@@ -9,7 +9,7 @@
        - 入口（Rescue Decision）+ 出口 + checker 结果一并归档；
        - checker 与 rescue 发起者必须独立：solo dev 场景**强制走二次 `codex:adversarial-review`** 作为独立 gate（脚本 checker 在 solo dev 下仍是自证，不采用）。
      - 两种通道均**不得**降级为普通 review 或其他非对抗性通道。
-     - **细则见** `docs/reviews-workflow.md`（8 种物化路径、Rescue Decision 字段、敏感/工具阻塞下的脱敏归档、工具缺陷兜底等）；该文件演进与 CLAUDE.md 一致走 adversarial-review。
+     - **细则见** `docs/reviews-workflow.md`（8 种物化路径、Rescue Decision 字段、无法归档场景直接停止提交用户批准、独立二次 adversarial-review 的独立 job/session 硬约束、工具缺陷兜底等）；该文件演进与 CLAUDE.md 一致走 adversarial-review。
 3. **每个模块代码验收必须给人工验证方案**：交付时附一份**无代码经验者也能按步骤执行**的验证清单（操作步骤 + 预期现象 + 通过/失败判据），并**走完人工验证**再算完成。
 4. **工具 / 流程规范**：
    - 项目**全程用 GitHub 管理**（分支、PR、Issue、Review）。
