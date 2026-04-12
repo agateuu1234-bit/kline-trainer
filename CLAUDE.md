@@ -13,10 +13,5 @@
 3. **每个模块代码验收必须给人工验证方案**：交付时附一份**无代码经验者也能按步骤执行**的验证清单（操作步骤 + 预期现象 + 通过/失败判据），并**走完人工验证**再算完成。
 4. **工具 / 流程规范**：
    - 项目**全程用 GitHub 管理**（分支、PR、Issue、Review）。
-   - 开发流程**必须严格按 superpowers 的全部 skills 流程推进**，不得跳步、不得合并阶段：
-     - 需求/设计阶段：`brainstorming` → `writing-plans`
-     - 实施阶段：`executing-plans` + `TDD`（`test-driven-development`）
-     - 交付阶段：`verification-before-completion` → `requesting-code-review` → `finishing-a-development-branch`
-     - 遇到 bug：先 `systematic-debugging` 再动手
-     - 任一阶段跳过 → 停止推进并提交用户批准。
+   - 开发流程按 `superpowers` skills 推进，不跳步。
    - **前端设计必须先走 `frontend-design` skill**：未经此 skill 产出设计稿/组件方案前，**禁止直接写 UI 代码**。
