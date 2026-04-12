@@ -2,10 +2,19 @@
 
 1. **全程中文**沟通。
 2. **所有 Claude 输出必须过 codex**：代码、方案、文档、设计决定，都要让 codex 做 review 或对抗性 review，通过后才交付。若**连续 3 轮**（每轮 = Claude 回应 + codex review）仍未完全达成一致，**停止推进，提交给用户批准**。
-   - **codex 对抗性 review 通道选择**（按对象能否 `git diff` 判定）：
-     - **有父提交、可 `git diff` 的对象**（代码改动、PR diff、提交后的变更）：**必须**用 `codex:adversarial-review`。
-     - **没有父提交、无法 `git diff` 的对象**（首个提交中的文档、纯需求/设计稿、未入库的草稿等）：用 `codex:rescue` 承担对抗性 review，prompt 须显式采用对抗性立场（要求 codex 尝试证伪、找失败路径、给 ship/no-ship 判断）。
-     - 两种情况下，均**不得**用普通 review 或其他通道替代对抗性立场。
+   - **codex 对抗性 review 通道选择**（按对象能否物化为 **diff-able artifact** 判定，非凭作者主观声称）：
+     - **可物化为 diff-able artifact 的对象**：**必须**用 `codex:adversarial-review`。以下 4 种 diff 形态全部视为"可 diff"：
+       1. PR diff（`--base <target-branch>`）
+       2. 首提交 empty-tree diff（工具支持后启用，当前用 rescue 兜底，见下）
+       3. `git diff --no-index` 两份独立文件/目录的对比
+       4. stash diff（`git stash show -p`）
+       额外：对象若能以较低成本**物化为** PR / commit / Issue / `docs/` 目录下的 markdown，也归入此类——**不得**以"还没建 PR""还没 commit"为由跳过。
+     - **确不可物化为 diff-able artifact 的对象**（纯口头概念讨论、纯脑内方案等）：允许用 `codex:rescue` 承担对抗性 review，但必须同时满足**入口 / 出口 / 归档**三道闸门：
+       1. **入口：结构化 Rescue Decision**（记入 commit message / PR 描述 / 归档 markdown 的固定字段块）必须包含：`jobId`、`对象`、`调用理由`，以及**逐项列出** PR diff / 首提交 empty-tree diff / `git diff --no-index` / stash diff / 物化为 PR / 物化为 commit / 物化为 Issue / 物化为 `docs/` markdown 这 **8 种物化路径**为何不适用的具体理由；**禁止** "N/A"、"纯概念讨论"、"不适用" 等无对象、无失败原因的套话；任一路径可行 → **禁用** rescue，必须先物化后走 `codex:adversarial-review`。
+       2. **出口：契约等价 adversarial-review**。rescue 输出必须给出：`verdict`（ship/no-ship 或 needs-attention）、`artifact anchor`（具体对象 / 章节 / 行号引用）、`失败场景`、`修复建议`、`置信度`（0-1）、`残余风险`。无 finding 时也必须显式声明残余风险。交付前必须过人工 checklist 或脚本 checker 对照本契约；不满足即视为未通过 review。
+       3. **归档**：rescue 的完整输入 prompt + 输出必须**自身物化**为 Issue 或 `docs/reviews/YYYY-MM-DD-<slug>.md`，成为后续可审计对象；这条在自动化工具创建追踪 Issue 能力到位前即日生效。
+     - **两种通道**下，均**不得**用普通 review 或其他非对抗性通道替代对抗性立场。
+     - **工具缺陷兜底**：当前 `codex:adversarial-review` 未实现 empty-tree base / `--no-index` 支持，该缺口由独立 Issue 跟踪。工具修复前，该类对象暂走 rescue 三闸门；工具修复后相应对象**自动**回归 `codex:adversarial-review`，无需改本规则。
 3. **每个模块代码验收必须给人工验证方案**：交付时附一份**无代码经验者也能按步骤执行**的验证清单（操作步骤 + 预期现象 + 通过/失败判据），并**走完人工验证**再算完成。
 4. **工具 / 流程规范**：
    - 项目**全程用 GitHub 管理**（分支、PR、Issue、Review）。
