@@ -2,7 +2,10 @@
 
 1. **全程中文**沟通。
 2. **所有 Claude 输出必须过 codex**：代码、方案、文档、设计决定，都要让 codex 做 review 或对抗性 review，通过后才交付。若**连续 3 轮**（每轮 = Claude 回应 + codex review）仍未完全达成一致，**停止推进，提交给用户批准**。
-   - **codex 进行对抗性 review 时必须使用 `codex:adversarial-review` skill**，不得用普通 rescue 或其他通道替代。
+   - **codex 对抗性 review 通道选择**（按对象能否 `git diff` 判定）：
+     - **有父提交、可 `git diff` 的对象**（代码改动、PR diff、提交后的变更）：**必须**用 `codex:adversarial-review`。
+     - **没有父提交、无法 `git diff` 的对象**（首个提交中的文档、纯需求/设计稿、未入库的草稿等）：用 `codex:rescue` 承担对抗性 review，prompt 须显式采用对抗性立场（要求 codex 尝试证伪、找失败路径、给 ship/no-ship 判断）。
+     - 两种情况下，均**不得**用普通 review 或其他通道替代对抗性立场。
 3. **每个模块代码验收必须给人工验证方案**：交付时附一份**无代码经验者也能按步骤执行**的验证清单（操作步骤 + 预期现象 + 通过/失败判据），并**走完人工验证**再算完成。
 4. **工具 / 流程规范**：
    - 项目**全程用 GitHub 管理**（分支、PR、Issue、Review）。
