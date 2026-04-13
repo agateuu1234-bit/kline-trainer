@@ -1093,7 +1093,9 @@ enum ChartAction: Equatable, Sendable {
   - 同上 cancel：派发 `drawingCancelled(baseRevision: 0)` → `.none` + mode 仍为 drawing
 - **Deceleration stop 契约测试**（闸门 #4 F3 新增）：`panEnded(velocity:) → .startDeceleration(v)` effect handler 启动 animator；后续 activateDrawing → `.requestDrawingSnapshotAfterStoppingAnimator` effect；验证 handler 必须**先**调用 `animator.stop()` 再计算 range（集成测试：模拟延迟 animator 回调，验证 drawing 退出后无 `offsetApplied` 到达 reducer）
 - `drawingCommitted/drawingCancelled` 非法转换 assertion 测试：autoTracking / freeScrolling 上派发 → assertionFailure
-- `drawingCommitted/drawingCancelled` 正常退出测试：drawing 模式内派发 → mode=autoTracking + .none；无论 action 携带的 baseRevision 值为何（baseRevision 仅作调试 trace，reducer 不 check）
+- **`drawingCommitted/drawingCancelled` 双分支测试**（闸门 #6 修订，与新 guard 一致）：
+  - 匹配分支：drawing(snap.baseRev=r) 模式下派发 `drawingCommitted(baseRevision: r)` / `drawingCancelled(baseRevision: r)` → 断言 mode=autoTracking + `.none`
+  - 不匹配分支（跨 session 遗留）：drawing(snap.baseRev=r) 模式下派发 `drawingCommitted(baseRevision: r-1)` 或任意 != r → 断言 mode 仍=drawing + `.none`，**不得退出 drawing**
 - `offsetApplied` 单独测试：
   - autoTracking / freeScrolling：offset 累加 + revision+1；mode 不变
   - drawing：忽略（.none），offset 与 revision 均不变
