@@ -150,34 +150,55 @@
 
 v1.2 已把算法从 `sha256(sqlite_bytes)` 改为 `zlib.crc32(zip_bytes)`，但 `training_sets.content_hash` 列仍是 `VARCHAR(64)`，长度不再匹配。v1.3 迁移：
 
+**两阶段 migration**（v1.3 修订：闸门 #1 F1 修复——避免 `SET NOT NULL` 校验阶段撞到被置 NULL 的遗留行）：
+
 ```sql
--- v1.3 migration 0003_v1.3/forward.sql
--- 先把遗留 sha256 hash 行标记作废，重新生成 CRC32
+-- v1.3 migration 0003_v1.3_part1/forward.sql
+-- 第 1 阶段：收紧列类型但保持可空，作废遗留 sha256 行等待 B2 backfill
+ALTER TABLE training_sets
+  ALTER COLUMN content_hash TYPE CHAR(8) USING NULL;  -- 所有非 8 字符值置 NULL
+
 UPDATE training_sets
    SET status = 'unsent',
        content_hash = NULL,
        lease_id = NULL,
        lease_expires_at = NULL,
        reserved_at = NULL
- WHERE LENGTH(content_hash) > 8;   -- 遗留 64 字符 sha256 hex
+ WHERE content_hash IS NULL OR LENGTH(content_hash) <> 8;
 
--- 列类型收紧到 CHAR(8)
-ALTER TABLE training_sets
-  ALTER COLUMN content_hash TYPE CHAR(8);
-ALTER TABLE training_sets
-  ALTER COLUMN content_hash SET NOT NULL;
 COMMENT ON COLUMN training_sets.content_hash
-  IS 'zip 文件 CRC32 十六进制（8 字符，小写），由 B2 生成、P2 校验';
+  IS 'zip 文件 CRC32 十六进制（8 字符，小写），由 B2 生成、P2 校验；v1.3 两阶段 migration 第 1 阶段后可空，B2 backfill 完成后第 2 阶段加 NOT NULL';
 ```
 
 ```sql
--- v1.3 migration 0003_v1.3/rollback.sql
-ALTER TABLE training_sets ALTER COLUMN content_hash DROP NOT NULL;
+-- v1.3 migration 0003_v1.3_part1/rollback.sql
 ALTER TABLE training_sets ALTER COLUMN content_hash TYPE VARCHAR(64);
 -- 不恢复旧 sha256 数据（已作废行由 B4 重新生成）
 ```
 
-**B2 回迁策略**：B2 `generate_one_training_set` 在 v1.3 上线后首次运行时，会把上一步标作废的行按 CRC32 重新登记（见 §四 B2）。
+```sql
+-- v1.3 migration 0003_v1.3_part2/forward.sql
+-- 第 2 阶段：B2 backfill 完成后再加 NOT NULL；B3 在部署脚本中校验没有 content_hash IS NULL 行后才执行本阶段
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM training_sets WHERE content_hash IS NULL) THEN
+    RAISE EXCEPTION 'content_hash backfill incomplete; run B2 generate_batch first';
+  END IF;
+END$$;
+ALTER TABLE training_sets ALTER COLUMN content_hash SET NOT NULL;
+```
+
+```sql
+-- v1.3 migration 0003_v1.3_part2/rollback.sql
+ALTER TABLE training_sets ALTER COLUMN content_hash DROP NOT NULL;
+```
+
+**B2 回迁策略**：B2 `generate_one_training_set` 在 part1 部署完成后首次运行时，识别 `status='unsent' AND content_hash IS NULL` 行（即 migration 作废的遗留 sha256 行），按新 CRC32 格式重新计算并回写；全部补齐后 B3 部署 part2 加 NOT NULL。
+
+**验收步骤**（含 codex 建议的 migration 测试）：
+1. 部署 part1 → 人为插入 1 条 `content_hash = LPAD('a', 64, 'a')` 遗留行 → 验证该行 `content_hash IS NULL AND status = 'unsent'`
+2. 运行 B4 调度器 → 验证 B2 重新生成该行 content_hash（8 字符 CRC32）
+3. 部署 part2 → 断言成功；若仍有 NULL 行，part2 RAISE EXCEPTION 阻塞
 
 #### app.sqlite `download_acceptance_journal` 表（v1.3 新增）
 
@@ -213,10 +234,12 @@ confirmed       -- confirm 成功；本地 TrainingSetFile 可见
 rejected        -- 显式失败（409/404/CRC 失败/schema mismatch 等）；sqlite_local_path 可清理
 ```
 
-**幂等规则**：
-- `confirmPending` 状态可无限重试 confirm（只要 `lease_id` 有效）；只有 **409/404** 明确失败才转 `rejected` 并允许清理本地文件。
-- 网络超时 / 连接错误 → 停留 `confirmPending`；App 启动时扫描所有 `confirmPending` 记录并重试。
-- `stored` 状态意外崩溃后恢复：App 启动扫描 → 继续 confirm。
+**幂等与崩溃恢复规则**（v1.3 闸门 #1 F3 修订）：
+- App 启动时的 journal 扫描必须**同时覆盖两类 state**：`stored`（已落盘未发起 confirm）+ `confirmPending`（confirm 已发起但网络不确定）。两类都走同一 `retryPendingConfirmations` 流程：以原 `lease_id` 调用 `api.confirm`。
+- `stored` → 调用 `confirm`：成功则 → `confirmed`；网络不确定 → `confirmPending`；409/404 → `rejected` 清理本地文件
+- `confirmPending` → 重试 `confirm`：成功 → `confirmed`；仍网络不确定 → 停留 `confirmPending`；409/404 → `rejected` 清理本地文件
+- **场景覆盖**：cache.store 完成、confirm 尚未调用时崩溃 → 启动时从 `stored` 恢复，本地 sqlite 不孤立；confirm 请求发出但响应未到达时崩溃 → 启动时从 `confirmPending` 恢复
+- 只有 **409/404** 明确失败才转 `rejected` 并允许清理本地文件；其他错误停留原态
 
 #### PostgreSQL `training_sets` 扩充（v1.2 新增）
 
@@ -327,8 +350,8 @@ enum PanelId: Equatable, Sendable { case upper, lower }
 enum SwipeDirection: Equatable, Sendable { case up, down }
 enum PeriodDirection: Equatable, Sendable { case toLarger, toSmaller }
 
-// —— K 线（完整 CodingKeys）——
-struct KLineCandle: Codable, Equatable {
+// —— K 线（完整 CodingKeys；v1.3 Sendable）——
+struct KLineCandle: Codable, Equatable, Sendable {
     let period: Period
     let datetime: Int64
     let open, high, low, close: Double
@@ -357,7 +380,7 @@ struct KLineCandle: Codable, Equatable {
     }
 }
 
-struct TrainingSetMeta: Codable, Equatable {
+struct TrainingSetMeta: Codable, Equatable, Sendable {
     let stockCode: String
     let stockName: String
     let startDatetime: Int64
@@ -385,27 +408,27 @@ struct TradeOperation: Codable, Equatable, Sendable {
     // Codable 保持 rawValue "1/5" ... "5/5"，无需自定义 CodingKeys
 }
 
-struct DrawingAnchor: Codable, Equatable {
+struct DrawingAnchor: Codable, Equatable, Sendable {
     let period: Period
     let candleIndex: Int
     let price: Double
 }
 
-struct DrawingObject: Codable, Equatable {
+struct DrawingObject: Codable, Equatable, Sendable {
     let toolType: DrawingToolType
     let anchors: [DrawingAnchor]
     let isExtended: Bool
     let panelPosition: Int
 }
 
-struct TradeMarker: Equatable {
+struct TradeMarker: Equatable, Sendable {
     let globalTick: Int
     let price: Double
     let direction: TradeDirection
 }
 
-// —— 训练记录（v1.2 含 finalTick，对应 DDL）——
-struct TrainingRecord: Codable, Equatable {
+// —— 训练记录（v1.2 含 finalTick，对应 DDL；v1.3 Sendable）——
+struct TrainingRecord: Codable, Equatable, Sendable {
     let id: Int64?
     let trainingSetFilename: String
     let createdAt: Int64
@@ -765,23 +788,23 @@ v1.3 把 v1.2 的单一 C1 模块拆为 3 个顶层模块，分别承担几何 /
 #### 几何 + 视口
 
 ```swift
-struct ChartGeometry: Equatable {
+struct ChartGeometry: Equatable, Sendable {
     let candleStep, candleWidth, gap: CGFloat
 }
 
-struct ChartPanelFrames: Equatable {
+struct ChartPanelFrames: Equatable, Sendable {
     let mainChart: CGRect      // 60%
     let volumeChart: CGRect    // 15%
     let macdChart: CGRect      // 25%
     static func split(in rect: CGRect) -> ChartPanelFrames
 }
 
-struct PriceRange: Equatable {
+struct PriceRange: Equatable, Sendable {
     let min, max: Double
     static func calculate(from candles: ArraySlice<KLineCandle>) -> PriceRange
 }
 
-struct ChartViewport: Equatable {
+struct ChartViewport: Equatable, Sendable {
     let startIndex: Int
     let visibleCount: Int
     let pixelShift: CGFloat
@@ -794,7 +817,7 @@ struct ChartViewport: Equatable {
 #### 坐标映射
 
 ```swift
-struct CoordinateMapper: Equatable {
+struct CoordinateMapper: Equatable, Sendable {
     let viewport: ChartViewport
     let displayScale: CGFloat
 
@@ -830,8 +853,8 @@ struct NonDegenerateRange: Equatable, Sendable {
 }
 
 // v1.2：独立副图 mapper（不再有 make(for:)，valueRange 外部注入）
-// v1.3：valueRange 类型从 ClosedRange<Double> 改为 NonDegenerateRange，valueToY 保证无除零
-struct IndicatorMapper: Equatable {
+// v1.3：valueRange 类型从 ClosedRange<Double> 改为 NonDegenerateRange，valueToY 保证无除零；+ Sendable
+struct IndicatorMapper: Equatable, Sendable {
     let frame: CGRect
     let valueRange: NonDegenerateRange
     let geometry: ChartGeometry
@@ -889,34 +912,28 @@ extension PanelViewState {
 - 业务含义：交易后硬切 autoTracking 或跨 tick 面板状态漂移时，旧 snapshot 的 commit/cancel 不再能覆盖当前面板
 - 推断：在 `@MainActor` + sync reducer 前提下已大部分消除重入，但 async effect 跨 tick 返回时仍可能拿到旧 revision（例如长按绘线期间交易触发），revision 检测是最轻量的防御
 
-#### C1b 三态 Reducer（v1.2 完整 3×7 矩阵；v1.3 action 加 baseRevision + stale 检测）
+#### C1b 三态 Reducer（v1.3：activateDrawing 改 effect-driven + drawingCommitted/Cancelled 比对当前 revision）
 
 ```swift
-enum ChartAction: Equatable, Sendable {
-    case panStarted
-    case panEnded(velocity: CGFloat)
-    case activateDrawing(DrawingToolType)
-    case drawingCommitted(baseRevision: UInt64)      // v1.3：携带冻结时的 revision
-    case drawingCancelled(baseRevision: UInt64)      // v1.3：携带冻结时的 revision
-    case tradeTriggered                               // 买/卖/持有/观察
-    case periodComboSwitched
-}
+// ChartAction 定义见本节后方（含 v1.3 新增 setDrawingSnapshot）；reducer 先定义 effect 与 reduce 实现
 
-// v1.3：effect 扩充 stalePanelRevision
+// v1.3：effect 扩充 requestDrawingSnapshot / stalePanelRevision
 enum ChartReduceEffect: Equatable, Sendable {
     case none
     case startDeceleration(velocity: CGFloat)
     case clearPendingDrawing
-    case stalePanelRevision(expected: UInt64, actual: UInt64)   // v1.3：baseRevision 不匹配
+    case requestDrawingSnapshot(tool: DrawingToolType, baseRevision: UInt64)   // v1.3：activateDrawing 请求外部算 candleRange
+    case stalePanelRevision(expected: UInt64, actual: UInt64)                  // v1.3：commit/cancel 的 baseRevision 与当前 panel revision 不匹配
 }
 
 /// v1.3 说明：reducer 在修改面板可见范围的 action 处理时 `revision += 1`：
 /// - panStarted / panEnded：修改 interactionMode 和 offset → bump
-/// - activateDrawing：修改 interactionMode → bump
+/// - activateDrawing：返回 requestDrawingSnapshot effect；不进 drawing 模式；不 bump revision
+/// - setDrawingSnapshot（新 action，见下）：外部带真实 candleRange 回来，才进 drawing 模式；不 bump revision（但核对 baseRevision 必须等于当前 revision）
 /// - tradeTriggered / periodComboSwitched：硬切 autoTracking → bump
-/// drawingCommitted/drawingCancelled：只切 mode 不动 offset；**不 bump**
+/// drawingCommitted/drawingCancelled：比较 action.baseRevision 与当前 panel.revision；不匹配返回 stalePanelRevision 保留 mode；匹配则切 autoTracking
 extension PanelViewState {
-    /// 合法转换矩阵（v1.2 完整 21 格；v1.3 drawingCommitted/Cancelled 加 baseRevision 检查）
+    /// v1.3 更新：ChartAction 新增 setDrawingSnapshot；drawing 模式不再使用 placeholder
     mutating func reduce(_ action: ChartAction) -> ChartReduceEffect {
         switch (interactionMode, action) {
         // —— panStarted ——
@@ -934,28 +951,32 @@ extension PanelViewState {
             revision &+= 1
             return .startDeceleration(velocity: v)
 
-        // —— activateDrawing ——
-        // 注：调用方（E5/C8）需要通过当前 viewport 构造 candleRange；
-        // v1.3 让 reducer 调用 freeze(candleRange:) 需要外部提供 range；
-        // 若 reducer 无法独立算出 range，则 effect 层用 `requestDrawingSnapshot` 异步模式
-        // —— 当前实现：假设调用者在 activateDrawing 前已设置好 visibleCount / offset，
-        // freeze() 不再调用已废弃的 computeRange()；candleRange 由 E5/C8 在派发 activateDrawing 前通过 viewport 预算好并塞入 snapshot（推断：简单路径）
-        case (.autoTracking, .activateDrawing), (.freeScrolling, .activateDrawing):
-            // 推断：此处由 E5/C8 接住 effect 后回写真正的 snapshot；reducer 仅完成 mode 切换与 revision bump
-            revision &+= 1
-            interactionMode = .drawing(snapshot: DrawingSnapshot(
-                frozen: FrozenPanelState(period: period, visibleCount: visibleCount,
-                                         offset: offset, candleRange: 0..<0,   // 占位；由 C8/E5 随后用真实 range 更新
-                                         baseRevision: revision)))
-            return .none
+        // —— activateDrawing（v1.3：不直接进 drawing 模式，只发 effect 请求快照）——
+        case (.autoTracking, .activateDrawing(let tool)), (.freeScrolling, .activateDrawing(let tool)):
+            return .requestDrawingSnapshot(tool: tool, baseRevision: revision)
         case (.drawing, .activateDrawing):
             return .none  // 切换工具由 DrawingToolManager 处理
 
-        // —— drawingCommitted / drawingCancelled ——（v1.3：check baseRevision）
-        case (.drawing(let snap), .drawingCommitted(let base)),
-             (.drawing(let snap), .drawingCancelled(let base)):
-            guard snap.frozen.baseRevision == base else {
-                return .stalePanelRevision(expected: snap.frozen.baseRevision, actual: base)
+        // —— setDrawingSnapshot（v1.3 新 action：外部带真实 candleRange 回来）——
+        case (.autoTracking, .setDrawingSnapshot(let tool, let baseRev, let range)),
+             (.freeScrolling, .setDrawingSnapshot(let tool, let baseRev, let range)):
+            // 回到时 revision 已漂移 → 丢弃
+            guard baseRev == revision else {
+                return .stalePanelRevision(expected: baseRev, actual: revision)
+            }
+            _ = tool  // 由 DrawingToolManager 处理 tool 切换；reducer 只管面板 mode
+            let frozen = FrozenPanelState(period: period, visibleCount: visibleCount,
+                                          offset: offset, candleRange: range,
+                                          baseRevision: revision)
+            interactionMode = .drawing(snapshot: DrawingSnapshot(frozen: frozen))
+            return .none
+        case (.drawing, .setDrawingSnapshot):
+            return .none  // drawing 模式下切工具由 DrawingToolManager 处理，不重复进 drawing
+
+        // —— drawingCommitted / drawingCancelled（v1.3：比 action.baseRevision vs 当前 panel.revision）——
+        case (.drawing, .drawingCommitted(let base)), (.drawing, .drawingCancelled(let base)):
+            guard base == revision else {
+                return .stalePanelRevision(expected: base, actual: revision)
             }
             interactionMode = .autoTracking
             return .none
@@ -980,9 +1001,31 @@ extension PanelViewState {
 }
 ```
 
+**ChartAction 更新**（v1.3 加 `setDrawingSnapshot`；activateDrawing 不再直接切 mode）：
+
+```swift
+enum ChartAction: Equatable, Sendable {
+    case panStarted
+    case panEnded(velocity: CGFloat)
+    case activateDrawing(DrawingToolType)                                  // v1.3：只触发 effect，不 bump revision
+    case setDrawingSnapshot(tool: DrawingToolType, baseRevision: UInt64,
+                            candleRange: Range<Int>)                       // v1.3 新：外部带真实 range 回推
+    case drawingCommitted(baseRevision: UInt64)
+    case drawingCancelled(baseRevision: UInt64)
+    case tradeTriggered
+    case periodComboSwitched
+}
+```
+
+**stalePanelRevision 可达路径**（v1.3 修订，F2 修复后）：
+- **setDrawingSnapshot 漂移**：A) reducer 派 `activateDrawing` → effect `requestDrawingSnapshot(baseRevision: r0)`；B) 异步计算期间发生 `tradeTriggered` → `revision = r0+1`；C) effect 回来派 `setDrawingSnapshot(baseRev: r0, ...)` → reducer 返回 `.stalePanelRevision(expected: r0, actual: r0+1)` 且 mode 保持 autoTracking（不进 drawing）
+- **drawingCommitted 漂移**：A) drawing 模式，`snap.frozen.baseRevision = r0`；B) 发生 `tradeTriggered` → mode 切 autoTracking + revision bump r0+1 + snapshot 被丢弃；C) 旧回调 `drawingCommitted(baseRevision: r0)` 派发 → 进 `.autoTracking/.drawingCommitted` 分支触发 `assertionFailure`（非法转换）——**推断**：真实场景 C8/E5 不应在 mode 已切后再发 commit；若需处理，UI 层在 drawing mode 切出时取消绘线 UI 即可
+
 **Wave 0 额外验收**（v1.3）：
-- `revision` 单调性测试：任意 panStarted / panEnded / tradeTriggered / periodComboSwitched / activateDrawing 均 bump；drawingCommitted / drawingCancelled 不 bump
-- `stalePanelRevision` 覆盖测试：在 drawing 模式下派发 `tradeTriggered` → 再 `drawingCommitted(baseRevision: 旧)` → 应返回 `.stalePanelRevision(expected: 旧, actual: 当前)` 且 `interactionMode` 仍为 drawing
+- `revision` 单调性测试：任意 panStarted / panEnded / tradeTriggered / periodComboSwitched 均 bump；activateDrawing / setDrawingSnapshot / drawingCommitted / drawingCancelled 均不 bump
+- `requestDrawingSnapshot` effect 覆盖测试：autoTracking / freeScrolling 上派发 activateDrawing → 返回 effect + mode 未变
+- `stalePanelRevision` 可达测试：setDrawingSnapshot 场景 = activateDrawing（r0）→ tradeTriggered（r0+1）→ setDrawingSnapshot(baseRev: r0) → 断言返回 `.stalePanelRevision(expected: r0, actual: r0+1)` 且 mode 仍为 autoTracking
+- `drawingCommitted` 非法转换 assertion 测试：autoTracking / freeScrolling 上派发 drawingCommitted → assertionFailure
 
 #### KLineView 本体
 
@@ -1592,7 +1635,9 @@ final class DownloadAcceptanceRunner {
     func run(meta: TrainingSetMetaItem, leaseId: String) async -> AcceptanceResult
     func runBatch(lease: LeaseResponse, concurrency: Int = 1) async -> [AcceptanceResult]
 
-    /// App 启动时扫描 confirmPending 记录，重试 confirm
+    /// App 启动时扫描 stored + confirmPending 记录，重试 confirm（v1.3 修订）
+    /// - 覆盖两类 state：stored（已落盘未 confirm）+ confirmPending（confirm 已发起但不确定）
+    /// - 成功 → confirmed；409/404 → rejected + 清理；网络不确定 → 停留/转 confirmPending
     func retryPendingConfirmations() async
 }
 ```
@@ -1610,11 +1655,14 @@ final class DownloadAcceptanceRunner {
 | 6. `cache.store(...)` | → `stored`，写 sqlite_local_path | rejected(persistence) |
 | 7. `api.confirm(id:leaseId:)` | 成功 → `confirmed`；409/404 → `rejected`；网络不确定 → `confirmPending` | 见下 |
 
-**confirmPending 重试**（解 P0-4）：
-- 停留 `confirmPending` 的记录不清理本地 sqlite 文件
-- App 启动扫 `confirmPending` → 用原 `lease_id` 重试 confirm
-- 成功 → `confirmed`；收到 409/404 → `rejected` 才清理
-- 网络仍不确定 → 继续停留
+**崩溃恢复与 confirmPending 重试**（v1.3 闸门 #1 F3 修订，解 P0-4 + stored 崩溃孤立）：
+- 停留 `stored` / `confirmPending` 的记录均不清理本地 sqlite 文件
+- App 启动扫 `stored ∪ confirmPending` → 用原 `lease_id` 调/重试 confirm
+- 成功 → `confirmed`；收到 409/404 → `rejected` 才清理本地文件
+- 网络仍不确定 → `stored` 行转 `confirmPending`；已在 `confirmPending` 行保持
+- 验收用例：
+  1. `stored` 后进程 kill → 启动 → journal = confirmed + 本地 sqlite 保留
+  2. `confirmPending` 状态下进程 kill → 启动 → 若网络恢复则 confirmed，否则仍 confirmPending
 
 ### P3 训练组数据库（v1.3 拆 P3a Factory / P3b Reader）
 
