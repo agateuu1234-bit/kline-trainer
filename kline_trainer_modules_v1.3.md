@@ -932,13 +932,23 @@ extension PanelViewState {
 ```swift
 // ChartAction 定义见本节后方（含 v1.3 新增 setDrawingSnapshot）；reducer 先定义 effect 与 reduce 实现
 
-// v1.3：effect 扩充 requestDrawingSnapshot / stalePanelRevision
+// v1.3：effect 扩充。闸门 #4 修订：
+// - 拆分 stale 场景只保留 setDrawingSnapshot 漂移（drawing 内不可能 bump revision，commit/cancel 不 check）
+// - activateDrawing effect 显式要求 handler 先 stop animator
 enum ChartReduceEffect: Equatable, Sendable {
     case none
     case startDeceleration(velocity: CGFloat)
     case clearPendingDrawing
-    case requestDrawingSnapshot(tool: DrawingToolType, baseRevision: UInt64)   // v1.3：activateDrawing 请求外部算 candleRange
-    case stalePanelRevision(expected: UInt64, actual: UInt64)                  // v1.3：commit/cancel 的 baseRevision 与当前 panel revision 不匹配
+    /// activateDrawing 返回此 effect。Handler 合约（必须按序）：
+    ///   1. 立即调用 DecelerationAnimator.stop()（防止 stale 漂移，闸门 #2 F2）
+    ///   2. 基于当前 viewport 计算 candleRange
+    ///   3. 派发 ChartAction.setDrawingSnapshot(tool, baseRevision, candleRange)
+    /// 若 handler 不 stop animator，reducer 已通过 drawing 模式下吞 offsetApplied 兜底
+    /// 但任何残留 animator 回调在 drawing 退出后仍会应用 → 必须 stop
+    case requestDrawingSnapshotAfterStoppingAnimator(tool: DrawingToolType, baseRevision: UInt64)
+    /// setDrawingSnapshot 回推时发现 revision 已漂移（handler 计算期间被 tradeTriggered/period 切换抢占）
+    /// 语义：snapshot 无效 → mode 保持 autoTracking，不进 drawing；UI 可按需重新发 activateDrawing
+    case staleDrawingSnapshot(expected: UInt64, actual: UInt64)
 }
 
 /// v1.3 说明：reducer 在修改面板可见范围的 action 处理时 `revision += 1`：
@@ -968,16 +978,16 @@ extension PanelViewState {
 
         // —— activateDrawing（v1.3：不直接进 drawing 模式，只发 effect 请求快照）——
         case (.autoTracking, .activateDrawing(let tool)), (.freeScrolling, .activateDrawing(let tool)):
-            return .requestDrawingSnapshot(tool: tool, baseRevision: revision)
+            return .requestDrawingSnapshotAfterStoppingAnimator(tool: tool, baseRevision: revision)
         case (.drawing, .activateDrawing):
             return .none  // 切换工具由 DrawingToolManager 处理
 
-        // —— setDrawingSnapshot（v1.3 新 action：外部带真实 candleRange 回来）——
+        // —— setDrawingSnapshot（v1.3 新 action：外部带真实 candleRange 回来；stale 仅此处可达）——
         case (.autoTracking, .setDrawingSnapshot(let tool, let baseRev, let range)),
              (.freeScrolling, .setDrawingSnapshot(let tool, let baseRev, let range)):
-            // 回到时 revision 已漂移 → 丢弃
+            // handler 计算 candleRange 期间若被 tradeTriggered / periodComboSwitched 抢占，revision 已漂移
             guard baseRev == revision else {
-                return .stalePanelRevision(expected: baseRev, actual: revision)
+                return .staleDrawingSnapshot(expected: baseRev, actual: revision)
             }
             _ = tool  // 由 DrawingToolManager 处理 tool 切换；reducer 只管面板 mode
             let frozen = FrozenPanelState(period: period, visibleCount: visibleCount,
@@ -988,21 +998,14 @@ extension PanelViewState {
         case (.drawing, .setDrawingSnapshot):
             return .none  // drawing 模式下切工具由 DrawingToolManager 处理，不重复进 drawing
 
-        // —— drawingCommitted（v1.3：比 action.baseRevision vs 当前 panel.revision；stale 则阻塞 commit）——
-        case (.drawing, .drawingCommitted(let base)):
-            guard base == revision else {
-                return .stalePanelRevision(expected: base, actual: revision)
-            }
+        // —— drawingCommitted / drawingCancelled（v1.3 闸门 #4 简化）——
+        // 洞察：drawing 模式下没有任何 action 可以 bump revision（offsetApplied 被吞；
+        // tradeTriggered/periodComboSwitched 会切出 drawing；其余都是 no-op）；
+        // 所以 drawing 模式内 action.baseRevision 必然 == 当前 revision，stale 不可达。
+        // baseRevision 参数保留作为 UI → reducer 的调试 trace，reducer 本身不做 stale 检查。
+        case (.drawing, .drawingCommitted), (.drawing, .drawingCancelled):
             interactionMode = .autoTracking
             return .none
-
-        // —— drawingCancelled（v1.3 闸门 #3 修订：cancel 即便 stale 也必须退出 drawing 模式，避免用户卡住）——
-        // 语义：stale 表示 snapshot 已过期，cancel 是"放弃 pending drawing"，永远应允许；
-        //       同时仍然回发 stalePanelRevision effect 供 UI 决定是否重建 drawing 会话
-        case (.drawing, .drawingCancelled(let base)):
-            let isStale = (base != revision)
-            interactionMode = .autoTracking
-            return isStale ? .stalePanelRevision(expected: base, actual: revision) : .none
         case (.autoTracking, .drawingCommitted), (.freeScrolling, .drawingCommitted),
              (.autoTracking, .drawingCancelled), (.freeScrolling, .drawingCancelled):
             assertionFailure("非法转换：\(interactionMode) → \(action)")
@@ -1056,22 +1059,25 @@ enum ChartAction: Equatable, Sendable {
 - 所有改变 `offset` 的路径（手势 Pan / DecelerationAnimator / 程序 setOffset）**必须**通过 `offsetApplied` action；reducer 在此 action 下 bump `revision`
 - 由此 `requestDrawingSnapshot` 返回后若发生任何 offset 漂移，`revision` 已变，`setDrawingSnapshot` 会因 revision 不匹配返回 `.stalePanelRevision`
 
-**stalePanelRevision 可达路径**（v1.3 修订，F2 修复后）：
-- **setDrawingSnapshot 漂移**：A) reducer 派 `activateDrawing` → effect `requestDrawingSnapshot(baseRevision: r0)`；B) 异步计算期间发生 `tradeTriggered` → `revision = r0+1`；C) effect 回来派 `setDrawingSnapshot(baseRev: r0, ...)` → reducer 返回 `.stalePanelRevision(expected: r0, actual: r0+1)` 且 mode 保持 autoTracking（不进 drawing）
-- **drawingCommitted 漂移**：A) drawing 模式，`snap.frozen.baseRevision = r0`；B) 发生 `tradeTriggered` → mode 切 autoTracking + revision bump r0+1 + snapshot 被丢弃；C) 旧回调 `drawingCommitted(baseRevision: r0)` 派发 → 进 `.autoTracking/.drawingCommitted` 分支触发 `assertionFailure`（非法转换）——**推断**：真实场景 C8/E5 不应在 mode 已切后再发 commit；若需处理，UI 层在 drawing mode 切出时取消绘线 UI 即可
+**staleDrawingSnapshot 可达路径**（v1.3 闸门 #4 简化：仅 setDrawingSnapshot 阶段可能 stale）：
 
-**Wave 0 额外验收**（v1.3）：
-- `revision` 单调性测试：任意 panStarted / panEnded / tradeTriggered / periodComboSwitched / **offsetApplied** 均 bump；activateDrawing / setDrawingSnapshot / drawingCommitted / drawingCancelled 均不 bump
-- `requestDrawingSnapshot` effect 覆盖测试：autoTracking / freeScrolling 上派发 activateDrawing → 返回 effect + mode 未变
-- `stalePanelRevision` 可达测试（3 条路径）：
-  1. **trade 漂移**：activateDrawing（r0）→ tradeTriggered（r0+1）→ setDrawingSnapshot(baseRev: r0) → 返回 `.stalePanelRevision(expected: r0, actual: r0+1)` 且 mode 仍为 autoTracking
-  2. **deceleration 漂移**（闸门 #2 F2 覆盖）：panEnded（r0+1）→ startDeceleration effect → activateDrawing（baseRev: r0+1）→ offsetApplied（r0+2，动画驱动）→ setDrawingSnapshot(baseRev: r0+1) → 返回 `.stalePanelRevision(expected: r0+1, actual: r0+2)`
-  3. **periodCombo 漂移**：drawing 模式中 periodComboSwitched（r+1，mode → autoTracking + clearPendingDrawing）→ 旧 drawingCommitted(baseRev: r) 派发到 autoTracking 分支 → assertionFailure（非法转换）
-- `drawingCommitted` 非法转换 assertion 测试：autoTracking / freeScrolling 上派发 drawingCommitted → assertionFailure
+- **trade 漂移**：activateDrawing（r=0）→ effect `.requestDrawingSnapshotAfterStoppingAnimator(tool, baseRev:0)` → handler 计算期间发生 `tradeTriggered` 使 revision=1 → handler 回推 setDrawingSnapshot(baseRev:0, range) → reducer 返回 `.staleDrawingSnapshot(expected:0, actual:1)` 且 mode 保持 autoTracking（未进 drawing）
+- **periodCombo 漂移**：同 trade，但触发 `periodComboSwitched`（也 bump + 切 autoTracking）
+
+**drawing 模式不可能 stale**：进入 drawing 后无任何 action 能 bump revision（offsetApplied 被吞；tradeTriggered/periodComboSwitched 会直接切出 drawing + 丢弃 snapshot）；因此 commit/cancel 不需 check baseRevision。
+
+**Wave 0 额外验收**（v1.3 闸门 #4 修订）：
+- `revision` 单调性测试：`panStarted` / `panEnded` / `tradeTriggered` / `periodComboSwitched` / **`offsetApplied`**（仅 autoTracking + freeScrolling 模式）均 bump；其它 action 均不 bump；drawing 模式下 `offsetApplied` 吞掉、revision 不变
+- `requestDrawingSnapshotAfterStoppingAnimator` effect 覆盖测试：autoTracking / freeScrolling 上派发 activateDrawing → 返回对应 effect + mode 未变 + revision 未变
+- **`staleDrawingSnapshot` 可达测试**：
+  1. activateDrawing（r=0）→ tradeTriggered（r=1）→ setDrawingSnapshot(baseRev:0) → 断言 `.staleDrawingSnapshot(expected:0, actual:1)` + mode=autoTracking
+  2. activateDrawing（r=0）→ periodComboSwitched（r=1, clearPendingDrawing）→ setDrawingSnapshot(baseRev:0) → 同上
+- **Deceleration stop 契约测试**（闸门 #4 F3 新增）：`panEnded(velocity:) → .startDeceleration(v)` effect handler 启动 animator；后续 activateDrawing → `.requestDrawingSnapshotAfterStoppingAnimator` effect；验证 handler 必须**先**调用 `animator.stop()` 再计算 range（集成测试：模拟延迟 animator 回调，验证 drawing 退出后无 `offsetApplied` 到达 reducer）
+- `drawingCommitted/drawingCancelled` 非法转换 assertion 测试：autoTracking / freeScrolling 上派发 → assertionFailure
+- `drawingCommitted/drawingCancelled` 正常退出测试：drawing 模式内派发 → mode=autoTracking + .none；无论 action 携带的 baseRevision 值为何（baseRevision 仅作调试 trace，reducer 不 check）
 - `offsetApplied` 单独测试：
   - autoTracking / freeScrolling：offset 累加 + revision+1；mode 不变
-  - **drawing**（闸门 #3 修订）：忽略，offset 与 revision 均不变
-- **drawingCancelled stale-exit 测试**（闸门 #3 新增）：panEnded → activateDrawing(r) → setDrawingSnapshot(r) → offsetApplied 被吞（drawing 模式）→ 若此前有 panEnded 引起的 autoTracking/freeScrolling offsetApplied 使 revision 漂移到 r+1 → drawingCancelled(baseRev: r) → 返回 `.stalePanelRevision` **且 mode 切回 autoTracking**（即便 stale，cancel 必然退出 drawing）
+  - drawing：忽略（.none），offset 与 revision 均不变
 
 #### KLineView 本体
 
