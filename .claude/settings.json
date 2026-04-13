@@ -20,8 +20,8 @@
       "Bash(git pull:*)",
       "Bash(git push)",
       "Bash(git push origin:*)",
-      "Bash(git push -u:*)",
-      "Bash(git push --set-upstream:*)",
+      "Bash(git push -u origin:*)",
+      "Bash(git push --set-upstream origin:*)",
       "Bash(git restore:*)",
       "Bash(git stash:*)",
       "Bash(git worktree add:*)",
@@ -34,12 +34,12 @@
       "Bash(gh pr edit:*)",
       "Bash(gh pr status:*)",
       "Bash(gh pr checks:*)",
-      "Bash(gh issue create:*)",
       "Bash(gh issue view:*)",
       "Bash(gh issue list:*)",
+      "Bash(gh issue create:*)",
       "Bash(gh issue edit:*)",
-      "Bash(gh api:*)",
-      "Bash(gh repo view:*)"
+      "Bash(gh repo view:*)",
+      "Bash(node /Users/maziming/.claude/plugins/cache/openai-codex/codex/1.0.3/scripts/codex-companion.mjs:*)"
     ],
     "ask": [
       "Bash(git push --force)",
@@ -47,6 +47,8 @@
       "Bash(git push -f:*)",
       "Bash(git push --force:*)",
       "Bash(git push --force-with-lease:*)",
+      "Bash(git push origin --force:*)",
+      "Bash(git push origin -f:*)",
       "Bash(git reset --hard:*)",
       "Bash(git reset --soft:*)",
       "Bash(git branch -D:*)",
@@ -55,13 +57,20 @@
       "Bash(git worktree remove:*)",
       "Bash(rm -rf:*)",
       "Bash(rm -r:*)",
+      "Bash(gh api:*)",
       "Bash(gh pr merge:*)",
       "Write(/Users/maziming/.claude/settings.json)",
       "Write(/Users/maziming/Coding/Prj_Kline trainer/.claude/settings.json)",
       "Edit(/Users/maziming/.claude/settings.json)",
       "Edit(/Users/maziming/Coding/Prj_Kline trainer/.claude/settings.json)"
+    ],
+    "deny": [
+      "Bash(git push origin HEAD:main*)",
+      "Bash(git push origin HEAD:master*)",
+      "Bash(git push origin main:*)",
+      "Bash(git push origin master:*)",
+      "Bash(git push origin :main)",
+      "Bash(git push origin :master)"
     ]
   }
 }
-</content>
-</invoke>

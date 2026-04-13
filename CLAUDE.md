@@ -5,22 +5,36 @@
 2. **codex review 分级触发**：
 
    - **强制走 `codex:adversarial-review` + PR + 你手工 merge**：
-     - 所有源码文件改动（`.swift` / `.py` 等）
+     - 所有源码文件改动（`.swift` / `.py` / `.ts` 等）
      - M0 契约字段变更（DB schema / OpenAPI / Swift 模型 / AppError / 并发约定）
+     - DB migration 文件（SQL / GRDB migrator 等）
      - 新模块、新公共接口、破坏性 API
      - 跨模块依赖图调整
      - `modules` / `plan` 文档新增章节或任何实质性改写
      - `CLAUDE.md` 本身的修改
+     - **Trust-boundary / 配置 / 工具链文件**（catch-all，含但不限于）：
+       - `.claude/**`（settings / hooks / agents / skills）
+       - `.github/**`（workflows / actions / branch protection / CODEOWNERS 等）
+       - CI / 自动化脚本（`scripts/**`、`Makefile`、`Fastfile` 等）
+       - 依赖 / lockfile（`Package.resolved` / `Podfile.lock` / `requirements.txt` / `package.json` / `pnpm-lock.yaml` 等）
+       - 版本 / 发布配置（`pyproject.toml` / `*.podspec` / Docker / `docker-compose.yml` 等）
 
    - **作者自判（Claude 建议走但不强制）**：
      - `docs/` 目录下非实质性文档新建 / 重写（例如说明文档、操作手册）
 
-   - **免 review，可直接 commit + push 到 main**（commit message 清楚即可，不开 PR）：
-     - typo / 标点 / 格式 / 排版
-     - 注释润色
-     - 不改语义的措辞调整
+   - **免 review，可直接 commit + push 到 main**（commit message 清楚即可，不开 PR）——**仅限纯表面**改动：
+     - typo / 标点 / 排版（不改语义）
+     - 注释润色（不改对应代码行为）
+     - Markdown 格式调整（链接 / 标题层级 / 列表样式）
 
-   - **禁止**以"免 review"名义混入实质改动；一旦涉及接口 / 字段 / 业务逻辑 → 自动回到"强制"类。
+   - **禁止**以"免 review"名义：
+     - 混入任何实质改动（接口 / 字段 / 业务逻辑 / 权限 / 配置）→ 自动回到"强制"类
+     - 混入任何上列 trust-boundary / 配置 / 工具链文件改动 → 自动回到"强制"类，不论看起来多像"排版"
+
+   - **adversarial-review 闭环自治**：一旦进入强制类改动的 review 流程（Claude 起草 → 开 PR → 跑闸门 → 修 findings → 再跑闸门），**该循环内的所有 git / gh / codex 操作自动执行，不请示用户**。用户**仅在**以下两个 out 节点介入：
+     1. codex 给 `approve` + PR 准备好 → 通知用户 merge
+     2. 连续 3 轮仍 `needs-attention` → 停止推进，提交用户决定方向
+     中间的 commit / push / gh pr edit / 修 findings / 再跑 codex 等动作无需任何确认。
 
    - **3 轮停止条款**：连续 3 轮 `codex:adversarial-review` 未收敛 → 停止推进，提交用户批准（3 轮是**上限**，不是下限；跑到 `approve` 即止）。
 
