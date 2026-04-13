@@ -154,17 +154,28 @@ v1.2 已把算法从 `sha256(sqlite_bytes)` 改为 `zlib.crc32(zip_bytes)`，但
 
 ```sql
 -- v1.3 migration 0003_v1.3_part1/forward.sql
--- 第 1 阶段：收紧列类型但保持可空，作废遗留 sha256 行等待 B2 backfill
-ALTER TABLE training_sets
-  ALTER COLUMN content_hash TYPE CHAR(8) USING NULL;  -- 所有非 8 字符值置 NULL
+-- 第 1 阶段：收紧列类型但保持可空；保留 8 字符 CRC32（小写十六进制）有效行，其它置 NULL 等 B2 backfill
+-- 先 DROP NOT NULL（若存在），避免 TYPE 改写时校验
+ALTER TABLE training_sets ALTER COLUMN content_hash DROP NOT NULL;
 
+-- 用 CASE 表达式只替换非合法行，保留已合法的 8 字符小写十六进制 CRC32
+ALTER TABLE training_sets
+  ALTER COLUMN content_hash TYPE CHAR(8)
+  USING CASE
+          WHEN content_hash ~ '^[0-9a-f]{8}$'
+            THEN content_hash::char(8)
+          WHEN content_hash ~ '^[0-9A-Fa-f]{8}$'
+            THEN lower(content_hash)::char(8)
+          ELSE NULL
+        END;
+
+-- 只对被置 NULL 的遗留行（原 sha256 或其它非 CRC32 形态）重置 status / lease
 UPDATE training_sets
    SET status = 'unsent',
-       content_hash = NULL,
        lease_id = NULL,
        lease_expires_at = NULL,
        reserved_at = NULL
- WHERE content_hash IS NULL OR LENGTH(content_hash) <> 8;
+ WHERE content_hash IS NULL;
 
 COMMENT ON COLUMN training_sets.content_hash
   IS 'zip 文件 CRC32 十六进制（8 字符，小写），由 B2 生成、P2 校验；v1.3 两阶段 migration 第 1 阶段后可空，B2 backfill 完成后第 2 阶段加 NOT NULL';
@@ -195,10 +206,14 @@ ALTER TABLE training_sets ALTER COLUMN content_hash DROP NOT NULL;
 
 **B2 回迁策略**：B2 `generate_one_training_set` 在 part1 部署完成后首次运行时，识别 `status='unsent' AND content_hash IS NULL` 行（即 migration 作废的遗留 sha256 行），按新 CRC32 格式重新计算并回写；全部补齐后 B3 部署 part2 加 NOT NULL。
 
-**验收步骤**（含 codex 建议的 migration 测试）：
-1. 部署 part1 → 人为插入 1 条 `content_hash = LPAD('a', 64, 'a')` 遗留行 → 验证该行 `content_hash IS NULL AND status = 'unsent'`
-2. 运行 B4 调度器 → 验证 B2 重新生成该行 content_hash（8 字符 CRC32）
-3. 部署 part2 → 断言成功；若仍有 NULL 行，part2 RAISE EXCEPTION 阻塞
+**验收步骤**（含 codex 建议的 migration 测试，v1.3 闸门 #2 修订）：
+1. 准备混合数据：1 条 `content_hash = 'deadbeef'`（合法 8 字符 CRC32）+ 1 条 `content_hash = LPAD('a', 64, 'a')`（遗留 sha256）+ 1 条 `content_hash = 'BADC0DE1'`（大写 8 字符，应被 lower 保留）
+2. 部署 part1 → 验证：
+   - 合法 `'deadbeef'` 行：`content_hash = 'deadbeef'`（保留）、`status` 不变
+   - 大写 `'BADC0DE1'` 行：`content_hash = 'badc0de1'`（转小写保留）、`status` 不变
+   - 遗留 64 字符行：`content_hash IS NULL AND status = 'unsent'`
+3. 运行 B4 调度器 → 验证 B2 重新生成遗留行的 content_hash（8 字符 CRC32 小写）
+4. 部署 part2 → 断言成功；若仍有 NULL 行，part2 RAISE EXCEPTION 阻塞
 
 #### app.sqlite `download_acceptance_journal` 表（v1.3 新增）
 
@@ -996,12 +1011,18 @@ extension PanelViewState {
             interactionMode = .autoTracking
             revision &+= 1
             return .clearPendingDrawing
+
+        // —— offsetApplied（v1.3 新，闸门 #2 F2 修复）：手势/减速/程序改 offset 统一走此 action ——
+        case (_, .offsetApplied(let deltaPixels)):
+            offset += deltaPixels
+            revision &+= 1
+            return .none
         }
     }
 }
 ```
 
-**ChartAction 更新**（v1.3 加 `setDrawingSnapshot`；activateDrawing 不再直接切 mode）：
+**ChartAction 更新**（v1.3 加 `setDrawingSnapshot` + `offsetApplied`；activateDrawing 不再直接切 mode）：
 
 ```swift
 enum ChartAction: Equatable, Sendable {
@@ -1014,18 +1035,28 @@ enum ChartAction: Equatable, Sendable {
     case drawingCancelled(baseRevision: UInt64)
     case tradeTriggered
     case periodComboSwitched
+    case offsetApplied(deltaPixels: CGFloat)                               // v1.3 新（闸门 #2 F2 修复）：手势/减速动画/程序驱动的 offset 变化必须走此 action；reducer 更新 offset + bump revision
 }
 ```
+
+**关键约束**（闸门 #2 F2 修复）：
+- `DecelerationAnimator.onUpdate` **禁止**直接写 `PanelViewState.offset`；必须派发 `.offsetApplied(deltaPixels:)` 到 reducer
+- 所有改变 `offset` 的路径（手势 Pan / DecelerationAnimator / 程序 setOffset）**必须**通过 `offsetApplied` action；reducer 在此 action 下 bump `revision`
+- 由此 `requestDrawingSnapshot` 返回后若发生任何 offset 漂移，`revision` 已变，`setDrawingSnapshot` 会因 revision 不匹配返回 `.stalePanelRevision`
 
 **stalePanelRevision 可达路径**（v1.3 修订，F2 修复后）：
 - **setDrawingSnapshot 漂移**：A) reducer 派 `activateDrawing` → effect `requestDrawingSnapshot(baseRevision: r0)`；B) 异步计算期间发生 `tradeTriggered` → `revision = r0+1`；C) effect 回来派 `setDrawingSnapshot(baseRev: r0, ...)` → reducer 返回 `.stalePanelRevision(expected: r0, actual: r0+1)` 且 mode 保持 autoTracking（不进 drawing）
 - **drawingCommitted 漂移**：A) drawing 模式，`snap.frozen.baseRevision = r0`；B) 发生 `tradeTriggered` → mode 切 autoTracking + revision bump r0+1 + snapshot 被丢弃；C) 旧回调 `drawingCommitted(baseRevision: r0)` 派发 → 进 `.autoTracking/.drawingCommitted` 分支触发 `assertionFailure`（非法转换）——**推断**：真实场景 C8/E5 不应在 mode 已切后再发 commit；若需处理，UI 层在 drawing mode 切出时取消绘线 UI 即可
 
 **Wave 0 额外验收**（v1.3）：
-- `revision` 单调性测试：任意 panStarted / panEnded / tradeTriggered / periodComboSwitched 均 bump；activateDrawing / setDrawingSnapshot / drawingCommitted / drawingCancelled 均不 bump
+- `revision` 单调性测试：任意 panStarted / panEnded / tradeTriggered / periodComboSwitched / **offsetApplied** 均 bump；activateDrawing / setDrawingSnapshot / drawingCommitted / drawingCancelled 均不 bump
 - `requestDrawingSnapshot` effect 覆盖测试：autoTracking / freeScrolling 上派发 activateDrawing → 返回 effect + mode 未变
-- `stalePanelRevision` 可达测试：setDrawingSnapshot 场景 = activateDrawing（r0）→ tradeTriggered（r0+1）→ setDrawingSnapshot(baseRev: r0) → 断言返回 `.stalePanelRevision(expected: r0, actual: r0+1)` 且 mode 仍为 autoTracking
+- `stalePanelRevision` 可达测试（3 条路径）：
+  1. **trade 漂移**：activateDrawing（r0）→ tradeTriggered（r0+1）→ setDrawingSnapshot(baseRev: r0) → 返回 `.stalePanelRevision(expected: r0, actual: r0+1)` 且 mode 仍为 autoTracking
+  2. **deceleration 漂移**（闸门 #2 F2 覆盖）：panEnded（r0+1）→ startDeceleration effect → activateDrawing（baseRev: r0+1）→ offsetApplied（r0+2，动画驱动）→ setDrawingSnapshot(baseRev: r0+1) → 返回 `.stalePanelRevision(expected: r0+1, actual: r0+2)`
+  3. **periodCombo 漂移**：drawing 模式中 periodComboSwitched（r+1，mode → autoTracking + clearPendingDrawing）→ 旧 drawingCommitted(baseRev: r) 派发到 autoTracking 分支 → assertionFailure（非法转换）
 - `drawingCommitted` 非法转换 assertion 测试：autoTracking / freeScrolling 上派发 drawingCommitted → assertionFailure
+- `offsetApplied` 单独测试：autoTracking / freeScrolling / drawing 三种 mode 下，派发 `.offsetApplied(deltaPixels: 10)` 均累加 offset 且 revision+1；mode 不变
 
 #### KLineView 本体
 
@@ -1093,10 +1124,12 @@ struct KLineRenderState: Equatable, Sendable {
   - reducer 全 21 格矩阵测试（含 assertionFailure 触发）
   - `KLineRenderState` Equatable 短路测试（相同输入两次 render 只画一次）
 
-### C2 减速动画模块 `DecelerationAnimator.swift`
+### C2 减速动画模块 `DecelerationAnimator.swift`（v1.3：offset 更新必须派发 action）
 
 ```swift
 final class DecelerationAnimator {
+    /// v1.3（闸门 #2 F2 修复）：onUpdate 的消费者**必须**把 deltaOffset 封装为
+    /// `ChartAction.offsetApplied(deltaPixels:)` 派发给 reducer；禁止直接写 `PanelViewState.offset`
     var onUpdate: ((CGFloat) -> Void)?
     var onFinish: (() -> Void)?
     init(friction: CGFloat = 0.94, stopThreshold: CGFloat = 0.5)
@@ -1104,6 +1137,11 @@ final class DecelerationAnimator {
     func stop()
     func resetOnSceneActive()     // 由 E5.onSceneActivated() 调用
 }
+
+// v1.3 用法示例（C8 或 E5 中）：
+// animator.onUpdate = { [weak dispatcher] delta in
+//     dispatcher?.dispatch(.offsetApplied(deltaPixels: delta))
+// }
 ```
 
 ### C3 主图渲染模块 `KLineView+Candles.swift`
