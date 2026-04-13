@@ -38,3 +38,6 @@ out/
 *.pem
 *.key
 secrets/
+
+# Claude Code 本地 personal 设置（保留 .claude/settings.json 提交）
+.claude/settings.local.json
