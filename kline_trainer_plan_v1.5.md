@@ -354,7 +354,7 @@ CREATE TABLE training_sets (
     end_datetime BIGINT NOT NULL,
     schema_version INTEGER NOT NULL DEFAULT 1,
     file_path VARCHAR(255) NOT NULL,
-    content_hash VARCHAR(64),
+    content_hash CHAR(8),   -- zip 文件 CRC32 十六进制（8 字符小写），见 modules v1.3 M0.1；v1.3 迁移分两阶段：先 DROP NOT NULL + 收紧 CHAR(8)；B2 backfill 后再 SET NOT NULL
     created_at TIMESTAMP DEFAULT NOW(),
     status VARCHAR(10) NOT NULL DEFAULT 'unsent'  -- unsent / reserved / sent
 );
@@ -992,7 +992,7 @@ GET /training-sets/meta?count=N
                 "stock_name": "贵州茅台",
                 "filename": "ts_42_600519.zip",
                 "schema_version": 1,
-                "content_hash": "sha256hex..."
+                "content_hash": "1a2b3c4d"    // zip 文件 CRC32 十六进制（8 字符小写），见 modules v1.3 M0.1 / M0.2
             },
             ...
         ]
