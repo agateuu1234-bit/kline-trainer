@@ -988,13 +988,21 @@ extension PanelViewState {
         case (.drawing, .setDrawingSnapshot):
             return .none  // drawing 模式下切工具由 DrawingToolManager 处理，不重复进 drawing
 
-        // —— drawingCommitted / drawingCancelled（v1.3：比 action.baseRevision vs 当前 panel.revision）——
-        case (.drawing, .drawingCommitted(let base)), (.drawing, .drawingCancelled(let base)):
+        // —— drawingCommitted（v1.3：比 action.baseRevision vs 当前 panel.revision；stale 则阻塞 commit）——
+        case (.drawing, .drawingCommitted(let base)):
             guard base == revision else {
                 return .stalePanelRevision(expected: base, actual: revision)
             }
             interactionMode = .autoTracking
             return .none
+
+        // —— drawingCancelled（v1.3 闸门 #3 修订：cancel 即便 stale 也必须退出 drawing 模式，避免用户卡住）——
+        // 语义：stale 表示 snapshot 已过期，cancel 是"放弃 pending drawing"，永远应允许；
+        //       同时仍然回发 stalePanelRevision effect 供 UI 决定是否重建 drawing 会话
+        case (.drawing, .drawingCancelled(let base)):
+            let isStale = (base != revision)
+            interactionMode = .autoTracking
+            return isStale ? .stalePanelRevision(expected: base, actual: revision) : .none
         case (.autoTracking, .drawingCommitted), (.freeScrolling, .drawingCommitted),
              (.autoTracking, .drawingCancelled), (.freeScrolling, .drawingCancelled):
             assertionFailure("非法转换：\(interactionMode) → \(action)")
@@ -1012,8 +1020,12 @@ extension PanelViewState {
             revision &+= 1
             return .clearPendingDrawing
 
-        // —— offsetApplied（v1.3 新，闸门 #2 F2 修复）：手势/减速/程序改 offset 统一走此 action ——
-        case (_, .offsetApplied(let deltaPixels)):
+        // —— offsetApplied（v1.3 新；闸门 #3 修订：drawing 模式下忽略，防止 deceleration/Pan 漂移导致 drawing 卡死）——
+        // 业务约束：进入 drawing 模式前，E5/C8 应 stop 减速动画；若仍有残余回调到达 drawing 模式，reducer 直接忽略
+        case (.drawing, .offsetApplied):
+            return .none
+        case (.autoTracking, .offsetApplied(let deltaPixels)),
+             (.freeScrolling, .offsetApplied(let deltaPixels)):
             offset += deltaPixels
             revision &+= 1
             return .none
@@ -1056,7 +1068,10 @@ enum ChartAction: Equatable, Sendable {
   2. **deceleration 漂移**（闸门 #2 F2 覆盖）：panEnded（r0+1）→ startDeceleration effect → activateDrawing（baseRev: r0+1）→ offsetApplied（r0+2，动画驱动）→ setDrawingSnapshot(baseRev: r0+1) → 返回 `.stalePanelRevision(expected: r0+1, actual: r0+2)`
   3. **periodCombo 漂移**：drawing 模式中 periodComboSwitched（r+1，mode → autoTracking + clearPendingDrawing）→ 旧 drawingCommitted(baseRev: r) 派发到 autoTracking 分支 → assertionFailure（非法转换）
 - `drawingCommitted` 非法转换 assertion 测试：autoTracking / freeScrolling 上派发 drawingCommitted → assertionFailure
-- `offsetApplied` 单独测试：autoTracking / freeScrolling / drawing 三种 mode 下，派发 `.offsetApplied(deltaPixels: 10)` 均累加 offset 且 revision+1；mode 不变
+- `offsetApplied` 单独测试：
+  - autoTracking / freeScrolling：offset 累加 + revision+1；mode 不变
+  - **drawing**（闸门 #3 修订）：忽略，offset 与 revision 均不变
+- **drawingCancelled stale-exit 测试**（闸门 #3 新增）：panEnded → activateDrawing(r) → setDrawingSnapshot(r) → offsetApplied 被吞（drawing 模式）→ 若此前有 panEnded 引起的 autoTracking/freeScrolling offsetApplied 使 revision 漂移到 r+1 → drawingCancelled(baseRev: r) → 返回 `.stalePanelRevision` **且 mode 切回 autoTracking**（即便 stale，cancel 必然退出 drawing）
 
 #### KLineView 本体
 
