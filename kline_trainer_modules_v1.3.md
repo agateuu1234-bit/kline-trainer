@@ -796,7 +796,7 @@ v1.3 把 v1.2 的单一 C1 模块拆为 3 个顶层模块，分别承担几何 /
 **v1.3 关键修订**（基于 Round 3 adversarial review 收敛）：
 1. `PanelViewState` 加 `revision: UInt64` 单调版本；`FrozenPanelState` 加 `baseRevision: UInt64`（解 P0-1 跨 tick 快照漂移）
 2. `ChartAction.drawingCommitted/drawingCancelled` 加参数 `baseRevision: UInt64`
-3. `ChartReduceEffect` 新增 `.stalePanelRevision(expected:actual:)`
+3. `ChartReduceEffect` 新增 `.staleDrawingSnapshot(expected:actual:)` + `.requestDrawingSnapshotAfterStoppingAnimator(tool:baseRevision:)`
 4. `NonDegenerateRange` 替换 `ClosedRange<Double>` 用于副图值域（解 P1-5）
 5. C1 拆 3 顶层模块（C1a / C1b / C1c，见上）
 
@@ -923,7 +923,7 @@ extension PanelViewState {
 **revision 防漂移语义**（v1.3 解 P0-1）：
 - `periodComboSwitched` / `tradeTriggered` / `panStarted` / `panEnded` 等任何改变面板可见范围的 action 处理时，reducer 递增 `revision`
 - `activateDrawing` 冻结 snapshot 时记录当时的 `revision` 作为 `baseRevision`
-- `drawingCommitted(baseRevision:)` / `drawingCancelled(baseRevision:)` 提交时携带冻结时的 `baseRevision`；reducer 比对当前 `revision`，**不匹配则返回 `.stalePanelRevision(expected:actual:)` 并保持 drawing 模式**（让 UI 层决定重新冻结还是放弃）
+- `drawingCommitted(baseRevision:)` / `drawingCancelled(baseRevision:)` 提交时携带冻结时的 `baseRevision`；reducer 比对当前 `snapshot.frozen.baseRevision`（**不是** `revision`），**不匹配 = 上一轮 drawing session 遗留 action → 丢弃（返回 `.none`）保持当前 drawing 模式**
 - 业务含义：交易后硬切 autoTracking 或跨 tick 面板状态漂移时，旧 snapshot 的 commit/cancel 不再能覆盖当前面板
 - 推断：在 `@MainActor` + sync reducer 前提下已大部分消除重入，但 async effect 跨 tick 返回时仍可能拿到旧 revision（例如长按绘线期间交易触发），revision 检测是最轻量的防御
 
@@ -956,7 +956,7 @@ enum ChartReduceEffect: Equatable, Sendable {
 /// - activateDrawing：返回 requestDrawingSnapshot effect；不进 drawing 模式；不 bump revision
 /// - setDrawingSnapshot（新 action，见下）：外部带真实 candleRange 回来，才进 drawing 模式；不 bump revision（但核对 baseRevision 必须等于当前 revision）
 /// - tradeTriggered / periodComboSwitched：硬切 autoTracking → bump
-/// drawingCommitted/drawingCancelled：比较 action.baseRevision 与当前 panel.revision；不匹配返回 stalePanelRevision 保留 mode；匹配则切 autoTracking
+/// drawingCommitted/drawingCancelled：比较 action.baseRevision 与当前 snapshot.frozen.baseRevision（防跨 session 误作用）；不匹配丢弃返回 .none；匹配则切 autoTracking
 extension PanelViewState {
     /// v1.3 更新：ChartAction 新增 setDrawingSnapshot；drawing 模式不再使用 placeholder
     mutating func reduce(_ action: ChartAction) -> ChartReduceEffect {
@@ -998,12 +998,23 @@ extension PanelViewState {
         case (.drawing, .setDrawingSnapshot):
             return .none  // drawing 模式下切工具由 DrawingToolManager 处理，不重复进 drawing
 
-        // —— drawingCommitted / drawingCancelled（v1.3 闸门 #4 简化）——
-        // 洞察：drawing 模式下没有任何 action 可以 bump revision（offsetApplied 被吞；
-        // tradeTriggered/periodComboSwitched 会切出 drawing；其余都是 no-op）；
-        // 所以 drawing 模式内 action.baseRevision 必然 == 当前 revision，stale 不可达。
-        // baseRevision 参数保留作为 UI → reducer 的调试 trace，reducer 本身不做 stale 检查。
-        case (.drawing, .drawingCommitted), (.drawing, .drawingCancelled):
+        // —— drawingCommitted / drawingCancelled（v1.3 闸门 #5 修订：防跨 session 误作用）——
+        // 关键保护：即便 drawing 模式内 revision 不能 bump，也可能有上一轮 drawing session 遗留的
+        // action 在 tradeTriggered/periodCombo 切出 drawing → 再 activateDrawing + setDrawingSnapshot
+        // 进入新 drawing session 后到达。此时若无 guard，会错误切出当前新 session。
+        // guard：action.baseRevision 必须等于当前 snapshot.frozen.baseRevision；
+        //        不匹配 = 旧 session 遗留 action → 丢弃（.none），保持当前 drawing mode
+        case (.drawing(let snap), .drawingCommitted(let base)):
+            guard base == snap.frozen.baseRevision else {
+                // 来自上一轮 session 的延迟 action，忽略
+                return .none
+            }
+            interactionMode = .autoTracking
+            return .none
+        case (.drawing(let snap), .drawingCancelled(let base)):
+            guard base == snap.frozen.baseRevision else {
+                return .none
+            }
             interactionMode = .autoTracking
             return .none
         case (.autoTracking, .drawingCommitted), (.freeScrolling, .drawingCommitted),
@@ -1057,21 +1068,29 @@ enum ChartAction: Equatable, Sendable {
 **关键约束**（闸门 #2 F2 修复）：
 - `DecelerationAnimator.onUpdate` **禁止**直接写 `PanelViewState.offset`；必须派发 `.offsetApplied(deltaPixels:)` 到 reducer
 - 所有改变 `offset` 的路径（手势 Pan / DecelerationAnimator / 程序 setOffset）**必须**通过 `offsetApplied` action；reducer 在此 action 下 bump `revision`
-- 由此 `requestDrawingSnapshot` 返回后若发生任何 offset 漂移，`revision` 已变，`setDrawingSnapshot` 会因 revision 不匹配返回 `.stalePanelRevision`
+- 由此 `requestDrawingSnapshotAfterStoppingAnimator` 返回后若发生任何 offset 漂移，`revision` 已变，`setDrawingSnapshot` 会因 revision 不匹配返回 `.staleDrawingSnapshot`
 
-**staleDrawingSnapshot 可达路径**（v1.3 闸门 #4 简化：仅 setDrawingSnapshot 阶段可能 stale）：
+**staleDrawingSnapshot 可达路径**（v1.3 闸门 #5 补齐：3 条漂移源；仅 setDrawingSnapshot 阶段可能 stale）：
 
 - **trade 漂移**：activateDrawing（r=0）→ effect `.requestDrawingSnapshotAfterStoppingAnimator(tool, baseRev:0)` → handler 计算期间发生 `tradeTriggered` 使 revision=1 → handler 回推 setDrawingSnapshot(baseRev:0, range) → reducer 返回 `.staleDrawingSnapshot(expected:0, actual:1)` 且 mode 保持 autoTracking（未进 drawing）
 - **periodCombo 漂移**：同 trade，但触发 `periodComboSwitched`（也 bump + 切 autoTracking）
+- **offsetApplied 漂移**（闸门 #5 新增）：activateDrawing（r=0）→ handler 计算期间发生 `.offsetApplied(delta)`（手势/deceleration 余震，mode 仍是 autoTracking/freeScrolling）使 revision=1 → handler 回推 setDrawingSnapshot(baseRev:0) → 同上 stale。尽管 effect 合约要求 handler 先 stop animator，但 handler 不是原子的——仍可能发生
 
-**drawing 模式不可能 stale**：进入 drawing 后无任何 action 能 bump revision（offsetApplied 被吞；tradeTriggered/periodComboSwitched 会直接切出 drawing + 丢弃 snapshot）；因此 commit/cancel 不需 check baseRevision。
+**drawing 模式内部 stale 可达性**（闸门 #5 修订）：
+- drawing 模式内没有任何 action 能 bump revision（offsetApplied 被吞；tradeTriggered/periodComboSwitched 会直接切出 drawing + 丢弃 snapshot）→ 当前 session 内 commit/cancel 必然 baseRev == snap.frozen.baseRevision
+- **但跨 session 可能 stale**：session A 进 drawing（snap.baseRev=0）→ tradeTriggered 切出 + 新 revision=1 → 重新 activateDrawing + setDrawingSnapshot(baseRev=1) → 新 session B drawing（snap.baseRev=1）；此时 session A 遗留的 drawingCommitted(baseRev=0) 到达 → reducer 的 guard `base != snap.frozen.baseRevision`（0 != 1）→ **丢弃返回 .none 保持 session B**，不错误切出
 
 **Wave 0 额外验收**（v1.3 闸门 #4 修订）：
 - `revision` 单调性测试：`panStarted` / `panEnded` / `tradeTriggered` / `periodComboSwitched` / **`offsetApplied`**（仅 autoTracking + freeScrolling 模式）均 bump；其它 action 均不 bump；drawing 模式下 `offsetApplied` 吞掉、revision 不变
 - `requestDrawingSnapshotAfterStoppingAnimator` effect 覆盖测试：autoTracking / freeScrolling 上派发 activateDrawing → 返回对应 effect + mode 未变 + revision 未变
-- **`staleDrawingSnapshot` 可达测试**：
+- **`staleDrawingSnapshot` 可达测试**（3 条路径）：
   1. activateDrawing（r=0）→ tradeTriggered（r=1）→ setDrawingSnapshot(baseRev:0) → 断言 `.staleDrawingSnapshot(expected:0, actual:1)` + mode=autoTracking
   2. activateDrawing（r=0）→ periodComboSwitched（r=1, clearPendingDrawing）→ setDrawingSnapshot(baseRev:0) → 同上
+  3. **offsetApplied 漂移**（闸门 #5 新增）：activateDrawing（r=0）→ offsetApplied(delta) 在 autoTracking 模式下（r=1）→ setDrawingSnapshot(baseRev:0) → 同上
+- **跨 session commit/cancel 丢弃测试**（闸门 #5 新增）：
+  - 进 session A drawing(snap.baseRev=0) → tradeTriggered（r=1，mode=autoTracking）→ activateDrawing + setDrawingSnapshot(baseRev=1) 进 session B drawing(snap.baseRev=1)
+  - 模拟 session A 延迟 action：派发 `drawingCommitted(baseRevision: 0)` → 断言 `.none` + mode 仍为 drawing（session B 未被错误切出）
+  - 同上 cancel：派发 `drawingCancelled(baseRevision: 0)` → `.none` + mode 仍为 drawing
 - **Deceleration stop 契约测试**（闸门 #4 F3 新增）：`panEnded(velocity:) → .startDeceleration(v)` effect handler 启动 animator；后续 activateDrawing → `.requestDrawingSnapshotAfterStoppingAnimator` effect；验证 handler 必须**先**调用 `animator.stop()` 再计算 range（集成测试：模拟延迟 animator 回调，验证 drawing 退出后无 `offsetApplied` 到达 reducer）
 - `drawingCommitted/drawingCancelled` 非法转换 assertion 测试：autoTracking / freeScrolling 上派发 → assertionFailure
 - `drawingCommitted/drawingCancelled` 正常退出测试：drawing 模式内派发 → mode=autoTracking + .none；无论 action 携带的 baseRevision 值为何（baseRevision 仅作调试 trace，reducer 不 check）
@@ -2008,10 +2027,10 @@ struct HistoryActionSheet: View {
 - [ ] **F2** Theme 框架 + 默认颜色常量
 - [ ] **C1 三件拆分完整交付**（v1.3 拆 C1a/C1b/C1c 全部在 Wave 0）：
   - **C1a Geometry**：`ChartGeometry / ChartPanelFrames / PriceRange / ChartViewport / CoordinateMapper / IndicatorMapper / NonDegenerateRange`（v1.3 新）
-  - **C1b Reducer**：`PanelViewState(含 revision) / FrozenPanelState(含 baseRevision) / DrawingSnapshot / ChartInteractionMode / ChartAction(drawingCommitted/Cancelled 带 baseRevision) / ChartReduceEffect(含 stalePanelRevision) / 完整 3×7 reduce 实现`
+  - **C1b Reducer**：`PanelViewState(含 revision) / FrozenPanelState(含 baseRevision) / DrawingSnapshot / ChartInteractionMode / ChartAction(drawingCommitted/Cancelled 带 baseRevision + offsetApplied + setDrawingSnapshot) / ChartReduceEffect(含 staleDrawingSnapshot + requestDrawingSnapshotAfterStoppingAnimator) / 完整 reduce 实现`
   - **C1c Render**：`KLineView / KLineRenderState(volumeRange/macdRange 为 NonDegenerateRange)`
   - C3-C6 的 drawXxx extension 方法签名 + **空 stub 实现**（真正实现放 Wave 1）
-  - 单元测试：坐标映射 / PriceRange / reducer 21 格矩阵 / NonDegenerateRange.make 退化值覆盖 / revision 单调性 / stalePanelRevision 场景 / renderState Equatable 短路
+  - 单元测试：坐标映射 / PriceRange / reducer 动作矩阵 / NonDegenerateRange.make 退化值覆盖 / revision 单调性 / staleDrawingSnapshot 场景（含 trade / periodCombo / offsetApplied 三条漂移路径）/ drawing 模式 offsetApplied 吞掉 / 跨 session commit 丢弃 / renderState Equatable 短路
 - [ ] **E6 TrainingSessionCoordinator 契约** + init 签名 + preview() Fixture（v1.3）
 - [ ] **TrainingEnginePreviewFactory** 前移 Wave 0（v1.3；原 Wave 1）
 - [ ] **P2 4 内部端口**（`ZipIntegrityVerifying` / `ZipExtracting` / `TrainingSetDataVerifying` / `DownloadAcceptanceCleaning`）协议定义 + 空 stub（v1.3）
@@ -2115,7 +2134,7 @@ struct HistoryActionSheet: View {
 - [ ] **KLineView 本体**（C1c）+ `KLineRenderState`（v1.3：volumeRange/macdRange 为 `NonDegenerateRange`）+ `ChartPanelFrames`
 - [ ] **非递归 `FrozenPanelState`**（v1.3：含 `baseRevision`）+ `DrawingSnapshot`
 - [ ] 所有 C1a/C1b/C1c 值类型 **`Equatable, Sendable`**（v1.3）
-- [ ] **reducer 完整 3×7 矩阵** + 非法 assertionFailure 测试 + **revision 单调性测试** + **stalePanelRevision 测试**（v1.3）
+- [ ] **reducer 完整动作矩阵** + 非法 assertionFailure 测试 + **revision 单调性测试** + **staleDrawingSnapshot 3 漂移路径测试**（v1.3）+ **跨 session commit/cancel 丢弃测试**（v1.3 闸门 #5）
 - [ ] **`IndicatorMapper`**（C1a）独立类型 + `NonDegenerateRange` 外部注入
 - [ ] **`NonDegenerateRange.make`** 覆盖空 / 全零 / 单值 fallback 测试（v1.3）
 - [ ] **`classifyTwoFingerGesture`** + **`classifySingleFingerPan`** + **`panPolicyInDrawingMode`** 纯函数
@@ -2279,7 +2298,7 @@ v1.3（累计 54 项修订）
 | 37 | R2-Cloud-新增 | — | P2 | M0.2/B2 | content_hash 改 zip CRC32 |
 | (38) | R2-Cloud-新增 | — | P2 | M0.4 | AppError.unknown → internalError(module, detail) |
 | **— 第 3 轮（v1.3）—** | | | | | |
-| 38 | R3-P0-1 | P0 | P0 | C1b | reducer `PanelViewState.revision` + `FrozenPanelState.baseRevision` + action 携 baseRevision + `.stalePanelRevision` effect |
+| 38 | R3-P0-1 | P0 | P0 | C1b | reducer `PanelViewState.revision` + `FrozenPanelState.baseRevision` + action 携 baseRevision + `.staleDrawingSnapshot` effect（v1.3 闸门 #4 effect 拆分 + 闸门 #5 跨 session guard）|
 | 39 | R3-P0-2 | P0 | P0 | E5/E6 | E5 L2 拆分：TrainingEngine 运行时 + 新 E6 `TrainingSessionCoordinator`（start/resume/save/finalize/review/replay）|
 | 40 | R3-P0-3 | P0 | P0 | M0.1/B2 | `training_sets.content_hash` 改 `CHAR(8) NOT NULL` CRC32 + migration 作废遗留 sha256 + B2 回迁策略 |
 | 41 | R3-P0-4 | P0 | P0 | M0.1/P4/P2 | `download_acceptance_journal` 表 + `P2JournalState` 9 态 + `AcceptanceJournalDAO` + confirmPending 重试 |
