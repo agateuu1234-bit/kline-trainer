@@ -50,7 +50,7 @@
      - 已有 approved spec 或明确 requirements 的多步任务开工前 → `superpowers:writing-plans`；spec 未明 → 先 brainstorming
      - 执行已有书面 implementation plan 且任务独立 → `superpowers:subagent-driven-development`；单线推进 → `superpowers:executing-plans`
      - 2+ 独立调查 / 故障域可并行 → `superpowers:dispatching-parallel-agents`
-     - 实现 feature / bugfix / refactor / 行为变更 写生产代码前 → `superpowers:test-driven-development`（配置 / 纯文档 / 流程文本除外）
+     - 实现 feature / bugfix / refactor / 行为变更 写生产代码前 → `superpowers:test-driven-development`（**行为中性**的配置 / 纯文档 / 流程文本除外；feature flag / 运行时配置 / 依赖设置等**改变行为**的 config 仍触发 TDD）
      - 遇到 bug / test 失败 / 意外行为 → 先 `superpowers:systematic-debugging`
      - 任何成功 / 完成 / 通过声明之前、commit / PR / 进入下一任务之前 → `superpowers:verification-before-completion`
      - 合并前自审 → `superpowers:requesting-code-review`（**不替代**规则 2 的 `codex:adversarial-review`）
