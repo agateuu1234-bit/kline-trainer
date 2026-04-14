@@ -144,7 +144,7 @@ v1.4 矩阵如下：
 | `CONTRACT_VERSION`（顶层标识） | `"1.4"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
 | PostgreSQL schema（`schema.sql` migration id） | `0003_v1.3` | 任何 PostgreSQL DDL 变更（含加列）；联动顶层 |
 | 训练组 SQLite `PRAGMA user_version` | `1` | 训练组 schema 结构变更；联动顶层 |
-| app.sqlite GRDB migration | `0002_v1.3_journal` | app.sqlite DDL / 新表；联动顶层 |
+| app.sqlite GRDB migration | `0003_v1.4_purge_leased` | app.sqlite DDL / 新表 / **DML 数据清理 migration**（v1.4 新增：删除 v1.3 残留 `state='leased'` journal 行）；联动顶层 |
 | Swift 模型版本（`M0.3`） | `1.3` | Codable 字段 / 枚举 case 变更；联动顶层 |
 | `P2 journal states` enum（v1.4 改版本） | `v2` | 删除 / 改 raw value / 改既有语义 / 改恢复扫描集 → bump 顶层；仅追加本地中间态 → 只 bump 本子版本，reader 须显式处理未知 state |
 
@@ -262,13 +262,27 @@ rejected        -- 显式失败（409/404/CRC 失败/schema mismatch 等）；sq
 
 **v1.4 修订说明（删 `leased`）**：原 v1.3 的 `leased` 状态承载"GET /meta 已拿 lease、未开始下载"的客户端观察点，但与 plan §8.2 的后端 `reserved` 状态 + modules §三 M0.1 `training_sets.status='reserved'` 形成三向名义重复，易造成跨端沟通混淆；且文档的崩溃恢复扫描集（`stored ∪ confirmPending`）从不包含 `leased`，实际无恢复价值。v1.4 改为：GET /meta 成功、下载未开始阶段只在内存持 `lease_id`，**不写 journal 行**；zip 下载完成后才写入第一条 journal 行（state = `downloaded`）。若下载期间崩溃 → 本地无 journal 记录；**由 B3 的 GET /meta 在下次请求时立即把 `lease_expires_at <= now()` 的 reserved 行视为可重选**（见 §四 B3 v1.4 变更），不再依赖 B4 日程。
 
-**v1.4 app.sqlite 数据迁移（purge `leased` 残留行）**：v1.3 到 v1.4 的 GRDB migration 必须处理已持久化的 `state = 'leased'` 行。这些行本应不存在（v1.3 实际流程 `leased` 只作为瞬态用）但跨版本数据可能残留：
+**v1.4 app.sqlite 数据迁移（purge `leased` 残留行）**：v1.3 到 v1.4 的 GRDB migration `0003_v1.4_purge_leased` 必须处理已持久化的 `state = 'leased'` 行。这些行本应不存在（v1.3 实际流程 `leased` 只作为瞬态用）但跨版本数据可能残留。**migration 必须通过 P4 的 GRDB `DatabaseMigrator` 注册**（不是孤立 SQL 文件），确保启动时强制执行：
+
+```swift
+// P4 DatabaseMigrator 注册（示例；实际代码在 Wave 2 实现）
+migrator.registerMigration("0003_v1.4_purge_leased") { db in
+    try db.execute(sql: """
+        DELETE FROM download_acceptance_journal WHERE state = 'leased';
+    """)
+}
+```
+
+对应 SQL（纯 DML，无 DDL，不可回滚即无需 rollback）：
 
 ```sql
--- v1.4 migration: app.sqlite migrations/0003_v1.4_purge_leased.sql
+-- backend/sql/migrations/app/0003_v1.4_purge_leased.sql（仅供参考；实际由 GRDB 执行）
 -- 清理 v1.3 残留的 leased 行；这些行无 sqlite_local_path（下载未完成），直接删除安全
 DELETE FROM download_acceptance_journal WHERE state = 'leased';
 ```
+
+**v1.4 迁移验收 case**：
+- 准备 v1.3 app.sqlite 含至少 1 条 `state = 'leased'` 行 → 应用 v1.4 migrator → 读表应无 `state = 'leased'` 行、无其它数据损失；其它状态（downloaded / confirmed / rejected 等）行保持不变。
 
 **v1.4 DAO reader 对未知 state 的处理**（对应 CONTRACT_VERSION 子版本 bump 策略要求）：
 
