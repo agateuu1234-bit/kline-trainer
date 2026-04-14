@@ -260,7 +260,23 @@ confirmed       -- confirm 成功；本地 TrainingSetFile 可见
 rejected        -- 显式失败（409/404/CRC 失败/schema mismatch 等）；sqlite_local_path 可清理
 ```
 
-**v1.4 修订说明（删 `leased`）**：原 v1.3 的 `leased` 状态承载"GET /meta 已拿 lease、未开始下载"的客户端观察点，但与 plan §8.2 的后端 `reserved` 状态 + modules §三 M0.1 `training_sets.status='reserved'` 形成三向名义重复，易造成跨端沟通混淆；且文档的崩溃恢复扫描集（`stored ∪ confirmPending`）从不包含 `leased`，实际无恢复价值。v1.4 改为：GET /meta 成功、下载未开始阶段只在内存持 `lease_id`，**不写 journal 行**；zip 下载完成后才写入第一条 journal 行（state = `downloaded`）。若下载期间崩溃 → 本地无 journal 记录，服务端 lease TTL 到期后自动回滚 `training_sets.status='unsent'`，由下次拉取恢复。
+**v1.4 修订说明（删 `leased`）**：原 v1.3 的 `leased` 状态承载"GET /meta 已拿 lease、未开始下载"的客户端观察点，但与 plan §8.2 的后端 `reserved` 状态 + modules §三 M0.1 `training_sets.status='reserved'` 形成三向名义重复，易造成跨端沟通混淆；且文档的崩溃恢复扫描集（`stored ∪ confirmPending`）从不包含 `leased`，实际无恢复价值。v1.4 改为：GET /meta 成功、下载未开始阶段只在内存持 `lease_id`，**不写 journal 行**；zip 下载完成后才写入第一条 journal 行（state = `downloaded`）。若下载期间崩溃 → 本地无 journal 记录；**由 B3 的 GET /meta 在下次请求时立即把 `lease_expires_at <= now()` 的 reserved 行视为可重选**（见 §四 B3 v1.4 变更），不再依赖 B4 日程。
+
+**v1.4 app.sqlite 数据迁移（purge `leased` 残留行）**：v1.3 到 v1.4 的 GRDB migration 必须处理已持久化的 `state = 'leased'` 行。这些行本应不存在（v1.3 实际流程 `leased` 只作为瞬态用）但跨版本数据可能残留：
+
+```sql
+-- v1.4 migration: app.sqlite migrations/0003_v1.4_purge_leased.sql
+-- 清理 v1.3 残留的 leased 行；这些行无 sqlite_local_path（下载未完成），直接删除安全
+DELETE FROM download_acceptance_journal WHERE state = 'leased';
+```
+
+**v1.4 DAO reader 对未知 state 的处理**（对应 CONTRACT_VERSION 子版本 bump 策略要求）：
+
+- `AcceptanceJournalDAO.listByState(_:)` / `listScanTargets()` 读取时若遇到**当前 enum 未定义**的 raw value（跨版本向前读 / 回滚后读新版本写入的行等），采用"**fail-safe 忽略**"策略：
+  - 记 warning 日志（状态名、training_set_id、lease_id）
+  - 该行**不进入任何恢复扫描集**（不重试 confirm、不清理本地文件）
+  - 留待用户手动运维或下次版本 migration 处理
+- Swift 实现提示：`P2JournalState.init(rawValue:)` 返回 `nil` 时 DAO 将该行映射为内部 `UnknownJournalRow` 类型（不对外暴露到 `AcceptanceJournalRow.state`），listBy* API 过滤掉该类行。
 
 **幂等与崩溃恢复规则**（v1.3 闸门 #1 F3 修订）：
 - App 启动时的 journal 扫描必须**同时覆盖两类 state**：`stored`（已落盘未发起 confirm）+ `confirmPending`（confirm 已发起但网络不确定）。两类都走同一 `retryPendingConfirmations` 流程：以原 `lease_id` 调用 `api.confirm`。
@@ -711,14 +727,40 @@ def generate_batch(conn, target_count: int) -> List[GeneratedTrainingSet]:
 - **不变量**：月线前 ≥30 / "之后"= 8 根月 K 时间窗口 / end_global_index 二分匹配 / UNIQUE(stock_code, start_datetime) 冲突重选
 - **验收**：生成 10 个样本，每个 zip 用 `unzip -v` 查看 CRC 与库里 content_hash 一致（长度 8，小写）
 
-### B3 FastAPI 服务模块 `app/routes.py`（v1.3：+ migration/rollback owner）
+### B3 FastAPI 服务模块 `app/routes.py`（v1.3：+ migration/rollback owner；v1.4：GET /meta 内联 TTL 过期过滤）
 
 - **职责**：实现 M0.2 + 租约状态机 + **PostgreSQL migration / rollback 执行**（v1.3 新增）
 - **v1.3 新增 owner 责任**：B3 负责执行 `backend/sql/migrations/` 下每个 migration 的 `forward.sql` / `rollback.sql`，按 M0.1 规则不允许不可逆 migration（除非列/表删除且显式标注）
 - **v1.2 变更**：`GET /meta` 不再仅改 `status`，需原子更新 `status='reserved' / lease_id / lease_expires_at / reserved_at` 4 列；`POST /confirm` 校验 `lease_id` 与 `lease_expires_at > now()`
+- **v1.4 变更（解 journal 删 leased 后的客户端崩溃恢复）**：`GET /meta` 的选择条件改为"`status='unsent' OR (status='reserved' AND lease_expires_at <= now())`"——即**过期的 reserved 行在 GET /meta 时即视为可重新预占**，原 lease 自动作废。不再依赖 B4 日程才能回收过期 lease；最长回收延迟 = 请求两次 GET /meta 的间隔，而不是最长 24 小时。
 - **实现参考**：
 
 ```python
+# v1.4：GET /meta 选择已过期的 reserved 行与 unsent 行；过期行 lease_id 重置
+@app.get("/training-sets/meta")
+async def fetch_meta(count: int):
+    async with db.transaction():
+        rows = await db.fetch_all("""
+            SELECT id, stock_code, stock_name, filename, schema_version, content_hash
+            FROM training_sets
+            WHERE status = 'unsent'
+               OR (status = 'reserved' AND lease_expires_at <= now())
+            ORDER BY created_at
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+        """, count)
+        lease_id = uuid4()
+        expires_at = now() + timedelta(minutes=10)
+        await db.execute("""
+            UPDATE training_sets
+               SET status = 'reserved',
+                   lease_id = $1,
+                   lease_expires_at = $2,
+                   reserved_at = now()
+             WHERE id = ANY($3)
+        """, lease_id, expires_at, [r["id"] for r in rows])
+        return {"lease_id": str(lease_id), "expires_at": expires_at.isoformat(), "sets": rows}
+
 @app.post("/training-set/{id}/confirm")
 async def confirm(id: int, lease_id: UUID):
     async with db.transaction():
@@ -735,6 +777,10 @@ async def confirm(id: int, lease_id: UUID):
         await db.execute("UPDATE training_sets SET status = 'sent' WHERE id = $1", id)
         return {"ok": True}
 ```
+
+**v1.4 验收补充**（B3）：
+- 用例 A：客户端 GET /meta 成功拿到 lease_id=X，紧接着崩溃。**等待 10 分钟 + 1 秒** → 下次客户端 GET /meta 应能重新预占同一 training_set（新 lease_id=Y），**无需等 B4 日程**。
+- 用例 B：客户端 GET /meta 后立即下载并 confirm 成功 → training_set.status='sent'，不会被后续过期重选。
 
 ### B4 调度器模块 `app/scheduler.py`
 
