@@ -30,11 +30,11 @@ else
 fi
 
 # 3. 检查 PostgreSQL 端口
-echo -n "Checking PostgreSQL port ($NAS_HOST:5432)... "
-if nc -z -w 3 "$NAS_HOST" 5432 2>/dev/null; then
+echo -n "Checking PostgreSQL port ($NAS_HOST:5433)... "
+if nc -z -w 3 "$NAS_HOST" 5433 2>/dev/null; then
     echo "PASS"
 else
-    echo "FAIL: Port 5432 not open on $NAS_HOST"
+    echo "FAIL: Port 5433 not open on $NAS_HOST"
     echo "  可能原因：NAS 上 PostgreSQL Docker 容器未启动"
     echo "  操作：SSH 到 NAS 执行 cd backend && docker compose up -d"
     exit 1
