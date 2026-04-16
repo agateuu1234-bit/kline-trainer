@@ -58,6 +58,66 @@ tools/
 
 ---
 
+## Task 0: settings.json 权限闭环
+
+**Files:**
+- Modify: `.claude/settings.json`
+
+- [ ] **Step 1: 查看当前 allow 列表**
+
+Run: `cat "/Users/maziming/Coding/Prj_Kline trainer/.claude/settings.json" | python3 -c "import sys,json; [print(x) for x in json.load(sys.stdin)['permissions']['allow']]"`
+
+Expected: 看到 git / gh pr / codex companion 等，**没有** xcodebuild / pip3 / pytest / bash scripts。
+
+- [ ] **Step 2: 添加 Plan 0a 执行所需的权限**
+
+在 `.claude/settings.json` 的 `permissions.allow` 数组末尾追加：
+
+```json
+"Bash(xcodebuild:*)",
+"Bash(xcrun:*)",
+"Bash(python3 -m pytest:*)",
+"Bash(pip3 install:*)",
+"Bash(bash scripts/*:*)",
+"Bash(chmod:*)"
+```
+
+同时把 `gh api` 从 `permissions.ask` 移到 `permissions.allow`：
+
+```json
+"Bash(gh api:*)"
+```
+
+并从 `permissions.ask` 中删除 `"Bash(gh api:*)"` 这一行。
+
+- [ ] **Step 3: 验证权限更新生效**
+
+Run: `cat "/Users/maziming/Coding/Prj_Kline trainer/.claude/settings.json" | python3 -c "import sys,json; a=json.load(sys.stdin)['permissions']['allow']; print('xcodebuild:', any('xcodebuild' in x for x in a)); print('pytest:', any('pytest' in x for x in a)); print('gh api:', any('gh api' in x for x in a))"`
+
+Expected:
+```
+xcodebuild: True
+pytest: True
+gh api: True
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add .claude/settings.json
+git commit -m "$(cat <<'EOF'
+chore: add xcodebuild/pytest/pip3/gh-api to settings.json allow list
+
+Required for Plan 0a agentic execution without ask prompts.
+Moves gh api from ask to allow for adversarial-review close-loop.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
 ## Task 1: 仓库目录结构
 
 **Files:**
@@ -469,7 +529,15 @@ xcodebuild -scheme KlineTrainer -destination "platform=iOS Simulator,id=$DEST" b
 
 Expected: 最后一行包含 `BUILD SUCCEEDED`
 
-- [ ] **Step 6: Commit Xcode 工程**
+- [ ] **Step 6: 确认 Package.resolved 已生成**
+
+Run: `ls "/Users/maziming/Coding/Prj_Kline trainer/ios/KlineTrainer/KlineTrainer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved" 2>/dev/null && echo "PASS: Package.resolved exists" || echo "FAIL: Package.resolved not found"`
+
+Expected: `PASS: Package.resolved exists`
+
+如果 FAIL：重新打开 Xcode → File → Add Package Dependencies → 确认 GRDB 已添加 → Cmd+S → 关闭 Xcode。
+
+- [ ] **Step 7: Commit Xcode 工程（含 Package.resolved）**
 
 ```bash
 cd "/Users/maziming/Coding/Prj_Kline trainer"
@@ -798,10 +866,29 @@ SCRIPT
 ```bash
 cat >> scripts/acceptance/plan_0a_toolchain.sh <<'SCRIPT'
 
-# 3. Xcode 工程
+# 3. Xcode 工程 + 依赖锁定
 check "Xcode project exists" test -d ios/KlineTrainer/KlineTrainer.xcodeproj
+check "Package.resolved committed" bash -c '
+    git ls-files --error-unmatch ios/KlineTrainer/KlineTrainer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved 2>/dev/null
+'
 
-# 4. FastAPI
+# 4. Claude hook 验活
+check "guard-git-push hook exists" test -f .claude/hooks/guard-git-push.sh
+check "guard-git-push hook is executable" test -x .claude/hooks/guard-git-push.sh
+check "settings.json references hook" grep -q "guard-git-push" .claude/settings.json
+
+# 5. settings.json 权限闭环
+check "xcodebuild in allow list" bash -c '
+    python3 -c "import json; a=json.load(open(\".claude/settings.json\"))[\"permissions\"][\"allow\"]; assert any(\"xcodebuild\" in x for x in a)"
+'
+check "pytest in allow list" bash -c '
+    python3 -c "import json; a=json.load(open(\".claude/settings.json\"))[\"permissions\"][\"allow\"]; assert any(\"pytest\" in x for x in a)"
+'
+check "gh api in allow list" bash -c '
+    python3 -c "import json; a=json.load(open(\".claude/settings.json\"))[\"permissions\"][\"allow\"]; assert any(\"gh api\" in x for x in a)"
+'
+
+# 6. FastAPI
 check "FastAPI health test passes" bash -c '
     cd backend && python3 -m pytest tests/test_health.py -q 2>&1 | grep -q "1 passed"
 '
