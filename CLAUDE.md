@@ -62,6 +62,7 @@
    - **豁免条件**（两种之一成立才可跳过入口 skill）：
      1. 用户**明确指向流程**的豁免（"跳过 superpowers" / "跳过 brainstorming" / "不要设计流程" 等明确指令）；**"按我说的做"不等于豁免**。
      2. 任务是**只读查询或不改变语义/行为/配置/策略的单步动作**；源码 / 配置 / 流程 / `CLAUDE.md` / `.claude/**` / `.github/**` 改动**不得**用该豁免。
+   - **降级不免流程**：执行方式可降级（subagent → 手工 / 并行 → 串行），但 skill pipeline 各环节（TDD → 实现 → review → verification）不可因降级而省略。
    - **违反补救**：Claude 走错 skill / 漏写 Skill gate / 用错 exempt 理由 → 必须**主动承认并从正确 skill 重新开始**；用户追问等同于触发。
    - **分支隔离**（`superpowers:using-git-worktrees` 场景触发）：下列情况**必须**用 `git worktree` 创建独立工作目录：
      - 并行多个 PR（同时跑 2 个及以上 PR 互不阻塞）
