@@ -462,7 +462,7 @@ Expected: 能看到 `Targets: KlineTrainer`，以及 `Build Configurations: Debu
 Run（用第一个可用的 iPhone simulator）:
 
 ```bash
-DEST=$(xcrun simctl list devices available | grep -i "iphone" | head -1 | sed 's/.*(\(.*\)).*/\1/')
+DEST=$(xcrun simctl list devices available | grep -oE '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}' | head -1)
 cd "/Users/maziming/Coding/Prj_Kline trainer/ios/KlineTrainer"
 xcodebuild -scheme KlineTrainer -destination "platform=iOS Simulator,id=$DEST" build 2>&1 | tail -5
 ```
@@ -572,6 +572,16 @@ EOF
 Run: `grep -q '^\.env$' .gitignore && echo "PASS: .env in .gitignore" || echo "FAIL"`
 
 Expected: `PASS`（当前仓库 `.gitignore` 已有 `.env` 规则）
+
+如果 FAIL：
+
+```bash
+echo "" >> .gitignore
+echo "# 环境变量（含密码，不提交）" >> .gitignore
+echo ".env" >> .gitignore
+```
+
+然后重新运行确认命令，看到 `PASS` 后继续。
 
 - [ ] **Step 2: 创建 backend/.env（用户手工操作）**
 
