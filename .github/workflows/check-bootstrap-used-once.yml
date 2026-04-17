@@ -1,0 +1,36 @@
+# check-bootstrap-used-once.yml
+# Always runs on every PR (F6); ensures bootstrap-lock.consumed is tracked and not reclaimed.
+# Job name = 'check-bootstrap-used-once' — matches branch-protection required-check context.
+name: check-bootstrap-used-once
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check-bootstrap-used-once:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+      - name: Verify bootstrap lock usage
+        run: |
+          if [ ! -f .github/bootstrap-lock.json ]; then
+            echo "FAIL: .github/bootstrap-lock.json missing"
+            exit 1
+          fi
+          consumed=$(python3 -c "import json; d=json.load(open('.github/bootstrap-lock.json')); print(d.get('consumed', False))")
+          pr_body=$(cat <<'EOF'
+          ${{ github.event.pull_request.body }}
+          EOF
+          )
+          if [ "$consumed" = "False" ] || [ "$consumed" = "false" ] || [ "$consumed" = "None" ]; then
+            echo "Lock not yet consumed (this may be THE bootstrap PR or a pre-bootstrap PR)."
+          else
+            # Lock already consumed — reject future bootstrap claims
+            if echo "$pr_body" | grep -iqE '^bootstrap:.*true|^this is.*bootstrap|bootstrap exemption'; then
+              echo "FAIL: bootstrap lock already consumed at $consumed; new PR cannot claim bootstrap"
+              exit 1
+            fi
+          fi
+          echo "PASS"
