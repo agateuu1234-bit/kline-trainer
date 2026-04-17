@@ -24,6 +24,14 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Xcode
+xcuserdata/
+*.xcuserstate
+*.moved-aside
+DerivedData/
+*.hmap
+*.ipa
+
 # Build / dist
 dist/
 build/

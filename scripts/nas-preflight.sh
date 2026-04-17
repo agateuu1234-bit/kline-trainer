@@ -19,6 +19,15 @@ fi
 
 source backend/.env
 
+# 1b. 检查必需变量
+for var in NAS_HOST POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB DB_URL; do
+    if [ -z "${!var:-}" ]; then
+        echo "FAIL: $var not set in backend/.env"
+        echo "  请检查 backend/.env 中是否填写了所有变量"
+        exit 1
+    fi
+done
+
 # 2. 检查 NAS 网络可达
 echo -n "Checking NAS network ($NAS_HOST)... "
 if ping -c 1 -W 3 "$NAS_HOST" > /dev/null 2>&1; then
