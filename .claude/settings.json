@@ -140,6 +140,17 @@
     ]
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/session-start.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -149,6 +160,49 @@
             "command": "bash .claude/hooks/guard-git-push.sh",
             "if": "Bash(git push:*)",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/pre-commit-diff-scan.sh",
+            "if": "Bash(git commit:*)",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/pre-merge-warn.sh",
+            "if": "Bash(gh pr merge:*)",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/pre-edit-trust-boundary-hint.sh",
+            "timeout": 2
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/pre-edit-trust-boundary-hint.sh",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/stop-response-check.sh",
+            "timeout": 3
           }
         ]
       }
