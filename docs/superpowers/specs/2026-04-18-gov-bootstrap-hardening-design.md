@@ -57,7 +57,7 @@
 | 新增 script | `.claude/scripts/attest-override.sh` | 手工豁免入口；要求真实 tty + 随机 nonce 确认串；写审计日志 + ledger（见 §2.5） |
 | 改动 script | `.claude/scripts/codex-attest.sh` | 增加 `--scope branch-diff` 模式；成功 approve 后写入台账（以 head SHA 为 key 的一部分） |
 | 改动 settings | `.claude/settings.json` | `allow` 加 `Write` / `Edit` / `Read` 三条裸名；`hooks.PreToolUse[Bash]` 挂新 hook；`deny` 新增 `Edit(.claude/scripts/attest-override.sh)` + `Write(...)` + `Bash(echo * \| .claude/scripts/attest-override.sh*)` 阻止 Claude 绕 tty |
-| 改动 hook 注册 | `.claude/settings.json` | 给 `.claude/hooks/guard-attest-ledger.sh` 加 `if` 条件，覆盖 push/pr create/pr merge |
+| 改动 hook 注册 | `.claude/settings.json` | 将 `.claude/hooks/guard-attest-ledger.sh` 挂载到 PreToolUse[Bash] **无 if 条件**的 entry（覆盖 bare `git push` / `gh pr merge` 等前缀模式易遗漏的情况）；hook 内部 parse 后决定是否生效 |
 | 多个文件改名 | memory + docs + MEMORY.md 索引 | R 任务 |
 
 ### 2.2 权限语义验证（G1 深度检查）
@@ -117,26 +117,28 @@ Claude Code 权限精度优先级：`deny > ask > allow`，且**更具体的 glo
 步骤：
   1. 解析 tool_input.command，匹配三种模式之一（否则 exit 0 放行）
   2. 初始化 ledger：若 .claude/state/attest-ledger.json 不存在，创建 {version:1, entries:{}} 后继续执行后续检查；**不 soft-pass**。首次运行时但凡 push/PR 涉及 plan/spec 或 code diff，一律视为 missing attestation → block（告知用户"ledger 首次初始化，请先跑 codex-attest 再重试"）
-  3. 场景 A（`git push ...`）：
-     a. 解析被推送 refspec：从 command 里提取 `<src-branch>`（`git push origin foo` / `git push -u origin foo` / `git push origin HEAD:foo` / `git push` 隐式 current）
-     b. 计算 commits-to-push：优先用 `git rev-list <src-branch> ^origin/<tracked-upstream>`；追踪关系缺失则回退到 `git rev-list <src-branch> ^origin/main` + stderr warn
-     c. 对 commits-to-push 里每个 commit 取 `git diff-tree --name-only`，过滤 `docs/superpowers/plans/*.md` | `docs/superpowers/specs/*.md`
-     d. 对每个文件：在 src-branch HEAD 下取 `git ls-tree <src-branch> -- <file>` 的 blob sha（**不是 working-tree 的 hash-object**，因为 working-tree 可能和 pushed HEAD 不一致）
-     e. ledger_blob = entries["file:$path"].blob_sha；不一致 → 收集违规
-     f. 任一违规 → decision=block + 完整清单 + "跑 .claude/scripts/codex-attest.sh --scope working-tree --focus <file>（在 src-branch HEAD 上）"
+  3. 场景 A（`git push ...` — 含 bare `git push`、`-u`、`--set-upstream`、`HEAD:foo` refspec）：
+     a. 解析被推送 refspec：从 command 里提取 `<src-branch>`。bare `git push` 时取 current HEAD + 其 tracked upstream
+     b. 计算 commits-to-push：优先用 `git rev-list <src-branch> ^origin/<tracked-upstream>`；追踪关系缺失则回退到 `git rev-list <src-branch> ^origin/main` + stderr warn；仍失败 → block
+     c. 对 commits-to-push 里每个 commit 取 `git diff-tree --name-only`，收集所有被动过的文件
+     d. **文件级 plan/spec 检查**：过滤出 `docs/superpowers/plans/*.md` / `docs/superpowers/specs/*.md`；对每个文件在 src-branch HEAD 下读 `git ls-tree <src-branch> -- <file>` 的 blob sha；与 `entries["file:$path"].blob_sha` 比对；不一致 → 违规
+     e. **code branch-diff 检查**：若 c 里任意文件**不属于** plan/spec 白名单，视为 code 改动；要求 `entries["branch:$src-branch@$src-head-sha"].diff_fingerprint` 存在且等于 sha256(`git diff origin/<tracked-or-main>...<src-head-sha>` 的 canonical output)；不一致 → 违规
+     f. 任一违规 → decision=block + 完整清单（plan 违规提示"跑 codex-attest --scope working-tree --focus <file>"；code 违规提示"跑 codex-attest --scope branch-diff --base origin/<base> --head <src-branch>"）
   4. 场景 B（`gh pr create ...`）：
      a. **解析实际 PR 目标**：parse `--head <X>`（若存在）否则 current branch；parse `--base <Y>`（若存在）否则 main
      b. head_sha = `git rev-parse <head>`（必要时先 `git fetch origin <head>`）
      c. 执行场景 A 的文件级检查，但 blob 读自 head_sha 而非 current working tree
-     d. branch-diff fingerprint = sha256(`git diff origin/<base>...<head_sha>` 的 stable canonical output)
-     e. ledger_fp = entries["branch:$head@$head_sha"].diff_fingerprint（**以 head SHA 为 key 的一部分**，避免同名分支历史上曾过 codex 但后续被 reset 的情况）
-     f. 不一致 → 违规 + "跑 codex-attest --scope branch-diff"
-  5. 场景 C（`gh pr merge <N|URL|branch> ...`）：
-     a. 解析 merge target：若 command 含 `<N>` 或 `<URL>` → `gh pr view <target> --json headRefName,headRefOid,baseRefName` 取真实 head/base
-     b. 若 command 无 target（隐式当前分支 PR） → 先 `gh pr view --json ...` 解析
-     c. 用解析到的 headRefOid 作为 fingerprint 比较依据，而不是 current local branch
-     d. 同场景 B 的文件级 + branch-diff 检查
+     d. 执行场景 A 的 code branch-diff 检查，key = `branch:$head@$head_sha`
+     e. 不一致 → 违规 + 对应提示
+  5. 场景 C（`gh pr merge ...` — 含 bare `gh pr merge`、`gh pr merge <N|URL|branch>`）：
+     a. 解析 merge target：command 里若出现 `<N|URL|branch>` → 以此为 target；否则（bare `gh pr merge`）用 current branch 查 PR（`gh pr view --json ...`）
+     b. `gh pr view <target> --json headRefName,headRefOid,baseRefName` 取真实 head/base 和 headRefOid
+     c. **race 防护**：command 必须显式带 `--match-head-commit <X>` 且 `X` == headRefOid；不带或不匹配 → block + 强制提示"请改写为 `gh pr merge <target> --match-head-commit <headRefOid> ...` 确保 merge 的 SHA 与 ledger 校验一致"。此防护避免 `gh pr view` → `gh pr merge` 之间分支被 push 新 commit 导致 merge 到未经审 SHA 的竞态
+     d. 用 headRefOid 作为 branch-diff 检查的 `head_sha`，读 `entries["branch:$headRefName@$headRefOid"]`；文件级检查读 headRefOid 下的 blob
+     e. 不一致 → 违规
   6. exit code 2（block） or 0（pass）
+
+**hook 挂载策略**（与 finding #2 对应）：在 `.claude/settings.json` 的 `hooks.PreToolUse[matcher:Bash]` 数组里挂一条**无 `if` 条件**的 entry 指向本 hook（让它对所有 Bash 调用都触发）；hook 内部先 parse command 再决定是否进入场景 A/B/C，非三者一律 exit 0 放行。这样 `git push`（bare）/`gh pr merge`（bare）/`git push:*` 一视同仁，避免 `if` 表达式的模式遗漏。
 ```
 
 ### 2.5 人工豁免机制（override，方案 Y 修订版）
@@ -172,17 +174,22 @@ Claude Code 权限精度优先级：`deny > ask > allow`，且**更具体的 glo
 ### 2.6 codex-attest.sh 扩展
 
 ```bash
-# 新增 CLI
-.claude/scripts/codex-attest.sh --scope branch-diff --base origin/main
+# 新增 CLI（branch-diff 模式必须显式指定 --head 以避免 current-branch 歧义）
+.claude/scripts/codex-attest.sh --scope branch-diff --base origin/main --head <branch>
 
-# 执行逻辑变化（伪码）：
-#   1. 按 --scope 计算 review target（working-tree = 文件，branch-diff = diff）
-#   2. 调 codex-companion ... adversarial-review --wait
-#   3. 捕获 JSON verdict（codex-companion 已有机器可读输出）
-#   4. 若 verdict.approve=true：
-#      - working-tree/file：对每个 --focus 文件，写 entries["file:$path"] = {blob_sha=..., codex_round, verdict_digest}
-#      - branch-diff：写 entries["branch:$current_branch"] = {diff_fingerprint=..., base=..., ...}
-#   5. 若 verdict.approve=false：不更新 ledger；打印 findings；非零 exit
+# 执行逻辑（伪码）：
+#   1. 按 --scope 计算 review target（working-tree = 文件；branch-diff = diff）
+#   2. 对 branch-diff：解析 --head <branch>（或默认 current），head_sha = git rev-parse <branch>
+#      必须显式要求 --head 可查；若缺失或 ambiguous → exit 非零，不调 codex
+#   3. 调 codex-companion ... adversarial-review --wait
+#   4. 捕获 JSON verdict（codex-companion 已有机器可读输出）
+#   5. 若 verdict.approve=true：
+#      - working-tree/file：对每个 --focus 文件，从 HEAD 或 --ref 读 blob；写
+#        entries["file:$path"] = {kind:"file", blob_sha=..., attest_time_utc, codex_round, verdict_digest}
+#      - branch-diff：diff_fp = sha256(git diff <base>...<head_sha> canonical)；写
+#        entries["branch:<branch>@<head_sha>"] = {kind:"branch", base:<base>, head_sha:<head_sha>, diff_fingerprint:<diff_fp>, attest_time_utc, codex_round, verdict_digest}
+#      **key 格式必须与 guard-attest-ledger.sh 读取时严格一致**（单元测试显式覆盖此 round-trip）
+#   6. 若 verdict.approve=false：不更新 ledger；打印 findings；非零 exit
 ```
 
 ---
@@ -315,6 +322,11 @@ Claude Code 权限精度优先级：`deny > ask > allow`，且**更具体的 glo
 | 16 | 运行 `grep -r "plan-0b" docs/ memory/ MEMORY.md` | 输出**只**出现在 `project_gov_bootstrap_naming.md` 的"曾用名"注记段落中 | 仅注记段 = PASS；其他地方有残留 = FAIL |
 | 17 | 访问 GitHub 网页 PR #14 | 标题 / branch / commit messages 仍显示 "plan-0b"（历史不改） | 保持原样 = PASS |
 | 18 | 在 GitHub 网页点击 Merge 合并一个**未过 codex** 的新 PR（边界明示测试） | hook **不生效**；PR 被 merge；§1.3 明示此路径**不在本 PR 覆盖**，本次测试结果作为文档化的已知 gap | merge 成功 = PASS（本 PR 不承诺拦此路径）；误以为拦住并 claim 成功 = FAIL |
+| 19 | 在 feature 分支**只改 code**（不动 plan/spec），跑 `git push origin HEAD` | hook 触发 code branch-diff 检查；ledger 未命中 → BLOCK，提示跑 `codex-attest --scope branch-diff` | BLOCK = PASS；code-only push 放行 = FAIL（对应 round2 #1） |
+| 20 | bare `git push`（无参数）和 bare `gh pr merge`（无参数） | hook 照常触发并进行场景 A/C 检查 | 两者都被解析并检查 = PASS；任一绕过 = FAIL（对应 round2 #2） |
+| 21 | 跑 `gh pr merge <N>` **不带** `--match-head-commit` | hook BLOCK，要求改写为 `gh pr merge <N> --match-head-commit <headRefOid>` | BLOCK = PASS；放行 = FAIL（对应 round2 #3） |
+| 22 | 跑 `gh pr merge <N> --match-head-commit <X>`，其中 `<X>` ≠ `gh pr view <N>` 当前的 headRefOid | hook BLOCK，提示 SHA 不匹配 | BLOCK = PASS |
+| 23 | 跑 `codex-attest.sh --scope branch-diff --head feature-X` 成功 approve 后，hook 在 `gh pr create --head feature-X` 时能命中台账 | ledger key = `branch:feature-X@<head_sha>` 与 hook 读的 key 严格一致 → PASS | 命中 = PASS；不命中（writer/reader key mismatch）= FAIL（对应 round2 #4） |
 
 ---
 
@@ -334,7 +346,9 @@ Claude Code 权限精度优先级：`deny > ask > allow`，且**更具体的 glo
 4. ledger 过期清理：已 merge 的分支条目何时删除？本 PR 不实现，留给 G3 或后续维护。
 5. attest-override.sh 在 CI / 自动化场景（未来 GitHub Actions workflow 里调用）显然会缺 tty → 策略：CI 场景不应调用该脚本（server 侧应走 codex-review-verify.yml 的 workflow 路径）。是否需要在脚本里显式把"被 GitHub Actions 调用"也识别为 reject（用 `$CI` / `$GITHUB_ACTIONS` 环境变量）？→ **plan 阶段决定**。
 
-## 10. 对 Codex round 1 findings 的响应
+## 10. 对 Codex 对抗评审 findings 的响应
+
+### Round 1（commit b82ce27）
 
 | Finding | 处置 |
 |---|---|
@@ -342,3 +356,12 @@ Claude Code 权限精度优先级：`deny > ask > allow`，且**更具体的 glo
 | #2 high: override marker 自授权 | §2.5 完全重写：废弃 marker，改为真实 tty + 随机 nonce 手工脚本；§2.1 架构件清单新增 `.claude/scripts/attest-override.sh` 并在 settings.json deny 阻止 Claude 绕 tty |
 | #3 high: PR checks bound to current branch | §2.4 场景 B/C 重写：parse `--head` / `gh pr view <target>` 拿真实 PR head；ledger key 用 `branch:<name>@<head_sha>` 确保 reset/rebase 后旧台账自动失效 |
 | #4 high: missing ledger first-run bypass | §4 异常处理：ledger 不存在→创建后**继续完整检查**，首次涉及 plan/spec/branch-diff 必 BLOCK，不 soft-pass |
+
+### Round 2（commit 466c987）
+
+| Finding | 处置 |
+|---|---|
+| #1 high: push 路径漏掉 code branch-diff | §2.4 场景 A 新增 3.e 步"code branch-diff 检查"：push 若含 code 文件改动则同时要求 branch-diff 台账命中；§7 新增 #19 验收 |
+| #2 high: hook 注册漏 bare 形式 | §2.1 + §2.4 末尾改为"挂载到 PreToolUse[Bash] **无 if 条件** + hook 内 parse 后再决定"，覆盖 bare `git push` / bare `gh pr merge`；§7 新增 #20 |
+| #3 high: merge head-SHA race | §2.4 场景 C 新增 5.c 步强制要求 `--match-head-commit <headRefOid>`；不带或不匹配 → BLOCK；§7 新增 #21 #22 |
+| #4 medium: codex-attest vs hook ledger key 不一致 | §2.6 codex-attest 伪码改写：branch-diff 必须写 `branch:<branch>@<head_sha>`，强制 `--head` 参数；加"round-trip 单元测试显式覆盖 writer/reader key 一致性"；§7 新增 #23 |
