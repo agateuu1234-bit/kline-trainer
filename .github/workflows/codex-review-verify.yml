@@ -1,6 +1,7 @@
 # codex-review-verify.yml
 # workflow_run triggered — runs BASE branch code; PR cannot replace this workflow.
-# Has OPENAI_API_KEY + checks:write. Derives authoritative SHAs from GitHub API (R6.1 fix).
+# Has OPENAI_API_KEY + checks:write. Derives authoritative SHAs from GitHub API (R6.1).
+# Uses @openai/codex (npm) + openai/codex-plugin-cc (git) per codex.pin.json.
 name: codex-review-verify
 on:
   workflow_run:
@@ -23,7 +24,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
 
       - name: Download PR metadata (advisory)
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
         with:
           name: pr-metadata
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -42,7 +43,7 @@ jobs:
 
       - name: Derive authoritative SHAs from GitHub API (R6.1)
         id: sha
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -64,21 +65,29 @@ jobs:
             core.setOutput('head', apiHead);
             core.setOutput('number', pr.number);
 
-      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af  # v4.1.0
-        with:
-          node-version: '20'
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
+        with: { node-version: '20' }
 
-      - name: Install Codex (pinned, no scripts)
+      - name: Install Codex CLI (pinned @openai/codex via npm)
         run: |
-          mkdir -p .github/codex-runtime
-          cat > .github/codex-runtime/package.json <<'EOF'
-          { "name": "codex-runtime", "version": "0.0.0", "dependencies": { "openai-codex": "1.0.3" } }
-          EOF
-          cd .github/codex-runtime
-          npm install --ignore-scripts --save-exact openai-codex@1.0.3
+          CLI_VERSION=$(python3 -c "import json; print(json.load(open('codex.pin.json'))['codex_cli']['version'])")
+          npm install -g "@openai/codex@${CLI_VERSION}"
+          codex --version
 
-      - name: Verify installed tree integrity
-        run: node .claude/scripts/verify-codex-tree.mjs codex.pin.json .github/codex-runtime/node_modules/openai-codex
+      - name: Clone codex-plugin-cc at pinned tag + verify commit
+        run: |
+          TAG=$(python3 -c "import json; print(json.load(open('codex.pin.json'))['codex_plugin_cc']['tag'])")
+          EXPECTED_COMMIT=$(python3 -c "import json; print(json.load(open('codex.pin.json'))['codex_plugin_cc']['commit_sha'])")
+          git clone --depth 1 --branch "$TAG" https://github.com/openai/codex-plugin-cc.git .github/codex-plugin
+          ACTUAL_COMMIT=$(cd .github/codex-plugin && git rev-parse HEAD)
+          if [ "$EXPECTED_COMMIT" != "$ACTUAL_COMMIT" ]; then
+            echo "FAIL: codex-plugin-cc commit mismatch. pin=$EXPECTED_COMMIT actual=$ACTUAL_COMMIT"
+            exit 1
+          fi
+          echo "Plugin verified at commit $ACTUAL_COMMIT"
+
+      - name: Verify plugin file tree integrity
+        run: node .claude/scripts/verify-codex-tree.mjs codex.pin.json .github/codex-plugin/plugins/codex
 
       - name: Checkout PR head in subdir (full depth)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -99,10 +108,22 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         working-directory: pr-head
         run: |
-          ../.github/codex-runtime/node_modules/.bin/codex adversarial-review \
+          PLUGIN_DIR="$GITHUB_WORKSPACE/.github/codex-plugin/plugins/codex"
+          export CLAUDE_PLUGIN_ROOT="$PLUGIN_DIR"
+          node "$PLUGIN_DIR/scripts/codex-companion.mjs" adversarial-review \
+            --wait --scope branch \
             --base "${{ steps.sha.outputs.base }}" \
-            --head "${{ steps.sha.outputs.head }}" \
-            --output ../verdict.json
+            > "$GITHUB_WORKSPACE/verdict-full.txt" 2>&1 || true
+          echo "--- last 20 lines ---"
+          tail -20 "$GITHUB_WORKSPACE/verdict-full.txt" || true
+
+      - name: Parse verdict from codex output
+        id: verdict
+        run: |
+          VERDICT=$(grep -oE '"verdict":[[:space:]]*"[a-z-]+"' "$GITHUB_WORKSPACE/verdict-full.txt" | head -1 | sed -E 's/.*"verdict":[[:space:]]*"([a-z-]+)".*/\1/')
+          [ -z "$VERDICT" ] && VERDICT="needs-attention"
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "Parsed verdict: $VERDICT"
 
       - name: Post codex-verify-pass check-run + PR comment
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
@@ -110,21 +131,22 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs'), crypto = require('crypto');
-            const v = JSON.parse(fs.readFileSync('verdict.json'));
-            const digest = crypto.createHash('sha256').update(fs.readFileSync('verdict.json')).digest('hex');
+            const verdict = '${{ steps.verdict.outputs.verdict }}';
+            const body = fs.readFileSync(process.env.GITHUB_WORKSPACE + '/verdict-full.txt', 'utf-8');
+            const digest = crypto.createHash('sha256').update(body).digest('hex');
             await github.rest.checks.create({
               owner: context.repo.owner, repo: context.repo.repo,
               name: 'codex-verify-pass',
               head_sha: '${{ steps.sha.outputs.head }}',
               status: 'completed',
-              conclusion: v.verdict === 'approve' ? 'success' : 'failure',
+              conclusion: verdict === 'approve' ? 'success' : 'failure',
               output: {
-                title: `Codex verdict: ${v.verdict}`,
-                summary: `codex_json_digest=${digest}\nreview_target_sha=${{ steps.sha.outputs.head }}\nbase=${{ steps.sha.outputs.base }}\n\n${v.summary || ''}`
+                title: `Codex verdict: ${verdict}`,
+                summary: `codex_json_digest=${digest}\nreview_target_sha=${{ steps.sha.outputs.head }}\nbase=${{ steps.sha.outputs.base }}\n\n` + body.substring(0, 60000)
               }
             });
             await github.rest.issues.createComment({
               owner: context.repo.owner, repo: context.repo.repo,
               issue_number: ${{ steps.sha.outputs.number }},
-              body: '```json\n' + fs.readFileSync('verdict.json', 'utf-8') + '\n```'
+              body: '```\n' + body.substring(0, 60000) + '\n```'
             });
