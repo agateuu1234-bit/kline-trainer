@@ -1,7 +1,7 @@
 {
   "_comment": "Single-use bootstrap lock. consumed flips to ISO timestamp after THE bootstrap PR merges. Further PRs claiming bootstrap are rejected by check-bootstrap-used-once.yml.",
-  "pr_number": null,
-  "pr_head_sha": null,
+  "pr_number": 14,
+  "pr_head_sha": "8ad31913d6fe9e59bf8b0c33a4b809efe8f79da9",
   "expiry_utc": "2026-05-01T00:00:00Z",
   "codex_json_digest": null,
   "consumed": false,
