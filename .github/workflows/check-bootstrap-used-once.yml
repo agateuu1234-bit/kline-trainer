@@ -1,0 +1,62 @@
+# check-bootstrap-used-once.yml (R2+R3.2 fix: include edited in types)
+name: check-bootstrap-used-once
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+permissions:
+  contents: read
+jobs:
+  check-bootstrap-used-once:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout BASE branch to read authoritative lock
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+      - name: Evaluate bootstrap lock against this PR
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            let lock = {};
+            try {
+              lock = JSON.parse(fs.readFileSync('.github/bootstrap-lock.json', 'utf-8'));
+            } catch (e) {
+              core.setFailed(`Cannot read base-branch bootstrap-lock.json: ${e.message}`);
+              return;
+            }
+            const body = (context.payload.pull_request && context.payload.pull_request.body) || '';
+            const prNumber = context.payload.pull_request.number;
+            const claimsBootstrap = /^bootstrap:\s*true|^this is.*bootstrap|bootstrap exemption/im.test(body);
+            const consumed = lock.consumed;
+            const consumedIsTrue = consumed && consumed !== false && consumed !== 'false' && consumed !== 'None';
+
+            if (consumedIsTrue) {
+              if (claimsBootstrap) {
+                core.setFailed(`Bootstrap lock already consumed at ${consumed}; this PR cannot re-claim bootstrap`);
+                return;
+              }
+              console.log(`PASS: bootstrap lock consumed at ${consumed}; PR does not claim bootstrap.`);
+              return;
+            }
+
+            if (claimsBootstrap) {
+              if (lock.expiry_utc) {
+                const expiry = new Date(lock.expiry_utc).getTime();
+                if (!isNaN(expiry) && Date.now() > expiry) {
+                  core.setFailed(`Bootstrap lock expired at ${lock.expiry_utc}`);
+                  return;
+                }
+              }
+              if (lock.pr_number && lock.pr_number !== prNumber) {
+                core.setFailed(`Bootstrap claimed but PR #${prNumber} != registered PR #${lock.pr_number}`);
+                return;
+              }
+              // pr_head_sha is informational; head integrity enforced via codex-verify-pass workflow_run mechanism.
+              console.log(`PASS: recognized bootstrap PR #${prNumber}`);
+              return;
+            }
+
+            console.log('PASS: pre-bootstrap state, PR does not claim bootstrap.');
