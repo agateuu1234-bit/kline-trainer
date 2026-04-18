@@ -2,6 +2,7 @@
 # workflow_run triggered — runs BASE branch code; PR cannot replace this workflow.
 # Has OPENAI_API_KEY + checks:write. Derives authoritative SHAs from GitHub API (R6.1).
 # Uses @openai/codex (npm) + openai/codex-plugin-cc (git) per codex.pin.json.
+# F3 fix: enforce npm tarball integrity verification before install.
 name: codex-review-verify
 on:
   workflow_run:
@@ -68,10 +69,42 @@ jobs:
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
         with: { node-version: '20' }
 
-      - name: Install Codex CLI (pinned @openai/codex via npm)
+      - name: Fetch + verify Codex CLI tarball integrity (F3 fix)
         run: |
           CLI_VERSION=$(python3 -c "import json; print(json.load(open('codex.pin.json'))['codex_cli']['version'])")
-          npm install -g "@openai/codex@${CLI_VERSION}"
+          EXPECTED_INTEGRITY=$(python3 -c "import json; print(json.load(open('codex.pin.json'))['codex_cli']['tarball_integrity'])")
+          if [ -z "$EXPECTED_INTEGRITY" ] || [ "$EXPECTED_INTEGRITY" = "__NOT_AVAILABLE__" ]; then
+            echo "FAIL: codex.pin.json.codex_cli.tarball_integrity not set"
+            exit 1
+          fi
+
+          TARBALL_URL=$(npm view "@openai/codex@${CLI_VERSION}" dist.tarball)
+          ACTUAL_INTEGRITY=$(npm view "@openai/codex@${CLI_VERSION}" dist.integrity)
+
+          if [ "$ACTUAL_INTEGRITY" != "$EXPECTED_INTEGRITY" ]; then
+            echo "FAIL: npm registry integrity mismatch"
+            echo "expected: $EXPECTED_INTEGRITY"
+            echo "registry: $ACTUAL_INTEGRITY"
+            exit 1
+          fi
+          echo "Registry integrity matches pin: $EXPECTED_INTEGRITY"
+
+          # Download tarball and verify local hash matches the expected integrity (sha512-base64)
+          mkdir -p /tmp/codex-tarball
+          curl -sL "$TARBALL_URL" -o /tmp/codex-tarball/codex.tgz
+          # Compute sha512 of the downloaded tarball in base64 (matches npm integrity format)
+          LOCAL_SHA512=$(openssl dgst -sha512 -binary /tmp/codex-tarball/codex.tgz | base64 | tr -d '\n')
+          LOCAL_INTEGRITY="sha512-${LOCAL_SHA512}"
+          if [ "$LOCAL_INTEGRITY" != "$EXPECTED_INTEGRITY" ]; then
+            echo "FAIL: downloaded tarball integrity mismatch"
+            echo "expected: $EXPECTED_INTEGRITY"
+            echo "local:    $LOCAL_INTEGRITY"
+            exit 1
+          fi
+          echo "Local tarball hash matches pin — installing from verified tarball"
+
+          # Install from verified local tarball (bypass registry in case of TOCTOU)
+          npm install -g /tmp/codex-tarball/codex.tgz
           codex --version
 
       - name: Clone codex-plugin-cc at pinned tag + verify commit
