@@ -1,21 +1,20 @@
-# check-bootstrap-used-once.yml (R2.2 + R2.3 fix)
-# Always runs on every PR; reads lock from BASE branch state + enforces single-use semantics.
-# Job name = 'check-bootstrap-used-once' — matches branch-protection required-check context.
+# check-bootstrap-used-once.yml (R2+R3.2 fix: include edited in types)
 name: check-bootstrap-used-once
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
 permissions:
   contents: read
 jobs:
   check-bootstrap-used-once:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout BASE branch to read authoritative lock (F2 fix)
+      - name: Checkout BASE branch to read authoritative lock
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 1
-      - name: Evaluate bootstrap lock against this PR (F1 + F2 + R2.2 + R2.3)
+      - name: Evaluate bootstrap lock against this PR
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -31,11 +30,9 @@ jobs:
             const body = (context.payload.pull_request && context.payload.pull_request.body) || '';
             const prNumber = context.payload.pull_request.number;
             const claimsBootstrap = /^bootstrap:\s*true|^this is.*bootstrap|bootstrap exemption/im.test(body);
-
             const consumed = lock.consumed;
             const consumedIsTrue = consumed && consumed !== false && consumed !== 'false' && consumed !== 'None';
 
-            // R2.3 fix: expiry only matters for unconsumed+bootstrap path, NOT consumed-state PRs
             if (consumedIsTrue) {
               if (claimsBootstrap) {
                 core.setFailed(`Bootstrap lock already consumed at ${consumed}; this PR cannot re-claim bootstrap`);
@@ -45,13 +42,11 @@ jobs:
               return;
             }
 
-            // consumed == false on base: pre-bootstrap state
             if (claimsBootstrap) {
-              // Only now check expiry (R2.3 fix)
               if (lock.expiry_utc) {
                 const expiry = new Date(lock.expiry_utc).getTime();
                 if (!isNaN(expiry) && Date.now() > expiry) {
-                  core.setFailed(`Bootstrap lock expired at ${lock.expiry_utc}; cannot bootstrap`);
+                  core.setFailed(`Bootstrap lock expired at ${lock.expiry_utc}`);
                   return;
                 }
               }
@@ -59,14 +54,9 @@ jobs:
                 core.setFailed(`Bootstrap claimed but PR #${prNumber} != registered PR #${lock.pr_number}`);
                 return;
               }
-              // pr_head_sha is INFORMATIONAL only (documented · R2.2 note):
-              // PR head evolves with every commit on the bootstrap branch; strict head-SHA enforcement
-              // would create a perpetual mismatch loop (update lock → head changes → mismatch → fail).
-              // True head integrity is enforced by codex-verify-pass check-run's review_target_sha,
-              // which is tied to PR head via workflow_run mechanism.
-              console.log(`PASS: recognized bootstrap PR #${prNumber} (head_sha is informational)`);
+              // pr_head_sha is informational; head integrity enforced via codex-verify-pass workflow_run mechanism.
+              console.log(`PASS: recognized bootstrap PR #${prNumber}`);
               return;
             }
 
-            // consumed=false + no bootstrap claim → allow (pre-bootstrap regular PRs)
             console.log('PASS: pre-bootstrap state, PR does not claim bootstrap.');
