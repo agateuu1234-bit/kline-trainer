@@ -1,8 +1,9 @@
 # codex-review-verify.yml
 # workflow_run triggered — runs BASE branch code; PR cannot replace this workflow.
 # Has OPENAI_API_KEY + checks:write. Derives authoritative SHAs from GitHub API (R6.1).
-# Uses @openai/codex (npm) + openai/codex-plugin-cc (git) per codex.pin.json.
+# Uses @openai/codex (npm, sha512-verified) + openai/codex-plugin-cc (git tag-pinned).
 # F3 fix: enforce npm tarball integrity verification before install.
+# R2.1 fix: artifact-derived values pass via env vars + strict regex validation (no inline in JS source).
 name: codex-review-verify
 on:
   workflow_run:
@@ -42,12 +43,26 @@ jobs:
           echo "head=$head" >> "$GITHUB_OUTPUT"
           echo "number=$num" >> "$GITHUB_OUTPUT"
 
-      - name: Derive authoritative SHAs from GitHub API (R6.1)
+      - name: Derive + validate SHAs (R6.1 + R2.1 · env vars, no inline)
         id: sha
+        env:
+          ARTIFACT_BASE: ${{ steps.sha_artifact.outputs.base }}
+          ARTIFACT_HEAD: ${{ steps.sha_artifact.outputs.head }}
+          ARTIFACT_NUMBER: ${{ steps.sha_artifact.outputs.number }}
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const sha40 = /^[0-9a-f]{40}$/;
+            const prNumRe = /^[0-9]+$/;
+            const artifactHead = process.env.ARTIFACT_HEAD || '';
+            const artifactBase = process.env.ARTIFACT_BASE || '';
+            const artifactNumber = process.env.ARTIFACT_NUMBER || '';
+            // R2.1: strict regex validation BEFORE any API/check-run action
+            if (!sha40.test(artifactHead)) { core.setFailed('artifact head SHA invalid'); return; }
+            if (!sha40.test(artifactBase)) { core.setFailed('artifact base SHA invalid'); return; }
+            if (!prNumRe.test(artifactNumber)) { core.setFailed('artifact PR number invalid'); return; }
+
             const prs = context.payload.workflow_run.pull_requests || [];
             if (!prs.length) { core.setFailed('no PR associated with workflow_run'); return; }
             const pr = prs[0];
@@ -57,14 +72,12 @@ jobs:
             const apiHead = data.head.sha;
             const apiBase = data.base.sha;
             const wrHead = context.payload.workflow_run.head_sha;
-            const artifactHead = '${{ steps.sha_artifact.outputs.head }}';
-            const artifactBase = '${{ steps.sha_artifact.outputs.base }}';
-            if (artifactHead !== apiHead) core.setFailed(`head mismatch: artifact=${artifactHead} api=${apiHead}`);
-            if (artifactBase !== apiBase) core.setFailed(`base mismatch: artifact=${artifactBase} api=${apiBase}`);
-            if (wrHead !== apiHead) core.setFailed(`workflow_run head=${wrHead} != api head=${apiHead}`);
+            if (artifactHead !== apiHead) { core.setFailed('head mismatch artifact vs API'); return; }
+            if (artifactBase !== apiBase) { core.setFailed('base mismatch artifact vs API'); return; }
+            if (wrHead !== apiHead) { core.setFailed('workflow_run head != api head'); return; }
             core.setOutput('base', apiBase);
             core.setOutput('head', apiHead);
-            core.setOutput('number', pr.number);
+            core.setOutput('number', String(pr.number));
 
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
         with: { node-version: '20' }
@@ -89,10 +102,8 @@ jobs:
           fi
           echo "Registry integrity matches pin: $EXPECTED_INTEGRITY"
 
-          # Download tarball and verify local hash matches the expected integrity (sha512-base64)
           mkdir -p /tmp/codex-tarball
           curl -sL "$TARBALL_URL" -o /tmp/codex-tarball/codex.tgz
-          # Compute sha512 of the downloaded tarball in base64 (matches npm integrity format)
           LOCAL_SHA512=$(openssl dgst -sha512 -binary /tmp/codex-tarball/codex.tgz | base64 | tr -d '\n')
           LOCAL_INTEGRITY="sha512-${LOCAL_SHA512}"
           if [ "$LOCAL_INTEGRITY" != "$EXPECTED_INTEGRITY" ]; then
@@ -102,8 +113,6 @@ jobs:
             exit 1
           fi
           echo "Local tarball hash matches pin — installing from verified tarball"
-
-          # Install from verified local tarball (bypass registry in case of TOCTOU)
           npm install -g /tmp/codex-tarball/codex.tgz
           codex --version
 
@@ -147,7 +156,6 @@ jobs:
             --wait --scope branch \
             --base "${{ steps.sha.outputs.base }}" \
             > "$GITHUB_WORKSPACE/verdict-full.txt" 2>&1 || true
-          echo "--- last 20 lines ---"
           tail -20 "$GITHUB_WORKSPACE/verdict-full.txt" || true
 
       - name: Parse verdict from codex output
@@ -159,27 +167,40 @@ jobs:
           echo "Parsed verdict: $VERDICT"
 
       - name: Post codex-verify-pass check-run + PR comment
+        env:
+          HEAD_SHA: ${{ steps.sha.outputs.head }}
+          BASE_SHA: ${{ steps.sha.outputs.base }}
+          PR_NUMBER: ${{ steps.sha.outputs.number }}
+          VERDICT: ${{ steps.verdict.outputs.verdict }}
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs'), crypto = require('crypto');
-            const verdict = '${{ steps.verdict.outputs.verdict }}';
+            const sha40 = /^[0-9a-f]{40}$/;
+            const prNumRe = /^[0-9]+$/;
+            const verdict = process.env.VERDICT;
+            const headSha = process.env.HEAD_SHA;
+            const baseSha = process.env.BASE_SHA;
+            const prNum = process.env.PR_NUMBER;
+            if (!sha40.test(headSha) || !sha40.test(baseSha) || !prNumRe.test(prNum)) {
+              core.setFailed('internal: validated outputs tainted'); return;
+            }
             const body = fs.readFileSync(process.env.GITHUB_WORKSPACE + '/verdict-full.txt', 'utf-8');
             const digest = crypto.createHash('sha256').update(body).digest('hex');
             await github.rest.checks.create({
               owner: context.repo.owner, repo: context.repo.repo,
               name: 'codex-verify-pass',
-              head_sha: '${{ steps.sha.outputs.head }}',
+              head_sha: headSha,
               status: 'completed',
               conclusion: verdict === 'approve' ? 'success' : 'failure',
               output: {
                 title: `Codex verdict: ${verdict}`,
-                summary: `codex_json_digest=${digest}\nreview_target_sha=${{ steps.sha.outputs.head }}\nbase=${{ steps.sha.outputs.base }}\n\n` + body.substring(0, 60000)
+                summary: `codex_json_digest=${digest}\nreview_target_sha=${headSha}\nbase=${baseSha}\n\n` + body.substring(0, 60000)
               }
             });
             await github.rest.issues.createComment({
               owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: ${{ steps.sha.outputs.number }},
+              issue_number: Number(prNum),
               body: '```\n' + body.substring(0, 60000) + '\n```'
             });
