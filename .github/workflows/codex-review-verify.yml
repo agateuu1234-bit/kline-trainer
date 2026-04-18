@@ -154,8 +154,11 @@ jobs:
               d = json.load(open('codex-verdict.json'))
           except Exception as e:
               print(f'parse_error: {e}', file=sys.stderr); sys.exit(2)
-          if d.get('parseError'):
-              print(f'codex parseError: {d["parseError"]}', file=sys.stderr); sys.exit(3)
+          # R7.2 fix: strict wrapper-shape check — parseError key must exist and be exactly null
+          if 'parseError' not in d:
+              print('wrapper missing parseError key', file=sys.stderr); sys.exit(3)
+          if d['parseError'] is not None:
+              print(f'codex parseError: {d["parseError"]!r}', file=sys.stderr); sys.exit(3)
           result = d.get('result')
           if not isinstance(result, dict):
               print(f'result is not an object: {type(result).__name__}', file=sys.stderr); sys.exit(4)
