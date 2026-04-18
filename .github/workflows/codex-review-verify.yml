@@ -99,6 +99,13 @@ jobs:
           npm install -g /tmp/codex-tarball/codex.tgz
           codex --version
 
+      - name: Authenticate Codex CLI (codex login --with-api-key)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          printenv OPENAI_API_KEY | codex login --with-api-key
+          codex login status || true
+
       - name: Clone codex-plugin-cc at pinned tag + verify commit
         run: |
           TAG=$(python3 -c "import json; print(json.load(open('codex.pin.json'))['codex_plugin_cc']['tag'])")
@@ -134,14 +141,23 @@ jobs:
         run: |
           PLUGIN_DIR="$GITHUB_WORKSPACE/.github/codex-plugin/plugins/codex"
           export CLAUDE_PLUGIN_ROOT="$PLUGIN_DIR"
-          # R3.1 fix: --json outputs schema-validated JSON; no log-parsing.
-          # Exit code is NOT suppressed with || true — codex-companion propagates exit 0 on success, non-zero otherwise.
+          set +e
           node "$PLUGIN_DIR/scripts/codex-companion.mjs" adversarial-review \
             --wait --json --scope branch \
             --base "${{ steps.sha.outputs.base }}" \
             > "$GITHUB_WORKSPACE/codex-verdict.json" \
             2> "$GITHUB_WORKSPACE/codex-run.stderr"
-          # If codex exits non-zero, step fails closed.
+          CODEX_EXIT=$?
+          echo "--- codex exit: $CODEX_EXIT ---"
+          echo "--- stderr ---"
+          cat "$GITHUB_WORKSPACE/codex-run.stderr" || echo "(no stderr file)"
+          echo "--- verdict first 2000 chars ---"
+          head -c 2000 "$GITHUB_WORKSPACE/codex-verdict.json" || echo "(empty)"
+          echo ""
+          if [ "$CODEX_EXIT" -ne 0 ]; then
+            echo "FAIL: codex exit $CODEX_EXIT"
+            exit "$CODEX_EXIT"
+          fi
 
       - name: Parse verdict from structured JSON (R3.1 + R5.1 fix · result.verdict)
         id: verdict
