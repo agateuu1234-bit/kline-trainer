@@ -56,7 +56,25 @@
 | 新增 state | `.claude/state/attest-override-log.jsonl` | append-only 审计日志，记录每次 override 事件（行号是 ledger override 条目的引用） |
 | 新增 script | `.claude/scripts/attest-override.sh` | 手工豁免入口；要求真实 tty + 随机 nonce 确认串；写审计日志 + ledger（见 §2.5） |
 | 改动 script | `.claude/scripts/codex-attest.sh` | 增加 `--scope branch-diff` 模式；成功 approve 后写入台账（以 head SHA 为 key 的一部分） |
-| 改动 settings | `.claude/settings.json` | `allow` 加 `Write` / `Edit` / `Read` 三条裸名；`hooks.PreToolUse[Bash]` 挂新 hook；`deny` 新增 `Edit(.claude/scripts/attest-override.sh)` + `Write(...)` + `Bash(echo * \| .claude/scripts/attest-override.sh*)` 阻止 Claude 绕 tty |
+| 改动 settings | `.claude/settings.json` | `allow` 加 `Write` / `Edit` / `Read` 三条裸名；`hooks.PreToolUse[Bash]` 挂新 hook；`deny` 扩展（见下）阻止 Claude 绕 override 脚本 + 绕写台账 |
+| 改动 .gitignore | `.gitignore` | 新增 `.claude/state/*` + `!.claude/state/.gitkeep` 例外，阻止台账和 override log 进 git（F2）|
+| 改动 pre-commit hook | `.claude/hooks/pre-commit-diff-scan.sh` | 扩展：若 staged 文件含 `.claude/state/attest-ledger.json` 或 `.claude/state/attest-override-log.jsonl` → block + 提示"不应提交本地 attestation 状态"（F2 staging 拦截）|
+
+**settings.json `deny` 新增条目**（F1 defense-in-depth + F2 状态保护）：
+
+```
+Bash(*attest-override.sh*)                # Claude 不能直接调用该脚本
+Bash(* > .claude/state*)                   # 单重定向写
+Bash(* > .claude/state/*)
+Bash(python* .claude/state*)               # 任意 python 操作状态
+Bash(node * .claude/state*)
+Bash(cat * > .claude/state*)
+Bash(printf * > .claude/state*)
+Bash(git add .claude/state/attest-ledger.json*)
+Bash(git add .claude/state/attest-override-log.jsonl*)
+Edit(.claude/state/**)                     # 已在旧 deny
+Write(.claude/state/**)                    # 已在旧 deny
+```
 | 改动 hook 注册 | `.claude/settings.json` | 将 `.claude/hooks/guard-attest-ledger.sh` 挂载到 PreToolUse[Bash] **无 if 条件**的 entry（覆盖 bare `git push` / `gh pr merge` 等前缀模式易遗漏的情况）；hook 内部 parse 后决定是否生效 |
 | 多个文件改名 | memory + docs + MEMORY.md 索引 | R 任务 |
 
@@ -147,9 +165,16 @@ Claude Code 权限精度优先级：`deny > ask > allow`，且**更具体的 glo
 
 **旧方案（已废弃）**：plan/spec 文件内嵌 `<!-- attest-override: ... -->` 注释 — Codex round 1 指出这是自授权，被保护的文件自己授权自己，任何写文件的 agent 都能绕闸。**作废，不采用**。
 
-**新方案**：
+**诚实免责（基于 Round 3 Codex 实证）**：
+Codex round 3 在它自己的 Bash 工具里实测 `[ -t 0 ]` 返回 tty，证明 PTY-capable 的 Bash 可以读脚本打印的 nonce 并通过"确认"。本地任何脚本都**无法真正分辨"人在打字"与"agent 通过 PTY 打字"**。因此：
 
-用户手工跑一条独立脚本 `.claude/scripts/attest-override.sh`（新增文件，trust-boundary 属 deny + 只 owner 可改）：
+- ⚠ 本 PR 的 override 机制是 **ceremony + audit-trail + defense-in-depth**，**不是 agent-proof security**。
+- 完整 agent-proof 边界需要服务端审批（GitHub manual approval / required workflow），延到 `gov-bootstrap-hardening-3`（与 OpenAI API 充值同步）。
+- 本 PR 承诺的是：**让 override 路径足够显眼 + 可审计 + 攻击成本抬高**，而非"Claude 无法 mint"。
+
+**新方案（降级 claim 版）**：
+
+用户手工跑独立脚本 `.claude/scripts/attest-override.sh`：
 
 ```bash
 .claude/scripts/attest-override.sh <target-file-or-branch> <reason>
@@ -157,17 +182,33 @@ Claude Code 权限精度优先级：`deny > ask > allow`，且**更具体的 glo
 
 脚本逻辑：
 1. 读取 target 的当前 blob_sha（file）或 head_sha + diff_fp（branch）
-2. **要求 stdin 从真实 tty 读一行确认串**（`read -p "Type OVERRIDE-CONFIRM to authorize: " ans`；用 `[ -t 0 ]` 断言是 tty，否则拒跑 — Claude 的 Bash 工具没有 interactive tty 通道）
-3. `ans` 必须精确等于 `OVERRIDE-CONFIRM-<short-blob-sha-prefix>`（短 sha 是脚本事先打印出来的，每次都变；防止用户事先录屏/复制）
-4. 通过后：
-   - 在 `.claude/state/attest-override-log.jsonl` 追加一行：`{"time_utc":"...","target":"...","kind":"file|branch","blob_or_head_sha":"...","reason":"...","git_user":"...","actor":"manual-cli"}`
-   - 在 ledger 写 override 条目（带 `override:true` + `audit_log_line` 索引）
-5. 日志行是 append-only，任何篡改导致 `wc -l` vs ledger `audit_log_line` 对不上 → hook block
+2. 打印随机 nonce（短 blob sha 前缀）+ prompt `read -p "Type OVERRIDE-CONFIRM-<nonce> to authorize: " ans`
+3. **PPID 父进程启发式检查**（不是 security，提升攻击成本）：
+   ```bash
+   parent_cmd=$(ps -p $PPID -o comm= 2>/dev/null || echo unknown)
+   case "$parent_cmd" in
+     claude|node|*claude-code*|*claude.app*)
+       echo "[attest-override] refuse: parent process '$parent_cmd' looks like Claude/agent."
+       echo "If this is a false positive, set ATTEST_OVERRIDE_CONFIRM_PARENT=1 and rerun."
+       [ "${ATTEST_OVERRIDE_CONFIRM_PARENT:-0}" = "1" ] || exit 9
+       ;;
+   esac
+   ```
+4. `ans` 精确等于 `OVERRIDE-CONFIRM-<nonce>` → 继续，否则 exit 非零
+5. 通过后：
+   - 在 `.claude/state/attest-override-log.jsonl` 追加一行 JSON `{"time_utc":"...","target":"...","kind":"file|branch","blob_or_head_sha":"...","reason":"...","git_user":"...","parent_cmd":"...","actor":"manual-cli"}`
+   - 在 ledger 写 override 条目（带 `override:true` + `audit_log_line` 索引 + `blob_or_head_sha_at_override`）
+6. 日志 append-only；hook 每次验证 `wc -l attest-override-log.jsonl` == 所有 ledger override 条目 `audit_log_line` 之最大值（+ 预设 header 行偏移）；不一致 → block + 提示 "override 日志已被篡改或丢失"
 
-**为什么这个比 marker 稳**：
-- 不能从 Claude 工具链自主走完流程：`read -p` + `[ -t 0 ]` 的 tty 要求让 Claude 的 Bash 工具跑进去会立刻 exit 非零
-- 用户必须主动 cd 到仓库根、在 zsh/bash 里敲这条命令 — 一次明确的 context switch
-- 审计日志和 ledger 分开文件，互相验证（append-only + 行号索引）
+**Defense-in-depth 层**（见 §2.1 settings.json 变更）：
+- `Bash(*attest-override.sh*)` 加入 deny（Claude 工具链无法直接调用该脚本，用户手工跑不走 Claude Bash 工具）
+- `Bash(* > .claude/state*)`、`Bash(* > .claude/state/*)`、`Bash(python* .claude/state*)`、`Bash(node * .claude/state*)`、`Bash(cat * > .claude/state*)`、`Bash(printf * > .claude/state*)` 全部加 deny，防止 Claude 绕脚本直写台账
+- 现有 deny 里 `Bash(* >> .claude/state*)`、`Bash(tee * .claude/*)`、`Bash(sed -i * .claude/*)`、`Bash(rm * .claude/*)`、`Bash(chmod * .claude/*)` 保留
+
+**残余风险明示**：
+- 即使全部 deny 命中，用户**本人**跑 attest-override.sh 仍然被 PPID 检查阻挡 Claude，但 Claude 若在交互会话引导用户"来，打一下这个命令"是可能绕过的社工路径 → 这是用户侧责任边界
+- 若 Claude 在别的 session 设 `ATTEST_OVERRIDE_CONFIRM_PARENT=1` 绕 PPID 检查，仍能完成流程 → 审计日志会记录 `parent_cmd` 留痕
+- 完整堵死：见 hardening-3
 
 **降级门槛**：若 OpenAI API 不可用 + 用户也不愿手工 override → 本 PR 的闸门会 block 所有 plan/spec/code 外发 → 这是**故意的行为**，强迫用户面对 API 问题而非绕行。
 
@@ -327,6 +368,13 @@ Claude Code 权限精度优先级：`deny > ask > allow`，且**更具体的 glo
 | 21 | 跑 `gh pr merge <N>` **不带** `--match-head-commit` | hook BLOCK，要求改写为 `gh pr merge <N> --match-head-commit <headRefOid>` | BLOCK = PASS；放行 = FAIL（对应 round2 #3） |
 | 22 | 跑 `gh pr merge <N> --match-head-commit <X>`，其中 `<X>` ≠ `gh pr view <N>` 当前的 headRefOid | hook BLOCK，提示 SHA 不匹配 | BLOCK = PASS |
 | 23 | 跑 `codex-attest.sh --scope branch-diff --head feature-X` 成功 approve 后，hook 在 `gh pr create --head feature-X` 时能命中台账 | ledger key = `branch:feature-X@<head_sha>` 与 hook 读的 key 严格一致 → PASS | 命中 = PASS；不命中（writer/reader key mismatch）= FAIL（对应 round2 #4） |
+| 24 | 让 Claude 用 Bash 工具尝试直接调 `.claude/scripts/attest-override.sh`（任意形式） | settings.json deny 命中，拒绝执行 | 拒绝 = PASS（对应 round3 F1 defense-in-depth） |
+| 25 | 让 Claude 用 Bash 尝试 `echo '{...}' > .claude/state/attest-ledger.json` 或等价的 python/node 写法绕过脚本直写台账 | deny 命中，拒绝执行 | 拒绝 = PASS（对应 round3 F1） |
+| 26 | 用户手工在真实 tty 运行 `.claude/scripts/attest-override.sh <file> <reason>`，脚本读到 PPID 父进程不像 Claude 时正常往下走 | 打印 nonce + 等 input；用户敲入正确 `OVERRIDE-CONFIRM-<nonce>` 后脚本完成 + log/ledger 各加一条 | 全流程走通 + 日志/台账各 +1 = PASS |
+| 27 | 让 Claude 在其 Bash 工具里（PTY 视为 tty）跑 attest-override 脚本，首先 deny 被命中（测 #24）；假定 deny 放行，脚本的 PPID 检查拒跑 | Claude Bash 父进程 comm 匹配 `claude\|node\|*claude-code*` → 脚本 exit 9 + 提示"parent process looks like Claude/agent" | exit 9 = PASS（attest 攻击成本抬高） |
+| 28 | 在一个干净 clone 里 `.claude/state/attest-ledger.json` 和 `attest-override-log.jsonl` 都不应以 tracked 文件出现 | `git ls-files .claude/state/` 只输出 `.claude/state/.gitkeep` | 仅 .gitkeep = PASS；其他 state 文件 tracked = FAIL（对应 round3 F2） |
+| 29 | 尝试 `git add .claude/state/attest-ledger.json` 后跑 `git commit` | pre-commit-diff-scan.sh 扩展命中；block + 提示"不应提交本地 attestation 状态" | block = PASS（对应 round3 F2 staging 拦截） |
+| 30 | 查 Plan 0a v3 split 的 plan 文档（`docs/superpowers/plans/2026-04-18-plan-0a-v3-split.md`）Task 顺序 | 恢复 Plan 0a v3 前已按本 spec §8 的 F3 注解 reorder（codex-attest 前置），文档末尾或 Self-Review 有明确记录 | 已 reorder = PASS；仍是 push → codex = FAIL（Plan 0a v3 阻塞） |
 
 ---
 
@@ -335,6 +383,10 @@ Claude Code 权限精度优先级：`deny > ask > allow`，且**更具体的 glo
 - **依赖**：`codex-companion.mjs` 仍在 pinned path `$HOME/.claude/plugins/cache/openai-codex/codex/1.0.3/scripts/codex-companion.mjs`；OpenAI API 可用或用户愿意手工跑 `attest-override.sh` 于真实 tty。
 - **不依赖**：GitHub Actions 侧工作流的变更（codex-review-verify.yml 保持现状；本 PR 只改本地闸）。
 - **与 G3 的接口**：`attest-ledger.json` 结构里预留 `codex_round` / `verdict_digest` 字段供 G3 未来的 task-log.jsonl 读取。
+- **与 Plan 0a v3 的交互**（F3）：Plan 0a v3 split 当前 paused；其 plan 文件 Task 5/6 顺序是 "push → PR → 跑 codex"，与本 spec §2.4 "外部可见动作前必须 attested" 冲突。本 PR merge 后，恢复 Plan 0a v3 时必须先：
+  1. reorder Task：新 Task 4.5 `跑 codex-attest --scope working-tree --focus <plan>` + 新 Task 4.6 `跑 codex-attest --scope branch-diff --head plan-0a/v3-split` 插在原 Task 5 之前
+  2. 原 Task 6（post-PR codex）可保留作为 "server-side cross-check" 注释
+  3. 重新跑一轮 spec 对抗评审确认 Plan 0a v3 修正后不再违反 G2
 
 ---
 
@@ -365,3 +417,11 @@ Claude Code 权限精度优先级：`deny > ask > allow`，且**更具体的 glo
 | #2 high: hook 注册漏 bare 形式 | §2.1 + §2.4 末尾改为"挂载到 PreToolUse[Bash] **无 if 条件** + hook 内 parse 后再决定"，覆盖 bare `git push` / bare `gh pr merge`；§7 新增 #20 |
 | #3 high: merge head-SHA race | §2.4 场景 C 新增 5.c 步强制要求 `--match-head-commit <headRefOid>`；不带或不匹配 → BLOCK；§7 新增 #21 #22 |
 | #4 medium: codex-attest vs hook ledger key 不一致 | §2.6 codex-attest 伪码改写：branch-diff 必须写 `branch:<branch>@<head_sha>`，强制 `--head` 参数；加"round-trip 单元测试显式覆盖 writer/reader key 一致性"；§7 新增 #23 |
+
+### Round 3（commit 988c507，用户 A3 授权进 Round 4）
+
+| Finding | 处置（方案 Y1 + α） |
+|---|---|
+| F1 critical: tty 非真正 agent 屏障 | §2.5 完全重写："降级 claim + defense-in-depth" ：(a) 明示 tty 检查非 security 而是 ceremony；(b) 新增 PPID 父进程启发式检查拒 Claude-like 父进程；(c) §2.1 settings.json deny 新增 `Bash(*attest-override.sh*)` + 围堵 `.claude/state/*` 任意写法；(d) 明示完整 agent-proof 延到 hardening-3；§7 新增 #24/#25/#26/#27 验收 |
+| F2 high: .claude/state/* 泄漏 git | §2.1 架构件清单新增 `.gitignore` 修改（`.claude/state/*` + `!.claude/state/.gitkeep` 例外）+ pre-commit-diff-scan.sh 扩展拦截 staging；§7 新增 #28/#29 |
+| F3 high: Plan 0a v3 流程与 G2 冲突 | §8 依赖与边界新增 "与 Plan 0a v3 的交互" 条目：明示 Plan 0a v3 恢复前必须 reorder Task 5/6（将 codex-attest 前移），并重跑 spec 评审；§7 新增 #30 |
