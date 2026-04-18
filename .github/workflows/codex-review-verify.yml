@@ -143,24 +143,27 @@ jobs:
             2> "$GITHUB_WORKSPACE/codex-run.stderr"
           # If codex exits non-zero, step fails closed.
 
-      - name: Parse verdict from structured JSON (R3.1 fix)
+      - name: Parse verdict from structured JSON (R3.1 + R5.1 fix · result.verdict)
         id: verdict
-        env:
-          HEAD_SHA: ${{ steps.sha.outputs.head }}
         run: |
-          # Parse JSON file; validate required fields; reject anything malformed.
-          # If JSON parse fails, verdict file missing, or verdict not in allowed enum → fail step.
-          VERDICT=$(python3 - <<'PY'
+          # codex-companion --json emits a wrapper: {review, target, codex, result: {verdict, ...}, parseError, ...}
+          # verdict is at result.verdict (R5.1 fix), NOT top-level.
+          VERDICT=$(python3 - <<'PYEOF'
           import json, sys
           try:
               d = json.load(open('codex-verdict.json'))
           except Exception as e:
               print(f'parse_error: {e}', file=sys.stderr); sys.exit(2)
-          v = d.get('verdict')
+          if d.get('parseError'):
+              print(f'codex parseError: {d["parseError"]}', file=sys.stderr); sys.exit(3)
+          result = d.get('result')
+          if not isinstance(result, dict):
+              print(f'result is not an object: {type(result).__name__}', file=sys.stderr); sys.exit(4)
+          v = result.get('verdict')
           if v not in ('approve', 'needs-attention'):
-              print(f'invalid verdict: {v}', file=sys.stderr); sys.exit(3)
+              print(f'invalid verdict: {v!r}', file=sys.stderr); sys.exit(5)
           print(v)
-          PY
+          PYEOF
           )
           [ -z "$VERDICT" ] && { echo "FAIL: could not extract verdict"; exit 1; }
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
