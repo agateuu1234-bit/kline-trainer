@@ -858,6 +858,32 @@ cat .claude/scripts/codex-attest.sh
 
 Expected: shows existing script (~52 lines) with `exec node ...` at end.
 
+- [ ] **Step 1.5: Verify real codex-companion CLI shape (P2-F2 pre-flight)**
+
+`.claude/scripts/codex-attest.sh` must actually invoke codex-companion with flags the binary accepts. Empirically the existing script uses `--scope working-tree` and that works; but `--scope branch-diff` is **unverified** against the real companion. Read the companion source and confirm scope names before committing Task 4 code:
+
+```bash
+NODE_BIN=/usr/bin/node
+[ -x "$NODE_BIN" ] || NODE_BIN=$(command -v node)
+CODEX_PATH="$HOME/.claude/plugins/cache/openai-codex/codex/1.0.3/scripts/codex-companion.mjs"
+# Read supported scope names
+grep -nE '"(working-tree|branch|branch-diff|auto)"' "$CODEX_PATH"
+```
+
+**Action**: if `branch-diff` is NOT a supported scope name, rewrite Task 4 Step 4 to use the real supported name (likely `branch` or `auto`). Also note the invocation flag for JSON output (if any; `--json`).
+
+Record the verified supported scope names in the commit message of Task 4 Step 7.
+
+- [ ] **Step 1.6: P2-F1 — verify `node` is not PATH-shadowed before trusting output**
+
+`.claude/scripts/codex-attest.sh` invokes `node "$CODEX_PATH"` with unqualified `node`; any earlier `node` on PATH can mint approve. Add a safety check: prefer absolute `/usr/bin/node` (standard macOS Homebrew not applicable; system node is at `/opt/homebrew/bin/node` or `/usr/local/bin/node` on macOS). The implementation must:
+
+1. Resolve `NODE_BIN` with `command -v node`
+2. Assert the resolved path is under `/usr/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, `$HOME/.nvm/`, or `$HOME/.volta/` (add more allowlist as needed; reject anything in `$PWD`, `/tmp`, `./stubs`, or relative paths)
+3. Refuse to run if the resolved path fails the allowlist check
+
+This does not fix the fundamental "Claude can modify PATH before invocation" — but it blocks the trivial `./stubs/node` case my own tests use.
+
 - [ ] **Step 2: Write failing tests for ledger writeback**
 
 Create `tests/hooks/test_codex_attest_ledger_write.py`:
@@ -898,7 +924,8 @@ class TestCodexAttestFileModeLedgerWrite:
         subprocess.run(["git", "commit", "-qm", "x"], cwd=temp_git_repo, check=True)
 
         stub = make_node_stub(temp_git_repo, {"verdict": "approve"})
-        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}"}
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
 
         r = subprocess.run(
             ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
@@ -926,7 +953,8 @@ class TestCodexAttestBranchDiffMode:
                        cwd=temp_git_repo, check=True)
 
         stub = make_node_stub(temp_git_repo, {"verdict": "approve"})
-        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}"}
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
 
         r = subprocess.run(
             ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
@@ -946,7 +974,8 @@ class TestCodexAttestBranchDiffMode:
 
     def test_branch_without_head_arg_errors(self, temp_git_repo):
         stub = make_node_stub(temp_git_repo, {"verdict": "approve"})
-        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}"}
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
         r = subprocess.run(
             ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
              "--scope", "branch-diff", "--base", "origin/main"],
@@ -963,7 +992,8 @@ class TestCodexAttestNeedsAttentionNoWrite:
         subprocess.run(["git", "commit", "-qm", "x"], cwd=temp_git_repo, check=True)
 
         stub = make_node_stub(temp_git_repo, {"verdict": "needs-attention"})
-        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}"}
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
 
         r = subprocess.run(
             ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
@@ -1027,6 +1057,29 @@ if [ "$SCOPE" = "branch-diff" ] && [ -z "$BASE" ]; then
     BASE="origin/main"
 fi
 
+# P2-F1: resolve node binary and refuse PATH-shadowed variants
+NODE_BIN=$(command -v node 2>/dev/null || true)
+if [ -z "$NODE_BIN" ]; then
+    echo "[codex-attest] ERROR: 'node' not found on PATH" >&2
+    exit 10
+fi
+# Canonicalize to absolute real path
+NODE_BIN=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$NODE_BIN")
+# Test-mode bypass (tests set CODEX_ATTEST_TEST_MODE=1 + stub $NODE_BIN location).
+# Production sessions never set this.
+if [ "${CODEX_ATTEST_TEST_MODE:-0}" != "1" ]; then
+    case "$NODE_BIN" in
+        /usr/bin/node|/usr/local/bin/node|/opt/homebrew/bin/node|/opt/local/bin/node) ;;
+        "$HOME"/.nvm/*|"$HOME"/.volta/*|"$HOME"/.asdf/*) ;;
+        *)
+            echo "[codex-attest] ERROR: node resolved to untrusted path: $NODE_BIN" >&2
+            echo "  Allowlist: /usr/bin, /usr/local/bin, /opt/homebrew/bin, /opt/local/bin, \$HOME/.nvm, \$HOME/.volta, \$HOME/.asdf" >&2
+            echo "  (set CODEX_ATTEST_TEST_MODE=1 for test suites only; NEVER in production)" >&2
+            exit 11
+            ;;
+    esac
+fi
+
 # Locate codex-companion.mjs at pinned path
 CODEX_PATH="$HOME/.claude/plugins/cache/openai-codex/codex/1.0.3/scripts/codex-companion.mjs"
 if [ ! -f "$CODEX_PATH" ]; then
@@ -1074,7 +1127,7 @@ else
     REVIEW_ARGS="$FOCUS"
 fi
 
-node "$CODEX_PATH" adversarial-review --wait --scope "$SCOPE" $REVIEW_ARGS 2>&1 | tee "$TMP_OUT"
+"$NODE_BIN" "$CODEX_PATH" adversarial-review --wait --scope "$SCOPE" $REVIEW_ARGS 2>&1 | tee "$TMP_OUT"
 CODEX_EXIT=${PIPESTATUS[0]}
 
 # Extract verdict JSON from stdout (codex-companion emits single JSON somewhere)
@@ -1136,6 +1189,27 @@ echo "[codex-attest] verdict=approve; ledger updated."
 Add to `tests/hooks/test_codex_attest_ledger_write.py`:
 
 ```python
+class TestNodeBinAllowlistP2F1:
+    """P2-F1: reject PATH-shadowed node in ./stubs or /tmp."""
+    def test_reject_stub_node_in_cwd(self, temp_git_repo):
+        # Place stub at ./stubs/node (which is NOT in the allowlist)
+        stub_dir = temp_git_repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub.write_text("#!/usr/bin/env bash\necho '{\"verdict\":\"approve\"}'\nexit 0\n")
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
+
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "working-tree", "--focus", "any.md"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 11, f"expected exit 11 for untrusted node; got {r.returncode}\nstderr={r.stderr}"
+        assert "untrusted path" in (r.stderr + r.stdout).lower()
+
+
 class TestBranchDiffPassesPatchToCodex:
     def test_codex_receives_patch_file_path(self, temp_git_repo):
         """Regression for P1-F1: branch-diff mode must hand the actual
@@ -1170,7 +1244,8 @@ echo '{"verdict":"approve"}'
 exit 0
 """)
         stub.chmod(0o755)
-        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}"}
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
         r = subprocess.run(
             ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
              "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
@@ -2394,3 +2469,23 @@ No inconsistencies found.
 - Task 8 is independent (doc rename) — can run anytime after Task 0
 - Task 9 (acceptance) depends on Tasks 1-8
 - Task 10 (push/PR) depends on Task 9
+
+---
+
+## Adversarial review disposition
+
+### Spec (`docs/superpowers/specs/2026-04-18-gov-bootstrap-hardening-design.md`)
+- 6 rounds of codex:adversarial-review
+- R1-R5 findings all fixed
+- R6-F1 fixed (destructive acceptance test removed)
+- R6-F2/F3 downgraded to plan-stage Tasks (this plan implements them — see Task 7 git-content denies and Task 5 B/C independent file discovery)
+- Review loop terminated 2026-04-19 per user authorization
+
+### Plan (this file)
+- 2 rounds of codex:adversarial-review
+- P1-F1/F2/F3/F4 all fixed (Task 4 patch-as-focus, Task 5 detect_scenario + override accessors, Task 7 blob-SHA exfil denies)
+- P2-F1 fixed (Task 4 node-path allowlist with CODEX_ATTEST_TEST_MODE=1 test bypass)
+- P2-F2 addressed as Task 4 Step 1.5 pre-flight verification (empirically current CLI shape works; if `branch-diff` scope name differs, implementer corrects)
+- **P2-F3 inherited residual** from spec R5-F1: `.claude/state/*` protection via Bash string-pattern deny is a blacklist, fundamentally bypassable via variable construction / concatenation in single-operator shell. This is a known limit of local Claude-session enforcement; full integrity requires server-side signed attestations in `gov-bootstrap-hardening-3`. The current plan's `Bash(*.claude/state*)` deny is NOT sole trust root — it's defense-in-depth alongside `Edit(.claude/state/**)` / `Write(.claude/state/**)` deny and audit-log tamper detection. Accepted as residual per spec round 5.
+
+Review loop terminated 2026-04-19 per user option A.
