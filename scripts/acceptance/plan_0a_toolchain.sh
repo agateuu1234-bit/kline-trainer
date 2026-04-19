@@ -40,7 +40,8 @@ check "PR template has iOS hat"                  grep -q "iOS hat" .github/PULL_
 check "PR template has Data hat"                 grep -q "Data hat" .github/PULL_REQUEST_TEMPLATE.md
 
 check "enforce_admins enabled" bash -c '
-    gh api repos/agateuu1234-bit/kline-trainer/branches/main/protection 2>/dev/null \
+    curl -sfH "Authorization: Bearer ${GITHUB_TOKEN:-$(gh auth token)}" \
+         https://api.github.com/repos/agateuu1234-bit/kline-trainer/branches/main/protection \
     | python3 -c "import sys,json; d=json.load(sys.stdin); assert d[\"enforce_admins\"][\"enabled\"]"
 '
 
@@ -55,15 +56,15 @@ check "guard-git-push hook exists" test -f .claude/hooks/guard-git-push.sh
 check "guard-git-push hook is executable" test -x .claude/hooks/guard-git-push.sh
 check "settings.json references hook" grep -q "guard-git-push" .claude/settings.json
 
-# 5. settings.json 权限闭环
-check "xcodebuild in allow list" bash -c '
-    python3 -c "import json; a=json.load(open(\".claude/settings.json\"))[\"permissions\"][\"allow\"]; assert any(\"xcodebuild\" in x for x in a)"
+# 5. settings.json 权限闭环（gov-bootstrap 版）
+check "gh api NOT in allow (gov-bootstrap sensitive)" bash -c '
+    python3 -c "import json; a=json.load(open(\".claude/settings.json\"))[\"permissions\"][\"allow\"]; assert not any(x.startswith(\"Bash(gh api\") for x in a)"
 '
-check "pytest in allow list" bash -c '
-    python3 -c "import json; a=json.load(open(\".claude/settings.json\"))[\"permissions\"][\"allow\"]; assert any(\"pytest\" in x for x in a)"
+check "codex-companion pinned path in allow" bash -c '
+    python3 -c "import json; a=json.load(open(\".claude/settings.json\"))[\"permissions\"][\"allow\"]; assert any(\"codex-companion.mjs\" in x for x in a)"
 '
-check "gh api in allow list" bash -c '
-    python3 -c "import json; a=json.load(open(\".claude/settings.json\"))[\"permissions\"][\"allow\"]; assert any(\"gh api\" in x for x in a)"
+check "push-to-main in deny list" bash -c '
+    python3 -c "import json; d=json.load(open(\".claude/settings.json\"))[\"permissions\"][\"deny\"]; assert any(\"origin main\" in x for x in d)"
 '
 
 # 6. FastAPI
