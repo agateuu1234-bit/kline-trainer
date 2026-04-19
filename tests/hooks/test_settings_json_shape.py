@@ -113,3 +113,48 @@ class TestHookRegistration:
                 if "guard-attest-ledger.sh" in cmd and "if" not in h:
                     found = True
         assert found, "guard-attest-ledger.sh must be mounted unconditionally on Bash PreToolUse"
+
+
+class TestEnvExampleExemptionH25:
+    """H2-5: .env.example must NOT be in deny; .env.local MUST be in deny;
+    **/.env.* blanket patterns must be removed in favor of enumeration."""
+
+    def test_env_example_not_denied(self):
+        deny = set(load()["permissions"]["deny"])
+        for p in ["Read(**/.env.example)", "Edit(**/.env.example)", "Write(**/.env.example)"]:
+            assert p not in deny, f"{p} should NOT be in deny (sample file must be readable)"
+
+    def test_env_sample_template_dist_also_exempt(self):
+        deny = set(load()["permissions"]["deny"])
+        for suffix in ("sample", "template", "dist"):
+            for action in ("Read", "Edit", "Write"):
+                pattern = f"{action}(**/.env.{suffix})"
+                assert pattern not in deny, \
+                    f"{pattern} should NOT be in deny (example-like file)"
+
+    def test_env_local_denied(self):
+        deny = set(load()["permissions"]["deny"])
+        for action in ("Read", "Edit", "Write"):
+            assert f"{action}(**/.env.local)" in deny, \
+                f"{action}(**/.env.local) MUST be in deny (real secrets)"
+
+    def test_env_production_and_staging_denied(self):
+        deny = set(load()["permissions"]["deny"])
+        for variant in ("production", "prod", "staging", "test", "dev", "development"):
+            for action in ("Read", "Edit", "Write"):
+                pattern = f"{action}(**/.env.{variant})"
+                assert pattern in deny, \
+                    f"{pattern} MUST be in deny (real-secret variant)"
+
+    def test_env_blanket_pattern_gone(self):
+        """Regression: **/.env.* blanket pattern (too broad, catches .example) must not exist."""
+        deny = set(load()["permissions"]["deny"])
+        for p in ["Read(**/.env.*)", "Edit(**/.env.*)", "Write(**/.env.*)"]:
+            assert p not in deny, \
+                f"blanket {p} is over-broad (catches .env.example); use enumeration instead"
+
+    def test_base_env_still_denied(self):
+        """Regression: plain .env (no suffix) must still be denied."""
+        deny = set(load()["permissions"]["deny"])
+        for action in ("Read", "Edit", "Write"):
+            assert f"{action}(**/.env)" in deny
