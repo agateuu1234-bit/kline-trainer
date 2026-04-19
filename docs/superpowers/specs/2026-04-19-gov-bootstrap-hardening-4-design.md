@@ -172,4 +172,13 @@ trap 'git worktree remove --force "$WORKTREE" 2>/dev/null || true; rm -rf "$WORK
 
 ## 9. Round-by-round responses
 
-（空；待 codex 评审后填）
+| Round | Target | Verdict | Finding | 处置 |
+|---|---|---|---|---|
+| 1 | `b55b948` | needs-attention | H4R1-F1 high: BASE mutable；head frozen 但 base 可漂移 | **修** `fbc8708`: `BASE_SHA_FROZEN=$(git rev-parse "$BASE")` + 后检 drift + 用 frozen SHA 算 fingerprint |
+| 2 | `fbc8708` | needs-attention | H4R2-F1 high: codex 收到的是 ref name（会被内部重新 resolve），非 frozen SHA | **修** `e7d6f7b`: `REVIEW_ARGS="--base $BASE_SHA_FROZEN"` 传 40-char SHA |
+| 3 | `e7d6f7b` | needs-attention | H4R3-F1 high: scalar REVIEW_ARGS 引 word-splitting；H4R3-F2 medium: EXIT trap 不响应 INT/TERM/HUP | **修** `11e1945` + `6c7bf5f` 前置 ec unbound 小补: array REVIEW_ARGS + `_cleanup_worktree` function trapped on EXIT INT TERM HUP |
+| 4 | `11e1945` | needs-attention | H4R4-F1 medium: `_cleanup_worktree` 替换了老 EXIT trap，TMP_OUT 不被清 | **修** `ef4d099`: cleanup function 加 `rm -f "$TMP_OUT"` |
+| 5 | `ef4d099` | needs-attention | H4R5-F1 medium: codex-companion 写 state/logs 到 `$CLAUDE_PLUGIN_DATA`，不在 worktree 内，累积 orphan | **修** `6c7bf5f`: `PLUGIN_DATA_DIR=$(mktemp -d)` + `export CLAUDE_PLUGIN_DATA=$PLUGIN_DATA_DIR` + cleanup 加 rm |
+| 6 | `6c7bf5f` | needs-attention | H4R6-F1 high: codex-companion 启动 detached broker 进程，PLUGIN_DATA_DIR 删了但 broker 继续跑；累积 stale process | **接受 residual**（user 2026-04-19 option A）。影响 bounded：单人本地；`/tmp/cxc-*` 系统周期清；进程不 hang 影响后续。移 hardening-5：探 codex-companion broker shutdown API 或 non-broker 模式 |
+
+**Review loop terminated** round 6 per user option A；override ceremony 收尾。H2-3 核心目标（branch-diff 真 review target SHA）已达成；cleanup 完善度为 residual。
