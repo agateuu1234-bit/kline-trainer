@@ -107,7 +107,12 @@ else
     REVIEW_ARGS="$FOCUS"
 fi
 
-"$NODE_BIN" "$CODEX_PATH" adversarial-review --wait --scope "$SCOPE" $REVIEW_ARGS 2>&1 | tee "$TMP_OUT"
+# Translate internal SCOPE to codex-companion CLI name
+case "$SCOPE" in
+    branch-diff) NODE_SCOPE="branch" ;;
+    *) NODE_SCOPE="$SCOPE" ;;
+esac
+"$NODE_BIN" "$CODEX_PATH" adversarial-review --wait --scope "$NODE_SCOPE" $REVIEW_ARGS 2>&1 | tee "$TMP_OUT"
 CODEX_EXIT=${PIPESTATUS[0]}
 
 # Extract verdict from stdout. codex-companion emits markdown with "Verdict: X"
