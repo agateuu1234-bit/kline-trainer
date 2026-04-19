@@ -41,3 +41,7 @@ secrets/
 
 # Claude Code 本地 personal 设置（保留 .claude/settings.json 提交）
 .claude/settings.local.json
+
+# gov-bootstrap-hardening: keep local attestation state out of git
+.claude/state/*
+!.claude/state/.gitkeep
