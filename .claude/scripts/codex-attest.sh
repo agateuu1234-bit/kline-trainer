@@ -50,6 +50,7 @@ if [ "${CODEX_ATTEST_TEST_MODE:-0}" != "1" ]; then
     case "$NODE_BIN" in
         /usr/bin/node|/usr/local/bin/node|/opt/homebrew/bin/node|/opt/local/bin/node) ;;
         "$HOME"/.nvm/*|"$HOME"/.volta/*|"$HOME"/.asdf/*) ;;
+        /opt/homebrew/Cellar/node*/bin/node) ;;  # Homebrew realpath (bootstrap fix 2026-04-19)
         *)
             echo "[codex-attest] ERROR: node resolved to untrusted path: $NODE_BIN" >&2
             echo "  Allowlist: /usr/bin, /usr/local/bin, /opt/homebrew/bin, /opt/local/bin, \$HOME/.nvm, \$HOME/.volta, \$HOME/.asdf" >&2
