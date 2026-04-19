@@ -55,7 +55,11 @@ class TestFirstLineMissing:
         entry = json.loads(lines[0])
         assert entry["first_line"] == "Plan complete, now testing."
         assert "time_utc" in entry and "inferred_skill" in entry and "response_sha" in entry
-        assert "drift logged" in r.stderr.lower()
+        # H3-2 changed wording: "drift logged" -> "drift recorded" / "Drift count"
+        assert ("drift recorded" in r.stderr.lower() or
+                "drift count" in r.stderr.lower() or
+                "skill-gate-drift" in r.stderr.lower()), \
+            f"stderr should mention drift was recorded; got:\n{r.stderr}"
 
     def test_missing_gate_infers_last_skill_from_transcript(self, temp_git_repo, tmp_path):
         tx = make_transcript(tmp_path, [
@@ -84,6 +88,49 @@ class TestFirstLineMissing:
         drift = temp_git_repo / ".claude/state/skill-gate-drift.jsonl"
         entry = json.loads(drift.read_text().splitlines()[-1])
         assert entry["inferred_skill"] == "exempt(behavior-neutral)"
+
+
+class TestDriftStderrFormatH32:
+    """H3-2 a2: stderr on drift must be multi-line with drift count + inferred skill + next-action."""
+
+    def test_stderr_contains_drift_count(self, temp_git_repo, tmp_path):
+        """H3-2: stderr must show explicit drift count number (not just 'drift')."""
+        drift = temp_git_repo / ".claude/state/skill-gate-drift.jsonl"
+        drift.parent.mkdir(parents=True, exist_ok=True)
+        drift.write_text('{"first_line":"p1"}\n{"first_line":"p2"}\n{"first_line":"p3"}\n')
+        tx = make_transcript(tmp_path, [
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Missing gate here.\n\nBody."},
+            ]}},
+        ])
+        r = run_hook(tx, temp_git_repo)
+        assert r.returncode == 0
+        combined = r.stderr + r.stdout
+        # New H3-2 format: explicit "Drift count" phrase + numeric value
+        assert "drift count" in combined.lower(), \
+            f"H3-2 stderr must contain explicit 'drift count' phrase (new format); got:\n{combined}"
+        # Multi-line format (at least 4 lines in stderr block)
+        stderr_line_count = len([ln for ln in r.stderr.split("\n") if ln.strip()])
+        assert stderr_line_count >= 4, \
+            f"H3-2 stderr must be multi-line (>=4 lines); got {stderr_line_count} lines:\n{r.stderr}"
+        # Explicit next-action capitalized/emphasized
+        assert ("MUST START WITH" in combined or "NEXT RESPONSE" in combined.upper()), \
+            f"H3-2 stderr must have explicit next-action instruction; got:\n{combined}"
+
+    def test_stderr_contains_inferred_skill_hint(self, temp_git_repo, tmp_path):
+        tx = make_transcript(tmp_path, [
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Skill gate: superpowers:brainstorming\n\nFirst."},
+            ]}},
+            {"type": "user", "message": {"content": "next"}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Missing gate second time.\n\nBody."},
+            ]}},
+        ])
+        r = run_hook(tx, temp_git_repo)
+        combined = r.stderr + r.stdout
+        assert "superpowers:brainstorming" in combined, \
+            f"must mention inferred skill; got:\n{combined}"
 
 
 class TestExemptBadReasonStillBlocks:

@@ -133,27 +133,18 @@ class TestEnvExampleExemptionH25:
                     f"{pattern} should NOT be in deny (example-like file)"
 
     def test_env_local_denied(self):
-        deny = set(load()["permissions"]["deny"])
-        for action in ("Read", "Edit", "Write"):
-            assert f"{action}(**/.env.local)" in deny, \
-                f"{action}(**/.env.local) MUST be in deny (real secrets)"
+        """H2-5 OBSOLETE: enumeration replaced by guard-env-read.sh hook (H3-1).
+        Equivalent behavior tested in tests/hooks/test_guard_env_read.py::TestEnvDenyDefault."""
+        # Guard-env-read.sh handles these via PreToolUse; enumeration no longer needed.
+        pass
 
     def test_env_production_and_staging_denied(self):
-        deny = set(load()["permissions"]["deny"])
-        for variant in ("production", "prod", "staging", "test", "dev", "development"):
-            for action in ("Read", "Edit", "Write"):
-                pattern = f"{action}(**/.env.{variant})"
-                assert pattern in deny, \
-                    f"{pattern} MUST be in deny (real-secret variant)"
+        """H2-5 OBSOLETE — see test_env_local_denied note."""
+        pass
 
     def test_env_ci_and_ops_variants_denied_H2R1(self):
-        """H2R1-F1: codex round 1 flagged CI/ops/backup variants falling through to allow."""
-        deny = set(load()["permissions"]["deny"])
-        for variant in ("ci", "qa", "uat", "preview", "stage", "backup", "bak", "shared", "nas"):
-            for action in ("Read", "Edit", "Write"):
-                pattern = f"{action}(**/.env.{variant})"
-                assert pattern in deny, \
-                    f"{pattern} MUST be in deny (H2R1-F1 extended variant)"
+        """H2R1-F1 OBSOLETE — see test_env_local_denied note."""
+        pass
 
     def test_env_blanket_pattern_gone(self):
         """Regression: **/.env.* blanket pattern (too broad, catches .example) must not exist."""
@@ -167,3 +158,40 @@ class TestEnvExampleExemptionH25:
         deny = set(load()["permissions"]["deny"])
         for action in ("Read", "Edit", "Write"):
             assert f"{action}(**/.env)" in deny
+
+
+class TestH31SettingsCleanup:
+    """H3-1 settings.json: env enumeration deleted (hook handles),
+    guard-env-read mounted, ack-drift.sh deny pattern present."""
+
+    def test_env_enumeration_all_removed(self):
+        deny = set(load()["permissions"]["deny"])
+        # Sample of the hardening-2 enum — all should be gone after H3-1
+        for v in ("local", "production", "staging", "ci", "qa", "uat",
+                  "backup", "bak", "nas", "heroku"):
+            for action in ("Read", "Edit", "Write"):
+                assert f"{action}(**/.env.{v})" not in deny, \
+                    f"{action}(**/.env.{v}) should be removed (guard-env-read.sh handles it now)"
+
+    def test_base_env_still_denied_H31(self):
+        """`Read/Edit/Write(**/.env)` stays as defense-in-depth fallback."""
+        deny = set(load()["permissions"]["deny"])
+        for action in ("Read", "Edit", "Write"):
+            assert f"{action}(**/.env)" in deny
+
+    def test_guard_env_read_mounted(self):
+        pre = load()["hooks"]["PreToolUse"]
+        mounted_matchers = set()
+        for group in pre:
+            m = group.get("matcher", "")
+            for h in group.get("hooks", []):
+                if "guard-env-read.sh" in h.get("command", ""):
+                    mounted_matchers.add(m)
+        assert "Read" in mounted_matchers, "guard-env-read.sh must be mounted on Read"
+        assert "Edit" in mounted_matchers, "guard-env-read.sh must be mounted on Edit"
+        assert "Write" in mounted_matchers, "guard-env-read.sh must be mounted on Write"
+
+    def test_ack_drift_deny(self):
+        deny = set(load()["permissions"]["deny"])
+        assert any("ack-drift.sh" in p for p in deny), \
+            "Bash(*ack-drift.sh*) must be in deny (user-tty only)"

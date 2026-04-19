@@ -109,7 +109,6 @@
       "Bash(git push origin :master)",
       "Bash(git push origin :refs/heads/main)",
       "Bash(git push origin :refs/heads/master)",
-
       "Bash(gh api graphql*)",
       "Bash(gh api * -X POST*)",
       "Bash(gh api * --method POST*)",
@@ -147,7 +146,6 @@
       "Bash(sudo *)",
       "Bash(node */codex-companion.mjs*)",
       "Bash(node ~/.claude/plugins/*)",
-
       "Edit(.claude/hooks/**)",
       "Write(.claude/hooks/**)",
       "Edit(.claude/scripts/**)",
@@ -173,118 +171,11 @@
       "Bash(sed -i * .claude/*)",
       "Bash(rm * .claude/*)",
       "Bash(chmod * .claude/*)",
-
       "Bash(*.claude/state*)",
       "Bash(*attest-override.sh*)",
-
       "Read(**/.env)",
       "Edit(**/.env)",
       "Write(**/.env)",
-      "Read(**/.env.local)",
-      "Edit(**/.env.local)",
-      "Write(**/.env.local)",
-      "Read(**/.env.dev)",
-      "Edit(**/.env.dev)",
-      "Write(**/.env.dev)",
-      "Read(**/.env.development)",
-      "Edit(**/.env.development)",
-      "Write(**/.env.development)",
-      "Read(**/.env.prod)",
-      "Edit(**/.env.prod)",
-      "Write(**/.env.prod)",
-      "Read(**/.env.production)",
-      "Edit(**/.env.production)",
-      "Write(**/.env.production)",
-      "Read(**/.env.staging)",
-      "Edit(**/.env.staging)",
-      "Write(**/.env.staging)",
-      "Read(**/.env.test)",
-      "Edit(**/.env.test)",
-      "Write(**/.env.test)",
-      "Read(**/.env.testing)",
-      "Edit(**/.env.testing)",
-      "Write(**/.env.testing)",
-      "Read(**/.env.secret)",
-      "Edit(**/.env.secret)",
-      "Write(**/.env.secret)",
-      "Read(**/.env.secrets)",
-      "Edit(**/.env.secrets)",
-      "Write(**/.env.secrets)",
-      "Read(**/.env.override)",
-      "Edit(**/.env.override)",
-      "Write(**/.env.override)",
-      "Read(**/.env.private)",
-      "Edit(**/.env.private)",
-      "Write(**/.env.private)",
-      "Read(**/.env.ci)",
-      "Edit(**/.env.ci)",
-      "Write(**/.env.ci)",
-      "Read(**/.env.qa)",
-      "Edit(**/.env.qa)",
-      "Write(**/.env.qa)",
-      "Read(**/.env.uat)",
-      "Edit(**/.env.uat)",
-      "Write(**/.env.uat)",
-      "Read(**/.env.preview)",
-      "Edit(**/.env.preview)",
-      "Write(**/.env.preview)",
-      "Read(**/.env.stage)",
-      "Edit(**/.env.stage)",
-      "Write(**/.env.stage)",
-      "Read(**/.env.pre)",
-      "Edit(**/.env.pre)",
-      "Write(**/.env.pre)",
-      "Read(**/.env.backup)",
-      "Edit(**/.env.backup)",
-      "Write(**/.env.backup)",
-      "Read(**/.env.bak)",
-      "Edit(**/.env.bak)",
-      "Write(**/.env.bak)",
-      "Read(**/.env.old)",
-      "Edit(**/.env.old)",
-      "Write(**/.env.old)",
-      "Read(**/.env.orig)",
-      "Edit(**/.env.orig)",
-      "Write(**/.env.orig)",
-      "Read(**/.env.shared)",
-      "Edit(**/.env.shared)",
-      "Write(**/.env.shared)",
-      "Read(**/.env.personal)",
-      "Edit(**/.env.personal)",
-      "Write(**/.env.personal)",
-      "Read(**/.env.remote)",
-      "Edit(**/.env.remote)",
-      "Write(**/.env.remote)",
-      "Read(**/.env.heroku)",
-      "Edit(**/.env.heroku)",
-      "Write(**/.env.heroku)",
-      "Read(**/.env.vercel)",
-      "Edit(**/.env.vercel)",
-      "Write(**/.env.vercel)",
-      "Read(**/.env.netlify)",
-      "Edit(**/.env.netlify)",
-      "Write(**/.env.netlify)",
-      "Read(**/.env.fly)",
-      "Edit(**/.env.fly)",
-      "Write(**/.env.fly)",
-      "Read(**/.env.render)",
-      "Edit(**/.env.render)",
-      "Write(**/.env.render)",
-      "Read(**/.env.railway)",
-      "Edit(**/.env.railway)",
-      "Write(**/.env.railway)",
-      "Read(**/.env.docker)",
-      "Edit(**/.env.docker)",
-      "Write(**/.env.docker)",
-      "Read(**/.env.compose)",
-      "Edit(**/.env.compose)",
-      "Write(**/.env.compose)",
-      "Read(**/.env.k8s)",
-      "Edit(**/.env.k8s)",
-      "Write(**/.env.k8s)",
-      "Read(**/.env.nas)",
-      "Edit(**/.env.nas)",
-      "Write(**/.env.nas)",
       "Read(secrets/**)",
       "Edit(secrets/**)",
       "Write(secrets/**)",
@@ -342,7 +233,6 @@
       "Read(**/fastlane/**/Matchfile)",
       "Edit(**/fastlane/**/Matchfile)",
       "Write(**/fastlane/**/Matchfile)",
-
       "Bash(cat **/.env*)",
       "Bash(cat **/secrets/**)",
       "Bash(cat **/*.p12)",
@@ -353,7 +243,6 @@
       "Bash(cat **/.pypirc)",
       "Bash(* > **/.env*)",
       "Bash(* > **/secrets/**)",
-
       "Bash(git show *.env*)",
       "Bash(git show *secrets/*)",
       "Bash(git show *.p12*)",
@@ -368,7 +257,6 @@
       "Bash(git show *.key)",
       "Bash(git show *id_rsa*)",
       "Bash(git show *.ssh/*)",
-
       "Bash(git diff *.env*)",
       "Bash(git diff *secrets/*)",
       "Bash(git diff *.p12*)",
@@ -383,7 +271,6 @@
       "Bash(git diff *.key)",
       "Bash(git diff *id_rsa*)",
       "Bash(git diff *.ssh/*)",
-
       "Bash(git grep *.env*)",
       "Bash(git grep *secrets/*)",
       "Bash(git grep *.p12*)",
@@ -398,9 +285,7 @@
       "Bash(git grep *.key)",
       "Bash(git grep *id_rsa*)",
       "Bash(git grep *.ssh/*)",
-
       "Bash(git cat-file -p:*)",
-
       "Bash(git ls-files -s *.env*)",
       "Bash(git ls-files -s *secrets/*)",
       "Bash(git ls-files -s *.p12*)",
@@ -412,7 +297,6 @@
       "Bash(git ls-files -s *.netrc*)",
       "Bash(git ls-files -s *.pypirc*)",
       "Bash(git ls-files -s *.ssh/*)",
-
       "Bash(git hash-object *.env*)",
       "Bash(git hash-object *secrets/*)",
       "Bash(git hash-object *.p12*)",
@@ -420,7 +304,8 @@
       "Bash(git hash-object *GoogleService-Info.plist*)",
       "Bash(git hash-object *.pem)",
       "Bash(git hash-object *.key)",
-      "Bash(git hash-object *id_rsa*)"
+      "Bash(git hash-object *id_rsa*)",
+      "Bash(*ack-drift.sh*)"
     ]
   },
   "hooks": {
@@ -486,6 +371,36 @@
             "type": "command",
             "command": "bash .claude/hooks/pre-edit-trust-boundary-hint.sh",
             "timeout": 2
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/guard-env-read.sh",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/guard-env-read.sh",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/guard-env-read.sh",
+            "timeout": 3
           }
         ]
       }
