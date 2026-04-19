@@ -1,6 +1,6 @@
 # Adversarial Review 模板
 
-用于 codex:adversarial-review 闸门（CLAUDE.md 规则 2 强制类改动）。
+用于 codex:adversarial-review 闸门（CLAUDE.md "Repository governance backstop" 治理项 1；参见 `.claude/workflow-rules.json` → `adversarial_review_loop`）。
 
 ## Review 维度
 
@@ -11,7 +11,7 @@
 - 语法、逻辑、边界条件、错误处理
 
 ### 3. 无代码经验者可执行性
-- CLAUDE.md 规则 3：每模块验收必须无代码经验者可执行
+- CLAUDE.md "Repository governance backstop" 治理项 2：每模块验收必须无代码经验者可执行（参见 `.claude/workflow-rules.json` → `verification_template`）
 - 操作步骤是否详细？预期现象是否明确？通过/失败判据是否清晰？
 
 ### 4. 安全 / 敏感信息
