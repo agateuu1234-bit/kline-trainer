@@ -295,6 +295,17 @@ SRC_BRANCH=$(echo "$CMD" | awk '{
 
 ## 11. Round-by-round responses
 
+### Branch-diff Round 3 (commit 4ae8934)
+
+触 `adversarial_review_loop.max_rounds=3` 上限。Codex 重复 F1/F2 同等意见不收敛。按 `on_non_convergence` escalate 用户裁决 → 用户 2026-04-19 选 **A**：接受两条 residual 交付本 PR，走 `attest-override.sh` ceremony。
+
+| Finding | 处置 |
+|---|---|
+| H2R3-F1 [high]: env enumeration 对 compound suffix fall-through | **继承接受 residual**（同 H2R2-F1），不改本 PR。hardening-3 补 fail-closed `guard-env-read.sh` hook |
+| H2R3-F2 [high]: drift-log 非 hard-enforce | **继承接受 residual**（同 H2R2-F2 + 用户原始 Q2=d 授权）。policy 文本（workflow-rules + CLAUDE.md §4）已对齐。hardening-3 可选实施"auto-inject 替代 drift-log" + CI rollup |
+
+Review loop 终止于 round 3 / 用户选项 A。
+
 ### Branch-diff Round 2 (commit 868385d → 接受后 policy 对齐补丁见后续 commit)
 
 | Finding | 处置 |
