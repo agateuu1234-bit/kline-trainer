@@ -32,7 +32,11 @@
 
 **H2-4**：Hook `detect_scenario` 的 refspec 解析显式过滤 `2>&1 >& &> > < | && || ;` 等 shell operator + `origin`/`push` 保留字 + 所有 `-` 开头 flag。
 
-**H2-5**：`.env.example` / `.env.sample` / `.env.template` 恢复可读。
+**H2-5**：`.env.example` / `.env.sample` / `.env.template` 恢复可读。通过 **单级后缀枚举**（35 个变体）+ 已知样例不枚举即自动放行。
+
+**H2-5 已知残余**（codex round 1/2 明示 + 本 spec 接受）：
+- 复合后缀文件 `.env.local.backup` / `.env.production.local` / `.env.staging.bak` / `.env.abc123`（2 级后缀及以上）不在枚举内，落入 catch-all Read/Edit/Write allow。这是 pure-enumeration 模型的固有局限：笛卡尔积爆炸。**根治**延 hardening-3：PreToolUse Read/Edit/Write hook `guard-env-read.sh`，fail-closed deny `**/.env*` with explicit allow-list `.env.example` / `.sample` / `.template` / `.dist`。
+- 本 PR 明示**不承诺** compound-suffix secret file 的读写防护；用户知情接受（单人项目、文件命名惯例以 `.env.local` / `.env.production` 为主，2 级后缀罕见）。
 
 ## 3. 非目标（本 PR 显式不做）
 
@@ -290,6 +294,13 @@ SRC_BRANCH=$(echo "$CMD" | awk '{
 若超过，按 `workflow-rules.adversarial_review_loop.on_non_convergence` escalate。
 
 ## 11. Round-by-round responses
+
+### Branch-diff Round 2 (commit 868385d → 接受后 policy 对齐补丁见后续 commit)
+
+| Finding | 处置 |
+|---|---|
+| H2R2-F1 [high]: 复合后缀 `.env.local.backup` / `.env.production.local` / `.env.staging.bak` / `.env.abc123` 不在枚举 → fall through | **接受为 residual**（γ 方案，用户 2026-04-19 授权）。本 spec §2 H2-5 已新增 compound-suffix residual 明示段 + 指向 hardening-3 `guard-env-read.sh` fail-closed hook 作为根治路径。本 PR 不做 cartesian-product 枚举（会爆炸），也不 shipping fail-closed hook（scope 扩张）。 |
+| H2R2-F2 [high]: stop-hook drift-log = policy bypass | **接受 push-back + 补 policy 对齐**：本 commit 同步更新 `.claude/workflow-rules.json` `skill_gate_policy` 新增 `enforcement_mode: "drift-log"` + `enforcement_description` + `future_hardening_3_scope`；更新 `CLAUDE.md §governance §4` 明示 drift-log 语义。政策文本现与 hook 代码一致，不再 internal inconsistent。 |
 
 ### Branch-diff Round 1 (commit 8516cd5)
 
