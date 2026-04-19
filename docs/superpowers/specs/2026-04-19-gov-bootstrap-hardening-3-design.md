@@ -2,7 +2,8 @@
 
 **Date:** 2026-04-19
 **Status:** Draft（待 codex:adversarial-review 收敛）
-**Scope:** H3-1 env-guard hook + H3-2 skill-gate auto-inject (a2+a3) + H3-3 heredoc 误报修
+**Final Scope (2026-04-19 post-review):** H3-1 env-guard hook + H3-2 skill-gate auto-inject (a2+a3)
+**Dropped during review:** H3-3 heredoc stripping（round 3 escalation，user option A，moved to hardening-4）
 **Out of scope:** H2-3 worktree / G3 pipeline / subagent 强制 / CI attest-override reject / Cellar 泛化 / 集成测试 → hardening-4+
 
 **Prereqs:**
@@ -235,4 +236,23 @@ PY
 
 ## 11. Round-by-round responses
 
-（空；待 codex 评审后填）
+### Branch-diff Round 1 (commit 021f410)
+
+| Finding | 处置 |
+|---|---|
+| H3R1-F1 [critical]: `bash <<EOF git push EOF` executes heredoc body; strip-heredoc hid detection | **修**（`47a584d`）：strip-heredoc.py 增加 `is_executing_heredoc` 检查 prefix token，对 bash/sh/zsh/ksh/python/ruby/perl/node/env 等解释器保留 heredoc |
+| H3R1-F2 [high]: `.envrc` / `.envlocal` / `.envsomething` (no-dot suffix) fall through | **修**（`47a584d`）：guard-env-read.sh 案件匹配从 `.env\|.env.*` 拓宽到 `.env*`，所有 `.env` 前缀的 basename 都进检查流程 |
+
+### Branch-diff Round 2 (commit 47a584d)
+
+| Finding | 处置 |
+|---|---|
+| H3R2-F1 [high]: `cat <<EOF \| sh ... EOF` 管道送 shell 执行；prefix token 是 cat，my check 漏掉 | **修**（`b3c3986`）：strip-heredoc.py 增加 fail-closed 规则——任何命令含 shell 复合构造（\|, &&, \|\|, ;, $(, backtick, &）一律不 strip |
+
+### Branch-diff Round 3 (commit b3c3986)
+
+| Finding | 处置 |
+|---|---|
+| H3R3-F1 [critical]: `tee >(sh) <<EOF ... EOF` 进程替换 + `xargs sh -c` 等绕过；复合构造清单无法穷尽 | **用户 option A 决策**：drop H3-3 entirely（`7ef43a3`）。Regex-based shell parsing 是 adversarial 不可穷尽领域；每轮 codex 都找新 class。revert 删 strip-heredoc.py + hook prologue 复原。Plan 0a v3 doc-writing workaround 改为 "用 Write 工具写文件"。**H3-3 移入 hardening-4 backlog**，考虑改用 shell parser（tree-sitter-bash 或 shlex+AST）重做。TestHeredocAttacksStillBlocked 新测试验证 BLOCK_UNPARSEABLE fallback 继续拦住实际绕过。 |
+
+Review loop 终止于 round 3。最终 hardening-3 scope = H3-1 (env-guard) + H3-2 (skill-gate drift ceiling + stderr)。
