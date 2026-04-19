@@ -14,6 +14,16 @@ if [ "$branch" != "main" ] && [ "$branch" != "master" ]; then
   exit 0
 fi
 
+# gov-bootstrap-hardening (R3-F2): block staging local attestation state files.
+STAGED=$(git diff --cached --name-only 2>/dev/null)
+if echo "$STAGED" | grep -qE '^\.claude/state/(attest-ledger\.json|attest-override-log\.jsonl)$'; then
+    OFFENDERS=$(echo "$STAGED" | grep -E '^\.claude/state/(attest-ledger\.json|attest-override-log\.jsonl)$')
+    echo "[pre-commit-diff-scan] BLOCK: local attestation state must not be committed:" >&2
+    printf '  %s\n' $OFFENDERS >&2
+    echo "  (see .gitignore; unstage with: git restore --staged <file>)" >&2
+    exit 2
+fi
+
 RULES=".claude/workflow-rules.json"
 [ ! -f "$RULES" ] && exit 0
 
