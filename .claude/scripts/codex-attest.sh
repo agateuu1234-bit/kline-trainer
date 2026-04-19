@@ -120,11 +120,17 @@ CODEX_EXIT=${PIPESTATUS[0]}
 VERDICT=$(python3 - "$TMP_OUT" <<'PY'
 import json, re, sys
 text = open(sys.argv[1]).read()
-# Primary: markdown "Verdict: <label>" line from the final rendered review
-for line in reversed(text.splitlines()):
+# Primary: markdown "Verdict: <label>" lines (H2-2: take FIRST, fail-closed on mismatch)
+matches = []
+for line in text.splitlines():
     m = re.match(r'^Verdict:\s*(approve|needs-attention|request-changes|reject|block)\s*$', line.strip())
     if m:
-        print(m.group(1)); sys.exit(0)
+        matches.append(m.group(1))
+if matches:
+    if len(set(matches)) > 1:
+        # Header verdict and body/quoted text disagree -> ambiguous, fail closed
+        print("ambiguous"); sys.exit(0)
+    print(matches[0]); sys.exit(0)
 # Fallback 1: complete JSON object anywhere in text
 objs = re.findall(r'\{[^{}]*"verdict"\s*:\s*"[^"]+"[^{}]*\}', text)
 if objs:
