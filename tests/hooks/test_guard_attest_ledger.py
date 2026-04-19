@@ -397,25 +397,18 @@ class TestDriftCeilingH32:
         assert r.returncode == 0, f"DRIFT_PUSH_OVERRIDE should bypass; stderr={r.stderr}"
 
 
-class TestHeredocStrippingH33:
-    """H3-3: detect_scenario must strip heredoc body before scanning for protected commands."""
+class TestHeredocAttacksStillBlocked:
+    """H3-3 DROPPED (codex round 3 user option A). No heredoc stripping = any heredoc
+    containing git push / gh pr create / gh pr merge is caught by BLOCK_UNPARSEABLE
+    substring fallback. This is the pre-hardening-3 behavior; H3-3's attempt to
+    carve out false positives created more attack surface than the original bug.
 
-    def test_heredoc_with_git_push_text_not_false_positive(self, temp_git_repo):
-        """Bash command with heredoc body containing 'git push' text must NOT trigger BLOCK_UNPARSEABLE."""
-        cmd = """cat > /tmp/test.md <<'EOF'
-documentation mentions git push as a concept
-also gh pr create was used earlier
-EOF"""
-        r = run_hook(
-            hook_path(temp_git_repo),
-            {"tool_name": "Bash", "tool_input": {"command": cmd}},
-            temp_git_repo,
-        )
-        assert r.returncode == 0, f"heredoc body should be stripped; got block:\n{r.stderr}"
+    Plan 0a v3 doc-writing workaround: use Write tool for file content, not
+    heredoc via Bash.
 
-    def test_heredoc_attached_to_bash_NOT_stripped_H3R1F1(self, temp_git_repo):
-        """H3R1-F1 CRITICAL: bash <<EOF ... EOF executes body. Must NOT be stripped.
-        Detector should see 'git push' and NOT exit 0 (should BLOCK or scenario-A block)."""
+    These tests confirm heredoc-wrapped protected commands remain blocked:"""
+
+    def test_bash_heredoc_push_blocked(self, temp_git_repo):
         cmd = """bash <<EOF
 git push -u origin feat
 EOF"""
@@ -424,14 +417,9 @@ EOF"""
             {"tool_name": "Bash", "tool_input": {"command": cmd}},
             temp_git_repo,
         )
-        # Must NOT exit 0. Either scenario A fires (no ledger → block) or BLOCK_UNPARSEABLE.
-        assert r.returncode != 0, (
-            f"bash <<EOF git push EOF would execute; hook MUST not pass.\n"
-            f"If it exited 0, heredoc strip hid the push from detection. stderr={r.stderr}"
-        )
+        assert r.returncode != 0
 
-    def test_heredoc_piped_to_sh_NOT_stripped_H3R2F1(self, temp_git_repo):
-        """H3R2-F1: cat <<EOF | sh ... EOF pipes body to shell → must not strip."""
+    def test_cat_pipe_sh_heredoc_push_blocked(self, temp_git_repo):
         cmd = """cat <<'EOF' | sh
 git push -u origin feat
 EOF"""
@@ -440,44 +428,7 @@ EOF"""
             {"tool_name": "Bash", "tool_input": {"command": cmd}},
             temp_git_repo,
         )
-        assert r.returncode != 0, f"pipeline exec must not be hidden; stderr={r.stderr}"
-
-    def test_heredoc_in_command_sub_NOT_stripped(self, temp_git_repo):
-        """python3 -c "$(cat <<EOF ... EOF)" → body executes; must not strip."""
-        cmd = '''python3 -c "$(cat <<'EOF'
-import os; os.system('git push -u origin feat')
-EOF
-)"'''
-        r = run_hook(
-            hook_path(temp_git_repo),
-            {"tool_name": "Bash", "tool_input": {"command": cmd}},
-            temp_git_repo,
-        )
         assert r.returncode != 0
-
-    def test_heredoc_attached_to_sh_NOT_stripped_H3R1F1(self, temp_git_repo):
-        """Same for sh."""
-        cmd = """sh <<EOF
-gh pr merge 42
-EOF"""
-        r = run_hook(
-            hook_path(temp_git_repo),
-            {"tool_name": "Bash", "tool_input": {"command": cmd}},
-            temp_git_repo,
-        )
-        assert r.returncode != 0
-
-    def test_heredoc_unquoted_tag_also_stripped(self, temp_git_repo):
-        """<<EOF (no quotes) same treatment."""
-        cmd = """cat > /tmp/test.md <<EOF
-body with git push reference
-EOF"""
-        r = run_hook(
-            hook_path(temp_git_repo),
-            {"tool_name": "Bash", "tool_input": {"command": cmd}},
-            temp_git_repo,
-        )
-        assert r.returncode == 0
 
 
 class TestShellOpsFilterH24:

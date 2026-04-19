@@ -25,8 +25,7 @@ def temp_git_repo(tmp_path: Path) -> Path:
                 ".claude/hooks/pre-commit-diff-scan.sh",
                 ".claude/hooks/stop-response-check.sh",
                 ".claude/hooks/guard-env-read.sh",
-                ".claude/scripts/ack-drift.sh",
-                ".claude/scripts/strip-heredoc.py"]:
+                ".claude/scripts/ack-drift.sh"]:
         src = REPO_ROOT / rel
         if src.exists():
             dst = tmp_path / rel
