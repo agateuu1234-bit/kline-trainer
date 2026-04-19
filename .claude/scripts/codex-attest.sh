@@ -104,15 +104,32 @@ if [ "$SCOPE" = "branch-diff" ]; then
     # not the current checkout. Replaces patch-as-focus (codex-companion ignored
     # --focus files and reviewed cwd HEAD anyway).
     WORKTREE=$(mktemp -d -t codex-attest-wt.XXXXXX)
-    trap 'git worktree remove --force "$WORKTREE" 2>/dev/null || true; rm -rf "$WORKTREE" 2>/dev/null || true' EXIT
+    _cleanup_worktree() {
+        local ec=$?
+        git worktree remove --force "$WORKTREE" 2>/dev/null || true
+        rm -rf "$WORKTREE" 2>/dev/null || true
+        # Preserve original exit status on EXIT; for signals, exit with conventional 128+signal
+        case "${1:-EXIT}" in
+            SIGNAL-INT) exit 130 ;;
+            SIGNAL-TERM) exit 143 ;;
+            SIGNAL-HUP) exit 129 ;;
+            *) return $ec ;;
+        esac
+    }
+    trap '_cleanup_worktree' EXIT
+    trap '_cleanup_worktree SIGNAL-INT' INT
+    trap '_cleanup_worktree SIGNAL-TERM' TERM
+    trap '_cleanup_worktree SIGNAL-HUP' HUP
     if ! git worktree add --detach "$WORKTREE" "$HEAD_SHA_FOR_PATCH" 2>/dev/null; then
         echo "[codex-attest] ERROR: cannot create worktree at $HEAD_SHA_FOR_PATCH" >&2
         exit 14
     fi
-    REVIEW_ARGS="--base $BASE_SHA_FROZEN --cwd $WORKTREE"
+    REVIEW_ARGS=(--base "$BASE_SHA_FROZEN" --cwd "$WORKTREE")
     echo "[codex-attest] branch-diff worktree: $WORKTREE @ $HEAD_SHA_FOR_PATCH"
 else
-    REVIEW_ARGS="$FOCUS"
+    # working-tree path: split FOCUS into an array (existing callers pass paths separated by spaces)
+    # shellcheck disable=SC2206
+    REVIEW_ARGS=( $FOCUS )
 fi
 
 # Translate internal SCOPE to codex-companion CLI name
@@ -120,7 +137,7 @@ case "$SCOPE" in
     branch-diff) NODE_SCOPE="branch" ;;
     *) NODE_SCOPE="$SCOPE" ;;
 esac
-"$NODE_BIN" "$CODEX_PATH" adversarial-review --wait --scope "$NODE_SCOPE" $REVIEW_ARGS 2>&1 | tee "$TMP_OUT"
+"$NODE_BIN" "$CODEX_PATH" adversarial-review --wait --scope "$NODE_SCOPE" "${REVIEW_ARGS[@]}" 2>&1 | tee "$TMP_OUT"
 CODEX_EXIT=${PIPESTATUS[0]}
 
 # Extract verdict from stdout. codex-companion emits markdown with "Verdict: X"

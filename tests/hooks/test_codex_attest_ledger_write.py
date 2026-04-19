@@ -408,6 +408,54 @@ exit 0
                                       cwd=temp_git_repo, capture_output=True, text=True).stdout.strip()
             assert f"branch:feat@{feat_sha}" not in data.get("entries", {})
 
+    def test_worktree_path_with_spaces_preserved_H4R3(self, temp_git_repo, ledger_path, tmp_path):
+        """H4R3-F1: TMPDIR with spaces must not cause word-splitting of --cwd."""
+        MARKER = "m_spaces.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+
+        # Stub asserts --cwd receives exactly one path (not split)
+        stub_dir = temp_git_repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub.write_text(f'''#!/usr/bin/env bash
+FOUND_CWD=""
+cwd_count=0
+argc=$#
+i=1
+while [ $i -le $argc ]; do
+    eval cur=\\${{$i}}
+    if [ "$cur" = "--cwd" ]; then
+        cwd_count=$((cwd_count+1))
+        nxt=$((i+1))
+        eval FOUND_CWD=\\${{$nxt}}
+    fi
+    i=$((i+1))
+done
+if [ "$cwd_count" -ne 1 ]; then echo "# Codex"; echo "Verdict: needs-attention"; echo "why: --cwd count=$cwd_count"; exit 0; fi
+# FOUND_CWD should be the full worktree path even if it contains spaces
+if [ ! -d "$FOUND_CWD" ]; then echo "# Codex"; echo "Verdict: needs-attention"; echo "why: --cwd not a dir"; exit 0; fi
+if [ ! -f "$FOUND_CWD/{MARKER}" ]; then echo "# Codex"; echo "Verdict: needs-attention"; echo "why: marker missing"; exit 0; fi
+echo "# Codex Adversarial Review"
+echo "Verdict: approve"
+exit 0
+''')
+        stub.chmod(0o755)
+        tmp_with_spaces = tmp_path / "dir with spaces"
+        tmp_with_spaces.mkdir()
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1",
+               "TMPDIR": str(tmp_with_spaces)}
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (
+            f"TMPDIR with spaces should be preserved via array expansion; got {r.returncode}\n"
+            f"stdout={r.stdout}\nstderr={r.stderr}"
+        )
+
     def test_codex_receives_frozen_base_sha_not_ref_H4R2(self, temp_git_repo, ledger_path):
         """H4R2: --base argv to codex must be the frozen SHA (immutable), not the
         mutable ref name. Covers transient base-ref drift during review window."""
