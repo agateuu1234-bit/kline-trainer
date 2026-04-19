@@ -22,9 +22,10 @@ fi
 
 BASENAME=$(basename "$FILE_PATH")
 
-# Not an env file -> pass
+# Not an env file -> pass. Match .env, .env.*, .envrc, .envlocal, .envsomething.
+# H3R1-F2: use glob .env* to catch all basenames starting with .env.
 case "$BASENAME" in
-    .env|.env.*) ;;
+    .env*) ;;
     *) exit 0 ;;
 esac
 

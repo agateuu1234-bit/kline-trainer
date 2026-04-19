@@ -32,6 +32,12 @@ class TestEnvDenyDefault:
         r = call(temp_git_repo, "Read", "backend/.env.production")
         assert r.returncode == 2
 
+    def test_envrc_denied_H3R1F2(self, temp_git_repo):
+        """H3R1-F2: .envrc (direnv) and .envlocal (no dot) must be denied."""
+        for path in ("backend/.envrc", "backend/.envlocal", "backend/.envsomething"):
+            r = call(temp_git_repo, "Read", path)
+            assert r.returncode == 2, f"{path} MUST be denied; got {r.returncode}"
+
     def test_compound_suffix_denied_H3F1(self, temp_git_repo):
         """The hardening-2 residual: compound suffixes fell through to allow.
         Hardening-3 must close this."""

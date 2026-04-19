@@ -413,6 +413,35 @@ EOF"""
         )
         assert r.returncode == 0, f"heredoc body should be stripped; got block:\n{r.stderr}"
 
+    def test_heredoc_attached_to_bash_NOT_stripped_H3R1F1(self, temp_git_repo):
+        """H3R1-F1 CRITICAL: bash <<EOF ... EOF executes body. Must NOT be stripped.
+        Detector should see 'git push' and NOT exit 0 (should BLOCK or scenario-A block)."""
+        cmd = """bash <<EOF
+git push -u origin feat
+EOF"""
+        r = run_hook(
+            hook_path(temp_git_repo),
+            {"tool_name": "Bash", "tool_input": {"command": cmd}},
+            temp_git_repo,
+        )
+        # Must NOT exit 0. Either scenario A fires (no ledger → block) or BLOCK_UNPARSEABLE.
+        assert r.returncode != 0, (
+            f"bash <<EOF git push EOF would execute; hook MUST not pass.\n"
+            f"If it exited 0, heredoc strip hid the push from detection. stderr={r.stderr}"
+        )
+
+    def test_heredoc_attached_to_sh_NOT_stripped_H3R1F1(self, temp_git_repo):
+        """Same for sh."""
+        cmd = """sh <<EOF
+gh pr merge 42
+EOF"""
+        r = run_hook(
+            hook_path(temp_git_repo),
+            {"tool_name": "Bash", "tool_input": {"command": cmd}},
+            temp_git_repo,
+        )
+        assert r.returncode != 0
+
     def test_heredoc_unquoted_tag_also_stripped(self, temp_git_repo):
         """<<EOF (no quotes) same treatment."""
         cmd = """cat > /tmp/test.md <<EOF
