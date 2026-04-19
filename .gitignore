@@ -45,3 +45,11 @@ secrets/
 # gov-bootstrap-hardening: keep local attestation state out of git
 .claude/state/*
 !.claude/state/.gitkeep
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+*.moved-aside
+DerivedData/
+*.hmap
+*.ipa
