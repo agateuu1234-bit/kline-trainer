@@ -50,6 +50,7 @@ if [ "${CODEX_ATTEST_TEST_MODE:-0}" != "1" ]; then
     case "$NODE_BIN" in
         /usr/bin/node|/usr/local/bin/node|/opt/homebrew/bin/node|/opt/local/bin/node) ;;
         "$HOME"/.nvm/*|"$HOME"/.volta/*|"$HOME"/.asdf/*) ;;
+        /opt/homebrew/Cellar/node*/bin/node) ;;  # Homebrew realpath (bootstrap fix 2026-04-19)
         *)
             echo "[codex-attest] ERROR: node resolved to untrusted path: $NODE_BIN" >&2
             echo "  Allowlist: /usr/bin, /usr/local/bin, /opt/homebrew/bin, /opt/local/bin, \$HOME/.nvm, \$HOME/.volta, \$HOME/.asdf" >&2
@@ -100,33 +101,42 @@ if [ "$SCOPE" = "branch-diff" ]; then
         echo "[codex-attest] ERROR: cannot compute $BASE...$HEAD_BR diff for patch" >&2
         exit 6
     }
-    REVIEW_ARGS="--focus $TMP_PATCH"
+    REVIEW_ARGS="--base $BASE --focus $TMP_PATCH"
     echo "[codex-attest] branch-diff patch: $TMP_PATCH ($BASE...$HEAD_BR @ $HEAD_SHA_FOR_PATCH)"
 else
     REVIEW_ARGS="$FOCUS"
 fi
 
-"$NODE_BIN" "$CODEX_PATH" adversarial-review --wait --scope "$SCOPE" $REVIEW_ARGS 2>&1 | tee "$TMP_OUT"
+# Translate internal SCOPE to codex-companion CLI name
+case "$SCOPE" in
+    branch-diff) NODE_SCOPE="branch" ;;
+    *) NODE_SCOPE="$SCOPE" ;;
+esac
+"$NODE_BIN" "$CODEX_PATH" adversarial-review --wait --scope "$NODE_SCOPE" $REVIEW_ARGS 2>&1 | tee "$TMP_OUT"
 CODEX_EXIT=${PIPESTATUS[0]}
 
-# Extract verdict JSON from stdout (codex-companion emits single JSON somewhere)
+# Extract verdict from stdout. codex-companion emits markdown with "Verdict: X"
+# line which is reliable; JSON form in log is often truncated. Try markdown first.
 VERDICT=$(python3 - "$TMP_OUT" <<'PY'
 import json, re, sys
 text = open(sys.argv[1]).read()
-# Try to find last JSON object in output
+# Primary: markdown "Verdict: <label>" line from the final rendered review
+for line in reversed(text.splitlines()):
+    m = re.match(r'^Verdict:\s*(approve|needs-attention|request-changes|reject|block)\s*$', line.strip())
+    if m:
+        print(m.group(1)); sys.exit(0)
+# Fallback 1: complete JSON object anywhere in text
 objs = re.findall(r'\{[^{}]*"verdict"\s*:\s*"[^"]+"[^{}]*\}', text)
-if not objs:
-    # fallback: try parse each line as JSON
-    for line in reversed(text.splitlines()):
-        line=line.strip()
-        if line.startswith("{") and '"verdict"' in line:
-            try: print(json.loads(line)["verdict"]); sys.exit(0)
-            except Exception: pass
-    print("unknown"); sys.exit(0)
-try:
-    print(json.loads(objs[-1])["verdict"])
-except Exception:
-    print("unknown")
+if objs:
+    try: print(json.loads(objs[-1])["verdict"]); sys.exit(0)
+    except Exception: pass
+# Fallback 2: line-by-line JSON parse
+for line in reversed(text.splitlines()):
+    line = line.strip()
+    if line.startswith("{") and '"verdict"' in line:
+        try: print(json.loads(line)["verdict"]); sys.exit(0)
+        except Exception: pass
+print("unknown")
 PY
 )
 
@@ -154,10 +164,16 @@ if [ "$SCOPE" = "working-tree" ] && [ -n "$FOCUS" ]; then
         echo "[codex-attest] ledger: file:$f blob=$BLOB"
     done
 elif [ "$SCOPE" = "branch-diff" ]; then
-    HEAD_SHA=$(git rev-parse "$HEAD_BR")
-    FP=$(ledger_compute_branch_fingerprint "$BASE" "$HEAD_BR")
-    ledger_write_branch "$HEAD_BR" "$HEAD_SHA" "$BASE" "$FP" "$NOW" "$VERDICT_DIGEST" "$ROUND"
-    echo "[codex-attest] ledger: branch:$HEAD_BR@$HEAD_SHA fp=$FP"
+    # BD-R2-F1: verify HEAD_BR didn't advance during review
+    HEAD_SHA_AFTER_REVIEW=$(git rev-parse "$HEAD_BR")
+    if [ "$HEAD_SHA_AFTER_REVIEW" != "$HEAD_SHA_FOR_PATCH" ]; then
+        echo "[codex-attest] ERROR: $HEAD_BR moved during review ($HEAD_SHA_FOR_PATCH -> $HEAD_SHA_AFTER_REVIEW); ledger NOT updated" >&2
+        exit 13
+    fi
+    # Use frozen SHA for fingerprint so it matches the exact reviewed diff
+    FP=$(ledger_compute_branch_fingerprint "$BASE" "$HEAD_SHA_FOR_PATCH")
+    ledger_write_branch "$HEAD_BR" "$HEAD_SHA_FOR_PATCH" "$BASE" "$FP" "$NOW" "$VERDICT_DIGEST" "$ROUND"
+    echo "[codex-attest] ledger: branch:$HEAD_BR@$HEAD_SHA_FOR_PATCH fp=$FP"
 fi
 
 echo "[codex-attest] verdict=approve; ledger updated."
