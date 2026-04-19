@@ -430,6 +430,31 @@ EOF"""
             f"If it exited 0, heredoc strip hid the push from detection. stderr={r.stderr}"
         )
 
+    def test_heredoc_piped_to_sh_NOT_stripped_H3R2F1(self, temp_git_repo):
+        """H3R2-F1: cat <<EOF | sh ... EOF pipes body to shell → must not strip."""
+        cmd = """cat <<'EOF' | sh
+git push -u origin feat
+EOF"""
+        r = run_hook(
+            hook_path(temp_git_repo),
+            {"tool_name": "Bash", "tool_input": {"command": cmd}},
+            temp_git_repo,
+        )
+        assert r.returncode != 0, f"pipeline exec must not be hidden; stderr={r.stderr}"
+
+    def test_heredoc_in_command_sub_NOT_stripped(self, temp_git_repo):
+        """python3 -c "$(cat <<EOF ... EOF)" → body executes; must not strip."""
+        cmd = '''python3 -c "$(cat <<'EOF'
+import os; os.system('git push -u origin feat')
+EOF
+)"'''
+        r = run_hook(
+            hook_path(temp_git_repo),
+            {"tool_name": "Bash", "tool_input": {"command": cmd}},
+            temp_git_repo,
+        )
+        assert r.returncode != 0
+
     def test_heredoc_attached_to_sh_NOT_stripped_H3R1F1(self, temp_git_repo):
         """Same for sh."""
         cmd = """sh <<EOF
