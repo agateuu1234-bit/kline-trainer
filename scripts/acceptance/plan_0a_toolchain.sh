@@ -72,8 +72,15 @@ check "FastAPI health test passes" bash -c '
     cd backend && python3 -m pytest tests/test_health.py -q 2>&1 | grep -q "1 passed"
 '
 
-# 7. NAS preflight
-check "NAS preflight passes" bash scripts/nas-preflight.sh
+# 7. NAS preflight — opt-in via ACCEPT_WITH_NAS=1
+# Default skip: repo-local acceptance should not require private NAS infrastructure.
+# Clean clones, CI, and reviewers don't have backend/.env or a reachable NAS.
+# Real deployment verification is a separate concern from repo acceptance.
+if [ "${ACCEPT_WITH_NAS:-0}" = "1" ]; then
+    check "NAS preflight passes" bash scripts/nas-preflight.sh
+else
+    echo "SKIP  NAS preflight (set ACCEPT_WITH_NAS=1 to include; needs backend/.env + live NAS)"
+fi
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

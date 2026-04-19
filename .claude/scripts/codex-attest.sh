@@ -101,7 +101,7 @@ if [ "$SCOPE" = "branch-diff" ]; then
         echo "[codex-attest] ERROR: cannot compute $BASE...$HEAD_BR diff for patch" >&2
         exit 6
     }
-    REVIEW_ARGS="--focus $TMP_PATCH"
+    REVIEW_ARGS="--base $BASE --focus $TMP_PATCH"
     echo "[codex-attest] branch-diff patch: $TMP_PATCH ($BASE...$HEAD_BR @ $HEAD_SHA_FOR_PATCH)"
 else
     REVIEW_ARGS="$FOCUS"
@@ -164,10 +164,16 @@ if [ "$SCOPE" = "working-tree" ] && [ -n "$FOCUS" ]; then
         echo "[codex-attest] ledger: file:$f blob=$BLOB"
     done
 elif [ "$SCOPE" = "branch-diff" ]; then
-    HEAD_SHA=$(git rev-parse "$HEAD_BR")
-    FP=$(ledger_compute_branch_fingerprint "$BASE" "$HEAD_BR")
-    ledger_write_branch "$HEAD_BR" "$HEAD_SHA" "$BASE" "$FP" "$NOW" "$VERDICT_DIGEST" "$ROUND"
-    echo "[codex-attest] ledger: branch:$HEAD_BR@$HEAD_SHA fp=$FP"
+    # BD-R2-F1: verify HEAD_BR didn't advance during review
+    HEAD_SHA_AFTER_REVIEW=$(git rev-parse "$HEAD_BR")
+    if [ "$HEAD_SHA_AFTER_REVIEW" != "$HEAD_SHA_FOR_PATCH" ]; then
+        echo "[codex-attest] ERROR: $HEAD_BR moved during review ($HEAD_SHA_FOR_PATCH -> $HEAD_SHA_AFTER_REVIEW); ledger NOT updated" >&2
+        exit 13
+    fi
+    # Use frozen SHA for fingerprint so it matches the exact reviewed diff
+    FP=$(ledger_compute_branch_fingerprint "$BASE" "$HEAD_SHA_FOR_PATCH")
+    ledger_write_branch "$HEAD_BR" "$HEAD_SHA_FOR_PATCH" "$BASE" "$FP" "$NOW" "$VERDICT_DIGEST" "$ROUND"
+    echo "[codex-attest] ledger: branch:$HEAD_BR@$HEAD_SHA_FOR_PATCH fp=$FP"
 fi
 
 echo "[codex-attest] verdict=approve; ledger updated."
