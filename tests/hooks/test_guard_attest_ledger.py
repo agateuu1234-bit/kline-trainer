@@ -331,6 +331,72 @@ class TestOverrideRecognitionP1F3:
         assert "tamper" in (r.stderr + r.stdout).lower() or "missing" in (r.stderr + r.stdout).lower()
 
 
+class TestDriftCeilingH32:
+    """H3-2 a3: push is blocked when new_drift_since_last_push > DRIFT_PUSH_THRESHOLD."""
+
+    def _setup_branch_with_ledger(self, repo, branch="feat"):
+        setup_repo_with_remote(repo)
+        subprocess.run(["git", "checkout", "-qb", branch], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-qm", "empty"], cwd=repo, check=True)
+        head_sha = subprocess.run(["git", "rev-parse", branch],
+                                  cwd=repo, capture_output=True, text=True).stdout.strip()
+        fp_proc = subprocess.run(
+            ["bash", "-c",
+             f"git diff --no-color --no-ext-diff origin/main...{branch} | shasum -a 256 | awk '{{print $1}}'"],
+            cwd=repo, capture_output=True, text=True, check=True)
+        fp = "sha256:" + fp_proc.stdout.strip()
+        ledger = repo / ".claude/state/attest-ledger.json"
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(json.dumps({
+            "version": 1,
+            "entries": {
+                f"branch:{branch}@{head_sha}": {
+                    "kind": "branch", "head_sha": head_sha, "base": "origin/main",
+                    "diff_fingerprint": fp, "attest_time_utc": "now",
+                    "verdict_digest": "sha256:y", "codex_round": 1,
+                },
+            },
+        }))
+
+    def test_drift_below_threshold_passes(self, temp_git_repo):
+        self._setup_branch_with_ledger(temp_git_repo)
+        drift = temp_git_repo / ".claude/state/skill-gate-drift.jsonl"
+        drift.write_text("\n".join(f'{{"i":{i}}}' for i in range(3)) + "\n")
+        (temp_git_repo / ".claude/state/skill-gate-push-cursor.txt").write_text("0\n")
+        r = run_hook(hook_path(temp_git_repo),
+                     {"tool_name": "Bash",
+                      "tool_input": {"command": "git push -u origin feat"}},
+                     temp_git_repo)
+        assert r.returncode == 0, f"expected pass; stderr={r.stderr}"
+
+    def test_drift_above_threshold_blocks(self, temp_git_repo):
+        self._setup_branch_with_ledger(temp_git_repo)
+        drift = temp_git_repo / ".claude/state/skill-gate-drift.jsonl"
+        drift.write_text("\n".join(f'{{"i":{i}}}' for i in range(10)) + "\n")
+        (temp_git_repo / ".claude/state/skill-gate-push-cursor.txt").write_text("0\n")
+        r = run_hook(hook_path(temp_git_repo),
+                     {"tool_name": "Bash",
+                      "tool_input": {"command": "git push -u origin feat"}},
+                     temp_git_repo)
+        assert r.returncode != 0
+        combined = r.stderr + r.stdout
+        assert "drift" in combined.lower()
+        assert "ack-drift" in combined
+
+    def test_env_override_bypasses(self, temp_git_repo):
+        self._setup_branch_with_ledger(temp_git_repo)
+        drift = temp_git_repo / ".claude/state/skill-gate-drift.jsonl"
+        drift.write_text("\n".join(f'{{"i":{i}}}' for i in range(20)) + "\n")
+        env = {**os.environ, "DRIFT_PUSH_OVERRIDE": "1"}
+        r = subprocess.run(
+            ["bash", str(hook_path(temp_git_repo))],
+            input=json.dumps({"tool_name": "Bash",
+                              "tool_input": {"command": "git push -u origin feat"}}),
+            capture_output=True, text=True, cwd=temp_git_repo, env=env,
+        )
+        assert r.returncode == 0, f"DRIFT_PUSH_OVERRIDE should bypass; stderr={r.stderr}"
+
+
 class TestShellOpsFilterH24:
     """H2-4: refspec parser must skip shell redirect/operator tokens.
 

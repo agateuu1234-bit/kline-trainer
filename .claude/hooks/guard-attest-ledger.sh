@@ -354,6 +354,20 @@ $branch_violation"
     exit 0
 }
 
+# H3-2 a3: drift ceiling check (block push when too many unacked skill-gate drifts)
+DRIFT_LOG=".claude/state/skill-gate-drift.jsonl"
+CURSOR_FILE=".claude/state/skill-gate-push-cursor.txt"
+DRIFT_PUSH_THRESHOLD="${DRIFT_PUSH_THRESHOLD:-5}"
+current_drift_count=$([ -f "$DRIFT_LOG" ] && wc -l < "$DRIFT_LOG" | tr -d ' ' || echo 0)
+drift_cursor=$([ -f "$CURSOR_FILE" ] && cat "$CURSOR_FILE" | tr -d ' \n' || echo 0)
+case "$drift_cursor" in
+    ''|*[!0-9]*) drift_cursor=0 ;;
+esac
+new_drift=$((current_drift_count - drift_cursor))
+if [ "$new_drift" -gt "$DRIFT_PUSH_THRESHOLD" ] && [ "${DRIFT_PUSH_OVERRIDE:-0}" != "1" ]; then
+    block "Skill-gate drift since last push = $new_drift (> threshold $DRIFT_PUSH_THRESHOLD). Run .claude/scripts/ack-drift.sh in a real tty to acknowledge and advance cursor; or set DRIFT_PUSH_OVERRIDE=1 in your own shell (NOT Claude's Bash tool) to bypass once."
+fi
+
 case "$SCENARIO" in
     A) scenario_A ;;
     B) scenario_B ;;
