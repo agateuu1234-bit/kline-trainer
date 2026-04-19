@@ -28,6 +28,20 @@ for var in NAS_HOST POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB DB_URL; do
     fi
 done
 
+# 1c. 检查是否还是默认/弱密码（BD-F3）
+case "${POSTGRES_PASSWORD}" in
+    changeme|change_me|password|postgres|123456|admin)
+        echo "FAIL: POSTGRES_PASSWORD 仍是默认/弱值 '$POSTGRES_PASSWORD'"
+        echo "  操作：编辑 backend/.env，把 POSTGRES_PASSWORD 改成一个真实的强密码"
+        exit 1
+        ;;
+esac
+if [ "${#POSTGRES_PASSWORD}" -lt 8 ]; then
+    echo "FAIL: POSTGRES_PASSWORD 长度不足 8 位（当前 ${#POSTGRES_PASSWORD} 位）"
+    echo "  操作：编辑 backend/.env，把密码改长"
+    exit 1
+fi
+
 # 2. 检查 NAS 网络可达
 echo -n "Checking NAS network ($NAS_HOST)... "
 if ping -c 1 -W 3 "$NAS_HOST" > /dev/null 2>&1; then

@@ -10,9 +10,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      # NAS 上系统 PostgreSQL 占用 5432，Docker 容器映射到 5433
-      # 本地开发如无冲突可改回 "5432:5432"
-      - "5433:5432"
+      # 默认只绑 localhost（127.0.0.1）— 避免 changeme 默认密码暴露到 LAN
+      # NAS 部署若需要跨机访问，需在 .env 里显式设 DB_BIND_HOST=0.0.0.0 并同步改掉默认密码
+      # 本地开发如无冲突可把 5433 改回 5432
+      - "${DB_BIND_HOST:-127.0.0.1}:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 
