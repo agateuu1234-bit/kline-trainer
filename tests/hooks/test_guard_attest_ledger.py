@@ -397,6 +397,35 @@ class TestDriftCeilingH32:
         assert r.returncode == 0, f"DRIFT_PUSH_OVERRIDE should bypass; stderr={r.stderr}"
 
 
+class TestHeredocStrippingH33:
+    """H3-3: detect_scenario must strip heredoc body before scanning for protected commands."""
+
+    def test_heredoc_with_git_push_text_not_false_positive(self, temp_git_repo):
+        """Bash command with heredoc body containing 'git push' text must NOT trigger BLOCK_UNPARSEABLE."""
+        cmd = """cat > /tmp/test.md <<'EOF'
+documentation mentions git push as a concept
+also gh pr create was used earlier
+EOF"""
+        r = run_hook(
+            hook_path(temp_git_repo),
+            {"tool_name": "Bash", "tool_input": {"command": cmd}},
+            temp_git_repo,
+        )
+        assert r.returncode == 0, f"heredoc body should be stripped; got block:\n{r.stderr}"
+
+    def test_heredoc_unquoted_tag_also_stripped(self, temp_git_repo):
+        """<<EOF (no quotes) same treatment."""
+        cmd = """cat > /tmp/test.md <<EOF
+body with git push reference
+EOF"""
+        r = run_hook(
+            hook_path(temp_git_repo),
+            {"tool_name": "Bash", "tool_input": {"command": cmd}},
+            temp_git_repo,
+        )
+        assert r.returncode == 0
+
+
 class TestShellOpsFilterH24:
     """H2-4: refspec parser must skip shell redirect/operator tokens.
 

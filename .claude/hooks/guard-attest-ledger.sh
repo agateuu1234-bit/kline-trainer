@@ -26,7 +26,10 @@ block() {
 #   `cd repo && git push`.
 # If chained in a form we can't parse, conservatively BLOCK. ---
 detect_scenario() {
-    local cmd=" $CMD "
+    # H3-3: strip heredoc body so literal git push / gh pr text inside heredocs doesn't false-positive
+    local stripped_cmd
+    stripped_cmd=$(printf '%s' "$CMD" | python3 "$(dirname "$0")/../scripts/strip-heredoc.py" 2>/dev/null || printf '%s' "$CMD")
+    local cmd=" $stripped_cmd "
     # cd && git push is unparseable (we can't know the working dir) → BLOCK_UNPARSEABLE
     if printf '%s' "$CMD" | grep -qE '^cd[[:space:]]'; then
         if printf '%s' "$CMD" | grep -qE '(git[[:space:]]+push|gh[[:space:]]+pr[[:space:]]+(create|merge))'; then
