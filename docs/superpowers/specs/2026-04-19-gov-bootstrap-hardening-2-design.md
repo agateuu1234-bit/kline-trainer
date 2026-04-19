@@ -291,4 +291,11 @@ SRC_BRANCH=$(echo "$CMD" | awk '{
 
 ## 11. Round-by-round responses
 
-（空；待 codex 评审后填）
+### Branch-diff Round 1 (commit 8516cd5)
+
+| Finding | 处置 |
+|---|---|
+| H2R1-F1 [high]: `.env.ci` / `.env.qa` / `.env.uat` / `.env.preview` / `.env.backup` 未枚举 → fall through 到 catch-all allow | **接受 + 修**（commit `67c12fc`）：enumeration 扩展 23 个变体（ci/qa/uat/preview/stage/pre, backup/bak/old/orig, shared/personal/remote, heroku/vercel/netlify/fly/render/railway, docker/compose/k8s, nas）。新测试 `test_env_ci_and_ops_variants_denied_H2R1` 覆盖。**残余风险**：真正未知的自定义后缀（如 `.env.abc123`）仍会 fall through；根治方案 = content-aware 样例识别 hook，延 hardening-3 |
+| H2R1-F2 [high]: skill-gate stop-hook drift-log 不 block 等于绕过 pipeline | **不接受（push-back）**。此设计是用户在本 spec brainstorm Q2 里**显式选择的方案 d**（"自动推断 skill + drift log + `auto-injected` 审计标签"）。理由：spec §2 用户语境下本 session 观察到 29 次违规打扰；"fail-closed"方案已被证明对 Claude 的注意力扛不住依赖；drift log 保留审计可追溯，且后续 session 可统计读 log 做 rollup。本 PR 明示**不承诺** hard-block 政策；policy 文本对应调整应与此 PR 同步。如 reviewer 坚持此为 blocker，escalate 用户重新裁决 Q2 |
+
+（后续 rounds 的 findings + 处置按需追加）
