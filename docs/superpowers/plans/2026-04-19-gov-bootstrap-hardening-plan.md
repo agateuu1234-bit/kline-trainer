@@ -371,6 +371,39 @@ class TestComputeBranchDiffFingerprint:
         assert r1.returncode == 0 and r2.returncode == 0
         assert r1.stdout.strip() == r2.stdout.strip()
         assert r1.stdout.strip().startswith("sha256:")
+
+
+class TestOverrideAccessors:
+    """P1-F3: guard reads override entries via these accessors."""
+    def test_file_override_blob_when_entry_is_override(self, temp_git_repo, ledger_path):
+        ledger_path.write_text(json.dumps({
+            "version": 1,
+            "entries": {"file:x.md": {
+                "kind": "file", "override": True,
+                "blob_or_head_sha_at_override": "abc123",
+                "audit_log_line": 2,
+            }},
+        }))
+        r = run_lib_fn("ledger_get_file_override_blob", ["x.md"], temp_git_repo)
+        assert r.stdout.strip() == "abc123"
+
+    def test_file_override_blob_empty_for_non_override_entry(self, temp_git_repo, ledger_path):
+        ledger_path.write_text(json.dumps({
+            "version": 1,
+            "entries": {"file:x.md": {"kind": "file", "blob_sha": "abc"}},
+        }))
+        r = run_lib_fn("ledger_get_file_override_blob", ["x.md"], temp_git_repo)
+        assert r.stdout.strip() == ""
+
+    def test_validate_audit_log_line_ok(self, temp_git_repo, override_log_path):
+        override_log_path.write_text('{"one":1}\n{"two":2}\n{"three":3}\n')
+        r = run_lib_fn("ledger_validate_audit_log_line", ["2"], temp_git_repo)
+        assert r.returncode == 0
+
+    def test_validate_audit_log_line_tampered(self, temp_git_repo, override_log_path):
+        override_log_path.write_text('{"one":1}\n')
+        r = run_lib_fn("ledger_validate_audit_log_line", ["5"], temp_git_repo)
+        assert r.returncode != 0
 ```
 
 - [ ] **Step 2: Run tests — expect failures**
@@ -494,6 +527,67 @@ ledger_compute_branch_fingerprint() {
     local sha
     sha=$(printf '%s' "$diff_output" | shasum -a 256 | awk '{print $1}')
     printf 'sha256:%s\n' "$sha"
+}
+
+# P1-F3: override entry accessors (guard uses these to honor attest-override.sh)
+ledger_get_file_override_blob() {
+    # $1 = relpath; prints blob_or_head_sha_at_override if entry is override, else empty
+    [ -f "$LEDGER_PATH" ] || return 0
+    python3 - "$LEDGER_PATH" "$1" <<'PY'
+import json, sys
+p, rel = sys.argv[1:3]
+try: d=json.load(open(p))
+except Exception: print(""); sys.exit(0)
+e=d.get("entries",{}).get(f"file:{rel}")
+print(e.get("blob_or_head_sha_at_override","") if (e and e.get("override")) else "")
+PY
+}
+
+ledger_get_file_override_log_line() {
+    [ -f "$LEDGER_PATH" ] || return 0
+    python3 - "$LEDGER_PATH" "$1" <<'PY'
+import json, sys
+p, rel = sys.argv[1:3]
+try: d=json.load(open(p))
+except Exception: print(""); sys.exit(0)
+e=d.get("entries",{}).get(f"file:{rel}")
+print(str(e.get("audit_log_line","")) if (e and e.get("override")) else "")
+PY
+}
+
+ledger_get_branch_override_head() {
+    # args: <branch> <head_sha>
+    [ -f "$LEDGER_PATH" ] || return 0
+    python3 - "$LEDGER_PATH" "$1" "$2" <<'PY'
+import json, sys
+p, branch, head = sys.argv[1:4]
+try: d=json.load(open(p))
+except Exception: print(""); sys.exit(0)
+e=d.get("entries",{}).get(f"branch:{branch}@{head}")
+print(e.get("blob_or_head_sha_at_override","") if (e and e.get("override")) else "")
+PY
+}
+
+ledger_get_branch_override_log_line() {
+    [ -f "$LEDGER_PATH" ] || return 0
+    python3 - "$LEDGER_PATH" "$1" "$2" <<'PY'
+import json, sys
+p, branch, head = sys.argv[1:4]
+try: d=json.load(open(p))
+except Exception: print(""); sys.exit(0)
+e=d.get("entries",{}).get(f"branch:{branch}@{head}")
+print(str(e.get("audit_log_line","")) if (e and e.get("override")) else "")
+PY
+}
+
+ledger_validate_audit_log_line() {
+    # $1 = claimed line number; returns 0 if the audit log has at least that many lines
+    local claimed="$1"
+    [ -z "$claimed" ] && return 1
+    [ -f "$OVERRIDE_LOG_PATH" ] || return 1
+    local actual
+    actual=$(wc -l < "$OVERRIDE_LOG_PATH" | tr -d ' ')
+    [ "$claimed" -le "$actual" ]
 }
 ```
 
@@ -960,10 +1054,27 @@ fi
 # Run codex; capture stdout to both terminal and buffer so we can parse verdict.
 echo "[codex-attest] invoking codex-companion"
 TMP_OUT=$(mktemp)
-trap 'rm -f "$TMP_OUT"' EXIT
+TMP_PATCH=""
+trap 'rm -f "$TMP_OUT" ${TMP_PATCH:+"$TMP_PATCH"}' EXIT
 
-# Note: node is expected to be on PATH; tests stub via PATH prefix
-node "$CODEX_PATH" adversarial-review --wait --scope "$SCOPE" $FOCUS 2>&1 | tee "$TMP_OUT"
+# P1-F1 fix: in branch-diff mode, generate a canonical patch file and hand it
+# to codex as the review target via --focus (FOCUS was previously empty in
+# branch-diff mode, causing approve to be written for an unreviewed target).
+REVIEW_ARGS=""
+if [ "$SCOPE" = "branch-diff" ]; then
+    TMP_PATCH=$(mktemp --suffix=.patch 2>/dev/null || mktemp -t codex-branchdiff)
+    HEAD_SHA_FOR_PATCH=$(git rev-parse "$HEAD_BR")
+    git diff --no-color --no-ext-diff "$BASE...$HEAD_BR" > "$TMP_PATCH" || {
+        echo "[codex-attest] ERROR: cannot compute $BASE...$HEAD_BR diff for patch" >&2
+        exit 6
+    }
+    REVIEW_ARGS="--focus $TMP_PATCH"
+    echo "[codex-attest] branch-diff patch: $TMP_PATCH ($BASE...$HEAD_BR @ $HEAD_SHA_FOR_PATCH)"
+else
+    REVIEW_ARGS="$FOCUS"
+fi
+
+node "$CODEX_PATH" adversarial-review --wait --scope "$SCOPE" $REVIEW_ARGS 2>&1 | tee "$TMP_OUT"
 CODEX_EXIT=${PIPESTATUS[0]}
 
 # Extract verdict JSON from stdout (codex-companion emits single JSON somewhere)
@@ -1020,17 +1131,65 @@ fi
 echo "[codex-attest] verdict=approve; ledger updated."
 ```
 
-- [ ] **Step 5: Run tests — expect pass**
+- [ ] **Step 5: Extend tests to assert patch file is passed to codex-companion (P1-F1 regression)**
+
+Add to `tests/hooks/test_codex_attest_ledger_write.py`:
+
+```python
+class TestBranchDiffPassesPatchToCodex:
+    def test_codex_receives_patch_file_path(self, temp_git_repo):
+        """Regression for P1-F1: branch-diff mode must hand the actual
+        diff to codex as --focus; an empty --focus would let codex approve
+        the wrong target."""
+        subprocess.run(["git", "commit", "--allow-empty", "-qm", "init"], cwd=temp_git_repo, check=True)
+        subprocess.run(["git", "branch", "-M", "main"], cwd=temp_git_repo, check=True)
+        subprocess.run(["git", "checkout", "-qb", "feat"], cwd=temp_git_repo, check=True)
+        (temp_git_repo / "f").write_text("x\n")
+        subprocess.run(["git", "add", "f"], cwd=temp_git_repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "m"], cwd=temp_git_repo, check=True)
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "main"],
+                       cwd=temp_git_repo, check=True)
+
+        # Stub that asserts --focus argv contains a .patch file whose content
+        # matches the branch diff, then emits approve.
+        stub_dir = temp_git_repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub.write_text("""#!/usr/bin/env bash
+# Find --focus arg and validate patch file exists + non-empty.
+FOUND=""
+for ((i=1;i<=$#;i++)); do
+    if [ "${!i}" = "--focus" ]; then
+        next=$((i+1))
+        FOUND="${!next}"
+    fi
+done
+if [ -z "$FOUND" ]; then echo '{"verdict":"needs-attention","why":"no --focus"}' ; exit 1; fi
+if [ ! -s "$FOUND" ]; then echo '{"verdict":"needs-attention","why":"empty focus"}' ; exit 1; fi
+echo '{"verdict":"approve"}'
+exit 0
+""")
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}"}
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+```
+
+- [ ] **Step 6: Run tests — expect pass**
 
 ```bash
 pytest tests/hooks/test_codex_attest_ledger_write.py -q
 ```
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add .claude/scripts/codex-attest.sh tests/hooks/test_codex_attest_ledger_write.py
-git commit -m "feat(codex-attest): add --scope branch-diff + ledger writeback on approve"
+git commit -m "feat(codex-attest): add --scope branch-diff + ledger writeback + patch-as-focus (P1-F1)"
 ```
 
 ---
@@ -1249,6 +1408,119 @@ class TestIgnoredCommands:
                      {"tool_name": "Bash", "tool_input": {"command": "ls -la"}},
                      temp_git_repo)
         assert r.returncode == 0
+
+
+class TestWrappedFormsP1F2:
+    """P1-F2: wrapped forms of git push / gh pr commands must not bypass the hook."""
+    def _setup(self, repo):
+        setup_repo_with_remote(repo)
+        subprocess.run(["git", "checkout", "-qb", "feat"], cwd=repo, check=True)
+        plan_file_at(repo, "docs/superpowers/plans/x.md", "plan x")
+
+    def test_env_prefixed_git_push_blocked(self, temp_git_repo):
+        self._setup(temp_git_repo)
+        r = run_hook(hook_path(temp_git_repo),
+                     {"tool_name": "Bash",
+                      "tool_input": {"command": "env FOO=bar git push -u origin feat"}},
+                     temp_git_repo)
+        assert r.returncode != 0
+
+    def test_command_prefixed_git_push_blocked(self, temp_git_repo):
+        self._setup(temp_git_repo)
+        r = run_hook(hook_path(temp_git_repo),
+                     {"tool_name": "Bash",
+                      "tool_input": {"command": "command git push -u origin feat"}},
+                     temp_git_repo)
+        assert r.returncode != 0
+
+    def test_git_C_push_blocked(self, temp_git_repo):
+        self._setup(temp_git_repo)
+        r = run_hook(hook_path(temp_git_repo),
+                     {"tool_name": "Bash",
+                      "tool_input": {"command": "git -C . push -u origin feat"}},
+                     temp_git_repo)
+        assert r.returncode != 0
+
+    def test_cd_chain_git_push_blocked(self, temp_git_repo):
+        self._setup(temp_git_repo)
+        r = run_hook(hook_path(temp_git_repo),
+                     {"tool_name": "Bash",
+                      "tool_input": {"command": "cd . && git push -u origin feat"}},
+                     temp_git_repo)
+        # cd chain → unparseable → conservative BLOCK
+        assert r.returncode != 0
+        assert "parse" in (r.stderr + r.stdout).lower() or "simplif" in (r.stderr + r.stdout).lower() \
+               or "x.md" in (r.stderr + r.stdout)
+
+    def test_gh_global_flag_before_pr_merge_blocked(self, temp_git_repo):
+        self._setup(temp_git_repo)
+        r = run_hook(hook_path(temp_git_repo),
+                     {"tool_name": "Bash",
+                      "tool_input": {"command": "gh --repo foo/bar pr merge 42"}},
+                     temp_git_repo)
+        assert r.returncode != 0
+
+
+class TestOverrideRecognitionP1F3:
+    """P1-F3: guard must honor override ledger entries."""
+    def test_override_file_entry_blob_match_passes(self, temp_git_repo, ledger_path, override_log_path):
+        setup_repo_with_remote(temp_git_repo)
+        subprocess.run(["git", "checkout", "-qb", "feat"], cwd=temp_git_repo, check=True)
+        blob = plan_file_at(temp_git_repo, "docs/superpowers/plans/x.md", "plan")
+        # Compute branch fp for ledger (still required for branch check)
+        head_sha = subprocess.run(["git", "rev-parse", "feat"],
+                                  cwd=temp_git_repo, capture_output=True, text=True).stdout.strip()
+        fp_proc = subprocess.run(
+            ["bash", "-c",
+             f"git diff --no-color --no-ext-diff origin/main...feat | shasum -a 256 | awk '{{print $1}}'"],
+            cwd=temp_git_repo, capture_output=True, text=True, check=True)
+        fp = "sha256:" + fp_proc.stdout.strip()
+
+        # Write override entry for the file + normal ledger for the branch
+        override_log_path.write_text('{"entry":1}\n')
+        ledger_path.write_text(json.dumps({
+            "version": 1,
+            "entries": {
+                "file:docs/superpowers/plans/x.md": {
+                    "kind": "file", "override": True,
+                    "blob_or_head_sha_at_override": blob,
+                    "audit_log_line": 1,
+                    "override_reason": "test", "override_time_utc": "now",
+                },
+                f"branch:feat@{head_sha}": {
+                    "kind": "branch", "head_sha": head_sha, "base": "origin/main",
+                    "diff_fingerprint": fp, "attest_time_utc": "now",
+                    "verdict_digest": "sha256:y", "codex_round": 1,
+                },
+            },
+        }))
+        r = run_hook(hook_path(temp_git_repo),
+                     {"tool_name": "Bash",
+                      "tool_input": {"command": "git push -u origin feat"}},
+                     temp_git_repo)
+        assert r.returncode == 0, f"expected PASS via override; stdout={r.stdout}\nstderr={r.stderr}"
+        assert "OVERRIDE IN USE" in (r.stderr + r.stdout)
+
+    def test_override_with_mismatched_audit_log_line_blocks(self, temp_git_repo, ledger_path, override_log_path):
+        setup_repo_with_remote(temp_git_repo)
+        subprocess.run(["git", "checkout", "-qb", "feat"], cwd=temp_git_repo, check=True)
+        blob = plan_file_at(temp_git_repo, "docs/superpowers/plans/x.md", "plan")
+
+        override_log_path.write_text('{"entry":1}\n')  # only 1 line
+        ledger_path.write_text(json.dumps({
+            "version": 1,
+            "entries": {"file:docs/superpowers/plans/x.md": {
+                "kind": "file", "override": True,
+                "blob_or_head_sha_at_override": blob,
+                "audit_log_line": 99,  # claims line 99 but log has only 1
+            }},
+        }))
+        r = run_hook(hook_path(temp_git_repo),
+                     {"tool_name": "Bash",
+                      "tool_input": {"command": "git push -u origin feat"}},
+                     temp_git_repo)
+        assert r.returncode != 0
+        assert "tamper" in (r.stderr + r.stdout).lower() or "missing" in (r.stderr + r.stdout).lower()
 ```
 
 - [ ] **Step 2: Run tests — expect failures**
@@ -1282,11 +1554,39 @@ block() {
     exit 2
 }
 
-# --- Dispatch by command prefix ---
-case "$CMD" in
-    "git push"*)   SCENARIO=A ;;
-    "gh pr create"*) SCENARIO=B ;;
-    "gh pr merge"*)  SCENARIO=C ;;
+# --- Dispatch by command content (P1-F2: match simple-command substring,
+# not just command prefix, to cover wrapped forms like:
+#   `command git push`, `env FOO=bar git push`, `git -C . push`,
+#   `cd repo && git push`, `sh -c 'git push ...'`, `gh --version && gh pr create`,
+# If a match is found but the command has shell chaining we can't parse,
+# conservatively block with a message telling the user to simplify. ---
+detect_scenario() {
+    # Normalize whitespace for matching
+    local cmd=" $CMD "
+    # Find simple-command occurrence: token boundary before `git push`/`gh pr create`/`gh pr merge`
+    if echo "$cmd" | grep -Eq '(^|[[:space:];&|(]|&&|\|\|)(command[[:space:]]+|env([[:space:]]+[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+)*[[:space:]]+)?git([[:space:]]+-[A-Za-z]|[[:space:]]+-C[[:space:]]+[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)'; then
+        echo A; return
+    fi
+    if echo "$cmd" | grep -Eq '(^|[[:space:];&|(]|&&|\|\|)(command[[:space:]]+|env([[:space:]]+[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+)*[[:space:]]+)?gh([[:space:]]+--[a-z-]+([[:space:]]+[^[:space:]]+)?)*[[:space:]]+pr[[:space:]]+create([[:space:]]|$)'; then
+        echo B; return
+    fi
+    if echo "$cmd" | grep -Eq '(^|[[:space:];&|(]|&&|\|\|)(command[[:space:]]+|env([[:space:]]+[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+)*[[:space:]]+)?gh([[:space:]]+--[a-z-]+([[:space:]]+[^[:space:]]+)?)*[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+        echo C; return
+    fi
+    # Substring fallback: if command contains git push or gh pr create/merge anywhere
+    # but doesn't match the regex above (complex chaining we can't parse), conservatively BLOCK.
+    if echo "$cmd" | grep -qE '(git[[:space:]]+push|gh[[:space:]]+pr[[:space:]]+(create|merge))'; then
+        echo BLOCK_UNPARSEABLE; return
+    fi
+    echo ""
+}
+
+SCENARIO=$(detect_scenario)
+case "$SCENARIO" in
+    A|B|C) ;;
+    BLOCK_UNPARSEABLE)
+        block "command contains git push / gh pr create / gh pr merge but is chained or wrapped in a form the hook cannot parse. Simplify to a bare command and retry. Raw command was: $CMD"
+        ;;
     *) exit 0 ;;
 esac
 
@@ -1309,14 +1609,28 @@ is_plan_or_spec_file() {
 
 check_file_entries() {
     # args: <ref> <file list>
+    # P1-F3: recognize override entries. ledger-lib `ledger_get_file_blob`
+    # currently returns empty for override entries; extend so that override
+    # entries with blob_or_head_sha_at_override == current_blob count as PASS.
     local ref="$1"; shift
     local violations=()
     for f in "$@"; do
         is_plan_or_spec_file "$f" || continue
-        local current_blob ledger_blob
+        local current_blob ledger_blob override_blob override_log_line
         current_blob=$(ledger_compute_file_blob_at_ref "$ref" "$f")
         [ -z "$current_blob" ] && { violations+=("$f (cannot resolve at $ref)"); continue; }
         ledger_blob=$(ledger_get_file_blob "$f")
+        override_blob=$(ledger_get_file_override_blob "$f")
+        override_log_line=$(ledger_get_file_override_log_line "$f")
+        if [ -n "$override_blob" ] && [ "$override_blob" = "$current_blob" ]; then
+            if ledger_validate_audit_log_line "$override_log_line"; then
+                echo "[guard-attest-ledger] OVERRIDE IN USE: file:$f (audit log line=$override_log_line)" >&2
+                continue
+            else
+                violations+=("$f (override audit log line=$override_log_line missing/tampered)")
+                continue
+            fi
+        fi
         if [ -z "$ledger_blob" ] || [ "$ledger_blob" != "$current_blob" ]; then
             violations+=("$f (blob=$current_blob, ledger=$ledger_blob)")
         fi
@@ -1326,10 +1640,22 @@ check_file_entries() {
 
 check_branch_entry() {
     # args: <branch> <head_sha> <base>
+    # P1-F3: same override recognition for branch entries
     local branch="$1" head="$2" base="$3"
-    local fp_current fp_ledger
+    local fp_current fp_ledger override_head override_log_line
     fp_current=$(ledger_compute_branch_fingerprint "$base" "$head")
     fp_ledger=$(ledger_get_branch_fingerprint "$branch" "$head")
+    override_head=$(ledger_get_branch_override_head "$branch" "$head")
+    override_log_line=$(ledger_get_branch_override_log_line "$branch" "$head")
+    if [ -n "$override_head" ] && [ "$override_head" = "$head" ]; then
+        if ledger_validate_audit_log_line "$override_log_line"; then
+            echo "[guard-attest-ledger] OVERRIDE IN USE: branch:$branch@$head (audit log line=$override_log_line)" >&2
+            return 0
+        else
+            echo "branch:$branch@$head (override audit log line=$override_log_line missing/tampered)"
+            return 0
+        fi
+    fi
     if [ -z "$fp_ledger" ] || [ "$fp_ledger" != "$fp_current" ]; then
         echo "branch:$branch@$head mismatch (current=$fp_current, ledger=$fp_ledger)"
     fi
@@ -1699,6 +2025,34 @@ class TestGitContentBypassDenyR6F2:
         assert "Bash(git grep *secrets/*)" in deny
 
 
+class TestBlobShaExfilDenyP1F4:
+    """P1-F4: two-step blob-SHA exfil (ls-files -s → show <sha>) must fail."""
+    def test_broad_git_show_allow_removed(self):
+        allow = set(load()["permissions"]["allow"])
+        assert "Bash(git show:*)" not in allow, \
+            "broad Bash(git show:*) allow enables show <blob-sha> bypass"
+
+    def test_git_cat_file_p_denied(self):
+        deny = set(load()["permissions"]["deny"])
+        assert "Bash(git cat-file -p:*)" in deny
+
+    def test_git_ls_files_s_secret_paths_denied(self):
+        deny = set(load()["permissions"]["deny"])
+        for p in ["Bash(git ls-files -s *.env*)",
+                  "Bash(git ls-files -s *secrets/*)",
+                  "Bash(git ls-files -s *.p12*)",
+                  "Bash(git ls-files -s *mobileprovision*)",
+                  "Bash(git ls-files -s *GoogleService-Info.plist*)",
+                  "Bash(git ls-files -s *.pem)",
+                  "Bash(git ls-files -s *id_rsa*)"]:
+            assert p in deny, f"missing deny: {p}"
+
+    def test_narrow_git_show_allow_still_usable(self):
+        allow = set(load()["permissions"]["allow"])
+        # At least one narrow form should remain so operators can still inspect commits
+        assert any(p.startswith("Bash(git show HEAD") for p in allow)
+
+
 class TestHookRegistration:
     def test_guard_attest_ledger_mounted_unconditional_bash(self):
         hooks = load()["hooks"]["PreToolUse"]
@@ -1734,8 +2088,13 @@ Read current settings.json fully. Then apply the following changes:
 - Append credential read/edit/write denies (**/.env*, **/.npmrc, **/.netrc, **/.pypirc, **/.pgpass, **/*.p12, **/*.pfx, **/*.mobileprovision, **/GoogleService-Info.plist, **/private_keys/**, **/*_private.key, **/*_rsa, **/fastlane/Appfile, **/fastlane/Matchfile, secrets/**, **/*.pem, **/*.key, **/id_rsa*, **/.ssh/**, **/.aws/credentials*)
 - Append `Bash(cat **/.env*)`, `Bash(cat **/secrets/**)`, `Bash(cat **/*.p12)`, `Bash(cat **/*.mobileprovision)`, `Bash(cat **/GoogleService-Info.plist)`, `Bash(cat **/.npmrc)`, `Bash(cat **/.netrc)`, `Bash(cat **/.pypirc)`
 - Append `Bash(* > **/.env*)`, `Bash(* > **/secrets/**)`
-- **R6-F2 git content denies**: `Bash(git show *.env*)`, `Bash(git show *secrets/*)`, `Bash(git show *.p12*)`, `Bash(git show *mobileprovision*)`, `Bash(git show *GoogleService-Info.plist*)`, `Bash(git show *.npmrc*)`, `Bash(git show *.netrc*)`, `Bash(git show *.pypirc*)`, `Bash(git show *fastlane/Appfile*)`, `Bash(git show *fastlane/Matchfile*)`, `Bash(git show *.pem)`, `Bash(git show *.key)`, `Bash(git show *id_rsa*)`, `Bash(git show *.ssh/*)`
+- **R6-F2 git content denies** (path-based): `Bash(git show *.env*)`, `Bash(git show *secrets/*)`, `Bash(git show *.p12*)`, `Bash(git show *mobileprovision*)`, `Bash(git show *GoogleService-Info.plist*)`, `Bash(git show *.npmrc*)`, `Bash(git show *.netrc*)`, `Bash(git show *.pypirc*)`, `Bash(git show *fastlane/Appfile*)`, `Bash(git show *fastlane/Matchfile*)`, `Bash(git show *.pem)`, `Bash(git show *.key)`, `Bash(git show *id_rsa*)`, `Bash(git show *.ssh/*)`
 - Same patterns for `Bash(git diff ...)` and `Bash(git grep ...)` and `Bash(git cat-file -p * .env*)` etc
+- **P1-F4 blob-SHA exfil** (two-step attack: `git ls-files -s <secret-glob>` → `git show <blob_sha>`)：
+  - **Remove** broad existing `allow`: `Bash(git show:*)` → replace with narrow explicit allows for non-sha targets (`Bash(git show HEAD)`, `Bash(git show HEAD:*)`, `Bash(git show --stat:*)`, `Bash(git show <N>)` patterns for refs only)
+  - Add deny: `Bash(git cat-file -p:*)` (raw object read of arbitrary sha)
+  - Add deny for `git ls-files -s` targeting secret paths: `Bash(git ls-files -s *.env*)`, `Bash(git ls-files -s *secrets/*)`, `Bash(git ls-files -s *.p12*)`, `Bash(git ls-files -s *mobileprovision*)`, `Bash(git ls-files -s *GoogleService-Info.plist*)`, `Bash(git ls-files -s *.pem)`, `Bash(git ls-files -s *.key)`, `Bash(git ls-files -s *id_rsa*)`, `Bash(git ls-files -s *.ssh/*)`, `Bash(git ls-files -s *.npmrc*)`, `Bash(git ls-files -s *.netrc*)`, `Bash(git ls-files -s *.pypirc*)`
+  - Add deny for `git hash-object` with credential paths (prevents writing arbitrary blobs too): `Bash(git hash-object *.env*)`, `Bash(git hash-object *secrets/*)`, similar set
 
 **In `hooks.PreToolUse`:**
 - Append a new matcher-Bash group (or append to existing Bash matcher) containing:
