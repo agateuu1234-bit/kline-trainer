@@ -95,7 +95,16 @@ entry = {
 with open(p, "a") as f:
     f.write(json.dumps(entry) + "\n")
 PY
-  echo "[stop-hook] drift logged (inferred skill: $inferred); please include 'Skill gate: ...' explicitly next response" >&2
+  DRIFT_COUNT=$(wc -l < "$DRIFT_LOG" 2>/dev/null | tr -d ' ' || echo 0)
+  echo "[skill-gate-drift] =================================" >&2
+  echo "  Previous response MISSED first-line Skill gate." >&2
+  echo "  First line was: $first_line" >&2
+  echo "  Inferred skill (from transcript): $inferred" >&2
+  echo "  Drift count (session log): $DRIFT_COUNT" >&2
+  echo "  YOUR NEXT RESPONSE MUST START WITH:" >&2
+  echo "    Skill gate: <skill-name>   OR   Skill gate: exempt(<whitelist-reason>)" >&2
+  echo "  (drift recorded; not blocking; push will block at threshold via H3-2)" >&2
+  echo "[skill-gate-drift] =================================" >&2
 fi
 
 # 2) Exempt reason whitelist
