@@ -110,24 +110,28 @@ fi
 "$NODE_BIN" "$CODEX_PATH" adversarial-review --wait --scope "$SCOPE" $REVIEW_ARGS 2>&1 | tee "$TMP_OUT"
 CODEX_EXIT=${PIPESTATUS[0]}
 
-# Extract verdict JSON from stdout (codex-companion emits single JSON somewhere)
+# Extract verdict from stdout. codex-companion emits markdown with "Verdict: X"
+# line which is reliable; JSON form in log is often truncated. Try markdown first.
 VERDICT=$(python3 - "$TMP_OUT" <<'PY'
 import json, re, sys
 text = open(sys.argv[1]).read()
-# Try to find last JSON object in output
+# Primary: markdown "Verdict: <label>" line from the final rendered review
+for line in reversed(text.splitlines()):
+    m = re.match(r'^Verdict:\s*(approve|needs-attention|request-changes|reject|block)\s*$', line.strip())
+    if m:
+        print(m.group(1)); sys.exit(0)
+# Fallback 1: complete JSON object anywhere in text
 objs = re.findall(r'\{[^{}]*"verdict"\s*:\s*"[^"]+"[^{}]*\}', text)
-if not objs:
-    # fallback: try parse each line as JSON
-    for line in reversed(text.splitlines()):
-        line=line.strip()
-        if line.startswith("{") and '"verdict"' in line:
-            try: print(json.loads(line)["verdict"]); sys.exit(0)
-            except Exception: pass
-    print("unknown"); sys.exit(0)
-try:
-    print(json.loads(objs[-1])["verdict"])
-except Exception:
-    print("unknown")
+if objs:
+    try: print(json.loads(objs[-1])["verdict"]); sys.exit(0)
+    except Exception: pass
+# Fallback 2: line-by-line JSON parse
+for line in reversed(text.splitlines()):
+    line = line.strip()
+    if line.startswith("{") and '"verdict"' in line:
+        try: print(json.loads(line)["verdict"]); sys.exit(0)
+        except Exception: pass
+print("unknown")
 PY
 )
 
