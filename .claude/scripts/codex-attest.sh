@@ -109,7 +109,7 @@ if [ "$SCOPE" = "branch-diff" ]; then
         echo "[codex-attest] ERROR: cannot create worktree at $HEAD_SHA_FOR_PATCH" >&2
         exit 14
     fi
-    REVIEW_ARGS="--base $BASE --cwd $WORKTREE"
+    REVIEW_ARGS="--base $BASE_SHA_FROZEN --cwd $WORKTREE"
     echo "[codex-attest] branch-diff worktree: $WORKTREE @ $HEAD_SHA_FOR_PATCH"
 else
     REVIEW_ARGS="$FOCUS"

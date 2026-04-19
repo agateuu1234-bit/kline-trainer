@@ -408,6 +408,55 @@ exit 0
                                       cwd=temp_git_repo, capture_output=True, text=True).stdout.strip()
             assert f"branch:feat@{feat_sha}" not in data.get("entries", {})
 
+    def test_codex_receives_frozen_base_sha_not_ref_H4R2(self, temp_git_repo, ledger_path):
+        """H4R2: --base argv to codex must be the frozen SHA (immutable), not the
+        mutable ref name. Covers transient base-ref drift during review window."""
+        MARKER = "m_frozen.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+
+        # Stub that asserts --base looks like a SHA (40 hex chars), not a ref name
+        stub_dir = temp_git_repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub.write_text('''#!/usr/bin/env bash
+# Find --base arg
+FOUND=""
+argc=$#
+i=1
+while [ $i -le $argc ]; do
+    eval cur=\\${$i}
+    if [ "$cur" = "--base" ]; then
+        nxt=$((i+1))
+        eval FOUND=\\${$nxt}
+    fi
+    i=$((i+1))
+done
+# Assert --base is a 40-char SHA, not a ref name like "origin/main"
+case "$FOUND" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+        echo '# Codex Adversarial Review'
+        echo 'Verdict: approve'
+        exit 0 ;;
+esac
+echo '# Codex Adversarial Review'
+echo 'Verdict: needs-attention'
+echo "why: --base was '$FOUND', not a 40-char SHA"
+exit 0
+''')
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (
+            f"stub approves iff --base is a SHA. Pre-H4R2 sent 'origin/main' ref.\n"
+            f"stdout={r.stdout}\nstderr={r.stderr}"
+        )
+
     def test_base_ref_drift_during_review_aborts_H4R1(self, temp_git_repo, ledger_path):
         """H4R1: base ref (not just head) drift must abort. origin/main advancing
         during review would let ledger record new-base...head while codex reviewed
