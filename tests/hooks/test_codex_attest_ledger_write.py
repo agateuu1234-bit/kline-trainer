@@ -408,6 +408,63 @@ exit 0
                                       cwd=temp_git_repo, capture_output=True, text=True).stdout.strip()
             assert f"branch:feat@{feat_sha}" not in data.get("entries", {})
 
+    def test_plugin_data_dir_cleaned_H4R5(self, temp_git_repo, tmp_path):
+        """H4R5: CLAUDE_PLUGIN_DATA scoped to a temp dir, removed in cleanup.
+        Stub asserts CLAUDE_PLUGIN_DATA env is set and points to a dir that gets cleaned."""
+        import glob
+        MARKER = "m_pd.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+
+        # Stub records the CLAUDE_PLUGIN_DATA value + writes a marker file there
+        probe = tmp_path / "pd-probe.txt"
+        stub_dir = temp_git_repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub.write_text(f'''#!/usr/bin/env bash
+if [ -n "${{CLAUDE_PLUGIN_DATA:-}}" ] && [ -d "$CLAUDE_PLUGIN_DATA" ]; then
+    # Record the path so test can verify cleanup
+    echo "$CLAUDE_PLUGIN_DATA" > "{probe}"
+    # Simulate companion writing state
+    touch "$CLAUDE_PLUGIN_DATA/companion-job.log"
+fi
+# Also validate --cwd contains marker (reuse the H2-3 flow)
+FOUND_CWD=""
+argc=$#
+i=1
+while [ $i -le $argc ]; do
+    eval cur=\\${{$i}}
+    if [ "$cur" = "--cwd" ]; then
+        nxt=$((i+1))
+        eval FOUND_CWD=\\${{$nxt}}
+    fi
+    i=$((i+1))
+done
+if [ -f "$FOUND_CWD/{MARKER}" ]; then
+    echo "# Codex Adversarial Review"
+    echo "Verdict: approve"
+    exit 0
+fi
+echo "# Codex"
+echo "Verdict: needs-attention"
+exit 0
+''')
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, f"stub should approve when CLAUDE_PLUGIN_DATA set.\nstderr={r.stderr}"
+        assert probe.exists(), "stub did not observe CLAUDE_PLUGIN_DATA env var"
+        recorded_dir = probe.read_text().strip()
+        assert recorded_dir, "CLAUDE_PLUGIN_DATA was empty"
+        # After script exits, the recorded dir should be removed
+        assert not Path(recorded_dir).exists(), \
+            f"CLAUDE_PLUGIN_DATA leaked: {recorded_dir} still exists"
+
     def test_tmp_out_cleaned_in_branch_diff_H4R4(self, temp_git_repo, tmp_path):
         """H4R4: _cleanup_worktree must also rm -f TMP_OUT (review transcript)."""
         import glob

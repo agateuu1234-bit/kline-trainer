@@ -104,12 +104,17 @@ if [ "$SCOPE" = "branch-diff" ]; then
     # not the current checkout. Replaces patch-as-focus (codex-companion ignored
     # --focus files and reviewed cwd HEAD anyway).
     WORKTREE=$(mktemp -d -t codex-attest-wt.XXXXXX)
+    # H4R5: scope codex-companion plugin state/logs to a wrapper-owned temp dir
+    PLUGIN_DATA_DIR=$(mktemp -d -t codex-attest-plugin-data.XXXXXX)
+    export CLAUDE_PLUGIN_DATA="$PLUGIN_DATA_DIR"
     _cleanup_worktree() {
         local ec=$?
         # H4R4: also clean up TMP_OUT (previously cleaned by top-level trap we override)
         rm -f "$TMP_OUT" 2>/dev/null || true
         git worktree remove --force "$WORKTREE" 2>/dev/null || true
         rm -rf "$WORKTREE" 2>/dev/null || true
+        # H4R5: clean up scoped CLAUDE_PLUGIN_DATA dir (companion state/logs)
+        rm -rf "$PLUGIN_DATA_DIR" 2>/dev/null || true
         # Preserve original exit status on EXIT; for signals, exit with conventional 128+signal
         case "${1:-EXIT}" in
             SIGNAL-INT) exit 130 ;;
