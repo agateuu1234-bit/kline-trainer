@@ -106,6 +106,8 @@ if [ "$SCOPE" = "branch-diff" ]; then
     WORKTREE=$(mktemp -d -t codex-attest-wt.XXXXXX)
     _cleanup_worktree() {
         local ec=$?
+        # H4R4: also clean up TMP_OUT (previously cleaned by top-level trap we override)
+        rm -f "$TMP_OUT" 2>/dev/null || true
         git worktree remove --force "$WORKTREE" 2>/dev/null || true
         rm -rf "$WORKTREE" 2>/dev/null || true
         # Preserve original exit status on EXIT; for signals, exit with conventional 128+signal

@@ -408,6 +408,29 @@ exit 0
                                       cwd=temp_git_repo, capture_output=True, text=True).stdout.strip()
             assert f"branch:feat@{feat_sha}" not in data.get("entries", {})
 
+    def test_tmp_out_cleaned_in_branch_diff_H4R4(self, temp_git_repo, tmp_path):
+        """H4R4: _cleanup_worktree must also rm -f TMP_OUT (review transcript)."""
+        import glob
+        MARKER = "m_tmpout.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+        stub = self._make_marker_stub(temp_git_repo, MARKER)
+
+        # Point TMPDIR somewhere we can inspect
+        inspect_tmp = tmp_path / "inspect-tmp"
+        inspect_tmp.mkdir()
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1",
+               "TMPDIR": str(inspect_tmp)}
+        subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        # Expect no mktemp-created files left in inspect_tmp after success
+        leftovers = [p for p in inspect_tmp.iterdir() if p.is_file()]
+        assert not leftovers, f"TMP files leaked: {leftovers}"
+
     def test_worktree_path_with_spaces_preserved_H4R3(self, temp_git_repo, ledger_path, tmp_path):
         """H4R3-F1: TMPDIR with spaces must not cause word-splitting of --cwd."""
         MARKER = "m_spaces.txt"
