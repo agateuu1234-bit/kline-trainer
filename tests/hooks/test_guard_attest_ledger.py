@@ -329,3 +329,46 @@ class TestOverrideRecognitionP1F3:
                      temp_git_repo)
         assert r.returncode != 0
         assert "tamper" in (r.stderr + r.stdout).lower() or "missing" in (r.stderr + r.stdout).lower()
+
+
+class TestShellOpsFilterH24:
+    """H2-4: refspec parser must skip shell redirect/operator tokens.
+
+    Pre-fix behavior: `git push -u origin feat 2>&1` parses `2>&1` as src-branch,
+    leading to "cannot compute diff origin/main..2>&1" BLOCK message.
+    Post-fix: parser correctly extracts `feat`."""
+
+    def test_refspec_with_2gt1_tail(self, temp_git_repo):
+        setup_repo_with_remote(temp_git_repo)
+        subprocess.run(["git", "checkout", "-qb", "feat"], cwd=temp_git_repo, check=True)
+        plan_file_at(temp_git_repo, "docs/superpowers/plans/x.md", "plan x")
+        r = run_hook(
+            hook_path(temp_git_repo),
+            {"tool_name": "Bash",
+             "tool_input": {"command": "git push -u origin feat 2>&1"}},
+            temp_git_repo,
+        )
+        # Should BLOCK (plan without ledger) but refer to 'feat', not misread '2>&1' as branch
+        assert r.returncode != 0
+        output = r.stderr + r.stdout
+        # The block reason must not mention "2>&1" as if it were a branch
+        assert "origin/main..2>&1" not in output, \
+            f"parser misread 2>&1 as src-branch. Output:\n{output}"
+        # Positive: message should be about the actual plan file or feat branch
+        assert ("x.md" in output or
+                "feat" in output.replace("feature", "")), \
+            f"expected BLOCK msg to mention x.md or feat. Output:\n{output}"
+
+    def test_refspec_with_gt_ampersand(self, temp_git_repo):
+        setup_repo_with_remote(temp_git_repo)
+        subprocess.run(["git", "checkout", "-qb", "feat"], cwd=temp_git_repo, check=True)
+        plan_file_at(temp_git_repo, "docs/superpowers/plans/x.md", "plan")
+        r = run_hook(
+            hook_path(temp_git_repo),
+            {"tool_name": "Bash",
+             "tool_input": {"command": "git push -u origin feat >& /dev/null"}},
+            temp_git_repo,
+        )
+        assert r.returncode != 0
+        output = r.stderr + r.stdout
+        assert ">&" not in output.split("BLOCK")[-1] if "BLOCK" in output else True

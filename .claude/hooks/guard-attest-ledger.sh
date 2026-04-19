@@ -183,9 +183,16 @@ scenario_A() {
         SRC_BRANCH=$(git rev-parse --abbrev-ref HEAD)
     else
         # Find last word that is not a flag; if contains `:`, take left side
+        # H2-4: skip shell redirect/operator tokens + keywords + flags + redirect targets
         SRC_BRANCH=$(printf '%s' "$CMD" | awk '{
             for(i=NF;i>0;i--){
-                if(substr($i,1,1)!="-"&&$i!="origin"&&$i!="push"&&$i!="git"&&$i!="command"&&$i!="."&&$i!="env"){print $i;exit}
+                tok=$i
+                if(tok=="2>&1"||tok==">&"||tok=="&>"||tok==">"||tok=="<"||tok=="|"||tok=="&&"||tok=="||"||tok==";") continue
+                if(tok=="origin"||tok=="push"||tok=="git"||tok=="command"||tok=="."||tok=="env") continue
+                if(substr(tok,1,1)=="-") continue
+                if(tok ~ /^[0-9]*>&?[0-9]*$/) continue
+                if(tok ~ /^\/(tmp|var|dev|proc)\//) continue
+                print tok; exit
             }
         }')
         [ -z "$SRC_BRANCH" ] && SRC_BRANCH=$(git rev-parse --abbrev-ref HEAD)
