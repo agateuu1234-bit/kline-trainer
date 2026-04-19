@@ -408,6 +408,41 @@ exit 0
                                       cwd=temp_git_repo, capture_output=True, text=True).stdout.strip()
             assert f"branch:feat@{feat_sha}" not in data.get("entries", {})
 
+    def test_base_ref_drift_during_review_aborts_H4R1(self, temp_git_repo, ledger_path):
+        """H4R1: base ref (not just head) drift must abort. origin/main advancing
+        during review would let ledger record new-base...head while codex reviewed
+        old-base...head — bypass."""
+        MARKER = "m_base.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+        # Stub that advances origin/main (base) mid-review
+        stub_dir = temp_git_repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub.write_text(f'''#!/usr/bin/env bash
+cd "{temp_git_repo}"
+# Advance main (base) by an empty commit, update origin/main tracking ref
+git checkout -q main 2>/dev/null
+git commit --allow-empty -qm "base drift" 2>/dev/null
+git update-ref refs/remotes/origin/main main
+echo '# Codex Adversarial Review'
+echo 'Verdict: approve'
+exit 0
+''')
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        # Expect exit non-zero with "base" in the drift message
+        assert r.returncode != 0, f"base drift must abort; got exit 0.\nstderr={r.stderr}"
+        combined = (r.stderr + r.stdout).lower()
+        assert "base" in combined and "drift" in combined or "moved" in combined, \
+            f"expected base-drift abort message; got:\n{r.stderr}{r.stdout}"
+
     def test_ref_drift_during_review_aborts(self, temp_git_repo, ledger_path):
         MARKER = "m4.txt"
         self._setup_branches(temp_git_repo, MARKER)

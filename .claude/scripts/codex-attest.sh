@@ -96,6 +96,10 @@ trap 'rm -f "$TMP_OUT" ${TMP_PATCH:+"$TMP_PATCH"}' EXIT
 REVIEW_ARGS=""
 if [ "$SCOPE" = "branch-diff" ]; then
     HEAD_SHA_FOR_PATCH=$(git rev-parse "$HEAD_BR")
+    BASE_SHA_FROZEN=$(git rev-parse "$BASE" 2>/dev/null) || {
+        echo "[codex-attest] ERROR: cannot resolve base ref $BASE" >&2
+        exit 15
+    }
     # H2-3: use git worktree at frozen SHA + --cwd so codex reviews the target,
     # not the current checkout. Replaces patch-as-focus (codex-companion ignored
     # --focus files and reviewed cwd HEAD anyway).
@@ -177,13 +181,19 @@ elif [ "$SCOPE" = "branch-diff" ]; then
     # BD-R2-F1: verify HEAD_BR didn't advance during review
     HEAD_SHA_AFTER_REVIEW=$(git rev-parse "$HEAD_BR")
     if [ "$HEAD_SHA_AFTER_REVIEW" != "$HEAD_SHA_FOR_PATCH" ]; then
-        echo "[codex-attest] ERROR: $HEAD_BR moved during review ($HEAD_SHA_FOR_PATCH -> $HEAD_SHA_AFTER_REVIEW); ledger NOT updated" >&2
+        echo "[codex-attest] ERROR: head $HEAD_BR drift moved during review ($HEAD_SHA_FOR_PATCH -> $HEAD_SHA_AFTER_REVIEW); ledger NOT updated" >&2
         exit 13
     fi
-    # Use frozen SHA for fingerprint so it matches the exact reviewed diff
-    FP=$(ledger_compute_branch_fingerprint "$BASE" "$HEAD_SHA_FOR_PATCH")
+    # H4R1: also verify BASE didn't move during review
+    BASE_SHA_AFTER_REVIEW=$(git rev-parse "$BASE")
+    if [ "$BASE_SHA_AFTER_REVIEW" != "$BASE_SHA_FROZEN" ]; then
+        echo "[codex-attest] ERROR: base $BASE drift moved during review ($BASE_SHA_FROZEN -> $BASE_SHA_AFTER_REVIEW); ledger NOT updated" >&2
+        exit 13
+    fi
+    # Use frozen SHAs for fingerprint so it matches exactly what codex saw
+    FP=$(ledger_compute_branch_fingerprint "$BASE_SHA_FROZEN" "$HEAD_SHA_FOR_PATCH")
     ledger_write_branch "$HEAD_BR" "$HEAD_SHA_FOR_PATCH" "$BASE" "$FP" "$NOW" "$VERDICT_DIGEST" "$ROUND"
-    echo "[codex-attest] ledger: branch:$HEAD_BR@$HEAD_SHA_FOR_PATCH fp=$FP"
+    echo "[codex-attest] ledger: branch:$HEAD_BR@$HEAD_SHA_FOR_PATCH base=$BASE_SHA_FROZEN fp=$FP"
 fi
 
 echo "[codex-attest] verdict=approve; ledger updated."
