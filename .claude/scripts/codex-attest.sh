@@ -95,14 +95,18 @@ trap 'rm -f "$TMP_OUT" ${TMP_PATCH:+"$TMP_PATCH"}' EXIT
 # branch-diff mode, causing approve to be written for an unreviewed target).
 REVIEW_ARGS=""
 if [ "$SCOPE" = "branch-diff" ]; then
-    TMP_PATCH=$(mktemp --suffix=.patch 2>/dev/null || mktemp -t codex-branchdiff)
     HEAD_SHA_FOR_PATCH=$(git rev-parse "$HEAD_BR")
-    git diff --no-color --no-ext-diff "$BASE...$HEAD_BR" > "$TMP_PATCH" || {
-        echo "[codex-attest] ERROR: cannot compute $BASE...$HEAD_BR diff for patch" >&2
-        exit 6
-    }
-    REVIEW_ARGS="--base $BASE --focus $TMP_PATCH"
-    echo "[codex-attest] branch-diff patch: $TMP_PATCH ($BASE...$HEAD_BR @ $HEAD_SHA_FOR_PATCH)"
+    # H2-3: use git worktree at frozen SHA + --cwd so codex reviews the target,
+    # not the current checkout. Replaces patch-as-focus (codex-companion ignored
+    # --focus files and reviewed cwd HEAD anyway).
+    WORKTREE=$(mktemp -d -t codex-attest-wt.XXXXXX)
+    trap 'git worktree remove --force "$WORKTREE" 2>/dev/null || true; rm -rf "$WORKTREE" 2>/dev/null || true' EXIT
+    if ! git worktree add --detach "$WORKTREE" "$HEAD_SHA_FOR_PATCH" 2>/dev/null; then
+        echo "[codex-attest] ERROR: cannot create worktree at $HEAD_SHA_FOR_PATCH" >&2
+        exit 14
+    fi
+    REVIEW_ARGS="--base $BASE --cwd $WORKTREE"
+    echo "[codex-attest] branch-diff worktree: $WORKTREE @ $HEAD_SHA_FOR_PATCH"
 else
     REVIEW_ARGS="$FOCUS"
 fi
