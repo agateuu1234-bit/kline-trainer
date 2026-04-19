@@ -45,9 +45,57 @@ block() {
   exit 0
 }
 
-# 1) First-line Skill gate syntax
+# 1) First-line Skill gate syntax (H2-1: drift-log instead of block)
 if ! echo "$first_line" | grep -qE '^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\([a-z-]+\))'; then
-  block "首行缺 'Skill gate: <name>' 或 'Skill gate: exempt(<reason>)'; 实际首行: $first_line"
+  DRIFT_LOG=".claude/state/skill-gate-drift.jsonl"
+  mkdir -p "$(dirname "$DRIFT_LOG")"
+  # Infer last valid Skill gate from transcript (reverse scan most recent 20 assistant messages)
+  inferred=$(python3 - "$tpath" <<'PY'
+import json, re, sys
+target = sys.argv[1]
+gate_re = re.compile(r'^Skill gate:\s*(superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\([a-z-]+\))')
+recent = []
+try:
+    with open(target) as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+                if d.get('type') == 'assistant':
+                    content = d.get('message', {}).get('content', [])
+                    if isinstance(content, list):
+                        for c in content:
+                            if isinstance(c, dict) and c.get('type') == 'text':
+                                recent.append(c.get('text', ''))
+                    elif isinstance(content, str):
+                        recent.append(content)
+            except Exception:
+                continue
+except Exception:
+    pass
+# Take last 20, reverse, find first whose first-line matches (skip current msg at index 0)
+for text in list(reversed(recent))[1:21]:
+    fl = text.splitlines()[0] if text.splitlines() else ''
+    m = gate_re.match(fl)
+    if m:
+        print(m.group(1)); sys.exit(0)
+print('exempt(behavior-neutral)')
+PY
+)
+  response_sha=$(printf %s "$last_text" | shasum -a 256 | awk '{print $1}')
+  # Append JSONL drift record
+  python3 - "$DRIFT_LOG" "$first_line" "$inferred" "$response_sha" <<'PY'
+import json, sys, time
+p, first_line, inferred, sha = sys.argv[1:5]
+entry = {
+    "time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "first_line": first_line,
+    "inferred_skill": inferred,
+    "response_sha": sha,
+}
+with open(p, "a") as f:
+    f.write(json.dumps(entry) + "\n")
+PY
+  echo "[stop-hook] drift logged (inferred skill: $inferred); please include 'Skill gate: ...' explicitly next response" >&2
 fi
 
 # 2) Exempt reason whitelist

@@ -165,11 +165,14 @@
       "read-only-query",
       "single-step-no-semantic-change"
     ],
+    "enforcement_mode": "drift-log",
+    "enforcement_description": "Since gov-bootstrap-hardening-2 (2026-04-19), a missing first-line Skill gate does NOT block the response. stop-response-check.sh appends a drift record to .claude/state/skill-gate-drift.jsonl (inferred_skill from transcript scan, first_line, response_sha, time_utc), emits stderr WARN, and exits 0. Rationale: block-mode produced 29 violations per multi-hour session without improving compliance; drift-log preserves audit trail + enables rollup without interruption. Out-of-whitelist exempt reason still blocks (invariant).",
     "degradation_policy": {
-      "allowed": "execution downgrade (subagent to manual; parallel to serial)",
-      "forbidden": "skipping any skill pipeline stage (TDD to impl to review to verification)"
+      "allowed_downgrade": "execution downgrade (subagent-to-manual; parallel-to-serial); first-line gate drift-log inference from transcript",
+      "forbidden": "skipping any skill pipeline stage (TDD to impl to review to verification); using an out-of-whitelist exempt reason"
     },
-    "wrong_skill_remediation": "acknowledge + restart from correct skill; user inquiry = trigger"
+    "wrong_skill_remediation": "acknowledge + restart from correct skill; user inquiry = trigger",
+    "future_hardening_3_scope": "auto-inject mode (gate injection + validation pipeline) + CI rollup report of skill-gate-drift.jsonl"
   },
 
   "verification_template": {
