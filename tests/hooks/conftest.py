@@ -22,7 +22,8 @@ def temp_git_repo(tmp_path: Path) -> Path:
     for rel in [".claude/scripts/ledger-lib.sh", ".claude/scripts/codex-attest.sh",
                 ".claude/scripts/attest-override.sh",
                 ".claude/hooks/guard-attest-ledger.sh",
-                ".claude/hooks/pre-commit-diff-scan.sh"]:
+                ".claude/hooks/pre-commit-diff-scan.sh",
+                ".claude/hooks/stop-response-check.sh"]:
         src = REPO_ROOT / rel
         if src.exists():
             dst = tmp_path / rel
