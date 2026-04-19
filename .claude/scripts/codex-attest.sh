@@ -95,16 +95,48 @@ trap 'rm -f "$TMP_OUT" ${TMP_PATCH:+"$TMP_PATCH"}' EXIT
 # branch-diff mode, causing approve to be written for an unreviewed target).
 REVIEW_ARGS=""
 if [ "$SCOPE" = "branch-diff" ]; then
-    TMP_PATCH=$(mktemp --suffix=.patch 2>/dev/null || mktemp -t codex-branchdiff)
     HEAD_SHA_FOR_PATCH=$(git rev-parse "$HEAD_BR")
-    git diff --no-color --no-ext-diff "$BASE...$HEAD_BR" > "$TMP_PATCH" || {
-        echo "[codex-attest] ERROR: cannot compute $BASE...$HEAD_BR diff for patch" >&2
-        exit 6
+    BASE_SHA_FROZEN=$(git rev-parse "$BASE" 2>/dev/null) || {
+        echo "[codex-attest] ERROR: cannot resolve base ref $BASE" >&2
+        exit 15
     }
-    REVIEW_ARGS="--base $BASE --focus $TMP_PATCH"
-    echo "[codex-attest] branch-diff patch: $TMP_PATCH ($BASE...$HEAD_BR @ $HEAD_SHA_FOR_PATCH)"
+    # H2-3: use git worktree at frozen SHA + --cwd so codex reviews the target,
+    # not the current checkout. Replaces patch-as-focus (codex-companion ignored
+    # --focus files and reviewed cwd HEAD anyway).
+    WORKTREE=$(mktemp -d -t codex-attest-wt.XXXXXX)
+    # H4R5: scope codex-companion plugin state/logs to a wrapper-owned temp dir
+    PLUGIN_DATA_DIR=$(mktemp -d -t codex-attest-plugin-data.XXXXXX)
+    export CLAUDE_PLUGIN_DATA="$PLUGIN_DATA_DIR"
+    _cleanup_worktree() {
+        local ec=$?
+        # H4R4: also clean up TMP_OUT (previously cleaned by top-level trap we override)
+        rm -f "$TMP_OUT" 2>/dev/null || true
+        git worktree remove --force "$WORKTREE" 2>/dev/null || true
+        rm -rf "$WORKTREE" 2>/dev/null || true
+        # H4R5: clean up scoped CLAUDE_PLUGIN_DATA dir (companion state/logs)
+        rm -rf "$PLUGIN_DATA_DIR" 2>/dev/null || true
+        # Preserve original exit status on EXIT; for signals, exit with conventional 128+signal
+        case "${1:-EXIT}" in
+            SIGNAL-INT) exit 130 ;;
+            SIGNAL-TERM) exit 143 ;;
+            SIGNAL-HUP) exit 129 ;;
+            *) return $ec ;;
+        esac
+    }
+    trap '_cleanup_worktree' EXIT
+    trap '_cleanup_worktree SIGNAL-INT' INT
+    trap '_cleanup_worktree SIGNAL-TERM' TERM
+    trap '_cleanup_worktree SIGNAL-HUP' HUP
+    if ! git worktree add --detach "$WORKTREE" "$HEAD_SHA_FOR_PATCH" 2>/dev/null; then
+        echo "[codex-attest] ERROR: cannot create worktree at $HEAD_SHA_FOR_PATCH" >&2
+        exit 14
+    fi
+    REVIEW_ARGS=(--base "$BASE_SHA_FROZEN" --cwd "$WORKTREE")
+    echo "[codex-attest] branch-diff worktree: $WORKTREE @ $HEAD_SHA_FOR_PATCH"
 else
-    REVIEW_ARGS="$FOCUS"
+    # working-tree path: split FOCUS into an array (existing callers pass paths separated by spaces)
+    # shellcheck disable=SC2206
+    REVIEW_ARGS=( $FOCUS )
 fi
 
 # Translate internal SCOPE to codex-companion CLI name
@@ -112,7 +144,7 @@ case "$SCOPE" in
     branch-diff) NODE_SCOPE="branch" ;;
     *) NODE_SCOPE="$SCOPE" ;;
 esac
-"$NODE_BIN" "$CODEX_PATH" adversarial-review --wait --scope "$NODE_SCOPE" $REVIEW_ARGS 2>&1 | tee "$TMP_OUT"
+"$NODE_BIN" "$CODEX_PATH" adversarial-review --wait --scope "$NODE_SCOPE" "${REVIEW_ARGS[@]}" 2>&1 | tee "$TMP_OUT"
 CODEX_EXIT=${PIPESTATUS[0]}
 
 # Extract verdict from stdout. codex-companion emits markdown with "Verdict: X"
@@ -173,13 +205,19 @@ elif [ "$SCOPE" = "branch-diff" ]; then
     # BD-R2-F1: verify HEAD_BR didn't advance during review
     HEAD_SHA_AFTER_REVIEW=$(git rev-parse "$HEAD_BR")
     if [ "$HEAD_SHA_AFTER_REVIEW" != "$HEAD_SHA_FOR_PATCH" ]; then
-        echo "[codex-attest] ERROR: $HEAD_BR moved during review ($HEAD_SHA_FOR_PATCH -> $HEAD_SHA_AFTER_REVIEW); ledger NOT updated" >&2
+        echo "[codex-attest] ERROR: head $HEAD_BR drift moved during review ($HEAD_SHA_FOR_PATCH -> $HEAD_SHA_AFTER_REVIEW); ledger NOT updated" >&2
         exit 13
     fi
-    # Use frozen SHA for fingerprint so it matches the exact reviewed diff
-    FP=$(ledger_compute_branch_fingerprint "$BASE" "$HEAD_SHA_FOR_PATCH")
+    # H4R1: also verify BASE didn't move during review
+    BASE_SHA_AFTER_REVIEW=$(git rev-parse "$BASE")
+    if [ "$BASE_SHA_AFTER_REVIEW" != "$BASE_SHA_FROZEN" ]; then
+        echo "[codex-attest] ERROR: base $BASE drift moved during review ($BASE_SHA_FROZEN -> $BASE_SHA_AFTER_REVIEW); ledger NOT updated" >&2
+        exit 13
+    fi
+    # Use frozen SHAs for fingerprint so it matches exactly what codex saw
+    FP=$(ledger_compute_branch_fingerprint "$BASE_SHA_FROZEN" "$HEAD_SHA_FOR_PATCH")
     ledger_write_branch "$HEAD_BR" "$HEAD_SHA_FOR_PATCH" "$BASE" "$FP" "$NOW" "$VERDICT_DIGEST" "$ROUND"
-    echo "[codex-attest] ledger: branch:$HEAD_BR@$HEAD_SHA_FOR_PATCH fp=$FP"
+    echo "[codex-attest] ledger: branch:$HEAD_BR@$HEAD_SHA_FOR_PATCH base=$BASE_SHA_FROZEN fp=$FP"
 fi
 
 echo "[codex-attest] verdict=approve; ledger updated."

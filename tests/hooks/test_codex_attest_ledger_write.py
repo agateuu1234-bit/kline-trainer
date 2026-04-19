@@ -142,9 +142,12 @@ class TestNodeBinAllowlistP2F1:
 
 class TestBranchDiffPassesPatchToCodex:
     def test_codex_receives_patch_file_path(self, temp_git_repo):
-        """Regression for P1-F1: branch-diff mode must hand the actual
-        diff to codex as --focus; an empty --focus would let codex approve
-        the wrong target."""
+        """H2-3 MIGRATION of hardening-1 P1-F1: originally asserted --focus <patch>
+        was passed to codex. H2-3 replaces that mechanism with --cwd <worktree>.
+        This test now asserts the new contract: branch-diff must pass --cwd pointing
+        at an existing worktree directory (empty --cwd or missing dir = fail-closed).
+
+        Covered more thoroughly by TestWorktreeBranchReviewH23 (H2-3 tests below)."""
         subprocess.run(["git", "commit", "--allow-empty", "-qm", "init"], cwd=temp_git_repo, check=True)
         subprocess.run(["git", "branch", "-M", "main"], cwd=temp_git_repo, check=True)
         subprocess.run(["git", "checkout", "-qb", "feat"], cwd=temp_git_repo, check=True)
@@ -154,23 +157,22 @@ class TestBranchDiffPassesPatchToCodex:
         subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "main"],
                        cwd=temp_git_repo, check=True)
 
-        # Stub that asserts --focus argv contains a .patch file whose content
-        # matches the branch diff, then emits approve.
         stub_dir = temp_git_repo / "stubs"
         stub_dir.mkdir(exist_ok=True)
         stub = stub_dir / "node"
         stub.write_text("""#!/usr/bin/env bash
-# Find --focus arg and validate patch file exists + non-empty.
+# H2-3: validate --cwd argv points at an existing non-empty dir.
 FOUND=""
 for ((i=1;i<=$#;i++)); do
-    if [ "${!i}" = "--focus" ]; then
+    if [ "${!i}" = "--cwd" ]; then
         next=$((i+1))
         FOUND="${!next}"
     fi
 done
-if [ -z "$FOUND" ]; then echo '{"verdict":"needs-attention","why":"no --focus"}' ; exit 1; fi
-if [ ! -s "$FOUND" ]; then echo '{"verdict":"needs-attention","why":"empty focus"}' ; exit 1; fi
-echo '{"verdict":"approve"}'
+if [ -z "$FOUND" ]; then echo '{"verdict":"needs-attention","why":"no --cwd"}' ; exit 0; fi
+if [ ! -d "$FOUND" ]; then echo '{"verdict":"needs-attention","why":"cwd missing"}' ; exit 0; fi
+echo '# Codex Adversarial Review'
+echo 'Verdict: approve'
 exit 0
 """)
         stub.chmod(0o755)
@@ -285,3 +287,363 @@ Verdict: approve""")
             data = json.loads(ledger_path.read_text())
             assert "file:focus.md" not in data.get("entries", {}), \
                 "CRITICAL: ledger updated despite spoofed approve in body"
+
+
+class TestWorktreeBranchReviewH23:
+    """H2-3: branch-diff mode must invoke codex with --cwd pointing at a worktree
+    checked out at the frozen HEAD_SHA, not the current repo checkout."""
+
+    def _make_marker_stub(self, repo, marker_path):
+        stub_dir = repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub.write_text(f'''#!/usr/bin/env bash
+# Find --cwd arg
+FOUND_CWD=""
+argc=$#
+i=1
+while [ $i -le $argc ]; do
+    eval cur=\\${{$i}}
+    if [ "$cur" = "--cwd" ]; then
+        nxt=$((i+1))
+        eval FOUND_CWD=\\${{$nxt}}
+    fi
+    i=$((i+1))
+done
+if [ -z "$FOUND_CWD" ]; then echo '{{"verdict":"needs-attention","why":"no --cwd"}}'; exit 0; fi
+if [ ! -d "$FOUND_CWD" ]; then echo '{{"verdict":"needs-attention","why":"cwd missing"}}'; exit 0; fi
+if [ -f "$FOUND_CWD/{marker_path}" ]; then
+    echo '# Codex Adversarial Review'
+    echo 'Target: branch diff'
+    echo 'Verdict: approve'
+    exit 0
+fi
+echo '# Codex Adversarial Review'
+echo 'Verdict: needs-attention'
+echo 'why: marker missing from cwd'
+exit 0
+''')
+        stub.chmod(0o755)
+        return stub
+
+    def _setup_branches(self, repo, marker_filename):
+        subprocess.run(["git", "commit", "--allow-empty", "-qm", "init"], cwd=repo, check=True)
+        subprocess.run(["git", "branch", "-M", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "checkout", "-qb", "feat"], cwd=repo, check=True)
+        (repo / marker_filename).write_text("only-in-feat\n")
+        subprocess.run(["git", "add", marker_filename], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "add marker"], cwd=repo, check=True)
+
+    def test_branch_diff_reviews_target_sha_not_current_checkout(self, temp_git_repo, ledger_path):
+        MARKER = "marker-only-in-feat.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+        assert not (temp_git_repo / MARKER).exists()
+
+        stub = self._make_marker_stub(temp_git_repo, MARKER)
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (
+            f"stub approves iff --cwd contains marker. Pre-H2-3 script sent --focus "
+            f"(no --cwd) -> stub returns needs-attention -> exit 7.\n"
+            f"exit={r.returncode}\nstdout={r.stdout}\nstderr={r.stderr}"
+        )
+        feat_sha = subprocess.run(["git", "rev-parse", "feat"],
+                                  cwd=temp_git_repo, capture_output=True, text=True).stdout.strip()
+        data = json.loads(ledger_path.read_text())
+        key = f"branch:feat@{feat_sha}"
+        assert key in data["entries"], f"expected {key}; got {list(data['entries'])}"
+
+    def test_worktree_cleaned_on_success(self, temp_git_repo):
+        import glob
+        MARKER = "m2.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+        stub = self._make_marker_stub(temp_git_repo, MARKER)
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
+        before = set(glob.glob("/tmp/codex-attest-wt.*"))
+        subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        after = set(glob.glob("/tmp/codex-attest-wt.*"))
+        assert not (after - before), f"worktree dirs leaked: {after - before}"
+
+    def test_worktree_cleaned_on_failure(self, temp_git_repo, ledger_path):
+        import glob
+        MARKER = "m3.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+        stub_dir = temp_git_repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub.write_text('''#!/usr/bin/env bash
+echo '# Codex Adversarial Review'
+echo 'Verdict: needs-attention'
+exit 0
+''')
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
+        before = set(glob.glob("/tmp/codex-attest-wt.*"))
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        after = set(glob.glob("/tmp/codex-attest-wt.*"))
+        assert r.returncode != 0
+        assert not (after - before), f"worktree dirs leaked on failure: {after - before}"
+        if ledger_path.exists():
+            data = json.loads(ledger_path.read_text())
+            feat_sha = subprocess.run(["git", "rev-parse", "feat"],
+                                      cwd=temp_git_repo, capture_output=True, text=True).stdout.strip()
+            assert f"branch:feat@{feat_sha}" not in data.get("entries", {})
+
+    def test_plugin_data_dir_cleaned_H4R5(self, temp_git_repo, tmp_path):
+        """H4R5: CLAUDE_PLUGIN_DATA scoped to a temp dir, removed in cleanup.
+        Stub asserts CLAUDE_PLUGIN_DATA env is set and points to a dir that gets cleaned."""
+        import glob
+        MARKER = "m_pd.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+
+        # Stub records the CLAUDE_PLUGIN_DATA value + writes a marker file there
+        probe = tmp_path / "pd-probe.txt"
+        stub_dir = temp_git_repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub.write_text(f'''#!/usr/bin/env bash
+if [ -n "${{CLAUDE_PLUGIN_DATA:-}}" ] && [ -d "$CLAUDE_PLUGIN_DATA" ]; then
+    # Record the path so test can verify cleanup
+    echo "$CLAUDE_PLUGIN_DATA" > "{probe}"
+    # Simulate companion writing state
+    touch "$CLAUDE_PLUGIN_DATA/companion-job.log"
+fi
+# Also validate --cwd contains marker (reuse the H2-3 flow)
+FOUND_CWD=""
+argc=$#
+i=1
+while [ $i -le $argc ]; do
+    eval cur=\\${{$i}}
+    if [ "$cur" = "--cwd" ]; then
+        nxt=$((i+1))
+        eval FOUND_CWD=\\${{$nxt}}
+    fi
+    i=$((i+1))
+done
+if [ -f "$FOUND_CWD/{MARKER}" ]; then
+    echo "# Codex Adversarial Review"
+    echo "Verdict: approve"
+    exit 0
+fi
+echo "# Codex"
+echo "Verdict: needs-attention"
+exit 0
+''')
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, f"stub should approve when CLAUDE_PLUGIN_DATA set.\nstderr={r.stderr}"
+        assert probe.exists(), "stub did not observe CLAUDE_PLUGIN_DATA env var"
+        recorded_dir = probe.read_text().strip()
+        assert recorded_dir, "CLAUDE_PLUGIN_DATA was empty"
+        # After script exits, the recorded dir should be removed
+        assert not Path(recorded_dir).exists(), \
+            f"CLAUDE_PLUGIN_DATA leaked: {recorded_dir} still exists"
+
+    def test_tmp_out_cleaned_in_branch_diff_H4R4(self, temp_git_repo, tmp_path):
+        """H4R4: _cleanup_worktree must also rm -f TMP_OUT (review transcript)."""
+        import glob
+        MARKER = "m_tmpout.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+        stub = self._make_marker_stub(temp_git_repo, MARKER)
+
+        # Point TMPDIR somewhere we can inspect
+        inspect_tmp = tmp_path / "inspect-tmp"
+        inspect_tmp.mkdir()
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1",
+               "TMPDIR": str(inspect_tmp)}
+        subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        # Expect no mktemp-created files left in inspect_tmp after success
+        leftovers = [p for p in inspect_tmp.iterdir() if p.is_file()]
+        assert not leftovers, f"TMP files leaked: {leftovers}"
+
+    def test_worktree_path_with_spaces_preserved_H4R3(self, temp_git_repo, ledger_path, tmp_path):
+        """H4R3-F1: TMPDIR with spaces must not cause word-splitting of --cwd."""
+        MARKER = "m_spaces.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+
+        # Stub asserts --cwd receives exactly one path (not split)
+        stub_dir = temp_git_repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub.write_text(f'''#!/usr/bin/env bash
+FOUND_CWD=""
+cwd_count=0
+argc=$#
+i=1
+while [ $i -le $argc ]; do
+    eval cur=\\${{$i}}
+    if [ "$cur" = "--cwd" ]; then
+        cwd_count=$((cwd_count+1))
+        nxt=$((i+1))
+        eval FOUND_CWD=\\${{$nxt}}
+    fi
+    i=$((i+1))
+done
+if [ "$cwd_count" -ne 1 ]; then echo "# Codex"; echo "Verdict: needs-attention"; echo "why: --cwd count=$cwd_count"; exit 0; fi
+# FOUND_CWD should be the full worktree path even if it contains spaces
+if [ ! -d "$FOUND_CWD" ]; then echo "# Codex"; echo "Verdict: needs-attention"; echo "why: --cwd not a dir"; exit 0; fi
+if [ ! -f "$FOUND_CWD/{MARKER}" ]; then echo "# Codex"; echo "Verdict: needs-attention"; echo "why: marker missing"; exit 0; fi
+echo "# Codex Adversarial Review"
+echo "Verdict: approve"
+exit 0
+''')
+        stub.chmod(0o755)
+        tmp_with_spaces = tmp_path / "dir with spaces"
+        tmp_with_spaces.mkdir()
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1",
+               "TMPDIR": str(tmp_with_spaces)}
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (
+            f"TMPDIR with spaces should be preserved via array expansion; got {r.returncode}\n"
+            f"stdout={r.stdout}\nstderr={r.stderr}"
+        )
+
+    def test_codex_receives_frozen_base_sha_not_ref_H4R2(self, temp_git_repo, ledger_path):
+        """H4R2: --base argv to codex must be the frozen SHA (immutable), not the
+        mutable ref name. Covers transient base-ref drift during review window."""
+        MARKER = "m_frozen.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+
+        # Stub that asserts --base looks like a SHA (40 hex chars), not a ref name
+        stub_dir = temp_git_repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub.write_text('''#!/usr/bin/env bash
+# Find --base arg
+FOUND=""
+argc=$#
+i=1
+while [ $i -le $argc ]; do
+    eval cur=\\${$i}
+    if [ "$cur" = "--base" ]; then
+        nxt=$((i+1))
+        eval FOUND=\\${$nxt}
+    fi
+    i=$((i+1))
+done
+# Assert --base is a 40-char SHA, not a ref name like "origin/main"
+case "$FOUND" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+        echo '# Codex Adversarial Review'
+        echo 'Verdict: approve'
+        exit 0 ;;
+esac
+echo '# Codex Adversarial Review'
+echo 'Verdict: needs-attention'
+echo "why: --base was '$FOUND', not a 40-char SHA"
+exit 0
+''')
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 0, (
+            f"stub approves iff --base is a SHA. Pre-H4R2 sent 'origin/main' ref.\n"
+            f"stdout={r.stdout}\nstderr={r.stderr}"
+        )
+
+    def test_base_ref_drift_during_review_aborts_H4R1(self, temp_git_repo, ledger_path):
+        """H4R1: base ref (not just head) drift must abort. origin/main advancing
+        during review would let ledger record new-base...head while codex reviewed
+        old-base...head — bypass."""
+        MARKER = "m_base.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+        # Stub that advances origin/main (base) mid-review
+        stub_dir = temp_git_repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub.write_text(f'''#!/usr/bin/env bash
+cd "{temp_git_repo}"
+# Advance main (base) by an empty commit, update origin/main tracking ref
+git checkout -q main 2>/dev/null
+git commit --allow-empty -qm "base drift" 2>/dev/null
+git update-ref refs/remotes/origin/main main
+echo '# Codex Adversarial Review'
+echo 'Verdict: approve'
+exit 0
+''')
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        # Expect exit non-zero with "base" in the drift message
+        assert r.returncode != 0, f"base drift must abort; got exit 0.\nstderr={r.stderr}"
+        combined = (r.stderr + r.stdout).lower()
+        assert "base" in combined and "drift" in combined or "moved" in combined, \
+            f"expected base-drift abort message; got:\n{r.stderr}{r.stdout}"
+
+    def test_ref_drift_during_review_aborts(self, temp_git_repo, ledger_path):
+        MARKER = "m4.txt"
+        self._setup_branches(temp_git_repo, MARKER)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=temp_git_repo, check=True)
+        stub_dir = temp_git_repo / "stubs"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "node"
+        stub_code = f'''#!/usr/bin/env bash
+cd "{temp_git_repo}"
+git checkout -q feat 2>/dev/null
+git commit --allow-empty -qm "drift"
+git checkout -q main 2>/dev/null
+echo '# Codex Adversarial Review'
+echo 'Verdict: approve'
+exit 0
+'''
+        stub.write_text(stub_code)
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}",
+               "CODEX_ATTEST_TEST_MODE": "1"}
+        r = subprocess.run(
+            ["bash", str(temp_git_repo / ".claude/scripts/codex-attest.sh"),
+             "--scope", "branch-diff", "--base", "origin/main", "--head", "feat"],
+            cwd=temp_git_repo, capture_output=True, text=True, env=env,
+        )
+        assert r.returncode == 13, f"expected exit 13; got {r.returncode}\nstderr={r.stderr}"
+        assert "moved during review" in (r.stderr + r.stdout).lower()
