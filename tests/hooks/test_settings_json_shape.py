@@ -146,6 +146,15 @@ class TestEnvExampleExemptionH25:
                 assert pattern in deny, \
                     f"{pattern} MUST be in deny (real-secret variant)"
 
+    def test_env_ci_and_ops_variants_denied_H2R1(self):
+        """H2R1-F1: codex round 1 flagged CI/ops/backup variants falling through to allow."""
+        deny = set(load()["permissions"]["deny"])
+        for variant in ("ci", "qa", "uat", "preview", "stage", "backup", "bak", "shared", "nas"):
+            for action in ("Read", "Edit", "Write"):
+                pattern = f"{action}(**/.env.{variant})"
+                assert pattern in deny, \
+                    f"{pattern} MUST be in deny (H2R1-F1 extended variant)"
+
     def test_env_blanket_pattern_gone(self):
         """Regression: **/.env.* blanket pattern (too broad, catches .example) must not exist."""
         deny = set(load()["permissions"]["deny"])
