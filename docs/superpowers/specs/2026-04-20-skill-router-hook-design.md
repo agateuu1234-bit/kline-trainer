@@ -307,16 +307,27 @@ for s in $expected_skills; do
   echo "$actual_skills" | grep -Fxq "$s" || fail "T4B: $s in skill_entry_map but not in hook"
 done
 
-# T5（settings 挂载守卫·新增 · Codex R1-F2 修复）:
+# T5（settings 挂载守卫·新增 · Codex R1-F2 + R2-F1 修复）:
 # settings.json 必须真的挂载了这个 hook，防止测试通过但 hook 从未被触发
+#
+# R2-F1 修复：原先的 jq 链式表达式语法错误
+#   `.hooks.UserPromptSubmit | type == "array" and length > 0 | .hooks[0].hooks[] | select(...)`
+# 会把 `type == "array" and length > 0` 的布尔值当作下一步的输入，导致
+# "Cannot index boolean with string" 错误。拆成两步独立的 jq -e 判断。
+
+# 步骤 1：UserPromptSubmit 节点必须是非空数组
+jq -e '.hooks.UserPromptSubmit | type == "array" and length > 0' \
+  .claude/settings.json > /dev/null \
+  || fail "T5-a: .hooks.UserPromptSubmit is not a non-empty array"
+
+# 步骤 2：至少有一条 hook 条目 command + timeout + type 三项全对
 jq -e '
-  .hooks.UserPromptSubmit
-  | type == "array" and length > 0
-  | .hooks[0].hooks[]
+  .hooks.UserPromptSubmit[]?.hooks[]?
   | select(.command == "bash .claude/hooks/user-prompt-skill-reminder.sh"
         and .timeout == 2
         and .type == "command")
-' .claude/settings.json > /dev/null || fail "T5: settings.json not wired to UserPromptSubmit hook"
+' .claude/settings.json > /dev/null \
+  || fail "T5-b: no UserPromptSubmit hook entry with correct command/timeout/type"
 ```
 
 **反漂移守卫 T4 双向作用：**
@@ -342,7 +353,7 @@ phase_delivery: true；验收内容为**机制验证**（非业务功能）。
 
 **预期（Expected）：**
 1. 第 1 条命令输出一行，包含文件名且权限含 `x`
-2. 第 2 条命令最后一行显示 `All 4 tests passed`
+2. 第 2 条命令最后一行显示 `All 5 tests passed`
 
 **通过判据（Pass/Fail）：**
 - 通过：两条命令均按预期输出
@@ -501,9 +512,25 @@ phase_delivery: true；验收内容为**机制验证**（非业务功能）。
 
 **Round 1 产出 sha：** 本 commit 后的 spec blob sha（见 git log）
 
-### Round 2+
+### Round 2
 
-（待 codex-attest 再次执行后补充）
+**Target:** branch-diff gov/skill-router-hook @ e5e65711 vs origin/main @ b90d36c0
+**Verdict:** needs-attention
+**Status:** R1 F1 / F3 接受（不再提）；R1 F2 落地实现有 bug，新 finding：
+
+**Findings:**
+
+- **[medium] R2-F1**：T5 的 jq 表达式链式错误——`.hooks.UserPromptSubmit | type == "array" and length > 0 | .hooks[0].hooks[]` 的中间管道段返回布尔值，下一段 `.hooks[0]` 报 "Cannot index boolean with string"。实际运行会把 T5 变成假阳性或被实施者弱化移除，R1 F2 的修复形同虚设。另：§6 验收 1 仍写 `All 4 tests passed` 但 spec 已定义 5 条测试。
+
+**Claude 响应（半轮 2）：**
+
+- **R2-F1（fully accept）**：拆 T5 为两步独立的 `jq -e` 调用：
+  - 步骤 1：`.hooks.UserPromptSubmit | type == "array" and length > 0` 单独验证数组存在
+  - 步骤 2：`.hooks.UserPromptSubmit[]?.hooks[]? | select(...)` 单独验证至少一条正确条目
+  - 本地用 mock JSON 验证三组 case（正确配置 / 错 command / 空 array）全部预期行为
+- **验收文本修正**：全文 `All 4 tests passed` → `All 5 tests passed`（单处）
+
+**Round 2 产出 sha：** 本 commit 后的 spec blob sha
 
 ---
 
