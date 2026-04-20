@@ -256,8 +256,9 @@ cat <<'EOF'
 
 # Domain/context-specific (highest priority)
   • UI / frontend code                                 → frontend-design:frontend-design
-  • Mandatory review class (trust-boundary governance) → codex:adversarial-review
   • Session start / cross-session resume               → superpowers:using-superpowers
+  • Explicit review request on existing spec/plan/PR   → codex:adversarial-review
+    (NARROW: only when user says "run codex review on X" — NOT for new governance work)
 
 # Specific triggers
   • Bug / test failure / unexpected behavior           → superpowers:systematic-debugging
@@ -277,9 +278,11 @@ cat <<'EOF'
 # Generic code writing (assumes you already have an approved plan)
   • Write production code (feature / bugfix / refactor)→ superpowers:test-driven-development
 
+# Governance class (MUST start with brainstorming, NOT codex review directly)
+  • Governance / hooks / workflow rules / CLAUDE.md change → superpowers:brainstorming
+    (after brainstorming + writing-plans: run codex-attest.sh for codex:adversarial-review)
+
 # Generic brainstorming class (fallback for no-spec-yet work)
-  • Governance / hooks / workflow rules / CLAUDE.md    → superpowers:brainstorming
-    (after brainstorming: run codex-attest.sh to invoke codex:adversarial-review)
   • New feature / component / behavior change          → superpowers:brainstorming
   • No approved spec yet (general exploration)         → superpowers:brainstorming
 
