@@ -6,7 +6,17 @@
 
 **Architecture:** One new bash script (`.claude/hooks/user-prompt-skill-reminder.sh`) reads and discards stdin, then emits a hardcoded heredoc reminder covering every `skill_entry_map` entry and every `exempt_reason_whitelist` reason. One new test file (`tests/hooks/test-user-prompt-skill-reminder.sh`) runs the hook and validates its stdout. One change to `.claude/settings.json` wires the hook to the `UserPromptSubmit` event. No state files, no external classification, fail-open on any failure.
 
-**Tech Stack:** bash 3.2+, `jq` (tests only, runtime-free), Claude Code hooks system (`UserPromptSubmit` event).
+**Tech Stack:** bash 3.2+, `jq` (tests only, runtime-free), portable timeout helper (`timeout` / `gtimeout` / `perl -e 'alarm'`), Claude Code hooks system (`UserPromptSubmit` event).
+
+**Trust-boundary execution model:** `.claude/settings.json` deny list blocks Claude's `Edit(.claude/hooks/**)` and `Write(.claude/hooks/**)` by design (governance invariant). The plan therefore splits who creates which file:
+
+| File | Who creates/edits | Via |
+|---|---|---|
+| `tests/hooks/test-user-prompt-skill-reminder.sh` | **Claude** | `Write` tool (tests/ is not in deny) |
+| `.claude/hooks/user-prompt-skill-reminder.sh` | **User (TTY)** | Heredoc commands copy-pasted into user's own terminal |
+| `.claude/settings.json` | **Claude** | `Edit` tool (settings.json is in `ask`, click-approval each time) |
+
+User-terminal steps (like Task 1 Step 3 below) are **not ambiguous**: the plan provides the exact command block, and execution returns to Claude once the user confirms completion.
 
 **Phase delivery:** true (mechanism verification per spec §4.6 acceptance checklist 1–5).
 
@@ -110,11 +120,16 @@ FAIL: T1: hook exit=127 expected 0
 ```
 (exit 127 = "bash: hook file not found")
 
-- [ ] **Step 3: Write minimal hook**
+- [ ] **Step 3: USER creates hook file via terminal (Claude is deny-blocked)**
 
-Create `.claude/hooks/user-prompt-skill-reminder.sh`:
+Claude cannot `Write(.claude/hooks/**)` — hard-denied in `.claude/settings.json`. The user must run the heredoc below in their own terminal (any one-shot paste works; `cat > ... <<'OUTER'` is intentionally used so bash does NOT expand the inner `'EOF'` heredoc terminator).
+
+User runs in terminal:
 
 ```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer"
+
+cat > .claude/hooks/user-prompt-skill-reminder.sh <<'OUTER'
 #!/usr/bin/env bash
 # user-prompt-skill-reminder.sh — UserPromptSubmit hook.
 # Emits a fixed skill-routing reminder so Claude's first-line `Skill gate:`
@@ -136,7 +151,14 @@ cat <<'EOF'
 EOF
 
 exit 0
+OUTER
+
+ls -l .claude/hooks/user-prompt-skill-reminder.sh
 ```
+
+Expected last line shows the file exists (executable bit not required since we invoke via `bash <path>`).
+
+User then tells Claude "done" (or pastes the `ls -l` line back) to resume.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -156,10 +178,13 @@ All 5 tests passed
 
 - [ ] **Step 5: Commit**
 
+Claude runs:
 ```bash
 git add tests/hooks/test-user-prompt-skill-reminder.sh .claude/hooks/user-prompt-skill-reminder.sh
 git commit -m "test+feat(skill-router-hook T1): hook skeleton + basic invocation test"
 ```
+
+(The `git add` of `.claude/hooks/user-prompt-skill-reminder.sh` works because `Bash(git add:*)` is in Claude's allow list; Claude cannot Edit/Write the file but CAN stage and commit a file the user created.)
 
 ---
 
@@ -209,11 +234,23 @@ FAIL: T2 anchor 'whitelist reasons line' missing ...
 1 pass, 4 fail
 ```
 
-- [ ] **Step 3: Replace the placeholder heredoc with the full reminder**
+- [ ] **Step 3: USER replaces hook heredoc with full reminder via terminal**
 
-Replace the entire `cat <<'EOF' ... EOF` block in `.claude/hooks/user-prompt-skill-reminder.sh` with the text below. Everything else in the hook file stays the same:
+Claude still cannot write. User runs in terminal:
 
 ```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer"
+
+cat > .claude/hooks/user-prompt-skill-reminder.sh <<'OUTER'
+#!/usr/bin/env bash
+# user-prompt-skill-reminder.sh — UserPromptSubmit hook.
+# Spec: docs/superpowers/specs/2026-04-20-skill-router-hook-design.md
+# Plan: docs/superpowers/plans/2026-04-20-skill-router-hook-plan.md
+# Stateless, fail-open. Drain stdin, emit fixed heredoc, exit 0.
+set -u
+
+cat >/dev/null 2>&1 || true
+
 cat <<'EOF'
 [skill-router] Choose the correct skill before acting. Each row below maps ONE user-intent to ONE next skill. Pick the EARLIEST applicable row.
 
@@ -232,8 +269,9 @@ cat <<'EOF'
   • Multi-PR parallel / isolation needed               → superpowers:using-git-worktrees
   • Finishing a development branch                     → superpowers:finishing-a-development-branch
   • Session start / cross-session resume               → superpowers:using-superpowers
+  • Mandatory review class (trust-boundary governance) → codex:adversarial-review
   • Governance / hooks / workflow rules / CLAUDE.md    → superpowers:brainstorming
-    (plus: governance work ALSO requires codex:adversarial-review before merge)
+    (after brainstorming: run codex-attest.sh to invoke codex:adversarial-review)
   • Read-only query                                    → exempt(read-only-query)
   • Trivial one-step with no semantic change           → exempt(single-step-no-semantic-change)
   • Doc-only change with zero runtime effect           → exempt(behavior-neutral)
@@ -246,7 +284,19 @@ OR:
 
 Whitelist reasons (exhaustive): behavior-neutral | user-explicit-skip | read-only-query | single-step-no-semantic-change
 EOF
+
+exit 0
+OUTER
+
+# Verify
+bash .claude/hooks/user-prompt-skill-reminder.sh < /dev/null | head -3
 ```
+
+Expected last 3 lines of output start with `[skill-router] Choose the correct skill...`.
+
+User tells Claude "done" to resume.
+
+**Why a dedicated `codex:adversarial-review` row (R3-F3 fix)**: the earlier version buried `codex:adversarial-review` in a governance parenthetical, so T4 greps saw the token but there was no actionable route. Now a top-level row pairs the `mandatory_review_class_change` situation directly with the skill.
 
 - [ ] **Step 4: Run the test to verify all pass**
 
@@ -280,16 +330,47 @@ git commit -m "test+feat(skill-router-hook T2): full reminder text + anchor asse
 **Files:**
 - Modify: `tests/hooks/test-user-prompt-skill-reminder.sh` (add T3)
 
-- [ ] **Step 1: Add T3 to the test file**
+- [ ] **Step 1: Add T3 to the test file (portable timeout · R1-F2 fix)**
 
-Insert this block after T2 (before the summary):
+Insert this block after T2 (before the summary). **macOS by default has neither `timeout` nor `gtimeout`**; the fix is a portable shim that uses whichever is available, falling back to `perl -e 'alarm'` which ships with macOS.
 
 ```bash
 # ---------------- T3: hook doesn't hang on garbage stdin ----------------
-# Use timeout 3 to cap runtime; hook should finish in milliseconds.
-# `timeout` returns 124 if hook hangs past the limit.
-t3_output=$(printf '%s' "not-json-at-all" | timeout 3 bash "$HOOK" 2>/dev/null)
-t3_exit=$?
+# Portable timeout helper (R1-F2 fix).
+#
+# Defines run_with_timeout(): runs "$@" with a 3-second cap.
+#   - Prefers GNU `timeout` (Linux) or `gtimeout` (brew coreutils on mac)
+#   - Falls back to `perl -e 'alarm'` which is available on stock macOS
+# Exit 124 = timed out (for both timeout/gtimeout);
+# perl fallback: SIGALRM-killed child returns 142 on macOS; we normalize to 124.
+
+run_with_timeout() {
+    local limit="$1"; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$limit" "$@"
+        return $?
+    fi
+    if command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$limit" "$@"
+        return $?
+    fi
+    # perl fallback
+    perl -e '
+        my $limit = shift;
+        my $pid = fork();
+        die "fork: $!" unless defined $pid;
+        if ($pid == 0) { exec @ARGV; die "exec: $!"; }
+        local $SIG{ALRM} = sub { kill 15, $pid; sleep 1; kill 9, $pid; exit 124; };
+        alarm $limit;
+        waitpid $pid, 0;
+        my $rc = $? >> 8;
+        exit $rc;
+    ' "$limit" "$@"
+    return $?
+}
+
+t3_exit=0
+{ printf '%s' "not-json-at-all" | run_with_timeout 3 bash "$HOOK" >/dev/null 2>&1; } || t3_exit=$?
 if [ "$t3_exit" -eq 124 ]; then
     fail "T3: hook hung past 3s on garbage stdin"
 elif [ "$t3_exit" -ne 0 ]; then
@@ -534,7 +615,13 @@ FAIL: T5b: no UserPromptSubmit hook entry with correct command/timeout/type
 10 pass, 2 fail
 ```
 
-- [ ] **Step 3: Add UserPromptSubmit node to `.claude/settings.json`**
+- [ ] **Step 3: Claude edits `.claude/settings.json` to add UserPromptSubmit node**
+
+`.claude/settings.json` is in Claude's `ask` permission list — Claude's `Edit` tool prompts the user to click Accept before writing. Claude executes:
+
+```
+Edit tool on .claude/settings.json (user approves the click-through)
+```
 
 Open `.claude/settings.json` and find the `"hooks": {` object (around line 311 in the current file). Inside that object, after the closing `]` of the existing `"SessionStart"` array and before the `"PreToolUse"` array, insert the new `"UserPromptSubmit"` node.
 
