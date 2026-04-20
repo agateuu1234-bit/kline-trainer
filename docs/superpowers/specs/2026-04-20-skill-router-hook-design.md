@@ -1,11 +1,13 @@
-# Skill Router Hook · 入口守卫设计
+# Skill Router Hook · 入口提醒设计
 
 **日期**：2026-04-20
-**状态**：Draft（准备进 codex:adversarial-review）
+**状态**：Draft（codex:adversarial-review 进行中，Round 1 已完成）
 **分类**：governance / process / toolchain change
 **分支**：`gov/skill-router-hook`
-**作者**：Claude（起草），Codex（对抗性 review 待执行）
+**作者**：Claude（起草），Codex（对抗性 review 执行中）
 **关联治理**：这是 gov-bootstrap-hardening-4 合并后的**第一个痛点驱动**治理增量；明确**不属于** hardening 系列延续（hardening-5 已于 2026-04-20 终止）。
+
+> **⚠️ 重要边界声明**：本 spec 是**提醒（reminder）**而非**强制（enforcer）**。用户 § 1 需求 1 原话是"Hook 强制执行"，但经 § 3 tradeoff 显式评估后，用户选择**方案 D（软注入 + 自律）**而非强制拦截。本 spec 的名字从"入口守卫"改为"入口提醒"以反映真实行为。强化到硬拦截是显式的**将来升级路径**（§ 7.2 情形 A/B），不在本次 scope。
 
 ---
 
@@ -40,13 +42,26 @@ H5 尝试构建阶段守卫（task-log.jsonl + 每阶段证据比对），跑 11
 
 ## 1. 用户需求（原话精炼）
 
-1. Hook 强制执行 superpowers 工作流；不靠 Claude 自律
+1. Hook **强化** superpowers 工作流触发；不完全靠 Claude 自律
+   - 原话是"强制"，但 § 3 tradeoff 里用户显式选择**方案 D（软提醒 + 现有 drift-log）**而非方案 B/C（硬拦截）
+   - 本 spec 只满足"强化"，**不满足"强制"**——强制是后续升级路径
 2. 所有 review 由 Codex 做（保留，本 spec 将进 codex-attest review）
 3. **不打扰用户**——Codex 3 轮收敛就自动进下一步
 4. **简单优先**——已觉得现有治理太复杂，不再堆
 5. **痛点驱动**——今天只修今天遇到的痛（"hook 有时候没触发对的 skill"）
 6. 最终 PR/merge 仍走现有 `gh pr merge` + `ask` 权限 + 用户 CODEOWNERS Approve
 7. 代码审查继续走 `codex-attest.sh` shell 路径，不切到 `codex:adversarial-review` skill 路径（不降低防伪）
+
+### 1.1 需求 1 与方案 D 之间的显式 gap
+
+| 维度 | 用户原话要的（需求 1） | 方案 D 实际给的 | Gap |
+|---|---|---|---|
+| 触发强化 | 强制 | 软提醒注入 | 方案 D 给 |
+| 错 skill 自动抓 | 期望（隐含） | 放弃外部校验 | **方案 D 不给** |
+| 跳过 skill 时硬拦 | 期望（隐含） | fail-open 不拦 | **方案 D 不给** |
+| 错用 exempt 时抓 | 期望（隐含） | 靠用户肉眼 | **方案 D 不给** |
+
+此 gap **不是 bug、是显式 tradeoff**。接受此 gap 的理由见 § 3；若此 gap 上线后痛，按 § 7.2 升级到方案 1/3。
 
 ---
 
@@ -192,9 +207,18 @@ Claude 收到：用户消息 + hook stdout 内容
   • New feature / component / behavior change  → superpowers:brainstorming
   • Execute an approved plan                    → superpowers:writing-plans
                                                   superpowers:executing-plans
+  • Execute plan with independent subtasks      → superpowers:subagent-driven-development
+  • 2+ independent investigations               → superpowers:dispatching-parallel-agents
   • Write production code (feature/bug/refactor)→ superpowers:test-driven-development
   • Bug / test failure / unexpected behavior    → superpowers:systematic-debugging
   • Before claiming done / passing / commit     → superpowers:verification-before-completion
+  • UI / frontend code                          → frontend-design:frontend-design
+  • Self-review before merge                    → superpowers:requesting-code-review
+  • Receive review feedback                     → superpowers:receiving-code-review
+  • Create / modify a skill                     → superpowers:writing-skills
+  • Multi-PR parallel / isolation needed        → superpowers:using-git-worktrees
+  • Finishing a development branch              → superpowers:finishing-a-development-branch
+  • Session start / cross-session resume        → superpowers:using-superpowers
   • Governance / hooks / workflow rules change  → superpowers:brainstorming  then
                                                   codex:adversarial-review
   • Read-only query / trivial one-step          → exempt(read-only-query) or
@@ -208,6 +232,8 @@ OR:
 Whitelist reasons: behavior-neutral | user-explicit-skip | read-only-query |
                    single-step-no-semantic-change
 ```
+
+**覆盖范围说明**：提醒文本包含 `skill_entry_map` 里所有 non-exempt 路由值，跨 `superpowers:*`、`frontend-design:*`、`codex:*` 三个 namespace。T4 测试强制双向覆盖（见 § 5）。
 
 **3.4 触发频率**
 
@@ -240,7 +266,7 @@ Whitelist reasons: behavior-neutral | user-explicit-skip | read-only-query |
 
 **文件：** `tests/hooks/test-user-prompt-skill-reminder.sh`
 
-**4 个用例：**
+**5 个用例：**
 
 ```bash
 # T1: 正常跑，输出非空，exit 0
@@ -257,19 +283,52 @@ stdout | grep -q "exempt("
 echo "non-json garbage" | timeout 3 bash .claude/hooks/user-prompt-skill-reminder.sh
 assert exit_code == 0  # timeout 超时会返回 124
 
-# T4（反漂移守卫）: hook 文本引用的 skill 必须全在 skill_entry_map
-for skill in $(grep -oE 'superpowers:[a-z-]+|codex:[a-z-]+' .claude/hooks/user-prompt-skill-reminder.sh); do
-  jq -e ".skill_entry_map | to_entries | map(.value) | index(\"$skill\")" \
-    .claude/workflow-rules.json > /dev/null || fail "$skill not in skill_entry_map"
+# T4（反漂移守卫 · 双向）: skill_entry_map 里所有 non-exempt 值都必须在 hook 文本里出现；反之亦然
+#
+#   方向 A：hook → map（hook 文本里引用的必须是 map 里存在的，防拼错）
+#   方向 B：map → hook（map 里所有 non-exempt 路由必须在 hook 文本里，防遗漏）
+#
+# 覆盖所有 namespace：superpowers:* / frontend-design:* / codex:* 以及未来新增
+
+expected_skills=$(jq -r \
+  '.skill_entry_map | to_entries | map(.value) | .[] | select(startswith("(exempt") | not)' \
+  .claude/workflow-rules.json | sort -u)
+
+actual_skills=$(grep -oE '(superpowers|frontend-design|codex):[a-z-]+' \
+  .claude/hooks/user-prompt-skill-reminder.sh | sort -u)
+
+# 方向 A
+for s in $actual_skills; do
+  echo "$expected_skills" | grep -Fxq "$s" || fail "T4A: $s in hook but not in skill_entry_map"
 done
+
+# 方向 B
+for s in $expected_skills; do
+  echo "$actual_skills" | grep -Fxq "$s" || fail "T4B: $s in skill_entry_map but not in hook"
+done
+
+# T5（settings 挂载守卫·新增 · Codex R1-F2 修复）:
+# settings.json 必须真的挂载了这个 hook，防止测试通过但 hook 从未被触发
+jq -e '
+  .hooks.UserPromptSubmit
+  | type == "array" and length > 0
+  | .hooks[0].hooks[]
+  | select(.command == "bash .claude/hooks/user-prompt-skill-reminder.sh"
+        and .timeout == 2
+        and .type == "command")
+' .claude/settings.json > /dev/null || fail "T5: settings.json not wired to UserPromptSubmit hook"
 ```
 
-**反漂移守卫（T4）的作用：** 未来 `workflow-rules.json` 里改名某个 skill，T4 fail 逼迫同步更新 hook 文本；否则会漂移成死引用。
+**反漂移守卫 T4 双向作用：**
+- **方向 A**：hook 里写了 `superpowers:brainstormingXXX` 但 map 没这个值 → fail（防拼错）
+- **方向 B**：map 新增 `ui_frontend_code` 路由到 `frontend-design:frontend-design`，但 hook 没更新 → fail（防遗漏，Codex R1-F3 识别的真实漏洞）
+
+**挂载守卫 T5 作用：** 保证 `.claude/settings.json` 里有正确 wire 的 UserPromptSubmit 节点（command / timeout / type 三项都对）；防止 hook 文件存在但 Claude Code 运行时根本不触发（Codex R1-F2 识别的漏洞）。
 
 **不测的（显式放弃）：**
 
 - 不测"Claude 收到提醒后行为是否改变"——LLM 非确定性，不可靠单元测试；靠 drift-log 事后统计
-- 不测 settings.json 是否正确 wire hook——开新会话时手动验证一次（§ 6 验收 3）
+- 不测"Claude 实际在新会话里声明首行是对的"——这是 § 6 验收 3 的端到端手工步骤，不在自动化测试范畴
 
 ### 4.6 § 6 验收清单（Phase Delivery · 中文三段式 · 用户执行）
 
@@ -420,7 +479,31 @@ phase_delivery: true；验收内容为**机制验证**（非业务功能）。
 
 ## 8. Review 历史
 
-（待 codex-attest 执行后补充。每轮记录：spec blob sha / codex verdict digest / findings / Claude 响应 / 下一轮 sha）
+### Round 1
+
+**Target:** branch-diff gov/skill-router-hook @ 7f1d6eb1 vs origin/main @ b90d36c0
+**Verdict:** needs-attention
+**Verdict digest:** （见 codex-attest 输出 TMP_OUT sha256）
+
+**Findings:**
+
+- **[high] F1**：spec 言必称"强制"，但方案 4 明确是自分类 + fail-open + 无外部校验；措辞与实际行为矛盾。推荐：要么把 artifact 重新定位成 best-effort 提醒且去掉 force/guard 措辞；要么加真正的硬检查（code Edit/Write 要求 TDD skill / trust-boundary 要求 codex review 证据 / 非法 exempt 拦截）。
+- **[medium] F2**：`.claude/settings.json` 是否正确 wire UserPromptSubmit 从不自动化测试；hook 脚本可以 pass 所有单元测试的同时在 settings 里根本没挂载 / 挂错名字 / 错 timeout / 漏配。推荐：加 pre-merge 自动测试解析 settings.json，断言 `hooks.UserPromptSubmit` 存在且 command + timeout 正确。
+- **[medium] F3**：T4 反漂移只单向（hook → map），map 新加路由但 hook 没同步不会 fail；且 regex 只覆盖 `superpowers:*` / `codex:*`，遗漏 `frontend-design:*` 等 namespace；具体漏洞：`ui_frontend_code` 在 map 里但不在 hook 提醒里。推荐：T4 改双向 + 覆盖所有 namespace。
+
+**Claude 响应（半轮 1）：**
+
+- **F1（partial accept + partial push back）**：
+  - **Accept**：重命名 spec 标题 "入口守卫" → "入口提醒"；加显式边界声明（首段）；§ 1 需求 1 加 "强化 ≠ 强制" 澄清；新增 § 1.1 显式列出 gap table
+  - **Push back**：不加硬检查（TDD 强制 / trust-boundary gate / exempt 拦截）。理由：用户在 brainstorming 里**显式评估了方案 A/B/C/D 后选 D**，并原话说"太复杂了"。增加硬检查等于偷偷把 scope 改回 B/C，违背用户选择；升级路径显式保留在 § 7.2 情形 A/B/C
+- **F2（fully accept）**：新增 T5 测试用例解析 settings.json 校验 UserPromptSubmit 正确 wire（command + timeout + type 三项）
+- **F3（fully accept）**：T4 改双向（方向 A + 方向 B）+ 覆盖 `superpowers:` / `frontend-design:` / `codex:` 三个 namespace；提醒文本扩充加入 `frontend-design:frontend-design` + 其余所有 `skill_entry_map` non-exempt 路由
+
+**Round 1 产出 sha：** 本 commit 后的 spec blob sha（见 git log）
+
+### Round 2+
+
+（待 codex-attest 再次执行后补充）
 
 ---
 
