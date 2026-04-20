@@ -202,35 +202,37 @@ Claude 收到：用户消息 + hook stdout 内容
 **3.3 提醒文本内容**
 
 ```
-[skill-router] Choose the correct skill before acting. Match your request against:
+[skill-router] Choose the correct skill before acting. Each row below maps ONE user-intent to ONE next skill.
 
-  • New feature / component / behavior change  → superpowers:brainstorming
-  • Execute an approved plan                    → superpowers:writing-plans
-                                                  superpowers:executing-plans
-  • Execute plan with independent subtasks      → superpowers:subagent-driven-development
-  • 2+ independent investigations               → superpowers:dispatching-parallel-agents
-  • Write production code (feature/bug/refactor)→ superpowers:test-driven-development
-  • Bug / test failure / unexpected behavior    → superpowers:systematic-debugging
-  • Before claiming done / passing / commit     → superpowers:verification-before-completion
-  • UI / frontend code                          → frontend-design:frontend-design
-  • Self-review before merge                    → superpowers:requesting-code-review
-  • Receive review feedback                     → superpowers:receiving-code-review
-  • Create / modify a skill                     → superpowers:writing-skills
-  • Multi-PR parallel / isolation needed        → superpowers:using-git-worktrees
-  • Finishing a development branch              → superpowers:finishing-a-development-branch
-  • Session start / cross-session resume        → superpowers:using-superpowers
-  • Governance / hooks / workflow rules change  → superpowers:brainstorming  then
-                                                  codex:adversarial-review
-  • Read-only query / trivial one-step          → exempt(read-only-query) or
-                                                  exempt(single-step-no-semantic-change)
+  • New feature / component / behavior change          → superpowers:brainstorming
+  • Have approved spec, need to write plan             → superpowers:writing-plans
+  • Execute existing plan (single-thread)              → superpowers:executing-plans
+  • Execute existing plan (independent subtasks)       → superpowers:subagent-driven-development
+  • 2+ independent investigations running in parallel  → superpowers:dispatching-parallel-agents
+  • Write production code (feature / bugfix / refactor)→ superpowers:test-driven-development
+  • Bug / test failure / unexpected behavior           → superpowers:systematic-debugging
+  • Before claiming done / passing / commit / PR       → superpowers:verification-before-completion
+  • UI / frontend code                                 → frontend-design:frontend-design
+  • Self-review before merge                           → superpowers:requesting-code-review
+  • Receive review feedback                            → superpowers:receiving-code-review
+  • Create / modify a skill                            → superpowers:writing-skills
+  • Multi-PR parallel / isolation needed               → superpowers:using-git-worktrees
+  • Finishing a development branch                     → superpowers:finishing-a-development-branch
+  • Session start / cross-session resume               → superpowers:using-superpowers
+  • Governance / hooks / workflow rules / CLAUDE.md    → superpowers:brainstorming
+    (plus: governance work ALSO requires codex:adversarial-review before merge)
+  • Read-only query                                    → exempt(read-only-query)
+  • Trivial one-step with no semantic change           → exempt(single-step-no-semantic-change)
+  • Doc-only change with zero runtime effect           → exempt(behavior-neutral)
+  • User explicitly told you to skip                   → exempt(user-explicit-skip)
 
 First line of your response MUST be exactly:
   Skill gate: <skill-name>
 OR:
   Skill gate: exempt(<whitelist-reason>)
 
-Whitelist reasons: behavior-neutral | user-explicit-skip | read-only-query |
-                   single-step-no-semantic-change
+Whitelist reasons (exhaustive): behavior-neutral | user-explicit-skip | read-only-query |
+                                single-step-no-semantic-change
 ```
 
 **覆盖范围说明**：提醒文本包含 `skill_entry_map` 里所有 non-exempt 路由值，跨 `superpowers:*`、`frontend-design:*`、`codex:*` 三个 namespace。T4 测试强制双向覆盖（见 § 5）。
@@ -283,28 +285,59 @@ stdout | grep -q "exempt("
 echo "non-json garbage" | timeout 3 bash .claude/hooks/user-prompt-skill-reminder.sh
 assert exit_code == 0  # timeout 超时会返回 124
 
-# T4（反漂移守卫 · 双向）: skill_entry_map 里所有 non-exempt 值都必须在 hook 文本里出现；反之亦然
+# T4（反漂移守卫 · 双向 · 检查 runtime stdout · Codex R3-F2 修复）:
 #
-#   方向 A：hook → map（hook 文本里引用的必须是 map 里存在的，防拼错）
-#   方向 B：map → hook（map 里所有 non-exempt 路由必须在 hook 文本里，防遗漏）
+# R3-F2 修复：原先 T4 直接 grep hook 的源码文件，漏洞是：
+#   1. 注释里、已弃用的 heredoc 里、dead code 里的 skill 名也会被 grep 到
+#   2. hook 实际 stdout 可能只输出部分内容，但测试通过
+#   3. 没有验证 exempt 原因白名单是否在 hook 输出里 / 是否只用白名单的
 #
-# 覆盖所有 namespace：superpowers:* / frontend-design:* / codex:* 以及未来新增
+# 修复：跑一次 hook，取 stdout，针对 stdout 做所有断言
 
+hook_stdout=$(echo '{"prompt":"test"}' | bash .claude/hooks/user-prompt-skill-reminder.sh)
+
+# --- T4A/B: skill routing 双向覆盖 ---
 expected_skills=$(jq -r \
   '.skill_entry_map | to_entries | map(.value) | .[] | select(startswith("(exempt") | not)' \
   .claude/workflow-rules.json | sort -u)
 
-actual_skills=$(grep -oE '(superpowers|frontend-design|codex):[a-z-]+' \
-  .claude/hooks/user-prompt-skill-reminder.sh | sort -u)
+actual_skills=$(printf '%s\n' "$hook_stdout" \
+  | grep -oE '(superpowers|frontend-design|codex):[a-z-]+' | sort -u)
 
-# 方向 A
+# 方向 A：hook stdout → map
 for s in $actual_skills; do
-  echo "$expected_skills" | grep -Fxq "$s" || fail "T4A: $s in hook but not in skill_entry_map"
+  echo "$expected_skills" | grep -Fxq "$s" \
+    || fail "T4A: $s in hook stdout but not in skill_entry_map"
 done
 
-# 方向 B
+# 方向 B：map → hook stdout
 for s in $expected_skills; do
-  echo "$actual_skills" | grep -Fxq "$s" || fail "T4B: $s in skill_entry_map but not in hook"
+  echo "$actual_skills" | grep -Fxq "$s" \
+    || fail "T4B: $s in skill_entry_map but not in hook stdout"
+done
+
+# --- T4C/D: exempt reason whitelist 双向覆盖 ---
+expected_exempt=$(jq -r '.skill_gate_policy.exempt_reason_whitelist[]' \
+  .claude/workflow-rules.json | sort -u)
+
+# 从 hook stdout 提取 exempt 原因（两个来源：exempt(<reason>) 模式 + Whitelist 列表行）
+actual_exempt=$({
+  printf '%s' "$hook_stdout" | grep -oE 'exempt\([a-z-]+\)' | grep -oE '[a-z-]+' | grep -v '^exempt$'
+  printf '%s' "$hook_stdout" | grep -E '^Whitelist reasons' | tr '|' '\n' \
+    | sed 's/Whitelist reasons (exhaustive)://; s/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | grep -E '^[a-z-]+$'
+} | sort -u)
+
+# 方向 C：hook stdout → whitelist（防止 hook 暗示 Claude 用非法 exempt 原因）
+for r in $actual_exempt; do
+  echo "$expected_exempt" | grep -Fxq "$r" \
+    || fail "T4C: '$r' suggested in hook stdout but not in exempt_reason_whitelist"
+done
+
+# 方向 D：whitelist → hook stdout（防止 whitelist 新增原因但 hook 没提醒 Claude 有此选项）
+for r in $expected_exempt; do
+  echo "$actual_exempt" | grep -Fxq "$r" \
+    || fail "T4D: '$r' in exempt_reason_whitelist but not mentioned in hook stdout"
 done
 
 # T5（settings 挂载守卫·新增 · Codex R1-F2 + R2-F1 修复）:
@@ -530,7 +563,109 @@ phase_delivery: true；验收内容为**机制验证**（非业务功能）。
   - 本地用 mock JSON 验证三组 case（正确配置 / 错 command / 空 array）全部预期行为
 - **验收文本修正**：全文 `All 4 tests passed` → `All 5 tests passed`（单处）
 
-**Round 2 产出 sha：** 本 commit 后的 spec blob sha
+**Round 2 产出 sha：** commit 27f637f 后的 spec blob sha
+
+### Round 3
+
+**Target:** branch-diff gov/skill-router-hook @ 27f637f4 vs origin/main @ b90d36c0
+**Verdict:** needs-attention
+**Status:** R1/R2 findings 全部接受未再提；R3 发现两个新的实施细节问题：
+
+**Findings:**
+
+- **[medium] R3-F1**：提醒文本里"Execute an approved plan"一行同时指向 `superpowers:writing-plans` 和 `superpowers:executing-plans`，但 hook 要求"exactly one first-line skill"——歧义路由可能导致 Claude 把"执行这个 plan"的请求路回 planning 阶段，或声明错 skill。stop hook 只检查首行语法，T4 也只查"skill 值是否出现"不查"每个 trigger 是否唯一映射"。
+- **[medium] R3-F2**：T4 直接 grep hook 源码文件而不是 runtime stdout——如果实现把 skill 名放在注释、dead heredoc、或只输出部分提醒，T4 仍会 pass 但 Claude 收不到完整路由表。另：T4 完全没检查 hook 里的 exempt 原因是否在 `skill_gate_policy.exempt_reason_whitelist` 里，白名单漂移（新加原因 / hook 暗示非法原因）不会被抓到。
+
+**Claude 响应（半轮 3）：**
+
+- **R3-F1（fully accept）**：重写提醒文本，每行 ONE intent → ONE skill，显式注明。折开之前的 2-skill 合并行：
+  - `Have approved spec, need to write plan` → `superpowers:writing-plans`
+  - `Execute existing plan (single-thread)` → `superpowers:executing-plans`
+  - `Execute existing plan (independent subtasks)` → `superpowers:subagent-driven-development`
+  - Governance 专门加注"plus: governance 还要 codex:adversarial-review 在 merge 前"
+  - 4 个 exempt 原因各一行显式列出，不再合并
+- **R3-F2（fully accept）**：T4 重构 —— 跑 hook 一次取 stdout，所有断言针对 stdout；新增 T4C/T4D 检查 exempt 原因白名单双向覆盖；覆盖两个漂移源（skill_entry_map + exempt_reason_whitelist）
+
+**Round 3 产出 sha：** 本 commit 后的 spec blob sha
+
+### 收敛状态评估（3 轮结束）
+
+3 轮 Codex half-round + 3 轮 Claude half-round 全部完成。轨迹：
+
+| 轮次 | Codex verdict | Findings 数量 | 架构争议？ | Claude 全部 accept？ |
+|---|---|---|---|---|
+| R1 | needs-attention | 1 high + 2 medium | 1 处（F1 push back）| 2/3 完全 accept，F1 partial |
+| R2 | needs-attention | 1 medium | 无 | 1/1 完全 accept |
+| R3 | needs-attention | 2 medium | 无 | 2/2 完全 accept |
+
+**未达成"approve" 形式收敛**，但：
+- **无持续 re-raise** 的 finding（每轮都是新问题被发现后 accept）
+- **仅 1 处架构分歧**（F1 强制 vs 提醒），已通过 spec 措辞 reframe 而非行为让步解决
+- **趋势递减**：严重度从 high 降到 medium；finding 数从 3→1→2（2 个都是前一轮新增 surface area 上的 bug）
+
+对照 H5 失败模式（同一争议反复 11 轮）—— 本次 3 轮是**健康迭代**，不是**僵局**。每轮都在 converge。
+
+per `workflow-rules.json` `on_non_convergence`: 形式上需升级给用户决策，因为未获 approve 标签。Payload 见 § 9。
+
+---
+
+## 9. Escalation Payload（3 轮未形式收敛）
+
+per `workflow-rules.json adversarial_review_loop.on_non_convergence`。
+
+### 9.1 Verdict 序列
+
+```
+R1: needs-attention (1 high + 2 medium)
+R2: needs-attention (1 medium)
+R3: needs-attention (2 medium)
+```
+
+### 9.2 未解 findings
+
+**无**。R3 的 2 个 findings 在本 commit 中全部 fully accept 并实现（提醒文本去歧义、T4 重构为 stdout-driven + 白名单双向守卫）。
+
+未 accept 的 finding 仅有 R1-F1 的"增加硬检查"推荐，但**不属于 unresolved**——它是 Codex 推荐的替代架构，Claude 基于用户显式选择（D 优于 B/C）push back，且 Codex R2/R3 未再提。
+
+### 9.3 Claude rationale：为什么值得 proceed（不等于形式 approve）
+
+1. **趋势健康**：严重度递减（high → medium → medium）；findings 递减趋势合理（后续轮次都是前轮 surface area 上的新 surface）
+2. **无持续争议**：无任何 finding 被重复 re-raise
+3. **单一架构分歧已 reframe 解决**：R1-F1 的"强制 vs 提醒"分歧，通过 spec 措辞（"入口提醒" + § 1.1 gap table）显式声明 scope 而非行为让步
+4. **健康迭代而非 H5 僵局**：H5 是同一争议反复 11 轮；本次是 3 轮里 Codex 每次发现新 surface 后 Claude accept，已收敛到 polish 级别
+
+### 9.4 Tradeoff 位置
+
+| 维度 | 此处现状 |
+|---|---|
+| 形式 approve 达成 | ❌（R3 仍 needs-attention） |
+| 实质 findings 全部 accept | ✅ |
+| 架构争议有无 | ✅ 有 1 处（F1），经 reframe 解决，非行为让步 |
+| 预算状态 | 已用满 3 轮 |
+
+### 9.5 Bypass 选项（用户决策）
+
+**选项 A：跑 Round 4（over-budget 1 轮）**
+- 代价：1 次 Codex 调用（~3-5 分钟）
+- 预期：如仅 R3 findings 已 fix，大概率 approve；如继续找新 surface issue → 选项 B 或 C
+- 风险：低
+
+**选项 B：用户裁决覆盖（bypass formal approve）**
+- 代价：你需要相信 Claude 的断言"R3 findings 已完整 accept 并实现"
+- 好处：立即解锁 writing-plans 阶段
+- 风险：中——ledger 不会写 branch-level approve 条目，push 时会被 guard-attest-ledger.sh 拦（需要用 `attest-override.sh` 做显式 override，留审计痕迹）
+
+**选项 C：停止 + 砍 scope / 换方案**
+- 情形：如果你觉得 3 轮 codex review 的迭代暴露了方案 4 本身的"难以稳定表达"风险
+- 动作：revert 本分支，重新 brainstorm 是否应该做（或直接砍成"仅扩充 session-start 文本，不增 hook"）
+
+### 9.6 Claude 推荐
+
+**选项 A**。理由：
+- R3 findings 全部是 surface-level 实施细节，已在本 commit 中 fully 修复
+- R4 的 Codex 调用是**单次低成本测试**，就可以把形式和实质对齐
+- 如果 R4 approve → 完全收敛，进 writing-plans
+- 如果 R4 继续找新 surface → 那时才升级到选项 B 或 C，决策信息更充分
 
 ---
 
