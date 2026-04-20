@@ -252,26 +252,38 @@ set -u
 cat >/dev/null 2>&1 || true
 
 cat <<'EOF'
-[skill-router] Choose the correct skill before acting. Each row below maps ONE user-intent to ONE next skill. Pick the EARLIEST applicable row.
+[skill-router] Choose the correct skill before acting. Each row below maps ONE user-intent to ONE next skill. Pick the EARLIEST applicable row. Rows are ordered SPECIFIC-TO-GENERIC so domain/context matches win over generic defaults.
 
-  • New feature / component / behavior change          → superpowers:brainstorming
-  • Have approved spec, need to write plan             → superpowers:writing-plans
-  • Execute existing plan (single-thread)              → superpowers:executing-plans
-  • Execute existing plan (independent subtasks)       → superpowers:subagent-driven-development
-  • 2+ independent investigations running in parallel  → superpowers:dispatching-parallel-agents
-  • Write production code (feature / bugfix / refactor)→ superpowers:test-driven-development
-  • Bug / test failure / unexpected behavior           → superpowers:systematic-debugging
-  • Before claiming done / passing / commit / PR       → superpowers:verification-before-completion
+# Domain/context-specific (highest priority)
   • UI / frontend code                                 → frontend-design:frontend-design
-  • Self-review before merge                           → superpowers:requesting-code-review
-  • Receive review feedback                            → superpowers:receiving-code-review
-  • Create / modify a skill                            → superpowers:writing-skills
-  • Multi-PR parallel / isolation needed               → superpowers:using-git-worktrees
-  • Finishing a development branch                     → superpowers:finishing-a-development-branch
-  • Session start / cross-session resume               → superpowers:using-superpowers
   • Mandatory review class (trust-boundary governance) → codex:adversarial-review
+  • Session start / cross-session resume               → superpowers:using-superpowers
+
+# Specific triggers
+  • Bug / test failure / unexpected behavior           → superpowers:systematic-debugging
+  • Create / modify a skill                            → superpowers:writing-skills
+  • Receive review feedback                            → superpowers:receiving-code-review
+  • Self-review before merge                           → superpowers:requesting-code-review
+  • Before claiming done / passing / commit / PR       → superpowers:verification-before-completion
+  • Finishing a development branch                     → superpowers:finishing-a-development-branch
+  • Multi-PR parallel / isolation needed               → superpowers:using-git-worktrees
+  • 2+ independent investigations running in parallel  → superpowers:dispatching-parallel-agents
+
+# Stage-specific (execute or extend existing plan)
+  • Execute existing plan (independent subtasks)       → superpowers:subagent-driven-development
+  • Execute existing plan (single-thread)              → superpowers:executing-plans
+  • Have approved spec, need to write plan             → superpowers:writing-plans
+
+# Generic code writing (assumes you already have an approved plan)
+  • Write production code (feature / bugfix / refactor)→ superpowers:test-driven-development
+
+# Generic brainstorming class (fallback for no-spec-yet work)
   • Governance / hooks / workflow rules / CLAUDE.md    → superpowers:brainstorming
     (after brainstorming: run codex-attest.sh to invoke codex:adversarial-review)
+  • New feature / component / behavior change          → superpowers:brainstorming
+  • No approved spec yet (general exploration)         → superpowers:brainstorming
+
+# Exempts (most specific first)
   • Read-only query                                    → exempt(read-only-query)
   • Trivial one-step with no semantic change           → exempt(single-step-no-semantic-change)
   • Doc-only change with zero runtime effect           → exempt(behavior-neutral)
@@ -297,6 +309,14 @@ Expected last 3 lines of output start with `[skill-router] Choose the correct sk
 User tells Claude "done" to resume.
 
 **Why a dedicated `codex:adversarial-review` row (R3-F3 fix)**: the earlier version buried `codex:adversarial-review` in a governance parenthetical, so T4 greps saw the token but there was no actionable route. Now a top-level row pairs the `mandatory_review_class_change` situation directly with the skill.
+
+**Why specific-to-generic ordering (R2-F1 fix)**: the previous order had generic "New feature" row ahead of specific "UI / frontend code", biasing frontend work toward `superpowers:brainstorming` instead of `frontend-design:frontend-design` under the "earliest match" rule. New ordering makes domain/context matches win over generic defaults.
+
+**Why added "No approved spec yet" row (partial R2-F2 fix)**: the earlier version had 18 of 19 `skill_entry_map` keys covered by explicit rows; `no_spec_yet` was functionally subsumed under "New feature" but not visible. Now every map key has a dedicated row.
+
+**Known residual (R2-F2 accepted)**: T4's `jq -r '.value'` de-duplicates map values, so if a key with a shared value is omitted, T4B still passes (shared-value camouflage). Fixing requires either structural workflow-rules change (stable intent IDs) or dynamic reminder generation — both violate methodology (scope was static bash heredoc). Left as known gap; upgrade path documented in spec §7.2.
+
+**Spec-plan divergence note (R2-F3)**: spec §3.3 was frozen at Round 3 review approval + user override (blob 8fc3ba4). The plan's Task 2 heredoc is the authoritative implementation reference; it has diverged from spec §3.3 by design (added `codex:adversarial-review` row, added `no_spec_yet` row, reordered rows). Reconciling the spec would invalidate the file-level override and push us back into attestation churn.
 
 - [ ] **Step 4: Run the test to verify all pass**
 
