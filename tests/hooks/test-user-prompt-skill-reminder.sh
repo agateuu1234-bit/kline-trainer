@@ -155,6 +155,29 @@ for r in $expected_exempt; do
 done
 [ "$t4d_ok" -eq 1 ] && pass "T4D whitelist -> hook exempt"
 
+# ---------------- T5: settings.json wiring guard ----------------
+# Two-step jq check (per spec §4.5 R2-F1 fix):
+#   T5a verifies UserPromptSubmit is a non-empty array
+#   T5b verifies at least one entry has correct command/timeout/type
+
+if jq -e '.hooks.UserPromptSubmit | type == "array" and length > 0' \
+    "$SETTINGS" > /dev/null 2>&1; then
+    pass "T5a UserPromptSubmit is a non-empty array"
+else
+    fail "T5a: .hooks.UserPromptSubmit is missing / not an array / empty"
+fi
+
+if jq -e '
+    .hooks.UserPromptSubmit[]?.hooks[]?
+    | select(.command == "bash .claude/hooks/user-prompt-skill-reminder.sh"
+          and .timeout == 2
+          and .type == "command")
+' "$SETTINGS" > /dev/null 2>&1; then
+    pass "T5b UserPromptSubmit wired with correct command/timeout/type"
+else
+    fail "T5b: no UserPromptSubmit hook entry with correct command/timeout/type"
+fi
+
 # ---------------- Summary ----------------
 printf '\n%d pass, %d fail\n' "$PASS" "$FAIL"
 if [ "$FAIL" -eq 0 ]; then
