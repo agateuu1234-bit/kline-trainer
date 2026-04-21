@@ -49,8 +49,18 @@ struct RESTDTOsTests {
     /// content_hash 格式跨契约对齐（Plan 1 PG CHECK + Plan 1b OpenAPI pattern + Plan 1c Swift 这里）
     @Test func contentHash_fixtureValuesMatchCRC32LowercaseHex() throws {
         let pattern = #/^[0-9a-f]{8}$/#
+        // 1. Validate the hardcoded regex against known-good values
         for hash in ["deadbeef", "a0b1c2d3", "00112233", "abcdef01"] {
             #expect(hash.wholeMatch(of: pattern) != nil, "hash '\(hash)' should match ^[0-9a-f]{8}$")
+        }
+        // 2. Validate the actual fixture file — catches future drift if someone
+        //    edits lease_response.json with a non-conforming value
+        let url = Bundle.module.url(forResource: "lease_response", withExtension: "json", subdirectory: "fixtures")
+        let data = try Data(contentsOf: #require(url))
+        let resp = try JSONDecoder().decode(LeaseResponse.self, from: data)
+        for item in resp.sets {
+            #expect(item.contentHash.wholeMatch(of: pattern) != nil,
+                    "fixture content_hash '\(item.contentHash)' (id=\(item.id)) should match ^[0-9a-f]{8}$")
         }
     }
 }
