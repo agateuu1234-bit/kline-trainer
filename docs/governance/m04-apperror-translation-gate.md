@@ -34,7 +34,8 @@ Codex 对 Plan 1d 的 plan R1 + post-merge attest 均指出：若单拆 Plan 1d 
 - **方法维度**：模块 `Sources/<Module>/` 下所有 `public func ... async throws` / `public func ... throws` 方法全覆盖。
 - **失败模式维度**：每个方法的每个文档化失败模式（timeout / offline / serverError / leaseExpired / leaseNotFound / ioError / ...）至少 1 个失败注入 fixture。
 - **空测禁令**：test 在 "expected error but succeeded" 分支必须 `Issue.record` + fail。
-- **catch-all 兜底**：每个模块必须含 1 条 catch-all 测试，模拟依赖抛出**非建模**的 raw error（例如 `NSError`、未预期的 `URLError.Code`、未预期的 `DatabaseError` subtype），断言 public API **仍**只抛 `AppError`（典型映射：`.internalError`）。此条保证未预期的依赖错误类不会以 raw 形式跨边界泄露。
+- **catch-all 兜底（per-method 或 per-dependency-boundary）**：**每个 public throwing 方法**（或最小化工作量时：**每个 dependency 边界**——例如一个模块的 `URLSession` 共用 boundary、`GRDB.DatabaseQueue` 共用 boundary 分别 1 条即可）必须含至少 1 条 catch-all 测试，模拟依赖抛出**非建模**的 raw error（例如 `NSError`、未预期的 `URLError.Code`、未预期的 `DatabaseError` subtype），断言 public API **仍**只抛 `AppError`（典型映射：`.internalError`）。此条保证未预期的依赖错误类不会以 raw 形式跨边界泄露。
+  - **禁止**：一个模块仅含单条 module-level catch-all（不同 public 方法可能走不同 boundary，单条 catch-all 无法覆盖其它）。
 
 示例（catch-all 兜底）：
 
@@ -103,6 +104,12 @@ grep -rnE 'throw[[:space:]]+(DatabaseError|URLError|APIError)|catch[[:space:]]+l
 2. 在模块 test 文件加对应测试（Gate 1：调用真实 public 方法，断言只抛 `AppError`）
 3. 启发式 lint（Gate 2 draft）：可选运行，**发现 match 必须修**，但无 match 不等于无泄漏
 4. 非 coder 验收清单里登记 "AppError trust-boundary Gate 1 test pass" 一项
+5. **Gate 1 证据映射表**：模块 PR body 或 plan 的 Gate 1 证据段必须含一张 markdown 表，把每个 public throwing API 映射到：(a) 文档化失败模式 fixture 列表；(b) catch-all fixture（per-method 或共用 dependency boundary）。示例：
+
+   | public API | 失败模式 fixtures | catch-all fixture |
+   |---|---|---|
+   | `fetchMeta(count:)` | `timeout`, `offline`, `serverError`, `leaseExpired` | `NSError domain=UnexpectedDomain` via `URLSession` boundary |
+   | `reserveMeta(...)` | `leaseExpired`, `conflict409` | 复用 `URLSession` boundary catch-all |
 
 **Plan 3 P1 特殊任务**：作为第一个消费 AppError 的 Swift 模块，P1 PR 必须在本文档基础上选定 Gate 2 最终形态（SwiftSyntax lint / tested shell fixture / 取消 Gate 2 + 扩展 Gate 1）并更新应用矩阵。
 
