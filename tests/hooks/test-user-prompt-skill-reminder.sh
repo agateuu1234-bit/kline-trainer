@@ -119,6 +119,42 @@ for s in $expected_skills; do
 done
 [ "$t4b_ok" -eq 1 ] && pass "T4B skill_entry_map -> hook"
 
+# ---------------- T4C/D: exempt reason bidirectional drift guard ----------------
+expected_exempt=$(jq -r '.skill_gate_policy.exempt_reason_whitelist[]' "$RULES" | sort -u)
+
+# Extract exempt reasons from hook stdout (exempt(<reason>) patterns + "Whitelist reasons" line)
+actual_exempt=$({
+    printf '%s' "$t4_stdout" \
+      | grep -oE 'exempt\([a-z-]+\)' \
+      | sed 's/^exempt(//; s/)$//'
+    printf '%s' "$t4_stdout" \
+      | grep -E '^Whitelist reasons' \
+      | sed 's/^Whitelist reasons[^:]*: *//' \
+      | tr '|' '\n' \
+      | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+      | grep -E '^[a-z-]+$'
+} | sort -u)
+
+# Direction C: every exempt reason in hook must be in whitelist
+t4c_ok=1
+for r in $actual_exempt; do
+    if ! printf '%s\n' "$expected_exempt" | grep -Fxq "$r"; then
+        fail "T4C: '$r' in hook stdout but not in exempt_reason_whitelist"
+        t4c_ok=0
+    fi
+done
+[ "$t4c_ok" -eq 1 ] && pass "T4C hook exempt -> whitelist"
+
+# Direction D: every whitelist reason must appear in hook stdout
+t4d_ok=1
+for r in $expected_exempt; do
+    if ! printf '%s\n' "$actual_exempt" | grep -Fxq "$r"; then
+        fail "T4D: '$r' in whitelist but not in hook stdout"
+        t4d_ok=0
+    fi
+done
+[ "$t4d_ok" -eq 1 ] && pass "T4D whitelist -> hook exempt"
+
 # ---------------- Summary ----------------
 printf '\n%d pass, %d fail\n' "$PASS" "$FAIL"
 if [ "$FAIL" -eq 0 ]; then
