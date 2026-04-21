@@ -207,6 +207,8 @@ public struct DrawingObject: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - Trade Marker (UI overlay; NOT Codable per spec M0.3 — runtime only)
+
 public struct TradeMarker: Equatable, Sendable {
     public let globalTick: Int
     public let price: Double

@@ -98,7 +98,11 @@ struct KLineCandleTests {
         let data = try JSONEncoder().encode(candle)
         let json = String(data: data, encoding: .utf8)!
         #expect(json.contains("\"boll_upper\":11.2"))
+        #expect(json.contains("\"boll_mid\":10.4"))
+        #expect(json.contains("\"boll_lower\":9.6"))
         #expect(json.contains("\"macd_diff\":0.12"))
+        #expect(json.contains("\"macd_dea\":0.08"))
+        #expect(json.contains("\"macd_bar\":0.04"))
         #expect(json.contains("\"global_index\":42"))
         #expect(json.contains("\"end_global_index\":42"))
     }
