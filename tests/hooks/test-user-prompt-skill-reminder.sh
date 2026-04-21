@@ -169,7 +169,7 @@ fi
 
 if jq -e '
     .hooks.UserPromptSubmit[]?.hooks[]?
-    | select(.command == "bash .claude/hooks/user-prompt-skill-reminder.sh"
+    | select(.command == "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/user-prompt-skill-reminder.sh"
           and .timeout == 2
           and .type == "command")
 ' "$SETTINGS" > /dev/null 2>&1; then

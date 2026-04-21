@@ -325,7 +325,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/user-prompt-skill-reminder.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/user-prompt-skill-reminder.sh",
             "timeout": 2
           }
         ]
