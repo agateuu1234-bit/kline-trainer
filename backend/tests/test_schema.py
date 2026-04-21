@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pglast
 from pglast.ast import (
-    AlterTableStmt,
     Constraint,
     CreateStmt,
     IndexStmt,
@@ -115,6 +114,10 @@ def test_training_sets_partial_indexes_exist():
     assert "idx_training_sets_lease" in indexes
     assert "idx_training_sets_lease_expire" in indexes
     assert "idx_klines_lookup" in indexes
+    assert indexes["idx_training_sets_lease"].whereClause is not None, \
+        "idx_training_sets_lease must be partial (WHERE lease_id IS NOT NULL)"
+    assert indexes["idx_training_sets_lease_expire"].whereClause is not None, \
+        "idx_training_sets_lease_expire must be partial (WHERE status='reserved')"
 
 
 def test_klines_unique_stock_period_datetime():
