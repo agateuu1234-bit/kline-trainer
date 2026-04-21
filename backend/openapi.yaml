@@ -1,0 +1,163 @@
+openapi: 3.0.3
+info:
+  title: Kline Trainer API
+  version: "1.4"
+  description: >
+    Kline Trainer 后端 REST API。Lease-based 训练组预占-下载-确认流程。
+    详见 kline_trainer_modules_v1.4.md §M0.2 及 kline_trainer_plan_v1.5.md §8.1。
+
+    部署场景（决定以下契约选择）：单用户 iOS app 客户端 + 内网 NAS FastAPI 服务端（docker-compose），非公网 / 非多租户。
+    GET 侧效应 + download 无 lease_id 的 REST 正式性问题为**已知 residual**，通过 lease TTL=10 分钟 + B4 APScheduler 每日回滚 + 内网访问边界兜底；公网迁移时 spec v1.5+ 收紧（见 plan 文档 §"Spec v1.4 REST 设计选择"）。
+servers:
+  - url: http://{host}:{port}
+    variables:
+      host:
+        default: localhost
+      port:
+        default: "8000"
+
+paths:
+  /training-sets/meta:
+    get:
+      summary: 批量预占 N 个 training set
+      description: >
+        **已知 REST 非幂等**：此 GET 有 side-effect（mark reserved + 发 lease_id）。
+        spec v1.4 选择沿用 GET 语义；residual 通过 lease TTL=10 分钟（spec M0.1）+ B4
+        调度器每日 05:00 把 lease_expires_at ≤ now 的 reserved 回滚为 unsent 兜底。
+        内网单用户场景下 prefetch/CDN/浏览器 retry 均不适用（客户端固定是 iOS app）。
+      operationId: reserveTrainingSets
+      parameters:
+        - in: query
+          name: count
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          description: 预占数量
+      responses:
+        '200':
+          description: 预占成功；标记这 N 个 training set 为 reserved 状态（lease TTL=10 分钟）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaseResponse'
+
+  /training-set/{id}/download:
+    get:
+      summary: 下载已预占的 training set zip
+      description: >
+        **已知无 lease_id 参数**：spec v1.4 选择 download 阶段不强制 lease_id。
+        理由：单用户内网场景下 id 猜测攻击不适用；跨客户端（单人多设备）重复下载
+        无数据损坏风险（zip CRC32 保护）。lease 隔离的真正目标（防库存耗尽）由
+        confirm 阶段的 lease_id 必填卡住 sent 状态转换兜底。
+        公网部署时 spec v1.5+ 将补 `lease_id` query + 409/404 响应。
+      operationId: downloadTrainingSet
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: zip 文件流
+          headers:
+            Content-MD5:
+              description: zip 文件 MD5 hash（客户端可二次校验）
+              schema:
+                type: string
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+
+  /training-set/{id}/confirm:
+    post:
+      summary: 确认已下载 training set，标记为 sent；幂等
+      operationId: confirmTrainingSet
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+        - in: query
+          name: lease_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: 必须匹配 /training-sets/meta 返回的 lease_id
+      responses:
+        '200':
+          description: 确认成功（幂等：同一 (id, lease_id) 重复调用仍返回 200）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                required: [ok]
+        '409':
+          description: lease 过期或 lease_id 不匹配
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: training set 不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    LeaseResponse:
+      type: object
+      required: [lease_id, expires_at, sets]
+      properties:
+        lease_id:
+          type: string
+          format: uuid
+          description: UUID v4
+        expires_at:
+          type: string
+          format: date-time
+          description: ISO8601 UTC；Lease TTL = 10 分钟
+        sets:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrainingSetMetaItem'
+
+    TrainingSetMetaItem:
+      type: object
+      required: [id, stock_code, stock_name, filename, schema_version, content_hash]
+      properties:
+        id:
+          type: integer
+        stock_code:
+          type: string
+        stock_name:
+          type: string
+        filename:
+          type: string
+        schema_version:
+          type: integer
+        content_hash:
+          type: string
+          minLength: 8
+          maxLength: 8
+          pattern: '^[0-9a-f]{8}$'
+          description: zip 文件 CRC32 十六进制（8 字符小写；与 PostgreSQL ck_content_hash_crc32_lowercase CHECK 对齐）
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [lease_expired, not_found]
