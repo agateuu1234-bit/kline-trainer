@@ -1,0 +1,99 @@
+name: Schema Smoke Test
+
+on:
+  pull_request:
+    paths:
+      - 'backend/sql/**'
+      - 'backend/tests/test_schema.py'
+      - 'ios/sql/**'
+      - '.github/workflows/schema-smoke.yml'
+  push:
+    branches: [main]
+
+# Trust-boundary hardening (codex round 10):
+# - Least-privilege token: read-only repo contents, no write scopes
+# - actions pinned to full SHA to match project convention
+permissions:
+  contents: read
+
+jobs:
+  postgres-runtime-smoke:
+    name: PostgreSQL 15 ephemeral deploy
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: schema_smoke
+          POSTGRES_DB: kt_schema_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGPASSWORD: schema_smoke
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGUSER: postgres
+      PGDATABASE: kt_schema_smoke
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Wait for postgres ready
+        run: |
+          for i in $(seq 1 30); do
+            pg_isready -h 127.0.0.1 -p 5432 -U postgres && break
+            sleep 1
+          done
+          pg_isready -h 127.0.0.1 -p 5432 -U postgres
+      - name: Deploy schema.sql
+        run: psql -v ON_ERROR_STOP=1 -f backend/sql/schema.sql
+      - name: Assert 3 application tables
+        run: |
+          COUNT=$(psql -tAc "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename IN ('stocks','klines','training_sets');")
+          [[ "$COUNT" == "3" ]] || { echo "FAIL: expected 3 tables, got $COUNT"; exit 1; }
+      - name: Assert uq_stock_start constraint
+        run: |
+          COUNT=$(psql -tAc "SELECT count(*) FROM pg_constraint WHERE conname='uq_stock_start';")
+          [[ "$COUNT" == "1" ]] || { echo "FAIL: uq_stock_start missing"; exit 1; }
+      - name: Assert content_hash CHAR(8) NOT NULL
+        run: |
+          LEN=$(psql -tAc "SELECT character_maximum_length FROM information_schema.columns WHERE table_name='training_sets' AND column_name='content_hash';")
+          NULL=$(psql -tAc "SELECT is_nullable FROM information_schema.columns WHERE table_name='training_sets' AND column_name='content_hash';")
+          [[ "$LEN" == "8" && "$NULL" == "NO" ]] || { echo "FAIL: content_hash expected CHAR(8) NOT NULL, got length=$LEN nullable=$NULL"; exit 1; }
+      - name: Assert lease partial indexes
+        run: |
+          psql -tAc "SELECT indexname FROM pg_indexes WHERE tablename='training_sets' AND indexname IN ('idx_training_sets_lease','idx_training_sets_lease_expire');" | sort | paste -sd, - | grep -q 'idx_training_sets_lease,idx_training_sets_lease_expire'
+      # v1.4 M0.1 runtime invariant smoke tests (codex round 8)
+      - name: Reject uppercase content_hash (ck_content_hash_crc32_lowercase)
+        run: |
+          ! psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash) VALUES ('X', 'Y', 0, 0, 'f', 'ABCDEF12');"
+      - name: Reject non-enum status (ck_status_enum)
+        run: |
+          ! psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash, status) VALUES ('X', 'Y', 0, 0, 'f', 'abcdef12', 'bogus');"
+      - name: Reject unsent row with lease populated (ck_lease_state_invariant)
+        run: |
+          ! psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash, status, lease_id, lease_expires_at, reserved_at) VALUES ('X', 'Y', 0, 0, 'f', 'abcdef12', 'unsent', '00000000-0000-0000-0000-000000000001', NOW(), NOW());"
+      - name: Reject reserved row without lease (ck_lease_state_invariant)
+        run: |
+          ! psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash, status) VALUES ('X', 'Y', 0, 0, 'f', 'abcdef12', 'reserved');"
+      - name: Accept a valid unsent row (positive control)
+        run: |
+          psql -v ON_ERROR_STOP=1 -c "INSERT INTO training_sets(stock_code, stock_name, start_datetime, end_datetime, file_path, content_hash) VALUES ('TEST', 'T', 0, 0, '/tmp/f.zip', 'abcdef12');"
+          COUNT=$(psql -tAc "SELECT count(*) FROM training_sets WHERE stock_code='TEST';")
+          [[ "$COUNT" == "1" ]] || { echo "FAIL: valid insert did not persist"; exit 1; }
+
+  sqlite-runtime-smoke:
+    name: SQLite training-set + app schemas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install sqlite3
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
+      - name: training_set_schema_v1.sql smoke
+        run: ./backend/sql/tests/test_training_set_schema.sh
+      - name: app_schema_v1.sql smoke
+        run: ./backend/sql/tests/test_app_schema.sh
