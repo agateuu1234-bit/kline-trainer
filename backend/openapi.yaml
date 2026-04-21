@@ -25,6 +25,12 @@ paths:
         spec v1.4 选择沿用 GET 语义；residual 通过 lease TTL=10 分钟（spec M0.1）+ B4
         调度器每日 05:00 把 lease_expires_at ≤ now 的 reserved 回滚为 unsent 兜底。
         内网单用户场景下 prefetch/CDN/浏览器 retry 均不适用（客户端固定是 iOS app）。
+
+        **库存不足行为未在本契约冻结**：unsent 行数 < count 时的返回结构
+        （partial lease 还是错误码）由 Plan 2 B3 FastAPI 实现时定义，届时回补
+        openapi.yaml（增 4xx 响应 + test_openapi.py 断言）。B4 调度器每日补足
+        unsent 至 100（spec §8.1）使得触发概率极低，作为 Plan 2 pre-condition
+        residual 接受。
       operationId: reserveTrainingSets
       parameters:
         - in: query

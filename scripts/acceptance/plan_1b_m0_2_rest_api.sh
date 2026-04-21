@@ -30,8 +30,9 @@ run "file: test_openapi.py exists" test -s backend/tests/test_openapi.py
 run "file: openapi-smoke.yml exists" test -s .github/workflows/openapi-smoke.yml
 
 # ---- 契约测试 ----
+# 必须确切 11 passed；若将来 test 数变化说明 spec drift，label 必须同步更新
 run "pytest: 11 OpenAPI invariants" \
-    bash -c "cd backend && python3 -m pytest tests/test_openapi.py -q"
+    bash -c "cd backend && python3 -m pytest tests/test_openapi.py -q | tee /tmp/plan1b-pytest.out && grep -q '^11 passed' /tmp/plan1b-pytest.out"
 
 # ---- CI workflow YAML 合法 ----
 run "yaml: openapi-smoke.yml parse" \
