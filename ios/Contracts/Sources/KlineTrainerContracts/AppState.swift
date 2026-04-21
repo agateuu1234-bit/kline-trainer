@@ -125,7 +125,7 @@ public struct PendingTraining: Codable, Equatable, Sendable {
     }
 }
 
-// MARK: - App Settings / Cached File
+// MARK: - Training Set File (NOT Codable: localURL is runtime filesystem reference; P5 CacheManager scope)
 
 public struct TrainingSetFile: Equatable, Sendable {
     public let id: Int
@@ -147,6 +147,8 @@ public struct TrainingSetFile: Equatable, Sendable {
         self.downloadedAt = downloadedAt
     }
 }
+
+// MARK: - App Settings (NOT Codable: stored per-field in app.sqlite settings table; P6 SettingsStore scope)
 
 public struct AppSettings: Equatable, Sendable {
     public var commissionRate: Double
