@@ -33,6 +33,23 @@ else
     pass "T1 basic invocation"
 fi
 
+# ---------------- T2: output contains required anchors ----------------
+t2_stdout=$(printf '%s' '{"prompt":"x"}' | bash "$HOOK" 2>/dev/null)
+
+check_anchor() {
+    local name="$1" pattern="$2"
+    if printf '%s' "$t2_stdout" | grep -Fq "$pattern"; then
+        pass "T2 anchor '$name' present"
+    else
+        fail "T2 anchor '$name' missing (pattern: $pattern)"
+    fi
+}
+
+check_anchor "Skill gate: literal"        "Skill gate:"
+check_anchor "superpowers:brainstorming"  "superpowers:brainstorming"
+check_anchor "exempt(...) pattern"        "exempt("
+check_anchor "whitelist reasons line"     "Whitelist reasons"
+
 # ---------------- Summary ----------------
 printf '\n%d pass, %d fail\n' "$PASS" "$FAIL"
 if [ "$FAIL" -eq 0 ]; then
