@@ -53,3 +53,6 @@ xcuserdata/
 DerivedData/
 *.hmap
 *.ipa
+
+# Git worktrees (project-local isolated workspaces for parallel plans)
+.worktrees/
