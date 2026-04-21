@@ -10,24 +10,32 @@ Codex 对 Plan 1d 的 plan R1 + post-merge attest 均指出：若单拆 Plan 1d 
 
 本文件把两条强制 gate 固化到 repo 内，Plan 2/3 每个消费 AppError 的模块 PR 前置 prereq。
 
-## Gate 1：public API 只抛 AppError
+## Gate 1：public API 只抛 AppError（权威 runtime 断言）
 
-每个模块的 test suite 必须含类似 `testApiMethodsThrowAppErrorOnly()` 的断言。示例（P1 APIClient）：
+每个模块必须对每个 public `throws` 方法 × 每个**已文档化的失败模式** 提供 deterministic 失败注入 fixture + 断言只抛 `AppError`。测试 MUST 在期望失败模式下**没有抛错**时 fail——否则是空测（test 成功仅因为依赖默认值/mock 默认成功）。
+
+示例（P1 APIClient · lease-expired 失败模式）：
 
 ```swift
-@Test func api_public_methods_throw_only_AppError() async {
+@Test func fetchMeta_leaseExpired_throwsAppError() async {
+    let client = APIClient(baseURL: fixtureServer.leaseExpiredURL)
     do {
         _ = try await client.fetchMeta(count: 1)
+        Issue.record("expected AppError to be thrown, call succeeded")
     } catch let e as AppError {
-        // 预期路径
+        #expect(e == .network(.leaseExpired))
     } catch {
         Issue.record("non-AppError leaked: \(type(of: error))")
     }
-    // 对每个 public async throws 方法重复
 }
 ```
 
-**覆盖范围**：模块 `Sources/` 下所有 `public func ... async throws` / `public func ... throws` 方法。
+**覆盖范围（强制）**：
+- **方法维度**：模块 `Sources/<Module>/` 下所有 `public func ... async throws` / `public func ... throws` 方法全覆盖。
+- **失败模式维度**：每个方法的每个文档化失败模式（timeout / offline / serverError / leaseExpired / leaseNotFound / ioError / ...）至少 1 个失败注入 fixture。
+- **空测禁令**：test 在 "expected error but succeeded" 分支必须 `Issue.record` + fail。
+
+**违反任一维度 = 模块 PR blocker**（acceptance 脚本应 grep 该模块 test 文件对 failure-mode fixture 数量的证据；具体 grep 形态在 Plan 3 P1 首次消费时定形——见下文 Gate 2 备注）。
 
 ## Gate 2：启发式 lint draft（**权威 enforcement 在 Gate 1**；Plan 3 P1 首次消费时具体化）
 
