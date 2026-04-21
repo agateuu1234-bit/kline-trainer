@@ -29,43 +29,54 @@ Codex 对 Plan 1d 的 plan R1 + post-merge attest 均指出：若单拆 Plan 1d 
 
 **覆盖范围**：模块 `Sources/` 下所有 `public func ... async throws` / `public func ... throws` 方法。
 
-## Gate 2：acceptance 脚本 grep 排查内部错误类型泄露
+## Gate 2：启发式 lint draft（**权威 enforcement 在 Gate 1**；Plan 3 P1 首次消费时具体化）
 
-每个模块的 acceptance 脚本（`scripts/acceptance/plan_N_<module>.sh`）必须含一步：
+⚠️ **本节是 draft，不是权威 enforcement**——shell `grep` 无法可靠扫描 Swift 函数体（`throw URLError(.x)`）或 catch 重抛（`catch let e as DatabaseError { throw e }`），而这恰恰是私有错误跨边界的主要路径。本 hotfix 对应的 codex round 2 HIGH finding 已显式指出这一点。
+
+**权威 enforcement = Gate 1**（runtime `@Test` 断言：调用真实 public 方法，断言只抛 `AppError`）。Gate 1 是 runtime 行为检查，可靠。
+
+**Gate 2 的最终形态在 Plan 3 P1 APIClient（首个消费 AppError 的 Swift 模块）落地时选定**，三选一：
+
+1. **SwiftSyntax-based AST 扫描**：新建一个 Swift lint 工具，解析 `Sources/<Module>/` 所有 `public func` 的函数体 + catch 块，断言不出现私有错误类型字面量。需 `swift-syntax` 依赖。
+2. **模块粒度的 tested shell guard**：对特定模块的文件结构做手工正则，配 positive/negative fixture（故意种一个 leak，确认 recipe 抓到；删除 fixture，确认通过）。
+3. **取消 Gate 2，强化 Gate 1**：要求每个模块对每条 public throws 路径都有 `@Test` 覆盖（Gate 1 的 coverage 扩展）。
+
+**现阶段（Plan 1d hotfix ~ Plan 3 P1 之间）的启发式线索**（仅供 Plan 2/3 模块作者自查，**不是**acceptance 门槛）：
 
 ```bash
-# 排查内部错误类型是否泄露到 public API 作用域
-# 允许在 private / fileprivate 中使用（内部 mapping）
-# 禁止在 public 函数签名 / catch 块返回给调用方
-run "grep: no internal-error-types leaked to public API" \
-    bash -c '! grep -rE "public[[:space:]]+func[[:space:]]+[^(]+throws[^{]*(DatabaseError|URLError|APIError)" Sources/<ModuleName>/ --include="*.swift"'
+# 启发式：扫 public .swift 文件中的 throw 字面量 + catch-as 模式
+# 已知漏洞：不抓 let err = makeErr(); throw err 等间接抛
+# 不能替代 Gate 1 runtime test
+grep -rnE 'throw[[:space:]]+(DatabaseError|URLError|APIError)|catch[[:space:]]+let[[:space:]]+[a-zA-Z_]+[[:space:]]+as[[:space:]]+(DatabaseError|URLError|APIError)' Sources/<ModuleName>/ --include='*.swift' || echo 'no naive leaks found'
 ```
 
-返回空 = OK；有 match = FAIL（public API 声明里直接用了私有错误类型）。
+**Plan 3 P1 落地任务**：选定形态 1/2/3 并在 P1 PR 里更新本文档 + 迁移到权威 acceptance 检查。
 
 ## 应用范围
 
-| Plan | 模块 | Gate 必需 | 备注 |
-|---|---|---|---|
-| Plan 2 | B1 import_csv | 否 | 不抛 error 到外；独立脚本 |
-| Plan 2 | B2 generate_training_sets | 否 | 同上 |
-| Plan 2 | B3 FastAPI routes | N/A | Python，不在 Swift AppError 覆盖范围 |
-| Plan 2 | B4 scheduler | N/A | 同 B3 |
-| Plan 3 | P1 APIClient | ✅ Gate 1 + Gate 2 | |
-| Plan 3 | P2 DownloadAcceptance | ✅ Gate 1 + Gate 2 | |
-| Plan 3 | P3a TrainingSetDBFactory / P3b TrainingSetReader | ✅ Gate 1 + Gate 2 | |
-| Plan 3 | P4 RecordRepo / PendingRepo / SettingsDAO / AcceptanceJournalDAO | ✅ Gate 1 + Gate 2 | |
-| Plan 3 | P5 CacheManager | ✅ Gate 1 + Gate 2 | |
-| Plan 3 | P6 SettingsStore | ✅ Gate 1 + Gate 2 | |
-| Plan 3 | E3 TradeCalculator | 否 | 返 `Result<Quote, TradeReason>`，不 throws；调用方 `mapError` 提升 |
+| Plan | 模块 | Gate 1 (权威) | Gate 2 (启发式 draft) | 备注 |
+|---|---|---|---|---|
+| Plan 2 | B1 import_csv | 否 | 否 | 不抛 error 到外；独立脚本 |
+| Plan 2 | B2 generate_training_sets | 否 | 否 | 同上 |
+| Plan 2 | B3 FastAPI routes | N/A | N/A | Python，不在 Swift AppError 覆盖范围 |
+| Plan 2 | B4 scheduler | N/A | N/A | 同 B3 |
+| Plan 3 | P1 APIClient | ✅ | 落地定形态 | **P1 PR 选定 Gate 2 最终形态**（SwiftSyntax / tested shell / 取消并扩展 Gate 1）|
+| Plan 3 | P2 DownloadAcceptance | ✅ | 按 P1 选型 | |
+| Plan 3 | P3a TrainingSetDBFactory / P3b TrainingSetReader | ✅ | 按 P1 选型 | |
+| Plan 3 | P4 RecordRepo / PendingRepo / SettingsDAO / AcceptanceJournalDAO | ✅ | 按 P1 选型 | |
+| Plan 3 | P5 CacheManager | ✅ | 按 P1 选型 | |
+| Plan 3 | P6 SettingsStore | ✅ | 按 P1 选型 | |
+| Plan 3 | E3 TradeCalculator | 否 | 否 | 返 `Result<Quote, TradeReason>`，不 throws；调用方 `mapError` 提升 |
 
 ## 使用方式
 
 写 Plan 2/3 涉及模块 PR 时：
 
-1. 在 plan 的 §"依赖（hard prereq）" 加一行：`per docs/governance/m04-apperror-translation-gate.md，本模块消费 AppError 故 Gate 1 + Gate 2 强制`
-2. 在模块 test 文件加对应测试（Gate 1）
-3. 在 acceptance 脚本加 grep 项（Gate 2，替换 `<ModuleName>` 为实际模块）
-4. 非 coder 验收清单里登记 "AppError trust-boundary（Gate 1 test + Gate 2 grep）" 一项
+1. 在 plan 的 §"依赖（hard prereq）" 加一行：`per docs/governance/m04-apperror-translation-gate.md，本模块消费 AppError 故 Gate 1（权威 runtime 断言）强制`
+2. 在模块 test 文件加对应测试（Gate 1：调用真实 public 方法，断言只抛 `AppError`）
+3. 启发式 lint（Gate 2 draft）：可选运行，**发现 match 必须修**，但无 match 不等于无泄漏
+4. 非 coder 验收清单里登记 "AppError trust-boundary Gate 1 test pass" 一项
+
+**Plan 3 P1 特殊任务**：作为第一个消费 AppError 的 Swift 模块，P1 PR 必须在本文档基础上选定 Gate 2 最终形态（SwiftSyntax lint / tested shell fixture / 取消 Gate 2 + 扩展 Gate 1）并更新应用矩阵。
 
 **若发现要传递私有错误类型**：在模块内部（`private` / `fileprivate`）做 mapping，边界外只抛 `AppError`。违反 Gate = PR blocker。
