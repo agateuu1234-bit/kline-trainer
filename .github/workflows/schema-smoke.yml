@@ -10,6 +10,12 @@ on:
   push:
     branches: [main]
 
+# Trust-boundary hardening (codex round 10):
+# - Least-privilege token: read-only repo contents, no write scopes
+# - actions pinned to full SHA to match project convention
+permissions:
+  contents: read
+
 jobs:
   postgres-runtime-smoke:
     name: PostgreSQL 15 ephemeral deploy
@@ -35,7 +41,7 @@ jobs:
       PGUSER: postgres
       PGDATABASE: kt_schema_smoke
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Wait for postgres ready
         run: |
           for i in $(seq 1 30); do
@@ -84,7 +90,7 @@ jobs:
     name: SQLite training-set + app schemas
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Install sqlite3
         run: sudo apt-get update && sudo apt-get install -y sqlite3
       - name: training_set_schema_v1.sql smoke
