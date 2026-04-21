@@ -86,6 +86,39 @@ else
     pass "T3 stdin drain safety"
 fi
 
+# ---------------- T4A/B: skill routing bidirectional drift guard ----------------
+# Run hook once, parse STDOUT (not source file), compare against skill_entry_map.
+
+t4_stdout=$(printf '%s' '{"prompt":"x"}' | bash "$HOOK" 2>/dev/null)
+
+expected_skills=$(jq -r \
+  '.skill_entry_map | to_entries | map(.value) | .[] | select(startswith("(exempt") | not)' \
+  "$RULES" | sort -u)
+
+actual_skills=$(printf '%s\n' "$t4_stdout" \
+  | grep -oE '(superpowers|frontend-design|codex):[a-z-]+' \
+  | sort -u)
+
+# Direction A: every skill in hook stdout must exist in skill_entry_map
+t4a_ok=1
+for s in $actual_skills; do
+    if ! printf '%s\n' "$expected_skills" | grep -Fxq "$s"; then
+        fail "T4A: '$s' in hook stdout but not in skill_entry_map"
+        t4a_ok=0
+    fi
+done
+[ "$t4a_ok" -eq 1 ] && pass "T4A hook -> skill_entry_map"
+
+# Direction B: every non-exempt skill in skill_entry_map must appear in hook stdout
+t4b_ok=1
+for s in $expected_skills; do
+    if ! printf '%s\n' "$actual_skills" | grep -Fxq "$s"; then
+        fail "T4B: '$s' in skill_entry_map but not in hook stdout"
+        t4b_ok=0
+    fi
+done
+[ "$t4b_ok" -eq 1 ] && pass "T4B skill_entry_map -> hook"
+
 # ---------------- Summary ----------------
 printf '\n%d pass, %d fail\n' "$PASS" "$FAIL"
 if [ "$FAIL" -eq 0 ]; then
