@@ -34,8 +34,27 @@ Codex 对 Plan 1d 的 plan R1 + post-merge attest 均指出：若单拆 Plan 1d 
 - **方法维度**：模块 `Sources/<Module>/` 下所有 `public func ... async throws` / `public func ... throws` 方法全覆盖。
 - **失败模式维度**：每个方法的每个文档化失败模式（timeout / offline / serverError / leaseExpired / leaseNotFound / ioError / ...）至少 1 个失败注入 fixture。
 - **空测禁令**：test 在 "expected error but succeeded" 分支必须 `Issue.record` + fail。
+- **catch-all 兜底**：每个模块必须含 1 条 catch-all 测试，模拟依赖抛出**非建模**的 raw error（例如 `NSError`、未预期的 `URLError.Code`、未预期的 `DatabaseError` subtype），断言 public API **仍**只抛 `AppError`（典型映射：`.internalError`）。此条保证未预期的依赖错误类不会以 raw 形式跨边界泄露。
 
-**违反任一维度 = 模块 PR blocker**（acceptance 脚本应 grep 该模块 test 文件对 failure-mode fixture 数量的证据；具体 grep 形态在 Plan 3 P1 首次消费时定形——见下文 Gate 2 备注）。
+示例（catch-all 兜底）：
+
+```swift
+@Test func fetchMeta_unknownDependencyError_wrappedAsInternal() async {
+    let client = APIClient(transport: MockTransport.throwing(NSError(domain: "UnexpectedDomain", code: -999)))
+    do {
+        _ = try await client.fetchMeta(count: 1)
+        Issue.record("expected AppError, call succeeded")
+    } catch let e as AppError {
+        if case .internalError = e { /* ok */ } else {
+            Issue.record("unknown dependency should map to .internalError, got \(e)")
+        }
+    } catch {
+        Issue.record("raw non-AppError leaked on unknown-dep path: \(type(of: error))")
+    }
+}
+```
+
+**违反任一维度 = 模块 PR blocker**（acceptance 脚本应 grep 该模块 test 文件对 failure-mode fixture 数量 + catch-all 存在性的证据；具体 grep 形态在 Plan 3 P1 首次消费时定形——见下文 Gate 2 备注）。
 
 ## Gate 2：启发式 lint draft（**权威 enforcement 在 Gate 1**；Plan 3 P1 首次消费时具体化）
 

@@ -28,9 +28,12 @@ run() {
 run "file: AppError.swift"        test -s ios/Contracts/Sources/KlineTrainerContracts/AppError.swift
 run "file: AppErrorTests.swift"   test -s ios/Contracts/Tests/KlineTrainerContractsTests/AppErrorTests.swift
 
-# ---- M0.4 翻译规则 gate 文档存在 + 含 Gate 1/Gate 2 锚点 (hotfix 2026-04-22) ----
+# ---- M0.4 翻译规则 gate 文档存在 + 含 Gate 1/Gate 2 锚点 + 语义关键短语 (hotfix 2026-04-22) ----
 run "file: translation gate doc"     test -s docs/governance/m04-apperror-translation-gate.md
 run "grep: Gate 1 + Gate 2 anchors"  bash -c "grep -q '^## Gate 1' docs/governance/m04-apperror-translation-gate.md && grep -q '^## Gate 2' docs/governance/m04-apperror-translation-gate.md"
+run "grep: failure-inducing fixture requirement" grep -q "失败注入 fixture" docs/governance/m04-apperror-translation-gate.md
+run "grep: catch-all fallback requirement"       grep -q "catch-all 兜底" docs/governance/m04-apperror-translation-gate.md
+run "grep: PR blocker language"                  grep -q "PR blocker" docs/governance/m04-apperror-translation-gate.md
 
 # ---- AppError.swift 包含 4 个 Reason + 1 个 AppError 定义 ----
 run "grep: AppError enum definition" grep -q '^public enum AppError:' ios/Contracts/Sources/KlineTrainerContracts/AppError.swift
