@@ -179,7 +179,9 @@ else
 fi
 
 # ---------------- Summary ----------------
-printf '\n%d pass, %d fail\n' "$PASS" "$FAIL"
+# 5 top-level tests = T1, T2, T3, T4 (A/B/C/D), T5 (a/b).
+# Spec §6 acceptance uses "All 5 tests passed" to match top-level grouping.
+printf '\n%d assertions passed, %d failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -eq 0 ]; then
     echo "All 5 tests passed"
     exit 0
