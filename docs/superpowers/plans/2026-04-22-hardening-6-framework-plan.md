@@ -271,43 +271,110 @@ git commit -m "hardening-6 Task 2: state infra (skill-stage dir + drift jsonl)"
 1. 读 `workflow-rules.json.skill_gate_policy.enforcement_mode`。若 = `block` 且 first-line 缺失/格式 invalid → block（既有行为在 H6.9 flip 后变 block）
 2. exempt 合理性 allowlist（L3）：read-only-query / behavior-neutral / single-step-no-semantic-change 下严格限制 tool_uses
 
-- [ ] **Step 1: 先读 response tool uses 的辅助函数加入**
+- [ ] **Step 1: 加 Python exempt validator helper（R5 F1 fix：用 Python 而非 shell parsing 避免 IFS='|' bypass）**
 
 在 hook 开头（set -eo pipefail 之后）加 helper：
 
 ```bash
-# helper: extract tool_uses list from last assistant message
-extract_tool_uses() {
-  python3 - "$1" <<'PY'
-import json, sys
+# helper: validate exempt integrity entirely in Python (avoid shell IFS parsing bypass)
+# Input: transcript path + exempt reason
+# Output: prints "OK" on pass; prints "BLOCK: <reason>" on fail
+# Exit 0 always (hook uses output parsing)
+validate_exempt_integrity() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys, re
+
+tpath, reason = sys.argv[1], sys.argv[2]
+
+# Extract last assistant tool_uses (list of {name, input_dict})
+last_tool_uses = []
 try:
-    with open(sys.argv[1]) as f:
-        last_tool_uses = []
+    with open(tpath) as f:
         for line in f:
             try:
                 d = json.loads(line)
                 if d.get('type') == 'assistant':
                     content = d.get('message', {}).get('content', [])
                     if isinstance(content, list):
-                        # Reset per assistant message (we want last one's tool uses)
-                        last_tool_uses = []
-                        for c in content:
-                            if isinstance(c, dict) and c.get('type') == 'tool_use':
-                                last_tool_uses.append({
-                                    'name': c.get('name', ''),
-                                    'input': c.get('input', {}),
-                                })
+                        last_tool_uses = [c for c in content if isinstance(c, dict) and c.get('type') == 'tool_use']
             except Exception:
                 continue
-    for tu in last_tool_uses:
-        # Output one tool use per line: name|<bash_cmd_or_empty>|<other_input_snippet>
-        name = tu['name']
-        inp = tu.get('input', {})
-        bash_cmd = inp.get('command', '') if name == 'Bash' else ''
-        snippet = json.dumps(inp)[:200]
-        print(f"{name}|{bash_cmd}|{snippet}")
 except Exception as e:
-    print(f"ERROR|{e}|", file=sys.stderr)
+    print(f"BLOCK: transcript parse error: {e}")
+    sys.exit(0)
+
+def get_cmd(tu):
+    return tu.get('input', {}).get('command', '')
+
+def get_path(tu):
+    return tu.get('input', {}).get('file_path', '')
+
+# R5 F1 fix: each tool use is a complete object; no |-split parsing
+# R5 F2 fix: for behavior-neutral, check Write/Edit/NotebookEdit paths against allowlist
+# R5 F3 not relevant here (target regex is in skill-invoke-check, not this hook)
+
+if reason == 'read-only-query':
+    # Strict allowlist: Read/Grep/Glob or specific safe Bash patterns
+    # Safe Bash: complete regex match; NO pipes, redirects, compound commands
+    safe_bash = re.compile(
+        r'^(pwd|true|false)$'
+        r'|^echo +["\'][^"\'|<>;&`$()]*["\']$'
+        r'|^(ls|cat|head|tail|wc) +[^|<>;&`$(){}]+$'
+    )
+    for tu in last_tool_uses:
+        name = tu.get('name', '')
+        if name in ('Read', 'Grep', 'Glob'):
+            continue
+        if name == 'Bash':
+            cmd = get_cmd(tu)
+            # Reject any pipe/redirect/compound regardless of prefix match
+            if re.search(r'[|<>;&`$]', cmd) or '||' in cmd or '&&' in cmd:
+                print(f"BLOCK: exempt(read-only-query) Bash 含管道/重定向/复合命令: {cmd[:80]}")
+                sys.exit(0)
+            if not safe_bash.match(cmd):
+                print(f"BLOCK: exempt(read-only-query) Bash 不在严格白名单: {cmd[:80]}")
+                sys.exit(0)
+            continue
+        print(f"BLOCK: exempt(read-only-query) 不允许工具 {name}")
+        sys.exit(0)
+
+elif reason == 'behavior-neutral':
+    # R5 F2 fix: restrict Write/Edit/NotebookEdit paths; block commit/push
+    safe_path = re.compile(r'^(\./)?(docs/.*\.md|\.claude/state/[a-zA-Z0-9_.-]+\.(jsonl|json))$')
+    for tu in last_tool_uses:
+        name = tu.get('name', '')
+        if name in ('Write', 'Edit', 'NotebookEdit', 'MultiEdit'):
+            fp = get_path(tu)
+            # Normalize to relative (strip leading /workspace/PROJECT_PATH if present)
+            import os
+            pwd = os.getcwd()
+            if fp.startswith(pwd + '/'):
+                fp = fp[len(pwd) + 1:]
+            elif fp.startswith('/'):
+                fp = fp.lstrip('/')
+            if not safe_path.match(fp):
+                print(f"BLOCK: exempt(behavior-neutral) Write/Edit 路径不在白名单 (docs/*.md 或 .claude/state/*.json[l]): {fp}")
+                sys.exit(0)
+        elif name == 'Bash':
+            cmd = get_cmd(tu)
+            if re.search(r'git +(commit|push|tag)|gh +pr +(create|merge)', cmd):
+                print(f"BLOCK: exempt(behavior-neutral) Bash 不允许 commit/push/tag/PR: {cmd[:80]}")
+                sys.exit(0)
+
+elif reason == 'single-step-no-semantic-change':
+    if len(last_tool_uses) > 2:
+        print(f"BLOCK: exempt(single-step-no-semantic-change) tool_uses 超 2 ({len(last_tool_uses)})")
+        sys.exit(0)
+    for tu in last_tool_uses:
+        if tu.get('name') == 'Bash':
+            cmd = get_cmd(tu)
+            if re.search(r'git +push|gh +pr +(create|merge)', cmd):
+                print(f"BLOCK: exempt(single-step) Bash 不允许 push/PR: {cmd[:80]}")
+                sys.exit(0)
+
+# user-explicit-skip: trust user, no content check
+
+print("OK")
 PY
 }
 ```
@@ -325,73 +392,21 @@ PY
   fi
 ```
 
-- [ ] **Step 3: L3 exempt integrity allowlist**
+- [ ] **Step 3: L3 exempt integrity allowlist (v6：委托 Python helper，避免 shell IFS bypass)**
 
-在既有 `# 2) Exempt reason whitelist` 块之后，添加 L3 integrity check（当 reason 通过白名单后）：
+在既有 `# 2) Exempt reason whitelist` 块之后，添加 L3 integrity check：
 
 ```bash
-# L3 exempt integrity (H6 new): check tool_uses match the exempt claim
+# L3 exempt integrity (v6 H6 R5 F1+F2 fix): delegate to Python validator
+# Avoids shell IFS='|' parsing that let 'cat x | tee y' bypass allowlist
+# Also handles Write/Edit path check for behavior-neutral
 if echo "$first_line" | grep -qE '^Skill gate: exempt\('; then
   reason=$(echo "$first_line" | sed -E 's/^Skill gate: exempt\(([^)]+)\).*/\1/')
-  # (already whitelist-checked above; now integrity check)
-  
-  TOOL_USES=$(extract_tool_uses "$tpath")
-  
-  case "$reason" in
-    "read-only-query")
-      # allowlist: only Read/Grep/Glob, or Bash matching strict read-only patterns
-      while IFS='|' read -r tname bcmd _rest; do
-        [ -z "$tname" ] && continue
-        case "$tname" in
-          Read|Grep|Glob) continue ;;
-          Bash)
-            # Strict allow: pwd|true|false|echo literal|ls/cat/head/tail/wc with simple args
-            # Reject pipes, redirects, compound commands
-            if echo "$bcmd" | grep -qE '[|<>;&`$]' && ! echo "$bcmd" | grep -qE '^echo +["\x27][^"\x27]*["\x27]$'; then
-              block "exempt(read-only-query) 不允许 Bash 含管道/重定向/复合命令: $bcmd"
-            fi
-            if ! echo "$bcmd" | grep -qE '^(pwd|true|false)$|^echo +["\x27][^|<>;&`$]*["\x27]$|^(ls|cat|head|tail|wc) +[^|<>;&`$(){}]+$'; then
-              block "exempt(read-only-query) Bash 不在严格白名单: $bcmd"
-            fi
-            ;;
-          *)
-            block "exempt(read-only-query) 不允许工具 $tname"
-            ;;
-        esac
-      done <<EOF
-$TOOL_USES
-EOF
-      ;;
-    "behavior-neutral")
-      # Reject commit/push/tag/PR ops
-      while IFS='|' read -r tname bcmd _rest; do
-        [ "$tname" = "Bash" ] || continue
-        if echo "$bcmd" | grep -qE 'git (commit|push|tag)|gh pr (create|merge)'; then
-          block "exempt(behavior-neutral) 不允许 commit/push/tag/PR: $bcmd"
-        fi
-      done <<EOF
-$TOOL_USES
-EOF
-      ;;
-    "single-step-no-semantic-change")
-      # Max 2 tool_uses, no push/merge/PR
-      tc=$(echo "$TOOL_USES" | grep -cv '^$' || echo 0)
-      if [ "$tc" -gt 2 ]; then
-        block "exempt(single-step-no-semantic-change) tool_uses 超 2 ($tc)"
-      fi
-      while IFS='|' read -r tname bcmd _rest; do
-        [ "$tname" = "Bash" ] || continue
-        if echo "$bcmd" | grep -qE 'git push|gh pr (create|merge)'; then
-          block "exempt(single-step) 不允许 push/PR: $bcmd"
-        fi
-      done <<EOF
-$TOOL_USES
-EOF
-      ;;
-    "user-explicit-skip")
-      : # trust user, no content check
-      ;;
-  esac
+  # reason 已在 §2 被白名单过滤，这里只检 integrity
+  result=$(validate_exempt_integrity "$tpath" "$reason")
+  if [[ "$result" == BLOCK:* ]]; then
+    block "${result#BLOCK: }"
+  fi
 fi
 ```
 
@@ -795,13 +810,13 @@ if [ "$SKILL_NAME" = "codex:adversarial-review" ]; then
   TARGET=""
   case "$LAST_STAGE" in
     "superpowers:brainstorming"|"superpowers:writing-plans")
-      # v4: Look at THIS response's Write/Edit tool_uses for spec/plan path
-      # If exactly 1 match → use it; if 0 or >1 → BLOCK (don't guess)
+      # v6 R5 F3 fix: accept both relative and absolute paths; normalize
+      # before regex match (strip leading ./) 
       CANDIDATES=$(echo "$TXT_AND_USES" | jq -r '
         .tool_uses[]
-        | select(.name == "Write" or .name == "Edit" or .name == "NotebookEdit")
+        | select(.name == "Write" or .name == "Edit" or .name == "NotebookEdit" or .name == "MultiEdit")
         | .input.file_path // empty
-      ' | grep -E '/docs/superpowers/(specs|plans)/.+\.md$' | sort -u)
+      ' | sed -E "s|^$PWD/||; s|^\./||" | grep -E '^docs/superpowers/(specs|plans)/.+\.md$' | sort -u)
       # Fall back to git log if response has no artifacts (e.g., codex run-only response)
       if [ -z "$CANDIDATES" ]; then
         CANDIDATES=$(git log -1 --name-only --pretty=format: 2>/dev/null | grep -E '^docs/superpowers/(specs|plans)/' | sort -u)
