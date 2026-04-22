@@ -1026,8 +1026,16 @@ if [ "$SKILL_NAME" = "codex:adversarial-review" ]; then
               EVIDENCE_PASS=1
             fi
           fi
+        elif [[ "$TARGET" =~ ^branch: ]]; then
+          # v14 R13 F1 fix: branch target 也必须 payload SHA match (不止 key match)
+          BR_SHA_FROM_TARGET="${TARGET##*@}"
+          ENTRY_HEAD_SHA=$(echo "$ENTRY" | jq -r '.head_sha // .blob_or_head_sha // .head_sha_for_patch // ""')
+          if [ -n "$BR_SHA_FROM_TARGET" ] && [ "$BR_SHA_FROM_TARGET" = "$ENTRY_HEAD_SHA" ]; then
+            EVIDENCE_PASS=1
+          fi
         else
-          EVIDENCE_PASS=1
+          # Unknown target kind (shouldn't reach here but fail-closed)
+          :
         fi
       fi
     fi
