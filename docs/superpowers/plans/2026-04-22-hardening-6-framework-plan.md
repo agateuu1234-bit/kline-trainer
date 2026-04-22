@@ -819,9 +819,14 @@ git commit -m "hardening-6 Task 4: tests for stop-response-check L1 block + L3 i
 ```bash
 cat > .claude/hooks/skill-invoke-check.sh <<'HOOK_EOF'
 #!/usr/bin/env bash
-# skill-invoke-check.sh (hardening-6 v9 ζ)
+# skill-invoke-check.sh (hardening-6 v19 ζ)
 # Stop hook: L2 invoke match + L4 mini-state + L5 codex evidence + unknown gate fail-closed
 set -eo pipefail
+
+# v19 R18 F1 fix: anchor all relative paths to project root regardless of cwd
+# (Claude Code may invoke Stop hooks from any directory; paths must work reliably)
+REPO_ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+cd "$REPO_ROOT" || { echo "[skill-invoke-check] cannot cd to REPO_ROOT=$REPO_ROOT; fail-open" >&2; exit 0; }
 
 CONFIG=".claude/config/skill-invoke-enforced.json"
 RULES=".claude/workflow-rules.json"
