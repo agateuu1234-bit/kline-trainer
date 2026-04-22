@@ -1814,7 +1814,7 @@ operate normally."
 | 1 | `./scripts/acceptance/hardening_6_framework.sh` | `HARDENING 6 PASS` | 两齐 = PASS |
 | 2 | `jq '.enforce \| length' .claude/config/skill-invoke-enforced.json; jq -e '.enforce["codex:adversarial-review"]' .claude/config/skill-invoke-enforced.json` | 第 1 输出 `14`；第 2 jq -e exit 0 | 两者齐 = PASS |
 | 3 | `jq '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json` | 输出 `"block"`（最后 commit 后）| `block` = PASS |
-| 4 | `ls .claude/state/skill-stage/` | 至少含 `.gitkeep` | 存在 = PASS |
+| 4 | `git check-ignore -q .claude/state/skill-stage/test.json; echo "exit=$?"` | 输出 `exit=0`（gitignored runtime 目录）| `exit=0` = PASS（state 目录是 runtime 创建，不 commit；per v10 R9 F3 fix）|
 | 5 | `test -x .claude/hooks/skill-invoke-check.sh && echo OK` | `OK` | = PASS |
 | 6 | `pytest tests/hooks/test_stop_response_check.py tests/hooks/test_skill_invoke_check.py -q` | 末行 `N passed` + 0 failed | 0 failed = PASS |
 | 7 | PR files 数组含本 plan 10 个新/改文件 (`gh pr view <PR> --json files`) | 仅这 10 个路径 | 仅 10 个 = PASS |
