@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Plan 1d 聚合验收：M0.4 AppError 契约
 # 涵盖：AppError.swift + AppErrorTests.swift 存在 + swift test exit 0 + 5 keywords
+# hotfix 2026-04-22: + gate stub 锚点（待 Plan 3 P1 闭合）
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -24,16 +25,13 @@ run() {
   fi
 }
 
+# ---- M0.4 翻译规则 gate stub 锚点 (hotfix 2026-04-22, E-mode) ----
+run "file: translation gate stub" test -s docs/governance/m04-apperror-translation-gate.md
+run "grep: stub Plan 3 P1 closure hook" grep -q 'TODO Plan 3 P1' docs/governance/m04-apperror-translation-gate.md
+
 # ---- 文件存在性 ----
 run "file: AppError.swift"        test -s ios/Contracts/Sources/KlineTrainerContracts/AppError.swift
 run "file: AppErrorTests.swift"   test -s ios/Contracts/Tests/KlineTrainerContractsTests/AppErrorTests.swift
-
-# ---- M0.4 翻译规则 gate 文档存在 + 含 Gate 1/Gate 2 锚点 + 语义关键短语 (hotfix 2026-04-22) ----
-run "file: translation gate doc"     test -s docs/governance/m04-apperror-translation-gate.md
-run "grep: Gate 1 + Gate 2 anchors"  bash -c "grep -q '^## Gate 1' docs/governance/m04-apperror-translation-gate.md && grep -q '^## Gate 2' docs/governance/m04-apperror-translation-gate.md"
-run "grep: failure-inducing fixture requirement" grep -q "失败注入 fixture" docs/governance/m04-apperror-translation-gate.md
-run "grep: catch-all fallback requirement"       grep -q "catch-all 兜底" docs/governance/m04-apperror-translation-gate.md
-run "grep: PR blocker language"                  grep -q "PR blocker" docs/governance/m04-apperror-translation-gate.md
 
 # ---- AppError.swift 包含 4 个 Reason + 1 个 AppError 定义 ----
 run "grep: AppError enum definition" grep -q '^public enum AppError:' ios/Contracts/Sources/KlineTrainerContracts/AppError.swift

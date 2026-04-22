@@ -1,145 +1,50 @@
-# M0.4 AppError Trust-Boundary Translation Gate
+# M0.4 AppError Trust-Boundary Translation Gate（stub，待 Plan 3 P1 闭合）
 
-> **Source**: 本文档由 Plan 1d hotfix（2026-04-22）落地；对应 session-local memory `project_m04_translation_gate.md` 已指向此文件作为权威副本。Plan 2/3 消费 AppError 的 Swift 模块 PR 必须引用本文件两条 gate。
+> **Status**：stub 锚点。具体 Gate 规则在 Plan 3 P1 APIClient 首次消费 AppError 时落地——因为没有真 Swift 模块可迭代，现在抽象化写规则已被 codex 6 轮对抗性 review 验证会持续 shift goalposts（见本 PR 历史）。
 
-## 背景
+## 用途
 
-Plan 1d（M0.4 AppError 契约冻结）scope 仅冻结 `AppError` + 4 Reason 类型层 + 3 UI extension computed vars。spec M0.4 的"翻译规则表"（P1 APIClient / P3 TrainingSetDB / P4 AppDB / E3 TradeCalculator / P2 DownloadAcceptance / UI 各模块如何把本模块私有错误转 AppError）属模块实现约束，归 Plan 2/3 落地。
+本文件是 `spec M0.4` "私有错误在本模块边界内转 AppError" 原则的 **repo 锚点**。它的存在解决了 Plan 1d PR #26 codex post-merge finding："promised translation gate artifact not in repo"。
 
-Codex 对 Plan 1d 的 plan R1 + post-merge attest 均指出：若单拆 Plan 1d 不含翻译规则强制手段，Plan 2/3 模块可能悄悄跨模块传递私有错误（`DatabaseError` / `URLError` / `APIError` 等），违反 M0.4 "私有错误在本模块边界内转 AppError" 原则。
+Plan 2/3 消费 AppError 的 Swift 模块 PR 必须引用本文件，**即使规则尚未具体化**——目的是让引用链不丢。
 
-本文件把两条强制 gate 固化到 repo 内，Plan 2/3 每个消费 AppError 的模块 PR 前置 prereq。
+## Plan 3 P1 闭合清单（TODO）
 
-## Gate 1：public API 只抛 AppError（权威 runtime 断言）
+Plan 3 P1（APIClient，第一个 public throws 消费 AppError 的 Swift 模块）PR 必须**闭合以下 5 条**并把本 stub 升级为权威 gate doc：
 
-每个模块必须对每个 public `throws` 方法 × 每个**已文档化的失败模式** 提供 deterministic 失败注入 fixture + 断言只抛 `AppError`。测试 MUST 在期望失败模式下**没有抛错**时 fail——否则是空测（test 成功仅因为依赖默认值/mock 默认成功）。
+- [ ] **TODO Plan 3 P1**: Gate 1 coverage 范围——`public func ... throws` only，还是包含 `init / accessor / subscript / protocol requirement`？
+- [ ] **TODO Plan 3 P1**: Gate 1 是否强制"失败注入 fixture per 方法 × per 文档化失败模式"？（codex R3 推荐 yes）
+- [ ] **TODO Plan 3 P1**: catch-all 兜底形态——per-method 强制，还是允许 shared-adapter 例外？（codex R4 推荐 per-method；R5 反攻 shared-adapter；需真代码验证）
+- [ ] **TODO Plan 3 P1**: Gate 1 evidence mapping table（public API → fixtures）是否作为 PR body 强制？
+- [ ] **TODO Plan 3 P1**: Gate 2 形态——SwiftSyntax lint / tested shell fixture / 取消并扩展 Gate 1？
 
-示例（P1 APIClient · lease-expired 失败模式）：
-
-```swift
-@Test func fetchMeta_leaseExpired_throwsAppError() async {
-    let client = APIClient(baseURL: fixtureServer.leaseExpiredURL)
-    do {
-        _ = try await client.fetchMeta(count: 1)
-        Issue.record("expected AppError to be thrown, call succeeded")
-    } catch let e as AppError {
-        #expect(e == .network(.leaseExpired))
-    } catch {
-        Issue.record("non-AppError leaked: \(type(of: error))")
-    }
-}
-```
-
-**覆盖范围（强制）**：
-- **方法维度**：模块 `Sources/<Module>/` 下所有 `public func ... async throws` / `public func ... throws` 方法全覆盖。
-- **失败模式维度**：每个方法的每个文档化失败模式（timeout / offline / serverError / leaseExpired / leaseNotFound / ioError / ...）至少 1 个失败注入 fixture。
-- **空测禁令**：test 在 "expected error but succeeded" 分支必须 `Issue.record` + fail。
-- **catch-all 兜底（per-method 或 per-dependency-boundary）**：**每个 public throwing 方法**（或最小化工作量时：**每个 dependency 边界**——例如一个模块的 `URLSession` 共用 boundary、`GRDB.DatabaseQueue` 共用 boundary 分别 1 条即可）必须含至少 1 条 catch-all 测试，模拟依赖抛出**非建模**的 raw error（例如 `NSError`、未预期的 `URLError.Code`、未预期的 `DatabaseError` subtype），断言 public API **仍**只抛 `AppError`（典型映射：`.internalError`）。此条保证未预期的依赖错误类不会以 raw 形式跨边界泄露。
-  - **禁止**：一个模块仅含单条 module-level catch-all（不同 public 方法可能走不同 boundary，单条 catch-all 无法覆盖其它）。
-
-示例（catch-all 兜底）：
-
-```swift
-@Test func fetchMeta_unknownDependencyError_wrappedAsInternal() async {
-    let client = APIClient(transport: MockTransport.throwing(NSError(domain: "UnexpectedDomain", code: -999)))
-    do {
-        _ = try await client.fetchMeta(count: 1)
-        Issue.record("expected AppError, call succeeded")
-    } catch let e as AppError {
-        if case .internalError = e { /* ok */ } else {
-            Issue.record("unknown dependency should map to .internalError, got \(e)")
-        }
-    } catch {
-        Issue.record("raw non-AppError leaked on unknown-dep path: \(type(of: error))")
-    }
-}
-```
-
-**违反任一维度 = 模块 PR blocker**（acceptance 脚本应 grep 该模块 test 文件对 failure-mode fixture 数量 + catch-all 存在性的证据；具体 grep 形态在 Plan 3 P1 首次消费时定形——见下文 Gate 2 备注）。
-
-## Gate 2：启发式 lint draft（**权威 enforcement 在 Gate 1**；Plan 3 P1 首次消费时具体化）
-
-⚠️ **本节是 draft，不是权威 enforcement**——shell `grep` 无法可靠扫描 Swift 函数体（`throw URLError(.x)`）或 catch 重抛（`catch let e as DatabaseError { throw e }`），而这恰恰是私有错误跨边界的主要路径。本 hotfix 对应的 codex round 2 HIGH finding 已显式指出这一点。
-
-**权威 enforcement = Gate 1**（runtime `@Test` 断言：调用真实 public 方法，断言只抛 `AppError`）。Gate 1 是 runtime 行为检查，可靠。
-
-**Gate 2 的最终形态在 Plan 3 P1 APIClient（首个消费 AppError 的 Swift 模块）落地时选定**，三选一：
-
-1. **SwiftSyntax-based AST 扫描**：新建一个 Swift lint 工具，解析 `Sources/<Module>/` 所有 `public func` 的函数体 + catch 块，断言不出现私有错误类型字面量。需 `swift-syntax` 依赖。
-2. **模块粒度的 tested shell guard**：对特定模块的文件结构做手工正则，配 positive/negative fixture（故意种一个 leak，确认 recipe 抓到；删除 fixture，确认通过）。
-3. **取消 Gate 2，强化 Gate 1**：要求每个模块对每条 public throws 路径都有 `@Test` 覆盖（Gate 1 的 coverage 扩展）。
-
-**现阶段（Plan 1d hotfix ~ Plan 3 P1 之间）的启发式线索**（仅供 Plan 2/3 模块作者自查，**不是**acceptance 门槛）：
+**Plan 3 P1 的 acceptance 脚本必须含一条断言**：
 
 ```bash
-# 启发式：扫 public .swift 文件中的 throw 字面量 + catch-as 模式
-# 已知漏洞：不抓 let err = makeErr(); throw err 等间接抛
-# 不能替代 Gate 1 runtime test
-grep -rnE 'throw[[:space:]]+(DatabaseError|URLError|APIError)|catch[[:space:]]+let[[:space:]]+[a-zA-Z_]+[[:space:]]+as[[:space:]]+(DatabaseError|URLError|APIError)' Sources/<ModuleName>/ --include='*.swift' || echo 'no naive leaks found'
+# 确保 Plan 3 P1 闭合了所有 stub TODO
+run "gov: m04 gate stub closed" \
+    bash -c "! grep -q 'TODO Plan 3 P1' docs/governance/m04-apperror-translation-gate.md"
 ```
 
-**Plan 3 P1 落地任务**：选定形态 1/2/3 并在 P1 PR 里更新本文档 + 迁移到权威 acceptance 检查。
+本断言返回 empty grep 结果 = TODO 全部删除 = stub 已升级为权威 gate = acceptance PASS。
 
-## 应用范围
+## 历史讨论（参考，不权威）
 
-| Plan | 模块 | Gate 1 (权威) | Gate 2 (启发式 draft) | 备注 |
-|---|---|---|---|---|
-| Plan 2 | B1 import_csv | 否 | 否 | 不抛 error 到外；独立脚本 |
-| Plan 2 | B2 generate_training_sets | 否 | 否 | 同上 |
-| Plan 2 | B3 FastAPI routes | N/A | N/A | Python，不在 Swift AppError 覆盖范围 |
-| Plan 2 | B4 scheduler | N/A | N/A | 同 B3 |
-| Plan 3 | P1 APIClient | ✅ | 落地定形态 | **P1 PR 选定 Gate 2 最终形态**（SwiftSyntax / tested shell / 取消并扩展 Gate 1）|
-| Plan 3 | P2 DownloadAcceptance | ✅ | 按 P1 选型 | |
-| Plan 3 | P3a TrainingSetDBFactory / P3b TrainingSetReader | ✅ | 按 P1 选型 | |
-| Plan 3 | P4 RecordRepo / PendingRepo / SettingsDAO / AcceptanceJournalDAO | ✅ | 按 P1 选型 | |
-| Plan 3 | P5 CacheManager | ✅ | 按 P1 选型 | |
-| Plan 3 | P6 SettingsStore | ✅ | 按 P1 选型 | |
-| Plan 3 | E3 TradeCalculator | 否 | 否 | 返 `Result<Quote, TradeReason>`，不 throws；调用方 `mapError` 提升 |
+Plan 1d hotfix 期间（2026-04-22）对 5 条 TODO 的 6 轮 codex 迭代见：
+- 本 PR（plan-1d-hotfix/translation-gate）commit 历史：`29a3559` → `fbaa432`（R0 入仓、R1-R4 规则打磨）
+- codex R5/R6 findings：gov doc §"已知残留"（commit `d1ee2ca`）——均已被本次 E-mode 重写替换，仅历史留痕
+- memory `project_m04_translation_gate.md`（session-local 讨论笔记）
 
-## 使用方式
+**以上历史仅供 Plan 3 P1 决策时参考，不是权威约束。Plan 3 P1 有权**完全重新设计**这 5 条规则，只要最终形态能通过该 PR 自己的 codex review。**
 
-写 Plan 2/3 涉及模块 PR 时：
+## 应用范围（不变，来自原 memory）
 
-1. 在 plan 的 §"依赖（hard prereq）" 加一行：`per docs/governance/m04-apperror-translation-gate.md，本模块消费 AppError 故 Gate 1（权威 runtime 断言）强制`
-2. 在模块 test 文件加对应测试（Gate 1：调用真实 public 方法，断言只抛 `AppError`）
-3. 启发式 lint（Gate 2 draft）：可选运行，**发现 match 必须修**，但无 match 不等于无泄漏
-4. 非 coder 验收清单里登记 "AppError trust-boundary Gate 1 test pass" 一项
-5. **Gate 1 证据映射表**：模块 PR body 或 plan 的 Gate 1 证据段必须含一张 markdown 表，把每个 public throwing API 映射到：(a) 文档化失败模式 fixture 列表；(b) catch-all fixture（per-method 或共用 dependency boundary）。示例：
-
-   | public API | 失败模式 fixtures | catch-all fixture |
-   |---|---|---|
-   | `fetchMeta(count:)` | `timeout`, `offline`, `serverError`, `leaseExpired` | `NSError domain=UnexpectedDomain` via `URLSession` boundary |
-   | `reserveMeta(...)` | `leaseExpired`, `conflict409` | 复用 `URLSession` boundary catch-all |
-
-**Plan 3 P1 特殊任务**：作为第一个消费 AppError 的 Swift 模块，P1 PR 必须在本文档基础上选定 Gate 2 最终形态（SwiftSyntax lint / tested shell fixture / 取消 Gate 2 + 扩展 Gate 1）并更新应用矩阵。
-
-## 已知残留（codex R6 提出，延迟到 Plan 3 P1 具体化）
-
-本文档由 Plan 1d hotfix 落地，经历 codex 5 轮 adversarial review（R1–R5 全部 inline 修完），R6 又提出 2 条新角度。**per memory `feedback_codex_plan_budget_overshoot.md` "5 轮必 escalate" 规则，以下作为 explicit residual 交 Plan 3 P1 首次消费时具体闭环**：
-
-### R6-RES-1：Gate 1 coverage 只覆盖 `public func ... throws`，未覆盖其它 public throwing 声明
-
-Swift 的 public trust boundary 还包括：
-- `public init(...) throws` / `public init(...) async throws`
-- `public var x: T { get throws }`（throwing computed property）
-- `public subscript(...) throws -> T`
-- `protocol` 的 public requirement（由本模块实现）
-
-**Plan 3 P1 需在本文档 Gate 1 coverage 定义段加：**
-> 覆盖所有 public throwing 声明（funcs, static/class funcs, initializers, throwing computed properties/subscripts/accessors, 本模块实现的 public protocol requirements）。证据表必须枚举全部 public throwing surface。
-
-### R6-RES-2：共用 dependency-boundary catch-all 的例外过宽
-
-当前 Gate 1 允许"共用 dependency boundary 一条 catch-all"（例如多个 public 方法共用 `URLSession` → 一条 `URLSession` boundary catch-all 可覆盖多方法）。Codex R6 指出：不同 public 方法在共用 dependency 后可能有**独立的 catch/translation 代码**，单条 catch-all 只证明一条路径上的 mapping 正确，不能推到其它。
-
-**Plan 3 P1 需在本文档加限定：**
-> 共用 dependency boundary catch-all 的例外仅当 PR 证明存在**单一共享 throwing adapter** 持有所有 translation，且每个 public API 的失败路径都必须经过该 adapter（evidence table 需显式画出该链路）。否则必须 per-method catch-all。
-
-### 为什么延迟到 Plan 3 P1
-
-- Plan 1d 范围 = M0.4 AppError **类型层契约冻结** + **trust-boundary 翻译规则 repo 化**
-- codex R6 两条都是"如何在具体 Swift 模块落地 Gate 1 coverage 的措辞收紧"——没有实际模块可测时只能进一步抽象文字，难以收敛
-- Plan 3 P1（APIClient 是第一个 public throws 消费者）就是**具体**落地场，到时有真代码、真 fixtures，可以 close 上述两条 RES
-- 强行在 Plan 1d hotfix 里继续修会进入"codex 在 R5 接受的折衷被 R6 反攻成 loophole"的典型 shifting-goalposts 循环（R5 允许 per-boundary → R6 说 per-boundary 不够安全），违反 memory `feedback_codex_plan_budget_overshoot.md` 的 5+ 轮 escalate 规则
-
-**若发现要传递私有错误类型**：在模块内部（`private` / `fileprivate`）做 mapping，边界外只抛 `AppError`。违反 Gate = PR blocker。
+| Plan | 模块 | Gate 必需 | 备注 |
+|---|---|---|---|
+| Plan 2 | B1 import_csv | 否 | 不抛 error 到外 |
+| Plan 2 | B2 generate_training_sets | 否 | 同上 |
+| Plan 2 | B3/B4 | N/A | Python |
+| Plan 3 | **P1 APIClient** | **✅（首次消费，必闭合本 stub）** | |
+| Plan 3 | P2 DownloadAcceptance | ✅（继承 P1 规则）| |
+| Plan 3 | P3a/P3b / P4 / P5 / P6 | ✅（继承 P1 规则）| |
+| Plan 3 | E3 TradeCalculator | 否 | 返 `Result`，不 throws |
