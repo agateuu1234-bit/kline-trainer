@@ -2048,6 +2048,24 @@ jobs:
           else
             echo "enforcement_mode=$mode (pre-flip or non-H6.0); acceptance gate not required"
           fi
+
+      # v24 R23 F1 fix: self-check branch protection includes this workflow
+      # as required status check. If not, flip to block is unsafe.
+      - name: Verify branch protection requires this check
+        if: github.event.pull_request.base.ref == 'main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          checks=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" --jq '.required_status_checks.contexts[]?' 2>/dev/null || echo "")
+          mode=$(jq -r '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json)
+          if [ "$mode" = "block" ] && ! echo "$checks" | grep -q 'hardening-6'; then
+            echo "::error::enforcement_mode=block but branch protection does not require hardening-6 gate."
+            echo "::error::Configure: gh api -X PUT repos/${GITHUB_REPOSITORY}/branches/main/protection \\"
+            echo "::error::  -f 'required_status_checks[contexts][]=hardening-6 framework gate / acceptance' ..."
+            exit 1
+          fi
+          echo "Branch protection check: mode=$mode, contexts include hardening-6 if needed"
 ```
 
 - [ ] **Step 2: commit**
