@@ -363,8 +363,13 @@ if reason == 'read-only-query':
         sys.exit(0)
 
 elif reason == 'behavior-neutral':
-    # R5 F2 + R8 F1 fix: restrict Write/Edit paths AND Bash with strict allowlist
-    safe_path = re.compile(r'^(\./)?(docs/.*\.md|\.claude/state/[a-zA-Z0-9_.-]+\.(jsonl|json))$')
+    # R5 F2 + R8 F1 + R11 F1 CRITICAL fix: Write allowlist EXCLUDES .claude/state
+    # (L5 reads attest-ledger/override-log from there; allowing agent Write would
+    # let behavior-neutral forge codex evidence). state files 只能由 codex-attest.sh /
+    # attest-override.sh / hook 自身写 (via ledger-lib.sh)
+    safe_path = re.compile(r'^(\./)?docs/.*\.md$')
+    # 显式 deny list: 任何 .claude/state/* 路径一律 block
+    deny_path = re.compile(r'(^|/)\.claude/state/')
     # Same strict Bash allowlist as read-only (prevents rm/sed-i/python writes/redirects)
     safe_bash = re.compile(
         r'^(pwd|true|false)$'
@@ -382,8 +387,14 @@ elif reason == 'behavior-neutral':
                 fp = fp[len(pwd) + 1:]
             elif fp.startswith('/'):
                 fp = fp.lstrip('/')
+            # R11 F1 CRITICAL fix: deny .claude/state/* regardless of extension
+            # (ledger/override-log are L5 evidence; agent Write would forge it)
+            if deny_path.search(fp):
+                print(f"BLOCK: exempt(behavior-neutral) Write/Edit 到 .claude/state/ 禁止"
+                      f"（L5 evidence 文件只能由 codex-attest.sh / attest-override.sh 写）: {fp}")
+                sys.exit(0)
             if not safe_path.match(fp):
-                print(f"BLOCK: exempt(behavior-neutral) Write/Edit 路径不在白名单: {fp}")
+                print(f"BLOCK: exempt(behavior-neutral) Write/Edit 路径不在白名单 (仅 docs/*.md): {fp}")
                 sys.exit(0)
         elif name == 'Bash':
             cmd = get_cmd(tu)
@@ -862,11 +873,13 @@ block() {
 
 drift_log() {
   # $1 = drift_kind; other fields from env
+  # R11 F2 fix: mkdir -p parent dir (fresh checkout may not have .claude/state/)
   local kind="$1"
   local invoked="${2:-false}"
   local exempt_matched="${3:-null}"
   local last_stage_before="${4:-null}"
   local rsha=$(printf '%s' "$LAST_TEXT" | shasum -a 256 | awk '{print $1}')
+  mkdir -p "$(dirname "$DRIFT_LOG")" 2>/dev/null || true
   python3 - "$DRIFT_LOG" "$kind" "$SKILL_NAME" "$invoked" "$exempt_matched" "$last_stage_before" "$rsha" "${CLAUDE_SESSION_ID:-unknown}" <<'PY'
 import json, sys, time, os
 p, kind, skill, invoked, exempt_m, last_stage, rsha, sid = sys.argv[1:9]
@@ -882,6 +895,8 @@ entry = {
     'drift_kind': kind,
     'blocked': False,
 }
+# Ensure parent dir exists (fresh checkout fix R11 F2)
+os.makedirs(os.path.dirname(p) or '.', exist_ok=True)
 with open(p, 'a') as f:
     f.write(json.dumps(entry) + '\n')
 PY
