@@ -1,40 +1,41 @@
-# Hardening-6 Skill Pipeline Enforcement Framework 设计 Spec（ζ scope）
+# Hardening-6 Skill Pipeline Enforcement Framework 设计 Spec（ζ scope, v3）
 
-**Status**: drafted 2026-04-22；brainstorming 输出（含 6 轮 Q&A 后 scope 升级）；后续走 writing-plans → subagent-driven-development → codex adversarial review → PR（逐 skill flip 走 H6.1-H6.N 后续 PR）。
+**Status**: drafted 2026-04-22；v3（post codex R1 3 findings + user 提议 codex:adversarial-review 纳入 first-class）；scope 仍 ζ 不动。
 
-**重要**：本 spec 历经 **α → α'' → ζ 3 次 scope 迭代**（详见附录 A 决策日志）。最终 scope **ζ 中等野心**，覆盖 Plan 1f 实测的主要漏点（场景 A + D + exempt 滥用），含 mini state 1-step lookahead。完整 state machine β 留 H7，artifact check γ 留 H7。
+**v3 relative v2 变化**：
+1. 新增 **L5 codex:adversarial-review 强制**（不改既有 codex hook，在新 hook 里识别 `codex-attest.sh` 调用 / ledger entry）
+2. 修 Codex R1 HIGH #1：unknown skill gate 在 block mode 下 **fail-closed**
+3. 修 Codex R1 HIGH #2：exempt-integrity 从黑名单 → **allowlist**
+4. 修 Codex R1 MEDIUM #3：mini-state 按 **worktree hash + session_id** 隔离
 
-**痛点触发**：Plan 1f 2026-04-22 audit 发现至少 **5 次场景 A + 2 次场景 D**（详见附录 A §1），涉及 3 个核心 skill（verification-before-completion / requesting-code-review / receiving-code-review）silent skip；既有 `stop-response-check.sh` 因 hardening-2 H2-1 降级为 drift-log advisory，失去强制力。
+**关键：不改既有 codex hook**（`codex-attest.sh` / `guard-attest-ledger.sh` / `attest-override.sh`）。只在新 hook 里识别 codex 合规信号。
 
 ---
 
 ## 1. 目标
 
-### 1.1 Goal（ζ scope）
+### 1.1 Goal（ζ scope, 5 层强制）
 
-新增 / 升级 `.claude/hooks/` 若干脚本，做到以下**4 层强制**：
+| 层 | 覆盖场景 | 机制 | v3 补充 |
+|---|---|---|---|
+| L1 声明强制 | **A**：Claude 忘贴 first-line | 升级 `stop-response-check.sh` drift-log → hard block | — |
+| L2 invoke 强制 | **D**：声明了没 invoke | 新 `skill-invoke-check.sh` 扫 tool_uses Skill 调用 | — |
+| L3 exempt 合理性 | exempt 滥用 | Hook 1 exempt-integrity check | **v3 改 allowlist** |
+| L4 mini-state | 部分 **C**：流程必然性 | `.claude/state/skill-stage/<wt-hash>-<session>.json` 记 last_stage + legal-next-set | **v3 按 worktree/session 隔离** |
+| **L5 codex 强制** | **spec/plan 后没跑 codex 对抗性 review 就下一步** | 新 hook 识别 `codex-attest.sh` Bash 调用 / `attest-ledger.json` entry | **v3 新增** |
 
-| 层 | 覆盖场景 | 机制 |
-|---|---|---|
-| L1 声明强制 | **A**：Claude 忘贴 first-line `Skill gate: ...` | 升级 `stop-response-check.sh` 从 drift-log → **hard block**（exempt 白名单放行）|
-| L2 invoke 强制 | **D**：声明了但没 Skill tool invoke | **新增** `skill-invoke-check.sh` 扫 tool_uses 匹配 |
-| L3 exempt 合理性 | exempt 滥用（如 `read-only-query` 下仍 Edit/Write） | 扩 `stop-response-check.sh` exempt-integrity check |
-| L4 mini-state 流程必然性 | 部分 **C**：writing-plans 完 → 必须走 worktree / subagent-driven-development / executing-plans（不能跳 verify / finish） | 新增 `.claude/state/skill-stage.json` 记录上一次成功 stage；hook 查 legal-next-set 表 |
+**未覆盖**：
+- 场景 B（故意选错 skill）→ 需 LLM 意图判断
+- 完整 state machine β / artifact check γ → H7 backlog
 
-**未覆盖（承认 scope 局限）**：
-- 场景 B：Claude 故意选错 skill（需 LLM 判断意图，bash 做不到）
-- 完整 state machine（14 skill × transitions × exempts）：留 H7（β）
-- Artifact check（声明 brainstorming 必须产 spec.md）：留 H7（γ）
+### 1.2 Non-Goal
 
-### 1.2 Non-Goal（明确排除，防 hardening-5 重蹈）
-
-- 完整 state machine + 所有 transition rules + per-stage exit conditions → **H7（β）**
-- per-skill artifact check（spec 文件 / plan 文件 / 测试结果 / commit 计数）→ **H7（γ）**
-- UserPromptSubmit 增强 expected-skill 推断（需 NLP）→ H7
-- auto-inject skill content → 不做
-- codex:adversarial-review 纳入本 hook → 不做（独立 attest-ledger 完整 enforced）
-- writing-skills / frontend-design → 本项目不用
-- 修改 `guard-attest-ledger.sh` / `guard-env-read.sh` → 不动
+- 完整 state machine（H7 β）
+- per-skill artifact check（H7 γ）
+- UserPromptSubmit 增强 expected-skill 推断
+- auto-inject skill content
+- **改既有 codex hook**（`codex-attest.sh` / `guard-attest-ledger.sh` / `attest-override.sh`）：坚决不动；只在新 hook 里复用其信号（Bash 调用 + ledger 文件）
+- writing-skills / frontend-design（本项目不用）
 
 ## 2. 架构
 
@@ -42,15 +43,16 @@
 
 | 文件 | 动作 | 作用 | 预估行数 |
 |---|---|---|---|
-| `.claude/hooks/stop-response-check.sh` | **升级** | drift-log → hard-block（exempt 白名单放行） + 加 exempt-integrity 校验 | +50 / 改 |
-| `.claude/hooks/skill-invoke-check.sh` | **新增** | 扫 Skill tool invoke + mini-state 检查 | ~180 |
-| `.claude/config/skill-invoke-enforced.json` | 新增 | 13 skill config (observe/block) + legal-next-set 表 | ~80 |
-| `.claude/state/skill-stage.json` | 新增 | mini-state: 记录最近一次成功 skill stage | small |
-| `.claude/state/skill-invoke-drift.jsonl` | 新增 | append-only drift log | 空初始化 |
-| `.claude/workflow-rules.json` | **修改** | `skill_gate_policy.enforcement_mode`: `drift-log` → `block` | 1 行 |
-| `.claude/settings.json` | 修改 | 新增 `Stop.skill-invoke-check` hook 节点 | +4 行 |
-| `tests/hooks/test_stop_response_check_block.sh` | 新增 | 升级部分的单元测试 | ~150 |
-| `tests/hooks/test_skill_invoke_check.sh` | 新增 | 新 hook 单元测试 | ~250 |
+| `.claude/hooks/stop-response-check.sh` | **升级** | drift-log → hard-block + exempt-integrity allowlist | +70 |
+| `.claude/hooks/skill-invoke-check.sh` | 新增 | L2 invoke + L4 mini-state（按 worktree/session）+ L5 codex 识别 + unknown gate fail-closed | ~250 |
+| `.claude/config/skill-invoke-enforced.json` | 新增 | 14 skill config + legal_next_set 含 codex + wildcard + migration flag | ~120 |
+| `.claude/state/skill-stage/` | 新增目录 | 按 `<wt-hash>-<session>` 存 stage 文件 | — |
+| `.claude/state/skill-invoke-drift.jsonl` | 新增 | append-only drift log（空初始化）| 0 |
+| `.claude/workflow-rules.json` | 修改 | `skill_gate_policy.enforcement_mode`: `drift-log` → `block`（PR 最后一个 commit） | 1 行 |
+| `.claude/settings.json` | 修改 | 加 Stop.skill-invoke-check hook 节点 | +4 行 |
+| `tests/hooks/test_stop_response_check_block.py` | 新增 | L1/L3 block + allowlist 单元测试 | ~200 |
+| `tests/hooks/test_skill_invoke_check.py` | 新增 | L2/L4/L5 + unknown gate 单元测试 | ~350 |
+| `scripts/acceptance/hardening_6_framework.sh` | 新增 | 聚合验收 | ~100 |
 
 ### 2.2 Hook 逻辑流（Stop trigger，两 hook 串联）
 
@@ -61,59 +63,94 @@ Claude 响应完成 → Stop event
 Hook 1: stop-response-check.sh（升级版）
     │
     ├─ first-line 解析
-    │   ├─ 缺失 first-line → BLOCK + stderr 提示（"required Skill gate: ..."）
+    │   ├─ 缺失 → BLOCK
     │   ├─ 格式 invalid → BLOCK
-    │   ├─ exempt(<reason>) 且 reason ∈ 白名单 
-    │   │   └─ exempt-integrity check（L3）
-    │   │       ├─ reason == "read-only-query"
-    │   │       │   └─ 响应含 Edit/Write/Bash 非只读 → BLOCK（exempt 滥用）
-    │   │       ├─ reason == "behavior-neutral"
-    │   │       │   └─ 响应含任何 runtime-affecting 改动 → BLOCK
-    │   │       └─ 其他 reason → pass（"user-explicit-skip" 和 "single-step-no-semantic-change" 不做 integrity check，信任用户）
     │   ├─ exempt(<reason>) 且 reason ∉ 白名单 → BLOCK
-    │   └─ Skill gate: <skill-name> → pass to Hook 2
+    │   ├─ exempt(<reason>) 且 reason ∈ 白名单
+    │   │   └─ L3 exempt-integrity check（allowlist 版）
+    │   │       ├─ reason = "read-only-query"
+    │   │       │   └─ 响应 tool_uses 必须**全部**在 allowlist 内
+    │   │       │       allowlist = {Read, Grep} ∪ {Bash where command 匹配
+    │   │       │         `^(git status|git diff|git log|rg|grep|cat|ls|head|
+    │   │       │           tail|jq|wc|find|basename|dirname|pwd|test|stat)
+    │   │       │           (\s|$)` 且 **无**写类重定向 `>`（管道 `|` 和读类 
+    │   │       │           `<` 允许）且 **无** `;` `&&` `||` 复合命令（安全起见）}
+    │   │       │       任一 tool_use 超 allowlist → BLOCK
+    │   │       ├─ reason = "behavior-neutral"
+    │   │       │   └─ 响应不得含 git commit/push/tag、gh pr create/merge、
+    │   │       │       Skill-invoked-producing-artifacts 操作 → 否则 BLOCK
+    │   │       ├─ reason = "user-explicit-skip" → pass（信任用户）
+    │   │       ├─ reason = "single-step-no-semantic-change" → 响应 tool_uses ≤ 2
+    │   │       │   且不含 push/merge/PR → 否则 BLOCK
+    │   │       └─ 未知 reason（已在上面白名单检查拒）→ 不会到此
+    │   └─ `Skill gate: <skill-name>` → 不 block，传给 Hook 2
     │
     ▼
-Hook 2: skill-invoke-check.sh（新增）
+Hook 2: skill-invoke-check.sh（v3）
     │
-    ├─ first-line gate 的 skill-name 在 config？
-    │   ├─ 否 → drift-log "unknown_skill_in_gate"，exit 0
-    │   └─ 是
+    ├─ skill-name ∈ config.enforce？
+    │   │
+    │   ├─ **否**（unknown gate）
+    │   │   ├─ enforcement_mode = "drift-log"（observe 迁移期）→ drift-log + exit 0
+    │   │   ├─ 环境变量 ALLOW_UNKNOWN_GATE=1 → pass + drift-log WARN
+    │   │   └─ 其他（含 block mode）→ **BLOCK**（R1 F1 fix：fail-closed）
+    │   │
+    │   └─ 是（已知 skill）
     │       │
-    │       ├─ 扫响应 tool_uses 找 Skill invoke with matching skill name
-    │       │   ├─ 匹配 → L2 pass；进 L4 mini-state check
-    │       │   └─ 不匹配 → 查 exempt_rule
-    │       │       ├─ "plan-doc-spec-frozen-note" 且 plan doc 含 skip 注记 → pass
-    │       │       ├─ "plan-start-in-worktree" 且响应有 `git worktree add` 或 cwd ∈ .worktrees → pass
-    │       │       └─ 无匹配豁免
-    │       │           ├─ mode == observe → drift-log，exit 0
-    │       │           └─ mode == block → BLOCK + stderr
+    │       ├─ 特殊：skill-name == "codex:adversarial-review"（L5 路径）
+    │       │   ├─ 豁免检查 exempt_rule = "codex-attest-script-run-or-ledger"
+    │       │   │   ├─ 响应 tool_uses 含 Bash 调用 `.claude/scripts/codex-attest.sh` → pass
+    │       │   │   ├─ 响应 tool_uses 含 Bash 调用 `.claude/scripts/attest-override.sh` → pass
+    │       │   │   ├─ `.claude/state/attest-ledger.json` 最近 entry time_utc 在
+    │       │   │   │   `$SESSION_START_UTC` 之后 → pass
+    │       │   │   └─ 否则 → mode 判断 drift / block
+    │       │   └─ 不走"Skill tool invoke 匹配"（codex 无法 Skill tool invoke）
     │       │
-    │       └─ L4 mini-state check
-    │           ├─ 读 `.claude/state/skill-stage.json` 拿 last_stage
-    │           ├─ 查 legal-next-set(last_stage) 表
-    │           ├─ 当前 skill ∈ legal-next-set → pass + 更新 last_stage
-    │           └─ 当前 skill ∉ legal-next-set
-    │               ├─ mode == observe → drift-log "illegal_transition"
-    │               └─ mode == block → BLOCK + stderr 提示 "expected next: {legal_set}"
+    │       └─ 普通 skill（非 codex）
+    │           ├─ 扫响应 tool_uses 找 Skill invoke 名==skill-name
+    │           │   ├─ 匹配 → 进 L4 mini-state check
+    │           │   └─ 不匹配 → 查 exempt_rule
+    │           │       ├─ "plan-doc-spec-frozen-note" 且 plan doc 含注记 → L4
+    │           │       ├─ "plan-start-in-worktree" 且响应有 `git worktree add` 或
+    │           │       │   cwd ∈ `.worktrees/` → L4
+    │           │       └─ 否则 mode 判断 drift / block
+    │           │
+    │           └─ L4 mini-state check（隔离版）
+    │               ├─ state_file = f".claude/state/skill-stage/{wt_hash8}-{session_id8}.json"
+    │               │   wt_hash8 = sha256($PWD)[0:8]
+    │               │   session_id8 = $CLAUDE_SESSION_ID[0:8] or "noSessID"
+    │               ├─ 读 last_stage（文件不存在或 parse 失败 → "_initial"）
+    │               ├─ 查 legal_next_set(last_stage)
+    │               ├─ skill-name ∈ wildcard_always_allowed → pass + 更新 last_stage
+    │               ├─ skill-name ∈ legal_next_set → pass + 更新 last_stage（原子 write：tmp + rename）
+    │               └─ 非法 transition
+    │                   ├─ mode = observe → drift-log "illegal_transition"
+    │                   └─ mode = block → BLOCK + stderr "expected next: {set}"
     │
-    └─ pass → exit 0
+    └─ exit 0 / exit 2
 ```
 
-**两 hook 配合**：Hook 1 管 "有没有声明 + 声明是否合法"；Hook 2 管 "声明的是否匹配 invoke + 流程顺序"。职责分离。
-
-### 2.3 Config 文件 schema
+### 2.3 Config schema（v3）
 
 `.claude/config/skill-invoke-enforced.json`：
 
 ```json
 {
   "version": "1",
-  "description": "Hardening-6 skill invoke check + mini-state enforcement.",
+  "description": "Hardening-6 v3: 5-layer enforcement; codex:adversarial-review first-class.",
+  "unknown_gate_policy": {
+    "drift-log_mode": "drift-log_then_pass",
+    "block_mode": "fail_closed_unless_ALLOW_UNKNOWN_GATE=1"
+  },
   "enforce": {
-    "superpowers:brainstorming": {
+    "codex:adversarial-review": {
       "mode": "observe",
-      "flip_phase": "H6.5",
+      "flip_phase": "H6.10",
+      "exempt_rule": "codex-attest-script-run-or-ledger",
+      "note": "first-class v3: Skill tool disable-model-invocation; 改走 codex-attest.sh Bash 调用 / attest-ledger entry 检查"
+    },
+    "superpowers:brainstorming": {
+      "mode": "observe", "flip_phase": "H6.5",
       "exempt_rule": "plan-doc-spec-frozen-note"
     },
     "superpowers:writing-plans": { "mode": "observe", "flip_phase": "H6.6" },
@@ -127,14 +164,15 @@ Hook 2: skill-invoke-check.sh（新增）
       "mode": "observe", "flip_phase": "H6.4",
       "exempt_rule": "plan-start-in-worktree"
     },
-    "superpowers:using-superpowers": { "mode": "observe", "flip_phase": "永久", "note": "meta, auto-loaded" },
-    "superpowers:executing-plans": { "mode": "observe", "flip_phase": "永久", "note": "本项目用 subagent-driven-development" },
-    "superpowers:systematic-debugging": { "mode": "observe", "flip_phase": "永久", "note": "低频" },
-    "superpowers:dispatching-parallel-agents": { "mode": "observe", "flip_phase": "永久", "note": "偶尔 POC 并行" }
+    "superpowers:using-superpowers": { "mode": "observe", "flip_phase": "永久", "note": "meta" },
+    "superpowers:executing-plans": { "mode": "observe", "flip_phase": "永久" },
+    "superpowers:systematic-debugging": { "mode": "observe", "flip_phase": "永久" },
+    "superpowers:dispatching-parallel-agents": { "mode": "observe", "flip_phase": "永久" }
   },
   "mini_state": {
     "enabled": true,
-    "state_file": ".claude/state/skill-stage.json",
+    "state_dir": ".claude/state/skill-stage/",
+    "file_template": "{wt_hash8}-{session_id8}.json",
     "legal_next_set": {
       "_initial": [
         "superpowers:using-git-worktrees",
@@ -148,12 +186,19 @@ Hook 2: skill-invoke-check.sh（新增）
         "superpowers:writing-plans"
       ],
       "superpowers:brainstorming": [
-        "superpowers:writing-plans",
+        "codex:adversarial-review",
         "superpowers:using-git-worktrees"
       ],
-      "superpowers:writing-plans": [
+      "codex:adversarial-review": [
+        "superpowers:writing-plans",
         "superpowers:subagent-driven-development",
         "superpowers:executing-plans",
+        "superpowers:receiving-code-review",
+        "superpowers:finishing-a-development-branch",
+        "superpowers:brainstorming"
+      ],
+      "superpowers:writing-plans": [
+        "codex:adversarial-review",
         "superpowers:using-git-worktrees"
       ],
       "superpowers:subagent-driven-development": [
@@ -163,13 +208,15 @@ Hook 2: skill-invoke-check.sh（新增）
         "superpowers:receiving-code-review",
         "superpowers:systematic-debugging",
         "superpowers:finishing-a-development-branch",
-        "superpowers:dispatching-parallel-agents"
+        "superpowers:dispatching-parallel-agents",
+        "codex:adversarial-review"
       ],
       "superpowers:executing-plans": [
         "superpowers:test-driven-development",
         "superpowers:verification-before-completion",
         "superpowers:systematic-debugging",
-        "superpowers:finishing-a-development-branch"
+        "superpowers:finishing-a-development-branch",
+        "codex:adversarial-review"
       ],
       "superpowers:test-driven-development": [
         "superpowers:verification-before-completion",
@@ -189,19 +236,22 @@ Hook 2: skill-invoke-check.sh（新增）
       "superpowers:requesting-code-review": [
         "superpowers:receiving-code-review",
         "superpowers:finishing-a-development-branch",
+        "codex:adversarial-review",
         "superpowers:test-driven-development"
       ],
       "superpowers:receiving-code-review": [
         "superpowers:test-driven-development",
         "superpowers:verification-before-completion",
         "superpowers:requesting-code-review",
-        "superpowers:subagent-driven-development"
+        "superpowers:subagent-driven-development",
+        "codex:adversarial-review"
       ],
       "superpowers:systematic-debugging": [
         "superpowers:test-driven-development",
         "superpowers:verification-before-completion"
       ],
       "superpowers:finishing-a-development-branch": [
+        "codex:adversarial-review",
         "_initial"
       ]
     },
@@ -211,272 +261,263 @@ Hook 2: skill-invoke-check.sh（新增）
       "superpowers:dispatching-parallel-agents"
     ],
     "reset_triggers": [
-      "new worktree 创建 (detected via git worktree add in response)",
-      "finishing-a-development-branch 完成 push/PR"
+      "response 含 `git worktree add` → 新 plan 起手，last_stage ← _initial",
+      "response 含 push + PR 且 ledger 记录 approve → last_stage ← _initial",
+      "session 切换（session_id 变）→ 新 state file 自动初始化"
     ]
   }
 }
 ```
 
-**wildcard_always_allowed**：这 3 个 skill 可以从**任何** stage 进入（不受 legal-next-set 约束），因为它们是 cross-cutting 或 debugging 辅助。
+**关键流程（含 codex）**：
 
-### 2.4 Mini-state 数据结构
+```
+_initial → brainstorming (spec 起草)
+         → codex:adversarial-review (spec review gate) ← L5 强制
+         → writing-plans (plan 起草)
+         → codex:adversarial-review (plan review gate) ← L5 强制
+         → subagent-driven-development (执行)
+           → TDD / verify / review loops...
+         → requesting-code-review / finishing-a-development-branch
+         → codex:adversarial-review (PR review gate) ← L5 强制
+         → _initial (合入，周期重置)
+```
 
-`.claude/state/skill-stage.json`：
+### 2.4 Mini-state 数据结构（v3 隔离版）
 
+**目录**：`.claude/state/skill-stage/`（新建，`.gitignore` 已覆盖 `.claude/state/`）
+
+**文件命名**：`{wt_hash8}-{session_id8}.json`
+- `wt_hash8` = `sha256($PWD)` 前 8 字符
+- `session_id8` = `$CLAUDE_SESSION_ID` 前 8 字符，或 `"noSessID"`
+
+**每文件 schema**：
 ```json
 {
   "version": "1",
   "last_stage": "superpowers:writing-plans",
   "last_stage_time_utc": "2026-04-22T10:00:00Z",
-  "session_id": "019db3a4-xxxx",
   "worktree_path": "/Users/maziming/.../plan-1g/topic",
-  "drift_count_since_reset": 0
+  "session_id": "019db3a4-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "drift_count": 0,
+  "transition_history": [
+    {"stage": "superpowers:using-git-worktrees", "time": "2026-04-22T09:00:00Z"},
+    {"stage": "superpowers:brainstorming", "time": "2026-04-22T09:30:00Z"},
+    {"stage": "codex:adversarial-review", "time": "2026-04-22T09:45:00Z"},
+    {"stage": "superpowers:writing-plans", "time": "2026-04-22T10:00:00Z"}
+  ]
 }
 ```
 
-- Hook 每次 pass 更新 `last_stage`
-- `reset_triggers` 触发时 `last_stage = "_initial"`（开新 plan）
-- drift_count 超阈值（如 5）触发额外 stderr 警告
+**原子写**：`mktemp + rename`（不是直接 write），防多 hook 并发覆盖。
 
-### 2.5 Drift log 格式
+**fail-open**：JSON parse 失败 → 视作 `_initial`，drift-log 但不 block。
 
-`.claude/state/skill-invoke-drift.jsonl`（append-only）：
+**清理策略**（不在 H6.0 scope，留 backlog）：超 30 天无更新的 state file 可清理；H6.0 只新建不清理。
 
-```json
-{
-  "time_utc": "2026-04-22T08:00:00Z",
-  "session_id": "019db3a4-xxxx",
-  "response_sha": "sha256:abc123...",
-  "gate_skill": "superpowers:verification-before-completion",
-  "config_mode": "observe",
-  "invoked": false,
-  "exempt_rule_matched": null,
-  "last_stage_before": "superpowers:writing-plans",
-  "drift_kind": "gate_declared_no_invoke",
-  "blocked": false
-}
-```
+### 2.5 Drift log（v3）
 
-**7 种 `drift_kind`**：
-- `missing_first_line`（L1 触发）
+`.claude/state/skill-invoke-drift.jsonl`，新增 1 种 kind（总 8 种）：
+
+- `missing_first_line`（L1）
 - `invalid_exempt_reason`（L1）
-- `exempt_integrity_violation`（L3，如 read-only 下做了写操作）
+- `exempt_integrity_violation`（L3）
 - `gate_declared_no_invoke`（L2）
-- `unknown_skill_in_gate`
+- `unknown_skill_in_gate`（L2，v3 fail-closed 时）
 - `illegal_transition`（L4）
-- `parse_error`（fail-open 前记录）
+- **`codex_gate_no_evidence`**（L5 v3 新增）：`Skill gate: codex:adversarial-review` 但响应无 codex-attest.sh 调用 + ledger 无新 entry
+- `parse_error`（fail-open）
 
-## 3. 豁免条款详述
+## 3. 豁免规则详述（v3）
 
-### 3.1 exempt-integrity rules（L3，Hook 1 负责）
+### 3.1 exempt-integrity rules（L3，allowlist 版）
 
-| exempt reason | Integrity 规则 |
+| exempt reason | 规则 |
 |---|---|
-| `read-only-query` | 响应 tool_uses **不得含** Edit / Write / NotebookEdit，**不得含** Bash with pattern `git push\|git commit\|git worktree add\|gh pr\|echo.*>` |
-| `behavior-neutral` | 响应不得有任何 commit / push / PR 操作 |
-| `user-explicit-skip` | 响应附近需有用户明确授权信号（如用户 message 含 "跳过" / "skip" / "exempt"）→ 简化为"信任用户"，不做 content check |
-| `single-step-no-semantic-change` | 响应 tool_uses 数 ≤ 1 或仅限 Bash/Read 单次 |
+| `read-only-query` | **Allowlist**（严格）：tool_uses 必须全部 ∈ {Read, Grep} 或 Bash 匹配 `^(git status\|git diff\|git log\|rg\|grep\|cat\|ls\|head\|tail\|jq\|wc\|find\|basename\|dirname\|pwd\|test\|stat)(\s\|$)` 且 **无** 写类重定向 `>` / 复合命令 `;` `&&` `\|\|`（管道 `\|` 允许）。任一 tool_use 超 allowlist → BLOCK |
+| `behavior-neutral` | 禁 commit / push / tag / PR create-merge；允许 Edit/Write 到 `docs/**/*.md` 或 `.claude/state/*.jsonl`；其他写操作 → BLOCK |
+| `user-explicit-skip` | 信任用户（无 content check）但 drift-log 记录 |
+| `single-step-no-semantic-change` | tool_uses ≤ 2，且不含 push/merge/PR → 否则 BLOCK |
 
-Violating integrity → BLOCK（exempt 应该真的是"exempt"，不能拿着免死金牌做实事）。
+**Block 时给用户清晰 stderr 提示**："read-only-query exempt 不允许 `<具体命令>`；如真是 read-only 用 Read 或 grep 级命令，否则选其他 exempt 或真正声明 skill"。
 
-### 3.2 plan-doc-spec-frozen-note（brainstorming 专用）
+### 3.2 plan-doc-spec-frozen-note（brainstorming 专用，未变）
 
-`Skill gate: superpowers:writing-plans` + 响应写 `docs/superpowers/plans/*.md` + plan 内容含 `brainstorming skipped.*spec.*frozen` → brainstorming 的 L2 豁免（即 brainstorming 的 gate declared 但没 invoke 不算 drift）。
+`Skill gate: superpowers:writing-plans` + 响应写 `docs/superpowers/plans/*.md` + plan 内容含 `brainstorming skipped.*spec.*frozen` → brainstorming L2 豁免。
 
-### 3.3 plan-start-in-worktree（using-git-worktrees 专用）
+### 3.3 plan-start-in-worktree（using-git-worktrees 专用，未变）
 
-`Skill gate: superpowers:using-git-worktrees` + 响应有 `git worktree add` 调用，或 cwd 已在 `.worktrees/` 下 → L2 豁免。
+`Skill gate: superpowers:using-git-worktrees` + 响应有 `git worktree add` 或 cwd ∈ `.worktrees/` → L2 豁免。
 
-## 4. 滚动激活计划（H6.0 - H6.9）
+### 3.4 codex-attest-script-run-or-ledger（codex:adversarial-review 专用，v3 新增）
+
+`Skill gate: codex:adversarial-review` 满足**任一**：
+
+- 响应 tool_uses 有 Bash 调用 `.claude/scripts/codex-attest.sh` / `.claude/scripts/attest-override.sh` → pass
+- 读 `.claude/state/attest-ledger.json`，找到 entry 的 `time_utc` ∈ `$SESSION_START_UTC` 之后 → pass（说明本 session 内跑过）
+- 响应 tool_uses 有 Read `.claude/state/attest-ledger.json` + 引用其中 entry 作为证据（宽松模式，便于 discuss）→ drift-log 但 pass
+
+`SESSION_START_UTC` 获取：从 `$CLAUDE_SESSION_ID`（ULID 前缀是 timestamp），或 env var `$CLAUDE_SESSION_START_UTC`，或退化到"本进程启动时间"（/proc/self/stat 类）。
+
+## 4. 滚动激活计划（H6.0 - H6.10）
 
 | PR | 内容 | 文件改动 | 预估 codex 轮数 |
 |---|---|---|---|
-| **H6.0** | 建框架（全部 `observe`）：2 hook + config + state file + settings + tests | 9 新/改文件 | **3-4**（ζ scope 可能 codex 挖 transition table edge case）|
+| **H6.0** | 建框架（全部 observe）：2 hook + config + state dir + settings + tests | 11 新/改文件 | **3-5**（ζ 含 codex 增加复杂度）|
 | H6.1 | flip `verification-before-completion` → block | config.json 1 行 + 新单元测试 | 1-2 |
 | H6.2 | flip `requesting-code-review` → block | 同 | 1-2 |
 | H6.3 | flip `receiving-code-review` → block | 同 | 1-2 |
-| H6.4 | flip `using-git-worktrees` → block（带 plan-start-in-worktree 豁免）| config + hook 豁免逻辑测试 | 2-3 |
-| H6.5 | flip `brainstorming` → block（带 plan-doc-spec-frozen-note 豁免）| config + hook 豁免逻辑测试 | 2-3 |
+| H6.4 | flip `using-git-worktrees` → block | config + 豁免测试 | 2-3 |
+| H6.5 | flip `brainstorming` → block（spec-frozen 豁免）| config + 豁免测试 | 2-3 |
 | H6.6-H6.9 | 其他 flow skill flip | config 1 行 | 每 1-2 |
+| **H6.10** | flip `codex:adversarial-review` → block（L5 硬强制）| config 1 行 + 诈骗测试（无 codex 调用 → block） | 2-3 |
 
-**每 PR 硬约束**（吸收 hardening-5 教训）：
-- **3 轮 codex 内收敛**，超 3 轮主动 escalate 用户选 residual accept 或降级
-- **H6.0 超 5 轮 → 降级到 α''**（砍掉 mini-state 部分，保留 L1+L2+L3）
-- α'' 超 5 轮 → 降级到 α（仅 L2，即原 α scope，跟现有 drift-log 一致但改 block）
+**每 PR 硬约束**：
+- 3 轮 codex 内收敛；超 3 轮 escalate
+- H6.0 超 5 轮 → **降级到 α''**（砍 mini-state + L5）
+- α'' 超 5 轮 → 降级到 α（仅 L2）
 
-## 5. 测试策略
+## 5. 测试策略（v3 扩展）
 
-### 5.1 单元测试（两 hook 共 ~30 测试用例）
+### 5.1 单元测试新增用例
 
-**stop-response-check.sh 升级版**：
-| 场景 | 期望 |
-|---|---|
-| first-line 缺失 → BLOCK |
-| `Skill gate: ` 后面空 → BLOCK |
-| `Skill gate: exempt(invalid)` → BLOCK |
-| `Skill gate: exempt(read-only-query)` + 响应仅 Read/Bash(grep/cat) → pass |
-| `Skill gate: exempt(read-only-query)` + 响应有 Edit → BLOCK(integrity) |
-| `Skill gate: exempt(read-only-query)` + 响应有 Bash(git push) → BLOCK |
-| `Skill gate: exempt(behavior-neutral)` + 响应 docs/*.md 改动 → pass |
-| `Skill gate: exempt(behavior-neutral)` + 响应有 commit → BLOCK |
-| `Skill gate: exempt(user-explicit-skip)` → pass（信任）|
-| `Skill gate: superpowers:X` → 传递给 Hook 2 |
+**stop-response-check.sh 升级（L3 allowlist）**：
+- `read-only-query` + Bash `python -c "open(x,'w').write(y)"` → BLOCK（R1 F2 原报 bypass）
+- `read-only-query` + Bash `tee file.txt` → BLOCK
+- `read-only-query` + Bash `sed -i ...` → BLOCK（修改文件）
+- `read-only-query` + Bash `git add .` → BLOCK
+- `read-only-query` + Bash `gh api DELETE ...` → BLOCK（非 GET）
+- `read-only-query` + Bash `rm x.txt` / `mv a b` → BLOCK
+- `read-only-query` + Bash `git log | head -10` → pass（管道允许）
+- `read-only-query` + Bash `cat file.txt > other.txt` → BLOCK（重定向写）
+- `read-only-query` + Read / Grep → pass
+- `behavior-neutral` + Edit docs/*.md → pass
+- `behavior-neutral` + commit → BLOCK
 
-**skill-invoke-check.sh**：
-| 场景 | 期望 |
-|---|---|
-| gate=X, X ∉ config → drift-log, pass |
-| gate=X, X ∈ config, invoke X → mini-state check |
-| gate=X, X ∈ config, 无 invoke, mode=observe → drift-log |
-| gate=X, X ∈ config, 无 invoke, mode=block → BLOCK |
-| gate=X, 无 invoke, exempt_rule=plan-doc-spec-frozen-note 满足 → pass |
-| gate=X, 无 invoke, exempt_rule=plan-start-in-worktree 满足 → pass |
-| mini-state: last=writing-plans, current=subagent-driven → pass |
-| mini-state: last=writing-plans, current=finishing-branch → BLOCK(illegal) |
-| mini-state: last=writing-plans, current=systematic-debugging → pass(wildcard) |
-| mini-state: last=writing-plans, current=using-superpowers → pass(wildcard) |
-| reset_trigger: new worktree → last_stage reset 到 _initial |
-| reset_trigger: finishing-branch pushed → last_stage reset |
+**skill-invoke-check.sh（v3 新增 L5 + unknown gate fail-closed）**：
+- `Skill gate: superpowers:invalid-typo` + mode=drift-log → drift-log, pass
+- `Skill gate: superpowers:invalid-typo` + mode=block → BLOCK（R1 F1 fix 验证）
+- `Skill gate: superpowers:invalid-typo` + mode=block + ALLOW_UNKNOWN_GATE=1 → pass + drift-log WARN
+- `Skill gate: codex:adversarial-review` + Bash codex-attest.sh 调用 → pass
+- `Skill gate: codex:adversarial-review` + attest-ledger 有近期 entry → pass
+- `Skill gate: codex:adversarial-review` 均无 → drift-log (observe) / BLOCK (block)
+- mini-state: session A last=writing-plans；session B 读同 cwd 不同 sess → 两独立 state file，互不影响（R1 F3 fix 验证）
+- mini-state: 原子 write 测试（kill -9 mid-write → 原文件不损坏）
 
 ### 5.2 集成测试
 
 `scripts/acceptance/hardening_6_framework.sh`：
-- hooks 存在 + executable
-- config 合法 JSON + 13 skill 列全 + legal_next_set 有效
-- state file 初始 content 合法
-- workflow-rules.json `enforcement_mode = "block"`
-- settings.json 含两 hook 节点
-- 所有单元测试 passing
-- 不 regression Plan 1/1b/1c/1f 既有 acceptance
+- 2 hooks executable + syntax check
+- config JSON schema valid + 14 skill（含 codex）列全
+- legal_next_set 每个 key 的 values 都是已定义 skill
+- state_dir 可写
+- workflow-rules `enforcement_mode` 值合法
+- settings.json Stop 节点有 skill-invoke-check
+- 单元测试全绿
+- Plan 1/1b/1c/1f regression（间接）
 
-## 6. 风险与缓解
+## 6. 风险与缓解（v3）
 
 | 风险 | 缓解 |
 |---|---|
-| 升级 stop-response-check 到 block 后 false positive 频发 | 豁免白名单已有 4 种；H6.0 起先 block 带 `ENFORCE_BOOTSTRAP=1` 环境变量（默认 off 便于 bootstrap 自己过）；测试覆盖各 exempt 路径 |
-| mini-state 文件 corrupt | JSON parse 失败 → fail-open（drift-log + WARN），不 block；H6.0 含 state-reset.sh 工具 |
-| legal_next_set 表枚举不完 | 出现新合法 transition 时，config 1 行加到对应条目；起手表依据今天 Plan 1f 实际流程 + 14 skill 关系图 |
-| hook 自身 bug 卡住 Claude | fail-open 策略：parse error → exit 0 drift-log |
-| exempt-integrity check false positive | 严格 whitelist： read-only 只放 Read/Grep/某些 Bash；其他 tool_use 全 block |
-| Hook performance | 2 hooks 串联 + JSON parse + grep；预估 <200ms；性能监测加 WARN 如 >1s |
-| bootstrap chicken-egg（H6.0 自己开发时 hook 可能 block 开发）| workflow-rules.json 保持 `drift-log` 到 H6.0 merge 前；merge 后才 flip 到 block（通过 PR 自身最后一个 commit） |
+| allowlist 覆盖不全，频繁误拦 | H6.0 先 observe（drift-log 不 block），收集真实 false-positive 数据；H6.N flip 前按数据调整 allowlist |
+| mini-state 文件 corrupt | JSON parse 失败 fail-open drift-log；atomic mktemp+rename |
+| state 目录无限增长 | 登记 cleanup backlog；H6.0 只新建 |
+| codex-attest.sh 签名变动 / 路径重命名 | 检测点固化：exempt_rule 文档写明检查字符串；H6.N 加 breaking-change detection |
+| Session id 不可用时多 plan state 冲突 | fallback session_id = "noSessID"，全局 fallback state file；drift-log 警告 |
+| bootstrap 自指（H6.0 开发时 hook 可能 block 开发）| workflow-rules.json enforcement_mode 保 drift-log 到 H6.0 PR 最后一个 commit；merge 后才 block |
+| H6.10 flip codex 到 block 后，push 仪式被额外 gate 层反复问 | 确认无新 block：既有 attest-ledger + 新 hook 配合，attest-override.sh 继续走 bypass 路径 |
+| legal_next_set 枚举不完 | H6.0 提供 config 1 行补全机制；drift-log illegal_transition 积累数据指导加条目 |
 
 ## 7. 依赖 / 不依赖
 
-**依赖（hard prereq）**：
-- PR #22 skill-router-hook merged（UserPromptSubmit 提醒 hook）
-- PR #19 hardening-2 merged（drift-log + stop-response-check.sh 骨架）
-- `.claude/scripts/ledger-lib.sh` 可复用（jsonl append pattern）
+**依赖**：
+- PR #22 skill-router-hook merged
+- PR #19 hardening-2 merged（drift-log infra + ledger-lib.sh）
+- `.claude/scripts/codex-attest.sh` 存在（本 hook 读其调用信号，不改脚本）
 
 **不依赖**：
-- codex:adversarial-review（独立）
-- 任何业务 Plan（Plan 1f 已 merged，Plan 1g / Plan 2 未开）
-- Plan 1e aborted branch artifacts
+- 任何业务 Plan
+- Plan 1e / Plan 1g（后续业务）
 
 ## 8. 跨 Plan 后续 backlog
 
-**H7 升级路径**（痛点驱动，不主动做）：
+**H7 升级路径**（痛点驱动）：
 
-1. **完整 state machine（β）**：
-   - 触发：H6 运行 2-3 业务 plan 后 drift log 仍频繁出现 `illegal_transition` 或场景 C（选错 skill）
-   - Scope：legal_next_set 表扩为 full transition graph + per-stage exit conditions + 多分支豁免
-   - 预估风险：hardening-5 模式，需用户批准才开
-
-2. **Artifact check per skill（γ）**：
-   - 触发：H6 运行后发现"声明 + invoke 了但没按 skill 做"（场景 D' 变种）
-   - Scope：每 skill 独立 PR 加 artifact check（brainstorming → spec.md，writing-plans → plan.md 等）
-   - 预估：单 skill 小 PR 可 3 轮收敛
-
-3. **UserPromptSubmit 增强**（expected skill 推断）：
-   - 触发：skill-router 静态提示不够用，用户 prompt 含复杂上下文
-   - Scope：识别 prompt 里的触发词 → 在下一响应检查 Claude first-line 是否匹配期望
-   - 风险：NLP 难度中
-
-4. **override 频率监控**：
-   - attest-override-log.jsonl 每月 rollup
-   - 检测 override 率超阈值（>5 次/月）→ 警告
+1. 完整 state machine（β）
+2. Artifact check per skill（γ）
+3. UserPromptSubmit expected-skill 推断
+4. State file cleanup（30 天）
+5. Override 频率监控
 
 ## 9. 执行切换提示
 
-Spec approved → 进 writing-plans，起草 H6.0 plan（~5-7 task：stop-check 升级 / invoke-check 新增 / config / state / workflow-rules flip / settings / tests / acceptance）。
-
-**关键：H6.0 scope 超 5 轮 codex 不收敛 → 降级到 α''**（砍 mini-state 部分），这条降级路径已固化在本 spec 附录 A。
+Spec approved → writing-plans H6.0 task 分解（~9-11 task：config / state / stop-check 升级 / invoke-check 新增 / settings 挂钩 / acceptance / 2 tests / workflow-rules flip / bootstrap 测试）。
 
 ---
 
-## 附录 A：Design Decision Log（2026-04-22 brainstorming Q&A 记录）
+## 附录 A：Design Decision Log
 
-### A.1 Plan 1f audit 场景分布（实测数据）
+### A.1 Plan 1f audit 场景分布
 
 | skill 漏点 | 漏点类型 | 次数 |
 |---|---|---|
-| verification-before-completion | D（声明了没 invoke） | 1 |
-| requesting-code-review | A（完全没声明） | ~3（push 前 / PR 前各节点） |
-| receiving-code-review | A（5 次 codex feedback 只 1 次声明 receiving-code-review）+ D（剩 1 次声明了没 invoke） | 4A + 1D |
+| verification-before-completion | D | 1 |
+| requesting-code-review | A | ~3 |
+| receiving-code-review | 4A + 1D | 5 |
 
-**结论**：主漏点是**场景 A**（silent skip 不声明），不是 D。这修正了我最初 α scope 假设。
+### A.2 4 种场景对照
 
-### A.2 4 种场景对照（brainstorming 中与用户梳理）
-
-| 场景 | 描述 | Plan 1f 出现 | 能否 hook detect |
-|---|---|---|---|
-| A | 忘贴 first-line Skill gate | ~5 次 | ✅ hook 可查缺失 |
-| B | 贴了但选错 skill（故意作弊）| 0 次 | ❌ 需 LLM 判意图 |
-| C | 贴了对的 skill 但流程乱（跳阶段） | 偶见 | ⚠️ 部分（mini-state）|
-| D | 贴了 + 没 Skill tool invoke | ~2 次 | ✅ hook 可扫 invoke |
+| 场景 | Plan 1f 实测 | 能否 hook detect |
+|---|---|---|
+| A 忘贴 first-line | ~5 次 | ✅ L1 |
+| B 故意选错 skill | 0 次 | ❌ LLM 才能 |
+| C 跳阶段 | 偶见 | ⚠️ L4 部分 |
+| D 贴了没 invoke | ~2 次 | ✅ L2 |
 
 ### A.3 4 种 scope 方案对比
 
-| | 覆盖范围 | 技术复杂度 | hardening-5 相似度 | 推荐度 |
-|---|---|---|---|---|
-| α（原 spec） | 仅 D | 低 | 低 | ❌ 不覆盖主漏点 A |
-| α''（α + L1 block + L3 exempt integrity） | A + D + 部分 exempt 滥用 | 中低 | 低 | ⚠️ 不覆盖流程必然性 |
-| **ζ（α'' + L4 mini-state）** ✅ | A + D + exempt + 部分 C | 中 | 中 | **推荐**（最终选择）|
-| β（ζ + 完整 state machine + artifact check）| A + B（部分）+ C + D | 高 | 高（~hardening-5）| ❌ 预估 11 轮不收敛 |
+| | 范围 | 复杂度 | hardening-5 相似度 |
+|---|---|---|---|
+| α | 仅 D | 低 | 低 |
+| α'' | A + D + L3 exempt | 中低 | 低 |
+| **ζ（最终）** | A + D + L3 + 部分 C + L5 codex | 中 | 中 |
+| β | A + B(部分) + C + D + γ | 高 | 高（hardening-5 类） |
 
-### A.4 为什么最终选 ζ（不选 β）
+### A.4 为何选 ζ 不选 β
 
-**hardening-5 数据**：
-- spec 尝试 1（full G3）：11 轮 codex 27 findings 不收敛
-- spec 尝试 2（5.1 拆解）：6 轮 codex 13 findings 仍不收敛
-- 用户选 option E 中止
+hardening-5 数据：spec 尝试 1（full G3）11 轮不收敛；尝试 2（5.1 拆解）6 轮不收敛。沉没成本：直接 ζ ~3h vs β 若失败降 ζ ~12h。
 
-**沉没成本分析**：
-- 直接 ζ 起步 → 3-5 轮收敛 → ship（~3h）
-- β 起步若 11 轮不收敛 → 降 ζ（废弃 β 80% 代码重写）→ 3-5 轮 → ship（~12h）
+### A.5 β / γ 升级触发
 
-**为何不是 α''（更保守）**：
-- 用户提出"流程必然性"关切有价值——仅声明 + invoke 不阻止 Claude 跳阶段
-- mini-state 只做"1-step lookahead"（不是完整 state machine），scope 比 β 小得多
-- ζ 是 α'' 的**自然延伸**，成本增量小
+- β 触发：H6 ship 后 2-3 业务 plan drift log `illegal_transition` 频率 > 每 plan 3 次
+- γ 触发："声明 + invoke 了但没产 artifact" 频繁
 
-### A.5 β / γ 什么时候考虑
+### A.6 并行 3 对话不可行
 
-**触发升级 β 的数据信号**（H7）：
-- H6 ship 后 2-3 个业务 plan 观察期
-- drift log 出现 illegal_transition 频率 > 每 plan 3 次
-- 或 user audit 发现 Claude 频繁"声明对 skill 但跳阶段完成任务"
+`.claude/` 共享一份（hook 互相 clobber）；3 方案嵌套（α'' ⊂ ζ ⊂ β）。
 
-**触发 γ（artifact check）的数据信号**：
-- 出现"声明 + invoke 了但没产 artifact"的实证（场景 D' 变种）
-- 某个 skill 上述 pattern 频发 → 单 skill 小 PR 加 artifact check
+### A.7 Codex R1 3 findings 处理（2026-04-22）
 
-### A.6 并行 3 对话 α''/ζ/β 方案评估（用户一度提议）
+| Finding | 严重 | 处理 |
+|---|---|---|
+| F1 unknown gate bypass | HIGH | v3 block mode fail-closed + `ALLOW_UNKNOWN_GATE=1` migration flag |
+| F2 exempt integrity blacklist 漏 | HIGH | v3 改 allowlist（严格白名单 + 无重定向 + 无复合命令）|
+| F3 mini-state 全局单文件 | MEDIUM | v3 按 `<wt-hash8>-<session8>.json` 隔离，原子 write |
 
-**结论：技术不可行**
-- 3 worktree 共享同一 `.claude/` 目录（Claude 读主 repo 的 .claude/），hook 互相 clobber
-- 3 方案嵌套（α'' ⊂ ζ ⊂ β），并行 = 做 3 次重复工作
-- 代替方案：**单线 ζ 起步 + 自带降级路径**（H6.0 超 5 轮降 α''，超 8 轮降 α）
+### A.8 User 2026-04-22 新增要求：codex:adversarial-review 纳入 first-class
+
+理由：Plan 1f audit 发现我会忘跑 codex on spec（上一轮就漏了）。原 spec 把 codex 完全排除 hook 体系，靠"自觉"。现在纳入：
+- config.enforce 加 `codex:adversarial-review` entry
+- legal_next_set 里 `brainstorming → codex → writing-plans`、`writing-plans → codex → impl`、`finishing → codex → _initial` 全部把 codex 写入
+- 豁免：检测 `codex-attest.sh` / `attest-override.sh` Bash 调用 或 attest-ledger 最近 entry
+- **不改既有 codex 任何 hook**（纯新 hook 里识别信号）
 
 ---
 
-## 附录 B：Spec 自查清单（skill §Spec Self-Review 4 项）
+## 附录 B：Spec 自查（skill §Spec Self-Review 4 项）
 
-1. **Placeholder scan**：无 TBD / TODO；state file schema 字段 `session_id` / `response_sha` 获取方式已说明
-2. **内部一致性**：13 skill 数在 §2.3 config block、§4 rollout、§1.1 一致；legal_next_set 表覆盖所有 13 skill（12 显式 + _initial）
-3. **Scope check**：单 spec，一个 H6.0 实施 PR + 9 个 flip PR；scope 是 H6.0 框架本身
-4. **Ambiguity check**：
-   - exempt-integrity 规则用正则严格白名单
-   - legal_next_set 表显式枚举
-   - H6.0 bootstrap 自指问题通过 workflow-rules flip 延迟到 PR 最后一个 commit 处理
+1. **Placeholder** 无 TBD/TODO
+2. **一致性**：14 skill（含 codex）数在 §1.1 / §2.3 / §4 / §A.8 一致
+3. **Scope** 单 spec 单 H6.0 PR
+4. **Ambiguity**：allowlist 正则、wt_hash8 / session_id8 计算、legal_next_set 表都显式
