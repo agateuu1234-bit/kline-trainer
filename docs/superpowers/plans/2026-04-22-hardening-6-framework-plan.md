@@ -461,6 +461,10 @@ elif reason == 'single-step-no-semantic-change':
         r'^(pwd|true|false)$'
         r'|^echo +["\'][^"\'|<>;&`$()]*["\']$'
         r'|^(ls|cat|head|tail|wc|grep|rg|jq) +[^|<>;&`$(){}\-]+$'  # no -flag to avoid --output/--delete
+        # v22 R21 F1 inline (previously only in Task 8.5 guidance):
+        # Allow codex-attest.sh / attest-override.sh with args for mode ii
+        # (run codex first response, announce gate next response)
+        r'|^\.claude/scripts/(codex-attest|attest-override)\.sh( +[-A-Za-z0-9_./:=@]+)*$'
     )
     for tu in last_tool_uses:
         name = tu.get('name', '')
