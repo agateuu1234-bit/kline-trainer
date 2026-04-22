@@ -1224,32 +1224,202 @@ class TestMiniStateTransition:
 
 
 class TestL5CodexGate:
-    def test_codex_no_evidence_observe(self, tmp_path):
+    """L5 codex evidence gate tests with real fixtures (plan R2 F1 fix).
+    
+    Each test establishes last_stage != _initial (so target computes to a file:
+    or branch: path) and sets ledger / override-log content to drive specific
+    pass/block outcomes.
+    """
+
+    def _setup_brainstorming_stage(self, spec_file):
+        """Force state to last_stage=superpowers:brainstorming with file target
+        pointing at spec_file. Uses the state JSON format from Task 5.
+        """
+        import hashlib
+        state_dir = Path(".claude/state/skill-stage")
+        state_dir.mkdir(parents=True, exist_ok=True)
+        wt_h = hashlib.sha256(os.getcwd().encode()).hexdigest()[:8]
+        sid = os.environ.get("CLAUDE_SESSION_ID", "testsess")[:8]
+        sf = state_dir / f"{wt_h}-{sid}.json"
+        state = {
+            "version": "1",
+            "last_stage": "superpowers:brainstorming",
+            "last_stage_time_utc": "2026-04-22T00:00:00Z",
+            "worktree_path": os.getcwd(),
+            "session_id": os.environ.get("CLAUDE_SESSION_ID", "testsess"),
+            "drift_count": 0,
+            "transition_history": [],
+        }
+        sf.write_text(json.dumps(state))
+        return sf
+
+    def _write_ledger_entry(self, key, blob_sha, attest_time="2026-04-22T09:00:00Z"):
+        """Write a mock approve entry to attest-ledger.json."""
+        ledger_p = Path(".claude/state/attest-ledger.json")
+        bak = str(ledger_p) + ".testbak"
+        if ledger_p.exists():
+            shutil.copy(ledger_p, bak)
+            ledger = json.loads(ledger_p.read_text())
+        else:
+            ledger = {}
+            bak = None
+        ledger[key] = {
+            "attest_time_utc": attest_time,
+            "verdict_digest": "sha256:testdigest",
+            "blob_sha": blob_sha,
+            "round": 1,
+        }
+        ledger_p.parent.mkdir(parents=True, exist_ok=True)
+        ledger_p.write_text(json.dumps(ledger, indent=2))
+        return bak
+
+    def _restore_ledger(self, bak):
+        ledger_p = Path(".claude/state/attest-ledger.json")
+        if bak and Path(bak).exists():
+            shutil.move(bak, ledger_p)
+        elif ledger_p.exists() and not bak:
+            ledger_p.unlink()
+
+    def test_codex_no_evidence_observe_drift_only(self, tmp_path):
+        """No ledger entry in observe mode → drift-log, no block."""
         tp = _write_transcript(
             tmp_path,
             "Skill gate: codex:adversarial-review\n\nx",
             tool_uses=[],
         )
         rc, stdout, _ = _run_hook(tp)
-        # observe mode → drift-log only
         assert '"decision":"block"' not in stdout.replace(" ", "")
 
-    def test_codex_no_evidence_block(self, tmp_path):
+    def test_codex_no_evidence_block_blocks(self, tmp_path):
+        """Block mode + last_stage=brainstorming + no ledger → BLOCK."""
+        # Create a real spec file so target computes
+        spec = Path("docs/superpowers/specs/2026-04-22-test-fixture.md")
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("test")
+        sf = self._setup_brainstorming_stage(spec)
         bak = _set_mode("codex:adversarial-review", "block")
         try:
-            # force last_stage brainstorming via prior call (no state setup here; block before ledger check)
-            tp = _write_transcript(
-                tmp_path,
-                "Skill gate: codex:adversarial-review\n\nx",
-                tool_uses=[],
-            )
-            # _initial target allows pass in the implementation; but if last_stage not _initial and target=empty → block
-            # For simplicity this test asserts observe-mode unless setup
-            rc, stdout, _ = _run_hook(tp)
-            # May pass due to _initial; that's acceptable for H6.0 framework
-            # This test documents the observability; hard block path covered in later tests
+            tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nx")
+            rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
+            assert '"decision":"block"' in stdout.replace(" ", "")
         finally:
             _restore(bak)
+            sf.unlink(missing_ok=True)
+            spec.unlink(missing_ok=True)
+
+    def test_codex_ledger_match_block_mode_passes(self, tmp_path):
+        """Block mode + ledger has entry with matching file blob + attest > session_start → pass."""
+        spec = Path("docs/superpowers/specs/2026-04-22-test-fixture.md")
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("test-content-v1")
+        # Compute blob via git hash-object
+        blob = subprocess.check_output(
+            ["git", "hash-object", str(spec)], text=True
+        ).strip()
+        sf = self._setup_brainstorming_stage(spec)
+        ledger_bak = self._write_ledger_entry(f"file:{spec}", blob)
+        mode_bak = _set_mode("codex:adversarial-review", "block")
+        try:
+            tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nx")
+            rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
+            assert '"decision":"block"' not in stdout.replace(" ", "")
+        finally:
+            _restore(mode_bak)
+            self._restore_ledger(ledger_bak)
+            sf.unlink(missing_ok=True)
+            spec.unlink(missing_ok=True)
+
+    def test_codex_ledger_blob_mismatch_blocks(self, tmp_path):
+        """Ledger has entry but file content changed (blob mismatch) → BLOCK (revision check)."""
+        spec = Path("docs/superpowers/specs/2026-04-22-test-fixture.md")
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("original-content")
+        old_blob = subprocess.check_output(
+            ["git", "hash-object", str(spec)], text=True
+        ).strip()
+        # Edit file to change blob
+        spec.write_text("edited-content-different-blob")
+        sf = self._setup_brainstorming_stage(spec)
+        ledger_bak = self._write_ledger_entry(f"file:{spec}", old_blob)
+        mode_bak = _set_mode("codex:adversarial-review", "block")
+        try:
+            tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nx")
+            rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
+            assert '"decision":"block"' in stdout.replace(" ", "")
+        finally:
+            _restore(mode_bak)
+            self._restore_ledger(ledger_bak)
+            sf.unlink(missing_ok=True)
+            spec.unlink(missing_ok=True)
+
+    def test_codex_ledger_stale_time_blocks(self, tmp_path):
+        """Ledger entry exists but attest_time_utc < SESSION_START → BLOCK."""
+        spec = Path("docs/superpowers/specs/2026-04-22-test-fixture.md")
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("content")
+        blob = subprocess.check_output(
+            ["git", "hash-object", str(spec)], text=True
+        ).strip()
+        sf = self._setup_brainstorming_stage(spec)
+        # attest_time BEFORE session start
+        ledger_bak = self._write_ledger_entry(f"file:{spec}", blob, attest_time="2026-04-21T00:00:00Z")
+        mode_bak = _set_mode("codex:adversarial-review", "block")
+        try:
+            tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nx")
+            rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
+            assert '"decision":"block"' in stdout.replace(" ", "")
+        finally:
+            _restore(mode_bak)
+            self._restore_ledger(ledger_bak)
+            sf.unlink(missing_ok=True)
+            spec.unlink(missing_ok=True)
+
+    def test_codex_ledger_wrong_target_blocks(self, tmp_path):
+        """Ledger has entry for different file → BLOCK."""
+        spec = Path("docs/superpowers/specs/2026-04-22-test-fixture.md")
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("content")
+        sf = self._setup_brainstorming_stage(spec)
+        # Ledger key is DIFFERENT file
+        ledger_bak = self._write_ledger_entry("file:docs/superpowers/specs/UNRELATED.md", "dummyblob")
+        mode_bak = _set_mode("codex:adversarial-review", "block")
+        try:
+            tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nx")
+            rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
+            assert '"decision":"block"' in stdout.replace(" ", "")
+        finally:
+            _restore(mode_bak)
+            self._restore_ledger(ledger_bak)
+            sf.unlink(missing_ok=True)
+            spec.unlink(missing_ok=True)
+
+    def test_codex_session_start_unknown_block_mode_blocks(self, tmp_path):
+        """No CLAUDE_SESSION_ID + no CLAUDE_SESSION_START_UTC + block mode → BLOCK (fail-closed)."""
+        spec = Path("docs/superpowers/specs/2026-04-22-test-fixture.md")
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("content")
+        blob = subprocess.check_output(
+            ["git", "hash-object", str(spec)], text=True
+        ).strip()
+        sf = self._setup_brainstorming_stage(spec)
+        ledger_bak = self._write_ledger_entry(f"file:{spec}", blob)
+        mode_bak = _set_mode("codex:adversarial-review", "block")
+        # Unset both session envs
+        env_no_sess = {k: v for k, v in os.environ.items()
+                       if k not in ("CLAUDE_SESSION_ID", "CLAUDE_SESSION_START_UTC")}
+        try:
+            tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nx")
+            proc = subprocess.run(
+                ["bash", HOOK],
+                input=json.dumps({"transcript_path": str(tp)}),
+                capture_output=True, text=True, timeout=15, env=env_no_sess,
+            )
+            assert '"decision":"block"' in proc.stdout.replace(" ", "")
+        finally:
+            _restore(mode_bak)
+            self._restore_ledger(ledger_bak)
+            sf.unlink(missing_ok=True)
+            spec.unlink(missing_ok=True)
 
 
 class TestStateIsolation:
@@ -1458,7 +1628,7 @@ operate normally."
 | 项 | Action | Expected | Pass / Fail |
 |---|---|---|---|
 | 1 | `./scripts/acceptance/hardening_6_framework.sh` | `HARDENING 6 PASS` | 两齐 = PASS |
-| 2 | `jq '.enforce \| length' .claude/config/skill-invoke-enforced.json` | 输出 `13` | `13` = PASS |
+| 2 | `jq '.enforce \| length' .claude/config/skill-invoke-enforced.json; jq -e '.enforce["codex:adversarial-review"]' .claude/config/skill-invoke-enforced.json` | 第 1 输出 `14`；第 2 jq -e exit 0 | 两者齐 = PASS |
 | 3 | `jq '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json` | 输出 `"block"`（最后 commit 后）| `block` = PASS |
 | 4 | `ls .claude/state/skill-stage/` | 至少含 `.gitkeep` | 存在 = PASS |
 | 5 | `test -x .claude/hooks/skill-invoke-check.sh && echo OK` | `OK` | = PASS |
