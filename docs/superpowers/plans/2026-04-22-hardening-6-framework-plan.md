@@ -1031,14 +1031,24 @@ if [ "$SKILL_NAME" = "codex:adversarial-review" ]; then
         [ "$CONFIG_MODE" = "block" ] && block "codex:adversarial-review target 模糊（last_stage=$LAST_STAGE, 候选 $CAND_COUNT 个）；请响应内显式编辑/写入单一 spec/plan 文件，或设置 env TARGET"
         exit 0
       fi
-      # v18 R17 F3 HIGH fix: fallback to mini-state recorded artifact
-      # (brainstorming/writing-plans response updates state with last written
-      # spec/plan path; codex run-only response reads it from state)
+      # v18 R17 F3 HIGH + v26 R25 F1 fix: fallback to mini-state recorded artifact
+      # with blob consistency check (prevents stale approval covering changed file)
       if [ "$CAND_COUNT" = "0" ] && [ -f "$STATE_FILE" ]; then
         RECENT_ART=$(jq -r '.recent_artifact_path // ""' "$STATE_FILE" 2>/dev/null)
+        RECENT_BLOB=$(jq -r '.recent_artifact_blob // ""' "$STATE_FILE" 2>/dev/null)
         if [ -n "$RECENT_ART" ] && [ -f "$RECENT_ART" ]; then
-          TARGET="file:$RECENT_ART"
-          CAND_COUNT=1
+          # v26 R25 F1: verify current file blob matches stored blob
+          # If file was modified after state recorded, state is stale →
+          # require explicit current Write/Edit tool_use or state refresh
+          CUR_BLOB_OF_ART=$(git hash-object "$RECENT_ART" 2>/dev/null)
+          if [ -n "$RECENT_BLOB" ] && [ "$CUR_BLOB_OF_ART" = "$RECENT_BLOB" ]; then
+            TARGET="file:$RECENT_ART"
+            CAND_COUNT=1
+          else
+            drift_log "codex_gate_stale_artifact_target"
+            [ "$CONFIG_MODE" = "block" ] && block "codex:adversarial-review: state recorded blob ($RECENT_BLOB) != current ($CUR_BLOB_OF_ART) for $RECENT_ART; 需响应内显式 Write/Edit spec/plan 或重新触发 brainstorming/writing-plans 刷新 state"
+            exit 0
+          fi
         fi
       fi
       # CAND_COUNT == 0 AND no state artifact → TARGET stays empty, falls through
