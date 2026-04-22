@@ -419,21 +419,28 @@ elif reason == 'behavior-neutral':
         if name in ('Write', 'Edit', 'NotebookEdit', 'MultiEdit'):
             fp = get_path(tu)
             import os
-            pwd = os.getcwd()
-            if fp.startswith(pwd + '/'):
-                fp = fp[len(pwd) + 1:]
-            elif fp.startswith('/'):
-                fp = fp.lstrip('/')
-            # v25 R24 F1 fix: canonicalize to defeat `docs/./superpowers/...` and
-            # `docs/x/../superpowers/...` bypasses; reject traversals escaping repo
-            fp_norm = os.path.normpath(fp)
-            # Reject absolute paths (should have been stripped) and leading ../
-            if fp_norm.startswith('/') or fp_norm.startswith('..'):
-                print(f"BLOCK: exempt(behavior-neutral) path traversal / absolute: {fp}")
+            from pathlib import Path
+            # v28 R28 F1 fix: resolve real path and require it inside repo root,
+            # then derive repo-relative path. Defeats `/docs/release.md` and
+            # `/tmp/../etc/docs/x.md` bypasses where `lstrip('/')` would
+            # silently convert an absolute out-of-repo path into a relative
+            # `docs/...` that passes safe_path.
+            repo_root = Path(os.getcwd()).resolve()
+            try:
+                fp_resolved = (repo_root / fp).resolve() if not os.path.isabs(fp) else Path(fp).resolve()
+            except Exception:
+                print(f"BLOCK: exempt(behavior-neutral) 路径不可 resolve: {fp}")
                 sys.exit(0)
-            fp = fp_norm  # use canonical form for deny/allow checks below
-            # R11 F1 CRITICAL + R12 F1 HIGH + R24 F1 fix: deny .claude/state/* AND
-            # docs/superpowers/** (specs/plans need brainstorming/writing-plans skills)
+            # Require resolved path strictly inside repo root
+            try:
+                fp_rel = fp_resolved.relative_to(repo_root)
+            except ValueError:
+                print(f"BLOCK: exempt(behavior-neutral) 路径 resolve 到仓库外: {fp} → {fp_resolved}")
+                sys.exit(0)
+            fp = str(fp_rel).replace(os.sep, '/')
+            # R11 F1 CRITICAL + R12 F1 HIGH + R24 F1 + R28 F1 fix: deny
+            # .claude/state/* AND docs/superpowers/** (specs/plans need
+            # brainstorming/writing-plans skills)
             if deny_path.search(fp):
                 print(f"BLOCK: exempt(behavior-neutral) Write/Edit 到 {fp} 禁止"
                       f"（.claude/state = L5 evidence; docs/superpowers = skill 产出区）")
@@ -1580,22 +1587,37 @@ class TestL5CodexGate:
     pass/block outcomes.
     """
 
-    def _setup_brainstorming_stage(self, spec_file):
+    # v28 R28 F2 fix: deterministic session ID + SHA256 hash matching the hook
+    # v27 R26 F1 changed hook to hash FULL CLAUDE_SESSION_ID via SHA256[:8];
+    # test fixture previously used CLAUDE_SESSION_ID[:8] → hook and fixture
+    # wrote/read different filenames → L5 evidence tests silently exercised
+    # _initial path, not the intended brainstorming/plan path. All block-mode
+    # tests MUST pass DETERMINISTIC_SESSION_ID via env; fixture hashes it
+    # identically to the hook.
+    DETERMINISTIC_SESSION_ID = "01HQTESTAAAAAAAAAAAAAAAAAA"  # ULID-shaped, 26 chars
+
+    def _sid_hash8(self, session_id=None):
+        import hashlib
+        sid = session_id or os.environ.get("CLAUDE_SESSION_ID") or self.DETERMINISTIC_SESSION_ID
+        return hashlib.sha256(sid.encode()).hexdigest()[:8]
+
+    def _setup_brainstorming_stage(self, spec_file, session_id=None):
         """Force state to last_stage=superpowers:brainstorming with file target
-        pointing at spec_file. Uses the state JSON format from Task 5.
+        pointing at spec_file. Uses state filename identical to the hook's
+        SHA256-based scheme (v27 R26 F1).
         """
         import hashlib
         state_dir = Path(".claude/state/skill-stage")
         state_dir.mkdir(parents=True, exist_ok=True)
         wt_h = hashlib.sha256(os.getcwd().encode()).hexdigest()[:8]
-        sid = os.environ.get("CLAUDE_SESSION_ID", "testsess")[:8]
-        sf = state_dir / f"{wt_h}-{sid}.json"
+        sid_h = self._sid_hash8(session_id)
+        sf = state_dir / f"{wt_h}-{sid_h}.json"
         state = {
             "version": "1",
             "last_stage": "superpowers:brainstorming",
             "last_stage_time_utc": "2026-04-22T00:00:00Z",
             "worktree_path": os.getcwd(),
-            "session_id": os.environ.get("CLAUDE_SESSION_ID", "testsess"),
+            "session_id": session_id or os.environ.get("CLAUDE_SESSION_ID") or self.DETERMINISTIC_SESSION_ID,
             "drift_count": 0,
             "transition_history": [],
         }
@@ -1639,8 +1661,20 @@ class TestL5CodexGate:
         rc, stdout, _ = _run_hook(tp)
         assert '"decision":"block"' not in stdout.replace(" ", "")
 
+    # v28 R28 F2 fix: block-mode evidence tests MUST provide deterministic
+    # CLAUDE_SESSION_ID so the L4 fail-closed gate (v27 R26 F1 + v28 R27 F1)
+    # does not short-circuit before the intended L5 evidence code path runs.
+    # Each test asserts a SPECIFIC block reason substring, so that any
+    # regression that routes the test to a different (earlier) gate fails
+    # the assertion explicitly.
+    def _block_env(self):
+        return {
+            "CLAUDE_SESSION_ID": self.DETERMINISTIC_SESSION_ID,
+            "CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z",
+        }
+
     def test_codex_no_evidence_block_blocks(self, tmp_path):
-        """Block mode + last_stage=brainstorming + no ledger → BLOCK."""
+        """Block mode + last_stage=brainstorming + no ledger → BLOCK (evidence missing)."""
         # Create a real spec file so target computes
         spec = Path("docs/superpowers/specs/2026-04-22-test-fixture.md")
         spec.parent.mkdir(parents=True, exist_ok=True)
@@ -1648,15 +1682,15 @@ class TestL5CodexGate:
         sf = self._setup_brainstorming_stage(spec)
         bak = _set_mode("codex:adversarial-review", "block")
         try:
-            # v5 R4 F1 fix: include Write tool_use pointing at spec so hook
-            # can derive target from response (not git log / empty fallback)
             tp = _write_transcript(
                 tmp_path,
                 "Skill gate: codex:adversarial-review\n\nx",
                 tool_uses=[{"name": "Write", "input": {"file_path": str(spec), "content": "updated"}}],
             )
-            rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
+            rc, stdout, _ = _run_hook(tp, env_extra=self._block_env())
             assert '"decision":"block"' in stdout.replace(" ", "")
+            # v28 R28 F2: assert evidence-missing reason (not session_id_absent)
+            assert ("no_evidence" in stdout or "ledger" in stdout or "evidence" in stdout)
         finally:
             _restore(bak)
             sf.unlink(missing_ok=True)
@@ -1667,7 +1701,6 @@ class TestL5CodexGate:
         spec = Path("docs/superpowers/specs/2026-04-22-test-fixture.md")
         spec.parent.mkdir(parents=True, exist_ok=True)
         spec.write_text("test-content-v1")
-        # Compute blob via git hash-object
         blob = subprocess.check_output(
             ["git", "hash-object", str(spec)], text=True
         ).strip()
@@ -1675,14 +1708,12 @@ class TestL5CodexGate:
         ledger_bak = self._write_ledger_entry(f"file:{spec}", blob)
         mode_bak = _set_mode("codex:adversarial-review", "block")
         try:
-            # v5 R4 F1 fix: include Write tool_use pointing at spec so hook
-            # can derive target from response (not git log / empty fallback)
             tp = _write_transcript(
                 tmp_path,
                 "Skill gate: codex:adversarial-review\n\nx",
                 tool_uses=[{"name": "Write", "input": {"file_path": str(spec), "content": "updated"}}],
             )
-            rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
+            rc, stdout, _ = _run_hook(tp, env_extra=self._block_env())
             assert '"decision":"block"' not in stdout.replace(" ", "")
         finally:
             _restore(mode_bak)
@@ -1691,28 +1722,27 @@ class TestL5CodexGate:
             spec.unlink(missing_ok=True)
 
     def test_codex_ledger_blob_mismatch_blocks(self, tmp_path):
-        """Ledger has entry but file content changed (blob mismatch) → BLOCK (revision check)."""
+        """Ledger entry exists but file content changed (blob mismatch) → BLOCK (revision check)."""
         spec = Path("docs/superpowers/specs/2026-04-22-test-fixture.md")
         spec.parent.mkdir(parents=True, exist_ok=True)
         spec.write_text("original-content")
         old_blob = subprocess.check_output(
             ["git", "hash-object", str(spec)], text=True
         ).strip()
-        # Edit file to change blob
         spec.write_text("edited-content-different-blob")
         sf = self._setup_brainstorming_stage(spec)
         ledger_bak = self._write_ledger_entry(f"file:{spec}", old_blob)
         mode_bak = _set_mode("codex:adversarial-review", "block")
         try:
-            # v5 R4 F1 fix: include Write tool_use pointing at spec so hook
-            # can derive target from response (not git log / empty fallback)
             tp = _write_transcript(
                 tmp_path,
                 "Skill gate: codex:adversarial-review\n\nx",
                 tool_uses=[{"name": "Write", "input": {"file_path": str(spec), "content": "updated"}}],
             )
-            rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
+            rc, stdout, _ = _run_hook(tp, env_extra=self._block_env())
             assert '"decision":"block"' in stdout.replace(" ", "")
+            # v28 R28 F2: assert blob-mismatch reason explicitly
+            assert ("blob" in stdout or "revision" in stdout)
         finally:
             _restore(mode_bak)
             self._restore_ledger(ledger_bak)
@@ -1728,18 +1758,15 @@ class TestL5CodexGate:
             ["git", "hash-object", str(spec)], text=True
         ).strip()
         sf = self._setup_brainstorming_stage(spec)
-        # attest_time BEFORE session start
         ledger_bak = self._write_ledger_entry(f"file:{spec}", blob, attest_time="2026-04-21T00:00:00Z")
         mode_bak = _set_mode("codex:adversarial-review", "block")
         try:
-            # v5 R4 F1 fix: include Write tool_use pointing at spec so hook
-            # can derive target from response (not git log / empty fallback)
             tp = _write_transcript(
                 tmp_path,
                 "Skill gate: codex:adversarial-review\n\nx",
                 tool_uses=[{"name": "Write", "input": {"file_path": str(spec), "content": "updated"}}],
             )
-            rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
+            rc, stdout, _ = _run_hook(tp, env_extra=self._block_env())
             assert '"decision":"block"' in stdout.replace(" ", "")
         finally:
             _restore(mode_bak)
@@ -1753,18 +1780,15 @@ class TestL5CodexGate:
         spec.parent.mkdir(parents=True, exist_ok=True)
         spec.write_text("content")
         sf = self._setup_brainstorming_stage(spec)
-        # Ledger key is DIFFERENT file
         ledger_bak = self._write_ledger_entry("file:docs/superpowers/specs/UNRELATED.md", "dummyblob")
         mode_bak = _set_mode("codex:adversarial-review", "block")
         try:
-            # v5 R4 F1 fix: include Write tool_use pointing at spec so hook
-            # can derive target from response (not git log / empty fallback)
             tp = _write_transcript(
                 tmp_path,
                 "Skill gate: codex:adversarial-review\n\nx",
                 tool_uses=[{"name": "Write", "input": {"file_path": str(spec), "content": "updated"}}],
             )
-            rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
+            rc, stdout, _ = _run_hook(tp, env_extra=self._block_env())
             assert '"decision":"block"' in stdout.replace(" ", "")
         finally:
             _restore(mode_bak)
@@ -2095,17 +2119,15 @@ def test_codex_mode_ii_run_only_via_single_step_exempt(self, tmp_path):
 
 ```yaml
 name: hardening-6 framework gate
+# v28 R28 F3 fix: REMOVED pull_request.paths filter. When this workflow is
+# required by branch protection, GitHub only creates status checks for PRs
+# matching paths; PRs that don't touch those paths would never report a
+# status → required check waits forever → branch protection deadlocks all
+# unrelated PRs. Fix: always run on every PR; the job itself short-circuits
+# (fast pass) when no relevant file changed.
 on:
   pull_request:
-    paths:
-      - '.claude/hooks/stop-response-check.sh'
-      - '.claude/hooks/skill-invoke-check.sh'
-      - '.claude/config/skill-invoke-enforced.json'
-      - '.claude/settings.json'
-      - '.claude/workflow-rules.json'
-      - 'tests/hooks/test_stop_response_check.py'
-      - 'tests/hooks/test_skill_invoke_check.py'
-      - 'scripts/acceptance/hardening_6_framework.sh'
+    branches: [main]
 
 permissions:
   contents: read
@@ -2115,14 +2137,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need history to diff against origin/main
       - name: Install jq
         run: sudo apt-get install -y jq
+      # v28 R28 F3: determine whether any hardening-6-relevant file changed
+      - name: Detect relevant changes
+        id: changes
+        run: |
+          set -euo pipefail
+          git fetch origin main --depth=50
+          CHANGED=$(git diff --name-only origin/main...HEAD)
+          echo "$CHANGED" | tee /tmp/h6-changed.txt
+          if echo "$CHANGED" | grep -qE '^(\.claude/hooks/(stop-response-check|skill-invoke-check)\.sh|\.claude/config/skill-invoke-enforced\.json|\.claude/settings\.json|\.claude/workflow-rules\.json|tests/hooks/test_(stop_response_check|skill_invoke_check)\.py|scripts/acceptance/hardening_6_framework\.sh|\.github/workflows/hardening_6_gate\.yml)$'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Skip when nothing relevant changed
+        if: steps.changes.outputs.relevant == 'false'
+        run: echo "No hardening-6 framework files touched in this PR; acceptance skipped (status = success)."
       - name: Run hardening-6 acceptance
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           bash scripts/acceptance/hardening_6_framework.sh
       - name: Verify enforcement_mode gate
-        # If enforcement_mode == "block" in this PR, ALL hooks + tests
-        # must have passed above. If not "block", this step no-ops.
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           mode=$(jq -r '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json)
           if [ "$mode" = "block" ]; then
@@ -2130,9 +2170,10 @@ jobs:
           else
             echo "enforcement_mode=$mode (pre-flip or non-H6.0); acceptance gate not required"
           fi
-
       # v24 R23 F1 fix: self-check branch protection includes this workflow
       # as required status check. If not, flip to block is unsafe.
+      # v28 R28 F3: runs regardless of relevant changes so required-check
+      # self-audit posts on every PR.
       - name: Verify branch protection requires this check
         if: github.event.pull_request.base.ref == 'main'
         env:
