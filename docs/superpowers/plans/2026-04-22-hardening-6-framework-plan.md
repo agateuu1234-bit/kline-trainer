@@ -704,10 +704,10 @@ if echo "$FIRST_LINE" | grep -qE '^Skill gate: exempt\('; then
 fi
 SKILL_NAME=$(echo "$FIRST_LINE" | sed -E 's/^Skill gate: (.*)/\1/')
 
-# Session start
-SESSION_START_UTC="${CLAUDE_SESSION_START_UTC:-}"
-if [ -z "$SESSION_START_UTC" ] && [ -n "$CLAUDE_SESSION_ID" ]; then
-  # ULID timestamp decode (first 10 chars base32 → ms since epoch)
+# Session start (v4 R3 F3 fix: ULID first, env fallback - aligns with spec §3.4)
+SESSION_START_UTC=""
+if [ -n "$CLAUDE_SESSION_ID" ]; then
+  # Primary: ULID timestamp decode (first 10 chars base32 → ms since epoch)
   SESSION_START_UTC=$(python3 -c "
 import sys
 try:
@@ -721,6 +721,10 @@ try:
 except Exception:
     pass
 " 2>/dev/null)
+fi
+# Fallback: env var (only if ULID failed/absent)
+if [ -z "$SESSION_START_UTC" ]; then
+  SESSION_START_UTC="${CLAUDE_SESSION_START_UTC:-}"
 fi
 SESSION_UNKNOWN=0
 [ -z "$SESSION_START_UTC" ] && SESSION_UNKNOWN=1
@@ -787,13 +791,32 @@ fi
 
 # Special path for codex:adversarial-review (L5)
 if [ "$SKILL_NAME" = "codex:adversarial-review" ]; then
-  # Compute target
+  # Compute target (v4 R3 F2 fix: explicit from response; block on ambiguity)
   TARGET=""
   case "$LAST_STAGE" in
     "superpowers:brainstorming"|"superpowers:writing-plans")
-      # file target: find latest modified file in docs/superpowers/specs or plans in recent commits
-      RECENT_FILE=$(git log -1 --name-only --pretty=format: 2>/dev/null | grep -E '^docs/superpowers/(specs|plans)/' | head -1)
-      [ -n "$RECENT_FILE" ] && TARGET="file:$RECENT_FILE"
+      # v4: Look at THIS response's Write/Edit tool_uses for spec/plan path
+      # If exactly 1 match → use it; if 0 or >1 → BLOCK (don't guess)
+      CANDIDATES=$(echo "$TXT_AND_USES" | jq -r '
+        .tool_uses[]
+        | select(.name == "Write" or .name == "Edit" or .name == "NotebookEdit")
+        | .input.file_path // empty
+      ' | grep -E '/docs/superpowers/(specs|plans)/.+\.md$' | sort -u)
+      # Fall back to git log if response has no artifacts (e.g., codex run-only response)
+      if [ -z "$CANDIDATES" ]; then
+        CANDIDATES=$(git log -1 --name-only --pretty=format: 2>/dev/null | grep -E '^docs/superpowers/(specs|plans)/' | sort -u)
+      fi
+      CAND_COUNT=$(echo "$CANDIDATES" | grep -cv '^$' 2>/dev/null || echo 0)
+      if [ "$CAND_COUNT" = "1" ]; then
+        # Resolve relative: if absolute path, strip leading PWD + /
+        RECENT_FILE=$(echo "$CANDIDATES" | sed "s|^$PWD/||")
+        TARGET="file:$RECENT_FILE"
+      elif [ "$CAND_COUNT" -gt 1 ]; then
+        drift_log "codex_gate_ambiguous_target"
+        [ "$CONFIG_MODE" = "block" ] && block "codex:adversarial-review target 模糊（last_stage=$LAST_STAGE, 候选 $CAND_COUNT 个）；请响应内显式编辑/写入单一 spec/plan 文件，或设置 env TARGET"
+        exit 0
+      fi
+      # CAND_COUNT == 0 → TARGET stays empty, falls through to empty-target handling
       ;;
     "superpowers:subagent-driven-development"|"superpowers:requesting-code-review"|"superpowers:finishing-a-development-branch")
       HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
@@ -890,15 +913,11 @@ else
   SKIP_L2=0
 fi
 
-# L2: Skill invoke match (for non-codex)
+# L2: Skill invoke match (v4: exact canonical match only, no short-name alias)
+# R3 F1 fix: reject `brainstorming` invoke when gate is `superpowers:brainstorming`
+# (or vice versa); require .input.skill == $SKILL_NAME exactly as configured
 if [ "$SKIP_L2" = "0" ]; then
   INVOKED=$(echo "$TXT_AND_USES" | jq -r --arg s "$SKILL_NAME" '
-    .tool_uses[] 
-    | select(.name == "Skill") 
-    | select(.input.skill == ($s | sub("^superpowers:"; "") | sub("^codex:"; ""))) 
-    | "true"
-  ' | head -1)
-  [ -z "$INVOKED" ] && INVOKED=$(echo "$TXT_AND_USES" | jq -r --arg s "$SKILL_NAME" '
     .tool_uses[] 
     | select(.name == "Skill") 
     | select(.input.skill == $s) 
