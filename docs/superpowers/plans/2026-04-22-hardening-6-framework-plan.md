@@ -1827,6 +1827,99 @@ git commit -m "hardening-6 Task 8: acceptance script"
 
 ---
 
+## Task 8.5: L5 Codex Gate Rollout 使用指南（v16 R15 F1 fix，Task 9 前置）
+
+**问题**（Codex R15 HIGH）：Task 9 flip `enforcement_mode=block` 后，任何 response first-line 不是合法 `Skill gate:` 的都会被 L1 block。codex review 工作流若走 "先 run codex-attest 在一响应，再 announce gate 下一响应"（spec §2.2 模式 ii），那 run-only 响应可能被 L1 block。
+
+**本项目使用 L5 codex gate 的**正确模式**（v16 明确化）：
+
+### 模式 i（同响应 announce + run，**推荐**）
+
+Claude 的响应结构：
+```
+Skill gate: codex:adversarial-review
+<正文：本 response 将跑 codex-attest 验证 spec/plan/branch>
+<tool_use: Bash: .claude/scripts/codex-attest.sh --scope branch-diff --base ... --head ...>
+```
+
+- L1：first-line 是 `Skill gate: codex:adversarial-review` → 合法 → pass
+- L2：skip（codex 走 L5 特殊路径，L2 不做 Skill tool invoke match）
+- L3：skip（非 exempt）
+- L5：Bash 完成后 ledger update，path A 查 target 匹配的 entry → pass
+
+### 模式 ii（先 run 再 announce，**不推荐**在 Task 9 后）
+
+flip 后 run-only 响应必须用 first-line `Skill gate: exempt(single-step-no-semantic-change)` + 跑 codex-attest.sh。但 L3 single-step Bash allowlist 不含 `.claude/scripts/codex-attest.sh`，会被 block。
+
+**v16 解决**：扩 single-step Bash allowlist 允许 codex-attest.sh / attest-override.sh：
+
+在 Task 3 Step 1 `safe_bash_single` 正则（validate_exempt_integrity 中）追加 alternative：
+
+```python
+safe_bash_single = re.compile(
+    r'^(pwd|true|false)$'
+    r'|^echo +["\'][^"\'|<>;&`$()]*["\']$'
+    r'|^(ls|cat|head|tail|wc|grep|rg|jq) +[^|<>;&`$(){}\-]+$'
+    r'|^\.claude/scripts/(codex-attest|attest-override)\.sh(\s|$)'  # v16 R15 F1
+)
+```
+
+### Task 6 新增测试
+
+在 `test_skill_invoke_check.py` `TestL5CodexGate` 加：
+
+```python
+def test_codex_mode_i_same_response_announce_and_run(self, tmp_path):
+    """v16 R15 F1: 模式 i (announce + run same response) must pass L1 in block mode."""
+    # Set enforcement_mode=block globally
+    import shutil as _sh
+    rp = Path(".claude/workflow-rules.json")
+    bak = str(rp) + ".bak"
+    _sh.copy(rp, bak)
+    try:
+        d = json.loads(rp.read_text())
+        d["skill_gate_policy"]["enforcement_mode"] = "block"
+        rp.write_text(json.dumps(d, indent=2))
+        # Response has codex gate + Bash codex-attest (mode i)
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: codex:adversarial-review\n\nRunning attest.",
+            tool_uses=[{"name": "Bash", "input": {"command": ".claude/scripts/codex-attest.sh --scope branch-diff --head my-branch"}}],
+        )
+        rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
+        # L1 must not block (first-line is valid codex gate)
+        # L5 may drift-log (observe mode for codex in H6.0) but not block
+        assert '"decision":"block"' not in stdout.replace(" ", "")
+    finally:
+        _sh.move(bak, str(rp))
+
+def test_codex_mode_ii_run_only_via_single_step_exempt(self, tmp_path):
+    """v16 R15 F1: 模式 ii run-only via exempt(single-step) must pass when
+    Bash is codex-attest.sh (in safe_bash_single allowlist)."""
+    import shutil as _sh
+    rp = Path(".claude/workflow-rules.json")
+    bak = str(rp) + ".bak"
+    _sh.copy(rp, bak)
+    try:
+        d = json.loads(rp.read_text())
+        d["skill_gate_policy"]["enforcement_mode"] = "block"
+        rp.write_text(json.dumps(d, indent=2))
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\nRunning attest only.",
+            tool_uses=[{"name": "Bash", "input": {"command": ".claude/scripts/codex-attest.sh --scope branch-diff --head my-branch"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' not in stdout.replace(" ", ""), \
+            "single-step exempt with codex-attest.sh should be allowed by safe_bash_single v16 alt"
+    finally:
+        _sh.move(bak, str(rp))
+```
+
+这两个 tests **必须在 Task 9 flip 前加入并通过**。
+
+---
+
 ## Task 9: Flip `workflow-rules.json` `enforcement_mode` → `block`（最后一个 commit）
 
 **Files:**
