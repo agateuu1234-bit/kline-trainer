@@ -947,17 +947,21 @@ block() {
 }
 
 drift_log() {
-  # $1 = drift_kind; other fields from env
+  # $1 = drift_kind; $2 = invoked; $3 = exempt_matched; $4 = last_stage_before
+  # $5 = blocked (v27 R26 F3 fix; default inferred from BLOCK_MODE_PENDING env)
   # R11 F2 fix: mkdir -p parent dir (fresh checkout may not have .claude/state/)
   local kind="$1"
   local invoked="${2:-false}"
   local exempt_matched="${3:-null}"
   local last_stage_before="${4:-null}"
+  # v27 R26 F3: blocked reflects whether this drift_log call precedes a block()
+  # Passed explicitly by caller (default false if not passed)
+  local blocked="${5:-false}"
   local rsha=$(printf '%s' "$LAST_TEXT" | shasum -a 256 | awk '{print $1}')
   mkdir -p "$(dirname "$DRIFT_LOG")" 2>/dev/null || true
-  python3 - "$DRIFT_LOG" "$kind" "$SKILL_NAME" "$invoked" "$exempt_matched" "$last_stage_before" "$rsha" "${CLAUDE_SESSION_ID:-unknown}" <<'PY'
+  python3 - "$DRIFT_LOG" "$kind" "$SKILL_NAME" "$invoked" "$exempt_matched" "$last_stage_before" "$rsha" "${CLAUDE_SESSION_ID:-unknown}" "$blocked" <<'PY'
 import json, sys, time, os
-p, kind, skill, invoked, exempt_m, last_stage, rsha, sid = sys.argv[1:9]
+p, kind, skill, invoked, exempt_m, last_stage, rsha, sid, blocked = sys.argv[1:10]
 entry = {
     'time_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
     'session_id': sid,
@@ -968,13 +972,20 @@ entry = {
     'exempt_rule_matched': None if exempt_m == 'null' else exempt_m,
     'last_stage_before': None if last_stage == 'null' else last_stage,
     'drift_kind': kind,
-    'blocked': False,
+    'blocked': blocked == 'true',
 }
 # Ensure parent dir exists (fresh checkout fix R11 F2)
 os.makedirs(os.path.dirname(p) or '.', exist_ok=True)
 with open(p, 'a') as f:
     f.write(json.dumps(entry) + '\n')
 PY
+}
+
+# v27 R26 F3 fix: helper that calls drift_log with blocked=true then block()
+drift_log_and_block() {
+  # Usage: drift_log_and_block <drift_kind> <reason>
+  drift_log "$1" "false" "null" "$LAST_STAGE" "true"
+  block "$2"
 }
 
 # Look up config
@@ -995,9 +1006,16 @@ export CONFIG_MODE
 
 # Load mini-state
 WT_HASH8=$(printf '%s' "$PWD" | shasum -a 256 | awk '{print $1}' | cut -c1-8)
-SID8="${CLAUDE_SESSION_ID:-noSessID}"
-SID8="${SID8:0:8}"
-STATE_FILE="$STATE_DIR/${WT_HASH8}-${SID8}.json"
+# v27 R26 F1 fix: SHA256 hash of FULL CLAUDE_SESSION_ID (not :0:8 prefix which
+# is ULID timestamp data, collides across sessions in same time bucket).
+# Falls back to pid+time for no-session-id case; NEVER shared "noSessID" bucket.
+if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
+  SID_HASH=$(printf '%s' "$CLAUDE_SESSION_ID" | shasum -a 256 | awk '{print $1}' | cut -c1-8)
+else
+  # No session ID: use per-process unique fallback (ppid + epoch seconds)
+  SID_HASH=$(printf 'noSess-%s-%s' "$PPID" "$(date +%s)" | shasum -a 256 | awk '{print $1}' | cut -c1-8)
+fi
+STATE_FILE="$STATE_DIR/${WT_HASH8}-${SID_HASH}.json"
 LAST_STAGE="_initial"
 if [ -f "$STATE_FILE" ]; then
   LAST_STAGE=$(jq -r '.last_stage // "_initial"' "$STATE_FILE" 2>/dev/null || echo "_initial")
@@ -1882,8 +1900,8 @@ run "config: 14 skill"     bash -c "[ \"\$(jq '.enforce | length' .claude/config
 # v15 R14 F1: legal_next_set has 12 non-wildcard skills + systematic-debugging + _initial = 14 keys
 # (using-superpowers / dispatching-parallel-agents are state-less wildcards)
 run "config: legal_next_set 14 keys (12 non-wildcard + sys-debug + _initial)" bash -c "[ \"\$(jq '.mini_state.legal_next_set | length' .claude/config/skill-invoke-enforced.json)\" = '14' ]"
-run "config: non-wildcard enforce keys covered by legal_next_set (wildcards excluded)" \
-  bash -c "diff <(jq -r '(.enforce | keys) - (.mini_state.wildcard_always_allowed) | .[]' .claude/config/skill-invoke-enforced.json | sort) <(jq -r '.mini_state.legal_next_set | keys[] | select(. != \"_initial\")' .claude/config/skill-invoke-enforced.json | sort)"
+run "config: state-aware wildcards (systematic-debugging) + non-wildcards all covered by legal_next_set" \
+  bash -c "diff <(jq -r '(.enforce | keys) - [\"superpowers:using-superpowers\", \"superpowers:dispatching-parallel-agents\"] | .[]' .claude/config/skill-invoke-enforced.json | sort) <(jq -r '.mini_state.legal_next_set | keys[] | select(. != \"_initial\")' .claude/config/skill-invoke-enforced.json | sort)"
 run "config: codex entry exists"    bash -c "jq -e '.enforce[\"codex:adversarial-review\"]' .claude/config/skill-invoke-enforced.json > /dev/null"
 
 # ---- settings.json wired ----
