@@ -1788,9 +1788,10 @@ git commit -m "hardening-6 Task 6: tests for skill-invoke-check.sh L2/L4/L5"
 读现有 settings.json 的 `hooks.Stop` 数组，向内追加：
 
 ```bash
-# v20 R19 F1 fix: quote expanded $CLAUDE_PROJECT_DIR to handle project
-# paths with spaces (本项目路径是 "Prj_Kline trainer" 含空格)
-jq '.hooks.Stop += [{"hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill-invoke-check.sh\""}]}]' .claude/settings.json > /tmp/new-settings.json
+# v21 R20 F1 fix: wrapper resolves repo root with CLAUDE_PROJECT_DIR fallback
+# to git rev-parse. Handles both missing env var AND paths with spaces (R19 F1).
+# Command invokes bash -c wrapper that computes REPO_ROOT safely then exec's hook.
+jq '.hooks.Stop += [{"hooks":[{"type":"command","command":"bash -c '\''cd \"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}\" && exec bash .claude/hooks/skill-invoke-check.sh'\''"}]}]' .claude/settings.json > /tmp/new-settings.json
 mv /tmp/new-settings.json .claude/settings.json
 ```
 
