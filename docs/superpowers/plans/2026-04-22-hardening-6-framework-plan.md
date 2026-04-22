@@ -363,10 +363,12 @@ def get_path(tu):
 # R5 F2 fix: for behavior-neutral, check Write/Edit/NotebookEdit paths against allowlist
 # R5 F3 not relevant here (target regex is in skill-invoke-check, not this hook)
 
+# v18 R17 F2 fix: hoist CONTROL_CHARS_RE to module-level (was inside read-only branch)
+CONTROL_CHARS_RE = re.compile(r'[\r\n\t\x00]')  # reject multi-line shell payloads
+
 if reason == 'read-only-query':
     # Strict allowlist: Read/Grep/Glob or specific safe Bash patterns
-    # Safe Bash: complete regex match; NO pipes, redirects, compound commands, NO newlines/CR/tab (v17 R16 F1 fix)
-    CONTROL_CHARS_RE = re.compile(r'[\r\n\t\x00]')  # reject multi-line shell payloads
+    # Safe Bash: complete regex match; NO pipes, redirects, compound commands, NO newlines/CR/tab
     safe_bash = re.compile(
         r'^(pwd|true|false)$'
         r'|^echo +["\'][^"\'|<>;&`$()]*["\']$'
@@ -1011,7 +1013,17 @@ if [ "$SKILL_NAME" = "codex:adversarial-review" ]; then
         [ "$CONFIG_MODE" = "block" ] && block "codex:adversarial-review target 模糊（last_stage=$LAST_STAGE, 候选 $CAND_COUNT 个）；请响应内显式编辑/写入单一 spec/plan 文件，或设置 env TARGET"
         exit 0
       fi
-      # CAND_COUNT == 0 → TARGET stays empty, falls through to empty-target handling
+      # v18 R17 F3 HIGH fix: fallback to mini-state recorded artifact
+      # (brainstorming/writing-plans response updates state with last written
+      # spec/plan path; codex run-only response reads it from state)
+      if [ "$CAND_COUNT" = "0" ] && [ -f "$STATE_FILE" ]; then
+        RECENT_ART=$(jq -r '.recent_artifact_path // ""' "$STATE_FILE" 2>/dev/null)
+        if [ -n "$RECENT_ART" ] && [ -f "$RECENT_ART" ]; then
+          TARGET="file:$RECENT_ART"
+          CAND_COUNT=1
+        fi
+      fi
+      # CAND_COUNT == 0 AND no state artifact → TARGET stays empty, falls through
       ;;
     "superpowers:subagent-driven-development"|"superpowers:requesting-code-review"|"superpowers:finishing-a-development-branch")
       HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
@@ -1077,27 +1089,37 @@ if [ "$SKILL_NAME" = "codex:adversarial-review" ]; then
     fi
   fi
 
-  # Path B: override-log
-  if [ "$EVIDENCE_PASS" = "0" ] && [ -f "$OVERRIDE_LOG" ]; then
-    OV=$(tail -1 "$OVERRIDE_LOG" 2>/dev/null)
-    if [ -n "$OV" ]; then
-      OV_TARGET=$(echo "$OV" | jq -r '.target // ""')
-      OV_TIME=$(echo "$OV" | jq -r '.time_utc // ""')
-      OV_KIND=$(echo "$OV" | jq -r '.kind // ""')
-      # Match: file target checks path; branch target checks branch name
-      if [[ "$TARGET" =~ ^file: ]] && [ "$OV_KIND" = "file" ] && [ "$OV_TARGET" = "${TARGET#file:}" ] \
-         && [[ "$OV_TIME" > "$SESSION_START_UTC" ]]; then
-        # Revision bind
-        FILE_PATH="${TARGET#file:}"
-        CUR_BLOB=$(git hash-object "$FILE_PATH" 2>/dev/null)
-        OV_BLOB=$(echo "$OV" | jq -r '.blob_or_head_sha // ""')
-        [ "$CUR_BLOB" = "$OV_BLOB" ] && EVIDENCE_PASS=1
-      elif [[ "$TARGET" =~ ^branch: ]] && [ "$OV_KIND" = "branch" ] \
-           && [[ "$OV_TIME" > "$SESSION_START_UTC" ]]; then
-        BR_NAME=$(echo "$TARGET" | sed -E 's/branch:([^@]+)@.*/\1/')
-        BR_SHA="${TARGET##*@}"
-        OV_BR_SHA=$(echo "$OV" | jq -r '.blob_or_head_sha // ""')
-        [ "$OV_TARGET" = "$BR_NAME" ] && [ "$OV_BR_SHA" = "$BR_SHA" ] && EVIDENCE_PASS=1
+  # Path B: ledger override entry (v18 R17 F1 CRITICAL fix)
+  # Raw override-log jsonl line is NOT sufficient (can be forged with Write).
+  # Require keyed ledger entry with override:true field AND matching audit_log_line
+  # reference, then cross-verify the audit log line matches the ledger entry.
+  if [ "$EVIDENCE_PASS" = "0" ] && [ -f "$LEDGER" ]; then
+    OV_ENTRY=$(jq -c --arg k "$TARGET" '.entries[$k] // .[$k] // empty' "$LEDGER" 2>/dev/null)
+    if [ -n "$OV_ENTRY" ]; then
+      IS_OVERRIDE=$(echo "$OV_ENTRY" | jq -r '.override // false')
+      OV_TIME=$(echo "$OV_ENTRY" | jq -r '.override_time_utc // .attest_time_utc // ""')
+      AUDIT_LINE=$(echo "$OV_ENTRY" | jq -r '.audit_log_line // ""')
+      if [ "$IS_OVERRIDE" = "true" ] && [[ "$OV_TIME" > "$SESSION_START_UTC" ]] && [ -n "$AUDIT_LINE" ]; then
+        # Cross-verify: audit log line N in override-log.jsonl must reference same target
+        if [ -f "$OVERRIDE_LOG" ]; then
+          AUDIT_CONTENT=$(sed -n "${AUDIT_LINE}p" "$OVERRIDE_LOG" 2>/dev/null)
+          if [ -n "$AUDIT_CONTENT" ]; then
+            AUDIT_TARGET=$(echo "$AUDIT_CONTENT" | jq -r '.target // ""')
+            AUDIT_KIND=$(echo "$AUDIT_CONTENT" | jq -r '.kind // ""')
+            # Match target path/branch + kind + revision
+            if [[ "$TARGET" =~ ^file: ]] && [ "$AUDIT_KIND" = "file" ] && [ "$AUDIT_TARGET" = "${TARGET#file:}" ]; then
+              FILE_PATH="${TARGET#file:}"
+              CUR_BLOB=$(git hash-object "$FILE_PATH" 2>/dev/null)
+              AUDIT_BLOB=$(echo "$AUDIT_CONTENT" | jq -r '.blob_or_head_sha // ""')
+              [ "$CUR_BLOB" = "$AUDIT_BLOB" ] && EVIDENCE_PASS=1
+            elif [[ "$TARGET" =~ ^branch: ]] && [ "$AUDIT_KIND" = "branch" ]; then
+              BR_NAME=$(echo "$TARGET" | sed -E 's/branch:([^@]+)@.*/\1/')
+              BR_SHA="${TARGET##*@}"
+              AUDIT_BR_SHA=$(echo "$AUDIT_CONTENT" | jq -r '.blob_or_head_sha // ""')
+              [ "$AUDIT_TARGET" = "$BR_NAME" ] && [ "$AUDIT_BR_SHA" = "$BR_SHA" ] && EVIDENCE_PASS=1
+            fi
+          fi
+        fi
       fi
     fi
   fi
@@ -1180,17 +1202,48 @@ fi
 # Atomic update last_stage
 mkdir -p "$STATE_DIR"
 TMP=$(mktemp)
-python3 - "$STATE_FILE" "$TMP" "$SKILL_NAME" "$PWD" "${CLAUDE_SESSION_ID:-}" <<'PY'
-import json, sys, time, os
-sf, tmp, skill, pwd, sid = sys.argv[1:6]
+python3 - "$STATE_FILE" "$TMP" "$SKILL_NAME" "$PWD" "${CLAUDE_SESSION_ID:-}" "$TXT_AND_USES" <<'PY'
+import json, sys, time, os, subprocess
+sf, tmp, skill, pwd, sid, txt_uses_json = sys.argv[1:7]
 history = []
+recent_artifact = ""
+recent_artifact_blob = ""
 if os.path.exists(sf):
     try:
         d = json.load(open(sf))
         history = d.get('transition_history', [])
+        recent_artifact = d.get('recent_artifact_path', '')
+        recent_artifact_blob = d.get('recent_artifact_blob', '')
     except Exception:
         pass
 history.append({'stage': skill, 'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})
+
+# v18 R17 F3 fix: if brainstorming/writing-plans writes a spec/plan, record path+blob
+# so next codex run-only response can recover target from state
+if skill in ('superpowers:brainstorming', 'superpowers:writing-plans'):
+    try:
+        tu_data = json.loads(txt_uses_json)
+        import re
+        spec_plan_re = re.compile(r'^(\./)?docs/superpowers/(specs|plans)/.+\.md$')
+        for tu in tu_data.get('tool_uses', []):
+            if tu.get('name') in ('Write', 'Edit', 'MultiEdit', 'NotebookEdit'):
+                fp = tu.get('input', {}).get('file_path', '')
+                if fp.startswith(pwd + '/'):
+                    fp = fp[len(pwd)+1:]
+                elif fp.startswith('/'):
+                    fp = fp.lstrip('/')
+                if spec_plan_re.match(fp):
+                    recent_artifact = fp
+                    try:
+                        recent_artifact_blob = subprocess.check_output(
+                            ['git', 'hash-object', fp], text=True, stderr=subprocess.DEVNULL
+                        ).strip()
+                    except Exception:
+                        recent_artifact_blob = ''
+                    break
+    except Exception:
+        pass
+
 state = {
     'version': '1',
     'last_stage': skill,
@@ -1199,6 +1252,8 @@ state = {
     'session_id': sid,
     'drift_count': 0,
     'transition_history': history[-50:],
+    'recent_artifact_path': recent_artifact,
+    'recent_artifact_blob': recent_artifact_blob,
 }
 json.dump(state, open(tmp, 'w'), indent=2)
 PY
