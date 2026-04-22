@@ -371,13 +371,19 @@ if reason == 'read-only-query':
         sys.exit(0)
 
 elif reason == 'behavior-neutral':
-    # R5 F2 fix: restrict Write/Edit/NotebookEdit paths; block commit/push
+    # R5 F2 + R8 F1 fix: restrict Write/Edit paths AND Bash with strict allowlist
     safe_path = re.compile(r'^(\./)?(docs/.*\.md|\.claude/state/[a-zA-Z0-9_.-]+\.(jsonl|json))$')
+    # Same strict Bash allowlist as read-only (prevents rm/sed-i/python writes/redirects)
+    safe_bash = re.compile(
+        r'^(pwd|true|false)$'
+        r'|^echo +["\'][^"\'|<>;&`$()]*["\']$'
+        r'|^(ls|cat|head|tail|wc|git +(status|diff|log)|grep|rg|find|jq) +[^|<>;&`$(){}]+$'
+        r'|^(git +(status|log))$'
+    )
     for tu in last_tool_uses:
         name = tu.get('name', '')
         if name in ('Write', 'Edit', 'NotebookEdit', 'MultiEdit'):
             fp = get_path(tu)
-            # Normalize to relative (strip leading /workspace/PROJECT_PATH if present)
             import os
             pwd = os.getcwd()
             if fp.startswith(pwd + '/'):
@@ -385,24 +391,49 @@ elif reason == 'behavior-neutral':
             elif fp.startswith('/'):
                 fp = fp.lstrip('/')
             if not safe_path.match(fp):
-                print(f"BLOCK: exempt(behavior-neutral) Write/Edit 路径不在白名单 (docs/*.md 或 .claude/state/*.json[l]): {fp}")
+                print(f"BLOCK: exempt(behavior-neutral) Write/Edit 路径不在白名单: {fp}")
                 sys.exit(0)
         elif name == 'Bash':
             cmd = get_cmd(tu)
-            if re.search(r'git +(commit|push|tag)|gh +pr +(create|merge)', cmd):
-                print(f"BLOCK: exempt(behavior-neutral) Bash 不允许 commit/push/tag/PR: {cmd[:80]}")
+            # Reject any side-effecting command
+            if re.search(r'[|<>;&`$]', cmd) or '&&' in cmd or '||' in cmd:
+                print(f"BLOCK: exempt(behavior-neutral) Bash 含管道/重定向/复合命令: {cmd[:80]}")
                 sys.exit(0)
+            if not safe_bash.match(cmd):
+                print(f"BLOCK: exempt(behavior-neutral) Bash 不在严格白名单（同 read-only 集）: {cmd[:80]}")
+                sys.exit(0)
+        elif name in ('Read', 'Grep', 'Glob'):
+            continue
+        else:
+            # Other tools not explicitly allowed
+            print(f"BLOCK: exempt(behavior-neutral) 不允许工具 {name}")
+            sys.exit(0)
 
 elif reason == 'single-step-no-semantic-change':
+    # R8 F1 fix: also apply strict Bash allowlist (not just push/PR block)
     if len(last_tool_uses) > 2:
         print(f"BLOCK: exempt(single-step-no-semantic-change) tool_uses 超 2 ({len(last_tool_uses)})")
         sys.exit(0)
+    safe_bash_single = re.compile(
+        r'^(pwd|true|false)$'
+        r'|^echo +["\'][^"\'|<>;&`$()]*["\']$'
+        r'|^(ls|cat|head|tail|wc|git +(status|diff|log)|grep|rg|find|jq) +[^|<>;&`$(){}]+$'
+    )
     for tu in last_tool_uses:
-        if tu.get('name') == 'Bash':
+        name = tu.get('name', '')
+        if name in ('Read', 'Grep', 'Glob'):
+            continue
+        if name == 'Bash':
             cmd = get_cmd(tu)
-            if re.search(r'git +push|gh +pr +(create|merge)', cmd):
-                print(f"BLOCK: exempt(single-step) Bash 不允许 push/PR: {cmd[:80]}")
+            if re.search(r'[|<>;&`$]', cmd) or '&&' in cmd or '||' in cmd:
+                print(f"BLOCK: exempt(single-step) Bash 含管道/重定向/复合命令: {cmd[:80]}")
                 sys.exit(0)
+            if not safe_bash_single.match(cmd):
+                print(f"BLOCK: exempt(single-step) Bash 不在严格白名单: {cmd[:80]}")
+                sys.exit(0)
+            continue
+        print(f"BLOCK: exempt(single-step) 不允许工具 {name}")
+        sys.exit(0)
 
 # user-explicit-skip: trust user, no content check
 
@@ -752,8 +783,9 @@ DRIFT_LOG=".claude/state/skill-invoke-drift.jsonl"
 LEDGER=".claude/state/attest-ledger.json"
 OVERRIDE_LOG=".claude/state/attest-override-log.jsonl"
 
-# Fail-open: parse errors / missing infra → exit 0 drift-log
-trap 'echo "[skill-invoke-check] parse error; fail-open" >&2; exit 0' ERR
+# Fail-open ONLY for parse/infra errors; NOT for enforcement paths
+# v8 R8 F2 fix: remove global ERR trap which could swallow pipefail errors
+# in codex target computation; handle expected empty results explicitly with || true
 
 input=$(cat)
 tpath=$(echo "$input" | jq -r '.transcript_path // ""')
@@ -895,16 +927,17 @@ if [ "$SKILL_NAME" = "codex:adversarial-review" ]; then
   TARGET=""
   case "$LAST_STAGE" in
     "superpowers:brainstorming"|"superpowers:writing-plans")
-      # v6 R5 F3 fix: accept both relative and absolute paths; normalize
-      # before regex match (strip leading ./) 
+      # v6 R5 F3 + v9 R8 F2 fix: accept relative+absolute paths normalized;
+      # use || true on all pipelines so empty result doesn't trigger pipefail ERR
+      # (fail-closed later by empty TARGET check, not by pipeline error)
       CANDIDATES=$(echo "$TXT_AND_USES" | jq -r '
         .tool_uses[]
         | select(.name == "Write" or .name == "Edit" or .name == "NotebookEdit" or .name == "MultiEdit")
         | .input.file_path // empty
-      ' | sed -E "s|^$PWD/||; s|^\./||" | grep -E '^docs/superpowers/(specs|plans)/.+\.md$' | sort -u)
+      ' 2>/dev/null | sed -E "s|^$PWD/||; s|^\./||" 2>/dev/null | { grep -E '^docs/superpowers/(specs|plans)/.+\.md$' || true; } | sort -u)
       # Fall back to git log if response has no artifacts (e.g., codex run-only response)
       if [ -z "$CANDIDATES" ]; then
-        CANDIDATES=$(git log -1 --name-only --pretty=format: 2>/dev/null | grep -E '^docs/superpowers/(specs|plans)/' | sort -u)
+        CANDIDATES=$(git log -1 --name-only --pretty=format: 2>/dev/null | { grep -E '^docs/superpowers/(specs|plans)/' || true; } | sort -u)
       fi
       CAND_COUNT=$(echo "$CANDIDATES" | grep -cv '^$' 2>/dev/null || echo 0)
       if [ "$CAND_COUNT" = "1" ]; then
@@ -1688,10 +1721,11 @@ run "rules: enforcement_mode valid" \
   bash -c "jq -re '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json | grep -qE '^(drift-log|block)$'"
 
 # ---- Unit tests ----
+# v9 R8 F3 fix: preserve pytest exit via -o pipefail; output capture separate
 run "unit: test_stop_response_check" \
-  bash -c "pytest tests/hooks/test_stop_response_check.py -q 2>&1 | tail -3"
+  bash -o pipefail -c "pytest tests/hooks/test_stop_response_check.py -q > /tmp/pytest-stop.log 2>&1; ec=\$?; tail -3 /tmp/pytest-stop.log; exit \$ec"
 run "unit: test_skill_invoke_check" \
-  bash -c "pytest tests/hooks/test_skill_invoke_check.py -q 2>&1 | tail -3"
+  bash -o pipefail -c "pytest tests/hooks/test_skill_invoke_check.py -q > /tmp/pytest-invoke.log 2>&1; ec=\$?; tail -3 /tmp/pytest-invoke.log; exit \$ec"
 
 # ---- Regression ----
 run "regression: Plan 1 DDL" \
