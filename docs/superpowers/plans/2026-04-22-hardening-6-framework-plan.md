@@ -186,7 +186,21 @@ cat > .claude/config/skill-invoke-enforced.json <<'EOF'
       "superpowers:using-superpowers",
       "superpowers:systematic-debugging",
       "superpowers:dispatching-parallel-agents"
-    ]
+    ],
+    "reset_triggers": {
+      "new_worktree": {
+        "signal": "response tool_uses contains Bash with command matching 'git worktree add'",
+        "effect": "last_stage reset to _initial"
+      },
+      "finishing_branch_pushed": {
+        "signal": "response tool_uses contains Bash with command matching 'git push' AND '(gh pr create|gh pr merge)'",
+        "effect": "last_stage reset to _initial"
+      },
+      "session_switch": {
+        "signal": "state file {wt_hash8}-{session_id8}.json not found for current session",
+        "effect": "implicit _initial (new file created on first write)"
+      }
+    }
   }
 }
 EOF
@@ -195,8 +209,10 @@ EOF
 - [ ] **Step 2: 验证 JSON 合法 + 所有 skill 列全**
 
 ```bash
-jq -e '.enforce | length == 13' .claude/config/skill-invoke-enforced.json
-jq -e '.mini_state.legal_next_set | length == 13' .claude/config/skill-invoke-enforced.json
+jq -e '.enforce | length == 14' .claude/config/skill-invoke-enforced.json
+# legal_next_set has 14 skill keys + 1 "_initial" = 15 total
+jq -e '.mini_state.legal_next_set | length == 15' .claude/config/skill-invoke-enforced.json
+# Key-set comparison (robust vs count): enforce keys == legal_next_set keys minus "_initial"
 jq -r '.enforce | keys[]' .claude/config/skill-invoke-enforced.json | sort > /tmp/enforce-keys
 jq -r '.mini_state.legal_next_set | keys[] | select(. != "_initial")' .claude/config/skill-invoke-enforced.json | sort > /tmp/state-keys
 diff /tmp/enforce-keys /tmp/state-keys && echo "OK: 两表 skill 一致"
@@ -963,10 +979,31 @@ json.dump(state, open(tmp, 'w'), indent=2)
 PY
 mv "$TMP" "$STATE_FILE"
 
-# Reset trigger: git worktree add in response
-if echo "$TXT_AND_USES" | jq -r '.tool_uses[] | select(.name=="Bash") | .input.command' | grep -qE 'git worktree add'; then
-  # Next invocation will see _initial as fallback; current response still counts
-  :
+# Reset triggers (v9 per config.mini_state.reset_triggers)
+# 1. new_worktree: git worktree add detected in this response
+# 2. finishing_branch_pushed: git push + gh pr create/merge detected
+# Note: session_switch is implicit (new session_id → new state file)
+BASH_CMDS=$(echo "$TXT_AND_USES" | jq -r '.tool_uses[] | select(.name=="Bash") | .input.command' 2>/dev/null || echo "")
+RESET=0
+if echo "$BASH_CMDS" | grep -qE 'git worktree add'; then
+  RESET=1
+elif echo "$BASH_CMDS" | grep -qE 'git push' && echo "$BASH_CMDS" | grep -qE 'gh pr (create|merge)'; then
+  RESET=1
+fi
+if [ "$RESET" = "1" ]; then
+  # Reset last_stage to _initial for NEXT invocation (current response already updated state above)
+  python3 - "$STATE_FILE" <<'PY'
+import json, sys, time
+sf = sys.argv[1]
+try:
+    d = json.load(open(sf))
+    d['last_stage'] = '_initial'
+    d['last_stage_time_utc'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    d.setdefault('transition_history', []).append({'stage': '_initial', 'time': d['last_stage_time_utc'], 'reason': 'reset_trigger'})
+    json.dump(d, open(sf, 'w'), indent=2)
+except Exception:
+    pass
+PY
 fi
 
 exit 0
@@ -1312,8 +1349,10 @@ run "file: drift log" test -e .claude/state/skill-invoke-drift.jsonl
 run "dir: skill-stage" test -d .claude/state/skill-stage
 
 # ---- Config schema ----
-run "config: 13 skill"     bash -c "[ \"\$(jq '.enforce | length' .claude/config/skill-invoke-enforced.json)\" = '13' ]"
-run "config: legal_next_set 13 key" bash -c "[ \"\$(jq '.mini_state.legal_next_set | length' .claude/config/skill-invoke-enforced.json)\" = '13' ]"
+run "config: 14 skill"     bash -c "[ \"\$(jq '.enforce | length' .claude/config/skill-invoke-enforced.json)\" = '14' ]"
+run "config: legal_next_set 15 keys (14 skills + _initial)" bash -c "[ \"\$(jq '.mini_state.legal_next_set | length' .claude/config/skill-invoke-enforced.json)\" = '15' ]"
+run "config: enforce keys == legal_next_set keys minus _initial" \
+  bash -c "diff <(jq -r '.enforce | keys[]' .claude/config/skill-invoke-enforced.json | sort) <(jq -r '.mini_state.legal_next_set | keys[] | select(. != \"_initial\")' .claude/config/skill-invoke-enforced.json | sort)"
 run "config: codex entry exists"    bash -c "jq -e '.enforce[\"codex:adversarial-review\"]' .claude/config/skill-invoke-enforced.json > /dev/null"
 
 # ---- settings.json wired ----
