@@ -310,22 +310,39 @@ import json, sys, re
 
 tpath, reason = sys.argv[1], sys.argv[2]
 
-# Extract last assistant tool_uses (list of {name, input_dict})
-last_tool_uses = []
+# Extract tool_uses from ALL assistant entries since last user entry
+# (R12 F2 HIGH fix: aggregate whole turn, not just last assistant message
+# earlier assistant entries may contain side-effecting tool calls while final
+# one has only text)
+entries = []
 try:
     with open(tpath) as f:
         for line in f:
             try:
                 d = json.loads(line)
-                if d.get('type') == 'assistant':
-                    content = d.get('message', {}).get('content', [])
-                    if isinstance(content, list):
-                        last_tool_uses = [c for c in content if isinstance(c, dict) and c.get('type') == 'tool_use']
+                if d.get('type') in ('user', 'assistant'):
+                    entries.append(d)
             except Exception:
                 continue
 except Exception as e:
     print(f"BLOCK: transcript parse error: {e}")
     sys.exit(0)
+
+# Find last user entry index (current turn begins after it)
+last_user_idx = -1
+for i, e in enumerate(entries):
+    if e.get('type') == 'user':
+        last_user_idx = i
+
+# Aggregate all tool_uses from assistant entries after last user
+last_tool_uses = []
+for e in entries[last_user_idx + 1:]:
+    if e.get('type') == 'assistant':
+        content = e.get('message', {}).get('content', [])
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get('type') == 'tool_use':
+                    last_tool_uses.append(c)
 
 def get_cmd(tu):
     return tu.get('input', {}).get('command', '')
@@ -363,13 +380,15 @@ if reason == 'read-only-query':
         sys.exit(0)
 
 elif reason == 'behavior-neutral':
-    # R5 F2 + R8 F1 + R11 F1 CRITICAL fix: Write allowlist EXCLUDES .claude/state
-    # (L5 reads attest-ledger/override-log from there; allowing agent Write would
-    # let behavior-neutral forge codex evidence). state files 只能由 codex-attest.sh /
-    # attest-override.sh / hook 自身写 (via ledger-lib.sh)
+    # R5 F2 + R8 F1 + R11 F1 CRITICAL + R12 F1 HIGH fix:
+    # Write allowlist EXCLUDES .claude/state/* AND docs/superpowers/**
+    # - .claude/state/: L5 evidence 文件 (R11)
+    # - docs/superpowers/specs/**: brainstorming 产出, 只能 brainstorming skill 写
+    # - docs/superpowers/plans/**: writing-plans 产出, 只能 writing-plans skill 写
+    # 允许 docs/ 下其他文件 (如 docs/governance/, README.md 等文档)
     safe_path = re.compile(r'^(\./)?docs/.*\.md$')
-    # 显式 deny list: 任何 .claude/state/* 路径一律 block
-    deny_path = re.compile(r'(^|/)\.claude/state/')
+    # 两个 deny 必须先于 allow 检查
+    deny_path = re.compile(r'(^|/)(\.claude/state/|docs/superpowers/)')
     # Same strict Bash allowlist as read-only (prevents rm/sed-i/python writes/redirects)
     safe_bash = re.compile(
         r'^(pwd|true|false)$'
@@ -387,11 +406,11 @@ elif reason == 'behavior-neutral':
                 fp = fp[len(pwd) + 1:]
             elif fp.startswith('/'):
                 fp = fp.lstrip('/')
-            # R11 F1 CRITICAL fix: deny .claude/state/* regardless of extension
-            # (ledger/override-log are L5 evidence; agent Write would forge it)
+            # R11 F1 CRITICAL + R12 F1 HIGH fix: deny .claude/state/* AND
+            # docs/superpowers/** (specs/plans need brainstorming/writing-plans skills)
             if deny_path.search(fp):
-                print(f"BLOCK: exempt(behavior-neutral) Write/Edit 到 .claude/state/ 禁止"
-                      f"（L5 evidence 文件只能由 codex-attest.sh / attest-override.sh 写）: {fp}")
+                print(f"BLOCK: exempt(behavior-neutral) Write/Edit 到 {fp} 禁止"
+                      f"（.claude/state = L5 evidence; docs/superpowers = skill 产出区）")
                 sys.exit(0)
             if not safe_path.match(fp):
                 print(f"BLOCK: exempt(behavior-neutral) Write/Edit 路径不在白名单 (仅 docs/*.md): {fp}")
