@@ -187,6 +187,7 @@ cat > .claude/config/skill-invoke-enforced.json <<'EOF'
       "superpowers:systematic-debugging",
       "superpowers:dispatching-parallel-agents"
     ],
+    "_note_wildcard": "v15 R14 F1 fix: hook 对 wildcard skill NOT 更新 last_stage (避免 wildcard 后下一步看到空 legal_next_set). systematic-debugging 已有 legal_next_set entry (见上); using-superpowers 和 dispatching-parallel-agents 不需要 entry 因为 wildcard 路径直接 pass 不更新 state",
     "reset_triggers": {
       "new_worktree": {
         "signal": "response tool_uses contains Bash with command matching 'git worktree add'",
@@ -210,12 +211,20 @@ EOF
 
 ```bash
 jq -e '.enforce | length == 14' .claude/config/skill-invoke-enforced.json
-# legal_next_set has 14 skill keys + 1 "_initial" = 15 total
-jq -e '.mini_state.legal_next_set | length == 15' .claude/config/skill-invoke-enforced.json
-# Key-set comparison (robust vs count): enforce keys == legal_next_set keys minus "_initial"
-jq -r '.enforce | keys[]' .claude/config/skill-invoke-enforced.json | sort > /tmp/enforce-keys
+# v15 R14 F1 fix: legal_next_set covers only NON-wildcard skills + _initial
+# wildcards (using-superpowers/systematic-debugging/dispatching-parallel-agents):
+#   - systematic-debugging DOES have an entry (it's in wildcard for always-allowed
+#     to enter from any state, but also its own transitions are defined)
+#   - using-superpowers / dispatching-parallel-agents don't need entries: hook
+#     pass-through without state update
+# Compute expected: enforce keys - {using-superpowers, dispatching-parallel-agents}
+# = 14 - 2 = 12 non-wildcard skills + _initial + systematic-debugging = 14 entries total
+jq -e '.mini_state.legal_next_set | length == 14' .claude/config/skill-invoke-enforced.json
+# Keyset check: non-wildcard-exempt enforce skills ⊆ legal_next_set keys
+# (systematic-debugging counted as having entry even though also wildcard)
+jq -r '(.enforce | keys) - (["superpowers:using-superpowers", "superpowers:dispatching-parallel-agents"]) | .[]' .claude/config/skill-invoke-enforced.json | sort > /tmp/enforce-keys
 jq -r '.mini_state.legal_next_set | keys[] | select(. != "_initial")' .claude/config/skill-invoke-enforced.json | sort > /tmp/state-keys
-diff /tmp/enforce-keys /tmp/state-keys && echo "OK: 两表 skill 一致"
+diff /tmp/enforce-keys /tmp/state-keys && echo "OK: 两表 skill 一致（排除 state-less wildcards）"
 ```
 
 Expected: `OK: 两表 skill 一致`
@@ -815,31 +824,44 @@ tpath=$(echo "$input" | jq -r '.transcript_path // ""')
 [ ! -f "$tpath" ] && exit 0
 [ ! -f "$CONFIG" ] && exit 0
 
-# Extract last assistant: text + tool_uses
+# Extract current-turn assistant: text (last) + tool_uses (aggregated across ALL
+# assistant entries since last user entry) — v15 R14 F2 fix
 TXT_AND_USES=$(python3 - "$tpath" <<'PY'
 import json, sys
 text = ""
 tool_uses = []
+entries = []
 try:
     with open(sys.argv[1]) as f:
         for line in f:
             try:
                 d = json.loads(line)
-                if d.get('type') == 'assistant':
-                    content = d.get('message', {}).get('content', [])
-                    text = ""
-                    tool_uses = []
-                    if isinstance(content, list):
-                        for c in content:
-                            if isinstance(c, dict):
-                                if c.get('type') == 'text':
-                                    text = c.get('text', '')
-                                elif c.get('type') == 'tool_use':
-                                    tool_uses.append({'name': c.get('name'), 'input': c.get('input', {})})
+                if d.get('type') in ('user', 'assistant'):
+                    entries.append(d)
             except Exception:
                 continue
 except Exception:
     pass
+# Find last user index; current turn = all assistant entries after it
+last_user_idx = -1
+for i, e in enumerate(entries):
+    if e.get('type') == 'user':
+        last_user_idx = i
+# Aggregate tool_uses across all assistant entries after last user;
+# text = text from LAST assistant entry (first_line 取自最后一条)
+for e in entries[last_user_idx + 1:]:
+    if e.get('type') == 'assistant':
+        content = e.get('message', {}).get('content', [])
+        if isinstance(content, list):
+            last_text_this_entry = ""
+            for c in content:
+                if isinstance(c, dict):
+                    if c.get('type') == 'text':
+                        last_text_this_entry = c.get('text', '')
+                    elif c.get('type') == 'tool_use':
+                        tool_uses.append({'name': c.get('name'), 'input': c.get('input', {})})
+            if last_text_this_entry:
+                text = last_text_this_entry
 print(json.dumps({'text': text, 'tool_uses': tool_uses}))
 PY
 )
@@ -1121,8 +1143,11 @@ fi
 # wildcard
 WILDCARD=$(jq -r --arg s "$SKILL_NAME" '.mini_state.wildcard_always_allowed[] | select(. == $s)' "$CONFIG")
 if [ -n "$WILDCARD" ]; then
-  # update state and pass
-  :
+  # v15 R14 F1 fix: wildcard skill PASSES without updating last_stage
+  # (prevents wildcard from overwriting state to a skill that has no
+  #  legal_next_set entry, which would leave subsequent transitions
+  #  with empty legal set)
+  exit 0
 else
   # legal_next_set check
   LEGAL=$(jq -r --arg k "$LAST_STAGE" --arg s "$SKILL_NAME" '
@@ -1745,9 +1770,11 @@ run "gitignore: drift log covered" \
 
 # ---- Config schema ----
 run "config: 14 skill"     bash -c "[ \"\$(jq '.enforce | length' .claude/config/skill-invoke-enforced.json)\" = '14' ]"
-run "config: legal_next_set 15 keys (14 skills + _initial)" bash -c "[ \"\$(jq '.mini_state.legal_next_set | length' .claude/config/skill-invoke-enforced.json)\" = '15' ]"
-run "config: enforce keys == legal_next_set keys minus _initial" \
-  bash -c "diff <(jq -r '.enforce | keys[]' .claude/config/skill-invoke-enforced.json | sort) <(jq -r '.mini_state.legal_next_set | keys[] | select(. != \"_initial\")' .claude/config/skill-invoke-enforced.json | sort)"
+# v15 R14 F1: legal_next_set has 12 non-wildcard skills + systematic-debugging + _initial = 14 keys
+# (using-superpowers / dispatching-parallel-agents are state-less wildcards)
+run "config: legal_next_set 14 keys (12 non-wildcard + sys-debug + _initial)" bash -c "[ \"\$(jq '.mini_state.legal_next_set | length' .claude/config/skill-invoke-enforced.json)\" = '14' ]"
+run "config: non-wildcard enforce keys covered by legal_next_set (wildcards excluded)" \
+  bash -c "diff <(jq -r '(.enforce | keys) - (.mini_state.wildcard_always_allowed) | .[]' .claude/config/skill-invoke-enforced.json | sort) <(jq -r '.mini_state.legal_next_set | keys[] | select(. != \"_initial\")' .claude/config/skill-invoke-enforced.json | sort)"
 run "config: codex entry exists"    bash -c "jq -e '.enforce[\"codex:adversarial-review\"]' .claude/config/skill-invoke-enforced.json > /dev/null"
 
 # ---- settings.json wired ----
