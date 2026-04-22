@@ -424,7 +424,15 @@ elif reason == 'behavior-neutral':
                 fp = fp[len(pwd) + 1:]
             elif fp.startswith('/'):
                 fp = fp.lstrip('/')
-            # R11 F1 CRITICAL + R12 F1 HIGH fix: deny .claude/state/* AND
+            # v25 R24 F1 fix: canonicalize to defeat `docs/./superpowers/...` and
+            # `docs/x/../superpowers/...` bypasses; reject traversals escaping repo
+            fp_norm = os.path.normpath(fp)
+            # Reject absolute paths (should have been stripped) and leading ../
+            if fp_norm.startswith('/') or fp_norm.startswith('..'):
+                print(f"BLOCK: exempt(behavior-neutral) path traversal / absolute: {fp}")
+                sys.exit(0)
+            fp = fp_norm  # use canonical form for deny/allow checks below
+            # R11 F1 CRITICAL + R12 F1 HIGH + R24 F1 fix: deny .claude/state/* AND
             # docs/superpowers/** (specs/plans need brainstorming/writing-plans skills)
             if deny_path.search(fp):
                 print(f"BLOCK: exempt(behavior-neutral) Write/Edit 到 {fp} 禁止"
@@ -1189,11 +1197,20 @@ fi
 # wildcard
 WILDCARD=$(jq -r --arg s "$SKILL_NAME" '.mini_state.wildcard_always_allowed[] | select(. == $s)' "$CONFIG")
 if [ -n "$WILDCARD" ]; then
-  # v15 R14 F1 fix: wildcard skill PASSES without updating last_stage
-  # (prevents wildcard from overwriting state to a skill that has no
-  #  legal_next_set entry, which would leave subsequent transitions
-  #  with empty legal set)
-  exit 0
+  # v25 R24 F2 fix: distinguish between "state-less wildcards" and
+  # "wildcards WITH legal_next_set entry":
+  # - state-less (using-superpowers, dispatching-parallel-agents):
+  #   pass without state update (no entry means no meaningful "next")
+  # - has legal_next_set entry (systematic-debugging):
+  #   wildcard-entry is allowed from any last_stage, BUT state MUST
+  #   update to this skill so subsequent transitions check its
+  #   legal_next_set (e.g., systematic-debugging -> test/verification)
+  HAS_LNS=$(jq -r --arg s "$SKILL_NAME" '.mini_state.legal_next_set[$s] // empty' "$CONFIG")
+  if [ -z "$HAS_LNS" ]; then
+    # State-less wildcard: pass, no state update
+    exit 0
+  fi
+  # Wildcard with legal_next_set: fall through to state update block below
 else
   # legal_next_set check
   LEGAL=$(jq -r --arg k "$LAST_STAGE" --arg s "$SKILL_NAME" '
