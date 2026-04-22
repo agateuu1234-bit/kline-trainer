@@ -113,4 +113,33 @@ grep -rnE 'throw[[:space:]]+(DatabaseError|URLError|APIError)|catch[[:space:]]+l
 
 **Plan 3 P1 特殊任务**：作为第一个消费 AppError 的 Swift 模块，P1 PR 必须在本文档基础上选定 Gate 2 最终形态（SwiftSyntax lint / tested shell fixture / 取消 Gate 2 + 扩展 Gate 1）并更新应用矩阵。
 
+## 已知残留（codex R6 提出，延迟到 Plan 3 P1 具体化）
+
+本文档由 Plan 1d hotfix 落地，经历 codex 5 轮 adversarial review（R1–R5 全部 inline 修完），R6 又提出 2 条新角度。**per memory `feedback_codex_plan_budget_overshoot.md` "5 轮必 escalate" 规则，以下作为 explicit residual 交 Plan 3 P1 首次消费时具体闭环**：
+
+### R6-RES-1：Gate 1 coverage 只覆盖 `public func ... throws`，未覆盖其它 public throwing 声明
+
+Swift 的 public trust boundary 还包括：
+- `public init(...) throws` / `public init(...) async throws`
+- `public var x: T { get throws }`（throwing computed property）
+- `public subscript(...) throws -> T`
+- `protocol` 的 public requirement（由本模块实现）
+
+**Plan 3 P1 需在本文档 Gate 1 coverage 定义段加：**
+> 覆盖所有 public throwing 声明（funcs, static/class funcs, initializers, throwing computed properties/subscripts/accessors, 本模块实现的 public protocol requirements）。证据表必须枚举全部 public throwing surface。
+
+### R6-RES-2：共用 dependency-boundary catch-all 的例外过宽
+
+当前 Gate 1 允许"共用 dependency boundary 一条 catch-all"（例如多个 public 方法共用 `URLSession` → 一条 `URLSession` boundary catch-all 可覆盖多方法）。Codex R6 指出：不同 public 方法在共用 dependency 后可能有**独立的 catch/translation 代码**，单条 catch-all 只证明一条路径上的 mapping 正确，不能推到其它。
+
+**Plan 3 P1 需在本文档加限定：**
+> 共用 dependency boundary catch-all 的例外仅当 PR 证明存在**单一共享 throwing adapter** 持有所有 translation，且每个 public API 的失败路径都必须经过该 adapter（evidence table 需显式画出该链路）。否则必须 per-method catch-all。
+
+### 为什么延迟到 Plan 3 P1
+
+- Plan 1d 范围 = M0.4 AppError **类型层契约冻结** + **trust-boundary 翻译规则 repo 化**
+- codex R6 两条都是"如何在具体 Swift 模块落地 Gate 1 coverage 的措辞收紧"——没有实际模块可测时只能进一步抽象文字，难以收敛
+- Plan 3 P1（APIClient 是第一个 public throws 消费者）就是**具体**落地场，到时有真代码、真 fixtures，可以 close 上述两条 RES
+- 强行在 Plan 1d hotfix 里继续修会进入"codex 在 R5 接受的折衷被 R6 反攻成 loophole"的典型 shifting-goalposts 循环（R5 允许 per-boundary → R6 说 per-boundary 不够安全），违反 memory `feedback_codex_plan_budget_overshoot.md` 的 5+ 轮 escalate 规则
+
 **若发现要传递私有错误类型**：在模块内部（`private` / `fileprivate`）做 mapping，边界外只抛 `AppError`。违反 Gate = PR blocker。
