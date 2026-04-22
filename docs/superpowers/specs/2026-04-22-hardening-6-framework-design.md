@@ -97,14 +97,32 @@ Hook 2: skill-invoke-check.sh（v3）
     │   │
     │   └─ 是（已知 skill）
     │       │
-    │       ├─ 特殊：skill-name == "codex:adversarial-review"（L5 路径）
-    │       │   ├─ 豁免检查 exempt_rule = "codex-attest-script-run-or-ledger"
-    │       │   │   ├─ 响应 tool_uses 含 Bash 调用 `.claude/scripts/codex-attest.sh` → pass
-    │       │   │   ├─ 响应 tool_uses 含 Bash 调用 `.claude/scripts/attest-override.sh` → pass
-    │       │   │   ├─ `.claude/state/attest-ledger.json` 最近 entry time_utc 在
-    │       │   │   │   `$SESSION_START_UTC` 之后 → pass
-    │       │   │   └─ 否则 → mode 判断 drift / block
-    │       │   └─ 不走"Skill tool invoke 匹配"（codex 无法 Skill tool invoke）
+    │       ├─ 特殊：skill-name == "codex:adversarial-review"（L5 路径，v4 精化）
+    │       │   ├─ 计算当前 target key：
+    │       │   │   - if mini-state last_stage ∈ {brainstorming,writing-plans}：
+    │       │   │     target = `file:<spec_or_plan_path>` （扫响应最近 commit 的文件）
+    │       │   │   - if last_stage ∈ {requesting-code-review, finishing-...}：
+    │       │   │     target = `branch:<current_branch>@<HEAD_sha>`
+    │       │   │   - 否则 target = 空（warn + drift-log）
+    │       │   │
+    │       │   ├─ 豁免检查 exempt_rule = "codex-evidence-bound-to-target"（v4）
+    │       │   │   ├─ **路径 A（approve）**：读 attest-ledger.json，找 key == target 的 entry
+    │       │   │   │   │   字段要求：`attest_time_utc` 存在 && `verdict_digest` 非空
+    │       │   │   │   │   && `attest_time_utc > SESSION_START_UTC`
+    │       │   │   │   └─ 满足 → pass（approve 路径）
+    │       │   │   ├─ **路径 B（override）**：读 attest-override-log.jsonl 最新行
+    │       │   │   │   │   字段要求：`target == <当前 target>` && `time_utc > SESSION_START_UTC`
+    │       │   │   │   │   && `kind` 正确（file / branch 匹配）
+    │       │   │   │   └─ 满足 → pass（override 路径）
+    │       │   │   ├─ **路径 C（command invoke 证据，最严格）**：
+    │       │   │   │   响应 tool_uses 有 Bash 调用 codex-attest.sh + **解析 stdout**：
+    │       │   │   │   - 含 `Verdict: approve` → pass + 更新 state（等同 A 路径）
+    │       │   │   │   - 含 `Verdict: (needs-attention|reject|ambiguous|block)` → **BLOCK**，要求修正后重跑
+    │       │   │   │   - 响应 tool_uses 有 Bash 调用 attest-override.sh + exit 0 → pass（等同 B 路径）
+    │       │   │   └─ 以上全不满足 → mode 判断 drift / block
+    │       │   │
+    │       │   └─ L5 pass 后**也进 L4 mini-state 更新**（v4 fix R2 F3）
+    │       │       └─ 执行下方 L4 同样的 `legal_next_set` 检查 + atomic update last_stage 到 "codex:adversarial-review"
     │       │
     │       └─ 普通 skill（非 codex）
     │           ├─ 扫响应 tool_uses 找 Skill invoke 名==skill-name
@@ -334,7 +352,7 @@ _initial → brainstorming (spec 起草)
 
 | exempt reason | 规则 |
 |---|---|
-| `read-only-query` | **Allowlist**（严格）：tool_uses 必须全部 ∈ {Read, Grep} 或 Bash 匹配 `^(git status\|git diff\|git log\|rg\|grep\|cat\|ls\|head\|tail\|jq\|wc\|find\|basename\|dirname\|pwd\|test\|stat)(\s\|$)` 且 **无** 写类重定向 `>` / 复合命令 `;` `&&` `\|\|`（管道 `\|` 允许）。任一 tool_use 超 allowlist → BLOCK |
+| `read-only-query` | **v4 严格白名单**：tool_uses 必须全部是 **Read / Grep / Glob** 工具；**Bash 基本禁用**，仅允许 argv-parse 后匹配以下**严格完整命令模式**（正则必须完整匹配整个 command 字符串，**禁止管道/重定向/复合命令/任何 flag 不在白名单内**）：`^(pwd\|true\|false)$` 或 `^echo [^|<>;&$()\`'\"]*$`（echo literal 无变量/重定向） 或 `^(ls\|cat\|head\|tail\|wc)\s+[^|<>;&$(){}]+$`（单文件参数，无管道/重定向）。**明确禁**：`find` / `git diff` / `tee` / `sed` / 管道 `\|` / 重定向 `> < >>` / 复合 `;` `&&` `\|\|`。复杂查询应改用 Read/Grep/Glob tool 或选其他 exempt reason。v4 fix R2 F2：find -delete / git diff --output / git log \| tee 等 bypass 被关死 |
 | `behavior-neutral` | 禁 commit / push / tag / PR create-merge；允许 Edit/Write 到 `docs/**/*.md` 或 `.claude/state/*.jsonl`；其他写操作 → BLOCK |
 | `user-explicit-skip` | 信任用户（无 content check）但 drift-log 记录 |
 | `single-step-no-semantic-change` | tool_uses ≤ 2，且不含 push/merge/PR → 否则 BLOCK |
@@ -349,15 +367,28 @@ _initial → brainstorming (spec 起草)
 
 `Skill gate: superpowers:using-git-worktrees` + 响应有 `git worktree add` 或 cwd ∈ `.worktrees/` → L2 豁免。
 
-### 3.4 codex-attest-script-run-or-ledger（codex:adversarial-review 专用，v3 新增）
+### 3.4 codex-evidence-bound-to-target（codex:adversarial-review 专用，v4）
 
-`Skill gate: codex:adversarial-review` 满足**任一**：
+v4 fix R2 F1：**必须证据绑定到当前 target**，不接受跨文件/跨分支的 stale ledger entry。
 
-- 响应 tool_uses 有 Bash 调用 `.claude/scripts/codex-attest.sh` / `.claude/scripts/attest-override.sh` → pass
-- 读 `.claude/state/attest-ledger.json`，找到 entry 的 `time_utc` ∈ `$SESSION_START_UTC` 之后 → pass（说明本 session 内跑过）
-- 响应 tool_uses 有 Read `.claude/state/attest-ledger.json` + 引用其中 entry 作为证据（宽松模式，便于 discuss）→ drift-log 但 pass
+**Target 计算**：
+- last_stage ∈ {brainstorming, writing-plans}：target = `file:<最近修改的 spec 或 plan 路径>`
+- last_stage ∈ {subagent-driven-development, requesting-code-review, finishing-a-development-branch}：target = `branch:<current_branch>@<HEAD_sha>`
+- 其他：target = 空（drift-log WARN，观察但不 block）
 
-`SESSION_START_UTC` 获取：从 `$CLAUDE_SESSION_ID`（ULID 前缀是 timestamp），或 env var `$CLAUDE_SESSION_START_UTC`，或退化到"本进程启动时间"（/proc/self/stat 类）。
+**满足任一路径即 pass**：
+
+- **A（approve ledger）**：`.claude/state/attest-ledger.json` 内查 key == target 的 entry：
+  - 必有字段 `attest_time_utc`（非 `time_utc`）
+  - `verdict_digest` 非空（= approve 了）
+  - `attest_time_utc > SESSION_START_UTC`
+- **B（override ledger）**：`.claude/state/attest-override-log.jsonl` 最近行 `target` 匹配、`time_utc > SESSION_START_UTC`、`kind` 正确（file/branch）
+- **C（同响应 command 证据）**：响应 Bash 调用 codex-attest.sh **且** stdout 含 `Verdict: approve` 或 Bash 调用 attest-override.sh 且 exit 0。**needs-attention / reject → BLOCK 不 pass**（R2 F1 核心 fix）
+
+**`SESSION_START_UTC` 获取**：
+- 首选：`$CLAUDE_SESSION_ID` 是 ULID，前 10 字符时间戳解码
+- 退化：env var `$CLAUDE_SESSION_START_UTC`（hook setup 时设置）
+- 最终 fallback：`date -u -v-12H +%Y-%m-%dT%H:%M:%SZ`（12 小时内所有 entry 视作 session 内，安全起见宽松）
 
 ## 4. 滚动激活计划（H6.0 - H6.10）
 
@@ -381,28 +412,38 @@ _initial → brainstorming (spec 起草)
 
 ### 5.1 单元测试新增用例
 
-**stop-response-check.sh 升级（L3 allowlist）**：
-- `read-only-query` + Bash `python -c "open(x,'w').write(y)"` → BLOCK（R1 F2 原报 bypass）
-- `read-only-query` + Bash `tee file.txt` → BLOCK
-- `read-only-query` + Bash `sed -i ...` → BLOCK（修改文件）
-- `read-only-query` + Bash `git add .` → BLOCK
-- `read-only-query` + Bash `gh api DELETE ...` → BLOCK（非 GET）
-- `read-only-query` + Bash `rm x.txt` / `mv a b` → BLOCK
-- `read-only-query` + Bash `git log | head -10` → pass（管道允许）
-- `read-only-query` + Bash `cat file.txt > other.txt` → BLOCK（重定向写）
-- `read-only-query` + Read / Grep → pass
+**stop-response-check.sh 升级（L3 v4 严格 allowlist，R2 F2 fix 验证）**：
+- `read-only-query` + Read / Grep / Glob → pass
+- `read-only-query` + Bash `pwd` / `true` / `echo "hi"` → pass
+- `read-only-query` + Bash `ls .` / `cat file.txt` / `head -20 log` → pass
+- `read-only-query` + Bash `python -c ...` → **BLOCK**（python 不在白名单）
+- `read-only-query` + Bash `git status` → **BLOCK**（v4 严格：git 也不在白名单；用 Bash with git 请选别的 exempt 或声明 skill）
+- `read-only-query` + Bash `find . -delete` → BLOCK（find 禁）
+- `read-only-query` + Bash `git diff --output=x.patch` → BLOCK（git 禁）
+- `read-only-query` + Bash `git log \| tee out` → BLOCK（管道禁 + tee 禁）
+- `read-only-query` + Bash `rm x.txt` / `mv a b` / `sed -i ...` → BLOCK
+- `read-only-query` + Bash `cat file.txt > other` → BLOCK（重定向禁）
+- `read-only-query` + Bash `echo hi; rm x` → BLOCK（复合禁）
 - `behavior-neutral` + Edit docs/*.md → pass
 - `behavior-neutral` + commit → BLOCK
 
-**skill-invoke-check.sh（v3 新增 L5 + unknown gate fail-closed）**：
+**skill-invoke-check.sh（v4 L5 精化 + R1/R2 fix）**：
 - `Skill gate: superpowers:invalid-typo` + mode=drift-log → drift-log, pass
 - `Skill gate: superpowers:invalid-typo` + mode=block → BLOCK（R1 F1 fix 验证）
 - `Skill gate: superpowers:invalid-typo` + mode=block + ALLOW_UNKNOWN_GATE=1 → pass + drift-log WARN
-- `Skill gate: codex:adversarial-review` + Bash codex-attest.sh 调用 → pass
-- `Skill gate: codex:adversarial-review` + attest-ledger 有近期 entry → pass
-- `Skill gate: codex:adversarial-review` 均无 → drift-log (observe) / BLOCK (block)
-- mini-state: session A last=writing-plans；session B 读同 cwd 不同 sess → 两独立 state file，互不影响（R1 F3 fix 验证）
-- mini-state: 原子 write 测试（kill -9 mid-write → 原文件不损坏）
+- **L5 codex evidence 测试（v4 R2 F1 fix）**：
+  - codex-attest stdout 含 `Verdict: approve` + target 匹配 → pass
+  - codex-attest stdout 含 `Verdict: needs-attention` → **BLOCK**（不接受 needs-attention）
+  - codex-attest 调用但无 stdout 或 stdout 不含 `Verdict:` → BLOCK
+  - ledger 有无关 target 的 entry + 无本 target entry → BLOCK
+  - ledger 有本 target 的 entry 但 `attest_time_utc < SESSION_START` → BLOCK
+  - ledger 有本 target 的 entry 且 `attest_time_utc > SESSION_START` + `verdict_digest` 非空 → pass
+  - attest-override-log 最近行 target 匹配 → pass
+- **L5 mini-state update（v4 R2 F3 fix）**：
+  - 起点 last_stage=brainstorming；codex pass；last_stage 更新为 codex → pass
+  - 紧接 writing-plans（legal from codex）→ pass（不再卡 brainstorming）
+- mini-state isolation（R1 F3）：session A 和 session B 独立 state file
+- mini-state 原子 write 测试（kill -9 mid-write → 原文件不损坏）
 
 ### 5.2 集成测试
 
@@ -504,6 +545,14 @@ hardening-5 数据：spec 尝试 1（full G3）11 轮不收敛；尝试 2（5.1 
 | F1 unknown gate bypass | HIGH | v3 block mode fail-closed + `ALLOW_UNKNOWN_GATE=1` migration flag |
 | F2 exempt integrity blacklist 漏 | HIGH | v3 改 allowlist（严格白名单 + 无重定向 + 无复合命令）|
 | F3 mini-state 全局单文件 | MEDIUM | v3 按 `<wt-hash8>-<session8>.json` 隔离，原子 write |
+
+### A.9 Codex R2 3 findings 处理（2026-04-22）
+
+| Finding | 严重 | 处理（v4） |
+|---|---|---|
+| F1 L5 接受错的证据（needs-attention 通过 / 无关 ledger entry 通过）| HIGH | 精化 exempt_rule：A 路径必须 ledger key 匹配 target + `attest_time_utc` 非空；B 路径必须 override-log 匹配 target；C 路径解析 codex-attest stdout，`Verdict: approve` 才 pass；needs-attention BLOCK |
+| F2 read-only allowlist 仍可 find -delete / git diff --output / git log \| tee | HIGH | Bash 几乎全禁；仅允许 `pwd/true/false/echo literal/ls/cat/head/tail/wc` 严格模式；禁管道/重定向/复合；复杂查询用 Read/Grep/Glob tool |
+| F3 codex stage 不更新 mini-state | MEDIUM | L5 pass 后**也进 L4** 检查 legal_next_set + atomic update last_stage 为 "codex:adversarial-review" |
 
 ### A.8 User 2026-04-22 新增要求：codex:adversarial-review 纳入 first-class
 
