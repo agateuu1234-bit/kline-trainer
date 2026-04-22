@@ -34,8 +34,8 @@
 | 文件 | 动作 | 所有 Task | 预估行 |
 |---|---|---|---|
 | `.claude/config/skill-invoke-enforced.json` | 新增 | Task 1 | ~120 JSON |
-| `.claude/state/skill-stage/.gitkeep` | 新增（空目录占位）| Task 2 | 0 |
-| `.claude/state/skill-invoke-drift.jsonl` | 新增（空）| Task 2 | 0 |
+| ~~`.claude/state/skill-stage/.gitkeep`~~ | runtime 创建（gitignored）| Task 2 验证 gitignore | 0（不 commit）|
+| ~~`.claude/state/skill-invoke-drift.jsonl`~~ | runtime 创建（gitignored）| Task 2 验证 gitignore | 0（不 commit）|
 | `.claude/hooks/stop-response-check.sh` | 升级 | Task 3 | +90 |
 | `tests/hooks/test_stop_response_check.py` | 扩充 | Task 4 | +150 |
 | `.claude/hooks/skill-invoke-check.sh` | 新增 | Task 5 | ~280 |
@@ -229,35 +229,27 @@ git commit -m "hardening-6 Task 1: skill-invoke-enforced.json 13-skill config + 
 
 ---
 
-## Task 2: State infrastructure
+## Task 2: State infrastructure（v10 R9 F3 fix：runtime 创建，不 commit）
 
 **Files:**
-- Create: `.claude/state/skill-stage/.gitkeep`
-- Create: `.claude/state/skill-invoke-drift.jsonl`
+- None commited. Hook runtime 自动创建 `.claude/state/skill-stage/` 目录和 `.claude/state/skill-invoke-drift.jsonl` 文件（每次 append 之前 `mkdir -p` + `touch` 隐式）。
 
-- [ ] **Step 1: 建目录 + 空文件**
+**背景**：`.gitignore` 规则已忽略 `.claude/state/*`（运行时 telemetry 不该进 git）。若强行 `git add -f` 会违背设计。hook 代码在 Task 5 已含 `mkdir -p "$STATE_DIR"` 和 Python open('a') 隐式创建文件。
+
+- [ ] **Step 1: 验证 .gitignore 规则**
 
 ```bash
-mkdir -p .claude/state/skill-stage
-touch .claude/state/skill-stage/.gitkeep
-touch .claude/state/skill-invoke-drift.jsonl
+git check-ignore -q .claude/state/skill-stage/foo.json && echo "OK: gitignore 覆盖 state 目录"
+git check-ignore -q .claude/state/skill-invoke-drift.jsonl && echo "OK: gitignore 覆盖 drift log"
 ```
 
-- [ ] **Step 2: 验证**
+Expected: 2 行 OK（确认 hook 运行时创建的文件不会被 git track）
+
+- [ ] **Step 2: 无需 commit**
 
 ```bash
-test -d .claude/state/skill-stage && echo "OK dir"
-test -e .claude/state/skill-stage/.gitkeep && echo "OK gitkeep"
-test -e .claude/state/skill-invoke-drift.jsonl && echo "OK drift log"
-```
-
-Expected: 3 行 OK
-
-- [ ] **Step 3: commit**
-
-```bash
-git add .claude/state/skill-stage/.gitkeep .claude/state/skill-invoke-drift.jsonl
-git commit -m "hardening-6 Task 2: state infra (skill-stage dir + drift jsonl)"
+# 本 task 不 commit 任何文件；仅确认 .gitignore 行为正确
+echo "Task 2: no commit (runtime artifacts)"
 ```
 
 ---
@@ -351,7 +343,7 @@ if reason == 'read-only-query':
     safe_bash = re.compile(
         r'^(pwd|true|false)$'
         r'|^echo +["\'][^"\'|<>;&`$()]*["\']$'
-        r'|^(ls|cat|head|tail|wc) +[^|<>;&`$(){}]+$'
+        r'|^(ls|cat|head|tail|wc) +[^|<>;&`$(){}\-]+$'  # no -flag to avoid --delete/--output
     )
     for tu in last_tool_uses:
         name = tu.get('name', '')
@@ -377,7 +369,7 @@ elif reason == 'behavior-neutral':
     safe_bash = re.compile(
         r'^(pwd|true|false)$'
         r'|^echo +["\'][^"\'|<>;&`$()]*["\']$'
-        r'|^(ls|cat|head|tail|wc|git +(status|diff|log)|grep|rg|find|jq) +[^|<>;&`$(){}]+$'
+        r'|^(ls|cat|head|tail|wc|grep|rg|jq) +[^|<>;&`$(){}\-]+$'  # no -flag to avoid --output/--delete
         r'|^(git +(status|log))$'
     )
     for tu in last_tool_uses:
@@ -417,7 +409,7 @@ elif reason == 'single-step-no-semantic-change':
     safe_bash_single = re.compile(
         r'^(pwd|true|false)$'
         r'|^echo +["\'][^"\'|<>;&`$()]*["\']$'
-        r'|^(ls|cat|head|tail|wc|git +(status|diff|log)|grep|rg|find|jq) +[^|<>;&`$(){}]+$'
+        r'|^(ls|cat|head|tail|wc|grep|rg|jq) +[^|<>;&`$(){}\-]+$'  # no -flag to avoid --output/--delete
     )
     for tu in last_tool_uses:
         name = tu.get('name', '')
@@ -985,7 +977,7 @@ if [ "$SKILL_NAME" = "codex:adversarial-review" ]; then
   if [ "$TARGET" = "_initial" ]; then
     EVIDENCE_PASS=1
   elif [ -f "$LEDGER" ]; then
-    ENTRY=$(jq -c --arg k "$TARGET" '.[$k] // empty' "$LEDGER" 2>/dev/null)
+    ENTRY=$(jq -c --arg k "$TARGET" '.entries[$k] // .[$k] // empty' "$LEDGER" 2>/dev/null)
     if [ -n "$ENTRY" ]; then
       ATTEST_TIME=$(echo "$ENTRY" | jq -r '.attest_time_utc // ""')
       VDIGEST=$(echo "$ENTRY" | jq -r '.verdict_digest // ""')
@@ -1702,8 +1694,12 @@ run() {
 # ---- Files 存在 + 可执行 ----
 run "file: config"   test -s .claude/config/skill-invoke-enforced.json
 run "file: new hook" test -x .claude/hooks/skill-invoke-check.sh
-run "file: drift log" test -e .claude/state/skill-invoke-drift.jsonl
-run "dir: skill-stage" test -d .claude/state/skill-stage
+# v10 R9 F3: state dir/drift log are runtime artifacts (ignored by git);
+# check .gitignore covers them instead of requiring file existence
+run "gitignore: state dir covered" \
+  bash -c "git check-ignore -q .claude/state/skill-stage/test.json || test -d .claude/state/skill-stage"
+run "gitignore: drift log covered" \
+  bash -c "git check-ignore -q .claude/state/skill-invoke-drift.jsonl || test -f .claude/state/skill-invoke-drift.jsonl"
 
 # ---- Config schema ----
 run "config: 14 skill"     bash -c "[ \"\$(jq '.enforce | length' .claude/config/skill-invoke-enforced.json)\" = '14' ]"
