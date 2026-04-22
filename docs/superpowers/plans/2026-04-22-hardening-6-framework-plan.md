@@ -1041,18 +1041,41 @@ if [ "$SKILL_NAME" = "codex:adversarial-review" ]; then
   TARGET=""
   case "$LAST_STAGE" in
     "superpowers:brainstorming"|"superpowers:writing-plans")
-      # v6 R5 F3 + v9 R8 F2 fix: accept relative+absolute paths normalized;
-      # use || true on all pipelines so empty result doesn't trigger pipefail ERR
-      # (fail-closed later by empty TARGET check, not by pipeline error)
-      CANDIDATES=$(echo "$TXT_AND_USES" | jq -r '
-        .tool_uses[]
-        | select(.name == "Write" or .name == "Edit" or .name == "NotebookEdit" or .name == "MultiEdit")
-        | .input.file_path // empty
-      ' 2>/dev/null | sed -E "s|^$PWD/||; s|^\./||" 2>/dev/null | { grep -E '^docs/superpowers/(specs|plans)/.+\.md$' || true; } | sort -u)
+      # v29 R29 F1 fix: resolve each Write/Edit path to absolute, require
+      # relative_to(repo_root) inside repo, THEN match docs/superpowers/(specs|plans)/.
+      # Defeats absolute out-of-repo paths like /tmp/docs/superpowers/specs/x.md
+      # that previously survived sed-based normalization and bound codex
+      # evidence to a file outside the repo.
+      CANDIDATES=$(echo "$TXT_AND_USES" | python3 - "$PWD" <<'PY' 2>/dev/null || true
+import json, sys, re
+from pathlib import Path
+pwd = Path(sys.argv[1]).resolve()
+spec_plan_re = re.compile(r'^docs/superpowers/(specs|plans)/.+\.md$')
+seen = set()
+try:
+    data = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+for tu in data.get('tool_uses', []):
+    if tu.get('name') not in ('Write', 'Edit', 'NotebookEdit', 'MultiEdit'):
+        continue
+    fp = tu.get('input', {}).get('file_path', '')
+    if not fp:
+        continue
+    try:
+        fp_abs = (pwd / fp).resolve() if not Path(fp).is_absolute() else Path(fp).resolve()
+        rel = fp_abs.relative_to(pwd)
+    except (ValueError, OSError):
+        continue
+    rel_str = str(rel).replace('\\', '/')
+    if spec_plan_re.match(rel_str) and rel_str not in seen:
+        seen.add(rel_str)
+        print(rel_str)
+PY
+)
       CAND_COUNT=$(echo "$CANDIDATES" | grep -cv '^$' 2>/dev/null || echo 0)
       if [ "$CAND_COUNT" = "1" ]; then
-        # Resolve relative: if absolute path, strip leading PWD + /
-        RECENT_FILE=$(echo "$CANDIDATES" | sed "s|^$PWD/||")
+        RECENT_FILE="$CANDIDATES"
         TARGET="file:$RECENT_FILE"
       elif [ "$CAND_COUNT" -gt 1 ]; then
         drift_log "codex_gate_ambiguous_target"
@@ -1296,23 +1319,33 @@ history.append({'stage': skill, 'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time
 
 # v18 R17 F3 fix: if brainstorming/writing-plans writes a spec/plan, record path+blob
 # so next codex run-only response can recover target from state
+# v29 R29 F1 fix: resolve path to absolute, require relative_to(repo_root) inside
+# repo before accepting. Previous lstrip('/') converted /tmp/docs/superpowers/...
+# → tmp/docs/superpowers/... which still contained docs/superpowers/ substring
+# in some regex variants, or more broadly bound state to out-of-repo files.
 if skill in ('superpowers:brainstorming', 'superpowers:writing-plans'):
     try:
         tu_data = json.loads(txt_uses_json)
         import re
-        spec_plan_re = re.compile(r'^(\./)?docs/superpowers/(specs|plans)/.+\.md$')
+        from pathlib import Path
+        pwd_real = Path(pwd).resolve()
+        spec_plan_re = re.compile(r'^docs/superpowers/(specs|plans)/.+\.md$')
         for tu in tu_data.get('tool_uses', []):
             if tu.get('name') in ('Write', 'Edit', 'MultiEdit', 'NotebookEdit'):
                 fp = tu.get('input', {}).get('file_path', '')
-                if fp.startswith(pwd + '/'):
-                    fp = fp[len(pwd)+1:]
-                elif fp.startswith('/'):
-                    fp = fp.lstrip('/')
-                if spec_plan_re.match(fp):
-                    recent_artifact = fp
+                if not fp:
+                    continue
+                try:
+                    fp_abs = (pwd_real / fp).resolve() if not Path(fp).is_absolute() else Path(fp).resolve()
+                    rel = fp_abs.relative_to(pwd_real)
+                except (ValueError, OSError):
+                    continue  # out-of-repo / unresolvable → skip
+                rel_str = str(rel).replace('\\', '/')
+                if spec_plan_re.match(rel_str):
+                    recent_artifact = rel_str
                     try:
                         recent_artifact_blob = subprocess.check_output(
-                            ['git', 'hash-object', fp], text=True, stderr=subprocess.DEVNULL
+                            ['git', 'hash-object', rel_str], text=True, stderr=subprocess.DEVNULL
                         ).strip()
                     except Exception:
                         recent_artifact_blob = ''
@@ -1870,6 +1903,106 @@ class TestStateIsolation:
             assert "session_id_absent_l4_fail_closed" in proc.stdout or "CLAUDE_SESSION_ID" in proc.stdout
         finally:
             _restore(mode_bak)
+
+
+class TestOutOfRepoPathRejection:
+    """v29 R29 F1: codex target derivation and recent_artifact recording MUST
+    reject absolute out-of-repo paths (Path.resolve + relative_to check).
+    Previously sed/lstrip('/') could normalize /tmp/docs/superpowers/specs/x.md
+    into a repo-relative-looking string and bind codex evidence to a file
+    outside the repo."""
+
+    OUT_OF_REPO_PATHS = [
+        "/tmp/docs/superpowers/specs/x.md",
+        "/docs/superpowers/specs/x.md",
+        "../outside/docs/superpowers/specs/x.md",
+    ]
+
+    def _deterministic_env(self):
+        return {
+            "CLAUDE_SESSION_ID": "01HQTESTAAAAAAAAAAAAAAAAAA",
+            "CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z",
+        }
+
+    def test_codex_target_rejects_out_of_repo_paths(self, tmp_path):
+        """codex:adversarial-review gate MUST NOT bind to absolute out-of-repo
+        spec/plan paths in the response tool_uses."""
+        import hashlib
+        state_dir = Path(".claude/state/skill-stage")
+        state_dir.mkdir(parents=True, exist_ok=True)
+        wt_h = hashlib.sha256(os.getcwd().encode()).hexdigest()[:8]
+        sid_h = hashlib.sha256(b"01HQTESTAAAAAAAAAAAAAAAAAA").hexdigest()[:8]
+        sf = state_dir / f"{wt_h}-{sid_h}.json"
+        sf.write_text(json.dumps({
+            "version": "1",
+            "last_stage": "superpowers:brainstorming",
+            "last_stage_time_utc": "2026-04-22T00:00:00Z",
+            "worktree_path": os.getcwd(),
+            "session_id": "01HQTESTAAAAAAAAAAAAAAAAAA",
+            "drift_count": 0,
+            "transition_history": [],
+        }))
+        mode_bak = _set_mode("codex:adversarial-review", "block")
+        try:
+            for bad_path in self.OUT_OF_REPO_PATHS:
+                tp = _write_transcript(
+                    tmp_path,
+                    "Skill gate: codex:adversarial-review\n\nx",
+                    tool_uses=[{"name": "Write", "input": {"file_path": bad_path, "content": "x"}}],
+                )
+                rc, stdout, _ = _run_hook(tp, env_extra=self._deterministic_env())
+                # Out-of-repo path must not produce a file: TARGET.
+                # Either blocks with no_target/stale or fails on evidence —
+                # in no case does it pass silently.
+                assert '"decision":"block"' in stdout.replace(" ", ""), \
+                    f"Out-of-repo path {bad_path!r} should not pass codex gate; stdout={stdout[:300]}"
+        finally:
+            _restore(mode_bak)
+            sf.unlink(missing_ok=True)
+
+    def test_recent_artifact_state_rejects_out_of_repo_paths(self, tmp_path):
+        """State recorded recent_artifact_path MUST NOT be set to an
+        out-of-repo absolute path even when brainstorming/writing-plans
+        response carries such a Write tool_use."""
+        import hashlib
+        state_dir = Path(".claude/state/skill-stage")
+        state_dir.mkdir(parents=True, exist_ok=True)
+        # Clean slate: remove existing state for this test's sid hash
+        wt_h = hashlib.sha256(os.getcwd().encode()).hexdigest()[:8]
+        sid_h = hashlib.sha256(b"01HQTESTAAAAAAAAAAAAAAAAAA").hexdigest()[:8]
+        sf = state_dir / f"{wt_h}-{sid_h}.json"
+        sf.unlink(missing_ok=True)
+        try:
+            # Stage brainstorming with an out-of-repo Write tool_use
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: superpowers:brainstorming\n\nx",
+                tool_uses=[
+                    {"name": "Skill", "input": {"skill": "superpowers:brainstorming"}},
+                    {"name": "Write", "input": {
+                        "file_path": "/tmp/docs/superpowers/specs/evil.md",
+                        "content": "hijack",
+                    }},
+                ],
+            )
+            _run_hook(tp, env_extra=self._deterministic_env())
+            assert sf.exists(), "brainstorming should create state file"
+            state = json.loads(sf.read_text())
+            recent = state.get("recent_artifact_path", "")
+            # Out-of-repo path MUST NOT be recorded
+            assert not recent.startswith("/"), \
+                f"recent_artifact_path should not be absolute: {recent!r}"
+            assert recent != "tmp/docs/superpowers/specs/evil.md", \
+                f"out-of-repo path leaked via lstrip: {recent!r}"
+            # Either empty or an actual in-repo docs/superpowers/... path
+            if recent:
+                assert recent.startswith("docs/superpowers/"), \
+                    f"recent_artifact_path must be in-repo docs/superpowers/: {recent!r}"
+                # And the corresponding file must actually exist in repo
+                assert Path(recent).exists(), \
+                    f"recent_artifact_path should point at a real in-repo file: {recent!r}"
+        finally:
+            sf.unlink(missing_ok=True)
 ```
 
 - [ ] **Step 2: 跑测试**
