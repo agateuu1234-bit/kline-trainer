@@ -110,6 +110,7 @@ Bump 策略**分两类**（spec v1.4 修订，L137-138）：
 - [ ] **`download_acceptance_journal` 表 migration**：spec L233-263 描述的 `0002_v1.3_journal/forward.sql` + `.../rollback.sql` 同上，由 Plan 2 B3 落地。
 - [ ] **`0003_v1.4_purge_leased` app.sqlite GRDB migration 注册**（spec L268-281）由 Plan 3 P4 落地。
 - [ ] **跨语言 `CONTRACT_VERSION` 常量同步 lint**：当 Plan 2 Python 常量 + Plan 3 Swift 常量都存在时，可在 PR CI 中加 string-equality lint；本 backlog 项延后到两侧都落地。
+- [ ] **Plan 1f acceptance 脚本 R7-hardening（accepted residual 2026-04-22，codex R7 finding）**：当前 `scripts/acceptance/plan_1f_m0_1_schema_versioning.sh` 的 CONTRACT_VERSION 矩阵 6 行断言已覆盖 dim + version cell（cell-boundary exact），但**未验证第 3 列的 bump-trigger 规则文本**；且 §Bump 策略 的 A/B 触发条件（DDL / OpenAPI / 跨系统 / 删 state / 改 raw value / 改恢复扫描集）以段落级断言覆盖，未逐 bullet 独立断言。codex R7 round 给出建议加强；评估后按 ε 方案接受为 residual（Plan 1f 已 7 轮 codex budget，继续 R8+ 边际收益递减）。**触发升级时机**：Plan 2 B3 首次真 migration PR 时借道扩 acceptance 断言至"行内 3 列全配" + "A/B bullet 独立断言"，同时可以利用真 migration 的具体字段做为断言 exemplar。
 
 ## 交叉引用
 
