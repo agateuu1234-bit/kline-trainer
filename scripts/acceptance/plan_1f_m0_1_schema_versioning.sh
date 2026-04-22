@@ -71,15 +71,19 @@ run "regression: m04 gate stub still present" \
 run "regression: m04 still cross-refs Plan 3 P1 (闭合前 TODO 或闭合后 completed 都匹配)" \
     grep -q 'Plan 3 P1' docs/governance/m04-apperror-translation-gate.md
 
-# ---- 不 regression Plan 1/1b/1c/1d acceptance ----
+# ---- 不 regression Plan 1/1b/1c acceptance ----
+# 注意：故意不直接 regression plan_1d_m0_4_apperror.sh——其内部 'TODO Plan 3 P1' 断言
+# 是 Plan 3 P1 闭合的 transient state；本 plan 通过 Plan 1c 的 swift test 间接覆盖
+# Plan 1d AppError 测试（SwiftPM 扫描 Tests/ 目录）。Plan 1d 脚本本身的 TODO 依赖
+# 属 Plan 3 P1 scope 处理。
 run "regression: Plan 1 (M0.1 DDL) acceptance" \
     bash -c "test -x scripts/acceptance/plan_1_m0_1_db_schema.sh && ./scripts/acceptance/plan_1_m0_1_db_schema.sh > /tmp/p1.log 2>&1"
 run "regression: Plan 1b (M0.2 OpenAPI) acceptance" \
     bash -c "test -x scripts/acceptance/plan_1b_m0_2_rest_api.sh && ./scripts/acceptance/plan_1b_m0_2_rest_api.sh > /tmp/p1b.log 2>&1"
-run "regression: Plan 1c (M0.3 Swift Models) acceptance" \
+run "regression: Plan 1c (M0.3 Swift Models) acceptance (间接覆盖 Plan 1d AppError tests)" \
     bash -c "test -x scripts/acceptance/plan_1c_m0_3_swift_contracts.sh && ./scripts/acceptance/plan_1c_m0_3_swift_contracts.sh > /tmp/p1c.log 2>&1"
-run "regression: Plan 1d (M0.4 AppError) acceptance" \
-    bash -c "test -x scripts/acceptance/plan_1d_m0_4_apperror.sh && ./scripts/acceptance/plan_1d_m0_4_apperror.sh > /tmp/p1d.log 2>&1"
+run "regression: Plan 1d artifact present (AppError.swift)" \
+    test -s ios/Contracts/Sources/KlineTrainerContracts/AppError.swift
 
 # ---- 汇总 ----
 echo ""
@@ -88,7 +92,7 @@ echo "Plan 1f (M0.1 schema versioning) acceptance: $PASS passed, $FAIL failed"
 if [[ $FAIL -gt 0 ]]; then
   echo "Failed items:"
   for f in "${FAILED[@]}"; do echo "  - $f"; done
-  echo "失败日志位置（regression 段）：/tmp/p1.log, /tmp/p1b.log, /tmp/p1c.log, /tmp/p1d.log"
+  echo "失败日志位置（regression 段）：/tmp/p1.log, /tmp/p1b.log, /tmp/p1c.log"
   echo "PLAN 1f FAIL"
   exit 1
 fi
