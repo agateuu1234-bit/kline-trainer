@@ -43,6 +43,7 @@
 | `.claude/settings.json` | 修改 | Task 7 | +4 |
 | `scripts/acceptance/hardening_6_framework.sh` | 新增 | Task 8 | ~90 |
 | `.claude/workflow-rules.json` | 修改 | Task 9 | 1 行 |
+| `.github/workflows/hardening_6_gate.yml` | 新增 | Task 8.75 | ~30 |
 
 ---
 
@@ -2001,6 +2002,63 @@ def test_codex_mode_ii_run_only_via_single_step_exempt(self, tmp_path):
 
 ---
 
+## Task 8.75: CI acceptance gate（v23 R22 F1 fix，Task 9 前置）
+
+**背景**：codex R22 指出 Task 9 flip 只靠 "ordering discipline"不可靠——若 Task 1-8 任一 commit 不完整就 flip，全局 block 会拦合法响应。需要 CI 作为 hard gate。
+
+**Files:**
+- Create: `.github/workflows/hardening_6_gate.yml`
+
+- [ ] **Step 1: 写 CI workflow**
+
+```yaml
+name: hardening-6 framework gate
+on:
+  pull_request:
+    paths:
+      - '.claude/hooks/stop-response-check.sh'
+      - '.claude/hooks/skill-invoke-check.sh'
+      - '.claude/config/skill-invoke-enforced.json'
+      - '.claude/settings.json'
+      - '.claude/workflow-rules.json'
+      - 'tests/hooks/test_stop_response_check.py'
+      - 'tests/hooks/test_skill_invoke_check.py'
+      - 'scripts/acceptance/hardening_6_framework.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq
+        run: sudo apt-get install -y jq
+      - name: Run hardening-6 acceptance
+        run: |
+          bash scripts/acceptance/hardening_6_framework.sh
+      - name: Verify enforcement_mode gate
+        # If enforcement_mode == "block" in this PR, ALL hooks + tests
+        # must have passed above. If not "block", this step no-ops.
+        run: |
+          mode=$(jq -r '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json)
+          if [ "$mode" = "block" ]; then
+            echo "enforcement_mode=block confirmed; acceptance gate must have passed"
+          else
+            echo "enforcement_mode=$mode (pre-flip or non-H6.0); acceptance gate not required"
+          fi
+```
+
+- [ ] **Step 2: commit**
+
+```bash
+git add .github/workflows/hardening_6_gate.yml
+git commit -m "hardening-6 Task 8.75: CI acceptance gate required before Task 9 flip"
+```
+
+---
+
 ## Task 9: Flip `workflow-rules.json` `enforcement_mode` → `block`（最后一个 commit）
 
 **Files:**
@@ -2027,13 +2085,23 @@ Expected：
 +    "enforcement_mode": "block",
 ```
 
-- [ ] **Step 3: 最终验收**
+- [ ] **Step 3: 最终本地验收 (pre-commit)**
 
 ```bash
 ./scripts/acceptance/hardening_6_framework.sh
 ```
 
 Expected: `HARDENING 6 PASS`
+
+- [ ] **Step 3.5: 确认 CI workflow 存在 (v23 R22 F1 gate)**
+
+```bash
+test -f .github/workflows/hardening_6_gate.yml && echo "OK: CI gate in place"
+```
+
+Expected: `OK: CI gate in place`（Task 8.75 已完成）
+
+CI 会在 PR 上自动跑 acceptance。本 commit merge 时，GitHub Actions required status check 必须 PASS 否则 merge 被阻。
 
 - [ ] **Step 4: commit（LAST COMMIT）**
 
