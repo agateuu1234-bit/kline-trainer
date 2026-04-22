@@ -365,7 +365,8 @@ def get_path(tu):
 
 if reason == 'read-only-query':
     # Strict allowlist: Read/Grep/Glob or specific safe Bash patterns
-    # Safe Bash: complete regex match; NO pipes, redirects, compound commands
+    # Safe Bash: complete regex match; NO pipes, redirects, compound commands, NO newlines/CR/tab (v17 R16 F1 fix)
+    CONTROL_CHARS_RE = re.compile(r'[\r\n\t\x00]')  # reject multi-line shell payloads
     safe_bash = re.compile(
         r'^(pwd|true|false)$'
         r'|^echo +["\'][^"\'|<>;&`$()]*["\']$'
@@ -377,11 +378,16 @@ if reason == 'read-only-query':
             continue
         if name == 'Bash':
             cmd = get_cmd(tu)
+            # v17 R16 F1 fix: reject control chars (newline/CR/tab/NUL) BEFORE allowlist
+            # Prevents 'ls .\nrm x' bypass where newline separates commands
+            if CONTROL_CHARS_RE.search(cmd):
+                print(f"BLOCK: exempt(read-only-query) Bash 含 newline/CR/tab/NUL 控制字符（多行 shell 命令）: {cmd[:80]!r}")
+                sys.exit(0)
             # Reject any pipe/redirect/compound regardless of prefix match
             if re.search(r'[|<>;&`$]', cmd) or '||' in cmd or '&&' in cmd:
                 print(f"BLOCK: exempt(read-only-query) Bash 含管道/重定向/复合命令: {cmd[:80]}")
                 sys.exit(0)
-            if not safe_bash.match(cmd):
+            if not safe_bash.fullmatch(cmd):  # v17: fullmatch not match (prevents prefix-only)
                 print(f"BLOCK: exempt(read-only-query) Bash 不在严格白名单: {cmd[:80]}")
                 sys.exit(0)
             continue
@@ -426,11 +432,15 @@ elif reason == 'behavior-neutral':
                 sys.exit(0)
         elif name == 'Bash':
             cmd = get_cmd(tu)
+            # v17 R16 F1 fix: reject control chars before allowlist
+            if CONTROL_CHARS_RE.search(cmd):
+                print(f"BLOCK: exempt(behavior-neutral) Bash 含 newline/CR/tab/NUL: {cmd[:80]!r}")
+                sys.exit(0)
             # Reject any side-effecting command
             if re.search(r'[|<>;&`$]', cmd) or '&&' in cmd or '||' in cmd:
                 print(f"BLOCK: exempt(behavior-neutral) Bash 含管道/重定向/复合命令: {cmd[:80]}")
                 sys.exit(0)
-            if not safe_bash.match(cmd):
+            if not safe_bash.fullmatch(cmd):  # v17: fullmatch
                 print(f"BLOCK: exempt(behavior-neutral) Bash 不在严格白名单（同 read-only 集）: {cmd[:80]}")
                 sys.exit(0)
         elif name in ('Read', 'Grep', 'Glob'):
@@ -456,10 +466,14 @@ elif reason == 'single-step-no-semantic-change':
             continue
         if name == 'Bash':
             cmd = get_cmd(tu)
+            # v17 R16 F1 fix: reject control chars before allowlist
+            if CONTROL_CHARS_RE.search(cmd):
+                print(f"BLOCK: exempt(single-step) Bash 含 newline/CR/tab/NUL: {cmd[:80]!r}")
+                sys.exit(0)
             if re.search(r'[|<>;&`$]', cmd) or '&&' in cmd or '||' in cmd:
                 print(f"BLOCK: exempt(single-step) Bash 含管道/重定向/复合命令: {cmd[:80]}")
                 sys.exit(0)
-            if not safe_bash_single.match(cmd):
+            if not safe_bash_single.fullmatch(cmd):  # v17: fullmatch
                 print(f"BLOCK: exempt(single-step) Bash 不在严格白名单: {cmd[:80]}")
                 sys.exit(0)
             continue
