@@ -64,10 +64,12 @@ run "cross-ref: spec L133-157" \
 run "cross-ref: m04 gate doc" grep -q 'm04-apperror-translation-gate' "$DOC"
 
 # ---- m04 gate stub 仍存在（不 regression Plan 1d hotfix）----
+# 注意：只断言 m04 doc 存在 + 仍 cross-ref Plan 3 P1；不断言 TODO 仍开
+# （Plan 3 P1 闭合时会删除 TODO 标记，本 plan 不该阻断 Plan 3 P1）
 run "regression: m04 gate stub still present" \
     test -s docs/governance/m04-apperror-translation-gate.md
-run "regression: m04 stub TODOs still open (Plan 3 P1 owns closure)" \
-    grep -q 'TODO Plan 3 P1' docs/governance/m04-apperror-translation-gate.md
+run "regression: m04 still cross-refs Plan 3 P1 (闭合前 TODO 或闭合后 completed 都匹配)" \
+    grep -q 'Plan 3 P1' docs/governance/m04-apperror-translation-gate.md
 
 # ---- 不 regression Plan 1/1b/1c/1d acceptance ----
 run "regression: Plan 1 (M0.1 DDL) acceptance" \
