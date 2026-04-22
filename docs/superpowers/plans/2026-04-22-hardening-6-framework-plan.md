@@ -1008,11 +1008,18 @@ export CONFIG_MODE
 WT_HASH8=$(printf '%s' "$PWD" | shasum -a 256 | awk '{print $1}' | cut -c1-8)
 # v27 R26 F1 fix: SHA256 hash of FULL CLAUDE_SESSION_ID (not :0:8 prefix which
 # is ULID timestamp data, collides across sessions in same time bucket).
-# Falls back to pid+time for no-session-id case; NEVER shared "noSessID" bucket.
+# v28 R27 F1 fix: in block mode, fail-closed when CLAUDE_SESSION_ID absent
+# (PPID+epoch fallback creates new state file per invocation → LAST_STAGE
+# resets to _initial → L4 mini-state silently bypassed). In observe mode,
+# retain pid+time fallback for drift telemetry continuity.
 if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
   SID_HASH=$(printf '%s' "$CLAUDE_SESSION_ID" | shasum -a 256 | awk '{print $1}' | cut -c1-8)
 else
-  # No session ID: use per-process unique fallback (ppid + epoch seconds)
+  if [ "$CONFIG_MODE" = "block" ]; then
+    drift_log "session_id_absent_l4_fail_closed" false null "_initial"
+    block "CLAUDE_SESSION_ID 不可读; block mode L4 fail-closed（PPID+time fallback 会每次重置 last_stage=_initial，等效绕过 mini-state）；export CLAUDE_SESSION_ID 或降级 observe mode"
+  fi
+  # observe mode only: per-process unique fallback (drift telemetry continuity)
   SID_HASH=$(printf 'noSess-%s-%s' "$PPID" "$(date +%s)" | shasum -a 256 | awk '{print $1}' | cut -c1-8)
 fi
 STATE_FILE="$STATE_DIR/${WT_HASH8}-${SID_HASH}.json"
@@ -1035,10 +1042,6 @@ if [ "$SKILL_NAME" = "codex:adversarial-review" ]; then
         | select(.name == "Write" or .name == "Edit" or .name == "NotebookEdit" or .name == "MultiEdit")
         | .input.file_path // empty
       ' 2>/dev/null | sed -E "s|^$PWD/||; s|^\./||" 2>/dev/null | { grep -E '^docs/superpowers/(specs|plans)/.+\.md$' || true; } | sort -u)
-      # Fall back to git log if response has no artifacts (e.g., codex run-only response)
-      if [ -z "$CANDIDATES" ]; then
-        CANDIDATES=$(git log -1 --name-only --pretty=format: 2>/dev/null | { grep -E '^docs/superpowers/(specs|plans)/' || true; } | sort -u)
-      fi
       CAND_COUNT=$(echo "$CANDIDATES" | grep -cv '^$' 2>/dev/null || echo 0)
       if [ "$CAND_COUNT" = "1" ]; then
         # Resolve relative: if absolute path, strip leading PWD + /
@@ -1049,8 +1052,15 @@ if [ "$SKILL_NAME" = "codex:adversarial-review" ]; then
         [ "$CONFIG_MODE" = "block" ] && block "codex:adversarial-review target 模糊（last_stage=$LAST_STAGE, 候选 $CAND_COUNT 个）；请响应内显式编辑/写入单一 spec/plan 文件，或设置 env TARGET"
         exit 0
       fi
-      # v18 R17 F3 HIGH + v26 R25 F1 fix: fallback to mini-state recorded artifact
-      # with blob consistency check (prevents stale approval covering changed file)
+      # v18 R17 F3 HIGH + v26 R25 F1 + v28 R27 F2 fix:
+      # When no explicit tool_use (e.g., codex run-only response), ONLY
+      # fall back to mini-state recorded artifact with blob consistency check.
+      # v28 R27 F2: REMOVED `git log -1 --name-only` fallback — that committed
+      # file's blob may not match CURRENT file blob if user has uncommitted
+      # edits; binding to committed blob silently approves stale content.
+      # mini-state records path+blob at brainstorming/writing-plans time and
+      # is compared to CURRENT git hash-object output, so blob mismatch →
+      # explicit refresh required.
       if [ "$CAND_COUNT" = "0" ] && [ -f "$STATE_FILE" ]; then
         RECENT_ART=$(jq -r '.recent_artifact_path // ""' "$STATE_FILE" 2>/dev/null)
         RECENT_BLOB=$(jq -r '.recent_artifact_blob // ""' "$STATE_FILE" 2>/dev/null)
@@ -1256,7 +1266,11 @@ fi
 
 # Atomic update last_stage
 mkdir -p "$STATE_DIR"
-TMP=$(mktemp)
+# v28 R27 F3 fix: mktemp inside $STATE_DIR guarantees same-filesystem rename
+# (default mktemp uses $TMPDIR or /tmp, which on Linux tmpfs is a different
+# filesystem → mv becomes copy+unlink, not atomic; concurrent reader can
+# observe partial write). Same-FS mv is rename(2) = atomic.
+TMP=$(mktemp "$STATE_DIR/.tmp.XXXXXX")
 python3 - "$STATE_FILE" "$TMP" "$SKILL_NAME" "$PWD" "${CLAUDE_SESSION_ID:-}" "$TXT_AND_USES" <<'PY'
 import json, sys, time, os, subprocess
 sf, tmp, skill, pwd, sid, txt_uses_json = sys.argv[1:7]
@@ -1809,6 +1823,29 @@ class TestStateIsolation:
         after = set(state_dir.glob("*.json"))
         new_files = after - before
         assert len(new_files) >= 2
+
+    def test_no_session_id_block_mode_fails_closed_v28(self, tmp_path):
+        """v28 R27 F1: non-codex skill invocation with no CLAUDE_SESSION_ID in
+        block mode MUST block (PPID+time fallback would reset last_stage=_initial,
+        silently bypassing L4 mini-state)."""
+        mode_bak = _set_mode("superpowers:brainstorming", "block")
+        env_no_sess = {k: v for k, v in os.environ.items()
+                       if k not in ("CLAUDE_SESSION_ID",)}
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: superpowers:brainstorming\n\nx",
+                tool_uses=[{"name": "Skill", "input": {"skill": "superpowers:brainstorming"}}],
+            )
+            proc = subprocess.run(
+                ["bash", HOOK],
+                input=json.dumps({"transcript_path": str(tp)}),
+                capture_output=True, text=True, timeout=15, env=env_no_sess,
+            )
+            assert '"decision":"block"' in proc.stdout.replace(" ", "")
+            assert "session_id_absent_l4_fail_closed" in proc.stdout or "CLAUDE_SESSION_ID" in proc.stdout
+        finally:
+            _restore(mode_bak)
 ```
 
 - [ ] **Step 2: 跑测试**
