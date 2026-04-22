@@ -271,6 +271,29 @@ git commit -m "hardening-6 Task 2: state infra (skill-stage dir + drift jsonl)"
 1. 读 `workflow-rules.json.skill_gate_policy.enforcement_mode`。若 = `block` 且 first-line 缺失/格式 invalid → block（既有行为在 H6.9 flip 后变 block）
 2. exempt 合理性 allowlist（L3）：read-only-query / behavior-neutral / single-step-no-semantic-change 下严格限制 tool_uses
 
+- [ ] **Step 0: 确认既有 first-line regex 覆盖所有合法 gate（v6 R6 prerequisite）**
+
+既有 `.claude/hooks/stop-response-check.sh` line 49 的 first-line regex 是：
+```bash
+'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\([a-z-]+\))'
+```
+
+此 regex **已经**接受所有 4 类合法 first-line：
+- `Skill gate: superpowers:<name>`（含 brainstorming / writing-plans 等 14 skill）
+- `Skill gate: codex:adversarial-review`
+- `Skill gate: frontend-design:<name>`
+- `Skill gate: exempt(<reason>)`
+
+**重要（v6 R6 HIGH finding fix）**：本 Task 的 Step 2 加 block 分支仅在**既有 drift-log 分支**内嵌入（既有逻辑：regex match fail → drift-log，加 block 变为 drift-log + exit 2）。**不改既有 regex**。因此 Task 9 flip 到 block 后，`Skill gate: superpowers:brainstorming` 仍走既有 match 路径 pass，不被误 block。Task 4 含 `test_valid_first_line_both_modes_pass` 已验证此场景。
+
+读 hook 确认：
+
+```bash
+grep -n "Skill gate:" .claude/hooks/stop-response-check.sh | head -3
+```
+
+Expected: 第 49 行输出含 `superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\(`
+
 - [ ] **Step 1: 加 Python exempt validator helper（R5 F1 fix：用 Python 而非 shell parsing 避免 IFS='|' bypass）**
 
 在 hook 开头（set -eo pipefail 之后）加 helper：
@@ -516,13 +539,30 @@ class TestL1BlockMode:
             _restore_enforcement_mode(bak)
 
     def test_valid_first_line_both_modes_pass(self, tmp_path):
+        """Verify all 4 gate forms pass Hook 1 in both modes (R6 F1 verification).
+        
+        After Task 9 flips enforcement_mode to block, ordinary skill-gated
+        responses must still pass through Hook 1 (既有 regex line 49 accepts
+        superpowers:/codex:/frontend-design:/exempt(...)).
+        """
+        gate_samples = [
+            "Skill gate: superpowers:brainstorming\n\nSome text",
+            "Skill gate: superpowers:writing-plans\n\ntext",
+            "Skill gate: superpowers:verification-before-completion\n\ntext",
+            "Skill gate: codex:adversarial-review\n\ntext",
+            "Skill gate: frontend-design:frontend-design\n\ntext",
+            "Skill gate: exempt(read-only-query)\n\ntext",
+            "Skill gate: exempt(behavior-neutral)\n\ntext",
+        ]
         for mode in ("drift-log", "block"):
             bak = _set_enforcement_mode(mode)
             try:
-                tp = _write_transcript(tmp_path, "Skill gate: superpowers:brainstorming\n\nSome text")
-                rc, stdout, stderr = _run_hook(tp)
-                assert rc == 0
-                assert '"decision":"block"' not in stdout
+                for gate in gate_samples:
+                    tp = _write_transcript(tmp_path, gate)
+                    rc, stdout, stderr = _run_hook(tp)
+                    assert rc == 0
+                    # Skill gate (non-exempt) or exempt passed whitelist → no block
+                    assert '"decision":"block"' not in stdout.replace(" ", ""), f"mode={mode} gate={gate[:60]} unexpectedly blocked"
             finally:
                 _restore_enforcement_mode(bak)
 
