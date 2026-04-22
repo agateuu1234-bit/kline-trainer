@@ -765,6 +765,37 @@ class TestL3ExemptIntegrityReadOnly:
         rc, stdout, _ = _run_hook(tp)
         assert '"decision":"block"' in stdout.replace(" ", "")
 
+    # v30 R30 F1 regression tests: spec §3.1 R2 F2 hardening — git fully blocked
+    # in read-only-query. Earlier spec diagram (pre-v30) listed git as legal,
+    # which contradicted the authoritative §3.1 policy. These tests lock the
+    # hardened policy so future spec drift can't silently relax it.
+    def test_read_only_with_git_status_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "git status"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_read_only_with_git_diff_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "git diff HEAD~1"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_read_only_with_git_log_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "git log --oneline"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
 
 class TestL3ExemptIntegrityBehaviorNeutral:
     def test_behavior_neutral_with_doc_edit_passes(self, tmp_path):
@@ -781,6 +812,52 @@ class TestL3ExemptIntegrityBehaviorNeutral:
             tmp_path,
             "Skill gate: exempt(behavior-neutral)\n\n",
             tool_uses=[{"name": "Bash", "input": {"command": "git commit -m 'x'"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    # v30 R30 F2 regression tests: spec §3.1 R11 F1 CRITICAL + R17 F1 CRITICAL
+    # hardening — ALL .claude/state/ writes are blocked in behavior-neutral
+    # (both .json like attest-ledger and .jsonl like override-log can forge
+    # L5 evidence). Earlier spec carveout ".claude/state/*.jsonl" is removed
+    # and these tests lock the hardened policy.
+    def test_behavior_neutral_with_claude_state_jsonl_blocks(self, tmp_path):
+        """R11 hardening: .claude/state/*.jsonl writes blocked — override-log
+        forgery path must stay closed."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Write", "input": {
+                "file_path": ".claude/state/attest-override-log.jsonl",
+                "content": "forged entry",
+            }}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_with_claude_state_json_blocks(self, tmp_path):
+        """R11 hardening: .claude/state/attest-ledger.json writes blocked."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Write", "input": {
+                "file_path": ".claude/state/attest-ledger.json",
+                "content": '{"entries":{}}',
+            }}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_with_drift_jsonl_blocks(self, tmp_path):
+        """R11 hardening: even seemingly-innocent drift-log writes are blocked —
+        drift log must be hook-written, never response-written."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Write", "input": {
+                "file_path": ".claude/state/skill-invoke-drift.jsonl",
+                "content": '{"fake":"entry"}',
+            }}],
         )
         rc, stdout, _ = _run_hook(tp)
         assert '"decision":"block"' in stdout.replace(" ", "")

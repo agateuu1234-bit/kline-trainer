@@ -67,18 +67,19 @@ Hook 1: stop-response-check.sh（升级版）
     │   ├─ 格式 invalid → BLOCK
     │   ├─ exempt(<reason>) 且 reason ∉ 白名单 → BLOCK
     │   ├─ exempt(<reason>) 且 reason ∈ 白名单
-    │   │   └─ L3 exempt-integrity check（allowlist 版）
+    │   │   └─ L3 exempt-integrity check（allowlist 版 — 权威策略见 §3.3）
     │   │       ├─ reason = "read-only-query"
-    │   │       │   └─ 响应 tool_uses 必须**全部**在 allowlist 内
-    │   │       │       allowlist = {Read, Grep} ∪ {Bash where command 匹配
-    │   │       │         `^(git status|git diff|git log|rg|grep|cat|ls|head|
-    │   │       │           tail|jq|wc|find|basename|dirname|pwd|test|stat)
-    │   │       │           (\s|$)` 且 **无**写类重定向 `>`（管道 `|` 和读类 
-    │   │       │           `<` 允许）且 **无** `;` `&&` `||` 复合命令（安全起见）}
-    │   │       │       任一 tool_use 超 allowlist → BLOCK
+    │   │       │   └─ 响应 tool_uses 必须**全部**在严格白名单内：
+    │   │       │       {Read, Grep, Glob} ∪ {Bash 严格完整命令正则：
+    │   │       │         `pwd|true|false|echo "<literal>"|ls|cat|head|tail|wc`（单参数）}
+    │   │       │       **R2 F2 hardening**：`git`/`find`/`sed`/`tee`/管道/重定向/复合
+    │   │       │       一律拒绝（否则 find -delete / git log | tee 等 bypass）
+    │   │       │       任一 tool_use 超白名单 → BLOCK
     │   │       ├─ reason = "behavior-neutral"
-    │   │       │   └─ 响应不得含 git commit/push/tag、gh pr create/merge、
-    │   │       │       Skill-invoked-producing-artifacts 操作 → 否则 BLOCK
+    │   │       │   └─ 响应 Write/Edit 只允许 `docs/**/*.md`（repo-containment 检查后）；
+    │   │       │       `.claude/state/**` 全部拒（**R11 F1 CRITICAL + R17 F1 CRITICAL
+    │   │       │       hardening**：attest-ledger.json / override-log.jsonl forgery 路径）；
+    │   │       │       Bash 同 read-only 严格白名单 + 额外禁 commit/push/tag/PR → 否则 BLOCK
     │   │       ├─ reason = "user-explicit-skip" → pass（信任用户）
     │   │       ├─ reason = "single-step-no-semantic-change" → 响应 tool_uses ≤ 2
     │   │       │   且不含 push/merge/PR → 否则 BLOCK
@@ -343,7 +344,7 @@ _initial → brainstorming (spec 起草)
 | exempt reason | 规则 |
 |---|---|
 | `read-only-query` | **v4 严格白名单**：tool_uses 必须全部是 **Read / Grep / Glob** 工具；**Bash 基本禁用**，仅允许 argv-parse 后匹配以下**严格完整命令模式**（正则必须完整匹配整个 command 字符串，**禁止管道/重定向/复合命令/任何 flag 不在白名单内**）：`^(pwd\|true\|false)$` 或 `^echo [^|<>;&$()\`'\"]*$`（echo literal 无变量/重定向） 或 `^(ls\|cat\|head\|tail\|wc)\s+[^|<>;&$(){}]+$`（单文件参数，无管道/重定向）。**明确禁**：`find` / `git diff` / `tee` / `sed` / 管道 `\|` / 重定向 `> < >>` / 复合 `;` `&&` `\|\|`。复杂查询应改用 Read/Grep/Glob tool 或选其他 exempt reason。v4 fix R2 F2：find -delete / git diff --output / git log \| tee 等 bypass 被关死 |
-| `behavior-neutral` | 禁 commit / push / tag / PR create-merge；允许 Edit/Write 到 `docs/**/*.md` 或 `.claude/state/*.jsonl`；其他写操作 → BLOCK |
+| `behavior-neutral` | 禁 commit / push / tag / PR create-merge；允许 Edit/Write 到 `docs/**/*.md`（排除 `docs/superpowers/**`，brainstorming/writing-plans 产出区；repo-containment 检查后）；**R11 F1 CRITICAL + R17 F1 CRITICAL hardening**：`.claude/state/**` 全部拒（含 attest-ledger.json 和 override-log.jsonl — L5 evidence forgery 路径）；其他写操作 → BLOCK |
 | `user-explicit-skip` | 信任用户（无 content check）但 drift-log 记录 |
 | `single-step-no-semantic-change` | tool_uses ≤ 2，且不含 push/merge/PR → 否则 BLOCK |
 
