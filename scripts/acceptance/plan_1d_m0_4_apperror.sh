@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Plan 1d 聚合验收：M0.4 AppError 契约
 # 涵盖：AppError.swift + AppErrorTests.swift 存在 + swift test exit 0 + 5 keywords
+# hotfix 2026-04-22: + gate stub 锚点（待 Plan 3 P1 闭合）
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -23,6 +24,10 @@ run() {
     FAILED+=("$label")
   fi
 }
+
+# ---- M0.4 翻译规则 gate stub 锚点 (hotfix 2026-04-22, E-mode) ----
+run "file: translation gate stub" test -s docs/governance/m04-apperror-translation-gate.md
+run "grep: stub Plan 3 P1 closure hook" grep -q 'TODO Plan 3 P1' docs/governance/m04-apperror-translation-gate.md
 
 # ---- 文件存在性 ----
 run "file: AppError.swift"        test -s ios/Contracts/Sources/KlineTrainerContracts/AppError.swift
