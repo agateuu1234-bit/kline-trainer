@@ -294,6 +294,15 @@ grep -n "Skill gate:" .claude/hooks/stop-response-check.sh | head -3
 
 Expected: 第 49 行输出含 `superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\(`
 
+**v7 R7 finding 澄清（false positive 驳回）**：正则字符集 `[a-z-]+` 含 `-`，完整 match `adversarial-review` 这种 hyphenated name。证明：
+
+```bash
+echo 'Skill gate: codex:adversarial-review' | grep -qE '^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\([a-z-]+\))'
+echo "exit=$?"  # Expected: exit=0 (match)
+```
+
+Codex R7 误读为"only one hyphen-free segment"；实则 `[a-z-]+` 正则类中的 `-` 在字符集末尾位置被 POSIX 视为字面 hyphen 字符，可匹配任意含 `-` 的 a-z 串。Task 4 含专门 TestCodexGateRegexExplicit 回归测试锁定此行为。
+
 - [ ] **Step 1: 加 Python exempt validator helper（R5 F1 fix：用 Python 而非 shell parsing 避免 IFS='|' bypass）**
 
 在 hook 开头（set -eo pipefail 之后）加 helper：
@@ -537,6 +546,42 @@ class TestL1BlockMode:
             assert '"decision"' not in stdout  # not block
         finally:
             _restore_enforcement_mode(bak)
+
+    def test_codex_adversarial_review_gate_regex_explicit(self, tmp_path):
+        """R7 F1 regression: prove regex [a-z-]+ accepts codex:adversarial-review.
+        
+        Codex R7 incorrectly inferred that codex:[a-z-]+ allows only single
+        hyphen-free segment. In POSIX character classes, the literal - can
+        be placed at end/start of class and matches any hyphen - so
+        [a-z-]+ matches adversarial-review (mix of a-z and -).
+        """
+        # Test the exact first-line string Task 1 requires
+        for mode in ("drift-log", "block"):
+            bak = _set_enforcement_mode(mode)
+            try:
+                tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nText")
+                rc, stdout, stderr = _run_hook(tp)
+                assert rc == 0
+                assert '"decision":"block"' not in stdout.replace(" ", ""), f"mode={mode} blocked 'codex:adversarial-review' - Hook 1 regex bug"
+                # No skill-gate-drift WARN either (means regex matched)
+                assert "skill-gate-drift" not in stderr, f"mode={mode} drift-logged 'codex:adversarial-review' - regex didn't match"
+            finally:
+                _restore_enforcement_mode(bak)
+
+        # Additional sanity: raw grep test of the regex
+        import subprocess as sp
+        for line in [
+            "Skill gate: codex:adversarial-review",
+            "Skill gate: superpowers:verification-before-completion",
+            "Skill gate: superpowers:requesting-code-review",
+            "Skill gate: superpowers:finishing-a-development-branch",
+        ]:
+            r = sp.run(
+                ["grep", "-qE",
+                 "^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\\([a-z-]+\\))"],
+                input=line, capture_output=True, text=True,
+            )
+            assert r.returncode == 0, f"regex rejected valid gate: {line}"
 
     def test_valid_first_line_both_modes_pass(self, tmp_path):
         """Verify all 4 gate forms pass Hook 1 in both modes (R6 F1 verification).
