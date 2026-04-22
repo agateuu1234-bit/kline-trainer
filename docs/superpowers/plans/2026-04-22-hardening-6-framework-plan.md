@@ -354,6 +354,23 @@ for e in entries[last_user_idx + 1:]:
                 if isinstance(c, dict) and c.get('type') == 'tool_use':
                     last_tool_uses.append(c)
 
+# v31 R31 F1 fix: extract last user message text for user-explicit-skip
+# verification (previously trust-without-evidence was the whole L1 bypass)
+last_user_text = ""
+if last_user_idx >= 0:
+    umsg = entries[last_user_idx].get('message', {})
+    ucontent = umsg.get('content', '')
+    if isinstance(ucontent, str):
+        last_user_text = ucontent
+    elif isinstance(ucontent, list):
+        parts = []
+        for c in ucontent:
+            if isinstance(c, dict) and c.get('type') == 'text':
+                parts.append(c.get('text', ''))
+            elif isinstance(c, str):
+                parts.append(c)
+        last_user_text = '\n'.join(parts)
+
 def get_cmd(tu):
     return tu.get('input', {}).get('command', '')
 
@@ -502,7 +519,29 @@ elif reason == 'single-step-no-semantic-change':
         print(f"BLOCK: exempt(single-step) 不允许工具 {name}")
         sys.exit(0)
 
-# user-explicit-skip: trust user, no content check
+# v31 R31 F1 fix: user-explicit-skip MUST carry an auditable current-turn
+# authorization. Previously "trust user, no content check" was an L1 bypass:
+# any response could declare exempt(user-explicit-skip) and skip L2/L4/L5.
+# v31 requires the MOST RECENT user message to contain one of the explicit
+# phrases (case-insensitive, Chinese or English). If missing, BLOCK so the
+# bypass can only be used by actual user instruction, not by Claude alone.
+elif reason == 'user-explicit-skip':
+    AUTH_PHRASES = [
+        r'skip\s*skill',          # en: "skip skill"
+        r'no\s*skill',            # en: "no skill"
+        r'without\s*skill',       # en: "without skill"
+        r'exempt.*skill',         # en: "exempt skill" / "use exempt"
+        r'bypass\s*skill',        # en: "bypass skill"
+        r'跳过\s*skill',          # zh: "跳过 skill"
+        r'不用\s*skill',          # zh: "不用 skill"
+        r'免\s*skill',            # zh: "免 skill"
+        r'/no-?skill',            # slash marker
+    ]
+    auth_re = re.compile('|'.join(AUTH_PHRASES), re.IGNORECASE)
+    if not auth_re.search(last_user_text):
+        print(f"BLOCK: exempt(user-explicit-skip) 需当前 user message 含显式授权短语（skip skill / 跳过skill / 不用skill / 免skill / /no-skill 等）")
+        sys.exit(0)
+    # Authorization found: pass; the hook's caller still drift-logs the skip
 
 print("OK")
 PY
@@ -598,15 +637,21 @@ def _run_hook(transcript_path):
     )
     return proc.returncode, proc.stdout, proc.stderr
 
-def _write_transcript(tmp_path, assistant_text, tool_uses=None):
-    """Write mock transcript JSONL with one assistant message."""
+def _write_transcript(tmp_path, assistant_text, tool_uses=None, user_text=None):
+    """Write mock transcript JSONL. Optionally includes a preceding user message
+    (needed for v31 R31 F1 user-explicit-skip tests which validate last-user-text)."""
+    lines = []
+    if user_text is not None:
+        user_entry = {"type": "user", "message": {"content": user_text}}
+        lines.append(json.dumps(user_entry))
     content = [{"type": "text", "text": assistant_text}]
     if tool_uses:
         for tu in tool_uses:
             content.append({"type": "tool_use", "name": tu["name"], "input": tu["input"]})
     entry = {"type": "assistant", "message": {"content": content}}
+    lines.append(json.dumps(entry))
     tp = tmp_path / "transcript.jsonl"
-    tp.write_text(json.dumps(entry) + "\n")
+    tp.write_text('\n'.join(lines) + '\n')
     return tp
 
 def _set_enforcement_mode(mode):
@@ -882,6 +927,65 @@ class TestL3ExemptIntegritySingleStep:
                 {"name": "Read", "input": {"file_path": "/a"}},
                 {"name": "Read", "input": {"file_path": "/b"}},
             ],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+
+class TestL3ExemptIntegrityUserExplicitSkip:
+    """v31 R31 F1 hardening: user-explicit-skip MUST carry auditable user
+    authorization in the current-turn user message. Previously it was
+    "trust user, no content check" which was an unrestricted L1 bypass —
+    any Claude response could self-declare this reason and skip all
+    L2/L4/L5 checks once block mode global."""
+
+    def test_user_explicit_skip_without_auth_phrase_blocks(self, tmp_path):
+        """No authorization phrase in user message → BLOCK."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(user-explicit-skip)\n\n",
+            user_text="修一下这个 bug",  # no skip authorization
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+        assert "user-explicit-skip" in stdout or "授权" in stdout
+
+    def test_user_explicit_skip_with_en_skip_skill_passes(self, tmp_path):
+        """'skip skill' in user message → pass."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(user-explicit-skip)\n\n",
+            user_text="just run ls, skip skill for this one",
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' not in stdout
+
+    def test_user_explicit_skip_with_zh_phrase_passes(self, tmp_path):
+        """中文 '跳过 skill' → pass."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(user-explicit-skip)\n\n",
+            user_text="直接跑 ls, 跳过 skill",
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' not in stdout
+
+    def test_user_explicit_skip_with_slash_marker_passes(self, tmp_path):
+        """'/no-skill' slash marker → pass."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(user-explicit-skip)\n\n",
+            user_text="/no-skill ls",
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' not in stdout
+
+    def test_user_explicit_skip_no_user_message_blocks(self, tmp_path):
+        """No user message at all → BLOCK (can't verify authorization)."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(user-explicit-skip)\n\n",
+            # user_text omitted → transcript has only assistant entry
         )
         rc, stdout, _ = _run_hook(tp)
         assert '"decision":"block"' in stdout.replace(" ", "")

@@ -80,7 +80,10 @@ Hook 1: stop-response-check.sh（升级版）
     │   │       │       `.claude/state/**` 全部拒（**R11 F1 CRITICAL + R17 F1 CRITICAL
     │   │       │       hardening**：attest-ledger.json / override-log.jsonl forgery 路径）；
     │   │       │       Bash 同 read-only 严格白名单 + 额外禁 commit/push/tag/PR → 否则 BLOCK
-    │   │       ├─ reason = "user-explicit-skip" → pass（信任用户）
+    │   │       ├─ reason = "user-explicit-skip"
+    │   │       │   └─ **R31 F1 hardening**：MUST 验证当前 turn user message 含授权短语
+    │   │       │       (skip skill / 跳过 skill / 不用 skill / 免 skill / /no-skill 等)
+    │   │       │       缺失 → BLOCK（否则 Claude 可单方面声明 exempt 绕过全部 L2/L4/L5）
     │   │       ├─ reason = "single-step-no-semantic-change" → 响应 tool_uses ≤ 2
     │   │       │   且不含 push/merge/PR → 否则 BLOCK
     │   │       └─ 未知 reason（已在上面白名单检查拒）→ 不会到此
@@ -345,7 +348,7 @@ _initial → brainstorming (spec 起草)
 |---|---|
 | `read-only-query` | **v4 严格白名单**：tool_uses 必须全部是 **Read / Grep / Glob** 工具；**Bash 基本禁用**，仅允许 argv-parse 后匹配以下**严格完整命令模式**（正则必须完整匹配整个 command 字符串，**禁止管道/重定向/复合命令/任何 flag 不在白名单内**）：`^(pwd\|true\|false)$` 或 `^echo [^|<>;&$()\`'\"]*$`（echo literal 无变量/重定向） 或 `^(ls\|cat\|head\|tail\|wc)\s+[^|<>;&$(){}]+$`（单文件参数，无管道/重定向）。**明确禁**：`find` / `git diff` / `tee` / `sed` / 管道 `\|` / 重定向 `> < >>` / 复合 `;` `&&` `\|\|`。复杂查询应改用 Read/Grep/Glob tool 或选其他 exempt reason。v4 fix R2 F2：find -delete / git diff --output / git log \| tee 等 bypass 被关死 |
 | `behavior-neutral` | 禁 commit / push / tag / PR create-merge；允许 Edit/Write 到 `docs/**/*.md`（排除 `docs/superpowers/**`，brainstorming/writing-plans 产出区；repo-containment 检查后）；**R11 F1 CRITICAL + R17 F1 CRITICAL hardening**：`.claude/state/**` 全部拒（含 attest-ledger.json 和 override-log.jsonl — L5 evidence forgery 路径）；其他写操作 → BLOCK |
-| `user-explicit-skip` | 信任用户（无 content check）但 drift-log 记录 |
+| `user-explicit-skip` | **R31 F1 hardening**：MUST 验证当前 turn user message 含授权短语：`skip skill` / `no skill` / `without skill` / `exempt .* skill` / `bypass skill` / `跳过 skill` / `不用 skill` / `免 skill` / `/no-skill`（case-insensitive）。缺失 → BLOCK（previously trust-without-evidence was L1 bypass — any response could self-declare exempt 绕过 L2/L4/L5 全部）。授权存在 → pass + drift-log 记录 |
 | `single-step-no-semantic-change` | tool_uses ≤ 2，且不含 push/merge/PR → 否则 BLOCK |
 
 **Block 时给用户清晰 stderr 提示**："read-only-query exempt 不允许 `<具体命令>`；如真是 read-only 用 Read 或 grep 级命令，否则选其他 exempt 或真正声明 skill"。
