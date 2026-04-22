@@ -1318,7 +1318,13 @@ class TestL5CodexGate:
         sf = self._setup_brainstorming_stage(spec)
         bak = _set_mode("codex:adversarial-review", "block")
         try:
-            tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nx")
+            # v5 R4 F1 fix: include Write tool_use pointing at spec so hook
+            # can derive target from response (not git log / empty fallback)
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: codex:adversarial-review\n\nx",
+                tool_uses=[{"name": "Write", "input": {"file_path": str(spec), "content": "updated"}}],
+            )
             rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
             assert '"decision":"block"' in stdout.replace(" ", "")
         finally:
@@ -1339,7 +1345,13 @@ class TestL5CodexGate:
         ledger_bak = self._write_ledger_entry(f"file:{spec}", blob)
         mode_bak = _set_mode("codex:adversarial-review", "block")
         try:
-            tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nx")
+            # v5 R4 F1 fix: include Write tool_use pointing at spec so hook
+            # can derive target from response (not git log / empty fallback)
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: codex:adversarial-review\n\nx",
+                tool_uses=[{"name": "Write", "input": {"file_path": str(spec), "content": "updated"}}],
+            )
             rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
             assert '"decision":"block"' not in stdout.replace(" ", "")
         finally:
@@ -1362,7 +1374,13 @@ class TestL5CodexGate:
         ledger_bak = self._write_ledger_entry(f"file:{spec}", old_blob)
         mode_bak = _set_mode("codex:adversarial-review", "block")
         try:
-            tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nx")
+            # v5 R4 F1 fix: include Write tool_use pointing at spec so hook
+            # can derive target from response (not git log / empty fallback)
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: codex:adversarial-review\n\nx",
+                tool_uses=[{"name": "Write", "input": {"file_path": str(spec), "content": "updated"}}],
+            )
             rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
             assert '"decision":"block"' in stdout.replace(" ", "")
         finally:
@@ -1384,7 +1402,13 @@ class TestL5CodexGate:
         ledger_bak = self._write_ledger_entry(f"file:{spec}", blob, attest_time="2026-04-21T00:00:00Z")
         mode_bak = _set_mode("codex:adversarial-review", "block")
         try:
-            tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nx")
+            # v5 R4 F1 fix: include Write tool_use pointing at spec so hook
+            # can derive target from response (not git log / empty fallback)
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: codex:adversarial-review\n\nx",
+                tool_uses=[{"name": "Write", "input": {"file_path": str(spec), "content": "updated"}}],
+            )
             rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
             assert '"decision":"block"' in stdout.replace(" ", "")
         finally:
@@ -1403,7 +1427,13 @@ class TestL5CodexGate:
         ledger_bak = self._write_ledger_entry("file:docs/superpowers/specs/UNRELATED.md", "dummyblob")
         mode_bak = _set_mode("codex:adversarial-review", "block")
         try:
-            tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nx")
+            # v5 R4 F1 fix: include Write tool_use pointing at spec so hook
+            # can derive target from response (not git log / empty fallback)
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: codex:adversarial-review\n\nx",
+                tool_uses=[{"name": "Write", "input": {"file_path": str(spec), "content": "updated"}}],
+            )
             rc, stdout, _ = _run_hook(tp, env_extra={"CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z"})
             assert '"decision":"block"' in stdout.replace(" ", "")
         finally:
@@ -1427,7 +1457,12 @@ class TestL5CodexGate:
         env_no_sess = {k: v for k, v in os.environ.items()
                        if k not in ("CLAUDE_SESSION_ID", "CLAUDE_SESSION_START_UTC")}
         try:
-            tp = _write_transcript(tmp_path, "Skill gate: codex:adversarial-review\n\nx")
+            # v5 R4 F1 fix: include Write tool_use so target derives from response
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: codex:adversarial-review\n\nx",
+                tool_uses=[{"name": "Write", "input": {"file_path": str(spec), "content": "x"}}],
+            )
             proc = subprocess.run(
                 ["bash", HOOK],
                 input=json.dumps({"transcript_path": str(tp)}),
