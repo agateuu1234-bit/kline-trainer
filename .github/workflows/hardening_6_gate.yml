@@ -1,0 +1,121 @@
+name: hardening-6 framework gate
+# v28 R28 F3 fix: REMOVED pull_request.paths filter. When this workflow is
+# required by branch protection, GitHub only creates status checks for PRs
+# matching paths; PRs that don't touch those paths would never report a
+# status → required check waits forever → branch protection deadlocks all
+# unrelated PRs. Fix: always run on every PR; the job itself short-circuits
+# (fast pass) when no relevant file changed.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need history to diff against origin/main
+      - name: Install jq
+        run: sudo apt-get install -y jq
+      # v41 R41 F3 fix: acceptance invokes pytest via scripts/acceptance/*.sh;
+      # without pytest installed on clean runners, CI would fail BEFORE
+      # exercising hardening checks → deadlock status.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # Install root dev deps if present (pytest + plugins), plus any
+          # backend-specific test deps the acceptance scripts may invoke.
+          for req in requirements-dev.txt backend/requirements-dev.txt backend/requirements.txt; do
+            [ -f "$req" ] && python -m pip install -r "$req"
+          done
+          # Ensure pytest is available even if no requirements files
+          python -m pip install pytest || true
+      # v28 R28 F3: determine whether any hardening-6-relevant file changed
+      - name: Detect relevant changes
+        id: changes
+        run: |
+          set -euo pipefail
+          git fetch origin main --depth=50
+          CHANGED=$(git diff --name-only origin/main...HEAD)
+          echo "$CHANGED" | tee /tmp/h6-changed.txt
+          if echo "$CHANGED" | grep -qE '^(\.claude/hooks/(stop-response-check|skill-invoke-check)\.sh|\.claude/config/skill-invoke-enforced\.json|\.claude/settings\.json|\.claude/workflow-rules\.json|tests/hooks/test_(stop_response_check|skill_invoke_check)\.py|scripts/acceptance/hardening_6_framework\.sh|\.github/workflows/hardening_6_gate\.yml)$'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Skip when nothing relevant changed
+        if: steps.changes.outputs.relevant == 'false'
+        run: echo "No hardening-6 framework files touched in this PR; acceptance skipped (status = success)."
+      - name: Run hardening-6 acceptance (mode auto-detected from PR state)
+        # v35 R35 F1 + v40 R40 F1 fix: call --final ONLY when this PR's HEAD
+        # has enforcement_mode=block (i.e., it IS the H6.0-flip PR).
+        # Framework PR (H6.0, drift-log) runs default mode → passes.
+        # Flip PR (H6.0-flip, block) runs --final → requires block.
+        # Prevents chicken-egg: framework PR's own CI can't fail by requiring
+        # a state the framework PR intentionally doesn't set (v39 R38 F2).
+        if: steps.changes.outputs.relevant == 'true'
+        run: |
+          set -euo pipefail
+          mode=$(jq -r '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json)
+          if [ "$mode" = "block" ]; then
+            echo "PR has enforcement_mode=block → running acceptance in --final mode."
+            bash scripts/acceptance/hardening_6_framework.sh --final
+          else
+            echo "PR has enforcement_mode=$mode → running acceptance in bootstrap mode."
+            bash scripts/acceptance/hardening_6_framework.sh
+          fi
+      # v24 R23 F1 + v37 R37 F1 fix: self-check branch protection includes
+      # this workflow as required status check. ADVISORY ONLY (not
+      # fail-blocking) because:
+      # - Repos may use rulesets (new API) instead of branch protection
+      # - GITHUB_TOKEN may lack repo admin read on /branches/*/protection
+      # - Protection may not yet be configured on bootstrap PR
+      # A hard fail here would deadlock EVERY PR (documentation-only included)
+      # the moment enforcement_mode=block is merged. Instead emit ::warning::
+      # + job summary; opt-in STRICT mode via H6_BRANCH_PROTECTION_STRICT=1
+      # env (only set after admin confirms protection configured).
+      - name: Verify branch protection requires this check (advisory)
+        if: github.event.pull_request.base.ref == 'main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          H6_BRANCH_PROTECTION_STRICT: ${{ vars.H6_BRANCH_PROTECTION_STRICT || '0' }}
+        run: |
+          set -u  # no -e: we tolerate missing/unreadable protection
+          mode=$(jq -r '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json)
+          echo "enforcement_mode=$mode"
+          if [ "$mode" != "block" ]; then
+            echo "Not block mode; skipping branch-protection advisory."
+            exit 0
+          fi
+          # Try branch protection API; tolerate 404 (no protection) and 403 (no read perm)
+          api_out=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>&1) || api_rc=$?
+          api_rc=${api_rc:-0}
+          if [ "$api_rc" != "0" ]; then
+            echo "::warning::branch-protection API unreadable (rc=$api_rc). Cannot verify required-context config."
+            echo "::warning::api response: $api_out"
+            if [ "$H6_BRANCH_PROTECTION_STRICT" = "1" ]; then
+              echo "::error::STRICT mode on (H6_BRANCH_PROTECTION_STRICT=1) and API unreadable → fail."
+              exit 1
+            fi
+            exit 0
+          fi
+          checks=$(echo "$api_out" | jq -r '.required_status_checks.contexts[]?' 2>/dev/null || echo "")
+          if echo "$checks" | grep -q 'hardening-6'; then
+            echo "Branch protection includes hardening-6 gate. ✓"
+          else
+            echo "::warning::enforcement_mode=block but branch protection doesn't list hardening-6 gate."
+            echo "::warning::Configure via: gh api -X PUT repos/${GITHUB_REPOSITORY}/branches/main/protection -f 'required_status_checks[contexts][]=hardening-6 framework gate / acceptance' ..."
+            if [ "$H6_BRANCH_PROTECTION_STRICT" = "1" ]; then
+              echo "::error::STRICT mode on and missing context → fail."
+              exit 1
+            fi
+          fi
