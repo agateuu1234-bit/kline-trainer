@@ -75,11 +75,12 @@ Bash (behavior-neutral + single-step branches):
    if parts[0] in ('ls', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
        # per-tool parse
    ```
-7. Per-tool parse rules:
-   - **`cat` / `head` / `tail` / `wc` / `ls`**: all non-flag args are paths; require ≥1 non-flag arg; each path → `_path_is_safe_for_read` (which rejects empty / root-equiv / sensitive / out-of-repo).
-   - **`grep` / `rg`**: ban any flag (`^-` arg) at this stage — the safe_bash regex already rejects them, but the arg-loop check is a second line of defense. Require exactly 2 positional args: pattern (arg[0], NOT path-checked) + path (arg[1], path-checked).
-   - **`jq`**: the first non-flag arg is the filter (NOT path-checked); subsequent non-flag args are paths (path-checked). Zero non-flag args → BLOCK.
-8. Note: `safe_bash` regex at line 153 / 208 already excludes `-` in arg chars, so flags are whitelist-blocked. The arg-loop rules above are defense-in-depth when future relaxation introduces flag support.
+7. **Universal flag-ban** (codex round-7 finding 1 uniformity fix): for ANY of the 8 whitelisted tools, if any arg in `parts[1:]` matches regex `^-` → `BLOCK: exempt(X) Bash {tool} 不允许任何 flag（避免 flag 吃 operand 导致 operand 误分类，如 head -n 1 .env / ls -I .env）`. Aligns arg-loop strictness with safe_bash regex's existing `-` exclusion; closes the same class as grep/rg flag-consumption.
+8. Per-tool operand rules (after flag-ban confirms no `-` args):
+   - **`cat` / `head` / `tail` / `wc` / `ls`**: all args are paths; require ≥1 arg; each path → `_path_is_safe_for_read` (rejects empty / root-equiv / sensitive / out-of-repo).
+   - **`grep` / `rg`**: require exactly 2 args: pattern (arg[0], NOT path-checked) + path (arg[1], path-checked).
+   - **`jq`**: require ≥1 arg; the first is the filter (NOT path-checked); subsequent args are paths (path-checked).
+9. Note: `safe_bash` regex at line 153 / 208 already excludes `-` in arg chars (whitelist-level flag-block). Step 7's arg-loop flag-ban is **defense-in-depth** — aligns the two layers so any future relaxation of safe_bash must also update step 7, and ensures the arg-loop never sees a flag to misclassify.
 
 **Tests** (`tests/hooks/test_stop_response_check.py`) — 18 new tests:
 
@@ -113,6 +114,11 @@ jq regression coverage (3):
 - `test_behavior_neutral_bash_ls_dotenv_blocks` — `Bash("ls .env")` → BLOCK (sensitive-name)
 - `test_single_step_bash_ls_safe_path_passes` — `Bash("ls docs/")` → PASS
 
+**Universal flag-ban on all Bash read tools** (3 — codex round-7 finding 1):
+- `test_behavior_neutral_bash_head_with_n_flag_blocks` — `Bash("head -n 1 .env")` → BLOCK (flag-ban; covers option-consuming attack on head)
+- `test_single_step_bash_ls_with_I_flag_blocks` — `Bash("ls -I .env")` → BLOCK
+- `test_behavior_neutral_bash_wc_with_l_flag_blocks` — `Bash("wc -l .env")` → BLOCK
+
 **Risk**: False positives for legitimate whole-repo read. Mitigation: exempt contexts are by design minimal; whole-repo reads should declare a real skill gate instead. Escape hatch exists.
 
 ---
@@ -133,7 +139,7 @@ H6.0.1b and H6.0.1c are separate PRs with their own specs, plans, and codex revi
 
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
-| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` | 所有测试 pass；新增 18 个 F1 测试 | 输出里 "passed" 数 ≥ 原有 + 18；failed = 0 |
+| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` | 所有测试 pass；新增 21 个 F1 测试 | 输出里 "passed" 数 ≥ 原有 + 21；failed = 0 |
 | A2 | 用户肉眼审 diff：`git diff origin/main -- .claude/hooks/ tests/hooks/` | 只改 `.claude/hooks/stop-response-check.sh` + `tests/hooks/test_stop_response_check.py` 两个文件；`.claude/hooks/skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 必须 0 改动 | diff 只覆盖 2 个文件 |
 | A3 | 用户读 spec 确认 scope | scope 只含 R53 F1；F2 / F3 明确标注归 H6.0.1c / H6.0.1b | 用户口头确认 |
 | A4 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main` | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |
