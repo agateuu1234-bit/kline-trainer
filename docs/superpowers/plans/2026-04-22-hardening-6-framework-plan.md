@@ -652,11 +652,16 @@ PY
   ENF_MODE=$(jq -r '.skill_gate_policy.enforcement_mode // "drift-log"' "$RULES" 2>/dev/null)
   if [ "$ENF_MODE" = "block" ]; then
     # Scan current turn ONLY for non-exempt skill gates (codex:*/superpowers:*/
-    # frontend-design:*). exempt(...) rescued gates are explicitly refused.
+    # v45 R45 F1 final: rescue ONLY non-exempt H6-scoped gates (superpowers:*
+    # or codex:*). frontend-design:* was still in rescue regex after v44 dropped
+    # it from the primary L1 regex — that left a bypass where earlier
+    # frontend-design gate rescued, final ungated, Hook 2 H6-only regex ignored
+    # the plugin gate, effectively passing without H6 enforcement. Drop
+    # frontend-design:* here too.
     CUR_TURN_GATE=$(python3 - "$tpath" <<'PY'
 import json, re, sys
-# v43 R43 F1: rescue ONLY non-exempt gates. exempt rescue would bypass L3.
-GATE_RE = re.compile(r'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+)')
+# v45 R45 F1: rescue ONLY H6 non-exempt gates. exempt/plugin rescue bypass L3/L2.
+GATE_RE = re.compile(r'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+)')
 entries = []
 try:
     for line in open(sys.argv[1]):
@@ -704,12 +709,33 @@ PY
 # L3 exempt integrity (v6 H6 R5 F1+F2 fix): delegate to Python validator
 # Avoids shell IFS='|' parsing that let 'cat x | tee y' bypass allowlist
 # Also handles Write/Edit path check for behavior-neutral
+# v45 R45 F2 fix: respect enforcement_mode. In drift-log mode, integrity
+# violations drift-log only (do not block). Task 9 flip activates block.
+# Previously unconditional `block` violated observe-only H6.0 rollout
+# boundary — H6.0 would start rejecting exempt responses before the
+# branch-protection checkpoint and before false-positive data collection.
 if echo "$first_line" | grep -qE '^Skill gate: exempt\('; then
   reason=$(echo "$first_line" | sed -E 's/^Skill gate: exempt\(([^)]+)\).*/\1/')
   # reason 已在 §2 被白名单过滤，这里只检 integrity
   result=$(validate_exempt_integrity "$tpath" "$reason")
   if [[ "$result" == BLOCK:* ]]; then
-    block "${result#BLOCK: }"
+    # v45 R45 F2: drift-log in observe; block only in enforcement=block
+    ENF_MODE_L3=$(jq -r '.skill_gate_policy.enforcement_mode // "drift-log"' .claude/workflow-rules.json 2>/dev/null)
+    DRIFT_LOG=".claude/state/skill-gate-drift.jsonl"
+    mkdir -p "$(dirname "$DRIFT_LOG")"
+    printf '{"time_utc":"%s","kind":"l3_integrity_violation","first_line":%s,"reason":%s,"block_message":%s,"enforcement_mode":"%s","blocked":%s}\n' \
+      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      "$(printf '%s' "$first_line" | jq -Rs .)" \
+      "$(printf '%s' "$reason" | jq -Rs .)" \
+      "$(printf '%s' "${result#BLOCK: }" | jq -Rs .)" \
+      "$ENF_MODE_L3" \
+      "$([ "$ENF_MODE_L3" = "block" ] && echo true || echo false)" \
+      >> "$DRIFT_LOG"
+    if [ "$ENF_MODE_L3" = "block" ]; then
+      block "${result#BLOCK: }"
+    fi
+    # drift-log mode: emit stderr warning but pass
+    echo "[l3-drift] ${result#BLOCK: } (enforcement_mode=$ENF_MODE_L3; not blocking)" >&2
   fi
 fi
 ```
@@ -1054,6 +1080,75 @@ class TestL3ExemptIntegrityReadOnly:
         finally:
             if created:
                 f.unlink(missing_ok=True)
+
+    # v45 R45 F1 regression: mode-i rescue MUST NOT rescue frontend-design
+    # (or other plugin gates outside H6 scope). Attack shape: earlier
+    # `Skill gate: frontend-design:web` + plugin tool_use + tool_result
+    # + ungated final. Without fix: L1 rescue accepts plugin gate, Hook 2
+    # H6-only regex skips plugin gate → effectively passes without H6
+    # state machine or codex evidence enforcement.
+    def test_block_mode_frontend_design_rescue_rejected_r45_f1(self, tmp_path):
+        """Earlier frontend-design gate + tool_result + ungated final MUST
+        BLOCK in block mode (rescue refuses non-H6-scoped gates)."""
+        bak = _set_enforcement_mode("block")
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Implementation done.",
+                user_text="add a form component",
+            )
+            lines = tp.read_text().splitlines()
+            gated = json.dumps({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "text", "text": "Skill gate: frontend-design:web\n\ndesigning"},
+                    {"type": "tool_use", "id": "tu_fd",
+                     "name": "Skill",
+                     "input": {"skill": "frontend-design:web"}},
+                ]},
+            })
+            tool_result = json.dumps({
+                "type": "user",
+                "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "tu_fd",
+                     "content": "design ok"},
+                ]},
+            })
+            new_lines = [lines[0], gated, tool_result, lines[1]]
+            tp.write_text('\n'.join(new_lines) + '\n')
+            rc, stdout, _ = _run_hook(tp)
+            assert '"decision":"block"' in stdout.replace(" ", ""), \
+                f"frontend-design rescue bypass must block; stdout={stdout[:400]}"
+        finally:
+            _restore_enforcement_mode(bak)
+
+    # v45 R45 F2 regression: L3 integrity violations MUST drift-log (not
+    # block) when enforcement_mode=drift-log. Block only activates after
+    # Task 9/H6.0-flip.
+    def test_l3_violation_drift_logs_in_observe_mode_r45_f2(self, tmp_path):
+        """drift-log mode + exempt(read-only-query) + disallowed Bash →
+        drift-log entry written, NO block decision."""
+        bak = _set_enforcement_mode("drift-log")
+        drift_log = Path(".claude/state/skill-gate-drift.jsonl")
+        drift_log.parent.mkdir(parents=True, exist_ok=True)
+        before_size = drift_log.stat().st_size if drift_log.exists() else 0
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: exempt(read-only-query)\n\n",
+                tool_uses=[{"name": "Bash", "input": {"command": "cat /etc/passwd"}}],
+            )
+            rc, stdout, _ = _run_hook(tp)
+            # observe mode: no block decision, but drift record appended
+            assert '"decision":"block"' not in stdout.replace(" ", ""), \
+                f"drift-log mode should NOT block L3 violations; stdout={stdout[:400]}"
+            # drift log should have new record with kind=l3_integrity_violation
+            if drift_log.exists():
+                tail = drift_log.read_text()[before_size:]
+                assert "l3_integrity_violation" in tail, \
+                    f"drift log should record L3 violation; new content={tail[:400]!r}"
+        finally:
+            _restore_enforcement_mode(bak)
 
     # v43 R43 F1 regression: mode-i rescue MUST NOT rescue exempt gates.
     # Attack shape: earlier assistant with `Skill gate: exempt(read-only-query)`
