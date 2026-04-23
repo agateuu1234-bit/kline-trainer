@@ -2,6 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ PR scope notice (v46 R46 F1 HIGH fix):** This document is a **plan**,
+> not a completed delivery. The H6.0 framework PR MUST include BOTH this
+> plan/spec AND the implementation artifacts listed in the File Structure
+> table (hooks, config, settings, tests, acceptance script, CI workflow).
+> A PR that contains ONLY this plan/spec file is NOT a valid H6.0 framework
+> delivery — the non-coder checklist (`scripts/acceptance/hardening_6_framework.sh`)
+> must pass against real files in the PR before any merge claim. Reviewers
+> (codex/human) seeing a docs-only branch should REJECT as "implementation
+> missing" regardless of plan content quality.
+
 **Goal (v39 R38 F2 + v40 R39 F1 scope correction):** 建 skill pipeline enforcement 框架 **骨架 + 全 observe** (ζ scope, 5 层)：新 `skill-invoke-check.sh` hook + 升级 `stop-response-check.sh` + `skill-invoke-enforced.json` config + per-worktree/session mini-state + drift log + CI workflow。**H6.0 只落 observe-mode 骨架**；`enforcement_mode` 全程保持 `drift-log`。**L1/L3 global hard-block 的 flip 不在本 PR** — 拆到后续单独 PR `H6.0-flip`，前置条件为 admin 手动确认 branch protection / rulesets 已配置 required status check。
 
 **Architecture:** 2 个 Stop hooks 串联（既有 stop-response-check.sh 升级 L1/L3 + 新 skill-invoke-check.sh 做 L2/L4/L5；所有 block 逻辑已就位，但当前 enforcement_mode=drift-log 时都走 drift-log 分支）；JSON config 驱动 14 个 skill 的 mode 和 legal_next_set；mini-state 按 worktree hash + session_id 隔离原子 write；codex gate 读 attest-ledger.json + attest-override-log.jsonl 做 target-bound + revision-bound 证据检查（不改既有 codex hook）。
@@ -2892,10 +2902,14 @@ run "unit: test_skill_invoke_check" \
   bash -o pipefail -c "pytest tests/hooks/test_skill_invoke_check.py -q > /tmp/pytest-invoke.log 2>&1; ec=\$?; tail -3 /tmp/pytest-invoke.log; exit \$ec"
 
 # ---- Regression ----
+# v46 R46 F2 fix: regression scripts must emit their exact success sentinel.
+# Previously only exit code was checked; a script that internally skipped
+# or caught failures while returning 0 would pass acceptance. Now we
+# require the sentinel line to appear in the captured log.
 run "regression: Plan 1 DDL" \
-  bash -c "./scripts/acceptance/plan_1_m0_1_db_schema.sh > /tmp/p1.log 2>&1"
+  bash -c "./scripts/acceptance/plan_1_m0_1_db_schema.sh > /tmp/p1.log 2>&1 && grep -Fxq 'PLAN 1 PASS' /tmp/p1.log"
 run "regression: Plan 1f schema versioning" \
-  bash -c "./scripts/acceptance/plan_1f_m0_1_schema_versioning.sh > /tmp/p1f.log 2>&1"
+  bash -c "./scripts/acceptance/plan_1f_m0_1_schema_versioning.sh > /tmp/p1f.log 2>&1 && grep -Fxq 'PLAN 1f PASS' /tmp/p1f.log"
 
 echo ""; echo "============================================"
 echo "Hardening-6 framework acceptance: $PASS passed, $FAIL failed"
