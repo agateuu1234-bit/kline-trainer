@@ -105,7 +105,7 @@ Bash (behavior-neutral + single-step branches):
 
 12. **Path-operand glob-metachar defense is pre-existing, not a new rule** (codex Gate-4 round-5 clarification): for **path** operands (e.g. `cat docs/*`, `ls docs/*.md`, `wc docs/[ab].txt`), `_path_is_safe_for_read` already rejects glob metacharacters at line 96-97 via `if any(c in s for c in '*?[]{}'): return f"BLOCK: {exempt_label} 路径含 glob: {s}"`. This H6.0.1 PR does NOT change that rule — the fix inherits it for all newly-routed Bash path operands (cat/head/tail/wc/ls full args + grep/rg arg[1] + jq arg[1:]). Defense-in-depth tests added to prove the combined flow (Bash arg-loop → `_path_is_safe_for_read`) blocks shell-expanded path operands end-to-end.
 
-**Tests** (`tests/hooks/test_stop_response_check.py`) — 32 new tests (one authoritative inventory; numbers below must match plan A1/A4 exactly):
+**Tests** (`tests/hooks/test_stop_response_check.py`) — 34 new tests (one authoritative inventory; numbers below must match plan A1/A4 exactly):
 
 Tool-native Grep (4; Gate-4 round-4 finding: patterns use non-sensitive `TODO` so tests validate the "path required" rule rather than incidentally matching sensitive-name fallback; behavior-neutral no-path case added):
 - `test_read_only_grep_without_path_blocks` — `Grep(pattern="TODO")` no path → BLOCK
@@ -118,10 +118,11 @@ Tool-native Glob unconditional block (3 — codex rounds 8+10 root-cause fix):
 - `test_behavior_neutral_glob_always_blocks` — same → BLOCK
 - `test_single_step_glob_always_blocks` — same → BLOCK
 
-Bash grep/rg (3):
-- `test_behavior_neutral_bash_rg_without_path_blocks` — `Bash("rg secret")` → BLOCK
-- `test_behavior_neutral_bash_rg_with_path_passes` — `Bash("rg secret docs/")` → PASS
-- `test_single_step_bash_grep_recursive_no_path_blocks` — `Bash("grep -r TODO")` → BLOCK
+Bash grep/rg (4; Gate-4 round-9 finding: use non-sensitive pattern `TODO` and add single-step variant so tests validate Task 3's 2-arg rule, not incidental sensitive-name block):
+- `test_behavior_neutral_bash_rg_without_path_blocks` — `Bash("rg TODO")` → BLOCK
+- `test_single_step_bash_rg_without_path_blocks` — `Bash("rg TODO")` in single-step → BLOCK
+- `test_behavior_neutral_bash_rg_with_path_passes` — `Bash("rg TODO docs/")` → PASS
+- `test_single_step_bash_grep_recursive_no_path_blocks` — `Bash("grep -r TODO")` → BLOCK (flag-ban catches -r)
 
 Repo-root-equivalent rejection (3):
 - `test_read_only_grep_dot_path_blocks` — `Grep(pattern="secret", path=".")` → BLOCK
@@ -132,8 +133,9 @@ Flag-ban on grep/rg (2):
 - `test_behavior_neutral_bash_rg_with_flag_blocks` — `Bash("rg -g '*.md' secret docs/")` → BLOCK
 - `test_single_step_bash_grep_with_f_flag_blocks` — `Bash("grep -f patterns.txt secret docs/")` → BLOCK
 
-jq regression coverage (3):
-- `test_behavior_neutral_bash_jq_filter_only_blocks` — `Bash("jq .")` → BLOCK (no file)
+jq regression coverage (4; Gate-4 round-9: use non-root filter `.foo` + add single-step variant):
+- `test_behavior_neutral_bash_jq_filter_only_blocks` — `Bash("jq .foo")` → BLOCK (no file)
+- `test_single_step_bash_jq_filter_only_blocks` — `Bash("jq .foo")` in single-step → BLOCK
 - `test_behavior_neutral_bash_jq_filter_and_file_passes` — `Bash("jq . docs/foo.json")` → PASS
 - `test_behavior_neutral_bash_jq_filter_and_sensitive_file_blocks` — `Bash("jq . .env")` → BLOCK
 
@@ -186,10 +188,10 @@ The following 4 acceptance criteria are evaluated by the user at the final PR-me
 
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
-| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**) | 所有测试 pass；新增 32 个 F1 测试（4 Grep tool-native + 3 Glob-always-block + 3 Bash grep/rg + 3 repo-root-equivalent + 2 flag-ban grep/rg + 3 jq + 3 ls + 3 其他 flag-ban + 4 shell-glob-metachar-ban pattern/filter + 3 path-defense-in-depth + 1 static source assertion） | 输出里 "passed" 数 ≥ 原有 + 32；failed = 0 |
-| A2 | 用户肉眼审 diff：`git diff origin/main -- .claude/hooks/ tests/hooks/` (**after Gate 5 implementation**) | 只改 `.claude/hooks/stop-response-check.sh` + `tests/hooks/test_stop_response_check.py` 两个文件（外加本 spec 文档 `docs/superpowers/specs/2026-04-23-h6-0-1-hardening-design.md` 以及 Gate 3 产出的 plan 文档 `docs/superpowers/plans/2026-04-23-h6-0-1-hardening-plan.md`）；`.claude/hooks/skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 必须 0 改动 | diff 只覆盖 4 个文件（2 code + 2 doc） |
+| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**)。**注**: 具体命令和判定见 plan 的 Acceptance A1/A4/A4b，已 pin base SHA 到 893b83222435a0ea4d9ce4f30d077c4cd4480ed7。 | 所有测试 pass；新增 34 个 F1 测试（4 Grep tool-native + 3 Glob-always-block + 4 Bash grep/rg + 3 repo-root-equivalent + 2 flag-ban grep/rg + 4 jq + 3 ls + 3 其他 flag-ban + 4 shell-glob-metachar-ban pattern/filter + 3 path-defense-in-depth + 1 static source assertion） | 输出里 "passed" 数 ≥ 原有 + 34；failed = 0 |
+| A2 | 用户肉眼审 diff：`git diff 893b83222435a0ea4d9ce4f30d077c4cd4480ed7 -- .claude/hooks/ tests/hooks/` (**after Gate 5 implementation; pinned base SHA per Gate-4 round-8 finding**) | 只改 `.claude/hooks/stop-response-check.sh` + `tests/hooks/test_stop_response_check.py` 两个文件（外加本 spec 文档 `docs/superpowers/specs/2026-04-23-h6-0-1-hardening-design.md` 以及 Gate 3 产出的 plan 文档 `docs/superpowers/plans/2026-04-23-h6-0-1-hardening-plan.md`）；`.claude/hooks/skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 必须 0 改动 | diff 只覆盖 4 个文件（2 code + 2 doc） |
 | A3 | 用户读 spec 确认 scope | scope 只含 R53 F1；F2 / F3 明确标注归 H6.0.1c / H6.0.1b | 用户口头确认 |
-| A4 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main` (**Gate 6 codex review**) | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |
+| A4 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base 893b83222435a0ea4d9ce4f30d077c4cd4480ed7` (**Gate 6 codex review; pinned base SHA**) | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |
 
 **禁词**：此 checklist 不出现 "should work" / "looks good" / "probably fine"；所有判定有可观测命令。
 
