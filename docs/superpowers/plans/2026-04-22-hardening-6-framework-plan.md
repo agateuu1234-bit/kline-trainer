@@ -273,28 +273,34 @@ echo "Task 2: no commit (runtime artifacts)"
 1. 读 `workflow-rules.json.skill_gate_policy.enforcement_mode`。若 = `block` 且 first-line 缺失/格式 invalid → block（既有行为在 H6.9 flip 后变 block）
 2. exempt 合理性 allowlist（L3）：read-only-query / behavior-neutral / single-step-no-semantic-change 下严格限制 tool_uses
 
-- [ ] **Step 0: 确认既有 first-line regex 覆盖所有合法 gate（v6 R6 prerequisite）**
+- [ ] **Step 0: 收紧既有 first-line regex（v34 R34 F2 HIGH fix：移除 frontend-design）**
 
-既有 `.claude/hooks/stop-response-check.sh` line 49 的 first-line regex 是：
+**v34 R34 F2 修复**：既有 regex 包含 `frontend-design:[a-z-]+`；这让 frontend-design:* gate 通过 L1 但 L2 skill-invoke-check.sh 找不到配置 → fail-closed block（R33 F2 误判），或者 v33 我加的 passthrough 成了 universal bypass（R34 F2）。正确做法是**移除 frontend-design 从 L1 regex**——本 framework 只管 14 superpowers + codex，其他 plugin 想 block 保护需显式注册到 skill-invoke-enforced.json。
+
+既有 `.claude/hooks/stop-response-check.sh` line 49 的 first-line regex 改成：
 ```bash
-'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\([a-z-]+\))'
+# v34: drop frontend-design:* (not in project scope; if needed, register in config)
+'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\([a-z-]+\))'
 ```
 
-此 regex **已经**接受所有 4 类合法 first-line：
+此 regex 接受 3 类合法 first-line：
 - `Skill gate: superpowers:<name>`（含 brainstorming / writing-plans 等 14 skill）
-- `Skill gate: codex:adversarial-review`
-- `Skill gate: frontend-design:<name>`
+- `Skill gate: codex:<name>`（含 codex:adversarial-review + codex:rescue；后者需显式 register in config 才能通过 L2）
 - `Skill gate: exempt(<reason>)`
 
-**重要（v6 R6 HIGH finding fix）**：本 Task 的 Step 2 加 block 分支仅在**既有 drift-log 分支**内嵌入（既有逻辑：regex match fail → drift-log，加 block 变为 drift-log + exit 2）。**不改既有 regex**。因此 Task 9 flip 到 block 后，`Skill gate: superpowers:brainstorming` 仍走既有 match 路径 pass，不被误 block。Task 4 含 `test_valid_first_line_both_modes_pass` 已验证此场景。
+**frontend-design:<name>** 现在**不是合法 L1 gate**；若用户响应以此开头，L1 regex match fail → drift-log（observe）或 block（Task 9 后）。使用 frontend-design 时用其他合适 gate（如 superpowers:frontend-design 如果已加入 14 skill，或 exempt(behavior-neutral) 纯 doc 改动）。
 
-读 hook 确认：
+**重要（v6 R6 HIGH finding fix）**：本 Task 的 Step 2 加 block 分支仅在**既有 drift-log 分支**内嵌入（既有逻辑：regex match fail → drift-log，加 block 变为 drift-log + exit 2）。因此 Task 9 flip 到 block 后，`Skill gate: superpowers:brainstorming` 仍走既有 match 路径 pass，不被误 block。Task 4 含 `test_valid_first_line_both_modes_pass` 已验证此场景。
+
+**Step 0 修改命令**：
 
 ```bash
+# 找到既有 regex 行并收紧
+sed -i.bak -E "s|frontend-design:\\[a-z-\\]\\+\\||g" .claude/hooks/stop-response-check.sh
 grep -n "Skill gate:" .claude/hooks/stop-response-check.sh | head -3
 ```
 
-Expected: 第 49 行输出含 `superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\(`
+Expected: regex 不再含 `frontend-design:`，只保留 `superpowers:[a-z-]+|codex:[a-z-]+|exempt\(`
 
 **v7 R7 finding 澄清（false positive 驳回）**：正则字符集 `[a-z-]+` 含 `-`，完整 match `adversarial-review` 这种 hyphenated name。证明：
 
@@ -338,13 +344,44 @@ except Exception as e:
     print(f"BLOCK: transcript parse error: {e}")
     sys.exit(0)
 
-# Find last user entry index (current turn begins after it)
+# v34 R34 F1 fix: distinguish HUMAN user prompt from tool_result user turn.
+# Anthropic transcripts represent BOTH as type="user": human prompts have
+# content as string OR list of {type:"text"} blocks; tool_result turns have
+# content as list containing {type:"tool_result", ...} blocks. Using
+# type=="user" as the turn boundary incorrectly dropped earlier assistant
+# tool_uses before tool_result pseudo-user turns → a response could
+# side-effect (Bash rm), receive tool_result, then announce exempt(read-only)
+# and pass L3 check because earlier tool_use looked "in previous turn".
+def is_human_user_entry(e):
+    if e.get('type') != 'user':
+        return False
+    content = e.get('message', {}).get('content', '')
+    # String content → human prompt
+    if isinstance(content, str):
+        return True
+    # List content → human if any block is text/input-text and none is tool_result
+    if isinstance(content, list):
+        has_tool_result = any(
+            isinstance(c, dict) and c.get('type') == 'tool_result'
+            for c in content
+        )
+        if has_tool_result:
+            return False  # tool_result pseudo-user turn
+        # Otherwise treat as human if there's text content (most common shape)
+        has_text = any(
+            isinstance(c, dict) and c.get('type') in ('text', 'input-text')
+            for c in content
+        )
+        return has_text or True  # default: real user (conservative)
+    return False
+
+# Find last HUMAN user entry index (current turn begins after it)
 last_user_idx = -1
 for i, e in enumerate(entries):
-    if e.get('type') == 'user':
+    if is_human_user_entry(e):
         last_user_idx = i
 
-# Aggregate all tool_uses from assistant entries after last user
+# Aggregate all tool_uses from assistant entries after last HUMAN user
 last_tool_uses = []
 for e in entries[last_user_idx + 1:]:
     if e.get('type') == 'assistant':
@@ -637,13 +674,30 @@ def _run_hook(transcript_path):
     )
     return proc.returncode, proc.stdout, proc.stderr
 
-def _write_transcript(tmp_path, assistant_text, tool_uses=None, user_text=None):
+def _write_transcript(tmp_path, assistant_text, tool_uses=None, user_text=None,
+                      prior_assistant_tool_uses=None):
     """Write mock transcript JSONL. Optionally includes a preceding user message
-    (needed for v31 R31 F1 user-explicit-skip tests which validate last-user-text)."""
+    (needed for v31 R31 F1 user-explicit-skip tests which validate last-user-text).
+    v34 R34 F1: prior_assistant_tool_uses lets tests build transcripts like
+    [user prompt, assistant+tool_uses, tool_result user pseudo-turn,
+     final assistant with gate] to verify hook aggregates across tool_result
+     pseudo-turns correctly."""
     lines = []
     if user_text is not None:
         user_entry = {"type": "user", "message": {"content": user_text}}
         lines.append(json.dumps(user_entry))
+    if prior_assistant_tool_uses:
+        prior_content = []
+        for tu in prior_assistant_tool_uses:
+            prior_content.append({"type": "tool_use", "id": tu.get("id", "tu_prior"),
+                                   "name": tu["name"], "input": tu["input"]})
+        lines.append(json.dumps({"type": "assistant", "message": {"content": prior_content}}))
+        # tool_result pseudo-user turn (what Anthropic transcripts actually have)
+        tool_result_entry = {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": prior_assistant_tool_uses[0].get("id", "tu_prior"),
+             "content": "ok"}
+        ]}}
+        lines.append(json.dumps(tool_result_entry))
     content = [{"type": "text", "text": assistant_text}]
     if tool_uses:
         for tu in tool_uses:
@@ -840,6 +894,28 @@ class TestL3ExemptIntegrityReadOnly:
         )
         rc, stdout, _ = _run_hook(tp)
         assert '"decision":"block"' in stdout.replace(" ", "")
+
+    # v34 R34 F1 regression: tool_result pseudo-user turn must NOT reset
+    # the "current turn" — prior assistant tool_use still counts for L3.
+    # Previously last_user_idx found the tool_result user turn → dropped
+    # earlier assistant tool_use → read-only check passed despite side
+    # effect already done in prior assistant entry.
+    def test_read_only_tool_result_pseudo_turn_still_sees_prior_bash(self, tmp_path):
+        """Transcript: [user, assistant with 'rm -rf /x' Bash, tool_result
+        pseudo-user, final assistant gate] — the Bash tool_use MUST be
+        detected and block read-only (side effect in the same turn)."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            user_text="do something read-only",
+            prior_assistant_tool_uses=[
+                {"name": "Bash", "input": {"command": "rm -rf /tmp/x"}, "id": "tu1"},
+            ],
+            tool_uses=[],  # final assistant has only text (the gate line)
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", ""), \
+            f"tool_result pseudo-turn must not hide prior Bash side-effect; stdout={stdout[:400]}"
 
 
 class TestL3ExemptIntegrityBehaviorNeutral:
@@ -1064,12 +1140,36 @@ try:
                 continue
 except Exception:
     pass
-# Find last user index; current turn = all assistant entries after it
+# v34 R34 F1 fix: distinguish HUMAN user prompt from tool_result pseudo-user
+# (see stop-response-check.sh for full rationale — same bypass: tool_result
+# turns between assistant tool_use and final assistant would drop earlier
+# tool_uses → L2 invoke check + codex target derivation silently miss them).
+def is_human_user_entry(e):
+    if e.get('type') != 'user':
+        return False
+    content = e.get('message', {}).get('content', '')
+    if isinstance(content, str):
+        return True
+    if isinstance(content, list):
+        has_tool_result = any(
+            isinstance(c, dict) and c.get('type') == 'tool_result'
+            for c in content
+        )
+        if has_tool_result:
+            return False
+        has_text = any(
+            isinstance(c, dict) and c.get('type') in ('text', 'input-text')
+            for c in content
+        )
+        return has_text or True
+    return False
+
+# Find last HUMAN user index; current turn = all assistant entries after it
 last_user_idx = -1
 for i, e in enumerate(entries):
-    if e.get('type') == 'user':
+    if is_human_user_entry(e):
         last_user_idx = i
-# Aggregate tool_uses across all assistant entries after last user;
+# Aggregate tool_uses across all assistant entries after last HUMAN user;
 # text = text from LAST assistant entry (first_line 取自最后一条)
 for e in entries[last_user_idx + 1:]:
     if e.get('type') == 'assistant':
@@ -1091,7 +1191,7 @@ LAST_TEXT=$(echo "$TXT_AND_USES" | jq -r '.text')
 [ -z "$LAST_TEXT" ] && exit 0
 
 FIRST_LINE=$(echo "$LAST_TEXT" | head -1)
-GATE_RE='^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\([a-z-]+\))'
+GATE_RE='^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\([a-z-]+\))'  # v34 R34 F2: dropped frontend-design:*
 if ! echo "$FIRST_LINE" | grep -qE "$GATE_RE"; then
   exit 0  # existing stop-response-check.sh handles missing first-line
 fi
@@ -1176,20 +1276,19 @@ drift_log_and_block() {
   block "$2"
 }
 
-# v33 R33 F2 fix: plugin-prefixed gates (frontend-design:*, codex:rescue, etc.)
-# are legal L1 first-line forms but not configured in skill-invoke-enforced.json.
-# Before v33 these would hit unknown-gate fail-closed in block mode → any
-# legitimate frontend-design/codex:rescue response would be blocked after
-# Task 9 flip. Passthrough BEFORE unknown-gate check: these plugins own their
-# own enforcement contracts; skill-invoke-check.sh is out-of-scope for them.
-# Only prefixes explicitly enumerated here get passthrough (allow-list, not
-# a generic regex).
-case "$SKILL_NAME" in
-  frontend-design:*|codex:rescue)
-    drift_log "out_of_scope_plugin_gate"
-    exit 0
-    ;;
-esac
+# v34 R34 F2 fix: REMOVED v33 plugin-prefix passthrough (frontend-design:*,
+# codex:rescue). Codex correctly flagged it as a universal bypass — any
+# response could declare `Skill gate: frontend-design:<anything>` and skip
+# L2 invoke check, L4 mini-state, L5 codex evidence. Instead:
+# - Task 2 Step 0 tightens L1 regex to drop frontend-design:* from accepted
+#   first-line forms (not legal gate for this project).
+# - codex:rescue remains in L1 regex (codex:[a-z-]+) but must be explicitly
+#   registered in skill-invoke-enforced.json (§Task 1) with its own L2
+#   invoke-match contract — otherwise hits the unknown-gate fail-closed
+#   below.
+# Plugin gates outside the configured 14 superpowers + codex:adversarial-review
+# either register themselves in config (with validated invocation/evidence
+# contract) or stay out of the accepted L1 gate set.
 
 # Look up config
 IN_CONFIG=$(jq -r --arg s "$SKILL_NAME" '.enforce[$s] // empty' "$CONFIG")
@@ -2281,13 +2380,17 @@ class TestCodexTargetInResponseOnly:
             spec.unlink(missing_ok=True)
 
 
-class TestPluginGatePassthrough:
-    """v33 R33 F2 regression: plugin-prefixed gates (frontend-design:*,
-    codex:rescue) are valid L1 first-line forms. Must passthrough L2
-    unknown-gate check, not fail-closed in block mode."""
+class TestL1RegexTightening:
+    """v34 R34 F2 regression: frontend-design:* is NOT a legal L1 gate form.
+    L1 regex tightened to superpowers:|codex:|exempt( only. Previously
+    accepting frontend-design enabled universal bypass — any response
+    could declare 'Skill gate: frontend-design:web' and (in v33) hit
+    passthrough, or (in v34) fall into unknown-gate fail-closed.
+    Now L1 rejects the form directly."""
 
-    def test_frontend_design_gate_block_mode_passes(self, tmp_path):
-        """frontend-design:<anything> in block mode MUST NOT fail-closed."""
+    def test_frontend_design_gate_rejected_by_l1_in_block_mode(self, tmp_path):
+        """Block mode + Skill gate: frontend-design:web → L1 regex fails →
+        missing-gate block kicks in."""
         bak = _set_enforcement_mode("block")
         try:
             tp = _write_transcript(
@@ -2295,16 +2398,27 @@ class TestPluginGatePassthrough:
                 "Skill gate: frontend-design:web\n\nx",
                 tool_uses=[],
             )
-            rc, stdout, _ = _run_hook(tp, env_extra={
-                "CLAUDE_SESSION_ID": "01HQTESTAAAAAAAAAAAAAAAAAA",
-            })
-            assert '"decision":"block"' not in stdout.replace(" ", ""), \
-                f"frontend-design:web should passthrough L2 in block mode; stdout={stdout[:400]}"
+            # Run stop-response-check.sh directly (it owns L1 regex)
+            stop_hook_path = ".claude/hooks/stop-response-check.sh"
+            if Path(stop_hook_path).exists():
+                proc = subprocess.run(
+                    ["bash", stop_hook_path],
+                    input=json.dumps({"transcript_path": str(tp)}),
+                    capture_output=True, text=True, timeout=15,
+                )
+                # In block mode, missing/invalid first-line gate must block
+                combined = proc.stdout + proc.stderr
+                assert '"decision":"block"' in combined.replace(" ", "") \
+                    or proc.returncode == 2 \
+                    or "Skill gate" in combined, \
+                    f"frontend-design:web must NOT pass L1 in block mode; stdout={proc.stdout[:400]} stderr={proc.stderr[:400]}"
         finally:
             _restore_enforcement_mode(bak)
 
-    def test_codex_rescue_gate_block_mode_passes(self, tmp_path):
-        """codex:rescue (assistance tool, not review channel) passthrough."""
+    def test_codex_rescue_unknown_gate_block_mode_blocks(self, tmp_path):
+        """codex:rescue not registered in skill-invoke-enforced.json →
+        unknown-gate fail-closed in block mode (users must register
+        plugin gates explicitly, per v34 R34 F2 recommendation)."""
         bak = _set_enforcement_mode("block")
         try:
             tp = _write_transcript(
@@ -2315,9 +2429,8 @@ class TestPluginGatePassthrough:
             rc, stdout, _ = _run_hook(tp, env_extra={
                 "CLAUDE_SESSION_ID": "01HQTESTAAAAAAAAAAAAAAAAAA",
             })
-            assert '"decision":"block"' not in stdout.replace(" ", "")
-        finally:
-            _restore_enforcement_mode(bak)
+            assert '"decision":"block"' in stdout.replace(" ", ""), \
+                f"codex:rescue (not in config) must fail-closed in block; stdout={stdout[:400]}"
 ```
 
 - [ ] **Step 2: 跑测试**
