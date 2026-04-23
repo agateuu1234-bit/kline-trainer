@@ -87,6 +87,29 @@ if reason == 'read-only-query':
     for tu in last_tool_uses:
         name = tu.get('name', '')
         if name in ('Read', 'Grep', 'Glob'):
+            # v51 R51 F2: apply same repo-containment + sensitive-name check to
+            # Read/Grep/Glob path arguments. Stop hook fires AFTER the tool already
+            # read content; denying here is defense-in-depth (primary gate is
+            # settings.json allow/deny).
+            inp = tu.get('input', {})
+            # Read uses file_path; Grep uses path; Glob uses path. Pattern is optional.
+            tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
+            if tgt:
+                tgt = str(tgt)
+                if tgt.startswith('~') or tgt.startswith('-'):
+                    print(f"BLOCK: exempt(read-only-query) {name} 路径含 ~/flag: {tgt}"); sys.exit(0)
+                try:
+                    import os
+                    from pathlib import Path
+                    repo_root = Path(os.getcwd()).resolve()
+                    resolved = (repo_root / tgt).resolve() if not os.path.isabs(tgt) else Path(tgt).resolve()
+                    rel = resolved.relative_to(repo_root)
+                    rel_str = str(rel).replace(os.sep, '/')
+                    for component in rel_str.split('/'):
+                        if sensitive_name_re.search(component):
+                            print(f"BLOCK: exempt(read-only-query) {name} 路径含敏感名: {rel_str}"); sys.exit(0)
+                except (ValueError, OSError):
+                    print(f"BLOCK: exempt(read-only-query) {name} 路径 resolve 到仓库外或不可 resolve: {tgt}"); sys.exit(0)
             continue
         if name == 'Bash':
             cmd = get_cmd(tu)

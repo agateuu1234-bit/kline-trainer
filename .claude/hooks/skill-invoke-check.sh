@@ -83,8 +83,13 @@ for i, e in enumerate(entries):
 # gate-shaped first line. Fall back to last assistant text if none.
 import re
 GATE_RE = re.compile(r'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\([a-z-]+\))')  # v44 R44 F1 final: H6 scope only
-gated_text = ""
+# v51 R51 F1 fix: prefer FINAL assistant gate over earlier rescue, detect
+# multi-gate ambiguity. Track (gate_name, text) tuples for each assistant
+# that has a gate-shaped first line. If multiple DIFFERENT gate names
+# appear → ambiguous (block in block mode).
+gate_entries = []  # list of (gate_name, full_text) tuples in assistant order
 last_text_any = ""
+final_gated_text = ""  # text of the LAST assistant that has a gate
 for e in entries[last_user_idx + 1:]:
     if e.get('type') == 'assistant':
         content = e.get('message', {}).get('content', [])
@@ -98,15 +103,55 @@ for e in entries[last_user_idx + 1:]:
                         tool_uses.append({'name': c.get('name'), 'input': c.get('input', {})})
             if text_this_entry:
                 last_text_any = text_this_entry
-                # First gate-matching text wins
-                if not gated_text and GATE_RE.match(text_this_entry.splitlines()[0] if text_this_entry else ""):
-                    gated_text = text_this_entry
-text = gated_text or last_text_any
-print(json.dumps({'text': text, 'tool_uses': tool_uses}))
+                first_line_of_entry = text_this_entry.splitlines()[0] if text_this_entry else ""
+                m = GATE_RE.match(first_line_of_entry)
+                if m:
+                    gate_entries.append((m.group(1), text_this_entry))
+                    final_gated_text = text_this_entry
+
+# Ambiguity detection: multiple DIFFERENT gate names in one turn
+distinct_gates = {g for (g, _) in gate_entries}
+multi_gate_ambiguous = len(distinct_gates) > 1
+
+# Gate selection:
+# 1. Prefer final gate (if final assistant has one)
+# 2. Else rescue with first gate (mode-i: announce + run, final ungated)
+# 3. Else no gate (text = last_text_any, L1 in stop-response-check handles it)
+if GATE_RE.match((last_text_any.splitlines() or [''])[0]) and final_gated_text:
+    text = final_gated_text  # final has gate — use it
+elif gate_entries:
+    text = gate_entries[0][1]  # rescue: earlier gate, final ungated
+else:
+    text = last_text_any
+print(json.dumps({'text': text, 'tool_uses': tool_uses, 'multi_gate_ambiguous': multi_gate_ambiguous}))
 PY
 )
 LAST_TEXT=$(echo "$TXT_AND_USES" | jq -r '.text')
 [ -z "$LAST_TEXT" ] && exit 0
+
+# v51 R51 F1 fix: multi-gate ambiguity check
+MULTI_GATE=$(echo "$TXT_AND_USES" | jq -r '.multi_gate_ambiguous // false')
+if [ "$MULTI_GATE" = "true" ]; then
+  mkdir -p "$(dirname "$DRIFT_LOG")" 2>/dev/null || true
+  python3 - "$DRIFT_LOG" "${CLAUDE_SESSION_ID:-unknown}" <<'MGPY' 2>/dev/null || true
+import json, sys, time
+p, sid = sys.argv[1], sys.argv[2]
+entry = {
+    'time_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+    'session_id': sid,
+    'drift_kind': 'multi_gate_ambiguous_turn',
+    'gate_skill': 'AMBIGUOUS',
+    'blocked': True,
+}
+with open(p, 'a') as f:
+    f.write(json.dumps(entry) + '\n')
+MGPY
+  ENF_MODE_MG=$(jq -r '.skill_gate_policy.enforcement_mode // "drift-log"' "$RULES" 2>/dev/null || echo "drift-log")
+  if [ "$ENF_MODE_MG" = "block" ]; then
+    jq -nc --arg r "当前 turn 含多个不同 Skill gate — 歧义禁止；每个 turn 只能声明一个 gate" '{decision: "block", reason: $r}'
+    exit 0
+  fi
+fi
 
 FIRST_LINE=$(echo "$LAST_TEXT" | head -1)
 GATE_RE='^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\([a-z-]+\))'  # v44 R44 F1 final: H6 scope only

@@ -319,10 +319,11 @@ class TestL3ExemptIntegrityReadOnly:
         _restore_enforcement_mode(bak)
 
     def test_read_only_with_read_tool_passes(self, tmp_path):
+        # v51 R51 F2: Read path must be repo-relative (absolute /tmp path now blocked)
         tp = _write_transcript(
             tmp_path,
             "Skill gate: exempt(read-only-query)\n\nLooking at a file.",
-            tool_uses=[{"name": "Read", "input": {"file_path": "/tmp/foo.txt"}}],
+            tool_uses=[{"name": "Read", "input": {"file_path": "README.md"}}],
         )
         rc, stdout, _ = _run_hook(tp)
         assert '"decision":"block"' not in stdout
