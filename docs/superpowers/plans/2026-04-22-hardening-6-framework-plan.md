@@ -639,21 +639,23 @@ PY
 
 ```bash
   # L1 block mode (H6.9 flip): if enforcement_mode=block, hard block missing first-line
-  # v36 R36 F1 fix: mode-i codex flow (same-response announce + codex-attest Bash)
-  # leaves the FINAL assistant (after tool_result) WITHOUT the gate line. The
-  # existing drift-log inference already scans recent assistant messages for
-  # the last valid gate. If the inferred gate is from the SAME current turn
-  # (i.e., an earlier assistant before the tool_result), treat that as the
-  # effective first-line and pass (block would kill the documented flow).
+  # v36 R36 F1 + v43 R43 F1 fix: rescue mode-i codex flow ONLY.
+  # Real rescue scenario: final assistant (after tool_result) lacks gate
+  # because mode-i = same-response announce + codex-attest Bash. Rescue
+  # does NOT apply to exempt(...) gates — exempt responses do not need
+  # tool_use for exempt semantics, and allowing exempt rescue would let
+  # an earlier exempt gate pass L1 while L3 exempt validator skips
+  # (because it reads original ungated first_line) → bypass: exempt +
+  # disallowed Bash + tool_result + ungated final could run.
   RULES=".claude/workflow-rules.json"
   ENF_MODE=$(jq -r '.skill_gate_policy.enforcement_mode // "drift-log"' "$RULES" 2>/dev/null)
   if [ "$ENF_MODE" = "block" ]; then
-    # Check if inferred gate is from the CURRENT turn (last human user → end):
-    # python scan looks for a gate-matching line in any assistant entry after
-    # the last HUMAN user entry (excluding tool_result pseudo-turns).
+    # Scan current turn ONLY for non-exempt skill gates (codex:*/superpowers:*/
+    # frontend-design:*). exempt(...) rescued gates are explicitly refused.
     CUR_TURN_GATE=$(python3 - "$tpath" <<'PY'
 import json, re, sys
-GATE_RE = re.compile(r'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\([a-z-]+\))')
+# v43 R43 F1: rescue ONLY non-exempt gates. exempt rescue would bypass L3.
+GATE_RE = re.compile(r'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+)')
 entries = []
 try:
     for line in open(sys.argv[1]):
@@ -685,9 +687,11 @@ for e in entries[lui+1:]:
 PY
 )
     if [ -z "$CUR_TURN_GATE" ]; then
-      block "first-line Skill gate 缺失或格式无效（当前 turn 无任何 assistant 含合法 gate）；当前 first_line=\"$first_line\""
+      block "first-line Skill gate 缺失或格式无效（当前 turn 无任何 assistant 含合法非-exempt gate；exempt rescue 不允许）；当前 first_line=\"$first_line\""
     fi
-    # Current turn has a gate on an earlier assistant (mode-i pattern); pass
+    # Current turn has a non-exempt gate on an earlier assistant (mode-i
+    # pattern: codex:adversarial-review). Pass L1. L3 exempt integrity is
+    # NOT triggered here because rescued gate is non-exempt by construction.
   fi
 ```
 
@@ -1052,6 +1056,61 @@ class TestL3ExemptIntegrityReadOnly:
         finally:
             if created:
                 f.unlink(missing_ok=True)
+
+    # v43 R43 F1 regression: mode-i rescue MUST NOT rescue exempt gates.
+    # Attack shape: earlier assistant with `Skill gate: exempt(read-only-query)`
+    # + disallowed Bash (e.g., cat ~/.ssh/id_rsa), tool_result pseudo-user,
+    # final assistant ungated. Without this fix:
+    #   L1 rescue finds exempt earlier → passes L1
+    #   L3 reads ungated final first_line → no exempt reason → skips validator
+    #   → disallowed Bash bypasses L3 allowlist
+    def test_block_mode_exempt_rescue_rejected_r43_f1(self, tmp_path):
+        """Earlier exempt gate + disallowed Bash + tool_result + ungated final
+        MUST BLOCK (rescue refuses exempt gates)."""
+        bak = _set_enforcement_mode("block")
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                # final assistant text: no gate line
+                "This run is done.",
+                user_text="check things",
+                prior_assistant_tool_uses=[
+                    # First prior-assistant-in-turn has the exempt gate + Bash
+                    # (We encode the gate text via a hack: include a text
+                    # block via prior_assistant_tool_uses extension below)
+                ],
+            )
+            # Manually overwrite transcript to add the exempt gate + Bash in
+            # an earlier assistant entry, plus a tool_result pseudo-user,
+            # plus the ungated final assistant (already written above).
+            lines = tp.read_text().splitlines()
+            # Expected order from helper: [user, ?prior_assistant+tool_result, final assistant]
+            # Since prior_assistant_tool_uses=[] above, lines = [user, final_assistant].
+            # Insert gated assistant + tool_result BEFORE final assistant.
+            gated_assistant = json.dumps({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "text",
+                     "text": "Skill gate: exempt(read-only-query)\n\nrunning"},
+                    {"type": "tool_use", "id": "tu_bypass",
+                     "name": "Bash",
+                     "input": {"command": "cat /tmp/secret-evidence"}},
+                ]},
+            })
+            tool_result_pseudo = json.dumps({
+                "type": "user",
+                "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "tu_bypass",
+                     "content": "stolen secret contents"}
+                ]},
+            })
+            new_lines = [lines[0], gated_assistant, tool_result_pseudo, lines[1]]
+            tp.write_text('\n'.join(new_lines) + '\n')
+            rc, stdout, _ = _run_hook(tp)
+            assert '"decision":"block"' in stdout.replace(" ", ""), \
+                f"Exempt rescue bypass must block; stdout={stdout[:400]}"
+        finally:
+            _restore_enforcement_mode(bak)
 
     # v34 R34 F1 regression: tool_result pseudo-user turn must NOT reset
     # the "current turn" — prior assistant tool_use still counts for L3.
