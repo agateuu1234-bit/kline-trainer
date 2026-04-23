@@ -11,7 +11,7 @@ cat <<'EOF'
 [skill-router] Choose the correct skill before acting. Each row below maps ONE user-intent to ONE next skill. Pick the EARLIEST applicable row. Rows are ordered SPECIFIC-TO-GENERIC so domain/context matches win over generic defaults.
 
 # Domain/context-specific (highest priority)
-  • UI / frontend code                                 → frontend-design:frontend-design
+  • UI / frontend code                                 → superpowers:subagent-driven-development (then invoke frontend-design:frontend-design as Skill sub-tool)
   • Session start / cross-session resume               → superpowers:using-superpowers
   • Explicit review request on existing spec/plan/PR   → codex:adversarial-review
     (NARROW: only when user says "run codex review on X" — NOT for new governance work)

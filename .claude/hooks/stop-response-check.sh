@@ -1,9 +1,252 @@
 #!/usr/bin/env bash
 # stop-response-check.sh
-# Input: stdin JSON {"transcript_path": "/path/to/transcript.jsonl", ...}
-# Reads last assistant message from transcript; validates Skill gate first line + completion claims.
-# Output: Stop hook decision JSON {"decision":"block","reason":"..."} or exit 0 silent.
 set -eo pipefail
+
+# v49 R49 F1 HIGH fix: anchor to repo root so relative reads of
+# .claude/workflow-rules.json / .claude/state/... work when the hook is
+# launched from a subdirectory (via settings.json entry or CI).
+REPO_ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+cd "$REPO_ROOT" || true
+
+# helper: validate exempt integrity entirely in Python (avoid shell IFS parsing bypass)
+# Input: transcript path + exempt reason
+# Output: prints "OK" on pass; prints "BLOCK: <reason>" on fail. Exit 0 always.
+validate_exempt_integrity() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys, re
+
+tpath, reason = sys.argv[1], sys.argv[2]
+entries = []
+try:
+    with open(tpath) as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+                if d.get('type') in ('user', 'assistant'):
+                    entries.append(d)
+            except Exception:
+                continue
+except Exception as e:
+    print(f"BLOCK: transcript parse error: {e}")
+    sys.exit(0)
+
+def is_human_user_entry(e):
+    if e.get('type') != 'user':
+        return False
+    content = e.get('message', {}).get('content', '')
+    if isinstance(content, str):
+        return True
+    if isinstance(content, list):
+        if any(isinstance(c, dict) and c.get('type') == 'tool_result' for c in content):
+            return False
+        return True
+    return False
+
+last_user_idx = -1
+for i, e in enumerate(entries):
+    if is_human_user_entry(e):
+        last_user_idx = i
+
+last_tool_uses = []
+for e in entries[last_user_idx + 1:]:
+    if e.get('type') == 'assistant':
+        content = e.get('message', {}).get('content', [])
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get('type') == 'tool_use':
+                    last_tool_uses.append(c)
+
+last_user_text = ""
+if last_user_idx >= 0:
+    umsg = entries[last_user_idx].get('message', {})
+    ucontent = umsg.get('content', '')
+    if isinstance(ucontent, str):
+        last_user_text = ucontent
+    elif isinstance(ucontent, list):
+        parts = []
+        for c in ucontent:
+            if isinstance(c, dict) and c.get('type') == 'text':
+                parts.append(c.get('text', ''))
+            elif isinstance(c, str):
+                parts.append(c)
+        last_user_text = '\n'.join(parts)
+
+def get_cmd(tu): return tu.get('input', {}).get('command', '')
+def get_path(tu): return tu.get('input', {}).get('file_path', '')
+
+CONTROL_CHARS_RE = re.compile(r'[\r\n\t\x00]')
+
+import os, shlex
+from pathlib import Path
+
+_SENSITIVE_NAME_RE = re.compile(
+    r'(\.ssh|\.aws|\.gnupg|\.kube|credentials|secrets?|\.env(\..+)?|'
+    r'id_[rd]sa|\.pem|\.key|\.pgpass|\.netrc)$',
+    re.IGNORECASE,
+)
+
+def _path_is_safe_for_read(raw_path, exempt_label):
+    # Return None if safe; else a BLOCK message string.
+    # Applies: reject ~/- / glob / absolute-out-of-repo / sensitive-name.
+    if not raw_path:
+        return None  # empty path - not a file-read arg
+    s = str(raw_path)
+    if s.startswith('~') or s.startswith('-'):
+        return f"BLOCK: {exempt_label} 路径含 ~/flag: {s}"
+    if any(c in s for c in '*?[]{}'):
+        return f"BLOCK: {exempt_label} 路径含 glob: {s}"
+    try:
+        repo_root = Path(os.getcwd()).resolve()
+        resolved = (repo_root / s).resolve() if not os.path.isabs(s) else Path(s).resolve()
+        rel = resolved.relative_to(repo_root)
+    except (ValueError, OSError):
+        return f"BLOCK: {exempt_label} 路径 resolve 到仓库外或不可 resolve: {s}"
+    rel_str = str(rel).replace(os.sep, '/')
+    for component in rel_str.split('/'):
+        if _SENSITIVE_NAME_RE.search(component):
+            return f"BLOCK: {exempt_label} 路径含敏感名: {rel_str}"
+    return None
+
+if reason == 'read-only-query':
+    zero_path_re = re.compile(r'^(pwd|true|false)$|^echo +["\'][^"\'"|<>;&`$()]*["\']$')
+    file_read_tools = {'ls', 'cat', 'head', 'tail', 'wc'}
+    for tu in last_tool_uses:
+        name = tu.get('name', '')
+        if name in ('Read', 'Grep', 'Glob'):
+            # v52 R52 F1: use shared helper for repo-containment + sensitive-name check
+            inp = tu.get('input', {})
+            tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
+            msg = _path_is_safe_for_read(tgt, f"exempt(read-only-query) {name}")
+            if msg:
+                print(msg); sys.exit(0)
+            continue
+        if name == 'Bash':
+            cmd = get_cmd(tu)
+            if CONTROL_CHARS_RE.search(cmd):
+                print(f"BLOCK: exempt(read-only-query) Bash 含控制字符: {cmd[:80]!r}"); sys.exit(0)
+            if re.search(r'[|<>;&`$]', cmd) or '||' in cmd or '&&' in cmd:
+                print(f"BLOCK: exempt(read-only-query) Bash 含管道/重定向/复合: {cmd[:80]}"); sys.exit(0)
+            if zero_path_re.fullmatch(cmd):
+                continue
+            try:
+                parts = shlex.split(cmd)
+            except ValueError:
+                print(f"BLOCK: exempt(read-only-query) Bash 解析失败: {cmd[:80]}"); sys.exit(0)
+            if not parts or parts[0] not in file_read_tools:
+                print(f"BLOCK: exempt(read-only-query) Bash 不在白名单: {cmd[:80]}"); sys.exit(0)
+            args = parts[1:]
+            if len(args) != 1:
+                print(f"BLOCK: exempt(read-only-query) {parts[0]} 需恰好 1 个路径参数: {cmd[:80]}"); sys.exit(0)
+            path_arg = args[0]
+            msg = _path_is_safe_for_read(path_arg, "exempt(read-only-query) Bash")
+            if msg:
+                print(msg); sys.exit(0)
+            continue
+        print(f"BLOCK: exempt(read-only-query) 不允许工具 {name}"); sys.exit(0)
+
+elif reason == 'behavior-neutral':
+    safe_path = re.compile(r'^(\./)?docs/.*\.md$')
+    deny_path = re.compile(r'(^|/)(\.claude/state/|docs/superpowers/)')
+    safe_bash = re.compile(
+        r'^(pwd|true|false)$'
+        r'|^echo +["\'][^"\'"|<>;&`$()]*["\']$'
+        r'|^(ls|cat|head|tail|wc|grep|rg|jq) +[^|<>;&`$(){}\-]+$'
+        r'|^(git +(status|log))$')
+    for tu in last_tool_uses:
+        name = tu.get('name', '')
+        if name in ('Write', 'Edit', 'NotebookEdit', 'MultiEdit'):
+            fp = get_path(tu)
+            repo_root = Path(os.getcwd()).resolve()
+            try:
+                fp_resolved = (repo_root / fp).resolve() if not os.path.isabs(fp) else Path(fp).resolve()
+            except Exception:
+                print(f"BLOCK: exempt(behavior-neutral) 路径不可 resolve: {fp}"); sys.exit(0)
+            try:
+                fp_rel = fp_resolved.relative_to(repo_root)
+            except ValueError:
+                print(f"BLOCK: exempt(behavior-neutral) 路径 resolve 到仓库外: {fp}"); sys.exit(0)
+            fp = str(fp_rel).replace(os.sep, '/')
+            if deny_path.search(fp):
+                print(f"BLOCK: exempt(behavior-neutral) Write/Edit 到 {fp} 禁止（.claude/state=L5 evidence; docs/superpowers=skill 产出区）"); sys.exit(0)
+            if not safe_path.match(fp):
+                print(f"BLOCK: exempt(behavior-neutral) Write/Edit 路径不在白名单: {fp}"); sys.exit(0)
+        elif name == 'Bash':
+            cmd = get_cmd(tu)
+            if CONTROL_CHARS_RE.search(cmd):
+                print(f"BLOCK: exempt(behavior-neutral) Bash 含控制字符: {cmd[:80]!r}"); sys.exit(0)
+            if re.search(r'[|<>;&`$]', cmd) or '&&' in cmd or '||' in cmd:
+                print(f"BLOCK: exempt(behavior-neutral) Bash 含管道/重定向/复合: {cmd[:80]}"); sys.exit(0)
+            if not safe_bash.fullmatch(cmd):
+                print(f"BLOCK: exempt(behavior-neutral) Bash 不在严格白名单: {cmd[:80]}"); sys.exit(0)
+            try:
+                parts = shlex.split(cmd)
+            except ValueError:
+                print(f"BLOCK: exempt(behavior-neutral) Bash 解析失败: {cmd[:80]}"); sys.exit(0)
+            if parts and parts[0] in ('cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
+                for arg in parts[1:]:
+                    if arg.startswith('-'):
+                        continue
+                    msg = _path_is_safe_for_read(arg, f"exempt(behavior-neutral) Bash {parts[0]}")
+                    if msg:
+                        print(msg); sys.exit(0)
+        elif name in ('Read', 'Grep', 'Glob'):
+            inp = tu.get('input', {})
+            tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
+            msg = _path_is_safe_for_read(tgt, f"exempt(behavior-neutral) {name}")
+            if msg:
+                print(msg); sys.exit(0)
+            continue
+        else:
+            print(f"BLOCK: exempt(behavior-neutral) 不允许工具 {name}"); sys.exit(0)
+
+elif reason == 'single-step-no-semantic-change':
+    if len(last_tool_uses) > 2:
+        print(f"BLOCK: exempt(single-step) tool_uses 超2 ({len(last_tool_uses)})"); sys.exit(0)
+    safe_bash_single = re.compile(
+        r'^(pwd|true|false)$'
+        r'|^echo +["\'][^"\'"|<>;&`$()]*["\']$'
+        r'|^(ls|cat|head|tail|wc|grep|rg|jq) +[^|<>;&`$(){}\-]+$'
+        r'|^\.claude/scripts/(codex-attest|attest-override)\.sh( +[-A-Za-z0-9_./:=@]+)*$')
+    for tu in last_tool_uses:
+        name = tu.get('name', '')
+        if name in ('Read', 'Grep', 'Glob'):
+            inp = tu.get('input', {})
+            tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
+            msg = _path_is_safe_for_read(tgt, f"exempt(single-step) {name}")
+            if msg:
+                print(msg); sys.exit(0)
+            continue
+        if name == 'Bash':
+            cmd = get_cmd(tu)
+            if CONTROL_CHARS_RE.search(cmd):
+                print(f"BLOCK: exempt(single-step) Bash 含控制字符: {cmd[:80]!r}"); sys.exit(0)
+            if re.search(r'[|<>;&`$]', cmd) or '&&' in cmd or '||' in cmd:
+                print(f"BLOCK: exempt(single-step) Bash 含管道/重定向/复合: {cmd[:80]}"); sys.exit(0)
+            if not safe_bash_single.fullmatch(cmd):
+                print(f"BLOCK: exempt(single-step) Bash 不在严格白名单: {cmd[:80]}"); sys.exit(0)
+            try:
+                parts = shlex.split(cmd)
+            except ValueError:
+                print(f"BLOCK: exempt(single-step) Bash 解析失败: {cmd[:80]}"); sys.exit(0)
+            if parts and parts[0] in ('cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
+                for arg in parts[1:]:
+                    if arg.startswith('-'):
+                        continue
+                    msg = _path_is_safe_for_read(arg, f"exempt(single-step) Bash {parts[0]}")
+                    if msg:
+                        print(msg); sys.exit(0)
+            continue
+        print(f"BLOCK: exempt(single-step) 不允许工具 {name}"); sys.exit(0)
+
+elif reason == 'user-explicit-skip':
+    AUTH_PHRASES = [r'skip\s*skill', r'no\s*skill', r'without\s*skill', r'exempt.*skill',
+                    r'bypass\s*skill', r'跳过\s*skill', r'不用\s*skill', r'免\s*skill', r'/no-?skill']
+    if not re.compile('|'.join(AUTH_PHRASES), re.IGNORECASE).search(last_user_text):
+        print("BLOCK: exempt(user-explicit-skip) 需当前 user message 含显式授权短语"); sys.exit(0)
+
+print("OK")
+PY
+}
 
 input=$(cat)
 tpath=$(echo "$input" | jq -r '.transcript_path // ""')
@@ -46,14 +289,14 @@ block() {
 }
 
 # 1) First-line Skill gate syntax (H2-1: drift-log instead of block)
-if ! echo "$first_line" | grep -qE '^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\([a-z-]+\))'; then
+if ! echo "$first_line" | grep -qE '^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\([a-z-]+\))'; then
   DRIFT_LOG=".claude/state/skill-gate-drift.jsonl"
   mkdir -p "$(dirname "$DRIFT_LOG")"
   # Infer last valid Skill gate from transcript (reverse scan most recent 20 assistant messages)
   inferred=$(python3 - "$tpath" <<'PY'
 import json, re, sys
 target = sys.argv[1]
-gate_re = re.compile(r'^Skill gate:\s*(superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\([a-z-]+\))')
+gate_re = re.compile(r'^Skill gate:\s*(superpowers:[a-z-]+|codex:[a-z-]+|exempt\([a-z-]+\))')
 recent = []
 try:
     with open(target) as f:
@@ -105,6 +348,45 @@ PY
   echo "    Skill gate: <skill-name>   OR   Skill gate: exempt(<whitelist-reason>)" >&2
   echo "  (drift recorded; not blocking; push will block at threshold via H3-2)" >&2
   echo "[skill-gate-drift] =================================" >&2
+  # L1 block mode (H6.9 flip): hard block missing first-line if enforcement_mode=block
+  # v45 R45 F1: rescue ONLY H6 non-exempt gates (superpowers:*, codex:*)
+  RULES=".claude/workflow-rules.json"
+  ENF_MODE=$(jq -r '.skill_gate_policy.enforcement_mode // "drift-log"' "$RULES" 2>/dev/null || echo "drift-log")
+  if [ "$ENF_MODE" = "block" ]; then
+    CUR_TURN_GATE=$(python3 - "$tpath" <<'PYRESCUE'
+import json, re, sys
+GATE_RE = re.compile(r'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+)')
+entries = []
+try:
+    for line in open(sys.argv[1]):
+        try: entries.append(json.loads(line))
+        except Exception: continue
+except Exception: pass
+def is_human(e):
+    if e.get('type') != 'user': return False
+    c = e.get('message', {}).get('content', '')
+    if isinstance(c, str): return True
+    if isinstance(c, list):
+        if any(isinstance(x, dict) and x.get('type') == 'tool_result' for x in c): return False
+    return True
+lui = -1
+for i, e in enumerate(entries):
+    if is_human(e): lui = i
+for e in entries[lui+1:]:
+    if e.get('type') != 'assistant': continue
+    content = e.get('message', {}).get('content', [])
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get('type') == 'text':
+                fl = (c.get('text','').splitlines() or [''])[0]
+                m = GATE_RE.match(fl)
+                if m: print(m.group(1)); sys.exit(0)
+PYRESCUE
+)
+    if [ -z "$CUR_TURN_GATE" ]; then
+      block "first-line Skill gate 缺失或格式无效（当前 turn 无任何 assistant 含合法非-exempt gate；exempt rescue 不允许）；当前 first_line=\"$first_line\""
+    fi
+  fi
 fi
 
 # 2) Exempt reason whitelist
@@ -116,6 +398,29 @@ if echo "$first_line" | grep -qE '^Skill gate: exempt\('; then
     ok=false
     for w in $wl; do [ "$reason" = "$w" ] && ok=true && break; done
     $ok || block "exempt 理由 '$reason' 不在白名单: $wl"
+  fi
+fi
+
+# L3 exempt integrity (v6 H6 R5 F1+F2 fix + v45 R45 F2 enforcement-mode gating):
+if echo "$first_line" | grep -qE '^Skill gate: exempt\('; then
+  reason=$(echo "$first_line" | sed -E 's/^Skill gate: exempt\(([^)]+)\).*/\1/')
+  result=$(validate_exempt_integrity "$tpath" "$reason")
+  if [[ "$result" == BLOCK:* ]]; then
+    ENF_MODE_L3=$(jq -r '.skill_gate_policy.enforcement_mode // "drift-log"' .claude/workflow-rules.json 2>/dev/null || echo "drift-log")
+    DRIFT_LOG=".claude/state/skill-gate-drift.jsonl"
+    mkdir -p "$(dirname "$DRIFT_LOG")"
+    printf '{"time_utc":"%s","kind":"l3_integrity_violation","first_line":%s,"reason":%s,"block_message":%s,"enforcement_mode":"%s","blocked":%s}\n' \
+      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      "$(printf '%s' "$first_line" | jq -Rs .)" \
+      "$(printf '%s' "$reason" | jq -Rs .)" \
+      "$(printf '%s' "${result#BLOCK: }" | jq -Rs .)" \
+      "$ENF_MODE_L3" \
+      "$([ "$ENF_MODE_L3" = "block" ] && echo true || echo false)" \
+      >> "$DRIFT_LOG"
+    if [ "$ENF_MODE_L3" = "block" ]; then
+      block "${result#BLOCK: }"
+    fi
+    echo "[l3-drift] ${result#BLOCK: } (enforcement_mode=$ENF_MODE_L3; not blocking)" >&2
   fi
 fi
 
