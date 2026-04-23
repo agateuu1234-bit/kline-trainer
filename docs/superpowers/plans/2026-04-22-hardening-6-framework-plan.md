@@ -274,35 +274,36 @@ echo "Task 2: no commit (runtime artifacts)"
 1. 读 `workflow-rules.json.skill_gate_policy.enforcement_mode`。若 = `block` 且 first-line 缺失/格式 invalid → block（既有行为在 H6.9 flip 后变 block）
 2. exempt 合理性 allowlist（L3）：read-only-query / behavior-neutral / single-step-no-semantic-change 下严格限制 tool_uses
 
-- [ ] **Step 0: 确认既有 first-line regex（v38 R38 F1：保留所有 plugin 前缀）**
+- [ ] **Step 0: 收紧既有 first-line regex（v44 R44 F1 HIGH final fix：H6 scope only）**
 
-**v38 R38 F1 HIGH**：v35 曾把 `frontend-design:*` 从 L1 regex 移除，结果被 codex 标记为 scope 不当——把 scoped hardening rollout 变成 global availability break（所有 non-H6 plugin 都被拒）。v38 修正策略：**L1 保留所有 plugin 前缀，L2 用 invoke-match 精细分级**（见 Task 5 v38 fix）。
+**v44 R44 F1 HIGH final fix**：codex 在 R33→R38→R44 经过三轮反复后给出终局结论——**非-H6 plugin gate（frontend-design:* 等）必须从 L1 regex 移除**。v38 曾尝试用 L2 invoke-match 兜底，但 codex R44 指出这仍是 durable bypass：agent 可声明 `Skill gate: frontend-design:web`、调用 frontend-design skill、完全绕过 H6 required transitions (brainstorming → writing-plans → codex review)。
 
-既有 `.claude/hooks/stop-response-check.sh` line 49 的 first-line regex **保持不变**：
+**终局策略**：L1 regex **只接受 H6-scoped gate**（superpowers:* + codex:* + exempt(...))。非-H6 plugin 用户两条路：
+1. 用 H6 gate（如 `Skill gate: superpowers:subagent-driven-development`），在 response 内部调 frontend-design Skill tool（当作 sub-skill），正常走 L2/L4/L5
+2. 显式注册 frontend-design:<name> 到 `.claude/config/skill-invoke-enforced.json`（带自己的 legal_next_set + mode），走完整 L2/L4/L5
+
+既有 `.claude/hooks/stop-response-check.sh` line 49 regex 改成：
 ```bash
-'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\([a-z-]+\))'
+# v44 final: H6 scope only; non-H6 plugins go through superpowers gate or register
+'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\([a-z-]+\))'
 ```
 
-L1 regex 接受所有 4 类 plugin-format gate：
-- `Skill gate: superpowers:<name>`（14 H6 skill；L2 full enforcement）
-- `Skill gate: codex:<name>`（codex:adversarial-review 走 L5；codex:rescue 走 L2 invoke-match）
-- `Skill gate: frontend-design:<name>`（L2 invoke-match 要求真正调用 Skill tool；无 L4/L5）
+L1 regex 接受 3 类：
+- `Skill gate: superpowers:<name>`（14 H6 skill；完整 L2/L4/L5）
+- `Skill gate: codex:<name>`（codex:adversarial-review 有 L5 契约；未注册 codex:* 走 unknown-gate fail-closed）
 - `Skill gate: exempt(<reason>)`
 
-**L2 的分级处理逻辑**（skill-invoke-check.sh，详见 Task 5 v38 fix）：
-- Gate 在 config 注册 → 完整 H6 enforcement (L2 invoke + L4 mini-state + L5 codex evidence)
-- Gate 是 plugin-format 但未注册 → 仅要求 Skill tool invoke match（L2），跳过 L4/L5（out-of-scope）
-- 无 Skill tool invoke → block with 清晰错误（Plugin gate 需要真正调用对应 Skill）
+`frontend-design:*` / 其他未注册 plugin **不是合法 L1 gate**；response 若以此开头，L1 match fail → block（Task 9 后）。
 
 **重要（v6 R6 HIGH finding fix）**：本 Task 的 Step 2 加 block 分支仅在**既有 drift-log 分支**内嵌入（既有逻辑：regex match fail → drift-log，加 block 变为 drift-log + exit 2）。因此 Task 9 flip 到 block 后，`Skill gate: superpowers:brainstorming` 仍走既有 match 路径 pass，不被误 block。Task 4 含 `test_valid_first_line_both_modes_pass` 已验证此场景。
 
-**Step 0 读取确认**：
-
+**Step 0 修改命令**：
 ```bash
+sed -i.bak -E "s|frontend-design:\\[a-z-\\]\\+\\||g" .claude/hooks/stop-response-check.sh
 grep -n "Skill gate:" .claude/hooks/stop-response-check.sh | head -3
 ```
 
-Expected: regex 含 `superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\(`
+Expected: regex **不含** `frontend-design:`；只保留 `superpowers:[a-z-]+|codex:[a-z-]+|exempt\(`
 
 **v7 R7 finding 澄清（false positive 驳回）**：正则字符集 `[a-z-]+` 含 `-`，完整 match `adversarial-review` 这种 hyphenated name。证明：
 
@@ -872,27 +873,24 @@ class TestL1BlockMode:
         ]:
             r = sp.run(
                 ["grep", "-qE",
-                 "^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\\([a-z-]+\\))"],  # v38 R38 F1: restored frontend-design (L2 invoke-match enforces)
+                 "^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\\([a-z-]+\\))"],  # v44 R44 F1 final: H6 scope only
                 input=line, capture_output=True, text=True,
             )
             assert r.returncode == 0, f"regex rejected valid gate: {line}"
 
     def test_valid_first_line_both_modes_pass(self, tmp_path):
-        """Verify 4 legal gate forms pass Hook 1 in both modes (R6 F1 verification).
+        """Verify 3 legal gate forms pass Hook 1 in both modes (R6 F1 verification).
 
-        v38 R38 F1: frontend-design:* restored (L2 invoke-match enforces —
-        plugin gates without Skill tool invoke get blocked at L2 not L1).
-        All 4 prefixes legal at L1: superpowers:/codex:/frontend-design:/exempt(.
-
-        After Task 9 flips enforcement_mode to block, ordinary skill-gated
-        responses must still pass through Hook 1.
+        v44 R44 F1 final: L1 scope restricted to H6 only
+        (superpowers:* + codex:* + exempt(...)). Non-H6 plugins (frontend-design
+        etc.) either go through superpowers:* gate as sub-skill, or register
+        in skill-invoke-enforced.json with their own L2/L4/L5 contract.
         """
         gate_samples = [
             "Skill gate: superpowers:brainstorming\n\nSome text",
             "Skill gate: superpowers:writing-plans\n\ntext",
             "Skill gate: superpowers:verification-before-completion\n\ntext",
             "Skill gate: codex:adversarial-review\n\ntext",
-            "Skill gate: frontend-design:frontend-design\n\ntext",  # v38 L1 accepts; L2 enforces invoke
             "Skill gate: exempt(read-only-query)\n\ntext",
             "Skill gate: exempt(behavior-neutral)\n\ntext",
         ]
@@ -1396,7 +1394,7 @@ for i, e in enumerate(entries):
 # the current turn; take FIRST_LINE from the first assistant that has a
 # gate-shaped first line. Fall back to last assistant text if none.
 import re
-GATE_RE = re.compile(r'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\([a-z-]+\))')  # v38 R38 F1: restored frontend-design
+GATE_RE = re.compile(r'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\([a-z-]+\))')  # v44 R44 F1 final: H6 scope only
 gated_text = ""
 last_text_any = ""
 for e in entries[last_user_idx + 1:]:
@@ -1423,7 +1421,7 @@ LAST_TEXT=$(echo "$TXT_AND_USES" | jq -r '.text')
 [ -z "$LAST_TEXT" ] && exit 0
 
 FIRST_LINE=$(echo "$LAST_TEXT" | head -1)
-GATE_RE='^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\([a-z-]+\))'  # v38 R38 F1: restored frontend-design, L2 handles via invoke-match
+GATE_RE='^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\([a-z-]+\))'  # v44 R44 F1 final: H6 scope only
 if ! echo "$FIRST_LINE" | grep -qE "$GATE_RE"; then
   exit 0  # existing stop-response-check.sh handles missing first-line
 fi
@@ -1508,42 +1506,22 @@ drift_log_and_block() {
   block "$2"
 }
 
-# v38 R38 F1 fix: scope block mode to H6 namespace (14 skills + codex:adversarial-review).
-# Previous v34/v35 iterations either unconditionally blocked unregistered gates
-# (breaks every non-H6 plugin after Task 9 flip) or unconditionally passed them
-# (universal bypass per R34 F2). Correct design:
-#   - Registered gate (.enforce[gate] exists): full H6 enforcement (L2/L4/L5)
-#   - Unregistered plugin-format gate (prefix:name shape, not H6-scoped):
-#     require Skill tool invoke match in response (L2 only); skip L4/L5 as
-#     out-of-scope. Bypass prevented because Claude must have actually
-#     invoked the Skill tool with the exact declared name.
-#   - Bare malformed gate: block (unchanged).
-# Plugin gates that want full H6 hardening opt in by registering in config.
+# v44 R44 F1 HIGH final fix: unknown-gate fail-closed in block mode.
+# Previous v38 plugin-format-invoke-match passthrough was durable bypass:
+# agent could declare `Skill gate: frontend-design:web` + invoke
+# frontend-design, skipping required H6 transitions (brainstorming →
+# writing-plans → codex:adversarial-review). Codex R44 final verdict:
+# scope L1 + L2 to H6 only. Non-H6 users either:
+# 1. Use superpowers:* gate + call plugin as Skill sub-invoke (normal H6 flow)
+# 2. Explicitly register plugin gate in skill-invoke-enforced.json
 
 # Look up config
 IN_CONFIG=$(jq -r --arg s "$SKILL_NAME" '.enforce[$s] // empty' "$CONFIG")
 if [ -z "$IN_CONFIG" ]; then
-  # Unregistered gate. Distinguish plugin-format (prefix:name) from bare.
-  if echo "$SKILL_NAME" | grep -qE '^[a-z][a-z-]*:[a-z][a-z-]*$'; then
-    # Plugin-format unregistered gate: require actual Skill tool invoke match
-    # (L2 parity with registered skills), but skip L4/L5 (out-of-scope).
-    INVOKED=$(echo "$TXT_AND_USES" | jq -r --arg s "$SKILL_NAME" '
-      .tool_uses[]? | select(.name == "Skill") | .input.skill // empty
-    ' 2>/dev/null | grep -Fx "$SKILL_NAME" | head -1)
-    if [ -z "$INVOKED" ]; then
-      drift_log "unregistered_plugin_gate_without_invoke" false null "$LAST_STAGE"
-      if [ "$ENF_MODE" = "block" ] && [ "${ALLOW_UNKNOWN_GATE:-0}" != "1" ]; then
-        block "Plugin gate '$SKILL_NAME' (未在 H6 config 注册) 声明但响应内无对应 Skill tool 调用；请真正调用 Skill tool 或 register in skill-invoke-enforced.json"
-      fi
-    else
-      drift_log "unregistered_plugin_gate_invoked" true null "$LAST_STAGE"
-    fi
-    exit 0
-  fi
-  # Bare/malformed gate (no colon): always fail-closed in block mode.
+  # Unknown gate: fail-closed in block mode (no plugin-format passthrough).
   if [ "$ENF_MODE" = "block" ] && [ "${ALLOW_UNKNOWN_GATE:-0}" != "1" ]; then
     drift_log "unknown_skill_in_gate"
-    block "Skill gate '$SKILL_NAME' 格式无效或未注册；block mode fail-closed"
+    block "Skill gate '$SKILL_NAME' 未在 skill-invoke-enforced.json 配置；block mode fail-closed。非-H6 plugin 请：(1) 用 superpowers:* gate 把该 plugin 当 Skill sub-invoke 调用，或 (2) 注册 plugin gate 到 config"
   fi
   drift_log "unknown_skill_in_gate"
   exit 0
@@ -2643,35 +2621,16 @@ class TestCodexTargetInResponseOnly:
             spec.unlink(missing_ok=True)
 
 
-class TestPluginGateInvokeMatch:
-    """v38 R38 F1 regression: plugin-format gates not in H6 config must require
-    Skill tool invoke match in L2. Bypass prevented by requiring actual invoke;
-    non-H6 skills not globally blocked (avoids scoped rollout becoming global
-    availability break per codex R38 F1 HIGH)."""
+class TestH6ScopeOnlyL1L2:
+    """v44 R44 F1 final regression: L1 + L2 scoped to H6 only. Non-H6
+    plugin gates MUST be rejected (neither passthrough nor invoke-match
+    bypass). Rationale: codex R44 verified that plugin-format passthrough
+    lets agents bypass required H6 transitions (brainstorming → writing-plans
+    → codex:adversarial-review) by routing through an unrelated plugin gate."""
 
-    def test_frontend_design_gate_without_invoke_blocks(self, tmp_path):
-        """Block mode + frontend-design:web gate + no Skill tool invoke →
-        L2 invoke-match fails → BLOCK."""
-        bak = _set_enforcement_mode("block")
-        try:
-            tp = _write_transcript(
-                tmp_path,
-                "Skill gate: frontend-design:web\n\nx",
-                tool_uses=[],
-            )
-            rc, stdout, _ = _run_hook(tp, env_extra={
-                "CLAUDE_SESSION_ID": "01HQTESTAAAAAAAAAAAAAAAAAA",
-            })
-            assert '"decision":"block"' in stdout.replace(" ", ""), \
-                f"frontend-design:web without invoke must block at L2; stdout={stdout[:400]}"
-            assert "frontend-design:web" in stdout or "Plugin gate" in stdout, \
-                f"Block reason should mention the plugin gate name; stdout={stdout[:400]}"
-        finally:
-            _restore_enforcement_mode(bak)
-
-    def test_frontend_design_gate_with_invoke_passes(self, tmp_path):
-        """Block mode + frontend-design:web gate + matching Skill tool invoke →
-        L2 invoke-match passes; L4/L5 skipped as out-of-scope."""
+    def test_frontend_design_gate_l1_rejects_in_block_mode(self, tmp_path):
+        """frontend-design:web declared as L1 gate → L1 regex fails (H6 scope).
+        In block mode, stop-response-check.sh hard-blocks missing/invalid gate."""
         bak = _set_enforcement_mode("block")
         try:
             tp = _write_transcript(
@@ -2679,32 +2638,25 @@ class TestPluginGateInvokeMatch:
                 "Skill gate: frontend-design:web\n\nx",
                 tool_uses=[{"name": "Skill", "input": {"skill": "frontend-design:web"}}],
             )
-            rc, stdout, _ = _run_hook(tp, env_extra={
-                "CLAUDE_SESSION_ID": "01HQTESTAAAAAAAAAAAAAAAAAA",
-            })
-            assert '"decision":"block"' not in stdout.replace(" ", ""), \
-                f"frontend-design:web with invoke must pass L2; stdout={stdout[:400]}"
+            # Run the L1 stop-response-check (owns L1 regex).
+            stop_hook = ".claude/hooks/stop-response-check.sh"
+            if Path(stop_hook).exists():
+                proc = subprocess.run(
+                    ["bash", stop_hook],
+                    input=json.dumps({"transcript_path": str(tp)}),
+                    capture_output=True, text=True, timeout=15,
+                )
+                combined = proc.stdout + proc.stderr
+                assert '"decision":"block"' in combined.replace(" ", "") \
+                    or proc.returncode == 2 \
+                    or "Skill gate" in combined, \
+                    f"frontend-design:web must not pass L1 in block mode; stdout={proc.stdout[:400]}"
         finally:
             _restore_enforcement_mode(bak)
 
-    def test_codex_rescue_without_invoke_blocks(self, tmp_path):
-        """codex:rescue gate without Skill tool invoke → L2 invoke-match fails → BLOCK."""
-        bak = _set_enforcement_mode("block")
-        try:
-            tp = _write_transcript(
-                tmp_path,
-                "Skill gate: codex:rescue\n\nx",
-                tool_uses=[],
-            )
-            rc, stdout, _ = _run_hook(tp, env_extra={
-                "CLAUDE_SESSION_ID": "01HQTESTAAAAAAAAAAAAAAAAAA",
-            })
-            assert '"decision":"block"' in stdout.replace(" ", "")
-        finally:
-            _restore_enforcement_mode(bak)
-
-    def test_codex_rescue_with_invoke_passes(self, tmp_path):
-        """codex:rescue gate with matching invoke → passes (out-of-scope plugin)."""
+    def test_unregistered_codex_prefix_l2_fail_closed(self, tmp_path):
+        """codex:rescue / codex:<anything> not in config → L2 unknown-gate
+        fail-closed in block mode (no plugin-format invoke-match bypass)."""
         bak = _set_enforcement_mode("block")
         try:
             tp = _write_transcript(
@@ -2715,7 +2667,11 @@ class TestPluginGateInvokeMatch:
             rc, stdout, _ = _run_hook(tp, env_extra={
                 "CLAUDE_SESSION_ID": "01HQTESTAAAAAAAAAAAAAAAAAA",
             })
-            assert '"decision":"block"' not in stdout.replace(" ", "")
+            assert '"decision":"block"' in stdout.replace(" ", ""), \
+                f"codex:rescue not in config must block at L2; stdout={stdout[:400]}"
+            assert "未在 skill-invoke-enforced" in stdout or "未在" in stdout \
+                or "block mode" in stdout, \
+                f"Block reason should indicate unregistered gate; stdout={stdout[:400]}"
         finally:
             _restore_enforcement_mode(bak)
 ```
