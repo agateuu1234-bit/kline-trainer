@@ -2817,25 +2817,52 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         run: |
           bash scripts/acceptance/hardening_6_framework.sh --final
-      # v24 R23 F1 fix: self-check branch protection includes this workflow
-      # as required status check. If not, flip to block is unsafe.
-      # v28 R28 F3: runs regardless of relevant changes so required-check
-      # self-audit posts on every PR.
-      - name: Verify branch protection requires this check
+      # v24 R23 F1 + v37 R37 F1 fix: self-check branch protection includes
+      # this workflow as required status check. ADVISORY ONLY (not
+      # fail-blocking) because:
+      # - Repos may use rulesets (new API) instead of branch protection
+      # - GITHUB_TOKEN may lack repo admin read on /branches/*/protection
+      # - Protection may not yet be configured on bootstrap PR
+      # A hard fail here would deadlock EVERY PR (documentation-only included)
+      # the moment enforcement_mode=block is merged. Instead emit ::warning::
+      # + job summary; opt-in STRICT mode via H6_BRANCH_PROTECTION_STRICT=1
+      # env (only set after admin confirms protection configured).
+      - name: Verify branch protection requires this check (advisory)
         if: github.event.pull_request.base.ref == 'main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          H6_BRANCH_PROTECTION_STRICT: ${{ vars.H6_BRANCH_PROTECTION_STRICT || '0' }}
         run: |
-          set -euo pipefail
-          checks=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" --jq '.required_status_checks.contexts[]?' 2>/dev/null || echo "")
+          set -u  # no -e: we tolerate missing/unreadable protection
           mode=$(jq -r '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json)
-          if [ "$mode" = "block" ] && ! echo "$checks" | grep -q 'hardening-6'; then
-            echo "::error::enforcement_mode=block but branch protection does not require hardening-6 gate."
-            echo "::error::Configure: gh api -X PUT repos/${GITHUB_REPOSITORY}/branches/main/protection \\"
-            echo "::error::  -f 'required_status_checks[contexts][]=hardening-6 framework gate / acceptance' ..."
-            exit 1
+          echo "enforcement_mode=$mode"
+          if [ "$mode" != "block" ]; then
+            echo "Not block mode; skipping branch-protection advisory."
+            exit 0
           fi
-          echo "Branch protection check: mode=$mode, contexts include hardening-6 if needed"
+          # Try branch protection API; tolerate 404 (no protection) and 403 (no read perm)
+          api_out=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>&1) || api_rc=$?
+          api_rc=${api_rc:-0}
+          if [ "$api_rc" != "0" ]; then
+            echo "::warning::branch-protection API unreadable (rc=$api_rc). Cannot verify required-context config."
+            echo "::warning::api response: $api_out"
+            if [ "$H6_BRANCH_PROTECTION_STRICT" = "1" ]; then
+              echo "::error::STRICT mode on (H6_BRANCH_PROTECTION_STRICT=1) and API unreadable → fail."
+              exit 1
+            fi
+            exit 0
+          fi
+          checks=$(echo "$api_out" | jq -r '.required_status_checks.contexts[]?' 2>/dev/null || echo "")
+          if echo "$checks" | grep -q 'hardening-6'; then
+            echo "Branch protection includes hardening-6 gate. ✓"
+          else
+            echo "::warning::enforcement_mode=block but branch protection doesn't list hardening-6 gate."
+            echo "::warning::Configure via: gh api -X PUT repos/${GITHUB_REPOSITORY}/branches/main/protection -f 'required_status_checks[contexts][]=hardening-6 framework gate / acceptance' ..."
+            if [ "$H6_BRANCH_PROTECTION_STRICT" = "1" ]; then
+              echo "::error::STRICT mode on and missing context → fail."
+              exit 1
+            fi
+          fi
 ```
 
 - [ ] **Step 2: commit**
