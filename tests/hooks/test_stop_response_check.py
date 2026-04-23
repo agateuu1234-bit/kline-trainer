@@ -614,6 +614,25 @@ class TestL3ExemptIntegrityReadOnly:
             f"tool_result pseudo-turn must not hide prior Bash side-effect; stdout={stdout[:400]}"
 
 
+class TestR53F1RepoRootRejectInHelper:
+    """R53 F1 fix: _path_is_safe_for_read rejects paths that normalize to repo root."""
+
+    @pytest.fixture(autouse=True)
+    def _block_mode(self):
+        bak = _set_enforcement_mode("block")
+        yield
+        _restore_enforcement_mode(bak)
+
+    def test_read_only_grep_dot_path_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "secret", "path": "."}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+
 class TestL3ExemptIntegrityBehaviorNeutral:
     @pytest.fixture(autouse=True)
     def _block_mode_for_l3(self):

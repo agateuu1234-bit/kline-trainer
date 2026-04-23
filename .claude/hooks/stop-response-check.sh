@@ -102,6 +102,9 @@ def _path_is_safe_for_read(raw_path, exempt_label):
     except (ValueError, OSError):
         return f"BLOCK: {exempt_label} 路径 resolve 到仓库外或不可 resolve: {s}"
     rel_str = str(rel).replace(os.sep, '/')
+    # R53 F1 fix (codex Gate-2 round-2): reject repo-root-equivalent paths
+    if rel_str in ('.', ''):
+        return f"BLOCK: {exempt_label} 路径归一化到仓库根等于全仓搜索: {raw_path}"
     for component in rel_str.split('/'):
         if _SENSITIVE_NAME_RE.search(component):
             return f"BLOCK: {exempt_label} 路径含敏感名: {rel_str}"
