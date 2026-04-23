@@ -48,7 +48,7 @@
 | `.claude/config/skill-invoke-enforced.json` | 新增 | 14 skill config + legal_next_set 含 codex + wildcard + migration flag | ~120 |
 | `.claude/state/skill-stage/` | 新增目录 | 按 `<wt-hash>-<session>` 存 stage 文件 | — |
 | `.claude/state/skill-invoke-drift.jsonl` | 新增 | append-only drift log（空初始化）| 0 |
-| `.claude/workflow-rules.json` | 修改 | `skill_gate_policy.enforcement_mode`: `drift-log` → `block`（PR 最后一个 commit） | 1 行 |
+| `.claude/workflow-rules.json` | **不在 H6.0 修改**（R41 F2 HIGH fix） | H6.0 保持 `drift-log`；`skill_gate_policy.enforcement_mode`: `drift-log` → `block` 由**单独 H6.0-flip PR** 承担，前置条件 admin 手动确认 branch protection / rulesets 已将 `hardening-6 framework gate / acceptance` 配为 required status check | 0 行 in H6.0 / 1 行 in H6.0-flip |
 | `.claude/settings.json` | 修改 | 加 Stop.skill-invoke-check hook 节点 | +4 行 |
 | `tests/hooks/test_stop_response_check_block.py` | 新增 | L1/L3 block + allowlist 单元测试 | ~200 |
 | `tests/hooks/test_skill_invoke_check.py` | 新增 | L2/L4/L5 + unknown gate 单元测试 | ~350 |

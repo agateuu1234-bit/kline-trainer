@@ -424,12 +424,26 @@ def get_path(tu):
 CONTROL_CHARS_RE = re.compile(r'[\r\n\t\x00]')  # reject multi-line shell payloads
 
 if reason == 'read-only-query':
-    # Strict allowlist: Read/Grep/Glob or specific safe Bash patterns
-    # Safe Bash: complete regex match; NO pipes, redirects, compound commands, NO newlines/CR/tab
-    safe_bash = re.compile(
+    # v41 R41 F1 HIGH fix: safe_bash previously allowed `cat ~/.ssh/id_rsa`
+    # because the regex checked argument charset but not path semantics.
+    # The Stop hook runs AFTER the Bash already executed, so allowing the
+    # exempt response means the secret has already been read into the turn.
+    # v41 splits into two tiers:
+    #   - pwd/true/false/echo-literal: zero-path commands, stay regex-based
+    #   - ls/cat/head/tail/wc: must have one repo-relative path arg that
+    #     Path.resolve()s inside repo_root and is not under a denylist
+    #     (~, /Users except current repo, /etc, .ssh, .aws, credentials
+    #     patterns, .env). Parsed via shlex for robust argument split.
+    import shlex
+    zero_path_re = re.compile(
         r'^(pwd|true|false)$'
         r'|^echo +["\'][^"\'|<>;&`$()]*["\']$'
-        r'|^(ls|cat|head|tail|wc) +[^|<>;&`$(){}\-]+$'  # no -flag to avoid --delete/--output
+    )
+    file_read_tools = {'ls', 'cat', 'head', 'tail', 'wc'}
+    sensitive_name_re = re.compile(
+        r'(\.ssh|\.aws|\.gnupg|\.kube|credentials|secrets?|\.env(\..+)?|'
+        r'id_[rd]sa|\.pem|\.key|\.pgpass|\.netrc)$',
+        re.IGNORECASE,
     )
     for tu in last_tool_uses:
         name = tu.get('name', '')
@@ -437,18 +451,50 @@ if reason == 'read-only-query':
             continue
         if name == 'Bash':
             cmd = get_cmd(tu)
-            # v17 R16 F1 fix: reject control chars (newline/CR/tab/NUL) BEFORE allowlist
-            # Prevents 'ls .\nrm x' bypass where newline separates commands
+            # v17 R16 F1 fix: reject control chars BEFORE allowlist
             if CONTROL_CHARS_RE.search(cmd):
-                print(f"BLOCK: exempt(read-only-query) Bash 含 newline/CR/tab/NUL 控制字符（多行 shell 命令）: {cmd[:80]!r}")
+                print(f"BLOCK: exempt(read-only-query) Bash 含 newline/CR/tab/NUL 控制字符: {cmd[:80]!r}")
                 sys.exit(0)
-            # Reject any pipe/redirect/compound regardless of prefix match
             if re.search(r'[|<>;&`$]', cmd) or '||' in cmd or '&&' in cmd:
                 print(f"BLOCK: exempt(read-only-query) Bash 含管道/重定向/复合命令: {cmd[:80]}")
                 sys.exit(0)
-            if not safe_bash.fullmatch(cmd):  # v17: fullmatch not match (prevents prefix-only)
-                print(f"BLOCK: exempt(read-only-query) Bash 不在严格白名单: {cmd[:80]}")
+            # Tier 1: zero-path commands (regex match; no args or literal echo)
+            if zero_path_re.fullmatch(cmd):
+                continue
+            # Tier 2: file-read commands - parse via shlex, verify path safety
+            try:
+                parts = shlex.split(cmd)
+            except ValueError:
+                print(f"BLOCK: exempt(read-only-query) Bash 解析失败: {cmd[:80]}")
                 sys.exit(0)
+            if not parts or parts[0] not in file_read_tools:
+                print(f"BLOCK: exempt(read-only-query) Bash 不在白名单命令集: {cmd[:80]}")
+                sys.exit(0)
+            # Exactly one path arg after the command (no flags, no globs)
+            args = parts[1:]
+            if len(args) != 1:
+                print(f"BLOCK: exempt(read-only-query) {parts[0]} 必须恰好 1 个路径参数（不允许 flags/globs）: {cmd[:80]}")
+                sys.exit(0)
+            path_arg = args[0]
+            if path_arg.startswith('-') or any(c in path_arg for c in '*?[]{}') or path_arg.startswith('~'):
+                print(f"BLOCK: exempt(read-only-query) 路径含 flag/glob/home-expansion: {path_arg}")
+                sys.exit(0)
+            # Resolve and verify repo containment + sensitive path denylist
+            import os
+            from pathlib import Path
+            repo_root = Path(os.getcwd()).resolve()
+            try:
+                resolved = (repo_root / path_arg).resolve() if not os.path.isabs(path_arg) else Path(path_arg).resolve()
+                rel = resolved.relative_to(repo_root)
+            except (ValueError, OSError):
+                print(f"BLOCK: exempt(read-only-query) 路径 resolve 到仓库外或不可 resolve: {path_arg}")
+                sys.exit(0)
+            rel_str = str(rel).replace(os.sep, '/')
+            # Sensitive-name check on any path component
+            for component in rel_str.split('/'):
+                if sensitive_name_re.search(component):
+                    print(f"BLOCK: exempt(read-only-query) 路径含敏感名 (ssh/aws/credentials/env/key/pem): {rel_str}")
+                    sys.exit(0)
             continue
         print(f"BLOCK: exempt(read-only-query) 不允许工具 {name}")
         sys.exit(0)
@@ -944,6 +990,68 @@ class TestL3ExemptIntegrityReadOnly:
         )
         rc, stdout, _ = _run_hook(tp)
         assert '"decision":"block"' in stdout.replace(" ", "")
+
+    # v41 R41 F1 regression: read-only exempt Bash cat/head/tail/wc MUST
+    # reject sensitive paths (~/.ssh/id_rsa, ~/.aws/credentials, .env) and
+    # repo-outside absolute paths. Previously safe_bash regex charset check
+    # allowed these, and Stop hook fires AFTER Bash already ran → exempt
+    # approval would let a response containing secrets be emitted.
+    def test_read_only_cat_ssh_key_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "cat ~/.ssh/id_rsa"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_read_only_cat_aws_credentials_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "cat /Users/x/.aws/credentials"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_read_only_cat_dotenv_blocks(self, tmp_path):
+        """Repo-relative .env files are still blocked (sensitive by name)."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "cat .env"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_read_only_cat_abs_out_of_repo_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "cat /etc/passwd"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_read_only_cat_repo_relative_passes(self, tmp_path):
+        """Repo-relative non-sensitive path (e.g., README.md) passes."""
+        # Create a harmless file to cat
+        f = Path("README.md")
+        created = False
+        if not f.exists():
+            f.write_text("readme")
+            created = True
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: exempt(read-only-query)\n\n",
+                tool_uses=[{"name": "Bash", "input": {"command": "cat README.md"}}],
+            )
+            rc, stdout, _ = _run_hook(tp)
+            assert '"decision":"block"' not in stdout.replace(" ", "")
+        finally:
+            if created:
+                f.unlink(missing_ok=True)
 
     # v34 R34 F1 regression: tool_result pseudo-user turn must NOT reset
     # the "current turn" — prior assistant tool_use still counts for L3.
@@ -2838,6 +2946,24 @@ jobs:
           fetch-depth: 0  # need history to diff against origin/main
       - name: Install jq
         run: sudo apt-get install -y jq
+      # v41 R41 F3 fix: acceptance invokes pytest via scripts/acceptance/*.sh;
+      # without pytest installed on clean runners, CI would fail BEFORE
+      # exercising hardening checks → deadlock status.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # Install root dev deps if present (pytest + plugins), plus any
+          # backend-specific test deps the acceptance scripts may invoke.
+          for req in requirements-dev.txt backend/requirements-dev.txt backend/requirements.txt; do
+            [ -f "$req" ] && python -m pip install -r "$req"
+          done
+          # Ensure pytest is available even if no requirements files
+          python -m pip install pytest || true
       # v28 R28 F3: determine whether any hardening-6-relevant file changed
       - name: Detect relevant changes
         id: changes
