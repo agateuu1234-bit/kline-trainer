@@ -425,6 +425,14 @@
             "timeout": 3
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'cd \"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}\" && exec bash .claude/hooks/skill-invoke-check.sh'"
+          }
+        ]
       }
     ]
   }
