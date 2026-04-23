@@ -1,4 +1,4 @@
-# H6.0.1 Hardening — Spec (v11, 三拆最终 scope + Glob-ban 根源修)
+# H6.0.1 Hardening — Spec (v12, 三拆最终 scope + Glob-ban + shell-glob-metachar-ban)
 
 **Date**: 2026-04-23
 **Status**: Design frozen, awaiting codex branch-diff review at Review Gate 2 of 7 (spec-only phase; pre-implementation)
@@ -98,9 +98,10 @@ Bash (behavior-neutral + single-step branches):
 8. **Universal flag-ban** (codex round-7 finding 1 uniformity fix): for ANY of the 8 whitelisted tools, if any arg in `parts[1:]` matches regex `^-` → `BLOCK: exempt(X) Bash {tool} 不允许任何 flag（避免 flag 吃 operand 导致 operand 误分类，如 head -n 1 .env / ls -I .env）`. Aligns arg-loop strictness with safe_bash regex's existing `-` exclusion; closes the same class as grep/rg flag-consumption.
 9. Per-tool operand rules (after flag-ban confirms no `-` args):
    - **`cat` / `head` / `tail` / `wc` / `ls`**: all args are paths; require ≥1 arg; each path → `_path_is_safe_for_read` (rejects empty / root-equiv / sensitive / out-of-repo).
-   - **`grep` / `rg`**: require exactly 2 args: pattern (arg[0], NOT path-checked) + path (arg[1], path-checked).
-   - **`jq`**: require ≥1 arg; the first is the filter (NOT path-checked); subsequent args are paths (path-checked).
+   - **`grep` / `rg`**: require exactly 2 args: pattern (arg[0]) + path (arg[1], path-checked). **Pattern MUST additionally be rejected if it contains any shell-glob metacharacter (`*`, `?`, `[`, `]`, `{`, `}`)** — see step 11. Requires BLOCK: `exempt(X) Bash {grep|rg} pattern 含 shell glob 元字符（shell 会在命令执行前展开成文件列表，绕过 path 检查）: {pattern}`.
+   - **`jq`**: require ≥2 args: the first is the filter (arg[0]) + at least one path (arg[1:], path-checked). **Filter MUST additionally be rejected if it contains any shell-glob metacharacter** — same reason and same rule as grep/rg. Cost: jq array-iteration syntax `.foo[]` becomes unavailable in exempt context; users needing it declare a real skill gate.
 10. Note: `safe_bash` regex at line 153 / 208 already excludes `-` in arg chars (whitelist-level flag-block). Step 8's arg-loop flag-ban is **defense-in-depth** — aligns the two layers so any future relaxation of safe_bash must also update step 8, and ensures the arg-loop never sees a flag to misclassify.
+11. **Shell-glob metacharacter ban in unchecked operands** (codex Gate-4 round-1 finding): for `grep`/`rg`/`jq`, the first non-flag arg is a pattern/filter (not a path), so `_path_is_safe_for_read` does not see it. But bash performs glob expansion BEFORE invoking the tool, so `rg * docs/` expands `*` to every repo-root entry — rg then sees `rg a b .env ... docs/` and searches all expanded names, bypassing the path check. Fix: reject any pattern/filter arg matching `re.search(r'[*?\[\]{}]', arg)`. The SAME set of chars `_path_is_safe_for_read` already rejects on path args at line 96; Step 11 applies identical rule to pattern/filter slot.
 
 **Tests** (`tests/hooks/test_stop_response_check.py`) — 18 new tests:
 
@@ -143,6 +144,11 @@ jq regression coverage (3):
 - `test_single_step_bash_ls_with_I_flag_blocks` — `Bash("ls -I .env")` → BLOCK
 - `test_behavior_neutral_bash_wc_with_l_flag_blocks` — `Bash("wc -l .env")` → BLOCK
 
+**Shell-glob metachar ban in grep/rg pattern and jq filter** (3 — codex Gate-4 round-1 finding):
+- `test_behavior_neutral_bash_rg_star_pattern_blocks` — `Bash("rg * docs/")` → BLOCK (bare `*` expands in shell before rg runs)
+- `test_single_step_bash_grep_starpem_pattern_blocks` — `Bash("grep *.pem docs/")` → BLOCK (`*.pem` expands to sensitive files)
+- `test_behavior_neutral_bash_jq_star_filter_blocks` — `Bash("jq * docs/foo.json")` → BLOCK (filter slot same class)
+
 <!-- Prior v9 "Glob pattern validation" (dotdot / absolute / sensitive-literal / safe-pass) tests REMOVED in v11 — replaced by the 3 Glob-always-blocks tests above. Rationale: v9 rule validated the pattern grammar; v10 codex still exposed wildcarded-sensitive-name bypasses (`**/.en[v]`, `**/*.pem`, `id_[rd]sa`). Exiting the grammar-validation arms race by unconditionally blocking Glob in exempt contexts. -->
 
 
@@ -168,7 +174,7 @@ The following 4 acceptance criteria are evaluated by the user at the final PR-me
 
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
-| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**) | 所有测试 pass；新增 23 个 F1 测试（3 Grep tool-native + 3 Glob-always-block + 3 Bash grep/rg + 3 repo-root-equivalent + 3 flag-ban grep/rg + 3 jq + 3 ls + 2 其他 flag-ban head/ls/wc） | 输出里 "passed" 数 ≥ 原有 + 23；failed = 0 |
+| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**) | 所有测试 pass；新增 26 个 F1 测试（3 Grep tool-native + 3 Glob-always-block + 3 Bash grep/rg + 3 repo-root-equivalent + 2 flag-ban grep/rg + 3 jq + 3 ls + 3 其他 flag-ban + 3 shell-glob-metachar-ban） | 输出里 "passed" 数 ≥ 原有 + 26；failed = 0 |
 | A2 | 用户肉眼审 diff：`git diff origin/main -- .claude/hooks/ tests/hooks/` (**after Gate 5 implementation**) | 只改 `.claude/hooks/stop-response-check.sh` + `tests/hooks/test_stop_response_check.py` 两个文件（外加本 spec 文档 `docs/superpowers/specs/2026-04-23-h6-0-1-hardening-design.md` 以及 Gate 3 产出的 plan 文档 `docs/superpowers/plans/2026-04-23-h6-0-1-hardening-plan.md`）；`.claude/hooks/skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 必须 0 改动 | diff 只覆盖 4 个文件（2 code + 2 doc） |
 | A3 | 用户读 spec 确认 scope | scope 只含 R53 F1；F2 / F3 明确标注归 H6.0.1c / H6.0.1b | 用户口头确认 |
 | A4 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main` (**Gate 6 codex review**) | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |

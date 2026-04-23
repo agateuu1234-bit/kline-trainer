@@ -503,6 +503,38 @@ class TestR53F1BashArgs:
         )
         rc, stdout, _ = _run_hook(tp)
         assert '"decision":"block"' in stdout.replace(" ", "")
+
+    # --- Shell-glob-metachar ban in grep/rg pattern + jq filter (Gate-4 round-1 fix) ---
+
+    def test_behavior_neutral_bash_rg_star_pattern_blocks(self, tmp_path):
+        """`rg * docs/` — bare `*` expands in shell BEFORE rg runs → BLOCK."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "rg * docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_bash_grep_starpem_pattern_blocks(self, tmp_path):
+        """`grep *.pem docs/` — `*.pem` expands to all .pem files at cwd → BLOCK."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "grep *.pem docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_bash_jq_star_filter_blocks(self, tmp_path):
+        """`jq * docs/foo.json` — `*` filter slot expands in shell → BLOCK."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "jq * docs/foo.json"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
 ```
 
 - [ ] **Step 2: Run tests to verify all 15 fail**
@@ -594,6 +626,9 @@ With (using exempt_label_short = "behavior-neutral"):
                 elif tool in ('grep', 'rg'):
                     if len(args) != 2:
                         print(f"BLOCK: exempt(behavior-neutral) Bash {tool} 必须恰好 '<pattern> <path>' 形式 (实际 {len(args)} 参数): {cmd[:120]}"); sys.exit(0)
+                    # Gate-4 round-1 fix: reject shell-glob metachars in pattern (shell expands before tool runs)
+                    if any(c in args[0] for c in '*?[]{}'):
+                        print(f"BLOCK: exempt(behavior-neutral) Bash {tool} pattern 含 shell glob 元字符（shell 会在命令执行前展开成文件列表，绕过 path 检查）: {args[0]}"); sys.exit(0)
                     msg = _path_is_safe_for_read(args[1], f"exempt(behavior-neutral) Bash {tool}")
                     if msg:
                         print(msg); sys.exit(0)
@@ -602,6 +637,9 @@ With (using exempt_label_short = "behavior-neutral"):
                         print(f"BLOCK: exempt(behavior-neutral) Bash jq 至少需 filter: {cmd[:120]}"); sys.exit(0)
                     if len(args) < 2:
                         print(f"BLOCK: exempt(behavior-neutral) Bash jq 必须传文件参数 (filter 后至少 1 个 path): {cmd[:120]}"); sys.exit(0)
+                    # Gate-4 round-1 fix: same class as grep/rg — reject shell-glob metachars in filter
+                    if any(c in args[0] for c in '*?[]{}'):
+                        print(f"BLOCK: exempt(behavior-neutral) Bash jq filter 含 shell glob 元字符（shell 会在命令执行前展开成文件列表，绕过 path 检查）: {args[0]}"); sys.exit(0)
                     for path_arg in args[1:]:
                         msg = _path_is_safe_for_read(path_arg, f"exempt(behavior-neutral) Bash jq")
                         if msg:
@@ -752,10 +790,10 @@ Target verdict: `approve`. Budget ≤2 rounds.
 
 | # | 动作 | 预期 | 判定（可观测命令） |
 |---|---|---|---|
-| A1 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && pytest tests/hooks/test_stop_response_check.py -v 2>&1 \| tail -30` | 最后一行包含 "N passed"；所有新增 F1 tests 命中 `TestR53F1RepoRootRejectInHelper` / `TestR53F1GrepGlob` / `TestR53F1BashArgs` 三个 class | 新增 23 个测试全部在输出中以 `PASSED` 出现；"failed" 计数 = 0；"error" 计数 = 0 |
+| A1 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && pytest tests/hooks/test_stop_response_check.py -v 2>&1 \| tail -30` | 最后一行包含 "N passed"；所有新增 F1 tests 命中 `TestR53F1RepoRootRejectInHelper` / `TestR53F1GrepGlob` / `TestR53F1BashArgs` 三个 class | 新增 26 个测试全部在输出中以 `PASSED` 出现；"failed" 计数 = 0；"error" 计数 = 0 |
 | A2 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && pytest tests/hooks/ -v 2>&1 \| tail -10` | 全部 hooks tests 通过（回归检查） | 输出最后 "failed" 计数 = 0；"error" 计数 = 0 |
 | A3 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && git diff origin/main --name-only` | 恰好列出 4 个文件路径 | 文件名集合 = {`.claude/hooks/stop-response-check.sh`, `docs/superpowers/plans/2026-04-23-h6-0-1-hardening-plan.md`, `docs/superpowers/specs/2026-04-23-h6-0-1-hardening-design.md`, `tests/hooks/test_stop_response_check.py`}；不含 `skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 任何一个 |
-| A4 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && git diff origin/main -- tests/hooks/test_stop_response_check.py \| grep -c "^+    def test_"` | 新增测试函数恰好 23 个 | 输出数字 = 23 |
+| A4 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && git diff origin/main -- tests/hooks/test_stop_response_check.py \| grep -c "^+    def test_"` | 新增测试函数恰好 26 个 | 输出数字 = 26 |
 | A5 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main 2>&1 \| tail -5` | codex 输出 `Verdict: approve`；脚本 exit 0；ledger 被更新 | 输出含字符串 `Verdict: approve`；无 `Verdict: needs-attention` 或 `Verdict: request-changes` |
 
 **禁词核查**：此 checklist 不含 "should work" / "looks good" / "probably fine" / "basically" / "roughly" / "more or less"。所有判定有可观测命令。
