@@ -34,7 +34,7 @@ jobs:
           python -m pip install --upgrade pip
           # Install root dev deps if present (pytest + plugins), plus any
           # backend-specific test deps the acceptance scripts may invoke.
-          for req in requirements-dev.txt backend/requirements-dev.txt backend/requirements.txt; do
+          for req in requirements-dev.txt backend/requirements-dev.txt; do
             [ -f "$req" ] && python -m pip install -r "$req"
           done
           # Ensure pytest is available even if no requirements files
