@@ -295,7 +295,7 @@ PY
   # L1 block mode (H6.9 flip): hard block missing first-line if enforcement_mode=block
   # v45 R45 F1: rescue ONLY H6 non-exempt gates (superpowers:*, codex:*)
   RULES=".claude/workflow-rules.json"
-  ENF_MODE=$(jq -r '.skill_gate_policy.enforcement_mode // "drift-log"' "$RULES" 2>/dev/null)
+  ENF_MODE=$(jq -r '.skill_gate_policy.enforcement_mode // "drift-log"' "$RULES" 2>/dev/null || echo "drift-log")
   if [ "$ENF_MODE" = "block" ]; then
     CUR_TURN_GATE=$(python3 - "$tpath" <<'PYRESCUE'
 import json, re, sys
@@ -350,7 +350,7 @@ if echo "$first_line" | grep -qE '^Skill gate: exempt\('; then
   reason=$(echo "$first_line" | sed -E 's/^Skill gate: exempt\(([^)]+)\).*/\1/')
   result=$(validate_exempt_integrity "$tpath" "$reason")
   if [[ "$result" == BLOCK:* ]]; then
-    ENF_MODE_L3=$(jq -r '.skill_gate_policy.enforcement_mode // "drift-log"' .claude/workflow-rules.json 2>/dev/null)
+    ENF_MODE_L3=$(jq -r '.skill_gate_policy.enforcement_mode // "drift-log"' .claude/workflow-rules.json 2>/dev/null || echo "drift-log")
     DRIFT_LOG=".claude/state/skill-gate-drift.jsonl"
     mkdir -p "$(dirname "$DRIFT_LOG")"
     printf '{"time_utc":"%s","kind":"l3_integrity_violation","first_line":%s,"reason":%s,"block_message":%s,"enforcement_mode":"%s","blocked":%s}\n' \
