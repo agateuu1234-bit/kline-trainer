@@ -76,40 +76,49 @@ def get_path(tu): return tu.get('input', {}).get('file_path', '')
 
 CONTROL_CHARS_RE = re.compile(r'[\r\n\t\x00]')
 
+import os, shlex
+from pathlib import Path
+
+_SENSITIVE_NAME_RE = re.compile(
+    r'(\.ssh|\.aws|\.gnupg|\.kube|credentials|secrets?|\.env(\..+)?|'
+    r'id_[rd]sa|\.pem|\.key|\.pgpass|\.netrc)$',
+    re.IGNORECASE,
+)
+
+def _path_is_safe_for_read(raw_path, exempt_label):
+    # Return None if safe; else a BLOCK message string.
+    # Applies: reject ~/- / glob / absolute-out-of-repo / sensitive-name.
+    if not raw_path:
+        return None  # empty path - not a file-read arg
+    s = str(raw_path)
+    if s.startswith('~') or s.startswith('-'):
+        return f"BLOCK: {exempt_label} 路径含 ~/flag: {s}"
+    if any(c in s for c in '*?[]{}'):
+        return f"BLOCK: {exempt_label} 路径含 glob: {s}"
+    try:
+        repo_root = Path(os.getcwd()).resolve()
+        resolved = (repo_root / s).resolve() if not os.path.isabs(s) else Path(s).resolve()
+        rel = resolved.relative_to(repo_root)
+    except (ValueError, OSError):
+        return f"BLOCK: {exempt_label} 路径 resolve 到仓库外或不可 resolve: {s}"
+    rel_str = str(rel).replace(os.sep, '/')
+    for component in rel_str.split('/'):
+        if _SENSITIVE_NAME_RE.search(component):
+            return f"BLOCK: {exempt_label} 路径含敏感名: {rel_str}"
+    return None
+
 if reason == 'read-only-query':
-    import shlex, os
-    from pathlib import Path
-    zero_path_re = re.compile(r'^(pwd|true|false)$|^echo +["\'"][^"\'"|<>;&`$()]*["\'"]$')
+    zero_path_re = re.compile(r'^(pwd|true|false)$|^echo +["\'][^"\'"|<>;&`$()]*["\']$')
     file_read_tools = {'ls', 'cat', 'head', 'tail', 'wc'}
-    sensitive_name_re = re.compile(
-        r'(\.ssh|\.aws|\.gnupg|\.kube|credentials|secrets?|\.env(\..+)?|id_[rd]sa|\.pem|\.key|\.pgpass|\.netrc)$',
-        re.IGNORECASE)
     for tu in last_tool_uses:
         name = tu.get('name', '')
         if name in ('Read', 'Grep', 'Glob'):
-            # v51 R51 F2: apply same repo-containment + sensitive-name check to
-            # Read/Grep/Glob path arguments. Stop hook fires AFTER the tool already
-            # read content; denying here is defense-in-depth (primary gate is
-            # settings.json allow/deny).
+            # v52 R52 F1: use shared helper for repo-containment + sensitive-name check
             inp = tu.get('input', {})
-            # Read uses file_path; Grep uses path; Glob uses path. Pattern is optional.
             tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
-            if tgt:
-                tgt = str(tgt)
-                if tgt.startswith('~') or tgt.startswith('-'):
-                    print(f"BLOCK: exempt(read-only-query) {name} 路径含 ~/flag: {tgt}"); sys.exit(0)
-                try:
-                    import os
-                    from pathlib import Path
-                    repo_root = Path(os.getcwd()).resolve()
-                    resolved = (repo_root / tgt).resolve() if not os.path.isabs(tgt) else Path(tgt).resolve()
-                    rel = resolved.relative_to(repo_root)
-                    rel_str = str(rel).replace(os.sep, '/')
-                    for component in rel_str.split('/'):
-                        if sensitive_name_re.search(component):
-                            print(f"BLOCK: exempt(read-only-query) {name} 路径含敏感名: {rel_str}"); sys.exit(0)
-                except (ValueError, OSError):
-                    print(f"BLOCK: exempt(read-only-query) {name} 路径 resolve 到仓库外或不可 resolve: {tgt}"); sys.exit(0)
+            msg = _path_is_safe_for_read(tgt, f"exempt(read-only-query) {name}")
+            if msg:
+                print(msg); sys.exit(0)
             continue
         if name == 'Bash':
             cmd = get_cmd(tu)
@@ -129,29 +138,18 @@ if reason == 'read-only-query':
             if len(args) != 1:
                 print(f"BLOCK: exempt(read-only-query) {parts[0]} 需恰好 1 个路径参数: {cmd[:80]}"); sys.exit(0)
             path_arg = args[0]
-            if path_arg.startswith('-') or any(c in path_arg for c in '*?[]{}') or path_arg.startswith('~'):
-                print(f"BLOCK: exempt(read-only-query) 路径含 flag/glob/~: {path_arg}"); sys.exit(0)
-            repo_root = Path(os.getcwd()).resolve()
-            try:
-                resolved = (repo_root / path_arg).resolve() if not os.path.isabs(path_arg) else Path(path_arg).resolve()
-                rel = resolved.relative_to(repo_root)
-            except (ValueError, OSError):
-                print(f"BLOCK: exempt(read-only-query) 路径 resolve 到仓库外: {path_arg}"); sys.exit(0)
-            rel_str = str(rel).replace(os.sep, '/')
-            for component in rel_str.split('/'):
-                if sensitive_name_re.search(component):
-                    print(f"BLOCK: exempt(read-only-query) 路径含敏感名: {rel_str}"); sys.exit(0)
+            msg = _path_is_safe_for_read(path_arg, "exempt(read-only-query) Bash")
+            if msg:
+                print(msg); sys.exit(0)
             continue
         print(f"BLOCK: exempt(read-only-query) 不允许工具 {name}"); sys.exit(0)
 
 elif reason == 'behavior-neutral':
-    import os
-    from pathlib import Path
     safe_path = re.compile(r'^(\./)?docs/.*\.md$')
     deny_path = re.compile(r'(^|/)(\.claude/state/|docs/superpowers/)')
     safe_bash = re.compile(
         r'^(pwd|true|false)$'
-        r'|^echo +["\'"][^"\'"|<>;&`$()]*["\'"]$'
+        r'|^echo +["\'][^"\'"|<>;&`$()]*["\']$'
         r'|^(ls|cat|head|tail|wc|grep|rg|jq) +[^|<>;&`$(){}\-]+$'
         r'|^(git +(status|log))$')
     for tu in last_tool_uses:
@@ -180,22 +178,43 @@ elif reason == 'behavior-neutral':
                 print(f"BLOCK: exempt(behavior-neutral) Bash 含管道/重定向/复合: {cmd[:80]}"); sys.exit(0)
             if not safe_bash.fullmatch(cmd):
                 print(f"BLOCK: exempt(behavior-neutral) Bash 不在严格白名单: {cmd[:80]}"); sys.exit(0)
+            try:
+                parts = shlex.split(cmd)
+            except ValueError:
+                print(f"BLOCK: exempt(behavior-neutral) Bash 解析失败: {cmd[:80]}"); sys.exit(0)
+            if parts and parts[0] in ('cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
+                for arg in parts[1:]:
+                    if arg.startswith('-'):
+                        continue
+                    msg = _path_is_safe_for_read(arg, f"exempt(behavior-neutral) Bash {parts[0]}")
+                    if msg:
+                        print(msg); sys.exit(0)
         elif name in ('Read', 'Grep', 'Glob'):
+            inp = tu.get('input', {})
+            tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
+            msg = _path_is_safe_for_read(tgt, f"exempt(behavior-neutral) {name}")
+            if msg:
+                print(msg); sys.exit(0)
             continue
         else:
             print(f"BLOCK: exempt(behavior-neutral) 不允许工具 {name}"); sys.exit(0)
 
 elif reason == 'single-step-no-semantic-change':
     if len(last_tool_uses) > 2:
-        print(f"BLOCK: exempt(single-step) tool_uses 超 2 ({len(last_tool_uses)})"); sys.exit(0)
+        print(f"BLOCK: exempt(single-step) tool_uses 超2 ({len(last_tool_uses)})"); sys.exit(0)
     safe_bash_single = re.compile(
         r'^(pwd|true|false)$'
-        r'|^echo +["\'"][^"\'"|<>;&`$()]*["\'"]$'
+        r'|^echo +["\'][^"\'"|<>;&`$()]*["\']$'
         r'|^(ls|cat|head|tail|wc|grep|rg|jq) +[^|<>;&`$(){}\-]+$'
         r'|^\.claude/scripts/(codex-attest|attest-override)\.sh( +[-A-Za-z0-9_./:=@]+)*$')
     for tu in last_tool_uses:
         name = tu.get('name', '')
         if name in ('Read', 'Grep', 'Glob'):
+            inp = tu.get('input', {})
+            tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
+            msg = _path_is_safe_for_read(tgt, f"exempt(single-step) {name}")
+            if msg:
+                print(msg); sys.exit(0)
             continue
         if name == 'Bash':
             cmd = get_cmd(tu)
@@ -205,6 +224,17 @@ elif reason == 'single-step-no-semantic-change':
                 print(f"BLOCK: exempt(single-step) Bash 含管道/重定向/复合: {cmd[:80]}"); sys.exit(0)
             if not safe_bash_single.fullmatch(cmd):
                 print(f"BLOCK: exempt(single-step) Bash 不在严格白名单: {cmd[:80]}"); sys.exit(0)
+            try:
+                parts = shlex.split(cmd)
+            except ValueError:
+                print(f"BLOCK: exempt(single-step) Bash 解析失败: {cmd[:80]}"); sys.exit(0)
+            if parts and parts[0] in ('cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
+                for arg in parts[1:]:
+                    if arg.startswith('-'):
+                        continue
+                    msg = _path_is_safe_for_read(arg, f"exempt(single-step) Bash {parts[0]}")
+                    if msg:
+                        print(msg); sys.exit(0)
             continue
         print(f"BLOCK: exempt(single-step) 不允许工具 {name}"); sys.exit(0)
 
