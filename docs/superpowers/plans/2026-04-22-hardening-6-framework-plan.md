@@ -1176,6 +1176,21 @@ drift_log_and_block() {
   block "$2"
 }
 
+# v33 R33 F2 fix: plugin-prefixed gates (frontend-design:*, codex:rescue, etc.)
+# are legal L1 first-line forms but not configured in skill-invoke-enforced.json.
+# Before v33 these would hit unknown-gate fail-closed in block mode → any
+# legitimate frontend-design/codex:rescue response would be blocked after
+# Task 9 flip. Passthrough BEFORE unknown-gate check: these plugins own their
+# own enforcement contracts; skill-invoke-check.sh is out-of-scope for them.
+# Only prefixes explicitly enumerated here get passthrough (allow-list, not
+# a generic regex).
+case "$SKILL_NAME" in
+  frontend-design:*|codex:rescue)
+    drift_log "out_of_scope_plugin_gate"
+    exit 0
+    ;;
+esac
+
 # Look up config
 IN_CONFIG=$(jq -r --arg s "$SKILL_NAME" '.enforce[$s] // empty' "$CONFIG")
 if [ -z "$IN_CONFIG" ]; then
@@ -1224,17 +1239,21 @@ if [ "$SKILL_NAME" = "codex:adversarial-review" ]; then
     "superpowers:brainstorming"|"superpowers:writing-plans")
       # v29 R29 F1 fix: resolve each Write/Edit path to absolute, require
       # relative_to(repo_root) inside repo, THEN match docs/superpowers/(specs|plans)/.
-      # Defeats absolute out-of-repo paths like /tmp/docs/superpowers/specs/x.md
-      # that previously survived sed-based normalization and bound codex
-      # evidence to a file outside the repo.
-      CANDIDATES=$(echo "$TXT_AND_USES" | python3 - "$PWD" <<'PY' 2>/dev/null || true
-import json, sys, re
+      # v33 R33 F1 fix: pass TXT_AND_USES via env var, NOT stdin pipe.
+      # Previous `echo "$TXT_AND_USES" | python3 - "$PWD" <<'PY'` had
+      # conflicting stdin: `python3 -` reads SCRIPT from stdin, AND heredoc
+      # also occupies stdin → heredoc wins → python ran the script but
+      # sys.stdin.read() then returned empty / the script text itself,
+      # so json.loads always failed silently → CANDIDATES always empty →
+      # codex gate after valid spec/plan edit would block with no_target.
+      CANDIDATES=$(TXT_AND_USES_JSON="$TXT_AND_USES" python3 - "$PWD" <<'PY' 2>/dev/null || true
+import json, os, sys, re
 from pathlib import Path
 pwd = Path(sys.argv[1]).resolve()
 spec_plan_re = re.compile(r'^docs/superpowers/(specs|plans)/.+\.md$')
 seen = set()
 try:
-    data = json.loads(sys.stdin.read())
+    data = json.loads(os.environ.get('TXT_AND_USES_JSON', ''))
 except Exception:
     sys.exit(0)
 for tu in data.get('tool_uses', []):
@@ -2184,6 +2203,121 @@ class TestOutOfRepoPathRejection:
                     f"recent_artifact_path should point at a real in-repo file: {recent!r}"
         finally:
             sf.unlink(missing_ok=True)
+
+
+class TestCodexTargetInResponseOnly:
+    """v33 R33 F1 regression: codex target MUST derive from CURRENT response
+    Write/Edit tool_use when present. Previous `echo $X | python3 - <<'PY'`
+    had stdin conflict between pipe and heredoc → CANDIDATES always empty →
+    valid codex gate after spec/plan edit blocked with no_target."""
+
+    def test_codex_target_from_response_write_in_block_mode(self, tmp_path):
+        """Block mode + brainstorming stage + response has Write to spec +
+        ledger has matching entry → PASS (target derives from response)."""
+        import hashlib
+        spec = Path("docs/superpowers/specs/2026-04-22-r33-f1-fixture.md")
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("v33-r33-f1-content")
+        blob = subprocess.check_output(
+            ["git", "hash-object", str(spec)], text=True
+        ).strip()
+        # Stage brainstorming so codex target path executes
+        state_dir = Path(".claude/state/skill-stage")
+        state_dir.mkdir(parents=True, exist_ok=True)
+        wt_h = hashlib.sha256(os.getcwd().encode()).hexdigest()[:8]
+        sid_h = hashlib.sha256(b"01HQTESTAAAAAAAAAAAAAAAAAA").hexdigest()[:8]
+        sf = state_dir / f"{wt_h}-{sid_h}.json"
+        sf.write_text(json.dumps({
+            "version": "1",
+            "last_stage": "superpowers:brainstorming",
+            "last_stage_time_utc": "2026-04-22T00:00:00Z",
+            "worktree_path": os.getcwd(),
+            "session_id": "01HQTESTAAAAAAAAAAAAAAAAAA",
+            "drift_count": 0,
+            "transition_history": [],
+        }))
+        ledger_p = Path(".claude/state/attest-ledger.json")
+        ledger_bak = str(ledger_p) + ".r33bak"
+        if ledger_p.exists():
+            shutil.copy(ledger_p, ledger_bak)
+            ledger = json.loads(ledger_p.read_text())
+        else:
+            ledger = {"entries": {}}
+            ledger_bak = None
+        ledger.setdefault("entries", {})[f"file:{spec}"] = {
+            "attest_time_utc": "2026-04-22T09:00:00Z",
+            "verdict_digest": "sha256:testdigest",
+            "blob_sha": blob,
+            "round": 1,
+        }
+        ledger_p.parent.mkdir(parents=True, exist_ok=True)
+        ledger_p.write_text(json.dumps(ledger, indent=2))
+        mode_bak = _set_mode("codex:adversarial-review", "block")
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: codex:adversarial-review\n\nx",
+                tool_uses=[{"name": "Write", "input": {"file_path": str(spec), "content": "updated"}}],
+            )
+            rc, stdout, _ = _run_hook(tp, env_extra={
+                "CLAUDE_SESSION_ID": "01HQTESTAAAAAAAAAAAAAAAAAA",
+                "CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z",
+            })
+            # Target MUST derive from response Write → file:<spec> → ledger
+            # entry found → pass. If R33 F1 stdin bug regresses, CANDIDATES
+            # is empty → target falls back to state/_initial → would block
+            # with no_target.
+            assert '"decision":"block"' not in stdout.replace(" ", ""), \
+                f"Valid codex gate with response Write should pass; stdout={stdout[:400]}"
+            assert "codex_gate_no_target" not in stdout, \
+                "If CANDIDATES empty, hook would drift_log codex_gate_no_target — stdin-pipe bug regressed"
+        finally:
+            _restore(mode_bak)
+            if ledger_bak:
+                shutil.move(ledger_bak, ledger_p)
+            elif ledger_p.exists():
+                ledger_p.unlink()
+            sf.unlink(missing_ok=True)
+            spec.unlink(missing_ok=True)
+
+
+class TestPluginGatePassthrough:
+    """v33 R33 F2 regression: plugin-prefixed gates (frontend-design:*,
+    codex:rescue) are valid L1 first-line forms. Must passthrough L2
+    unknown-gate check, not fail-closed in block mode."""
+
+    def test_frontend_design_gate_block_mode_passes(self, tmp_path):
+        """frontend-design:<anything> in block mode MUST NOT fail-closed."""
+        bak = _set_enforcement_mode("block")
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: frontend-design:web\n\nx",
+                tool_uses=[],
+            )
+            rc, stdout, _ = _run_hook(tp, env_extra={
+                "CLAUDE_SESSION_ID": "01HQTESTAAAAAAAAAAAAAAAAAA",
+            })
+            assert '"decision":"block"' not in stdout.replace(" ", ""), \
+                f"frontend-design:web should passthrough L2 in block mode; stdout={stdout[:400]}"
+        finally:
+            _restore_enforcement_mode(bak)
+
+    def test_codex_rescue_gate_block_mode_passes(self, tmp_path):
+        """codex:rescue (assistance tool, not review channel) passthrough."""
+        bak = _set_enforcement_mode("block")
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: codex:rescue\n\nx",
+                tool_uses=[],
+            )
+            rc, stdout, _ = _run_hook(tp, env_extra={
+                "CLAUDE_SESSION_ID": "01HQTESTAAAAAAAAAAAAAAAAAA",
+            })
+            assert '"decision":"block"' not in stdout.replace(" ", "")
+        finally:
+            _restore_enforcement_mode(bak)
 ```
 
 - [ ] **Step 2: 跑测试**
@@ -2283,9 +2417,12 @@ run "config: codex entry exists"    bash -c "jq -e '.enforce[\"codex:adversarial
 run "settings: skill-invoke-check wired" \
   bash -c "jq -e '.hooks.Stop | map(.hooks[]?.command) | flatten | any(. | contains(\"skill-invoke-check\"))' .claude/settings.json > /dev/null"
 
-# ---- workflow-rules enforcement_mode 合法值 ----
-run "rules: enforcement_mode valid" \
-  bash -c "jq -re '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json | grep -qE '^(drift-log|block)$'"
+# ---- workflow-rules enforcement_mode 必须 = "block" (v33 R33 F3 fix) ----
+# Previously 'drift-log|block' 都 accept，Task 9 flip 漏掉也通过 → 框架上线后
+# 仍是 observe mode → CI 绿了但其实框架没起作用。本脚本是 PRE-MERGE GATE
+# (CI required status)，必须 fail 如果 enforcement_mode != "block"。
+run "rules: enforcement_mode == block (pre-merge gate; Task 9 flip 必须已完成)" \
+  bash -c "jq -e '.skill_gate_policy.enforcement_mode == \"block\"' .claude/workflow-rules.json > /dev/null"
 
 # ---- Unit tests ----
 # v9 R8 F3 fix: preserve pytest exit via -o pipefail; output capture separate
@@ -2475,15 +2612,16 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         run: |
           bash scripts/acceptance/hardening_6_framework.sh
-      - name: Verify enforcement_mode gate
+      - name: Verify enforcement_mode gate (v33 R33 F3 — must be block for merge)
         if: steps.changes.outputs.relevant == 'true'
         run: |
+          set -euo pipefail
           mode=$(jq -r '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json)
-          if [ "$mode" = "block" ]; then
-            echo "enforcement_mode=block confirmed; acceptance gate must have passed"
-          else
-            echo "enforcement_mode=$mode (pre-flip or non-H6.0); acceptance gate not required"
+          if [ "$mode" != "block" ]; then
+            echo "::error::enforcement_mode='$mode' (expected 'block'). Task 9 flip 未完成；本 PR 不能 merge (否则框架仍在 observe mode，L1/L3 hard block 不生效)。"
+            exit 1
           fi
+          echo "enforcement_mode=block confirmed."
       # v24 R23 F1 fix: self-check branch protection includes this workflow
       # as required status check. If not, flip to block is unsafe.
       # v28 R28 F3: runs regardless of relevant changes so required-check
