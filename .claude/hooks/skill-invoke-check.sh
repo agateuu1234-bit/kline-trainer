@@ -289,7 +289,7 @@ for tu in data.get('tool_uses', []):
         print(rel_str)
 PY
 )
-      CAND_COUNT=$(echo "$CANDIDATES" | grep -cv '^$' 2>/dev/null || echo 0)
+      CAND_COUNT=$(printf '%s\n' "$CANDIDATES" | awk 'NF' | wc -l | tr -d ' ')
       if [ "$CAND_COUNT" = "1" ]; then
         RECENT_FILE="$CANDIDATES"
         TARGET="file:$RECENT_FILE"
@@ -308,6 +308,13 @@ PY
       # is compared to CURRENT git hash-object output, so blob mismatch →
       # explicit refresh required.
       if [ "$CAND_COUNT" = "0" ] && [ -f "$STATE_FILE" ]; then
+        # v50 R50 F2: check if state recorded multiple artifacts (ambiguity)
+        RECENT_COUNT=$(jq -r '.recent_artifacts // [] | length' "$STATE_FILE" 2>/dev/null || echo 0)
+        if [ "$RECENT_COUNT" -gt 1 ]; then
+          drift_log "codex_gate_multi_artifact_ambiguous"
+          [ "$CONFIG_MODE" = "block" ] && block "codex:adversarial-review: state 记录多个 spec/plan 产出 ($RECENT_COUNT 个)；请在 codex 响应内显式 Write/Edit 单一目标文件以消除歧义，或拆分为多个 brainstorming/writing-plans turn 分别 attest"
+          exit 0
+        fi
         RECENT_ART=$(jq -r '.recent_artifact_path // ""' "$STATE_FILE" 2>/dev/null)
         RECENT_BLOB=$(jq -r '.recent_artifact_blob // ""' "$STATE_FILE" 2>/dev/null)
         if [ -n "$RECENT_ART" ] && [ -f "$RECENT_ART" ]; then
@@ -521,14 +528,18 @@ python3 - "$STATE_FILE" "$TMP" "$SKILL_NAME" "$PWD" "${CLAUDE_SESSION_ID:-}" "$T
 import json, sys, time, os, subprocess
 sf, tmp, skill, pwd, sid, txt_uses_json = sys.argv[1:7]
 history = []
-recent_artifact = ""
-recent_artifact_blob = ""
+recent_artifacts = []  # v50 R50 F2: list form
 if os.path.exists(sf):
     try:
         d = json.load(open(sf))
         history = d.get('transition_history', [])
-        recent_artifact = d.get('recent_artifact_path', '')
-        recent_artifact_blob = d.get('recent_artifact_blob', '')
+        recent_artifacts = d.get('recent_artifacts', [])
+        # back-compat: if old state had scalar fields but no list, migrate
+        if not recent_artifacts:
+            old_path = d.get('recent_artifact_path', '')
+            old_blob = d.get('recent_artifact_blob', '')
+            if old_path:
+                recent_artifacts = [{'path': old_path, 'blob': old_blob}]
     except Exception:
         pass
 history.append({'stage': skill, 'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})
@@ -539,6 +550,7 @@ history.append({'stage': skill, 'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time
 # repo before accepting. Previous lstrip('/') converted /tmp/docs/superpowers/...
 # → tmp/docs/superpowers/... which still contained docs/superpowers/ substring
 # in some regex variants, or more broadly bound state to out-of-repo files.
+# v50 R50 F2 fix: collect ALL matching Write/Edit (no break) into recent_artifacts list
 if skill in ('superpowers:brainstorming', 'superpowers:writing-plans'):
     try:
         tu_data = json.loads(txt_uses_json)
@@ -546,6 +558,7 @@ if skill in ('superpowers:brainstorming', 'superpowers:writing-plans'):
         from pathlib import Path
         pwd_real = Path(pwd).resolve()
         spec_plan_re = re.compile(r'^docs/superpowers/(specs|plans)/.+\.md$')
+        new_artifacts = []
         for tu in tu_data.get('tool_uses', []):
             if tu.get('name') in ('Write', 'Edit', 'MultiEdit', 'NotebookEdit'):
                 fp = tu.get('input', {}).get('file_path', '')
@@ -558,14 +571,16 @@ if skill in ('superpowers:brainstorming', 'superpowers:writing-plans'):
                     continue  # out-of-repo / unresolvable → skip
                 rel_str = str(rel).replace('\\', '/')
                 if spec_plan_re.match(rel_str):
-                    recent_artifact = rel_str
                     try:
-                        recent_artifact_blob = subprocess.check_output(
+                        blob = subprocess.check_output(
                             ['git', 'hash-object', rel_str], text=True, stderr=subprocess.DEVNULL
                         ).strip()
                     except Exception:
-                        recent_artifact_blob = ''
-                    break
+                        blob = ''
+                    new_artifacts.append({'path': rel_str, 'blob': blob})
+        # NO break — collect all matching artifacts
+        if new_artifacts:
+            recent_artifacts = new_artifacts
     except Exception:
         pass
 
@@ -577,8 +592,10 @@ state = {
     'session_id': sid,
     'drift_count': 0,
     'transition_history': history[-50:],
-    'recent_artifact_path': recent_artifact,
-    'recent_artifact_blob': recent_artifact_blob,
+    'recent_artifacts': recent_artifacts,  # v50 R50 F2: list of {path, blob}
+    # Legacy scalar fields for back-compat readers in this PR
+    'recent_artifact_path': recent_artifacts[0]['path'] if recent_artifacts else '',
+    'recent_artifact_blob': recent_artifacts[0]['blob'] if recent_artifacts else '',
 }
 try:
     with open(tmp, 'w') as f:
