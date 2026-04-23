@@ -775,24 +775,25 @@ class TestL1BlockMode:
         ]:
             r = sp.run(
                 ["grep", "-qE",
-                 "^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|frontend-design:[a-z-]+|exempt\\([a-z-]+\\))"],
+                 "^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\\([a-z-]+\\))"],  # v35 R35 F2: dropped frontend-design
                 input=line, capture_output=True, text=True,
             )
             assert r.returncode == 0, f"regex rejected valid gate: {line}"
 
     def test_valid_first_line_both_modes_pass(self, tmp_path):
-        """Verify all 4 gate forms pass Hook 1 in both modes (R6 F1 verification).
-        
+        """Verify 3 legal gate forms pass Hook 1 in both modes (R6 F1 verification).
+
+        v35 R35 F2: frontend-design:* removed from legal set (universal bypass
+        risk per codex R34 F2). Only superpowers:/codex:/exempt( are legal.
+
         After Task 9 flips enforcement_mode to block, ordinary skill-gated
-        responses must still pass through Hook 1 (既有 regex line 49 accepts
-        superpowers:/codex:/frontend-design:/exempt(...)).
+        responses must still pass through Hook 1.
         """
         gate_samples = [
             "Skill gate: superpowers:brainstorming\n\nSome text",
             "Skill gate: superpowers:writing-plans\n\ntext",
             "Skill gate: superpowers:verification-before-completion\n\ntext",
             "Skill gate: codex:adversarial-review\n\ntext",
-            "Skill gate: frontend-design:frontend-design\n\ntext",
             "Skill gate: exempt(read-only-query)\n\ntext",
             "Skill gate: exempt(behavior-neutral)\n\ntext",
         ]
@@ -2530,12 +2531,21 @@ run "config: codex entry exists"    bash -c "jq -e '.enforce[\"codex:adversarial
 run "settings: skill-invoke-check wired" \
   bash -c "jq -e '.hooks.Stop | map(.hooks[]?.command) | flatten | any(. | contains(\"skill-invoke-check\"))' .claude/settings.json > /dev/null"
 
-# ---- workflow-rules enforcement_mode 必须 = "block" (v33 R33 F3 fix) ----
-# Previously 'drift-log|block' 都 accept，Task 9 flip 漏掉也通过 → 框架上线后
-# 仍是 observe mode → CI 绿了但其实框架没起作用。本脚本是 PRE-MERGE GATE
-# (CI required status)，必须 fail 如果 enforcement_mode != "block"。
-run "rules: enforcement_mode == block (pre-merge gate; Task 9 flip 必须已完成)" \
-  bash -c "jq -e '.skill_gate_policy.enforcement_mode == \"block\"' .claude/workflow-rules.json > /dev/null"
+# ---- workflow-rules enforcement_mode (v34 R33 F3 + v35 R35 F1 fix) ----
+# Task 1-8 runs in bootstrap mode where enforcement_mode is still drift-log
+# (Task 9 flip is deliberately the last commit). If we hard-required block
+# here, Task 8 acceptance could NEVER pass → push 开发者改破窗绕开。
+# Split: default mode accepts drift-log OR block; --final (pre-merge/CI)
+# requires block. Task 8 calls default; CI workflow passes --final.
+FINAL_MODE=0
+for a in "$@"; do [ "$a" = "--final" ] && FINAL_MODE=1; done
+if [ "$FINAL_MODE" = "1" ]; then
+  run "rules: enforcement_mode == block (pre-merge gate; Task 9 flip 必须已完成)" \
+    bash -c "jq -e '.skill_gate_policy.enforcement_mode == \"block\"' .claude/workflow-rules.json > /dev/null"
+else
+  run "rules: enforcement_mode ∈ {drift-log, block} (bootstrap mode)" \
+    bash -c "jq -re '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json | grep -qE '^(drift-log|block)$'"
+fi
 
 # ---- Unit tests ----
 # v9 R8 F3 fix: preserve pytest exit via -o pipefail; output capture separate
@@ -2562,13 +2572,17 @@ ACC_EOF
 chmod +x scripts/acceptance/hardening_6_framework.sh
 ```
 
-- [ ] **Step 2: 跑一遍**
+- [ ] **Step 2: 跑一遍（bootstrap mode；enforcement_mode 仍是 drift-log）**
 
 ```bash
+# v35 R35 F1: Task 8 跑 default mode（不带 --final），accept drift-log 或 block。
+# Task 9 flip 之后 CI 会用 --final 跑，require block。
 ./scripts/acceptance/hardening_6_framework.sh
 ```
 
 Expected: `HARDENING 6 PASS` + 11 passed 0 failed（部分 unit test 数量依实际）
+
+**注**：Task 9 commit 之后，本脚本也可以用 `--final` 再跑一次验证 block mode 状态正确。但 local Task 8 verification 不带 --final，避免 Task 8 必然 fail 的 chicken-and-egg（codex R35 F1 HIGH fix）。
 
 - [ ] **Step 3: commit**
 
@@ -2721,20 +2735,12 @@ jobs:
       - name: Skip when nothing relevant changed
         if: steps.changes.outputs.relevant == 'false'
         run: echo "No hardening-6 framework files touched in this PR; acceptance skipped (status = success)."
-      - name: Run hardening-6 acceptance
+      - name: Run hardening-6 acceptance (pre-merge / --final mode)
+        # v35 R35 F1: CI passes --final so enforcement_mode == block is required.
+        # Local Task 8 runs without --final (bootstrap mode, drift-log OK).
         if: steps.changes.outputs.relevant == 'true'
         run: |
-          bash scripts/acceptance/hardening_6_framework.sh
-      - name: Verify enforcement_mode gate (v33 R33 F3 — must be block for merge)
-        if: steps.changes.outputs.relevant == 'true'
-        run: |
-          set -euo pipefail
-          mode=$(jq -r '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json)
-          if [ "$mode" != "block" ]; then
-            echo "::error::enforcement_mode='$mode' (expected 'block'). Task 9 flip 未完成；本 PR 不能 merge (否则框架仍在 observe mode，L1/L3 hard block 不生效)。"
-            exit 1
-          fi
-          echo "enforcement_mode=block confirmed."
+          bash scripts/acceptance/hardening_6_framework.sh --final
       # v24 R23 F1 fix: self-check branch protection includes this workflow
       # as required status check. If not, flip to block is unsafe.
       # v28 R28 F3: runs regardless of relevant changes so required-check
