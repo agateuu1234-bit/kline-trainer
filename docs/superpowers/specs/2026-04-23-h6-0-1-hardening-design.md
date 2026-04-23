@@ -103,7 +103,7 @@ Bash (behavior-neutral + single-step branches):
 10. Note: `safe_bash` regex at line 153 / 208 already excludes `-` in arg chars (whitelist-level flag-block). Step 8's arg-loop flag-ban is **defense-in-depth** — aligns the two layers so any future relaxation of safe_bash must also update step 8, and ensures the arg-loop never sees a flag to misclassify.
 11. **Shell-glob metacharacter ban in unchecked operands** (codex Gate-4 round-1 finding): for `grep`/`rg`/`jq`, the first non-flag arg is a pattern/filter (not a path), so `_path_is_safe_for_read` does not see it. But bash performs glob expansion BEFORE invoking the tool, so `rg * docs/` expands `*` to every repo-root entry — rg then sees `rg a b .env ... docs/` and searches all expanded names, bypassing the path check. Fix: reject any pattern/filter arg matching `re.search(r'[*?\[\]{}]', arg)`. The SAME set of chars `_path_is_safe_for_read` already rejects on path args at line 96; Step 11 applies identical rule to pattern/filter slot.
 
-**Tests** (`tests/hooks/test_stop_response_check.py`) — 18 new tests:
+**Tests** (`tests/hooks/test_stop_response_check.py`) — 26 new tests (one authoritative inventory; numbers below must match plan A1/A4 exactly):
 
 Tool-native Grep (3):
 - `test_read_only_grep_without_path_blocks` — `Grep(pattern=".env")` no path → BLOCK
