@@ -2854,12 +2854,24 @@ jobs:
       - name: Skip when nothing relevant changed
         if: steps.changes.outputs.relevant == 'false'
         run: echo "No hardening-6 framework files touched in this PR; acceptance skipped (status = success)."
-      - name: Run hardening-6 acceptance (pre-merge / --final mode)
-        # v35 R35 F1: CI passes --final so enforcement_mode == block is required.
-        # Local Task 8 runs without --final (bootstrap mode, drift-log OK).
+      - name: Run hardening-6 acceptance (mode auto-detected from PR state)
+        # v35 R35 F1 + v40 R40 F1 fix: call --final ONLY when this PR's HEAD
+        # has enforcement_mode=block (i.e., it IS the H6.0-flip PR).
+        # Framework PR (H6.0, drift-log) runs default mode → passes.
+        # Flip PR (H6.0-flip, block) runs --final → requires block.
+        # Prevents chicken-egg: framework PR's own CI can't fail by requiring
+        # a state the framework PR intentionally doesn't set (v39 R38 F2).
         if: steps.changes.outputs.relevant == 'true'
         run: |
-          bash scripts/acceptance/hardening_6_framework.sh --final
+          set -euo pipefail
+          mode=$(jq -r '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json)
+          if [ "$mode" = "block" ]; then
+            echo "PR has enforcement_mode=block → running acceptance in --final mode."
+            bash scripts/acceptance/hardening_6_framework.sh --final
+          else
+            echo "PR has enforcement_mode=$mode → running acceptance in bootstrap mode."
+            bash scripts/acceptance/hardening_6_framework.sh
+          fi
       # v24 R23 F1 + v37 R37 F1 fix: self-check branch protection includes
       # this workflow as required status check. ADVISORY ONLY (not
       # fail-blocking) because:
