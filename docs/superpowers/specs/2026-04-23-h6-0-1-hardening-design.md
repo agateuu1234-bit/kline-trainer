@@ -103,12 +103,13 @@ Bash (behavior-neutral + single-step branches):
 10. Note: `safe_bash` regex at line 153 / 208 already excludes `-` in arg chars (whitelist-level flag-block). Step 8's arg-loop flag-ban is **defense-in-depth** — aligns the two layers so any future relaxation of safe_bash must also update step 8, and ensures the arg-loop never sees a flag to misclassify.
 11. **Shell-glob metacharacter ban in unchecked operands** (codex Gate-4 round-1 finding): for `grep`/`rg`/`jq`, the first non-flag arg is a pattern/filter (not a path), so `_path_is_safe_for_read` does not see it. But bash performs glob expansion BEFORE invoking the tool, so `rg * docs/` expands `*` to every repo-root entry — rg then sees `rg a b .env ... docs/` and searches all expanded names, bypassing the path check. Fix: reject any pattern/filter arg matching `re.search(r'[*?\[\]{}]', arg)`. The SAME set of chars `_path_is_safe_for_read` already rejects on path args at line 96; Step 11 applies identical rule to pattern/filter slot.
 
-**Tests** (`tests/hooks/test_stop_response_check.py`) — 26 new tests (one authoritative inventory; numbers below must match plan A1/A4 exactly):
+**Tests** (`tests/hooks/test_stop_response_check.py`) — 27 new tests (one authoritative inventory; numbers below must match plan A1/A4 exactly):
 
-Tool-native Grep (3):
-- `test_read_only_grep_without_path_blocks` — `Grep(pattern=".env")` no path → BLOCK
-- `test_read_only_grep_with_safe_path_passes` — `Grep(pattern=".env", path="docs/")` → PASS
-- `test_single_step_grep_without_path_blocks` → BLOCK
+Tool-native Grep (4; Gate-4 round-4 finding: patterns use non-sensitive `TODO` so tests validate the "path required" rule rather than incidentally matching sensitive-name fallback; behavior-neutral no-path case added):
+- `test_read_only_grep_without_path_blocks` — `Grep(pattern="TODO")` no path → BLOCK
+- `test_behavior_neutral_grep_without_path_blocks` — `Grep(pattern="TODO")` in behavior-neutral → BLOCK
+- `test_read_only_grep_with_safe_path_passes` — `Grep(pattern="TODO", path="docs/")` → PASS
+- `test_single_step_grep_without_path_blocks` — `Grep(pattern="TODO")` in single-step → BLOCK
 
 Tool-native Glob unconditional block (3 — codex rounds 8+10 root-cause fix):
 - `test_read_only_glob_always_blocks` — any `Glob(pattern="*", path="docs/")` (or any args) → BLOCK
@@ -174,7 +175,7 @@ The following 4 acceptance criteria are evaluated by the user at the final PR-me
 
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
-| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**) | 所有测试 pass；新增 26 个 F1 测试（3 Grep tool-native + 3 Glob-always-block + 3 Bash grep/rg + 3 repo-root-equivalent + 2 flag-ban grep/rg + 3 jq + 3 ls + 3 其他 flag-ban + 3 shell-glob-metachar-ban） | 输出里 "passed" 数 ≥ 原有 + 26；failed = 0 |
+| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**) | 所有测试 pass；新增 27 个 F1 测试（4 Grep tool-native + 3 Glob-always-block + 3 Bash grep/rg + 3 repo-root-equivalent + 2 flag-ban grep/rg + 3 jq + 3 ls + 3 其他 flag-ban + 3 shell-glob-metachar-ban） | 输出里 "passed" 数 ≥ 原有 + 27；failed = 0 |
 | A2 | 用户肉眼审 diff：`git diff origin/main -- .claude/hooks/ tests/hooks/` (**after Gate 5 implementation**) | 只改 `.claude/hooks/stop-response-check.sh` + `tests/hooks/test_stop_response_check.py` 两个文件（外加本 spec 文档 `docs/superpowers/specs/2026-04-23-h6-0-1-hardening-design.md` 以及 Gate 3 产出的 plan 文档 `docs/superpowers/plans/2026-04-23-h6-0-1-hardening-plan.md`）；`.claude/hooks/skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 必须 0 改动 | diff 只覆盖 4 个文件（2 code + 2 doc） |
 | A3 | 用户读 spec 确认 scope | scope 只含 R53 F1；F2 / F3 明确标注归 H6.0.1c / H6.0.1b | 用户口头确认 |
 | A4 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main` (**Gate 6 codex review**) | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |

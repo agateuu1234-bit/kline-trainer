@@ -19,7 +19,7 @@
 | File | Action | Responsibility |
 |---|---|---|
 | `.claude/hooks/stop-response-check.sh` | Modify lines 88-108, 110-145, 147-200, 202-250 | Two helpers (`_path_is_safe_for_read` / new `_extract_read_target`) + three exempt branches' Tool-native + Bash logic |
-| `tests/hooks/test_stop_response_check.py` | Add new `TestR53F1RepoRootRejectInHelper` + `TestR53F1GrepGlob` + `TestR53F1BashArgs` test classes | **26 new tests** covering all 6 bypass classes (see per-class breakdown in each Task + A4 audit command) |
+| `tests/hooks/test_stop_response_check.py` | Add new `TestR53F1RepoRootRejectInHelper` + `TestR53F1GrepGlob` + `TestR53F1BashArgs` test classes | **27 new tests** covering all 6 bypass classes (1 Task 1 + 8 Task 2 + 18 Task 3; see per-class breakdown in each Task + A4/A4b audit commands) |
 
 No other files touched. Acceptance A2 requires `git diff origin/main -- .claude/hooks/ tests/hooks/` to show exactly these two files (plus `docs/superpowers/specs/` + `docs/superpowers/plans/` already on branch).
 
@@ -143,10 +143,25 @@ class TestR53F1GrepGlob:
         _restore_enforcement_mode(bak)
 
     def test_read_only_grep_without_path_blocks(self, tmp_path):
+        """Gate-4 round-4 finding: use non-sensitive pattern so test fails on
+        current (pre-fix) code — validates the actual 'path required' rule,
+        not the incidental sensitive-name fallback."""
         tp = _write_transcript(
             tmp_path,
             "Skill gate: exempt(read-only-query)\n\n",
-            tool_uses=[{"name": "Grep", "input": {"pattern": ".env"}}],
+            tool_uses=[{"name": "Grep", "input": {"pattern": "TODO"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_grep_without_path_blocks(self, tmp_path):
+        """Gate-4 round-4 finding: inventory gap — behavior-neutral needed own
+        native Grep no-path test (previous inventory only had read-only +
+        single-step)."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "TODO"}}],
         )
         rc, stdout, _ = _run_hook(tp)
         assert '"decision":"block"' in stdout.replace(" ", "")
@@ -155,7 +170,7 @@ class TestR53F1GrepGlob:
         tp = _write_transcript(
             tmp_path,
             "Skill gate: exempt(read-only-query)\n\n",
-            tool_uses=[{"name": "Grep", "input": {"pattern": ".env", "path": "docs/"}}],
+            tool_uses=[{"name": "Grep", "input": {"pattern": "TODO", "path": "docs/"}}],
         )
         rc, stdout, _ = _run_hook(tp)
         assert '"decision":"block"' not in stdout
@@ -301,7 +316,7 @@ Expected: all 7 PASS.
 pytest tests/hooks/test_stop_response_check.py -v
 ```
 
-Expected: all pre-existing tests still PASS + Task 1 test PASS + Task 2's 7 tests PASS.
+Expected: all pre-existing tests still PASS + Task 1 test PASS + Task 2's 8 tests PASS.
 
 - [ ] **Step 9: Commit**
 
@@ -688,7 +703,7 @@ Expected: all 15 PASS.
 pytest tests/hooks/test_stop_response_check.py -v
 ```
 
-Expected: all tests PASS (original + Task 1 + Task 2 + Task 3 = original count + 26 new).
+Expected: all tests PASS (original + Task 1 + Task 2 + Task 3 = original count + 27 new).
 
 - [ ] **Step 9: Commit**
 
@@ -723,7 +738,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1"
 pytest tests/hooks/test_stop_response_check.py -v
 ```
 
-Expected: all tests PASS (including 26 new F1 tests: 1 Task 1 + 7 Task 2 + 18 Task 3).
+Expected: all tests PASS (including 27 new F1 tests: 1 Task 1 + 8 Task 2 + 18 Task 3).
 
 - [ ] **Step 2: Run the full hooks test suite (regression check)**
 
@@ -755,7 +770,7 @@ Critical: these four and ONLY these four. If `skill-invoke-check.sh` / `skill-in
 git diff origin/main -- tests/hooks/test_stop_response_check.py | grep -c "^+    def test_"
 ```
 
-Expected: 26 (exactly — 1 Task 1 + 7 Task 2 + 18 Task 3).
+Expected: 27 (exactly — 1 Task 1 + 8 Task 2 + 18 Task 3).
 
 - [ ] **Step 5: Commit the plan itself if not yet committed**
 
@@ -766,7 +781,7 @@ git add docs/superpowers/plans/2026-04-23-h6-0-1-hardening-plan.md
 git commit -m "plan(hardening-6.0.1): R53 F1 TDD implementation plan
 
 Bite-sized TDD plan for Gate 5 implementation of H6.0.1 F1 fix. 4 tasks
-(3 implementation + 1 verification) covering 26 new tests across
+(3 implementation + 1 verification) covering 27 new tests across
 _path_is_safe_for_read repo-root-reject / _extract_read_target helper /
 Bash arg-loop 8-tool + flag-ban + per-tool ops.
 
@@ -808,11 +823,11 @@ Target verdict: `approve`. Budget ≤2 rounds.
 
 | # | 动作 | 预期 | 判定（可观测命令） |
 |---|---|---|---|
-| A1 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && pytest tests/hooks/test_stop_response_check.py -v 2>&1 \| tail -30` | 最后一行包含 "N passed"；所有新增 F1 tests 命中 `TestR53F1RepoRootRejectInHelper` / `TestR53F1GrepGlob` / `TestR53F1BashArgs` 三个 class | 新增 26 个测试全部在输出中以 `PASSED` 出现；"failed" 计数 = 0；"error" 计数 = 0 |
+| A1 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && pytest tests/hooks/test_stop_response_check.py -v 2>&1 \| tail -30` | 最后一行包含 "N passed"；所有新增 F1 tests 命中 `TestR53F1RepoRootRejectInHelper` / `TestR53F1GrepGlob` / `TestR53F1BashArgs` 三个 class | 新增 27 个测试全部在输出中以 `PASSED` 出现；"failed" 计数 = 0；"error" 计数 = 0 |
 | A2 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && pytest tests/hooks/ -v 2>&1 \| tail -10` | 全部 hooks tests 通过（回归检查） | 输出最后 "failed" 计数 = 0；"error" 计数 = 0 |
 | A3 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && git diff origin/main --name-only` | 恰好列出 4 个文件路径 | 文件名集合 = {`.claude/hooks/stop-response-check.sh`, `docs/superpowers/plans/2026-04-23-h6-0-1-hardening-plan.md`, `docs/superpowers/specs/2026-04-23-h6-0-1-hardening-design.md`, `tests/hooks/test_stop_response_check.py`}；不含 `skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 任何一个 |
-| A4 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && git diff origin/main -- tests/hooks/test_stop_response_check.py \| grep -c "^+    def test_"` | 新增测试函数恰好 26 个 | 输出数字 = 26 |
-| A4b | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && for t in test_read_only_grep_dot_path_blocks test_read_only_grep_without_path_blocks test_read_only_grep_with_safe_path_passes test_single_step_grep_without_path_blocks test_single_step_grep_normalized_root_dotdot_blocks test_read_only_glob_always_blocks test_behavior_neutral_glob_always_blocks test_single_step_glob_always_blocks test_behavior_neutral_bash_rg_without_path_blocks test_behavior_neutral_bash_rg_with_path_passes test_single_step_bash_grep_recursive_no_path_blocks test_behavior_neutral_bash_rg_dot_blocks test_behavior_neutral_bash_rg_with_flag_blocks test_single_step_bash_grep_with_f_flag_blocks test_behavior_neutral_bash_jq_filter_only_blocks test_behavior_neutral_bash_jq_filter_and_file_passes test_behavior_neutral_bash_jq_filter_and_sensitive_file_blocks test_read_only_bash_ls_dot_blocks test_behavior_neutral_bash_ls_dotenv_blocks test_single_step_bash_ls_safe_path_passes test_behavior_neutral_bash_head_with_n_flag_blocks test_single_step_bash_ls_with_I_flag_blocks test_behavior_neutral_bash_wc_with_l_flag_blocks test_behavior_neutral_bash_rg_star_pattern_blocks test_single_step_bash_grep_starpem_pattern_blocks test_behavior_neutral_bash_jq_star_filter_blocks; do grep -q "def $t" tests/hooks/test_stop_response_check.py && echo "OK $t" \|\| echo "MISSING $t"; done \| grep -c "^OK "` | 以上 26 个测试名每一个都存在于测试文件中（按类别覆盖 6 个 bypass class） | 输出数字 = 26；无 `MISSING` 行 |
+| A4 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && git diff origin/main -- tests/hooks/test_stop_response_check.py \| grep -c "^+    def test_"` | 新增测试函数恰好 27 个 | 输出数字 = 27 |
+| A4b | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && for t in test_read_only_grep_dot_path_blocks test_read_only_grep_without_path_blocks test_behavior_neutral_grep_without_path_blocks test_read_only_grep_with_safe_path_passes test_single_step_grep_without_path_blocks test_single_step_grep_normalized_root_dotdot_blocks test_read_only_glob_always_blocks test_behavior_neutral_glob_always_blocks test_single_step_glob_always_blocks test_behavior_neutral_bash_rg_without_path_blocks test_behavior_neutral_bash_rg_with_path_passes test_single_step_bash_grep_recursive_no_path_blocks test_behavior_neutral_bash_rg_dot_blocks test_behavior_neutral_bash_rg_with_flag_blocks test_single_step_bash_grep_with_f_flag_blocks test_behavior_neutral_bash_jq_filter_only_blocks test_behavior_neutral_bash_jq_filter_and_file_passes test_behavior_neutral_bash_jq_filter_and_sensitive_file_blocks test_read_only_bash_ls_dot_blocks test_behavior_neutral_bash_ls_dotenv_blocks test_single_step_bash_ls_safe_path_passes test_behavior_neutral_bash_head_with_n_flag_blocks test_single_step_bash_ls_with_I_flag_blocks test_behavior_neutral_bash_wc_with_l_flag_blocks test_behavior_neutral_bash_rg_star_pattern_blocks test_single_step_bash_grep_starpem_pattern_blocks test_behavior_neutral_bash_jq_star_filter_blocks; do grep -q "def $t" tests/hooks/test_stop_response_check.py && echo "OK $t" \|\| echo "MISSING $t"; done \| grep -c "^OK "` | 以上 27 个测试名每一个都存在于测试文件中（按类别覆盖 6 个 bypass class） | 输出数字 = 27；无 `MISSING` 行 |
 | A5 | `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/hardening-6.0.1" && bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main 2>&1 \| tail -5` | codex 输出 `Verdict: approve`；脚本 exit 0；ledger 被更新 | 输出含字符串 `Verdict: approve`；无 `Verdict: needs-attention` 或 `Verdict: request-changes` |
 
 **禁词核查**：此 checklist 不含 "should work" / "looks good" / "probably fine" / "basically" / "roughly" / "more or less"。所有判定有可观测命令。
