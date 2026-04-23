@@ -110,16 +110,34 @@ def _path_is_safe_for_read(raw_path, exempt_label):
             return f"BLOCK: {exempt_label} 路径含敏感名: {rel_str}"
     return None
 
+def _extract_read_target(tu):
+    """R53 F1 fix: per-tool path extraction. Returns (tool_name, path_or_None).
+    Read → (Read, file_path); Grep → (Grep, path); Glob → (Glob, None sentinel for unconditional block).
+    Removes the v52 fallback `file_path or path or pattern or ''` which incorrectly
+    treated Grep's pattern as a path when path param was absent."""
+    name = tu.get('name', '')
+    inp = tu.get('input', {})
+    if name == 'Read':
+        return (name, inp.get('file_path'))
+    if name == 'Grep':
+        return (name, inp.get('path'))
+    if name == 'Glob':
+        return (name, None)  # sentinel — caller unconditionally blocks
+    return (name, None)
+
 if reason == 'read-only-query':
     zero_path_re = re.compile(r'^(pwd|true|false)$|^echo +["\'][^"\'"|<>;&`$()]*["\']$')
     file_read_tools = {'ls', 'cat', 'head', 'tail', 'wc'}
     for tu in last_tool_uses:
         name = tu.get('name', '')
         if name in ('Read', 'Grep', 'Glob'):
-            # v52 R52 F1: use shared helper for repo-containment + sensitive-name check
-            inp = tu.get('input', {})
-            tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
-            msg = _path_is_safe_for_read(tgt, f"exempt(read-only-query) {name}")
+            # R53 F1 fix (Gate 2 design): per-tool extraction + Glob unconditional block + Grep path-required
+            tool_name, path_arg = _extract_read_target(tu)
+            if tool_name == 'Glob':
+                print(f"BLOCK: exempt(read-only-query) 不允许 Glob 工具（文件枚举不符合 exempt 最小读语义；请用 Read + 具体 path，或声明真实 skill gate）"); sys.exit(0)
+            if tool_name == 'Grep' and not path_arg:
+                print(f"BLOCK: exempt(read-only-query) Grep 必须显式传 path 参数（不允许无 path 全仓搜索）"); sys.exit(0)
+            msg = _path_is_safe_for_read(path_arg, f"exempt(read-only-query) {tool_name}")
             if msg:
                 print(msg); sys.exit(0)
             continue
@@ -193,9 +211,13 @@ elif reason == 'behavior-neutral':
                     if msg:
                         print(msg); sys.exit(0)
         elif name in ('Read', 'Grep', 'Glob'):
-            inp = tu.get('input', {})
-            tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
-            msg = _path_is_safe_for_read(tgt, f"exempt(behavior-neutral) {name}")
+            # R53 F1 fix (Gate 2 design): per-tool extraction + Glob unconditional block + Grep path-required
+            tool_name, path_arg = _extract_read_target(tu)
+            if tool_name == 'Glob':
+                print(f"BLOCK: exempt(behavior-neutral) 不允许 Glob 工具（文件枚举不符合 exempt 最小读语义；请用 Read + 具体 path，或声明真实 skill gate）"); sys.exit(0)
+            if tool_name == 'Grep' and not path_arg:
+                print(f"BLOCK: exempt(behavior-neutral) Grep 必须显式传 path 参数（不允许无 path 全仓搜索）"); sys.exit(0)
+            msg = _path_is_safe_for_read(path_arg, f"exempt(behavior-neutral) {tool_name}")
             if msg:
                 print(msg); sys.exit(0)
             continue
@@ -213,9 +235,13 @@ elif reason == 'single-step-no-semantic-change':
     for tu in last_tool_uses:
         name = tu.get('name', '')
         if name in ('Read', 'Grep', 'Glob'):
-            inp = tu.get('input', {})
-            tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
-            msg = _path_is_safe_for_read(tgt, f"exempt(single-step) {name}")
+            # R53 F1 fix (Gate 2 design): per-tool extraction + Glob unconditional block + Grep path-required
+            tool_name, path_arg = _extract_read_target(tu)
+            if tool_name == 'Glob':
+                print(f"BLOCK: exempt(single-step) 不允许 Glob 工具（文件枚举不符合 exempt 最小读语义；请用 Read + 具体 path，或声明真实 skill gate）"); sys.exit(0)
+            if tool_name == 'Grep' and not path_arg:
+                print(f"BLOCK: exempt(single-step) Grep 必须显式传 path 参数（不允许无 path 全仓搜索）"); sys.exit(0)
+            msg = _path_is_safe_for_read(path_arg, f"exempt(single-step) {tool_name}")
             if msg:
                 print(msg); sys.exit(0)
             continue

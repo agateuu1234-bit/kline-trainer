@@ -633,6 +633,93 @@ class TestR53F1RepoRootRejectInHelper:
         assert '"decision":"block"' in stdout.replace(" ", "")
 
 
+class TestR53F1GrepGlob:
+    """R53 F1 fix: Grep requires path; Glob unconditionally blocked in all exempt branches."""
+
+    @pytest.fixture(autouse=True)
+    def _block_mode(self):
+        bak = _set_enforcement_mode("block")
+        yield
+        _restore_enforcement_mode(bak)
+
+    def test_read_only_grep_without_path_blocks(self, tmp_path):
+        """Gate-4 round-9 finding: use non-sensitive pattern `TODO` so test
+        validates Task 2's 'path required' rule (not Task 1 sensitive-name helper)."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "TODO"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_grep_without_path_blocks(self, tmp_path):
+        """Gate-4 round-9 finding: inventory gap — behavior-neutral needed own
+        native Grep no-path test."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "TODO"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_read_only_grep_with_safe_path_passes(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "TODO", "path": "docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' not in stdout
+
+    def test_single_step_grep_without_path_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "TODO"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_grep_normalized_root_dotdot_blocks(self, tmp_path):
+        """Grep path='docs/..' resolves to repo-root → BLOCK via helper."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "secret", "path": "docs/.."}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_read_only_glob_always_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Glob", "input": {"pattern": "**/*.md", "path": "docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_glob_always_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Glob", "input": {"pattern": "*.md", "path": "docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_glob_always_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Glob", "input": {"pattern": "*.md", "path": "docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+
 class TestL3ExemptIntegrityBehaviorNeutral:
     @pytest.fixture(autouse=True)
     def _block_mode_for_l3(self):
