@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # stop-response-check.sh
-# Input: stdin JSON {"transcript_path": "/path/to/transcript.jsonl", ...}
-# Reads last assistant message from transcript; validates Skill gate first line + completion claims.
-# Output: Stop hook decision JSON {"decision":"block","reason":"..."} or exit 0 silent.
 set -eo pipefail
+
+# v49 R49 F1 HIGH fix: anchor to repo root so relative reads of
+# .claude/workflow-rules.json / .claude/state/... work when the hook is
+# launched from a subdirectory (via settings.json entry or CI).
+REPO_ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+cd "$REPO_ROOT" || true
 
 # helper: validate exempt integrity entirely in Python (avoid shell IFS parsing bypass)
 # Input: transcript path + exempt reason

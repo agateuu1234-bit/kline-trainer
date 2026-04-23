@@ -45,6 +45,24 @@ for a in "$@"; do [ "$a" = "--final" ] && FINAL_MODE=1; done
 if [ "$FINAL_MODE" = "1" ]; then
   run "rules: enforcement_mode == block (pre-merge gate; Task 9 flip 必须已完成)" \
     bash -c "jq -e '.skill_gate_policy.enforcement_mode == \"block\"' .claude/workflow-rules.json > /dev/null"
+  # v49 R49 F2 HIGH: prove L1 + L3 really block in --final mode. Per-skill
+  # L2/L4/L5 enforcement requires separate per-skill flip PRs (H6.1-H6.10);
+  # --final here validates ONLY L1 (first-line) and L3 (exempt integrity)
+  # global-block contract.
+  run "final: L1 hard-blocks missing first-line" bash -c '
+    tp=$(mktemp); echo "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"no gate here\"}]}}" > "$tp"
+    out=$(echo "{\"transcript_path\":\"$tp\"}" | bash .claude/hooks/stop-response-check.sh 2>&1)
+    rm -f "$tp"
+    echo "$out" | grep -q "\"decision\":\"block\""
+  '
+  run "final: L3 hard-blocks exempt(read-only-query) + cat sensitive path" bash -c '
+    tp=$(mktemp)
+    printf "%s\n" "{\"type\":\"user\",\"message\":{\"content\":\"test\"}}" \
+      "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Skill gate: exempt(read-only-query)\\n\\nrun\"},{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"cat /etc/passwd\"}}]}}" > "$tp"
+    out=$(echo "{\"transcript_path\":\"$tp\"}" | bash .claude/hooks/stop-response-check.sh 2>&1)
+    rm -f "$tp"
+    echo "$out" | grep -q "\"decision\":\"block\""
+  '
 else
   run "rules: enforcement_mode ∈ {drift-log, block} (bootstrap mode)" \
     bash -c "jq -re '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json | grep -qE '^(drift-log|block)$'"
@@ -52,10 +70,23 @@ fi
 
 # ---- Unit tests ----
 # v9 R8 F3 fix: preserve pytest exit via -o pipefail; output capture separate
+# v49 R49 F2 HIGH fix: in --final mode, unit tests that assert drift-log behavior
+# (e.g. test_unknown_skill_drift_pass) fail when enforcement_mode=block.
+# Temporarily restore drift-log around unit tests so they run in their designed mode;
+# the blackbox tests above already prove L1/L3 block in block mode.
+if [ "$FINAL_MODE" = "1" ]; then
+  _SAVED_ENF=$(jq -r '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json 2>/dev/null || echo "block")
+  jq --arg m drift-log '.skill_gate_policy.enforcement_mode = $m' .claude/workflow-rules.json > /tmp/h6-rules-unit.json \
+    && mv /tmp/h6-rules-unit.json .claude/workflow-rules.json
+fi
 run "unit: test_stop_response_check" \
   bash -o pipefail -c "python3 -m pytest tests/hooks/test_stop_response_check.py -q > /tmp/pytest-stop.log 2>&1; ec=\$?; tail -3 /tmp/pytest-stop.log; exit \$ec"
 run "unit: test_skill_invoke_check" \
   bash -o pipefail -c "python3 -m pytest tests/hooks/test_skill_invoke_check.py -q > /tmp/pytest-invoke.log 2>&1; ec=\$?; tail -3 /tmp/pytest-invoke.log; exit \$ec"
+if [ "$FINAL_MODE" = "1" ]; then
+  jq --arg m "$_SAVED_ENF" '.skill_gate_policy.enforcement_mode = $m' .claude/workflow-rules.json > /tmp/h6-rules-unit.json \
+    && mv /tmp/h6-rules-unit.json .claude/workflow-rules.json
+fi
 
 # ---- Regression ----
 # v46 R46 F2 fix: regression scripts must emit their exact success sentinel.

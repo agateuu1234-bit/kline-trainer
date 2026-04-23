@@ -421,7 +421,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/stop-response-check.sh",
+            "command": "bash -c 'cd \"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}\" && exec bash .claude/hooks/stop-response-check.sh'",
             "timeout": 3
           }
         ]
