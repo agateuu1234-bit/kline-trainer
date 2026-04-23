@@ -203,13 +203,42 @@ elif reason == 'behavior-neutral':
                 parts = shlex.split(cmd)
             except ValueError:
                 print(f"BLOCK: exempt(behavior-neutral) Bash 解析失败: {cmd[:80]}"); sys.exit(0)
-            if parts and parts[0] in ('cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
-                for arg in parts[1:]:
+            # R53 F1 fix (Gate 2): 8-tool coverage + universal flag-ban + per-tool operand rules
+            if parts and parts[0] in ('ls', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
+                tool = parts[0]
+                args = parts[1:]
+                # Universal flag-ban (defense-in-depth; safe_bash regex also rejects `-`)
+                for arg in args:
                     if arg.startswith('-'):
-                        continue
-                    msg = _path_is_safe_for_read(arg, f"exempt(behavior-neutral) Bash {parts[0]}")
+                        print(f"BLOCK: exempt(behavior-neutral) Bash {tool} 不允许任何 flag（避免 flag 吃 operand 导致 operand 误分类，如 head -n 1 .env / ls -I .env）: {cmd[:120]}"); sys.exit(0)
+                if tool in ('cat', 'head', 'tail', 'wc', 'ls'):
+                    if len(args) < 1:
+                        print(f"BLOCK: exempt(behavior-neutral) Bash {tool} 需至少 1 个路径参数: {cmd[:120]}"); sys.exit(0)
+                    for path_arg in args:
+                        msg = _path_is_safe_for_read(path_arg, f"exempt(behavior-neutral) Bash {tool}")
+                        if msg:
+                            print(msg); sys.exit(0)
+                elif tool in ('grep', 'rg'):
+                    if len(args) != 2:
+                        print(f"BLOCK: exempt(behavior-neutral) Bash {tool} 必须恰好 '<pattern> <path>' 形式 (实际 {len(args)} 参数): {cmd[:120]}"); sys.exit(0)
+                    # Gate-4 round-1: reject shell-glob metachars in pattern (shell expands before tool runs)
+                    if any(c in args[0] for c in '*?[]{}'):
+                        print(f"BLOCK: exempt(behavior-neutral) Bash {tool} pattern 含 shell glob 元字符（shell 会在命令执行前展开成文件列表，绕过 path 检查）: {args[0]}"); sys.exit(0)
+                    msg = _path_is_safe_for_read(args[1], f"exempt(behavior-neutral) Bash {tool}")
                     if msg:
                         print(msg); sys.exit(0)
+                elif tool == 'jq':
+                    if len(args) < 1:
+                        print(f"BLOCK: exempt(behavior-neutral) Bash jq 至少需 filter: {cmd[:120]}"); sys.exit(0)
+                    if len(args) < 2:
+                        print(f"BLOCK: exempt(behavior-neutral) Bash jq 必须传文件参数 (filter 后至少 1 个 path): {cmd[:120]}"); sys.exit(0)
+                    # Gate-4 round-1: same class as grep/rg — reject shell-glob metachars in filter
+                    if any(c in args[0] for c in '*?[]{}'):
+                        print(f"BLOCK: exempt(behavior-neutral) Bash jq filter 含 shell glob 元字符（shell 会在命令执行前展开成文件列表，绕过 path 检查）: {args[0]}"); sys.exit(0)
+                    for path_arg in args[1:]:
+                        msg = _path_is_safe_for_read(path_arg, f"exempt(behavior-neutral) Bash jq")
+                        if msg:
+                            print(msg); sys.exit(0)
         elif name in ('Read', 'Grep', 'Glob'):
             # R53 F1 fix (Gate 2 design): per-tool extraction + Glob unconditional block + Grep path-required
             tool_name, path_arg = _extract_read_target(tu)
@@ -257,13 +286,41 @@ elif reason == 'single-step-no-semantic-change':
                 parts = shlex.split(cmd)
             except ValueError:
                 print(f"BLOCK: exempt(single-step) Bash 解析失败: {cmd[:80]}"); sys.exit(0)
-            if parts and parts[0] in ('cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
-                for arg in parts[1:]:
+            # R53 F1 fix (Gate 2): 8-tool coverage + universal flag-ban + per-tool operand rules
+            if parts and parts[0] in ('ls', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
+                tool = parts[0]
+                args = parts[1:]
+                # Universal flag-ban (defense-in-depth; safe_bash regex also rejects `-`)
+                for arg in args:
                     if arg.startswith('-'):
-                        continue
-                    msg = _path_is_safe_for_read(arg, f"exempt(single-step) Bash {parts[0]}")
+                        print(f"BLOCK: exempt(single-step) Bash {tool} 不允许任何 flag（避免 flag 吃 operand 导致 operand 误分类，如 head -n 1 .env / ls -I .env）: {cmd[:120]}"); sys.exit(0)
+                if tool in ('cat', 'head', 'tail', 'wc', 'ls'):
+                    if len(args) < 1:
+                        print(f"BLOCK: exempt(single-step) Bash {tool} 需至少 1 个路径参数: {cmd[:120]}"); sys.exit(0)
+                    for path_arg in args:
+                        msg = _path_is_safe_for_read(path_arg, f"exempt(single-step) Bash {tool}")
+                        if msg:
+                            print(msg); sys.exit(0)
+                elif tool in ('grep', 'rg'):
+                    if len(args) != 2:
+                        print(f"BLOCK: exempt(single-step) Bash {tool} 必须恰好 '<pattern> <path>' 形式 (实际 {len(args)} 参数): {cmd[:120]}"); sys.exit(0)
+                    # Gate-4 round-1: reject shell-glob metachars in pattern
+                    if any(c in args[0] for c in '*?[]{}'):
+                        print(f"BLOCK: exempt(single-step) Bash {tool} pattern 含 shell glob 元字符（shell 会在命令执行前展开成文件列表，绕过 path 检查）: {args[0]}"); sys.exit(0)
+                    msg = _path_is_safe_for_read(args[1], f"exempt(single-step) Bash {tool}")
                     if msg:
                         print(msg); sys.exit(0)
+                elif tool == 'jq':
+                    if len(args) < 1:
+                        print(f"BLOCK: exempt(single-step) Bash jq 至少需 filter: {cmd[:120]}"); sys.exit(0)
+                    if len(args) < 2:
+                        print(f"BLOCK: exempt(single-step) Bash jq 必须传文件参数 (filter 后至少 1 个 path): {cmd[:120]}"); sys.exit(0)
+                    if any(c in args[0] for c in '*?[]{}'):
+                        print(f"BLOCK: exempt(single-step) Bash jq filter 含 shell glob 元字符（shell 会在命令执行前展开成文件列表，绕过 path 检查）: {args[0]}"); sys.exit(0)
+                    for path_arg in args[1:]:
+                        msg = _path_is_safe_for_read(path_arg, f"exempt(single-step) Bash jq")
+                        if msg:
+                            print(msg); sys.exit(0)
             continue
         print(f"BLOCK: exempt(single-step) 不允许工具 {name}"); sys.exit(0)
 
