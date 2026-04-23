@@ -56,7 +56,8 @@ Bash fixes (behavior-neutral + single-step branches):
    - **Ban all flags in exempt context** (codex round-3 finding 3): if ANY arg (including middle/trailing) matches regex `^-` → `BLOCK: exempt(X) Bash {grep|rg} 不允许任何 flag（避免 -g/-f/--include 这类 flag 吃 operand 导致 operand 误分类）`. Supersedes the earlier "strip leading -flag" design — flag-aware parsing is out of scope; banning flags is the correct simplification.
    - After flag-ban confirms no flag, require exactly 2 positional args: `pattern` (arg[0]) + `path` (arg[1]). <2 or >2 → `BLOCK: exempt(X) Bash {grep|rg} 必须恰好 "<pattern> <path>" 形式`.
    - Pattern (arg[0]) is NOT path-safety-checked. Path (arg[1]) goes through `_path_is_safe_for_read`, which (per step 4) also rejects repo-root-equivalent paths (`.` / `docs/..`).
-7. `cat` / `head` / `tail` / `wc` / `jq` keep existing rule (all non-flag args are paths; require ≥1).
+7. `cat` / `head` / `tail` / `wc` keep existing rule (all non-flag args are paths; require ≥1).
+8. **`jq` special parse** (codex round-4 finding 3, regression avoidance): `jq` filters like `.`, `.items[]`, `keys` are NOT paths — the earlier rule misclassified them and the new repo-root-equivalent-reject would false-block `jq .`. Fix: for `parts[0] == "jq"`, the FIRST non-flag arg is the filter (do NOT path-check it); subsequent args are paths (path-checked normally). If zero non-flag args → BLOCK `exempt(X) Bash jq 必须至少传 filter`. This keeps `jq . file.json` passing while `jq . /etc/passwd` still blocks on the path arg.
 
 **Tests** (`tests/hooks/test_stop_response_check.py`) — 10 new tests:
 
@@ -81,6 +82,11 @@ Flag-ban (2 — codex round-3 finding 3):
 - `test_single_step_bash_grep_with_f_flag_blocks` — `Bash("grep -f patterns.txt secret docs/")` → BLOCK
 
 Note: earlier `test_single_step_bash_grep_recursive_no_path_blocks` (grep -r TODO) now blocks via flag-ban (−r is a flag); still passes, semantics simpler.
+
+jq regression coverage (2 — codex round-4 finding 3):
+- `test_behavior_neutral_bash_jq_filter_only_blocks` — `Bash("jq .")` no file → BLOCK (filter OK but no file to read = malformed invocation in exempt context)
+- `test_behavior_neutral_bash_jq_filter_and_file_passes` — `Bash("jq . docs/foo.json")` → PASS (filter `.` not path-checked; file path goes through safety check)
+- `test_behavior_neutral_bash_jq_filter_and_sensitive_file_blocks` — `Bash("jq . .env")` → BLOCK (filter OK; path hits sensitive-name)
 
 **Risk**: False positives for legitimate no-path Grep/rg. Mitigation: no-path Grep/rg is always repo-wide; exempt contexts are by design minimal and read-limited — requiring an explicit path is the correct tightening, and escape hatch is "don't use exempt path, declare a real skill gate".
 
@@ -132,7 +138,9 @@ Net effect: under `enforcement_mode=block`, any of these 5 failure conditions ca
 
 **Compute ANY_BLOCK at hook init** (once per invocation, near line 193 where `ENF_MODE` is read):
 ```bash
-ANY_BLOCK=$(jq -r '[.skills | to_entries[] | select(.value.enforcement_mode == "block")] | length' "$CONFIG" 2>/dev/null || echo "0")
+# Schema verified against .claude/config/skill-invoke-enforced.json (codex round-4 finding 1 fix):
+# actual path is .enforce[<skill>].mode, NOT .skills[<skill>].enforcement_mode
+ANY_BLOCK=$(jq -r '[.enforce | to_entries[] | select(.value.mode == "block")] | length' "$CONFIG" 2>/dev/null || echo "0")
 # ANY_BLOCK == "0" means pure-observe (H6.0.1 baseline); >0 means mixed rollout began
 ```
 Helper `state_fail()` (bash function defined once, used by all 6 branches):
@@ -219,16 +227,37 @@ Read-side validation (codex round-3 finding 2):
 Pure-observe differentiation (codex round-3 finding 1):
 - `test_state_any_failure_pure_observe_passes_with_drift_log` — ANY_BLOCK=0 fixture + ANY of the above conditions → exit 0; drift-log file contains matching drift_kind. Verifies that pure-observe rollout preserves current observe semantics.
 
+ANY_BLOCK schema validation (codex round-4 finding 1):
+- `test_state_fail_under_real_config_with_one_skill_flipped_blocks` — fixture sets one skill's `.enforce.<skill>.mode` to `"block"` in skill-invoke-enforced.json (real schema path, not the old wrong `.skills[].enforcement_mode`) + force any state failure → BLOCK. Validates that the jq query introspects the REAL schema; catches the exact bug codex round-4 finding 1 pointed out.
+
 Python-write exception (`json.dump` raise) test: **explicitly deferred** — not reliably injectable without test-only hook seams. The `PY_EC` guard is still added (belt-and-suspenders), and its behavior is covered by codex-inspection rather than runtime test. Documented as acceptable residual for H6.0.1.
 
 **Risk**: Observe-mode operators see more drift-log entries for infra conditions. Mitigation intended: these are real anomalies and should be visible.
 
 ## Non-goals / Explicit Deferrals
 
-- No new enforcement-mode flip (strict contract: this PR stays observe-only; all 3 fixes pass through existing `CONFIG_MODE` branches).
+- No new enforcement-mode flip (strict contract: this PR stays observe-only; state-persistence fixes use `ANY_BLOCK` detection but config itself remains all-observe).
 - No refactor of `_path_is_safe_for_read` signature beyond what F1 requires.
 - No consolidation of R49-R52 fixes (they are already merged; do NOT touch).
 - No new `skill-invoke-enforced.json` keys.
+
+## Accepted residuals (deferred to H6.0-flip PR, NOT this PR)
+
+### R-SID-1: CLAUDE_SESSION_ID continuity gap (codex round-4 finding 2)
+
+**Finding**: `.claude/hooks/skill-invoke-check.sh` line 279-288 falls back to a per-invocation SID hash when `CLAUDE_SESSION_ID` env var is absent. Fallback produces a different state file path per invocation → effectively resets state. In mixed-rollout (ANY_BLOCK>0), an observe turn with missing SID loses stage history; a subsequent block turn sees `_initial` baseline → L4 transition bypass.
+
+**Why deferred to H6.0-flip (not H6.0.1)**:
+1. **Different failure mode**: R53 F3 residual is about state **content** integrity (write/read corruption). SID gap is state **identity** (wrong file read entirely). Different mechanism, different fix surface (hook init SID resolution, not the state-write block).
+2. **Current H6.0.1 state**: `ANY_BLOCK=0` (all observe). Even if SID is unstable today, no block-mode skill exists to consume stale state → no in-the-wild bypass.
+3. **Scope contract**: R53 residual memory and H6.0 merge-acceptance agreed "3 HIGH residual" = F1/F2/F3. SID continuity was NOT in that scope. Inflating H6.0.1 to 4 residuals violates the scope freeze that made H6.0 mergeable.
+
+**Hard precondition bound to H6.0-flip PR** (new gate):
+- H6.0-flip PR (first `mode: "block"` flip for any skill) MUST land CLAUDE_SESSION_ID fail-close logic before the flip commits. Specifically: if CLAUDE_SESSION_ID is absent and ANY_BLOCK would be ≥1 after the proposed flip, hook init emits block JSON (`session_id_absent_l4_fail_closed` drift_kind already exists per line 283 — extend to block).
+- H6.0-flip PR body MUST link this spec's `R-SID-1` section as the gate origin.
+- Acceptance A5 extended: H6.0-flip codex review MUST verify SID-continuity fix is landed.
+
+This residual is **acceptable to merge H6.0.1** because: ANY_BLOCK currently = 0 (no block-mode skill exists), so the SID gap has no exploitable consequence. It becomes exploitable only when the first skill is flipped, and that flip PR is gated on fixing R-SID-1 first.
 
 ## Acceptance (non-coder-executable)
 
@@ -236,8 +265,8 @@ Per CLAUDE.md §Repository governance backstop item 2: every module/phase delive
 
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
-| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` | 所有测试 pass；新增 12 个 F1 测试（4 tool-native + 3 Bash + 3 repo-root-equivalent + 2 flag-ban） | 输出里 "passed" 数 ≥ 原有 + 12；failed = 0 |
-| A2 | 用户终端执行 `pytest tests/hooks/test_skill_invoke_check.py -v` | 所有测试 pass；新增 6 个 F2 + 8 个 F3 测试（含 read-side validation + ANY_BLOCK + reset-trigger） | 输出里 "passed" 数 ≥ 原有 + 14；failed = 0 |
+| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` | 所有测试 pass；新增 15 个 F1 测试（4 tool-native + 3 Bash + 3 repo-root-equivalent + 2 flag-ban + 3 jq regression） | 输出里 "passed" 数 ≥ 原有 + 15；failed = 0 |
+| A2 | 用户终端执行 `pytest tests/hooks/test_skill_invoke_check.py -v` | 所有测试 pass；新增 6 个 F2 + 9 个 F3 测试（含 read-side + ANY_BLOCK + real-schema + reset-trigger） | 输出里 "passed" 数 ≥ 原有 + 15；failed = 0 |
 | A3 | 用户肉眼审 diff：`git diff origin/main -- .claude/hooks/ tests/hooks/` | 只改 2 个 hooks 文件 + 2 个 test 文件，无其他文件改动（尤其 skill-invoke-enforced.json / workflow-rules.json / CLAUDE.md 必须 0 改动） | diff 只覆盖 4 个文件 |
 | A4 | 用户读 spec + plan 确认 scope | scope 只含 R53 F1/F2/F3；不含 enforcement_mode flip / 其他 residual / 无关 refactor | 用户口头确认 |
 | A5 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main` | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |
