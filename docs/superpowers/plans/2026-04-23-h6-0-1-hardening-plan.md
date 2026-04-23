@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Fix R53 F1 — close 5 read-safety bypass classes in exempt contexts (Grep no-path, repo-root-equivalent paths, Bash grep/rg flag-consumption, Bash `ls` missing from arg-path-check, Glob unconditional-block).
+**Goal:** Fix R53 F1 — close 6 read-safety bypass classes in exempt contexts (Grep no-path, repo-root-equivalent paths, Bash grep/rg flag-consumption, Bash `ls` missing from arg-path-check, Glob unconditional-block, shell-glob-metachar expansion in pattern/filter operands).
 
 **Architecture:** Single-file refactor to `.claude/hooks/stop-response-check.sh`. Changes span two helpers (`_path_is_safe_for_read` + new `_extract_read_target`) and three exempt branches (`read-only-query`, `behavior-neutral`, `single-step-no-semantic-change`). No changes to `skill-invoke-check.sh`, `skill-invoke-enforced.json`, `workflow-rules.json`, or `CLAUDE.md`. Glob is unconditionally blocked in exempt (root-cause fix — abandons glob-pattern-grammar arms race).
 
@@ -656,6 +656,24 @@ Specifically, replace the existing arg-loop (line 231-236, the `if parts and par
 
 The read-only-query branch already handles `ls` with 1-arg requirement (line 138). The `path_arg` check at line 141 calls `_path_is_safe_for_read` which now rejects `.` (Task 1 change). So `ls .` already blocks after Task 1. No further changes needed here — verified by `test_read_only_bash_ls_dot_blocks` passing.
 
+- [ ] **Step 6b: Update pre-existing `test_single_step_with_one_tool_passes` to use a safe path (codex Gate-4 round-2 finding 1)**
+
+The existing test in `TestL3ExemptIntegritySingleStep` class (search for `test_single_step_with_one_tool_passes` in `tests/hooks/test_stop_response_check.py`) uses `Bash("ls .")` and asserts no block. After Task 1's repo-root-reject + Task 3's single-step `ls` path-check, this fixture is now unsafe and the test will fail. Update the `command` string:
+
+Before:
+```python
+tool_uses=[{"name": "Bash", "input": {"command": "ls ."}}],
+```
+
+After:
+```python
+tool_uses=[{"name": "Bash", "input": {"command": "ls docs/"}}],
+```
+
+Rationale: test's original intent was "single-step allows ONE tool_use, passes" — the `.` vs `docs/` choice was incidental. With F1 fix, `.` is unsafe and tested by our new `test_single_step_bash_ls_safe_path_passes` (which uses `ls docs/`). The update preserves the existing test's "one-tool count" semantic while moving away from now-unsafe fixture.
+
+Note: the new `test_single_step_bash_ls_safe_path_passes` (in TestR53F1BashArgs class) effectively replaces the coverage lost here if we had deleted the existing test. They're near-duplicates semantically — acceptable because the existing test lives in `TestL3ExemptIntegritySingleStep` (legacy H6.0 class) and the new one lives in F1-specific class.
+
 - [ ] **Step 7: Run the 15 new Bash tests**
 
 ```bash
@@ -737,7 +755,7 @@ Critical: these four and ONLY these four. If `skill-invoke-check.sh` / `skill-in
 git diff origin/main -- tests/hooks/test_stop_response_check.py | grep -c "^+    def test_"
 ```
 
-Expected: 23 (exactly).
+Expected: 26 (exactly — 1 Task 1 + 7 Task 2 + 18 Task 3).
 
 - [ ] **Step 5: Commit the plan itself if not yet committed**
 
