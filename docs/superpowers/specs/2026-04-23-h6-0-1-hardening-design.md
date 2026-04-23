@@ -1,4 +1,4 @@
-# H6.0.1 Hardening — Spec (v10, 三拆最终 scope)
+# H6.0.1 Hardening — Spec (v11, 三拆最终 scope + Glob-ban 根源修)
 
 **Date**: 2026-04-23
 **Status**: Design frozen, awaiting codex branch-diff review at Review Gate 2 of 7 (spec-only phase; pre-implementation)
@@ -61,9 +61,9 @@ Why residual merge was safe: framework runs observe-only → no response is bloc
 - Bash branches: line 185-191 (behavior-neutral arg loop), 230-236 (single-step arg loop)
 - `safe_bash` / `safe_bash_single` whitelist regex: line 150-154, 205-209
 
-**Bug — four equivalent bypass paths**:
+**Bug — five equivalent bypass paths**:
 
-(a) **Tool-native Grep/Glob without `path`** (codex round-1 finding 1 equivalent): path extraction falls back to `pattern` as path, so `Grep(pattern="TODO")` searches cwd recursively while path-safety sees pattern string.
+(a) **Tool-native Grep without `path`**: path extraction falls back to `pattern` as path, so `Grep(pattern="TODO")` searches cwd recursively while path-safety sees pattern string.
 
 (b) **Tool-native / Bash `path` = repo-root-equivalent** (codex round-2 finding 1): `rg secret .` / `Grep(path="docs/..")` / `ls .` all resolve to repo root but currently pass `_path_is_safe_for_read` (only rejects `~`, glob, out-of-repo, sensitive-component).
 
@@ -71,23 +71,23 @@ Why residual merge was safe: framework runs observe-only → no response is bloc
 
 (d) **Bash `ls` not in arg-path-check loop** (codex round-6 finding 2): `ls` IS in safe_bash whitelist (line 153) but the arg loop (line 185-191, 231-236) only covers `cat/head/tail/wc/grep/rg/jq`. `ls .` / `ls .env` / `ls docs/..` pass the whitelist AND skip arg-path-check → bypass for repo-wide enum or sensitive-name probe.
 
+(e) **Glob — entire tool class is the wrong fit for exempt contexts** (codex rounds 8+10 findings, root-cause): Glob's `pattern` is itself a file selector with a rich wildcard language (`*`, `**`, `?`, `[abc]`, `{a,b}`). Every round of "validate Glob pattern" (round 8 = literal-component sensitive-name; round 10 = wildcarded-component sensitive-name like `**/.en[v]`, `**/*.pem`, `id_[rd]sa`) closed one subset of the bypass space and opened another. Glob's whole purpose is "enumerate files matching a pattern" — which is the opposite of the minimum-privilege read-limited posture that exempt contexts are designed for. Fixing this at the pattern-grammar level is a losing game (codex 2 rounds already). **Root-cause fix: exempt contexts should not allow Glob at all** — whoever needs to enumerate files should declare a real skill gate.
+
 **Fix (approach A — unified, minimal, in one file)**:
 
 Tool-native (3 exempt branches):
 1. Remove `pattern` fallback from path extraction for Grep (Grep's pattern is content-match, NOT a path).
-2. Introduce helper `_extract_read_target(tu)` returning `(tool_name, path_str_or_None, glob_pattern_or_None)`:
-   - `Read` → `(Read, file_path, None)` (file_path required, None if absent)
-   - `Grep` → `(Grep, path, None)` (path only; None if absent)
-   - `Glob` → `(Glob, path, pattern)` (BOTH required; pattern is a file selector and must be validated, codex round-8 finding 1)
-3. `_path_is_safe_for_read`: when called with empty/None path for Grep/Glob, return
-   `BLOCK: {exempt_label} Grep/Glob 必须显式传 path 参数（不允许无 path 全仓搜索）`.
+2. Introduce helper `_extract_read_target(tu)` returning `(tool_name, path_str_or_None)`:
+   - `Read` → `(Read, file_path)` (None if absent)
+   - `Grep` → `(Grep, path)` (None if absent)
+   - `Glob` → `(Glob, None)` — caller will unconditionally BLOCK (see step 5).
+3. `_path_is_safe_for_read`: when called with empty/None path for Grep, return
+   `BLOCK: {exempt_label} Grep 必须显式传 path 参数（不允许无 path 全仓搜索）`.
 4. **Reject repo-root-equivalent paths**: after `rel = resolved.relative_to(repo_root)`, if `str(rel).replace(os.sep, '/')` is `'.'` or empty, return `BLOCK: {exempt_label} 路径归一化到仓库根等于全仓搜索: {s}`. Catches `.`, `./`, `docs/..`, absolute `<repo>` form.
-5. **Glob pattern validation** (NEW, codex round-8 finding 1): introduce `_glob_pattern_is_safe(pattern, exempt_label)` that rejects:
-   - Any `..` component (traversal) → BLOCK `exempt(X) Glob pattern 含 .. 禁止 traversal: {pattern}`
-   - Leading `/` or `~` (absolute / home) → BLOCK `exempt(X) Glob pattern 禁止绝对路径: {pattern}`
-   - Any literal (non-glob-char) path component matching `_SENSITIVE_NAME_RE` → BLOCK `exempt(X) Glob pattern 字面组件含敏感名: {pattern}` (e.g. `**/.env`, `secrets/**`, `*/id_rsa`). "Literal" = component with no `*`, `?`, `[`, `]`, `{`, `}` chars.
-   - For Glob, call both `_path_is_safe_for_read(path, ...)` AND `_glob_pattern_is_safe(pattern, ...)` — either failure blocks.
-6. Update three tool-native call sites to use `_extract_read_target` and the Glob two-arg validation.
+5. **Glob unconditionally blocked in all three exempt branches** (codex rounds 8+10 root-cause fix — supersedes the prior `_glob_pattern_is_safe` helper, which is removed): when a tool_use has `name == "Glob"` in any exempt branch, return
+   `BLOCK: {exempt_label} 不允许 Glob 工具（文件枚举不符合 exempt 最小读语义；请用 Read + 具体 path，或声明真实 skill gate）`.
+   No path or pattern inspection. No wildcards sub-rule. No literal-vs-glob-char distinction. The entire Glob-related finding class is closed by refusing to route Glob through exempt at all.
+6. Update three tool-native call sites to use `_extract_read_target` and the step-5 unconditional Glob block.
 
 Bash (behavior-neutral + single-step branches):
 7. Extend the arg-path-check loop to cover **all** whitelisted Bash read tools:
@@ -104,11 +104,15 @@ Bash (behavior-neutral + single-step branches):
 
 **Tests** (`tests/hooks/test_stop_response_check.py`) — 18 new tests:
 
-Tool-native (4):
+Tool-native Grep (3):
 - `test_read_only_grep_without_path_blocks` — `Grep(pattern=".env")` no path → BLOCK
 - `test_read_only_grep_with_safe_path_passes` — `Grep(pattern=".env", path="docs/")` → PASS
-- `test_behavior_neutral_glob_without_path_blocks` → BLOCK
 - `test_single_step_grep_without_path_blocks` → BLOCK
+
+Tool-native Glob unconditional block (3 — codex rounds 8+10 root-cause fix):
+- `test_read_only_glob_always_blocks` — any `Glob(pattern="*", path="docs/")` (or any args) → BLOCK
+- `test_behavior_neutral_glob_always_blocks` — same → BLOCK
+- `test_single_step_glob_always_blocks` — same → BLOCK
 
 Bash grep/rg (3):
 - `test_behavior_neutral_bash_rg_without_path_blocks` — `Bash("rg secret")` → BLOCK
@@ -118,7 +122,7 @@ Bash grep/rg (3):
 Repo-root-equivalent rejection (3):
 - `test_read_only_grep_dot_path_blocks` — `Grep(pattern="secret", path=".")` → BLOCK
 - `test_behavior_neutral_bash_rg_dot_blocks` — `Bash("rg secret .")` → BLOCK
-- `test_single_step_grep_normalized_root_blocks` — `Grep(pattern="secret", path="docs/..")` → BLOCK
+- `test_single_step_grep_normalized_root_dotdot_blocks` — `Grep(pattern="secret", path="docs/..")` → BLOCK
 
 Flag-ban on grep/rg (2):
 - `test_behavior_neutral_bash_rg_with_flag_blocks` — `Bash("rg -g '*.md' secret docs/")` → BLOCK
@@ -139,11 +143,8 @@ jq regression coverage (3):
 - `test_single_step_bash_ls_with_I_flag_blocks` — `Bash("ls -I .env")` → BLOCK
 - `test_behavior_neutral_bash_wc_with_l_flag_blocks` — `Bash("wc -l .env")` → BLOCK
 
-**Glob pattern validation** (4 — codex round-8 finding 1):
-- `test_read_only_glob_with_dotdot_pattern_blocks` — `Glob(pattern="../.env", path="docs/")` → BLOCK (`..` traversal)
-- `test_behavior_neutral_glob_with_absolute_pattern_blocks` — `Glob(pattern="/etc/passwd", path="docs/")` → BLOCK (absolute)
-- `test_single_step_glob_with_sensitive_literal_blocks` — `Glob(pattern="**/.env", path="docs/")` → BLOCK (literal `.env` component matches sensitive-name regex)
-- `test_behavior_neutral_glob_with_safe_pattern_passes` — `Glob(pattern="**/*.md", path="docs/")` → PASS (glob chars only, no literal sensitive component)
+<!-- Prior v9 "Glob pattern validation" (dotdot / absolute / sensitive-literal / safe-pass) tests REMOVED in v11 — replaced by the 3 Glob-always-blocks tests above. Rationale: v9 rule validated the pattern grammar; v10 codex still exposed wildcarded-sensitive-name bypasses (`**/.en[v]`, `**/*.pem`, `id_[rd]sa`). Exiting the grammar-validation arms race by unconditionally blocking Glob in exempt contexts. -->
+
 
 **Risk**: False positives for legitimate whole-repo read. Mitigation: exempt contexts are by design minimal; whole-repo reads should declare a real skill gate instead. Escape hatch exists.
 
@@ -167,7 +168,7 @@ The following 4 acceptance criteria are evaluated by the user at the final PR-me
 
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
-| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**) | 所有测试 pass；新增 25 个 F1 测试 | 输出里 "passed" 数 ≥ 原有 + 25；failed = 0 |
+| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**) | 所有测试 pass；新增 23 个 F1 测试（3 Grep tool-native + 3 Glob-always-block + 3 Bash grep/rg + 3 repo-root-equivalent + 3 flag-ban grep/rg + 3 jq + 3 ls + 2 其他 flag-ban head/ls/wc） | 输出里 "passed" 数 ≥ 原有 + 23；failed = 0 |
 | A2 | 用户肉眼审 diff：`git diff origin/main -- .claude/hooks/ tests/hooks/` (**after Gate 5 implementation**) | 只改 `.claude/hooks/stop-response-check.sh` + `tests/hooks/test_stop_response_check.py` 两个文件（外加本 spec 文档 `docs/superpowers/specs/2026-04-23-h6-0-1-hardening-design.md` 以及 Gate 3 产出的 plan 文档 `docs/superpowers/plans/2026-04-23-h6-0-1-hardening-plan.md`）；`.claude/hooks/skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 必须 0 改动 | diff 只覆盖 4 个文件（2 code + 2 doc） |
 | A3 | 用户读 spec 确认 scope | scope 只含 R53 F1；F2 / F3 明确标注归 H6.0.1c / H6.0.1b | 用户口头确认 |
 | A4 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main` (**Gate 6 codex review**) | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |
