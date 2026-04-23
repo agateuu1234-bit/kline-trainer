@@ -105,7 +105,7 @@ Bash (behavior-neutral + single-step branches):
 
 12. **Path-operand glob-metachar defense is pre-existing, not a new rule** (codex Gate-4 round-5 clarification): for **path** operands (e.g. `cat docs/*`, `ls docs/*.md`, `wc docs/[ab].txt`), `_path_is_safe_for_read` already rejects glob metacharacters at line 96-97 via `if any(c in s for c in '*?[]{}'): return f"BLOCK: {exempt_label} 路径含 glob: {s}"`. This H6.0.1 PR does NOT change that rule — the fix inherits it for all newly-routed Bash path operands (cat/head/tail/wc/ls full args + grep/rg arg[1] + jq arg[1:]). Defense-in-depth tests added to prove the combined flow (Bash arg-loop → `_path_is_safe_for_read`) blocks shell-expanded path operands end-to-end.
 
-**Tests** (`tests/hooks/test_stop_response_check.py`) — 30 new tests (one authoritative inventory; numbers below must match plan A1/A4 exactly):
+**Tests** (`tests/hooks/test_stop_response_check.py`) — 31 new tests (one authoritative inventory; numbers below must match plan A1/A4 exactly):
 
 Tool-native Grep (4; Gate-4 round-4 finding: patterns use non-sensitive `TODO` so tests validate the "path required" rule rather than incidentally matching sensitive-name fallback; behavior-neutral no-path case added):
 - `test_read_only_grep_without_path_blocks` — `Grep(pattern="TODO")` no path → BLOCK
@@ -157,6 +157,9 @@ jq regression coverage (3):
 - `test_single_step_bash_ls_glob_path_blocks` — `Bash("ls docs/*.md")` → BLOCK
 - `test_behavior_neutral_bash_wc_bracket_path_blocks` — `Bash("wc docs/[ab].txt")` → BLOCK (`[...]` char class)
 
+**Static source assertion — flag-ban arg-loop presence** (1 — codex Gate-4 round-6 finding): existing safe_bash whitelist rejects `-` before the arg-loop runs, so runtime flag-ban tests block via whitelist not arg-loop. A static assertion independent of whitelist confirms arg-loop flag-ban code exists in both exempt branches (defense-in-depth invariant: if whitelist is future-relaxed, arg-loop still blocks):
+- `test_r53f1_flag_ban_code_present_in_both_branches` — grep hook source for "不允许任何 flag"; count ≥ 2 (one per exempt branch)
+
 <!-- Prior v9 "Glob pattern validation" (dotdot / absolute / sensitive-literal / safe-pass) tests REMOVED in v11 — replaced by the 3 Glob-always-blocks tests above. Rationale: v9 rule validated the pattern grammar; v10 codex still exposed wildcarded-sensitive-name bypasses (`**/.en[v]`, `**/*.pem`, `id_[rd]sa`). Exiting the grammar-validation arms race by unconditionally blocking Glob in exempt contexts. -->
 
 
@@ -182,7 +185,7 @@ The following 4 acceptance criteria are evaluated by the user at the final PR-me
 
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
-| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**) | 所有测试 pass；新增 30 个 F1 测试（4 Grep tool-native + 3 Glob-always-block + 3 Bash grep/rg + 3 repo-root-equivalent + 2 flag-ban grep/rg + 3 jq + 3 ls + 3 其他 flag-ban + 3 shell-glob-metachar-ban pattern/filter + 3 shell-glob-metachar-ban path-defense-in-depth） | 输出里 "passed" 数 ≥ 原有 + 30；failed = 0 |
+| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**) | 所有测试 pass；新增 31 个 F1 测试（4 Grep tool-native + 3 Glob-always-block + 3 Bash grep/rg + 3 repo-root-equivalent + 2 flag-ban grep/rg + 3 jq + 3 ls + 3 其他 flag-ban + 3 shell-glob-metachar-ban pattern/filter + 3 path-defense-in-depth + 1 static source assertion） | 输出里 "passed" 数 ≥ 原有 + 31；failed = 0 |
 | A2 | 用户肉眼审 diff：`git diff origin/main -- .claude/hooks/ tests/hooks/` (**after Gate 5 implementation**) | 只改 `.claude/hooks/stop-response-check.sh` + `tests/hooks/test_stop_response_check.py` 两个文件（外加本 spec 文档 `docs/superpowers/specs/2026-04-23-h6-0-1-hardening-design.md` 以及 Gate 3 产出的 plan 文档 `docs/superpowers/plans/2026-04-23-h6-0-1-hardening-plan.md`）；`.claude/hooks/skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 必须 0 改动 | diff 只覆盖 4 个文件（2 code + 2 doc） |
 | A3 | 用户读 spec 确认 scope | scope 只含 R53 F1；F2 / F3 明确标注归 H6.0.1c / H6.0.1b | 用户口头确认 |
 | A4 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main` (**Gate 6 codex review**) | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |
