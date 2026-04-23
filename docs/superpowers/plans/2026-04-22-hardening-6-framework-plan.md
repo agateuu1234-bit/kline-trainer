@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 建 skill pipeline enforcement 框架 (ζ scope, 5 层)：新 `skill-invoke-check.sh` hook + 升级 `stop-response-check.sh` + `skill-invoke-enforced.json` config + per-worktree/session mini-state + drift log；初始全 observe，最后一个 commit flip `enforcement_mode: drift-log → block`。
+**Goal (v39 R38 F2 + v40 R39 F1 scope correction):** 建 skill pipeline enforcement 框架 **骨架 + 全 observe** (ζ scope, 5 层)：新 `skill-invoke-check.sh` hook + 升级 `stop-response-check.sh` + `skill-invoke-enforced.json` config + per-worktree/session mini-state + drift log + CI workflow。**H6.0 只落 observe-mode 骨架**；`enforcement_mode` 全程保持 `drift-log`。**L1/L3 global hard-block 的 flip 不在本 PR** — 拆到后续单独 PR `H6.0-flip`，前置条件为 admin 手动确认 branch protection / rulesets 已配置 required status check。
 
-**Architecture:** 2 个 Stop hooks 串联（既有 stop-response-check.sh 升级 L1/L3 强制 + 新 skill-invoke-check.sh 做 L2/L4/L5）；JSON config 驱动 13 个 skill 的 mode 和 legal_next_set；mini-state 按 worktree hash + session_id 隔离原子 write；codex gate 读 attest-ledger.json + attest-override-log.jsonl 做 target-bound + revision-bound 证据检查（不改既有 codex hook）。
+**Architecture:** 2 个 Stop hooks 串联（既有 stop-response-check.sh 升级 L1/L3 + 新 skill-invoke-check.sh 做 L2/L4/L5；所有 block 逻辑已就位，但当前 enforcement_mode=drift-log 时都走 drift-log 分支）；JSON config 驱动 14 个 skill 的 mode 和 legal_next_set；mini-state 按 worktree hash + session_id 隔离原子 write；codex gate 读 attest-ledger.json + attest-override-log.jsonl 做 target-bound + revision-bound 证据检查（不改既有 codex hook）。
 
 **Tech Stack:** bash 4 + `jq` / `python3` / POSIX regex / JSONL append-only log。复用既有 `ledger-lib.sh` pattern。测试用 Python (匹配既有 `tests/hooks/test_*.py` pattern)。
 
@@ -18,9 +18,10 @@
 
 ## Scope 边界
 
-**In scope**：建框架 + 13 skill observe（**不 block 任何 per-skill 调用**；仅 L1/L3 全局 hard-block 通过 flip `enforcement_mode`）
+**In scope**：建框架骨架 + 14 skill observe（**不 block 任何 per-skill 调用**；`enforcement_mode` 全程 drift-log；所有 block 代码已就位但仅在 enforcement_mode=block 时激活）
 
-**Out of scope**：
+**Out of scope**（v39 R38 F2 defer）：
+- **`enforcement_mode` drift-log → block flip（H6.0-flip 单独 PR，要求 admin 先配 branch protection）**
 - per-skill flip 到 block（H6.1-H6.10 后续 PR）
 - 完整 state machine β（H7）
 - Artifact check γ（H7）
@@ -3008,7 +3009,7 @@ post-merge handoff。
 |---|---|---|---|
 | 1 | `./scripts/acceptance/hardening_6_framework.sh` | `HARDENING 6 PASS` | 两齐 = PASS |
 | 2 | `jq '.enforce \| length' .claude/config/skill-invoke-enforced.json; jq -e '.enforce["codex:adversarial-review"]' .claude/config/skill-invoke-enforced.json` | 第 1 输出 `14`；第 2 jq -e exit 0 | 两者齐 = PASS |
-| 3 | `jq '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json` | 输出 `"block"`（最后 commit 后）| `block` = PASS |
+| 3 | `jq '.skill_gate_policy.enforcement_mode' .claude/workflow-rules.json` | **H6.0 框架 PR**：输出 `"drift-log"`（Task 9 flip 不在本 PR，v39 R38 F2 defer）；**后续 H6.0-flip PR**：输出 `"block"` | 见 Expected 二选一 = PASS |
 | 4 | `git check-ignore -q .claude/state/skill-stage/test.json; echo "exit=$?"` | 输出 `exit=0`（gitignored runtime 目录）| `exit=0` = PASS（state 目录是 runtime 创建，不 commit；per v10 R9 F3 fix）|
 | 5 | `test -x .claude/hooks/skill-invoke-check.sh && echo OK` | `OK` | = PASS |
 | 6 | `pytest tests/hooks/test_stop_response_check.py tests/hooks/test_skill_invoke_check.py -q` | 末行 `N passed` + 0 failed | 0 failed = PASS |
