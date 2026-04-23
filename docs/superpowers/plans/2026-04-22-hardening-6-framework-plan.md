@@ -591,10 +591,55 @@ PY
 
 ```bash
   # L1 block mode (H6.9 flip): if enforcement_mode=block, hard block missing first-line
+  # v36 R36 F1 fix: mode-i codex flow (same-response announce + codex-attest Bash)
+  # leaves the FINAL assistant (after tool_result) WITHOUT the gate line. The
+  # existing drift-log inference already scans recent assistant messages for
+  # the last valid gate. If the inferred gate is from the SAME current turn
+  # (i.e., an earlier assistant before the tool_result), treat that as the
+  # effective first-line and pass (block would kill the documented flow).
   RULES=".claude/workflow-rules.json"
   ENF_MODE=$(jq -r '.skill_gate_policy.enforcement_mode // "drift-log"' "$RULES" 2>/dev/null)
   if [ "$ENF_MODE" = "block" ]; then
-    block "first-line Skill gate 缺失或格式无效；当前 first_line=\"$first_line\""
+    # Check if inferred gate is from the CURRENT turn (last human user → end):
+    # python scan looks for a gate-matching line in any assistant entry after
+    # the last HUMAN user entry (excluding tool_result pseudo-turns).
+    CUR_TURN_GATE=$(python3 - "$tpath" <<'PY'
+import json, re, sys
+GATE_RE = re.compile(r'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\([a-z-]+\))')
+entries = []
+try:
+    for line in open(sys.argv[1]):
+        try:
+            entries.append(json.loads(line))
+        except Exception: continue
+except Exception: pass
+def is_human(e):
+    if e.get('type') != 'user': return False
+    c = e.get('message', {}).get('content', '')
+    if isinstance(c, str): return True
+    if isinstance(c, list):
+        if any(isinstance(x, dict) and x.get('type') == 'tool_result' for x in c):
+            return False
+    return True
+lui = -1
+for i, e in enumerate(entries):
+    if is_human(e): lui = i
+for e in entries[lui+1:]:
+    if e.get('type') != 'assistant': continue
+    content = e.get('message', {}).get('content', [])
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get('type') == 'text':
+                fl = (c.get('text','').splitlines() or [''])[0]
+                m = GATE_RE.match(fl)
+                if m:
+                    print(m.group(1)); sys.exit(0)
+PY
+)
+    if [ -z "$CUR_TURN_GATE" ]; then
+      block "first-line Skill gate 缺失或格式无效（当前 turn 无任何 assistant 含合法 gate）；当前 first_line=\"$first_line\""
+    fi
+    # Current turn has a gate on an earlier assistant (mode-i pattern); pass
   fi
 ```
 
@@ -1170,21 +1215,36 @@ last_user_idx = -1
 for i, e in enumerate(entries):
     if is_human_user_entry(e):
         last_user_idx = i
-# Aggregate tool_uses across all assistant entries after last HUMAN user;
-# text = text from LAST assistant entry (first_line 取自最后一条)
+# v36 R36 F1 fix: FIRST_LINE must cover mode-i flow (same-response announce
+# + codex-attest run). Real transcripts after a tool_use have:
+#   assistant N  : text("Skill gate:...") + tool_use
+#   user N+1     : tool_result (pseudo-turn, not human)
+#   assistant N+2: final text (MAY NOT repeat gate)
+# Previous code took text from the LAST assistant only → final ungated →
+# L1 blocks the legit codex gate flow. Fix: scan all assistant entries in
+# the current turn; take FIRST_LINE from the first assistant that has a
+# gate-shaped first line. Fall back to last assistant text if none.
+import re
+GATE_RE = re.compile(r'^Skill gate: (superpowers:[a-z-]+|codex:[a-z-]+|exempt\([a-z-]+\))')
+gated_text = ""
+last_text_any = ""
 for e in entries[last_user_idx + 1:]:
     if e.get('type') == 'assistant':
         content = e.get('message', {}).get('content', [])
         if isinstance(content, list):
-            last_text_this_entry = ""
+            text_this_entry = ""
             for c in content:
                 if isinstance(c, dict):
                     if c.get('type') == 'text':
-                        last_text_this_entry = c.get('text', '')
+                        text_this_entry = c.get('text', '')
                     elif c.get('type') == 'tool_use':
                         tool_uses.append({'name': c.get('name'), 'input': c.get('input', {})})
-            if last_text_this_entry:
-                text = last_text_this_entry
+            if text_this_entry:
+                last_text_any = text_this_entry
+                # First gate-matching text wins
+                if not gated_text and GATE_RE.match(text_this_entry.splitlines()[0] if text_this_entry else ""):
+                    gated_text = text_this_entry
+text = gated_text or last_text_any
 print(json.dumps({'text': text, 'tool_uses': tool_uses}))
 PY
 )
@@ -1773,6 +1833,22 @@ def _set_mode(skill, mode):
 
 def _restore(bak):
     shutil.move(bak, bak[:-4])
+
+# v36 R36 F2 fix: local helpers for workflow-rules.json enforcement_mode
+# mutation (needed by TestL1RegexTightening). Previously these were
+# referenced-but-not-defined → NameError at pytest collection.
+def _set_enforcement_mode(mode):
+    p = Path(".claude/workflow-rules.json")
+    bak = str(p) + ".enf.bak"
+    shutil.copy(p, bak)
+    d = json.loads(p.read_text())
+    d["skill_gate_policy"]["enforcement_mode"] = mode
+    p.write_text(json.dumps(d, indent=2))
+    return bak
+
+def _restore_enforcement_mode(bak):
+    import pathlib
+    shutil.move(bak, bak[:-len(".enf.bak")])
 
 
 class TestL2InvokeMatch:
