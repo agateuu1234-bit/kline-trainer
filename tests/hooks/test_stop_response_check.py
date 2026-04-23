@@ -614,6 +614,402 @@ class TestL3ExemptIntegrityReadOnly:
             f"tool_result pseudo-turn must not hide prior Bash side-effect; stdout={stdout[:400]}"
 
 
+class TestR53F1RepoRootRejectInHelper:
+    """R53 F1 fix: _path_is_safe_for_read rejects paths that normalize to repo root."""
+
+    @pytest.fixture(autouse=True)
+    def _block_mode(self):
+        bak = _set_enforcement_mode("block")
+        yield
+        _restore_enforcement_mode(bak)
+
+    def test_read_only_grep_dot_path_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "secret", "path": "."}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+
+class TestR53F1GrepGlob:
+    """R53 F1 fix: Grep requires path; Glob unconditionally blocked in all exempt branches."""
+
+    @pytest.fixture(autouse=True)
+    def _block_mode(self):
+        bak = _set_enforcement_mode("block")
+        yield
+        _restore_enforcement_mode(bak)
+
+    def test_read_only_grep_without_path_blocks(self, tmp_path):
+        """Gate-4 round-9 finding: use non-sensitive pattern `TODO` so test
+        validates Task 2's 'path required' rule (not Task 1 sensitive-name helper)."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "TODO"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_grep_without_path_blocks(self, tmp_path):
+        """Gate-4 round-9 finding: inventory gap — behavior-neutral needed own
+        native Grep no-path test."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "TODO"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_read_only_grep_with_safe_path_passes(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "TODO", "path": "docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' not in stdout
+
+    def test_single_step_grep_without_path_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "TODO"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_grep_normalized_root_dotdot_blocks(self, tmp_path):
+        """Grep path='docs/..' resolves to repo-root → BLOCK via helper."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Grep", "input": {"pattern": "secret", "path": "docs/.."}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_read_only_glob_always_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Glob", "input": {"pattern": "**/*.md", "path": "docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_glob_always_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Glob", "input": {"pattern": "*.md", "path": "docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_glob_always_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Glob", "input": {"pattern": "*.md", "path": "docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+
+class TestR53F1BashArgs:
+    """R53 F1 fix: Bash arg-loop extended to 8 tools + universal flag-ban + per-tool operand rules."""
+
+    @pytest.fixture(autouse=True)
+    def _block_mode(self):
+        bak = _set_enforcement_mode("block")
+        yield
+        _restore_enforcement_mode(bak)
+
+    # --- Bash grep/rg: no-path / with-path / recursive-flag ---
+
+    def test_behavior_neutral_bash_rg_without_path_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "rg TODO"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_bash_rg_without_path_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "rg TODO"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_bash_rg_with_path_passes(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "rg TODO docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' not in stdout
+
+    def test_single_step_bash_grep_recursive_no_path_blocks(self, tmp_path):
+        """`grep -r TODO` — blocked (flag present)."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "grep -r TODO"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    # --- Repo-root-equivalent on Bash grep/rg ---
+
+    def test_behavior_neutral_bash_rg_dot_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "rg secret ."}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    # --- Flag-ban on Bash grep/rg ---
+
+    def test_behavior_neutral_bash_rg_with_flag_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "rg -g *.md secret docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_bash_grep_with_f_flag_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "grep -f patterns.txt secret docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    # --- jq special parse: filter vs paths ---
+
+    def test_behavior_neutral_bash_jq_filter_only_blocks(self, tmp_path):
+        """Gate-4 round-9: non-root filter `.foo` validates Task 3's >=2 args rule."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "jq .foo"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_bash_jq_filter_only_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "jq .foo"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_bash_jq_filter_and_file_blocks(self, tmp_path):
+        """Gate-6 round-1: jq unconditionally blocked in exempt (previously
+        'passes' — renamed + assertion flipped per root-cause jq ban)."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "jq . docs/foo.json"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_bash_jq_env_builtin_blocks(self, tmp_path):
+        """Gate-6 round-1 finding: `jq env codex.pin.json` previously bypassed
+        because filter-slot only banned shell-glob metachars. jq's `env`
+        builtin dumps process environment — now blocked by jq-unconditional ban."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "jq env codex.pin.json"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_bash_jq_filter_and_sensitive_file_blocks(self, tmp_path):
+        """`jq . .env` — redundant under jq-unconditional ban but kept for defense-in-depth."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "jq . .env"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    # --- ls coverage ---
+
+    def test_read_only_bash_ls_dot_blocks(self, tmp_path):
+        """`ls .` — repo-root-reject from Task 1 catches this."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(read-only-query)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "ls ."}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_bash_ls_dotenv_blocks(self, tmp_path):
+        """`ls .env` in behavior-neutral — previously passed because ls was not in arg-loop."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "ls .env"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_bash_ls_safe_path_passes(self, tmp_path):
+        """`ls docs/` — safe path, new arg-loop should allow."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "ls docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' not in stdout
+
+    # --- Universal flag-ban on head/ls/wc ---
+
+    def test_behavior_neutral_bash_head_with_n_flag_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "head -n 1 .env"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_bash_ls_with_I_flag_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "ls -I .env"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_bash_wc_with_l_flag_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "wc -l .env"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    # --- Shell-glob metachar ban in grep/rg pattern + jq filter (Gate-4 round-1 fix) ---
+
+    def test_behavior_neutral_bash_rg_star_pattern_blocks(self, tmp_path):
+        """`rg * docs/` — bare `*` expands in shell BEFORE rg runs → BLOCK."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "rg * docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_bash_grep_starpem_pattern_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "grep *.pem docs/"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_bash_jq_star_filter_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "jq * docs/foo.json"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_bash_jq_star_filter_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "jq * docs/foo.json"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    # --- Shell-glob metachar on PATH operands: defense-in-depth (Gate-4 round-5) ---
+
+    def test_behavior_neutral_bash_cat_glob_path_blocks(self, tmp_path):
+        """`cat docs/*` — path arg contains `*`; pre-existing helper rule blocks."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "cat docs/*"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_single_step_bash_ls_glob_path_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(single-step-no-semantic-change)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "ls docs/*.md"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_bash_wc_bracket_path_blocks(self, tmp_path):
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "wc docs/[ab].txt"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    # --- Static source assertion (Gate-4 round-6 + round-7 findings) ---
+
+    def test_r53f1_flag_ban_code_present_in_both_branches(self):
+        """Branch-scoped assertion: verify EACH exempt branch (behavior-neutral +
+        single-step-no-semantic-change) contains BOTH the `arg.startswith('-')`
+        guard AND the flag-ban BLOCK message."""
+        import re
+        hook_path = REPO_ROOT / ".claude" / "hooks" / "stop-response-check.sh"
+        hook_src = hook_path.read_text()
+
+        def _extract_branch_body(reason):
+            m = re.search(
+                rf"(?:if|elif) +reason +== +['\"]?{re.escape(reason)}['\"]?\s*:(.*?)(?=(?:if|elif) +reason +==|\Z)",
+                hook_src, re.DOTALL)
+            assert m, f"branch for reason={reason!r} not found in hook source"
+            return m.group(1)
+
+        for reason in ('behavior-neutral', 'single-step-no-semantic-change'):
+            body = _extract_branch_body(reason)
+            assert ("arg.startswith('-')" in body) or ('arg.startswith("-")' in body), (
+                f"branch '{reason}' Bash arg-loop missing `arg.startswith('-')` flag guard"
+            )
+            assert "不允许任何 flag" in body, (
+                f"branch '{reason}' missing flag-ban BLOCK message — defense-in-depth gone"
+            )
+
+
 class TestL3ExemptIntegrityBehaviorNeutral:
     @pytest.fixture(autouse=True)
     def _block_mode_for_l3(self):
@@ -696,10 +1092,13 @@ class TestL3ExemptIntegritySingleStep:
         _restore_enforcement_mode(bak)
 
     def test_single_step_with_one_tool_passes(self, tmp_path):
+        # R53 F1: command updated from "ls ." to "ls docs/" — "." now rejected
+        # as repo-root-equivalent per Task 1 helper. Test's original intent
+        # ("single-step with ONE tool passes") preserved via safe path.
         tp = _write_transcript(
             tmp_path,
             "Skill gate: exempt(single-step-no-semantic-change)\n\n",
-            tool_uses=[{"name": "Bash", "input": {"command": "ls ."}}],
+            tool_uses=[{"name": "Bash", "input": {"command": "ls docs/"}}],
         )
         rc, stdout, _ = _run_hook(tp)
         assert '"decision":"block"' not in stdout

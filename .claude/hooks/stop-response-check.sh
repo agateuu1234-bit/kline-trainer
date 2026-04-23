@@ -102,10 +102,28 @@ def _path_is_safe_for_read(raw_path, exempt_label):
     except (ValueError, OSError):
         return f"BLOCK: {exempt_label} 路径 resolve 到仓库外或不可 resolve: {s}"
     rel_str = str(rel).replace(os.sep, '/')
+    # R53 F1 fix (codex Gate-2 round-2): reject repo-root-equivalent paths
+    if rel_str in ('.', ''):
+        return f"BLOCK: {exempt_label} 路径归一化到仓库根等于全仓搜索: {raw_path}"
     for component in rel_str.split('/'):
         if _SENSITIVE_NAME_RE.search(component):
             return f"BLOCK: {exempt_label} 路径含敏感名: {rel_str}"
     return None
+
+def _extract_read_target(tu):
+    """R53 F1 fix: per-tool path extraction. Returns (tool_name, path_or_None).
+    Read → (Read, file_path); Grep → (Grep, path); Glob → (Glob, None sentinel for unconditional block).
+    Removes the v52 fallback `file_path or path or pattern or ''` which incorrectly
+    treated Grep's pattern as a path when path param was absent."""
+    name = tu.get('name', '')
+    inp = tu.get('input', {})
+    if name == 'Read':
+        return (name, inp.get('file_path'))
+    if name == 'Grep':
+        return (name, inp.get('path'))
+    if name == 'Glob':
+        return (name, None)  # sentinel — caller unconditionally blocks
+    return (name, None)
 
 if reason == 'read-only-query':
     zero_path_re = re.compile(r'^(pwd|true|false)$|^echo +["\'][^"\'"|<>;&`$()]*["\']$')
@@ -113,10 +131,13 @@ if reason == 'read-only-query':
     for tu in last_tool_uses:
         name = tu.get('name', '')
         if name in ('Read', 'Grep', 'Glob'):
-            # v52 R52 F1: use shared helper for repo-containment + sensitive-name check
-            inp = tu.get('input', {})
-            tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
-            msg = _path_is_safe_for_read(tgt, f"exempt(read-only-query) {name}")
+            # R53 F1 fix (Gate 2 design): per-tool extraction + Glob unconditional block + Grep path-required
+            tool_name, path_arg = _extract_read_target(tu)
+            if tool_name == 'Glob':
+                print(f"BLOCK: exempt(read-only-query) 不允许 Glob 工具（文件枚举不符合 exempt 最小读语义；请用 Read + 具体 path，或声明真实 skill gate）"); sys.exit(0)
+            if tool_name == 'Grep' and not path_arg:
+                print(f"BLOCK: exempt(read-only-query) Grep 必须显式传 path 参数（不允许无 path 全仓搜索）"); sys.exit(0)
+            msg = _path_is_safe_for_read(path_arg, f"exempt(read-only-query) {tool_name}")
             if msg:
                 print(msg); sys.exit(0)
             continue
@@ -182,17 +203,45 @@ elif reason == 'behavior-neutral':
                 parts = shlex.split(cmd)
             except ValueError:
                 print(f"BLOCK: exempt(behavior-neutral) Bash 解析失败: {cmd[:80]}"); sys.exit(0)
-            if parts and parts[0] in ('cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
-                for arg in parts[1:]:
+            # R53 F1 fix (Gate 2): 8-tool coverage + universal flag-ban + per-tool operand rules
+            if parts and parts[0] in ('ls', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
+                tool = parts[0]
+                args = parts[1:]
+                # Universal flag-ban (defense-in-depth; safe_bash regex also rejects `-`)
+                for arg in args:
                     if arg.startswith('-'):
-                        continue
-                    msg = _path_is_safe_for_read(arg, f"exempt(behavior-neutral) Bash {parts[0]}")
+                        print(f"BLOCK: exempt(behavior-neutral) Bash {tool} 不允许任何 flag（避免 flag 吃 operand 导致 operand 误分类，如 head -n 1 .env / ls -I .env）: {cmd[:120]}"); sys.exit(0)
+                if tool in ('cat', 'head', 'tail', 'wc', 'ls'):
+                    if len(args) < 1:
+                        print(f"BLOCK: exempt(behavior-neutral) Bash {tool} 需至少 1 个路径参数: {cmd[:120]}"); sys.exit(0)
+                    for path_arg in args:
+                        msg = _path_is_safe_for_read(path_arg, f"exempt(behavior-neutral) Bash {tool}")
+                        if msg:
+                            print(msg); sys.exit(0)
+                elif tool in ('grep', 'rg'):
+                    if len(args) != 2:
+                        print(f"BLOCK: exempt(behavior-neutral) Bash {tool} 必须恰好 '<pattern> <path>' 形式 (实际 {len(args)} 参数): {cmd[:120]}"); sys.exit(0)
+                    # Gate-4 round-1: reject shell-glob metachars in pattern (shell expands before tool runs)
+                    if any(c in args[0] for c in '*?[]{}'):
+                        print(f"BLOCK: exempt(behavior-neutral) Bash {tool} pattern 含 shell glob 元字符（shell 会在命令执行前展开成文件列表，绕过 path 检查）: {args[0]}"); sys.exit(0)
+                    msg = _path_is_safe_for_read(args[1], f"exempt(behavior-neutral) Bash {tool}")
                     if msg:
                         print(msg); sys.exit(0)
+                elif tool == 'jq':
+                    # Gate-6 round-1 root-cause fix: jq filter language is too rich for
+                    # safe exempt-context parsing. `jq env codex.pin.json` dumps process
+                    # env via jq's `env` builtin; similar for `inputs`, `include`, `@base64`
+                    # etc. Same pattern as Glob: ban entire tool in exempt rather than
+                    # arms-race the grammar.
+                    print(f"BLOCK: exempt(behavior-neutral) 不允许 jq 工具（filter 语言包含 env/inputs/include 等可读进程环境的 builtin；请改用 cat/head/tail/wc 或声明真实 skill gate）: {cmd[:120]}"); sys.exit(0)
         elif name in ('Read', 'Grep', 'Glob'):
-            inp = tu.get('input', {})
-            tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
-            msg = _path_is_safe_for_read(tgt, f"exempt(behavior-neutral) {name}")
+            # R53 F1 fix (Gate 2 design): per-tool extraction + Glob unconditional block + Grep path-required
+            tool_name, path_arg = _extract_read_target(tu)
+            if tool_name == 'Glob':
+                print(f"BLOCK: exempt(behavior-neutral) 不允许 Glob 工具（文件枚举不符合 exempt 最小读语义；请用 Read + 具体 path，或声明真实 skill gate）"); sys.exit(0)
+            if tool_name == 'Grep' and not path_arg:
+                print(f"BLOCK: exempt(behavior-neutral) Grep 必须显式传 path 参数（不允许无 path 全仓搜索）"); sys.exit(0)
+            msg = _path_is_safe_for_read(path_arg, f"exempt(behavior-neutral) {tool_name}")
             if msg:
                 print(msg); sys.exit(0)
             continue
@@ -210,9 +259,13 @@ elif reason == 'single-step-no-semantic-change':
     for tu in last_tool_uses:
         name = tu.get('name', '')
         if name in ('Read', 'Grep', 'Glob'):
-            inp = tu.get('input', {})
-            tgt = inp.get('file_path') or inp.get('path') or inp.get('pattern') or ''
-            msg = _path_is_safe_for_read(tgt, f"exempt(single-step) {name}")
+            # R53 F1 fix (Gate 2 design): per-tool extraction + Glob unconditional block + Grep path-required
+            tool_name, path_arg = _extract_read_target(tu)
+            if tool_name == 'Glob':
+                print(f"BLOCK: exempt(single-step) 不允许 Glob 工具（文件枚举不符合 exempt 最小读语义；请用 Read + 具体 path，或声明真实 skill gate）"); sys.exit(0)
+            if tool_name == 'Grep' and not path_arg:
+                print(f"BLOCK: exempt(single-step) Grep 必须显式传 path 参数（不允许无 path 全仓搜索）"); sys.exit(0)
+            msg = _path_is_safe_for_read(path_arg, f"exempt(single-step) {tool_name}")
             if msg:
                 print(msg); sys.exit(0)
             continue
@@ -228,13 +281,33 @@ elif reason == 'single-step-no-semantic-change':
                 parts = shlex.split(cmd)
             except ValueError:
                 print(f"BLOCK: exempt(single-step) Bash 解析失败: {cmd[:80]}"); sys.exit(0)
-            if parts and parts[0] in ('cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
-                for arg in parts[1:]:
+            # R53 F1 fix (Gate 2): 8-tool coverage + universal flag-ban + per-tool operand rules
+            if parts and parts[0] in ('ls', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
+                tool = parts[0]
+                args = parts[1:]
+                # Universal flag-ban (defense-in-depth; safe_bash regex also rejects `-`)
+                for arg in args:
                     if arg.startswith('-'):
-                        continue
-                    msg = _path_is_safe_for_read(arg, f"exempt(single-step) Bash {parts[0]}")
+                        print(f"BLOCK: exempt(single-step) Bash {tool} 不允许任何 flag（避免 flag 吃 operand 导致 operand 误分类，如 head -n 1 .env / ls -I .env）: {cmd[:120]}"); sys.exit(0)
+                if tool in ('cat', 'head', 'tail', 'wc', 'ls'):
+                    if len(args) < 1:
+                        print(f"BLOCK: exempt(single-step) Bash {tool} 需至少 1 个路径参数: {cmd[:120]}"); sys.exit(0)
+                    for path_arg in args:
+                        msg = _path_is_safe_for_read(path_arg, f"exempt(single-step) Bash {tool}")
+                        if msg:
+                            print(msg); sys.exit(0)
+                elif tool in ('grep', 'rg'):
+                    if len(args) != 2:
+                        print(f"BLOCK: exempt(single-step) Bash {tool} 必须恰好 '<pattern> <path>' 形式 (实际 {len(args)} 参数): {cmd[:120]}"); sys.exit(0)
+                    # Gate-4 round-1: reject shell-glob metachars in pattern
+                    if any(c in args[0] for c in '*?[]{}'):
+                        print(f"BLOCK: exempt(single-step) Bash {tool} pattern 含 shell glob 元字符（shell 会在命令执行前展开成文件列表，绕过 path 检查）: {args[0]}"); sys.exit(0)
+                    msg = _path_is_safe_for_read(args[1], f"exempt(single-step) Bash {tool}")
                     if msg:
                         print(msg); sys.exit(0)
+                elif tool == 'jq':
+                    # Gate-6 round-1 root-cause fix (mirror behavior-neutral): ban jq in exempt
+                    print(f"BLOCK: exempt(single-step) 不允许 jq 工具（filter 语言包含 env/inputs/include 等可读进程环境的 builtin；请改用 cat/head/tail/wc 或声明真实 skill gate）: {cmd[:120]}"); sys.exit(0)
             continue
         print(f"BLOCK: exempt(single-step) 不允许工具 {name}"); sys.exit(0)
 
