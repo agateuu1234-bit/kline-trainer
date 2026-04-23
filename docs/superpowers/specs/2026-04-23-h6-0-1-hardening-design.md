@@ -60,27 +60,33 @@ Why residual merge was safe: framework runs observe-only → no response is bloc
 **Fix (approach A — unified, minimal, in one file)**:
 
 Tool-native (3 exempt branches):
-1. Remove `pattern` fallback from path extraction (`pattern` is NOT a path).
-2. Introduce helper `_extract_read_target(tu)` returning `(tool_name, path_str_or_None)`:
-   - `Read` → `file_path` (required, None if absent)
-   - `Grep` / `Glob` → `path` only (None if absent)
+1. Remove `pattern` fallback from path extraction for Grep (Grep's pattern is content-match, NOT a path).
+2. Introduce helper `_extract_read_target(tu)` returning `(tool_name, path_str_or_None, glob_pattern_or_None)`:
+   - `Read` → `(Read, file_path, None)` (file_path required, None if absent)
+   - `Grep` → `(Grep, path, None)` (path only; None if absent)
+   - `Glob` → `(Glob, path, pattern)` (BOTH required; pattern is a file selector and must be validated, codex round-8 finding 1)
 3. `_path_is_safe_for_read`: when called with empty/None path for Grep/Glob, return
    `BLOCK: {exempt_label} Grep/Glob 必须显式传 path 参数（不允许无 path 全仓搜索）`.
 4. **Reject repo-root-equivalent paths**: after `rel = resolved.relative_to(repo_root)`, if `str(rel).replace(os.sep, '/')` is `'.'` or empty, return `BLOCK: {exempt_label} 路径归一化到仓库根等于全仓搜索: {s}`. Catches `.`, `./`, `docs/..`, absolute `<repo>` form.
-5. Update three tool-native call sites to use `_extract_read_target`.
+5. **Glob pattern validation** (NEW, codex round-8 finding 1): introduce `_glob_pattern_is_safe(pattern, exempt_label)` that rejects:
+   - Any `..` component (traversal) → BLOCK `exempt(X) Glob pattern 含 .. 禁止 traversal: {pattern}`
+   - Leading `/` or `~` (absolute / home) → BLOCK `exempt(X) Glob pattern 禁止绝对路径: {pattern}`
+   - Any literal (non-glob-char) path component matching `_SENSITIVE_NAME_RE` → BLOCK `exempt(X) Glob pattern 字面组件含敏感名: {pattern}` (e.g. `**/.env`, `secrets/**`, `*/id_rsa`). "Literal" = component with no `*`, `?`, `[`, `]`, `{`, `}` chars.
+   - For Glob, call both `_path_is_safe_for_read(path, ...)` AND `_glob_pattern_is_safe(pattern, ...)` — either failure blocks.
+6. Update three tool-native call sites to use `_extract_read_target` and the Glob two-arg validation.
 
 Bash (behavior-neutral + single-step branches):
-6. Extend the arg-path-check loop to cover **all** whitelisted Bash read tools:
+7. Extend the arg-path-check loop to cover **all** whitelisted Bash read tools:
    ```python
    if parts[0] in ('ls', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'jq'):
        # per-tool parse
    ```
-7. **Universal flag-ban** (codex round-7 finding 1 uniformity fix): for ANY of the 8 whitelisted tools, if any arg in `parts[1:]` matches regex `^-` → `BLOCK: exempt(X) Bash {tool} 不允许任何 flag（避免 flag 吃 operand 导致 operand 误分类，如 head -n 1 .env / ls -I .env）`. Aligns arg-loop strictness with safe_bash regex's existing `-` exclusion; closes the same class as grep/rg flag-consumption.
-8. Per-tool operand rules (after flag-ban confirms no `-` args):
+8. **Universal flag-ban** (codex round-7 finding 1 uniformity fix): for ANY of the 8 whitelisted tools, if any arg in `parts[1:]` matches regex `^-` → `BLOCK: exempt(X) Bash {tool} 不允许任何 flag（避免 flag 吃 operand 导致 operand 误分类，如 head -n 1 .env / ls -I .env）`. Aligns arg-loop strictness with safe_bash regex's existing `-` exclusion; closes the same class as grep/rg flag-consumption.
+9. Per-tool operand rules (after flag-ban confirms no `-` args):
    - **`cat` / `head` / `tail` / `wc` / `ls`**: all args are paths; require ≥1 arg; each path → `_path_is_safe_for_read` (rejects empty / root-equiv / sensitive / out-of-repo).
    - **`grep` / `rg`**: require exactly 2 args: pattern (arg[0], NOT path-checked) + path (arg[1], path-checked).
    - **`jq`**: require ≥1 arg; the first is the filter (NOT path-checked); subsequent args are paths (path-checked).
-9. Note: `safe_bash` regex at line 153 / 208 already excludes `-` in arg chars (whitelist-level flag-block). Step 7's arg-loop flag-ban is **defense-in-depth** — aligns the two layers so any future relaxation of safe_bash must also update step 7, and ensures the arg-loop never sees a flag to misclassify.
+10. Note: `safe_bash` regex at line 153 / 208 already excludes `-` in arg chars (whitelist-level flag-block). Step 8's arg-loop flag-ban is **defense-in-depth** — aligns the two layers so any future relaxation of safe_bash must also update step 8, and ensures the arg-loop never sees a flag to misclassify.
 
 **Tests** (`tests/hooks/test_stop_response_check.py`) — 18 new tests:
 
@@ -119,6 +125,12 @@ jq regression coverage (3):
 - `test_single_step_bash_ls_with_I_flag_blocks` — `Bash("ls -I .env")` → BLOCK
 - `test_behavior_neutral_bash_wc_with_l_flag_blocks` — `Bash("wc -l .env")` → BLOCK
 
+**Glob pattern validation** (4 — codex round-8 finding 1):
+- `test_read_only_glob_with_dotdot_pattern_blocks` — `Glob(pattern="../.env", path="docs/")` → BLOCK (`..` traversal)
+- `test_behavior_neutral_glob_with_absolute_pattern_blocks` — `Glob(pattern="/etc/passwd", path="docs/")` → BLOCK (absolute)
+- `test_single_step_glob_with_sensitive_literal_blocks` — `Glob(pattern="**/.env", path="docs/")` → BLOCK (literal `.env` component matches sensitive-name regex)
+- `test_behavior_neutral_glob_with_safe_pattern_passes` — `Glob(pattern="**/*.md", path="docs/")` → PASS (glob chars only, no literal sensitive component)
+
 **Risk**: False positives for legitimate whole-repo read. Mitigation: exempt contexts are by design minimal; whole-repo reads should declare a real skill gate instead. Escape hatch exists.
 
 ---
@@ -139,7 +151,7 @@ H6.0.1b and H6.0.1c are separate PRs with their own specs, plans, and codex revi
 
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
-| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` | 所有测试 pass；新增 21 个 F1 测试 | 输出里 "passed" 数 ≥ 原有 + 21；failed = 0 |
+| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` | 所有测试 pass；新增 25 个 F1 测试 | 输出里 "passed" 数 ≥ 原有 + 25；failed = 0 |
 | A2 | 用户肉眼审 diff：`git diff origin/main -- .claude/hooks/ tests/hooks/` | 只改 `.claude/hooks/stop-response-check.sh` + `tests/hooks/test_stop_response_check.py` 两个文件；`.claude/hooks/skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 必须 0 改动 | diff 只覆盖 2 个文件 |
 | A3 | 用户读 spec 确认 scope | scope 只含 R53 F1；F2 / F3 明确标注归 H6.0.1c / H6.0.1b | 用户口头确认 |
 | A4 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main` | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |
