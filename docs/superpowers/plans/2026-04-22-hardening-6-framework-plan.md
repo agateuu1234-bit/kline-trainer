@@ -40,21 +40,28 @@
 
 ## File Structure
 
-新增 / 修改文件清单（共 11）：
+**H6.0 framework PR 精确 commit 路径清单**（v47 R47 F2 fix：严格化为 10
+条明确路径，区分 H6.0 vs H6.0-flip）：
 
-| 文件 | 动作 | 所有 Task | 预估行 |
-|---|---|---|---|
-| `.claude/config/skill-invoke-enforced.json` | 新增 | Task 1 | ~120 JSON |
-| ~~`.claude/state/skill-stage/.gitkeep`~~ | runtime 创建（gitignored）| Task 2 验证 gitignore | 0（不 commit）|
-| ~~`.claude/state/skill-invoke-drift.jsonl`~~ | runtime 创建（gitignored）| Task 2 验证 gitignore | 0（不 commit）|
-| `.claude/hooks/stop-response-check.sh` | 升级 | Task 3 | +90 |
-| `tests/hooks/test_stop_response_check.py` | 扩充 | Task 4 | +150 |
-| `.claude/hooks/skill-invoke-check.sh` | 新增 | Task 5 | ~280 |
-| `tests/hooks/test_skill_invoke_check.py` | 新增 | Task 6 | ~320 |
-| `.claude/settings.json` | 修改 | Task 7 | +4 |
-| `scripts/acceptance/hardening_6_framework.sh` | 新增 | Task 8 | ~90 |
-| `.claude/workflow-rules.json` | 修改 | Task 9 | 1 行 |
-| `.github/workflows/hardening_6_gate.yml` | 新增 | Task 8.75 | ~30 |
+| # | 文件 | 动作 | Task | 所属 PR | 预估行 |
+|---|---|---|---|---|---|
+| 1 | `docs/superpowers/specs/2026-04-22-hardening-6-framework-design.md` | 新增 | plan/spec | **H6.0** | ~450 |
+| 2 | `docs/superpowers/plans/2026-04-22-hardening-6-framework-plan.md` | 新增 | plan/spec | **H6.0** | ~3300 |
+| 3 | `.claude/config/skill-invoke-enforced.json` | 新增 | Task 1 | **H6.0** | ~120 JSON |
+| 4 | `.claude/hooks/stop-response-check.sh` | 升级 | Task 3 | **H6.0** | +90 |
+| 5 | `tests/hooks/test_stop_response_check.py` | 扩充 | Task 4 | **H6.0** | +150 |
+| 6 | `.claude/hooks/skill-invoke-check.sh` | 新增 | Task 5 | **H6.0** | ~280 |
+| 7 | `tests/hooks/test_skill_invoke_check.py` | 新增 | Task 6 | **H6.0** | ~320 |
+| 8 | `.claude/settings.json` | 修改 | Task 7 | **H6.0** | +4 |
+| 9 | `scripts/acceptance/hardening_6_framework.sh` | 新增 | Task 8 | **H6.0** | ~90 |
+| 10 | `.github/workflows/hardening_6_gate.yml` | 新增 | Task 8.75 | **H6.0** | ~60 |
+| --- | `.claude/workflow-rules.json` | 修改 1 行 | Task 9 | **H6.0-flip**（v39 R38 F2 defer） | 1 |
+| --- | ~~`.claude/state/skill-stage/.gitkeep`~~ | runtime 创建（gitignored）| Task 2 | **不 commit** | 0 |
+| --- | ~~`.claude/state/skill-invoke-drift.jsonl`~~ | runtime 创建（gitignored）| Task 2 | **不 commit** | 0 |
+
+**H6.0 PR commit 文件数 = 严格 10**（第 1-10 行）。非 coder 清单 item 7 验证
+完全对齐此 10 路径集。`.claude/workflow-rules.json` 单独出现在 H6.0-flip
+PR；state dir + drift-log 是 runtime 生成（gitignored），永不 commit。
 
 ---
 
@@ -3275,7 +3282,7 @@ post-merge handoff。
 | 4 | `git check-ignore -q .claude/state/skill-stage/test.json; echo "exit=$?"` | 输出 `exit=0`（gitignored runtime 目录）| `exit=0` = PASS（state 目录是 runtime 创建，不 commit；per v10 R9 F3 fix）|
 | 5 | `test -x .claude/hooks/skill-invoke-check.sh && echo OK` | `OK` | = PASS |
 | 6 | `pytest tests/hooks/test_stop_response_check.py tests/hooks/test_skill_invoke_check.py -q` | 末行 `N passed` + 0 failed | 0 failed = PASS |
-| 7 | PR files 数组含本 plan 10 个新/改文件 (`gh pr view <PR> --json files`) | 仅这 10 个路径 | 仅 10 个 = PASS |
+| 7 | **H6.0 PR**: `gh pr view <PR> --json files --jq '.files[].path' \| sort` 输出严格等于 File Structure 表行 1-10 的 10 条路径；**H6.0-flip PR**: 严格等于 1 条 `.claude/workflow-rules.json` | 路径集 diff 为空 | PASS |
 | 8 | codex verdict 贴 PR（对 branch HEAD）= `approve` 或 `attest-override 仪式` | 有 comment | 有 = PASS |
 
 ---
