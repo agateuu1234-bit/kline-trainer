@@ -230,15 +230,17 @@ EOF
 
 ```bash
 jq -e '.enforce | length == 14' .claude/config/skill-invoke-enforced.json
-# v15 R14 F1 fix: legal_next_set covers only NON-wildcard skills + _initial
+# v48 R48 Task 1 implementer fix: off-by-one in earlier plan — legal_next_set
+# has 13 keys (12 non-wildcard skills INCLUDING systematic-debugging + _initial),
+# NOT 14. Plan previously double-counted systematic-debugging.
 # wildcards (using-superpowers/systematic-debugging/dispatching-parallel-agents):
 #   - systematic-debugging DOES have an entry (it's in wildcard for always-allowed
 #     to enter from any state, but also its own transitions are defined)
 #   - using-superpowers / dispatching-parallel-agents don't need entries: hook
 #     pass-through without state update
 # Compute expected: enforce keys - {using-superpowers, dispatching-parallel-agents}
-# = 14 - 2 = 12 non-wildcard skills + _initial + systematic-debugging = 14 entries total
-jq -e '.mini_state.legal_next_set | length == 14' .claude/config/skill-invoke-enforced.json
+# = 14 - 2 = 12 non-wildcard skills (systematic-debugging included) + _initial = 13 entries
+jq -e '.mini_state.legal_next_set | length == 13' .claude/config/skill-invoke-enforced.json
 # Keyset check: non-wildcard-exempt enforce skills ⊆ legal_next_set keys
 # (systematic-debugging counted as having entry even though also wildcard)
 jq -r '(.enforce | keys) - (["superpowers:using-superpowers", "superpowers:dispatching-parallel-agents"]) | .[]' .claude/config/skill-invoke-enforced.json | sort > /tmp/enforce-keys
@@ -2874,9 +2876,9 @@ run "gitignore: drift log covered" \
 
 # ---- Config schema ----
 run "config: 14 skill"     bash -c "[ \"\$(jq '.enforce | length' .claude/config/skill-invoke-enforced.json)\" = '14' ]"
-# v15 R14 F1: legal_next_set has 12 non-wildcard skills + systematic-debugging + _initial = 14 keys
+# v48 Task 1 implementer fix: legal_next_set has 12 non-wildcard skills (INCLUDING systematic-debugging) + _initial = 13 keys
 # (using-superpowers / dispatching-parallel-agents are state-less wildcards)
-run "config: legal_next_set 14 keys (12 non-wildcard + sys-debug + _initial)" bash -c "[ \"\$(jq '.mini_state.legal_next_set | length' .claude/config/skill-invoke-enforced.json)\" = '14' ]"
+run "config: legal_next_set 13 keys (12 non-wildcard skills + _initial)" bash -c "[ \"\$(jq '.mini_state.legal_next_set | length' .claude/config/skill-invoke-enforced.json)\" = '13' ]"
 run "config: state-aware wildcards (systematic-debugging) + non-wildcards all covered by legal_next_set" \
   bash -c "diff <(jq -r '(.enforce | keys) - [\"superpowers:using-superpowers\", \"superpowers:dispatching-parallel-agents\"] | .[]' .claude/config/skill-invoke-enforced.json | sort) <(jq -r '.mini_state.legal_next_set | keys[] | select(. != \"_initial\")' .claude/config/skill-invoke-enforced.json | sort)"
 run "config: codex entry exists"    bash -c "jq -e '.enforce[\"codex:adversarial-review\"]' .claude/config/skill-invoke-enforced.json > /dev/null"
