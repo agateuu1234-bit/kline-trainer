@@ -182,8 +182,12 @@ entry = {
 }
 # Ensure parent dir exists (fresh checkout fix R11 F2)
 os.makedirs(os.path.dirname(p) or '.', exist_ok=True)
-with open(p, 'a') as f:
-    f.write(json.dumps(entry) + '\n')
+try:
+    with open(p, 'a') as f:
+        f.write(json.dumps(entry) + '\n')
+except Exception as e:
+    print(f"[skill-invoke-check:drift-log-write-failed] {e}", file=sys.stderr)
+    sys.exit(0)
 PY
 }
 
@@ -576,9 +580,17 @@ state = {
     'recent_artifact_path': recent_artifact,
     'recent_artifact_blob': recent_artifact_blob,
 }
-json.dump(state, open(tmp, 'w'), indent=2)
+try:
+    with open(tmp, 'w') as f:
+        json.dump(state, f, indent=2)
+except Exception as e:
+    print(f"[skill-invoke-check:state-write-failed] {e}", file=sys.stderr)
+    sys.exit(0)
 PY
-mv "$TMP" "$STATE_FILE"
+if ! mv "$TMP" "$STATE_FILE" 2>/dev/null; then
+  echo "[skill-invoke-check:state-mv-failed]" >&2
+  rm -f "$TMP" 2>/dev/null || true
+fi
 
 # Reset triggers (v9 per config.mini_state.reset_triggers)
 # 1. new_worktree: git worktree add detected in this response
