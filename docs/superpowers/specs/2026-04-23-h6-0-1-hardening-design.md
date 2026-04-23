@@ -1,9 +1,23 @@
-# H6.0.1 Hardening — Spec (v7, 三拆最终 scope)
+# H6.0.1 Hardening — Spec (v10, 三拆最终 scope)
 
 **Date**: 2026-04-23
-**Status**: Design frozen, awaiting codex branch-diff review (round 7+)
-**Scope**: Fix 1 HIGH residual from H6.0 R53 — **F1** (read-safety bypass via Grep/Glob/Bash grep/rg/jq/ls in exempt contexts) only
+**Status**: Design frozen, awaiting codex branch-diff review at Review Gate 2 of 7 (spec-only phase; pre-implementation)
+**Planned scope** (to be implemented AFTER plan approval + TDD, NOT present in this branch yet): Fix 1 HIGH residual from H6.0 R53 — **F1** (read-safety bypass via Grep/Glob/Bash grep/rg/jq/ls in exempt contexts) only
 **Branch**: `hardening-6.0.1` off `origin/main@893b832` (H6.0 merged)
+
+## ⚠️ Branch state vs PR state (for reviewers)
+
+**This branch is currently at Review Gate 2** (spec review). The branch diff vs `origin/main` intentionally contains ONLY this spec document. Implementation (`.claude/hooks/stop-response-check.sh` + `tests/hooks/test_stop_response_check.py`) is **Gate 5**, which follows:
+- Gate 3: Plan written (via `superpowers:writing-plans`)
+- Gate 4: Codex adversarial-review on plan
+- Gate 5: TDD implementation of hook + tests
+- Gate 6: Codex adversarial-review on full branch (post-implementation)
+- Gate 7: PR merge
+
+This spec MUST reach `approve` at Gate 2 BEFORE any implementation begins. Acceptance checklist A1/A2 (in "Acceptance" section below) applies at Gate 7 (PR merge review), NOT at this Gate 2 review. Reviewers at Gate 2 are asked to validate the **design** (fix approach, completeness, test plan), not the implementation (which does not yet exist).
+
+H6.0-flip precondition satisfaction requires this branch to reach Gate 7 with the full implementation + Gate 6 approve — the spec-only state at Gate 2 is NOT a satisfied precondition. This ordering is intentional (spec-first catches design flaws before implementation sunk cost, as demonstrated by rounds 1-8 refining F1 before any code was written).
+
 **Sibling PRs (must ALL merge before any H6.x flip)**:
 - H6.0.1b — R53 F3 family (state persistence/integrity, 6 guards + reset-trigger + ANY_BLOCK, + R-SID-1 CLAUDE_SESSION_ID continuity, + config-robustness)
 - H6.0.1c — R53 F2 family (Skill invoke assistant-message boundary enforcement, transcript-parse refactor)
@@ -147,14 +161,16 @@ jq regression coverage (3):
 
 H6.0.1b and H6.0.1c are separate PRs with their own specs, plans, and codex reviews. **All three (H6.0.1 + H6.0.1b + H6.0.1c) must land before any H6.x flip**. H6.0-flip PR body MUST link all three commit SHAs as preconditions; H6.0-flip codex review MUST verify all three are landed. This PR (H6.0.1) is orthogonal to b and c — F1 is pure read-safety, no dependency on state-integrity or invoke-order fixes.
 
-## Acceptance (non-coder-executable)
+## Acceptance (non-coder-executable, applies at Gate 7 / PR merge; NOT at Gate 2 spec review)
+
+The following 4 acceptance criteria are evaluated by the user at the final PR-merge review (Review Gate 7). They assume Gate 5 (TDD implementation) has already landed the hook + test changes. At Gate 2 (spec review, this branch's current state), these criteria are NOT applicable — at Gate 2 the branch contains only the spec document and A1/A2 would fail by construction.
 
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
-| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` | 所有测试 pass；新增 25 个 F1 测试 | 输出里 "passed" 数 ≥ 原有 + 25；failed = 0 |
-| A2 | 用户肉眼审 diff：`git diff origin/main -- .claude/hooks/ tests/hooks/` | 只改 `.claude/hooks/stop-response-check.sh` + `tests/hooks/test_stop_response_check.py` 两个文件；`.claude/hooks/skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 必须 0 改动 | diff 只覆盖 2 个文件 |
+| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**) | 所有测试 pass；新增 25 个 F1 测试 | 输出里 "passed" 数 ≥ 原有 + 25；failed = 0 |
+| A2 | 用户肉眼审 diff：`git diff origin/main -- .claude/hooks/ tests/hooks/` (**after Gate 5 implementation**) | 只改 `.claude/hooks/stop-response-check.sh` + `tests/hooks/test_stop_response_check.py` 两个文件（外加本 spec 文档 `docs/superpowers/specs/2026-04-23-h6-0-1-hardening-design.md` 以及 Gate 3 产出的 plan 文档 `docs/superpowers/plans/2026-04-23-h6-0-1-hardening-plan.md`）；`.claude/hooks/skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 必须 0 改动 | diff 只覆盖 4 个文件（2 code + 2 doc） |
 | A3 | 用户读 spec 确认 scope | scope 只含 R53 F1；F2 / F3 明确标注归 H6.0.1c / H6.0.1b | 用户口头确认 |
-| A4 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main` | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |
+| A4 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main` (**Gate 6 codex review**) | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |
 
 **禁词**：此 checklist 不出现 "should work" / "looks good" / "probably fine"；所有判定有可观测命令。
 
