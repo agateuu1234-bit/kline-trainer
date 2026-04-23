@@ -48,17 +48,18 @@ Tool-native fixes:
    - `Grep` / `Glob` → `path` only (None if absent)
 3. `_path_is_safe_for_read`: when called with empty/None path for Grep/Glob, return
    `BLOCK: {exempt_label} Grep/Glob 必须显式传 path 参数（不允许无 path 全仓搜索）`.
-4. Update three tool-native call sites.
+4. **Reject repo-root-equivalent paths** (codex round-2 finding 1): after `rel = resolved.relative_to(repo_root)`, if `str(rel).replace(os.sep, '/')` is `'.'` or empty, return `BLOCK: {exempt_label} 路径归一化到仓库根等于全仓搜索: {s}`. Catches `.`, `./`, `docs/..`, `<repo>` absolute, etc.
+5. Update three tool-native call sites.
 
 Bash fixes (behavior-neutral + single-step branches):
-5. After `shlex.split(cmd)`, separately for `grep` / `rg` commands (identified by `parts[0]`):
+6. After `shlex.split(cmd)`, separately for `grep` / `rg` commands (identified by `parts[0]`):
    - Strip leading `-<flag>` args (existing logic).
    - Require ≥2 non-flag positional args (`pattern` + at least 1 path). <2 → `BLOCK: exempt(X) Bash {grep|rg} 必须同时传 pattern 和 path (拒绝无 path 全仓搜索)`.
    - The FIRST non-flag arg is the pattern (do NOT path-safety check it).
-   - ALL subsequent args ARE paths — each goes through `_path_is_safe_for_read` as before.
-6. `cat` / `head` / `tail` / `wc` / `jq` keep existing rule (all non-flag args are paths; require ≥1).
+   - ALL subsequent args ARE paths — each goes through `_path_is_safe_for_read`, which (per step 4) now also rejects repo-root-equivalent paths (`.` / `docs/..`).
+7. `cat` / `head` / `tail` / `wc` / `jq` keep existing rule (all non-flag args are paths; require ≥1).
 
-**Tests** (`tests/hooks/test_stop_response_check.py`) — 7 new tests:
+**Tests** (`tests/hooks/test_stop_response_check.py`) — 10 new tests:
 
 Tool-native (4):
 - `test_read_only_grep_without_path_blocks` — `Grep(pattern=".env")` no path → BLOCK
@@ -71,6 +72,11 @@ Bash (3):
 - `test_behavior_neutral_bash_rg_with_path_passes` — `Bash("rg secret docs/")` → PASS
 - `test_single_step_bash_grep_recursive_no_path_blocks` — `Bash("grep -r TODO")` → BLOCK (flag stripped, only 1 non-flag arg remains)
 
+Repo-root-equivalent rejection (3 — codex round-2 finding 1):
+- `test_read_only_grep_dot_path_blocks` — `Grep(pattern="secret", path=".")` → BLOCK
+- `test_behavior_neutral_bash_rg_dot_blocks` — `Bash("rg secret .")` → BLOCK
+- `test_single_step_grep_normalized_root_blocks` — `Grep(pattern="secret", path="docs/..")` → BLOCK
+
 **Risk**: False positives for legitimate no-path Grep/rg. Mitigation: no-path Grep/rg is always repo-wide; exempt contexts are by design minimal and read-limited — requiring an explicit path is the correct tightening, and escape hatch is "don't use exempt path, declare a real skill gate".
 
 ---
@@ -81,20 +87,21 @@ Bash (3):
 
 **Bug**: Current L2 only checks "does `tool_uses` contain a Skill invoke matching the declared gate name". Attacker can emit `[Write(dangerous), Bash(exfil), Skill(superpowers:brainstorming)]` and satisfy L2. In observe mode nothing blocks; in block mode this is a real bypass.
 
-**Fix (approach A)**:
-1. After finding the matching Skill invoke, compute:
-   - `skill_idx` = index of the first matching `Skill` tool_use (input.skill == SKILL_NAME) in `tool_uses`
-   - `first_non_skill_idx` = index of the first tool_use whose `name != "Skill"`
-2. If `first_non_skill_idx < skill_idx` → emit `drift_log "invoke_order_violation" true null "$LAST_STAGE"` and in block mode `block "Skill invoke 必须在任何其他 tool_use 之前; 第一个非-Skill tool 在 index N, Skill invoke 在 index M"`.
-3. Order check is additive to existing `gate_declared_no_invoke`: it only runs when a matching Skill IS found. Absent-invoke path unchanged.
+**Fix (approach A — STRICT first-index, per codex round-2 finding 3)**:
+1. After finding the matching Skill invoke, compute `skill_idx` = index of the first matching `Skill` tool_use (input.skill == SKILL_NAME) in `tool_uses`.
+2. If `skill_idx != 0` → emit `drift_log "invoke_order_violation" true null "$LAST_STAGE"` and in block mode `block "Skill invoke '$SKILL_NAME' 必须是 tool_uses[0]；实际在 index $skill_idx"`.
+3. Order check is additive to existing `gate_declared_no_invoke`: runs only when a matching Skill IS found. Absent-invoke path unchanged.
+4. **Rationale for strict `== 0` vs "before first non-Skill"**: round-1 spec used "before first non-Skill" but that allows `[Skill(other), Skill(required), Write]` to pass — an unrelated skill can still shape the turn before the gated rubric loads. Strict `== 0` matches the spec's own block message contract ("必须在任何其他 tool_use 之前"). Cost: any response that invokes a non-matching Skill before the gated Skill now drift-logs/blocks. Acceptable — if there's a legitimate case (none known), whitelist as exempt_rule in follow-up PR.
 
-**Tests** (`tests/hooks/test_skill_invoke_check.py`):
-- `test_l2_skill_first_passes` — `[Skill, Write]` → PASS (observe and block)
-- `test_l2_write_before_skill_drift_logs` — `[Write, Skill]` drift-log → drift-log entry `invoke_order_violation`, exit 0
-- `test_l2_write_before_skill_blocks` — `[Write, Skill]` block mode → BLOCK
-- `test_l2_only_skill_passes` — `[Skill]` → PASS
+**Tests** (`tests/hooks/test_skill_invoke_check.py`) — 6 new tests:
+- `test_l2_skill_first_passes` — `[Skill(required), Write]` → PASS (observe and block)
+- `test_l2_write_before_skill_drift_logs` — `[Write, Skill(required)]` drift-log → entry `invoke_order_violation`, exit 0
+- `test_l2_write_before_skill_blocks` — `[Write, Skill(required)]` block mode → BLOCK
+- `test_l2_only_skill_passes` — `[Skill(required)]` → PASS
+- `test_l2_other_skill_before_required_drift_logs` — `[Skill(other), Skill(required), Write]` drift-log → `invoke_order_violation`, exit 0 (**round-2 finding 3**)
+- `test_l2_other_skill_before_required_blocks` — same sequence block mode → BLOCK (**round-2 finding 3**)
 
-**Risk**: Responses that legitimately use non-Skill tools before invoking Skill (e.g., `TaskCreate` / `ToolSearch`). Decision: treat all non-Skill tool_uses uniformly; Skill must be strictly first. Rationale: the whole point of invoking a skill is to load its rubric BEFORE doing work; any tool before Skill is bypassable attack surface. If this proves too strict in practice, narrow via follow-up PR (whitelist `TaskCreate` / `ToolSearch` as "pre-skill meta tools") — NOT in this PR.
+**Risk**: Responses that legitimately use meta-tools (`TaskCreate` / `ToolSearch`) or preparatory Skills before the gated Skill. Decision: accept this strictness; invoke the gated Skill FIRST, then use other tools. If a legitimate case emerges, narrow via a follow-up exempt_rule — NOT in this PR.
 
 ---
 
@@ -163,6 +170,12 @@ Net effect: under `enforcement_mode=block`, any of these 5 failure conditions ca
 
 All 5 branches emit a `drift_log` entry (observability preserved in both modes) and dispatch on `$CONFIG_MODE` for block/exit decision.
 
+6. **Reset-trigger state rewrite** (line 668-680, codex round-2 finding 2) — a SECOND state-write path exists for reset triggers (`git worktree add` / `git push` + `gh pr *`). Current code uses `json.dump(d, open(sf, 'w'), indent=2)` wrapped in `except Exception: pass` — same fail-open pattern. On partial write, state JSON gets corrupted; `jq ... || echo "_initial"` load path treats unreadable state as `_initial` → L4 fail-open under block mode.
+
+   Fix: rewrite the reset-trigger block to use the same atomic TMP+mv pattern with mode-aware guards. Concretely, replace the inline Python block with a call-out to the same shared logic, OR inline the same 5-guard structure (preflight + mkdir + mktemp + py_ec + mv). Preferred: extract a bash helper `_write_state_atomic()` taking `STATE_FILE`, `STATE_DIR`, `CONFIG_MODE`, and a Python snippet that produces the JSON; reuse for both paths. Scope note: extracting the helper is the minimum refactor to avoid duplicating the 5-branch guard logic; not a speculative abstraction.
+
+   Failure-mode coverage: reset-trigger path inherits all 5 failure modes since it uses the same helper. No new drift_kind names needed (same `state_write_failed` / `state_mv_failed` / etc.).
+
 **Tests** (`tests/hooks/test_skill_invoke_check.py`) — 5 new tests, each injects a DIFFERENT failure mode directly (fixing codex round-1 finding 2):
 
 - `test_state_preflight_state_file_is_directory_blocks` — pre-create STATE_FILE as a dir (`os.makedirs(state_file)`) + block mode → BLOCK with `STATE_FILE 存在但是目录`
@@ -170,6 +183,7 @@ All 5 branches emit a `drift_log` entry (observability preserved in both modes) 
 - `test_state_mktemp_failed_block_mode_blocks` — pre-create STATE_DIR as chmod 0555 (so mkdir succeeds no-op, mktemp fails) + block mode → BLOCK
 - `test_state_mv_failed_block_mode_blocks` — use monkeypatched STATE_FILE pointing to `/dev/null/foo` (POSIX: `/dev/null` is not a dir → mv fails with ENOTDIR) + block mode → BLOCK. (Alternative if `/dev/null/foo` is flaky in test runner: make STATE_FILE's parent dir not the same filesystem as TMP — but since mktemp uses STATE_DIR, test via a sibling path trick.)
 - `test_state_any_failure_drift_mode_passes_with_drift_log` — any one of the above conditions + drift-log mode → exit 0; drift-log file contains the matching `drift_kind`
+- `test_state_reset_trigger_mv_fail_block_mode_blocks` (**round-2 finding 2**) — flow includes `git worktree add` in tool_uses (triggers reset path); force `mv` failure on reset-trigger path + block mode → BLOCK
 
 Python-write exception test: **explicitly deferred** — not reliably injectable without test-only hook hooks. The `PY_EC` guard is still added (belt-and-suspenders), and its behavior is covered by inspection in codex review rather than a runtime test. Documented as acceptable residual.
 
@@ -188,8 +202,8 @@ Per CLAUDE.md §Repository governance backstop item 2: every module/phase delive
 
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
-| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` | 所有测试 pass；新增 7 个 F1 测试（4 个 tool-native + 3 个 Bash grep/rg） | 输出里 "passed" 数 ≥ 原有 + 7；failed = 0 |
-| A2 | 用户终端执行 `pytest tests/hooks/test_skill_invoke_check.py -v` | 所有测试 pass；新增 4 个 F2 + 5 个 F3 测试 | 输出里 "passed" 数 ≥ 原有 + 9；failed = 0 |
+| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` | 所有测试 pass；新增 10 个 F1 测试（4 tool-native + 3 Bash + 3 repo-root-equivalent reject） | 输出里 "passed" 数 ≥ 原有 + 10；failed = 0 |
+| A2 | 用户终端执行 `pytest tests/hooks/test_skill_invoke_check.py -v` | 所有测试 pass；新增 6 个 F2 + 6 个 F3 测试（含 reset-trigger 路径） | 输出里 "passed" 数 ≥ 原有 + 12；failed = 0 |
 | A3 | 用户肉眼审 diff：`git diff origin/main -- .claude/hooks/ tests/hooks/` | 只改 2 个 hooks 文件 + 2 个 test 文件，无其他文件改动（尤其 skill-invoke-enforced.json / workflow-rules.json / CLAUDE.md 必须 0 改动） | diff 只覆盖 4 个文件 |
 | A4 | 用户读 spec + plan 确认 scope | scope 只含 R53 F1/F2/F3；不含 enforcement_mode flip / 其他 residual / 无关 refactor | 用户口头确认 |
 | A5 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base origin/main` | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |
