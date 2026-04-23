@@ -820,18 +820,31 @@ class TestR53F1BashArgs:
         rc, stdout, _ = _run_hook(tp)
         assert '"decision":"block"' in stdout.replace(" ", "")
 
-    def test_behavior_neutral_bash_jq_filter_and_file_passes(self, tmp_path):
-        """`jq . docs/foo.json` — filter `.` not path-checked; file is safe."""
+    def test_behavior_neutral_bash_jq_filter_and_file_blocks(self, tmp_path):
+        """Gate-6 round-1: jq unconditionally blocked in exempt (previously
+        'passes' — renamed + assertion flipped per root-cause jq ban)."""
         tp = _write_transcript(
             tmp_path,
             "Skill gate: exempt(behavior-neutral)\n\n",
             tool_uses=[{"name": "Bash", "input": {"command": "jq . docs/foo.json"}}],
         )
         rc, stdout, _ = _run_hook(tp)
-        assert '"decision":"block"' not in stdout
+        assert '"decision":"block"' in stdout.replace(" ", "")
+
+    def test_behavior_neutral_bash_jq_env_builtin_blocks(self, tmp_path):
+        """Gate-6 round-1 finding: `jq env codex.pin.json` previously bypassed
+        because filter-slot only banned shell-glob metachars. jq's `env`
+        builtin dumps process environment — now blocked by jq-unconditional ban."""
+        tp = _write_transcript(
+            tmp_path,
+            "Skill gate: exempt(behavior-neutral)\n\n",
+            tool_uses=[{"name": "Bash", "input": {"command": "jq env codex.pin.json"}}],
+        )
+        rc, stdout, _ = _run_hook(tp)
+        assert '"decision":"block"' in stdout.replace(" ", "")
 
     def test_behavior_neutral_bash_jq_filter_and_sensitive_file_blocks(self, tmp_path):
-        """`jq . .env` — filter `.` not path-checked; .env hits sensitive-name."""
+        """`jq . .env` — redundant under jq-unconditional ban but kept for defense-in-depth."""
         tp = _write_transcript(
             tmp_path,
             "Skill gate: exempt(behavior-neutral)\n\n",

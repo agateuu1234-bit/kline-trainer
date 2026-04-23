@@ -228,17 +228,12 @@ elif reason == 'behavior-neutral':
                     if msg:
                         print(msg); sys.exit(0)
                 elif tool == 'jq':
-                    if len(args) < 1:
-                        print(f"BLOCK: exempt(behavior-neutral) Bash jq 至少需 filter: {cmd[:120]}"); sys.exit(0)
-                    if len(args) < 2:
-                        print(f"BLOCK: exempt(behavior-neutral) Bash jq 必须传文件参数 (filter 后至少 1 个 path): {cmd[:120]}"); sys.exit(0)
-                    # Gate-4 round-1: same class as grep/rg — reject shell-glob metachars in filter
-                    if any(c in args[0] for c in '*?[]{}'):
-                        print(f"BLOCK: exempt(behavior-neutral) Bash jq filter 含 shell glob 元字符（shell 会在命令执行前展开成文件列表，绕过 path 检查）: {args[0]}"); sys.exit(0)
-                    for path_arg in args[1:]:
-                        msg = _path_is_safe_for_read(path_arg, f"exempt(behavior-neutral) Bash jq")
-                        if msg:
-                            print(msg); sys.exit(0)
+                    # Gate-6 round-1 root-cause fix: jq filter language is too rich for
+                    # safe exempt-context parsing. `jq env codex.pin.json` dumps process
+                    # env via jq's `env` builtin; similar for `inputs`, `include`, `@base64`
+                    # etc. Same pattern as Glob: ban entire tool in exempt rather than
+                    # arms-race the grammar.
+                    print(f"BLOCK: exempt(behavior-neutral) 不允许 jq 工具（filter 语言包含 env/inputs/include 等可读进程环境的 builtin；请改用 cat/head/tail/wc 或声明真实 skill gate）: {cmd[:120]}"); sys.exit(0)
         elif name in ('Read', 'Grep', 'Glob'):
             # R53 F1 fix (Gate 2 design): per-tool extraction + Glob unconditional block + Grep path-required
             tool_name, path_arg = _extract_read_target(tu)
@@ -311,16 +306,8 @@ elif reason == 'single-step-no-semantic-change':
                     if msg:
                         print(msg); sys.exit(0)
                 elif tool == 'jq':
-                    if len(args) < 1:
-                        print(f"BLOCK: exempt(single-step) Bash jq 至少需 filter: {cmd[:120]}"); sys.exit(0)
-                    if len(args) < 2:
-                        print(f"BLOCK: exempt(single-step) Bash jq 必须传文件参数 (filter 后至少 1 个 path): {cmd[:120]}"); sys.exit(0)
-                    if any(c in args[0] for c in '*?[]{}'):
-                        print(f"BLOCK: exempt(single-step) Bash jq filter 含 shell glob 元字符（shell 会在命令执行前展开成文件列表，绕过 path 检查）: {args[0]}"); sys.exit(0)
-                    for path_arg in args[1:]:
-                        msg = _path_is_safe_for_read(path_arg, f"exempt(single-step) Bash jq")
-                        if msg:
-                            print(msg); sys.exit(0)
+                    # Gate-6 round-1 root-cause fix (mirror behavior-neutral): ban jq in exempt
+                    print(f"BLOCK: exempt(single-step) 不允许 jq 工具（filter 语言包含 env/inputs/include 等可读进程环境的 builtin；请改用 cat/head/tail/wc 或声明真实 skill gate）: {cmd[:120]}"); sys.exit(0)
             continue
         print(f"BLOCK: exempt(single-step) 不允许工具 {name}"); sys.exit(0)
 

@@ -73,6 +73,8 @@ Why residual merge was safe: framework runs observe-only → no response is bloc
 
 (e) **Glob — entire tool class is the wrong fit for exempt contexts** (codex rounds 8+10 findings, root-cause): Glob's `pattern` is itself a file selector with a rich wildcard language (`*`, `**`, `?`, `[abc]`, `{a,b}`). Every round of "validate Glob pattern" (round 8 = literal-component sensitive-name; round 10 = wildcarded-component sensitive-name like `**/.en[v]`, `**/*.pem`, `id_[rd]sa`) closed one subset of the bypass space and opened another. Glob's whole purpose is "enumerate files matching a pattern" — which is the opposite of the minimum-privilege read-limited posture that exempt contexts are designed for. Fixing this at the pattern-grammar level is a losing game (codex 2 rounds already). **Root-cause fix: exempt contexts should not allow Glob at all** — whoever needs to enumerate files should declare a real skill gate.
 
+(f) **Bash `jq` — filter language is similarly too rich for safe exempt parsing** (codex Gate-6 round-1 finding, root-cause): jq has builtin identifiers like `env` (dumps process environment), `inputs`, `input_filename`, `include`, `import`, and format operators (`@base64`, `@csv`, `@tsv`) that can read/exfiltrate data outside the nominal file path arg. `jq env codex.pin.json` passes any filter-grammar check based only on shell-glob metachars — but at runtime jq's `env` builtin prints `$PATH`, `$TOKEN`, `$SECRET` etc. Same pattern as Glob: every attempt to whitelist "safe filter subset" is an arms race against jq's language evolution. **Root-cause fix (mirror Glob): ban jq entirely in exempt contexts** — use `cat`/`head`/`tail`/`wc` for simple reads, or declare a real skill gate for JSON processing.
+
 **Fix (approach A — unified, minimal, in one file)**:
 
 Tool-native (3 exempt branches):
@@ -99,13 +101,13 @@ Bash (behavior-neutral + single-step branches):
 9. Per-tool operand rules (after flag-ban confirms no `-` args):
    - **`cat` / `head` / `tail` / `wc` / `ls`**: all args are paths; require ≥1 arg; each path → `_path_is_safe_for_read` (rejects empty / root-equiv / sensitive / out-of-repo).
    - **`grep` / `rg`**: require exactly 2 args: pattern (arg[0]) + path (arg[1], path-checked). **Pattern MUST additionally be rejected if it contains any shell-glob metacharacter (`*`, `?`, `[`, `]`, `{`, `}`)** — see step 11. Requires BLOCK: `exempt(X) Bash {grep|rg} pattern 含 shell glob 元字符（shell 会在命令执行前展开成文件列表，绕过 path 检查）: {pattern}`.
-   - **`jq`**: require ≥2 args: the first is the filter (arg[0]) + at least one path (arg[1:], path-checked). **Filter MUST additionally be rejected if it contains any shell-glob metacharacter** — same reason and same rule as grep/rg. Cost: jq array-iteration syntax `.foo[]` becomes unavailable in exempt context; users needing it declare a real skill gate.
+   - **`jq`** (superseded Gate-6 round-1): **UNCONDITIONALLY BLOCKED in exempt contexts** (mirror Glob pattern). Earlier design of "filter + paths with glob-metachar ban" proved insufficient — jq's `env` builtin dumps process environment via `jq env file.json`, which passes any shell-glob-metachar check. Ban entire tool in exempt instead of arms-racing jq's grammar (env / inputs / include / @base64 / @csv / @tsv / etc.). Escape hatch: cat/head/tail/wc for simple reads, or declare a real skill gate for JSON processing.
 10. Note: `safe_bash` regex at line 153 / 208 already excludes `-` in arg chars (whitelist-level flag-block). Step 8's arg-loop flag-ban is **defense-in-depth** — aligns the two layers so any future relaxation of safe_bash must also update step 8, and ensures the arg-loop never sees a flag to misclassify.
 11. **Shell-glob metacharacter ban in unchecked operands** (codex Gate-4 round-1 finding): for `grep`/`rg`/`jq`, the first non-flag arg is a pattern/filter (not a path), so `_path_is_safe_for_read` does not see it. But bash performs glob expansion BEFORE invoking the tool, so `rg * docs/` expands `*` to every repo-root entry — rg then sees `rg a b .env ... docs/` and searches all expanded names, bypassing the path check. Fix: reject any pattern/filter arg matching `re.search(r'[*?\[\]{}]', arg)`. The SAME set of chars `_path_is_safe_for_read` already rejects on path args at line 96; Step 11 applies identical rule to pattern/filter slot.
 
 12. **Path-operand glob-metachar defense is pre-existing, not a new rule** (codex Gate-4 round-5 clarification): for **path** operands (e.g. `cat docs/*`, `ls docs/*.md`, `wc docs/[ab].txt`), `_path_is_safe_for_read` already rejects glob metacharacters at line 96-97 via `if any(c in s for c in '*?[]{}'): return f"BLOCK: {exempt_label} 路径含 glob: {s}"`. This H6.0.1 PR does NOT change that rule — the fix inherits it for all newly-routed Bash path operands (cat/head/tail/wc/ls full args + grep/rg arg[1] + jq arg[1:]). Defense-in-depth tests added to prove the combined flow (Bash arg-loop → `_path_is_safe_for_read`) blocks shell-expanded path operands end-to-end.
 
-**Tests** (`tests/hooks/test_stop_response_check.py`) — 34 new tests (one authoritative inventory; numbers below must match plan A1/A4 exactly):
+**Tests** (`tests/hooks/test_stop_response_check.py`) — 35 new tests (one authoritative inventory; numbers below must match plan A1/A4 exactly):
 
 Tool-native Grep (4; Gate-4 round-4 finding: patterns use non-sensitive `TODO` so tests validate the "path required" rule rather than incidentally matching sensitive-name fallback; behavior-neutral no-path case added):
 - `test_read_only_grep_without_path_blocks` — `Grep(pattern="TODO")` no path → BLOCK
@@ -136,7 +138,7 @@ Flag-ban on grep/rg (2):
 jq regression coverage (4; Gate-4 round-9: use non-root filter `.foo` + add single-step variant):
 - `test_behavior_neutral_bash_jq_filter_only_blocks` — `Bash("jq .foo")` → BLOCK (no file)
 - `test_single_step_bash_jq_filter_only_blocks` — `Bash("jq .foo")` in single-step → BLOCK
-- `test_behavior_neutral_bash_jq_filter_and_file_passes` — `Bash("jq . docs/foo.json")` → PASS
+- `test_behavior_neutral_bash_jq_filter_and_file_blocks test_behavior_neutral_bash_jq_env_builtin_blocks` — `Bash("jq . docs/foo.json")` → PASS
 - `test_behavior_neutral_bash_jq_filter_and_sensitive_file_blocks` — `Bash("jq . .env")` → BLOCK
 
 **ls coverage** (3 — codex round-6 finding 2):
@@ -188,7 +190,7 @@ The following 4 acceptance criteria are evaluated by the user at the final PR-me
 
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
-| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**)。**注**: 具体命令和判定见 plan 的 Acceptance A1/A4/A4b，已 pin base SHA 到 893b83222435a0ea4d9ce4f30d077c4cd4480ed7。 | 所有测试 pass；新增 34 个 F1 测试（4 Grep tool-native + 3 Glob-always-block + 4 Bash grep/rg + 3 repo-root-equivalent + 2 flag-ban grep/rg + 4 jq + 3 ls + 3 其他 flag-ban + 4 shell-glob-metachar-ban pattern/filter + 3 path-defense-in-depth + 1 static source assertion） | 输出里 "passed" 数 ≥ 原有 + 34；failed = 0 |
+| A1 | 用户终端执行 `pytest tests/hooks/test_stop_response_check.py -v` (**after Gate 5 implementation**)。**注**: 具体命令和判定见 plan 的 Acceptance A1/A4/A4b，已 pin base SHA 到 893b83222435a0ea4d9ce4f30d077c4cd4480ed7。 | 所有测试 pass；新增 35 个 F1 测试（4 Grep tool-native + 3 Glob-always-block + 4 Bash grep/rg + 3 repo-root-equivalent + 2 flag-ban grep/rg + 4 jq + 3 ls + 3 其他 flag-ban + 4 shell-glob-metachar-ban pattern/filter + 3 path-defense-in-depth + 1 static source assertion） | 输出里 "passed" 数 ≥ 原有 + 35；failed = 0 |
 | A2 | 用户肉眼审 diff：`git diff 893b83222435a0ea4d9ce4f30d077c4cd4480ed7 -- .claude/hooks/ tests/hooks/` (**after Gate 5 implementation; pinned base SHA per Gate-4 round-8 finding**) | 只改 `.claude/hooks/stop-response-check.sh` + `tests/hooks/test_stop_response_check.py` 两个文件（外加本 spec 文档 `docs/superpowers/specs/2026-04-23-h6-0-1-hardening-design.md` 以及 Gate 3 产出的 plan 文档 `docs/superpowers/plans/2026-04-23-h6-0-1-hardening-plan.md`）；`.claude/hooks/skill-invoke-check.sh` / `skill-invoke-enforced.json` / `workflow-rules.json` / `CLAUDE.md` 必须 0 改动 | diff 只覆盖 4 个文件（2 code + 2 doc） |
 | A3 | 用户读 spec 确认 scope | scope 只含 R53 F1；F2 / F3 明确标注归 H6.0.1c / H6.0.1b | 用户口头确认 |
 | A4 | 用户 terminal 跑 `bash .claude/scripts/codex-attest.sh --scope branch-diff --head hardening-6.0.1 --base 893b83222435a0ea4d9ce4f30d077c4cd4480ed7` (**Gate 6 codex review; pinned base SHA**) | codex 回 `Verdict: approve`（ledger 记录） | 脚本 exit 0，ledger 更新 |
