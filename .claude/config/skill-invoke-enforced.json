@@ -20,7 +20,7 @@
     "superpowers:writing-plans": { "mode": "observe", "flip_phase": "H6.6" },
     "superpowers:subagent-driven-development": { "mode": "observe", "flip_phase": "H6.7" },
     "superpowers:test-driven-development": { "mode": "observe", "flip_phase": "H6.8" },
-    "superpowers:verification-before-completion": { "mode": "observe", "flip_phase": "H6.1" },
+    "superpowers:verification-before-completion": { "mode": "block", "flip_phase": "H6.1" },
     "superpowers:requesting-code-review": { "mode": "observe", "flip_phase": "H6.2" },
     "superpowers:receiving-code-review": { "mode": "observe", "flip_phase": "H6.3" },
     "superpowers:finishing-a-development-branch": { "mode": "observe", "flip_phase": "H6.9" },
@@ -44,7 +44,8 @@
         "superpowers:brainstorming",
         "superpowers:writing-plans",
         "superpowers:systematic-debugging",
-        "superpowers:finishing-a-development-branch"
+        "superpowers:finishing-a-development-branch",
+        "superpowers:verification-before-completion"
       ],
       "superpowers:using-git-worktrees": [
         "superpowers:brainstorming",
@@ -128,6 +129,7 @@
       "superpowers:dispatching-parallel-agents"
     ],
     "_note_wildcard": "v15 R14 F1 fix: hook 对 wildcard skill NOT 更新 last_stage (避免 wildcard 后下一步看到空 legal_next_set). systematic-debugging 已有 legal_next_set entry (见上); using-superpowers 和 dispatching-parallel-agents 不需要 entry 因为 wildcard 路径直接 pass 不更新 state",
+    "_note_initial_verification_exemption": "H6.1 (2026-04-24) legal_next_set._initial 加入 verification-before-completion。User-ratified residual: session resume / state reset → _initial，用户设计意图是第一个 skill 不 L4-strict-enforced；L2 gate_declared_no_invoke 仍强制（skill MUST be invoked）；bypass concern 是 accepted residual，skill semantic check 兜底。详见 spec §6 + memory project_h6_initial_legal_next_set_exemption_pattern.md。",
     "reset_triggers": {
       "new_worktree": {
         "signal": "response tool_uses contains Bash with command matching 'git worktree add'",
