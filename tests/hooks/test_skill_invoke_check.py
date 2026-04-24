@@ -728,3 +728,217 @@ class TestH6ScopeOnlyL1L2:
                 f"Block reason should indicate unregistered gate; stdout={stdout[:400]}"
         finally:
             _restore_enforcement_mode(bak)
+
+
+class TestVerificationBeforeCompletionBlockFlip:
+    """H6.1: verification-before-completion mode flipped to block.
+    复用 _set_mode 显式锁定 "block"（防回滚静默）。
+    复用 TestL5CodexGate 同款 state seeding + session id 约定。"""
+
+    DETERMINISTIC_SESSION_ID = "01HQTESTAAAAAAAAAAAAAAAAAA"
+
+    def _sid_hash8(self, sid=None):
+        import hashlib
+        sid = sid or self.DETERMINISTIC_SESSION_ID
+        return hashlib.sha256(sid.encode()).hexdigest()[:8]
+
+    def _seed_tdd_stage(self, session_id=None):
+        """Pre-seed state file with last_stage=test-driven-development
+        so transition → verification-before-completion is legal at L4."""
+        import hashlib
+        state_dir = Path(".claude/state/skill-stage")
+        state_dir.mkdir(parents=True, exist_ok=True)
+        wt_h = hashlib.sha256(os.getcwd().encode()).hexdigest()[:8]
+        sid_h = self._sid_hash8(session_id)
+        sf = state_dir / f"{wt_h}-{sid_h}.json"
+        sf.write_text(json.dumps({
+            "version": "1",
+            "last_stage": "superpowers:test-driven-development",
+            "last_stage_time_utc": "2026-04-22T00:00:00Z",
+            "worktree_path": os.getcwd(),
+            "session_id": session_id or self.DETERMINISTIC_SESSION_ID,
+            "drift_count": 0,
+            "transition_history": [],
+        }))
+        return sf
+
+    def _seed_stage(self, stage, session_id=None):
+        """Generalized version of _seed_tdd_stage for any predecessor."""
+        import hashlib
+        state_dir = Path(".claude/state/skill-stage")
+        state_dir.mkdir(parents=True, exist_ok=True)
+        wt_h = hashlib.sha256(os.getcwd().encode()).hexdigest()[:8]
+        sid_h = self._sid_hash8(session_id)
+        sf = state_dir / f"{wt_h}-{sid_h}.json"
+        sf.write_text(json.dumps({
+            "version": "1",
+            "last_stage": stage,
+            "last_stage_time_utc": "2026-04-22T00:00:00Z",
+            "worktree_path": os.getcwd(),
+            "session_id": session_id or self.DETERMINISTIC_SESSION_ID,
+            "drift_count": 0,
+            "transition_history": [],
+        }))
+        return sf
+
+    def _block_env(self):
+        return {
+            "CLAUDE_SESSION_ID": self.DETERMINISTIC_SESSION_ID,
+            "CLAUDE_SESSION_START_UTC": "2026-04-22T00:00:00Z",
+        }
+
+    def test_l2_missing_invoke_blocks(self, tmp_path):
+        sf = self._seed_tdd_stage()
+        bak = _set_mode("superpowers:verification-before-completion", "block")
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: superpowers:verification-before-completion\n\nx",
+                tool_uses=[{"name": "Read", "input": {"file_path": "/a"}}],
+            )
+            rc, stdout, _ = _run_hook(tp, env_extra=self._block_env())
+            assert '"decision":"block"' in stdout.replace(" ", "")
+            assert "声明但响应未 Skill tool invoke" in stdout
+        finally:
+            _restore(bak)
+            sf.unlink(missing_ok=True)
+
+    def test_l2_valid_invoke_passes(self, tmp_path):
+        sf = self._seed_tdd_stage()
+        bak = _set_mode("superpowers:verification-before-completion", "block")
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: superpowers:verification-before-completion\n\nx",
+                tool_uses=[{"name": "Skill",
+                            "input": {"skill": "superpowers:verification-before-completion"}}],
+            )
+            rc, stdout, _ = _run_hook(tp, env_extra=self._block_env())
+            assert '"decision":"block"' not in stdout.replace(" ", "")
+        finally:
+            _restore(bak)
+            sf.unlink(missing_ok=True)
+
+    def test_l2_wrong_skill_invoke_blocks(self, tmp_path):
+        sf = self._seed_tdd_stage()
+        bak = _set_mode("superpowers:verification-before-completion", "block")
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: superpowers:verification-before-completion\n\nx",
+                tool_uses=[{"name": "Skill",
+                            "input": {"skill": "superpowers:brainstorming"}}],
+            )
+            rc, stdout, _ = _run_hook(tp, env_extra=self._block_env())
+            assert '"decision":"block"' in stdout.replace(" ", "")
+            assert "声明但响应未 Skill tool invoke" in stdout
+        finally:
+            _restore(bak)
+            sf.unlink(missing_ok=True)
+
+    def test_committed_config_is_block(self):
+        """Codex R2 F2 fix: guard against _set_mode masking a regressed commit."""
+        cfg = json.loads(Path(".claude/config/skill-invoke-enforced.json").read_text())
+        assert cfg["enforce"]["superpowers:verification-before-completion"]["mode"] == "block", \
+            "H6.1 flip regressed: committed config must be 'block', not 'observe'"
+
+    def test_l4_codex_to_verification_still_blocks(self, tmp_path):
+        """Codex R12 F1 fix: 1b was reverted — codex → verification 直通
+        构成 bypass（跳过 writing-plans + TDD）。本测试断言该 transit 仍挡。"""
+        sf = self._seed_stage("codex:adversarial-review")
+        bak = _set_mode("superpowers:verification-before-completion", "block")
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: superpowers:verification-before-completion\n\nx",
+                tool_uses=[{"name": "Skill",
+                            "input": {"skill": "superpowers:verification-before-completion"}}],
+            )
+            rc, stdout, _ = _run_hook(tp, env_extra=self._block_env())
+            assert '"decision":"block"' in stdout.replace(" ", ""), \
+                "codex → verification bypass must stay blocked (R12 F1)"
+            assert "非法 transition" in stdout
+        finally:
+            _restore(bak)
+            sf.unlink(missing_ok=True)
+
+    def test_l2_block_drift_log_matches_monitoring_predicate(self, tmp_path):
+        """Codex R9 F2 fix: verify emitted drift-log entry has the exact
+        fields (gate_skill / config_mode / drift_kind) the §6 revert
+        predicate reads."""
+        sf = self._seed_tdd_stage()
+        bak = _set_mode("superpowers:verification-before-completion", "block")
+        drift_path = Path(".claude/state/skill-invoke-drift.jsonl")
+        drift_path.parent.mkdir(parents=True, exist_ok=True)
+        lines_before = drift_path.read_text().count('\n') if drift_path.exists() else 0
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: superpowers:verification-before-completion\n\nx",
+                tool_uses=[{"name": "Read", "input": {"file_path": "/a"}}],
+            )
+            _run_hook(tp, env_extra=self._block_env())
+            new_lines = drift_path.read_text().splitlines()[lines_before:]
+            relevant = []
+            for line in new_lines:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if e.get("gate_skill") == "superpowers:verification-before-completion":
+                    relevant.append(e)
+            assert relevant, \
+                "drift log must include an entry for the blocked gate"
+            e = relevant[-1]
+            assert e["config_mode"] == "block"
+            assert e["drift_kind"] in ("gate_declared_no_invoke", "illegal_transition")
+        finally:
+            _restore(bak)
+            sf.unlink(missing_ok=True)
+
+    def test_l4_initial_to_verification_allowed(self, tmp_path):
+        """D_narrow 方案核心断言（覆盖 codex R2/R5/R6/R9/R11 F1）：
+        加了 1c legal_next_set 后，`_initial` → verification-before-completion
+        transition 合法，session resume / state reset 场景不被 L4 误挡。"""
+        import hashlib
+        state_dir = Path(".claude/state/skill-stage")
+        state_dir.mkdir(parents=True, exist_ok=True)
+        wt_h = hashlib.sha256(os.getcwd().encode()).hexdigest()[:8]
+        sid_h = self._sid_hash8()
+        sf = state_dir / f"{wt_h}-{sid_h}.json"
+        sf.unlink(missing_ok=True)  # ensure _initial
+
+        bak = _set_mode("superpowers:verification-before-completion", "block")
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: superpowers:verification-before-completion\n\nx",
+                tool_uses=[{"name": "Skill",
+                            "input": {"skill": "superpowers:verification-before-completion"}}],
+            )
+            rc, stdout, _ = _run_hook(tp, env_extra=self._block_env())
+            assert '"decision":"block"' not in stdout.replace(" ", ""), \
+                "`_initial` → verification must pass under D_narrow (1c legal_next_set 豁免)"
+        finally:
+            _restore(bak)
+            sf.unlink(missing_ok=True)
+
+    def test_l4_brainstorming_to_verification_still_blocks(self, tmp_path):
+        """D_narrow 保留场景 #5 的 L4 保护：brainstorming 不是 verification 的
+        合法前序，从 brainstorming 直接跳 verification 仍 block — 防"脑暴后假装完成"。"""
+        sf = self._seed_stage("superpowers:brainstorming")
+        bak = _set_mode("superpowers:verification-before-completion", "block")
+        try:
+            tp = _write_transcript(
+                tmp_path,
+                "Skill gate: superpowers:verification-before-completion\n\nx",
+                tool_uses=[{"name": "Skill",
+                            "input": {"skill": "superpowers:verification-before-completion"}}],
+            )
+            rc, stdout, _ = _run_hook(tp, env_extra=self._block_env())
+            assert '"decision":"block"' in stdout.replace(" ", "")
+            assert "非法 transition" in stdout
+            assert "last_stage=superpowers:brainstorming" in stdout
+        finally:
+            _restore(bak)
+            sf.unlink(missing_ok=True)
