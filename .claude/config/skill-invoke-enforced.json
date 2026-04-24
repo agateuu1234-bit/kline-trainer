@@ -20,7 +20,7 @@
     "superpowers:writing-plans": { "mode": "observe", "flip_phase": "H6.6" },
     "superpowers:subagent-driven-development": { "mode": "observe", "flip_phase": "H6.7" },
     "superpowers:test-driven-development": { "mode": "observe", "flip_phase": "H6.8" },
-    "superpowers:verification-before-completion": { "mode": "observe", "flip_phase": "H6.1" },
+    "superpowers:verification-before-completion": { "mode": "block", "flip_phase": "H6.1" },
     "superpowers:requesting-code-review": { "mode": "observe", "flip_phase": "H6.2" },
     "superpowers:receiving-code-review": { "mode": "observe", "flip_phase": "H6.3" },
     "superpowers:finishing-a-development-branch": { "mode": "observe", "flip_phase": "H6.9" },
