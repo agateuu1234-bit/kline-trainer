@@ -44,7 +44,8 @@
         "superpowers:brainstorming",
         "superpowers:writing-plans",
         "superpowers:systematic-debugging",
-        "superpowers:finishing-a-development-branch"
+        "superpowers:finishing-a-development-branch",
+        "superpowers:verification-before-completion"
       ],
       "superpowers:using-git-worktrees": [
         "superpowers:brainstorming",
