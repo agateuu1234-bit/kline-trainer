@@ -39,6 +39,7 @@
     "state_dir": ".claude/state/skill-stage/",
     "file_template": "{wt_hash8}-{session_id8}.json",
     "legal_next_set": {
+      "_note_initial_verification_exemption": "H6.1 (2026-04-24) adds verification-before-completion as _initial successor per user-ratified residual. Rationale: session resume / state reset results in _initial, and user's explicit design intent is that the first skill of a new/resumed session is not L4-strict-enforced. L2 gate_declared_no_invoke still enforces (skill MUST be invoked). Bypass concern (_initial→verification without prior TDD) is accepted residual; skill content layer (verification-before-completion Skill semantic checks) provides the defense-in-depth. See spec §6 + memory project_h6_initial_legal_next_set_exemption_pattern.md.",
       "_initial": [
         "superpowers:using-git-worktrees",
         "superpowers:brainstorming",
