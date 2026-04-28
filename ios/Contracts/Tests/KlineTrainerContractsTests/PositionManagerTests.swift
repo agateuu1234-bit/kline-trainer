@@ -1,5 +1,5 @@
-import Foundation
 import Testing
+import Foundation
 @testable import KlineTrainerContracts
 
 @Suite("PositionManager")
