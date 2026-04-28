@@ -1,0 +1,21 @@
+# Generated from .claude/workflow-rules.json
+# canonical_codeowner = @agateuu1234-bit
+# Governance/tooling paths only (business source is Codex-gated but not CODEOWNERS-required)
+
+.claude/**                                         @agateuu1234-bit
+.github/**                                         @agateuu1234-bit
+/CLAUDE.md                                         @agateuu1234-bit
+/codex.pin.json                                    @agateuu1234-bit
+docs/governance/**                                 @agateuu1234-bit
+docs/superpowers/specs/**                          @agateuu1234-bit
+docs/superpowers/plans/**                          @agateuu1234-bit
+/kline_trainer_modules*.md                         @agateuu1234-bit
+/kline_trainer_plan*.md                            @agateuu1234-bit
+modules/**                                         @agateuu1234-bit
+plan/**                                            @agateuu1234-bit
+scripts/**                                         @agateuu1234-bit
+/Makefile                                          @agateuu1234-bit
+/Fastfile                                          @agateuu1234-bit
+fastlane/**                                        @agateuu1234-bit
+**/*.podspec                                       @agateuu1234-bit
+**/Dockerfile                                      @agateuu1234-bit

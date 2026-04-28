@@ -1,0 +1,53 @@
+# codex-review-rerun.yml
+# Triggers codex-review-collect rerun when user comments "/codex-review" on PR.
+# Verifies actor has write/admin permission (R1.5 fix).
+name: codex-review-rerun
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: read
+  actions: write
+jobs:
+  rerun:
+    if: |
+      github.event.issue.pull_request != null &&
+      github.event.comment.body == '/codex-review'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify actor has write/admin permission
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const perm = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: context.payload.comment.user.login
+            });
+            if (!['admin', 'write'].includes(perm.data.permission)) {
+              core.setFailed(`Actor ${context.payload.comment.user.login} lacks write permission (has: ${perm.data.permission})`);
+            }
+      - name: Rerun codex-review-collect for this PR head
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'codex-review-collect.yml',
+              head_sha: pr.data.head.sha
+            });
+            if (runs.data.workflow_runs.length === 0) {
+              core.setFailed('no prior collect run for this head SHA; push a new commit first');
+              return;
+            }
+            await github.rest.actions.reRunWorkflow({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runs.data.workflow_runs[0].id
+            });

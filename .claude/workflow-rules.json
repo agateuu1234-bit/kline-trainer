@@ -1,0 +1,265 @@
+{
+  "_comment": "Machine-readable project governance rules. Read by hooks + GitHub Actions workflows. Do NOT edit without going through codex:adversarial-review + PR + CODEOWNERS approval (this file is itself trust-boundary).",
+  "canonical_codeowner": "@agateuu1234-bit",
+
+  "trust_boundary_globs": [
+    "src/**",
+    "ios/**/*.swift",
+    "**/*.py",
+    "**/*.ts",
+    "**/*.tsx",
+    "kline_trainer_modules*.md",
+    "kline_trainer_plan*.md",
+    "docs/governance/**",
+    "docs/superpowers/specs/**",
+    "docs/superpowers/plans/**",
+    "modules/**",
+    "plan/**",
+    "fixtures/**",
+    "tools/fixtures/**",
+    "**/fixtures/**",
+    "**/golden/**",
+    "**/migrations/**",
+    "**/*.sql",
+    "**/openapi*.yml",
+    "**/openapi*.yaml",
+    "**/schema.graphql",
+    "**/*.xcodeproj/**",
+    "**/*.xcworkspace/**",
+    "**/project.pbxproj",
+    "**/*.xcassets/**",
+    "CLAUDE.md",
+    ".claude/**",
+    ".github/**",
+    "backend/**",
+    "**/.env*",
+    ".gitignore",
+    "README.md",
+    "docs/policy/**",
+    "scripts/**",
+    "Makefile",
+    "Fastfile",
+    "fastlane/**",
+    "**/Package.resolved",
+    "**/Podfile.lock",
+    "**/requirements*.txt",
+    "**/package.json",
+    "**/pnpm-lock.yaml",
+    "**/yarn.lock",
+    "**/poetry.lock",
+    "**/pyproject.toml",
+    "**/*.podspec",
+    "**/Dockerfile",
+    "**/docker-compose*.yml",
+    "**/docker-compose*.yaml",
+    "codex.pin.json",
+    "tests/**",
+    "docs/**"
+  ],
+
+  "trust_boundary_whitelist": [
+    "ios/**/.gitkeep",
+    "**/.DS_Store",
+    "*.lockb",
+    "ios/**/UserInterfaceState.xcuserstate",
+    ".gitattributes",
+    ".editorconfig",
+    "LICENSE",
+    "LICENSE.md"
+  ],
+
+  "trust_boundary_coverage_test": {
+    "source": "git ls-files",
+    "glob_engine": "python pathlib + fnmatch",
+    "symlink_policy": "follow=false",
+    "fail_on_uncovered": true
+  },
+
+  "codeowners_required_globs": [
+    ".claude/**",
+    ".github/**",
+    "CLAUDE.md",
+    "codex.pin.json",
+    "docs/governance/**",
+    "docs/superpowers/specs/**",
+    "docs/superpowers/plans/**",
+    "kline_trainer_modules*.md",
+    "kline_trainer_plan*.md",
+    "modules/**",
+    "plan/**",
+    "scripts/**",
+    "Makefile",
+    "Fastfile",
+    "fastlane/**",
+    "**/*.podspec",
+    "**/Dockerfile"
+  ],
+
+  "skill_entry_map": {
+    "session_start_or_cross_session_resume": "superpowers:using-superpowers",
+    "new_feature_new_component_behavior_change": "superpowers:brainstorming",
+    "multi_step_task_with_approved_spec": "superpowers:writing-plans",
+    "no_spec_yet": "superpowers:brainstorming",
+    "execute_existing_plan_independent_tasks": "superpowers:subagent-driven-development",
+    "execute_existing_plan_single_thread": "superpowers:executing-plans",
+    "two_or_more_independent_investigations": "superpowers:dispatching-parallel-agents",
+    "write_production_code_for_feature_bugfix_refactor": "superpowers:test-driven-development",
+    "behavior_neutral_doc_or_config_exempt_from_tdd": "(exempt: behavior-neutral)",
+    "bug_test_failure_unexpected_behavior": "superpowers:systematic-debugging",
+    "before_completion_success_pass_commit_pr_claim": "superpowers:verification-before-completion",
+    "self_review_before_merge": "superpowers:requesting-code-review",
+    "receive_review_feedback": "superpowers:receiving-code-review",
+    "mandatory_review_class_change": "codex:adversarial-review",
+    "finishing_phase_wrap_up": "superpowers:finishing-a-development-branch",
+    "create_or_modify_skill": "superpowers:writing-skills",
+    "multi_pr_parallel_or_isolation_needed": "superpowers:using-git-worktrees",
+    "ui_frontend_code": "frontend-design:frontend-design"
+  },
+
+  "task_class_to_required_stages": {
+    "feature_or_bugfix": {
+      "ordered_stages": [
+        "brainstorming",
+        "writing-plans",
+        "test-driven-development",
+        "verification-before-completion",
+        "requesting-code-review",
+        "codex:adversarial-review (if trust-boundary touched)"
+      ]
+    },
+    "governance_process_toolchain_change": {
+      "ordered_stages": [
+        "brainstorming",
+        "writing-plans",
+        "codex:adversarial-review",
+        "verification-before-completion"
+      ]
+    },
+    "pure_query_or_single_step_no_semantic_change": {
+      "ordered_stages": [],
+      "exempt_valid": true
+    }
+  },
+
+  "task_state_file": ".claude/state/task-log.jsonl",
+  "task_state_policy": {
+    "append_only": true,
+    "hook_owned_write": true,
+    "claude_write_denied": true,
+    "evidence_required_per_stage": {
+      "brainstorming": "spec file sha",
+      "writing-plans": "plan file sha",
+      "TDD": "test file sha + test run output sha",
+      "verification": "verification output sha",
+      "codex-review": "codex JSON digest"
+    }
+  },
+
+  "skill_gate_policy": {
+    "required_on_any_work_advancing_response": true,
+    "first_line_format": "Skill gate: <skill-name>",
+    "exempt_format": "Skill gate: exempt(<whitelist-reason>)",
+    "exempt_reason_whitelist": [
+      "behavior-neutral",
+      "user-explicit-skip",
+      "read-only-query",
+      "single-step-no-semantic-change"
+    ],
+    "enforcement_mode": "drift-log",
+    "enforcement_description": "Since gov-bootstrap-hardening-2 (2026-04-19), a missing first-line Skill gate does NOT block the response. stop-response-check.sh appends a drift record to .claude/state/skill-gate-drift.jsonl (inferred_skill from transcript scan, first_line, response_sha, time_utc), emits stderr WARN, and exits 0. Rationale: block-mode produced 29 violations per multi-hour session without improving compliance; drift-log preserves audit trail + enables rollup without interruption. Out-of-whitelist exempt reason still blocks (invariant).",
+    "degradation_policy": {
+      "allowed_downgrade": "execution downgrade (subagent-to-manual; parallel-to-serial); first-line gate drift-log inference from transcript",
+      "forbidden": "skipping any skill pipeline stage (TDD to impl to review to verification); using an out-of-whitelist exempt reason"
+    },
+    "wrong_skill_remediation": "acknowledge + restart from correct skill; user inquiry = trigger",
+    "future_hardening_3_scope": "auto-inject mode (gate injection + validation pipeline) + CI rollup report of skill-gate-drift.jsonl"
+  },
+
+  "verification_template": {
+    "audience": "user themselves (non-coder; voice input; needs term translation + actionable steps)",
+    "language": "Chinese for user-facing; English for JSON keys",
+    "required_sections": [
+      "action: reproducible UI/command/button level operation steps",
+      "expected: observable UI state / file changes / command output",
+      "pass_fail: explicit binary pass/fail criteria"
+    ],
+    "evidence_requirements": [
+      "critical steps must include screenshot or command output transcript",
+      "pass criteria must be binary decidable"
+    ],
+    "forbidden_phrases": [
+      "验证通过即可",
+      "看起来正常",
+      "应该没问题",
+      "should work",
+      "looks fine"
+    ],
+    "delivery_medium": {
+      "primary": "PR body (markdown three-section template)",
+      "acceptance_evidence_upload": "PR comment with screenshot / command output",
+      "alternative_for_ui_heavy": "attached screen recording link"
+    }
+  },
+
+  "adversarial_review_loop": {
+    "round_definition": "1 round = 1 Codex half-round + 1 Claude half-round (round trip = 1 round)",
+    "max_rounds": 3,
+    "on_converge_within_3": "auto-proceed to next stage, no user interruption",
+    "on_non_convergence": "escalate to user; payload includes verdict sequence + unresolved findings + Claude rationale + tradeoff positions + bypass options with cost",
+    "applies_to_artifacts": [
+      "brainstorming-produced spec (.md in docs/superpowers/specs/)",
+      "writing-plans-produced plan (.md in docs/superpowers/plans/)",
+      "feature PR code (via GitHub Actions workflow)"
+    ],
+    "review_channel": "codex:adversarial-review",
+    "forbidden_channels": ["codex:rescue"],
+    "rescue_purpose": "diagnosis / Q&A / auxiliary reasoning only; NOT a review channel",
+    "per_round_artifact": {
+      "spec_blob_sha": "required (git hash-object)",
+      "codex_json_digest": "required (sha256)",
+      "review_target_sha": "required (= spec blob sha at review time)"
+    },
+    "duplicate_same_blob_not_counted": true,
+    "only_approve_on_pr_head_sha_merges_code": true,
+    "execution_venue_by_stage": {
+      "brainstorming_spec": "Claude local codex-companion (best-effort first layer)",
+      "writing_plans_plan": "Claude local codex-companion (best-effort first layer)",
+      "pr_feature_code": "GitHub Actions runner (unforgeable second-layer backstop; reviews spec/plan files too)"
+    }
+  },
+
+  "phase_delivery": {
+    "default_unit": "each plan = 1 phase delivery",
+    "exemption_mechanism": "plan file frontmatter may set phase_delivery: false + exemption_reason; exemption itself goes through Codex review",
+    "acceptance_checklist_sections": ["action", "expected", "pass_fail"],
+    "acceptance_checklist_language": "Chinese",
+    "acceptance_evidence": "user self-runs steps + screenshot/output + PR comment",
+    "plan_0a_classification": "governance/infrastructure plan → phase_delivery: true, acceptance = mechanism verification rather than business feature",
+    "business_plan_examples": "K-line rendering, RSI indicator, etc. business module plans → phase_delivery: true, acceptance = UI/feature verification"
+  },
+
+  "hat_signoff_verification": {
+    "source": "docs/governance/signing-rules.md",
+    "author": "non-bot GitHub user (repo owner, not claude-code / any bot)",
+    "timing": "comment posted AFTER latest PR commit AND AFTER required checks pass",
+    "staleness": "new push -> signoff invalidated, must re-sign",
+    "format": "exact hat string match (not substring; not PR body text; not template placeholder)"
+  },
+
+  "user_escalation_ladder": {
+    "admin_bypass_definition": "GitHub audit-log admin action + required check conclusion remains failure/neutral (NOT success)",
+    "forbidden_bypass_paths": [
+      "Claude-authored PR body as bypass record",
+      "Claude-authored comment as bypass record",
+      "setting check-run conclusion to success when verdict is not approve"
+    ]
+  },
+
+  "bootstrap_lock": {
+    "location": ".github/bootstrap-lock.json",
+    "fields": ["pr_number", "pr_head_sha", "expiry_utc", "codex_json_digest", "consumed", "branch_protection_verified_after_merge"],
+    "write_permission": "GitHub Actions workflow only (Claude Edit denied except during bootstrap PR itself)",
+    "reuse_prohibited": true,
+    "check_workflow": ".github/workflows/check-bootstrap-used-once.yml"
+  }
+}

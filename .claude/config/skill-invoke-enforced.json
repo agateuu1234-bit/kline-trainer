@@ -1,0 +1,148 @@
+{
+  "version": "1",
+  "description": "Hardening-6 v9: 5-layer skill pipeline enforcement (L1 gate presence / L2 Skill tool invoke / L3 exempt integrity / L4 mini-state / L5 codex target-bound + revision-bound evidence). Initial全 observe; per-skill flip 在 H6.1-H6.10.",
+  "unknown_gate_policy": {
+    "drift-log_mode": "drift-log_then_pass",
+    "block_mode": "fail_closed_unless_ALLOW_UNKNOWN_GATE=1"
+  },
+  "enforce": {
+    "codex:adversarial-review": {
+      "mode": "observe",
+      "flip_phase": "H6.10",
+      "exempt_rule": "codex-evidence-bound-to-target",
+      "note": "v3 first-class; ledger/override-log path A/B only; no stdout path C; revision-bound for file targets"
+    },
+    "superpowers:brainstorming": {
+      "mode": "observe",
+      "flip_phase": "H6.5",
+      "exempt_rule": "plan-doc-spec-frozen-note"
+    },
+    "superpowers:writing-plans": { "mode": "observe", "flip_phase": "H6.6" },
+    "superpowers:subagent-driven-development": { "mode": "observe", "flip_phase": "H6.7" },
+    "superpowers:test-driven-development": { "mode": "observe", "flip_phase": "H6.8" },
+    "superpowers:verification-before-completion": { "mode": "block", "flip_phase": "H6.1" },
+    "superpowers:requesting-code-review": { "mode": "observe", "flip_phase": "H6.2" },
+    "superpowers:receiving-code-review": { "mode": "observe", "flip_phase": "H6.3" },
+    "superpowers:finishing-a-development-branch": { "mode": "observe", "flip_phase": "H6.9" },
+    "superpowers:using-git-worktrees": {
+      "mode": "observe",
+      "flip_phase": "H6.4",
+      "exempt_rule": "plan-start-in-worktree"
+    },
+    "superpowers:using-superpowers": { "mode": "observe", "flip_phase": "永久" },
+    "superpowers:executing-plans": { "mode": "observe", "flip_phase": "永久" },
+    "superpowers:systematic-debugging": { "mode": "observe", "flip_phase": "永久" },
+    "superpowers:dispatching-parallel-agents": { "mode": "observe", "flip_phase": "永久" }
+  },
+  "mini_state": {
+    "enabled": true,
+    "state_dir": ".claude/state/skill-stage/",
+    "file_template": "{wt_hash8}-{session_id8}.json",
+    "legal_next_set": {
+      "_initial": [
+        "superpowers:using-git-worktrees",
+        "superpowers:brainstorming",
+        "superpowers:writing-plans",
+        "superpowers:systematic-debugging",
+        "superpowers:finishing-a-development-branch",
+        "superpowers:verification-before-completion"
+      ],
+      "superpowers:using-git-worktrees": [
+        "superpowers:brainstorming",
+        "superpowers:writing-plans"
+      ],
+      "superpowers:brainstorming": [
+        "codex:adversarial-review",
+        "superpowers:using-git-worktrees"
+      ],
+      "codex:adversarial-review": [
+        "superpowers:writing-plans",
+        "superpowers:subagent-driven-development",
+        "superpowers:executing-plans",
+        "superpowers:receiving-code-review",
+        "superpowers:finishing-a-development-branch",
+        "superpowers:brainstorming"
+      ],
+      "superpowers:writing-plans": [
+        "codex:adversarial-review",
+        "superpowers:using-git-worktrees"
+      ],
+      "superpowers:subagent-driven-development": [
+        "superpowers:test-driven-development",
+        "superpowers:verification-before-completion",
+        "superpowers:requesting-code-review",
+        "superpowers:receiving-code-review",
+        "superpowers:systematic-debugging",
+        "superpowers:finishing-a-development-branch",
+        "superpowers:dispatching-parallel-agents",
+        "codex:adversarial-review"
+      ],
+      "superpowers:executing-plans": [
+        "superpowers:test-driven-development",
+        "superpowers:verification-before-completion",
+        "superpowers:systematic-debugging",
+        "superpowers:finishing-a-development-branch",
+        "codex:adversarial-review"
+      ],
+      "superpowers:test-driven-development": [
+        "superpowers:verification-before-completion",
+        "superpowers:systematic-debugging",
+        "superpowers:requesting-code-review",
+        "superpowers:receiving-code-review",
+        "superpowers:subagent-driven-development",
+        "superpowers:executing-plans"
+      ],
+      "superpowers:verification-before-completion": [
+        "superpowers:requesting-code-review",
+        "superpowers:finishing-a-development-branch",
+        "superpowers:test-driven-development",
+        "superpowers:subagent-driven-development",
+        "superpowers:executing-plans"
+      ],
+      "superpowers:requesting-code-review": [
+        "superpowers:receiving-code-review",
+        "superpowers:finishing-a-development-branch",
+        "codex:adversarial-review",
+        "superpowers:test-driven-development"
+      ],
+      "superpowers:receiving-code-review": [
+        "superpowers:test-driven-development",
+        "superpowers:verification-before-completion",
+        "superpowers:requesting-code-review",
+        "superpowers:subagent-driven-development",
+        "superpowers:executing-plans",
+        "superpowers:systematic-debugging",
+        "codex:adversarial-review"
+      ],
+      "superpowers:systematic-debugging": [
+        "superpowers:test-driven-development",
+        "superpowers:verification-before-completion"
+      ],
+      "superpowers:finishing-a-development-branch": [
+        "codex:adversarial-review",
+        "_initial"
+      ]
+    },
+    "wildcard_always_allowed": [
+      "superpowers:using-superpowers",
+      "superpowers:systematic-debugging",
+      "superpowers:dispatching-parallel-agents"
+    ],
+    "_note_wildcard": "v15 R14 F1 fix: hook 对 wildcard skill NOT 更新 last_stage (避免 wildcard 后下一步看到空 legal_next_set). systematic-debugging 已有 legal_next_set entry (见上); using-superpowers 和 dispatching-parallel-agents 不需要 entry 因为 wildcard 路径直接 pass 不更新 state",
+    "_note_initial_verification_exemption": "H6.1 (2026-04-24) legal_next_set._initial 加入 verification-before-completion。User-ratified residual: session resume / state reset → _initial，用户设计意图是第一个 skill 不 L4-strict-enforced；L2 gate_declared_no_invoke 仍强制（skill MUST be invoked）；bypass concern 是 accepted residual，skill semantic check 兜底。详见 spec §6 + memory project_h6_initial_legal_next_set_exemption_pattern.md。",
+    "reset_triggers": {
+      "new_worktree": {
+        "signal": "response tool_uses contains Bash with command matching 'git worktree add'",
+        "effect": "last_stage reset to _initial"
+      },
+      "finishing_branch_pushed": {
+        "signal": "response tool_uses contains Bash with command matching 'git push' AND '(gh pr create|gh pr merge)'",
+        "effect": "last_stage reset to _initial"
+      },
+      "session_switch": {
+        "signal": "state file {wt_hash8}-{session_id8}.json not found for current session",
+        "effect": "implicit _initial (new file created on first write)"
+      }
+    }
+  }
+}
