@@ -355,7 +355,7 @@ merge 后按 `feedback_post_plan_ritual.md` 回回中列剩余 v6 PR 清单。
 | 5 | 在 GitHub PR 页面看 CI checks | 若 CI 已挂：所有 check 绿灯，test summary 显示 57 tests passed（任一红灯不得 merge）；若 CI 未挂：本行 N/A 并标 ✅ | ☐ |
 | 6 | PR body 末尾「不在范围 (residual)」段 | 列出 `positionTier`、100 股取整、强制平仓三项；并指明各自归属下一个 PR | ☐ |
 | 7 | 在 PR 页面的 commit 列表 | 看到至少 3 个独立 commit（Task 1 主 + Task 2 主 + Task 3 push 不产生 commit）；额外可能含 Task 2 review-fix 衍生 commit（如 import 顺序 / plan 同步），可接受不视为缺陷 | ☐ |
-| 8 | 在 GitHub PR 页面看 `codex:adversarial-review` status check（CLAUDE.md backstop §1：所有 PR 必须过此 review） | 该 check 绿灯通过；若该 check 不存在 / 红灯 / 仍 pending，**不得 merge**（即使其他行全绿） | ☐ |
+| 8 | 在 GitHub PR 页面 Checks 面板看 `codex-verify-pass` status check（这是 CLAUDE.md backstop §1 要求的 `codex:adversarial-review` 在 GitHub 上的对外 check 名，由 `.github/workflows/codex-review-verify.yml` 写入） | 该 check 绿灯通过；若该 check 不存在 / 红灯 / 仍 pending，**不得 merge**（即使其他行全绿） | ☐ |
 
 **任一行 ❌ → 不得 merge**；用户可在 PR comment 中粘贴每条命令的实际输出 / 截图作为证据。
 
