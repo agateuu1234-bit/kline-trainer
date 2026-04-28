@@ -1,0 +1,229 @@
+# codex-review-verify.yml (R3.1 fix: structured JSON + strict exit code)
+# workflow_run triggered — runs BASE branch code; PR cannot replace this workflow.
+# Has OPENAI_API_KEY + checks:write. Derives authoritative SHAs from GitHub API (R6.1).
+name: codex-review-verify
+on:
+  workflow_run:
+    workflows: [codex-review-collect]
+    types: [completed]
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+  actions: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' }}
+    environment: codex-review
+    steps:
+      - name: Checkout BASE branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download PR metadata (advisory)
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: pr-metadata
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Load SHAs from artifact (advisory only)
+        id: sha_artifact
+        run: |
+          base=$(cat pr-base.txt | tr -d '[:space:]')
+          head=$(cat pr-head.txt | tr -d '[:space:]')
+          num=$(cat pr-number.txt | tr -d '[:space:]')
+          [ -z "$base" ] || [ -z "$head" ] && { echo "FAIL: empty artifact SHA"; exit 1; }
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "number=$num" >> "$GITHUB_OUTPUT"
+
+      - name: Derive + validate SHAs (R6.1 + R2.1)
+        id: sha
+        env:
+          ARTIFACT_BASE: ${{ steps.sha_artifact.outputs.base }}
+          ARTIFACT_HEAD: ${{ steps.sha_artifact.outputs.head }}
+          ARTIFACT_NUMBER: ${{ steps.sha_artifact.outputs.number }}
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const sha40 = /^[0-9a-f]{40}$/;
+            const prNumRe = /^[0-9]+$/;
+            const artifactHead = process.env.ARTIFACT_HEAD || '';
+            const artifactBase = process.env.ARTIFACT_BASE || '';
+            const artifactNumber = process.env.ARTIFACT_NUMBER || '';
+            if (!sha40.test(artifactHead)) { core.setFailed('artifact head SHA invalid'); return; }
+            if (!sha40.test(artifactBase)) { core.setFailed('artifact base SHA invalid'); return; }
+            if (!prNumRe.test(artifactNumber)) { core.setFailed('artifact PR number invalid'); return; }
+            const prs = context.payload.workflow_run.pull_requests || [];
+            if (!prs.length) { core.setFailed('no PR associated with workflow_run'); return; }
+            const pr = prs[0];
+            const { data } = await github.rest.pulls.get({
+              owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number
+            });
+            const apiHead = data.head.sha;
+            const apiBase = data.base.sha;
+            const wrHead = context.payload.workflow_run.head_sha;
+            if (artifactHead !== apiHead) { core.setFailed('head mismatch artifact vs API'); return; }
+            if (artifactBase !== apiBase) { core.setFailed('base mismatch artifact vs API'); return; }
+            if (wrHead !== apiHead) { core.setFailed('workflow_run head != api head'); return; }
+            core.setOutput('base', apiBase);
+            core.setOutput('head', apiHead);
+            core.setOutput('number', String(pr.number));
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
+        with: { node-version: '20' }
+
+      - name: Fetch + verify Codex CLI tarball integrity (F3)
+        run: |
+          CLI_VERSION=$(python3 -c "import json; print(json.load(open('codex.pin.json'))['codex_cli']['version'])")
+          EXPECTED_INTEGRITY=$(python3 -c "import json; print(json.load(open('codex.pin.json'))['codex_cli']['tarball_integrity'])")
+          if [ -z "$EXPECTED_INTEGRITY" ] || [ "$EXPECTED_INTEGRITY" = "__NOT_AVAILABLE__" ]; then
+            echo "FAIL: tarball_integrity not set"; exit 1
+          fi
+          TARBALL_URL=$(npm view "@openai/codex@${CLI_VERSION}" dist.tarball)
+          ACTUAL_INTEGRITY=$(npm view "@openai/codex@${CLI_VERSION}" dist.integrity)
+          if [ "$ACTUAL_INTEGRITY" != "$EXPECTED_INTEGRITY" ]; then
+            echo "FAIL: npm registry integrity mismatch"; exit 1
+          fi
+          mkdir -p /tmp/codex-tarball
+          curl -sL "$TARBALL_URL" -o /tmp/codex-tarball/codex.tgz
+          LOCAL_SHA512=$(openssl dgst -sha512 -binary /tmp/codex-tarball/codex.tgz | base64 | tr -d '\n')
+          LOCAL_INTEGRITY="sha512-${LOCAL_SHA512}"
+          if [ "$LOCAL_INTEGRITY" != "$EXPECTED_INTEGRITY" ]; then
+            echo "FAIL: tarball hash mismatch"; exit 1
+          fi
+          npm install -g /tmp/codex-tarball/codex.tgz
+          codex --version
+
+      - name: Authenticate Codex CLI (codex login --with-api-key)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          printenv OPENAI_API_KEY | codex login --with-api-key
+          codex login status || true
+
+      - name: Clone codex-plugin-cc at pinned tag + verify commit
+        run: |
+          TAG=$(python3 -c "import json; print(json.load(open('codex.pin.json'))['codex_plugin_cc']['tag'])")
+          EXPECTED_COMMIT=$(python3 -c "import json; print(json.load(open('codex.pin.json'))['codex_plugin_cc']['commit_sha'])")
+          git clone --depth 1 --branch "$TAG" https://github.com/openai/codex-plugin-cc.git .github/codex-plugin
+          ACTUAL_COMMIT=$(cd .github/codex-plugin && git rev-parse HEAD)
+          if [ "$EXPECTED_COMMIT" != "$ACTUAL_COMMIT" ]; then
+            echo "FAIL: plugin commit mismatch"; exit 1
+          fi
+
+      - name: Verify plugin file tree integrity
+        run: node .claude/scripts/verify-codex-tree.mjs codex.pin.json .github/codex-plugin/plugins/codex
+
+      - name: Checkout PR head in subdir (full depth)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ steps.sha.outputs.head }}
+          path: pr-head
+          fetch-depth: 0
+
+      - name: Verify both base + head exist in pr-head
+        working-directory: pr-head
+        run: |
+          git fetch origin "${{ steps.sha.outputs.base }}" --depth=1 2>&1 || true
+          git cat-file -e "${{ steps.sha.outputs.base }}" || { echo "FAIL: base SHA missing"; exit 1; }
+          git cat-file -e "${{ steps.sha.outputs.head }}" || { echo "FAIL: head SHA missing"; exit 1; }
+
+      - name: Run Codex adversarial-review (R3.1 · --json + strict exit code)
+        id: codex_run
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        working-directory: pr-head
+        run: |
+          PLUGIN_DIR="$GITHUB_WORKSPACE/.github/codex-plugin/plugins/codex"
+          export CLAUDE_PLUGIN_ROOT="$PLUGIN_DIR"
+          set +e
+          node "$PLUGIN_DIR/scripts/codex-companion.mjs" adversarial-review \
+            --wait --json --scope branch \
+            --base "${{ steps.sha.outputs.base }}" \
+            > "$GITHUB_WORKSPACE/codex-verdict.json" \
+            2> "$GITHUB_WORKSPACE/codex-run.stderr"
+          CODEX_EXIT=$?
+          echo "--- codex exit: $CODEX_EXIT ---"
+          echo "--- stderr ---"
+          cat "$GITHUB_WORKSPACE/codex-run.stderr" || echo "(no stderr file)"
+          echo "--- verdict first 2000 chars ---"
+          head -c 2000 "$GITHUB_WORKSPACE/codex-verdict.json" || echo "(empty)"
+          echo ""
+          if [ "$CODEX_EXIT" -ne 0 ]; then
+            echo "FAIL: codex exit $CODEX_EXIT"
+            exit "$CODEX_EXIT"
+          fi
+
+      - name: Parse verdict from structured JSON (R3.1 + R5.1 fix · result.verdict)
+        id: verdict
+        run: |
+          # codex-companion --json emits a wrapper: {review, target, codex, result: {verdict, ...}, parseError, ...}
+          # verdict is at result.verdict (R5.1 fix), NOT top-level.
+          VERDICT=$(python3 - <<'PYEOF'
+          import json, sys
+          try:
+              d = json.load(open('codex-verdict.json'))
+          except Exception as e:
+              print(f'parse_error: {e}', file=sys.stderr); sys.exit(2)
+          # R7.2 fix: strict wrapper-shape check — parseError key must exist and be exactly null
+          if 'parseError' not in d:
+              print('wrapper missing parseError key', file=sys.stderr); sys.exit(3)
+          if d['parseError'] is not None:
+              print(f'codex parseError: {d["parseError"]!r}', file=sys.stderr); sys.exit(3)
+          result = d.get('result')
+          if not isinstance(result, dict):
+              print(f'result is not an object: {type(result).__name__}', file=sys.stderr); sys.exit(4)
+          v = result.get('verdict')
+          if v not in ('approve', 'needs-attention'):
+              print(f'invalid verdict: {v!r}', file=sys.stderr); sys.exit(5)
+          print(v)
+          PYEOF
+          )
+          [ -z "$VERDICT" ] && { echo "FAIL: could not extract verdict"; exit 1; }
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "Parsed verdict: $VERDICT"
+
+      - name: Post codex-verify-pass check-run + PR comment
+        env:
+          HEAD_SHA: ${{ steps.sha.outputs.head }}
+          BASE_SHA: ${{ steps.sha.outputs.base }}
+          PR_NUMBER: ${{ steps.sha.outputs.number }}
+          VERDICT: ${{ steps.verdict.outputs.verdict }}
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs'), crypto = require('crypto');
+            const sha40 = /^[0-9a-f]{40}$/;
+            const prNumRe = /^[0-9]+$/;
+            const verdictRe = /^(approve|needs-attention)$/;
+            const verdict = process.env.VERDICT;
+            const headSha = process.env.HEAD_SHA;
+            const baseSha = process.env.BASE_SHA;
+            const prNum = process.env.PR_NUMBER;
+            if (!sha40.test(headSha) || !sha40.test(baseSha) || !prNumRe.test(prNum) || !verdictRe.test(verdict)) {
+              core.setFailed('internal: validated outputs tainted'); return;
+            }
+            const jsonBody = fs.readFileSync('codex-verdict.json', 'utf-8');
+            const digest = crypto.createHash('sha256').update(jsonBody).digest('hex');
+            await github.rest.checks.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              name: 'codex-verify-pass',
+              head_sha: headSha,
+              status: 'completed',
+              conclusion: verdict === 'approve' ? 'success' : 'failure',
+              output: {
+                title: `Codex verdict: ${verdict}`,
+                summary: `codex_json_digest=${digest}\nreview_target_sha=${headSha}\nbase=${baseSha}\n\n\`\`\`json\n${jsonBody.substring(0, 60000)}\n\`\`\``
+              }
+            });
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: Number(prNum),
+              body: '```json\n' + jsonBody.substring(0, 60000) + '\n```'
+            });

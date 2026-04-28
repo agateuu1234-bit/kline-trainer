@@ -23,14 +23,10 @@
       "Bash(git push --set-upstream origin:*)",
       "Bash(git restore:*)",
       "Bash(git stash:*)",
-      "Bash(git rm:*)",
-      "Bash(git mv:*)",
       "Bash(git worktree add:*)",
       "Bash(git worktree list:*)",
       "Bash(git worktree prune:*)",
-      "Bash(git worktree remove:*)",
       "Bash(git branch -d:*)",
-      "Bash(git show:*)",
       "Bash(gh pr view:*)",
       "Bash(gh pr list:*)",
       "Bash(gh pr create:*)",
@@ -42,44 +38,141 @@
       "Bash(gh issue create:*)",
       "Bash(gh issue edit:*)",
       "Bash(gh repo view:*)",
-      "Bash(gh api:*)",
+      "Bash(node /Users/maziming/.claude/plugins/cache/openai-codex/codex/1.0.3/scripts/codex-companion.mjs:*)",
       "Write",
       "Edit",
-      "Read"
+      "Read",
+      "Bash(bash .claude/scripts/codex-attest.sh:*)",
+      "Bash(.claude/scripts/codex-attest.sh:*)",
+      "Bash(git show HEAD)",
+      "Bash(git show HEAD:*)",
+      "Bash(git show --stat:*)",
+      "Bash(git show HEAD^:*)",
+      "Bash(git show HEAD^^:*)",
+      "Bash(git show HEAD^^^:*)"
     ],
     "ask": [
+      "Bash(git push --force)",
+      "Bash(git push --force-with-lease)",
+      "Bash(git push -f:*)",
       "Bash(git push --force:*)",
       "Bash(git push --force-with-lease:*)",
-      "Bash(git push -f:*)",
       "Bash(git push origin --force:*)",
       "Bash(git push origin -f:*)",
       "Bash(git reset --hard:*)",
+      "Bash(git reset --soft:*)",
       "Bash(git branch -D:*)",
       "Bash(git rebase:*)",
       "Bash(git commit --amend:*)",
+      "Bash(git worktree remove:*)",
       "Bash(rm -rf:*)",
       "Bash(rm -r:*)",
+      "Bash(gh api:*)",
       "Bash(gh pr merge:*)",
-      "Bash(sudo:*)"
+      "Write(/Users/maziming/.claude/settings.json)",
+      "Write(/Users/maziming/Coding/Prj_Kline trainer/.claude/settings.json)",
+      "Edit(/Users/maziming/.claude/settings.json)",
+      "Edit(/Users/maziming/Coding/Prj_Kline trainer/.claude/settings.json)"
     ],
     "deny": [
       "Bash(git push origin main)",
       "Bash(git push origin main:*)",
+      "Bash(git push origin master)",
+      "Bash(git push origin master:*)",
       "Bash(git push -u origin main)",
       "Bash(git push -u origin main:*)",
+      "Bash(git push -u origin master)",
+      "Bash(git push -u origin master:*)",
       "Bash(git push --set-upstream origin main)",
       "Bash(git push --set-upstream origin main:*)",
+      "Bash(git push --set-upstream origin master)",
+      "Bash(git push --set-upstream origin master:*)",
       "Bash(git push origin HEAD:main)",
       "Bash(git push origin HEAD:main:*)",
+      "Bash(git push origin HEAD:master)",
+      "Bash(git push origin HEAD:master:*)",
       "Bash(git push origin HEAD:refs/heads/main)",
       "Bash(git push origin HEAD:refs/heads/main:*)",
+      "Bash(git push origin HEAD:refs/heads/master)",
+      "Bash(git push origin HEAD:refs/heads/master:*)",
       "Bash(git push origin refs/heads/main)",
       "Bash(git push origin refs/heads/main:*)",
+      "Bash(git push origin refs/heads/master)",
+      "Bash(git push origin refs/heads/master:*)",
       "Bash(git push origin +main:*)",
+      "Bash(git push origin +master:*)",
       "Bash(git push origin +HEAD:main:*)",
+      "Bash(git push origin +HEAD:master:*)",
       "Bash(git push origin +HEAD:refs/heads/main:*)",
+      "Bash(git push origin +HEAD:refs/heads/master:*)",
       "Bash(git push origin :main)",
+      "Bash(git push origin :master)",
       "Bash(git push origin :refs/heads/main)",
+      "Bash(git push origin :refs/heads/master)",
+      "Bash(gh api graphql*)",
+      "Bash(gh api * -X POST*)",
+      "Bash(gh api * --method POST*)",
+      "Bash(gh api * -X PUT*)",
+      "Bash(gh api * -X PATCH*)",
+      "Bash(gh api * -X DELETE*)",
+      "Bash(gh api repos/*/check-runs*)",
+      "Bash(gh api repos/*/statuses/*)",
+      "Bash(gh api repos/*/issues/*/comments*)",
+      "Bash(gh api repos/*/pulls/*/comments*)",
+      "Bash(gh pr comment:*)",
+      "Bash(gh pr review:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh issue comment:*)",
+      "Bash(gh issue edit:*)",
+      "Bash(gh workflow run*)",
+      "Bash(gh run rerun*)",
+      "Bash(gh secret *)",
+      "Bash(gh variable *)",
+      "Bash(gh release *)",
+      "Bash(gh ruleset *)",
+      "Bash(gh repo edit*)",
+      "Bash(gh auth *)",
+      "Bash(curl * github.com*)",
+      "Bash(curl * api.github.com*)",
+      "Bash(wget * github.com*)",
+      "Bash(nc * github.com*)",
+      "Bash(python* -c *github.com*)",
+      "Bash(node -e *github.com*)",
+      "Bash(bash -c *)",
+      "Bash(zsh -c *)",
+      "Bash(sh -c *)",
+      "Bash(eval *)",
+      "Bash(exec *)",
+      "Bash(sudo *)",
+      "Bash(node */codex-companion.mjs*)",
+      "Bash(node ~/.claude/plugins/*)",
+      "Edit(.claude/hooks/**)",
+      "Write(.claude/hooks/**)",
+      "Edit(.claude/scripts/**)",
+      "Write(.claude/scripts/**)",
+      "Edit(.claude/workflow-rules.json)",
+      "Write(.claude/workflow-rules.json)",
+      "Edit(.claude/state/**)",
+      "Write(.claude/state/**)",
+      "Edit(.github/workflows/**)",
+      "Write(.github/workflows/**)",
+      "Edit(.github/CODEOWNERS)",
+      "Write(.github/CODEOWNERS)",
+      "Edit(CLAUDE.md)",
+      "Write(CLAUDE.md)",
+      "Edit(codex.pin.json)",
+      "Write(codex.pin.json)",
+      "Write(~/.claude/plugins/cache/openai-codex/**)",
+      "Edit(~/.claude/plugins/cache/openai-codex/**)",
+      "Bash(* >> .claude/state*)",
+      "Bash(* >> .claude/hooks*)",
+      "Bash(* >> .github/workflows*)",
+      "Bash(tee * .claude/*)",
+      "Bash(sed -i * .claude/*)",
+      "Bash(rm * .claude/*)",
+      "Bash(chmod * .claude/*)",
+      "Bash(*.claude/state*)",
+      "Bash(*attest-override.sh*)",
       "Read(**/.env)",
       "Edit(**/.env)",
       "Write(**/.env)",
@@ -101,19 +194,246 @@
       "Read(**/.aws/credentials*)",
       "Edit(**/.aws/credentials*)",
       "Write(**/.aws/credentials*)",
+      "Read(**/.npmrc)",
+      "Edit(**/.npmrc)",
+      "Write(**/.npmrc)",
+      "Read(**/.netrc)",
+      "Edit(**/.netrc)",
+      "Write(**/.netrc)",
+      "Read(**/.pypirc)",
+      "Edit(**/.pypirc)",
+      "Write(**/.pypirc)",
+      "Read(**/.pgpass)",
+      "Edit(**/.pgpass)",
+      "Write(**/.pgpass)",
       "Read(**/*.p12)",
       "Edit(**/*.p12)",
       "Write(**/*.p12)",
+      "Read(**/*.pfx)",
+      "Edit(**/*.pfx)",
+      "Write(**/*.pfx)",
       "Read(**/*.mobileprovision)",
       "Edit(**/*.mobileprovision)",
       "Write(**/*.mobileprovision)",
       "Read(**/GoogleService-Info.plist)",
       "Edit(**/GoogleService-Info.plist)",
       "Write(**/GoogleService-Info.plist)",
+      "Read(**/private_keys/**)",
+      "Edit(**/private_keys/**)",
+      "Write(**/private_keys/**)",
+      "Read(**/*_private.key)",
+      "Edit(**/*_private.key)",
+      "Write(**/*_private.key)",
+      "Read(**/*_rsa)",
+      "Edit(**/*_rsa)",
+      "Write(**/*_rsa)",
+      "Read(**/fastlane/**/Appfile)",
+      "Edit(**/fastlane/**/Appfile)",
+      "Write(**/fastlane/**/Appfile)",
+      "Read(**/fastlane/**/Matchfile)",
+      "Edit(**/fastlane/**/Matchfile)",
+      "Write(**/fastlane/**/Matchfile)",
       "Bash(cat **/.env*)",
       "Bash(cat **/secrets/**)",
       "Bash(cat **/*.p12)",
-      "Bash(cat **/*.mobileprovision)"
+      "Bash(cat **/*.mobileprovision)",
+      "Bash(cat **/GoogleService-Info.plist)",
+      "Bash(cat **/.npmrc)",
+      "Bash(cat **/.netrc)",
+      "Bash(cat **/.pypirc)",
+      "Bash(* > **/.env*)",
+      "Bash(* > **/secrets/**)",
+      "Bash(git show *.env*)",
+      "Bash(git show *secrets/*)",
+      "Bash(git show *.p12*)",
+      "Bash(git show *mobileprovision*)",
+      "Bash(git show *GoogleService-Info.plist*)",
+      "Bash(git show *.npmrc*)",
+      "Bash(git show *.netrc*)",
+      "Bash(git show *.pypirc*)",
+      "Bash(git show *fastlane/Appfile*)",
+      "Bash(git show *fastlane/Matchfile*)",
+      "Bash(git show *.pem)",
+      "Bash(git show *.key)",
+      "Bash(git show *id_rsa*)",
+      "Bash(git show *.ssh/*)",
+      "Bash(git diff *.env*)",
+      "Bash(git diff *secrets/*)",
+      "Bash(git diff *.p12*)",
+      "Bash(git diff *mobileprovision*)",
+      "Bash(git diff *GoogleService-Info.plist*)",
+      "Bash(git diff *.npmrc*)",
+      "Bash(git diff *.netrc*)",
+      "Bash(git diff *.pypirc*)",
+      "Bash(git diff *fastlane/Appfile*)",
+      "Bash(git diff *fastlane/Matchfile*)",
+      "Bash(git diff *.pem)",
+      "Bash(git diff *.key)",
+      "Bash(git diff *id_rsa*)",
+      "Bash(git diff *.ssh/*)",
+      "Bash(git grep *.env*)",
+      "Bash(git grep *secrets/*)",
+      "Bash(git grep *.p12*)",
+      "Bash(git grep *mobileprovision*)",
+      "Bash(git grep *GoogleService-Info.plist*)",
+      "Bash(git grep *.npmrc*)",
+      "Bash(git grep *.netrc*)",
+      "Bash(git grep *.pypirc*)",
+      "Bash(git grep *fastlane/Appfile*)",
+      "Bash(git grep *fastlane/Matchfile*)",
+      "Bash(git grep *.pem)",
+      "Bash(git grep *.key)",
+      "Bash(git grep *id_rsa*)",
+      "Bash(git grep *.ssh/*)",
+      "Bash(git cat-file -p:*)",
+      "Bash(git ls-files -s *.env*)",
+      "Bash(git ls-files -s *secrets/*)",
+      "Bash(git ls-files -s *.p12*)",
+      "Bash(git ls-files -s *mobileprovision*)",
+      "Bash(git ls-files -s *GoogleService-Info.plist*)",
+      "Bash(git ls-files -s *.pem)",
+      "Bash(git ls-files -s *id_rsa*)",
+      "Bash(git ls-files -s *.npmrc*)",
+      "Bash(git ls-files -s *.netrc*)",
+      "Bash(git ls-files -s *.pypirc*)",
+      "Bash(git ls-files -s *.ssh/*)",
+      "Bash(git hash-object *.env*)",
+      "Bash(git hash-object *secrets/*)",
+      "Bash(git hash-object *.p12*)",
+      "Bash(git hash-object *mobileprovision*)",
+      "Bash(git hash-object *GoogleService-Info.plist*)",
+      "Bash(git hash-object *.pem)",
+      "Bash(git hash-object *.key)",
+      "Bash(git hash-object *id_rsa*)",
+      "Bash(*ack-drift.sh*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/session-start.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/user-prompt-skill-reminder.sh",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/guard-git-push.sh",
+            "if": "Bash(git push:*)",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/pre-commit-diff-scan.sh",
+            "if": "Bash(git commit:*)",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/pre-merge-warn.sh",
+            "if": "Bash(gh pr merge:*)",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/guard-attest-ledger.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/pre-edit-trust-boundary-hint.sh",
+            "timeout": 2
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/pre-edit-trust-boundary-hint.sh",
+            "timeout": 2
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/guard-env-read.sh",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/guard-env-read.sh",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/guard-env-read.sh",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'cd \"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}\" && exec bash .claude/hooks/stop-response-check.sh'",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'cd \"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}\" && exec bash .claude/hooks/skill-invoke-check.sh'"
+          }
+        ]
+      }
     ]
   }
 }
