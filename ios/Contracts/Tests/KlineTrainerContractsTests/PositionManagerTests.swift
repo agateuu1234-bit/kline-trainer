@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import KlineTrainerContracts
 
@@ -67,5 +68,30 @@ struct PositionManagerTests {
         var c = PositionManager()
         c.buy(shares: 200, totalCost: 2000)
         #expect(a != c)
+    }
+
+    @Test("Codable round-trip preserves all state")
+    func codableRoundTrip() throws {
+        var original = PositionManager()
+        original.buy(shares: 200, totalCost: 2500)         // avg 12.5
+
+        let json = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(PositionManager.self, from: json)
+
+        #expect(decoded == original)
+        #expect(decoded.shares == 200)
+        #expect(decoded.averageCost == 12.5)
+        #expect(decoded.totalInvested == 2500)
+    }
+
+    @Test("Codable JSON keys are camelCase (averageCost / totalInvested)")
+    func codableJsonKeys() throws {
+        var p = PositionManager()
+        p.buy(shares: 100, totalCost: 1000)
+        let data = try JSONEncoder().encode(p)
+        // 用 JSONSerialization 解键名，避免 Double 渲染（"10" vs "10.0"）的字符串脆性。
+        // Wave 0 §M0.1 position_data 列契约靠 round-trip 保证；本测试只锁键名约定。
+        let dict = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(dict.keys.sorted() == ["averageCost", "shares", "totalInvested"])
     }
 }

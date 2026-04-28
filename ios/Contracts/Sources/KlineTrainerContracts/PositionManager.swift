@@ -3,7 +3,7 @@
 
 import Foundation
 
-public struct PositionManager: Equatable, Sendable {
+public struct PositionManager: Codable, Equatable, Sendable {
     public private(set) var shares: Int
     public private(set) var averageCost: Double
     public private(set) var totalInvested: Double
