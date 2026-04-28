@@ -66,18 +66,6 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ---
 
-## Repository governance backstop (project-specific · non-overridable)
+## 5. Follow Superpowers Skills
 
-The four principles above are day-to-day coding guidelines. Even if every hook, skill, or config is broken or missing, the following project invariants still hold:
-
-1. All PRs that touch the repository go through `codex:adversarial-review`, with the review verdict enforceable as a required GitHub status check (not self-attested).
-
-2. Every module/phase delivery (default: 1 plan = 1 phase) MUST include a non-coder-executable acceptance checklist (action / expected / pass-fail; Chinese; forbidden phrases listed in `.claude/workflow-rules.json`).
-
-3. Memory cleanup is destructive and REQUIRES explicit user checkpoint confirmation — never automatic.
-
-4. Every work-advancing response from Claude MUST begin with its first line as `Skill gate: <skill-name>` or `Skill gate: exempt(<whitelist-reason>)`. Exemption reasons are restricted to the whitelist in `.claude/workflow-rules.json`. **Enforcement (since gov-bootstrap-hardening-2, 2026-04-19):** missing first line is **drift-logged** to `.claude/state/skill-gate-drift.jsonl` (not hard-blocked); out-of-whitelist exempt reason still blocks. Full hard-enforce policy is hardening-3 scope.
-
-Governance / tooling / process changes are out of scope for the four principles above; they go through `superpowers:brainstorming` → `superpowers:writing-plans` → `codex:adversarial-review` → PR review. See `.claude/workflow-rules.json` and the SessionStart hook for the authoritative skill/trust-boundary mapping.
-
-`codex:adversarial-review` is the ONLY Codex review channel. `codex:rescue` is an assistance tool (diagnosis / Q&A / auxiliary reasoning); it is NOT a review channel and must not be used as one.
+When a `superpowers:*` skill applies to the task at hand, follow its workflow. The user monitors compliance manually.
