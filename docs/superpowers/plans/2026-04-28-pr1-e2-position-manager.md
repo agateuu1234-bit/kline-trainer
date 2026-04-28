@@ -352,9 +352,10 @@ merge 后按 `feedback_post_plan_ritual.md` 回回中列剩余 v6 PR 清单。
 | 2 | 跑 `git diff --stat main...HEAD` | 仅列出 3 个文件：`PositionManager.swift`、`PositionManagerTests.swift`、本 plan `.md`；其中 PositionManager.swift ≤ 80 行，PositionManagerTests.swift ≤ 170 行（plan `.md` 行数不约束） | ☐ |
 | 3 | 跑 `swift build 2>&1 \| grep -E "warning:\|error:" \| grep -v "AppErrorTests.swift:63"` | 输出为空（即除 baseline `#expect(true)` 警告外无新告警 / 无错误） | ☐ |
 | 4 | 在 GitHub PR 页面看 Files changed | 文件清单与上方第 2 行一致；PositionManager.swift ≤ 80 行 | ☐ |
-| 5 | 在 GitHub PR 页面看 CI（若已挂 GitHub Actions） | 所有 check 绿灯；test summary 显示 57 tests passed | ☐ |
+| 5 | 在 GitHub PR 页面看 CI checks | 若 CI 已挂：所有 check 绿灯，test summary 显示 57 tests passed（任一红灯不得 merge）；若 CI 未挂：本行 N/A 并标 ✅ | ☐ |
 | 6 | PR body 末尾「不在范围 (residual)」段 | 列出 `positionTier`、100 股取整、强制平仓三项；并指明各自归属下一个 PR | ☐ |
 | 7 | 在 PR 页面的 commit 列表 | 看到至少 3 个独立 commit（Task 1 主 + Task 2 主 + Task 3 push 不产生 commit）；额外可能含 Task 2 review-fix 衍生 commit（如 import 顺序 / plan 同步），可接受不视为缺陷 | ☐ |
+| 8 | 在 GitHub PR 页面看 `codex:adversarial-review` status check（CLAUDE.md backstop §1：所有 PR 必须过此 review） | 该 check 绿灯通过；若该 check 不存在 / 红灯 / 仍 pending，**不得 merge**（即使其他行全绿） | ☐ |
 
 **任一行 ❌ → 不得 merge**；用户可在 PR comment 中粘贴每条命令的实际输出 / 截图作为证据。
 
