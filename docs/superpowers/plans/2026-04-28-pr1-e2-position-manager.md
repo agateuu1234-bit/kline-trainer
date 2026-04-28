@@ -354,7 +354,7 @@ merge 后按 `feedback_post_plan_ritual.md` 回回中列剩余 v6 PR 清单。
 | 4 | 在 GitHub PR 页面看 Files changed | 文件清单与上方第 2 行一致；PositionManager.swift ≤ 80 行 | ☐ |
 | 5 | 在 GitHub PR 页面看 CI（若已挂 GitHub Actions） | 所有 check 绿灯；test summary 显示 57 tests passed | ☐ |
 | 6 | PR body 末尾「不在范围 (residual)」段 | 列出 `positionTier`、100 股取整、强制平仓三项；并指明各自归属下一个 PR | ☐ |
-| 7 | 在 PR 页面的 commit 列表 | 看到 3 个独立 commit：Task 1 主 commit + Task 2 主 commit + Task 2 style fixup（import 顺序对齐 review minor）；Task 3 不产生 commit（仅 push & PR） | ☐ |
+| 7 | 在 PR 页面的 commit 列表 | 看到至少 3 个独立 commit（Task 1 主 + Task 2 主 + Task 3 push 不产生 commit）；额外可能含 Task 2 review-fix 衍生 commit（如 import 顺序 / plan 同步），可接受不视为缺陷 | ☐ |
 
 **任一行 ❌ → 不得 merge**；用户可在 PR comment 中粘贴每条命令的实际输出 / 截图作为证据。
 
