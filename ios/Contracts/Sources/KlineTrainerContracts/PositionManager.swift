@@ -78,30 +78,28 @@ public struct PositionManager: Codable, Equatable, Sendable {
         self.init(shares: shares, averageCost: averageCost, totalInvested: totalInvested)
     }
 
-    public mutating func buy(shares: Int, totalCost: Double) {
-        // Codex R1+R4：input 守门
-        precondition(shares > 0, "PositionManager.buy: shares must be > 0")
-        precondition(totalCost.isFinite && totalCost > 0, "PositionManager.buy: totalCost must be finite & strictly positive")
-        // Codex R5/R6：candidate-state 守门 —— 在 mutate 前算到本地变量，验完不变量再 assign。
-        // 防大-but-decodable 状态叠加输入产生 +inf 或 Int trap。
+    /// Codex R7 spec drift（user-approved 2026-04-29）：
+    /// spec §4.2 literal 是 `mutating func buy/sell`（无 throws）；codex 主张 public mutator 不应用 precondition crash 处理 routine rejection。
+    /// drift to throwing API：复用 M0.4 `TradeReason.invalidShareCount` / `.insufficientHolding`；E5 TrainingEngine 调用方 try + `.mapError { AppError.trade($0) }`（modules_v1.4 line 1509 已示）。
+    public mutating func buy(shares: Int, totalCost: Double) throws {
+        guard shares > 0,
+              totalCost.isFinite, totalCost > 0
+        else { throw TradeReason.invalidShareCount }
         let (newShares, sharesOverflow) = self.shares.addingReportingOverflow(shares)
-        precondition(!sharesOverflow, "PositionManager.buy: shares would overflow Int")
+        guard !sharesOverflow else { throw TradeReason.invalidShareCount }
         let newTotal = totalInvested + totalCost
-        precondition(newTotal.isFinite, "PositionManager.buy: totalInvested would become non-finite")
+        guard newTotal.isFinite else { throw TradeReason.invalidShareCount }
         let newAverage = newTotal / Double(newShares)
-        precondition(
-            PositionManager.invariantsHold(shares: newShares, averageCost: newAverage, totalInvested: newTotal),
-            "PositionManager.buy: post-mutation invariants violated"
-        )
+        guard PositionManager.invariantsHold(shares: newShares, averageCost: newAverage, totalInvested: newTotal)
+        else { throw TradeReason.invalidShareCount }
         self.shares = newShares
         self.averageCost = newAverage
         self.totalInvested = newTotal
     }
 
-    public mutating func sell(shares: Int) {
-        precondition(shares > 0, "PositionManager.sell: shares must be > 0")
-        precondition(shares <= self.shares, "PositionManager.sell: cannot oversell (shares > current holding)")
-        // sell 不扩张：newShares < self.shares；averageCost 不变；avg * newShares ≤ totalInvested（已 finite）。
+    public mutating func sell(shares: Int) throws {
+        guard shares > 0 else { throw TradeReason.invalidShareCount }
+        guard shares <= self.shares else { throw TradeReason.insufficientHolding }
         let newShares = self.shares - shares
         let newAverage: Double
         let newTotal: Double
@@ -112,10 +110,8 @@ public struct PositionManager: Codable, Equatable, Sendable {
             newAverage = averageCost
             newTotal = averageCost * Double(newShares)
         }
-        precondition(
-            PositionManager.invariantsHold(shares: newShares, averageCost: newAverage, totalInvested: newTotal),
-            "PositionManager.sell: post-mutation invariants violated"
-        )
+        guard PositionManager.invariantsHold(shares: newShares, averageCost: newAverage, totalInvested: newTotal)
+        else { throw TradeReason.invalidShareCount }
         self.shares = newShares
         self.averageCost = newAverage
         self.totalInvested = newTotal

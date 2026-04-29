@@ -15,9 +15,9 @@ struct PositionManagerTests {
     }
 
     @Test("single buy sets weighted state correctly")
-    func singleBuy() {
+    func singleBuy() throws {
         var p = PositionManager()
-        p.buy(shares: 100, totalCost: 1000)
+        try p.buy(shares: 100, totalCost: 1000)
         #expect(p.shares == 100)
         #expect(p.totalInvested == 1000)
         #expect(p.averageCost == 10.0)
@@ -25,10 +25,10 @@ struct PositionManagerTests {
     }
 
     @Test("multiple buys produce weighted average cost")
-    func weightedAverageBuys() {
+    func weightedAverageBuys() throws {
         var p = PositionManager()
-        p.buy(shares: 100, totalCost: 1000)            // avg 10.0
-        p.buy(shares: 100, totalCost: 1500)            // (1000+1500)/200 = 12.5 exact dyadic
+        try p.buy(shares: 100, totalCost: 1000)        // avg 10.0
+        try p.buy(shares: 100, totalCost: 1500)        // (1000+1500)/200 = 12.5 exact dyadic
         #expect(p.shares == 200)
         #expect(p.totalInvested == 2500)
         #expect(p.averageCost == 12.5)
@@ -36,10 +36,10 @@ struct PositionManagerTests {
     }
 
     @Test("partial sell reduces shares, keeps averageCost, recomputes totalInvested = avg * remaining")
-    func partialSell() {
+    func partialSell() throws {
         var p = PositionManager()
-        p.buy(shares: 200, totalCost: 2500)            // avg 12.5
-        p.sell(shares: 50)
+        try p.buy(shares: 200, totalCost: 2500)        // avg 12.5
+        try p.sell(shares: 50)
         #expect(p.shares == 150)
         #expect(p.averageCost == 12.5)
         #expect(p.totalInvested == 1875)               // 12.5 × 150 = 1875 exact
@@ -47,10 +47,10 @@ struct PositionManagerTests {
     }
 
     @Test("full sell zeroes averageCost and totalInvested")
-    func fullSellResets() {
+    func fullSellResets() throws {
         var p = PositionManager()
-        p.buy(shares: 100, totalCost: 1000)
-        p.sell(shares: 100)
+        try p.buy(shares: 100, totalCost: 1000)
+        try p.sell(shares: 100)
         #expect(p.shares == 0)
         #expect(p.averageCost == 0)
         #expect(p.totalInvested == 0)
@@ -58,22 +58,22 @@ struct PositionManagerTests {
     }
 
     @Test("Equatable: identical states are equal, different states are not")
-    func equatable() {
+    func equatable() throws {
         var a = PositionManager()
-        a.buy(shares: 100, totalCost: 1000)
+        try a.buy(shares: 100, totalCost: 1000)
         var b = PositionManager()
-        b.buy(shares: 100, totalCost: 1000)
+        try b.buy(shares: 100, totalCost: 1000)
         #expect(a == b)
 
         var c = PositionManager()
-        c.buy(shares: 200, totalCost: 2000)
+        try c.buy(shares: 200, totalCost: 2000)
         #expect(a != c)
     }
 
     @Test("Codable round-trip preserves all state")
     func codableRoundTrip() throws {
         var original = PositionManager()
-        original.buy(shares: 200, totalCost: 2500)         // avg 12.5
+        try original.buy(shares: 200, totalCost: 2500)     // avg 12.5
 
         let json = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(PositionManager.self, from: json)
@@ -87,7 +87,7 @@ struct PositionManagerTests {
     @Test("Codable JSON keys are camelCase (averageCost / totalInvested)")
     func codableJsonKeys() throws {
         var p = PositionManager()
-        p.buy(shares: 100, totalCost: 1000)
+        try p.buy(shares: 100, totalCost: 1000)
         let data = try JSONEncoder().encode(p)
         // 用 JSONSerialization 解键名，避免 Double 渲染（"10" vs "10.0"）的字符串脆性。
         // Wave 0 §M0.1 position_data 列契约靠 round-trip 保证；本测试只锁键名约定。
@@ -144,6 +144,42 @@ struct PositionManagerTests {
         let json = #"{"shares":100,"averageCost":1e308,"totalInvested":1e308}"#.data(using: .utf8)!
         #expect(throws: DecodingError.self) {
             _ = try JSONDecoder().decode(PositionManager.self, from: json)
+        }
+    }
+
+    // MARK: - Codex R7 spec drift: throwing API tests
+
+    @Test("buy throws TradeReason.invalidShareCount on zero shares")
+    func buyThrowsOnZeroShares() {
+        var p = PositionManager()
+        #expect(throws: TradeReason.invalidShareCount) {
+            try p.buy(shares: 0, totalCost: 1000)
+        }
+    }
+
+    @Test("buy throws TradeReason.invalidShareCount on non-positive cost")
+    func buyThrowsOnZeroCost() {
+        var p = PositionManager()
+        #expect(throws: TradeReason.invalidShareCount) {
+            try p.buy(shares: 100, totalCost: 0)
+        }
+    }
+
+    @Test("sell throws TradeReason.insufficientHolding on oversell")
+    func sellThrowsOnOversell() throws {
+        var p = PositionManager()
+        try p.buy(shares: 100, totalCost: 1000)
+        #expect(throws: TradeReason.insufficientHolding) {
+            try p.sell(shares: 200)
+        }
+    }
+
+    @Test("sell throws TradeReason.invalidShareCount on zero shares")
+    func sellThrowsOnZeroShares() throws {
+        var p = PositionManager()
+        try p.buy(shares: 100, totalCost: 1000)
+        #expect(throws: TradeReason.invalidShareCount) {
+            try p.sell(shares: 0)
         }
     }
 }
