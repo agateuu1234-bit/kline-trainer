@@ -79,26 +79,46 @@ public struct PositionManager: Codable, Equatable, Sendable {
     }
 
     public mutating func buy(shares: Int, totalCost: Double) {
-        // Codex R1+R4：public + Codable 是 trust boundary，守门防 0/0=NaN、负值、零成本 corrupt 持久化状态。
-        // 上游 E3 TradeCalculator 仍负责语义 gating；本 precondition 是 defense-in-depth。
+        // Codex R1+R4：input 守门
         precondition(shares > 0, "PositionManager.buy: shares must be > 0")
         precondition(totalCost.isFinite && totalCost > 0, "PositionManager.buy: totalCost must be finite & strictly positive")
+        // Codex R5/R6：candidate-state 守门 —— 在 mutate 前算到本地变量，验完不变量再 assign。
+        // 防大-but-decodable 状态叠加输入产生 +inf 或 Int trap。
+        let (newShares, sharesOverflow) = self.shares.addingReportingOverflow(shares)
+        precondition(!sharesOverflow, "PositionManager.buy: shares would overflow Int")
         let newTotal = totalInvested + totalCost
-        let newShares = self.shares + shares
-        averageCost = newTotal / Double(newShares)
+        precondition(newTotal.isFinite, "PositionManager.buy: totalInvested would become non-finite")
+        let newAverage = newTotal / Double(newShares)
+        precondition(
+            PositionManager.invariantsHold(shares: newShares, averageCost: newAverage, totalInvested: newTotal),
+            "PositionManager.buy: post-mutation invariants violated"
+        )
         self.shares = newShares
-        totalInvested = newTotal
+        self.averageCost = newAverage
+        self.totalInvested = newTotal
     }
 
     public mutating func sell(shares: Int) {
         precondition(shares > 0, "PositionManager.sell: shares must be > 0")
         precondition(shares <= self.shares, "PositionManager.sell: cannot oversell (shares > current holding)")
-        self.shares -= shares
-        totalInvested = averageCost * Double(self.shares)
-        if self.shares == 0 {
-            averageCost = 0
-            totalInvested = 0
+        // sell 不扩张：newShares < self.shares；averageCost 不变；avg * newShares ≤ totalInvested（已 finite）。
+        let newShares = self.shares - shares
+        let newAverage: Double
+        let newTotal: Double
+        if newShares == 0 {
+            newAverage = 0
+            newTotal = 0
+        } else {
+            newAverage = averageCost
+            newTotal = averageCost * Double(newShares)
         }
+        precondition(
+            PositionManager.invariantsHold(shares: newShares, averageCost: newAverage, totalInvested: newTotal),
+            "PositionManager.sell: post-mutation invariants violated"
+        )
+        self.shares = newShares
+        self.averageCost = newAverage
+        self.totalInvested = newTotal
     }
 
     public var holdingCost: Double { averageCost * Double(shares) }
