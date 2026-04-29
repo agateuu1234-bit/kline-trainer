@@ -31,7 +31,7 @@
 
 **Quantitative budget（per `feedback_planner_packaging_bias.md` 硬规则）:**
 - 子项 ≤ 3 ✅（本 plan = 3 task）
-- prod 行数 ≤ 500 ✅（PositionManager.swift 预估 ~60 行，tests ~120 行）
+- prod 行数 ≤ 500 ✅（PositionManager.swift 实际 125 行，tests 149 行；含 codex R1-R5 7 轮 review 累计的守门 + invariant helper + decoder validation + 6 个对抗输入测试）
 
 ---
 
@@ -262,7 +262,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr1-e2/ios/Contracts"
 swift test --filter PositionManager 2>&1 | tail -10
 ```
 
-期望：PositionManager suite 共 8 tests passed（6 业务 + 2 Codable）。
+期望（codex review 累计后）：PositionManager suite 共 14 tests passed（6 业务 + 2 Codable round-trip/JSON keys + 3 R2 decoder reject + 1 R3 inconsistent positive + 2 R4 zero-cost/overflow）。
 
 - [ ] **Step 2.5: Commit**
 
@@ -304,7 +304,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr1-e2"
 git diff --stat main...HEAD
 ```
 
-期望：3 个文件改动（PositionManager.swift + PositionManagerTests.swift + 本 plan `.md`）；PositionManager.swift ≤ 80 行，PositionManagerTests.swift ≤ 170 行；plan `.md` 行数不在硬规则约束内（`feedback_planner_packaging_bias.md` 的 ≤500 prod 上限只数代码）。
+期望：3 个文件改动（PositionManager.swift + PositionManagerTests.swift + 本 plan `.md`）；PositionManager.swift 125 行（≤ 500 硬上限），PositionManagerTests.swift 149 行；plan `.md` 行数不在硬规则约束内（`feedback_planner_packaging_bias.md` 的 ≤500 prod 上限只数代码）。
 
 - [ ] **Step 3.4: 把分支推上去**
 
@@ -335,10 +335,10 @@ gh pr create --title "feat(E2): PositionManager 加权平均成本 + Codable" --
 - 100 股取整 / 强制平仓 —— E3 TradeCalculator + E5 TrainingEngine 职责
 
 ### 验收
-- 8 个 PositionManager 测试全过（默认 init / 单买 / 加权多买 / 部分卖 / 全卖归零 / Equatable / Codable round-trip / JSON 形状）
-- 整包 57 tests pass（baseline 49 + 新增 8）
+- 14 个 PositionManager 测试全过（6 业务行为 + 2 Codable + 6 对抗输入 decoder reject）
+- 整包 63 tests pass（baseline 49 + 新增 14）
 - 无新 warning、无 error
-- 文件预算：1 个 prod 文件 ~60 行 + 1 个 test 文件 ~140 行；远低于 ≤500 行硬上限
+- 文件实际：PositionManager.swift 125 行 + PositionManagerTests.swift 149 行；远低于 ≤500 行硬上限
 EOF
 )"
 ```
@@ -359,10 +359,10 @@ merge 后按 `feedback_post_plan_ritual.md` 回回中列剩余 v6 PR 清单。
 | # | 动作 | 期望结果 | 通过/失败 |
 |---|------|----------|-----------|
 | 1 | 在终端 cd 到 worktree 后跑 `swift test 2>&1 \| tail -5` | 最末行包含 `Test run with 63 tests in 14 suites passed` | ☐ |
-| 2 | 跑 `git diff --stat main...HEAD` | 仅列出 3 个文件：`PositionManager.swift`、`PositionManagerTests.swift`、本 plan `.md`；其中 PositionManager.swift ≤ 80 行，PositionManagerTests.swift ≤ 170 行（plan `.md` 行数不约束） | ☐ |
+| 2 | 跑 `git diff --stat main...HEAD` | 仅列出 3 个文件：`PositionManager.swift`、`PositionManagerTests.swift`、本 plan `.md`；其中 PositionManager.swift 125 行（≤ 500 硬上限）、PositionManagerTests.swift 149 行；plan `.md` 行数不约束 | ☐ |
 | 3 | 跑 `swift build 2>&1 \| grep -E "warning:\|error:" \| grep -v "AppErrorTests.swift:63"` | 输出为空（即除 baseline `#expect(true)` 警告外无新告警 / 无错误） | ☐ |
-| 4 | 在 GitHub PR 页面看 Files changed | 文件清单与上方第 2 行一致；PositionManager.swift ≤ 80 行 | ☐ |
-| 5 | 在 GitHub PR 页面看 CI checks | 若 CI 已挂：所有 check 绿灯，test summary 显示 57 tests passed（任一红灯不得 merge）；若 CI 未挂：本行 N/A 并标 ✅ | ☐ |
+| 4 | 在 GitHub PR 页面看 Files changed | 文件清单与上方第 2 行一致（PositionManager.swift 125 行，≤ 500 硬上限） | ☐ |
+| 5 | 在 GitHub PR 页面看 CI checks | 若 CI 已挂：所有 check 绿灯，test summary 显示 63 tests passed（任一红灯不得 merge）；若 CI 未挂：本行 N/A 并标 ✅ | ☐ |
 | 6 | PR body 末尾「不在范围 (residual)」段 | 列出 `positionTier`、100 股取整、强制平仓三项；并指明各自归属下一个 PR | ☐ |
 | 7 | 在 PR 页面的 commit 列表 | 看到至少 3 个独立 commit（Task 1 主 + Task 2 主 + Task 3 push 不产生 commit）；额外可能含 Task 2 review-fix 衍生 commit（如 import 顺序 / plan 同步），可接受不视为缺陷 | ☐ |
 | 8 | 在 GitHub PR 页面 Checks 面板看 `codex-verify-pass` status check（这是 CLAUDE.md backstop §1 要求的 `codex:adversarial-review` 在 GitHub 上的对外 check 名，由 `.github/workflows/codex-review-verify.yml` 写入） | 该 check 绿灯通过；若该 check 不存在 / 红灯 / 仍 pending，**不得 merge**（即使其他行全绿） | ☐ |
