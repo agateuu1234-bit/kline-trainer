@@ -25,6 +25,7 @@
 - **R3**：shares > 0 时 `totalInvested ≈ averageCost * shares` 一致性，容差 `1e-9 * max(1, |operands|)` 覆盖 buy 后 IEEE 754 ULP 误差；sell 后精确成立。`invariantsHold` private static helper 复用于 init + decoder。
 - **R4-1**：shares > 0 时 averageCost / totalInvested 必须 strictly positive（实际交易必有正成本）；buy precondition 改 `totalCost > 0`。
 - **R4-2**：拒绝 `averageCost * shares` 中间积非有限，防溢出致容差变 +inf 而 fall-open。
+- **R5（user pushback 2026-04-29，accept residual）**：codex 主张 buy 内部 `totalInvested + totalCost` 可从合法 finite state 产生 +inf、`shares + shares` 可 Int trap。技术对，但 ：(a) 触发需 averageCost ≈ 1e308 / shares ≈ Int.max，超 v1 真实股票数据 280+ 数量级；(b) 攻击模型 = SQLite 文件被外部进程篡改 = root 已陷落，超 sandbox 威胁模型；(c) 上游 E3 TradeCalculator 在真实路径 reject 不合理金额。详见 `PositionManager.swift` 文件头 DESIGN / THREAT MODEL 注释。v2 若引入云同步 / 外部数据导入再上 L4（throwing API）。
 - 上游 E3 `TradeCalculator` 仍负责语义 gating；本 PR 是 defense-in-depth。preconditions 是 invariant assertion 而非 error handling（CLAUDE.md §2 允许）；DecodingError 是 stdlib 边界错误（不与 M0.4 AppError 冲突）。
 - 增加 3 个 decoder reject test（negative shares / negative cost / inconsistent empty）。运行时 invariant trap 仍不测（Swift Testing 无 expectFatalError 标准 idiom）。
 
