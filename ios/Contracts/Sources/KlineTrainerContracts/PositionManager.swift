@@ -13,9 +13,39 @@ public struct PositionManager: Codable, Equatable, Sendable {
         averageCost: Double = 0,
         totalInvested: Double = 0
     ) {
+        // Codex R2：public init 是 trust boundary 的另一面，必须自守不变量。
+        precondition(shares >= 0, "PositionManager.init: shares must be >= 0")
+        precondition(averageCost.isFinite && averageCost >= 0, "PositionManager.init: averageCost must be finite & non-negative")
+        precondition(totalInvested.isFinite && totalInvested >= 0, "PositionManager.init: totalInvested must be finite & non-negative")
+        if shares == 0 {
+            precondition(averageCost == 0 && totalInvested == 0, "PositionManager.init: empty position requires zero cost")
+        }
         self.shares = shares
         self.averageCost = averageCost
         self.totalInvested = totalInvested
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case shares, averageCost, totalInvested
+    }
+
+    public init(from decoder: any Decoder) throws {
+        // Codex R2：自定义 decoder 走 public init 的不变量校验；非法 JSON throw DecodingError 而非 corrupt 状态。
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let shares = try container.decode(Int.self, forKey: .shares)
+        let averageCost = try container.decode(Double.self, forKey: .averageCost)
+        let totalInvested = try container.decode(Double.self, forKey: .totalInvested)
+        guard shares >= 0,
+              averageCost.isFinite, averageCost >= 0,
+              totalInvested.isFinite, totalInvested >= 0,
+              (shares > 0 || (averageCost == 0 && totalInvested == 0))
+        else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "PositionManager: invariants violated (shares=\(shares), averageCost=\(averageCost), totalInvested=\(totalInvested))"
+            ))
+        }
+        self.init(shares: shares, averageCost: averageCost, totalInvested: totalInvested)
     }
 
     public mutating func buy(shares: Int, totalCost: Double) {

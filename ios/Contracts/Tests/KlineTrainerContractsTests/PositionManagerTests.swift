@@ -94,4 +94,29 @@ struct PositionManagerTests {
         let dict = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(dict.keys.sorted() == ["averageCost", "shares", "totalInvested"])
     }
+
+    @Test("Decoder rejects malformed JSON: negative shares")
+    func decoderRejectsNegativeShares() {
+        let json = #"{"shares":-5,"averageCost":10,"totalInvested":50}"#.data(using: .utf8)!
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(PositionManager.self, from: json)
+        }
+    }
+
+    @Test("Decoder rejects malformed JSON: non-finite averageCost")
+    func decoderRejectsNonFiniteCost() {
+        // JSON 不允许字面 NaN/Infinity；但负 averageCost 同样违反不变量
+        let json = #"{"shares":100,"averageCost":-1,"totalInvested":100}"#.data(using: .utf8)!
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(PositionManager.self, from: json)
+        }
+    }
+
+    @Test("Decoder rejects malformed JSON: shares=0 with non-zero cost")
+    func decoderRejectsInconsistentEmpty() {
+        let json = #"{"shares":0,"averageCost":0,"totalInvested":50}"#.data(using: .utf8)!
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(PositionManager.self, from: json)
+        }
+    }
 }
