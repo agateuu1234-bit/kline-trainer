@@ -26,6 +26,7 @@
 - **R4-1**：shares > 0 时 averageCost / totalInvested 必须 strictly positive（实际交易必有正成本）；buy precondition 改 `totalCost > 0`。
 - **R4-2**：拒绝 `averageCost * shares` 中间积非有限，防溢出致容差变 +inf 而 fall-open。
 - **R5（user pushback 失败 → 接收）**：codex 不接受 threat model 论证（R6 重复 finding）。落实候选状态守门：buy 用 `addingReportingOverflow` 检 Int + `newTotal.isFinite` 检 Double + post-mutation `invariantsHold` 校；sell 同样在 mutate 前计算到本地再 assign。THREAT MODEL 注释保留作为 v2 升级路标。
+- **R7-R8（attempted then reverted 2026-04-29）**：尝试改 throwing API（option Y）以平息 codex `precondition` 抗议。R8 codex 反过来抓"spec drift 没同步到 spec 文档"，要求改 spec v1.5 §4.2 + bump CONTRACT_VERSION——超 PR 范围。Revert R7 commit，回到 R5 precondition 形态。spec §4.2 redesign（throwing API）作为独立 spec-redesign plan 走 brainstorming → writing-plans → 单独 PR；本启动锚 PR 不带 spec drift。codex R7-1 design pushback 留作 v2 issue（详见 `PositionManager.swift` 头注释 L4 升级路标）。
 - 上游 E3 `TradeCalculator` 仍负责语义 gating；本 PR 是 defense-in-depth。preconditions 是 invariant assertion 而非 error handling（CLAUDE.md §2 允许）；DecodingError 是 stdlib 边界错误（不与 M0.4 AppError 冲突）。
 - 增加 3 个 decoder reject test（negative shares / negative cost / inconsistent empty）。运行时 invariant trap 仍不测（Swift Testing 无 expectFatalError 标准 idiom）。
 
