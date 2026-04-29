@@ -19,6 +19,10 @@ public struct PositionManager: Codable, Equatable, Sendable {
     }
 
     public mutating func buy(shares: Int, totalCost: Double) {
+        // Codex R1：public + Codable 是 trust boundary，守门防 0/0=NaN 与负值 corrupt 持久化状态。
+        // 上游 E3 TradeCalculator 仍负责 gating；本 precondition 是 defense-in-depth。
+        precondition(shares > 0, "PositionManager.buy: shares must be > 0")
+        precondition(totalCost.isFinite && totalCost >= 0, "PositionManager.buy: totalCost must be finite & non-negative")
         let newTotal = totalInvested + totalCost
         let newShares = self.shares + shares
         averageCost = newTotal / Double(newShares)
@@ -27,6 +31,8 @@ public struct PositionManager: Codable, Equatable, Sendable {
     }
 
     public mutating func sell(shares: Int) {
+        precondition(shares > 0, "PositionManager.sell: shares must be > 0")
+        precondition(shares <= self.shares, "PositionManager.sell: cannot oversell (shares > current holding)")
         self.shares -= shares
         totalInvested = averageCost * Double(self.shares)
         if self.shares == 0 {

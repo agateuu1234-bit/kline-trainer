@@ -19,6 +19,8 @@
 - 100 股取整 / 强制平仓 → E3 `TradeCalculator` + E5 `TrainingEngine` 职责
 - 最大回撤 (`DrawdownAccumulator`) → E5 单独类型
 
+**Codex R1 接收（defense-in-depth）:** Codex 抓到 `public + Codable` 是 trust boundary，buy/sell 数学未守 0/负值 → 加 `precondition` 守门（`shares > 0`、`totalCost` 有限非负、`sellShares <= holding`）。上游 E3 `TradeCalculator` 仍负责语义 gating；preconditions 是 invariant assertion 而非 error handling（CLAUDE.md §2 允许）。不改 spec API；不加 trap-based test（Swift Testing 无 expectFatalError 标准 idiom）。
+
 **Quantitative budget（per `feedback_planner_packaging_bias.md` 硬规则）:**
 - 子项 ≤ 3 ✅（本 plan = 3 task）
 - prod 行数 ≤ 500 ✅（PositionManager.swift 预估 ~60 行，tests ~120 行）
