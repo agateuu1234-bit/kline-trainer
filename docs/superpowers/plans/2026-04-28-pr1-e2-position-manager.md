@@ -25,8 +25,7 @@
 - **R3**：shares > 0 时 `totalInvested ≈ averageCost * shares` 一致性，容差 `1e-9 * max(1, |operands|)` 覆盖 buy 后 IEEE 754 ULP 误差；sell 后精确成立。`invariantsHold` private static helper 复用于 init + decoder。
 - **R4-1**：shares > 0 时 averageCost / totalInvested 必须 strictly positive（实际交易必有正成本）；buy precondition 改 `totalCost > 0`。
 - **R4-2**：拒绝 `averageCost * shares` 中间积非有限，防溢出致容差变 +inf 而 fall-open。
-- **R5（user pushback 失败 → 接收）**：codex 不接受 threat model 论证（R6 重复 finding）。落实候选状态守门：buy 用 `addingReportingOverflow` 检 Int + `newTotal.isFinite` 检 Double + post-mutation `invariantsHold` 校；sell 同样在 mutate 前计算到本地再 assign。
-- **R7（spec drift, user-approved 2026-04-29）**：codex 第 7 轮持续主张 `precondition` 不该用在 public mutator——routine rejection 应可恢复 throw。**有意识 spec drift**：spec §4.2 literal `mutating func buy/sell`（无 throws）改为 `throws`，复用 M0.4 `TradeReason.invalidShareCount` / `.insufficientHolding`。E5 TrainingEngine 调用方需 `try` + `.mapError { AppError.trade($0) }`（modules_v1.4 line 1509 已示该 pattern，本 drift 与 E3 TradeCalculator 设计一致）。新增 4 个 throw test 锁约定。后续 spec §4.2 文档应同步标记为 v1.5→v1.6 修订点。
+- **R5（user pushback 失败 → 接收）**：codex 不接受 threat model 论证（R6 重复 finding）。落实候选状态守门：buy 用 `addingReportingOverflow` 检 Int + `newTotal.isFinite` 检 Double + post-mutation `invariantsHold` 校；sell 同样在 mutate 前计算到本地再 assign。THREAT MODEL 注释保留作为 v2 升级路标。
 - 上游 E3 `TradeCalculator` 仍负责语义 gating；本 PR 是 defense-in-depth。preconditions 是 invariant assertion 而非 error handling（CLAUDE.md §2 允许）；DecodingError 是 stdlib 边界错误（不与 M0.4 AppError 冲突）。
 - 增加 3 个 decoder reject test（negative shares / negative cost / inconsistent empty）。运行时 invariant trap 仍不测（Swift Testing 无 expectFatalError 标准 idiom）。
 
@@ -287,7 +286,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr1-e2/ios/Contracts"
 swift test 2>&1 | tail -5
 ```
 
-期望：`Test run with 67 tests in 14 suites passed`（baseline 49 + PositionManager 8）。若 baseline 数字与本机 49 不一致，以 PR 提交前 main 分支跑出的实际数为准 +8。
+期望：`Test run with 63 tests in 14 suites passed`（baseline 49 + PositionManager 8）。若 baseline 数字与本机 49 不一致，以 PR 提交前 main 分支跑出的实际数为准 +8。
 
 - [ ] **Step 3.2: 跑完整 SwiftPM 编译（捕获 warning regression）**
 
@@ -336,10 +335,10 @@ gh pr create --title "feat(E2): PositionManager 加权平均成本 + Codable" --
 - 100 股取整 / 强制平仓 —— E3 TradeCalculator + E5 TrainingEngine 职责
 
 ### 验收
-- 18 个 PositionManager 测试全过（6 业务 + 2 Codable + 6 对抗输入 decoder reject + 4 throw API：buy/sell × invalid/oversell）
-- 整包 67 tests pass（baseline 49 + 新增 18）
+- 14 个 PositionManager 测试全过（6 业务行为 + 2 Codable + 6 对抗输入 decoder reject）
+- 整包 63 tests pass（baseline 49 + 新增 14）
 - 无新 warning、无 error
-- 文件实际：PositionManager.swift ~135 行 + PositionManagerTests.swift ~190 行；远低于 ≤500 行硬上限
+- 文件实际：PositionManager.swift 125 行 + PositionManagerTests.swift 149 行；远低于 ≤500 行硬上限
 EOF
 )"
 ```
@@ -359,7 +358,7 @@ merge 后按 `feedback_post_plan_ritual.md` 回回中列剩余 v6 PR 清单。
 
 | # | 动作 | 期望结果 | 通过/失败 |
 |---|------|----------|-----------|
-| 1 | 在终端 cd 到 worktree 后跑 `swift test 2>&1 \| tail -5` | 最末行包含 `Test run with 67 tests in 14 suites passed` | ☐ |
+| 1 | 在终端 cd 到 worktree 后跑 `swift test 2>&1 \| tail -5` | 最末行包含 `Test run with 63 tests in 14 suites passed` | ☐ |
 | 2 | 跑 `git diff --stat main...HEAD` | 仅列出 3 个文件：`PositionManager.swift`、`PositionManagerTests.swift`、本 plan `.md`；其中 PositionManager.swift 125 行（≤ 500 硬上限）、PositionManagerTests.swift 149 行；plan `.md` 行数不约束 | ☐ |
 | 3 | 跑 `swift build 2>&1 \| grep -E "warning:\|error:" \| grep -v "AppErrorTests.swift:63"` | 输出为空（即除 baseline `#expect(true)` 警告外无新告警 / 无错误） | ☐ |
 | 4 | 在 GitHub PR 页面看 Files changed | 文件清单与上方第 2 行一致（PositionManager.swift 125 行，≤ 500 硬上限） | ☐ |
@@ -378,7 +377,7 @@ merge 后按 `feedback_post_plan_ritual.md` 回回中列剩余 v6 PR 清单。
 # A. 跑 PR 测试
 cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr1-e2/ios/Contracts"
 swift test 2>&1 | tail -5
-# 期望：Test run with 67 tests in 14 suites passed
+# 期望：Test run with 63 tests in 14 suites passed
 
 # B. 行数预算核查
 cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr1-e2"
