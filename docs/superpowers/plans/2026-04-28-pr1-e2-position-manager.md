@@ -22,6 +22,7 @@
 **Codex R1+R2 接收（defense-in-depth）:** Codex 抓到 `public + Codable` 是 trust boundary。
 - **R1**：buy/sell 数学未守 0/负值 → 加 `precondition`（`shares > 0`、`totalCost` 有限非负、`sellShares <= holding`）。
 - **R2**：synthesized `init(from:)` 绕过 buy/sell preconditions，可从恶意 JSON 产负 shares → 加 public init 不变量 precondition + 自定义 `init(from:)` throw `DecodingError` on 非法状态（不变量：shares ≥ 0；averageCost / totalInvested 有限非负；shares == 0 ⟹ avg == 0 && total == 0）。
+- **R3**：shares > 0 时 `totalInvested ≈ averageCost * shares` 一致性，容差 `1e-9 * max(1, |operands|)` 覆盖 buy 后 IEEE 754 ULP 误差；sell 后精确成立。`invariantsHold` private static helper 复用于 init + decoder。
 - 上游 E3 `TradeCalculator` 仍负责语义 gating；本 PR 是 defense-in-depth。preconditions 是 invariant assertion 而非 error handling（CLAUDE.md §2 允许）；DecodingError 是 stdlib 边界错误（不与 M0.4 AppError 冲突）。
 - 增加 3 个 decoder reject test（negative shares / negative cost / inconsistent empty）。运行时 invariant trap 仍不测（Swift Testing 无 expectFatalError 标准 idiom）。
 
@@ -282,7 +283,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr1-e2/ios/Contracts"
 swift test 2>&1 | tail -5
 ```
 
-期望：`Test run with 60 tests in 14 suites passed`（baseline 49 + PositionManager 8）。若 baseline 数字与本机 49 不一致，以 PR 提交前 main 分支跑出的实际数为准 +8。
+期望：`Test run with 61 tests in 14 suites passed`（baseline 49 + PositionManager 8）。若 baseline 数字与本机 49 不一致，以 PR 提交前 main 分支跑出的实际数为准 +8。
 
 - [ ] **Step 3.2: 跑完整 SwiftPM 编译（捕获 warning regression）**
 
@@ -354,7 +355,7 @@ merge 后按 `feedback_post_plan_ritual.md` 回回中列剩余 v6 PR 清单。
 
 | # | 动作 | 期望结果 | 通过/失败 |
 |---|------|----------|-----------|
-| 1 | 在终端 cd 到 worktree 后跑 `swift test 2>&1 \| tail -5` | 最末行包含 `Test run with 60 tests in 14 suites passed` | ☐ |
+| 1 | 在终端 cd 到 worktree 后跑 `swift test 2>&1 \| tail -5` | 最末行包含 `Test run with 61 tests in 14 suites passed` | ☐ |
 | 2 | 跑 `git diff --stat main...HEAD` | 仅列出 3 个文件：`PositionManager.swift`、`PositionManagerTests.swift`、本 plan `.md`；其中 PositionManager.swift ≤ 80 行，PositionManagerTests.swift ≤ 170 行（plan `.md` 行数不约束） | ☐ |
 | 3 | 跑 `swift build 2>&1 \| grep -E "warning:\|error:" \| grep -v "AppErrorTests.swift:63"` | 输出为空（即除 baseline `#expect(true)` 警告外无新告警 / 无错误） | ☐ |
 | 4 | 在 GitHub PR 页面看 Files changed | 文件清单与上方第 2 行一致；PositionManager.swift ≤ 80 行 | ☐ |
@@ -373,7 +374,7 @@ merge 后按 `feedback_post_plan_ritual.md` 回回中列剩余 v6 PR 清单。
 # A. 跑 PR 测试
 cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr1-e2/ios/Contracts"
 swift test 2>&1 | tail -5
-# 期望：Test run with 60 tests in 14 suites passed
+# 期望：Test run with 61 tests in 14 suites passed
 
 # B. 行数预算核查
 cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr1-e2"

@@ -119,4 +119,13 @@ struct PositionManagerTests {
             _ = try JSONDecoder().decode(PositionManager.self, from: json)
         }
     }
+
+    @Test("Decoder rejects malformed JSON: shares > 0 with totalInvested != avg * shares")
+    func decoderRejectsInconsistentPositive() {
+        // Codex R3：shares=100 + averageCost=10 ⟹ totalInvested 应 = 1000；JSON 给 1 → 拒收
+        let json = #"{"shares":100,"averageCost":10,"totalInvested":1}"#.data(using: .utf8)!
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(PositionManager.self, from: json)
+        }
+    }
 }

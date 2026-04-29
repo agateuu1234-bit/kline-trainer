@@ -8,18 +8,32 @@ public struct PositionManager: Codable, Equatable, Sendable {
     public private(set) var averageCost: Double
     public private(set) var totalInvested: Double
 
+    /// Validate state invariants. shares > 0 时 totalInvested ≈ averageCost * shares
+    /// 容差 = 1e-9 × max(1, |operands|)（覆盖 buy 后的 IEEE 754 division-multiplication ULP 误差；
+    /// sell 后 totalInvested = averageCost * shares 精确成立）。
+    private static func invariantsHold(shares: Int, averageCost: Double, totalInvested: Double) -> Bool {
+        guard shares >= 0,
+              averageCost.isFinite, averageCost >= 0,
+              totalInvested.isFinite, totalInvested >= 0
+        else { return false }
+        if shares == 0 {
+            return averageCost == 0 && totalInvested == 0
+        }
+        let expected = averageCost * Double(shares)
+        let tolerance = 1e-9 * Swift.max(1.0, Swift.max(abs(totalInvested), abs(expected)))
+        return abs(totalInvested - expected) <= tolerance
+    }
+
     public init(
         shares: Int = 0,
         averageCost: Double = 0,
         totalInvested: Double = 0
     ) {
-        // Codex R2：public init 是 trust boundary 的另一面，必须自守不变量。
-        precondition(shares >= 0, "PositionManager.init: shares must be >= 0")
-        precondition(averageCost.isFinite && averageCost >= 0, "PositionManager.init: averageCost must be finite & non-negative")
-        precondition(totalInvested.isFinite && totalInvested >= 0, "PositionManager.init: totalInvested must be finite & non-negative")
-        if shares == 0 {
-            precondition(averageCost == 0 && totalInvested == 0, "PositionManager.init: empty position requires zero cost")
-        }
+        // Codex R2/R3：public init 自守不变量（含一致性容差）。callers 提供非法值直接 trap，因这是 caller bug。
+        precondition(
+            PositionManager.invariantsHold(shares: shares, averageCost: averageCost, totalInvested: totalInvested),
+            "PositionManager.init: invariants violated (shares=\(shares), averageCost=\(averageCost), totalInvested=\(totalInvested))"
+        )
         self.shares = shares
         self.averageCost = averageCost
         self.totalInvested = totalInvested
@@ -35,11 +49,7 @@ public struct PositionManager: Codable, Equatable, Sendable {
         let shares = try container.decode(Int.self, forKey: .shares)
         let averageCost = try container.decode(Double.self, forKey: .averageCost)
         let totalInvested = try container.decode(Double.self, forKey: .totalInvested)
-        guard shares >= 0,
-              averageCost.isFinite, averageCost >= 0,
-              totalInvested.isFinite, totalInvested >= 0,
-              (shares > 0 || (averageCost == 0 && totalInvested == 0))
-        else {
+        guard PositionManager.invariantsHold(shares: shares, averageCost: averageCost, totalInvested: totalInvested) else {
             throw DecodingError.dataCorrupted(.init(
                 codingPath: decoder.codingPath,
                 debugDescription: "PositionManager: invariants violated (shares=\(shares), averageCost=\(averageCost), totalInvested=\(totalInvested))"
