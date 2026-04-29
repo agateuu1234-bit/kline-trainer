@@ -128,4 +128,22 @@ struct PositionManagerTests {
             _ = try JSONDecoder().decode(PositionManager.self, from: json)
         }
     }
+
+    @Test("Decoder rejects malformed JSON: shares > 0 with zero cost basis")
+    func decoderRejectsZeroCostPositive() {
+        // Codex R4-1：shares=100 + 全零成本 = 实际不可达状态（trade 必有正成本）→ 拒收
+        let json = #"{"shares":100,"averageCost":0,"totalInvested":0}"#.data(using: .utf8)!
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(PositionManager.self, from: json)
+        }
+    }
+
+    @Test("Decoder rejects malformed JSON: avg × shares overflows to +inf")
+    func decoderRejectsOverflowProduct() {
+        // Codex R4-2：averageCost=1e308 × shares=100 → 1e310 = +inf；防止容差变 +inf 而 fall-open
+        let json = #"{"shares":100,"averageCost":1e308,"totalInvested":1e308}"#.data(using: .utf8)!
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(PositionManager.self, from: json)
+        }
+    }
 }

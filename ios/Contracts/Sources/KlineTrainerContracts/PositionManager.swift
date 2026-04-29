@@ -19,7 +19,11 @@ public struct PositionManager: Codable, Equatable, Sendable {
         if shares == 0 {
             return averageCost == 0 && totalInvested == 0
         }
+        // Codex R4-1：shares > 0 ⟹ averageCost > 0 && totalInvested > 0（实际交易必有正成本）
+        guard averageCost > 0, totalInvested > 0 else { return false }
+        // Codex R4-2：拒绝非有限中间积，防止 avg × shares 溢出致容差变 +inf 而 fall-open
         let expected = averageCost * Double(shares)
+        guard expected.isFinite else { return false }
         let tolerance = 1e-9 * Swift.max(1.0, Swift.max(abs(totalInvested), abs(expected)))
         return abs(totalInvested - expected) <= tolerance
     }
@@ -59,10 +63,10 @@ public struct PositionManager: Codable, Equatable, Sendable {
     }
 
     public mutating func buy(shares: Int, totalCost: Double) {
-        // Codex R1：public + Codable 是 trust boundary，守门防 0/0=NaN 与负值 corrupt 持久化状态。
-        // 上游 E3 TradeCalculator 仍负责 gating；本 precondition 是 defense-in-depth。
+        // Codex R1+R4：public + Codable 是 trust boundary，守门防 0/0=NaN、负值、零成本 corrupt 持久化状态。
+        // 上游 E3 TradeCalculator 仍负责语义 gating；本 precondition 是 defense-in-depth。
         precondition(shares > 0, "PositionManager.buy: shares must be > 0")
-        precondition(totalCost.isFinite && totalCost >= 0, "PositionManager.buy: totalCost must be finite & non-negative")
+        precondition(totalCost.isFinite && totalCost > 0, "PositionManager.buy: totalCost must be finite & strictly positive")
         let newTotal = totalInvested + totalCost
         let newShares = self.shares + shares
         averageCost = newTotal / Double(newShares)
