@@ -91,7 +91,7 @@ struct TickEngineTests {
         #expect(t.globalTickIndex == 75)
     }
 
-    @Test("Equatable: identical state ==, different state !=")
+    @Test("Equatable: identical state ==, different state !=, different maxTick !=")
     func equatable() {
         let a = TickEngine(maxTick: 100, initialTick: 50)
         let b = TickEngine(maxTick: 100, initialTick: 50)
@@ -100,5 +100,24 @@ struct TickEngineTests {
         var c = TickEngine(maxTick: 100, initialTick: 50)
         _ = c.advance(steps: 5)
         #expect(a != c)
+
+        let d = TickEngine(maxTick: 200, initialTick: 50)
+        #expect(a != d)
+    }
+
+    @Test("advance large negative steps breaks lower-bound invariant (spec body 字面; residual #1)")
+    func advanceLargeNegativeStep() {
+        var t = TickEngine(maxTick: 100, initialTick: 5)
+        let result = t.advance(steps: -1000)
+        #expect(result == true)
+        #expect(t.globalTickIndex == -995)
+    }
+
+    @Test("advance steps=0 at maxTick returns false (guard fires before clamp)")
+    func advanceZeroAtMaxTick() {
+        var t = TickEngine(maxTick: 100, initialTick: 100)
+        let result = t.advance(steps: 0)
+        #expect(result == false)
+        #expect(t.globalTickIndex == 100)
     }
 }
