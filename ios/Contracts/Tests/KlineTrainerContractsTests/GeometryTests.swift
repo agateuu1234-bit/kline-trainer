@@ -106,3 +106,83 @@ struct NonDegenerateRangeTests {
         #expect(r.span >= 2e-6)   // pad = 1e-6 on each side → total span = 2e-6
     }
 }
+
+// MARK: - Helper for PriceRange tests
+
+private func makeCandle(low: Double, high: Double,
+                       bollUpper: Double? = nil, bollLower: Double? = nil,
+                       ma66: Double? = nil) -> KLineCandle {
+    KLineCandle(
+        period: .m15, datetime: 0,
+        open: low, high: high, low: low, close: high,
+        volume: 0, amount: nil, ma66: ma66,
+        bollUpper: bollUpper, bollMid: nil, bollLower: bollLower,
+        macdDiff: nil, macdDea: nil, macdBar: nil,
+        globalIndex: nil, endGlobalIndex: 0
+    )
+}
+
+@Suite("PriceRange")
+struct PriceRangeTests {
+
+    @Test("empty candles → (0, 1)")
+    func emptyFallback() {
+        let empty: ArraySlice<KLineCandle> = []
+        let r = PriceRange.calculate(from: empty)
+        #expect(r.min == 0.0)
+        #expect(r.max == 1.0)
+    }
+
+    @Test("普通 candles 仅 high/low → ±5% padding")
+    func plainHighLow() {
+        let candles = [makeCandle(low: 100, high: 200)]
+        let r = PriceRange.calculate(from: candles[...])
+        #expect(r.min == 100.0 * 0.95)
+        #expect(r.max == 200.0 * 1.05)
+    }
+
+    @Test("含 bollUpper 扩 hi")
+    func includesBollUpper() {
+        let candles = [makeCandle(low: 100, high: 200, bollUpper: 250)]
+        let r = PriceRange.calculate(from: candles[...])
+        #expect(r.max == 250.0 * 1.05)
+        #expect(r.min == 100.0 * 0.95)
+    }
+
+    @Test("含 bollLower 扩 lo")
+    func includesBollLower() {
+        let candles = [makeCandle(low: 100, high: 200, bollLower: 80)]
+        let r = PriceRange.calculate(from: candles[...])
+        #expect(r.min == 80.0 * 0.95)
+        #expect(r.max == 200.0 * 1.05)
+    }
+
+    @Test("含 ma66 同时扩 lo/hi")
+    func includesMA66() {
+        let candlesHi = [makeCandle(low: 100, high: 200, ma66: 250)]
+        let r1 = PriceRange.calculate(from: candlesHi[...])
+        #expect(r1.max == 250.0 * 1.05)
+
+        let candlesLo = [makeCandle(low: 100, high: 200, ma66: 50)]
+        let r2 = PriceRange.calculate(from: candlesLo[...])
+        #expect(r2.min == 50.0 * 0.95)
+    }
+
+    @Test("三指标全有 + 同时扩 lo/hi（reviewer test-1）")
+    func allThreeIndicators() {
+        let candles = [makeCandle(low: 100, high: 200, bollUpper: 240, bollLower: 90, ma66: 250)]
+        let r = PriceRange.calculate(from: candles[...])
+        // hi: bollUpper=240 < ma66=250 → 250 wins
+        // lo: bollLower=90 < low=100 → 90 wins
+        #expect(r.max == 250.0 * 1.05)
+        #expect(r.min == 90.0 * 0.95)
+    }
+
+    @Test("单根 candle 全 nil 指标 → 仅 high/low ±5%")
+    func singleCandleNoIndicators() {
+        let candles = [makeCandle(low: 50, high: 60)]
+        let r = PriceRange.calculate(from: candles[...])
+        #expect(r.min == 50.0 * 0.95)
+        #expect(r.max == 60.0 * 1.05)
+    }
+}

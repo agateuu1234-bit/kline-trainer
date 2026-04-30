@@ -66,3 +66,30 @@ public struct NonDegenerateRange: Equatable, Sendable {
 
     public var span: Double { upper - lower }
 }
+
+// MARK: - 价格值域
+
+public struct PriceRange: Equatable, Sendable {
+    public let min: Double
+    public let max: Double
+
+    public init(min: Double, max: Double) {
+        self.min = min
+        self.max = max
+    }
+
+    /// plan §3 L142-161 字面：含 BOLL / MA66 + 5% 上下扩展
+    public static func calculate(from candles: ArraySlice<KLineCandle>) -> PriceRange {
+        guard !candles.isEmpty else { return PriceRange(min: 0, max: 1) }
+        var lo = candles.map(\.low).min()!
+        var hi = candles.map(\.high).max()!
+        for c in candles {
+            if let bu = c.bollUpper { hi = Swift.max(hi, bu) }
+            if let bl = c.bollLower { lo = Swift.min(lo, bl) }
+            if let ma = c.ma66 { hi = Swift.max(hi, ma); lo = Swift.min(lo, ma) }
+        }
+        lo *= 0.95
+        hi *= 1.05
+        return PriceRange(min: lo, max: hi)
+    }
+}
