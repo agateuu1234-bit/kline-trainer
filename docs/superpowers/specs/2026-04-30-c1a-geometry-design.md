@@ -295,13 +295,19 @@ public struct IndicatorMapper: Equatable, Sendable {
 
 6. **空 candles → `PriceRange(min: 0, max: 1)`**：plan §3 L148 字面 fallback。char test：empty ArraySlice → exact (0, 1)。
 
-六项作 **accepted residuals**，design doc codify + char tests 抢答，不写进 impl 防御逻辑。
+7. **`displayScale > 0` 由 caller 保证**（final-reviewer predicted-4 抢答）：所有 sub-pixel 算式 `... / displayScale` 用 displayScale 作除数。`scale = 0` → inf / NaN 传播；`scale < 0` → mirror coords。`UIView.traitCollection.displayScale` 在 iOS / macOS 真机上恒 ≥ 1（UIKit 平台保证），simulator 偶尔 1/2/3。caller（KLineView）传入 `traitCollection.displayScale` 即可，不需 C1a 自校。**归 caller side**；不加 `precondition` 避免触发 governance budget cap 防御 bias。
+
+8. **`IndicatorMapper` 同时持 `viewport: ChartViewport` + `geometry: ChartGeometry` 是 spec-mandated 重复**（final-reviewer predicted-5 抢答）：modules L945-955 字面声明两字段并存。impl 取 `geometry.candleStep` 而非 `viewport.geometry.candleStep`，所以 caller 传不一致 geometry 时 indexToX 用 IndicatorMapper.geometry。**归 caller convention**：caller 应保 `indMap.geometry === viewport.geometry`（C8 ChartContainerView 构造时同源）；C1a 不强制一致性。spec L945-955 是硬证据，不重构 impl。
+
+9. **`NonDegenerateRange.span > 0` 仅 `.make` 路径保证**（final-reviewer predicted-6 抢答）：`NonDegenerateRange` 无 public init，外部消费者只能 `.make`，所有 3 分支 post-condition `lower < upper`。但同 package 内（含 tests + 未来 Contracts 内部代码）可走 internal memberwise init 直接传 `lower==upper`。`IndicatorMapper.valueToY` 注释"span > 0 by .make 构造保证"是对**外部 caller path** 的契约声明，不是同包内强制不变量。同包内若构造退化值，行为为 NaN/inf 传播 — 归同包 dev 责任，不加 `assert`。
+
+九项作 **accepted residuals**（原 6 + final-reviewer 抢答 3），design doc codify + char tests / 注释抢答，不写进 impl 防御逻辑。
 
 ## Codex review 策略
 
-- **预期 round 数**：≤3 轮（30 tests > E1 的 15，超 memory ≤10 警戒，故 +1 round contingency）
+- **预期 round 数**：≤3 轮（34 tests > E1 的 15，超 memory ≤10 警戒，故 +1 round contingency）
 - **关键预防**：
-  - 6 residuals codify + 每项 char test → 抢先回答 codex 可能的 push（"为啥不防 overflow" / "为啥不参数化 0.95" 等）
+  - 9 residuals codify + 关键项 char test → 抢先回答 codex 可能的 push（"为啥不防 overflow" / "为啥不参数化 0.95" / "displayScale 为啥不验证" / "geometry 为啥重复" / "span > 0 同包能破" 等）
   - spec citation 表 5 项 discrepancy + line 编号 → 抢先回答 "spec 不一致" 类 push
   - impl 一字不差对应 spec body → 不给 codex "spec drift" attack surface
   - C1c 跨 package 拆分 + α placement deferred reconciliation 显式声明 → 抢先回答 "modules 路径漂移" 类 push
