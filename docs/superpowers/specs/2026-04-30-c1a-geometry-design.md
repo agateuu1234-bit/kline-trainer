@@ -80,7 +80,7 @@ UIKit-bearing siblings 落 **iOS Xcode app target**：
 - ❌ spec / m01 / §M0.x 任何修订（D-2 narrative 漂移留 plan v1.6 单独修，不在 C1a scope）
 - ❌ Codable conformance（spec 不要求；C1a 类型不持久化）
 - ❌ 性能 benchmark / Equatable hot-path 测量（modules L1451 在 C8 验收，不在 C1a v1）
-- ❌ 6 项 residuals 的 caller-side 防御（spec gap，归 caller / E5 / 训练数据源责任，详见 §"Residuals"）
+- ❌ 12 项 residuals 的 caller-side 防御（spec gap，归 caller / E5 / 训练数据源责任，详见 §"Residuals"）
 
 ## Implementation
 
@@ -337,13 +337,13 @@ T7  merge
 
 | # | 动作 | 期望 | 通过 |
 |---|---|---|---|
-| 1 | `cd .worktrees/c1a-geometry && swift test 2>&1 \| tail -5` | 退出码 0；末行 `Test Suite 'All tests' passed`；新增 34 C1a tests，全部 baseline tests 仍通过；0 warnings | ☐ |
+| 1 | `cd .worktrees/c1a-geometry && swift test 2>&1 \| tail -5` | 退出码 0；末行 `Test Suite 'All tests' passed`；新增 35 C1a tests，全部 baseline tests 仍通过；0 warnings | ☐ |
 | 2 | `wc -l ios/Contracts/Sources/KlineTrainerContracts/Geometry/*.swift` | ≤210 行 prod 总和 | ☐ |
 | 3 | `wc -l ios/Contracts/Tests/KlineTrainerContractsTests/GeometryTests.swift` | ≤420 行（34 tests / 5 Suites + 2 helpers / 实测对齐 E1 precedent commit 8b91e38 的 budget bump 模式） | ☐ |
 | 4 | `git diff main --stat` | 仅 Geometry impl + tests + design doc + plan doc，无副改 | ☐ |
 | 5 | `grep -rnE "import UIKit\|import SwiftUI" ios/Contracts/Sources/KlineTrainerContracts/Geometry/` | 0 命中（Contracts package 不依赖 UIKit / SwiftUI） | ☐ |
 | 6 | `grep -rnE "precondition\|fatalError\|throws\|assertionFailure" ios/Contracts/Sources/KlineTrainerContracts/Geometry/` | 0 命中（spec 字面 fidelity，无新增防御） | ☐ |
-| 7 | PR description 中文 + 含本 design doc cross-ref + 5 项 discrepancy 解决记录 + 6 项 residuals 显式 list | 显式 list | ☐ |
+| 7 | PR description 中文 + 含本 design doc cross-ref + 5 项 discrepancy 解决记录 + 12 项 residuals 显式 list | 显式 list | ☐ |
 | 8 | PR `codex-verify-pass` GitHub status check | **绿灯** | ☐ |
 
 第 8 行红/黄灯 → 不得 merge（CLAUDE.md backstop §1）。**超 3 轮 codex needs-attn → abort PR + close + 重新评估**（per memory hard rule）。
