@@ -172,7 +172,7 @@ public struct IndicatorMapper: Equatable, Sendable {
     }
 
     public func valueToY(_ value: Double) -> CGFloat {
-        let ratio = (value - valueRange.lower) / valueRange.span    // span > 0 by .make 构造保证
+        let ratio = (value - valueRange.lower) / valueRange.span    // span > 0 when constructed via .make (外部 caller 契约 — 见 design doc §Residuals #9)
         let raw = frame.maxY - CGFloat(ratio) * frame.height
         return (raw * displayScale).rounded(.toNearestOrAwayFromZero) / displayScale
     }
