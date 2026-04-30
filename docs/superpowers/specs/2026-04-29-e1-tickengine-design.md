@@ -144,7 +144,7 @@ public struct TickEngine: Equatable {
 
 3. **`advance(steps: Int.max)` checked arithmetic overflow trap**（R1 C-1）：Swift 6 `Int.+` 是 checked arithmetic。`globalTickIndex + steps` 溢出时 trap（SIGTRAP / exit 133），先于 `min(.., maxTick)` clamp 触发。从任何 `globalTickIndex > 0`，`steps = Int.max` 会让进程崩。**归 E5 caller side**：caller 须保证 `steps <= Int.max - globalTickIndex`（实践中 advance 单步 1 / 几十，绝不可能 Int.max）。E1 不加 `addingReportingOverflow` 或 saturating 算术（spec body 字面写 `min(globalTickIndex + steps, maxTick)`，加防御 = spec drift）。**Codex 风险**：可能 R1 push "为啥不防 overflow"。反驳素材：spec 原文 + `feedback_governance_budget_cap` + 业务上 advance 步长有自然上限（K 线 tick 数 ≤百万级）。
 
-三项作 **accepted residuals**，design doc 已 codify + 各自 characterization tests（test #9 / N/A / N/A），不写进 impl。
+三项作 **accepted residuals**，design doc 已 codify + 各自 characterization tests（tests #9 + #14 / N/A / N/A），不写进 impl。
 
 ## Codex review 策略
 

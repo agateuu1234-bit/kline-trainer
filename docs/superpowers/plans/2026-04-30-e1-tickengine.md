@@ -25,9 +25,9 @@
 
 ---
 
-## Task 1: TickEngine impl + 13 tests (TDD red-green per method batch)
+## Task 1: TickEngine impl + 15 tests (TDD red-green per method batch + R1 review 增量)
 
-**Strategy**: 4 个 method batch（init / advance / reset / Equatable），每个 batch 走完 RED → GREEN → commit 后进下一个。最终单文件 ≤30 行 prod + ≤110 行 tests（含 blank separator），4 commits。
+**Strategy**: 4 个 method batch（init / advance / reset / Equatable），每个 batch 走完 RED → GREEN → commit 后进下一个；初始 13 tests / 4 batch commits。R1 adversarial review 后增 2 tests (#14 #15) + 改 #13，total 15 tests / ≤130 行（含 blank separator）。最终单文件 ≤30 行 prod。
 
 **Files:**
 - Create: `ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift`
