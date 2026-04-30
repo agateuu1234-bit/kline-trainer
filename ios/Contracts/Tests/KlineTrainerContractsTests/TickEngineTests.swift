@@ -69,4 +69,25 @@ struct TickEngineTests {
         #expect(result == true)
         #expect(t.globalTickIndex == 49)
     }
+
+    @Test("reset to negative clamps to 0")
+    func resetNegative() {
+        var t = TickEngine(maxTick: 100, initialTick: 50)
+        t.reset(to: -5)
+        #expect(t.globalTickIndex == 0)
+    }
+
+    @Test("reset to > maxTick clamps to maxTick")
+    func resetOverMax() {
+        var t = TickEngine(maxTick: 100, initialTick: 50)
+        t.reset(to: 200)
+        #expect(t.globalTickIndex == 100)
+    }
+
+    @Test("reset to mid-range exact")
+    func resetMidRange() {
+        var t = TickEngine(maxTick: 100, initialTick: 50)
+        t.reset(to: 75)
+        #expect(t.globalTickIndex == 75)
+    }
 }

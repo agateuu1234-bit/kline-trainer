@@ -15,4 +15,8 @@ public struct TickEngine: Equatable {
         globalTickIndex = min(globalTickIndex + steps, maxTick)
         return true
     }
+
+    public mutating func reset(to tick: Int) {
+        globalTickIndex = max(0, min(tick, maxTick))
+    }
 }
