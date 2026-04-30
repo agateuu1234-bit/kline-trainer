@@ -29,4 +29,44 @@ struct TickEngineTests {
         #expect(t.globalTickIndex == 0)
         #expect(t.maxTick == 0)
     }
+
+    @Test("advance default steps=1 increments by 1")
+    func advanceDefault() {
+        var t = TickEngine(maxTick: 100, initialTick: 50)
+        let result = t.advance()
+        #expect(result == true)
+        #expect(t.globalTickIndex == 51)
+    }
+
+    @Test("advance multi-step clamps at maxTick")
+    func advanceMultiStep() {
+        var t = TickEngine(maxTick: 100, initialTick: 50)
+        let result = t.advance(steps: 60)
+        #expect(result == true)
+        #expect(t.globalTickIndex == 100)
+    }
+
+    @Test("advance at maxTick returns false, no mutation")
+    func advanceAtMaxTick() {
+        var t = TickEngine(maxTick: 100, initialTick: 100)
+        let result = t.advance()
+        #expect(result == false)
+        #expect(t.globalTickIndex == 100)
+    }
+
+    @Test("advance steps=0 returns true, no mutation (spec body 字面行为)")
+    func advanceZeroSteps() {
+        var t = TickEngine(maxTick: 100, initialTick: 50)
+        let result = t.advance(steps: 0)
+        #expect(result == true)
+        #expect(t.globalTickIndex == 50)
+    }
+
+    @Test("advance steps=-1 returns true, decrements (spec body 字面行为; residual 见 design doc)")
+    func advanceNegativeStep() {
+        var t = TickEngine(maxTick: 100, initialTick: 50)
+        let result = t.advance(steps: -1)
+        #expect(result == true)
+        #expect(t.globalTickIndex == 49)
+    }
 }

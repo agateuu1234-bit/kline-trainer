@@ -9,4 +9,10 @@ public struct TickEngine: Equatable {
         self.maxTick = maxTick
         self.globalTickIndex = max(0, min(initialTick, maxTick))
     }
+
+    public mutating func advance(steps: Int = 1) -> Bool {
+        guard globalTickIndex < maxTick else { return false }
+        globalTickIndex = min(globalTickIndex + steps, maxTick)
+        return true
+    }
 }
