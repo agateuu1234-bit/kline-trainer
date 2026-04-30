@@ -114,3 +114,66 @@ public struct ChartViewport: Equatable, Sendable {
         self.mainChartFrame = mainChartFrame
     }
 }
+
+// MARK: - 坐标映射
+
+public struct CoordinateMapper: Equatable, Sendable {
+    public let viewport: ChartViewport
+    public let displayScale: CGFloat
+
+    public init(viewport: ChartViewport, displayScale: CGFloat) {
+        self.viewport = viewport
+        self.displayScale = displayScale
+    }
+
+    public func indexToX(_ index: Int) -> CGFloat {
+        let raw = CGFloat(index - viewport.startIndex) * viewport.geometry.candleStep
+        return (raw * displayScale).rounded(.toNearestOrAwayFromZero) / displayScale
+    }
+
+    public func priceToY(_ price: Double) -> CGFloat {
+        let frame = viewport.mainChartFrame
+        let span = viewport.priceRange.max - viewport.priceRange.min
+        let ratio = (price - viewport.priceRange.min) / span
+        let raw = frame.maxY - CGFloat(ratio) * frame.height
+        return (raw * displayScale).rounded(.toNearestOrAwayFromZero) / displayScale
+    }
+
+    public func xToIndex(_ x: CGFloat) -> Int {
+        viewport.startIndex + Int((x / viewport.geometry.candleStep).rounded(.down))
+    }
+
+    public func yToPrice(_ y: CGFloat) -> Double {
+        let frame = viewport.mainChartFrame
+        let ratio = Double((frame.maxY - y) / frame.height)
+        return viewport.priceRange.min + ratio * (viewport.priceRange.max - viewport.priceRange.min)
+    }
+}
+
+public struct IndicatorMapper: Equatable, Sendable {
+    public let frame: CGRect
+    public let valueRange: NonDegenerateRange
+    public let geometry: ChartGeometry
+    public let viewport: ChartViewport
+    public let displayScale: CGFloat
+
+    public init(frame: CGRect, valueRange: NonDegenerateRange,
+                geometry: ChartGeometry, viewport: ChartViewport, displayScale: CGFloat) {
+        self.frame = frame
+        self.valueRange = valueRange
+        self.geometry = geometry
+        self.viewport = viewport
+        self.displayScale = displayScale
+    }
+
+    public func indexToX(_ index: Int) -> CGFloat {
+        let raw = CGFloat(index - viewport.startIndex) * geometry.candleStep
+        return (raw * displayScale).rounded(.toNearestOrAwayFromZero) / displayScale
+    }
+
+    public func valueToY(_ value: Double) -> CGFloat {
+        let ratio = (value - valueRange.lower) / valueRange.span    // span > 0 by .make 构造保证
+        let raw = frame.maxY - CGFloat(ratio) * frame.height
+        return (raw * displayScale).rounded(.toNearestOrAwayFromZero) / displayScale
+    }
+}

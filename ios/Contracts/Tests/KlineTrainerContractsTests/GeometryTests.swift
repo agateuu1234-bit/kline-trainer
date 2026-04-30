@@ -228,3 +228,173 @@ struct ChartViewportTests {
         #expect(a != b)
     }
 }
+
+@Suite("CoordinateMapper")
+struct CoordinateMapperTests {
+
+    private func makeMapper(displayScale: CGFloat = 2,
+                           startIndex: Int = 0,
+                           candleStep: CGFloat = 8,
+                           mainChartFrame: CGRect = CGRect(x: 0, y: 0, width: 400, height: 600),
+                           priceMin: Double = 100, priceMax: Double = 200) -> CoordinateMapper {
+        CoordinateMapper(
+            viewport: ChartViewport(
+                startIndex: startIndex, visibleCount: 100, pixelShift: 0,
+                geometry: ChartGeometry(candleStep: candleStep, candleWidth: 6, gap: 2),
+                priceRange: PriceRange(min: priceMin, max: priceMax),
+                mainChartFrame: mainChartFrame
+            ),
+            displayScale: displayScale
+        )
+    }
+
+    @Test("indexToX 起点 = 0")
+    func indexToXStart() {
+        let m = makeMapper(displayScale: 1, startIndex: 0)
+        #expect(m.indexToX(0) == 0)
+    }
+
+    @Test("indexToX 偏移 N step")
+    func indexToXOffset() {
+        let m = makeMapper(displayScale: 1, startIndex: 0, candleStep: 8)
+        #expect(m.indexToX(10) == 80)
+    }
+
+    @Test("priceToY 上界 priceMax → frame.minY")
+    func priceToYUpper() {
+        let m = makeMapper(priceMin: 100, priceMax: 200)
+        // ratio = 1 → raw = maxY - height = 0
+        #expect(m.priceToY(200) == 0)
+    }
+
+    @Test("priceToY 下界 priceMin → frame.maxY")
+    func priceToYLower() {
+        let m = makeMapper(mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600),
+                          priceMin: 100, priceMax: 200)
+        // ratio = 0 → raw = maxY = 600
+        #expect(m.priceToY(100) == 600)
+    }
+
+    @Test("xToIndex floor 行为（向 -∞ 取整）")
+    func xToIndexFloor() {
+        let m = makeMapper(startIndex: 0, candleStep: 8)
+        #expect(m.xToIndex(0) == 0)
+        #expect(m.xToIndex(7.9) == 0)         // floor(7.9/8) = 0
+        #expect(m.xToIndex(8) == 1)
+        #expect(m.xToIndex(15.9) == 1)        // floor(15.9/8) = 1
+    }
+
+    @Test("yToPrice 反向 priceToY")
+    func yToPriceInverse() {
+        let m = makeMapper(mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600),
+                          priceMin: 100, priceMax: 200)
+        let y = m.priceToY(150)
+        let price = m.yToPrice(y)
+        #expect(abs(price - 150) < 0.01)
+    }
+
+    @Test("sub-pixel scale=1 不改变整数 raw")
+    func subPixelScale1() {
+        let m = makeMapper(displayScale: 1, startIndex: 0, candleStep: 8)
+        // raw = 80 → 80 * 1 = 80 → rounded(80) / 1 = 80
+        #expect(m.indexToX(10) == 80)
+    }
+
+    @Test("sub-pixel scale=2 raw=0.25 → 0.5（.toNearestOrAwayFromZero 抢答 banker's drift, reviewer test-3）")
+    func subPixelScale2HalfBoundary() {
+        // raw = candleStep * (1 - 0) = 0.25; raw * scale = 0.5
+        // .toNearestOrAwayFromZero(0.5) = 1.0 → 1.0 / 2 = 0.5
+        // .rounded() (banker's = .toNearestOrEven) would give 0 → 0/2 = 0 (drift)
+        // 此 test 验证选 .toNearestOrAwayFromZero 而非默认 banker's
+        let m = makeMapper(displayScale: 2, startIndex: 0, candleStep: 0.25)
+        #expect(m.indexToX(1) == 0.5)
+    }
+
+    @Test("sub-pixel scale=3 不同于 scale=1")
+    func subPixelScale3() {
+        let m1 = makeMapper(displayScale: 1, startIndex: 0, candleStep: 0.4)
+        let m3 = makeMapper(displayScale: 3, startIndex: 0, candleStep: 0.4)
+        // m1: raw = 0.4 → rounded(0.4) = 0 → 0/1 = 0
+        // m3: raw = 0.4 → 0.4*3 = 1.2 → rounded(1.2) = 1 → 1/3 ≈ 0.333
+        #expect(m1.indexToX(1) == 0)
+        #expect(abs(m3.indexToX(1) - (1.0/3.0)) < 1e-9)
+    }
+}
+
+@Suite("IndicatorMapper")
+struct IndicatorMapperTests {
+
+    private func makeViewport(candleStep: CGFloat = 8, startIndex: Int = 0) -> ChartViewport {
+        ChartViewport(
+            startIndex: startIndex, visibleCount: 100, pixelShift: 0,
+            geometry: ChartGeometry(candleStep: candleStep, candleWidth: 6, gap: 2),
+            priceRange: PriceRange(min: 100, max: 200),
+            mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600)
+        )
+    }
+
+    private func makeMapper(displayScale: CGFloat = 2,
+                           candleStep: CGFloat = 8,
+                           startIndex: Int = 0,
+                           valueRange: NonDegenerateRange = .make(values: [0, 100]),
+                           frame: CGRect = CGRect(x: 0, y: 600, width: 400, height: 150)) -> IndicatorMapper {
+        let v = makeViewport(candleStep: candleStep, startIndex: startIndex)
+        return IndicatorMapper(
+            frame: frame,
+            valueRange: valueRange,
+            geometry: v.geometry,
+            viewport: v,
+            displayScale: displayScale
+        )
+    }
+
+    @Test("indexToX(i) === CoordinateMapper.indexToX(i) 共享 viewport/scale/geometry（reviewer test-2）")
+    func indexToXConsistent() {
+        let v = makeViewport(candleStep: 8, startIndex: 0)
+        let coord = CoordinateMapper(viewport: v, displayScale: 2)
+        let ind = IndicatorMapper(
+            frame: CGRect(x: 0, y: 600, width: 400, height: 150),
+            valueRange: .make(values: [0, 100]),
+            geometry: v.geometry,
+            viewport: v,
+            displayScale: 2
+        )
+        for i in [0, 1, 5, 10, 50] {
+            #expect(coord.indexToX(i) == ind.indexToX(i))
+        }
+    }
+
+    @Test("valueToY 上界 valueRange.upper → frame.minY")
+    func valueToYUpper() {
+        let r = NonDegenerateRange.make(values: [0, 100])
+        let m = makeMapper(valueRange: r, frame: CGRect(x: 0, y: 600, width: 400, height: 150))
+        // ratio = 1 → raw = maxY - height = 600
+        #expect(m.valueToY(r.upper) == 600)
+    }
+
+    @Test("valueToY 下界 valueRange.lower → frame.maxY")
+    func valueToYLower() {
+        let r = NonDegenerateRange.make(values: [0, 100])
+        let m = makeMapper(valueRange: r, frame: CGRect(x: 0, y: 600, width: 400, height: 150))
+        // ratio = 0 → raw = maxY = 750
+        #expect(m.valueToY(r.lower) == 750)
+    }
+
+    @Test("sub-pixel rounding 与 CoordinateMapper 同 rule")
+    func subPixelConsistent() {
+        let m = makeMapper(displayScale: 3, candleStep: 0.4)
+        // raw = 0.4 * 3 = 1.2 → .toNearestOrAwayFromZero(1.2) = 1.0 → 1/3
+        #expect(abs(m.indexToX(1) - (1.0/3.0)) < 1e-9)
+    }
+
+    @Test("valueRange.span > 0 不除零（.make 任何分支 post-condition）")
+    func spanNonZero() {
+        let m1 = makeMapper(valueRange: .make(values: []))            // empty fallback
+        let m2 = makeMapper(valueRange: .make(values: [42, 42, 42]))  // 全等值
+        let m3 = makeMapper(valueRange: .make(values: [0]))           // 单 0 值
+        // 都不应崩；valueToY 任何输入应产生有限 CGFloat
+        #expect(m1.valueToY(0).isFinite)
+        #expect(m2.valueToY(42).isFinite)
+        #expect(m3.valueToY(0).isFinite)
+    }
+}
