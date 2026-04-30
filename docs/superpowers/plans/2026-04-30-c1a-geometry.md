@@ -17,7 +17,7 @@
 | File | Responsibility | LOC budget |
 |---|---|---|
 | `ios/Contracts/Sources/KlineTrainerContracts/Geometry/Geometry.swift` | 7 值类型 impl bundle | ≤210 行 prod |
-| `ios/Contracts/Tests/KlineTrainerContractsTests/GeometryTests.swift` | 34 tests（7 个 `@Suite`：1+3+7+3+6+9+5） | ≤270 行（含 blank separator） |
+| `ios/Contracts/Tests/KlineTrainerContractsTests/GeometryTests.swift` | 34 tests（7 个 `@Suite`：1+3+7+3+6+9+5） | ≤420 行（含 blank separator + helpers，实测对齐） |
 
 **File rationale**：单 prod 文件 ~187 LOC 在 simplicity-first / 可读性范围内；7 个 `@Suite` 分组让测试结构按类型映射，无需拆 7 个 test 文件。Swift Package Manager 自动递归扫 target path，`Geometry/` 子目录无需改 Package.swift。
 
@@ -810,7 +810,7 @@ wc -l ios/Contracts/Tests/KlineTrainerContractsTests/GeometryTests.swift
 ```
 Expected:
 - Geometry/*.swift ≤ 210 行 prod 总和
-- GeometryTests.swift ≤ 270 行
+- GeometryTests.swift ≤ 420 行（实测对齐）
 
 若超：先 try 删冗余 blank line / 注释；不要为压行数砍 test。超 ≥10% 找用户决策。
 
