@@ -275,6 +275,16 @@ struct CoordinateMapperTests {
         #expect(m.priceToY(100) == 600)
     }
 
+    @Test("priceToY 退化 PriceRange(min==max) → NaN（document residual #10 R1 抢答）")
+    func priceToYDegenerateRange() {
+        // PriceRange.init 不强制 min < max；calculate 路径天然不退化，
+        // 但 caller 直接 init 传 min==max 时 (price-min)/0 = NaN，最终输出 NaN。
+        // 此 test 显式 character 此行为，抢答 codex push "为啥 PriceRange.init 不验证"。
+        // 归 caller side（residual #10）；不加 precondition。
+        let m = makeMapper(priceMin: 100, priceMax: 100)
+        #expect(m.priceToY(100).isNaN)
+    }
+
     @Test("xToIndex floor 行为（向 -∞ 取整）")
     func xToIndexFloor() {
         let m = makeMapper(startIndex: 0, candleStep: 8)

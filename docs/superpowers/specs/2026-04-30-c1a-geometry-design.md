@@ -269,7 +269,7 @@ public struct IndicatorMapper: Equatable, Sendable {
 - sub-pixel 对齐：`(raw * scale).rounded(.toNearestOrAwayFromZero) / scale` —— 显式选 `.toNearestOrAwayFromZero` 与 plan §3 L172-184 `Foundation.round()` C99 语义严格对齐（注意：`.rounded()` 默认 `.toNearestOrEven` banker's rounding 在 .5 边界与 spec 不一致，故必须显式 rounding rule）
 - `xToIndex` 用 `(x / step).rounded(.down)` 等价于 `floor`，避免显式 `Foundation.floor` 依赖
 
-## 测试矩阵（34 tests，1+3+7+3+6+9+5）
+## 测试矩阵（35 tests，1+3+7+3+6+10+5）
 
 | 类型 | tests | 关键验证 |
 |---|---|---|
@@ -278,7 +278,7 @@ public struct IndicatorMapper: Equatable, Sendable {
 | PriceRange | 7 | empty → (0,1) ; 普通 candles ; 含 BOLL ; 含 MA66 ; **三指标全有 + 同时扩 lo/hi**（reviewer test-1）; 5% pad 精确值 ; 单根 candle |
 | ChartViewport | 3 | init / Equatable / 跨 frame Equatable 区分 |
 | NonDegenerateRange | 6 | empty → fallback ; 全等值 → 对称 pad ; 普通 → span pad ; non-default paddingRatio ; non-default fallback ; **每分支 span > 0 显式断言**（reviewer test-4） |
-| CoordinateMapper | 9 | indexToX 起点 / indexToX 偏移 ; priceToY 上下边界 ; xToIndex floor 行为 ; yToPrice 反向 ; sub-pixel scale=1/2/3 ; **.5-边界 .toNearestOrAwayFromZero 抢答 banker's-rounding drift**（reviewer test-3 / drift-1）|
+| CoordinateMapper | 10 | indexToX 起点 / indexToX 偏移 ; priceToY 上下边界 ; xToIndex floor 行为 ; yToPrice 反向 ; sub-pixel scale=1/2/3 ; **.5-边界 .toNearestOrAwayFromZero 抢答 banker's-rounding drift**（reviewer test-3 / drift-1）; **退化 PriceRange(min==max) → NaN**（residual #10 R1 抢答）|
 | IndicatorMapper | 5 | **indexToX(i) === CoordinateMapper.indexToX(i) 显式相等**（reviewer test-2）; valueToY 上下边界 ; sub-pixel ; valueRange.span > 0 不除零 |
 
 ## Open Questions / Residuals（不在 C1a v1 scope，6 项 + char tests 抢答 codex）
@@ -301,13 +301,19 @@ public struct IndicatorMapper: Equatable, Sendable {
 
 9. **`NonDegenerateRange.span > 0` 仅 `.make` 路径保证**（final-reviewer predicted-6 抢答）：`NonDegenerateRange` 无 public init，外部消费者只能 `.make`，所有 3 分支 post-condition `lower < upper`。但同 package 内（含 tests + 未来 Contracts 内部代码）可走 internal memberwise init 直接传 `lower==upper`。`IndicatorMapper.valueToY` 注释"span > 0 by .make 构造保证"是对**外部 caller path** 的契约声明，不是同包内强制不变量。同包内若构造退化值，行为为 NaN/inf 传播 — 归同包 dev 责任，不加 `assert`。
 
-九项作 **accepted residuals**（原 6 + final-reviewer 抢答 3），design doc codify + char tests / 注释抢答，不写进 impl 防御逻辑。
+10. **`PriceRange(min:max:)` public init 不强制 `min < max`**（R1 adversarial-reviewer I-1 抢答）：`PriceRange.calculate` 路径在 `lo *= 0.95; hi *= 1.05` 后天然 `max > min`（正价输入下），不退化。但 caller 直接走 public init 传 `min == max` 或 `min > max` 时，`priceToY` 算 `(price - min) / (max - min)` → 0/0 = NaN 或负 ratio，最终输出 NaN/inf。**归 caller side**；A 股股价场景下 caller 只走 `.calculate` 不直接 init。char test：`PriceRange(min: 100, max: 100)` 的 `priceToY` 显式断言 NaN（document behavior，不是 invariant 强制）。
+
+11. **`ChartGeometry.candleStep == 0` 传 `xToIndex` 触发 runtime trap**（R1 adversarial-reviewer I-2 抢答）：`(x / 0).rounded(.down) = +inf`，`Int(+inf)` 在 Swift trap (EXC_BAD_INSTRUCTION)。Residual #4 仅覆盖 Int.max overflow，不覆盖 division-by-zero。**归 caller side**：`ChartGeometry.candleStep` 必须 > 0 by C8 caller convention；UI 层不会传 0（K 线 candle 间距至少 1px）。不加 `precondition` 避免 governance budget cap 防御 bias。
+
+12. **`frame.height == 0` 产生 NaN 传播**（R1 adversarial-reviewer I-3 抢答）：`priceToY` / `yToPrice` / `valueToY` 算 `... / frame.height` 用 frame.height 作除数。`ChartPanelFrames.split(in: 0-高 rect)` 已 char-test 产生 `mainChart.height == 0`，但 mapper 输出未 char-test。caller 责任：`ChartContainerView` `bounds` 在 attach 后非零；UI 层 layout 阶段才构造 mapper。归 caller convention，不防御。
+
+十二项作 **accepted residuals**（原 9 + R1 adversarial 抢答 3），design doc codify + 关键 char tests / 注释抢答，不写进 impl 防御逻辑。
 
 ## Codex review 策略
 
 - **预期 round 数**：≤3 轮（34 tests > E1 的 15，超 memory ≤10 警戒，故 +1 round contingency）
 - **关键预防**：
-  - 9 residuals codify + 关键项 char test → 抢先回答 codex 可能的 push（"为啥不防 overflow" / "为啥不参数化 0.95" / "displayScale 为啥不验证" / "geometry 为啥重复" / "span > 0 同包能破" 等）
+  - 12 residuals codify + 关键项 char test → 抢先回答 codex 可能的 push（"为啥不防 overflow / div-by-zero / NaN 传播" / "为啥不参数化 0.95" / "displayScale 为啥不验证" / "geometry 为啥重复" / "span > 0 同包能破" / "PriceRange.init 为啥不验证 min<max" / "candleStep=0 触发 trap" 等）
   - spec citation 表 5 项 discrepancy + line 编号 → 抢先回答 "spec 不一致" 类 push
   - impl 一字不差对应 spec body → 不给 codex "spec drift" attack surface
   - C1c 跨 package 拆分 + α placement deferred reconciliation 显式声明 → 抢先回答 "modules 路径漂移" 类 push
