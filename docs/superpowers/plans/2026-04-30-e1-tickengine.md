@@ -17,11 +17,11 @@
 | File | Responsibility | LOC budget |
 |---|---|---|
 | `ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift` | TickEngine 值类型 impl（init + advance + reset + Equatable） | ≤30 行 prod |
-| `ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift` | 13 tests（init 4 + advance 5 含 characterization + reset 3 + Equatable 1） | ≤110 行（含 blank separator；89 non-blank） |
+| `ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift` | 15 tests（init 4 + advance 5 含 characterization + reset 3 + Equatable 1 + R1 review 加 #14 #15） | ≤130 行（含 blank separator） |
 
 **Working directory**：`/Users/maziming/Coding/Prj_Kline trainer/.worktrees/e1-tickengine/ios/Contracts/`（SwiftPM root）
 
-**Baseline**：`swift test` 当前 49 tests pass / 0 warnings；E1 PR 完成后预期 62 tests pass。
+**Baseline**：`swift test` 当前 49 tests pass / 0 warnings；E1 PR 完成后预期 64 tests pass（49 + 15）。
 
 ---
 
@@ -291,14 +291,14 @@ git commit -m "feat(E1): TickEngine Equatable test (Batch D, TDD green; auto-syn
 **Files:**
 - Read-only verification（无文件改动）
 
-- [ ] **Step 2.1: 跑整个 SwiftPM package 全测试，确认 baseline 49 + new 13 = 62 全过 + 0 warnings + 0 errors**
+- [ ] **Step 2.1: 跑整个 SwiftPM package 全测试，确认 baseline 49 + new 15 = 64 全过 + 0 warnings + 0 errors**
 
 Run: `cd ios/Contracts && swift test 2>&1 | tail -5`
 Expected:
 ```
 ✔ Suite "TickEngine" passed after ... seconds.
 ...
-Test run with 62 tests in 14 suites passed after ... seconds.
+Test run with 64 tests in 14 suites passed after ... seconds.
 ```
 
 - [ ] **Step 2.2: 验收清单第 1 行 —— SwiftPM 测试退出码**
@@ -311,10 +311,10 @@ Expected: 最后一行 `exit: 0`
 Run: `wc -l ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift`
 Expected: 输出 `<= 30 ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift`（行数 ≤30）
 
-- [ ] **Step 2.4: 验收清单第 3 行 —— TickEngineTests.swift 行数 ≤110**
+- [ ] **Step 2.4: 验收清单第 3 行 —— TickEngineTests.swift 行数 ≤130**
 
 Run: `wc -l ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift`
-Expected: 输出行数 ≤110（13 tests 含 blank separator；89 non-blank）
+Expected: 输出行数 ≤130（15 tests 含 blank separator）
 
 - [ ] **Step 2.5: 验收清单第 4 行 —— git diff main --stat 文件数（plan commit 在 Step 2.10 之后单独入账）**
 
@@ -342,7 +342,7 @@ Expected: 0 命中，`exit: 1`（即 spec 字面 fidelity，无新增防御）
 PR description 草稿（pending push）应含：
 - 引用本 plan + design doc cross-ref
 - spec discrepancy 解决记录（modules §E1 优先 over plan §3）
-- 2 项 accepted residuals（negative steps + maxTick<0）
+- 3 项 accepted residuals（negative steps lower-bound invariant break + maxTick<0 + Int.+ overflow trap）
 - codex review ≤3 轮硬规则声明（超 3 立即 abort）
 
 实际 PR open 时 user explicit confirm 后由 push 步骤生成。本 plan 不实际 push。
@@ -365,17 +365,20 @@ git commit -m "docs(plan): E1 TickEngine implementation plan (subagent-driven-de
 ## Acceptance summary
 
 完成后状态：
-- 5 commits on branch `e1-tickengine`：
-  1. design doc commit (sha 2339481, 已 commit on Apr 29)
-  2. Batch A (init + 4 tests)
-  3. Batch B (advance + 5 tests)
-  4. Batch C (reset + 3 tests)
-  5. Batch D (Equatable test, no impl change)
-  6. plan commit
-- `ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift` ≤30 行 prod
-- `ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift` ≤110 行 13 tests（89 non-blank）
-- 整 package 62 tests pass / 0 warnings / 0 errors
-- 0 grep 命中外部 import / precondition / fatalError / throws
+- 9 commits on branch `e1-tickengine`：
+  1. design doc commit (sha 2339481)
+  2. plan commit (sha 6a81c27)
+  3. Batch A init + 4 tests (sha 9d1a04c)
+  4. Batch B advance + 5 tests (sha d5afb50)
+  5. Batch C reset + 3 tests (sha 8cdd4e2)
+  6. Batch D Equatable test (sha 81eca23)
+  7. doc fix LOC budget bump 80→110 (sha 8b91e38)
+  8. R1 review tests #14 #15 + Equatable maxTick (sha eda7000)
+  9. R1 review docs (residuals + counts + spec discrepancy table) — this commit
+- `ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift` ≤30 行 prod（实测 22 行）
+- `ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift` ≤130 行 15 tests（实测 123 行）
+- 整 package 64 tests pass / 0 warnings / 0 errors
+- 0 grep 命中外部 import / precondition / fatalError / throws / Sendable / Codable
 
 **未 push**：等 user explicit confirm（per memory `feedback_reviewer_verdict_not_authorization`）。
 
@@ -383,7 +386,7 @@ git commit -m "docs(plan): E1 TickEngine implementation plan (subagent-driven-de
 
 ## Memory compliance check
 
-- ✅ `feedback_big_pr_codex_noncovergence`：≤30 行 prod / 13 tests / 预计 ≤3 codex 轮（超 3 abort）
+- ✅ `feedback_big_pr_codex_noncovergence`：≤30 行 prod / 15 tests / 预计 ≤3 codex 轮（超 3 abort）
 - ✅ `feedback_planner_packaging_bias`：1 sub-task ≤ ≤3 硬上限（4 commits 是 TDD batch 不是 sub-task）
 - ✅ `feedback_brainstorming_grep_first`：spec 章节归属 grep-verified（modules L1457 + plan L555-566）
 - ✅ `feedback_module_level_abort_signal`：E1 anchor 选择基于 E2 三连 abort 教训

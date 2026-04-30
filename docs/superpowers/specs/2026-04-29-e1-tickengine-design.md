@@ -58,14 +58,15 @@ modules vs plan declaration 不一致：
 |---|---|---|
 | Equatable conformance | 显式 `: Equatable` | 无（隐式 by struct） |
 | `globalTickIndex` 默认值 | 无（构造时 init 给值） | `= 0` |
+| 显式 `init` clamping | 显式 `init(maxTick:initialTick:)` 含 clamp | 无（依赖 Swift auto-synth memberwise + `= 0` 默认值，无 clamp） |
 
-**冲突解决**：以 **modules §E1 为准**（per memory `project_modules_v1.4_frozen`，35 模块 4 轮 codex review 冻结 baseline）。impl 加显式 `: Equatable`，无默认值（构造路径全经 init clamp）。
+**冲突解决**：以 **modules §E1 为准**（per memory `project_modules_v1.4_frozen`，35 模块 4 轮 codex review 冻结 baseline）。impl 加显式 `: Equatable` + 显式 `init` 含 clamp（构造路径全经 init clamp，无默认值）。
 
 ## Scope
 
-**Sub-task 1（unique）**：impl + tests
+**Sub-task 1**：impl + tests（Plan Task 2 是只读 verification，不计 sub-task）
 - 文件 1：`ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift`（≤30 行 prod）
-- 文件 2：`ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift`（≤110 行 含 blank separator / 89 non-blank，13 tests）
+- 文件 2：`ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift`（≤130 行 含 blank separator，15 tests）
 
 **子项总数 1**（远低于 ≤3 硬上限），**prod 行数 ≤30**（远低于 ≤500 硬上限）。
 
@@ -80,7 +81,7 @@ modules vs plan declaration 不一致：
 - ❌ E2 PositionManager 重审（独立 backlog track）
 - ❌ M0.3 矩阵 bump（**reviewer M-2**：E1 在 §七业务逻辑模块，**不**在 §M0.3 契约值类型 scope）
 - ❌ spec / m01 / §M0.x 任何修订
-- ❌ negative steps / `init(maxTick: < 0)` invariant 守门（**reviewer I-2 residual**：spec gap，归 E5 caller side 验证，不在 E1 v1 scope）
+- ❌ negative steps / `init(maxTick: < 0)` invariant 守门 / `Int.+` overflow 防（**3 项 accepted residuals**：spec gap，归 E5 caller side 验证，不在 E1 v1 scope；详见 §"Open Questions / Residuals"）
 
 ## Implementation
 
@@ -113,7 +114,7 @@ public struct TickEngine: Equatable {
 - `public` 暴露符合 SwiftPM package 跨模块使用约定（与 PR #36 archive 的 PositionManager 一致）。
 - 实现一字不差对应 plan §3 L555-566 body + modules §E1 L1457 declaration（resolved per discrepancy section）。
 
-## 测试矩阵（13 tests，含 reviewer I-1 + I-2 characterization tests）
+## 测试矩阵（15 tests，含 reviewer I-1 + I-2 + R1 adversarial review characterization tests）
 
 | # | Test | Purpose |
 |---|---|---|
@@ -125,20 +126,25 @@ public struct TickEngine: Equatable {
 | 6 | `advance(steps: 60)` from 50 (maxTick 100) → true, idx = 100 | multi-step + clamp at maxTick |
 | 7 | `advance()` at maxTick → false, no mutation | terminal state |
 | 8 | **`advance(steps: 0)` from 50 → true, idx = 50** | **reviewer I-1**：characterize 0-step（spec body 字面行为：guard 通过，min(50+0, max) = 50, return true） |
-| 9 | **`advance(steps: -1)` from 50 → true, idx = 49** | **reviewer I-1**：characterize negative-step（spec body 字面行为：guard 通过，min(50-1, max) = 49, return true；residual 见 Open Questions） |
+| 9 | **`advance(steps: -1)` from 50 → true, idx = 49** | **reviewer I-1**：characterize negative-step（spec body 字面行为：guard 通过，min(50-1, max) = 49, return true；residual #1 见 Open Questions） |
 | 10 | `reset(to: -5)` → globalTickIndex = 0 | clamp negative reset |
 | 11 | `reset(to: 200)` (maxTick 100) → globalTickIndex = 100 | clamp reset > maxTick |
 | 12 | `reset(to: 50)` → globalTickIndex = 50 | mid-range reset exact |
-| 13 | Equatable: identical state == equal; different state != | Equatable conformance |
+| 13 | Equatable: identical state == / different state != / different maxTick != | Equatable conformance（含 R1 M-4：maxTick discriminator） |
+| 14 | **`advance(steps: -1000)` from idx=5 → true, idx = -995** | **R1 I-1**：characterize lower-bound invariant break（advance 不 clamp 下界；residual #1 见 Open Questions） |
+| 15 | **`advance(steps: 0)` AT maxTick → false, no mutation** | **R1 I-2**：characterize guard branch when steps=0 at terminal state（vs test #8 在 mid-range） |
 
-实际 13 tests（reviewer 推荐 9-10，加 mid-range reset + Equatable，实测 104 行 / 89 non-blank）。
+实际 15 tests（含 R1 round adversarial review characterization #14 #15 + Equatable maxTick discriminator，实测 123 行 / 含 blank separator）。
 
 ## Open Questions / Residuals（不在 E1 v1 scope）
 
-1. **Negative `steps` 语义反直觉**（reviewer I-1）：spec body 字面接受 negative steps 实现"回退"，与方法名 `advance` 语义冲突。**归 E5 integration 责任**：caller-side validation `precondition(steps >= 0)` 或 deliberate negative use（如 `tick.advance(steps: -1)` 等价于 backstep）。E1 不引入 precondition，保 spec 字面 fidelity。
+1. **Negative `steps` 语义反直觉 + 下界 invariant 破坏**（reviewer I-1 + R1 I-1）：spec body 字面接受 negative steps 实现"回退"，与方法名 `advance` 语义冲突。**关键**：`advance` 只 clamp 上界 `min(.., maxTick)`，**不 clamp 下界**。从 `globalTickIndex > 0` 大幅 negative steps 会让 `globalTickIndex` 变负数（test #14 characterize: `-1000` from idx=5 → idx=-995），破坏 init/reset 维护的 `globalTickIndex >= 0` invariant。**归 E5 integration 责任**：caller-side `precondition(steps >= 0)` 或 deliberate negative use；E5 下游消费方（如 BinarySearch L526）须自防 `globalTickIndex < 0`。E1 不引入 precondition，保 spec 字面 fidelity。
+
 2. **`init(maxTick: < 0)` invariant gap**（reviewer I-2）：spec 没给 maxTick 下界 contract。`maxTick = -1` 时 `globalTickIndex = 0 > maxTick = -1`，invariant `globalTickIndex <= maxTick` 破坏。**归 E5 caller side**：构造 TickEngine 前 caller 自验 `maxTick >= 0`。E1 不加 precondition / fatalError（避免触发 codex defense-in-depth bias 进而 spec drift）。
 
-两项作 **accepted residuals**，design doc 已 codify，不写进 impl。
+3. **`advance(steps: Int.max)` checked arithmetic overflow trap**（R1 C-1）：Swift 6 `Int.+` 是 checked arithmetic。`globalTickIndex + steps` 溢出时 trap（SIGTRAP / exit 133），先于 `min(.., maxTick)` clamp 触发。从任何 `globalTickIndex > 0`，`steps = Int.max` 会让进程崩。**归 E5 caller side**：caller 须保证 `steps <= Int.max - globalTickIndex`（实践中 advance 单步 1 / 几十，绝不可能 Int.max）。E1 不加 `addingReportingOverflow` 或 saturating 算术（spec body 字面写 `min(globalTickIndex + steps, maxTick)`，加防御 = spec drift）。**Codex 风险**：可能 R1 push "为啥不防 overflow"。反驳素材：spec 原文 + `feedback_governance_budget_cap` + 业务上 advance 步长有自然上限（K 线 tick 数 ≤百万级）。
+
+三项作 **accepted residuals**，design doc 已 codify + 各自 characterization tests（test #9 / N/A / N/A），不写进 impl。
 
 ## Codex review 策略
 
@@ -167,20 +173,20 @@ T7  merge
 
 | # | 动作 | 期望 | 通过 |
 |---|---|---|---|
-| 1 | `cd .worktrees/e1-tickengine && swift test` | 退出码 0；13 tests 全过；0 warnings | ☐ |
+| 1 | `cd .worktrees/e1-tickengine && swift test` | 退出码 0；64 tests 全过（49 baseline + 15 E1）；0 warnings | ☐ |
 | 2 | `wc -l ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift` | ≤30 行 prod | ☐ |
-| 3 | `wc -l ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift` | ≤110 行（13 tests 含 blank separator） | ☐ |
-| 4 | `git diff main --stat` | 仅 2 文件改动（新增 TickEngine.swift + TickEngineTests.swift） | ☐ |
+| 3 | `wc -l ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift` | ≤130 行（15 tests 含 blank separator） | ☐ |
+| 4 | `git diff main --stat` | 4 文件（TickEngine.swift + TickEngineTests.swift + design doc + plan doc） | ☐ |
 | 5 | grep `import Foundation\|import Combine\|import GRDB` TickEngine.swift | 0 命中（纯 Int 运算，无外部 import） | ☐ |
 | 6 | grep `precondition\|fatalError\|throws` TickEngine.swift | 0 命中（spec 字面 fidelity，无新增防御） | ☐ |
-| 7 | PR description 含 cross-ref 引用本 design doc + spec discrepancy 解决记录 | 显式 list | ☐ |
+| 7 | PR description 含 cross-ref 引用本 design doc + spec discrepancy 解决记录 + 3 项 residuals | 显式 list | ☐ |
 | 8 | PR `codex-verify-pass` GitHub status check | **绿灯** | ☐ |
 
 第 8 行红/黄灯 → 不得 merge（CLAUDE.md backstop §1）。**超 3 轮 codex needs-attn → abort PR + close + 重新评估**（per memory hard rule）。
 
 ## Memory compliance check
 
-- ✅ `feedback_big_pr_codex_noncovergence`：≤30 行 prod / 13 tests / 预计 ≤3 codex 轮
+- ✅ `feedback_big_pr_codex_noncovergence`：≤30 行 prod / 15 tests / 预计 ≤3 codex 轮
 - ✅ `feedback_planner_packaging_bias`：1 sub-task ≤ 3 硬上限
 - ✅ `feedback_brainstorming_grep_first`：spec 章节归属 grep-verified（modules L1457 + plan L555-566）
 - ✅ `feedback_module_level_abort_signal`：E1 anchor 选择基于 E2 三连 abort 教训
