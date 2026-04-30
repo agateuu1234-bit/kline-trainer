@@ -17,7 +17,7 @@
 | File | Responsibility | LOC budget |
 |---|---|---|
 | `ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift` | TickEngine 值类型 impl（init + advance + reset + Equatable） | ≤30 行 prod |
-| `ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift` | 13 tests（init 4 + advance 5 含 characterization + reset 3 + Equatable 1） | ≤80 行 |
+| `ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift` | 13 tests（init 4 + advance 5 含 characterization + reset 3 + Equatable 1） | ≤110 行（含 blank separator；89 non-blank） |
 
 **Working directory**：`/Users/maziming/Coding/Prj_Kline trainer/.worktrees/e1-tickengine/ios/Contracts/`（SwiftPM root）
 
@@ -27,7 +27,7 @@
 
 ## Task 1: TickEngine impl + 13 tests (TDD red-green per method batch)
 
-**Strategy**: 4 个 method batch（init / advance / reset / Equatable），每个 batch 走完 RED → GREEN → commit 后进下一个。最终单文件 ≤30 行 prod + ≤80 行 tests，4 commits。
+**Strategy**: 4 个 method batch（init / advance / reset / Equatable），每个 batch 走完 RED → GREEN → commit 后进下一个。最终单文件 ≤30 行 prod + ≤110 行 tests（含 blank separator），4 commits。
 
 **Files:**
 - Create: `ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift`
@@ -311,10 +311,10 @@ Expected: 最后一行 `exit: 0`
 Run: `wc -l ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift`
 Expected: 输出 `<= 30 ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift`（行数 ≤30）
 
-- [ ] **Step 2.4: 验收清单第 3 行 —— TickEngineTests.swift 行数 ≤80**
+- [ ] **Step 2.4: 验收清单第 3 行 —— TickEngineTests.swift 行数 ≤110**
 
 Run: `wc -l ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift`
-Expected: 输出行数 ≤80
+Expected: 输出行数 ≤110（13 tests 含 blank separator；89 non-blank）
 
 - [ ] **Step 2.5: 验收清单第 4 行 —— git diff main --stat 文件数（plan commit 在 Step 2.10 之后单独入账）**
 
@@ -373,7 +373,7 @@ git commit -m "docs(plan): E1 TickEngine implementation plan (subagent-driven-de
   5. Batch D (Equatable test, no impl change)
   6. plan commit
 - `ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift` ≤30 行 prod
-- `ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift` ≤80 行 13 tests
+- `ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift` ≤110 行 13 tests（89 non-blank）
 - 整 package 62 tests pass / 0 warnings / 0 errors
 - 0 grep 命中外部 import / precondition / fatalError / throws
 

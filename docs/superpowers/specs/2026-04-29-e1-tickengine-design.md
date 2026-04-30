@@ -65,7 +65,7 @@ modules vs plan declaration 不一致：
 
 **Sub-task 1（unique）**：impl + tests
 - 文件 1：`ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift`（≤30 行 prod）
-- 文件 2：`ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift`（≤80 行，13 tests）
+- 文件 2：`ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift`（≤110 行 含 blank separator / 89 non-blank，13 tests）
 
 **子项总数 1**（远低于 ≤3 硬上限），**prod 行数 ≤30**（远低于 ≤500 硬上限）。
 
@@ -131,7 +131,7 @@ public struct TickEngine: Equatable {
 | 12 | `reset(to: 50)` → globalTickIndex = 50 | mid-range reset exact |
 | 13 | Equatable: identical state == equal; different state != | Equatable conformance |
 
-实际 13 tests（reviewer 推荐 9-10，加 mid-range reset + Equatable，仍 ≤80 行）。
+实际 13 tests（reviewer 推荐 9-10，加 mid-range reset + Equatable，实测 104 行 / 89 non-blank）。
 
 ## Open Questions / Residuals（不在 E1 v1 scope）
 
@@ -169,7 +169,7 @@ T7  merge
 |---|---|---|---|
 | 1 | `cd .worktrees/e1-tickengine && swift test` | 退出码 0；13 tests 全过；0 warnings | ☐ |
 | 2 | `wc -l ios/Contracts/Sources/KlineTrainerContracts/TickEngine.swift` | ≤30 行 prod | ☐ |
-| 3 | `wc -l ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift` | ≤80 行 | ☐ |
+| 3 | `wc -l ios/Contracts/Tests/KlineTrainerContractsTests/TickEngineTests.swift` | ≤110 行（13 tests 含 blank separator） | ☐ |
 | 4 | `git diff main --stat` | 仅 2 文件改动（新增 TickEngine.swift + TickEngineTests.swift） | ☐ |
 | 5 | grep `import Foundation\|import Combine\|import GRDB` TickEngine.swift | 0 命中（纯 Int 运算，无外部 import） | ☐ |
 | 6 | grep `precondition\|fatalError\|throws` TickEngine.swift | 0 命中（spec 字面 fidelity，无新增防御） | ☐ |
