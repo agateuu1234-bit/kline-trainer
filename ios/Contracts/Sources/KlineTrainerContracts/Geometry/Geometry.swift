@@ -48,9 +48,6 @@ public struct NonDegenerateRange: Equatable, Sendable {
     public let lower: Double
     public let upper: Double                    // 强制 upper > lower（无 public init，外部只能走 .make）
 
-    // memberwise init 不显式声明 → Swift 合成 internal init；外部只能 .make
-    // 同 package test 可直接 internal init 验证 Equatable / span / 边界
-
     /// modules L924-925 字面：empty / 全等值都返回可用 range
     public static func make(values: [Double],
                             fallback: ClosedRange<Double> = 0.0...1.0,
@@ -59,7 +56,7 @@ public struct NonDegenerateRange: Equatable, Sendable {
             return NonDegenerateRange(lower: fallback.lowerBound, upper: fallback.upperBound)
         }
         if minV == maxV {
-            let pad = Swift.max(abs(minV) * paddingRatio, 1e-6)
+            let pad = max(abs(minV) * paddingRatio, 1e-6)
             return NonDegenerateRange(lower: minV - pad, upper: maxV + pad)
         }
         let span = maxV - minV

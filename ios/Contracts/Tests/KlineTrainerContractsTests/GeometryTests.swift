@@ -1,5 +1,4 @@
 import Testing
-import Foundation
 import CoreGraphics
 @testable import KlineTrainerContracts
 
@@ -104,6 +103,6 @@ struct NonDegenerateRangeTests {
         #expect(r.lower < 0.0)
         #expect(r.upper > 0.0)
         #expect(r.span > 0)
-        #expect(r.span >= 2e-6)
+        #expect(r.span >= 2e-6)   // pad = 1e-6 on each side → total span = 2e-6
     }
 }
