@@ -90,4 +90,15 @@ struct TickEngineTests {
         t.reset(to: 75)
         #expect(t.globalTickIndex == 75)
     }
+
+    @Test("Equatable: identical state ==, different state !=")
+    func equatable() {
+        let a = TickEngine(maxTick: 100, initialTick: 50)
+        let b = TickEngine(maxTick: 100, initialTick: 50)
+        #expect(a == b)
+
+        var c = TickEngine(maxTick: 100, initialTick: 50)
+        _ = c.advance(steps: 5)
+        #expect(a != c)
+    }
 }
