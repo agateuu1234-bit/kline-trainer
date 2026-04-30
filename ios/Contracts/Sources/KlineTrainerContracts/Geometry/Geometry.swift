@@ -93,3 +93,24 @@ public struct PriceRange: Equatable, Sendable {
         return PriceRange(min: lo, max: hi)
     }
 }
+
+// MARK: - 视口
+
+public struct ChartViewport: Equatable, Sendable {
+    public let startIndex: Int
+    public let visibleCount: Int
+    public let pixelShift: CGFloat
+    public let geometry: ChartGeometry
+    public let priceRange: PriceRange
+    public let mainChartFrame: CGRect
+
+    public init(startIndex: Int, visibleCount: Int, pixelShift: CGFloat,
+                geometry: ChartGeometry, priceRange: PriceRange, mainChartFrame: CGRect) {
+        self.startIndex = startIndex
+        self.visibleCount = visibleCount
+        self.pixelShift = pixelShift
+        self.geometry = geometry
+        self.priceRange = priceRange
+        self.mainChartFrame = mainChartFrame
+    }
+}

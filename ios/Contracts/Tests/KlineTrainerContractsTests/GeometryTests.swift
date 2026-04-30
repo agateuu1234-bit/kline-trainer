@@ -188,3 +188,43 @@ struct PriceRangeTests {
         #expect(r.max == 60.0 * 1.05)
     }
 }
+
+@Suite("ChartViewport")
+struct ChartViewportTests {
+
+    private func makeViewport(startIndex: Int = 0, mainChartFrame: CGRect = CGRect(x: 0, y: 0, width: 400, height: 600)) -> ChartViewport {
+        ChartViewport(
+            startIndex: startIndex,
+            visibleCount: 100,
+            pixelShift: 0,
+            geometry: ChartGeometry(candleStep: 8, candleWidth: 6, gap: 2),
+            priceRange: PriceRange(min: 100, max: 200),
+            mainChartFrame: mainChartFrame
+        )
+    }
+
+    @Test("init 6 字段全保留")
+    func initFields() {
+        let v = makeViewport(startIndex: 50)
+        #expect(v.startIndex == 50)
+        #expect(v.visibleCount == 100)
+        #expect(v.pixelShift == 0)
+        #expect(v.geometry.candleStep == 8)
+        #expect(v.priceRange.min == 100)
+        #expect(v.mainChartFrame.width == 400)
+    }
+
+    @Test("Equatable 同字段 ==")
+    func equatableSame() {
+        let a = makeViewport()
+        let b = makeViewport()
+        #expect(a == b)
+    }
+
+    @Test("Equatable 跨 frame 不同 !=")
+    func equatableDifferentFrame() {
+        let a = makeViewport(mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600))
+        let b = makeViewport(mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 800))
+        #expect(a != b)
+    }
+}
