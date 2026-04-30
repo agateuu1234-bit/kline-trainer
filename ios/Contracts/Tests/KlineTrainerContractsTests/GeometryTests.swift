@@ -162,10 +162,12 @@ struct PriceRangeTests {
         let candlesHi = [makeCandle(low: 100, high: 200, ma66: 250)]
         let r1 = PriceRange.calculate(from: candlesHi[...])
         #expect(r1.max == 250.0 * 1.05)
+        #expect(r1.min == 100.0 * 0.95)   // 抢答：ma66 仅扩 hi 时 lo 不应被污染
 
         let candlesLo = [makeCandle(low: 100, high: 200, ma66: 50)]
         let r2 = PriceRange.calculate(from: candlesLo[...])
         #expect(r2.min == 50.0 * 0.95)
+        #expect(r2.max == 200.0 * 1.05)   // 抢答：ma66 仅扩 lo 时 hi 不应被污染
     }
 
     @Test("三指标全有 + 同时扩 lo/hi（reviewer test-1）")
