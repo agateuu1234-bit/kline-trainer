@@ -52,3 +52,37 @@ public final class ThemeController {
     }
 }
 #endif
+
+// MARK: - UIKit shell 层 #2（AppColor 默认色常量；仅 iOS / iOS Simulator 编译）
+
+#if canImport(UIKit)
+import UIKit
+
+/// 默认颜色常量。spec L827-836 列出 8 个，"..."派生 5 个（D-3）。
+/// 本 PR 全部 static UIColor 字面量；dark/light dynamic 留 Wave 3 §夜间模式。
+/// Caller（C3-C8 / U1-U6）需要 SwiftUI Color 时自行 `Color(uiColor: AppColor.X)` 转换。
+public enum AppColor {
+    // 主图蜡烛（中文红涨绿跌惯例）
+    public static let candleUp: UIColor   = UIColor(red: 0.86, green: 0.18, blue: 0.20, alpha: 1.0)
+    public static let candleDown: UIColor = UIColor(red: 0.16, green: 0.66, blue: 0.36, alpha: 1.0)
+
+    // 主图叠加指标
+    public static let ma66: UIColor       = UIColor(red: 0.55, green: 0.40, blue: 0.85, alpha: 1.0)
+    public static let bollLine: UIColor   = UIColor(red: 0.95, green: 0.70, blue: 0.20, alpha: 1.0)
+
+    // MACD 子图（v1.5 §2：DIF 白 + DEA 黄）
+    public static let macdDIF: UIColor          = UIColor.white
+    public static let macdDEA: UIColor          = UIColor(red: 1.00, green: 0.84, blue: 0.20, alpha: 1.0)
+    public static let macdBarPositive: UIColor  = AppColor.candleUp
+    public static let macdBarNegative: UIColor  = AppColor.candleDown
+
+    // 盈亏（D-3 派生）
+    public static let profitRed: UIColor  = AppColor.candleUp
+    public static let lossGreen: UIColor  = AppColor.candleDown
+
+    // 背景 / 网格 / 文字（D-3 派生：systemBackground / 自定 alpha 灰 / label）
+    public static let background: UIColor = .systemBackground
+    public static let gridLine: UIColor   = UIColor(white: 0.5, alpha: 0.25)
+    public static let text: UIColor       = .label
+}
+#endif
