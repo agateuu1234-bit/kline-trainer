@@ -63,3 +63,33 @@ struct ResolveColorSchemeTests {
         #expect(resolveColorScheme(displayMode: .dark, traitIsDark: false) == .dark)
     }
 }
+
+#if canImport(UIKit)
+import UIKit
+
+@Suite("ThemeController")
+@MainActor
+struct ThemeControllerTests {
+
+    @Test("默认 displayMode == .system")
+    func defaultMode() {
+        let c = ThemeController()
+        #expect(c.displayMode == .system)
+    }
+
+    @Test("resolve(trait:) .system + dark trait → .dark")
+    func resolveSystemDark() {
+        let c = ThemeController()
+        let trait = UITraitCollection(userInterfaceStyle: .dark)
+        #expect(c.resolve(trait: trait) == .dark)
+    }
+
+    @Test("resolve(trait:) .light forced 忽略 dark trait")
+    func resolveLightForced() {
+        let c = ThemeController()
+        c.displayMode = .light
+        let trait = UITraitCollection(userInterfaceStyle: .dark)
+        #expect(c.resolve(trait: trait) == .light)
+    }
+}
+#endif

@@ -30,3 +30,25 @@ public func resolveColorScheme(displayMode: DisplayMode,
     case .dark:   return .dark
     }
 }
+
+// MARK: - UIKit shell 层 #1（仅 iOS / iOS Simulator 编译；macOS host 跳过）
+
+#if canImport(UIKit)
+import UIKit
+import Observation
+
+@MainActor
+@Observable
+public final class ThemeController {
+    public var displayMode: DisplayMode = .system
+
+    public init() {}
+
+    /// spec L824 字面：`func resolve(trait: UITraitCollection) -> ColorScheme`。
+    /// 本实现把 `ColorScheme` rename 为 `AppColorScheme`（D-1），主体逻辑全部委派给纯值层 resolver。
+    public func resolve(trait: UITraitCollection) -> AppColorScheme {
+        resolveColorScheme(displayMode: displayMode,
+                           traitIsDark: trait.userInterfaceStyle == .dark)
+    }
+}
+#endif
