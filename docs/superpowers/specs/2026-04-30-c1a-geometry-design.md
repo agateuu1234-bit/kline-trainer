@@ -307,7 +307,11 @@ public struct IndicatorMapper: Equatable, Sendable {
 
 12. **`frame.height == 0` 产生 NaN 传播**（R1 adversarial-reviewer I-3 抢答）：`priceToY` / `yToPrice` / `valueToY` 算 `... / frame.height` 用 frame.height 作除数。`ChartPanelFrames.split(in: 0-高 rect)` 已 char-test 产生 `mainChart.height == 0`，但 mapper 输出未 char-test。caller 责任：`ChartContainerView` `bounds` 在 attach 后非零；UI 层 layout 阶段才构造 mapper。归 caller convention，不防御。
 
-十二项作 **accepted residuals**（原 9 + R1 adversarial 抢答 3），design doc codify + 关键 char tests / 注释抢答，不写进 impl 防御逻辑。
+13. **`ChartViewport.pixelShift` 不进 mapper（spec 字面）**（codex R1 finding #1 抢答）：modules v1.4 §C1a L908-916 仅声明 mapper 函数签名；plan v1.5 §3 L172-189 mapper body 字面均不读 `viewport.pixelShift`。pixelShift 作为视口状态字段保存，但亚像素平移由 **C8 KLineRenderState / layer transform 下游应用**（不在 C1a scope）。codex R1 自认 "inference from viewport field" — 字面证据 + 下游 layer transform 设计意图覆盖。char test：`pixelShiftIgnoredByMapper` 显式断言 pixelShift=0 / pixelShift=4 mapping 完全相等，document 字面契约。**归下游 C8 caller**，不进 mapper。
+
+十三项作 **accepted residuals**（原 9 + R1 adversarial 抢答 3 + codex R1 #1 抢答 1），design doc codify + 关键 char tests / 注释抢答，不写进 impl 防御逻辑。
+
+**codex R1 finding #2 fix（NonDegenerateRange.make 退化 fallback）**：modules L924 字面"返回可用的 range" = 非退化合约。原 impl `fallback: 0...0` → `lower=0, upper=0` span=0 违约。R2 修复：empty values 路径检查 fallback 是否退化（`lo == hi`），退化则走 single-value padding 路径（与 `values=[0.0]` 走的同一支），保 span > 0 不变量。新 char tests `emptyValuesDegenerateFallback`（fallback 0...0）+ `emptyValuesDegenerateNonZeroFallback`（fallback 5...5）。
 
 ## Codex review 策略
 
@@ -337,9 +341,9 @@ T7  merge
 
 | # | 动作 | 期望 | 通过 |
 |---|---|---|---|
-| 1 | `cd .worktrees/c1a-geometry && swift test 2>&1 \| tail -5` | 退出码 0；末行 `Test Suite 'All tests' passed`；新增 35 C1a tests，全部 baseline tests 仍通过；0 warnings | ☐ |
+| 1 | `cd .worktrees/c1a-geometry && swift test 2>&1 \| tail -5` | 退出码 0；末行 `Test Suite 'All tests' passed`；新增 38 C1a tests（含 codex R2 修复 +3），全部 baseline tests 仍通过；0 warnings | ☐ |
 | 2 | `wc -l ios/Contracts/Sources/KlineTrainerContracts/Geometry/*.swift` | ≤210 行 prod 总和 | ☐ |
-| 3 | `wc -l ios/Contracts/Tests/KlineTrainerContractsTests/GeometryTests.swift` | ≤420 行（34 tests / 5 Suites + 2 helpers / 实测对齐 E1 precedent commit 8b91e38 的 budget bump 模式） | ☐ |
+| 3 | `wc -l ios/Contracts/Tests/KlineTrainerContractsTests/GeometryTests.swift` | ≤450 行（38 tests / 5 Suites + 2 helpers / 实测对齐 E1 precedent commit 8b91e38 的 budget bump 模式） | ☐ |
 | 4 | `git diff main --stat` | 仅 Geometry impl + tests + design doc + plan doc，无副改 | ☐ |
 | 5 | `grep -rnE "import UIKit\|import SwiftUI" ios/Contracts/Sources/KlineTrainerContracts/Geometry/` | 0 命中（Contracts package 不依赖 UIKit / SwiftUI） | ☐ |
 | 6 | `grep -rnE "precondition\|fatalError\|throws\|assertionFailure" ios/Contracts/Sources/KlineTrainerContracts/Geometry/` | 0 命中（spec 字面 fidelity，无新增防御） | ☐ |

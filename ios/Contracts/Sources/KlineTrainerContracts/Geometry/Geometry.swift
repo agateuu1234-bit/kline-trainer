@@ -49,11 +49,18 @@ public struct NonDegenerateRange: Equatable, Sendable {
     public let upper: Double                    // 强制 upper > lower（无 public init，外部只能走 .make）
 
     /// modules L924-925 字面：empty / 全等值都返回可用 range
+    /// 退化 fallback (lower==upper) 走 single-value padding 路径，保 span > 0 不变量
     public static func make(values: [Double],
                             fallback: ClosedRange<Double> = 0.0...1.0,
                             paddingRatio: Double = 0.02) -> NonDegenerateRange {
         guard let minV = values.min(), let maxV = values.max() else {
-            return NonDegenerateRange(lower: fallback.lowerBound, upper: fallback.upperBound)
+            let lo = fallback.lowerBound
+            let hi = fallback.upperBound
+            if lo == hi {
+                let pad = max(abs(lo) * paddingRatio, 1e-6)
+                return NonDegenerateRange(lower: lo - pad, upper: hi + pad)
+            }
+            return NonDegenerateRange(lower: lo, upper: hi)
         }
         if minV == maxV {
             let pad = max(abs(minV) * paddingRatio, 1e-6)

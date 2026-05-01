@@ -105,6 +105,21 @@ struct NonDegenerateRangeTests {
         #expect(r.span > 0)
         #expect(r.span >= 2e-6)   // pad = 1e-6 on each side → total span = 2e-6
     }
+
+    @Test("empty values + degenerate fallback (0...0) → 退化 fallback 走 single-value padding（codex R1 finding #2）")
+    func emptyValuesDegenerateFallback() {
+        let r = NonDegenerateRange.make(values: [], fallback: 0.0...0.0)
+        #expect(r.span > 0)
+        #expect(r.span >= 2e-6)
+    }
+
+    @Test("empty values + degenerate fallback (5...5) → 非零退化值也对称 padding")
+    func emptyValuesDegenerateNonZeroFallback() {
+        let r = NonDegenerateRange.make(values: [], fallback: 5.0...5.0)
+        #expect(r.span > 0)
+        #expect(r.lower < 5.0)
+        #expect(r.upper > 5.0)
+    }
 }
 
 // MARK: - Helper for PriceRange tests
@@ -292,6 +307,28 @@ struct CoordinateMapperTests {
         #expect(m.xToIndex(7.9) == 0)         // floor(7.9/8) = 0
         #expect(m.xToIndex(8) == 1)
         #expect(m.xToIndex(15.9) == 1)        // floor(15.9/8) = 1
+    }
+
+    @Test("pixelShift 不影响 mapping（spec 字面 modules L908-916 + plan §3 L172-189；residual #13）")
+    func pixelShiftIgnoredByMapper() {
+        // spec 字面 indexToX/xToIndex 不读 viewport.pixelShift；亚像素平移由 C8 layer transform 应用。
+        // 抢答 codex R1 finding #1：codex 自认 "inference from viewport field"，但 spec 两份字面均不入 mapper。
+        let viewportNoShift = ChartViewport(
+            startIndex: 0, visibleCount: 100, pixelShift: 0,
+            geometry: ChartGeometry(candleStep: 8, candleWidth: 6, gap: 2),
+            priceRange: PriceRange(min: 100, max: 200),
+            mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600)
+        )
+        let viewportWithShift = ChartViewport(
+            startIndex: 0, visibleCount: 100, pixelShift: 4,
+            geometry: ChartGeometry(candleStep: 8, candleWidth: 6, gap: 2),
+            priceRange: PriceRange(min: 100, max: 200),
+            mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600)
+        )
+        let m1 = CoordinateMapper(viewport: viewportNoShift, displayScale: 2)
+        let m2 = CoordinateMapper(viewport: viewportWithShift, displayScale: 2)
+        #expect(m1.indexToX(10) == m2.indexToX(10))
+        #expect(m1.xToIndex(40) == m2.xToIndex(40))
     }
 
     @Test("yToPrice 反向 priceToY")
