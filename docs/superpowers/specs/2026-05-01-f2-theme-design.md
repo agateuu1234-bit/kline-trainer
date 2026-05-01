@@ -32,7 +32,7 @@ F2 在现有 `KlineTrainerContracts` SwiftPM package 内落地，跟随 E1 / C1a
 - iOS 17+ / macOS 14+（既有 Package.swift platforms 不变）
 - `@Observable` macro（iOS 17+ Observation framework）
 - `@MainActor` global actor isolation
-- `xcodebuild` for iOS Simulator 编译验证（macOS host 已可调）
+- `swiftc -typecheck -sdk iphonesimulator -target arm64-apple-ios17.0-simulator` 单文件 iOS SDK 编译 + 类型验证（D-5 探针法；bare SwiftPM scheme 当前不被 xcodebuild iOS Simulator build 接受，故不用 xcodebuild gate）
 
 ## Spec snapshot（grep-verified）
 
@@ -112,7 +112,7 @@ F2 在 `ios/Contracts/Sources/KlineTrainerContracts/Theme/Theme.swift` 单文件
 - ❌ 配色给 SwiftUI 用的 `Color` bridge——所有颜色按 spec 字面 `UIColor`；C8 / U1-U6 自己 `Color(uiColor: AppColor.candleUp)` 转换。
 - ❌ 颜色无障碍 / 对比度调整——超 spec 范围。
 - ❌ `AppColorScheme` 与 SwiftUI `ColorScheme` 互转——下游需要时自加 extension，不在 F2 scope。
-- ❌ iOS Simulator runtime test —— 仅做 `xcodebuild build` 编译验证。Simulator runtime test 设施留给后续 C2 / C5 / C6 等动效模块时再立。
+- ❌ iOS Simulator runtime test —— 仅做 `swiftc -typecheck` 单文件编译 + 类型验证（D-5）。Simulator runtime test 设施留给后续 C2 / C5 / C6 等动效模块时再立。
 - ❌ §M0.3 / §M0.4 / spec / m01 任何修订。
 - ❌ 12+ project residuals 的 caller-side 防御。
 
