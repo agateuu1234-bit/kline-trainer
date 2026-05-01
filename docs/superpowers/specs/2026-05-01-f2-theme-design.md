@@ -79,8 +79,9 @@ enum AppColor {
 | **D-3** | `AppColor` "..."省略号 | L836 spec literal `// ... 背景/网格/文字` | spec 留口子。**Resolution**：本 PR 落地 13 个具体 constants（候选 8 个 spec 列出 + 5 个 `// ...` 派生）。**派生 5 = 系统三件套（`background` 用 `.systemBackground` / `gridLine` 用 `UIColor(white: 0.5, alpha: 0.25)` / `text` 用 `.label`）+ MACD bar 双色（`macdBarPositive` / `macdBarNegative` 直接 alias `candleUp/Down`）**。Wave 1 渲染层（C3-C6）发现新需求时往 `AppColor` 补，不阻塞当前。 |
 | **D-4** | `Theme/` path 字面 | L817 字面 `Theme/` | 跟随 E1 / C1a precedent，落 `KlineTrainerContracts/Theme/Theme.swift`。Spec literal `ChartEngine/Core/Geometry/`（C1a）和 `Theme/`（F2）暗示 iOS app target；本项目 SPM-first，等 iOS app target 自身有 test infra 时再 reconcile。**Resolution**：deferred，跟 C1a 同处理。 |
 | **D-5** | iOS Simulator gate 不可达 | §15.4 暗示 "F1/F2/C1 完成 §15.1 编译验证" | bare SwiftPM scheme `xcodebuild ... -destination 'generic/platform=iOS Simulator' build` 当前 fail（"Supported platforms ... empty"——因 KlineTrainer Xcode app target 未引用 KlineTrainerContracts package，scheme 无 iOS run destination）。**Resolution**：本 PR 用 `swiftc -typecheck -sdk iphonesimulator -target arm64-apple-ios17.0-simulator Theme.swift` 单文件 typecheck 探针 — 验 UIKit / Observation / `@MainActor` 在 iOS SDK 下解析 + 类型检查通过；不依赖 SwiftPM Xcode integration。`xcodebuild` 完整 iOS build 留待 KlineTrainer app target 引入 `KlineTrainerContracts` package 后做（独立 PR），届时同步关 D-4 / D-5。 |
+| **D-6** | `DisplayMode` 已 M0.3 落地（Models.swift L41），F2 spec L823 `var displayMode: DisplayMode` 引用同名类型 | spec §F2 L823 字面 `var displayMode: DisplayMode = .system`（默认 `.system`）；spec §M0.3 L406 字面 `enum DisplayMode: String, Codable, Equatable, Sendable { case light, dark, system }`（**case 顺序 light/dark/system，无 CaseIterable**）| **Resolution**：F2 **复用** Models.swift `DisplayMode`，**不再 redeclare**。tests 改用 `DisplayMode(rawValue:)` mapping + 默认值 `.system` 验证（不依赖 `.allCases`，因 M0.3 baseline 不带 CaseIterable）。**记**：本 spec drift 是 plan / 三轮 design review 漏抓的现实冲突（Batch A implementer 撞上 `invalid redeclaration of 'DisplayMode'` 才发现）；reflexive lesson 留 memory `feedback_brainstorming_grep_first` —— **plan 起手必须 grep 已存在符号 / 类型名**。 |
 
-**冲突解决原则**：spec literal 优先，但 SwiftUI 命名冲突（D-1）+ infra readiness（D-4 / D-5）属硬阻塞，必须 deviate 并落 spec drift log。
+**冲突解决原则**：spec literal 优先，但 SwiftUI 命名冲突（D-1）+ infra readiness（D-4 / D-5）+ M0.3 baseline 复用（D-6）属硬约束，必须 deviate / reuse 并落 spec drift log。
 
 ### Package 结构 pre-commit clause
 
@@ -127,16 +128,13 @@ F2 在 `ios/Contracts/Sources/KlineTrainerContracts/Theme/Theme.swift` 单文件
 //   D-1：spec L824 literal `ColorScheme` 改为 `AppColorScheme`（避 SwiftUI 命名冲突）
 //   D-3：13 个 default UIColor constants（spec 字面 8 + "..."派生 5）
 //   D-4：path `Theme/` 落 Contracts package（同 C1a precedent）
+//   D-6：`DisplayMode` 复用 Models.swift L41（M0.3 已落地，case 顺序 light/dark/system，无 CaseIterable）
 
 import Foundation
 
 // MARK: - 纯值层（macOS / iOS 共用，swift test 直跑）
 
-public enum DisplayMode: String, Equatable, Sendable, CaseIterable {
-    case system
-    case light
-    case dark
-}
+// `DisplayMode` 在 Models.swift（M0.3）已定义；F2 复用，**不再 redeclare**（D-6）
 
 public enum AppColorScheme: String, Equatable, Sendable, CaseIterable {
     case light
@@ -211,18 +209,21 @@ public enum AppColor {
 ### 纯值层 tests（macOS swift test 直跑，7 个）
 
 ```swift
-@Suite("DisplayMode")
-struct DisplayModeTests {
-    @Test("3 case 全列出")
-    func cases() {
-        #expect(DisplayMode.allCases == [.system, .light, .dark])
-    }
-
-    @Test("Equatable + raw value 字面对齐")
+@Suite("DisplayMode (F2 视角；类型在 Models.swift M0.3 落地, D-6)")
+struct DisplayModeF2Tests {
+    @Test("3 case rawValue 字面对齐 (M0.3 baseline)")
     func rawValues() {
         #expect(DisplayMode.system.rawValue == "system")
         #expect(DisplayMode.light.rawValue == "light")
         #expect(DisplayMode.dark.rawValue == "dark")
+    }
+
+    @Test("rawValue init mapping + 未知 rawValue → nil")
+    func rawValueInit() {
+        #expect(DisplayMode(rawValue: "system") == .system)
+        #expect(DisplayMode(rawValue: "light") == .light)
+        #expect(DisplayMode(rawValue: "dark") == .dark)
+        #expect(DisplayMode(rawValue: "unknown") == nil)
     }
 }
 
