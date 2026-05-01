@@ -319,6 +319,8 @@ public struct IndicatorMapper: Equatable, Sendable {
 
 **codex R3 finding #1 fix（fractional pixelShift round-trip）**：R2 实施 `xToIndex = startIndex + floor((x - pixelShift)/step)` 在 fractional pixelShift 下破对称。codex R3 case：pixelShift=0.4 step=8 displayScale=1：indexToX(5)=round(40.4)=40；xToIndex(40)=floor(39.6/8)=4 ❌ 应 5。**根因**：indexToX 把 (i*step+pixelShift) round 到 display grid 但 xToIndex 减的是未 round 的 pixelShift，sub-pixel 漂移堆叠破 floor 边界。**R3 修复**：`alignedShift = round(pixelShift * displayScale) / displayScale`，再 `xToIndex = startIndex + floor((x - alignedShift)/step)`。pixelShift=0 时 alignedShift=0 与 spec 字面 `floor(x/step)` 完全等价（保 7.9→0 / 8→1 spec 行为）；fractional pixelShift 下保 round-trip。+3 char tests（fractionalPixelShiftRoundTripScale1 / fractionalPixelShiftRoundTripScale2 / nearHalfPixelShiftRoundTrip）。
 
+**codex R4 finding #1 fix（fractional candleStep round-trip）— verify-and-correct 算法**：codex R4 找 fractional candleStep 破 R3 修复：pixelShift=0 step=8.2 displayScale=1，indexToX(1)=round(8.2)=8；R3 xToIndex(8)=floor((8-0)/8.2)=0 ❌ 应 1。**根因**：R3 把 pixelShift 对齐 grid 但没对齐 candleStep；fractional step 下 floor 边界跟随 step 浮动，单纯 floor 必破。**R5 修复（verify-and-correct）**：`approx = startIndex + floor((x-pixelShift)/step)`，再用 rounded indexToX(approx±1) 做边界 classifier 修正±1。算法**只用 indexToX 自身做 inverse**（不试图独立推导 grid 对齐），所以 round-trip 恒等独立于 fractional pixelShift / candleStep / displayScale。2-round Opus xhigh 对抗 review 推荐 spike + property test 验证；spike 通过：6 steps × 6 shifts × 3 scales × 5 indices = 540 round-trip 网格全过。+1 property test（fractionalCandleStepRoundTrip）。
+
 ## Codex review 策略
 
 - **预期 round 数**：≤3 轮（34 tests > E1 的 15，超 memory ≤10 警戒，故 +1 round contingency）
@@ -347,9 +349,9 @@ T7  merge
 
 | # | 动作 | 期望 | 通过 |
 |---|---|---|---|
-| 1 | `cd .worktrees/c1a-geometry && swift test 2>&1 \| tail -5` | 退出码 0；末行 `Test Suite 'All tests' passed`；新增 43 C1a tests（含 codex R1 修复 +3 + R2 +3 -1 flip + R3 fractional pixelShift +3 = 净 +8），全部 baseline tests 仍通过；0 warnings | ☐ |
+| 1 | `cd .worktrees/c1a-geometry && swift test 2>&1 \| tail -5` | 退出码 0；末行 `Test Suite 'All tests' passed`；新增 44 C1a tests（含 codex R1 +3 / R2 +3 -1 flip / R3 fractional pixelShift +3 / R4 verify-and-correct property test +1，540 round-trip 网格全过），全部 baseline tests 仍通过；0 warnings | ☐ |
 | 2 | `wc -l ios/Contracts/Sources/KlineTrainerContracts/Geometry/*.swift` | ≤210 行 prod 总和 | ☐ |
-| 3 | `wc -l ios/Contracts/Tests/KlineTrainerContractsTests/GeometryTests.swift` | ≤520 行（43 tests / 5 Suites + 2 helpers / 实测对齐 E1 precedent commit 8b91e38 的 budget bump 模式） | ☐ |
+| 3 | `wc -l ios/Contracts/Tests/KlineTrainerContractsTests/GeometryTests.swift` | ≤545 行（44 tests / 5 Suites + 2 helpers + property test 网格 / 实测对齐 E1 precedent commit 8b91e38 的 budget bump 模式） | ☐ |
 | 4 | `git diff main --stat` | 仅 Geometry impl + tests + design doc + plan doc，无副改 | ☐ |
 | 5 | `grep -rnE "import UIKit\|import SwiftUI" ios/Contracts/Sources/KlineTrainerContracts/Geometry/` | 0 命中（Contracts package 不依赖 UIKit / SwiftUI） | ☐ |
 | 6 | `grep -rnE "precondition\|fatalError\|throws\|assertionFailure" ios/Contracts/Sources/KlineTrainerContracts/Geometry/` | 0 命中（spec 字面 fidelity，无新增防御） | ☐ |

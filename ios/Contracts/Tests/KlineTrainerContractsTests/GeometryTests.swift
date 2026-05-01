@@ -398,6 +398,29 @@ struct CoordinateMapperTests {
         }
     }
 
+    @Test("fractional candleStep round-trip（codex R4 case + 网格扫描）")
+    func fractionalCandleStepRoundTrip() {
+        // codex R4 case: candleStep=8.2 pixelShift=0 displayScale=1，indexToX(1)=8 但旧 xToIndex(8)=0
+        for step in [CGFloat(8.0), 8.2, 8.5, 8.7, 9.3, 12.6] {
+            for shift in [CGFloat(0), 0.4, -0.3, 0.49, 0.51, -0.51] {
+                for scale in [CGFloat(1), 2, 3] {
+                    let viewport = ChartViewport(
+                        startIndex: 0, visibleCount: 100, pixelShift: shift,
+                        geometry: ChartGeometry(candleStep: step, candleWidth: 6, gap: 2),
+                        priceRange: PriceRange(min: 100, max: 200),
+                        mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600)
+                    )
+                    let m = CoordinateMapper(viewport: viewport, displayScale: scale)
+                    for i in [0, 1, 5, 25, 99] {
+                        let x = m.indexToX(i)
+                        #expect(m.xToIndex(x) == i,
+                            "round-trip 破: step=\(step) shift=\(shift) scale=\(scale) i=\(i) x=\(x) xToIndex=\(m.xToIndex(x))")
+                    }
+                }
+            }
+        }
+    }
+
     @Test("yToPrice 反向 priceToY")
     func yToPriceInverse() {
         let m = makeMapper(mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600),
