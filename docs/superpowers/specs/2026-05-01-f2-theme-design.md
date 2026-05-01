@@ -21,7 +21,7 @@ F2 在现有 `KlineTrainerContracts` SwiftPM package 内落地，跟随 E1 / C1a
 2. **iOS app target 当前 0 test target**（C1a design doc 已记录），新建 iOS test target 是 heavy infra scope creep；feedback `feedback_governance_budget_cap` 硬规则：业务 PR 不主动加治理设施。
 3. **`#if canImport(UIKit)` 是 SwiftPM 标准条件编译**，无新 build flag、无 Package.swift 改动。
 4. **UIKit shell 仅是 `@MainActor` wrapper + UIColor 字面量**，业务逻辑（resolveColorScheme）在纯值层；macOS swift test 仍然覆盖 100% 业务路径。
-5. **iOS 编译验证**通过 `xcodebuild -scheme KlineTrainerContracts -destination 'generic/platform=iOS Simulator' build`（不需要启动 simulator runtime；只验编译），落 acceptance gate。
+5. **iOS 编译验证**通过 `swiftc -typecheck -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" -target arm64-apple-ios17.0-simulator ios/Contracts/Sources/KlineTrainerContracts/Theme/Theme.swift`（不需启动 simulator runtime / 不依赖 SwiftPM Xcode integration；纯 swiftc parse + typecheck，验 UIKit / `@Observable` / `@MainActor` 在 iOS SDK 下编译 + 类型检查通过），落 acceptance gate。**注**：bare SwiftPM `xcodebuild ... -destination 'generic/platform=iOS Simulator' build` 当前 fail（`Supported platforms ... empty`）— 因为 KlineTrainerContracts 未被 Xcode app target 引用、scheme 无 iOS run destination；待 KlineTrainer app target 引入此 package 后再 reconcile（D-5 deferred）。
 
 ## Tech Stack
 
@@ -70,16 +70,17 @@ enum AppColor {
 - v1.5 plan L5（macdDEA 黄色）：`MACD 线颜色从 DIF白+DEA黑 改为 DIF白+DEA黄，与需求"黄白线"一致`。
 - v1.5 plan L731 / L868 / L1104：MACD 子图 = `柱子 + DIF白线 + DEA黄线`。
 
-### Spec discrepancies（4 项）
+### Spec discrepancies（5 项）
 
 | # | Aspect | spec literal | Resolution |
 |---|---|---|---|
-| **D-1** | `ColorScheme` 类型名 | modules L824 字面 `ColorScheme` | **改名 `AppColorScheme`**——`ColorScheme` 与 SwiftUI 同名 enum 冲突；下游 C8 / U1-U6 必然 `import SwiftUI`，未限定 `ColorScheme` 会触发 ambiguity。`AppColorScheme` 与 `AppColor` / `AppError` / `AppDB` 命名风格一致。**Resolution**：取 `AppColorScheme`，记 spec drift 留 plan v1.6 reconciliation。 |
-| **D-2** | `displayMode` 默认值 | L823 字面 `var displayMode: DisplayMode = .system` | 一致采纳。`DisplayMode` 三 case：`.system / .light / .dark`（spec 未列 case，按 iOS 标准 + L823 隐含；记为 D-2 派生项）。 |
-| **D-3** | `AppColor` "..."省略号 | L836 spec literal `// ... 背景/网格/文字` | spec 留口子。**Resolution**：本 PR 落地 13 个具体 constants（候选 8 个 spec 列出 + 5 个 `// ...` 派生：`background / gridLine / text / macdBarPositive / macdBarNegative`）。Wave 1 渲染层（C3-C6）发现新需求时往 `AppColor` 补，不阻塞当前。 |
+| **D-1** | `ColorScheme` 类型名 | modules L824 字面 `ColorScheme` | **改名 `AppColorScheme`**——`ColorScheme` 与 SwiftUI 同名 enum 同名（不 module-qualified 时 caller-side 心智负担高；C8 / U1-U6 大概率 `import SwiftUI` 后 unqualified 引用 `ColorScheme` 时会触发 ambiguity）。`AppColorScheme` 与 `AppColor` / `AppError` / `AppDB` 命名风格一致，caller ergonomics 更好。**Resolution**：取 `AppColorScheme`，记 spec drift 留 plan v1.6 reconciliation。**注**：技术上下游可用 module-qualified `KlineTrainerContracts.ColorScheme` 避歧义，但每次都写 prefix 不现实。 |
+| **D-2** | `displayMode` 默认值 | L823 字面 `var displayMode: DisplayMode = .system` | 一致采纳（var、`.system` 默认）。`DisplayMode` 三 case：`.system / .light / .dark`（spec 未列 case，按 iOS 标准 + L823 隐含；记为 D-2 派生项）。 |
+| **D-3** | `AppColor` "..."省略号 | L836 spec literal `// ... 背景/网格/文字` | spec 留口子。**Resolution**：本 PR 落地 13 个具体 constants（候选 8 个 spec 列出 + 5 个 `// ...` 派生）。**派生 5 = 系统三件套（`background` 用 `.systemBackground` / `gridLine` 用 `UIColor(white: 0.5, alpha: 0.25)` / `text` 用 `.label`）+ MACD bar 双色（`macdBarPositive` / `macdBarNegative` 直接 alias `candleUp/Down`）**。Wave 1 渲染层（C3-C6）发现新需求时往 `AppColor` 补，不阻塞当前。 |
 | **D-4** | `Theme/` path 字面 | L817 字面 `Theme/` | 跟随 E1 / C1a precedent，落 `KlineTrainerContracts/Theme/Theme.swift`。Spec literal `ChartEngine/Core/Geometry/`（C1a）和 `Theme/`（F2）暗示 iOS app target；本项目 SPM-first，等 iOS app target 自身有 test infra 时再 reconcile。**Resolution**：deferred，跟 C1a 同处理。 |
+| **D-5** | iOS Simulator gate 不可达 | §15.4 暗示 "F1/F2/C1 完成 §15.1 编译验证" | bare SwiftPM scheme `xcodebuild ... -destination 'generic/platform=iOS Simulator' build` 当前 fail（"Supported platforms ... empty"——因 KlineTrainer Xcode app target 未引用 KlineTrainerContracts package，scheme 无 iOS run destination）。**Resolution**：本 PR 用 `swiftc -typecheck -sdk iphonesimulator -target arm64-apple-ios17.0-simulator Theme.swift` 单文件 typecheck 探针 — 验 UIKit / Observation / `@MainActor` 在 iOS SDK 下解析 + 类型检查通过；不依赖 SwiftPM Xcode integration。`xcodebuild` 完整 iOS build 留待 KlineTrainer app target 引入 `KlineTrainerContracts` package 后做（独立 PR），届时同步关 D-4 / D-5。 |
 
-**冲突解决原则**：spec literal 优先，但 SwiftUI 命名冲突（D-1）+ infra readiness（D-4）属硬阻塞，必须 deviate 并落 spec drift log。
+**冲突解决原则**：spec literal 优先，但 SwiftUI 命名冲突（D-1）+ infra readiness（D-4 / D-5）属硬阻塞，必须 deviate 并落 spec drift log。
 
 ### Package 结构 pre-commit clause
 
@@ -90,8 +91,8 @@ F2 在 `ios/Contracts/Sources/KlineTrainerContracts/Theme/Theme.swift` 单文件
 
 `KlineTrainerContractsTests/ThemeTests.swift` 同样按段拆：
 
-- macOS swift test 跑：纯值层 tests（DisplayMode equatable、AppColorScheme equatable、resolveColorScheme 全 6-cell 矩阵）。
-- 仅 iOS xcodebuild test 跑：UIKit shell tests（ThemeController.displayMode 默认值、resolve(trait:) 三态映射、AppColor 13 const non-nil）。本 PR 不强制跑 iOS Simulator test runtime；以 `xcodebuild build` 编译验证为充分条件（per §15.1 spec literal）。
+- macOS swift test 跑：纯值层 tests（DisplayMode equatable、AppColorScheme equatable、resolveColorScheme 全 6-cell 矩阵）—— **共 7 tests**。
+- 仅 `swiftc -typecheck` iOS SDK gate 验：UIKit shell tests（ThemeController.displayMode 默认值、resolve(trait:) 三态映射、AppColor 13 const 全 resolvable / DIF·DEA RGB 字面 / 派生不变量）—— **共 6 tests**。本 PR 不强制跑 iOS Simulator runtime test；以 `swiftc -typecheck` 编译 + 类型检查为充分条件（D-5）。
 
 ## Scope
 
@@ -101,7 +102,7 @@ F2 在 `ios/Contracts/Sources/KlineTrainerContracts/Theme/Theme.swift` 单文件
 
 **子项总数 1**（≤3 硬上限）；**prod 估 ~95 LOC**（≤500 硬上限留余裕）。
 
-**测试数估 12**（纯值层 7 + UIKit shell 段 5；macOS swift test 跑 7，iOS xcodebuild build 仅做编译 verify shell 5 个 test 文件能编译）。
+**测试数 13**（纯值层 7 + UIKit shell 6；macOS swift test 跑 7，UIKit shell 6 由 `swiftc -typecheck` 验语法 / 类型 — 不进 macOS test runner 计数）。
 
 ## 不在范围
 
@@ -263,7 +264,7 @@ struct ResolveColorSchemeTests {
 
 合计 7 tests（DisplayMode 2 + AppColorScheme 2 + resolveColorScheme 4，共 6 cell 矩阵）。
 
-### UIKit shell tests（`#if canImport(UIKit)` gated；macOS swift test 跳过；iOS xcodebuild build 编译验证）
+### UIKit shell tests（`#if canImport(UIKit)` gated；macOS swift test 跳过；iOS `swiftc -typecheck` 编译 + 类型验证）
 
 ```swift
 #if canImport(UIKit)
@@ -339,16 +340,16 @@ struct AppColorConstantsTests {
 #endif
 ```
 
-合计 5 tests（ThemeController 3 + AppColor 2）。
+合计 6 tests（ThemeController 3 + AppColor 3）。
 
-总测试数：**7（macOS 跑）+ 5（iOS 编译验证）= 12**。
+总测试数：**7（macOS 跑）+ 6（iOS `swiftc -typecheck` 验）= 13**。
 
 ## Residuals（accepted，不阻塞 PR）
 
 | # | 内容 | 归属 |
 |---|---|---|
-| **R1** | UIKit shell 5 tests 当前 macOS host swift test 不跑；仅 `xcodebuild build` 编译验证；逻辑覆盖等价于纯值层 7 tests（resolve 委派 resolveColorScheme） | 后续 C2 / C5 / C6 引入 iOS Simulator runtime test infra 时启用 |
-| **R2** | 13 个默认 UIColor 暂不支持 dark mode 自适应；spec 仅要求"默认颜色常量" | Wave 3 §夜间模式 + Phase 5 |
+| **R1** | UIKit shell 6 tests 当前 macOS host swift test 不跑；仅 `swiftc -typecheck -sdk iphonesimulator` 编译 + 类型验；runtime 覆盖等价于纯值层 7 tests（`ThemeController.resolve(trait:)` 委派 `resolveColorScheme`） | 后续 C2 / C5 / C6 引入 iOS Simulator runtime test infra 时启用 |
+| **R2** | 13 个默认 UIColor **10 个 hardcoded RGB（candle / ma66 / boll / macd DIF·DEA·BarPos·BarNeg / profit·loss · gridLine）暂不支持 dark mode 自适应**；3 个系统色（`background = .systemBackground` / `text = .label` 由 UIKit 内置 dynamic provider 自带 light/dark；`gridLine` 半透明灰跨 mode 都过得去）。spec 仅要求"默认颜色常量"；hardcoded 10 项的 dark variant 留 Wave 3 §夜间模式 | Wave 3 §夜间模式 + Phase 5 |
 | **R3** | `AppColor.macdBarPositive / macdBarNegative / profitRed / lossGreen` 直接 `=` aliasing `candleUp / candleDown`；若未来 spec 拆分两套色簇（如盈亏专用强对比），caller 需 push | C3-C8 / U1-U6 |
 | **R4** | `ThemeController` 不监听 trait change；scenePhase / traitCollectionDidChange 由 caller（U1 / SceneDelegate）触发 resolve | U1 / 未列模块 |
 | **R5** | `AppColorScheme` 与 SwiftUI `ColorScheme` 不直接互转；下游自加 `init` extension | C8 / U1-U6 |
@@ -364,20 +365,29 @@ struct AppColorConstantsTests {
 
 | 动作 | 期望 | 通过/失败 |
 |---|---|---|
+**Pre-PR 段（PR 创建之前必须全过）**：
+
+| 动作 | 期望 | 通过/失败 |
+|---|---|---|
 | 1. cd 至 worktree 跑 `swift test` | `Test Suite 'All tests' passed`；总数 = 108 baseline + 7 F2 = 115 tests pass / 0 warnings |  |
-| 2. `xcodebuild -scheme KlineTrainerContracts -destination 'generic/platform=iOS Simulator' build` 跑过 | `BUILD SUCCEEDED`；UIKit shell 段编译通过 |  |
+| 2. `swiftc -typecheck -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" -target arm64-apple-ios17.0-simulator ios/Contracts/Sources/KlineTrainerContracts/Theme/Theme.swift` 跑过 | exit 0；无错；UIKit shell + Observation + `@MainActor` 在 iOS SDK 下 typecheck 通过 |  |
 | 3. `wc -l Theme/Theme.swift` 不超 ≤120 行 prod | 实测 ≤120 |  |
 | 4. `wc -l ThemeTests.swift` 不超 ≤180 行 | 实测 ≤180 |  |
 | 5. `grep -rnE "precondition\|fatalError\|throws\|assertionFailure" Theme/` 0 命中 | 0 命中 |  |
-| 6. `grep -rnE "import UIKit\|import SwiftUI" Theme/Theme.swift` 命中数 ≤2（仅在 `#if canImport(UIKit)` 段内） | 命中 ≤2 且全在 `#if` 块内 |  |
+| 6. `grep -rnE "import UIKit\|import SwiftUI\|import Observation" Theme/Theme.swift` 命中只在 `#if canImport(UIKit)` 段内（人工核位） | 命中行号全在 `#if … #endif` 之间 |  |
+
+**Post-PR 段（PR push 之后由用户 / 自动化 verify）**：
+
+| 动作 | 期望 | 通过/失败 |
+|---|---|---|
 | 7. F2 PR 中 codex adversarial review ≤ 3 轮 | 收敛 |  |
 | 8. CODEOWNERS approve（user self-approve） | 通过 |  |
 
-8 行均为 coder-friendly 但非编码者也能逐条 binary 判过/不过；与 C1a precedent 一致。
+Pre-PR 6 项均为 coder-friendly 但非编码者也能逐条 binary 判过/不过；与 C1a precedent 一致（C1a 同样把 codex review 轮数列在末尾）。
 
 ## 风险面 / 风险闸门
 
-- **A. UIKit shell 编译验证**：`xcodebuild` iOS Simulator build 必过，否则 §15.4 iOS 代表签字未达成 → block PR。
+- **A. UIKit shell 编译验证**：`swiftc -typecheck -sdk iphonesimulator -target arm64-apple-ios17.0-simulator Theme.swift` 必过（exit 0），否则 §15.4 iOS 代表签字未达成 → block PR。**注**：bare SwiftPM `xcodebuild ... iOS Simulator build` 当前 fail（D-5），所以不用 xcodebuild gate。
 - **B. macOS swift test baseline 不破**：F2 不应让既有 108 tests（pre-C1a 73 + C1a 35）任何一个 fail。`#if canImport(UIKit)` 必须紧夹住所有 UIKit 引用。
 - **C. SwiftUI 命名冲突未爆**：D-1 已 rename `AppColorScheme`，但若忘记 namespace，下游 C8 import SwiftUI 时编译会报 `'ColorScheme' is ambiguous`。
 - **D. `@Observable` 与 `@MainActor` strict concurrency**：iOS 17 `@Observable` macro 默认非 Sendable；`@MainActor` 是必备，缺会爆 `Sending '...' risks causing data races`（§15.1 重点关注列表）。
