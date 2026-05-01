@@ -309,26 +309,46 @@ struct CoordinateMapperTests {
         #expect(m.xToIndex(15.9) == 1)        // floor(15.9/8) = 1
     }
 
-    @Test("pixelShift 不影响 mapping（spec 字面 modules L908-916 + plan §3 L172-189；residual #13）")
-    func pixelShiftIgnoredByMapper() {
-        // spec 字面 indexToX/xToIndex 不读 viewport.pixelShift；亚像素平移由 C8 layer transform 应用。
-        // 抢答 codex R1 finding #1：codex 自认 "inference from viewport field"，但 spec 两份字面均不入 mapper。
-        let viewportNoShift = ChartViewport(
-            startIndex: 0, visibleCount: 100, pixelShift: 0,
-            geometry: ChartGeometry(candleStep: 8, candleWidth: 6, gap: 2),
-            priceRange: PriceRange(min: 100, max: 200),
-            mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600)
-        )
-        let viewportWithShift = ChartViewport(
+    @Test("pixelShift > 0 平移 indexToX 输出（codex R2 finding #1 收敛）")
+    func pixelShiftAppliedToIndexToX() {
+        // pixelShift 符号契约：pixelShift > 0 = candles 右移
+        // indexToX(10) = (10-0)*8 + 4 = 84
+        let viewport = ChartViewport(
             startIndex: 0, visibleCount: 100, pixelShift: 4,
             geometry: ChartGeometry(candleStep: 8, candleWidth: 6, gap: 2),
             priceRange: PriceRange(min: 100, max: 200),
             mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600)
         )
-        let m1 = CoordinateMapper(viewport: viewportNoShift, displayScale: 2)
-        let m2 = CoordinateMapper(viewport: viewportWithShift, displayScale: 2)
-        #expect(m1.indexToX(10) == m2.indexToX(10))
-        #expect(m1.xToIndex(40) == m2.xToIndex(40))
+        let m = CoordinateMapper(viewport: viewport, displayScale: 1)
+        #expect(m.indexToX(10) == 84)
+    }
+
+    @Test("pixelShift round-trip indexToX → xToIndex（symmetric）")
+    func pixelShiftRoundTrip() {
+        // pixelShift=4: indexToX(5) = 5*8+4 = 44; xToIndex(44) 需返回 5
+        let viewport = ChartViewport(
+            startIndex: 0, visibleCount: 100, pixelShift: 4,
+            geometry: ChartGeometry(candleStep: 8, candleWidth: 6, gap: 2),
+            priceRange: PriceRange(min: 100, max: 200),
+            mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600)
+        )
+        let m = CoordinateMapper(viewport: viewport, displayScale: 1)
+        let x = m.indexToX(5)
+        #expect(x == 44)
+        #expect(m.xToIndex(x) == 5)
+    }
+
+    @Test("pixelShift 负值 = candles 左移")
+    func pixelShiftNegative() {
+        // pixelShift=-3: indexToX(2) = 2*8 + (-3) = 13
+        let viewport = ChartViewport(
+            startIndex: 0, visibleCount: 100, pixelShift: -3,
+            geometry: ChartGeometry(candleStep: 8, candleWidth: 6, gap: 2),
+            priceRange: PriceRange(min: 100, max: 200),
+            mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600)
+        )
+        let m = CoordinateMapper(viewport: viewport, displayScale: 1)
+        #expect(m.indexToX(2) == 13)
     }
 
     @Test("yToPrice 反向 priceToY")

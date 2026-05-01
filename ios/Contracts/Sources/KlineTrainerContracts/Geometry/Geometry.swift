@@ -133,8 +133,10 @@ public struct CoordinateMapper: Equatable, Sendable {
         self.displayScale = displayScale
     }
 
+    /// pixelShift 符号契约：pixelShift > 0 = candles 向右平移 pixelShift 像素（亚像素 pan offset）
+    /// indexToX 加 pixelShift；xToIndex 减 pixelShift（symmetric round-trip）
     public func indexToX(_ index: Int) -> CGFloat {
-        let raw = CGFloat(index - viewport.startIndex) * viewport.geometry.candleStep
+        let raw = CGFloat(index - viewport.startIndex) * viewport.geometry.candleStep + viewport.pixelShift
         return (raw * displayScale).rounded(.toNearestOrAwayFromZero) / displayScale
     }
 
@@ -147,7 +149,7 @@ public struct CoordinateMapper: Equatable, Sendable {
     }
 
     public func xToIndex(_ x: CGFloat) -> Int {
-        viewport.startIndex + Int((x / viewport.geometry.candleStep).rounded(.down))
+        viewport.startIndex + Int(((x - viewport.pixelShift) / viewport.geometry.candleStep).rounded(.down))
     }
 
     public func yToPrice(_ y: CGFloat) -> Double {
@@ -173,8 +175,9 @@ public struct IndicatorMapper: Equatable, Sendable {
         self.displayScale = displayScale
     }
 
+    /// pixelShift 与 CoordinateMapper 同符号契约：通过 viewport.pixelShift 平移
     public func indexToX(_ index: Int) -> CGFloat {
-        let raw = CGFloat(index - viewport.startIndex) * geometry.candleStep
+        let raw = CGFloat(index - viewport.startIndex) * geometry.candleStep + viewport.pixelShift
         return (raw * displayScale).rounded(.toNearestOrAwayFromZero) / displayScale
     }
 
