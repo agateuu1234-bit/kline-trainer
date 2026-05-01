@@ -148,8 +148,11 @@ public struct CoordinateMapper: Equatable, Sendable {
         return (raw * displayScale).rounded(.toNearestOrAwayFromZero) / displayScale
     }
 
+    /// 减去与 indexToX 同源的 display-grid-aligned pixelShift（保 fractional pixelShift round-trip），
+    /// 再走 spec 字面 floor — pixelShift=0 时与 spec 字面 `floor(x/step)` 完全等价。
     public func xToIndex(_ x: CGFloat) -> Int {
-        viewport.startIndex + Int(((x - viewport.pixelShift) / viewport.geometry.candleStep).rounded(.down))
+        let alignedShift = (viewport.pixelShift * displayScale).rounded(.toNearestOrAwayFromZero) / displayScale
+        return viewport.startIndex + Int(((x - alignedShift) / viewport.geometry.candleStep).rounded(.down))
     }
 
     public func yToPrice(_ y: CGFloat) -> Double {

@@ -351,6 +351,53 @@ struct CoordinateMapperTests {
         #expect(m.indexToX(2) == 13)
     }
 
+    @Test("fractional pixelShift round-trip displayScale=1（codex R3 抢答）")
+    func fractionalPixelShiftRoundTripScale1() {
+        // codex R3 case: pixelShift=0.4, candleStep=8, displayScale=1
+        // indexToX(5) = round(40.4) = 40; xToIndex(40) 必须返回 5
+        let viewport = ChartViewport(
+            startIndex: 0, visibleCount: 100, pixelShift: 0.4,
+            geometry: ChartGeometry(candleStep: 8, candleWidth: 6, gap: 2),
+            priceRange: PriceRange(min: 100, max: 200),
+            mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600)
+        )
+        let m = CoordinateMapper(viewport: viewport, displayScale: 1)
+        let x = m.indexToX(5)
+        #expect(x == 40)
+        #expect(m.xToIndex(x) == 5)   // 不修复时 floor((40-0.4)/8) = 4
+    }
+
+    @Test("fractional pixelShift round-trip displayScale=2 全 5 个 index 都对称")
+    func fractionalPixelShiftRoundTripScale2() {
+        let viewport = ChartViewport(
+            startIndex: 0, visibleCount: 100, pixelShift: 0.4,
+            geometry: ChartGeometry(candleStep: 8, candleWidth: 6, gap: 2),
+            priceRange: PriceRange(min: 100, max: 200),
+            mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600)
+        )
+        let m = CoordinateMapper(viewport: viewport, displayScale: 2)
+        for i in [0, 1, 5, 10, 50] {
+            let x = m.indexToX(i)
+            #expect(m.xToIndex(x) == i)
+        }
+    }
+
+    @Test("near-half-pixel boundary fractional pixelShift round-trip（drift 兜底）")
+    func nearHalfPixelShiftRoundTrip() {
+        // pixelShift = 0.49（< 0.5/displayScale*step 但接近边界）
+        let viewport = ChartViewport(
+            startIndex: 0, visibleCount: 100, pixelShift: 0.49,
+            geometry: ChartGeometry(candleStep: 8, candleWidth: 6, gap: 2),
+            priceRange: PriceRange(min: 100, max: 200),
+            mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600)
+        )
+        let m = CoordinateMapper(viewport: viewport, displayScale: 1)
+        for i in [0, 1, 3, 7, 12] {
+            let x = m.indexToX(i)
+            #expect(m.xToIndex(x) == i)
+        }
+    }
+
     @Test("yToPrice 反向 priceToY")
     func yToPriceInverse() {
         let m = makeMapper(mainChartFrame: CGRect(x: 0, y: 0, width: 400, height: 600),
