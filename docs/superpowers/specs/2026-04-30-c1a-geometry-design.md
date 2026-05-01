@@ -307,9 +307,13 @@ public struct IndicatorMapper: Equatable, Sendable {
 
 12. **`frame.height == 0` 产生 NaN 传播**（R1 adversarial-reviewer I-3 抢答）：`priceToY` / `yToPrice` / `valueToY` 算 `... / frame.height` 用 frame.height 作除数。`ChartPanelFrames.split(in: 0-高 rect)` 已 char-test 产生 `mainChart.height == 0`，但 mapper 输出未 char-test。caller 责任：`ChartContainerView` `bounds` 在 attach 后非零；UI 层 layout 阶段才构造 mapper。归 caller convention，不防御。
 
+14. **`candleStep ≤ 0.5/displayScale` 物理重叠破 round-trip**（codex R5 finding #1 抢答）：当 `candleStep × displayScale ≤ 0.5` 时，相邻 indices 经 `.toNearestOrAwayFromZero` round 后落同一 display pixel（如 candleStep=0.25 displayScale=2，indexToX(1)=0.5 = indexToX(2)）。verify-and-correct 在重叠像素上选择 approx + 1 是任意 tie-breaking — round-trip 数学上不可定义。**归 caller side**（residual #11 延展）：A 股 K 线 candle 间距业务上 ≥ 1px（典型 6-12px），`candleStep × displayScale ≤ 0.5` = sub-pixel 密度，UI 层不可达。spec 字面 modules L879-881 不要求 candleStep 下界；`feedback_governance_budget_cap` 不加 precondition。
+
+15. **`PriceRange.calculate(全 0 价 candles)` → `(0, 0)` → NaN**（codex R5 finding #2 抢答）：spec 字面 plan §3 L157-158 `lo *= 0.95; hi *= 1.05` 在 lo=hi=0 时输出 (0, 0) span=0，priceToY 除零得 NaN。**归训练数据源 / E5 caller**（residual #5 延展）：A 股股价业务上 > 0（停牌除外）；E5 fixture 路径不会发出 lo=hi=0 candles。schema 层不强制 > 0 是 codex 引用证据，但 spec L142-161 字面意图通过正价数据源保非零。**residual #5 已声明"假定正价"**；#15 是其全零边界 case 显式声明，归同一 caller convention。
+
 13. **~~`ChartViewport.pixelShift` 不进 mapper~~ → R2 实施进 mapper**（codex R2 finding #1 收敛）：codex R1+R2 两轮强 push pixelShift 应在 mapper 内应用以保证 X mapping 与 hit-testing 对称（layer-transform-only 模式要求 caller 在 xToIndex 前减去 pixelShift = 认知负担 + 易错）。R2 接受：`indexToX = (i-startIndex)*step + pixelShift`；`xToIndex = startIndex + floor((x - pixelShift)/step)`。pixelShift 符号契约：> 0 = candles 右移。spec 字面（modules L908-916 仅签名；plan §3 L172-189 base case mapper body）没禁止 pixelShift 进 mapper，只是没显式写。pixelShift 作为 ChartViewport 字段存在 = 设计意图明确指向"被 mapper 消费"。+3 char tests（pixelShiftAppliedToIndexToX / pixelShiftRoundTrip / pixelShiftNegative）。
 
-十二项 + 1 项 R2 实施 = **十三项处理记录**（原 12 项 residuals + 1 项 R2 实施收敛）。
+十四项 residuals + 1 项 R2 实施 + 1 项 R4 verify-and-correct = **十六项处理记录**（原 12 + R1 #1 改实施 + R4 verify-and-correct 实施 + R5 #1 #2 抢答 residuals 14-15）。
 
 **codex R1 finding #2 fix（NonDegenerateRange.make 退化 fallback）**：modules L924 字面"返回可用的 range" = 非退化合约。原 impl `fallback: 0...0` → `lower=0, upper=0` span=0 违约。R2 修复：empty values 路径检查 fallback 是否退化（`lo == hi`），退化则走 single-value padding 路径（与 `values=[0.0]` 走的同一支），保 span > 0 不变量。新 char tests `emptyValuesDegenerateFallback`（fallback 0...0）+ `emptyValuesDegenerateNonZeroFallback`（fallback 5...5）。
 
@@ -320,6 +324,8 @@ public struct IndicatorMapper: Equatable, Sendable {
 **codex R3 finding #1 fix（fractional pixelShift round-trip）**：R2 实施 `xToIndex = startIndex + floor((x - pixelShift)/step)` 在 fractional pixelShift 下破对称。codex R3 case：pixelShift=0.4 step=8 displayScale=1：indexToX(5)=round(40.4)=40；xToIndex(40)=floor(39.6/8)=4 ❌ 应 5。**根因**：indexToX 把 (i*step+pixelShift) round 到 display grid 但 xToIndex 减的是未 round 的 pixelShift，sub-pixel 漂移堆叠破 floor 边界。**R3 修复**：`alignedShift = round(pixelShift * displayScale) / displayScale`，再 `xToIndex = startIndex + floor((x - alignedShift)/step)`。pixelShift=0 时 alignedShift=0 与 spec 字面 `floor(x/step)` 完全等价（保 7.9→0 / 8→1 spec 行为）；fractional pixelShift 下保 round-trip。+3 char tests（fractionalPixelShiftRoundTripScale1 / fractionalPixelShiftRoundTripScale2 / nearHalfPixelShiftRoundTrip）。
 
 **codex R4 finding #1 fix（fractional candleStep round-trip）— verify-and-correct 算法**：codex R4 找 fractional candleStep 破 R3 修复：pixelShift=0 step=8.2 displayScale=1，indexToX(1)=round(8.2)=8；R3 xToIndex(8)=floor((8-0)/8.2)=0 ❌ 应 1。**根因**：R3 把 pixelShift 对齐 grid 但没对齐 candleStep；fractional step 下 floor 边界跟随 step 浮动，单纯 floor 必破。**R5 修复（verify-and-correct）**：`approx = startIndex + floor((x-pixelShift)/step)`，再用 rounded indexToX(approx±1) 做边界 classifier 修正±1。算法**只用 indexToX 自身做 inverse**（不试图独立推导 grid 对齐），所以 round-trip 恒等独立于 fractional pixelShift / candleStep / displayScale。2-round Opus xhigh 对抗 review 推荐 spike + property test 验证；spike 通过：6 steps × 6 shifts × 3 scales × 5 indices = 540 round-trip 网格全过。+1 property test（fractionalCandleStepRoundTrip）。
+
+**codex R5 状态收敛 — user 选 1 (ACCEPT_R5_FINDINGS_AS_RESIDUALS)**：codex R5 又 needs-attention，2 finding：(#1) candleStep ≤ 0.5/displayScale sub-pixel 重叠破 round-trip；(#2) PriceRange.calculate(全 0 价) → (0,0) → NaN。诊断：两 finding 均落在已有 residual 同质边界（#11 candleStep=0 → #14 sub-pixel 重叠 / #5 假定正价 → #15 全 0 价显式声明）。memory `feedback_codex_plan_budget_overshoot` 5 轮必 escalate user → user 选 1 接受为 residuals。memory `feedback_governance_budget_cap` 不主动加防御。R5 verdict：accept R5 findings as residuals #14 #15，不改代码。real bugs (R3/R4) 已通过 540 round-trip 网格 property test 兜底。
 
 ## Codex review 策略
 
