@@ -91,10 +91,15 @@ struct ThemeControllerTests {
         let trait = UITraitCollection(userInterfaceStyle: .dark)
         #expect(c.resolve(trait: trait) == .light)
     }
-}
-#endif
 
-#if canImport(UIKit)
+    @Test("resolve(trait:) .dark forced 忽略 light trait")
+    func resolveDarkForced() {
+        let c = ThemeController()
+        c.displayMode = .dark
+        let trait = UITraitCollection(userInterfaceStyle: .light)
+        #expect(c.resolve(trait: trait) == .dark)
+    }
+}
 
 @Suite("AppColor constants")
 struct AppColorConstantsTests {
