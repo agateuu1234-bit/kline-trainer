@@ -157,7 +157,6 @@ public func resolveColorScheme(displayMode: DisplayMode,
 
 #if canImport(UIKit)
 import UIKit
-import Observation
 
 @MainActor
 @Observable
@@ -343,7 +342,7 @@ struct AppColorConstantsTests {
 
 合计 6 tests（ThemeController 3 + AppColor 3）。
 
-总测试数：**7（macOS 跑）+ 6（iOS `swiftc -typecheck` 验）= 13**。
+总测试数：**8（macOS 跑）+ 7（iOS `swiftc -typecheck` 验）= 15**。
 
 ## Residuals（accepted，不阻塞 PR）
 
@@ -370,7 +369,7 @@ struct AppColorConstantsTests {
 
 | 动作 | 期望 | 通过/失败 |
 |---|---|---|
-| 1. cd 至 worktree 跑 `swift test` | `Test Suite 'All tests' passed`；总数 = 108 baseline + 7 F2 = 115 tests pass / 0 warnings |  |
+| 1. cd 至 worktree 跑 `swift test` | `Test Suite 'All tests' passed`；总数 = 108 baseline + 8 F2 = 116 tests pass / 0 warnings |  |
 | 2. `swiftc -typecheck -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" -target arm64-apple-ios17.0-simulator ios/Contracts/Sources/KlineTrainerContracts/Theme/Theme.swift` 跑过 | exit 0；无错；UIKit shell + Observation + `@MainActor` 在 iOS SDK 下 typecheck 通过 |  |
 | 3. `wc -l Theme/Theme.swift` 不超 ≤120 行 prod | 实测 ≤120 |  |
 | 4. `wc -l ThemeTests.swift` 不超 ≤180 行 | 实测 ≤180 |  |
