@@ -7,6 +7,7 @@
 //   D-3：13 个 default UIColor constants（spec 字面 8 + "..."派生 5）
 //   D-4：path `Theme/` 落 Contracts package（同 C1a precedent）
 //   D-6：`DisplayMode` 复用 Models.swift L41（M0.3 已落地，case 顺序 light/dark/system，无 CaseIterable）
+//   D-7：`traitIsDark: Bool?` 三态（nil=unspecified），fix codex 复审指出 launch/preview/未挂载视图下 `.system` 错落 light bug
 
 // MARK: - 纯值层（macOS / iOS 共用，swift test 直跑）
 
@@ -17,13 +18,14 @@ public enum AppColorScheme: String, Equatable, Sendable, CaseIterable {
     case dark
 }
 
-/// 解析 displayMode + 当前 trait 的 dark 标志 → 实际生效 ColorScheme。
-/// `traitIsDark` 来源：iOS `UITraitCollection.userInterfaceStyle == .dark`，由 caller 抽离。
+/// 解析 displayMode + 当前 trait 的 dark 三态 → 实际生效 ColorScheme。
+/// `traitIsDark` 三态：true=dark / false=light / nil=unspecified（trait 未传播，
+/// 例如 launch / Preview / 未挂载视图）。.system + nil 沿 UIKit 习惯默认 .light。
 /// 纯函数，无副作用，可在任意 actor / thread 调用。
 public func resolveColorScheme(displayMode: DisplayMode,
-                               traitIsDark: Bool) -> AppColorScheme {
+                               traitIsDark: Bool?) -> AppColorScheme {
     switch displayMode {
-    case .system: return traitIsDark ? .dark : .light
+    case .system: return (traitIsDark == true) ? .dark : .light
     case .light:  return .light
     case .dark:   return .dark
     }
@@ -42,10 +44,17 @@ public final class ThemeController {
     public init() {}
 
     /// spec L824 字面：`func resolve(trait: UITraitCollection) -> ColorScheme`。
-    /// 本实现把 `ColorScheme` rename 为 `AppColorScheme`（D-1），主体逻辑全部委派给纯值层 resolver。
+    /// 本实现把 `ColorScheme` rename 为 `AppColorScheme`（D-1），主体逻辑委派给纯值层 resolver；
+    /// `.unspecified`（含 `@unknown default`）映射为 `nil` 以保留 UIKit "未传播" 语义（D-7）。
     public func resolve(trait: UITraitCollection) -> AppColorScheme {
-        resolveColorScheme(displayMode: displayMode,
-                           traitIsDark: trait.userInterfaceStyle == .dark)
+        let isDark: Bool?
+        switch trait.userInterfaceStyle {
+        case .dark:        isDark = true
+        case .light:       isDark = false
+        case .unspecified: isDark = nil
+        @unknown default:  isDark = nil
+        }
+        return resolveColorScheme(displayMode: displayMode, traitIsDark: isDark)
     }
 }
 

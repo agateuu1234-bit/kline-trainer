@@ -62,6 +62,17 @@ struct ResolveColorSchemeTests {
         #expect(resolveColorScheme(displayMode: .dark, traitIsDark: true) == .dark)
         #expect(resolveColorScheme(displayMode: .dark, traitIsDark: false) == .dark)
     }
+
+    @Test(".system + traitIsDark=nil（unspecified）→ .light（D-7 UIKit 默认）")
+    func systemUnspecified() {
+        #expect(resolveColorScheme(displayMode: .system, traitIsDark: nil) == .light)
+    }
+
+    @Test(".light/.dark forced 忽略 nil traitIsDark")
+    func forcedIgnoreNilTrait() {
+        #expect(resolveColorScheme(displayMode: .light, traitIsDark: nil) == .light)
+        #expect(resolveColorScheme(displayMode: .dark, traitIsDark: nil) == .dark)
+    }
 }
 
 #if canImport(UIKit)
@@ -98,6 +109,13 @@ struct ThemeControllerTests {
         c.displayMode = .dark
         let trait = UITraitCollection(userInterfaceStyle: .light)
         #expect(c.resolve(trait: trait) == .dark)
+    }
+
+    @Test("resolve(trait:) .system + .unspecified → .light（D-7：UIKit 未传播状态默认）")
+    func resolveSystemUnspecified() {
+        let c = ThemeController()
+        let trait = UITraitCollection(userInterfaceStyle: .unspecified)
+        #expect(c.resolve(trait: trait) == .light)
     }
 }
 
