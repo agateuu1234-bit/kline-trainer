@@ -2,7 +2,7 @@
 // Spec: kline_trainer_modules_v1.4.md §F2 (L817-838) + plan v1.5 §2 (DEA 黄)
 // Design doc: docs/superpowers/specs/2026-05-01-f2-theme-design.md
 //
-// Spec drift D-1/D-3/D-4/D-6/D-7/D-8/D-9/D-10/D-11 详见 design doc §"Spec discrepancies"。
+// Spec drift D-1/D-3/D-4/D-6/D-7/D-8/D-9/D-10/D-11/D-12 详见 design doc §"Spec discrepancies"。
 
 // MARK: - 纯值层（macOS / iOS 共用，swift test 直跑）
 
@@ -20,12 +20,16 @@ public func resolveColorScheme(displayMode: DisplayMode,
     }
 }
 
-/// platform-neutral RGBA token；13 个默认色字面 + 派生 alias 全部以本结构表达，
-/// 让 macOS swift test 直接断言 RGB 值 / alias / 通道差 contrast invariant（D-11）。
+/// platform-neutral RGBA token；13 个默认色字面 + 派生 alias 全部以本结构表达（D-11）。
+/// 公共 API：所有通道值在 init 静默 clamp 到 [0, 1]（D-12），保证 `UIColor(rgba:)`
+/// 桥接永不触发 UIKit 运行时越界。无 precondition / throws（项目 grep gate 禁用）。
 public struct AppColorRGBA: Equatable, Sendable {
     public let red: Double, green: Double, blue: Double, alpha: Double
     public init(red: Double, green: Double, blue: Double, alpha: Double = 1.0) {
-        self.red = red; self.green = green; self.blue = blue; self.alpha = alpha
+        self.red   = min(max(0, red),   1)
+        self.green = min(max(0, green), 1)
+        self.blue  = min(max(0, blue),  1)
+        self.alpha = min(max(0, alpha), 1)
     }
     public init(white: Double, alpha: Double = 1.0) {
         self.init(red: white, green: white, blue: white, alpha: alpha)

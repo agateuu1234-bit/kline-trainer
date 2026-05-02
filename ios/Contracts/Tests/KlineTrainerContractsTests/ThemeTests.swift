@@ -97,6 +97,14 @@ struct AppColorRGBAStructTests {
         let c = AppColorRGBA(red: 0.2, green: 0.5, blue: 0.4)
         #expect(abs(b.maxChannelDiff(to: c) - 0.5) < 1e-9)
     }
+
+    @Test("D-12 init clamp：越界 RGBA 值静默 clamp 到 [0,1]")
+    func clampOutOfRange() {
+        let c = AppColorRGBA(red: -0.5, green: 1.5, blue: 0.5, alpha: 2.0)
+        #expect(c.red == 0); #expect(c.green == 1); #expect(c.blue == 0.5); #expect(c.alpha == 1)
+        let w = AppColorRGBA(white: 2.0, alpha: -1.0)
+        #expect(w.red == 1); #expect(w.green == 1); #expect(w.blue == 1); #expect(w.alpha == 0)
+    }
 }
 
 @Suite("AppColorTokens 13 const + alias + RGB 字面 + contrast")
