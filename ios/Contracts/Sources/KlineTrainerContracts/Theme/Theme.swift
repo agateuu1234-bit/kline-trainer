@@ -10,6 +10,7 @@
 //   D-7：`traitIsDark: Bool?` 三态（nil=unspecified），fix codex 复审 #1 [medium] launch/preview/未挂载视图下 `.system` 错落 light bug
 //   D-8：`#if canImport(UIKit)` 块 explicit `import Observation`（@Observable 宏在 Observation 模块；UIKit 不 re-export — codex 复审 #2 [high] 防御性显式 import）
 //   D-9：`AppColor.background` 由 `.systemBackground` 改为深色 RGB 字面（chart-area 默认 bg），fix codex 复审 #2 [medium] DIF 白-on-systemBackground 白 light-mode 不可见 bug
+//   D-10：`AppColor.text` 由 `.label` 改为浅色 RGB 字面（chart-text），fix codex 复审 #3 [medium] D-9 改 dark chart bg 后 `.label` light-mode dark text dark-on-dark 不可见 regression
 
 // MARK: - 纯值层（macOS / iOS 共用，swift test 直跑）
 
@@ -83,13 +84,16 @@ public enum AppColor {
     public static let profitRed: UIColor  = AppColor.candleUp
     public static let lossGreen: UIColor  = AppColor.candleDown
 
-    // 背景 / 网格 / 文字（D-3 派生 + D-9 chart-area 深色 bg / 自定 alpha 灰 / label）
+    // 背景 / 网格 / 文字（D-3 派生 + D-9 chart-area 深色 bg / 自定 alpha 灰 + D-10 chart-text 浅色）
     /// chart-area 默认 bg；深色 RGB 确保 `macdDIF`(白) / `macdDEA`(黄) / `bollLine`(橙) 等
     /// 高亮指标在默认主题下可见。Wave 3 §夜间模式做 dynamic 时再迭代。
     /// 注：app shell / scene / nav bar 应直接用 `.systemBackground`（UIKit 自带），
     /// 不要复用本常量——本常量语义是"k 线主图 / MACD 子图绘图区"背景。
     public static let background: UIColor = UIColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
     public static let gridLine: UIColor   = UIColor(white: 0.5, alpha: 0.25)
-    public static let text: UIColor       = .label
+    /// chart-area 默认文字色（坐标轴 / label / annotation）；浅色 RGB 与 chart bg 高对比。
+    /// 注：app shell / nav bar 文字应直接用 `.label`（UIKit 自带），不复用本常量。
+    /// （D-10 修复 codex 复审 #3：原 `.label` light 模式下 dark text 在 dark chart bg 上不可见）
+    public static let text: UIColor       = UIColor(white: 0.92, alpha: 1.0)
 }
 #endif

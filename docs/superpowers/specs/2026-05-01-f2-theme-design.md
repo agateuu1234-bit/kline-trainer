@@ -70,7 +70,7 @@ enum AppColor {
 - v1.5 plan L5（macdDEA 黄色）：`MACD 线颜色从 DIF白+DEA黑 改为 DIF白+DEA黄，与需求"黄白线"一致`。
 - v1.5 plan L731 / L868 / L1104：MACD 子图 = `柱子 + DIF白线 + DEA黄线`。
 
-### Spec discrepancies（9 项 — D-1/D-2/D-3/D-4/D-5/D-6/D-7/D-8/D-9）
+### Spec discrepancies（10 项 — D-1/D-2/D-3/D-4/D-5/D-6/D-7/D-8/D-9/D-10）
 
 | # | Aspect | spec literal | Resolution |
 |---|---|---|---|
@@ -82,7 +82,8 @@ enum AppColor {
 | **D-6** | `DisplayMode` 已 M0.3 落地（Models.swift L41），F2 spec L823 `var displayMode: DisplayMode` 引用同名类型 | spec §F2 L823 字面 `var displayMode: DisplayMode = .system`（默认 `.system`）；spec §M0.3 L406 字面 `enum DisplayMode: String, Codable, Equatable, Sendable { case light, dark, system }`（**case 顺序 light/dark/system，无 CaseIterable**）| **Resolution**：F2 **复用** Models.swift `DisplayMode`，**不再 redeclare**。tests 改用 `DisplayMode(rawValue:)` mapping + 默认值 `.system` 验证（不依赖 `.allCases`，因 M0.3 baseline 不带 CaseIterable）。**记**：本 spec drift 是 plan / 三轮 design review 漏抓的现实冲突（Batch A implementer 撞上 `invalid redeclaration of 'DisplayMode'` 才发现）；reflexive lesson 留 memory `feedback_brainstorming_grep_first` —— **plan 起手必须 grep 已存在符号 / 类型名**。 |
 | **D-7** | `traitIsDark` Bool vs Bool? 三态 | spec §F2 L824 `func resolve(trait: UITraitCollection) -> ColorScheme` —— spec literal 不规范 `.unspecified` 处理 | **Resolution**：纯值层 signature 由 `traitIsDark: Bool` 改为 `traitIsDark: Bool?`（`nil` = unspecified，UIKit launch / SwiftUI Preview / 未挂载视图常态）；UIKit shell `resolve(trait:)` 用 `switch trait.userInterfaceStyle { .dark→true / .light→false / .unspecified→nil / @unknown→nil }`。`.system + nil` 沿 UIKit 习惯返回 `.light`（与 `.unspecified` 默认渲染对齐）。**触发**：codex 复审 #1 finding [medium]——旧实现 `trait.userInterfaceStyle == .dark` 把 `.unspecified` 折叠为 light，等同 explicit `.light`，导致 launch / Preview / detached view 下 dark 系统错落 light。R### 复审 fix。 |
 | **D-8** | `import Observation` 显式 | spec §F2 L817-822 字面无 import 声明 | **Resolution**：`#if canImport(UIKit)` 块内 `import UIKit` 之外**显式追加** `import Observation`。**触发**：codex 复审 #2 finding [high]——`@Observable` 宏由 Observation 模块声明；UIKit 不 re-export 该宏；当前 swiftc -emit-module 在本工具链下能解析（Swift stdlib 隐式可见），但跨工具链 / 跨 SDK 升级风险存在。**Resolution**：1 行 defensive import，消除 fragility，不影响 LOC budget。R#### 复审 fix。 |
-| **D-9** | `AppColor.background` chart-area 深色 RGB | spec L834-836 字面 `// ... 背景/网格/文字`（D-3 派生原计划 = `.systemBackground`） | **Resolution**：`AppColor.background` 由 `.systemBackground` 改为 `UIColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)` 深色字面 RGB，并加注释明确"chart-area 默认 bg；app shell / scene 应直接用 UIKit 自带 `.systemBackground`"。**触发**：codex 复审 #2 finding [medium]——原 `AppColor.background = .systemBackground`（light 模式下 = 白）+ `AppColor.macdDIF = .white`（v1.5 §2 字面）→ 默认 light 模式下 DIF 白线绘在白背景上不可见。**Resolution**：把 chart 背景从系统色改为深色 RGB 字面，DIF/DEA/bollLine 通道差恒 ≥ 0.4；新增 `chartIndicatorsContrastWithBackground` iOS-only 不变量测试断言通道差。Wave 3 §夜间模式做 dynamic provider 时再迭代。R#### 复审 fix。 |
+| **D-9** | `AppColor.background` chart-area 深色 RGB | spec L834-836 字面 `// ... 背景/网格/文字`（D-3 派生原计划 = `.systemBackground`） | **Resolution**：`AppColor.background` 由 `.systemBackground` 改为 `UIColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)` 深色字面 RGB，并加注释明确"chart-area 默认 bg；app shell / scene 应直接用 UIKit 自带 `.systemBackground`"。**触发**：codex 复审 #2 finding [medium]——原 `AppColor.background = .systemBackground`（light 模式下 = 白）+ `AppColor.macdDIF = .white`（v1.5 §2 字面）→ 默认 light 模式下 DIF 白线绘在白背景上不可见。**Resolution**：把 chart 背景从系统色改为深色 RGB 字面，DIF/DEA/bollLine 通道差恒 ≥ 0.4；新增 `chartPaletteContrastWithBackground` iOS-only 不变量测试断言通道差。Wave 3 §夜间模式做 dynamic provider 时再迭代。R#### 复审 fix。 |
+| **D-10** | `AppColor.text` chart-text 浅色 RGB | spec L834-836 字面 `// ... 背景/网格/文字`（D-3 派生原计划 = `.label`） | **Resolution**：`AppColor.text` 由 `.label` 改为 `UIColor(white: 0.92, alpha: 1.0)` 浅色字面 RGB；注释明确"chart-area 默认文字色（坐标轴/label/annotation）；app shell / nav bar 用 UIKit 自带 `.label`"。**触发**：codex 复审 #3 finding [medium]——D-9 把 `AppColor.background` 改成 fixed dark RGB 后，`AppColor.text = .label` light-mode 下解析为 dark text → 在 dark chart bg 上 dark-on-dark 不可见。**Resolution**：text 也变 fixed 浅色 RGB；contrast invariant test 扩到 light + dark 两 trait + 涵盖 text。R##### 复审 fix。 |
 
 **冲突解决原则**：spec literal 优先，但 SwiftUI 命名冲突（D-1）+ infra readiness（D-4 / D-5）+ M0.3 baseline 复用（D-6）属硬约束，必须 deviate / reuse 并落 spec drift log。
 
@@ -135,6 +136,7 @@ F2 在 `ios/Contracts/Sources/KlineTrainerContracts/Theme/Theme.swift` 单文件
 //   D-7：`traitIsDark: Bool?` 三态（nil=unspecified），fix codex 复审 #1 [medium] launch/preview/未挂载视图下 `.system` 错落 light bug
 //   D-8：`#if canImport(UIKit)` 块 explicit `import Observation`，fix codex 复审 #2 [high] 防御性显式 import
 //   D-9：`AppColor.background` 深色 RGB 字面（chart-area），fix codex 复审 #2 [medium] DIF 白-on-白 light-mode 不可见 bug
+//   D-10：`AppColor.text` 浅色 RGB 字面（chart-text），fix codex 复审 #3 [medium] D-9 后 `.label` dark-on-dark light-mode 不可见 regression
 
 import Foundation
 
@@ -210,12 +212,12 @@ public enum AppColor {
     public static let profitRed: UIColor  = AppColor.candleUp
     public static let lossGreen: UIColor  = AppColor.candleDown
 
-    // 背景 / 网格 / 文字（D-3 派生 + D-9 chart-area 深色 bg / 自定 alpha 灰 / label）
-    /// chart-area 默认 bg；深色 RGB 确保 DIF白 / DEA黄 / bollLine橙 在默认主题下可见。
-    /// 注：app shell / scene 直接用 `.systemBackground`（UIKit 自带），不复用本常量。
+    // 背景 / 网格 / 文字（D-3 派生 + D-9 chart-area 深色 bg + D-10 chart-text 浅色）
+    /// chart-area 默认 bg；深色 RGB 确保 DIF白 / DEA黄 / bollLine橙 / text浅色 在默认主题下可见。
+    /// 注：app shell / scene 直接用 `.systemBackground` / `.label`（UIKit 自带），不复用本常量。
     public static let background: UIColor = UIColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
     public static let gridLine: UIColor   = UIColor(white: 0.5, alpha: 0.25)
-    public static let text: UIColor       = .label
+    public static let text: UIColor       = UIColor(white: 0.92, alpha: 1.0)
 }
 #endif
 ```
