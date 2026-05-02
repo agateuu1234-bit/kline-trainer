@@ -120,3 +120,15 @@ struct SettingsStoreShapeTests {
         let _: () async throws -> Void = store.resetCapital
     }
 }
+
+@MainActor
+@Suite("TrainingEngineShell")
+struct TrainingEngineShellTests {
+
+    @Test("TrainingEngine 类型存在且 @MainActor 可解析")
+    func typeExists() {
+        // 本 stub 不可外部实例化（fileprivate init 触发 fatalError）；
+        // 只验类型存在，能作为 TSC 方法返回值类型
+        let _: TrainingEngine.Type = TrainingEngine.self
+    }
+}
