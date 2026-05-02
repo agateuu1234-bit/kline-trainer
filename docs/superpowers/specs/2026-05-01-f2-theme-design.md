@@ -382,6 +382,7 @@ struct AppColorConstantsTests {
 | **R11** | `@Observable` 触发的 will/didSet 自动通知不写 test；Apple Observation framework 内置覆盖 | platform 信任 |
 | **R12** | `AppColor` 全 `static let`（非 `static var { get }` per spec literal L828-835）——`let` immutable 比 `var get` 严格更强；spec 用 var 表 declaration syntax，semantic 等价 | spec literal 选择性遵循（结构性更稳） |
 | **R13** | CI 自动化 iOS gate 不在本 PR：`.github/workflows/swift-contracts-smoke.yml` 仅跑 macOS `swift test`，未把"iOS 两段式 typecheck"接入 CI step。codex 复审 #5 finding [medium] pushback；判 scope creep（治理设施而非业务实现）+ D-5 已显式 deferred 到 KlineTrainer app target 引入 package 后做。本 PR 维持 D-5 立场：人工跑 iOS gate 命令、PR Test plan 显式列两段式命令。CI 加 step 走独立治理 PR 时再做（feedback `feedback_governance_budget_cap`：业务 PR 不主动加治理设施）。R####### 接受 residual。 | 独立治理 PR / KlineTrainer app target 引入 package 后 |
+| **R14** | codex 复审 #6（R########）2 个 finding 全 reject：(a)[high] CI iOS gate = R13 已接受 residual 的复述；(b)[medium] `.unspecified` → `.light` 与 R### 复审 #1 自相矛盾——彼时 codex 自己说 "把 unspecified 折叠为 light 是 bug, 用 nil 三态"，已落地（D-7）；本轮 codex 反向说 "不该 collapse 到 light, 应该 unresolved/系统 fallback"，两轮 codex 自相矛盾。判定 codex 收敛失败（memory `feedback_codex_fractional_subpixel_bias` 模式：accepted residual / 设计选择被反复 raise）；按 memory `feedback_codex_plan_budget_overshoot` 5+ 轮 escalate + memory `feedback_openai_quota_ci_pattern` 走 user TTY override + admin merge 路径（同 PR #38 C1a precedent）。本 PR 不再修代码、不再吃 codex 复审。 | 本 PR 终态接受 |
 
 ## 8 行非 coder 验收清单
 
