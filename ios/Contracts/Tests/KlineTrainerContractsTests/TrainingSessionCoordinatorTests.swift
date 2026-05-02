@@ -132,3 +132,44 @@ struct TrainingEngineShellTests {
         let _: TrainingEngine.Type = TrainingEngine.self
     }
 }
+
+@Suite("InMemoryFakes")
+struct InMemoryFakesTests {
+
+    @Test("PreviewTrainingSetDBFactory 实例化")
+    func dbFactoryInstantiates() {
+        let _: any TrainingSetDBFactory = PreviewTrainingSetDBFactory()
+    }
+
+    @Test("InMemoryRecordRepository.listRecords 返回空 / statistics 返回零")
+    func recordRepoDefaults() throws {
+        let repo = InMemoryRecordRepository()
+        #expect(try repo.listRecords(limit: nil).isEmpty)
+        let stats = try repo.statistics()
+        #expect(stats.totalCount == 0)
+        #expect(stats.winCount == 0)
+        #expect(stats.currentCapital == 0)
+    }
+
+    @Test("InMemoryPendingTrainingRepository.loadPending 返回 nil")
+    func pendingRepoDefault() throws {
+        let repo = InMemoryPendingTrainingRepository()
+        #expect(try repo.loadPending() == nil)
+    }
+
+    @Test("InMemorySettingsDAO.loadSettings 返回 zero-value AppSettings")
+    func settingsDAODefault() throws {
+        let dao = InMemorySettingsDAO()
+        let s = try dao.loadSettings()
+        #expect(s.commissionRate == 0)
+        #expect(s.totalCapital == 0)
+        #expect(s.displayMode == .system)
+    }
+
+    @Test("InMemoryCacheManager.listAvailable 返回空 / pickRandom 返回 nil")
+    func cacheManagerDefaults() {
+        let cache = InMemoryCacheManager()
+        #expect(cache.listAvailable().isEmpty)
+        #expect(cache.pickRandom() == nil)
+    }
+}
