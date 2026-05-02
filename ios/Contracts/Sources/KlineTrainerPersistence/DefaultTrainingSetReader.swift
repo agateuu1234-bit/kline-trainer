@@ -6,6 +6,14 @@ import KlineTrainerContracts
 /// - 持有 var queue: DatabaseQueue?；close 设 nil 触发 ARC 释放（per spec L1848 "释放 DatabaseQueue"）
 /// - cached meta 在 init 时已加载，loadMeta O(1)
 /// - close 后 read 抛 AppError.internalError（caller 误用，不是 IO 故障）
+///
+/// 已知 residual（per round 1 code review MAJOR-1，accepted as design）：
+/// loadAllCandles 内 `row[col] as Type` 走 GRDB.Row 的 typed subscript，遇列类型不匹配
+/// （如 datetime 列存 TEXT、volume 列存 NULL 等）会 fatalError 而非抛 .dbCorrupted。
+/// 当前防线：①后端 backend/sql/training_set_schema_v1.sql 强制 NOT NULL + 类型约束；
+/// ②backend writer 是受信任来源，不会写入类型错乱数据；③SQLITE_NOTADB / SQLITE_CORRUPT
+/// （磁盘损坏场景）已经走 PersistenceErrorMapping 翻译为 .dbCorrupted。
+/// 列类型 silent 错乱属于"writer 受 trust 假设被打破"的极端场景，不在本 PR 防御 scope。
 public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Sendable {
     private var queue: DatabaseQueue?
     private let cachedMeta: TrainingSetMeta

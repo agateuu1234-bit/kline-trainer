@@ -1303,3 +1303,8 @@ MINOR（9 应用）：
 - meta 多行不抛 dbCorrupted，按 Postel 取首行（Design Decision §3）
 - klines 表为空不阻塞 openAndVerify（Design Decision §4）
 - close 后 reader 实例本身仍存活直到 caller 放掉引用（queue 已通过 nil 触发 ARC 释放，但 reader 是 final class 由 caller 持有）—— 与 spec L1848 "释放 DatabaseQueue" 字面一致
+
+**7. Round 1 code review residual（accepted as design）：**
+- **MAJOR-1**：`DefaultTrainingSetReader.loadAllCandles` 内 `row[col] as Type` 走 GRDB.Row 的 typed subscript（内部 try!）。列类型不匹配（如 datetime 列被写为 TEXT、volume 列存 NULL）→ fatalError 而非 .dbCorrupted。**接受理由**：①后端 backend/sql/training_set_schema_v1.sql 强制 NOT NULL + 类型约束；②backend writer 是受信任来源；③SQLITE_NOTADB / SQLITE_CORRUPT 已经走 PersistenceErrorMapping 翻译为 .dbCorrupted。列类型 silent 错乱属于"writer trust 假设被打破"的极端场景，不在本 PR 防御 scope。已在 `DefaultTrainingSetReader.swift` 类文档加 5 行注释明示。
+- **MAJOR-2**：`PersistenceErrorMapping.translate` 的 `SQLITE_CANTOPEN` 但**文件存在**分支（如权限拒绝、沙盒限制）落地为 `.persistence(.ioError("sqlite_cantopen"))`，**无测试覆盖**。**接受理由**：iOS sandbox 下罕见；security-scoped resource 过期是已知 edge case；测试需 mock 文件系统权限 platform-specific 难度高。Production 落地后若发现真实命中可补回归测试；目前作为 untested branch 接受。
+- **MAJOR-3 (已修)**：验收清单 #2-#5 / #6 关系对非 coder 用户不直观；已在验收 doc 加阅读说明 preamble 澄清"#2-#5 是 per-suite filter，#6 是并集"。

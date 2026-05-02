@@ -2,6 +2,12 @@
 
 > 用户在 macOS Terminal cd 到 `/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts` 后逐条执行。
 
+> **阅读说明**：
+> - **第 1 步**：编译验证。
+> - **第 2-5 步**：每步分别跑一个测试套（fixture / factory / reader / integration），每步独立查 PASS。
+> - **第 6 步**：跑全仓 `swift test`，应等于第 2-5 步覆盖的 15 项 + 历史 KlineTrainerContractsTests 的并集。
+> - **第 7-9 步**：架构 invariant 检查（grep / find），确认 GRDB 不污染契约层、Persistence 模块边界翻译错误正确。
+
 ## 动作 / 预期输出 / 是否通过
 
 | # | 动作 | 预期输出 | 通过判定 |
