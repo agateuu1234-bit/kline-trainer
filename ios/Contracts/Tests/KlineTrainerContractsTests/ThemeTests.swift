@@ -3,7 +3,6 @@ import Foundation
 @testable import KlineTrainerContracts
 
 // `DisplayMode` 在 Models.swift（M0.3）已定义；F2 测试角度复用 baseline，不 redeclare（D-6）。
-// M0.3 baseline 不带 CaseIterable，所以用 rawValue mapping 覆盖 3 case。
 @Suite("DisplayMode (F2 视角；类型在 M0.3 Models.swift)")
 struct DisplayModeF2Tests {
 
@@ -75,6 +74,76 @@ struct ResolveColorSchemeTests {
     }
 }
 
+// MARK: - AppColorRGBA / AppColorTokens 纯值断言（D-11 — macOS swift test 直跑，
+// 不再依赖 UIKit-only typecheck-only block；assertion 真实执行）
+
+@Suite("AppColorRGBA struct 不变量")
+struct AppColorRGBAStructTests {
+
+    @Test("init 默认 alpha=1.0 + init(white:) 派生 R=G=B + Equatable")
+    func initAndEquality() {
+        let c1 = AppColorRGBA(red: 0.1, green: 0.2, blue: 0.3)
+        #expect(c1.alpha == 1.0)
+        let c2 = AppColorRGBA(white: 0.5, alpha: 0.25)
+        #expect(c2.red == 0.5); #expect(c2.green == 0.5); #expect(c2.blue == 0.5); #expect(c2.alpha == 0.25)
+        #expect(AppColorRGBA(red: 0.5, green: 0.5, blue: 0.5) == AppColorRGBA(white: 0.5))
+    }
+
+    @Test("maxChannelDiff：self == 0；通道差取最大值")
+    func maxChannelDiffLogic() {
+        let a = AppColorRGBA(red: 0.5, green: 0.5, blue: 0.5)
+        #expect(a.maxChannelDiff(to: a) == 0)
+        let b = AppColorRGBA(red: 0.1, green: 0.5, blue: 0.9)
+        let c = AppColorRGBA(red: 0.2, green: 0.5, blue: 0.4)
+        #expect(abs(b.maxChannelDiff(to: c) - 0.5) < 1e-9)
+    }
+}
+
+@Suite("AppColorTokens 13 const + alias + RGB 字面 + contrast")
+struct AppColorTokensTests {
+
+    @Test("v1.5 §2 MACD：DIF 白 (1,1,1) / DEA 黄 (1.00, 0.84, 0.20)")
+    func macdLiterals() {
+        #expect(AppColorTokens.macdDIF == AppColorRGBA(white: 1.0))
+        let dea = AppColorTokens.macdDEA
+        #expect(abs(dea.red - 1.00) < 0.01)
+        #expect(abs(dea.green - 0.84) < 0.01)
+        #expect(abs(dea.blue - 0.20) < 0.01)
+    }
+
+    @Test("D-3 派生不变量：MACD bar / 盈亏 与 candle 同色簇")
+    func derivedAlias() {
+        #expect(AppColorTokens.macdBarPositive == AppColorTokens.candleUp)
+        #expect(AppColorTokens.macdBarNegative == AppColorTokens.candleDown)
+        #expect(AppColorTokens.profitRed == AppColorTokens.candleUp)
+        #expect(AppColorTokens.lossGreen == AppColorTokens.candleDown)
+    }
+
+    /// D-9/D-10 contrast 不变量：高亮指标 + 文字 vs chart bg 任一通道差 ≥ 0.4。
+    @Test("D-9/D-10 contrast：DIF/DEA/bollLine/text vs background 通道差 ≥ 0.4")
+    func chartPaletteContrastWithBackground() {
+        let bg = AppColorTokens.background
+        for c in [AppColorTokens.macdDIF, AppColorTokens.macdDEA,
+                  AppColorTokens.bollLine, AppColorTokens.text] {
+            #expect(c.maxChannelDiff(to: bg) >= 0.4)
+        }
+    }
+
+    @Test("13 token 计数")
+    func thirteenTokens() {
+        let all: [AppColorRGBA] = [
+            AppColorTokens.candleUp, AppColorTokens.candleDown, AppColorTokens.ma66,
+            AppColorTokens.bollLine, AppColorTokens.macdDIF, AppColorTokens.macdDEA,
+            AppColorTokens.macdBarPositive, AppColorTokens.macdBarNegative,
+            AppColorTokens.profitRed, AppColorTokens.lossGreen,
+            AppColorTokens.background, AppColorTokens.gridLine, AppColorTokens.text,
+        ]
+        #expect(all.count == 13)
+    }
+}
+
+// MARK: - UIKit shell 层 tests（`#if canImport(UIKit)` gated；macOS 跳过；iOS 探针法 typecheck）
+
 #if canImport(UIKit)
 import UIKit
 
@@ -119,61 +188,34 @@ struct ThemeControllerTests {
     }
 }
 
-@Suite("AppColor constants")
-struct AppColorConstantsTests {
+@Suite("UIColor(rgba:) bridge + AppColor 13 const")
+struct AppColorBridgeTests {
 
-    @Test("13 default UIColor 全 non-nil + resolveColor 不崩")
-    func allConstantsResolvable() {
-        let allColors: [UIColor] = [
-            AppColor.candleUp, AppColor.candleDown,
-            AppColor.ma66, AppColor.bollLine,
-            AppColor.macdDIF, AppColor.macdDEA,
-            AppColor.macdBarPositive, AppColor.macdBarNegative,
-            AppColor.profitRed, AppColor.lossGreen,
-            AppColor.background, AppColor.gridLine, AppColor.text,
+    @Test("UIColor(rgba:) 桥接保持通道值 + 13 const 全 = token 桥接（D-11）")
+    func bridgeFidelityAndAllConstants() {
+        let pairs: [(UIColor, AppColorRGBA)] = [
+            (AppColor.candleUp, AppColorTokens.candleUp),
+            (AppColor.candleDown, AppColorTokens.candleDown),
+            (AppColor.ma66, AppColorTokens.ma66),
+            (AppColor.bollLine, AppColorTokens.bollLine),
+            (AppColor.macdDIF, AppColorTokens.macdDIF),
+            (AppColor.macdDEA, AppColorTokens.macdDEA),
+            (AppColor.macdBarPositive, AppColorTokens.macdBarPositive),
+            (AppColor.macdBarNegative, AppColorTokens.macdBarNegative),
+            (AppColor.profitRed, AppColorTokens.profitRed),
+            (AppColor.lossGreen, AppColorTokens.lossGreen),
+            (AppColor.background, AppColorTokens.background),
+            (AppColor.gridLine, AppColorTokens.gridLine),
+            (AppColor.text, AppColorTokens.text),
         ]
-        #expect(allColors.count == 13)
-        let trait = UITraitCollection(userInterfaceStyle: .light)
-        for c in allColors {
-            _ = c.resolvedColor(with: trait)
-        }
-    }
-
-    @Test("v1.5 §2 MACD：DIF 白 / DEA 黄（RGB 字面）")
-    func macdColorsLiteral() {
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        AppColor.macdDIF.getRed(&r, green: &g, blue: &b, alpha: &a)
-        #expect(r == 1.0); #expect(g == 1.0); #expect(b == 1.0); #expect(a == 1.0)
-
-        AppColor.macdDEA.getRed(&r, green: &g, blue: &b, alpha: &a)
-        #expect(abs(r - 1.00) < 0.01)
-        #expect(abs(g - 0.84) < 0.01)
-        #expect(abs(b - 0.20) < 0.01)
-    }
-
-    @Test("D-3 派生不变量：MACD bar / 盈亏 与 candle 同色簇")
-    func derivedColorsAlias() {
-        #expect(AppColor.macdBarPositive == AppColor.candleUp)
-        #expect(AppColor.macdBarNegative == AppColor.candleDown)
-        #expect(AppColor.profitRed == AppColor.candleUp)
-        #expect(AppColor.lossGreen == AppColor.candleDown)
-    }
-
-    /// D-9/D-10 contrast 不变量：高亮指标 + 文字 vs chart bg 任一通道差 ≥ 0.4，light/dark 都成立。
-    @Test("D-9/D-10 contrast：DIF/DEA/bollLine/text vs background 通道差 ≥ 0.4（light + dark trait）")
-    func chartPaletteContrastWithBackground() {
-        for style in [UIUserInterfaceStyle.light, .dark] {
-            let trait = UITraitCollection(userInterfaceStyle: style)
-            let bg = AppColor.background.resolvedColor(with: trait)
-            var br: CGFloat = 0, bgg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
-            bg.getRed(&br, green: &bgg, blue: &bb, alpha: &ba)
-
-            for c in [AppColor.macdDIF, AppColor.macdDEA, AppColor.bollLine, AppColor.text] {
-                var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-                c.resolvedColor(with: trait).getRed(&r, green: &g, blue: &b, alpha: &a)
-                let maxDiff = max(abs(r - br), abs(g - bgg), abs(b - bb))
-                #expect(maxDiff >= 0.4)
-            }
+        #expect(pairs.count == 13)
+        for (ui, rgba) in pairs {
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            ui.getRed(&r, green: &g, blue: &b, alpha: &a)
+            #expect(abs(Double(r) - rgba.red) < 0.01)
+            #expect(abs(Double(g) - rgba.green) < 0.01)
+            #expect(abs(Double(b) - rgba.blue) < 0.01)
+            #expect(abs(Double(a) - rgba.alpha) < 0.01)
         }
     }
 }

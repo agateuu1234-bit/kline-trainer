@@ -70,7 +70,7 @@ enum AppColor {
 - v1.5 plan L5（macdDEA 黄色）：`MACD 线颜色从 DIF白+DEA黑 改为 DIF白+DEA黄，与需求"黄白线"一致`。
 - v1.5 plan L731 / L868 / L1104：MACD 子图 = `柱子 + DIF白线 + DEA黄线`。
 
-### Spec discrepancies（10 项 — D-1/D-2/D-3/D-4/D-5/D-6/D-7/D-8/D-9/D-10）
+### Spec discrepancies（11 项 — D-1/D-2/D-3/D-4/D-5/D-6/D-7/D-8/D-9/D-10/D-11）
 
 | # | Aspect | spec literal | Resolution |
 |---|---|---|---|
@@ -84,6 +84,7 @@ enum AppColor {
 | **D-8** | `import Observation` 显式 | spec §F2 L817-822 字面无 import 声明 | **Resolution**：`#if canImport(UIKit)` 块内 `import UIKit` 之外**显式追加** `import Observation`。**触发**：codex 复审 #2 finding [high]——`@Observable` 宏由 Observation 模块声明；UIKit 不 re-export 该宏；当前 swiftc -emit-module 在本工具链下能解析（Swift stdlib 隐式可见），但跨工具链 / 跨 SDK 升级风险存在。**Resolution**：1 行 defensive import，消除 fragility，不影响 LOC budget。R#### 复审 fix。 |
 | **D-9** | `AppColor.background` chart-area 深色 RGB | spec L834-836 字面 `// ... 背景/网格/文字`（D-3 派生原计划 = `.systemBackground`） | **Resolution**：`AppColor.background` 由 `.systemBackground` 改为 `UIColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)` 深色字面 RGB，并加注释明确"chart-area 默认 bg；app shell / scene 应直接用 UIKit 自带 `.systemBackground`"。**触发**：codex 复审 #2 finding [medium]——原 `AppColor.background = .systemBackground`（light 模式下 = 白）+ `AppColor.macdDIF = .white`（v1.5 §2 字面）→ 默认 light 模式下 DIF 白线绘在白背景上不可见。**Resolution**：把 chart 背景从系统色改为深色 RGB 字面，DIF/DEA/bollLine 通道差恒 ≥ 0.4；新增 `chartPaletteContrastWithBackground` iOS-only 不变量测试断言通道差。Wave 3 §夜间模式做 dynamic provider 时再迭代。R#### 复审 fix。 |
 | **D-10** | `AppColor.text` chart-text 浅色 RGB | spec L834-836 字面 `// ... 背景/网格/文字`（D-3 派生原计划 = `.label`） | **Resolution**：`AppColor.text` 由 `.label` 改为 `UIColor(white: 0.92, alpha: 1.0)` 浅色字面 RGB；注释明确"chart-area 默认文字色（坐标轴/label/annotation）；app shell / nav bar 用 UIKit 自带 `.label`"。**触发**：codex 复审 #3 finding [medium]——D-9 把 `AppColor.background` 改成 fixed dark RGB 后，`AppColor.text = .label` light-mode 下解析为 dark text → 在 dark chart bg 上 dark-on-dark 不可见。**Resolution**：text 也变 fixed 浅色 RGB；contrast invariant test 扩到 light + dark 两 trait + 涵盖 text。R##### 复审 fix。 |
+| **D-11** | 13 默认色 platform-neutral 化（`AppColorRGBA` + `AppColorTokens` + `UIColor(rgba:)` 薄 bridge） | spec L827-836 仅声明 `static var X: UIColor { get }` API，未约束实现层 | **Resolution**：把 13 个默认色字面值（含 alias 派生）从 UIKit-only `AppColor` 移到纯值层 `AppColorTokens`（值类型 `AppColorRGBA(r,g,b,a)`，含 `init(white:alpha:)` 简记 + `maxChannelDiff(to:)` contrast 算子）；UIKit shell `AppColor.X = UIColor(rgba: AppColorTokens.X)` 一行薄 bridge。tests 把 contrast / alias / RGB 字面 / 13 计数全搬到纯值层，macOS swift test **真实执行 assertion**；UIKit 端只剩 1 个 bridge fidelity test 验 `UIColor(rgba:)` 通道保真。**触发**：codex 复审 #4 finding [medium]——前轮 contrast / alias / DIF·DEA RGB / 13 计数 assertion 全在 `#if canImport(UIKit)` 块内，macOS swift test 跳过、iOS 探针只 typecheck 不执行；regression（如 white-on-white）能过所有现有 gate。**Resolution**：纯值层 macOS 直驱断言，bridge 层最薄。R###### 复审 fix。 |
 
 **冲突解决原则**：spec literal 优先，但 SwiftUI 命名冲突（D-1）+ infra readiness（D-4 / D-5）+ M0.3 baseline 复用（D-6）属硬约束，必须 deviate / reuse 并落 spec drift log。
 
@@ -103,7 +104,7 @@ F2 在 `ios/Contracts/Sources/KlineTrainerContracts/Theme/Theme.swift` 单文件
 
 **Sub-task 1（单 PR / 单 sub-item）**：F2 4 类型 + 1 函数 + 默认色常量 + tests
 - 文件 1：`ios/Contracts/Sources/KlineTrainerContracts/Theme/Theme.swift`（≤120 行 prod）
-- 文件 2：`ios/Contracts/Tests/KlineTrainerContractsTests/ThemeTests.swift`（≤180 行；纯值层 + UIKit shell 段分块）
+- 文件 2：`ios/Contracts/Tests/KlineTrainerContractsTests/ThemeTests.swift`（≤250 行；纯值层 + UIKit shell 段分块）
 
 **子项总数 1**（≤3 硬上限）；**prod 估 ~95 LOC**（≤500 硬上限留余裕）。
 
@@ -388,10 +389,10 @@ struct AppColorConstantsTests {
 
 | 动作 | 期望 | 通过/失败 |
 |---|---|---|
-| 1. cd 至 worktree 跑 `swift test` | `Test Suite 'All tests' passed`；总数 = 108 baseline + 10 F2 = 118 tests pass / 0 warnings |  |
+| 1. cd 至 worktree 跑 `swift test` | `Test Suite 'All tests' passed`；总数 = 108 baseline + 16 F2 = 124 tests pass / 0 warnings |  |
 | 2. iOS 两段式 typecheck 跑过：(a) `swiftc -emit-module -enable-testing` 整个 KlineTrainerContracts prod 集 → 得 `MODULE_OK`；(b) `swiftc -typecheck` ThemeTests.swift（`-I` 指向 emit 出的 swiftmodule，`-F` 指向 `iPhoneSimulator.platform/.../Frameworks`，`-plugin-path` 指向 `XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing`）→ 得 `TESTS_TYPECHECK_OK` | 两步均 exit 0；无错；UIKit shell + Observation + `@MainActor` + AppColor 13 const + ThemeTests 7 个 iOS-only test 引用全部在 iOS SDK 下 typecheck 通过 |  |
 | 3. `wc -l Theme/Theme.swift` 不超 ≤120 行 prod | 实测 ≤120 |  |
-| 4. `wc -l ThemeTests.swift` 不超 ≤180 行 | 实测 ≤180 |  |
+| 4. `wc -l ThemeTests.swift` 不超 ≤250 行 | 实测 ≤180 |  |
 | 5. `grep -rnE "precondition\|fatalError\|throws\|assertionFailure" Theme/` 0 命中 | 0 命中 |  |
 | 6. `grep -rnE "import UIKit\|import SwiftUI\|import Observation" Theme/Theme.swift` 命中只在 `#if canImport(UIKit)` 段内（人工核位） | 命中行号全在 `#if … #endif` 之间 |  |
 
