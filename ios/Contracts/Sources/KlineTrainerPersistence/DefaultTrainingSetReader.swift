@@ -23,9 +23,48 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
     }
 
     public func loadAllCandles() throws -> [Period: [KLineCandle]] {
-        // Task 4 实现
-        _ = try ensureOpen()
-        return [:]
+        let q = try ensureOpen()
+        do {
+            let rows = try q.read { db in
+                try Row.fetchAll(db, sql: """
+                SELECT period, datetime, open, high, low, close, volume,
+                       amount, ma66, boll_upper, boll_mid, boll_lower,
+                       macd_diff, macd_dea, macd_bar, global_index, end_global_index
+                FROM klines
+                ORDER BY period, end_global_index
+                """)
+            }
+            var result: [Period: [KLineCandle]] = [:]
+            for row in rows {
+                let rawPeriod: String = row["period"]
+                guard let period = Period(rawValue: rawPeriod) else {
+                    throw AppError.persistence(.dbCorrupted)
+                }
+                let candle = KLineCandle(
+                    period: period,
+                    datetime: row["datetime"] as Int64,
+                    open: row["open"] as Double,
+                    high: row["high"] as Double,
+                    low: row["low"] as Double,
+                    close: row["close"] as Double,
+                    volume: row["volume"] as Int64,
+                    amount: row["amount"] as Double?,
+                    ma66: row["ma66"] as Double?,
+                    bollUpper: row["boll_upper"] as Double?,
+                    bollMid: row["boll_mid"] as Double?,
+                    bollLower: row["boll_lower"] as Double?,
+                    macdDiff: row["macd_diff"] as Double?,
+                    macdDea: row["macd_dea"] as Double?,
+                    macdBar: row["macd_bar"] as Double?,
+                    globalIndex: row["global_index"] as Int?,
+                    endGlobalIndex: row["end_global_index"] as Int
+                )
+                result[period, default: []].append(candle)
+            }
+            return result
+        } catch {
+            throw PersistenceErrorMapping.translate(error)
+        }
     }
 
     public func close() {
