@@ -158,5 +158,22 @@ struct AppColorConstantsTests {
         #expect(AppColor.profitRed == AppColor.candleUp)
         #expect(AppColor.lossGreen == AppColor.candleDown)
     }
+
+    /// D-9 contrast 不变量：高亮指标必须与 chart-area 背景区分（任一通道差 ≥ 0.4）。
+    /// fix codex 复审 #2 [medium] DIF 白-on-systemBackground 白 light-mode 不可见 bug。
+    @Test("D-9 contrast：DIF/DEA/bollLine vs background 通道差 ≥ 0.4")
+    func chartIndicatorsContrastWithBackground() {
+        let trait = UITraitCollection(userInterfaceStyle: .light)
+        let bg = AppColor.background.resolvedColor(with: trait)
+        var br: CGFloat = 0, bgg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
+        bg.getRed(&br, green: &bgg, blue: &bb, alpha: &ba)
+
+        for c in [AppColor.macdDIF, AppColor.macdDEA, AppColor.bollLine] {
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            c.resolvedColor(with: trait).getRed(&r, green: &g, blue: &b, alpha: &a)
+            let maxDiff = max(abs(r - br), abs(g - bgg), abs(b - bb))
+            #expect(maxDiff >= 0.4)
+        }
+    }
 }
 #endif

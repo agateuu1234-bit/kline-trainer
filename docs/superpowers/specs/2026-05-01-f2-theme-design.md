@@ -70,7 +70,7 @@ enum AppColor {
 - v1.5 plan L5（macdDEA 黄色）：`MACD 线颜色从 DIF白+DEA黑 改为 DIF白+DEA黄，与需求"黄白线"一致`。
 - v1.5 plan L731 / L868 / L1104：MACD 子图 = `柱子 + DIF白线 + DEA黄线`。
 
-### Spec discrepancies（5 项）
+### Spec discrepancies（9 项 — D-1/D-2/D-3/D-4/D-5/D-6/D-7/D-8/D-9）
 
 | # | Aspect | spec literal | Resolution |
 |---|---|---|---|
@@ -81,6 +81,8 @@ enum AppColor {
 | **D-5** | iOS Simulator gate 不可达 | §15.4 暗示 "F1/F2/C1 完成 §15.1 编译验证" | bare SwiftPM scheme `xcodebuild ... -destination 'generic/platform=iOS Simulator' build` 当前 fail（"Supported platforms ... empty"——因 KlineTrainer Xcode app target 未引用 KlineTrainerContracts package，scheme 无 iOS run destination）。**Resolution**：本 PR 用 `swiftc -typecheck -sdk iphonesimulator -target arm64-apple-ios17.0-simulator Theme.swift` 单文件 typecheck 探针 — 验 UIKit / Observation / `@MainActor` 在 iOS SDK 下解析 + 类型检查通过；不依赖 SwiftPM Xcode integration。`xcodebuild` 完整 iOS build 留待 KlineTrainer app target 引入 `KlineTrainerContracts` package 后做（独立 PR），届时同步关 D-4 / D-5。 |
 | **D-6** | `DisplayMode` 已 M0.3 落地（Models.swift L41），F2 spec L823 `var displayMode: DisplayMode` 引用同名类型 | spec §F2 L823 字面 `var displayMode: DisplayMode = .system`（默认 `.system`）；spec §M0.3 L406 字面 `enum DisplayMode: String, Codable, Equatable, Sendable { case light, dark, system }`（**case 顺序 light/dark/system，无 CaseIterable**）| **Resolution**：F2 **复用** Models.swift `DisplayMode`，**不再 redeclare**。tests 改用 `DisplayMode(rawValue:)` mapping + 默认值 `.system` 验证（不依赖 `.allCases`，因 M0.3 baseline 不带 CaseIterable）。**记**：本 spec drift 是 plan / 三轮 design review 漏抓的现实冲突（Batch A implementer 撞上 `invalid redeclaration of 'DisplayMode'` 才发现）；reflexive lesson 留 memory `feedback_brainstorming_grep_first` —— **plan 起手必须 grep 已存在符号 / 类型名**。 |
 | **D-7** | `traitIsDark` Bool vs Bool? 三态 | spec §F2 L824 `func resolve(trait: UITraitCollection) -> ColorScheme` —— spec literal 不规范 `.unspecified` 处理 | **Resolution**：纯值层 signature 由 `traitIsDark: Bool` 改为 `traitIsDark: Bool?`（`nil` = unspecified，UIKit launch / SwiftUI Preview / 未挂载视图常态）；UIKit shell `resolve(trait:)` 用 `switch trait.userInterfaceStyle { .dark→true / .light→false / .unspecified→nil / @unknown→nil }`。`.system + nil` 沿 UIKit 习惯返回 `.light`（与 `.unspecified` 默认渲染对齐）。**触发**：codex 复审 #1 finding [medium]——旧实现 `trait.userInterfaceStyle == .dark` 把 `.unspecified` 折叠为 light，等同 explicit `.light`，导致 launch / Preview / detached view 下 dark 系统错落 light。R### 复审 fix。 |
+| **D-8** | `import Observation` 显式 | spec §F2 L817-822 字面无 import 声明 | **Resolution**：`#if canImport(UIKit)` 块内 `import UIKit` 之外**显式追加** `import Observation`。**触发**：codex 复审 #2 finding [high]——`@Observable` 宏由 Observation 模块声明；UIKit 不 re-export 该宏；当前 swiftc -emit-module 在本工具链下能解析（Swift stdlib 隐式可见），但跨工具链 / 跨 SDK 升级风险存在。**Resolution**：1 行 defensive import，消除 fragility，不影响 LOC budget。R#### 复审 fix。 |
+| **D-9** | `AppColor.background` chart-area 深色 RGB | spec L834-836 字面 `// ... 背景/网格/文字`（D-3 派生原计划 = `.systemBackground`） | **Resolution**：`AppColor.background` 由 `.systemBackground` 改为 `UIColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)` 深色字面 RGB，并加注释明确"chart-area 默认 bg；app shell / scene 应直接用 UIKit 自带 `.systemBackground`"。**触发**：codex 复审 #2 finding [medium]——原 `AppColor.background = .systemBackground`（light 模式下 = 白）+ `AppColor.macdDIF = .white`（v1.5 §2 字面）→ 默认 light 模式下 DIF 白线绘在白背景上不可见。**Resolution**：把 chart 背景从系统色改为深色 RGB 字面，DIF/DEA/bollLine 通道差恒 ≥ 0.4；新增 `chartIndicatorsContrastWithBackground` iOS-only 不变量测试断言通道差。Wave 3 §夜间模式做 dynamic provider 时再迭代。R#### 复审 fix。 |
 
 **冲突解决原则**：spec literal 优先，但 SwiftUI 命名冲突（D-1）+ infra readiness（D-4 / D-5）+ M0.3 baseline 复用（D-6）属硬约束，必须 deviate / reuse 并落 spec drift log。
 
@@ -94,7 +96,7 @@ F2 在 `ios/Contracts/Sources/KlineTrainerContracts/Theme/Theme.swift` 单文件
 `KlineTrainerContractsTests/ThemeTests.swift` 同样按段拆：
 
 - macOS swift test 跑：纯值层 tests（DisplayMode rawValue + rawValue init 2、AppColorScheme cases + equality 2、resolveColorScheme 6-cell 矩阵 6 含 systemUnspecified + forcedIgnoreNilTrait — D-7）—— **共 10 tests**。
-- 仅 `swiftc -typecheck` iOS SDK gate 验：UIKit shell tests（ThemeController.displayMode 默认值 + 四态 resolve（system+dark / light forced / dark forced / system+unspecified — D-7）= 5、AppColor 13 const 全 resolvable / DIF·DEA RGB 字面 / 派生不变量 = 3）—— **共 8 tests**。本 PR 不强制跑 iOS Simulator runtime test；以 `swiftc -typecheck`（prod 全集 emit-module + tests 文件 typecheck，含 Testing macros plugin）编译 + 类型检查为充分条件（D-5）。
+- 仅 `swiftc -typecheck` iOS SDK gate 验：UIKit shell tests（ThemeController.displayMode 默认值 + 四态 resolve（system+dark / light forced / dark forced / system+unspecified — D-7）= 5、AppColor 13 const 全 resolvable / DIF·DEA RGB 字面 / 派生不变量 = 4 含 R#### contrast 不变量）—— **共 9 tests**。本 PR 不强制跑 iOS Simulator runtime test；以 `swiftc -typecheck`（prod 全集 emit-module + tests 文件 typecheck，含 Testing macros plugin）编译 + 类型检查为充分条件（D-5）。
 
 ## Scope
 
@@ -131,6 +133,8 @@ F2 在 `ios/Contracts/Sources/KlineTrainerContracts/Theme/Theme.swift` 单文件
 //   D-4：path `Theme/` 落 Contracts package（同 C1a precedent）
 //   D-6：`DisplayMode` 复用 Models.swift L41（M0.3 已落地，case 顺序 light/dark/system，无 CaseIterable）
 //   D-7：`traitIsDark: Bool?` 三态（nil=unspecified），fix codex 复审 #1 [medium] launch/preview/未挂载视图下 `.system` 错落 light bug
+//   D-8：`#if canImport(UIKit)` 块 explicit `import Observation`，fix codex 复审 #2 [high] 防御性显式 import
+//   D-9：`AppColor.background` 深色 RGB 字面（chart-area），fix codex 复审 #2 [medium] DIF 白-on-白 light-mode 不可见 bug
 
 import Foundation
 
@@ -160,6 +164,7 @@ public func resolveColorScheme(displayMode: DisplayMode,
 
 #if canImport(UIKit)
 import UIKit
+import Observation  // D-8 defensive: Observable 宏在 Observation 模块；UIKit 不 re-export
 
 @MainActor
 @Observable
@@ -205,8 +210,10 @@ public enum AppColor {
     public static let profitRed: UIColor  = AppColor.candleUp
     public static let lossGreen: UIColor  = AppColor.candleDown
 
-    // 背景 / 网格 / 文字（D-3 派生：systemBackground / separator / label）
-    public static let background: UIColor = .systemBackground
+    // 背景 / 网格 / 文字（D-3 派生 + D-9 chart-area 深色 bg / 自定 alpha 灰 / label）
+    /// chart-area 默认 bg；深色 RGB 确保 DIF白 / DEA黄 / bollLine橙 在默认主题下可见。
+    /// 注：app shell / scene 直接用 `.systemBackground`（UIKit 自带），不复用本常量。
+    public static let background: UIColor = UIColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
     public static let gridLine: UIColor   = UIColor(white: 0.5, alpha: 0.25)
     public static let text: UIColor       = .label
 }
@@ -274,7 +281,7 @@ struct ResolveColorSchemeTests {
 
 合计 8 tests（DisplayMode 2 + AppColorScheme 2 + resolveColorScheme 4，共 4-cell 矩阵 + 2 forced 双 #expect）。
 
-### UIKit shell tests（`#if canImport(UIKit)` gated；macOS swift test 跳过；iOS 两段式 swiftc 编译 + 类型验证；8 个 — R### +1 D-7 unspecified）
+### UIKit shell tests（`#if canImport(UIKit)` gated；macOS swift test 跳过；iOS 两段式 swiftc 编译 + 类型验证；9 个 — R### +1 D-7 unspecified / R#### +1 D-9 contrast）
 
 ```swift
 #if canImport(UIKit)
@@ -350,7 +357,7 @@ struct AppColorConstantsTests {
 #endif
 ```
 
-合计 7 tests（ThemeController 5 含 dark-forced + AppColor 3）。
+合计 7 tests（ThemeController 5 含 dark-forced + AppColor 4 — R#### +contrast）。
 
 总测试数：**8（macOS 跑）+ 7（iOS `swiftc -typecheck` 验）= 15**。
 
