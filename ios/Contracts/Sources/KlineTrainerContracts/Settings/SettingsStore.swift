@@ -38,3 +38,14 @@ public final class SettingsStore {
                     minCommissionEnabled: settings.minCommissionEnabled)
     }
 }
+
+// MARK: - Preview Fixture (spec line 1689-1700 配套；依赖 InMemorySettingsDAO from PreviewFakes)
+
+#if DEBUG
+@MainActor
+extension SettingsStore {
+    public static func preview() -> SettingsStore {
+        SettingsStore(settingsDAO: InMemorySettingsDAO())
+    }
+}
+#endif

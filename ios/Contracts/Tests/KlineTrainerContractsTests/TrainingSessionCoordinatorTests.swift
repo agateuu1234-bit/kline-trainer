@@ -173,3 +173,78 @@ struct InMemoryFakesTests {
         #expect(cache.pickRandom() == nil)
     }
 }
+
+@MainActor
+@Suite("TrainingSessionCoordinatorShape")
+struct TrainingSessionCoordinatorShapeTests {
+
+    // 复用 Task 4 in-memory fakes 构造 TSC
+    private func makeCoordinator() -> TrainingSessionCoordinator {
+        TrainingSessionCoordinator(
+            dbFactory: PreviewTrainingSetDBFactory(),
+            recordRepo: InMemoryRecordRepository(),
+            pendingRepo: InMemoryPendingTrainingRepository(),
+            settingsDAO: InMemorySettingsDAO(),
+            cache: InMemoryCacheManager(),
+            settings: SettingsStore(settingsDAO: InMemorySettingsDAO())
+        )
+    }
+
+    @Test("init 6 参数签名照 spec line 1639-1644 编译 + 初始 active state 为 nil")
+    func initSignature() {
+        let coord = makeCoordinator()
+        #expect(coord.activeEngine == nil)
+        #expect(coord.activeReader == nil)
+    }
+
+    // 7 个方法签名编译期解析（不调用 fatalError 体）
+    @Test("startNewNormalSession() async throws -> TrainingEngine 签名")
+    func startNewSignature() {
+        let coord = makeCoordinator()
+        let _: () async throws -> TrainingEngine = coord.startNewNormalSession
+    }
+
+    @Test("resumePending() async throws -> TrainingEngine? 签名")
+    func resumeSignature() {
+        let coord = makeCoordinator()
+        let _: () async throws -> TrainingEngine? = coord.resumePending
+    }
+
+    @Test("review(recordId:) async throws -> TrainingEngine 签名")
+    func reviewSignature() {
+        let coord = makeCoordinator()
+        let _: (Int64) async throws -> TrainingEngine = coord.review
+    }
+
+    @Test("replay(recordId:) async throws -> TrainingEngine 签名")
+    func replaySignature() {
+        let coord = makeCoordinator()
+        let _: (Int64) async throws -> TrainingEngine = coord.replay
+    }
+
+    @Test("saveProgress(engine:) async throws 签名")
+    func saveProgressSignature() {
+        let coord = makeCoordinator()
+        let _: (TrainingEngine) async throws -> Void = coord.saveProgress
+    }
+
+    @Test("finalize(engine:) async throws -> Int64? 签名")
+    func finalizeSignature() {
+        let coord = makeCoordinator()
+        let _: (TrainingEngine) async throws -> Int64? = coord.finalize
+    }
+
+    @Test("endSession() async 签名（spec line 1666 不 throws）")
+    func endSessionSignature() {
+        let coord = makeCoordinator()
+        let _: () async -> Void = coord.endSession
+    }
+
+    // spec line 1689-1700 TSC.preview() smoke
+    @Test("TrainingSessionCoordinator.preview() 构造成功 + 初始 active state 为 nil")
+    func previewSmoke() {
+        let coord = TrainingSessionCoordinator.preview()
+        #expect(coord.activeEngine == nil)
+        #expect(coord.activeReader == nil)
+    }
+}
