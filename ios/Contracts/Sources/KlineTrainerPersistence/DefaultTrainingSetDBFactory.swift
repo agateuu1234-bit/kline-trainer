@@ -22,10 +22,22 @@ public struct DefaultTrainingSetDBFactory: TrainingSetDBFactory {
             config.readonly = true
             let queue = try DatabaseQueue(path: file.path, configuration: config)
 
-            let (userVersion, metaRow, badTypeCount) = try queue.read { db -> (Int, MetaRow?, Int) in
+            // Phase 1：先校验 user_version，meta SELECT 之前不接触任何 schema-dependent 表
+            // （per codex round 5 HIGH-1）：旧 / 新版本文件可能 meta 表已 renamed/missing，
+            // 同 closure 内 fallthrough 会先抛 SQLITE_ERROR → 走 .ioError，破坏
+            // .versionMismatch 恢复路径。先比对，再读 meta。
+            let userVersion: Int = try queue.read { db in
                 guard let v = try Int.fetchOne(db, sql: "PRAGMA user_version") else {
                     throw DatabaseError(resultCode: .SQLITE_CORRUPT, message: "pragma user_version returned nil")
                 }
+                return v
+            }
+            if userVersion != expectedSchemaVersion {
+                throw AppError.trainingSet(.versionMismatch(expected: expectedSchemaVersion, got: userVersion))
+            }
+
+            // Phase 2：版本对齐后才读 meta（schema-dependent）
+            let (metaRow, badTypeCount) = try queue.read { db -> (MetaRow?, Int) in
                 // SQL 层 typeof() 校验，绕过 GRDB Decodable 在 TEXT-in-INT 列的 silent coerce-to-0
                 // （per codex round 3 HIGH-2）
                 let badCount = try Int.fetchOne(db, sql: """
@@ -39,12 +51,9 @@ public struct DefaultTrainingSetDBFactory: TrainingSetDBFactory {
                     SELECT stock_code, stock_name, start_datetime, end_datetime
                     FROM meta LIMIT 1
                     """)
-                return (v, m, badCount)
+                return (m, badCount)
             }
 
-            if userVersion != expectedSchemaVersion {
-                throw AppError.trainingSet(.versionMismatch(expected: expectedSchemaVersion, got: userVersion))
-            }
             if badTypeCount > 0 {
                 throw AppError.persistence(.dbCorrupted)
             }

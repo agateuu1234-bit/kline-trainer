@@ -44,6 +44,14 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
                        OR typeof(volume) NOT IN ('integer','null')
                        OR typeof(end_global_index) NOT IN ('integer','null')
                        OR typeof(global_index) NOT IN ('integer','null')
+                       OR typeof(amount) NOT IN ('real','integer','null')
+                       OR typeof(ma66) NOT IN ('real','integer','null')
+                       OR typeof(boll_upper) NOT IN ('real','integer','null')
+                       OR typeof(boll_mid) NOT IN ('real','integer','null')
+                       OR typeof(boll_lower) NOT IN ('real','integer','null')
+                       OR typeof(macd_diff) NOT IN ('real','integer','null')
+                       OR typeof(macd_dea) NOT IN ('real','integer','null')
+                       OR typeof(macd_bar) NOT IN ('real','integer','null')
                     """) ?? 0
                 if badCount > 0 {
                     throw AppError.persistence(.dbCorrupted)

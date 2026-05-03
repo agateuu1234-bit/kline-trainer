@@ -215,4 +215,24 @@ final class DefaultTrainingSetDBFactoryTests: XCTestCase {
         }
     }
 
+    // MARK: - version check ordering（codex round 5 HIGH-1）
+
+    /// user_version mismatch + meta 表 missing（schema renamed/dropped）→ .versionMismatch
+    /// 而非 .ioError —— 不能把版本不兼容文件误判为 IO 错误（破坏 spec §M0.1 版本恢复路径）
+    func test_openAndVerify_versionMismatchWithMetaMissing_throwsVersionMismatchNotIoError() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.userVersion = 999            // 期望 1，实际 999
+        opts.skipMetaTable = true         // meta 表缺失
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+
+        let factory = DefaultTrainingSetDBFactory()
+
+        XCTAssertThrowsError(try factory.openAndVerify(file: url, expectedSchemaVersion: 1)) { err in
+            // 必须先抛 versionMismatch，不能 fallthrough 到 .ioError("sqlite_error_*")
+            guard case AppError.trainingSet(.versionMismatch(expected: 1, got: 999)) = err else {
+                return XCTFail("Expected .trainingSet(.versionMismatch(1, 999)), got \(err)")
+            }
+        }
+    }
 }

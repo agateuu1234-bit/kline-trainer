@@ -362,4 +362,50 @@ final class DefaultTrainingSetReaderTests: XCTestCase {
         XCTAssertTrue(candles.isEmpty, "Expected empty dict for empty klines table")
         reader.close()
     }
+
+    /// klines optional REAL 列（amount/ma66/boll_*/macd_*）存 TEXT → typeof 校验拦截 → .dbCorrupted
+    /// （codex round 5 MEDIUM；round 4 narrowing scope 时漏掉的 optional REAL 列补完）
+    func test_loadAllCandles_klinesWrongTypeInOptionalRealColumn_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.skipKlinesTable = true
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+
+        do {
+            let writeQueue = try GRDB.DatabaseQueue(path: url.path)
+            try writeQueue.write { db in
+                try db.execute(sql: """
+                CREATE TABLE klines (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    period TEXT NOT NULL, datetime INTEGER NOT NULL,
+                    open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL,
+                    volume INTEGER NOT NULL,
+                    amount REAL, ma66 REAL,
+                    boll_upper REAL, boll_mid REAL, boll_lower REAL,
+                    macd_diff REAL, macd_dea REAL, macd_bar REAL,
+                    global_index INTEGER, end_global_index INTEGER NOT NULL
+                )
+                """)
+                // m3 锚点合法
+                try db.execute(sql: """
+                    INSERT INTO klines (period, datetime, open, high, low, close, volume, global_index, end_global_index)
+                    VALUES ('3m', 1000, 1.0, 2.0, 0.5, 1.5, 100, 0, 0)
+                    """)
+                // ma66 列存 TEXT 字串（optional REAL，会被 GRDB silent coerce 为 0.0）
+                try db.execute(sql: """
+                    INSERT INTO klines (period, datetime, open, high, low, close, volume,
+                                        ma66, global_index, end_global_index)
+                    VALUES ('3m', 1180, 1.0, 2.0, 0.5, 1.5, 100, 'not_a_number', 1, 1)
+                    """)
+            }
+        }
+
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
 }
