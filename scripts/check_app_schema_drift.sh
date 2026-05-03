@@ -12,7 +12,7 @@ SWIFT_FILE="ios/Contracts/Sources/KlineTrainerPersistence/Internal/AppDBMigratio
 # 提取 Swift 字串内容：从 `static let v1_4_baselineDDL: String = """` 后到最近 `"""`
 INLINE=$(awk '
     /static let v1_4_baselineDDL: String = """/ { capture=1; next }
-    capture && /^    """$/ { capture=0; next }
+    capture && /^[[:space:]]*"""[[:space:]]*$/ { capture=0; next }
     capture { print }
 ' "$SWIFT_FILE")
 
