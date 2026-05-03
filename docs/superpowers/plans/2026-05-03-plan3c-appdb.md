@@ -66,7 +66,8 @@
       - 其它（含 backward + 同 rank 不同 state = 终态互斥）→ NOOP（不抛错，retry 是合法并发模式）
     - **R2 修订（codex high-1）UPDATE aux 列走 COALESCE**：`sqlite_local_path / content_hash / last_error` 用 `COALESCE(?, existing)`，nil 入参不擦已有值。原方案直接 `SET sqlite_local_path = ?` 会让 stale .stored retry（caller 丢失 path）把 stored 行的 path/hash 清成 NULL → recovery 失锚。state / state_entered_at 总是覆盖（forward 推进或同 state 重试都需刷新 stamp）。
     - **R2 修订（codex med-2）existing 是 unknown raw value → NOOP + os_log warning**：原方案 fall-through 到 update（用 caller 已知 state 覆盖 unknown 行），违反 spec L289 fail-safe ignore 原则。改为：发现 existing rawValue 不在 v1.4 enum 内 → 直接 NOOP + os_log error，不动该行；留给 migration / 手工修复处理（避免覆盖 forward-version skew 行）。
-    - `state_entered_at` 由实现侧用 `Int64(Date().timeIntervalSince1970 * 1000)`（毫秒）—— 仅 update 路径刷新；NOOP 路径不刷新。
+    - `state_entered_at` 由实现侧用 `Int64(Date().timeIntervalSince1970)`（Unix 秒 UTC，per spec L241）—— 仅 update 路径刷新；NOOP 路径不刷新。**R3 修订（codex med-3）**：原方案误用毫秒，与 schema 列定义冲突；fix 后与 spec 时间戳约定（L377 "所有 datetime 字段 = Unix 秒 UTC"）一致。
+    - **R3 修订（codex high-1）state-dependent invariants**：forward 推进到 `.stored` / `.confirmPending` / `.confirmed` 必须有 sqliteLocalPath（caller 新传或已存在）；`.stored` 还要 contentHash 8-char 小写 hex（per spec L390 CRC32）。不满足 → `.internalError(module: "P4-AcceptanceJournalDAO", ...)`。这是 DAO 边界 defense-in-depth，避免 caller bug 让 recovery 失锚。
     - **caller 侧无 API 变化**：upsert 签名不变；NOOP 对 caller 不可见，caller 后续 listByState 拿到的是 existing state（与单调推进语义一致）。
 
 11. **AcceptanceJournalDAO.listByState fail-safe + os_log 警告（R1 修订 codex med-3）**：spec L289 字面要求"fail-safe 忽略未定义 raw value"。`listByState(_ state: P2JournalState)` 主路径 SQL `WHERE state = ?` bind enum.rawValue → DB 不会返回任何"未定义"行；但**冗余加固层** `journalRowFromRow` decode 过程若 DB state 列含 v1.4 enum 外的字串（如 0003_purge_leased 失败前的 v1.3 残留 leased 行），落地：
@@ -264,7 +265,7 @@ public struct AcceptanceJournalRow: Equatable, Sendable {
     public let trainingSetId: Int
     public let leaseId: String
     public let state: P2JournalState
-    public let stateEnteredAt: Int64        // 毫秒 epoch
+    public let stateEnteredAt: Int64        // Unix 秒 UTC（per spec L241）
     public let lastError: String?
     public let sqliteLocalPath: String?
     public let contentHash: String?         // CRC32 hex（M0.1 CHAR(8)）
@@ -530,6 +531,64 @@ final class AppDBMigrationsTests: XCTestCase {
         // 再跑一次 migrator → 不抛错（GRDB DatabaseMigrator 内部 idempotent）
         XCTAssertNoThrow(try AppDBMigrations.makeMigrator().migrate(queue))
     }
+
+    // R3 修订（codex high-2）：DDL 用 IF NOT EXISTS → 模拟 v1.3 残留（DB 已有表但无 grdb_migrations 记录）
+    // baseline 0001 应可重跑不撞 "table exists"；0003 仍能跑
+    func test_baseline_idempotent_on_legacy_db_with_tables_no_migration_record() throws {
+        let dir = tmpDir!
+        let dbURL = dir.appendingPathComponent("legacy.sqlite")
+        // 直接 raw SQL 跑 baseline DDL —— 模拟 v1.3 装机后 grdb_migrations 表不存在的状态
+        do {
+            let queue = try DatabaseQueue(path: dbURL.path)
+            try queue.write { db in
+                try db.execute(sql: AppDBMigrations.v1_4_baselineDDL)
+                // 注入 1 条 leased 行
+                try db.execute(sql: """
+                    INSERT INTO download_acceptance_journal
+                      (training_set_id, lease_id, state, state_entered_at)
+                    VALUES (?, ?, 'leased', ?)
+                    """, arguments: [55, "legacy-leased", 1_700_000_000])
+            }
+        }
+        // 现在跑完整 migrator —— 因为 IF NOT EXISTS，0001 不撞表已存在
+        let queue = try DatabaseQueue(path: dbURL.path)
+        XCTAssertNoThrow(try AppDBMigrations.makeMigrator().migrate(queue))
+        // 0003 跑了 → leased 被删
+        let leasedAfter: Int = try queue.read { db in
+            try Int.fetchOne(db, sql:
+                "SELECT COUNT(*) FROM download_acceptance_journal WHERE state='leased'") ?? -1
+        }
+        XCTAssertEqual(leasedAfter, 0, "legacy DB 上 0003 仍应删 leased 行")
+    }
+
+    // R3 修订（codex med-4）：PersistenceErrorMapping 不传 fileURL 时 CANTOPEN → .ioError，不是 .fileNotFound
+    func test_PersistenceErrorMapping_without_fileURL_maps_CANTOPEN_to_ioError() throws {
+        let cantopen = DatabaseError(resultCode: .SQLITE_CANTOPEN)
+        let result = PersistenceErrorMapping.translate(cantopen)  // 不传 fileURL
+        guard case .persistence(.ioError) = result else {
+            return XCTFail("无 fileURL 应映射 .persistence(.ioError)，实际 \(result)")
+        }
+    }
+
+    // R3 修订（codex med-4）：DefaultAppDB.init 失败时不应抛 .trainingSet（应 .persistence）
+    // 用 read-only 父目录强制 SQLITE_CANTOPEN
+    func test_DefaultAppDB_open_failure_throws_persistence_not_trainingSet() throws {
+        let badPath = URL(fileURLWithPath: "/dev/null/x/app.sqlite")  // /dev/null 是设备节点不能 mkdir
+        XCTAssertThrowsError(try DefaultAppDB(dbPath: badPath)) { err in
+            guard let appErr = err as? AppError else {
+                return XCTFail("期望 AppError，实际 \(err)")
+            }
+            // 必须 .persistence (.ioError 或 .diskFull)，不是 .trainingSet(.fileNotFound)
+            switch appErr {
+            case .persistence:
+                break  // ok
+            case .trainingSet:
+                XCTFail("AppDB 错误不应映射成 .trainingSet（这是训练组语义）")
+            default:
+                XCTFail("意外错误类型 \(appErr)")
+            }
+        }
+    }
 }
 ```
 
@@ -541,7 +600,17 @@ swift test --filter AppDBMigrationsTests 2>&1 | tail -20
 # 期望：编译 fail，错误如 "cannot find 'DefaultAppDB' in scope" / "cannot find 'AppDBMigrations' in scope"
 ```
 
-- [ ] **Step 3.4: 写 AppDBMigrations.swift（含 inline schema 字串）**
+- [ ] **Step 3.4a: 同步 `ios/sql/app_schema_v1.sql`（R3 修订 codex high-2 — IF NOT EXISTS 加固）**
+
+修改 `ios/sql/app_schema_v1.sql` 把所有 `CREATE TABLE` 改 `CREATE TABLE IF NOT EXISTS`，`CREATE INDEX` 改 `CREATE INDEX IF NOT EXISTS`：
+
+```bash
+sed -i.bak 's/^CREATE TABLE /CREATE TABLE IF NOT EXISTS /g; s/^CREATE INDEX /CREATE INDEX IF NOT EXISTS /g' ios/sql/app_schema_v1.sql && rm ios/sql/app_schema_v1.sql.bak
+diff <(grep "^CREATE" ios/sql/app_schema_v1.sql) <(echo -e "CREATE TABLE IF NOT EXISTS training_records (\nCREATE TABLE IF NOT EXISTS trade_operations (\nCREATE TABLE IF NOT EXISTS drawings (\nCREATE TABLE IF NOT EXISTS pending_training (\nCREATE TABLE IF NOT EXISTS settings (\nCREATE TABLE IF NOT EXISTS download_acceptance_journal (\nCREATE INDEX IF NOT EXISTS idx_journal_state ON download_acceptance_journal(state);")
+# 期望：无 diff（顺序与命名匹配）
+```
+
+- [ ] **Step 3.4b: 写 AppDBMigrations.swift（含 inline schema 字串）**
 
 Create `ios/Contracts/Sources/KlineTrainerPersistence/Internal/AppDBMigrations.swift`：
 
@@ -559,7 +628,7 @@ enum AppDBMigrations {
     static let v1_4_baselineDDL: String = """
     PRAGMA user_version = 1;
 
-    CREATE TABLE training_records (
+    CREATE TABLE IF NOT EXISTS training_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         training_set_filename TEXT NOT NULL,
         created_at INTEGER NOT NULL,
@@ -577,7 +646,7 @@ enum AppDBMigrations {
         final_tick INTEGER NOT NULL DEFAULT 0
     );
 
-    CREATE TABLE trade_operations (
+    CREATE TABLE IF NOT EXISTS trade_operations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         record_id INTEGER NOT NULL REFERENCES training_records(id),
         global_tick INTEGER NOT NULL,
@@ -592,7 +661,7 @@ enum AppDBMigrations {
         created_at INTEGER NOT NULL
     );
 
-    CREATE TABLE drawings (
+    CREATE TABLE IF NOT EXISTS drawings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         record_id INTEGER NOT NULL REFERENCES training_records(id),
         tool_type TEXT NOT NULL,
@@ -601,7 +670,7 @@ enum AppDBMigrations {
         anchors TEXT NOT NULL
     );
 
-    CREATE TABLE pending_training (
+    CREATE TABLE IF NOT EXISTS pending_training (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         training_set_filename TEXT NOT NULL,
         global_tick_index INTEGER NOT NULL,
@@ -617,12 +686,12 @@ enum AppDBMigrations {
         drawdown TEXT NOT NULL
     );
 
-    CREATE TABLE settings (
+    CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );
 
-    CREATE TABLE download_acceptance_journal (
+    CREATE TABLE IF NOT EXISTS download_acceptance_journal (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         training_set_id INTEGER NOT NULL,
         lease_id TEXT NOT NULL,
@@ -634,7 +703,7 @@ enum AppDBMigrations {
         UNIQUE (training_set_id, lease_id)
     );
 
-    CREATE INDEX idx_journal_state ON download_acceptance_journal(state);
+    CREATE INDEX IF NOT EXISTS idx_journal_state ON download_acceptance_journal(state);
     """
 
     static func makeMigrator() -> DatabaseMigrator {
@@ -704,7 +773,9 @@ public final class DefaultAppDB: AppDB {
         } catch let appErr as AppError {
             throw appErr
         } catch {
-            throw PersistenceErrorMapping.translate(error, fileURL: dbPath)
+            // R3 修订（codex med-4）：不传 fileURL —— PersistenceErrorMapping 收到 fileURL+missing
+            // 会判 .trainingSet(.fileNotFound)，那是训练组语义；app.sqlite 走 .persistence(.ioError)
+            throw PersistenceErrorMapping.translate(error)
         }
     }
 
@@ -2089,6 +2160,68 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
         XCTAssertEqual(cp[0].contentHash, "6c0ffe11")
     }
 
+    // 用例 14（R3 新增 codex high-1）：forward 到 .stored 缺 sqliteLocalPath → .internalError
+    func test_upsert_stored_without_path_throws_internalError() throws {
+        XCTAssertThrowsError(try db.upsert(
+            trainingSetId: 80, leaseId: "L80", state: .stored,
+            sqliteLocalPath: nil, contentHash: "deadbeef", lastError: nil)
+        ) { err in
+            guard let appErr = err as? AppError,
+                  case .internalError(let module, _) = appErr else {
+                return XCTFail("期望 .internalError，实际 \(err)")
+            }
+            XCTAssertTrue(module.contains("AcceptanceJournalDAO"))
+        }
+    }
+
+    // 用例 15（R3 新增 codex high-1）：forward 到 .stored contentHash 非 8-char hex → .internalError
+    func test_upsert_stored_with_invalid_contentHash_throws_internalError() throws {
+        try db.upsert(trainingSetId: 81, leaseId: "L81", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        // 错误格式：长度 7
+        XCTAssertThrowsError(try db.upsert(
+            trainingSetId: 81, leaseId: "L81", state: .stored,
+            sqliteLocalPath: "/tmp/x.sqlite", contentHash: "deadbee", lastError: nil))
+        // 错误格式：含大写
+        XCTAssertThrowsError(try db.upsert(
+            trainingSetId: 81, leaseId: "L81", state: .stored,
+            sqliteLocalPath: "/tmp/x.sqlite", contentHash: "DEADBEEF", lastError: nil))
+        // 错误格式：非 hex 字符
+        XCTAssertThrowsError(try db.upsert(
+            trainingSetId: 81, leaseId: "L81", state: .stored,
+            sqliteLocalPath: "/tmp/x.sqlite", contentHash: "deadbeeg", lastError: nil))
+    }
+
+    // 用例 16（R3 新增 codex high-1）：forward 到 .stored 已 inherit 历史 path → 允许（COALESCE existingPath）
+    func test_upsert_stored_inherits_existing_path_via_invariant_check() throws {
+        try db.upsert(trainingSetId: 82, leaseId: "L82", state: .downloaded,
+                      sqliteLocalPath: "/tmp/82.sqlite", contentHash: nil, lastError: nil)
+        // 推 .stored，path 不传（拿 existing），hash 必须传
+        try db.upsert(trainingSetId: 82, leaseId: "L82", state: .stored,
+                      sqliteLocalPath: nil, contentHash: "82deadbe", lastError: nil)
+        let stored = try db.listByState(.stored).filter { $0.leaseId == "L82" }
+        XCTAssertEqual(stored.count, 1)
+        XCTAssertEqual(stored[0].sqliteLocalPath, "/tmp/82.sqlite")
+        XCTAssertEqual(stored[0].contentHash, "82deadbe")
+    }
+
+    // 用例 17（R3 新增 codex med-3）：state_entered_at 是 Unix 秒 UTC（非毫秒）
+    func test_state_entered_at_is_unix_seconds_not_millis() throws {
+        let beforeSec = Int64(Date().timeIntervalSince1970)
+        try db.upsert(trainingSetId: 83, leaseId: "L83", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        let afterSec = Int64(Date().timeIntervalSince1970) + 1  // +1s 容忍
+
+        let row = try db.listByState(.downloaded).first { $0.leaseId == "L83" }
+        let stamp = row?.stateEnteredAt ?? 0
+        // Unix 秒数应在 [beforeSec, afterSec] 区间；毫秒会大约 1000x，超出区间
+        XCTAssertGreaterThanOrEqual(stamp, beforeSec - 1)
+        XCTAssertLessThanOrEqual(stamp, afterSec + 1)
+        // 显式断言：stamp / 1_000_000_000 应远小于 1（不是纳秒），stamp 数量级是 10^9-10^10（2024 epoch seconds）
+        XCTAssertGreaterThan(stamp, 1_700_000_000)        // 后于 2023-11
+        XCTAssertLessThan(stamp, 4_000_000_000)           // 早于 2096
+    }
+
     // 用例 13（R2 新增 codex med-2）：existing 是 unknown raw value → upsert NOOP，不覆盖
     func test_upsert_existing_unknown_state_is_NOOP_not_overwritten() throws {
         // raw SQL 注入 unknown state 行（v1.3 leased 模拟）
@@ -2186,6 +2319,39 @@ enum AcceptanceJournalDAOImpl {
         return false
     }
 
+    /// state-dependent invariant（R3 修订 codex high-1）：
+    /// 推进到 .stored / .confirmPending / .confirmed 时必须已有 sqliteLocalPath（否则 recovery 找不到本地文件）。
+    /// 推进到 .stored 时必须有 contentHash 且 8-char 小写 hex（per spec L390 CRC32 格式）。
+    /// 不满足 → .internalError（caller 编程错误，不走 user Toast）。
+    /// **设计**：仅校验"新行 INSERT"和"forward 推进"路径；同 state 重试 / 终态互斥 NOOP 不触发（因为不变更 state）。
+    private static func validateInvariants(state: P2JournalState,
+                                           existingPath: String?,
+                                           existingHash: String?,
+                                           newPath: String?,
+                                           newHash: String?) throws {
+        let resolvedPath = newPath ?? existingPath
+        let resolvedHash = newHash ?? existingHash
+        let needsPath: Set<P2JournalState> = [.stored, .confirmPending, .confirmed]
+        if needsPath.contains(state), resolvedPath == nil {
+            throw AppError.internalError(
+                module: "P4-AcceptanceJournalDAO",
+                detail: "state \(state.rawValue) requires sqliteLocalPath but neither new nor existing has it")
+        }
+        if state == .stored {
+            guard let h = resolvedHash, isValidCRC32Hex(h) else {
+                throw AppError.internalError(
+                    module: "P4-AcceptanceJournalDAO",
+                    detail: ".stored requires contentHash matching 8-char lowercase hex (CRC32)")
+            }
+        }
+    }
+
+    /// CRC32 hex 校验：8 个字符，全部 0-9a-f（小写）。per spec L390。
+    private static func isValidCRC32Hex(_ s: String) -> Bool {
+        guard s.count == 8 else { return false }
+        return s.allSatisfy { $0.isHexDigit && (!$0.isLetter || $0.isLowercase) }
+    }
+
     static func upsert(_ db: Database,
                        trainingSetId: Int, leaseId: String,
                        state: P2JournalState,
@@ -2194,13 +2360,17 @@ enum AcceptanceJournalDAOImpl {
                        lastError: String?) throws {
         // R1 修订（codex high-1）：read-then-write 单调 rank guard
         // 避免晚到 retry 把 .stored/.confirmed/.rejected 倒回 .downloaded
-        let stateEnteredAt = Int64(Date().timeIntervalSince1970 * 1000)
+        // R3 修订（codex med-3）：state_entered_at 改 Unix 秒 UTC（spec L241 字面）
+        let stateEnteredAt = Int64(Date().timeIntervalSince1970)
 
-        // ① 查 existing state（若有）
-        if let existingRaw = try String.fetchOne(db, sql: """
-            SELECT state FROM download_acceptance_journal
+        // ① 查 existing 行（state + path + hash），R3 修订：path/hash 也读出供 invariants 校验
+        if let row = try Row.fetchOne(db, sql: """
+            SELECT state, sqlite_local_path, content_hash FROM download_acceptance_journal
             WHERE training_set_id = ? AND lease_id = ?
             """, arguments: [trainingSetId, leaseId]) {
+            let existingRaw: String = row["state"]
+            let existingPath: String? = row["sqlite_local_path"]
+            let existingHash: String? = row["content_hash"]
             // 行已存在
             guard let existing = P2JournalState(rawValue: existingRaw) else {
                 // R2 修订（codex med-2）：existing 是 unknown raw value（downgrade / 跨版本残留）
@@ -2213,13 +2383,20 @@ enum AcceptanceJournalDAOImpl {
                 logger.info("noop: rejected upsert \(state.rawValue, privacy: .public) over \(existing.rawValue, privacy: .public) for trainingSetId=\(trainingSetId) leaseId=\(leaseId, privacy: .public)")
                 return
             }
-            // 转换合法 → UPDATE（aux 列走 COALESCE 保留已有非空值，per R2 codex high-1）
+            // R3 修订（codex high-1）：forward 推进前校验 state-dependent invariants
+            try validateInvariants(state: state,
+                                   existingPath: existingPath, existingHash: existingHash,
+                                   newPath: sqliteLocalPath, newHash: contentHash)
+            // 转换合法 + invariants 满足 → UPDATE（aux 列走 COALESCE 保留已有非空值，per R2 codex high-1）
             try update(db, trainingSetId: trainingSetId, leaseId: leaseId,
                        state: state, stateEnteredAt: stateEnteredAt,
                        sqliteLocalPath: sqliteLocalPath, contentHash: contentHash,
                        lastError: lastError)
         } else {
-            // 行不存在 → INSERT 新行
+            // 行不存在 → 校验 invariants（existingPath/Hash = nil）+ INSERT 新行
+            try validateInvariants(state: state,
+                                   existingPath: nil, existingHash: nil,
+                                   newPath: sqliteLocalPath, newHash: contentHash)
             try db.execute(sql: """
                 INSERT INTO download_acceptance_journal
                   (training_set_id, lease_id, state, state_entered_at,
@@ -2610,7 +2787,23 @@ verdict = **needs-attention**，4 findings：
 - COALESCE 设计中 last_error 也走 COALESCE（caller 传 nil 表示"无新错误"，保留旧 log）；如果 caller 真想清空 last_error 字段，需新加 API；目前认 last_error 只追加 / 不主动清空
 - `internalError(module: "P4-SettingsDAO", ...)` 而非 `.dbCorrupted` for save NaN：caller 编程错误不走用户 Toast（shouldShowToast=false）
 
-待执行 R3 验证。
+### Round 3（codex 2026-05-03，branch-diff vs origin/main）
+
+verdict = **needs-attention**，4 findings：
+
+| # | sev | finding | revision applied |
+|---|---|---|---|
+| 1 | HIGH | upsert 允许 .stored / .confirmPending / .confirmed 行无 sqliteLocalPath；spec 要求 stored 必须可定位本地文件 + 有 contentHash 才能 CRC 验证 | 加 `validateInvariants` helper：forward 到这 3 个 state 必须有 path（COALESCE 已有 + new）；.stored 还要 contentHash 8-char 小写 hex；缺 → `.internalError`；upsert 改 SELECT 全列拿 existing path/hash 喂 invariants；新增 用例 14/15/16 |
+| 2 | HIGH | baseline DDL 直接 CREATE TABLE，dev 残留 v1.3 app.sqlite 时撞 "table exists" → 0003 不跑 | DDL 全改 `CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`；同步改 `ios/sql/app_schema_v1.sql`（Step 3.4a 加 sed 命令）；新增 test_baseline_idempotent_on_legacy_db_with_tables_no_migration_record |
+| 3 | MED | `state_entered_at` 用毫秒，spec L241 字面是 Unix 秒 UTC | upsert + update 改 `Int64(Date().timeIntervalSince1970)`（去 *1000）；contract comment 改 "毫秒 epoch" → "Unix 秒 UTC"；新增 test_state_entered_at_is_unix_seconds_not_millis |
+| 4 | MED | DefaultAppDB.init 传 fileURL 给 PersistenceErrorMapping.translate → SQLITE_CANTOPEN + missing 文件被判 `.trainingSet(.fileNotFound)`（训练组语义，对 app DB 不对） | DefaultAppDB.init 不传 fileURL；新增 2 tests：test_PersistenceErrorMapping_without_fileURL_maps_CANTOPEN_to_ioError + test_DefaultAppDB_open_failure_throws_persistence_not_trainingSet |
+
+4 findings 全部应用真修订。残留：
+- IF NOT EXISTS 让 baseline 在残留 schema 上保守 silently skip；schema drift（旧字段 / 新字段）不会被检出，留给将来 alter migration 处理（Wave 0 fresh install 接受此 trade-off）
+- validateInvariants 不强制 `.confirmed` 必须有 contentHash（confirm 阶段可能已不需 hash —— 仅 .stored 阶段验 CRC32）；spec 未显式定义后续阶段是否仍需 hash，按 spec 字面只在 .stored 强制
+- AppDB CANTOPEN 测试用 `/dev/null/x/app.sqlite` 作 bad path——cross-platform 兼容假设但 macOS 一定 fail（XCode/SPM target macOS）
+
+待执行 R4 验证。**Round 计数：3**（≥5 触发 abort 协议 per `feedback_codex_round6_self_contradiction.md`）。
 
 ---
 
