@@ -5,16 +5,13 @@ import KlineTrainerContracts
 
 final class AppDBMigrationsTests: XCTestCase {
 
-    private var tmpDir: URL!
-
-    override func setUp() async throws {
-        tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+    /// 统一 fixture 工厂：每个 test 自己拿独立 tmp dir + db url + cleanup defer。
+    /// 避免 setUp/tearDown 与 AppDBFixture.makeFreshDB() 双 cleanup 路径冲突（codex review I-1）。
+    private func makeTmpDB(named name: String = "app.sqlite") throws -> (dir: URL, dbURL: URL) {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("appdb-mig-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-    }
-
-    override func tearDown() async throws {
-        try? FileManager.default.removeItem(at: tmpDir)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return (dir, dir.appendingPathComponent(name))
     }
 
     // MARK: - schema 完整性
@@ -63,8 +60,8 @@ final class AppDBMigrationsTests: XCTestCase {
 
     // MARK: - 0003_v1.4_purge_leased 实际删 leased 行
     func test_purge_leased_migration_removes_v1_3_leased_rows() throws {
-        let dir = tmpDir!
-        let dbURL = dir.appendingPathComponent("app.sqlite")
+        let (dir, dbURL) = try makeTmpDB()
+        defer { try? FileManager.default.removeItem(at: dir) }
 
         // 建 v1.3 模拟 DB（含 1 条 leased 行，未跑 0003）
         try AppDBFixture.makeV1_3SimulatedDB(at: dbURL)
@@ -99,8 +96,8 @@ final class AppDBMigrationsTests: XCTestCase {
     // R3 修订（codex high-2）：DDL 用 IF NOT EXISTS → 模拟 v1.3 残留（DB 已有表但无 grdb_migrations 记录）
     // baseline 0001 应可重跑不撞 "table exists"；0003 仍能跑
     func test_baseline_idempotent_on_legacy_db_with_tables_no_migration_record() throws {
-        let dir = tmpDir!
-        let dbURL = dir.appendingPathComponent("legacy.sqlite")
+        let (dir, dbURL) = try makeTmpDB(named: "legacy.sqlite")
+        defer { try? FileManager.default.removeItem(at: dir) }
         // 直接 raw SQL 跑 baseline DDL —— 模拟 v1.3 装机后 grdb_migrations 表不存在的状态
         do {
             let queue = try DatabaseQueue(path: dbURL.path)
