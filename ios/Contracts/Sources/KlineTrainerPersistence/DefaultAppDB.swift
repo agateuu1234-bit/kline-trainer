@@ -89,10 +89,34 @@ public final class DefaultAppDB: AppDB {
         catch { throw PersistenceErrorMapping.translate(error) }
     }
 
-    // MARK: - PendingTrainingRepository（Task 5）
-    public func savePending(_ p: PendingTraining) throws { fatalError("Task 5 实现") }
-    public func loadPending() throws -> PendingTraining? { fatalError("Task 5 实现") }
-    public func clearPending() throws { fatalError("Task 5 实现") }
+    // MARK: - PendingTrainingRepository
+
+    public func savePending(_ p: PendingTraining) throws {
+        do {
+            try dbQueue.write { db in
+                try PendingTrainingRepositoryImpl.savePending(db, pending: p)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func loadPending() throws -> PendingTraining? {
+        do {
+            return try dbQueue.read { db in
+                try PendingTrainingRepositoryImpl.loadPending(db)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func clearPending() throws {
+        do {
+            try dbQueue.write { db in
+                try PendingTrainingRepositoryImpl.clearPending(db)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
 
     // MARK: - SettingsDAO（Task 6）
     public func loadSettings() throws -> AppSettings { fatalError("Task 6 实现") }
