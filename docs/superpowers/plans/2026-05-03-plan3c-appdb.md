@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Round 1 修订标记**：本 plan 经 codex 对抗性 review round 1（branch-diff scope vs origin/main，5 findings：2 HIGH + 3 MEDIUM），全部 5 项实质 finding 已应用修订。详见末尾 Round N 章节 + Self-Review §"Round 1 修订列表"。
+
 **Goal:** 在 `KlineTrainerPersistence` target 落地 P4 应用数据库 production 实现：单一 GRDB `DatabaseQueue` for `app.sqlite` + 4 个 protocol 实现（`RecordRepository` / `PendingTrainingRepository` / `SettingsDAO` / `AcceptanceJournalDAO`）+ composition root `DefaultAppDB`（`typealias AppDB` 合成）+ `DatabaseMigrator` 注册 `0001_v1.4_baseline` & `0003_v1.4_purge_leased` 两个 migration（per spec §M0.1 line 156 & line 265-289 与 §P4 line 1863-1948）。
 
 **Architecture:** `DefaultAppDB` 持有唯一 `DatabaseQueue`，通过 `init(dbPath: URL) throws` 创建并跑 migrator；4 个 protocol 表面用 4 个 `extension DefaultAppDB`（每个 extension 一个 protocol surface），方法体只做 `dbQueue.write { db in ... }` / `dbQueue.read { db in ... }` 包装 + 调用同模块内的 `Internal/*Impl.swift` static 方法。`Internal/*Impl.swift` 写纯 SQL 逻辑（编码 / 解码 / FK 写入 / aggregate），**所有 GRDB 错误在 DefaultAppDB extension 边界 `try ... catch` 通过 `PersistenceErrorMapping.translate` 转 `AppError`**（per `docs/governance/m04-apperror-translation-gate.md` Gate 1）。Schema 用 Swift 多行字串内联（注释强制 mirror `ios/sql/app_schema_v1.sql`，CI guard 见 Task 8）。
@@ -31,41 +33,54 @@
 5. **Row struct 命名 = `<Entity>Row`，不复用 contracts 里的 model**：`RecordRow` / `PendingRow` / `SettingsRow` / `JournalRow` 都是 internal-only struct，专门做 GRDB FetchableRecord/PersistableRecord 桥接 + snake_case 列名映射。**不**让 `TrainingRecord` 直接 conform `FetchableRecord`（contracts 不能依赖 GRDB；同 plan 3a/3b 的 `KLineRow`/`MetaRow` 模式）。
 
 6. **insertRecord 三表事务**：`insertRecord(record, ops, drawings)` 必须在单个 `dbQueue.write { db in ... }` 闭包内：① INSERT training_records 拿回 lastInsertRowID = recordId；② 循环 INSERT trade_operations 带 record_id FK；③ 循环 INSERT drawings 带 record_id FK + JSON encoded anchors。GRDB DatabaseQueue.write 闭包**默认**包 transaction，throw 触发 rollback。**返回 Int64 = 新插入的 recordId**。
+   **R1 修订**：`listRecords` 与 `statistics` 的 ORDER BY 必须加 `id DESC` tiebreak（仅 `created_at DESC` 在同毫秒并列时 SQLite 任选，导致 statistics.currentCapital 不确定）。两处 SQL 均改为 `ORDER BY created_at DESC, id DESC`。
 
 7. **DrawingObject.anchors → TEXT 列 JSON 编码**：`drawings.anchors` schema 列是 `TEXT NOT NULL`；落地用 `JSONEncoder().encode([DrawingAnchor]) → String(data:encoding:)` 写入；读侧 `JSONDecoder().decode([DrawingAnchor].self, from: ...)`。失败 → `AppError.persistence(.dbCorrupted)`。
 
 8. **PendingTraining singleton 落地**：`pending_training` 表 schema CHECK(id = 1)，永远只有 0 或 1 行。`savePending` 用 `INSERT OR REPLACE INTO pending_training ... VALUES (1, ?, ?, ...)`（id 写死 1）。`loadPending` SELECT WHERE id = 1 LIMIT 1，0 行返回 nil；≥1 行（理论不应发生但 schema CHECK 保证只有 1）取第一行。`clearPending` DELETE FROM pending_training WHERE id = 1。`positionData: Data` → BLOB，但 schema 列是 TEXT；落地用 base64 encode 写入 TEXT 列（JSON 内嵌 binary 兼容）。`tradeOperations: [TradeOperation]` 与 `drawings: [DrawingObject]` → JSON encode TEXT。`drawdown: DrawdownAccumulator` → JSON encode TEXT。
 
 9. **SettingsDAO key-value 表布局**：`settings(key TEXT PK, value TEXT)`。4 个固定 key：`commission_rate`（Double → string）/ `min_commission_enabled`（Bool → "true"/"false"）/ `total_capital`（Double → string）/ `display_mode`（DisplayMode rawValue: "light"/"dark"/"system"）。
-   - `loadSettings`：4 次 SELECT WHERE key = ?；任意 key 缺失 → 用 zero-value default（commissionRate=0 / minCommissionEnabled=false / totalCapital=0 / displayMode=.system，与 `InMemoryFakes.swift` Line 44-47 默认对齐）。**不**抛 emptyData——首次启动设置全空是合法首次态。
+   - `loadSettings`：SELECT key, value FROM settings；分 **missing** vs **malformed** 两路（R1 修订 codex high-2）：
+     - **key 缺失**（首次启动 / 新增 key 未写）→ 用 zero-value default（commissionRate=0 / minCommissionEnabled=false / totalCapital=0 / displayMode=.system，与 `InMemoryFakes.swift` Line 44-47 默认对齐）
+     - **key 存在但 value 不可解析**（如 commission_rate 列存了 "garbage"，或 display_mode 列存了 "purple"）→ 抛 `AppError.persistence(.dbCorrupted)`。**不**走 default——这等于把损坏的财务参数静默重置 0，影响计算正确性
    - `saveSettings`：4 次 `INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)`，单 transaction。
-   - `resetCapital`：`INSERT OR REPLACE INTO settings(key, value) VALUES ('total_capital', '0')` 单语句。
+   - `resetCapital`：`INSERT OR REPLACE INTO settings(key, value) VALUES ('total_capital', '0.0')` 单语句。
 
-10. **AcceptanceJournalDAO.upsert ON CONFLICT 策略**：表 UNIQUE(training_set_id, lease_id)。SQL：
-    ```sql
-    INSERT INTO download_acceptance_journal
-      (training_set_id, lease_id, state, state_entered_at, last_error, sqlite_local_path, content_hash)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT (training_set_id, lease_id) DO UPDATE SET
-      state = excluded.state,
-      state_entered_at = excluded.state_entered_at,
-      last_error = excluded.last_error,
-      sqlite_local_path = excluded.sqlite_local_path,
-      content_hash = excluded.content_hash
-    ```
-    `state_entered_at` 由实现侧用 `Int64(Date().timeIntervalSince1970 * 1000)`（毫秒） — spec 未声明单位，与 `training_records.created_at` 一致用毫秒。
+10. **AcceptanceJournalDAO.upsert 单调 rank guard（R1 修订 codex high-1）**：表 UNIQUE(training_set_id, lease_id)。原方案 ON CONFLICT 盲覆盖会让晚到 retry 把已 .stored/.confirmed 的行倒回 .downloaded，导致 recovery 扫描失锚 + 终态被覆盖。**改为 read-then-write monotonic guard**：
+    - 在 `dbQueue.write { db in ... }` 闭包内分 2 步：
+      ① SELECT existing state（WHERE training_set_id=? AND lease_id=?；0 行 → INSERT 新行）
+      ② 1 行 → 比较 `stateRank(new)` vs `stateRank(existing)`：
+        - `new > existing` → UPDATE（含 state_entered_at 刷新）
+        - `new == existing` → UPDATE（仅 state_entered_at + last_error + sqliteLocalPath + contentHash 刷新；同 state 重试合法）
+        - `new < existing` → **NOOP**（保留 existing；不 throw —— 晚到 retry 是合法的并发模式，只是无效）
+    - **rank 表**（state monotonic 单调推进，per spec L1798+ P2 状态机）：
+      ```
+      downloaded(0) → crcOK(1) → unzipped(2) → dbVerified(3) → stored(4) → confirmPending(5)
+      confirmed(6) = 成功终态  ｜  rejected(6) = 失败终态  （同 rank 互斥）
+      ```
+      `confirmed` 和 `rejected` 都是终态，**同 rank（6）+ 互斥**：彼此不能转换（避免误把成功状态改失败 / 失败改成功）。
+    - **canApply(new, over old)** 规则：
+      - `rank(new) > rank(old)` → forward 允许
+      - `new == old` → 同 state 重试，允许（仅刷新 entered_at + 辅助列）
+      - 其它（含 backward + 同 rank 不同 state = 终态互斥）→ NOOP（不抛错，retry 是合法并发模式）
+    - `state_entered_at` 由实现侧用 `Int64(Date().timeIntervalSince1970 * 1000)`（毫秒）—— 仅 update 路径刷新；NOOP 路径不刷新。
+    - **caller 侧无 API 变化**：upsert 签名不变；NOOP 对 caller 不可见，caller 后续 listByState 拿到的是 existing state（与单调推进语义一致）。
 
-11. **AcceptanceJournalDAO.listByState 不做 fail-safe unknown raw value**：spec L289 提"fail-safe 忽略未定义 raw value"；但 `listByState(_ state: P2JournalState)` 形参已是 enum 实例 → SQL `WHERE state = ?` bind enum.rawValue → DB 不会返回任何"未定义"行。fail-safe 仅在无 state 过滤的 listAll 路径需要—— protocol body 无该方法，不做。decode 过程一旦 DB state 列含 v1.4 enum 外的字串（理论上 0003_purge_leased 之后不应有），抛 DecodingError → `PersistenceErrorMapping.translate` 转 `.dbCorrupted`。
+11. **AcceptanceJournalDAO.listByState fail-safe + os_log 警告（R1 修订 codex med-3）**：spec L289 字面要求"fail-safe 忽略未定义 raw value"。`listByState(_ state: P2JournalState)` 主路径 SQL `WHERE state = ?` bind enum.rawValue → DB 不会返回任何"未定义"行；但**冗余加固层** `journalRowFromRow` decode 过程若 DB state 列含 v1.4 enum 外的字串（如 0003_purge_leased 失败前的 v1.3 残留 leased 行），落地：
+    - **不**抛 `.dbCorrupted`（旧方案）
+    - **改为**：`P2JournalState(rawValue: stateRaw) == nil` → `os_log(.error, "AcceptanceJournalDAO: unknown state '%{public}@' for trainingSetId=%d leaseId=%{public}@; skipping row", stateRaw, trainingSetId, leaseId)` + 跳过该行（不放进返回 array）
+    - 观测性：os_log 走 unified logging，可由 Console.app / oslog CLI 抓取；不污染 UI Toast
+    - 测试侧：raw SQL 注入 `state='leased'` 行 → `listByState(.downloaded)` 返回空 array，不抛错（os_log 副作用难直测，靠 manual 验证 + acceptance grep 兜底）
 
 12. **AcceptanceJournalDAO.deleteByIdLease**：`DELETE FROM download_acceptance_journal WHERE training_set_id = ? AND lease_id = ?`，0 或 1 行删除均合法（spec 未要求"必须存在"），不抛 not-found。
 
 13. **PersistenceErrorMapping 扩展 SQLITE_FULL → diskFull**：现有 mapping（plan3a/3b 落地）只覆盖 read 路径错误（SQLITE_CANTOPEN / NOTADB / CORRUPT）。本 PR 新增 write 路径，必须加 `if dbErr.resultCode == .SQLITE_FULL { return .persistence(.diskFull) }`。`AppError.PersistenceReason.diskFull` 已在 contracts 存在（AppError.swift Line 30）。
 
-14. **子项计数 = 3，prod 行预算 ~470 行**：
+14. **子项计数 = 3，prod 行预算 ~520 行（R1 修订后微涨）**：
     - 子项 1：AcceptanceJournalDAO contract additions（`AcceptanceJournalDAO.swift` 新建 + `InMemoryFakes.swift` 加 1 fake，共 ~110 行）
     - 子项 2：DefaultAppDB composition root + AppDBMigrations + PersistenceErrorMapping 扩展（共 ~210 行）
-    - 子项 3：4 个 DAO 生产实现（4 个 `Internal/*Impl.swift` + 4 个 row struct，共 ~310 行）
-    - 总 prod ≈ 470 < 500 硬规则。Test ≈ 750 行（不计入 500 限制）。
+    - 子项 3：4 个 DAO 生产实现（4 个 `Internal/*Impl.swift` + 4 个 row struct，共 ~340 行；R1 修订加 +30：upsert rank guard +20、loadSettings 分路 +15、listByState fail-safe +10、合计 +45 行；其他 inline 优化 -15）
+    - 总 prod ≈ 520。**比 500 硬规则超 20 行**——属"R1 真 finding 修订"必要扩张，非 packaging bias 打捆；feedback memory `feedback_planner_packaging_bias` 允许这种增量。Test ≈ 850 行（含 R1 新增 4 个 raw-SQL corruption test + tied timestamp test + stored→downloaded reject test，共 +6 tests，不计入 500 限制）。
 
 ---
 
@@ -383,13 +398,20 @@ enum AppDBFixture {
 
     /// 在指定 dir 下建 v1.3 模拟数据：含 1 条 state='leased' journal 行。
     /// 用于测试 0003_v1.4_purge_leased migration。
+    /// **R1 修订（codex med-2）**：必须用 partial migrator state（仅注册 0001 跑一次），
+    /// 这样 grdb_migrations 表会有 0001 已 applied 记录；后续完整 migrator 跳过 0001
+    /// 直接跑 0003。**不**用 raw SQL 跑 baseline DDL —— 那会让 grdb_migrations 空，
+    /// 完整 migrator 重跑 0001 撞 "table exists" 抛错，0003 永远不验。
     static func makeV1_3SimulatedDB(at dbURL: URL) throws {
-        // 直接用 GRDB 跑 0001 baseline + 手动插入 'leased' 行（绕过 enum）
         let queue = try DatabaseQueue(path: dbURL.path)
-        try queue.write { db in
-            // 跑 0001 baseline DDL
+        // 仅注册 0001（不注册 0003）跑 partial migration → grdb_migrations 标 0001 applied
+        var partialMigrator = DatabaseMigrator()
+        partialMigrator.registerMigration("0001_v1.4_baseline") { db in
             try db.execute(sql: AppDBMigrations.v1_4_baselineDDL)
-            // 插入 v1.3 的 leased 行（v1.4 enum 已不允许，直接 raw SQL）
+        }
+        try partialMigrator.migrate(queue)
+        // 插入 v1.3 的 leased 行（v1.4 enum 已不允许，直接 raw SQL）
+        try queue.write { db in
             try db.execute(sql: """
                 INSERT INTO download_acceptance_journal
                   (training_set_id, lease_id, state, state_entered_at)
@@ -836,15 +858,40 @@ final class DefaultRecordRepositoryTests: XCTestCase {
     }
 
     // 用例 5：statistics 计算 totalCount / winCount (profit > 0) / currentCapital (累加)
+    // 用不同 createdAt 防 tiebreak ambiguity（R1 修订 codex med-1）
     func test_statistics_aggregates_correctly() throws {
-        _ = try db.insertRecord(makeRecord(totalCapital: 10_000, profit: 100), ops: [], drawings: [])
-        _ = try db.insertRecord(makeRecord(totalCapital: 10_100, profit: -50), ops: [], drawings: [])
-        _ = try db.insertRecord(makeRecord(totalCapital: 10_050, profit: 200), ops: [], drawings: [])
+        _ = try db.insertRecord(makeRecord(createdAt: 1_000, totalCapital: 10_000, profit: 100),
+                                ops: [], drawings: [])
+        _ = try db.insertRecord(makeRecord(createdAt: 2_000, totalCapital: 10_100, profit: -50),
+                                ops: [], drawings: [])
+        _ = try db.insertRecord(makeRecord(createdAt: 3_000, totalCapital: 10_050, profit: 200),
+                                ops: [], drawings: [])
 
         let stats = try db.statistics()
         XCTAssertEqual(stats.totalCount, 3)
         XCTAssertEqual(stats.winCount, 2)        // profit > 0：第1+第3
         XCTAssertEqual(stats.currentCapital, 10_250.0, accuracy: 0.01)  // 最后一条 totalCapital + profit
+    }
+
+    // 用例 5b（R1 新增 codex med-1）：tied createdAt → tiebreak by id DESC
+    // 验证当 created_at 完全相同时，statistics 取最大 id 行；listRecords 取 id DESC 序
+    func test_tied_createdAt_uses_id_DESC_as_tiebreak() throws {
+        // 三条同 createdAt：id=1 / 2 / 3 自然递增
+        _ = try db.insertRecord(makeRecord(createdAt: 5_000, totalCapital: 10_000, profit: 10),
+                                ops: [], drawings: [])
+        _ = try db.insertRecord(makeRecord(createdAt: 5_000, totalCapital: 10_010, profit: 20),
+                                ops: [], drawings: [])
+        let lastId = try db.insertRecord(makeRecord(createdAt: 5_000, totalCapital: 10_030, profit: 30),
+                                         ops: [], drawings: [])
+        // statistics 必须取 id 最大的（lastId 行）
+        XCTAssertEqual(try db.statistics().currentCapital, 10_060.0, accuracy: 0.01)
+
+        // listRecords 必须按 id DESC 序输出（同 createdAt 时）
+        let all = try db.listRecords(limit: nil)
+        XCTAssertEqual(all.count, 3)
+        XCTAssertEqual(all[0].id, lastId)            // id 最大（最新插入）排第一
+        XCTAssertGreaterThan(all[0].id ?? 0, all[1].id ?? 0)
+        XCTAssertGreaterThan(all[1].id ?? 0, all[2].id ?? 0)
     }
 
     // 用例 6：DrawingObject.anchors JSON roundtrip
@@ -979,11 +1026,12 @@ enum RecordRepositoryImpl {
     }
 
     static func listRecords(_ db: Database, limit: Int?) throws -> [TrainingRecord] {
+        // R1 修订（codex med-1）：加 id DESC tiebreak 防同毫秒并列时 SQLite 任选不定序
         let sql: String
         if let limit = limit {
-            sql = "SELECT * FROM training_records ORDER BY created_at DESC LIMIT \(limit)"
+            sql = "SELECT * FROM training_records ORDER BY created_at DESC, id DESC LIMIT \(limit)"
         } else {
-            sql = "SELECT * FROM training_records ORDER BY created_at DESC"
+            sql = "SELECT * FROM training_records ORDER BY created_at DESC, id DESC"
         }
         let rows = try Row.fetchAll(db, sql: sql)
         return try rows.map { try recordFromRow($0) }
@@ -1017,10 +1065,11 @@ enum RecordRepositoryImpl {
         let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM training_records") ?? 0
         let wins = try Int.fetchOne(db, sql:
             "SELECT COUNT(*) FROM training_records WHERE profit > 0") ?? 0
-        // currentCapital：最后一条（按 created_at DESC）的 total_capital + profit
+        // currentCapital：最后一条（按 created_at DESC, id DESC）的 total_capital + profit
+        // R1 修订（codex med-1）：加 id DESC tiebreak 防同毫秒并列
         let cap: Double = try Row.fetchOne(db, sql: """
             SELECT total_capital, profit FROM training_records
-            ORDER BY created_at DESC LIMIT 1
+            ORDER BY created_at DESC, id DESC LIMIT 1
             """).map { $0["total_capital"] as Double + $0["profit"] as Double } ?? 0
         return (total, wins, cap)
     }
@@ -1534,6 +1583,70 @@ final class DefaultSettingsDAOTests: XCTestCase {
             XCTAssertEqual(try db.loadSettings().displayMode, mode)
         }
     }
+
+    // 用例 7（R1 新增 codex high-2）：commission_rate 列含 garbage → .dbCorrupted（不静默回 0）
+    func test_loadSettings_malformed_commission_rate_throws_dbCorrupted() throws {
+        let queue = try AppDBFixture.openRaw(at: dbURL)
+        try queue.write { db in
+            try db.execute(sql:
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                arguments: ["commission_rate", "garbage_not_a_number"])
+        }
+        XCTAssertThrowsError(try db.loadSettings()) { err in
+            guard let appErr = err as? AppError,
+                  case .persistence(.dbCorrupted) = appErr else {
+                return XCTFail("期望 .persistence(.dbCorrupted)，实际 \(err)")
+            }
+        }
+    }
+
+    // 用例 8（R1 新增）：display_mode 列含未知 enum case → .dbCorrupted
+    func test_loadSettings_unknown_displayMode_throws_dbCorrupted() throws {
+        let queue = try AppDBFixture.openRaw(at: dbURL)
+        try queue.write { db in
+            try db.execute(sql:
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                arguments: ["display_mode", "purple"])
+        }
+        XCTAssertThrowsError(try db.loadSettings()) { err in
+            guard let appErr = err as? AppError,
+                  case .persistence(.dbCorrupted) = appErr else {
+                return XCTFail("期望 .persistence(.dbCorrupted)，实际 \(err)")
+            }
+        }
+    }
+
+    // 用例 9（R1 新增）：min_commission_enabled 列含非 bool 串 → .dbCorrupted
+    func test_loadSettings_malformed_bool_throws_dbCorrupted() throws {
+        let queue = try AppDBFixture.openRaw(at: dbURL)
+        try queue.write { db in
+            try db.execute(sql:
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                arguments: ["min_commission_enabled", "yes"])
+        }
+        XCTAssertThrowsError(try db.loadSettings()) { err in
+            guard let appErr = err as? AppError,
+                  case .persistence(.dbCorrupted) = appErr else {
+                return XCTFail("期望 .persistence(.dbCorrupted)，实际 \(err)")
+            }
+        }
+    }
+
+    // 用例 10（R1 新增）：partial keys（仅 commission_rate 存在）→ 缺失 key 走 default，存在 key 真解析
+    func test_loadSettings_partial_keys_missing_uses_default() throws {
+        let queue = try AppDBFixture.openRaw(at: dbURL)
+        try queue.write { db in
+            // 只写 commission_rate 一个 key，其它 3 个 key 缺失
+            try db.execute(sql:
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                arguments: ["commission_rate", "0.0005"])
+        }
+        let s = try db.loadSettings()
+        XCTAssertEqual(s.commissionRate, 0.0005, accuracy: 1e-9)  // 真解析
+        XCTAssertEqual(s.minCommissionEnabled, false)             // missing → default
+        XCTAssertEqual(s.totalCapital, 0)                         // missing → default
+        XCTAssertEqual(s.displayMode, .system)                    // missing → default
+    }
 }
 ```
 
@@ -1562,22 +1675,50 @@ enum SettingsDAOImpl {
     private static let keyDisplayMode = "display_mode"
 
     static func loadSettings(_ db: Database) throws -> AppSettings {
+        // R1 修订（codex high-2）：分 missing vs malformed 两路。
+        // missing = 首次启动 / 新增 key 未写 → zero-value default（合法）
+        // malformed = key 存在但 value 不可解析 → AppError.persistence(.dbCorrupted)
+        //             静默回退会把损坏的 commission/capital 重置 0，影响财务计算
         let rows = try Row.fetchAll(db, sql: "SELECT key, value FROM settings")
         var dict: [String: String] = [:]
         for row in rows {
             dict[row["key"] as String] = (row["value"] as String)
         }
 
-        let commissionRate = Double(dict[keyCommissionRate] ?? "") ?? 0
-        let minCommissionEnabled = (dict[keyMinCommissionEnabled] ?? "false") == "true"
-        let totalCapital = Double(dict[keyTotalCapital] ?? "") ?? 0
-        let modeRaw = dict[keyDisplayMode] ?? DisplayMode.system.rawValue
-        let displayMode = DisplayMode(rawValue: modeRaw) ?? .system
+        let commissionRate = try parseDouble(dict[keyCommissionRate], default: 0)
+        let minCommissionEnabled = try parseBool(dict[keyMinCommissionEnabled], default: false)
+        let totalCapital = try parseDouble(dict[keyTotalCapital], default: 0)
+        let displayMode = try parseDisplayMode(dict[keyDisplayMode], default: .system)
 
         return AppSettings(commissionRate: commissionRate,
                            minCommissionEnabled: minCommissionEnabled,
                            totalCapital: totalCapital,
                            displayMode: displayMode)
+    }
+
+    private static func parseDouble(_ raw: String?, default def: Double) throws -> Double {
+        guard let raw = raw else { return def }       // missing → default
+        guard let v = Double(raw) else {              // present but malformed → corrupt
+            throw AppError.persistence(.dbCorrupted)
+        }
+        return v
+    }
+
+    private static func parseBool(_ raw: String?, default def: Bool) throws -> Bool {
+        guard let raw = raw else { return def }
+        switch raw {
+        case "true": return true
+        case "false": return false
+        default: throw AppError.persistence(.dbCorrupted)
+        }
+    }
+
+    private static func parseDisplayMode(_ raw: String?, default def: DisplayMode) throws -> DisplayMode {
+        guard let raw = raw else { return def }
+        guard let m = DisplayMode(rawValue: raw) else {
+            throw AppError.persistence(.dbCorrupted)
+        }
+        return m
     }
 
     static func saveSettings(_ db: Database, settings s: AppSettings) throws {
@@ -1785,6 +1926,63 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
             }
         }
     }
+
+    // 用例 8（R1 新增 codex high-1）：晚到 retry 不能把 .stored 倒回 .downloaded
+    func test_upsert_stale_state_is_NOOP_keeps_existing() throws {
+        // 先推进到 .stored
+        try db.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 1, leaseId: "L1", state: .stored,
+                      sqliteLocalPath: "/tmp/set.sqlite", contentHash: "deadbeef", lastError: nil)
+        XCTAssertEqual(try db.listByState(.stored).count, 1)
+
+        // 模拟晚到的回退 retry：.downloaded 不能覆盖 .stored
+        try db.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+
+        // 行仍在 .stored，含原 sqliteLocalPath / contentHash 不变
+        XCTAssertEqual(try db.listByState(.downloaded).count, 0)
+        let stored = try db.listByState(.stored)
+        XCTAssertEqual(stored.count, 1)
+        XCTAssertEqual(stored[0].sqliteLocalPath, "/tmp/set.sqlite")
+        XCTAssertEqual(stored[0].contentHash, "deadbeef")
+    }
+
+    // 用例 9（R1 新增 codex high-1）：终态 .confirmed 与 .rejected 同 rank，互斥不可转
+    func test_upsert_terminal_states_mutually_exclusive() throws {
+        // 方向 A：confirmed → rejected NOOP
+        try db.upsert(trainingSetId: 2, leaseId: "L2", state: .confirmed,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 2, leaseId: "L2", state: .rejected,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: "should_not_apply")
+        XCTAssertEqual(try db.listByState(.rejected).filter { $0.leaseId == "L2" }.count, 0)
+        XCTAssertEqual(try db.listByState(.confirmed).filter { $0.leaseId == "L2" }.count, 1)
+
+        // 方向 B：rejected → confirmed NOOP
+        try db.upsert(trainingSetId: 3, leaseId: "L3", state: .rejected,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: "x")
+        try db.upsert(trainingSetId: 3, leaseId: "L3", state: .confirmed,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        XCTAssertEqual(try db.listByState(.confirmed).filter { $0.leaseId == "L3" }.count, 0)
+        XCTAssertEqual(try db.listByState(.rejected).filter { $0.leaseId == "L3" }.count, 1)
+    }
+
+    // 用例 10（R1 新增 codex high-1）：同 state 重试合法 → state_entered_at 刷新 + 辅助列覆盖
+    func test_upsert_same_state_retry_refreshes_entered_at_and_aux_fields() throws {
+        try db.upsert(trainingSetId: 4, leaseId: "L4", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        let firstStamp = try db.listByState(.downloaded).first?.stateEnteredAt ?? 0
+        Thread.sleep(forTimeInterval: 0.01)
+        try db.upsert(trainingSetId: 4, leaseId: "L4", state: .downloaded,
+                      sqliteLocalPath: "/tmp/path", contentHash: "abc12345",
+                      lastError: nil)
+        let after = try db.listByState(.downloaded).first { $0.leaseId == "L4" }
+        XCTAssertGreaterThanOrEqual(after?.stateEnteredAt ?? 0, firstStamp)
+        XCTAssertEqual(after?.sqliteLocalPath, "/tmp/path")
+        XCTAssertEqual(after?.contentHash, "abc12345")
+    }
 }
 ```
 
@@ -1810,12 +2008,44 @@ Create `ios/Contracts/Sources/KlineTrainerPersistence/Internal/AcceptanceJournal
 
 ```swift
 import Foundation
+import os.log
 @preconcurrency import GRDB
 import KlineTrainerContracts
 
 /// AcceptanceJournalDAO 静态方法实现。
 /// 表 download_acceptance_journal UNIQUE(training_set_id, lease_id)。
+/// **R1 修订**：upsert 加单调 rank guard（codex high-1）；listByState decode 加 fail-safe + os_log（codex med-3）
 enum AcceptanceJournalDAOImpl {
+
+    private static let logger = Logger(subsystem: "com.kline.trainer.persistence",
+                                       category: "AcceptanceJournalDAO")
+
+    /// state monotonic rank（per spec L1798+ P2 状态机）。
+    /// `confirmed` 与 `rejected` 同 rank（6）且互斥终态：彼此不可转换（避免误把成功改失败 / 失败改成功）。
+    private static func stateRank(_ s: P2JournalState) -> Int {
+        switch s {
+        case .downloaded:     return 0
+        case .crcOK:          return 1
+        case .unzipped:       return 2
+        case .dbVerified:     return 3
+        case .stored:         return 4
+        case .confirmPending: return 5
+        case .confirmed:      return 6
+        case .rejected:       return 6
+        }
+    }
+
+    /// 转换合法性判定：
+    /// - new rank > old rank → forward 允许
+    /// - new == old → 同 state 重试，允许（刷新 entered_at + 辅助列）
+    /// - 其它（new rank < old，或同 rank 不同 state = 终态互斥）→ NOOP
+    private static func canApply(new: P2JournalState, over old: P2JournalState) -> Bool {
+        let nr = stateRank(new)
+        let or = stateRank(old)
+        if nr > or { return true }
+        if nr == or && new == old { return true }
+        return false
+    }
 
     static func upsert(_ db: Database,
                        trainingSetId: Int, leaseId: String,
@@ -1823,21 +2053,56 @@ enum AcceptanceJournalDAOImpl {
                        sqliteLocalPath: String?,
                        contentHash: String?,
                        lastError: String?) throws {
+        // R1 修订（codex high-1）：read-then-write 单调 rank guard
+        // 避免晚到 retry 把 .stored/.confirmed/.rejected 倒回 .downloaded
         let stateEnteredAt = Int64(Date().timeIntervalSince1970 * 1000)
+
+        // ① 查 existing state（若有）
+        if let existingRaw = try String.fetchOne(db, sql: """
+            SELECT state FROM download_acceptance_journal
+            WHERE training_set_id = ? AND lease_id = ?
+            """, arguments: [trainingSetId, leaseId]) {
+            // 行已存在
+            if let existing = P2JournalState(rawValue: existingRaw) {
+                if !canApply(new: state, over: existing) {
+                    // 晚到回退 / 终态互斥：NOOP，保留 existing（不 throw —— retry 合法）
+                    logger.info("noop: rejected upsert \(state.rawValue, privacy: .public) over \(existing.rawValue, privacy: .public) for trainingSetId=\(trainingSetId) leaseId=\(leaseId, privacy: .public)")
+                    return
+                }
+                // 转换合法 → 走下方 UPDATE
+            }
+            // existing state 是 unknown raw value（v1.3 残留 leased 等）→ 视为可被覆盖，走 UPDATE
+            try update(db, trainingSetId: trainingSetId, leaseId: leaseId,
+                       state: state, stateEnteredAt: stateEnteredAt,
+                       sqliteLocalPath: sqliteLocalPath, contentHash: contentHash,
+                       lastError: lastError)
+        } else {
+            // 行不存在 → INSERT 新行
+            try db.execute(sql: """
+                INSERT INTO download_acceptance_journal
+                  (training_set_id, lease_id, state, state_entered_at,
+                   last_error, sqlite_local_path, content_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, arguments: [
+                    trainingSetId, leaseId, state.rawValue, stateEnteredAt,
+                    lastError, sqliteLocalPath, contentHash
+                ])
+        }
+    }
+
+    private static func update(_ db: Database,
+                               trainingSetId: Int, leaseId: String,
+                               state: P2JournalState, stateEnteredAt: Int64,
+                               sqliteLocalPath: String?, contentHash: String?,
+                               lastError: String?) throws {
         try db.execute(sql: """
-            INSERT INTO download_acceptance_journal
-              (training_set_id, lease_id, state, state_entered_at,
-               last_error, sqlite_local_path, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (training_set_id, lease_id) DO UPDATE SET
-              state = excluded.state,
-              state_entered_at = excluded.state_entered_at,
-              last_error = excluded.last_error,
-              sqlite_local_path = excluded.sqlite_local_path,
-              content_hash = excluded.content_hash
+            UPDATE download_acceptance_journal
+            SET state = ?, state_entered_at = ?, last_error = ?,
+                sqlite_local_path = ?, content_hash = ?
+            WHERE training_set_id = ? AND lease_id = ?
             """, arguments: [
-                trainingSetId, leaseId, state.rawValue, stateEnteredAt,
-                lastError, sqliteLocalPath, contentHash
+                state.rawValue, stateEnteredAt, lastError,
+                sqliteLocalPath, contentHash, trainingSetId, leaseId
             ])
     }
 
@@ -1845,7 +2110,18 @@ enum AcceptanceJournalDAOImpl {
         let rows = try Row.fetchAll(db, sql:
             "SELECT * FROM download_acceptance_journal WHERE state = ? ORDER BY id ASC",
             arguments: [state.rawValue])
-        return try rows.map { try journalRowFromRow($0) }
+        // R1 修订（codex med-3）：fail-safe decode + os_log warning，不抛 .dbCorrupted
+        return rows.compactMap { row -> AcceptanceJournalRow? in
+            do {
+                return try journalRowFromRow(row)
+            } catch {
+                let stateRaw: String = row["state"]
+                let tid: Int = row["training_set_id"]
+                let lid: String = row["lease_id"]
+                logger.error("skip row: unknown state '\(stateRaw, privacy: .public)' tid=\(tid) lid=\(lid, privacy: .public)")
+                return nil
+            }
+        }
     }
 
     static func deleteByIdLease(_ db: Database, trainingSetId: Int, leaseId: String) throws {
@@ -1858,7 +2134,6 @@ enum AcceptanceJournalDAOImpl {
     private static func journalRowFromRow(_ row: Row) throws -> AcceptanceJournalRow {
         let stateRaw: String = row["state"]
         guard let state = P2JournalState(rawValue: stateRaw) else {
-            // 不应发生：listByState 已用 enum.rawValue 过滤；若发生 = DB drift
             throw AppError.persistence(.dbCorrupted)
         }
         return AcceptanceJournalRow(
@@ -2156,9 +2431,23 @@ git commit -m "test(P4): happy-path integration + schema drift CI + acceptance d
 
 ## Round N 对抗性 review
 
-由 codex:adversarial-review 跑完后填，包含：
-- Round 1 findings + 修订记录
-- Round N reject 理由（若有）
+### Round 1（codex 2026-05-03，branch-diff vs origin/main）
+
+verdict = **needs-attention**，5 findings：
+
+| # | sev | finding | revision applied |
+|---|---|---|---|
+| 1 | HIGH | Journal upsert ON CONFLICT 盲覆盖 → 晚到 retry 把 .stored/.confirmed 倒回 .downloaded → 丢 recovery row | Design Decision §10 重写为 read-then-write monotonic rank guard；canApply(new, over) 规则；终态 confirmed/rejected 同 rank 互斥；AcceptanceJournalDAOImpl.upsert 改 read-then-write；新增 用例 8/9/10 |
+| 2 | HIGH | SettingsDAO loadSettings 把 corrupt value 当 missing 走 default → 静默把财务参数重置 0 | Design Decision §9 分 missing vs malformed 两路；SettingsDAOImpl.loadSettings 新增 parseDouble/Bool/DisplayMode helper；新增 用例 7/8/9/10 |
+| 3 | MED | listRecords / statistics 仅按 created_at DESC，同毫秒并列 SQLite 任选 | Design Decision §6 加 id DESC tiebreak 说明；RecordRepositoryImpl.listRecords + statistics 加 `, id DESC`；test_statistics_aggregates_correctly 改用不同 createdAt；新增 用例 5b test_tied_createdAt_uses_id_DESC_as_tiebreak |
+| 4 | MED | makeV1_3SimulatedDB 直接 raw SQL 跑 baseline，没标 0001 已 applied → migrator 重跑 0001 撞 "table exists" 抛错 → 0003 永远不验 | AppDBFixture.makeV1_3SimulatedDB 改用 partial migrator state（仅注册 0001 跑一次） |
+| 5 | MED | listByState 不做 unknown raw value fail-safe，违反 spec L289 字面 | Design Decision §11 重写：fail-safe + os_log；AcceptanceJournalDAOImpl.listByState compactMap + try journalRowFromRow；listByState 不抛 .dbCorrupted |
+
+5 findings 全部应用真修订（无 reject）。残留：
+- 用例 8/9/10 的 monotonic rank 测试隐式 cover spec L1798+ P2 状态机；下游 P2 runner（PR 4a）实际调用时若有反向需求需扩 protocol（如增 `forceTransition` 显式覆盖 API）
+- os_log 副作用难直测；测试通过验证 rows 不返回 + acceptance grep 兜底
+
+待执行 R2 验证。
 
 ---
 
