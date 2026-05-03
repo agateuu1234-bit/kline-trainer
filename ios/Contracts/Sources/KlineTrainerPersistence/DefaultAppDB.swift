@@ -47,19 +47,46 @@ public final class DefaultAppDB: AppDB {
         }
     }
 
-    // MARK: - RecordRepository（实现见 RecordRepositoryImpl + Task 4 extension）
+    // MARK: - RecordRepository
+
     public func insertRecord(_ r: TrainingRecord, ops: [TradeOperation],
                              drawings: [DrawingObject]) throws -> Int64 {
-        fatalError("Task 4 实现")
+        do {
+            return try dbQueue.write { db in
+                try RecordRepositoryImpl.insertRecord(db, record: r, ops: ops, drawings: drawings)
+            }
+        } catch let appErr as AppError {
+            throw appErr
+        } catch {
+            throw PersistenceErrorMapping.translate(error)
+        }
     }
+
     public func listRecords(limit: Int?) throws -> [TrainingRecord] {
-        fatalError("Task 4 实现")
+        do {
+            return try dbQueue.read { db in
+                try RecordRepositoryImpl.listRecords(db, limit: limit)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
     }
+
     public func loadRecordBundle(id: Int64) throws -> (TrainingRecord, [TradeOperation], [DrawingObject]) {
-        fatalError("Task 4 实现")
+        do {
+            return try dbQueue.read { db in
+                try RecordRepositoryImpl.loadRecordBundle(db, id: id)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
     }
+
     public func statistics() throws -> (totalCount: Int, winCount: Int, currentCapital: Double) {
-        fatalError("Task 4 实现")
+        do {
+            return try dbQueue.read { db in
+                try RecordRepositoryImpl.statistics(db)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
     }
 
     // MARK: - PendingTrainingRepository（Task 5）
