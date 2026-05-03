@@ -1,4 +1,5 @@
 import XCTest
+@preconcurrency import GRDB
 import KlineTrainerContracts
 @testable import KlineTrainerPersistence
 
@@ -115,4 +116,39 @@ final class DefaultTrainingSetDBFactoryTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - meta corrupt rows（codex round 2 HIGH-1）
+
+    /// meta NOT NULL 列存 NULL → MetaRow throwing decode → .dbCorrupted（不再 fatalError）
+    func test_openAndVerify_metaNullInRequiredColumn_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.skipMetaTable = true
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+
+        // 注入 weakened-schema meta + NULL stock_code
+        do {
+            let writeQueue = try GRDB.DatabaseQueue(path: url.path)
+            try writeQueue.write { db in
+                try db.execute(sql: """
+                CREATE TABLE meta (
+                    stock_code TEXT, stock_name TEXT,
+                    start_datetime INTEGER, end_datetime INTEGER
+                )
+                """)
+                try db.execute(sql: """
+                    INSERT INTO meta (stock_code, stock_name, start_datetime, end_datetime)
+                    VALUES (NULL, '测试', 1000, 2000)
+                    """)
+            }
+        }
+
+        let factory = DefaultTrainingSetDBFactory()
+        XCTAssertThrowsError(try factory.openAndVerify(file: url, expectedSchemaVersion: 1)) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+    }
+
 }

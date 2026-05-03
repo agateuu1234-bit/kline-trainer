@@ -51,11 +51,20 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
             throw AppError.persistence(.dbCorrupted)
         }
 
+        // 校验 per-period endGlobalIndex 严格递增（per codex round 2 HIGH-2）：
+        // SQL 已 ORDER BY period, end_global_index，但 schema 无 UNIQUE 约束；
+        // 二分查找 (E5 TrainingEngine) 依赖严格递增，duplicate / non-increasing 会污染步进。
+        // Reader 是首道运行时边界，必须 reject malformed training-set file。
         var result: [Period: [KLineCandle]] = [:]
+        var lastEnd: [Period: Int] = [:]
         for r in kRows {
             guard let period = Period(rawValue: r.period) else {
                 throw AppError.persistence(.dbCorrupted)
             }
+            if let prev = lastEnd[period], r.endGlobalIndex <= prev {
+                throw AppError.persistence(.dbCorrupted)
+            }
+            lastEnd[period] = r.endGlobalIndex
             let candle = KLineCandle(
                 period: period,
                 datetime: r.datetime,

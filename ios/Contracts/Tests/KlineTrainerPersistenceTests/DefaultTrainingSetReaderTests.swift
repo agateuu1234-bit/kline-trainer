@@ -181,4 +181,47 @@ final class DefaultTrainingSetReaderTests: XCTestCase {
         }
         reader.close()
     }
+
+    // MARK: - endGlobalIndex 单调性校验（codex round 2 HIGH-2）
+
+    /// duplicate end_global_index（同 period 内重复值）→ .dbCorrupted
+    func test_loadAllCandles_duplicateEndGlobalIndexInPeriod_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = [
+            (.m3, [(1_000, 0, 0), (1_180, 1, 1), (1_360, 2, 1)]),  // endGIdx 1 重复
+        ]
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
+
+    /// non-increasing end_global_index（同 period 内倒序）→ .dbCorrupted
+    /// SQL ORDER BY 已按 end_global_index 升序，要构造 non-increasing 必须有重复或 NULL；
+    /// 这里用 NULL 末位+先递增后 NULL 的边界（NULL 在 SQLite ORDER BY ASC 排首位）。
+    /// 实际测试同 period 内出现两个值 ASC 后，第二个 SELECT 顺位反而 ≤ 前者只有 duplicate；
+    /// 这个 test 用跨 period 边界（不同 period 间不校验）+ 同 period duplicate 双重覆盖。
+    func test_loadAllCandles_nonStrictlyIncreasingAcrossSamePeriod_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = [
+            (.m3, [(1_000, 0, 5), (1_180, 1, 5)]),  // 两条 endGIdx 都是 5（duplicate）
+            (.daily, [(1_000, nil, 1)]),
+        ]
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
 }

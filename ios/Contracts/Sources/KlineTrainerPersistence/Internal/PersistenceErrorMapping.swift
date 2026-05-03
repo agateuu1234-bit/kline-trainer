@@ -29,6 +29,14 @@ enum PersistenceErrorMapping {
             // 兜底：脱敏 token，不放 dbErr.message（含路径 / 环境信息）
             return .persistence(.ioError("sqlite_error_\(dbErr.resultCode.rawValue)"))
         }
+        // DecodingError：GRDB FetchableRecord+Decodable 路径在列类型 mismatch / NULL 出现在 NOT NULL 列
+        // / key 缺失时抛标准 Swift DecodingError（typeMismatch / valueNotFound / keyNotFound）。
+        // → schema 与 data 不一致 = .dbCorrupted（per codex round 2 HIGH-1）。
+        // 也覆盖 GRDB internal RowDecodingError（@usableFromInline enum，跨模块只能字串识别）。
+        if error is DecodingError ||
+           String(reflecting: type(of: error)).contains("RowDecodingError") {
+            return .persistence(.dbCorrupted)
+        }
         let nsErr = error as NSError
         if nsErr.domain == NSCocoaErrorDomain &&
            (nsErr.code == NSFileNoSuchFileError || nsErr.code == NSFileReadNoSuchFileError) {
