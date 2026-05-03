@@ -6,14 +6,9 @@ import KlineTrainerContracts
 /// - 持有 var queue: DatabaseQueue?；close 设 nil 触发 ARC 释放（per spec L1848 "释放 DatabaseQueue"）
 /// - cached meta 在 init 时已加载，loadMeta O(1)
 /// - close 后 read 抛 AppError.internalError（caller 误用，不是 IO 故障）
-///
-/// 已知 residual（per round 1 code review MAJOR-1，accepted as design）：
-/// loadAllCandles 内 `row[col] as Type` 走 GRDB.Row 的 typed subscript，遇列类型不匹配
-/// （如 datetime 列存 TEXT、volume 列存 NULL 等）会 fatalError 而非抛 .dbCorrupted。
-/// 当前防线：①后端 backend/sql/training_set_schema_v1.sql 强制 NOT NULL + 类型约束；
-/// ②backend writer 是受信任来源，不会写入类型错乱数据；③SQLITE_NOTADB / SQLITE_CORRUPT
-/// （磁盘损坏场景）已经走 PersistenceErrorMapping 翻译为 .dbCorrupted。
-/// 列类型 silent 错乱属于"writer 受 trust 假设被打破"的极端场景，不在本 PR 防御 scope。
+/// - loadAllCandles row 取值用 throwing decode（per codex round 1 HIGH-2）：
+///   列类型不匹配 / NULL 出现在 NOT NULL 列 → 抛 AppError.persistence(.dbCorrupted)，
+///   不再 fatalError
 public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Sendable {
     private var queue: DatabaseQueue?
     private let cachedMeta: TrainingSetMeta
@@ -32,9 +27,13 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
 
     public func loadAllCandles() throws -> [Period: [KLineCandle]] {
         let q = try ensureOpen()
+        let kRows: [KLineRow]
         do {
-            let rows = try q.read { db in
-                try Row.fetchAll(db, sql: """
+            kRows = try q.read { db in
+                // FetchableRecord + Decodable 走 GRDB 内部 throwing decode 路径：
+                // 列类型 mismatch / NULL 出现在 NOT NULL 列 → 抛 RowDecodingError，
+                // 由外层 catch 翻译为 AppError.persistence(.dbCorrupted)
+                try KLineRow.fetchAll(db, sql: """
                 SELECT period, datetime, open, high, low, close, volume,
                        amount, ma66, boll_upper, boll_mid, boll_lower,
                        macd_diff, macd_dea, macd_bar, global_index, end_global_index
@@ -42,37 +41,40 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
                 ORDER BY period, end_global_index
                 """)
             }
-            var result: [Period: [KLineCandle]] = [:]
-            for row in rows {
-                let rawPeriod: String = row["period"]
-                guard let period = Period(rawValue: rawPeriod) else {
-                    throw AppError.persistence(.dbCorrupted)
-                }
-                let candle = KLineCandle(
-                    period: period,
-                    datetime: row["datetime"] as Int64,
-                    open: row["open"] as Double,
-                    high: row["high"] as Double,
-                    low: row["low"] as Double,
-                    close: row["close"] as Double,
-                    volume: row["volume"] as Int64,
-                    amount: row["amount"] as Double?,
-                    ma66: row["ma66"] as Double?,
-                    bollUpper: row["boll_upper"] as Double?,
-                    bollMid: row["boll_mid"] as Double?,
-                    bollLower: row["boll_lower"] as Double?,
-                    macdDiff: row["macd_diff"] as Double?,
-                    macdDea: row["macd_dea"] as Double?,
-                    macdBar: row["macd_bar"] as Double?,
-                    globalIndex: row["global_index"] as Int?,
-                    endGlobalIndex: row["end_global_index"] as Int
-                )
-                result[period, default: []].append(candle)
-            }
-            return result
+        } catch let app as AppError {
+            throw app
+        } catch let dbErr as DatabaseError {
+            // SQLite IO 错误（缺表 / 损坏 / 权限）走 PersistenceErrorMapping 翻译
+            throw PersistenceErrorMapping.translate(dbErr)
         } catch {
-            throw PersistenceErrorMapping.translate(error)
+            // RowDecodingError / 其它 row decode 异常 → schema 与 data 不一致 = .dbCorrupted
+            throw AppError.persistence(.dbCorrupted)
         }
+
+        var result: [Period: [KLineCandle]] = [:]
+        for r in kRows {
+            guard let period = Period(rawValue: r.period) else {
+                throw AppError.persistence(.dbCorrupted)
+            }
+            let candle = KLineCandle(
+                period: period,
+                datetime: r.datetime,
+                open: r.open, high: r.high, low: r.low, close: r.close,
+                volume: r.volume,
+                amount: r.amount,
+                ma66: r.ma66,
+                bollUpper: r.bollUpper,
+                bollMid: r.bollMid,
+                bollLower: r.bollLower,
+                macdDiff: r.macdDiff,
+                macdDea: r.macdDea,
+                macdBar: r.macdBar,
+                globalIndex: r.globalIndex,
+                endGlobalIndex: r.endGlobalIndex
+            )
+            result[period, default: []].append(candle)
+        }
+        return result
     }
 
     public func close() {

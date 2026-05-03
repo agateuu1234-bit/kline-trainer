@@ -15,8 +15,11 @@ let package = Package(
         ),
     ],
     dependencies: [
-        // GRDB 7.x：Swift 6 strict concurrency 兼容；read-only DatabaseQueue / PRAGMA 支持。
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
+        // GRDB 6.29.x：与 ios/KlineTrainer/KlineTrainer.xcodeproj 现有 pin (upToNextMajor 6.29.0)
+        // 一致，避免 SwiftPM 单版本解析冲突（codex round 1 HIGH-1）。
+        // 6.29 已支持 read-only DatabaseQueue / PRAGMA / @preconcurrency import；
+        // Swift 6 strict-concurrency 由 @preconcurrency import GRDB 兜底。
+        .package(url: "https://github.com/groue/GRDB.swift.git", "6.29.0"..<"7.0.0"),
     ],
     targets: [
         .target(

@@ -100,4 +100,85 @@ final class DefaultTrainingSetReaderTests: XCTestCase {
             XCTAssertEqual(module, "P3b")
         }
     }
+
+    // MARK: - corrupt row data（codex round 1 HIGH-2 加测）
+
+    /// 列类型 mismatch（SQLite manifest typing 允许 INTEGER 列存 TEXT 字串）→ .dbCorrupted
+    func test_loadAllCandles_wrongTypeInColumn_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.skipKlinesTable = true
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+
+        do {
+            let writeQueue = try GRDB.DatabaseQueue(path: url.path)
+            try writeQueue.write { db in
+                // schema 不带 NOT NULL，模拟数据 corruption / 旧 schema
+                try db.execute(sql: """
+                CREATE TABLE klines (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    period TEXT, datetime INTEGER,
+                    open REAL, high REAL, low REAL, close REAL,
+                    volume INTEGER,
+                    amount REAL, ma66 REAL,
+                    boll_upper REAL, boll_mid REAL, boll_lower REAL,
+                    macd_diff REAL, macd_dea REAL, macd_bar REAL,
+                    global_index INTEGER, end_global_index INTEGER
+                )
+                """)
+                // datetime 列存 TEXT 字串（SQLite manifest typing 允许）
+                try db.execute(sql: """
+                    INSERT INTO klines (period, datetime, open, high, low, close, volume, end_global_index)
+                    VALUES ('m3', 'not_a_timestamp', 1.0, 2.0, 0.5, 1.5, 100, 0)
+                    """)
+            }
+        }
+
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
+
+    /// NULL 出现在 NOT NULL 语义列（KLineCandle.datetime 是 Int64）→ .dbCorrupted
+    func test_loadAllCandles_nullInRequiredColumn_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.skipKlinesTable = true
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+
+        do {
+            let writeQueue = try GRDB.DatabaseQueue(path: url.path)
+            try writeQueue.write { db in
+                try db.execute(sql: """
+                CREATE TABLE klines (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    period TEXT, datetime INTEGER,
+                    open REAL, high REAL, low REAL, close REAL,
+                    volume INTEGER,
+                    amount REAL, ma66 REAL,
+                    boll_upper REAL, boll_mid REAL, boll_lower REAL,
+                    macd_diff REAL, macd_dea REAL, macd_bar REAL,
+                    global_index INTEGER, end_global_index INTEGER
+                )
+                """)
+                // volume 列 NULL（KLineCandle.volume: Int64 是 NOT NULL 语义）
+                try db.execute(sql: """
+                    INSERT INTO klines (period, datetime, open, high, low, close, volume, end_global_index)
+                    VALUES ('m3', 1000, 1.0, 2.0, 0.5, 1.5, NULL, 0)
+                    """)
+            }
+        }
+
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
 }
