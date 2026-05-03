@@ -83,6 +83,30 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
             )
             result[period, default: []].append(candle)
         }
+
+        // .m3 是最小周期 = 全局 tick 轴（per codex round 3 HIGH-1 + spec L2242
+        // "global_index/end_global_index 严格递增 + 前后端 assert"）：
+        // - 每根 m3 candle 必须 globalIndex == endGlobalIndex（同一根 K 线起止索引相等）
+        // - m3 globalIndex 必须从 0 开始严格递增 0,1,2,...（无 gap、无 nil）
+        // - 其它周期的 endGlobalIndex 必须落在 m3 范围内（不超过 m3 最大 endGlobalIndex）
+        // 任一不变量违反 → .dbCorrupted。
+        if let m3Candles = result[.m3] {
+            for (i, c) in m3Candles.enumerated() {
+                guard let g = c.globalIndex,
+                      g == c.endGlobalIndex,
+                      g == i else {
+                    throw AppError.persistence(.dbCorrupted)
+                }
+            }
+            let m3Max = m3Candles.last?.endGlobalIndex ?? -1
+            for (period, candles) in result where period != .m3 {
+                for c in candles {
+                    if c.endGlobalIndex < 0 || c.endGlobalIndex > m3Max {
+                        throw AppError.persistence(.dbCorrupted)
+                    }
+                }
+            }
+        }
         return result
     }
 

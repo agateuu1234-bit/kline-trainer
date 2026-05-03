@@ -1305,10 +1305,17 @@ MINOR（9 应用）：
 - close 后 reader 实例本身仍存活直到 caller 放掉引用（queue 已通过 nil 触发 ARC 释放，但 reader 是 final class 由 caller 持有）—— 与 spec L1848 "释放 DatabaseQueue" 字面一致
 
 **7. Round 1 code review residual（accepted as design）：**
-- ~~**MAJOR-1**~~：**已修复（codex round 1 HIGH-2 + round 2 HIGH-1）**。`DefaultTrainingSetReader.loadAllCandles` 与 `DefaultTrainingSetDBFactory.openAndVerify` 都已改为通过内部 `KLineRow` / `MetaRow: FetchableRecord, Decodable` 走 GRDB throwing decode 路径：NULL 出现在 NOT NULL 语义列 → 抛 `DecodingError` / `RowDecodingError`，外层 catch（Reader 自带 catch-all + Factory 经 `PersistenceErrorMapping.translate` 加 `DecodingError` 检测分支）翻译为 `AppError.persistence(.dbCorrupted)`，不再 fatalError。新增 corrupt fixture tests：
-  - Reader：`wrongTypeInColumn` + `nullInRequiredColumn` + `duplicateEndGlobalIndexInPeriod` + `nonStrictlyIncreasingAcrossSamePeriod`（HIGH-2 endGlobalIndex 单调性校验）
-  - Factory：`metaNullInRequiredColumn`
-  - 总测试数 15 → 20。
-- **GRDB Decodable TEXT-in-INT silent coerce residual**（accept）：实测 GRDB 6.29 的 FetchableRecord+Decodable 路径在 INTEGER affinity 列存 TEXT 字串（`'not_a_timestamp'`）时 silent coerce 为 0 而非抛错（candle path 抛错是因 KLineRow 字段更多 + 或然路径差异，meta path silent coerce）。受 GRDB 内部行为限制无法完全防御 corrupt-TEXT-in-INT。**接受理由**：①codex HIGH-1 主诉是"crash"，NULL → 不再 crash（已满足）；②TEXT-in-INT silent coerce 不是 crash 而是失真；③production schema NOT NULL + writer 受信任。下游 if 真撞到，meta startDatetime=0 会被 caller (E6/TrainingEngine) 时间窗校验 reject。
+- ~~**MAJOR-1**~~：**已修复（codex round 1 HIGH-2 + round 2 HIGH-1）**。`KLineRow` / `MetaRow: FetchableRecord, Decodable` + `PersistenceErrorMapping` 加 `DecodingError` 检测分支 → `.dbCorrupted`，不再 fatalError。
+- ~~**TEXT-in-INT silent coerce residual**~~ —— **已修复（codex round 3 HIGH-2）**。`Factory.openAndVerify` 加 SQL 层 `typeof()` 校验：`SELECT COUNT(*) FROM meta WHERE typeof(stock_code) NOT IN ('text','null') OR typeof(start_datetime) NOT IN ('integer','null') OR ...`，命中 → `.dbCorrupted`。decode 后再加 sanity range check（stockCode/Name 非空 + startDatetime > 0 + endDatetime ≥ startDatetime）。
+- ~~**endGlobalIndex 非递增 silent 通过**~~ —— **已修复（codex round 2 HIGH-2）**。loadAllCandles 分组循环里 `lastEnd[period]` 严格递增校验。
+- **新增 .m3 globalIndex contract 校验（codex round 3 HIGH-1）**：`loadAllCandles` 后置校验三条 invariant：
+  1. 每根 .m3 candle 的 `globalIndex` 非 nil 且 `globalIndex == endGlobalIndex`
+  2. .m3 globalIndex 必须从 0 开始严格递增 0,1,2,...（无 gap、无 nil）
+  3. 其它 period 的 endGlobalIndex 必须落在 `[0, m3.last.endGlobalIndex]`
+  任一违反 → `.dbCorrupted`。
+- **新增 corrupt fixture tests 累计**（rounds 1-3）：
+  - Reader：`wrongTypeInColumn` / `nullInRequiredColumn` / `duplicateEndGlobalIndexInPeriod` / `nonStrictlyIncreasingAcrossSamePeriod` / `m3GlobalIndexNil` / `m3GlobalIndexMismatchEndGlobalIndex` / `higherPeriodEndGlobalIndexOutOfRange`
+  - Factory：`metaNullInRequiredColumn` / `metaWrongTypeInColumn` / `metaSanityRangeFailure`（合并 stockCode 空 / startDatetime ≤ 0 / endDatetime < startDatetime 三 sub-case）
+  - 总测试数 15 → 25。
 - **MAJOR-2**：`PersistenceErrorMapping.translate` 的 `SQLITE_CANTOPEN` 但**文件存在**分支（如权限拒绝、沙盒限制）落地为 `.persistence(.ioError("sqlite_cantopen"))`，**无测试覆盖**。**接受理由**：iOS sandbox 下罕见；security-scoped resource 过期是已知 edge case；测试需 mock 文件系统权限 platform-specific 难度高。Production 落地后若发现真实命中可补回归测试；目前作为 untested branch 接受。
 - **MAJOR-3 (已修)**：验收清单 #2-#5 / #6 关系对非 coder 用户不直观；已在验收 doc 加阅读说明 preamble 澄清"#2-#5 是 per-suite filter，#6 是并集"。

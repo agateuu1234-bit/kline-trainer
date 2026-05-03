@@ -22,22 +22,40 @@ public struct DefaultTrainingSetDBFactory: TrainingSetDBFactory {
             config.readonly = true
             let queue = try DatabaseQueue(path: file.path, configuration: config)
 
-            let (userVersion, metaRow) = try queue.read { db -> (Int, MetaRow?) in
+            let (userVersion, metaRow, badTypeCount) = try queue.read { db -> (Int, MetaRow?, Int) in
                 guard let v = try Int.fetchOne(db, sql: "PRAGMA user_version") else {
                     throw DatabaseError(resultCode: .SQLITE_CORRUPT, message: "pragma user_version returned nil")
                 }
+                // SQL 层 typeof() 校验，绕过 GRDB Decodable 在 TEXT-in-INT 列的 silent coerce-to-0
+                // （per codex round 3 HIGH-2）
+                let badCount = try Int.fetchOne(db, sql: """
+                    SELECT COUNT(*) FROM meta
+                    WHERE typeof(stock_code) NOT IN ('text','null')
+                       OR typeof(stock_name) NOT IN ('text','null')
+                       OR typeof(start_datetime) NOT IN ('integer','null')
+                       OR typeof(end_datetime) NOT IN ('integer','null')
+                    """) ?? 0
                 let m = try MetaRow.fetchOne(db, sql: """
                     SELECT stock_code, stock_name, start_datetime, end_datetime
                     FROM meta LIMIT 1
                     """)
-                return (v, m)
+                return (v, m, badCount)
             }
 
             if userVersion != expectedSchemaVersion {
                 throw AppError.trainingSet(.versionMismatch(expected: expectedSchemaVersion, got: userVersion))
             }
+            if badTypeCount > 0 {
+                throw AppError.persistence(.dbCorrupted)
+            }
             guard let m = metaRow else {
                 throw AppError.trainingSet(.emptyData)
+            }
+            // 边界 sanity check：stockCode / stockName 非空 + startDatetime > 0 + endDatetime ≥ startDatetime
+            // （per codex round 3 HIGH-2 — meta 字段语义校验）
+            if m.stockCode.isEmpty || m.stockName.isEmpty ||
+               m.startDatetime <= 0 || m.endDatetime < m.startDatetime {
+                throw AppError.persistence(.dbCorrupted)
             }
             let cachedMeta = TrainingSetMeta(
                 stockCode: m.stockCode,

@@ -224,4 +224,64 @@ final class DefaultTrainingSetReaderTests: XCTestCase {
         }
         reader.close()
     }
+
+    // MARK: - .m3 globalIndex contract（codex round 3 HIGH-1）
+
+    /// .m3 行 globalIndex 为 nil → .dbCorrupted
+    /// (spec: smallest-period global_index 是全局 tick 轴，必须非 nil)
+    func test_loadAllCandles_m3GlobalIndexNil_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = [
+            (.m3, [(1_000, nil, 0), (1_180, nil, 1)]),
+            (.daily, [(1_000, nil, 1)]),
+        ]
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
+
+    /// .m3 globalIndex != endGlobalIndex（同一根 K 线起止索引应相等）→ .dbCorrupted
+    func test_loadAllCandles_m3GlobalIndexMismatchEndGlobalIndex_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = [
+            (.m3, [(1_000, 0, 0), (1_180, 7, 1)]),  // 第二根 globalIndex=7 ≠ endGlobalIndex=1
+            (.daily, [(1_000, nil, 1)]),
+        ]
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
+
+    /// 高周期 endGlobalIndex 超出 m3 范围（不存在对应 m3 tick）→ .dbCorrupted
+    func test_loadAllCandles_higherPeriodEndGlobalIndexOutOfRange_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = [
+            (.m3, [(1_000, 0, 0), (1_180, 1, 1)]),  // m3Max = 1
+            (.daily, [(1_000, nil, 99)]),           // 99 > 1
+        ]
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
 }

@@ -119,6 +119,70 @@ final class DefaultTrainingSetDBFactoryTests: XCTestCase {
 
     // MARK: - meta corrupt rows（codex round 2 HIGH-1）
 
+    /// meta INTEGER affinity 列存 TEXT 字串 → SQL typeof() 校验拦截 → .dbCorrupted
+    /// （codex round 3 HIGH-2，绕过 GRDB Decodable silent coerce-to-0）
+    func test_openAndVerify_metaWrongTypeInColumn_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.skipMetaTable = true
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+
+        do {
+            let writeQueue = try GRDB.DatabaseQueue(path: url.path)
+            try writeQueue.write { db in
+                try db.execute(sql: """
+                CREATE TABLE meta (
+                    stock_code TEXT, stock_name TEXT,
+                    start_datetime INTEGER, end_datetime INTEGER
+                )
+                """)
+                // start_datetime 列存 TEXT 字串（typeof returns 'text'，非 'integer'/'null'）
+                try db.execute(sql: """
+                    INSERT INTO meta (stock_code, stock_name, start_datetime, end_datetime)
+                    VALUES ('600001', '测试', 'not_a_timestamp', 2000)
+                    """)
+            }
+        }
+
+        let factory = DefaultTrainingSetDBFactory()
+        XCTAssertThrowsError(try factory.openAndVerify(file: url, expectedSchemaVersion: 1)) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+    }
+
+    /// meta sanity range 校验：stockCode 空 / startDatetime ≤ 0 / endDatetime < startDatetime → .dbCorrupted
+    /// （codex round 3 HIGH-2，边界语义 sanity check）
+    func test_openAndVerify_metaSanityRangeFailure_throwsDbCorrupted() throws {
+        // 三个 sub-case 分别注入：合并到一个 test 减少样板代码
+        let cases: [(stockCode: String, stockName: String, start: Int64, end: Int64)] = [
+            ("", "测试", 1_700_000_000, 1_700_086_400),       // empty stockCode
+            ("600001", "测试", 0, 1_700_086_400),              // startDatetime <= 0
+            ("600001", "测试", 1_700_086_400, 1_700_000_000),  // endDatetime < startDatetime
+        ]
+
+        for c in cases {
+            var opts = TrainingSetSQLiteFixture.ConfigOptions()
+            opts.meta = TrainingSetMeta(
+                stockCode: c.stockCode, stockName: c.stockName,
+                startDatetime: c.start, endDatetime: c.end
+            )
+            let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+            cleanups.append(cleanup)
+
+            let factory = DefaultTrainingSetDBFactory()
+            XCTAssertThrowsError(
+                try factory.openAndVerify(file: url, expectedSchemaVersion: 1),
+                "Expected throw for case stockCode='\(c.stockCode)' start=\(c.start) end=\(c.end)"
+            ) { err in
+                guard case AppError.persistence(.dbCorrupted) = err else {
+                    return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+                }
+            }
+        }
+    }
+
     /// meta NOT NULL 列存 NULL → MetaRow throwing decode → .dbCorrupted（不再 fatalError）
     func test_openAndVerify_metaNullInRequiredColumn_throwsDbCorrupted() throws {
         var opts = TrainingSetSQLiteFixture.ConfigOptions()
