@@ -1317,9 +1317,10 @@ MINOR（9 应用）：
 - **m3 missing fallthrough 修复（codex round 4 MEDIUM）**：非 m3 endGlobalIndex 非负校验提到 `if let m3Candles` 外（基础 invariant）；m3 missing 但 result 非空（仅高周期）= 真 corrupt → reject；m3 missing 且 result 全空（整库无 candles）= plan §4 允许返回空字典。
 - **Factory version-check ordering（codex round 5 HIGH-1）**：openAndVerify 拆 2 phase —— phase 1 只读 PRAGMA user_version 与 expected 比对，phase 2 版本对齐后才读 meta（schema-dependent）。version mismatch + meta missing/renamed → 必定先抛 `.versionMismatch` 不会 fallthrough 到 `.ioError`，spec §M0.1 版本恢复路径恢复。
 - **klines optional REAL 列 typeof 校验扩展（codex round 5 MEDIUM）**：扩展 `loadAllCandles` typeof 校验覆盖 `amount` / `ma66` / `boll_upper/mid/lower` / `macd_diff/dea/bar` 8 个 optional REAL 列（round 4 narrowing scope 时遗漏）。
-- **新增 corrupt fixture tests 累计**（rounds 1-5）：
-  - Reader：`wrongTypeInColumn` / `nullInRequiredColumn` / `duplicateEndGlobalIndexInPeriod` / `nonStrictlyIncreasingAcrossSamePeriod` / `m3GlobalIndexNil` / `m3GlobalIndexMismatchEndGlobalIndex` / `higherPeriodEndGlobalIndexOutOfRange` / `klinesWrongTypeInNumericColumn` / `m3MissingButHigherPeriodPresent` / `emptyKlinesTable_returnsEmptyDict`（plan §4 边界确认）/ `klinesWrongTypeInOptionalRealColumn`
+- **OHLC 语义校验（codex round 6 HIGH）**：`loadAllCandles` 分组循环里逐行校验：①OHLC 必须 finite + positive；②`high >= max(open, close, low)` 与 `low <= min(open, close, high)`；③volume ≥ 0；④可选指标（amount/ma66/boll_*/macd_*）必须 finite，amount 必须非负。Geometry.PriceRange.calculate 假定正价，0 价 / NaN / 颠倒序会破坏坐标映射。
+- **新增 corrupt fixture tests 累计**（rounds 1-6）：
+  - Reader：`wrongTypeInColumn` / `nullInRequiredColumn` / `duplicateEndGlobalIndexInPeriod` / `nonStrictlyIncreasingAcrossSamePeriod` / `m3GlobalIndexNil` / `m3GlobalIndexMismatchEndGlobalIndex` / `higherPeriodEndGlobalIndexOutOfRange` / `klinesWrongTypeInNumericColumn` / `m3MissingButHigherPeriodPresent` / `emptyKlinesTable_returnsEmptyDict`（plan §4 边界确认）/ `klinesWrongTypeInOptionalRealColumn` / `ohlcAllZero` / `ohlcLowGreaterThanHigh` / `negativeVolume`
   - Factory：`metaNullInRequiredColumn` / `metaWrongTypeInColumn` / `metaSanityRangeFailure`（合并 stockCode 空 / startDatetime ≤ 0 / endDatetime < startDatetime 三 sub-case）/ `versionMismatchWithMetaMissing_throwsVersionMismatchNotIoError`
-  - 总测试数 15 → 30。
+  - 总测试数 15 → 33。
 - **MAJOR-2**：`PersistenceErrorMapping.translate` 的 `SQLITE_CANTOPEN` 但**文件存在**分支（如权限拒绝、沙盒限制）落地为 `.persistence(.ioError("sqlite_cantopen"))`，**无测试覆盖**。**接受理由**：iOS sandbox 下罕见；security-scoped resource 过期是已知 edge case；测试需 mock 文件系统权限 platform-specific 难度高。Production 落地后若发现真实命中可补回归测试；目前作为 untested branch 接受。
 - **MAJOR-3 (已修)**：验收清单 #2-#5 / #6 关系对非 coder 用户不直观；已在验收 doc 加阅读说明 preamble 澄清"#2-#5 是 per-suite filter，#6 是并集"。

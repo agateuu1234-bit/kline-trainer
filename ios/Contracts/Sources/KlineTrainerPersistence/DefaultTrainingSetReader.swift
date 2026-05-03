@@ -91,6 +91,28 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
                 throw AppError.persistence(.dbCorrupted)
             }
             lastEnd[period] = r.endGlobalIndex
+            // OHLC 语义校验（per codex round 6 HIGH）：finite + positive + 序关系 + nonnegative volume/amount
+            // + 可选指标 finite。下游 Geometry.PriceRange.calculate 假定正价，
+            // 0 价 / low > high / NaN 会让坐标映射 division-by-zero / NaN 渲染。
+            guard r.open.isFinite, r.open > 0,
+                  r.high.isFinite, r.high > 0,
+                  r.low.isFinite, r.low > 0,
+                  r.close.isFinite, r.close > 0,
+                  r.high >= max(r.open, r.close, r.low),
+                  r.low <= min(r.open, r.close, r.high),
+                  r.volume >= 0 else {
+                throw AppError.persistence(.dbCorrupted)
+            }
+            // 可选指标 finite + amount nonnegative
+            for opt in [r.amount, r.ma66, r.bollUpper, r.bollMid, r.bollLower,
+                        r.macdDiff, r.macdDea, r.macdBar] {
+                if let v = opt, !v.isFinite {
+                    throw AppError.persistence(.dbCorrupted)
+                }
+            }
+            if let a = r.amount, a < 0 {
+                throw AppError.persistence(.dbCorrupted)
+            }
             let candle = KLineCandle(
                 period: period,
                 datetime: r.datetime,
