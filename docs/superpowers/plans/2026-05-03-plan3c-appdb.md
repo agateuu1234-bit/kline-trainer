@@ -42,7 +42,8 @@
 9. **SettingsDAO key-value 表布局**：`settings(key TEXT PK, value TEXT)`。4 个固定 key：`commission_rate`（Double → string）/ `min_commission_enabled`（Bool → "true"/"false"）/ `total_capital`（Double → string）/ `display_mode`（DisplayMode rawValue: "light"/"dark"/"system"）。
    - `loadSettings`：SELECT key, value FROM settings；分 **missing** vs **malformed** 两路（R1 修订 codex high-2）：
      - **key 缺失**（首次启动 / 新增 key 未写）→ 用 zero-value default（commissionRate=0 / minCommissionEnabled=false / totalCapital=0 / displayMode=.system，与 `InMemoryFakes.swift` Line 44-47 默认对齐）
-     - **key 存在但 value 不可解析**（如 commission_rate 列存了 "garbage"，或 display_mode 列存了 "purple"）→ 抛 `AppError.persistence(.dbCorrupted)`。**不**走 default——这等于把损坏的财务参数静默重置 0，影响计算正确性
+     - **key 存在但 value 不可解析**（如 commission_rate 列存了 "garbage"，或 display_mode 列存了 "purple"，或 commission_rate 列存了 "NaN" / "Infinity"）→ 抛 `AppError.persistence(.dbCorrupted)`。**不**走 default——这等于把损坏的财务参数静默重置 0，影响计算正确性。**R2 修订（codex med-3）**：`parseDouble` 必须 `.isFinite` 校验，拒 NaN / +inf / -inf。
+   - **R2 修订（codex med-3）saveSettings 入参 finite 校验**：commission/capital 入参 NaN / inf → `AppError.internalError(module: "P4-SettingsDAO", detail: ...)`，不毒入 DB。`internalError` 而非 `dbCorrupted`：这是 caller 编程错误（上游不该传非有限值），走 debug log 不弹 Toast。
    - `saveSettings`：4 次 `INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)`，单 transaction。
    - `resetCapital`：`INSERT OR REPLACE INTO settings(key, value) VALUES ('total_capital', '0.0')` 单语句。
 
@@ -63,6 +64,8 @@
       - `rank(new) > rank(old)` → forward 允许
       - `new == old` → 同 state 重试，允许（仅刷新 entered_at + 辅助列）
       - 其它（含 backward + 同 rank 不同 state = 终态互斥）→ NOOP（不抛错，retry 是合法并发模式）
+    - **R2 修订（codex high-1）UPDATE aux 列走 COALESCE**：`sqlite_local_path / content_hash / last_error` 用 `COALESCE(?, existing)`，nil 入参不擦已有值。原方案直接 `SET sqlite_local_path = ?` 会让 stale .stored retry（caller 丢失 path）把 stored 行的 path/hash 清成 NULL → recovery 失锚。state / state_entered_at 总是覆盖（forward 推进或同 state 重试都需刷新 stamp）。
+    - **R2 修订（codex med-2）existing 是 unknown raw value → NOOP + os_log warning**：原方案 fall-through 到 update（用 caller 已知 state 覆盖 unknown 行），违反 spec L289 fail-safe ignore 原则。改为：发现 existing rawValue 不在 v1.4 enum 内 → 直接 NOOP + os_log error，不动该行；留给 migration / 手工修复处理（避免覆盖 forward-version skew 行）。
     - `state_entered_at` 由实现侧用 `Int64(Date().timeIntervalSince1970 * 1000)`（毫秒）—— 仅 update 路径刷新；NOOP 路径不刷新。
     - **caller 侧无 API 变化**：upsert 签名不变；NOOP 对 caller 不可见，caller 后续 listByState 拿到的是 existing state（与单调推进语义一致）。
 
@@ -254,8 +257,7 @@ public enum P2JournalState: String, Codable, Equatable, Sendable, CaseIterable {
     case rejected           // server 拒收 / 本地校验失败
 }
 
-// MARK: - Row 投影类型（D
-AO 读出的不可变快照）
+// MARK: - Row 投影类型（DAO 读出的不可变快照）
 
 public struct AcceptanceJournalRow: Equatable, Sendable {
     public let id: Int64
@@ -1647,6 +1649,63 @@ final class DefaultSettingsDAOTests: XCTestCase {
         XCTAssertEqual(s.totalCapital, 0)                         // missing → default
         XCTAssertEqual(s.displayMode, .system)                    // missing → default
     }
+
+    // 用例 11（R2 新增 codex med-3）：commission_rate 列含 "NaN" → .dbCorrupted
+    func test_loadSettings_NaN_value_throws_dbCorrupted() throws {
+        let queue = try AppDBFixture.openRaw(at: dbURL)
+        try queue.write { db in
+            try db.execute(sql:
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                arguments: ["commission_rate", "NaN"])
+        }
+        XCTAssertThrowsError(try db.loadSettings()) { err in
+            guard let appErr = err as? AppError,
+                  case .persistence(.dbCorrupted) = appErr else {
+                return XCTFail("期望 .persistence(.dbCorrupted) on NaN，实际 \(err)")
+            }
+        }
+    }
+
+    // 用例 12（R2 新增 codex med-3）：total_capital 列含 "Infinity" → .dbCorrupted
+    func test_loadSettings_infinity_value_throws_dbCorrupted() throws {
+        let queue = try AppDBFixture.openRaw(at: dbURL)
+        try queue.write { db in
+            try db.execute(sql:
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                arguments: ["total_capital", "Infinity"])
+        }
+        XCTAssertThrowsError(try db.loadSettings()) { err in
+            guard let appErr = err as? AppError,
+                  case .persistence(.dbCorrupted) = appErr else {
+                return XCTFail("期望 .persistence(.dbCorrupted) on Infinity，实际 \(err)")
+            }
+        }
+    }
+
+    // 用例 13（R2 新增 codex med-3）：saveSettings 入参 NaN commissionRate → 拒绝（internalError）
+    func test_saveSettings_with_NaN_commission_throws_internalError() throws {
+        let bad = AppSettings(commissionRate: .nan, minCommissionEnabled: false,
+                              totalCapital: 10_000, displayMode: .system)
+        XCTAssertThrowsError(try db.saveSettings(bad)) { err in
+            guard let appErr = err as? AppError,
+                  case .internalError(let module, _) = appErr else {
+                return XCTFail("期望 .internalError，实际 \(err)")
+            }
+            XCTAssertTrue(module.contains("SettingsDAO"))
+        }
+    }
+
+    // 用例 14（R2 新增 codex med-3）：saveSettings 入参 inf totalCapital → 拒绝
+    func test_saveSettings_with_inf_capital_throws_internalError() throws {
+        let bad = AppSettings(commissionRate: 0.0003, minCommissionEnabled: false,
+                              totalCapital: .infinity, displayMode: .system)
+        XCTAssertThrowsError(try db.saveSettings(bad)) { err in
+            guard let appErr = err as? AppError,
+                  case .internalError = appErr else {
+                return XCTFail("期望 .internalError，实际 \(err)")
+            }
+        }
+    }
 }
 ```
 
@@ -1698,7 +1757,8 @@ enum SettingsDAOImpl {
 
     private static func parseDouble(_ raw: String?, default def: Double) throws -> Double {
         guard let raw = raw else { return def }       // missing → default
-        guard let v = Double(raw) else {              // present but malformed → corrupt
+        guard let v = Double(raw), v.isFinite else {  // present but malformed / NaN / inf → corrupt
+            // R2 修订（codex med-3）：拒 NaN / +inf / -inf —— 这些值会污染 commission/capital 计算
             throw AppError.persistence(.dbCorrupted)
         }
         return v
@@ -1722,6 +1782,17 @@ enum SettingsDAOImpl {
     }
 
     static func saveSettings(_ db: Database, settings s: AppSettings) throws {
+        // R2 修订（codex med-3）：拒入参为 NaN / inf 的 commission/capital，避免毒入 DB
+        guard s.commissionRate.isFinite else {
+            throw AppError.internalError(
+                module: "P4-SettingsDAO",
+                detail: "saveSettings refused: commissionRate not finite (\(s.commissionRate))")
+        }
+        guard s.totalCapital.isFinite else {
+            throw AppError.internalError(
+                module: "P4-SettingsDAO",
+                detail: "saveSettings refused: totalCapital not finite (\(s.totalCapital))")
+        }
         let pairs: [(String, String)] = [
             (keyCommissionRate, String(s.commissionRate)),
             (keyMinCommissionEnabled, s.minCommissionEnabled ? "true" : "false"),
@@ -1969,7 +2040,7 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
         XCTAssertEqual(try db.listByState(.rejected).filter { $0.leaseId == "L3" }.count, 1)
     }
 
-    // 用例 10（R1 新增 codex high-1）：同 state 重试合法 → state_entered_at 刷新 + 辅助列覆盖
+    // 用例 10（R1 新增 codex high-1）：同 state 重试合法 → state_entered_at 刷新 + 辅助列覆盖（nil 入参不擦）
     func test_upsert_same_state_retry_refreshes_entered_at_and_aux_fields() throws {
         try db.upsert(trainingSetId: 4, leaseId: "L4", state: .downloaded,
                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
@@ -1982,6 +2053,74 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(after?.stateEnteredAt ?? 0, firstStamp)
         XCTAssertEqual(after?.sqliteLocalPath, "/tmp/path")
         XCTAssertEqual(after?.contentHash, "abc12345")
+    }
+
+    // 用例 11（R2 新增 codex high-1）：stale .stored retry 传 nil aux fields → COALESCE 保留已有值
+    func test_upsert_stale_retry_with_nil_aux_does_not_clear_existing_path_and_hash() throws {
+        // 先推到 .stored 含 path/hash
+        try db.upsert(trainingSetId: 5, leaseId: "L5", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 5, leaseId: "L5", state: .stored,
+                      sqliteLocalPath: "/tmp/set5.sqlite", contentHash: "5deadbe5",
+                      lastError: nil)
+
+        // 同 state .stored 重试，传 nil → COALESCE 保留已有值（不应清空）
+        try db.upsert(trainingSetId: 5, leaseId: "L5", state: .stored,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+
+        let stored = try db.listByState(.stored).filter { $0.leaseId == "L5" }
+        XCTAssertEqual(stored.count, 1)
+        XCTAssertEqual(stored[0].sqliteLocalPath, "/tmp/set5.sqlite", "nil 入参不应清空已有 path")
+        XCTAssertEqual(stored[0].contentHash, "5deadbe5", "nil 入参不应清空已有 hash")
+    }
+
+    // 用例 12（R2 新增 codex high-1）：forward .confirmPending 传 nil → 已有 path/hash 保留
+    func test_upsert_forward_with_nil_aux_preserves_existing_via_coalesce() throws {
+        try db.upsert(trainingSetId: 6, leaseId: "L6", state: .stored,
+                      sqliteLocalPath: "/tmp/set6.sqlite", contentHash: "6c0ffe11",
+                      lastError: nil)
+        // forward 推进到 .confirmPending，aux fields 传 nil
+        try db.upsert(trainingSetId: 6, leaseId: "L6", state: .confirmPending,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+
+        let cp = try db.listByState(.confirmPending).filter { $0.leaseId == "L6" }
+        XCTAssertEqual(cp.count, 1)
+        XCTAssertEqual(cp[0].sqliteLocalPath, "/tmp/set6.sqlite")
+        XCTAssertEqual(cp[0].contentHash, "6c0ffe11")
+    }
+
+    // 用例 13（R2 新增 codex med-2）：existing 是 unknown raw value → upsert NOOP，不覆盖
+    func test_upsert_existing_unknown_state_is_NOOP_not_overwritten() throws {
+        // raw SQL 注入 unknown state 行（v1.3 leased 模拟）
+        let queue = try AppDBFixture.openRaw(at: dbURL)
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO download_acceptance_journal
+                  (training_set_id, lease_id, state, state_entered_at,
+                   last_error, sqlite_local_path, content_hash)
+                VALUES (?, ?, 'leased', ?, NULL, '/tmp/v13.sqlite', 'd0d0beef')
+                """, arguments: [77, "v13-leased", 1_700_000_000_000])
+        }
+
+        // 尝试用合法 state 覆盖 → 应 NOOP，unknown 行原样保留
+        try db.upsert(trainingSetId: 77, leaseId: "v13-leased", state: .downloaded,
+                      sqliteLocalPath: "/tmp/new.sqlite", contentHash: "deadbeef",
+                      lastError: nil)
+
+        // listByState(.downloaded) 不应返回 unknown 行（fail-safe filter）
+        XCTAssertEqual(try db.listByState(.downloaded).filter { $0.leaseId == "v13-leased" }.count, 0)
+
+        // 直接读 raw row 验证 state 仍是 'leased'，path/hash 未变
+        let row = try queue.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT state, sqlite_local_path, content_hash
+                FROM download_acceptance_journal
+                WHERE training_set_id = ? AND lease_id = ?
+                """, arguments: [77, "v13-leased"])
+        }
+        XCTAssertEqual(row?["state"] as String?, "leased", "unknown state 应原样保留")
+        XCTAssertEqual(row?["sqlite_local_path"] as String?, "/tmp/v13.sqlite")
+        XCTAssertEqual(row?["content_hash"] as String?, "d0d0beef")
     }
 }
 ```
@@ -2063,15 +2202,18 @@ enum AcceptanceJournalDAOImpl {
             WHERE training_set_id = ? AND lease_id = ?
             """, arguments: [trainingSetId, leaseId]) {
             // 行已存在
-            if let existing = P2JournalState(rawValue: existingRaw) {
-                if !canApply(new: state, over: existing) {
-                    // 晚到回退 / 终态互斥：NOOP，保留 existing（不 throw —— retry 合法）
-                    logger.info("noop: rejected upsert \(state.rawValue, privacy: .public) over \(existing.rawValue, privacy: .public) for trainingSetId=\(trainingSetId) leaseId=\(leaseId, privacy: .public)")
-                    return
-                }
-                // 转换合法 → 走下方 UPDATE
+            guard let existing = P2JournalState(rawValue: existingRaw) else {
+                // R2 修订（codex med-2）：existing 是 unknown raw value（downgrade / 跨版本残留）
+                // → NOOP + warn，不覆盖 unknown 行；留给 migration / 手工修复处理
+                logger.error("noop: refuse to overwrite unknown existing state '\(existingRaw, privacy: .public)' with '\(state.rawValue, privacy: .public)' for trainingSetId=\(trainingSetId) leaseId=\(leaseId, privacy: .public)")
+                return
             }
-            // existing state 是 unknown raw value（v1.3 残留 leased 等）→ 视为可被覆盖，走 UPDATE
+            if !canApply(new: state, over: existing) {
+                // 晚到回退 / 终态互斥：NOOP，保留 existing（不 throw —— retry 合法）
+                logger.info("noop: rejected upsert \(state.rawValue, privacy: .public) over \(existing.rawValue, privacy: .public) for trainingSetId=\(trainingSetId) leaseId=\(leaseId, privacy: .public)")
+                return
+            }
+            // 转换合法 → UPDATE（aux 列走 COALESCE 保留已有非空值，per R2 codex high-1）
             try update(db, trainingSetId: trainingSetId, leaseId: leaseId,
                        state: state, stateEnteredAt: stateEnteredAt,
                        sqliteLocalPath: sqliteLocalPath, contentHash: contentHash,
@@ -2095,10 +2237,16 @@ enum AcceptanceJournalDAOImpl {
                                state: P2JournalState, stateEnteredAt: Int64,
                                sqliteLocalPath: String?, contentHash: String?,
                                lastError: String?) throws {
+        // R2 修订（codex high-1）：aux 列用 COALESCE(?, existing)，nil 入参保留已有值。
+        // state / state_entered_at 总是覆盖（forward 推进或同 state 重试，stamp 必须刷新）。
+        // last_error 也走 COALESCE：调用方传 nil 表示"无新错误信息"，保留旧错误日志便于 debug。
         try db.execute(sql: """
             UPDATE download_acceptance_journal
-            SET state = ?, state_entered_at = ?, last_error = ?,
-                sqlite_local_path = ?, content_hash = ?
+            SET state = ?,
+                state_entered_at = ?,
+                last_error = COALESCE(?, last_error),
+                sqlite_local_path = COALESCE(?, sqlite_local_path),
+                content_hash = COALESCE(?, content_hash)
             WHERE training_set_id = ? AND lease_id = ?
             """, arguments: [
                 state.rawValue, stateEnteredAt, lastError,
@@ -2447,7 +2595,22 @@ verdict = **needs-attention**，5 findings：
 - 用例 8/9/10 的 monotonic rank 测试隐式 cover spec L1798+ P2 状态机；下游 P2 runner（PR 4a）实际调用时若有反向需求需扩 protocol（如增 `forceTransition` 显式覆盖 API）
 - os_log 副作用难直测；测试通过验证 rows 不返回 + acceptance grep 兜底
 
-待执行 R2 验证。
+### Round 2（codex 2026-05-03，branch-diff vs origin/main）
+
+verdict = **needs-attention**，4 findings：
+
+| # | sev | finding | revision applied |
+|---|---|---|---|
+| 1 | HIGH | upsert update 路径无条件覆盖 sqlite_local_path/content_hash → stale .stored retry 传 nil 把 path/hash 清成 NULL → recovery 失锚 | update SQL 改 COALESCE(?, existing) for sqlite_local_path / content_hash / last_error；state / state_entered_at 仍覆盖；新增 用例 11/12 |
+| 2 | MED | existing 是 unknown raw value 时 fall-through 到 update → 把 unknown state 覆盖成 caller 已知 state（违反 fail-safe ignore） | 改 NOOP + os_log error；不动 unknown 行；新增 用例 13 验证 raw SQL 注入 leased 行后 upsert .downloaded 不覆盖 |
+| 3 | MED | parseDouble 不拒 NaN/inf；saveSettings 也不拒 → 污染财务计算 | parseDouble 加 `.isFinite` guard；saveSettings 加 commissionRate/totalCapital finite 校验抛 .internalError；新增 用例 11/12/13/14 |
+| 4 | MED | plan line 257-258 注释跨行打断 Swift 代码 | 合并 `// MARK: - Row 投影类型（DAO 读出的不可变快照）` 到一行 |
+
+4 findings 全部应用真修订。残留：
+- COALESCE 设计中 last_error 也走 COALESCE（caller 传 nil 表示"无新错误"，保留旧 log）；如果 caller 真想清空 last_error 字段，需新加 API；目前认 last_error 只追加 / 不主动清空
+- `internalError(module: "P4-SettingsDAO", ...)` 而非 `.dbCorrupted` for save NaN：caller 编程错误不走用户 Toast（shouldShowToast=false）
+
+待执行 R3 验证。
 
 ---
 
