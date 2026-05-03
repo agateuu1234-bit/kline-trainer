@@ -23,6 +23,9 @@ enum PersistenceErrorMapping {
                 }
                 return .persistence(.ioError("sqlite_cantopen"))
             }
+            if dbErr.resultCode == .SQLITE_FULL {
+                return .persistence(.diskFull)
+            }
             if dbErr.resultCode == .SQLITE_NOTADB || dbErr.resultCode == .SQLITE_CORRUPT {
                 return .persistence(.dbCorrupted)
             }

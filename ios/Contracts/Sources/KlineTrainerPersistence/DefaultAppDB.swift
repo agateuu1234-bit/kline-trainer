@@ -141,14 +141,38 @@ public final class DefaultAppDB: AppDB {
         catch { throw PersistenceErrorMapping.translate(error) }
     }
 
-    // MARK: - AcceptanceJournalDAO（Task 7）
+    // MARK: - AcceptanceJournalDAO
+
     public func upsert(trainingSetId: Int, leaseId: String, state: P2JournalState,
                        sqliteLocalPath: String?, contentHash: String?,
-                       lastError: String?) throws { fatalError("Task 7 实现") }
-    public func listByState(_ state: P2JournalState) throws -> [AcceptanceJournalRow] {
-        fatalError("Task 7 实现")
+                       lastError: String?) throws {
+        do {
+            try dbQueue.write { db in
+                try AcceptanceJournalDAOImpl.upsert(
+                    db, trainingSetId: trainingSetId, leaseId: leaseId,
+                    state: state, sqliteLocalPath: sqliteLocalPath,
+                    contentHash: contentHash, lastError: lastError)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
     }
+
+    public func listByState(_ state: P2JournalState) throws -> [AcceptanceJournalRow] {
+        do {
+            return try dbQueue.read { db in
+                try AcceptanceJournalDAOImpl.listByState(db, state: state)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
     public func deleteByIdLease(trainingSetId: Int, leaseId: String) throws {
-        fatalError("Task 7 实现")
+        do {
+            try dbQueue.write { db in
+                try AcceptanceJournalDAOImpl.deleteByIdLease(
+                    db, trainingSetId: trainingSetId, leaseId: leaseId)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
     }
 }
