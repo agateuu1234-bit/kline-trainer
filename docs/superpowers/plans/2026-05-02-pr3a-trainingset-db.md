@@ -1318,6 +1318,12 @@ MINOR（9 应用）：
 - **Factory version-check ordering（codex round 5 HIGH-1）**：openAndVerify 拆 2 phase —— phase 1 只读 PRAGMA user_version 与 expected 比对，phase 2 版本对齐后才读 meta（schema-dependent）。version mismatch + meta missing/renamed → 必定先抛 `.versionMismatch` 不会 fallthrough 到 `.ioError`，spec §M0.1 版本恢复路径恢复。
 - **klines optional REAL 列 typeof 校验扩展（codex round 5 MEDIUM）**：扩展 `loadAllCandles` typeof 校验覆盖 `amount` / `ma66` / `boll_upper/mid/lower` / `macd_diff/dea/bar` 8 个 optional REAL 列（round 4 narrowing scope 时遗漏）。
 - **OHLC 语义校验（codex round 6 HIGH）**：`loadAllCandles` 分组循环里逐行校验：①OHLC 必须 finite + positive；②`high >= max(open, close, low)` 与 `low <= min(open, close, high)`；③volume ≥ 0；④可选指标（amount/ma66/boll_*/macd_*）必须 finite，amount 必须非负。Geometry.PriceRange.calculate 假定正价，0 价 / NaN / 颠倒序会破坏坐标映射。
+- **codex round 7 HIGH `Period.allCases` 完整性 — REJECT 不修**（user 决策，按 memory `feedback_codex_round6_self_contradiction.md` + `feedback_codex_fractional_subpixel_bias.md`）：
+  - **复述模式**：codex round 4 MEDIUM 自己用 "consider requiring all Period.allCases"（非强制 advisory），我和 codex 那时都接受 m3 missing 走 plan §4。Round 7 升级为 "require every Period.allCases entry to exist" — **已 implicitly accepted residual 复述**，命中 memory reject 模式
+  - **冲突 plan Design Decision §4**：plan 已声明 partial data 是 caller 责任（"klines 表为空不阻塞 openAndVerify；返回空字典是合法情形，调用方 E6 / TrainingEngine 自行处理"）
+  - **可能 reject 合法稀疏数据**：spec L425 `globalIndex: Int?` 明示 nullable；短训练组（几个月数据）可能 weekly/monthly 稀疏；强制 6 周期非空会让合法 backend 输出被 reject
+  - **推到 caller**：spec L1295 `candles.binarySearchFirst { ... }` 是 caller (E5 TrainingEngine) 用法；caller 应自行处理 missing period（spec 没要求 reader 强制 6 周期）
+  - 此 finding 留作 known residual，不修；ledger 不推进 → user TTY override + admin bypass merge（per memory `feedback_openai_quota_ci_pattern.md`）
 - **新增 corrupt fixture tests 累计**（rounds 1-6）：
   - Reader：`wrongTypeInColumn` / `nullInRequiredColumn` / `duplicateEndGlobalIndexInPeriod` / `nonStrictlyIncreasingAcrossSamePeriod` / `m3GlobalIndexNil` / `m3GlobalIndexMismatchEndGlobalIndex` / `higherPeriodEndGlobalIndexOutOfRange` / `klinesWrongTypeInNumericColumn` / `m3MissingButHigherPeriodPresent` / `emptyKlinesTable_returnsEmptyDict`（plan §4 边界确认）/ `klinesWrongTypeInOptionalRealColumn` / `ohlcAllZero` / `ohlcLowGreaterThanHigh` / `negativeVolume`
   - Factory：`metaNullInRequiredColumn` / `metaWrongTypeInColumn` / `metaSanityRangeFailure`（合并 stockCode 空 / startDatetime ≤ 0 / endDatetime < startDatetime 三 sub-case）/ `versionMismatchWithMetaMissing_throwsVersionMismatchNotIoError`
