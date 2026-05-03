@@ -54,16 +54,22 @@
         - `new > existing` → UPDATE（含 state_entered_at 刷新）
         - `new == existing` → UPDATE（仅 state_entered_at + last_error + sqliteLocalPath + contentHash 刷新；同 state 重试合法）
         - `new < existing` → **NOOP**（保留 existing；不 throw —— 晚到 retry 是合法的并发模式，只是无效）
-    - **rank 表**（state monotonic 单调推进，per spec L1798+ P2 状态机）：
+    - **state 转换 allowlist**（R4 修订 codex high-2 — explicit nextAllowed map 取代 rank 比较）：
       ```
-      downloaded(0) → crcOK(1) → unzipped(2) → dbVerified(3) → stored(4) → confirmPending(5)
-      confirmed(6) = 成功终态  ｜  rejected(6) = 失败终态  （同 rank 互斥）
+      downloaded   → {crcOK, rejected}
+      crcOK        → {unzipped, rejected}
+      unzipped     → {dbVerified, rejected}
+      dbVerified   → {stored, rejected}
+      stored       → {confirmPending, rejected}
+      confirmPending → {confirmed, rejected}
+      confirmed    → {} (终态)
+      rejected     → {} (终态)
       ```
-      `confirmed` 和 `rejected` 都是终态，**同 rank（6）+ 互斥**：彼此不能转换（避免误把成功状态改失败 / 失败改成功）。
+      `rejected` 可从任何非终态推进（失败可在任何阶段发生）。`confirmed` 是成功终态。终态互不可转。**首次 INSERT 必须 .downloaded**（spec L1798+ "v1.4 首条持久化行起点"），caller 直接 INSERT 其它 state → `.internalError`（避免跳过 CRC/unzip/verify）。
     - **canApply(new, over old)** 规则：
-      - `rank(new) > rank(old)` → forward 允许
       - `new == old` → 同 state 重试，允许（仅刷新 entered_at + 辅助列）
-      - 其它（含 backward + 同 rank 不同 state = 终态互斥）→ NOOP（不抛错，retry 是合法并发模式）
+      - `new ∈ nextAllowed(old)` → 一步转换，允许
+      - 其它（含跨步跳过 / backward / 终态后转 / 终态互斥）→ NOOP（不抛错，retry 是合法并发模式）
     - **R2 修订（codex high-1）UPDATE aux 列走 COALESCE**：`sqlite_local_path / content_hash / last_error` 用 `COALESCE(?, existing)`，nil 入参不擦已有值。原方案直接 `SET sqlite_local_path = ?` 会让 stale .stored retry（caller 丢失 path）把 stored 行的 path/hash 清成 NULL → recovery 失锚。state / state_entered_at 总是覆盖（forward 推进或同 state 重试都需刷新 stamp）。
     - **R2 修订（codex med-2）existing 是 unknown raw value → NOOP + os_log warning**：原方案 fall-through 到 update（用 caller 已知 state 覆盖 unknown 行），违反 spec L289 fail-safe ignore 原则。改为：发现 existing rawValue 不在 v1.4 enum 内 → 直接 NOOP + os_log error，不动该行；留给 migration / 手工修复处理（避免覆盖 forward-version skew 行）。
     - `state_entered_at` 由实现侧用 `Int64(Date().timeIntervalSince1970)`（Unix 秒 UTC，per spec L241）—— 仅 update 路径刷新；NOOP 路径不刷新。**R3 修订（codex med-3）**：原方案误用毫秒，与 schema 列定义冲突；fix 后与 spec 时间戳约定（L377 "所有 datetime 字段 = Unix 秒 UTC"）一致。
@@ -2069,15 +2075,11 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
         }
     }
 
-    // 用例 8（R1 新增 codex high-1）：晚到 retry 不能把 .stored 倒回 .downloaded
+    // 用例 8（R1 codex high-1 / R4 改 walk-through）：晚到 retry 不能把 .stored 倒回 .downloaded
     func test_upsert_stale_state_is_NOOP_keeps_existing() throws {
-        // 先推进到 .stored
-        try db.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
-                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
-        try db.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK,
-                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
-        try db.upsert(trainingSetId: 1, leaseId: "L1", state: .stored,
-                      sqliteLocalPath: "/tmp/set.sqlite", contentHash: "deadbeef", lastError: nil)
+        // walk 到 .stored（必须走完整链）
+        try walkToStored(trainingSetId: 1, leaseId: "L1",
+                         path: "/tmp/set.sqlite", hash: "deadbeef")
         XCTAssertEqual(try db.listByState(.stored).count, 1)
 
         // 模拟晚到的回退 retry：.downloaded 不能覆盖 .stored
@@ -2126,15 +2128,27 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
         XCTAssertEqual(after?.contentHash, "abc12345")
     }
 
-    // 用例 11（R2 新增 codex high-1）：stale .stored retry 传 nil aux fields → COALESCE 保留已有值
-    func test_upsert_stale_retry_with_nil_aux_does_not_clear_existing_path_and_hash() throws {
-        // 先推到 .stored 含 path/hash
-        try db.upsert(trainingSetId: 5, leaseId: "L5", state: .downloaded,
+    // R4 修订（codex high-2）：helper 走完 .downloaded → .stored 链（必须一步一步）
+    @discardableResult
+    private func walkToStored(trainingSetId tid: Int, leaseId lid: String,
+                              path: String, hash: String) throws -> Bool {
+        try db.upsert(trainingSetId: tid, leaseId: lid, state: .downloaded,
                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
-        try db.upsert(trainingSetId: 5, leaseId: "L5", state: .stored,
-                      sqliteLocalPath: "/tmp/set5.sqlite", contentHash: "5deadbe5",
-                      lastError: nil)
+        try db.upsert(trainingSetId: tid, leaseId: lid, state: .crcOK,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: tid, leaseId: lid, state: .unzipped,
+                      sqliteLocalPath: path, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: tid, leaseId: lid, state: .dbVerified,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: tid, leaseId: lid, state: .stored,
+                      sqliteLocalPath: nil, contentHash: hash, lastError: nil)
+        return true
+    }
 
+    // 用例 11（R2 codex high-1 / R4 改 walk-through）：stale .stored retry 传 nil aux → COALESCE 保留
+    func test_upsert_stale_retry_with_nil_aux_does_not_clear_existing_path_and_hash() throws {
+        try walkToStored(trainingSetId: 5, leaseId: "L5",
+                         path: "/tmp/set5.sqlite", hash: "5deadbe5")
         // 同 state .stored 重试，传 nil → COALESCE 保留已有值（不应清空）
         try db.upsert(trainingSetId: 5, leaseId: "L5", state: .stored,
                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
@@ -2145,11 +2159,10 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
         XCTAssertEqual(stored[0].contentHash, "5deadbe5", "nil 入参不应清空已有 hash")
     }
 
-    // 用例 12（R2 新增 codex high-1）：forward .confirmPending 传 nil → 已有 path/hash 保留
+    // 用例 12（R2 codex high-1 / R4 改 walk-through）：forward .confirmPending 传 nil → 已有 path/hash 保留
     func test_upsert_forward_with_nil_aux_preserves_existing_via_coalesce() throws {
-        try db.upsert(trainingSetId: 6, leaseId: "L6", state: .stored,
-                      sqliteLocalPath: "/tmp/set6.sqlite", contentHash: "6c0ffe11",
-                      lastError: nil)
+        try walkToStored(trainingSetId: 6, leaseId: "L6",
+                         path: "/tmp/set6.sqlite", hash: "6c0ffe11")
         // forward 推进到 .confirmPending，aux fields 传 nil
         try db.upsert(trainingSetId: 6, leaseId: "L6", state: .confirmPending,
                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
@@ -2160,8 +2173,17 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
         XCTAssertEqual(cp[0].contentHash, "6c0ffe11")
     }
 
-    // 用例 14（R3 新增 codex high-1）：forward 到 .stored 缺 sqliteLocalPath → .internalError
+    // 用例 14（R3 codex high-1 / R4 改 walk-through）：到 .stored 缺 sqliteLocalPath → .internalError
     func test_upsert_stored_without_path_throws_internalError() throws {
+        // walk 到 .dbVerified（path 走 .unzipped 时已喂入；现在不喂 path 模拟 caller bug）
+        try db.upsert(trainingSetId: 80, leaseId: "L80", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 80, leaseId: "L80", state: .crcOK,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 80, leaseId: "L80", state: .unzipped,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 80, leaseId: "L80", state: .dbVerified,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
         XCTAssertThrowsError(try db.upsert(
             trainingSetId: 80, leaseId: "L80", state: .stored,
             sqliteLocalPath: nil, contentHash: "deadbeef", lastError: nil)
@@ -2174,35 +2196,94 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
         }
     }
 
-    // 用例 15（R3 新增 codex high-1）：forward 到 .stored contentHash 非 8-char hex → .internalError
+    // 用例 15（R3 codex high-1 / R4 改 walk-through）：到 .stored contentHash 非 8-char hex → .internalError
     func test_upsert_stored_with_invalid_contentHash_throws_internalError() throws {
+        // walk 到 .dbVerified，path 已喂
         try db.upsert(trainingSetId: 81, leaseId: "L81", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 81, leaseId: "L81", state: .crcOK,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 81, leaseId: "L81", state: .unzipped,
+                      sqliteLocalPath: "/tmp/x.sqlite", contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 81, leaseId: "L81", state: .dbVerified,
                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
         // 错误格式：长度 7
         XCTAssertThrowsError(try db.upsert(
             trainingSetId: 81, leaseId: "L81", state: .stored,
-            sqliteLocalPath: "/tmp/x.sqlite", contentHash: "deadbee", lastError: nil))
+            sqliteLocalPath: nil, contentHash: "deadbee", lastError: nil))
         // 错误格式：含大写
         XCTAssertThrowsError(try db.upsert(
             trainingSetId: 81, leaseId: "L81", state: .stored,
-            sqliteLocalPath: "/tmp/x.sqlite", contentHash: "DEADBEEF", lastError: nil))
+            sqliteLocalPath: nil, contentHash: "DEADBEEF", lastError: nil))
         // 错误格式：非 hex 字符
         XCTAssertThrowsError(try db.upsert(
             trainingSetId: 81, leaseId: "L81", state: .stored,
-            sqliteLocalPath: "/tmp/x.sqlite", contentHash: "deadbeeg", lastError: nil))
+            sqliteLocalPath: nil, contentHash: "deadbeeg", lastError: nil))
     }
 
-    // 用例 16（R3 新增 codex high-1）：forward 到 .stored 已 inherit 历史 path → 允许（COALESCE existingPath）
+    // 用例 16（R3 codex high-1 / R4 改 walk-through）：.stored inherit 历史 path → 允许
     func test_upsert_stored_inherits_existing_path_via_invariant_check() throws {
-        try db.upsert(trainingSetId: 82, leaseId: "L82", state: .downloaded,
-                      sqliteLocalPath: "/tmp/82.sqlite", contentHash: nil, lastError: nil)
-        // 推 .stored，path 不传（拿 existing），hash 必须传
-        try db.upsert(trainingSetId: 82, leaseId: "L82", state: .stored,
-                      sqliteLocalPath: nil, contentHash: "82deadbe", lastError: nil)
+        try walkToStored(trainingSetId: 82, leaseId: "L82",
+                         path: "/tmp/82.sqlite", hash: "82deadbe")
         let stored = try db.listByState(.stored).filter { $0.leaseId == "L82" }
         XCTAssertEqual(stored.count, 1)
         XCTAssertEqual(stored[0].sqliteLocalPath, "/tmp/82.sqlite")
         XCTAssertEqual(stored[0].contentHash, "82deadbe")
+    }
+
+    // 用例 18（R4 新增 codex high-2）：跳步 .downloaded → .stored 必须 NOOP
+    func test_upsert_skip_state_downloaded_to_stored_is_NOOP() throws {
+        try db.upsert(trainingSetId: 90, leaseId: "L90", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        // 直跳 .stored 跳过 crcOK/unzipped/dbVerified → NOOP
+        try db.upsert(trainingSetId: 90, leaseId: "L90", state: .stored,
+                      sqliteLocalPath: "/tmp/90.sqlite", contentHash: "90deadbe",
+                      lastError: nil)
+
+        // 行仍在 .downloaded，path/hash 仍 nil
+        XCTAssertEqual(try db.listByState(.stored).filter { $0.leaseId == "L90" }.count, 0)
+        let dl = try db.listByState(.downloaded).filter { $0.leaseId == "L90" }
+        XCTAssertEqual(dl.count, 1)
+        XCTAssertNil(dl[0].sqliteLocalPath)
+        XCTAssertNil(dl[0].contentHash)
+    }
+
+    // 用例 19（R4 新增 codex high-2）：首次 INSERT 非 .downloaded → .internalError
+    func test_first_insert_non_downloaded_throws_internalError() throws {
+        XCTAssertThrowsError(try db.upsert(
+            trainingSetId: 91, leaseId: "L91", state: .stored,
+            sqliteLocalPath: "/tmp/91.sqlite", contentHash: "91deadbe", lastError: nil)
+        ) { err in
+            guard let appErr = err as? AppError,
+                  case .internalError(let module, let detail) = appErr else {
+                return XCTFail("期望 .internalError，实际 \(err)")
+            }
+            XCTAssertTrue(module.contains("AcceptanceJournalDAO"))
+            XCTAssertTrue(detail.contains(".downloaded") || detail.contains("first INSERT"),
+                          "detail 应说明首次 INSERT 必须 .downloaded")
+        }
+        XCTAssertEqual(try db.listByState(.stored).filter { $0.leaseId == "L91" }.count, 0)
+    }
+
+    // 用例 20（R4 新增 codex high-2）：任何阶段都可推 .rejected（失败可在任何阶段发生）
+    func test_upsert_rejected_allowed_from_any_state() throws {
+        // 从 .downloaded 直推 .rejected
+        try db.upsert(trainingSetId: 92, leaseId: "L92", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 92, leaseId: "L92", state: .rejected,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: "crc_failed")
+        XCTAssertEqual(try db.listByState(.rejected).filter { $0.leaseId == "L92" }.count, 1)
+
+        // 从 .unzipped 推 .rejected
+        try db.upsert(trainingSetId: 93, leaseId: "L93", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 93, leaseId: "L93", state: .crcOK,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 93, leaseId: "L93", state: .unzipped,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 93, leaseId: "L93", state: .rejected,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: "verify_failed")
+        XCTAssertEqual(try db.listByState(.rejected).filter { $0.leaseId == "L93" }.count, 1)
     }
 
     // 用例 17（R3 新增 codex med-3）：state_entered_at 是 Unix 秒 UTC（非毫秒）
@@ -2292,31 +2373,30 @@ enum AcceptanceJournalDAOImpl {
     private static let logger = Logger(subsystem: "com.kline.trainer.persistence",
                                        category: "AcceptanceJournalDAO")
 
-    /// state monotonic rank（per spec L1798+ P2 状态机）。
-    /// `confirmed` 与 `rejected` 同 rank（6）且互斥终态：彼此不可转换（避免误把成功改失败 / 失败改成功）。
-    private static func stateRank(_ s: P2JournalState) -> Int {
+    /// 显式 next-state allowlist（R4 修订 codex high-2 — spec L1798+ P2 状态机线性顺序）：
+    /// 任何状态只能转去显式列出的下一组 state。downloaded → stored 跳过 CRC/unzip/verify 不允许。
+    /// `rejected` 是吸收终态；`confirmed` 是成功终态；终态间互斥不可转。
+    /// 任何状态都可推到 `.rejected`（失败可在任何阶段发生）。
+    private static func nextAllowed(_ s: P2JournalState) -> Set<P2JournalState> {
         switch s {
-        case .downloaded:     return 0
-        case .crcOK:          return 1
-        case .unzipped:       return 2
-        case .dbVerified:     return 3
-        case .stored:         return 4
-        case .confirmPending: return 5
-        case .confirmed:      return 6
-        case .rejected:       return 6
+        case .downloaded:     return [.crcOK, .rejected]
+        case .crcOK:          return [.unzipped, .rejected]
+        case .unzipped:       return [.dbVerified, .rejected]
+        case .dbVerified:     return [.stored, .rejected]
+        case .stored:         return [.confirmPending, .rejected]
+        case .confirmPending: return [.confirmed, .rejected]
+        case .confirmed:      return []  // 成功终态：不能再转
+        case .rejected:       return []  // 失败终态：不能再转
         }
     }
 
-    /// 转换合法性判定：
-    /// - new rank > old rank → forward 允许
-    /// - new == old → 同 state 重试，允许（刷新 entered_at + 辅助列）
-    /// - 其它（new rank < old，或同 rank 不同 state = 终态互斥）→ NOOP
+    /// 转换合法性判定（R4 修订 codex high-2 — 改 explicit allowlist 取代 rank>）：
+    /// - `new == old` → 同 state 重试，允许（刷新 entered_at + 辅助列）
+    /// - `new` ∈ `nextAllowed(old)` → 一步转换，允许
+    /// - 其它（跨步跳过 / backward / 终态互斥 / 终态后转）→ NOOP
     private static func canApply(new: P2JournalState, over old: P2JournalState) -> Bool {
-        let nr = stateRank(new)
-        let or = stateRank(old)
-        if nr > or { return true }
-        if nr == or && new == old { return true }
-        return false
+        if new == old { return true }
+        return nextAllowed(old).contains(new)
     }
 
     /// state-dependent invariant（R3 修订 codex high-1）：
@@ -2393,7 +2473,13 @@ enum AcceptanceJournalDAOImpl {
                        sqliteLocalPath: sqliteLocalPath, contentHash: contentHash,
                        lastError: lastError)
         } else {
-            // 行不存在 → 校验 invariants（existingPath/Hash = nil）+ INSERT 新行
+            // 行不存在 → 仅允许 .downloaded 作为首条 journal 行（per spec L1798+ "v1.4 首条持久化行起点"）
+            // R4 修订（codex high-2）：避免 caller bug 直接 INSERT .stored/.confirmed 跳过验证链
+            guard state == .downloaded else {
+                throw AppError.internalError(
+                    module: "P4-AcceptanceJournalDAO",
+                    detail: "first INSERT must be .downloaded; got .\(state.rawValue) for tid=\(trainingSetId) lid=\(leaseId)")
+            }
             try validateInvariants(state: state,
                                    existingPath: nil, existingHash: nil,
                                    newPath: sqliteLocalPath, newHash: contentHash)
@@ -2609,14 +2695,25 @@ final class AppDBHappyPathIntegrationTests: XCTestCase {
         XCTAssertEqual(stats.winCount, 1)
         XCTAssertEqual(stats.currentCapital, 10_500)
 
-        // ⑥ AcceptanceJournal 模拟 P2 一组 lease
+        // ⑥ AcceptanceJournal 模拟 P2 一组 lease 全链路（R4 修订：必须走每一步）
         try db.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
-                      sqliteLocalPath: "/tmp/set.sqlite", contentHash: "deadbeef", lastError: nil)
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 1, leaseId: "L1", state: .unzipped,
+                      sqliteLocalPath: "/tmp/set.sqlite", contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 1, leaseId: "L1", state: .dbVerified,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
         try db.upsert(trainingSetId: 1, leaseId: "L1", state: .stored,
-                      sqliteLocalPath: "/tmp/set.sqlite", contentHash: "deadbeef", lastError: nil)
+                      sqliteLocalPath: nil, contentHash: "deadbeef", lastError: nil)
         XCTAssertEqual(try db.listByState(.stored).count, 1)
+        try db.upsert(trainingSetId: 1, leaseId: "L1", state: .confirmPending,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try db.upsert(trainingSetId: 1, leaseId: "L1", state: .confirmed,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        XCTAssertEqual(try db.listByState(.confirmed).count, 1)
         try db.deleteByIdLease(trainingSetId: 1, leaseId: "L1")
-        XCTAssertEqual(try db.listByState(.stored).count, 0)
+        XCTAssertEqual(try db.listByState(.confirmed).count, 0)
 
         // ⑦ load record bundle 完整恢复
         let bundle = try db.loadRecordBundle(id: recordId)
@@ -2804,6 +2901,22 @@ verdict = **needs-attention**，4 findings：
 - AppDB CANTOPEN 测试用 `/dev/null/x/app.sqlite` 作 bad path——cross-platform 兼容假设但 macOS 一定 fail（XCode/SPM target macOS）
 
 待执行 R4 验证。**Round 计数：3**（≥5 触发 abort 协议 per `feedback_codex_round6_self_contradiction.md`）。
+
+### Round 4（codex 2026-05-03，branch-diff vs origin/main）
+
+verdict = **needs-attention**，2 findings（都 HIGH）：
+
+| # | sev | finding | decision |
+|---|---|---|---|
+| 1 | HIGH | baseline DDL `CREATE TABLE IF NOT EXISTS` 在残留 schema 上 silently skip → 列结构不匹配也认作 "已 v1.4"；codex 推 PRAGMA table_info / index_list 校验 + .schemaMismatch | **REJECT**（理由：Wave 0 fresh install 无 v1.3 deployed；spec L156 仅规定 P4 是 migration owner、未要求 schema 自动校验；PRAGMA validation 是 scope creep 且匹配 codex `feedback_codex_fractional_subpixel_bias` 防御级永远不够模式；该残留写入 §"已知残留"，将来 alter migration 引入时再加校验） |
+| 2 | HIGH | canApply 仅 rank 比较 → 允许 .downloaded → .stored 跳过 CRC/unzip/dbVerified；happy-path 测试自身就直跳，把 unsafe 当默认 | **ACCEPT**：canApply 改 explicit `nextAllowed` map（spec L1798+ 线性顺序）；首次 INSERT 必须 .downloaded；`.rejected` 任何阶段可推；修 happy-path 集成测试走完整链；新增 walkToStored helper；新增 用例 18/19/20；改写 用例 8/11/12/14/15/16 用 walk-through |
+
+1 ACCEPT + 1 REJECT。残留：
+- IF NOT EXISTS 残留 schema 不验证：Wave 0 fresh install 接受；将来出现 v1.x → v1.y migration 时再加 PRAGMA 校验
+- caller 想要"批量推进"（如 `.crcOK + .unzipped + .dbVerified` 一步合并）需调 N 次 upsert；DAO 层不允许跨步是 defense-in-depth 决策
+- happy-path 测试现 7 步走完链，看似冗长但验证 spec L1798+ 完整顺序
+
+**Round 计数：4**（≥5 触发 abort 协议 per `feedback_codex_round6_self_contradiction.md`）。R5 若仍出新 finding 或重复推 finding 1，escalate user。
 
 ---
 
