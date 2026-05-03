@@ -30,10 +30,28 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
         let kRows: [KLineRow]
         do {
             kRows = try q.read { db in
+                // SQL 层 typeof() 校验，绕过 GRDB Decodable 在 TEXT-in-INT/REAL 列的 silent
+                // coerce-to-0/0.0（per codex round 4 HIGH-1，与 meta 同模式）：
+                // klines 关键 NOT NULL 列必须 storage class 严格匹配 schema affinity。
+                let badCount = try Int.fetchOne(db, sql: """
+                    SELECT COUNT(*) FROM klines
+                    WHERE typeof(period) NOT IN ('text','null')
+                       OR typeof(datetime) NOT IN ('integer','null')
+                       OR typeof(open) NOT IN ('real','integer','null')
+                       OR typeof(high) NOT IN ('real','integer','null')
+                       OR typeof(low) NOT IN ('real','integer','null')
+                       OR typeof(close) NOT IN ('real','integer','null')
+                       OR typeof(volume) NOT IN ('integer','null')
+                       OR typeof(end_global_index) NOT IN ('integer','null')
+                       OR typeof(global_index) NOT IN ('integer','null')
+                    """) ?? 0
+                if badCount > 0 {
+                    throw AppError.persistence(.dbCorrupted)
+                }
                 // FetchableRecord + Decodable 走 GRDB 内部 throwing decode 路径：
                 // 列类型 mismatch / NULL 出现在 NOT NULL 列 → 抛 RowDecodingError，
                 // 由外层 catch 翻译为 AppError.persistence(.dbCorrupted)
-                try KLineRow.fetchAll(db, sql: """
+                return try KLineRow.fetchAll(db, sql: """
                 SELECT period, datetime, open, high, low, close, volume,
                        amount, ma66, boll_upper, boll_mid, boll_lower,
                        macd_diff, macd_dea, macd_bar, global_index, end_global_index
@@ -84,12 +102,24 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
             result[period, default: []].append(candle)
         }
 
-        // .m3 是最小周期 = 全局 tick 轴（per codex round 3 HIGH-1 + spec L2242
-        // "global_index/end_global_index 严格递增 + 前后端 assert"）：
+        // 非 m3 endGlobalIndex 非负校验（per codex round 4 MEDIUM）— 提到 m3 if 外，
+        // m3 missing 不影响这层基础 invariant：endGlobalIndex 恒非负。
+        for (period, candles) in result where period != .m3 {
+            for c in candles {
+                if c.endGlobalIndex < 0 {
+                    throw AppError.persistence(.dbCorrupted)
+                }
+            }
+        }
+
+        // .m3 是最小周期 = 全局 tick 轴（per codex round 3 HIGH-1 + round 4 MEDIUM
+        // + spec L2242 "global_index/end_global_index 严格递增 + 前后端 assert"）：
         // - 每根 m3 candle 必须 globalIndex == endGlobalIndex（同一根 K 线起止索引相等）
         // - m3 globalIndex 必须从 0 开始严格递增 0,1,2,...（无 gap、无 nil）
         // - 其它周期的 endGlobalIndex 必须落在 m3 范围内（不超过 m3 最大 endGlobalIndex）
         // 任一不变量违反 → .dbCorrupted。
+        // m3 missing 但 result 非空（只有高周期数据）= 真 corrupt（无 global axis 锚点）→ reject。
+        // m3 missing 且 result 全空（整库无 candles）= plan §4 允许，返回空字典让 caller 处理。
         if let m3Candles = result[.m3] {
             for (i, c) in m3Candles.enumerated() {
                 guard let g = c.globalIndex,
@@ -101,11 +131,14 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
             let m3Max = m3Candles.last?.endGlobalIndex ?? -1
             for (period, candles) in result where period != .m3 {
                 for c in candles {
-                    if c.endGlobalIndex < 0 || c.endGlobalIndex > m3Max {
+                    if c.endGlobalIndex > m3Max {
                         throw AppError.persistence(.dbCorrupted)
                     }
                 }
             }
+        } else if !result.isEmpty {
+            // 高周期数据存在但无 m3 = 缺全局 tick 轴锚点
+            throw AppError.persistence(.dbCorrupted)
         }
         return result
     }
