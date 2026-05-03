@@ -4,7 +4,7 @@
 
 PRAGMA user_version = 1;
 
-CREATE TABLE training_records (
+CREATE TABLE IF NOT EXISTS training_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     training_set_filename TEXT NOT NULL,
     created_at INTEGER NOT NULL,
@@ -22,7 +22,7 @@ CREATE TABLE training_records (
     final_tick INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE trade_operations (
+CREATE TABLE IF NOT EXISTS trade_operations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     record_id INTEGER NOT NULL REFERENCES training_records(id),
     global_tick INTEGER NOT NULL,
@@ -37,7 +37,7 @@ CREATE TABLE trade_operations (
     created_at INTEGER NOT NULL
 );
 
-CREATE TABLE drawings (
+CREATE TABLE IF NOT EXISTS drawings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     record_id INTEGER NOT NULL REFERENCES training_records(id),
     tool_type TEXT NOT NULL,
@@ -46,7 +46,7 @@ CREATE TABLE drawings (
     anchors TEXT NOT NULL
 );
 
-CREATE TABLE pending_training (
+CREATE TABLE IF NOT EXISTS pending_training (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     training_set_filename TEXT NOT NULL,
     global_tick_index INTEGER NOT NULL,
@@ -62,12 +62,12 @@ CREATE TABLE pending_training (
     drawdown TEXT NOT NULL
 );
 
-CREATE TABLE settings (
+CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
-CREATE TABLE download_acceptance_journal (
+CREATE TABLE IF NOT EXISTS download_acceptance_journal (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     training_set_id INTEGER NOT NULL,
     lease_id TEXT NOT NULL,
@@ -79,4 +79,4 @@ CREATE TABLE download_acceptance_journal (
     UNIQUE (training_set_id, lease_id)
 );
 
-CREATE INDEX idx_journal_state ON download_acceptance_journal(state);
+CREATE INDEX IF NOT EXISTS idx_journal_state ON download_acceptance_journal(state);

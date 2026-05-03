@@ -50,6 +50,17 @@ public final class InMemorySettingsDAO: SettingsDAO, @unchecked Sendable {
     public func resetCapital() throws {}
 }
 
+public final class InMemoryAcceptanceJournalDAO: AcceptanceJournalDAO, @unchecked Sendable {
+    public init() {}
+    public func upsert(trainingSetId: Int, leaseId: String,
+                       state: P2JournalState,
+                       sqliteLocalPath: String?,
+                       contentHash: String?,
+                       lastError: String?) throws {}
+    public func listByState(_ state: P2JournalState) throws -> [AcceptanceJournalRow] { [] }
+    public func deleteByIdLease(trainingSetId: Int, leaseId: String) throws {}
+}
+
 // MARK: - P5 fake
 
 public final class InMemoryCacheManager: CacheManager, @unchecked Sendable {
