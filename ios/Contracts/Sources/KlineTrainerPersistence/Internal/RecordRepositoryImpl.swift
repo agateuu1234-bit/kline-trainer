@@ -56,13 +56,11 @@ enum RecordRepositoryImpl {
 
     static func listRecords(_ db: Database, limit: Int?) throws -> [TrainingRecord] {
         // R1 修订（codex med-1）：加 id DESC tiebreak 防同毫秒并列时 SQLite 任选不定序
-        let sql: String
-        if let limit = limit {
-            sql = "SELECT * FROM training_records ORDER BY created_at DESC, id DESC LIMIT \(limit)"
-        } else {
-            sql = "SELECT * FROM training_records ORDER BY created_at DESC, id DESC"
-        }
-        let rows = try Row.fetchAll(db, sql: sql)
+        // code-review I-1：LIMIT 用 ? 占位符，与文件其它 SQL 站点参数化方式统一
+        let baseSQL = "SELECT * FROM training_records ORDER BY created_at DESC, id DESC"
+        let sql = limit != nil ? baseSQL + " LIMIT ?" : baseSQL
+        let args: StatementArguments = limit.map { [$0] } ?? []
+        let rows = try Row.fetchAll(db, sql: sql, arguments: args)
         return try rows.map { try recordFromRow($0) }
     }
 
