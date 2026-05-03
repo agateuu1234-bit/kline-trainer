@@ -118,10 +118,28 @@ public final class DefaultAppDB: AppDB {
         catch { throw PersistenceErrorMapping.translate(error) }
     }
 
-    // MARK: - SettingsDAO（Task 6）
-    public func loadSettings() throws -> AppSettings { fatalError("Task 6 实现") }
-    public func saveSettings(_ s: AppSettings) throws { fatalError("Task 6 实现") }
-    public func resetCapital() throws { fatalError("Task 6 实现") }
+    // MARK: - SettingsDAO
+
+    public func loadSettings() throws -> AppSettings {
+        do {
+            return try dbQueue.read { db in try SettingsDAOImpl.loadSettings(db) }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func saveSettings(_ s: AppSettings) throws {
+        do {
+            try dbQueue.write { db in try SettingsDAOImpl.saveSettings(db, settings: s) }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func resetCapital() throws {
+        do {
+            try dbQueue.write { db in try SettingsDAOImpl.resetCapital(db) }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
 
     // MARK: - AcceptanceJournalDAO（Task 7）
     public func upsert(trainingSetId: Int, leaseId: String, state: P2JournalState,
