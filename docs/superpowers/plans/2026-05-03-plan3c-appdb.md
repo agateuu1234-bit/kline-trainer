@@ -2013,13 +2013,18 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(after[0].stateEnteredAt, firstStamp)
     }
 
-    // 用例 3：listByState 多状态分桶
+    // 用例 3：listByState 多状态分桶（R5 修订 codex high-2：用 walk-through 而非直接 INSERT）
     func test_listByState_filters_correctly() throws {
         try db.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
-        try db.upsert(trainingSetId: 2, leaseId: "L2", state: .stored,
-                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
-        try db.upsert(trainingSetId: 3, leaseId: "L3", state: .stored,
+        try walkToStored(trainingSetId: 2, leaseId: "L2",
+                         path: "/tmp/2.sqlite", hash: "2deadbef")
+        try walkToStored(trainingSetId: 3, leaseId: "L3",
+                         path: "/tmp/3.sqlite", hash: "3deadbef")
+        // walk 到 .confirmed
+        try walkToStored(trainingSetId: 4, leaseId: "L4",
+                         path: "/tmp/4.sqlite", hash: "4deadbef")
+        try db.upsert(trainingSetId: 4, leaseId: "L4", state: .confirmPending,
                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
         try db.upsert(trainingSetId: 4, leaseId: "L4", state: .confirmed,
                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
@@ -2043,12 +2048,14 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
         XCTAssertNoThrow(try db.deleteByIdLease(trainingSetId: 999, leaseId: "missing"))
     }
 
-    // 用例 6：upsert 包含 lastError 文本
+    // 用例 6：upsert 包含 lastError 文本（R5 修订 codex high-2：必须先 .downloaded 再转 .rejected）
     func test_upsert_carries_lastError_text() throws {
+        try db.upsert(trainingSetId: 6, leaseId: "L6", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
         try db.upsert(trainingSetId: 6, leaseId: "L6", state: .rejected,
                       sqliteLocalPath: nil, contentHash: nil,
                       lastError: "crc_mismatch_at_byte_42")
-        let rows = try db.listByState(.rejected)
+        let rows = try db.listByState(.rejected).filter { $0.leaseId == "L6" }
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0].lastError, "crc_mismatch_at_byte_42")
     }
@@ -2094,9 +2101,13 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
         XCTAssertEqual(stored[0].contentHash, "deadbeef")
     }
 
-    // 用例 9（R1 新增 codex high-1）：终态 .confirmed 与 .rejected 同 rank，互斥不可转
+    // 用例 9（R1 codex high-1 / R5 改 walk-through）：终态 .confirmed 与 .rejected 不可互转
     func test_upsert_terminal_states_mutually_exclusive() throws {
-        // 方向 A：confirmed → rejected NOOP
+        // 方向 A：walk 到 .confirmed，然后试 .rejected → NOOP
+        try walkToStored(trainingSetId: 2, leaseId: "L2",
+                         path: "/tmp/2.sqlite", hash: "2deadbef")
+        try db.upsert(trainingSetId: 2, leaseId: "L2", state: .confirmPending,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
         try db.upsert(trainingSetId: 2, leaseId: "L2", state: .confirmed,
                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
         try db.upsert(trainingSetId: 2, leaseId: "L2", state: .rejected,
@@ -2104,7 +2115,9 @@ final class DefaultAcceptanceJournalDAOTests: XCTestCase {
         XCTAssertEqual(try db.listByState(.rejected).filter { $0.leaseId == "L2" }.count, 0)
         XCTAssertEqual(try db.listByState(.confirmed).filter { $0.leaseId == "L2" }.count, 1)
 
-        // 方向 B：rejected → confirmed NOOP
+        // 方向 B：先 .downloaded 再 .rejected，然后试 .confirmed → NOOP
+        try db.upsert(trainingSetId: 3, leaseId: "L3", state: .downloaded,
+                      sqliteLocalPath: nil, contentHash: nil, lastError: nil)
         try db.upsert(trainingSetId: 3, leaseId: "L3", state: .rejected,
                       sqliteLocalPath: nil, contentHash: nil, lastError: "x")
         try db.upsert(trainingSetId: 3, leaseId: "L3", state: .confirmed,
@@ -2917,6 +2930,19 @@ verdict = **needs-attention**，2 findings（都 HIGH）：
 - happy-path 测试现 7 步走完链，看似冗长但验证 spec L1798+ 完整顺序
 
 **Round 计数：4**（≥5 触发 abort 协议 per `feedback_codex_round6_self_contradiction.md`）。R5 若仍出新 finding 或重复推 finding 1，escalate user。
+
+### Round 5（codex 2026-05-03，branch-diff vs origin/main）
+
+verdict = **needs-attention**，2 findings（都 HIGH）：
+
+| # | sev | finding | decision |
+|---|---|---|---|
+| 1 | HIGH | baseline DDL CREATE TABLE IF NOT EXISTS 在残留 schema 上 silently skip → 推 PRAGMA table_info / index_list / user_version 校验 + .schemaMismatch | **REJECT 第 2 次（codex 复述 R4 已 reject finding）** — 命中 `feedback_codex_round6_self_contradiction.md` 模式；理由不变（Wave 0 fresh install 无 v1.3 deployed；spec L156 不要求 schema auto validation；不同意 codex 第 5 轮把第 4 轮已驳回的 finding 重新升 HIGH） |
+| 2 | HIGH | 用例 3 / 6 / 9 直接 INSERT 到 .stored / .rejected / .confirmed → 触发 R4 加的 first-INSERT-must-be-.downloaded 守门 → 测试在断言前抛 .internalError 失败 | **ACCEPT — 我自己 R4 改 guard 后没同步修这 3 个 test cases，是真疏漏**：用例 3 用 walkToStored(L2/L3/L4) + 用例 4 .confirmPending → .confirmed；用例 6 加前置 .downloaded；用例 9 方向 A 走完整链 walkToStored → .confirmPending → .confirmed，方向 B 加前置 .downloaded |
+
+1 ACCEPT + 1 REJECT 第 2 次。
+
+**Round 计数：5**。命中 abort 协议（`feedback_codex_round6_self_contradiction.md`）：codex 复述已 reject finding = 自相矛盾 / 边际负收益信号。**Plan 不再进 R6 codex review 自动循环**；finding 2 真修订已应用，finding 1 sustainably reject。**Escalate user TTY override** 决策（继续 R6 / accept plan 进 implementation / 接 finding 1）。
 
 ---
 
