@@ -222,6 +222,27 @@ private static let zeroDefault = AppSettings(
 - 后续 U4 SettingsPanel 加 `forceResetAndReload()` API（Wave 2 scope，本 PR 不做）
 - 短期代价：dbCorrupted 用户不能改 settings；但 dbCorrupted 是极罕见事故（用户主动改 sqlite / DB 真损坏）；强制重启 + 后续重置比 silent data loss 好
 
+**§6.3 R5 修订：snapshotFees 路径不能 silent 返 zero（codex R5-H1）**
+
+spec L1981 签名：`func snapshotFees() -> FeeSnapshot` —— sync 无 throws，不能直接 throw 自报错误。
+
+**问题**（codex R5-H1）：loadError 状态下 self.settings 是 zero-default，snapshotFees 返 `FeeSnapshot(commissionRate: 0, minCommissionEnabled: false)`，下游 trade calculator 会用 zero fee 算交易成本 → P&L 错。这个错误**看不到**（valid-looking FeeSnapshot），比 throw 还危险。
+
+**修订方案**：
+1. **暴露 public read-only `loadError`** —— `public var loadError: AppError? { _loadError }`（同名 alias 把私有 sentinel 露出）
+2. **caller 契约**：E6/E5/U4 在调 snapshotFees 前必须先 guard `loadError == nil`，loadError 非 nil 时不能进入 trading flow（spec §11 Test Fixture / §15 acceptance 的 caller 文档加这条）
+3. **snapshotFees 自身实现不变**（保 spec sync 签名）：返当前 settings 的 zero fees；caller 没 guard 是 caller bug
+4. **defense-in-depth**（本 PR 加）：snapshotFees 内部 `if let e = _loadError { Logger(...).error("snapshotFees called while loadError set: \(e)") }` 但**不抛**——日志能让运维抓到 caller bug
+
+**为什么不改 snapshotFees 签名**：
+- 改 throws 等同打破 spec L1981 + PR #40 类壳契约（H-2 同类问题）
+- E6 Coordinator (Wave 2) 调 snapshotFees 是 sync 路径（在 startNewNormalSession 内），改 throws 强制 E6 整链路 throws
+- 暴露 loadError 作为 explicit gate 比 throws 更明确 + 更易 testable
+
+**测试加**（Task 6）：
+- snapshotFees_loadErrorSet_returnsZeroAndLogs：loadError 非 nil 时 snapshotFees 仍返 zero（不 throw），verify Logger 日志（用 mock OSLog 或 `@available` skip）
+- loadError 公开 readable：assert `store.loadError == .persistence(.diskFull)` after init
+
 **§6.2 update / resetCapital 异步实现（R1 重写：inflight Task 链串行化，防 H-3 数据丢失）**
 
 `SettingsDAO.saveSettings(_:) throws` 和 `resetCapital() throws` 都是 sync。`SettingsStore.update(_:)` 是 `async throws`，`resetCapital()` 也是 `async throws`。
@@ -295,7 +316,20 @@ public func resetCapital() async throws {
 - 并发触发 2 个 update（一个改 commissionRate，一个改 totalCapital）→ 两个字段都应在 dao.saveSettings 最后一次调用中 visible
 - 并发触发 update + resetCapital → resetCapital 不应被 update 的旧 totalCapital overwrite
 
-**snapshotFees() 实现**：直接读 `self.settings.commissionRate` + `minCommissionEnabled` 构造 `FeeSnapshot`——纯读 MainActor 字段，无 IO，无需 async（spec L1981 签名就是 sync）。PR #40 类壳已经写对了，不动。
+**snapshotFees() 实现**（R5 H-1 修订）：直接读 `self.settings.commissionRate` + `minCommissionEnabled` 构造 `FeeSnapshot`——纯读 MainActor 字段，无 IO，无需 async（spec L1981 签名就是 sync）。PR #40 类壳基本写对，本 PR 加 1 行 defense-in-depth log（loadError 非 nil 时记录 caller 没 guard 的 misuse；不抛、不改返回值，详 §6.3）：
+
+```swift
+public func snapshotFees() -> FeeSnapshot {
+    if let e = _loadError {
+        // R5 H-1 defense-in-depth: caller 应 guard loadError；这里仅 log 不抛
+        Logger(subsystem: "kline.trainer", category: "settings").error(
+            "snapshotFees called while loadError set (caller bug): \(String(describing: e), privacy: .public)")
+    }
+    return FeeSnapshot(
+        commissionRate: settings.commissionRate,
+        minCommissionEnabled: settings.minCommissionEnabled)
+}
+```
 
 ### §7 测试 isolation
 
@@ -305,17 +339,38 @@ P6 测试用 `StubSettingsDAO`（注入返回值 + throws），不依赖 GRDB。
 
 **为什么不用 in-process app.sqlite + DefaultAppDB**：单元测试 scope 应隔离。P5 测试不需要 sqlite，P6 测试用 stub 比真 GRDB 快百倍且无 fixture 依赖。
 
-### §8 trust-boundary 影响评估（codex review 必问）
+### §8 trust-boundary 影响评估（R5 修订：明示签名增强）
 
 | 文件 | trust-boundary? | 评估 |
 |---|---|---|
-| `Settings/SettingsStore.swift` | ✅ `ios/**/*.swift` 在 globs 内 | 仅改 init/update/resetCapital body；**不改 public 签名**；不破坏 PR #40 contract |
+| `Settings/SettingsStore.swift` | ✅ `ios/**/*.swift` 在 globs 内 | 改 init/update/resetCapital body **+ 2 处签名增强**（详 §8.1）|
 | `DefaultFileSystemCacheManager.swift` | ✅ 同上 | 新文件 = 新 public class；CacheManager 协议在 PR #40，本 PR 实现一个 conformer，无新公共 API surface |
 | `Internal/CacheErrorMapping.swift` | ✅ 同上 | `internal` 范围，不暴露 |
 | `*Tests.swift` | ✅ `tests/**` 在 globs 内 | 测试新增，不破坏既有 |
 | `docs/acceptance/...md` | ✅ `docs/**` 在 globs 内 | 验收清单，doc-only |
 
-**结论**：本 PR 不改任何 public 协议签名（CacheManager / SettingsStore 类签名 / SettingsDAO 全部冻结），属"实现填充"，trust-boundary 风险面低。
+**§8.1 签名增强清单（R5 H-2 修订：诚实暴露，不再藏在注释里）**
+
+PR #40 SettingsStore 类壳是 fatalError 占位，**没有任何 production caller**。本 PR 落地生产实现时不可避免引入 2 处 strict-concurrency 必需的签名增强：
+
+1. **`update(_ mutate:)` 加 `@escaping @Sendable`**（原：`(inout AppSettings) -> Void`；新：`@escaping @Sendable (inout AppSettings) -> Void`）
+   - **原因**：序列化并发 update 必须把 mutate 推到 inflight Task chain 跨 await；Swift 6 strict concurrency 要求 Task 闭包 sendable context 内捕获 sendable 闭包
+   - **替代方案评估（codex R5 推荐"redesign 不捕获 closure"）**：
+     - **A. mutate 同步 apply on MainActor + 只序列化 save** —— 拒：concurrent updates 都从 baseline 读 → mutate 之间互相覆盖（同 H-3 数据丢失模式）
+     - **B. actor SaveSerializer + optimistic settings 更新 + 失败 revert** —— 拒：revert 在 concurrent 场景 overwrite 后续 update 仍丢；新引入 actor reentrance 复杂度
+     - **C. @escaping @Sendable 闭包捕获**（本 PR 选）—— 接受：caller 写纯 mutate（如 `s.commissionRate = 0.0001`）天然 Sendable；Swift 6 编译可强制 caller 不传含非 Sendable 捕获的闭包
+   - **caller 影响**：PR #40 类壳无 caller；首批 caller 是 Wave 2 U4 SettingsPanel + E6 Coordinator，本 PR 落契约后他们按 @Sendable 写即可；无 binary 兼容问题
+
+2. **`loadError: AppError?` 公开 read-only 属性**（PR #40 类壳无此属性；新增 public getter）
+   - **原因**：R5 H-1，snapshotFees 不能改签名 throw，必须暴露 loadError 让 caller guard
+   - **caller 影响**：新增 read-only API，不破坏既有，是 strictly additive
+
+**为什么这两处不属"破坏 trust-boundary"**：
+- 都是 strictly additive 或 strict-concurrency 必需的强化，**没有任何旧 API 被删除或语义改变**
+- PR #40 SettingsStore 类壳明示 "Wave 2 P6 PR 改为 init 内调用 settingsDAO.loadSettings() 实际加载"，本 PR 就是那个落地 PR；signature 强化是落地不可避免的副产品
+- codex review 链路本身就是 trust-boundary check，本 PR 全程经 ≥5 轮 codex review，每轮显式列签名变化
+
+**结论**：本 PR 引入 2 处 SettingsStore 签名增强（addtive `loadError` getter + strengthening `@escaping @Sendable` on `update`）；CacheManager 协议**完全冻结**（不动）。这两处增强已在 codex R5 留痕认知。
 
 ---
 
@@ -443,6 +498,11 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
         self.cacheRoot = cacheRoot
     }
 
+    /// R5 M-3: lazy 一次性清残留 .staging-* 文件（前次 process kill 留下的 orphan）
+    /// 由 store 首次调用触发；不影响 listAvailable / pickRandom 性能（它们也调）
+    /// 用 NSLock 而非 queue.sync 因 caller 已在 queue.sync 内（递归 deadlock）
+    private var cleanStaleStagingDone = false
+
     public func listAvailable() -> [TrainingSetFile] {
         queue.sync { listAvailableLocked() }
     }
@@ -454,6 +514,9 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
     public func store(downloadedZip src: URL, meta: TrainingSetMetaItem) throws -> TrainingSetFile {
         try queue.sync {
             try ensureCacheRootExists()
+            // R5 M-3: 清前一次 store 进程崩溃残留的 .staging-* 文件（防 orphan 绕过 LRU cap）
+            // 一次性 lazy（cleanStaleStagingDone flag）；首次 store 触发，零 overhead 后续 store
+            cleanStaleStagingIfNeededLocked()
             // R3 H-2: 验证 meta.filename 不带 path 分隔符 / traversal / 空 / staging 前缀
             try validateFilename(meta.filename)
             let target = try cacheURL(forId: meta.id, filename: meta.filename)
@@ -511,6 +574,29 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
 
     // MARK: - Internal helpers (all FileManager / DatabaseQueue I/O wrapped here)
     // M-4 gate 强制：public 方法零 raw `try FileManager.` / `try DatabaseQueue`，全部走以下 helpers。
+
+    /// R5 M-3: 清前次 process kill 残留的 `.staging-*` 文件。
+    /// 调用时机：store 首次进 queue.sync 时（lazy）；listAvailable 是 read，不触发 cleanup。
+    /// caller 已在 queue.sync 内，本函数不再额外 lock。
+    private func cleanStaleStagingIfNeededLocked() {
+        if cleanStaleStagingDone { return }
+        cleanStaleStagingDone = true
+        // 用 includingPropertiesForKeys=nil + producesRelativePathURLs=false 列出全部
+        // 注意：包含 hidden（不传 .skipsHiddenFiles）
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: cacheRoot, includingPropertiesForKeys: nil, options: [])) ?? []
+        for entry in entries {
+            let basename = entry.deletingPathExtension().lastPathComponent
+            if basename.hasPrefix(".staging-") {
+                do {
+                    try removeFile(entry)
+                    log.info("removed stale staging: \(entry.lastPathComponent, privacy: .public)")
+                } catch {
+                    log.error("failed to remove stale staging \(entry.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)")
+                }
+            }
+        }
+    }
 
     private func ensureCacheRootExists() throws {
         if !FileManager.default.fileExists(atPath: cacheRoot.path) {
@@ -1136,6 +1222,31 @@ func delete_doesNotTrustLocalURL_externalFileSafe() throws {
     #expect(FileManager.default.fileExists(atPath: victim.path), "外部文件不应被 cache 操作影响")
 }
 
+// R5 M-3 regression: pre-existing .staging-* 文件被清，不绕 LRU cap
+@Test("store: cache root 内残留 .staging-* 文件首次 store 时被清")
+func store_firstCallCleansStaleStagingFiles() throws {
+    let root = CacheFixture.makeTempCacheRoot()
+    defer { CacheFixture.cleanup(root) }
+    // 预 - 留 2 个残留 staging 文件
+    let stale1 = root.appendingPathComponent(".staging-OLD1__99__leftover.sqlite")
+    let stale2 = root.appendingPathComponent(".staging-OLD2__88__leftover.sqlite")
+    try Data("dummy".utf8).write(to: stale1)
+    try Data("dummy".utf8).write(to: stale2)
+    #expect(FileManager.default.fileExists(atPath: stale1.path))
+    #expect(FileManager.default.fileExists(atPath: stale2.path))
+
+    let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+    // 触发 cleanup（首次 store 进 queue.sync 内调）
+    let s = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+    _ = try cache.store(downloadedZip: s, meta: CacheFixture.meta(id: 7, filename: "x.sqlite"))
+
+    // 残留 staging 应被清
+    #expect(!FileManager.default.fileExists(atPath: stale1.path), "stale1 应被清")
+    #expect(!FileManager.default.fileExists(atPath: stale2.path), "stale2 应被清")
+    // 当前 store 的 cache 应在
+    #expect(cache.listAvailable().count == 1)
+}
+
 // R3 H-2 regression: touch 同样不信任 localURL
 @Test("touch: 不信任 file.localURL，外部文件 mtime 不变")
 func touch_doesNotTrustLocalURL_externalFileMtimeUnchanged() throws {
@@ -1398,10 +1509,10 @@ public final class SettingsStore {
 
     private let settingsDAO: SettingsDAO
     private var pendingMutations: Task<Void, Error>?
-    /// R2 H-3 + R3 H-1：非 .dbCorrupted 的 load 失败保留在此，update/reset 入口先抛 loadError
-    /// 防止 transient I/O 错误时 UI 写 zero 覆盖用户原数据。dbCorrupted 不进入此 sentinel
-    /// （因 dbCorrupted 是真不可恢复 + 用户已经丢了原数据，允许 UI 改写至少能恢复 functionality）。
-    private var loadError: AppError?
+    /// R2 H-3 + R3 H-1 + R4 H-1：所有 load 失败（含 dbCorrupted）都阻塞写。
+    /// R5 H-1：暴露为 public read-only，让 caller (E6/E5) 在调 snapshotFees / 进 trade flow 前 guard。
+    private var _loadError: AppError?
+    public var loadError: AppError? { _loadError }
 
     private static let zeroDefault = AppSettings(
         commissionRate: 0, minCommissionEnabled: false,
@@ -1416,7 +1527,7 @@ public final class SettingsStore {
             // SettingsDAO 是 key-value，dbCorrupted 可能伴随部分合法 keys；conservative 阻塞防 silent 覆盖
             // 用户恢复路径：重启 app 重新 load；极端情况靠 Wave 2 U4 显式 reset 按钮（本 PR 不做）
             self.settings = SettingsStore.zeroDefault
-            self.loadError = (error as? AppError)
+            self._loadError = (error as? AppError)
                 ?? .internalError(module: "P6", detail: String(describing: error))
             Logger(subsystem: "kline.trainer", category: "settings").error(
                 "loadSettings: blocked write (loadError set): \(String(describing: error), privacy: .public)")
@@ -1525,6 +1636,24 @@ func concurrentUpdate_differentFields_neitherLost() async throws {
     #expect(dao.savedSettings?.totalCapital == 77_777)
 }
 
+// R5 H-1 regression: snapshotFees 在 loadError 状态下返 zero（不 throw 不 crash），caller 可读 loadError guard
+@Test("snapshotFees: loadError 非 nil 时返 zero fees + loadError 公开 readable")
+func snapshotFees_loadErrorState_returnsZeroAndExposesLoadError() async throws {
+    let dfErr = AppError.persistence(.diskFull)
+    let dao = StubSettingsDAO(load: .failure(dfErr))
+    let store = SettingsStore(settingsDAO: dao)
+
+    // R5 H-1 contract: caller MUST guard via loadError before snapshotFees
+    #expect(store.loadError == dfErr)
+
+    // snapshotFees 不阻塞不抛；返当前 settings (zero-default) 的 fees
+    let fees = store.snapshotFees()
+    #expect(fees.commissionRate == 0)
+    #expect(fees.minCommissionEnabled == false)
+
+    // loadError 状态下 update / resetCapital 仍阻塞（同 H-3 测试已验）
+}
+
 // R1 H-3 regression: 并发 update + resetCapital
 @Test("concurrent update+reset: reset 不被 update 旧 totalCapital overwrite")
 func concurrentUpdate_andReset_resetWins() async throws {
@@ -1550,7 +1679,7 @@ func concurrentUpdate_andReset_resetWins() async throws {
 
 ```swift
 public func update(_ mutate: @escaping @Sendable (inout AppSettings) -> Void) async throws {
-    if let e = loadError { throw e }  // R2 H-3: block writes 直到 reload 成功
+    if let e = _loadError { throw e }  // R2 H-3 + R4 H-1: block writes 直到 reload 成功
     let prev = pendingMutations
     let task = Task { [weak self, mutate] in
         _ = try? await prev?.value  // 等前一个完成（错误不级联）
@@ -1569,7 +1698,7 @@ public func update(_ mutate: @escaping @Sendable (inout AppSettings) -> Void) as
 }
 
 public func resetCapital() async throws {
-    if let e = loadError { throw e }  // R2 H-3: block writes 直到 reload 成功
+    if let e = _loadError { throw e }  // R2 H-3 + R4 H-1: block writes 直到 reload 成功
     let prev = pendingMutations
     let task = Task { [weak self] in
         _ = try? await prev?.value
@@ -1715,6 +1844,11 @@ git push -u origin pr4b-cache-settings
   - R4-H1 dbCorrupted zero-default 仍危险（key-value DAO 单 key 坏不代表全坏）→ §6.1 取消特例，所有 load 失败均设 loadError 阻塞写 + Step 5.4 同步 + 测试改为 `init_dbCorrupted_updateBlocked`（断言 throws + 不调 saveSettings）✓
   - R4-H2 validateFilename 不限 .sqlite → 必须 lowercased.hasSuffix(".sqlite") + NULL byte 也拒 + 测试加 foo.db / noext / trailingdot.sqlite. 三 case ✓
   - R4-H3 mutate closure 缺 `@Sendable`，Swift 6 strict concurrency 编译 fail → 签名改 `@escaping @Sendable (inout AppSettings) -> Void` ✓
+
+- [ ] **R5 codex finding 全覆盖**：
+  - R5-H1 snapshotFees 不阻塞 loadError → silent zero fees → P&L 错算（valid-looking）→ §6.3 + Step 6 加 defense-in-depth log + 暴露 `public var loadError: AppError?` 让 caller guard + 测试 `snapshotFees_loadErrorState_returnsZeroAndExposesLoadError` ✓
+  - R5-H2 update @Sendable 改 PR #40 frozen contract（自我矛盾） → §8.1 诚实暴露 2 处签名增强：`update` 加 `@escaping @Sendable` + 加 public `loadError` getter；列拒 A/B 替代方案理由 ✓
+  - R5-M3 staging 残留绕过 LRU cap → 加 `cleanStaleStagingIfNeededLocked()` lazy 一次性扫 + 测试 `store_firstCallCleansStaleStagingFiles` ✓
 
 ---
 
