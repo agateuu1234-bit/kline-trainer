@@ -129,4 +129,74 @@ struct DefaultFileSystemCacheManagerTests {
             try cache.delete(ghost)
         }
     }
+
+    // MARK: - Task 3: LRU evict / same-id overwrite / concurrent store
+
+    @Test("store: 超 maxCachedSets=20 时驱逐 mtime 最老的")
+    func store_evictsOldestWhenExceedsMaxCachedSets() throws {
+        let root = CacheFixture.makeTempCacheRoot()
+        defer { CacheFixture.cleanup(root) }
+        let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+
+        // 写 20 个，每个间隔确保 mtime 单调
+        var firstFile: TrainingSetFile?
+        for i in 1...20 {
+            let s = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+            let f = try cache.store(downloadedZip: s, meta: CacheFixture.meta(id: i, filename: "f\(i).sqlite"))
+            if i == 1 { firstFile = f }
+            if i < 20 { Thread.sleep(forTimeInterval: 1.1) }
+        }
+        #expect(cache.listAvailable().count == 20)
+
+        Thread.sleep(forTimeInterval: 1.1)
+        // 第 21 个 → 应驱逐 id=1（mtime 最老）
+        let s21 = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+        _ = try cache.store(downloadedZip: s21, meta: CacheFixture.meta(id: 21, filename: "f21.sqlite"))
+
+        let after = cache.listAvailable()
+        #expect(after.count == 20)
+        #expect(!after.contains { $0.id == 1 }, "id=1 应被驱逐")
+        #expect(after.contains { $0.id == 21 }, "id=21 应在")
+        if let f = firstFile {
+            #expect(!FileManager.default.fileExists(atPath: f.localURL.path),
+                    "id=1 物理文件应被删")
+        }
+    }
+
+    @Test("store: 同 id 重新 store 覆盖旧文件，listAvailable 仍只 1 条")
+    func store_sameIdOverwritesOldFile() throws {
+        let root = CacheFixture.makeTempCacheRoot()
+        defer { CacheFixture.cleanup(root) }
+        let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+
+        let s1 = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+        _ = try cache.store(downloadedZip: s1, meta: CacheFixture.meta(id: 5, filename: "x.sqlite"))
+        let s2 = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+        let r2 = try cache.store(downloadedZip: s2, meta: CacheFixture.meta(id: 5, filename: "x.sqlite"))
+
+        let all = cache.listAvailable()
+        #expect(all.count == 1)
+        #expect(all[0].id == 5)
+        // /var/folders ↔ /private/var/folders 是 macOS symlink → 比较解析后的路径
+        #expect(all[0].localURL.resolvingSymlinksInPath().path
+                == r2.localURL.resolvingSymlinksInPath().path)
+    }
+
+    @Test("store: 并发 10 次不同 id 全部成功 + listAvailable count=10")
+    func store_concurrentDifferentIds_allSucceed() async throws {
+        let root = CacheFixture.makeTempCacheRoot()
+        defer { CacheFixture.cleanup(root) }
+        let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for i in 1...10 {
+                group.addTask {
+                    let s = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+                    _ = try cache.store(downloadedZip: s, meta: CacheFixture.meta(id: i, filename: "p\(i).sqlite"))
+                }
+            }
+            try await group.waitForAll()
+        }
+        #expect(cache.listAvailable().count == 10)
+    }
 }
