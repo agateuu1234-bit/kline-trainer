@@ -170,14 +170,53 @@
 | B. init 改 throws | 错误立即上抛 | 破坏协议；改所有 caller；E6 preview() 必须改 | ❌ 拒（破坏契约） |
 | C. lazy load on first access + Bool didLoad | init 不动；错误延迟到访问时上抛 | snapshotFees 是 sync 的，不能 throws；@Observable settings 字段必须有初值，本质上还是要个 default | ❌ 拒（架构丑） |
 
-**§6.1 A 方案语义边界（codex 必抓点，预防辩论）：**
-- `SettingsDAO.loadSettings()` 的失败类型只有两种（PR #42 SettingsDAOImpl L19-58）：
-  - **missing**：key 不存在（首次启动 / 新增 key）→ 返回 zero-value，**不 throw**
-  - **malformed**：key 存在但 value 非法（NaN / inf / 非法 enum）→ throw `.persistence(.dbCorrupted)`
-- 所以 init eager-load throws 的唯一路径 = dbCorrupted；这种情况**任何 fallback 都是有损的**：
-  - 选 A（zero-default + log）：用户损失原 commission/capital 设置，但 UI 还能用
-  - 选 B（init throws）：app 启动崩溃 / 进入 error UI，更"诚实"但用户体验更差
-- 取舍：**选 A**——理由：dbCorrupted 是极罕见事故（用户主动改 sqlite 才会触发），fallback 让用户至少能进 UI 改设置；os_log `.error` 级别记录，崩溃上报里能看到；后续可由 U4 SettingsPanel 检测 `commissionRate == 0 && totalCapital == 0` 提示用户"检测到设置异常，请重新配置"（U4 是 Wave 2 scope，本 PR 不做）
+**§6.1 A 方案语义边界（R2 修订 codex H-3：区分 dbCorrupted vs 其它）：**
+
+- `SettingsDAO.loadSettings()` 的失败 surface（per `PersistenceErrorMapping`）：
+  - **missing**：key 不存在 → zero-value，**不 throw** ✓
+  - **malformed**：value 非法（NaN/inf/非法 enum）→ throw `.persistence(.dbCorrupted)` —— **真不可恢复**，需 fallback
+  - **transient I/O**：sqlite_busy / locked / 短暂 ENOENT → `.persistence(.ioError(...))` —— **重启可能恢复**，不该 silent 覆盖
+  - **diskFull / schemaMismatch / 其它 GRDB 错误**：`.persistence(.diskFull/.schemaMismatch)` —— 同样不该 silent 覆盖
+
+**R0/R1 的 H-3 bug**（codex R2 抓的）：catch 全部错误一律 zero-default，后续 `update` 把 zero 持久化 → 把用户原 commission/capital 真覆盖为 0 = **真 data loss**。
+
+**R2 修订 (A')**：
+- 只对 `.persistence(.dbCorrupted)` 走 zero-default + 允许后续写
+- 其它错误（diskFull / ioError / schemaMismatch / unknown）→ 保留 zero-default UI **但**记录 `loadError: AppError?` sentinel
+- `update / resetCapital` 入口 `if let e = loadError { throw e }` —— 阻塞写直到 UI 处理（用户重启 app 触发重新 load）
+- snapshotFees 不阻塞（read-only，spec 签名无 throws）
+
+```swift
+private var loadError: AppError?
+
+public init(settingsDAO: SettingsDAO) {
+    self.settingsDAO = settingsDAO
+    do {
+        self.settings = try settingsDAO.loadSettings()
+    } catch let e as AppError where e == .persistence(.dbCorrupted) {
+        // 已知不可恢复 → zero-default + 允许后续覆盖
+        self.settings = SettingsStore.zeroDefault
+        Logger(subsystem: "kline.trainer", category: "settings").error(
+            "loadSettings: dbCorrupted, fallback to zero-default")
+    } catch {
+        // 其它（transient/diskFull/...）→ 保 zero-UI 但 BLOCK update/reset 防 silent 覆盖
+        self.settings = SettingsStore.zeroDefault
+        self.loadError = (error as? AppError) ?? .internalError(module: "P6", detail: "load failed")
+        Logger(subsystem: "kline.trainer", category: "settings").error(
+            "loadSettings: deferred error: \(String(describing: error), privacy: .public)")
+    }
+}
+
+private static let zeroDefault = AppSettings(
+    commissionRate: 0, minCommissionEnabled: false,
+    totalCapital: 0, displayMode: .system)
+```
+
+**取舍说明**：
+- "重启 app 重新 load" 比 "init throws 崩溃 UI" 用户体验好（spec init 签名无 throws，A' 不破契约）
+- 比 "全错误 silent zero-default" 安全（不会 silent 覆盖用户数据）
+- loadError 复合 update/reset 的 throws 路径，UI 看到的 error 等同 dao 失败时 user 直接 update 的 error
+- 后续 U4 SettingsPanel 可加显式 reload 按钮（Wave 2 scope，本 PR 不做）
 
 **§6.2 update / resetCapital 异步实现（R1 重写：inflight Task 链串行化，防 H-3 数据丢失）**
 
@@ -492,10 +531,17 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
     }
 
     private func replaceFile(at target: URL, with staging: URL) throws {
+        // R2 H-1 fix: replaceItemAt 是 "safe-save" API，文档假定 target 已存在；首次 store
+        // 走 replaceItemAt 会 throw "file doesn't exist"。分支：
+        //   target 存在 → replaceItemAt（atomic swap）
+        //   target 不存在 → moveItem（atomic rename(2)）
+        // 在 queue.sync 串行段内，fileExists/replaceItemAt 之间无竞态。
         do {
-            // replaceItemAt 在 same volume + same dir 走 rename(2)，APFS 上 atomic
-            // 旧 target 不存在也合法（创建 target）
-            _ = try FileManager.default.replaceItemAt(target, withItemAt: staging)
+            if FileManager.default.fileExists(atPath: target.path) {
+                _ = try FileManager.default.replaceItemAt(target, withItemAt: staging)
+            } else {
+                try FileManager.default.moveItem(at: staging, to: target)
+            }
         } catch {
             throw CacheErrorMapping.translate(error)
         }
@@ -522,25 +568,33 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
             // listAvailable 协议签名非 throws；目录不存在 / 不可读 → 返空
             return []
         }
-        var results: [TrainingSetFile] = []
+        // R2 H-2 fix: 内部 sort 用 Date（APFS 纳秒精度）+ tiebreaker（ctime Date / basename），
+        // 防 rapid same-second stores 同 mtime 时 LRU 顺序不稳定 → 误 evict 新存的。
+        // public TrainingSetFile.lastAccessedAt 仍 Int64 秒（struct 契约不变）。
+        struct CacheEntry { let file: TrainingSetFile; let mtimeDate: Date; let ctimeDate: Date; let basename: String }
+        var staged: [CacheEntry] = []
         for entry in entries {
             guard entry.pathExtension.lowercased() == "sqlite" else { continue }
             let basename = entry.deletingPathExtension().lastPathComponent
-            // R1 strict: skip staging files (前缀 ".staging-")，避免 in-flight store 被列出
-            if basename.hasPrefix(".staging-") { continue }
-            // basename = "<id>__<filenameWithoutExt>"；split 取 id
+            if basename.hasPrefix(".staging-") { continue }  // skip in-flight staging
             let parts = basename.components(separatedBy: "__")
             guard parts.count >= 2, let id = Int(parts[0]) else { continue }
             let filename = parts.dropFirst().joined(separator: "__") + ".sqlite"
-            guard let attrs = try? fileAttributes(entry),
+            guard let dates = try? fileDateAttributes(entry),
                   let schemaVersion = try? readSchemaVersion(entry) else { continue }
-            results.append(TrainingSetFile(
+            let file = TrainingSetFile(
                 id: id, filename: filename, localURL: entry,
                 schemaVersion: schemaVersion,
-                lastAccessedAt: attrs.mtime,
-                downloadedAt: attrs.ctime))
+                lastAccessedAt: Int64(dates.mtime.timeIntervalSince1970),
+                downloadedAt: Int64(dates.ctime.timeIntervalSince1970))
+            staged.append(CacheEntry(file: file, mtimeDate: dates.mtime, ctimeDate: dates.ctime, basename: basename))
         }
-        return results.sorted { $0.lastAccessedAt > $1.lastAccessedAt }
+        staged.sort { lhs, rhs in
+            if lhs.mtimeDate != rhs.mtimeDate { return lhs.mtimeDate > rhs.mtimeDate }
+            if lhs.ctimeDate != rhs.ctimeDate { return lhs.ctimeDate > rhs.ctimeDate }
+            return lhs.basename > rhs.basename
+        }
+        return staged.map { $0.file }
     }
 
     private func evictIfNeededLocked() {
@@ -557,6 +611,12 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
     }
 
     private func fileAttributes(_ url: URL) throws -> (mtime: Int64, ctime: Int64) {
+        let dates = try fileDateAttributes(url)
+        return (Int64(dates.mtime.timeIntervalSince1970), Int64(dates.ctime.timeIntervalSince1970))
+    }
+
+    /// R2 H-2: 内部 sort 用的纳秒精度 Date（APFS preserves nanosecond mtime）。
+    private func fileDateAttributes(_ url: URL) throws -> (mtime: Date, ctime: Date) {
         let raw: [FileAttributeKey: Any]
         do {
             raw = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -565,7 +625,7 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
         }
         let mtime = (raw[.modificationDate] as? Date) ?? Date()
         let ctime = (raw[.creationDate] as? Date) ?? mtime
-        return (Int64(mtime.timeIntervalSince1970), Int64(ctime.timeIntervalSince1970))
+        return (mtime, ctime)
     }
 
     private func readSchemaVersion(_ url: URL) throws -> Int {
@@ -941,6 +1001,43 @@ func store_oldMtimeSrc_doesNotEvictNewCache() throws {
     #expect(after.contains { $0.id == 21 })
     #expect(FileManager.default.fileExists(atPath: f20.localURL.path))
 }
+
+// R2 H-1 regression: 空 cache 首次 store 不应 throw（replaceItemAt 假定 target 存在）
+@Test("store: 空 cache 首次 store 走 moveItem 路径 success（不走 replaceItemAt）")
+func store_emptyCacheFirstStore_succeeds() throws {
+    let root = CacheFixture.makeTempCacheRoot()
+    defer { CacheFixture.cleanup(root) }
+    let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+    // 确认 cache 是空的
+    #expect(cache.listAvailable().isEmpty)
+
+    let s = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+    let r = try cache.store(downloadedZip: s, meta: CacheFixture.meta(id: 99, filename: "first.sqlite"))
+    #expect(r.id == 99)
+    #expect(FileManager.default.fileExists(atPath: r.localURL.path))
+    #expect(cache.listAvailable().count == 1)
+}
+
+// R2 H-2 regression: 21 rapid same-second stores LRU 顺序稳定
+@Test("store: 21 个连续 store（无 sleep，多数同秒）evict 应删 id=1（最早 store）")
+func store_21RapidStores_evictsOldestStored() throws {
+    let root = CacheFixture.makeTempCacheRoot()
+    defer { CacheFixture.cleanup(root) }
+    let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+
+    // 21 个连续 store，无 sleep。每次 setAttributes 调用 takes ~us，纳秒精度 mtime 差异化。
+    for i in 1...21 {
+        let s = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+        _ = try cache.store(downloadedZip: s, meta: CacheFixture.meta(id: i, filename: "r\(i).sqlite"))
+    }
+
+    let after = cache.listAvailable()
+    #expect(after.count == 20)
+    // id=21 必在（刚 store 的）
+    #expect(after.contains { $0.id == 21 })
+    // 按"最早 store 应最先被 evict"逻辑，id=1 应被删（21 个里 mtime/ctime 最旧）
+    #expect(!after.contains { $0.id == 1 }, "首次 store 的 id=1 应被 evict")
+}
 ```
 
 - [ ] **Step 4.2: 写 AppError gate script（R1 强化 M-4 finding）**
@@ -1110,6 +1207,43 @@ struct SettingsStoreProductionTests {
         let store = SettingsStore(settingsDAO: dao)
         #expect(store.settings == .zero)
     }
+
+    // R2 H-3 regression: dbCorrupted 后 update 仍可写（fallback path）
+    @Test("init: dbCorrupted 后 update 不被 loadError 阻塞")
+    func init_dbCorrupted_updateStillWorks() async throws {
+        let dao = StubSettingsDAO(load: .failure(AppError.persistence(.dbCorrupted)))
+        let store = SettingsStore(settingsDAO: dao)
+
+        try await store.update { s in s.commissionRate = 0.0007 }
+        #expect(store.settings.commissionRate == 0.0007)
+        #expect(dao.savedSettings?.commissionRate == 0.0007)
+    }
+
+    // R2 H-3 regression: transient I/O 错误后 update 必须 throw 不能 silent 覆盖
+    @Test("init: dao throws .ioError → update 抛同 error 阻塞写")
+    func init_daoThrowsIOError_updateThrowsLoadError() async throws {
+        let ioErr = AppError.persistence(.ioError("transient_lock"))
+        let dao = StubSettingsDAO(load: .failure(ioErr))
+        let store = SettingsStore(settingsDAO: dao)
+
+        await #expect(throws: ioErr) {
+            try await store.update { s in s.commissionRate = 0.0009 }
+        }
+        // dao.saveSettings 不应被调
+        #expect(dao.savedSettings == nil)
+    }
+
+    @Test("init: dao throws .diskFull → resetCapital 抛同 error 阻塞写")
+    func init_daoThrowsDiskFull_resetCapitalThrowsLoadError() async throws {
+        let dfErr = AppError.persistence(.diskFull)
+        let dao = StubSettingsDAO(load: .failure(dfErr))
+        let store = SettingsStore(settingsDAO: dao)
+
+        await #expect(throws: dfErr) {
+            try await store.resetCapital()
+        }
+        #expect(!dao.resetCalled)
+    }
 }
 ```
 
@@ -1270,6 +1404,7 @@ func concurrentUpdate_andReset_resetWins() async throws {
 
 ```swift
 public func update(_ mutate: @escaping (inout AppSettings) -> Void) async throws {
+    if let e = loadError { throw e }  // R2 H-3: block writes 直到 reload 成功
     let prev = pendingMutations
     let task = Task { [weak self, mutate] in
         _ = try? await prev?.value  // 等前一个完成（错误不级联）
@@ -1288,6 +1423,7 @@ public func update(_ mutate: @escaping (inout AppSettings) -> Void) async throws
 }
 
 public func resetCapital() async throws {
+    if let e = loadError { throw e }  // R2 H-3: block writes 直到 reload 成功
     let prev = pendingMutations
     let task = Task { [weak self] in
         _ = try? await prev?.value
@@ -1419,6 +1555,11 @@ git push -u origin pr4b-cache-settings
   - H-2 explicit mtime touch → §3 staging touch + Task 4 `store_oldMtimeSrc_doesNotEvictNewCache` ✓
   - H-3 settings 串行化 → §6.2 inflight Task chain + Task 6 `concurrentUpdate_*` 两测试 ✓
   - M-4 gate 强化 → Task 4 增 3 规则（throw/public-no-raw-try/translate-near-raw-try）✓
+
+- [ ] **R2 codex finding 全覆盖**：
+  - R2-H1 replaceItemAt 假定 target 存在 → §3 + helper `replaceFile` 分支（exists → replaceItemAt; not → moveItem）+ Task 4 `store_emptyCacheFirstStore_succeeds` ✓
+  - R2-H2 mtime 截到秒 LRU 不稳 → §3 + listAvailableLocked 用 Date 多级 tiebreaker（mtime/ctime/basename）+ Task 4 `store_21RapidStores_evictsOldestStored` ✓
+  - R2-H3 init catch all silent zero → §6.1 区分 .dbCorrupted（zero+允许写）vs 其它（保 loadError 阻塞 update/reset）+ Task 5 三测试（dbCorrupted 不阻塞、ioError 阻塞、diskFull 阻塞）✓
 
 ---
 
