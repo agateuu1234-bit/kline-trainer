@@ -1903,7 +1903,7 @@ git push -u origin pr4b-cache-settings
 - [ ] **R2 codex finding 全覆盖**：
   - R2-H1 replaceItemAt 假定 target 存在 → §3 + helper `replaceFile` 分支（exists → replaceItemAt; not → moveItem）+ Task 4 `store_emptyCacheFirstStore_succeeds` ✓
   - R2-H2 mtime 截到秒 LRU 不稳 → §3 + listAvailableLocked 用 Date 多级 tiebreaker（mtime/ctime/basename）+ Task 4 `store_21RapidStores_evictsOldestStored` ✓
-  - R2-H3 init catch all silent zero → §6.1 区分 .dbCorrupted（zero+允许写）vs 其它（保 loadError 阻塞 update/reset）+ Task 5 三测试（dbCorrupted 不阻塞、ioError 阻塞、diskFull 阻塞）✓
+  - R2-H3 init catch all silent zero → §6.1 所有 load 失败均设 loadError 阻塞 update/reset（R4 修订：取消 dbCorrupted 特例）+ Task 5 三测试（dbCorrupted 阻塞、ioError 阻塞、diskFull 阻塞）✓
 
 - [ ] **R3 codex finding 全覆盖**：
   - R3-H1 Step 5.4 task code 与 §6.1 设计脱节（catch all + 无 loadError）→ Step 5.4 重写 + 加 `loadError` 成员 + 加 `zeroDefault` 静态常量 ✓（R4 进一步取消 dbCorrupted 特例）

@@ -26,7 +26,7 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
     }
 
     /// R5 M-3: lazy 一次性清残留 .staging-* 文件（前次 process kill 留下的 orphan）
-    /// 由 store 首次调用触发；不影响 listAvailable / pickRandom 性能（它们也调）
+    /// 由首次 store 调用触发（lazy one-shot，后续 store 不再 scan）
     private var cleanStaleStagingDone = false
 
     public func listAvailable() -> [TrainingSetFile] {

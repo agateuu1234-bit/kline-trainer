@@ -82,8 +82,13 @@ public final class SettingsStore {
     }
 
     public func snapshotFees() -> FeeSnapshot {
-        FeeSnapshot(commissionRate: settings.commissionRate,
-                    minCommissionEnabled: settings.minCommissionEnabled)
+        // R5 H-1 defense-in-depth: caller 应 guard loadError；这里仅 log 不抛
+        if let e = _loadError {
+            Logger(subsystem: "kline.trainer", category: "settings").error(
+                "snapshotFees called while loadError set (caller bug): \(String(describing: e), privacy: .public)")
+        }
+        return FeeSnapshot(commissionRate: settings.commissionRate,
+                           minCommissionEnabled: settings.minCommissionEnabled)
     }
 
     /// R6 H-1: trading-flow caller (Wave 2 E5/E6) 必须用此 enforced 变体；

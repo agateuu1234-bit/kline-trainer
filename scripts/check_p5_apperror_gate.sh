@@ -19,7 +19,6 @@ FAIL=0
 BAD_THROW=$(grep -vE '^\s*//' "$F" | grep -nE '^\s*throw\s+' \
   | grep -vE 'throw\s+AppError\.' \
   | grep -vE 'throw\s+CacheErrorMapping\.translate' \
-  | grep -vE 'throw\s+error\b' \
   || true)
 if [[ -n "$BAD_THROW" ]]; then
   echo "FAIL[规则1]: 含未走 AppError 边界的 throw："
