@@ -450,7 +450,9 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
     public func store(downloadedZip src: URL, meta: TrainingSetMetaItem) throws -> TrainingSetFile {
         try queue.sync {
             try ensureCacheRootExists()
-            let target = cacheRoot.appendingPathComponent("\(meta.id)__\(meta.filename)")
+            // R3 H-2: 验证 meta.filename 不带 path 分隔符 / traversal / 空 / staging 前缀
+            try validateFilename(meta.filename)
+            let target = try cacheURL(forId: meta.id, filename: meta.filename)
             let staging = cacheRoot.appendingPathComponent(".staging-\(UUID().uuidString)__\(meta.id)__\(meta.filename)")
 
             // R1 H-1 fix: stage → validate → atomic replace；任意失败均不动 target
@@ -487,14 +489,19 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
 
     public func touch(_ file: TrainingSetFile) {
         queue.sync {
+            // R3 H-2: 不信任 caller 传的 file.localURL；从 id+filename 内部重新派生 cache 内 path
+            // 防止 caller 把 localURL 指到 app.sqlite / 其它 app 数据被误 touch
+            guard let url = try? cacheURL(forId: file.id, filename: file.filename) else { return }
             // best-effort：失败不抛（spec hint：协议签名无 throws）
-            try? touchFile(file.localURL)
+            try? touchFile(url)
         }
     }
 
     public func delete(_ file: TrainingSetFile) throws {
         try queue.sync {
-            try removeFile(file.localURL)
+            // R3 H-2: 同上，从 id+filename 重新派生；防 caller localURL 引导删 cache 外文件
+            let url = try cacheURL(forId: file.id, filename: file.filename)
+            try removeFile(url)
         }
     }
 
@@ -510,6 +517,33 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
                 throw CacheErrorMapping.translate(error)
             }
         }
+    }
+
+    /// R3 H-2: 验证 caller-supplied filename 不能引导 path traversal 或 staging 冲突
+    private func validateFilename(_ filename: String) throws {
+        if filename.isEmpty
+            || filename.contains("/")
+            || filename.contains("\\")
+            || filename.contains("..")
+            || filename.hasPrefix(".staging-") {
+            throw AppError.internalError(module: "P5-cache",
+                detail: "invalid filename rejected by cache boundary")
+        }
+    }
+
+    /// R3 H-2: cache 内 URL 的唯一构造路径；调用方禁止直接拼 cacheRoot.appendingPathComponent
+    /// 派生后用 standardizedFileURL.path.hasPrefix 兜底 cacheRoot 内
+    private func cacheURL(forId id: Int, filename: String) throws -> URL {
+        try validateFilename(filename)
+        let candidate = cacheRoot.appendingPathComponent("\(id)__\(filename)")
+        // defense-in-depth：standardize 后必须 still under cacheRoot
+        let stdCand = candidate.standardizedFileURL.path
+        let stdRoot = cacheRoot.standardizedFileURL.path
+        guard stdCand.hasPrefix(stdRoot + "/") else {
+            throw AppError.internalError(module: "P5-cache",
+                detail: "derived cache URL escaped cacheRoot")
+        }
+        return candidate
     }
 
     private func stageFile(from src: URL, to staging: URL) throws {
@@ -1038,6 +1072,83 @@ func store_21RapidStores_evictsOldestStored() throws {
     // 按"最早 store 应最先被 evict"逻辑，id=1 应被删（21 个里 mtime/ctime 最旧）
     #expect(!after.contains { $0.id == 1 }, "首次 store 的 id=1 应被 evict")
 }
+
+// R3 H-2 regression: caller 传带 path traversal 的 filename → store 拒收
+@Test("store: filename 含 / .. 或 staging 前缀应拒")
+func store_filenameWithSeparatorOrTraversalRejected() throws {
+    let root = CacheFixture.makeTempCacheRoot()
+    defer { CacheFixture.cleanup(root) }
+    let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+    let s = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+
+    let bad: [String] = [
+        "../escape.sqlite",
+        "sub/dir.sqlite",
+        "with\\back.sqlite",
+        "..",
+        "",
+        ".staging-stealth.sqlite",
+    ]
+    for name in bad {
+        #expect(throws: (any Error).self, "应拒 filename: \(name)") {
+            try cache.store(downloadedZip: s, meta: CacheFixture.meta(id: 1, filename: name))
+        }
+    }
+}
+
+// R3 H-2 regression: caller 给 file.localURL 指向 cache 外文件 → delete 不删该外部文件
+@Test("delete: 不信任 file.localURL，从 id+filename 内部派生；外部文件不被删")
+func delete_doesNotTrustLocalURL_externalFileSafe() throws {
+    let root = CacheFixture.makeTempCacheRoot()
+    defer { CacheFixture.cleanup(root) }
+    let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+
+    // 在 cache 外创建一个 victim 文件
+    let victim = FileManager.default.temporaryDirectory
+        .appendingPathComponent("victim-\(UUID()).sqlite")
+    try Data("important".utf8).write(to: victim)
+    defer { try? FileManager.default.removeItem(at: victim) }
+
+    // 构造一个 TrainingSetFile：id+filename 指向 cache 内一个不存在的项；localURL 指 victim
+    let evil = TrainingSetFile(
+        id: 999, filename: "ghost.sqlite",
+        localURL: victim,  // ← caller 引导 cache 操作 victim
+        schemaVersion: 1, lastAccessedAt: 0, downloadedAt: 0)
+
+    // delete 应基于 id+filename 派生 → 派生路径 = cacheRoot/999__ghost.sqlite，不存在 → fileNotFound
+    #expect(throws: AppError.trainingSet(.fileNotFound)) {
+        try cache.delete(evil)
+    }
+    // victim 必须仍在
+    #expect(FileManager.default.fileExists(atPath: victim.path), "外部文件不应被 cache 操作影响")
+}
+
+// R3 H-2 regression: touch 同样不信任 localURL
+@Test("touch: 不信任 file.localURL，外部文件 mtime 不变")
+func touch_doesNotTrustLocalURL_externalFileMtimeUnchanged() throws {
+    let root = CacheFixture.makeTempCacheRoot()
+    defer { CacheFixture.cleanup(root) }
+    let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+
+    let victim = FileManager.default.temporaryDirectory
+        .appendingPathComponent("victim-\(UUID()).sqlite")
+    try Data("important".utf8).write(to: victim)
+    defer { try? FileManager.default.removeItem(at: victim) }
+    // 设 victim mtime = 2000-01-01
+    let oldDate = Date(timeIntervalSince1970: 946_684_800)
+    try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: victim.path)
+
+    let evil = TrainingSetFile(
+        id: 1234, filename: "fake.sqlite", localURL: victim,
+        schemaVersion: 1, lastAccessedAt: 0, downloadedAt: 0)
+    cache.touch(evil)  // best-effort，不抛；内部派生路径不存在 → no-op
+
+    // victim mtime 必须仍为 2000-01-01
+    let attrs = try FileManager.default.attributesOfItem(atPath: victim.path)
+    let actualMtime = (attrs[.modificationDate] as? Date) ?? Date()
+    #expect(abs(actualMtime.timeIntervalSince1970 - oldDate.timeIntervalSince1970) < 1,
+            "外部文件 mtime 不应被 cache.touch 影响")
+}
 ```
 
 - [ ] **Step 4.2: 写 AppError gate script（R1 强化 M-4 finding）**
@@ -1252,33 +1363,56 @@ struct SettingsStoreProductionTests {
 Run: `cd '/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr4b-cache-settings' && swift test --package-path ios/Contracts --filter SettingsStoreProductionTests 2>&1 | tail -8`
 Expected: `init_loadsSettingsFromDAO` fail（settings 是 zero 不是 want）
 
-- [ ] **Step 5.4: 改 SettingsStore.init 实现 eager-load**
+- [ ] **Step 5.4: 改 SettingsStore.init 实现 eager-load（R2 H-3 + R3 H-1：与 §6.1 设计同步）**
 
-把 `SettingsStore.swift` 的 init 替换为：
-
-```swift
-public init(settingsDAO: SettingsDAO) {
-    self.settingsDAO = settingsDAO
-    // Production impl: eager-load via SettingsDAO
-    // dao failure (only path = .persistence(.dbCorrupted) per SettingsDAOImpl) → zero-value fallback + os_log
-    // 详见 plan §6.1：missing key 已被 SettingsDAO 内部处理为 default，不抛
-    do {
-        self.settings = try settingsDAO.loadSettings()
-    } catch {
-        // dbCorrupted → 用 zero-value 让 UI 还能跑；用户后续可通过 U4 SettingsPanel 重置
-        self.settings = AppSettings(
-            commissionRate: 0, minCommissionEnabled: false,
-            totalCapital: 0, displayMode: .system)
-        Logger(subsystem: "kline.trainer", category: "settings").error(
-            "SettingsStore.init: loadSettings failed, fallback to zero-value: \(String(describing: error), privacy: .public)")
-    }
-}
-```
-
-加 import：
+`SettingsStore.swift` 改动：
+1. 加 `private var loadError: AppError?` 成员
+2. 加 `private static let zeroDefault = AppSettings(...)` 常量
+3. init 区分 `.dbCorrupted`（zero+允许写）vs 其它（zero+保 loadError 阻塞写）
+4. 加 import `import os.log`
 
 ```swift
 import os.log
+// ...
+
+@MainActor
+@Observable
+public final class SettingsStore {
+    public private(set) var settings: AppSettings
+
+    private let settingsDAO: SettingsDAO
+    private var pendingMutations: Task<Void, Error>?
+    /// R2 H-3 + R3 H-1：非 .dbCorrupted 的 load 失败保留在此，update/reset 入口先抛 loadError
+    /// 防止 transient I/O 错误时 UI 写 zero 覆盖用户原数据。dbCorrupted 不进入此 sentinel
+    /// （因 dbCorrupted 是真不可恢复 + 用户已经丢了原数据，允许 UI 改写至少能恢复 functionality）。
+    private var loadError: AppError?
+
+    private static let zeroDefault = AppSettings(
+        commissionRate: 0, minCommissionEnabled: false,
+        totalCapital: 0, displayMode: .system)
+
+    public init(settingsDAO: SettingsDAO) {
+        self.settingsDAO = settingsDAO
+        do {
+            self.settings = try settingsDAO.loadSettings()
+        } catch let e as AppError where e == .persistence(.dbCorrupted) {
+            // 真不可恢复：底层 sqlite settings 表 corrupt → zero-default + 允许 UI 后续改写
+            self.settings = SettingsStore.zeroDefault
+            Logger(subsystem: "kline.trainer", category: "settings").error(
+                "loadSettings: dbCorrupted, fallback to zero-default")
+        } catch {
+            // transient/diskFull/ioError/schemaMismatch/unknown → 保 zero UI 但 BLOCK update/reset
+            // 防 silent zero overwrite（codex R2 H-3）。用户重启 app 触发重新 load。
+            self.settings = SettingsStore.zeroDefault
+            self.loadError = (error as? AppError)
+                ?? .internalError(module: "P6", detail: String(describing: error))
+            Logger(subsystem: "kline.trainer", category: "settings").error(
+                "loadSettings: deferred error: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    // ... update/resetCapital 见 Step 6.2（已含 if let e = loadError { throw e } 早返）
+}
 ```
 
 - [ ] **Step 5.5: 跑测试确认通过**
@@ -1560,6 +1694,10 @@ git push -u origin pr4b-cache-settings
   - R2-H1 replaceItemAt 假定 target 存在 → §3 + helper `replaceFile` 分支（exists → replaceItemAt; not → moveItem）+ Task 4 `store_emptyCacheFirstStore_succeeds` ✓
   - R2-H2 mtime 截到秒 LRU 不稳 → §3 + listAvailableLocked 用 Date 多级 tiebreaker（mtime/ctime/basename）+ Task 4 `store_21RapidStores_evictsOldestStored` ✓
   - R2-H3 init catch all silent zero → §6.1 区分 .dbCorrupted（zero+允许写）vs 其它（保 loadError 阻塞 update/reset）+ Task 5 三测试（dbCorrupted 不阻塞、ioError 阻塞、diskFull 阻塞）✓
+
+- [ ] **R3 codex finding 全覆盖**：
+  - R3-H1 Step 5.4 task code 与 §6.1 设计脱节（catch all + 无 loadError）→ Step 5.4 重写 + 加 `loadError` 成员 + 加 `zeroDefault` 静态常量 + 区分 dbCorrupted vs 其它 ✓
+  - R3-H2 touch/delete 信任 caller localURL → 加 `validateFilename` + `cacheURL(forId:filename:)` 内部派生 + standardize hasPrefix(cacheRoot) 兜底 + Task 4 三测试（filename traversal 拒、delete victim 安全、touch victim mtime 不变）✓
 
 ---
 
