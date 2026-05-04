@@ -27,13 +27,13 @@
 | `ios/Contracts/Tests/KlineTrainerContractsTests/StubSettingsDAO.swift` | test helper：可控 `loadSettings` 返回值 + `throws` 注入 + `saveSettings` capture | Create |
 | `docs/acceptance/2026-05-04-pr4b-cache-settings.md` | 验收清单（中文，非 coder 可执行）| Create |
 
-**预估 prod LOC（硬规则 ≤500）**：
-- `DefaultFileSystemCacheManager.swift`：≈ 200 LOC（含 doc comments）
+**预估 prod LOC（硬规则 ≤500；R1 修订上调）**：
+- `DefaultFileSystemCacheManager.swift`：≈ 250 LOC（含 R1 stage/replace/touch helpers + defer cleanup + `.staging-` skip 逻辑）
 - `Internal/CacheErrorMapping.swift`：≈ 35 LOC
-- `Settings/SettingsStore.swift` 改动：净增 ≈ 50 LOC（init/update/resetCapital 实做替换原 `fatalError` 占位）
-- 合计：**≈ 285 prod LOC** ✓ 在 500 内
+- `Settings/SettingsStore.swift` 改动：净增 ≈ 70 LOC（R1 inflight Task chain + init eager-load + update/resetCapital）
+- 合计：**≈ 355 prod LOC** ✓ 仍在 500 内
 
-**预估 test LOC**：≈ 450（无硬规则）
+**预估 test LOC**：≈ 580（R1 加 H-1/H-2/H-3 三组 regression 测试，约 +130 行）
 
 ---
 
@@ -76,25 +76,47 @@
 - 重命名属"contract change PR"，不应混进生产实现 PR
 - 留 backlog 单独 PR（或 v1.5 spec 修订时一起改）
 
-### §3 P5 atomic rename + serial queue
+### §3 P5 atomic rename + serial queue（R1 重写：rollback-safe + explicit mtime touch）
 
 **spec L687："文件系统：P5 `store()` 采用临时文件 + rename 原子化。"**
 **spec L692："❌ 并发多次 `CacheManager.store()` 写同一目标路径"**
 
-**实现：**
+**R1 codex finding H-1（rollback safety）+ H-2（mtime preservation 导致立刻 evict）已采纳，重写如下：**
+
+**算法（rollback-safe two-stage）：**
+
 - 入参 `downloadedZip: URL`（实为 .sqlite URL）来自 caller 的 `temporaryDirectory`（P2 ZipExtractor 输出）
-- target path = `<cacheRoot>/<id>__<meta.filename>`
-- 串行 `DispatchQueue(label: "kline.cache.serial")`，store/touch/delete 全部 `queue.sync { ... }` —— 保证同一 target path 不可能并发写
-- store 内部步骤：
+- final target path = `<cacheRoot>/<id>__<meta.filename>`
+- staging path = `<cacheRoot>/.staging-<UUID>__<id>__<meta.filename>`（cacheRoot 内同一目录 → `replaceItemAt` 走 fast atomic 路径；`.staging-` 前缀让 `listAvailable` 能 skip）
+- 串行 `DispatchQueue(label: "kline.cache.serial")`，store/touch/delete 全部 `queue.sync { ... }` 保证同 target path 不可能并发写
+
+**store 内部 6 步（必要时用 cleanup defer 防 staging 残留）：**
+
   1. `queue.sync` 进入串行段
-  2. 创建 cache root（若不存在）
-  3. 检查 target 是否已存在 → 存在则先 `removeItem`（覆盖语义；同 id 重新下载即覆盖）
-  4. `FileManager.moveItem(at: srcSqliteURL, to: targetURL)`——`moveItem` 在 same volume 内是 atomic rename；跨 volume fallback copy+delete（caller 给 `/tmp`，target 给 `Application Support`，这两个**很可能**在同一 volume / 都在 Data partition；若不是，`moveItem` 仍能跑，只是非原子）
-  5. 读 `PRAGMA user_version` 拿 schemaVersion
-  6. 用 mtime/ctime 构造 `TrainingSetFile`
-  7. 触发 `evictIfNeeded()`
-- touch：`queue.sync { try? FileManager.setAttributes([.modificationDate: Date()], ofItemAtPath: file.localURL.path) }`——失败不抛（spec hint 没要求 touch 抛错；调用方语义是 "best-effort 更新 LRU 时序"）
-- delete：`queue.sync { try FileManager.removeItem(at: file.localURL) }`——抛 AppError（spec 协议签名 `throws`）
+  2. `ensureCacheRootExists()` → 创建 cache root（已封装 do/catch + translate）
+  3. **stage**：`stageFile(from: src, to: stagingURL)` → 把 src 移入 cacheRoot 同目录的 staging 路径（move 失败 → translate + throw；defer 注册 staging cleanup，验证失败时清理）
+  4. **touch staging**：`touchFile(stagingURL)` → 立即 `setAttributes([.modificationDate: Date()])`，让 mtime = now（防 H-2 老 mtime 立刻被 evict；wrap 内部）
+  5. **validate**：`readSchemaVersion(stagingURL)` 打开 GRDB DatabaseQueue 读 PRAGMA user_version → 失败（无效 sqlite / 损坏）即抛 AppError，defer 清 staging，target **不动** ✓
+  6. **atomic replace**：`try replaceFile(at: target, with: stagingURL)`（封装 `FileManager.replaceItemAt(target, withItemAt: staging)`）
+     - same-directory replace 用 `rename(2)` POSIX 系统调用，atomic 在 APFS 上保证 ✓
+     - 旧 target 存在 → swap；不存在 → 创建 target；任何情况下 staging 路径在 replaceItemAt 后**消失**（被 rename 走或 swap 走），cleanup defer 是 no-op
+     - replace 失败 → defer 清 staging，target **不动** ✓
+  7. 读 attrs（mtime 应 ≈ now / ctime 来自 src 文件创建时刻；wrap 内部）
+  8. `evictIfNeededLocked()` → 现在 newest mtime 必为 now，evict 不会误删本次 store 的项
+  9. 返回 `TrainingSetFile { id, filename, localURL: target, schemaVersion, lastAccessedAt: nowMtime, downloadedAt: ctime }`
+
+**为什么先 stage 再 validate 再 replace（R0 的 "先删 target 再 move" 错在哪）**：
+- R0 顺序：`removeItem(target)` → `moveItem(src, target)` → `readSchemaVersion(target)` → 若 PRAGMA fail，旧 target 已被删，新文件留在 target 但损坏。**用户 data loss + 留 corrupt cache** 双输。
+- R1 顺序：staging → validate → atomic replace。validate fail 时 staging 已被 defer 删干净 + 旧 target **从未触动**；replace fail 时同样 target 不动。**任意失败均 rollback-safe** ✓
+
+**为什么 touch staging 而不是 touch target**：
+- `setAttributes([.modificationDate: Date()])` 修改 inode mtime；`replaceItemAt` 走 rename 后 mtime 跟随 inode 走 → target mtime = now ✓
+- 若 touch target（after replace），`replaceItemAt` 在某些 APFS 路径会重建 inode → touch 用错 path 拿到 stale handle 的可能性更高，复杂度更高
+- 顺序：`touch staging → replace → 读 target attrs` 更直白
+
+**touch（公开方法，spec 协议）**：`queue.sync { try? touchFile(file.localURL) }`——失败不抛（spec hint 没要求 touch 抛错；语义 "best-effort 更新 LRU 时序"）
+
+**delete（公开方法，spec 协议）**：`queue.sync { try removeFile(file.localURL) }`——helper 内部 wrap，throws AppError
 
 ### §4 P5 LRU evict policy
 
@@ -112,17 +134,27 @@
 
 **`pickRandom()` 实现**：`listAvailable()` 后 `randomElement()`；空 → 返 nil（spec 协议签名 `?`）
 
-### §5 P5 错误边界翻译
+### §5 P5 错误边界翻译（R1 强化：所有 helper 内部 wrap，public 方法零 raw try）
 
 **翻译表**：
 - `NSCocoaErrorDomain.NSFileWriteOutOfSpaceError`（28 = ENOSPC）→ `.persistence(.diskFull)`
 - `NSCocoaErrorDomain.NSFileNoSuchFileError` / `NSFileReadNoSuchFileError` → `.trainingSet(.fileNotFound)`（与 PR4a `ZipErrorMapping` 一致：训练组语义）
-- `NSCocoaErrorDomain.NSFileWriteFileExistsError` → `.persistence(.ioError("file_exists"))`（不应发生，store 已先 removeItem，但 race-of-os 保护性映射）
-- 兜底 → `.persistence(.ioError("filesystem_error"))`
+- `NSCocoaErrorDomain.NSFileWriteFileExistsError` → `.persistence(.ioError("file_exists"))`（不应发生，replaceItemAt 已 swap；race 保护映射）
+- `DatabaseError.SQLITE_CANTOPEN / SQLITE_NOTADB / SQLITE_CORRUPT` → `.persistence(.dbCorrupted)`
+- 兜底 → `.persistence(.ioError("filesystem_error"))` / `.persistence(.ioError("sqlite_error_<code>"))`
 - 已是 `AppError` 直通
 
 **复用既有 `PersistenceErrorMapping`？**
 - 拒——`PersistenceErrorMapping` 处理 GRDB DatabaseError + Decoding（数据库语义），cache manager 处理纯 FileManager（文件系统语义），混在一起会让 GRDB 路径多一层无关 NSError 分支。新建 `CacheErrorMapping` 边界明确。
+
+**R1 强化：M-4 codex finding 采纳，封装策略 = "public 方法零 raw try"：**
+
+所有 `try FileManager.default.X()` / `try DatabaseQueue` 调用必须在 named private helpers 内部（`stageFile / touchFile / replaceFile / removeFile / fileAttributes / readSchemaVersion / ensureCacheRootExists`），每个 helper 内部 do/catch wrap → throw AppError。public 方法（store / touch / delete / listAvailable / pickRandom）只调 helpers，不出现 raw `try FileManager.` / `try DatabaseQueue`。
+
+**Gate script（Task 4 详）增强**：
+1. 既有规则：禁裸 `throw NSError|throw .*Error`（PR4a 套路）
+2. 新增规则：`grep -E 'try FileManager|try DatabaseQueue' DefaultFileSystemCacheManager.swift` 命中的每行必须出现在 private helper 内（即所在函数签名为 `private func`），public 方法体内（`public func`）一行都不能有
+3. 新增规则：每个 private helper 内若含 `try FileManager` / `try DatabaseQueue`，文件内必须存在对应的 do/catch + `CacheErrorMapping.translate` 引用
 
 ### §6 P6 SettingsStore eager-load fallback 策略
 
@@ -147,14 +179,78 @@
   - 选 B（init throws）：app 启动崩溃 / 进入 error UI，更"诚实"但用户体验更差
 - 取舍：**选 A**——理由：dbCorrupted 是极罕见事故（用户主动改 sqlite 才会触发），fallback 让用户至少能进 UI 改设置；os_log `.error` 级别记录，崩溃上报里能看到；后续可由 U4 SettingsPanel 检测 `commissionRate == 0 && totalCapital == 0` 提示用户"检测到设置异常，请重新配置"（U4 是 Wave 2 scope，本 PR 不做）
 
-**§6.2 update / resetCapital 异步实现**
+**§6.2 update / resetCapital 异步实现（R1 重写：inflight Task 链串行化，防 H-3 数据丢失）**
 
 `SettingsDAO.saveSettings(_:) throws` 和 `resetCapital() throws` 都是 sync。`SettingsStore.update(_:)` 是 `async throws`，`resetCapital()` 也是 `async throws`。
 
-**实现：**
-- 用 `Task.detached`（or `await Task.detached(priority: .userInitiated) { ... }.value`）把 sync DAO 调用从 MainActor hop 到后台线程，避免 GRDB write 阻塞 main thread
-- 写成功后 hop 回 MainActor 更新 `self.settings`（@Observable 触发 UI 重渲染）
-- 写失败 → 抛上去，本地 `self.settings` 不更新（保持上次成功状态）
+**R0 算法的 H-3 bug**（codex R1 抓的）：
+```swift
+// R0 (BUG)
+public func update(_ mutate: ...) async throws {
+    var copy = self.settings           // ← 读 settings @ MainActor T0
+    mutate(&copy)
+    try await Task.detached { ...saveSettings(snapshot)... }.value  // ← await，MainActor 释放
+    // ↑ 在此 await 期间，另一 update / resetCapital 可以入场：读旧 settings、mutate、save、回写
+    self.settings = snapshot           // ← 我恢复后 overwrite 别人的写入；并发更新丢失 ✗
+}
+```
+
+`@MainActor` 是 cooperative，await 处会 yield；reentrant 入场是 well-defined Swift 行为，不算 race，但 LWW（last-writer-wins）语义对"互不冲突字段的并发 update"是数据丢失。
+
+**R1 算法（inflight Task 链串行化）：**
+
+```swift
+private var pendingMutations: Task<Void, Error>?
+
+public func update(_ mutate: @escaping (inout AppSettings) -> Void) async throws {
+    let prev = pendingMutations  // 捕获前一个 in-flight（如有）
+    let task = Task { [weak self, mutate] in
+        _ = try? await prev?.value  // 等前一个完成（错误不级联）
+        guard let self = self else { return }
+        // 此处 self 是 MainActor isolated，read settings 拿到 prev 写完的 freshest 值
+        var copy = self.settings
+        mutate(&copy)
+        let snapshot = copy
+        let dao = self.settingsDAO
+        try await Task.detached(priority: .userInitiated) {
+            try dao.saveSettings(snapshot)
+        }.value
+        self.settings = snapshot  // 写成功后回 MainActor 更新
+    }
+    pendingMutations = task
+    try await task.value
+}
+```
+
+**关键点**：
+- 每个 update 调用都创建一个 Task，其内部第一行就 `await prev?.value` 让自己排在上一个 task 后面
+- `pendingMutations = task` 让下一个 update 调用能把 `task` 当作它的 prev，形成单链队列
+- chain 内部读 settings 在 prev 完成后 → 拿到最新值；mutate 应用在最新值上 → 不丢前面 update 的字段修改 ✓
+- 错误用 `try?` 接住 prev 的异常（前一个失败不阻塞下一个；前一个写失败时本地 settings 也不会被更新，所以下一个 read 还是写失败前的值，行为对）
+- weak self 防 SettingsStore deinit 后 task 泄漏
+
+**resetCapital 同模式**：
+
+```swift
+public func resetCapital() async throws {
+    let prev = pendingMutations
+    let task = Task { [weak self] in
+        _ = try? await prev?.value
+        guard let self = self else { return }
+        let dao = self.settingsDAO
+        try await Task.detached(priority: .userInitiated) {
+            try dao.resetCapital()
+        }.value
+        self.settings.totalCapital = 0
+    }
+    pendingMutations = task
+    try await task.value
+}
+```
+
+**测试**（Task 6 增加）：
+- 并发触发 2 个 update（一个改 commissionRate，一个改 totalCapital）→ 两个字段都应在 dao.saveSettings 最后一次调用中 visible
+- 并发触发 update + resetCapital → resetCapital 不应被 update 的旧 totalCapital overwrite
 
 **snapshotFees() 实现**：直接读 `self.settings.commissionRate` + `minCommissionEnabled` 构造 `FeeSnapshot`——纯读 MainActor 字段，无 IO，无需 async（spec L1981 签名就是 sync）。PR #40 类壳已经写对了，不动。
 
@@ -316,22 +412,35 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
         try queue.sync {
             try ensureCacheRootExists()
             let target = cacheRoot.appendingPathComponent("\(meta.id)__\(meta.filename)")
-            // 同 id 重新下载 → 覆盖
-            if FileManager.default.fileExists(atPath: target.path) {
-                try FileManager.default.removeItem(at: target)
+            let staging = cacheRoot.appendingPathComponent(".staging-\(UUID().uuidString)__\(meta.id)__\(meta.filename)")
+
+            // R1 H-1 fix: stage → validate → atomic replace；任意失败均不动 target
+            try stageFile(from: src, to: staging)
+            var stagingCleanupNeeded = true
+            defer {
+                if stagingCleanupNeeded {
+                    // best-effort 清理 staging（验证失败 / replace 失败时）
+                    try? FileManager.default.removeItem(at: staging)
+                }
             }
-            do {
-                try FileManager.default.moveItem(at: src, to: target)
-            } catch {
-                throw CacheErrorMapping.translate(error)
-            }
+
+            // R1 H-2 fix: 立即 touch staging，让新 store 的项 mtime = now，evict 不会立刻挑中
+            try touchFile(staging)
+
+            // R1 H-1 fix: 验证 sqlite 可读 + 拿 schemaVersion；失败 → throw + defer 清 staging，target 不动
+            let schemaVersion = try readSchemaVersion(staging)
+
+            // atomic replace（POSIX rename(2) 在同目录 APFS 上原子）
+            try replaceFile(at: target, with: staging)
+            stagingCleanupNeeded = false  // staging 已被 replace 走 / swap 走
+
             let attrs = try fileAttributes(target)
             evictIfNeededLocked()
             return TrainingSetFile(
                 id: meta.id,
                 filename: meta.filename,
                 localURL: target,
-                schemaVersion: try readSchemaVersion(target),
+                schemaVersion: schemaVersion,
                 lastAccessedAt: attrs.mtime,
                 downloadedAt: attrs.ctime)
         }
@@ -339,23 +448,19 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
 
     public func touch(_ file: TrainingSetFile) {
         queue.sync {
-            try? FileManager.default.setAttributes(
-                [.modificationDate: Date()],
-                ofItemAtPath: file.localURL.path)
+            // best-effort：失败不抛（spec hint：协议签名无 throws）
+            try? touchFile(file.localURL)
         }
     }
 
     public func delete(_ file: TrainingSetFile) throws {
         try queue.sync {
-            do {
-                try FileManager.default.removeItem(at: file.localURL)
-            } catch {
-                throw CacheErrorMapping.translate(error)
-            }
+            try removeFile(file.localURL)
         }
     }
 
-    // MARK: - Internal (locked = caller already in queue.sync)
+    // MARK: - Internal helpers (all FileManager / DatabaseQueue I/O wrapped here)
+    // M-4 gate 强制：public 方法零 raw `try FileManager.` / `try DatabaseQueue`，全部走以下 helpers。
 
     private func ensureCacheRootExists() throws {
         if !FileManager.default.fileExists(atPath: cacheRoot.path) {
@@ -368,15 +473,61 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
         }
     }
 
+    private func stageFile(from src: URL, to staging: URL) throws {
+        do {
+            try FileManager.default.moveItem(at: src, to: staging)
+        } catch {
+            throw CacheErrorMapping.translate(error)
+        }
+    }
+
+    private func touchFile(_ url: URL) throws {
+        do {
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date()],
+                ofItemAtPath: url.path)
+        } catch {
+            throw CacheErrorMapping.translate(error)
+        }
+    }
+
+    private func replaceFile(at target: URL, with staging: URL) throws {
+        do {
+            // replaceItemAt 在 same volume + same dir 走 rename(2)，APFS 上 atomic
+            // 旧 target 不存在也合法（创建 target）
+            _ = try FileManager.default.replaceItemAt(target, withItemAt: staging)
+        } catch {
+            throw CacheErrorMapping.translate(error)
+        }
+    }
+
+    private func removeFile(_ url: URL) throws {
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            throw CacheErrorMapping.translate(error)
+        }
+    }
+
+    // MARK: - Internal listing (locked = caller already in queue.sync)
+
     private func listAvailableLocked() -> [TrainingSetFile] {
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: cacheRoot,
-            includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey],
-            options: [.skipsHiddenFiles]) else { return [] }
+        let entries: [URL]
+        do {
+            entries = try FileManager.default.contentsOfDirectory(
+                at: cacheRoot,
+                includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey],
+                options: [.skipsHiddenFiles])
+        } catch {
+            // listAvailable 协议签名非 throws；目录不存在 / 不可读 → 返空
+            return []
+        }
         var results: [TrainingSetFile] = []
         for entry in entries {
             guard entry.pathExtension.lowercased() == "sqlite" else { continue }
             let basename = entry.deletingPathExtension().lastPathComponent
+            // R1 strict: skip staging files (前缀 ".staging-")，避免 in-flight store 被列出
+            if basename.hasPrefix(".staging-") { continue }
             // basename = "<id>__<filenameWithoutExt>"；split 取 id
             let parts = basename.components(separatedBy: "__")
             guard parts.count >= 2, let id = Int(parts[0]) else { continue }
@@ -389,17 +540,16 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
                 lastAccessedAt: attrs.mtime,
                 downloadedAt: attrs.ctime))
         }
-        // 按 mtime desc 排序（newest first）
         return results.sorted { $0.lastAccessedAt > $1.lastAccessedAt }
     }
 
     private func evictIfNeededLocked() {
         let all = listAvailableLocked()
         guard all.count > Self.maxCachedSets else { return }
-        let toEvict = all.suffix(all.count - Self.maxCachedSets)  // 最老的（mtime 最小）
+        let toEvict = all.suffix(all.count - Self.maxCachedSets)
         for f in toEvict {
             do {
-                try FileManager.default.removeItem(at: f.localURL)
+                try removeFile(f.localURL)
             } catch {
                 log.error("cache evict failed for \(f.localURL.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)")
             }
@@ -407,7 +557,12 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
     }
 
     private func fileAttributes(_ url: URL) throws -> (mtime: Int64, ctime: Int64) {
-        let raw = try FileManager.default.attributesOfItem(atPath: url.path)
+        let raw: [FileAttributeKey: Any]
+        do {
+            raw = try FileManager.default.attributesOfItem(atPath: url.path)
+        } catch {
+            throw CacheErrorMapping.translate(error)
+        }
         let mtime = (raw[.modificationDate] as? Date) ?? Date()
         let ctime = (raw[.creationDate] as? Date) ?? mtime
         return (Int64(mtime.timeIntervalSince1970), Int64(ctime.timeIntervalSince1970))
@@ -722,33 +877,141 @@ func store_invalidSqliteThrowsDbCorrupted() throws {
                         meta: CacheFixture.meta(id: 1, filename: "x.sqlite"))
     }
 }
+
+// R1 H-1 regression: 同 id 重新 store 的 src 损坏时，旧 cache 应保留
+@Test("store: 已存在 id 的 src 损坏时旧 cache 不丢（rollback safe）")
+func store_invalidNewSqlite_oldCachePreserved() throws {
+    let root = CacheFixture.makeTempCacheRoot()
+    defer { CacheFixture.cleanup(root) }
+    let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+
+    let valid1 = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+    let f1 = try cache.store(downloadedZip: valid1, meta: CacheFixture.meta(id: 5, filename: "stk.sqlite"))
+    #expect(FileManager.default.fileExists(atPath: f1.localURL.path))
+
+    // 第二次 store 同 id 但 src 损坏
+    let bogus = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bogus-\(UUID()).sqlite")
+    try Data("not a sqlite".utf8).write(to: bogus)
+    #expect(throws: AppError.persistence(.dbCorrupted)) {
+        try cache.store(downloadedZip: bogus,
+                        meta: CacheFixture.meta(id: 5, filename: "stk.sqlite"))
+    }
+
+    // 旧 cache 应仍在 + 仍可读
+    #expect(FileManager.default.fileExists(atPath: f1.localURL.path), "旧 cache 文件应保留")
+    let listed = cache.listAvailable()
+    #expect(listed.count == 1)
+    #expect(listed[0].id == 5)
+    #expect(listed[0].schemaVersion == 1)
+
+    // 不应有 staging 残留
+    let entries = try FileManager.default.contentsOfDirectory(atPath: root.path)
+    let stagingResidue = entries.filter { $0.hasPrefix(".staging-") }
+    #expect(stagingResidue.isEmpty, "staging 文件应被 defer 清理：\(stagingResidue)")
+}
+
+// R1 H-2 regression: src 文件 mtime 老不影响 evict
+@Test("store: src 文件 mtime 远古，store 后新 cache 不会被立刻 evict")
+func store_oldMtimeSrc_doesNotEvictNewCache() throws {
+    let root = CacheFixture.makeTempCacheRoot()
+    defer { CacheFixture.cleanup(root) }
+    let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+
+    // 准备 19 个 fresh cache
+    for i in 1...19 {
+        let s = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+        _ = try cache.store(downloadedZip: s, meta: CacheFixture.meta(id: i, filename: "f\(i).sqlite"))
+    }
+
+    // 第 20 个：src 的 mtime 设到 2000-01-01（远古）
+    let oldSrc = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+    try FileManager.default.setAttributes(
+        [.modificationDate: Date(timeIntervalSince1970: 946_684_800)],  // 2000-01-01
+        ofItemAtPath: oldSrc.path)
+    let f20 = try cache.store(downloadedZip: oldSrc, meta: CacheFixture.meta(id: 20, filename: "f20.sqlite"))
+
+    // 第 21 个 → 应驱逐 mtime 最老的；id=20 因 store 时 touch 过，mtime=now，不应被驱逐
+    let s21 = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+    _ = try cache.store(downloadedZip: s21, meta: CacheFixture.meta(id: 21, filename: "f21.sqlite"))
+
+    let after = cache.listAvailable()
+    #expect(after.count == 20)
+    #expect(after.contains { $0.id == 20 }, "id=20 不应因 src 老 mtime 被 evict")
+    #expect(after.contains { $0.id == 21 })
+    #expect(FileManager.default.fileExists(atPath: f20.localURL.path))
+}
 ```
 
-- [ ] **Step 4.2: 写 AppError gate script**
+- [ ] **Step 4.2: 写 AppError gate script（R1 强化 M-4 finding）**
 
 ```bash
 # scripts/check_p5_apperror_gate.sh
 #!/usr/bin/env bash
 # 验证 DefaultFileSystemCacheManager 不裸抛非 AppError 错误（M0.4 trust-boundary gate）
-# 规则：所有 throw 必须 throw AppError.* 或 throw CacheErrorMapping.translate(...)
+# R1 强化 (codex M-4)：增 2 条规则
+#   规则 1（PR4a 套路）：所有 throw 必须 throw AppError.* 或 throw CacheErrorMapping.translate(...)
+#   规则 2：public 方法体内禁止 raw `try FileManager.` / `try DatabaseQueue` —— 必须走 helper
+#   规则 3：所有含 raw try FileManager / try DatabaseQueue 的 private helper 内必须有 do/catch + CacheErrorMapping.translate
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 F="$ROOT/ios/Contracts/Sources/KlineTrainerPersistence/DefaultFileSystemCacheManager.swift"
-if [ ! -f "$F" ]; then
+if [[ ! -f "$F" ]]; then
   echo "FAIL: $F 不存在"
   exit 1
 fi
-# 抓所有 throw 行，排除 throw AppError / throw CacheErrorMapping.translate
-BAD=$(grep -nE '^\s*throw\s+' "$F" \
+
+FAIL=0
+
+# === 规则 1：throw 走 AppError 边界 ===
+# 剔除注释行；抓所有 throw 行；排除 throw AppError / throw CacheErrorMapping.translate
+BAD_THROW=$(grep -vE '^\s*//' "$F" | grep -nE '^\s*throw\s+' \
   | grep -vE 'throw\s+AppError\.' \
   | grep -vE 'throw\s+CacheErrorMapping\.translate' \
+  | grep -vE 'throw\s+error\b' \
   || true)
-if [ -n "$BAD" ]; then
-  echo "FAIL: P5 DefaultFileSystemCacheManager 含未走 AppError 边界的 throw："
-  echo "$BAD"
-  exit 1
+if [[ -n "$BAD_THROW" ]]; then
+  echo "FAIL[规则1]: 含未走 AppError 边界的 throw："
+  echo "$BAD_THROW"
+  FAIL=1
 fi
-echo "OK: P5 DefaultFileSystemCacheManager 全部 throw 走 AppError 边界"
+
+# === 规则 2：public 方法体内禁 raw try FileManager / try DatabaseQueue ===
+# 用 awk 跟踪 public func 块的开闭：检测到 `public func` 进入 public 区，遇到顶层 `}` 退出
+# 简化：CacheManager protocol surface 的 5 个 public 方法是 store/touch/delete/listAvailable/pickRandom + init
+# 若这 5 个方法体内出现 `try FileManager` / `try DatabaseQueue` / `try q.read` 即 fail
+PUBLIC_BAD=$(awk '
+  /^    public (func|init)/ { in_pub = 1; depth = 0; method = $0; next }
+  in_pub == 1 && /\{/ { depth += gsub(/\{/, "{") }
+  in_pub == 1 && /\}/ { depth -= gsub(/\}/, "}"); if (depth <= 0) { in_pub = 0; depth = 0 } }
+  in_pub == 1 && /try FileManager\.|try DatabaseQueue|try q\.read|try [a-z][a-zA-Z0-9_]*\.read[ {]/ {
+    print FILENAME ":" NR ": " $0 " (in public method: " method ")"
+  }
+' "$F")
+if [[ -n "$PUBLIC_BAD" ]]; then
+  echo "FAIL[规则2]: public 方法体内含 raw try FileManager / try DatabaseQueue（应走 private helper）："
+  echo "$PUBLIC_BAD"
+  FAIL=1
+fi
+
+# === 规则 3：含 raw try FileManager / try DatabaseQueue 的行附近必有 CacheErrorMapping.translate ===
+# 简化检查：每行 raw try 后 ±10 行内必出现 "CacheErrorMapping.translate" 或本行就在 catch block 里
+RAW_TRY_LINES=$(grep -nE 'try FileManager\.|try DatabaseQueue|try q\.read' "$F" | grep -v '^\s*//' | cut -d: -f1)
+for ln in $RAW_TRY_LINES; do
+  start=$((ln > 10 ? ln - 10 : 1))
+  end=$((ln + 10))
+  block=$(sed -n "${start},${end}p" "$F")
+  if ! echo "$block" | grep -qE 'CacheErrorMapping\.translate'; then
+    echo "FAIL[规则3]: 行 $ln 的 raw try 附近 ±10 行无 CacheErrorMapping.translate："
+    sed -n "${ln}p" "$F"
+    FAIL=1
+  fi
+done
+
+if [[ $FAIL -eq 0 ]]; then
+  echo "OK: P5 DefaultFileSystemCacheManager 全部 throw 走 AppError 边界 + public 方法零 raw try"
+fi
+exit $FAIL
 ```
 
 - [ ] **Step 4.3: 跑测试 + 跑 gate**
@@ -956,38 +1219,91 @@ func resetCapital_callsDAOAndZerosLocalCapital() async throws {
     try await store.resetCapital()
     #expect(dao.resetCalled)
     #expect(store.settings.totalCapital == 0)
-    // 其它字段不变
     #expect(store.settings.commissionRate == 0.0001)
     #expect(store.settings.minCommissionEnabled == true)
     #expect(store.settings.displayMode == .dark)
 }
+
+// R1 H-3 regression: 并发 update 不丢字段
+@Test("concurrent update: 并发改不同字段，最终 dao 写入和本地都包含两次修改")
+func concurrentUpdate_differentFields_neitherLost() async throws {
+    let initial = AppSettings(
+        commissionRate: 0, minCommissionEnabled: false,
+        totalCapital: 0, displayMode: .system)
+    let dao = StubSettingsDAO(load: .success(initial))
+    let store = SettingsStore(settingsDAO: dao)
+
+    async let a: Void = store.update { s in s.commissionRate = 0.0005 }
+    async let b: Void = store.update { s in s.totalCapital = 77_777 }
+    _ = try await (a, b)
+
+    // 两个字段都应保留（chain 串行 + 后写包含前写）
+    #expect(store.settings.commissionRate == 0.0005)
+    #expect(store.settings.totalCapital == 77_777)
+    // dao 最后一次写入也应同时含两个字段
+    #expect(dao.savedSettings?.commissionRate == 0.0005)
+    #expect(dao.savedSettings?.totalCapital == 77_777)
+}
+
+// R1 H-3 regression: 并发 update + resetCapital
+@Test("concurrent update+reset: reset 不被 update 旧 totalCapital overwrite")
+func concurrentUpdate_andReset_resetWins() async throws {
+    let initial = AppSettings(
+        commissionRate: 0.0001, minCommissionEnabled: false,
+        totalCapital: 50_000, displayMode: .system)
+    let dao = StubSettingsDAO(load: .success(initial))
+    let store = SettingsStore(settingsDAO: dao)
+
+    async let a: Void = store.update { s in s.commissionRate = 0.0009 }
+    async let b: Void = store.resetCapital()
+    _ = try await (a, b)
+
+    // commissionRate 修改应保留；totalCapital 必为 0（resetCapital 是后排还是前排都行，串行结果稳定）
+    #expect(store.settings.totalCapital == 0)
+    #expect(store.settings.commissionRate == 0.0009)
+}
 ```
 
-- [ ] **Step 6.2: 改 SettingsStore.update / resetCapital 实做**
+- [ ] **Step 6.2: 改 SettingsStore.update / resetCapital 实做（R1 串行化版）**
 
-把 update 和 resetCapital 实现替换为：
+`SettingsStore.swift` 加成员 `private var pendingMutations: Task<Void, Error>?`，update 和 resetCapital 实现替换为：
 
 ```swift
-public func update(_ mutate: (inout AppSettings) -> Void) async throws {
-    var copy = self.settings
-    mutate(&copy)
-    let snapshot = copy
-    let dao = settingsDAO
-    try await Task.detached(priority: .userInitiated) {
-        try dao.saveSettings(snapshot)
-    }.value
-    // 写成功后回 MainActor 更新（detached.value resume 在原 actor）
-    self.settings = snapshot
+public func update(_ mutate: @escaping (inout AppSettings) -> Void) async throws {
+    let prev = pendingMutations
+    let task = Task { [weak self, mutate] in
+        _ = try? await prev?.value  // 等前一个完成（错误不级联）
+        guard let self = self else { return }
+        var copy = self.settings
+        mutate(&copy)
+        let snapshot = copy
+        let dao = self.settingsDAO
+        try await Task.detached(priority: .userInitiated) {
+            try dao.saveSettings(snapshot)
+        }.value
+        self.settings = snapshot
+    }
+    pendingMutations = task
+    try await task.value
 }
 
 public func resetCapital() async throws {
-    let dao = settingsDAO
-    try await Task.detached(priority: .userInitiated) {
-        try dao.resetCapital()
-    }.value
-    self.settings.totalCapital = 0
+    let prev = pendingMutations
+    let task = Task { [weak self] in
+        _ = try? await prev?.value
+        guard let self = self else { return }
+        let dao = self.settingsDAO
+        try await Task.detached(priority: .userInitiated) {
+            try dao.resetCapital()
+        }.value
+        self.settings.totalCapital = 0
+    }
+    pendingMutations = task
+    try await task.value
 }
 ```
+
+注：`update` 签名加 `@escaping` —— 因 closure 被 Task 捕获跨 await。Swift 6 编译器会要求；既有 PR #40 类壳没有但当时 fatalError 不需要 escaping。本 PR 改签名 = behavior-only 改动（PR #40 还没 production caller），无 binary contract 影响。
 
 - [ ] **Step 6.3: 跑测试**
 
@@ -1077,7 +1393,7 @@ git push -u origin pr4b-cache-settings
 - [ ] **Spec coverage**：
   - P5 5 方法（listAvailable / pickRandom / store / touch / delete）全部覆盖 → Task 1-3 ✓
   - P5 maxCachedSets=20 + 自动 evict（spec L1962, L2367）→ Task 3 ✓
-  - P5 临时文件 + atomic rename（spec L687）→ Task 1 store impl 用 moveItem ✓
+  - P5 临时文件 + atomic rename（spec L687）→ Task 1 store impl 用 stage→replaceItemAt ✓
   - P5 串行队列防并发同 path（spec L692）→ Task 1 + Task 3 并发测试 ✓
   - P6 init(settingsDAO:) + 4 方法（spec L1979-1982）→ Task 5-6 ✓
   - P6 @MainActor @Observable（spec L1973-1975）→ 既有 PR #40 类壳已标，不动 ✓
@@ -1090,13 +1406,19 @@ git push -u origin pr4b-cache-settings
   - `AppSettings` 字段名与 PR #40 freeze（commissionRate/minCommissionEnabled/totalCapital/displayMode）完全一致
   - `AppError` 枚举 case（.persistence(.diskFull/.dbCorrupted/.ioError) / .trainingSet(.fileNotFound)）与 `AppError.swift` 既有定义对齐
 
-- [ ] **Trust-boundary 评估**：§Design Decision §8 已列；不改任何 public 协议签名
+- [ ] **Trust-boundary 评估**：§Design Decision §8 已列；不改任何 public 协议签名（`update` 加 `@escaping` 是 closure 标注，不破坏 caller 二进制兼容；PR #40 当时 fatalError 类壳无 production caller）
 
-- [ ] **LOC 预算**：≈ 285 prod LOC < 500 硬规则 ✓
+- [ ] **LOC 预算**：≈ 355 prod LOC < 500 硬规则 ✓
 
-- [ ] **TDD discipline**：每个 task 都是 test → fail → impl → pass → commit；Task 1/5 严格 TDD（先写测试），Task 2/3/4/6 是 additive 测试
+- [ ] **TDD discipline**：每个 task 都是 test → fail → impl → pass → commit；Task 1/5 严格 TDD（先写测试），Task 2/3/4/6 是 additive 测试 + R1 regression（H-1/H-2/H-3）
 
 - [ ] **Commit ritual**：每个 task 末尾独立 commit；7 commits 总数
+
+- [ ] **R1 codex finding 全覆盖**：
+  - H-1 rollback safety → §3 算法重写 + Task 4 `store_invalidNewSqlite_oldCachePreserved` ✓
+  - H-2 explicit mtime touch → §3 staging touch + Task 4 `store_oldMtimeSrc_doesNotEvictNewCache` ✓
+  - H-3 settings 串行化 → §6.2 inflight Task chain + Task 6 `concurrentUpdate_*` 两测试 ✓
+  - M-4 gate 强化 → Task 4 增 3 规则（throw/public-no-raw-try/translate-near-raw-try）✓
 
 ---
 
