@@ -170,21 +170,30 @@
 | B. init 改 throws | 错误立即上抛 | 破坏协议；改所有 caller；E6 preview() 必须改 | ❌ 拒（破坏契约） |
 | C. lazy load on first access + Bool didLoad | init 不动；错误延迟到访问时上抛 | snapshotFees 是 sync 的，不能 throws；@Observable settings 字段必须有初值，本质上还是要个 default | ❌ 拒（架构丑） |
 
-**§6.1 A 方案语义边界（R2 修订 codex H-3：区分 dbCorrupted vs 其它）：**
+**§6.1 A 方案语义边界（R4 修订 codex R4-H1：dbCorrupted 也阻塞写，无特例）：**
 
 - `SettingsDAO.loadSettings()` 的失败 surface（per `PersistenceErrorMapping`）：
   - **missing**：key 不存在 → zero-value，**不 throw** ✓
-  - **malformed**：value 非法（NaN/inf/非法 enum）→ throw `.persistence(.dbCorrupted)` —— **真不可恢复**，需 fallback
-  - **transient I/O**：sqlite_busy / locked / 短暂 ENOENT → `.persistence(.ioError(...))` —— **重启可能恢复**，不该 silent 覆盖
-  - **diskFull / schemaMismatch / 其它 GRDB 错误**：`.persistence(.diskFull/.schemaMismatch)` —— 同样不该 silent 覆盖
+  - **malformed**：value 非法（NaN/inf/非法 enum）→ throw `.persistence(.dbCorrupted)`
+  - **transient I/O**：sqlite_busy / locked / 短暂 ENOENT → `.persistence(.ioError(...))`
+  - **diskFull / schemaMismatch / 其它**：`.persistence(.diskFull/.schemaMismatch)`
 
-**R0/R1 的 H-3 bug**（codex R2 抓的）：catch 全部错误一律 zero-default，后续 `update` 把 zero 持久化 → 把用户原 commission/capital 真覆盖为 0 = **真 data loss**。
+**R0/R1/R2/R3 的 H-3 残留 bug**（codex R4 抓的最终形态）：
+- SettingsDAO 是 **key-value** 表（4 个 row：commission_rate / min_commission_enabled / total_capital / display_mode）
+- dbCorrupted 可由**单一 key 的 malformed value** 触发（譬如 `display_mode='INVALID'`），但**其它 3 个 key 是合法的**（用户已设的 commission / capital / minCommission）
+- R2/R3 设计：dbCorrupted → zero-default + 允许后续 update
+- 用户改 displayMode 触发 update → `saveSettings` 把 self.settings 全 4 字段写回 → **zero 覆盖了原本合法的 commission/capital/minCommission** = data loss
 
-**R2 修订 (A')**：
-- 只对 `.persistence(.dbCorrupted)` 走 zero-default + 允许后续写
-- 其它错误（diskFull / ioError / schemaMismatch / unknown）→ 保留 zero-default UI **但**记录 `loadError: AppError?` sentinel
-- `update / resetCapital` 入口 `if let e = loadError { throw e }` —— 阻塞写直到 UI 处理（用户重启 app 触发重新 load）
+**R4 修订 (A''，最终形态)**：
+- 任何 load 失败（含 dbCorrupted）→ 同时 `loadError = e` + zero-default UI
+- `update / resetCapital` 入口 `if let e = loadError { throw e }` —— 阻塞写直到下次成功 load
+- 用户唯一恢复路径 = 重启 app 触发 init 重新 load；如重启仍失败，需 Wave 2 U4 SettingsPanel 提供显式 "重置全部 settings" 按钮（本 PR 不做）
 - snapshotFees 不阻塞（read-only，spec 签名无 throws）
+
+**为什么不分 dbCorrupted 和其它**：
+- 都可能伴随**部分合法 keys**（dbCorrupted 来自单 key malformed；transient I/O 也可能只锁单行）
+- 让 SettingsDAO 区分并 surface "哪些 key OK / 哪些 bad" 是 SettingsDAO 内部改造，超 PR4b scope（属 Wave 2 U4 配合）
+- 当前 SettingsDAO API 只能 all-or-nothing load；client 端**无法区分** "整体 corrupt" vs "单 key corrupt"，必须 conservative 阻塞
 
 ```swift
 private var loadError: AppError?
@@ -193,17 +202,12 @@ public init(settingsDAO: SettingsDAO) {
     self.settingsDAO = settingsDAO
     do {
         self.settings = try settingsDAO.loadSettings()
-    } catch let e as AppError where e == .persistence(.dbCorrupted) {
-        // 已知不可恢复 → zero-default + 允许后续覆盖
-        self.settings = SettingsStore.zeroDefault
-        Logger(subsystem: "kline.trainer", category: "settings").error(
-            "loadSettings: dbCorrupted, fallback to zero-default")
     } catch {
-        // 其它（transient/diskFull/...）→ 保 zero-UI 但 BLOCK update/reset 防 silent 覆盖
+        // R4 H-1: 任何错误（含 dbCorrupted）都阻塞写，避免 silent 覆盖部分合法 keys
         self.settings = SettingsStore.zeroDefault
         self.loadError = (error as? AppError) ?? .internalError(module: "P6", detail: "load failed")
         Logger(subsystem: "kline.trainer", category: "settings").error(
-            "loadSettings: deferred error: \(String(describing: error), privacy: .public)")
+            "loadSettings: blocked write (loadError set): \(String(describing: error), privacy: .public)")
     }
 }
 
@@ -213,10 +217,10 @@ private static let zeroDefault = AppSettings(
 ```
 
 **取舍说明**：
-- "重启 app 重新 load" 比 "init throws 崩溃 UI" 用户体验好（spec init 签名无 throws，A' 不破契约）
-- 比 "全错误 silent zero-default" 安全（不会 silent 覆盖用户数据）
-- loadError 复合 update/reset 的 throws 路径，UI 看到的 error 等同 dao 失败时 user 直接 update 的 error
-- 后续 U4 SettingsPanel 可加显式 reload 按钮（Wave 2 scope，本 PR 不做）
+- "重启 app + 极端情况 Wave 2 显式 reset" 比 "silent 覆盖部分合法 keys" 安全
+- spec init 签名无 throws，A'' 不破契约
+- 后续 U4 SettingsPanel 加 `forceResetAndReload()` API（Wave 2 scope，本 PR 不做）
+- 短期代价：dbCorrupted 用户不能改 settings；但 dbCorrupted 是极罕见事故（用户主动改 sqlite / DB 真损坏）；强制重启 + 后续重置比 silent data loss 好
 
 **§6.2 update / resetCapital 异步实现（R1 重写：inflight Task 链串行化，防 H-3 数据丢失）**
 
@@ -241,7 +245,7 @@ public func update(_ mutate: ...) async throws {
 ```swift
 private var pendingMutations: Task<Void, Error>?
 
-public func update(_ mutate: @escaping (inout AppSettings) -> Void) async throws {
+public func update(_ mutate: @escaping @Sendable (inout AppSettings) -> Void) async throws {
     let prev = pendingMutations  // 捕获前一个 in-flight（如有）
     let task = Task { [weak self, mutate] in
         _ = try? await prev?.value  // 等前一个完成（错误不级联）
@@ -519,13 +523,17 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
         }
     }
 
-    /// R3 H-2: 验证 caller-supplied filename 不能引导 path traversal 或 staging 冲突
+    /// R3 H-2 + R4 H-2: 验证 caller-supplied filename
+    /// - 拒 path traversal（/ \ ..）/ staging 前缀冲突 / 空
+    /// - 必须以 ".sqlite"（小写）结尾——否则 listAvailable 按 .sqlite 过滤会让该文件孤儿绕过 LRU cap
     private func validateFilename(_ filename: String) throws {
         if filename.isEmpty
             || filename.contains("/")
             || filename.contains("\\")
             || filename.contains("..")
-            || filename.hasPrefix(".staging-") {
+            || filename.contains("\0")  // R4 defense-in-depth: NULL byte
+            || filename.hasPrefix(".staging-")
+            || !filename.lowercased().hasSuffix(".sqlite") {
             throw AppError.internalError(module: "P5-cache",
                 detail: "invalid filename rejected by cache boundary")
         }
@@ -1073,9 +1081,9 @@ func store_21RapidStores_evictsOldestStored() throws {
     #expect(!after.contains { $0.id == 1 }, "首次 store 的 id=1 应被 evict")
 }
 
-// R3 H-2 regression: caller 传带 path traversal 的 filename → store 拒收
-@Test("store: filename 含 / .. 或 staging 前缀应拒")
-func store_filenameWithSeparatorOrTraversalRejected() throws {
+// R3 H-2 + R4 H-2 regression: caller 传带 path traversal 或非 .sqlite 扩展的 filename → 拒收
+@Test("store: filename 含 / .. \\ NULL / staging 前缀 / 非 .sqlite 扩展应拒")
+func store_filenameValidationRejectsBadInputs() throws {
     let root = CacheFixture.makeTempCacheRoot()
     defer { CacheFixture.cleanup(root) }
     let cache = DefaultFileSystemCacheManager(cacheRoot: root)
@@ -1088,6 +1096,11 @@ func store_filenameWithSeparatorOrTraversalRejected() throws {
         "..",
         "",
         ".staging-stealth.sqlite",
+        "with\u{0000}null.sqlite",
+        // R4 H-2: 非 .sqlite 扩展应拒，否则 listAvailable 按 .sqlite 过滤 → 孤儿绕 LRU cap
+        "foo.db",
+        "noext",
+        "trailingdot.sqlite.",
     ]
     for name in bad {
         #expect(throws: (any Error).self, "应拒 filename: \(name)") {
@@ -1319,15 +1332,18 @@ struct SettingsStoreProductionTests {
         #expect(store.settings == .zero)
     }
 
-    // R2 H-3 regression: dbCorrupted 后 update 仍可写（fallback path）
-    @Test("init: dbCorrupted 后 update 不被 loadError 阻塞")
-    func init_dbCorrupted_updateStillWorks() async throws {
-        let dao = StubSettingsDAO(load: .failure(AppError.persistence(.dbCorrupted)))
+    // R4 H-1 regression: dbCorrupted 也阻塞写（防 silent 覆盖部分合法 keys）
+    @Test("init: dbCorrupted 后 update 抛 dbCorrupted 阻塞，不持久化 zero")
+    func init_dbCorrupted_updateBlocked() async throws {
+        let dbErr = AppError.persistence(.dbCorrupted)
+        let dao = StubSettingsDAO(load: .failure(dbErr))
         let store = SettingsStore(settingsDAO: dao)
 
-        try await store.update { s in s.commissionRate = 0.0007 }
-        #expect(store.settings.commissionRate == 0.0007)
-        #expect(dao.savedSettings?.commissionRate == 0.0007)
+        await #expect(throws: dbErr) {
+            try await store.update { s in s.commissionRate = 0.0007 }
+        }
+        // dao.saveSettings 不应被调
+        #expect(dao.savedSettings == nil)
     }
 
     // R2 H-3 regression: transient I/O 错误后 update 必须 throw 不能 silent 覆盖
@@ -1395,19 +1411,15 @@ public final class SettingsStore {
         self.settingsDAO = settingsDAO
         do {
             self.settings = try settingsDAO.loadSettings()
-        } catch let e as AppError where e == .persistence(.dbCorrupted) {
-            // 真不可恢复：底层 sqlite settings 表 corrupt → zero-default + 允许 UI 后续改写
-            self.settings = SettingsStore.zeroDefault
-            Logger(subsystem: "kline.trainer", category: "settings").error(
-                "loadSettings: dbCorrupted, fallback to zero-default")
         } catch {
-            // transient/diskFull/ioError/schemaMismatch/unknown → 保 zero UI 但 BLOCK update/reset
-            // 防 silent zero overwrite（codex R2 H-3）。用户重启 app 触发重新 load。
+            // R4 H-1: 任何错误（含 dbCorrupted）都设 loadError 阻塞写
+            // SettingsDAO 是 key-value，dbCorrupted 可能伴随部分合法 keys；conservative 阻塞防 silent 覆盖
+            // 用户恢复路径：重启 app 重新 load；极端情况靠 Wave 2 U4 显式 reset 按钮（本 PR 不做）
             self.settings = SettingsStore.zeroDefault
             self.loadError = (error as? AppError)
                 ?? .internalError(module: "P6", detail: String(describing: error))
             Logger(subsystem: "kline.trainer", category: "settings").error(
-                "loadSettings: deferred error: \(String(describing: error), privacy: .public)")
+                "loadSettings: blocked write (loadError set): \(String(describing: error), privacy: .public)")
         }
     }
 
@@ -1537,7 +1549,7 @@ func concurrentUpdate_andReset_resetWins() async throws {
 `SettingsStore.swift` 加成员 `private var pendingMutations: Task<Void, Error>?`，update 和 resetCapital 实现替换为：
 
 ```swift
-public func update(_ mutate: @escaping (inout AppSettings) -> Void) async throws {
+public func update(_ mutate: @escaping @Sendable (inout AppSettings) -> Void) async throws {
     if let e = loadError { throw e }  // R2 H-3: block writes 直到 reload 成功
     let prev = pendingMutations
     let task = Task { [weak self, mutate] in
@@ -1573,7 +1585,7 @@ public func resetCapital() async throws {
 }
 ```
 
-注：`update` 签名加 `@escaping` —— 因 closure 被 Task 捕获跨 await。Swift 6 编译器会要求；既有 PR #40 类壳没有但当时 fatalError 不需要 escaping。本 PR 改签名 = behavior-only 改动（PR #40 还没 production caller），无 binary contract 影响。
+注：`update` 签名加 `@escaping @Sendable` —— closure 被 Task 捕获跨 await + Swift 6 strict concurrency 要求 Task 操作闭包是 Sendable context；不加 `@Sendable` 编译 fail（codex R4 H-3）。既有 PR #40 类壳是 fatalError 不需要 escaping/Sendable。本 PR 改签名 = behavior-only 强化（PR #40 还无 production caller），无 binary contract 影响。caller 传纯 mutate（如 `s.commissionRate = 0.0001`）天然满足 @Sendable。
 
 - [ ] **Step 6.3: 跑测试**
 
@@ -1696,8 +1708,13 @@ git push -u origin pr4b-cache-settings
   - R2-H3 init catch all silent zero → §6.1 区分 .dbCorrupted（zero+允许写）vs 其它（保 loadError 阻塞 update/reset）+ Task 5 三测试（dbCorrupted 不阻塞、ioError 阻塞、diskFull 阻塞）✓
 
 - [ ] **R3 codex finding 全覆盖**：
-  - R3-H1 Step 5.4 task code 与 §6.1 设计脱节（catch all + 无 loadError）→ Step 5.4 重写 + 加 `loadError` 成员 + 加 `zeroDefault` 静态常量 + 区分 dbCorrupted vs 其它 ✓
+  - R3-H1 Step 5.4 task code 与 §6.1 设计脱节（catch all + 无 loadError）→ Step 5.4 重写 + 加 `loadError` 成员 + 加 `zeroDefault` 静态常量 ✓（R4 进一步取消 dbCorrupted 特例）
   - R3-H2 touch/delete 信任 caller localURL → 加 `validateFilename` + `cacheURL(forId:filename:)` 内部派生 + standardize hasPrefix(cacheRoot) 兜底 + Task 4 三测试（filename traversal 拒、delete victim 安全、touch victim mtime 不变）✓
+
+- [ ] **R4 codex finding 全覆盖**：
+  - R4-H1 dbCorrupted zero-default 仍危险（key-value DAO 单 key 坏不代表全坏）→ §6.1 取消特例，所有 load 失败均设 loadError 阻塞写 + Step 5.4 同步 + 测试改为 `init_dbCorrupted_updateBlocked`（断言 throws + 不调 saveSettings）✓
+  - R4-H2 validateFilename 不限 .sqlite → 必须 lowercased.hasSuffix(".sqlite") + NULL byte 也拒 + 测试加 foo.db / noext / trailingdot.sqlite. 三 case ✓
+  - R4-H3 mutate closure 缺 `@Sendable`，Swift 6 strict concurrency 编译 fail → 签名改 `@escaping @Sendable (inout AppSettings) -> Void` ✓
 
 ---
 
