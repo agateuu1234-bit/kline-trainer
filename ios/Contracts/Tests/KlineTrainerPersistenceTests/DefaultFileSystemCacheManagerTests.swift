@@ -412,6 +412,29 @@ struct DefaultFileSystemCacheManagerTests {
         #expect(cache.listAvailable().count == 1)
     }
 
+    // codex post-impl R7 regression: REST meta.filename 是 .zip，cache 应规范化为 .sqlite
+    @Test("store: meta.filename=`<base>.zip` 时，cache 持久化为 `<id>__<base>.sqlite` + 返回 .sqlite")
+    func store_zipMetaFilename_normalizesToSqliteOnDisk() throws {
+        let root = CacheFixture.makeTempCacheRoot()
+        defer { CacheFixture.cleanup(root) }
+        let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+
+        let s = try CacheFixture.makeValidSqlite(schemaVersion: 1)
+        // 模拟真实 REST shape：meta.filename 是 zip 名（e.g. RESTDTOsTests `600519_202001.zip`）
+        let r = try cache.store(downloadedZip: s,
+                                meta: CacheFixture.meta(id: 600519, filename: "600519_202001.zip"))
+
+        // 返回的 TrainingSetFile.filename 应是规范化后的 .sqlite
+        #expect(r.filename == "600519_202001.sqlite")
+        #expect(r.localURL.lastPathComponent == "600519__600519_202001.sqlite")
+        #expect(FileManager.default.fileExists(atPath: r.localURL.path))
+        // listAvailable 也应能 round-trip 出来
+        let listed = cache.listAvailable()
+        #expect(listed.count == 1)
+        #expect(listed[0].id == 600519)
+        #expect(listed[0].filename == "600519_202001.sqlite")
+    }
+
     // R3 H-2 regression: touch 同样不信任 localURL
     @Test("touch: 不信任 file.localURL，外部文件 mtime 不变")
     func touch_doesNotTrustLocalURL_externalFileMtimeUnchanged() throws {

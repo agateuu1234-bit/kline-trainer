@@ -42,10 +42,11 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
             try ensureCacheRootExists()
             // R5 M-3: 清前一次 store 进程崩溃残留的 .staging-* 文件（防 orphan 绕过 LRU cap）
             cleanStaleStagingIfNeededLocked()
-            // R3 H-2: 验证 meta.filename 不带 path 分隔符 / traversal / 空 / staging 前缀
-            try validateFilename(meta.filename)
-            let target = try cacheURL(forId: meta.id, filename: meta.filename)
-            let staging = cacheRoot.appendingPathComponent(".staging-\(UUID().uuidString)__\(meta.id)__\(meta.filename)")
+            // codex post-impl R7: REST meta.filename 是 .zip（e.g. "600519_202001.zip"），
+            // cache 层规范化为 .sqlite（src 已是解压后的 sqlite）。.sqlite 直传则原样保留。
+            let cacheFilename = try normalizedCacheFilename(meta.filename)
+            let target = try cacheURL(forId: meta.id, filename: cacheFilename)
+            let staging = cacheRoot.appendingPathComponent(".staging-\(UUID().uuidString)__\(meta.id)__\(cacheFilename)")
 
             // R1 H-1 fix: stage → validate → atomic replace；任意失败均不动 target
             try stageFile(from: src, to: staging)
@@ -70,7 +71,7 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
             evictIfNeededLocked()
             return TrainingSetFile(
                 id: meta.id,
-                filename: meta.filename,
+                filename: cacheFilename,
                 localURL: target,
                 schemaVersion: schemaVersion,
                 lastAccessedAt: attrs.mtime,
@@ -128,25 +129,43 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
         }
     }
 
-    /// R3 H-2 + R4 H-2: 验证 caller-supplied filename
-    /// - 拒 path traversal（/ \ ..）/ staging 前缀冲突 / 空 / NULL byte
-    /// - 必须以 ".sqlite"（小写）结尾——否则 listAvailable 按 .sqlite 过滤会让该文件孤儿绕过 LRU cap
-    private func validateFilename(_ filename: String) throws {
+    /// R3 H-2: filename 安全检查（path / staging 前缀 / 空 / NULL）；不检查扩展名。
+    private func validateFilenameSafety(_ filename: String) throws {
         if filename.isEmpty
             || filename.contains("/")
             || filename.contains("\\")
             || filename.contains("..")
             || filename.contains("\0")
-            || filename.hasPrefix(".staging-")
-            || !filename.lowercased().hasSuffix(".sqlite") {
+            || filename.hasPrefix(".staging-") {
             throw AppError.internalError(module: "P5-cache",
                 detail: "invalid filename rejected by cache boundary")
         }
     }
 
-    /// R3 H-2: cache 内 URL 的唯一构造路径
+    /// codex post-impl R7: REST `TrainingSetMetaItem.filename` 是上游 zip 名（e.g. `600519_202001.zip`），
+    /// `downloadedZip` 入参实为已解压 .sqlite。Cache 把 `.zip` 规范化为 `.sqlite` 用于持久化与回报。
+    /// `.sqlite` 直传 → 原样返回。其他扩展名 → 拒。
+    private func normalizedCacheFilename(_ metaFilename: String) throws -> String {
+        try validateFilenameSafety(metaFilename)
+        let lower = metaFilename.lowercased()
+        if lower.hasSuffix(".sqlite") {
+            return metaFilename
+        }
+        if lower.hasSuffix(".zip") {
+            return String(metaFilename.dropLast(4)) + ".sqlite"
+        }
+        throw AppError.internalError(module: "P5-cache",
+            detail: "filename must end in .sqlite or .zip (case-insensitive)")
+    }
+
+    /// R3 H-2: cache 内 URL 的唯一构造路径。filename 必须已是 cache 内部 .sqlite 形式
+    /// （store 走 normalizedCacheFilename；touch / delete 收到的 TrainingSetFile.filename 也已是 .sqlite）。
     private func cacheURL(forId id: Int, filename: String) throws -> URL {
-        try validateFilename(filename)
+        try validateFilenameSafety(filename)
+        guard filename.lowercased().hasSuffix(".sqlite") else {
+            throw AppError.internalError(module: "P5-cache",
+                detail: "cache disk filename must end in .sqlite")
+        }
         let candidate = cacheRoot.appendingPathComponent("\(id)__\(filename)")
         let stdCand = candidate.standardizedFileURL.path
         let stdRoot = cacheRoot.standardizedFileURL.path
