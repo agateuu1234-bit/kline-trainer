@@ -329,6 +329,14 @@ public func snapshotFees() -> FeeSnapshot {
         commissionRate: settings.commissionRate,
         minCommissionEnabled: settings.minCommissionEnabled)
 }
+
+// R6 H-1 partial fix: additive API，让 trading-flow caller 用 enforced 路径
+// snapshotFees 保持 spec L1981 sync 签名不动；新加 throws variant 强制 caller 处理 loadError
+// E5/E6 (Wave 2) trading 入口应用 snapshotFeesIfReady()，普通 UI 显示用 snapshotFees()
+public func snapshotFeesIfReady() throws -> FeeSnapshot {
+    if let e = _loadError { throw e }
+    return snapshotFees()
+}
 ```
 
 ### §7 测试 isolation
@@ -365,12 +373,30 @@ PR #40 SettingsStore 类壳是 fatalError 占位，**没有任何 production cal
    - **原因**：R5 H-1，snapshotFees 不能改签名 throw，必须暴露 loadError 让 caller guard
    - **caller 影响**：新增 read-only API，不破坏既有，是 strictly additive
 
-**为什么这两处不属"破坏 trust-boundary"**：
-- 都是 strictly additive 或 strict-concurrency 必需的强化，**没有任何旧 API 被删除或语义改变**
-- PR #40 SettingsStore 类壳明示 "Wave 2 P6 PR 改为 init 内调用 settingsDAO.loadSettings() 实际加载"，本 PR 就是那个落地 PR；signature 强化是落地不可避免的副产品
-- codex review 链路本身就是 trust-boundary check，本 PR 全程经 ≥5 轮 codex review，每轮显式列签名变化
+3. **`snapshotFeesIfReady() throws -> FeeSnapshot`**（R6 H-1 部分修；新增 throws variant）
+   - **原因**：R6 H-1 codex 不接受 "log + 公开 loadError" 作为 enforcement，要求 fail-closed API
+   - **方案选择**：spec L1981 `snapshotFees -> FeeSnapshot` 不能改 sync→throws（破 spec），故新增 additive `snapshotFeesIfReady() throws`；trading flow caller (Wave 2 E5/E6) 用此变体；snapshotFees 保留给 UI 显示路径
+   - **caller 影响**：strictly additive，不破坏既有
 
-**结论**：本 PR 引入 2 处 SettingsStore 签名增强（addtive `loadError` getter + strengthening `@escaping @Sendable` on `update`）；CacheManager 协议**完全冻结**（不动）。这两处增强已在 codex R5 留痕认知。
+**为什么这 3 处不属"破坏 trust-boundary"**：
+- 全部 strictly additive 或 strict-concurrency 必需的强化，**没有任何旧 API 被删除或语义改变**
+- PR #40 SettingsStore 类壳明示 "Wave 2 P6 PR 改为 init 内调用 settingsDAO.loadSettings() 实际加载"，本 PR 就是那个落地 PR；signature 强化是落地不可避免的副产品
+- codex review 链路本身就是 trust-boundary check，本 PR 全程经 ≥6 轮 codex review，每轮显式列签名变化
+
+**§8.2 R6 reject residual（接受未修）**
+
+**R6-M3：codex 重申 update @Sendable 签名 source-breaking，建议改用 actor / async lock + nonescaping mutate**
+
+- 这是 R5-H2 的复述（codex R5 已提，我已在 §8.1 列拒方案 A/B 理由）
+- 进一步分析 codex R6 推荐的 actor-based 替代方案：
+  - 设 `private actor SaveLock`，`update` 内 mutate 同步 apply on MainActor (no escaping) + optimistic settings 写 + saveLock.withLock save + revert on fail
+  - **数据一致性反例**：concurrent update1 + update2，update1 save fail 时，settings 已被 update2 optimistic 覆盖；revert 把 update2 的写入也回滚 → in-memory s0 / DB s12 inconsistency
+  - revert 要"基于 prevSnapshot 但只回退自己的写"是 not-trivially-feasible（需要 diff 而非 swap，OS-level 单 atomic snapshot 不存在）
+- 本 PR 选 @Sendable closure 捕获是 **correctness-required**；codex R6 推荐方案在并发场景反而引入更严重的 in-memory/DB 不一致
+- per `feedback_codex_round6_self_contradiction` rule（≥6 轮命中复述模式 → REJECT 不修）+ `feedback_codex_plan_budget_overshoot` rule（5 轮必 escalate）
+- **REJECT 接受 residual**：update 签名加 `@escaping @Sendable`；caller 影响详见 §8.1 第 1 项；user 已 acknowledge
+
+**结论**：本 PR 引入 3 处 SettingsStore 签名增强（additive `loadError` getter + additive `snapshotFeesIfReady` + strengthening `@escaping @Sendable` on `update`）；CacheManager 协议**完全冻结**（不动）。这 3 处增强已在 codex R5+R6 留痕认知；R6-M3 reject 接受 residual 并入 PR description 提示 reviewer。
 
 ---
 
@@ -454,10 +480,31 @@ struct DefaultFileSystemCacheManagerTests {
         #expect(result.schemaVersion == 1)
         #expect(result.localURL.lastPathComponent == "42__stock_42.sqlite")
         #expect(FileManager.default.fileExists(atPath: result.localURL.path))
-        #expect(!FileManager.default.fileExists(atPath: src.path),
-                "src 应被 move 走，原位置不存在")
+        // R6 M-2: src 用 copy，不被 move 走；caller 自己负责清 src
+        #expect(FileManager.default.fileExists(atPath: src.path), "src 应保留（caller retry-safe）")
         #expect(result.lastAccessedAt > 0)
         #expect(result.downloadedAt > 0)
+    }
+
+    // R6 M-2 regression: store fail 后 src 仍可用于 retry
+    @Test("store: PRAGMA validation fail 后 src 仍存在，可 retry")
+    func store_validationFail_srcRemainsForRetry() throws {
+        let root = CacheFixture.makeTempCacheRoot()
+        defer { CacheFixture.cleanup(root) }
+        let cache = DefaultFileSystemCacheManager(cacheRoot: root)
+
+        // src 不是合法 sqlite → PRAGMA 读 fail → store throws
+        let bogus = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bogus-\(UUID()).sqlite")
+        try Data("not sqlite".utf8).write(to: bogus)
+        defer { try? FileManager.default.removeItem(at: bogus) }
+
+        #expect(throws: AppError.persistence(.dbCorrupted)) {
+            try cache.store(downloadedZip: bogus, meta: CacheFixture.meta(id: 1, filename: "x.sqlite"))
+        }
+        // src 必须仍在（caller 可换 fixture 重试 or report）
+        #expect(FileManager.default.fileExists(atPath: bogus.path),
+                "src 不应因 store fail 被消耗")
     }
 }
 ```
@@ -640,9 +687,11 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
         return candidate
     }
 
+    /// R6 M-2 fix: 用 copy 而非 move——src 保留给 caller retry（validation/replace 失败时 src 不丢）
+    /// 代价：store 窗口内 ~MB 临时双倍磁盘；store 成功后 caller 应清自己的 src（来自 ZipExtractor 的 tmp）
     private func stageFile(from src: URL, to staging: URL) throws {
         do {
-            try FileManager.default.moveItem(at: src, to: staging)
+            try FileManager.default.copyItem(at: src, to: staging)
         } catch {
             throw CacheErrorMapping.translate(error)
         }
@@ -1654,6 +1703,26 @@ func snapshotFees_loadErrorState_returnsZeroAndExposesLoadError() async throws {
     // loadError 状态下 update / resetCapital 仍阻塞（同 H-3 测试已验）
 }
 
+// R6 H-1 partial regression: snapshotFeesIfReady throws on loadError
+@Test("snapshotFeesIfReady: loadError 时 throws；happy 时返正常 fees")
+func snapshotFeesIfReady_throwsOnLoadError_returnsFeesOnHappy() async throws {
+    let dfErr = AppError.persistence(.diskFull)
+    let failDao = StubSettingsDAO(load: .failure(dfErr))
+    let failStore = SettingsStore(settingsDAO: failDao)
+    #expect(throws: dfErr) {
+        try failStore.snapshotFeesIfReady()
+    }
+
+    let goodSettings = AppSettings(
+        commissionRate: 0.0001, minCommissionEnabled: true,
+        totalCapital: 1000, displayMode: .dark)
+    let goodDao = StubSettingsDAO(load: .success(goodSettings))
+    let goodStore = SettingsStore(settingsDAO: goodDao)
+    let fees = try goodStore.snapshotFeesIfReady()
+    #expect(fees.commissionRate == 0.0001)
+    #expect(fees.minCommissionEnabled == true)
+}
+
 // R1 H-3 regression: 并发 update + resetCapital
 @Test("concurrent update+reset: reset 不被 update 旧 totalCapital overwrite")
 func concurrentUpdate_andReset_resetWins() async throws {
@@ -1849,6 +1918,11 @@ git push -u origin pr4b-cache-settings
   - R5-H1 snapshotFees 不阻塞 loadError → silent zero fees → P&L 错算（valid-looking）→ §6.3 + Step 6 加 defense-in-depth log + 暴露 `public var loadError: AppError?` 让 caller guard + 测试 `snapshotFees_loadErrorState_returnsZeroAndExposesLoadError` ✓
   - R5-H2 update @Sendable 改 PR #40 frozen contract（自我矛盾） → §8.1 诚实暴露 2 处签名增强：`update` 加 `@escaping @Sendable` + 加 public `loadError` getter；列拒 A/B 替代方案理由 ✓
   - R5-M3 staging 残留绕过 LRU cap → 加 `cleanStaleStagingIfNeededLocked()` lazy 一次性扫 + 测试 `store_firstCallCleansStaleStagingFiles` ✓
+
+- [ ] **R6 codex finding 处理（部分接受 + 1 reject）**：
+  - R6-H1 snapshotFees 仍 fail-open（R5-H1 升级版）→ 部分修：加 additive `snapshotFeesIfReady() throws -> FeeSnapshot`，trading-flow caller (Wave 2 E5/E6) 必须用此 enforced 变体；snapshotFees 保留给 UI 显示路径 + 测试 `snapshotFeesIfReady_throwsOnLoadError_returnsFeesOnHappy` ✓
+  - R6-M2 src 被 move 消耗 → caller retry 失败 → fix：stageFile 用 copyItem 而非 moveItem；happy-path 测试 flip + 加 retry-safe 测试 `store_validationFail_srcRemainsForRetry` ✓
+  - **R6-M3 update @Sendable 签名（R5-H2 复述）→ REJECT 接受 residual**：详 §8.2，actor 替代方案在并发 + revert 路径下引入更严重 in-memory/DB 不一致；per `feedback_codex_round6_self_contradiction` rule ≥6 轮命中复述模式立即 reject ✗
 
 ---
 
