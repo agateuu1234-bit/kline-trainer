@@ -214,6 +214,10 @@ struct DefaultFileSystemCacheManagerTests {
             try cache.store(downloadedZip: ghost,
                             meta: CacheFixture.meta(id: 1, filename: "x.sqlite"))
         }
+        // codex post-impl R8 regression: stageFile catch 必须清残留；任何 store fail 后 cache root 内不应有 .staging-*
+        let entries = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        let stagingResidue = entries.filter { $0.hasPrefix(".staging-") }
+        #expect(stagingResidue.isEmpty, "stageFile 失败后不应留 .staging-* orphan：\(stagingResidue)")
     }
 
     @Test("store: src 不是合法 sqlite 抛 .persistence(.dbCorrupted)（PRAGMA 读失败）")

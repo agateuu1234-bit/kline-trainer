@@ -177,10 +177,13 @@ public final class DefaultFileSystemCacheManager: CacheManager, @unchecked Senda
     }
 
     /// R6 M-2 fix: 用 copy 而非 move——src 保留给 caller retry
+    /// codex post-impl R8: copyItem 在 ENOSPC / 短写时可能在 throw 前部分写入 dest；
+    /// 清残留再上抛，否则 cleanStaleStagingDone=true 后同进程 retry 会累积 .staging-* orphans。
     private func stageFile(from src: URL, to staging: URL) throws {
         do {
             try FileManager.default.copyItem(at: src, to: staging)
         } catch {
+            try? FileManager.default.removeItem(at: staging)
             throw CacheErrorMapping.translate(error)
         }
     }
