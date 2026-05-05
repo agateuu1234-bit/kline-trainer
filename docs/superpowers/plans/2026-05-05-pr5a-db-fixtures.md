@@ -27,12 +27,12 @@
 | `ios/Contracts/Tests/KlineTrainerContractsTests/AcceptanceJournalDAOContractTests.swift` | 升级 `test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol`：从「不持久化」翻面成 round-trip 行为断言 | Modify |
 | `docs/acceptance/2026-05-05-pr5a-db-fixtures.md` | 验收清单（中文，非 coder 可执行）| Create |
 
-**预估 prod LOC（硬规则 ≤500；R1 修订上调）：**
-- `InMemoryFakes.swift` 净增 ≈ 200 LOC（4 fake 各加内部状态 + lock + 真实 method 体；AcceptanceJournalDAO 全镜像 production state machine + invariants + COALESCE +60 LOC；PreviewTrainingSetDBFactory 升级 +15 LOC）
-- `PreviewTrainingSetReader.swift` 新增 ≈ 40 LOC（含 init / loadMeta / loadAllCandles / close）
-- 合计：**≈ 240 prod LOC** ✓ 仍远低于 500
+**预估 prod LOC（硬规则 ≤500；R1 / R2 修订上调）：**
+- `InMemoryFakes.swift` 净增 ≈ 215 LOC（4 fake 各加内部状态 + lock + 真实 method 体；AcceptanceJournalDAO 全镜像 production state machine + invariants + COALESCE +60 LOC；R2 SettingsDAO finite-value guard +12 LOC；PreviewTrainingSetDBFactory 升级 +15 LOC）
+- `PreviewTrainingSetReader.swift` 新增 ≈ 55 LOC（含 init / loadMeta / loadAllCandles / close + R2 isClosed lock + ensureOpen helper）
+- 合计：**≈ 270 prod LOC** ✓ 仍远低于 500
 
-**预估 test LOC**：≈ 380（R1 加 state machine 12 条 + id-tiebreak 2 条，约 +100 行）
+**预估 test LOC**：≈ 430（R1 加 state machine 12 条 + id-tiebreak 2 条 +100 行；R2 加 NaN/inf 2 条 + close-then-read 1 条，约 +50 行）
 
 **子项数**（per memory feedback "硬规则 ≤3 子项"）：
 1. P4 4 fake 升级（一个文件内的内聚改动，spec 列在同一 §11.3 子清单 #1-4）
@@ -100,9 +100,20 @@ Fake 实现：
 - `statistics().currentCapital`：用同 sort 取首条
 - 加测试：3 条 record `createdAt = 100`，按 insert 顺序 id = 1/2/3，断言 `listRecords[0].id == 3`（id 最大者排首）+ `statistics().currentCapital` 用第 3 条计算
 
-### §5 `InMemorySettingsDAO.resetCapital` = 把 totalCapital 置 0
+### §5 `InMemorySettingsDAO` = resetCapital 只置 0 + saveSettings 拒 NaN/inf（R2 修订：codex round-2 med-2）
 
-**Production 行为**（`SettingsDAOImpl.resetCapital`，line 87-91）：`UPDATE settings SET total_capital = '0.0'`，**只动 totalCapital，不动其他字段**。Fake 镜像同口径。
+**Production 行为 1**（`SettingsDAOImpl.resetCapital`，line 87-91）：`UPDATE settings SET total_capital = '0.0'`，**只动 totalCapital，不动其他字段**。Fake 镜像同口径。
+
+**R2 修订（codex round-2 med-2）—— Production 行为 2**（`SettingsDAOImpl.saveSettings`，line 62-85）：在写入前拒非有限值：
+- `commissionRate` 若不是 finite（NaN / +inf / -inf）→ `throw AppError.internalError(module: "P4-SettingsDAO", detail: "saveSettings refused: commissionRate not finite (...)")`
+- `totalCapital` 若不是 finite → 同上 detail 改 totalCapital
+
+Fake 必须镜像同 guard：
+- `saveSettings` 检查 `s.commissionRate.isFinite && s.totalCapital.isFinite`
+- 任一不 finite → `throw AppError.internalError(module: "PR5a-InMemorySettingsDAO", detail: "saveSettings refused: ...")`
+- **不修改内部 settings 字段**（mirror production 拒收前直接抛，不动 DB row）
+
+**为什么必须**：若 fake 接受 NaN/inf 然后 round-trip 出去，使用 fake 写的测试会让 SettingsStore 等下游模块的 fee/P&L 计算被 NaN 污染（production 拒收，fake 接受）—— 计算路径相关测试会出现 fake-pass / production-fail 分叉。
 
 ### §6 `InMemoryAcceptanceJournalDAO` 镜像 production state machine + invariants + COALESCE（R1 修订：codex round-1 high-1）
 
@@ -141,9 +152,24 @@ Fake 必须复刻同样行为，否则 P2 runner / E6 coordinator 等使用 fake
 
 **fake-specific 简化**：production logger.info NOOP / logger.error refuse 路径，fake 不 emit log（fake 不持有 `os.Logger` 资源）；只静默 NOOP / 抛错。
 
-### §7 `PreviewTrainingSetReader` 是 class 不是 struct
+### §7 `PreviewTrainingSetReader` 是 class + 镜像 production isClosed 生命周期（R2 修订：codex round-2 high-1）
 
 **Spec literal**：`public protocol TrainingSetReader: AnyObject, Sendable`（L1842）—— `AnyObject` 强制 reference type。`final class` + immutable stored property + `@unchecked Sendable`（值 capture 后不变）。
+
+**R2 修订（codex round-2 high-1）—— 镜像 `DefaultTrainingSetReader` 的 isClosed 生命周期**：
+
+Production `DefaultTrainingSetReader` (`KlineTrainerPersistence/DefaultTrainingSetReader.swift` line 15-16, 184-191)：
+- `isClosed` Bool flag + `NSLock`
+- `close()` 设 `isClosed = true` + queue = nil 释放 ARC
+- `ensureOpen()` 检查 `!isClosed` 否则 `throw AppError.internalError(module: "P3b", detail: "reader closed")`
+- `loadMeta()` / `loadAllCandles()` 都先 `try ensureOpen()`
+
+Fake 必须镜像同生命周期：
+- 加 `private var isClosed: Bool = false` + `private let lock = NSLock()`
+- `close()` lock 内设 `isClosed = true`
+- `loadMeta()` / `loadAllCandles()` lock 内检查 `isClosed`，若 closed `throw AppError.internalError(module: "PR5a-PreviewTrainingSetReader", detail: "reader closed")`
+
+**为什么必须**：若 fake `close()` 是 no-op，consumer 误用 close 后再 read 的代码在 fake 上通过测试，到 production 撞 `.internalError` 崩溃。fake/production 行为发散就是 codex round-2 finding 1 拒收的根因。
 
 ### §8 不在 PR5a 内做 Preview Fixture 数据（KLineCandle.previewFixture / FeeSnapshot.preview / TrainingRecord.previewRecord）
 
@@ -312,6 +338,36 @@ final class InMemoryFakesTests: XCTestCase {
         XCTAssertEqual(after.commissionRate, 0.0003)
         XCTAssertTrue(after.minCommissionEnabled)
         XCTAssertEqual(after.displayMode, .dark)
+    }
+
+    /// R2 修订（codex round-2 med-2）：mirror production saveSettings 拒 NaN / +inf / -inf
+    func test_settingsDAO_saveSettings_rejects_nonfinite_commissionRate_and_does_not_mutate() throws {
+        let dao = InMemorySettingsDAO()
+        let baseline = AppSettings(commissionRate: 0.0003, minCommissionEnabled: true, totalCapital: 1000, displayMode: .dark)
+        try dao.saveSettings(baseline)
+
+        for bad in [Double.nan, .infinity, -.infinity] {
+            let payload = AppSettings(commissionRate: bad, minCommissionEnabled: true, totalCapital: 1000, displayMode: .dark)
+            XCTAssertThrowsError(try dao.saveSettings(payload)) { err in
+                guard case AppError.internalError = err else { XCTFail("expected internalError"); return }
+            }
+        }
+        // 拒收后 settings 未被改（仍是 baseline）
+        XCTAssertEqual(try dao.loadSettings(), baseline)
+    }
+
+    func test_settingsDAO_saveSettings_rejects_nonfinite_totalCapital_and_does_not_mutate() throws {
+        let dao = InMemorySettingsDAO()
+        let baseline = AppSettings(commissionRate: 0.0003, minCommissionEnabled: true, totalCapital: 1000, displayMode: .dark)
+        try dao.saveSettings(baseline)
+
+        for bad in [Double.nan, .infinity, -.infinity] {
+            let payload = AppSettings(commissionRate: 0.0003, minCommissionEnabled: true, totalCapital: bad, displayMode: .dark)
+            XCTAssertThrowsError(try dao.saveSettings(payload)) { err in
+                guard case AppError.internalError = err else { XCTFail("expected internalError"); return }
+            }
+        }
+        XCTAssertEqual(try dao.loadSettings(), baseline)
     }
 
     // MARK: - InMemoryAcceptanceJournalDAO（R1 修订：state machine + invariants + COALESCE 全镜像 production）
@@ -641,7 +697,7 @@ public final class InMemoryPendingTrainingRepository: PendingTrainingRepository,
 }
 ```
 
-- [ ] **改 `InMemorySettingsDAO`：加 lock + `var settings`**
+- [ ] **改 `InMemorySettingsDAO`：加 lock + `var settings` + R2 修订 finite-value guard**
 
 ```swift
 public final class InMemorySettingsDAO: SettingsDAO, @unchecked Sendable {
@@ -660,6 +716,18 @@ public final class InMemorySettingsDAO: SettingsDAO, @unchecked Sendable {
     }
 
     public func saveSettings(_ s: AppSettings) throws {
+        // R2 修订（codex round-2 med-2）：mirror production SettingsDAOImpl.saveSettings line 64-73
+        // 在 lock 外做 guard：拒收时不应锁也不应改字段
+        guard s.commissionRate.isFinite else {
+            throw AppError.internalError(
+                module: "PR5a-InMemorySettingsDAO",
+                detail: "saveSettings refused: commissionRate not finite (\(s.commissionRate))")
+        }
+        guard s.totalCapital.isFinite else {
+            throw AppError.internalError(
+                module: "PR5a-InMemorySettingsDAO",
+                detail: "saveSettings refused: totalCapital not finite (\(s.totalCapital))")
+        }
         lock.lock(); defer { lock.unlock() }
         settings = s
     }
@@ -798,7 +866,7 @@ public final class InMemoryAcceptanceJournalDAO: AcceptanceJournalDAO, @unchecke
 }
 ```
 
-- [ ] **运行测试，确认 22 个 P4 测试全过 + 既有 contract 测试不退化**
+- [ ] **运行测试，确认 24 个 P4 测试全过 + 既有 contract 测试不退化**
 
 ```bash
 cd ios/Contracts && swift test --filter InMemoryFakesTests 2>&1 | tail -10
@@ -807,7 +875,7 @@ cd ios/Contracts && swift test --filter TrainingSessionCoordinatorTests 2>&1 | t
 ```
 
 Expected:
-- `InMemoryFakesTests`: 22 个全 PASS（含 R1 修订加的 id-tiebreak 2 条 + state-machine 12 条）
+- `InMemoryFakesTests`: 24 个全 PASS（含 R1 加的 id-tiebreak 2 + state-machine 12，R2 加的 SettingsDAO NaN/inf 拒收 2）
 - `AcceptanceJournalDAOContractTests`: 旧 `test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol` **会 fail**（旧断言 `XCTAssertEqual(rows.count, 0)` 与新行为冲突）—— Step 3.1 修
 - `TrainingSessionCoordinatorTests`: 应保持 PASS（PR #40 测试用 listRecords/loadPending/loadSettings 都是「空状态」断言；新 fake 默认空状态语义不变）
 
@@ -867,13 +935,26 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
         XCTAssertEqual(loaded[.daily]?.first?.close, 1.5)
     }
 
-    func test_reader_close_is_no_op() {
+    /// R2 修订（codex round-2 high-1）：close 后 loadMeta / loadAllCandles 必须 throw（mirror production DefaultTrainingSetReader.ensureOpen）
+    func test_reader_close_then_loadMeta_throws_internalError() {
         let reader = PreviewTrainingSetReader(
             meta: TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0),
             candles: [:])
-        reader.close()
-        // close 后再 loadMeta 不抛（fake 设计：no-op）
+        // close 前可读
         XCTAssertNoThrow(try reader.loadMeta())
+
+        reader.close()
+
+        // close 后 loadMeta 抛 internalError
+        XCTAssertThrowsError(try reader.loadMeta()) { err in
+            guard case AppError.internalError = err else { XCTFail("expected internalError"); return }
+        }
+        // close 后 loadAllCandles 也抛
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.internalError = err else { XCTFail("expected internalError"); return }
+        }
+        // close 重复调用合法（mirror production NSLock 不抛）
+        reader.close()
     }
 
     // MARK: - Factory
@@ -921,12 +1002,15 @@ Expected: compile error (`PreviewTrainingSetReader` 类型未定义 / `PreviewTr
 
 ### Step 2.2 — 实施 reader + 升级 factory
 
-- [ ] **新增 `PreviewTrainingSetReader.swift`**
+- [ ] **新增 `PreviewTrainingSetReader.swift`（R2 修订：mirror production isClosed 生命周期）**
 
 ```swift
 // Kline Trainer Swift Contracts — Preview/Test Fixture: P3b TrainingSetReader fake
 // Spec: kline_trainer_modules_v1.4.md §11.3 line 2200 (PreviewTrainingSetDBFactory + PreviewTrainingSetReader)
 //       protocol 体 §P3b line 1840-1856
+// R2 修订（codex round-2 high-1）：mirror DefaultTrainingSetReader 的 isClosed + ensureOpen
+//       (KlineTrainerPersistence/DefaultTrainingSetReader.swift line 15-16, 184-191)
+//       fake 不持有 DatabaseQueue，但必须镜像 close-then-read = throw 的 lifecycle 契约。
 
 #if DEBUG
 
@@ -935,18 +1019,36 @@ import Foundation
 public final class PreviewTrainingSetReader: TrainingSetReader, @unchecked Sendable {
     private let meta: TrainingSetMeta
     private let candles: [Period: [KLineCandle]]
+    private var isClosed: Bool = false
+    private let lock = NSLock()
 
     public init(meta: TrainingSetMeta, candles: [Period: [KLineCandle]]) {
         self.meta = meta
         self.candles = candles
     }
 
-    public func loadMeta() throws -> TrainingSetMeta { meta }
+    public func loadMeta() throws -> TrainingSetMeta {
+        try ensureOpen()
+        return meta
+    }
 
-    public func loadAllCandles() throws -> [Period: [KLineCandle]] { candles }
+    public func loadAllCandles() throws -> [Period: [KLineCandle]] {
+        try ensureOpen()
+        return candles
+    }
 
     public func close() {
-        // no-op：fake 不持有真实 DatabaseQueue
+        lock.lock(); defer { lock.unlock() }
+        isClosed = true
+    }
+
+    private func ensureOpen() throws {
+        lock.lock(); defer { lock.unlock() }
+        if isClosed {
+            throw AppError.internalError(
+                module: "PR5a-PreviewTrainingSetReader",
+                detail: "reader closed")
+        }
     }
 }
 
@@ -1083,11 +1185,11 @@ Expected: 0 failures（含 PR #37-44 既有所有测试）
 | `cd ios/Contracts && swift test --filter TrainingSessionCoordinatorTests 2>&1 \| tail -3` | 全过 | 0 failures |
 | `cd ios/Contracts && swift test --filter AcceptanceJournalDAOContractTests 2>&1 \| tail -3` | 全过 | 0 failures |
 
-### 5. 验证生产代码 0 改动
+### 5. 验证生产代码 0 改动（R2 修订：codex round-2 med-3 — pathspec 用目录递归而非单 `*.swift`）
 | 操作 | 期望 | 通过条件 |
 |---|---|---|
-| `git diff main..HEAD --stat -- 'ios/Contracts/Sources/KlineTrainerPersistence/*.swift'` | 输出为空（生产实现 0 改动）| 输出为空字符串 |
-| `git diff main..HEAD --stat -- 'ios/Contracts/Sources/KlineTrainerContracts/Persistence/*.swift'` | 输出为空（contract 协议 0 改动）| 输出为空字符串 |
+| `git diff main..HEAD --name-only -- 'ios/Contracts/Sources/KlineTrainerPersistence/'` | 输出为空（生产实现 + Internal 子目录全部 0 改动）| 输出为空字符串 |
+| `git diff main..HEAD --name-only -- 'ios/Contracts/Sources/KlineTrainerContracts/Persistence/'` | 输出为空（contract 协议 0 改动）| 输出为空字符串 |
 
 ### 6. 验证只在 DEBUG 编译产物里
 | 操作 | 期望 | 通过条件 |
@@ -1168,3 +1270,8 @@ git commit -m "test(PR5a): contract test 翻面 + 验收清单"
 **4. R1 修订对接（codex round-1 findings 吸收）：**
 - finding 1 (high) AcceptanceJournal state machine → §6 重写 + Task 1 测试 12 条 + 实施代码 4 helper + 测试翻面 Step 3.1
 - finding 2 (medium) Record id-tiebreak → §4 修订 + Task 1 测试 2 条 + 实施代码 listRecords/statistics 双处
+
+**5. R2 修订对接（codex round-2 findings 吸收）：**
+- finding 1 (high) PreviewTrainingSetReader close 生命周期 → §7 加 isClosed 镜像 + Task 2 测试翻面（close 后 read 抛 internalError）+ 实施加 NSLock + ensureOpen
+- finding 2 (medium) InMemorySettingsDAO 拒 NaN/inf → §5 修订 + Task 1 测试 2 条 + 实施 saveSettings 加 finite-value guard
+- finding 3 (medium) acceptance pathspec 漏 Internal/ → 验收清单 §5 改用目录 pathspec（`'..../KlineTrainerPersistence/'` 而非 `'..../KlineTrainerPersistence/*.swift'`），覆盖 Internal 子目录
