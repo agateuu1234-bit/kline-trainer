@@ -47,13 +47,20 @@ public final class InMemoryRecordRepository: RecordRepository, @unchecked Sendab
         return id
     }
 
-    public func listRecords(limit: Int?) throws -> [TrainingRecord] {
-        lock.lock(); defer { lock.unlock() }
-        // R1 修订（codex round-1 med-2）：mirror production line 60 "ORDER BY created_at DESC, id DESC"
-        let sorted = records.values.sorted { (a, b) in
+    /// 按 (createdAt desc, id desc) 排序——mirror production RecordRepositoryImpl line 60/99
+    /// 抽出供 listRecords 和 statistics 共用，避免双处维护漂移。
+    /// 调用方须已持有 lock（本函数不加锁）。
+    private func sortedRecordsLocked() -> [TrainingRecord] {
+        records.values.sorted { (a, b) in
             if a.createdAt != b.createdAt { return a.createdAt > b.createdAt }
             return (a.id ?? 0) > (b.id ?? 0)
         }
+    }
+
+    public func listRecords(limit: Int?) throws -> [TrainingRecord] {
+        lock.lock(); defer { lock.unlock() }
+        // R1 修订（codex round-1 med-2）：mirror production line 60 "ORDER BY created_at DESC, id DESC"
+        let sorted = sortedRecordsLocked()
         // R8 修订（codex round-8 med-3）：负 limit 会 trap `Array.prefix` precondition；
         // mirror SQLite `LIMIT ?` 负值语义 = "无限制"，把负值视同 nil（全量返回）
         if let limit = limit, limit >= 0 { return Array(sorted.prefix(limit)) }
@@ -74,10 +81,7 @@ public final class InMemoryRecordRepository: RecordRepository, @unchecked Sendab
         let total = records.count
         let wins = records.values.filter { $0.profit > 0 }.count
         // R1 修订（codex round-1 med-2）：mirror production line 99 "ORDER BY created_at DESC, id DESC LIMIT 1"
-        let latest = records.values.sorted { (a, b) in
-            if a.createdAt != b.createdAt { return a.createdAt > b.createdAt }
-            return (a.id ?? 0) > (b.id ?? 0)
-        }.first
+        let latest = sortedRecordsLocked().first
         let cap = latest.map { $0.totalCapital + $0.profit } ?? 0
         return (total, wins, cap)
     }

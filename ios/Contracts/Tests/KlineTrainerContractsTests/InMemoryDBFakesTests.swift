@@ -265,6 +265,12 @@ final class InMemoryDBFakesTests: XCTestCase {
 
     // 7) state ∈ {.stored, .confirmPending, .confirmed} 缺 sqliteLocalPath → throw
     func test_journalDAO_stored_requires_path() throws {
+        // Note: validateInvariants also requires path for .confirmPending / .confirmed,
+        // but the state machine forces those states to be reached only after .stored,
+        // which itself requires path. So .stored coverage exhausts the missing-path
+        // branch reachable via public API. Same applies to invalid CRC32 hex on those
+        // later states: once .stored succeeded with a valid path, COALESCE ensures path
+        // is always present for subsequent .confirmPending / .confirmed upserts.
         let dao = InMemoryAcceptanceJournalDAO()
         // 走到 .dbVerified（合法且不要 path——production validateInvariants 只对 stored/confirmPending/confirmed 要 path）
         try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
