@@ -9,10 +9,42 @@ import Foundation
 
 // MARK: - P3a fake
 
+/// **Scope: preview/happy-path only.**
+/// 此 factory 默认 happy-path 成功（`file` / `expectedSchemaVersion` 被忽略）。
+/// 需要测试 .versionMismatch / .fileNotFound 等错误分支的用例请用专属 mock，
+/// 不要 fork 本 fake（保 fake 行为面收敛）。
 public struct PreviewTrainingSetDBFactory: TrainingSetDBFactory {
-    public init() {}
+    private let meta: TrainingSetMeta
+    private let candles: [Period: [KLineCandle]]
+
+    public init(meta: TrainingSetMeta? = nil,
+                candles: [Period: [KLineCandle]] = [:]) {
+        // R4 修订（codex round-4 high-1）：占位 meta 必须满足 production
+        // DefaultTrainingSetDBFactory line 65-68 的 sanity check（startDatetime > 0
+        // + endDatetime >= startDatetime + 非空 stock fields），否则 fake/production
+        // 接受度分叉。startDatetime/endDatetime = 1（最小合法 Unix 秒，避免 0 边界）
+        self.meta = meta ?? TrainingSetMeta(
+            stockCode: "PREVIEW",
+            stockName: "Preview Stock",
+            startDatetime: 1,
+            endDatetime: 1)
+        self.candles = candles
+    }
+
     public func openAndVerify(file: URL, expectedSchemaVersion: Int) throws -> TrainingSetReader {
-        fatalError("Wave 0 fake: not exercised in preview path")
+        // R4 修订（codex round-4 high-1）：每次 openAndVerify 校验注入的 meta
+        // mirror DefaultTrainingSetDBFactory line 65-68
+        try Self.validateMeta(meta)
+        // file / expectedSchemaVersion 在 fake 中被忽略（§3 决策）；
+        // 每次调用产生新 reader（spec L1830 契约）
+        return PreviewTrainingSetReader(meta: meta, candles: candles)
+    }
+
+    private static func validateMeta(_ m: TrainingSetMeta) throws {
+        if m.stockCode.isEmpty || m.stockName.isEmpty ||
+           m.startDatetime <= 0 || m.endDatetime < m.startDatetime {
+            throw AppError.persistence(.dbCorrupted)
+        }
     }
 }
 
