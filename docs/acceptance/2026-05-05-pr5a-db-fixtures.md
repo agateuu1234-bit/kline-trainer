@@ -45,14 +45,15 @@
 |---|---|---|---|
 | 11 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && git diff main..HEAD --name-only -- 'ios/Contracts/Sources/KlineTrainerPersistence/'` | 输出为空字符串 | 输出空 = ✅ |
 | 12 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && git diff main..HEAD --name-only -- 'ios/Contracts/Sources/KlineTrainerContracts/Persistence/'` | 输出为空字符串 | 输出空 = ✅ |
+| 12a | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && git diff main..HEAD --name-only -- 'ios/Contracts/Sources/KlineTrainerContracts/AppError.swift' 'ios/Contracts/Sources/KlineTrainerContracts/AppState.swift' 'ios/Contracts/Sources/KlineTrainerContracts/Models.swift' 'ios/Contracts/Sources/KlineTrainerContracts/Settings/SettingsStore.swift' 'ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift'` | 输出为空字符串 | 输出空 = ✅ |
 
 ## 六、只在 DEBUG 编译产物里
 
 | # | 动作 | 预期 | 通过判定 |
 |---|---|---|---|
-| 13 | 终端执行 `grep -c '^#if DEBUG' "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures/ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift"` | 输出 `1` | 输出 `1` = ✅ |
-| 14 | 终端执行 `grep -c '^#if DEBUG' "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures/ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/PreviewTrainingSetReader.swift"` | 输出 `1` | 输出 `1` = ✅ |
-| 15 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift build --package-path ios/Contracts -c release 2>&1 \| tail -3` | 输出含 `Build complete!`，无 fake 类型暴露 release | 看到 `Build complete!` = ✅ |
+| 13 | 终端执行 `grep -c '^#if DEBUG' "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures/ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift"` | 输出整数 ≥ 1 | 数字 ≥ 1 = ✅（每个文件至少一个 `#if DEBUG` 顶层守卫）|
+| 14 | 终端执行 `grep -c '^#if DEBUG' "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures/ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/PreviewTrainingSetReader.swift"` | 输出整数 ≥ 1 | 数字 ≥ 1 = ✅（每个文件至少一个 `#if DEBUG` 顶层守卫）|
+| 15 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift build --package-path ios/Contracts -c release 2>&1 \| tail -3` | 输出含 `Build complete!`（release 编译成功 = release 路径不依赖 fake 类型）| 看到 `Build complete!` = ✅ |
 
 ## 失败兜底
 任何步骤通过条件不满足，**不要继续合并** —— 把终端完整输出贴给 Claude 让它修。
