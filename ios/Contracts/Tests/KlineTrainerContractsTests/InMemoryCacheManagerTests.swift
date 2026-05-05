@@ -54,6 +54,20 @@ final class InMemoryCacheManagerTests: XCTestCase {
         XCTAssertEqual(f.filename, "x.sqlite")
     }
 
+    /// post-impl R1-L2 修订：mirror production `DefaultFileSystemCacheManager.normalizedCacheFilename` (line 150)
+    /// 用 `.lowercased().hasSuffix` 做 case-insensitive 后缀匹配。fake 同语义。
+    func test_store_filename_extension_match_is_case_insensitive() throws {
+        let cache = InMemoryCacheManager()
+        // .ZIP 大写仍规范化为 .sqlite (drop 后 4 字符 + ".sqlite")
+        let f1 = try cache.store(downloadedZip: dummyZip,
+                                 meta: makeMeta(id: 1, filename: "X.ZIP"))
+        XCTAssertEqual(f1.filename, "X.sqlite")
+        // .Sqlite mixed-case 直传保留原 raw（仅校验后缀，不改大小写）
+        let f2 = try cache.store(downloadedZip: dummyZip,
+                                 meta: makeMeta(id: 2, filename: "Y.Sqlite"))
+        XCTAssertEqual(f2.filename, "Y.Sqlite")
+    }
+
     // MARK: - 5-6. filename safety
 
     func test_store_other_extension_throws_internalError() {

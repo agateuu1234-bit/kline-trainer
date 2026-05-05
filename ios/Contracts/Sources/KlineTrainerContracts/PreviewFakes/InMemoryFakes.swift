@@ -444,6 +444,10 @@ public final class InMemoryCacheManager: CacheManager, @unchecked Sendable {
 /// 仅供 InMemoryCacheManagerTests 直接灌入预构造 file（绕过 store 路径，
 /// 用于测 listAvailable tiebreaker / 20-cap 驱逐边界）。
 /// R1-M2 修订：不嵌套 `#if DEBUG`——本 extension 已在文件级 `#if DEBUG` 块内（line 6 起）。
+///
+/// **Invariant (post-impl R1-L3)**：caller 必须传 `filename` 已是 `.sqlite` 后缀的 `TrainingSetFile`
+/// （绕过 normalizedFilename 的 caller 自负）。否则 listAvailable basename tiebreaker 与 production
+/// 行为发散（production 入口 `normalizedCacheFilename` 强制后缀）。
 internal extension InMemoryCacheManager {
     func _seedForTesting(_ files: [TrainingSetFile]) {
         lock.lock(); defer { lock.unlock() }

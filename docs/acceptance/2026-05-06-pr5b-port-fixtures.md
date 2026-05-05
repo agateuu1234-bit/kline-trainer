@@ -84,12 +84,12 @@ grep -rn "protocol APIClient" ios/Contracts/Sources/ 2>&1 | head -3
 
 **动作：**
 ```
-grep -nE "^[[:space:]]*throw " ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/P2Fakes.swift | grep -v "AppError" 2>&1
+grep -nE "throw[[:space:]]" ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/P2Fakes.swift | grep -vE "AppError|throw err\b|^[^:]+:[0-9]+://" 2>&1
 ```
 
-**期望：** **没有命中**（grep 第一段列所有 throw 语句，第二段排除合法的 `AppError`；剩下的命中即非法私有错误抛出）。fake 应只抛 `AppError.*` 子 case 或 caller 注入的 `AppError`。
+**期望：** **没有命中**（stage 1 列所有 throw 语句含 inline `if cond { throw err }`；stage 2 排除合法路径：`AppError` 字面量、`throw err` rebroadcast（err 是 P2 fake 内 `AppError?` 类型局部变量）、以及全行 `//` 注释行）。剩下命中即非法私有错误（NSError / URLError / GRDB.DatabaseError 等）。
 
-**通过条件：** 通过 = 最终 grep 输出为空；不通过 = 命中任一行（即出现非 AppError 的 throw）
+**通过条件：** 通过 = 最终 grep 输出为空（exit code 1）；不通过 = 命中任一行（exit code 0）
 
 ---
 
