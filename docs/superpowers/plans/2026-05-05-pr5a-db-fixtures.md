@@ -27,12 +27,12 @@
 | `ios/Contracts/Tests/KlineTrainerContractsTests/AcceptanceJournalDAOContractTests.swift` | 升级 `test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol`：从「不持久化」翻面成 round-trip 行为断言 | Modify |
 | `docs/acceptance/2026-05-05-pr5a-db-fixtures.md` | 验收清单（中文，非 coder 可执行）| Create |
 
-**预估 prod LOC（硬规则 ≤500；R1 / R2 修订上调）：**
+**预估 prod LOC（硬规则 ≤500；R1 / R2 / R3 修订上调）：**
 - `InMemoryFakes.swift` 净增 ≈ 215 LOC（4 fake 各加内部状态 + lock + 真实 method 体；AcceptanceJournalDAO 全镜像 production state machine + invariants + COALESCE +60 LOC；R2 SettingsDAO finite-value guard +12 LOC；PreviewTrainingSetDBFactory 升级 +15 LOC）
-- `PreviewTrainingSetReader.swift` 新增 ≈ 55 LOC（含 init / loadMeta / loadAllCandles / close + R2 isClosed lock + ensureOpen helper）
-- 合计：**≈ 270 prod LOC** ✓ 仍远低于 500
+- `PreviewTrainingSetReader.swift` 新增 ≈ 110 LOC（init / loadMeta / loadAllCandles / close + R2 isClosed lock + ensureOpen + R3 validateCandles helper ~50 LOC）
+- 合计：**≈ 325 prod LOC** ✓ 仍低于 500 上限
 
-**预估 test LOC**：≈ 430（R1 加 state machine 12 条 + id-tiebreak 2 条 +100 行；R2 加 NaN/inf 2 条 + close-then-read 1 条，约 +50 行）
+**预估 test LOC**：≈ 580（R1 加 state machine 12 + id-tiebreak 2 +100；R2 加 NaN/inf 2 + close-then-read 1 +50；R3 加 candle 校验 9 +150 行）
 
 **子项数**（per memory feedback "硬规则 ≤3 子项"）：
 1. P4 4 fake 升级（一个文件内的内聚改动，spec 列在同一 §11.3 子清单 #1-4）
@@ -152,7 +152,7 @@ Fake 必须复刻同样行为，否则 P2 runner / E6 coordinator 等使用 fake
 
 **fake-specific 简化**：production logger.info NOOP / logger.error refuse 路径，fake 不 emit log（fake 不持有 `os.Logger` 资源）；只静默 NOOP / 抛错。
 
-### §7 `PreviewTrainingSetReader` 是 class + 镜像 production isClosed 生命周期（R2 修订：codex round-2 high-1）
+### §7 `PreviewTrainingSetReader` 是 class + 镜像 production isClosed 生命周期 + 数据校验（R2/R3 修订）
 
 **Spec literal**：`public protocol TrainingSetReader: AnyObject, Sendable`（L1842）—— `AnyObject` 强制 reference type。`final class` + immutable stored property + `@unchecked Sendable`（值 capture 后不变）。
 
@@ -170,6 +170,39 @@ Fake 必须镜像同生命周期：
 - `loadMeta()` / `loadAllCandles()` lock 内检查 `isClosed`，若 closed `throw AppError.internalError(module: "PR5a-PreviewTrainingSetReader", detail: "reader closed")`
 
 **为什么必须**：若 fake `close()` 是 no-op，consumer 误用 close 后再 read 的代码在 fake 上通过测试，到 production 撞 `.internalError` 崩溃。fake/production 行为发散就是 codex round-2 finding 1 拒收的根因。
+
+**R3 修订（codex round-3 high-1）—— 镜像 production 数据校验**：
+
+Production `DefaultTrainingSetReader.loadAllCandles()` (`KlineTrainerPersistence/DefaultTrainingSetReader.swift` line 28-174) 在返回 candles 前做大量校验：
+
+1. **OHLC finite + positive**（line 97-100）：`open / high / low / close` 都必须 `.isFinite && > 0`
+2. **OHLC 序关系**（line 101-102）：`high >= max(open, close, low)` AND `low <= min(open, close, high)`
+3. **volume 非负**（line 103）：`volume >= 0`
+4. **可选指标 finite**（line 107-112）：`amount / ma66 / boll{Upper,Mid,Lower} / macd{Diff,Dea,Bar}` 若非 nil 必须 finite
+5. **amount 非负**（line 113-115）：`amount` 若非 nil 必须 ≥ 0
+6. **endGlobalIndex per-period 严格递增**（line 90-93）：相邻同 period candle 必须 strict increasing
+7. **非 m3 endGlobalIndex 非负**（line 137-143）：除 m3 外所有 period 的 endGlobalIndex 必须 ≥ 0
+8. **m3 global-axis 不变量**（line 153-160）：m3 candle 必须 `globalIndex == endGlobalIndex == array index`（即从 0 开始严格递增 0, 1, 2, ...）
+9. **非 m3 endGlobalIndex ≤ m3Max**（line 162-168）：其它 period 的 endGlobalIndex 不超过 m3 最大 endGlobalIndex
+10. **m3 缺失但 result 非空 → 拒**（line 169-172）：除非整库 result 全空（允许）
+
+任一违反 → `throw AppError.persistence(.dbCorrupted)`。
+
+Fake 必须镜像同套校验，否则 consumer 依赖「reader 返回 = 已校验」的代码（如 chart geometry 假设 OHLC 正、E5 二分查找假设 globalIndex 单调）会在 fake 上通过测试，到 production 因数据 reject 失败。
+
+**实现位置**：`PreviewTrainingSetReader` 内部加 `private static func validateCandles(_ candles:) throws`，在 `loadAllCandles()` 内 close 检查后调用：
+
+```swift
+public func loadAllCandles() throws -> [Period: [KLineCandle]] {
+    try ensureOpen()
+    try Self.validateCandles(candles)
+    return candles
+}
+```
+
+**fake-specific 简化**：production 在 SQL 层先做 `typeof()` 校验（line 36-58）防 silent coerce — fake 入参本身已是 typed `KLineCandle`（Swift 静态类型，无 coerce 风险），跳过 typeof 那一段。production 也在 raw `KLineRow` 上做校验后再构造 `KLineCandle` — fake 反过来在 `KLineCandle` 上直接读 property 校验。
+
+**已存在 fake 注入路径**：`PreviewTrainingSetDBFactory(meta:candles:)` 默认 `candles: [:]`（空字典）—— 空字典无 m3，但**也无非空 result**，符合 line 169-172 的「整库 result 全空允许」分支，validateCandles 通过。所以 PR #40 既有空构造 callsite 不破。
 
 ### §8 不在 PR5a 内做 Preview Fixture 数据（KLineCandle.previewFixture / FeeSnapshot.preview / TrainingRecord.previewRecord）
 
@@ -984,7 +1017,163 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
         let factory = PreviewTrainingSetDBFactory()
         let r1 = try factory.openAndVerify(file: URL(fileURLWithPath: "/dev/null"), expectedSchemaVersion: 1)
         let r2 = try factory.openAndVerify(file: URL(fileURLWithPath: "/dev/null"), expectedSchemaVersion: 1)
-        XCTAssertFalse(r1 === r2)  // 不同实例
+        XCTAssertFalse(r1 === r2)
+    }
+
+    // MARK: - R3 修订：数据校验（mirror production DefaultTrainingSetReader 全套 invariants）
+
+    /// Helper: 构造一根有效 m3 candle (globalIndex == endGlobalIndex == idx)
+    private func validM3(_ idx: Int, close: Double = 1.5) -> KLineCandle {
+        KLineCandle(period: .m3, datetime: Int64(idx),
+                    open: 1, high: 2, low: 0.5, close: close,
+                    volume: 100, amount: nil, ma66: nil,
+                    bollUpper: nil, bollMid: nil, bollLower: nil,
+                    macdDiff: nil, macdDea: nil, macdBar: nil,
+                    globalIndex: idx, endGlobalIndex: idx)
+    }
+    /// Helper: 构造 valid 单根 daily candle (endGlobalIndex 落在指定值)
+    private func validDaily(eg: Int, close: Double = 1.5) -> KLineCandle {
+        KLineCandle(period: .daily, datetime: 0,
+                    open: 1, high: 2, low: 0.5, close: close,
+                    volume: 100, amount: nil, ma66: nil,
+                    bollUpper: nil, bollMid: nil, bollLower: nil,
+                    macdDiff: nil, macdDea: nil, macdBar: nil,
+                    globalIndex: nil, endGlobalIndex: eg)
+    }
+
+    func test_reader_validation_OHLC_must_be_finite_and_positive() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+
+        // Open = NaN → corrupt
+        let badNaN = KLineCandle(period: .m3, datetime: 0,
+                                 open: .nan, high: 2, low: 0.5, close: 1,
+                                 volume: 100, amount: nil, ma66: nil,
+                                 bollUpper: nil, bollMid: nil, bollLower: nil,
+                                 macdDiff: nil, macdDea: nil, macdBar: nil,
+                                 globalIndex: 0, endGlobalIndex: 0)
+        let r1 = PreviewTrainingSetReader(meta: meta, candles: [.m3: [badNaN]])
+        XCTAssertThrowsError(try r1.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else { XCTFail("expected dbCorrupted"); return }
+        }
+
+        // Open = 0 → corrupt
+        let bad0 = KLineCandle(period: .m3, datetime: 0,
+                               open: 0, high: 2, low: 0.5, close: 1,
+                               volume: 100, amount: nil, ma66: nil,
+                               bollUpper: nil, bollMid: nil, bollLower: nil,
+                               macdDiff: nil, macdDea: nil, macdBar: nil,
+                               globalIndex: 0, endGlobalIndex: 0)
+        XCTAssertThrowsError(try PreviewTrainingSetReader(meta: meta, candles: [.m3: [bad0]]).loadAllCandles())
+    }
+
+    func test_reader_validation_OHLC_ordering_high_max_low_min() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        // high < open (违反 high >= max(open, close, low))
+        let bad = KLineCandle(period: .m3, datetime: 0,
+                              open: 5, high: 2, low: 0.5, close: 1,
+                              volume: 100, amount: nil, ma66: nil,
+                              bollUpper: nil, bollMid: nil, bollLower: nil,
+                              macdDiff: nil, macdDea: nil, macdBar: nil,
+                              globalIndex: 0, endGlobalIndex: 0)
+        XCTAssertThrowsError(try PreviewTrainingSetReader(meta: meta, candles: [.m3: [bad]]).loadAllCandles())
+    }
+
+    func test_reader_validation_volume_nonnegative() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        let bad = KLineCandle(period: .m3, datetime: 0,
+                              open: 1, high: 2, low: 0.5, close: 1,
+                              volume: -1, amount: nil, ma66: nil,
+                              bollUpper: nil, bollMid: nil, bollLower: nil,
+                              macdDiff: nil, macdDea: nil, macdBar: nil,
+                              globalIndex: 0, endGlobalIndex: 0)
+        XCTAssertThrowsError(try PreviewTrainingSetReader(meta: meta, candles: [.m3: [bad]]).loadAllCandles())
+    }
+
+    func test_reader_validation_optional_indicators_must_be_finite_when_set() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        // ma66 = inf
+        let bad = KLineCandle(period: .m3, datetime: 0,
+                              open: 1, high: 2, low: 0.5, close: 1,
+                              volume: 100, amount: nil, ma66: .infinity,
+                              bollUpper: nil, bollMid: nil, bollLower: nil,
+                              macdDiff: nil, macdDea: nil, macdBar: nil,
+                              globalIndex: 0, endGlobalIndex: 0)
+        XCTAssertThrowsError(try PreviewTrainingSetReader(meta: meta, candles: [.m3: [bad]]).loadAllCandles())
+    }
+
+    func test_reader_validation_endGlobalIndex_strictly_increasing_per_period() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        // 同 period 两根 endGlobalIndex 相等 → 非严格递增
+        let dup1 = validM3(0)
+        let dup2 = KLineCandle(period: .m3, datetime: 1,
+                               open: 1, high: 2, low: 0.5, close: 1,
+                               volume: 100, amount: nil, ma66: nil,
+                               bollUpper: nil, bollMid: nil, bollLower: nil,
+                               macdDiff: nil, macdDea: nil, macdBar: nil,
+                               globalIndex: 0, endGlobalIndex: 0)  // 重复 0
+        XCTAssertThrowsError(try PreviewTrainingSetReader(meta: meta, candles: [.m3: [dup1, dup2]]).loadAllCandles())
+    }
+
+    func test_reader_validation_m3_globalIndex_must_equal_endGlobalIndex_and_array_index() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        // m3[0] 但 globalIndex = 5（应等于 array idx = 0）
+        let bad = KLineCandle(period: .m3, datetime: 0,
+                              open: 1, high: 2, low: 0.5, close: 1,
+                              volume: 100, amount: nil, ma66: nil,
+                              bollUpper: nil, bollMid: nil, bollLower: nil,
+                              macdDiff: nil, macdDea: nil, macdBar: nil,
+                              globalIndex: 5, endGlobalIndex: 5)
+        XCTAssertThrowsError(try PreviewTrainingSetReader(meta: meta, candles: [.m3: [bad]]).loadAllCandles())
+
+        // m3 globalIndex = nil 也违反（must non-nil + equal endGlobalIndex + array idx）
+        let badNil = KLineCandle(period: .m3, datetime: 0,
+                                 open: 1, high: 2, low: 0.5, close: 1,
+                                 volume: 100, amount: nil, ma66: nil,
+                                 bollUpper: nil, bollMid: nil, bollLower: nil,
+                                 macdDiff: nil, macdDea: nil, macdBar: nil,
+                                 globalIndex: nil, endGlobalIndex: 0)
+        XCTAssertThrowsError(try PreviewTrainingSetReader(meta: meta, candles: [.m3: [badNil]]).loadAllCandles())
+    }
+
+    func test_reader_validation_non_m3_endGlobalIndex_must_be_nonneg_and_within_m3Max() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        // m3 max endGlobalIndex = 2；daily 一根 endGlobalIndex = 5 → 越界
+        let m3 = [validM3(0), validM3(1), validM3(2)]
+        let dailyOob = validDaily(eg: 5)
+        XCTAssertThrowsError(try PreviewTrainingSetReader(
+            meta: meta, candles: [.m3: m3, .daily: [dailyOob]]
+        ).loadAllCandles())
+
+        // daily endGlobalIndex = -1（非负要求）
+        let dailyNeg = validDaily(eg: -1)
+        XCTAssertThrowsError(try PreviewTrainingSetReader(
+            meta: meta, candles: [.m3: m3, .daily: [dailyNeg]]
+        ).loadAllCandles())
+    }
+
+    func test_reader_validation_higher_period_without_m3_is_corrupt() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        // 只有 daily 没有 m3，且非空 → corrupt
+        XCTAssertThrowsError(try PreviewTrainingSetReader(
+            meta: meta, candles: [.daily: [validDaily(eg: 0)]]
+        ).loadAllCandles())
+    }
+
+    func test_reader_validation_empty_dict_is_legal() throws {
+        // 整库 result 全空 = 允许（mirror production line 169-172 else 分支不触发）
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        let r = PreviewTrainingSetReader(meta: meta, candles: [:])
+        XCTAssertEqual(try r.loadAllCandles().count, 0)
+    }
+
+    func test_reader_validation_valid_m3_plus_daily_passes() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        let m3 = [validM3(0), validM3(1), validM3(2)]
+        let daily = [validDaily(eg: 2)]  // 落在 m3 范围内
+        let r = PreviewTrainingSetReader(meta: meta, candles: [.m3: m3, .daily: daily])
+        let loaded = try r.loadAllCandles()
+        XCTAssertEqual(loaded[.m3]?.count, 3)
+        XCTAssertEqual(loaded[.daily]?.count, 1)
     }
 }
 #endif
@@ -1010,7 +1199,11 @@ Expected: compile error (`PreviewTrainingSetReader` 类型未定义 / `PreviewTr
 //       protocol 体 §P3b line 1840-1856
 // R2 修订（codex round-2 high-1）：mirror DefaultTrainingSetReader 的 isClosed + ensureOpen
 //       (KlineTrainerPersistence/DefaultTrainingSetReader.swift line 15-16, 184-191)
-//       fake 不持有 DatabaseQueue，但必须镜像 close-then-read = throw 的 lifecycle 契约。
+// R3 修订（codex round-3 high-1）：mirror DefaultTrainingSetReader.loadAllCandles 全套数据校验
+//       (KlineTrainerPersistence/DefaultTrainingSetReader.swift line 84-173)
+//       维护契约：production validateCandles 改了 → 这里同步改。
+// fake 不持有 DatabaseQueue，但必须镜像 close-then-read = throw + data invariants 才能让
+// consumer 的 "reader 返回 = 已校验" 假设在测试和生产都成立。
 
 #if DEBUG
 
@@ -1034,6 +1227,7 @@ public final class PreviewTrainingSetReader: TrainingSetReader, @unchecked Senda
 
     public func loadAllCandles() throws -> [Period: [KLineCandle]] {
         try ensureOpen()
+        try Self.validateCandles(candles)
         return candles
     }
 
@@ -1048,6 +1242,71 @@ public final class PreviewTrainingSetReader: TrainingSetReader, @unchecked Senda
             throw AppError.internalError(
                 module: "PR5a-PreviewTrainingSetReader",
                 detail: "reader closed")
+        }
+    }
+
+    /// mirror of DefaultTrainingSetReader.loadAllCandles validation (line 84-173)
+    /// 任一不变量违反 → AppError.persistence(.dbCorrupted)
+    private static func validateCandles(_ data: [Period: [KLineCandle]]) throws {
+        // 1) per-period strictly increasing endGlobalIndex（line 90-93）
+        // 2) OHLC finite + positive + 序关系 + volume nonneg（line 97-105）
+        // 3) optional indicator finite + amount nonneg（line 107-115）
+        for (period, list) in data {
+            var lastEnd: Int? = nil
+            for c in list {
+                if let prev = lastEnd, c.endGlobalIndex <= prev {
+                    throw AppError.persistence(.dbCorrupted)
+                }
+                lastEnd = c.endGlobalIndex
+
+                guard c.open.isFinite, c.open > 0,
+                      c.high.isFinite, c.high > 0,
+                      c.low.isFinite, c.low > 0,
+                      c.close.isFinite, c.close > 0,
+                      c.high >= max(c.open, c.close, c.low),
+                      c.low <= min(c.open, c.close, c.high),
+                      c.volume >= 0 else {
+                    throw AppError.persistence(.dbCorrupted)
+                }
+                for opt in [c.amount, c.ma66, c.bollUpper, c.bollMid, c.bollLower,
+                            c.macdDiff, c.macdDea, c.macdBar] {
+                    if let v = opt, !v.isFinite {
+                        throw AppError.persistence(.dbCorrupted)
+                    }
+                }
+                if let a = c.amount, a < 0 {
+                    throw AppError.persistence(.dbCorrupted)
+                }
+            }
+            // 非 m3 endGlobalIndex 非负（line 137-143）
+            if period != .m3 {
+                for c in list {
+                    if c.endGlobalIndex < 0 {
+                        throw AppError.persistence(.dbCorrupted)
+                    }
+                }
+            }
+        }
+        // 4) m3 global-axis invariants（line 153-160）+ 非 m3 ≤ m3Max（line 162-168）
+        // 5) 非空 result 但缺 m3 → corrupt（line 169-172）
+        if let m3 = data[.m3] {
+            for (i, c) in m3.enumerated() {
+                guard let g = c.globalIndex,
+                      g == c.endGlobalIndex,
+                      g == i else {
+                    throw AppError.persistence(.dbCorrupted)
+                }
+            }
+            let m3Max = m3.last?.endGlobalIndex ?? -1
+            for (period, list) in data where period != .m3 {
+                for c in list {
+                    if c.endGlobalIndex > m3Max {
+                        throw AppError.persistence(.dbCorrupted)
+                    }
+                }
+            }
+        } else if !data.isEmpty {
+            throw AppError.persistence(.dbCorrupted)
         }
     }
 }
@@ -1086,7 +1345,7 @@ public struct PreviewTrainingSetDBFactory: TrainingSetDBFactory {
 cd ios/Contracts && swift test --filter PreviewTrainingSetReaderTests 2>&1 | tail -10
 ```
 
-Expected: 6 个全 PASS
+Expected: 15 个全 PASS（6 reader/factory 基础 + 9 R3 candle 校验）
 
 - [ ] **commit**
 
@@ -1275,3 +1534,8 @@ git commit -m "test(PR5a): contract test 翻面 + 验收清单"
 - finding 1 (high) PreviewTrainingSetReader close 生命周期 → §7 加 isClosed 镜像 + Task 2 测试翻面（close 后 read 抛 internalError）+ 实施加 NSLock + ensureOpen
 - finding 2 (medium) InMemorySettingsDAO 拒 NaN/inf → §5 修订 + Task 1 测试 2 条 + 实施 saveSettings 加 finite-value guard
 - finding 3 (medium) acceptance pathspec 漏 Internal/ → 验收清单 §5 改用目录 pathspec（`'..../KlineTrainerPersistence/'` 而非 `'..../KlineTrainerPersistence/*.swift'`），覆盖 Internal 子目录
+
+**6. R3 修订对接（codex round-3 findings 吸收）：**
+- finding 1 (high) PreviewTrainingSetReader candle 校验 → §7 加 R3 段 + Task 2 测试 9 条 + 实施 validateCandles helper（mirror DefaultTrainingSetReader.loadAllCandles line 84-173 全套校验：OHLC finite/positive/序关系、volume/amount nonneg、optional finite、endGlobalIndex 严格递增、m3 global-axis 不变量、非 m3 ≤ m3Max、空 dict 允许）
+
+**7. 后续轮次预算**：plan 已在 round 3 收 6 个 findings（R1 2 + R2 3 + R3 1）。round 4 若再撞同模式「production 有 X validation，fake 也要」类 finding，按 memory `feedback_codex_round6_self_contradiction` 评估：fake 已镜像 4 处主要 production guards（state machine + isClosed + finite settings + candle validation），剩余可能的「次级保护」属边际收益低。round 4 起若新 finding 不能引向具体 production 行为分叉案例，pushback + accept residual。
