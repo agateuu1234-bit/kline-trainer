@@ -183,9 +183,22 @@ extension PanelViewState {
         case (.drawing, .setDrawingSnapshot):
             return .none
 
-        // —— PR7b1 scope（剩余 2 drawing case 占位，Batch B 替换）——
-        case (_, .drawingCommitted),
-             (_, .drawingCancelled):
+        // —— drawingCommitted / drawingCancelled（spec L1074-1097 闸门 #5：cross-session guard）——
+        case (.drawing(let snap), .drawingCommitted(let base)):
+            guard base == snap.frozen.baseRevision else {
+                return .none  // 旧 session 遗留 action，丢弃保持当前 drawing
+            }
+            interactionMode = .autoTracking
+            return .none
+        case (.drawing(let snap), .drawingCancelled(let base)):
+            guard base == snap.frozen.baseRevision else {
+                return .none
+            }
+            interactionMode = .autoTracking
+            return .none
+        case (.autoTracking, .drawingCommitted), (.freeScrolling, .drawingCommitted),
+             (.autoTracking, .drawingCancelled), (.freeScrolling, .drawingCancelled):
+            assertionFailure("非法转换：\(interactionMode) → \(action)")
             return .none
         }
     }

@@ -518,115 +518,88 @@ struct ReduceSetDrawingSnapshotTests {
     }
 }
 
-// MARK: - reduce: drawing-action 占位（PR7a scope = 不 bump revision；PR7b1 替换为真实现）
+// MARK: - reduce: drawingCommitted (drawing-matched + drawing-unmatched cross-session guard;
+//                                   auto/free assertion paths 不直接 unit test, see plan §2)
 
-@Suite("reduce drawing-action 占位 (PR7a scope = 不 bump, 全 3 mode)")
-struct ReduceDrawingPlaceholderTests {
-    // spec L1157 字面验收：「其它 action 均不 bump」要求覆盖全部 3 mode（autoTracking / freeScrolling / drawing）。
-    // PR7a 占位行为 = `case (_, .activateDrawing/.setDrawingSnapshot/.drawingCommitted/.drawingCancelled): return .none`；
-    // 4 action × 3 mode = 12 测试。PR7b1 替换占位时此 @Suite 整体改写（assert 真 FSM 行为）。
+@Suite("reduce drawingCommitted")
+struct ReduceDrawingCommittedTests {
 
-    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 5) -> PanelViewState {
+    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0) -> PanelViewState {
         PanelViewState(period: .m15, interactionMode: mode,
                        visibleCount: 100, offset: 0, revision: rev)
     }
 
-    private func drawing(baseRev: UInt64 = 5) -> ChartInteractionMode {
+    private func drawingMode(baseRev: UInt64 = 5) -> ChartInteractionMode {
         let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
                                       candleRange: 0..<100, baseRevision: baseRev)
         return .drawing(snapshot: DrawingSnapshot(frozen: frozen))
     }
 
-    // —— activateDrawing 占位：3 mode 全不 bump ——
-
-    @Test("activateDrawing autoTracking 不 bump (PR7a 占位)")
-    func activateDrawingAutoNoBump() {
-        var s = make(.autoTracking)
-        _ = s.reduce(.activateDrawing(.ray))
+    @Test("drawing(snap.baseRev=r) + drawingCommitted(baseRev=r) → autoTracking + 不 bump + .none")
+    func drawingMatchedExits() {
+        var s = make(drawingMode(baseRev: 5), rev: 5)
+        let eff = s.reduce(.drawingCommitted(baseRevision: 5))
+        #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 5)
+        #expect(eff == .none)
     }
 
-    @Test("activateDrawing freeScrolling 不 bump (PR7a 占位)")
-    func activateDrawingFreeNoBump() {
-        var s = make(.freeScrolling)
-        _ = s.reduce(.activateDrawing(.ray))
-        #expect(s.revision == 5)
+    @Test("drawing(snap.baseRev=r) + drawingCommitted(baseRev != r) → mode 不变 + 不 bump + .none（cross-session 丢弃）")
+    func drawingUnmatchedKeepsSession() {
+        // spec L1163-1166 验收 #4：session A 遗留 drawingCommitted(baseRev=0)
+        // 在新 session B drawing(snap.baseRev=1) 时到达 → guard `base != snap.frozen.baseRevision`
+        // → 丢弃返回 .none，mode 仍为 drawing（不错误切出 session B）
+        var s = make(drawingMode(baseRev: 1), rev: 1)
+        let eff = s.reduce(.drawingCommitted(baseRevision: 0))
+        guard case .drawing(let snap) = s.interactionMode else {
+            Issue.record("expected drawing mode unchanged after unmatched commit")
+            return
+        }
+        #expect(snap.frozen.baseRevision == 1)  // session B snap 不变
+        #expect(s.revision == 1)
+        #expect(eff == .none)
+    }
+}
+
+// MARK: - reduce: drawingCancelled (drawing-matched + drawing-unmatched cross-session guard;
+//                                   same scope notes as committed)
+
+@Suite("reduce drawingCancelled")
+struct ReduceDrawingCancelledTests {
+
+    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0) -> PanelViewState {
+        PanelViewState(period: .m15, interactionMode: mode,
+                       visibleCount: 100, offset: 0, revision: rev)
     }
 
-    @Test("activateDrawing drawing 不 bump (PR7a 占位)")
-    func activateDrawingDrawingNoBump() {
-        var s = make(drawing())
-        _ = s.reduce(.activateDrawing(.ray))
-        #expect(s.revision == 5)
+    private func drawingMode(baseRev: UInt64 = 5) -> ChartInteractionMode {
+        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
+                                      candleRange: 0..<100, baseRevision: baseRev)
+        return .drawing(snapshot: DrawingSnapshot(frozen: frozen))
     }
 
-    // —— setDrawingSnapshot 占位：3 mode 全不 bump ——
-
-    @Test("setDrawingSnapshot autoTracking 不 bump (PR7a 占位)")
-    func setDrawingSnapshotAutoNoBump() {
-        var s = make(.autoTracking)
-        _ = s.reduce(.setDrawingSnapshot(tool: .ray, baseRevision: 5, candleRange: 0..<100))
+    @Test("drawing(snap.baseRev=r) + drawingCancelled(baseRev=r) → autoTracking + 不 bump + .none")
+    func drawingMatchedExits() {
+        var s = make(drawingMode(baseRev: 5), rev: 5)
+        let eff = s.reduce(.drawingCancelled(baseRevision: 5))
+        #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 5)
+        #expect(eff == .none)
     }
 
-    @Test("setDrawingSnapshot freeScrolling 不 bump (PR7a 占位)")
-    func setDrawingSnapshotFreeNoBump() {
-        var s = make(.freeScrolling)
-        _ = s.reduce(.setDrawingSnapshot(tool: .ray, baseRevision: 5, candleRange: 0..<100))
-        #expect(s.revision == 5)
-    }
-
-    @Test("setDrawingSnapshot drawing 不 bump (PR7a 占位)")
-    func setDrawingSnapshotDrawingNoBump() {
-        var s = make(drawing())
-        _ = s.reduce(.setDrawingSnapshot(tool: .ray, baseRevision: 5, candleRange: 0..<100))
-        #expect(s.revision == 5)
-    }
-
-    // —— drawingCommitted 占位：3 mode 全不 bump ——
-
-    @Test("drawingCommitted autoTracking 不 bump (PR7a 占位)")
-    func drawingCommittedAutoNoBump() {
-        var s = make(.autoTracking)
-        _ = s.reduce(.drawingCommitted(baseRevision: 5))
-        #expect(s.revision == 5)
-    }
-
-    @Test("drawingCommitted freeScrolling 不 bump (PR7a 占位)")
-    func drawingCommittedFreeNoBump() {
-        var s = make(.freeScrolling)
-        _ = s.reduce(.drawingCommitted(baseRevision: 5))
-        #expect(s.revision == 5)
-    }
-
-    @Test("drawingCommitted drawing 不 bump (PR7a 占位)")
-    func drawingCommittedDrawingNoBump() {
-        var s = make(drawing())
-        _ = s.reduce(.drawingCommitted(baseRevision: 5))
-        #expect(s.revision == 5)
-    }
-
-    // —— drawingCancelled 占位：3 mode 全不 bump ——
-
-    @Test("drawingCancelled autoTracking 不 bump (PR7a 占位)")
-    func drawingCancelledAutoNoBump() {
-        var s = make(.autoTracking)
-        _ = s.reduce(.drawingCancelled(baseRevision: 5))
-        #expect(s.revision == 5)
-    }
-
-    @Test("drawingCancelled freeScrolling 不 bump (PR7a 占位)")
-    func drawingCancelledFreeNoBump() {
-        var s = make(.freeScrolling)
-        _ = s.reduce(.drawingCancelled(baseRevision: 5))
-        #expect(s.revision == 5)
-    }
-
-    @Test("drawingCancelled drawing 不 bump (PR7a 占位)")
-    func drawingCancelledDrawingNoBump() {
-        var s = make(drawing())
-        _ = s.reduce(.drawingCancelled(baseRevision: 5))
-        #expect(s.revision == 5)
+    @Test("drawing(snap.baseRev=r) + drawingCancelled(baseRev != r) → mode 不变 + 不 bump + .none（cross-session 丢弃）")
+    func drawingUnmatchedKeepsSession() {
+        // spec L1163-1166 验收 #4 cancel 分支：session A 遗留 drawingCancelled(baseRev=0)
+        // 在新 session B drawing(snap.baseRev=1) 时到达 → guard 丢弃保持 session B
+        var s = make(drawingMode(baseRev: 1), rev: 1)
+        let eff = s.reduce(.drawingCancelled(baseRevision: 0))
+        guard case .drawing(let snap) = s.interactionMode else {
+            Issue.record("expected drawing mode unchanged after unmatched cancel")
+            return
+        }
+        #expect(snap.frozen.baseRevision == 1)
+        #expect(s.revision == 1)
+        #expect(eff == .none)
     }
 }
 
