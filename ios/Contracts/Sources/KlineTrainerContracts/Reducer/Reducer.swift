@@ -84,3 +84,90 @@ extension PanelViewState {
                          baseRevision: revision)
     }
 }
+
+// MARK: - 动作 (modules L1136-1144)
+
+/// modules L1136-1144 字面：v1.3 加 setDrawingSnapshot / offsetApplied，
+/// activateDrawing 不再直接切 mode（只触发 effect）。
+public enum ChartAction: Equatable, Sendable {
+    case panStarted
+    case panEnded(velocity: CGFloat)
+    case activateDrawing(DrawingToolType)
+    case setDrawingSnapshot(tool: DrawingToolType, baseRevision: UInt64, candleRange: Range<Int>)
+    case drawingCommitted(baseRevision: UInt64)
+    case drawingCancelled(baseRevision: UInt64)
+    case tradeTriggered
+    case periodComboSwitched
+    case offsetApplied(deltaPixels: CGFloat)
+}
+
+// MARK: - 副作用 (modules L1009-1023)
+
+/// modules L1009-1023 字面：v1.3 effect 拆 stale + activateDrawing handler 合约。
+public enum ChartReduceEffect: Equatable, Sendable {
+    case none
+    case startDeceleration(velocity: CGFloat)
+    case clearPendingDrawing
+    /// activateDrawing 返回此 effect。Handler 合约（必须按序）：
+    ///   1. 立即调用 DecelerationAnimator.stop()（防 stale 漂移，闸门 #2 F2）
+    ///   2. 基于当前 viewport 计算 candleRange
+    ///   3. 派发 ChartAction.setDrawingSnapshot(tool, baseRevision, candleRange)
+    case requestDrawingSnapshotAfterStoppingAnimator(tool: DrawingToolType, baseRevision: UInt64)
+    /// setDrawingSnapshot 回推时发现 revision 已漂移 → snapshot 无效；mode 保持 autoTracking。
+    case staleDrawingSnapshot(expected: UInt64, actual: UInt64)
+}
+
+// MARK: - 部分 Reducer (PR7a：5 非-drawing case 真实现 + 4 drawing case 占位)
+
+extension PanelViewState {
+    /// PR7a scope: 5 个非-drawing action 真实现（panStarted / panEnded / tradeTriggered /
+    /// periodComboSwitched / offsetApplied）；4 个 drawing action 占位返回 .none，
+    /// PR7b1 替换占位为真实现（modules L1003-1131 完整体）。
+    public mutating func reduce(_ action: ChartAction) -> ChartReduceEffect {
+        switch (interactionMode, action) {
+        // —— panStarted ——
+        case (.autoTracking, .panStarted):
+            interactionMode = .freeScrolling
+            revision &+= 1
+            return .none
+        case (.freeScrolling, .panStarted), (.drawing, .panStarted):
+            return .none
+
+        // —— panEnded ——
+        case (.autoTracking, .panEnded), (.drawing, .panEnded):
+            return .none
+        case (.freeScrolling, .panEnded(let v)):
+            revision &+= 1
+            return .startDeceleration(velocity: v)
+
+        // —— tradeTriggered（任意状态硬切 autoTracking + bump）——
+        case (_, .tradeTriggered):
+            interactionMode = .autoTracking
+            revision &+= 1
+            return .none
+
+        // —— periodComboSwitched（同 trade，并 clearPendingDrawing）——
+        case (_, .periodComboSwitched):
+            interactionMode = .autoTracking
+            revision &+= 1
+            return .clearPendingDrawing
+
+        // —— offsetApplied（drawing 吞；其它 += delta + bump）——
+        case (.drawing, .offsetApplied):
+            return .none
+        case (.autoTracking, .offsetApplied(let d)),
+             (.freeScrolling, .offsetApplied(let d)):
+            offset += d
+            revision &+= 1
+            return .none
+
+        // —— PR7b1 scope: drawing-action 占位（不 bump revision）——
+        // 替换计划见 docs/superpowers/plans/2026-05-05-pr7a-c1b-values-revision.md §1
+        case (_, .activateDrawing),
+             (_, .setDrawingSnapshot),
+             (_, .drawingCommitted),
+             (_, .drawingCancelled):
+            return .none
+        }
+    }
+}
