@@ -10,7 +10,7 @@
 - 全部 `#if DEBUG` guard（PR #40 文件级既有约定，与 spec L1671-1713 preview Fixture 一致：fakes 不进 Release binary）
 - `PreviewTrainingSetReader` = 新增 `final class` + value-injected `meta` + `candles`；`PreviewTrainingSetDBFactory` 升级为 init 接收 `meta` + `candles`，`openAndVerify` 忽略 `file` 参数返回内置 reader（带 default 空构造保 PR #40 既有 callsite 不破）
 - 不动 `InMemoryCacheManager`（PR 5b scope）；不动协议签名（`KlineTrainerContracts/Persistence/*.swift`）
-- 测试在已有 `KlineTrainerContractsTests` target 内新增 `InMemoryFakesTests.swift` + 1 个 `PreviewTrainingSetReaderTests.swift`；现有 `AcceptanceJournalDAOContractTests` 的 `Wave 0 fake 不实际持久化` 行为断言要随升级翻面（旧断言已矛盾于 PR 5a 目标）
+- 测试在已有 `KlineTrainerContractsTests` target 内新增 `InMemoryDBFakesTests.swift` + 1 个 `PreviewTrainingSetReaderTests.swift`；现有 `AcceptanceJournalDAOContractTests` 的 `Wave 0 fake 不实际持久化` 行为断言要随升级翻面（旧断言已矛盾于 PR 5a 目标）
 
 **Tech Stack:** Swift 6.0 / SwiftPM / Foundation / `NSLock` / XCTest
 
@@ -22,7 +22,7 @@
 |---|---|---|
 | `ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift` | 4 个 P4 fake 升级为真 in-memory 状态；`PreviewTrainingSetDBFactory` 升级为 value-injected | Modify |
 | `ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/PreviewTrainingSetReader.swift` | 新增 P3b 预览 reader：constructor-injected meta + candles | Create |
-| `ios/Contracts/Tests/KlineTrainerContractsTests/InMemoryFakesTests.swift` | 4 个 P4 fake 行为测试：round-trip insert/list、save/load/clear、resetCapital → 0、upsert 同 (id,lease) 替换、listByState 过滤、deleteByIdLease 0 行删除合法、stateEnteredAt 单调、并发安全 | Create |
+| `ios/Contracts/Tests/KlineTrainerContractsTests/InMemoryDBFakesTests.swift` | 4 个 P4 fake 行为测试：round-trip insert/list、save/load/clear、resetCapital → 0、upsert 同 (id,lease) 替换、listByState 过滤、deleteByIdLease 0 行删除合法、stateEnteredAt 单调、并发安全（**XCTest class，名称必须避开既有 `@Suite struct InMemoryFakesTests` in `TrainingSessionCoordinatorTests.swift:137-185` —— R6 修订**）| Create |
 | `ios/Contracts/Tests/KlineTrainerContractsTests/PreviewTrainingSetReaderTests.swift` | reader meta/candles 透传 + factory 透传 reader + close() 是 no-op | Create |
 | `ios/Contracts/Tests/KlineTrainerContractsTests/AcceptanceJournalDAOContractTests.swift` | 升级 `test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol`：从「不持久化」翻面成 round-trip 行为断言 | Modify |
 | `docs/acceptance/2026-05-05-pr5a-db-fixtures.md` | 验收清单（中文，非 coder 可执行）| Create |
@@ -261,11 +261,11 @@ public func loadAllCandles() throws -> [Period: [KLineCandle]] {
 
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift`
-- Create: `ios/Contracts/Tests/KlineTrainerContractsTests/InMemoryFakesTests.swift`
+- Create: `ios/Contracts/Tests/KlineTrainerContractsTests/InMemoryDBFakesTests.swift`
 
 ### Step 1.1 — 写 4 个 P4 fake 行为测试（fail first）
 
-- [ ] **写测试文件 InMemoryFakesTests.swift（XCTest，与 `AcceptanceJournalDAOContractTests` 同 target `KlineTrainerContractsTests`）**
+- [ ] **写测试文件 InMemoryDBFakesTests.swift（XCTest，与 `AcceptanceJournalDAOContractTests` 同 target `KlineTrainerContractsTests`）—— R6 修订：类名 `InMemoryDBFakesTests` 避开既有 `@Suite struct InMemoryFakesTests`（同 target 名称冲突触发 invalid redeclaration）**
 
 > **类型签名锚点（按当前 `Models.swift` / `AppState.swift` / `AppError.swift` 真实形状）：**
 > - `Period` cases：`m3 / m15 / m60 / daily / weekly / monthly`（**没有 `.day` / `.min15`**；测试用 `.daily` + `.m15`）
@@ -280,7 +280,7 @@ import XCTest
 @testable import KlineTrainerContracts
 
 #if DEBUG
-final class InMemoryFakesTests: XCTestCase {
+final class InMemoryDBFakesTests: XCTestCase {
 
     // MARK: - InMemoryRecordRepository
 
@@ -674,13 +674,13 @@ final class InMemoryFakesTests: XCTestCase {
 #endif
 ```
 
-- [ ] **运行测试，确认全部 fail**
+- [ ] **运行测试，确认 filter 命中且至少 1 条 fail（fail-first 验证）**
 
 ```bash
-cd ios/Contracts && swift test --filter InMemoryFakesTests 2>&1 | tail -30
+cd ios/Contracts && swift test --filter InMemoryDBFakesTests 2>&1 | tail -30
 ```
 
-Expected: 编译过 + 22 个测试**全部 fail**（state machine guards 缺失 → 越级 / 终态转换不被 NOOP；id-tiebreak 顺序错；invariants 缺 → stored 接受 nil path/bad hash；fatalError 还在等）
+Expected: 编译过；`Executed N tests, with M failures` 中 `M > 0`（state machine guards 缺失 → 越级 / 终态转换不被 NOOP；id-tiebreak 顺序错；invariants 缺 → stored 接受 nil path/bad hash；fatalError 还在）。具体 N 不写死，subagent 实际跑出多少就是多少
 
 ### Step 1.2 — 升级 `InMemoryFakes.swift` 4 个 P4 fake 实现
 
@@ -946,16 +946,16 @@ public final class InMemoryAcceptanceJournalDAO: AcceptanceJournalDAO, @unchecke
 }
 ```
 
-- [ ] **运行测试，确认 24 个 P4 测试全过 + 既有 contract 测试不退化**
+- [ ] **运行测试，确认 P4 测试 0 failures + 既有 contract 测试不退化**
 
 ```bash
-cd ios/Contracts && swift test --filter InMemoryFakesTests 2>&1 | tail -10
+cd ios/Contracts && swift test --filter InMemoryDBFakesTests 2>&1 | tail -10
 cd ios/Contracts && swift test --filter AcceptanceJournalDAOContractTests 2>&1 | tail -10
 cd ios/Contracts && swift test --filter TrainingSessionCoordinatorTests 2>&1 | tail -10
 ```
 
 Expected:
-- `InMemoryFakesTests`: 24 个全 PASS（含 R1 加的 id-tiebreak 2 + state-machine 12，R2 加的 SettingsDAO NaN/inf 拒收 2）
+- `InMemoryDBFakesTests`: `Executed N tests, with 0 failures`（N 由实际方法数决定）
 - `AcceptanceJournalDAOContractTests`: 旧 `test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol` **会 fail**（旧断言 `XCTAssertEqual(rows.count, 0)` 与新行为冲突）—— Step 3.1 修
 - `TrainingSessionCoordinatorTests`: 应保持 PASS（PR #40 测试用 listRecords/loadPending/loadSettings 都是「空状态」断言；新 fake 默认空状态语义不变）
 
@@ -965,7 +965,7 @@ Expected:
 
 ```bash
 git add ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift \
-        ios/Contracts/Tests/KlineTrainerContractsTests/InMemoryFakesTests.swift
+        ios/Contracts/Tests/KlineTrainerContractsTests/InMemoryDBFakesTests.swift
 git commit -m "feat(PR5a): 4 P4 in-memory fakes 升级真状态 + 14 行为测试"
 ```
 
@@ -1480,7 +1480,7 @@ public struct PreviewTrainingSetDBFactory: TrainingSetDBFactory {
 cd ios/Contracts && swift test --filter PreviewTrainingSetReaderTests 2>&1 | tail -10
 ```
 
-Expected: 21 个全 PASS（6 reader/factory 基础 + 9 R3 candle 校验 + 5 R4 factory meta sanity + 1 R4 period 一致性）
+Expected: `Executed N tests, with 0 failures`（N 由实际方法数决定 —— 包含 reader/factory 基础 + R3 candle 校验 + R4 factory meta sanity + R4 period 一致性）
 
 - [ ] **commit**
 
@@ -1563,11 +1563,11 @@ Expected: 0 failures（含 PR #37-44 既有所有测试）
 |---|---|---|
 | `cd ios/Contracts && swift test 2>&1 \| tail -5` | 看到 `Test Suite 'All tests' passed` 或 `Executed XX tests, with 0 failures` | 数字 failures = 0 |
 
-### 3. 新增测试存在
+### 3. 新增测试 0 failures（R6 修订：从硬编码 count 改为 0-failures 校验，避开测试方法数演化与文档脱节）
 | 操作 | 期望 | 通过条件 |
 |---|---|---|
-| `cd ios/Contracts && swift test --filter InMemoryFakesTests 2>&1 \| grep "Test Case"` | 看到 14 个 `passed` 行 | 14 行全部含 `passed` |
-| `cd ios/Contracts && swift test --filter PreviewTrainingSetReaderTests 2>&1 \| grep "Test Case"` | 看到 6 个 `passed` 行 | 6 行全部含 `passed` |
+| `cd ios/Contracts && swift test --filter InMemoryDBFakesTests 2>&1 \| tail -3` | 看到 `Executed N tests, with 0 failures`（N ≥ 1）| 输出含 `with 0 failures` |
+| `cd ios/Contracts && swift test --filter PreviewTrainingSetReaderTests 2>&1 \| tail -3` | 看到 `Executed N tests, with 0 failures`（N ≥ 1）| 输出含 `with 0 failures` |
 
 ### 4. 不影响 PR #37-44 既有测试
 | 操作 | 期望 | 通过条件 |
@@ -1608,11 +1608,11 @@ git commit -m "test(PR5a): contract test 翻面 + 验收清单"
 ## 完工自检（subagent 不要早停）
 
 - [ ] `cd ios/Contracts && swift test 2>&1 | tail -5` 显示 `0 failures`
-- [ ] `git log main..HEAD --oneline` 显示 3 commits（Task 1/2/3 各一）
-- [ ] `git diff main..HEAD --stat` 各文件改动行数与 plan 预估对齐（±20% 内）：
-  - `InMemoryFakes.swift` 净增 ≤ 130 LOC
-  - `PreviewTrainingSetReader.swift` ≤ 50 LOC
-  - 测试文件总行数 ≤ 350 LOC
+- [ ] `git log main..HEAD --oneline` 显示 ≥ 3 commits（Task 1/2/3 各一；plan v1-v7 commits 已存在；plan 自身可压成单 commit 或散开均可）
+- [ ] `git diff main..HEAD --stat` 各文件改动行数在 plan 预估上限内（R5 修订后实际值）：
+  - `InMemoryFakes.swift` 净增 ≤ 250 LOC
+  - `PreviewTrainingSetReader.swift` ≤ 130 LOC
+  - 测试文件总行数 ≤ 750 LOC（R3 candle 校验 + R4 factory meta sanity 撑大了）
 - [ ] **没有**改动以下任何路径（`git diff main..HEAD --stat` 应不出现）：
   - `ios/Contracts/Sources/KlineTrainerPersistence/**`
   - `ios/Contracts/Sources/KlineTrainerContracts/Persistence/*.swift`（协议本体）
@@ -1684,3 +1684,7 @@ git commit -m "test(PR5a): contract test 翻面 + 验收清单"
 - finding 2 (medium) reader public init bypass meta sanity → §7 加 R5 段 + reader init 改 internal（mirror production DefaultTrainingSetReader.init 是 internal）+ 测试用 `@testable import KlineTrainerContracts` 拿 internal 访问 + close-test meta 改 startDatetime/endDatetime = 1
 
 **9. 后续轮次预算**：plan 已在 round 5 收 11 个 findings（R1 2 + R2 3 + R3 1 + R4 3 + R5 2）。Round 6 起按 memory `feedback_codex_round6_self_contradiction` 评估：若新 finding = 已 accept residual 复述（如 R5 已 accept "preview-only scope" 后 R6 又复述 "需 error-path mock"）立即 reject + accept residual + user TTY override 路径。若新 finding = 真新角度 production 行为（之前未触及），看权衡再决定。Round 5+ pushback 需要 explicit 列依据，不靠默认接受。
+
+**10. R6 修订对接（codex round-6 findings 吸收）：**
+- finding 1 (high) test class 名称冲突 → 重命名 InMemoryFakesTests → InMemoryDBFakesTests（避开既有 `@Suite struct InMemoryFakesTests` in `TrainingSessionCoordinatorTests.swift:137-185`）
+- finding 2 (medium) 测试 count 三处不一致 → Step 1.2 / 2.2 expected 改用 `0 failures` 模式；验收清单 §3 改用 `tail -3 | grep "with 0 failures"`；完工自检 LOC 上限上调到实际值（≤ 250/130/750）
