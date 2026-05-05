@@ -25,19 +25,19 @@
 
 | # | 动作 | 预期 | 通过判定 |
 |---|---|---|---|
-| 3 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter InMemoryDBFakesTests 2>&1 \| tail -3` | 输出 `Executed N tests, with 0 failures` | 输出含 `with 0 failures` = ✅ |
-| 4 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter PreviewTrainingSetReaderTests 2>&1 \| tail -3` | 输出 `Executed N tests, with 0 failures` | 输出含 `with 0 failures` = ✅ |
+| 3 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter InMemoryDBFakesTests 2>&1 \| tail -10` | 输出含 `Executed N tests, with 0 failures` | 输出含 `with 0 failures` = ✅ |
+| 4 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter PreviewTrainingSetReaderTests 2>&1 \| tail -10` | 输出含 `Executed N tests, with 0 failures` | 输出含 `with 0 failures` = ✅ |
 
 ## 四、不影响 PR #37-44 既有测试
 
 | # | 动作 | 预期 | 通过判定 |
 |---|---|---|---|
-| 5 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter TickEngineTests 2>&1 \| tail -3` | 全过 | 输出含 `with 0 failures` = ✅ |
-| 6 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter GeometryTests 2>&1 \| tail -3` | 全过 | 输出含 `with 0 failures` = ✅ |
-| 7 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter ThemeTests 2>&1 \| tail -3` | 全过 | 输出含 `with 0 failures` = ✅ |
-| 8 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter SettingsStoreProductionTests 2>&1 \| tail -3` | 全过 | 输出含 `with 0 failures` = ✅ |
-| 9 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter TrainingSessionCoordinatorTests 2>&1 \| tail -3` | 全过 | 输出含 `with 0 failures` = ✅ |
-| 10 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter AcceptanceJournalDAOContractTests 2>&1 \| tail -3` | 全过 | 输出含 `with 0 failures` = ✅ |
+| 5 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter TickEngineTests 2>&1 \| tail -10` | 全过 | 输出含 `with 0 failures` 或 `Test run with N tests in M suites passed` = ✅ |
+| 6 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter GeometryTests 2>&1 \| tail -10` | 全过 | 输出含 `with 0 failures` 或 `Test run with N tests in M suites passed` = ✅ |
+| 7 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter ThemeTests 2>&1 \| tail -10` | 全过 | 输出含 `with 0 failures` 或 `Test run with N tests in M suites passed` = ✅ |
+| 8 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter SettingsStoreProductionTests 2>&1 \| tail -10` | 全过 | 输出含 `with 0 failures` = ✅ |
+| 9 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter TrainingSessionCoordinatorTests 2>&1 \| tail -10` | 全过 | 输出含 `with 0 failures` 或 `Test run with N tests in M suites passed` = ✅ |
+| 10 | 终端执行 `cd "/Users/maziming/Coding/Prj_Kline trainer/.worktrees/pr5a/db-fixtures" && swift test --package-path ios/Contracts --filter AcceptanceJournalDAOContractTests 2>&1 \| tail -10` | 全过 | 输出含 `with 0 failures` = ✅ |
 
 ## 五、生产代码 0 改动
 
