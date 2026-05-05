@@ -84,12 +84,12 @@ grep -rn "protocol APIClient" ios/Contracts/Sources/ 2>&1 | head -3
 
 **动作：**
 ```
-grep -nE "throw NSError|throw URLError|throw .*Error\(" ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/P2Fakes.swift 2>&1
+grep -nE "^[[:space:]]*throw " ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/P2Fakes.swift | grep -v "AppError" 2>&1
 ```
 
-**期望：** **没有命中**（fake 只抛 `AppError.persistence(...)` / `AppError.internalError(...)` / caller 注入的 `AppError`，不抛 NSError / URLError 等私有错误）
+**期望：** **没有命中**（grep 第一段列所有 throw 语句，第二段排除合法的 `AppError`；剩下的命中即非法私有错误抛出）。fake 应只抛 `AppError.*` 子 case 或 caller 注入的 `AppError`。
 
-**通过条件：** 通过 = grep 0 命中；不通过 = 任一命中
+**通过条件：** 通过 = 最终 grep 输出为空；不通过 = 命中任一行（即出现非 AppError 的 throw）
 
 ---
 
