@@ -27,12 +27,12 @@
 | `ios/Contracts/Tests/KlineTrainerContractsTests/AcceptanceJournalDAOContractTests.swift` | 升级 `test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol`：从「不持久化」翻面成 round-trip 行为断言 | Modify |
 | `docs/acceptance/2026-05-05-pr5a-db-fixtures.md` | 验收清单（中文，非 coder 可执行）| Create |
 
-**预估 prod LOC（硬规则 ≤500）：**
-- `InMemoryFakes.swift` 净增 ≈ 110 LOC（4 fake 各加内部状态 + lock + 真实 method 体；PreviewTrainingSetDBFactory 升级 ≈ +15 LOC）
+**预估 prod LOC（硬规则 ≤500；R1 修订上调）：**
+- `InMemoryFakes.swift` 净增 ≈ 200 LOC（4 fake 各加内部状态 + lock + 真实 method 体；AcceptanceJournalDAO 全镜像 production state machine + invariants + COALESCE +60 LOC；PreviewTrainingSetDBFactory 升级 +15 LOC）
 - `PreviewTrainingSetReader.swift` 新增 ≈ 40 LOC（含 init / loadMeta / loadAllCandles / close）
-- 合计：**≈ 150 prod LOC** ✓ 远低于 500
+- 合计：**≈ 240 prod LOC** ✓ 仍远低于 500
 
-**预估 test LOC**：≈ 280
+**预估 test LOC**：≈ 380（R1 加 state machine 12 条 + id-tiebreak 2 条，约 +100 行）
 
 **子项数**（per memory feedback "硬规则 ≤3 子项"）：
 1. P4 4 fake 升级（一个文件内的内聚改动，spec 列在同一 §11.3 子清单 #1-4）
@@ -83,26 +83,63 @@
 
 **为什么不让 `openAndVerify` 抛 `fileNotFound`：** spec L1832 错误清单是 production 行为；fake 设计就是「不 open file」，模拟「永远成功」更适配 preview 场景。
 
-### §4 `InMemoryRecordRepository.statistics` 计算口径
+### §4 `InMemoryRecordRepository.statistics` + `listRecords` 计算口径（R1 修订：含 id DESC tiebreaker）
 
-**Spec 字面无 statistics SQL 给出**（L1870 仅给 protocol 签名）。Production `RecordRepositoryImpl.statistics` 按 spec § P4 line 1923-1929 的语义实现：
-- `totalCount` = `records` 行数
-- `winCount` = `profit > 0` 行数
-- `currentCapital` = `latest_record.totalCapital + latest_record.profit`（按 `created_at DESC LIMIT 1`），无记录时 = 0
+**Spec 字面无 statistics SQL 给出**（L1870 仅给 protocol 签名）。Production `RecordRepositoryImpl`（`Internal/RecordRepositoryImpl.swift`）：
+- `listRecords`：`ORDER BY created_at DESC, id DESC` + 可选 `LIMIT ?`（line 60）
+- `statistics`：
+  - `totalCount` = `COUNT(*)`
+  - `winCount` = `COUNT(profit > 0)`
+  - `currentCapital` = `latest.totalCapital + latest.profit`（按 `created_at DESC, id DESC LIMIT 1`，line 99），无记录时 = 0
 
-Fake 镜像 production 这套口径（同口径才能和 production 互换不破测试）。
+**R1 修订（codex round-1 med-2）**：production 把 `id DESC` 加进 tiebreaker 是 codex med-1 的修订（line 58 注释明示）；fake 必须**同口径**镜像，否则同 createdAt 多条插入时 fake/production 行为分叉，使用方测试失败模式不一致。
+
+Fake 实现：
+- `nextId` 自增 → records 字典的 key（`var records: [Int64: TrainingRecord]`）
+- `listRecords`：`records.values.sorted { ($0.createdAt, $0.id ?? 0) > ($1.createdAt, $1.id ?? 0) }` 用 lexicographic tuple 比较实现 `(createdAt desc, id desc)`
+- `statistics().currentCapital`：用同 sort 取首条
+- 加测试：3 条 record `createdAt = 100`，按 insert 顺序 id = 1/2/3，断言 `listRecords[0].id == 3`（id 最大者排首）+ `statistics().currentCapital` 用第 3 条计算
 
 ### §5 `InMemorySettingsDAO.resetCapital` = 把 totalCapital 置 0
 
 **Production 行为**（`SettingsDAOImpl.resetCapital`，line 87-91）：`UPDATE settings SET total_capital = '0.0'`，**只动 totalCapital，不动其他字段**。Fake 镜像同口径。
 
-### §6 `InMemoryAcceptanceJournalDAO.upsert` 主键与 `stateEnteredAt`
+### §6 `InMemoryAcceptanceJournalDAO` 镜像 production state machine + invariants + COALESCE（R1 修订：codex round-1 high-1）
 
 **Spec 主键**（M0.1 line 230-289 `download_acceptance_journal`）：`UNIQUE(training_set_id, lease_id)`。Fake 用 `[String: AcceptanceJournalRow]` 字典，key = `"\(trainingSetId)::\(leaseId)"`。
 
-**`stateEnteredAt`**（spec L241）：`Int64` Unix 秒 UTC，由实现侧 stamp。Fake 在每次 `upsert` 时 `Int64(Date().timeIntervalSince1970)`；同 (id, lease) 重新 upsert 重新 stamp（与 production `INSERT OR REPLACE` 一致）。
+**`stateEnteredAt`**（spec L241）：`Int64` Unix 秒 UTC，由实现侧 stamp。Fake 在每次接受的 `upsert` 时 `Int64(Date().timeIntervalSince1970)`。
 
-**`id` 自增**：fake 用 `var nextId: Int64 = 1`，每次 `upsert` **新行**（key 不存在）时 ++；已存在 key 的 upsert **保留原 id**（mirror SQLite UNIQUE 约束 + REPLACE 行为）。
+**`id` 自增**：fake 用 `var nextId: Int64 = 1`，每次接受的 `upsert` **新行**（key 不存在）时 ++；已存在 key 的 upsert **保留原 id**（mirror SQLite UNIQUE 约束 + REPLACE 行为）。
+
+**R1 修订（codex round-1 high-1）—— 镜像 `AcceptanceJournalDAOImpl` 全部 production guards**：
+
+Production `AcceptanceJournalDAOImpl.upsert`（`Internal/AcceptanceJournalDAOImpl.swift` line 71-120）执行的逻辑：
+
+1. **首插必须 `.downloaded`**：`(training_set_id, lease_id)` 不存在时，`state != .downloaded` → `throw AppError.internalError(...)`（line 102-106）
+2. **next-state allowlist**（`nextAllowed` map line 18-29）：
+   - `.downloaded → {.crcOK, .rejected}`
+   - `.crcOK → {.unzipped, .rejected}`
+   - `.unzipped → {.dbVerified, .rejected}`
+   - `.dbVerified → {.stored, .rejected}`
+   - `.stored → {.confirmPending, .rejected}`
+   - `.confirmPending → {.confirmed, .rejected}`
+   - `.confirmed → {}`（吸收）
+   - `.rejected → {}`（吸收）
+3. **同 state retry 允许**（`canApply` line 36 `if new == old { return true }`）：用于失败重试同 state 续 stamp
+4. **不合法转换 = silent NOOP**（line 90-92 `logger.info` + `return`）—— **不抛错**
+5. **state-dependent invariants**（`validateInvariants` line 43-63）：
+   - `state ∈ {.stored, .confirmPending, .confirmed}` 时 `resolvedPath = newPath ?? existingPath` 必须非 nil，否则 throw
+   - `state == .stored` 时 `resolvedHash` 必须是 8-char 小写 hex CRC32，否则 throw
+6. **COALESCE 字段保留**（line 131-133 `COALESCE(?, last_error)` / `COALESCE(?, sqlite_local_path)` / `COALESCE(?, content_hash)`）：upsert 传 nil 时**保留 existing 值**，不覆盖
+
+Fake 必须复刻同样行为，否则 P2 runner / E6 coordinator 等使用 fake 写的测试会接受 production 拒绝的非法 sequence（codex round-1 finding 1 verbatim：`downloaded → stored`、`confirmed → rejected`、缺 stored metadata、nil retries 擦掉 path/hash 等）。
+
+**fake 实现位置**：在 `InMemoryAcceptanceJournalDAO` 内部加 3 个 private static helper（`nextAllowed` / `canApply` / `validateInvariants` / `isValidCRC32Hex`）—— 直接照抄 production 函数体（不 import production 模块；这是允许的代码克隆，源在 `KlineTrainerPersistence` 模块且 fake 在 `KlineTrainerContracts` DEBUG-only，跨模块依赖会破 wave 0 拓扑）。文件头加注释明示「mirror of `AcceptanceJournalDAOImpl` line 14-138；production 改 → fake 同步改」并在 plan §6 + 文件 SS-1 处双重 anchor。
+
+**`AppError.internalError(module:detail:)` 复用**：fake 抛错时 `module: "PR5a-InMemoryAcceptanceJournalDAO"` 与 production 同 case 但区分 module 字段（便于排查）。
+
+**fake-specific 简化**：production logger.info NOOP / logger.error refuse 路径，fake 不 emit log（fake 不持有 `os.Logger` 资源）；只静默 NOOP / 抛错。
 
 ### §7 `PreviewTrainingSetReader` 是 class 不是 struct
 
@@ -122,7 +159,15 @@ Fake 镜像 production 这套口径（同口径才能和 production 互换不破
 
 ### Step 1.1 — 写 4 个 P4 fake 行为测试（fail first）
 
-- [ ] **写测试文件 InMemoryFakesTests.swift（XCTest，与 AcceptanceJournalDAOContractTests 同 target）**
+- [ ] **写测试文件 InMemoryFakesTests.swift（XCTest，与 `AcceptanceJournalDAOContractTests` 同 target `KlineTrainerContractsTests`）**
+
+> **类型签名锚点（按当前 `Models.swift` / `AppState.swift` / `AppError.swift` 真实形状）：**
+> - `Period` cases：`m3 / m15 / m60 / daily / weekly / monthly`（**没有 `.day` / `.min15`**；测试用 `.daily` + `.m15`）
+> - `PositionTier` cases：`tier1 / tier2 / tier3 / tier4 / tier5`（**没有 `.heavy`**；测试用 `.tier3`）
+> - `DrawingToolType` cases：`ray / trend / horizontal / golden / wave / cycle / time`（**没有 `.horizontalLine`**；测试用 `.horizontal`）
+> - `DrawingObject(toolType:, anchors:, isExtended:, panelPosition:)`（**没有 `id` / `createdAt` / `tool`**）
+> - `KLineCandle(period:, datetime:, open:, high:, low:, close:, volume:, amount:, ma66:, bollUpper:, bollMid:, bollLower:, macdDiff:, macdDea:, macdBar:, globalIndex:, endGlobalIndex:)`
+> - `AppError.persistence` cases：`diskFull / dbCorrupted / schemaMismatch / ioError`（**没有 `.notFound`**；fake 缺 record 抛 `.dbCorrupted` 与 production `RecordRepositoryImpl.swift` line 74 同步）
 
 ```swift
 import XCTest
@@ -137,11 +182,10 @@ final class InMemoryFakesTests: XCTestCase {
         let repo = InMemoryRecordRepository()
         let rec = makeRecord(id: nil, profit: 100, total: 1000)
         let id = try repo.insertRecord(rec, ops: [], drawings: [])
-        XCTAssertEqual(id, 1) // 首条 id = 1
+        XCTAssertEqual(id, 1)
         let listed = try repo.listRecords(limit: nil)
         XCTAssertEqual(listed.count, 1)
-        // 返回的 record 应带 server-assigned id
-        XCTAssertEqual(listed.first?.id, 1)
+        XCTAssertEqual(listed.first?.id, 1)  // server-assigned id 写回
     }
 
     func test_recordRepo_loadRecordBundle_returns_inserted_ops_and_drawings() throws {
@@ -156,9 +200,14 @@ final class InMemoryFakesTests: XCTestCase {
         XCTAssertEqual(bundle.2.count, 1)
     }
 
-    func test_recordRepo_loadRecordBundle_throws_for_unknown_id() {
+    func test_recordRepo_loadRecordBundle_throws_dbCorrupted_for_unknown_id() {
+        // mirror production RecordRepositoryImpl.swift line 74
         let repo = InMemoryRecordRepository()
-        XCTAssertThrowsError(try repo.loadRecordBundle(id: 999))
+        XCTAssertThrowsError(try repo.loadRecordBundle(id: 999)) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                XCTFail("expected .dbCorrupted, got \(err)"); return
+            }
+        }
     }
 
     func test_recordRepo_listRecords_limit_and_order_desc_by_createdAt() throws {
@@ -173,16 +222,40 @@ final class InMemoryFakesTests: XCTestCase {
         XCTAssertEqual(topTwo.map(\.createdAt), [300, 200])
     }
 
+    /// R1 修订（codex round-1 med-2）：同 createdAt 多条时按 id DESC tiebreak（mirror production line 60）
+    func test_recordRepo_listRecords_id_desc_tiebreaker_for_same_createdAt() throws {
+        let repo = InMemoryRecordRepository()
+        // 3 条 createdAt 全 = 100；插入顺序赋 id = 1, 2, 3
+        let id1 = try repo.insertRecord(makeRecord(id: nil, createdAt: 100, profit: 1), ops: [], drawings: [])
+        let id2 = try repo.insertRecord(makeRecord(id: nil, createdAt: 100, profit: 2), ops: [], drawings: [])
+        let id3 = try repo.insertRecord(makeRecord(id: nil, createdAt: 100, profit: 3), ops: [], drawings: [])
+        XCTAssertEqual([id1, id2, id3], [1, 2, 3])
+
+        let all = try repo.listRecords(limit: nil)
+        // (createdAt desc, id desc) → id 3 / 2 / 1
+        XCTAssertEqual(all.map(\.id), [3, 2, 1])
+    }
+
     func test_recordRepo_statistics_currentCapital_uses_latest_by_createdAt() throws {
         let repo = InMemoryRecordRepository()
-        // 3 条记录：profit 100/200/-50；createdAt 100/200/300（最新 = 第 3 条）
         _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 100, profit: 100, total: 1000), ops: [], drawings: [])
         _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 200, profit: 200, total: 1000), ops: [], drawings: [])
         _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 300, profit: -50, total: 1000), ops: [], drawings: [])
         let s = try repo.statistics()
         XCTAssertEqual(s.totalCount, 3)
-        XCTAssertEqual(s.winCount, 2) // profit > 0 的 2 条
-        XCTAssertEqual(s.currentCapital, 1000 + (-50)) // 最新一条 = total + profit = 950
+        XCTAssertEqual(s.winCount, 2)
+        XCTAssertEqual(s.currentCapital, 1000 + (-50))
+    }
+
+    /// R1 修订（codex round-1 med-2）：statistics.currentCapital 同 createdAt 时取 id 最大者（mirror production line 99）
+    func test_recordRepo_statistics_id_desc_tiebreaker_for_same_createdAt() throws {
+        let repo = InMemoryRecordRepository()
+        _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 100, profit: 100, total: 1000), ops: [], drawings: [])
+        _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 100, profit: 200, total: 1000), ops: [], drawings: [])
+        _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 100, profit: -50, total: 1000), ops: [], drawings: [])
+        // 最后插入 id=3 的 profit=-50；同 createdAt 下 id 最大胜出
+        let s = try repo.statistics()
+        XCTAssertEqual(s.currentCapital, 1000 + (-50))
     }
 
     func test_recordRepo_statistics_empty_returns_zero() throws {
@@ -199,19 +272,16 @@ final class InMemoryFakesTests: XCTestCase {
         let repo = InMemoryPendingTrainingRepository()
         XCTAssertNil(try repo.loadPending())
 
-        let pending = makePending(filename: "S001.sqlite")
-        try repo.savePending(pending)
+        try repo.savePending(makePending(filename: "S001.sqlite"))
         XCTAssertEqual(try repo.loadPending()?.trainingSetFilename, "S001.sqlite")
 
-        // save 再次替换（spec L1881 语义）
-        let pending2 = makePending(filename: "S002.sqlite")
-        try repo.savePending(pending2)
+        try repo.savePending(makePending(filename: "S002.sqlite"))
         XCTAssertEqual(try repo.loadPending()?.trainingSetFilename, "S002.sqlite")
 
         try repo.clearPending()
         XCTAssertNil(try repo.loadPending())
 
-        // clear 在已 nil 时合法（再清一次不抛）
+        // clear 在已 nil 时合法
         try repo.clearPending()
     }
 
@@ -239,81 +309,185 @@ final class InMemoryFakesTests: XCTestCase {
         try dao.resetCapital()
         let after = try dao.loadSettings()
         XCTAssertEqual(after.totalCapital, 0)
-        // 其他字段保留（mirror production）
         XCTAssertEqual(after.commissionRate, 0.0003)
         XCTAssertTrue(after.minCommissionEnabled)
         XCTAssertEqual(after.displayMode, .dark)
     }
 
-    // MARK: - InMemoryAcceptanceJournalDAO
+    // MARK: - InMemoryAcceptanceJournalDAO（R1 修订：state machine + invariants + COALESCE 全镜像 production）
 
-    func test_journalDAO_upsert_then_listByState() throws {
+    // 1) 首插必须 .downloaded
+    func test_journalDAO_first_insert_must_be_downloaded() {
         let dao = InMemoryAcceptanceJournalDAO()
-        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
-                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
-        let downloaded = try dao.listByState(.downloaded)
-        XCTAssertEqual(downloaded.count, 1)
-        XCTAssertEqual(downloaded.first?.trainingSetId, 1)
-        XCTAssertEqual(downloaded.first?.leaseId, "L1")
-        XCTAssertEqual(downloaded.first?.state, .downloaded)
-
-        // 不存在的 state 返回空
-        XCTAssertEqual(try dao.listByState(.confirmed).count, 0)
+        XCTAssertThrowsError(try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK,
+                                            sqliteLocalPath: nil, contentHash: nil, lastError: nil)) { err in
+            guard case AppError.internalError = err else { XCTFail("expected internalError"); return }
+        }
+        // .downloaded OK
+        XCTAssertNoThrow(try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
+                                        sqliteLocalPath: nil, contentHash: nil, lastError: nil))
     }
 
-    func test_journalDAO_upsert_same_id_lease_replaces_keeps_id() throws {
+    // 2) 合法转换 downloaded → crcOK 接受
+    func test_journalDAO_legal_transition_downloaded_to_crcOK() throws {
         let dao = InMemoryAcceptanceJournalDAO()
         try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
                        sqliteLocalPath: nil, contentHash: nil, lastError: nil)
-        let firstId = try XCTUnwrap(try dao.listByState(.downloaded).first?.id)
-
-        // 升级 state，同 (1, L1)
         try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK,
-                       sqliteLocalPath: "/tmp/x.sqlite", contentHash: "deadbeef", lastError: nil)
-        XCTAssertEqual(try dao.listByState(.downloaded).count, 0) // 已升级，旧 state 已不存在
-        let crcRows = try dao.listByState(.crcOK)
-        XCTAssertEqual(crcRows.count, 1)
-        XCTAssertEqual(crcRows.first?.id, firstId) // id 保留（mirror SQLite UNIQUE + REPLACE）
-        XCTAssertEqual(crcRows.first?.contentHash, "deadbeef")
+                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        XCTAssertEqual(try dao.listByState(.downloaded).count, 0)
+        XCTAssertEqual(try dao.listByState(.crcOK).count, 1)
     }
 
-    func test_journalDAO_stateEnteredAt_updates_on_upsert() throws {
+    // 3) 跳跃转换 = silent NOOP（不抛、不改 state）—— mirror production logger.info + return
+    func test_journalDAO_skip_transition_downloaded_to_stored_is_noop() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
+                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        // 越级到 .stored —— 即使带齐 path+hash，也应被 nextAllowed 拒（NOOP）
+        XCTAssertNoThrow(try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .stored,
+                                        sqliteLocalPath: "/tmp/x.sqlite", contentHash: "deadbeef",
+                                        lastError: nil))
+        // state 仍是 .downloaded
+        XCTAssertEqual(try dao.listByState(.stored).count, 0)
+        XCTAssertEqual(try dao.listByState(.downloaded).count, 1)
+    }
+
+    // 4) 终态 confirmed 不可再转
+    func test_journalDAO_terminal_confirmed_to_rejected_is_noop() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        // 走完 downloaded → ... → confirmed
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .unzipped, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .dbVerified, sqliteLocalPath: "/tmp/x.sqlite", contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .stored, sqliteLocalPath: "/tmp/x.sqlite", contentHash: "deadbeef", lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .confirmPending, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .confirmed, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        XCTAssertEqual(try dao.listByState(.confirmed).count, 1)
+
+        // confirmed → rejected = NOOP
+        XCTAssertNoThrow(try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .rejected,
+                                        sqliteLocalPath: nil, contentHash: nil, lastError: "x"))
+        XCTAssertEqual(try dao.listByState(.confirmed).count, 1) // 仍 confirmed
+        XCTAssertEqual(try dao.listByState(.rejected).count, 0)
+    }
+
+    // 5) 任何 state 都可推 .rejected（除终态）
+    func test_journalDAO_any_state_to_rejected_allowed() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .rejected, sqliteLocalPath: nil, contentHash: nil, lastError: "fail")
+        XCTAssertEqual(try dao.listByState(.rejected).count, 1)
+        XCTAssertEqual(try dao.listByState(.rejected).first?.lastError, "fail")
+    }
+
+    // 6) 同 state retry 允许（new == old → canApply true，重新 stamp）
+    func test_journalDAO_same_state_retry_allowed_and_stamp_advances() throws {
         let dao = InMemoryAcceptanceJournalDAO()
         try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
                        sqliteLocalPath: nil, contentHash: nil, lastError: nil)
         let firstAt = try XCTUnwrap(try dao.listByState(.downloaded).first?.stateEnteredAt)
-
-        // sleep ≥1s 让 Int64 Unix 秒能区分（fake stamp 用 Int64(timeIntervalSince1970)）
         Thread.sleep(forTimeInterval: 1.05)
-
-        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK,
-                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
-        let secondAt = try XCTUnwrap(try dao.listByState(.crcOK).first?.stateEnteredAt)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
+                       sqliteLocalPath: nil, contentHash: nil, lastError: "retry")
+        let secondAt = try XCTUnwrap(try dao.listByState(.downloaded).first?.stateEnteredAt)
         XCTAssertGreaterThan(secondAt, firstAt)
     }
 
+    // 7) state ∈ {.stored, .confirmPending, .confirmed} 缺 sqliteLocalPath → throw
+    func test_journalDAO_stored_requires_path() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        // 走到 .dbVerified（合法且不要 path——production validateInvariants 只对 stored/confirmPending/confirmed 要 path）
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .unzipped, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .dbVerified, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+
+        // .stored 缺 path 应抛
+        XCTAssertThrowsError(try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .stored,
+                                            sqliteLocalPath: nil, contentHash: "deadbeef", lastError: nil)) { err in
+            guard case AppError.internalError = err else { XCTFail("expected internalError"); return }
+        }
+    }
+
+    // 8) .stored 缺 contentHash / hash 非 8-char 小写 hex → throw
+    func test_journalDAO_stored_requires_valid_crc32_hex() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .unzipped, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .dbVerified, sqliteLocalPath: "/tmp/x.sqlite", contentHash: nil, lastError: nil)
+
+        // hash nil
+        XCTAssertThrowsError(try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .stored,
+                                            sqliteLocalPath: "/tmp/x.sqlite", contentHash: nil, lastError: nil))
+        // hash 长度错（7 字符）
+        XCTAssertThrowsError(try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .stored,
+                                            sqliteLocalPath: "/tmp/x.sqlite", contentHash: "deadbee", lastError: nil))
+        // hash 大写（production 要小写）
+        XCTAssertThrowsError(try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .stored,
+                                            sqliteLocalPath: "/tmp/x.sqlite", contentHash: "DEADBEEF", lastError: nil))
+        // hash 含非 hex 字符
+        XCTAssertThrowsError(try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .stored,
+                                            sqliteLocalPath: "/tmp/x.sqlite", contentHash: "zzzzzzzz", lastError: nil))
+        // 合法 8-char 小写 hex 通过
+        XCTAssertNoThrow(try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .stored,
+                                        sqliteLocalPath: "/tmp/x.sqlite", contentHash: "deadbeef", lastError: nil))
+    }
+
+    // 9) COALESCE：nil 入参不覆盖 existing 字段
+    func test_journalDAO_coalesce_preserves_existing_path_and_hash_on_nil_inputs() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .unzipped, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .dbVerified, sqliteLocalPath: "/tmp/x.sqlite", contentHash: nil, lastError: "first")
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .stored, sqliteLocalPath: nil, contentHash: "deadbeef", lastError: nil)
+
+        // .stored 入参 sqliteLocalPath = nil；COALESCE 应保留 .dbVerified 时写入的 "/tmp/x.sqlite"
+        let row = try XCTUnwrap(try dao.listByState(.stored).first)
+        XCTAssertEqual(row.sqliteLocalPath, "/tmp/x.sqlite")  // 未被 nil 覆盖
+        XCTAssertEqual(row.contentHash, "deadbeef")            // 新写入
+        XCTAssertEqual(row.lastError, "first")                 // 未被 nil 覆盖
+
+        // 再 upsert 同 state 带新 lastError，hash 入 nil → 保留 deadbeef
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .stored,
+                       sqliteLocalPath: nil, contentHash: nil, lastError: "second")
+        let row2 = try XCTUnwrap(try dao.listByState(.stored).first)
+        XCTAssertEqual(row2.contentHash, "deadbeef")
+        XCTAssertEqual(row2.lastError, "second")
+    }
+
+    // 10) upsert 合法转换保留 id（mirror SQLite UNIQUE + REPLACE）
+    func test_journalDAO_legal_transition_keeps_id() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        let firstId = try XCTUnwrap(try dao.listByState(.downloaded).first?.id)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        XCTAssertEqual(try dao.listByState(.crcOK).first?.id, firstId)
+    }
+
+    // 11) listByState 按 id ASC（mirror production line 143 ORDER BY id ASC）
+    func test_journalDAO_listByState_orders_by_id_asc() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        try dao.upsert(trainingSetId: 2, leaseId: "L2", state: .downloaded, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 3, leaseId: "L3", state: .downloaded, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        let rows = try dao.listByState(.downloaded)
+        XCTAssertEqual(rows.map(\.id), [1, 2, 3]) // 按 insertion id ASC
+    }
+
+    // 12) deleteByIdLease 0 行删除合法
     func test_journalDAO_deleteByIdLease_zero_row_legal() throws {
         let dao = InMemoryAcceptanceJournalDAO()
-        // 不存在 (1, L1)，删 0 行不抛（spec L62 注释明示）
         try dao.deleteByIdLease(trainingSetId: 1, leaseId: "L1")
-
-        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
-                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
         try dao.deleteByIdLease(trainingSetId: 1, leaseId: "L1")
         XCTAssertEqual(try dao.listByState(.downloaded).count, 0)
     }
 
-    func test_journalDAO_id_autoincrement_across_distinct_keys() throws {
-        let dao = InMemoryAcceptanceJournalDAO()
-        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
-                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
-        try dao.upsert(trainingSetId: 2, leaseId: "L2", state: .downloaded,
-                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
-        let ids = try dao.listByState(.downloaded).map(\.id).sorted()
-        XCTAssertEqual(ids, [1, 2])
-    }
-
-    // MARK: - 并发安全（4 fake 共用一个简短并发 smoke test）
+    // MARK: - 并发安全 smoke
 
     func test_recordRepo_concurrent_inserts_no_data_race_or_lost_writes() throws {
         let repo = InMemoryRecordRepository()
@@ -342,18 +516,18 @@ final class InMemoryFakesTests: XCTestCase {
     }
 
     private func makeOp(direction: TradeDirection) -> TradeOperation {
-        TradeOperation(globalTick: 0, period: .day, direction: direction,
-                       price: 10, shares: 100, positionTier: .heavy,
+        TradeOperation(globalTick: 0, period: .daily, direction: direction,
+                       price: 10, shares: 100, positionTier: .tier3,
                        commission: 0, stampDuty: 0, totalCost: 0, createdAt: 0)
     }
 
     private func makeDrawing() -> DrawingObject {
-        DrawingObject(id: UUID(), tool: .horizontalLine, anchors: [], createdAt: 0)
+        DrawingObject(toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
     }
 
     private func makePending(filename: String) -> PendingTraining {
         PendingTraining(trainingSetFilename: filename, globalTickIndex: 0,
-                        upperPeriod: .day, lowerPeriod: .min15,
+                        upperPeriod: .daily, lowerPeriod: .m15,
                         positionData: Data(), cashBalance: 0,
                         feeSnapshot: FeeSnapshot(commissionRate: 0, minCommissionEnabled: false),
                         tradeOperations: [], drawings: [],
@@ -364,19 +538,17 @@ final class InMemoryFakesTests: XCTestCase {
 #endif
 ```
 
-> **注意：** `makeRecord` / `makePending` / `makeDrawing` / `makeOp` 真实字段以 `AppState.swift` + `Models.swift` 当前结构为准。如果某字段名/类型与上面 stub 不符（例：`PositionTier` 实际可用 case 不是 `.heavy`、`DrawingObject.tool` 字段名不是 `tool`），子代理负责按编译器报错对齐——不要回头改测试断言语义。
-
-- [ ] **运行测试，确认全部 fail（缺真实在内存状态）**
+- [ ] **运行测试，确认全部 fail**
 
 ```bash
 cd ios/Contracts && swift test --filter InMemoryFakesTests 2>&1 | tail -30
 ```
 
-Expected: 14 个测试全部 fail（`fatalError` 触发崩溃 / 返回空集合断言失败 / 等）
+Expected: 编译过 + 22 个测试**全部 fail**（state machine guards 缺失 → 越级 / 终态转换不被 NOOP；id-tiebreak 顺序错；invariants 缺 → stored 接受 nil path/bad hash；fatalError 还在等）
 
 ### Step 1.2 — 升级 `InMemoryFakes.swift` 4 个 P4 fake 实现
 
-- [ ] **改 `InMemoryRecordRepository`：加 NSLock + records 字典 + ops/drawings 字典 + nextId**
+- [ ] **改 `InMemoryRecordRepository`：加 NSLock + records 字典 + ops/drawings 字典 + nextId + id DESC tiebreak**
 
 ```swift
 public final class InMemoryRecordRepository: RecordRepository, @unchecked Sendable {
@@ -394,7 +566,7 @@ public final class InMemoryRecordRepository: RecordRepository, @unchecked Sendab
         lock.lock(); defer { lock.unlock() }
         let id = nextId
         nextId += 1
-        // 把 server-assigned id 写回 record（mirror production INSERT RETURNING id）
+        // 把 server-assigned id 写回 record（mirror production INSERT lastInsertedRowID）
         let stored = TrainingRecord(
             id: id, trainingSetFilename: rec.trainingSetFilename, createdAt: rec.createdAt,
             stockCode: rec.stockCode, stockName: rec.stockName,
@@ -410,7 +582,11 @@ public final class InMemoryRecordRepository: RecordRepository, @unchecked Sendab
 
     public func listRecords(limit: Int?) throws -> [TrainingRecord] {
         lock.lock(); defer { lock.unlock() }
-        let sorted = records.values.sorted { $0.createdAt > $1.createdAt }
+        // R1 修订（codex round-1 med-2）：mirror production line 60 "ORDER BY created_at DESC, id DESC"
+        let sorted = records.values.sorted { (a, b) in
+            if a.createdAt != b.createdAt { return a.createdAt > b.createdAt }
+            return (a.id ?? 0) > (b.id ?? 0)
+        }
         if let limit = limit { return Array(sorted.prefix(limit)) }
         return sorted
     }
@@ -418,7 +594,8 @@ public final class InMemoryRecordRepository: RecordRepository, @unchecked Sendab
     public func loadRecordBundle(id: Int64) throws -> (TrainingRecord, [TradeOperation], [DrawingObject]) {
         lock.lock(); defer { lock.unlock() }
         guard let r = records[id] else {
-            throw AppError.persistence(.notFound)
+            // mirror production RecordRepositoryImpl.swift line 74：未知 id = caller 编程错误
+            throw AppError.persistence(.dbCorrupted)
         }
         return (r, ops[id] ?? [], drawings[id] ?? [])
     }
@@ -427,14 +604,16 @@ public final class InMemoryRecordRepository: RecordRepository, @unchecked Sendab
         lock.lock(); defer { lock.unlock() }
         let total = records.count
         let wins = records.values.filter { $0.profit > 0 }.count
-        let latest = records.values.max(by: { $0.createdAt < $1.createdAt })
+        // R1 修订（codex round-1 med-2）：mirror production line 99 "ORDER BY created_at DESC, id DESC LIMIT 1"
+        let latest = records.values.sorted { (a, b) in
+            if a.createdAt != b.createdAt { return a.createdAt > b.createdAt }
+            return (a.id ?? 0) > (b.id ?? 0)
+        }.first
         let cap = latest.map { $0.totalCapital + $0.profit } ?? 0
         return (total, wins, cap)
     }
 }
 ```
-
-> 检查 `AppError.persistence(.notFound)` 是否存在；如不存在改用 `AppError.persistence(.dbCorrupted)` 或最近义 case；不要新增 case（trust-boundary）。
 
 - [ ] **改 `InMemoryPendingTrainingRepository`：加 lock + 单 slot**
 
@@ -496,9 +675,13 @@ public final class InMemorySettingsDAO: SettingsDAO, @unchecked Sendable {
 }
 ```
 
-- [ ] **改 `InMemoryAcceptanceJournalDAO`：加 lock + 字典 + nextId**
+- [ ] **改 `InMemoryAcceptanceJournalDAO`：加 lock + 字典 + nextId + 全镜像 production state machine + invariants + COALESCE**
 
 ```swift
+// R1 修订（codex round-1 high-1）：fake 必须镜像 AcceptanceJournalDAOImpl 的 state machine + invariants + COALESCE
+// 否则 P2 runner / E6 coordinator 等使用 fake 写的测试会接受 production 拒绝的非法 sequence。
+// 镜像源：ios/Contracts/Sources/KlineTrainerPersistence/Internal/AcceptanceJournalDAOImpl.swift line 14-138
+// 维护契约：production 的 nextAllowed / canApply / validateInvariants / isValidCRC32Hex 改了 → 这里同步改。
 public final class InMemoryAcceptanceJournalDAO: AcceptanceJournalDAO, @unchecked Sendable {
     private let lock = NSLock()
     private var rows: [String: AcceptanceJournalRow] = [:]
@@ -510,6 +693,53 @@ public final class InMemoryAcceptanceJournalDAO: AcceptanceJournalDAO, @unchecke
         "\(trainingSetId)::\(leaseId)"
     }
 
+    // mirror production line 18-29
+    private static func nextAllowed(_ s: P2JournalState) -> Set<P2JournalState> {
+        switch s {
+        case .downloaded:     return [.crcOK, .rejected]
+        case .crcOK:          return [.unzipped, .rejected]
+        case .unzipped:       return [.dbVerified, .rejected]
+        case .dbVerified:     return [.stored, .rejected]
+        case .stored:         return [.confirmPending, .rejected]
+        case .confirmPending: return [.confirmed, .rejected]
+        case .confirmed:      return []
+        case .rejected:       return []
+        }
+    }
+
+    // mirror production line 35-38
+    private static func canApply(new: P2JournalState, over old: P2JournalState) -> Bool {
+        if new == old { return true }
+        return nextAllowed(old).contains(new)
+    }
+
+    // mirror production line 43-63
+    private static func validateInvariants(state: P2JournalState,
+                                            existingPath: String?, existingHash: String?,
+                                            newPath: String?, newHash: String?) throws {
+        let resolvedPath = newPath ?? existingPath
+        let resolvedHash = newHash ?? existingHash
+        let needsPath: Set<P2JournalState> = [.stored, .confirmPending, .confirmed]
+        if needsPath.contains(state), resolvedPath == nil {
+            throw AppError.internalError(
+                module: "PR5a-InMemoryAcceptanceJournalDAO",
+                detail: "state \(state.rawValue) requires sqliteLocalPath but neither new nor existing has it")
+        }
+        if state == .stored {
+            guard let h = resolvedHash, isValidCRC32Hex(h) else {
+                throw AppError.internalError(
+                    module: "PR5a-InMemoryAcceptanceJournalDAO",
+                    detail: ".stored requires contentHash matching 8-char lowercase hex (CRC32)")
+            }
+        }
+    }
+
+    // mirror production line 66-69
+    private static func isValidCRC32Hex(_ s: String) -> Bool {
+        guard s.count == 8 else { return false }
+        return s.allSatisfy { $0.isHexDigit && (!$0.isLetter || $0.isLowercase) }
+    }
+
     public func upsert(trainingSetId: Int, leaseId: String,
                        state: P2JournalState,
                        sqliteLocalPath: String?,
@@ -518,17 +748,42 @@ public final class InMemoryAcceptanceJournalDAO: AcceptanceJournalDAO, @unchecke
         lock.lock(); defer { lock.unlock() }
         let k = Self.key(trainingSetId, leaseId)
         let stamp = Int64(Date().timeIntervalSince1970)
-        let id: Int64
+
         if let existing = rows[k] {
-            id = existing.id  // mirror SQLite UNIQUE + REPLACE：保留旧 id
+            // 已存在 → 检查 transition 是否合法（mirror production line 90-92：不合法 = silent NOOP）
+            if !Self.canApply(new: state, over: existing.state) {
+                return  // NOOP（不抛、不修改）
+            }
+            try Self.validateInvariants(state: state,
+                                        existingPath: existing.sqliteLocalPath,
+                                        existingHash: existing.contentHash,
+                                        newPath: sqliteLocalPath,
+                                        newHash: contentHash)
+            // COALESCE：nil 入参保留 existing 字段（mirror production line 131-133）
+            rows[k] = AcceptanceJournalRow(
+                id: existing.id,  // 保留 id（mirror UNIQUE + UPDATE）
+                trainingSetId: trainingSetId, leaseId: leaseId,
+                state: state, stateEnteredAt: stamp,
+                lastError: lastError ?? existing.lastError,
+                sqliteLocalPath: sqliteLocalPath ?? existing.sqliteLocalPath,
+                contentHash: contentHash ?? existing.contentHash)
         } else {
-            id = nextId
+            // 首插：mirror production line 102-106：state 必须 .downloaded
+            guard state == .downloaded else {
+                throw AppError.internalError(
+                    module: "PR5a-InMemoryAcceptanceJournalDAO",
+                    detail: "first INSERT must be .downloaded; got .\(state.rawValue) for tid=\(trainingSetId) lid=\(leaseId)")
+            }
+            try Self.validateInvariants(state: state,
+                                        existingPath: nil, existingHash: nil,
+                                        newPath: sqliteLocalPath, newHash: contentHash)
+            let id = nextId
             nextId += 1
+            rows[k] = AcceptanceJournalRow(
+                id: id, trainingSetId: trainingSetId, leaseId: leaseId,
+                state: state, stateEnteredAt: stamp,
+                lastError: lastError, sqliteLocalPath: sqliteLocalPath, contentHash: contentHash)
         }
-        rows[k] = AcceptanceJournalRow(
-            id: id, trainingSetId: trainingSetId, leaseId: leaseId,
-            state: state, stateEnteredAt: stamp,
-            lastError: lastError, sqliteLocalPath: sqliteLocalPath, contentHash: contentHash)
     }
 
     public func listByState(_ state: P2JournalState) throws -> [AcceptanceJournalRow] {
@@ -543,7 +798,7 @@ public final class InMemoryAcceptanceJournalDAO: AcceptanceJournalDAO, @unchecke
 }
 ```
 
-- [ ] **运行测试，确认 14 个 P4 测试全过 + 既有 contract 测试不退化**
+- [ ] **运行测试，确认 22 个 P4 测试全过 + 既有 contract 测试不退化**
 
 ```bash
 cd ios/Contracts && swift test --filter InMemoryFakesTests 2>&1 | tail -10
@@ -552,7 +807,7 @@ cd ios/Contracts && swift test --filter TrainingSessionCoordinatorTests 2>&1 | t
 ```
 
 Expected:
-- `InMemoryFakesTests`: 14 个全 PASS
+- `InMemoryFakesTests`: 22 个全 PASS（含 R1 修订加的 id-tiebreak 2 条 + state-machine 12 条）
 - `AcceptanceJournalDAOContractTests`: 旧 `test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol` **会 fail**（旧断言 `XCTAssertEqual(rows.count, 0)` 与新行为冲突）—— Step 3.1 修
 - `TrainingSessionCoordinatorTests`: 应保持 PASS（PR #40 测试用 listRecords/loadPending/loadSettings 都是「空状态」断言；新 fake 默认空状态语义不变）
 
@@ -595,17 +850,21 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
     }
 
     func test_reader_loadAllCandles_returns_injected_dict() throws {
-        let candle = KLineCandle(timestamp: 0, open: 1, high: 2, low: 0.5, close: 1.5,
-                                 volume: 100, ma5: nil, ma10: nil, ma20: nil, ma30: nil, ma60: nil, ma66: nil,
-                                 macdDif: nil, macdDea: nil, macdBar: nil,
+        // KLineCandle 真实签名：period/datetime/open/high/low/close/volume/amount/ma66/boll*/macd*/globalIndex/endGlobalIndex
+        let candle = KLineCandle(period: .daily, datetime: 0,
+                                 open: 1, high: 2, low: 0.5, close: 1.5,
+                                 volume: 100, amount: nil,
+                                 ma66: nil,
+                                 bollUpper: nil, bollMid: nil, bollLower: nil,
+                                 macdDiff: nil, macdDea: nil, macdBar: nil,
                                  globalIndex: 0, endGlobalIndex: 0)
-        let dict: [Period: [KLineCandle]] = [.day: [candle]]
+        let dict: [Period: [KLineCandle]] = [.daily: [candle]]
         let reader = PreviewTrainingSetReader(
             meta: TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0),
             candles: dict)
         let loaded = try reader.loadAllCandles()
-        XCTAssertEqual(loaded[.day]?.count, 1)
-        XCTAssertEqual(loaded[.day]?.first?.close, 1.5)
+        XCTAssertEqual(loaded[.daily]?.count, 1)
+        XCTAssertEqual(loaded[.daily]?.first?.close, 1.5)
     }
 
     func test_reader_close_is_no_op() {
@@ -650,7 +909,7 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
 #endif
 ```
 
-> `KLineCandle` 真实初始化器签名按 `Models.swift` line 59-114 当前形状对齐。子代理按编译报错调整字段名顺序，不改测试语义断言。
+> `KLineCandle` 真实初始化器签名已按 `Models.swift` line 75-101 当前形状对齐（period/datetime/open/high/low/close/volume/amount/ma66/boll{Upper,Mid,Lower}/macd{Diff,Dea,Bar}/globalIndex/endGlobalIndex）。其它类型签名按 `Models.swift` 当前形状对齐——若发现 plan 与源不符，按编译器报错对齐 init 顺序，**不改测试语义断言**。
 
 - [ ] **运行 → 全部 fail（type / 文件不存在）**
 
@@ -754,6 +1013,7 @@ git commit -m "feat(PR5a): PreviewTrainingSetReader + factory 升级 value-injec
 #if DEBUG
 func test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol() throws {
     let fake: AcceptanceJournalDAO = InMemoryAcceptanceJournalDAO()
+    // PR 5a 升级：首插必须 .downloaded（mirror production state machine）
     try fake.upsert(trainingSetId: 1, leaseId: "x", state: .downloaded,
                     sqliteLocalPath: nil, contentHash: nil, lastError: nil)
     let rows = try fake.listByState(.downloaded)
@@ -865,7 +1125,7 @@ git commit -m "test(PR5a): contract test 翻面 + 验收清单"
   - `ios/Contracts/Sources/KlineTrainerContracts/AppError.swift`
   - `ios/Contracts/Sources/KlineTrainerContracts/Settings/SettingsStore.swift`
   - `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift`
-  - `ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift` 中 `InMemoryCacheManager` 类（PR 5b scope）
+- [ ] **`InMemoryFakes.swift` 内 `InMemoryCacheManager` 类**（PR 5b scope）`git diff main..HEAD ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift` **不出现** `InMemoryCacheManager` 行的修改
 - [ ] `swift build -c release 2>&1 | tail -3` 不出错（确认 `#if DEBUG` 守卫使 release build 不带 fake 类型）
 
 ---
@@ -896,7 +1156,15 @@ git commit -m "test(PR5a): contract test 翻面 + 验收清单"
 **2. Placeholder 扫描：** 无 TBD / TODO / 「适当处理」类占位
 
 **3. Type 一致性：**
-- `AppError.persistence(.notFound)` 在 Step 1.2 明示「检查存在；如不存在改用 `.dbCorrupted` 或最近义」——避免凭记忆假设
-- `KLineCandle` / `TradeOperation` / `DrawingObject` / `PendingTraining` 真实字段以源文件为准（plan body 提示子代理按编译器对齐）
+- `AppError.persistence(.dbCorrupted)`：fake unknown id 抛此 case，与 `RecordRepositoryImpl.swift` line 74 同步（**不**用 `.notFound`，该 case 在 `AppError.swift` 不存在）
+- `Period` cases = `m3 / m15 / m60 / daily / weekly / monthly`（**没有 `.day` / `.min15`**；测试 helper 用 `.daily` + `.m15`）
+- `PositionTier` = `tier1..tier5`（**没有 `.heavy`**）；`DrawingToolType` = `ray/trend/horizontal/golden/wave/cycle/time`（**没有 `.horizontalLine`**）
+- `DrawingObject(toolType:, anchors:, isExtended:, panelPosition:)`（**没有 `id` / `createdAt` / `tool`**）
+- `KLineCandle(period:, datetime:, open:, high:, low:, close:, volume:, amount:, ma66:, bollUpper:, bollMid:, bollLower:, macdDiff:, macdDea:, macdBar:, globalIndex:, endGlobalIndex:)`
 - `PreviewTrainingSetDBFactory` 默认 init 占位 meta（`stockCode = "PREVIEW"`）在 §3 决策 + Step 2.1 测试 + Step 2.2 实施三处一致引用
 - `nextId` 自增策略在 RecordRepository 与 AcceptanceJournalDAO 都明示「新 key ++ / 旧 key 保留」
+- `InMemoryAcceptanceJournalDAO` mirror 的 4 个 helper（`nextAllowed` / `canApply` / `validateInvariants` / `isValidCRC32Hex`）签名与 production `AcceptanceJournalDAOImpl.swift` line 18-69 完全一致
+
+**4. R1 修订对接（codex round-1 findings 吸收）：**
+- finding 1 (high) AcceptanceJournal state machine → §6 重写 + Task 1 测试 12 条 + 实施代码 4 helper + 测试翻面 Step 3.1
+- finding 2 (medium) Record id-tiebreak → §4 修订 + Task 1 测试 2 条 + 实施代码 listRecords/statistics 双处
