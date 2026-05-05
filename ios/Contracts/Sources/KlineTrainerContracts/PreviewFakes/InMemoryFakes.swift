@@ -448,6 +448,10 @@ public final class InMemoryCacheManager: CacheManager, @unchecked Sendable {
 /// **Invariant (post-impl R1-L3)**：caller 必须传 `filename` 已是 `.sqlite` 后缀的 `TrainingSetFile`
 /// （绕过 normalizedFilename 的 caller 自负）。否则 listAvailable basename tiebreaker 与 production
 /// 行为发散（production 入口 `normalizedCacheFilename` 强制后缀）。
+///
+/// **Capacity note (self-review minor #1)**：`_seedForTesting` 不调用 `evictIfNeededLocked`。
+/// 灌入超 `maxCachedSets`（20）项后 dict 暂时超容量，直到下一次 `store()` 调用才触发驱逐；
+/// 当前 test #16 故意灌 20 + 走 store 第 21 验 evict，符合该 invariant。
 internal extension InMemoryCacheManager {
     func _seedForTesting(_ files: [TrainingSetFile]) {
         lock.lock(); defer { lock.unlock() }
