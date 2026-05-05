@@ -153,7 +153,7 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
     }
 
     func test_reader_validation_OHLC_must_be_finite_and_positive() throws {
-        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
 
         // Open = NaN → corrupt
         let badNaN = KLineCandle(period: .m3, datetime: 0,
@@ -178,7 +178,7 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
     }
 
     func test_reader_validation_OHLC_ordering_high_max_low_min() throws {
-        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
         // high < open (违反 high >= max(open, close, low))
         let bad = KLineCandle(period: .m3, datetime: 0,
                               open: 5, high: 2, low: 0.5, close: 1,
@@ -190,7 +190,7 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
     }
 
     func test_reader_validation_volume_nonnegative() throws {
-        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
         let bad = KLineCandle(period: .m3, datetime: 0,
                               open: 1, high: 2, low: 0.5, close: 1,
                               volume: -1, amount: nil, ma66: nil,
@@ -200,8 +200,25 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
         XCTAssertThrowsError(try PreviewTrainingSetReader(meta: meta, candles: [.m3: [bad]]).loadAllCandles())
     }
 
+    func test_reader_validation_amount_must_be_nonneg_when_set() throws {
+        // I-1: mirrors production DefaultTrainingSetReader line 113-115: amount < 0 → dbCorrupted
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
+        let bad = KLineCandle(period: .daily, datetime: 0,
+                              open: 10, high: 10, low: 10, close: 10,
+                              volume: 100, amount: -0.01, ma66: nil,
+                              bollUpper: nil, bollMid: nil, bollLower: nil,
+                              macdDiff: nil, macdDea: nil, macdBar: nil,
+                              globalIndex: 0, endGlobalIndex: 0)
+        let m3 = [validM3(0)]
+        XCTAssertThrowsError(try PreviewTrainingSetReader(
+            meta: meta, candles: [.m3: m3, .daily: [bad]]
+        ).loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else { XCTFail("expected dbCorrupted"); return }
+        }
+    }
+
     func test_reader_validation_optional_indicators_must_be_finite_when_set() throws {
-        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
         // ma66 = inf
         let bad = KLineCandle(period: .m3, datetime: 0,
                               open: 1, high: 2, low: 0.5, close: 1,
@@ -213,7 +230,7 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
     }
 
     func test_reader_validation_endGlobalIndex_strictly_increasing_per_period() throws {
-        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
         // 同 period 两根 endGlobalIndex 相等 → 非严格递增
         let dup1 = validM3(0)
         let dup2 = KLineCandle(period: .m3, datetime: 1,
@@ -226,7 +243,7 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
     }
 
     func test_reader_validation_m3_globalIndex_must_equal_endGlobalIndex_and_array_index() throws {
-        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
         // m3[0] 但 globalIndex = 5（应等于 array idx = 0）
         let bad = KLineCandle(period: .m3, datetime: 0,
                               open: 1, high: 2, low: 0.5, close: 1,
@@ -247,7 +264,7 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
     }
 
     func test_reader_validation_non_m3_endGlobalIndex_must_be_nonneg_and_within_m3Max() throws {
-        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
         // m3 max endGlobalIndex = 2；daily 一根 endGlobalIndex = 5 → 越界
         let m3 = [validM3(0), validM3(1), validM3(2)]
         let dailyOob = validDaily(eg: 5)
@@ -263,7 +280,7 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
     }
 
     func test_reader_validation_higher_period_without_m3_is_corrupt() throws {
-        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
         // 只有 daily 没有 m3，且非空 → corrupt
         XCTAssertThrowsError(try PreviewTrainingSetReader(
             meta: meta, candles: [.daily: [validDaily(eg: 0)]]
@@ -272,7 +289,7 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
 
     func test_reader_validation_empty_dict_is_legal() throws {
         // 整库 result 全空 = 允许（mirror production line 169-172 else 分支不触发）
-        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
         let r = PreviewTrainingSetReader(meta: meta, candles: [:])
         XCTAssertEqual(try r.loadAllCandles().count, 0)
     }
