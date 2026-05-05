@@ -627,13 +627,17 @@ final class InMemoryDBFakesTests: XCTestCase {
 
     func test_recordRepo_concurrent_inserts_no_data_race_or_lost_writes() throws {
         let repo = InMemoryRecordRepository()
+        // R7 修订（codex round-7 high-1）：Swift 6 strict concurrency 下 q.async 闭包是 @Sendable，
+        // 不能捕获非-Sendable 的 XCTestCase self。先在主线程同步构造 [TrainingRecord]（仍可调 self.makeRecord），
+        // 再把已构造的 Sendable 值分发进闭包。
+        let records: [TrainingRecord] = (0..<200).map { i in makeRecord(id: nil, createdAt: Int64(i)) }
         let group = DispatchGroup()
         let q = DispatchQueue.global(qos: .userInitiated)
-        for i in 0..<200 {
+        for record in records {
             group.enter()
             q.async {
-                _ = try? repo.insertRecord(self.makeRecord(id: nil, createdAt: Int64(i)), ops: [], drawings: [])
-                group.leave()
+                defer { group.leave() }
+                _ = try? repo.insertRecord(record, ops: [], drawings: [])
             }
         }
         group.wait()
@@ -1637,6 +1641,7 @@ git commit -m "test(PR5a): contract test 翻面 + 验收清单"
 | `DefaultTrainingSetReader` / `DefaultTrainingSetDBFactory` 改动 | 生产实现，PR #41 已 merge | N/A |
 | Production `RecordRepositoryImpl` / `SettingsDAOImpl` 任何变更 | 生产实现已 merge | N/A |
 | Production 错误路径模拟（versionMismatch / fileNotFound / SQLite IO 错误）factory mock | R5 决策：PreviewTrainingSetDBFactory scope = preview/happy-path only；错误路径 mock 留 backlog 单独 PR | backlog |
+| `TrainingSessionCoordinator.preview()` / `SettingsStore.preview()` 共享单 `InMemorySettingsDAO` 实例 wiring 修复 | R7 决策：preview 用例只渲染默认值不写回，stateful fake 后两条路径分叉对 preview path 无实际影响；要测 round-trip 写的代码自建 `let dao = InMemorySettingsDAO()` 注入两端，不依赖 `.preview()` 工厂；本 PR 守"不动 PR40 既有 wiring"边界 | backlog |
 
 ---
 
@@ -1688,3 +1693,7 @@ git commit -m "test(PR5a): contract test 翻面 + 验收清单"
 **10. R6 修订对接（codex round-6 findings 吸收）：**
 - finding 1 (high) test class 名称冲突 → 重命名 InMemoryFakesTests → InMemoryDBFakesTests（避开既有 `@Suite struct InMemoryFakesTests` in `TrainingSessionCoordinatorTests.swift:137-185`）
 - finding 2 (medium) 测试 count 三处不一致 → Step 1.2 / 2.2 expected 改用 `0 failures` 模式；验收清单 §3 改用 `tail -3 | grep "with 0 failures"`；完工自检 LOC 上限上调到实际值（≤ 250/130/750）
+
+**11. R7 修订对接（codex round-7 findings 吸收）：**
+- finding 1 (high) Swift 6 Sendable closure 编译 bug → Task 1 并发测试改写：先 sync 构造 `[TrainingRecord]` 再分发进 `q.async` 闭包；不在闭包内捕获 XCTestCase self；用 `defer { group.leave() }`
+- finding 2 (medium) Preview SettingsStore wiring 分叉 → **不修，进 §10 backlog**：rationale = preview 用例渲染默认值不 round-trip 写；要测共享 DAO 的 round-trip 测试自建 dao + inject 两端；改 `TrainingSessionCoordinator.preview()` 是改 PR40 wiring 决策不属 PR5a fixture-upgrade scope；本 PR 守"不动 PR40 既有 wiring"边界（user 路径 2 决策 2026-05-05）
