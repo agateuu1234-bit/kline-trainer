@@ -372,6 +372,16 @@ final class InMemoryDBFakesTests: XCTestCase {
         XCTAssertEqual(s.currentCapital, 0)
     }
 
+    /// R8 修订（codex round-8 med-3）：负 limit 不应 trap，应返回全量（mirror SQLite LIMIT 负值语义）
+    func test_recordRepo_listRecords_negative_limit_returns_all() throws {
+        let repo = InMemoryRecordRepository()
+        _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 100), ops: [], drawings: [])
+        _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 200), ops: [], drawings: [])
+        XCTAssertEqual(try repo.listRecords(limit: -1).count, 2)  // 不 trap
+        XCTAssertEqual(try repo.listRecords(limit: -100).count, 2)
+        XCTAssertEqual(try repo.listRecords(limit: 0).count, 0)   // 0 = 空（合法 prefix）
+    }
+
     // MARK: - InMemoryPendingTrainingRepository
 
     func test_pendingRepo_save_load_clear_round_trip() throws {
@@ -727,7 +737,9 @@ public final class InMemoryRecordRepository: RecordRepository, @unchecked Sendab
             if a.createdAt != b.createdAt { return a.createdAt > b.createdAt }
             return (a.id ?? 0) > (b.id ?? 0)
         }
-        if let limit = limit { return Array(sorted.prefix(limit)) }
+        // R8 修订（codex round-8 med-3）：负 limit 会 trap `Array.prefix` precondition；
+        // mirror SQLite `LIMIT ?` 负值语义 = "无限制"，把负值视同 nil（全量返回）
+        if let limit = limit, limit >= 0 { return Array(sorted.prefix(limit)) }
         return sorted
     }
 
@@ -1697,3 +1709,14 @@ git commit -m "test(PR5a): contract test 翻面 + 验收清单"
 **11. R7 修订对接（codex round-7 findings 吸收）：**
 - finding 1 (high) Swift 6 Sendable closure 编译 bug → Task 1 并发测试改写：先 sync 构造 `[TrainingRecord]` 再分发进 `q.async` 闭包；不在闭包内捕获 XCTestCase self；用 `defer { group.leave() }`
 - finding 2 (medium) Preview SettingsStore wiring 分叉 → **不修，进 §10 backlog**：rationale = preview 用例渲染默认值不 round-trip 写；要测共享 DAO 的 round-trip 测试自建 dao + inject 两端；改 `TrainingSessionCoordinator.preview()` 是改 PR40 wiring 决策不属 PR5a fixture-upgrade scope；本 PR 守"不动 PR40 既有 wiring"边界（user 路径 2 决策 2026-05-05）
+
+**12. R8 修订对接（codex round-8 findings 处理）：**
+- finding 1 (high) preview factory 不能 exercise failure paths → **REJECT 复述 R5 已 accept residual**：R5 finding 1 已 explicit accept "scope = preview/happy-path only"，进 §10 backlog table 第 7 行（"Production 错误路径模拟 factory mock"）；codex round-5 的 recommendation 3（"clearly split this into a preview-only factory that is not used as the test fixture for TrainingSetDBFactory error paths"）已采纳。round-8 复述同诉求按 memory `feedback_codex_round6_self_contradiction` reject
+- finding 2 (medium) stateful settings fake 双独立 store → **REJECT 复述 R7 已 accept residual**：R7 finding 2 已经 user explicit accept residual（路径 2 决策），进 §10 backlog table 第 8 行；codex round-7 已收到同 recommendation 已被 user level 决策 accept，round-8 复述按 memory rule reject
+- finding 3 (medium) listRecords 负 limit trap → **修**：fake `listRecords(limit:)` 加 `limit >= 0` guard（mirror SQLite LIMIT 负值 = 无限制语义）+ Task 1 测试 1 条覆盖 -1 / -100 / 0 三个边界
+
+**13. Round 8 后停止 review 循环**（per user 路径 2 R8 硬上限决策 2026-05-05）：
+- 11/13 findings 已修；2/13 已显式 accept residual + 进 §10 backlog
+- finding 复述模式确认（findings 1+2 都是已 accept residual 第 2 次复述）= memory 触发条件
+- 不再跑 codex round 9；直接进 subagent 执行（Task 1/2/3）+ 主 Plan 验证
+- 实现完成后跑 post-impl codex review（branch-diff scope，针对实现代码 not plan）一次；若仍 needs-attention 走 admin bypass merge 路径
