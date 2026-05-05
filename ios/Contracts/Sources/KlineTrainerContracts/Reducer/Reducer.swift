@@ -161,12 +161,44 @@ extension PanelViewState {
             revision &+= 1
             return .none
 
-        // —— PR7b1 scope: drawing-action 占位（不 bump revision）——
-        // 替换计划见 docs/superpowers/plans/2026-05-05-pr7a-c1b-values-revision.md §1
-        case (_, .activateDrawing),
-             (_, .setDrawingSnapshot),
-             (_, .drawingCommitted),
-             (_, .drawingCancelled):
+        // —— activateDrawing（spec L1052-1056；不直接进 drawing，只发 effect）——
+        case (.autoTracking, .activateDrawing(let tool)),
+             (.freeScrolling, .activateDrawing(let tool)):
+            return .requestDrawingSnapshotAfterStoppingAnimator(tool: tool, baseRevision: revision)
+        case (.drawing, .activateDrawing):
+            return .none
+
+        // —— setDrawingSnapshot（spec L1058-1072；外部回推 candleRange；matched 进 drawing；stale 留 effect）——
+        case (.autoTracking, .setDrawingSnapshot(let tool, let baseRev, let range)),
+             (.freeScrolling, .setDrawingSnapshot(let tool, let baseRev, let range)):
+            guard baseRev == revision else {
+                return .staleDrawingSnapshot(expected: baseRev, actual: revision)
+            }
+            _ = tool  // 由 DrawingToolManager 处理 tool 切换；reducer 只管面板 mode
+            let frozen = FrozenPanelState(period: period, visibleCount: visibleCount,
+                                          offset: offset, candleRange: range,
+                                          baseRevision: revision)
+            interactionMode = .drawing(snapshot: DrawingSnapshot(frozen: frozen))
+            return .none
+        case (.drawing, .setDrawingSnapshot):
+            return .none
+
+        // —— drawingCommitted / drawingCancelled（spec L1074-1097 闸门 #5：cross-session guard）——
+        case (.drawing(let snap), .drawingCommitted(let base)):
+            guard base == snap.frozen.baseRevision else {
+                return .none  // 旧 session 遗留 action，丢弃保持当前 drawing
+            }
+            interactionMode = .autoTracking
+            return .none
+        case (.drawing(let snap), .drawingCancelled(let base)):
+            guard base == snap.frozen.baseRevision else {
+                return .none
+            }
+            interactionMode = .autoTracking
+            return .none
+        case (.autoTracking, .drawingCommitted), (.freeScrolling, .drawingCommitted),
+             (.autoTracking, .drawingCancelled), (.freeScrolling, .drawingCancelled):
+            assertionFailure("非法转换：\(interactionMode) → \(action)")
             return .none
         }
     }
