@@ -400,6 +400,124 @@ struct ReduceOffsetAppliedTests {
     }
 }
 
+// MARK: - reduce: activateDrawing (3 modes; PR7b1 replaces PR7a placeholder)
+
+@Suite("reduce activateDrawing")
+struct ReduceActivateDrawingTests {
+
+    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0) -> PanelViewState {
+        PanelViewState(period: .m15, interactionMode: mode,
+                       visibleCount: 100, offset: 0, revision: rev)
+    }
+
+    private func drawingMode(baseRev: UInt64 = 5) -> ChartInteractionMode {
+        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
+                                      candleRange: 0..<100, baseRevision: baseRev)
+        return .drawing(snapshot: DrawingSnapshot(frozen: frozen))
+    }
+
+    @Test("autoTracking → 不 bump + .requestDrawingSnapshotAfterStoppingAnimator(tool, revision)")
+    func autoEffect() {
+        var s = make(.autoTracking, rev: 5)
+        let eff = s.reduce(.activateDrawing(.ray))
+        #expect(s.interactionMode == .autoTracking)
+        #expect(s.revision == 5)
+        #expect(eff == .requestDrawingSnapshotAfterStoppingAnimator(tool: .ray, baseRevision: 5))
+    }
+
+    @Test("freeScrolling → 不 bump + .requestDrawingSnapshotAfterStoppingAnimator(tool, revision)")
+    func freeEffect() {
+        var s = make(.freeScrolling, rev: 7)
+        let eff = s.reduce(.activateDrawing(.trend))
+        #expect(s.interactionMode == .freeScrolling)
+        #expect(s.revision == 7)
+        #expect(eff == .requestDrawingSnapshotAfterStoppingAnimator(tool: .trend, baseRevision: 7))
+    }
+
+    @Test("drawing → 不 bump + .none（DrawingToolManager 处理切工具）")
+    func drawingNoChange() {
+        var s = make(drawingMode(baseRev: 5), rev: 5)
+        let eff = s.reduce(.activateDrawing(.horizontal))
+        guard case .drawing = s.interactionMode else {
+            Issue.record("expected drawing mode unchanged after activateDrawing")
+            return
+        }
+        #expect(s.revision == 5)
+        #expect(eff == .none)
+    }
+}
+
+// MARK: - reduce: setDrawingSnapshot (3 modes happy / matched only; PR7b2 cover stale)
+
+@Suite("reduce setDrawingSnapshot")
+struct ReduceSetDrawingSnapshotTests {
+
+    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0) -> PanelViewState {
+        PanelViewState(period: .m15, interactionMode: mode,
+                       visibleCount: 100, offset: 0, revision: rev)
+    }
+
+    private func drawingMode(baseRev: UInt64 = 5) -> ChartInteractionMode {
+        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
+                                      candleRange: 0..<100, baseRevision: baseRev)
+        return .drawing(snapshot: DrawingSnapshot(frozen: frozen))
+    }
+
+    @Test("autoTracking + matched baseRev → drawing(snap) + 不 bump + .none")
+    func autoMatchedEntersDrawing() {
+        var s = make(.autoTracking, rev: 5)
+        let eff = s.reduce(.setDrawingSnapshot(tool: .ray, baseRevision: 5, candleRange: 10..<110))
+        guard case .drawing(let snap) = s.interactionMode else {
+            Issue.record("expected drawing mode after matched setDrawingSnapshot")
+            return
+        }
+        #expect(snap.frozen.period == .m15)
+        #expect(snap.frozen.visibleCount == 100)
+        #expect(snap.frozen.offset == 0)
+        #expect(snap.frozen.candleRange == 10..<110)
+        #expect(snap.frozen.baseRevision == 5)
+        #expect(s.revision == 5)
+        #expect(eff == .none)
+    }
+
+    @Test("freeScrolling + matched baseRev → drawing(snap) + 不 bump + .none")
+    func freeMatchedEntersDrawing() {
+        var s = make(.freeScrolling, rev: 7)
+        let eff = s.reduce(.setDrawingSnapshot(tool: .trend, baseRevision: 7, candleRange: 0..<50))
+        guard case .drawing(let snap) = s.interactionMode else {
+            Issue.record("expected drawing mode after matched setDrawingSnapshot")
+            return
+        }
+        #expect(snap.frozen.candleRange == 0..<50)
+        #expect(snap.frozen.baseRevision == 7)
+        #expect(s.revision == 7)
+        #expect(eff == .none)
+    }
+
+    @Test("drawing → 不变 + 不 bump + .none（DrawingToolManager 处理切工具；distinguishing fixture 守'未重入'）")
+    func drawingNoReentry() {
+        // R1 H-3 修订：fixture 与 reduce 参数 candleRange / offset 不同；
+        // 若 prod 错把 drawing 模式重入新 snap，新 snap 会带 reduce 参数 candleRange=200..<300
+        // 而非 fixture 0..<100；fixture frozen.offset=0 vs PanelViewState.offset=99 同理（注：
+        // setDrawingSnapshot 字面落地时新 snap 用 PanelViewState.offset 而非 frozen 旧值）。
+        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
+                                      candleRange: 0..<100, baseRevision: 5)
+        var s = PanelViewState(period: .m15,
+                               interactionMode: .drawing(snapshot: DrawingSnapshot(frozen: frozen)),
+                               visibleCount: 100, offset: 99, revision: 5)
+        let eff = s.reduce(.setDrawingSnapshot(tool: .ray, baseRevision: 5, candleRange: 200..<300))
+        guard case .drawing(let snap) = s.interactionMode else {
+            Issue.record("expected drawing mode unchanged")
+            return
+        }
+        #expect(snap.frozen.candleRange == 0..<100)  // fixture 值，证明未重入
+        #expect(snap.frozen.offset == 0)              // 同上
+        #expect(snap.frozen.baseRevision == 5)
+        #expect(s.revision == 5)
+        #expect(eff == .none)
+    }
+}
+
 // MARK: - reduce: drawing-action 占位（PR7a scope = 不 bump revision；PR7b1 替换为真实现）
 
 @Suite("reduce drawing-action 占位 (PR7a scope = 不 bump, 全 3 mode)")
