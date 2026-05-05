@@ -1,0 +1,902 @@
+# PR 5a — Fixture/Mock DB-domain Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 落地 Wave 0 顺位 9 的 DB-domain 测试 fixture——把 PR #40 在 `InMemoryFakes.swift` 留下的 4 个 P4 stub fake（`InMemoryRecordRepository` / `InMemoryPendingTrainingRepository` / `InMemorySettingsDAO` / `InMemoryAcceptanceJournalDAO`，全部 `fatalError` 或返回空集合）升级为真有内存状态、能 round-trip 的 fake；新增 P3 `PreviewTrainingSetReader` 与升级 `PreviewTrainingSetDBFactory` 走 value-injected 模式。覆盖 spec §11.3（line 2195-2200）DB-domain 5 项；port-domain 6 项（`InMemoryCacheManager` 等）留 PR 5b。
+
+**Architecture:**
+- 4 个 P4 fake 保持独立 class（spec §P4 v1.3 修订意图：3-Repo + 1-DAO 独立 mock 粒度，line 1945-1947）；不合并成 `InMemoryAppDB` 巨石
+- 内部状态 = pure Swift `Dictionary` / 单值 slot，无文件系统、无 GRDB；线程安全用 `NSLock` 包裹（`@unchecked Sendable` 已是 PR #40 约定）
+- 全部 `#if DEBUG` guard（PR #40 文件级既有约定，与 spec L1671-1713 preview Fixture 一致：fakes 不进 Release binary）
+- `PreviewTrainingSetReader` = 新增 `final class` + value-injected `meta` + `candles`；`PreviewTrainingSetDBFactory` 升级为 init 接收 `meta` + `candles`，`openAndVerify` 忽略 `file` 参数返回内置 reader（带 default 空构造保 PR #40 既有 callsite 不破）
+- 不动 `InMemoryCacheManager`（PR 5b scope）；不动协议签名（`KlineTrainerContracts/Persistence/*.swift`）
+- 测试在已有 `KlineTrainerContractsTests` target 内新增 `InMemoryFakesTests.swift` + 1 个 `PreviewTrainingSetReaderTests.swift`；现有 `AcceptanceJournalDAOContractTests` 的 `Wave 0 fake 不实际持久化` 行为断言要随升级翻面（旧断言已矛盾于 PR 5a 目标）
+
+**Tech Stack:** Swift 6.0 / SwiftPM / Foundation / `NSLock` / XCTest
+
+---
+
+## File Structure
+
+| 文件 | 责任 | 状态 |
+|---|---|---|
+| `ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift` | 4 个 P4 fake 升级为真 in-memory 状态；`PreviewTrainingSetDBFactory` 升级为 value-injected | Modify |
+| `ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/PreviewTrainingSetReader.swift` | 新增 P3b 预览 reader：constructor-injected meta + candles | Create |
+| `ios/Contracts/Tests/KlineTrainerContractsTests/InMemoryFakesTests.swift` | 4 个 P4 fake 行为测试：round-trip insert/list、save/load/clear、resetCapital → 0、upsert 同 (id,lease) 替换、listByState 过滤、deleteByIdLease 0 行删除合法、stateEnteredAt 单调、并发安全 | Create |
+| `ios/Contracts/Tests/KlineTrainerContractsTests/PreviewTrainingSetReaderTests.swift` | reader meta/candles 透传 + factory 透传 reader + close() 是 no-op | Create |
+| `ios/Contracts/Tests/KlineTrainerContractsTests/AcceptanceJournalDAOContractTests.swift` | 升级 `test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol`：从「不持久化」翻面成 round-trip 行为断言 | Modify |
+| `docs/acceptance/2026-05-05-pr5a-db-fixtures.md` | 验收清单（中文，非 coder 可执行）| Create |
+
+**预估 prod LOC（硬规则 ≤500）：**
+- `InMemoryFakes.swift` 净增 ≈ 110 LOC（4 fake 各加内部状态 + lock + 真实 method 体；PreviewTrainingSetDBFactory 升级 ≈ +15 LOC）
+- `PreviewTrainingSetReader.swift` 新增 ≈ 40 LOC（含 init / loadMeta / loadAllCandles / close）
+- 合计：**≈ 150 prod LOC** ✓ 远低于 500
+
+**预估 test LOC**：≈ 280
+
+**子项数**（per memory feedback "硬规则 ≤3 子项"）：
+1. P4 4 fake 升级（一个文件内的内聚改动，spec 列在同一 §11.3 子清单 #1-4）
+2. P3 PreviewTrainingSetReader + factory 升级（spec §11.3 #5 配对）
+3. 验收清单 + 已有测试翻面修订
+合计 **3 子项** ✓
+
+---
+
+## Design Decisions（plan-time 锁定，codex review 抓变动）
+
+### §1 不合并 4 个 P4 fake 为一个 `InMemoryAppDB` 巨石
+
+**Spec 字面证据：**
+- L1865 spec 解释 v1.3 拆分：「原单一 `protocol AppDB` 把 record / pending / settings 全塞在一个端口，**违反 §零原则 4（独立验收 Mock 粒度过大）**」
+- L1945-1947 显式 Mock 粒度收益：「`SettingsStore` 只依赖 `SettingsDAO`，Mock 三个方法即可」「`TrainingSessionCoordinator` 依赖 `RecordRepository + PendingTrainingRepository`，**不需要 Mock settings 路径**」
+- §11.3（L2195-2200）测试 fixture 清单按 4 个独立类列出，不是 1 个
+
+**3 选项评估：**
+
+| 方案 | 优点 | 缺点 | 选/拒 |
+|---|---|---|---|
+| **A. 4 个独立 class（spec 直译）** | mock 粒度 = protocol 粒度；spec literal；PR #40 既有 stub 形状一致 | 4 个 lock，更多重复 init 样板 | ✅ 选 |
+| B. 单 `InMemoryAppDB` 实现 4 协议复合 | 一处 lock；少行数 | 违反 spec L1865 拆分意图；测试要 mock SettingsDAO 时被迫拖入 RecordRepository 状态 | ❌ 拒 |
+| C. shared `InMemoryStore` 类 + 4 个 wrapper class 转发 | mock 粒度保持 + 共享状态 | 3 层间接；fake 不做跨协议事务，没有共享必要 | ❌ 拒（YAGNI） |
+
+**结论**：选 A。`production` 端 `DefaultAppDB` 在 spec L1931 用 `typealias AppDB = RecordRepository & PendingTrainingRepository & SettingsDAO & AcceptanceJournalDAO` 复合，是「生产侧合成 root」；fake 端故意不合成、保持独立 mock 粒度。
+
+### §2 线程安全 = `NSLock`，不用 `actor`
+
+**理由：**
+- protocol 体全部 sync `throws`（不是 `async`），actor 包裹后 `await` 调用所有 method 会强制改 protocol 签名 → trust-boundary change 出 PR5a scope
+- PR #40 已经把所有 fake 标 `@unchecked Sendable`，约定就是「自管同步」
+- `NSLock` ≈ 5 行样板（`lock.lock(); defer { lock.unlock() }; ...`），重复 4 份可以接受；Swift `Mutex` 仅 macOS 15+，iOS 17 不支持
+
+**反驳「为什么不 `DispatchQueue.sync`」：** 同步路径上 `NSLock` 比 queue thunk 快 ~10x；fake 不在性能 hot path 上但「不用 queue 也无成本」。
+
+### §3 `PreviewTrainingSetDBFactory` 升级 = init(meta:candles:) + 默认空构造
+
+**Spec literal**：`func openAndVerify(file: URL, expectedSchemaVersion: Int) throws -> TrainingSetReader`（L1830）
+
+**Reality**：fake 在 preview / 单测里没有真 sqlite 文件可打开，`file:` 参数注定被忽略；spec §15.1 #9（L2456）只要求 `TrainingEngine.preview(mode:)` 能在 `#Preview` 渲染——意味着 fake 必须返回**有意义的 reader**（载入 fixture candles）。
+
+**接口形状选择：**
+- factory 加 `public init(meta: TrainingSetMeta? = nil, candles: [Period: [KLineCandle]] = [:])`
+- `openAndVerify` 忽略 `file` / `expectedSchemaVersion`，把构造期注入的 meta+candles 包成 reader 返回
+- meta 为 nil 时（PR #40 既有空构造 callsite）返回带「占位 meta」的 reader：`TrainingSetMeta(stockCode: "PREVIEW", stockName: "Preview Stock", startDatetime: 0, endDatetime: 0)`——保 callsite 不破
+
+**为什么不让 `openAndVerify` 抛 `fileNotFound`：** spec L1832 错误清单是 production 行为；fake 设计就是「不 open file」，模拟「永远成功」更适配 preview 场景。
+
+### §4 `InMemoryRecordRepository.statistics` 计算口径
+
+**Spec 字面无 statistics SQL 给出**（L1870 仅给 protocol 签名）。Production `RecordRepositoryImpl.statistics` 按 spec § P4 line 1923-1929 的语义实现：
+- `totalCount` = `records` 行数
+- `winCount` = `profit > 0` 行数
+- `currentCapital` = `latest_record.totalCapital + latest_record.profit`（按 `created_at DESC LIMIT 1`），无记录时 = 0
+
+Fake 镜像 production 这套口径（同口径才能和 production 互换不破测试）。
+
+### §5 `InMemorySettingsDAO.resetCapital` = 把 totalCapital 置 0
+
+**Production 行为**（`SettingsDAOImpl.resetCapital`，line 87-91）：`UPDATE settings SET total_capital = '0.0'`，**只动 totalCapital，不动其他字段**。Fake 镜像同口径。
+
+### §6 `InMemoryAcceptanceJournalDAO.upsert` 主键与 `stateEnteredAt`
+
+**Spec 主键**（M0.1 line 230-289 `download_acceptance_journal`）：`UNIQUE(training_set_id, lease_id)`。Fake 用 `[String: AcceptanceJournalRow]` 字典，key = `"\(trainingSetId)::\(leaseId)"`。
+
+**`stateEnteredAt`**（spec L241）：`Int64` Unix 秒 UTC，由实现侧 stamp。Fake 在每次 `upsert` 时 `Int64(Date().timeIntervalSince1970)`；同 (id, lease) 重新 upsert 重新 stamp（与 production `INSERT OR REPLACE` 一致）。
+
+**`id` 自增**：fake 用 `var nextId: Int64 = 1`，每次 `upsert` **新行**（key 不存在）时 ++；已存在 key 的 upsert **保留原 id**（mirror SQLite UNIQUE 约束 + REPLACE 行为）。
+
+### §7 `PreviewTrainingSetReader` 是 class 不是 struct
+
+**Spec literal**：`public protocol TrainingSetReader: AnyObject, Sendable`（L1842）—— `AnyObject` 强制 reference type。`final class` + immutable stored property + `@unchecked Sendable`（值 capture 后不变）。
+
+### §8 不在 PR5a 内做 Preview Fixture 数据（KLineCandle.previewFixture / FeeSnapshot.preview / TrainingRecord.previewRecord）
+
+**Spec §11.3 (line 2188-2194)** 列了 6 项 Preview Fixture 数据，与 §11.3 (line 2195-2200) 11 项 Test Fixture Ports 是**两个独立清单**。v6 outline PR5a/5b 拆分对应**后者的前 5 / 后 6**；前者 6 项 Preview 数据已由 PR #40（`SettingsStore.preview()` + `TrainingSessionCoordinator.preview()` callsite）部分落地，剩余几项 v6 outline 未列入 Wave 0 强制锚——按「实施 plan 打包偏差」memory rule，**不超 scope 提前合并**。若 codex 提，按 spec 双清单引用 reject。
+
+---
+
+## Task 1: 4 个 P4 in-memory fake 升级为真状态
+
+**Files:**
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift`
+- Create: `ios/Contracts/Tests/KlineTrainerContractsTests/InMemoryFakesTests.swift`
+
+### Step 1.1 — 写 4 个 P4 fake 行为测试（fail first）
+
+- [ ] **写测试文件 InMemoryFakesTests.swift（XCTest，与 AcceptanceJournalDAOContractTests 同 target）**
+
+```swift
+import XCTest
+@testable import KlineTrainerContracts
+
+#if DEBUG
+final class InMemoryFakesTests: XCTestCase {
+
+    // MARK: - InMemoryRecordRepository
+
+    func test_recordRepo_insertRecord_assigns_id_and_persists() throws {
+        let repo = InMemoryRecordRepository()
+        let rec = makeRecord(id: nil, profit: 100, total: 1000)
+        let id = try repo.insertRecord(rec, ops: [], drawings: [])
+        XCTAssertEqual(id, 1) // 首条 id = 1
+        let listed = try repo.listRecords(limit: nil)
+        XCTAssertEqual(listed.count, 1)
+        // 返回的 record 应带 server-assigned id
+        XCTAssertEqual(listed.first?.id, 1)
+    }
+
+    func test_recordRepo_loadRecordBundle_returns_inserted_ops_and_drawings() throws {
+        let repo = InMemoryRecordRepository()
+        let op = makeOp(direction: .buy)
+        let dr = makeDrawing()
+        let id = try repo.insertRecord(makeRecord(id: nil), ops: [op], drawings: [dr])
+        let bundle = try repo.loadRecordBundle(id: id)
+        XCTAssertEqual(bundle.0.id, id)
+        XCTAssertEqual(bundle.1.count, 1)
+        XCTAssertEqual(bundle.1.first?.direction, .buy)
+        XCTAssertEqual(bundle.2.count, 1)
+    }
+
+    func test_recordRepo_loadRecordBundle_throws_for_unknown_id() {
+        let repo = InMemoryRecordRepository()
+        XCTAssertThrowsError(try repo.loadRecordBundle(id: 999))
+    }
+
+    func test_recordRepo_listRecords_limit_and_order_desc_by_createdAt() throws {
+        let repo = InMemoryRecordRepository()
+        _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 100), ops: [], drawings: [])
+        _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 300), ops: [], drawings: [])
+        _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 200), ops: [], drawings: [])
+        let all = try repo.listRecords(limit: nil)
+        XCTAssertEqual(all.map(\.createdAt), [300, 200, 100])
+        let topTwo = try repo.listRecords(limit: 2)
+        XCTAssertEqual(topTwo.count, 2)
+        XCTAssertEqual(topTwo.map(\.createdAt), [300, 200])
+    }
+
+    func test_recordRepo_statistics_currentCapital_uses_latest_by_createdAt() throws {
+        let repo = InMemoryRecordRepository()
+        // 3 条记录：profit 100/200/-50；createdAt 100/200/300（最新 = 第 3 条）
+        _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 100, profit: 100, total: 1000), ops: [], drawings: [])
+        _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 200, profit: 200, total: 1000), ops: [], drawings: [])
+        _ = try repo.insertRecord(makeRecord(id: nil, createdAt: 300, profit: -50, total: 1000), ops: [], drawings: [])
+        let s = try repo.statistics()
+        XCTAssertEqual(s.totalCount, 3)
+        XCTAssertEqual(s.winCount, 2) // profit > 0 的 2 条
+        XCTAssertEqual(s.currentCapital, 1000 + (-50)) // 最新一条 = total + profit = 950
+    }
+
+    func test_recordRepo_statistics_empty_returns_zero() throws {
+        let repo = InMemoryRecordRepository()
+        let s = try repo.statistics()
+        XCTAssertEqual(s.totalCount, 0)
+        XCTAssertEqual(s.winCount, 0)
+        XCTAssertEqual(s.currentCapital, 0)
+    }
+
+    // MARK: - InMemoryPendingTrainingRepository
+
+    func test_pendingRepo_save_load_clear_round_trip() throws {
+        let repo = InMemoryPendingTrainingRepository()
+        XCTAssertNil(try repo.loadPending())
+
+        let pending = makePending(filename: "S001.sqlite")
+        try repo.savePending(pending)
+        XCTAssertEqual(try repo.loadPending()?.trainingSetFilename, "S001.sqlite")
+
+        // save 再次替换（spec L1881 语义）
+        let pending2 = makePending(filename: "S002.sqlite")
+        try repo.savePending(pending2)
+        XCTAssertEqual(try repo.loadPending()?.trainingSetFilename, "S002.sqlite")
+
+        try repo.clearPending()
+        XCTAssertNil(try repo.loadPending())
+
+        // clear 在已 nil 时合法（再清一次不抛）
+        try repo.clearPending()
+    }
+
+    // MARK: - InMemorySettingsDAO
+
+    func test_settingsDAO_default_load_returns_zero_AppSettings() throws {
+        let dao = InMemorySettingsDAO()
+        let s = try dao.loadSettings()
+        XCTAssertEqual(s.commissionRate, 0)
+        XCTAssertEqual(s.totalCapital, 0)
+        XCTAssertFalse(s.minCommissionEnabled)
+        XCTAssertEqual(s.displayMode, .system)
+    }
+
+    func test_settingsDAO_save_then_load_round_trip() throws {
+        let dao = InMemorySettingsDAO()
+        let s = AppSettings(commissionRate: 0.0003, minCommissionEnabled: true, totalCapital: 50_000, displayMode: .dark)
+        try dao.saveSettings(s)
+        XCTAssertEqual(try dao.loadSettings(), s)
+    }
+
+    func test_settingsDAO_resetCapital_only_zeroes_totalCapital() throws {
+        let dao = InMemorySettingsDAO()
+        try dao.saveSettings(AppSettings(commissionRate: 0.0003, minCommissionEnabled: true, totalCapital: 50_000, displayMode: .dark))
+        try dao.resetCapital()
+        let after = try dao.loadSettings()
+        XCTAssertEqual(after.totalCapital, 0)
+        // 其他字段保留（mirror production）
+        XCTAssertEqual(after.commissionRate, 0.0003)
+        XCTAssertTrue(after.minCommissionEnabled)
+        XCTAssertEqual(after.displayMode, .dark)
+    }
+
+    // MARK: - InMemoryAcceptanceJournalDAO
+
+    func test_journalDAO_upsert_then_listByState() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
+                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        let downloaded = try dao.listByState(.downloaded)
+        XCTAssertEqual(downloaded.count, 1)
+        XCTAssertEqual(downloaded.first?.trainingSetId, 1)
+        XCTAssertEqual(downloaded.first?.leaseId, "L1")
+        XCTAssertEqual(downloaded.first?.state, .downloaded)
+
+        // 不存在的 state 返回空
+        XCTAssertEqual(try dao.listByState(.confirmed).count, 0)
+    }
+
+    func test_journalDAO_upsert_same_id_lease_replaces_keeps_id() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
+                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        let firstId = try XCTUnwrap(try dao.listByState(.downloaded).first?.id)
+
+        // 升级 state，同 (1, L1)
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK,
+                       sqliteLocalPath: "/tmp/x.sqlite", contentHash: "deadbeef", lastError: nil)
+        XCTAssertEqual(try dao.listByState(.downloaded).count, 0) // 已升级，旧 state 已不存在
+        let crcRows = try dao.listByState(.crcOK)
+        XCTAssertEqual(crcRows.count, 1)
+        XCTAssertEqual(crcRows.first?.id, firstId) // id 保留（mirror SQLite UNIQUE + REPLACE）
+        XCTAssertEqual(crcRows.first?.contentHash, "deadbeef")
+    }
+
+    func test_journalDAO_stateEnteredAt_updates_on_upsert() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
+                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        let firstAt = try XCTUnwrap(try dao.listByState(.downloaded).first?.stateEnteredAt)
+
+        // sleep ≥1s 让 Int64 Unix 秒能区分（fake stamp 用 Int64(timeIntervalSince1970)）
+        Thread.sleep(forTimeInterval: 1.05)
+
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .crcOK,
+                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        let secondAt = try XCTUnwrap(try dao.listByState(.crcOK).first?.stateEnteredAt)
+        XCTAssertGreaterThan(secondAt, firstAt)
+    }
+
+    func test_journalDAO_deleteByIdLease_zero_row_legal() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        // 不存在 (1, L1)，删 0 行不抛（spec L62 注释明示）
+        try dao.deleteByIdLease(trainingSetId: 1, leaseId: "L1")
+
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
+                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.deleteByIdLease(trainingSetId: 1, leaseId: "L1")
+        XCTAssertEqual(try dao.listByState(.downloaded).count, 0)
+    }
+
+    func test_journalDAO_id_autoincrement_across_distinct_keys() throws {
+        let dao = InMemoryAcceptanceJournalDAO()
+        try dao.upsert(trainingSetId: 1, leaseId: "L1", state: .downloaded,
+                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try dao.upsert(trainingSetId: 2, leaseId: "L2", state: .downloaded,
+                       sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        let ids = try dao.listByState(.downloaded).map(\.id).sorted()
+        XCTAssertEqual(ids, [1, 2])
+    }
+
+    // MARK: - 并发安全（4 fake 共用一个简短并发 smoke test）
+
+    func test_recordRepo_concurrent_inserts_no_data_race_or_lost_writes() throws {
+        let repo = InMemoryRecordRepository()
+        let group = DispatchGroup()
+        let q = DispatchQueue.global(qos: .userInitiated)
+        for i in 0..<200 {
+            group.enter()
+            q.async {
+                _ = try? repo.insertRecord(self.makeRecord(id: nil, createdAt: Int64(i)), ops: [], drawings: [])
+                group.leave()
+            }
+        }
+        group.wait()
+        XCTAssertEqual(try repo.listRecords(limit: nil).count, 200)
+    }
+
+    // MARK: - Helpers
+
+    private func makeRecord(id: Int64?, createdAt: Int64 = 0, profit: Double = 0, total: Double = 1000) -> TrainingRecord {
+        TrainingRecord(id: id, trainingSetFilename: "x.sqlite", createdAt: createdAt,
+                       stockCode: "000001", stockName: "S", startYear: 2020, startMonth: 1,
+                       totalCapital: total, profit: profit, returnRate: 0, maxDrawdown: 0,
+                       buyCount: 0, sellCount: 0,
+                       feeSnapshot: FeeSnapshot(commissionRate: 0, minCommissionEnabled: false),
+                       finalTick: 0)
+    }
+
+    private func makeOp(direction: TradeDirection) -> TradeOperation {
+        TradeOperation(globalTick: 0, period: .day, direction: direction,
+                       price: 10, shares: 100, positionTier: .heavy,
+                       commission: 0, stampDuty: 0, totalCost: 0, createdAt: 0)
+    }
+
+    private func makeDrawing() -> DrawingObject {
+        DrawingObject(id: UUID(), tool: .horizontalLine, anchors: [], createdAt: 0)
+    }
+
+    private func makePending(filename: String) -> PendingTraining {
+        PendingTraining(trainingSetFilename: filename, globalTickIndex: 0,
+                        upperPeriod: .day, lowerPeriod: .min15,
+                        positionData: Data(), cashBalance: 0,
+                        feeSnapshot: FeeSnapshot(commissionRate: 0, minCommissionEnabled: false),
+                        tradeOperations: [], drawings: [],
+                        startedAt: 0, accumulatedCapital: 0,
+                        drawdown: .initial)
+    }
+}
+#endif
+```
+
+> **注意：** `makeRecord` / `makePending` / `makeDrawing` / `makeOp` 真实字段以 `AppState.swift` + `Models.swift` 当前结构为准。如果某字段名/类型与上面 stub 不符（例：`PositionTier` 实际可用 case 不是 `.heavy`、`DrawingObject.tool` 字段名不是 `tool`），子代理负责按编译器报错对齐——不要回头改测试断言语义。
+
+- [ ] **运行测试，确认全部 fail（缺真实在内存状态）**
+
+```bash
+cd ios/Contracts && swift test --filter InMemoryFakesTests 2>&1 | tail -30
+```
+
+Expected: 14 个测试全部 fail（`fatalError` 触发崩溃 / 返回空集合断言失败 / 等）
+
+### Step 1.2 — 升级 `InMemoryFakes.swift` 4 个 P4 fake 实现
+
+- [ ] **改 `InMemoryRecordRepository`：加 NSLock + records 字典 + ops/drawings 字典 + nextId**
+
+```swift
+public final class InMemoryRecordRepository: RecordRepository, @unchecked Sendable {
+    private let lock = NSLock()
+    private var records: [Int64: TrainingRecord] = [:]
+    private var ops: [Int64: [TradeOperation]] = [:]
+    private var drawings: [Int64: [DrawingObject]] = [:]
+    private var nextId: Int64 = 1
+
+    public init() {}
+
+    public func insertRecord(_ rec: TrainingRecord,
+                             ops opsIn: [TradeOperation],
+                             drawings drawingsIn: [DrawingObject]) throws -> Int64 {
+        lock.lock(); defer { lock.unlock() }
+        let id = nextId
+        nextId += 1
+        // 把 server-assigned id 写回 record（mirror production INSERT RETURNING id）
+        let stored = TrainingRecord(
+            id: id, trainingSetFilename: rec.trainingSetFilename, createdAt: rec.createdAt,
+            stockCode: rec.stockCode, stockName: rec.stockName,
+            startYear: rec.startYear, startMonth: rec.startMonth,
+            totalCapital: rec.totalCapital, profit: rec.profit, returnRate: rec.returnRate,
+            maxDrawdown: rec.maxDrawdown, buyCount: rec.buyCount, sellCount: rec.sellCount,
+            feeSnapshot: rec.feeSnapshot, finalTick: rec.finalTick)
+        records[id] = stored
+        ops[id] = opsIn
+        drawings[id] = drawingsIn
+        return id
+    }
+
+    public func listRecords(limit: Int?) throws -> [TrainingRecord] {
+        lock.lock(); defer { lock.unlock() }
+        let sorted = records.values.sorted { $0.createdAt > $1.createdAt }
+        if let limit = limit { return Array(sorted.prefix(limit)) }
+        return sorted
+    }
+
+    public func loadRecordBundle(id: Int64) throws -> (TrainingRecord, [TradeOperation], [DrawingObject]) {
+        lock.lock(); defer { lock.unlock() }
+        guard let r = records[id] else {
+            throw AppError.persistence(.notFound)
+        }
+        return (r, ops[id] ?? [], drawings[id] ?? [])
+    }
+
+    public func statistics() throws -> (totalCount: Int, winCount: Int, currentCapital: Double) {
+        lock.lock(); defer { lock.unlock() }
+        let total = records.count
+        let wins = records.values.filter { $0.profit > 0 }.count
+        let latest = records.values.max(by: { $0.createdAt < $1.createdAt })
+        let cap = latest.map { $0.totalCapital + $0.profit } ?? 0
+        return (total, wins, cap)
+    }
+}
+```
+
+> 检查 `AppError.persistence(.notFound)` 是否存在；如不存在改用 `AppError.persistence(.dbCorrupted)` 或最近义 case；不要新增 case（trust-boundary）。
+
+- [ ] **改 `InMemoryPendingTrainingRepository`：加 lock + 单 slot**
+
+```swift
+public final class InMemoryPendingTrainingRepository: PendingTrainingRepository, @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: PendingTraining?
+
+    public init() {}
+
+    public func savePending(_ p: PendingTraining) throws {
+        lock.lock(); defer { lock.unlock() }
+        pending = p
+    }
+
+    public func loadPending() throws -> PendingTraining? {
+        lock.lock(); defer { lock.unlock() }
+        return pending
+    }
+
+    public func clearPending() throws {
+        lock.lock(); defer { lock.unlock() }
+        pending = nil
+    }
+}
+```
+
+- [ ] **改 `InMemorySettingsDAO`：加 lock + `var settings`**
+
+```swift
+public final class InMemorySettingsDAO: SettingsDAO, @unchecked Sendable {
+    private let lock = NSLock()
+    private var settings: AppSettings = AppSettings(
+        commissionRate: 0,
+        minCommissionEnabled: false,
+        totalCapital: 0,
+        displayMode: .system)
+
+    public init() {}
+
+    public func loadSettings() throws -> AppSettings {
+        lock.lock(); defer { lock.unlock() }
+        return settings
+    }
+
+    public func saveSettings(_ s: AppSettings) throws {
+        lock.lock(); defer { lock.unlock() }
+        settings = s
+    }
+
+    public func resetCapital() throws {
+        lock.lock(); defer { lock.unlock() }
+        // mirror production: 只动 totalCapital
+        settings = AppSettings(commissionRate: settings.commissionRate,
+                               minCommissionEnabled: settings.minCommissionEnabled,
+                               totalCapital: 0,
+                               displayMode: settings.displayMode)
+    }
+}
+```
+
+- [ ] **改 `InMemoryAcceptanceJournalDAO`：加 lock + 字典 + nextId**
+
+```swift
+public final class InMemoryAcceptanceJournalDAO: AcceptanceJournalDAO, @unchecked Sendable {
+    private let lock = NSLock()
+    private var rows: [String: AcceptanceJournalRow] = [:]
+    private var nextId: Int64 = 1
+
+    public init() {}
+
+    private static func key(_ trainingSetId: Int, _ leaseId: String) -> String {
+        "\(trainingSetId)::\(leaseId)"
+    }
+
+    public func upsert(trainingSetId: Int, leaseId: String,
+                       state: P2JournalState,
+                       sqliteLocalPath: String?,
+                       contentHash: String?,
+                       lastError: String?) throws {
+        lock.lock(); defer { lock.unlock() }
+        let k = Self.key(trainingSetId, leaseId)
+        let stamp = Int64(Date().timeIntervalSince1970)
+        let id: Int64
+        if let existing = rows[k] {
+            id = existing.id  // mirror SQLite UNIQUE + REPLACE：保留旧 id
+        } else {
+            id = nextId
+            nextId += 1
+        }
+        rows[k] = AcceptanceJournalRow(
+            id: id, trainingSetId: trainingSetId, leaseId: leaseId,
+            state: state, stateEnteredAt: stamp,
+            lastError: lastError, sqliteLocalPath: sqliteLocalPath, contentHash: contentHash)
+    }
+
+    public func listByState(_ state: P2JournalState) throws -> [AcceptanceJournalRow] {
+        lock.lock(); defer { lock.unlock() }
+        return rows.values.filter { $0.state == state }.sorted { $0.id < $1.id }
+    }
+
+    public func deleteByIdLease(trainingSetId: Int, leaseId: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        rows.removeValue(forKey: Self.key(trainingSetId, leaseId))
+    }
+}
+```
+
+- [ ] **运行测试，确认 14 个 P4 测试全过 + 既有 contract 测试不退化**
+
+```bash
+cd ios/Contracts && swift test --filter InMemoryFakesTests 2>&1 | tail -10
+cd ios/Contracts && swift test --filter AcceptanceJournalDAOContractTests 2>&1 | tail -10
+cd ios/Contracts && swift test --filter TrainingSessionCoordinatorTests 2>&1 | tail -10
+```
+
+Expected:
+- `InMemoryFakesTests`: 14 个全 PASS
+- `AcceptanceJournalDAOContractTests`: 旧 `test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol` **会 fail**（旧断言 `XCTAssertEqual(rows.count, 0)` 与新行为冲突）—— Step 3.1 修
+- `TrainingSessionCoordinatorTests`: 应保持 PASS（PR #40 测试用 listRecords/loadPending/loadSettings 都是「空状态」断言；新 fake 默认空状态语义不变）
+
+### Step 1.3 — 提交
+
+- [ ] **commit**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/InMemoryFakesTests.swift
+git commit -m "feat(PR5a): 4 P4 in-memory fakes 升级真状态 + 14 行为测试"
+```
+
+---
+
+## Task 2: PreviewTrainingSetReader 新增 + factory 升级
+
+**Files:**
+- Create: `ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/PreviewTrainingSetReader.swift`
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift`（升级 `PreviewTrainingSetDBFactory`）
+- Create: `ios/Contracts/Tests/KlineTrainerContractsTests/PreviewTrainingSetReaderTests.swift`
+
+### Step 2.1 — 写测试（fail first）
+
+- [ ] **写 PreviewTrainingSetReaderTests.swift**
+
+```swift
+import XCTest
+import Foundation
+@testable import KlineTrainerContracts
+
+#if DEBUG
+final class PreviewTrainingSetReaderTests: XCTestCase {
+
+    func test_reader_loadMeta_returns_injected_meta() throws {
+        let meta = TrainingSetMeta(stockCode: "600519", stockName: "贵州茅台",
+                                   startDatetime: 1_700_000_000, endDatetime: 1_700_086_400)
+        let reader = PreviewTrainingSetReader(meta: meta, candles: [:])
+        XCTAssertEqual(try reader.loadMeta(), meta)
+    }
+
+    func test_reader_loadAllCandles_returns_injected_dict() throws {
+        let candle = KLineCandle(timestamp: 0, open: 1, high: 2, low: 0.5, close: 1.5,
+                                 volume: 100, ma5: nil, ma10: nil, ma20: nil, ma30: nil, ma60: nil, ma66: nil,
+                                 macdDif: nil, macdDea: nil, macdBar: nil,
+                                 globalIndex: 0, endGlobalIndex: 0)
+        let dict: [Period: [KLineCandle]] = [.day: [candle]]
+        let reader = PreviewTrainingSetReader(
+            meta: TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0),
+            candles: dict)
+        let loaded = try reader.loadAllCandles()
+        XCTAssertEqual(loaded[.day]?.count, 1)
+        XCTAssertEqual(loaded[.day]?.first?.close, 1.5)
+    }
+
+    func test_reader_close_is_no_op() {
+        let reader = PreviewTrainingSetReader(
+            meta: TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0),
+            candles: [:])
+        reader.close()
+        // close 后再 loadMeta 不抛（fake 设计：no-op）
+        XCTAssertNoThrow(try reader.loadMeta())
+    }
+
+    // MARK: - Factory
+
+    func test_factory_default_init_returns_reader_with_placeholder_meta() throws {
+        let factory = PreviewTrainingSetDBFactory()
+        // file URL + expectedSchemaVersion 都被忽略；不抛
+        let reader = try factory.openAndVerify(
+            file: URL(fileURLWithPath: "/dev/null"),
+            expectedSchemaVersion: 1)
+        let meta = try reader.loadMeta()
+        XCTAssertEqual(meta.stockCode, "PREVIEW") // §3 决策：占位 meta
+    }
+
+    func test_factory_value_injected_returns_reader_with_provided_meta() throws {
+        let meta = TrainingSetMeta(stockCode: "300750", stockName: "宁德时代",
+                                   startDatetime: 1, endDatetime: 2)
+        let factory = PreviewTrainingSetDBFactory(meta: meta, candles: [:])
+        let reader = try factory.openAndVerify(
+            file: URL(fileURLWithPath: "/dev/null"),
+            expectedSchemaVersion: 1)
+        XCTAssertEqual(try reader.loadMeta().stockCode, "300750")
+    }
+
+    func test_factory_returns_independent_reader_per_call() throws {
+        // spec L1830 注释：「每次调用产生新 reader 实例」——fake 也镜像
+        let factory = PreviewTrainingSetDBFactory()
+        let r1 = try factory.openAndVerify(file: URL(fileURLWithPath: "/dev/null"), expectedSchemaVersion: 1)
+        let r2 = try factory.openAndVerify(file: URL(fileURLWithPath: "/dev/null"), expectedSchemaVersion: 1)
+        XCTAssertFalse(r1 === r2)  // 不同实例
+    }
+}
+#endif
+```
+
+> `KLineCandle` 真实初始化器签名按 `Models.swift` line 59-114 当前形状对齐。子代理按编译报错调整字段名顺序，不改测试语义断言。
+
+- [ ] **运行 → 全部 fail（type / 文件不存在）**
+
+```bash
+cd ios/Contracts && swift test --filter PreviewTrainingSetReaderTests 2>&1 | tail -20
+```
+
+Expected: compile error (`PreviewTrainingSetReader` 类型未定义 / `PreviewTrainingSetDBFactory(meta:candles:)` init 不存在)
+
+### Step 2.2 — 实施 reader + 升级 factory
+
+- [ ] **新增 `PreviewTrainingSetReader.swift`**
+
+```swift
+// Kline Trainer Swift Contracts — Preview/Test Fixture: P3b TrainingSetReader fake
+// Spec: kline_trainer_modules_v1.4.md §11.3 line 2200 (PreviewTrainingSetDBFactory + PreviewTrainingSetReader)
+//       protocol 体 §P3b line 1840-1856
+
+#if DEBUG
+
+import Foundation
+
+public final class PreviewTrainingSetReader: TrainingSetReader, @unchecked Sendable {
+    private let meta: TrainingSetMeta
+    private let candles: [Period: [KLineCandle]]
+
+    public init(meta: TrainingSetMeta, candles: [Period: [KLineCandle]]) {
+        self.meta = meta
+        self.candles = candles
+    }
+
+    public func loadMeta() throws -> TrainingSetMeta { meta }
+
+    public func loadAllCandles() throws -> [Period: [KLineCandle]] { candles }
+
+    public func close() {
+        // no-op：fake 不持有真实 DatabaseQueue
+    }
+}
+
+#endif
+```
+
+- [ ] **改 `InMemoryFakes.swift` 的 `PreviewTrainingSetDBFactory`**
+
+```swift
+public struct PreviewTrainingSetDBFactory: TrainingSetDBFactory {
+    private let meta: TrainingSetMeta
+    private let candles: [Period: [KLineCandle]]
+
+    public init(meta: TrainingSetMeta? = nil,
+                candles: [Period: [KLineCandle]] = [:]) {
+        self.meta = meta ?? TrainingSetMeta(
+            stockCode: "PREVIEW",
+            stockName: "Preview Stock",
+            startDatetime: 0,
+            endDatetime: 0)
+        self.candles = candles
+    }
+
+    public func openAndVerify(file: URL, expectedSchemaVersion: Int) throws -> TrainingSetReader {
+        // file / expectedSchemaVersion 在 fake 中被忽略（§3 决策）；
+        // 每次调用产生新 reader（spec L1830 契约）
+        PreviewTrainingSetReader(meta: meta, candles: candles)
+    }
+}
+```
+
+- [ ] **运行测试**
+
+```bash
+cd ios/Contracts && swift test --filter PreviewTrainingSetReaderTests 2>&1 | tail -10
+```
+
+Expected: 6 个全 PASS
+
+- [ ] **commit**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/PreviewTrainingSetReader.swift \
+        ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/PreviewTrainingSetReaderTests.swift
+git commit -m "feat(PR5a): PreviewTrainingSetReader + factory 升级 value-injected"
+```
+
+---
+
+## Task 3: 既有测试翻面修订 + 验收清单
+
+**Files:**
+- Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/AcceptanceJournalDAOContractTests.swift`
+- Create: `docs/acceptance/2026-05-05-pr5a-db-fixtures.md`
+
+### Step 3.1 — 翻面 `AcceptanceJournalDAOContractTests.test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol`
+
+旧测试断言 `Wave 0 fake 不实际持久化`，与 PR5a 目标矛盾。改为：
+
+- [ ] **改测试 body**
+
+```swift
+#if DEBUG
+func test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol() throws {
+    let fake: AcceptanceJournalDAO = InMemoryAcceptanceJournalDAO()
+    try fake.upsert(trainingSetId: 1, leaseId: "x", state: .downloaded,
+                    sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+    let rows = try fake.listByState(.downloaded)
+    XCTAssertEqual(rows.count, 1)  // PR 5a 升级：fake 现在真持久化
+    XCTAssertEqual(rows.first?.trainingSetId, 1)
+    try fake.deleteByIdLease(trainingSetId: 1, leaseId: "x")
+    XCTAssertEqual(try fake.listByState(.downloaded).count, 0)
+}
+#endif
+```
+
+- [ ] **检查 `TrainingSessionCoordinatorTests` 既有 3 个 fake instantiation 测试是否仍 PASS**
+
+```bash
+cd ios/Contracts && swift test --filter TrainingSessionCoordinatorTests 2>&1 | tail -20
+```
+
+Expected: 全 PASS（默认空状态下 `listRecords / loadPending / loadSettings` 行为不变）
+
+- [ ] **跑全 suite 确认无回归**
+
+```bash
+cd ios/Contracts && swift test 2>&1 | tail -30
+```
+
+Expected: 0 failures（含 PR #37-44 既有所有测试）
+
+### Step 3.2 — 写中文非 coder 验收清单
+
+- [ ] **创建 `docs/acceptance/2026-05-05-pr5a-db-fixtures.md`**
+
+模板参考 `docs/acceptance/2026-05-04-pr4b-cache-settings.md`。结构：
+
+```markdown
+# PR 5a 验收清单（DB-domain 测试 fixture）
+
+## 范围
+本次改动新增 5 个测试用 in-memory fake：
+- 4 个数据库相关 fake（成交记录 / 待续训练 / 设置 / 验收日志）
+- 1 个训练组数据库读取器 fake
+
+## 验收步骤（终端逐条复制粘贴执行）
+
+### 1. 编译通过
+| 操作 | 期望 | 通过条件 |
+|---|---|---|
+| `cd ios/Contracts && swift build 2>&1 \| tail -3` | 看到 `Build complete!` | 没有红色 error 行 |
+
+### 2. 测试全过
+| 操作 | 期望 | 通过条件 |
+|---|---|---|
+| `cd ios/Contracts && swift test 2>&1 \| tail -5` | 看到 `Test Suite 'All tests' passed` 或 `Executed XX tests, with 0 failures` | 数字 failures = 0 |
+
+### 3. 新增测试存在
+| 操作 | 期望 | 通过条件 |
+|---|---|---|
+| `cd ios/Contracts && swift test --filter InMemoryFakesTests 2>&1 \| grep "Test Case"` | 看到 14 个 `passed` 行 | 14 行全部含 `passed` |
+| `cd ios/Contracts && swift test --filter PreviewTrainingSetReaderTests 2>&1 \| grep "Test Case"` | 看到 6 个 `passed` 行 | 6 行全部含 `passed` |
+
+### 4. 不影响 PR #37-44 既有测试
+| 操作 | 期望 | 通过条件 |
+|---|---|---|
+| `cd ios/Contracts && swift test --filter TickEngineTests 2>&1 \| tail -3` | 全过 | 0 failures |
+| `cd ios/Contracts && swift test --filter GeometryTests 2>&1 \| tail -3` | 全过 | 0 failures |
+| `cd ios/Contracts && swift test --filter ThemeTests 2>&1 \| tail -3` | 全过 | 0 failures |
+| `cd ios/Contracts && swift test --filter SettingsStoreProductionTests 2>&1 \| tail -3` | 全过 | 0 failures |
+| `cd ios/Contracts && swift test --filter TrainingSessionCoordinatorTests 2>&1 \| tail -3` | 全过 | 0 failures |
+| `cd ios/Contracts && swift test --filter AcceptanceJournalDAOContractTests 2>&1 \| tail -3` | 全过 | 0 failures |
+
+### 5. 验证生产代码 0 改动
+| 操作 | 期望 | 通过条件 |
+|---|---|---|
+| `git diff main..HEAD --stat -- 'ios/Contracts/Sources/KlineTrainerPersistence/*.swift'` | 输出为空（生产实现 0 改动）| 输出为空字符串 |
+| `git diff main..HEAD --stat -- 'ios/Contracts/Sources/KlineTrainerContracts/Persistence/*.swift'` | 输出为空（contract 协议 0 改动）| 输出为空字符串 |
+
+### 6. 验证只在 DEBUG 编译产物里
+| 操作 | 期望 | 通过条件 |
+|---|---|---|
+| `grep -c '^#if DEBUG' ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift` | 输出 `1` | 等于 1 |
+| `grep -c '^#if DEBUG' ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/PreviewTrainingSetReader.swift` | 输出 `1` | 等于 1 |
+
+## 失败处理
+任何步骤通过条件不满足，**不要继续合并**——把终端完整输出贴给 Claude 让它修。
+```
+
+- [ ] **commit**
+
+```bash
+git add ios/Contracts/Tests/KlineTrainerContractsTests/AcceptanceJournalDAOContractTests.swift \
+        docs/acceptance/2026-05-05-pr5a-db-fixtures.md
+git commit -m "test(PR5a): contract test 翻面 + 验收清单"
+```
+
+---
+
+## 完工自检（subagent 不要早停）
+
+- [ ] `cd ios/Contracts && swift test 2>&1 | tail -5` 显示 `0 failures`
+- [ ] `git log main..HEAD --oneline` 显示 3 commits（Task 1/2/3 各一）
+- [ ] `git diff main..HEAD --stat` 各文件改动行数与 plan 预估对齐（±20% 内）：
+  - `InMemoryFakes.swift` 净增 ≤ 130 LOC
+  - `PreviewTrainingSetReader.swift` ≤ 50 LOC
+  - 测试文件总行数 ≤ 350 LOC
+- [ ] **没有**改动以下任何路径（`git diff main..HEAD --stat` 应不出现）：
+  - `ios/Contracts/Sources/KlineTrainerPersistence/**`
+  - `ios/Contracts/Sources/KlineTrainerContracts/Persistence/*.swift`（协议本体）
+  - `ios/Contracts/Sources/KlineTrainerContracts/AppState.swift`
+  - `ios/Contracts/Sources/KlineTrainerContracts/Models.swift`
+  - `ios/Contracts/Sources/KlineTrainerContracts/AppError.swift`
+  - `ios/Contracts/Sources/KlineTrainerContracts/Settings/SettingsStore.swift`
+  - `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift`
+  - `ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift` 中 `InMemoryCacheManager` 类（PR 5b scope）
+- [ ] `swift build -c release 2>&1 | tail -3` 不出错（确认 `#if DEBUG` 守卫使 release build 不带 fake 类型）
+
+---
+
+## 不在本 PR 范围（codex 提即 reject 引用）
+
+| 项 | 原因 | 归属 |
+|---|---|---|
+| `InMemoryCacheManager` 升级真状态 | spec §11.3 line 2201（port-domain）| PR 5b |
+| 6 项 port-domain fake（FakeZipExtractor 等）| spec §11.3 line 2202-2206 | PR 5b |
+| `KLineCandle.previewFixture` / `FeeSnapshot.preview` / `TrainingRecord.previewRecord` | spec §11.3 line 2188-2194 是另一份清单（Preview Fixture 数据，非 Test Fixture Ports）；v6 outline 不在 Wave 0 强制锚 | backlog |
+| 协议签名调整（如改 `downloadedZip` 参数名）| trust-boundary change PR | 独立 PR / v1.5 spec |
+| `DefaultTrainingSetReader` / `DefaultTrainingSetDBFactory` 改动 | 生产实现，PR #41 已 merge | N/A |
+| Production `RecordRepositoryImpl` / `SettingsDAOImpl` 任何变更 | 生产实现已 merge | N/A |
+
+---
+
+## 自检（plan 写完后跑）
+
+**1. Spec coverage：**
+- §11.3 line 2196 InMemoryRecordRepository → Task 1 ✅
+- §11.3 line 2197 InMemoryPendingTrainingRepository → Task 1 ✅
+- §11.3 line 2198 InMemorySettingsDAO → Task 1 ✅
+- §11.3 line 2199 InMemoryAcceptanceJournalDAO → Task 1 ✅
+- §11.3 line 2200 PreviewTrainingSetDBFactory + PreviewTrainingSetReader → Task 2 ✅
+- §11.3 line 2201-2206 port-domain → 显式排除 PR 5b（"不在本 PR 范围"表）✅
+
+**2. Placeholder 扫描：** 无 TBD / TODO / 「适当处理」类占位
+
+**3. Type 一致性：**
+- `AppError.persistence(.notFound)` 在 Step 1.2 明示「检查存在；如不存在改用 `.dbCorrupted` 或最近义」——避免凭记忆假设
+- `KLineCandle` / `TradeOperation` / `DrawingObject` / `PendingTraining` 真实字段以源文件为准（plan body 提示子代理按编译器对齐）
+- `PreviewTrainingSetDBFactory` 默认 init 占位 meta（`stockCode = "PREVIEW"`）在 §3 决策 + Step 2.1 测试 + Step 2.2 实施三处一致引用
+- `nextId` 自增策略在 RecordRepository 与 AcceptanceJournalDAO 都明示「新 key ++ / 旧 key 保留」
