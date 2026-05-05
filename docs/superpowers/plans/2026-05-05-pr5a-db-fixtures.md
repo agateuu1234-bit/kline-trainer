@@ -27,12 +27,12 @@
 | `ios/Contracts/Tests/KlineTrainerContractsTests/AcceptanceJournalDAOContractTests.swift` | 升级 `test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol`：从「不持久化」翻面成 round-trip 行为断言 | Modify |
 | `docs/acceptance/2026-05-05-pr5a-db-fixtures.md` | 验收清单（中文，非 coder 可执行）| Create |
 
-**预估 prod LOC（硬规则 ≤500；R1 / R2 / R3 修订上调）：**
-- `InMemoryFakes.swift` 净增 ≈ 215 LOC（4 fake 各加内部状态 + lock + 真实 method 体；AcceptanceJournalDAO 全镜像 production state machine + invariants + COALESCE +60 LOC；R2 SettingsDAO finite-value guard +12 LOC；PreviewTrainingSetDBFactory 升级 +15 LOC）
-- `PreviewTrainingSetReader.swift` 新增 ≈ 110 LOC（init / loadMeta / loadAllCandles / close + R2 isClosed lock + ensureOpen + R3 validateCandles helper ~50 LOC）
-- 合计：**≈ 325 prod LOC** ✓ 仍低于 500 上限
+**预估 prod LOC（硬规则 ≤500；R1 / R2 / R3 / R4 修订上调）：**
+- `InMemoryFakes.swift` 净增 ≈ 225 LOC（4 fake + AcceptanceJournalDAO state machine + R2 SettingsDAO finite-value guard + R4 factory validateMeta helper +10 LOC）
+- `PreviewTrainingSetReader.swift` 新增 ≈ 115 LOC（含 R4 period 一致性 +1 行 guard）
+- 合计：**≈ 340 prod LOC** ✓ 仍低于 500 上限
 
-**预估 test LOC**：≈ 580（R1 加 state machine 12 + id-tiebreak 2 +100；R2 加 NaN/inf 2 + close-then-read 1 +50；R3 加 candle 校验 9 +150 行）
+**预估 test LOC**：≈ 670（R3 加 candle 校验 9 +150；R4 加 factory meta sanity 5 + period 一致性 1 +90 行）
 
 **子项数**（per memory feedback "硬规则 ≤3 子项"）：
 1. P4 4 fake 升级（一个文件内的内聚改动，spec 列在同一 §11.3 子清单 #1-4）
@@ -70,7 +70,7 @@
 
 **反驳「为什么不 `DispatchQueue.sync`」：** 同步路径上 `NSLock` 比 queue thunk 快 ~10x；fake 不在性能 hot path 上但「不用 queue 也无成本」。
 
-### §3 `PreviewTrainingSetDBFactory` 升级 = init(meta:candles:) + 默认空构造
+### §3 `PreviewTrainingSetDBFactory` 升级 = init(meta:candles:) + 默认空构造 + meta sanity check（R4 修订：codex round-4 high-1）
 
 **Spec literal**：`func openAndVerify(file: URL, expectedSchemaVersion: Int) throws -> TrainingSetReader`（L1830）
 
@@ -79,7 +79,19 @@
 **接口形状选择：**
 - factory 加 `public init(meta: TrainingSetMeta? = nil, candles: [Period: [KLineCandle]] = [:])`
 - `openAndVerify` 忽略 `file` / `expectedSchemaVersion`，把构造期注入的 meta+candles 包成 reader 返回
-- meta 为 nil 时（PR #40 既有空构造 callsite）返回带「占位 meta」的 reader：`TrainingSetMeta(stockCode: "PREVIEW", stockName: "Preview Stock", startDatetime: 0, endDatetime: 0)`——保 callsite 不破
+- meta 为 nil 时（PR #40 既有空构造 callsite）使用「占位 meta」**满足 production sanity check**
+
+**R4 修订（codex round-4 high-1）—— 默认占位 meta + meta sanity check 镜像 production**：
+
+Production `DefaultTrainingSetDBFactory` (`KlineTrainerPersistence/DefaultTrainingSetDBFactory.swift` line 65-68) meta 边界校验：
+- `stockCode.isEmpty || stockName.isEmpty || startDatetime <= 0 || endDatetime < startDatetime` → `throw AppError.persistence(.dbCorrupted)`
+
+Fake 必须镜像同 guard：
+- 默认占位 meta 改为 `TrainingSetMeta(stockCode: "PREVIEW", stockName: "Preview Stock", startDatetime: 1, endDatetime: 1)`（满足 production sanity 边界）
+- `openAndVerify` 在返回 reader 前 `try Self.validateMeta(meta)`，违反 4 条任一 → `throw AppError.persistence(.dbCorrupted)`
+- helper：`private static func validateMeta(_ m:) throws`
+
+**fake-specific 简化**：production 除 sanity 外还做 `PRAGMA user_version` 校验、文件存在性、SQL 层 typeof() 校验；fake 不读文件，全部跳过（参数 `file` / `expectedSchemaVersion` 被忽略不变）。
 
 **为什么不让 `openAndVerify` 抛 `fileNotFound`：** spec L1832 错误清单是 production 行为；fake 设计就是「不 open file」，模拟「永远成功」更适配 preview 场景。
 
@@ -170,6 +182,14 @@ Fake 必须镜像同生命周期：
 - `loadMeta()` / `loadAllCandles()` lock 内检查 `isClosed`，若 closed `throw AppError.internalError(module: "PR5a-PreviewTrainingSetReader", detail: "reader closed")`
 
 **为什么必须**：若 fake `close()` 是 no-op，consumer 误用 close 后再 read 的代码在 fake 上通过测试，到 production 撞 `.internalError` 崩溃。fake/production 行为发散就是 codex round-2 finding 1 拒收的根因。
+
+**R4 修订（codex round-4 med-1）—— `c.period == period` key/value 一致性**：
+
+Production `DefaultTrainingSetReader.loadAllCandles` 通过 `result[period, default: []].append(candle)` 把 row 的 `period` 字段同时用作 dict key 和 candle.period（line 132），所以**永远不可能** key 与 candle.period 不一致。
+
+Fake 入参是已构造的 `[Period: [KLineCandle]]`，test author 可能传 `[.m3: [dailyCandle]]`（key vs c.period 不匹配）。production 不可能产出这种数据 → fake 拒。
+
+`validateCandles` 内 per-candle loop 加 `guard c.period == period else { throw .dbCorrupted }`。
 
 **R3 修订（codex round-3 high-1）—— 镜像 production 数据校验**：
 
@@ -944,6 +964,8 @@ import Foundation
 final class PreviewTrainingSetReaderTests: XCTestCase {
 
     func test_reader_loadMeta_returns_injected_meta() throws {
+        // 注：直接构造 reader 不经过 factory；reader.loadMeta 自身不做 meta sanity，
+        // 只在 factory.openAndVerify 处校验（mirror production：sanity 在 factory）
         let meta = TrainingSetMeta(stockCode: "600519", stockName: "贵州茅台",
                                    startDatetime: 1_700_000_000, endDatetime: 1_700_086_400)
         let reader = PreviewTrainingSetReader(meta: meta, candles: [:])
@@ -951,19 +973,27 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
     }
 
     func test_reader_loadAllCandles_returns_injected_dict() throws {
-        // KLineCandle 真实签名：period/datetime/open/high/low/close/volume/amount/ma66/boll*/macd*/globalIndex/endGlobalIndex
-        let candle = KLineCandle(period: .daily, datetime: 0,
-                                 open: 1, high: 2, low: 0.5, close: 1.5,
-                                 volume: 100, amount: nil,
-                                 ma66: nil,
-                                 bollUpper: nil, bollMid: nil, bollLower: nil,
-                                 macdDiff: nil, macdDea: nil, macdBar: nil,
-                                 globalIndex: 0, endGlobalIndex: 0)
-        let dict: [Period: [KLineCandle]] = [.daily: [candle]]
+        // R4 修订（codex round-4 high-2）：positive 测试必须满足 v4 加的 validateCandles
+        // 不变量——非空 result 必有 m3，非 m3 endGlobalIndex 落在 m3 范围内
+        let m3 = KLineCandle(period: .m3, datetime: 0,
+                             open: 1, high: 2, low: 0.5, close: 1.5,
+                             volume: 100, amount: nil, ma66: nil,
+                             bollUpper: nil, bollMid: nil, bollLower: nil,
+                             macdDiff: nil, macdDea: nil, macdBar: nil,
+                             globalIndex: 0, endGlobalIndex: 0)
+        let daily = KLineCandle(period: .daily, datetime: 0,
+                                open: 1, high: 2, low: 0.5, close: 1.5,
+                                volume: 100, amount: nil, ma66: nil,
+                                bollUpper: nil, bollMid: nil, bollLower: nil,
+                                macdDiff: nil, macdDea: nil, macdBar: nil,
+                                globalIndex: nil, endGlobalIndex: 0)
+        let dict: [Period: [KLineCandle]] = [.m3: [m3], .daily: [daily]]
+        // R4 修订：meta 必须满足 production sanity（startDatetime > 0 + endDatetime >= startDatetime）
         let reader = PreviewTrainingSetReader(
-            meta: TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0),
+            meta: TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1),
             candles: dict)
         let loaded = try reader.loadAllCandles()
+        XCTAssertEqual(loaded[.m3]?.count, 1)
         XCTAssertEqual(loaded[.daily]?.count, 1)
         XCTAssertEqual(loaded[.daily]?.first?.close, 1.5)
     }
@@ -1018,6 +1048,43 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
         let r1 = try factory.openAndVerify(file: URL(fileURLWithPath: "/dev/null"), expectedSchemaVersion: 1)
         let r2 = try factory.openAndVerify(file: URL(fileURLWithPath: "/dev/null"), expectedSchemaVersion: 1)
         XCTAssertFalse(r1 === r2)
+    }
+
+    // MARK: - R4 修订：factory meta sanity check（mirror production DefaultTrainingSetDBFactory line 65-68）
+
+    func test_factory_rejects_empty_stockCode() throws {
+        let bad = TrainingSetMeta(stockCode: "", stockName: "Y", startDatetime: 1, endDatetime: 1)
+        let factory = PreviewTrainingSetDBFactory(meta: bad)
+        XCTAssertThrowsError(try factory.openAndVerify(file: URL(fileURLWithPath: "/dev/null"), expectedSchemaVersion: 1)) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else { XCTFail("expected dbCorrupted"); return }
+        }
+    }
+
+    func test_factory_rejects_empty_stockName() throws {
+        let bad = TrainingSetMeta(stockCode: "X", stockName: "", startDatetime: 1, endDatetime: 1)
+        let factory = PreviewTrainingSetDBFactory(meta: bad)
+        XCTAssertThrowsError(try factory.openAndVerify(file: URL(fileURLWithPath: "/dev/null"), expectedSchemaVersion: 1))
+    }
+
+    func test_factory_rejects_zero_or_negative_startDatetime() throws {
+        let bad0 = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 1)
+        XCTAssertThrowsError(try PreviewTrainingSetDBFactory(meta: bad0)
+            .openAndVerify(file: URL(fileURLWithPath: "/dev/null"), expectedSchemaVersion: 1))
+        let badNeg = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: -1, endDatetime: 1)
+        XCTAssertThrowsError(try PreviewTrainingSetDBFactory(meta: badNeg)
+            .openAndVerify(file: URL(fileURLWithPath: "/dev/null"), expectedSchemaVersion: 1))
+    }
+
+    func test_factory_rejects_endDatetime_before_startDatetime() throws {
+        let bad = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 100, endDatetime: 50)
+        XCTAssertThrowsError(try PreviewTrainingSetDBFactory(meta: bad)
+            .openAndVerify(file: URL(fileURLWithPath: "/dev/null"), expectedSchemaVersion: 1))
+    }
+
+    func test_factory_default_placeholder_meta_passes_sanity() throws {
+        // R4 修订：默认 placeholder（startDatetime/endDatetime = 1）必须通过 sanity
+        let factory = PreviewTrainingSetDBFactory()
+        XCTAssertNoThrow(try factory.openAndVerify(file: URL(fileURLWithPath: "/dev/null"), expectedSchemaVersion: 1))
     }
 
     // MARK: - R3 修订：数据校验（mirror production DefaultTrainingSetReader 全套 invariants）
@@ -1167,13 +1234,30 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
     }
 
     func test_reader_validation_valid_m3_plus_daily_passes() throws {
-        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 0, endDatetime: 0)
+        // 直接构造 reader 不经过 factory；validateCandles 不要求 meta 通过 sanity（仅 candles 范畴）
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
         let m3 = [validM3(0), validM3(1), validM3(2)]
         let daily = [validDaily(eg: 2)]  // 落在 m3 范围内
         let r = PreviewTrainingSetReader(meta: meta, candles: [.m3: m3, .daily: daily])
         let loaded = try r.loadAllCandles()
         XCTAssertEqual(loaded[.m3]?.count, 3)
         XCTAssertEqual(loaded[.daily]?.count, 1)
+    }
+
+    /// R4 修订（codex round-4 med-1）：dict key 必须 == candle.period
+    func test_reader_validation_period_key_value_consistency() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
+        // 把一根 daily candle 塞进 .m3 key
+        let bogus = KLineCandle(period: .daily, datetime: 0,  // ← daily
+                                open: 1, high: 2, low: 0.5, close: 1,
+                                volume: 100, amount: nil, ma66: nil,
+                                bollUpper: nil, bollMid: nil, bollLower: nil,
+                                macdDiff: nil, macdDea: nil, macdBar: nil,
+                                globalIndex: 0, endGlobalIndex: 0)
+        let r = PreviewTrainingSetReader(meta: meta, candles: [.m3: [bogus]])  // ← key 是 m3
+        XCTAssertThrowsError(try r.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else { XCTFail("expected dbCorrupted"); return }
+        }
     }
 }
 #endif
@@ -1251,9 +1335,14 @@ public final class PreviewTrainingSetReader: TrainingSetReader, @unchecked Senda
         // 1) per-period strictly increasing endGlobalIndex（line 90-93）
         // 2) OHLC finite + positive + 序关系 + volume nonneg（line 97-105）
         // 3) optional indicator finite + amount nonneg（line 107-115）
+        // R4 修订（codex round-4 med-1）：候选 c.period 必须 == dict key
+        // production result[period, default:].append(candle) 用同一 row.period 构造 → 必然一致
         for (period, list) in data {
             var lastEnd: Int? = nil
             for c in list {
+                guard c.period == period else {
+                    throw AppError.persistence(.dbCorrupted)
+                }
                 if let prev = lastEnd, c.endGlobalIndex <= prev {
                     throw AppError.persistence(.dbCorrupted)
                 }
@@ -1314,7 +1403,7 @@ public final class PreviewTrainingSetReader: TrainingSetReader, @unchecked Senda
 #endif
 ```
 
-- [ ] **改 `InMemoryFakes.swift` 的 `PreviewTrainingSetDBFactory`**
+- [ ] **改 `InMemoryFakes.swift` 的 `PreviewTrainingSetDBFactory`（R4 修订：默认占位 meta + meta sanity check）**
 
 ```swift
 public struct PreviewTrainingSetDBFactory: TrainingSetDBFactory {
@@ -1323,18 +1412,32 @@ public struct PreviewTrainingSetDBFactory: TrainingSetDBFactory {
 
     public init(meta: TrainingSetMeta? = nil,
                 candles: [Period: [KLineCandle]] = [:]) {
+        // R4 修订（codex round-4 high-1）：占位 meta 必须满足 production
+        // DefaultTrainingSetDBFactory line 65-68 的 sanity check（startDatetime > 0
+        // + endDatetime >= startDatetime + 非空 stock fields），否则 fake/production
+        // 接受度分叉。startDatetime/endDatetime = 1（最小合法 Unix 秒，避免 0 边界）
         self.meta = meta ?? TrainingSetMeta(
             stockCode: "PREVIEW",
             stockName: "Preview Stock",
-            startDatetime: 0,
-            endDatetime: 0)
+            startDatetime: 1,
+            endDatetime: 1)
         self.candles = candles
     }
 
     public func openAndVerify(file: URL, expectedSchemaVersion: Int) throws -> TrainingSetReader {
+        // R4 修订（codex round-4 high-1）：每次 openAndVerify 校验注入的 meta
+        // mirror DefaultTrainingSetDBFactory line 65-68
+        try Self.validateMeta(meta)
         // file / expectedSchemaVersion 在 fake 中被忽略（§3 决策）；
         // 每次调用产生新 reader（spec L1830 契约）
-        PreviewTrainingSetReader(meta: meta, candles: candles)
+        return PreviewTrainingSetReader(meta: meta, candles: candles)
+    }
+
+    private static func validateMeta(_ m: TrainingSetMeta) throws {
+        if m.stockCode.isEmpty || m.stockName.isEmpty ||
+           m.startDatetime <= 0 || m.endDatetime < m.startDatetime {
+            throw AppError.persistence(.dbCorrupted)
+        }
     }
 }
 ```
@@ -1345,7 +1448,7 @@ public struct PreviewTrainingSetDBFactory: TrainingSetDBFactory {
 cd ios/Contracts && swift test --filter PreviewTrainingSetReaderTests 2>&1 | tail -10
 ```
 
-Expected: 15 个全 PASS（6 reader/factory 基础 + 9 R3 candle 校验）
+Expected: 21 个全 PASS（6 reader/factory 基础 + 9 R3 candle 校验 + 5 R4 factory meta sanity + 1 R4 period 一致性）
 
 - [ ] **commit**
 
@@ -1538,4 +1641,9 @@ git commit -m "test(PR5a): contract test 翻面 + 验收清单"
 **6. R3 修订对接（codex round-3 findings 吸收）：**
 - finding 1 (high) PreviewTrainingSetReader candle 校验 → §7 加 R3 段 + Task 2 测试 9 条 + 实施 validateCandles helper（mirror DefaultTrainingSetReader.loadAllCandles line 84-173 全套校验：OHLC finite/positive/序关系、volume/amount nonneg、optional finite、endGlobalIndex 严格递增、m3 global-axis 不变量、非 m3 ≤ m3Max、空 dict 允许）
 
-**7. 后续轮次预算**：plan 已在 round 3 收 6 个 findings（R1 2 + R2 3 + R3 1）。round 4 若再撞同模式「production 有 X validation，fake 也要」类 finding，按 memory `feedback_codex_round6_self_contradiction` 评估：fake 已镜像 4 处主要 production guards（state machine + isClosed + finite settings + candle validation），剩余可能的「次级保护」属边际收益低。round 4 起若新 finding 不能引向具体 production 行为分叉案例，pushback + accept residual。
+**7. R4 修订对接（codex round-4 findings 吸收）：**
+- finding 1 (high) factory 默认 placeholder 不满 production sanity → §3 重写 + 默认 meta startDatetime/endDatetime = 1（满足 line 65-68）+ openAndVerify 加 validateMeta helper + Task 2 测试 5 条
+- finding 2 (high) v4 plan 自相矛盾（positive 测试用 .daily-only candles 与 v4 加的 validateCandles 冲突）→ Task 2 positive 测试改用 m3+daily（修自 plan bug）
+- finding 3 (medium) candle.period == dict key 一致性 → §7 R4 段 + validateCandles 加 guard + Task 2 测试 1 条
+
+**8. 后续轮次预算**：plan 已在 round 4 收 9 个 findings（R1 2 + R2 3 + R3 1 + R4 3）。round 5 起若新 finding 不能给出具体 production 行为分叉案例（如 X 在 production 抛 Y，fake 不抛会让 caller Z 测试假阳）按 memory `feedback_codex_round6_self_contradiction` pushback + accept residual。memory `feedback_codex_plan_budget_overshoot`：「5 轮必 escalate」——round 5 若仍 needs-attention，user TTY override + admin merge 路径已是既定走法。
