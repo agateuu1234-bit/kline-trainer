@@ -54,11 +54,14 @@ final class AcceptanceJournalDAOContractTests: XCTestCase {
     #if DEBUG
     func test_InMemoryAcceptanceJournalDAO_can_instantiate_and_satisfies_protocol() throws {
         let fake: AcceptanceJournalDAO = InMemoryAcceptanceJournalDAO()
+        // PR 5a 升级：首插必须 .downloaded（mirror production state machine）
         try fake.upsert(trainingSetId: 1, leaseId: "x", state: .downloaded,
                         sqliteLocalPath: nil, contentHash: nil, lastError: nil)
         let rows = try fake.listByState(.downloaded)
-        XCTAssertEqual(rows.count, 0)  // Wave 0 fake 不实际持久化（与其它 P4 fake 一致）
+        XCTAssertEqual(rows.count, 1)  // PR 5a 升级：fake 现在真持久化
+        XCTAssertEqual(rows.first?.trainingSetId, 1)
         try fake.deleteByIdLease(trainingSetId: 1, leaseId: "x")
+        XCTAssertEqual(try fake.listByState(.downloaded).count, 0)
     }
     #endif
 }
