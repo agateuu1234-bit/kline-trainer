@@ -304,15 +304,161 @@ public final class InMemoryAcceptanceJournalDAO: AcceptanceJournalDAO, @unchecke
 
 // MARK: - P5 fake
 
+/// **Scope: preview/happy-path only.**
+///
+/// 此 fake 不读 sqlite 文件——`schemaVersion` 来自 caller 注入的 `meta.schemaVersion`，
+/// `downloadedZip` URL 不被读取（只存进 `TrainingSetFile.localURL` 字段供 caller 持有）。
+///
+/// 镜像 production `DefaultFileSystemCacheManager` 行为（plan §2 8 条）：
+/// - filename safety check（拒空 / `/` / `\` / `..` / `\0` / `.staging-` 前缀）
+/// - `.zip → .sqlite` 文件名规范化（codex post-impl R7）
+/// - listAvailable 排序：lastAccessedAt desc → downloadedAt desc → **basename desc**（R1-H2 修订；basename = `"\(id)__\(filename)"`，mirror production line 256）
+/// - store: 同 id 替换；新插入 mtime = now；替换保留原 downloadedAt，lastAccessedAt = now
+/// - maxCachedSets = 20；超容量驱逐尾部
+/// - touch: best-effort，缺失 silent no-op
+/// - delete: 缺失抛 **`.trainingSet(.fileNotFound)`**（R1-H1 修订；mirror `Internal/CacheErrorMapping.swift:24-25` `NSFileNoSuchFileError → .trainingSet(.fileNotFound)`）
+/// - 全部 method 走 NSLock 串行
+///
+/// **不镜像**（fake-specific 简化）：
+/// - PRAGMA user_version 读取（用 caller 注入 schemaVersion）
+/// - 文件系统 stage / replaceItemAt / staging orphan 清扫
+/// - 同 id 多 filename 共存（dict 单 id 唯一；后写覆盖前写）
+/// - replaceItemAt ctime swap 边界
+///
+/// 需要测试真 sqlite IO 错误（diskFull / dbCorrupted via PRAGMA failure）的用例，
+/// 请用 `DefaultFileSystemCacheManager` + 真临时目录 fixture，不要 fork 本 fake。
 public final class InMemoryCacheManager: CacheManager, @unchecked Sendable {
+
+    public static let maxCachedSets = 20
+
+    private let lock = NSLock()
+    private var store: [Int: TrainingSetFile] = [:]
+
     public init() {}
-    public func listAvailable() -> [TrainingSetFile] { [] }
-    public func pickRandom() -> TrainingSetFile? { nil }
-    public func store(downloadedZip: URL, meta: TrainingSetMetaItem) throws -> TrainingSetFile {
-        fatalError("Wave 0 fake: not exercised in preview path")
+
+    public func listAvailable() -> [TrainingSetFile] {
+        lock.lock(); defer { lock.unlock() }
+        return sortedLocked()
     }
-    public func touch(_: TrainingSetFile) {}
-    public func delete(_: TrainingSetFile) throws {}
+
+    public func pickRandom() -> TrainingSetFile? {
+        lock.lock(); defer { lock.unlock() }
+        return sortedLocked().randomElement()
+    }
+
+    public func store(downloadedZip: URL, meta: TrainingSetMetaItem) throws -> TrainingSetFile {
+        lock.lock(); defer { lock.unlock() }
+        let cacheFilename = try Self.normalizedFilename(meta.filename)
+        let now = Int64(Date().timeIntervalSince1970)
+        let preservedDownloadedAt = self.store[meta.id]?.downloadedAt ?? now
+        let file = TrainingSetFile(
+            id: meta.id,
+            filename: cacheFilename,
+            localURL: downloadedZip,
+            schemaVersion: meta.schemaVersion,
+            lastAccessedAt: now,
+            downloadedAt: preservedDownloadedAt
+        )
+        self.store[meta.id] = file
+        evictIfNeededLocked()
+        return file
+    }
+
+    public func touch(_ file: TrainingSetFile) {
+        lock.lock(); defer { lock.unlock() }
+        guard let existing = self.store[file.id] else { return }   // best-effort silent no-op
+        let now = Int64(Date().timeIntervalSince1970)
+        self.store[file.id] = TrainingSetFile(
+            id: existing.id, filename: existing.filename, localURL: existing.localURL,
+            schemaVersion: existing.schemaVersion,
+            lastAccessedAt: now,
+            downloadedAt: existing.downloadedAt
+        )
+    }
+
+    public func delete(_ file: TrainingSetFile) throws {
+        lock.lock(); defer { lock.unlock() }
+        // R1-H1 修订：mirror production CacheErrorMapping `NSFileNoSuchFileError → .trainingSet(.fileNotFound)`
+        // (Internal/CacheErrorMapping.swift:24-25)；production test 期望同 case
+        // (DefaultFileSystemCacheManagerTests.swift:118-128 delete_nonExistentThrowsFileNotFound)
+        guard self.store.removeValue(forKey: file.id) != nil else {
+            throw AppError.trainingSet(.fileNotFound)
+        }
+    }
+
+    // MARK: - Internal helpers
+
+    /// `.zip → .sqlite` 规范化 + filename safety；mirror `DefaultFileSystemCacheManager.normalizedCacheFilename` (line 148-159) + `validateFilenameSafety` (line 132-143)
+    private static func normalizedFilename(_ raw: String) throws -> String {
+        // safety check（先于扩展名规范化，避免被规范化掩盖）
+        if raw.isEmpty
+            || raw.contains("/")
+            || raw.contains("\\")
+            || raw.contains("..")
+            || raw.contains("\0")
+            || raw.hasPrefix(".staging-") {
+            throw AppError.internalError(
+                module: "PR5b-InMemoryCacheManager",
+                detail: "invalid filename rejected: \(raw)"
+            )
+        }
+        let lower = raw.lowercased()
+        if lower.hasSuffix(".sqlite") {
+            return raw
+        }
+        if lower.hasSuffix(".zip") {
+            return String(raw.dropLast(4)) + ".sqlite"
+        }
+        throw AppError.internalError(
+            module: "PR5b-InMemoryCacheManager",
+            detail: "filename must end in .sqlite or .zip (case-insensitive): \(raw)"
+        )
+    }
+
+    /// caller 已 lock。listAvailable 排序：lastAccessedAt desc → downloadedAt desc → basename desc。
+    /// R1-H2 修订：mirror production `DefaultFileSystemCacheManager.swift:253-257`
+    /// （basename = `entry.deletingPathExtension().lastPathComponent` = `"\(id)__\(filename_no_ext)"`；
+    /// fake 等价比较 `"\(id)__\(filename)"` —— 所有项同 `.sqlite` 后缀，字符串 `>` 与 production 同序）。
+    private func sortedLocked() -> [TrainingSetFile] {
+        store.values.sorted { lhs, rhs in
+            if lhs.lastAccessedAt != rhs.lastAccessedAt { return lhs.lastAccessedAt > rhs.lastAccessedAt }
+            if lhs.downloadedAt != rhs.downloadedAt { return lhs.downloadedAt > rhs.downloadedAt }
+            return Self.basename(lhs) > Self.basename(rhs)
+        }
+    }
+
+    private static func basename(_ f: TrainingSetFile) -> String {
+        "\(f.id)__\(f.filename)"
+    }
+
+    /// caller 已 lock。20-cap 驱逐：保留排序后前 20。
+    private func evictIfNeededLocked() {
+        if store.count <= Self.maxCachedSets { return }
+        let keep = Set(sortedLocked().prefix(Self.maxCachedSets).map(\.id))
+        for id in Array(store.keys) where !keep.contains(id) {
+            store.removeValue(forKey: id)
+        }
+    }
+}
+
+/// 仅供 InMemoryCacheManagerTests 直接灌入预构造 file（绕过 store 路径，
+/// 用于测 listAvailable tiebreaker / 20-cap 驱逐边界）。
+/// R1-M2 修订：不嵌套 `#if DEBUG`——本 extension 已在文件级 `#if DEBUG` 块内（line 6 起）。
+///
+/// **Invariant (post-impl R1-L3)**：caller 必须传 `filename` 已是 `.sqlite` 后缀的 `TrainingSetFile`
+/// （绕过 normalizedFilename 的 caller 自负）。否则 listAvailable basename tiebreaker 与 production
+/// 行为发散（production 入口 `normalizedCacheFilename` 强制后缀）。
+///
+/// **Capacity note (self-review minor #1)**：`_seedForTesting` 不调用 `evictIfNeededLocked`。
+/// 灌入超 `maxCachedSets`（20）项后 dict 暂时超容量，直到下一次 `store()` 调用才触发驱逐；
+/// 当前 test #16 故意灌 20 + 走 store 第 21 验 evict，符合该 invariant。
+internal extension InMemoryCacheManager {
+    func _seedForTesting(_ files: [TrainingSetFile]) {
+        lock.lock(); defer { lock.unlock() }
+        for f in files {
+            store[f.id] = f
+        }
+    }
 }
 
 #endif
