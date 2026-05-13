@@ -56,3 +56,4 @@ DerivedData/
 
 # Git worktrees (project-local isolated workspaces for parallel plans)
 .worktrees/
+.claude/worktrees/
