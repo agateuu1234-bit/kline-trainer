@@ -511,6 +511,25 @@ struct ReduceDrawingCommittedTests {
         #expect(s.revision == 1)
         #expect(eff == .none)
     }
+
+    @Test("drawing(snap.baseRev=5) + state.rev=99 + drawingCommitted(base=99) → guard 读 snap.baseRev 而非 state.rev → mode 不变 + .none")
+    func drawingCommittedReadsSnapshotNotRevision() {
+        // R3 high-1 修订：distinguishing fixture where state.revision != snap.frozen.baseRevision。
+        // 守 prod guard literal `guard base == snap.frozen.baseRevision`：
+        //   - 真 guard: base(99) == snap.baseRev(5) → false → guard 失败 → return .none → mode 保 drawing ✓
+        //   - mutation `guard base == revision`: base(99) == state.rev(99) → true → guard 通过 → 退出 drawing ✗
+        // 此 fixture 合成（drawing 模式内 revision 不会被 bump，真实流程触达不到 state.rev != snap.baseRev），
+        // 但 mutation testing 需要此 fixture 暴露 wrong-source 误改。
+        var s = makePanel(makeDrawingMode(baseRev: 5), rev: 99)
+        let eff = s.reduce(.drawingCommitted(baseRevision: 99))
+        guard case .drawing(let snap) = s.interactionMode else {
+            Issue.record("expected drawing mode unchanged (wrong-source mutation would exit drawing)")
+            return
+        }
+        #expect(snap.frozen.baseRevision == 5)  // snap 不变
+        #expect(s.revision == 99)                // state.rev 不变
+        #expect(eff == .none)
+    }
 }
 
 // MARK: - reduce: drawingCancelled (drawing-matched + drawing-unmatched cross-session guard;
@@ -541,6 +560,157 @@ struct ReduceDrawingCancelledTests {
         #expect(snap.frozen.baseRevision == 1)
         #expect(s.revision == 1)
         #expect(eff == .none)
+    }
+
+    @Test("drawing(snap.baseRev=5) + state.rev=99 + drawingCancelled(base=99) → guard 读 snap.baseRev 而非 state.rev → mode 不变 + .none")
+    func drawingCancelledReadsSnapshotNotRevision() {
+        // R3 high-1 修订（mirror committed）：distinguishing fixture state.revision != snap.frozen.baseRevision。
+        // 守 cancel 分支 prod guard 同样读 snap.frozen.baseRevision；mutation 同上抓。
+        var s = makePanel(makeDrawingMode(baseRev: 5), rev: 99)
+        let eff = s.reduce(.drawingCancelled(baseRevision: 99))
+        guard case .drawing(let snap) = s.interactionMode else {
+            Issue.record("expected drawing mode unchanged (wrong-source mutation would exit drawing)")
+            return
+        }
+        #expect(snap.frozen.baseRevision == 5)
+        #expect(s.revision == 99)
+        #expect(eff == .none)
+    }
+}
+
+// MARK: - reduce: 5 stale drift paths (spec L1146-1162 验收 #3 + R2 freeScrolling 补 + R6 trade nonzero baseline 拆姊妹 test)
+// Characterization tests: prod stale guard literal 在 PR7b1 已落（Reducer.swift L174-176）；
+// 本 Suite 验证 3 条 spec 字面 sequence path（trade / periodCombo / offsetApplied 漂移）
+// 在 reducer 内端到端可达，stale guard 真返回 .staleDrawingSnapshot。
+
+@Suite("reduce stale drift paths")
+struct ReduceStaleDrawingSnapshotTests {
+
+    @Test("trade 漂移 (spec literal r=0→1): activateDrawing(r=0) → tradeTriggered(r=1) → setDrawingSnapshot(baseRev:0) → stale")
+    func tradeDrift() {
+        // R6 medium-1 修订：保留 spec L1148/L1160 字面 r=0→r=1 trade path（守 r=0 boundary case，
+        // 防 "revision==0 sentinel 错把 tradeTriggered 漂移当成 no-op"回归窗口）。
+        // R1 medium-2 提出的 nonzero mutation-killing 拆到独立 `tradeDriftNonZeroBaseline` test（下方），
+        // 两个 test 分担：本 test 守 spec literal、姊妹 test 守 mutation gap。
+        var s = makePanel(.autoTracking, rev: 0)
+
+        // Step 1: activateDrawing — 不 bump revision，mode 不变
+        let eff1 = s.reduce(.activateDrawing(.ray))
+        #expect(s.interactionMode == .autoTracking)
+        #expect(s.revision == 0)
+        #expect(eff1 == .requestDrawingSnapshotAfterStoppingAnimator(tool: .ray, baseRevision: 0))
+
+        // Step 2: tradeTriggered 漂移 — revision bump 到 1，mode 保持 autoTracking
+        let eff2 = s.reduce(.tradeTriggered)
+        #expect(s.interactionMode == .autoTracking)
+        #expect(s.revision == 1)
+        #expect(eff2 == .none)
+
+        // Step 3: setDrawingSnapshot(baseRev=0) handler 回推 — revision 已漂到 1
+        // → reducer 守 stale guard 返回 .staleDrawingSnapshot；mode 保持 autoTracking（未进 drawing）
+        let eff3 = s.reduce(.setDrawingSnapshot(tool: .ray, baseRevision: 0, candleRange: 0..<100))
+        #expect(s.interactionMode == .autoTracking)
+        #expect(s.revision == 1)
+        #expect(eff3 == .staleDrawingSnapshot(expected: 0, actual: 1))
+    }
+
+    @Test("trade 漂移 (nonzero baseline, mutation killer): activateDrawing(r=5) → tradeTriggered(r=6) → setDrawingSnapshot(baseRev:5) → stale")
+    func tradeDriftNonZeroBaseline() {
+        // R1 medium-2 + R6 medium-1 修订：与 `tradeDrift` (r=0) 互补的姊妹 test，起点 rev=5。
+        // 抓 mutation `guard baseRev != 0` 常量 guard 错改：mutation 在 baseRev=5 时 false（5 != 0 = true
+        // → guard 失败 → 不返回 stale → 进 drawing mode），test FAIL → mutation 被抓。
+        var s = makePanel(.autoTracking, rev: 5)
+
+        let eff1 = s.reduce(.activateDrawing(.ray))
+        #expect(s.interactionMode == .autoTracking)
+        #expect(s.revision == 5)
+        #expect(eff1 == .requestDrawingSnapshotAfterStoppingAnimator(tool: .ray, baseRevision: 5))
+
+        let eff2 = s.reduce(.tradeTriggered)
+        #expect(s.interactionMode == .autoTracking)
+        #expect(s.revision == 6)
+        #expect(eff2 == .none)
+
+        let eff3 = s.reduce(.setDrawingSnapshot(tool: .ray, baseRevision: 5, candleRange: 0..<100))
+        #expect(s.interactionMode == .autoTracking)
+        #expect(s.revision == 6)
+        #expect(eff3 == .staleDrawingSnapshot(expected: 5, actual: 6))
+    }
+
+    @Test("periodCombo 漂移: activateDrawing(r=0) → periodComboSwitched(r=1, .clearPendingDrawing) → setDrawingSnapshot(baseRev:0) → stale")
+    func periodComboDrift() {
+        var s = makePanel(.autoTracking, rev: 0)
+
+        // Step 1: activateDrawing
+        let eff1 = s.reduce(.activateDrawing(.trend))
+        #expect(s.revision == 0)
+        #expect(eff1 == .requestDrawingSnapshotAfterStoppingAnimator(tool: .trend, baseRevision: 0))
+
+        // Step 2: periodComboSwitched 漂移 — bump + .clearPendingDrawing
+        let eff2 = s.reduce(.periodComboSwitched)
+        #expect(s.interactionMode == .autoTracking)
+        #expect(s.revision == 1)
+        #expect(eff2 == .clearPendingDrawing)
+
+        // Step 3: setDrawingSnapshot(baseRev=0) → stale
+        let eff3 = s.reduce(.setDrawingSnapshot(tool: .trend, baseRevision: 0, candleRange: 0..<100))
+        #expect(s.interactionMode == .autoTracking)
+        #expect(s.revision == 1)
+        #expect(eff3 == .staleDrawingSnapshot(expected: 0, actual: 1))
+    }
+
+    @Test("offsetApplied 漂移 (autoTracking): activateDrawing(r=0) → offsetApplied(delta=3, autoTracking, r=1) → setDrawingSnapshot(baseRev:0) → stale")
+    func offsetAppliedDrift() {
+        // 闸门 #5 新增路径：handler 计算 candleRange 期间发生 .offsetApplied（手势 / deceleration 余震），
+        // mode 仍是 autoTracking → revision bump → setDrawingSnapshot 回推已 stale
+        var s = makePanel(.autoTracking, rev: 0)
+
+        // Step 1: activateDrawing
+        let eff1 = s.reduce(.activateDrawing(.horizontal))
+        #expect(s.revision == 0)
+        #expect(eff1 == .requestDrawingSnapshotAfterStoppingAnimator(tool: .horizontal, baseRevision: 0))
+
+        // Step 2: offsetApplied 漂移 — offset 累加 + bump
+        let eff2 = s.reduce(.offsetApplied(deltaPixels: 3))
+        #expect(s.interactionMode == .autoTracking)
+        #expect(s.offset == 3)
+        #expect(s.revision == 1)
+        #expect(eff2 == .none)
+
+        // Step 3: setDrawingSnapshot(baseRev=0) → stale
+        let eff3 = s.reduce(.setDrawingSnapshot(tool: .horizontal, baseRevision: 0, candleRange: 0..<100))
+        #expect(s.interactionMode == .autoTracking)
+        #expect(s.revision == 1)
+        #expect(eff3 == .staleDrawingSnapshot(expected: 0, actual: 1))
+    }
+
+    @Test("freeScrolling 漂移 (offsetApplied): activateDrawing(r=0, free) → offsetApplied(delta=3, free, r=1) → setDrawingSnapshot(baseRev:0) → stale + mode 保 free")
+    func freeScrollingOffsetAppliedDrift() {
+        // R2 medium-1 修订：覆盖 spec L1059-1064 stale guard 的 freeScrolling 分支；
+        // 关闭 prod 错写「auto 单 case + free 单走 .none」回归窗口。
+        // 选 offsetApplied（非 trade/period）：spec L1098-1102 / L1104-1108 trade/period
+        // 会硬切 autoTracking，中间 step 后 mode 已不在 freeScrolling；offsetApplied 在
+        // freeScrolling 上吞 + bump（不切 mode），mode 全程保 freeScrolling。
+        var s = makePanel(.freeScrolling, rev: 0)
+
+        // Step 1: activateDrawing — 不 bump revision，mode 保 freeScrolling
+        let eff1 = s.reduce(.activateDrawing(.ray))
+        #expect(s.interactionMode == .freeScrolling)
+        #expect(s.revision == 0)
+        #expect(eff1 == .requestDrawingSnapshotAfterStoppingAnimator(tool: .ray, baseRevision: 0))
+
+        // Step 2: offsetApplied 漂移 — offset 累加 + bump；mode 保 freeScrolling
+        let eff2 = s.reduce(.offsetApplied(deltaPixels: 3))
+        #expect(s.interactionMode == .freeScrolling)
+        #expect(s.offset == 3)
+        #expect(s.revision == 1)
+        #expect(eff2 == .none)
+
+        // Step 3: setDrawingSnapshot(baseRev=0) → stale；mode 保 freeScrolling（未进 drawing 也未掉 auto）
+        let eff3 = s.reduce(.setDrawingSnapshot(tool: .ray, baseRevision: 0, candleRange: 0..<100))
+        #expect(s.interactionMode == .freeScrolling)
+        #expect(s.revision == 1)
+        #expect(eff3 == .staleDrawingSnapshot(expected: 0, actual: 1))
     }
 }
 

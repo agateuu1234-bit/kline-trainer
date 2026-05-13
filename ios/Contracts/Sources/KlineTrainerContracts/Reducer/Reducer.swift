@@ -166,7 +166,7 @@ extension PanelViewState {
              (.freeScrolling, .activateDrawing(let tool)):
             return .requestDrawingSnapshotAfterStoppingAnimator(tool: tool, baseRevision: revision)
         case (.drawing, .activateDrawing):
-            return .none
+            return .none  // 切换工具由 DrawingToolManager 处理
 
         // —— setDrawingSnapshot（spec L1058-1072；外部回推 candleRange；matched 进 drawing；stale 留 effect）——
         case (.autoTracking, .setDrawingSnapshot(let tool, let baseRev, let range)),
@@ -181,12 +181,13 @@ extension PanelViewState {
             interactionMode = .drawing(snapshot: DrawingSnapshot(frozen: frozen))
             return .none
         case (.drawing, .setDrawingSnapshot):
-            return .none
+            return .none  // drawing 模式下切工具由 DrawingToolManager 处理，不重复进 drawing
 
         // —— drawingCommitted / drawingCancelled（spec L1074-1097 闸门 #5：cross-session guard）——
         case (.drawing(let snap), .drawingCommitted(let base)):
             guard base == snap.frozen.baseRevision else {
-                return .none  // 旧 session 遗留 action，丢弃保持当前 drawing
+                // 来自上一轮 session 的延迟 action，忽略
+                return .none
             }
             interactionMode = .autoTracking
             return .none
