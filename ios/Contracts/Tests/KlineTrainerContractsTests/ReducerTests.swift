@@ -10,6 +10,26 @@ import Foundation
 import CoreGraphics
 @testable import KlineTrainerContracts
 
+// MARK: - File-level test helpers (extracted in PR7b2 from per-Suite copies)
+
+/// 构造 `PanelViewState` 的统一测试 fixture。
+/// 默认 visibleCount=100、offset=0、revision=0；可覆写。
+/// PR7b2 抽自 9 个 Suite 内 `private func make` copy（PR7b1 plan §4 R1 M-4 技术债）。
+private func makePanel(_ mode: ChartInteractionMode,
+                       rev: UInt64 = 0,
+                       offset: CGFloat = 0) -> PanelViewState {
+    PanelViewState(period: .m15, interactionMode: mode,
+                   visibleCount: 100, offset: offset, revision: rev)
+}
+
+/// 构造 drawing 模式 fixture（candleRange: 0..<100, offset: 0, baseRev 可调）。
+/// PR7b2 抽自 4 个 Suite 内 `private func drawingMode` copy。
+private func makeDrawingMode(baseRev: UInt64 = 5) -> ChartInteractionMode {
+    let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
+                                  candleRange: 0..<100, baseRevision: baseRev)
+    return .drawing(snapshot: DrawingSnapshot(frozen: frozen))
+}
+
 // MARK: - PanelViewState
 
 @Suite("PanelViewState")
@@ -197,14 +217,9 @@ struct ChartReduceEffectEquatableTests {
 @Suite("reduce panStarted")
 struct ReducePanStartedTests {
 
-    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0) -> PanelViewState {
-        PanelViewState(period: .m15, interactionMode: mode,
-                       visibleCount: 100, offset: 0, revision: rev)
-    }
-
     @Test("autoTracking → freeScrolling + bump revision")
     func autoToFree() {
-        var s = make(.autoTracking, rev: 5)
+        var s = makePanel(.autoTracking, rev: 5)
         let eff = s.reduce(.panStarted)
         #expect(s.interactionMode == .freeScrolling)
         #expect(s.revision == 6)
@@ -213,7 +228,7 @@ struct ReducePanStartedTests {
 
     @Test("freeScrolling → 无变化, 无 bump")
     func freeNoChange() {
-        var s = make(.freeScrolling, rev: 5)
+        var s = makePanel(.freeScrolling, rev: 5)
         let eff = s.reduce(.panStarted)
         #expect(s.interactionMode == .freeScrolling)
         #expect(s.revision == 5)
@@ -224,7 +239,7 @@ struct ReducePanStartedTests {
     func drawingNoChange() {
         let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
                                       candleRange: 0..<100, baseRevision: 5)
-        var s = make(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5)
+        var s = makePanel(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5)
         let eff = s.reduce(.panStarted)
         guard case .drawing = s.interactionMode else {
             Issue.record("expected drawing mode unchanged after panStarted")
@@ -240,14 +255,9 @@ struct ReducePanStartedTests {
 @Suite("reduce panEnded")
 struct ReducePanEndedTests {
 
-    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0) -> PanelViewState {
-        PanelViewState(period: .m15, interactionMode: mode,
-                       visibleCount: 100, offset: 0, revision: rev)
-    }
-
     @Test("autoTracking → 无 bump, 无 effect")
     func autoNoBump() {
-        var s = make(.autoTracking, rev: 5)
+        var s = makePanel(.autoTracking, rev: 5)
         let eff = s.reduce(.panEnded(velocity: 3.0))
         #expect(s.revision == 5)
         #expect(eff == .none)
@@ -255,7 +265,7 @@ struct ReducePanEndedTests {
 
     @Test("freeScrolling → bump + .startDeceleration(v)")
     func freeBumpAndEffect() {
-        var s = make(.freeScrolling, rev: 5)
+        var s = makePanel(.freeScrolling, rev: 5)
         let eff = s.reduce(.panEnded(velocity: 3.0))
         #expect(s.revision == 6)
         #expect(eff == .startDeceleration(velocity: 3.0))
@@ -265,7 +275,7 @@ struct ReducePanEndedTests {
     func drawingNoBump() {
         let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
                                       candleRange: 0..<100, baseRevision: 5)
-        var s = make(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5)
+        var s = makePanel(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5)
         let eff = s.reduce(.panEnded(velocity: 3.0))
         guard case .drawing = s.interactionMode else {
             Issue.record("expected drawing mode unchanged after panEnded")
@@ -281,14 +291,9 @@ struct ReducePanEndedTests {
 @Suite("reduce tradeTriggered")
 struct ReduceTradeTriggeredTests {
 
-    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0) -> PanelViewState {
-        PanelViewState(period: .m15, interactionMode: mode,
-                       visibleCount: 100, offset: 0, revision: rev)
-    }
-
     @Test("autoTracking → autoTracking + bump")
     func auto() {
-        var s = make(.autoTracking, rev: 5)
+        var s = makePanel(.autoTracking, rev: 5)
         let eff = s.reduce(.tradeTriggered)
         #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 6)
@@ -297,7 +302,7 @@ struct ReduceTradeTriggeredTests {
 
     @Test("freeScrolling → autoTracking + bump")
     func free() {
-        var s = make(.freeScrolling, rev: 5)
+        var s = makePanel(.freeScrolling, rev: 5)
         let eff = s.reduce(.tradeTriggered)
         #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 6)
@@ -308,7 +313,7 @@ struct ReduceTradeTriggeredTests {
     func drawing() {
         let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
                                       candleRange: 0..<100, baseRevision: 5)
-        var s = make(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5)
+        var s = makePanel(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5)
         let eff = s.reduce(.tradeTriggered)
         #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 6)
@@ -321,14 +326,9 @@ struct ReduceTradeTriggeredTests {
 @Suite("reduce periodComboSwitched")
 struct ReducePeriodComboTests {
 
-    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0) -> PanelViewState {
-        PanelViewState(period: .m15, interactionMode: mode,
-                       visibleCount: 100, offset: 0, revision: rev)
-    }
-
     @Test("autoTracking → autoTracking + bump + .clearPendingDrawing")
     func auto() {
-        var s = make(.autoTracking, rev: 5)
+        var s = makePanel(.autoTracking, rev: 5)
         let eff = s.reduce(.periodComboSwitched)
         #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 6)
@@ -337,7 +337,7 @@ struct ReducePeriodComboTests {
 
     @Test("freeScrolling → autoTracking + bump + .clearPendingDrawing")
     func free() {
-        var s = make(.freeScrolling, rev: 5)
+        var s = makePanel(.freeScrolling, rev: 5)
         let eff = s.reduce(.periodComboSwitched)
         #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 6)
@@ -348,7 +348,7 @@ struct ReducePeriodComboTests {
     func drawing() {
         let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
                                       candleRange: 0..<100, baseRevision: 5)
-        var s = make(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5)
+        var s = makePanel(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5)
         let eff = s.reduce(.periodComboSwitched)
         #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 6)
@@ -361,14 +361,9 @@ struct ReducePeriodComboTests {
 @Suite("reduce offsetApplied")
 struct ReduceOffsetAppliedTests {
 
-    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0, offset: CGFloat = 0) -> PanelViewState {
-        PanelViewState(period: .m15, interactionMode: mode,
-                       visibleCount: 100, offset: offset, revision: rev)
-    }
-
     @Test("autoTracking → offset+=delta + bump")
     func auto() {
-        var s = make(.autoTracking, rev: 5, offset: 10)
+        var s = makePanel(.autoTracking, rev: 5, offset: 10)
         let eff = s.reduce(.offsetApplied(deltaPixels: 3))
         #expect(s.offset == 13)
         #expect(s.revision == 6)
@@ -377,7 +372,7 @@ struct ReduceOffsetAppliedTests {
 
     @Test("freeScrolling → offset+=delta + bump")
     func free() {
-        var s = make(.freeScrolling, rev: 5, offset: 10)
+        var s = makePanel(.freeScrolling, rev: 5, offset: 10)
         let eff = s.reduce(.offsetApplied(deltaPixels: -2))
         #expect(s.offset == 8)
         #expect(s.revision == 6)
@@ -388,7 +383,7 @@ struct ReduceOffsetAppliedTests {
     func drawingSwallows() {
         let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
                                       candleRange: 0..<100, baseRevision: 5)
-        var s = make(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5, offset: 10)
+        var s = makePanel(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5, offset: 10)
         let eff = s.reduce(.offsetApplied(deltaPixels: 100))
         guard case .drawing = s.interactionMode else {
             Issue.record("expected drawing mode unchanged after offsetApplied")
@@ -405,20 +400,9 @@ struct ReduceOffsetAppliedTests {
 @Suite("reduce activateDrawing")
 struct ReduceActivateDrawingTests {
 
-    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0) -> PanelViewState {
-        PanelViewState(period: .m15, interactionMode: mode,
-                       visibleCount: 100, offset: 0, revision: rev)
-    }
-
-    private func drawingMode(baseRev: UInt64 = 5) -> ChartInteractionMode {
-        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
-                                      candleRange: 0..<100, baseRevision: baseRev)
-        return .drawing(snapshot: DrawingSnapshot(frozen: frozen))
-    }
-
     @Test("autoTracking → 不 bump + .requestDrawingSnapshotAfterStoppingAnimator(tool, revision)")
     func autoEffect() {
-        var s = make(.autoTracking, rev: 5)
+        var s = makePanel(.autoTracking, rev: 5)
         let eff = s.reduce(.activateDrawing(.ray))
         #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 5)
@@ -427,7 +411,7 @@ struct ReduceActivateDrawingTests {
 
     @Test("freeScrolling → 不 bump + .requestDrawingSnapshotAfterStoppingAnimator(tool, revision)")
     func freeEffect() {
-        var s = make(.freeScrolling, rev: 7)
+        var s = makePanel(.freeScrolling, rev: 7)
         let eff = s.reduce(.activateDrawing(.trend))
         #expect(s.interactionMode == .freeScrolling)
         #expect(s.revision == 7)
@@ -436,7 +420,7 @@ struct ReduceActivateDrawingTests {
 
     @Test("drawing → 不 bump + .none（DrawingToolManager 处理切工具）")
     func drawingNoChange() {
-        var s = make(drawingMode(baseRev: 5), rev: 5)
+        var s = makePanel(makeDrawingMode(baseRev: 5), rev: 5)
         let eff = s.reduce(.activateDrawing(.horizontal))
         guard case .drawing = s.interactionMode else {
             Issue.record("expected drawing mode unchanged after activateDrawing")
@@ -452,20 +436,9 @@ struct ReduceActivateDrawingTests {
 @Suite("reduce setDrawingSnapshot")
 struct ReduceSetDrawingSnapshotTests {
 
-    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0) -> PanelViewState {
-        PanelViewState(period: .m15, interactionMode: mode,
-                       visibleCount: 100, offset: 0, revision: rev)
-    }
-
-    private func drawingMode(baseRev: UInt64 = 5) -> ChartInteractionMode {
-        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
-                                      candleRange: 0..<100, baseRevision: baseRev)
-        return .drawing(snapshot: DrawingSnapshot(frozen: frozen))
-    }
-
     @Test("autoTracking + matched baseRev → drawing(snap) + 不 bump + .none")
     func autoMatchedEntersDrawing() {
-        var s = make(.autoTracking, rev: 5)
+        var s = makePanel(.autoTracking, rev: 5)
         let eff = s.reduce(.setDrawingSnapshot(tool: .ray, baseRevision: 5, candleRange: 10..<110))
         guard case .drawing(let snap) = s.interactionMode else {
             Issue.record("expected drawing mode after matched setDrawingSnapshot")
@@ -482,7 +455,7 @@ struct ReduceSetDrawingSnapshotTests {
 
     @Test("freeScrolling + matched baseRev → drawing(snap) + 不 bump + .none")
     func freeMatchedEntersDrawing() {
-        var s = make(.freeScrolling, rev: 7)
+        var s = makePanel(.freeScrolling, rev: 7)
         let eff = s.reduce(.setDrawingSnapshot(tool: .trend, baseRevision: 7, candleRange: 0..<50))
         guard case .drawing(let snap) = s.interactionMode else {
             Issue.record("expected drawing mode after matched setDrawingSnapshot")
@@ -524,20 +497,9 @@ struct ReduceSetDrawingSnapshotTests {
 @Suite("reduce drawingCommitted")
 struct ReduceDrawingCommittedTests {
 
-    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0) -> PanelViewState {
-        PanelViewState(period: .m15, interactionMode: mode,
-                       visibleCount: 100, offset: 0, revision: rev)
-    }
-
-    private func drawingMode(baseRev: UInt64 = 5) -> ChartInteractionMode {
-        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
-                                      candleRange: 0..<100, baseRevision: baseRev)
-        return .drawing(snapshot: DrawingSnapshot(frozen: frozen))
-    }
-
     @Test("drawing(snap.baseRev=r) + drawingCommitted(baseRev=r) → autoTracking + 不 bump + .none")
     func drawingMatchedExits() {
-        var s = make(drawingMode(baseRev: 5), rev: 5)
+        var s = makePanel(makeDrawingMode(baseRev: 5), rev: 5)
         let eff = s.reduce(.drawingCommitted(baseRevision: 5))
         #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 5)
@@ -549,7 +511,7 @@ struct ReduceDrawingCommittedTests {
         // spec L1163-1166 验收 #4：session A 遗留 drawingCommitted(baseRev=0)
         // 在新 session B drawing(snap.baseRev=1) 时到达 → guard `base != snap.frozen.baseRevision`
         // → 丢弃返回 .none，mode 仍为 drawing（不错误切出 session B）
-        var s = make(drawingMode(baseRev: 1), rev: 1)
+        var s = makePanel(makeDrawingMode(baseRev: 1), rev: 1)
         let eff = s.reduce(.drawingCommitted(baseRevision: 0))
         guard case .drawing(let snap) = s.interactionMode else {
             Issue.record("expected drawing mode unchanged after unmatched commit")
@@ -567,20 +529,9 @@ struct ReduceDrawingCommittedTests {
 @Suite("reduce drawingCancelled")
 struct ReduceDrawingCancelledTests {
 
-    private func make(_ mode: ChartInteractionMode, rev: UInt64 = 0) -> PanelViewState {
-        PanelViewState(period: .m15, interactionMode: mode,
-                       visibleCount: 100, offset: 0, revision: rev)
-    }
-
-    private func drawingMode(baseRev: UInt64 = 5) -> ChartInteractionMode {
-        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
-                                      candleRange: 0..<100, baseRevision: baseRev)
-        return .drawing(snapshot: DrawingSnapshot(frozen: frozen))
-    }
-
     @Test("drawing(snap.baseRev=r) + drawingCancelled(baseRev=r) → autoTracking + 不 bump + .none")
     func drawingMatchedExits() {
-        var s = make(drawingMode(baseRev: 5), rev: 5)
+        var s = makePanel(makeDrawingMode(baseRev: 5), rev: 5)
         let eff = s.reduce(.drawingCancelled(baseRevision: 5))
         #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 5)
@@ -591,7 +542,7 @@ struct ReduceDrawingCancelledTests {
     func drawingUnmatchedKeepsSession() {
         // spec L1163-1166 验收 #4 cancel 分支：session A 遗留 drawingCancelled(baseRev=0)
         // 在新 session B drawing(snap.baseRev=1) 时到达 → guard 丢弃保持 session B
-        var s = make(drawingMode(baseRev: 1), rev: 1)
+        var s = makePanel(makeDrawingMode(baseRev: 1), rev: 1)
         let eff = s.reduce(.drawingCancelled(baseRevision: 0))
         guard case .drawing(let snap) = s.interactionMode else {
             Issue.record("expected drawing mode unchanged after unmatched cancel")
