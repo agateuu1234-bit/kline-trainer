@@ -617,8 +617,9 @@ struct ReduceStaleDrawingSnapshotTests {
     @Test("trade 漂移 (nonzero baseline, mutation killer): activateDrawing(r=5) → tradeTriggered(r=6) → setDrawingSnapshot(baseRev:5) → stale")
     func tradeDriftNonZeroBaseline() {
         // R1 medium-2 + R6 medium-1 修订：与 `tradeDrift` (r=0) 互补的姊妹 test，起点 rev=5。
-        // 抓 mutation `guard baseRev != 0` 常量 guard 错改：mutation 在 baseRev=5 时 false（5 != 0 = true
-        // → guard 失败 → 不返回 stale → 进 drawing mode），test FAIL → mutation 被抓。
+        // 抓 mutation `guard baseRev != 0 else { return stale }` 常量 guard 错改：
+        // baseRev=5 时 `baseRev != 0 = true` → guard CONDITION true → 不进 else 分支 →
+        // 不返回 stale → 进 drawing mode；本 test 期望 .staleDrawingSnapshot → 整体 FAIL → mutation 被抓。
         var s = makePanel(.autoTracking, rev: 5)
 
         let eff1 = s.reduce(.activateDrawing(.ray))
@@ -641,8 +642,9 @@ struct ReduceStaleDrawingSnapshotTests {
     func periodComboDrift() {
         var s = makePanel(.autoTracking, rev: 0)
 
-        // Step 1: activateDrawing
+        // Step 1: activateDrawing — 不 bump revision，mode 不变
         let eff1 = s.reduce(.activateDrawing(.trend))
+        #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 0)
         #expect(eff1 == .requestDrawingSnapshotAfterStoppingAnimator(tool: .trend, baseRevision: 0))
 
@@ -665,8 +667,9 @@ struct ReduceStaleDrawingSnapshotTests {
         // mode 仍是 autoTracking → revision bump → setDrawingSnapshot 回推已 stale
         var s = makePanel(.autoTracking, rev: 0)
 
-        // Step 1: activateDrawing
+        // Step 1: activateDrawing — 不 bump revision，mode 不变
         let eff1 = s.reduce(.activateDrawing(.horizontal))
+        #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 0)
         #expect(eff1 == .requestDrawingSnapshotAfterStoppingAnimator(tool: .horizontal, baseRevision: 0))
 
