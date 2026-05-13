@@ -237,9 +237,7 @@ struct ReducePanStartedTests {
 
     @Test("drawing → 无变化, 无 bump")
     func drawingNoChange() {
-        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
-                                      candleRange: 0..<100, baseRevision: 5)
-        var s = makePanel(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5)
+        var s = makePanel(makeDrawingMode(baseRev: 5), rev: 5)
         let eff = s.reduce(.panStarted)
         guard case .drawing = s.interactionMode else {
             Issue.record("expected drawing mode unchanged after panStarted")
@@ -273,9 +271,7 @@ struct ReducePanEndedTests {
 
     @Test("drawing → 无 bump, 无 effect, mode 不变")
     func drawingNoBump() {
-        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
-                                      candleRange: 0..<100, baseRevision: 5)
-        var s = makePanel(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5)
+        var s = makePanel(makeDrawingMode(baseRev: 5), rev: 5)
         let eff = s.reduce(.panEnded(velocity: 3.0))
         guard case .drawing = s.interactionMode else {
             Issue.record("expected drawing mode unchanged after panEnded")
@@ -311,9 +307,7 @@ struct ReduceTradeTriggeredTests {
 
     @Test("drawing → autoTracking + bump")
     func drawing() {
-        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
-                                      candleRange: 0..<100, baseRevision: 5)
-        var s = makePanel(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5)
+        var s = makePanel(makeDrawingMode(baseRev: 5), rev: 5)
         let eff = s.reduce(.tradeTriggered)
         #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 6)
@@ -346,9 +340,7 @@ struct ReducePeriodComboTests {
 
     @Test("drawing → autoTracking + bump + .clearPendingDrawing")
     func drawing() {
-        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
-                                      candleRange: 0..<100, baseRevision: 5)
-        var s = makePanel(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5)
+        var s = makePanel(makeDrawingMode(baseRev: 5), rev: 5)
         let eff = s.reduce(.periodComboSwitched)
         #expect(s.interactionMode == .autoTracking)
         #expect(s.revision == 6)
@@ -381,9 +373,7 @@ struct ReduceOffsetAppliedTests {
 
     @Test("drawing → 全部忽略，offset / revision / mode 不变")
     func drawingSwallows() {
-        let frozen = FrozenPanelState(period: .m15, visibleCount: 100, offset: 0,
-                                      candleRange: 0..<100, baseRevision: 5)
-        var s = makePanel(.drawing(snapshot: DrawingSnapshot(frozen: frozen)), rev: 5, offset: 10)
+        var s = makePanel(makeDrawingMode(baseRev: 5), rev: 5, offset: 10)
         let eff = s.reduce(.offsetApplied(deltaPixels: 100))
         guard case .drawing = s.interactionMode else {
             Issue.record("expected drawing mode unchanged after offsetApplied")
