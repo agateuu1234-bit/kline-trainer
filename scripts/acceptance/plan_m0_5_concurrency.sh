@@ -57,9 +57,10 @@ run "mainactor: UIView overlay (C1c)"           grep -qE 'UIView.*子类.*UIKit 
 run "actor: NetworkExecutor only"   grep -q 'actor NetworkExecutor' "$DOC"
 # 排他性规则 anchor：spec L671 明示"仅一个 actor"，加 anchor 保证规则文本不被删除
 run "actor: 仅一个 actor exclusivity rule" grep -qE '\*\*仅一个 actor\*\*|仅一个 actor.*spec L671' "$DOC"
-# branch-diff R6 fix：negative test — 除 NetworkExecutor 外不允许出现 `actor <Name> {` 形态 declaration（含模板 X 排除：禁止 actor X { ... }）
-# 例外：禁止清单与重提"actor X { ... }"中的字面 X 是泛指占位符，doc 故意引用作为禁止示例；用反向 grep 排除已知 legal mentions
-run "actor: no other actor declared (negative)" bash -c 'illegal=$(grep -nE "actor [A-Z][a-zA-Z]+ \{" "$DOC" | grep -vE "NetworkExecutor|actor X \{"); [ -z "$illegal" ]'
+# branch-diff R6+R7 fix：negative test — 除 NetworkExecutor 外不允许出现 `actor <Name> {` 形态 declaration
+# 例外：禁止清单"actor X { ... }"中的字面 X 是泛指占位符，doc 故意引用作为禁止示例；用反向 grep 排除已知 legal mentions
+# R7 fix：原 bash -c 单引号导致 $DOC 未展开；改成 $1 显式传参 + grep 失败 fail-closed（grep 退出码非零时函数返回错误）
+run "actor: no other actor declared (negative)" bash -c 'set -e; illegal=$(grep -nE "actor [A-Z][a-zA-Z]+ \{" "$1" || true); illegal=$(echo "$illegal" | grep -vE "NetworkExecutor|actor X \{" || true); [ -z "$illegal" ]' _ "$DOC"
 # P3/P4 各独立 anchor：要求"含 P3" 与 "含 不使用 actor" 在同一行；§应用范围里的 P3a/P3b 行不含 "不使用 actor"，不会误命中
 run "actor: P3 not actor"           bash -c "grep 'P3' \"$DOC\" | grep -q '不使用 actor'"
 run "actor: P4 not actor"           bash -c "grep 'P4' \"$DOC\" | grep -q '不使用 actor'"
