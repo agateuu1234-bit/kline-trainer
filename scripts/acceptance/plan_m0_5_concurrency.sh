@@ -72,13 +72,14 @@ run "sendable: NetworkReason row"    grep -qE '^- \`NetworkReason: Error, Equata
 run "sendable: PersistenceReason row" grep -qE '^- \`PersistenceReason: Error, Equatable, Sendable\`' "$DOC"
 run "sendable: TradeReason row"      grep -qE '^- \`TradeReason: Error, Equatable, Sendable\`' "$DOC"
 run "sendable: TrainingSetReason row" grep -qE '^- \`TrainingSetReason: Error, Equatable, Sendable\`' "$DOC"
-# 6 个跨 actor 协议：anchor 到 §Sendable #3 table 行起始 "| `Proto` |" — 删该行（contract regress）必然 fail
-run "sendable: APIClient row"                  grep -qE '^\| \`APIClient\` \|' "$DOC"
-run "sendable: TrainingSetReader row"          grep -qE '^\| \`TrainingSetReader\`' "$DOC"
-run "sendable: RecordRepository row"           grep -qE '^\| \`RecordRepository\` \|' "$DOC"
-run "sendable: PendingTrainingRepository row"  grep -qE '^\| \`PendingTrainingRepository\` \|' "$DOC"
-run "sendable: SettingsDAO row"                grep -qE '^\| \`SettingsDAO\` \|' "$DOC"
-run "sendable: AcceptanceJournalDAO row"       grep -qE '^\| \`AcceptanceJournalDAO\` \|' "$DOC"
+# 6 个跨 actor 协议：anchor 到 §Sendable #3 table 行，要求 protocol 名 + Sendable conformance 共现 same-line
+# branch-diff R5 fix：原 row anchor 只校验协议名 + |，spec drift 允许删 `: Sendable` 仍 PASS。修改后强制每行含 Sendable
+run "sendable: APIClient protocol Sendable"    grep -qE '^\| \`APIClient\`.*Sendable' "$DOC"
+run "sendable: TrainingSetReader protocol Sendable"   grep -qE '^\| \`protocol TrainingSetReader: AnyObject, Sendable\`' "$DOC"
+run "sendable: RecordRepository protocol Sendable"    grep -qE '^\| \`protocol RecordRepository: Sendable\`' "$DOC"
+run "sendable: PendingTrainingRepository protocol Sendable" grep -qE '^\| \`protocol PendingTrainingRepository: Sendable\`' "$DOC"
+run "sendable: SettingsDAO protocol Sendable"  grep -qE '^\| \`protocol SettingsDAO: Sendable\`' "$DOC"
+run "sendable: AcceptanceJournalDAO protocol Sendable" grep -qE '^\| \`protocol AcceptanceJournalDAO: Sendable\`' "$DOC"
 # 4 个 P2 内部端口：同一行 enumerate 在 P2 row，anchor 要求 P2 4 内部端口 + 端口名共现
 run "sendable: P2 ZipIntegrityVerifying row"      grep -qE 'P2 4 内部端口.*ZipIntegrityVerifying' "$DOC"
 run "sendable: P2 ZipExtracting row"              grep -qE 'P2 4 内部端口.*ZipExtracting' "$DOC"

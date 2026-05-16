@@ -93,18 +93,18 @@ spec L594-628（M0.4 落地于 PR #26）：
 - `TradeReason: Error, Equatable, Sendable`
 - `TrainingSetReason: Error, Equatable, Sendable`
 
-### 3. 跨 actor 协议返回值必须 `Sendable`
+### 3. 跨 actor 协议本身 + 返回值必须 `Sendable`
 
-以下 6 类协议的返回值跨 actor 传递，**必须** `Sendable`（spec L700）：
+以下 6 类协议**本身必须标 `Sendable`**（spec L700 + L1843-L1893 的 `protocol Xxx: Sendable` 声明），且返回值跨 actor 传递时也必须 `Sendable`（branch-diff codex R5 修正：原表只写"返回值"弱化了 spec 的 protocol-level conformance 要求）：
 
-| 协议 | 模块 | spec 行 |
+| 协议（含 Sendable conformance） | 模块 | spec 行 |
 |---|---|---|
-| `APIClient` | P1 | §八 P1 |
-| `TrainingSetReader` (`AnyObject + Sendable`) | P3b | L1843 |
-| `RecordRepository` | P4 | L1870 |
-| `PendingTrainingRepository` | P4 | L1879 |
-| `SettingsDAO` | P4 | L1885 |
-| `AcceptanceJournalDAO` | P4 | L1893 |
+| `APIClient` 协议本身 `Sendable` + 返回值 `Sendable` | P1 | §八 P1 |
+| `protocol TrainingSetReader: AnyObject, Sendable` | P3b | L1843 |
+| `protocol RecordRepository: Sendable` | P4 | L1870 |
+| `protocol PendingTrainingRepository: Sendable` | P4 | L1879 |
+| `protocol SettingsDAO: Sendable` | P4 | L1885 |
+| `protocol AcceptanceJournalDAO: Sendable` | P4 | L1893 |
 | P2 4 内部端口（`ZipIntegrityVerifying` / `ZipExtracting` / `TrainingSetDataVerifying` / `DownloadAcceptanceCleaning`）返回类型 | P2 | L1751-1786 |
 
 ### 4. `@Observable final class` 非 Sendable
