@@ -45,8 +45,8 @@ final class SpyDecelerationAnimator {
     }
 
     /// spec §C2 L1252：停止减速动画。
-    /// 关键契约（spec L1167「必须 stop」隐含要求）：stop() 同步生效，返回后 animator 不再
-    /// 触发 onUpdate——包括 stop() 之前已在途的回调。`isRunning = false` 即此 cancellation guard。
+    /// stop() 同步生效，返回后 `isRunning = false` guard 确保后续 tick(delta:) 调用不触发 onUpdate。
+    /// 注意：本 spy **不**模型「stop() 前已脱离调度的 in-flight 回调」——见 tick(delta:) doc 的边界说明。
     func stop() {
         stopCount += 1
         isRunning = false
@@ -55,8 +55,11 @@ final class SpyDecelerationAnimator {
     /// 测试钩子：模拟 animator 尝试投递一次 onUpdate（一帧 driver tick）。
     /// - start 后、stop 前（isRunning）：正常 tick → 触发 onUpdate → 返回 true。
     /// - stop 后（!isRunning）：driver 已停，tick 被 stop() cancellation 契约丢弃，返回 false。
-    /// 注意：本 primitive 只模型「handler stop 后 driver 不再产生新 tick」，
-    /// 不模型「stop() 前已脱离调度的 in-flight 回调」——后者属 Wave 1 C2 cancellation 机制。
+    /// 注意：本 primitive 只模型「handler stop 后 driver 不再产生新 tick」。
+    /// 对 Wave 0 此即完整模型——per spec L1019-1020「残留 animator 回调**只在 handler 不 stop 时存在**」，
+    /// handler 一旦 stop()，isRunning guard 即丢弃所有后续投递尝试。
+    /// 不模型「stop() 前已脱离调度的 in-flight 回调」——后者属 Wave 1 C2 的 cancellation 机制（generation token 等），
+    /// 由 production gate 在 Wave 1 关闭，非本 PR scope。
     @discardableResult
     func tick(delta: CGFloat) -> Bool {
         guard isRunning else { return false }
@@ -106,6 +109,7 @@ final class ReducerEffectHarness {
     func dispatch(_ action: ChartAction) {
         timeline.append(.dispatched(action))
         let effect = state.reduce(action)
+        // effect routing：handle(_:) 是 spec L1015-1021 的可执行 handler 参考实现，Wave 1 E5/C8 必须 conform。
         handle(effect)
     }
 
@@ -117,9 +121,16 @@ final class ReducerEffectHarness {
             animator.start(initialVelocity: velocity)
             timeline.append(.animatorStarted)
 
-        case .requestDrawingSnapshotAfterStoppingAnimator:
-            // PR7b3 Task 2 填真实现（spec L1015-1021 handler 合约）。Task 1 暂 stub。
-            break
+        case .requestDrawingSnapshotAfterStoppingAnimator(let tool, let baseRevision):
+            // spec L1015-1021 handler 合约（必须按序）：
+            //   1. 立即 stop animator（防 stale 漂移，spec L1167「必须先调用 animator.stop()」）
+            animator.stop()
+            timeline.append(.animatorStopped)
+            //   2. 基于当前 viewport 计算 candleRange
+            timeline.append(.rangeComputed)
+            let range = stubCandleRange
+            //   3. 派发 setDrawingSnapshot（链内 reentrant dispatch）
+            dispatch(.setDrawingSnapshot(tool: tool, baseRevision: baseRevision, candleRange: range))
 
         case .none, .clearPendingDrawing, .staleDrawingSnapshot:
             // L1167 集成链路无需额外处理：clearPendingDrawing/stale 由 UI 层响应（Wave 1）。
@@ -155,5 +166,95 @@ struct ReducerEffectIntegrationTests {
             .dispatched(.panEnded(velocity: 3.0)),
             .animatorStarted,
         ])
+    }
+
+    @Test("activateDrawing → handler stop animator + 派发 setDrawingSnapshot + 进 drawing")
+    func activateDrawingStopsAnimatorAndEntersDrawing() {
+        // spec L1167：animator 运行中 → activateDrawing → .requestDrawingSnapshotAfterStoppingAnimator
+        // → handler stop animator + 算 range + 派发 setDrawingSnapshot → reducer 进 drawing。
+        let harness = ReducerEffectHarness(state: makeState(.freeScrolling, rev: 5))
+        harness.dispatch(.panEnded(velocity: 3.0))   // animator 启动，rev 5→6
+        #expect(harness.animator.isRunning == true)
+
+        harness.dispatch(.activateDrawing(.ray))
+
+        // handler 停了 animator
+        #expect(harness.animator.stopCount == 1)
+        #expect(harness.animator.isRunning == false)
+        // setDrawingSnapshot 被 handler 回推 → reducer 进 drawing（baseRev == 当前 revision 6）
+        guard case .drawing(let snap) = harness.state.interactionMode else {
+            Issue.record("expected drawing mode after handler dispatched setDrawingSnapshot")
+            return
+        }
+        #expect(snap.frozen.baseRevision == 6)        // panEnded bump 后 revision=6
+        #expect(snap.frozen.candleRange == 0..<100)   // stubCandleRange
+    }
+
+    @Test("handler 必须先 stop animator 再算 range 再派发 setDrawingSnapshot（顺序契约）")
+    func handlerStopsAnimatorBeforeComputingRange() {
+        // spec L1167：验证 handler 必须**先**调用 animator.stop() 再计算 range。
+        // 全时间线相等断言 = mutation killer：handler 若先算 range / 先派发再 stop，顺序即不符。
+        let harness = ReducerEffectHarness(state: makeState(.freeScrolling, rev: 5))
+        harness.dispatch(.panEnded(velocity: 3.0))
+        harness.dispatch(.activateDrawing(.ray))
+
+        #expect(harness.timeline == [
+            .dispatched(.panEnded(velocity: 3.0)),
+            .animatorStarted,
+            .dispatched(.activateDrawing(.ray)),
+            .animatorStopped,     // ← 必须早于 rangeComputed
+            .rangeComputed,       // ← 必须早于 setDrawingSnapshot 派发
+            .dispatched(.setDrawingSnapshot(tool: .ray, baseRevision: 6, candleRange: 0..<100)),
+        ])
+    }
+
+    @Test("drawing 模式内：handler 已 stop animator → 残留 tick 被丢弃，无 offsetApplied 到达 reducer")
+    func noResidualCallbackWhileDrawing() {
+        // 本 test 验证「handler-stop 的**效果**」：handler 进 drawing 时已 stop animator，
+        // 此后 animator 的 driver tick 静默（被 isRunning guard 丢弃）→ 无 offsetApplied 进 reducer。
+        // 它**不是** in-flight 延迟回调测试——「stop() 前已脱离调度、stop() 后才到达的回调被挡住」
+        // 是 L1167 production gate 的一部分，属 Wave 1（见「spy 的回调模型 · 本模型不覆盖什么」）。
+        let harness = ReducerEffectHarness(state: makeState(.freeScrolling, rev: 5))
+        harness.dispatch(.panEnded(velocity: 3.0))
+        harness.dispatch(.activateDrawing(.ray))      // handler stop animator + 进 drawing
+        let timelineCountAfterDrawing = harness.timeline.count
+        let offsetBefore = harness.state.offset
+
+        // handler stop 后的 driver tick：animator 已 stop → tick 返回 false，onUpdate 不触发
+        let fired = harness.animator.tick(delta: 50)
+
+        #expect(fired == false)                                        // stop 契约：无残留回调
+        #expect(harness.state.offset == offsetBefore)                  // offset 未漂移
+        #expect(harness.timeline.count == timelineCountAfterDrawing)    // 没有新 dispatch
+        #expect(!harness.timeline.contains(.dispatched(.offsetApplied(deltaPixels: 50))))
+    }
+
+    @Test("drawing 退出后：handler 已 stop animator → driver tick 静默，autoTracking 下也无 offsetApplied 漂移")
+    func noResidualCallbackAfterDrawingExit() {
+        // 本 test 验证「handler-stop 的效果」延伸到 drawing 退出后：handler 进 drawing 时已 stop
+        // animator，退出 drawing 回到 autoTracking 后，animator 的 driver tick 仍静默（isRunning guard）。
+        // spec L1019-1020：drawing 退出后 reducer 不再吞 offsetApplied（autoTracking 会真应用）——
+        // 所以「handler 必须 stop」在退出后才真正要命；本 test 守这条。
+        // mutation killer：若 handler 漏调 animator.stop()，tick 在此 autoTracking 窗口会 fire →
+        // offsetApplied 真漂移 offset/revision → 本 test FAIL。
+        // 边界（codex R3/R4 high）：本 test **不是** in-flight 延迟回调测试。它在「stop() 完全取消」
+        // 的 spy 模型下验证 handler-stop 合约的效果；「production stop() 真能挡住 stop() 前已脱离
+        // 调度的 in-flight 回调」是 Wave 1 C2 的 cancellation 机制，本 PR 不覆盖、不声称覆盖。
+        let harness = ReducerEffectHarness(state: makeState(.freeScrolling, rev: 5))
+        harness.dispatch(.panEnded(velocity: 3.0))            // animator 启动，rev 5→6
+        harness.dispatch(.activateDrawing(.ray))              // handler stop animator + 进 drawing(baseRev=6)
+        harness.dispatch(.drawingCommitted(baseRevision: 6))  // 匹配 baseRev → 退出 drawing → autoTracking
+
+        #expect(harness.state.interactionMode == .autoTracking)   // 已退出 drawing，drawing-swallow 兜底层失效
+        let offsetBefore = harness.state.offset
+        let revisionBefore = harness.state.revision
+
+        // handler stop 后的 driver tick，落在危险的 autoTracking 窗口：animator 已 stop → 丢弃
+        let fired = harness.animator.tick(delta: 50)
+
+        #expect(fired == false)
+        #expect(harness.state.offset == offsetBefore)         // 退出后 offset 不漂移
+        #expect(harness.state.revision == revisionBefore)     // 退出后 revision 不漂移
+        #expect(!harness.timeline.contains(.dispatched(.offsetApplied(deltaPixels: 50))))
     }
 }
