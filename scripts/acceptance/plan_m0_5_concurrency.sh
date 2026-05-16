@@ -41,19 +41,22 @@ run "file: m04 sibling doc"         test -s "$M04"
 run "structure: 12 H2 sections"     bash -c "grep -c '^## ' $DOC | grep -q '^12$'"
 
 # ---- @MainActor 必须清单：5 类 + 3 SwiftUI/UIKit 默认 + 1 UIView overlay（9 项）----
-# R5 fix：所有 anchor 收紧为 row-scoped (table row 起始 | 模块 |) 或 same-line rule，避免删行后名字在 Status 块 / scope 表余 mention 误 pass
-run "mainactor: E5 TrainingEngine row"          grep -qE '^\| E5 \|.*TrainingEngine' "$DOC"
-run "mainactor: E6 TrainingSessionCoordinator row" grep -qE '^\| E6 \|.*TrainingSessionCoordinator' "$DOC"
-run "mainactor: F2 ThemeController row"         grep -qE '^\| F2 \|.*ThemeController' "$DOC"
-run "mainactor: P6 SettingsStore row"           grep -qE '^\| P6 \|.*SettingsStore' "$DOC"
-run "mainactor: C6 DrawingToolManager row"      grep -qE '^\| C6 \|.*DrawingToolManager' "$DOC"
+# R5 fix：所有 anchor 收紧为 row-scoped (table row 起始 | 模块 |) 或 same-line rule
+# branch-diff R1 fix：5 row anchor 加 .*@MainActor 共现，编辑者删 @MainActor 字面值必 FAIL
+run "mainactor: E5 TrainingEngine row"          grep -qE '^\| E5 \|.*TrainingEngine.*@MainActor' "$DOC"
+run "mainactor: E6 TrainingSessionCoordinator row" grep -qE '^\| E6 \|.*TrainingSessionCoordinator.*@MainActor' "$DOC"
+run "mainactor: F2 ThemeController row"         grep -qE '^\| F2 \|.*ThemeController.*@MainActor' "$DOC"
+run "mainactor: P6 SettingsStore row"           grep -qE '^\| P6 \|.*SettingsStore.*@MainActor' "$DOC"
+run "mainactor: C6 DrawingToolManager row"      grep -qE '^\| C6 \|.*DrawingToolManager.*@MainActor' "$DOC"
 run "mainactor: SwiftUI.View default"           grep -qE 'SwiftUI\.View.*默认.*@MainActor' "$DOC"
 run "mainactor: UIViewRepresentable default"    grep -qE 'UIViewRepresentable.*默认.*@MainActor' "$DOC"
 run "mainactor: UIGestureRecognizerDelegate"    grep -qE 'UIGestureRecognizerDelegate.*默认.*@MainActor' "$DOC"
 run "mainactor: UIView overlay (C1c)"           grep -qE 'UIView.*子类.*UIKit overlay.*@MainActor|UIView.*子类.*@MainActor.*UIKit overlay' "$DOC"
 
-# ---- actor 与后台执行（3 项，R3 fix：P3/P4 拆为独立 anchor，编辑只删 P4 一半也能独立 FAIL）----
+# ---- actor 与后台执行（4 项，R3 fix：P3/P4 拆为独立 anchor + branch-diff R1 fix：加"仅一个 actor"排他性规则 anchor）----
 run "actor: NetworkExecutor only"   grep -q 'actor NetworkExecutor' "$DOC"
+# 排他性规则 anchor：spec L671 明示"仅一个 actor"，加 anchor 保证规则文本不被删除
+run "actor: 仅一个 actor exclusivity rule" grep -qE '\*\*仅一个 actor\*\*|仅一个 actor.*spec L671' "$DOC"
 # P3/P4 各独立 anchor：要求"含 P3" 与 "含 不使用 actor" 在同一行；§应用范围里的 P3a/P3b 行不含 "不使用 actor"，不会误命中
 run "actor: P3 not actor"           bash -c "grep 'P3' \"$DOC\" | grep -q '不使用 actor'"
 run "actor: P4 not actor"           bash -c "grep 'P4' \"$DOC\" | grep -q '不使用 actor'"
