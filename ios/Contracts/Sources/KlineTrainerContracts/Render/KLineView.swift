@@ -7,10 +7,10 @@
 // 所有 drawXxx 在 PR 8 内为 Wave 1 占位空 stub；本 shell 关闭 §15.1 #3 编译验证闸门。
 
 import Foundation
-import CoreGraphics
 
 #if canImport(UIKit)
 import UIKit
+import CoreGraphics
 
 public final class KLineView: UIView {
     public var renderState: KLineRenderState = .empty {

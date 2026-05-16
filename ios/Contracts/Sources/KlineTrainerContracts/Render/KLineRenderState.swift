@@ -64,6 +64,10 @@ public struct KLineRenderState: Equatable, Sendable {
             mainChartFrame: .zero
         ),
         visibleCandles: [],
+        // 注：`NonDegenerateRange.make(values: [])` 在 empty array 时落入 fallback range 0.0...1.0
+        // （Geometry.swift L56-63）。Wave 1 C4 Volume/MACD 渲染必须用 `visibleCandles.isEmpty`
+        // 判 "no-data"，**不**用 range 值做 emptiness 判断（`.empty` 的 range 是合法的 0.0...1.0
+        // 非退化值，不是 sentinel）。
         volumeRange: NonDegenerateRange.make(values: []),
         macdRange: NonDegenerateRange.make(values: []),
         markers: [],
