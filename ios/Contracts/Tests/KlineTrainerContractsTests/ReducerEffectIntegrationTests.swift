@@ -212,8 +212,8 @@ struct ReducerEffectIntegrationTests {
         #expect(harness.animator.stopCount == 1)
     }
 
-    @Test("drawing 模式内：handler 已 stop animator → 残留 tick 被丢弃，无 offsetApplied 到达 reducer")
-    func noResidualCallbackWhileDrawing() {
+    @Test("drawing 模式内：handler 已 stop animator → spy.tick(delta:) 被 isRunning guard 挡回 false，无 onUpdate 触发")
+    func tickAfterStopReturnsFalseInDrawing() {
         // 本 test 验证「handler-stop 的**效果**」：handler 进 drawing 时已 stop animator，
         // 此后 animator 的 driver tick 静默（被 isRunning guard 丢弃）→ 无 offsetApplied 进 reducer。
         // 它**不是** in-flight 延迟回调测试——「stop() 前已脱离调度、stop() 后才到达的回调被挡住」
@@ -233,8 +233,8 @@ struct ReducerEffectIntegrationTests {
         #expect(!harness.timeline.contains(.dispatched(.offsetApplied(deltaPixels: 50))))
     }
 
-    @Test("drawing 退出后：handler 已 stop animator → driver tick 静默，autoTracking 下也无 offsetApplied 漂移")
-    func noResidualCallbackAfterDrawingExit() {
+    @Test("drawing 退出后：handler 已 stop animator → spy.tick(delta:) 被 isRunning guard 挡回 false，autoTracking 下 offset/revision 不变")
+    func tickAfterStopReturnsFalseAfterExit() {
         // 本 test 验证「handler-stop 的效果」延伸到 drawing 退出后：handler 进 drawing 时已 stop
         // animator，退出 drawing 回到 autoTracking 后，animator 的 driver tick 仍静默（isRunning guard）。
         // spec L1019-1020：drawing 退出后 reducer 不再吞 offsetApplied（autoTracking 会真应用）——

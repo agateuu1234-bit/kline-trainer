@@ -18,7 +18,7 @@
 ## §3. 新 Suite `ReducerEffectIntegrationTests` 5/5 PASS
 
 - **操作：** `swift test --package-path ios/Contracts --filter ReducerEffectIntegrationTests 2>&1 | tail -12`
-- **预期：** 5 个测试全 `passed`：`panEndedStartsAnimator` / `activateDrawingStopsAnimatorAndEntersDrawing` / `handlerStopsAnimatorBeforeComputingRange` / `noResidualCallbackWhileDrawing` / `noResidualCallbackAfterDrawingExit`。
+- **预期：** 5 个测试全 `passed`：`panEndedStartsAnimator` / `activateDrawingStopsAnimatorAndEntersDrawing` / `handlerStopsAnimatorBeforeComputingRange` / `tickAfterStopReturnsFalseInDrawing` / `tickAfterStopReturnsFalseAfterExit`。
 - **通过判定：** 5 个测试名全部出现且全 `passed`，`0 failures` → 通过；少一个或有 `failed:` → 不通过。
 
 ## §4. 零生产代码改动（本 PR 只动测试 + 文档）
