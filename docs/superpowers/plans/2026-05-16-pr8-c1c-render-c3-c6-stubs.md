@@ -1023,8 +1023,9 @@ if ! ( set -o pipefail; xcodebuild build-for-testing \
   echo "GATE FAIL: xcodebuild exited non-zero"; exit 1
 fi
 
-# Gate check #2: 日志必须含 "** BUILD SUCCEEDED **"
-grep -qF '** BUILD SUCCEEDED **' "$LOG" || { echo "GATE FAIL: no BUILD SUCCEEDED in log"; exit 1; }
+# Gate check #2: 日志必须含 "** BUILD SUCCEEDED **" 或 "** TEST BUILD SUCCEEDED **"
+# (v9 修：build-for-testing 输出 TEST BUILD SUCCEEDED；plain build 输出 BUILD SUCCEEDED；都接受)
+grep -qE '\*\* (TEST )?BUILD SUCCEEDED \*\*' "$LOG" || { echo "GATE FAIL: no BUILD SUCCEEDED in log"; exit 1; }
 
 # Gate check #3: 日志不得有 "error:" 行（xcodebuild 错误行）
 # ⚠️ codex R3 finding 3 修复（v4）：路径含空格（`/Users/maziming/Coding/Prj_Kline trainer/...`）
