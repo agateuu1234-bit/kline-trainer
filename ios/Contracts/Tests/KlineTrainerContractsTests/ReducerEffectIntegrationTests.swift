@@ -206,6 +206,10 @@ struct ReducerEffectIntegrationTests {
             .rangeComputed,       // ← 必须早于 setDrawingSnapshot 派发
             .dispatched(.setDrawingSnapshot(tool: .ray, baseRevision: 6, candleRange: 0..<100)),
         ])
+        // PR-level review Important #1：单独断言 animator.stop() 真被调（spy state 派生），
+        // 守 mutation「漏 animator.stop() 调用、但保 timeline.append(.animatorStopped)」——
+        // 否则 Test 3 时间线对得上而本 case 静默通过；本断言让 Test 3 独立自洽。
+        #expect(harness.animator.stopCount == 1)
     }
 
     @Test("drawing 模式内：handler 已 stop animator → 残留 tick 被丢弃，无 offsetApplied 到达 reducer")
