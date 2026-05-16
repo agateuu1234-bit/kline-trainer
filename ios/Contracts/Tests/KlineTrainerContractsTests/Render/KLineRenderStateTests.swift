@@ -1,3 +1,7 @@
+// Kline Trainer Swift Contracts — C1c KLineRenderState Tests
+// Spec: kline_trainer_modules_v1.4.md §六 C1c (L1219-1229, L1240)
+// Covers: .empty defaults, Equatable auto-synthesis, Sendable crossing.
+//
 import Testing
 import Foundation
 import CoreGraphics
@@ -13,9 +17,12 @@ struct KLineRenderStateTests {
         #expect(s.markers.isEmpty)
         #expect(s.drawings.isEmpty)
         #expect(s.crosshairPoint == nil)
+        // self-review fix #1: frame + viewport 默认值断言（防 .empty 静默回归）
+        #expect(s.frames.mainChart == .zero)
+        #expect(s.viewport.visibleCount == 0)
     }
 
-    @Test("Equatable 短路：相等 instances 之间 == 为 true（didSet 不触发）")
+    @Test("Equatable 自动合成：两个 .empty 实例 == 为 true")
     func equatableShortCircuit() {
         let a = KLineRenderState.empty
         let b = KLineRenderState.empty
