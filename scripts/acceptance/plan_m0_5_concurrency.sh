@@ -107,9 +107,12 @@ run "ban #4: CADisplayLink 重活"     grep -qE '^4\. ❌.*CADisplayLink.*重量
 run "ban #5: 私有错误类型跨模块"     grep -qE '^5\. ❌.*跨模块.*私有错误类型|^5\. ❌.*私有错误类型' "$DOC"
 run "ban #6: 跨 actor 捕获非 Sendable" grep -qE '^6\. ❌.*跨 actor 捕获.*非 Sendable' "$DOC"
 
-# ---- 跨 actor 捕获 + assumeIsolated（2 项）----
+# ---- 跨 actor 捕获 + assumeIsolated（3 项；branch-diff R4 fix：前置条件 + 文档化说明 改为 bullet-anchor，避免代码注释里的 "main 线程" 兜底误 pass）----
 run "assumeIsolated: 提及"           grep -q 'MainActor.assumeIsolated' "$DOC"
-run "assumeIsolated: 前置条件 main-thread" bash -c "grep -q 'assumeIsolated' $DOC && grep -qE 'main.*thread|main 线程' $DOC"
+# 前置条件 bullet 1：runtime 必在 main thread
+run "assumeIsolated: 前置 main-thread bullet"  grep -qE '^- 调用点 runtime 必在 main thread' "$DOC"
+# 前置条件 bullet 2：上层调用者契约文档化说明
+run "assumeIsolated: 文档化说明 bullet"        grep -qE '^- 上层调用者契约文档化说明' "$DOC"
 
 # ---- 应用范围表（13 项 ✅ 强制行；R2 fix：原 5 项漏 P2/P3a/P3b/P5/P6/E6/C6 行；R3 fix：F1 Models 改为 ✅ 加入断言）----
 # 设计（codex R1 fix）：原 awk '/^## 应用范围/,/^## /' 把起始模式当结束模式 → 立刻退出仅输出 header 行，
