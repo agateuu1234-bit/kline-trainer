@@ -1,6 +1,6 @@
 # Wave 1+ plan 模板
 
-每个 Wave 1+ plan 在 Task 0 前置声明本 plan 使用哪些评审形式（spec §15.3 L2495-2505）：
+每个 Wave 1+ plan 在 Task 0 前置声明本 plan 使用哪些评审形式（spec §15.3 后续评审策略；PR 9 §M0.3 inventory 表插入后行号会随 spec 演进飘动，靠 section name 锚定）：
 
 ## Task 0 — §15.3 评审策略前置
 
