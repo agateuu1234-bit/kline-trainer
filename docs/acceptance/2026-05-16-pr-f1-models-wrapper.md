@@ -6,26 +6,26 @@
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| A1 | `ls ios/Contracts/Sources/KlineTrainerContracts/Models/` | 看到 2 个文件：Models.swift / BinarySearch.swift | ☐ |
-| A2 | `ls ios/Contracts/Sources/KlineTrainerContracts/Models.swift 2>&1` | 输出含 `No such file or directory`（旧路径已被 git mv 删除） | ☐ |
-| A3 | `ls ios/Contracts/Tests/KlineTrainerContractsTests/Models/` | 看到 1 个文件：BinarySearchTests.swift | ☐ |
-| A4 | `wc -l ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift` | ≈ 222（M0.3 内容字面保留 + 2 行 header 更新） | ☐ |
+| A1 | `ls ios/Contracts/Sources/KlineTrainerContracts/Models/` | 看到 2 个文件：Models.swift / BinarySearch.swift | ☑ |
+| A2 | `ls ios/Contracts/Sources/KlineTrainerContracts/Models.swift 2>&1` | 输出含 `No such file or directory`（旧路径已被 git mv 删除） | ☑ |
+| A3 | `ls ios/Contracts/Tests/KlineTrainerContractsTests/Models/` | 看到 1 个文件：BinarySearchTests.swift | ☑ |
+| A4 | `wc -l ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift` | ≈ 222（M0.3 内容字面保留 + 2 行 header 更新） | ☑ |
 
 ## B. 编译验证
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| B1 | `cd ios/Contracts && swift build` | 输出 `Build complete!`，无 error 无 warning | ☐ |
-| B2 | `cd ios/Contracts && if ! ( set -o pipefail; swift test 2>&1 \| tee /tmp/pr-f1-b2.log ); then echo FAIL; else tail -5 /tmp/pr-f1-b2.log; fi` | 末尾出现 `Test run with N tests in M suites passed`，**N = 297**（274 baseline + 15 BinarySearch + 8 Codable round-trip = 23 新增）、**M = 63**（60 + 3 新 Suite：`PartitioningIndexTests` + `ComparableBoundTests` + `AdditionalCodableRoundTripTests`）；**未** 出现 `FAIL` 字样 | ☐ |
-| B3 | `cd ios/Contracts && swift build -Xswiftc -strict-concurrency=complete 2>&1 \| grep -c "warning:"` | 输出 `0`（严格并发检查无警告） | ☐ |
+| B1 | `cd ios/Contracts && swift build` | 输出 `Build complete!`，无 error 无 warning | ☑ |
+| B2 | `cd ios/Contracts && if ! ( set -o pipefail; swift test 2>&1 \| tee /tmp/pr-f1-b2.log ); then echo FAIL; else tail -5 /tmp/pr-f1-b2.log; fi` | 末尾出现 `Test run with N tests in M suites passed`，**N = 297**（274 baseline + 15 BinarySearch + 8 Codable round-trip = 23 新增）、**M = 63**（60 + 3 新 Suite：`PartitioningIndexTests` + `ComparableBoundTests` + `AdditionalCodableRoundTripTests`）；**未** 出现 `FAIL` 字样 | ☑ |
+| B3 | `cd ios/Contracts && swift build -Xswiftc -strict-concurrency=complete 2>&1 \| grep -c "warning:"` | 输出 `0`（严格并发检查无警告） | ☑ |
 
 ## C. 单元测试覆盖（共 23 个新 @Test：BinarySearch 15 + Codable round-trip 8）
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| C1 | `swift test --filter PartitioningIndexTests 2>&1 \| grep "passed\|failed" \| tail -3` | 显示 `PartitioningIndexTests` **7 个** @Test（含 `arraySlice_nonZeroStartIndex_returnsAbsoluteIndex`）全部 passed | ☐ |
-| C2 | `swift test --filter ComparableBoundTests 2>&1 \| grep "passed\|failed" \| tail -3` | 显示 `ComparableBoundTests` **8 个** @Test（含三插入点 below-min/between/above-max）全部 passed | ☐ |
-| C3 | `swift test --filter AdditionalCodableRoundTripTests 2>&1 \| grep "passed\|failed" \| tail -3` | 显示 `AdditionalCodableRoundTripTests` **8 个** @Test（3 struct + 2 enum + 3 现有 gap full equality：Period / TrainingSetMeta / TradeOperation）全部 passed | ☐ |
+| C1 | `swift test --filter PartitioningIndexTests 2>&1 \| grep "passed\|failed" \| tail -3` | 显示 `PartitioningIndexTests` **7 个** @Test（含 `arraySlice_nonZeroStartIndex_returnsAbsoluteIndex`）全部 passed | ☑ |
+| C2 | `swift test --filter ComparableBoundTests 2>&1 \| grep "passed\|failed" \| tail -3` | 显示 `ComparableBoundTests` **8 个** @Test（含三插入点 below-min/between/above-max）全部 passed | ☑ |
+| C3 | `swift test --filter AdditionalCodableRoundTripTests 2>&1 \| grep "passed\|failed" \| tail -3` | 显示 `AdditionalCodableRoundTripTests` **8 个** @Test（3 struct + 2 enum + 3 现有 gap full equality：Period / TrainingSetMeta / TradeOperation）全部 passed | ☑ |
 
 ## D. §15.1 #6 sign-off ledger（F1 名下 §15.1 闸门项，**scope narrow 到 Models.swift only**，codex R7 修订）
 
@@ -40,22 +40,22 @@
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| E1 | `git diff main -- ios/Contracts/Package.swift` | 输出为空（不动 Package.swift） | ☐ |
-| E2 | `git diff main -- ios/Contracts/Sources/KlineTrainerContracts/AppError.swift` | 输出为空（不动 M0.4 AppError） | ☐ |
-| E3 | `git diff main -- ios/KlineTrainer/` | 输出为空（不动 Xcode app 工程） | ☐ |
+| E1 | `git diff main -- ios/Contracts/Package.swift` | 输出为空（不动 Package.swift） | ☑ |
+| E2 | `git diff main -- ios/Contracts/Sources/KlineTrainerContracts/AppError.swift` | 输出为空（不动 M0.4 AppError） | ☑ |
+| E3 | `git diff main -- ios/KlineTrainer/` | 输出为空（不动 Xcode app 工程） | ☑ |
 
 ## F. CI（GitHub Actions）
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| F1 | `gh pr checks <pr_number>` | 6/6 checks SUCCESS（或 OpenAI quota fail 走 admin bypass，按 memory `feedback_openai_quota_ci_pattern`） | ☐ |
+| F1 | `gh pr checks <pr_number>` | 6/6 checks SUCCESS（或 OpenAI quota fail 走 admin bypass，按 memory `feedback_openai_quota_ci_pattern`） | ☐ 待 PR 打开后 gh pr checks 验 |
 
 ## G. 文档
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| G1 | `ls docs/superpowers/plans/2026-05-16-pr-f1-models-wrapper.md` | 文件存在 | ☐ |
-| G2 | `ls docs/acceptance/2026-05-16-pr-f1-models-wrapper.md` | 文件存在（本文件） | ☐ |
+| G1 | `ls docs/superpowers/plans/2026-05-16-pr-f1-models-wrapper.md` | 文件存在 | ☑ |
+| G2 | `ls docs/acceptance/2026-05-16-pr-f1-models-wrapper.md` | 文件存在（本文件） | ☑ |
 
 ## H. 已知 plan-residual（**不阻塞本 PR merge**）
 
