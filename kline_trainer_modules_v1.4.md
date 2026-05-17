@@ -2536,8 +2536,8 @@ Wave 0 全部交付物收齐后（见 §十一 Checklist），由以下 3 方签
 
 任何一方拒签 → **回契约层修订 → 重新编译验证 → 重新签字**。签字完成后：
 
-1. 项目 README 登记 v1.2 版本号 + 签字时间 + 依赖版本表
-2. Git 打 tag `wave0-frozen-v1.2`
+1. 项目 README 登记 v1.4 版本号 + 签字时间 + 依赖版本表（PR 9 freeze ceremony v1.4 修订；v1.2 历史 wording 已升级）
+2. Git 打 tag `wave0-frozen-v1.4`（PR 9 §5.6 三层 blocking gate；scripts/governance/verify-freeze-tag.sh）
 3. 三方邮件/群组留存确认记录
 4. Wave 1 开工
 

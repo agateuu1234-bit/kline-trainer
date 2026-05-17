@@ -34,7 +34,7 @@
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| D1 | `gh pr checks <pr_number>` | 7/7 checks SUCCESS（含新 catalyst-build job） — 或 OpenAI quota fail 走 admin bypass per memory `feedback_openai_quota_ci_pattern` | ☐ 待 push 后跑 |
+| D1 | `gh pr checks <pr_number>` | 7/7 checks SUCCESS（含新 `Mac Catalyst build-for-testing on macos-15` job context） — 或 OpenAI quota fail 走 admin bypass per memory `feedback_openai_quota_ci_pattern` | ☐ 待 push 后跑 |
 
 ## E. Tag 三层 blocking gate（PR 9 merge 之后跑，mirror spec §5.6）
 
@@ -114,4 +114,4 @@ echo "GATE PASS: tag wave0-frozen-v1.4 三层验证全过"
 | # | action | expected | pass_fail |
 |---|---|---|---|
 | H8 | GitHub repo Settings → Rules → New tag ruleset：name `wave0-frozen-protected` / target ref_name include `wave0-frozen-*` / enforcement Active / Rules ✅ Restrict creations + Updates + Deletions / Bypass actors Repository admin only | UI 配置完成 | ☐ 待 PR merge 后 admin 手动 |
-| H8' | `gh api repos/agateuu1234-bit/kline-trainer/branches/main/protection --jq '.required_status_checks.contexts'` 含 `catalyst-build` | 输出 array 含 `catalyst-build`；如不含 admin 在 Settings → Branches → main edit required status checks | ☐ 待 PR merge 后 admin 手动 |
+| H8' | `gh api repos/agateuu1234-bit/kline-trainer/branches/main/protection --jq '.required_status_checks.contexts'` 含 `Mac Catalyst build-for-testing on macos-15` | 输出 array 含 job 的 display name `Mac Catalyst build-for-testing on macos-15`（GitHub Actions emit 的 check context = job 的 `name:` 字段，**不是** job ID `catalyst-build`；codex impl-stage R1 finding 2 修） | ☐ 待 PR merge 后 admin 手动 |
