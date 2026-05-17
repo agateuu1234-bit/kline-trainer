@@ -5,6 +5,12 @@
 **Wave**：Wave 0 closing ceremony（在 v6 outline 17 顺位之后）
 **类型**：Governance（trust-boundary，含 CI workflow + spec amendment + git tag）
 
+**Revision history：**
+- **v1**（2026-05-17）：初稿 → codex spec-stage R1 verdict `needs-attention`（2 findings：1 high + 1 medium）
+- **v2**（2026-05-17）：codex R1 2 findings 全修
+  - finding 1 (high) → 移除 ledger 内 `(PR 9 squash commit SHA，PR merge 后填)` 占位符；provenance 走 annotated tag (`git show wave0-frozen-v1.4`)；ledger 自身保持 self-contained 不含 SHA；验收清单同步删 "commit SHA 占位" 项
+  - finding 2 (medium) → Catalyst CI job 不硬编码 `/Applications/Xcode_16.app`；改用 existing `swift-contracts-smoke.yml` swift-test job 同 pattern（依赖 runner 默认 Xcode，`xcodebuild -version` 断言版本，fail-fast 给诊断 — 镜像 codex Plan 1c R2 已确立的项目 convention）
+
 ---
 
 ## 1. 目标
@@ -122,16 +128,28 @@ Task 6 git tag wave0-frozen-v1.4 origin/main + push (子项 6)
   catalyst-build:
     name: Mac Catalyst build-for-testing on macos-15
     runs-on: macos-15
-    needs: []  # 与 swift-test 并行
     timeout-minutes: 15
+    # 依赖 runner 默认 Xcode（macos-15 image 预装 Xcode 16）提供 xcodebuild。
+    # 不硬编码 /Applications/Xcode_16.app 路径（镜像 swift-test job 已有的 codex Plan 1c R2
+    # finding 修订 pattern；GHA image 刷新时路径可能变 → fail-fast 给清晰诊断）。
     steps:
-      - uses: actions/checkout@v4
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.app
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Assert Xcode >= 16
+        run: |
+          xcodebuild -version
+          XCODE_VER=$(xcodebuild -version | head -1 | awk '{print $2}')
+          MAJOR=$(echo "$XCODE_VER" | cut -d. -f1)
+          if [[ -z "$XCODE_VER" || "$MAJOR" -lt 16 ]]; then
+            echo "FAIL: Xcode 16+ required (Swift 6.0 + Catalyst destination)；runner provides $XCODE_VER"
+            echo "Available Xcode installs:"
+            ls -la /Applications | grep -i xcode || true
+            exit 1
+          fi
+          echo "Xcode $XCODE_VER OK"
       - name: Mac Catalyst build-for-testing
+        working-directory: ios/Contracts
         run: |
           set -o pipefail
-          cd ios/Contracts
           xcodebuild build-for-testing \
             -scheme KlineTrainerContracts \
             -destination 'platform=macOS,variant=Mac Catalyst' \
@@ -143,7 +161,7 @@ Task 6 git tag wave0-frozen-v1.4 origin/main + push (子项 6)
           echo "GATE PASS: §15.1 #3 闸门关闭（Catalyst CI 持续守护）"
 ```
 
-**理由**：PR #51 R7 finding G3 标记"reviewer 仅信本地 log 不可持续，governance 必须升级"。此 job 在每个 PR 自动跑 Catalyst build-for-testing，确保 KLineView UIKit shell 编译永不退化。
+**理由**：PR #51 R7 finding G3 标记"reviewer 仅信本地 log 不可持续，governance 必须升级"。此 job 在每个 PR 自动跑 Catalyst build-for-testing，确保 KLineView UIKit shell 编译永不退化。**Pattern 镜像现有 `swift-test` job**（codex Plan 1c R2 已确立 convention）：不硬编码 Xcode path / `xcodebuild -version` 断言 / fail-fast 诊断 / `actions/checkout` SHA pinned。
 
 ### 5.4 §15.4 三方签字 ledger（单人简化 doc）
 
@@ -160,8 +178,7 @@ Task 6 git tag wave0-frozen-v1.4 origin/main + push (子项 6)
 - [x] M0.1 DDL（PostgreSQL schema + 训练组 sqlite + AppDB）与 PR #23 / #29 一致
 - [x] M0.2 OpenAPI 与 PR #24 三接口 schema 一致；lease 状态机 + CRC32 已落地
 - [x] B1-B4 实现在 Wave 1 backlog；OpenAPI 与 backend 契约对齐
-- **签字时间**：2026-05-17（PR 9 merge 时确认）
-- **commit**：(PR 9 squash commit SHA，PR merge 后填)
+- **签字时间**：2026-05-17
 
 ## iOS 代表 sign-off（自签）
 - [x] M0.3 数据模型：21 个类型 inventory（见 §M0.3 表）全 Equatable / 关键 Codable round-trip 闭环
@@ -195,6 +212,17 @@ Task 6 git tag wave0-frozen-v1.4 origin/main + push (子项 6)
 见 README v1.4 + `ios/Contracts/Package.resolved`。
 
 签字完成后：契约层进入 RFC 修改模式；任何 M0.* / F1 / F2 / C1a / C1b / C1c / E1 / E6 / P3 / P4 / P5 / P6 改动需 RFC 走 superpowers:brainstorming + ledger 留痕。
+
+## Provenance（codex R1 finding 1 修：ledger 不含 SHA 占位符）
+
+本 ledger **不内嵌 PR 9 squash commit SHA**；不可篡改 provenance 由 git annotated tag 承担：
+
+\`\`\`bash
+git show wave0-frozen-v1.4   # 显示 tagger / date / commit SHA / message
+git tag -l 'wave0-frozen-*' --format='%(refname:short) → %(objectname) %(taggerdate:iso-strict)'
+\`\`\`
+
+annotated tag (\`git tag -a\`) 加密学地把签字时刻 + 指向的 commit + tagger 身份钉死；ledger 自身保持 self-contained（不需要 merge 后回填占位符）。
 ```
 
 ### 5.5 README v1.4 + 依赖版本表
@@ -276,7 +304,7 @@ memory `project_review_strategy_deferred` PR 9 后 archived。
 - **A 文件落地**：spec md / CI yaml / governance md / README md 全到位
 - **B 编译验证**：现有 swift test 297/63 不退化 + Catalyst build SUCCEEDED
 - **C Spec 一致性**：grep 子项 1+2 修订后 §6 C1b L1167 含 "Wave 1 验收" + §F1 含 "11 Codable 实体" + §M0.3 含 "14 Codable + 7 非 Codable = 21"
-- **D §15.4 ledger**：三方 ✅ + 5 residuals + commit SHA 占位
+- **D §15.4 ledger**：三方 ✅ + 5 residuals；ledger 内**不含**任何未填占位符（codex R1 finding 1 修：provenance 走 annotated tag，不在 ledger 嵌 SHA）
 - **E CI**：6/6 → 7/7 SUCCESS（多 Catalyst job）
 - **F tag**：merge 后 `git tag -l wave0-frozen-v1.4` 存在 + remote push 成功
 
@@ -299,10 +327,10 @@ memory `project_review_strategy_deferred` PR 9 后 archived。
 | risk | 缓解 |
 |---|---|
 | 7 子项 > ≤3 packaging 硬规则 | 治理类 PR 例外；codex review 必审 — 接受 risk |
-| Catalyst CI job 在 CI 首次跑可能失败（toolchain / Xcode 版本） | 子项 3 单独 commit；CI fail → debug 单独 commit 修；若 quota fail 走 memory `feedback_openai_quota_ci_pattern` admin bypass |
+| Catalyst CI job 在 CI 首次跑可能失败（toolchain / Xcode 版本） | 镜像 swift-test job 已有 codex Plan 1c R2 修订 pattern：`xcodebuild -version` 断言 + fail-fast 诊断（含 `ls /Applications` 列出可用 Xcode）；不硬编码路径。若 quota fail 走 memory `feedback_openai_quota_ci_pattern` admin bypass |
 | spec §F1 wording 修订与历史 PR #53 plan v9 H3 residual 表面冲突 | PR #53 H3 residual 显式说"留 PR 9 governance 阶段澄清"，此 PR 9 子项 2 = 兑现承诺，不矛盾 |
 | §15.4 ledger 单人三角色 self-sign 看起来薄 | spec §15.4 原文支持 ledger 形式留痕；单人项目 doc-化即等价三方会议 |
-| tag 指向 squash commit 不指向 author commit | git tag -a 是标准做法；后续 `git diff wave0-frozen-v1.4..HEAD` 能正确 diff |
+| tag 指向 squash commit 不指向 author commit | git tag -a 是标准做法；annotated tag 承担 immutable provenance；ledger 内不含 SHA 占位符（codex R1 finding 1 修订） |
 
 ## 9. 完成后状态
 
