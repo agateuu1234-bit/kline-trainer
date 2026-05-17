@@ -23,9 +23,13 @@
   - finding 2 (high) → protected tag ruleset 检查顺序错 + filter 不精确（v6 R5 抓出 exclude/creation/bypass 也要验）
   - finding 3 (high) → ledger iOS sign-off stale "21"→"23"；数据代表样本数据移 H7 residual
 - **v6**（2026-05-17）：codex R5 3 fresh findings 全修（user explicit 选项 A，超 5 轮预算）
-  - finding 1 (high) → TAG_COMMIT 自 origin/main 直接派生 = self-derived；改为先 `gh pr view 9 --json mergeCommit --jq .mergeCommit.oid` 拿真实 PR 9 squash SHA，断言 `origin/main HEAD == mergeCommit.oid`，否则 exit 1（防早跑/晚跑/中间 commit 漂移）
-  - finding 2 (high) → protected ruleset detail 检查仅看 `include` 含 `wave0-frozen`，未检 (a) `exclude` pattern 是否反向排除目标 ref；(b) `rules` 是否含 **`creation`** 类型（不光 update + deletion）；(c) `bypass_actors` 是否限 admin-only —— 改为完整 ruleset 谓词：actual `refs/tags/wave0-frozen-v1.4` 走 include/exclude fnmatch 评估命中 + `enforcement==active` + `rules` 含 `creation`+`update`+`deletion` 三类 + `bypass_actors` 仅 admin role；spec §5.6 描述要求 + 实际 python 评估脚本留 impl 阶段（`scripts/governance/verify-freeze-tag.sh`）
-  - finding 3 (medium) → §6.F 验收 stale `git ls-remote --tags` 写法 → 完全 mirror §5.6 三层 blocking gate（同 command + 同 fail message）
+  - finding 1 (high) → TAG_COMMIT 自 origin/main 派生不验 PR 9 squash 真相；前置 0 `gh pr view 9 --json mergeCommit`（v7 R6 抓出 push 在 verify 前）
+  - finding 2 (high) → protected ruleset 完整谓词描述（v7 R6 sanity）
+  - finding 3 (medium) → §6.F mirror §5.6 peeled
+- **v7**（2026-05-17）：codex R6 3 fresh findings 全修（continue per user 选项 A，已 6 轮，符合 `feedback_codex_round6_self_contradiction` 边界）
+  - finding 1 (high) → tag 创建/push/verify 顺序错：`git push` 在 `git verify-tag` 前；signed verify fail 时 tag 已 remote。改为：本地创建 tag → 本地 `git verify-tag`（若 signed） → 本地 `git rev-parse ^{}` 双 check → 然后 `git push` → push 后再 remote `git ls-remote ^{}` 确认
+  - finding 2 (medium) → §6.D 验收 "5 residuals" stale；v4 加 H6 + v5 加 H7 → 实际 7 residuals (H1-H7)；§6.D 改为 "7 residuals" + 明文列 H1-H7 ID 防漏
+  - finding 3 (medium) → §2 scope 表 "M0.3 multi-file inventory 表（21 类型）" stale → 改 "23 类型 (16 Codable + 7 non-Codable)"；防 writing-plans / reviewer 误用 stale 数字
 
 ---
 
@@ -38,7 +42,7 @@
 | # | 子项 | 类型 | LOC 估 | 验证 |
 |---|---|---|---|---|
 | 1 | Spec §6 C1b 闸门 #4 F3 修订（L1167 移 Wave 1） | spec md | ~10 | grep diff |
-| 2 | Spec §F1 wording 改 + §M0.3 multi-file inventory 表 | spec md | ~40 | grep diff + table 检 21 类型 |
+| 2 | Spec §F1 wording 改 + §M0.3 multi-file inventory 表 | spec md | ~40 | grep diff + table 检 **23 类型 (16 Codable + 7 non-Codable)**（codex R6 finding 3 修：v1-v6 stale "21"） |
 | 3 | Catalyst CI job (`.github/workflows/swift-contracts-smoke.yml` 第二 job) | CI yaml | ~50 | yaml parse + 本地 act 试跑 OR 信 CI |
 | 4 | §15.4 三方签字 ledger（单人简化 doc） | governance md | ~80 | 文件存在 + 三角色 ✅ |
 | 5 | README v1.4 + 签字时间 + 依赖版本表 | README md | ~30 | grep 10 依赖 |
@@ -331,7 +335,7 @@ TAG_COMMIT="$EXPECTED_SHA"
 echo "Layer 1 OK: protected tag namespace 完整谓词检查通过"
 ```
 
-**Tag 创建（优先 signed，fallback unsigned）：**
+**Tag 创建（优先 signed，fallback unsigned；codex R6 finding 1 修：顺序 创建 → 本地 verify → 本地 peeled check → push → remote peeled check）：**
 
 ```bash
 if git tag -s wave0-frozen-v1.4 \
@@ -345,42 +349,46 @@ else
     "$TAG_COMMIT"
   TAG_SIGNED=0
 fi
-
-# Push 到 remote（protected ruleset 已确认配，安全 push）
-git push origin wave0-frozen-v1.4
 ```
 
-**层 2：signed tag 验证（若 signed）**
+**层 2 (push 前本地 verify)：signed tag 验证（若 signed）**
 
 ```bash
 if [ "$TAG_SIGNED" = "1" ]; then
-  git verify-tag wave0-frozen-v1.4 || { echo "FAIL: signed tag 验签失败"; exit 1; }
-  echo "Layer 2 OK: signed tag 验签通过"
+  git verify-tag wave0-frozen-v1.4 || { echo "FAIL: signed tag 验签失败（push 前本地拦截）"; git tag -d wave0-frozen-v1.4; exit 1; }
+  echo "Layer 2 OK: signed tag 本地验签通过"
 else
   echo "Layer 2 SKIP: unsigned tag；layer 1 protected ruleset 已防 retarget"
 fi
+
+# 本地 peeled SHA 预检（push 前确认 tag 指向预期）
+LOCAL_PEELED=$(git rev-parse "wave0-frozen-v1.4^{}")
+if [ "$LOCAL_PEELED" != "$EXPECTED_SHA" ]; then
+  echo "FAIL: 本地 tag peeled $LOCAL_PEELED ≠ PR 9 squash SHA $EXPECTED_SHA（push 前本地拦截）"
+  git tag -d wave0-frozen-v1.4
+  exit 1
+fi
+echo "Layer 2 pre-push 本地 peeled SHA OK"
+
+# 本地全部验证通过后才 push
+git push origin wave0-frozen-v1.4
 ```
 
-**层 3：remote+本地 peeled target commit SHA == 预期 squash SHA**（codex R4 finding 1 + R5 finding 1 修：用 `^{}` peeled + 与 EXPECTED_SHA 对齐）
+**层 3：remote peeled target commit SHA == 预期 squash SHA**（codex R4 finding 1 + R5 finding 1 修：用 `^{}` peeled + 与 EXPECTED_SHA 对齐）
 
 ```bash
 REMOTE_PEELED=$(git ls-remote origin "refs/tags/wave0-frozen-v1.4^{}" | awk '{print $1}')
 if [ -z "$REMOTE_PEELED" ]; then
-  echo "FAIL: remote tag peeled SHA 拿不到（tag 可能未 push 成功）"
+  echo "FAIL: remote tag peeled SHA 拿不到（tag 可能未 push 成功 — 但本地已删可恢复）"
   exit 1
 fi
 if [ "$REMOTE_PEELED" != "$EXPECTED_SHA" ]; then
   echo "FAIL: remote tag peeled 指向 $REMOTE_PEELED，与 PR #$PR_NUMBER squash SHA $EXPECTED_SHA 不符"
   exit 1
 fi
-LOCAL_PEELED=$(git rev-parse "wave0-frozen-v1.4^{}")
-if [ "$LOCAL_PEELED" != "$EXPECTED_SHA" ]; then
-  echo "FAIL: 本地 tag peeled $LOCAL_PEELED ≠ PR #$PR_NUMBER squash SHA $EXPECTED_SHA"
-  exit 1
-fi
-echo "Layer 3 OK: remote+local peeled SHA == PR #$PR_NUMBER squash"
+echo "Layer 3 OK: remote peeled SHA == PR #$PR_NUMBER squash（本地 push 前已 pre-check 通过，layer 2 内）"
 
-echo "GATE PASS: tag wave0-frozen-v1.4 三层验证全过（layer 1 protected ruleset 完整谓词 / layer 2 signed=$TAG_SIGNED / layer 3 peeled SHA 对齐 PR squash）"
+echo "GATE PASS: tag wave0-frozen-v1.4 三层验证全过（layer 1 protected ruleset 完整谓词 / layer 2 本地 signed=$TAG_SIGNED + peeled SHA pre-check / layer 3 remote peeled SHA 对齐 PR squash）"
 ```
 
 **注意**（codex R2 finding 3 wording 修订）：
@@ -417,7 +425,7 @@ memory `project_review_strategy_deferred` PR 9 后 archived。
 - **A 文件落地**：spec md / CI yaml / governance md / README md 全到位
 - **B 编译验证**：现有 swift test 297/63 不退化 + Catalyst build SUCCEEDED
 - **C Spec 一致性**：grep 子项 1+2 修订后 §6 C1b L1167 含 "Wave 1 验收" + §F1 含 "11 Codable 实体" + §M0.3 含 "16 Codable" + "7 非 Codable" + "23 M0.3 类型"（codex R3 finding 1 修：v3 漏 AppState TrainingSetFile/AppSettings；v1/v2 误写 14+7）
-- **D §15.4 ledger**：三方 ✅ + 5 residuals；ledger 内**不含**任何未填占位符（codex R1 finding 1 修：provenance 走 annotated tag，不在 ledger 嵌 SHA）
+- **D §15.4 ledger**：三方 ✅ + **7 residuals**（H1 L1167 / H2 E2 / H3 Wave 1 plan / H4 M0.3 multi-file / H5 Catalyst CI / H6 backend deps / H7 sample 训练组数据；codex R6 finding 2 修：v1-v6 stale "5 residuals"）；ledger 内**不含**任何未填占位符（codex R1 finding 1 修：provenance 走 annotated tag，不在 ledger 嵌 SHA）
 - **E CI**：6/6 → 7/7 SUCCESS（多 Catalyst job）
 - **F tag**：merge 后**完全 mirror §5.6 三层 blocking gate**（codex R5 finding 3 修：v3-v5 stale `ls-remote --tags` 改 `refs/tags/...^{}` peeled）— 前置 0：`gh pr view 9 --json mergeCommit` 取真实 squash SHA；层 1：`scripts/governance/verify-freeze-tag.sh` protected ruleset 完整谓词检查（include + exclude + creation/update/deletion + bypass_actors admin-only）；层 2：`git verify-tag`（若 signed）；层 3：`git ls-remote origin "refs/tags/wave0-frozen-v1.4^{}"` + `git rev-parse wave0-frozen-v1.4^{}` 双 check == PR 9 squash SHA。任意一层 `exit 1`
 
