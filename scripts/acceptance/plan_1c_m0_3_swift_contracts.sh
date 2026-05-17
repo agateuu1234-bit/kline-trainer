@@ -26,7 +26,7 @@ run() {
 
 # ---- 文件存在性（源文件 + fixture + 3 测试文件 + CI workflow）----
 run "file: Package.swift"            test -s ios/Contracts/Package.swift
-run "file: Models.swift"             test -s ios/Contracts/Sources/KlineTrainerContracts/Models.swift
+run "file: Models/Models.swift"      test -s ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift
 run "file: AppState.swift"           test -s ios/Contracts/Sources/KlineTrainerContracts/AppState.swift
 run "file: RESTDTOs.swift"           test -s ios/Contracts/Sources/KlineTrainerContracts/RESTDTOs.swift
 run "file: ModelsTests.swift"        test -s ios/Contracts/Tests/KlineTrainerContractsTests/ModelsTests.swift
