@@ -2,8 +2,6 @@
 // Spec: kline_trainer_modules_v1.4.md §十三（L2286）"BinarySearch 扩展 归 F1 通用工具区"
 // 消费方：Wave 1 C5 trade marker index lookup（KLineView+Markers.swift:15 hook 点）
 
-import Foundation
-
 extension RandomAccessCollection {
     /// 二分查找分区点：返回首个使 `predicate` 为 `true` 的 index；若无则返回 `endIndex`。
     ///
