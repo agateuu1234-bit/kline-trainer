@@ -163,3 +163,137 @@ struct TradeOperationTests {
         #expect(!json.contains("\"created_at\""))
     }
 }
+
+/// codex R1+R2+R4+R5+R7 findings 修：F1 PR scope narrow 到 Models.swift 内 11 个 Codable 类型
+/// （codex R7 finding 1：AppState.swift 内 3 个 M0.3 Codable struct 在 H3 residual queue，未来 PR 闭环）。
+/// 本 PR Models.swift inventory 的 ModelsTests 留下 8 个 gap：3 个 struct
+/// (FeeSnapshot/DrawingAnchor/DrawingObject) 零覆盖 + 2 个 enum (PositionTier/DrawingToolType) 只检
+/// rawValue + 3 个现有 gap (Period 分离 encode/decode 测试无完整链 / TrainingSetMeta 无 full equality /
+/// TradeOperation 无 full equality)。本 Suite 把这 8 个 gap 闭环（characterization，非 TDD red→green；
+/// M0.3 已实现 Codable）。
+@Suite("Additional Codable round-trip (F1 verification gap closure)")
+struct AdditionalCodableRoundTripTests {
+    // —— 3 Struct round-trip（codex R1 finding 1）——
+
+    @Test func feeSnapshot_roundTrip() throws {
+        let original = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(FeeSnapshot.self, from: data)
+        #expect(decoded == original)
+        let json = String(data: data, encoding: .utf8)!
+        #expect(json.contains("\"commissionRate\":0.0001"))
+        #expect(json.contains("\"minCommissionEnabled\":true"))
+    }
+
+    @Test func drawingAnchor_roundTrip() throws {
+        let original = DrawingAnchor(period: .daily, candleIndex: 42, price: 123.45)
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(DrawingAnchor.self, from: data)
+        #expect(decoded == original)
+        #expect(decoded.period == .daily)
+        #expect(decoded.candleIndex == 42)
+        #expect(decoded.price == 123.45)
+    }
+
+    @Test func drawingObject_roundTripWithMultipleAnchors() throws {
+        let original = DrawingObject(
+            toolType: .trend,
+            anchors: [
+                DrawingAnchor(period: .m15, candleIndex: 0, price: 10.0),
+                DrawingAnchor(period: .m15, candleIndex: 5, price: 12.5)
+            ],
+            isExtended: true,
+            panelPosition: 1
+        )
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(DrawingObject.self, from: data)
+        #expect(decoded == original)
+        #expect(decoded.toolType == .trend)
+        #expect(decoded.anchors.count == 2)
+        #expect(decoded.isExtended == true)
+        #expect(decoded.panelPosition == 1)
+    }
+
+    // —— 2 Enum 真 JSON round-trip（codex R2 finding 1）——
+    // codex R6 finding 2 修：用 semantic decode-string 比较（不依赖 JSON 字节 formatting；
+    // PositionTier rawValue "1/5"-"5/5" 含 `/`，JSONEncoder 默认 escape 为 `\/`）。
+
+    @Test func positionTier_jsonRoundTrip_encodesAsRawValueString() throws {
+        for tier in PositionTier.allCases {
+            let data = try JSONEncoder().encode(tier)
+            let decoded = try JSONDecoder().decode(PositionTier.self, from: data)
+            #expect(decoded == tier)
+            let decodedRaw = try JSONDecoder().decode(String.self, from: data)
+            #expect(decodedRaw == tier.rawValue)  // 如 "3/5"
+        }
+    }
+
+    @Test func drawingToolType_jsonRoundTrip_allSevenCases() throws {
+        let all: [DrawingToolType] = [.ray, .trend, .horizontal, .golden, .wave, .cycle, .time]
+        for tool in all {
+            let data = try JSONEncoder().encode(tool)
+            let decoded = try JSONDecoder().decode(DrawingToolType.self, from: data)
+            #expect(decoded == tool)
+            let decodedRaw = try JSONDecoder().decode(String.self, from: data)
+            #expect(decodedRaw == tool.rawValue)
+        }
+    }
+
+    // —— 3 现有 ModelsTests gap 闭环（codex R4 finding 1 + R5 finding 1）——
+
+    @Test func period_jsonRoundTrip_allCases() throws {
+        // codex R5 finding 1：现有 period_encodesToRawString / period_decodesFromRawString
+        // 是分离两个测试（encode .m60 → "60m" / decode "3m" → .m3），无完整 round-trip + equality 链。
+        for period in Period.allCases {
+            let data = try JSONEncoder().encode(period)
+            let decoded = try JSONDecoder().decode(Period.self, from: data)
+            #expect(decoded == period)
+            let decodedRaw = try JSONDecoder().decode(String.self, from: data)
+            #expect(decodedRaw == period.rawValue)
+        }
+    }
+
+    @Test func trainingSetMeta_fullRoundTrip_equality() throws {
+        let original = TrainingSetMeta(
+            stockCode: "600519",
+            stockName: "贵州茅台",
+            startDatetime: 1_700_000_000,
+            endDatetime: 1_710_000_000
+        )
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(TrainingSetMeta.self, from: data)
+        #expect(decoded == original)
+        #expect(decoded.stockCode == "600519")
+        #expect(decoded.stockName == "贵州茅台")
+        #expect(decoded.startDatetime == 1_700_000_000)
+        #expect(decoded.endDatetime == 1_710_000_000)
+    }
+
+    @Test func tradeOperation_fullRoundTrip_equality() throws {
+        let original = TradeOperation(
+            globalTick: 100,
+            period: .m15,
+            direction: .buy,
+            price: 12.34,
+            shares: 200,
+            positionTier: .tier3,
+            commission: 1.23,
+            stampDuty: 0.5,
+            totalCost: 2470.73,
+            createdAt: 1_700_000_000
+        )
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(TradeOperation.self, from: data)
+        #expect(decoded == original)
+        #expect(decoded.globalTick == 100)
+        #expect(decoded.period == .m15)
+        #expect(decoded.direction == .buy)
+        #expect(decoded.price == 12.34)
+        #expect(decoded.shares == 200)
+        #expect(decoded.positionTier == .tier3)
+        #expect(decoded.commission == 1.23)
+        #expect(decoded.stampDuty == 0.5)
+        #expect(decoded.totalCost == 2470.73)
+        #expect(decoded.createdAt == 1_700_000_000)
+    }
+}

@@ -1,5 +1,5 @@
-// Kline Trainer Swift Contracts — M0.3
-// Spec: kline_trainer_modules_v1.4.md §M0.3
+// Kline Trainer Swift Contracts — F1 Models 模块（承载 M0.3 数据模型）
+// Spec: kline_trainer_modules_v1.4.md §五 F1（L811-815） + §三 M0.3
 
 import Foundation
 
