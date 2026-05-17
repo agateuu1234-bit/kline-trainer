@@ -1,7 +1,11 @@
 # PR 9 — Wave 0 契约冻结 ceremony Implementation Plan
 
 **Revision history：**
-- **v1**（2026-05-17）：初稿，待 codex 对抗性 review
+- **v1**（2026-05-17）：初稿 → codex plan-stage R1 verdict `needs-attention`（3 findings：2 high + 1 medium）
+- **v2**（2026-05-17）：codex R1 3 findings 全修
+  - finding 1 (high) → `verify-freeze-tag.sh` python heredoc 抢 stdin（`<<'PY'` 把 stdin 给 program text，`json.load(sys.stdin)` 拿不到 `gh api` DETAIL，protected gate 永远 fail）→ Task 5 Step 5.2 改用 env var 传 DETAIL：`DETAIL_JSON="$DETAIL" TARGET_REF="$TARGET_REF" python3 <<'PY'` + program 用 `os.environ['DETAIL_JSON']` / `os.environ['TARGET_REF']` 读取
+  - finding 2 (high) → spec §15.2 还说 "Wave 0 锁所有 deps（含 backend `requirements.txt`）" 与 README/ledger v1.4 "iOS exact pin + backend H6 residual" 矛盾；Task 1 增 Step 1.5 amend §15.2（加 v1.4 freeze qualifier note：iOS deps `Package.resolved` exact pin / backend ranges Wave 1 B1-B4 PR 各自 == 锁定 / 引用 ledger H6 residual）
+  - finding 3 (medium) → workflow `pull_request.paths` 限 `ios/Contracts/**`，触 `ios/KlineTrainer/` 跳过 Catalyst gate；Task 2 增 Step 2.0 expand workflow `paths` 加 `ios/KlineTrainer/**`；spec §5.3 + plan wording "每个 PR" → "每个 iOS-touching PR (ios/Contracts + ios/KlineTrainer)"
 
 ---
 
@@ -286,7 +290,39 @@ Expected: 看到 `### M0.3 Swift 数据模型契约` (~L395) + `### M0.4 ...` (~
 
 ```
 
-- [ ] **Step 1.5: 验证修订**
+- [ ] **Step 1.5: 修订 §15.2 加 v1.4 freeze qualifier note（codex plan R1 finding 2 修）**
+
+定位 §15.2：
+
+```bash
+grep -n "^### 15\.2 三方依赖" kline_trainer_modules_v1.4.md
+```
+
+Expected: 输出 `2467:### 15.2 三方依赖版本锁定`（或实际行号）。
+
+使用 Edit tool 在 §15.2 标题下方第 1 行（"Wave 0 签字同步锁定..."）之前**追加** v1.4 freeze qualifier note：
+
+**old_string** (§15.2 标题 + 第一行原文)：
+```
+### 15.2 三方依赖版本锁定
+
+Wave 0 签字同步锁定以下版本，**Wave 1 起不得修改**（除非安全补丁 + 三方同意）：
+```
+
+**new_string** (插入 v1.4 freeze qualifier note 段落)：
+```
+### 15.2 三方依赖版本锁定
+
+**v1.4 freeze 修订（PR 9 ceremony，2026-05-17）**：本节列出的是 Wave 0 spec 推荐版本范围（`6.x 最新稳定 (≥ 6.29)` 等）。**v1.4 实际冻结状态**：
+
+- **iOS 依赖 exact pin（已在 `Package.resolved` 锁定）**：GRDB.swift `6.29.3` / ZipFoundation `0.9.20`。 Wave 1 起 `Package.resolved` 视为锁定 source-of-truth，变更走 RFC + ledger。
+- **Backend 依赖 ranges（v1.4 暂不 exact pin）**：FastAPI / Uvicorn / APScheduler / pandas / pandas-ta / asyncpg / PostgreSQL 暂用本节 ranges；Wave 1 B1-B4 PR 各自落 `backend/requirements.txt == X.Y.Z` 精确版本 + `docker-compose.yml` image digest pin 时同步锁定（见 `docs/governance/2026-05-17-wave0-signoff-ledger.md` residual H6）。
+- **README v1.4 + ledger** 互为补充：README 列实际锁定状态；本节列 spec 推荐范围 + v1.4 freeze 真锁定状态摘要。
+
+Wave 0 签字同步锁定以下版本，**Wave 1 起不得修改**（除非安全补丁 + 三方同意）：
+```
+
+- [ ] **Step 1.6: 验证修订**
 
 ```bash
 grep -c "Wave 1 验收（C2 DecelerationAnimator" kline_trainer_modules_v1.4.md
@@ -294,9 +330,11 @@ grep -c "M0.3 \*\*核心\*\* 数据类型" kline_trainer_modules_v1.4.md
 grep -c "23 M0.3 类型" kline_trainer_modules_v1.4.md
 grep -c "16 Codable" kline_trainer_modules_v1.4.md
 grep -c "7 非 Codable" kline_trainer_modules_v1.4.md
+grep -c "v1.4 freeze 修订（PR 9 ceremony" kline_trainer_modules_v1.4.md
+grep -c "residual H6" kline_trainer_modules_v1.4.md
 ```
 
-Expected: 每个 grep ≥ 1（5 项全命中）。
+Expected: 每个 grep ≥ 1（7 项全命中）。
 
 跑 swift test 确认 spec md 不影响代码：
 
@@ -306,29 +344,62 @@ cd ios/Contracts && swift test 2>&1 | tail -3
 
 Expected: 297 tests in 63 suites passed。
 
-- [ ] **Step 1.6: Commit Task 1**
+- [ ] **Step 1.7: Commit Task 1**
 
 ```bash
 cd /Users/maziming/Coding/Prj_Kline\ trainer/.worktrees/pr9-wave0-freeze
 git add kline_trainer_modules_v1.4.md
-git commit -m "spec(PR 9): §6 C1b 闸门 #4 F3 L1167 移 Wave 1 + §F1 wording + §M0.3 inventory 表 23 类型
+git commit -m "spec(PR 9): §6 C1b 闸门 #4 F3 L1167 移 Wave 1 + §F1 wording + §M0.3 inventory 表 23 类型 + §15.2 v1.4 freeze qualifier
 
 - L1167 Deceleration stop 集成测试：Wave 0 仅 reducer 契约测试；production
   handler 集成测试移 Wave 1（C2 + C8 落地时同 PR 内验收）
 - §F1 wording：'承载 M0.3 所有类型' → '承载 M0.3 核心数据类型 (Models.swift
   11 Codable + 5 非 Codable)，不含 AppState.swift / RESTDTOs.swift'
 - §M0.3 加 inventory 表：4 行（Models.swift 9 enum + 7 struct / AppState.swift
-  5 struct / RESTDTOs.swift 2 struct）= 16 Codable + 7 非 Codable = 23 类型"
+  5 struct / RESTDTOs.swift 2 struct）= 16 Codable + 7 非 Codable = 23 类型
+- §15.2 加 v1.4 freeze qualifier note（codex plan R1 finding 2 修）：iOS deps
+  exact pin（GRDB 6.29.3 / ZipFoundation 0.9.20，Package.resolved）/ backend
+  ranges Wave 1 B1-B4 PR 内 == 锁定 + 引用 ledger residual H6"
 ```
 
-Expected: 1 file changed, +~50 行 spec 修订。
+Expected: 1 file changed, +~70 行 spec 修订（多 §15.2 ~20 行）。
 
 ---
 
-### Task 2: Catalyst CI job 加 swift-contracts-smoke.yml
+### Task 2: Catalyst CI job 加 swift-contracts-smoke.yml + 扩 paths trigger
 
 **Files:**
 - Modify: `.github/workflows/swift-contracts-smoke.yml`
+
+- [ ] **Step 2.0: 扩 workflow paths trigger 加 `ios/KlineTrainer/**`（codex plan R1 finding 3 修）**
+
+定位 `paths:` 块：
+
+```bash
+cd /Users/maziming/Coding/Prj_Kline\ trainer/.worktrees/pr9-wave0-freeze
+grep -n "paths:" .github/workflows/swift-contracts-smoke.yml
+```
+
+Expected: 输出 `5:    paths:`（或实际行号）。
+
+使用 Edit tool：
+
+**old_string** (paths 块):
+```
+    paths:
+      - 'ios/Contracts/**'
+      - '.github/workflows/swift-contracts-smoke.yml'
+```
+
+**new_string** (加 ios/KlineTrainer/**)：
+```
+    paths:
+      - 'ios/Contracts/**'
+      - 'ios/KlineTrainer/**'
+      - '.github/workflows/swift-contracts-smoke.yml'
+```
+
+理由（codex plan R1 finding 3 修）：spec §5.3 + plan v1 文本说 "每个 PR" 但 v1 workflow trigger 限 `ios/Contracts/**`；touching `ios/KlineTrainer/` 的 PR 不触发 Catalyst gate；不实。加 `ios/KlineTrainer/**` 让 iOS-touching 全覆盖；spec §5.3 wording 同步软化为 "iOS-touching PR"（不在本 plan 改 spec，spec v7 locked；plan v2 revision history 记录此差异作为 known doc/spec text drift）。
 
 - [ ] **Step 2.1: 读现有 workflow 找插入点**
 
@@ -403,17 +474,19 @@ Expected: 0 errors（如装）或 "未装" 提示。
 
 ```bash
 git add .github/workflows/swift-contracts-smoke.yml
-git commit -m "ci(PR 9): 加 catalyst-build job 持续守 §15.1 #3 闸门
+git commit -m "ci(PR 9): 加 catalyst-build job 持续守 §15.1 #3 闸门 + 扩 paths 含 ios/KlineTrainer
 
 - 镜像 swift-test job pattern（codex Plan 1c R2 修订 convention）：
   不硬编码 /Applications/Xcode_16.app；xcodebuild -version 断言版本
   + fail-fast 给清晰诊断；actions/checkout SHA pinned
 - destination platform=macOS,variant=Mac Catalyst build-for-testing
 - 3-gate 检查：TEST BUILD SUCCEEDED + 无 error: + 无 warning:
-- 兑现 PR #51 R7 finding G3 residual: Catalyst CI 持续守护"
+- 兑现 PR #51 R7 finding G3 residual: Catalyst CI 持续守护
+- codex plan R1 finding 3 修：paths trigger 加 'ios/KlineTrainer/**'
+  让 iOS-touching PR 全覆盖（不只 ios/Contracts/**）"
 ```
 
-Expected: 1 file changed, +~50 行 yaml。
+Expected: 1 file changed, +~52 行 yaml（50 新 job + 2 paths 行）。
 
 ---
 
@@ -650,7 +723,7 @@ ls scripts/
 
 Expected: 看到现有 `scripts/acceptance/` + 新创建的 `scripts/governance/`。
 
-- [ ] **Step 5.2: 创建脚本**
+- [ ] **Step 5.2: 创建脚本（codex plan R1 finding 1 修：python heredoc stdin 改 env var）**
 
 Create `scripts/governance/verify-freeze-tag.sh`（chmod +x 之后）：
 
@@ -680,7 +753,8 @@ if [ -z "$TARGET_REF" ]; then
   exit 2
 fi
 
-# 拉所有 rulesets
+# 拉所有 rulesets — 用 env var 传 JSON 给嵌入 python（codex plan R1 finding 1 修：
+# 不能用 stdin pipe + heredoc，<<'PY' 抢 stdin 让 json.load(sys.stdin) 拿不到）
 RULESETS_JSON=$(gh api "repos/$REPO/rulesets" 2>&1) || {
   echo "FAIL: gh api repos/$REPO/rulesets 失败"
   echo "$RULESETS_JSON"
@@ -688,12 +762,13 @@ RULESETS_JSON=$(gh api "repos/$REPO/rulesets" 2>&1) || {
 }
 
 # 过滤 target=tag 的 ruleset ID 列表
-TAG_RULESET_IDS=$(printf '%s' "$RULESETS_JSON" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
+TAG_RULESET_IDS=$(RULESETS_JSON="$RULESETS_JSON" python3 <<'PY'
+import json, os
+data = json.loads(os.environ['RULESETS_JSON'])
 ids = [str(r['id']) for r in data if r.get('target') == 'tag']
 print(' '.join(ids))
-")
+PY
+)
 
 if [ -z "$TAG_RULESET_IDS" ]; then
   echo "FAIL: 无任何 target=tag 的 ruleset 在 repo $REPO"
@@ -708,10 +783,12 @@ PROTECTED_OK=0
 FAILED_REASONS=""
 for RID in $TAG_RULESET_IDS; do
   DETAIL=$(gh api "repos/$REPO/rulesets/$RID")
-  RESULT=$(printf '%s' "$DETAIL" | python3 - "$TARGET_REF" <<'PY'
-import json, sys, fnmatch
-ruleset = json.load(sys.stdin)
-target_ref = sys.argv[1]
+  # codex plan R1 finding 1 修：DETAIL 通过 env var 传，不走 stdin（heredoc 抢 stdin）
+  set +e
+  RESULT=$(DETAIL_JSON="$DETAIL" TARGET_REF="$TARGET_REF" python3 <<'PY'
+import json, os, fnmatch, sys
+ruleset = json.loads(os.environ['DETAIL_JSON'])
+target_ref = os.environ['TARGET_REF']
 
 reasons = []
 
@@ -752,7 +829,6 @@ if missing:
 # 谓词 4: bypass_actors 限 admin-only
 bypass = ruleset.get('bypass_actors') or []
 # GitHub admin: actor_type='RepositoryRole' + actor_id=5 (admin) OR actor_type='OrganizationAdmin'
-# 允许的 bypass actors（admin role only）：
 def is_admin_bypass(b):
     at = b.get('actor_type', '')
     aid = b.get('actor_id', 0)
@@ -771,9 +847,11 @@ if reasons:
     sys.exit(1)
 print("OK")
 PY
-  ) || RESULT="$RESULT"
+)
+  PY_EXIT=$?
+  set -e
 
-  if [ "$RESULT" = "OK" ]; then
+  if [ "$PY_EXIT" = "0" ] && [ "$RESULT" = "OK" ]; then
     echo "Ruleset $RID: OK"
     PROTECTED_OK=1
     break
