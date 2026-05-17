@@ -31,8 +31,11 @@
   - finding 2 (medium) → §6.D 5 → 7 residuals
   - finding 3 (medium) → §2 scope 21 → 23 类型
 - **v8**（2026-05-17）：plan-stage codex R4 抓到 spec 自身 bug 反向修订（2 处）
-  - spec §5.6 前置 0 `PR_NUMBER=9` 是项目内部命名，不是实际 GitHub PR 编号 → 改用 `gh pr list --head pr9-wave0-freeze --state merged --json number --jq '.[0].number'` auto-detect（与 plan v4 acceptance §E 一致）
-  - spec §5.6 layer 1 调用 `verify-freeze-tag.sh ... --layer protected-namespace`，但 plan Task 5 Step 5.2 实际实现脚本只接受 `--ref` / `--repo` / `-h/--help` → 删除 `--layer protected-namespace` 参数（脚本本身就只跑一种 protected ruleset 检查，flag 多余）
+  - spec §5.6 前置 0 `PR_NUMBER=9` → 改 auto-detect
+  - spec §5.6 layer 1 `--layer protected-namespace` 参数 → 删（script 不接受）
+- **v9**（2026-05-17）：plan-stage codex R5 反向抓 spec §6 漏修 + Catalyst CI 非 required gate
+  - spec §6.F 还有 `gh pr view 9 --json mergeCommit` 硬码（v8 §5.6 修了 §6 漏修）→ §6.F 改用 §5.6 同 auto-detect flow
+  - **新 residual H8**: Catalyst CI 加 workflow 不等于 required merge gate；spec §6 加 "branch protection settings 必须把 `catalyst-build` 加为 required status check" 注解 + ledger 加 H8 residual（admin 在 PR 9 merge 后 GitHub UI 配置）
 
 ---
 
@@ -438,7 +441,8 @@ memory `project_review_strategy_deferred` PR 9 后 archived。
 - **C Spec 一致性**：grep 子项 1+2 修订后 §6 C1b L1167 含 "Wave 1 验收" + §F1 含 "11 Codable 实体" + §M0.3 含 "16 Codable" + "7 非 Codable" + "23 M0.3 类型"（codex R3 finding 1 修：v3 漏 AppState TrainingSetFile/AppSettings；v1/v2 误写 14+7）
 - **D §15.4 ledger**：三方 ✅ + **7 residuals**（H1 L1167 / H2 E2 / H3 Wave 1 plan / H4 M0.3 multi-file / H5 Catalyst CI / H6 backend deps / H7 sample 训练组数据；codex R6 finding 2 修：v1-v6 stale "5 residuals"）；ledger 内**不含**任何未填占位符（codex R1 finding 1 修：provenance 走 annotated tag，不在 ledger 嵌 SHA）
 - **E CI**：6/6 → 7/7 SUCCESS（多 Catalyst job）
-- **F tag**：merge 后**完全 mirror §5.6 三层 blocking gate**（codex R5 finding 3 修：v3-v5 stale `ls-remote --tags` 改 `refs/tags/...^{}` peeled）— 前置 0：`gh pr view 9 --json mergeCommit` 取真实 squash SHA；层 1：`scripts/governance/verify-freeze-tag.sh` protected ruleset 完整谓词检查（include + exclude + creation/update/deletion + bypass_actors admin-only）；层 2：`git verify-tag`（若 signed）；层 3：`git ls-remote origin "refs/tags/wave0-frozen-v1.4^{}"` + `git rev-parse wave0-frozen-v1.4^{}` 双 check == PR 9 squash SHA。任意一层 `exit 1`
+- **F tag**：merge 后**完全 mirror §5.6 三层 blocking gate**（v9 plan R5 修：§6.F 不再硬码 `gh pr view 9`）— 前置 0：`gh pr list --head pr9-wave0-freeze --state merged --json number` auto-detect 真实 PR # → `gh pr view "$PR_NUMBER" --json mergeCommit` 拿 squash SHA；层 1：`scripts/governance/verify-freeze-tag.sh --ref refs/tags/wave0-frozen-v1.4`；层 2：`git verify-tag`（若 signed） + 本地 peeled SHA pre-check；层 3：`git ls-remote origin "refs/tags/wave0-frozen-v1.4^{}"` peeled commit SHA == auto-detected PR squash SHA。任意一层 `exit 1`
+- **G branch protection enforcement (H8 residual; v9 plan R5 finding 1 修)**：PR 9 merge 后 admin 必须在 GitHub repo Settings → Branches → main 加 `catalyst-build` 为 required status check；否则 Catalyst CI 沦为 advisory，未来 PR 红 Catalyst 仍可 merge，违反 "continuous guard" 承诺。Ledger H5 (Catalyst CI 持续守护) 完全闭合需 H8 配套完成。
 
 ## 7. 流水线（按 user 指定）
 
