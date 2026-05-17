@@ -10,6 +10,10 @@
 - **v2**（2026-05-17）：codex R1 2 findings 全修
   - finding 1 (high) → 移除 ledger 内 `(PR 9 squash commit SHA，PR merge 后填)` 占位符；provenance 走 annotated tag (`git show wave0-frozen-v1.4`)；ledger 自身保持 self-contained 不含 SHA；验收清单同步删 "commit SHA 占位" 项
   - finding 2 (medium) → Catalyst CI job 不硬编码 `/Applications/Xcode_16.app`；改用 existing `swift-contracts-smoke.yml` swift-test job 同 pattern（依赖 runner 默认 Xcode，`xcodebuild -version` 断言版本，fail-fast 给诊断 — 镜像 codex Plan 1c R2 已确立的项目 convention）
+- **v3**（2026-05-17）：codex R2 3 findings 全修
+  - finding 1 (high) → 依赖 freeze 用 ranges 不实；iOS deps 改为 `Package.resolved` 真实 exact 版本 (GRDB.swift **6.29.3** / ZipFoundation **0.9.20**)；backend deps (FastAPI/pandas 等) 实际未实现 — 移到 residual H6 (Wave 1 B1-B4 PR 内 `requirements.txt == 精确锁定` 时同步) + 标识"Wave 0 freeze 仅 iOS deps exact pin；backend ranges Wave 1 内闭环"
+  - finding 2 (high) → M0.3 inventory 数学错；正确：5 Codable enum + 6 Codable struct + 3 AppState struct + 2 RESTDTOs struct = **16 Codable**；4 非 Codable enum + 1 非 Codable struct (TradeMarker) = **5 非 Codable**；合计 **21 类型**；spec §M0.3 inventory 表底部 + 验收 grep 全部改 16 / 5 / 21
+  - finding 3 (high) → annotated tag 单凭 metadata 不是 cryptographic（tagger 字段 arbitrary）；删除 "加密学地钉死" overclaim wording；改为 (a) GitHub repo settings 加 `wave0-frozen-*` protected tag namespace (admin-only push) + (b) optional `git tag -s` GPG/SSH signing（如 user 已配置 signing key）；acceptance 加 `git verify-tag wave0-frozen-v1.4`（若 signed）+ remote ref 反查指向正确 commit SHA + 注明 protected tag 已配置
 
 ---
 
@@ -115,7 +119,7 @@ Task 6 git tag wave0-frozen-v1.4 origin/main + push (子项 6)
 | AppState.swift | 3 struct: TrainingRecord / DrawdownAccumulator / PendingTraining | 3/3 | 状态/持仓累计 |
 | RESTDTOs.swift | 2 struct: LeaseResponse / TrainingSetMetaItem | 2/2 | REST 边界 DTO |
 
-**合计 14 Codable + 7 非 Codable = 21 M0.3 类型。** F1 模块 scope 仅 `Models.swift` 11 Codable；`AppState.swift` 3 struct 与 `RESTDTOs.swift` 2 struct 分别归 §C1b reducer / §B3 REST API 模块责任。
+**合计 16 Codable（5 enum + 11 struct）+ 5 非 Codable（4 enum + 1 struct: TradeMarker）= 21 M0.3 类型。** F1 模块 scope 仅 `Models.swift` 11 Codable；`AppState.swift` 3 struct 与 `RESTDTOs.swift` 2 struct 分别归 §C1b reducer / §B3 REST API 模块责任。
 ```
 
 ### 5.3 Catalyst CI job
@@ -213,16 +217,21 @@ Task 6 git tag wave0-frozen-v1.4 origin/main + push (子项 6)
 
 签字完成后：契约层进入 RFC 修改模式；任何 M0.* / F1 / F2 / C1a / C1b / C1c / E1 / E6 / P3 / P4 / P5 / P6 改动需 RFC 走 superpowers:brainstorming + ledger 留痕。
 
-## Provenance（codex R1 finding 1 修：ledger 不含 SHA 占位符）
+## Provenance（codex R1 finding 1 + R2 finding 3 修订）
 
-本 ledger **不内嵌 PR 9 squash commit SHA**；不可篡改 provenance 由 git annotated tag 承担：
+本 ledger **不内嵌 PR 9 squash commit SHA**；provenance 走三件互证：
 
-\`\`\`bash
+1. **annotated tag** (`git show wave0-frozen-v1.4`) — 显示 tagger / date / target commit SHA / message
+2. **GitHub protected tag namespace** — `wave0-frozen-*` 配 admin-only push + 禁 force-update（实操等价物：单人项目账号控制 = 信任根）
+3. **本 ledger + README v1.4** — 三处文本签字记录互证；任意一处篡改可 `git diff` 出来
+
+```bash
 git show wave0-frozen-v1.4   # 显示 tagger / date / commit SHA / message
 git tag -l 'wave0-frozen-*' --format='%(refname:short) → %(objectname) %(taggerdate:iso-strict)'
-\`\`\`
+git verify-tag wave0-frozen-v1.4 2>&1   # 若 signed annotated tag
+```
 
-annotated tag (\`git tag -a\`) 加密学地把签字时刻 + 指向的 commit + tagger 身份钉死；ledger 自身保持 self-contained（不需要 merge 后回填占位符）。
+**注意**：annotated tag (`-a`) 自身的 tagger 字段是 arbitrary metadata，不是 cryptographic proof。signed tag (`-s`，依赖 GPG/SSH key) 才提供加密保证；单人项目实操中 GitHub protected tag namespace + admin-only push = remote ref 不可篡改的等价防线（codex R2 finding 3 修：避免 v1/v2 overclaim "加密学地钉死"）。
 ```
 
 ### 5.5 README v1.4 + 依赖版本表
@@ -234,22 +243,31 @@ annotated tag (\`git tag -a\`) 加密学地把签字时刻 + 指向的 commit + 
 
 Wave 0 已签字冻结。tag：`wave0-frozen-v1.4`。Sign-off ledger：[docs/governance/2026-05-17-wave0-signoff-ledger.md](docs/governance/2026-05-17-wave0-signoff-ledger.md)。
 
-### 依赖版本锁定（spec §15.2）
+### 依赖版本锁定（spec §15.2；codex R2 finding 1 修：iOS exact pin / backend 移 residual）
 
-| 依赖 | 用途 | 版本 |
-|---|---|---|
-| GRDB.swift | iOS SQLite ORM | 6.29+（Package.resolved） |
-| ZipFoundation | iOS zip 解压 | 0.9.20 |
-| SQLite | iOS + 后端 | 3.45+（iOS 17 自带） |
-| FastAPI | 后端 API | 0.110+ |
-| Uvicorn | ASGI server | 0.27+ |
-| APScheduler | 后端定时 | 3.10+ |
-| pandas | 后端数据 | 2.x |
-| pandas-ta | 指标计算 | 0.3.14b0+ |
-| asyncpg | PG 驱动 | 0.29+ |
-| PostgreSQL | 数据仓库 | 15+ |
+**iOS 依赖（Wave 0 freeze，exact 版本，来自 `ios/Contracts/Package.resolved`）：**
 
-**Wave 1 起不得修改**（除安全补丁 + ledger 留痕）。
+| 依赖 | 用途 | 版本 | Lock 源 |
+|---|---|---|---|
+| GRDB.swift | iOS SQLite ORM | **6.29.3** | `Package.resolved` |
+| ZipFoundation | iOS zip 解压 | **0.9.20** | `Package.resolved` |
+| SQLite | iOS 内嵌 | iOS 17+ 系统自带 | iOS minimum deployment target |
+
+**Wave 0 起 `Package.resolved` 视为锁定 source-of-truth**。变更走 RFC + ledger。
+
+**后端依赖（Wave 1 B1-B4 PR 内 exact pin；Wave 0 暂用 ranges + residual H6）：**
+
+| 依赖 | 用途 | spec §15.2 range | 真锁定时点 |
+|---|---|---|---|
+| FastAPI | 后端 API 框架 | 0.110+ | B3 PR 落 `backend/requirements.txt == 0.110.x` |
+| Uvicorn | ASGI server | 0.27+ | B3 PR |
+| APScheduler | 后端定时 | 3.10+ | B4 PR |
+| pandas | 后端数据 | 2.x | B1 PR |
+| pandas-ta | 指标计算 | 0.3.14b0+ | B2 PR |
+| asyncpg | PG 驱动 | 0.29+ | B3 PR |
+| PostgreSQL | 数据仓库 | 15+ | `docker-compose.yml` image digest pin B3 PR |
+
+Wave 0 freeze **仅 iOS deps exact pin**；backend ranges 待 Wave 1 B1-B4 PR 各自落 `requirements.txt == X.Y.Z` 时同步锁定（residual H6 in `docs/governance/...-wave0-signoff-ledger.md`）。
 
 ### Wave 0 交付清单
 
@@ -258,22 +276,37 @@ Wave 0 已签字冻结。tag：`wave0-frozen-v1.4`。Sign-off ledger：[docs/gov
 
 ### 5.6 git tag wave0-frozen-v1.4（merge 后动作）
 
-PR 9 **merge 之后**单独动作（不在 PR 9 commits 里，避免 tag 指向未 merge commit）：
+PR 9 **merge 之后**单独动作（不在 PR 9 commits 里，避免 tag 指向未 merge commit）。
+
+**前置（codex R2 finding 3 修）**：在 GitHub repo settings 配置 `wave0-frozen-*` **protected tag namespace**（admin-only push + 禁止 force-update），否则 unsigned annotated tag 的 ref 可被任意 retarget。
+
+**Tag 创建（含 optional GPG/SSH 签名）：**
 
 ```bash
 git fetch origin main
 TAG_COMMIT=$(git rev-parse origin/main)
-git tag -a wave0-frozen-v1.4 \
+
+# 优先选项：signed annotated tag（如 user 已配 GPG 或 SSH signing key）
+git tag -s wave0-frozen-v1.4 \
   -m "Wave 0 契约冻结 v1.4：17 业务模块 + M0 契约 + §15.4 三方签字 ledger / docs/governance/2026-05-17-wave0-signoff-ledger.md" \
   "$TAG_COMMIT"
+# 若 `-s` 失败（未配 signing），fallback 到 unsigned annotated:
+# git tag -a wave0-frozen-v1.4 -m "..." "$TAG_COMMIT"
+
 git push origin wave0-frozen-v1.4
 
 # 验证
 git tag -l "wave0-frozen-*"
 git show wave0-frozen-v1.4 --stat | head -5
+git verify-tag wave0-frozen-v1.4 2>&1 || echo "Tag unsigned — protected namespace (GitHub repo settings) 是唯一防 retarget 屏障"
+# 反查 GitHub remote 配置：
+gh api repos/agateuu1234-bit/kline-trainer/rules/branches --jq '.[] | select(.type=="tag_name_pattern" or .ref_name_pattern // empty | contains("wave0-frozen"))' 2>&1 || echo "WARN: 检查 protected tag namespace 是否已配"
 ```
 
-`-a` 注释 tag（携带 message + commit + tagger info，不是 lightweight tag）。tag 指向 PR 9 squash merge commit。
+**注意**（codex R2 finding 3 wording 修订）：
+- annotated tag (`-a`) 自身**不是 cryptographic provenance**（tagger 字段 arbitrary）；签名 tag (`-s`) 才提供加密保证
+- 单人项目 threat model：账号 / 仓库主控权 = 终极信任根；GitHub protected tag namespace（admin-only push + force-update 禁止）= remote ref 不可篡改的实操等价物
+- README v1.4 + ledger 文本 + tag 三件互证：任意一处被改动都能 `git diff` 出来
 
 ### 5.7 §15.3 评审策略写进 Wave 1 plan 模板
 
@@ -303,7 +336,7 @@ memory `project_review_strategy_deferred` PR 9 后 archived。
 
 - **A 文件落地**：spec md / CI yaml / governance md / README md 全到位
 - **B 编译验证**：现有 swift test 297/63 不退化 + Catalyst build SUCCEEDED
-- **C Spec 一致性**：grep 子项 1+2 修订后 §6 C1b L1167 含 "Wave 1 验收" + §F1 含 "11 Codable 实体" + §M0.3 含 "14 Codable + 7 非 Codable = 21"
+- **C Spec 一致性**：grep 子项 1+2 修订后 §6 C1b L1167 含 "Wave 1 验收" + §F1 含 "11 Codable 实体" + §M0.3 含 "16 Codable" + "5 非 Codable" + "21 M0.3 类型"（codex R2 finding 2 修：v1/v2 误写 14+7）
 - **D §15.4 ledger**：三方 ✅ + 5 residuals；ledger 内**不含**任何未填占位符（codex R1 finding 1 修：provenance 走 annotated tag，不在 ledger 嵌 SHA）
 - **E CI**：6/6 → 7/7 SUCCESS（多 Catalyst job）
 - **F tag**：merge 后 `git tag -l wave0-frozen-v1.4` 存在 + remote push 成功
