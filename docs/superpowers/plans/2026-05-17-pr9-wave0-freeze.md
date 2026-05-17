@@ -10,7 +10,10 @@
   - finding 1 (high) → acceptance §E 加 set -euo pipefail + 每步 || exit 1 双保险
   - finding 2 (medium) → E3 改 peeled (`ls-remote refs/tags/...^{}`)
 - **v4**（2026-05-17）：codex R3 1 high finding 全修
-  - finding 1 (high) → `PR_NUMBER=9` 是项目**内部命名**（"PR 9 governance" anchor），不是实际 GitHub PR number — 该 repo 已有 PR #37-#53，新 freeze PR 会是 #54+；硬编码 9 让 `gh pr view 9 --json mergeCommit` 拉旧/不存在 PR，origin/main vs mergeCommit 断言失败，ceremony 永远跑不过 → 改用 `gh pr list --head pr9-wave0-freeze --state merged --json number --jq '.[0].number'` 在 ceremony 跑时 auto-detect 真 PR number；fail 时显式诊断 + exit 1；spec §5.6 同样 mirror（v7 locked，记录为 plan v4 修复 spec-vs-implementation drift）
+  - finding 1 (high) → PR_NUMBER hardcode → auto-detect
+- **v5**（2026-05-17）：plan-stage codex R5 反向 2 findings 全修（同步 spec v9）
+  - finding 1 (high) → Catalyst CI 加 workflow 不等于 required merge gate；Task 3 Step 3.1 ledger residual 表加 H8 行（PR 9 merge 后 admin 在 GitHub Settings → Branches → main 加 `catalyst-build` 为 required status check）；plan acceptance 加 §G admin manual step；ledger residual 计数从 7 改 8
+  - finding 2 (high) → spec §6 还硬码 PR 9（v8 §5.6 修 §6 漏）；本 plan v5 不动 spec（spec v9 已修），但 plan v3 acceptance §E 已是 auto-detect 正确版本，仅 ledger 表 + 数量更新
 
 ---
 
@@ -533,7 +536,7 @@ Create `docs/governance/2026-05-17-wave0-signoff-ledger.md` 内容：
 - ⚠️ **未签**（codex R4 finding 3 修：future scope 不能签 ✅）：3-5 个样本训练组数据落地 → 移入 **residual H7**（Wave 1 B1/B2 PR 内验证 3-5 个样本数据正确性 + ledger 回填）
 - **签字时间**：2026-05-17
 
-## 已知 residuals（不阻塞 freeze；7 项 H1-H7）
+## 已知 residuals（不阻塞 freeze；8 项 H1-H8）
 
 | ID | residual | 来源 | 处理路径 |
 |---|---|---|---|
@@ -541,9 +544,10 @@ Create `docs/governance/2026-05-17-wave0-signoff-ledger.md` 内容：
 | H2 | E2 PositionManager 三连 abort | PR #36 closed | Wave 1 启动前 spec §4.2 重审窗口 |
 | H3 | Wave 1 内部 plan 排序 | v6 outline 仅 Wave 0 | PR 9 merge 后 brainstorming + writing-plans 排细顺位 |
 | H4 | M0.3 multi-file split 历史 over-claim | PR F1 R7+R8 | Spec §F1 wording + §M0.3 inventory 表（PR 9 子项 2） |
-| H5 | Catalyst CI 持续守护 | PR #51 R7 G3 | `.github/workflows` Catalyst job（PR 9 子项 3） |
+| H5 | Catalyst CI 持续守护 | PR #51 R7 G3 | `.github/workflows` Catalyst job（PR 9 子项 3）+ **配套 H8 admin 在 branch protection 加 `catalyst-build` required status check** |
 | H6 | backend deps exact pin | spec §15.2 暂用 ranges | Wave 1 B1-B4 PR 各自落 `backend/requirements.txt == X.Y.Z` + `docker-compose.yml` image digest pin |
 | H7 | sample 训练组数据 | 数据代表 sign-off 第 3 项 future scope | Wave 1 B1/B2 PR 内真生成 3-5 个样本 + 数据正确性 ledger 回填 |
+| **H8** | Catalyst CI required merge gate enforcement（v9 plan R5 finding 1 修） | spec v9 §6.G | PR 9 merge 后 admin 在 GitHub repo Settings → Branches → main → Required status checks 加 `catalyst-build`（GitHub UI 手动步骤，非代码改动）；H5 完全闭合需 H8 配套 |
 
 ## 依赖版本锁定（§15.2 v1.4 freeze）
 
@@ -957,7 +961,7 @@ Create `docs/acceptance/2026-05-17-pr9-wave0-freeze.md`：
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| C1 | `grep -c "H[1-7]" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 至少 14（H1-H7 表头 + 7 行） | ☐ |
+| C1 | `grep -c "H[1-8]" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 至少 16（H1-H8 表头 + 8 行） | ☐ |
 | C2 | `grep "## .*sign-off" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 输出 3 行：后端代表 / iOS 代表 / 数据代表 | ☐ |
 | C3 | `grep "Provenance" docs/governance/2026-05-17-wave0-signoff-ledger.md` | ≥ 1（codex R1 finding 1 修订标记） | ☐ |
 | C4 | `grep -F "(PR 9 squash commit SHA" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 空输出（ledger 不含 SHA 占位符；codex R1 finding 1 修） | ☐ |
