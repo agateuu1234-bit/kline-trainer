@@ -6,7 +6,7 @@
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| A1 | `grep -c "Wave 1 验收（C2 DecelerationAnimator" kline_trainer_modules_v1.4.md` | ≥ 1（spec §6 C1b L1167 修订落地） | ☐ |
+| A1 | `grep -c "Wave 1 验收" kline_trainer_modules_v1.4.md` | ≥ 1（spec §6 C1b L1167 修订落地；spec 实际是 markdown bold `**Wave 1 验收**`） | ☐ |
 | A2 | `grep -c "23 M0.3 类型" kline_trainer_modules_v1.4.md` | ≥ 1（§M0.3 inventory 表落地） | ☐ |
 | A3 | `python3 -c "import yaml; print(list(yaml.safe_load(open('.github/workflows/swift-contracts-smoke.yml'))['jobs'].keys()))"` | 输出 `['swift-test', 'catalyst-build']` | ☐ |
 | A4 | `ls docs/governance/2026-05-17-wave0-signoff-ledger.md` | 文件存在 | ☐ |
