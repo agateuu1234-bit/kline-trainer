@@ -7,8 +7,10 @@
   - finding 2 (high) → spec §15.2 与 README/ledger 矛盾；Task 1 增 Step 1.5 amend §15.2
   - finding 3 (medium) → workflow paths 限 `ios/Contracts/**` 不够；Task 2 增 Step 2.0 加 `ios/KlineTrainer/**`
 - **v3**（2026-05-17）：codex R2 2 findings 全修
-  - finding 1 (high) → acceptance §E command block 缺 `set -euo pipefail` fail-open；改加 `set -euo pipefail` + 把每步显式 `|| exit 1` 守卫；ruleset check / 本地 verify / 本地 peeled / push / remote peeled 任一 fail block 全文 abort
-  - finding 2 (medium) → E3 `.object.sha` 对 annotated tag 返回 tag object SHA 不是 target commit（同 spec R4 finding 1 pattern 但 §E3 漏修）→ 改用 peeled 检查 `git ls-remote origin "refs/tags/wave0-frozen-v1.4^{}"`，或 `gh api git/tags/<tag-object-sha>` 再 dereference `.object.sha`
+  - finding 1 (high) → acceptance §E 加 set -euo pipefail + 每步 || exit 1 双保险
+  - finding 2 (medium) → E3 改 peeled (`ls-remote refs/tags/...^{}`)
+- **v4**（2026-05-17）：codex R3 1 high finding 全修
+  - finding 1 (high) → `PR_NUMBER=9` 是项目**内部命名**（"PR 9 governance" anchor），不是实际 GitHub PR number — 该 repo 已有 PR #37-#53，新 freeze PR 会是 #54+；硬编码 9 让 `gh pr view 9 --json mergeCommit` 拉旧/不存在 PR，origin/main vs mergeCommit 断言失败，ceremony 永远跑不过 → 改用 `gh pr list --head pr9-wave0-freeze --state merged --json number --jq '.[0].number'` 在 ceremony 跑时 auto-detect 真 PR number；fail 时显式诊断 + exit 1；spec §5.6 同样 mirror（v7 locked，记录为 plan v4 修复 spec-vs-implementation drift）
 
 ---
 
@@ -973,14 +975,24 @@ Create `docs/acceptance/2026-05-17-pr9-wave0-freeze.md`：
 ```bash
 set -euo pipefail   # codex plan R2 finding 1 修：必须 strict mode，否则上面任何 exit 1 不阻断后续
 
-# 前置 0：从 GitHub 拿 PR 9 真实 squash commit SHA
-PR_NUMBER=9
+# 前置 0：auto-detect 真实 GitHub PR number（codex plan R3 finding 1 修：
+# "PR 9" 是项目内部命名，actual GitHub PR # 由 gh pr create 分配，可能 #54+）
+BRANCH="pr9-wave0-freeze"
+PR_NUMBER=$(gh pr list --repo agateuu1234-bit/kline-trainer --head "$BRANCH" --state merged --json number --jq '.[0].number')
+[ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ] || {
+  echo "FAIL: 找不到 branch $BRANCH 的已 merge PR"
+  echo "  如刚 merge，确认 origin 已 fetch 最新；如 PR 还在 open，等 merge 完再跑本 ceremony"
+  exit 1
+}
+echo "Detected actual GitHub PR #$PR_NUMBER for branch $BRANCH"
+
+# 拿 PR squash commit SHA
 EXPECTED_SHA=$(gh pr view "$PR_NUMBER" --repo agateuu1234-bit/kline-trainer --json mergeCommit --jq '.mergeCommit.oid')
-[ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "null" ] || { echo "FAIL: PR #$PR_NUMBER 未 merge"; exit 1; }
+[ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "null" ] || { echo "FAIL: PR #$PR_NUMBER mergeCommit 拿不到"; exit 1; }
 echo "Expected PR #$PR_NUMBER squash commit: $EXPECTED_SHA"
 git fetch origin main
 LOCAL_MAIN=$(git rev-parse origin/main)
-[ "$LOCAL_MAIN" = "$EXPECTED_SHA" ] || { echo "FAIL: origin/main HEAD ($LOCAL_MAIN) != PR 9 squash SHA ($EXPECTED_SHA)"; exit 1; }
+[ "$LOCAL_MAIN" = "$EXPECTED_SHA" ] || { echo "FAIL: origin/main HEAD ($LOCAL_MAIN) != PR #$PR_NUMBER squash SHA ($EXPECTED_SHA)"; exit 1; }
 TAG_COMMIT="$EXPECTED_SHA"
 
 # 层 1 (前置)：protected tag namespace 完整谓词检查 — 显式 || exit 1（set -e 已防呆，双保险）
