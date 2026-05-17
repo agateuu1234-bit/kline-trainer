@@ -6,35 +6,35 @@
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| A1 | `grep -c "Wave 1 验收" kline_trainer_modules_v1.4.md` | ≥ 1（spec §6 C1b L1167 修订落地；spec 实际是 markdown bold `**Wave 1 验收**`） | ☐ |
-| A2 | `grep -c "23 M0.3 类型" kline_trainer_modules_v1.4.md` | ≥ 1（§M0.3 inventory 表落地） | ☐ |
-| A3 | `python3 -c "import yaml; print(list(yaml.safe_load(open('.github/workflows/swift-contracts-smoke.yml'))['jobs'].keys()))"` | 输出 `['swift-test', 'catalyst-build']` | ☐ |
-| A4 | `ls docs/governance/2026-05-17-wave0-signoff-ledger.md` | 文件存在 | ☐ |
-| A5 | `ls docs/governance/wave1-plan-template.md` | 文件存在 | ☐ |
-| A6 | `grep -c "Wave 0 契约冻结 v1.4" README.md` | ≥ 1 | ☐ |
-| A7 | `test -x scripts/governance/verify-freeze-tag.sh && echo OK` | 输出 `OK`（脚本可执行） | ☐ |
+| A1 | `grep -c "Wave 1 验收" kline_trainer_modules_v1.4.md` | ≥ 1（spec §6 C1b L1167 修订落地；spec 实际是 markdown bold `**Wave 1 验收**`） | ☑ |
+| A2 | `grep -c "23 M0.3 类型" kline_trainer_modules_v1.4.md` | ≥ 1（§M0.3 inventory 表落地） | ☑ |
+| A3 | `python3 -c "import yaml; print(list(yaml.safe_load(open('.github/workflows/swift-contracts-smoke.yml'))['jobs'].keys()))"` | 输出 `['swift-test', 'catalyst-build']` | ☑ |
+| A4 | `ls docs/governance/2026-05-17-wave0-signoff-ledger.md` | 文件存在 | ☑ |
+| A5 | `ls docs/governance/wave1-plan-template.md` | 文件存在 | ☑ |
+| A6 | `grep -c "Wave 0 契约冻结 v1.4" README.md` | ≥ 1 | ☑ |
+| A7 | `test -x scripts/governance/verify-freeze-tag.sh && echo OK` | 输出 `OK`（脚本可执行） | ☑ |
 
 ## B. 编译验证（spec amendments + governance docs 不影响代码）
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| B1 | `cd ios/Contracts && swift build` | 输出 `Build complete!`，无 error 无 warning | ☐ |
-| B2 | `cd ios/Contracts && swift test 2>&1 \| tail -3` | 末尾出现 `Test run with 297 tests in 63 suites passed`（与 PR #53 baseline 一致；本 PR 0 业务代码改动） | ☐ |
+| B1 | `cd ios/Contracts && swift build` | 输出 `Build complete!`，无 error 无 warning | ☑ |
+| B2 | `cd ios/Contracts && swift test 2>&1 \| tail -3` | 末尾出现 `Test run with 297 tests in 63 suites passed`（与 PR #53 baseline 一致；本 PR 0 业务代码改动） | ☑ |
 
 ## C. Ledger 完整性（10 residuals H1-H10）
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| C1 | `grep -c "H\([1-9]\|10\)" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 至少 11（H1-H10 各出现 ≥ 1 次） | ☐ |
-| C2 | `grep "## .*sign-off" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 输出 3 行：后端代表 / iOS 代表 / 数据代表 | ☐ |
-| C3 | `grep -c "Provenance" docs/governance/2026-05-17-wave0-signoff-ledger.md` | ≥ 1（codex R1 finding 1 修订标记） | ☐ |
-| C4 | `grep -F "(PR 9 squash commit SHA" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 空输出（ledger 不含 SHA 占位符；codex R1 finding 1 修） | ☐ |
+| C1 | `grep -c "H\([1-9]\|10\)" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 至少 11（H1-H10 各出现 ≥ 1 次） | ☑ |
+| C2 | `grep "## .*sign-off" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 输出 3 行：后端代表 / iOS 代表 / 数据代表 | ☑ |
+| C3 | `grep -c "Provenance" docs/governance/2026-05-17-wave0-signoff-ledger.md` | ≥ 1（codex R1 finding 1 修订标记） | ☑ |
+| C4 | `grep -F "(PR 9 squash commit SHA" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 空输出（ledger 不含 SHA 占位符；codex R1 finding 1 修） | ☑ |
 
 ## D. CI（GitHub Actions）
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| D1 | `gh pr checks <pr_number>` | 7/7 checks SUCCESS（含新 catalyst-build job） — 或 OpenAI quota fail 走 admin bypass per memory `feedback_openai_quota_ci_pattern` | ☐ |
+| D1 | `gh pr checks <pr_number>` | 7/7 checks SUCCESS（含新 catalyst-build job） — 或 OpenAI quota fail 走 admin bypass per memory `feedback_openai_quota_ci_pattern` | ☐ 待 push 后跑 |
 
 ## E. Tag 三层 blocking gate（PR 9 merge 之后跑，mirror spec §5.6）
 
@@ -89,29 +89,29 @@ echo "GATE PASS: tag wave0-frozen-v1.4 三层验证全过"
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| E1 | 跑完上面命令链 | 末尾 `GATE PASS: tag wave0-frozen-v1.4 三层验证全过`；无 FAIL | ☐ |
-| E2 | `git tag -l 'wave0-frozen-*'` | 输出 `wave0-frozen-v1.4` | ☐ |
-| E3 | `git ls-remote origin "refs/tags/wave0-frozen-v1.4^{}" \| awk '{print $1}'` | 输出 = `$EXPECTED_SHA`（PR 9 squash commit） | ☐ |
+| E1 | 跑完上面命令链 | 末尾 `GATE PASS: tag wave0-frozen-v1.4 三层验证全过`；无 FAIL | ☐ 待 PR merge 后跑 |
+| E2 | `git tag -l 'wave0-frozen-*'` | 输出 `wave0-frozen-v1.4` | ☐ 待 PR merge 后跑 |
+| E3 | `git ls-remote origin "refs/tags/wave0-frozen-v1.4^{}" \| awk '{print $1}'` | 输出 = `$EXPECTED_SHA`（PR 9 squash commit） | ☐ 待 PR merge 后跑 |
 
 ## F. Scope 边界（不应做的事）
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| F1 | `git diff main -- ios/Contracts/Sources/` | 输出为空（不动业务代码） | ☐ |
-| F2 | `git diff main -- ios/Contracts/Tests/` | 输出为空（不动测试） | ☐ |
-| F3 | `git diff main -- ios/Contracts/Package.swift` | 输出为空（不动 SwiftPM manifest） | ☐ |
+| F1 | `git diff main -- ios/Contracts/Sources/` | 输出为空（不动业务代码） | ☑ |
+| F2 | `git diff main -- ios/Contracts/Tests/` | 输出为空（不动测试） | ☑ |
+| F3 | `git diff main -- ios/Contracts/Package.swift` | 输出为空（不动 SwiftPM manifest） | ☑ |
 
 ## G. 文档
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| G1 | `ls docs/superpowers/plans/2026-05-17-pr9-wave0-freeze.md` | 文件存在 | ☐ |
-| G2 | `ls docs/superpowers/specs/2026-05-17-pr9-wave0-freeze-design.md` | 文件存在 | ☐ |
-| G3 | `ls docs/acceptance/2026-05-17-pr9-wave0-freeze.md` | 文件存在（本文件） | ☐ |
+| G1 | `ls docs/superpowers/plans/2026-05-17-pr9-wave0-freeze.md` | 文件存在 | ☑ |
+| G2 | `ls docs/superpowers/specs/2026-05-17-pr9-wave0-freeze-design.md` | 文件存在 | ☑ |
+| G3 | `ls docs/acceptance/2026-05-17-pr9-wave0-freeze.md` | 文件存在（本文件） | ☑ |
 
 ## H. 后续 admin 手动步骤（PR 9 merge 之后 + tag 之前）
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| H8 | GitHub repo Settings → Rules → New tag ruleset：name `wave0-frozen-protected` / target ref_name include `wave0-frozen-*` / enforcement Active / Rules ✅ Restrict creations + Updates + Deletions / Bypass actors Repository admin only | UI 配置完成 | ☐ |
-| H8' | `gh api repos/agateuu1234-bit/kline-trainer/branches/main/protection --jq '.required_status_checks.contexts'` 含 `catalyst-build` | 输出 array 含 `catalyst-build`；如不含 admin 在 Settings → Branches → main edit required status checks | ☐ |
+| H8 | GitHub repo Settings → Rules → New tag ruleset：name `wave0-frozen-protected` / target ref_name include `wave0-frozen-*` / enforcement Active / Rules ✅ Restrict creations + Updates + Deletions / Bypass actors Repository admin only | UI 配置完成 | ☐ 待 PR merge 后 admin 手动 |
+| H8' | `gh api repos/agateuu1234-bit/kline-trainer/branches/main/protection --jq '.required_status_checks.contexts'` 含 `catalyst-build` | 输出 array 含 `catalyst-build`；如不含 admin 在 Settings → Branches → main edit required status checks | ☐ 待 PR merge 后 admin 手动 |
