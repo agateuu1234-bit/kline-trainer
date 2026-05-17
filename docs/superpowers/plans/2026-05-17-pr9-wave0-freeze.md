@@ -3,9 +3,12 @@
 **Revision history：**
 - **v1**（2026-05-17）：初稿 → codex plan-stage R1 verdict `needs-attention`（3 findings：2 high + 1 medium）
 - **v2**（2026-05-17）：codex R1 3 findings 全修
-  - finding 1 (high) → `verify-freeze-tag.sh` python heredoc 抢 stdin（`<<'PY'` 把 stdin 给 program text，`json.load(sys.stdin)` 拿不到 `gh api` DETAIL，protected gate 永远 fail）→ Task 5 Step 5.2 改用 env var 传 DETAIL：`DETAIL_JSON="$DETAIL" TARGET_REF="$TARGET_REF" python3 <<'PY'` + program 用 `os.environ['DETAIL_JSON']` / `os.environ['TARGET_REF']` 读取
-  - finding 2 (high) → spec §15.2 还说 "Wave 0 锁所有 deps（含 backend `requirements.txt`）" 与 README/ledger v1.4 "iOS exact pin + backend H6 residual" 矛盾；Task 1 增 Step 1.5 amend §15.2（加 v1.4 freeze qualifier note：iOS deps `Package.resolved` exact pin / backend ranges Wave 1 B1-B4 PR 各自 == 锁定 / 引用 ledger H6 residual）
-  - finding 3 (medium) → workflow `pull_request.paths` 限 `ios/Contracts/**`，触 `ios/KlineTrainer/` 跳过 Catalyst gate；Task 2 增 Step 2.0 expand workflow `paths` 加 `ios/KlineTrainer/**`；spec §5.3 + plan wording "每个 PR" → "每个 iOS-touching PR (ios/Contracts + ios/KlineTrainer)"
+  - finding 1 (high) → `verify-freeze-tag.sh` python heredoc 抢 stdin；Task 5 Step 5.2 改用 env var
+  - finding 2 (high) → spec §15.2 与 README/ledger 矛盾；Task 1 增 Step 1.5 amend §15.2
+  - finding 3 (medium) → workflow paths 限 `ios/Contracts/**` 不够；Task 2 增 Step 2.0 加 `ios/KlineTrainer/**`
+- **v3**（2026-05-17）：codex R2 2 findings 全修
+  - finding 1 (high) → acceptance §E command block 缺 `set -euo pipefail` fail-open；改加 `set -euo pipefail` + 把每步显式 `|| exit 1` 守卫；ruleset check / 本地 verify / 本地 peeled / push / remote peeled 任一 fail block 全文 abort
+  - finding 2 (medium) → E3 `.object.sha` 对 annotated tag 返回 tag object SHA 不是 target commit（同 spec R4 finding 1 pattern 但 §E3 漏修）→ 改用 peeled 检查 `git ls-remote origin "refs/tags/wave0-frozen-v1.4^{}"`，或 `gh api git/tags/<tag-object-sha>` 再 dereference `.object.sha`
 
 ---
 
@@ -965,20 +968,23 @@ Create `docs/acceptance/2026-05-17-pr9-wave0-freeze.md`：
 
 ## E. Tag 三层 blocking gate（PR 9 merge 之后跑，mirror spec §5.6）
 
-> ⚠️ 本节在 **PR 9 merge 之后**单独跑，不在 PR 9 commits 内。手动执行下面命令链；任一 `exit 1` 失败 = freeze ceremony fail，回查诊断。
+> ⚠️ 本节在 **PR 9 merge 之后**单独跑，不在 PR 9 commits 内。**整段保持 `set -euo pipefail`**（codex plan R2 finding 1 修：v1/v2 缺 strict mode 让 nonzero exit 不阻断后续 tag 创建/push，fail-open）；任一 `exit 1` 失败 = freeze ceremony fail，回查诊断。
 
 ```bash
+set -euo pipefail   # codex plan R2 finding 1 修：必须 strict mode，否则上面任何 exit 1 不阻断后续
+
 # 前置 0：从 GitHub 拿 PR 9 真实 squash commit SHA
 PR_NUMBER=9
 EXPECTED_SHA=$(gh pr view "$PR_NUMBER" --repo agateuu1234-bit/kline-trainer --json mergeCommit --jq '.mergeCommit.oid')
+[ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "null" ] || { echo "FAIL: PR #$PR_NUMBER 未 merge"; exit 1; }
 echo "Expected PR #$PR_NUMBER squash commit: $EXPECTED_SHA"
 git fetch origin main
 LOCAL_MAIN=$(git rev-parse origin/main)
 [ "$LOCAL_MAIN" = "$EXPECTED_SHA" ] || { echo "FAIL: origin/main HEAD ($LOCAL_MAIN) != PR 9 squash SHA ($EXPECTED_SHA)"; exit 1; }
 TAG_COMMIT="$EXPECTED_SHA"
 
-# 层 1 (前置)：protected tag namespace 完整谓词检查
-./scripts/governance/verify-freeze-tag.sh --ref "refs/tags/wave0-frozen-v1.4"
+# 层 1 (前置)：protected tag namespace 完整谓词检查 — 显式 || exit 1（set -e 已防呆，双保险）
+./scripts/governance/verify-freeze-tag.sh --ref "refs/tags/wave0-frozen-v1.4" || { echo "FAIL: 层 1 protected ruleset check"; exit 1; }
 
 # Tag 创建（优先 signed，fallback unsigned）
 if git tag -s wave0-frozen-v1.4 \
@@ -987,22 +993,23 @@ if git tag -s wave0-frozen-v1.4 \
   TAG_SIGNED=1
 else
   echo "WARN: GPG/SSH signing 未配，fallback annotated"
-  git tag -a wave0-frozen-v1.4 -m "Wave 0 契约冻结 v1.4" "$TAG_COMMIT"
+  git tag -a wave0-frozen-v1.4 -m "Wave 0 契约冻结 v1.4" "$TAG_COMMIT" || { echo "FAIL: annotated tag 创建"; exit 1; }
   TAG_SIGNED=0
 fi
 
 # 层 2：本地 signed verify + peeled SHA pre-check
 if [ "$TAG_SIGNED" = "1" ]; then
-  git verify-tag wave0-frozen-v1.4 || { echo "FAIL signed verify"; git tag -d wave0-frozen-v1.4; exit 1; }
+  git verify-tag wave0-frozen-v1.4 || { echo "FAIL signed verify (push 前本地拦截)"; git tag -d wave0-frozen-v1.4; exit 1; }
 fi
 LOCAL_PEELED=$(git rev-parse "wave0-frozen-v1.4^{}")
 [ "$LOCAL_PEELED" = "$EXPECTED_SHA" ] || { echo "FAIL local peeled $LOCAL_PEELED != $EXPECTED_SHA"; git tag -d wave0-frozen-v1.4; exit 1; }
 
-# Push 到 remote
-git push origin wave0-frozen-v1.4
+# Push 到 remote (set -e + 显式 || exit 双保险)
+git push origin wave0-frozen-v1.4 || { echo "FAIL: git push origin wave0-frozen-v1.4"; exit 1; }
 
 # 层 3：remote peeled SHA 反查
 REMOTE_PEELED=$(git ls-remote origin "refs/tags/wave0-frozen-v1.4^{}" | awk '{print $1}')
+[ -n "$REMOTE_PEELED" ] || { echo "FAIL: remote peeled SHA 拿不到"; exit 1; }
 [ "$REMOTE_PEELED" = "$EXPECTED_SHA" ] || { echo "FAIL remote peeled $REMOTE_PEELED != $EXPECTED_SHA"; exit 1; }
 
 echo "GATE PASS: tag wave0-frozen-v1.4 三层验证全过"
@@ -1012,7 +1019,7 @@ echo "GATE PASS: tag wave0-frozen-v1.4 三层验证全过"
 |---|---|---|---|
 | E1 | 跑完上面命令链 | 末尾 `GATE PASS: tag wave0-frozen-v1.4 三层验证全过`；无 FAIL | ☐ |
 | E2 | `git tag -l 'wave0-frozen-*'` | 输出 `wave0-frozen-v1.4` | ☐ |
-| E3 | `gh api repos/agateuu1234-bit/kline-trainer/git/refs/tags/wave0-frozen-v1.4 --jq .object.sha` | 输出 = `$EXPECTED_SHA` | ☐ |
+| E3 | `git ls-remote origin "refs/tags/wave0-frozen-v1.4^{}" \| awk '{print $1}'`（codex plan R2 finding 2 修：annotated tag 用 peeled，不是 `.object.sha` 拿 tag object） | 输出 = `$EXPECTED_SHA`（PR 9 squash commit） | ☐ |
 
 ## F. Scope 边界（不应做的事）
 
