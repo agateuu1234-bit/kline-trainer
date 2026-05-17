@@ -12,8 +12,11 @@
 - **v4**（2026-05-17）：codex R3 1 high finding 全修
   - finding 1 (high) → PR_NUMBER hardcode → auto-detect
 - **v5**（2026-05-17）：plan-stage codex R5 反向 2 findings 全修（同步 spec v9）
-  - finding 1 (high) → Catalyst CI 加 workflow 不等于 required merge gate；Task 3 Step 3.1 ledger residual 表加 H8 行（PR 9 merge 后 admin 在 GitHub Settings → Branches → main 加 `catalyst-build` 为 required status check）；plan acceptance 加 §G admin manual step；ledger residual 计数从 7 改 8
-  - finding 2 (high) → spec §6 还硬码 PR 9（v8 §5.6 修 §6 漏）；本 plan v5 不动 spec（spec v9 已修），但 plan v3 acceptance §E 已是 auto-detect 正确版本，仅 ledger 表 + 数量更新
+  - finding 1 (high) → Catalyst CI 加 workflow 不等于 required merge gate；ledger residual H8 (admin GitHub UI 配置)；ledger 7 → 8
+  - finding 2 (high) → spec §6 还硬码 PR 9（v8 §5.6 修 §6 漏）；plan v3 acceptance §E 已 auto-detect 正确；仅同步 ledger 表
+- **v6**（2026-05-17，**final** — user TTY override 锁定）：plan-stage codex R6 2 fresh findings → 进 H9 + H10 residual queue（**不修，accept-as-residual**；累积 12 codex 轮 / ~28 findings / fractional drilling pattern 确认）
+  - finding 1 (high, H9) → workflow `paths` filter + `catalyst-build` required check 矛盾：docs-only PR 不触发 workflow → check pending → block merge / 否则 advisory；架构性决议（移除 paths 全 PR 跑 / 拆 workflow / conditional skip）超 PR 9 freeze ceremony scope，进 H9 residual + 配套 H8（admin 配 required check 时一并决议方案）
+  - finding 2 (high, H10) → acceptance §G 缺 machine-checkable verification (`gh api .../branches/main/protection` 检 `required_status_checks.contexts` 含 `catalyst-build`)；进 H10 residual + 配套 H8（admin 配置后跑 verification one-liner）
 
 ---
 
@@ -536,7 +539,7 @@ Create `docs/governance/2026-05-17-wave0-signoff-ledger.md` 内容：
 - ⚠️ **未签**（codex R4 finding 3 修：future scope 不能签 ✅）：3-5 个样本训练组数据落地 → 移入 **residual H7**（Wave 1 B1/B2 PR 内验证 3-5 个样本数据正确性 + ledger 回填）
 - **签字时间**：2026-05-17
 
-## 已知 residuals（不阻塞 freeze；8 项 H1-H8）
+## 已知 residuals（不阻塞 freeze；10 项 H1-H10）
 
 | ID | residual | 来源 | 处理路径 |
 |---|---|---|---|
@@ -544,10 +547,12 @@ Create `docs/governance/2026-05-17-wave0-signoff-ledger.md` 内容：
 | H2 | E2 PositionManager 三连 abort | PR #36 closed | Wave 1 启动前 spec §4.2 重审窗口 |
 | H3 | Wave 1 内部 plan 排序 | v6 outline 仅 Wave 0 | PR 9 merge 后 brainstorming + writing-plans 排细顺位 |
 | H4 | M0.3 multi-file split 历史 over-claim | PR F1 R7+R8 | Spec §F1 wording + §M0.3 inventory 表（PR 9 子项 2） |
-| H5 | Catalyst CI 持续守护 | PR #51 R7 G3 | `.github/workflows` Catalyst job（PR 9 子项 3）+ **配套 H8 admin 在 branch protection 加 `catalyst-build` required status check** |
+| H5 | Catalyst CI 持续守护 | PR #51 R7 G3 | `.github/workflows` Catalyst job（PR 9 子项 3）+ **配套 H8 + H9 + H10 整体闭合 required gate** |
 | H6 | backend deps exact pin | spec §15.2 暂用 ranges | Wave 1 B1-B4 PR 各自落 `backend/requirements.txt == X.Y.Z` + `docker-compose.yml` image digest pin |
 | H7 | sample 训练组数据 | 数据代表 sign-off 第 3 项 future scope | Wave 1 B1/B2 PR 内真生成 3-5 个样本 + 数据正确性 ledger 回填 |
-| **H8** | Catalyst CI required merge gate enforcement（v9 plan R5 finding 1 修） | spec v9 §6.G | PR 9 merge 后 admin 在 GitHub repo Settings → Branches → main → Required status checks 加 `catalyst-build`（GitHub UI 手动步骤，非代码改动）；H5 完全闭合需 H8 配套 |
+| H8 | Catalyst CI required merge gate enforcement | spec v9 §6.G | PR 9 merge 后 admin 在 GitHub repo Settings → Branches → main → Required status checks 加 `catalyst-build`；GitHub UI 手动步骤 |
+| **H9** | workflow `paths` filter 与 required check 架构性矛盾（v6 plan R6 finding 1 修） | docs-only PR 不触发 workflow → required check 永 pending block merge | 独立后续 governance PR 决议：(A) 移除 paths filter 全 PR 跑 catalyst-build（每 PR ~5min macos-15 cost）；(B) 拆 catalyst-build 独立 workflow 文件 + 全 trigger；(C) conditional skip 加 always-success 短路 step。配套 H8 admin 配置时一起做架构选型 |
+| **H10** | acceptance §G 缺 machine-checkable required check 验证（v6 plan R6 finding 2 修） | plan acceptance §G 只检文件存在 | PR 9 merge 后 admin 配 required check + 跑 `gh api repos/agateuu1234-bit/kline-trainer/branches/main/protection --jq '.required_status_checks.contexts'` 断言含 `catalyst-build`；ledger 回填 verification 输出 |
 
 ## 依赖版本锁定（§15.2 v1.4 freeze）
 
@@ -961,7 +966,7 @@ Create `docs/acceptance/2026-05-17-pr9-wave0-freeze.md`：
 
 | # | action | expected | pass_fail |
 |---|---|---|---|
-| C1 | `grep -c "H[1-8]" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 至少 16（H1-H8 表头 + 8 行） | ☐ |
+| C1 | `grep -c "H\\([1-9]\\|10\\)" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 至少 20（H1-H10 表头 + 10 行） | ☐ |
 | C2 | `grep "## .*sign-off" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 输出 3 行：后端代表 / iOS 代表 / 数据代表 | ☐ |
 | C3 | `grep "Provenance" docs/governance/2026-05-17-wave0-signoff-ledger.md` | ≥ 1（codex R1 finding 1 修订标记） | ☐ |
 | C4 | `grep -F "(PR 9 squash commit SHA" docs/governance/2026-05-17-wave0-signoff-ledger.md` | 空输出（ledger 不含 SHA 占位符；codex R1 finding 1 修） | ☐ |
