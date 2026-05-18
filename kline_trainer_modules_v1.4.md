@@ -585,6 +585,17 @@ struct AppSettings: Equatable, Sendable {
 }
 ```
 
+**M0.3 类型 inventory（v1.4 freeze）**：
+
+| 文件 | 类型 | Codable | 用途 |
+|---|---|---|---|
+| Models.swift | 9 enum: Period / TradeDirection / PositionTier / TrainingMode / DrawingToolType / DisplayMode / PanelId / SwipeDirection / PeriodDirection | 5/9 (Period / TradeDirection / PositionTier / DrawingToolType / DisplayMode 是 Codable) | 核心枚举 |
+| Models.swift | 7 struct: KLineCandle / TrainingSetMeta / FeeSnapshot / TradeOperation / DrawingAnchor / DrawingObject / TradeMarker | 6/7 (TradeMarker NOT Codable — UI overlay 运行期专用) | 核心数据 |
+| AppState.swift | 5 struct: TrainingRecord / DrawdownAccumulator / PendingTraining / TrainingSetFile / AppSettings | 3/5 (TrainingRecord / DrawdownAccumulator / PendingTraining 是 Codable；TrainingSetFile / AppSettings 非 Codable — UI/cache state 运行期专用) | 状态/持仓累计/UI 配置 |
+| RESTDTOs.swift | 2 struct: LeaseResponse / TrainingSetMetaItem | 2/2 | REST 边界 DTO |
+
+**合计 16 Codable（5 enum + 11 struct）+ 7 非 Codable（4 enum + 3 struct: TradeMarker / TrainingSetFile / AppSettings）= 23 M0.3 类型。** F1 模块 scope 仅 `Models.swift` 11 Codable；`AppState.swift` 5 struct 与 `RESTDTOs.swift` 2 struct 分别归 §C1b reducer / §B3 REST API 模块责任。
+
 ### M0.4 错误处理策略（v1.2 重写翻译规则）
 
 **核心原则**（v1.2 重写）：**私有错误在本模块边界内转 AppError，调用方只消费 AppError**。v1.1 的"P2 转换 P1 的私有错误"属职责错配。
@@ -810,7 +821,7 @@ async def confirm(id: int, lease_id: UUID):
 
 ### F1 数据模型模块 `Models/`
 
-- **职责**：承载 M0.3 所有类型（含 `Equatable / Codable / CodingKeys`）
+- **职责**：承载 M0.3 **核心** 数据类型（`Models.swift` 内 9 enum + 7 struct = 11 Codable 实体 + 5 非 Codable 类型）；**不含**跨文件 split 的 `AppState.swift` / `RESTDTOs.swift` 中的 M0.3 类型（见 §M0.3 inventory 表）。
 - **依赖**：M0.3、M0.4（AppError）
 - **验收**：Codable round-trip 测试（snake_case JSON ↔ camelCase struct）；所有类型 `Equatable`；Reason 枚举 `Error` conformance 编译通过
 
@@ -1164,7 +1175,11 @@ enum ChartAction: Equatable, Sendable {
   - 进 session A drawing(snap.baseRev=0) → tradeTriggered（r=1，mode=autoTracking）→ activateDrawing + setDrawingSnapshot(baseRev=1) 进 session B drawing(snap.baseRev=1)
   - 模拟 session A 延迟 action：派发 `drawingCommitted(baseRevision: 0)` → 断言 `.none` + mode 仍为 drawing（session B 未被错误切出）
   - 同上 cancel：派发 `drawingCancelled(baseRevision: 0)` → `.none` + mode 仍为 drawing
-- **Deceleration stop 契约测试**（闸门 #4 F3 新增）：`panEnded(velocity:) → .startDeceleration(v)` effect handler 启动 animator；后续 activateDrawing → `.requestDrawingSnapshotAfterStoppingAnimator` effect；验证 handler 必须**先**调用 `animator.stop()` 再计算 range（集成测试：模拟延迟 animator 回调，验证 drawing 退出后无 `offsetApplied` 到达 reducer）
+- **Deceleration stop 契约测试**（闸门 #4 F3 修订 v1.4 — **Wave 0 仅 reducer 契约测试；production handler 集成测试移 Wave 1**）：
+  - **Wave 0 验收**（PR #50 已落）：reducer 派发 `panEnded(velocity:) → .startDeceleration(v)` effect + `activateDrawing → .requestDrawingSnapshotAfterStoppingAnimator` effect 的契约测试（13 个测试覆盖 happy + cross-session）
+  - **Wave 1 验收**（C2 DecelerationAnimator + C8 ChartContainerView 落地时同 PR 内）：production handler 集成测试 — 模拟延迟 animator 回调，验证 handler 必须**先**调用 `animator.stop()` 再计算 range；drawing 退出后无 `offsetApplied` 到达 reducer
+
+  **理由**：production handler 涉及 C2/C8/E5 三模块 orchestration，非 Wave 0 单模块 scope；reducer 契约测试已覆盖契约面，handler 集成测试在生产代码落地的同 PR 验证更准。
 - `drawingCommitted/drawingCancelled` 非法转换 assertion 测试：autoTracking / freeScrolling 上派发 → assertionFailure
 - **`drawingCommitted/drawingCancelled` 双分支测试**（闸门 #6 修订，与新 guard 一致）：
   - 匹配分支：drawing(snap.baseRev=r) 模式下派发 `drawingCommitted(baseRevision: r)` / `drawingCancelled(baseRevision: r)` → 断言 mode=autoTracking + `.none`
@@ -2466,6 +2481,12 @@ v1.2 契约层含大量代码片段，尤其 §六 C1 的类型设计在 v1.1→
 
 ### 15.2 三方依赖版本锁定
 
+**v1.4 freeze 修订（PR 9 ceremony，2026-05-17）**：本节列出的是 Wave 0 spec 推荐版本范围（`6.x 最新稳定 (≥ 6.29)` 等）。**v1.4 实际冻结状态**：
+
+- **iOS 依赖 exact pin（已在 `Package.resolved` 锁定）**：GRDB.swift `6.29.3` / ZipFoundation `0.9.20`。 Wave 1 起 `Package.resolved` 视为锁定 source-of-truth，变更走 RFC + ledger。
+- **Backend 依赖 ranges（v1.4 暂不 exact pin）**：FastAPI / Uvicorn / APScheduler / pandas / pandas-ta / asyncpg / PostgreSQL 暂用本节 ranges；Wave 1 B1-B4 PR 各自落 `backend/requirements.txt == X.Y.Z` 精确版本 + `docker-compose.yml` image digest pin 时同步锁定（见 `docs/governance/2026-05-17-wave0-signoff-ledger.md` residual H6）。
+- **README v1.4 + ledger** 互为补充：README 列实际锁定状态；本节列 spec 推荐范围 + v1.4 freeze 真锁定状态摘要。
+
 Wave 0 签字同步锁定以下版本，**Wave 1 起不得修改**（除非安全补丁 + 三方同意）：
 
 | 依赖 | 用途 | 建议版本 | 锁定位置 |
@@ -2515,8 +2536,8 @@ Wave 0 全部交付物收齐后（见 §十一 Checklist），由以下 3 方签
 
 任何一方拒签 → **回契约层修订 → 重新编译验证 → 重新签字**。签字完成后：
 
-1. 项目 README 登记 v1.2 版本号 + 签字时间 + 依赖版本表
-2. Git 打 tag `wave0-frozen-v1.2`
+1. 项目 README 登记 v1.4 版本号 + 签字时间 + 依赖版本表（PR 9 freeze ceremony v1.4 修订；v1.2 历史 wording 已升级）
+2. Git 打 tag `wave0-frozen-v1.4`（PR 9 §5.6 三层 blocking gate；scripts/governance/verify-freeze-tag.sh）
 3. 三方邮件/群组留存确认记录
 4. Wave 1 开工
 

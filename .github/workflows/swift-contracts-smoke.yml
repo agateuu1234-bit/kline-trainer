@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'ios/Contracts/**'
+      - 'ios/KlineTrainer/**'
       - '.github/workflows/swift-contracts-smoke.yml'
   push:
     branches: [main]
@@ -36,3 +37,38 @@ jobs:
       - name: Run swift test
         working-directory: ios/Contracts
         run: swift test
+
+  catalyst-build:
+    name: Mac Catalyst build-for-testing on macos-15
+    runs-on: macos-15
+    timeout-minutes: 15
+    # 依赖 runner 默认 Xcode（macos-15 image 预装 Xcode 16）提供 xcodebuild。
+    # 不硬编码 /Applications/Xcode_16.app 路径（镜像 swift-test job 已有的 codex Plan 1c R2
+    # finding 修订 pattern；GHA image 刷新时路径可能变 → fail-fast 给清晰诊断）。
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Assert Xcode >= 16
+        run: |
+          xcodebuild -version
+          XCODE_VER=$(xcodebuild -version | head -1 | awk '{print $2}')
+          MAJOR=$(echo "$XCODE_VER" | cut -d. -f1)
+          if [[ -z "$XCODE_VER" || "$MAJOR" -lt 16 ]]; then
+            echo "FAIL: Xcode 16+ required (Swift 6.0 + Catalyst destination)；runner provides $XCODE_VER"
+            echo "Available Xcode installs:"
+            ls -la /Applications | grep -i xcode || true
+            exit 1
+          fi
+          echo "Xcode $XCODE_VER OK"
+      - name: Mac Catalyst build-for-testing
+        working-directory: ios/Contracts
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -scheme KlineTrainerContracts \
+            -destination 'platform=macOS,variant=Mac Catalyst' \
+            -derivedDataPath /tmp/derived 2>&1 | tee /tmp/catalyst-build.log
+      - name: Gate — TEST BUILD SUCCEEDED + no error/warning
+        run: |
+          grep -F "** TEST BUILD SUCCEEDED **" /tmp/catalyst-build.log || { echo "BUILD SUCCEEDED 缺失"; exit 1; }
+          ! grep -E "(^|[[:space:]])(error|warning):" /tmp/catalyst-build.log || { echo "error/warning 触发 gate"; exit 1; }
+          echo "GATE PASS: §15.1 #3 闸门关闭（Catalyst CI 持续守护）"
