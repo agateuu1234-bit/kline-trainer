@@ -36,9 +36,9 @@
 | H5 | Catalyst CI 持续守护 | PR #51 R7 G3 | `.github/workflows` Catalyst job（PR 9 子项 3）+ 配套 H8 + H9 + H10 整体闭合 required gate |
 | H6 | backend deps exact pin | spec §15.2 暂用 ranges | Wave 1 B1-B4 PR 各自落 `backend/requirements.txt == X.Y.Z` + `docker-compose.yml` image digest pin |
 | H7 | sample 训练组数据 | 数据代表 sign-off 第 3 项 future scope | Wave 1 B1/B2 PR 内真生成 3-5 个样本 + 数据正确性 ledger 回填 |
-| H8 | Catalyst CI required merge gate enforcement | spec v9 §6.G | 顺位 1c admin 在 GitHub repo Settings → Branches → main → Required status checks 加 context `Mac Catalyst build-for-testing on macos-15`（= job `name`，**非** job key `catalyst-build`；顺位 1a 拆 workflow 后 context 仍为此名）；GitHub UI 手动步骤 |
+| H8 | Catalyst CI required merge gate enforcement | spec v9 §6.G | 顺位 1c admin 在 GitHub repo Settings → Branches → main → Required status checks 加 context `Mac Catalyst build-for-testing on macos-15`（= job `name`，**非** job key `catalyst-build`；顺位 1a 拆 workflow 后 context 仍为此名），并**绑定来源为 GitHub Actions app**（UI 选 source = GitHub Actions / Ruleset 设 integration_id=15368），**不可留 "any source"**——否则任意 integration 可写同名 status 伪造满足 gate（trust-boundary spoof）；GitHub UI 手动步骤 |
 | H9 | workflow `paths` filter 与 required check 架构性矛盾 | plan v6 codex R6 finding 1 | ✅ 顺位 1a 决议（option B）：catalyst-build 拆至独立 always-trigger workflow `.github/workflows/catalyst-build.yml`（无 paths filter，每 PR 必跑必报）；job name 保持 `Mac Catalyst build-for-testing on macos-15` 不变以保留 required check context。required check 配置 + machine-checkable 验证（H8/H10）仍在顺位 1c |
-| H10 | acceptance §G 缺 machine-checkable required check 验证 | plan v6 codex R6 finding 2 | 顺位 1c admin 配 required check + 跑 `gh api repos/agateuu1234-bit/kline-trainer/branches/main/protection --jq '.required_status_checks.contexts'` 断言含 `Mac Catalyst build-for-testing on macos-15`（job name context，**非** `catalyst-build`）；ledger 回填 verification 输出 |
+| H10 | acceptance §G 缺 machine-checkable required check 验证 | plan v6 codex R6 finding 2 | 顺位 1c admin 配 required check + 跑 `gh api repos/agateuu1234-bit/kline-trainer/branches/main/protection --jq '.required_status_checks.checks[] | select(.context=="Mac Catalyst build-for-testing on macos-15")'` 断言该 entry 存在**且 `.app_id==15368`（GitHub Actions app，防伪造来源）**（job name context，**非** `catalyst-build`；legacy `.contexts` 数组不绑来源、source-agnostic，不可作唯一依据）；ledger 回填 verification 输出 |
 
 ## 依赖版本锁定（§15.2 v1.4 freeze）
 
