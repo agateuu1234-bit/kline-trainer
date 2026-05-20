@@ -75,6 +75,8 @@ assert_and_evidence() {
 
 # 保留不变量检查（R6-F2）：reread 是否保留 payload 的全部保护元素（容许额外追加）。
 # 退出码：0=保留齐全 / 1=有缺失（保护流失/未生效）/ 2=观测失败（JSON 解析）。按集合比，稳健于 GitHub 服务端规范化/排序。
+# 非 rsc 规则：desired 每条完整对象必须在 actual（R7-F3：catch param 漂移/删除；容许追加）。
+# rsc policy 字段（strict_required_status_checks_policy / do_not_enforce_on_create）精确保留（R7-F3）。
 preservation_ok() { # args: desired-payload.json reread-raw.json
   python3 - "$1" "$2" <<'PY'
 import json, sys
@@ -83,20 +85,25 @@ try:
     actual = json.loads(open(sys.argv[2]).read())
 except Exception:
     sys.exit(2)
+def rsc(d):
+    return next((x for x in (d.get('rules') or []) if x.get('type') == 'required_status_checks'), {})
 def checks(d):
-    r = next((x for x in (d.get('rules') or []) if x.get('type') == 'required_status_checks'), None)
     return {(c.get('context'), c.get('integration_id'))
-            for c in ((r or {}).get('parameters', {}).get('required_status_checks') or [])}
+            for c in ((rsc(d).get('parameters') or {}).get('required_status_checks') or [])}
+def nonrsc(d):  # 非 rsc 规则整对象 canonical：catch param 削弱/删除，容许额外追加
+    return {json.dumps(r, sort_keys=True) for r in (d.get('rules') or []) if r.get('type') != 'required_status_checks'}
 def bypass(d):
     return {(b.get('actor_id'), b.get('actor_type'), b.get('bypass_mode')) for b in (d.get('bypass_actors') or [])}
-# 注：conditions 用精确相等。若 GitHub PUT round-trip 规范化 conditions 表示（如 [] vs 省略键），
-# 可能保守误报"需人工"（失败方向安全：不会静默削弱保护）。1c 真正 apply（非 no-op skip）前若遇此，
-# 以 rollback-payload.json 为权威还原源 + 人工核对。见 plan grounding #13 I1 note。
 # 标量 + conditions 不可变
 for k in ('name', 'target', 'enforcement', 'conditions'):
     if actual.get(k) != desired.get(k): sys.exit(1)
-# rule 类型 / required checks：desired ⊆ actual（容许额外追加；非 rsc 规则参数级保留见 plan grounding #13 R7-F3 residual）
-if not {x.get('type') for x in (desired.get('rules') or [])} <= {x.get('type') for x in (actual.get('rules') or [])}: sys.exit(1)
+# 非 rsc 规则：desired 每条完整对象必须在 actual（R7-F3：catch param 漂移/删除；容许追加）
+if not nonrsc(desired) <= nonrsc(actual): sys.exit(1)
+# rsc policy 字段精确保留（R7-F3）
+dp = rsc(desired).get('parameters') or {}; ap = rsc(actual).get('parameters') or {}
+for pf in ('strict_required_status_checks_policy', 'do_not_enforce_on_create'):
+    if dp.get(pf) != ap.get(pf): sys.exit(1)
+# required checks：desired ⊆ actual（容许额外 check）
 if not checks(desired) <= checks(actual): sys.exit(1)
 # bypass actors：**精确相等**（R7-F1：新增任何 bypass actor 都会架空 required check，不能容许追加）
 if bypass(desired) != bypass(actual): sys.exit(1)

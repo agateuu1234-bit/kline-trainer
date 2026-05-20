@@ -49,11 +49,12 @@ ledger: docs/governance/2026-05-17-wave0-signoff-ledger.md（H8 / H10）
 13. **codex plan-stage R7 三个 finding 的处理 + plan-stage codex 收口**（user 选项 1：第 7 轮再冒新 high → 修干净的、residual 脆弱的，plan-stage codex 在此收口；实施后 branch-diff codex 为第二道背靠）：
    - **preservation 容许新增 bypass actor（R7-F1，high）→ 修**：新增任何 bypass actor 都会架空 required check（trust-boundary 洞）。`preservation_ok` 的 bypass 由 `<=` 改 **`!=` 精确相等**。加 `ruleset-extra-bypass.json` fixture + 测试 6d（多 bypass→人工 exit 1）。
    - **conditions 漏通配排除 main（R7-F2，high）→ 修**：`_binds_main` 只认精确 token，漏 `refs/heads/*` / `*` 等通配 exclude。改用 **GitHub 兼容通配语义**（`fnmatch` 对 `refs/heads/main`+`main`，外加 `~DEFAULT_BRANCH`/`~ALL`）判 include/exclude 是否命中 main。加 `ruleset-wildcard-exclude.json` fixture + verifier 测试。
-   - **preservation 非 rsc 规则只比 type、漏 param 削弱（R7-F3，medium）→ residual**：codex 建议"整规则对象 canonical 比对"，但 GitHub GET 会回填默认 param（如 pull_request 的默认字段），整对象 exact 比对会把**正常 apply 误判为保护流失**（false-negative）；且单人内网仓 1c 跑是 no-op skip、并发削弱 param 极度假设。**接受为 residual**：保留 rule-type 级保留检查（已 catch 整条规则删除/类型变化，测试 6c）；param 级深度保留不实现（理由：GitHub 默认 param 回填导致 false-negative + 单管理员近乎空操作 + per `feedback_governance_budget_cap` 不做预防性过度工程）。owner @agateuu1234-bit；rollback：N/A（不改 prod 行为）；follow-up：若将来引入 param 化的 pull_request 规则且多管理员并发，再评估。
+   - **preservation 非 rsc 规则只比 type、漏 param 削弱（R7-F3，medium）→ 已实施**：branch-diff codex R3 重新提出此 finding；user 决策关闭此 gap（conservative-fail 方向可接受，与 I1 conditions 精确相等同类）。实施方式：非 rsc 规则改为**整对象 canonical 比对**（`json.dumps(sort_keys=True)` 集合子集，catch param 漂移/删除，容许追加）；rsc 的 `strict_required_status_checks_policy` / `do_not_enforce_on_create` policy 字段**精确保留**。新增 fixture `ruleset-weakened-policy.json`（R7-F3 negative：`do_not_enforce_on_create=true` 削弱）+ 测试 6e（param 削弱 → 人工介入 exit 1）。6a（并发合法追加 extra check，同 non-rsc rules + same policy）仍 exit 0 确认无 false-negative。
    - **最终 code-review I1（非 blocker）**：preservation 的 conditions 精确相等理论上可能因 GitHub round-trip 规范化保守误报；失败方向安全（不静默削弱）；1c real-apply 前再评估，rollback-payload.json 为权威还原源。
 14. **branch-diff codex（实施后第二道）finding**：
    - **assert 不查 bypass_actors（high）→ 修**：preflight/assert 原本只查 name/target/enforcement/conditions + Catalyst check，未查 bypass——预存的非 admin bypass actor 能绕过 required check 却仍输出 GATE PASS（假 H10 证据）。修：preflight/assert 加 **admin-only bypass 校验**（镜像 `verify-freeze-tag.sh`：`OrganizationAdmin` 或 `RepositoryRole`+`actor_id=5`），含非 admin → fail-closed exit 1。加 verifier negative（assert/preflight extra-bypass→1）+ runbook 8c（snapshot 非 admin bypass → preflight fail-closed 无 PUT）。
    - **run-all 在 codex sandbox exit 1 = 误报**：codex 的 `/bin/zsh -lc` shell 缺 pytest；fresh worktree at HEAD 复现为 `pytest 8.4.2` 在 + `ALL GREEN` exit 0。非代码 bug；用户/CI 环境 pytest 在。
+   - **R7-F3 param 削弱 branch-diff R3 重提 → 实施**：branch-diff codex R3 重新提出 R7-F3（preservation 非 rsc 规则整对象 + rsc policy 字段精确）；user 决策由 residual 改为实施（conservative-fail 方向可接受）。非 rsc 规则整对象 canonical 比对 + rsc policy exact。新增 `ruleset-weakened-policy.json` fixture + 测试 6e。6a 验证无 false-negative。residual 条目在 grounding #13 更新为已实施。
 
 ---
 
@@ -166,6 +167,8 @@ Create `tests/scripts/governance/fixtures/ruleset-exclude-main.json`（**conditi
 Create `tests/scripts/governance/fixtures/ruleset-wildcard-exclude.json`（**通配排除 main** negative：基于 `ruleset-with-check.json` 但 `"conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": ["refs/heads/*"]}}`；通配 exclude 命中 main，verify 须拒——R7-F2）。
 
 Create `tests/scripts/governance/fixtures/ruleset-extra-bypass.json`（**多出 bypass actor**：基于 `ruleset-with-check.json` 但 `bypass_actors` 多一条非 admin（如 `{"actor_id": 99, "actor_type": "Team", "bypass_mode": "always"}`）；模拟 PUT 后被加了能架空 gate 的 bypass——preservation 须判 bypass 精确相等→失败→人工介入——R7-F1）。
+
+Create `tests/scripts/governance/fixtures/ruleset-weakened-policy.json`（**R7-F3 negative：rsc policy 字段被削弱**：基于 `ruleset-with-check.json` 但 `required_status_checks` 规则的 `parameters.do_not_enforce_on_create` 改为 `true`（从默认 `false` 削弱）；其余全部相同；preservation_ok 须判 rsc policy 字段漂移→失败→人工介入——R7-F3）。
 
 Create `tests/scripts/governance/fixtures/ruleset-missing-rule.json`（**保护规则缺失**：基于 `ruleset-with-check.json` 但 `rules` 删掉 `deletion`（Catalyst 仍在位+绑 app）；模拟 PUT 后别的保护被一起改没——post_put_classify 状态 != 目标 payload → 人工介入不算成功——R6-F2）。`rules` 仅保留：
 
@@ -937,6 +940,16 @@ check "多 bypass actor → 1（人工介入）" 1 "$rc"
 put_count=$(grep -c "PUT" "$log" || true)
 [ "$put_count" -eq 1 ] && echo "PASS: 新增 bypass 未被当成功 + 未自动 rollback（PUT 恰 1）" || { echo "FAIL: PUT=$put_count"; fail=1; }
 
+# 6e) 规则 param 削弱（PUT 后 re-read rsc policy do_not_enforce_on_create 翻转，N3）→ 不算成功 → 人工 → 1（R7-F3）
+d=$(newdir); log="$d/calls.log"
+set +e
+GH_CMD="$MOCK" MOCK_FIXTURE="$WITHOUT" MOCK_FIXTURE_N3="$FIX/ruleset-weakened-policy.json" MOCK_LOG="$log" \
+  "$R" --apply --artifact-dir "$d" >/dev/null 2>&1; rc=$?
+set -e
+check "param 削弱 → 1（人工介入）" 1 "$rc"
+put_count=$(grep -c "PUT" "$log" || true)
+[ "$put_count" -eq 1 ] && echo "PASS: param 削弱未被当成功 + 未自动 rollback（PUT 恰 1）" || { echo "FAIL: PUT=$put_count"; fail=1; }
+
 # 6b) 未知/部分状态（PUT 后 re-read 无 Catalyst 且 != 原状态，N3）→ 人工介入不自动 rollback → 1（R4-F1）
 d=$(newdir); log="$d/calls.log"
 set +e
@@ -1109,6 +1122,8 @@ assert_and_evidence() {
 
 # 保留不变量检查（R6-F2）：reread 是否保留 payload 的全部保护元素（容许额外追加）。
 # 退出码：0=保留齐全 / 1=有缺失（保护流失/未生效）/ 2=观测失败（JSON 解析）。按集合比，稳健于 GitHub 服务端规范化/排序。
+# 非 rsc 规则：desired 每条完整对象必须在 actual（R7-F3：catch param 漂移/删除；容许追加）。
+# rsc policy 字段（strict_required_status_checks_policy / do_not_enforce_on_create）精确保留（R7-F3）。
 preservation_ok() { # args: desired-payload.json reread-raw.json
   python3 - "$1" "$2" <<'PY'
 import json, sys
@@ -1117,20 +1132,25 @@ try:
     actual = json.loads(open(sys.argv[2]).read())
 except Exception:
     sys.exit(2)
+def rsc(d):
+    return next((x for x in (d.get('rules') or []) if x.get('type') == 'required_status_checks'), {})
 def checks(d):
-    r = next((x for x in (d.get('rules') or []) if x.get('type') == 'required_status_checks'), None)
     return {(c.get('context'), c.get('integration_id'))
-            for c in ((r or {}).get('parameters', {}).get('required_status_checks') or [])}
+            for c in ((rsc(d).get('parameters') or {}).get('required_status_checks') or [])}
+def nonrsc(d):  # 非 rsc 规则整对象 canonical：catch param 削弱/删除，容许额外追加
+    return {json.dumps(r, sort_keys=True) for r in (d.get('rules') or []) if r.get('type') != 'required_status_checks'}
 def bypass(d):
     return {(b.get('actor_id'), b.get('actor_type'), b.get('bypass_mode')) for b in (d.get('bypass_actors') or [])}
-# 注：conditions 用精确相等。若 GitHub PUT round-trip 规范化 conditions 表示（如 [] vs 省略键），
-# 可能保守误报"需人工"（失败方向安全：不会静默削弱保护）。1c 真正 apply（非 no-op skip）前若遇此，
-# 以 rollback-payload.json 为权威还原源 + 人工核对。见 plan grounding #13 I1 note。
 # 标量 + conditions 不可变
 for k in ('name', 'target', 'enforcement', 'conditions'):
     if actual.get(k) != desired.get(k): sys.exit(1)
-# rule 类型 / required checks：desired ⊆ actual（容许额外追加；非 rsc 规则参数级保留见 plan grounding #13 R7-F3 residual）
-if not {x.get('type') for x in (desired.get('rules') or [])} <= {x.get('type') for x in (actual.get('rules') or [])}: sys.exit(1)
+# 非 rsc 规则：desired 每条完整对象必须在 actual（R7-F3：catch param 漂移/删除；容许追加）
+if not nonrsc(desired) <= nonrsc(actual): sys.exit(1)
+# rsc policy 字段精确保留（R7-F3）
+dp = rsc(desired).get('parameters') or {}; ap = rsc(actual).get('parameters') or {}
+for pf in ('strict_required_status_checks_policy', 'do_not_enforce_on_create'):
+    if dp.get(pf) != ap.get(pf): sys.exit(1)
+# required checks：desired ⊆ actual（容许额外 check）
 if not checks(desired) <= checks(actual): sys.exit(1)
 # bypass actors：**精确相等**（R7-F1：新增任何 bypass actor 都会架空 required check，不能容许追加）
 if bypass(desired) != bypass(actual): sys.exit(1)

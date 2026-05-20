@@ -107,6 +107,16 @@ check "多 bypass actor → 1（人工介入）" 1 "$rc"
 put_count=$(grep -c "PUT" "$log" || true)
 [ "$put_count" -eq 1 ] && echo "PASS: 新增 bypass 未被当成功 + 未自动 rollback（PUT 恰 1）" || { echo "FAIL: PUT=$put_count"; fail=1; }
 
+# 6e) 规则 param 削弱（PUT 后 re-read rsc policy do_not_enforce_on_create 翻转，N3）→ 不算成功 → 人工 → 1（R7-F3）
+d=$(newdir); log="$d/calls.log"
+set +e
+GH_CMD="$MOCK" MOCK_FIXTURE="$WITHOUT" MOCK_FIXTURE_N3="$FIX/ruleset-weakened-policy.json" MOCK_LOG="$log" \
+  "$R" --apply --artifact-dir "$d" >/dev/null 2>&1; rc=$?
+set -e
+check "param 削弱 → 1（人工介入）" 1 "$rc"
+put_count=$(grep -c "PUT" "$log" || true)
+[ "$put_count" -eq 1 ] && echo "PASS: param 削弱未被当成功 + 未自动 rollback（PUT 恰 1）" || { echo "FAIL: PUT=$put_count"; fail=1; }
+
 # 6b) 未知/部分状态（PUT 后 re-read 无 Catalyst 且 != 原状态，N3）→ 人工介入不自动 rollback → 1（R4-F1）
 d=$(newdir); log="$d/calls.log"
 set +e
