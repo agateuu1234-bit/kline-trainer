@@ -1,0 +1,27 @@
+{
+  "id": 15660830,
+  "node_id": "RRS_lACfake",
+  "name": "main",
+  "target": "branch",
+  "source_type": "Repository",
+  "source": "agateuu1234-bit/kline-trainer",
+  "enforcement": "active",
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-05-01T00:00:00Z",
+  "_links": {"self": {"href": "https://api.github.com/x"}},
+  "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+  "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+  "rules": [
+    {"type": "deletion"},
+    {"type": "non_fast_forward"},
+    {"type": "pull_request"},
+    {"type": "required_status_checks", "parameters": {
+      "strict_required_status_checks_policy": false,
+      "do_not_enforce_on_create": false,
+      "required_status_checks": [
+        {"context": "swift-contracts-smoke", "integration_id": 15368},
+        {"context": "extra-smoke", "integration_id": 15368}
+      ]
+    }}
+  ]
+}
