@@ -68,10 +68,11 @@ def test_fixpoint():
     second = mod.build_payload(json.loads(mod.serialize(first)))
     assert mod.serialize(first) == mod.serialize(second)
 
-# redaction：输出不含任何 token 样式字符串（builder 输入无 secret，断言守恒）
-def test_no_token_in_output():
-    out = mod.serialize(mod.build_payload(_ruleset("ruleset-with-check.json")))
-    assert "ghp_" not in out and "github_pat_" not in out
+# builder 不 redact 合法的 token 样 context 名（R2-F4：源不污染）
+def test_builder_preserves_tokenish_context():
+    out = mod.serialize(mod.build_payload(_ruleset("ruleset-tokenish.json")))
+    assert "ghp_lookslikeatoken_ctx" in out
+    assert "github_pat_" not in out
 
 # fail-closed：无 rsc 规则 → ValueError
 def test_fail_closed_no_rsc_rule():

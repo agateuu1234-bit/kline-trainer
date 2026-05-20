@@ -343,10 +343,11 @@ def test_fixpoint():
     second = mod.build_payload(json.loads(mod.serialize(first)))
     assert mod.serialize(first) == mod.serialize(second)
 
-# redaction：输出不含任何 token 样式字符串（builder 输入无 secret，断言守恒）
-def test_no_token_in_output():
-    out = mod.serialize(mod.build_payload(_ruleset("ruleset-with-check.json")))
-    assert "ghp_" not in out and "github_pat_" not in out
+# builder 不 redact 合法的 token 样 context 名（R2-F4：源不污染）
+def test_builder_preserves_tokenish_context():
+    out = mod.serialize(mod.build_payload(_ruleset("ruleset-tokenish.json")))
+    assert "ghp_lookslikeatoken_ctx" in out
+    assert "github_pat_" not in out
 
 # fail-closed：无 rsc 规则 → ValueError
 def test_fail_closed_no_rsc_rule():
@@ -495,7 +496,7 @@ if __name__ == "__main__":
 - [ ] **Step 4：跑测试确认通过**
 
 Run: `cd "$(git rev-parse --show-toplevel)" && python3 -m pytest tests/scripts/governance/test_build_payload.py -q`
-Expected: PASS（14 passed）
+Expected: PASS（13 passed）
 
 - [ ] **Step 5：commit**
 
@@ -756,8 +757,10 @@ print("diff（payload vs 当前 required_status_checks）:")
 print("\n".join(changes) if changes else "  （无变更——已是 desired 状态，幂等 no-op）")
 PY
 )
+    PY_EXIT=$?
     set -e
     echo "$RESULT"
+    [ "$PY_EXIT" -eq 0 ] || { echo "FAIL: diff 计算失败（观测失败）" >&2; exit 3; }
     exit 0
     ;;
 esac
@@ -1109,8 +1112,10 @@ post_put_classify() {
   if [ "$pc" -eq 2 ]; then echo "FAIL: re-read 观测失败（无法解析）— 状态未知，人工介入" >&2; return 1; fi
   if [ "$pc" -eq 0 ]; then
     echo "re-read 保留全部目标保护（容许额外追加）→ 成功" >&2
-    assert_and_evidence --mode assert --ruleset-json "$REREAD_RAW" && return 0
-    echo "FAIL: 保留检查通过但 assert 异常未过 — 人工介入" >&2; return 1
+    local arc=0
+    assert_and_evidence --mode assert --ruleset-json "$REREAD_RAW" || arc=$?
+    [ "$arc" -eq 0 ] && return 0
+    echo "FAIL: 保留检查通过但 assert 未过（exit=$arc，1=谓词假/3=观测失败）— 人工介入" >&2; return 1
   fi
   # pc==1 有缺失：判 PUT 是否根本没生效（仍为原状态）
   local norm; norm=$(python3 "$BUILDER" --normalize-only --ruleset-json "$REREAD_RAW") \
@@ -1261,7 +1266,7 @@ git commit -m "test(1b): run-all.sh 单命令入口（pytest + 2 bash 套件）"
 | 2 | 跑 `bash scripts/governance/verify-required-checks.sh --mode assert --ruleset-json tests/scripts/governance/fixtures/ruleset-with-check.json` | 打印 `OK: 'Mac Catalyst build-for-testing on macos-15' 在位 + integration_id=15368 + enforcement=active`，退出 0 | 见 OK 且退出 0 = pass |
 | 3 | 跑 `bash scripts/governance/verify-required-checks.sh --mode assert --ruleset-json tests/scripts/governance/fixtures/ruleset-anysource.json` | 打印含 `integration_id=None != 15368（any-source 伪造风险）`，退出 1 | 见 FAIL 且退出 1 = pass |
 | 4 | 跑 `bash scripts/governance/admin-configure-required-checks.sh --artifact-dir /tmp/1b GH_CMD=...`（dry-run，mock 注入见 Task 3） | 打印将变更 diff，**无 PUT**，退出 0 | dry-run 无 mutation = pass |
-| 5 | 确认 `git grep -n "branches/main/protection" scripts/governance/` 在新脚本中**零命中** | 新脚本不依赖 legacy protection API（已 404） | 零命中 = pass |
+| 5 | 确认新脚本无 legacy protection API **功能调用**：`git grep -nE 'api[^#]*branches/[^ "'"'"']*/protection' -- scripts/governance/` 零命中（注：脚本注释/docstring 里提到 `branches/main/protection` 是解释「为何改用 rulesets」，不算依赖） | 新脚本仅经 Rulesets API，不调用已 404 的 legacy protection API | 功能调用 grep 零命中 = pass |
 | 6 | 确认 1b 改动**不含** `.github/workflows/` 与 `docs/governance/` 文件 | `git diff --name-only main...HEAD` 列表无这两类路径 | 无命中 = pass |
 | 7 | run-all 输出里确认 mutation-safety 测试均 PASS：`rollback-payload 无只读字段`（R1-F1）/ `并发漂移 → 1 abort`（R1-F2）/ `apply no-op → 0`（R2-F1）/ `PUT 干净失败 → 1` + `PUT 报错但已 apply → 0`（R2-F2）/ `payload 保留 token 样 context`（R2-F4）/ `PUT body == payload.json`（R3-F2）/ verifier `assert target=tag → 1` + `assert name!=main → 1`（R3-F3）/ `并发合法改动 → 0（不 rollback）` + `未知状态 → 1（人工介入）` + `观测失败 → 1（不 rollback）`（R4-F1）/ `PUT-failure artifact 无 token`（R4-F2）/ `inactive → 1（fail-closed）`（R5-F1）/ verifier `assert wrong-include → 1` + `assert exclude-main → 1` + `assert wildcard-exclude → 1`（R6-F1/R7-F2）/ `并发合法追加 → 0` + `保护流失(Catalyst在但少规则) → 1`（R6-F2）/ `多 bypass actor → 1`（R7-F1） | codex R1-R7 全部 finding 的契约落实（R7-F3 见 plan grounding #13 residual） | 全部 PASS = pass |
 

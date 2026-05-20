@@ -146,8 +146,10 @@ print("diff（payload vs 当前 required_status_checks）:")
 print("\n".join(changes) if changes else "  （无变更——已是 desired 状态，幂等 no-op）")
 PY
 )
+    PY_EXIT=$?
     set -e
     echo "$RESULT"
+    [ "$PY_EXIT" -eq 0 ] || { echo "FAIL: diff 计算失败（观测失败）" >&2; exit 3; }
     exit 0
     ;;
 esac

@@ -108,8 +108,10 @@ post_put_classify() {
   if [ "$pc" -eq 2 ]; then echo "FAIL: re-read 观测失败（无法解析）— 状态未知，人工介入" >&2; return 1; fi
   if [ "$pc" -eq 0 ]; then
     echo "re-read 保留全部目标保护（容许额外追加）→ 成功" >&2
-    assert_and_evidence --mode assert --ruleset-json "$REREAD_RAW" && return 0
-    echo "FAIL: 保留检查通过但 assert 异常未过 — 人工介入" >&2; return 1
+    local arc=0
+    assert_and_evidence --mode assert --ruleset-json "$REREAD_RAW" || arc=$?
+    [ "$arc" -eq 0 ] && return 0
+    echo "FAIL: 保留检查通过但 assert 未过（exit=$arc，1=谓词假/3=观测失败）— 人工介入" >&2; return 1
   fi
   # pc==1 有缺失：判 PUT 是否根本没生效（仍为原状态）
   local norm; norm=$(python3 "$BUILDER" --normalize-only --ruleset-json "$REREAD_RAW") \
