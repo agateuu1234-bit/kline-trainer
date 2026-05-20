@@ -1,0 +1,53 @@
+name: Mac Catalyst Build
+
+# H9 resolution（Wave 1 顺位 1a，option B）：catalyst-build 从 swift-contracts-smoke.yml
+# 拆出为独立 always-trigger workflow（无 paths filter），使 required check
+# "Mac Catalyst build-for-testing on macos-15" 在每个 PR 都运行并报告，消除
+# "paths filter 跳过 → required check 永不报告 → PR 死锁" 架构性矛盾（§15.4 ledger H9）。
+# 注意：required check 以 job name 匹配；job name 必须保持不变。
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Trust-boundary hardening（对齐 swift-contracts-smoke.yml / codeowners-config-check.yml）:
+# - Least-privilege token: read-only repo contents
+# - actions/checkout pinned to full SHA
+permissions:
+  contents: read
+
+jobs:
+  catalyst-build:
+    name: Mac Catalyst build-for-testing on macos-15
+    runs-on: macos-15
+    timeout-minutes: 15
+    # 依赖 runner 默认 Xcode（macos-15 image 预装 Xcode 16）提供 xcodebuild。
+    # 不硬编码 /Applications/Xcode_16.app 路径（镜像 swift-test job 已有的 codex Plan 1c R2
+    # finding 修订 pattern；GHA image 刷新时路径可能变 → fail-fast 给清晰诊断）。
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Assert Xcode >= 16
+        run: |
+          xcodebuild -version
+          XCODE_VER=$(xcodebuild -version | head -1 | awk '{print $2}')
+          MAJOR=$(echo "$XCODE_VER" | cut -d. -f1)
+          if [[ -z "$XCODE_VER" || "$MAJOR" -lt 16 ]]; then
+            echo "FAIL: Xcode 16+ required (Swift 6.0 + Catalyst destination)；runner provides $XCODE_VER"
+            echo "Available Xcode installs:"
+            ls -la /Applications | grep -i xcode || true
+            exit 1
+          fi
+          echo "Xcode $XCODE_VER OK"
+      - name: Mac Catalyst build-for-testing
+        working-directory: ios/Contracts
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -scheme KlineTrainerContracts \
+            -destination 'platform=macOS,variant=Mac Catalyst' \
+            -derivedDataPath /tmp/derived 2>&1 | tee /tmp/catalyst-build.log
+      - name: Gate — TEST BUILD SUCCEEDED + no error/warning
+        run: |
+          grep -F "** TEST BUILD SUCCEEDED **" /tmp/catalyst-build.log || { echo "BUILD SUCCEEDED 缺失"; exit 1; }
+          ! grep -E "(^|[[:space:]])(error|warning):" /tmp/catalyst-build.log || { echo "error/warning 触发 gate"; exit 1; }
+          echo "GATE PASS: §15.1 #3 闸门关闭（Catalyst CI 持续守护）"

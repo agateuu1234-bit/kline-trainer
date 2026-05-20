@@ -1175,11 +1175,11 @@ enum ChartAction: Equatable, Sendable {
   - 进 session A drawing(snap.baseRev=0) → tradeTriggered（r=1，mode=autoTracking）→ activateDrawing + setDrawingSnapshot(baseRev=1) 进 session B drawing(snap.baseRev=1)
   - 模拟 session A 延迟 action：派发 `drawingCommitted(baseRevision: 0)` → 断言 `.none` + mode 仍为 drawing（session B 未被错误切出）
   - 同上 cancel：派发 `drawingCancelled(baseRevision: 0)` → `.none` + mode 仍为 drawing
-- **Deceleration stop 契约测试**（闸门 #4 F3 修订 v1.4 — **Wave 0 仅 reducer 契约测试；production handler 集成测试移 Wave 1**）：
+- **Deceleration stop 契约测试**（闸门 #4 F3 修订 v1.4 — **Wave 0 仅 reducer 契约测试；production handler 集成测试移 Wave 2**；Wave 1 顺位 1a reclassify，理由见下）：
   - **Wave 0 验收**（PR #50 已落）：reducer 派发 `panEnded(velocity:) → .startDeceleration(v)` effect + `activateDrawing → .requestDrawingSnapshotAfterStoppingAnimator` effect 的契约测试（13 个测试覆盖 happy + cross-session）
-  - **Wave 1 验收**（C2 DecelerationAnimator + C8 ChartContainerView 落地时同 PR 内）：production handler 集成测试 — 模拟延迟 animator 回调，验证 handler 必须**先**调用 `animator.stop()` 再计算 range；drawing 退出后无 `offsetApplied` 到达 reducer
+  - **Wave 2 验收**（C8 ChartContainerView + E5 TrainingEngine 落地时同 PR 内；C2 DecelerationAnimator 已于 Wave 1 顺位 3 落地）：production handler 集成测试 — 模拟延迟 animator 回调，验证 handler 必须**先**调用 `animator.stop()` 再计算 range；drawing 退出后无 `offsetApplied` 到达 reducer
 
-  **理由**：production handler 涉及 C2/C8/E5 三模块 orchestration，非 Wave 0 单模块 scope；reducer 契约测试已覆盖契约面，handler 集成测试在生产代码落地的同 PR 验证更准。
+  **理由**：production handler 涉及 C2/C8/E5 三模块 orchestration，非 Wave 0 单模块 scope；reducer 契约测试已覆盖契约面，handler 集成测试在生产代码落地的同 PR 验证更准。C8/E5 属 Wave 2（见 Wave 1 outline §六），故集成测试在 Wave 2 C8 集成 PR 内闭环（Wave 1 顺位 1a 仅 reclassify wording）。
 - `drawingCommitted/drawingCancelled` 非法转换 assertion 测试：autoTracking / freeScrolling 上派发 → assertionFailure
 - **`drawingCommitted/drawingCancelled` 双分支测试**（闸门 #6 修订，与新 guard 一致）：
   - 匹配分支：drawing(snap.baseRev=r) 模式下派发 `drawingCommitted(baseRevision: r)` / `drawingCancelled(baseRevision: r)` → 断言 mode=autoTracking + `.none`
