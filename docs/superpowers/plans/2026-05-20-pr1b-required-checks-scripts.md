@@ -1092,9 +1092,15 @@ PY
 
 # assert 已应用状态 + 写 evidence（live=--repo / offline=--ruleset-json FILE）。
 # 保留 VERIFY 真实退出码（0 pass / 1 谓词假 / 3 观测失败）——R3-F1：runbook 据此区分 rollback vs 人工介入。
+# 最终 branch-diff review：evidence redact/写盘失败 → fail-closed（不假绿）。
 assert_and_evidence() {
-  local rc=0
-  "$VERIFY" "$@" | redact > "$ARTIFACT_DIR/verify-evidence.txt" || rc=${PIPESTATUS[0]}
+  local rc=0 tmp
+  tmp=$(mktemp); chmod 600 "$tmp"
+  "$VERIFY" "$@" > "$tmp" || rc=$?
+  if ! redact < "$tmp" > "$ARTIFACT_DIR/verify-evidence.txt" || [ ! -s "$ARTIFACT_DIR/verify-evidence.txt" ]; then
+    rm -f "$tmp"; echo "FAIL: evidence redact/写盘失败或为空（审计不可信）— 人工介入" >&2; return 1
+  fi
+  rm -f "$tmp"
   if [ "$rc" -eq 0 ]; then
     echo "GATE PASS：Catalyst required check 已绑 app + active。evidence: $ARTIFACT_DIR/verify-evidence.txt"
   fi
