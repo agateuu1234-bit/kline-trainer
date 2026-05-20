@@ -15,7 +15,7 @@
 - [x] F1 Models 薄 wrapper（PR #53）含 BinarySearch utility
 - [x] F2 Theme（PR #39）13 默认色
 - [x] C1a Geometry / C1b Reducer / C1c Render UIKit shell（PR #38 / #47 / #48 / #49 / #50 / #51）
-- [x] §15.1 编译验证 #1-#9 全闭环：本地 swift test + Catalyst build SUCCEEDED + CI 持续守护（PR 9 加 catalyst-build job；H8 + H9 + H10 配套闭合 required gate）
+- [x] §15.1 编译验证 #1-#9 全闭环：本地 swift test + Catalyst build SUCCEEDED + CI 持续守护（PR 9 加 catalyst-build job，顺位 1a 拆至独立 workflow `.github/workflows/catalyst-build.yml`；H8 + H9 + H10 配套闭合 required gate）
 - [x] Preview Fixture 可在 Xcode Canvas 渲染（E6 PR #40 提供）
 - **签字时间**：2026-05-17
 
