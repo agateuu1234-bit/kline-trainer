@@ -96,6 +96,15 @@ if not any(_matches_main(p) for p in include):
 if any(_matches_main(p) for p in exclude):
     print(f"FAIL: conditions.exclude 命中并排除 main（exclude={exclude}）"); sys.exit(1)
 
+# 最终 branch-diff review：bypass_actors 必须仅 admin —— 否则非 admin 可绕过 required check（gate 形同虚设 / 假 H10 证据）。
+# admin 判定镜像 verify-freeze-tag.sh：RepositoryRole+actor_id=5 或 OrganizationAdmin。
+def _is_admin_bypass(b):
+    at = b.get('actor_type', ''); aid = b.get('actor_id', 0)
+    return at == 'OrganizationAdmin' or (at == 'RepositoryRole' and aid == 5)
+non_admin_bypass = [b for b in (rs.get('bypass_actors') or []) if not _is_admin_bypass(b)]
+if non_admin_bypass:
+    print(f"FAIL: bypass_actors 含非 admin（可绕过 required check）: {non_admin_bypass}"); sys.exit(1)
+
 rules = rs.get('rules') or []
 rsc = next((r for r in rules if r.get('type') == 'required_status_checks'), None)
 if rsc is None:
@@ -103,7 +112,7 @@ if rsc is None:
 checks = (rsc.get('parameters') or {}).get('required_status_checks') or []
 
 if mode == 'preflight':
-    print("OK: preflight（main branch ruleset + 绑默认分支 + active + 有 required_status_checks 规则）"); sys.exit(0)
+    print("OK: preflight（main branch ruleset + 绑默认分支 + active + 有 required_status_checks 规则 + bypass 仅 admin）"); sys.exit(0)
 
 # assert（enforcement/name/target 已在上面 fail-closed，这里只判 Catalyst check）
 reasons = []
@@ -116,7 +125,7 @@ else:
             reasons.append(f"'{CATALYST}' integration_id={c.get('integration_id')} != {APP_ID}（any-source 伪造风险）")
 if reasons:
     print("FAIL: " + " | ".join(reasons)); sys.exit(1)
-print(f"OK: main branch ruleset + 绑默认分支 + active + '{CATALYST}' 在位 + integration_id={APP_ID}"); sys.exit(0)
+print(f"OK: main branch ruleset + 绑默认分支 + active + '{CATALYST}' 在位 + integration_id={APP_ID} + bypass 仅 admin"); sys.exit(0)
 PY
 )
     PY_EXIT=$?

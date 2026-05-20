@@ -51,6 +51,9 @@ ledger: docs/governance/2026-05-17-wave0-signoff-ledger.md（H8 / H10）
    - **conditions 漏通配排除 main（R7-F2，high）→ 修**：`_binds_main` 只认精确 token，漏 `refs/heads/*` / `*` 等通配 exclude。改用 **GitHub 兼容通配语义**（`fnmatch` 对 `refs/heads/main`+`main`，外加 `~DEFAULT_BRANCH`/`~ALL`）判 include/exclude 是否命中 main。加 `ruleset-wildcard-exclude.json` fixture + verifier 测试。
    - **preservation 非 rsc 规则只比 type、漏 param 削弱（R7-F3，medium）→ residual**：codex 建议"整规则对象 canonical 比对"，但 GitHub GET 会回填默认 param（如 pull_request 的默认字段），整对象 exact 比对会把**正常 apply 误判为保护流失**（false-negative）；且单人内网仓 1c 跑是 no-op skip、并发削弱 param 极度假设。**接受为 residual**：保留 rule-type 级保留检查（已 catch 整条规则删除/类型变化，测试 6c）；param 级深度保留不实现（理由：GitHub 默认 param 回填导致 false-negative + 单管理员近乎空操作 + per `feedback_governance_budget_cap` 不做预防性过度工程）。owner @agateuu1234-bit；rollback：N/A（不改 prod 行为）；follow-up：若将来引入 param 化的 pull_request 规则且多管理员并发，再评估。
    - **最终 code-review I1（非 blocker）**：preservation 的 conditions 精确相等理论上可能因 GitHub round-trip 规范化保守误报；失败方向安全（不静默削弱）；1c real-apply 前再评估，rollback-payload.json 为权威还原源。
+14. **branch-diff codex（实施后第二道）finding**：
+   - **assert 不查 bypass_actors（high）→ 修**：preflight/assert 原本只查 name/target/enforcement/conditions + Catalyst check，未查 bypass——预存的非 admin bypass actor 能绕过 required check 却仍输出 GATE PASS（假 H10 证据）。修：preflight/assert 加 **admin-only bypass 校验**（镜像 `verify-freeze-tag.sh`：`OrganizationAdmin` 或 `RepositoryRole`+`actor_id=5`），含非 admin → fail-closed exit 1。加 verifier negative（assert/preflight extra-bypass→1）+ runbook 8c（snapshot 非 admin bypass → preflight fail-closed 无 PUT）。
+   - **run-all 在 codex sandbox exit 1 = 误报**：codex 的 `/bin/zsh -lc` shell 缺 pytest；fresh worktree at HEAD 复现为 `pytest 8.4.2` 在 + `ALL GREEN` exit 0。非代码 bug；用户/CI 环境 pytest 在。
 
 ---
 
@@ -590,6 +593,12 @@ check "assert wildcard-exclude → 1" 1 "$rc"
 set +e; "$V" --mode preflight --ruleset-json "$FIX/ruleset-wildcard-exclude.json" >/dev/null 2>&1; rc=$?; set -e
 check "preflight wildcard-exclude → 1" 1 "$rc"
 
+# 最终 review：含非 admin bypass actor → assert/preflight 都拒（防绕过 required check）
+set +e; "$V" --mode assert --ruleset-json "$FIX/ruleset-extra-bypass.json" >/dev/null 2>&1; rc=$?; set -e
+check "assert extra-bypass → 1" 1 "$rc"
+set +e; "$V" --mode preflight --ruleset-json "$FIX/ruleset-extra-bypass.json" >/dev/null 2>&1; rc=$?; set -e
+check "preflight extra-bypass → 1" 1 "$rc"
+
 # diff：anysource → 0 且输出含 "Mac Catalyst"（显示将修正）
 set +e; out=$("$V" --mode diff --ruleset-json "$FIX/ruleset-anysource.json" 2>&1); rc=$?; set -e
 check "diff anysource → 0" 0 "$rc"
@@ -710,6 +719,15 @@ if not any(_matches_main(p) for p in include):
 if any(_matches_main(p) for p in exclude):
     print(f"FAIL: conditions.exclude 命中并排除 main（exclude={exclude}）"); sys.exit(1)
 
+# 最终 branch-diff review：bypass_actors 必须仅 admin —— 否则非 admin 可绕过 required check（gate 形同虚设 / 假 H10 证据）。
+# admin 判定镜像 verify-freeze-tag.sh：RepositoryRole+actor_id=5 或 OrganizationAdmin。
+def _is_admin_bypass(b):
+    at = b.get('actor_type', ''); aid = b.get('actor_id', 0)
+    return at == 'OrganizationAdmin' or (at == 'RepositoryRole' and aid == 5)
+non_admin_bypass = [b for b in (rs.get('bypass_actors') or []) if not _is_admin_bypass(b)]
+if non_admin_bypass:
+    print(f"FAIL: bypass_actors 含非 admin（可绕过 required check）: {non_admin_bypass}"); sys.exit(1)
+
 rules = rs.get('rules') or []
 rsc = next((r for r in rules if r.get('type') == 'required_status_checks'), None)
 if rsc is None:
@@ -717,7 +735,7 @@ if rsc is None:
 checks = (rsc.get('parameters') or {}).get('required_status_checks') or []
 
 if mode == 'preflight':
-    print("OK: preflight（main branch ruleset + 绑默认分支 + active + 有 required_status_checks 规则）"); sys.exit(0)
+    print("OK: preflight（main branch ruleset + 绑默认分支 + active + 有 required_status_checks 规则 + bypass 仅 admin）"); sys.exit(0)
 
 # assert（enforcement/name/target 已在上面 fail-closed，这里只判 Catalyst check）
 reasons = []
@@ -730,7 +748,7 @@ else:
             reasons.append(f"'{CATALYST}' integration_id={c.get('integration_id')} != {APP_ID}（any-source 伪造风险）")
 if reasons:
     print("FAIL: " + " | ".join(reasons)); sys.exit(1)
-print(f"OK: main branch ruleset + 绑默认分支 + active + '{CATALYST}' 在位 + integration_id={APP_ID}"); sys.exit(0)
+print(f"OK: main branch ruleset + 绑默认分支 + active + '{CATALYST}' 在位 + integration_id={APP_ID} + bypass 仅 admin"); sys.exit(0)
 PY
 )
     PY_EXIT=$?
@@ -955,6 +973,15 @@ GH_CMD="$MOCK" MOCK_FIXTURE="$FIX/ruleset-inactive.json" MOCK_LOG="$log" \
 set -e
 check "inactive → 1（fail-closed）" 1 "$rc"
 grep -q "PUT" "$log" && { echo "FAIL: inactive 不应 PUT"; fail=1; } || echo "PASS: inactive 无 PUT"
+
+# 8c) snapshot 含非 admin bypass → preflight fail-closed → 1，无 PUT（最终 review bypass gap）
+d=$(newdir); log="$d/calls.log"
+set +e
+GH_CMD="$MOCK" MOCK_FIXTURE="$FIX/ruleset-extra-bypass.json" MOCK_LOG="$log" \
+  "$R" --apply --artifact-dir "$d" >/dev/null 2>&1; rc=$?
+set -e
+check "非admin bypass → 1（fail-closed）" 1 "$rc"
+grep -q "PUT" "$log" && { echo "FAIL: 非admin bypass 不应 PUT"; fail=1; } || echo "PASS: 非admin bypass 无 PUT"
 
 # 9) redaction：注入假 GH_TOKEN，断言 artifact 文件不含它
 d=$(newdir); log="$d/calls.log"

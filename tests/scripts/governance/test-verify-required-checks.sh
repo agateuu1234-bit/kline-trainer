@@ -61,6 +61,12 @@ check "assert wildcard-exclude → 1" 1 "$rc"
 set +e; "$V" --mode preflight --ruleset-json "$FIX/ruleset-wildcard-exclude.json" >/dev/null 2>&1; rc=$?; set -e
 check "preflight wildcard-exclude → 1" 1 "$rc"
 
+# 最终 review：含非 admin bypass actor → assert/preflight 都拒（防绕过 required check）
+set +e; "$V" --mode assert --ruleset-json "$FIX/ruleset-extra-bypass.json" >/dev/null 2>&1; rc=$?; set -e
+check "assert extra-bypass → 1" 1 "$rc"
+set +e; "$V" --mode preflight --ruleset-json "$FIX/ruleset-extra-bypass.json" >/dev/null 2>&1; rc=$?; set -e
+check "preflight extra-bypass → 1" 1 "$rc"
+
 # diff：anysource → 0 且输出含 "Mac Catalyst"（显示将修正）
 set +e; out=$("$V" --mode diff --ruleset-json "$FIX/ruleset-anysource.json" 2>&1); rc=$?; set -e
 check "diff anysource → 0" 0 "$rc"

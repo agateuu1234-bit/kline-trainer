@@ -144,6 +144,15 @@ set -e
 check "inactive → 1（fail-closed）" 1 "$rc"
 grep -q "PUT" "$log" && { echo "FAIL: inactive 不应 PUT"; fail=1; } || echo "PASS: inactive 无 PUT"
 
+# 8c) snapshot 含非 admin bypass → preflight fail-closed → 1，无 PUT（最终 review bypass gap）
+d=$(newdir); log="$d/calls.log"
+set +e
+GH_CMD="$MOCK" MOCK_FIXTURE="$FIX/ruleset-extra-bypass.json" MOCK_LOG="$log" \
+  "$R" --apply --artifact-dir "$d" >/dev/null 2>&1; rc=$?
+set -e
+check "非admin bypass → 1（fail-closed）" 1 "$rc"
+grep -q "PUT" "$log" && { echo "FAIL: 非admin bypass 不应 PUT"; fail=1; } || echo "PASS: 非admin bypass 无 PUT"
+
 # 9) redaction：注入假 GH_TOKEN，断言 artifact 文件不含它
 d=$(newdir); log="$d/calls.log"
 set +e
