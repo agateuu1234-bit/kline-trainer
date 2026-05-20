@@ -83,6 +83,9 @@ def checks(d):
             for c in ((r or {}).get('parameters', {}).get('required_status_checks') or [])}
 def bypass(d):
     return {(b.get('actor_id'), b.get('actor_type'), b.get('bypass_mode')) for b in (d.get('bypass_actors') or [])}
+# 注：conditions 用精确相等。若 GitHub PUT round-trip 规范化 conditions 表示（如 [] vs 省略键），
+# 可能保守误报"需人工"（失败方向安全：不会静默削弱保护）。1c 真正 apply（非 no-op skip）前若遇此，
+# 以 rollback-payload.json 为权威还原源 + 人工核对。见 plan grounding #13 I1 note。
 # 标量 + conditions 不可变
 for k in ('name', 'target', 'enforcement', 'conditions'):
     if actual.get(k) != desired.get(k): sys.exit(1)

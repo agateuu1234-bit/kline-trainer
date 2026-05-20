@@ -50,6 +50,7 @@ ledger: docs/governance/2026-05-17-wave0-signoff-ledger.md（H8 / H10）
    - **preservation 容许新增 bypass actor（R7-F1，high）→ 修**：新增任何 bypass actor 都会架空 required check（trust-boundary 洞）。`preservation_ok` 的 bypass 由 `<=` 改 **`!=` 精确相等**。加 `ruleset-extra-bypass.json` fixture + 测试 6d（多 bypass→人工 exit 1）。
    - **conditions 漏通配排除 main（R7-F2，high）→ 修**：`_binds_main` 只认精确 token，漏 `refs/heads/*` / `*` 等通配 exclude。改用 **GitHub 兼容通配语义**（`fnmatch` 对 `refs/heads/main`+`main`，外加 `~DEFAULT_BRANCH`/`~ALL`）判 include/exclude 是否命中 main。加 `ruleset-wildcard-exclude.json` fixture + verifier 测试。
    - **preservation 非 rsc 规则只比 type、漏 param 削弱（R7-F3，medium）→ residual**：codex 建议"整规则对象 canonical 比对"，但 GitHub GET 会回填默认 param（如 pull_request 的默认字段），整对象 exact 比对会把**正常 apply 误判为保护流失**（false-negative）；且单人内网仓 1c 跑是 no-op skip、并发削弱 param 极度假设。**接受为 residual**：保留 rule-type 级保留检查（已 catch 整条规则删除/类型变化，测试 6c）；param 级深度保留不实现（理由：GitHub 默认 param 回填导致 false-negative + 单管理员近乎空操作 + per `feedback_governance_budget_cap` 不做预防性过度工程）。owner @agateuu1234-bit；rollback：N/A（不改 prod 行为）；follow-up：若将来引入 param 化的 pull_request 规则且多管理员并发，再评估。
+   - **最终 code-review I1（非 blocker）**：preservation 的 conditions 精确相等理论上可能因 GitHub round-trip 规范化保守误报；失败方向安全（不静默削弱）；1c real-apply 前再评估，rollback-payload.json 为权威还原源。
 
 ---
 
@@ -567,6 +568,8 @@ set +e; "$V" --mode preflight --ruleset-json "$FIX/ruleset-tag.json" >/dev/null 
 check "preflight target=tag → 1" 1 "$rc"
 set +e; "$V" --mode assert --ruleset-json "$FIX/ruleset-wrongname.json" >/dev/null 2>&1; rc=$?; set -e
 check "assert name!=main → 1" 1 "$rc"
+set +e; "$V" --mode preflight --ruleset-json "$FIX/ruleset-wrongname.json" >/dev/null 2>&1; rc=$?; set -e
+check "preflight name!=main → 1" 1 "$rc"
 
 # R5-F1：enforcement 非 active 的 ruleset，preflight 即 fail-closed（不等 assert）
 set +e; "$V" --mode preflight --ruleset-json "$FIX/ruleset-inactive.json" >/dev/null 2>&1; rc=$?; set -e
@@ -1087,6 +1090,9 @@ def checks(d):
             for c in ((r or {}).get('parameters', {}).get('required_status_checks') or [])}
 def bypass(d):
     return {(b.get('actor_id'), b.get('actor_type'), b.get('bypass_mode')) for b in (d.get('bypass_actors') or [])}
+# 注：conditions 用精确相等。若 GitHub PUT round-trip 规范化 conditions 表示（如 [] vs 省略键），
+# 可能保守误报"需人工"（失败方向安全：不会静默削弱保护）。1c 真正 apply（非 no-op skip）前若遇此，
+# 以 rollback-payload.json 为权威还原源 + 人工核对。见 plan grounding #13 I1 note。
 # 标量 + conditions 不可变
 for k in ('name', 'target', 'enforcement', 'conditions'):
     if actual.get(k) != desired.get(k): sys.exit(1)

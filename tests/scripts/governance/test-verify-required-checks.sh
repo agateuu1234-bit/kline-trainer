@@ -39,6 +39,8 @@ set +e; "$V" --mode preflight --ruleset-json "$FIX/ruleset-tag.json" >/dev/null 
 check "preflight target=tag → 1" 1 "$rc"
 set +e; "$V" --mode assert --ruleset-json "$FIX/ruleset-wrongname.json" >/dev/null 2>&1; rc=$?; set -e
 check "assert name!=main → 1" 1 "$rc"
+set +e; "$V" --mode preflight --ruleset-json "$FIX/ruleset-wrongname.json" >/dev/null 2>&1; rc=$?; set -e
+check "preflight name!=main → 1" 1 "$rc"
 
 # R5-F1：enforcement 非 active 的 ruleset，preflight 即 fail-closed（不等 assert）
 set +e; "$V" --mode preflight --ruleset-json "$FIX/ruleset-inactive.json" >/dev/null 2>&1; rc=$?; set -e
