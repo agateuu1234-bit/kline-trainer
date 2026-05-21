@@ -84,6 +84,6 @@ cmp -s /tmp/pr1c-final/ruleset-snapshot.json docs/governance/2026-05-21-pr1c-rul
 
 - plan-stage codex 对抗性 review **13 轮**逐条真 finding 全修（R1-R4 架构 / R5-R13 信任边界 + shell 加固）+ 本地实测捕获 zsh `$P` 假绿 bug；命中 governance-runbook permanent edge-mining（同 PR #1b），2026-05-21 user explicit TTY override 收口 plan-stage（见 plan「Plan-stage codex 收敛记录」）。
 - subagent-driven 实施（user-gated origin 命令 → inline 降级，per workflow-rules degradation_policy；每文档 task 走 spec + code-quality 两段 review）。
-- 整体 branch-diff codex 对抗性 review（收敛轮数 merge 前回填）。
+- 整体 branch-diff codex 对抗性 review：R1 给 2 finding（acceptance #1/#2 缺 clean-tree guard / #5b `\|` 假 pipe）→ 已修 + 本地实测；R2（确认收敛）撞 OpenAI 配额（per `feedback_openai_quota_ci_pattern`：配额 infra fail ≠ codex needs-attn 轮数）。2026-05-22 user explicit 批准走 PR #45/#47 先例 **opus 4.7 xhigh review subagent 顶上**：独立复跑全部 acceptance + 验证 R1 两 finding 真修 + 1b 脚本字节未改 + snapshot↔live 一致 + no-op（payload==rollback 字节相等）→ **VERDICT: APPROVE**（唯一 Low = plan code-fence 模板沿用编写日 2026-05-21，cosmetic，非交付缺陷）。GitHub Actions `codex-review-verify` backstop 在 PR 时仍会再跑。
 
 > 禁忌词自查：本清单已规避 `.claude/workflow-rules.json` `forbidden_phrases` 所列的全部模糊判据用语（无任何此类含糊措辞，判据均为二元可判定）。
