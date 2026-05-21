@@ -9,19 +9,54 @@
 
 > **运行 #1/#1b 已自带 fail-closed gh pin + 机械退出码**：子 shell `( ... )` 内 allowlist 校验 `GH_BIN`，落 allowlist 外即 `exit 1`；末尾 `[ "$rc" -eq 0 ]` / `[ "$out" = main ]` 令进程状态机械反映断言（不被 `echo` 掩盖）。**若遇 `EOF` 网络抖动 → 重试一次**。
 
-| # | 动作（在终端粘贴运行） | 预期 | 通过判据 |
-|---|---|---|---|
-| 1 | `( GH_BIN=$(command -v gh); case "$GH_BIN" in /opt/homebrew/bin/gh|/usr/local/bin/gh|/usr/bin/gh) ;; *) echo "FAIL 不可信 gh:$GH_BIN" >&2; exit 1;; esac; env -u REPO -u MOCK_FIXTURE -u MOCK_LOG -u MOCK_PUT_FAIL -u MOCK_LIST_ID GH_HOST=github.com GH_CMD="$GH_BIN" bash scripts/governance/verify-required-checks.sh --mode assert --repo agateuu1234-bit/kline-trainer ); rc=$?; echo "退出码=$rc"; [ "$rc" -eq 0 ]` | 打印 `OK: main branch ruleset + 绑默认分支 + active + 'Mac Catalyst build-for-testing on macos-15' 在位 + integration_id=15368 + bypass 仅 admin`，`退出码=0` | 见 OK 且进程退 0 = 通过（= H10 谓词在 origin 真成立） |
-| 1b | `( GH_BIN=$(command -v gh); case "$GH_BIN" in /opt/homebrew/bin/gh|/usr/local/bin/gh|/usr/bin/gh) ;; *) echo "FAIL 不可信 gh:$GH_BIN" >&2; exit 1;; esac; out=$(env GH_HOST=github.com "$GH_BIN" api repos/agateuu1234-bit/kline-trainer --jq '.default_branch'); echo "default_branch=$out"; [ "$out" = main ] ); rc=$?; echo "退出码=$rc"; [ "$rc" -eq 0 ]` | 打印 `default_branch=main`，进程退 0 | 进程退 0（`out`==`main`）= 通过。**与 #1 共同构成 H8/H10 close 条件** |
-| 2 | `bash tests/scripts/governance/run-all.sh` | 末行 `ALL GREEN`，退出码 `0` | 见 ALL GREEN 且退出码 0 = 通过（1b 契约仍完整） |
-| 3 | `{ git rev-parse --verify main >/dev/null && files=$(git diff --name-only main...HEAD -- scripts/governance tests/scripts/governance .github/workflows) && { [ -n "$files" ] && printf '%s\n' "$files"; [ -z "$files" ]; }; }; rc=$?; echo "scope 退出码=$rc"; [ "$rc" -eq 0 ]` | 无文件输出，`scope 退出码=0`，进程退 0 | 无输出 + 进程退 0 = 通过（1c 未越界改脚本/测试/workflow） |
-| 4 | `git diff --name-only main...HEAD` | 仅出现 5 个 `docs/` 文件：`docs/governance/2026-05-21-pr1c-required-checks-evidence.md`、`docs/governance/2026-05-21-pr1c-ruleset-snapshot.redacted.json`、`docs/governance/2026-05-17-wave0-signoff-ledger.md`、`docs/acceptance/2026-05-21-pr1c-required-checks-admin-execute.md`、`docs/superpowers/plans/2026-05-21-pr1c-required-checks-admin-execute.md`。**绝不含** `scripts/` `tests/` `.github/` `kline_trainer*` | 仅这 5 个 docs 文件 = 通过 |
-| 5 | `out=$(grep -nE -e 'gh[pousr]_' -e 'github_pat_' -e '://[^/[:space:]@]+:[^/[:space:]@]+@' docs/governance/2026-05-21-pr1c-required-checks-evidence.md docs/governance/2026-05-21-pr1c-ruleset-snapshot.redacted.json); if [ -n "$out" ]; then printf '%s\n' "$out"; echo FAIL; false; else echo "no secret OK"; fi` | 打印 `no secret OK`，进程退 0 | 见 `no secret OK` 且进程退 0 = 通过（扩展 token 前缀 + basic-auth URL + fail-closed） |
-| 5b | （scanner 自测，证明 fail-closed）`printf 'ghp_FAKE\ngithub_pat_FAKE\nhttps://u:p@github.com/x\n' \| grep -cE -e 'gh[pousr]_' -e 'github_pat_' -e '://[^/[:space:]@]+:[^/[:space:]@]+@'` | 打印 `3` | 打印 `3` = scanner 真能抓三类凭证 |
-| 6 | `grep -cE '^\| H[0-9]+ ' docs/governance/2026-05-17-wave0-signoff-ledger.md` | 打印 `10` | 10 条 residual 一条不少 = 通过 |
-| 7 | `grep -c '✅ \*\*顺位 1c close' docs/governance/2026-05-17-wave0-signoff-ledger.md` | 打印 `2` | H8 + H10 均 close = 通过 |
-| 8 | `grep -cE 'api[^|]*branches/[^ |]*/protection.*app_id' docs/governance/2026-05-17-wave0-signoff-ledger.md` | 打印 `0` | stale legacy 验证命令已清除 = 通过 |
-| 9 | `cmp -s /tmp/pr1c-final/ruleset-snapshot.json docs/governance/2026-05-21-pr1c-ruleset-snapshot.redacted.json && shasum -a 256 docs/governance/2026-05-21-pr1c-ruleset-snapshot.redacted.json`（仅本次执行后立即可验；artifact 清理后跳过） | sha256 == evidence §4 记录的 `2901c81f500bcf2270771398b75e68058ccb946f15f9d5cda2f93c1a0fd1e38e` | sha 一致 = 入仓 snapshot 与执行时产物字节相等 |
+> 命令放 fenced block（不放表格单元格）——避免 markdown 表格里 `|` 与 shell 管道/case 冲突（codex branch-diff R1-F2）。每条都**机器判定**（末尾谓词决定进程退出码，不靠人读）。**#1/#2 已内联 canonical clean-tree guard**（codex branch-diff R1-F1）：脚本/测试/workflow 一旦相对 main 有 committed 改动或 working-tree 不干净，guard 短路、verifier/测试根本不跑。
+
+**#1 — H10 权威断言（assert，含 clean-tree guard）**：跑后应打印 `OK: main branch ruleset + 绑默认分支 + active + 'Mac Catalyst build-for-testing on macos-15' 在位 + integration_id=15368 + bypass 仅 admin` + `退出码=0`，**进程退 0 = 通过**（遇 `EOF` 网络抖动重试）：
+```bash
+( git rev-parse --verify main >/dev/null && [ -z "$(git diff --name-only main...HEAD -- scripts/governance tests/scripts/governance .github/workflows)" ] && [ -z "$(git status --porcelain -- scripts/governance tests/scripts/governance .github/workflows)" ] && git diff --quiet -- scripts/governance tests/scripts/governance .github/workflows && git diff --cached --quiet -- scripts/governance tests/scripts/governance .github/workflows && GH_BIN=$(command -v gh) && { case "$GH_BIN" in /opt/homebrew/bin/gh|/usr/local/bin/gh|/usr/bin/gh) ;; *) echo "FAIL 不可信 gh:$GH_BIN" >&2; exit 1;; esac; } && env -u REPO -u MOCK_FIXTURE -u MOCK_LOG -u MOCK_PUT_FAIL -u MOCK_LIST_ID GH_HOST=github.com GH_CMD="$GH_BIN" bash scripts/governance/verify-required-checks.sh --mode assert --repo agateuu1234-bit/kline-trainer ); rc=$?; echo "退出码=$rc"; [ "$rc" -eq 0 ]
+```
+
+**#1b — live `default_branch == main`（与 #1 共同构成 H8/H10 close 条件）**：应打印 `default_branch=main` + 进程退 0：
+```bash
+( GH_BIN=$(command -v gh); case "$GH_BIN" in /opt/homebrew/bin/gh|/usr/local/bin/gh|/usr/bin/gh) ;; *) echo "FAIL 不可信 gh:$GH_BIN" >&2; exit 1;; esac; out=$(env GH_HOST=github.com "$GH_BIN" api repos/agateuu1234-bit/kline-trainer --jq '.default_branch'); echo "default_branch=$out"; [ "$out" = main ] ); rc=$?; echo "退出码=$rc"; [ "$rc" -eq 0 ]
+```
+
+**#2 — 1b 契约仍完整（run-all，含 clean-tree guard）**：应末行 `ALL GREEN` + 进程退 0：
+```bash
+( git rev-parse --verify main >/dev/null && [ -z "$(git diff --name-only main...HEAD -- scripts/governance tests/scripts/governance .github/workflows)" ] && [ -z "$(git status --porcelain -- scripts/governance tests/scripts/governance .github/workflows)" ] && git diff --quiet -- scripts/governance tests/scripts/governance .github/workflows && git diff --cached --quiet -- scripts/governance tests/scripts/governance .github/workflows ) && bash tests/scripts/governance/run-all.sh
+```
+
+**#3 — scope 守约（1c 未越界改脚本/测试/workflow）**：应无文件输出 + `scope 退出码=0` + 进程退 0：
+```bash
+{ git rev-parse --verify main >/dev/null && files=$(git diff --name-only main...HEAD -- scripts/governance tests/scripts/governance .github/workflows) && { [ -n "$files" ] && printf '%s\n' "$files"; [ -z "$files" ]; }; }; rc=$?; echo "scope 退出码=$rc"; [ "$rc" -eq 0 ]
+```
+
+**#4 — 改动文件仅 5 个 docs**：输出应**仅**为 `docs/acceptance/2026-05-21-pr1c-required-checks-admin-execute.md`、`docs/governance/2026-05-17-wave0-signoff-ledger.md`、`docs/governance/2026-05-21-pr1c-required-checks-evidence.md`、`docs/governance/2026-05-21-pr1c-ruleset-snapshot.redacted.json`、`docs/superpowers/plans/2026-05-21-pr1c-required-checks-admin-execute.md`；**绝不含** `scripts/` `tests/` `.github/` `kline_trainer*`：
+```bash
+git diff --name-only main...HEAD
+```
+
+**#5 — secret 扫描（evidence + snapshot；fail-closed）**：应打印 `no secret OK` + 进程退 0：
+```bash
+out=$(grep -nE -e 'gh[pousr]_' -e 'github_pat_' -e '://[^/[:space:]@]+:[^/[:space:]@]+@' docs/governance/2026-05-21-pr1c-required-checks-evidence.md docs/governance/2026-05-21-pr1c-ruleset-snapshot.redacted.json); if [ -n "$out" ]; then printf '%s\n' "$out"; echo FAIL; false; else echo "no secret OK"; fi
+```
+
+**#5b — scanner 自测（证明 fail-closed；codex branch-diff R1-F2：真 pipe + 机械判定）**：应打印 `3` + 进程退 0：
+```bash
+count=$(printf 'ghp_FAKE\ngithub_pat_FAKE\nhttps://u:p@github.com/x\n' | grep -cE -e 'gh[pousr]_' -e 'github_pat_' -e '://[^/[:space:]@]+:[^/[:space:]@]+@'); echo "$count"; [ "$count" -eq 3 ]
+```
+
+**#6/#7/#8 — ledger 结构 + close + stale 清除**：分别应打印 `10`、`2`、`0`：
+```bash
+grep -cE '^\| H[0-9]+ ' docs/governance/2026-05-17-wave0-signoff-ledger.md
+grep -c '✅ \*\*顺位 1c close' docs/governance/2026-05-17-wave0-signoff-ledger.md
+grep -cE 'api[^|]*branches/[^ |]*/protection.*app_id' docs/governance/2026-05-17-wave0-signoff-ledger.md
+```
+
+**#9 — 入仓 snapshot 与执行时产物字节相等（仅本次执行后、artifact 未清理时可验）**：`shasum` 应 == evidence §4 记录的 `2901c81f500bcf2270771398b75e68058ccb946f15f9d5cda2f93c1a0fd1e38e`：
+```bash
+cmp -s /tmp/pr1c-final/ruleset-snapshot.json docs/governance/2026-05-21-pr1c-ruleset-snapshot.redacted.json && shasum -a 256 docs/governance/2026-05-21-pr1c-ruleset-snapshot.redacted.json
+```
 
 ## 二、PR merge gate 真生效（GitHub 上人工确认）
 
