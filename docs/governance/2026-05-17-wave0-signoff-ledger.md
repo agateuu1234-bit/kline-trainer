@@ -15,7 +15,7 @@
 - [x] F1 Models 薄 wrapper（PR #53）含 BinarySearch utility
 - [x] F2 Theme（PR #39）13 默认色
 - [x] C1a Geometry / C1b Reducer / C1c Render UIKit shell（PR #38 / #47 / #48 / #49 / #50 / #51）
-- [x] §15.1 编译验证 #1-#9 全闭环：本地 swift test + Catalyst build SUCCEEDED + CI 持续守护（PR 9 加 catalyst-build job，顺位 1a 拆至独立 workflow `.github/workflows/catalyst-build.yml`；H8 + H9 + H10 配套闭合 required gate）
+- [x] §15.1 编译验证 #1-#9 全闭环：本地 swift test + Catalyst build SUCCEEDED + CI 持续守护（PR 9 加 catalyst-build job，顺位 1a 拆至独立 workflow `.github/workflows/catalyst-build.yml`；H8 + H9 + H10 配套闭合 required gate）（**H8/H10 顺位 1c close 2026-05-22**；H9 顺位 1a；见 `docs/governance/2026-05-21-pr1c-required-checks-evidence.md`）
 - [x] Preview Fixture 可在 Xcode Canvas 渲染（E6 PR #40 提供）
 - **签字时间**：2026-05-17
 
@@ -36,9 +36,9 @@
 | H5 | Catalyst CI 持续守护 | PR #51 R7 G3 | `.github/workflows` Catalyst job（PR 9 子项 3）+ 配套 H8 + H9 + H10 整体闭合 required gate |
 | H6 | backend deps exact pin | spec §15.2 暂用 ranges | Wave 1 B1-B4 PR 各自落 `backend/requirements.txt == X.Y.Z` + `docker-compose.yml` image digest pin |
 | H7 | sample 训练组数据 | 数据代表 sign-off 第 3 项 future scope | Wave 1 B1/B2 PR 内真生成 3-5 个样本 + 数据正确性 ledger 回填 |
-| H8 | Catalyst CI required merge gate enforcement | spec v9 §6.G | 顺位 1c admin 在 GitHub repo Settings → Branches → main → Required status checks 加 context `Mac Catalyst build-for-testing on macos-15`（= job `name`，**非** job key `catalyst-build`；顺位 1a 拆 workflow 后 context 仍为此名），并**绑定来源为 GitHub Actions app**（UI 选 source = GitHub Actions / Ruleset 设 integration_id=15368），**不可留 "any source"**——否则任意 integration 可写同名 status 伪造满足 gate（trust-boundary spoof）；GitHub UI 手动步骤 |
+| H8 | Catalyst CI required merge gate enforcement | spec v9 §6.G | ✅ **顺位 1c close（2026-05-22）**：origin `main` ruleset 已配 required check context `Mac Catalyst build-for-testing on macos-15`（= job name，非 job key `catalyst-build`）且绑 GitHub Actions app（`integration_id=15368`，非 "any source"，防 trust-boundary spoof）。1c 经 1b runbook **dry-run 确认幂等 no-op（gate 已在位，无需 mutation，未跑 `--apply`）** + 独立 `verify-required-checks.sh --mode assert` + live `default_branch==main` 双谓词确认；与 1a 拆出的 always-trigger workflow `.github/workflows/catalyst-build.yml`（H9 已解）配套，每 PR 必跑必报且 merge 受 gate。证据：`docs/governance/2026-05-21-pr1c-required-checks-evidence.md` |
 | H9 | workflow `paths` filter 与 required check 架构性矛盾 | plan v6 codex R6 finding 1 | ✅ 顺位 1a 决议（option B）：catalyst-build 拆至独立 always-trigger workflow `.github/workflows/catalyst-build.yml`（无 paths filter，每 PR 必跑必报）；job name 保持 `Mac Catalyst build-for-testing on macos-15` 不变以保留 required check context。required check 配置 + machine-checkable 验证（H8/H10）仍在顺位 1c |
-| H10 | acceptance §G 缺 machine-checkable required check 验证 | plan v6 codex R6 finding 2 | 顺位 1c admin 配 required check + 跑 `gh api repos/agateuu1234-bit/kline-trainer/branches/main/protection --jq '.required_status_checks.checks[] | select(.context=="Mac Catalyst build-for-testing on macos-15")'` 断言该 entry 存在**且 `.app_id==15368`（GitHub Actions app，防伪造来源）**（job name context，**非** `catalyst-build`；legacy `.contexts` 数组不绑来源、source-agnostic，不可作唯一依据）；ledger 回填 verification 输出 |
+| H10 | acceptance §G 缺 machine-checkable required check 验证 | plan v6 codex R6 finding 2 | ✅ **顺位 1c close（2026-05-22）**：机器可检查谓词权威断言 = `bash scripts/governance/verify-required-checks.sh --mode assert`（源真相 rulesets API；断言 Catalyst check 在位 + `integration_id=15368`（GitHub Actions app，防伪造来源）+ enforcement=active + 绑默认分支 + bypass 仅 admin）**且** live 默认分支断言 `default_branch == main`（读 `repos/<owner>/<repo>` 的 `.default_branch` 字段；codex R2-F2：assert 内部把 `~DEFAULT_BRANCH` 无条件当 main 不 live 核实，故 close 须双谓词同时成立）。**注**：legacy 验证写法（旧 branch-protection endpoint + `.app_id` 字段）已 stale——该 endpoint 对 main 返回 404、rulesets 源真相用 `integration_id` 非旧字段；1c 已修正为上述 rulesets 谓词。证据：`docs/governance/2026-05-21-pr1c-required-checks-evidence.md` |
 
 ## 依赖版本锁定（§15.2 v1.4 freeze）
 
