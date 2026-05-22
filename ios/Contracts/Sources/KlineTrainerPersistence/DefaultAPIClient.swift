@@ -8,13 +8,19 @@ public actor DefaultAPIClient: APIClient {
     private let baseURL: URL
     private let transport: HTTPRequesting
     private let decoder: JSONDecoder
-    private let iso8601: ISO8601DateFormatter  // actor-isolated；Formatter 非线程安全，作实例属性
+    // ISO8601DateFormatter 不能同时接受有/无毫秒两种形式——设 .withFractionalSeconds 则拒绝无毫秒形式，
+    // 反之亦然；因此保留两个 formatter，任一解析成功即视为合法。
+    private let iso8601: ISO8601DateFormatter      // 无毫秒（如 2026-05-22T12:34:56Z）
+    private let iso8601Frac: ISO8601DateFormatter  // 有毫秒（如 2026-05-22T12:34:56.123Z）
 
     public init(baseURL: URL, transport: HTTPRequesting = URLSession.shared) {
         self.baseURL = baseURL
         self.transport = transport
         self.decoder = JSONDecoder()
         self.iso8601 = ISO8601DateFormatter()
+        let frac = ISO8601DateFormatter()
+        frac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        self.iso8601Frac = frac
     }
 
     public func reserveTrainingSets(count: Int) async throws -> LeaseResponse {
@@ -42,6 +48,7 @@ public actor DefaultAPIClient: APIClient {
     public func downloadTrainingSet(id: Int) async throws -> URL {
         let url = baseURL.appending(path: "training-set/\(id)/download")
         let (tempURL, response) = try await sendDownload(URLRequest(url: url))
+        // sendDownload 在 tempURL 创建前 throw（传输错误）→ 无文件可清理；defer 仅覆盖拿到 tempURL 之后的路径。
         // codex R2 medium：拿到 tempURL 后任何 throw（status / move / 取消）都必须清理临时文件，
         // 否则降级响应反复打来会撑爆临时存储。moved=true 表示所有权已转移给 dest。
         var moved = false
@@ -136,7 +143,7 @@ public actor DefaultAPIClient: APIClient {
         }
     }
 
-    /// meta 状态校验：== expected 否则 fail-closed 抛 serverError；非 HTTP 抛 internalError。
+    /// HTTP 状态校验（单一 expected status 的 endpoint，如 meta）：== expected 否则 fail-closed 抛 serverError；非 HTTP 抛 internalError。
     private func requireStatus(_ response: URLResponse, _ expected: Int) throws {
         guard let http = response as? HTTPURLResponse else {
             throw AppError.internalError(module: "P1", detail: "non_http_response")
@@ -165,7 +172,8 @@ public actor DefaultAPIClient: APIClient {
         guard UUID(uuidString: lease.leaseId) != nil else {
             throw AppError.internalError(module: "P1", detail: "meta_invalid_lease_id")
         }
-        guard iso8601.date(from: lease.expiresAt) != nil else {
+        guard iso8601.date(from: lease.expiresAt) != nil
+                || iso8601Frac.date(from: lease.expiresAt) != nil else {
             throw AppError.internalError(module: "P1", detail: "meta_invalid_expires_at")
         }
         for s in lease.sets

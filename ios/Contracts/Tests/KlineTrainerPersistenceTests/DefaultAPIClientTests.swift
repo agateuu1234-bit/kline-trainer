@@ -290,6 +290,13 @@ final class DefaultAPIClientTests: XCTestCase {
         }
     }
 
+    func test_reserve_accepts_fractional_seconds_expires_at() async throws {
+        let body = #"{"lease_id":"6f8a9c1d-2b3e-4f50-8a12-7d9e0f1b2c3d","expires_at":"2026-05-22T12:34:56.123Z","sets":[]}"#
+        let (api, _) = client(.init(body: Data(body.utf8), statusCode: 200))
+        let lease = try await api.reserveTrainingSets(count: 1)
+        XCTAssertEqual(lease.sets.count, 0)  // 带毫秒的合法 expires_at 不应被拒
+    }
+
     // MARK: - helpers
     private func assertThrowsAppError(
         _ expected: AppError, _ op: () async throws -> Void,
