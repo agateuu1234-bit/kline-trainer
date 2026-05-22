@@ -11,12 +11,9 @@ enum APIErrorMapping {
             switch urlErr.code {
             case .timedOut:
                 return .network(.timeout)
-            case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost,
-                 .cannotFindHost, .dataNotAllowed, .internationalRoamingOff:
-                return .network(.offline)
             default:
-                // NetworkReason 词汇内无 unknown 类目（M0.4 L655）；其它传输层
-                // URLError（badServerResponse / cannotParseResponse 等）保守归
+                // NetworkReason 词汇内无 unknown 类目（M0.4 L655）；除 timeout 外的所有传输层
+                // URLError（连接失败 / badServerResponse / cannotParseResponse 等）保守归
                 // offline（传输失败、isRecoverable=true，可重试）。
                 return .network(.offline)
             }
