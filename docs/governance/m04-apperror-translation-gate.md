@@ -22,13 +22,13 @@ throwing Swift 模块边界：内部错误（URLError / DatabaseError / Foundati
 
 ## Gate 2（源码静态核验）
 
-- **形态**：tested shell 脚本 `scripts/check_p<N>_apperror_gate.sh`（与既有
+- **形态**：tested shell 脚本 `scripts/check_p<N>_apperror_gate.sh`（N = 模块编号，如 p1/p2/p5；与既有
   `check_p2_apperror_gate.sh` / `check_p5_apperror_gate.sh` 同构）。剔除注释后，模块实现
   文件每条 `throw` 行必须含 allowlist token（类型名 `AppError`（大写 A）/ 模块内
   `*ErrorMapping.translate(...)` / `CancellationError`）；否则 FAIL。**不允许裸变量重抛**
   （`throw appErr` 这类变量名小写 a 不命中类型 token `AppError`——封死无法静态证明类型的旁路；
    要透传 AppError 用 `throw (error as? AppError) ?? ...Mapping.translate(error)` 单表达式）。
-  脚本自带 `tests/scripts/test-check-p<N>-apperror-gate.sh` 单测（clean PASS / dirty + bare-variable
+  脚本自带 `tests/scripts/test-check-p<N>-apperror-gate.sh`（N = 模块编号，如 p1/p2/p5）单测（clean PASS / dirty + bare-variable
   bypass + 行内注释 + public 方法 raw-try 泄漏 FAIL）。
 - **规则2 防 raw-try 泄漏**：public 方法体内禁 raw 危险 try（transport/decoder/JSONDecoder/
   FileManager/.decode/.write）——IO/解码全推 private helper，否则 `try foo.decode(...)` 这类无

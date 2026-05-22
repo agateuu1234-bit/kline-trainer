@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Plan 3 P1 边界翻译 Gate 2（per docs/governance/m04-apperror-translation-gate.md；对齐 check_p5_apperror_gate.sh 3 规则）。
-# 规则1：所有 throw 走 AppError 边界（token：AppError / *ErrorMapping.translate / CancellationError；剥行内注释封 codex R4 旁路；无 bare-variable token 封 codex R3 旁路）。
+# 规则1：所有 throw 走 AppError 边界（token：AppError / *ErrorMapping.translate / CancellationError；sed 剥行内注释封 codex R4 旁路及行内注释含 throw 字词误报；无 bare-variable token 封 codex R3 旁路）。
 # 规则2（codex R5）：public 方法体内禁 raw 危险 try（transport/decoder/JSONDecoder/FileManager/.decode/.write）——必须走 private helper，否则 raw try 让 DecodingError/URLError 无 throw 行直接逃逸。
 # 规则3：含 raw 危险 try 的行 ±10 行内必有 perform / *ErrorMapping.translate / AppError（证明翻译就近发生）。
-# 已知局限（同 P2/P5 grep gate）：多行 throw / 字符串内 `//` 不处理；本仓单行 throw 风格不触发。SwiftSyntax 当前 toolchain 无（YAGNI）。
+# 已知局限（同 P2/P5 grep gate）：(a) 多行 throw 表达式不处理；(b) `sed 's://.*::'` 同时会抹掉代码行里字符串字面量内的 `//`（极少见，token 通常在字符串之前）。SwiftSyntax 当前 toolchain 无（YAGNI）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -26,14 +26,13 @@ for f in "${TARGETS[@]}"; do
 
     # === 规则1：throw 走 AppError ===
     while IFS= read -r line; do
-        code="${line%%//*}"   # 剥行内注释
-        echo "$code" | grep -qE "(AppError|[A-Za-z]*ErrorMapping\.translate|CancellationError)" && continue
+        echo "$line" | grep -qE "(AppError|[A-Za-z]*ErrorMapping\.translate|CancellationError)" && continue
         echo "FAIL[规则1]: $f 非 AppError throw -> $line"; FAIL=1
-    done < <(grep -vE "^[[:space:]]*//" "$f" | grep -nE "(^|[[:space:]])throw[[:space:]]")
+    done < <(sed 's://.*::' "$f" | grep -nE "(^|[[:space:]])throw[[:space:]]")
 
     # === 规则2：public 方法体内禁 raw 危险 try ===
     PUBLIC_BAD=$(awk -v danger="$DANGER_AWK" '
-        /^[[:space:]]*public (func|init)/ { in_pub=1 }
+        /^[[:space:]]*public (func|init)/ { in_pub=1; depth=0 }
         in_pub==1 {
             n=gsub(/{/,"{"); m=gsub(/}/,"}"); depth += n - m
             l=$0; sub(/\/\/.*/,"",l)
@@ -52,7 +51,7 @@ for f in "${TARGETS[@]}"; do
         if ! sed -n "${start},${end}p" "$f" | grep -qE "perform|[A-Za-z]*ErrorMapping\.translate|AppError"; then
             echo "FAIL[规则3]: $f 行 $ln raw try 附近 ±10 行无 AppError 翻译"; FAIL=1
         fi
-    done < <(grep -vE "^[[:space:]]*//" "$f" | grep -nE "$DANGER")
+    done < <(sed 's://.*::' "$f" | grep -nE "$DANGER")
 done
 
 if [[ $FAIL -eq 0 ]]; then

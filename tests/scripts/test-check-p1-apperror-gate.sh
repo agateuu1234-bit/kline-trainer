@@ -36,12 +36,19 @@ func f() throws { throw error // AppError
 EOF
 if bash "$GATE" "$TMP/inline.swift" >/dev/null 2>&1; then echo "FAIL: 行内注释旁路应 FAIL"; exit 1; else echo "PASS inline"; fi
 
-# case 5（codex R5）: public 方法体内 raw try 泄漏（无 throw 行也能漏 DecodingError）→ 必须 FAIL
+# case 5（codex R5）: public 方法体内 raw try 泄漏（无 throw 行也能漏 DecodingError）→ 必须 FAIL（同时覆盖规则2 + 规则3）
 cat > "$TMP/rawtry.swift" <<'EOF'
 public func g() throws -> Int {
     return try JSONDecoder().decode(Int.self, from: Data())
 }
 EOF
 if bash "$GATE" "$TMP/rawtry.swift" >/dev/null 2>&1; then echo "FAIL: raw-try 泄漏应 FAIL"; exit 1; else echo "PASS rawtry"; fi
+
+# case 6（codex R5 review）: 非 throw 代码行的行内注释含 "throw" 字词 → 不应误报（剥注释后无 throw 语句）→ PASS
+cat > "$TMP/inline_comment_word.swift" <<'EOF'
+func k() throws { try doSomething() }  // throw NSError here in a comment
+func l() throws { throw AppError.network(.timeout) }
+EOF
+if bash "$GATE" "$TMP/inline_comment_word.swift" >/dev/null; then echo "PASS inline-comment-word"; else echo "FAIL: inline-comment-word 应 PASS"; exit 1; fi
 
 echo "ALL PASS"
