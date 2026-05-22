@@ -1,5 +1,5 @@
 // P1 APIClient 契约 — 训练组 lease 预占-下载-确认（对接 backend/openapi.yaml）。
-// M0.4 §L655：所有方法 throws AppError；M0.5 §L711：返回值 Sendable。
+// M0.4 §L655：所有方法仅抛 AppError（实现约束，由 m04 gate doc + check_p1_apperror_gate.sh 强制，非 typed throws）；M0.5 §L711：返回值 Sendable。
 
 import Foundation
 
