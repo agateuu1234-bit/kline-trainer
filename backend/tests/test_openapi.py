@@ -128,6 +128,7 @@ def _load_fixture(name: str) -> dict:
 
 
 def _assert_matches_lease_response(spec: dict, instance: dict) -> None:
+    """Assert instance has all required fields + content_hash matches the frozen pattern (presence + pattern check, not full type validation)."""
     lr = spec["components"]["schemas"]["LeaseResponse"]
     for req in lr["required"]:
         assert req in instance, f"LeaseResponse missing required field {req}"
@@ -151,7 +152,7 @@ def test_meta_description_freezes_partial_behavior():
     """meta description 必须冻结库存不足 = partial-200（不再 defer 到 B3）。"""
     spec = _load_spec()
     desc = spec["paths"]["/training-sets/meta"]["get"]["description"]
-    assert "partial" in desc.lower()
+    assert "partial fulfillment" in desc.lower()
     assert "未在本契约冻结" not in desc
 
 
