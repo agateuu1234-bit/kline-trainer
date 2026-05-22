@@ -196,6 +196,22 @@ final class DefaultAPIClientTests: XCTestCase {
         }
     }
 
+    // codex branch-diff F2：非预期 4xx = terminal（不可重试）。
+    func test_reserve_http_400_throws_terminal_internalError() async {
+        let (api, _) = client(.init(body: Data(), statusCode: 400))
+        await assertInternalErrorP1(detail: "http_400") {
+            _ = try await api.reserveTrainingSets(count: 1)
+        }
+        XCTAssertFalse(AppError.internalError(module: "P1", detail: "http_400").isRecoverable)
+    }
+
+    func test_confirm_403_throws_terminal_internalError() async {
+        let (api, _) = client(.init(body: Data(), statusCode: 403))
+        await assertInternalErrorP1(detail: "http_403") {
+            try await api.confirmTrainingSet(id: 1, leaseId: validLease)
+        }
+    }
+
     // MARK: downloadTrainingSet
 
     func test_download_200_returns_file_with_contents() async throws {

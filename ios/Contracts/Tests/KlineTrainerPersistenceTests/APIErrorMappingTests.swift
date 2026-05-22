@@ -14,9 +14,22 @@ final class APIErrorMappingTests: XCTestCase {
         XCTAssertEqual(APIErrorMapping.translate(URLError(.cannotConnectToHost)), .network(.offline))
     }
 
-    func test_other_urlerror_maps_to_offline_conservative() {
-        // NetworkReason 词汇内无 "unknown"；其它传输层 URLError 归 offline（可重试）。
-        XCTAssertEqual(APIErrorMapping.translate(URLError(.badServerResponse)), .network(.offline))
+    func test_tls_error_maps_to_terminal_internalError() {
+        let err = APIErrorMapping.translate(URLError(.secureConnectionFailed))
+        guard case .internalError(let module, _) = err else { return XCTFail("expected internalError, got \(err)") }
+        XCTAssertEqual(module, "P1")
+        XCTAssertFalse(err.isRecoverable)  // terminal
+    }
+
+    func test_auth_required_maps_to_terminal_internalError() {
+        let err = APIErrorMapping.translate(URLError(.userAuthenticationRequired))
+        guard case .internalError(let module, _) = err else { return XCTFail("expected internalError, got \(err)") }
+        XCTAssertEqual(module, "P1")
+    }
+
+    func test_bad_server_response_maps_to_terminal_internalError() {
+        let err = APIErrorMapping.translate(URLError(.badServerResponse))
+        guard case .internalError = err else { return XCTFail("expected internalError, got \(err)") }
     }
 
     func test_passthrough_existing_apperror() {

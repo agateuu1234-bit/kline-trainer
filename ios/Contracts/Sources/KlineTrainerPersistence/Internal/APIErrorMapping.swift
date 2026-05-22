@@ -11,11 +11,15 @@ enum APIErrorMapping {
             switch urlErr.code {
             case .timedOut:
                 return .network(.timeout)
-            default:
-                // NetworkReason 词汇内无 unknown 类目（M0.4 L655）；除 timeout 外的所有传输层
-                // URLError（连接失败 / badServerResponse / cannotParseResponse 等）保守归
-                // offline（传输失败、isRecoverable=true，可重试）。
+            case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost,
+                 .cannotFindHost, .dnsLookupFailed, .dataNotAllowed, .internationalRoamingOff,
+                 .callIsActive:
+                // 真 transient connectivity → 可重试。
                 return .network(.offline)
+            default:
+                // codex branch-diff F1：TLS/证书/ATS/auth/badServerResponse/unsupportedURL 等
+                // 是 terminal（重试无意义 + 安全/配置问题不应静默重试）→ 标 P1 terminal。
+                return .internalError(module: "P1", detail: "url_error_\(urlErr.code.rawValue)")
             }
         }
         // 非 URLError 的传输层异常（罕见）→ fail-closed 标 P1。

@@ -79,7 +79,7 @@ public actor DefaultAPIClient: APIClient {
         case 200:  try requireConfirmOk(data)         // 含幂等重复
         case 409:  throw AppError.network(.leaseExpired)
         case 404:  throw AppError.network(.leaseNotFound)
-        default:   throw AppError.network(.serverError(code: http.statusCode))
+        default:   throw mapUnexpectedStatus(http.statusCode) as AppError
         }
     }
 
@@ -127,6 +127,15 @@ public actor DefaultAPIClient: APIClient {
 
     // MARK: - error translation / status helpers
 
+    /// codex branch-diff F2：非预期 HTTP 状态分类——5xx + 429 = transient 可重试 serverError；
+    /// 其它非预期 4xx（400/401/403/422 等）= terminal（契约/权限/请求错误，重试无意义）。
+    private func mapUnexpectedStatus(_ code: Int) -> AppError {
+        if code >= 500 || code == 429 {
+            return .network(.serverError(code: code))
+        }
+        return .internalError(module: "P1", detail: "http_\(code)")
+    }
+
     /// 把传输层抛出的 URLError / 其它 error 翻译为 AppError；已是 AppError 则透传。
     /// codex R2：协作取消（CancellationError / URLError.cancelled）统一重抛 CancellationError
     /// （AppError-only gate 唯一例外），让调用方区分"主动取消" vs "失败"。
@@ -149,7 +158,7 @@ public actor DefaultAPIClient: APIClient {
             throw AppError.internalError(module: "P1", detail: "non_http_response")
         }
         guard http.statusCode == expected else {
-            throw AppError.network(.serverError(code: http.statusCode))
+            throw mapUnexpectedStatus(http.statusCode) as AppError
         }
     }
 
@@ -163,7 +172,7 @@ public actor DefaultAPIClient: APIClient {
         switch http.statusCode {
         case 200:  return
         case 404:  throw AppError.trainingSet(.fileNotFound)
-        default:   throw AppError.network(.serverError(code: http.statusCode))
+        default:   throw mapUnexpectedStatus(http.statusCode) as AppError
         }
     }
 
