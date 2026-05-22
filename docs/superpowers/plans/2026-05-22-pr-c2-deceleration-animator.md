@@ -563,12 +563,13 @@ struct DecelerationAnimatorTests {
         #expect(box.fake!.fire(ref) == false)   // onTick [weak self] nil → false（驱动应自失活）
     }
 
-    // 12b. elapsedDelta：帧间真实经过时间（大间隙不被当成一帧），证明停顿后大 dt 能到 advance（branch-diff R1）
-    @Test("elapsedDelta reflects real elapsed time across a stall")
+    // 12b. elapsedDelta：帧间真实经过时间（含延迟首帧，last=创建时刻）；大间隙 → advance 大-dt 停止（branch-diff R1/R2）
+    @Test("elapsedDelta reflects real elapsed time including a delayed first frame")
     func elapsedDeltaReflectsRealGap() {
-        #expect(RealFrameDriver.elapsedDelta(now: 100.0, last: 98.0, fallback: 1.0 / 120.0) == 2.0)
-        #expect(RealFrameDriver.elapsedDelta(now: 5.0, last: nil, fallback: 1.0 / 120.0) == 1.0 / 120.0)
-        #expect(abs(RealFrameDriver.elapsedDelta(now: 1.0 + 1.0 / 120.0, last: 1.0, fallback: 1.0 / 120.0) - 1.0 / 120.0) < 1e-9)
+        // 延迟首帧 2s（last = 创建时刻）：dt = 2.0 → advance 因 dt>=1.0 停止
+        #expect(RealFrameDriver.elapsedDelta(now: 100.0, last: 98.0) == 2.0)
+        // 正常帧
+        #expect(abs(RealFrameDriver.elapsedDelta(now: 1.0 + 1.0 / 120.0, last: 1.0) - 1.0 / 120.0) < 1e-9)
     }
 
     #if !canImport(UIKit)
@@ -729,7 +730,7 @@ public final class DecelerationAnimator {
 @MainActor
 final class RealFrameDriver: FrameDriving {
     private let onTick: @MainActor (CGFloat) -> Bool
-    private var lastTimestamp: CFTimeInterval?
+    private var lastTimestamp: CFTimeInterval
     #if canImport(UIKit)
     private var link: CADisplayLink?
     #else
@@ -738,6 +739,9 @@ final class RealFrameDriver: FrameDriving {
 
     init(onTick: @escaping @MainActor (CGFloat) -> Bool) {
         self.onTick = onTick
+        // 记录创建时刻（CACurrentMediaTime 与 CADisplayLink.timestamp 同 media 时钟）；
+        // 使首帧 dt 反映 start→首帧 的真实经过（含停顿/后台），不漏 dt>=1.0 停止 guard（branch-diff R1/R2）。
+        self.lastTimestamp = CACurrentMediaTime()
         #if canImport(UIKit)
         let l = CADisplayLink(target: self, selector: #selector(step(_:)))
         l.add(to: .main, forMode: .common)
@@ -760,26 +764,23 @@ final class RealFrameDriver: FrameDriving {
         #endif
     }
 
-    /// 帧间**真实经过时间**（秒）；首帧（last==nil）用 fallback。
-    /// 关键（branch-diff R1）：用真实经过时间（而非 CADisplayLink 帧预算 targetTimestamp-timestamp），
-    /// 让 `DecelerationModel.advance` 的大-dt 后台/停顿停止 guard 在 run loop 停顿后真正生效。
-    nonisolated static func elapsedDelta(now: CFTimeInterval, last: CFTimeInterval?, fallback: CFTimeInterval) -> CFTimeInterval {
-        guard let last else { return fallback }
-        return now - last
+    /// 帧间**真实经过时间**（秒）。用真实经过时间（而非 CADisplayLink 帧预算 targetTimestamp-timestamp），
+    /// 让 `DecelerationModel.advance` 的大-dt 后台/停顿停止 guard 在 run loop 停顿后真正生效（branch-diff R1/R2）。
+    nonisolated static func elapsedDelta(now: CFTimeInterval, last: CFTimeInterval) -> CFTimeInterval {
+        now - last
     }
 
     #if canImport(UIKit)
     @objc private func step(_ link: CADisplayLink) {
         let now = link.timestamp
-        let dt = Self.elapsedDelta(now: now, last: lastTimestamp,
-                                   fallback: link.targetTimestamp - link.timestamp)
+        let dt = Self.elapsedDelta(now: now, last: lastTimestamp)
         lastTimestamp = now
         if !onTick(CGFloat(dt)) { invalidate() }
     }
     #else
     @objc private func stepTimer() {
         let now = CACurrentMediaTime()
-        let dt = Self.elapsedDelta(now: now, last: lastTimestamp, fallback: 1.0 / 120.0)
+        let dt = Self.elapsedDelta(now: now, last: lastTimestamp)
         lastTimestamp = now
         if !onTick(CGFloat(dt)) { invalidate() }
     }
@@ -874,4 +875,5 @@ git commit -m "docs(C2): 验收清单"
 - R3-F1 UIKit 驱动只编译不运行 → DD-1/DD-5 注入式 FrameDriving + fake，driver 调度/失活/清理/代次在 `swift test` 确定性覆盖（测试 #1/#3/#4/#7/#11/#12）；已验证 Catalyst 不能跑测试故不依赖之 ✓；R3-F2 grep 误伤 → 验收 #7 改只查 `PanelViewState` ✓。
 - R4-F1 验收 grep 仍误伤（注释含 PanelViewState 字面）→ onUpdate 注释去字面 ✓；R4-F2 CADisplayLink 无运行时 gate → 「Accepted residual」+ iOS-sim/Catalyst 两 destination 不可行证据，user 接受残留 ✓。
 - requesting-code-review I1（`start` 低于停止阈值初速度触发 spurious onFinish）→ `start` 守卫加 `abs(initialVelocity) >= model.stopThreshold` + 回归测试 #9b ✓（commit 0116e23）。
-- branch-diff R1（UIKit 驱动传帧预算 `targetTimestamp-timestamp` 而非真实经过时间，停顿后大-dt 停止 guard 失效）→ 两分支统一 `RealFrameDriver.elapsedDelta(now:last:fallback:)` 真经过时间 + 单测 #12b ✓（commit 8bc6f01）。spec plan §3 L62 字面 bug 已 verify-and-correct。
+- branch-diff R1（UIKit 驱动传帧预算 `targetTimestamp-timestamp` 而非真实经过时间，停顿后大-dt 停止 guard 失效）→ 两分支统一 `RealFrameDriver.elapsedDelta` 真经过时间 + 单测 #12b ✓（commit 8bc6f01）。spec plan §3 L62 字面 bug 已 verify-and-correct。
+- branch-diff R2（首帧 last==nil 走 fallback，start→首帧间停顿被漏）→ init 时 `lastTimestamp = CACurrentMediaTime()`（消除 fallback 分支），首帧 dt 反映真实"创建→首帧"经过 + 单测覆盖延迟首帧 ✓（commit f2a5c6b）。
