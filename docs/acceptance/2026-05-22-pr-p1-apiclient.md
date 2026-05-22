@@ -10,6 +10,8 @@
 `tests/scripts/test-check-p1-apperror-gate.sh`、
 `docs/governance/m04-apperror-translation-gate.md`（升级）、各配套测试。
 
+**branch-diff R1**：2 high（terminal URLError + 非预期 4xx 误报 recoverable）→ 全修（TLS/auth/cert + 400/401/403/422 → terminal internalError）
+
 **Codex plan-stage 对抗 review 统计**：共 5 轮：
 - R1：confirm-body 格式 + count 参数校验
 - R2：leaseId UUID 校验 + 取消语义 + download 临时文件清理 + M0.4 gate 闭合
@@ -45,13 +47,13 @@
 
 | Step | Action | Expected | Pass / Fail |
 |---|---|---|---|
-| B1 | 终端运行：`cd ios/Contracts && swift test --filter DefaultAPIClientTests 2>&1 \| tail -5` | 含 `Executed 29 tests, with 0 failures`（reserve / download / confirm 三方法全绿） | □ Pass / □ Fail |
+| B1 | 终端运行：`cd ios/Contracts && swift test --filter DefaultAPIClientTests 2>&1 \| tail -5` | 含 `Executed 31 tests, with 0 failures`（reserve / download / confirm 三方法全绿） | □ Pass / □ Fail |
 
 ---
 
 ### C Gate 1 错误翻译证据映射表
 
-每行对应一个注入场景 → 测试函数 → 期望的 AppError。所有测试已含在 B1 的 29 个用例中。
+每行对应一个注入场景 → 测试函数 → 期望的 AppError。DefaultAPIClientTests 31 个用例、APIErrorMappingTests 7 个用例均含在内。
 
 #### C1 reserveTrainingSets 失败场景
 
@@ -60,9 +62,10 @@
 | count = 0 / -1 / 101（无效参数） | 直接传入非法 count | `test_reserve_invalid_count_throws_without_issuing_request` | `.internalError("P1", _)`，且**不发出** HTTP 请求 |
 | 服务端返回条目数 > 请求数（overfull） | HTTP 200 body 含 2 条但 count=1 | `test_reserve_overfull_response_throws_internalError` | `.internalError("P1", _)` |
 | 响应 body 格式非 JSON | HTTP 200 + `{not json` | `test_reserve_malformed_body_throws_internalError_p1` | `.internalError("P1", _)` |
-| HTTP 500 | statusCode=500 | `test_reserve_http_500_throws_serverError` | `.network(.serverError(code: 500))` |
+| HTTP 500 | statusCode=500 | `test_reserve_http_500_throws_serverError` | `.network(.serverError(code: 500))`（5xx → recoverable） |
+| 非预期 4xx（如 400） | statusCode=400 | `test_reserve_http_400_throws_terminal_internalError` | `.internalError("P1", "http_400")`（terminal/不可重试） |
 | 网络超时（URLError.timedOut） | error=URLError(.timedOut) | `test_reserve_timeout_throws_network_timeout` | `.network(.timeout)` |
-| 无网络（URLError.notConnectedToInternet） | error=URLError(.notConnectedToInternet) | `test_reserve_offline_throws_network_offline` | `.network(.offline)` |
+| 无网络（URLError.notConnectedToInternet，属连通性 URLError） | error=URLError(.notConnectedToInternet) | `test_reserve_offline_throws_network_offline` | `.network(.offline)`（仅瞬断连通性代码 → recoverable） |
 | 响应非 HTTPURLResponse | returnNonHTTPResponse=true | `test_reserve_non_http_response_throws_internalError` | `.internalError("P1", _)` |
 | meta.lease_id 非 UUID 格式 | body 中 lease_id="not-a-uuid" | `test_reserve_invalid_lease_id_in_meta_throws` | `.internalError("P1", "meta_invalid_lease_id")` |
 | meta.expires_at 非 ISO8601 | body 中 expires_at="not-a-date" | `test_reserve_invalid_expires_at_throws` | `.internalError("P1", "meta_invalid_expires_at")` |
@@ -73,8 +76,11 @@
 | 失败场景 | 注入方式 | 测试函数 | 期望 AppError |
 |---|---|---|---|
 | HTTP 404（文件不存在） | statusCode=404 | `test_download_404_throws_fileNotFound_terminal` | `.trainingSet(.fileNotFound)`，`isRecoverable == false` |
-| HTTP 500 | statusCode=500 | `test_download_500_throws_serverError` | `.network(.serverError(code: 500))` |
-| 网络断开（URLError.networkConnectionLost） | error=URLError(.networkConnectionLost) | `test_download_offline_throws_network_offline` | `.network(.offline)` |
+| HTTP 500 | statusCode=500 | `test_download_500_throws_serverError` | `.network(.serverError(code: 500))`（5xx → recoverable） |
+| 网络断开（URLError.networkConnectionLost，属连通性 URLError） | error=URLError(.networkConnectionLost) | `test_download_offline_throws_network_offline` | `.network(.offline)`（仅瞬断连通性代码 → recoverable） |
+| TLS / 证书错误（URLError.secureConnectionFailed） | error=URLError(.secureConnectionFailed) | `test_tls_error_maps_to_terminal_internalError` | `.internalError("P1", "url_error_…")`（terminal/不可重试） |
+| HTTP Auth 要求（URLError.userAuthenticationRequired） | error=URLError(.userAuthenticationRequired) | `test_auth_required_maps_to_terminal_internalError` | `.internalError("P1", "url_error_…")`（terminal） |
+| 服务端响应异常（URLError.badServerResponse） | error=URLError(.badServerResponse) | `test_bad_server_response_maps_to_terminal_internalError` | `.internalError("P1", "url_error_…")`（terminal） |
 
 #### C3 confirmTrainingSet 失败场景
 
@@ -85,7 +91,8 @@
 | HTTP 200 且 `{"ok":false}` | HTTP 200 + `{"ok":false}` | `test_confirm_200_ok_false_throws_not_ok` | `.internalError("P1", "confirm_not_ok")` |
 | HTTP 409（lease 已过期） | statusCode=409 | `test_confirm_409_throws_leaseExpired` | `.network(.leaseExpired)` |
 | HTTP 404（lease 不存在） | statusCode=404 | `test_confirm_404_throws_leaseNotFound` | `.network(.leaseNotFound)` |
-| HTTP 500 | statusCode=500 | `test_confirm_500_throws_serverError` | `.network(.serverError(code: 500))` |
+| HTTP 500 | statusCode=500 | `test_confirm_500_throws_serverError` | `.network(.serverError(code: 500))`（5xx → recoverable） |
+| 非预期 4xx（如 403） | statusCode=403 | `test_confirm_403_throws_terminal_internalError` | `.internalError("P1", "http_403")`（terminal/不可重试） |
 
 #### C4 取消语义（CancellationError 不封装为 AppError）
 
