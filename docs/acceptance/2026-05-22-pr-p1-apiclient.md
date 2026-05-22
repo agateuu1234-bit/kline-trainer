@@ -2,8 +2,8 @@
 
 **PR 范围**：P1 APIClient（Wave 1 顺位 2）——新增/修改文件：
 `backend/openapi.yaml`、`tests/contract-fixtures/`、
-`ios/Contracts/Sources/KlineTrainerPersistence/Network/APIClient.swift`、
-`ios/Contracts/Sources/KlineTrainerPersistence/Network/HTTPRequesting.swift`、
+`ios/Contracts/Sources/KlineTrainerContracts/Network/APIClient.swift`、
+`ios/Contracts/Sources/KlineTrainerContracts/Network/HTTPRequesting.swift`、
 `ios/Contracts/Sources/KlineTrainerPersistence/DefaultAPIClient.swift`、
 `ios/Contracts/Sources/KlineTrainerPersistence/Internal/APIErrorMapping.swift`、
 `scripts/check_p1_apperror_gate.sh`、
