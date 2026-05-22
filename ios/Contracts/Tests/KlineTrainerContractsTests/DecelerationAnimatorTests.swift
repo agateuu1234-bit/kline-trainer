@@ -193,15 +193,13 @@ struct DecelerationAnimatorTests {
         #expect(box.fake!.fire(ref) == false)
     }
 
-    // 12b. elapsedDelta：帧间真实经过时间（大间隙不被当成一帧），证明停顿后大 dt 能到 advance（branch-diff R1）
-    @Test("elapsedDelta reflects real elapsed time across a stall")
+    // 12b. elapsedDelta：帧间真实经过时间（含延迟首帧，last=创建时刻）；大间隙 → advance 大-dt 停止（branch-diff R1/R2）
+    @Test("elapsedDelta reflects real elapsed time including a delayed first frame")
     func elapsedDeltaReflectsRealGap() {
-        // 停顿 2s：now - last = 2.0（非帧预算），advance 会因 dt>=1.0 停止
-        #expect(RealFrameDriver.elapsedDelta(now: 100.0, last: 98.0, fallback: 1.0 / 120.0) == 2.0)
-        // 首帧 last==nil → fallback
-        #expect(RealFrameDriver.elapsedDelta(now: 5.0, last: nil, fallback: 1.0 / 120.0) == 1.0 / 120.0)
+        // 延迟首帧 2s（last = 创建时刻）：dt = 2.0 → advance 因 dt>=1.0 停止
+        #expect(RealFrameDriver.elapsedDelta(now: 100.0, last: 98.0) == 2.0)
         // 正常帧
-        #expect(abs(RealFrameDriver.elapsedDelta(now: 1.0 + 1.0 / 120.0, last: 1.0, fallback: 1.0 / 120.0) - 1.0 / 120.0) < 1e-9)
+        #expect(abs(RealFrameDriver.elapsedDelta(now: 1.0 + 1.0 / 120.0, last: 1.0) - 1.0 / 120.0) < 1e-9)
     }
 
     #if !canImport(UIKit)

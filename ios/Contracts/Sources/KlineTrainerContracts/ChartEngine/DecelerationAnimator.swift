@@ -115,7 +115,7 @@ public final class DecelerationAnimator {
 @MainActor
 final class RealFrameDriver: FrameDriving {
     private let onTick: @MainActor (CGFloat) -> Bool
-    private var lastTimestamp: CFTimeInterval?
+    private var lastTimestamp: CFTimeInterval
     #if canImport(UIKit)
     private var link: CADisplayLink?
     #else
@@ -124,6 +124,9 @@ final class RealFrameDriver: FrameDriving {
 
     init(onTick: @escaping @MainActor (CGFloat) -> Bool) {
         self.onTick = onTick
+        // 记录创建时刻（CACurrentMediaTime 与 CADisplayLink.timestamp 同 media 时钟）；
+        // 使首帧 dt 反映 start→首帧 的真实经过（含停顿/后台），不漏 dt>=1.0 停止 guard（branch-diff R1/R2）。
+        self.lastTimestamp = CACurrentMediaTime()
         #if canImport(UIKit)
         let l = CADisplayLink(target: self, selector: #selector(step(_:)))
         l.add(to: .main, forMode: .common)
@@ -146,26 +149,23 @@ final class RealFrameDriver: FrameDriving {
         #endif
     }
 
-    /// 帧间**真实经过时间**（秒）；首帧（last==nil）用 fallback。
-    /// 关键：用真实经过时间（而非 CADisplayLink 帧预算 targetTimestamp-timestamp），
-    /// 让 `DecelerationModel.advance` 的大-dt 后台/停顿停止 guard 在 run loop 停顿后真正生效（branch-diff R1）。
-    nonisolated static func elapsedDelta(now: CFTimeInterval, last: CFTimeInterval?, fallback: CFTimeInterval) -> CFTimeInterval {
-        guard let last else { return fallback }
-        return now - last
+    /// 帧间**真实经过时间**（秒）。用真实经过时间（而非 CADisplayLink 帧预算 targetTimestamp-timestamp），
+    /// 让 `DecelerationModel.advance` 的大-dt 后台/停顿停止 guard 在 run loop 停顿后真正生效（branch-diff R1/R2）。
+    nonisolated static func elapsedDelta(now: CFTimeInterval, last: CFTimeInterval) -> CFTimeInterval {
+        now - last
     }
 
     #if canImport(UIKit)
     @objc private func step(_ link: CADisplayLink) {
         let now = link.timestamp
-        let dt = Self.elapsedDelta(now: now, last: lastTimestamp,
-                                   fallback: link.targetTimestamp - link.timestamp)
+        let dt = Self.elapsedDelta(now: now, last: lastTimestamp)
         lastTimestamp = now
         if !onTick(CGFloat(dt)) { invalidate() }
     }
     #else
     @objc private func stepTimer() {
         let now = CACurrentMediaTime()
-        let dt = Self.elapsedDelta(now: now, last: lastTimestamp, fallback: 1.0 / 120.0)
+        let dt = Self.elapsedDelta(now: now, last: lastTimestamp)
         lastTimestamp = now
         if !onTick(CGFloat(dt)) { invalidate() }
     }
