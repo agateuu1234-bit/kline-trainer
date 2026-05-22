@@ -26,11 +26,12 @@ paths:
         调度器每日 05:00 把 lease_expires_at ≤ now 的 reserved 回滚为 unsent 兜底。
         内网单用户场景下 prefetch/CDN/浏览器 retry 均不适用（客户端固定是 iOS app）。
 
-        **库存不足行为未在本契约冻结**：unsent 行数 < count 时的返回结构
-        （partial lease 还是错误码）由 Plan 2 B3 FastAPI 实现时定义，届时回补
-        openapi.yaml（增 4xx 响应 + test_openapi.py 断言）。B4 调度器每日补足
-        unsent 至 100（spec §8.1）使得触发概率极低，作为 Plan 2 pre-condition
-        residual 接受。
+        **库存不足行为（contract-freeze，Wave 1 顺位 2 Task 0）**：unsent 行数 < count
+        时，服务端返回 **200 LeaseResponse**，sets 含 0..count 项（partial fulfillment，
+        从不为库存不足返回错误码）。count 是上界而非保证；客户端 P1 按返回的实际 sets 数
+        处理，空 sets（[]）是合法响应。B4 调度器每日 05:00 补足 unsent 至 100 使 partial
+        触发概率极低。B3 FastAPI（顺位 18）实现必须遵循本冻结契约，与
+        tests/contract-fixtures/lease_response_{empty,partial,full}.json 一致。
       operationId: reserveTrainingSets
       parameters:
         - in: query
@@ -78,6 +79,12 @@ paths:
               schema:
                 type: string
                 format: binary
+        '404':
+          description: training set 不存在（terminal，客户端不应重试该 id）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /training-set/{id}/confirm:
     post:

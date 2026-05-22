@@ -5,6 +5,8 @@ CI layer in .github/workflows/openapi-smoke.yml runs the same tests on Ubuntu.
 """
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 import yaml
@@ -113,3 +115,76 @@ def test_download_has_content_md5_header():
         spec["paths"]["/training-set/{id}/download"]["get"]["responses"]["200"]["headers"]
     )
     assert "Content-MD5" in headers
+
+
+CONTRACT_FIXTURES_DIR = (
+    Path(__file__).parent.parent.parent / "tests" / "contract-fixtures"
+)
+
+
+def _load_fixture(name: str) -> dict:
+    with (CONTRACT_FIXTURES_DIR / f"{name}.json").open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _assert_matches_lease_response(spec: dict, instance: dict) -> None:
+    """Assert instance has all required fields + content_hash matches the frozen pattern (presence + pattern check, not full type validation)."""
+    lr = spec["components"]["schemas"]["LeaseResponse"]
+    for req in lr["required"]:
+        assert req in instance, f"LeaseResponse missing required field {req}"
+    item = spec["components"]["schemas"]["TrainingSetMetaItem"]
+    pattern = item["properties"]["content_hash"]["pattern"]
+    assert isinstance(instance["sets"], list)
+    for s in instance["sets"]:
+        for req in item["required"]:
+            assert req in s, f"TrainingSetMetaItem missing required field {req}"
+        assert re.fullmatch(pattern, s["content_hash"]), s["content_hash"]
+
+
+def test_meta_sets_allows_empty_array():
+    """contract-freeze: LeaseResponse.sets 无 minItems → 空数组合法（partial-200）。"""
+    spec = _load_spec()
+    sets_schema = spec["components"]["schemas"]["LeaseResponse"]["properties"]["sets"]
+    assert "minItems" not in sets_schema
+
+
+def test_meta_description_freezes_partial_behavior():
+    """meta description 必须冻结库存不足 = partial-200（不再 defer 到 B3）。"""
+    spec = _load_spec()
+    desc = spec["paths"]["/training-sets/meta"]["get"]["description"]
+    assert "partial fulfillment" in desc.lower()
+    assert "未在本契约冻结" not in desc
+
+
+def test_full_lease_fixture_matches_schema():
+    _assert_matches_lease_response(_load_spec(), _load_fixture("lease_response_full"))
+
+
+def test_partial_lease_fixture_matches_schema():
+    inst = _load_fixture("lease_response_partial")
+    assert len(inst["sets"]) >= 1
+    _assert_matches_lease_response(_load_spec(), inst)
+
+
+def test_empty_lease_fixture_matches_schema():
+    inst = _load_fixture("lease_response_empty")
+    assert inst["sets"] == []
+    _assert_matches_lease_response(_load_spec(), inst)
+
+
+def test_error_fixtures_match_error_enum():
+    spec = _load_spec()
+    allowed = set(spec["components"]["schemas"]["ErrorResponse"]["properties"]["error"]["enum"])
+    assert _load_fixture("error_lease_expired")["error"] in allowed
+    assert _load_fixture("error_not_found")["error"] in allowed
+
+
+def test_confirm_ok_fixture_shape():
+    assert _load_fixture("confirm_ok") == {"ok": True}
+
+
+def test_download_documents_404_not_found():
+    """codex R5：download 404（id 不存在/journal 损坏）须在契约文档化（P1 映射 terminal fileNotFound）。"""
+    spec = _load_spec()
+    responses = spec["paths"]["/training-set/{id}/download"]["get"]["responses"]
+    assert "404" in responses
