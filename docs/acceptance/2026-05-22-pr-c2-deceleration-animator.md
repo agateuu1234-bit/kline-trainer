@@ -4,7 +4,7 @@
 
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
-| 1 | 运行 `swift test --package-path ios/Contracts --filter DecelerationModel` | 终端输出含 `14 tests`、`0 failures` | failures = 0 → 通过；否则不通过 |
+| 1 | 运行 `swift test --package-path ios/Contracts --filter DecelerationModel` | 终端输出含 `15 tests`、`0 failures` | failures = 0 → 通过；否则不通过 |
 | 2 | 运行 `swift test --package-path ios/Contracts --filter DecelerationAnimator` | 终端输出含 `16 tests`、`0 failures` | failures = 0 → 通过；否则不通过 |
 | 3 | 运行 `swift test --package-path ios/Contracts` | 全量测试 0 failures | failures = 0 → 通过；否则不通过 |
 | 4 | 运行 `swift build --package-path ios/Contracts` | 输出 `Build complete!` | 出现该串且无 error → 通过；否则不通过 |
