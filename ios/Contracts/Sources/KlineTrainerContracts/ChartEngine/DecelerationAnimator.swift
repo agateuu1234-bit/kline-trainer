@@ -93,6 +93,13 @@ public final class DecelerationAnimator {
         stop()
     }
 
+    /// 同步拆解（branch-diff R3）：owner 释放本对象时立即失活帧驱动，不依赖后续 tick
+    /// （帧暂停/后台时后续 tick 可能不来 → 否则 run-loop 持有的 driver 会滞留）。
+    /// `isolated deinit`（SE-0371）使 deinit 在 main actor 运行，可调 @MainActor 的 `invalidate()`。
+    isolated deinit {
+        driver?.invalidate()
+    }
+
     // MARK: - 测试缝（internal，经 @testable import 可见）
 
     /// 推进一帧并派发回调；代次不符直接忽略（R2-F1）。

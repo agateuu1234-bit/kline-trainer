@@ -193,6 +193,20 @@ struct DecelerationAnimatorTests {
         #expect(box.fake!.fire(ref) == false)
     }
 
+    // 12c. 释放活跃 animator 立即失活驱动（同步拆解，无需后续 tick；branch-diff R3）
+    @Test("releasing active animator invalidates driver synchronously (no tick)")
+    func releaseInvalidatesDriverSynchronously() {
+        final class Box { var fake: FakeFrameDriver? }
+        let box = Box()
+        var a: DecelerationAnimator? = DecelerationAnimator(makeDriver: { onTick in
+            let f = FakeFrameDriver(onTick: onTick); box.fake = f; return f
+        })
+        a!.start(initialVelocity: 1000)
+        #expect(box.fake?.isInvalidated == false)
+        a = nil   // isolated deinit → driver?.invalidate()
+        #expect(box.fake?.isInvalidated == true)
+    }
+
     // 12b. elapsedDelta：帧间真实经过时间（含延迟首帧，last=创建时刻）；大间隙 → advance 大-dt 停止（branch-diff R1/R2）
     @Test("elapsedDelta reflects real elapsed time including a delayed first frame")
     func elapsedDeltaReflectsRealGap() {
