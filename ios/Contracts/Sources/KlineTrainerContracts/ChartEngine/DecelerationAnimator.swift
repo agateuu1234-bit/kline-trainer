@@ -162,19 +162,18 @@ final class RealFrameDriver: FrameDriving {
         now - last
     }
 
-    #if canImport(UIKit)
-    @objc private func step(_ link: CADisplayLink) {
-        let now = link.timestamp
-        let dt = Self.elapsedDelta(now: now, last: lastTimestamp)
-        lastTimestamp = now
-        if !onTick(CGFloat(dt)) { invalidate() }
-    }
-    #else
-    @objc private func stepTimer() {
+    /// 用 `CACurrentMediaTime()`（单调钟，与 init 播种同源）算帧间真实经过时间——
+    /// 不用 `CADisplayLink.timestamp`（"上一显示帧"时刻，首帧可能早于播种 → dt<=0 → 误停，branch-diff R4-F2）。
+    private func tick() {
         let now = CACurrentMediaTime()
         let dt = Self.elapsedDelta(now: now, last: lastTimestamp)
         lastTimestamp = now
         if !onTick(CGFloat(dt)) { invalidate() }
     }
+
+    #if canImport(UIKit)
+    @objc private func step(_ link: CADisplayLink) { tick() }
+    #else
+    @objc private func stepTimer() { tick() }
     #endif
 }

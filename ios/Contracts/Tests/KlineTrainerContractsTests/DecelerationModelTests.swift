@@ -141,4 +141,22 @@ struct DecelerationModelTests {
             #expect(m.velocity == 0)
         }
     }
+
+    // 15. 位移在不同帧切分下一致（frame-rate independent offset，branch-diff R4-F1）
+    @Test("offset delta is invariant to frame chunking over equal elapsed time")
+    func chunkingInvariantDelta() {
+        let total: CGFloat = 0.1
+        var big = DecelerationModel(friction: f, stopThreshold: thr, refInterval: ref, velocity: 1000)
+        var dBig: CGFloat = 0
+        if case .move(let d) = big.advance(dt: total) { dBig = d }
+        var small = DecelerationModel(friction: f, stopThreshold: thr, refInterval: ref, velocity: 1000)
+        var dSmall: CGFloat = 0
+        var t = total
+        while t > 1e-9 {
+            let step = min(t, ref)
+            if case .move(let d) = small.advance(dt: step) { dSmall += d }
+            t -= step
+        }
+        #expect(abs(dBig - dSmall) < 1e-6)
+    }
 }

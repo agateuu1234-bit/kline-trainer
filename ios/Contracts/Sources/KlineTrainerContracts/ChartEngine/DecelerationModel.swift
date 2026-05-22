@@ -32,25 +32,36 @@ struct DecelerationModel: Equatable, Sendable {
     }
 
     /// 推进一帧。`dt` 单位为秒（来自帧驱动 timestamp 差）。
+    /// 按 refInterval 细分积分，使总位移在不同帧切分下一致（frame-rate independent offset，branch-diff R4-F1）。
     mutating func advance(dt: CGFloat) -> Outcome {
         // 后台恢复 / 异常 dt：直接停（plan §3 L63-67）
         guard dt > 0, dt < 1.0 else {
             velocity = 0
             return .stop
         }
-        // 帧率无关指数衰减（plan §3 L68）
-        velocity *= pow(friction, dt / refInterval)
-        // DD-8 / R1-F2 defense-in-depth：非有限速度终止，绝不外溢 NaN/inf delta
-        guard velocity.isFinite else {
-            velocity = 0
-            return .stop
+        var remaining = dt
+        var totalDelta: CGFloat = 0
+        while remaining > 1e-9 {
+            let step = Swift.min(remaining, refInterval)
+            // 帧率无关指数衰减（plan §3 L68）
+            velocity *= pow(friction, step / refInterval)
+            // DD-8 / R1-F2 defense-in-depth：非有限速度终止，绝不外溢 NaN/inf delta
+            guard velocity.isFinite else {
+                velocity = 0
+                return .stop
+            }
+            // 停止阈值（plan §3 L69-72）
+            if abs(velocity) < stopThreshold {
+                velocity = 0
+                break
+            }
+            totalDelta += velocity * step
+            remaining -= step
         }
-        // 停止阈值（plan §3 L69-72）
-        if abs(velocity) < stopThreshold {
-            velocity = 0
-            return .stop
+        // 细分中途停下：派发已累积位移（若有），由下一帧 advance 返回 .stop
+        if velocity == 0 {
+            return totalDelta != 0 ? .move(delta: totalDelta) : .stop
         }
-        // 继续：派发衰减后速度 × dt（plan §3 L73）
-        return .move(delta: velocity * dt)
+        return .move(delta: totalDelta)
     }
 }
