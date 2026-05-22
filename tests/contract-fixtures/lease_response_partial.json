@@ -1,0 +1,7 @@
+{
+  "lease_id": "11111111-2222-4333-8444-555566667777",
+  "expires_at": "2026-05-22T12:40:00Z",
+  "sets": [
+    { "id": 201, "stock_code": "600519", "stock_name": "贵州茅台", "filename": "600519_201805.zip", "schema_version": 1, "content_hash": "0f1e2d3c" }
+  ]
+}

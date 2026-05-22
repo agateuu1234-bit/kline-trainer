@@ -1,0 +1,8 @@
+{
+  "lease_id": "6f8a9c1d-2b3e-4f50-8a12-7d9e0f1b2c3d",
+  "expires_at": "2026-05-22T12:34:56Z",
+  "sets": [
+    { "id": 101, "stock_code": "600519", "stock_name": "贵州茅台", "filename": "600519_202001.zip", "schema_version": 1, "content_hash": "deadbeef" },
+    { "id": 102, "stock_code": "000001", "stock_name": "平安银行", "filename": "000001_202103.zip", "schema_version": 1, "content_hash": "a0b1c2d3" }
+  ]
+}
