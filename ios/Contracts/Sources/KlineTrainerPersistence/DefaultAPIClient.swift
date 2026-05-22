@@ -140,7 +140,9 @@ public actor DefaultAPIClient: APIClient {
     /// codex R2：协作取消（CancellationError / URLError.cancelled）统一重抛 CancellationError
     /// （AppError-only gate 唯一例外），让调用方区分"主动取消" vs "失败"。
     /// codex R3：catch-all 用 `(error as? AppError) ?? translate(...)` 单表达式，无 bare-variable 旁路。
-    private func perform<T>(_ op: () async throws -> T) async throws -> T {
+    // T: Sendable —— op 在 nonisolated 上下文执行，结果须跨回 actor 边界（CI macos-15 Swift 6.0
+    // strict-concurrency 强制；本地较新 toolchain 靠 region-based isolation 推断未报）。
+    private func perform<T: Sendable>(_ op: () async throws -> T) async throws -> T {
         do {
             return try await op()
         } catch is CancellationError {
