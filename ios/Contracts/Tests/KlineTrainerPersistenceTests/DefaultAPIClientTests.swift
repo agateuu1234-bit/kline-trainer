@@ -235,7 +235,7 @@ final class DefaultAPIClientTests: XCTestCase {
         do {
             _ = try await api.downloadTrainingSet(id: 7)
             XCTFail("500 download should throw")
-        } catch {}
+        } catch { /* 预期抛错；类型不重要，此处只验证临时文件清理 */ }
         let temp = fake.lastDownloadTempURL
         XCTAssertNotNil(temp)
         XCTAssertFalse(FileManager.default.fileExists(atPath: temp!.path), "temp file must be cleaned on failure")

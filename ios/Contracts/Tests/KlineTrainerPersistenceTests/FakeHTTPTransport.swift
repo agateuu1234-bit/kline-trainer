@@ -38,6 +38,7 @@ final class FakeHTTPTransport: HTTPRequesting, @unchecked Sendable {
     func download(for request: URLRequest) async throws -> (URL, URLResponse) {
         record(request)
         if let e = stub.error { throw e }
+        // 模拟 URLSession.download：任何完成的 HTTP 事务都把 body 写入临时文件（含非 200 的 error body）——这正是 DefaultAPIClient defer 清理要覆盖的场景。
         let tmp = FileManager.default.temporaryDirectory
             .appending(path: "fake-dl-\(UUID().uuidString).zip")
         try (stub.downloadFileContents ?? Data()).write(to: tmp)
