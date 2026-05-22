@@ -66,7 +66,8 @@ public final class DecelerationAnimator {
     /// 以初速度启动惯性滚动。重复调用会重置（先 stop 失活旧驱动 + 代次自增 + 归位）。
     public func start(initialVelocity: CGFloat) {
         stop()
-        guard initialVelocity.isFinite else { return }   // DD-8 / R1-F2
+        // DD-8 / R1-F2 + 自审 I1：非有限或低于停止阈值的初速度不算惯性滚动 → no-op（不建驱动、不触发 onFinish）
+        guard initialVelocity.isFinite, abs(initialVelocity) >= model.stopThreshold else { return }
         currentGeneration &+= 1
         let gen = currentGeneration
         model.velocity = initialVelocity
@@ -151,6 +152,7 @@ final class RealFrameDriver: FrameDriving {
     }
     #else
     @objc private func stepTimer() {
+        // 实际经过时间（vs UIKit 分支用 targetTimestamp-timestamp 的帧预算）；120Hz 下差异亚毫秒
         let now = CACurrentMediaTime()
         let dt = lastTimestamp.map { now - $0 } ?? (1.0 / 120.0)
         lastTimestamp = now

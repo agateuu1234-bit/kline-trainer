@@ -137,6 +137,20 @@ struct DecelerationAnimatorTests {
         }
     }
 
+    // 9b. 低于停止阈值的初速度不启动（自审 I1：避免零/微速度 start 触发 spurious onFinish）
+    @Test("sub-threshold initial velocity does not start")
+    func subThresholdInitialVelocityNoStart() {
+        let (a, fake) = makeWithFake()
+        var updates = 0, finishes = 0
+        a.onUpdate = { _ in updates += 1 }
+        a.onFinish = { finishes += 1 }
+        a.start(initialVelocity: 0.3)   // < stopThreshold 0.5
+        #expect(!a.isDecelerating)
+        #expect(fake() == nil)
+        #expect(updates == 0)
+        #expect(finishes == 0)
+    }
+
     // 10. 旧代次 handleTick 被忽略
     @Test("stale-generation tick is ignored after restart")
     func staleGenerationIgnored() {
