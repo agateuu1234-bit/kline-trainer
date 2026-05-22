@@ -193,6 +193,17 @@ struct DecelerationAnimatorTests {
         #expect(box.fake!.fire(ref) == false)
     }
 
+    // 12b. elapsedDelta：帧间真实经过时间（大间隙不被当成一帧），证明停顿后大 dt 能到 advance（branch-diff R1）
+    @Test("elapsedDelta reflects real elapsed time across a stall")
+    func elapsedDeltaReflectsRealGap() {
+        // 停顿 2s：now - last = 2.0（非帧预算），advance 会因 dt>=1.0 停止
+        #expect(RealFrameDriver.elapsedDelta(now: 100.0, last: 98.0, fallback: 1.0 / 120.0) == 2.0)
+        // 首帧 last==nil → fallback
+        #expect(RealFrameDriver.elapsedDelta(now: 5.0, last: nil, fallback: 1.0 / 120.0) == 1.0 / 120.0)
+        // 正常帧
+        #expect(abs(RealFrameDriver.elapsedDelta(now: 1.0 + 1.0 / 120.0, last: 1.0, fallback: 1.0 / 120.0) - 1.0 / 120.0) < 1e-9)
+    }
+
     #if !canImport(UIKit)
     // 13. macOS 真 Timer 驱动 smoke：start() → onUpdate(≥1) → onFinish
     @Test("macOS real Timer driver produces updates then finishes")

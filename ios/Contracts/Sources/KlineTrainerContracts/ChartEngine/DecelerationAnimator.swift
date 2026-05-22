@@ -115,11 +115,11 @@ public final class DecelerationAnimator {
 @MainActor
 final class RealFrameDriver: FrameDriving {
     private let onTick: @MainActor (CGFloat) -> Bool
+    private var lastTimestamp: CFTimeInterval?
     #if canImport(UIKit)
     private var link: CADisplayLink?
     #else
     private var timer: Timer?
-    private var lastTimestamp: CFTimeInterval?
     #endif
 
     init(onTick: @escaping @MainActor (CGFloat) -> Bool) {
@@ -146,15 +146,26 @@ final class RealFrameDriver: FrameDriving {
         #endif
     }
 
+    /// 帧间**真实经过时间**（秒）；首帧（last==nil）用 fallback。
+    /// 关键：用真实经过时间（而非 CADisplayLink 帧预算 targetTimestamp-timestamp），
+    /// 让 `DecelerationModel.advance` 的大-dt 后台/停顿停止 guard 在 run loop 停顿后真正生效（branch-diff R1）。
+    nonisolated static func elapsedDelta(now: CFTimeInterval, last: CFTimeInterval?, fallback: CFTimeInterval) -> CFTimeInterval {
+        guard let last else { return fallback }
+        return now - last
+    }
+
     #if canImport(UIKit)
     @objc private func step(_ link: CADisplayLink) {
-        if !onTick(CGFloat(link.targetTimestamp - link.timestamp)) { invalidate() }
+        let now = link.timestamp
+        let dt = Self.elapsedDelta(now: now, last: lastTimestamp,
+                                   fallback: link.targetTimestamp - link.timestamp)
+        lastTimestamp = now
+        if !onTick(CGFloat(dt)) { invalidate() }
     }
     #else
     @objc private func stepTimer() {
-        // 实际经过时间（vs UIKit 分支用 targetTimestamp-timestamp 的帧预算）；120Hz 下差异亚毫秒
         let now = CACurrentMediaTime()
-        let dt = lastTimestamp.map { now - $0 } ?? (1.0 / 120.0)
+        let dt = Self.elapsedDelta(now: now, last: lastTimestamp, fallback: 1.0 / 120.0)
         lastTimestamp = now
         if !onTick(CGFloat(dt)) { invalidate() }
     }
