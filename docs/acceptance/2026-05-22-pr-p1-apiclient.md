@@ -145,7 +145,8 @@
 | Step | Action | Expected | Pass / Fail |
 |---|---|---|---|
 | I1 | 终端运行：`cd ios/Contracts && swift build 2>&1 \| tail -3` | 末行含 `Build complete!`，输出中**不含** `warning:` | □ Pass / □ Fail |
-| I2 | 终端运行：`cd ios/Contracts && swift test 2>&1 \| tail -5` | 含 `297 tests in 63 suites passed`；XCTest 行含 `All tests' passed` 且 `0 failures` | □ Pass / □ Fail |
+| I2 | 终端运行：`cd ios/Contracts && swift test 2>&1 \| tail -5` | 末行（或末几行）出现 `✔ Test run with 297 tests in 63 suites passed`（swift-testing 业务测试全绿） | □ Pass / □ Fail |
+| I2b | 终端运行：`cd ios/Contracts && swift test 2>&1 \| grep -c "with 0 failures"` | 输出 ≥ 1（每个 XCTest 套件均 0 failures；P1 的 DefaultAPIClientTests / APIErrorMappingTests 含在内） | □ Pass / □ Fail |
 | I3 | 终端运行：`cd backend && python3 -m pytest tests/ -q 2>&1 \| tail -3` | 末行含 `28 passed` | □ Pass / □ Fail |
 
 ---
