@@ -31,7 +31,9 @@
 
 **关键 1（R2 finding 修正）**：上表回调**仅在手势被 `classifySingleFingerPan` 锁定为水平后才发**。垂直 / ambiguous 单指手势全程**不发任何 onPan**（emissions==[]），绝不把 reducer 从 autoTracking 推到 freeScrolling / 启动减速。该不变量由纯函数 `singlePanStep` 承载并被 `SinglePanStepTests` 单测覆盖。UIKit 真实 `.began` 相位被吞，水平锁定瞬间合成一个 `.began` 回调。
 
-**关键 2（R7 finding-2 修正）**：终止时若末段还有残量位移，arbiter 在该回调内**先发一个 `.changed`(残量) 再发终止相位**（共 2 个 onPan）——消费者照常 `.changed→offsetApplied`、终止→`panEnded`，**残量精确应用一次不丢**（消费者无需也不应忽略 `.ended` 之前的 `.changed`）。残量为 0 时只发终止一个。
+**关键 2（R7 finding-2 修正）**：终止时若末段还有残量位移，arbiter 在该回调内**先发一个 `.changed`(残量) 再发终止相位**（共 2 个 onPan）——消费者照常 `.changed→offsetApplied`、终止→`panEnded`，**残量精确应用一次不丢**（消费者无需也不应忽略 `.ended` 之前的 `.changed`）。残量为 0 时只发终止一个。drawing 截获 / 多指接管的取消路径同样补残量再 `.cancelled`（R13 finding-2）。
+
+**关键 3（R13 finding-1 修正）**：`.changed` 增量为 0（识别器重复回调 x 不变）时**不发** onPan——避免下游 `offsetApplied(0)` 空 bump reducer revision、误使绘图快照失效。
 
 ---
 
@@ -252,6 +254,13 @@ struct SinglePanStepTests {
                                 lifecycle: .horizontalActive, lastTranslationX: 30)
         #expect(end.emissions == [SinglePanEmission(deltaX: 0, velocityX: 900, phase: .ended)])
     }
+    // R13 finding-1：horizontalActive 下 x 不变（current==last）→ 不发 .changed，避免下游 offsetApplied(0) 空 bump revision
+    @Test("零 delta .changed 不发回调")
+    func zeroDeltaChangedSuppressed() {
+        let s = singlePanStep(phase: .changed, cumulative: CGPoint(x: 30, y: 7), velocityX: 700,
+                              lifecycle: .horizontalActive, lastTranslationX: 30)
+        #expect(s.emissions.isEmpty); #expect(s.lifecycle == .horizontalActive); #expect(s.lastTranslationX == 30)
+    }
     // .cancelled 在已激活时发终止但速度归零（不启动减速的释放速度）；残量 10 先补
     @Test("cancelled 在激活态发残量+终止且 velocity 归零")
     func cancelledZeroVelocity() {
@@ -261,12 +270,14 @@ struct SinglePanStepTests {
                                   SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)])
         #expect(end.lifecycle == .idle)
     }
-    // R4 + R5 finding-1：drawing 中途截获活跃水平 pan → 发 .cancelled 关闭生命周期 + reset；关闭后下个 pan 干净起步
-    @Test("drawing 截获活跃 pan → cancelled + reset")
+    // R4 + R5 finding-1 + R13 finding-2：drawing 中途截获活跃水平 pan → 先补末段残量 .changed 再 .cancelled，关闭生命周期 + reset
+    @Test("drawing 截获活跃 pan → 残量 + cancelled + reset")
     func drawingTakeoverCancelsActive() {
+        // 截获时累积 80、基线 40 → 残量 40 先补，再 .cancelled（R13 finding-2 不丢接管前位移）
         let intercepted = singlePanStep(phase: .changed, cumulative: CGPoint(x: 80, y: 4), velocityX: 700,
                                         lifecycle: .horizontalActive, lastTranslationX: 40, drawingTakesOver: true)
-        #expect(intercepted.emissions == [SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)])
+        #expect(intercepted.emissions == [SinglePanEmission(deltaX: 40, velocityX: 0, phase: .changed),
+                                          SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)])
         #expect(intercepted.lifecycle == .idle); #expect(intercepted.lastTranslationX == 0)
         // 截获再来一帧（仍 drawing、已 idle）→ 不再发回调
         let stillDrawing = singlePanStep(phase: .changed, cumulative: CGPoint(x: 85, y: 4), velocityX: 700,
@@ -287,18 +298,25 @@ struct SinglePanStepTests {
                               lifecycle: .idle, lastTranslationX: 0, drawingTakesOver: true)
         #expect(s.emissions.isEmpty); #expect(s.lifecycle == .idle)
     }
-    // R11 finding：多指接管同步关闭——horizontalActive 时恰发一个 .cancelled + 复位，不依赖回调投递
-    @Test("supersede 在 horizontalActive 恰发一个 cancelled + 复位")
-    func supersedeActiveEmitsOneCancelled() {
-        let s = singlePanSupersede(lifecycle: .horizontalActive)
+    // R11 finding：多指接管同步关闭——horizontalActive 无残量（current==last）→ 恰发一个 .cancelled + 复位，不依赖回调投递
+    @Test("supersede horizontalActive 无残量 → 恰一个 cancelled")
+    func supersedeActiveNoResidual() {
+        let s = singlePanSupersede(lifecycle: .horizontalActive, cumulative: CGPoint(x: 30, y: 5), lastTranslationX: 30)
         #expect(s.emissions == [SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)])
         #expect(s.lifecycle == .idle); #expect(s.lastTranslationX == 0)
+    }
+    // R13 finding-2：supersede 时基线落后于当前累积 → 先补残量 .changed 再 .cancelled，不丢接管前位移
+    @Test("supersede horizontalActive 有残量 → 残量 + cancelled")
+    func supersedeActiveWithResidual() {
+        let s = singlePanSupersede(lifecycle: .horizontalActive, cumulative: CGPoint(x: 55, y: 5), lastTranslationX: 40)
+        #expect(s.emissions == [SinglePanEmission(deltaX: 15, velocityX: 0, phase: .changed),
+                                SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)])
     }
     // supersede 在 idle / verticalRejected → 无 emission，仍复位
     @Test("supersede 非活跃态无回调仍复位")
     func supersedeInactiveNoEmit() {
-        #expect(singlePanSupersede(lifecycle: .idle).emissions.isEmpty)
-        let v = singlePanSupersede(lifecycle: .verticalRejected)
+        #expect(singlePanSupersede(lifecycle: .idle, cumulative: CGPoint(x: 99, y: 0), lastTranslationX: 0).emissions.isEmpty)
+        let v = singlePanSupersede(lifecycle: .verticalRejected, cumulative: CGPoint(x: 99, y: 0), lastTranslationX: 0)
         #expect(v.emissions.isEmpty); #expect(v.lifecycle == .idle)
     }
 }
@@ -556,12 +574,16 @@ func singlePanStep(phase: GesturePhase,
                    lastTranslationX: CGFloat,
                    minThreshold: CGFloat = 8,
                    drawingTakesOver: Bool = false) -> SinglePanStep {
-    // Drawing 模式截获（修正 R4 + R5 finding-1）：清空 per-gesture 状态防残留；
-    // 但若**已激活**水平 pan，先发 `.cancelled`(velocity 0) 关闭生命周期再 reset，避免下游 panStarted 悬空无终止。
+    // Drawing 模式截获（修正 R4 + R5 finding-1 + R13 finding-2）：清空 per-gesture 状态防残留；
+    // 若**已激活**水平 pan，先补末段残量 `.changed`(若非零) 再发 `.cancelled` 关闭生命周期——
+    // 不丢截获前最后一段拖动位移（R13 finding-2），且避免下游 panStarted 悬空无终止（R5 finding-1）。
     if drawingTakesOver {
         if lifecycle == .horizontalActive {
-            return SinglePanStep(emissions: [SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)],
-                                 lifecycle: .idle, lastTranslationX: 0)
+            let residual = panIncrement(current: cumulative.x, last: lastTranslationX)
+            var emissions: [SinglePanEmission] = []
+            if residual != 0 { emissions.append(SinglePanEmission(deltaX: residual, velocityX: 0, phase: .changed)) }
+            emissions.append(SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled))
+            return SinglePanStep(emissions: emissions, lifecycle: .idle, lastTranslationX: 0)
         }
         return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0)
     }
@@ -572,6 +594,10 @@ func singlePanStep(phase: GesturePhase,
         switch lifecycle {
         case .horizontalActive:
             let delta = panIncrement(current: cumulative.x, last: lastTranslationX)
+            // 零 delta（识别器重复回调 x 不变）→ 不发，避免下游 offsetApplied(0) 空 bump revision（R13 finding-1）
+            if delta == 0 {
+                return SinglePanStep(emissions: [], lifecycle: .horizontalActive, lastTranslationX: lastTranslationX)
+            }
             return SinglePanStep(
                 emissions: [SinglePanEmission(deltaX: delta, velocityX: velocityX, phase: .changed)],
                 lifecycle: .horizontalActive, lastTranslationX: cumulative.x)
@@ -605,12 +631,16 @@ func singlePanStep(phase: GesturePhase,
 }
 
 /// 多指接管时**同步**关闭单指生命周期的纯决策（R11 finding：正确性不得依赖 `isEnabled` toggle 的 .cancelled 回调投递）。
-/// `horizontalActive` → 发恰一个 `.cancelled`(0,0) 关闭消费者 pan 生命周期；`idle`/`verticalRejected` → 无 emission。
-/// 一律复位为 `.idle` + 基线 0（arbiter 据此同步更新状态，再物理 toggle 识别器作防御性清理）。
-func singlePanSupersede(lifecycle: SinglePanLifecycle) -> SinglePanStep {
-    let emissions: [SinglePanEmission] = lifecycle == .horizontalActive
-        ? [SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)]
-        : []
+/// `horizontalActive` → 先补末段残量 `.changed`(若非零，R13 finding-2 不丢接管前位移) 再发 `.cancelled` 关闭；
+/// `idle`/`verticalRejected` → 无 emission。一律复位为 `.idle` + 基线 0（arbiter 据此同步更新，再物理 toggle 识别器作防御性清理）。
+func singlePanSupersede(lifecycle: SinglePanLifecycle, cumulative: CGPoint, lastTranslationX: CGFloat) -> SinglePanStep {
+    guard lifecycle == .horizontalActive else {
+        return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0)
+    }
+    let residual = panIncrement(current: cumulative.x, last: lastTranslationX)
+    var emissions: [SinglePanEmission] = []
+    if residual != 0 { emissions.append(SinglePanEmission(deltaX: residual, velocityX: 0, phase: .changed)) }
+    emissions.append(SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled))
     return SinglePanStep(emissions: emissions, lifecycle: .idle, lastTranslationX: 0)
 }
 
@@ -839,8 +869,11 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     /// 两指/pinch 起手时确定性接管：取消进行中的单指 pan（R10 finding-1；不用 require(toFail:) 故不伤单指响应）。
     /// **同步**关闭生命周期（R11 finding）：经纯函数 `singlePanSupersede` 直接发 `.cancelled` + 复位状态，
     /// **不依赖** `isEnabled` toggle 的回调投递；toggle 仅作防御性物理取消（其后续 .cancelled 命中 idle 被吞，不双发）。
-    private func supersedeSinglePanForMultitouch() {
-        let step = singlePanSupersede(lifecycle: singlePanLifecycle)
+    private func supersedeSinglePanForMultitouch(in view: UIView?) {
+        // 读单指识别器当前累积，结算时补末段残量（R13 finding-2 不丢接管前位移）
+        let cumulative = singlePanRecognizer?.translation(in: view) ?? .zero
+        let step = singlePanSupersede(lifecycle: singlePanLifecycle, cumulative: cumulative,
+                                      lastTranslationX: lastSinglePanTranslationX)
         singlePanLifecycle = step.lifecycle
         lastSinglePanTranslationX = step.lastTranslationX
         for e in step.emissions { onPan?(e.deltaX, e.velocityX, e.phase) }
@@ -887,7 +920,7 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     // 两指 pan 与 pinch 两识别器都喂入同一 twoFingerStep 状态机（顺序无关）；各读对方实时值。
     @objc private func handleTwoFingerPan(_ g: UIPanGestureRecognizer) {
         guard let ph = phase(from: g.state) else { return }
-        if ph == .began { supersedeSinglePanForMultitouch() }   // 第 2 指落 → 取消单指（R10 finding-1）
+        if ph == .began { supersedeSinglePanForMultitouch(in: g.view) }   // 第 2 指落 → 取消单指（R10 finding-1）
         let scale = pinchRecognizer?.scale ?? 1.0
         let focus = pinchRecognizer?.location(in: g.view) ?? g.location(in: g.view)
         emitTwoFinger(twoFingerStep(source: .pan, phase: ph, scale: scale, translation: g.translation(in: g.view),
@@ -896,7 +929,7 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
 
     @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
         guard let ph = phase(from: g.state) else { return }
-        if ph == .began { supersedeSinglePanForMultitouch() }   // 捏合起手 → 取消单指（R10 finding-1）
+        if ph == .began { supersedeSinglePanForMultitouch(in: g.view) }   // 捏合起手 → 取消单指（R10 finding-1）
         let translation = twoFingerPanRecognizer?.translation(in: g.view) ?? .zero
         emitTwoFinger(twoFingerStep(source: .pinch, phase: ph, scale: g.scale, translation: translation,
                                     state: twoFingerState), focus: g.location(in: g.view))
@@ -991,7 +1024,8 @@ Expected: 0 匹配。
   - grep `verticalRejected` 在 GestureClassifiers（垂直 latch 态存在 → 防 R9 finding-1 回归）
   - grep `supersedeSinglePanForMultitouch` 在 handleTwoFingerPan 与 handlePinch（确定性两指接管接线 → 防 R10 finding-1 回归）
   - grep `singlePanSupersede` 在 supersedeSinglePanForMultitouch（同步关闭不依赖回调 → 防 R11 finding 回归）
-  - SinglePanStepTests `supersedeActiveEmitsOneCancelled` 通过（多指接管恰一个终止，单测证 R11 finding）
+  - SinglePanStepTests `supersedeActiveNoResidual` 通过（多指接管同步关闭恰一个终止，单测证 R11 finding）
+  - SinglePanStepTests `zeroDeltaChangedSuppressed` 通过（零 delta 不空 bump revision，单测证 R13 finding-1）
   - grep `lastPinchScale` 在 GestureClassifiers（pinch scale 记忆存在 → 防 R10 finding-2 回归）
   - （真机/Catalyst 验收残留）同一 arbiter 对同一 view 连调 `attach` 两次 → 该 view `gestureRecognizers.count` 不增（幂等，R6 finding-2）
   - （真机/Catalyst 验收残留）正常单指拖动 → 拖动过程中即收到 `.began`/`.changed`（不卡到松手；R9 finding-2）
@@ -1036,6 +1070,8 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 - R10 finding-2（pinch 抬起后 pan 源发 stale-scale pinch.changed）→ `lastPinchScale` 记 pinch 源最后有效 scale；pinch down 才发 pan 源 pinch.changed、终止用 lastPinchScale；`lateRecognizerNoLeak`（lagChanged 抑制 + 终止 scale 1.06）单测。✓
 - R11 finding（多指接管依赖回调投递不可靠）→ `singlePanSupersede` 纯函数**同步**关闭（恰一个 .cancelled + 复位），supersede 不再依赖 isEnabled 回调；`supersedeActiveEmitsOneCancelled`/`supersedeInactiveNoEmit` 单测。✓
 - R12 finding（pinch 阈值 FP 边界 1.02 误判致测试失败）→ verify-and-correct 改对称显式边界 `scale > 1.02 || scale < 0.98`（保 spec 意图）；`scaleAtBoundaryNotPinch`/`scaleAtLowerBoundaryNotPinch` 等四边界单测。✓
+- R13 finding-1（零 delta .changed 空 bump revision）→ `singlePanStep` horizontalActive 下 delta==0 不发 .changed；`zeroDeltaChangedSuppressed` 单测。✓
+- R13 finding-2（取消/接管丢末段位移）→ drawing 截获 + `singlePanSupersede` 均先补末段残量 `.changed`(读当前累积) 再 `.cancelled`；`drawingTakeoverCancelsActive`(残量 40) / `supersedeActiveWithResidual`(残量 15) 单测。✓
 
 **3. Placeholder 扫描：** 无 TBD/TODO；每 code step 含完整代码；分类函数逐字 spec。✓
 
@@ -1047,4 +1083,4 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 
 ## 流程位置
 
-用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R11 见上 findings；R12 pinch 阈值 FP 边界 verify-and-correct→**本次 R13 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
+用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R13 见上 findings；R13 零 delta 抑制 + 取消保残量→**本次 R14 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
