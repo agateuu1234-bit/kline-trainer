@@ -261,6 +261,25 @@ struct SinglePanStepTests {
                               lifecycle: .horizontalActive, lastTranslationX: 30)
         #expect(s.emissions.isEmpty); #expect(s.lifecycle == .horizontalActive); #expect(s.lastTranslationX == 30)
     }
+    // R14 finding：`.began` 已带过阈值水平 translation 直达 `.ended`（无 `.changed`）→ panStarted + 残量 + ended velocity 不丢 flick
+    @Test("began 带水平 translation 直达 ended → flick 不丢")
+    func beganToEndedFlickNoChanged() {
+        let began = singlePanStep(phase: .began, cumulative: CGPoint(x: 25, y: 3), velocityX: 800,
+                                  lifecycle: .idle, lastTranslationX: 0)
+        #expect(began.emissions == [SinglePanEmission(deltaX: 0, velocityX: 800, phase: .began)])
+        #expect(began.lifecycle == .horizontalActive); #expect(began.lastTranslationX == 25)
+        let end = singlePanStep(phase: .ended, cumulative: CGPoint(x: 40, y: 3), velocityX: 950,
+                                lifecycle: began.lifecycle, lastTranslationX: began.lastTranslationX)
+        #expect(end.emissions == [SinglePanEmission(deltaX: 15, velocityX: 950, phase: .changed),
+                                  SinglePanEmission(deltaX: 0, velocityX: 950, phase: .ended)])
+    }
+    // `.began` 垂直已过阈值 → 立即 latch verticalRejected（仍零回调）
+    @Test("began 垂直过阈值 → 立即 latch verticalRejected")
+    func beganVerticalLatchesImmediately() {
+        let s = singlePanStep(phase: .began, cumulative: CGPoint(x: 3, y: 30), velocityX: 0,
+                              lifecycle: .idle, lastTranslationX: 0)
+        #expect(s.emissions.isEmpty); #expect(s.lifecycle == .verticalRejected)
+    }
     // .cancelled 在已激活时发终止但速度归零（不启动减速的释放速度）；残量 10 先补
     @Test("cancelled 在激活态发残量+终止且 velocity 归零")
     func cancelledZeroVelocity() {
@@ -565,7 +584,7 @@ struct SinglePanStep: Equatable {
 /// 关键不变量：
 /// - 仅 `horizontalActive` 才产出 pan emissions；`idle`(等待) / `verticalRejected`(已拒) 全程 emissions == []（R2 finding）；
 /// - **垂直一旦判定即 latch 为 `verticalRejected`**，后续即便累积满足水平分类器也不再发回调（R9 finding-1）；
-/// - `.began` 仅复位为 `idle` 不发回调；首次 `.horizontal` 才发 `.began`（消费者 panStarted），基线设当前累积（deadzone 不计入 offset）；
+/// - `.began` **复位并立即按当前累积分类**（R14 finding：UIKit `.began` 可能已过阈值带 translation，防 `.began→.ended` 漏 flick）；`idle .changed` 同样分类；水平锁定时发 `.began`（消费者 panStarted）、基线设当前累积（deadzone 不计入 offset）；
 /// - 终止（R7 finding-2）：`horizontalActive` 时若末段有残量，**先发 `.changed`(残量) 再发终止相位**，残量精确应用一次不丢。
 func singlePanStep(phase: GesturePhase,
                    cumulative: CGPoint,
@@ -587,9 +606,23 @@ func singlePanStep(phase: GesturePhase,
         }
         return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0)
     }
+    // 空闲态按当前累积分类（`.began` 与 idle `.changed` 共用）：水平→锁定+发 `.began`(panStarted)、基线设当前累积（deadzone 不计入）；
+    // 垂直→latch verticalRejected；ambiguous→保持 idle 等待。
+    func classifyFromIdle() -> SinglePanStep {
+        switch classifySingleFingerPan(translation: cumulative, minThreshold: minThreshold) {
+        case .horizontal:
+            return SinglePanStep(emissions: [SinglePanEmission(deltaX: 0, velocityX: velocityX, phase: .began)],
+                                 lifecycle: .horizontalActive, lastTranslationX: cumulative.x)
+        case .vertical:
+            return SinglePanStep(emissions: [], lifecycle: .verticalRejected, lastTranslationX: 0)
+        case .ambiguous:
+            return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0)
+        }
+    }
     switch phase {
     case .began:
-        return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0)
+        // 复位 + 立即分类（R14 finding：UIKit `.began` 可能已带过阈值 translation，防 `.began`→`.ended` 直达漏 flick）
+        return classifyFromIdle()
     case .changed:
         switch lifecycle {
         case .horizontalActive:
@@ -604,16 +637,7 @@ func singlePanStep(phase: GesturePhase,
         case .verticalRejected:
             return SinglePanStep(emissions: [], lifecycle: .verticalRejected, lastTranslationX: lastTranslationX)  // latch
         case .idle:
-            switch classifySingleFingerPan(translation: cumulative, minThreshold: minThreshold) {
-            case .horizontal:
-                return SinglePanStep(
-                    emissions: [SinglePanEmission(deltaX: 0, velocityX: velocityX, phase: .began)],
-                    lifecycle: .horizontalActive, lastTranslationX: cumulative.x)
-            case .vertical:
-                return SinglePanStep(emissions: [], lifecycle: .verticalRejected, lastTranslationX: lastTranslationX)  // latch 垂直
-            case .ambiguous:
-                return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: lastTranslationX)  // 继续等待
-            }
+            return classifyFromIdle()
         }
     case .ended, .cancelled:
         if lifecycle == .horizontalActive {
@@ -1072,6 +1096,7 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 - R12 finding（pinch 阈值 FP 边界 1.02 误判致测试失败）→ verify-and-correct 改对称显式边界 `scale > 1.02 || scale < 0.98`（保 spec 意图）；`scaleAtBoundaryNotPinch`/`scaleAtLowerBoundaryNotPinch` 等四边界单测。✓
 - R13 finding-1（零 delta .changed 空 bump revision）→ `singlePanStep` horizontalActive 下 delta==0 不发 .changed；`zeroDeltaChangedSuppressed` 单测。✓
 - R13 finding-2（取消/接管丢末段位移）→ drawing 截获 + `singlePanSupersede` 均先补末段残量 `.changed`(读当前累积) 再 `.cancelled`；`drawingTakeoverCancelsActive`(残量 40) / `supersedeActiveWithResidual`(残量 15) 单测。✓
+- R14 finding（`.began`→`.ended` 无 `.changed` 漏 flick）→ `.began` 复位 + 立即 `classifyFromIdle` 分类（与 idle `.changed` 共用）；`beganToEndedFlickNoChanged`/`beganVerticalLatchesImmediately` 单测。✓
 
 **3. Placeholder 扫描：** 无 TBD/TODO；每 code step 含完整代码；分类函数逐字 spec。✓
 
@@ -1083,4 +1108,4 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 
 ## 流程位置
 
-用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R13 见上 findings；R13 零 delta 抑制 + 取消保残量→**本次 R14 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
+用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R14 见上 findings；R14 `.began` 立即分类防漏 flick→**本次 R15 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
