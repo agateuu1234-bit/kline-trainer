@@ -46,3 +46,34 @@ struct NormalFlowTests {
         #expect(flow.canAdvance())
     }
 }
+
+@Suite("ReviewFlow")
+struct ReviewFlowTests {
+    private let record = makeRecord(finalTick: 742, feeSnapshot: originalFees)
+    private var flow: ReviewFlow { ReviewFlow(record: record) }
+
+    @Test("属性：mode/feeSnapshot=原局/initialTick=finalTick/单点 range")
+    func properties() {
+        #expect(flow.mode == .review)
+        #expect(flow.feeSnapshot == originalFees)
+        #expect(flow.initialTick == 742)
+        #expect(flow.allowedTickRange == 742...742)
+    }
+
+    @Test("能力：全 false（矩阵 Review 列）")
+    func capabilities() {
+        #expect(!flow.canBuySell())
+        #expect(!flow.canAdvance())
+        #expect(!flow.shouldSaveRecord())
+        #expect(!flow.shouldAccumulateCapital())
+        #expect(!flow.shouldShowSettlement())
+        #expect(!flow.shouldGiveHapticFeedback())
+    }
+
+    @Test("验收：initialTick == record.finalTick，不是 maxTick（spec v1.1→v1.2 修正点）")
+    func initialTickIsFinalTickNotMaxTick() {
+        #expect(flow.initialTick == record.finalTick)
+        #expect(flow.allowedTickRange.lowerBound == flow.allowedTickRange.upperBound)
+        #expect(!flow.canAdvance())
+    }
+}

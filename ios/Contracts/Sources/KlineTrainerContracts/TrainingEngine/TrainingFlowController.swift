@@ -50,3 +50,24 @@ public struct NormalFlow: TrainingFlowController {
     public func shouldShowSettlement() -> Bool { true }
     public func shouldGiveHapticFeedback() -> Bool { true }
 }
+
+/// 复盘（只读）：固定在原局结束态，全能力关闭。
+public struct ReviewFlow: TrainingFlowController {
+    public let record: TrainingRecord
+
+    public init(record: TrainingRecord) {
+        self.record = record
+    }
+
+    public var mode: TrainingMode { .review }
+    public var feeSnapshot: FeeSnapshot { record.feeSnapshot }
+    public var initialTick: Int { record.finalTick }
+    public var allowedTickRange: ClosedRange<Int> { record.finalTick...record.finalTick }
+
+    public func canBuySell() -> Bool { false }
+    public func canAdvance() -> Bool { false }
+    public func shouldSaveRecord() -> Bool { false }
+    public func shouldAccumulateCapital() -> Bool { false }
+    public func shouldShowSettlement() -> Bool { false }
+    public func shouldGiveHapticFeedback() -> Bool { false }
+}
