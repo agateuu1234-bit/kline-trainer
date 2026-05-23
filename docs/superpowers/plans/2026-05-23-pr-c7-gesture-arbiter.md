@@ -279,6 +279,20 @@ struct SinglePanStepTests {
                               lifecycle: .idle, lastTranslationX: 0, drawingTakesOver: true)
         #expect(s.emissions.isEmpty); #expect(s.lifecycle == .idle)
     }
+    // R11 finding：多指接管同步关闭——horizontalActive 时恰发一个 .cancelled + 复位，不依赖回调投递
+    @Test("supersede 在 horizontalActive 恰发一个 cancelled + 复位")
+    func supersedeActiveEmitsOneCancelled() {
+        let s = singlePanSupersede(lifecycle: .horizontalActive)
+        #expect(s.emissions == [SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)])
+        #expect(s.lifecycle == .idle); #expect(s.lastTranslationX == 0)
+    }
+    // supersede 在 idle / verticalRejected → 无 emission，仍复位
+    @Test("supersede 非活跃态无回调仍复位")
+    func supersedeInactiveNoEmit() {
+        #expect(singlePanSupersede(lifecycle: .idle).emissions.isEmpty)
+        let v = singlePanSupersede(lifecycle: .verticalRejected)
+        #expect(v.emissions.isEmpty); #expect(v.lifecycle == .idle)
+    }
 }
 
 @Suite("twoFingerStep lifecycle")
@@ -578,6 +592,16 @@ func singlePanStep(phase: GesturePhase,
     }
 }
 
+/// 多指接管时**同步**关闭单指生命周期的纯决策（R11 finding：正确性不得依赖 `isEnabled` toggle 的 .cancelled 回调投递）。
+/// `horizontalActive` → 发恰一个 `.cancelled`(0,0) 关闭消费者 pan 生命周期；`idle`/`verticalRejected` → 无 emission。
+/// 一律复位为 `.idle` + 基线 0（arbiter 据此同步更新状态，再物理 toggle 识别器作防御性清理）。
+func singlePanSupersede(lifecycle: SinglePanLifecycle) -> SinglePanStep {
+    let emissions: [SinglePanEmission] = lifecycle == .horizontalActive
+        ? [SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)]
+        : []
+    return SinglePanStep(emissions: emissions, lifecycle: .idle, lastTranslationX: 0)
+}
+
 // MARK: - 两指手势生命周期状态机（纯函数，修正 R3 finding：意图须锁定，不得跨回调重分类）
 
 /// 两指手势一次应发出的事件（focus 由 arbiter 从识别器补）。
@@ -800,13 +824,15 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
         attachedView = view
     }
 
-    /// 两指/pinch 起手时确定性接管：取消进行中的单指 pan（R10 finding-1，不用 require(toFail:) 故不伤单指响应）。
-    /// 切换 isEnabled 令单指识别器 .cancelled → handleSinglePan 经 singlePanStep 在 horizontalActive 时发 `.cancelled`
-    /// 关闭消费者 pan 生命周期并复位；之后路由权交两指。
+    /// 两指/pinch 起手时确定性接管：取消进行中的单指 pan（R10 finding-1；不用 require(toFail:) 故不伤单指响应）。
+    /// **同步**关闭生命周期（R11 finding）：经纯函数 `singlePanSupersede` 直接发 `.cancelled` + 复位状态，
+    /// **不依赖** `isEnabled` toggle 的回调投递；toggle 仅作防御性物理取消（其后续 .cancelled 命中 idle 被吞，不双发）。
     private func supersedeSinglePanForMultitouch() {
-        guard let s = singlePanRecognizer, s.isEnabled else { return }
-        s.isEnabled = false
-        s.isEnabled = true
+        let step = singlePanSupersede(lifecycle: singlePanLifecycle)
+        singlePanLifecycle = step.lifecycle
+        lastSinglePanTranslationX = step.lastTranslationX
+        for e in step.emissions { onPan?(e.deltaX, e.velocityX, e.phase) }
+        if let s = singlePanRecognizer, s.isEnabled { s.isEnabled = false; s.isEnabled = true }
     }
 
     /// 复位 per-gesture 状态（attach 切 view 时调，防跨 view/代次状态串）。
@@ -952,6 +978,8 @@ Expected: 0 匹配。
   - grep `attachedView === view` 在 attach（幂等守卫存在 → 防 R6 finding-2 回归）
   - grep `verticalRejected` 在 GestureClassifiers（垂直 latch 态存在 → 防 R9 finding-1 回归）
   - grep `supersedeSinglePanForMultitouch` 在 handleTwoFingerPan 与 handlePinch（确定性两指接管接线 → 防 R10 finding-1 回归）
+  - grep `singlePanSupersede` 在 supersedeSinglePanForMultitouch（同步关闭不依赖回调 → 防 R11 finding 回归）
+  - SinglePanStepTests `supersedeActiveEmitsOneCancelled` 通过（多指接管恰一个终止，单测证 R11 finding）
   - grep `lastPinchScale` 在 GestureClassifiers（pinch scale 记忆存在 → 防 R10 finding-2 回归）
   - （真机/Catalyst 验收残留）同一 arbiter 对同一 view 连调 `attach` 两次 → 该 view `gestureRecognizers.count` 不增（幂等，R6 finding-2）
   - （真机/Catalyst 验收残留）正常单指拖动 → 拖动过程中即收到 `.began`/`.changed`（不卡到松手；R9 finding-2）
@@ -994,6 +1022,7 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 - R9 finding-2（`require(toFail:)` 卡死单指滚动）→ **回退 require(toFail:)** 保单指响应性。✓
 - R10 finding-1（交错两指优先级不该留残留）→ 确定性 `supersedeSinglePanForMultitouch()`：两指/pinch `.began` 切 `single.isEnabled` 取消单指、路由交两指（不伤单指响应）；约束 #5。✓
 - R10 finding-2（pinch 抬起后 pan 源发 stale-scale pinch.changed）→ `lastPinchScale` 记 pinch 源最后有效 scale；pinch down 才发 pan 源 pinch.changed、终止用 lastPinchScale；`lateRecognizerNoLeak`（lagChanged 抑制 + 终止 scale 1.06）单测。✓
+- R11 finding（多指接管依赖回调投递不可靠）→ `singlePanSupersede` 纯函数**同步**关闭（恰一个 .cancelled + 复位），supersede 不再依赖 isEnabled 回调；`supersedeActiveEmitsOneCancelled`/`supersedeInactiveNoEmit` 单测。✓
 
 **3. Placeholder 扫描：** 无 TBD/TODO；每 code step 含完整代码；分类函数逐字 spec。✓
 
@@ -1005,4 +1034,4 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 
 ## 流程位置
 
-用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R9 见上 findings；R10 确定性两指接管 + lastPinchScale→**本次 R11 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
+用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R10 见上 findings；R11 多指接管同步关闭不依赖回调→**本次 R12 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
