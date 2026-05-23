@@ -102,7 +102,8 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     /// **同步**关闭生命周期（R11 finding）：经纯函数 `singlePanSupersede` 直接发 `.cancelled` + 复位状态，
     /// **不依赖** `isEnabled` toggle 的回调投递；toggle 仅作防御性物理取消（其后续 .cancelled 命中 idle 被吞，不双发）。
     private func supersedeSinglePanForMultitouch(in view: UIView?) {
-        // 读单指识别器当前累积，结算时补末段残量（R13 finding-2 不丢接管前位移）
+        // 读单指识别器当前累积，结算时补末段残量（R13 finding-2 不丢接管前位移）。
+        // 注意顺序：translation 必须在下方 isEnabled toggle 取消识别器之前读取（此处为 toggle 前，cumulative 为实时有效值）。
         let cumulative = singlePanRecognizer?.translation(in: view) ?? .zero
         let step = singlePanSupersede(lifecycle: singlePanLifecycle, cumulative: cumulative,
                                       lastTranslationX: lastSinglePanTranslationX)
