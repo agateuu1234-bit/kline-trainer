@@ -71,3 +71,27 @@ public struct ReviewFlow: TrainingFlowController {
     public func shouldShowSettlement() -> Bool { false }
     public func shouldGiveHapticFeedback() -> Bool { false }
 }
+
+/// 再来一次：可操作但不入账，沿用原局 FeeSnapshot。
+/// - Precondition: `maxTick >= 0`（同 NormalFlow）。
+public struct ReplayFlow: TrainingFlowController {
+    public let feeSnapshotFromOriginal: FeeSnapshot
+    public let maxTick: Int
+
+    public init(feeSnapshotFromOriginal: FeeSnapshot, maxTick: Int) {
+        self.feeSnapshotFromOriginal = feeSnapshotFromOriginal
+        self.maxTick = maxTick
+    }
+
+    public var mode: TrainingMode { .replay }
+    public var feeSnapshot: FeeSnapshot { feeSnapshotFromOriginal }
+    public var initialTick: Int { 0 }
+    public var allowedTickRange: ClosedRange<Int> { 0...maxTick }
+
+    public func canBuySell() -> Bool { true }
+    public func canAdvance() -> Bool { true }
+    public func shouldSaveRecord() -> Bool { false }
+    public func shouldAccumulateCapital() -> Bool { false }
+    public func shouldShowSettlement() -> Bool { true }
+    public func shouldGiveHapticFeedback() -> Bool { true }
+}

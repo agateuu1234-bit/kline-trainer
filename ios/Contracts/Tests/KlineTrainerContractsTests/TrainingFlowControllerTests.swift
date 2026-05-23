@@ -77,3 +77,33 @@ struct ReviewFlowTests {
         #expect(!flow.canAdvance())
     }
 }
+
+@Suite("ReplayFlow")
+struct ReplayFlowTests {
+    private let flow = ReplayFlow(feeSnapshotFromOriginal: originalFees, maxTick: 1000)
+
+    @Test("属性：mode/feeSnapshot=原局/initialTick=0/0...maxTick")
+    func properties() {
+        #expect(flow.mode == .replay)
+        #expect(flow.feeSnapshot == originalFees)
+        #expect(flow.initialTick == 0)
+        #expect(flow.allowedTickRange == 0...1000)
+    }
+
+    @Test("能力：T,T,F,F,T,T（矩阵 Replay 列）")
+    func capabilities() {
+        #expect(flow.canBuySell())
+        #expect(flow.canAdvance())
+        #expect(!flow.shouldSaveRecord())          // 不保存
+        #expect(!flow.shouldAccumulateCapital())   // 不累加资金
+        #expect(flow.shouldShowSettlement())       // 显示结算但不保存
+        #expect(flow.shouldGiveHapticFeedback())
+    }
+
+    @Test("验收：从头开始(tick=0)、用原局 feeSnapshot、结束不保存（spec modules §E4 验收）")
+    func acceptance() {
+        #expect(flow.initialTick == 0)
+        #expect(flow.feeSnapshot == originalFees)
+        #expect(!flow.shouldSaveRecord())
+    }
+}
