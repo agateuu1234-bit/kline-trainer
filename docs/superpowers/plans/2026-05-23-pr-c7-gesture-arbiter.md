@@ -37,7 +37,7 @@
 
 1. **arbiter 无 macOS 单测，是平台固有约束。** `UIGestureRecognizerDelegate` / `UIPanGestureRecognizer` 等 UIKit 独有，plain macOS SDK 无对等 API。arbiter 整类 `#if canImport(UIKit)`：macOS `swift build` 编译为空；Catalyst `xcodebuild` 真实编译（required `Mac Catalyst build-for-testing on macos-15`）；运行时手势触发 = 真机验收残留（plan v1.5 §验收 L1177）。所有**非平凡决策逻辑都在被全量单测的纯函数里**（4 分类/换算函数）；arbiter 内未测部分仅为 UIKit 管道：识别器声明式配置、`State→GesturePhase` 平凡 switch、跨识别器 scale/translation 读取、per-gesture 增量状态、委托共存策略。
 2. **两指仲裁是纯函数生命周期状态机 `twoFingerStep`（修正 R1 finding 3 + R3 finding）。** pinch 与两指 pan 两个独立识别器、**放行同时识别**、各喂对方实时值（scale / translation）进**同一** `twoFingerStep` 状态机。内部用 `classifyTwoFingerGesture` 做判定（`.pinch` 分支转活），但**意图一旦锁定 pinch 即锁死**：后续不再可能切周期、终止相位始终关闭 pinch 生命周期（无论末帧 scale）、切周期仅在未锁定时终止相位发一次、对两识别器顺序无关不双发。arbiter 持两识别器 **weak** 引用（view 持有它们，避免 arbiter↔recognizer 环），仅存 `twoFingerState` 一个状态字段。
-3. **单指平移生命周期是纯函数 `singlePanStep`（修正 R2 finding）。** 方向判定用累积位移过 `classifySingleFingerPan`；**仅锁定为水平后才发 onPan**——垂直/ambiguous 全程零回调，不触碰 reducer pan 状态。锁定瞬间合成 `.began`（消费者 panStarted）并把增量基线设为当前累积（deadzone 位移不计入 offset，更干净）；之后 `panIncrement` 出帧间增量；终止相位仅在 active 时发、`.ended` 携 `velocity(in:).x`、`.cancelled` 速度归零。arbiter 仅存 `lastTranslationX` + `singlePanHorizontalActive` 两个状态字段，决策与不变量全在 `singlePanStep`（macOS 单测穷举垂直/ambiguous/水平三类生命周期）。
+3. **单指平移生命周期是纯函数 `singlePanStep`（修正 R2 + R4 finding）。** 方向判定用累积位移过 `classifySingleFingerPan`；**仅锁定为水平后才发 onPan**——垂直/ambiguous 全程零回调，不触碰 reducer pan 状态。锁定瞬间合成 `.began`（消费者 panStarted）并把增量基线设为当前累积（deadzone 位移不计入 offset）；之后 `panIncrement` 出帧间增量；终止相位仅在 active 时发、`.ended` 携 `velocity(in:).x`、`.cancelled` 速度归零。**`drawingTakesOver` 参数折入函数**：drawing 截获时始终返回 reset state + nil emission（R4：防 drawing 中途切入残留 stale 状态）。arbiter 仅存 `lastTranslationX` + `singlePanHorizontalActive` 两字段，决策与不变量全在 `singlePanStep`（macOS 单测穷举垂直/ambiguous/水平/drawing-截获 四类生命周期）。
 4. **边界语义严格对齐 spec 字面**：`abs(scale-1.0) > 0.02`、`dy > dx*1.2`、`dx > dy*1.5` / `dy > dx*1.5`、`dx < minThreshold && dy < minThreshold` 全严格不等；边界相等值归属由单测固定。codex 若就 `>` vs `>=` 无 spec 依据反复挖，按 `feedback_codex_plan_budget_overshoot` pushback。
 
 ---
@@ -228,6 +228,23 @@ struct SinglePanStepTests {
         #expect(end.emission == SinglePanEmission(deltaX: 10, velocityX: 0, phase: .cancelled))
         #expect(end.active == false)
     }
+    // R4 finding：drawing 模式中途截获活跃水平 pan → 始终 reset，不发回调；关闭后下个 pan 干净起步
+    @Test("drawing 截获活跃 pan → reset 无回调")
+    func drawingTakeoverResetsActive() {
+        // 正处于激活水平 pan（active=true, baseline=40）；drawing 此刻开启的 .changed
+        let intercepted = singlePanStep(phase: .changed, cumulative: CGPoint(x: 80, y: 4), velocityX: 700,
+                                        active: true, lastTranslationX: 40, drawingTakesOver: true)
+        #expect(intercepted.emission == nil)
+        #expect(intercepted.active == false)
+        #expect(intercepted.lastTranslationX == 0)
+        // drawing 关闭后下一个 .changed：从干净态（active=false, baseline=0）重新分类
+        let resumed = singlePanStep(phase: .changed, cumulative: CGPoint(x: 90, y: 4), velocityX: 700,
+                                    active: intercepted.active, lastTranslationX: intercepted.lastTranslationX,
+                                    drawingTakesOver: false)
+        // 累积 90 水平 → 锁定发 .began delta 0（不是把 90 当 stale delta 灌进 reducer）
+        #expect(resumed.emission == SinglePanEmission(deltaX: 0, velocityX: 700, phase: .began))
+        #expect(resumed.lastTranslationX == 90)
+    }
 }
 
 @Suite("twoFingerStep lifecycle")
@@ -395,7 +412,13 @@ func singlePanStep(phase: GesturePhase,
                    velocityX: CGFloat,
                    active: Bool,
                    lastTranslationX: CGFloat,
-                   minThreshold: CGFloat = 8) -> SinglePanStep {
+                   minThreshold: CGFloat = 8,
+                   drawingTakesOver: Bool = false) -> SinglePanStep {
+    // Drawing 模式截获（修正 R4 finding）：不发任何回调，且**始终清空** per-gesture 状态——
+    // 即便 drawing 在水平 pan 进行中途开启，也不残留 active/baseline，drawing 关闭后下个 pan 干净起步。
+    if drawingTakesOver {
+        return SinglePanStep(emission: nil, active: false, lastTranslationX: 0)
+    }
     switch phase {
     case .began:
         return SinglePanStep(emission: nil, active: false, lastTranslationX: 0)
@@ -602,15 +625,15 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     // MARK: - Handlers
 
     @objc private func handleSinglePan(_ g: UIPanGestureRecognizer) {
-        // Drawing 模式下 Pan 被绘线截获（spec 仲裁表）
-        guard panPolicyInDrawingMode(drawingMode: drawingMode) == .normalPass else { return }
         guard let ph = phase(from: g.state) else { return }
-        // 生命周期决策全在纯函数 singlePanStep（垂直/ambiguous 返回 emission==nil → 不触碰 reducer pan 状态）
+        // 生命周期决策全在纯函数 singlePanStep：垂直/ambiguous → emission==nil 不触碰 reducer；
+        // drawing 截获 → 始终 reset state 不发回调（R4 finding：防 mid-flight 切入残留）。
         let step = singlePanStep(phase: ph,
                                  cumulative: g.translation(in: g.view),
                                  velocityX: g.velocity(in: g.view).x,
                                  active: singlePanHorizontalActive,
-                                 lastTranslationX: lastSinglePanTranslationX)
+                                 lastTranslationX: lastSinglePanTranslationX,
+                                 drawingTakesOver: panPolicyInDrawingMode(drawingMode: drawingMode) == .drawingTakesOver)
         singlePanHorizontalActive = step.active
         lastSinglePanTranslationX = step.lastTranslationX
         if let e = step.emission { onPan?(e.deltaX, e.velocityX, e.phase) }
@@ -720,6 +743,7 @@ Expected: 0 匹配。
   - PanIncrementTests `multiFrameNetMovement` 通过（净位移 == 增量和，单测证 R1 finding 1）
   - SinglePanStepTests `verticalNeverEmits` 通过（垂直手势零回调，单测证 R2 finding）
   - TwoFingerStepTests `pinchLockSuppressesSwipe` 通过（pinch 锁定不切周期，单测证 R3 finding）
+  - SinglePanStepTests `drawingTakeoverResetsActive` 通过（drawing 截获 reset stale 态，单测证 R4 finding）
 
 - [ ] **Step 5: 提交**
 
@@ -740,6 +764,7 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 - R1 finding 3（仲裁虚设）→ pinch/两指pan 放行同时识别 + 喂双实时值经 `classifyTwoFingerGesture` 判定、`.pinch` 转活。✓（R3 进一步加生命周期锁定）
 - R2 finding（垂直/ambiguous 仍 emit pan 生命周期）→ `singlePanStep` 显式水平态状态机：仅锁定水平后才产 emission，垂直/ambiguous 全程 nil；`verticalNeverEmits` / `ambiguousNeverEmits` 单测。✓
 - R3 finding（两指跨回调重分类致冲突/丢终止）→ `twoFingerStep` 生命周期状态机：意图锁定 pinch 后不切周期、终止始终关闭 pinch 生命周期、顺序无关不双发；`pinchLockSuppressesSwipe` / `pinchTerminalAlwaysClosed` / `secondTerminalNoOp` 单测。✓
+- R4 finding（drawing 中途截获留 stale 单指状态）→ `drawingTakesOver` 折入 `singlePanStep` 始终 reset；移除 handler 早返回；`drawingTakeoverResetsActive` 单测（截获 reset + 关闭后干净起步）。✓
 
 **3. Placeholder 扫描：** 无 TBD/TODO；每 code step 含完整代码；分类函数逐字 spec。✓
 
@@ -751,4 +776,4 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 
 ## 流程位置
 
-用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1 3 findings → R2；R2 单指生命周期 → R3；R3 两指生命周期 → **本次 R4 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。
+用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1 3 findings → R2；R2 单指生命周期 → R3；R3 两指生命周期 → R4；R4 drawing 截获残留 → **本次 R5 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。
