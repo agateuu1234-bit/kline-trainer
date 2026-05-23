@@ -3,7 +3,6 @@
 // Spec: kline_trainer_modules_v1.4.md §C7（L1351-1406）+ kline_trainer_plan_v1.5.md §手势方案
 // Plan: docs/superpowers/plans/2026-05-23-pr-c7-gesture-arbiter.md
 
-import Foundation
 import CoreGraphics
 
 /// 手势生命周期相位（spec §C7）。映射自 UIGestureRecognizer.State，本类型跨平台。
@@ -71,21 +70,21 @@ public func panIncrement(current: CGFloat, last: CGFloat) -> CGFloat {
 // MARK: - 单指平移生命周期状态机（纯函数，修正 R2 finding：垂直/ambiguous 不得触碰 reducer pan 状态）
 
 /// 单指平移一次回调应发出的事件。
-struct SinglePanEmission: Equatable {
+struct SinglePanEmission: Equatable, Sendable {
     let deltaX: CGFloat
     let velocityX: CGFloat
     let phase: GesturePhase
 }
 
 /// 单指平移生命周期态（修正 R9 finding-1：垂直意图须 latch，不得后续翻成 pan）。
-enum SinglePanLifecycle: Equatable {
+enum SinglePanLifecycle: Equatable, Sendable {
     case idle               // 方向未定，仍可锁定水平 / 拒绝为垂直
     case horizontalActive   // 已锁定水平平移
     case verticalRejected   // 已判定垂直，本手势剩余全程忽略（latch）
 }
 
 /// 单指平移生命周期一步的纯决策结果。`emissions` 按序发（0/1/2 个）——终止带残量时发 2 个（先 .changed 后终止）。
-struct SinglePanStep: Equatable {
+struct SinglePanStep: Equatable, Sendable {
     let emissions: [SinglePanEmission]   // [] = 本步不触发任何 onPan 回调
     let lifecycle: SinglePanLifecycle    // 本手势更新后的生命周期态
     let lastTranslationX: CGFloat        // 下一步增量基线
@@ -182,18 +181,18 @@ func singlePanSupersede(lifecycle: SinglePanLifecycle, cumulative: CGPoint, last
 // MARK: - 两指手势生命周期状态机（纯函数，修正 R3 finding：意图须锁定，不得跨回调重分类）
 
 /// 两指手势一次应发出的事件（focus 由 arbiter 从识别器补）。
-enum TwoFingerEmission: Equatable {
+enum TwoFingerEmission: Equatable, Sendable {
     case pinch(scale: CGFloat, phase: GesturePhase)
     case switchPeriod(SwipeDirection)
 }
 
 /// 事件来源识别器（pinch 与两指 pan 同时识别，各发各的 began/changed/ended）。
-enum TwoFingerSource: Equatable { case pinch, pan }
+enum TwoFingerSource: Equatable, Sendable { case pinch, pan }
 
 /// 两指手势生命周期状态。跟踪两识别器是否在按（`pinchDown`/`panDown`）+ 是否锁定 pinch（`locked`）
 /// + 延后结算时已记下的终止 phase（`pendingTerminal`，`.cancelled` 压倒 `.ended`）
 /// + 延后时已捕获的切周期方向（`pendingSwipe`，防滞后识别器结算时 translation 已失效，R7 finding-1）。
-struct TwoFingerState: Equatable {
+struct TwoFingerState: Equatable, Sendable {
     var pinchDown = false
     var panDown = false
     var locked = false
@@ -203,7 +202,7 @@ struct TwoFingerState: Equatable {
 }
 
 /// `twoFingerStep` 返回。
-struct TwoFingerStepResult: Equatable {
+struct TwoFingerStepResult: Equatable, Sendable {
     let emission: TwoFingerEmission?
     let state: TwoFingerState
 }
