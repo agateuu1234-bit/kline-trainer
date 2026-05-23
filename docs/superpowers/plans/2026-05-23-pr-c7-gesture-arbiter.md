@@ -36,7 +36,7 @@
 ## 设计约束与残留（codex review 重点审视项，前置声明）
 
 1. **arbiter 无 macOS 单测，是平台固有约束。** `UIGestureRecognizerDelegate` / `UIPanGestureRecognizer` 等 UIKit 独有，plain macOS SDK 无对等 API。arbiter 整类 `#if canImport(UIKit)`：macOS `swift build` 编译为空；Catalyst `xcodebuild` 真实编译（required `Mac Catalyst build-for-testing on macos-15`）；运行时手势触发 = 真机验收残留（plan v1.5 §验收 L1177）。所有**非平凡决策逻辑都在被全量单测的纯函数里**（4 分类/换算函数）；arbiter 内未测部分仅为 UIKit 管道：识别器声明式配置、`State→GesturePhase` 平凡 switch、跨识别器 scale/translation 读取、per-gesture 增量状态、委托共存策略。
-2. **两指仲裁由 `classifyTwoFingerGesture` 真实承担（修正 R1 finding 3）。** pinch 与两指 pan 是两个独立识别器、**放行同时识别**；两个 handler 都调 `classifyTwoFingerGesture(translation:, scale:)` 并喂**两个识别器的实时值**（pinch handler 读两指pan.translation，两指pan handler 读 pinch.scale）。函数内 `abs(scale-1.0)>0.02` 优先判 pinch、否则垂直判切周期——成为确定性单一仲裁权威，`.pinch` 分支在生产**转活**。arbiter 持两识别器 **weak** 引用（view 持有它们，避免 arbiter↔recognizer 环）。
+2. **两指仲裁是纯函数生命周期状态机 `twoFingerStep`（修正 R1 finding 3 + R3 finding）。** pinch 与两指 pan 两个独立识别器、**放行同时识别**、各喂对方实时值（scale / translation）进**同一** `twoFingerStep` 状态机。内部用 `classifyTwoFingerGesture` 做判定（`.pinch` 分支转活），但**意图一旦锁定 pinch 即锁死**：后续不再可能切周期、终止相位始终关闭 pinch 生命周期（无论末帧 scale）、切周期仅在未锁定时终止相位发一次、对两识别器顺序无关不双发。arbiter 持两识别器 **weak** 引用（view 持有它们，避免 arbiter↔recognizer 环），仅存 `twoFingerState` 一个状态字段。
 3. **单指平移生命周期是纯函数 `singlePanStep`（修正 R2 finding）。** 方向判定用累积位移过 `classifySingleFingerPan`；**仅锁定为水平后才发 onPan**——垂直/ambiguous 全程零回调，不触碰 reducer pan 状态。锁定瞬间合成 `.began`（消费者 panStarted）并把增量基线设为当前累积（deadzone 位移不计入 offset，更干净）；之后 `panIncrement` 出帧间增量；终止相位仅在 active 时发、`.ended` 携 `velocity(in:).x`、`.cancelled` 速度归零。arbiter 仅存 `lastTranslationX` + `singlePanHorizontalActive` 两个状态字段，决策与不变量全在 `singlePanStep`（macOS 单测穷举垂直/ambiguous/水平三类生命周期）。
 4. **边界语义严格对齐 spec 字面**：`abs(scale-1.0) > 0.02`、`dy > dx*1.2`、`dx > dy*1.5` / `dy > dx*1.5`、`dx < minThreshold && dy < minThreshold` 全严格不等；边界相等值归属由单测固定。codex 若就 `>` vs `>=` 无 spec 依据反复挖，按 `feedback_codex_plan_budget_overshoot` pushback。
 
@@ -45,7 +45,7 @@
 ## File Structure
 
 - **Create** `ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/GestureClassifiers.swift`
-  4 值类型（`GesturePhase`/`TwoFingerIntent`/`SingleFingerPanIntent`/`DrawingModePanPolicy`）+ 3 分类纯函数（spec 逐字）+ `panIncrement` 增量纯函数 + `singlePanStep` 生命周期纯函数（+ internal `SinglePanStep`/`SinglePanEmission`）。跨平台。`SwipeDirection` 复用 `Models.swift`。
+  4 值类型（`GesturePhase`/`TwoFingerIntent`/`SingleFingerPanIntent`/`DrawingModePanPolicy`）+ 3 分类纯函数（spec 逐字）+ `panIncrement` + `singlePanStep`（单指生命周期）+ `twoFingerStep`（两指生命周期）纯函数（+ internal `SinglePanStep`/`SinglePanEmission`/`TwoFingerEmission`/`TwoFingerState`/`TwoFingerStepResult`）。跨平台。`SwipeDirection` 复用 `Models.swift`。
 - **Create** `ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/ChartGestureArbiter.swift`
   `ChartGestureArbiter` UIKit 类——5 回调 + drawingMode + attach + 委托 + @objc handlers + per-gesture 增量状态 + 两指仲裁。整文件 `#if canImport(UIKit)`。
 - **Create** `ios/Contracts/Tests/KlineTrainerContractsTests/GestureClassifiersTests.swift`
@@ -230,6 +230,55 @@ struct SinglePanStepTests {
     }
 }
 
+@Suite("twoFingerStep lifecycle")
+struct TwoFingerStepTests {
+    // R3 核心反例：先 pinch 越阈值 → 后回落 scale≈1.0 + 垂直平移结束 → 只发 pinch 生命周期，绝不切周期
+    @Test("pinch 锁定后末帧回落不触发切周期")
+    func pinchLockSuppressesSwipe() {
+        var st = TwoFingerState()
+        let began = twoFingerStep(phase: .began, scale: 1.0, translation: .zero, state: st); st = began.state
+        #expect(began.emission == nil)
+        let lock = twoFingerStep(phase: .changed, scale: 1.05, translation: CGPoint(x: 0, y: 0), state: st); st = lock.state
+        #expect(lock.emission == .pinch(scale: 1.05, phase: .began)); #expect(st.locked)
+        // 末帧 scale 回落到 1.0 且垂直平移大 → 仍发 pinch(.ended)，不发 switchPeriod
+        let end = twoFingerStep(phase: .ended, scale: 1.0, translation: CGPoint(x: 0, y: -200), state: st); st = end.state
+        #expect(end.emission == .pinch(scale: 1.0, phase: .ended))
+        #expect(st.started == false && st.locked == false)
+    }
+    // 反向失败模式：已 emit 的 pinch 末帧 scale 回落阈值内仍须关闭生命周期（不丢 .ended）
+    @Test("锁定 pinch 末帧 scale 在阈值内仍发 ended")
+    func pinchTerminalAlwaysClosed() {
+        var st = TwoFingerState(started: true, locked: true)
+        let end = twoFingerStep(phase: .ended, scale: 1.001, translation: .zero, state: st); st = end.state
+        #expect(end.emission == .pinch(scale: 1.001, phase: .ended))
+    }
+    // 纯垂直两指 swipe（无 pinch）：changed 不发，ended 发一次 switchPeriod
+    @Test("纯垂直两指 → ended 发一次 switchPeriod")
+    func verticalSwipe() {
+        var st = TwoFingerState()
+        st = twoFingerStep(phase: .began, scale: 1.0, translation: .zero, state: st).state
+        let changed = twoFingerStep(phase: .changed, scale: 1.0, translation: CGPoint(x: 5, y: -100), state: st); st = changed.state
+        #expect(changed.emission == nil); #expect(st.locked == false)
+        let end = twoFingerStep(phase: .ended, scale: 1.0, translation: CGPoint(x: 5, y: -120), state: st); st = end.state
+        #expect(end.emission == .switchPeriod(.up))
+        #expect(st.started == false)
+    }
+    // 顺序无关 + 不双发：第二个识别器的终止回调（started==false）须 no-op
+    @Test("第二个终止回调 no-op（不双发）")
+    func secondTerminalNoOp() {
+        let reset = TwoFingerState(started: false, locked: false)
+        let second = twoFingerStep(phase: .ended, scale: 1.0, translation: CGPoint(x: 0, y: -200), state: reset)
+        #expect(second.emission == nil)
+    }
+    // 已在手势中再来 began（另一识别器）不重置 locked
+    @Test("手势中再 began 不重置 locked")
+    func beganPreservesLock() {
+        let st = TwoFingerState(started: true, locked: true)
+        let again = twoFingerStep(phase: .began, scale: 1.2, translation: .zero, state: st)
+        #expect(again.emission == nil); #expect(again.state.locked == true)
+    }
+}
+
 @Suite("Gesture value types Equatable")
 struct GestureValueTypeTests {
     @Test("switchPeriod 方向区分")
@@ -374,11 +423,68 @@ func singlePanStep(phase: GesturePhase,
         }
     }
 }
+
+// MARK: - 两指手势生命周期状态机（纯函数，修正 R3 finding：意图须锁定，不得跨回调重分类）
+
+/// 两指手势一次应发出的事件（focus 由 arbiter 从识别器补）。
+enum TwoFingerEmission: Equatable {
+    case pinch(scale: CGFloat, phase: GesturePhase)
+    case switchPeriod(SwipeDirection)
+}
+
+/// 两指手势生命周期状态。`started` = 手势进行中；`locked` = 已锁定为 pinch 意图。
+struct TwoFingerState: Equatable {
+    var started: Bool = false
+    var locked: Bool = false
+}
+
+/// `twoFingerStep` 返回。
+struct TwoFingerStepResult: Equatable {
+    let emission: TwoFingerEmission?
+    let state: TwoFingerState
+}
+
+/// 两指生命周期纯决策。pinch 与两指 pan 两识别器**交错**调用、各喂对方实时值（scale / translation）。
+/// 关键不变量（R3 finding）：
+/// - 一旦 `classifyTwoFingerGesture == .pinch`，**锁定** intent，后续 `.changed` 全发 pinch、**不再可能切周期**；
+/// - 已锁定 pinch 的手势在终止相位**始终**发 `pinch(.ended/.cancelled)`，**无论末帧 scale 是否回落阈值内**（不丢生命周期）；
+/// - 切周期仅在**未锁定 pinch** 且终止相位垂直时离散发一次；
+/// - 对两识别器**顺序无关**：首个终止回调出 emission 并复位，第二个（`started==false`）no-op，绝不双发。
+func twoFingerStep(phase: GesturePhase, scale: CGFloat, translation: CGPoint,
+                   state: TwoFingerState) -> TwoFingerStepResult {
+    switch phase {
+    case .began:
+        // 已在手势中（另一识别器先 began）→ 保留 locked，不重置
+        if state.started { return TwoFingerStepResult(emission: nil, state: state) }
+        return TwoFingerStepResult(emission: nil, state: TwoFingerState(started: true, locked: false))
+    case .changed:
+        var st = state; st.started = true
+        if st.locked {
+            return TwoFingerStepResult(emission: .pinch(scale: scale, phase: .changed), state: st)
+        }
+        if classifyTwoFingerGesture(translation: translation, scale: scale) == .pinch {
+            st.locked = true
+            return TwoFingerStepResult(emission: .pinch(scale: scale, phase: .began), state: st)
+        }
+        return TwoFingerStepResult(emission: nil, state: st)   // 切周期延后到终止判定
+    case .ended, .cancelled:
+        let reset = TwoFingerState(started: false, locked: false)
+        guard state.started else { return TwoFingerStepResult(emission: nil, state: reset) }
+        if state.locked {
+            // 锁定 pinch：始终关闭生命周期，忽略末帧 scale
+            return TwoFingerStepResult(emission: .pinch(scale: scale, phase: phase), state: reset)
+        }
+        if case .switchPeriod(let dir) = classifyTwoFingerGesture(translation: translation, scale: scale) {
+            return TwoFingerStepResult(emission: .switchPeriod(dir), state: reset)
+        }
+        return TwoFingerStepResult(emission: nil, state: reset)
+    }
+}
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `swift test --package-path ios/Contracts --filter ClassifyTwoFingerGestureTests` 然后依次 `--filter ClassifySingleFingerPanTests`、`--filter PanPolicyInDrawingModeTests`、`--filter PanIncrementTests`、`--filter SinglePanStepTests`、`--filter GestureValueTypeTests`
+Run: `swift test --package-path ios/Contracts --filter ClassifyTwoFingerGestureTests` 然后依次 `--filter ClassifySingleFingerPanTests`、`--filter PanPolicyInDrawingModeTests`、`--filter PanIncrementTests`、`--filter SinglePanStepTests`、`--filter TwoFingerStepTests`、`--filter GestureValueTypeTests`
 Expected: 各 suite `0 failures`。
 
 - [ ] **Step 5: 提交**
@@ -445,6 +551,9 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     private var lastSinglePanTranslationX: CGFloat = 0
     private var singlePanHorizontalActive = false
 
+    // 两指 per-gesture 状态（生命周期决策在纯函数 twoFingerStep）。
+    private var twoFingerState = TwoFingerState()
+
     public override init() { super.init() }
 
     /// 在目标视图上创建并挂载 5 个识别器，全部以 self 为 delegate。
@@ -507,22 +616,28 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
         if let e = step.emission { onPan?(e.deltaX, e.velocityX, e.phase) }
     }
 
+    // 两指 pan 与 pinch 两识别器都喂入同一 twoFingerStep 状态机（顺序无关）；各读对方实时值。
     @objc private func handleTwoFingerPan(_ g: UIPanGestureRecognizer) {
-        // 切周期离散：松手判定一次；scale 取实时 pinch 识别器值参与仲裁
-        guard g.state == .ended else { return }
-        let t = g.translation(in: g.view)
+        guard let ph = phase(from: g.state) else { return }
         let scale = pinchRecognizer?.scale ?? 1.0
-        if case .switchPeriod(let dir) = classifyTwoFingerGesture(translation: t, scale: scale) {
-            onTwoFingerSwipe?(dir)
-        }
+        let focus = pinchRecognizer?.location(in: g.view) ?? g.location(in: g.view)
+        emitTwoFinger(twoFingerStep(phase: ph, scale: scale, translation: g.translation(in: g.view),
+                                    state: twoFingerState), focus: focus)
     }
 
     @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
         guard let ph = phase(from: g.state) else { return }
-        // 喂两指pan 实时 translation + 本识别器 scale；仅 scale 主导（classifier == .pinch）才发缩放
         let translation = twoFingerPanRecognizer?.translation(in: g.view) ?? .zero
-        if classifyTwoFingerGesture(translation: translation, scale: g.scale) == .pinch {
-            onPinch?(g.scale, g.location(in: g.view), ph)
+        emitTwoFinger(twoFingerStep(phase: ph, scale: g.scale, translation: translation,
+                                    state: twoFingerState), focus: g.location(in: g.view))
+    }
+
+    private func emitTwoFinger(_ result: TwoFingerStepResult, focus: CGPoint) {
+        twoFingerState = result.state
+        switch result.emission {
+        case .pinch(let s, let p): onPinch?(s, focus, p)
+        case .switchPeriod(let dir): onTwoFingerSwipe?(dir)
+        case .none: break
         }
     }
 
@@ -601,9 +716,10 @@ Expected: 0 匹配。
   - grep `#if canImport(UIKit)` 在 arbiter（UIKit 门控存在）
   - grep `singlePanStep` 在 handleSinglePan（生命周期纯函数接线存在 → 防 R1 finding 1 + R2 finding 回归）
   - grep `velocity(in:` 在 arbiter（释放速度路径存在 → 防 R1 finding 2 回归）
-  - grep `classifyTwoFingerGesture` 在 handlePinch 与 handleTwoFingerPan 各 1 处（两指仲裁活接线 → 防 R1 finding 3 回归）
+  - grep `twoFingerStep` 在 handlePinch 与 handleTwoFingerPan 各 1 处（两指生命周期状态机活接线 → 防 R1 finding 3 + R3 finding 回归）
   - PanIncrementTests `multiFrameNetMovement` 通过（净位移 == 增量和，单测证 R1 finding 1）
   - SinglePanStepTests `verticalNeverEmits` 通过（垂直手势零回调，单测证 R2 finding）
+  - TwoFingerStepTests `pinchLockSuppressesSwipe` 通过（pinch 锁定不切周期，单测证 R3 finding）
 
 - [ ] **Step 5: 提交**
 
@@ -621,8 +737,9 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 **2. codex findings 闭合：**
 - R1 finding 1（累积当增量）→ `panIncrement` + `singlePanStep` 维护基线 + `multiFrameNetMovement` 单测。✓
 - R1 finding 2（缺速度路径）→ onPan 第二参定义 velocityX、`.ended` surface `velocity(in:).x`、对齐 reducer `panEnded(velocity:)→startDeceleration`。✓
-- R1 finding 3（仲裁虚设）→ pinch/两指pan 放行同时识别 + 两 handler 喂双实时值经 `classifyTwoFingerGesture` 确定性仲裁、`.pinch` 转活。✓
+- R1 finding 3（仲裁虚设）→ pinch/两指pan 放行同时识别 + 喂双实时值经 `classifyTwoFingerGesture` 判定、`.pinch` 转活。✓（R3 进一步加生命周期锁定）
 - R2 finding（垂直/ambiguous 仍 emit pan 生命周期）→ `singlePanStep` 显式水平态状态机：仅锁定水平后才产 emission，垂直/ambiguous 全程 nil；`verticalNeverEmits` / `ambiguousNeverEmits` 单测。✓
+- R3 finding（两指跨回调重分类致冲突/丢终止）→ `twoFingerStep` 生命周期状态机：意图锁定 pinch 后不切周期、终止始终关闭 pinch 生命周期、顺序无关不双发；`pinchLockSuppressesSwipe` / `pinchTerminalAlwaysClosed` / `secondTerminalNoOp` 单测。✓
 
 **3. Placeholder 扫描：** 无 TBD/TODO；每 code step 含完整代码；分类函数逐字 spec。✓
 
@@ -634,4 +751,4 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 
 ## 流程位置
 
-用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1 3 findings → R2 修；R2 1 finding 单指生命周期 → **本次 R3 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。
+用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1 3 findings → R2；R2 单指生命周期 → R3；R3 两指生命周期 → **本次 R4 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。
