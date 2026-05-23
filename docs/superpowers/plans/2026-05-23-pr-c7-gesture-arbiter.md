@@ -356,6 +356,16 @@ struct TwoFingerStepTests {
         #expect(end.emission == .pinch(scale: 1.0, phase: .ended))
         #expect(st == TwoFingerState())
     }
+    // R15 finding-2：快速 pinch `.began` 已带过阈值 scale 直达 `.ended`（无 `.changed`）→ pinch 生命周期不丢
+    @Test("pinch began 带过阈值 scale 直达 ended → pinch 生命周期不丢")
+    func quickPinchBeganToEnded() {
+        var st = TwoFingerState()
+        let began = twoFingerStep(source: .pinch, phase: .began, scale: 1.05, translation: .zero, state: st); st = began.state
+        #expect(began.emission == .pinch(scale: 1.05, phase: .began)); #expect(st.locked)
+        let end = twoFingerStep(source: .pinch, phase: .ended, scale: 1.05, translation: .zero, state: st); st = end.state
+        #expect(end.emission == .pinch(scale: 1.05, phase: .ended))
+        #expect(st == TwoFingerState())
+    }
     // 反向失败模式：已 emit 的 pinch 末帧 scale 回落阈值内仍须关闭生命周期（不丢 .ended）
     @Test("锁定 pinch 末帧 scale 在阈值内仍发 ended")
     func pinchTerminalAlwaysClosed() {
@@ -711,6 +721,12 @@ func twoFingerStep(source: TwoFingerSource, phase: GesturePhase, scale: CGFloat,
     switch phase {
     case .began:
         setDown(true)
+        // R15 finding-2：.began 可能已带过阈值 scale（快速捏合）→ 立即按当前值分类，防 .began→.ended 无 .changed 漏 pinch
+        if !st.locked, classifyTwoFingerGesture(translation: translation, scale: scale) == .pinch {
+            st.locked = true
+            st.lastPinchScale = scale
+            return TwoFingerStepResult(emission: .pinch(scale: scale, phase: .began), state: st)
+        }
         return TwoFingerStepResult(emission: nil, state: st)
     case .changed:
         setDown(true)   // .changed 蕴含本识别器活跃
@@ -980,15 +996,20 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
 
     // MARK: - UIGestureRecognizerDelegate
 
-    /// 长按+Pan 共存（spec 仲裁表）；Pinch+两指Pan 共存（供 classifyTwoFingerGesture 同时拿 scale+translation 仲裁）。
+    /// 长按+Pan 共存（spec 仲裁表）；Pinch+两指Pan 共存（供 classifyTwoFingerGesture 同时拿 scale+translation 仲裁）；
+    /// **单指Pan+两指Pan 共存**（R15 finding-1：让两指 pan 在单指已识别时仍能 `.began` → 触发 `supersedeSinglePanForMultitouch`
+    /// 同步取消单指、确定性接管；否则委托互斥会挡死两指 began 使切周期无法发生）。
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                   shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         let pair = [gestureRecognizer, other]
         let hasLongPress = pair.contains { $0 is UILongPressGestureRecognizer }
         let hasPinch = pair.contains { $0 is UIPinchGestureRecognizer }
         let hasPan = pair.contains { $0 is UIPanGestureRecognizer }
+        let hasSinglePan = pair.contains { $0 === singlePanRecognizer }
+        let hasTwoFingerPan = pair.contains { $0 === twoFingerPanRecognizer }
         if hasLongPress && hasPan { return true }
         if hasPinch && hasPan { return true }
+        if hasSinglePan && hasTwoFingerPan { return true }   // 让两指 pan 能 began 触发 supersede 接管
         return false
     }
 }
@@ -1097,6 +1118,8 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 - R13 finding-1（零 delta .changed 空 bump revision）→ `singlePanStep` horizontalActive 下 delta==0 不发 .changed；`zeroDeltaChangedSuppressed` 单测。✓
 - R13 finding-2（取消/接管丢末段位移）→ drawing 截获 + `singlePanSupersede` 均先补末段残量 `.changed`(读当前累积) 再 `.cancelled`；`drawingTakeoverCancelsActive`(残量 40) / `supersedeActiveWithResidual`(残量 15) 单测。✓
 - R14 finding（`.began`→`.ended` 无 `.changed` 漏 flick）→ `.began` 复位 + 立即 `classifyFromIdle` 分类（与 idle `.changed` 共用）；`beganToEndedFlickNoChanged`/`beganVerticalLatchesImmediately` 单测。✓
+- R15 finding-1（交错两指接管被委托挡死）→ 委托放行单指Pan+两指Pan 同时识别（让两指 began 触发 supersede）；grep `hasSinglePan && hasTwoFingerPan` + Catalyst 验收交错起手。✓
+- R15 finding-2（快速 pinch `.began`→`.ended` 漏 pinch）→ `twoFingerStep` `.began` 也分类 pinch（与 `.changed` 锁对称）；`quickPinchBeganToEnded` 单测。✓
 
 **3. Placeholder 扫描：** 无 TBD/TODO；每 code step 含完整代码；分类函数逐字 spec。✓
 
@@ -1108,4 +1131,4 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 
 ## 流程位置
 
-用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R14 见上 findings；R14 `.began` 立即分类防漏 flick→**本次 R15 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
+用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R15 见上 findings；R15 委托放行单+两指接管 + pinch `.began` 分类→**本次 R16 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
