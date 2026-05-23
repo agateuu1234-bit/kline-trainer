@@ -22,12 +22,14 @@
 故 `UIPanGestureRecognizer` 的 **累积 translation 必须换算成帧间增量**再出回调（否则下游累加得 10+20+30=60 而非净 30，codex R1 finding 1）；**松手必须surface 释放速度** `velocity(in:).x`（否则惯性滚动拿不到初速，codex R1 finding 2）。
 
 **因此 spec 未标注的 `onPan: ((CGFloat, CGFloat, GesturePhase))` 两个 CGFloat 定义为 `(incrementalDeltaX, velocityX, phase)`**：
-| phase | incrementalDeltaX | velocityX | 消费者（C8/E5）派发 |
+| onPan 回调 phase | incrementalDeltaX | velocityX | 消费者（C8/E5）派发 |
 |---|---|---|---|
-| `.began` | 0 | ~0 | `.panStarted` |
+| `.began`（首次锁定水平时发） | 0 | 锁定瞬时速度 | `.panStarted` |
 | `.changed` | 帧间水平增量 | 实时水平速度 | `.offsetApplied(deltaPixels: incrementalDeltaX)` |
 | `.ended` | 末帧残量（消费者可忽略） | 释放水平速度 | `.panEnded(velocity: velocityX)` |
 | `.cancelled` | 末帧残量 | 0 | `.panEnded(velocity: 0)` |
+
+**关键（R2 finding 修正）**：上表回调**仅在手势被 `classifySingleFingerPan` 锁定为水平后才发**。垂直 / ambiguous 单指手势全程**不发任何 onPan**（emission==nil），绝不把 reducer 从 autoTracking 推到 freeScrolling / 启动减速。该不变量由纯函数 `singlePanStep` 承载并被 `SinglePanStepTests` 单测覆盖。UIKit 的真实 `.began` 相位被吞，水平锁定瞬间合成一个 `.began` 回调。
 
 ---
 
@@ -35,7 +37,7 @@
 
 1. **arbiter 无 macOS 单测，是平台固有约束。** `UIGestureRecognizerDelegate` / `UIPanGestureRecognizer` 等 UIKit 独有，plain macOS SDK 无对等 API。arbiter 整类 `#if canImport(UIKit)`：macOS `swift build` 编译为空；Catalyst `xcodebuild` 真实编译（required `Mac Catalyst build-for-testing on macos-15`）；运行时手势触发 = 真机验收残留（plan v1.5 §验收 L1177）。所有**非平凡决策逻辑都在被全量单测的纯函数里**（4 分类/换算函数）；arbiter 内未测部分仅为 UIKit 管道：识别器声明式配置、`State→GesturePhase` 平凡 switch、跨识别器 scale/translation 读取、per-gesture 增量状态、委托共存策略。
 2. **两指仲裁由 `classifyTwoFingerGesture` 真实承担（修正 R1 finding 3）。** pinch 与两指 pan 是两个独立识别器、**放行同时识别**；两个 handler 都调 `classifyTwoFingerGesture(translation:, scale:)` 并喂**两个识别器的实时值**（pinch handler 读两指pan.translation，两指pan handler 读 pinch.scale）。函数内 `abs(scale-1.0)>0.02` 优先判 pinch、否则垂直判切周期——成为确定性单一仲裁权威，`.pinch` 分支在生产**转活**。arbiter 持两识别器 **weak** 引用（view 持有它们，避免 arbiter↔recognizer 环）。
-3. **单指平移：方向判定用累积位移，offset 发帧间增量。** `classifySingleFingerPan` 吃累积 translation 锁定主方向（需累积才能过 minThreshold/1.5 倍比）；锁定为 `.horizontal` 后用纯函数 `panIncrement(current:last:)` 算帧间增量出回调。per-gesture `lastTranslationX` 在 `.began` 归零（UIKit handler 内状态，device-tested）。已知微行为：首个水平帧的增量含 ~8pt deadzone 起跳量（亚像素级，不修，防 `feedback_codex_fractional_subpixel_bias` 挖边界）。
+3. **单指平移生命周期是纯函数 `singlePanStep`（修正 R2 finding）。** 方向判定用累积位移过 `classifySingleFingerPan`；**仅锁定为水平后才发 onPan**——垂直/ambiguous 全程零回调，不触碰 reducer pan 状态。锁定瞬间合成 `.began`（消费者 panStarted）并把增量基线设为当前累积（deadzone 位移不计入 offset，更干净）；之后 `panIncrement` 出帧间增量；终止相位仅在 active 时发、`.ended` 携 `velocity(in:).x`、`.cancelled` 速度归零。arbiter 仅存 `lastTranslationX` + `singlePanHorizontalActive` 两个状态字段，决策与不变量全在 `singlePanStep`（macOS 单测穷举垂直/ambiguous/水平三类生命周期）。
 4. **边界语义严格对齐 spec 字面**：`abs(scale-1.0) > 0.02`、`dy > dx*1.2`、`dx > dy*1.5` / `dy > dx*1.5`、`dx < minThreshold && dy < minThreshold` 全严格不等；边界相等值归属由单测固定。codex 若就 `>` vs `>=` 无 spec 依据反复挖，按 `feedback_codex_plan_budget_overshoot` pushback。
 
 ---
@@ -43,7 +45,7 @@
 ## File Structure
 
 - **Create** `ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/GestureClassifiers.swift`
-  4 值类型（`GesturePhase`/`TwoFingerIntent`/`SingleFingerPanIntent`/`DrawingModePanPolicy`）+ 3 分类纯函数（spec 逐字）+ `panIncrement` 增量纯函数。跨平台。`SwipeDirection` 复用 `Models.swift`。
+  4 值类型（`GesturePhase`/`TwoFingerIntent`/`SingleFingerPanIntent`/`DrawingModePanPolicy`）+ 3 分类纯函数（spec 逐字）+ `panIncrement` 增量纯函数 + `singlePanStep` 生命周期纯函数（+ internal `SinglePanStep`/`SinglePanEmission`）。跨平台。`SwipeDirection` 复用 `Models.swift`。
 - **Create** `ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/ChartGestureArbiter.swift`
   `ChartGestureArbiter` UIKit 类——5 回调 + drawingMode + attach + 委托 + @objc handlers + per-gesture 增量状态 + 两指仲裁。整文件 `#if canImport(UIKit)`。
 - **Create** `ios/Contracts/Tests/KlineTrainerContractsTests/GestureClassifiersTests.swift`
@@ -177,6 +179,57 @@ struct PanIncrementTests {
     func noMove() { #expect(panIncrement(current: 42, last: 42) == 0) }
 }
 
+@Suite("singlePanStep lifecycle")
+struct SinglePanStepTests {
+    // 垂直手势全程不产出回调（修正 R2 finding：不得触碰 reducer pan 状态）
+    @Test("垂直单指手势全程 emission 为 nil 且不激活")
+    func verticalNeverEmits() {
+        let began = singlePanStep(phase: .began, cumulative: .zero, velocityX: 0, active: false, lastTranslationX: 99)
+        #expect(began.emission == nil); #expect(began.active == false); #expect(began.lastTranslationX == 0)
+        let changed = singlePanStep(phase: .changed, cumulative: CGPoint(x: 5, y: 100), velocityX: 800,
+                                    active: began.active, lastTranslationX: began.lastTranslationX)
+        #expect(changed.emission == nil); #expect(changed.active == false)
+        let ended = singlePanStep(phase: .ended, cumulative: CGPoint(x: 5, y: 120), velocityX: 900,
+                                  active: changed.active, lastTranslationX: changed.lastTranslationX)
+        #expect(ended.emission == nil)   // 关键：垂直手势松手不发 panEnded，不启动减速
+    }
+    // ambiguous（斜向 / 微动）同样零回调
+    @Test("ambiguous 手势全程 emission 为 nil")
+    func ambiguousNeverEmits() {
+        let s = singlePanStep(phase: .changed, cumulative: CGPoint(x: 50, y: 50), velocityX: 100,
+                              active: false, lastTranslationX: 0)
+        #expect(s.emission == nil); #expect(s.active == false)
+    }
+    // 水平手势：首次锁定发 .began(delta 0)，后续发 .changed 增量，松手发 .ended 携释放速度
+    @Test("水平手势激活→增量→松手速度全链")
+    func horizontalActivationLifecycle() {
+        let begin = singlePanStep(phase: .began, cumulative: .zero, velocityX: 0, active: false, lastTranslationX: 0)
+        #expect(begin.emission == nil)
+        // 首个水平 .changed（累积 20）：发 .began，delta 0，基线设 20（deadzone 不计入）
+        let lock = singlePanStep(phase: .changed, cumulative: CGPoint(x: 20, y: 3), velocityX: 600,
+                                 active: begin.active, lastTranslationX: begin.lastTranslationX)
+        #expect(lock.emission == SinglePanEmission(deltaX: 0, velocityX: 600, phase: .began))
+        #expect(lock.active == true); #expect(lock.lastTranslationX == 20)
+        // 后续 .changed（累积 30）：发 .changed，delta 10
+        let move = singlePanStep(phase: .changed, cumulative: CGPoint(x: 30, y: 4), velocityX: 700,
+                                 active: lock.active, lastTranslationX: lock.lastTranslationX)
+        #expect(move.emission == SinglePanEmission(deltaX: 10, velocityX: 700, phase: .changed))
+        // .ended（累积 35，速度 900）：发 .ended，delta 5，velocity 900
+        let end = singlePanStep(phase: .ended, cumulative: CGPoint(x: 35, y: 4), velocityX: 900,
+                                active: move.active, lastTranslationX: move.lastTranslationX)
+        #expect(end.emission == SinglePanEmission(deltaX: 5, velocityX: 900, phase: .ended))
+        #expect(end.active == false)
+    }
+    // .cancelled 在已激活时发终止但速度归零（不启动减速的释放速度）
+    @Test("cancelled 在激活态发终止且 velocity 归零")
+    func cancelledZeroVelocity() {
+        let end = singlePanStep(phase: .cancelled, cumulative: CGPoint(x: 50, y: 4), velocityX: 999,
+                                active: true, lastTranslationX: 40)
+        #expect(end.emission == SinglePanEmission(deltaX: 10, velocityX: 0, phase: .cancelled))
+        #expect(end.active == false)
+    }
+}
+
 @Suite("Gesture value types Equatable")
 struct GestureValueTypeTests {
     @Test("switchPeriod 方向区分")
@@ -266,11 +319,66 @@ public func panPolicyInDrawingMode(drawingMode: Bool) -> DrawingModePanPolicy {
 public func panIncrement(current: CGFloat, last: CGFloat) -> CGFloat {
     current - last
 }
+
+// MARK: - 单指平移生命周期状态机（纯函数，修正 R2 finding：垂直/ambiguous 不得触碰 reducer pan 状态）
+
+/// 单指平移一次回调应发出的事件。
+struct SinglePanEmission: Equatable {
+    let deltaX: CGFloat
+    let velocityX: CGFloat
+    let phase: GesturePhase
+}
+
+/// 单指平移生命周期一步的纯决策结果。
+struct SinglePanStep: Equatable {
+    let emission: SinglePanEmission?   // nil = 本步不触发任何 onPan 回调
+    let active: Bool                   // 本手势是否已锁定为水平平移
+    let lastTranslationX: CGFloat      // 下一步增量基线
+}
+
+/// 单指平移生命周期纯决策。arbiter handler 把识别器原始值喂入、据返回更新状态并发回调。
+/// 关键不变量（R2 finding）：**仅当本手势曾锁定为水平平移才产出 emission**——
+/// 垂直 / ambiguous 手势全程 emission == nil，绝不触碰 reducer pan 状态。
+/// `.began` 仅重置状态不发回调；首次 `classifySingleFingerPan == .horizontal` 才发 `.began`（消费者 panStarted）
+/// 并把基线设为当前累积（deadzone 位移不计入 offset）；终止相位仅在 active 时发。
+func singlePanStep(phase: GesturePhase,
+                   cumulative: CGPoint,
+                   velocityX: CGFloat,
+                   active: Bool,
+                   lastTranslationX: CGFloat,
+                   minThreshold: CGFloat = 8) -> SinglePanStep {
+    switch phase {
+    case .began:
+        return SinglePanStep(emission: nil, active: false, lastTranslationX: 0)
+    case .changed:
+        if active {
+            let delta = panIncrement(current: cumulative.x, last: lastTranslationX)
+            return SinglePanStep(
+                emission: SinglePanEmission(deltaX: delta, velocityX: velocityX, phase: .changed),
+                active: true, lastTranslationX: cumulative.x)
+        } else if case .horizontal = classifySingleFingerPan(translation: cumulative, minThreshold: minThreshold) {
+            return SinglePanStep(
+                emission: SinglePanEmission(deltaX: 0, velocityX: velocityX, phase: .began),
+                active: true, lastTranslationX: cumulative.x)
+        } else {
+            return SinglePanStep(emission: nil, active: false, lastTranslationX: lastTranslationX)
+        }
+    case .ended, .cancelled:
+        if active {
+            let delta = panIncrement(current: cumulative.x, last: lastTranslationX)
+            return SinglePanStep(
+                emission: SinglePanEmission(deltaX: delta, velocityX: phase == .ended ? velocityX : 0, phase: phase),
+                active: false, lastTranslationX: cumulative.x)
+        } else {
+            return SinglePanStep(emission: nil, active: false, lastTranslationX: lastTranslationX)
+        }
+    }
+}
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `swift test --package-path ios/Contracts --filter ClassifyTwoFingerGestureTests` 然后依次 `--filter ClassifySingleFingerPanTests`、`--filter PanPolicyInDrawingModeTests`、`--filter PanIncrementTests`、`--filter GestureValueTypeTests`
+Run: `swift test --package-path ios/Contracts --filter ClassifyTwoFingerGestureTests` 然后依次 `--filter ClassifySingleFingerPanTests`、`--filter PanPolicyInDrawingModeTests`、`--filter PanIncrementTests`、`--filter SinglePanStepTests`、`--filter GestureValueTypeTests`
 Expected: 各 suite `0 failures`。
 
 - [ ] **Step 5: 提交**
@@ -333,8 +441,9 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     private weak var pinchRecognizer: UIPinchGestureRecognizer?
     private weak var twoFingerPanRecognizer: UIPanGestureRecognizer?
 
-    // 单指平移 per-gesture 增量状态（.began 归零）。
+    // 单指平移 per-gesture 状态（生命周期决策在纯函数 singlePanStep，本类仅存状态）。
     private var lastSinglePanTranslationX: CGFloat = 0
+    private var singlePanHorizontalActive = false
 
     public override init() { super.init() }
 
@@ -387,24 +496,15 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
         // Drawing 模式下 Pan 被绘线截获（spec 仲裁表）
         guard panPolicyInDrawingMode(drawingMode: drawingMode) == .normalPass else { return }
         guard let ph = phase(from: g.state) else { return }
-        let cumulative = g.translation(in: g.view)
-        let velocityX = g.velocity(in: g.view).x
-        switch ph {
-        case .began:
-            lastSinglePanTranslationX = 0
-            onPan?(0, velocityX, .began)
-        case .changed:
-            // 方向判定用累积位移；仅水平才发增量 offset
-            if case .horizontal = classifySingleFingerPan(translation: cumulative) {
-                let delta = panIncrement(current: cumulative.x, last: lastSinglePanTranslationX)
-                lastSinglePanTranslationX = cumulative.x
-                onPan?(delta, velocityX, .changed)
-            }
-        case .ended, .cancelled:
-            let delta = panIncrement(current: cumulative.x, last: lastSinglePanTranslationX)
-            lastSinglePanTranslationX = cumulative.x
-            onPan?(delta, ph == .ended ? velocityX : 0, ph)
-        }
+        // 生命周期决策全在纯函数 singlePanStep（垂直/ambiguous 返回 emission==nil → 不触碰 reducer pan 状态）
+        let step = singlePanStep(phase: ph,
+                                 cumulative: g.translation(in: g.view),
+                                 velocityX: g.velocity(in: g.view).x,
+                                 active: singlePanHorizontalActive,
+                                 lastTranslationX: lastSinglePanTranslationX)
+        singlePanHorizontalActive = step.active
+        lastSinglePanTranslationX = step.lastTranslationX
+        if let e = step.emission { onPan?(e.deltaX, e.velocityX, e.phase) }
     }
 
     @objc private func handleTwoFingerPan(_ g: UIPanGestureRecognizer) {
@@ -499,10 +599,11 @@ Expected: 0 匹配。
   - Catalyst build-for-testing → `** TEST BUILD SUCCEEDED **`
   - grep AppError → 0 匹配
   - grep `#if canImport(UIKit)` 在 arbiter（UIKit 门控存在）
-  - grep `panIncrement` 在 handleSinglePan（增量换算接线存在 → 防 R1 finding 1 回归）
+  - grep `singlePanStep` 在 handleSinglePan（生命周期纯函数接线存在 → 防 R1 finding 1 + R2 finding 回归）
   - grep `velocity(in:` 在 arbiter（释放速度路径存在 → 防 R1 finding 2 回归）
   - grep `classifyTwoFingerGesture` 在 handlePinch 与 handleTwoFingerPan 各 1 处（两指仲裁活接线 → 防 R1 finding 3 回归）
-  - PanIncrementTests `multiFrameNetMovement` 通过（净位移 == 增量和，单测层证 finding 1 修复）
+  - PanIncrementTests `multiFrameNetMovement` 通过（净位移 == 增量和，单测证 R1 finding 1）
+  - SinglePanStepTests `verticalNeverEmits` 通过（垂直手势零回调，单测证 R2 finding）
 
 - [ ] **Step 5: 提交**
 
@@ -517,10 +618,11 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 
 **1. Spec coverage（modules §C7 L1351-1406）：** `GesturePhase`/`TwoFingerIntent`/`classifyTwoFingerGesture`(逐字)/`SingleFingerPanIntent`/`classifySingleFingerPan`(逐字)/`DrawingModePanPolicy`/`panPolicyInDrawingMode`(逐字)/`ChartGestureArbiter`(5 回调+drawingMode+attach) 全覆盖；spec L2231 三纯函数测试目标 ✓ 穷举；plan v1.5 §仲裁规则 L90-100 全映射。
 
-**2. R1 findings 闭合：**
-- finding 1（累积当增量）→ `panIncrement` 纯函数 + 单指 handler 跟踪 lastTranslationX + `multiFrameNetMovement` 单测。✓
-- finding 2（缺速度路径）→ onPan 第二参定义 velocityX、`.ended` surface `velocity(in:).x`、对齐 reducer `panEnded(velocity:)→startDeceleration`。✓
-- finding 3（仲裁虚设）→ pinch/两指pan 放行同时识别 + 两 handler 喂双实时值经 `classifyTwoFingerGesture` 确定性仲裁、`.pinch` 转活。✓
+**2. codex findings 闭合：**
+- R1 finding 1（累积当增量）→ `panIncrement` + `singlePanStep` 维护基线 + `multiFrameNetMovement` 单测。✓
+- R1 finding 2（缺速度路径）→ onPan 第二参定义 velocityX、`.ended` surface `velocity(in:).x`、对齐 reducer `panEnded(velocity:)→startDeceleration`。✓
+- R1 finding 3（仲裁虚设）→ pinch/两指pan 放行同时识别 + 两 handler 喂双实时值经 `classifyTwoFingerGesture` 确定性仲裁、`.pinch` 转活。✓
+- R2 finding（垂直/ambiguous 仍 emit pan 生命周期）→ `singlePanStep` 显式水平态状态机：仅锁定水平后才产 emission，垂直/ambiguous 全程 nil；`verticalNeverEmits` / `ambiguousNeverEmits` 单测。✓
 
 **3. Placeholder 扫描：** 无 TBD/TODO；每 code step 含完整代码；分类函数逐字 spec。✓
 
@@ -532,4 +634,4 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 
 ## 流程位置
 
-用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（**R1 needs-attention 3 findings → 本次 R2 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。
+用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1 3 findings → R2 修；R2 1 finding 单指生命周期 → **本次 R3 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。
