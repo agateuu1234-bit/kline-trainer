@@ -117,6 +117,10 @@ struct TradeCalculatorSellTests {
                                           tier: .tier5, price: 20, fees: noMin)
         guard case .success(let q) = r else { Issue.record("expected success"); return }
         #expect(q.shares == 50)
+        #expect(approx(q.notional, 1_000))              // 50*20
+        #expect(approx(q.commission, 0.1))              // 1000*0.0001
+        #expect(approx(q.stampDuty, 0.5))               // 1000*0.0005
+        #expect(approx(q.proceeds, 999.4))              // 1000-0.1-0.5
     }
 
     @Test("tier3 整手卖出: 500*0.6=300 -> lot 300")
@@ -161,5 +165,47 @@ struct TradeCalculatorSellTests {
         guard case .success(let q) = r else { Issue.record("expected success"); return }
         #expect(approx(q.commission, 5.0))              // raw 0.8 < 5 -> 5
         #expect(approx(q.proceeds, 7_991.0))            // 8000-5-4
+    }
+}
+
+@Suite("TradeCalculator.forceCloseOnEnd")
+struct TradeCalculatorForceCloseTests {
+
+    @Test("happy: 全量清仓，佣金+印花税")
+    func happy() {
+        let q = TradeCalculator.forceCloseOnEnd(holding: 1000, averageCost: 15,
+                                                price: 20, fees: noMin)
+        #expect(q.shares == 1000)
+        #expect(approx(q.notional, 20_000))
+        #expect(approx(q.commission, 2.0))
+        #expect(approx(q.stampDuty, 10.0))
+        #expect(approx(q.proceeds, 19_988.0))           // 20000-2-10
+    }
+
+    @Test("奇数持仓全量清仓不取整")
+    func oddLot() {
+        let q = TradeCalculator.forceCloseOnEnd(holding: 1234, averageCost: 15,
+                                                price: 10, fees: noMin)
+        #expect(q.shares == 1234)
+        #expect(approx(q.notional, 12_340))
+    }
+
+    @Test("holding=0: 全零报价（无交易无费用）")
+    func zeroHolding() {
+        let q = TradeCalculator.forceCloseOnEnd(holding: 0, averageCost: 0,
+                                                price: 20, fees: withMin)
+        #expect(q.shares == 0)
+        #expect(approx(q.notional, 0))
+        #expect(approx(q.commission, 0))                // 不触发 min5
+        #expect(approx(q.stampDuty, 0))
+        #expect(approx(q.proceeds, 0))
+    }
+
+    @Test("min commission: 清仓免5开启且佣金<5 计 5")
+    func minCommission() {
+        let q = TradeCalculator.forceCloseOnEnd(holding: 1000, averageCost: 15,
+                                                price: 20, fees: withMin)
+        #expect(approx(q.commission, 5.0))              // raw 2.0 < 5 -> 5
+        #expect(approx(q.proceeds, 19_985.0))           // 20000-5-10
     }
 }

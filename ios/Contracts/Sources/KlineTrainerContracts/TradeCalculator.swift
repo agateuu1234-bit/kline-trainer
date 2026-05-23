@@ -62,7 +62,8 @@ public enum TradeCalculator {
     public static func quoteSell(holding: Int, averageCost: Double,
                                  tier: PositionTier, price: Double,
                                  fees: FeeSnapshot) -> Result<SellQuote, TradeReason> {
-        // averageCost 属冻结签名；E3 不用它（已实现盈亏由 E5 调用方按 averageCost 计算）。
+        // averageCost 属冻结签名；E3 不用它（已实现盈亏由 E5 调用方按 averageCost 计算），
+        // 故有意不做 isFinite 校验（未参与计算，校验无意义）。
         guard price > 0, holding >= 0, price.isFinite else {
             return .failure(.invalidShareCount)
         }
@@ -76,9 +77,22 @@ public enum TradeCalculator {
             // 与 buy 路径保持一致 floor 语义。
             sellShares = (robustFloor(Double(holding) * ratio(of: tier)) / shareLotSize) * shareLotSize
         }
+        // 仅 non-tier5 可达：tier5 分支已令 sellShares = holding（holding>0 已由上方 guard 保证）
         guard sellShares > 0 else { return .failure(.insufficientHolding) }
 
         return .success(makeSellQuote(shares: sellShares, price: price, fees: fees))
+    }
+
+    // MARK: - Force close (end of game)
+
+    public static func forceCloseOnEnd(holding: Int, averageCost: Double,
+                                       price: Double, fees: FeeSnapshot) -> SellQuote {
+        // 局终全量清仓，无错误通道；holding<=0 或非法 price -> 全零报价（无交易无费用）。
+        // averageCost 属冻结签名；E3 不用它（已实现盈亏由 E5 调用方计算）。
+        guard holding > 0, price > 0, price.isFinite else {
+            return SellQuote(shares: 0, notional: 0, commission: 0, stampDuty: 0, proceeds: 0)
+        }
+        return makeSellQuote(shares: holding, price: price, fees: fees)
     }
 
     // MARK: - Private helpers
