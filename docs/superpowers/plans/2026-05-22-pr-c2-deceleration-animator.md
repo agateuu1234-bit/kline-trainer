@@ -103,7 +103,7 @@ final class DecelerationAnimator {
 | Create: `ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/DecelerationModel.swift` | 纯减速物理 + 数值校验（internal struct）：`advance(dt:) -> Outcome`。无 UIKit / 无 run loop。 |
 | Create: `ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/DecelerationAnimator.swift` | `@MainActor public final class` + internal `FrameDriving` 协议 + `RealFrameDriver`：持 model + 注入工厂建驱动 + generation + §C2 public API + 测试缝 `handleTick(dt:generation:)` / 注入 init / `isDecelerating` / `currentGeneration`。 |
 | Create: `ios/Contracts/Tests/KlineTrainerContractsTests/DecelerationModelTests.swift` | 纯物理 + 数值校验 + 帧切分不变性测试（15）。 |
-| Create: `ios/Contracts/Tests/KlineTrainerContractsTests/DecelerationAnimatorTests.swift` | 接线测试（@MainActor，`.serialized`）+ 内置 `FakeFrameDriver`：handleTick 逻辑 + 代次 + initialVelocity guard（含 sub-threshold no-op）+ fake 驱动生命周期/清理（含 isolated deinit 同步失活）+ elapsedDelta 真经过时间 + 1 macOS 真 Timer smoke（16）。 |
+| Create: `ios/Contracts/Tests/KlineTrainerContractsTests/DecelerationAnimatorTests.swift` | 接线测试（@MainActor，`.serialized`）+ 内置 `FakeFrameDriver`：handleTick 逻辑 + 代次 + initialVelocity guard（含 sub-threshold no-op）+ fake 驱动生命周期/清理（weak-self 自愈）+ elapsedDelta 真经过时间 + 1 macOS 真 Timer smoke（15）。 |
 | Create: `docs/acceptance/2026-05-22-pr-c2-deceleration-animator.md` | 非 coder 验收清单（中文，action/expected/pass-fail，二元可判）。 |
 
 子项映射（per `feedback_planner_packaging_bias` ≤3 子项 / ≤500 行 prod；本 PR 约 175 行 prod）：① DecelerationModel ② DecelerationAnimator + FrameDriving + RealFrameDriver ③ acceptance + 验证。
@@ -813,14 +813,14 @@ final class RealFrameDriver: FrameDriving {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `swift test --package-path ios/Contracts --filter DecelerationAnimator`
-Expected: PASS（macOS 宿主 16 tests = 15 确定性/fake + 1 真 Timer smoke；Catalyst 编译 15，0 failures）
+Expected: PASS（macOS 宿主 15 tests = 14 确定性/fake + 1 真 Timer smoke；Catalyst 编译 14，0 failures）
 
 - [ ] **Step 5: 提交**
 
 ```bash
 git add ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/DecelerationAnimator.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/DecelerationAnimatorTests.swift
-git commit -m "feat(C2): DecelerationAnimator + 可注入 FrameDriving + RealFrameDriver + 16 tests"
+git commit -m "feat(C2): DecelerationAnimator + 可注入 FrameDriving + RealFrameDriver + 15 tests"
 ```
 
 ---
@@ -839,7 +839,7 @@ Expected: `Build complete!`，0 concurrency warning/error。
 - [ ] **Step 2: 全量测试**
 
 Run: `swift test --package-path ios/Contracts`
-Expected: 既有测试（PR #59 后约 297+ 个）+ 新增 31 个（model 15 + animator 16）全 PASS，0 failures。
+Expected: 既有测试（PR #59 后约 297+ 个）+ 新增 30 个（model 15 + animator 15）全 PASS，0 failures。
 
 - [ ] **Step 3: Mac Catalyst build-for-testing（编译 iOS/Catalyst CADisplayLink adapter，修 R2-F2）**
 
@@ -902,5 +902,6 @@ git commit -m "docs(C2): 验收清单"
 - branch-diff R3（释放时帧暂停 → run-loop 持有的 driver 滞留，仅靠后续 tick 自失活）→ `isolated deinit { driver?.invalidate() }` 同步失活（SE-0371，已本地 build + Catalyst build-for-testing 验证编译）+ 单测 #12c（释放即失活无需 tick）✓（commit d0434ed）。
 - branch-diff R4-F1（位移只用 final velocity × 整 dt → 非帧率无关）→ `advance` 按 refInterval **细分积分** + chunking-invariance 单测（model #15）✓（commit 1094c80）。
 - branch-diff R4-F2（CADisplayLink 用 `link.timestamp` 减创建播种 → 首帧 dt≤0 → iOS 减速误停，我 R2 引入的回归）→ 改用 `CACurrentMediaTime()` 单调钟经共享 `tick()`，两分支统一 ✓（commit 1094c80）。
+- branch-diff R5（R3 的 `isolated deinit` 需 Swift 6.2+，违反仓库 `swift-tools-version: 6.0` 契约 → 6.0/6.1 toolchain 编译失败，我 R3 引入的隐患）→ **移除 `isolated deinit`**，回到 `[weak self]` 自愈拆解；R3 的"帧暂停同步拆解"降级为有界自愈残留（见 Accepted residual）✓（commit bde9d05）。
 
-> 注：Task 1/2 内嵌代码块为初版骨架；`advance` 细分积分 / `tick()` 单调钟 / `isolated deinit` 等 R1-R4+I1 修订以最终源码为准（本 Self-review 列全 commit；codex branch-diff 审源码非内嵌块）。
+> 注：Task 1/2 内嵌代码块 + DD-3 中 `isolated deinit` 措辞为中途版本，**已于 R5 移除**；`advance` 细分积分 / `tick()` 单调钟 / weak-self 自愈拆解以最终源码为准（Self-review 列全 commit；codex branch-diff 审源码非内嵌块）。

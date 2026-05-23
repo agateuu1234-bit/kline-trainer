@@ -5,7 +5,7 @@
 | # | 动作 | 预期 | 判定 |
 |---|---|---|---|
 | 1 | 运行 `swift test --package-path ios/Contracts --filter DecelerationModel` | 终端输出含 `15 tests`、`0 failures` | failures = 0 → 通过；否则不通过 |
-| 2 | 运行 `swift test --package-path ios/Contracts --filter DecelerationAnimator` | 终端输出含 `16 tests`、`0 failures` | failures = 0 → 通过；否则不通过 |
+| 2 | 运行 `swift test --package-path ios/Contracts --filter DecelerationAnimator` | 终端输出含 `15 tests`、`0 failures` | failures = 0 → 通过；否则不通过 |
 | 3 | 运行 `swift test --package-path ios/Contracts` | 全量测试 0 failures | failures = 0 → 通过；否则不通过 |
 | 4 | 运行 `swift build --package-path ios/Contracts` | 输出 `Build complete!` | 出现该串且无 error → 通过；否则不通过 |
 | 5 | 在 `ios/Contracts` 运行 `xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' -derivedDataPath /tmp/c2-catalyst` | 输出含 `** TEST BUILD SUCCEEDED **`，无 `error:`/`warning:` | 出现该串且无 error/warning → 通过（编译 iOS/Catalyst CADisplayLink adapter）；否则不通过 |
