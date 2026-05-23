@@ -1131,4 +1131,6 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 
 ## 流程位置
 
-用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R15 见上 findings；R15 委托放行单+两指接管 + pinch `.began` 分类→**本次 R16 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
+用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage review **已收敛** → 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff review。
+
+**plan-stage 收敛记录（如实）**：codex plan-stage **R1-R15 全 needs-attention**（15 轮真 correctness bug 全修：累积 delta/释放 velocity/pinch 仲裁/垂直 latch/两指生命周期顺序无关/drawing 截获保残量/attach 幂等/FP 边界 verify-and-correct/零 delta 抑制/`.began` flick/委托接管/快速 pinch；每轮均真 bug 或真 tradeoff，无复述无自相矛盾，user 2026-05-23 明示"继续修到批准"）→ **R16 codex 周级配额耗尽（May 27 才重置）→ user 授权 opus 4.7 xhigh fallback → APPROVE**（逐条执行 40+ 测试断言 + 全链验证 + reducer 对齐，0 真 finding）。**codex 本身从未 approve**；plan-stage 闸门靠 opus xhigh fallback 收口（push 仪式走 attest-override 记录）。
