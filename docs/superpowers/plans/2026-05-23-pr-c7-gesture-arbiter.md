@@ -40,7 +40,7 @@
 1. **arbiter 无 macOS 单测，是平台固有约束。** `UIGestureRecognizerDelegate` / `UIPanGestureRecognizer` / `UIView` 等 UIKit 独有，plain macOS SDK 无对等 API。arbiter 整类 `#if canImport(UIKit)`：macOS `swift build` 编译为空；Catalyst `xcodebuild` 真实编译（required `Mac Catalyst build-for-testing on macos-15`）；运行时手势触发 + `attach(to:)` 幂等性 = 真机/Catalyst 验收残留（plan v1.5 §验收 L1177）。所有**非平凡决策与生命周期逻辑都在被全量单测的纯函数里**（3 分类 + `panIncrement` + `singlePanStep` + `twoFingerStep`）；arbiter 内未测部分仅为 UIKit 管道：识别器声明式配置/挂载/卸载、`State→GesturePhase` 平凡 switch、跨识别器实时值读取、把纯函数结果转回调。
 2. **两指仲裁是纯函数生命周期状态机 `twoFingerStep`（修正 R1 finding 3 + R3 + R5 finding-2）。** pinch 与两指 pan 两个独立识别器、**放行同时识别**、各喂对方实时值进**同一** `twoFingerStep`（带 `source` 标识）。内部用 `classifyTwoFingerGesture` 判定（`.pinch` 分支转活），**意图一旦锁定 pinch 即锁死**（后续不切周期、终止始终关闭 pinch 生命周期、切周期仅未锁定时终止发一次）。**真顺序无关**：状态机分别跟踪 `pinchDown`/`panDown`，**仅当两者皆 false 才结算**——一个识别器先终止只清自己 down 标志延后结算，滞后识别器回调不重启/不泄漏；孤立终止（无 began）no-op。arbiter 持两识别器 **weak** 引用（view 持有，避免环），仅存 `twoFingerState` 一字段。
 3. **单指平移生命周期是纯函数 `singlePanStep` 三态机 `idle/horizontalActive/verticalRejected`（修正 R2 + R4 + R9 finding-1）。** 方向判定用累积位移过 `classifySingleFingerPan`；**仅 `horizontalActive` 才发 onPan**——`idle`(等待)/`verticalRejected`(已拒) 全程零回调，不触碰 reducer pan 状态。**垂直一旦判定即 latch 为 `verticalRejected`**，后续累积即便满足水平分类器也不翻成 pan（R9 finding-1）。锁定水平瞬间合成 `.began`（消费者 panStarted）+ 基线设当前累积（deadzone 不计入）；之后 `panIncrement` 出增量；终止仅 active 时发、`.ended` 携 `velocity(in:).x`、`.cancelled` 速度归零、末段残量先补 `.changed`（R7 finding-2）。`drawingTakesOver` 折入：截获清空状态、active 时先发 `.cancelled` 关闭生命周期（R4 + R5 finding-1）。arbiter 仅存 `lastTranslationX` + `singlePanLifecycle` 两字段（macOS 单测穷举垂直 latch/ambiguous/水平/drawing-截获 全生命周期）。
-4. **边界语义严格对齐 spec 字面**：`abs(scale-1.0) > 0.02`、`dy > dx*1.2`、`dx > dy*1.5` / `dy > dx*1.5`、`dx < minThreshold && dy < minThreshold` 全严格不等；边界相等值归属由单测固定。codex 若就 `>` vs `>=` 无 spec 依据反复挖，按 `feedback_codex_plan_budget_overshoot` pushback。
+4. **边界语义严格对齐 spec 字面（一处 verify-and-correct）**：`dy > dx*1.2`、`dx > dy*1.5` / `dy > dx*1.5`、`dx < minThreshold && dy < minThreshold` 全严格不等逐字。**唯一 verify-and-correct（R12 finding）**：pinch 阈值 spec 字面 `abs(scale-1.0) > 0.02` 在 Double 下 1.02/0.98 精确边界 FP 误判 → 改对称显式边界 `scale > 1.02 || scale < 0.98`（保 spec ">2% 偏离" 意图，消 FP wart）。边界相等值归属由单测固定（含对称 0.98）。codex 若就其余 `>` vs `>=` 无 spec 依据反复挖，按 `feedback_codex_plan_budget_overshoot` pushback。
 
 5. **单指↔两指优先级（spec L95）= 确定性 touch-count 升级（R8 finding-2 / R9 finding-2 / R10 finding-1）。** 干净场景靠 `maxTouches=1`/`minTouches=2` + 委托 pan+pan 互斥。**不用 `single.require(toFail:)`**（会卡死单指响应，R9）。**交错起手**用**确定性接管**：两指 pan / pinch `.began` 时 `supersedeSinglePanForMultitouch()` 切 `single.isEnabled` 取消进行中的单指 pan（其 `.cancelled` 经 `singlePanStep` 关闭消费者生命周期），路由权交两指。单指响应性不受影响（仅在第 2 指真触发多指手势时才取消）。运行时手势 fire 行为（真机/Catalyst 验收）仍是残留，但**优先级设计已确定不再靠 UX 调优**。
 
@@ -93,13 +93,21 @@ struct ClassifyTwoFingerGestureTests {
     func scaleZoomOut() {
         #expect(classifyTwoFingerGesture(translation: CGPoint(x: 999, y: 999), scale: 0.5) == .pinch)
     }
-    @Test("scale 恰在阈值 0.02 不算 pinch（严格 >）")
+    @Test("scale 恰在上边界 1.02 不算 pinch（显式 > 1.02，R12 FP 修正）")
     func scaleAtBoundaryNotPinch() {
         #expect(classifyTwoFingerGesture(translation: CGPoint(x: 0, y: -100), scale: 1.02) == .switchPeriod(.up))
     }
-    @Test("scale 略超阈值 → pinch")
+    @Test("scale 略超上边界 → pinch")
     func scaleJustOverBoundary() {
         #expect(classifyTwoFingerGesture(translation: CGPoint(x: 0, y: -100), scale: 1.0201) == .pinch)
+    }
+    @Test("scale 恰在下边界 0.98 不算 pinch（对称）")
+    func scaleAtLowerBoundaryNotPinch() {
+        #expect(classifyTwoFingerGesture(translation: CGPoint(x: 0, y: -100), scale: 0.98) == .switchPeriod(.up))
+    }
+    @Test("scale 略低于下边界 → pinch")
+    func scaleJustUnderLowerBoundary() {
+        #expect(classifyTwoFingerGesture(translation: CGPoint(x: 0, y: -100), scale: 0.9799) == .pinch)
     }
     @Test("两指上滑 → switchPeriod up")
     func swipeUp() {
@@ -462,10 +470,14 @@ public enum TwoFingerIntent: Equatable, Sendable {
     case ignore
 }
 
-/// 两指意图分类（spec L1363-1368 逐字）。scale 偏离 1.0 超阈值优先判 pinch；
-/// 否则垂直分量显著（dy > dx*1.2）判切周期方向；其余忽略。
+/// 两指意图分类（spec L1363-1368）。scale 偏离 1.0 超 2% 判 pinch；否则垂直分量显著（dy > dx*1.2）判切周期方向；其余忽略。
+///
+/// **verify-and-correct（R12 finding）**：spec 字面 `abs(scale - 1.0) > 0.02` 在 IEEE754 Double 下，`1.02 - 1.0` 舍入到
+/// 略大于 `0.02` → 恰好 2% 边界（scale==1.02 / 0.98）被误判为 pinch（codex `swift -e` 实证）。这里用**对称显式边界**
+/// 表达同一意图（>2% 偏离判 pinch），使恰好 2% 边界确定为**非 pinch**、避免减法舍入。等价于 spec 意图，仅消除 FP 边界 wart
+/// （C1a xToIndex verify-and-correct 同类先例；非功能性改写——真实连续 scale 不会落在 measure-zero 的精确边界）。
 public func classifyTwoFingerGesture(translation: CGPoint, scale: CGFloat) -> TwoFingerIntent {
-    if abs(scale - 1.0) > 0.02 { return .pinch }
+    if scale > 1.02 || scale < 0.98 { return .pinch }
     let dx = abs(translation.x); let dy = abs(translation.y)
     if dy > dx * 1.2 { return .switchPeriod(translation.y < 0 ? .up : .down) }
     return .ignore
@@ -1001,7 +1013,7 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 
 ## Self-Review（对照 spec + R1 findings）
 
-**1. Spec coverage（modules §C7 L1351-1406）：** `GesturePhase`/`TwoFingerIntent`/`classifyTwoFingerGesture`(逐字)/`SingleFingerPanIntent`/`classifySingleFingerPan`(逐字)/`DrawingModePanPolicy`/`panPolicyInDrawingMode`(逐字)/`ChartGestureArbiter`(5 回调+drawingMode+attach) 全覆盖；spec L2231 三纯函数测试目标 ✓ 穷举；plan v1.5 §仲裁规则 L90-100 全映射。
+**1. Spec coverage（modules §C7 L1351-1406）：** `GesturePhase`/`TwoFingerIntent`/`classifyTwoFingerGesture`(spec 意图，pinch 阈值 verify-and-correct 见约束 #4)/`SingleFingerPanIntent`/`classifySingleFingerPan`(逐字)/`DrawingModePanPolicy`/`panPolicyInDrawingMode`(逐字)/`ChartGestureArbiter`(5 回调+drawingMode+attach) 全覆盖；spec L2231 三纯函数测试目标 ✓ 穷举；plan v1.5 §仲裁规则 L90-100 全映射。
 
 **2. codex findings 闭合：**
 - R1 finding 1（累积当增量）→ `panIncrement` + `singlePanStep` 维护基线 + `multiFrameNetMovement` 单测。✓
@@ -1023,15 +1035,16 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 - R10 finding-1（交错两指优先级不该留残留）→ 确定性 `supersedeSinglePanForMultitouch()`：两指/pinch `.began` 切 `single.isEnabled` 取消单指、路由交两指（不伤单指响应）；约束 #5。✓
 - R10 finding-2（pinch 抬起后 pan 源发 stale-scale pinch.changed）→ `lastPinchScale` 记 pinch 源最后有效 scale；pinch down 才发 pan 源 pinch.changed、终止用 lastPinchScale；`lateRecognizerNoLeak`（lagChanged 抑制 + 终止 scale 1.06）单测。✓
 - R11 finding（多指接管依赖回调投递不可靠）→ `singlePanSupersede` 纯函数**同步**关闭（恰一个 .cancelled + 复位），supersede 不再依赖 isEnabled 回调；`supersedeActiveEmitsOneCancelled`/`supersedeInactiveNoEmit` 单测。✓
+- R12 finding（pinch 阈值 FP 边界 1.02 误判致测试失败）→ verify-and-correct 改对称显式边界 `scale > 1.02 || scale < 0.98`（保 spec 意图）；`scaleAtBoundaryNotPinch`/`scaleAtLowerBoundaryNotPinch` 等四边界单测。✓
 
 **3. Placeholder 扫描：** 无 TBD/TODO；每 code step 含完整代码；分类函数逐字 spec。✓
 
 **4. 类型一致性：** `SwipeDirection`(Models.swift 既有)；4 值类型 Task1 定义 / Task2 引用一致；回调签名对齐 spec L1398-1402；onPan 双参语义在「下游契约」表锁定。✓
 
-**已知超 spec 实现选择（已声明，非 placeholder）：** onPan 双 CGFloat 具体化为 (incrementalDeltaX, velocityX)（spec 未标注，依 Reducer 契约推定）；两指切周期 `.ended` 离散触发；首水平帧增量含 deadzone 起跳量（亚像素，不修）。
+**已知超 / 偏离 spec 字面（已声明，非 placeholder）：** onPan 双 CGFloat 具体化为 (incrementalDeltaX, velocityX)（spec 未标注，依 Reducer 契约推定）；两指切周期 `.ended` 离散触发；首水平帧 deadzone 不计入 offset；**`classifyTwoFingerGesture` pinch 阈值由 spec 字面 `abs(scale-1.0)>0.02` verify-and-correct 为 `scale>1.02||scale<0.98`**（保意图、消 FP 边界 wart，R12，约束 #4）。
 
 ---
 
 ## 流程位置
 
-用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R10 见上 findings；R11 多指接管同步关闭不依赖回调→**本次 R12 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
+用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R11 见上 findings；R12 pinch 阈值 FP 边界 verify-and-correct→**本次 R13 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
