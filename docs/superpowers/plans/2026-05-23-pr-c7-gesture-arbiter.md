@@ -42,7 +42,7 @@
 3. **单指平移生命周期是纯函数 `singlePanStep` 三态机 `idle/horizontalActive/verticalRejected`（修正 R2 + R4 + R9 finding-1）。** 方向判定用累积位移过 `classifySingleFingerPan`；**仅 `horizontalActive` 才发 onPan**——`idle`(等待)/`verticalRejected`(已拒) 全程零回调，不触碰 reducer pan 状态。**垂直一旦判定即 latch 为 `verticalRejected`**，后续累积即便满足水平分类器也不翻成 pan（R9 finding-1）。锁定水平瞬间合成 `.began`（消费者 panStarted）+ 基线设当前累积（deadzone 不计入）；之后 `panIncrement` 出增量；终止仅 active 时发、`.ended` 携 `velocity(in:).x`、`.cancelled` 速度归零、末段残量先补 `.changed`（R7 finding-2）。`drawingTakesOver` 折入：截获清空状态、active 时先发 `.cancelled` 关闭生命周期（R4 + R5 finding-1）。arbiter 仅存 `lastTranslationX` + `singlePanLifecycle` 两字段（macOS 单测穷举垂直 latch/ambiguous/水平/drawing-截获 全生命周期）。
 4. **边界语义严格对齐 spec 字面**：`abs(scale-1.0) > 0.02`、`dy > dx*1.2`、`dx > dy*1.5` / `dy > dx*1.5`、`dx < minThreshold && dy < minThreshold` 全严格不等；边界相等值归属由单测固定。codex 若就 `>` vs `>=` 无 spec 依据反复挖，按 `feedback_codex_plan_budget_overshoot` pushback。
 
-5. **单指↔两指优先级（spec L95）的静态边界 + device 残留（R8 finding-2 / R9 finding-2）。** 干净场景靠 `maxTouches=1`（单指）/`minTouches=2`（两指）+ 委托 pan+pan 互斥覆盖。**不用 `single.require(toFail:)`**——会让正常单指拖动卡 `.possible` 等两指失败、毁掉图表主交互响应性（R9）。**交错起手（先 1 指微动再落第 2 指）的两指优先级**是 device-tuning 残留：静态 plan 无法在不牺牲单指响应性下两全（R8 要优先、R9 要响应，方向相反），运行时 UX 真机/Catalyst 验收 + 必要时 Phase 5 调优；C2 CADisplayLink 运行时 gate 同类先例。
+5. **单指↔两指优先级（spec L95）= 确定性 touch-count 升级（R8 finding-2 / R9 finding-2 / R10 finding-1）。** 干净场景靠 `maxTouches=1`/`minTouches=2` + 委托 pan+pan 互斥。**不用 `single.require(toFail:)`**（会卡死单指响应，R9）。**交错起手**用**确定性接管**：两指 pan / pinch `.began` 时 `supersedeSinglePanForMultitouch()` 切 `single.isEnabled` 取消进行中的单指 pan（其 `.cancelled` 经 `singlePanStep` 关闭消费者生命周期），路由权交两指。单指响应性不受影响（仅在第 2 指真触发多指手势时才取消）。运行时手势 fire 行为（真机/Catalyst 验收）仍是残留，但**优先级设计已确定不再靠 UX 调优**。
 
 ---
 
@@ -324,15 +324,15 @@ struct TwoFingerStepTests {
         // pinch 锁定
         let lock = twoFingerStep(source: .pinch, phase: .changed, scale: 1.06, translation: .zero, state: st); st = lock.state
         #expect(lock.emission == .pinch(scale: 1.06, phase: .began))
-        // pinch 先 ended，但 pan 仍 down → 延后，不发
+        // pinch 先 ended（scale 1.06 记入 lastPinchScale），但 pan 仍 down → 延后，不发
         let pinchEnd = twoFingerStep(source: .pinch, phase: .ended, scale: 1.06, translation: .zero, state: st); st = pinchEnd.state
         #expect(pinchEnd.emission == nil); #expect(st.panDown == true && st.locked == true)
-        // 滞后 pan 的 changed（垂直）：仍锁定 → 发 pinch.changed，绝不 switchPeriod
+        // 滞后 pan 的 changed（pinch 已抬起，scale=1.0 是 stale）→ 抑制，不发 stale pinch.changed（R10 finding-2）
         let lagChanged = twoFingerStep(source: .pan, phase: .changed, scale: 1.0, translation: CGPoint(x: 0, y: -200), state: st); st = lagChanged.state
-        #expect(lagChanged.emission == .pinch(scale: 1.0, phase: .changed))
-        // pan ended（两 down 归零）→ 结算发 pinch.ended，无 switchPeriod
+        #expect(lagChanged.emission == nil)
+        // pan ended（两 down 归零）→ 结算发 pinch.ended，scale 用 lastPinchScale=1.06（非 stale 1.0），无 switchPeriod
         let panEnd = twoFingerStep(source: .pan, phase: .ended, scale: 1.0, translation: CGPoint(x: 0, y: -240), state: st); st = panEnd.state
-        #expect(panEnd.emission == .pinch(scale: 1.0, phase: .ended))
+        #expect(panEnd.emission == .pinch(scale: 1.06, phase: .ended))
         #expect(st == TwoFingerState())
     }
     // R6 finding-1：锁定 pinch 先 .cancelled（pan 仍 down 延后）→ 滞后 pan .ended 结算须发 pinch(.cancelled) 不是 .ended
@@ -346,7 +346,7 @@ struct TwoFingerStepTests {
         let pinchCancel = twoFingerStep(source: .pinch, phase: .cancelled, scale: 1.08, translation: .zero, state: st); st = pinchCancel.state
         #expect(pinchCancel.emission == nil); #expect(st.pendingTerminal == .cancelled)
         let panEnd = twoFingerStep(source: .pan, phase: .ended, scale: 1.0, translation: .zero, state: st); st = panEnd.state
-        #expect(panEnd.emission == .pinch(scale: 1.0, phase: .cancelled))   // 中断的 pinch 不误报成功
+        #expect(panEnd.emission == .pinch(scale: 1.08, phase: .cancelled))   // 中断 pinch 不误报成功；scale 用 lastPinchScale 非 stale
         #expect(st == TwoFingerState())
     }
     // cancelled 的垂直两指手势不得切周期（离散成功动作只在正常 ended 触发）
@@ -598,6 +598,7 @@ struct TwoFingerState: Equatable {
     var locked = false
     var pendingTerminal: GesturePhase? = nil
     var pendingSwipe: SwipeDirection? = nil
+    var lastPinchScale: CGFloat = 1.0    // 最近一次 pinch 源报告的 scale；pan 源/终止结算复用，防 stale（R10 finding-2）
 }
 
 /// `twoFingerStep` 返回。
@@ -624,10 +625,17 @@ func twoFingerStep(source: TwoFingerSource, phase: GesturePhase, scale: CGFloat,
     case .changed:
         setDown(true)   // .changed 蕴含本识别器活跃
         if st.locked {
-            return TwoFingerStepResult(emission: .pinch(scale: scale, phase: .changed), state: st)
+            // 仅 pinch 源、或 pinch 仍在按时（scale 为 pinch 实时有效值）才发 pinch.changed 并记 lastPinchScale；
+            // pinch 已抬起后 pan 源的 scale 是 stale（默认 1.0）→ 抑制，避免缩放跳变（R10 finding-2）
+            if source == .pinch || st.pinchDown {
+                st.lastPinchScale = scale
+                return TwoFingerStepResult(emission: .pinch(scale: scale, phase: .changed), state: st)
+            }
+            return TwoFingerStepResult(emission: nil, state: st)
         }
         if classifyTwoFingerGesture(translation: translation, scale: scale) == .pinch {
             st.locked = true
+            st.lastPinchScale = scale
             return TwoFingerStepResult(emission: .pinch(scale: scale, phase: .began), state: st)
         }
         return TwoFingerStepResult(emission: nil, state: st)   // 切周期延后到终止判定
@@ -636,6 +644,7 @@ func twoFingerStep(source: TwoFingerSource, phase: GesturePhase, scale: CGFloat,
         let thisSourceWasDown = (source == .pinch) ? st.pinchDown : st.panDown
         guard thisSourceWasDown else { return TwoFingerStepResult(emission: nil, state: st) }
         setDown(false)
+        if source == .pinch { st.lastPinchScale = scale }   // pinch 自身终止 scale 有效 → 记下供结算（R10 finding-2）
         // 合并终止意图：任一识别器 .cancelled 则整手势视为 cancelled（压倒 .ended），见 R6 finding-1
         let effectivePhase: GesturePhase = (phase == .cancelled || st.pendingTerminal == .cancelled) ? .cancelled : .ended
         // 本次终止回调时（translation 仍有效）捕获切周期方向；与已记 pendingSwipe 取首个非空（R7 finding-1）
@@ -653,8 +662,9 @@ func twoFingerStep(source: TwoFingerSource, phase: GesturePhase, scale: CGFloat,
         // 至此本识别器确曾参与（thisSourceWasDown）且两 down 皆归零 → 结算
         let reset = TwoFingerState()
         if st.locked {
-            // 锁定 pinch：用合并后的 effectivePhase 关闭生命周期（中断的 pinch 不得误报成功，R6 finding-1）
-            return TwoFingerStepResult(emission: .pinch(scale: scale, phase: effectivePhase), state: reset)
+            // 锁定 pinch：用合并后的 effectivePhase 关闭生命周期（中断的 pinch 不得误报成功，R6 finding-1）；
+            // scale 用 lastPinchScale（pinch 源最后有效值），不用结算回调可能 stale 的 scale（R10 finding-2）
+            return TwoFingerStepResult(emission: .pinch(scale: st.lastPinchScale, phase: effectivePhase), state: reset)
         }
         // 切周期是离散成功动作：仅正常结束（非 cancelled）才发；用 defer 时捕获的方向（防滞后帧 translation 失效，R7 finding-1）
         if effectivePhase == .ended, let dir = swipe {
@@ -729,6 +739,7 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     // 弱引用：两指仲裁需跨识别器读对方实时值；view 持有识别器，weak 避免 arbiter↔recognizer 环。
     private weak var pinchRecognizer: UIPinchGestureRecognizer?
     private weak var twoFingerPanRecognizer: UIPanGestureRecognizer?
+    private weak var singlePanRecognizer: UIPanGestureRecognizer?   // 两指起手时确定性取消单指（R10 finding-1）
     // 已挂载的目标视图（weak）；attach 幂等性判定用（R6 finding-2）。
     private weak var attachedView: UIView?
 
@@ -785,7 +796,17 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
 
         pinchRecognizer = pinch
         twoFingerPanRecognizer = twoFinger
+        singlePanRecognizer = single
         attachedView = view
+    }
+
+    /// 两指/pinch 起手时确定性接管：取消进行中的单指 pan（R10 finding-1，不用 require(toFail:) 故不伤单指响应）。
+    /// 切换 isEnabled 令单指识别器 .cancelled → handleSinglePan 经 singlePanStep 在 horizontalActive 时发 `.cancelled`
+    /// 关闭消费者 pan 生命周期并复位；之后路由权交两指。
+    private func supersedeSinglePanForMultitouch() {
+        guard let s = singlePanRecognizer, s.isEnabled else { return }
+        s.isEnabled = false
+        s.isEnabled = true
     }
 
     /// 复位 per-gesture 状态（attach 切 view 时调，防跨 view/代次状态串）。
@@ -828,6 +849,7 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     // 两指 pan 与 pinch 两识别器都喂入同一 twoFingerStep 状态机（顺序无关）；各读对方实时值。
     @objc private func handleTwoFingerPan(_ g: UIPanGestureRecognizer) {
         guard let ph = phase(from: g.state) else { return }
+        if ph == .began { supersedeSinglePanForMultitouch() }   // 第 2 指落 → 取消单指（R10 finding-1）
         let scale = pinchRecognizer?.scale ?? 1.0
         let focus = pinchRecognizer?.location(in: g.view) ?? g.location(in: g.view)
         emitTwoFinger(twoFingerStep(source: .pan, phase: ph, scale: scale, translation: g.translation(in: g.view),
@@ -836,6 +858,7 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
 
     @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
         guard let ph = phase(from: g.state) else { return }
+        if ph == .began { supersedeSinglePanForMultitouch() }   // 捏合起手 → 取消单指（R10 finding-1）
         let translation = twoFingerPanRecognizer?.translation(in: g.view) ?? .zero
         emitTwoFinger(twoFingerStep(source: .pinch, phase: ph, scale: g.scale, translation: translation,
                                     state: twoFingerState), focus: g.location(in: g.view))
@@ -928,9 +951,11 @@ Expected: 0 匹配。
   - grep `twoFingerStep` 在 handlePinch 与 handleTwoFingerPan 各 1 处（两指生命周期状态机活接线 → 防 R1 finding 3 + R3 finding 回归）
   - grep `attachedView === view` 在 attach（幂等守卫存在 → 防 R6 finding-2 回归）
   - grep `verticalRejected` 在 GestureClassifiers（垂直 latch 态存在 → 防 R9 finding-1 回归）
+  - grep `supersedeSinglePanForMultitouch` 在 handleTwoFingerPan 与 handlePinch（确定性两指接管接线 → 防 R10 finding-1 回归）
+  - grep `lastPinchScale` 在 GestureClassifiers（pinch scale 记忆存在 → 防 R10 finding-2 回归）
   - （真机/Catalyst 验收残留）同一 arbiter 对同一 view 连调 `attach` 两次 → 该 view `gestureRecognizers.count` 不增（幂等，R6 finding-2）
-  - （真机/Catalyst 验收残留）正常单指拖动 → 拖动过程中即收到 `.began`/`.changed`（不卡到松手；R9 finding-2 主交互响应性）
-  - （真机/Catalyst 验收残留）交错两指起手的两指优先级（约束 #5 device-tuning 残留，UX 验证）
+  - （真机/Catalyst 验收残留）正常单指拖动 → 拖动过程中即收到 `.began`/`.changed`（不卡到松手；R9 finding-2）
+  - （真机/Catalyst 验收残留）交错两指起手（先 1 指微动再落第 2 指上下滑/捏合）→ 单指被取消、触发切周期/缩放（R10 finding-1 确定性接管）
   - PanIncrementTests `multiFrameNetMovement` 通过（净位移 == 增量和，单测证 R1 finding 1）
   - SinglePanStepTests `verticalNeverEmits` 通过（垂直手势零回调，单测证 R2 finding）
   - TwoFingerStepTests `pinchLockSuppressesSwipe` 通过（pinch 锁定不切周期，单测证 R3 finding）
@@ -966,7 +991,9 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 - R8 finding-1（旁观 failed 识别器误取消 swipe）→ `twoFingerStep` 终止先查 `thisSourceWasDown`，从未参与的识别器终止完全忽略；`failedPinchDoesNotCancelSwipe` 单测。✓
 - R8 finding-2（两指优先级未强制）→ 干净场景靠 maxTouches/minTouches + 委托互斥；**交错起手优先级记为 device 残留**（见约束 #5）。
 - R9 finding-1（垂直意图未 latch 后翻成 pan）→ `singlePanStep` 三态 `idle/horizontalActive/verticalRejected`，垂直一旦判定即 latch；`verticalLatchedBlocksLaterHorizontal` 单测。✓
-- R9 finding-2（`require(toFail:)` 卡死单指滚动）→ **回退 require(toFail:)** 保单指响应性；优先级降为约束 #5 device 残留。✓（与 R8 finding-2 是方向相反的 tradeoff，取主交互响应性）
+- R9 finding-2（`require(toFail:)` 卡死单指滚动）→ **回退 require(toFail:)** 保单指响应性。✓
+- R10 finding-1（交错两指优先级不该留残留）→ 确定性 `supersedeSinglePanForMultitouch()`：两指/pinch `.began` 切 `single.isEnabled` 取消单指、路由交两指（不伤单指响应）；约束 #5。✓
+- R10 finding-2（pinch 抬起后 pan 源发 stale-scale pinch.changed）→ `lastPinchScale` 记 pinch 源最后有效 scale；pinch down 才发 pan 源 pinch.changed、终止用 lastPinchScale；`lateRecognizerNoLeak`（lagChanged 抑制 + 终止 scale 1.06）单测。✓
 
 **3. Placeholder 扫描：** 无 TBD/TODO；每 code step 含完整代码；分类函数逐字 spec。✓
 
@@ -978,4 +1005,4 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 
 ## 流程位置
 
-用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R8 见上 findings；R9 垂直latch + require(toFail)回退→**本次 R10 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
+用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R9 见上 findings；R10 确定性两指接管 + lastPinchScale→**本次 R11 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug/真 tradeoff，非边界挖掘）。
