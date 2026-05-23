@@ -56,7 +56,7 @@ final class DecelerationAnimator {
 - **DD-2 `onFinish` 语义**：**仅减速自然终止**（速度衰减到 < stopThreshold）**或 dt-guard 异常停**（后台恢复）时触发**一次**；外部主动 `stop()` / `resetOnSceneActive()` **静默不触发**。理由：reducer 在 drawing 激活时调 `stop()` 防 stale 漂移（modules L1027 / Reducer.swift:112）；若 stop() 触发 onFinish → 可能再触发 onUpdate 链，正是要防的漂移。
 - **DD-3 防泄漏 + 防 stale 回调（修 R1-F1 + R2-F1）**：
   - **防泄漏（无独立 proxy）**：`RealFrameDriver` 是平台帧驱动 target（`runloop → link/timer → RealFrameDriver`）；animator 注入的 `onTick` 闭包以 `[weak self]` 持 animator（故 runloop **不**强持有 animator，owner 释放即可析构）。`stop()` / 自然终止经 `driver?.invalidate()` 立即失活；下一帧 `onTick` 见 `self == nil` **返回 false** → `RealFrameDriver` 自失活（次级防御）。
-  - **同步拆解（branch-diff R3）**：owner 释放 animator 时若帧暂停（后台 / run loop 不 tick），上面的"下一帧"可能不来 → run-loop 持有的 driver 滞留。故加 **`isolated deinit { driver?.invalidate() }`**（SE-0371；本类型 `@MainActor`，isolated deinit 在 main actor 运行可调 @MainActor 的 `invalidate()`——plain nonisolated deinit 调 @MainActor 方法会编译报错，已验证）。同步失活，不依赖后续 tick。`isolated deinit` 已经本地 `swift build` + `xcodebuild Mac Catalyst build-for-testing` 验证编译通过（CI macos-15 Catalyst build 为最终 toolchain 权威）。
+  - **释放拆解（branch-diff R3 → R5 定稿）**：owner 释放 animator 时若帧暂停，上面的"下一帧"可能不来 → run-loop 持有的 driver 短暂滞留。R3 曾用 `isolated deinit` 同步失活，但 R5 发现它需 Swift 6.2+、违反仓库 `swift-tools-version: 6.0` 契约（6.0/6.1 编译失败）→ **已移除**。定稿：靠 `[weak self]` 自愈（主 run loop 每帧 tick → 下一帧即失活；后台回前台即愈）；"帧暂停同步拆解"作有界自愈残留（见 Accepted residual）。
   - **防 stale 回调（generation token）**：仅 `isDecelerating` 不足区分 run 代次——`stop()`+`start()` 复用同实例后，旧驱动 in-flight 回调若到达会推进**新 model**派发 stale `.offsetApplied`（本模块要防的漂移）。解法：`currentGeneration` 每 `start()` 自增；`onTick` 闭包捕获该代次，闭包与 `handleTick(dt:generation:)` 都 `guard generation == currentGeneration`，stale 代次→闭包返回 false→旧驱动自失活、`handleTick` no-op。
 - **DD-4 并发**：`DecelerationAnimator` / `RealFrameDriver` / `FakeFrameDriver` / `FrameDriving` 均 `@MainActor`（帧驱动在 main run loop；消费者是 UI）。`onUpdate`/`onFinish` 是 main-actor 隔离存储属性，**无需** `@Sendable`。`DecelerationModel` 是 `Sendable` 纯值类型。
 - **DD-5 测试缝**：(a) `handleTick(dt:generation:)` internal——确定性测模型/回调/代次逻辑；(b) 第二个 internal `init(... makeDriver:)`——注入 `FakeFrameDriver`，确定性测驱动调度/失活/weak 清理（`fake.fire(dt:)` 驱动**真实生产 onTick 闭包**）；(c) `isDecelerating` / `currentGeneration` internal `private(set)`。三者经 `@testable import` 可见，**不进 public 面**。另 1 个 macOS 真 Timer smoke（runloop-spin）证明真实 adapter 确实 fire。
@@ -78,7 +78,9 @@ final class DecelerationAnimator {
 
 ---
 
-## Accepted residual（R4-F2：生产 CADisplayLink adapter 无运行时执行 gate）
+## Accepted residual（两项：R4-F2 CADisplayLink 无运行时 gate；R5/R3 帧暂停释放拆解）
+
+### 残留 1（R4-F2）：生产 CADisplayLink adapter 无运行时执行 gate
 
 **残留**：iOS/Catalyst 的 `CADisplayLink` adapter（`RealFrameDriver` 的 `#if canImport(UIKit)` 分支：target/selector 投递、main run loop 注册、`onTick==false` 自失活）在本仓**只被编译、不被运行时执行**。
 
@@ -88,7 +90,15 @@ final class DecelerationAnimator {
 1. 纯物理 14 测（确定性，CI `swift test`）。
 2. 驱动生命周期（start 调度 / stop·finish·restart 失活 / 代次 / weak 清理）经**注入 fake** 确定性覆盖——fake 驱动的是 animator 创建的**真实生产 onTick 闭包**（含 weak-self、代次 guard、`return isDecelerating` 自失活信号），CI `swift test` 跑。
 3. 真实 driver firing 由 macOS `Timer` adapter 运行时 smoke（runloop-spin）验证。
-4. `CADisplayLink` adapter 与 `Timer` adapter **结构同形**（同 `onTick→Bool` 自失活契约），差异仅 ~3 行（link 创建 + `targetTimestamp-timestamp` dt），由 Catalyst build-for-testing 编译守护。
+4. `CADisplayLink` adapter 与 `Timer` adapter **结构同形**（同 `onTick→Bool` 自失活契约），差异仅 ~3 行（link 创建 + dt 计算），由 Catalyst build-for-testing 编译守护。
+
+### 残留 2（R5/R3）：owner 在帧暂停时释放 → 帧驱动短暂滞留
+
+**残留**：owner 释放 animator 时若帧驱动恰好暂停（后台 / main run loop 不 tick），驱动靠 `[weak self]` onTick 在**下一帧**返回 false 才自失活；那一帧不来时驱动短暂滞留。
+
+**有界自愈**：正常运行下主 run loop 每帧 tick → 下一帧（≤1 帧 ~8ms）即失活；后台时回前台即愈。唯一"永久滞留"是 app 主循环永久停止（即 app 退出），无实际影响。
+
+**为何不在本 PR 闭合（user 已接受，2026-05-23）**：干净的同步拆解 `isolated deinit` 需 Swift 6.2+，违反仓库 `swift-tools-version: 6.0` 契约（branch-diff R5 实证 → 已移除）；另一条 `nonisolated(unsafe)` 会引入 unsafe 标注 + 残留线程安全洞。权衡后 user 选择接受此有界自愈残留（codex branch-diff 5 轮已达预算上限）。真机端到端在 Wave 2 C8 集成 + 手测覆盖。
 
 **未覆盖的精确剩余**：仅"CADisplayLink 这个平台对象在真机/模拟器上确实按帧回调"——属 Apple 框架行为，将在 **Wave 2 C8 ChartContainerView 集成 + 真机/模拟器手测**时端到端覆盖（与 §15.1 production handler 集成测试同窗口）。
 
@@ -564,20 +574,6 @@ struct DecelerationAnimatorTests {
         #expect(box.fake!.fire(ref) == false)   // onTick [weak self] nil → false（驱动应自失活）
     }
 
-    // 12c. 释放活跃 animator 立即失活驱动（同步拆解，无需后续 tick；branch-diff R3）
-    @Test("releasing active animator invalidates driver synchronously (no tick)")
-    func releaseInvalidatesDriverSynchronously() {
-        final class Box { var fake: FakeFrameDriver? }
-        let box = Box()
-        var a: DecelerationAnimator? = DecelerationAnimator(makeDriver: { onTick in
-            let f = FakeFrameDriver(onTick: onTick); box.fake = f; return f
-        })
-        a!.start(initialVelocity: 1000)
-        #expect(box.fake?.isInvalidated == false)
-        a = nil   // isolated deinit → driver?.invalidate()
-        #expect(box.fake?.isInvalidated == true)
-    }
-
     // 12b. elapsedDelta：帧间真实经过时间（含延迟首帧，last=创建时刻）；大间隙 → advance 大-dt 停止（branch-diff R1/R2）
     @Test("elapsedDelta reflects real elapsed time including a delayed first frame")
     func elapsedDeltaReflectsRealGap() {
@@ -656,7 +652,7 @@ protocol FrameDriving: AnyObject {
 /// ```
 ///
 /// 防泄漏（DD-3 / R1-F1）：注入的 onTick 闭包以 `[weak self]` 持本对象；owner 释放后下一帧
-/// 闭包返回 false，`RealFrameDriver` 自失活（次级）；owner 释放走 `isolated deinit` 同步失活（branch-diff R3）。无独立 proxy。
+/// 闭包返回 false，`RealFrameDriver` 自失活；owner 释放后下一帧 `[weak self]` 即失活（有界自愈，见 Accepted residual）。无独立 proxy、无 deinit。
 /// 防 stale 回调（DD-3 / R2-F1）：`currentGeneration` 每 start 自增，闭包捕获该代次并校验。
 @MainActor
 public final class DecelerationAnimator {
@@ -721,13 +717,6 @@ public final class DecelerationAnimator {
     /// 由 E5.onSceneActivated() 调用：scene 恢复时复位，防后台 dt 爆炸跳帧。静默。
     public func resetOnSceneActive() {
         stop()
-    }
-
-    /// 同步拆解（branch-diff R3）：owner 释放本对象时立即失活帧驱动，不依赖后续 tick
-    /// （帧暂停/后台时后续 tick 可能不来 → 否则 run-loop 持有的 driver 会滞留）。
-    /// `isolated deinit`（SE-0371）使 deinit 在 main actor 运行，可调 @MainActor 的 `invalidate()`。
-    isolated deinit {
-        driver?.invalidate()
     }
 
     // MARK: - 测试缝（internal，经 @testable import 可见）
