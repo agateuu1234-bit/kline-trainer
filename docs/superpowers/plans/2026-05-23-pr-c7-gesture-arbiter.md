@@ -26,10 +26,12 @@
 |---|---|---|---|
 | `.began`（首次锁定水平时发） | 0 | 锁定瞬时速度 | `.panStarted` |
 | `.changed` | 帧间水平增量 | 实时水平速度 | `.offsetApplied(deltaPixels: incrementalDeltaX)` |
-| `.ended` | 末帧残量（消费者可忽略） | 释放水平速度 | `.panEnded(velocity: velocityX)` |
-| `.cancelled` | 末帧残量 | 0 | `.panEnded(velocity: 0)` |
+| `.ended` | 0（残量见下） | 释放水平速度 | `.panEnded(velocity: velocityX)` |
+| `.cancelled` | 0（残量见下） | 0 | `.panEnded(velocity: 0)` |
 
-**关键（R2 finding 修正）**：上表回调**仅在手势被 `classifySingleFingerPan` 锁定为水平后才发**。垂直 / ambiguous 单指手势全程**不发任何 onPan**（emission==nil），绝不把 reducer 从 autoTracking 推到 freeScrolling / 启动减速。该不变量由纯函数 `singlePanStep` 承载并被 `SinglePanStepTests` 单测覆盖。UIKit 的真实 `.began` 相位被吞，水平锁定瞬间合成一个 `.began` 回调。
+**关键 1（R2 finding 修正）**：上表回调**仅在手势被 `classifySingleFingerPan` 锁定为水平后才发**。垂直 / ambiguous 单指手势全程**不发任何 onPan**（emissions==[]），绝不把 reducer 从 autoTracking 推到 freeScrolling / 启动减速。该不变量由纯函数 `singlePanStep` 承载并被 `SinglePanStepTests` 单测覆盖。UIKit 真实 `.began` 相位被吞，水平锁定瞬间合成一个 `.began` 回调。
+
+**关键 2（R7 finding-2 修正）**：终止时若末段还有残量位移，arbiter 在该回调内**先发一个 `.changed`(残量) 再发终止相位**（共 2 个 onPan）——消费者照常 `.changed→offsetApplied`、终止→`panEnded`，**残量精确应用一次不丢**（消费者无需也不应忽略 `.ended` 之前的 `.changed`）。残量为 0 时只发终止一个。
 
 ---
 
@@ -182,71 +184,78 @@ struct PanIncrementTests {
 @Suite("singlePanStep lifecycle")
 struct SinglePanStepTests {
     // 垂直手势全程不产出回调（修正 R2 finding：不得触碰 reducer pan 状态）
-    @Test("垂直单指手势全程 emission 为 nil 且不激活")
+    @Test("垂直单指手势全程 emissions 为空且不激活")
     func verticalNeverEmits() {
         let began = singlePanStep(phase: .began, cumulative: .zero, velocityX: 0, active: false, lastTranslationX: 99)
-        #expect(began.emission == nil); #expect(began.active == false); #expect(began.lastTranslationX == 0)
+        #expect(began.emissions.isEmpty); #expect(began.active == false); #expect(began.lastTranslationX == 0)
         let changed = singlePanStep(phase: .changed, cumulative: CGPoint(x: 5, y: 100), velocityX: 800,
                                     active: began.active, lastTranslationX: began.lastTranslationX)
-        #expect(changed.emission == nil); #expect(changed.active == false)
+        #expect(changed.emissions.isEmpty); #expect(changed.active == false)
         let ended = singlePanStep(phase: .ended, cumulative: CGPoint(x: 5, y: 120), velocityX: 900,
                                   active: changed.active, lastTranslationX: changed.lastTranslationX)
-        #expect(ended.emission == nil)   // 关键：垂直手势松手不发 panEnded，不启动减速
+        #expect(ended.emissions.isEmpty)   // 关键：垂直手势松手不发 panEnded，不启动减速
     }
     // ambiguous（斜向 / 微动）同样零回调
-    @Test("ambiguous 手势全程 emission 为 nil")
+    @Test("ambiguous 手势全程 emissions 为空")
     func ambiguousNeverEmits() {
         let s = singlePanStep(phase: .changed, cumulative: CGPoint(x: 50, y: 50), velocityX: 100,
                               active: false, lastTranslationX: 0)
-        #expect(s.emission == nil); #expect(s.active == false)
+        #expect(s.emissions.isEmpty); #expect(s.active == false)
     }
-    // 水平手势：首次锁定发 .began(delta 0)，后续发 .changed 增量，松手发 .ended 携释放速度
-    @Test("水平手势激活→增量→松手速度全链")
+    // 水平手势：首次锁定发 .began(delta 0)，后续发 .changed 增量，松手发末段残量 .changed + .ended
+    @Test("水平手势激活→增量→松手残量+速度全链")
     func horizontalActivationLifecycle() {
         let begin = singlePanStep(phase: .began, cumulative: .zero, velocityX: 0, active: false, lastTranslationX: 0)
-        #expect(begin.emission == nil)
+        #expect(begin.emissions.isEmpty)
         // 首个水平 .changed（累积 20）：发 .began，delta 0，基线设 20（deadzone 不计入）
         let lock = singlePanStep(phase: .changed, cumulative: CGPoint(x: 20, y: 3), velocityX: 600,
                                  active: begin.active, lastTranslationX: begin.lastTranslationX)
-        #expect(lock.emission == SinglePanEmission(deltaX: 0, velocityX: 600, phase: .began))
+        #expect(lock.emissions == [SinglePanEmission(deltaX: 0, velocityX: 600, phase: .began)])
         #expect(lock.active == true); #expect(lock.lastTranslationX == 20)
         // 后续 .changed（累积 30）：发 .changed，delta 10
         let move = singlePanStep(phase: .changed, cumulative: CGPoint(x: 30, y: 4), velocityX: 700,
                                  active: lock.active, lastTranslationX: lock.lastTranslationX)
-        #expect(move.emission == SinglePanEmission(deltaX: 10, velocityX: 700, phase: .changed))
-        // .ended（累积 35，速度 900）：发 .ended，delta 5，velocity 900
+        #expect(move.emissions == [SinglePanEmission(deltaX: 10, velocityX: 700, phase: .changed)])
+        // .ended（累积 35）：末段残量 5 → 先发 .changed(5) 再发 .ended(0)；两者携 velocity 900（R7 finding-2）
         let end = singlePanStep(phase: .ended, cumulative: CGPoint(x: 35, y: 4), velocityX: 900,
                                 active: move.active, lastTranslationX: move.lastTranslationX)
-        #expect(end.emission == SinglePanEmission(deltaX: 5, velocityX: 900, phase: .ended))
+        #expect(end.emissions == [SinglePanEmission(deltaX: 5, velocityX: 900, phase: .changed),
+                                  SinglePanEmission(deltaX: 0, velocityX: 900, phase: .ended)])
         #expect(end.active == false)
     }
-    // .cancelled 在已激活时发终止但速度归零（不启动减速的释放速度）
-    @Test("cancelled 在激活态发终止且 velocity 归零")
+    // 残量为 0（松手时无新位移）→ 仅发终止一个
+    @Test("松手无残量 → 仅终止一个 emission")
+    func endedNoResidual() {
+        let end = singlePanStep(phase: .ended, cumulative: CGPoint(x: 30, y: 4), velocityX: 900,
+                                active: true, lastTranslationX: 30)
+        #expect(end.emissions == [SinglePanEmission(deltaX: 0, velocityX: 900, phase: .ended)])
+    }
+    // .cancelled 在已激活时发终止但速度归零（不启动减速的释放速度）；残量 10 先补
+    @Test("cancelled 在激活态发残量+终止且 velocity 归零")
     func cancelledZeroVelocity() {
         let end = singlePanStep(phase: .cancelled, cumulative: CGPoint(x: 50, y: 4), velocityX: 999,
                                 active: true, lastTranslationX: 40)
-        #expect(end.emission == SinglePanEmission(deltaX: 10, velocityX: 0, phase: .cancelled))
+        #expect(end.emissions == [SinglePanEmission(deltaX: 10, velocityX: 0, phase: .changed),
+                                  SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)])
         #expect(end.active == false)
     }
     // R4 + R5 finding-1：drawing 中途截获活跃水平 pan → 发 .cancelled 关闭生命周期 + reset；关闭后下个 pan 干净起步
     @Test("drawing 截获活跃 pan → cancelled + reset")
     func drawingTakeoverCancelsActive() {
-        // 正处于激活水平 pan（active=true, baseline=40）；drawing 此刻开启的 .changed
         let intercepted = singlePanStep(phase: .changed, cumulative: CGPoint(x: 80, y: 4), velocityX: 700,
                                         active: true, lastTranslationX: 40, drawingTakesOver: true)
-        #expect(intercepted.emission == SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled))
-        #expect(intercepted.active == false)
-        #expect(intercepted.lastTranslationX == 0)
+        #expect(intercepted.emissions == [SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)])
+        #expect(intercepted.active == false); #expect(intercepted.lastTranslationX == 0)
         // 截获再来一帧（仍 drawing、已非 active）→ 不再发回调
         let stillDrawing = singlePanStep(phase: .changed, cumulative: CGPoint(x: 85, y: 4), velocityX: 700,
                                          active: intercepted.active, lastTranslationX: intercepted.lastTranslationX,
                                          drawingTakesOver: true)
-        #expect(stillDrawing.emission == nil)
+        #expect(stillDrawing.emissions.isEmpty)
         // drawing 关闭后下一个 .changed：从干净态重新分类，累积 90 水平 → 锁定发 .began delta 0（不灌 stale delta）
         let resumed = singlePanStep(phase: .changed, cumulative: CGPoint(x: 90, y: 4), velocityX: 700,
                                     active: stillDrawing.active, lastTranslationX: stillDrawing.lastTranslationX,
                                     drawingTakesOver: false)
-        #expect(resumed.emission == SinglePanEmission(deltaX: 0, velocityX: 700, phase: .began))
+        #expect(resumed.emissions == [SinglePanEmission(deltaX: 0, velocityX: 700, phase: .began)])
         #expect(resumed.lastTranslationX == 90)
     }
     // drawing 截获时本就未激活 → 纯 reset 无回调
@@ -254,7 +263,7 @@ struct SinglePanStepTests {
     func drawingTakeoverInactiveNoEmit() {
         let s = singlePanStep(phase: .changed, cumulative: CGPoint(x: 80, y: 4), velocityX: 700,
                               active: false, lastTranslationX: 0, drawingTakesOver: true)
-        #expect(s.emission == nil); #expect(s.active == false)
+        #expect(s.emissions.isEmpty); #expect(s.active == false)
     }
 }
 
@@ -333,6 +342,32 @@ struct TwoFingerStepTests {
         st = twoFingerStep(source: .pan, phase: .began, scale: 1.0, translation: .zero, state: st).state
         let end = twoFingerStep(source: .pan, phase: .cancelled, scale: 1.0, translation: CGPoint(x: 0, y: -200), state: st)
         #expect(end.emission == nil)
+    }
+    // R7 finding-1：纯垂直 swipe，pan 先 ended（带垂直 translation）→ pinch 后 ended（translation 已失效为 .zero）→ swipe 不丢
+    @Test("pan 先 ended 捕获方向 + pinch 后 ended 失效帧 → swipe 保留")
+    func swipeSurvivesPanEndedFirst() {
+        var st = TwoFingerState()
+        st = twoFingerStep(source: .pan, phase: .began, scale: 1.0, translation: .zero, state: st).state
+        st = twoFingerStep(source: .pinch, phase: .began, scale: 1.0, translation: .zero, state: st).state
+        // pan 先 ended（垂直 -120），pinch 仍 down → 延后，捕获 pendingSwipe=.up
+        let panEnd = twoFingerStep(source: .pan, phase: .ended, scale: 1.0, translation: CGPoint(x: 0, y: -120), state: st); st = panEnd.state
+        #expect(panEnd.emission == nil); #expect(st.pendingSwipe == .up)
+        // pinch 后 ended，此刻 pan translation 已失效（.zero）→ 用 pendingSwipe 结算
+        let pinchEnd = twoFingerStep(source: .pinch, phase: .ended, scale: 1.0, translation: .zero, state: st); st = pinchEnd.state
+        #expect(pinchEnd.emission == .switchPeriod(.up))
+        #expect(st == TwoFingerState())
+    }
+    // 对称：pinch 先 ended（读到 pan 实时垂直 translation 捕获方向）→ pan 后 ended → swipe 不丢
+    @Test("pinch 先 ended 捕获方向 + pan 后 ended → swipe 保留")
+    func swipeSurvivesPinchEndedFirst() {
+        var st = TwoFingerState()
+        st = twoFingerStep(source: .pinch, phase: .began, scale: 1.0, translation: .zero, state: st).state
+        st = twoFingerStep(source: .pan, phase: .began, scale: 1.0, translation: .zero, state: st).state
+        // pinch 先 ended，handlePinch 读 pan 实时 translation = 垂直 120（向下）→ 捕获 .down，pan 仍 down → 延后
+        let pinchEnd = twoFingerStep(source: .pinch, phase: .ended, scale: 1.0, translation: CGPoint(x: 0, y: 120), state: st); st = pinchEnd.state
+        #expect(pinchEnd.emission == nil); #expect(st.pendingSwipe == .down)
+        let panEnd = twoFingerStep(source: .pan, phase: .ended, scale: 1.0, translation: CGPoint(x: 0, y: 130), state: st); st = panEnd.state
+        #expect(panEnd.emission == .switchPeriod(.down))
     }
     // 顺序无关 + 不双发：在干净（空）状态收到孤立终止回调 no-op
     @Test("空状态孤立终止回调 no-op（不双发）")
@@ -442,18 +477,20 @@ struct SinglePanEmission: Equatable {
     let phase: GesturePhase
 }
 
-/// 单指平移生命周期一步的纯决策结果。
+/// 单指平移生命周期一步的纯决策结果。`emissions` 按序发（0/1/2 个）——终止带残量时发 2 个（先 .changed 后终止）。
 struct SinglePanStep: Equatable {
-    let emission: SinglePanEmission?   // nil = 本步不触发任何 onPan 回调
-    let active: Bool                   // 本手势是否已锁定为水平平移
-    let lastTranslationX: CGFloat      // 下一步增量基线
+    let emissions: [SinglePanEmission]   // [] = 本步不触发任何 onPan 回调
+    let active: Bool                     // 本手势是否已锁定为水平平移
+    let lastTranslationX: CGFloat        // 下一步增量基线
 }
 
 /// 单指平移生命周期纯决策。arbiter handler 把识别器原始值喂入、据返回更新状态并发回调。
-/// 关键不变量（R2 finding）：**仅当本手势曾锁定为水平平移才产出 emission**——
-/// 垂直 / ambiguous 手势全程 emission == nil，绝不触碰 reducer pan 状态。
+/// 关键不变量（R2 finding）：**仅当本手势曾锁定为水平平移才产出 emissions**——
+/// 垂直 / ambiguous 手势全程 emissions == []，绝不触碰 reducer pan 状态。
 /// `.began` 仅重置状态不发回调；首次 `classifySingleFingerPan == .horizontal` 才发 `.began`（消费者 panStarted）
-/// 并把基线设为当前累积（deadzone 位移不计入 offset）；终止相位仅在 active 时发。
+/// 并把基线设为当前累积（deadzone 位移不计入 offset）。
+/// 终止（R7 finding-2）：active 时若末段还有残量（cumulative 与基线之差≠0），**先发 `.changed`(残量) 再发终止相位**——
+/// 消费者 `.changed→offsetApplied`、终止→`panEnded(velocity)`，残量精确应用一次不丢。
 func singlePanStep(phase: GesturePhase,
                    cumulative: CGPoint,
                    velocityX: CGFloat,
@@ -465,35 +502,39 @@ func singlePanStep(phase: GesturePhase,
     // 但若**已激活**水平 pan，先发 `.cancelled`(velocity 0) 关闭生命周期再 reset，避免下游 panStarted 悬空无终止。
     if drawingTakesOver {
         if active {
-            return SinglePanStep(emission: SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled),
+            return SinglePanStep(emissions: [SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)],
                                  active: false, lastTranslationX: 0)
         }
-        return SinglePanStep(emission: nil, active: false, lastTranslationX: 0)
+        return SinglePanStep(emissions: [], active: false, lastTranslationX: 0)
     }
     switch phase {
     case .began:
-        return SinglePanStep(emission: nil, active: false, lastTranslationX: 0)
+        return SinglePanStep(emissions: [], active: false, lastTranslationX: 0)
     case .changed:
         if active {
             let delta = panIncrement(current: cumulative.x, last: lastTranslationX)
             return SinglePanStep(
-                emission: SinglePanEmission(deltaX: delta, velocityX: velocityX, phase: .changed),
+                emissions: [SinglePanEmission(deltaX: delta, velocityX: velocityX, phase: .changed)],
                 active: true, lastTranslationX: cumulative.x)
         } else if case .horizontal = classifySingleFingerPan(translation: cumulative, minThreshold: minThreshold) {
             return SinglePanStep(
-                emission: SinglePanEmission(deltaX: 0, velocityX: velocityX, phase: .began),
+                emissions: [SinglePanEmission(deltaX: 0, velocityX: velocityX, phase: .began)],
                 active: true, lastTranslationX: cumulative.x)
         } else {
-            return SinglePanStep(emission: nil, active: false, lastTranslationX: lastTranslationX)
+            return SinglePanStep(emissions: [], active: false, lastTranslationX: lastTranslationX)
         }
     case .ended, .cancelled:
         if active {
-            let delta = panIncrement(current: cumulative.x, last: lastTranslationX)
-            return SinglePanStep(
-                emission: SinglePanEmission(deltaX: delta, velocityX: phase == .ended ? velocityX : 0, phase: phase),
-                active: false, lastTranslationX: cumulative.x)
+            let residual = panIncrement(current: cumulative.x, last: lastTranslationX)
+            let v: CGFloat = phase == .ended ? velocityX : 0
+            var emissions: [SinglePanEmission] = []
+            if residual != 0 {   // 末段残量先补 offset（R7 finding-2），再发终止
+                emissions.append(SinglePanEmission(deltaX: residual, velocityX: v, phase: .changed))
+            }
+            emissions.append(SinglePanEmission(deltaX: 0, velocityX: v, phase: phase))
+            return SinglePanStep(emissions: emissions, active: false, lastTranslationX: cumulative.x)
         } else {
-            return SinglePanStep(emission: nil, active: false, lastTranslationX: lastTranslationX)
+            return SinglePanStep(emissions: [], active: false, lastTranslationX: lastTranslationX)
         }
     }
 }
@@ -510,12 +551,14 @@ enum TwoFingerEmission: Equatable {
 enum TwoFingerSource: Equatable { case pinch, pan }
 
 /// 两指手势生命周期状态。跟踪两识别器是否在按（`pinchDown`/`panDown`）+ 是否锁定 pinch（`locked`）
-/// + 延后结算时已记下的终止 phase（`pendingTerminal`，`.cancelled` 压倒 `.ended`）。
+/// + 延后结算时已记下的终止 phase（`pendingTerminal`，`.cancelled` 压倒 `.ended`）
+/// + 延后时已捕获的切周期方向（`pendingSwipe`，防滞后识别器结算时 translation 已失效，R7 finding-1）。
 struct TwoFingerState: Equatable {
     var pinchDown = false
     var panDown = false
     var locked = false
     var pendingTerminal: GesturePhase? = nil
+    var pendingSwipe: SwipeDirection? = nil
 }
 
 /// `twoFingerStep` 返回。
@@ -554,9 +597,16 @@ func twoFingerStep(source: TwoFingerSource, phase: GesturePhase, scale: CGFloat,
         setDown(false)
         // 合并终止意图：任一识别器 .cancelled 则整手势视为 cancelled（压倒 .ended），见 R6 finding-1
         let effectivePhase: GesturePhase = (phase == .cancelled || st.pendingTerminal == .cancelled) ? .cancelled : .ended
-        // 另一识别器仍在按 → 记下 pending 终止 phase 并延后结算（R5 finding-2 + R6 finding-1）
+        // 本次终止回调时（translation 仍有效）捕获切周期方向；与已记 pendingSwipe 取首个非空（R7 finding-1）
+        var swipe = st.pendingSwipe
+        if swipe == nil, !st.locked,
+           case .switchPeriod(let dir) = classifyTwoFingerGesture(translation: translation, scale: scale) {
+            swipe = dir
+        }
+        // 另一识别器仍在按 → 记下 pending 终止 phase + 已捕获的切周期方向，延后结算（R5 finding-2 + R6 + R7 finding-1）
         if st.pinchDown || st.panDown {
             st.pendingTerminal = effectivePhase
+            st.pendingSwipe = swipe
             return TwoFingerStepResult(emission: nil, state: st)
         }
         // 孤立终止（reset 后无 began 的滞后回调）→ no-op，不结算（R5 finding-2 顺序无关）
@@ -566,9 +616,8 @@ func twoFingerStep(source: TwoFingerSource, phase: GesturePhase, scale: CGFloat,
             // 锁定 pinch：用合并后的 effectivePhase 关闭生命周期（中断的 pinch 不得误报成功，R6 finding-1）
             return TwoFingerStepResult(emission: .pinch(scale: scale, phase: effectivePhase), state: reset)
         }
-        // 切周期是离散成功动作：仅正常结束（非 cancelled）才发
-        if effectivePhase == .ended,
-           case .switchPeriod(let dir) = classifyTwoFingerGesture(translation: translation, scale: scale) {
+        // 切周期是离散成功动作：仅正常结束（非 cancelled）才发；用 defer 时捕获的方向（防滞后帧 translation 失效，R7 finding-1）
+        if effectivePhase == .ended, let dir = swipe {
             return TwoFingerStepResult(emission: .switchPeriod(dir), state: reset)
         }
         return TwoFingerStepResult(emission: nil, state: reset)
@@ -727,7 +776,7 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
                                  drawingTakesOver: panPolicyInDrawingMode(drawingMode: drawingMode) == .drawingTakesOver)
         singlePanHorizontalActive = step.active
         lastSinglePanTranslationX = step.lastTranslationX
-        if let e = step.emission { onPan?(e.deltaX, e.velocityX, e.phase) }
+        for e in step.emissions { onPan?(e.deltaX, e.velocityX, e.phase) }
     }
 
     // 两指 pan 与 pinch 两识别器都喂入同一 twoFingerStep 状态机（顺序无关）；各读对方实时值。
@@ -863,6 +912,8 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 - R5 finding-2（两指首终止即 reset 致滞后回调泄漏切周期）→ `twoFingerStep` 双 down-flag 模型：仅 `pinchDown`/`panDown` 皆 false 才结算 + `wasActive` 守卫孤立终止；`lateRecognizerNoLeak` / `strayTerminalNoOp` 单测。✓
 - R6 finding-1（滞后终止丢锁定 pinch 的 cancel 误报成功）→ `pendingTerminal` 持久化终止 phase、`.cancelled` 压倒 `.ended`、cancelled 不切周期；`lockedPinchCancellationPreserved` / `cancelledSwipeSuppressed` 单测。✓
 - R6 finding-2（attach 非幂等致回调翻倍）→ `attach(to:)` 同 view no-op、换 view 卸载旧识别器 + `resetGestureState`；Catalyst/真机验收"重复 attach 识别器数不增"+ grep `attachedView === view` 守卫。✓
+- R7 finding-1（两指 swipe 顺序依赖丢失）→ `twoFingerStep` defer 时捕获 `pendingSwipe` 方向、结算用之；`swipeSurvivesPanEndedFirst` / `swipeSurvivesPinchEndedFirst` 双序单测。✓
+- R7 finding-2（末段 pan 残量丢失）→ `singlePanStep` 终止有残量时先补 `.changed`(残量) 再终止（emissions 数组）；`horizontalActivationLifecycle`/`cancelledZeroVelocity`/`endedNoResidual` 单测。✓
 
 **3. Placeholder 扫描：** 无 TBD/TODO；每 code step 含完整代码；分类函数逐字 spec。✓
 
@@ -874,4 +925,4 @@ git commit -m "docs(C7): 验收清单（4 纯函数测试 + Catalyst 闸门 + R1
 
 ## 流程位置
 
-用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1 3→R2；R2 单指→R3；R3 两指→R4；R4 drawing 残留→R5；R5 drawing 终止+两指顺序→R6；R6 丢cancel+非幂等attach→**本次 R7 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug，非边界挖掘）。
+用户指定 Superpowers 6 段流程：1 writing-plans（本文件）→ 2 plan-stage codex（R1→…→R6 见 changelog；R7 两指swipe顺序+末段残量→**本次 R8 修订**）→ 3 subagent-driven-development → 4 verification-before-completion → 5 requesting-code-review → 6 branch-diff codex。⚠️ 超 5 轮预算：2026-05-23 user 明示"继续修到 codex 批准"（每轮均真 bug，非边界挖掘）。
