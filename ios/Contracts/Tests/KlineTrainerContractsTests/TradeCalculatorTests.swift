@@ -206,6 +206,24 @@ struct TradeCalculatorForceCloseTests {
         let q = TradeCalculator.forceCloseOnEnd(holding: 1000, averageCost: 15,
                                                 price: 20, fees: withMin)
         #expect(approx(q.commission, 5.0))              // raw 2.0 < 5 -> 5
+        #expect(approx(q.stampDuty, 10.0))              // 20000*0.0005
         #expect(approx(q.proceeds, 19_985.0))           // 20000-5-10
+    }
+
+    @Test("price<=0: 全零报价（无错误通道，守卫短路）")
+    func invalidPrice() {
+        let q = TradeCalculator.forceCloseOnEnd(holding: 1000, averageCost: 15,
+                                                price: 0, fees: noMin)
+        #expect(q.shares == 0)
+        #expect(approx(q.notional, 0))
+        #expect(approx(q.proceeds, 0))
+    }
+
+    @Test("holding<0: 全零报价（守卫短路）")
+    func negativeHolding() {
+        let q = TradeCalculator.forceCloseOnEnd(holding: -1, averageCost: 0,
+                                                price: 20, fees: noMin)
+        #expect(q.shares == 0)
+        #expect(approx(q.proceeds, 0))
     }
 }
