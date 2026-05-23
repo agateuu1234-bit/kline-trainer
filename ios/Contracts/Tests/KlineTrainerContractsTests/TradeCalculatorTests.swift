@@ -86,3 +86,80 @@ struct TradeCalculatorBuyTests {
                                          tier: .tier1, price: 10, fees: noMin) == .failure(.invalidShareCount))
     }
 }
+
+@Suite("TradeCalculator.quoteSell")
+struct TradeCalculatorSellTests {
+
+    @Test("happy: 整手卖出，佣金+印花税")
+    func happy() {
+        let r = TradeCalculator.quoteSell(holding: 1000, averageCost: 15,
+                                          tier: .tier2, price: 20, fees: noMin)
+        guard case .success(let q) = r else { Issue.record("expected success, got \(r)"); return }
+        #expect(q.shares == 400)                        // floor(1000*0.4/100)*100=400
+        #expect(approx(q.notional, 8_000))
+        #expect(approx(q.commission, 0.8))              // 8000*0.0001
+        #expect(approx(q.stampDuty, 4.0))               // 8000*0.0005
+        #expect(approx(q.proceeds, 7_995.2))            // 8000-0.8-4.0
+    }
+
+    @Test("清仓 5/5: 不取整，允许零股（奇数持仓全卖）")
+    func clearOddLot() {
+        let r = TradeCalculator.quoteSell(holding: 1050, averageCost: 15,
+                                          tier: .tier5, price: 20, fees: noMin)
+        guard case .success(let q) = r else { Issue.record("expected success"); return }
+        #expect(q.shares == 1050)                       // 清仓全卖不取整
+        #expect(approx(q.notional, 21_000))
+    }
+
+    @Test("清仓 5/5: 持仓 < 100 也全卖")
+    func clearSubLot() {
+        let r = TradeCalculator.quoteSell(holding: 50, averageCost: 15,
+                                          tier: .tier5, price: 20, fees: noMin)
+        guard case .success(let q) = r else { Issue.record("expected success"); return }
+        #expect(q.shares == 50)
+    }
+
+    @Test("tier3 整手卖出: 500*0.6=300 -> lot 300")
+    func tier3LotRounding() {
+        // 整手卖出正确性测试（非 FP demo：整数 holding × 0.6 不会 FP 下溢，
+        // sell 路径 robustFloor 仅为与 buy 对称的防御层）。
+        let r = TradeCalculator.quoteSell(holding: 500, averageCost: 15,
+                                          tier: .tier3, price: 10, fees: noMin)
+        guard case .success(let q) = r else { Issue.record("expected success"); return }
+        #expect(q.shares == 300)
+        #expect(approx(q.notional, 3_000))
+    }
+
+    @Test("insufficientHolding: 非清仓且 floor 后股数=0")
+    func roundsToZero() {
+        let r = TradeCalculator.quoteSell(holding: 250, averageCost: 15,
+                                          tier: .tier1, price: 20, fees: noMin)
+        #expect(r == .failure(.insufficientHolding))    // floor(250*0.2)=50 -> lot 0，tier1 非清仓
+    }
+
+    @Test("disabled: 空仓点卖出")
+    func emptyHolding() {
+        #expect(TradeCalculator.quoteSell(holding: 0, averageCost: 0,
+                                          tier: .tier1, price: 20, fees: noMin) == .failure(.disabled))
+        // 空仓即使点 5/5 清仓也是 disabled（无仓可清）
+        #expect(TradeCalculator.quoteSell(holding: 0, averageCost: 0,
+                                          tier: .tier5, price: 20, fees: noMin) == .failure(.disabled))
+    }
+
+    @Test("invalidShareCount: price<=0 / holding<0")
+    func invalid() {
+        #expect(TradeCalculator.quoteSell(holding: 1000, averageCost: 15,
+                                          tier: .tier1, price: 0, fees: noMin) == .failure(.invalidShareCount))
+        #expect(TradeCalculator.quoteSell(holding: -1, averageCost: 15,
+                                          tier: .tier1, price: 20, fees: noMin) == .failure(.invalidShareCount))
+    }
+
+    @Test("min commission: 卖出免5开启且佣金<5 计 5")
+    func minCommission() {
+        let r = TradeCalculator.quoteSell(holding: 1000, averageCost: 15,
+                                          tier: .tier2, price: 20, fees: withMin)
+        guard case .success(let q) = r else { Issue.record("expected success"); return }
+        #expect(approx(q.commission, 5.0))              // raw 0.8 < 5 -> 5
+        #expect(approx(q.proceeds, 7_991.0))            // 8000-5-4
+    }
+}

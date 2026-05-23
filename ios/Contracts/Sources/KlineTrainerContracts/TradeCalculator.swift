@@ -57,6 +57,30 @@ public enum TradeCalculator {
                                  commission: commission, totalCost: totalCost))
     }
 
+    // MARK: - Sell
+
+    public static func quoteSell(holding: Int, averageCost: Double,
+                                 tier: PositionTier, price: Double,
+                                 fees: FeeSnapshot) -> Result<SellQuote, TradeReason> {
+        // averageCost 属冻结签名；E3 不用它（已实现盈亏由 E5 调用方按 averageCost 计算）。
+        guard price > 0, holding >= 0, price.isFinite else {
+            return .failure(.invalidShareCount)
+        }
+        guard holding > 0 else { return .failure(.disabled) }
+
+        let sellShares: Int
+        if tier == .tier5 {
+            sellShares = holding                        // 清仓：全部持仓，不取整，允许零股
+        } else {
+            // robustFloor 在 sell 路径为防御性对称（整数 holding × 5 档比例不会 FP 下溢），
+            // 与 buy 路径保持一致 floor 语义。
+            sellShares = (robustFloor(Double(holding) * ratio(of: tier)) / shareLotSize) * shareLotSize
+        }
+        guard sellShares > 0 else { return .failure(.insufficientHolding) }
+
+        return .success(makeSellQuote(shares: sellShares, price: price, fees: fees))
+    }
+
     // MARK: - Private helpers
 
     /// floor() 对二进制浮点表示误差做 verify-and-correct（C1a 模式）。
@@ -75,6 +99,15 @@ public enum TradeCalculator {
             return minCommissionAmount
         }
         return raw
+    }
+
+    private static func makeSellQuote(shares: Int, price: Double, fees: FeeSnapshot) -> SellQuote {
+        let notional = Double(shares) * price
+        let commission = computeCommission(notional: notional, fees: fees)
+        let stampDuty = notional * stampDutyRate
+        let proceeds = notional - commission - stampDuty
+        return SellQuote(shares: shares, notional: notional, commission: commission,
+                         stampDuty: stampDuty, proceeds: proceeds)
     }
 
     private static func ratio(of tier: PositionTier) -> Double {
