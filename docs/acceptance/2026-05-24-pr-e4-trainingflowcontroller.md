@@ -69,6 +69,10 @@
 - 设计 grep：`throw` 0 处、`Sendable`/protocol-ext default 0 处。
 - branch diff：源/测试仅 2 文件（`TrainingFlowController.swift` +97 / 测试 +167），冻结契约未改；另 m04 注册 +1 行、plan 文档。
 
-**6. branch-diff 对抗性 review：** opus 4.7 xhigh 收口结论见 PR 描述（如未 APPROVE，按 memory `feedback_codex_convergence_honest_reporting` 如实记录轮数 + escalate + 接受残留 + override，不包装成"收敛"）。
+**6. requesting-code-review（pre-merge，stage 5）：** opus/sonnet senior reviewer 给 `Ready to merge: Yes`（0 Critical / 0 Important / 3 Minor）。3 Minor 裁决（依 `superpowers:receiving-code-review`）：#1 ReviewFlow 缺 precondition 注释 → 跳过（ReviewFlow 无 maxTick，`finalTick...finalTick` 单点恒合法）；#2 `ReviewFlowTests.flow` 用 computed `var` 而非 stored `let` → **驳回（评审有误）**：stored `let flow = ReviewFlow(record: record)` 在 stored-property initializer 里引用实例成员 `record` 在 Swift 不可编译，computed `var` 是正确写法；#3 gate #10 grep 未来可能被注释误伤 → 跳过（现返 0，评审自评"极低风险"）。
 
-**7. 合并方式：** 待用户确认（remote 写入需 explicit 授权）。
+**7. branch-diff 对抗性 review（stage 6，opus 4.7 xhigh）：1 轮收敛 `VERDICT: APPROVE`（0 Critical / 0 High）。** 评审者独立重算 18 格矩阵全对、复跑 `swift build` + `swift test`（415 pass）、确认 D2 权威裁断有据（spec 示例 `ReplayFlow` 仅 override `shouldSaveRecord`，在 `shouldAccumulateCapital` 上**真正矛盾**于矩阵——任何默认都给 true，矩阵要 ❌；代码正确选了矩阵）。2 个 LOW 作**已接受残留**（不在 final APPROVE 后再改代码，保持 reviewed tree == merged tree 的 provenance）：
+- **L1**：ReviewFlow 缺与 Normal/Replay 对称的 precondition 注释（`record.finalTick >= 0` 是持久化 record 不变量；非 bug，纯文档对称性）。
+- **L2**：验收 gate #11 用 `main..HEAD`；今日 `63f4da0` 即 main tip 故正确，仅当 main 在 merge 前推进才可能误伤（squash merge 不受影响）。
+
+**8. 合并方式：** 待用户 explicit 授权（remote 写入需用户确认，per memory `feedback_reviewer_verdict_not_authorization`）。**评审通道偏离记录：** 两道闸门用 opus 4.7 xhigh（非 codex），系用户 session 开头明示指定（契约）；按 codex required-check 治理，merge ceremony 需 attest-override（user TTY 仪式）+ ack-drift + admin squash（Catalyst required CI 真实通过，不绕过），同 E3/C7/C2 先例。
