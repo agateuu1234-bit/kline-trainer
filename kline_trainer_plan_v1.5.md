@@ -652,14 +652,88 @@ struct PositionManager {
     /// 持仓成本 = 当前持仓股数 × 加权平均成本
     var holdingCost: Double { averageCost * Double(shares) }
     
-    /// 当前仓位档位（0~5）
+    /// 当前仓位档位（0~5）—— ⚠️ 占位符：见 §4.2.8 positionTier 注（caller-derived，顺位 8 移除本 member）
     var positionTier: Int {
-        // 根据实际持仓比例映射到最接近的档位
-        // 具体实现取决于初始资金和当前持仓
+        // 占位返回 0；真实档位由 caller（E4/E5）依初始资金 + 当前持仓推导（顺位 8 落地）
         0
     }
 }
 ```
+
+**§4.2 PositionManager — API 契约与设计理由（v1.5 §4.2 重审 · Wave 1 顺位 7 RFC 落地）**
+
+`PositionManager.buy / sell` 在违约输入上 `precondition` trap，**不** `throws`、**不**返回 `Result`。Codable 反序列化（持久化入口）用 throwing 自定义 decoder + `invariantsHold` 守门。下列 8 节 codify API 不变量、信任边界与处置策略，作为顺位 8 实施的权威契约。
+
+**§4.2.1 Trust-boundary 定位**
+
+PositionManager 的 ingress：
+
+- **入口 1a（进程内交易）**：UI → E3 `TradeCalculator.quoteBuy/quoteSell` → `Result<Quote, TradeReason>`；`.failure` 终止于 UI Toast，`.success(quote)` → E5 → `position.buy/sell`。传入 buy/sell 的输入**已被 E3 Result 通道验证**（资金不足/tier 非法/价格非法/佣金溢出）；违约 ⟺ 调用方 programmer error。
+- **入口 1b（进程内局终强平）**：E5 局终（`globalTickIndex >= maxTick`）→ E3 `forceCloseOnEnd(holding:...)` → 裸 `SellQuote`（**无 Result**）→ `position.sell`。`forceCloseOnEnd` 只守 `holding>0/price`（否则全零报价 → `sell(0)` no-op），它**不读** `position.shares`；不越界依赖 **caller 不变量 `holding == position.shares`**——与入口 1a 同信任类（caller 契约，违约 = programmer error → trap），**非**"按构造保证"。
+- **入口 1c（进程内重建）**：E6 `resumePending()` → decoder 重建 = 归**入口 2**；`replay(recordId:)` → 从头跑 → 走入口 1a/1b；`review(recordId:)` → 只读 → 无 mutation 入口。
+- **入口 2（持久化 load）**：SQLite `position_data`(TEXT base64) → `Data` → `JSONDecoder` → `PositionManager.init(from:)`；`DecodingError` / `invariantsHold==false` → load 失败终止。**唯一真实的外部不可信入口**（存档可能损坏/被篡改）。
+
+所有进程内入口（1a/1b/1c）违约均为 caller programmer error → **trap**；只有持久化入口（2）→ **throws**。contract 不绑定具体 caller 身份；新增 caller 须满足同一前置（buy/sell 传入已验证 quote；force-close 传入 `holding==shares`）。
+
+**§4.2.2 Swift stdlib 处置一致性**
+
+Swift stdlib 二分：programmer error / contract violation → **trap**（`Array.subscript`、`Dictionary!`、`Int.+`、`UnicodeScalar.init`）；I/O / parse / external-input error → **throws**（`JSONDecoder.decode`、`String(contentsOf:)`、`FileHandle.read`）。buy/sell 违约输入在 §4.2.1 守门后只剩 caller programmer error，归 trap；decoder 处理 external input，归 throws。
+
+**§4.2.3 Threat model（输入域 vs 类型上界）**
+
+| 量 | 真实上界（粗量级工程估算，**非 spec 引用**） | 类型上界（量级） | gap |
+|---|---|---|---|
+| `averageCost`（Double, 元/股） | ~10⁴ | ~10³⁰⁸ | ~304 |
+| `shares`（Int, 股） | ~10⁶–10⁸ | ~10¹⁸–10¹⁹ | ~10–13 |
+| `totalInvested`（Double, 元） | ~10¹⁰ | ~10³⁰⁸ | ~298 |
+
+数字为粗量级工程估算（**非 spec 引用**：spec 内无价格区间、无日内笔数上界），**不作 contract 上界**，仅说明输入域与类型上界 gap。合成 `+inf` / Int 溢出需输入接近 `Double.greatestFiniteMagnitude` / `Int.max`，唯一构造路径是 SQLite 文件被外部进程篡改（root 已陷落，sandbox 已破）。decoder ingress 已守 `isFinite` + `invariantsHold`，进程内 ingress 由 E3（1a）+ caller 不变量（1b）守 → buy/sell mutating 路径二次守门 ROI 为负。
+
+**§4.2.4 数值溢出语义**
+
+- **Int 路径**（`self.shares + shares`）：Swift 默认 trap on overflow。
+- **Double 路径**（`self.totalInvested + totalCost`）：IEEE 754 saturating 至 ±inf，**不** trap。
+
+实现要求：① mutation 前用 `addingReportingOverflow` / `isFinite` 预检合成结果，违约即 `precondition` trap（trap message 含违约参数 + 当前 state）；② 预检通过后写入；③ debug build end-of-function `assert(invariantsHold)` 兜底，不作主守门。
+
+**§4.2.5 Considered alternatives**
+
+| 提案 | 处置 | 理由 |
+|---|---|---|
+| buy/sell public API `throws` | 拒 | caller 在 §4.2.1 守门后的 dead branch 上被迫写 `try!`/`try?`，徒增噪声。 |
+| 改 `Result<_, TradeReason>` 与 E3 统一 | 拒 | 不同 error class：E3 处理 caller-recoverable error；§4.2 处理 invariant violation。统一为 false symmetry。 |
+| buy/sell 进程内 defense-in-depth | 拒 | defense-in-depth 适用于跨进程/网络/用户 trust boundary；§4.2 进程内同 MainActor，二次 throws 守门 ROI 为负（§4.2.3）。 |
+
+**§4.2.6 Acceptance 与 testability**
+
+- `precondition` 语义 = fail-fast on programmer-contract violation，debug/release 均保留 trap，**不**视为正常控制流。
+- buy/sell 违约输入路径**不在 test surface**（contract 假设上游已守门，违约路径无 caller-side 责任可测）。caller-recoverable error 的 test matrix 在 §E3。
+- Trap message 含违约参数 + 当前 Position state，便于 production crashlog 反查。
+
+**§4.2.7 Migration note + 顺位 8 bump 义务门**
+
+本 contract 假设 v1 sandbox 单用户、无外部 import。v2 若引入云同步 / 跨设备 / CSV import 等新 ingress，§4.2 contract 须重评（可能升 throws/Result）。
+
+`position_data` 已是 shipped schema 列（当前当不透明字节往返）；顺位 8 引入的 typed throwing decoder 把其解释从"任何字节"收紧为"合法 PositionManager 否则拒收"，属对**已 shipped 持久化契约的语义收紧**，命中 m01 §Bump 策略 A 类"改既有语义" → **bump 应当发生**。bump 执行（`CONTRACT_VERSION` / m01 矩阵 / acceptance 脚本三件套）**MANDATORY 与 decoder 代码同 PR（顺位 8）落地**——本 docs-only RFC 不执行 bump（避免 spec↔m01 同 PR 自循环；无 decoder 时改版本常量空头）。**顺位 8 = required predecessor**：顺位 8 前不得有 PR 引入 typed `position_data` reader。enforcement = 本节 spec 义务 + 顺位 8 plan Task 0 必检 + 顺位 8 acceptance hook（grep `PositionManager.init(from:)` ⟹ 断言同 diff 含 `CONTRACT_VERSION` delta，缺则 fail）。
+
+**§4.2.8 invariantsHold contract**
+
+```swift
+private static func invariantsHold(shares: Int, averageCost: Double, totalInvested: Double) -> Bool
+```
+
+O(1)，校验：
+
+- `shares ≥ 0`
+- `totalInvested ≥ 0` ∧ `totalInvested.isFinite`
+- `(shares == 0) ⟺ (totalInvested == 0)`
+- `shares > 0 ⟹ averageCost > 0 ∧ averageCost.isFinite ∧ |averageCost*Double(shares) - totalInvested| ≤ tol * max(1, |totalInvested|)`
+
+**"≈" 必须用相对容差，不可用 `==`**：`buy` 存 `averageCost = newTotal/Double(newShares)`、`totalInvested = newTotal`，decoder 复检 `(newTotal/newShares)*newShares ≈ newTotal` 非位精确（叠加 JSON Double 十进制往返）→ 用 `==` 或过紧 epsilon 会拒收 app 自己写出的合法存档；`sell` 安全（`totalInvested = averageCost*shares` 是精确赋值）。`tol` 具体值由顺位 8 定并给测试。
+
+使用点：decoder `init(from:)`（false → throw `DecodingError`）/ buy-sell 候选态（false → `precondition` trap）/ debug `assert` 兜底。
+
+**`positionTier` 注**：下方代码块 `var positionTier: Int { 0 }` 是占位符；档位需"初始资金"（不在 PositionManager 状态内）→ 判定 **caller-derived**（E4/E5 依初始资金 + 当前持仓推导）；**顺位 8 从 PositionManager 移除此 member**。本 RFC 仅 codify 此契约，不改算术。
 
 **无效操作处理：**
 - **空仓点卖出：** 卖出按钮灰置（disabled），不可点击
