@@ -145,3 +145,23 @@ struct TrainingFlowMatrixTests {
         #expect(review != replay)
     }
 }
+
+@Suite("allowedTickRange 边界：maxTick==0 / finalTick==0 → 单点 0...0")
+struct TrainingFlowBoundaryTests {
+    @Test("NormalFlow maxTick==0（precondition 最小合法值）→ 0...0")
+    func normalMinMaxTick() {
+        #expect(NormalFlow(fees: normalFees, maxTick: 0).allowedTickRange == 0...0)
+    }
+
+    @Test("ReplayFlow maxTick==0 → 0...0")
+    func replayMinMaxTick() {
+        #expect(ReplayFlow(feeSnapshotFromOriginal: originalFees, maxTick: 0).allowedTickRange == 0...0)
+    }
+
+    @Test("ReviewFlow finalTick==0 → 单点 0...0")
+    func reviewZeroFinalTick() {
+        let flow = ReviewFlow(record: makeRecord(finalTick: 0, feeSnapshot: originalFees))
+        #expect(flow.initialTick == 0)
+        #expect(flow.allowedTickRange == 0...0)
+    }
+}
