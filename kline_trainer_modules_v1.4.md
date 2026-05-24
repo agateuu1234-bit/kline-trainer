@@ -1490,6 +1490,8 @@ struct TickEngine: Equatable {
 
 （见 v1.5 §4.2；类型加 `Equatable`）
 
+**API 契约与设计理由**：详 `kline_trainer_plan_v1.5.md` §4.2.1–§4.2.8（trust-boundary / stdlib 一致性 / 威胁模型 / 溢出语义 / considered alternatives / acceptance / migration + 顺位 8 bump 义务门 / `invariantsHold` contract）。要点：buy/sell `precondition` trap（不 throws/Result）；持久化用 throwing 自定义 decoder + `invariantsHold`；`positionData` 已 shipped，typed decoder 的语义收紧触发 `CONTRACT_VERSION`/m01 bump，**执行 MANDATORY 推迟顺位 8 同 PR**（本类型实现本体 = 顺位 8）。
+
 ### E3 交易计算模块 `TradeCalculator.swift`（v1.2 错误类型闭环）
 
 ```swift
