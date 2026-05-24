@@ -669,7 +669,7 @@ struct PositionManager {
 PositionManager 的 ingress：
 
 - **入口 1a（进程内交易）**：UI → E3 `TradeCalculator.quoteBuy/quoteSell` → `Result<Quote, TradeReason>`；`.failure` 终止于 UI Toast，`.success(quote)` → E5 → `position.buy/sell`。传入 buy/sell 的输入**已被 E3 Result 通道验证**（资金不足/tier 非法/价格非法/佣金溢出）；违约 ⟺ 调用方 programmer error。
-- **入口 1b（进程内局终强平）**：E5 局终（`globalTickIndex >= maxTick`）→ E3 `forceCloseOnEnd(holding:...)` → 裸 `SellQuote`（**无 Result**）→ `position.sell`。`forceCloseOnEnd` 只守 `holding>0/price`（否则全零报价 → `sell(0)` no-op），它**不读** `position.shares`；不越界依赖 **caller 不变量 `holding == position.shares`**——与入口 1a 同信任类（caller 契约，违约 = programmer error → trap），**非**"按构造保证"。
+- **入口 1b（进程内局终强平）**：E5 局终（`globalTickIndex >= maxTick`）→ E3 `forceCloseOnEnd(holding:...)` → 裸 `SellQuote`（**无 Result**）→ `position.sell`。`forceCloseOnEnd` 只守 `holding>0/price`（否则全零报价 → `sell(0)` no-op），它**不读** `position.shares`；不越界依赖 **caller 不变量 `holding == position.shares`**——与入口 1a 同信任类（caller 契约，违约 = programmer error → trap；§4.2.8 `invariantsHold` `shares≥0` 为 debug backstop），**非**"按构造保证"。
 - **入口 1c（进程内重建）**：E6 `resumePending()` → decoder 重建 = 归**入口 2**；`replay(recordId:)` → 从头跑 → 走入口 1a/1b；`review(recordId:)` → 只读 → 无 mutation 入口。
 - **入口 2（持久化 load）**：SQLite `position_data`(TEXT base64) → `Data` → `JSONDecoder` → `PositionManager.init(from:)`；`DecodingError` / `invariantsHold==false` → load 失败终止。**唯一真实的外部不可信入口**（存档可能损坏/被篡改）。
 
@@ -733,7 +733,7 @@ O(1)，校验：
 
 使用点：decoder `init(from:)`（false → throw `DecodingError`）/ buy-sell 候选态（false → `precondition` trap）/ debug `assert` 兜底。
 
-**`positionTier` 注**：下方代码块 `var positionTier: Int { 0 }` 是占位符；档位需"初始资金"（不在 PositionManager 状态内）→ 判定 **caller-derived**（E4/E5 依初始资金 + 当前持仓推导）；**顺位 8 从 PositionManager 移除此 member**。本 RFC 仅 codify 此契约，不改算术。
+**`positionTier` 注**：本节**上方** PositionManager struct 代码块里的 `var positionTier: Int { 0 }` 是占位符；档位需"初始资金"（不在 PositionManager 状态内）→ 判定 **caller-derived**（E4/E5 依初始资金 + 当前持仓推导）；**顺位 8 从 PositionManager 移除此 member**。本 RFC 仅 codify 此契约，不改算术。
 
 **无效操作处理：**
 - **空仓点卖出：** 卖出按钮灰置（disabled），不可点击
