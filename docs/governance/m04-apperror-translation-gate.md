@@ -60,3 +60,4 @@ Gate 1 断言取消路径抛 `CancellationError`（非 AppError）；Gate 2 allo
 | Plan 3 | P2 DownloadAcceptance | ✅（继承 P1 规则）| `check_p2_apperror_gate.sh` |
 | Plan 3 | P3a/P3b / P4 / P5 / P6 | ✅（继承 P1 规则）| P5 = `check_p5_apperror_gate.sh` |
 | Plan 3 | E3 TradeCalculator | 否 | 返 `Result`，不 throws |
+| Plan 3 | E4 TrainingFlowController | 否 | 纯 capability 查询，返 Bool/Int/ClosedRange，不 throws |

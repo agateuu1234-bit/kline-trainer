@@ -107,3 +107,41 @@ struct ReplayFlowTests {
         #expect(!flow.shouldSaveRecord())
     }
 }
+
+@Suite("Capability matrix（逐列 sweep，经协议存在类型）")
+struct TrainingFlowMatrixTests {
+    /// 顺序：canBuySell, canAdvance, shouldSaveRecord,
+    ///       shouldAccumulateCapital, shouldShowSettlement, shouldGiveHapticFeedback
+    private func column(_ f: TrainingFlowController) -> [Bool] {
+        [f.canBuySell(), f.canAdvance(), f.shouldSaveRecord(),
+         f.shouldAccumulateCapital(), f.shouldShowSettlement(), f.shouldGiveHapticFeedback()]
+    }
+
+    @Test("Normal 列 = 全 true")
+    func normalColumn() {
+        let f: TrainingFlowController = NormalFlow(fees: normalFees, maxTick: 1000)
+        #expect(column(f) == [true, true, true, true, true, true])
+    }
+
+    @Test("Review 列 = 全 false")
+    func reviewColumn() {
+        let f: TrainingFlowController = ReviewFlow(record: makeRecord(finalTick: 742, feeSnapshot: originalFees))
+        #expect(column(f) == [false, false, false, false, false, false])
+    }
+
+    @Test("Replay 列 = T,T,F,F,T,T")
+    func replayColumn() {
+        let f: TrainingFlowController = ReplayFlow(feeSnapshotFromOriginal: originalFees, maxTick: 1000)
+        #expect(column(f) == [true, true, false, false, true, true])
+    }
+
+    @Test("三列两两可区分（无两列相同，防复制粘贴塌缩）")
+    func columnsAreDistinct() {
+        let normal = column(NormalFlow(fees: normalFees, maxTick: 10))
+        let review = column(ReviewFlow(record: makeRecord(finalTick: 5, feeSnapshot: originalFees)))
+        let replay = column(ReplayFlow(feeSnapshotFromOriginal: originalFees, maxTick: 10))
+        #expect(normal != review)
+        #expect(normal != replay)
+        #expect(review != replay)
+    }
+}
