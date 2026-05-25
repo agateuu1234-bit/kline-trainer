@@ -35,6 +35,7 @@ extension KLineView {
         AppColor.ma66.setStroke()
         ctx.setLineWidth(1 / mapper.displayScale)
         ctx.setLineJoin(.round)
+        // 单点段无法成线，跳过（D9：polylineSegments 在 nil 处断段，孤立单点是边角产物）。
         for segment in segments where segment.count >= 2 {
             ctx.move(to: segment[0])
             for point in segment.dropFirst() { ctx.addLine(to: point) }
@@ -56,6 +57,7 @@ extension KLineView {
         // 此配对正确性靠 defer 紧跟 saveGState 的惯用法 + code review，无运行期自动验证（H1 如实记录）。
         ctx.setLineDash(phase: 0, lengths: MainChartLayout.dashPattern(displayScale: mapper.displayScale))
         for line in lines {
+            // 单点段无法成线，跳过（D9，同 drawMA66）。
             for segment in line where segment.count >= 2 {
                 ctx.move(to: segment[0])
                 for point in segment.dropFirst() { ctx.addLine(to: point) }
