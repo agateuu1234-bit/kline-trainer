@@ -146,10 +146,14 @@ struct PositionManagerCodableTests {
 
     // ---- D4 tol 双向 demonstrator ----
 
-    // 正向：buy 产生除-乘 ULP 误差的合法存档 → decode 成功（若用 == 会拒收 → 反证 tol 必要）
+    // 正向：buy 产生真实除-乘 ULP 误差的合法存档 → decode 成功（若用 == 会拒收 → 反证 tol 必要）
     @Test func acceptsAppWrittenArchiveWithRoundingError() throws {
         var p = PositionManager()
-        p.buy(shares: 700, totalCost: 1001.0)   // averageCost = 1001/700，avg*700 与 1001 可能差 ULP
+        p.buy(shares: 300, totalCost: 1001.0)   // averageCost = 1001/300；avg*300 与 1001 差 ~1.1e-13（ULP）
+        // 自证这是真 demonstrator：avg*shares 与 totalInvested 有非零 round 误差（严格 == 会拒收），但在 tol 内
+        let gap = abs(p.averageCost * Double(p.shares) - p.totalInvested)
+        #expect(gap > 0)
+        #expect(gap <= PositionManager.invariantTolerance * max(1.0, abs(p.totalInvested)))
         let data = try JSONEncoder().encode(p)
         let decoded = try JSONDecoder().decode(PositionManager.self, from: data)
         #expect(decoded == p)

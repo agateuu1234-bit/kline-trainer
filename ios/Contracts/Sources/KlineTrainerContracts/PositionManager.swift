@@ -7,8 +7,6 @@
 // → precondition trap。唯一外部不可信入口 = 持久化 load（SQLite position_data，入口 2）
 // → throwing 自定义 init(from:) + invariantsHold。详见 plan §4.2.1–§4.2.8。
 
-import Foundation
-
 public struct PositionManager: Codable, Equatable, Sendable {
     public private(set) var shares: Int
     public private(set) var averageCost: Double
