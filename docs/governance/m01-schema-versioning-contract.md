@@ -26,12 +26,14 @@
 
 | 维度 | 当前版本 | 变更触发 bump 的条件 |
 |---|---|---|
-| `CONTRACT_VERSION`（顶层标识） | `"1.4"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
+| `CONTRACT_VERSION`（顶层标识） | `"1.5"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
 | PostgreSQL schema（`schema.sql` migration id） | `0003_v1.3` | 任何 PostgreSQL DDL 变更（含加列）；联动顶层 |
 | 训练组 SQLite `PRAGMA user_version` | `1` | 训练组 schema 结构变更；联动顶层 |
 | app.sqlite GRDB migration | `0003_v1.4_purge_leased` | app.sqlite DDL / 新表 / **DML 数据清理 migration**（v1.4 新增：删除 v1.3 残留 `state='leased'` journal 行）；联动顶层 |
 | Swift 模型版本（`M0.3`） | `1.3` | Codable 字段 / 枚举 case 变更；联动顶层 |
 | `P2 journal states` enum | `v2` | 删除 / 改 raw value / 改既有语义 / 改恢复扫描集 → bump 顶层；仅追加本地中间态 → 只 bump 本子版本，reader 须显式处理未知 state |
+
+> **bump 记录（2026-05-25，Wave 1 顺位 8 E2）**：顶层 `CONTRACT_VERSION` `"1.4"` → `"1.5"`。触发 = E2 PositionManager typed throwing `init(from:)` 把 `position_data` 列从"任何字节"收紧为"合法否则拒收"，命中 §Bump 策略 **A 类"改既有语义"**。**无 DDL 变更**（`position_data` 仍 `TEXT NOT NULL`，收紧属 reader 侧语义），故仅 bump 顶层标识，三套存储 sub-version（PostgreSQL/训练组/app.sqlite）不变、不新增 migration 文件。详见 `kline_trainer_plan_v1.5.md` §4.2.7。
 
 **存储表位 速查**（spec L129-131）：
 
@@ -105,7 +107,7 @@ Bump 策略**分两类**（spec v1.4 修订，L137-138）：
 
 以下增量在 Plan 1f scope **之外**，但作为 spec 长期 governance 目标登记：
 
-- [ ] **CI assert：`CONTRACT_VERSION` 常量与本文件矩阵同步**（spec L2232，v1.3 要求）：需先等 Plan 2 B3 在 Python 侧定义 `CONTRACT_VERSION = "1.4"` 常量（或 `kline_trainer/version.py`）且 Plan 3 F1 / P4 在 Swift 侧定义对应常量，随后开一个轻量 CI workflow grep 本文件当前 `"1.4"` 字串 vs 两侧常量。**落地形态待 Plan 2 B3 + Plan 3 F1 完成后另议**。
+- [ ] **CI assert：`CONTRACT_VERSION` 常量与本文件矩阵同步**（spec L2232，v1.3 要求）：需先等 Plan 2 B3 在 Python 侧定义 `CONTRACT_VERSION` 常量（值同本矩阵顶层，当前 `"1.5"`；或 `kline_trainer/version.py`）且 Plan 3 F1 / P4 在 Swift 侧定义对应常量，随后开一个轻量 CI workflow grep 本文件当前顶层 `CONTRACT_VERSION` 字串 vs 两侧常量。**落地形态待 Plan 2 B3 + Plan 3 F1 完成后另议**。
 - [ ] **具体 migration SQL 文件落地**：spec L161-231 描述的 `content_hash` 两阶段 migration（`0003_v1.3_part1/forward.sql` + `.../rollback.sql` + `part2/forward.sql` + `.../rollback.sql`）由 Plan 2 B3 首次 migration PR 落地；本文件作为 migration 文件命名规范 / rollback 格式的**引用对象**。
 - [ ] **`download_acceptance_journal` 表 migration**：spec L233-263 描述的 `0002_v1.3_journal/forward.sql` + `.../rollback.sql` 同上，由 Plan 2 B3 落地。
 - [ ] **`0003_v1.4_purge_leased` app.sqlite GRDB migration 注册**（spec L268-281）由 Plan 3 P4 落地。

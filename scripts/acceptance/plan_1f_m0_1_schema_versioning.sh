@@ -39,8 +39,8 @@ run "structure: 7 H2 sections" bash -c "grep -c '^## ' $DOC | grep -q '^7$'"
 # ---- CONTRACT_VERSION 矩阵 6 行协同断言（cell-boundary exact；per codex R6）----
 # 每断言要求: dim 在前 | 精确 version 字面值 含 cell boundary （空格+backtick可选+值+backtick可选+空格+\|）
 # 防御模式：值后面必须紧跟 \| 或 backtick+空格+\|，禁止 version="1" 匹配 cell="10"
-run "matrix row: CONTRACT_VERSION top | \`\"1.4\"\`" \
-    grep -qE '^\|.*CONTRACT_VERSION.*\| *`?"1\.4"`? *\|' \
+run "matrix row: CONTRACT_VERSION top | \`\"1.5\"\`" \
+    grep -qE '^\|.*CONTRACT_VERSION.*\| *`?"1\.5"`? *\|' \
     <(awk '/^## CONTRACT_VERSION 矩阵$/,/^## Bump 策略/' "$DOC")
 run "matrix row: PostgreSQL | \`0003_v1.3\`" \
     grep -qE '^\|.*PostgreSQL.*\| *`?0003_v1\.3`? *\|' \
