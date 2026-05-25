@@ -55,6 +55,8 @@ struct MainChartLayoutCandleTests {
         #expect(s.isUp == false)
         #expect(s.bodyRect.minY == 480)
         #expect(s.bodyRect.height == 60)
+        #expect(s.wickTop == CGPoint(x: 0, y: 450))
+        #expect(s.wickBottom == CGPoint(x: 0, y: 570))
     }
 
     @Test("平盘 doji：实体高度=1/displayScale（最小 1 设备像素）")
@@ -71,6 +73,12 @@ struct MainChartLayoutCandleTests {
         let m = makeMapper(startIndex: 0, count: 2)
         let shapes = MainChartLayout.candleShapes(for: arr[0..<2], mapper: m)
         #expect(shapes[1].bodyRect.midX == 10)
+    }
+
+    @Test("空 slice → 空数组")
+    func emptySlice() {
+        let arr: [KLineCandle] = []
+        #expect(MainChartLayout.candleShapes(for: arr[0..<0], mapper: makeMapper(count: 0)).isEmpty)
     }
 }
 
@@ -98,6 +106,20 @@ struct MainChartLayoutMA66Tests {
     func allNil() {
         let arr = [mc(0), mc(1)]
         #expect(MainChartLayout.ma66Polyline(for: arr[0..<2], mapper: makeMapper(count: 2)).isEmpty)
+    }
+
+    @Test("trailing nil：末尾 nil 不产生空段")
+    func trailingNil() {
+        let arr = [mc(0, ma66: 50), mc(1)]
+        let segs = MainChartLayout.ma66Polyline(for: arr[0..<2], mapper: makeMapper(count: 2))
+        #expect(segs.count == 1)
+        #expect(segs[0] == [CGPoint(x: 0, y: 300)])
+    }
+
+    @Test("空 slice → 空")
+    func emptySlice() {
+        let arr: [KLineCandle] = []
+        #expect(MainChartLayout.ma66Polyline(for: arr[0..<0], mapper: makeMapper(count: 0)).isEmpty)
     }
 }
 
@@ -134,6 +156,7 @@ struct MainChartLayoutBollTests {
     func dashPatternValue() {
         #expect(MainChartLayout.dashPattern(displayScale: 2) == [2, 2])
         #expect(MainChartLayout.dashPattern(displayScale: 1) == [4, 4])
+        #expect(MainChartLayout.dashPattern(displayScale: 3) == [4.0 / 3.0, 4.0 / 3.0])
     }
 }
 
