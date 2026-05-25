@@ -107,7 +107,7 @@ Bump 策略**分两类**（spec v1.4 修订，L137-138）：
 
 以下增量在 Plan 1f scope **之外**，但作为 spec 长期 governance 目标登记：
 
-- [ ] **CI assert：`CONTRACT_VERSION` 常量与本文件矩阵同步**（spec L2232，v1.3 要求）：需先等 Plan 2 B3 在 Python 侧定义 `CONTRACT_VERSION = "1.4"` 常量（或 `kline_trainer/version.py`）且 Plan 3 F1 / P4 在 Swift 侧定义对应常量，随后开一个轻量 CI workflow grep 本文件当前 `"1.4"` 字串 vs 两侧常量。**落地形态待 Plan 2 B3 + Plan 3 F1 完成后另议**。
+- [ ] **CI assert：`CONTRACT_VERSION` 常量与本文件矩阵同步**（spec L2232，v1.3 要求）：需先等 Plan 2 B3 在 Python 侧定义 `CONTRACT_VERSION` 常量（值同本矩阵顶层，当前 `"1.5"`；或 `kline_trainer/version.py`）且 Plan 3 F1 / P4 在 Swift 侧定义对应常量，随后开一个轻量 CI workflow grep 本文件当前顶层 `CONTRACT_VERSION` 字串 vs 两侧常量。**落地形态待 Plan 2 B3 + Plan 3 F1 完成后另议**。
 - [ ] **具体 migration SQL 文件落地**：spec L161-231 描述的 `content_hash` 两阶段 migration（`0003_v1.3_part1/forward.sql` + `.../rollback.sql` + `part2/forward.sql` + `.../rollback.sql`）由 Plan 2 B3 首次 migration PR 落地；本文件作为 migration 文件命名规范 / rollback 格式的**引用对象**。
 - [ ] **`download_acceptance_journal` 表 migration**：spec L233-263 描述的 `0002_v1.3_journal/forward.sql` + `.../rollback.sql` 同上，由 Plan 2 B3 落地。
 - [ ] **`0003_v1.4_purge_leased` app.sqlite GRDB migration 注册**（spec L268-281）由 Plan 3 P4 落地。
