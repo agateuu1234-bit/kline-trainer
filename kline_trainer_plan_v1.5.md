@@ -651,12 +651,6 @@ struct PositionManager {
     
     /// 持仓成本 = 当前持仓股数 × 加权平均成本
     var holdingCost: Double { averageCost * Double(shares) }
-    
-    /// 当前仓位档位（0~5）—— ⚠️ 占位符：见 §4.2.8 positionTier 注（caller-derived，顺位 8 移除本 member）
-    var positionTier: Int {
-        // 占位返回 0；真实档位由 caller（E4/E5）依初始资金 + 当前持仓推导（顺位 8 落地）
-        0
-    }
 }
 ```
 
@@ -733,7 +727,7 @@ O(1)，校验：
 
 使用点：decoder `init(from:)`（false → throw `DecodingError`）/ buy-sell 候选态（false → `precondition` trap）/ debug `assert` 兜底。
 
-**`positionTier` 注**：本节**上方** PositionManager struct 代码块里的 `var positionTier: Int { 0 }` 是占位符；档位需"初始资金"（不在 PositionManager 状态内）→ 判定 **caller-derived**（E4/E5 依初始资金 + 当前持仓推导）；**顺位 8 从 PositionManager 移除此 member**。本 RFC 仅 codify 此契约，不改算术。
+**`positionTier` 注**：档位需"初始资金"（不在 PositionManager 状态内）→ 判定 **caller-derived**（E4/E5 依初始资金 + 当前持仓推导）；**顺位 8 已从 PositionManager 移除此占位 member**（连同本节上方 illustrative 代码块的占位行），生产 `PositionManager.swift` 不含 `positionTier`。
 
 **无效操作处理：**
 - **空仓点卖出：** 卖出按钮灰置（disabled），不可点击
