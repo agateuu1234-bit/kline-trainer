@@ -437,13 +437,7 @@ struct PositionManagerCodableTests {
         try JSONDecoder().decode(PositionManager.self, from: Data(json.utf8))
     }
 
-    // ---- 6 个 reject case（§4.2.8 各条）----
-
-    @Test func rejectsNegativeShares() {
-        #expect(throws: DecodingError.self) {
-            try decode(#"{"shares":-1,"averageCost":0.0,"totalInvested":0.0}"#)
-        }
-    }
+    // ---- 5 个 reject case（§4.2.8 各条；negative-shares 已在 Task 1 PositionManagerCoreTests 守 TDD，不重复）----
 
     @Test func rejectsNegativeTotalInvested() {
         #expect(throws: DecodingError.self) {
@@ -451,7 +445,8 @@ struct PositionManagerCodableTests {
         }
     }
 
-    // 非有限值：JSONDecoder 对 1e400 或抛 dataCorrupted、或产 .infinity 被 isFinite 拒——两路都 → DecodingError
+    // 超界数值：JSONDecoder 对 1e400 在 parse 阶段即抛 DecodingError（Swift Double 不可表示）；
+    // 不依赖 decoder 自身 isFinite 分支（JSON 无法表达 NaN/Inf 字面），但结果同 → DecodingError。
     @Test func rejectsNonFiniteValues() {
         #expect(throws: DecodingError.self) {
             try decode(#"{"shares":100,"averageCost":1e400,"totalInvested":1e400}"#)
@@ -522,7 +517,7 @@ struct PositionManagerCodableTests {
 - [ ] **Step 2：运行测试，确认通过（绿）**
 
 Run: `cd ios/Contracts && swift test --filter PositionManagerCodableTests`
-Expected: 9 tests pass，0 failures。（decoder 已在 Task 1 实现，本 suite 验证其守门覆盖。）
+Expected: 8 tests pass，0 failures。（decoder 已在 Task 1 实现，本 suite 验证其守门覆盖；negative-shares reject 在 Task 1 核心 suite。）
 
 > 若 `acceptsAppWrittenArchiveWithRoundingError` 或 `tolBoundaryDiscriminates` 失败：说明 `invariantTolerance` 选值与 JSON Double 往返不匹配——这是 D4 要捕捉的真信号，**不要**盲目放大 tol；先打印 `abs(decoded.averageCost*Double(decoded.shares) - decoded.totalInvested)` 与 `margin` 对比，按实测 ULP 量级定 tol（systematic-debugging）。
 
@@ -533,7 +528,7 @@ Run:
 cd ios/Contracts && swift test --filter PositionManager
 cd ios/Contracts && swift test
 ```
-Expected: PositionManager 全 suites 通过；全 package 在既有 415 基础上 +21 左右、0 failures。
+Expected: PositionManager 全 suites 通过；全 package 在既有 415 基础上 +20 左右、0 failures。
 
 - [ ] **Step 4：Commit**
 
@@ -786,8 +781,8 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 | # | 动作 | 期望 | 通过 |
 |---|---|---|---|
-| 1 | 运行：`cd ios/Contracts && swift test --filter PositionManager` | 全部通过，0 失败（约 21 项：核心 6 + 交易 6 + 持久化 9） | ☐ |
-| 2 | 运行：`cd ios/Contracts && swift test` | 全 package 通过，0 失败（在既有 415 基础上增加约 21 项） | ☐ |
+| 1 | 运行：`cd ios/Contracts && swift test --filter PositionManager` | 全部通过，0 失败（约 20 项：核心 6 + 交易 6 + 持久化 8） | ☐ |
+| 2 | 运行：`cd ios/Contracts && swift test` | 全 package 通过，0 失败（在既有 415 基础上增加约 20 项） | ☐ |
 | 3 | 运行：`bash scripts/acceptance/plan_e2_position_manager.sh` | 每行 `OK:`，末行 `=== ALL E2 ACCEPTANCE CHECKS PASSED ===` | ☐ |
 | 4 | 运行：`bash scripts/acceptance/plan_1f_m0_1_schema_versioning.sh` | 全部断言通过（含矩阵顶层 CONTRACT_VERSION 已是 1.5） | ☐ |
 | 5 | 运行：`grep -n 'CONTRACT_VERSION = ' ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift` | 显示 `= "1.5"`（版本号已升） | ☐ |
@@ -820,7 +815,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ## Final verification（全部 task 完成后，进 requesting-code-review 前）
 
 - [ ] `cd ios/Contracts && swift build` → Build complete!
-- [ ] `cd ios/Contracts && swift test` → 全 package 0 failures（约 436 in 80+ suites）
+- [ ] `cd ios/Contracts && swift test` → 全 package 0 failures（约 435 in 83+ suites）
 - [ ] Catalyst：`xcodebuild build-for-testing -scheme <scheme> -destination 'platform=macOS,variant=Mac Catalyst'` → TEST BUILD SUCCEEDED（CI 必绿，不绕过）
 - [ ] `bash scripts/acceptance/plan_e2_position_manager.sh` → ALL PASSED
 - [ ] `bash scripts/acceptance/plan_1f_m0_1_schema_versioning.sh` → 全通过
