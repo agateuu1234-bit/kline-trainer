@@ -47,3 +47,55 @@ struct PositionManagerCoreTests {
         }
     }
 }
+
+@Suite("PositionManager 交易")
+struct PositionManagerTradeTests {
+
+    @Test func buySingleSetsAverageCost() {
+        var p = PositionManager()
+        p.buy(shares: 100, totalCost: 1000.0)
+        #expect(p.shares == 100)
+        #expect(p.totalInvested == 1000.0)
+        #expect(abs(p.averageCost - 10.0) < 1e-9)
+    }
+
+    @Test func buyMultipleAccumulatesWeightedAverage() {
+        var p = PositionManager()
+        p.buy(shares: 100, totalCost: 1000.0)   // avg 10
+        p.buy(shares: 100, totalCost: 1200.0)   // total 2200 / 200 = 11
+        #expect(p.shares == 200)
+        #expect(p.totalInvested == 2200.0)
+        #expect(abs(p.averageCost - 11.0) < 1e-9)
+    }
+
+    @Test func sellPartialKeepsAverageCost() {
+        var p = PositionManager()
+        p.buy(shares: 300, totalCost: 3000.0)   // avg 10
+        p.sell(shares: 100)
+        #expect(p.shares == 200)
+        #expect(abs(p.averageCost - 10.0) < 1e-9)
+        #expect(abs(p.totalInvested - 2000.0) < 1e-9)
+    }
+
+    @Test func sellFullClearsToZero() {
+        var p = PositionManager()
+        p.buy(shares: 100, totalCost: 1000.0)
+        p.sell(shares: 100)
+        #expect(p == PositionManager())
+    }
+
+    // D1：§4.2.1 入口 1b force-close 全零报价 → sell(0) no-op（不 trap）
+    @Test func sellZeroIsNoOp() {
+        var p = PositionManager(shares: 300, averageCost: 5.0, totalInvested: 1500.0)
+        let before = p
+        p.sell(shares: 0)
+        #expect(p == before)
+    }
+
+    // sell(0) 在空仓上也 no-op（force-close holding==shares==0 路径）
+    @Test func sellZeroOnEmptyIsNoOp() {
+        var p = PositionManager()
+        p.sell(shares: 0)
+        #expect(p == PositionManager())
+    }
+}

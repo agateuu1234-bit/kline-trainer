@@ -72,6 +72,53 @@ public struct PositionManager: Codable, Equatable, Sendable {
         self.totalInvested = totalInvested
     }
 
+    // MARK: - 交易（§4.2.1 入口 1a/1b：进程内 → precondition trap；§4.2.4 溢出预检）
+
+    /// 买入（加权平均成本）。§4.2.4：① 预检合成结果溢出/非有限 → trap；② 写入；③ debug assert 兜底。
+    public mutating func buy(shares purchasedShares: Int, totalCost: Double) {
+        precondition(purchasedShares > 0,
+            "PositionManager.buy: shares must be > 0 (got \(purchasedShares); state shares=\(shares))")
+        precondition(totalCost.isFinite && totalCost > 0,
+            "PositionManager.buy: totalCost must be finite & > 0 (got \(totalCost); state totalInvested=\(totalInvested))")
+        // ① 预检合成结果（§4.2.4 ①：主守门）
+        let (combinedShares, sharesOverflow) = shares.addingReportingOverflow(purchasedShares)
+        precondition(!sharesOverflow,
+            "PositionManager.buy: shares would overflow Int (state shares=\(shares) + \(purchasedShares))")
+        let newTotal = totalInvested + totalCost
+        precondition(newTotal.isFinite,
+            "PositionManager.buy: totalInvested would become non-finite (state totalInvested=\(totalInvested) + \(totalCost))")
+        let newAverage = newTotal / Double(combinedShares)
+        // ② 写入
+        shares = combinedShares
+        averageCost = newAverage
+        totalInvested = newTotal
+        // ③ debug 兜底（§4.2.4 ③：不作主守门）
+        assert(PositionManager.invariantsHold(shares: shares, averageCost: averageCost, totalInvested: totalInvested),
+            "PositionManager.buy: post-mutation invariants violated (shares=\(shares), averageCost=\(averageCost), totalInvested=\(totalInvested))")
+    }
+
+    /// 卖出。§4.2.1 入口 1b：force-close 全零报价 → sell(0) no-op；oversell / 负值 = caller bug → trap。
+    public mutating func sell(shares soldShares: Int) {
+        if soldShares == 0 { return }   // D1 / §4.2.1 入口 1b：全零报价 no-op
+        precondition(soldShares > 0,
+            "PositionManager.sell: shares must be > 0 (got \(soldShares); 0 已作 no-op)")
+        precondition(soldShares <= shares,
+            "PositionManager.sell: cannot oversell (got \(soldShares) > holding \(shares))")
+        let remaining = shares - soldShares
+        if remaining == 0 {
+            shares = 0
+            averageCost = 0
+            totalInvested = 0
+        } else {
+            shares = remaining
+            // averageCost 不变；totalInvested = averageCost * remaining（精确赋值，§4.2.8 sell 安全）
+            totalInvested = averageCost * Double(remaining)
+        }
+        // ③ debug 兜底
+        assert(PositionManager.invariantsHold(shares: shares, averageCost: averageCost, totalInvested: totalInvested),
+            "PositionManager.sell: post-mutation invariants violated (shares=\(shares), averageCost=\(averageCost), totalInvested=\(totalInvested))")
+    }
+
     // MARK: - 派生
 
     /// 持仓成本 = 当前持仓股数 × 加权平均成本（§4.2）。
