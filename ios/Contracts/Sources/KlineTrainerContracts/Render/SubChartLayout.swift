@@ -76,4 +76,33 @@ enum SubChartLayout {
             dif: polylineSegments(for: candles, mapper: mapper, value: { $0.macdDiff }),
             dea: polylineSegments(for: candles, mapper: mapper, value: { $0.macdDea }))
     }
+
+    /// MACD 柱基线（D11）：valueToY(0) 钳到 [frame.minY, frame.maxY]，
+    /// 防御 macdRange 不含 0 的退化（C8 Wave 2 应避免，此处兜底不掩盖责任）。
+    static func macdBarBaseline(mapper: IndicatorMapper) -> CGFloat {
+        let raw = mapper.valueToY(0)
+        return min(max(raw, mapper.frame.minY), mapper.frame.maxY)
+    }
+
+    /// MACD 柱（D1 读 candle.macdBar 不重算 / D9b nil 跳过 / D11 基线钳制 / D8 零柱最小高度）。
+    static func macdBars(for candles: ArraySlice<KLineCandle>,
+                         mapper: IndicatorMapper) -> [MacdBar] {
+        let width = mapper.viewport.geometry.candleWidth
+        let baseline = macdBarBaseline(mapper: mapper)
+        let minBar = 1 / mapper.displayScale
+        var bars: [MacdBar] = []
+        bars.reserveCapacity(candles.count)
+        for index in candles.indices {
+            guard let value = candles[index].macdBar else { continue }   // D9b
+            let cx = mapper.indexToX(index)
+            let top = mapper.valueToY(value)
+            // 正柱：top < baseline；负柱：top > baseline；零柱：top == baseline
+            let minY = min(baseline, top)
+            let maxY = max(baseline, top)
+            let height = max(maxY - minY, minBar)
+            let rect = CGRect(x: cx - width / 2, y: minY, width: width, height: height)
+            bars.append(MacdBar(rect: rect, isPositive: value >= 0))
+        }
+        return bars
+    }
 }

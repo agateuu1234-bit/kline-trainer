@@ -151,3 +151,67 @@ struct SubChartLayoutMacdLinesTests {
         #expect(lines.dif[0].allSatisfy { $0.y == 100 })
     }
 }
+
+@Suite("SubChartLayout.macdBars")
+struct SubChartLayoutMacdBarsTests {
+
+    @Test("正柱：isPositive=true，柱顶在基线上方")
+    func positiveBar() {
+        let candles = [mc(0, macdBar: 20)]
+        let m = makeMacdMapper(count: 1)
+        let bars = SubChartLayout.macdBars(for: candles[0..<1], mapper: m)
+        #expect(bars.count == 1)
+        let b = bars[0]
+        #expect(b.isPositive == true)
+        #expect(b.rect.minX == -3 && b.rect.width == 6)
+        #expect(b.rect.minY == 60)
+        #expect(b.rect.height == 40)
+    }
+
+    @Test("负柱：isPositive=false，柱顶=基线，柱底=valueToY(macdBar) 下方")
+    func negativeBar() {
+        let candles = [mc(0, macdBar: -20)]
+        let m = makeMacdMapper(count: 1)
+        let b = SubChartLayout.macdBars(for: candles[0..<1], mapper: m)[0]
+        #expect(b.isPositive == false)
+        #expect(b.rect.minY == 100)
+        #expect(b.rect.height == 40)
+    }
+
+    @Test("零柱：macdBar==0，高度=1/displayScale（D8）+ 中心契约 D5（M1）")
+    func zeroBar() {
+        let b = SubChartLayout.macdBars(for: [mc(0, macdBar: 0)][0..<1], mapper: makeMacdMapper(count: 1))[0]
+        #expect(b.isPositive == true)
+        #expect(b.rect.minX == -3 && b.rect.width == 6)
+        #expect(b.rect.height == 0.5)
+    }
+
+    @Test("nil 柱跳过（D9b）+ 留存柱 D5 中心契约（M1）")
+    func nilBarSkipped() {
+        let arr = [mc(0, macdBar: 10), mc(1), mc(2, macdBar: -5)]
+        let bars = SubChartLayout.macdBars(for: arr[0..<3], mapper: makeMacdMapper(count: 3))
+        #expect(bars.count == 2)
+        #expect(bars[0].rect.midX == 0 && bars[0].rect.width == 6)
+        #expect(bars[1].rect.midX == 20 && bars[1].rect.width == 6)
+    }
+
+    @Test("D11 退化：valueRange 全正（不含 0）→ 基线钳到 frame.maxY；柱顶精确像素 = 111.0")
+    func degenerateRangeAllPositive() {
+        let m = makeMacdMapper(count: 1, lower: 10, upper: 100)
+        let b = SubChartLayout.macdBars(for: [mc(0, macdBar: 50)][0..<1], mapper: m)[0]
+        #expect(b.rect.minX == -3 && b.rect.width == 6)
+        #expect(b.rect.minY == 111.0)
+        #expect(b.rect.maxY == 200)
+        #expect(b.rect.height == 89.0)
+        #expect(b.isPositive == true)
+    }
+
+    @Test("D6 杀手：slice arr[2..<5] + startIndex=2 → 首根 midX==0")
+    func indexAlignment() {
+        let arr = (0..<5).map { mc($0, macdBar: 10) }
+        let m = makeMacdMapper(startIndex: 2, count: 3)
+        let bars = SubChartLayout.macdBars(for: arr[2..<5], mapper: m)
+        #expect(bars.count == 3)
+        #expect(bars.map { $0.rect.midX } == [0, 10, 20])
+    }
+}
