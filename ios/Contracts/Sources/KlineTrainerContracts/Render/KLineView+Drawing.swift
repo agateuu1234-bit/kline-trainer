@@ -11,12 +11,14 @@ import CoreGraphics
 extension KLineView {
     /// C6 绘线渲染 dispatch loop. spec §C6 + design §3.2.
     /// Missing tool in `tools` dict → silently skip (Wave 1 default path).
-    @MainActor
+    /// `period` 保留作 Wave 3 跨周期价格映射用；当前 Wave 1 不消费（@MainActor 隔离由
+    /// KLineView UIView 继承，与 sibling extensions（Crosshair/Candles/Volume/MACD）一致不重声明）。
     func drawDrawings(ctx: CGContext,
                       mapper: CoordinateMapper,
                       drawings: [DrawingObject],
                       period: Period,
                       tools: [DrawingToolType: any DrawingTool]) {
+        _ = period  // reserved for Wave 3 cross-period price mapping
         for drawing in drawings {
             guard let tool = tools[drawing.toolType] else { continue }
             tool.render(ctx: ctx, mapper: mapper, anchors: drawing.anchors)

@@ -42,7 +42,7 @@
 | E.4 | `grep -nc 'func render(ctx: CGContext' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingTool.swift` | 1 hit | 数字 = 1 |
 | E.5 | `grep -nc 'func hitTest(point: CGPoint' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingTool.swift` | 1 hit | 数字 = 1 |
 | E.6 | `grep -nc 'public protocol DrawingInputController: AnyObject' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingInputController.swift` | 1 hit | 数字 = 1 |
-| E.7 | `grep -nc '@Observable' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingToolManager.swift` | 1 hit | 数字 = 1 |
+| E.7 | `grep -nc '^@Observable$' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingToolManager.swift` | 1 hit（独立 `@Observable` annotation 行；不含 header 注释里的字面） | 数字 = 1 |
 | E.8 | `grep -nc 'final class DrawingToolManager' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingToolManager.swift` | 1 hit | 数字 = 1 |
 | E.9 | `grep -nc 'func drawDrawings(ctx: CGContext' ios/Contracts/Sources/KlineTrainerContracts/Render/KLineView+Drawing.swift` | 1 hit | 数字 = 1 |
 | E.10 | `grep -nc 'tools: \[DrawingToolType: any DrawingTool\]' ios/Contracts/Sources/KlineTrainerContracts/Render/KLineView+Drawing.swift` | 1 hit | 数字 = 1 |
