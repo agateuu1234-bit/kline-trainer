@@ -830,10 +830,10 @@ After all three Edits, verify with `grep -nc 'tools: \[:\]\|tools: \[DrawingTool
 |---|---|---|---|
 | E.1 | `grep -nc 'static var type: DrawingToolType' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingTool.swift` | 1 hit | 数字 = 1 |
 | E.2 | `grep -nc 'var requiredAnchors: ClosedRange<Int>' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingTool.swift` | 1 hit | 数字 = 1 |
-| E.3 | `grep -nc '@MainActor func render(ctx: CGContext' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingTool.swift` | 1 hit | 数字 = 1 |
-| E.4 | `grep -nc '@MainActor func hitTest(point: CGPoint' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingTool.swift` | 1 hit | 数字 = 1 |
-| E.5 | `grep -nc '@MainActor func tapToAnchor(at point: CGPoint' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingInputController.swift` | 1 hit | 数字 = 1 |
-| E.6 | `grep -nc '@MainActor func shouldCommit(current:' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingInputController.swift` | 1 hit | 数字 = 1 |
+| E.3 | `grep -nc 'func render(ctx: CGContext' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingTool.swift` | 1 hit（protocol-level @MainActor 后无成员级前缀，per spec v4） | 数字 = 1 |
+| E.4 | `grep -nc 'func hitTest(point: CGPoint' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingTool.swift` | 1 hit | 数字 = 1 |
+| E.5 | `grep -nc 'func tapToAnchor(at point: CGPoint' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingInputController.swift` | 1 hit | 数字 = 1 |
+| E.6 | `grep -nc 'func shouldCommit(current:' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingInputController.swift` | 1 hit | 数字 = 1 |
 | E.7 | `grep -nc '@Observable' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingToolManager.swift` | 1 hit | 数字 = 1 |
 | E.8 | `grep -nc 'final class DrawingToolManager' ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingToolManager.swift` | 1 hit | 数字 = 1 |
 | E.9 | `grep -nc 'func drawDrawings(ctx: CGContext' ios/Contracts/Sources/KlineTrainerContracts/Render/KLineView+Drawing.swift` | 1 hit | 数字 = 1 |

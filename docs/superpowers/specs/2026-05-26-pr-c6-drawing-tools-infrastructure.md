@@ -335,15 +335,17 @@ drawDrawings(ctx: ctx, mapper: mapper,
 |---|---|---|
 | 17 | `protocolSignatureGuardsAgainstSpecDrift` | 静态编译期约束：(a) `DrawingTool` 必须 `@MainActor` protocol（`@MainActor private final class SignatureGuardTool: DrawingTool` 编译通过；如果 protocol 改为 nonisolated，@MainActor conformer 触发 ConformanceIsolation 错误，per Task 1 fix `a80c9df`）；(b) `DrawingToolManager` 必须 @MainActor（`@MainActor func` 内同步调用 `DrawingToolManager(enabledTools:)` 必须成功）；(c) `requiredAnchors` 返回类型必须是 `ClosedRange<Int>`（编译期赋值约束 `let req: ClosedRange<Int> = tool.requiredAnchors`） |
 
-**Spec literal grep 锚**（acceptance §A 手动 checklist）：
+**Spec literal grep 锚**（acceptance §A 手动 checklist。protocol-level `@MainActor` 后成员行无 `@MainActor` 前缀，per v4 修订）：
 - `grep -n 'static var type: DrawingToolType' DrawingTool.swift` → 1 hit
 - `grep -n 'var requiredAnchors: ClosedRange<Int>' DrawingTool.swift` → 1 hit
-- `grep -n '@MainActor func render(ctx: CGContext' DrawingTool.swift` → 1 hit
-- `grep -n '@MainActor func hitTest(point: CGPoint' DrawingTool.swift` → 1 hit
-- `grep -n '@MainActor func tapToAnchor(at point: CGPoint' DrawingInputController.swift` → 1 hit
-- `grep -n '@MainActor func shouldCommit(current:' DrawingInputController.swift` → 1 hit
+- `grep -n 'public protocol DrawingTool' DrawingTool.swift` → 1 hit（protocol-level @MainActor 在前一行）
+- `grep -n 'func render(ctx: CGContext' DrawingTool.swift` → 1 hit
+- `grep -n 'func hitTest(point: CGPoint' DrawingTool.swift` → 1 hit
+- `grep -n 'public protocol DrawingInputController: AnyObject' DrawingInputController.swift` → 1 hit
+- `grep -n 'func tapToAnchor(at point: CGPoint' DrawingInputController.swift` → 1 hit
+- `grep -n 'func shouldCommit(current:' DrawingInputController.swift` → 1 hit
 - `grep -n '@MainActor' DrawingToolManager.swift` → ≥1 hit
-- `grep -n '@Observable' DrawingToolManager.swift` → 1 hit
+- `grep -n '^@Observable$' DrawingToolManager.swift` → 1 hit
 - `grep -n 'final class DrawingToolManager' DrawingToolManager.swift` → 1 hit
 - `grep -n 'func drawDrawings(ctx: CGContext' KLineView+Drawing.swift` → 1 hit（5 参签名含 `tools:` 字典）
 - `grep -n 'tools: \[DrawingToolType: any DrawingTool\]' KLineView+Drawing.swift` → 1 hit
