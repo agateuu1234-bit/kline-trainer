@@ -6,7 +6,9 @@ import Testing
 import CoreGraphics
 @testable import KlineTrainerContracts
 
-#if canImport(UIKit)
+// 跨平台测试：仅依赖 CoreGraphics + 跨平台值类型（CoordinateMapper / ChartViewport /
+// ChartGeometry / PriceRange / PanelViewState / DrawingAnchor / DrawingToolType）；
+// 无 UIKit 依赖。在 macOS host `swift test` 跑得通，Catalyst CI 也跑得通。
 
 @MainActor
 struct DrawingProtocolTests {
@@ -48,11 +50,10 @@ struct DrawingProtocolTests {
 }
 
 // MARK: - Test fakes
+// protocol DrawingTool 是 @MainActor 隔离（无 : Sendable 要求），fake 类只需 @MainActor。
 
-// @unchecked Sendable: Swift 6 strict concurrency — @MainActor final class 不自动 Sendable，
-// DrawingTool protocol 强制 : Sendable → 必须显式标。无可变状态，安全。
 @MainActor
-private final class FakeDrawingTool: DrawingTool, @unchecked Sendable {
+private final class FakeDrawingTool: DrawingTool {
     static var type: DrawingToolType { .horizontal }
     var requiredAnchors: ClosedRange<Int> { 1...1 }
     func render(ctx: CGContext, mapper: CoordinateMapper, anchors: [DrawingAnchor]) {}
@@ -102,5 +103,3 @@ private func makePanelFixture() -> PanelViewState {
         revision: 0
     )
 }
-
-#endif
