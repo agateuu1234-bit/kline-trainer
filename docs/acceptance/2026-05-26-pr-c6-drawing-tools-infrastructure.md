@@ -15,7 +15,8 @@
 | 编号 | 命令 | 预期看到 | 通过条件 |
 |---|---|---|---|
 | B.1 | `cd ios/Contracts && swift build 2>&1 \| tail -3` | `Build complete!` | 命中 |
-| B.2 | `cd ios/Contracts && swift test 2>&1 \| grep -E "Test run with [0-9]+ tests? in [0-9]+ suites? passed"` | `Test run with 503 tests in 100 suites passed after X seconds.` | tests 数 = 503，suites 数 = 100（main baseline 实测 486/96 + 本 PR 新增 17/4） |
+| B.2 | `cd ios/Contracts && swift test 2>&1 \| grep -E "Test run with [0-9]+ tests? in [0-9]+ suites? passed"` | macOS host: `Test run with 500 tests in 99 suites passed after X seconds.` | tests 数 = 500，suites 数 = 99（main baseline 实测 486/96 + 本 PR 新增 14/3 = 三跨平台 suite + 1 spec-guard suite，不含 UIKit-gated DispatchTests 3 个） |
+| B.3 | Catalyst CI 跑同命令（macos-15 catalyst-build job） | `Test run with 503 tests in 100 suites passed after X seconds.` | tests 数 = 503，suites 数 = 100（macOS host 500/99 + UIKit-gated DrawDrawingsDispatchTests 3 tests / 1 suite 在 Catalyst CI 才跑） |
 
 ## §C C6 新文件存在
 
@@ -24,11 +25,12 @@
 | C.1 | `ls ios/Contracts/Sources/KlineTrainerContracts/Drawing/` | DrawingInputController.swift / DrawingTool.swift / DrawingToolManager.swift 三个文件 | 全部存在 |
 | C.2 | `ls ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/` | DrawingProtocolTests.swift / DrawingToolManagerTests.swift / DrawDrawingsDispatchTests.swift / SpecLiteralGuardTests.swift 四个文件 | 全部存在 |
 
-## §D 4 个新 suite 全绿
+## §D 新 suite 全绿（macOS host 3 + Catalyst CI 4）
 
 | 编号 | 命令 | 预期看到 | 通过条件 |
 |---|---|---|---|
-| D.1 | `cd ios/Contracts && swift test 2>&1 \| grep -cE 'Suite "(DrawingProtocolTests\|DrawingToolManagerTests\|DrawDrawingsDispatchTests\|SpecLiteralGuardTests)" passed'` | 数字 4 | 数字 = 4 |
+| D.1 | `cd ios/Contracts && swift test 2>&1 \| grep -cE 'Suite (DrawingProtocolTests\|DrawingToolManagerTests\|SpecLiteralGuardTests) passed'` | 数字 3 | 数字 = 3（macOS host 跑 3 个跨平台 suite） |
+| D.2 | Catalyst CI 跑 `grep -cE 'Suite (DrawingProtocolTests\|DrawingToolManagerTests\|DrawDrawingsDispatchTests\|SpecLiteralGuardTests) passed'` | 数字 4 | 数字 = 4（Catalyst CI 额外跑 UIKit-gated DrawDrawingsDispatchTests） |
 
 ## §E spec literal grep 锚（防 spec drift）
 
