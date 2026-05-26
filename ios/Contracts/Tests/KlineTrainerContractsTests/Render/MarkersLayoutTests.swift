@@ -90,3 +90,66 @@ struct MarkerPlacementsTests {
         #expect(placements[0].direction == .buy)
     }
 }
+
+@Suite("MarkersLayout 哨兵契约")
+struct MarkersSentinelTests {
+
+    @Test("D2：findCandleIndex 等价 partitioningIndex（哨兵：禁止改换为 linear scan）")
+    func equivalentToPartitioning() {
+        let candles = [mc(0, endGlobal: 5), mc(1, endGlobal: 10),
+                       mc(2, endGlobal: 15), mc(3, endGlobal: 20)]
+        let slice = candles[0..<4]
+        for gt in [1, 5, 6, 10, 15, 20, 21] {
+            let marker = TradeMarker(globalTick: gt, price: 10, direction: .buy)
+            let mine = MarkersLayout.findCandleIndex(for: marker, in: slice)
+            let ref = slice.partitioningIndex { $0.endGlobalIndex >= gt }
+            let expected: Int? = (ref < slice.endIndex) ? ref : nil
+            #expect(mine == expected)
+        }
+    }
+
+    @Test("D10：dot center.y 锚到 candle.close（不是 marker.price）—— 跨周期同步关键")
+    func centerYAnchorsCandleClose() {
+        let m = makeMapper(count: 2)
+        // candle close = 80（priceToY = 600 - 80/100*600 = 120）；marker price = 30
+        let candles = [mc(0, endGlobal: 5, close: 80), mc(1, endGlobal: 10, close: 80)]
+        let markers = [TradeMarker(globalTick: 5, price: 30, direction: .buy)]
+        let placements = MarkersLayout.markerPlacements(
+            mapper: m, markers: markers, candles: candles[0..<2])
+        #expect(placements.count == 1)
+        #expect(placements[0].center.y == 120)  // priceToY(80)，不是 priceToY(30)=420
+    }
+
+    @Test("方向透传：buy/sell 不丢失（D10 后续 UIKit 据此选色 + 字母）")
+    func directionPassthrough() {
+        let m = makeMapper(count: 2)
+        let candles = [mc(0, endGlobal: 5), mc(1, endGlobal: 10)]
+        let markers = [TradeMarker(globalTick: 5,  price: 10, direction: .buy),
+                       TradeMarker(globalTick: 10, price: 10, direction: .sell)]
+        let placements = MarkersLayout.markerPlacements(
+            mapper: m, markers: markers, candles: candles[0..<2])
+        #expect(placements.map(\.direction) == [.buy, .sell])
+    }
+
+    @Test("R1 F8：startIndex≠0 slice 时 findCandleIndex 返回的是 slice 母数组 index 而非 0-based")
+    func nonZeroSliceStartIndex() {
+        // 母数组 6 根；slice 取 [2..<6]（startIndex=2）。
+        let arr = [mc(0, endGlobal: 1),  mc(1, endGlobal: 3),
+                   mc(2, endGlobal: 5),  mc(3, endGlobal: 10),
+                   mc(4, endGlobal: 15), mc(5, endGlobal: 20)]
+        let slice = arr[2..<6]  // startIndex=2, endIndex=6
+        // globalTick=7：母数组 endGlobal[2,5]=5 不满足，[3,10]=10 满足 → 母数组 index 3。
+        let m1 = TradeMarker(globalTick: 7, price: 10, direction: .buy)
+        #expect(MarkersLayout.findCandleIndex(for: m1, in: slice) == 3)
+        // globalTick=20：[5,20]=20 满足，首个 → 母数组 index 5。
+        let m2 = TradeMarker(globalTick: 20, price: 10, direction: .sell)
+        #expect(MarkersLayout.findCandleIndex(for: m2, in: slice) == 5)
+        // 同样验 markerPlacements.candleIndex 用 slice 母数组 index（不是 0-based）。
+        let placements = MarkersLayout.markerPlacements(
+            mapper: makeMapper(startIndex: 2, count: 4),
+            markers: [m1, m2], candles: slice)
+        #expect(placements.count == 2)
+        #expect(placements[0].candleIndex == 3)
+        #expect(placements[1].candleIndex == 5)
+    }
+}

@@ -102,3 +102,36 @@ struct CrosshairLabelTests {
         #expect(label == nil)
     }
 }
+
+@Suite("CrosshairLayout 哨兵契约")
+struct CrosshairSentinelTests {
+
+    @Test("frame 四角 point —— frame.contains 半开区间 [minX, maxX) × [minY, maxY)（R1 F6 4 角全覆盖）")
+    func boundary() {
+        let m = makeMapper()
+        // CGRect.contains 半开区间：(x>=minX && x<maxX) && (y>=minY && y<maxY)
+        #expect(CrosshairLayout.lines(at: CGPoint(x: 0,    y: 0),    mapper: m) != nil)  // 左上角 ∈
+        #expect(CrosshairLayout.lines(at: CGPoint(x: 1000, y: 0),    mapper: m) == nil)  // 右上角 ∉（maxX 开）
+        #expect(CrosshairLayout.lines(at: CGPoint(x: 0,    y: 600),  mapper: m) == nil)  // 左下角 ∉（maxY 开）
+        #expect(CrosshairLayout.lines(at: CGPoint(x: 1000, y: 600),  mapper: m) == nil)  // 右下角 ∉ ←R1 F6 补
+    }
+
+    @Test("priceLabel 与 yToPrice 完全一致（哨兵：禁止 priceLabel 内重算 ratio）")
+    func priceLabelMirrorsMapper() {
+        let m = makeMapper()
+        for y: CGFloat in [50, 150, 300, 450, 550] {
+            let p = m.yToPrice(y)
+            let label = CrosshairLayout.priceLabel(at: CGPoint(x: 100, y: y), mapper: m)
+            #expect(label.text == String(format: "%.2f", p))
+        }
+    }
+
+    @Test("timeLabel locale 中性（en_US_POSIX + UTC+8）：跨设备 locale 结果稳定")
+    func timeLabelLocaleNeutral() {
+        let m = makeMapper(count: 1)
+        let candles = [mc(0, datetime: 1735689600)]  // 2025-01-01 00:00:00 UTC = 08:00 北京
+        let label = CrosshairLayout.timeLabel(at: CGPoint(x: 0, y: 300),
+                                              mapper: m, candles: candles[0..<1])
+        #expect(label?.text == "2025-01-01 08:00")
+    }
+}
