@@ -67,20 +67,22 @@
 ### 2.2 关键 protocol 形状
 
 ```swift
-public protocol DrawingTool: Sendable {
+@MainActor
+public protocol DrawingTool {
     static var type: DrawingToolType { get }
     var requiredAnchors: ClosedRange<Int> { get }
-    @MainActor func render(ctx: CGContext, mapper: CoordinateMapper, anchors: [DrawingAnchor])
-    @MainActor func hitTest(point: CGPoint, mapper: CoordinateMapper, anchors: [DrawingAnchor]) -> Bool
+    func render(ctx: CGContext, mapper: CoordinateMapper, anchors: [DrawingAnchor])
+    func hitTest(point: CGPoint, mapper: CoordinateMapper, anchors: [DrawingAnchor]) -> Bool
 }
 
+@MainActor
 public protocol DrawingInputController: AnyObject {
-    @MainActor func tapToAnchor(at point: CGPoint, panel: PanelViewState, mapper: CoordinateMapper) -> DrawingAnchor
-    @MainActor func shouldCommit(current: [DrawingAnchor], tool: DrawingToolType) -> Bool
+    func tapToAnchor(at point: CGPoint, panel: PanelViewState, mapper: CoordinateMapper) -> DrawingAnchor
+    func shouldCommit(current: [DrawingAnchor], tool: DrawingToolType) -> Bool
 }
 ```
 
-字面对齐 modules L1318–1328，**只增加可见性修饰符 `public` + concurrency 修饰符**（`Sendable` / `@MainActor`，per M0.5 §并发契约）。
+字面对齐 modules L1318–1328，**只增加可见性修饰符 `public` + concurrency 修饰符** `@MainActor`（**protocol-level** 而非成员级，per Task 1 fix `a80c9df`：spec v3 字面 `: Sendable` + 成员级 `@MainActor` 组合在 Swift 6 strict concurrency 下触发 `ConformanceIsolation` 编译错误"conformance crosses into main actor-isolated code"，protocol-level `@MainActor` 替代后 `@MainActor` 隔离自带 `Sendable` 语义，编译通过 + 跨 actor 仍安全）。
 
 **`requiredAnchors` 归属**：留在 `DrawingTool` protocol 上（实例成员），由具体 tool 实现负责。**Manager 不调用此属性**（详 §四：commit 不查 anchor count 上下界）；anchor 数量边界约束由 `DrawingInputController.shouldCommit` 守，是 caller 责任。
 
@@ -331,7 +333,7 @@ drawDrawings(ctx: ctx, mapper: mapper,
 
 | # | 测试名 | 覆盖 |
 |---|---|---|
-| 17 | `protocolSignatureGuardsAgainstSpecDrift` | 静态编译期 + 反射约束：(a) `DrawingTool` protocol 必须 conform `Sendable`；(b) `DrawingToolManager` 必须 `@MainActor`（通过 `_ = MainActor.assumeIsolated` 闭包内访问验证）；(c) `requiredAnchors` 返回类型必须是 `ClosedRange<Int>`（编译期类型检查 fake.requiredAnchors as? ClosedRange<Int>） |
+| 17 | `protocolSignatureGuardsAgainstSpecDrift` | 静态编译期约束：(a) `DrawingTool` 必须 `@MainActor` protocol（`@MainActor private final class SignatureGuardTool: DrawingTool` 编译通过；如果 protocol 改为 nonisolated，@MainActor conformer 触发 ConformanceIsolation 错误，per Task 1 fix `a80c9df`）；(b) `DrawingToolManager` 必须 @MainActor（`@MainActor func` 内同步调用 `DrawingToolManager(enabledTools:)` 必须成功）；(c) `requiredAnchors` 返回类型必须是 `ClosedRange<Int>`（编译期赋值约束 `let req: ClosedRange<Int> = tool.requiredAnchors`） |
 
 **Spec literal grep 锚**（acceptance §A 手动 checklist）：
 - `grep -n 'static var type: DrawingToolType' DrawingTool.swift` → 1 hit
@@ -407,3 +409,4 @@ drawDrawings(ctx: ctx, mapper: mapper,
 | 2026-05-26 | v1 (draft) | 初稿；brainstorming 4 个 scope 决策对齐 user：纯框架 / Manager 全实现 / 不持久化不 Controller / 互斥+全7种 enabled |
 | 2026-05-26 | v2 (opus xhigh R1 修订) | R1 verdict NEEDS-ATTENTION 12 findings（3C/3H/4M/2L）全部处理：(a) **删 Manager → ChartReducer 接缝**（消除 F1/F3/F5/F8：commit revision sync / toggle 隐含 cancel 撞 reducer assertionFailure / 切工具与 reducer L168 矛盾 / dispatch 闭包丢 effect）—— Manager 改纯内存 state 容器，reducer ChartAction 流转责任全归 Wave 3 UI 层；(b) commit 不查 requiredAnchors（消除 F2 Swift 编译 mismatch + F6 commit 下界 user-facing trap）—— anchor 数量上下界由 caller shouldCommit 守；(c) §3.3 显式 `completedDrawings` source-of-truth + UI 层负责投影 renderState.drawings（消除 F4 两份真值源缺接缝 + F12 持久化责任归属）；(d) enabledTools 默认 `[]`（消除 F7 scope 边界冲突）；(e) 删 revision 接缝 3 tests（消除 F9 测试命名陷阱）；(f) 加 spec literal grep guard test + acceptance §A manual grep checklist（消除 F10 spec drift 无 guard）；(g) §2.1 行数估算 ~280 → ~250 prod / 总 prod ~250（消除 F11，估算更保守，删 dispatch 接缝后 Manager 从 ~180 → ~140）；(h) §一 §不在 scope 加 "ChartReducer ChartAction 流转 / renderState 投影实现 / 持久化责任" 三条退出；(i) §七 risks 表加 4 条新 reject pattern（Manager dispatch reducer / completedDrawings 内部投影 / commit 验 requiredAnchors / enabledTools 默认 7） |
 | 2026-05-26 | v3 (opus xhigh R2 修订) | R2 verdict APPROVE-with-minor-caveat，R1 12 findings 全部真收敛；R2 新 finding R2-F1 [Medium] drawDrawings 签名 spec amendment 覆盖面不全 + grep guard 漏一条 → v3 直接修：(1) §六 acceptance amendment 从 1 行改 3 行表格（加 modules L1224-1225 + L1346-1348 两条 drawDrawings 5 参签名同步责任）；(2) §5.4 grep 锚加 2 条覆盖 drawDrawings 签名 + tools 字典字面 |
+| 2026-05-27 | v4 (Task 1 实施期间 fix 回填) | Task 1 实施 (commit `a80c9df`) 发现 v3 §2.2 字面有 2 个 Swift 6 兼容性 bug：(1) `public protocol DrawingTool: Sendable { ... @MainActor func render(...) }` 触发 `ConformanceIsolation` 编译错误 "conformance crosses into main actor-isolated code"（成员级 `@MainActor` 与 protocol Sendable 在 strict concurrency 模式下冲突）；(2) `#if canImport(UIKit)` 包装 protocol + tests 让 macOS host `swift test` 排除整 suite，TDD 验证失效。v4 修订：§2.2 协议形状改 **protocol-level `@MainActor`**（替代成员级 + 删 `: Sendable`，因 `@MainActor` 隔离自带 Sendable 语义）；§5.4 #17 描述同步更新（守 protocol-level @MainActor 不守 Sendable existential）；`#if canImport(UIKit)` guard 在 protocol + tests 文件去除，仅 `KLineView+Drawing.swift`（UIKit-tied）保留。最终 17 tests 中 14 在 macOS host 跑（DrawDrawingsDispatchTests 3 个用 KLineView fixture 仅 Catalyst CI 跑） |
