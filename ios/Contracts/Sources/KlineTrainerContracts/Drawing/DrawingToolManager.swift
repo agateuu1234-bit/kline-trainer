@@ -12,10 +12,13 @@ import Observation
 @MainActor
 @Observable
 public final class DrawingToolManager {
-    public var activeTool: DrawingToolType?
-    public var enabledTools: Set<DrawingToolType>
-    public var pendingAnchors: [DrawingAnchor]
-    public var completedDrawings: [DrawingObject]
+    // public private(set): trust-boundary 强化 — 外部 readonly + 仅 5 方法可 mutate；
+    // 防 caller 直接 mutate pendingAnchors/completedDrawings 绕过 toggle/commit guards。
+    // var 保留（spec §2.3 字面 + @Observable 要求）。
+    public private(set) var activeTool: DrawingToolType?
+    public private(set) var enabledTools: Set<DrawingToolType>
+    public private(set) var pendingAnchors: [DrawingAnchor]
+    public private(set) var completedDrawings: [DrawingObject]
 
     public init(enabledTools: Set<DrawingToolType> = []) {
         self.activeTool = nil
