@@ -1222,7 +1222,7 @@ final class KLineView: UIView {
         drawVolume(ctx: ctx, mapper: volMapper, candles: renderState.visibleCandles)
         drawMACD(ctx: ctx, mapper: macdMapper, candles: renderState.visibleCandles)
         drawDrawings(ctx: ctx, mapper: mapper, drawings: renderState.drawings,
-                    period: renderState.panel.period)
+                    period: renderState.panel.period, tools: [:])
         drawMarkers(ctx: ctx, viewport: renderState.viewport, mapper: mapper,
                    markers: renderState.markers, candles: renderState.visibleCandles)
         drawCrosshair(ctx: ctx, at: renderState.crosshairPoint, viewport: renderState.viewport)
@@ -1344,7 +1344,8 @@ final class DrawingToolManager {
 
 extension KLineView {
     func drawDrawings(ctx: CGContext, mapper: CoordinateMapper,
-                     drawings: [DrawingObject], period: Period)
+                     drawings: [DrawingObject], period: Period,
+                     tools: [DrawingToolType: any DrawingTool])
 }
 ```
 
@@ -2146,7 +2147,7 @@ struct HistoryActionSheet: View {
 - [ ] C3 Candles + MA66 + BOLL（实现）
 - [ ] C4 Volume + MACD（实现，用 IndicatorMapper）
 - [ ] C5 Crosshair + Markers（二分谓词精确）
-- [ ] C6 DrawingTools + DrawingInputController（Phase 2.5 水平线先行）
+- [ ] C6 DrawingTools + DrawingInputController（infrastructure + tool 框架；Phase 2.5 水平线 MVP 归 Wave 3，per outline v20 顺位 12）
 
 **业务逻辑（1-2 人）**
 - [ ] E1 TickEngine
