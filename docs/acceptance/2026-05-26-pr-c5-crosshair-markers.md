@@ -21,7 +21,7 @@
 
 | # | 动作 | 期望 | 通过判据 |
 |---|------|------|----------|
-| 3.1 | 跑：`cd ios/Contracts && swift test 2>&1 \| grep -E "Test run with [0-9]+ tests in [0-9]+ suites passed"` | 看到一行 "Test run with 486 tests in 87 suites passed after X seconds."（Swift Testing 输出格式） | 该行出现 ≥ 1 次（数量轻微浮动可接受） |
+| 3.1 | 跑：`cd ios/Contracts && swift test 2>&1 \| grep -E "Test run with [0-9]+ tests in [0-9]+ suites passed"` | 看到一行 "Test run with 486 tests in 96 suites passed after X seconds."（Swift Testing 输出格式） | 该行出现 ≥ 1 次（数量轻微浮动可接受） |
 | 3.2 | 数 C5 新 suite：`cd ios/Contracts && swift test 2>&1 \| grep -cE "Suite \"(CrosshairLinesTests\|CrosshairLabelTests\|FindCandleIndexTests\|MarkerPlacementsTests\|CrosshairSentinelTests\|MarkersSentinelTests)\" passed"` | 6（6 个 suite 各 1 行 Swift Testing 格式 ✔ Suite "Name" passed） | 数字 = 6 |
 
 ## 4. Mac Catalyst 编译
