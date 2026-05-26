@@ -104,3 +104,50 @@ struct SubChartLayoutVolumeTests {
         #expect(bars[2].rect.midX == 20)
     }
 }
+
+@Suite("SubChartLayout.macdLines")
+struct SubChartLayoutMacdLinesTests {
+
+    @Test("DIF 与 DEA 各自独立折线，warmup nil 跳过")
+    func difDeaDistinctAndWarmup() {
+        let arr = [mc(0),
+                   mc(1, macdDiff: 20, macdDea: 10),
+                   mc(2, macdDiff: -10, macdDea: 5),
+                   mc(3, macdDiff: 30, macdDea: nil)]
+        let m = makeMacdMapper(count: 4)
+        let lines = SubChartLayout.macdLines(for: arr[0..<4], mapper: m)
+        #expect(lines.dif.count == 1)
+        #expect(lines.dif[0] == [CGPoint(x: 10, y: 60), CGPoint(x: 20, y: 120), CGPoint(x: 30, y: 40)])
+        #expect(lines.dea.count == 1)
+        #expect(lines.dea[0] == [CGPoint(x: 10, y: 80), CGPoint(x: 20, y: 90)])
+    }
+
+    @Test("内部 nil 断段（D9a 防御）")
+    func internalGapSplits() {
+        let arr = [mc(0, macdDiff: 10, macdDea: 5),
+                   mc(1, macdDiff: 20, macdDea: 10),
+                   mc(2),
+                   mc(3, macdDiff: 30, macdDea: nil)]
+        let lines = SubChartLayout.macdLines(for: arr[0..<4], mapper: makeMacdMapper(count: 4))
+        #expect(lines.dif.count == 2)
+        #expect(lines.dif[0].count == 2)
+        #expect(lines.dif[1].count == 1)
+    }
+
+    @Test("全 nil → 两轨皆空")
+    func allNil() {
+        let arr = [mc(0), mc(1)]
+        let lines = SubChartLayout.macdLines(for: arr[0..<2], mapper: makeMacdMapper(count: 2))
+        #expect(lines.dif.isEmpty && lines.dea.isEmpty)
+    }
+
+    @Test("D6 杀手：slice arr[2..<5] + startIndex=2 → 首点 x==0")
+    func indexAlignment() {
+        let arr = (0..<5).map { mc($0, macdDiff: 0, macdDea: 0) }
+        let m = makeMacdMapper(startIndex: 2, count: 3)
+        let lines = SubChartLayout.macdLines(for: arr[2..<5], mapper: m)
+        #expect(lines.dif.count == 1)
+        #expect(lines.dif[0].map(\.x) == [0, 10, 20])
+        #expect(lines.dif[0].allSatisfy { $0.y == 100 })
+    }
+}

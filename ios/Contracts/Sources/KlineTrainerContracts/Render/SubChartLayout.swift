@@ -49,4 +49,31 @@ enum SubChartLayout {
         }
         return bars
     }
+
+    /// 按 value 提取折线点，遇 nil 断线分段（D9a，IndicatorMapper 重载）。
+    /// 与 MainChartLayout.polylineSegments 算法字面同款，仅 mapper 类型不同；不抽协议保持简单（5 行不值得引入泛型）。
+    private static func polylineSegments(for candles: ArraySlice<KLineCandle>,
+                                         mapper: IndicatorMapper,
+                                         value: (KLineCandle) -> Double?) -> [[CGPoint]] {
+        var segments: [[CGPoint]] = []
+        var current: [CGPoint] = []
+        for index in candles.indices {
+            if let v = value(candles[index]) {
+                current.append(CGPoint(x: mapper.indexToX(index), y: mapper.valueToY(v)))
+            } else if !current.isEmpty {
+                segments.append(current)
+                current = []
+            }
+        }
+        if !current.isEmpty { segments.append(current) }
+        return segments
+    }
+
+    /// MACD DIF + DEA 折线（D1：读预计算 candle.macdDiff/macdDea，不重算；D9a：各轨独立 nil 断线）。
+    static func macdLines(for candles: ArraySlice<KLineCandle>,
+                          mapper: IndicatorMapper) -> MacdLines {
+        MacdLines(
+            dif: polylineSegments(for: candles, mapper: mapper, value: { $0.macdDiff }),
+            dea: polylineSegments(for: candles, mapper: mapper, value: { $0.macdDea }))
+    }
 }
