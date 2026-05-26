@@ -154,9 +154,16 @@ struct MainChartLayoutBollTests {
 
     @Test("D3：dashPattern 段长 = 4/displayScale（虚线参数 host 可测，H1 修订）")
     func dashPatternValue() {
+        // 整除标度（@1x / @2x）走精确相等
         #expect(MainChartLayout.dashPattern(displayScale: 2) == [2, 2])
         #expect(MainChartLayout.dashPattern(displayScale: 1) == [4, 4])
-        #expect(MainChartLayout.dashPattern(displayScale: 3) == [4.0 / 3.0, 4.0 / 3.0])
+        // @3x：4/3 非整除，跨工具链字面 4.0/3.0 vs CGFloat(4)/CGFloat(3) 可能有 ULP 漂移
+        // （CI macos-15 实测失败，本地 toolchain 放过 → 改容差对比比率正确性，production 不变）
+        let p3x = MainChartLayout.dashPattern(displayScale: 3)
+        let expected: CGFloat = 4 / CGFloat(3)
+        #expect(p3x.count == 2)
+        #expect(abs(p3x[0] - expected) < 1e-12)
+        #expect(abs(p3x[1] - expected) < 1e-12)
     }
 }
 
