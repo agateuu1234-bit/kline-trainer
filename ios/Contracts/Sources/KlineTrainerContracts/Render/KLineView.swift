@@ -53,7 +53,7 @@ public final class KLineView: UIView {
         drawVolume(ctx: ctx, mapper: volMapper, candles: renderState.visibleCandles)
         drawMACD(ctx: ctx, mapper: macdMapper, candles: renderState.visibleCandles)
         drawDrawings(ctx: ctx, mapper: mapper, drawings: renderState.drawings,
-                     period: renderState.panel.period)
+                     period: renderState.panel.period, tools: [:])
         drawMarkers(ctx: ctx, viewport: renderState.viewport, mapper: mapper,
                     markers: renderState.markers, candles: renderState.visibleCandles)
         drawCrosshair(ctx: ctx, at: renderState.crosshairPoint, viewport: renderState.viewport)
