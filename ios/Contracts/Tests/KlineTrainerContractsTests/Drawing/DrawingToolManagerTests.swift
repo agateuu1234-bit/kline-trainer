@@ -124,4 +124,26 @@ struct DrawingToolManagerTests {
         let m2 = DrawingToolManager(enabledTools: all)
         #expect(m2.enabledTools.count == 7)
     }
+
+    @Test("§5.1 #11 commit with isExtended=true carries metadata (codex R2 H1)")
+    func commitWithIsExtendedCarriesMetadata() {
+        let m = DrawingToolManager(enabledTools: [.horizontal])
+        m.toggle(.horizontal)
+        m.addAnchor(makeAnchor())
+        m.commit(isExtended: true, panelPosition: 0)
+        #expect(m.completedDrawings.count == 1)
+        #expect(m.completedDrawings[0].isExtended == true)
+        #expect(m.completedDrawings[0].panelPosition == 0)
+    }
+
+    @Test("§5.1 #12 commit with panelPosition=1 (lower panel) carries metadata (codex R2 H1)")
+    func commitWithLowerPanelCarriesMetadata() {
+        let m = DrawingToolManager(enabledTools: [.horizontal])
+        m.toggle(.horizontal)
+        m.addAnchor(makeAnchor())
+        m.commit(isExtended: false, panelPosition: 1)
+        #expect(m.completedDrawings.count == 1)
+        #expect(m.completedDrawings[0].panelPosition == 1)
+        #expect(m.completedDrawings[0].isExtended == false)
+    }
 }

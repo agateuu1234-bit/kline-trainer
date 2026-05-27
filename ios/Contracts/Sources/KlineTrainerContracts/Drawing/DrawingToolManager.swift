@@ -53,7 +53,10 @@ public final class DrawingToolManager {
     /// Spec §3.1 commit: move pending → completedDrawings + reset.
     /// - invariant: activeTool != nil && !pendingAnchors.isEmpty
     /// - anchor 数量上下界由 caller (DrawingInputController.shouldCommit) gate, NOT manager.
-    public func commit() {
+    /// - isExtended / panelPosition 默认 false / 0（向后兼容 spec §3.1 字面 `commit()` 无参调用）；
+    ///   caller (Wave 3 UI 层) 通过 panel + tool 类型决定真值，传入此方法持久化到 DrawingObject。
+    ///   字段对齐 `DrawingObject.isExtended` + `panelPosition` (0=上栏, 1=下栏；schema 持久化) per codex R2 H1。
+    public func commit(isExtended: Bool = false, panelPosition: Int = 0) {
         // invariant: activeTool != nil
         precondition(activeTool != nil, "commit requires activeTool != nil")
         // invariant: !pendingAnchors.isEmpty
@@ -61,8 +64,8 @@ public final class DrawingToolManager {
         let drawing = DrawingObject(
             toolType: activeTool!,
             anchors: pendingAnchors,
-            isExtended: false,
-            panelPosition: 0
+            isExtended: isExtended,
+            panelPosition: panelPosition
         )
         completedDrawings.append(drawing)
         activeTool = nil
