@@ -39,7 +39,7 @@
 | E.3 | `grep -nc 'init(record: TrainingRecord, onConfirm: @escaping () -> Void)' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementView.swift` | 1 hit (D12：modules §U3 字面 `() -> Void` + Swift 编译强制 `@escaping`) | 数字 = 1 |
 | E.4 | `grep -nc '本局结算' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementView.swift` | 1 hit (spec L992) | 数字 = 1 |
 | E.5 | `grep -nc '"确认"' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementView.swift` | 1 hit (spec L1003) | 数字 = 1 |
-| E.6 | `grep -nc '"¥ ' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementContent.swift` | 1 hit (D3 ¥+空格字符串前缀) | 数字 ≥ 1 |
+| E.6 | `grep -nc '"¥ ' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementContent.swift` | ≥ 1 hit (D3 ¥+空格字符串前缀；实测 2 = 1 顶注释字面 + 1 prod return 字面) | 数字 ≥ 1 |
 | E.7 | `grep -nc 'en_US_POSIX' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementContent.swift` | 1 hit (D3 Locale 中性) | 数字 = 1 |
 | E.8 | `grep -nc '"%+.2f"' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementContent.swift` | 1 hit (D5 显式带符号) | 数字 = 1 |
 | E.9 | `grep -nc '"%02d"' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementContent.swift` | 1 hit (D4 月份零填充) | 数字 = 1 |

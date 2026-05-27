@@ -55,8 +55,8 @@ public struct SettlementContent: Equatable, Sendable {
         fmt.decimalSeparator = "."
         fmt.minimumFractionDigits = 2
         fmt.maximumFractionDigits = 2
-        // 兜底：若极端情况（如 .nan / .infinity）formatter 返回 nil，回落到普通 String 表达。
-        // 业务上 TrainingRecord.totalCapital 不允许 NaN（M0.3 已冻），但渲染层保留兜底。
+        // NumberFormatter(decimal) 对 NaN/Inf 实测返回 "NaN"/"+∞"/"-∞" 非 nil → ?? 兜底实际不可达；
+        // 留作 Foundation 行为变化的纵深防御。业务上 TrainingRecord.totalCapital 不允许 NaN（M0.3 已冻）。
         let body = fmt.string(from: NSNumber(value: value)) ?? String(format: "%.2f", value)
         return "¥ \(body)"
     }
