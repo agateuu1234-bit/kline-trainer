@@ -70,7 +70,7 @@
 | H.1 | `grep -nE '#if DEBUG' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementView.swift` | 1 hit | 数字 = 1 |
 | H.2 | `grep -nc '#endif' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementView.swift` | ≥ 1 hit (DEBUG 配对) | 数字 ≥ 1 |
 | H.3 | `grep -nc 'fileprivate extension TrainingRecord' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementView.swift` | 1 hit (D9 + R1-H4 fileprivate) | 数字 = 1 |
-| H.4 | `grep -ncE '^public.* extension TrainingRecord\|^extension TrainingRecord.*public' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementView.swift` | 0 hit (R1-H4 拒绝 public 跨模块污染；锚行首与 script G8 对齐) | 数字 = 0 |
+| H.4 | `grep -ncE '^public.* extension TrainingRecord|^extension TrainingRecord.*public' ios/Contracts/Sources/KlineTrainerContracts/UI/SettlementView.swift` | 0 hit (R1-H4 拒绝 public 跨模块污染；锚行首与 script G8 对齐) | 数字 = 0 |
 | H.5 | `grep -nc 'extension TrainingRecord\|TrainingRecord.preview' ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift` | 0 hit (本 PR 不动 PreviewFakes — D9) | 数字 = 0 |
 
 ## §I onConfirm 语义不分支（D11）
