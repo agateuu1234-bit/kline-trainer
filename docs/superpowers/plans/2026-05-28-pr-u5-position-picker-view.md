@@ -505,8 +505,8 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 |---|---|---|---|
 | F.1 | `grep -nE 'import (GRDB\|ZIPFoundation)' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 无命中 | 输出为空 |
 | F.2 | `grep -nE 'TradeCalculator\|TickEngine\|PositionManager\|TrainingFlowController\|APIClient' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 无命中 (D14) | 输出为空 |
-| F.3 | `grep -nc 'import SwiftUI' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 0 hit (Content 平台无关) | 数字 = 0 |
-| F.4 | `grep -nc 'import SwiftUI' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (View 才 import) | 数字 = 1 |
+| F.3 | `grep -ncE '^import SwiftUI$' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 0 hit (Content 平台无关；锚 `^import SwiftUI$` 避免命中注释里"不 import SwiftUI"子串，R5 修) | 数字 = 0 |
+| F.4 | `grep -ncE '^import SwiftUI$' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (View 才真 import；锚行首 R5 修) | 数字 = 1 |
 
 ## §G 无 RGB 硬编码 / 无 D16 反例（盈亏色未实现）
 
@@ -696,6 +696,19 @@ R1 verdict **APPROVE**（0C/0H/4M/4L）— reviewer 明示"absorb M2 + M4 是 me
 | L4 `#Preview` macro 依赖 iOS17/macOS14 未在 D9 显标 | Low | **接受 residual**：Package.swift 已锚定 platforms；不退化到 PreviewProvider 已是默认假设 | residual |
 
 测试数：10 → 10（不增不减；M2 修是新增 acceptance grep 不增测试）。基线推算 519+10 = 529 / 100+1 = 101，但 acceptance / script 走宽松正则锚不硬锁。
+
+---
+
+## R5 → v6 修订（whole-branch self-review 抓 doc-only false-fail）
+
+`superpowers:requesting-code-review` 整体 branch self-review 报 With-fixes — 1 Minor doc-only：
+
+| Finding | 严重度 | 修订方式 |
+|---|---|---|
+| R5-Minor acceptance §F.3 human grep `'import SwiftUI'` 命中 Content.swift 注释里"不 import SwiftUI"子串 → human 跑 F.3 看到 1 ≠ 期望 0 误判 FAIL | Minor（doc-only，机检 G2 用 `^import...$` 锚已正确，不受影响） | §F.3 + §F.4 改 `grep -ncE '^import SwiftUI$'` 锚行首（与 script G2 idiom 一致；同 R3-H1 注释子串 bug-class）；acceptance doc + plan 同步 |
+| R5-Minor2 U3 (PR #70) `plan_u3_settlement_view.sh` 同有 `! grep` 死闸门 | Minor（已 merged，out of scope） | **接受 residual**：surgical scope 不回溯改 U3；教训记 memory 供后续 acceptance script 复用正确 idiom |
+
+R5-Minor 只影响 human-facing doc（机检脚本 G2 用 `^import (SwiftUI\|UIKit\|CoreGraphics)$` 行首锚本就正确，J.1 跑脚本仍绿）。修是 1 行 doc 锚一致化。R5 不需新轮 review。
 
 ---
 

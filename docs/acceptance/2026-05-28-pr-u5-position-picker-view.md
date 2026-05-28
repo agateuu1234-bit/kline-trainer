@@ -54,8 +54,8 @@
 |---|---|---|---|
 | F.1 | `grep -nE 'import (GRDB\|ZIPFoundation)' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 无命中 | 输出为空 |
 | F.2 | `grep -nE 'TradeCalculator\|TickEngine\|PositionManager\|TrainingFlowController\|APIClient' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 无命中 (D14) | 输出为空 |
-| F.3 | `grep -nc 'import SwiftUI' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 0 hit (Content 平台无关) | 数字 = 0 |
-| F.4 | `grep -nc 'import SwiftUI' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (View 才 import) | 数字 = 1 |
+| F.3 | `grep -ncE '^import SwiftUI$' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 0 hit (Content 平台无关；锚 `^import SwiftUI$` 避免命中注释里"不 import SwiftUI"子串，R5 修) | 数字 = 0 |
+| F.4 | `grep -ncE '^import SwiftUI$' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (View 才真 import；锚行首 R5 修) | 数字 = 1 |
 
 ## §G 无 RGB 硬编码 / 无 D16 反例（盈亏色未实现）
 
