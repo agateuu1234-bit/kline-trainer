@@ -126,7 +126,7 @@ import Foundation
 @Suite("HistoryActionContent host tests")
 struct HistoryActionContentTests {
 
-    // MARK: - 共享 fixture helper（测试内 internal，不污染 prod）
+    // MARK: - 共享 fixture helper（测试内 private，不污染 prod）
 
     private func makeRecord(stockName: String, code: String) -> TrainingRecord {
         TrainingRecord(
@@ -743,6 +743,26 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 | R1-F4 §J.1 tail -2 展示细节 | Low | **确认性记录**：与 U5 同款，无需改 |
 
 reviewer 对 D4（不复用 U3 formatStock）/ D6（加取消按钮）独立判断均为「合理」。R1-F2 是 reviewer 推荐的一行 inline 修（grep 正则一致化，非语义改变）→ 不需新轮 review，plan-stage 收敛于 R1 APPROVE。
+
+---
+
+## subagent-driven + branch-diff 对抗性 review 收敛记录
+
+**subagent-driven-development**（3 Task，每 Task fresh sonnet implementer + sonnet spec reviewer + sonnet code-quality reviewer 双道）：
+- Task 1 `HistoryActionContent` + 10 host 测试 → spec ✅ / quality APPROVED（implementer 抓出 plan 测试 helper label `stockCode:`/`code:` 不一致并修 → 已 sync 回 plan）
+- Task 2 `HistoryActionSheet` SwiftUI shell → spec ✅ / quality APPROVED（spec reviewer 发现 prod D8 注释字面含 `borderedProminent` → 修 G6/§G.3 锚 `buttonStyle(.borderedProminent)` 避免注释碰撞）
+- Task 3 acceptance doc + 机检脚本 → spec ✅（重跑脚本 exit=0）/ quality APPROVED（1 Important = G8 跨文件 grep 文件缺失会 abort，属 U5 既有 idiom 可接受 residual）
+
+**verification-before-completion**（主线第一手证据）：acceptance script exit=0 + `Test run with 539 tests in 102 suites passed` + Mac Catalyst `TEST BUILD SUCCEEDED` + 工作树干净 6 commits。
+
+**requesting-code-review 整体 self-review**：Ready-to-merge，0 C/0 H，4 Low 全 residual。
+
+**Branch-diff opus 4.7 xhigh 对抗性 review R1 VERDICT: APPROVE**（6 维度全 PASS）。reviewer 独立实证：(1) **真跑 Catalyst DEBUG 编译坐实 D11 双 fileprivate 同名扩展不冲突**（本 PR 最高风险点）；(2) 重跑脚本 exit=0 复现 539/102 + 10/1 + Catalyst SUCCEEDED；(3) **实测三处 grep 碰撞风险全排除**（G6 borderedProminent / G7 ReviewFlow|ReplayFlow vs 注释 "Review/Replay" / G9 ASCII `dismiss()` vs 注释全角 `dismiss（`）；(4) preview fixture 15 字段与真 init 逐字段一致。
+- R1-F1 (Low) plan 内嵌 test 注释 "测试内 internal" vs 实际 "private" → **已吸收**（本 commit 改 plan 注释对齐）
+- R1-F2 (Low) `contentIsSendable` 轻度 tautological → **接受 residual**（本仓 U3/U5 既定 conformance 回归守护 idiom）
+- D3 残留（同股票多局单标题不可区分）→ **接受 residual**（plan 已记录；iOS sheet 视觉锚定兜底；v2 可吸收起始年月）
+
+branch-diff 收敛于 R1 APPROVE。无 Critical/High/Medium finding。
 
 ---
 
