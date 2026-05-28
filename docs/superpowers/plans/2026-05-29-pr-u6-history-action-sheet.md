@@ -531,7 +531,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 |---|---|---|---|
 | G.1 | `grep -nE 'Color\(red:\|UIColor\(' ios/Contracts/Sources/KlineTrainerContracts/UI/HistoryActionSheet.swift` | 无命中 | 输出为空 |
 | G.2 | `grep -nE '\.foregroundStyle\(\.red\|\.foregroundStyle\(\.green' ios/Contracts/Sources/KlineTrainerContracts/UI/HistoryActionSheet.swift` | 无命中 (D8：不分盈亏色) | 输出为空 |
-| G.3 | `grep -nc 'borderedProminent' ios/Contracts/Sources/KlineTrainerContracts/UI/HistoryActionSheet.swift` | 0 hit (D8：三按钮全 .bordered，不用 borderedProminent 暗示主次) | 数字 = 0 |
+| G.3 | `grep -ncF 'buttonStyle(.borderedProminent)' ios/Contracts/Sources/KlineTrainerContracts/UI/HistoryActionSheet.swift` | 0 hit (D8：三按钮全 .bordered；锚真实用法 `buttonStyle(.borderedProminent)` 避免命中 header 注释里的 `.borderedProminent` 字样) | 数字 = 0 |
 
 ## §H DEBUG-only preview 隔离（D11 — fileprivate 防跨模块污染）
 
@@ -613,8 +613,9 @@ fi
 if grep -qE 'Color\(red:|UIColor\(' "$SHEET"; then
   echo "G6 FAIL: 不应 RGB 硬编码 Color(red:/UIColor("; exit 1
 fi
-if grep -q 'borderedProminent' "$SHEET"; then
-  echo "G6 FAIL: D8 三按钮全 .bordered，不用 borderedProminent 暗示主次"; exit 1
+# 锚真实用法 buttonStyle(.borderedProminent)（-F 定串），避免命中 header 注释里的 .borderedProminent 字样
+if grep -qF 'buttonStyle(.borderedProminent)' "$SHEET"; then
+  echo "G6 FAIL: D8 三按钮全 .bordered，不用 buttonStyle(.borderedProminent) 暗示主次"; exit 1
 fi
 
 echo "== G7: D12 不引业务运行时 / Content 平台无关 =="
@@ -722,7 +723,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 **3. 类型一致性**：`HistoryActionContent` (Task 1) → `HistoryActionSheet` (Task 2) 单向使用，无类型重命名；`HistoryActionContent.init(record:)` 在 Task 1 定义，在 Task 2 调用 → 签名一致；`HistoryActionContent.title` 在 Task 1 定义，在 Task 2 body `Text(content.title)` 使用 → 一致；`HistoryActionContent.formatStock(name:code:)` 在 Task 1 定义，Task 1 测试 + Content.init 调用 → 一致；`TrainingRecord` / `FeeSnapshot` 已在 AppState.swift / Models.swift 冻结，不重定义（preview fixture 用其 init 字面字段顺序）。
 
-**4. Acceptance/script 一致性**：acceptance doc §B.2 + script G10 用同款宽松正则 `Test run with [0-9]+ tests in [0-9]+ suites passed` → 一致；§D.1 + script G11 用同款 → 一致；§C.1 + script G12 用 "TEST BUILD SUCCEEDED" → 一致；§E.4/E.5/E.6 + script G3 关于三 callback `@escaping` 签名锚 → 一致；§E.7-E.13 + script G4/G5 关于 body literal `Text("…")` + `Button(action: on…)` callback 锚 → 一致；§E.14 + script G5 关于 `Self.formatStock(...)` 标题映射锚 → 一致；§H.3/H.4 + script G8 关于 `fileprivate extension TrainingRecord` + `static func preview() -> TrainingRecord` 锚 + 反向 `^public.*extension TrainingRecord` 禁 → 一致；§G.3 + script G6 关于 `borderedProminent` 反向禁（D8）→ 一致。
+**4. Acceptance/script 一致性**：acceptance doc §B.2 + script G10 用同款宽松正则 `Test run with [0-9]+ tests in [0-9]+ suites passed` → 一致；§D.1 + script G11 用同款 → 一致；§C.1 + script G12 用 "TEST BUILD SUCCEEDED" → 一致；§E.4/E.5/E.6 + script G3 关于三 callback `@escaping` 签名锚 → 一致；§E.7-E.13 + script G4/G5 关于 body literal `Text("…")` + `Button(action: on…)` callback 锚 → 一致；§E.14 + script G5 关于 `Self.formatStock(...)` 标题映射锚 → 一致；§H.3/H.4 + script G8 关于 `fileprivate extension TrainingRecord` + `static func preview() -> TrainingRecord` 锚 + 反向 `^public.*extension TrainingRecord` 禁 → 一致；§G.3 + script G6 关于 `buttonStyle(.borderedProminent)` 反向禁（D8；锚真实用法避免命中 header 注释里 `.borderedProminent` 字样）→ 一致。
 
 **5. 负向断言 idiom（per memory `feedback_acceptance_grep_anchoring`）**：script 所有反向断言用 `if grep -q ...; then echo "GN FAIL"; exit 1; fi`（G2/G6×3/G7×2/G8×2/G9），**不用 `! grep`**（POSIX：`!` 起头 pipeline 被 `set -e` 豁免 = 死闸门，命中禁止 pattern 也永不 abort）。human-facing grep 计数用行首 / body-literal 锚（`^import SwiftUI$` / `Text("…")` / `^#if DEBUG$` / `^public.*extension`），避免命中 prod header 注释里复述的同字符串（U3/U5 R3/R5/R6 三次复发同 bug-class，本 plan 预先规避）。
 
