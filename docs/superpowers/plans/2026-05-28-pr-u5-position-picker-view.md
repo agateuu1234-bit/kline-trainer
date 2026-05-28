@@ -490,8 +490,8 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 | E.3 | `grep -nc 'init(enabledTiers: Set<PositionTier>,' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit | 数字 = 1 |
 | E.4 | `grep -nc 'onPick: @escaping (PositionTier) -> Void' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (D11) | 数字 = 1 |
 | E.5 | `grep -nc 'onCancel: @escaping () -> Void' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (D6 + D11) | 数字 = 1 |
-| E.6 | `grep -nc '"仓位选择"' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (D7 spec L946) | 数字 = 1 |
-| E.7 | `grep -nc '"取消"' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (D6 取消按钮 label) | 数字 = 1 |
+| E.6 | `grep -nc 'Text("仓位选择")' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (D7 spec L946 — anchor SwiftUI body literal，非 header 注释里的同字符串；R3 修) | 数字 = 1 |
+| E.7 | `grep -nc 'Text("取消")' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (D6 取消按钮 label — anchor SwiftUI body literal；R3 修) | 数字 = 1 |
 | E.7b | `grep -nc 'Button(action: onCancel)' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (R1-M2 修：D6 取消按钮真接 onCancel callback，非仅 label) | 数字 = 1 |
 | E.8 | `grep -nc 'PositionTier.allCases.map' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 1 hit (D4 迭代 allCases 非 Set) | 数字 = 1 |
 | E.9 | `grep -nc 'tier.rawValue' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 1 hit (D3 label = rawValue) | 数字 = 1 |
@@ -568,9 +568,10 @@ grep -q "onPick: @escaping (PositionTier) -> Void" \
 grep -q "onCancel: @escaping () -> Void" \
   ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
 
-echo "== G4: spec §6.2.4 字面字串：仓位选择 / 取消（D6/D7）+ 取消按钮真接 onCancel（R1-M2 修）=="
-grep -q '"仓位选择"' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
-grep -q '"取消"' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
+echo "== G4: spec §6.2.4 字面字串：仓位选择 / 取消（D6/D7）+ 取消按钮真接 onCancel（R1-M2 + R3 修）=="
+# R3 修：grep `Text("…")` body literal，避免命中 header 注释中相同字符串导致计数 ≠ 1
+grep -q 'Text("仓位选择")' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
+grep -q 'Text("取消")' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
 # R1-M2：取消按钮 label 必须真接 onCancel callback，不只是文本字面
 grep -q 'Button(action: onCancel)' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
 
@@ -677,6 +678,18 @@ R1 verdict **APPROVE**（0C/0H/4M/4L）— reviewer 明示"absorb M2 + M4 是 me
 | L4 `#Preview` macro 依赖 iOS17/macOS14 未在 D9 显标 | Low | **接受 residual**：Package.swift 已锚定 platforms；不退化到 PreviewProvider 已是默认假设 | residual |
 
 测试数：10 → 10（不增不减；M2 修是新增 acceptance grep 不增测试）。基线推算 519+10 = 529 / 100+1 = 101，但 acceptance / script 走宽松正则锚不硬锁。
+
+---
+
+## R3 → v4 修订（Task 2 implementer 抓 plan defect）
+
+Task 2 implementer 报 DONE_WITH_CONCERNS — 抓出 plan §E.6/§E.7 + script G4 grep `'"仓位选择"'` / `'"取消"'` 会命中 prod 文件 header 注释（L309-310）+ body Text(...) 共 2 处 → `数字 = 1` 验收必失败：
+
+| Finding | 修订 |
+|---|---|
+| R3-H1 grep `'"仓位选择"'` / `'"取消"'` 命中 header 注释 + body Text 共 2 处，验收硬锁 `= 1` 必失 | 改成 `Text("仓位选择")` / `Text("取消")` 精确 body literal anchor（implementer Option 2 recommended）；§E.6/§E.7 + script G4 同步 |
+
+R3-H1 是 plan 自身的 grep precision defect，不是 prod 代码缺陷（prod 代码逐字 copy plan 同样源）。R3-H1 在 Task 2 implementer 阶段抓出，Task 3 实施时才会真触发——抓到点位仍属"实施前防御"，纳入 v4 一次性 inline 修。R3 不需新轮 review（修是字面更精准的 grep 而非语义改变）。
 
 ---
 
