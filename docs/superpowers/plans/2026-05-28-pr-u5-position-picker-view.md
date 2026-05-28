@@ -495,7 +495,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 | E.7b | `grep -nc 'Button(action: onCancel)' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (R1-M2 修：D6 取消按钮真接 onCancel callback，非仅 label) | 数字 = 1 |
 | E.8 | `grep -nc 'PositionTier.allCases.map' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 1 hit (D4 迭代 allCases 非 Set) | 数字 = 1 |
 | E.9 | `grep -nc 'tier.rawValue' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 1 hit (D3 label = rawValue) | 数字 = 1 |
-| E.10 | `grep -nc 'enabledTiers.contains(tier)' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 1 hit (D5 enabled 判定) | 数字 = 1 |
+| E.10 | `grep -nc 'enabled: enabledTiers.contains(tier)' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 1 hit (D5 enabled 判定 — 锚 `enabled:` 前缀避免命中 D5 注释同子串，R6 修) | 数字 = 1 |
 | E.11 | `grep -nc 'HStack' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | ≥ 1 hit (D2 横向布局) | 数字 ≥ 1 |
 | E.12 | `grep -nc '.disabled(!item.enabled)' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (D5/D8 disabled 视觉) | 数字 = 1 |
 
@@ -519,7 +519,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 | 编号 | 命令 | 预期看到 | 通过条件 |
 |---|---|---|---|
-| H.1 | `grep -nE '#if DEBUG' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit | 数字 = 1 |
+| H.1 | `grep -ncE '^#if DEBUG$' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (锚 `^#if DEBUG$` 行首避免命中注释里同子串，R6 修) | 数字 = 1 |
 | H.2 | `grep -nc '#endif' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | ≥ 1 hit (DEBUG 配对) | 数字 ≥ 1 |
 | H.3 | `grep -nc 'fileprivate extension PositionTier' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (D9 v2 mechanism = `fileprivate extension PositionTier`，与 U3 严格同款) | 数字 = 1 |
 | H.3b | `grep -nc 'static func previewEnabledTiers() -> Set<PositionTier>' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (D9 v2 fixture 方法名) | 数字 = 1 |
@@ -696,6 +696,21 @@ R1 verdict **APPROVE**（0C/0H/4M/4L）— reviewer 明示"absorb M2 + M4 是 me
 | L4 `#Preview` macro 依赖 iOS17/macOS14 未在 D9 显标 | Low | **接受 residual**：Package.swift 已锚定 platforms；不退化到 PreviewProvider 已是默认假设 | residual |
 
 测试数：10 → 10（不增不减；M2 修是新增 acceptance grep 不增测试）。基线推算 519+10 = 529 / 100+1 = 101，但 acceptance / script 走宽松正则锚不硬锁。
+
+---
+
+## R6 → v7 修订（branch-diff opus xhigh 抓同类 doc false-fail ×2）
+
+branch-diff opus 4.7 xhigh 终审报 **APPROVE**（0C/0H/2M doc-only）— 又抓出 2 处 R5 同类注释子串碰撞：
+
+| Finding | 严重度 | 修订方式 |
+|---|---|---|
+| R6-M1 §H.1 human grep `'#if DEBUG'` 命中 View.swift 注释 L13"内联本文件 #if DEBUG 区" + 真指令 L71 = 2 ≠ 期望 1 | Minor（doc-only，机检 G8 用 `^#if DEBUG` 行首锚已正确） | §H.1 改 `grep -ncE '^#if DEBUG$'` 锚行首；acceptance + plan 同步 |
+| R6-M2 §E.10 human grep `'enabledTiers.contains(tier)'` 命中 Content.swift D5 注释 L10 + 代码 L34 = 2 ≠ 期望 1 | Minor（doc-only，机检 G5 用 `grep -q` 布尔不计数已正确） | §E.10 改 `grep -nc 'enabled: enabledTiers.contains(tier)'` 锚 `enabled:` 前缀（仅命中代码 L34）；acceptance + plan 同步 |
+
+两项均 doc-only false-fail（机检脚本 G5/G8 本就用布尔 / 行首锚，J.1 跑脚本仍绿），是 R5 F.3 同 bug-class 的剩余实例。终审 verdict APPROVE（0 C/H），2 M 顺手 inline 修后 branch-diff 收敛。R6 不需新轮 review。
+
+> **教训记 memory**：acceptance doc 的 human-facing grep 必须用行首/前缀锚（`^...$` 或显式 code-context 前缀），避免命中 prod 文件 D-decision 注释里复述的同字符串——本 PR R3/R5/R6 三次复发同 bug-class（共 5 处：E.6/E.7/F.3/H.1/E.10）。
 
 ---
 

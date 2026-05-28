@@ -44,7 +44,7 @@
 | E.7b | `grep -nc 'Button(action: onCancel)' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (R1-M2 修：D6 取消按钮真接 onCancel callback，非仅 label) | 数字 = 1 |
 | E.8 | `grep -nc 'PositionTier.allCases.map' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 1 hit (D4 迭代 allCases 非 Set) | 数字 = 1 |
 | E.9 | `grep -nc 'tier.rawValue' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 1 hit (D3 label = rawValue) | 数字 = 1 |
-| E.10 | `grep -nc 'enabledTiers.contains(tier)' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 1 hit (D5 enabled 判定) | 数字 = 1 |
+| E.10 | `grep -nc 'enabled: enabledTiers.contains(tier)' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift` | 1 hit (D5 enabled 判定 — 锚 `enabled:` 前缀避免命中 D5 注释同子串，R6 修) | 数字 = 1 |
 | E.11 | `grep -nc 'HStack' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | ≥ 1 hit (D2 横向布局) | 数字 ≥ 1 |
 | E.12 | `grep -nc '.disabled(!item.enabled)' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (D5/D8 disabled 视觉) | 数字 = 1 |
 
@@ -68,7 +68,7 @@
 
 | 编号 | 命令 | 预期看到 | 通过条件 |
 |---|---|---|---|
-| H.1 | `grep -nE '#if DEBUG' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit | 数字 = 1 |
+| H.1 | `grep -ncE '^#if DEBUG$' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (锚 `^#if DEBUG$` 行首避免命中注释里同子串，R6 修) | 数字 = 1 |
 | H.2 | `grep -nc '#endif' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | ≥ 1 hit (DEBUG 配对) | 数字 ≥ 1 |
 | H.3 | `grep -nc 'fileprivate extension PositionTier' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (D9 v2 mechanism = `fileprivate extension PositionTier`，与 U3 严格同款) | 数字 = 1 |
 | H.3b | `grep -nc 'static func previewEnabledTiers() -> Set<PositionTier>' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift` | 1 hit (D9 v2 fixture 方法名) | 数字 = 1 |
