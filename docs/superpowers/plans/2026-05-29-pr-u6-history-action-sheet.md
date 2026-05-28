@@ -128,12 +128,12 @@ struct HistoryActionContentTests {
 
     // MARK: - 共享 fixture helper（测试内 internal，不污染 prod）
 
-    private func makeRecord(stockName: String, stockCode: String) -> TrainingRecord {
+    private func makeRecord(stockName: String, code: String) -> TrainingRecord {
         TrainingRecord(
             id: 1,
             trainingSetFilename: "t.sqlite",
             createdAt: 1_700_000_000,
-            stockCode: stockCode,
+            stockCode: code,
             stockName: stockName,
             startYear: 2021,
             startMonth: 8,
