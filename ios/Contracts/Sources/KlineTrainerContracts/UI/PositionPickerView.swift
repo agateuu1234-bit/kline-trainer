@@ -13,7 +13,7 @@
 // - D9 fileprivate preview fixture 内联本文件 #if DEBUG 区，不污染 PreviewFakes
 // - D10 不单测 SwiftUI shell，靠 Catalyst build-for-testing 闸门
 // - D11 onPick / onCancel 闭包 @escaping（Swift 编译强制）
-// - D14 不 import E2 PositionManager runtime
+// - D14 仅语义依赖 E2（caller 由持仓状态推导 enabledTiers）；本文件不引业务运行时类型
 // - D15 Button tap 直接 fire onPick，不调 dismiss（caller 负责 presentation）
 // - D16 不实现 RGB 硬编码 / 不分盈亏色，默认 SwiftUI Button style
 

@@ -12,7 +12,10 @@ test -f docs/acceptance/2026-05-28-pr-u5-position-picker-view.md
 
 echo "== G2: PositionPickerContent 平台无关（仅 import Foundation；不 import SwiftUI/UIKit/CoreGraphics）=="
 grep -q "^import Foundation$" ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift
-! grep -qE "^import (SwiftUI|UIKit|CoreGraphics)$" ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift
+# R4-C1：负向断言必须用 if/exit 1，不能用 `! grep`（pipeline 起头 `!` 被 set -e 豁免，永不 abort）
+if grep -qE "^import (SwiftUI|UIKit|CoreGraphics)$" ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift; then
+  echo "G2 FAIL: Content 不应 import SwiftUI/UIKit/CoreGraphics"; exit 1
+fi
 
 echo "== G3: spec §U5 字面 init 签名（D1/D11）=="
 grep -q "public struct PositionPickerView: View" \
@@ -37,18 +40,27 @@ grep -q "tier.rawValue" ios/Contracts/Sources/KlineTrainerContracts/UI/PositionP
 grep -q "enabledTiers.contains(tier)" ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift
 
 echo "== G6: D16 不实现盈亏色 / RGB 硬编码（反向验证）=="
-! grep -qE '\.foregroundStyle\(\.red|\.foregroundStyle\(\.green' \
-  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
-! grep -qE 'Color\(red:|UIColor\(' \
-  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
+if grep -qE '\.foregroundStyle\(\.red|\.foregroundStyle\(\.green' \
+  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift; then
+  echo "G6 FAIL: 不应实现盈亏色 .foregroundStyle(.red/.green)"; exit 1
+fi
+if grep -qE 'Color\(red:|UIColor\(' \
+  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift; then
+  echo "G6 FAIL: 不应 RGB 硬编码 Color(red:/UIColor("; exit 1
+fi
 
 echo "== G7: D14 不引业务运行时 / Content 平台无关 =="
-! grep -qE 'import (GRDB|ZIPFoundation)' \
+if grep -qE 'import (GRDB|ZIPFoundation)' \
   ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift \
-  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
-! grep -qE 'TradeCalculator|TickEngine|PositionManager|TrainingFlowController|APIClient' \
+  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift; then
+  echo "G7 FAIL: 不应 import GRDB/ZIPFoundation"; exit 1
+fi
+# R4-I1：业务运行时类型不得出现在 prod 源（含注释）；D14 注释已改写不含裸 type token
+if grep -qE 'TradeCalculator|TickEngine|PositionManager|TrainingFlowController|APIClient' \
   ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift \
-  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
+  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift; then
+  echo "G7 FAIL: 不应引用业务运行时类型 TradeCalculator/TickEngine/PositionManager/TrainingFlowController/APIClient"; exit 1
+fi
 
 echo "== G8: D9 v2 DEBUG-only fileprivate extension PositionTier preview fixture（R1-M4 修：机制与 U3 严格同款，反向锚真有目标）=="
 grep -q '^#if DEBUG' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
@@ -57,15 +69,21 @@ grep -q "fileprivate extension PositionTier" \
 grep -q "static func previewEnabledTiers() -> Set<PositionTier>" \
   ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
 # 反向：不能是 public extension PositionTier（会污染下游 DEBUG 编译）
-! grep -qE "^public.*extension PositionTier|^extension PositionTier.*public" \
-  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
+if grep -qE "^public.*extension PositionTier|^extension PositionTier.*public" \
+  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift; then
+  echo "G8 FAIL: preview fixture extension 不能是 public（会跨模块污染 DEBUG 编译）"; exit 1
+fi
 # 反向：PreviewFakes 不被本 PR 动
-! grep -qE "extension PositionTier|PositionTier\.preview" \
-  ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift
+if grep -qE "extension PositionTier|PositionTier\.preview" \
+  ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift; then
+  echo "G8 FAIL: 本 PR 不应改 PreviewFakes（D9 单 use site）"; exit 1
+fi
 
 echo "== G9: D15 View 不调 dismiss（caller 负责 presentation）=="
-! grep -qE 'dismiss\(\)|@Environment\(\\.dismiss' \
-  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
+if grep -qE 'dismiss\(\)|@Environment\(.*dismiss' \
+  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift; then
+  echo "G9 FAIL: View 不应调 dismiss() 或 @Environment(\\.dismiss)（caller 负责 presentation）"; exit 1
+fi
 
 echo "== G10: swift test 全量 PASS（基线 519 + 本 PR +10 = 期望 ≥529，宽松正则锚）=="
 cd ios/Contracts

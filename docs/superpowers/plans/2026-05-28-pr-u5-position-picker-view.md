@@ -312,7 +312,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 // - D9 fileprivate preview fixture 内联本文件 #if DEBUG 区，不污染 PreviewFakes
 // - D10 不单测 SwiftUI shell，靠 Catalyst build-for-testing 闸门
 // - D11 onPick / onCancel 闭包 @escaping（Swift 编译强制）
-// - D14 不 import E2 PositionManager runtime
+// - D14 仅语义依赖 E2（caller 由持仓状态推导 enabledTiers）；本文件不引业务运行时类型
 // - D15 Button tap 直接 fire onPick，不调 dismiss（caller 负责 presentation）
 // - D16 不实现 RGB 硬编码 / 不分盈亏色，默认 SwiftUI Button style
 
@@ -556,7 +556,10 @@ test -f docs/acceptance/2026-05-28-pr-u5-position-picker-view.md
 
 echo "== G2: PositionPickerContent 平台无关（仅 import Foundation；不 import SwiftUI/UIKit/CoreGraphics）=="
 grep -q "^import Foundation$" ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift
-! grep -qE "^import (SwiftUI|UIKit|CoreGraphics)$" ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift
+# R4-C1：负向断言必须用 if/exit 1，不能用 `! grep`（pipeline 起头 `!` 被 set -e 豁免，永不 abort）
+if grep -qE "^import (SwiftUI|UIKit|CoreGraphics)$" ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift; then
+  echo "G2 FAIL: Content 不应 import SwiftUI/UIKit/CoreGraphics"; exit 1
+fi
 
 echo "== G3: spec §U5 字面 init 签名（D1/D11）=="
 grep -q "public struct PositionPickerView: View" \
@@ -581,18 +584,27 @@ grep -q "tier.rawValue" ios/Contracts/Sources/KlineTrainerContracts/UI/PositionP
 grep -q "enabledTiers.contains(tier)" ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift
 
 echo "== G6: D16 不实现盈亏色 / RGB 硬编码（反向验证）=="
-! grep -qE '\.foregroundStyle\(\.red|\.foregroundStyle\(\.green' \
-  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
-! grep -qE 'Color\(red:|UIColor\(' \
-  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
+if grep -qE '\.foregroundStyle\(\.red|\.foregroundStyle\(\.green' \
+  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift; then
+  echo "G6 FAIL: 不应实现盈亏色 .foregroundStyle(.red/.green)"; exit 1
+fi
+if grep -qE 'Color\(red:|UIColor\(' \
+  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift; then
+  echo "G6 FAIL: 不应 RGB 硬编码 Color(red:/UIColor("; exit 1
+fi
 
 echo "== G7: D14 不引业务运行时 / Content 平台无关 =="
-! grep -qE 'import (GRDB|ZIPFoundation)' \
+if grep -qE 'import (GRDB|ZIPFoundation)' \
   ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift \
-  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
-! grep -qE 'TradeCalculator|TickEngine|PositionManager|TrainingFlowController|APIClient' \
+  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift; then
+  echo "G7 FAIL: 不应 import GRDB/ZIPFoundation"; exit 1
+fi
+# R4-I1：业务运行时类型不得出现在 prod 源（含注释）；D14 注释已改写不含裸 type token
+if grep -qE 'TradeCalculator|TickEngine|PositionManager|TrainingFlowController|APIClient' \
   ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift \
-  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
+  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift; then
+  echo "G7 FAIL: 不应引用业务运行时类型 TradeCalculator/TickEngine/PositionManager/TrainingFlowController/APIClient"; exit 1
+fi
 
 echo "== G8: D9 v2 DEBUG-only fileprivate extension PositionTier preview fixture（R1-M4 修：机制与 U3 严格同款，反向锚真有目标）=="
 grep -q '^#if DEBUG' ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
@@ -601,15 +613,21 @@ grep -q "fileprivate extension PositionTier" \
 grep -q "static func previewEnabledTiers() -> Set<PositionTier>" \
   ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
 # 反向：不能是 public extension PositionTier（会污染下游 DEBUG 编译）
-! grep -qE "^public.*extension PositionTier|^extension PositionTier.*public" \
-  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
+if grep -qE "^public.*extension PositionTier|^extension PositionTier.*public" \
+  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift; then
+  echo "G8 FAIL: preview fixture extension 不能是 public（会跨模块污染 DEBUG 编译）"; exit 1
+fi
 # 反向：PreviewFakes 不被本 PR 动
-! grep -qE "extension PositionTier|PositionTier\.preview" \
-  ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift
+if grep -qE "extension PositionTier|PositionTier\.preview" \
+  ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift; then
+  echo "G8 FAIL: 本 PR 不应改 PreviewFakes（D9 单 use site）"; exit 1
+fi
 
 echo "== G9: D15 View 不调 dismiss（caller 负责 presentation）=="
-! grep -qE 'dismiss\(\)|@Environment\(\\.dismiss' \
-  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift
+if grep -qE 'dismiss\(\)|@Environment\(.*dismiss' \
+  ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift; then
+  echo "G9 FAIL: View 不应调 dismiss() 或 @Environment(\\.dismiss)（caller 负责 presentation）"; exit 1
+fi
 
 echo "== G10: swift test 全量 PASS（基线 519 + 本 PR +10 = 期望 ≥529，宽松正则锚）=="
 cd ios/Contracts
@@ -678,6 +696,22 @@ R1 verdict **APPROVE**（0C/0H/4M/4L）— reviewer 明示"absorb M2 + M4 是 me
 | L4 `#Preview` macro 依赖 iOS17/macOS14 未在 D9 显标 | Low | **接受 residual**：Package.swift 已锚定 platforms；不退化到 PreviewProvider 已是默认假设 | residual |
 
 测试数：10 → 10（不增不减；M2 修是新增 acceptance grep 不增测试）。基线推算 519+10 = 529 / 100+1 = 101，但 acceptance / script 走宽松正则锚不硬锁。
+
+---
+
+## R4 → v5 修订（Task 3 code-quality reviewer 抓 gate-soundness 硬伤）
+
+Task 3 code-quality reviewer 报 NEEDS_FIXES — 抓出 1 Critical + 1 Important：
+
+| Finding | 严重度 | 修订方式 |
+|---|---|---|
+| R4-C1 script 所有 `! grep -q` 负向断言在 `set -euo pipefail` 下是**死闸门** | Critical | POSIX 规则：以 `!` 起头的 pipeline 被 `set -e` 豁免（不 abort）→ G2/G6×2/G7×2/G8×2/G9 即使命中禁止 pattern 也永不 fail。改成 `if grep -q ...; then echo "GN FAIL: ..."; exit 1; fi` 标准 `set -e`-safe 负向 idiom。script + plan Task 3 Step 2 同步修。**实测验证**：`! grep` 对含 `import SwiftUI` 的文件 exit=0 不 abort（证实死闸门）；修后含禁止 pattern 时 exit≠0。 |
+| R4-I1 修 C1 后 G7 业务运行时 grep 会命中 prod 注释里裸 `PositionManager` token → 干净树误 FAIL | Important（修 C1 暴露） | 改写 prod `PositionPickerView.swift` L16 D14 注释：`不 import E2 PositionManager runtime` → `仅语义依赖 E2（caller 由持仓状态推导 enabledTiers）；本文件不引业务运行时类型`，去掉裸 type token。Task 2 Step 1 plan code block 同步。其余负向闸门（G2/G6/G8/G9）实测干净树通过（G9 dismiss CJK 全角括号不命中 ASCII `dismiss()`；G8 `fileprivate` 起头不命中 `^public`/`^extension`）。 |
+| R4-Minor doc 表格 `\|` 转义 / `Spacer().frame(height:8)` idiom / 缺 accessibilityLabel | Minor | **接受 residual**：表格 `\|` 是 GitHub 渲染正确的 markdown 转义；Spacer idiom plan-frozen；a11y label 用可见中文文本 VoiceOver 可读，故意省略（reviewer 自评不 block） |
+
+R4-C1 是真 gate-soundness 硬伤（5/12 闸门非功能性），R4-I1 是修 C1 后暴露的连带。两者均在 Task 3 review 阶段抓出、subagent-driven 流程内一次性修复并 re-run 验收脚本绿（12/12 + Catalyst SUCCEEDED + 负向闸门实测 live）。修后将 re-run code-quality review 确认收敛。
+
+> **注**：U3 (PR #70) 的 `plan_u3_settlement_view.sh` 同样有 `! grep` 死闸门模式（已 merged）——本 PR 不回溯修 U3（surgical scope），但教训记入 memory 供后续 acceptance script 复用正确 idiom。
 
 ---
 
