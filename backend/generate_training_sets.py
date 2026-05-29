@@ -114,16 +114,16 @@ def assign_global_indices(windows: dict[str, pd.DataFrame]) -> dict[str, pd.Data
 
 
 def _int_or_none(v: Any) -> Optional[int]:
-    if v is None or (isinstance(v, float) and pd.isna(v)):
+    # pd.isna 统一处理 None / float NaN / pd.NA（标量），避免 int(pd.NA) 抛 TypeError
+    if v is None or pd.isna(v):
         return None
     return int(v)
 
 
 def _float_or_none(v: Any) -> Optional[float]:
-    if v is None:
+    if v is None or pd.isna(v):
         return None
-    fv = float(v)
-    return None if pd.isna(fv) else fv
+    return float(v)
 
 
 # 训练组 SQLite DDL（逐字 backend/sql/training_set_schema_v1.sql，D8；本 PR 只读不改源文件）
