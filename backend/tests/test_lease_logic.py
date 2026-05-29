@@ -133,9 +133,10 @@ def test_inmemory_reserve_meta_marks_reserved_and_returns_meta():
     # 只有 id=1（unsent）可选；id=2 是 sent 不可选
     assert [r["id"] for r in reserved] == [1]
     assert reserved[0]["content_hash"] == "deadbeef"
-    # 选后行被置 reserved + lease 三列非空（D9 不变量）
+    # 选后行被置 reserved + lease 三列非空（D9/M1 不变量：含 reserved_at）
     row1 = repo._by_id(1)
-    assert row1.status == "reserved" and row1.lease_id == LID and row1.lease_expires_at == FUTURE
+    assert (row1.status == "reserved" and row1.lease_id == LID
+            and row1.lease_expires_at == FUTURE and row1.reserved_at == NOW)
 
 
 def test_inmemory_reserve_meta_respects_count_upper_bound():
