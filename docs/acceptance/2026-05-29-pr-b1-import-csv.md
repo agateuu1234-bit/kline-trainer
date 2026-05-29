@@ -30,7 +30,7 @@
 | D.1 | `grep -nc 'rolling(window=66' backend/import_csv.py` | 1 (D3 MA66) | =1 |
 | D.2 | `grep -nc 'std(ddof=0)' backend/import_csv.py` | 1 (D4 BOLL 总体 std) | =1 |
 | D.3 | `grep -nc 'ewm(span=12, adjust=False)' backend/import_csv.py` | 1 (D5 EMA12) | =1 |
-| D.4 | `grep -nc '(dif - dea) * 2' backend/import_csv.py` | 1 (D5 BAR×2) | =1 |
+| D.4 | `grep -Fnc '(dif - dea) * 2' backend/import_csv.py` | 1 (D5 BAR×2；`-F` 固定串避免 `*` 被当通配符) | =1 |
 
 ## §E ticket_index 1m 基准语义（D6）
 
@@ -70,7 +70,7 @@
 
 | 编号 | 命令 | 预期 | 通过条件 |
 |---|---|---|---|
-| J.1 | `bash scripts/acceptance/plan_b1_import_csv.sh 2>&1 | tail -2` | `✅ 所有 N 项验收通过` | 末行 ✅ + exit 0 |
+| J.1 | `bash scripts/acceptance/plan_b1_import_csv.sh 2>&1 \| tail -2` | `✅ 所有 8 项 G1-G8 验收通过` | 末行 ✅ + exit 0 |
 
 ## §K Residuals
 

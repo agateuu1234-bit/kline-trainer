@@ -721,7 +721,7 @@ docker pull postgres:15.12 >/dev/null 2>&1 && docker inspect --format='{{index .
 | D.1 | `grep -nc 'rolling(window=66' backend/import_csv.py` | 1 (D3 MA66) | =1 |
 | D.2 | `grep -nc 'std(ddof=0)' backend/import_csv.py` | 1 (D4 BOLL 总体 std) | =1 |
 | D.3 | `grep -nc 'ewm(span=12, adjust=False)' backend/import_csv.py` | 1 (D5 EMA12) | =1 |
-| D.4 | `grep -nc '(dif - dea) * 2' backend/import_csv.py` | 1 (D5 BAR×2) | =1 |
+| D.4 | `grep -Fnc '(dif - dea) * 2' backend/import_csv.py` | 1 (D5 BAR×2；`-F` 固定串避免 `*` 被当通配符) | =1 |
 
 ## §E ticket_index 1m 基准语义（D6）
 
@@ -761,7 +761,7 @@ docker pull postgres:15.12 >/dev/null 2>&1 && docker inspect --format='{{index .
 
 | 编号 | 命令 | 预期 | 通过条件 |
 |---|---|---|---|
-| J.1 | `bash scripts/acceptance/plan_b1_import_csv.sh 2>&1 | tail -2` | `✅ 所有 N 项验收通过` | 末行 ✅ + exit 0 |
+| J.1 | `bash scripts/acceptance/plan_b1_import_csv.sh 2>&1 \| tail -2` | `✅ 所有 8 项 G1-G8 验收通过` | 末行 ✅ + exit 0 |
 
 ## §K Residuals
 
@@ -857,6 +857,21 @@ R1 verdict **NEEDS-ATTENTION**（2H/2M/1L），reviewer 实测（装 pandas 2.2.
 | L1 acceptance G2 `pytest|tee|tail` 在 pipefail 下 grep 门半死（pytest 非零先 abort）但净行为正确 | Low | **接受 residual**：reviewer 自评 "benign, no fix required"，失败 pytest 仍正确 fail 脚本 | — |
 
 测试数：15 → 16（+`test_to_kline_records_integer_columns_are_python_int`；原 15 个 + 该 1 个 = 16，R3 prose 修：plan 早先误写 17）。reviewer 已实测确认 MA66/BOLL/MACD 数学 + ticket_index searchsorted + 17 列 INSERT 对齐 + NaN→None + grep 锚全部正确（"Verified correct" 清单）。R2（fresh opus xhigh）实测复核 APPROVE。
+
+---
+
+## R5 修订（Task 3 code-quality reviewer）
+
+subagent-driven Task 3 code-quality review **NEEDS_FIXES**（1 Critical + 3 Minor），均 acceptance **doc-only**（机检脚本 8/8 真绿、G4 锚本就用 `\*` 正确）：
+
+| Finding | 严重度 | 修订 |
+|---|---|---|
+| R5-C1 acceptance §D.4 human 命令 `grep -nc '(dif - dea) * 2'` 用 BRE 未转义 `*`（被当"零或多个空格"通配）→ 真 prod 行打印 `0` ≠ 期望 1 → 非程序员误判 correct tree FAILED（**第 6 个 PR 复发的注释/正则子串 bug-class**） | Critical（doc-only） | §D.4 改 `grep -Fnc '(dif - dea) * 2'`（`-F` 固定串）→ 实测打印 1；acceptance doc + plan 同步 |
+| R5-M1 §J.1 表格 cell 内裸 `|` 破坏 markdown 渲染 | Minor | `2>&1 \| tail -2` 转义 |
+| R5-M2 §J.1 期望 `所有 N 项` 占位 N vs 脚本输出 `8 项 G1-G8` | Minor | 改 `所有 8 项 G1-G8 验收通过` |
+| R5-M3 §G.3 无对应脚本 gate（docker 缺，B1-R2 文档容忍） | Minor | **接受**：legitimate 文档容忍，非 defect |
+
+R5-C1 只影响 human doc（机检脚本 G4 用 `grep -q '(dif - dea) \* 2'` BRE `\*`=字面，本就对）。修后脚本仍 8/8 绿。R5 不需新轮 review。
 
 ---
 
