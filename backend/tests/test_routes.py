@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -67,13 +68,14 @@ def test_meta_full_returns_200_lease_response_shape():
     assert len(body["sets"]) == 2
     for s in body["sets"]:
         assert set(s.keys()) == set(full["sets"][0].keys())
+        # content_hash 必须符合 openapi pattern ^[0-9a-f]{8}$（响应层契约校验，review M1）
+        assert re.fullmatch(r"[0-9a-f]{8}", s["content_hash"]), s["content_hash"]
 
 
 def test_meta_expires_at_uses_z_suffix():
     # D4：expires_at 与冻结 fixture 一致用 ...Z（非 +00:00）
     client, _ = _client([_unsent_row(101, "600519", "贵州茅台", "x.zip", "deadbeef")])
     body = client.get("/training-sets/meta", params={"count": 1}).json()
-    import re
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", body["expires_at"])
     # 与 fixture 的 expires_at 同格式
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
