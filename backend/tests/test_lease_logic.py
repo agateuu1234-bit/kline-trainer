@@ -109,3 +109,56 @@ def test_format_expires_at_naive_treated_as_utc():
 
 def test_lease_ttl_is_ten_minutes():
     assert LEASE_TTL == timedelta(minutes=10)
+
+
+# ---- InMemoryLeaseRepository 直测（不经 HTTP）----
+import asyncio
+from app.lease_repo import InMemoryLeaseRepository, MetaRow
+
+
+def _repo_with_rows():
+    return InMemoryLeaseRepository(rows=[
+        MetaRow(id=1, stock_code="600519", stock_name="贵州茅台",
+                filename="600519_202001.zip", schema_version=1, content_hash="deadbeef",
+                status="unsent", lease_id=None, lease_expires_at=None, file_path="/tmp/a.zip"),
+        MetaRow(id=2, stock_code="000001", stock_name="平安银行",
+                filename="000001_202103.zip", schema_version=1, content_hash="a0b1c2d3",
+                status="sent", lease_id=LID, lease_expires_at=FUTURE, file_path="/tmp/b.zip"),
+    ])
+
+
+def test_inmemory_reserve_meta_marks_reserved_and_returns_meta():
+    repo = _repo_with_rows()
+    reserved = asyncio.run(repo.reserve_meta(count=5, lease_id=LID, expires_at=FUTURE, now=NOW))
+    # 只有 id=1（unsent）可选；id=2 是 sent 不可选
+    assert [r["id"] for r in reserved] == [1]
+    assert reserved[0]["content_hash"] == "deadbeef"
+    # 选后行被置 reserved + lease 三列非空（D9 不变量）
+    row1 = repo._by_id(1)
+    assert row1.status == "reserved" and row1.lease_id == LID and row1.lease_expires_at == FUTURE
+
+
+def test_inmemory_reserve_meta_respects_count_upper_bound():
+    repo = _repo_with_rows()
+    reserved = asyncio.run(repo.reserve_meta(count=0, lease_id=LID, expires_at=FUTURE, now=NOW))
+    assert reserved == []   # count=0 → 空（partial/empty 合法）
+
+
+def test_inmemory_confirm_commit_then_idempotent():
+    repo = _repo_with_rows()
+    asyncio.run(repo.reserve_meta(count=1, lease_id=LID, expires_at=FUTURE, now=NOW))
+    o1 = asyncio.run(repo.confirm(1, LID, NOW))
+    assert o1 is ConfirmOutcome.COMMIT_SENT and repo._by_id(1).status == "sent"
+    o2 = asyncio.run(repo.confirm(1, LID, NOW))     # 重复
+    assert o2 is ConfirmOutcome.IDEMPOTENT_OK and repo._by_id(1).status == "sent"
+
+
+def test_inmemory_confirm_unknown_id_not_found():
+    repo = _repo_with_rows()
+    assert asyncio.run(repo.confirm(999, LID, NOW)) is ConfirmOutcome.NOT_FOUND
+
+
+def test_inmemory_file_path_lookup():
+    repo = _repo_with_rows()
+    assert asyncio.run(repo.get_file_path(1)) == "/tmp/a.zip"
+    assert asyncio.run(repo.get_file_path(999)) is None
