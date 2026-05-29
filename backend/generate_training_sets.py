@@ -262,7 +262,7 @@ async def _register_training_set(conn, gts: GeneratedTrainingSet) -> int:
         gts.schema_version, str(gts.path), gts.content_hash)
 
 
-def _stock_name_of(period_bars: dict, stock_code: str) -> str:
+def _stock_name_of(stock_code: str) -> str:
     """训练组生成不查 stocks 表，stock_name 简化为 code（B3/前端用 stocks.name 显示）。"""
     return stock_code
 
@@ -276,13 +276,14 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
     period_bars = {p: await _fetch_period_bars(conn, stock_code, p) for p in PERIODS}
     for _ in range(max_retries):
         gts = assemble_training_set(output_dir, stock_code=stock_code,
-                                    stock_name=_stock_name_of(period_bars, stock_code),
+                                    stock_name=_stock_name_of(stock_code),
                                     period_bars=period_bars, rng=rng)
         if await _exists_start(conn, stock_code, gts.start_datetime):
             gts.path.unlink(missing_ok=True)                     # 重选：删掉冲突产物
             gts.path.with_suffix(".db").unlink(missing_ok=True)
             continue
         await _register_training_set(conn, gts)
+        gts.path.with_suffix(".db").unlink(missing_ok=True)      # 仅保留 .zip（库登记的产物），删中间 .db
         return gts
     raise GenerateSkipException(f"{stock_code}: {max_retries} 次起始点全冲突，跳过")
 
