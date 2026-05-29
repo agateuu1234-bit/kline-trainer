@@ -57,7 +57,7 @@
 
 | 编号 | 命令 | 预期 | 通过条件 |
 |---|---|---|---|
-| H.1 | `grep -cE '(>=\|<\|~=)' backend/requirements.txt backend/requirements-dev.txt` | 0 (无 range) | =0 |
+| H.1 | `if grep -qE '(>=\|<\|~=)' backend/requirements.txt backend/requirements-dev.txt; then echo "有range(FAIL)"; else echo "全pin(PASS)"; fi` | `全pin(PASS)` | 输出 `全pin(PASS)` |
 
 ## §I 不碰 schema + .github/workflows（D13 / 只读 schema）
 
