@@ -126,7 +126,7 @@ def test_confirm_valid_reserved_commits_sent():
     assert decide_confirm(row, LID, NOW) is ConfirmOutcome.COMMIT_SENT
 
 
-def test_confirm_boundary_expires_equal_now_is_invalid():
+def test_confirm_boundary_expires_equal_now_commits_sent():
     # confirm 用严格 `<`：lease_expires_at == now → NOT < now → 不因过期判 invalid；
     # 但 reserved 且 lease 匹配且未过期 → COMMIT_SENT（边界 == now 视为未过期）
     row = RowState(status="reserved", lease_id=LID, lease_expires_at=NOW)
