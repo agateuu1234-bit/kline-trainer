@@ -246,7 +246,8 @@ async def _fetch_period_bars(conn, stock_code: str, period: str) -> pd.DataFrame
 
 
 async def _exists_start(conn, stock_code: str, start_datetime: int) -> bool:
-    """D7：幂等预检（schema 无 UNIQUE，用 SELECT 判断 (stock_code,start_datetime) 是否已生成）。"""
+    """D7：幂等预检——schema.sql 有 uq_stock_start UNIQUE(stock_code,start_datetime) 作硬底线；
+    本 SELECT 预检让冲突走"重选起始点"的干净 UX（而非撞 UNIQUE 抛 UniqueViolationError）。"""
     row = await conn.fetchrow(
         "SELECT 1 FROM training_sets WHERE stock_code=$1 AND start_datetime=$2",
         stock_code, start_datetime)

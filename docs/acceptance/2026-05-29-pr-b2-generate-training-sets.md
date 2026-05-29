@@ -80,3 +80,5 @@
 - **B2-R5**：`generate_one_training_set` 重试在月线极窄（n=39 → 唯一可选下标）时会把同一 start 试满 `max_retries` 次（每次写+删 db/zip），终止于 `GenerateSkipException`（不死循环），但低效。接受 residual。
 - **PG 壳无 CI 单测**：`_fetch_period_bars`/`generate_one`/`generate_batch`/`backfill_content_hash`/CLI 无 live PG 单测（D1/D13，B3/NAS scope）；纯装配层覆盖全部业务正确性。
 - **zip 字节非确定性**：`content_hash` 不跨重建复现（zip 头嵌 mtime）；它是"传输完整性指纹"，P2 须对收到的 zip 字节重算比对，不可重新打包再 hash。
+- **B2-R6（branch-diff R1-L2，澄清非缺陷）**：`backfill_content_hash` 在 v1.4 fresh schema（`content_hash CHAR(8) NOT NULL`）下恒返 0 行——这是 intended no-op：`content_hash IS NULL` 行仅存在于 v1.3 两阶段 migration 窗口（modules M0.1 L210-219），fresh 部署无遗留行。该函数是迁移安全网，非死代码。
+- **schema 前提更正（branch-diff R1-L1）**：早期 plan 误读 `plan_v1.5` 示意 DDL 以为 `training_sets` 无 UNIQUE / content_hash 可空；权威 `backend/sql/schema.sql` 实为 `uq_stock_start UNIQUE(stock_code,start_datetime)` + `content_hash NOT NULL` + 3 CHECK。B2 INSERT 经终审实证满足全部约束；D7 premise 已更正（UNIQUE 硬底线 + SELECT 预检软重选）。无代码改动。
