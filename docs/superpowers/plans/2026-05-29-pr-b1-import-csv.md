@@ -17,7 +17,7 @@
 - ≤ 500 行 prod（本 plan：~250 行 prod 估算）
 - review budget：opus 4.7 xhigh 双闸门各 4-5 轮内收敛（user 本次显式指定走 opus 不走 codex）
 - **本 PR 不碰 `.github/workflows`**（user 已决策"纯 opus xhigh，CI 延后"——见 Task 0 §CI 决策）；故 B1 pytest 在本地 + acceptance 脚本里跑，不进 CI；CI 接线作独立 codex 治理 PR 后续补
-- 后端命令从 `backend/` 跑：`cd backend && python -m pytest tests/test_import_csv.py -v`
+- 后端命令从 `backend/` 跑：`cd backend && python3 -m pytest tests/test_import_csv.py -v`
 - Working branch：执行阶段由 `using-git-worktrees` 创建（EnterWorktree，分支名按 attest 名开 PR——见 memory `feedback_worktree_cwd_drift`）
 - **memory `feedback_worktree_cwd_drift` 硬提醒**：每次 push / gh pr create 前先 `pwd && git branch --show-current && git rev-parse HEAD` 三连确认站在 worktree 正确分支
 
@@ -97,7 +97,7 @@ user 在本 plan 起草前明确选择 **"纯 opus xhigh，CI 延后"**：B1 只
 
 | 路径 | 动作 | 行数 | 测试 |
 |---|---|---|---|
-| `backend/tests/test_import_csv.py` | **新建** | ~250 | ~17 pytest：parse/schema-error 2 + clean(R04 异常) 4 + 指标(MA66/BOLL/MACD 精确值 + NULL 窗口) 5 + ticket_index(1m 递增 + 跨周期映射) 3 + to_records/round/类型 3（含 R1-H2 int 类型断言）。纯函数，无 DB。 |
+| `backend/tests/test_import_csv.py` | **新建** | ~250 | ~16 pytest：parse/schema-error 2 + clean(R04 异常) 4 + 指标(MA66/BOLL/MACD 精确值 + NULL 窗口) 4 + ticket_index(1m 递增 + 跨周期映射) 3 + to_records/NaN/类型 3（含 R1-H2 int 类型断言）。纯函数，无 DB。 |
 | `backend/tests/fixtures/sample_1m.csv` | **新建** | — | 微型 1m CSV fixture（~70 行数据，够触发 MA66 窗口）供测试。 |
 
 ### Docs / Scripts（2 文件）
@@ -107,11 +107,11 @@ user 在本 plan 起草前明确选择 **"纯 opus xhigh，CI 延后"**：B1 只
 | `docs/acceptance/2026-05-29-pr-b1-import-csv.md` | **新建** | 中文非程序员验收清单 §A-§K（文件存在 / pytest 全绿 / 指标公式 grep 锚 / ticket_index 语义 / deps pin / 不碰 workflow 反向验证 / residual B1-R1）。 |
 | `scripts/acceptance/plan_b1_import_csv.sh` | **新建** | 机检 bash（`set -euo pipefail` + **负向断言一律 `if grep; then exit 1; fi`** per memory `feedback_acceptance_grep_anchoring`；human-grep 用行首/前缀锚）。 |
 
-**Total：3 prod（1 新 + 2 改 deps）+ 1 test + 1 fixture + 1 doc + 1 script = 7 文件 / ~250 prod / ~250 test / ~17 新测试。**
+**Total：3 prod（1 新 + 2 改 deps）+ 1 test + 1 fixture + 1 doc + 1 script = 7 文件 / ~250 prod / ~250 test / ~16 新测试。**
 
 ---
 
-## Task 1 — 纯变换层 `import_csv.py` 纯函数 + ~17 host pytest
+## Task 1 — 纯变换层 `import_csv.py` 纯函数 + ~16 host pytest
 
 **Files:**
 - Create: `backend/import_csv.py`（先只写纯函数 + 模块级常量；写库壳 + CLI 在 Task 2）
@@ -315,7 +315,7 @@ def test_to_kline_records_integer_columns_are_python_int():
 
 Run:
 ```bash
-cd backend && python -m pytest tests/test_import_csv.py -q > /tmp/b1-red.txt 2>&1; echo "exit=$?"
+cd backend && python3 -m pytest tests/test_import_csv.py -q > /tmp/b1-red.txt 2>&1; echo "exit=$?"
 grep -iE "ModuleNotFoundError|ImportError|cannot import|error" /tmp/b1-red.txt | head -3
 ```
 Expected：`exit=` 非 0 + import/未定义错误命中（用 exit code 不依赖 wording）。
@@ -470,12 +470,12 @@ def to_kline_records(df: pd.DataFrame, stock_code: str, period: str) -> list[dic
     return records
 ```
 
-- [ ] **Step 5: 跑测试确认 ~17 全绿**
+- [ ] **Step 5: 跑测试确认 16 全绿**
 
-Run: `cd backend && python -m pytest tests/test_import_csv.py -q 2>&1 | tail -5`
-Expected：`17 passed`（或 N passed，0 failed）+ exit 0：
+Run: `cd backend && python3 -m pytest tests/test_import_csv.py -q 2>&1 | tail -5`
+Expected：`16 passed`（或 N passed，0 failed）+ exit 0：
 ```bash
-cd backend && python -m pytest tests/test_import_csv.py -q > /tmp/b1-green.txt 2>&1; echo "exit=$?"
+cd backend && python3 -m pytest tests/test_import_csv.py -q > /tmp/b1-green.txt 2>&1; echo "exit=$?"
 ```
 Expected：`exit=0`。某测试 fail → 改实现不改断言（除非断言本身算错——那是 plan bug，报 DONE_WITH_CONCERNS）。
 
@@ -484,7 +484,7 @@ Expected：`exit=0`。某测试 fail → 改实现不改断言（除非断言本
 ```bash
 cd "<repo-root>"
 git add backend/import_csv.py backend/tests/test_import_csv.py backend/tests/fixtures/sample_1m.csv
-git commit -m "feat(b1): import_csv 纯变换层 + 17 host pytest (Task 1)
+git commit -m "feat(b1): import_csv 纯变换层 + 16 host pytest (Task 1)
 
 CSV parse/clean(R04 异常) + MA66/BOLL/MACD(pandas 直算,可测精确值) +
 ticket_index(1m 基准 searchsorted) + to_records(NaN→None)。纯函数不碰 DB。
@@ -619,13 +619,13 @@ if __name__ == "__main__":
 
 Run:
 ```bash
-cd backend && python -m pytest tests/test_import_csv.py -q > /tmp/b1-task2.txt 2>&1; echo "exit=$?"
+cd backend && python3 -m pytest tests/test_import_csv.py -q > /tmp/b1-task2.txt 2>&1; echo "exit=$?"
 ```
-Expected：`exit=0`，仍 17 passed（写库壳的 `import asyncpg` 在函数内，纯层测试不触发；若 asyncpg 未装也不影响纯层）。
+Expected：`exit=0`，仍 16 passed（写库壳的 `import asyncpg` 在函数内，纯层测试不触发；若 asyncpg 未装也不影响纯层）。
 
 - [ ] **Step 3: 编译/语法自检（不连 DB）**
 
-Run: `cd backend && python -c "import import_csv; print('main' in dir(import_csv), 'write_to_postgres' in dir(import_csv))"`
+Run: `cd backend && python3 -c "import import_csv; print('main' in dir(import_csv), 'write_to_postgres' in dir(import_csv))"`
 Expected：`True True`（模块可 import、CLI + 写库壳符号存在）。
 
 - [ ] **Step 4: Commit**
@@ -656,7 +656,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 Run 先查实际版本：
 ```bash
-cd backend && python -m pip show pytest httpx pglast openapi-spec-validator pyyaml 2>/dev/null | grep -E "^(Name|Version)"
+cd backend && python3 -m pip show pytest httpx pglast openapi-spec-validator pyyaml 2>/dev/null | grep -E "^(Name|Version)"
 ```
 然后把 `requirements-dev.txt` 改成精确 pin（用上一步查到的版本号，示例占位，实施者填真实值）：
 ```
@@ -699,13 +699,13 @@ docker pull postgres:15.12 >/dev/null 2>&1 && docker inspect --format='{{index .
 
 | 编号 | 命令 | 预期 | 通过条件 |
 |---|---|---|---|
-| B.1 | `cd backend && python -m pytest tests/test_import_csv.py -q` | `N passed`（N≥17），0 failed | exit=0 + 末行无 failed |
+| B.1 | `cd backend && python3 -m pytest tests/test_import_csv.py -q` | `N passed`（N≥16），0 failed | exit=0 + 末行无 failed |
 
 ## §C 模块可导入 + CLI/写库符号存在
 
 | 编号 | 命令 | 预期 | 通过条件 |
 |---|---|---|---|
-| C.1 | `cd backend && python -c "import import_csv as m; print('main' in dir(m), 'write_to_postgres' in dir(m))"` | `True True` | 命中 |
+| C.1 | `cd backend && python3 -c "import import_csv as m; print('main' in dir(m), 'write_to_postgres' in dir(m))"` | `True True` | 命中 |
 
 ## §D 指标公式落地（D2-D5 grep 锚）
 
@@ -780,11 +780,11 @@ test -f backend/tests/fixtures/sample_1m.csv
 test -f docs/acceptance/2026-05-29-pr-b1-import-csv.md
 
 echo "== G2: 纯层 pytest 全绿（无需 DB）=="
-( cd backend && python -m pytest tests/test_import_csv.py -q 2>&1 | tee /tmp/b1-accept-pytest.txt | tail -3 )
+( cd backend && python3 -m pytest tests/test_import_csv.py -q 2>&1 | tee /tmp/b1-accept-pytest.txt | tail -3 )
 if grep -qiE "failed|error" /tmp/b1-accept-pytest.txt; then echo "G2 FAIL: pytest 有失败"; exit 1; fi
 
 echo "== G3: 模块可导入 + 符号存在 =="
-( cd backend && python -c "import import_csv as m; assert 'main' in dir(m) and 'write_to_postgres' in dir(m)" )
+( cd backend && python3 -c "import import_csv as m; assert 'main' in dir(m) and 'write_to_postgres' in dir(m)" )
 
 echo "== G4: 指标公式落地（D2-D5）=="
 grep -q 'rolling(window=66' backend/import_csv.py
@@ -849,7 +849,20 @@ R1 verdict **NEEDS-ATTENTION**（2H/2M/1L），reviewer 实测（装 pandas 2.2.
 | M2 CLI `--period <非1m>` 把 1m 文件过滤掉 → baseline 仍 None → `compute_ticket_index` 抛 ValueError；D10 声称的"DB 查基准"从未实现 | Medium | `main()` 总是先从 dir 找 1m CSV 建 baseline（与 --period 过滤解耦）；非 1m 且无 1m 文件 → fail-fast；D10 措辞收紧不再声称 DB 路径 | D10 决议 + Task 2 Step 1 `main()` |
 | L1 acceptance G2 `pytest|tee|tail` 在 pipefail 下 grep 门半死（pytest 非零先 abort）但净行为正确 | Low | **接受 residual**：reviewer 自评 "benign, no fix required"，失败 pytest 仍正确 fail 脚本 | — |
 
-测试数：16 → 17（+`test_to_kline_records_integer_columns_are_python_int`）。reviewer 已实测确认 MA66/BOLL/MACD 数学 + ticket_index searchsorted + 17 列 INSERT 对齐 + NaN→None + grep 锚全部正确（"Verified correct" 清单）。R1-H1/H2/M1/M2 修后需再跑 R2 确认。
+测试数：15 → 16（+`test_to_kline_records_integer_columns_are_python_int`；原 15 个 + 该 1 个 = 16，R3 prose 修：plan 早先误写 17）。reviewer 已实测确认 MA66/BOLL/MACD 数学 + ticket_index searchsorted + 17 列 INSERT 对齐 + NaN→None + grep 锚全部正确（"Verified correct" 清单）。R2（fresh opus xhigh）实测复核 APPROVE。
+
+---
+
+## R3 修订（Task 1 implementer 抓 plan prose + 环境）
+
+subagent-driven Task 1 implementer 报 DONE_WITH_CONCERNS，2 项均 plan/环境层（实现 16/16 真绿、逐字对齐）：
+
+| Finding | 修订 |
+|---|---|
+| R3-1 plan prose 写"17 host pytest / 17 passed / N≥17"，但 Task 1 literal 测试块实为 **16** 个（原 15 + R1-H2 加的 1）。implementer 正确拒绝杜撰第 17 个测试。 | 全 prose 17→16（File Structure / Task 1 title / Step 5 / acceptance §B.1 N≥16 / R1→v2 note 改"15→16"）；指标分类 5→4（实为 4 个指标测试）。$17 列 INSERT / 顺位 17 (B2) 等"17"无关，保留。 |
+| R3-2 本机只有 `python3` 无裸 `python`；plan 命令 + acceptance script/doc 用裸 `python` 在本地会 `command not found`（CI 已延后 → 脚本必须本地能跑） | plan 所有 `python -m pytest` / `python -c` / `python -m pip` → `python3`；Task 3 acceptance script + doc §B.1/§C.1/§J 同步用 `python3`。 |
+
+R3 是 prose + 环境一致化，不改业务逻辑/测试断言（实现已 16/16 green）。R3 不需新轮 review。
 
 ---
 
