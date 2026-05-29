@@ -80,3 +80,6 @@
 - **R4-2**：`_resolve_stock_name` 取首个非 NaN（非首个非空白）name；whitespace-only 首行会落到 fallback（--name / code）。name 按约定每文件恒定，fallback 安全，narrow edge，接受残留。
 - **R4-3**：每文件一个 `asyncio.run` 新事件循环/连接；7 周期批量微不足道，复用连接增共享状态复杂度（CLAUDE.md §2 不值当），接受残留。
 - **H7**：B1 仅提供测试用微型 fixture，3-5 个生产样本训练组数据由 B2（顺位 17）生成。
+- **R6-1**（self-review Minor）：`clean()` 若价格列含非数字文本（整列变 object dtype）→ `out[c] > 0` 抛 opaque `TypeError` 而非 `CsvSchemaError`/丢行。valid A股 CSV 全数字不触发；可选硬化 = `parse_csv` 里 `pd.to_numeric(errors="coerce")` 预转。接受残留（CLAUDE.md §2 不为不可能输入加防护）。
+- **R6-2**（self-review Minor）：`_discover_period` 病态双标记文件名（如 `stock_1m_15m.csv`）按 KNOWN_PERIODS 顺序可能误判；标准 `<code>_<period>.csv` 约定不触发，`--period` 可覆盖。接受残留。
+- **R6-3**（self-review Minor）：baseline 仅取 `one_min_files[0]`；约定每 dir 单个 1m CSV（R09）；多 1m 文件场景未覆盖。接受残留。
