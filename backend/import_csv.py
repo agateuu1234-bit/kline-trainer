@@ -143,3 +143,113 @@ def to_kline_records(df: pd.DataFrame, stock_code: str, period: str) -> list[dic
             rec[c] = _float_or_none(row.get(c))
         records.append(rec)
     return records
+
+
+# ===== 薄写库壳 + CLI（D14：不单测，B3/NAS 集成 scope）=====
+import argparse
+import asyncio
+import os
+
+_KLINE_INSERT = """
+INSERT INTO klines (stock_code, period, datetime, open, high, low, close,
+                    volume, amount, ticket_index, ma66,
+                    boll_upper, boll_mid, boll_lower,
+                    macd_diff, macd_dea, macd_bar)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+ON CONFLICT (stock_code, period, datetime) DO UPDATE SET
+    open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, close=EXCLUDED.close,
+    volume=EXCLUDED.volume, amount=EXCLUDED.amount, ticket_index=EXCLUDED.ticket_index,
+    ma66=EXCLUDED.ma66, boll_upper=EXCLUDED.boll_upper, boll_mid=EXCLUDED.boll_mid,
+    boll_lower=EXCLUDED.boll_lower, macd_diff=EXCLUDED.macd_diff,
+    macd_dea=EXCLUDED.macd_dea, macd_bar=EXCLUDED.macd_bar
+"""
+
+
+async def write_to_postgres(dsn: str, stock_code: str, stock_name: str,
+                            records: list[dict]) -> int:
+    """D11：stocks + klines 幂等 UPSERT。返回写入 kline 行数。"""
+    import asyncpg  # 局部 import：纯函数层不依赖 asyncpg（单测不装也能跑）
+    conn = await asyncpg.connect(dsn)
+    try:
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO stocks(code, name) VALUES($1,$2) "
+                "ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name",
+                stock_code, stock_name,
+            )
+            await conn.executemany(_KLINE_INSERT, [
+                (r["stock_code"], r["period"], r["datetime"], r["open"], r["high"],
+                 r["low"], r["close"], r["volume"], r["amount"], r["ticket_index"],
+                 r["ma66"], r["boll_upper"], r["boll_mid"], r["boll_lower"],
+                 r["macd_diff"], r["macd_dea"], r["macd_bar"])
+                for r in records
+            ])
+        return len(records)
+    finally:
+        await conn.close()
+
+
+def _resolve_stock_name(df: pd.DataFrame, cli_name: Optional[str], code: str) -> str:
+    """D8：CSV name 列首非空 → --name → code。"""
+    if "name" in df.columns:
+        nonnull = df["name"].dropna()
+        if len(nonnull) > 0 and str(nonnull.iloc[0]).strip():
+            return str(nonnull.iloc[0]).strip()
+    return cli_name or code
+
+
+def _discover_period(csv_path: Path) -> str:
+    """从文件名推断 period（如 '600519_1m.csv' → '1m'）；失败回 '1m'。"""
+    stem = csv_path.stem.lower()
+    for p in ("1m", "3m", "15m", "60m", "daily", "weekly", "monthly"):
+        if stem.endswith(p) or f"_{p}" in stem:
+            return p
+    return "1m"
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description="导入 CSV 行情到 PostgreSQL (B1)")
+    ap.add_argument("--input", required=True, help="CSV 目录")
+    ap.add_argument("--stock", required=True, help="股票代码")
+    ap.add_argument("--period", default=None, help="只导该周期；省略=导全部，1m 先建基准")
+    ap.add_argument("--name", default=None, help="股票名（缺省取 CSV name 列或代码）")
+    ap.add_argument("--dsn", default=os.environ.get("DATABASE_URL"), help="PostgreSQL DSN")
+    args = ap.parse_args(argv)
+    if not args.dsn:
+        ap.error("需要 --dsn 或环境变量 DATABASE_URL")
+
+    csv_dir = Path(args.input)
+    all_files = sorted(csv_dir.glob("*.csv"))
+
+    # R1-M2：总是先从 dir 里建 1m 基准（不依赖 DB），与 --period 过滤解耦。
+    baseline: Optional[list[int]] = None
+    one_min_files = [f for f in all_files if _discover_period(f) == "1m"]
+    if one_min_files:
+        base_df = compute_indicators(clean(parse_csv(one_min_files[0])))
+        baseline = list(base_df["datetime"])
+
+    # 要写库的文件：--period 过滤；1m 先写（保证基准来源行也入库）。
+    write_files = all_files
+    if args.period:
+        write_files = [f for f in all_files if _discover_period(f) == args.period]
+        if args.period != "1m" and baseline is None:
+            ap.error(f"--period {args.period} 需要同目录存在 1m CSV 以建 ticket_index 基准")
+    write_files = sorted(write_files,
+                         key=lambda f: 0 if _discover_period(f) == "1m" else 1)
+
+    total = 0
+    for f in write_files:
+        period = args.period or _discover_period(f)
+        df2 = compute_indicators(clean(parse_csv(f)))
+        df2["ticket_index"] = compute_ticket_index(df2, period, baseline)
+        name = _resolve_stock_name(df2, args.name, args.stock)
+        records = to_kline_records(df2, stock_code=args.stock, period=period)
+        n = asyncio.run(write_to_postgres(args.dsn, args.stock, name, records))
+        total += n
+        print(f"[B1] {f.name} period={period} rows={n}")
+    print(f"[B1] 完成：共写入 {total} 行 klines")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
