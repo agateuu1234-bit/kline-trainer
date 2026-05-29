@@ -36,7 +36,7 @@
 |---|---|---|---|
 | D.1 | 运行：`grep -nc 'row.status == "sent" and row.lease_id == lease_id' backend/app/lease_logic.py` | 输出 `1`（幂等检查行存在） | =1 |
 | D.2 | 运行：`grep -nc 'lease_expires_at < now' backend/app/lease_logic.py` | 输出 `1`（confirm 用严格小于） | =1 |
-| D.3 | 运行：`grep -nc 'lease_expires_at <= now' backend/app/lease_logic.py` | 输出 `1`（meta 用小于等于，与 D.2 不对称） | =1 |
+| D.3 | 运行：`grep -nc 'return lease_expires_at <= now' backend/app/lease_logic.py` | 输出 `1`（meta 用小于等于，与 D.2 不对称；锚到 `return` 行以避开 docstring 注释里的同字样） | =1 |
 | D.4 | 运行：`grep -nc 'status == "unsent"' backend/app/lease_logic.py` | 输出 `1`（meta 可选谓词包含 unsent） | =1 |
 
 ## §E D4 契约修正：expires_at 输出 `...Z` 格式
@@ -64,8 +64,8 @@
 | 编号 | 操作 | 预期 | 通过条件 |
 |---|---|---|---|
 | G.1 | 运行：`grep -cE '^(import\|from) (fastapi\|asyncpg)' backend/app/lease_logic.py` | 输出 `0`（纯决策层零顶层依赖） | =0（若命令因无匹配返回非零 exit，需用 `grep ... \|\| true` 包裹，值仍应为 0） |
-| G.2 | 运行：`grep -cE '^import asyncpg' backend/app/lease_repo.py` | 输出 `0`（asyncpg 局部 import，不在顶层） | =0 |
-| G.3 | 运行：`grep -c 'import asyncpg' backend/app/lease_repo.py` | 输出 `1`（asyncpg 在函数体内局部 import） | =1 |
+| G.2 | 运行：`grep -cE '^import asyncpg' backend/app/lease_repo.py` | 输出 `0`（无顶层 import asyncpg；asyncpg 由 pool 参数注入，文件从不真正 import） | =0 |
+| G.3 | 运行：`grep -cE '^[^#]*import asyncpg' backend/app/lease_repo.py` | 输出 `0`（去掉注释行后，全文件无任何 `import asyncpg` 语句——`AsyncpgLeaseRepository` 只收外部传入的 pool） | =0 |
 
 ## §H deps 无 range + 不改 frozen 文件
 
