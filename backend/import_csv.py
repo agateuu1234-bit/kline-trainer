@@ -198,10 +198,14 @@ def _resolve_stock_name(df: pd.DataFrame, cli_name: Optional[str], code: str) ->
     return cli_name or code
 
 
+# schema klines.period 合法值（plan v1.5 L328 字面）
+KNOWN_PERIODS = ("1m", "3m", "15m", "60m", "daily", "weekly", "monthly")
+
+
 def _discover_period(csv_path: Path) -> str:
     """从文件名推断 period（如 '600519_1m.csv' → '1m'）；失败回 '1m'。"""
     stem = csv_path.stem.lower()
-    for p in ("1m", "3m", "15m", "60m", "daily", "weekly", "monthly"):
+    for p in KNOWN_PERIODS:
         if stem.endswith(p) or f"_{p}" in stem:
             return p
     return "1m"
@@ -217,6 +221,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = ap.parse_args(argv)
     if not args.dsn:
         ap.error("需要 --dsn 或环境变量 DATABASE_URL")
+    # R4-1（Task2 code-quality）：拒绝 typo/未知 --period，避免静默 0 行"成功"导入。
+    if args.period and args.period not in KNOWN_PERIODS:
+        ap.error(f"未知 --period {args.period!r}（合法值：{', '.join(KNOWN_PERIODS)}）")
 
     csv_dir = Path(args.input)
     all_files = sorted(csv_dir.glob("*.csv"))

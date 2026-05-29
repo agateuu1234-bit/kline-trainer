@@ -558,10 +558,14 @@ def _resolve_stock_name(df: pd.DataFrame, cli_name: Optional[str], code: str) ->
     return cli_name or code
 
 
+# schema klines.period 合法值（plan v1.5 L328 字面）
+KNOWN_PERIODS = ("1m", "3m", "15m", "60m", "daily", "weekly", "monthly")
+
+
 def _discover_period(csv_path: Path) -> str:
     """从文件名推断 period（如 '600519_1m.csv' → '1m'）；失败回 '1m'。"""
     stem = csv_path.stem.lower()
-    for p in ("1m", "3m", "15m", "60m", "daily", "weekly", "monthly"):
+    for p in KNOWN_PERIODS:
         if stem.endswith(p) or f"_{p}" in stem:
             return p
     return "1m"
@@ -577,6 +581,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = ap.parse_args(argv)
     if not args.dsn:
         ap.error("需要 --dsn 或环境变量 DATABASE_URL")
+    # R4-1（Task2 code-quality）：拒绝 typo/未知 --period，避免静默 0 行"成功"导入。
+    if args.period and args.period not in KNOWN_PERIODS:
+        ap.error(f"未知 --period {args.period!r}（合法值：{', '.join(KNOWN_PERIODS)}）")
 
     csv_dir = Path(args.input)
     all_files = sorted(csv_dir.glob("*.csv"))
@@ -850,6 +857,20 @@ R1 verdict **NEEDS-ATTENTION**（2H/2M/1L），reviewer 实测（装 pandas 2.2.
 | L1 acceptance G2 `pytest|tee|tail` 在 pipefail 下 grep 门半死（pytest 非零先 abort）但净行为正确 | Low | **接受 residual**：reviewer 自评 "benign, no fix required"，失败 pytest 仍正确 fail 脚本 | — |
 
 测试数：15 → 16（+`test_to_kline_records_integer_columns_are_python_int`；原 15 个 + 该 1 个 = 16，R3 prose 修：plan 早先误写 17）。reviewer 已实测确认 MA66/BOLL/MACD 数学 + ticket_index searchsorted + 17 列 INSERT 对齐 + NaN→None + grep 锚全部正确（"Verified correct" 清单）。R2（fresh opus xhigh）实测复核 APPROVE。
+
+---
+
+## R4 修订（Task 2 code-quality reviewer）
+
+subagent-driven Task 2 code-quality review **APPROVED**（0 Critical/0 Important/3 Minor）。处理：
+
+| Finding | 处理 |
+|---|---|
+| R4-1 typo/未知 `--period` 静默选 0 文件 → 打印"共写入 0 行"exit 0（看似成功的空导入，导入工具的操作 footgun） | **修**：`main()` 加 `KNOWN_PERIODS` 校验，未知 period → `ap.error` fail-fast；`_discover_period` 复用同常量。code + plan 同步。 |
+| R4-2 `_resolve_stock_name` 取首个非 NaN（非首个非空白）name；whitespace-only 首行会落到 fallback | **接受 residual**：name 按约定每文件恒定，fallback（--name / code）安全；narrow edge。 |
+| R4-3 每文件一个 `asyncio.run` 新事件循环/连接 | **接受 residual**：7 周期批量微不足道；复用连接增共享状态复杂度，CLAUDE.md §2 不值当。 |
+
+R4-1 是 2 行 additive guard（不改业务逻辑/不改纯层/不改 17 列写库），16 纯层测试零回归。R4-2/R4-3 记 acceptance §K residual。R4 不需新轮 review。
 
 ---
 
