@@ -225,3 +225,136 @@ def assemble_training_set(output_dir: Path, *, stock_code: str, stock_name: str,
                                 stock_code=stock_code, stock_name=stock_name,
                                 start_datetime=start_datetime, end_datetime=after_end,
                                 schema_version=SCHEMA_VERSION)
+
+
+# ===== 薄 asyncpg PG 壳 + CLI（D1/D13：不单测，B3/NAS 集成 scope）=====
+import argparse
+import asyncio
+import os
+
+# klines 列：复制进训练组 SQLite 的列（指标由 B1 预计算，D15 B2 不重算）
+_KLINE_SELECT_COLS = ("period, datetime, open, high, low, close, volume, amount, "
+                      "ma66, boll_upper, boll_mid, boll_lower, macd_diff, macd_dea, macd_bar")
+
+
+async def _fetch_period_bars(conn, stock_code: str, period: str) -> pd.DataFrame:
+    """读某股某周期全部 klines（升序）→ DataFrame。指标列已由 B1 算好（D15）。"""
+    rows = await conn.fetch(
+        f"SELECT {_KLINE_SELECT_COLS} FROM klines "
+        "WHERE stock_code=$1 AND period=$2 ORDER BY datetime", stock_code, period)
+    return pd.DataFrame([dict(r) for r in rows])
+
+
+async def _exists_start(conn, stock_code: str, start_datetime: int) -> bool:
+    """D7：幂等预检（schema 无 UNIQUE，用 SELECT 判断 (stock_code,start_datetime) 是否已生成）。"""
+    row = await conn.fetchrow(
+        "SELECT 1 FROM training_sets WHERE stock_code=$1 AND start_datetime=$2",
+        stock_code, start_datetime)
+    return row is not None
+
+
+async def _register_training_set(conn, gts: GeneratedTrainingSet) -> int:
+    """登记 training_sets 行（status 默认 'unsent'）。返回新行 id。"""
+    return await conn.fetchval(
+        "INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, "
+        "schema_version, file_path, content_hash) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
+        gts.stock_code, gts.stock_name, gts.start_datetime, gts.end_datetime,
+        gts.schema_version, str(gts.path), gts.content_hash)
+
+
+def _stock_name_of(period_bars: dict, stock_code: str) -> str:
+    """训练组生成不查 stocks 表，stock_name 简化为 code（B3/前端用 stocks.name 显示）。"""
+    return stock_code
+
+
+async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
+                                    rng: Optional[random.Random] = None,
+                                    max_retries: int = 8) -> GeneratedTrainingSet:
+    """D7：取各周期 bars → 装配 → 幂等预检（冲突重选）→ 登记。
+    重试耗尽 / 月线不足 / 周期数据不足 → GenerateSkipException。"""
+    rng = rng or random.Random()
+    period_bars = {p: await _fetch_period_bars(conn, stock_code, p) for p in PERIODS}
+    for _ in range(max_retries):
+        gts = assemble_training_set(output_dir, stock_code=stock_code,
+                                    stock_name=_stock_name_of(period_bars, stock_code),
+                                    period_bars=period_bars, rng=rng)
+        if await _exists_start(conn, stock_code, gts.start_datetime):
+            gts.path.unlink(missing_ok=True)                     # 重选：删掉冲突产物
+            gts.path.with_suffix(".db").unlink(missing_ok=True)
+            continue
+        await _register_training_set(conn, gts)
+        return gts
+    raise GenerateSkipException(f"{stock_code}: {max_retries} 次起始点全冲突，跳过")
+
+
+async def generate_batch(conn, target_count: int, output_dir: Path,
+                         rng: Optional[random.Random] = None) -> list:
+    """D10：B4 调度器直接调用。循环生成直到 target_count 个或连续 skip 超限（防死循环）。"""
+    rng = rng or random.Random()
+    codes = [r["code"] for r in await conn.fetch("SELECT code FROM stocks ORDER BY code")]
+    if not codes:
+        return []
+    out: list = []
+    skips = 0
+    max_skips = max(target_count * 4, 4)
+    i = 0
+    while len(out) < target_count and skips < max_skips:
+        code = codes[i % len(codes)]
+        i += 1
+        try:
+            out.append(await generate_one_training_set(conn, code, output_dir, rng))
+        except GenerateSkipException:
+            skips += 1
+    if len(out) < target_count:
+        print(f"[B2] 警告：仅生成 {len(out)}/{target_count}（skip {skips} 次）")
+    return out
+
+
+async def backfill_content_hash(conn) -> int:
+    """D11：v1.3 回迁——重算 status='unsent' AND content_hash IS NULL 行的 CRC32 并回写。返回回填行数。"""
+    rows = await conn.fetch(
+        "SELECT id, file_path FROM training_sets "
+        "WHERE status='unsent' AND content_hash IS NULL")
+    n = 0
+    for r in rows:
+        zip_bytes = Path(r["file_path"]).read_bytes()
+        await conn.execute("UPDATE training_sets SET content_hash=$1 WHERE id=$2",
+                           crc32_hex(zip_bytes), r["id"])
+        n += 1
+    print(f"[B2] backfill：回填 {n} 行 content_hash")
+    return n
+
+
+async def _amain(args) -> int:
+    import asyncpg                          # 局部 import：纯装配层不依赖 asyncpg（单测不装也能跑）
+    conn = await asyncpg.connect(args.dsn)
+    try:
+        out_dir = Path(args.output)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if args.backfill:
+            await backfill_content_hash(conn)
+            return 0
+        sets = await generate_batch(conn, args.count, out_dir, random.Random(args.seed))
+        for g in sets:
+            print(f"[B2] {g.path.name} crc32={g.content_hash} start={g.start_datetime}")
+        print(f"[B2] 完成：生成 {len(sets)} 个训练组")
+        return 0
+    finally:
+        await conn.close()
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description="生成训练组 SQLite + zip + 登记 training_sets (B2)")
+    ap.add_argument("--dsn", default=os.environ.get("DATABASE_URL"), help="PostgreSQL DSN")
+    ap.add_argument("--count", type=int, default=100, help="目标生成个数")
+    ap.add_argument("--output", required=True, help="训练组 .zip 输出目录")
+    ap.add_argument("--seed", type=int, default=None, help="随机种子（可复现）")
+    ap.add_argument("--backfill", action="store_true", help="仅回迁 content_hash（v1.3 迁移）")
+    args = ap.parse_args(argv)
+    if not args.dsn:
+        ap.error("需要 --dsn 或环境变量 DATABASE_URL")
+    return asyncio.run(_amain(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
