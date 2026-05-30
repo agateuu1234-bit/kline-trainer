@@ -177,3 +177,174 @@ def test_sweep_is_degraded_flags_partial():
     assert sweep_is_degraded(SweepResult([], 70, 60)) is True
     assert sweep_is_degraded(SweepResult([], 70, 70)) is False
     assert sweep_is_degraded(SweepResult([], 0, 0)) is False
+
+
+def _fake_pool():
+    class _FakeConn:
+        pass
+
+    class _FakeAcq:
+        async def __aenter__(self):
+            return _FakeConn()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakePool:
+        def acquire(self):
+            return _FakeAcq()
+
+    return _FakePool()
+
+
+def test_build_generate_batch_adapts_b2_to_count(monkeypatch, tmp_path):
+    # D5：把 B2 generate_batch(conn,target_count,output_dir,rng)->list 适配成 (n)->int
+    import generate_training_sets as gts
+
+    async def fake_gb(conn, target_count, output_dir, rng):
+        return [object()] * target_count          # 模拟生成 target_count 个
+
+    monkeypatch.setattr(gts, "generate_batch", fake_gb)
+    from app.scheduler import build_generate_batch
+    gen = build_generate_batch(_fake_pool(), str(tmp_path / "ts_out"))
+    assert asyncio.run(gen(70)) == 70
+
+
+def test_build_generate_batch_creates_output_dir(monkeypatch, tmp_path):
+    # F1：首次部署输出目录不存在时，adapter 必须先建目录
+    import generate_training_sets as gts
+
+    async def fake_gb(conn, target_count, output_dir, rng):
+        assert output_dir.exists()
+        return [object()] * target_count
+
+    monkeypatch.setattr(gts, "generate_batch", fake_gb)
+    target = tmp_path / "nested" / "ts_out"
+    assert not target.exists()
+    from app.scheduler import build_generate_batch
+    gen = build_generate_batch(_fake_pool(), str(target))
+    assert target.exists()              # build 时即创建
+    assert asyncio.run(gen(3)) == 3
+
+
+def test_start_b4_scheduler_starts_running():
+    pytest.importorskip("apscheduler")
+    from app.scheduler import start_b4_scheduler
+
+    async def run():
+        repo = InMemoryLeaseRepository()
+
+        async def gen(n):
+            return 0
+
+        sched = start_b4_scheduler(repo, gen)
+        try:
+            assert sched.running is True
+            assert sched.get_job("b4_daily_sweep") is not None
+        finally:
+            sched.shutdown(wait=False)
+
+    asyncio.run(run())
+
+
+def test_main_app_startup_without_dsn_keeps_inmemory(monkeypatch):
+    # lifespan 无 DATABASE_URL 分支 no-op，不破坏现有 /health + InMemory 默认
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    from fastapi.testclient import TestClient
+    import app.main as main
+    with TestClient(main.app) as client:
+        assert client.get("/health").json() == {"status": "ok"}
+
+
+def _install_fake_asyncpg(monkeypatch, closed, *, lock_result=True):
+    import sys
+    import types
+
+    class _FakeConn:
+        async def fetchval(self, q, *a):
+            return lock_result          # pg_try_advisory_lock 结果
+        async def execute(self, q, *a):
+            return "ok"                 # pg_advisory_unlock
+
+    class _FakePool:
+        async def acquire(self):
+            return _FakeConn()
+        async def release(self, conn):
+            return None
+        async def close(self):
+            closed["pool"] = True
+
+    fake = types.ModuleType("asyncpg")
+
+    async def create_pool(dsn):
+        return _FakePool()
+
+    fake.create_pool = create_pool
+    monkeypatch.setitem(sys.modules, "asyncpg", fake)
+
+
+def test_main_lifespan_dsn_swaps_repo_only(monkeypatch):
+    # D12：有 DSN → lifespan swap 成 Asyncpg repo + 退出关 pool；不起调度器（调度器在独立进程）
+    import app.main as main
+    import app.routes as routes
+    from app.lease_repo import AsyncpgLeaseRepository, InMemoryLeaseRepository
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("DATABASE_URL", "postgres://x")
+    closed = {"pool": False}
+    _install_fake_asyncpg(monkeypatch, closed)
+    try:
+        with TestClient(main.app):
+            assert isinstance(routes._default_repo, AsyncpgLeaseRepository)
+        assert closed["pool"] is True
+    finally:
+        routes.set_default_repo(InMemoryLeaseRepository())   # 复原全局，避免污染后续测试
+
+
+def test_scheduler_main_run_wires_and_cleans_up(monkeypatch, tmp_path):
+    # D12：独立进程接线——建 pool/repo/adapter/start，block 立即返回后清理（关 pool）
+    pytest.importorskip("apscheduler")
+    import generate_training_sets as gts
+
+    async def fake_gb(conn, target_count, output_dir, rng):
+        return []
+
+    monkeypatch.setattr(gts, "generate_batch", fake_gb)
+    closed = {"pool": False}
+    _install_fake_asyncpg(monkeypatch, closed)
+
+    from app.scheduler_main import run_scheduler_process
+
+    async def block():
+        return  # 立即返回，模拟收到停止信号
+
+    asyncio.run(run_scheduler_process("postgres://x", str(tmp_path / "ts"), block=block))
+    assert closed["pool"] is True
+
+
+def test_scheduler_main_exits_when_lock_held(monkeypatch, tmp_path):
+    # D14：拿不到 advisory lock（已有 scheduler 持锁）→ 直接返回，不 start 调度器
+    import app.scheduler as scheduler_mod
+    closed = {"pool": False}
+    _install_fake_asyncpg(monkeypatch, closed, lock_result=False)
+    started = {"n": 0}
+    monkeypatch.setattr(scheduler_mod, "start_b4_scheduler",
+                        lambda *a, **k: started.__setitem__("n", started["n"] + 1))
+
+    from app.scheduler_main import run_scheduler_process
+
+    asyncio.run(run_scheduler_process("postgres://x", str(tmp_path / "ts")))
+    assert started["n"] == 0          # 未拿到锁 → 未起调度器
+    assert closed["pool"] is True     # 仍清理 pool
+
+
+def test_scheduler_main_requires_absolute_training_sets_dir(monkeypatch):
+    # D15：TRAINING_SETS_DIR 缺失或相对路径 → SystemExit（防 scheduler/web 路径不一致 404）
+    import app.scheduler_main as sm
+    monkeypatch.setenv("DATABASE_URL", "postgres://x")
+    monkeypatch.delenv("TRAINING_SETS_DIR", raising=False)
+    with pytest.raises(SystemExit):
+        sm.main()
+    monkeypatch.setenv("TRAINING_SETS_DIR", "relative/path")
+    with pytest.raises(SystemExit):
+        sm.main()
