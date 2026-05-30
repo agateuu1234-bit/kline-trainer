@@ -147,3 +147,33 @@ def test_run_sweep_until_target_exhausts_attempts():
     result = asyncio.run(run_sweep_until_target(repo, NOW, gen, max_attempts=3))
     assert sweep_is_degraded(result) is True
     assert result.generated == 0
+
+
+def test_build_scheduler_cron_and_reentrancy_guard():
+    pytest.importorskip("apscheduler")
+    from app.scheduler import build_scheduler
+    repo = InMemoryLeaseRepository()
+
+    async def gen(n):
+        return 0
+
+    # build_scheduler 返回未 start 的 scheduler；未 start 无需 shutdown
+    # （codex R3-F2：APScheduler 3.x 对未启动 scheduler shutdown 抛 SchedulerNotRunningError）。
+    # 未 start 时 add_job 进 _pending_jobs，get_job/get_jobs 仍可读到 pending job 及其属性。
+    sched = build_scheduler(repo, gen)
+    job = sched.get_job("b4_daily_sweep")
+    assert job is not None
+    r = repr(job.trigger)
+    assert "hour='5'" in r and "minute='0'" in r and "Asia/Shanghai" in r
+    # D11 同进程重入保护 + misfire 宽限（codex R7-F3）
+    assert job.max_instances == 1
+    assert job.coalesce is True
+    assert job.misfire_grace_time == 3600
+
+
+def test_sweep_is_degraded_flags_partial():
+    # codex R4-F2：补足未达目标（请求>0 但实际更少）须被标记 degraded
+    from app.scheduler import SweepResult, sweep_is_degraded
+    assert sweep_is_degraded(SweepResult([], 70, 60)) is True
+    assert sweep_is_degraded(SweepResult([], 70, 70)) is False
+    assert sweep_is_degraded(SweepResult([], 0, 0)) is False
