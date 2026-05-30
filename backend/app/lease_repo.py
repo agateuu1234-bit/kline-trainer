@@ -160,3 +160,23 @@ class AsyncpgLeaseRepository(LeaseRepository):
         async with self._pool.acquire() as conn:
             return await conn.fetchval(
                 "SELECT file_path FROM training_sets WHERE id = $1", id)
+
+    async def count_unsent(self) -> int:
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT count(*) FROM training_sets WHERE status = 'unsent'")
+
+    async def rollback_expired(self, now: datetime) -> list[int]:
+        """B4 职责 1：过期 reserved → unsent，重置 4 列（spec L813 严格 `<`）。
+        返回回滚 id。CI 不跑；now 为 tz-aware datetime → timestamptz。"""
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    """
+                    UPDATE training_sets
+                       SET status = 'unsent', lease_id = NULL,
+                           lease_expires_at = NULL, reserved_at = NULL
+                     WHERE status = 'reserved' AND lease_expires_at < $1
+                    RETURNING id
+                    """, now)
+                return [r["id"] for r in rows]
