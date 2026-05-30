@@ -54,8 +54,9 @@ async def run_sweep(
 
 
 def sweep_is_degraded(result: SweepResult) -> bool:
-    """补足未达目标（请求>0 但实际生成更少）→ degraded，需告警（codex R4-F2）。"""
-    return result.deficit > 0 and result.generated < result.deficit
+    """该 sweep 结果仍有未满足的剩余缺口（deficit>0）→ degraded，需告警。
+    用于 run_sweep_until_target 的结果——其 deficit = 重试后基于实际 count_unsent 的最终剩余缺口。"""
+    return result.deficit > 0
 
 
 DEFAULT_MAX_SWEEP_ATTEMPTS = 3
@@ -70,24 +71,28 @@ async def run_sweep_until_target(
     target: int = REPLENISH_TARGET,
     max_attempts: int = DEFAULT_MAX_SWEEP_ATTEMPTS,
 ) -> SweepResult:
-    """首轮完整 sweep（回滚 + 阈值门触发补足）；一旦触发补足（首轮 deficit>0）但累计未达起始缺口，
-    在同进程立即重试——**重试补 max(0, target - 当前 unsent)，不再过 unsent<=40 阈值门**（D16/R6-F1：
-    阈值门只决定「是否启动补足」，启动后须补到 target；否则 30→+35→重试看 65>40 会误判 deficit=0 停在 65）。
-    返回 SweepResult：rolled_back=首轮回滚；deficit=首轮起始缺口；generated=累计实际生成
-    （单线程下 unsent 只增 → generated>=deficit ⟺ 已达 target）。"""
+    """首轮完整 sweep（回滚 + 阈值门触发补足）；触发补足后基于**实际 count_unsent** 重试补到 target
+    （codex branch-diff R2-F1：并发 /meta reserve 会把生成的 unsent 移走，不能只看 B2 生成数；
+    以最终库存是否达 target 为准）。重试补 max(0, target-当前unsent)，不再过 unsent<=40 阈值门（D16）。
+    返回 SweepResult：rolled_back=首轮回滚；deficit=重试后基于实际 count 的最终剩余缺口（0=已达 target）；
+    generated=累计实际 B2 生成数。"""
     first = await run_sweep(repo, now, generate_batch, threshold=threshold, target=target)
     rolled = first.rolled_back
     initial_deficit = first.deficit
     total_generated = first.generated
     attempts = 1
-    while initial_deficit > 0 and total_generated < initial_deficit and attempts < max_attempts:
+    while initial_deficit > 0 and attempts < max_attempts:
         unsent = await repo.count_unsent()
-        remaining = max(0, target - unsent)     # 重试不过阈值门（已在补足中）
+        remaining = max(0, target - unsent)     # 重试按实际库存，不过阈值门
         if remaining <= 0:
             break
         total_generated += await generate_batch(remaining)
         attempts += 1
-    return SweepResult(rolled_back=rolled, deficit=initial_deficit, generated=total_generated)
+    final_deficit = 0
+    if initial_deficit > 0:                     # 仅触发过补足才按最终实际库存判剩余缺口
+        final_unsent = await repo.count_unsent()
+        final_deficit = max(0, target - final_unsent)
+    return SweepResult(rolled_back=rolled, deficit=final_deficit, generated=total_generated)
 
 
 def build_scheduler(
@@ -113,9 +118,9 @@ def build_scheduler(
                                                   threshold=threshold, target=target)
             logger.info("B4 sweep rolled_back=%d deficit=%d generated=%d",
                         len(result.rolled_back), result.deficit, result.generated)
-            if sweep_is_degraded(result):   # codex R4-F2/R5-F3：重试耗尽仍未达标才告警，不静默
-                logger.warning("B4 replenish degraded after retries: generated %d of requested %d",
-                               result.generated, result.deficit)
+            if sweep_is_degraded(result):   # codex R4-F2/R5-F3：最终库存仍未达 target 才告警，不静默
+                logger.warning("B4 replenish degraded: final unsent still short by %d (generated %d)",
+                               result.deficit, result.generated)
         except Exception:   # codex branch-diff F2：瞬时故障不得逃逸崩调度器；记录后等次日 cron(B4-R6)
             logger.exception("B4 sweep failed with exception; will retry at next daily fire")
 
@@ -127,6 +132,7 @@ def build_scheduler(
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,   # codex R7-F3：daily 维护任务给 1h 宽限，05:00 短暂 stall 不跳过当天
+        next_run_time=datetime.now(timezone.utc),  # codex branch-diff R2-F2：启动即首跑一次（防 05:00 后启动当天不补），之后按 cron
     )
     return scheduler
 

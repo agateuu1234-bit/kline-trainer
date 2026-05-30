@@ -29,6 +29,7 @@
 | Step | Action | Expected | Pass / Fail |
 |---|---|---|---|
 | 11 | 设 DATABASE_URL + 绝对 TRAINING_SETS_DIR 跑 `python -m app.scheduler_main` | 入口可启动：起 asyncpg pool + 调度器，含 b4_daily_sweep job（常驻/restart 部署归 B4-R4） | ☐ Pass / ☐ Fail |
+| 11b | 在 05:00 之后（非 cron 时刻）启动 `python -m app.scheduler_main` | 启动即首跑一次 sweep，不必等次日 05:00（D17 next_run_time，codex branch-diff R2-F2） | ☐ Pass / ☐ Fail |
 | 12 | 不设 TRAINING_SETS_DIR 或设相对路径跑 `python -m app.scheduler_main` | 报错退出（须绝对共享路径，D15） | ☐ Pass / ☐ Fail |
 | 13 | 已有 scheduler 进程时再启一个 `python -m app.scheduler_main` | 第二个 log error 退出、不重复 sweep（D14 advisory lock） | ☐ Pass / ☐ Fail |
 | 14 | B2 部分生成（generated < 请求数）时看进程日志 | 重试耗尽后含 "B4 replenish degraded after retries" warning（非静默） | ☐ Pass / ☐ Fail |

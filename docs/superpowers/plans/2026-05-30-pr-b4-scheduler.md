@@ -1171,6 +1171,12 @@ git commit -m "B4 Task 8: non-coder acceptance checklist + residual record"
 
 ---
 
+## 实现阶段 codex branch-diff 修订记录（plan override 收口后；代码以 `backend/` 实际为准）
+
+- **BD-F2（_job 异常边界，已修）**：`build_scheduler._job` 用 try/except 包整轮 sweep——瞬时故障（rollback/count/generate 抛异常）记 `logger.exception` 不逃逸、不崩调度器；等次日 cron（near-term retry → residual B4-R6）。
+- **BD-R2-F1（重试基于实际 count，已修）**：`run_sweep_until_target` 改为按 `count_unsent()` 重试补到 target——不再用「generated 累计 vs 初始 deficit」（并发 /meta reserve 会偷走刚生成的 unsent，致误报成功而库存仍低）。`run_sweep_until_target` 返回的 `SweepResult.deficit` = 重试后基于实际 count 的**最终剩余缺口**（0=达标）；`sweep_is_degraded(r) = r.deficit > 0`；`_job` 据此告警。（Task 5/6 代码块为初稿，最终以本条为准。）
+- **BD-R2-F2（startup catch-up，已修）= D17**：`build_scheduler` add_job 设 `next_run_time=now`——独立 scheduler 进程启动即首跑一次 sweep（防 05:00 之后部署/重启当天不回滚/不补足），之后按每日 cron。
+
 ## Residual 汇总（merge 后回填 ledger）
 
 | Residual | 处理 | Follow-up |

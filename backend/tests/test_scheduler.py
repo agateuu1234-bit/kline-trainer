@@ -133,7 +133,8 @@ def test_run_sweep_until_target_retries_partial():
     assert calls[0] == 70                       # 首轮请求 100-30
     assert len(calls) >= 2                       # 触发重试
     assert asyncio.run(repo.count_unsent()) == 100
-    assert result.generated == result.deficit    # 末轮已达标
+    assert result.deficit == 0                   # 最终库存达 target（基于实际 count）
+    assert result.generated == 70                # 累计实际生成
 
 
 def test_run_sweep_until_target_exhausts_attempts():
@@ -146,7 +147,33 @@ def test_run_sweep_until_target_exhausts_attempts():
 
     result = asyncio.run(run_sweep_until_target(repo, NOW, gen, max_attempts=3))
     assert sweep_is_degraded(result) is True
+    assert result.deficit == 70                  # 最终仍缺 70（基于实际 count）
     assert result.generated == 0
+
+
+def test_run_sweep_until_target_rechecks_actual_count_not_generated():
+    # codex branch-diff R2-F1：并发 /meta reserve 偷走生成的 unsent 时，按实际 count 继续补，
+    # 不因 generated 累计已 >= 初始 deficit 就早退（旧逻辑会停在 65 不到 100）
+    from app.scheduler import run_sweep_until_target
+    repo = InMemoryLeaseRepository(rows=[_meta(i, "unsent") for i in range(1, 31)])  # 30 unsent
+    state = {"steal": True}
+    calls = []
+
+    async def gen(n):
+        calls.append(n)
+        base = max((r.id for r in repo._rows), default=0)
+        for k in range(n):
+            repo._rows.append(_meta(base + 1 + k, "unsent"))
+        if state["steal"]:                       # 首轮生成后模拟并发 reserve 偷走一半
+            state["steal"] = False
+            for r in [x for x in repo._rows if x.status == "unsent"][: n // 2]:
+                r.status = "reserved"
+        return n
+
+    result = asyncio.run(run_sweep_until_target(repo, NOW, gen, max_attempts=5))
+    assert len(calls) >= 2                        # 首轮 generated=70>=deficit70 但被偷走 → 仍按实际 count 重试
+    assert asyncio.run(repo.count_unsent()) >= 100
+    assert result.deficit == 0                    # 最终按实际库存达 target
 
 
 def test_build_scheduler_cron_and_reentrancy_guard():
@@ -169,14 +196,15 @@ def test_build_scheduler_cron_and_reentrancy_guard():
     assert job.max_instances == 1
     assert job.coalesce is True
     assert job.misfire_grace_time == 3600
+    assert job.next_run_time is not None   # codex branch-diff R2-F2：启动即首跑一次已配置
 
 
 def test_sweep_is_degraded_flags_partial():
-    # codex R4-F2：补足未达目标（请求>0 但实际更少）须被标记 degraded
+    # codex R4-F2 / branch-diff R2-F1：基于剩余缺口（deficit>0 = 最终仍未达 target）判 degraded
     from app.scheduler import SweepResult, sweep_is_degraded
-    assert sweep_is_degraded(SweepResult([], 70, 60)) is True
-    assert sweep_is_degraded(SweepResult([], 70, 70)) is False
-    assert sweep_is_degraded(SweepResult([], 0, 0)) is False
+    assert sweep_is_degraded(SweepResult([], 10, 60)) is True    # 剩余缺口 10 → degraded
+    assert sweep_is_degraded(SweepResult([], 0, 70)) is False    # 剩余 0 → 达标
+    assert sweep_is_degraded(SweepResult([], 0, 0)) is False     # 未触发补足 → 达标
 
 
 def _fake_pool():
