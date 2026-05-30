@@ -108,13 +108,16 @@ def build_scheduler(
     scheduler = AsyncIOScheduler(timezone=BEIJING_TZ)
 
     async def _job() -> None:
-        result = await run_sweep_until_target(repo, datetime.now(timezone.utc), generate_batch,
-                                              threshold=threshold, target=target)
-        logger.info("B4 sweep rolled_back=%d deficit=%d generated=%d",
-                    len(result.rolled_back), result.deficit, result.generated)
-        if sweep_is_degraded(result):   # codex R4-F2/R5-F3：重试耗尽仍未达标才告警，不静默
-            logger.warning("B4 replenish degraded after retries: generated %d of requested %d",
-                           result.generated, result.deficit)
+        try:
+            result = await run_sweep_until_target(repo, datetime.now(timezone.utc), generate_batch,
+                                                  threshold=threshold, target=target)
+            logger.info("B4 sweep rolled_back=%d deficit=%d generated=%d",
+                        len(result.rolled_back), result.deficit, result.generated)
+            if sweep_is_degraded(result):   # codex R4-F2/R5-F3：重试耗尽仍未达标才告警，不静默
+                logger.warning("B4 replenish degraded after retries: generated %d of requested %d",
+                               result.generated, result.deficit)
+        except Exception:   # codex branch-diff F2：瞬时故障不得逃逸崩调度器；记录后等次日 cron(B4-R6)
+            logger.exception("B4 sweep failed with exception; will retry at next daily fire")
 
     scheduler.add_job(
         _job,

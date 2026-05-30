@@ -348,3 +348,28 @@ def test_scheduler_main_requires_absolute_training_sets_dir(monkeypatch):
     monkeypatch.setenv("TRAINING_SETS_DIR", "relative/path")
     with pytest.raises(SystemExit):
         sm.main()
+
+
+def test_build_scheduler_job_swallows_sweep_exception(caplog):
+    # codex branch-diff F2：sweep 抛异常时 _job 不传播（记录后等次日 cron），不崩调度器
+    import logging
+
+    pytest.importorskip("apscheduler")
+    from app.scheduler import build_scheduler
+
+    class _BoomRepo:
+        async def rollback_expired(self, now):
+            raise RuntimeError("db down")
+
+        async def count_unsent(self):
+            return 0
+
+    async def gen(n):
+        return 0
+
+    sched = build_scheduler(_BoomRepo(), gen)
+    job = sched.get_job("b4_daily_sweep")
+    # _job 不应把异常传播出来（未 start 的 scheduler 不需 shutdown）
+    with caplog.at_level(logging.ERROR, logger="app.scheduler"):
+        asyncio.run(job.func())
+    assert "B4 sweep failed" in caplog.text

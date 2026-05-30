@@ -1179,5 +1179,6 @@ git commit -m "B4 Task 8: non-coder acceptance checklist + residual record"
 | B4-R2 CI 不加 backend pytest | 沿用 B1-B3 | trust-boundary workflow 独立 governance PR |
 | B4-R3 进程级 advisory lock | **已实现**（D14 `pg_try_advisory_lock` 强制单例，codex R5-F1）| per-sweep 级锁非必要 |
 | B4-R4 生产部署编排 defer | PR goal 收窄不声称常驻启动（codex R4-F1 / R6-F2）| 后续部署 PR：compose service + restart policy + enabled 验收 |
-| B4-R5 advisory lock conn-scoped 极端 | residual（codex R7-F2，user 接受 escalate）| 多实例化改 per-sweep lock + conn-loss 检测 |
+| B4-R5 advisory lock conn-scoped 极端 | residual（codex R7-F2 / branch-diff F1，user 接受 escalate）| 多实例化改 per-sweep lock + conn-loss 检测 |
+| B4-R6 sweep 异常边界 | **已实现**（_job try/except + logger.exception，codex branch-diff F2）；near-term retry defer | 瞬时故障当天恢复留后续部署 PR |
 | H6 part 4 | Task 0 验证已 pin | ledger 标 closed |
