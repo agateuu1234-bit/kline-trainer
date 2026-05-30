@@ -14,6 +14,7 @@ from typing import Optional
 from uuid import UUID
 
 from app.lease_logic import ConfirmOutcome, RowState, decide_confirm, is_meta_selectable
+from app.scheduler_logic import is_expired_reserved
 
 # meta 响应需返回的 6 字段（对齐 openapi TrainingSetMetaItem / contract-fixtures）
 _META_FIELDS = ("id", "stock_code", "stock_name", "filename", "schema_version", "content_hash")
@@ -86,6 +87,23 @@ class InMemoryLeaseRepository(LeaseRepository):
     async def get_file_path(self, id: int) -> Optional[str]:
         r = self._by_id(id)
         return None if r is None else r.file_path
+
+    async def count_unsent(self) -> int:
+        """B4：统计 status=='unsent' 行数。"""
+        return sum(1 for r in self._rows if r.status == "unsent")
+
+    async def rollback_expired(self, now: datetime) -> list[int]:
+        """B4 职责 1：过期 reserved → unsent，重置 lease 三列 + reserved_at（维持
+        ck_lease_state_invariant：unsent 行 lease 字段须为空）。返回回滚 id 列表。"""
+        ids: list[int] = []
+        for r in self._rows:
+            if is_expired_reserved(r.status, r.lease_expires_at, now):
+                r.status = "unsent"
+                r.lease_id = None
+                r.lease_expires_at = None
+                r.reserved_at = None
+                ids.append(r.id)
+        return ids
 
 
 class AsyncpgLeaseRepository(LeaseRepository):
