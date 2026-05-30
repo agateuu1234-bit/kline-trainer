@@ -31,3 +31,24 @@ def test_expired_reserved_false_when_not_reserved():
 
 def test_expired_reserved_false_when_expiry_none():
     assert is_expired_reserved("reserved", None, NOW) is False
+
+
+def test_deficit_replenish_30_to_70():
+    # 验收场景 B：unsent=30 (<=40) → 补 70
+    assert compute_replenish_deficit(30) == 70
+
+
+def test_deficit_at_threshold_40_replenishes():
+    assert compute_replenish_deficit(40) == 60
+
+
+def test_deficit_above_threshold_returns_zero():
+    assert compute_replenish_deficit(41) == 0
+
+
+def test_deficit_zero_when_empty_fills_to_target():
+    assert compute_replenish_deficit(0) == 100
+
+
+def test_deficit_clamped_when_over_target():
+    assert compute_replenish_deficit(120) == 0
