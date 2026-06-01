@@ -14,6 +14,7 @@ from typing import Optional
 from uuid import UUID
 
 from app.lease_logic import ConfirmOutcome, RowState, decide_confirm, is_meta_selectable
+from app.scheduler_logic import is_expired_reserved
 
 # meta 响应需返回的 6 字段（对齐 openapi TrainingSetMetaItem / contract-fixtures）
 _META_FIELDS = ("id", "stock_code", "stock_name", "filename", "schema_version", "content_hash")
@@ -87,6 +88,23 @@ class InMemoryLeaseRepository(LeaseRepository):
         r = self._by_id(id)
         return None if r is None else r.file_path
 
+    async def count_unsent(self) -> int:
+        """B4：统计 status=='unsent' 行数。"""
+        return sum(1 for r in self._rows if r.status == "unsent")
+
+    async def rollback_expired(self, now: datetime) -> list[int]:
+        """B4 职责 1：过期 reserved → unsent，重置 lease 三列 + reserved_at（维持
+        ck_lease_state_invariant：unsent 行 lease 字段须为空）。返回回滚 id 列表。"""
+        ids: list[int] = []
+        for r in self._rows:
+            if is_expired_reserved(r.status, r.lease_expires_at, now):
+                r.status = "unsent"
+                r.lease_id = None
+                r.lease_expires_at = None
+                r.reserved_at = None
+                ids.append(r.id)
+        return ids
+
 
 class AsyncpgLeaseRepository(LeaseRepository):
     """薄 raw-SQL 壳（D1）：CI 不单测，NAS 部署集成。SQL 字面对齐 modules L763-803。"""
@@ -142,3 +160,23 @@ class AsyncpgLeaseRepository(LeaseRepository):
         async with self._pool.acquire() as conn:
             return await conn.fetchval(
                 "SELECT file_path FROM training_sets WHERE id = $1", id)
+
+    async def count_unsent(self) -> int:
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT count(*) FROM training_sets WHERE status = 'unsent'")
+
+    async def rollback_expired(self, now: datetime) -> list[int]:
+        """B4 职责 1：过期 reserved → unsent，重置 4 列（spec L813 严格 `<`）。
+        返回回滚 id。CI 不跑；now 为 tz-aware datetime → timestamptz。"""
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    """
+                    UPDATE training_sets
+                       SET status = 'unsent', lease_id = NULL,
+                           lease_expires_at = NULL, reserved_at = NULL
+                     WHERE status = 'reserved' AND lease_expires_at < $1
+                    RETURNING id
+                    """, now)
+                return [r["id"] for r in rows]
