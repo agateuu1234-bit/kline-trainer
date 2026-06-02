@@ -48,8 +48,8 @@
 | 5 | E6b TrainingSessionCoordinator 持久化生命周期（saveProgress/finalize/endSession） | 业务逻辑 | ~250 行 | E6a | — |
 | 6 | P2 DownloadAcceptanceRunner orchestration + `retryPendingConfirmations`（接线已有 4 端口 + 7 步 journal 状态机） | 持久化 | ~300-500 行（plan 阶段若超 500 再拆 run/runBatch + retry） | — | — |
 | 7 | **C8 ChartContainerView + H1 production handler 集成测试** | 图表集成 | ~250 行 + 集成测试 | E5（a+b） | **H1 close** + C3-C6 渲染收口 + C8 性能（见 §四） |
-| 8 | U1 HomeView | UI | ~250 行 SwiftUI | E6（a+b） + P2 | — |
-| 9 | U2 TrainingView | UI | ~300 行 SwiftUI | E5（a+b） + C8 | C2/C7 运行时验收（见 §四） |
+| 8 | U1 HomeView **+ 生产组合根 + 启动恢复**（替换模板 app entry `KlineTrainerApp.swift`/`ContentView.swift`，接线 `DefaultAppDB`/`SettingsStore`/E6 coordinator/P2 runner 生产依赖图；启动跑一次 `retryPendingConfirmations()`） | UI + composition | ~250-500 行 SwiftUI（plan 阶段若超 500 拆「组合根 + 启动恢复」与「HomeView」两 anchor） | E6（a+b） + P2 | **生产依赖图接线 + 启动孤儿确认恢复**（见 §四） |
+| 9 | U2 TrainingView **+ E6 生命周期接线** | UI | ~300 行 SwiftUI | E5（a+b） + C8 + **E6（a+b）** | C2/C7 运行时验收 + **E6 持久化生命周期**（见 §四） |
 | 10 | U4 SettingsPanel | UI | ~250 行 SwiftUI | P2 | — |
 
 **Phase 划分**：
@@ -57,9 +57,9 @@
 - B 训练运行时 + 会话编排（2-5：E5a/E5b/E6a/E6b）
 - C 下载验收编排（6：P2 runner）
 - D 图表集成 + H1 闭环（7：C8）
-- E UI 顶层装配（8-10：U1/U2/U4）
+- E UI 顶层装配 + 生产组合根（8-10：U1+组合根/U2/U4）
 
-**依赖满足校验**（每锚上游均在更早顺位 merged 或 Wave 0/1 已完成）：2 E5a(无 Wave 2 依赖) → 3 E5b(需 2) → 4 E6a(需 2+3；P4/P3a/P5/P6 Wave 0 已完成) → 5 E6b(需 4) → 6 P2(无 Wave 2 依赖；4 端口/P1/P4-journal/P5 Wave 0 已完成) → 7 C8(需 2+3，C2 Wave 1 已落) → 8 U1(需 4+5+6) → 9 U2(需 3+7) → 10 U4(需 6)。无逆向依赖。
+**依赖满足校验**（每锚上游均在更早顺位 merged 或 Wave 0/1 已完成）：2 E5a(无 Wave 2 依赖) → 3 E5b(需 2) → 4 E6a(需 2+3；P4/P3a/P5/P6 Wave 0 已完成) → 5 E6b(需 4) → 6 P2(无 Wave 2 依赖；4 端口/P1/P4-journal/P5 Wave 0 已完成) → 7 C8(需 2+3，C2 Wave 1 已落) → 8 U1+组合根(需 4+5+6：组合根接线 E6+P2，DefaultAppDB/SettingsStore Wave 0 已完成) → 9 U2(需 3+4+5+7：E5+E6 生命周期+C8) → 10 U4(需 6)。无逆向依赖。
 
 ---
 
@@ -113,11 +113,13 @@
 | C3-C6 渲染 residual（交 C8 Wave 2 的渲染收口项） | `project_pr66/67/68/69_merged` | 折入顺位 7 C8 集成 PR 评估（buildRenderState 计算 volumeRange/macdRange 用 `NonDegenerateRange.make`；C8 plan 阶段逐项核对各 C3-C6 deferred 项是否在 C8 scope） | 7 |
 | C8 性能（buildRenderState <4ms / 120Hz） | spec Phase 1 §10 + modules §C8 | 顺位 7 C8 acceptance 项（plan 阶段定验证方式；Instruments 或等价；**须具体验收证据，非仅编译通过**） | 7 |
 | **C2/C7 运行时 gate**（CADisplayLink 运行时验证 / 双识别器手势运行时行为；Catalyst CI 仅 build-for-testing 编译，不跑运行时） | `project_pr60/61_merged` 接受 residual | **纳入 Wave 2 净 residual 责任**（codex R1 F3）：顺位 7 C8（CADisplayLink/buildRenderState 运行时）+ 顺位 9 U2（手势仲裁运行时）须产出**具体验收 artifact**（simulator/device 手动证据 或 专门 test-infra PR）方可在收尾 doc 标 close；不得仅凭编译通过宣告 Wave 2 clean | 7 + 9 |
+| **生产组合根 + 启动孤儿确认恢复**（app entry 仍为模板 Hello World；P2 要求启动扫 `stored`/`confirmPending` 跑 `retryPendingConfirmations()`） | codex R2 F1 | 顺位 8 U1 scope 内：替换模板 app entry，构造并接线生产依赖图（`DefaultAppDB`/`SettingsStore`/E6/P2），启动跑一次 `retryPendingConfirmations()`；acceptance 须验证依赖图实例化 + 恢复路径 | 8 |
+| **U2 E6 持久化生命周期**（返回存进度 / 自动结束 finalize / 结算确认 / review / replay 路径；pending 清理 / replay·review 非保存语义） | codex R2 F2 | 顺位 9 U2 scope 内：U2 接线 E6 `saveProgress`/`finalize`/`endSession`；plan 阶段定生命周期契约/测试矩阵（back / auto-end / settlement confirm / review / replay 五路径 + pending 清理 + 非保存分支） | 9 |
 | W1-R1 docker image digest pin | `project_wave1_completion_2026_06_01` | **不在 Wave 2 scope**：归 NAS 部署 PR | — |
 | W1-R2 3-5 样本训练组数据 | 同上（H7） | **不在 Wave 2 scope**：需 NAS 真实数据源 | — |
 | B4-R1/R4/R5/R6（清理职责3 / 部署编排 / advisory lock conn-scoped / near-term retry） | `project_pr76_b4_scheduler_merged` | **不在 Wave 2 scope**：归后续部署 / 可靠性加固 PR | — |
 
-**Wave 2 净 residual 责任**：H1（顺位 1+7 闭环）+ C3-C6 渲染收口（顺位 7）+ C8 性能（顺位 7，须具体证据）+ **C2/C7 运行时 gate（顺位 7+9，须具体验收 artifact）**；后端 / 部署 / NAS 类 residual 明确**不在 Wave 2 scope**。
+**Wave 2 净 residual 责任**：H1（顺位 1+7 闭环）+ C3-C6 渲染收口（顺位 7）+ C8 性能（顺位 7，须具体证据）+ **C2/C7 运行时 gate（顺位 7+9，须具体验收 artifact）**+ **生产组合根 + 启动恢复（顺位 8）**+ **U2 E6 生命周期（顺位 9）**；后端 / 部署 / NAS 类 residual 明确**不在 Wave 2 scope**。
 
 ---
 
@@ -152,3 +154,4 @@
 |---|---|---|
 | 2026-06-02 | v1 (draft) | 起草；12 anchor 单线（含 P4 + P2a/P2b）；user 2026-06-02 确认全部按推荐（option a RFC / 按需拆 / 轻量收尾） |
 | 2026-06-02 | v2 (branch-diff codex R1 修) | **F1**（high）：核实 P4 `DefaultAppDB` + P2 4 端口已 Wave 0 落地 → 删 P4 anchor、P2 收缩为单一 runner anchor、加 §〇 baseline reconciliation 表（文件/commit 证据）、12→10 anchor、依赖图重算；**F2**（high）：顺位 1 RFC scope 扩到 `wave1-completion.md` H1 行 + modules §Wave 2 checklist 回填 + grep gate 防残留「同 PR」，更名为「baseline reconciliation + H1 RFC」；**F3**（med）：C2/C7 运行时 gate 纳入 Wave 2 净 residual 责任 + 要求顺位 7/9 具体验收 artifact（非仅编译）+ §五 注明 Catalyst CI 仅编译不跑运行时 |
+| 2026-06-02 | v3 (branch-diff codex R2 修) | **F1**（high）：顺位 8 U1 扩 scope 含**生产组合根**（替换模板 app entry + 接线 `DefaultAppDB`/`SettingsStore`/E6/P2 依赖图）+ **启动 `retryPendingConfirmations()` 孤儿确认恢复**（plan 阶段若超 500 拆「组合根+恢复」与「HomeView」）；**F2**（high）：顺位 9 U2 加 **E6（a+b）依赖** + E6 持久化生命周期接线（saveProgress/finalize/endSession）+ 生命周期测试矩阵要求（back/auto-end/settlement/review/replay 五路径 + pending 清理 + 非保存分支）；residual 表 + 净责任 + 依赖校验同步 |
