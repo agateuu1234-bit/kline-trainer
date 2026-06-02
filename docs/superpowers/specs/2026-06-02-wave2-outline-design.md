@@ -44,10 +44,10 @@
 | 1 | **baseline reconciliation + H1 RFC**（modules §C1b 闸门 #4 F3「同 PR」措辞松绑 + §Wave 2 checklist 回填 P4/P2-端口已完成 + §15.4 ledger H1 行 + wave1-completion.md H1 行 全部 reconcile） | governance | 仅 spec/ledger/governance 文档；0 业务代码 | — | H1 措辞松绑 + baseline reconcile（见 §三.1） |
 | 2 | E5a TrainingEngine 核心（init + 运行时状态 + accessors） | 业务逻辑 | ~300 行 | — | — |
 | 3 | E5b TrainingEngine 动作（buy/sell + 模式切换 + onSceneActivated 中继） | 业务逻辑 | ~300 行 | E5a | — |
-| 4 | E6a TrainingSessionCoordinator 会话构造（start/resume/review/replay + DI init） | 业务逻辑 | ~300 行 | E5（a+b） | — |
+| 4 | E6a TrainingSessionCoordinator 会话构造（start/resume/review/replay + DI init） | 业务逻辑 | ~300 行 | E5（a+b） | **fail-closed 费用快照**（见 §四）：构造 NormalFlow 前用 `snapshotFeesIfReady`/守 `loadError`，禁用 fail-open `snapshotFees` |
 | 5 | E6b TrainingSessionCoordinator 持久化生命周期（saveProgress/finalize/endSession） | 业务逻辑 | ~250 行 | E6a | — |
 | 6 | P2 DownloadAcceptanceRunner orchestration + `retryPendingConfirmations`（接线已有 4 端口 + 7 步 journal 状态机） | 持久化 | ~300-500 行（plan 阶段若超 500 再拆 run/runBatch + retry） | — | — |
-| 7 | **C8 ChartContainerView + H1 production handler 集成测试** | 图表集成 | ~250 行 + 集成测试 | E5（a+b） | **H1 close** + C3-C6 渲染收口 + C8 性能（见 §四） |
+| 7 | **C8 ChartContainerView + C7 手势接线 + H1 production handler 集成测试** | 图表集成 | ~300 行 + 集成测试 | E5（a+b） | **H1 close** + **C7 arbiter 接线**（见 §四）+ C3-C6 渲染收口 + C8 性能 |
 | 8 | U1 HomeView **+ 生产组合根 + 启动恢复**（替换模板 app entry `KlineTrainerApp.swift`/`ContentView.swift`，接线 `DefaultAppDB`/`SettingsStore`/E6 coordinator/P2 runner 生产依赖图；启动跑一次 `retryPendingConfirmations()`） | UI + composition | ~250-500 行 SwiftUI（plan 阶段若超 500 拆「组合根 + 启动恢复」与「HomeView」两 anchor） | E6（a+b） + P2 | **生产依赖图接线 + 启动孤儿确认恢复**（见 §四） |
 | 9 | U2 TrainingView **+ E6 生命周期接线** | UI | ~300 行 SwiftUI | E5（a+b） + C8 + **E6（a+b）** | C2/C7 运行时验收 + **E6 持久化生命周期**（见 §四） |
 | 10 | U4 SettingsPanel | UI | ~250 行 SwiftUI | P2 | — |
@@ -115,11 +115,13 @@
 | **C2/C7 运行时 gate**（CADisplayLink 运行时验证 / 双识别器手势运行时行为；Catalyst CI 仅 build-for-testing 编译，不跑运行时） | `project_pr60/61_merged` 接受 residual | **纳入 Wave 2 净 residual 责任**（codex R1 F3）：顺位 7 C8（CADisplayLink/buildRenderState 运行时）+ 顺位 9 U2（手势仲裁运行时）须产出**具体验收 artifact**（simulator/device 手动证据 或 专门 test-infra PR）方可在收尾 doc 标 close；不得仅凭编译通过宣告 Wave 2 clean | 7 + 9 |
 | **生产组合根 + 启动孤儿确认恢复**（app entry 仍为模板 Hello World；P2 要求启动扫 `stored`/`confirmPending` 跑 `retryPendingConfirmations()`） | codex R2 F1 | 顺位 8 U1 scope 内：替换模板 app entry，构造并接线生产依赖图（`DefaultAppDB`/`SettingsStore`/E6/P2），启动跑一次 `retryPendingConfirmations()`；acceptance 须验证依赖图实例化 + 恢复路径 | 8 |
 | **U2 E6 持久化生命周期**（返回存进度 / 自动结束 finalize / 结算确认 / review / replay 路径；pending 清理 / replay·review 非保存语义） | codex R2 F2 | 顺位 9 U2 scope 内：U2 接线 E6 `saveProgress`/`finalize`/`endSession`；plan 阶段定生命周期契约/测试矩阵（back / auto-end / settlement confirm / review / replay 五路径 + pending 清理 + 非保存分支） | 9 |
+| **C7 手势 arbiter 生产接线**（`ChartGestureArbiter.attach(to:)` + `onPan` 等 callback 已存在，但 KLineView 无 recognizer；C8 = UIViewRepresentable 造 KLineView 是自然接线点） | codex R3 F1 | 顺位 7 C8 scope 内：C8 attach arbiter（attach-once）+ 路由 callback（pan panStarted/offsetApplied/panEnded、周期切换、十字光标、drawing）进 E5/reducer；acceptance 验证接线正确。**U2 仍只负责 hosting + 运行时证据，不负责接线本身** | 7 |
+| **E6a fail-closed 费用快照**（P6 契约：交易流必须用 `snapshotFeesIfReady`/守 `loadError`；`snapshotFees` 是 fail-open 返零费用，仅 UI 显示路径用） | codex R3 F2 | 顺位 4 E6a scope 内：构造 NormalFlow 前用 `snapshotFeesIfReady` 或显式守 `loadError`；测试 loadError 传播 + 失败时不造 engine + 不保留 activeReader/session state | 4 |
 | W1-R1 docker image digest pin | `project_wave1_completion_2026_06_01` | **不在 Wave 2 scope**：归 NAS 部署 PR | — |
 | W1-R2 3-5 样本训练组数据 | 同上（H7） | **不在 Wave 2 scope**：需 NAS 真实数据源 | — |
 | B4-R1/R4/R5/R6（清理职责3 / 部署编排 / advisory lock conn-scoped / near-term retry） | `project_pr76_b4_scheduler_merged` | **不在 Wave 2 scope**：归后续部署 / 可靠性加固 PR | — |
 
-**Wave 2 净 residual 责任**：H1（顺位 1+7 闭环）+ C3-C6 渲染收口（顺位 7）+ C8 性能（顺位 7，须具体证据）+ **C2/C7 运行时 gate（顺位 7+9，须具体验收 artifact）**+ **生产组合根 + 启动恢复（顺位 8）**+ **U2 E6 生命周期（顺位 9）**；后端 / 部署 / NAS 类 residual 明确**不在 Wave 2 scope**。
+**Wave 2 净 residual 责任**：H1（顺位 1+7 闭环）+ C3-C6 渲染收口（顺位 7）+ C8 性能（顺位 7，须具体证据）+ **C2/C7 运行时 gate（顺位 7+9，须具体验收 artifact）**+ **生产组合根 + 启动恢复（顺位 8）**+ **U2 E6 生命周期（顺位 9）**+ **C7 手势 arbiter 接线（顺位 7）**+ **E6a fail-closed 费用快照（顺位 4）**；后端 / 部署 / NAS 类 residual 明确**不在 Wave 2 scope**。
 
 ---
 
@@ -155,3 +157,4 @@
 | 2026-06-02 | v1 (draft) | 起草；12 anchor 单线（含 P4 + P2a/P2b）；user 2026-06-02 确认全部按推荐（option a RFC / 按需拆 / 轻量收尾） |
 | 2026-06-02 | v2 (branch-diff codex R1 修) | **F1**（high）：核实 P4 `DefaultAppDB` + P2 4 端口已 Wave 0 落地 → 删 P4 anchor、P2 收缩为单一 runner anchor、加 §〇 baseline reconciliation 表（文件/commit 证据）、12→10 anchor、依赖图重算；**F2**（high）：顺位 1 RFC scope 扩到 `wave1-completion.md` H1 行 + modules §Wave 2 checklist 回填 + grep gate 防残留「同 PR」，更名为「baseline reconciliation + H1 RFC」；**F3**（med）：C2/C7 运行时 gate 纳入 Wave 2 净 residual 责任 + 要求顺位 7/9 具体验收 artifact（非仅编译）+ §五 注明 Catalyst CI 仅编译不跑运行时 |
 | 2026-06-02 | v3 (branch-diff codex R2 修) | **F1**（high）：顺位 8 U1 扩 scope 含**生产组合根**（替换模板 app entry + 接线 `DefaultAppDB`/`SettingsStore`/E6/P2 依赖图）+ **启动 `retryPendingConfirmations()` 孤儿确认恢复**（plan 阶段若超 500 拆「组合根+恢复」与「HomeView」）；**F2**（high）：顺位 9 U2 加 **E6（a+b）依赖** + E6 持久化生命周期接线（saveProgress/finalize/endSession）+ 生命周期测试矩阵要求（back/auto-end/settlement/review/replay 五路径 + pending 清理 + 非保存分支）；residual 表 + 净责任 + 依赖校验同步 |
+| 2026-06-02 | v4 (branch-diff codex R3 修) | **F1**（high）：顺位 7 C8 加 **C7 手势 arbiter 生产接线**（attach-once + 路由 onPan/周期切换/十字光标/drawing callback 进 E5/reducer；U2 仍只负责 hosting+运行时证据不负责接线）；**F2**（high）：顺位 4 E6a 加 **fail-closed 费用快照**（构造 NormalFlow 前用 `snapshotFeesIfReady`/守 `loadError`，禁 fail-open `snapshotFees`；测试 loadError 传播 + 不造 engine + 不留 reader/session）；residual 表 + 净责任 + 范围估算同步 |
