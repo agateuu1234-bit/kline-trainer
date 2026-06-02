@@ -82,9 +82,11 @@
 2. `kline_trainer_modules_v1.4.md` §Wave 2 checklist（L2171-2180）回填：P4 + P2 4 端口标注「已 Wave 0 落地」（消除 §〇 所列 stale 项）。
 3. `docs/governance/2026-05-17-wave0-signoff-ledger.md` §28 H1 行措辞同步。
 4. `docs/governance/2026-06-01-wave1-completion.md` H1 行（仓库 L43）措辞同步。
-5. **fee-callsite 措辞 reconcile**（codex R5 F1）：`kline_trainer_modules_v1.4.md` L2000 / L2040 现写「Coordinator.startNewNormalSession 内部调用 `settings.snapshotFees()`」——与 SettingsStore fail-closed 契约（交易流须 `snapshotFeesIfReady`/守 `loadError`）冲突。改为 `snapshotFeesIfReady`/显式 loadError 守卫措辞，防 E6a 照 stale 字面构造零费用 NormalFlow（架空 §四 E6a residual）。
-6. **grep gate**（acceptance 项）：RFC merge 后断言全仓 (a) 无未被 supersede 的 `同 PR` / `C2/C8/E5 orchestration 同 PR` 残留措辞；(b) 交易路径（`startNewNormalSession` 等）不调 fail-open `snapshotFees()`（除本 outline + RFC 自身引用 / changelog）。
-- 0 业务代码改动（仅 spec/governance 文档）。
+5. **全部 stale Wave 2 边界源 reconcile**（codex R6 F1）：除上述，`docs/superpowers/specs/2026-05-19-wave1-outline-design.md` §六（仍列 P4 + 全 P2 为 Wave 2）+ `docs/governance/2026-06-01-wave1-completion.md` §五（同列 P4/P2）均须标注「P4 + P2 4 端口已 Wave 0 落地，Wave 2 仅 P2 runner」，防 plan-stage grep 仍命中权威化的「重做已完成 P4/P2」指令。
+6. **fee-callsite 措辞 reconcile**（codex R5 F1）：`kline_trainer_modules_v1.4.md` L2000 / L2040 现写「Coordinator.startNewNormalSession 内部调用 `settings.snapshotFees()`」——与 SettingsStore fail-closed 契约（交易流须 `snapshotFeesIfReady`/守 `loadError`）冲突。改为 `snapshotFeesIfReady`/显式 loadError 守卫措辞，防 E6a 照 stale 字面构造零费用 NormalFlow（架空 §四 E6a residual）。
+7. **P6 `forceResetAndReload()` 恢复契约定义**（codex R6 F2：新公共 API 须有 spec/RFC owner，不能在 U4 临时引入未治理公共面）：在 RFC 内定义 SettingsStore loadError 恢复路径契约——API 形态（是否改 P6 公共 surface / 抑或 DAO 级 reset-all）、reset 语义（清哪些 key、是否 loadError set 下仍允许执行）、错误处理、acceptance（malformed → loadError → reset → 成功 reload / 交易仅在 reload 成功后解阻）。顺位 10 U4 据此契约实施，不自行定义公共面。
+8. **grep gate**（acceptance 项）：RFC merge 后断言全仓 (a) 无未被 supersede 的 `同 PR` / `C2/C8/E5 orchestration 同 PR` 残留措辞；(b) 交易路径（`startNewNormalSession` 等）不调 fail-open `snapshotFees()`；(c) 无把 `P4 DefaultAppDB` / `P2 4 内部端口` 列为 Wave 2 待办的 stale 条目（除本 outline §〇 + RFC 自身引用 / changelog）。
+- 0 业务代码改动（仅 spec/governance 文档）。**注**：本 RFC 因含 P6 恢复契约定义，使 Wave 2 的 spec 契约变更 = H1 措辞 + baseline reconciliation + **P6 恢复 API 契约**三项（§三.3 据此修订）。
 
 **顺位 7 C8**：ChartContainerView 桥接实现 + production handler 集成测试落地 → **H1 真正闭环**；严格按 RFC 决议；撞 ≥3 轮 codex 立即 escalate（per `feedback_big_pr_codex_noncovergence`）。
 
@@ -102,7 +104,7 @@
 
 ### 3.3 Wave 2 收尾：沿用轻量收尾，不打 freeze tag（预声明）
 
-**决策（user 2026-06-02 选轻量）**：Wave 2 是按已冻 spec 实现「集成层」（spec 契约仅 H1 措辞 + baseline reconciliation RFC，已逐 PR review），**无 spec 契约首冻语义**——沿用 Wave 1 收尾模式（per `project_wave1_completion_2026_06_01`）：结尾走轻量 completion doc（anchor 清单 + residual 终态回填）+ **不打 `wave2-frozen` tag / 不建 signoff ledger / 不改 README freeze 章节**。
+**决策（user 2026-06-02 选轻量）**：Wave 2 是按已冻 spec 实现「集成层」（spec 契约变更限于顺位 1 RFC 三项：H1 措辞松绑 + baseline reconciliation + **P6 `forceResetAndReload()` 恢复 API 契约定义**，均经 RFC + 逐 PR review），**无 spec 契约首冻语义**（契约变更集中在单一 governance RFC，不散落各实施 PR）——沿用 Wave 1 收尾模式（per `project_wave1_completion_2026_06_01`）：结尾走轻量 completion doc（anchor 清单 + residual 终态回填）+ **不打 `wave2-frozen` tag / 不建 signoff ledger / 不改 README freeze 章节**。
 
 **说明**：此为 outline 预声明方向；Wave 2 末再正式确认。若届时需要正式冻结基线（如 Wave 3 启动前），可后补 tag。
 
@@ -121,12 +123,12 @@
 | **U2 E6 持久化生命周期**（返回存进度 / 自动结束 finalize / 结算确认 / review / replay 路径；pending 清理 / replay·review 非保存语义） | codex R2 F2 | 顺位 9 U2 scope 内：U2 接线 E6 `saveProgress`/`finalize`/`endSession`；plan 阶段定生命周期契约/测试矩阵（back / auto-end / settlement confirm / review / replay 五路径 + pending 清理 + 非保存分支） | 9 |
 | **C7 手势 arbiter 生产接线**（`ChartGestureArbiter.attach(to:)` + `onPan` 等 callback 已存在，但 KLineView 无 recognizer；C8 = UIViewRepresentable 造 KLineView 是自然接线点） | codex R3 F1 | 顺位 7 C8 scope 内：C8 attach arbiter（attach-once）+ 路由 callback（pan panStarted/offsetApplied/panEnded、周期切换、十字光标、drawing）进 E5/reducer；acceptance 验证接线正确。**U2 仍只负责 hosting + 运行时证据，不负责接线本身** | 7 |
 | **E6a fail-closed 费用快照**（P6 契约：交易流必须用 `snapshotFeesIfReady`/守 `loadError`；`snapshotFees` 是 fail-open 返零费用，仅 UI 显示路径用） | codex R3 F2 | 顺位 4 E6a scope 内：构造 NormalFlow 前用 `snapshotFeesIfReady` 或显式守 `loadError`；测试 loadError 传播 + 失败时不造 engine + 不保留 activeReader/session state | 4 |
-| **SettingsStore loadError 恢复路径**（loadError set 时 `update`/`resetCapital` 全被阻塞 → 用户无应用内恢复手段；PR4b plan L190/L222 显式 defer 到 Wave 2 U4 的 `forceResetAndReload()`） | codex R4 F1 / PR4b plan defer | 顺位 10 U4 scope 内：加 P6 `forceResetAndReload()`（或等价 DAO 级 reset-all，loadError 下仍允许执行）+ SettingsPanel 暴露入口；测试 malformed settings → loadError → reset → 成功 reload / 交易解阻 | 10 |
+| **SettingsStore loadError 恢复路径**（loadError set 时 `update`/`resetCapital` 全被阻塞 → 用户无应用内恢复手段；PR4b plan L190/L222 显式 defer 到 Wave 2 U4 的 `forceResetAndReload()`） | codex R4 F1 / PR4b plan defer | **契约由顺位 1 RFC 定义**（R6 F2：新公共 API 须有 spec owner）；顺位 10 U4 据契约实施 `forceResetAndReload()`（或等价 DAO 级 reset-all，loadError 下仍允许执行）+ SettingsPanel 暴露入口；测试 malformed settings → loadError → reset → 成功 reload / 交易解阻 | 1（契约）+ 10（实施） |
 | W1-R1 docker image digest pin | `project_wave1_completion_2026_06_01` | **不在 Wave 2 scope**：归 NAS 部署 PR | — |
 | W1-R2 3-5 样本训练组数据 | 同上（H7） | **不在 Wave 2 scope**：需 NAS 真实数据源 | — |
 | B4-R1/R4/R5/R6（清理职责3 / 部署编排 / advisory lock conn-scoped / near-term retry） | `project_pr76_b4_scheduler_merged` | **不在 Wave 2 scope**：归后续部署 / 可靠性加固 PR | — |
 
-**Wave 2 净 residual 责任**：H1（顺位 1+7 闭环）+ C3-C6 渲染收口（顺位 7）+ C8 性能（顺位 7，须具体证据）+ **C2/C7 运行时 gate（顺位 7+9，须具体验收 artifact）**+ **生产组合根 + 启动恢复（顺位 8）**+ **U2 E6 生命周期（顺位 9）**+ **C7 手势 arbiter 接线（顺位 7）**+ **E6a fail-closed 费用快照（顺位 4）**+ **SettingsStore loadError 恢复路径（顺位 10）**+ **生产组合根 + 路由 + 启动恢复（顺位 11）**+ **holdOrObserve 第三动作（顺位 3）**+ **fee-callsite 措辞 reconcile（顺位 1）**；后端 / 部署 / NAS 类 residual 明确**不在 Wave 2 scope**。
+**Wave 2 净 residual 责任**：H1（顺位 1+7 闭环）+ C3-C6 渲染收口（顺位 7）+ C8 性能（顺位 7，须具体证据）+ **C2/C7 运行时 gate（顺位 7+9，须具体验收 artifact）**+ **U2 E6 生命周期（顺位 9）**+ **C7 手势 arbiter 接线（顺位 7）**+ **E6a fail-closed 费用快照（顺位 4）**+ **SettingsStore loadError 恢复路径（顺位 10，契约由顺位 1 RFC 定义）**+ **生产组合根 + 路由 + 启动恢复（顺位 11，唯一 owner——R5 F3 移出 U1 后不得再挂顺位 8）**+ **holdOrObserve 第三动作（顺位 3）**+ **fee-callsite 措辞 reconcile（顺位 1）**；后端 / 部署 / NAS 类 residual 明确**不在 Wave 2 scope**。
 
 ---
 
@@ -165,3 +167,4 @@
 | 2026-06-02 | v4 (branch-diff codex R3 修) | **F1**（high）：顺位 7 C8 加 **C7 手势 arbiter 生产接线**（attach-once + 路由 onPan/周期切换/十字光标/drawing callback 进 E5/reducer；U2 仍只负责 hosting+运行时证据不负责接线）；**F2**（high）：顺位 4 E6a 加 **fail-closed 费用快照**（构造 NormalFlow 前用 `snapshotFeesIfReady`/守 `loadError`，禁 fail-open `snapshotFees`；测试 loadError 传播 + 不造 engine + 不留 reader/session）；residual 表 + 净责任 + 范围估算同步 |
 | 2026-06-02 | v5 (branch-diff codex R4 修) | **F1**（high）：顺位 10 U4 加 **SettingsStore loadError 恢复路径**（P6 `forceResetAndReload()` API：loadError 下仍允许的 reset-all + SettingsPanel 暴露入口；测试 malformed→loadError→reset→reload/交易解阻）——PR4b plan L190/L222 显式 defer 到 Wave 2 U4 的恢复义务，v1-v4 漏列；residual 表 + 净责任同步 |
 | 2026-06-02 | v6 (branch-diff codex R5 修) | **F1**（high）：顺位 1 RFC scope 加 **fee-callsite 措辞 reconcile**（modules L2000/L2040「coordinator 调 `snapshotFees()`」改 `snapshotFeesIfReady`/loadError 守卫 + grep gate 禁交易路径调 fail-open）；**F2**（high）：顺位 3 E5b 加 **`holdOrObserve(panel:)`** 第三动作（契约 L1620；acceptance 覆盖观察/hold/advance/canAdvance==false/stop）；**F3**（high）：拆 R2 引入的「U1+生产组合根」——顺位 8 改 U1 HomeView view-only（导航意图注入），**新增顺位 11 = 生产组合根 + app entry 替换 + 路由接线 + 启动恢复**（置末位，U2/U4 已在场再接路由，消除占位路由）；10→11 anchor、Phase F 新增、依赖校验重算 |
+| 2026-06-02 | v7 (branch-diff codex R6 修) | **F1**（high）：顺位 1 RFC scope 扩到**全部 stale Wave 2 边界源**（Wave 1 outline §六 + wave1-completion §五 也标注 P4/P2 端口已 Wave 0 落地）+ grep gate 加 (c) 禁 stale `P4 DefaultAppDB`/`P2 4 内部端口` 列为 Wave 2 待办；**F2**（high）：顺位 1 RFC 加 **P6 `forceResetAndReload()` 恢复契约定义**（新公共 API 须 spec owner；U4 据契约实施不自定义公共面）+ §三.3 Wave 2 契约变更修订为三项（H1+baseline+P6 恢复 API）；**F3**（med）：删 net residual 责任行 stale「生产组合根+启动恢复（顺位 8）」，唯一 owner = 顺位 11 |
