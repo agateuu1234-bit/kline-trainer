@@ -60,11 +60,11 @@
 
 - **API 形态**：`SettingsStore` 新增 `public func forceResetAndReload() async throws`。**不改** Wave 0 冻结的 `SettingsDAO` 协议（现 3 方法 `loadSettings`/`saveSettings`/`resetCapital`）。
   - **理由**：恢复逻辑（loadError 下仍允许、清错误位、解阻交易）是 SettingsStore 状态机职责，非 DAO 存储职责；现有 DAO surface（`saveSettings` 幂等覆盖 + `loadSettings`）已足以拼出恢复语义，无需动多实现 + fake 的冻结协议。
-- **前置条件**：**`loadError` set 下仍允许执行**——这是唯一绕过 loadError 写守卫的路径（`update`/`resetCapital` 仍被阻塞）。
+- **前置条件（须限定恢复用途，防误抹健康设置；codex plan R7-high）**：**要求 `loadError != nil`**——健康态（`loadError == nil`）调用 → **throws 且不改 `settings`**（防 U4 误接线 / 健康 caller 抹掉合法 commissionRate/minCommissionEnabled/totalCapital/displayMode）。仅 loadError set 时这是唯一绕过写守卫的路径（`update`/`resetCapital` 仍被阻塞）。**注**：通用「恢复出厂」需求另走显式 user-confirmed API，不复用本恢复路径。
 - **语义（须显式状态转移，防解阻后读 stale settings；codex plan R2-high 修）**：`saveSettings(AppSettings.default)` 覆盖损坏状态 → `let loaded = try loadSettings()` 验证 → **在 MainActor 上先 `self.settings = loaded` 再 `_loadError = nil`**（解阻 `update`/`resetCapital`/交易 `snapshotFeesIfReady`）。**关键不变量**：必须先把 reloaded 值赋回 `settings` 再清错误位——`SettingsStore` 进 loadError 时 `settings` 是 init 的 `zeroDefault`（zero fee/capital），若只清错误位不刷新 `settings`，解阻后 `snapshotFeesIfReady()` 仍读 stale zero settings，重新引入本 RFC 要防的 zero-fee/zero-capital 失败。
 - **reset 目标值**：`AppSettings.default` —— **命名默认值，含合理起始本金（非 0 资本）**，使 reset 后用户能直接开始训练。清全部 4 字段（`commissionRate`/`minCommissionEnabled`/`totalCapital`/`displayMode`）到 default。该常量在**顺位 10 实施时引入**（顺位 1 docs-only 不写代码；当前 `AppSettings` 仅有 init，`SettingsStore` 内 private `zeroDefault` 是 capital 0，不复用为 reset 目标）。
 - **错误处理**：若 `saveSettings`/重 load 仍失败（DB 物理不可写）→ throws，`_loadError` **保持**（不静默清成功态；调用方据 throws 提示用户/上报）。
-- **acceptance（顺位 10 验收）**：malformed settings → `loadError` set → `forceResetAndReload()` → load 成功 → `loadError == nil` **且 `store.settings == AppSettings.default`**（状态已刷新非 stale zeroDefault）→ `update`/交易解阻 **且 `snapshotFeesIfReady()` 返回 `AppSettings.default` 对应 fee snapshot（非 zero）**；失败路径 → `loadError` 保留 + throws。
+- **acceptance（顺位 10 验收）**：(1) malformed settings → `loadError` set → `forceResetAndReload()` → load 成功 → `loadError == nil` **且 `store.settings == AppSettings.default`**（状态已刷新非 stale zeroDefault）→ `update`/交易解阻 **且 `snapshotFeesIfReady()` 返回 `AppSettings.default` 对应 fee snapshot（非 zero）**；(2) **健康态调用**（`loadError == nil`，settings 含用户自定义值）→ **throws + `settings` 不变**（不误抹合法设置）；(3) 失败路径（saveSettings/重 load 仍失败）→ `loadError` 保留 + throws。
 
 ---
 
@@ -76,7 +76,7 @@
 - **(b) 交易路径不调 fail-open `snapshotFees()`**：grep modules `startNewNormalSession` 费用打包上下文（L2000/L2040 区块）须为 `snapshotFeesIfReady`，不出现裸 `snapshotFees()` 作为交易路径调用。pass = 交易路径区块命中 0 个裸 `snapshotFees()`。
 - **(c) 无 stale「P4 DefaultAppDB / P2 4 内部端口」列为 Wave 2 待办**：锚定「Wave 2 checklist 未勾选 `- [ ]`」语境，**全部 3 个 live 权威源都查**（codex plan R2-medium 修，最终 gate 不得漏源）：(c1) modules §Wave 2 未勾选项不含 `P4 .DefaultAppDB. 实现`/`4 内部端口默认实现`；(c2) wave1-outline §六不含 `P4 DefaultAppDB 实施`/`4 内部端口真实现`；(c3) wave1-completion §五不含旧边界串 `C8 / E5 / E6 / P2 / P4 / U1`。**排除**架构描述性提及（modules L19/L53/L59/L1736 等非 todo）、本 RFC 自身引用、Wave 2 outline §〇、changelog。pass = 三源全 0 命中。
 
-- **(d) P6 恢复契约关键不变量已写入**（codex plan R5-medium#2 + R6-high#1）：不止计数——modules §P6 须同时含 `forceResetAndReload`（方法）+ `AppSettings.default`（reset 目标）+ `self.settings = loaded`（reload-before-clear 不变量）+ `保留...loadError`（失败保留）四锚 + 本 RFC spec ≥1。防实现加方法签名+裸引用就过关却漏掉「先刷新 settings 再清 loadError」安全条件。pass = 四锚全在 modules 且 spec ≥1。
+- **(d) P6 恢复契约关键不变量已写入**（codex plan R5-medium#2 + R6-high#1 + R7-med#2）：不止计数——modules §P6 须同时含 **精确签名 `func forceResetAndReload() async throws`**（code fence，非 prose 裸名）+ `AppSettings.default`（reset 目标）+ `self.settings = loaded`（reload-before-clear 不变量）+ `保留...loadError`（失败保留）+ `loadError != nil`/`== nil`（**healthy-state 前置条件守卫，防误抹合法设置**）+ 本 RFC spec ≥1。pass = 五锚全在 modules 且 spec ≥1。
 - **(e) Wave 2 outline supersede marker 位置在位**（codex plan R4-high#1 + R6-med#3）：不止存在——marker `本节措辞已 superseded` 须位于 `### 3.1` heading **之后**、首个 stale 短语（`落地时同 PR 内`/`C2/C8/E5 orchestration 同 PR`）**之前**（断言 heading 行 < marker 行 < 首个 stale 行）；防 marker 落在 changelog/§3.1 stale 段之后、后续 planner 仍先读旧约束。
 - **(f) scope allowlist fail-closed**（codex plan R6-high#2）：用 `git merge-base origin/main HEAD` 算 base（非本地 `main` ref，避免 stale/advanced/absent）→ diff 改动文件须全在 9 文件显式 allowlist；任何非白名单路径（`ios/`/`.swift`/`.py`/SQL/YAML/冻结 doc）→ 硬 FAIL。取代旧 `.swift/.py` 黑名单（不 fail-closed 且漏其他业务面）。
 

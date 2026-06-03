@@ -188,15 +188,20 @@ git commit -m "顺位1 RFC Task3：modules fee-callsite 改 snapshotFeesIfReady 
 **Files:**
 - Modify: `kline_trainer_modules_v1.4.md`（§P6 code block L2000 区 + L2015 后加契约 prose）
 
-- [ ] **Step 1：写验证断言（契约已写入）**
+- [ ] **Step 1：写验证断言（精确签名 + 不变量四锚，非仅计数；codex R6/R7）**
 
 ```bash
-grep -nc "forceResetAndReload" kline_trainer_modules_v1.4.md
+# 精确方法签名（仅 code fence 有 `func ... async throws`；prose 无 func 前缀）
+grep -nF "func forceResetAndReload() async throws" kline_trainer_modules_v1.4.md
+# 不变量四锚（prose 块）
+grep -nE "AppSettings\.default" kline_trainer_modules_v1.4.md
+grep -nE "self\.settings = loaded" kline_trainer_modules_v1.4.md
+grep -nE "loadError != nil|loadError == nil" kline_trainer_modules_v1.4.md
 ```
 
-- [ ] **Step 2：跑断言（当前 = 0）**
+- [ ] **Step 2：跑断言（当前全 = 空，待 Step 3/4 写入）**
 
-Expected: `0`
+Expected: 四条均输出空
 
 - [ ] **Step 3：在 §P6 protocol code block 加方法（在 Task3 改后的 snapshotFeesIfReady 行下方加一行）**
 
@@ -210,12 +215,19 @@ Expected: `0`
 在 `// E3 TradeCalculator / E5 TrainingEngine / P4 SettingsDAO 一律使用小数率。` 行后的 ` ``` ` 之后插入：
 ```
 
-**P6 loadError 恢复契约（Wave 2 顺位 1 RFC 定义；顺位 10 U4 实施）**：`loadError` set 后 `update`/`resetCapital`/交易（`snapshotFeesIfReady`）全阻塞，重启对持久损坏 DB 无效（每次 load 都失败）。`forceResetAndReload() async throws` 是**唯一绕过 loadError 写守卫的恢复路径**：`saveSettings(AppSettings.default)` 覆盖损坏状态 → `let loaded = try loadSettings()` 验证 → **在 MainActor 上先 `self.settings = loaded` 再清 `loadError`**（解阻 update/resetCapital/交易）；仍失败则 throws + **保留** loadError（不静默清成功态）。**关键不变量（codex plan R2-high）**：必须先把 reloaded 值赋回 `settings` 再清错误位——否则解阻后 `snapshotFeesIfReady()` 仍读 init 时 `zeroDefault`（zero fee/capital），架空契约。reset 目标 `AppSettings.default` = 含合理起始本金（非 0 资本）的命名默认值，顺位 10 引入（不复用 SettingsStore 内 capital 0 的 `zeroDefault`）。**不改** Wave 0 冻结的 `SettingsDAO` 协议（恢复逻辑是 Store 状态机职责非 DAO 存储职责）。详 `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md` §四。
+**P6 loadError 恢复契约（Wave 2 顺位 1 RFC 定义；顺位 10 U4 实施）**：`loadError` set 后 `update`/`resetCapital`/交易（`snapshotFeesIfReady`）全阻塞，重启对持久损坏 DB 无效（每次 load 都失败）。`forceResetAndReload() async throws` 是**唯一绕过 loadError 写守卫的恢复路径**。**前置条件（codex plan R7-high）**：**要求 `loadError != nil`**；健康态（`loadError == nil`）调用 → **throws 且不改 `settings`**（防 U4 误接线/健康 caller 抹掉合法 commissionRate/minCommissionEnabled/totalCapital/displayMode）；通用「恢复出厂」另走显式 user-confirmed API。恢复语义：`saveSettings(AppSettings.default)` 覆盖损坏状态 → `let loaded = try loadSettings()` 验证 → **在 MainActor 上先 `self.settings = loaded` 再清 `loadError`**（解阻 update/resetCapital/交易）；仍失败则 throws + **保留** loadError（不静默清成功态）。**关键不变量（codex plan R2-high）**：必须先把 reloaded 值赋回 `settings` 再清错误位——否则解阻后 `snapshotFeesIfReady()` 仍读 init 时 `zeroDefault`（zero fee/capital），架空契约。reset 目标 `AppSettings.default` = 含合理起始本金（非 0 资本）的命名默认值，顺位 10 引入（不复用 SettingsStore 内 capital 0 的 `zeroDefault`）。**不改** Wave 0 冻结的 `SettingsDAO` 协议（恢复逻辑是 Store 状态机职责非 DAO 存储职责）。详 `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md` §四。
 ```
 
-- [ ] **Step 5：跑断言验证（≥2：code block 方法 + prose 块；不含 spec 文档引用计在 modules 内 = 2）**
+- [ ] **Step 5：跑断言验证（精确签名 + 四锚全在位）**
 
-Run: `grep -nc "forceResetAndReload" kline_trainer_modules_v1.4.md`
+Run:
+```bash
+grep -nF "func forceResetAndReload() async throws" kline_trainer_modules_v1.4.md  # code fence 签名
+grep -nc "forceResetAndReload" kline_trainer_modules_v1.4.md                       # ≥2（方法 + prose）
+grep -nE "AppSettings\.default|self\.settings = loaded|loadError != nil" kline_trainer_modules_v1.4.md  # 不变量锚
+```
+Expected: 签名命中 1；count ≥2；不变量锚均命中。等价于谓词 (d) PASS 条件。
+（原 Step 5 表述 `grep -nc forceResetAndReload`）
 Expected: `2`
 
 - [ ] **Step 6：commit**
@@ -464,16 +476,18 @@ gg  "P4 DefaultAppDB 实施|4 内部端口真实现" "docs/superpowers/specs/202
 ggF "C8 / E5 / E6 / P2 / P4 / U1" "docs/governance/2026-06-01-wave1-completion.md"; c_hits+="$HITS"$'\n'
 if [ -n "$(nonblank "$c_hits")" ]; then echo "(c) FAIL"; printf '%s' "$c_hits"; rc=1; else echo "(c) PASS"; fi
 
-# (d) P6 恢复契约关键不变量写入 modules（非仅计数；codex R6-high#1）
-#     必含：方法名 + AppSettings.default + reload-before-clear（settings = loaded）+ 失败保留 loadError + spec≥1
+# (d) P6 恢复契约关键不变量写入 modules（非仅计数；codex R6-high#1 + R7-med#2）
+#     必含：精确方法签名（code fence）+ AppSettings.default + reload-before-clear（settings=loaded）
+#          + 失败保留 loadError + healthy-state 前置条件（loadError != / == nil）+ spec≥1
 d_ok=1
-ggF "forceResetAndReload" "$modules"; [ -n "$HITS" ] || d_ok=0
+ggF "func forceResetAndReload() async throws" "$modules"; [ -n "$HITS" ] || d_ok=0   # 精确签名，非 prose 裸名（R7-med#2）
 ggF "AppSettings.default"  "$modules"; [ -n "$HITS" ] || d_ok=0
 gg  "self\.settings = loaded" "$modules"; [ -n "$HITS" ] || d_ok=0
 gg  "保留.{0,4}loadError|loadError.{0,6}保留" "$modules"; [ -n "$HITS" ] || d_ok=0
+gg  "loadError != nil|loadError == nil" "$modules"; [ -n "$HITS" ] || d_ok=0          # healthy-state 前置条件（R7-high#1）
 s=$(grep -cF "forceResetAndReload" "$spec"); [ $? -gt 1 ] && { echo "GATE FAIL: grep -c spec"; exit 2; }
 [ "${s:-0}" -ge 1 ] || d_ok=0
-if [ "$d_ok" -eq 1 ]; then echo "(d) PASS"; else echo "(d) FAIL: P6 恢复契约不变量不全（modules 缺 forceResetAndReload/AppSettings.default/settings=loaded/保留 loadError 或 spec 缺）"; rc=1; fi
+if [ "$d_ok" -eq 1 ]; then echo "(d) PASS"; else echo "(d) FAIL: P6 恢复契约不全（modules 缺 精确签名/AppSettings.default/settings=loaded/保留 loadError/healthy-state 守卫 或 spec 缺）"; rc=1; fi
 
 # (e) marker 位置绑定：### 3.1 heading 行 < marker 行 < 首个 stale 短语行（codex R6-med#3）
 eh=$(linenoF "$outline" "### 3.1 顺位 1")
