@@ -68,6 +68,7 @@
 ## 三、关键决策
 
 ### 3.1 顺位 1：baseline reconciliation + H1 闭环 RFC（先松绑「同 PR」措辞）
+> **【顺位 1 RFC 已落地 2026-06-03，本节措辞已 superseded】**：本节描述的「同 PR」张力已由顺位 1 RFC（`docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md`）松绑为「集成测试在顺位 7 C8 集成 anchor 内、C2 + E5a/E5b + C8 三模块在场时验证」。下文「现状字面」「张力」引用为**松绑前历史描述**；顺位 7 C8 plan 以 modules L1180 松绑后措辞为准，**勿据本节旧「同 PR」字面重建约束**。
 
 **现状字面**（modules §C1b 闸门 #4 F3，v1.4，仓库 L1178-1182）：production handler 集成测试的 **Wave 2 验收**（L1180）写明「C8 ChartContainerView + E5 TrainingEngine **落地时同 PR 内**」；§15.4 ledger H1 行（仓库 L32）与 `docs/governance/2026-06-01-wave1-completion.md` H1 行同样写「C2/C8/E5 orchestration 同 PR」。
 

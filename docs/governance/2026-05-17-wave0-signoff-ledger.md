@@ -29,7 +29,7 @@
 
 | ID | residual | 来源 | 处理路径 |
 |---|---|---|---|
-| H1 | C1b 闸门 #4 F3 production handler 集成测试（modules §C1b L1180 区块） | PR #50 plan-residual | 顺位 1a spec amendment：modules §C1b 闸门 #4 reclassify Wave 1→Wave 2（C8/E5 属 Wave 2）；真正闭环 = Wave 2 C8 ChartContainerView 集成 PR（C2/C8/E5 orchestration 同 PR） |
+| H1 | C1b 闸门 #4 F3 production handler 集成测试（modules §C1b L1180 区块） | PR #50 plan-residual | 顺位 1a spec amendment：modules §C1b 闸门 #4 reclassify Wave 1→Wave 2（C8/E5 属 Wave 2）；真正闭环 = Wave 2 顺位 7 C8 集成 anchor（C2 + E5a/E5b + C8 三模块在场时验证 orchestration；Wave 2 顺位 1 RFC 松绑措辞，见 `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md`） |
 | H2 | E2 PositionManager 三连 abort | 顺位 7 RFC 已决议（spec §4.2.1–§4.2.8） | 实施 + CONTRACT_VERSION/m01 bump 执行 deferred 顺位 8（MANDATORY 门，见 plan §4.2.7） |
 | H3 | Wave 1 内部 plan 排序 | v6 outline 仅 Wave 0 | PR 9 merge 后 brainstorming + writing-plans 排细顺位 |
 | H4 | M0.3 multi-file split 历史 over-claim | PR F1 R7+R8 | Spec §F1 wording + §M0.3 inventory 表（PR 9 子项 2） |

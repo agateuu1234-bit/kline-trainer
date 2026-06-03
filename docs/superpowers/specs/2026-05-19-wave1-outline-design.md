@@ -51,7 +51,7 @@
 - E UI 壳（13-15）
 - F 后端 Python 线（16-19）
 
-**H1 不在 Wave 1 PR 顺位（仅在 1a spec amendment 内 reclassify）**：spec L1180-1182 字面要求 "production handler 集成测试" 与 C2+C8+E5 三模块 orchestration **同 PR 落地**。C8 / E5 实施在 Wave 2，因此 H1 真正闭环在 Wave 2 C8 ChartContainerView 集成 PR；1a 内 spec amendment 仅 reclassify。
+**H1 不在 Wave 1 PR 顺位（仅在 1a spec amendment 内 reclassify）**：spec L1180-1182 要求 "production handler 集成测试" 在 C2+C8+E5 三模块**同时在场**时验证 orchestration。C8 / E5 实施在 Wave 2，因此 H1 真正闭环在 Wave 2 顺位 7 C8 集成 anchor（彼时三模块均已 merged）；1a 内 spec amendment 仅 reclassify。〔Wave 2 顺位 1 RFC 松绑措辞，见 `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md`。〕
 
 ---
 
@@ -121,7 +121,7 @@
 
 ## 六、不在 Wave 1 顺位的工作
 
-- **Wave 2 范围**：C8 ChartContainerView 集成（含 H1 真正闭环）、E5 TrainingEngine 实施、E6 TrainingSessionCoordinator 实施、P2 DownloadAcceptanceRunner 4 内部端口真实现、P4 DefaultAppDB 实施、U1 HomeView、U2 TrainingView、U4 SettingsPanel
+- **Wave 2 范围**：C8 ChartContainerView 集成（含 H1 真正闭环）、E5 TrainingEngine 实施、E6 TrainingSessionCoordinator 实施、P2 DownloadAcceptanceRunner orchestration（**4 内部端口已 Wave 0 落地 PR #43**）、U1 HomeView、U2 TrainingView、U4 SettingsPanel〔baseline reconcile（Wave 2 顺位 1 RFC）：**P4 `DefaultAppDB` 已 Wave 0 落地 PR #42/#43，不在 Wave 2**〕
 - **Wave 3 范围**：Phase 2.5 水平线 MVP / Phase 3 完整流程 / Phase 5 磨光
 
 ---
