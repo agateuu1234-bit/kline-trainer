@@ -102,6 +102,7 @@ gg  "保留.{0,4}loadError|loadError.{0,6}保留" "$modules"; [ -n "$HITS" ] || 
 gg  "loadError != nil|loadError == nil" "$modules"; [ -n "$HITS" ] || d_ok=0          # healthy-state 前置条件（R7-high#1）
 ggF "_retryReloadFailed" "$modules"; [ -n "$HITS" ] || d_ok=0                          # state-enforced 顺序 flag（R9-high#1）
 gg  "try\? loadSettings" "$modules"; [ -n "$HITS" ] || d_ok=0                            # 破坏前最后非破坏 reload（R10-high#1）
+ggF "dbCorrupted" "$modules"; [ -n "$HITS" ] || d_ok=0                                    # 错误类型门：破坏仅 dbCorrupted，transient retry-only（最终 review FR2）
 s=$(grep -cF "forceResetAndReload" "$spec"); [ $? -gt 1 ] && { echo "GATE FAIL: grep -c spec"; exit 2; }
 [ "${s:-0}" -ge 1 ] || d_ok=0
 if [ "$d_ok" -eq 1 ]; then echo "(d) PASS"; else echo "(d) FAIL: P6 恢复契约不全（modules 缺 精确签名/AppSettings.default/settings=loaded/保留 loadError/healthy-state 守卫 或 spec 缺）"; rc=1; fi

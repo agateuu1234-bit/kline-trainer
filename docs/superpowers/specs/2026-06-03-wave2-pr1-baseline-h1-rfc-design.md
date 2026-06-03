@@ -68,7 +68,8 @@
 **(2) `public func forceResetAndReload(confirmation: SettingsResetConfirmation) async throws` — 破坏性 last-resort（持久损坏才用）**
 - **守卫编码进 state（不靠 prose 约定；codex plan R9-high#1 + R11-high#2 诚实化）**：
   - 参数 `confirmation: SettingsResetConfirmation` —— **deliberate-intent 信号**（caller 须显式构造、不能误调），**非**抗"determined caller"的安全边界（Swift public init 谁都能构造；不强行宣称编译期 enforcement）。其 init 归属由顺位 10 定（如 internal init + UI-owned recovery service 边界），acceptance 验证未确认路径行为。
-  - **真正的数据安全 = runtime 守卫 + 破坏前最后非破坏 reload**（下一行 + R10）：in-method 强制 `loadError != nil` **且 内部 `_retryReloadFailed == true`**（证明 `retryReload()` 已先试且失败）。任一不满足（健康态 / 未先试 retryReload）→ **throws 且不调 `saveSettings`**（零破坏）。**即便 caller 绕过 confirmation**，下方「破坏前最后非破坏 reload」保证：DB 仍可读时不写 default（合法设置不会被抹），仅在 load 真失败时才覆盖——数据丢失风险由此根除，confirmation 仅作 UX 故意性信号。
+  - **真正的数据安全 = 错误类型守卫 + runtime 守卫 + 破坏前最后非破坏 reload**（下三项）：in-method 强制 ① `loadError != nil`；② 内部 `_retryReloadFailed == true`（证明 `retryReload()` 已先试且失败）；③ **`loadError` 是 corruption-class `.persistence(.dbCorrupted)`（settings-row 解析损坏，数据真不可解，reset 才有意义）**。任一不满足（健康态 / 未先试 retryReload / **loadError 是 transient `.persistence(.diskFull)`/`.ioError`/`.schemaMismatch` 等非 dbCorrupted**）→ **throws 且不调 `saveSettings`**（零破坏，transient 走 retry-only，防误抹只是暂时读不出的完好设置；codex 最终 review FR2）。
+  - **即便 caller 绕过 confirmation**，下方「破坏前最后非破坏 reload」再保证：DB 仍可读时不写 default。两层（错误类型门 + 最后 reload）共同根除数据丢失，confirmation 仅作 UX 故意性信号。
 - 语义（**破坏前最后一次非破坏 reload，防 transient 恢复后误抹；codex plan R10-high#1**）：通过守卫后 **先非破坏重试 `if let loaded = try? loadSettings()`** → 若成功（transient 已恢复）→ `self.settings = loaded` + 清 `loadError`+flag + **return（不调 `saveSettings`，保留真实设置，零破坏）**；**仅当该最后 load 仍失败** → `saveSettings(AppSettings.default)` 覆盖 → `let loaded = try loadSettings()` → MainActor 先 `self.settings = loaded` 再清 `loadError`+flag；仍失败 → throws + `loadError` 保留。
 - **关键不变量（codex plan R2-high）**：必须先把 reloaded 值赋回 `settings` 再清错误位——loadError 时 `settings` 是 init 的 `zeroDefault`（zero fee/capital），只清错误位不刷新则解阻后 `snapshotFeesIfReady()` 仍读 stale zero settings，架空 RFC。
 
@@ -82,7 +83,9 @@
 3. **健康态**（`loadError == nil`，settings 含用户自定义值）→ `retryReload()` **与** `forceResetAndReload(confirmation:)` 均 throws + `settings` 不变。
 4. **未先试 retryReload 直接破坏**（`loadError != nil` 但 `_retryReloadFailed == false`）→ `forceResetAndReload(confirmation:)` **throws 且断言未调 `saveSettings`**（state 守卫强制顺序，零破坏；codex R9-high#1）。
 5. **transient 在确认前恢复**（`retryReload()` 瞬时失败置 flag → 依赖恢复 → 构造 confirmation → `forceResetAndReload(confirmation:)`）→ 破坏前最后 `loadSettings()` 成功 → `store.settings ==` **原用户设置（非 default）** + 解阻 + **断言未调 `saveSettings`**（transient 恢复零破坏；codex R10-high#1）。
-6. **破坏路径仍失败**（最后 load 也失败 → saveSettings/reload fail）→ `loadError` 保留 + throws。
+6. **transient 未恢复**（`retryReload()` 以 `.persistence(.diskFull)`/`.ioError`/`.schemaMismatch` 失败置 flag → 仍未恢复 → `forceResetAndReload(confirmation:)`）→ **错误类型门 throws 且断言未调 `saveSettings`**（非 dbCorrupted 不破坏，防误抹完好设置；codex 最终 review FR2）。
+7. **persistent corruption**（`retryReload()` 以 `.persistence(.dbCorrupted)` 失败）→ `forceResetAndReload(confirmation:)` → 最后 load 仍失败 → `saveSettings(AppSettings.default)` → `store.settings == AppSettings.default` + 解阻。
+8. **破坏路径仍失败**（dbCorrupted + saveSettings/reload fail）→ `loadError` 保留 + throws。
 
 ---
 
