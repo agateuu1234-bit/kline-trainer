@@ -28,6 +28,8 @@
 | **E2 顺位 8 bump「同 PR」**（语义完全不同：CONTRACT_VERSION bump 须与 decoder 同 PR） | `kline_trainer_modules_v1.4.md` L1494；`kline_trainer_plan_v1.5.md` L711；E2 RFC 系列 | ❌ 绝不碰，grep gate 显式排除 |
 | **冻结历史 plan/spec**（point-in-time 记录） | `docs/superpowers/plans/2026-05-20-pr1a-*.md`；`docs/superpowers/plans/2026-05-17-pr9-wave0-freeze.md`；`docs/superpowers/specs/2026-05-17-pr9-wave0-freeze-design.md` 等 | ❌ 不改写 |
 
+**例外（live 规划 doc，非冻结）**：`docs/superpowers/specs/2026-06-02-wave2-outline-design.md`（Wave 2 outline）是后续 anchor 的**当前**规划输入，不是 point-in-time 记录 → 列为 reconcile 目标 5b（§三），加 supersede banner（不删历史「现状/张力」引用，但标记已 superseded + 谓词 (e) 守护）。
+
 ---
 
 ## 三、Scope 八项 + 精确编辑目标
@@ -39,11 +41,12 @@
 | 3 | ledger §28 H1 行 | `docs/governance/2026-05-17-wave0-signoff-ledger.md` L32 | 「真正闭环 = Wave 2 C8 集成 PR（C2/C8/E5 orchestration 同 PR）」→「真正闭环 = Wave 2 C8 集成 anchor（C2/C8/E5 三模块在场时验证）」 |
 | 4 | completion H1 + §五 | `docs/governance/2026-06-01-wave1-completion.md` L43 + L80-82 | L43 H1 行措辞同步（同 #3）；§五 Wave 2 边界（L82）标注「P4 + P2 4 端口已 Wave 0 落地，Wave 2 仅 P2 runner」 |
 | 5 | wave1-outline §六 | `docs/superpowers/specs/2026-05-19-wave1-outline-design.md` L54 + L124 | L124 Wave 2 范围列表标注「P4 DefaultAppDB + P2 4 内部端口已 Wave 0 落地（PR #42/#43），Wave 2 仅 P2 runner」；L54 H1 措辞同步 |
+| 5b | **Wave 2 outline §三.1 supersede banner**（codex plan R4-high#1） | `docs/superpowers/specs/2026-06-02-wave2-outline-design.md` §3.1 | outline 是后续 anchor 规划输入，§3.1 仍含 stale `落地时同 PR 内`/`C2/C8/E5 orchestration 同 PR`（作历史「现状/张力」描述）。不删历史引用，加 supersede banner（含 marker `本节措辞已 superseded`）使后续 plan 读者先撞标记、不据旧字面重建约束。谓词 (e) 断言 banner 在位 |
 | 6 | fee-callsite 措辞 | `kline_trainer_modules_v1.4.md` L2000 + L2040 | 「Coordinator.startNewNormalSession 内部调用 `settings.snapshotFees()`」→「调用 `settings.snapshotFeesIfReady()`（loadError 时 throws，禁 fail-open）」+ 写明交易路径 fail-closed 理由 |
 | 7 | **P6 恢复契约定义** | RFC 本文件 §四 + `kline_trainer_modules_v1.4.md` §P6（L1988-2012 区块）补契约引用 | 见 §四 |
 | 8 | grep gate | RFC 本文件 §五 + `docs/acceptance/<PR>.md` | 见 §五 |
 
-**0 业务代码改动**（仅 spec/governance/RFC 文档 + acceptance）。
+**0 业务代码改动**（仅 spec/governance/RFC 文档 + acceptance + 1 验证 shell 脚本 `scripts/governance/verify-wave2-pr1-rfc.sh`；无 `.swift`/`.py`）。
 
 ---
 
@@ -73,7 +76,9 @@
 - **(b) 交易路径不调 fail-open `snapshotFees()`**：grep modules `startNewNormalSession` 费用打包上下文（L2000/L2040 区块）须为 `snapshotFeesIfReady`，不出现裸 `snapshotFees()` 作为交易路径调用。pass = 交易路径区块命中 0 个裸 `snapshotFees()`。
 - **(c) 无 stale「P4 DefaultAppDB / P2 4 内部端口」列为 Wave 2 待办**：锚定「Wave 2 checklist 未勾选 `- [ ]`」语境，**全部 3 个 live 权威源都查**（codex plan R2-medium 修，最终 gate 不得漏源）：(c1) modules §Wave 2 未勾选项不含 `P4 .DefaultAppDB. 实现`/`4 内部端口默认实现`；(c2) wave1-outline §六不含 `P4 DefaultAppDB 实施`/`4 内部端口真实现`；(c3) wave1-completion §五不含旧边界串 `C8 / E5 / E6 / P2 / P4 / U1`。**排除**架构描述性提及（modules L19/L53/L59/L1736 等非 todo）、本 RFC 自身引用、Wave 2 outline §〇、changelog。pass = 三源全 0 命中。
 
-**grep gate 实现归属**：谓词封装为独立 fail-closed 脚本 `scripts/governance/verify-wave2-pr1-rfc.sh`，acceptance `docs/acceptance/<PR>.md` 调它（per `feedback_acceptance_grep_anchoring`：负向断言用 `if grep ...; then exit 1`，不用 `set -e` 下 `! grep` 死闸门）。**fail-closed 要求（codex plan R3-high）**：源路径用**数组**（仓库默认 zsh 不 word-split 标量，`grep $SCALAR` 会把整串当单一文件名 → 读取失败被 `if...else` 转成 PASS）+ `set -o pipefail` + 跑前断言每个源文件存在；source 读取失败必须 exit 1 而非 PASS。
+- **(e) Wave 2 outline supersede marker 在位**（codex plan R4-high#1）：`grep -F "本节措辞已 superseded" docs/superpowers/specs/2026-06-02-wave2-outline-design.md` 命中 ≥1；防后续 anchor plan 读 outline §3.1 旧「同 PR」字面重建约束。
+
+**grep gate 实现归属**：谓词封装为独立 fail-closed 脚本 `scripts/governance/verify-wave2-pr1-rfc.sh`，acceptance `docs/acceptance/<PR>.md` 调它（per `feedback_acceptance_grep_anchoring`：负向断言用 `if grep ...; then exit 1`，不用 `set -e` 下 `! grep` 死闸门）。**fail-closed 要求（codex plan R3/R4-high）**：(1) 源路径用**数组**（仓库默认 zsh 不 word-split 标量，`grep $SCALAR` 把整串当单一文件名 → 读取失败被转成 PASS）；(2) 跑前 `-r` 断言每个源可读；(3) grep 包 helper 区分 rc 0(命中)/1(无命中)/**>1(读错误/坏正则 → 立即 exit 2)**，不用 `grep ... || true`（会把 exit 2 也吞成 PASS）；(4) 排除/过滤用纯 bash `case` 不用 `grep|grep -v`。脚本须实测：未编辑 repo → GATE FAIL exit 1；源不可读 → exit 2。
 
 ---
 
