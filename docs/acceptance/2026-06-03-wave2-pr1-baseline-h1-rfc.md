@@ -14,6 +14,10 @@
 
 脚本为 fail-closed：源文件不可读 → 打印 `GATE FAIL: unreadable source ...` 并 `exit 2`；任一谓词命中残留 → 对应 `(x) FAIL` 并 `exit 1`。仅当全部六谓词通过才 `exit 0`。
 
+| # | 操作 | 期望 | 判定 |
+|---|---|---|---|
+| 1b | 不可写 TMPDIR 下运行（模拟受限沙箱，codex 最终 review FR1）：`TMPDIR=/nonexistent-xyz bash scripts/governance/verify-wave2-pr1-rfc.sh; echo "exit=$?"` | 仍正常逐项判定（脚本用 `IFS=换行 + noglob` for-loop，无 here-string/临时文件依赖；启动自检探针若迭代机制坏 → `GATE FAIL ... exit 2`）——不会因临时目录不可写而静默 fail-open | ☐ |
+
 ---
 
 ## 二、逐项 scope 核对（与谓词对应）

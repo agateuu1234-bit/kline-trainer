@@ -441,7 +441,7 @@ git commit -m "顺位1 RFC Task7b：Wave2 outline §三.1 supersede banner（防
 - Create: `scripts/governance/verify-wave2-pr1-rfc.sh`（fail-closed bash gate）
 - Create: `docs/acceptance/2026-06-03-wave2-pr1-baseline-h1-rfc.md`（中文 non-coder checklist）
 
-**为何独立 fail-closed 脚本（codex plan R3-R6 修）**：(1) 标量 `SOURCES` zsh 不 word-split → 读错误 fail-open PASS（R3）；(2) `grep ... || true` 吞 grep exit 2 → PASS（R4）；(3) 谓词 (d) 仅计数 `forceResetAndReload` 不验 P6 不变量（R6-high#1）；(4) marker 仅查存在不绑位置（R6-med#3）；(5) scope 用 `git diff main...HEAD` 依赖本地 main + `.swift/.py` 黑名单不 fail-closed（R6-high#2）。综合修：**数组 + `-r` 可读断言 + grep helper 区分 rc 0/1/>1(→exit2) + 纯 bash `case` 过滤 + (d) 验关键不变量短语 + (e) 位置绑定 heading<marker<stale + (f) merge-base diff allowlist**。下方脚本**已实测**：未编辑 repo → a-e FAIL（抓全部 stale）；源不可读 → exit 2；(e) good/bad fixture 正确区分；zsh/bash 双兼容。
+**为何独立 fail-closed 脚本（codex plan R3-R6 修）**：(1) 标量 `SOURCES` zsh 不 word-split → 读错误 fail-open PASS（R3）；(2) `grep ... || true` 吞 grep exit 2 → PASS（R4）；(3) 谓词 (d) 仅计数 `forceResetAndReload` 不验 P6 不变量（R6-high#1）；(4) marker 仅查存在不绑位置（R6-med#3）；(5) scope 用 `git diff main...HEAD` 依赖本地 main + `.swift/.py` 黑名单不 fail-closed（R6-high#2）。综合修：**数组 + `-r` 可读断言 + grep helper 区分 rc 0/1/>1(→exit2) + 纯 bash `case` 过滤 + (d) 验关键不变量短语 + (e) 位置绑定 heading<marker<stale + (f) merge-base diff allowlist**。(6) 过滤循环用 `done <<< "$HITS"` here-string，在不可写 TMPDIR 下静默失败 → 循环跳过 → fail-open（codex 最终 review FR1）。综合修加：**过滤循环改 `IFS=换行 + set -f` for-loop（无 here-string/临时文件依赖）+ 启动自检探针（迭代机制坏 → exit 2）**。下方脚本**已实测**：未编辑 repo → a-e FAIL（抓全部 stale）；源不可读 → exit 2；**不可写 TMPDIR → 仍正常判定不 fail-open**；(e) good/bad fixture 正确区分；zsh/bash 双兼容。
 
 - [ ] **Step 1：读禁忌词清单**
 
@@ -494,24 +494,33 @@ nonblank() { printf '%s' "$1" | tr -d '[:space:]'; }
 lineno()  { grep -nE "$2" "$1" | head -1 | cut -d: -f1; }
 linenoF() { grep -nF "$2" "$1" | head -1 | cut -d: -f1; }
 
+# 行迭代 helper：用 IFS=换行 + noglob for-loop（无 here-string/临时文件依赖；codex 最终 review FR1：
+# `done <<< "$HITS"` 在不可写 TMPDIR 下静默失败 → 循环跳过 → fail-open）。
+# 启动自检：若行过滤机制坏掉 → exit 2（fail-closed），不进任何谓词。
+probe=""; _oi=$IFS; IFS=$'\n'; set -f
+for _l in $(printf 'keep\ndrop\n'); do case "$_l" in drop) continue ;; *) probe+="$_l" ;; esac; done
+set +f; IFS=$_oi
+[ "$probe" = "keep" ] || { echo "GATE FAIL: line-filter mechanism broken (TMPDIR/shell?)"; exit 2; }
+
 rc=0
 
 # (a) 4 源无 H1「同 PR」残留（纯 bash 过滤 E2 顺位8 + 1b/1c runbook）
 gg "同 PR" "${sources[@]}"
-a_hits=""
-while IFS= read -r line; do
+a_hits=""; _oi=$IFS; IFS=$'\n'; set -f
+for line in $HITS; do
   [ -z "$line" ] && continue
   case "$line" in
     *decoder*|*"顺位 8"*|*CONTRACT_VERSION*|*position_data*|*三连而非*) continue ;;
     *) a_hits+="$line"$'\n' ;;
   esac
-done <<< "$HITS"
+done
+set +f; IFS=$_oi
 if [ -n "$(nonblank "$a_hits")" ]; then echo "(a) FAIL"; printf '%s' "$a_hits"; rc=1; else echo "(a) PASS"; fi
 
 # (b) modules 交易/费用打包路径不调 fail-open snapshotFees（双向上下文，含 startNewNormalSession/NormalFlow.fees/打包；codex R8-high#1）
 gg "snapshotFees" "$modules"
-b_hits=""
-while IFS= read -r line; do
+b_hits=""; _oi=$IFS; IFS=$'\n'; set -f
+for line in $HITS; do
   [ -z "$line" ] && continue
   # context-first（codex R9-high#2：先判交易/打包语境，不让 fail-open 字样先掩盖）
   case "$line" in
@@ -520,7 +529,8 @@ while IFS= read -r line; do
   esac
   # 该语境行：用 fail-closed IfReady = 合法；否则（裸 fail-open snapshotFees 指引）→ FLAG
   case "$line" in *snapshotFeesIfReady*) continue ;; *) b_hits+="$line"$'\n' ;; esac
-done <<< "$HITS"
+done
+set +f; IFS=$_oi
 # (b2) positive：snapshotFeesIfReady 签名在位（交易流 fail-closed 变体存在）
 ggF "func snapshotFeesIfReady() throws -> FeeSnapshot" "$modules"; b2="$HITS"
 if [ -n "$(nonblank "$b_hits")" ]; then echo "(b) FAIL: fee 打包仍指 fail-open snapshotFees"; printf '%s' "$b_hits"; rc=1;
@@ -564,13 +574,14 @@ fi
 # (f) scope allowlist：merge-base diff 内每个改动文件须在白名单（codex R6-high#2）
 base=$(git merge-base origin/main HEAD 2>/dev/null) || { echo "(f) FAIL: cannot compute merge-base origin/main"; exit 2; }
 changed=$(git diff --name-only "$base" HEAD) || { echo "(f) FAIL: git diff error"; exit 2; }
-f_bad=""
-while IFS= read -r path; do
+f_bad=""; _oi=$IFS; IFS=$'\n'; set -f
+for path in $changed; do
   [ -z "$path" ] && continue
   ok=0
   for a in "${allowlist[@]}"; do [ "$path" = "$a" ] && { ok=1; break; }; done
   [ "$ok" -eq 0 ] && f_bad+="$path"$'\n'
-done <<< "$changed"
+done
+set +f; IFS=$_oi
 if [ -n "$(nonblank "$f_bad")" ]; then echo "(f) FAIL: 非白名单改动文件（疑似 ios/SQL/YAML/.swift/.py/冻结 doc）:"; printf '%s' "$f_bad"; rc=1; else echo "(f) PASS"; fi
 
 [ "$rc" -eq 0 ] && echo "ALL PASS" || echo "GATE FAIL"
