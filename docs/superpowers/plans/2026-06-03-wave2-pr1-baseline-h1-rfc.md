@@ -209,7 +209,7 @@ Expected: `0`
 在 `// E3 TradeCalculator / E5 TrainingEngine / P4 SettingsDAO 一律使用小数率。` 行后的 ` ``` ` 之后插入：
 ```
 
-**P6 loadError 恢复契约（Wave 2 顺位 1 RFC 定义；顺位 10 U4 实施）**：`loadError` set 后 `update`/`resetCapital`/交易（`snapshotFeesIfReady`）全阻塞，重启对持久损坏 DB 无效（每次 load 都失败）。`forceResetAndReload() async throws` 是**唯一绕过 loadError 写守卫的恢复路径**：`saveSettings(AppSettings.default)` 覆盖损坏状态 → 重 `loadSettings()` 验证 → 成功则清 `loadError`（解阻 update/resetCapital/交易）；仍失败则 throws + **保留** loadError（不静默清成功态）。reset 目标 `AppSettings.default` = 含合理起始本金（非 0 资本）的命名默认值，顺位 10 引入（不复用 SettingsStore 内 capital 0 的 `zeroDefault`）。**不改** Wave 0 冻结的 `SettingsDAO` 协议（恢复逻辑是 Store 状态机职责非 DAO 存储职责）。详 `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md` §四。
+**P6 loadError 恢复契约（Wave 2 顺位 1 RFC 定义；顺位 10 U4 实施）**：`loadError` set 后 `update`/`resetCapital`/交易（`snapshotFeesIfReady`）全阻塞，重启对持久损坏 DB 无效（每次 load 都失败）。`forceResetAndReload() async throws` 是**唯一绕过 loadError 写守卫的恢复路径**：`saveSettings(AppSettings.default)` 覆盖损坏状态 → `let loaded = try loadSettings()` 验证 → **在 MainActor 上先 `self.settings = loaded` 再清 `loadError`**（解阻 update/resetCapital/交易）；仍失败则 throws + **保留** loadError（不静默清成功态）。**关键不变量（codex plan R2-high）**：必须先把 reloaded 值赋回 `settings` 再清错误位——否则解阻后 `snapshotFeesIfReady()` 仍读 init 时 `zeroDefault`（zero fee/capital），架空契约。reset 目标 `AppSettings.default` = 含合理起始本金（非 0 资本）的命名默认值，顺位 10 引入（不复用 SettingsStore 内 capital 0 的 `zeroDefault`）。**不改** Wave 0 冻结的 `SettingsDAO` 协议（恢复逻辑是 Store 状态机职责非 DAO 存储职责）。详 `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md` §四。
 ```
 
 - [ ] **Step 5：跑断言验证（≥2：code block 方法 + prose 块；不含 spec 文档引用计在 modules 内 = 2）**
@@ -368,9 +368,10 @@ if grep -nE "同 PR" $SOURCES | grep -vE "decoder|顺位 8|CONTRACT_VERSION|posi
 # 谓词 (b)：modules 交易路径不调 fail-open snapshotFees()
 if grep -nE "startNewNormalSession.*snapshotFees\(\)|snapshotFees\(\).*startNewNormalSession" kline_trainer_modules_v1.4.md | grep -v "snapshotFeesIfReady"; then echo "(b) FAIL"; exit 1; else echo "(b) PASS"; fi
 
-# 谓词 (c)：无 stale P4/P2 端口列 Wave 2 待办
+# 谓词 (c)：无 stale P4/P2 端口列 Wave 2 待办（全部 3 个 live 权威源都查；codex plan R2-medium 修）
 if grep -nE "^- \[ \].*(P4 .DefaultAppDB. 实现|4 内部端口默认实现)" kline_trainer_modules_v1.4.md; then echo "(c1) FAIL"; exit 1; fi
 if grep -nE "P4 DefaultAppDB 实施|4 内部端口真实现" docs/superpowers/specs/2026-05-19-wave1-outline-design.md; then echo "(c2) FAIL"; exit 1; fi
+if grep -nF "C8 / E5 / E6 / P2 / P4 / U1" docs/governance/2026-06-01-wave1-completion.md; then echo "(c3) FAIL"; exit 1; fi
 echo "(c) PASS"
 ```
 
