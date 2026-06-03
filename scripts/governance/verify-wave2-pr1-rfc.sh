@@ -98,7 +98,7 @@ ggF "func retryReload() async throws" "$modules"; [ -n "$HITS" ] || d_ok=0      
 ggF "func forceResetAndReload(confirmation: SettingsResetConfirmation) async throws" "$modules"; [ -n "$HITS" ] || d_ok=0   # 破坏性签名 + confirmation marker（R7-med#2 + R9-high#1）
 ggF "AppSettings.default"  "$modules"; [ -n "$HITS" ] || d_ok=0
 gg  "self\.settings = loaded" "$modules"; [ -n "$HITS" ] || d_ok=0
-gg  "保留.{0,4}loadError|loadError.{0,6}保留" "$modules"; [ -n "$HITS" ] || d_ok=0
+ggF "更新为最新" "$modules"; [ -n "$HITS" ] || d_ok=0                                     # retryReload 失败更新 loadError 为最新错误（非保留 stale；FR7）
 gg  "loadError != nil|loadError == nil" "$modules"; [ -n "$HITS" ] || d_ok=0          # healthy-state 前置条件（R7-high#1）
 ggF "_retryReloadFailed" "$modules"; [ -n "$HITS" ] || d_ok=0                          # state-enforced 顺序 flag（R9-high#1）
 ggF "破坏前最后非破坏" "$modules"; [ -n "$HITS" ] || d_ok=0                                # 破坏前最后非破坏 reload（R10-high#1）
