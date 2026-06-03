@@ -94,7 +94,7 @@
 
 ## 五、grep gate 精确化（acceptance 项，非裸 grep）
 
-六谓词 (a)-(f)，**全部锚定具体短语 + 排除已知合法残留 + fail-closed**，防 codex 拿裸 `同 PR` 无限挑战（per `feedback_acceptance_grep_anchoring` + `feedback_codex_distributed_reliability_drilldown`）：
+七谓词 (a)-(g)，**全部锚定具体短语 + 排除已知合法残留 + fail-closed**，防 codex 拿裸 `同 PR` 无限挑战（per `feedback_acceptance_grep_anchoring` + `feedback_codex_distributed_reliability_drilldown`）：
 
 - **(a) 无 H1「同 PR」残留**：锚定精确短语 `C2/C8/E5 orchestration 同 PR` 与「落地时同 PR 内」，搜索范围**仅限 4 个 live 权威源**（modules + ledger + wave1-completion + wave1-outline §六）；**显式排除** E2 顺位 8 bump 短语（`MANDATORY 与 decoder 代码同 PR` / `顺位 8` 上下文）与 `docs/superpowers/plans/` `docs/superpowers/specs/`（changelog/历史）下文档。pass = 4 源命中 0。
 - **(b) 交易/费用打包路径不调 fail-open `snapshotFees`**（codex plan R8-high#1 扩面）：grep modules **全部** `snapshotFees` 行，**双向**匹配交易/打包语境（`startNewNormalSession`/`NormalFlow.fees`/`打包`——不止 L2000/L2040，含 risk-table L2293/L2401），排除 `snapshotFeesIfReady` 与明标 `fail-open`/`UI 显示` 的 def 行；**且 positive 断言 `func snapshotFeesIfReady() throws -> FeeSnapshot` 签名在位**。pass = 0 个 fee 打包指引用裸 fail-open `snapshotFees` 且 IfReady 签名存在。
@@ -103,6 +103,7 @@
 - **(d) P6 两层恢复契约关键不变量已写入**（codex plan R5-medium#2 + R6-high#1 + R7-med#2 + R8-high#2 + R9-high#1 + R10-high#2）：不止计数——modules §P6 须同时含 **两精确签名 `func retryReload() async throws`（非破坏）+ `func forceResetAndReload(confirmation: SettingsResetConfirmation) async throws`（破坏性，含 confirmation marker，**非无参**）**（code fence，非 prose 裸名）+ `AppSettings.default`（reset 目标）+ `self.settings = loaded`（reload-before-clear 不变量）+ `loadError != nil`/`== nil`（healthy-state 守卫）+ `_retryReloadFailed`（state-enforced 顺序 flag）+ 本 RFC spec ≥1。pass = 全锚在 modules 且 spec ≥1。
 - **(e) Wave 2 outline supersede marker 位置在位**（codex plan R4-high#1 + R6-med#3）：不止存在——marker `本节措辞已 superseded` 须位于 `### 3.1` heading **之后**、首个 stale 短语（`落地时同 PR 内`/`C2/C8/E5 orchestration 同 PR`）**之前**（断言 heading 行 < marker 行 < 首个 stale 行）；防 marker 落在 changelog/§3.1 stale 段之后、后续 planner 仍先读旧约束。
 - **(f) scope allowlist fail-closed**（codex plan R6-high#2）：用 `git merge-base origin/main HEAD` 算 base（非本地 `main` ref，避免 stale/advanced/absent）→ diff 改动文件须全在 9 文件显式 allowlist；任何非白名单路径（`ios/`/`.swift`/`.py`/SQL/YAML/冻结 doc）→ 硬 FAIL。取代旧 `.swift/.py` 黑名单（不 fail-closed 且漏其他业务面）。
+- **(g) Wave 2 outline 无 stale-loose「允许 DAO reset-all」语义**（codex 最终 review FR5）：P6 恢复契约 reconcile——outline 任何 `reset-all` 行若仍称「允许」而无「禁」/「曾考虑」/superseded 注解/changelog → FAIL；防顺位 10 据旧 outline 实现绕过守卫的 DAO 级 reset-all（应只用 RFC §四 的 SettingsStore 两层恢复）。
 
 **grep gate 实现归属**：谓词封装为独立 fail-closed 脚本 `scripts/governance/verify-wave2-pr1-rfc.sh`，acceptance `docs/acceptance/<PR>.md` 调它（per `feedback_acceptance_grep_anchoring`：负向断言用 `if grep ...; then exit 1`，不用 `set -e` 下 `! grep` 死闸门）。**fail-closed 要求（codex plan R3/R4-high）**：(1) 源路径用**数组**（仓库默认 zsh 不 word-split 标量，`grep $SCALAR` 把整串当单一文件名 → 读取失败被转成 PASS）；(2) 跑前 `-r` 断言每个源可读；(3) grep 包 helper 区分 rc 0(命中)/1(无命中)/**>1(读错误/坏正则 → 立即 exit 2)**，不用 `grep ... || true`（会把 exit 2 也吞成 PASS）；(4) 排除/过滤用纯 bash `case` 不用 `grep|grep -v`。脚本须实测：未编辑 repo → GATE FAIL exit 1；源不可读 → exit 2。
 

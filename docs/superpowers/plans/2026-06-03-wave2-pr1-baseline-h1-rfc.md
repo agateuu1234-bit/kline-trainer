@@ -586,6 +586,19 @@ done
 set +f; IFS=$_oi
 if [ -n "$(nonblank "$f_bad")" ]; then echo "(f) FAIL: 非白名单改动文件（疑似 ios/SQL/YAML/.swift/.py/冻结 doc）:"; printf '%s' "$f_bad"; rc=1; else echo "(f) PASS"; fi
 
+# (g) Wave2 outline 无 stale-loose「允许 DAO reset-all」语义（codex 最终 review FR5；P6 恢复契约 reconcile）
+gg "reset-all" "$outline"
+g_hits=""; _oi=$IFS; IFS=$'\n'; set -f
+for line in $HITS; do
+  [ -z "$line" ] && continue
+  case "$line" in *禁*) continue ;; esac                          # 禁止语境 OK
+  case "$line" in *"曾考虑"*|*"顺位 1 RFC 已"*) continue ;; esac     # 历史/superseded 注解 OK
+  case "$line" in *"| 2026-"*) continue ;; esac                   # 变更日志 OK
+  case "$line" in *允许*) g_hits+="$line"$'\n' ;; esac             # 仍称「允许 reset-all」→ stale FAIL
+done
+set +f; IFS=$_oi
+if [ -n "$(nonblank "$g_hits")" ]; then echo "(g) FAIL: outline 仍有 stale 允许 DAO reset-all 语义"; printf '%s' "$g_hits"; rc=1; else echo "(g) PASS"; fi
+
 [ "$rc" -eq 0 ] && echo "ALL PASS" || echo "GATE FAIL"
 exit "$rc"
 ```
