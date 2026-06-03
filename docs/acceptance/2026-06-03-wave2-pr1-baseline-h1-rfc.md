@@ -37,8 +37,8 @@
 
 | # | 操作 | 期望 | 判定 |
 |---|---|---|---|
-| 8 | 在 `kline_trainer_modules_v1.4.md` §P6 找到「P6 loadError 两层恢复契约」prose 块，目视核对 | 含：① `retryReload()` 非破坏（重读保留真实设置，失败置 `_retryReloadFailed`）；② `forceResetAndReload(confirmation:)` 破坏性，守卫 `loadError != nil` + `_retryReloadFailed == true`，破坏前 `try? loadSettings()` 最后非破坏重试成功则不写默认；健康态两者 throws 不改 settings | ☐ |
-| 9 | 在 RFC spec `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md` §四查 acceptance 列表 | 含 6 条验收场景：transient 恢复 / persistent malformed / 健康态 / 未先 retryReload 直接破坏 / transient 确认前恢复 / 破坏路径仍失败 | ☐ |
+| 8 | 在 `kline_trainer_modules_v1.4.md` §P6 找到「P6 loadError 两层恢复契约」prose 块，目视核对 | 含：① `retryReload()` 非破坏（重读保留真实设置，失败置 `_retryReloadFailed`）；② `forceResetAndReload(confirmation:)` 破坏性，**三重守卫** `loadError != nil` + `_retryReloadFailed == true` + **`loadError` 是 `.persistence(.dbCorrupted)`**（transient `.diskFull`/`.ioError`/`.schemaMismatch` → throws retry-only）；破坏前 **`do { try loadSettings() }`**：成功则不写默认，`catch` **仅 final 也 dbCorrupted 才 saveSettings(default)**，否则更新 loadError + throws 不破坏；健康态两者 throws 不改 settings | ☐ |
+| 9 | 在 RFC spec `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md` §四查 acceptance 列表 | 含 **9** 条验收场景：transient 恢复（retryReload）/ persistent dbCorrupted / 健康态 / 未先 retryReload 直接破坏 / 入口 dbCorrupted 但破坏前可读 / **transient 未恢复（非 dbCorrupted）throws 不破坏** / persistent corruption 写默认 / **混合错误（入口 dbCorrupted 破坏时刻变 transient）throws 不破坏** / 破坏写失败 | ☐ |
 
 ---
 
