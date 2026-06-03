@@ -183,6 +183,52 @@ git commit -m "顺位1 RFC Task3：modules fee-callsite 改 snapshotFeesIfReady 
 
 ---
 
+## Task 3b：modules risk-table 残留 fee 指引 reconcile（codex plan R8-high#1）
+
+**Files:**
+- Modify: `kline_trainer_modules_v1.4.md:2293,2401`
+
+**为何**：除 L2000/L2040，risk-table L2293（R36）+ L2401 仍指 `SettingsStore.snapshotFees`（fail-open）给 NormalFlow.fees/U1 打包——后续 E6/U1 规划读到会重建 fail-open 零费用路径。改指 `snapshotFeesIfReady`。
+
+- [ ] **Step 1：编辑 L2293（R36 行）**
+
+OLD:
+```
+| **R36** | **NormalFlow.fees 打包时机不明**（v1.2） | **P2** | U1 启动时 SettingsStore.snapshotFees | U1/E4 |
+```
+NEW:
+```
+| **R36** | **NormalFlow.fees 打包时机不明**（v1.2） | **P2** | U1 启动时 SettingsStore.snapshotFeesIfReady（顺位 1 RFC：交易流 fail-closed，禁 fail-open snapshotFees） | U1/E4 |
+```
+
+- [ ] **Step 2：编辑 L2401**
+
+OLD:
+```
+| 36 | R2-Cloud-新增 | — | P2 | U1/P6 | NormalFlow.fees 打包时机明确（U1 + SettingsStore.snapshotFees） |
+```
+NEW:
+```
+| 36 | R2-Cloud-新增 | — | P2 | U1/P6 | NormalFlow.fees 打包时机明确（U1 + SettingsStore.snapshotFeesIfReady；顺位 1 RFC fail-closed） |
+```
+
+- [ ] **Step 3：跑断言验证全仓 fee 打包指引无裸 snapshotFees（谓词 (b) 双向）**
+
+Run:
+```bash
+grep -nE "snapshotFees" kline_trainer_modules_v1.4.md | grep -vE "snapshotFeesIfReady|fail-open|UI 显示" | grep -E "startNewNormalSession|NormalFlow.fees|打包"
+```
+Expected: 输出空（L2000/2040/2293/2401 全已改 IfReady 或标 fail-open）
+
+- [ ] **Step 4：commit**
+
+```bash
+git add kline_trainer_modules_v1.4.md
+git commit -m "顺位1 RFC Task3b：reconcile risk-table L2293/L2401 fee 指引改 snapshotFeesIfReady fail-closed"
+```
+
+---
+
 ## Task 4：modules §P6 写入 forceResetAndReload 恢复契约
 
 **Files:**
@@ -191,9 +237,10 @@ git commit -m "顺位1 RFC Task3：modules fee-callsite 改 snapshotFeesIfReady 
 - [ ] **Step 1：写验证断言（精确签名 + 不变量四锚，非仅计数；codex R6/R7）**
 
 ```bash
-# 精确方法签名（仅 code fence 有 `func ... async throws`；prose 无 func 前缀）
+# 两精确方法签名（仅 code fence 有 `func ... async throws`；prose 无 func 前缀）
+grep -nF "func retryReload() async throws" kline_trainer_modules_v1.4.md
 grep -nF "func forceResetAndReload() async throws" kline_trainer_modules_v1.4.md
-# 不变量四锚（prose 块）
+# 不变量锚（prose 块）
 grep -nE "AppSettings\.default" kline_trainer_modules_v1.4.md
 grep -nE "self\.settings = loaded" kline_trainer_modules_v1.4.md
 grep -nE "loadError != nil|loadError == nil" kline_trainer_modules_v1.4.md
@@ -201,13 +248,14 @@ grep -nE "loadError != nil|loadError == nil" kline_trainer_modules_v1.4.md
 
 - [ ] **Step 2：跑断言（当前全 = 空，待 Step 3/4 写入）**
 
-Expected: 四条均输出空
+Expected: 五条均输出空
 
-- [ ] **Step 3：在 §P6 protocol code block 加方法（在 Task3 改后的 snapshotFeesIfReady 行下方加一行）**
+- [ ] **Step 3：在 §P6 protocol code block 加两个恢复方法（在 Task3 改后的 snapshotFeesIfReady 行下方）**
 
 在 `func snapshotFeesIfReady() throws -> FeeSnapshot ...` 行下方插入：
 ```
-    func forceResetAndReload() async throws              // Wave 2 顺位 1 RFC：loadError 恢复路径（顺位 10 U4 实施）
+    func retryReload() async throws                      // Wave 2 顺位 1 RFC：非破坏性 transient 恢复（重读，保留真实设置）
+    func forceResetAndReload() async throws              // Wave 2 顺位 1 RFC：破坏性 last-resort（需 user 确认 + retryReload 失败后）
 ```
 
 - [ ] **Step 4：在 §P6 code fence（L2015 ``` 收尾）之后插入契约 prose 块**
@@ -215,20 +263,18 @@ Expected: 四条均输出空
 在 `// E3 TradeCalculator / E5 TrainingEngine / P4 SettingsDAO 一律使用小数率。` 行后的 ` ``` ` 之后插入：
 ```
 
-**P6 loadError 恢复契约（Wave 2 顺位 1 RFC 定义；顺位 10 U4 实施）**：`loadError` set 后 `update`/`resetCapital`/交易（`snapshotFeesIfReady`）全阻塞，重启对持久损坏 DB 无效（每次 load 都失败）。`forceResetAndReload() async throws` 是**唯一绕过 loadError 写守卫的恢复路径**。**前置条件（codex plan R7-high）**：**要求 `loadError != nil`**；健康态（`loadError == nil`）调用 → **throws 且不改 `settings`**（防 U4 误接线/健康 caller 抹掉合法 commissionRate/minCommissionEnabled/totalCapital/displayMode）；通用「恢复出厂」另走显式 user-confirmed API。恢复语义：`saveSettings(AppSettings.default)` 覆盖损坏状态 → `let loaded = try loadSettings()` 验证 → **在 MainActor 上先 `self.settings = loaded` 再清 `loadError`**（解阻 update/resetCapital/交易）；仍失败则 throws + **保留** loadError（不静默清成功态）。**关键不变量（codex plan R2-high）**：必须先把 reloaded 值赋回 `settings` 再清错误位——否则解阻后 `snapshotFeesIfReady()` 仍读 init 时 `zeroDefault`（zero fee/capital），架空契约。reset 目标 `AppSettings.default` = 含合理起始本金（非 0 资本）的命名默认值，顺位 10 引入（不复用 SettingsStore 内 capital 0 的 `zeroDefault`）。**不改** Wave 0 冻结的 `SettingsDAO` 协议（恢复逻辑是 Store 状态机职责非 DAO 存储职责）。详 `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md` §四。
+**P6 loadError 两层恢复契约（Wave 2 顺位 1 RFC 定义；顺位 10 U4 实施）**：`loadError` set 后 `update`/`resetCapital`/交易（`snapshotFeesIfReady`）全阻塞，重启对持久损坏 DB 无效。**`loadError` 任何 init load 失败都 set（含 transient I/O/磁盘故障，非仅 malformed）**，故恢复分两层（codex plan R8-high#2）：**① `retryReload() async throws`（非破坏，transient 首选）**——要求 `loadError != nil`；`let loaded = try loadSettings()` 成功 → MainActor 先 `self.settings = loaded` 再清 `loadError`（**保留 DB 真实用户设置**）；仍失败 → loadError 保留 + throws；**不写库**。**② `forceResetAndReload() async throws`（破坏性 last-resort）**——要求 `loadError != nil` **且 caller 先经显式 user 确认**（UI 仅在 retryReload 已失败后暴露）；`saveSettings(AppSettings.default)` → `let loaded = try loadSettings()` → MainActor 先 `self.settings = loaded` 再清 `loadError`；仍失败 throws + 保留 loadError。**恢复顺序契约**：先 `retryReload()`，仅当它 throws 才在用户确认后 `forceResetAndReload()`，禁止跳过直接破坏。**前置条件（R7-high）**：两者健康态（`loadError == nil`）→ throws 且不改 `settings`（防误抹合法 commissionRate/minCommissionEnabled/totalCapital/displayMode）。**关键不变量（R2-high）**：必须先把 reloaded 值赋回 `settings` 再清错误位——否则解阻后 `snapshotFeesIfReady()` 仍读 init 时 `zeroDefault`（zero fee/capital），架空契约。reset 目标 `AppSettings.default` = 含合理起始本金（非 0 资本）的命名默认值，顺位 10 引入（不复用 capital 0 的 `zeroDefault`）。**不改** Wave 0 冻结的 `SettingsDAO` 协议。详 `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md` §四。
 ```
 
-- [ ] **Step 5：跑断言验证（精确签名 + 四锚全在位）**
+- [ ] **Step 5：跑断言验证（两精确签名 + 不变量锚全在位 = 谓词 (d)）**
 
 Run:
 ```bash
-grep -nF "func forceResetAndReload() async throws" kline_trainer_modules_v1.4.md  # code fence 签名
-grep -nc "forceResetAndReload" kline_trainer_modules_v1.4.md                       # ≥2（方法 + prose）
+grep -nF "func retryReload() async throws" kline_trainer_modules_v1.4.md            # 非破坏签名
+grep -nF "func forceResetAndReload() async throws" kline_trainer_modules_v1.4.md    # 破坏性签名
 grep -nE "AppSettings\.default|self\.settings = loaded|loadError != nil" kline_trainer_modules_v1.4.md  # 不变量锚
 ```
-Expected: 签名命中 1；count ≥2；不变量锚均命中。等价于谓词 (d) PASS 条件。
-（原 Step 5 表述 `grep -nc forceResetAndReload`）
-Expected: `2`
+Expected: 两签名各命中 1；不变量锚均命中。等价于谓词 (d) PASS 条件。
 
 - [ ] **Step 6：commit**
 
@@ -460,14 +506,23 @@ while IFS= read -r line; do
 done <<< "$HITS"
 if [ -n "$(nonblank "$a_hits")" ]; then echo "(a) FAIL"; printf '%s' "$a_hits"; rc=1; else echo "(a) PASS"; fi
 
-# (b) modules 交易路径不调 fail-open snapshotFees()
-gg "startNewNormalSession.*snapshotFees\(\)|snapshotFees\(\).*startNewNormalSession" "$modules"
+# (b) modules 交易/费用打包路径不调 fail-open snapshotFees（双向上下文，含 startNewNormalSession/NormalFlow.fees/打包；codex R8-high#1）
+gg "snapshotFees" "$modules"
 b_hits=""
 while IFS= read -r line; do
   [ -z "$line" ] && continue
-  case "$line" in *snapshotFeesIfReady*) continue ;; *) b_hits+="$line"$'\n' ;; esac
+  # 排除 fail-closed IfReady 与明确标注 fail-open/UI 显示的 def 行 + 纯 feature-name checklist
+  case "$line" in *snapshotFeesIfReady*) continue ;; *fail-open*|*"UI 显示"*) continue ;; esac
+  # 仅当行含交易/打包语境关键词才视为 fail-open 指引（双向，不依赖与 snapshotFees 的先后）
+  case "$line" in
+    *startNewNormalSession*|*"NormalFlow.fees"*|*"打包"*) b_hits+="$line"$'\n' ;;
+  esac
 done <<< "$HITS"
-if [ -n "$(nonblank "$b_hits")" ]; then echo "(b) FAIL"; printf '%s' "$b_hits"; rc=1; else echo "(b) PASS"; fi
+# (b2) positive：snapshotFeesIfReady 签名在位（交易流 fail-closed 变体存在）
+ggF "func snapshotFeesIfReady() throws -> FeeSnapshot" "$modules"; b2="$HITS"
+if [ -n "$(nonblank "$b_hits")" ]; then echo "(b) FAIL: fee 打包仍指 fail-open snapshotFees"; printf '%s' "$b_hits"; rc=1;
+elif [ -z "$b2" ]; then echo "(b) FAIL: 缺 snapshotFeesIfReady 签名（fail-closed 变体）"; rc=1;
+else echo "(b) PASS"; fi
 
 # (c) 3 源无 stale P4/P2 端口列 Wave 2 待办
 c_hits=""
@@ -480,7 +535,8 @@ if [ -n "$(nonblank "$c_hits")" ]; then echo "(c) FAIL"; printf '%s' "$c_hits"; 
 #     必含：精确方法签名（code fence）+ AppSettings.default + reload-before-clear（settings=loaded）
 #          + 失败保留 loadError + healthy-state 前置条件（loadError != / == nil）+ spec≥1
 d_ok=1
-ggF "func forceResetAndReload() async throws" "$modules"; [ -n "$HITS" ] || d_ok=0   # 精确签名，非 prose 裸名（R7-med#2）
+ggF "func retryReload() async throws" "$modules"; [ -n "$HITS" ] || d_ok=0            # 非破坏签名（R8-high#2）
+ggF "func forceResetAndReload() async throws" "$modules"; [ -n "$HITS" ] || d_ok=0   # 破坏性签名（R7-med#2）
 ggF "AppSettings.default"  "$modules"; [ -n "$HITS" ] || d_ok=0
 gg  "self\.settings = loaded" "$modules"; [ -n "$HITS" ] || d_ok=0
 gg  "保留.{0,4}loadError|loadError.{0,6}保留" "$modules"; [ -n "$HITS" ] || d_ok=0
@@ -561,9 +617,9 @@ Expected: 恰好 9 文件 = RFC spec + 本 plan + modules + ledger + wave1-compl
 
 ## Self-Review（plan↔spec 覆盖核对）
 
-- **spec §三 scope**：item1→Task1；item2→Task2；item3→Task5；item4→Task6；item5→Task7；**item5b→Task7b**；item6→Task3；item7→Task4；item8→Task8 ✅ 全覆盖
-- **spec §四 P6 契约**：Task4（modules 写入，含 R2-high 显式状态转移）+ 谓词 (d) 验 ✅
-- **spec §五 grep gate 六谓词 (a)-(f)**：Task8 fail-closed 脚本（已实测：a-e 抓 stale / 源不可读 exit2 / (e) 位置 fixture / (f) allowlist）✅
+- **spec §三 scope**：item1→Task1；item2→Task2；item3→Task5；item4→Task6；item5→Task7；**item5b→Task7b**；item6→Task3 **+ Task3b（risk-table L2293/L2401，R8-high#1）**；item7→Task4；item8→Task8 ✅ 全覆盖
+- **spec §四 P6 两层恢复契约**：Task4（modules 写入 retryReload 非破坏 + forceResetAndReload 破坏性，含 R2-high 状态转移 + R7-high healthy 守卫 + R8-high#2 两层）+ 谓词 (d) 验两签名 ✅
+- **spec §五 grep gate 六谓词 (a)-(f)**：Task8 fail-closed 脚本（已实测：a-e 抓 stale / (b) 抓 L2000/2040/2293/2401 / 源不可读 exit2 / (e) 位置 fixture / (d) 签名 vs prose / (f) allowlist）✅
 - **spec §二 编辑范围边界**：谓词 (f) merge-base allowlist 守护（仅 9 文件 / 非白名单硬 FAIL / 不碰 E2+冻结历史；Wave2 outline 是 live 例外 reconcile 目标）✅
 - **类型/命名一致**：`forceResetAndReload` / `snapshotFeesIfReady` / `AppSettings.default` / marker `本节措辞已 superseded` 各处一致 ✅
 - **无占位符**：所有编辑含 exact OLD/NEW；脚本逐字可照抄已实测；grep 谓词含 exact 命令 ✅
