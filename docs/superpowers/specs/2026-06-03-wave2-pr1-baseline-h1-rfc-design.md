@@ -66,13 +66,13 @@
 - **不写库**（纯重读），不会覆盖任何持久值。
 
 **(2) `public func forceResetAndReload(confirmation: SettingsResetConfirmation) async throws` — 破坏性 last-resort（持久损坏才用）**
-- **守卫编码进 API/state（不靠 prose 约定；codex plan R9-high#1）**：
-  - 参数 `confirmation: SettingsResetConfirmation` —— **不可默认构造的 marker 类型**，仅 UI 在确认对话框处构造（编译期强制「显式用户确认」，杜绝裸调用）。
-  - in-method 强制前置：`loadError != nil` **且 内部 `_retryReloadFailed == true`**（证明 `retryReload()` 已先试且失败）。任一不满足（健康态 / 未先试 retryReload / 未确认）→ **throws 且不调 `saveSettings`**（零破坏）。
+- **守卫编码进 state（不靠 prose 约定；codex plan R9-high#1 + R11-high#2 诚实化）**：
+  - 参数 `confirmation: SettingsResetConfirmation` —— **deliberate-intent 信号**（caller 须显式构造、不能误调），**非**抗"determined caller"的安全边界（Swift public init 谁都能构造；不强行宣称编译期 enforcement）。其 init 归属由顺位 10 定（如 internal init + UI-owned recovery service 边界），acceptance 验证未确认路径行为。
+  - **真正的数据安全 = runtime 守卫 + 破坏前最后非破坏 reload**（下一行 + R10）：in-method 强制 `loadError != nil` **且 内部 `_retryReloadFailed == true`**（证明 `retryReload()` 已先试且失败）。任一不满足（健康态 / 未先试 retryReload）→ **throws 且不调 `saveSettings`**（零破坏）。**即便 caller 绕过 confirmation**，下方「破坏前最后非破坏 reload」保证：DB 仍可读时不写 default（合法设置不会被抹），仅在 load 真失败时才覆盖——数据丢失风险由此根除，confirmation 仅作 UX 故意性信号。
 - 语义（**破坏前最后一次非破坏 reload，防 transient 恢复后误抹；codex plan R10-high#1**）：通过守卫后 **先非破坏重试 `if let loaded = try? loadSettings()`** → 若成功（transient 已恢复）→ `self.settings = loaded` + 清 `loadError`+flag + **return（不调 `saveSettings`，保留真实设置，零破坏）**；**仅当该最后 load 仍失败** → `saveSettings(AppSettings.default)` 覆盖 → `let loaded = try loadSettings()` → MainActor 先 `self.settings = loaded` 再清 `loadError`+flag；仍失败 → throws + `loadError` 保留。
 - **关键不变量（codex plan R2-high）**：必须先把 reloaded 值赋回 `settings` 再清错误位——loadError 时 `settings` 是 init 的 `zeroDefault`（zero fee/capital），只清错误位不刷新则解阻后 `snapshotFeesIfReady()` 仍读 stale zero settings，架空 RFC。
 
-**恢复顺序契约（由上述 state 强制，非仅 prose）**：U4 **先调 `retryReload()`**（非破坏，救 transient）；**仅当它 throws**（置 `_retryReloadFailed`）才在显式确认（构造 `SettingsResetConfirmation`）后调 `forceResetAndReload(confirmation:)`。跳过 retryReload 或无 confirmation → 破坏路径在 saveSettings 前 throws。
+**恢复顺序契约（由 runtime 守卫 + 最后非破坏 reload 强制，非仅 prose）**：U4 **先调 `retryReload()`**（非破坏，救 transient）；**仅当它 throws**（置 `_retryReloadFailed`）才在显式确认（构造 `SettingsResetConfirmation`）后调 `forceResetAndReload(confirmation:)`。跳过 retryReload（`_retryReloadFailed == false`）→ 守卫 throws 不调 saveSettings；即使绕过 confirmation，破坏前最后非破坏 reload 保证 DB 可读时不抹合法设置。
 
 **reset 目标值**：`AppSettings.default` —— 命名默认值，含合理起始本金（非 0 资本），清全 4 字段（`commissionRate`/`minCommissionEnabled`/`totalCapital`/`displayMode`）到 default。顺位 10 引入（顺位 1 docs-only 不写代码；不复用 capital 0 的 private `zeroDefault`）。
 
