@@ -73,7 +73,7 @@
 - **(b) 交易路径不调 fail-open `snapshotFees()`**：grep modules `startNewNormalSession` 费用打包上下文（L2000/L2040 区块）须为 `snapshotFeesIfReady`，不出现裸 `snapshotFees()` 作为交易路径调用。pass = 交易路径区块命中 0 个裸 `snapshotFees()`。
 - **(c) 无 stale「P4 DefaultAppDB / P2 4 内部端口」列为 Wave 2 待办**：锚定「Wave 2 checklist 未勾选 `- [ ]`」语境，**全部 3 个 live 权威源都查**（codex plan R2-medium 修，最终 gate 不得漏源）：(c1) modules §Wave 2 未勾选项不含 `P4 .DefaultAppDB. 实现`/`4 内部端口默认实现`；(c2) wave1-outline §六不含 `P4 DefaultAppDB 实施`/`4 内部端口真实现`；(c3) wave1-completion §五不含旧边界串 `C8 / E5 / E6 / P2 / P4 / U1`。**排除**架构描述性提及（modules L19/L53/L59/L1736 等非 todo）、本 RFC 自身引用、Wave 2 outline §〇、changelog。pass = 三源全 0 命中。
 
-**grep gate 实现归属**：acceptance 谓词写进 `docs/acceptance/<PR>.md`，plan 阶段定具体命令（per `feedback_acceptance_grep_anchoring`：负向断言用 `if grep ...; then exit 1`，不用 `set -e` 下 `! grep` 死闸门）。
+**grep gate 实现归属**：谓词封装为独立 fail-closed 脚本 `scripts/governance/verify-wave2-pr1-rfc.sh`，acceptance `docs/acceptance/<PR>.md` 调它（per `feedback_acceptance_grep_anchoring`：负向断言用 `if grep ...; then exit 1`，不用 `set -e` 下 `! grep` 死闸门）。**fail-closed 要求（codex plan R3-high）**：源路径用**数组**（仓库默认 zsh 不 word-split 标量，`grep $SCALAR` 会把整串当单一文件名 → 读取失败被 `if...else` 转成 PASS）+ `set -o pipefail` + 跑前断言每个源文件存在；source 读取失败必须 exit 1 而非 PASS。
 
 ---
 

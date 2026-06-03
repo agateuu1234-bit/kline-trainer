@@ -33,9 +33,10 @@ branch-diff：`codex-attest.sh --scope branch-diff`，4-5 轮内收敛。
 - [ ] **Step 1：写验证断言（4 源 H1「同 PR」残留检查）**
 
 ```bash
-SOURCES="kline_trainer_modules_v1.4.md docs/governance/2026-05-17-wave0-signoff-ledger.md docs/governance/2026-06-01-wave1-completion.md docs/superpowers/specs/2026-05-19-wave1-outline-design.md"
+# 数组而非标量（zsh 不 word-split 标量；codex plan R3-high）
+sources=(kline_trainer_modules_v1.4.md docs/governance/2026-05-17-wave0-signoff-ledger.md docs/governance/2026-06-01-wave1-completion.md docs/superpowers/specs/2026-05-19-wave1-outline-design.md)
 # 排除 E2 顺位 8 bump 的合法「同 PR」（decoder/顺位 8/CONTRACT_VERSION/position_data）
-grep -nE "同 PR" $SOURCES | grep -vE "decoder|顺位 8|CONTRACT_VERSION|position_data"
+grep -nE "同 PR" "${sources[@]}" | grep -vE "decoder|顺位 8|CONTRACT_VERSION|position_data"
 ```
 
 - [ ] **Step 2：跑断言（当前应命中 = 待修证据）**
@@ -346,67 +347,101 @@ git commit -m "顺位1 RFC Task7：wave1-outline §六 + H1 措辞 reconcile（P
 
 ---
 
-## Task 8：acceptance checklist 文档（中文 non-coder + grep gate 三谓词）
+## Task 8：fail-closed 验证脚本 + acceptance checklist 文档
 
 **Files:**
-- Create: `docs/acceptance/2026-06-03-wave2-pr1-baseline-h1-rfc.md`
+- Create: `scripts/governance/verify-wave2-pr1-rfc.sh`（fail-closed bash gate）
+- Create: `docs/acceptance/2026-06-03-wave2-pr1-baseline-h1-rfc.md`（中文 non-coder checklist）
+
+**为何独立脚本（codex plan R3-high 修）**：标量 `SOURCES="a b c"` 在仓库默认 zsh 下**不 word-split** → `grep $SOURCES` 把整串当一个文件名 → 报错退出非零 → `if...else` 把 source 读取失败转成 PASS（fail-open）。修：**数组 `sources=(...)` + `"${sources[@]}"`（zsh/bash 双兼容）+ `set -o pipefail` + 跑前断言每个源文件存在**，使读取失败 fail-closed。
 
 - [ ] **Step 1：读禁忌词清单**
 
-Run: `python3 -c "import json;print(json.load(open('.claude/workflow-rules.json')).get('acceptance_forbidden_phrases', json.load(open('.claude/workflow-rules.json'))))" 2>/dev/null | head -40`
-（确认 acceptance 文档不含禁忌措辞；若 key 名不同则 grep `forbidden` 全文件）
+Run: `grep -i "forbidden\|禁忌\|禁用" .claude/workflow-rules.json`
+（确认 acceptance 文档不含禁忌措辞）
 
-- [ ] **Step 2：写 acceptance 文档**
+- [ ] **Step 2：写 fail-closed 验证脚本**
 
-内容含：(1) 元信息（PR / 锚 / 性质 docs-only）；(2) grep gate 三谓词作可执行验收命令（action / expected / pass-fail）；(3) 8 项 scope 逐项 action/expected/☐ 表。三谓词命令：
-
+Create `scripts/governance/verify-wave2-pr1-rfc.sh`：
 ```bash
-# 谓词 (a)：4 live 权威源无 H1「同 PR」残留（排除 E2/runbook）
-SOURCES="kline_trainer_modules_v1.4.md docs/governance/2026-05-17-wave0-signoff-ledger.md docs/governance/2026-06-01-wave1-completion.md docs/superpowers/specs/2026-05-19-wave1-outline-design.md"
-if grep -nE "同 PR" $SOURCES | grep -vE "decoder|顺位 8|CONTRACT_VERSION|position_data|三连而非"; then echo "(a) FAIL"; exit 1; else echo "(a) PASS"; fi
+#!/usr/bin/env bash
+# verify-wave2-pr1-rfc.sh — Wave 2 顺位 1 RFC grep gate（fail-closed）
+# 数组 + pipefail + 源文件存在断言；read 失败 → exit 1（非 PASS）
+set -uo pipefail
+
+sources=(
+  "kline_trainer_modules_v1.4.md"
+  "docs/governance/2026-05-17-wave0-signoff-ledger.md"
+  "docs/governance/2026-06-01-wave1-completion.md"
+  "docs/superpowers/specs/2026-05-19-wave1-outline-design.md"
+)
+for f in "${sources[@]}"; do
+  [ -f "$f" ] || { echo "FAIL: missing source $f"; exit 1; }
+done
+
+rc=0
+
+# 谓词 (a)：4 源无 H1「同 PR」残留（排除 E2 顺位8 bump + 1b/1c runbook）
+a_raw=$(grep -nE "同 PR" "${sources[@]}") || true   # 源已断言存在 → 仅 0(命中)/1(无命中)
+a_hits=$(printf '%s\n' "$a_raw" | grep -vE "decoder|顺位 8|CONTRACT_VERSION|position_data|三连而非") || true
+a_hits=$(printf '%s' "$a_hits" | grep -vE "^[[:space:]]*$") || true
+if [ -n "$a_hits" ]; then echo "(a) FAIL"; printf '%s\n' "$a_hits"; rc=1; else echo "(a) PASS"; fi
 
 # 谓词 (b)：modules 交易路径不调 fail-open snapshotFees()
-if grep -nE "startNewNormalSession.*snapshotFees\(\)|snapshotFees\(\).*startNewNormalSession" kline_trainer_modules_v1.4.md | grep -v "snapshotFeesIfReady"; then echo "(b) FAIL"; exit 1; else echo "(b) PASS"; fi
+b_hits=$(grep -nE "startNewNormalSession.*snapshotFees\(\)|snapshotFees\(\).*startNewNormalSession" kline_trainer_modules_v1.4.md | grep -v "snapshotFeesIfReady") || true
+if [ -n "$b_hits" ]; then echo "(b) FAIL"; printf '%s\n' "$b_hits"; rc=1; else echo "(b) PASS"; fi
 
-# 谓词 (c)：无 stale P4/P2 端口列 Wave 2 待办（全部 3 个 live 权威源都查；codex plan R2-medium 修）
-if grep -nE "^- \[ \].*(P4 .DefaultAppDB. 实现|4 内部端口默认实现)" kline_trainer_modules_v1.4.md; then echo "(c1) FAIL"; exit 1; fi
-if grep -nE "P4 DefaultAppDB 实施|4 内部端口真实现" docs/superpowers/specs/2026-05-19-wave1-outline-design.md; then echo "(c2) FAIL"; exit 1; fi
-if grep -nF "C8 / E5 / E6 / P2 / P4 / U1" docs/governance/2026-06-01-wave1-completion.md; then echo "(c3) FAIL"; exit 1; fi
-echo "(c) PASS"
+# 谓词 (c)：3 源无 stale P4/P2 端口列 Wave 2 待办
+c_hits=$( { grep -nE "^- \[ \].*(P4 .DefaultAppDB. 实现|4 内部端口默认实现)" kline_trainer_modules_v1.4.md
+            grep -nE "P4 DefaultAppDB 实施|4 内部端口真实现" docs/superpowers/specs/2026-05-19-wave1-outline-design.md
+            grep -nF "C8 / E5 / E6 / P2 / P4 / U1" docs/governance/2026-06-01-wave1-completion.md ; } || true)
+if [ -n "$c_hits" ]; then echo "(c) FAIL"; printf '%s\n' "$c_hits"; rc=1; else echo "(c) PASS"; fi
+
+# 谓词 (d)：P6 契约已写入（modules ≥2 + spec ≥1）
+m=$(grep -c "forceResetAndReload" kline_trainer_modules_v1.4.md) || true
+s=$(grep -c "forceResetAndReload" docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md) || true
+if [ "${m:-0}" -ge 2 ] && [ "${s:-0}" -ge 1 ]; then echo "(d) PASS"; else echo "(d) FAIL: modules=$m spec=$s"; rc=1; fi
+
+[ "$rc" -eq 0 ] && echo "ALL PASS" || echo "GATE FAIL"
+exit "$rc"
 ```
 
-负向断言用 `if grep ...; then exit 1`（**不用** `set -e` 下 `! grep`，per `feedback_acceptance_grep_anchoring`）。
+- [ ] **Step 3：跑脚本验证 fail-closed 行为（先证伪：临时改坏一源 → exit 1）**
 
-- [ ] **Step 3：跑全部三谓词，确认 PASS**
+Run:
+```bash
+chmod +x scripts/governance/verify-wave2-pr1-rfc.sh
+# 反例 1：源缺失 → 必 FAIL（证 fail-closed 非 fail-open）
+( cd scripts && bash governance/verify-wave2-pr1-rfc.sh ); echo "missing-source exit=$?"
+# 反例 2：仓库根跑 → Task1-7 已改完应 ALL PASS
+bash scripts/governance/verify-wave2-pr1-rfc.sh; echo "exit=$?"
+```
+Expected: 反例 1（在 scripts/ 下跑，源相对路径找不到）打印 `FAIL: missing source ...` + `exit=1`；反例 2 在仓库根 `ALL PASS` + `exit=0`
 
-Run: 上述三段
-Expected: `(a) PASS` / `(b) PASS` / `(c) PASS`
+- [ ] **Step 4：写 acceptance 文档**
 
-- [ ] **Step 4：确认 P6 契约已写入（Task4 产物再验）**
-
-Run: `grep -c "forceResetAndReload" kline_trainer_modules_v1.4.md docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md`
-Expected: modules ≥2 + spec ≥1
+Create `docs/acceptance/2026-06-03-wave2-pr1-baseline-h1-rfc.md`：中文 non-coder checklist，含 (1) 元信息（PR / 锚 / docs-only / 0 业务代码）；(2) 唯一验收命令 `bash scripts/governance/verify-wave2-pr1-rfc.sh`（action / expected `ALL PASS` exit 0 / pass-fail ☐）；(3) 8 项 scope 逐项 action（具体 grep 或目视行号）/ expected / ☐ 表；(4) P6 契约目视核对项。**禁忌词**（Step 1 清单）不得出现。负向断言已封装在脚本内（fail-closed），acceptance 只调脚本不再裸 `! grep`。
 
 - [ ] **Step 5：commit**
 
 ```bash
-git add docs/acceptance/2026-06-03-wave2-pr1-baseline-h1-rfc.md
-git commit -m "顺位1 RFC Task8：acceptance checklist + grep gate 三谓词"
+git add scripts/governance/verify-wave2-pr1-rfc.sh docs/acceptance/2026-06-03-wave2-pr1-baseline-h1-rfc.md
+git commit -m "顺位1 RFC Task8：fail-closed 验证脚本（数组+pipefail+存在断言）+ acceptance checklist"
 ```
 
 ---
 
 ## Task 9：全仓最终验收 + 漂移自检
 
-- [ ] **Step 1：跑 acceptance 三谓词全绿**
+- [ ] **Step 1：跑 fail-closed 验证脚本全绿**
 
-Run: `bash docs/acceptance/2026-06-03-wave2-pr1-baseline-h1-rfc.md` 内三段（或逐段粘贴）
-Expected: 三谓词全 PASS
+Run: `bash scripts/governance/verify-wave2-pr1-rfc.sh; echo "exit=$?"`
+Expected: `(a) PASS` / `(b) PASS` / `(c) PASS` / `(d) PASS` / `ALL PASS` / `exit=0`
 
 - [ ] **Step 2：确认未碰 E2/冻结历史文档**
 
 Run: `git diff --name-only main...HEAD`
-Expected: 仅 7 文件 — RFC spec + modules + ledger + wave1-completion + wave1-outline + acceptance + 本 plan；**无** `docs/superpowers/plans/2026-05-*`、**无** `kline_trainer_plan_v1.5.md`、**无** ios/ 代码
+Expected: 仅 8 文件 — RFC spec + 本 plan + modules + ledger + wave1-completion + wave1-outline + acceptance.md + verify-wave2-pr1-rfc.sh；**无** `docs/superpowers/plans/2026-05-*`、**无** `kline_trainer_plan_v1.5.md`、**无** ios/ 代码
 
 - [ ] **Step 3：确认 0 业务代码改动**
 
