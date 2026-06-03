@@ -100,9 +100,9 @@ OLD:
 ```
 - [ ] P2 DownloadAcceptanceRunner 及 4 内部端口默认实现 + `retryPendingConfirmations`（v1.3）
 ```
-NEW:
+NEW（注：不含精确短语 `4 内部端口默认实现`，否则自伤谓词 (c)；codex plan R1-high 修）:
 ```
-- [ ] P2 DownloadAcceptanceRunner orchestration + `retryPendingConfirmations`（v1.3）〔baseline reconcile：4 内部端口默认实现 ✅ 已 Wave 0 落地 PR #43；Wave 2 仅剩 runner〕
+- [ ] P2 DownloadAcceptanceRunner orchestration + `retryPendingConfirmations`（v1.3）〔baseline reconcile：4 个内部端口 ✅ 已 Wave 0 落地 PR #43；Wave 2 仅剩 runner〕
 ```
 
 - [ ] **Step 4：编辑 L2177**
