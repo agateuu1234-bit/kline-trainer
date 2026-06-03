@@ -62,23 +62,26 @@
 
 **(1) `public func retryReload() async throws` — 非破坏性（transient 失败首选）**
 - 前置：要求 `loadError != nil`；健康态（`== nil`）→ throws 不动。
-- 语义：`let loaded = try loadSettings()` → 成功则 **MainActor 上先 `self.settings = loaded` 再 `_loadError = nil`**（**保留 DB 中真实用户设置**，恢复 transient 故障）；仍失败 → `loadError` 保留 + throws（不改 settings）。
+- 语义：`let loaded = try loadSettings()` → 成功则 **MainActor 上先 `self.settings = loaded` 再 `_loadError = nil`**（**保留 DB 中真实用户设置**，恢复 transient 故障；同时清内部 `_retryReloadFailed`）；仍失败 → **置内部 `_retryReloadFailed = true`** + `loadError` 保留 + throws（不改 settings）。
 - **不写库**（纯重读），不会覆盖任何持久值。
 
-**(2) `public func forceResetAndReload() async throws` — 破坏性 last-resort（持久损坏才用）**
-- 前置：要求 `loadError != nil` **且 调用方须先经显式 user 确认**（UI 仅在 `retryReload()` 已 throws 失败后才暴露此入口）；健康态（`== nil`）→ throws 且不改 `settings`（防误抹合法设置）。
-- 语义：`saveSettings(AppSettings.default)` 覆盖损坏状态 → `let loaded = try loadSettings()` 验证 → **MainActor 上先 `self.settings = loaded` 再 `_loadError = nil`**；仍失败 → throws + `loadError` 保留。
+**(2) `public func forceResetAndReload(confirmation: SettingsResetConfirmation) async throws` — 破坏性 last-resort（持久损坏才用）**
+- **守卫编码进 API/state（不靠 prose 约定；codex plan R9-high#1）**：
+  - 参数 `confirmation: SettingsResetConfirmation` —— **不可默认构造的 marker 类型**，仅 UI 在确认对话框处构造（编译期强制「显式用户确认」，杜绝裸调用）。
+  - in-method 强制前置：`loadError != nil` **且 内部 `_retryReloadFailed == true`**（证明 `retryReload()` 已先试且失败）。任一不满足（健康态 / 未先试 retryReload / 未确认）→ **throws 且不调 `saveSettings`**（零破坏）。
+- 语义：通过守卫后 `saveSettings(AppSettings.default)` 覆盖 → `let loaded = try loadSettings()` → **MainActor 上先 `self.settings = loaded` 再 `_loadError = nil`**（清 flag）；仍失败 → throws + `loadError` 保留。
 - **关键不变量（codex plan R2-high）**：必须先把 reloaded 值赋回 `settings` 再清错误位——loadError 时 `settings` 是 init 的 `zeroDefault`（zero fee/capital），只清错误位不刷新则解阻后 `snapshotFeesIfReady()` 仍读 stale zero settings，架空 RFC。
 
-**恢复顺序契约**：U4 **先调 `retryReload()`**（非破坏，救 transient）；**仅当它 throws**（持久损坏）才在**显式用户确认后**调 `forceResetAndReload()`（破坏性）。禁止跳过 retryReload 直接破坏性 reset。
+**恢复顺序契约（由上述 state 强制，非仅 prose）**：U4 **先调 `retryReload()`**（非破坏，救 transient）；**仅当它 throws**（置 `_retryReloadFailed`）才在显式确认（构造 `SettingsResetConfirmation`）后调 `forceResetAndReload(confirmation:)`。跳过 retryReload 或无 confirmation → 破坏路径在 saveSettings 前 throws。
 
 **reset 目标值**：`AppSettings.default` —— 命名默认值，含合理起始本金（非 0 资本），清全 4 字段（`commissionRate`/`minCommissionEnabled`/`totalCapital`/`displayMode`）到 default。顺位 10 引入（顺位 1 docs-only 不写代码；不复用 capital 0 的 private `zeroDefault`）。
 
 **acceptance（顺位 10 验收）**：
 1. **transient loadError**（DB 含合法用户设置，init load 偶发失败）→ `retryReload()` → load 成功 → `store.settings ==` **原用户设置（非 default）** + `loadError == nil` + `update`/交易解阻；**断言未调 `saveSettings`**（无破坏）。
-2. **persistent malformed** → `retryReload()` throws（`loadError` 保留）→ 用户确认 → `forceResetAndReload()` → `store.settings == AppSettings.default` + 解阻 + `snapshotFeesIfReady()` 返回 default fee（非 zero）。
-3. **健康态**（`loadError == nil`，settings 含用户自定义值）→ `retryReload()` **与** `forceResetAndReload()` 均 throws + `settings` 不变。
-4. **破坏路径仍失败**（saveSettings/reload fail）→ `loadError` 保留 + throws。
+2. **persistent malformed** → `retryReload()` throws（`loadError` 保留 + `_retryReloadFailed` 置位）→ 构造 `SettingsResetConfirmation` → `forceResetAndReload(confirmation:)` → `store.settings == AppSettings.default` + 解阻 + `snapshotFeesIfReady()` 返回 default fee（非 zero）。
+3. **健康态**（`loadError == nil`，settings 含用户自定义值）→ `retryReload()` **与** `forceResetAndReload(confirmation:)` 均 throws + `settings` 不变。
+4. **未先试 retryReload 直接破坏**（`loadError != nil` 但 `_retryReloadFailed == false`）→ `forceResetAndReload(confirmation:)` **throws 且断言未调 `saveSettings`**（state 守卫强制顺序，零破坏；codex R9-high#1）。
+5. **破坏路径仍失败**（saveSettings/reload fail）→ `loadError` 保留 + throws。
 
 ---
 
