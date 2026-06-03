@@ -6,13 +6,13 @@
 
 ---
 
-## 一、唯一总闸门（一条命令覆盖六谓词）
+## 一、唯一总闸门（一条命令覆盖七谓词）
 
 | # | 操作 | 期望 | 判定 |
 |---|---|---|---|
-| 1 | 在仓库根运行：`bash scripts/governance/verify-wave2-pr1-rfc.sh; echo "exit=$?"` | 末尾依次打印 `(a) PASS` `(b) PASS` `(c) PASS` `(d) PASS` `(e) PASS` `(f) PASS` `ALL PASS`，且最后一行 `exit=0` | ☐ |
+| 1 | 在仓库根运行：`bash scripts/governance/verify-wave2-pr1-rfc.sh; echo "exit=$?"` | 末尾依次打印 `(a) PASS` `(b) PASS` `(c) PASS` `(d) PASS` `(e) PASS` `(f) PASS` `(g) PASS` `ALL PASS`，且最后一行 `exit=0` | ☐ |
 
-脚本为 fail-closed：源文件不可读 → 打印 `GATE FAIL: unreadable source ...` 并 `exit 2`；任一谓词命中残留 → 对应 `(x) FAIL` 并 `exit 1`。仅当全部六谓词通过才 `exit 0`。
+七谓词：(a) H1「同 PR」残留 / (b) fee 打包不调 fail-open snapshotFees / (c) P4/P2 stale Wave2 待办 / (d) P6 两层恢复契约不变量 / (e) outline supersede marker 位置 / (f) merge-base allowlist / **(g) outline 无 stale-loose「允许 DAO reset-all」语义**。脚本为 fail-closed：源文件不可读 → 打印 `GATE FAIL: unreadable source ...` 并 `exit 2`；任一谓词命中残留 → 对应 `(x) FAIL` 并 `exit 1`。仅当全部七谓词通过才 `exit 0`。
 
 | # | 操作 | 期望 | 判定 |
 |---|---|---|---|
