@@ -245,11 +245,12 @@ grep -nE "AppSettings\.default" kline_trainer_modules_v1.4.md
 grep -nE "self\.settings = loaded" kline_trainer_modules_v1.4.md
 grep -nE "loadError != nil|loadError == nil" kline_trainer_modules_v1.4.md
 grep -nF "_retryReloadFailed" kline_trainer_modules_v1.4.md
+grep -nE "try\? loadSettings" kline_trainer_modules_v1.4.md   # 破坏前最后非破坏 reload（R10-high#1）
 ```
 
 - [ ] **Step 2：跑断言（当前全 = 空，待 Step 3/4 写入）**
 
-Expected: 六条均输出空
+Expected: 七条均输出空
 
 - [ ] **Step 3：在 §P6 protocol code block 加两个恢复方法（在 Task3 改后的 snapshotFeesIfReady 行下方）**
 
@@ -264,7 +265,7 @@ Expected: 六条均输出空
 在 `// E3 TradeCalculator / E5 TrainingEngine / P4 SettingsDAO 一律使用小数率。` 行后的 ` ``` ` 之后插入：
 ```
 
-**P6 loadError 两层恢复契约（Wave 2 顺位 1 RFC 定义；顺位 10 U4 实施）**：`loadError` set 后 `update`/`resetCapital`/交易（`snapshotFeesIfReady`）全阻塞，重启对持久损坏 DB 无效。**`loadError` 任何 init load 失败都 set（含 transient I/O/磁盘故障，非仅 malformed）**，故恢复分两层（codex plan R8-high#2）：**① `retryReload() async throws`（非破坏，transient 首选）**——要求 `loadError != nil`；`let loaded = try loadSettings()` 成功 → MainActor 先 `self.settings = loaded` 再清 `loadError`（**保留 DB 真实用户设置**）；仍失败 → 置内部 `_retryReloadFailed = true` + loadError 保留 + throws；**不写库**。**② `forceResetAndReload(confirmation: SettingsResetConfirmation) async throws`（破坏性 last-resort）**——**守卫编码进 state（非 prose；codex R9-high#1）**：`confirmation` 是不可默认构造的 marker（UI 确认对话框处构造，编译期强制显式确认）；in-method 强制 `loadError != nil` **且 `_retryReloadFailed == true`**，任一不满足（健康态/未先 retryReload/未确认）→ **throws 且不调 `saveSettings`**（零破坏）；通过后 `saveSettings(AppSettings.default)` → reload → MainActor 先 `self.settings = loaded` 再清 `loadError`+flag。**恢复顺序契约（state 强制）**：先 `retryReload()`，仅当它 throws（置 flag）才在确认后 `forceResetAndReload(confirmation:)`。**前置条件（R7-high）**：两者健康态（`loadError == nil`）→ throws 且不改 `settings`（防误抹合法 commissionRate/minCommissionEnabled/totalCapital/displayMode）。**关键不变量（R2-high）**：必须先把 reloaded 值赋回 `settings` 再清错误位——否则解阻后 `snapshotFeesIfReady()` 仍读 init 时 `zeroDefault`（zero fee/capital），架空契约。reset 目标 `AppSettings.default` = 含合理起始本金（非 0 资本）的命名默认值，顺位 10 引入（不复用 capital 0 的 `zeroDefault`）。**不改** Wave 0 冻结的 `SettingsDAO` 协议。详 `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md` §四。
+**P6 loadError 两层恢复契约（Wave 2 顺位 1 RFC 定义；顺位 10 U4 实施）**：`loadError` set 后 `update`/`resetCapital`/交易（`snapshotFeesIfReady`）全阻塞，重启对持久损坏 DB 无效。**`loadError` 任何 init load 失败都 set（含 transient I/O/磁盘故障，非仅 malformed）**，故恢复分两层（codex plan R8-high#2）：**① `retryReload() async throws`（非破坏，transient 首选）**——要求 `loadError != nil`；`let loaded = try loadSettings()` 成功 → MainActor 先 `self.settings = loaded` 再清 `loadError`（**保留 DB 真实用户设置**）；仍失败 → 置内部 `_retryReloadFailed = true` + loadError 保留 + throws；**不写库**。**② `forceResetAndReload(confirmation: SettingsResetConfirmation) async throws`（破坏性 last-resort）**——**守卫编码进 state（非 prose；codex R9-high#1）**：`confirmation` 是不可默认构造的 marker（UI 确认对话框处构造，编译期强制显式确认）；in-method 强制 `loadError != nil` **且 `_retryReloadFailed == true`**，任一不满足（健康态/未先 retryReload/未确认）→ **throws 且不调 `saveSettings`**（零破坏）；通过守卫后 **破坏前最后非破坏重试 `if let loaded = try? loadSettings()` → 成功（transient 已恢复）则 `self.settings = loaded` + 清 `loadError`+flag + return（不 `saveSettings`，保留真实设置，零破坏；codex R10-high#1）**；仅当该最后 load 仍失败 → `saveSettings(AppSettings.default)` → reload → MainActor 先 `self.settings = loaded` 再清 `loadError`+flag。**恢复顺序契约（state 强制）**：先 `retryReload()`，仅当它 throws（置 flag）才在确认后 `forceResetAndReload(confirmation:)`。**前置条件（R7-high）**：两者健康态（`loadError == nil`）→ throws 且不改 `settings`（防误抹合法 commissionRate/minCommissionEnabled/totalCapital/displayMode）。**关键不变量（R2-high）**：必须先把 reloaded 值赋回 `settings` 再清错误位——否则解阻后 `snapshotFeesIfReady()` 仍读 init 时 `zeroDefault`（zero fee/capital），架空契约。reset 目标 `AppSettings.default` = 含合理起始本金（非 0 资本）的命名默认值，顺位 10 引入（不复用 capital 0 的 `zeroDefault`）。**不改** Wave 0 冻结的 `SettingsDAO` 协议。详 `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md` §四。
 ```
 
 - [ ] **Step 5：跑断言验证（两精确签名 + 不变量锚全在位 = 谓词 (d)）**
@@ -544,6 +545,7 @@ gg  "self\.settings = loaded" "$modules"; [ -n "$HITS" ] || d_ok=0
 gg  "保留.{0,4}loadError|loadError.{0,6}保留" "$modules"; [ -n "$HITS" ] || d_ok=0
 gg  "loadError != nil|loadError == nil" "$modules"; [ -n "$HITS" ] || d_ok=0          # healthy-state 前置条件（R7-high#1）
 ggF "_retryReloadFailed" "$modules"; [ -n "$HITS" ] || d_ok=0                          # state-enforced 顺序 flag（R9-high#1）
+gg  "try\? loadSettings" "$modules"; [ -n "$HITS" ] || d_ok=0                            # 破坏前最后非破坏 reload（R10-high#1）
 s=$(grep -cF "forceResetAndReload" "$spec"); [ $? -gt 1 ] && { echo "GATE FAIL: grep -c spec"; exit 2; }
 [ "${s:-0}" -ge 1 ] || d_ok=0
 if [ "$d_ok" -eq 1 ]; then echo "(d) PASS"; else echo "(d) FAIL: P6 恢复契约不全（modules 缺 精确签名/AppSettings.default/settings=loaded/保留 loadError/healthy-state 守卫 或 spec 缺）"; rc=1; fi

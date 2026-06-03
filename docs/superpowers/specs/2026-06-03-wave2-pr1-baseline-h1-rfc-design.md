@@ -69,7 +69,7 @@
 - **守卫编码进 API/state（不靠 prose 约定；codex plan R9-high#1）**：
   - 参数 `confirmation: SettingsResetConfirmation` —— **不可默认构造的 marker 类型**，仅 UI 在确认对话框处构造（编译期强制「显式用户确认」，杜绝裸调用）。
   - in-method 强制前置：`loadError != nil` **且 内部 `_retryReloadFailed == true`**（证明 `retryReload()` 已先试且失败）。任一不满足（健康态 / 未先试 retryReload / 未确认）→ **throws 且不调 `saveSettings`**（零破坏）。
-- 语义：通过守卫后 `saveSettings(AppSettings.default)` 覆盖 → `let loaded = try loadSettings()` → **MainActor 上先 `self.settings = loaded` 再 `_loadError = nil`**（清 flag）；仍失败 → throws + `loadError` 保留。
+- 语义（**破坏前最后一次非破坏 reload，防 transient 恢复后误抹；codex plan R10-high#1**）：通过守卫后 **先非破坏重试 `if let loaded = try? loadSettings()`** → 若成功（transient 已恢复）→ `self.settings = loaded` + 清 `loadError`+flag + **return（不调 `saveSettings`，保留真实设置，零破坏）**；**仅当该最后 load 仍失败** → `saveSettings(AppSettings.default)` 覆盖 → `let loaded = try loadSettings()` → MainActor 先 `self.settings = loaded` 再清 `loadError`+flag；仍失败 → throws + `loadError` 保留。
 - **关键不变量（codex plan R2-high）**：必须先把 reloaded 值赋回 `settings` 再清错误位——loadError 时 `settings` 是 init 的 `zeroDefault`（zero fee/capital），只清错误位不刷新则解阻后 `snapshotFeesIfReady()` 仍读 stale zero settings，架空 RFC。
 
 **恢复顺序契约（由上述 state 强制，非仅 prose）**：U4 **先调 `retryReload()`**（非破坏，救 transient）；**仅当它 throws**（置 `_retryReloadFailed`）才在显式确认（构造 `SettingsResetConfirmation`）后调 `forceResetAndReload(confirmation:)`。跳过 retryReload 或无 confirmation → 破坏路径在 saveSettings 前 throws。
@@ -81,7 +81,8 @@
 2. **persistent malformed** → `retryReload()` throws（`loadError` 保留 + `_retryReloadFailed` 置位）→ 构造 `SettingsResetConfirmation` → `forceResetAndReload(confirmation:)` → `store.settings == AppSettings.default` + 解阻 + `snapshotFeesIfReady()` 返回 default fee（非 zero）。
 3. **健康态**（`loadError == nil`，settings 含用户自定义值）→ `retryReload()` **与** `forceResetAndReload(confirmation:)` 均 throws + `settings` 不变。
 4. **未先试 retryReload 直接破坏**（`loadError != nil` 但 `_retryReloadFailed == false`）→ `forceResetAndReload(confirmation:)` **throws 且断言未调 `saveSettings`**（state 守卫强制顺序，零破坏；codex R9-high#1）。
-5. **破坏路径仍失败**（saveSettings/reload fail）→ `loadError` 保留 + throws。
+5. **transient 在确认前恢复**（`retryReload()` 瞬时失败置 flag → 依赖恢复 → 构造 confirmation → `forceResetAndReload(confirmation:)`）→ 破坏前最后 `loadSettings()` 成功 → `store.settings ==` **原用户设置（非 default）** + 解阻 + **断言未调 `saveSettings`**（transient 恢复零破坏；codex R10-high#1）。
+6. **破坏路径仍失败**（最后 load 也失败 → saveSettings/reload fail）→ `loadError` 保留 + throws。
 
 ---
 
@@ -93,7 +94,7 @@
 - **(b) 交易/费用打包路径不调 fail-open `snapshotFees`**（codex plan R8-high#1 扩面）：grep modules **全部** `snapshotFees` 行，**双向**匹配交易/打包语境（`startNewNormalSession`/`NormalFlow.fees`/`打包`——不止 L2000/L2040，含 risk-table L2293/L2401），排除 `snapshotFeesIfReady` 与明标 `fail-open`/`UI 显示` 的 def 行；**且 positive 断言 `func snapshotFeesIfReady() throws -> FeeSnapshot` 签名在位**。pass = 0 个 fee 打包指引用裸 fail-open `snapshotFees` 且 IfReady 签名存在。
 - **(c) 无 stale「P4 DefaultAppDB / P2 4 内部端口」列为 Wave 2 待办**：锚定「Wave 2 checklist 未勾选 `- [ ]`」语境，**全部 3 个 live 权威源都查**（codex plan R2-medium 修，最终 gate 不得漏源）：(c1) modules §Wave 2 未勾选项不含 `P4 .DefaultAppDB. 实现`/`4 内部端口默认实现`；(c2) wave1-outline §六不含 `P4 DefaultAppDB 实施`/`4 内部端口真实现`；(c3) wave1-completion §五不含旧边界串 `C8 / E5 / E6 / P2 / P4 / U1`。**排除**架构描述性提及（modules L19/L53/L59/L1736 等非 todo）、本 RFC 自身引用、Wave 2 outline §〇、changelog。pass = 三源全 0 命中。
 
-- **(d) P6 两层恢复契约关键不变量已写入**（codex plan R5-medium#2 + R6-high#1 + R7-med#2 + R8-high#2）：不止计数——modules §P6 须同时含 **两个精确签名 `func retryReload() async throws`（非破坏）+ `func forceResetAndReload() async throws`（破坏性）**（code fence，非 prose 裸名）+ `AppSettings.default`（reset 目标）+ `self.settings = loaded`（reload-before-clear 不变量）+ `loadError != nil`/`== nil`（healthy-state 守卫）+ `retryReload` 出现于「先调/非破坏/transient」语境（恢复顺序契约）+ 本 RFC spec ≥1。pass = 全锚在 modules 且 spec ≥1。
+- **(d) P6 两层恢复契约关键不变量已写入**（codex plan R5-medium#2 + R6-high#1 + R7-med#2 + R8-high#2 + R9-high#1 + R10-high#2）：不止计数——modules §P6 须同时含 **两精确签名 `func retryReload() async throws`（非破坏）+ `func forceResetAndReload(confirmation: SettingsResetConfirmation) async throws`（破坏性，含 confirmation marker，**非无参**）**（code fence，非 prose 裸名）+ `AppSettings.default`（reset 目标）+ `self.settings = loaded`（reload-before-clear 不变量）+ `loadError != nil`/`== nil`（healthy-state 守卫）+ `_retryReloadFailed`（state-enforced 顺序 flag）+ 本 RFC spec ≥1。pass = 全锚在 modules 且 spec ≥1。
 - **(e) Wave 2 outline supersede marker 位置在位**（codex plan R4-high#1 + R6-med#3）：不止存在——marker `本节措辞已 superseded` 须位于 `### 3.1` heading **之后**、首个 stale 短语（`落地时同 PR 内`/`C2/C8/E5 orchestration 同 PR`）**之前**（断言 heading 行 < marker 行 < 首个 stale 行）；防 marker 落在 changelog/§3.1 stale 段之后、后续 planner 仍先读旧约束。
 - **(f) scope allowlist fail-closed**（codex plan R6-high#2）：用 `git merge-base origin/main HEAD` 算 base（非本地 `main` ref，避免 stale/advanced/absent）→ diff 改动文件须全在 9 文件显式 allowlist；任何非白名单路径（`ios/`/`.swift`/`.py`/SQL/YAML/冻结 doc）→ 硬 FAIL。取代旧 `.swift/.py` 黑名单（不 fail-closed 且漏其他业务面）。
 
