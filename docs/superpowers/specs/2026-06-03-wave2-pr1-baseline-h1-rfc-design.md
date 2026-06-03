@@ -70,12 +70,13 @@
 
 ## 五、grep gate 精确化（acceptance 项，非裸 grep）
 
-三谓词，**全部锚定具体短语 + 排除已知合法残留**，防 codex 拿裸 `同 PR` 无限挑战（per `feedback_acceptance_grep_anchoring` + `feedback_codex_distributed_reliability_drilldown`）：
+五谓词 (a)-(e)，**全部锚定具体短语 + 排除已知合法残留**，防 codex 拿裸 `同 PR` 无限挑战（per `feedback_acceptance_grep_anchoring` + `feedback_codex_distributed_reliability_drilldown`）：
 
 - **(a) 无 H1「同 PR」残留**：锚定精确短语 `C2/C8/E5 orchestration 同 PR` 与「落地时同 PR 内」，搜索范围**仅限 4 个 live 权威源**（modules + ledger + wave1-completion + wave1-outline §六）；**显式排除** E2 顺位 8 bump 短语（`MANDATORY 与 decoder 代码同 PR` / `顺位 8` 上下文）与 `docs/superpowers/plans/` `docs/superpowers/specs/`（changelog/历史）下文档。pass = 4 源命中 0。
 - **(b) 交易路径不调 fail-open `snapshotFees()`**：grep modules `startNewNormalSession` 费用打包上下文（L2000/L2040 区块）须为 `snapshotFeesIfReady`，不出现裸 `snapshotFees()` 作为交易路径调用。pass = 交易路径区块命中 0 个裸 `snapshotFees()`。
 - **(c) 无 stale「P4 DefaultAppDB / P2 4 内部端口」列为 Wave 2 待办**：锚定「Wave 2 checklist 未勾选 `- [ ]`」语境，**全部 3 个 live 权威源都查**（codex plan R2-medium 修，最终 gate 不得漏源）：(c1) modules §Wave 2 未勾选项不含 `P4 .DefaultAppDB. 实现`/`4 内部端口默认实现`；(c2) wave1-outline §六不含 `P4 DefaultAppDB 实施`/`4 内部端口真实现`；(c3) wave1-completion §五不含旧边界串 `C8 / E5 / E6 / P2 / P4 / U1`。**排除**架构描述性提及（modules L19/L53/L59/L1736 等非 todo）、本 RFC 自身引用、Wave 2 outline §〇、changelog。pass = 三源全 0 命中。
 
+- **(d) P6 恢复契约已写入**（codex plan R5-medium#2）：`forceResetAndReload` 在 modules（§P6 code block 方法 + prose 块，≥2）+ 本 RFC spec（≥1）均在位；防 RFC 宣称定义 P6 恢复却无契约落到权威 spec。pass = modules ≥2 且 spec ≥1。
 - **(e) Wave 2 outline supersede marker 在位**（codex plan R4-high#1）：`grep -F "本节措辞已 superseded" docs/superpowers/specs/2026-06-02-wave2-outline-design.md` 命中 ≥1；防后续 anchor plan 读 outline §3.1 旧「同 PR」字面重建约束。
 
 **grep gate 实现归属**：谓词封装为独立 fail-closed 脚本 `scripts/governance/verify-wave2-pr1-rfc.sh`，acceptance `docs/acceptance/<PR>.md` 调它（per `feedback_acceptance_grep_anchoring`：负向断言用 `if grep ...; then exit 1`，不用 `set -e` 下 `! grep` 死闸门）。**fail-closed 要求（codex plan R3/R4-high）**：(1) 源路径用**数组**（仓库默认 zsh 不 word-split 标量，`grep $SCALAR` 把整串当单一文件名 → 读取失败被转成 PASS）；(2) 跑前 `-r` 断言每个源可读；(3) grep 包 helper 区分 rc 0(命中)/1(无命中)/**>1(读错误/坏正则 → 立即 exit 2)**，不用 `grep ... || true`（会把 exit 2 也吞成 PASS）；(4) 排除/过滤用纯 bash `case` 不用 `grep|grep -v`。脚本须实测：未编辑 repo → GATE FAIL exit 1；源不可读 → exit 2。

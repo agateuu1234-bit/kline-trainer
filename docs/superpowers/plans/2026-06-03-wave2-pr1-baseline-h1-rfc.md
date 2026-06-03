@@ -462,17 +462,20 @@ if [ -n "$HITS" ]; then echo "(e) PASS"; else echo "(e) FAIL: outline 缺 supers
 exit "$rc"
 ```
 
-- [ ] **Step 3：跑脚本验证 fail-closed 行为（先证伪：临时改坏一源 → exit 1）**
+- [ ] **Step 3：跑脚本验证 fail-closed 行为（证伪 + 证实）**
 
 Run:
 ```bash
 chmod +x scripts/governance/verify-wave2-pr1-rfc.sh
-# 反例 1：源缺失 → 必 FAIL（证 fail-closed 非 fail-open）
-( cd scripts && bash governance/verify-wave2-pr1-rfc.sh ); echo "missing-source exit=$?"
-# 反例 2：仓库根跑 → Task1-7 已改完应 ALL PASS
+# 反例（源不可读）：必 GATE FAIL exit 2（证 fail-closed，读失败≠PASS）
+( cd scripts && bash governance/verify-wave2-pr1-rfc.sh ); echo "unreadable-source exit=$?"
+# 正例（仓库根，Task1-7b 已改完）：ALL PASS exit 0
 bash scripts/governance/verify-wave2-pr1-rfc.sh; echo "exit=$?"
 ```
-Expected: 反例 1（在 scripts/ 下跑，源相对路径找不到）打印 `FAIL: missing source ...` + `exit=1`；反例 2 在仓库根 `ALL PASS` + `exit=0`
+Expected：
+- 反例（在 scripts/ 下跑，源相对路径不可读）打印 `GATE FAIL: unreadable source ...` + `unreadable-source exit=2`（**exit 2 = 读失败硬退出，非语义 fail；与脚本 `-r` 守卫契约一致**）
+- 正例（仓库根）打印 `(a)-(e) PASS` / `ALL PASS` + `exit=0`
+- 注：exit 1 仅保留给语义 stale-content 失败（谓词命中残留）；exit 2 = 源读取失败；exit 0 = 全过
 
 - [ ] **Step 4：写 acceptance 文档**
 
