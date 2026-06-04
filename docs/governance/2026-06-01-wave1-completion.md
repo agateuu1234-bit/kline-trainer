@@ -40,7 +40,7 @@
 
 | ID | 终态 | 依据 |
 |---|---|---|
-| H1 | **→ Wave 2**：1a (#56) 已做 spec amendment（modules §C1b 闸门 #4 reclassify Wave 1→Wave 2）；真正闭环 = Wave 2 C8 ChartContainerView 集成 PR（C2/C8/E5 orchestration 同 PR） | #56 |
+| H1 | **→ Wave 2**：1a (#56) 已做 spec amendment（modules §C1b 闸门 #4 reclassify Wave 1→Wave 2）；真正闭环 = Wave 2 顺位 7 C8 集成 anchor（C2 + E5a/E5b + C8 三模块在场时验证；Wave 2 顺位 1 RFC 松绑措辞） | #56 |
 | H2 | **CLOSED**：E2 RFC (#64) + 实施 (#65) merged；CONTRACT_VERSION bump 1.4→1.5 已在 #65 落地 | #64 + #65 |
 | H3 | **CLOSED**：Wave 1 内部 plan 排序 = outline v20 (#55) | #55 |
 | H4 | **CLOSED**（Wave 0）：M0.3 multi-file split | Wave 0 |
@@ -79,4 +79,4 @@
 
 ## 五、Wave 2 边界（确认，不在本收尾 scope）
 
-Wave 1 outline §六明列 Wave 2 范围：**C8 / E5 / E6 / P2 / P4 / U1 / U2 / U4** + H1 真正闭环（C8 ChartContainerView 集成）。Wave 2 outline 排序为独立规划 session（brainstorming + writing-plans），不在本轻量收尾内。
+Wave 1 outline §六明列 Wave 2 范围：**C8 / E5 / E6 / P2 runner / U1 / U2 / U4** + H1 真正闭环（C8 ChartContainerView 集成）。〔baseline reconcile（Wave 2 顺位 1 RFC）：**P4 `DefaultAppDB` + P2 4 内部端口已 Wave 0 落地（PR #42/#43），不在 Wave 2；Wave 2 仅 P2 runner**。〕Wave 2 outline 排序为独立规划 session（brainstorming + writing-plans），不在本轻量收尾内。

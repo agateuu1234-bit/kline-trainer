@@ -1177,9 +1177,9 @@ enum ChartAction: Equatable, Sendable {
   - 同上 cancel：派发 `drawingCancelled(baseRevision: 0)` → `.none` + mode 仍为 drawing
 - **Deceleration stop 契约测试**（闸门 #4 F3 修订 v1.4 — **Wave 0 仅 reducer 契约测试；production handler 集成测试移 Wave 2**；Wave 1 顺位 1a reclassify，理由见下）：
   - **Wave 0 验收**（PR #50 已落）：reducer 派发 `panEnded(velocity:) → .startDeceleration(v)` effect + `activateDrawing → .requestDrawingSnapshotAfterStoppingAnimator` effect 的契约测试（13 个测试覆盖 happy + cross-session）
-  - **Wave 2 验收**（C8 ChartContainerView + E5 TrainingEngine 落地时同 PR 内；C2 DecelerationAnimator 已于 Wave 1 顺位 3 落地）：production handler 集成测试 — 模拟延迟 animator 回调，验证 handler 必须**先**调用 `animator.stop()` 再计算 range；drawing 退出后无 `offsetApplied` 到达 reducer
+  - **Wave 2 验收**（集成测试在 **Wave 2 顺位 7 C8 集成 anchor** 内验证；彼时 C2 DecelerationAnimator〔Wave 1 顺位 3〕+ E5a/E5b TrainingEngine〔Wave 2 顺位 2/3〕+ C8 ChartContainerView〔本 anchor〕三模块均已 merged 在场）：production handler 集成测试 — 模拟延迟 animator 回调，验证 handler 必须**先**调用 `animator.stop()` 再计算 range；drawing 退出后无 `offsetApplied` 到达 reducer
 
-  **理由**：production handler 涉及 C2/C8/E5 三模块 orchestration，非 Wave 0 单模块 scope；reducer 契约测试已覆盖契约面，handler 集成测试在生产代码落地的同 PR 验证更准。C8/E5 属 Wave 2（见 Wave 1 outline §六），故集成测试在 Wave 2 C8 集成 PR 内闭环（Wave 1 顺位 1a 仅 reclassify wording）。
+  **理由**：production handler 涉及 C2/C8/E5 三模块 orchestration，非 Wave 0 单模块 scope；reducer 契约测试已覆盖契约面，handler 集成测试需三模块**同时在场**时验证 orchestration 正确——语义要求是三模块**都已合入代码库**，不要求**同一个 PR 编写**。C8 是依赖链末端（需 E5），故集成测试自然落在 Wave 2 顺位 7 C8 集成 anchor（彼时 C2 + E5a/E5b 均已 merged）。〔Wave 2 顺位 1 RFC 松绑措辞为「C8 anchor 内三模块在场验证」，见 `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md`；Wave 1 顺位 1a 仅 reclassify Wave 1→Wave 2 wording。〕
 - `drawingCommitted/drawingCancelled` 非法转换 assertion 测试：autoTracking / freeScrolling 上派发 → assertionFailure
 - **`drawingCommitted/drawingCancelled` 双分支测试**（闸门 #6 修订，与新 guard 一致）：
   - 匹配分支：drawing(snap.baseRev=r) 模式下派发 `drawingCommitted(baseRevision: r)` / `drawingCancelled(baseRevision: r)` → 断言 mode=autoTracking + `.none`
@@ -1997,7 +1997,10 @@ final class SettingsStore {
     init(settingsDAO: SettingsDAO)
     func update(_ mutate: (inout AppSettings) -> Void) async throws
     func resetCapital() async throws
-    func snapshotFees() -> FeeSnapshot                   // v1.2：Coordinator.startNewNormalSession 内部调用
+    func snapshotFees() -> FeeSnapshot                   // fail-open（仅 UI 显示路径；loadError 时返回零费用不抛）
+    func snapshotFeesIfReady() throws -> FeeSnapshot     // fail-closed：loadError 时 throws；Coordinator.startNewNormalSession 等交易流必须用此变体
+    func retryReload() async throws                                          // Wave 2 顺位 1 RFC：非破坏性 transient 恢复（重读，保留真实设置；失败置 _retryReloadFailed）
+    func forceResetAndReload(confirmation: SettingsResetConfirmation) async throws  // Wave 2 顺位 1 RFC：破坏性 last-resort（state 强制 _retryReloadFailed + confirmation marker）
 }
 
 // v1.3：UI 层边界转换（U4 SettingsPanel 内实现，非 SettingsStore 职责）
@@ -2013,6 +2016,8 @@ func uiDisplayTenThousandth(fromCommissionRate r: Double) -> Double { r * 10000 
 // UI 层只在显示 / input 绑定处做一次乘除 10000 的转换。
 // E3 TradeCalculator / E5 TrainingEngine / P4 SettingsDAO 一律使用小数率。
 ```
+
+**P6 loadError 两层恢复契约（Wave 2 顺位 1 RFC 定义；顺位 10 U4 实施）**：`loadError` set 后 `update`/`resetCapital`/交易（`snapshotFeesIfReady`）全阻塞，重启对持久损坏 DB 无效。**`loadError` 任何 init load 失败都 set（含 transient I/O/磁盘故障，非仅 malformed）**，故恢复分两层（codex plan R8-high#2）：**① `retryReload() async throws`（非破坏，transient 首选）**——要求 `loadError != nil`；`let loaded = try loadSettings()` 成功 → MainActor 先 `self.settings = loaded` 再清 `loadError`（**保留 DB 真实用户设置**）；仍失败 → 置内部 `_retryReloadFailed = true` + **`_loadError` 更新为最新 `loadSettings()` 错误**（不保留 stale init 错误，否则 init-transient→retry-dbCorrupted 被旧 transient 锁死、损坏永修不了；codex 最终 review FR7）+ throws；**不写库**。**② `forceResetAndReload(confirmation: SettingsResetConfirmation) async throws`（破坏性 last-resort）**——`confirmation` 是 deliberate-intent 信号（caller 须显式构造、防误调；非抗 determined caller 的安全边界，init 归属顺位 10 定）；**真正数据安全 = 错误类型门 + runtime 守卫 + 破坏前最后非破坏 reload**：in-method 强制 ① `loadError != nil` ② `_retryReloadFailed == true` ③ **`loadError` 是 corruption-class `.persistence(.dbCorrupted)`**；任一不满足（健康态/未先 retryReload/**loadError 是 transient `.persistence(.diskFull)`/`.ioError`/`.schemaMismatch` 等非 dbCorrupted**）→ **throws 且不调 `saveSettings`**（零破坏，transient 走 retry-only 防误抹只是暂时读不出的完好设置；codex 最终 review FR2）；通过守卫后 **破坏前最后非破坏重试 `do { let loaded = try loadSettings() }` → 成功（transient 已恢复）则 `self.settings = loaded` + 清 `loadError`+flag + return（不 `saveSettings`，保留真实设置；codex R10-high#1）**；`catch` 检查 **final error**：**仅当 final 也是 `.persistence(.dbCorrupted)`** → `saveSettings(AppSettings.default)` → reload → `self.settings = loaded` + 清 `loadError`+flag；**否则（final 是 transient `.diskFull`/`.ioError` 等）→ `_loadError = final error` + throws + 不调 `saveSettings`**（防混合错误「入口 dbCorrupted 但破坏时刻变 transient」误抹合法设置；codex 最终 review FR3）。**恢复顺序契约（state 强制）**：先 `retryReload()`，仅当它 throws（置 flag）才在确认后 `forceResetAndReload(confirmation:)`。**前置条件（R7-high）**：两者健康态（`loadError == nil`）→ throws 且不改 `settings`（防误抹合法 commissionRate/minCommissionEnabled/totalCapital/displayMode）。**关键不变量（R2-high）**：必须先把 reloaded 值赋回 `settings` 再清错误位——否则解阻后 `snapshotFeesIfReady()` 仍读 init 时 `zeroDefault`（zero fee/capital），架空契约。reset 目标 `AppSettings.default` = 含合理起始本金（非 0 资本）的命名默认值，顺位 10 引入（不复用 capital 0 的 `zeroDefault`）。**不改** Wave 0 冻结的 `SettingsDAO` 协议。详 `docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md` §四。
 
 ---
 
@@ -2037,7 +2042,7 @@ struct HomeView: View {
 //     pushToTrainingView(engine: engine)
 // }
 //
-// fees 打包现在由 coordinator.startNewNormalSession 内部调用 settings.snapshotFees()，
+// fees 打包现在由 coordinator.startNewNormalSession 内部调用 settings.snapshotFeesIfReady()（fail-closed：loadError 时 throws；禁交易流用 fail-open snapshotFees() 误算零费用），
 // U1 不再直接拼装 flow / engine。
 ```
 
@@ -2173,8 +2178,8 @@ struct HistoryActionSheet: View {
 - [ ] C8 ChartContainerView（纯桥接；computes volumeRange/macdRange 用 `NonDegenerateRange.make` 注入 renderState）
 - [ ] E5 TrainingEngine（含 onSceneActivated；v1.3 init 增 `initialCapital/initialCashBalance/initialTradeOperations/initialDrawdown` 参数）
 - [ ] **E6 TrainingSessionCoordinator** 实现（v1.3 新）
-- [ ] P2 DownloadAcceptanceRunner 及 4 内部端口默认实现 + `retryPendingConfirmations`（v1.3）
-- [ ] P4 `DefaultAppDB` 实现（组合 4 个 protocol + `AcceptanceJournalDAO`）
+- [ ] P2 DownloadAcceptanceRunner orchestration + `retryPendingConfirmations`（v1.3）〔baseline reconcile：4 个内部端口 ✅ 已 Wave 0 落地 PR #43；Wave 2 仅剩 runner〕
+- [x] ~~P4 `DefaultAppDB` 实现~~ ✅ 已 Wave 0 落地（PR #42/#43；`KlineTrainerPersistence/DefaultAppDB.swift`）——baseline reconcile：不在 Wave 2
 - [ ] U1 HomeView（依赖 `TrainingSessionCoordinator` + `DownloadAcceptanceRunner`）
 - [ ] U2 TrainingView（顶层 scenePhase 监听；drawingCommitted/Cancelled 派发 baseRevision）
 - [ ] U4 SettingsPanel（v1.3：commissionRate UI 边界乘除 10000）
@@ -2290,7 +2295,7 @@ struct HistoryActionSheet: View {
 | **R33** | **GRDB Queue/Pool 并存矛盾**（v1.2） | **P1** | 统一 DatabaseQueue，删 pool 表述 | M0.5/P4 |
 | **R34** | **MockTrainingEngine 不可执行**（v1.2） | **P1** | 改 Preview Fixture 模式（非 protocol） | E5/U2 |
 | **R35** | **IndicatorMapperBundle.make 值域藏在 draw**（v1.2） | **P2** | 值域外置到 KLineRenderState，C8 构造 | C1/C8 |
-| **R36** | **NormalFlow.fees 打包时机不明**（v1.2） | **P2** | U1 启动时 SettingsStore.snapshotFees | U1/E4 |
+| **R36** | **NormalFlow.fees 打包时机不明**（v1.2） | **P2** | U1 启动时 SettingsStore.snapshotFeesIfReady（顺位 1 RFC：交易流 fail-closed，禁 fail-open snapshotFees） | U1/E4 |
 | **R37** | **content_hash 跨平台字节不确定**（v1.2） | **P2** | 改用 zip CRC32 | M0.2/B2 |
 
 ---
@@ -2398,7 +2403,7 @@ v1.4（累计 56 项修订）
 | 33 | R2-Codex P2-2 | P2 | P2 | C7 | 补 classifySingleFingerPan + drawingMode 规则 |
 | 34 | R2-Codex P2-3 | P2 | P2 | §十四 | 评审痕迹重做为 37 行 |
 | 35 | R2-Cloud-新增 | — | P2 | C1 | IndicatorMapperBundle.make 签名重构 |
-| 36 | R2-Cloud-新增 | — | P2 | U1/P6 | NormalFlow.fees 打包时机明确（U1 + SettingsStore.snapshotFees） |
+| 36 | R2-Cloud-新增 | — | P2 | U1/P6 | NormalFlow.fees 打包时机明确（U1 + SettingsStore.snapshotFeesIfReady；顺位 1 RFC fail-closed） |
 | 37 | R2-Cloud-新增 | — | P2 | M0.2/B2 | content_hash 改 zip CRC32 |
 | (38) | R2-Cloud-新增 | — | P2 | M0.4 | AppError.unknown → internalError(module, detail) |
 | **— 第 3 轮（v1.3）—** | | | | | |

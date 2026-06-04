@@ -50,7 +50,7 @@
 | 7 | **C8 ChartContainerView + C7 手势接线 + H1 production handler 集成测试** | 图表集成 | ~300 行 + 集成测试 | E5（a+b） | **H1 close** + **C7 arbiter 接线**（见 §四）+ C3-C6 渲染收口 + C8 性能 |
 | 8 | U1 HomeView（**view only**：start/continue/review/replay + gear 设置 经**注入导航意图**触发；不在此接生产 root，避免在 U2/U4 落地前引入占位路由） | UI | ~250 行 SwiftUI | E6（a+b） + P2 | — |
 | 9 | U2 TrainingView **+ E6 生命周期接线** | UI | ~300 行 SwiftUI | E5（a+b） + C8 + **E6（a+b）** | C2/C7 运行时验收 + **E6 持久化生命周期**（见 §四） |
-| 10 | U4 SettingsPanel **+ SettingsStore loadError 恢复**（P6 `forceResetAndReload()` API：loadError 下仍允许的 reset-all 路径 + SettingsPanel 暴露入口） | UI + P6 恢复 | ~250-350 行 SwiftUI + P6 API | P2 | **fail-closed settings 恢复路径**（见 §四；PR4b L190/L222 defer 到此） |
+| 10 | U4 SettingsPanel **+ SettingsStore loadError 恢复**（P6 两层恢复 API `retryReload()` + `forceResetAndReload(confirmation:)`，dbCorrupted-only 破坏门，**禁 DAO reset-all**；契约见顺位 1 RFC §四 + SettingsPanel 暴露入口） | UI + P6 恢复 | ~250-350 行 SwiftUI + P6 API | P2 | **fail-closed settings 恢复路径**（见 §四；PR4b L190/L222 defer 到此） |
 | 11 | **生产组合根 + app entry 替换 + 路由接线 + 启动恢复**（替换模板 `KlineTrainerApp.swift`/`ContentView.swift`，构造并接线 `DefaultAppDB`/`SettingsStore`/E6/P2 生产依赖图；接线 HomeView→TrainingView（start/continue/review/replay）+ gear→SettingsPanel 路由；启动跑一次 `retryPendingConfirmations()`） | composition | ~300-500 行（plan 阶段若超 500 拆「组合根+依赖图」与「路由+启动恢复」） | U1 + U2 + U4 + E6 + P2 | **生产依赖图接线 + 路由 + 启动孤儿确认恢复**（见 §四；置于末位确保所有被路由 view 已在场） |
 
 **Phase 划分**：
@@ -68,6 +68,7 @@
 ## 三、关键决策
 
 ### 3.1 顺位 1：baseline reconciliation + H1 闭环 RFC（先松绑「同 PR」措辞）
+> **【顺位 1 RFC 已落地 2026-06-03，本节措辞已 superseded】**：本节描述的「同 PR」张力已由顺位 1 RFC（`docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md`）松绑为「集成测试在顺位 7 C8 集成 anchor 内、C2 + E5a/E5b + C8 三模块在场时验证」。下文「现状字面」「张力」引用为**松绑前历史描述**；顺位 7 C8 plan 以 modules L1180 松绑后措辞为准，**勿据本节旧「同 PR」字面重建约束**。
 
 **现状字面**（modules §C1b 闸门 #4 F3，v1.4，仓库 L1178-1182）：production handler 集成测试的 **Wave 2 验收**（L1180）写明「C8 ChartContainerView + E5 TrainingEngine **落地时同 PR 内**」；§15.4 ledger H1 行（仓库 L32）与 `docs/governance/2026-06-01-wave1-completion.md` H1 行同样写「C2/C8/E5 orchestration 同 PR」。
 
@@ -84,7 +85,7 @@
 4. `docs/governance/2026-06-01-wave1-completion.md` H1 行（仓库 L43）措辞同步。
 5. **全部 stale Wave 2 边界源 reconcile**（codex R6 F1）：除上述，`docs/superpowers/specs/2026-05-19-wave1-outline-design.md` §六（仍列 P4 + 全 P2 为 Wave 2）+ `docs/governance/2026-06-01-wave1-completion.md` §五（同列 P4/P2）均须标注「P4 + P2 4 端口已 Wave 0 落地，Wave 2 仅 P2 runner」，防 plan-stage grep 仍命中权威化的「重做已完成 P4/P2」指令。
 6. **fee-callsite 措辞 reconcile**（codex R5 F1）：`kline_trainer_modules_v1.4.md` L2000 / L2040 现写「Coordinator.startNewNormalSession 内部调用 `settings.snapshotFees()`」——与 SettingsStore fail-closed 契约（交易流须 `snapshotFeesIfReady`/守 `loadError`）冲突。改为 `snapshotFeesIfReady`/显式 loadError 守卫措辞，防 E6a 照 stale 字面构造零费用 NormalFlow（架空 §四 E6a residual）。
-7. **P6 `forceResetAndReload()` 恢复契约定义**（codex R6 F2：新公共 API 须有 spec/RFC owner，不能在 U4 临时引入未治理公共面）：在 RFC 内定义 SettingsStore loadError 恢复路径契约——API 形态（是否改 P6 公共 surface / 抑或 DAO 级 reset-all）、reset 语义（清哪些 key、是否 loadError set 下仍允许执行）、错误处理、acceptance（malformed → loadError → reset → 成功 reload / 交易仅在 reload 成功后解阻）。顺位 10 U4 据此契约实施，不自行定义公共面。
+7. **P6 恢复契约定义**（codex R6 F2：新公共 API 须有 spec/RFC owner，不能在 U4 临时引入未治理公共面）：在 RFC 内定义 SettingsStore loadError 恢复路径契约。**〔顺位 1 RFC 已落定 option 1 = SettingsStore 两层恢复 `retryReload()`（非破坏 transient 首选）+ `forceResetAndReload(confirmation:)`（破坏性，dbCorrupted-only 错误类型门 + 破坏前 do/catch final-error 分流 + `_retryReloadFailed` 顺序守卫），**禁 DAO 级 reset-all**、不改 Wave 0 冻结 `SettingsDAO`，acceptance 9 场景含 transient/混合错误不破坏，见该 RFC §四。下文为松绑前开放问题描述。〕** API 形态（曾考虑：改 P6 公共 surface / 抑或 DAO 级 reset-all）、reset 语义、错误处理、acceptance。顺位 10 U4 据此契约实施，不自行定义公共面。
 8. **grep gate**（acceptance 项）：RFC merge 后断言全仓 (a) 无未被 supersede 的 `同 PR` / `C2/C8/E5 orchestration 同 PR` 残留措辞；(b) 交易路径（`startNewNormalSession` 等）不调 fail-open `snapshotFees()`；(c) 无把 `P4 DefaultAppDB` / `P2 4 内部端口` 列为 Wave 2 待办的 stale 条目（除本 outline §〇 + RFC 自身引用 / changelog）。
 - 0 业务代码改动（仅 spec/governance 文档）。**注**：本 RFC 因含 P6 恢复契约定义，使 Wave 2 的 spec 契约变更 = H1 措辞 + baseline reconciliation + **P6 恢复 API 契约**三项（§三.3 据此修订）。
 
@@ -123,7 +124,7 @@
 | **U2 E6 持久化生命周期**（返回存进度 / 自动结束 finalize / 结算确认 / review / replay 路径；pending 清理 / replay·review 非保存语义） | codex R2 F2 | 顺位 9 U2 scope 内：U2 接线 E6 `saveProgress`/`finalize`/`endSession`；plan 阶段定生命周期契约/测试矩阵（back / auto-end / settlement confirm / review / replay 五路径 + pending 清理 + 非保存分支） | 9 |
 | **C7 手势 arbiter 生产接线**（`ChartGestureArbiter.attach(to:)` + `onPan` 等 callback 已存在，但 KLineView 无 recognizer；C8 = UIViewRepresentable 造 KLineView 是自然接线点） | codex R3 F1 | 顺位 7 C8 scope 内：C8 attach arbiter（attach-once）+ 路由 callback（pan panStarted/offsetApplied/panEnded、周期切换、十字光标、drawing）进 E5/reducer；acceptance 验证接线正确。**U2 仍只负责 hosting + 运行时证据，不负责接线本身** | 7 |
 | **E6a fail-closed 费用快照**（P6 契约：交易流必须用 `snapshotFeesIfReady`/守 `loadError`；`snapshotFees` 是 fail-open 返零费用，仅 UI 显示路径用） | codex R3 F2 | 顺位 4 E6a scope 内：构造 NormalFlow 前用 `snapshotFeesIfReady` 或显式守 `loadError`；测试 loadError 传播 + 失败时不造 engine + 不保留 activeReader/session state | 4 |
-| **SettingsStore loadError 恢复路径**（loadError set 时 `update`/`resetCapital` 全被阻塞 → 用户无应用内恢复手段；PR4b plan L190/L222 显式 defer 到 Wave 2 U4 的 `forceResetAndReload()`） | codex R4 F1 / PR4b plan defer | **契约由顺位 1 RFC 定义**（R6 F2：新公共 API 须有 spec owner）；顺位 10 U4 据契约实施 `forceResetAndReload()`（或等价 DAO 级 reset-all，loadError 下仍允许执行）+ SettingsPanel 暴露入口；测试 malformed settings → loadError → reset → 成功 reload / 交易解阻 | 1（契约）+ 10（实施） |
+| **SettingsStore loadError 恢复路径**（loadError set 时 `update`/`resetCapital` 全被阻塞 → 用户无应用内恢复手段；PR4b plan L190/L222 显式 defer 到 Wave 2 U4） | codex R4 F1 / PR4b plan defer | **契约由顺位 1 RFC 定义并钉死**（`docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md` §四）；顺位 10 U4 据契约实施 **SettingsStore 两层恢复 `retryReload()`（非破坏 transient 首选）+ `forceResetAndReload(confirmation:)`（破坏性，守卫 `loadError != nil` + `_retryReloadFailed` + `.dbCorrupted` 错误类型门 + 破坏前 do/catch final-error 分流）**——**禁 DAO 级 reset-all**（不改 Wave 0 冻结 `SettingsDAO`；恢复是 Store 状态机职责）+ SettingsPanel 仅在 retryReload 失败后暴露破坏入口；acceptance 按 RFC §四 9 场景（含 transient 不破坏 / 混合错误不破坏） | 1（契约）+ 10（实施） |
 | W1-R1 docker image digest pin | `project_wave1_completion_2026_06_01` | **不在 Wave 2 scope**：归 NAS 部署 PR | — |
 | W1-R2 3-5 样本训练组数据 | 同上（H7） | **不在 Wave 2 scope**：需 NAS 真实数据源 | — |
 | B4-R1/R4/R5/R6（清理职责3 / 部署编排 / advisory lock conn-scoped / near-term retry） | `project_pr76_b4_scheduler_merged` | **不在 Wave 2 scope**：归后续部署 / 可靠性加固 PR | — |
