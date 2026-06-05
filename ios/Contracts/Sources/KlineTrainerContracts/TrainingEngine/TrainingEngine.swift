@@ -33,6 +33,17 @@ public final class TrainingEngine {
 
     private let animators: (upper: DecelerationAnimator, lower: DecelerationAnimator)
 
+    /// 构造运行时引擎（D9 校验边界契约）。
+    ///
+    /// **`allCandles` 必须是已校验数据。** 训练组数据的「可恢复」校验（空 `[:]` / 缺 `.m3` /
+    /// `c.period != key` / `.m3` 未覆盖 `maxTick`）是 **reader 层**的职责：`TrainingSetReader.read()`
+    /// 与 `DefaultTrainingSetDataVerifier` 已对损坏/空数据抛 `AppError.trainingSet`，在 E6 构造本引擎
+    /// **之前**就把可恢复错误呈现给用户。E6（顺位 4/5）必须只用 reader-已校验的 candle 构造引擎，
+    /// 并 **重新校验**（而非信任）P5 缓存数据。
+    ///
+    /// 因此下方 `precondition`/`preconditionFailure` 是**末线不变量执行**：触发即表示 E6/调用方
+    /// 违反「传入已校验数据」契约（程序 bug），与 `NormalFlow` 的 trap-on-caller-bug 同风格——
+    /// 不是可恢复的运行时数据错误，故不 `throws`（spec init 非 throwing，modules L1607-1616）。
     public init(flow: TrainingFlowController,
                 allCandles: [Period: [KLineCandle]],
                 maxTick: Int,

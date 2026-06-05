@@ -80,6 +80,14 @@ spec preview（L1690-1705）引用 `FeeSnapshot.preview` / `KLineCandle.previewF
 **判定：** `preview` 用私有 `static` helper 内联构造最小 fixture（`FeeSnapshot(commissionRate:0.0001, minCommissionEnabled:true)`、`previewCandleCount`=8 根 `.m60`+`.daily` K 线、review 用内联 `TrainingRecord`），**不**新增 `FeeSnapshot.preview` 等公共面（避免与未来 U 层 fixture 定义冲突）。gated `#if DEBUG`。**maxTick = `previewCandleCount-1`（=7）由 fixture 覆盖范围派生**，不照抄 spec 字面 1000——否则 maxTick(1000) 远超 candle 范围(0..7)，preview 推进 tick 会越界到无 candle 区（codex R3-F2）；并加 `previewMaxTickMatchesFixtureRange` 断言此不变量。
 **偏离声明：** 偏离 spec 的「`.preview`/`.previewFixture`」字面写法，但语义等价（DEBUG preview 构造器）。**codex 核**：是否应改为补公共 fixture 以供 U1/U2（顺位 8/9）复用 —— 倾向不补，留 U 层按需引入，避免本 PR 越界。
 
+### D9 — candle 数据校验边界：reader 可恢复 / engine init 末线不变量（Stage6 final-F1）
+**疑点（codex Stage6-F1, high 0.78）：** `allCandles` 源自训练组 reader/cache 边界（可能空/缺 .m3/损坏/陈旧缓存）；init 用 `precondition`/`preconditionFailure` 处理这些 → 若 E6 透传坏数据，app **trap 崩溃**而非弹可恢复 `AppError.trainingSet`。
+**判定（保持 precondition + 显式契约，spec-faithful）：** 不改 init 为 throwing（spec init 非 throwing，modules L1607-1616；改 throwing 属契约变更需 RFC，且倒置「E5=运行时 / E6=持久化校验」分层 + 全测试改 try）。
+- **可恢复校验在 reader 层（已存在）：** `TrainingSetReader.read()` + `DefaultTrainingSetDataVerifier`/`PreviewTrainingSetReader` 本就对空/缺 .m3/`c.period!=key`/损坏抛 `AppError.trainingSet`，在 E6 构造引擎**之前**呈现可恢复错误。
+- **engine precondition = 末线不变量执行：** 触发即 E6/调用方违反「传入已校验数据」契约（程序 bug），同 `NormalFlow`（TrainingFlowController.swift:29-31）的 trap-on-caller-bug 既定模式。已在 init 加 D9 契约文档注释。
+- **E6/P5 义务（显式登记，顺位 4/5 兑现）：** E6 必须只用 reader-已校验 candle 构造引擎，并**重新校验**（而非信任）P5 缓存数据，对空/损坏抛 `AppError.trainingSet`——这正是 codex 关注的「陈旧缓存绕过校验」defense-in-depth gap 的正确归属层。
+**若 codex 仍坚持 E5a init 必须 throwing → 升级 user 作 spec RFC 决策（契约变更 + 三方）。**
+
 ---
 
 ## Spec snapshot（grep-verified，2026-06-05）
@@ -839,7 +847,7 @@ Expected: `=== ALL E5a ACCEPTANCE CHECKS PASSED ===`，`exit=0`。
 |---|---|---|---|
 | 18 | 作用域守卫：G8 无 E5b 动作 + G4 无 buy/sellEnabled + G2b 含 R4-R6 前置（flow/maxTick、`.m3` 驱动+覆盖、resume tick、drawdown 基线、无 finestPeriod） | grep 命中/不命中均如期 | ☐ |
 | 19 | codex 对抗性评审 branch-diff | verdict `approve`（收敛） | ☐ |
-| 20 | 契约登记：D3 E6 换算契约；D4 buy/sellEnabled 移 E5b；D5/D7 init 签名 additive 扩展（resume tick + 周期组合）待 E6 RFC 确认 | PR body 已列 | ☐ |
+| 20 | 契约登记：D3 E6 换算契约；D4 buy/sellEnabled 移 E5b；D5/D7 init 签名 additive 扩展待 E6 RFC；D9 candle 校验边界（reader 可恢复 / engine 末线不变量 + E6/P5 重校验缓存义务） | PR body 已列 | ☐ |
 
 **任一条 ✗ → 不得 merge。**
 ```
@@ -934,3 +942,11 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **R8（codex branch-diff，verdict `approve`，2026-06-05）→ 收敛 ✅：** `findings: []`。codex 摘要：「only adds an implementation plan document, and the plan already records the known contract deviations, review gates, CI limitations, and acceptance checks rather than changing runtime behavior」。
 
 **收敛总结（R1→R8，共 8 轮）：** 语义契约(R1/R2) → 机械一致性(R3) → repo 不变量对齐(R4) → correctness 深化(R5) → resume 重建契约(R6) → 机械收尾(R7) → **approve(R8)**。全程 repo-grounded、无设计僵局；user 明确「继续刷到 approve」授权超 `max_rounds:3` 续推。计划阶段评审完成，进 Stage 3 subagent-driven development。
+
+---
+
+## Stage 6 整体实现 codex 对抗性 review（full branch diff：计划 + 真实 Swift 实现）
+
+**Final-R1（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应：**
+
+- **Final-F1（high 0.78, public init 对坏数据 trap）—— 部分反驳 + 文档化契约（D9）：** codex 要求 init 改 throwing 返回可恢复 AppError。判定保持 precondition（spec init 非 throwing，modules L1607-1616；可恢复校验已在 reader 层 `TrainingSetReader.read() throws` + Verifier；engine precondition = 末线不变量，同 NormalFlow trap-on-caller-bug）。已在 init 加 D9 契约文档注释 + 登记 **E6/P5 义务**（E6 只用 reader-已校验 candle 构造、重校验 P5 缓存，对空/损坏抛 `AppError.trainingSet`——codex 关注的「陈旧缓存绕过校验」的正确归属层）。**若 codex 仍坚持 throwing → 升级 user 作 spec RFC。** 待 Final-R2 复审。
