@@ -49,7 +49,8 @@ spec init 签名（L1607-1616）**不含** `fees` 参数，但存储属性 `let 
 **spec 已调和单位（codex R1-F1 误判澄清）：** `modules v1.4 L510` 明确 `DrawdownAccumulator.maxDrawdown` 是「**非负值，单位元**」的绝对额，`L516` 用 `dd = peak - current`；`L1636` 明确 E5 accessor「**直接读 accumulator**」。即运行时形态就是绝对元，**by design**。既有 `AppStateTests`（`maxDrawdown==30/50` 元）亦锚定此契约。codex R1-F1 把「record 列的比率」与「accumulator 的绝对额」混为一谈。
 **与「比率」的关系：** 比率（如 -0.12）只属 `TrainingRecord.max_drawdown` **列**（plan v1.5 L419、settlement L999），是**另一对象**；由 **E6 finalize 换算**（modules L537-538：record 只存最终 maxDrawdown、不存 peakCapital；resume 时 E6 从 `PendingTraining.drawdown` 重建 accumulator）。
 **判定：** `maxDrawdown { drawdown.maxDrawdown }` 透传绝对元（**spec-faithful**；不在 E5a 改成比率——那会违反 L1636 且破坏既有 `AppStateTests` 契约）。accessor **加文档注释**标明：单位=元/非负/运行时形态，比率换算是 E6 职责；调用方勿当比率用。
-**init 须 seeding peak（codex R2-F1 采纳，纠正前稿「不 seeding」）：** spec L1604 明确「`initialCapital` 用于 drawdown 初始化」。`.initial` 的 `peakCapital=0`，而 `update` 先把 peak 抬到当前值再算 dd——若局中第一次 update 时资金已跌破起始值，从初始资金起的那段回撤会**永久丢失**（低报）。故 init 把 `peakCapital` seeding 为**起始总资金** `startTotal = initialCashBalance + initialPosition.shares × startPrice`（startPrice = `flow.initialTick` 处现价）。fresh 局 `.initial`（peak 0）→ 取 startTotal；resume 局（`initialDrawdown` 携带更高 peak）→ `max(peak, startTotal)` 保留较大者，二者统一为 `peakCapital = max(initialDrawdown.peakCapital, startTotal)`，`maxDrawdown` 沿用 `initialDrawdown.maxDrawdown`。
+**init 须 seeding peak（codex R2-F1 采纳，纠正前稿「不 seeding」）：** spec L1604 明确「`initialCapital` 用于 drawdown 初始化」。`.initial` 的 `peakCapital=0`，而 `update` 先把 peak 抬到当前值再算 dd——若局中第一次 update 时资金已跌破起始值，从初始资金起的那段回撤会**永久丢失**（低报）。故 init 把 `peakCapital` seeding 为**起始总资金** `startTotal = initialCashBalance + initialPosition.shares × startPrice`（startPrice = `flow.initialTick` 处现价）。fresh 局 `.initial`（peak 0）→ 取 startTotal；resume 局（`initialDrawdown` 携带更高 peak）→ `max(peak, startTotal)` 保留较大者，统一为 `peakCapital = max(initialDrawdown.peakCapital, startTotal)`。
+**再调 `update(currentCapital: startTotal)` 反映当前回撤（codex R5-F1）：** 仅 seeding peak、`maxDrawdown` 照搬携带值仍会低报——若携带 peak 高于重建的起始总资金（如 resume：peak 130k / 当前 100k / 携带 maxDD 12k），**当前回撤 30k > 携带 12k**，此刻 finalize 会持久化低报值。故构造后 `seededDrawdown.update(currentCapital: startTotal)` 把「当前回撤」并入 `maxDrawdown`（= `max(携带 maxDD, peak − startTotal)`）。fresh 局 `startTotal == peak` → dd 0 不变；resume 上例 → maxDD 纠正为 30k。
 **E6 换算契约（显式登记，顺位 4/5 兑现）：** E6 finalize 构造 `TrainingRecord.maxDrawdown` 时须把运行时绝对元换算为比率（分母口径——initialCapital vs trough-peak——在 E6 RFC 定义；accumulator 不存 trough-peak，口径须显式选定）。本 PR 不实现换算，仅登记契约 + 测试断言 accessor 为绝对元（非负）。**若 codex 仍坚持 E5a 必须改 accessor 为比率 → 升级 user：该改动违 modules L1636，属契约变更需 RFC + 三方确认。**
 
 ### D4 — `buyEnabled`/`sellEnabled`（动作可达性门）整体下放 E5b（codex R2-F2）
@@ -196,8 +197,9 @@ import CoreGraphics
         #expect(e.drawdown.peakCapital == 100_000)
     }
 
-    @Test func resumePreservesCarriedDrawdownPeak() {
-        // resume 局 initialDrawdown 携带更高 peak → 不被 startTotal 覆盖（取 max）
+    @Test func resumeReconcilesDrawdownToCurrentTotal() {
+        // resume：携带 peak 130k / maxDD 12k；重建起始总资金 100k → 当前回撤 30k > 12k。
+        // peak 取 max 保留 130k；maxDrawdown 经 update 纠正为 30k（codex R5-F1，避免低报）。
         let dd = DrawdownAccumulator(peakCapital: 130_000, maxDrawdown: 12_000)
         let e = TrainingEngine(flow: NormalFlow(fees: Self.fees, maxTick: 0),
                                allCandles: Self.candles([10]),
@@ -206,7 +208,7 @@ import CoreGraphics
                                initialPosition: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000),
                                initialDrawdown: dd)
         #expect(e.drawdown.peakCapital == 130_000)   // max(130_000, 90_000 + 1000*10 = 100_000)
-        #expect(e.drawdown.maxDrawdown == 12_000)
+        #expect(e.drawdown.maxDrawdown == 30_000)    // 130_000 − 100_000（并入当前回撤）
     }
 }
 ```
@@ -286,13 +288,15 @@ public final class TrainingEngine {
         self.tick = TickEngine(maxTick: maxTick, initialTick: startTick)  // D5（前置已保证 initialTick 在范围内，无 clamp）
         self.position = initialPosition
         self.cashBalance = initialCashBalance
-        // D3：drawdown peak seeding 为起始总资金（modules L1604），避免低报回撤（codex R2-F1）。
-        // fresh 局 .initial(peak 0)→ startTotal；resume 局 → max 保留携带的更高 peak。
+        // D3：drawdown seeding（peak = 起始总资金，modules L1604）+ 用 update 把「当前回撤」并入
+        // maxDrawdown，避免低报（codex R2-F1 + R5-F1）。fresh 局 dd=0；resume 局当前回撤 > 携带值时纠正。
         let startPrice = TrainingEngine.price(in: allCandles, atTick: startTick)
         let startTotal = initialCashBalance + Double(initialPosition.shares) * startPrice
-        self.drawdown = DrawdownAccumulator(
+        var seededDrawdown = DrawdownAccumulator(
             peakCapital: max(initialDrawdown.peakCapital, startTotal),
             maxDrawdown: initialDrawdown.maxDrawdown)
+        seededDrawdown.update(currentCapital: startTotal)   // peak>startTotal 时把当前回撤并入 maxDrawdown
+        self.drawdown = seededDrawdown
         self.markers = initialMarkers
         self.drawings = initialDrawings
         self.tradeOperations = initialTradeOperations
@@ -378,12 +382,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
     @Test func maxDrawdownIsAbsoluteAmountPerSpec() {
         // modules L510：accumulator.maxDrawdown = 非负绝对额（元），运行时形态；
         // 比率换算是 E6 finalize 职责（D3），本 accessor 不换算。
-        let dd = DrawdownAccumulator(peakCapital: 120_000, maxDrawdown: 8_000)
+        // 取 peak 108k 与起始总资金 100k 一致（dd 恰 8k），使 init update 不改值，聚焦「绝对元」断言。
+        let dd = DrawdownAccumulator(peakCapital: 108_000, maxDrawdown: 8_000)
         let e = TrainingEngine(flow: NormalFlow(fees: Self.fees, maxTick: 2),
                                allCandles: Self.candles([10, 11, 12]),
                                maxTick: 2, initialCapital: 100_000,
                                initialCashBalance: 100_000, initialDrawdown: dd)
-        #expect(e.maxDrawdown == 8_000)     // 元（绝对额），非比率
+        #expect(e.maxDrawdown == 8_000)     // 元（绝对额），非比率（108_000 − 100_000）
         #expect(e.maxDrawdown >= 0)         // 非负不变量
     }
 
@@ -570,6 +575,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
         #expect(e.allCandles[.m3]?.isEmpty == false)
     }
 
+    @Test func previewProvidesCandlesForDefaultPanels() {
+        // codex R5-F2：preview 必须为 engine 默认面板周期（.m60 上 / .daily 下）提供非空数据。
+        let e = TrainingEngine.preview(mode: .normal)
+        #expect(e.allCandles[e.upperPanel.period]?.isEmpty == false)   // .m60
+        #expect(e.allCandles[e.lowerPanel.period]?.isEmpty == false)   // .daily
+    }
+
     @Test func previewDefaultsToNormal() {
         #expect(TrainingEngine.preview().flow.mode == .normal)
     }
@@ -607,18 +619,22 @@ extension TrainingEngine {
             initialCashBalance: 100_000)
     }
 
-    /// codex R4-F3：仅 `.m3` 驱动序列（合法 fixture：非空必含 .m3、c.period==key）。
-    /// E5a 运行时只需 .m3；面板的 .m60/.daily 渲染数据由 U 层 preview 自备。
+    /// codex R4-F3/R5-F2：合法 fixture —— 每根 c.period==key、含非空 `.m3` 驱动序列，
+    /// 并为默认面板周期 `.m60`/`.daily` 提供合法聚合（endGlobalIndex ≤ m3Max=7）。
     private static func previewCandles() -> [Period: [KLineCandle]] {
-        let m3: [KLineCandle] = (0..<previewCandleCount).map { i in
-            KLineCandle(period: .m3, datetime: Int64(i) * 3600,
-                        open: 10, high: 11, low: 9, close: 10 + Double(i) * 0.1,
+        func candle(_ p: Period, start: Int, end: Int, close: Double) -> KLineCandle {
+            KLineCandle(period: p, datetime: Int64(start) * 3600,
+                        open: 10, high: 11, low: 9, close: close,
                         volume: 1000, amount: nil, ma66: nil,
                         bollUpper: nil, bollMid: nil, bollLower: nil,
                         macdDiff: nil, macdDea: nil, macdBar: nil,
-                        globalIndex: i, endGlobalIndex: i)
+                        globalIndex: start, endGlobalIndex: end)
         }
-        return [.m3: m3]
+        let m3 = (0..<previewCandleCount).map { candle(.m3, start: $0, end: $0, close: 10 + Double($0) * 0.1) }
+        let m60 = [candle(.m60, start: 0, end: 3, close: 10.3),
+                   candle(.m60, start: 4, end: 7, close: 10.7)]
+        let daily = [candle(.daily, start: 0, end: 7, close: 10.7)]
+        return [.m3: m3, .m60: m60, .daily: daily]
     }
 
     private static func previewRecord(fees: FeeSnapshot, finalTick: Int) -> TrainingRecord {
@@ -683,6 +699,7 @@ want "flow/maxTick precondition（R4-F1）"    "grep -q 'flow.allowedTickRange.u
 want "initialTick 范围 precondition（R4-F1）" "grep -q 'allowedTickRange.contains(flow.initialTick)' '$TE'"
 want ".m3 驱动序列前置（R4-F2）"             "grep -qE 'allCandles\[.m3\]' '$TE'"
 wantn "无 finestPeriod 残留（R4-F2 删）"     "grep -q 'finestPeriod' '$TE'"
+want "drawdown update 反映起始总资金（R5-F1）" "grep -q 'seededDrawdown.update(currentCapital: startTotal)' '$TE'"
 
 echo "== G3: 9 个运行时存储态 =="
 for p in tick position cashBalance drawdown markers drawings upperPanel lowerPanel tradeOperations; do
@@ -758,14 +775,14 @@ Expected: `=== ALL E5a ACCEPTANCE CHECKS PASSED ===`，`exit=0`。
 | # | 规则 | 验证测试 | 期望 | 通过 |
 |---|---|---|---|---|
 | 6 | init 接线：现金/初始资金/空仓/起始 tick/初始组合 60m+日线 | `initWiresRuntimeState` | PASS | ☐ |
-| 7 | drawdown peak seeding：fresh→起始总资金、带仓含市值、resume→保留较大 peak（R2-F1） | `freshSessionSeedsDrawdownPeakFromStartingCapital` / `freshSessionSeedPeakIncludesInitialPositionValue` / `resumePreservesCarriedDrawdownPeak` | PASS | ☐ |
+| 7 | drawdown seeding + 反映当前回撤：fresh→peak=起始总资金/dd=0、带仓含市值、resume→peak 取 max 且 maxDD 纠正为当前回撤（R2-F1 + R5-F1） | `freshSessionSeedsDrawdownPeakFromStartingCapital` / `freshSessionSeedPeakIncludesInitialPositionValue` / `resumeReconcilesDrawdownToCurrentTotal` | PASS | ☐ |
 | 8 | 总资金 = 现金 + 持仓市值（现价取 `.m3` 驱动序列收盘价） | `currentTotalCapitalAddsMarketValueAtCurrentPrice` | PASS | ☐ |
 | 9 | 现价只取 `.m3`、不取聚合周期未来价（R4-F2） | `currentPriceUsesM3DrivingSeriesNotAggregate` | PASS | ☐ |
 | 10 | 收益率 = (总资金−初始资金)/初始资金 | `returnRateIsNetRatioOverInitialCapital` | PASS | ☐ |
 | 11 | maxDrawdown = 非负绝对额（元），非比率（E6 换算） | `maxDrawdownIsAbsoluteAmountPerSpec` | PASS | ☐ |
 | 12 | review 起于末态 tick；flow/maxTick 契约边界（R4-F1） | `reviewModeStartsAtFinalTick` | PASS | ☐ |
 | 13 | 场景中继不改业务状态 | `onSceneActivatedIsSafeAndPure` | PASS | ☐ |
-| 14 | preview 三模式可构造 + maxTick 匹配 fixture + period==key（R3-F2/R4-F3） | `previewBuildsAllModes` / `previewMaxTickMatchesFixtureRange` / `previewFixtureCandlePeriodsMatchKeys` | PASS | ☐ |
+| 14 | preview 三模式可构造 + maxTick 匹配 fixture + period==key + 默认面板(.m60/.daily)有数据（R3-F2/R4-F3/R5-F2） | `previewBuildsAllModes` / `previewMaxTickMatchesFixtureRange` / `previewFixtureCandlePeriodsMatchKeys` / `previewProvidesCandlesForDefaultPanels` | PASS | ☐ |
 
 ## 三、流程合规与偏差
 
@@ -850,4 +867,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - **R4-F2（medium 0.86, 现价用聚合周期未来价）—— 采纳：** 驱动周期应固定 `.m3`（reader 不变量「非空必含 m3、非 m3 `endGlobalIndex≤m3Max`」）。改：删 `finestPeriod`，`price`/init 固定 `allCandles[.m3]`，init 前置 `.m3` 非空；测试 fixture 默认 `.m3`；新增 `currentPriceUsesM3DrivingSeriesNotAggregate`。
 - **R4-F3（medium 0.95, preview fixture 非法）—— 采纳：** preview 把 m60 candle 塞 `.daily` key、无 `.m3`（违反 reader 校验）。改：`previewCandles` 仅合法 `.m3` 序列；新增 `previewFixtureCandlePeriodsMatchKeys` 断言 period==key 且含非空 `.m3`。
 
-**收敛判断（已 R1-R4）：** 四轮 findings 从「语义契约」（R1/R2）→「机械一致性」（R3）→「与既有 repo 不变量对齐」（R4），逐轮收窄、全部 repo-grounded 且已实质修正，无遗留设计分歧、无 spec 未定义项僵局。已超 `max_rounds:3`：本继续基于 user 明确「到收敛 / 继续」指令（指令优先级高于默认 cap）+ 透明披露轮次。R5 复审若 clean 即收敛进 SDD；若仍现**实质新设计分歧**（非机械修复）→ escalate user。
+**R5（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应（仍 repo-grounded、无设计分歧）：**
+
+- **R5-F1（high 0.96, drawdown 仍低报）—— 采纳（R2-F1 的更深一层）：** 仅 seeding peak、`maxDrawdown` 照搬携带值仍低报；resume（peak 130k/当前 100k/maxDD 12k）真实回撤 30k。改：init 构造后 `seededDrawdown.update(currentCapital: startTotal)` 并入当前回撤；resume 测试改期望 30k；`maxDrawdownIsAbsoluteAmountPerSpec` 用一致 peak 108k 保持 8k 焦点。
+- **R5-F2（medium 0.88, preview 喂不了默认面板）—— 采纳（纠正 R4-F3 over-correct）：** R4 改成 `.m3`-only，但 engine 默认面板是 `.m60`/`.daily`。改：`previewCandles` 补合法 `.m60`/`.daily` 聚合（period==key、endGlobalIndex≤m3Max）；新增 `previewProvidesCandlesForDefaultPanels`。
+
+**收敛判断（已 R1-R5，超 `max_rounds:3` 2 轮）：** 五轮 findings 始终 repo-grounded（语义契约→机械一致性→repo 不变量对齐→correctness 深化）、逐条已实质修正，**从未出现需 user 拍板的设计分歧 / spec 未定义僵局**。但连续 5 轮未 `approve` 本身是信号 → 已就「继续刷 codex-approve vs 带当前计划进实现」**escalate user**（见对话）。该 escalate 后按 user 决定推进。
