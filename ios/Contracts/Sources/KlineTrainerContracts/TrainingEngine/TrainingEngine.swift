@@ -73,6 +73,9 @@ public final class TrainingEngine {
         // 用 >= 而非 ==：review 模式 m3 为训练组全集，末根 endGlobalIndex 可 > finalTick(=maxTick)。
         precondition(m3.last!.endGlobalIndex >= maxTick,
                      ".m3 末根 endGlobalIndex (\(m3.last!.endGlobalIndex)) must be >= maxTick (\(maxTick))")
+        // final-R5-F1：.m3 轴连续从 0（currentPrice 二分依赖）末线不变量。
+        precondition(TrainingEngine.isContiguousM3Axis(m3),
+                     ".m3 global tick axis must be contiguous from 0 (globalIndex==endGlobalIndex==index)")
         // final-R4-F2：钱字段 finite 末线不变量（make() 已对数据派生失败抛可恢复 AppError；
         // 直调 init = trust-boundary，非 finite 视为调用方 bug）。
         precondition(initialCapital.isFinite && initialCashBalance.isFinite
@@ -150,16 +153,13 @@ public final class TrainingEngine {
         guard flow.allowedTickRange.contains(startTick) else {
             throw AppError.trainingSet(.emptyData)            // 陈旧 resume tick 超出范围（训练组被替换）
         }
-        // .m3 endGlobalIndex 必须严格升——`currentPrice` 二分（partitioningIndex）的前置；
-        // 损坏/乱序缓存（如 [2,0,1,3]）会取错价（codex final-R4-F1）。这是 E5a 自己代码依赖的不变量；
-        // 更深的内容校验（OHLC 有限 / 30 根 warmup / 从 0 连续）属 reader 绑定的 TrainingSetDataVerifying，
+        // .m3 全局 tick 轴必须连续从 0（第 i 根 globalIndex==endGlobalIndex==i）——`currentPrice` 二分
+        // （取首个 endGlobalIndex>=tick）直接依赖此轴：有 gap（如 [0,10]）会把 tick 1..9 定到未来 candle
+        // 污染总资金/收益率/回撤（codex final-R4/R5-F1）。这是 E5a 自己代码依赖的轴不变量。
+        // 更深的内容校验（OHLC 有限 / 30 根 warmup）属 reader 绑定的 TrainingSetDataVerifying，
         // 由 E6 构造前调用（其 verifyNonEmpty(reader:) 取 reader 非内存 dict，无法在此复用）。
-        var prevEnd = Int.min
-        for c in m3 {
-            guard c.endGlobalIndex > prevEnd else {
-                throw AppError.trainingSet(.emptyData)        // .m3 endGlobalIndex 非单调
-            }
-            prevEnd = c.endGlobalIndex
+        guard TrainingEngine.isContiguousM3Axis(m3) else {
+            throw AppError.trainingSet(.emptyData)            // .m3 轴非连续（gap / 乱序 / period 错）
         }
         // 钱字段 finite + 非负——`startTotal`/`currentTotalCapital`/`returnRate`/drawdown 数学的前置；
         // resume 状态可能 NaN/Inf 污染（codex final-R4-F2）。
@@ -220,6 +220,16 @@ public final class TrainingEngine {
         guard let last = candles.last else { return 0 }
         let idx = candles.partitioningIndex { $0.endGlobalIndex >= target }
         return idx < candles.count ? candles[idx].close : last.close
+    }
+
+    /// `.m3` 全局 tick 轴不变量：第 i 根 `period == .m3` 且 `globalIndex == endGlobalIndex == i`
+    /// （连续从 0、无 gap）。`currentPrice` 的二分（首个 `endGlobalIndex >= tick`）依赖此轴——
+    /// gap/乱序会把 tick 定到未来 candle（codex final-R5-F1）。`make` 校验为可恢复、`init` 为末线不变量。
+    private static func isContiguousM3Axis(_ m3: [KLineCandle]) -> Bool {
+        for (i, c) in m3.enumerated() {
+            guard c.period == .m3, c.globalIndex == i, c.endGlobalIndex == i else { return false }
+        }
+        return true
     }
 }
 

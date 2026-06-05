@@ -296,7 +296,7 @@ import CoreGraphics
     }
 
     @Test func makeThrowsOnUnsortedM3() {
-        // Stage6 R4-F1：.m3 endGlobalIndex [0,2,1,3] 非单调（破坏二分定价）→ 可恢复抛
+        // Stage6 R4/R5-F1：.m3 endGlobalIndex [0,2,1,3] 非连续/乱序（破坏二分定价）→ 可恢复抛
         func c(_ end: Int) -> KLineCandle {
             KLineCandle(period: .m3, datetime: 0, open: 10, high: 10, low: 10, close: 10,
                         volume: 1, amount: nil, ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
@@ -305,6 +305,20 @@ import CoreGraphics
         #expect(throws: AppError.trainingSet(.emptyData)) {
             try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 3),
                                     allCandles: [.m3: [c(0), c(2), c(1), c(3)]], maxTick: 3,
+                                    initialCapital: 100_000, initialCashBalance: 100_000)
+        }
+    }
+
+    @Test func makeThrowsOnGappedM3() {
+        // Stage6 R5-F1：.m3 轴有 gap [0,10]（maxTick 10）→ tick 1..9 会被二分定到未来 candle(10)→可恢复抛
+        func c(_ end: Int) -> KLineCandle {
+            KLineCandle(period: .m3, datetime: 0, open: 10, high: 10, low: 10, close: 10,
+                        volume: 1, amount: nil, ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: end, endGlobalIndex: end)
+        }
+        #expect(throws: AppError.trainingSet(.emptyData)) {
+            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 10),
+                                    allCandles: [.m3: [c(0), c(10)]], maxTick: 10,
                                     initialCapital: 100_000, initialCashBalance: 100_000)
         }
     }

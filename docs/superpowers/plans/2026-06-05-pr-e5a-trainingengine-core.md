@@ -751,7 +751,7 @@ want "resume initialTick 参数（R6-F1）"          "grep -q 'initialTick ?? fl
 want "drawdown 含 initialCapital 基线（R6-F3）"   "grep -q 'initialDrawdown.peakCapital, initialCapital, startTotal' '$TE'"
 want "throwing factory make() throws（Stage6 F1）"  "grep -qE 'public static func make\(' '$TE'"
 want "make 抛可恢复 trainingSet(.emptyData)"        "grep -q 'AppError.trainingSet(.emptyData)' '$TE'"
-want "make .m3 单调校验（R4-F1）"                   "grep -q 'c.endGlobalIndex > prevEnd' '$TE'"
+want "make .m3 轴连续校验（R4/R5-F1）"              "grep -q 'isContiguousM3Axis' '$TE'"
 want "make 钱 finite 校验（R4-F2）"                 "grep -q 'initialCashBalance.isFinite' '$TE'"
 
 echo "== G3: 9 个运行时存储态 =="
@@ -967,4 +967,8 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - **范围线（判定）：** `make()` 只校验 **E5a 自己代码依赖**的不变量。
 - **Final-R4-F1（high 0.86, 乱序 .m3 破坏二分定价）—— 采纳（范围内）：** `make` 增 `.m3` endGlobalIndex **严格单调**校验（`currentPrice` 二分前置）→ 可恢复抛；新增 `makeThrowsOnUnsortedM3`。**更深内容（OHLC 有限/30 根 warmup/从 0 连续）属 reader 绑定 verifier，E6 构造前调用**（登记 E6 契约）。
 - **Final-R4-F2（med 0.74, 非 finite 钱污染）—— 采纳（范围内）：** `make` 增 cash/capital/drawdown **finite + 非负**校验 → 可恢复抛；init 加匹配 finite precondition（末线）；新增 `makeThrowsOnNonFiniteMoney`。
-- **若 codex 仍要求 E5a 全量重校验训练组内容（OHLC/warmup/连续）→ 升级 user**：属「运行时模块 vs reader 绑定 verifier」架构/范围决策（verifier 不可在 make 复用 → 只能重复实现，违 DRY）。待 Final-R5 复审。
+- **若 codex 仍要求 E5a 全量重校验训练组内容（OHLC/warmup）→ 升级 user**：属「运行时模块 vs reader 绑定 verifier」架构/范围决策（verifier 不可在 make 复用 → 只能重复实现，违 DRY）。
+
+**Final-R5（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应（范围线内精确化）：**
+
+- **Final-R5-F1（high 0.78, gap .m3 轴破坏定价）—— 采纳（范围内）：** 我 R4 的「单调」不够——`[0,10]`(maxTick 10) 单调且覆盖，但 tick 1..9 被二分定到 endGlobalIndex 10 的未来 candle。codex 对：`currentPrice` 二分真正依赖**轴连续**（第 i 根 `globalIndex==endGlobalIndex==i`）。改：抽 `isContiguousM3Axis` helper（period==.m3 && globalIndex==endGlobalIndex==i），`make` 校验为可恢复 + `init` 末线 precondition（codex 的「mirror in init」）；`makeThrowsOnUnsortedM3` 改判连续 + 新增 `makeThrowsOnGappedM3`。**仍在范围线内**（轴连续是 E5a 定价代码直接依赖）；OHLC/warmup 仍归 reader verifier。待 Final-R6 复审。
