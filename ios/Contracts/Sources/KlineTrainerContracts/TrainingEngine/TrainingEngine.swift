@@ -106,11 +106,12 @@ public final class TrainingEngine {
 
     /// E6 推荐的**可恢复**构造路径（D9 / Stage6 codex final-F1）。
     ///
-    /// 训练组 candle 数据派生失败（空 `[:]` / 缺非空 `.m3` / `.m3` 未覆盖 `maxTick`）是来自
-    /// reader/cache 边界的**可恢复**条件——本工厂校验后抛 `AppError.trainingSet(.emptyData)`
-    /// （`isRecoverable == true`，由 UI 呈现），而非让 `init` 的末线 `precondition` 把数据错误变成
-    /// 进程 trap。E6（顺位 4/5）应经此工厂构造，并对 P5 缓存数据**重新校验**（而非信任）。
-    /// `init` 仍保留同名前置作为「已校验数据」契约的末线不变量。
+    /// 所有**数据派生**输入（candle 数据 + `maxTick` + flow/maxTick 一致性 + resume `startTick`）
+    /// 都来自 reader/cache/PendingTraining 边界，可能空/陈旧/损坏（如保存的 tick 超出被替换的更短
+    /// 训练组）。本工厂逐项校验，失败抛 `AppError.trainingSet(.emptyData)`（`isRecoverable==true`，由
+    /// UI 呈现），而非让 `init` 的末线 `precondition` 把数据错误变成进程 trap（Stage6 final-F1/R3）。
+    /// E6（顺位 4/5）应经此工厂构造，并对 P5 缓存数据**重新校验**（而非信任）。`init` 保留同名前置
+    /// 作为「已校验数据」契约的末线不变量（直调 init = trust-boundary，trap = 调用方程序 bug）。
     public static func make(
         flow: TrainingFlowController,
         allCandles: [Period: [KLineCandle]],
@@ -126,11 +127,23 @@ public final class TrainingEngine {
         initialUpperPeriod: Period = .m60,
         initialLowerPeriod: Period = .daily
     ) throws -> TrainingEngine {
+        // 顺序：maxTick>=0 必须最先——NormalFlow/ReplayFlow 的 allowedTickRange 是 0...maxTick，
+        // maxTick<0 时访问它本身会 trap，故先 guard maxTick 再碰 flow.allowedTickRange。
+        guard maxTick >= 0 else {
+            throw AppError.trainingSet(.emptyData)            // 损坏 maxTick（candle 数 / finalTick）
+        }
+        guard flow.allowedTickRange.upperBound == maxTick else {
+            throw AppError.trainingSet(.emptyData)            // flow/maxTick 版本错位（record/训练组）
+        }
         guard let m3 = allCandles[.m3], !m3.isEmpty else {
             throw AppError.trainingSet(.emptyData)            // 空 / 缺 .m3 驱动序列
         }
         guard let last = m3.last, last.endGlobalIndex >= maxTick else {
             throw AppError.trainingSet(.emptyData)            // .m3 未覆盖 maxTick（版本/数据残缺）
+        }
+        let startTick = initialTick ?? flow.initialTick
+        guard flow.allowedTickRange.contains(startTick) else {
+            throw AppError.trainingSet(.emptyData)            // 陈旧 resume tick 超出范围（训练组被替换）
         }
         return TrainingEngine(
             flow: flow, allCandles: allCandles, maxTick: maxTick, initialTick: initialTick,

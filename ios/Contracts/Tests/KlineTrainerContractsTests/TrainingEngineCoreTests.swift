@@ -268,6 +268,33 @@ import CoreGraphics
         }
     }
 
+    @Test func makeThrowsOnStalePendingTick() {
+        // Stage6 R3-F1：resume tick(99) 超出（被替换的更短训练组）→ 可恢复抛，非 trap
+        #expect(throws: AppError.trainingSet(.emptyData)) {
+            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
+                                    allCandles: Self.candles([10, 11, 12]), maxTick: 2, initialTick: 99,
+                                    initialCapital: 100_000, initialCashBalance: 100_000)
+        }
+    }
+
+    @Test func makeThrowsOnNegativeMaxTick() {
+        // Stage6 R3-F1：损坏 maxTick(-1) → 可恢复抛（且先于访问 0...maxTick 范围，不 trap）
+        #expect(throws: AppError.trainingSet(.emptyData)) {
+            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 0),
+                                    allCandles: Self.candles([10]), maxTick: -1,
+                                    initialCapital: 100_000, initialCashBalance: 100_000)
+        }
+    }
+
+    @Test func makeThrowsOnFlowMaxTickMismatch() {
+        // Stage6 R3-F1：flow.allowedTickRange.upperBound(2) != maxTick(3) → 可恢复抛，非 trap
+        #expect(throws: AppError.trainingSet(.emptyData)) {
+            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
+                                    allCandles: Self.candles([10, 11, 12, 13]), maxTick: 3,
+                                    initialCapital: 100_000, initialCashBalance: 100_000)
+        }
+    }
+
     @Test func makeSucceedsOnValidData() throws {
         let e = try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
                                         allCandles: Self.candles([10, 11, 12]), maxTick: 2,
