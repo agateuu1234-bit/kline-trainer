@@ -60,20 +60,20 @@ spec init 签名（L1607-1616）**不含** `fees` 参数，但存储属性 `let 
 **排序安全：** E5b（顺位 3）紧随 E5a（顺位 2），早于任何消费 buyEnabled 的 U 层（顺位 8/9），无前向缺口。
 **偏离声明：** spec modules L1637-1638 把这两个列在 E5 accessor 块；本 PR 按 outline「E5a=核心状态/值 accessor、E5b=动作」边界把「动作门」归 E5b。**若 codex 坚持必须在 E5a 实现 5/5 门 → 升级 user：tier-推导公式属 spec 未定义项，需先澄清/RFC，不可在实施计划里臆造。**
 
-### D5 — `tick` 由 `flow.initialTick` 起算
-**判定：** `self.tick = TickEngine(maxTick: maxTick, initialTick: flow.initialTick)`。Normal/Replay→0；Review→`record.finalTick`（复盘固定末态）。
-**偏离声明：** `maxTick` 参数与 `flow.allowedTickRange.upperBound` 的一致性由调用方保证（同 NormalFlow precondition 风格，不做防御 clamp）。
+### D5 — `tick` 起算：`initialTick ?? flow.initialTick`；init 加 resume tick 参数（codex R6-F1）
+**判定：** `let startTick = initialTick ?? flow.initialTick`；`self.tick = TickEngine(maxTick: maxTick, initialTick: startTick)`。fresh：Normal/Replay→`flow.initialTick`(0)、Review→`record.finalTick`；**resume：调用方（E6）传 `initialTick = PendingTraining.globalTickIndex`**。
+**为何加 `initialTick` 参数（spec 签名扩展）：** spec init（modules L1607-1616）接收 position/cash/drawdown/markers/drawings/tradeOps 等待恢复态，却**漏了 `globalTickIndex`**；而 `PendingTraining.globalTickIndex`（AppState.swift L87）是已保存态。无此参数 → resume normal 局回 tick 0 却带已保存现金/持仓 → 现价/总资金/标记全错位（codex R6-F1）。新增 `initialTick: Int? = nil`（默认 nil → flow.initialTick，**向后兼容**，spec 既有调用不受影响）。
+**前置：** `precondition(flow.allowedTickRange.contains(startTick))`（resolved tick 必须在 flow 允许域内，fail-fast）。**这是对 modules L1607-1616 冻结签名的 additive 扩展，登记待 E6 RFC 确认。**
 
 ### D6 — `onSceneActivated` 归入 E5a（scenePhase 中继）
 spec L1585 将「scenePhase 中继」列为 E5 运行时职责；outline E5a = 「运行时状态」。`animators` 是 E5a 构造的存储状态。
 **判定：** E5a 实现 `onSceneActivated()` → 对两个 `DecelerationAnimator` 调 `resetOnSceneActive()`（实测存在，DecelerationAnimator.swift:92）。`animators` 在 init 内用默认 `DecelerationAnimator()` 构造。
 **偏离声明：** 这是 E5a/E5b 边界判定 —— `onSceneActivated` 非交易「动作」，与 animators（E5a 状态）强耦合，故归 E5a。**codex 核**此边界。
 
-### D7 — 默认面板：上区 60m / 下区 日线，`visibleCount: 0`
-init 签名**不收** panel 参数 → 必须内部构造。
-**判定：** `upperPanel = PanelViewState(period: .m60, …)`，`lowerPanel = PanelViewState(period: .daily, …)`，`interactionMode: .autoTracking`，`offset: 0`，`revision: 0`，**`visibleCount: 0`**（沿用 `KLineRenderState.empty` 的「未布局」哨兵，由 view 首次 layout 时回填）。
-**依据：** plan v1.5 L777「初始周期组合：上区 60m，下区 日线」；`visibleCount` spec 无默认，view 布局期决定。
-**偏离声明：** resume（继续中断训练）不恢复用户上次周期组合 —— spec init 签名无 panel 参数，故 resume 也回默认组合。**codex 核**：`visibleCount:0` 是否会让某只读 accessor/preview 异常（本 PR accessor 不读 panel，故安全）。
+### D7 — 默认面板上区 60m / 下区 日线，`visibleCount: 0`；init 加 resume 周期组合参数（codex R6 同类）
+**判定：** `upperPanel = PanelViewState(period: initialUpperPeriod, …)`，`lowerPanel = PanelViewState(period: initialLowerPeriod, …)`，`interactionMode: .autoTracking`，`offset: 0`，`revision: 0`，**`visibleCount: 0`**（沿用 `KLineRenderState.empty` 的「未布局」哨兵，由 view 首次 layout 时回填）。
+**依据 + 为何加 panel 周期参数：** plan v1.5 L777「初始组合：上区 60m，下区 日线」给默认值。但 `PendingTraining.upperPeriod/lowerPeriod`（AppState.swift L88-89）是已保存态——与 R6-F1 同类 gap：spec init 漏了它们，resume 须恢复用户上次组合，否则回默认。故新增 `initialUpperPeriod: Period = .m60` / `initialLowerPeriod: Period = .daily`（默认 = plan v1.5 L777，**向后兼容**）。
+**偏离声明：** 同属对 modules L1607-1616 冻结签名的 additive 扩展，登记待 E6 RFC 确认。`visibleCount:0` 不影响 accessor（本 PR accessor 不读 panel）。
 
 ### D8 — `preview(mode:)` 内联构造 fixture，不新增公共 fixture 面
 spec preview（L1690-1705）引用 `FeeSnapshot.preview` / `KLineCandle.previewFixture` / `TrainingRecord.previewRecord` —— **三者均不存在公共定义**（仅 UI 文件内 fileprivate）。原样照抄**不可编译**。
@@ -87,7 +87,7 @@ spec preview（L1690-1705）引用 `FeeSnapshot.preview` / `KLineCandle.previewF
 | 锚点 | 文件:行 | 当前内容 |
 |---|---|---|
 | TrainingEngine 壳 | `…/TrainingEngine/TrainingEngine.swift:11-17` | `@MainActor @Observable public final class TrainingEngine { fileprivate init() { fatalError("Wave 0 stub…") } }` |
-| E5 class spec | `kline_trainer_modules_v1.4.md:1588-1639` | 9 存储态 + init(10 参) + 6 动作(E5b) + onSceneActivated + 6 accessor（本 PR 交 4 纯值；`buy/sellEnabled` 随动作门下放 E5b，D4） |
+| E5 class spec | `kline_trainer_modules_v1.4.md:1588-1639` | 9 存储态 + init(spec 10 参 + 3 resume 扩展 `initialTick`/`initialUpperPeriod`/`initialLowerPeriod`，D5/D7) + 6 动作(E5b) + onSceneActivated + 6 accessor（本 PR 交 4 纯值；`buy/sellEnabled` 下放 E5b，D4） |
 | preview spec | `kline_trainer_modules_v1.4.md:1690-1705` | `static func preview(mode:)`，引用不存在的 `.preview`/`.previewFixture`/`.previewRecord` |
 | 初始组合 | `kline_trainer_plan_v1.5.md:777` | 「上区 60m，下区 日线」 |
 | 现价/平仓 | `kline_trainer_plan_v1.5.md:751` | 「最后一根最小周期 K 线收盘价」 |
@@ -207,8 +207,30 @@ import CoreGraphics
                                initialCashBalance: 90_000,
                                initialPosition: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000),
                                initialDrawdown: dd)
-        #expect(e.drawdown.peakCapital == 130_000)   // max(130_000, 90_000 + 1000*10 = 100_000)
+        #expect(e.drawdown.peakCapital == 130_000)   // max(130_000, 100_000, 90_000 + 1000*10 = 100_000)
         #expect(e.drawdown.maxDrawdown == 30_000)    // 130_000 − 100_000（并入当前回撤）
+    }
+
+    @Test func drawdownSeedsAtLeastDeclaredInitialCapital() {
+        // R6-F3：起始总资金(95k) < 声明初始资金(100k) → peak seeding 到 initialCapital，当前回撤 5k 计入。
+        let e = TrainingEngine(flow: NormalFlow(fees: Self.fees, maxTick: 0),
+                               allCandles: Self.candles([10]),
+                               maxTick: 0, initialCapital: 100_000,
+                               initialCashBalance: 85_000,
+                               initialPosition: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
+        // startTotal = 85_000 + 1000*10 = 95_000 < initialCapital 100_000
+        #expect(e.drawdown.peakCapital == 100_000)   // 非 95_000（含声明基线）
+        #expect(e.drawdown.maxDrawdown == 5_000)     // 100_000 − 95_000
+    }
+
+    @Test func resumeRestoresSavedPanelCombo() {
+        // R6：resume 传入保存的周期组合 → 面板用之，非默认 60m/日线
+        let e = TrainingEngine(flow: NormalFlow(fees: Self.fees, maxTick: 2),
+                               allCandles: Self.candles([10, 11, 12]),
+                               maxTick: 2, initialCapital: 100_000, initialCashBalance: 100_000,
+                               initialUpperPeriod: .m15, initialLowerPeriod: .m60)
+        #expect(e.upperPanel.period == .m15)
+        #expect(e.lowerPanel.period == .m60)
     }
 }
 ```
@@ -260,32 +282,39 @@ public final class TrainingEngine {
     public init(flow: TrainingFlowController,
                 allCandles: [Period: [KLineCandle]],
                 maxTick: Int,
+                initialTick: Int? = nil,                       // R6-F1 resume：PendingTraining.globalTickIndex；nil→flow.initialTick
                 initialCapital: Double,
                 initialCashBalance: Double,
                 initialPosition: PositionManager = .init(),
                 initialMarkers: [TradeMarker] = [],
                 initialDrawings: [DrawingObject] = [],
                 initialTradeOperations: [TradeOperation] = [],
-                initialDrawdown: DrawdownAccumulator = .initial) {
+                initialDrawdown: DrawdownAccumulator = .initial,
+                initialUpperPeriod: Period = .m60,             // 默认上区 60m（plan v1.5 L777）；resume 传 PendingTraining.upperPeriod
+                initialLowerPeriod: Period = .daily) {          // 默认下区 日线；resume 传 PendingTraining.lowerPeriod
         // 前置不变量（NormalFlow 同风格：trap 调用方 bug，不防御 clamp）
         precondition(maxTick >= 0, "maxTick must be >= 0")
         // R4-F1：fail-fast flow/maxTick 契约，杜绝 TickEngine 静默 clamp 掩盖 record/训练组版本错位。
         precondition(flow.allowedTickRange.upperBound == maxTick,
                      "flow.allowedTickRange.upperBound (\(flow.allowedTickRange.upperBound)) must equal maxTick (\(maxTick))")
-        precondition(flow.allowedTickRange.contains(flow.initialTick),
-                     "flow.initialTick (\(flow.initialTick)) must be within allowedTickRange \(flow.allowedTickRange)")
+        let startTick = initialTick ?? flow.initialTick   // R6-F1：resume 传入则用之，否则 flow.initialTick
+        precondition(flow.allowedTickRange.contains(startTick),
+                     "resolved initialTick (\(startTick)) must be within allowedTickRange \(flow.allowedTickRange)")
         // R4-F2：.m3 是规范驱动周期（reader 不变量：非空数据必含 .m3）；现价只来自 .m3。
         guard let m3 = allCandles[.m3], !m3.isEmpty else {
             preconditionFailure("allCandles must contain a non-empty .m3 driving series")
         }
+        // R6-F2：.m3 必须覆盖到 maxTick（否则越界 tick 被 price clamp 成陈旧价）。
+        // 用 >= 而非 ==：review 模式 m3 为训练组全集，末根 endGlobalIndex 可 > finalTick(=maxTick)。
+        precondition(m3.last!.endGlobalIndex >= maxTick,
+                     ".m3 末根 endGlobalIndex (\(m3.last!.endGlobalIndex)) must be >= maxTick (\(maxTick))")
 
         self.flow = flow
         self.allCandles = allCandles
         self.fees = flow.feeSnapshot                 // D1
         self.initialCapital = initialCapital
 
-        let startTick = flow.initialTick
-        self.tick = TickEngine(maxTick: maxTick, initialTick: startTick)  // D5（前置已保证 initialTick 在范围内，无 clamp）
+        self.tick = TickEngine(maxTick: maxTick, initialTick: startTick)  // D5（前置已保证 startTick 在范围内，无 clamp）
         self.position = initialPosition
         self.cashBalance = initialCashBalance
         // D3：drawdown seeding（peak = 起始总资金，modules L1604）+ 用 update 把「当前回撤」并入
@@ -293,7 +322,7 @@ public final class TrainingEngine {
         let startPrice = TrainingEngine.price(in: allCandles, atTick: startTick)
         let startTotal = initialCashBalance + Double(initialPosition.shares) * startPrice
         var seededDrawdown = DrawdownAccumulator(
-            peakCapital: max(initialDrawdown.peakCapital, startTotal),
+            peakCapital: max(initialDrawdown.peakCapital, initialCapital, startTotal),   // R6-F3：含声明基线 initialCapital
             maxDrawdown: initialDrawdown.maxDrawdown)
         seededDrawdown.update(currentCapital: startTotal)   // peak>startTotal 时把当前回撤并入 maxDrawdown
         self.drawdown = seededDrawdown
@@ -301,10 +330,10 @@ public final class TrainingEngine {
         self.drawings = initialDrawings
         self.tradeOperations = initialTradeOperations
 
-        // D7：初始周期组合 上区 60m / 下区 日线（plan v1.5 L777）
-        self.upperPanel = PanelViewState(period: .m60, interactionMode: .autoTracking,
+        // D7：初始周期组合默认 上区 60m / 下区 日线（plan v1.5 L777）；resume 传入保存的组合（R6）。
+        self.upperPanel = PanelViewState(period: initialUpperPeriod, interactionMode: .autoTracking,
                                          visibleCount: 0, offset: 0, revision: 0)
-        self.lowerPanel = PanelViewState(period: .daily, interactionMode: .autoTracking,
+        self.lowerPanel = PanelViewState(period: initialLowerPeriod, interactionMode: .autoTracking,
                                          visibleCount: 0, offset: 0, revision: 0)
 
         self.animators = (upper: DecelerationAnimator(), lower: DecelerationAnimator())
@@ -416,6 +445,18 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
                                maxTick: 2, initialCapital: 100_000,
                                initialCashBalance: 99_500, initialPosition: pos)
         #expect(e.currentTotalCapital == 100_500)     // 99_500 + 100×10(.m3)，非 +100×99(聚合)
+    }
+
+    @Test func resumeNormalModeUsesSavedTickForPrice() {
+        // R6-F1：resume normal 局从保存 tick(2) 起、非 0；R6-F2：m3 覆盖到 maxTick。
+        // 现价 = tick 2 的 .m3 close = 12；持仓 1000 股。
+        let e = TrainingEngine(flow: NormalFlow(fees: Self.fees, maxTick: 2),
+                               allCandles: Self.candles([10, 11, 12]),
+                               maxTick: 2, initialTick: 2,
+                               initialCapital: 100_000, initialCashBalance: 88_000,
+                               initialPosition: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
+        #expect(e.tick.globalTickIndex == 2)          // 用 saved tick，非 NormalFlow.initialTick(0)
+        #expect(e.currentTotalCapital == 100_000)     // 88_000 + 1000 × 12（tick 2 现价）
     }
 
     // Review/preview 用最小 TrainingRecord
@@ -694,12 +735,15 @@ want "public init(flow:)" "grep -qE 'public init\(flow: TrainingFlowController' 
 want "initialCashBalance 参数" "grep -q 'initialCashBalance' '$TE'"
 want "drawdown peak seeding（codex R2-F1）" "grep -q 'max(initialDrawdown.peakCapital' '$TE'"
 
-echo "== G2b: R4 不变量前置（flow/maxTick 契约 + .m3 驱动）=="
-want "flow/maxTick precondition（R4-F1）"    "grep -q 'flow.allowedTickRange.upperBound == maxTick' '$TE'"
-want "initialTick 范围 precondition（R4-F1）" "grep -q 'allowedTickRange.contains(flow.initialTick)' '$TE'"
-want ".m3 驱动序列前置（R4-F2）"             "grep -qE 'allCandles\[.m3\]' '$TE'"
-wantn "无 finestPeriod 残留（R4-F2 删）"     "grep -q 'finestPeriod' '$TE'"
-want "drawdown update 反映起始总资金（R5-F1）" "grep -q 'seededDrawdown.update(currentCapital: startTotal)' '$TE'"
+echo "== G2b: R4-R6 不变量前置 =="
+want "flow/maxTick precondition（R4-F1）"        "grep -q 'flow.allowedTickRange.upperBound == maxTick' '$TE'"
+want "startTick 范围 precondition（R4-F1/R6-F1）" "grep -q 'allowedTickRange.contains(startTick)' '$TE'"
+want ".m3 驱动序列前置（R4-F2）"                 "grep -qE 'allCandles\[.m3\]' '$TE'"
+wantn "无 finestPeriod 残留（R4-F2 删）"         "grep -q 'finestPeriod' '$TE'"
+want "drawdown update 反映起始总资金（R5-F1）"    "grep -q 'seededDrawdown.update(currentCapital: startTotal)' '$TE'"
+want ".m3 覆盖 maxTick 前置（R6-F2）"            "grep -q 'endGlobalIndex >= maxTick' '$TE'"
+want "resume initialTick 参数（R6-F1）"          "grep -q 'initialTick ?? flow.initialTick' '$TE'"
+want "drawdown 含 initialCapital 基线（R6-F3）"   "grep -q 'initialDrawdown.peakCapital, initialCapital, startTotal' '$TE'"
 
 echo "== G3: 9 个运行时存储态 =="
 for p in tick position cashBalance drawdown markers drawings upperPanel lowerPanel tradeOperations; do
@@ -783,14 +827,17 @@ Expected: `=== ALL E5a ACCEPTANCE CHECKS PASSED ===`，`exit=0`。
 | 12 | review 起于末态 tick；flow/maxTick 契约边界（R4-F1） | `reviewModeStartsAtFinalTick` | PASS | ☐ |
 | 13 | 场景中继不改业务状态 | `onSceneActivatedIsSafeAndPure` | PASS | ☐ |
 | 14 | preview 三模式可构造 + maxTick 匹配 fixture + period==key + 默认面板(.m60/.daily)有数据（R3-F2/R4-F3/R5-F2） | `previewBuildsAllModes` / `previewMaxTickMatchesFixtureRange` / `previewFixtureCandlePeriodsMatchKeys` / `previewProvidesCandlesForDefaultPanels` | PASS | ☐ |
+| 15 | resume：从保存 tick 起算、现价用该 tick；m3 覆盖 maxTick（R6-F1/R6-F2） | `resumeNormalModeUsesSavedTickForPrice` | PASS | ☐ |
+| 16 | drawdown peak ≥ 声明 initialCapital 基线（R6-F3） | `drawdownSeedsAtLeastDeclaredInitialCapital` | PASS | ☐ |
+| 17 | resume 恢复保存的周期组合（R6） | `resumeRestoresSavedPanelCombo` | PASS | ☐ |
 
 ## 三、流程合规与偏差
 
 | # | 项 | 期望 | 通过 |
 |---|---|---|---|
-| 15 | 作用域守卫：G8 无 E5b 动作 + G4 无 buy/sellEnabled + G2b 含 R4 前置（flow/maxTick 契约、`.m3` 驱动、无 finestPeriod） | grep 命中/不命中均如期 | ☐ |
-| 16 | codex 对抗性评审 branch-diff | verdict `approve`（收敛） | ☐ |
-| 17 | 契约登记：D3 maxDrawdown 绝对元 + E6 换算契约（顺位 4/5 兑现）；D4 buy/sellEnabled 移 E5b | PR body 已列 | ☐ |
+| 18 | 作用域守卫：G8 无 E5b 动作 + G4 无 buy/sellEnabled + G2b 含 R4-R6 前置（flow/maxTick、`.m3` 驱动+覆盖、resume tick、drawdown 基线、无 finestPeriod） | grep 命中/不命中均如期 | ☐ |
+| 19 | codex 对抗性评审 branch-diff | verdict `approve`（收敛） | ☐ |
+| 20 | 契约登记：D3 E6 换算契约；D4 buy/sellEnabled 移 E5b；D5/D7 init 签名 additive 扩展（resume tick + 周期组合）待 E6 RFC 确认 | PR body 已列 | ☐ |
 
 **任一条 ✗ → 不得 merge。**
 ```
@@ -828,7 +875,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **4. Scope（surgical）：** 仅替换 TrainingEngine.swift + 新增 1 测试 + 1 脚本 + 1 清单；不碰任何已冻结契约文件（G10 守卫）；不「改进」相邻代码。
 
-**5. delta 声明：** D1-D8 全部显式标注依据 + 偏离声明；D2 = 「现价固定 `.m3` 驱动周期」（R4-F2），D3 = 「绝对元透传 + init seeding peak + E6 换算显式契约」（R1-F1 + R2-F1），D4 = 「buy/sellEnabled 动作门下放 E5b」（R2-F2），init 加 flow/maxTick fail-fast 前置（R4-F1），均登记入验收清单第 15-17 行。
+**5. delta 声明：** D1-D8 全部显式标注依据 + 偏离声明；D2=现价固定 `.m3`（R4-F2），D3=绝对元透传 + seeding(peak≥initialCapital) + update 反映当前回撤 + E6 换算契约（R1-F1/R2-F1/R5-F1/R6-F3），D4=buy/sellEnabled 下放 E5b（R2-F2），D5=init 加 `initialTick` resume 参数（R6-F1），D7=init 加 `initialUpperPeriod/initialLowerPeriod` resume 参数；init fail-fast 前置：flow/maxTick(R4-F1) + .m3 覆盖(R6-F2)。**D5/D7 的 init 签名 additive 扩展登记待 E6 RFC 确认。**
 
 **6. 无本机 swift 诚实性：** 所有 swift/xcodebuild 步骤标 [CI/mac]；RED/GREEN 期望写明但本机不执行、不谎称通过（per `feedback_swift_local_toolchain_blindspot`）。
 
@@ -872,4 +919,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - **R5-F1（high 0.96, drawdown 仍低报）—— 采纳（R2-F1 的更深一层）：** 仅 seeding peak、`maxDrawdown` 照搬携带值仍低报；resume（peak 130k/当前 100k/maxDD 12k）真实回撤 30k。改：init 构造后 `seededDrawdown.update(currentCapital: startTotal)` 并入当前回撤；resume 测试改期望 30k；`maxDrawdownIsAbsoluteAmountPerSpec` 用一致 peak 108k 保持 8k 焦点。
 - **R5-F2（medium 0.88, preview 喂不了默认面板）—— 采纳（纠正 R4-F3 over-correct）：** R4 改成 `.m3`-only，但 engine 默认面板是 `.m60`/`.daily`。改：`previewCandles` 补合法 `.m60`/`.daily` 聚合（period==key、endGlobalIndex≤m3Max）；新增 `previewProvidesCandlesForDefaultPanels`。
 
-**收敛判断（已 R1-R5，超 `max_rounds:3` 2 轮）：** 五轮 findings 始终 repo-grounded（语义契约→机械一致性→repo 不变量对齐→correctness 深化）、逐条已实质修正，**从未出现需 user 拍板的设计分歧 / spec 未定义僵局**。但连续 5 轮未 `approve` 本身是信号 → 已就「继续刷 codex-approve vs 带当前计划进实现」**escalate user**（见对话）。该 escalate 后按 user 决定推进。
+**R6（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应（resume 重建契约 + 覆盖前置 + 基线，repo-grounded）：**
+
+- **R6-F1（high 0.86, resume 无法恢复 tick）—— 采纳：** spec init 漏了 `globalTickIndex`，resume normal 局回 tick 0 却带已保存现金/持仓。改：init 加 `initialTick: Int? = nil`（resume 传 `PendingTraining.globalTickIndex`，nil→`flow.initialTick`，向后兼容）；前置改 `contains(startTick)`；新增 `resumeNormalModeUsesSavedTickForPrice`。**同类**：`PendingTraining.upperPeriod/lowerPeriod` 也是已保存态 → 加 `initialUpperPeriod/initialLowerPeriod`（默认 60m/日线）+ `resumeRestoresSavedPanelCombo`（D5/D7，additive 扩展待 E6 RFC）。
+- **R6-F2（high 0.92, maxTick 超 m3 覆盖被静默 clamp）—— 采纳：** 前置未证 `.m3` 覆盖 maxTick；`price` clamp 越界 tick 成陈旧价。改：加 `precondition(m3.last!.endGlobalIndex >= maxTick)`（用 `>=`，因 review 的 m3 全集会超过 finalTick）；`resumeNormalModeUsesSavedTickForPrice` 在 tick==maxTick 取末根价正向覆盖。
+- **R6-F3（medium 0.82, drawdown 漏 initialCapital 基线）—— 采纳：** seeding peak 漏了声明基线；startTotal < initialCapital 时低报。改：`peakCapital = max(carried.peak, initialCapital, startTotal)`（spec L1604）；新增 `drawdownSeedsAtLeastDeclaredInitialCapital`（95k<100k → peak 100k、maxDD 5k）。
+
+**收敛判断（已 R1-R6，超 `max_rounds:3` 3 轮）：** 六轮 findings 始终 repo-grounded、逐条实质修正，**从未出现需 user 拍板的设计分歧 / spec 未定义僵局**（D5/D7 的 init 签名扩展是补 spec resume 不完整，behavior 明确，登记待 E6 RFC 确认而非僵局）。user 已明确指令「**继续刷到 approve**」→ 继续迭代，不再每轮打断。R7 待复审。
