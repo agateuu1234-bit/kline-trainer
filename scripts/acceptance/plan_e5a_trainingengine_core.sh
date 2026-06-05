@@ -38,6 +38,7 @@ want "make .m3 轴连续校验（R4/R5-F1）"              "grep -q 'isContiguou
 want "make 钱 finite 校验（R4-F2）"                 "grep -q 'initialCashBalance.isFinite' '$TE'"
 want "make 面板周期有数据校验（R6-F1）"             "grep -q 'allCandles\[initialUpperPeriod\]' '$TE'"
 want "make 内部建 flow（FlowInput，R8-F1 trap-proof）" "grep -q 'public enum FlowInput' '$TE'"
+want "make 佣金率 finite+非负校验（R9-F2）"          "grep -q 'flow.feeSnapshot.commissionRate' '$TE'"
 
 echo "== G3: 9 个运行时存储态 =="
 for p in tick position cashBalance drawdown markers drawings upperPanel lowerPanel tradeOperations; do

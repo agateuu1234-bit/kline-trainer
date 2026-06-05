@@ -332,6 +332,26 @@ import CoreGraphics
         }
     }
 
+    @Test func makeThrowsOnNegativeFee() {
+        // Stage6 R9-F2：负佣金率 → 可恢复抛（防 TradeCalculator 负佣金/虚增购买力）
+        let badFees = FeeSnapshot(commissionRate: -0.001, minCommissionEnabled: false)
+        #expect(throws: AppError.trainingSet(.emptyData)) {
+            try TrainingEngine.make(.normal(fees: badFees, maxTick: 2),
+                                    allCandles: Self.candles([10, 11, 12]),
+                                    initialCapital: 100_000, initialCashBalance: 100_000)
+        }
+    }
+
+    @Test func makeThrowsOnNonFiniteFee() {
+        // Stage6 R9-F2：非 finite 佣金率（review record 同理）→ 可恢复抛
+        let badFees = FeeSnapshot(commissionRate: .infinity, minCommissionEnabled: true)
+        #expect(throws: AppError.trainingSet(.emptyData)) {
+            try TrainingEngine.make(.replay(fees: badFees, maxTick: 2),
+                                    allCandles: Self.candles([10, 11, 12]),
+                                    initialCapital: 100_000, initialCashBalance: 100_000)
+        }
+    }
+
     @Test func makeThrowsOnMissingPanelData() {
         // Stage6 R6-F1：.m3-only 数据 + 默认面板 .m60/.daily（无 candle）→ 可恢复抛
         // （防 buildRenderState 的 allCandles[panel.period]! 强解包崩溃）

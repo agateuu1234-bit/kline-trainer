@@ -81,11 +81,13 @@ public final class TrainingEngine {
         // final-R5-F1：.m3 轴连续从 0（currentPrice 二分依赖）末线不变量。
         precondition(TrainingEngine.isContiguousM3Axis(m3),
                      ".m3 global tick axis must be contiguous from 0 (globalIndex==endGlobalIndex==index)")
-        // final-R4-F2：钱字段 finite 末线不变量（make() 已对数据派生失败抛可恢复 AppError；
-        // 直调 init = trust-boundary，非 finite 视为调用方 bug）。
-        precondition(initialCapital.isFinite && initialCashBalance.isFinite
-                     && initialDrawdown.peakCapital.isFinite && initialDrawdown.maxDrawdown.isFinite,
-                     "money fields (capital/cash/drawdown) must be finite")
+        // final-R4-F2 + R9-F1：钱字段 finite + 非负末线不变量（与 make() 同强度；make 已对数据派生失败抛
+        // 可恢复 AppError；直调 init = trust-boundary，非 finite/负值视为调用方 bug）。
+        precondition(initialCapital.isFinite && initialCapital >= 0
+                     && initialCashBalance.isFinite && initialCashBalance >= 0
+                     && initialDrawdown.peakCapital.isFinite && initialDrawdown.peakCapital >= 0
+                     && initialDrawdown.maxDrawdown.isFinite && initialDrawdown.maxDrawdown >= 0,
+                     "money fields (capital/cash/drawdown) must be finite and non-negative")
 
         self.flow = flow
         self.allCandles = allCandles
@@ -161,6 +163,11 @@ public final class TrainingEngine {
             maxTick = record.finalTick; flow = ReviewFlow(record: record)
         }
         // flow 由 validated maxTick 建成 → allowedTickRange 安全、无 flow/maxTick 错位（R4-F1 由构造保证）。
+        // final-R9-F2：佣金率 finite + 非负——负率 + 免5关闭会让 TradeCalculator 算出负佣金/虚增购买力。
+        // 统一查 flow.feeSnapshot（normal/replay 来自 input fees、review 来自 record.feeSnapshot）。
+        guard flow.feeSnapshot.commissionRate.isFinite, flow.feeSnapshot.commissionRate >= 0 else {
+            throw AppError.trainingSet(.emptyData)
+        }
         guard let m3 = allCandles[.m3], !m3.isEmpty else {
             throw AppError.trainingSet(.emptyData)            // 空 / 缺 .m3 驱动序列
         }
