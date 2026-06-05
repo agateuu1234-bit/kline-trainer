@@ -80,13 +80,10 @@ spec preview（L1690-1705）引用 `FeeSnapshot.preview` / `KLineCandle.previewF
 **判定：** `preview` 用私有 `static` helper 内联构造最小 fixture（`FeeSnapshot(commissionRate:0.0001, minCommissionEnabled:true)`、`previewCandleCount`=8 根 `.m60`+`.daily` K 线、review 用内联 `TrainingRecord`），**不**新增 `FeeSnapshot.preview` 等公共面（避免与未来 U 层 fixture 定义冲突）。gated `#if DEBUG`。**maxTick = `previewCandleCount-1`（=7）由 fixture 覆盖范围派生**，不照抄 spec 字面 1000——否则 maxTick(1000) 远超 candle 范围(0..7)，preview 推进 tick 会越界到无 candle 区（codex R3-F2）；并加 `previewMaxTickMatchesFixtureRange` 断言此不变量。
 **偏离声明：** 偏离 spec 的「`.preview`/`.previewFixture`」字面写法，但语义等价（DEBUG preview 构造器）。**codex 核**：是否应改为补公共 fixture 以供 U1/U2（顺位 8/9）复用 —— 倾向不补，留 U 层按需引入，避免本 PR 越界。
 
-### D9 — candle 数据校验边界：reader 可恢复 / engine init 末线不变量（Stage6 final-F1）
-**疑点（codex Stage6-F1, high 0.78）：** `allCandles` 源自训练组 reader/cache 边界（可能空/缺 .m3/损坏/陈旧缓存）；init 用 `precondition`/`preconditionFailure` 处理这些 → 若 E6 透传坏数据，app **trap 崩溃**而非弹可恢复 `AppError.trainingSet`。
-**判定（保持 precondition + 显式契约，spec-faithful）：** 不改 init 为 throwing（spec init 非 throwing，modules L1607-1616；改 throwing 属契约变更需 RFC，且倒置「E5=运行时 / E6=持久化校验」分层 + 全测试改 try）。
-- **可恢复校验在 reader 层（已存在）：** `TrainingSetReader.read()` + `DefaultTrainingSetDataVerifier`/`PreviewTrainingSetReader` 本就对空/缺 .m3/`c.period!=key`/损坏抛 `AppError.trainingSet`，在 E6 构造引擎**之前**呈现可恢复错误。
-- **engine precondition = 末线不变量执行：** 触发即 E6/调用方违反「传入已校验数据」契约（程序 bug），同 `NormalFlow`（TrainingFlowController.swift:29-31）的 trap-on-caller-bug 既定模式。已在 init 加 D9 契约文档注释。
-- **E6/P5 义务（显式登记，顺位 4/5 兑现）：** E6 必须只用 reader-已校验 candle 构造引擎，并**重新校验**（而非信任）P5 缓存数据，对空/损坏抛 `AppError.trainingSet`——这正是 codex 关注的「陈旧缓存绕过校验」defense-in-depth gap 的正确归属层。
-**若 codex 仍坚持 E5a init 必须 throwing → 升级 user 作 spec RFC 决策（契约变更 + 三方）。**
+### D9 — candle 数据校验边界：`make` 工厂可恢复 / init 末线不变量（Stage6 final-F1/F2）
+**疑点：** F1（codex high 0.82）：init 用 precondition 处理空/缺.m3/覆盖不足——这些来自 reader/cache 边界（`DefaultTrainingSetReader` 空 klines 返回空字典；TSC 契约无注入 verifier 证明 init 前已校验），坏/陈旧缓存数据 → **trap 崩溃**而非可恢复 `AppError.trainingSet`。F2（med 0.7）：coverage 允许 `m3.last.endGlobalIndex > maxTick`，review（maxTick=finalTick）下 `engine.allCandles` 公开暴露未来 candle 给图表。
+**判定 F1（采纳 codex「throwing factory」—— additive，非 breaking 契约变更）：** 新增 `public static func make(...) throws -> TrainingEngine`：校验 空/缺非空 `.m3`/`.m3` 未覆盖 `maxTick` → 抛**已存在**的 `AppError.trainingSet(.emptyData)`（`isRecoverable==true`，由 UI 呈现），再委托 `init`。**E6 必须经此工厂构造**（可恢复路径**强制于代码**而非仅文档），并对 P5 缓存数据**重新校验**。`init` 保留同名 precondition 作「已校验数据」契约末线不变量（直调 init 仍是 trust-boundary，trap = 调用方程序 bug，同 `NormalFlow` 风格）。**不改 init 为 throwing**（spec init 非 throwing，modules L1607-1616），**不新增 AppError 分支**（复用 `.emptyData`）→ additive 扩展，登记待 E6 RFC（同 D5/D7）。
+**判定 F2（push back + 测试 + C8 契约）：** 「review 暴露未来 candle」被**核心揭示机制**化解——训练即「按 tick 逐根揭示」，图表对**所有模式**只渲染到 `globalTickIndex`（normal 亦不显未来），故 `allCandles` 持训练组全集（spec `let allCandles`，modules L1602）中超出 tick 的 candle 是「未揭示」而非「泄漏」。引擎定价亦只取 tick 处 `.m3`（`reviewModeWithM3BeyondFinalTickPricesAtTickNotFuture` 证 tick 2 取 close 12、非未来 13/14/15）。**C8（顺位 7）渲染契约（登记）**：图表渲染上限 = `engine.tick.globalTickIndex`。**若 codex 仍坚持引擎裁剪 / 私有化 `allCandles` → 升级 user**（属 spec `let allCandles` 公开契约变更，需 RFC + 三方）。
 
 ---
 
@@ -752,6 +749,8 @@ want "drawdown update 反映起始总资金（R5-F1）"    "grep -q 'seededDrawd
 want ".m3 覆盖 maxTick 前置（R6-F2）"            "grep -q 'endGlobalIndex >= maxTick' '$TE'"
 want "resume initialTick 参数（R6-F1）"          "grep -q 'initialTick ?? flow.initialTick' '$TE'"
 want "drawdown 含 initialCapital 基线（R6-F3）"   "grep -q 'initialDrawdown.peakCapital, initialCapital, startTotal' '$TE'"
+want "throwing factory make() throws（Stage6 F1）"  "grep -qE 'public static func make\(' '$TE'"
+want "make 抛可恢复 trainingSet(.emptyData)"        "grep -q 'AppError.trainingSet(.emptyData)' '$TE'"
 
 echo "== G3: 9 个运行时存储态 =="
 for p in tick position cashBalance drawdown markers drawings upperPanel lowerPanel tradeOperations; do
@@ -949,4 +948,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Final-R1（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应：**
 
-- **Final-F1（high 0.78, public init 对坏数据 trap）—— 部分反驳 + 文档化契约（D9）：** codex 要求 init 改 throwing 返回可恢复 AppError。判定保持 precondition（spec init 非 throwing，modules L1607-1616；可恢复校验已在 reader 层 `TrainingSetReader.read() throws` + Verifier；engine precondition = 末线不变量，同 NormalFlow trap-on-caller-bug）。已在 init 加 D9 契约文档注释 + 登记 **E6/P5 义务**（E6 只用 reader-已校验 candle 构造、重校验 P5 缓存，对空/损坏抛 `AppError.trainingSet`——codex 关注的「陈旧缓存绕过校验」的正确归属层）。**若 codex 仍坚持 throwing → 升级 user 作 spec RFC。** 待 Final-R2 复审。
+- **Final-F1（high 0.78, public init 对坏数据 trap）—— R1 文档化（被 R2 驳回，见下）：** R1 我保持 precondition + init 加 D9 契约文档注释 + 登记 E6/P5 义务，主张可恢复校验在 reader 层。
+
+**Final-R2（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应：**
+
+- **Final-R2-F1（high 0.82, 文档不等于强制）—— 采纳 codex「throwing factory」（additive）：** codex 驳回纯文档：`DefaultTrainingSetReader` 空 klines 返回空字典、TSC 无注入 verifier 证明 init 前已校验 → 需**可强制**校验边界。改：新增 `public static func make(...) throws -> TrainingEngine`，对空/缺.m3/覆盖不足抛**已有** `AppError.trainingSet(.emptyData)`（无新增 AppError 分支、init 不变 → additive，非 breaking）；E6 经此构造。新增 `makeThrowsOnMissingM3`/`makeThrowsOnInsufficientCoverage`/`makeSucceedsOnValidData`（D9）。
+- **Final-R2-F2（med 0.7, review 暴露未来 candle）—— push back + 测试 + C8 契约：** review 的未来 candle 被「按 tick 逐根揭示」核心机制化解（图表所有模式只渲染到 `globalTickIndex`）；`allCandles` 持全集是 spec（`let allCandles`，L1602）；引擎定价只取 tick 处 .m3。新增 `reviewModeWithM3BeyondFinalTickPricesAtTickNotFuture`；登记 C8(顺位7) 渲染上限契约。若 codex 坚持裁剪/私有化 allCandles → 升级 user（spec 公开契约变更）。待 Final-R3 复审。

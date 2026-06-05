@@ -250,6 +250,45 @@ import CoreGraphics
         #expect(TrainingEngine.preview().flow.mode == .normal)
     }
 
+    @Test func makeThrowsOnMissingM3() {
+        // Stage6 F1：空/缺 .m3 → 可恢复 AppError.trainingSet(.emptyData)，非 trap
+        #expect(throws: AppError.trainingSet(.emptyData)) {
+            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 0),
+                                    allCandles: [:], maxTick: 0,
+                                    initialCapital: 100_000, initialCashBalance: 100_000)
+        }
+    }
+
+    @Test func makeThrowsOnInsufficientCoverage() {
+        // Stage6 F1：.m3 末根 endGlobalIndex 1 < maxTick 5 → 可恢复抛，非 trap
+        #expect(throws: AppError.trainingSet(.emptyData)) {
+            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 5),
+                                    allCandles: Self.candles([10, 11]), maxTick: 5,
+                                    initialCapital: 100_000, initialCashBalance: 100_000)
+        }
+    }
+
+    @Test func makeSucceedsOnValidData() throws {
+        let e = try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
+                                        allCandles: Self.candles([10, 11, 12]), maxTick: 2,
+                                        initialCapital: 100_000, initialCashBalance: 100_000)
+        #expect(e.tick.maxTick == 2)
+        #expect(e.currentTotalCapital == 100_000)
+    }
+
+    @Test func reviewModeWithM3BeyondFinalTickPricesAtTickNotFuture() {
+        // Stage6 F2：review finalTick 2，m3 全集到 endGlobalIndex 5（>maxTick）。引擎构造成功（覆盖足）；
+        // 现价用 tick 2 的 close=12，不取未来 13/14/15。未来 candle「不渲染」由 C8(顺位7)
+        // 「揭示到 globalTickIndex」机制保证（所有模式同此机制，normal 亦不显未来）。
+        let record = Self.previewRecordForTest(finalTick: 2)
+        let e = TrainingEngine(flow: ReviewFlow(record: record),
+                               allCandles: Self.candles([10, 11, 12, 13, 14, 15]),
+                               maxTick: 2, initialCapital: 100_000, initialCashBalance: 50_000,
+                               initialPosition: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
+        #expect(e.tick.globalTickIndex == 2)
+        #expect(e.currentTotalCapital == 62_000)   // 50_000 + 1000*12（tick 2，非未来）
+    }
+
     // Review/preview 用最小 TrainingRecord
     static func previewRecordForTest(finalTick: Int = 2) -> TrainingRecord {
         TrainingRecord(id: 1, trainingSetFilename: "t.sqlite", createdAt: 0,

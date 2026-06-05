@@ -104,6 +104,43 @@ public final class TrainingEngine {
         self.animators = (upper: DecelerationAnimator(), lower: DecelerationAnimator())
     }
 
+    /// E6 推荐的**可恢复**构造路径（D9 / Stage6 codex final-F1）。
+    ///
+    /// 训练组 candle 数据派生失败（空 `[:]` / 缺非空 `.m3` / `.m3` 未覆盖 `maxTick`）是来自
+    /// reader/cache 边界的**可恢复**条件——本工厂校验后抛 `AppError.trainingSet(.emptyData)`
+    /// （`isRecoverable == true`，由 UI 呈现），而非让 `init` 的末线 `precondition` 把数据错误变成
+    /// 进程 trap。E6（顺位 4/5）应经此工厂构造，并对 P5 缓存数据**重新校验**（而非信任）。
+    /// `init` 仍保留同名前置作为「已校验数据」契约的末线不变量。
+    public static func make(
+        flow: TrainingFlowController,
+        allCandles: [Period: [KLineCandle]],
+        maxTick: Int,
+        initialTick: Int? = nil,
+        initialCapital: Double,
+        initialCashBalance: Double,
+        initialPosition: PositionManager = .init(),
+        initialMarkers: [TradeMarker] = [],
+        initialDrawings: [DrawingObject] = [],
+        initialTradeOperations: [TradeOperation] = [],
+        initialDrawdown: DrawdownAccumulator = .initial,
+        initialUpperPeriod: Period = .m60,
+        initialLowerPeriod: Period = .daily
+    ) throws -> TrainingEngine {
+        guard let m3 = allCandles[.m3], !m3.isEmpty else {
+            throw AppError.trainingSet(.emptyData)            // 空 / 缺 .m3 驱动序列
+        }
+        guard let last = m3.last, last.endGlobalIndex >= maxTick else {
+            throw AppError.trainingSet(.emptyData)            // .m3 未覆盖 maxTick（版本/数据残缺）
+        }
+        return TrainingEngine(
+            flow: flow, allCandles: allCandles, maxTick: maxTick, initialTick: initialTick,
+            initialCapital: initialCapital, initialCashBalance: initialCashBalance,
+            initialPosition: initialPosition, initialMarkers: initialMarkers,
+            initialDrawings: initialDrawings, initialTradeOperations: initialTradeOperations,
+            initialDrawdown: initialDrawdown,
+            initialUpperPeriod: initialUpperPeriod, initialLowerPeriod: initialLowerPeriod)
+    }
+
     // MARK: - 派生 accessor（只读纯值计算属性；买卖可用门见 E5b / D4）
 
     /// 现价：复用 Task 1 的静态 `price(...)`，固定 `.m3` 驱动序列（D2 / codex R4-F2）。

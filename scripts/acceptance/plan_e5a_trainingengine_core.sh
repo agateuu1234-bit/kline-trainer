@@ -30,6 +30,8 @@ want "drawdown update 反映起始总资金（R5-F1）"    "grep -q 'seededDrawd
 want ".m3 覆盖 maxTick 前置（R6-F2）"            "grep -q 'endGlobalIndex >= maxTick' '$TE'"
 want "resume initialTick 参数（R6-F1）"          "grep -q 'initialTick ?? flow.initialTick' '$TE'"
 want "drawdown 含 initialCapital 基线（R6-F3）"   "grep -q 'initialDrawdown.peakCapital, initialCapital, startTotal' '$TE'"
+want "throwing factory make() throws（Stage6 F1）"  "grep -qE 'public static func make\(' '$TE'"
+want "make 抛可恢复 trainingSet(.emptyData)"        "grep -q 'AppError.trainingSet(.emptyData)' '$TE'"
 
 echo "== G3: 9 个运行时存储态 =="
 for p in tick position cashBalance drawdown markers drawings upperPanel lowerPanel tradeOperations; do
