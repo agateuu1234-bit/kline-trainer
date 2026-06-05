@@ -137,3 +137,56 @@ public final class TrainingEngine {
         return idx < candles.count ? candles[idx].close : last.close
     }
 }
+
+#if DEBUG
+extension TrainingEngine {
+    /// preview fixture 的 base K 线根数；maxTick 由它派生，保证 tick 不越界（codex R3-F2）。
+    private static let previewCandleCount = 8
+
+    /// Preview Fixture（取代 MockTrainingEngine；modules L1687-1705）。
+    /// D8：内联构造最小 fixture，不新增公共 fixture 面；maxTick = previewCandleCount-1（非 spec 字面 1000）。
+    public static func preview(mode: TrainingMode = .normal) -> TrainingEngine {
+        let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+        let candles = previewCandles()
+        let maxTick = previewCandleCount - 1            // 末根 endGlobalIndex；tick 不越界
+        let flow: TrainingFlowController
+        switch mode {
+        case .normal: flow = NormalFlow(fees: fees, maxTick: maxTick)
+        case .review: flow = ReviewFlow(record: previewRecord(fees: fees, finalTick: maxTick))
+        case .replay: flow = ReplayFlow(feeSnapshotFromOriginal: fees, maxTick: maxTick)
+        }
+        return TrainingEngine(
+            flow: flow,
+            allCandles: candles,
+            maxTick: maxTick,
+            initialCapital: 100_000,
+            initialCashBalance: 100_000)
+    }
+
+    /// codex R4-F3/R5-F2：合法 fixture —— 每根 c.period==key、含非空 `.m3` 驱动序列，
+    /// 并为默认面板周期 `.m60`/`.daily` 提供合法聚合（endGlobalIndex ≤ m3Max=7）。
+    private static func previewCandles() -> [Period: [KLineCandle]] {
+        func candle(_ p: Period, start: Int, end: Int, close: Double) -> KLineCandle {
+            KLineCandle(period: p, datetime: Int64(start) * 3600,
+                        open: 10, high: 11, low: 9, close: close,
+                        volume: 1000, amount: nil, ma66: nil,
+                        bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil,
+                        globalIndex: start, endGlobalIndex: end)
+        }
+        let m3 = (0..<previewCandleCount).map { candle(.m3, start: $0, end: $0, close: 10 + Double($0) * 0.1) }
+        let m60 = [candle(.m60, start: 0, end: 3, close: 10.3),
+                   candle(.m60, start: 4, end: 7, close: 10.7)]
+        let daily = [candle(.daily, start: 0, end: 7, close: 10.7)]
+        return [.m3: m3, .m60: m60, .daily: daily]
+    }
+
+    private static func previewRecord(fees: FeeSnapshot, finalTick: Int) -> TrainingRecord {
+        TrainingRecord(id: 1, trainingSetFilename: "preview.sqlite", createdAt: 0,
+                       stockCode: "000001", stockName: "预览股",
+                       startYear: 2020, startMonth: 1,
+                       totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                       buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: finalTick)
+    }
+}
+#endif

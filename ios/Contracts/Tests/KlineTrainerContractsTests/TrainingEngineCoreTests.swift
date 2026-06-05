@@ -197,6 +197,43 @@ import CoreGraphics
         #expect(e.position.shares == 0)
     }
 
+    @Test func previewBuildsAllModes() {
+        let n = TrainingEngine.preview(mode: .normal)
+        #expect(n.flow.mode == .normal)
+        #expect(n.currentTotalCapital == 100_000)        // 空仓 → 现金 100k
+        let r = TrainingEngine.preview(mode: .review)
+        #expect(r.flow.mode == .review)
+        #expect(r.flow.canBuySell() == false)            // review 关闭买卖（flow 能力，非 E5a accessor）
+        let p = TrainingEngine.preview(mode: .replay)
+        #expect(p.flow.mode == .replay)
+    }
+
+    @Test func previewMaxTickMatchesFixtureRange() {
+        // codex R3-F2：preview 的 maxTick 必须 == fixture 末根 endGlobalIndex，tick 不越界。
+        let e = TrainingEngine.preview(mode: .normal)
+        #expect(e.tick.maxTick == 7)         // 8 根 candle（endGlobalIndex 0..7）→ maxTick 7
+    }
+
+    @Test func previewFixtureCandlePeriodsMatchKeys() {
+        // codex R4-F3：fixture 每根 candle.period 必须 == 其 dict key，且含非空 .m3 驱动序列。
+        let e = TrainingEngine.preview(mode: .normal)
+        for (period, list) in e.allCandles {
+            for c in list { #expect(c.period == period) }
+        }
+        #expect(e.allCandles[.m3]?.isEmpty == false)
+    }
+
+    @Test func previewProvidesCandlesForDefaultPanels() {
+        // codex R5-F2：preview 必须为 engine 默认面板周期（.m60 上 / .daily 下）提供非空数据。
+        let e = TrainingEngine.preview(mode: .normal)
+        #expect(e.allCandles[e.upperPanel.period]?.isEmpty == false)   // .m60
+        #expect(e.allCandles[e.lowerPanel.period]?.isEmpty == false)   // .daily
+    }
+
+    @Test func previewDefaultsToNormal() {
+        #expect(TrainingEngine.preview().flow.mode == .normal)
+    }
+
     // Review/preview 用最小 TrainingRecord
     static func previewRecordForTest(finalTick: Int = 2) -> TrainingRecord {
         TrainingRecord(id: 1, trainingSetFilename: "t.sqlite", createdAt: 0,
