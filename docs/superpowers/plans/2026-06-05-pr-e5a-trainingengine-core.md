@@ -76,7 +76,7 @@ init 签名**不收** panel 参数 → 必须内部构造。
 
 ### D8 — `preview(mode:)` 内联构造 fixture，不新增公共 fixture 面
 spec preview（L1690-1705）引用 `FeeSnapshot.preview` / `KLineCandle.previewFixture` / `TrainingRecord.previewRecord` —— **三者均不存在公共定义**（仅 UI 文件内 fileprivate）。原样照抄**不可编译**。
-**判定：** `preview` 用私有 `static` helper 内联构造最小 fixture（`FeeSnapshot(commissionRate:0.0001, minCommissionEnabled:true)`、8 根 `.m60`+`.daily` K 线、review 用内联 `TrainingRecord`），**不**新增 `FeeSnapshot.preview` 等公共面（避免与未来 U 层 fixture 定义冲突）。gated `#if DEBUG`。
+**判定：** `preview` 用私有 `static` helper 内联构造最小 fixture（`FeeSnapshot(commissionRate:0.0001, minCommissionEnabled:true)`、`previewCandleCount`=8 根 `.m60`+`.daily` K 线、review 用内联 `TrainingRecord`），**不**新增 `FeeSnapshot.preview` 等公共面（避免与未来 U 层 fixture 定义冲突）。gated `#if DEBUG`。**maxTick = `previewCandleCount-1`（=7）由 fixture 覆盖范围派生**，不照抄 spec 字面 1000——否则 maxTick(1000) 远超 candle 范围(0..7)，preview 推进 tick 会越界到无 candle 区（codex R3-F2）；并加 `previewMaxTickMatchesFixtureRange` 断言此不变量。
 **偏离声明：** 偏离 spec 的「`.preview`/`.previewFixture`」字面写法，但语义等价（DEBUG preview 构造器）。**codex 核**：是否应改为补公共 fixture 以供 U1/U2（顺位 8/9）复用 —— 倾向不补，留 U 层按需引入，避免本 PR 越界。
 
 ---
@@ -422,7 +422,7 @@ Expected: FAIL —— `currentTotalCapital`/`returnRate`/`holdingCost`/`maxDrawd
 在 `TrainingEngine` class 内、`finestPeriod` 之前追加：
 
 ```swift
-    // MARK: - 派生 accessor（只读纯值计算属性；buy/sellEnabled 动作门见 E5b / D4）
+    // MARK: - 派生 accessor（只读纯值计算属性；买卖可用门见 E5b / D4）
 
     /// 现价：复用 Task 1 的静态 `price(...)`（D2；endGlobalIndex 二分，超末根夹取末根）。
     private var currentPrice: Double {
@@ -544,6 +544,12 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
         #expect(p.flow.mode == .replay)
     }
 
+    @Test func previewMaxTickMatchesFixtureRange() {
+        // codex R3-F2：preview 的 maxTick 必须 == fixture 末根 endGlobalIndex，tick 不越界。
+        let e = TrainingEngine.preview(mode: .normal)
+        #expect(e.tick.maxTick == 7)         // 8 根 candle（endGlobalIndex 0..7）→ maxTick 7
+    }
+
     @Test func previewDefaultsToNormal() {
         #expect(TrainingEngine.preview().flow.mode == .normal)
     }
@@ -558,26 +564,31 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```swift
 #if DEBUG
 extension TrainingEngine {
+    /// preview fixture 的 base K 线根数；maxTick 由它派生，保证 tick 不越界（codex R3-F2）。
+    private static let previewCandleCount = 8
+
     /// Preview Fixture（取代 MockTrainingEngine；modules L1687-1705）。
-    /// D8：内联构造最小 fixture，不新增公共 fixture 面。
+    /// D8：内联构造最小 fixture，不新增公共 fixture 面；maxTick = previewCandleCount-1（非 spec 字面 1000）。
     public static func preview(mode: TrainingMode = .normal) -> TrainingEngine {
         let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+        let candles = previewCandles()
+        let maxTick = previewCandleCount - 1            // 末根 endGlobalIndex；tick 不越界
         let flow: TrainingFlowController
         switch mode {
-        case .normal: flow = NormalFlow(fees: fees, maxTick: 1000)
-        case .review: flow = ReviewFlow(record: previewRecord(fees: fees))
-        case .replay: flow = ReplayFlow(feeSnapshotFromOriginal: fees, maxTick: 1000)
+        case .normal: flow = NormalFlow(fees: fees, maxTick: maxTick)
+        case .review: flow = ReviewFlow(record: previewRecord(fees: fees, finalTick: maxTick))
+        case .replay: flow = ReplayFlow(feeSnapshotFromOriginal: fees, maxTick: maxTick)
         }
         return TrainingEngine(
             flow: flow,
-            allCandles: previewCandles(),
-            maxTick: 1000,
+            allCandles: candles,
+            maxTick: maxTick,
             initialCapital: 100_000,
             initialCashBalance: 100_000)
     }
 
     private static func previewCandles() -> [Period: [KLineCandle]] {
-        let arr: [KLineCandle] = (0..<8).map { i in
+        let arr: [KLineCandle] = (0..<previewCandleCount).map { i in
             KLineCandle(period: .m60, datetime: Int64(i) * 3600,
                         open: 10, high: 11, low: 9, close: 10 + Double(i) * 0.1,
                         volume: 1000, amount: nil, ma66: nil,
@@ -588,12 +599,12 @@ extension TrainingEngine {
         return [.m60: arr, .daily: arr]
     }
 
-    private static func previewRecord(fees: FeeSnapshot) -> TrainingRecord {
+    private static func previewRecord(fees: FeeSnapshot, finalTick: Int) -> TrainingRecord {
         TrainingRecord(id: 1, trainingSetFilename: "preview.sqlite", createdAt: 0,
                        stockCode: "000001", stockName: "预览股",
                        startYear: 2020, startMonth: 1,
                        totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
-                       buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: 7)
+                       buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: finalTick)
     }
 }
 #endif
@@ -654,8 +665,8 @@ echo "== G4: 4 纯值 accessor（buy/sellEnabled 下放 E5b，不应出现）=="
 for a in currentTotalCapital holdingCost returnRate maxDrawdown; do
   want "accessor $a" "grep -qE 'var $a' '$TE'"
 done
-wantn "buyEnabled 不在 E5a（D4 下放 E5b）"  "grep -q 'buyEnabled' '$TE'"
-wantn "sellEnabled 不在 E5a（D4 下放 E5b）" "grep -q 'sellEnabled' '$TE'"
+wantn "无 buyEnabled 声明（D4 下放 E5b）"  "grep -qE 'var +buyEnabled' '$TE'"
+wantn "无 sellEnabled 声明（D4 下放 E5b）" "grep -qE 'var +sellEnabled' '$TE'"
 
 echo "== G5: onSceneActivated 中继到 resetOnSceneActive =="
 want "onSceneActivated" "grep -q 'func onSceneActivated' '$TE'"
@@ -799,4 +810,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - **R2-F1（high 0.93, drawdown 低报）—— 采纳（纠正 R1 误判）：** R1 我 D3 说「不 seeding」是错的——spec L1604「`initialCapital` 用于 drawdown 初始化」+ `update` 先抬 peak 会丢失从初始资金起的回撤。改：init `peakCapital = max(initialDrawdown.peakCapital, startTotal)`（startTotal=起始总资金）；新增 `freshSessionSeedsDrawdownPeakFromStartingCapital` / `freshSessionSeedPeakIncludesInitialPositionValue` / `resumePreservesCarriedDrawdownPeak` 三测。
 - **R2-F2（medium 0.84, buyEnabled 忽略满仓）—— 采纳其 R1 备选「下放 E5b」：** `quoteBuy` 无当前持仓输入，5/5 满仓+余现金仍判 true；而 5/5 判定需 spec 未定义的 tier-推导公式（plan v1.5 L730 仅说 caller-derived），**不臆造**。`buyEnabled`/`sellEnabled` 整体移 E5b（顺位 3，与动作 tier 逻辑同处）；E5a 删二者实现与测试，保留 4 纯值 accessor；验收 G4 加 `wantn` 守卫确认 E5a 不含 buy/sellEnabled。
 
-待 R3 复审：收敛循环 round 3（max 3）；若仍 needs-attention 则就 D4「5/5 门是否必须在 E5a」escalate user（tier 公式属 spec 未定义项）。
+**R3（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应（均为 R1/R2 修订引入的一致性 bug，非设计分歧）：**
+
+- **R3-F1（medium 0.95, 验收脚本自相矛盾）—— 采纳：** R2 的 MARK 注释含 `buy/sellEnabled` 子串，被 G4 `wantn 'sellEnabled'` 子串匹配 → 实现过不了自己的闸门。改：注释去子串（→「买卖可用门」）+ G4 改匹配声明 `grep -qE 'var +sellEnabled'`（双保险）。
+- **R3-F2（medium 0.88, preview maxTick 越界）—— 采纳：** preview `maxTick:1000` 远超 8 根 fixture(endGlobalIndex 0..7)。改：`maxTick = previewCandleCount-1`（fixture 派生）+ `previewRecord(finalTick:)` 参数化 + 新增 `previewMaxTickMatchesFixtureRange` 断言不变量（D8）。
+
+**收敛判断（round 3 已用满）：** R1/R2/R3 findings 逐轮收窄——R1/R2 是真实语义契约（已实质修正），R3 两条是修订引入的局部一致性 bug（已全修），无遗留设计分歧、无 spec 未定义项触发。本轮修订后若 R4 复审 clean 即收敛；按 loop 策略 round>3 本应 escalate，但鉴于 R3 仅为机械一致性修复（非僵局/非反复拉锯），按 `duplicate/收窄趋势` 续审一轮确认 approve；仍不过则 escalate user。
