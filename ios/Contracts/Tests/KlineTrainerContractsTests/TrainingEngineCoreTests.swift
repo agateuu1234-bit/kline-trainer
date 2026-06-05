@@ -129,6 +129,22 @@ import CoreGraphics
         #expect(e.returnRate == 0)
     }
 
+    @Test func returnRateNonZeroAndZeroInitialCapitalGuard() {
+        // 正收益：总资金 150k vs 初始 100k → returnRate 0.5（精确可表示）
+        let gain = TrainingEngine(flow: NormalFlow(fees: Self.fees, maxTick: 2),
+                                  allCandles: Self.candles([10, 11, 12]),
+                                  maxTick: 2, initialCapital: 100_000,
+                                  initialCashBalance: 100_000,
+                                  initialPosition: PositionManager(shares: 5000, averageCost: 10, totalInvested: 50_000))
+        // tick 0 现价 10；总资金 = 100_000 + 5000*10 = 150_000 → returnRate 0.5
+        #expect(gain.returnRate == 0.5)
+        // initialCapital == 0 → guard 返回 0（不除零）
+        let zero = TrainingEngine(flow: NormalFlow(fees: Self.fees, maxTick: 0),
+                                  allCandles: Self.candles([10]),
+                                  maxTick: 0, initialCapital: 0, initialCashBalance: 0)
+        #expect(zero.returnRate == 0)
+    }
+
     @Test func holdingCostDelegatesToPosition() {
         let pos = PositionManager(shares: 300, averageCost: 12, totalInvested: 3600)
         let e = Self.normalEngine(position: pos)
