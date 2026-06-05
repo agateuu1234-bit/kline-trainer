@@ -854,7 +854,7 @@ Expected: `=== ALL E5a ACCEPTANCE CHECKS PASSED ===`，`exit=0`。
 |---|---|---|---|
 | 18 | 作用域守卫：G8 无 E5b 动作 + G4 无 buy/sellEnabled + G2b 含 R4-R6 前置（flow/maxTick、`.m3` 驱动+覆盖、resume tick、drawdown 基线、无 finestPeriod） | grep 命中/不命中均如期 | ☐ |
 | 19 | codex 对抗性评审 branch-diff | verdict `approve`（收敛） | ☐ |
-| 20 | 契约登记：D3 E6 换算契约；D4 buy/sellEnabled 移 E5b；D5/D7 init 签名 additive 扩展待 E6 RFC；D9 candle 校验边界（reader 可恢复 / engine 末线不变量 + E6/P5 重校验缓存义务） | PR body 已列 | ☐ |
+| 20 | 契约登记：D3 E6 换算契约；D4 buy/sellEnabled 移 E5b；D5/D7 init 扩展待 E6 RFC；D9 candle 校验边界 + E6/P5 重校验缓存；**E6 必经 `make(_:)` 构造**（R9）；**R9-F1 残留**（internal init 模块内可绕 make，user 接受 defense-in-depth） | PR body 已列 | ☐ |
 
 **任一条 ✗ → 不得 merge。**
 ```
@@ -991,4 +991,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Final-R8（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应（user 选 option A）：**
 
-- **Final-R8-F1（high 0.86, make 仍可 trap 于非法 flow）—— 采纳 option A（重构 make 自建 flow）：** 我 D9 预标的残留——`make` 读 `flow.allowedTickRange` 时，若外部传入 `NormalFlow(maxTick:-1)`（其 `0...-1` 一读即 trap）+ 合法 param maxTick，会崩；协议不暴露原始 maxTick 无法不 trap 地预判。改：make 签名由 `(flow:, maxTick:, ...)` 换为 `(_ input: FlowInput, ...)`，新增 `enum FlowInput { case normal/review/replay }`，工厂内部**先验 maxTick>=0 再建 flow**（maxTick 由 FlowInput 单一派生）→ 结构上**根除**外部非法 flow + flow/maxTick 错位；删除已过时的 `makeThrowsOnFlowMaxTickMismatch`，新增 `makeThrowsOnNegativeMaxTickReplay`，`makeThrowsOnNegativeMaxTick` 现直击 R8 场景（负 maxTick 由工厂先验拦下、不 trap）。make 测试全改 `make(.normal(...))` 形式；init-direct 测试不变。待 Final-R9 复审。
+- **Final-R8-F1（high 0.86, make 仍可 trap 于非法 flow）—— 采纳 option A（重构 make 自建 flow）：** 我 D9 预标的残留——`make` 读 `flow.allowedTickRange` 时，若外部传入 `NormalFlow(maxTick:-1)`（其 `0...-1` 一读即 trap）+ 合法 param maxTick，会崩；协议不暴露原始 maxTick 无法不 trap 地预判。改：make 签名由 `(flow:, maxTick:, ...)` 换为 `(_ input: FlowInput, ...)`，新增 `enum FlowInput { case normal/review/replay }`，工厂内部**先验 maxTick>=0 再建 flow**（maxTick 由 FlowInput 单一派生）→ 结构上**根除**外部非法 flow + flow/maxTick 错位；删除已过时的 `makeThrowsOnFlowMaxTickMismatch`，新增 `makeThrowsOnNegativeMaxTickReplay`，`makeThrowsOnNegativeMaxTick` 现直击 R8 场景（负 maxTick 由工厂先验拦下、不 trap）。make 测试全改 `make(.normal(...))` 形式；init-direct 测试不变。
+
+**Final-R9（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应（R8-F1 消失；R9 部分修 + 残留登记，user 选 B 停点）：**
+
+- **Final-R9-F2（high 0.78, FeeSnapshot 未校验）—— 采纳：** 负/非 finite `commissionRate` 会让 `TradeCalculator` 算出负佣金/虚增购买力。改：make 在建 flow 后统一查 `flow.feeSnapshot.commissionRate` finite + `>=0`（覆盖 normal/replay 的 input fees 与 review 的 record.feeSnapshot）→ 可恢复抛；新增 `makeThrowsOnNegativeFee`/`makeThrowsOnNonFiniteFee`。
+- **Final-R9-F1（high 0.82, internal init 可绕过 make）—— 部分修 + 残留登记（user 决策 B）：** ① 已修「弱校验」：init 钱 precondition 从 finite 加到 **finite + 非负**（与 make 同强度）。② **残留（已接受）**：init 保持 `internal`（标准「public 工厂 `make` + internal `init`」模式——外部只能走 make；模块内 E6 等可信代码**约定**走 make）；面板 backing 校验留在 **make**（喂渲染的生产路径）而非 init。彻底关闭需 init 改 `private` + ~18 init-direct 测试转 make + 多周期 fixture，**本机无 swift 无法验证此重构**（坏 PR 风险）→ user 选 B（停点 + 文档化）。
+
+**E6 强制契约（登记，顺位 4/5 兑现）：** E6（及所有生产构造）**必须经 `TrainingEngine.make(_:...)` 构造**（其校验全部数据派生不变量 + 佣金率 + 面板 backing → 可恢复 `AppError`）；`init` 仅作模块内 trust-boundary 末线。
+
+**Stage 6 收尾（user 决策 B，17 轮）：** 整体实现 codex 对抗审从 final-F1 → R8 逐条根因修复（throwing 工厂 → 全量数据派生校验 → 轴连续 → 面板 backing → init internal → FlowInput trap-proof → fee 校验）。剩 R9-F1 结构残留（internal init 模块内可绕过 make）按 user 决策接受为 defense-in-depth 残留 + E6 必经 make 契约。E5a 已硬化远超 spec 原范围。**本机可验证项（grep G1-G12）全绿；swift build/test/Catalyst 属 CI（macos-15）；codex Stage6 收尾带 1 条 documented-override 残留（R9-F1，user 接受）。**
