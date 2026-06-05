@@ -118,6 +118,15 @@ public final class TrainingEngine {
     /// 本 accessor 不做换算，调用方勿当比率使用。
     public var maxDrawdown: Double { drawdown.maxDrawdown }
 
+    // MARK: - 场景生命周期中继（D6）
+
+    /// 由 U2 TrainingView 顶层 `.onChange(of: scenePhase)` 触发（modules L1625-1629）。
+    /// 仅中继到减速动画 reset，不触碰业务状态。
+    public func onSceneActivated() {
+        animators.upper.resetOnSceneActive()
+        animators.lower.resetOnSceneActive()
+    }
+
     /// 现价查找（静态，供 init seeding 与实例 `currentPrice` 复用）：`.m3` 驱动序列中首个
     /// `endGlobalIndex >= target` 的 K 线收盘价；超末根夹取末根（D2）。`.m3` 与全局 tick 1:1，
     /// 避免聚合周期 close 取到未来价（codex R4-F2）。init 已保证 `.m3` 非空。

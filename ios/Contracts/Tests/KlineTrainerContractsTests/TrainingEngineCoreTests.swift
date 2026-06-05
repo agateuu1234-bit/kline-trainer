@@ -186,6 +186,17 @@ import CoreGraphics
         #expect(e.currentTotalCapital == 100_000)     // 88_000 + 1000 × 12（tick 2 现价）
     }
 
+    @Test func onSceneActivatedIsSafeAndPure() {
+        let e = Self.normalEngine(closes: [10, 11, 12])
+        let beforeTick = e.tick.globalTickIndex
+        let beforeCash = e.cashBalance
+        e.onSceneActivated()                 // 中继到两个 animator.resetOnSceneActive()
+        // 场景中继不改运行时业务状态
+        #expect(e.tick.globalTickIndex == beforeTick)
+        #expect(e.cashBalance == beforeCash)
+        #expect(e.position.shares == 0)
+    }
+
     // Review/preview 用最小 TrainingRecord
     static func previewRecordForTest(finalTick: Int = 2) -> TrainingRecord {
         TrainingRecord(id: 1, trainingSetFilename: "t.sqlite", createdAt: 0,
