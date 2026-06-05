@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task（本项目已排除 executing-plans，见 memory `project_executing_plans_excluded`）。Steps use checkbox (`- [ ]`) syntax for tracking. **本机 Linux 无 swift toolchain** —— 所有 `swift build` / `swift test` / `xcodebuild` 步骤在 CI（macos-15）或 mac 本地执行；本机只跑 grep / git 结构闸门。**绝不**以本机无法执行为由谎称 swift 测试通过。
 
-**Goal:** 把 `TrainingEngine` 从 Wave 0 类型壳（`fileprivate init` + `fatalError`）替换为运行时核心：可构造的 `public init` + 9 个运行时状态属性 + 6 个派生 accessor + `onSceneActivated` 场景中继 + `preview` 便利构造。
+**Goal:** 把 `TrainingEngine` 从 Wave 0 类型壳（`fileprivate init` + `fatalError`）替换为运行时核心：可构造的 `public init`（含 drawdown peak seeding）+ 9 个运行时状态属性 + 4 个纯值派生 accessor（`currentTotalCapital`/`holdingCost`/`returnRate`/`maxDrawdown`）+ `onSceneActivated` 场景中继 + `preview` 便利构造。**`buyEnabled`/`sellEnabled` 动作可达性门随动作下放 E5b（顺位 3，见 D4）。**
 
 **Architecture:** `@MainActor @Observable final class`，值语义运行时状态（`private(set)` 对外只读，写入留给 E5b 动作 PR）。现价从「最细粒度周期」K 线按 `endGlobalIndex` 二分查找得到（复用既有 `partitioningIndex`）。费用快照由 `flow.feeSnapshot` 派生（init 不收 `fees` 参数）。本 PR **不实现**任何交易动作（`buy`/`sell`/`holdOrObserve`/`switchPeriodCombo`/`activateDrawingTool`/`deleteDrawing` 属 E5b = Wave 2 顺位 3）。
 
@@ -48,17 +48,16 @@ spec init 签名（L1607-1616）**不含** `fees` 参数，但存储属性 `let 
 ### D3 — `maxDrawdown` accessor 透传绝对额（元）；E6 换算为比率（显式契约）
 **spec 已调和单位（codex R1-F1 误判澄清）：** `modules v1.4 L510` 明确 `DrawdownAccumulator.maxDrawdown` 是「**非负值，单位元**」的绝对额，`L516` 用 `dd = peak - current`；`L1636` 明确 E5 accessor「**直接读 accumulator**」。即运行时形态就是绝对元，**by design**。既有 `AppStateTests`（`maxDrawdown==30/50` 元）亦锚定此契约。codex R1-F1 把「record 列的比率」与「accumulator 的绝对额」混为一谈。
 **与「比率」的关系：** 比率（如 -0.12）只属 `TrainingRecord.max_drawdown` **列**（plan v1.5 L419、settlement L999），是**另一对象**；由 **E6 finalize 换算**（modules L537-538：record 只存最终 maxDrawdown、不存 peakCapital；resume 时 E6 从 `PendingTraining.drawdown` 重建 accumulator）。
-**判定：** `maxDrawdown { drawdown.maxDrawdown }` 透传绝对元（**spec-faithful**；不在 E5a 改成比率——那会违反 L1636 且破坏既有 `AppStateTests` 契约）。accessor **加文档注释**标明：单位=元/非负/运行时形态，比率换算是 E6 职责；调用方勿当比率用。init 忠实存 `initialDrawdown`（默认 `.initial`），不 seeding（绝对额公式无除零；从 peak=0 首次 update 即正确）。
+**判定：** `maxDrawdown { drawdown.maxDrawdown }` 透传绝对元（**spec-faithful**；不在 E5a 改成比率——那会违反 L1636 且破坏既有 `AppStateTests` 契约）。accessor **加文档注释**标明：单位=元/非负/运行时形态，比率换算是 E6 职责；调用方勿当比率用。
+**init 须 seeding peak（codex R2-F1 采纳，纠正前稿「不 seeding」）：** spec L1604 明确「`initialCapital` 用于 drawdown 初始化」。`.initial` 的 `peakCapital=0`，而 `update` 先把 peak 抬到当前值再算 dd——若局中第一次 update 时资金已跌破起始值，从初始资金起的那段回撤会**永久丢失**（低报）。故 init 把 `peakCapital` seeding 为**起始总资金** `startTotal = initialCashBalance + initialPosition.shares × startPrice`（startPrice = `flow.initialTick` 处现价）。fresh 局 `.initial`（peak 0）→ 取 startTotal；resume 局（`initialDrawdown` 携带更高 peak）→ `max(peak, startTotal)` 保留较大者，二者统一为 `peakCapital = max(initialDrawdown.peakCapital, startTotal)`，`maxDrawdown` 沿用 `initialDrawdown.maxDrawdown`。
 **E6 换算契约（显式登记，顺位 4/5 兑现）：** E6 finalize 构造 `TrainingRecord.maxDrawdown` 时须把运行时绝对元换算为比率（分母口径——initialCapital vs trough-peak——在 E6 RFC 定义；accumulator 不存 trough-peak，口径须显式选定）。本 PR 不实现换算，仅登记契约 + 测试断言 accessor 为绝对元（非负）。**若 codex 仍坚持 E5a 必须改 accessor 为比率 → 升级 user：该改动违 modules L1636，属契约变更需 RFC + 三方确认。**
 
-### D4 — `buyEnabled`/`sellEnabled` 用 E3 TradeCalculator 算「真可成交」（codex R1-F2 采纳）
-spec `{ get }` 无实现体。plan v1.5 L733-735：空仓→卖出灰置；满仓(5/5)→买入灰置；资金不足（取整后 0 手）。
-**判定（修正为正确语义，非最小残差）：** 复用已 merged 的纯函数 `TradeCalculator.quoteBuy/quoteSell`（E3，静态、`Result` 通道、`floor`+免5+印花税规则）做**只读**可成交校验——这是 feasibility 查询，非交易动作（动作 `buy()`/`sell()` 仍属 E5b），故在 E5a accessor 内合法。
-- `buyEnabled = flow.canBuySell() && (∃ tier∈PositionTier.allCases: quoteBuy(totalCapital: currentTotalCapital, cash: cashBalance, tier:, price: currentPrice, fees:) == .success)`
-  —— **必须遍历全 5 档**：小档可能「取整不足 1 手」失败而大档可成（各档**非单调**，不能只测 tier1）。这样「有现金但买不进」时正确返回 false（codex R1-F2 假阳性）。
-- `sellEnabled = flow.canBuySell() && position.shares > 0`
-  —— `holding>0` ⟹ tier5 全清报价恒成功（`quoteSell` tier5 分支 `sellShares=holding>0`），故等价、无假阳性（用 TradeCalculator 语义证明，非最小近似）。
-**残留留 E5b：** 「具体哪档可用 / 资金不足 Toast 文案 / 满仓 5/5 精确灰置」仍由 E5b 动作路径给出；本 PR 只保证 `buyEnabled` 不出现「亮但点不动」假阳性。
+### D4 — `buyEnabled`/`sellEnabled`（动作可达性门）整体下放 E5b（codex R2-F2）
+**演进：** R1 我用 `TradeCalculator.quoteBuy` 跨档校验 buyEnabled。R2-F2 指出仍有真实假阳性——`quoteBuy` **无当前持仓输入**，已满仓 5/5 且有余现金时仍会判 true，违反「满仓禁买」不变量（plan v1.5 L734）。
+**为何不在 E5a 修：** 正确的 5/5 判定需「当前持仓 → 档位」推导，而 spec 仅说该档位 **caller-derived**（plan v1.5 L730「依初始资金 + 当前持仓推导」），**未给公式**（分母口径、取整、与 tier ratio 的对应均未定义）。在 E5a 臆造一个 tier-推导公式违反「不臆造」原则，且与 E5b 的动作 tier 逻辑必然重复/易漂移。
+**判定（采纳 codex R1-F2 自己给出的备选「keep it out of E5a until E5b」）：** `buyEnabled`/`sellEnabled` 作为**动作可达性门**整体移至 **E5b（顺位 3）**，与 `buy()/sell()` 的 tier 推导 + 满仓判定 + 资金不足 Toast 同处实现，单一真值源。E5a 仅交付 **4 个纯值 accessor**（`currentTotalCapital`/`holdingCost`/`returnRate`/`maxDrawdown`）。
+**排序安全：** E5b（顺位 3）紧随 E5a（顺位 2），早于任何消费 buyEnabled 的 U 层（顺位 8/9），无前向缺口。
+**偏离声明：** spec modules L1637-1638 把这两个列在 E5 accessor 块；本 PR 按 outline「E5a=核心状态/值 accessor、E5b=动作」边界把「动作门」归 E5b。**若 codex 坚持必须在 E5a 实现 5/5 门 → 升级 user：tier-推导公式属 spec 未定义项，需先澄清/RFC，不可在实施计划里臆造。**
 
 ### D5 — `tick` 由 `flow.initialTick` 起算
 **判定：** `self.tick = TickEngine(maxTick: maxTick, initialTick: flow.initialTick)`。Normal/Replay→0；Review→`record.finalTick`（复盘固定末态）。
@@ -87,7 +86,7 @@ spec preview（L1690-1705）引用 `FeeSnapshot.preview` / `KLineCandle.previewF
 | 锚点 | 文件:行 | 当前内容 |
 |---|---|---|
 | TrainingEngine 壳 | `…/TrainingEngine/TrainingEngine.swift:11-17` | `@MainActor @Observable public final class TrainingEngine { fileprivate init() { fatalError("Wave 0 stub…") } }` |
-| E5 class spec | `kline_trainer_modules_v1.4.md:1588-1639` | 9 存储态 + init(10 参) + 6 动作(E5b) + onSceneActivated + 6 accessor |
+| E5 class spec | `kline_trainer_modules_v1.4.md:1588-1639` | 9 存储态 + init(10 参) + 6 动作(E5b) + onSceneActivated + 6 accessor（本 PR 交 4 纯值；`buy/sellEnabled` 随动作门下放 E5b，D4） |
 | preview spec | `kline_trainer_modules_v1.4.md:1690-1705` | `static func preview(mode:)`，引用不存在的 `.preview`/`.previewFixture`/`.previewRecord` |
 | 初始组合 | `kline_trainer_plan_v1.5.md:777` | 「上区 60m，下区 日线」 |
 | 现价/平仓 | `kline_trainer_plan_v1.5.md:751` | 「最后一根最小周期 K 线收盘价」 |
@@ -104,7 +103,7 @@ spec preview（L1690-1705）引用 `FeeSnapshot.preview` / `KLineCandle.previewF
 
 | 文件 | 动作 | 责任 | 预算 |
 |---|---|---|---|
-| `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift` | **Modify**（整体替换壳） | 运行时核心：存储态 + init + currentPrice + 6 accessor + onSceneActivated + `#if DEBUG` preview | ~120 行 |
+| `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift` | **Modify**（整体替换壳） | 运行时核心：存储态 + init（drawdown seeding）+ currentPrice + 4 纯值 accessor + onSceneActivated + `#if DEBUG` preview（buy/sellEnabled 不在本 PR） | ~115 行 |
 | `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineCoreTests.swift` | **Create** | Swift Testing：init 接线 / 现价 / accessor / scene 中继 / preview / 作用域守卫 | ~220 行 |
 | `scripts/acceptance/plan_e5a_trainingengine_core.sh` | **Create** | Linux 可跑 grep/git 结构闸门 G1-G10 | ~70 行 |
 | `docs/acceptance/2026-06-05-pr-e5a-trainingengine-core.md` | **Create** | 中文验收清单（action/expected/pass_fail；CI swift 行明标 macOS-only） | ~50 行 |
@@ -182,6 +181,33 @@ import CoreGraphics
         #expect(e.position.shares == 200)
         #expect(e.cashBalance == 98_000)
     }
+
+    @Test func freshSessionSeedsDrawdownPeakFromStartingCapital() {
+        // codex R2-F1：fresh 局 peak 须 seeding 为起始总资金，否则首次 update 低报回撤。
+        let e = Self.normalEngine(closes: [10], cash: 100_000, capital: 100_000)  // 空仓，起始价 10
+        #expect(e.drawdown.peakCapital == 100_000)   // 非 0
+        #expect(e.drawdown.maxDrawdown == 0)
+    }
+
+    @Test func freshSessionSeedPeakIncludesInitialPositionValue() {
+        // 起始带仓：startTotal = 现金 + 持仓市值（200 股 × 10）= 100_000
+        let pos = PositionManager(shares: 200, averageCost: 9, totalInvested: 1800)
+        let e = Self.normalEngine(closes: [10], cash: 98_000, capital: 100_000, position: pos)
+        #expect(e.drawdown.peakCapital == 100_000)
+    }
+
+    @Test func resumePreservesCarriedDrawdownPeak() {
+        // resume 局 initialDrawdown 携带更高 peak → 不被 startTotal 覆盖（取 max）
+        let dd = DrawdownAccumulator(peakCapital: 130_000, maxDrawdown: 12_000)
+        let e = TrainingEngine(flow: NormalFlow(fees: Self.fees, maxTick: 0),
+                               allCandles: Self.candles([10]),
+                               maxTick: 0, initialCapital: 100_000,
+                               initialCashBalance: 90_000,
+                               initialPosition: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000),
+                               initialDrawdown: dd)
+        #expect(e.drawdown.peakCapital == 130_000)   // max(130_000, 90_000 + 1000*10 = 100_000)
+        #expect(e.drawdown.maxDrawdown == 12_000)
+    }
 }
 ```
 
@@ -252,10 +278,17 @@ public final class TrainingEngine {
         self.initialCapital = initialCapital
         self.basePeriod = base
 
-        self.tick = TickEngine(maxTick: maxTick, initialTick: flow.initialTick)  // D5
+        let startTick = flow.initialTick
+        self.tick = TickEngine(maxTick: maxTick, initialTick: startTick)  // D5
         self.position = initialPosition
         self.cashBalance = initialCashBalance
-        self.drawdown = initialDrawdown              // D3：不 seeding
+        // D3：drawdown peak seeding 为起始总资金（modules L1604），避免低报回撤（codex R2-F1）。
+        // fresh 局 .initial(peak 0)→ startTotal；resume 局 → max 保留携带的更高 peak。
+        let startPrice = TrainingEngine.price(in: allCandles, basePeriod: base, atTick: startTick)
+        let startTotal = initialCashBalance + Double(initialPosition.shares) * startPrice
+        self.drawdown = DrawdownAccumulator(
+            peakCapital: max(initialDrawdown.peakCapital, startTotal),
+            maxDrawdown: initialDrawdown.maxDrawdown)
         self.markers = initialMarkers
         self.drawings = initialDrawings
         self.tradeOperations = initialTradeOperations
@@ -276,6 +309,16 @@ public final class TrainingEngine {
             .keys
             .min { (Period.allCases.firstIndex(of: $0) ?? .max)
                  < (Period.allCases.firstIndex(of: $1) ?? .max) }
+    }
+
+    /// 现价查找（静态，供 init seeding 与实例 `currentPrice` 复用）：basePeriod 中首个
+    /// `endGlobalIndex >= target` 的 K 线收盘价；超末根夹取末根（D2）。
+    private static func price(in allCandles: [Period: [KLineCandle]],
+                             basePeriod: Period, atTick target: Int) -> Double {
+        let candles = allCandles[basePeriod] ?? []
+        guard let last = candles.last else { return 0 }
+        let idx = candles.partitioningIndex { $0.endGlobalIndex >= target }
+        return idx < candles.count ? candles[idx].close : last.close
     }
 }
 ```
@@ -298,7 +341,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 2: 现价 + 6 个 accessor（TDD）
+## Task 2: 现价 + 4 个纯值 accessor（TDD）
 
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`
@@ -349,40 +392,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
         #expect(e.maxDrawdown >= 0)         // 非负不变量
     }
 
-    @Test func buySellEnabledFollowFlowAndState() {
-        // 空仓 + 有现金（Normal flow 全开）→ tier1 可成交
-        let flat = Self.normalEngine(cash: 100_000, position: .init())
-        #expect(flat.buyEnabled == true)
-        #expect(flat.sellEnabled == false)            // 空仓不可卖
-        // 有持仓 + 无现金 → 任何档总成本超现金(0) 失败
-        let held = Self.normalEngine(cash: 0,
-                                     position: PositionManager(shares: 100, averageCost: 10, totalInvested: 1000))
-        #expect(held.buyEnabled == false)             // 无现金不可买
-        #expect(held.sellEnabled == true)
-    }
-
-    @Test func buyEnabledTrueWhenAffordable() {
-        let e = Self.normalEngine(closes: [10], cash: 100_000, capital: 100_000)
-        #expect(e.buyEnabled == true)                 // tier1 20% → 2000 股 → 可成交
-    }
-
-    @Test func buyEnabledFalseWhenCashPositiveButUnbuyable() {
-        // 有现金(500) 但价高(10_000)→ 任何档取整后不足 1 手 → 不可买（codex R1-F2 假阳性）
-        let e = Self.normalEngine(closes: [10_000], cash: 500, capital: 500, position: .init())
-        #expect(e.cashBalance == 500)                 // 现金 > 0
-        #expect(e.buyEnabled == false)                // 但 buyEnabled 仍 false
-    }
-
-    @Test func reviewFlowDisablesBuySell() {
-        let record = Self.previewRecordForTest()
+    @Test func reviewModeStartsAtFinalTick() {
+        let record = Self.previewRecordForTest()   // finalTick 2
         let e = TrainingEngine(flow: ReviewFlow(record: record),
                                allCandles: Self.candles([10, 11, 12, 13]),
                                maxTick: 3, initialCapital: 100_000,
                                initialCashBalance: 50_000,
                                initialPosition: PositionManager(shares: 100, averageCost: 10, totalInvested: 1000))
-        // ReviewFlow.canBuySell() == false → 两者皆 false
-        #expect(e.buyEnabled == false)
-        #expect(e.sellEnabled == false)
         #expect(e.tick.globalTickIndex == record.finalTick)   // D5：复盘起于末态
     }
 
@@ -399,23 +415,18 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - [ ] **Step 2.2: 跑测试确认失败（CI/mac）**
 
 Run（CI/mac）：`cd ios/Contracts && swift test --filter TrainingEngineCoreTests`
-Expected: FAIL —— `currentTotalCapital`/`returnRate`/`holdingCost`/`maxDrawdown`/`buyEnabled`/`sellEnabled` 未定义。
+Expected: FAIL —— `currentTotalCapital`/`returnRate`/`holdingCost`/`maxDrawdown` 未定义。
 
-- [ ] **Step 2.3: 实现 currentPrice + 6 accessor**
+- [ ] **Step 2.3: 实现 currentPrice + 4 纯值 accessor**
 
 在 `TrainingEngine` class 内、`finestPeriod` 之前追加：
 
 ```swift
-    // MARK: - 派生 accessor（只读计算属性）
+    // MARK: - 派生 accessor（只读纯值计算属性；buy/sellEnabled 动作门见 E5b / D4）
 
-    /// 现价 = 最细粒度周期中、覆盖当前 globalTickIndex 的 K 线收盘价（D2）。
-    /// 用 endGlobalIndex 二分（同 MarkersLayout 约定）；tick 超末根夹取末根 close。
+    /// 现价：复用 Task 1 的静态 `price(...)`（D2；endGlobalIndex 二分，超末根夹取末根）。
     private var currentPrice: Double {
-        let candles = allCandles[basePeriod] ?? []
-        guard let last = candles.last else { return 0 }   // init 已保证非空；防御性兜底
-        let target = tick.globalTickIndex
-        let idx = candles.partitioningIndex { $0.endGlobalIndex >= target }
-        return idx < candles.count ? candles[idx].close : last.close
+        TrainingEngine.price(in: allCandles, basePeriod: basePeriod, atTick: tick.globalTickIndex)
     }
 
     /// 本局实时总资金 = 现金 + 持仓市值（plan v1.5 L914）。
@@ -435,26 +446,6 @@ Expected: FAIL —— `currentTotalCapital`/`returnRate`/`holdingCost`/`maxDrawd
     /// 注意：`TrainingRecord.maxDrawdown` 是比率（如 -0.12），由 E6 finalize 换算（modules L537-538，D3）；
     /// 本 accessor 不做换算，调用方勿当比率使用。
     public var maxDrawdown: Double { drawdown.maxDrawdown }
-
-    /// 买入可用：flow 能力门 + 「至少一档能产出成功买入报价」（D4 / codex R1-F2）。
-    /// 用 E3 `TradeCalculator.quoteBuy` 跨 5 档只读校验（feasibility，非动作）：有现金但取整后
-    /// 不足 1 手 / 总成本超现金时为 false，避免 UI 假阳性。各档非单调，故遍历全档。
-    public var buyEnabled: Bool {
-        guard flow.canBuySell() else { return false }
-        let price = currentPrice
-        let capital = currentTotalCapital
-        return PositionTier.allCases.contains { tier in
-            if case .success = TradeCalculator.quoteBuy(totalCapital: capital, cash: cashBalance,
-                                                        tier: tier, price: price, fees: fees) {
-                return true
-            }
-            return false
-        }
-    }
-
-    /// 卖出可用：flow 能力门 + 有持仓。
-    /// `holding>0` ⟹ tier5 全清报价恒成功（`TradeCalculator.quoteSell`），故等价 shares>0（D4）。
-    public var sellEnabled: Bool { flow.canBuySell() && position.shares > 0 }
 ```
 
 - [ ] **Step 2.4: 跑测试确认通过（CI/mac）**
@@ -467,7 +458,7 @@ Expected: PASS（全部 accessor 测试绿）。
 ```bash
 git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineCoreTests.swift
-git commit -m "feat(e5a): 现价二分 + 6 个 accessor（总资金/收益率/持仓成本/回撤/买卖可用，顺位 2）
+git commit -m "feat(e5a): 现价二分 + 4 纯值 accessor（总资金/收益率/持仓成本/回撤，顺位 2）
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -548,7 +539,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
         #expect(n.currentTotalCapital == 100_000)        // 空仓 → 现金 100k
         let r = TrainingEngine.preview(mode: .review)
         #expect(r.flow.mode == .review)
-        #expect(r.buyEnabled == false)                   // review 关闭买卖
+        #expect(r.flow.canBuySell() == false)            // review 关闭买卖（flow 能力，非 E5a accessor）
         let p = TrainingEngine.preview(mode: .replay)
         #expect(p.flow.mode == .replay)
     }
@@ -649,19 +640,22 @@ wantn "无 Wave 0 stub 注释" "grep -q 'Wave 0 stub' '$TE'"
 wantn "无 fatalError"       "grep -q 'fatalError' '$TE'"
 wantn "无 fileprivate init" "grep -qE 'fileprivate +init' '$TE'"
 
-echo "== G2: public init（10 参签名锚点）=="
+echo "== G2: public init（10 参签名锚点）+ drawdown seeding =="
 want "public init(flow:)" "grep -qE 'public init\(flow: TrainingFlowController' '$TE'"
 want "initialCashBalance 参数" "grep -q 'initialCashBalance' '$TE'"
+want "drawdown peak seeding（codex R2-F1）" "grep -q 'max(initialDrawdown.peakCapital' '$TE'"
 
 echo "== G3: 9 个运行时存储态 =="
 for p in tick position cashBalance drawdown markers drawings upperPanel lowerPanel tradeOperations; do
   want "存储态 $p" "grep -qE 'private\(set\) var $p' '$TE'"
 done
 
-echo "== G4: 6 个 accessor =="
-for a in currentTotalCapital holdingCost returnRate maxDrawdown buyEnabled sellEnabled; do
+echo "== G4: 4 纯值 accessor（buy/sellEnabled 下放 E5b，不应出现）=="
+for a in currentTotalCapital holdingCost returnRate maxDrawdown; do
   want "accessor $a" "grep -qE 'var $a' '$TE'"
 done
+wantn "buyEnabled 不在 E5a（D4 下放 E5b）"  "grep -q 'buyEnabled' '$TE'"
+wantn "sellEnabled 不在 E5a（D4 下放 E5b）" "grep -q 'sellEnabled' '$TE'"
 
 echo "== G5: onSceneActivated 中继到 resetOnSceneActive =="
 want "onSceneActivated" "grep -q 'func onSceneActivated' '$TE'"
@@ -725,20 +719,21 @@ Expected: `=== ALL E5a ACCEPTANCE CHECKS PASSED ===`，`exit=0`。
 | # | 规则 | 验证测试 | 期望 | 通过 |
 |---|---|---|---|---|
 | 6 | init 接线：现金/初始资金/空仓/起始 tick/初始组合 60m+日线 | `initWiresRuntimeState` | PASS | ☐ |
-| 7 | 总资金 = 现金 + 持仓市值（现价取最细周期收盘价） | `currentTotalCapitalAddsMarketValueAtCurrentPrice` | PASS | ☐ |
-| 8 | 收益率 = (总资金−初始资金)/初始资金 | `returnRateIsNetRatioOverInitialCapital` | PASS | ☐ |
-| 9 | 买卖可用门：空仓不可卖、review 全关；**有现金但取整不足 1 手→buyEnabled false（无假阳性）** | `buySellEnabledFollowFlowAndState` / `buyEnabledTrueWhenAffordable` / `buyEnabledFalseWhenCashPositiveButUnbuyable` / `reviewFlowDisablesBuySell` | PASS | ☐ |
+| 7 | drawdown peak seeding：fresh→起始总资金、带仓含市值、resume→保留较大 peak（codex R2-F1） | `freshSessionSeedsDrawdownPeakFromStartingCapital` / `freshSessionSeedPeakIncludesInitialPositionValue` / `resumePreservesCarriedDrawdownPeak` | PASS | ☐ |
+| 8 | 总资金 = 现金 + 持仓市值（现价取最细周期收盘价） | `currentTotalCapitalAddsMarketValueAtCurrentPrice` | PASS | ☐ |
+| 9 | 收益率 = (总资金−初始资金)/初始资金 | `returnRateIsNetRatioOverInitialCapital` | PASS | ☐ |
 | 10 | maxDrawdown = 非负绝对额（元），非比率（E6 换算） | `maxDrawdownIsAbsoluteAmountPerSpec` | PASS | ☐ |
-| 11 | 场景中继不改业务状态 | `onSceneActivatedIsSafeAndPure` | PASS | ☐ |
-| 12 | preview 三模式可构造 | `previewBuildsAllModes` | PASS | ☐ |
+| 11 | review 起于末态 tick | `reviewModeStartsAtFinalTick` | PASS | ☐ |
+| 12 | 场景中继不改业务状态 | `onSceneActivatedIsSafeAndPure` | PASS | ☐ |
+| 13 | preview 三模式可构造 | `previewBuildsAllModes` | PASS | ☐ |
 
 ## 三、流程合规与偏差
 
 | # | 项 | 期望 | 通过 |
 |---|---|---|---|
-| 13 | 作用域守卫：E5a 未实现任何 E5b 动作（G8） | grep 不命中 6 个动作方法 | ☐ |
-| 14 | codex 对抗性评审 branch-diff | verdict `approve`（收敛） | ☐ |
-| 15 | 契约登记：D3 maxDrawdown 绝对元 + E6 换算契约（顺位 4/5 兑现） | PR body 已列 E6 obligation | ☐ |
+| 14 | 作用域守卫：E5a 未实现任何 E5b 动作（G8）+ 无 buy/sellEnabled（G4，D4 下放 E5b） | grep 不命中 6 动作 + 不命中 buy/sellEnabled | ☐ |
+| 15 | codex 对抗性评审 branch-diff | verdict `approve`（收敛） | ☐ |
+| 16 | 契约登记：D3 maxDrawdown 绝对元 + E6 换算契约（顺位 4/5 兑现）；D4 buy/sellEnabled 移 E5b | PR body 已列 | ☐ |
 
 **任一条 ✗ → 不得 merge。**
 ```
@@ -768,7 +763,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ## Self-Review
 
-**1. Spec coverage（逐项）：** 9 存储态（Task1）✅；init 10 参（Task1）✅；6 accessor（Task2）✅；onSceneActivated（Task3）✅；preview（Task4）✅。**有意 OUT-OF-SCOPE：** 6 个交易动作（E5b 顺位 3）、E6 Coordinator（顺位 4/5）、集成测试（顺位 7）。
+**1. Spec coverage（逐项）：** 9 存储态（Task1）✅；init 10 参 + drawdown peak seeding（Task1）✅；4 纯值 accessor `currentTotalCapital/holdingCost/returnRate/maxDrawdown`（Task2）✅；onSceneActivated（Task3）✅；preview（Task4）✅。**有意 OUT-OF-SCOPE（评审驱动）：** `buyEnabled`/`sellEnabled` 动作门 → E5b（D4，codex R2-F2）；6 个交易动作 → E5b 顺位 3；maxDrawdown 绝对元→比率换算 → E6 finalize（D3，codex R1/R2）；E6 Coordinator 顺位 4/5；集成测试 顺位 7。
 
 **2. Placeholder scan：** 无 TBD/TODO；每个 code step 给出完整可编译代码；测试给出真实断言。
 
@@ -776,7 +771,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **4. Scope（surgical）：** 仅替换 TrainingEngine.swift + 新增 1 测试 + 1 脚本 + 1 清单；不碰任何已冻结契约文件（G10 守卫）；不「改进」相邻代码。
 
-**5. delta 声明：** D1-D8 全部显式标注依据 + 偏离声明，作为 codex 首要靶点；D3 改为「绝对元透传 + E6 换算显式契约」（codex R1-F1 响应），D4 改为「TradeCalculator 跨档真可成交」（codex R1-F2 采纳），均登记入验收清单第 13-15 行。
+**5. delta 声明：** D1-D8 全部显式标注依据 + 偏离声明，作为 codex 首要靶点；D3 = 「绝对元透传 + init seeding peak + E6 换算显式契约」（codex R1-F1 + R2-F1 响应），D4 = 「buy/sellEnabled 动作门下放 E5b」（codex R2-F2 采纳其 R1 备选），均登记入验收清单第 14-16 行。
 
 **6. 无本机 swift 诚实性：** 所有 swift/xcodebuild 步骤标 [CI/mac]；RED/GREEN 期望写明但本机不执行、不谎称通过（per `feedback_swift_local_toolchain_blindspot`）。
 
@@ -799,4 +794,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - **R1-F1（high, maxDrawdown 单位）—— 部分反驳 + 采纳其备选：** codex 把 `TrainingRecord.max_drawdown` 列的「比率」误当成 `DrawdownAccumulator.maxDrawdown` 的语义。权威 `modules v1.4 L510`（非负绝对额，单位元）+ `L1636`（accessor 直接读 accumulator）+ 既有 `AppStateTests`（==30/50 元）证明 E5a 透传绝对元是 spec-correct，改成比率反而违 L1636。**采纳 codex 第二方案**：accessor 加单位文档注释 + 把「绝对元→比率」登记为**显式 E6 finalize 换算契约**（D3）+ 加 `maxDrawdownIsAbsoluteAmountPerSpec` 断言绝对元/非负。若 codex 仍坚持改 accessor → 升级 user（属契约变更）。
 - **R1-F2（medium, buyEnabled 假阳性）—— 采纳：** `buyEnabled` 由 `canBuySell() && cash>0` 改为「∃ tier: `TradeCalculator.quoteBuy` == .success」跨全 5 档校验（D4）；新增负测 `buyEnabledFalseWhenCashPositiveButUnbuyable`（有现金但取整不足 1 手 → false）+ `buyEnabledTrueWhenAffordable`。`sellEnabled` 经证明 `shares>0` ⟺ tier5 全清成功，保持但加证明注释。
 
-待 R2 复审：同一收敛循环（max 3 轮）。
+**R2（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应：**
+
+- **R2-F1（high 0.93, drawdown 低报）—— 采纳（纠正 R1 误判）：** R1 我 D3 说「不 seeding」是错的——spec L1604「`initialCapital` 用于 drawdown 初始化」+ `update` 先抬 peak 会丢失从初始资金起的回撤。改：init `peakCapital = max(initialDrawdown.peakCapital, startTotal)`（startTotal=起始总资金）；新增 `freshSessionSeedsDrawdownPeakFromStartingCapital` / `freshSessionSeedPeakIncludesInitialPositionValue` / `resumePreservesCarriedDrawdownPeak` 三测。
+- **R2-F2（medium 0.84, buyEnabled 忽略满仓）—— 采纳其 R1 备选「下放 E5b」：** `quoteBuy` 无当前持仓输入，5/5 满仓+余现金仍判 true；而 5/5 判定需 spec 未定义的 tier-推导公式（plan v1.5 L730 仅说 caller-derived），**不臆造**。`buyEnabled`/`sellEnabled` 整体移 E5b（顺位 3，与动作 tier 逻辑同处）；E5a 删二者实现与测试，保留 4 纯值 accessor；验收 G4 加 `wantn` 守卫确认 E5a 不含 buy/sellEnabled。
+
+待 R3 复审：收敛循环 round 3（max 3）；若仍 needs-attention 则就 D4「5/5 门是否必须在 E5a」escalate user（tier 公式属 spec 未定义项）。
