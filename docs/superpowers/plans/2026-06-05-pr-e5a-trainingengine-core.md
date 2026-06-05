@@ -757,6 +757,7 @@ want "make 抛可恢复 trainingSet(.emptyData)"        "grep -q 'AppError.train
 want "make .m3 轴连续校验（R4/R5-F1）"              "grep -q 'isContiguousM3Axis' '$TE'"
 want "make 钱 finite 校验（R4-F2）"                 "grep -q 'initialCashBalance.isFinite' '$TE'"
 want "make 面板周期有数据校验（R6-F1）"             "grep -q 'allCandles\[initialUpperPeriod\]' '$TE'"
+want "make 内部建 flow（FlowInput，R8-F1 trap-proof）" "grep -q 'public enum FlowInput' '$TE'"
 
 echo "== G3: 9 个运行时存储态 =="
 for p in tick position cashBalance drawdown markers drawings upperPanel lowerPanel tradeOperations; do
@@ -985,4 +986,8 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Final-R7（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应：**
 
 - **R6-F2 已被接受 drop ✅：** 证据 push back（render visibleCandles 截断 + allCandles public 是 buildRenderState 所需）codex 采纳，「public allCandles 暴露未来」消解。
-- **Final-R7-F1（high 0.86, init 仍允许无 backing 面板）—— 采纳（option a：单一 public 构造路径）：** `make` 校验了面板 backing 但 `public init` 没有 → 两条 public 路径不同不变量，直调 init 仍能造 render-崩溃引擎。改：**`init` 改 internal**（`public init`→`init`），`make()` 成**唯一 public 构造路径**（校验全部数据派生不变量）。spec（modules L1591/1607）init 本就无 `public`，与之一致；模块内调用方（make/preview/E6/@testable 测试）不受影响；外部无法绕过 make。验收 G2 加 `wantn public init` + `want public static func make`。待 Final-R8 复审。
+- **Final-R7-F1（high 0.86, init 仍允许无 backing 面板）—— 采纳（option a：单一 public 构造路径）：** `make` 校验了面板 backing 但 `public init` 没有 → 两条 public 路径不同不变量，直调 init 仍能造 render-崩溃引擎。改：**`init` 改 internal**（`public init`→`init`），`make()` 成**唯一 public 构造路径**（校验全部数据派生不变量）。spec（modules L1591/1607）init 本就无 `public`，与之一致；模块内调用方（make/preview/E6/@testable 测试）不受影响；外部无法绕过 make。验收 G2 加 `wantn public init` + `want public static func make`。
+
+**Final-R8（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应（user 选 option A）：**
+
+- **Final-R8-F1（high 0.86, make 仍可 trap 于非法 flow）—— 采纳 option A（重构 make 自建 flow）：** 我 D9 预标的残留——`make` 读 `flow.allowedTickRange` 时，若外部传入 `NormalFlow(maxTick:-1)`（其 `0...-1` 一读即 trap）+ 合法 param maxTick，会崩；协议不暴露原始 maxTick 无法不 trap 地预判。改：make 签名由 `(flow:, maxTick:, ...)` 换为 `(_ input: FlowInput, ...)`，新增 `enum FlowInput { case normal/review/replay }`，工厂内部**先验 maxTick>=0 再建 flow**（maxTick 由 FlowInput 单一派生）→ 结构上**根除**外部非法 flow + flow/maxTick 错位；删除已过时的 `makeThrowsOnFlowMaxTickMismatch`，新增 `makeThrowsOnNegativeMaxTickReplay`，`makeThrowsOnNegativeMaxTick` 现直击 R8 场景（负 maxTick 由工厂先验拦下、不 trap）。make 测试全改 `make(.normal(...))` 形式；init-direct 测试不变。待 Final-R9 复审。

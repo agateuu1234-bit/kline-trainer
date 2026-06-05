@@ -253,44 +253,44 @@ import CoreGraphics
     @Test func makeThrowsOnMissingM3() {
         // Stage6 F1：空/缺 .m3 → 可恢复 AppError.trainingSet(.emptyData)，非 trap
         #expect(throws: AppError.trainingSet(.emptyData)) {
-            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 0),
-                                    allCandles: [:], maxTick: 0,
+            try TrainingEngine.make(.normal(fees: Self.fees, maxTick: 0),
+                                    allCandles: [:],
                                     initialCapital: 100_000, initialCashBalance: 100_000)
         }
     }
 
     @Test func makeThrowsOnInsufficientCoverage() {
-        // Stage6 F1：.m3 末根 endGlobalIndex 1 < maxTick 5 → 可恢复抛，非 trap
+        // Stage6 F1：.m3 末根 endGlobalIndex 1 < maxTick 5 → 可恢复抛
         #expect(throws: AppError.trainingSet(.emptyData)) {
-            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 5),
-                                    allCandles: Self.candles([10, 11]), maxTick: 5,
+            try TrainingEngine.make(.normal(fees: Self.fees, maxTick: 5),
+                                    allCandles: Self.candles([10, 11]),
                                     initialCapital: 100_000, initialCashBalance: 100_000)
         }
     }
 
     @Test func makeThrowsOnStalePendingTick() {
-        // Stage6 R3-F1：resume tick(99) 超出（被替换的更短训练组）→ 可恢复抛，非 trap
+        // Stage6 R3-F1：resume tick(99) 超出（被替换的更短训练组）→ 可恢复抛
         #expect(throws: AppError.trainingSet(.emptyData)) {
-            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
-                                    allCandles: Self.candles([10, 11, 12]), maxTick: 2, initialTick: 99,
+            try TrainingEngine.make(.normal(fees: Self.fees, maxTick: 2),
+                                    allCandles: Self.candles([10, 11, 12]), initialTick: 99,
                                     initialCapital: 100_000, initialCashBalance: 100_000)
         }
     }
 
     @Test func makeThrowsOnNegativeMaxTick() {
-        // Stage6 R3-F1：损坏 maxTick(-1) → 可恢复抛（且先于访问 0...maxTick 范围，不 trap）
+        // Stage6 R3/R8-F1：损坏/不一致 maxTick(-1) → 可恢复抛（工厂内先验 maxTick 再建 flow，结构上不 trap）
         #expect(throws: AppError.trainingSet(.emptyData)) {
-            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 0),
-                                    allCandles: Self.candles([10]), maxTick: -1,
+            try TrainingEngine.make(.normal(fees: Self.fees, maxTick: -1),
+                                    allCandles: Self.candles([10]),
                                     initialCapital: 100_000, initialCashBalance: 100_000)
         }
     }
 
-    @Test func makeThrowsOnFlowMaxTickMismatch() {
-        // Stage6 R3-F1：flow.allowedTickRange.upperBound(2) != maxTick(3) → 可恢复抛，非 trap
+    @Test func makeThrowsOnNegativeMaxTickReplay() {
+        // Stage6 R8-F1：ReplayFlow 同路径——负 maxTick 由工厂先验拦下，不 trap
         #expect(throws: AppError.trainingSet(.emptyData)) {
-            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
-                                    allCandles: Self.candles([10, 11, 12, 13]), maxTick: 3,
+            try TrainingEngine.make(.replay(fees: Self.fees, maxTick: -1),
+                                    allCandles: Self.candles([10]),
                                     initialCapital: 100_000, initialCashBalance: 100_000)
         }
     }
@@ -303,8 +303,8 @@ import CoreGraphics
                         macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: end, endGlobalIndex: end)
         }
         #expect(throws: AppError.trainingSet(.emptyData)) {
-            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 3),
-                                    allCandles: [.m3: [c(0), c(2), c(1), c(3)]], maxTick: 3,
+            try TrainingEngine.make(.normal(fees: Self.fees, maxTick: 3),
+                                    allCandles: [.m3: [c(0), c(2), c(1), c(3)]],
                                     initialCapital: 100_000, initialCashBalance: 100_000)
         }
     }
@@ -317,8 +317,8 @@ import CoreGraphics
                         macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: end, endGlobalIndex: end)
         }
         #expect(throws: AppError.trainingSet(.emptyData)) {
-            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 10),
-                                    allCandles: [.m3: [c(0), c(10)]], maxTick: 10,
+            try TrainingEngine.make(.normal(fees: Self.fees, maxTick: 10),
+                                    allCandles: [.m3: [c(0), c(10)]],
                                     initialCapital: 100_000, initialCashBalance: 100_000)
         }
     }
@@ -326,10 +326,9 @@ import CoreGraphics
     @Test func makeThrowsOnNonFiniteMoney() {
         // Stage6 R4-F2：resume cash = NaN → 可恢复抛（防污染总资金/收益率/回撤）
         #expect(throws: AppError.trainingSet(.emptyData)) {
-            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
-                                    allCandles: Self.candles([10, 11, 12]), maxTick: 2,
-                                    initialCapital: 100_000, initialCashBalance: .nan,
-                                    initialUpperPeriod: .m3, initialLowerPeriod: .m3)
+            try TrainingEngine.make(.normal(fees: Self.fees, maxTick: 2),
+                                    allCandles: Self.candles([10, 11, 12]),
+                                    initialCapital: 100_000, initialCashBalance: .nan)
         }
     }
 
@@ -337,8 +336,8 @@ import CoreGraphics
         // Stage6 R6-F1：.m3-only 数据 + 默认面板 .m60/.daily（无 candle）→ 可恢复抛
         // （防 buildRenderState 的 allCandles[panel.period]! 强解包崩溃）
         #expect(throws: AppError.trainingSet(.emptyData)) {
-            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
-                                    allCandles: Self.candles([10, 11, 12]), maxTick: 2,
+            try TrainingEngine.make(.normal(fees: Self.fees, maxTick: 2),
+                                    allCandles: Self.candles([10, 11, 12]),
                                     initialCapital: 100_000, initialCashBalance: 100_000)
             // 默认 initialUpperPeriod .m60 / initialLowerPeriod .daily 无数据 → throw
         }
@@ -346,8 +345,8 @@ import CoreGraphics
 
     @Test func makeSucceedsOnValidData() throws {
         // 面板用 .m3（有数据）使 R6-F1 面板校验通过，聚焦 make 成功路径
-        let e = try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
-                                        allCandles: Self.candles([10, 11, 12]), maxTick: 2,
+        let e = try TrainingEngine.make(.normal(fees: Self.fees, maxTick: 2),
+                                        allCandles: Self.candles([10, 11, 12]),
                                         initialCapital: 100_000, initialCashBalance: 100_000,
                                         initialUpperPeriod: .m3, initialLowerPeriod: .m3)
         #expect(e.tick.maxTick == 2)
