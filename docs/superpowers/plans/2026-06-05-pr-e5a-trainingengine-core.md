@@ -761,9 +761,11 @@ echo "== G5: onSceneActivated 中继到 resetOnSceneActive =="
 want "onSceneActivated" "grep -q 'func onSceneActivated' '$TE'"
 want "resetOnSceneActive 中继" "grep -q 'resetOnSceneActive' '$TE'"
 
-echo "== G6: 初始周期组合 上 60m / 下 日线（D7）=="
-want "upperPanel .m60" "grep -Pzo 'upperPanel = PanelViewState\(period: .m60' '$TE'"
-want "lowerPanel .daily" "grep -Pzo 'lowerPanel = PanelViewState\(period: .daily' '$TE'"
+echo "== G6: 默认周期组合 上 60m / 下 日线 + 面板由 resume 参数构造（D7 / R6 / R7-F1）=="
+want "initialUpperPeriod 默认 .m60"   "grep -q 'initialUpperPeriod: Period = .m60' '$TE'"
+want "initialLowerPeriod 默认 .daily"  "grep -q 'initialLowerPeriod: Period = .daily' '$TE'"
+want "upperPanel 由 initialUpperPeriod 构造" "grep -q 'PanelViewState(period: initialUpperPeriod' '$TE'"
+want "lowerPanel 由 initialLowerPeriod 构造" "grep -q 'PanelViewState(period: initialLowerPeriod' '$TE'"
 
 echo "== G7: maxDrawdown 透传 accumulator（spec L1636）=="
 want "drawdown.maxDrawdown 透传" "grep -q 'drawdown.maxDrawdown' '$TE'"
@@ -925,4 +927,8 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - **R6-F2（high 0.92, maxTick 超 m3 覆盖被静默 clamp）—— 采纳：** 前置未证 `.m3` 覆盖 maxTick；`price` clamp 越界 tick 成陈旧价。改：加 `precondition(m3.last!.endGlobalIndex >= maxTick)`（用 `>=`，因 review 的 m3 全集会超过 finalTick）；`resumeNormalModeUsesSavedTickForPrice` 在 tick==maxTick 取末根价正向覆盖。
 - **R6-F3（medium 0.82, drawdown 漏 initialCapital 基线）—— 采纳：** seeding peak 漏了声明基线；startTotal < initialCapital 时低报。改：`peakCapital = max(carried.peak, initialCapital, startTotal)`（spec L1604）；新增 `drawdownSeedsAtLeastDeclaredInitialCapital`（95k<100k → peak 100k、maxDD 5k）。
 
-**收敛判断（已 R1-R6，超 `max_rounds:3` 3 轮）：** 六轮 findings 始终 repo-grounded、逐条实质修正，**从未出现需 user 拍板的设计分歧 / spec 未定义僵局**（D5/D7 的 init 签名扩展是补 spec resume 不完整，behavior 明确，登记待 E6 RFC 确认而非僵局）。user 已明确指令「**继续刷到 approve**」→ 继续迭代，不再每轮打断。R7 待复审。
+**R7（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应（单条机械自矛盾，R6 改动引入）：**
+
+- **R7-F1（medium 0.96, G6 拒绝 resume 面板实现）—— 采纳：** R6 把面板改为由 `initialUpperPeriod/initialLowerPeriod` 构造，但 G6 仍 grep 字面 `PanelViewState(period: .m60`。改：G6 改查默认参数值 `initialUpperPeriod: Period = .m60` / `.daily` + 面板由 `initialUpperPeriod/initialLowerPeriod` 构造（与 R3-F1 同类，grep 守卫跟实现对齐）。
+
+**收敛判断（已 R1-R7，超 `max_rounds:3` 4 轮）：** findings 已收窄到单条机械一致性（R6 三条→R7 一条），始终 repo-grounded、无设计僵局。user 明确「**继续刷到 approve**」→ 继续。R8 待复审。
