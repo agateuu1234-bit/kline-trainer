@@ -751,6 +751,8 @@ want "resume initialTick 参数（R6-F1）"          "grep -q 'initialTick ?? fl
 want "drawdown 含 initialCapital 基线（R6-F3）"   "grep -q 'initialDrawdown.peakCapital, initialCapital, startTotal' '$TE'"
 want "throwing factory make() throws（Stage6 F1）"  "grep -qE 'public static func make\(' '$TE'"
 want "make 抛可恢复 trainingSet(.emptyData)"        "grep -q 'AppError.trainingSet(.emptyData)' '$TE'"
+want "make .m3 单调校验（R4-F1）"                   "grep -q 'c.endGlobalIndex > prevEnd' '$TE'"
+want "make 钱 finite 校验（R4-F2）"                 "grep -q 'initialCashBalance.isFinite' '$TE'"
 
 echo "== G3: 9 个运行时存储态 =="
 for p in tick position cashBalance drawdown markers drawings upperPanel lowerPanel tradeOperations; do
@@ -957,4 +959,12 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Final-R3（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应（factory 已被接受，补全其校验）：**
 
-- **Final-R3-F1（high 0.88, factory 仍把无效 tick 交给 trapping init）—— 采纳：** codex 接受 factory，但指出 `make` 只校验 candle 未校验 tick——`initialTick`(来自 `PendingTraining.globalTickIndex`) / `maxTick`(来自 record/训练组) 同属持久化数据，陈旧 tick（超出被替换的更短训练组）/ 负 maxTick / flow-maxTick 错位仍 trap。改：`make` 增校验 `maxTick>=0`（最先防负范围 trap）/ `flow.allowedTickRange.upperBound==maxTick` / resolved `startTick ∈ allowedTickRange` → 可恢复 `AppError.trainingSet(.emptyData)`；新增 `makeThrowsOnStalePendingTick`/`makeThrowsOnNegativeMaxTick`/`makeThrowsOnFlowMaxTickMismatch`。待 Final-R4 复审。
+- **Final-R3-F1（high 0.88, factory 仍把无效 tick 交给 trapping init）—— 采纳：** codex 接受 factory，但指出 `make` 只校验 candle 未校验 tick——`initialTick`(来自 `PendingTraining.globalTickIndex`) / `maxTick`(来自 record/训练组) 同属持久化数据，陈旧 tick（超出被替换的更短训练组）/ 负 maxTick / flow-maxTick 错位仍 trap。改：`make` 增校验 `maxTick>=0`（最先防负范围 trap）/ `flow.allowedTickRange.upperBound==maxTick` / resolved `startTick ∈ allowedTickRange` → 可恢复 `AppError.trainingSet(.emptyData)`；新增 `makeThrowsOnStalePendingTick`/`makeThrowsOnNegativeMaxTick`/`makeThrowsOnFlowMaxTickMismatch`。
+
+**Final-R4（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应（划定 E5a 校验范围线）：**
+
+- **架构发现：** repo verifier `TrainingSetDataVerifying.verifyNonEmpty(reader:)` **绑定 reader**（取 `TrainingSetReader` 非内存 dict）→ codex「复用 verifier」无法在拿到已物化 dict 的 `make()` 内做；全量重校验 = 重复实现 reader 绑定 verifier（违 DRY + 运行时模块越权持久化校验）。
+- **范围线（判定）：** `make()` 只校验 **E5a 自己代码依赖**的不变量。
+- **Final-R4-F1（high 0.86, 乱序 .m3 破坏二分定价）—— 采纳（范围内）：** `make` 增 `.m3` endGlobalIndex **严格单调**校验（`currentPrice` 二分前置）→ 可恢复抛；新增 `makeThrowsOnUnsortedM3`。**更深内容（OHLC 有限/30 根 warmup/从 0 连续）属 reader 绑定 verifier，E6 构造前调用**（登记 E6 契约）。
+- **Final-R4-F2（med 0.74, 非 finite 钱污染）—— 采纳（范围内）：** `make` 增 cash/capital/drawdown **finite + 非负**校验 → 可恢复抛；init 加匹配 finite precondition（末线）；新增 `makeThrowsOnNonFiniteMoney`。
+- **若 codex 仍要求 E5a 全量重校验训练组内容（OHLC/warmup/连续）→ 升级 user**：属「运行时模块 vs reader 绑定 verifier」架构/范围决策（verifier 不可在 make 复用 → 只能重复实现，违 DRY）。待 Final-R5 复审。

@@ -295,6 +295,29 @@ import CoreGraphics
         }
     }
 
+    @Test func makeThrowsOnUnsortedM3() {
+        // Stage6 R4-F1：.m3 endGlobalIndex [0,2,1,3] 非单调（破坏二分定价）→ 可恢复抛
+        func c(_ end: Int) -> KLineCandle {
+            KLineCandle(period: .m3, datetime: 0, open: 10, high: 10, low: 10, close: 10,
+                        volume: 1, amount: nil, ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: end, endGlobalIndex: end)
+        }
+        #expect(throws: AppError.trainingSet(.emptyData)) {
+            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 3),
+                                    allCandles: [.m3: [c(0), c(2), c(1), c(3)]], maxTick: 3,
+                                    initialCapital: 100_000, initialCashBalance: 100_000)
+        }
+    }
+
+    @Test func makeThrowsOnNonFiniteMoney() {
+        // Stage6 R4-F2：resume cash = NaN → 可恢复抛（防污染总资金/收益率/回撤）
+        #expect(throws: AppError.trainingSet(.emptyData)) {
+            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
+                                    allCandles: Self.candles([10, 11, 12]), maxTick: 2,
+                                    initialCapital: 100_000, initialCashBalance: .nan)
+        }
+    }
+
     @Test func makeSucceedsOnValidData() throws {
         let e = try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
                                         allCandles: Self.candles([10, 11, 12]), maxTick: 2,

@@ -32,6 +32,8 @@ want "resume initialTick 参数（R6-F1）"          "grep -q 'initialTick ?? fl
 want "drawdown 含 initialCapital 基线（R6-F3）"   "grep -q 'initialDrawdown.peakCapital, initialCapital, startTotal' '$TE'"
 want "throwing factory make() throws（Stage6 F1）"  "grep -qE 'public static func make\(' '$TE'"
 want "make 抛可恢复 trainingSet(.emptyData)"        "grep -q 'AppError.trainingSet(.emptyData)' '$TE'"
+want "make .m3 单调校验（R4-F1）"                   "grep -q 'c.endGlobalIndex > prevEnd' '$TE'"
+want "make 钱 finite 校验（R4-F2）"                 "grep -q 'initialCashBalance.isFinite' '$TE'"
 
 echo "== G3: 9 个运行时存储态 =="
 for p in tick position cashBalance drawdown markers drawings upperPanel lowerPanel tradeOperations; do

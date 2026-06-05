@@ -73,6 +73,11 @@ public final class TrainingEngine {
         // 用 >= 而非 ==：review 模式 m3 为训练组全集，末根 endGlobalIndex 可 > finalTick(=maxTick)。
         precondition(m3.last!.endGlobalIndex >= maxTick,
                      ".m3 末根 endGlobalIndex (\(m3.last!.endGlobalIndex)) must be >= maxTick (\(maxTick))")
+        // final-R4-F2：钱字段 finite 末线不变量（make() 已对数据派生失败抛可恢复 AppError；
+        // 直调 init = trust-boundary，非 finite 视为调用方 bug）。
+        precondition(initialCapital.isFinite && initialCashBalance.isFinite
+                     && initialDrawdown.peakCapital.isFinite && initialDrawdown.maxDrawdown.isFinite,
+                     "money fields (capital/cash/drawdown) must be finite")
 
         self.flow = flow
         self.allCandles = allCandles
@@ -144,6 +149,25 @@ public final class TrainingEngine {
         let startTick = initialTick ?? flow.initialTick
         guard flow.allowedTickRange.contains(startTick) else {
             throw AppError.trainingSet(.emptyData)            // 陈旧 resume tick 超出范围（训练组被替换）
+        }
+        // .m3 endGlobalIndex 必须严格升——`currentPrice` 二分（partitioningIndex）的前置；
+        // 损坏/乱序缓存（如 [2,0,1,3]）会取错价（codex final-R4-F1）。这是 E5a 自己代码依赖的不变量；
+        // 更深的内容校验（OHLC 有限 / 30 根 warmup / 从 0 连续）属 reader 绑定的 TrainingSetDataVerifying，
+        // 由 E6 构造前调用（其 verifyNonEmpty(reader:) 取 reader 非内存 dict，无法在此复用）。
+        var prevEnd = Int.min
+        for c in m3 {
+            guard c.endGlobalIndex > prevEnd else {
+                throw AppError.trainingSet(.emptyData)        // .m3 endGlobalIndex 非单调
+            }
+            prevEnd = c.endGlobalIndex
+        }
+        // 钱字段 finite + 非负——`startTotal`/`currentTotalCapital`/`returnRate`/drawdown 数学的前置；
+        // resume 状态可能 NaN/Inf 污染（codex final-R4-F2）。
+        guard initialCapital.isFinite, initialCapital >= 0,
+              initialCashBalance.isFinite, initialCashBalance >= 0,
+              initialDrawdown.peakCapital.isFinite, initialDrawdown.peakCapital >= 0,
+              initialDrawdown.maxDrawdown.isFinite, initialDrawdown.maxDrawdown >= 0 else {
+            throw AppError.trainingSet(.emptyData)
         }
         return TrainingEngine(
             flow: flow, allCandles: allCandles, maxTick: maxTick, initialTick: initialTick,
