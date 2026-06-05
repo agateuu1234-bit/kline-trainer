@@ -931,4 +931,6 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - **R7-F1（medium 0.96, G6 拒绝 resume 面板实现）—— 采纳：** R6 把面板改为由 `initialUpperPeriod/initialLowerPeriod` 构造，但 G6 仍 grep 字面 `PanelViewState(period: .m60`。改：G6 改查默认参数值 `initialUpperPeriod: Period = .m60` / `.daily` + 面板由 `initialUpperPeriod/initialLowerPeriod` 构造（与 R3-F1 同类，grep 守卫跟实现对齐）。
 
-**收敛判断（已 R1-R7，超 `max_rounds:3` 4 轮）：** findings 已收窄到单条机械一致性（R6 三条→R7 一条），始终 repo-grounded、无设计僵局。user 明确「**继续刷到 approve**」→ 继续。R8 待复审。
+**R8（codex branch-diff，verdict `approve`，2026-06-05）→ 收敛 ✅：** `findings: []`。codex 摘要：「only adds an implementation plan document, and the plan already records the known contract deviations, review gates, CI limitations, and acceptance checks rather than changing runtime behavior」。
+
+**收敛总结（R1→R8，共 8 轮）：** 语义契约(R1/R2) → 机械一致性(R3) → repo 不变量对齐(R4) → correctness 深化(R5) → resume 重建契约(R6) → 机械收尾(R7) → **approve(R8)**。全程 repo-grounded、无设计僵局；user 明确「继续刷到 approve」授权超 `max_rounds:3` 续推。计划阶段评审完成，进 Stage 3 subagent-driven development。
