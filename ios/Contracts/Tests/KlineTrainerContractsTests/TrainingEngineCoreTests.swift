@@ -328,14 +328,28 @@ import CoreGraphics
         #expect(throws: AppError.trainingSet(.emptyData)) {
             try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
                                     allCandles: Self.candles([10, 11, 12]), maxTick: 2,
-                                    initialCapital: 100_000, initialCashBalance: .nan)
+                                    initialCapital: 100_000, initialCashBalance: .nan,
+                                    initialUpperPeriod: .m3, initialLowerPeriod: .m3)
+        }
+    }
+
+    @Test func makeThrowsOnMissingPanelData() {
+        // Stage6 R6-F1：.m3-only 数据 + 默认面板 .m60/.daily（无 candle）→ 可恢复抛
+        // （防 buildRenderState 的 allCandles[panel.period]! 强解包崩溃）
+        #expect(throws: AppError.trainingSet(.emptyData)) {
+            try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
+                                    allCandles: Self.candles([10, 11, 12]), maxTick: 2,
+                                    initialCapital: 100_000, initialCashBalance: 100_000)
+            // 默认 initialUpperPeriod .m60 / initialLowerPeriod .daily 无数据 → throw
         }
     }
 
     @Test func makeSucceedsOnValidData() throws {
+        // 面板用 .m3（有数据）使 R6-F1 面板校验通过，聚焦 make 成功路径
         let e = try TrainingEngine.make(flow: NormalFlow(fees: Self.fees, maxTick: 2),
                                         allCandles: Self.candles([10, 11, 12]), maxTick: 2,
-                                        initialCapital: 100_000, initialCashBalance: 100_000)
+                                        initialCapital: 100_000, initialCashBalance: 100_000,
+                                        initialUpperPeriod: .m3, initialLowerPeriod: .m3)
         #expect(e.tick.maxTick == 2)
         #expect(e.currentTotalCapital == 100_000)
     }

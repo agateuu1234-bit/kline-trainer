@@ -753,6 +753,7 @@ want "throwing factory make() throws（Stage6 F1）"  "grep -qE 'public static f
 want "make 抛可恢复 trainingSet(.emptyData)"        "grep -q 'AppError.trainingSet(.emptyData)' '$TE'"
 want "make .m3 轴连续校验（R4/R5-F1）"              "grep -q 'isContiguousM3Axis' '$TE'"
 want "make 钱 finite 校验（R4-F2）"                 "grep -q 'initialCashBalance.isFinite' '$TE'"
+want "make 面板周期有数据校验（R6-F1）"             "grep -q 'allCandles\[initialUpperPeriod\]' '$TE'"
 
 echo "== G3: 9 个运行时存储态 =="
 for p in tick position cashBalance drawdown markers drawings upperPanel lowerPanel tradeOperations; do
@@ -971,4 +972,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Final-R5（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应（范围线内精确化）：**
 
-- **Final-R5-F1（high 0.78, gap .m3 轴破坏定价）—— 采纳（范围内）：** 我 R4 的「单调」不够——`[0,10]`(maxTick 10) 单调且覆盖，但 tick 1..9 被二分定到 endGlobalIndex 10 的未来 candle。codex 对：`currentPrice` 二分真正依赖**轴连续**（第 i 根 `globalIndex==endGlobalIndex==i`）。改：抽 `isContiguousM3Axis` helper（period==.m3 && globalIndex==endGlobalIndex==i），`make` 校验为可恢复 + `init` 末线 precondition（codex 的「mirror in init」）；`makeThrowsOnUnsortedM3` 改判连续 + 新增 `makeThrowsOnGappedM3`。**仍在范围线内**（轴连续是 E5a 定价代码直接依赖）；OHLC/warmup 仍归 reader verifier。待 Final-R6 复审。
+- **Final-R5-F1（high 0.78, gap .m3 轴破坏定价）—— 采纳（范围内）：** 我 R4 的「单调」不够——`[0,10]`(maxTick 10) 单调且覆盖，但 tick 1..9 被二分定到 endGlobalIndex 10 的未来 candle。codex 对：`currentPrice` 二分真正依赖**轴连续**（第 i 根 `globalIndex==endGlobalIndex==i`）。改：抽 `isContiguousM3Axis` helper（period==.m3 && globalIndex==endGlobalIndex==i），`make` 校验为可恢复 + `init` 末线 precondition（codex 的「mirror in init」）；`makeThrowsOnUnsortedM3` 改判连续 + 新增 `makeThrowsOnGappedM3`。**仍在范围线内**（轴连续是 E5a 定价代码直接依赖）；OHLC/warmup 仍归 reader verifier。
+
+**Final-R6（codex branch-diff，verdict `needs-attention`，2026-06-05；额度重置后重跑）→ 已响应：**
+
+- **Final-R6-F1（high 0.88, 面板周期无 backing 数据）—— 采纳（范围内）：** `make` 只校验 .m3，但默认面板 .m60/.daily 可能无 candle；`buildRenderState` 的 `allCandles[panel.period]!`（modules L1441 强解包）会崩。改：`make` 增「两面板周期非空」校验 → 可恢复抛（E5a 自身「面板↔candle」一致性，范围内）；新增 `makeThrowsOnMissingPanelData`；`makeSucceeds`/`NonFiniteMoney` 测试用 .m3 面板。**init 不加此 precondition**——会破坏「默认面板 .m60 + .m3-only fixture」的 init-direct 测试（且 init=trust-boundary，render-崩只经 make/生产路径，已由 make 拦）。
+- **Final-R6-F2（high 0.78, public allCandles 暴露未来 candle）—— 证据 push back：** codex 要求 allCandles 改 private + 加 `visibleCandles(for:)` 揭示访问器。**但既有 render 架构已截断**：`KLineRenderState.visibleCandles: ArraySlice`（已实现）+ `KLineView` 画 `renderState.visibleCandles`（已实现 L50-58）+ spec `buildRenderState`（L1438-1457）**读 `engine.allCandles[period]` 再切成 visibleCandles 截断切片**。即揭示上限 = render 层 visibleCandles（非 raw allCandles 私有化）；`allCandles` public 是 **spec 设计**（L1602 + L1441 buildRenderState 必须读它），改 private 会**破坏 spec render 契约**。登记 C8(顺位7) 渲染契约：render 用 visibleCandles。**若 codex 仍坚持 private allCandles → 升级 user（spec 公开 API 变更，需 RFC + 三方，且与 buildRenderState 冲突）。** 待 Final-R7 复审。

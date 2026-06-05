@@ -34,6 +34,7 @@ want "throwing factory make() throws（Stage6 F1）"  "grep -qE 'public static f
 want "make 抛可恢复 trainingSet(.emptyData)"        "grep -q 'AppError.trainingSet(.emptyData)' '$TE'"
 want "make .m3 轴连续校验（R4/R5-F1）"              "grep -q 'isContiguousM3Axis' '$TE'"
 want "make 钱 finite 校验（R4-F2）"                 "grep -q 'initialCashBalance.isFinite' '$TE'"
+want "make 面板周期有数据校验（R6-F1）"             "grep -q 'allCandles\[initialUpperPeriod\]' '$TE'"
 
 echo "== G3: 9 个运行时存储态 =="
 for p in tick position cashBalance drawdown markers drawings upperPanel lowerPanel tradeOperations; do

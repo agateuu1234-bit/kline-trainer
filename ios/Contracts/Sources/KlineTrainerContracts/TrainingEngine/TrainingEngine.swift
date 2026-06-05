@@ -169,6 +169,12 @@ public final class TrainingEngine {
               initialDrawdown.maxDrawdown.isFinite, initialDrawdown.maxDrawdown >= 0 else {
             throw AppError.trainingSet(.emptyData)
         }
+        // final-R6-F1：两个面板周期必须有非空 candle 数据——`buildRenderState` 读 `allCandles[panel.period]!`
+        // （modules L1441 强解包），缺数据会崩。E5a 自身「面板↔candle」状态一致性。
+        guard let up = allCandles[initialUpperPeriod], !up.isEmpty,
+              let low = allCandles[initialLowerPeriod], !low.isEmpty else {
+            throw AppError.trainingSet(.emptyData)            // 面板周期无 candle 数据
+        }
         return TrainingEngine(
             flow: flow, allCandles: allCandles, maxTick: maxTick, initialTick: initialTick,
             initialCapital: initialCapital, initialCashBalance: initialCashBalance,
