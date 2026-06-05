@@ -93,6 +93,31 @@ public final class TrainingEngine {
         self.animators = (upper: DecelerationAnimator(), lower: DecelerationAnimator())
     }
 
+    // MARK: - 派生 accessor（只读纯值计算属性；买卖可用门见 E5b / D4）
+
+    /// 现价：复用 Task 1 的静态 `price(...)`，固定 `.m3` 驱动序列（D2 / codex R4-F2）。
+    private var currentPrice: Double {
+        TrainingEngine.price(in: allCandles, atTick: tick.globalTickIndex)
+    }
+
+    /// 本局实时总资金 = 现金 + 持仓市值（plan v1.5 L914）。
+    public var currentTotalCapital: Double {
+        cashBalance + Double(position.shares) * currentPrice
+    }
+
+    /// 持仓成本（plan v1.5 L909）。
+    public var holdingCost: Double { position.holdingCost }
+
+    /// 本局至今净收益率（plan v1.5 L917）。
+    public var returnRate: Double {
+        initialCapital == 0 ? 0 : (currentTotalCapital - initialCapital) / initialCapital
+    }
+
+    /// 最大回撤：透传 accumulator —— **非负绝对额，单位元**，运行时形态（modules L510/L1636）。
+    /// 注意：`TrainingRecord.maxDrawdown` 是比率（如 -0.12），由 E6 finalize 换算（modules L537-538，D3）；
+    /// 本 accessor 不做换算，调用方勿当比率使用。
+    public var maxDrawdown: Double { drawdown.maxDrawdown }
+
     /// 现价查找（静态，供 init seeding 与实例 `currentPrice` 复用）：`.m3` 驱动序列中首个
     /// `endGlobalIndex >= target` 的 K 线收盘价；超末根夹取末根（D2）。`.m3` 与全局 tick 1:1，
     /// 避免聚合周期 close 取到未来价（codex R4-F2）。init 已保证 `.m3` 非空。

@@ -106,4 +106,92 @@ import CoreGraphics
         #expect(e.upperPanel.period == .m15)
         #expect(e.lowerPanel.period == .m60)
     }
+
+    @Test func currentTotalCapitalFlatEqualsCash() {
+        let e = Self.normalEngine(closes: [10, 11, 12], cash: 100_000)
+        // 空仓 → 总资金 == 现金（市值 0）
+        #expect(e.currentTotalCapital == 100_000)
+    }
+
+    @Test func currentTotalCapitalAddsMarketValueAtCurrentPrice() {
+        // tick 起点 0 → 现价 = candles[0].close == 10；持仓 200 股
+        let pos = PositionManager(shares: 200, averageCost: 9, totalInvested: 1800)
+        let e = Self.normalEngine(closes: [10, 11, 12], cash: 98_200, position: pos)
+        // 98_200 现金 + 200*10 市值 = 100_200
+        #expect(e.currentTotalCapital == 100_200)
+    }
+
+    @Test func returnRateIsNetRatioOverInitialCapital() {
+        let pos = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000)
+        let e = Self.normalEngine(closes: [10, 11, 12], cash: 99_000,
+                                  capital: 100_000, position: pos)
+        // 总资金 99_000 + 100*10 = 100_000 → returnRate 0
+        #expect(e.returnRate == 0)
+    }
+
+    @Test func holdingCostDelegatesToPosition() {
+        let pos = PositionManager(shares: 300, averageCost: 12, totalInvested: 3600)
+        let e = Self.normalEngine(position: pos)
+        #expect(e.holdingCost == 3600)   // 12 * 300
+    }
+
+    @Test func maxDrawdownIsAbsoluteAmountPerSpec() {
+        // modules L510：accumulator.maxDrawdown = 非负绝对额（元），运行时形态；
+        // 比率换算是 E6 finalize 职责（D3），本 accessor 不换算。
+        // 取 peak 108k 与起始总资金 100k 一致（dd 恰 8k），使 init update 不改值，聚焦「绝对元」断言。
+        let dd = DrawdownAccumulator(peakCapital: 108_000, maxDrawdown: 8_000)
+        let e = TrainingEngine(flow: NormalFlow(fees: Self.fees, maxTick: 2),
+                               allCandles: Self.candles([10, 11, 12]),
+                               maxTick: 2, initialCapital: 100_000,
+                               initialCashBalance: 100_000, initialDrawdown: dd)
+        #expect(e.maxDrawdown == 8_000)     // 元（绝对额），非比率（108_000 − 100_000）
+        #expect(e.maxDrawdown >= 0)         // 非负不变量
+    }
+
+    @Test func reviewModeStartsAtFinalTick() {
+        let record = Self.previewRecordForTest()   // finalTick 2
+        // R4-F1：ReviewFlow.allowedTickRange = finalTick...finalTick → engine maxTick 必须 == finalTick
+        let e = TrainingEngine(flow: ReviewFlow(record: record),
+                               allCandles: Self.candles([10, 11, 12]),
+                               maxTick: 2, initialCapital: 100_000,
+                               initialCashBalance: 50_000,
+                               initialPosition: PositionManager(shares: 100, averageCost: 10, totalInvested: 1000))
+        #expect(e.tick.globalTickIndex == record.finalTick)   // D5：复盘起于末态（无 clamp）
+    }
+
+    @Test func currentPriceUsesM3DrivingSeriesNotAggregate() {
+        // .m3 at tick 0 close = 10；另塞一根合法 .m60 聚合（endGlobalIndex 2, close 99 = 段末未来价）。
+        // 现价/总资金必须取 .m3 的 10，而非聚合 99（codex R4-F2）。
+        let m3 = Self.candles([10, 11, 12])[.m3]!     // endGlobalIndex 0,1,2
+        let m60 = [KLineCandle(period: .m60, datetime: 0, open: 99, high: 99, low: 99, close: 99,
+                               volume: 1, amount: nil, ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                               macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: 0, endGlobalIndex: 2)]
+        let pos = PositionManager(shares: 100, averageCost: 5, totalInvested: 500)
+        let e = TrainingEngine(flow: NormalFlow(fees: Self.fees, maxTick: 2),
+                               allCandles: [.m3: m3, .m60: m60],
+                               maxTick: 2, initialCapital: 100_000,
+                               initialCashBalance: 99_500, initialPosition: pos)
+        #expect(e.currentTotalCapital == 100_500)     // 99_500 + 100×10(.m3)，非 +100×99(聚合)
+    }
+
+    @Test func resumeNormalModeUsesSavedTickForPrice() {
+        // R6-F1：resume normal 局从保存 tick(2) 起、非 0；R6-F2：m3 覆盖到 maxTick。
+        // 现价 = tick 2 的 .m3 close = 12；持仓 1000 股。
+        let e = TrainingEngine(flow: NormalFlow(fees: Self.fees, maxTick: 2),
+                               allCandles: Self.candles([10, 11, 12]),
+                               maxTick: 2, initialTick: 2,
+                               initialCapital: 100_000, initialCashBalance: 88_000,
+                               initialPosition: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
+        #expect(e.tick.globalTickIndex == 2)          // 用 saved tick，非 NormalFlow.initialTick(0)
+        #expect(e.currentTotalCapital == 100_000)     // 88_000 + 1000 × 12（tick 2 现价）
+    }
+
+    // Review/preview 用最小 TrainingRecord
+    static func previewRecordForTest(finalTick: Int = 2) -> TrainingRecord {
+        TrainingRecord(id: 1, trainingSetFilename: "t.sqlite", createdAt: 0,
+                       stockCode: "000001", stockName: "测试股",
+                       startYear: 2020, startMonth: 1,
+                       totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                       buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: finalTick)
+    }
 }
