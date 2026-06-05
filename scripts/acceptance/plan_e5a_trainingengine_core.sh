@@ -16,8 +16,10 @@ wantn "无 Wave 0 stub 注释" "grep -q 'Wave 0 stub' '$TE'"
 wantn "无 fatalError"       "grep -q 'fatalError' '$TE'"
 wantn "无 fileprivate init" "grep -qE 'fileprivate +init' '$TE'"
 
-echo "== G2: public init（10 参签名锚点）+ drawdown seeding =="
-want "public init(flow:)" "grep -qE 'public init\(flow: TrainingFlowController' '$TE'"
+echo "== G2: init（internal，10 参签名锚点）+ make 唯一 public 路径 + drawdown seeding =="
+want "init(flow:) 签名存在" "grep -qE 'init\(flow: TrainingFlowController' '$TE'"
+wantn "init 非 public（R7-F1：make 唯一 public 构造路径）" "grep -qE 'public init\(flow: TrainingFlowController' '$TE'"
+want "make() 是 public 构造路径" "grep -qE 'public static func make\(' '$TE'"
 want "initialCashBalance 参数" "grep -q 'initialCashBalance' '$TE'"
 want "drawdown peak seeding（codex R2-F1）" "grep -q 'max(initialDrawdown.peakCapital' '$TE'"
 

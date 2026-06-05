@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task（本项目已排除 executing-plans，见 memory `project_executing_plans_excluded`）。Steps use checkbox (`- [ ]`) syntax for tracking. **本机 Linux 无 swift toolchain** —— 所有 `swift build` / `swift test` / `xcodebuild` 步骤在 CI（macos-15）或 mac 本地执行；本机只跑 grep / git 结构闸门。**绝不**以本机无法执行为由谎称 swift 测试通过。
 
-**Goal:** 把 `TrainingEngine` 从 Wave 0 类型壳（`fileprivate init` + `fatalError`）替换为运行时核心：可构造的 `public init`（含 drawdown peak seeding）+ 9 个运行时状态属性 + 4 个纯值派生 accessor（`currentTotalCapital`/`holdingCost`/`returnRate`/`maxDrawdown`）+ `onSceneActivated` 场景中继 + `preview` 便利构造。**`buyEnabled`/`sellEnabled` 动作可达性门随动作下放 E5b（顺位 3，见 D4）。**
+**Goal:** 把 `TrainingEngine` 从 Wave 0 类型壳（`fileprivate init` + `fatalError`）替换为运行时核心：唯一 public 构造路径 `make(...) throws`（校验数据派生不变量 → 可恢复 `AppError`）+ internal `init`（trust-boundary 末线，含 drawdown peak seeding）+ 9 个运行时状态属性 + 4 个纯值派生 accessor（`currentTotalCapital`/`holdingCost`/`returnRate`/`maxDrawdown`）+ `onSceneActivated` 场景中继 + `preview` 便利构造。**`buyEnabled`/`sellEnabled` 动作可达性门随动作下放 E5b（顺位 3，见 D4）。**
 
 **Architecture:** `@MainActor @Observable final class`，值语义运行时状态（`private(set)` 对外只读，写入留给 E5b 动作 PR）。现价从「最细粒度周期」K 线按 `endGlobalIndex` 二分查找得到（复用既有 `partitioningIndex`）。费用快照由 `flow.feeSnapshot` 派生（init 不收 `fees` 参数）。本 PR **不实现**任何交易动作（`buy`/`sell`/`holdOrObserve`/`switchPeriodCombo`/`activateDrawingTool`/`deleteDrawing` 属 E5b = Wave 2 顺位 3）。
 
@@ -284,7 +284,8 @@ public final class TrainingEngine {
 
     private let animators: (upper: DecelerationAnimator, lower: DecelerationAnimator)
 
-    public init(flow: TrainingFlowController,
+    // access = internal（final-R7-F1）：make() 为唯一 public 构造路径，init 退为 internal trust-boundary。
+    init(flow: TrainingFlowController,
                 allCandles: [Period: [KLineCandle]],
                 maxTick: Int,
                 initialTick: Int? = nil,                       // R6-F1 resume：PendingTraining.globalTickIndex；nil→flow.initialTick
@@ -735,8 +736,10 @@ wantn "无 Wave 0 stub 注释" "grep -q 'Wave 0 stub' '$TE'"
 wantn "无 fatalError"       "grep -q 'fatalError' '$TE'"
 wantn "无 fileprivate init" "grep -qE 'fileprivate +init' '$TE'"
 
-echo "== G2: public init（10 参签名锚点）+ drawdown seeding =="
-want "public init(flow:)" "grep -qE 'public init\(flow: TrainingFlowController' '$TE'"
+echo "== G2: init（internal，10 参签名锚点）+ make 唯一 public 路径 + drawdown seeding =="
+want "init(flow:) 签名存在" "grep -qE 'init\(flow: TrainingFlowController' '$TE'"
+wantn "init 非 public（R7-F1：make 唯一 public 构造路径）" "grep -qE 'public init\(flow: TrainingFlowController' '$TE'"
+want "make() 是 public 构造路径" "grep -qE 'public static func make\(' '$TE'"
 want "initialCashBalance 参数" "grep -q 'initialCashBalance' '$TE'"
 want "drawdown peak seeding（codex R2-F1）" "grep -q 'max(initialDrawdown.peakCapital' '$TE'"
 
@@ -977,4 +980,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Final-R6（codex branch-diff，verdict `needs-attention`，2026-06-05；额度重置后重跑）→ 已响应：**
 
 - **Final-R6-F1（high 0.88, 面板周期无 backing 数据）—— 采纳（范围内）：** `make` 只校验 .m3，但默认面板 .m60/.daily 可能无 candle；`buildRenderState` 的 `allCandles[panel.period]!`（modules L1441 强解包）会崩。改：`make` 增「两面板周期非空」校验 → 可恢复抛（E5a 自身「面板↔candle」一致性，范围内）；新增 `makeThrowsOnMissingPanelData`；`makeSucceeds`/`NonFiniteMoney` 测试用 .m3 面板。**init 不加此 precondition**——会破坏「默认面板 .m60 + .m3-only fixture」的 init-direct 测试（且 init=trust-boundary，render-崩只经 make/生产路径，已由 make 拦）。
-- **Final-R6-F2（high 0.78, public allCandles 暴露未来 candle）—— 证据 push back：** codex 要求 allCandles 改 private + 加 `visibleCandles(for:)` 揭示访问器。**但既有 render 架构已截断**：`KLineRenderState.visibleCandles: ArraySlice`（已实现）+ `KLineView` 画 `renderState.visibleCandles`（已实现 L50-58）+ spec `buildRenderState`（L1438-1457）**读 `engine.allCandles[period]` 再切成 visibleCandles 截断切片**。即揭示上限 = render 层 visibleCandles（非 raw allCandles 私有化）；`allCandles` public 是 **spec 设计**（L1602 + L1441 buildRenderState 必须读它），改 private 会**破坏 spec render 契约**。登记 C8(顺位7) 渲染契约：render 用 visibleCandles。**若 codex 仍坚持 private allCandles → 升级 user（spec 公开 API 变更，需 RFC + 三方，且与 buildRenderState 冲突）。** 待 Final-R7 复审。
+- **Final-R6-F2（high 0.78, public allCandles 暴露未来 candle）—— 证据 push back：** codex 要求 allCandles 改 private + 加 `visibleCandles(for:)` 揭示访问器。**但既有 render 架构已截断**：`KLineRenderState.visibleCandles: ArraySlice`（已实现）+ `KLineView` 画 `renderState.visibleCandles`（已实现 L50-58）+ spec `buildRenderState`（L1438-1457）**读 `engine.allCandles[period]` 再切成 visibleCandles 截断切片**。即揭示上限 = render 层 visibleCandles（非 raw allCandles 私有化）；`allCandles` public 是 **spec 设计**（L1602 + L1441 buildRenderState 必须读它），改 private 会**破坏 spec render 契约**。登记 C8(顺位7) 渲染契约：render 用 visibleCandles。**若 codex 仍坚持 private allCandles → 升级 user（spec 公开 API 变更，需 RFC + 三方，且与 buildRenderState 冲突）。**
+
+**Final-R7（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应：**
+
+- **R6-F2 已被接受 drop ✅：** 证据 push back（render visibleCandles 截断 + allCandles public 是 buildRenderState 所需）codex 采纳，「public allCandles 暴露未来」消解。
+- **Final-R7-F1（high 0.86, init 仍允许无 backing 面板）—— 采纳（option a：单一 public 构造路径）：** `make` 校验了面板 backing 但 `public init` 没有 → 两条 public 路径不同不变量，直调 init 仍能造 render-崩溃引擎。改：**`init` 改 internal**（`public init`→`init`），`make()` 成**唯一 public 构造路径**（校验全部数据派生不变量）。spec（modules L1591/1607）init 本就无 `public`，与之一致；模块内调用方（make/preview/E6/@testable 测试）不受影响；外部无法绕过 make。验收 G2 加 `wantn public init` + `want public static func make`。待 Final-R8 复审。

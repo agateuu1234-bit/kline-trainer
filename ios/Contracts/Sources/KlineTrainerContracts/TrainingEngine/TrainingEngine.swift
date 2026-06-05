@@ -44,7 +44,12 @@ public final class TrainingEngine {
     /// 因此下方 `precondition`/`preconditionFailure` 是**末线不变量执行**：触发即表示 E6/调用方
     /// 违反「传入已校验数据」契约（程序 bug），与 `NormalFlow` 的 trap-on-caller-bug 同风格——
     /// 不是可恢复的运行时数据错误，故不 `throws`（spec init 非 throwing，modules L1607-1616）。
-    public init(flow: TrainingFlowController,
+    ///
+    /// **access = internal（final-R7-F1）：** `make` 是唯一 **public** 构造路径（校验全部数据派生不变量
+    /// 并抛可恢复 `AppError`）。`init` 退为 internal trust-boundary（仅 `make`/`preview`/E6/`@testable` 测试
+    /// 在模块内调用），杜绝「两条 public 路径、不同不变量」——外部无法绕过 `make` 造出 render-崩溃引擎。
+    /// spec（modules L1591/1607）的 `init` 本就无 `public`，本改与之一致。
+    init(flow: TrainingFlowController,
                 allCandles: [Period: [KLineCandle]],
                 maxTick: Int,
                 initialTick: Int? = nil,                       // R6-F1 resume：PendingTraining.globalTickIndex；nil→flow.initialTick
