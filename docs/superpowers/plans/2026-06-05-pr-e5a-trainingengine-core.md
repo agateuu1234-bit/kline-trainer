@@ -45,17 +45,20 @@ spec init 签名（L1607-1616）**不含** `fees` 参数，但存储属性 `let 
 **依据：** plan v1.5 L751「自动结束按**最后一根最小周期** K 线收盘价强制平仓」；L767 markers 用 `end_global_index` 二分。
 **偏离声明：** spec 未显式定义「现价」函数，本判定是从「自动平仓用最小周期收盘价」与「markers 用 endGlobalIndex 二分」两处归纳。`Period` 当前**无** `Comparable`/粒度序（已 grep 确认）→ 用 `Period.allCases.firstIndex` 作粒度序（枚举声明序 m3<m15<m60<daily<weekly<monthly 即粒度升序）。**codex 重点核**：basePeriod 选取是否应固定为某「驱动周期」而非「最细存在周期」。
 
-### D3 — drawdown 不在 init 内 seeding；绝对额 vs 比率残差**不越界修**
-`DrawdownAccumulator.update`（AppState.swift 实测）是 `dd = peak - current`（**绝对额**，非 plan v1.5 L746 的比率 `(cur-peak)/peak`），`.initial = (peakCapital:0, maxDrawdown:0)`，**无除零**。从 `.initial`（peak 0）首次 `update(currentCapital>0)` 会先抬 peak 再算 dd，结果正确。
-**判定：** init 忠实存 `initialDrawdown` 参数（默认 `.initial`），**不** seeding peak=initialCapital（绝对额公式下无必要，且 seeding 会改变既有 merged 语义）。`maxDrawdown` accessor 直接 `drawdown.maxDrawdown`（spec L1636）。
-**残差（OUT-OF-SCOPE，仅标注不改）：** `DrawdownAccumulator.maxDrawdown` 是绝对额（元），而 spec/DB（plan v1.5 L419、L999）存比率（-0.12=-12%）。此不一致在已 merged 的 `DrawdownAccumulator`，非 E5a 引入；E5a 仅按 spec L1636 透传。**codex 若判定此为 E5a 必修则升级讨论**，否则记入 PR residual 待 E6 finalize（写 record 时换算）处理。
+### D3 — `maxDrawdown` accessor 透传绝对额（元）；E6 换算为比率（显式契约）
+**spec 已调和单位（codex R1-F1 误判澄清）：** `modules v1.4 L510` 明确 `DrawdownAccumulator.maxDrawdown` 是「**非负值，单位元**」的绝对额，`L516` 用 `dd = peak - current`；`L1636` 明确 E5 accessor「**直接读 accumulator**」。即运行时形态就是绝对元，**by design**。既有 `AppStateTests`（`maxDrawdown==30/50` 元）亦锚定此契约。codex R1-F1 把「record 列的比率」与「accumulator 的绝对额」混为一谈。
+**与「比率」的关系：** 比率（如 -0.12）只属 `TrainingRecord.max_drawdown` **列**（plan v1.5 L419、settlement L999），是**另一对象**；由 **E6 finalize 换算**（modules L537-538：record 只存最终 maxDrawdown、不存 peakCapital；resume 时 E6 从 `PendingTraining.drawdown` 重建 accumulator）。
+**判定：** `maxDrawdown { drawdown.maxDrawdown }` 透传绝对元（**spec-faithful**；不在 E5a 改成比率——那会违反 L1636 且破坏既有 `AppStateTests` 契约）。accessor **加文档注释**标明：单位=元/非负/运行时形态，比率换算是 E6 职责；调用方勿当比率用。init 忠实存 `initialDrawdown`（默认 `.initial`），不 seeding（绝对额公式无除零；从 peak=0 首次 update 即正确）。
+**E6 换算契约（显式登记，顺位 4/5 兑现）：** E6 finalize 构造 `TrainingRecord.maxDrawdown` 时须把运行时绝对元换算为比率（分母口径——initialCapital vs trough-peak——在 E6 RFC 定义；accumulator 不存 trough-peak，口径须显式选定）。本 PR 不实现换算，仅登记契约 + 测试断言 accessor 为绝对元（非负）。**若 codex 仍坚持 E5a 必须改 accessor 为比率 → 升级 user：该改动违 modules L1636，属契约变更需 RFC + 三方确认。**
 
-### D4 — `buyEnabled`/`sellEnabled` 最小语义（tier「满仓」判定留 E5b）
-spec `{ get }` 无实现体。plan v1.5 L733-734：空仓→卖出灰置；满仓(5/5)→买入灰置。
-**判定（E5a 最小版）：**
+### D4 — `buyEnabled`/`sellEnabled` 用 E3 TradeCalculator 算「真可成交」（codex R1-F2 采纳）
+spec `{ get }` 无实现体。plan v1.5 L733-735：空仓→卖出灰置；满仓(5/5)→买入灰置；资金不足（取整后 0 手）。
+**判定（修正为正确语义，非最小残差）：** 复用已 merged 的纯函数 `TradeCalculator.quoteBuy/quoteSell`（E3，静态、`Result` 通道、`floor`+免5+印花税规则）做**只读**可成交校验——这是 feasibility 查询，非交易动作（动作 `buy()`/`sell()` 仍属 E5b），故在 E5a accessor 内合法。
+- `buyEnabled = flow.canBuySell() && (∃ tier∈PositionTier.allCases: quoteBuy(totalCapital: currentTotalCapital, cash: cashBalance, tier:, price: currentPrice, fees:) == .success)`
+  —— **必须遍历全 5 档**：小档可能「取整不足 1 手」失败而大档可成（各档**非单调**，不能只测 tier1）。这样「有现金但买不进」时正确返回 false（codex R1-F2 假阳性）。
 - `sellEnabled = flow.canBuySell() && position.shares > 0`
-- `buyEnabled  = flow.canBuySell() && cashBalance > 0`
-**偏离声明：** 「满仓 5/5 禁买」「资金不足取整为 0」需 tier 推导（plan v1.5 L730「档位 caller-derived，依初始资金+当前持仓」）+ 取整规则，属**动作时**判定 → 留 E5b（顺位 3）精化。E5a 只保证 flow 能力门 + 基本前置（有现金/有持仓）。**codex 核**：此最小语义是否会让 U2 按钮在「资金不足但 >0」时误开放 —— 接受，E5b 补 Toast 与精确灰置。
+  —— `holding>0` ⟹ tier5 全清报价恒成功（`quoteSell` tier5 分支 `sellShares=holding>0`），故等价、无假阳性（用 TradeCalculator 语义证明，非最小近似）。
+**残留留 E5b：** 「具体哪档可用 / 资金不足 Toast 文案 / 满仓 5/5 精确灰置」仍由 E5b 动作路径给出；本 PR 只保证 `buyEnabled` 不出现「亮但点不动」假阳性。
 
 ### D5 — `tick` 由 `flow.initialTick` 起算
 **判定：** `self.tick = TickEngine(maxTick: maxTick, initialTick: flow.initialTick)`。Normal/Replay→0；Review→`record.finalTick`（复盘固定末态）。
@@ -334,25 +337,40 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
         #expect(e.holdingCost == 3600)   // 12 * 300
     }
 
-    @Test func maxDrawdownDelegatesToAccumulator() {
+    @Test func maxDrawdownIsAbsoluteAmountPerSpec() {
+        // modules L510：accumulator.maxDrawdown = 非负绝对额（元），运行时形态；
+        // 比率换算是 E6 finalize 职责（D3），本 accessor 不换算。
         let dd = DrawdownAccumulator(peakCapital: 120_000, maxDrawdown: 8_000)
         let e = TrainingEngine(flow: NormalFlow(fees: Self.fees, maxTick: 2),
                                allCandles: Self.candles([10, 11, 12]),
                                maxTick: 2, initialCapital: 100_000,
                                initialCashBalance: 100_000, initialDrawdown: dd)
-        #expect(e.maxDrawdown == 8_000)
+        #expect(e.maxDrawdown == 8_000)     // 元（绝对额），非比率
+        #expect(e.maxDrawdown >= 0)         // 非负不变量
     }
 
     @Test func buySellEnabledFollowFlowAndState() {
-        // 空仓 + 有现金（Normal flow 全开）
+        // 空仓 + 有现金（Normal flow 全开）→ tier1 可成交
         let flat = Self.normalEngine(cash: 100_000, position: .init())
         #expect(flat.buyEnabled == true)
         #expect(flat.sellEnabled == false)            // 空仓不可卖
-        // 有持仓 + 无现金
+        // 有持仓 + 无现金 → 任何档总成本超现金(0) 失败
         let held = Self.normalEngine(cash: 0,
                                      position: PositionManager(shares: 100, averageCost: 10, totalInvested: 1000))
         #expect(held.buyEnabled == false)             // 无现金不可买
         #expect(held.sellEnabled == true)
+    }
+
+    @Test func buyEnabledTrueWhenAffordable() {
+        let e = Self.normalEngine(closes: [10], cash: 100_000, capital: 100_000)
+        #expect(e.buyEnabled == true)                 // tier1 20% → 2000 股 → 可成交
+    }
+
+    @Test func buyEnabledFalseWhenCashPositiveButUnbuyable() {
+        // 有现金(500) 但价高(10_000)→ 任何档取整后不足 1 手 → 不可买（codex R1-F2 假阳性）
+        let e = Self.normalEngine(closes: [10_000], cash: 500, capital: 500, position: .init())
+        #expect(e.cashBalance == 500)                 // 现金 > 0
+        #expect(e.buyEnabled == false)                // 但 buyEnabled 仍 false
     }
 
     @Test func reviewFlowDisablesBuySell() {
@@ -413,13 +431,29 @@ Expected: FAIL —— `currentTotalCapital`/`returnRate`/`holdingCost`/`maxDrawd
         initialCapital == 0 ? 0 : (currentTotalCapital - initialCapital) / initialCapital
     }
 
-    /// 最大回撤：透传 accumulator（spec L1636；绝对额 vs 比率残差见 D3）。
+    /// 最大回撤：透传 accumulator —— **非负绝对额，单位元**，运行时形态（modules L510/L1636）。
+    /// 注意：`TrainingRecord.maxDrawdown` 是比率（如 -0.12），由 E6 finalize 换算（modules L537-538，D3）；
+    /// 本 accessor 不做换算，调用方勿当比率使用。
     public var maxDrawdown: Double { drawdown.maxDrawdown }
 
-    /// 买入可用：flow 能力门 + 有现金（D4；满仓判定留 E5b）。
-    public var buyEnabled: Bool { flow.canBuySell() && cashBalance > 0 }
+    /// 买入可用：flow 能力门 + 「至少一档能产出成功买入报价」（D4 / codex R1-F2）。
+    /// 用 E3 `TradeCalculator.quoteBuy` 跨 5 档只读校验（feasibility，非动作）：有现金但取整后
+    /// 不足 1 手 / 总成本超现金时为 false，避免 UI 假阳性。各档非单调，故遍历全档。
+    public var buyEnabled: Bool {
+        guard flow.canBuySell() else { return false }
+        let price = currentPrice
+        let capital = currentTotalCapital
+        return PositionTier.allCases.contains { tier in
+            if case .success = TradeCalculator.quoteBuy(totalCapital: capital, cash: cashBalance,
+                                                        tier: tier, price: price, fees: fees) {
+                return true
+            }
+            return false
+        }
+    }
 
-    /// 卖出可用：flow 能力门 + 有持仓（D4）。
+    /// 卖出可用：flow 能力门 + 有持仓。
+    /// `holding>0` ⟹ tier5 全清报价恒成功（`TradeCalculator.quoteSell`），故等价 shares>0（D4）。
     public var sellEnabled: Bool { flow.canBuySell() && position.shares > 0 }
 ```
 
@@ -693,17 +727,18 @@ Expected: `=== ALL E5a ACCEPTANCE CHECKS PASSED ===`，`exit=0`。
 | 6 | init 接线：现金/初始资金/空仓/起始 tick/初始组合 60m+日线 | `initWiresRuntimeState` | PASS | ☐ |
 | 7 | 总资金 = 现金 + 持仓市值（现价取最细周期收盘价） | `currentTotalCapitalAddsMarketValueAtCurrentPrice` | PASS | ☐ |
 | 8 | 收益率 = (总资金−初始资金)/初始资金 | `returnRateIsNetRatioOverInitialCapital` | PASS | ☐ |
-| 9 | 买卖可用门：空仓不可卖、无现金不可买、review 全关 | `buySellEnabledFollowFlowAndState` / `reviewFlowDisablesBuySell` | PASS | ☐ |
-| 10 | 场景中继不改业务状态 | `onSceneActivatedIsSafeAndPure` | PASS | ☐ |
-| 11 | preview 三模式可构造 | `previewBuildsAllModes` | PASS | ☐ |
+| 9 | 买卖可用门：空仓不可卖、review 全关；**有现金但取整不足 1 手→buyEnabled false（无假阳性）** | `buySellEnabledFollowFlowAndState` / `buyEnabledTrueWhenAffordable` / `buyEnabledFalseWhenCashPositiveButUnbuyable` / `reviewFlowDisablesBuySell` | PASS | ☐ |
+| 10 | maxDrawdown = 非负绝对额（元），非比率（E6 换算） | `maxDrawdownIsAbsoluteAmountPerSpec` | PASS | ☐ |
+| 11 | 场景中继不改业务状态 | `onSceneActivatedIsSafeAndPure` | PASS | ☐ |
+| 12 | preview 三模式可构造 | `previewBuildsAllModes` | PASS | ☐ |
 
 ## 三、流程合规与偏差
 
 | # | 项 | 期望 | 通过 |
 |---|---|---|---|
-| 12 | 作用域守卫：E5a 未实现任何 E5b 动作（G8） | grep 不命中 6 个动作方法 | ☐ |
-| 13 | codex 对抗性评审 branch-diff | verdict `approve`（收敛） | ☐ |
-| 14 | 残差登记：D3 绝对额 vs 比率、D4 满仓判定留 E5b | PR body residual 已列 | ☐ |
+| 13 | 作用域守卫：E5a 未实现任何 E5b 动作（G8） | grep 不命中 6 个动作方法 | ☐ |
+| 14 | codex 对抗性评审 branch-diff | verdict `approve`（收敛） | ☐ |
+| 15 | 契约登记：D3 maxDrawdown 绝对元 + E6 换算契约（顺位 4/5 兑现） | PR body 已列 E6 obligation | ☐ |
 
 **任一条 ✗ → 不得 merge。**
 ```
@@ -741,7 +776,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **4. Scope（surgical）：** 仅替换 TrainingEngine.swift + 新增 1 测试 + 1 脚本 + 1 清单；不碰任何已冻结契约文件（G10 守卫）；不「改进」相邻代码。
 
-**5. delta 声明：** D1-D8 全部显式标注依据 + 偏离声明，作为 codex 首要靶点；D3/D4 残差登记入验收清单第 14 行 + 待 PR body。
+**5. delta 声明：** D1-D8 全部显式标注依据 + 偏离声明，作为 codex 首要靶点；D3 改为「绝对元透传 + E6 换算显式契约」（codex R1-F1 响应），D4 改为「TradeCalculator 跨档真可成交」（codex R1-F2 采纳），均登记入验收清单第 13-15 行。
 
 **6. 无本机 swift 诚实性：** 所有 swift/xcodebuild 步骤标 [CI/mac]；RED/GREEN 期望写明但本机不执行、不谎称通过（per `feedback_swift_local_toolchain_blindspot`）。
 
@@ -754,3 +789,14 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **前置：** 本计划须先过 `codex:adversarial-review --scope working-tree` 收敛（approve）后才进 Task 1。codex review 由 Claude 直接调用；branch-diff attest ledger / pin 工具链由 user 负责。
 
 **PR 标题：** `E5a TrainingEngine 核心：init + 运行时状态 + accessors（Wave 2 顺位 2）`
+
+---
+
+## 变更日志 / codex 对抗性评审响应
+
+**R1（codex branch-diff，verdict `needs-attention`，2026-06-05）→ 已响应：**
+
+- **R1-F1（high, maxDrawdown 单位）—— 部分反驳 + 采纳其备选：** codex 把 `TrainingRecord.max_drawdown` 列的「比率」误当成 `DrawdownAccumulator.maxDrawdown` 的语义。权威 `modules v1.4 L510`（非负绝对额，单位元）+ `L1636`（accessor 直接读 accumulator）+ 既有 `AppStateTests`（==30/50 元）证明 E5a 透传绝对元是 spec-correct，改成比率反而违 L1636。**采纳 codex 第二方案**：accessor 加单位文档注释 + 把「绝对元→比率」登记为**显式 E6 finalize 换算契约**（D3）+ 加 `maxDrawdownIsAbsoluteAmountPerSpec` 断言绝对元/非负。若 codex 仍坚持改 accessor → 升级 user（属契约变更）。
+- **R1-F2（medium, buyEnabled 假阳性）—— 采纳：** `buyEnabled` 由 `canBuySell() && cash>0` 改为「∃ tier: `TradeCalculator.quoteBuy` == .success」跨全 5 档校验（D4）；新增负测 `buyEnabledFalseWhenCashPositiveButUnbuyable`（有现金但取整不足 1 手 → false）+ `buyEnabledTrueWhenAffordable`。`sellEnabled` 经证明 `shares>0` ⟺ tier5 全清成功，保持但加证明注释。
+
+待 R2 复审：同一收敛循环（max 3 轮）。
