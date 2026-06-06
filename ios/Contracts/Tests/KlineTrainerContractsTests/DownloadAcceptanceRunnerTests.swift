@@ -244,4 +244,47 @@ struct DownloadAcceptanceRunnerTests {
         #expect(try journal.listByState(.rejected).count == 1)
         #expect(try journal.listByState(.stored).isEmpty)
     }
+
+    @Test func run_confirm409_rejected_deletesLocalFile() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = InMemoryCacheManager()
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.leaseExpired)),
+                                cache: cache, journal: journal)
+        let result = await runner.run(meta: makeMeta(id: 3), leaseId: "lease")
+        #expect(result == .rejected(.network(.leaseExpired)))
+        #expect(try journal.listByState(.rejected).count == 1)
+        #expect(cache.listAvailable().contains(where: { $0.id == 3 }) == false)  // 本地副本已删
+    }
+
+    @Test func run_confirm404_rejected_deletesLocalFile() async throws {
+        let cache = InMemoryCacheManager()
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.leaseNotFound)), cache: cache)
+        let result = await runner.run(meta: makeMeta(id: 4), leaseId: "lease")
+        #expect(result == .rejected(.network(.leaseNotFound)))
+        #expect(cache.listAvailable().contains(where: { $0.id == 4 }) == false)
+    }
+
+    @Test func run_confirmNetworkUncertain_rejected_butKeepsFileAndPending() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = InMemoryCacheManager()
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.timeout)),
+                                cache: cache, journal: journal)
+        let result = await runner.run(meta: makeMeta(id: 5), leaseId: "lease")
+        #expect(result == .rejected(.network(.timeout)))
+        // 文件保留 + journal 停 confirmPending（待启动重试）
+        #expect(cache.listAvailable().contains(where: { $0.id == 5 }))
+        #expect(try journal.listByState(.confirmPending).count == 1)
+        #expect(try journal.listByState(.rejected).isEmpty)
+    }
+
+    @Test func run_confirmServerError5xx_keepsFileAndPending() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = InMemoryCacheManager()
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.serverError(code: 503))),
+                                cache: cache, journal: journal)
+        let result = await runner.run(meta: makeMeta(id: 6), leaseId: "lease")
+        #expect(result == .rejected(.network(.serverError(code: 503))))
+        #expect(cache.listAvailable().contains(where: { $0.id == 6 }))   // 5xx 非 409/404 → 保留
+        #expect(try journal.listByState(.confirmPending).count == 1)
+    }
 }
