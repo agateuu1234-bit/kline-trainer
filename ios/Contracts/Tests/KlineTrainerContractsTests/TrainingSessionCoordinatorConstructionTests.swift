@@ -74,4 +74,131 @@ struct TrainingSessionCoordinatorConstructionTests {
         #expect(coord.activeEngine != nil)
         #expect(coord.activeReader != nil)
     }
+
+    // MARK: - 失败注入 mock
+
+    /// loadSettings 抛 → SettingsStore.loadError 置位 → snapshotFeesIfReady throws。
+    struct ThrowingDAO: SettingsDAO {
+        let error: AppError
+        func loadSettings() throws -> AppSettings { throw error }
+        func saveSettings(_: AppSettings) throws {}
+        func resetCapital() throws {}
+    }
+
+    /// 记录 close() 调用 + 可配置 loadAllCandles 抛错的 spy reader。
+    final class SpyReader: TrainingSetReader, @unchecked Sendable {
+        let candles: [Period: [KLineCandle]]
+        let loadError: AppError?
+        private(set) var closed = false
+        init(candles: [Period: [KLineCandle]], loadError: AppError? = nil) {
+            self.candles = candles; self.loadError = loadError
+        }
+        func loadMeta() throws -> TrainingSetMeta {
+            TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 1)
+        }
+        func loadAllCandles() throws -> [Period: [KLineCandle]] {
+            if let e = loadError { throw e }
+            return candles
+        }
+        func close() { closed = true }
+    }
+
+    /// 注入指定 reader 的 factory（绕过 PreviewTrainingSetDBFactory 的 happy-path）。
+    struct StubFactory: TrainingSetDBFactory {
+        let reader: TrainingSetReader
+        let openError: AppError?
+        init(reader: TrainingSetReader, openError: AppError? = nil) {
+            self.reader = reader; self.openError = openError
+        }
+        func openAndVerify(file: URL, expectedSchemaVersion: Int) throws -> TrainingSetReader {
+            if let e = openError { throw e }
+            return reader
+        }
+    }
+
+    /// 用指定 factory + 起始本金 + 缓存文件 组装 coordinator（失败注入专用）。
+    static func makeCoordinator(
+        factory: TrainingSetDBFactory,
+        settings: SettingsStore,
+        seedFile: TrainingSetFile? = cachedFile()
+    ) -> TrainingSessionCoordinator {
+        let cache = InMemoryCacheManager()
+        if let f = seedFile { cache._seedForTesting([f]) }
+        return TrainingSessionCoordinator(
+            dbFactory: factory,
+            recordRepo: InMemoryRecordRepository(),
+            pendingRepo: InMemoryPendingTrainingRepository(),
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache,
+            settings: settings)
+    }
+
+    @Test("startNewNormalSession: 有记录 → 起始本金取 statistics().currentCapital（末条 total+profit）")
+    func startNew_withRecords_usesAccumulatedCapital() async throws {
+        let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
+        _ = try records.insertRecord(
+            TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 100,
+                           stockCode: "000001", stockName: "股", startYear: 2020, startMonth: 1,
+                           totalCapital: 50_000, profit: 12_000, returnRate: 0.24, maxDrawdown: 0,
+                           buyCount: 1, sellCount: 1,
+                           feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+                           finalTick: 7),
+            ops: [], drawings: [])
+        let engine = try await coord.startNewNormalSession()
+        #expect(engine.initialCapital == 62_000)         // 50000 + 12000，非 settings 50000
+        #expect(engine.cashBalance == 62_000)
+    }
+
+    @Test("startNewNormalSession: settings.loadError → throws 且不写 active（fail-closed D2/D9）")
+    func startNew_loadError_throwsNoActive() async throws {
+        let store = SettingsStore(settingsDAO: ThrowingDAO(error: .persistence(.dbCorrupted)))
+        let spy = SpyReader(candles: Self.validCandles())
+        let coord = Self.makeCoordinator(factory: StubFactory(reader: spy), settings: store)
+        await #expect(throws: AppError.persistence(.dbCorrupted)) {
+            try await coord.startNewNormalSession()
+        }
+        #expect(coord.activeEngine == nil)
+        #expect(coord.activeReader == nil)
+        #expect(spy.closed == false)                     // reader 从未打开（fees 早抛）
+    }
+
+    @Test("startNewNormalSession: 无缓存训练组 → .trainingSet(.fileNotFound)")
+    func startNew_noCache_throwsFileNotFound() async throws {
+        let store = SettingsStore(settingsDAO: CapitalDAO(capital: 10_000))
+        let coord = Self.makeCoordinator(
+            factory: StubFactory(reader: SpyReader(candles: Self.validCandles())),
+            settings: store, seedFile: nil)
+        await #expect(throws: AppError.trainingSet(.fileNotFound)) {
+            try await coord.startNewNormalSession()
+        }
+        #expect(coord.activeReader == nil)
+    }
+
+    @Test("startNewNormalSession: loadAllCandles 抛 → reader.close() 调用 + 不写 active（D9）")
+    func startNew_loadCandlesFails_closesReader() async throws {
+        let store = SettingsStore(settingsDAO: CapitalDAO(capital: 10_000))
+        let spy = SpyReader(candles: [:], loadError: .persistence(.ioError("disk")))
+        let coord = Self.makeCoordinator(factory: StubFactory(reader: spy), settings: store)
+        await #expect(throws: AppError.persistence(.ioError("disk"))) {
+            try await coord.startNewNormalSession()
+        }
+        #expect(spy.closed == true)                      // D9：失败关闭已开 reader
+        #expect(coord.activeEngine == nil)
+        #expect(coord.activeReader == nil)
+    }
+
+    @Test("startNewNormalSession: openAndVerify 抛 .versionMismatch → 传播 + 不写 active（reader 未建）")
+    func startNew_openThrows_propagatesNoActive() async throws {
+        let store = SettingsStore(settingsDAO: CapitalDAO(capital: 10_000))
+        let spy = SpyReader(candles: Self.validCandles())
+        let coord = Self.makeCoordinator(
+            factory: StubFactory(reader: spy, openError: .trainingSet(.versionMismatch(expected: 1, got: 2))),
+            settings: store)
+        await #expect(throws: AppError.trainingSet(.versionMismatch(expected: 1, got: 2))) {
+            try await coord.startNewNormalSession()
+        }
+        #expect(spy.closed == false)                     // openAndVerify 抛 → 无 reader 返回，无可关
+        #expect(coord.activeEngine == nil)
+        #expect(coord.activeReader == nil)
+    }
 }
