@@ -99,9 +99,35 @@ public final class TrainingSessionCoordinator {
         }
     }
 
-    /// Review 模式（spec line 1653）
+    /// Review 模式（spec L1670）：record bundle → 打开 reader → 构造只读 ReviewFlow 引擎，
+    /// 还原全部标记/绘线、固定末态（D5）。费率/起始年月均来自 record，不读当前 settings。
+    /// **D5 不变量**：review 仅供只读展示；`initialCashBalance = totalCapital + profit`（末态全现金，
+    /// 强平后）使引擎实时 `returnRate == record.returnRate`（flat-ending-cash 假设下自洽）；**不**改写
+    /// record 真值（settlement 若直读 record 则此重建只影响训练页状态栏显示，安全）。
+    /// **前置（D10）**：caller 须先 `endSession()`（同 startNewNormalSession）。
     public func review(recordId: Int64) async throws -> TrainingEngine {
-        fatalError("Wave 2 E6 impl")
+        let (record, ops, drawings) = try recordRepo.loadRecordBundle(id: recordId)
+        let file = try cachedFile(filename: record.trainingSetFilename)
+        let reader = try openReader(for: file)
+        do {
+            // maxTick 由 .review(record) 内部据 record.finalTick 派生；make 亦校验 .m3 非空 +
+            // m3.last.endGlobalIndex >= finalTick，故此处不重复 maxTick(from:)（D3 / LOW#8）。
+            let allCandles = try reader.loadAllCandles()
+            let engine = try TrainingEngine.make(
+                .review(record: record),
+                allCandles: allCandles,
+                initialCapital: record.totalCapital,
+                initialCashBalance: record.totalCapital + record.profit,   // 末态全现金（强平后）
+                initialMarkers: markers(from: ops),
+                initialDrawings: drawings,
+                initialTradeOperations: ops)
+            activeReader = reader
+            activeEngine = engine
+            return engine
+        } catch {
+            reader.close()
+            throw (error as? AppError) ?? .internalError(module: "E6a", detail: String(describing: error))
+        }
     }
 
     /// Replay 模式（spec line 1656）

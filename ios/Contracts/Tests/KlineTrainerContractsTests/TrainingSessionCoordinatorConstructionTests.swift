@@ -288,4 +288,73 @@ struct TrainingSessionCoordinatorConstructionTests {
         #expect(coord.activeEngine == nil)
         #expect(coord.activeReader == nil)
     }
+
+    /// 插一条带 ops/drawings 的记录，返回 recordId。
+    static func seedRecord(
+        _ records: InMemoryRecordRepository,
+        filename: String = "set.sqlite",
+        totalCapital: Double = 100_000, profit: Double = 8_000, finalTick: Int = 7,
+        ops: [TradeOperation], drawings: [DrawingObject] = []
+    ) throws -> Int64 {
+        try records.insertRecord(
+            TrainingRecord(id: nil, trainingSetFilename: filename, createdAt: 1,
+                           stockCode: "000001", stockName: "股", startYear: 2020, startMonth: 1,
+                           totalCapital: totalCapital, profit: profit,
+                           returnRate: profit / totalCapital, maxDrawdown: -0.05,
+                           buyCount: 1, sellCount: 1,
+                           feeSnapshot: FeeSnapshot(commissionRate: 0.0002, minCommissionEnabled: true),
+                           finalTick: finalTick),
+            ops: ops, drawings: drawings)
+    }
+
+    static func op(tick: Int, price: Double, dir: TradeDirection) -> TradeOperation {
+        TradeOperation(globalTick: tick, period: .m3, direction: dir, price: price, shares: 100,
+                       positionTier: .tier1, commission: 1, stampDuty: 0, totalCost: price * 100,
+                       createdAt: 0)
+    }
+
+    @Test("review: 只读末态 + 还原标记 + tick=finalTick + 收益率与 record 自洽（D5）")
+    func review_happy_restoresEndState() async throws {
+        let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let id = try Self.seedRecord(records, totalCapital: 100_000, profit: 8_000, finalTick: 7,
+                                     ops: [Self.op(tick: 2, price: 10.2, dir: .buy),
+                                           Self.op(tick: 5, price: 10.5, dir: .sell)])
+        let engine = try await coord.review(recordId: id)
+        #expect(engine.flow.mode == .review)
+        #expect(engine.flow.canBuySell() == false)        // ReviewFlow 全能力关
+        #expect(engine.tick.globalTickIndex == 7)          // initialTick = finalTick
+        #expect(engine.markers.count == 2)                 // 还原全部标记
+        #expect(engine.tradeOperations.count == 2)
+        #expect(engine.initialCapital == 100_000)
+        #expect(abs(engine.returnRate - 0.08) < 1e-9)      // (108000-100000)/100000 = record.returnRate
+        #expect(coord.activeReader != nil)
+    }
+
+    @Test("review: 费率来自 record 非当前 settings（D5）")
+    func review_usesRecordFees() async throws {
+        let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 10_000)
+        let id = try Self.seedRecord(records, ops: [])
+        let engine = try await coord.review(recordId: id)
+        #expect(engine.fees.commissionRate == 0.0002)      // record.feeSnapshot，非 settings 的 0.0001
+        #expect(engine.fees.minCommissionEnabled == true)
+    }
+
+    @Test("review: loadAllCandles 抛 → reader.close() + 不写 active（D9 post-open）")
+    func review_loadCandlesFails_closesReader() async throws {
+        let store = SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000))
+        let records = InMemoryRecordRepository()
+        let id = try Self.seedRecord(records, ops: [])
+        let spy = Self.SpyReader(candles: [:], loadError: .persistence(.ioError("x")))
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: records, pendingRepo: InMemoryPendingTrainingRepository(),
+            settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
+        await #expect(throws: AppError.persistence(.ioError("x"))) {
+            try await coord.review(recordId: id)
+        }
+        #expect(spy.closed == true)
+        #expect(coord.activeEngine == nil)
+        #expect(coord.activeReader == nil)
+    }
 }
