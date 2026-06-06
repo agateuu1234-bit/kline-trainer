@@ -43,7 +43,7 @@
 
 | 文件 | 操作 | 责任 |
 |---|---|---|
-| `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift` | **Modify**（仅追加方法 + 更新顶部 scope 注释） | 新增 6 个 public 成员（`buy`/`sell`/`holdOrObserve`/`switchPeriodCombo`/`buyEnabled`/`sellEnabled`）+ 4 个 private helper（`period(of:)`/`stepsForPeriod`/`candleDatetime(atTick:)`/`advanceAndAccount(panel:)`/`forceCloseIfEnded`）。**不动** E5a 存储态/init/make/accessor/preview。 |
+| `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift` | **Modify**（仅追加方法 + 更新顶部 scope 注释） | 新增 6 个 public 成员（`buy`/`sell`/`holdOrObserve`/`switchPeriodCombo`/`buyEnabled`/`sellEnabled`）+ 5 个 private helper（`period(of:)`/`stepsForPeriod`/`candleDatetime(atTick:)`/`advanceAndAccount(panel:)`/`forceCloseIfEnded`）+ 1 个 private static let（`periodCombos`）。**不动** E5a 存储态/init/make/accessor/preview。 |
 | `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineActionsTests.swift` | **Create** | E5b 动作专属测试 suite（`@MainActor @Suite`）。**新建独立文件**，不污染 E5a 的 `TrainingEngineCoreTests.swift`。 |
 | `scripts/acceptance/plan_e5b_trainingengine_actions.sh` | **Create** | Linux 可跑结构闸门（want/wantn）。 |
 | `docs/acceptance/2026-06-06-pr-e5b-trainingengine-actions.md` | **Create** | 非 coder 可执行验收清单（中文，action/expected/pass-fail）。 |
