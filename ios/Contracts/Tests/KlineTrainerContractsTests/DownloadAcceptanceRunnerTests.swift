@@ -351,6 +351,19 @@ struct DownloadAcceptanceRunnerTests {
         #expect(try journal.listByState(.stored).isEmpty)
     }
 
+    @Test func retry_storedRow_confirmSuccess_confirmedAndFileRetained() async throws {
+        // spec §P2 L1835 验收 case 1：stored 后 kill → 启动 confirmed + 本地 sqlite 保留
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = InMemoryCacheManager()
+        // 模拟「上次 store 完成后崩溃」：cache 有文件 + journal = stored
+        let file = try cache.store(downloadedZip: URL(fileURLWithPath: "/tmp/s.sqlite"), meta: makeMeta(id: 1))
+        try seedStored(journal, id: 1, leaseId: "L1", path: file.localURL.path)
+        let runner = makeRunner(api: FakeAPIClient(confirmError: nil), cache: cache, journal: journal)
+        await runner.retryPendingConfirmations()
+        #expect(try journal.listByState(.confirmed).count == 1)         // 推进到 confirmed
+        #expect(cache.listAvailable().contains(where: { $0.id == 1 }))  // sqlite 保留（未被删）
+    }
+
     @Test func retry_confirmPendingRow_confirmSuccess_becomesConfirmed() async throws {
         let journal = InMemoryAcceptanceJournalDAO()
         try seedStored(journal, id: 2, leaseId: "L2", path: "/tmp/b.sqlite")
