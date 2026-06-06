@@ -1,10 +1,12 @@
 // Kline Trainer Swift Contracts — E5a TrainingEngine 核心（Wave 2 顺位 2）
 // Spec: kline_trainer_modules_v1.4.md §E5 (L1581-1639, preview L1690-1705)
 //     + kline_trainer_plan_v1.5.md §4.2/§10.1（最大回撤、现价、初始周期组合 L777）
-// 范围：init + 运行时状态 + accessors + onSceneActivated（scenePhase 中继）+ preview。
-//   交易动作 buy/sell/holdOrObserve/switchPeriodCombo/activateDrawingTool/deleteDrawing
-//   属 E5b（Wave 2 顺位 3），本 PR 不实现。
-// 设计判定见 docs/superpowers/plans/2026-06-05-pr-e5a-trainingengine-core.md D1-D8。
+// 范围（E5a 顺位 2）：init + 运行时状态 + accessors + onSceneActivated（scenePhase 中继）+ preview。
+// E5b（顺位 3，本文件后半）：buy/sell/holdOrObserve/switchPeriodCombo + buyEnabled/sellEnabled
+//   + 局终自动强平（§4.2.1 入口 1b）。
+//   activateDrawingTool/deleteDrawing 延后 Wave 2 顺位 7 C8（画线激活编排需 C8 viewport，用户 2026-06-06 裁决）。
+// 设计判定见 docs/superpowers/plans/2026-06-05-pr-e5a-trainingengine-core.md（E5a）
+//   + docs/superpowers/plans/2026-06-06-pr-e5b-trainingengine-actions.md（E5b D1-D9）。
 
 #if canImport(Observation)
 import Observation
@@ -233,6 +235,186 @@ public final class TrainingEngine {
     /// 注意：`TrainingRecord.maxDrawdown` 是比率（如 -0.12），由 E6 finalize 换算（modules L537-538，D3）；
     /// 本 accessor 不做换算，调用方勿当比率使用。
     public var maxDrawdown: Double { drawdown.maxDrawdown }
+
+    // MARK: - 动作可用性门（E5b / D1：功能式 ∃tier，无 tier 推导公式）
+
+    /// 买入按钮可用：当前模式允许交易 **且** 存在某档 `quoteBuy` 成功。
+    /// 满仓(现金耗尽)→所有档 totalCost>cash 失败→false(disabled，plan v1.5 L734)。
+    /// 部分档成功→true；点不可买的档由 `buy` 返 `.insufficientCash`(toast，L735)——单一真值源，无 tier 公式臆造。
+    public var buyEnabled: Bool {
+        guard flow.canBuySell() else { return false }
+        let total = currentTotalCapital, cash = cashBalance, price = currentPrice
+        return PositionTier.allCases.contains { tier in
+            if case .success = TradeCalculator.quoteBuy(totalCapital: total, cash: cash,
+                                                        tier: tier, price: price, fees: fees) {
+                return true
+            }
+            return false
+        }
+    }
+
+    /// 卖出按钮可用：当前模式允许交易 **且** 有持仓（plan v1.5 L733 空仓灰置）。
+    public var sellEnabled: Bool {
+        flow.canBuySell() && position.shares > 0
+    }
+
+    // MARK: - 周期组合切换（E5b / D8）
+
+    /// 完整组合序列（plan v1.5 L782）：3m/15m ←→ 15m/60m ←→ 60m/日 ←→ 日/周 ←→ 周/月。
+    /// upper=较细、lower=较粗，整体随 direction 平移一档。
+    private static let periodCombos: [(upper: Period, lower: Period)] = [
+        (.m3, .m15), (.m15, .m60), (.m60, .daily), (.daily, .weekly), (.weekly, .monthly)
+    ]
+
+    /// 两指上下滑切换周期组合（plan v1.5 §4.4）。
+    /// - 边界 / 当前组合不在序列(损坏 resume) / target 周期无数据 → no-op（不 advance、不 bump）。
+    /// - 命中 → 改双面板 period + 对两面板派发 `.periodComboSwitched`（硬切 autoTracking + clearPendingDrawing；
+    ///   后者 effect 在 E5b 无消费者，画线延后顺位 7，故无 pending 可清，忽略安全）。
+    public func switchPeriodCombo(direction: PeriodDirection) {
+        let combos = TrainingEngine.periodCombos
+        guard let cur = combos.firstIndex(where: {
+            $0.upper == upperPanel.period && $0.lower == lowerPanel.period
+        }) else { return }   // 当前组合不在序列（损坏 resume 数据）→ no-op
+        let target = direction == .toLarger ? cur + 1 : cur - 1
+        guard combos.indices.contains(target) else { return }   // 边界 → no-op
+        let next = combos[target]
+        // D8 数据完整性守卫：避免后续 stepsForPeriod/渲染落在无数据周期
+        guard let u = allCandles[next.upper], !u.isEmpty,
+              let l = allCandles[next.lower], !l.isEmpty else { return }
+        upperPanel.period = next.upper
+        lowerPanel.period = next.lower
+        _ = upperPanel.reduce(.periodComboSwitched)
+        _ = lowerPanel.reduce(.periodComboSwitched)
+    }
+
+    // MARK: - 持有 / 观察（E5b）
+
+    /// 持有(有仓)/观察(空仓)：仅推进 tick（plan v1.5 L944「直接推进 1 根当前周期 K 线」），
+    /// 无成交、无 marker/operation。review 模式 canAdvance()==false → no-op（capability matrix L836）。
+    public func holdOrObserve(panel: PanelId) {
+        guard flow.canAdvance() else { return }
+        advanceAndAccount(panel: panel)
+    }
+
+    // MARK: - 私有：步进 + 联动 + 记账（buy/sell/holdOrObserve 共用）
+
+    /// 被点击面板对应的周期。
+    private func period(of panel: PanelId) -> Period {
+        switch panel {
+        case .upper: return upperPanel.period
+        case .lower: return lowerPanel.period
+        }
+    }
+
+    /// 步进量（plan v1.5 §4.1）：该周期首个 `endGlobalIndex > currentTick` 的 K 线的
+    /// `endGlobalIndex - currentTick`；无后续 K 线 → 0（已到该周期末尾）。
+    /// 用 `?? []`（D9）：缺数据 → 0 步=不推进，不 crash（比 spec 强解包防御）。
+    private func stepsForPeriod(_ period: Period) -> Int {
+        let candles = allCandles[period] ?? []
+        let current = tick.globalTickIndex
+        let idx = candles.partitioningIndex { $0.endGlobalIndex > current }
+        guard idx < candles.count else { return 0 }
+        return candles[idx].endGlobalIndex - current
+    }
+
+    /// 两面板硬切 autoTracking（D4，plan v1.5 L235）→ 推进 tick → 更新回撤 → 局终强平（Task 6 接入）。
+    private func advanceAndAccount(panel: PanelId) {
+        _ = upperPanel.reduce(.tradeTriggered)
+        _ = lowerPanel.reduce(.tradeTriggered)
+        _ = tick.advance(steps: stepsForPeriod(period(of: panel)))
+        drawdown.update(currentCapital: currentTotalCapital)
+        forceCloseIfEnded()
+    }
+
+    // MARK: - 买入（E5b / §4.2.1 入口 1a：E3 Result 通道 → position.buy precondition）
+
+    /// 买入：当前 tick 价成交 → 记 marker/operation(entryTick) → 推进 → 联动 → 局终强平。
+    /// 失败(模式不允许 / E3 校验失败)返 `.failure(.trade(...))`，**不** mutate、**不** advance（D9）。
+    public func buy(panel: PanelId, tier: PositionTier) -> Result<TradeOperation, AppError> {
+        guard flow.canBuySell() else { return .failure(.trade(.disabled)) }
+        let price = currentPrice
+        let entryTick = tick.globalTickIndex
+        let p = period(of: panel)
+        switch TradeCalculator.quoteBuy(totalCapital: currentTotalCapital, cash: cashBalance,
+                                        tier: tier, price: price, fees: fees) {
+        case .failure(let reason):
+            return .failure(.trade(reason))
+        case .success(let quote):
+            position.buy(shares: quote.shares, totalCost: quote.totalCost)
+            cashBalance -= quote.totalCost
+            markers.append(TradeMarker(globalTick: entryTick, price: price, direction: .buy))
+            let op = TradeOperation(
+                globalTick: entryTick, period: p, direction: .buy, price: price,
+                shares: quote.shares, positionTier: tier,
+                commission: quote.commission, stampDuty: 0,   // D6：买入无印花税
+                totalCost: quote.totalCost, createdAt: candleDatetime(atTick: entryTick))
+            tradeOperations.append(op)
+            advanceAndAccount(panel: panel)
+            return .success(op)
+        }
+    }
+
+    /// 成交时刻（D5）：成交 tick 的 `.m3` candle datetime；超末根夹取末根，缺数据 0。
+    private func candleDatetime(atTick target: Int) -> Int64 {
+        let m3 = allCandles[.m3] ?? []
+        guard let last = m3.last else { return 0 }
+        let idx = m3.partitioningIndex { $0.endGlobalIndex >= target }
+        return idx < m3.count ? m3[idx].datetime : last.datetime
+    }
+
+    // MARK: - 卖出（E5b / §4.2.1 入口 1a）
+
+    /// 卖出：当前 tick 价成交 → 记 marker/operation(entryTick) → 推进 → 联动 → 局终强平。
+    public func sell(panel: PanelId, tier: PositionTier) -> Result<TradeOperation, AppError> {
+        guard flow.canBuySell() else { return .failure(.trade(.disabled)) }
+        let price = currentPrice
+        let entryTick = tick.globalTickIndex
+        let p = period(of: panel)
+        switch TradeCalculator.quoteSell(holding: position.shares, averageCost: position.averageCost,
+                                         tier: tier, price: price, fees: fees) {
+        case .failure(let reason):
+            return .failure(.trade(reason))
+        case .success(let quote):
+            position.sell(shares: quote.shares)
+            cashBalance += quote.proceeds
+            markers.append(TradeMarker(globalTick: entryTick, price: price, direction: .sell))
+            let op = TradeOperation(
+                globalTick: entryTick, period: p, direction: .sell, price: price,
+                shares: quote.shares, positionTier: tier,
+                commission: quote.commission, stampDuty: quote.stampDuty,
+                totalCost: quote.proceeds,   // D6：sell totalCost = 到手 proceeds
+                createdAt: candleDatetime(atTick: entryTick))
+            tradeOperations.append(op)
+            advanceAndAccount(panel: panel)
+            return .success(op)
+        }
+    }
+
+    // MARK: - 局终自动强平（E5b / §4.2.1 入口 1b / D7）
+
+    /// 推进到 `>= maxTick` 且仍有持仓 → 按末根 .m3 收盘价强制全平（plan v1.5 L751）。
+    /// 走 E3 `forceCloseOnEnd`（裸 SellQuote，holding==position.shares 满足入口 1b caller 不变量）。
+    /// 幂等：强平后 shares==0，再次到顶 guard 短路。
+    private func forceCloseIfEnded() {
+        guard tick.globalTickIndex >= tick.maxTick, position.shares > 0 else { return }
+        let price = currentPrice
+        let quote = TradeCalculator.forceCloseOnEnd(
+            holding: position.shares, averageCost: position.averageCost, price: price, fees: fees)
+        guard quote.shares > 0 else { return }   // 全零报价(非法 price)→ no-op
+        let tickAtClose = tick.globalTickIndex
+        position.sell(shares: quote.shares)
+        cashBalance += quote.proceeds
+        markers.append(TradeMarker(globalTick: tickAtClose, price: price, direction: .sell))
+        tradeOperations.append(TradeOperation(
+            globalTick: tickAtClose, period: .m3, direction: .sell, price: price,
+            shares: quote.shares, positionTier: .tier5,
+            commission: quote.commission, stampDuty: quote.stampDuty,
+            totalCost: quote.proceeds, createdAt: candleDatetime(atTick: tickAtClose)))
+        // 强平后再次更新：把到手 proceeds（已扣佣金+印花税）的实现总资金反映进最大回撤——
+        // 这是 advanceAndAccount 内首次 update（仅市值，仓未平）之外的第二次 update，不可省略
+        // （否则末根手续费造成的回撤被低报）。对应测试 advancingToEndWithHoldingForceCloses 的 maxDrawdown 断言。
+        drawdown.update(currentCapital: currentTotalCapital)
+    }
 
     // MARK: - 场景生命周期中继（D6）
 
