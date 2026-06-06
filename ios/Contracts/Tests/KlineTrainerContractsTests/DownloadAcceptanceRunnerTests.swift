@@ -125,6 +125,22 @@ struct DownloadAcceptanceRunnerTests {
         let _: any Sendable = runner   // 编译期断言 Sendable
     }
 
+    /// 构造一个除指定失败点外全成功的 runner。
+    private func makeRunner(
+        api: FakeAPIClient = FakeAPIClient(),
+        cache: CacheManager = InMemoryCacheManager(),
+        journal: AcceptanceJournalDAO = InMemoryAcceptanceJournalDAO(),
+        factory: TrainingSetDBFactory = StubDBFactory(),
+        integrity: ZipIntegrityVerifying = FakeZipIntegrityVerifier(),
+        extractor: ZipExtracting = FakeZipExtractor(returnURL: URL(fileURLWithPath: "/tmp/ZipExtract-y/x.sqlite")),
+        dataVerifier: TrainingSetDataVerifying = FakeTrainingSetDataVerifier(),
+        cleaner: DownloadAcceptanceCleaning = FakeDownloadAcceptanceCleaner()
+    ) -> DownloadAcceptanceRunner {
+        DownloadAcceptanceRunner(api: api, cache: cache, dbFactory: factory, journal: journal,
+                                 integrity: integrity, extractor: extractor,
+                                 dataVerifier: dataVerifier, cleaner: cleaner)
+    }
+
     @Test func run_happyPath_returnsConfirmed_walksFullStateMachine() async throws {
         let meta = makeMeta(id: 7, contentHash: "0badf00d")
         let api = FakeAPIClient(confirmError: nil)               // confirm 成功
@@ -163,5 +179,69 @@ struct DownloadAcceptanceRunnerTests {
         let cleaned = cleaner.cleanedURLs().map(\.path)
         #expect(cleaned.contains("/tmp/ZipExtract-test/dl.zip"))
         #expect(cleaned.contains("/tmp/ZipExtract-x"))   // = sqlite.deletingLastPathComponent()
+    }
+
+    @Test func run_downloadFails_rejected_noJournalRow() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cleaner = FakeDownloadAcceptanceCleaner()
+        let runner = makeRunner(api: FakeAPIClient(download: .failure(.network(.offline))),
+                                journal: journal, cleaner: cleaner)
+        let result = await runner.run(meta: makeMeta(), leaseId: "lease")
+        #expect(result == .rejected(.network(.offline)))
+        // 无 journal 行（download 完成前不写）
+        for s in P2JournalState.allCases { #expect(try journal.listByState(s).isEmpty) }
+        // download 未成功 → 无 temp 可清
+        #expect(cleaner.cleanedURLs().isEmpty)
+    }
+
+    @Test func run_crcFails_rejected_journalRejected_cleaned() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cleaner = FakeDownloadAcceptanceCleaner()
+        let runner = makeRunner(journal: journal,
+                                integrity: FakeZipIntegrityVerifier(throwing: .trainingSet(.crcFailed)),
+                                cleaner: cleaner)
+        let result = await runner.run(meta: makeMeta(), leaseId: "lease")
+        #expect(result == .rejected(.trainingSet(.crcFailed)))
+        #expect(try journal.listByState(.rejected).count == 1)
+        #expect(cleaner.cleanedURLs().map(\.path).contains("/tmp/ZipExtract-test/dl.zip"))
+    }
+
+    @Test func run_extractFails_rejected_journalRejected() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let runner = makeRunner(journal: journal,
+                                extractor: FakeZipExtractor(throwing: .trainingSet(.unzipFailed)))
+        let result = await runner.run(meta: makeMeta(), leaseId: "lease")
+        #expect(result == .rejected(.trainingSet(.unzipFailed)))
+        #expect(try journal.listByState(.rejected).count == 1)
+    }
+
+    @Test func run_openVerifyFails_rejected_versionMismatch() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let runner = makeRunner(journal: journal,
+                                factory: StubDBFactory(error: .trainingSet(.versionMismatch(expected: 1, got: 2))))
+        let result = await runner.run(meta: makeMeta(), leaseId: "lease")
+        #expect(result == .rejected(.trainingSet(.versionMismatch(expected: 1, got: 2))))
+        #expect(try journal.listByState(.rejected).count == 1)
+    }
+
+    @Test func run_verifyNonEmptyFails_rejected_emptyData_readerClosed() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let factory = StubDBFactory()
+        let runner = makeRunner(journal: journal, factory: factory,
+                                dataVerifier: FakeTrainingSetDataVerifier(throwing: .trainingSet(.emptyData)))
+        let result = await runner.run(meta: makeMeta(), leaseId: "lease")
+        #expect(result == .rejected(.trainingSet(.emptyData)))
+        #expect(try journal.listByState(.rejected).count == 1)
+        #expect(factory.lastReader?.closed == true)   // 失败路径也关闭 reader
+    }
+
+    @Test func run_cacheStoreFails_rejected_persistence() async throws {
+        // 用抛错 cache：自定义一个只在 store 抛 diskFull 的替身
+        let journal = InMemoryAcceptanceJournalDAO()
+        let runner = makeRunner(cache: ThrowingStoreCache(error: .persistence(.diskFull)), journal: journal)
+        let result = await runner.run(meta: makeMeta(), leaseId: "lease")
+        #expect(result == .rejected(.persistence(.diskFull)))
+        #expect(try journal.listByState(.rejected).count == 1)
+        #expect(try journal.listByState(.stored).isEmpty)
     }
 }
