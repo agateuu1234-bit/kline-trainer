@@ -1,7 +1,9 @@
 // Kline Trainer Swift Contracts — P2 DownloadAcceptanceRunner（Wave 2 顺位 6）
 // Spec: kline_trainer_modules_v1.4.md §P2 (line 1761-1836) + M0.1 journal (230-300)
 //
-// 纯编排：只依赖协议（P1/P5/P3a/P4-journal + 4 内部端口），按 7 步 journal 状态机驱动；
+// 纯编排：注入 8 个依赖 = 4 内部端口（ZipIntegrityVerifying/ZipExtracting/TrainingSetDataVerifying/DownloadAcceptanceCleaning）
+//         + P1 APIClient + P5 CacheManager + P3a TrainingSetDBFactory + P4 AcceptanceJournalDAO，
+//         按 7 步 journal 状态机驱动；
 // 提供 run / runBatch / retryPendingConfirmations（启动孤儿确认恢复）。
 // 错误边界（M0.4 L659）：不接触私有错误，只消费 AppError。
 
@@ -84,10 +86,8 @@ public final class DownloadAcceptanceRunner: Sendable {
             }
 
             // Step 6：把**解压后的 sqlite** 存入 cache。
-            // ⚠️ store 参数名 `downloadedZip` 是 Wave 0 冻结代码的误导名——生产
-            // DefaultFileSystemCacheManager.store 把入参当**已解压 sqlite**：stageFile(copyItem)
-            // 后 readSchemaVersion 开 DatabaseQueue 读 PRAGMA user_version（DefaultFileSystemCacheManager.swift
-            // L45-46 注释 + L52/L64）。传 zip 必失败。故传 sqliteURL（extractor 产物），不是 zipURL。
+            // ⚠️ store 参数名 downloadedZip 是误导名——store 期望的是已解压 sqlite（内部开 DatabaseQueue 读 PRAGMA），
+            // 不是 zip。故传 sqliteURL。详见 plan 决策 6。
             let file = try cache.store(downloadedZip: sqliteURL, meta: meta)
             try journal.upsert(trainingSetId: meta.id, leaseId: leaseId, state: .stored,
                                sqliteLocalPath: file.localURL.path, contentHash: meta.contentHash,

@@ -91,6 +91,11 @@ private final class RecordingJournalDAO: AcceptanceJournalDAO, @unchecked Sendab
     var sequence: [P2JournalState] { lock.withLock { _seq } }
 }
 
+/// integrity 抛 CancellationError 的替身（测 asAppError 取消映射分支）。
+private struct CancellingIntegrity: ZipIntegrityVerifying {
+    func verify(zipURL: URL, expectedCRC32Hex: String) throws { throw CancellationError() }
+}
+
 /// store 固定抛错的 cache 替身（测 step 6 失败）。其它方法 no-op。
 private final class ThrowingStoreCache: CacheManager, @unchecked Sendable {
     private let error: AppError
@@ -112,7 +117,7 @@ private func makeMeta(id: Int = 1, contentHash: String = "deadbeef") -> Training
 @Suite("P2 DownloadAcceptanceRunner")
 struct DownloadAcceptanceRunnerTests {
 
-    @Test func constructs_withAllFakes_isSendable() {
+    @Test func constructs_withAllFakes_compilesAsSendable() {
         let runner = DownloadAcceptanceRunner(
             api: FakeAPIClient(),
             cache: InMemoryCacheManager(),
@@ -208,11 +213,14 @@ struct DownloadAcceptanceRunnerTests {
 
     @Test func run_extractFails_rejected_journalRejected() async throws {
         let journal = InMemoryAcceptanceJournalDAO()
+        let cleaner = FakeDownloadAcceptanceCleaner()
         let runner = makeRunner(journal: journal,
-                                extractor: FakeZipExtractor(throwing: .trainingSet(.unzipFailed)))
+                                extractor: FakeZipExtractor(throwing: .trainingSet(.unzipFailed)),
+                                cleaner: cleaner)
         let result = await runner.run(meta: makeMeta(), leaseId: "lease")
         #expect(result == .rejected(.trainingSet(.unzipFailed)))
         #expect(try journal.listByState(.rejected).count == 1)
+        #expect(cleaner.cleanedURLs().map(\.path).contains("/tmp/ZipExtract-test/dl.zip"))
     }
 
     @Test func run_openVerifyFails_rejected_versionMismatch() async throws {
@@ -286,5 +294,13 @@ struct DownloadAcceptanceRunnerTests {
         #expect(result == .rejected(.network(.serverError(code: 503))))
         #expect(cache.listAvailable().contains(where: { $0.id == 6 }))   // 5xx 非 409/404 → 保留
         #expect(try journal.listByState(.confirmPending).count == 1)
+    }
+
+    @Test func run_cancellationError_mappedToInternalP2() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let runner = makeRunner(journal: journal, integrity: CancellingIntegrity())
+        let result = await runner.run(meta: makeMeta(), leaseId: "lease")
+        #expect(result == .rejected(.internalError(module: "P2", detail: "cancelled")))
+        #expect(try journal.listByState(.rejected).count == 1)
     }
 }
