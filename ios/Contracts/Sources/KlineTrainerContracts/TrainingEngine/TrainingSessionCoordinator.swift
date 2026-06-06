@@ -130,9 +130,27 @@ public final class TrainingSessionCoordinator {
         }
     }
 
-    /// Replay 模式（spec line 1656）
+    /// Replay 模式（spec L1673）：record → 打开 reader → 从头构造 ReplayFlow 引擎（只继承原局
+    /// feeSnapshot，不还原标记/绘线、不入账，D6）。起始本金 = record 原局起始本金。
     public func replay(recordId: Int64) async throws -> TrainingEngine {
-        fatalError("Wave 2 E6 impl")
+        let (record, _, _) = try recordRepo.loadRecordBundle(id: recordId)
+        let file = try cachedFile(filename: record.trainingSetFilename)
+        let reader = try openReader(for: file)
+        do {
+            let allCandles = try reader.loadAllCandles()
+            let mt = try maxTick(from: allCandles)
+            let engine = try TrainingEngine.make(
+                .replay(fees: record.feeSnapshot, maxTick: mt),
+                allCandles: allCandles,
+                initialCapital: record.totalCapital,
+                initialCashBalance: record.totalCapital)
+            activeReader = reader
+            activeEngine = engine
+            return engine
+        } catch {
+            reader.close()
+            throw (error as? AppError) ?? .internalError(module: "E6a", detail: String(describing: error))
+        }
     }
 
     /// 保存进度（spec line 1659）

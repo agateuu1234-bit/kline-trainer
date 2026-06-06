@@ -357,4 +357,50 @@ struct TrainingSessionCoordinatorConstructionTests {
         #expect(coord.activeEngine == nil)
         #expect(coord.activeReader == nil)
     }
+
+    @Test("replay: 从头 tick=0 + 无标记 + 用原局费率 + 起始本金=record.totalCapital（D6）")
+    func replay_happy_freshFromOriginalFees() async throws {
+        let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 10_000)
+        let id = try Self.seedRecord(records, totalCapital: 80_000, profit: 5_000,
+                                     ops: [Self.op(tick: 2, price: 10.2, dir: .buy)])
+        let engine = try await coord.replay(recordId: id)
+        #expect(engine.flow.mode == .replay)
+        #expect(engine.flow.canBuySell() == true)          // Replay 可操作
+        #expect(engine.flow.shouldSaveRecord() == false)   // 不入账
+        #expect(engine.tick.globalTickIndex == 0)          // 从头
+        #expect(engine.markers.isEmpty)                    // fresh，无还原
+        #expect(engine.tradeOperations.isEmpty)
+        #expect(engine.initialCapital == 80_000)           // record.totalCapital（非累计、非 settings）
+        #expect(engine.cashBalance == 80_000)
+        #expect(engine.fees.commissionRate == 0.0002)      // 原局 feeSnapshot
+        #expect(coord.activeReader != nil)
+    }
+
+    @Test("replay: 记录不存在 → 传播 AppError（fake 抛 .dbCorrupted；reader 未开）")
+    func replay_unknownRecord_propagates() async throws {
+        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        await #expect(throws: AppError.persistence(.dbCorrupted)) {
+            try await coord.replay(recordId: 999)
+        }
+        #expect(coord.activeReader == nil)
+    }
+
+    @Test("replay: loadAllCandles 抛 → reader.close() + 不写 active（D9 post-open）")
+    func replay_loadCandlesFails_closesReader() async throws {
+        let store = SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000))
+        let records = InMemoryRecordRepository()
+        let id = try Self.seedRecord(records, ops: [])
+        let spy = Self.SpyReader(candles: [:], loadError: .persistence(.diskFull))
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: records, pendingRepo: InMemoryPendingTrainingRepository(),
+            settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
+        await #expect(throws: AppError.persistence(.diskFull)) {
+            try await coord.replay(recordId: id)
+        }
+        #expect(spy.closed == true)
+        #expect(coord.activeEngine == nil)
+        #expect(coord.activeReader == nil)
+    }
 }
