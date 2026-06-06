@@ -990,7 +990,8 @@ echo "== G6: 作用域 —— diff 只动允许文件 =="
 base="$(git merge-base origin/main HEAD 2>/dev/null || echo origin/main)"
 changed="$(git diff --name-only "$base"...HEAD 2>/dev/null || true)"
 if [ -n "$changed" ]; then
-  bados="$(echo "$changed" | grep -vE '^(ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine\.swift|ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineActionsTests\.swift|scripts/acceptance/plan_e5b_trainingengine_actions\.sh|docs/(acceptance|superpowers/plans)/.*)$' || true)"
+  # 收紧到 E5b 具名 doc（不再放行任意 plans/*——防跨 PR plan 串味，见 P2 contamination 教训）
+  bados="$(echo "$changed" | grep -vE '^(ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine\.swift|ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineActionsTests\.swift|scripts/acceptance/plan_e5b_trainingengine_actions\.sh|docs/acceptance/2026-06-06-pr-e5b-trainingengine-actions\.md|docs/superpowers/plans/2026-06-06-pr-e5b-trainingengine-actions\.md)$' || true)"
   if [ -n "$bados" ]; then bad "越界文件: $bados"; else ok "diff 仅含允许文件"; fi
 else
   ok "无 diff（或 base 不可解析，CI 再核）"
