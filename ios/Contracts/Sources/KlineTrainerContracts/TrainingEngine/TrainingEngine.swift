@@ -1,10 +1,12 @@
 // Kline Trainer Swift Contracts — E5a TrainingEngine 核心（Wave 2 顺位 2）
 // Spec: kline_trainer_modules_v1.4.md §E5 (L1581-1639, preview L1690-1705)
 //     + kline_trainer_plan_v1.5.md §4.2/§10.1（最大回撤、现价、初始周期组合 L777）
-// 范围：init + 运行时状态 + accessors + onSceneActivated（scenePhase 中继）+ preview。
-//   交易动作 buy/sell/holdOrObserve/switchPeriodCombo/activateDrawingTool/deleteDrawing
-//   属 E5b（Wave 2 顺位 3），本 PR 不实现。
-// 设计判定见 docs/superpowers/plans/2026-06-05-pr-e5a-trainingengine-core.md D1-D8。
+// 范围（E5a 顺位 2）：init + 运行时状态 + accessors + onSceneActivated（scenePhase 中继）+ preview。
+// E5b（顺位 3，本文件后半）：buy/sell/holdOrObserve/switchPeriodCombo + buyEnabled/sellEnabled
+//   + 局终自动强平（§4.2.1 入口 1b）。
+//   activateDrawingTool/deleteDrawing 延后 Wave 2 顺位 7 C8（画线激活编排需 C8 viewport，用户 2026-06-06 裁决）。
+// 设计判定见 docs/superpowers/plans/2026-06-05-pr-e5a-trainingengine-core.md（E5a）
+//   + docs/superpowers/plans/2026-06-06-pr-e5b-trainingengine-actions.md（E5b D1-D9）。
 
 #if canImport(Observation)
 import Observation
