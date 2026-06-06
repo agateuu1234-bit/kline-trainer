@@ -67,9 +67,36 @@ public final class TrainingSessionCoordinator {
         }
     }
 
-    /// 继续中断训练（spec line 1650）
+    /// 继续中断训练（spec L1667）：loadPending → 按 filename 打开 reader → 从 pending 重建引擎（D7）。
+    /// 无 pending 返回 nil（**仅**此情形返 nil；其它失败均 throw 可恢复 AppError）。
     public func resumePending() async throws -> TrainingEngine? {
-        fatalError("Wave 2 E6 impl")
+        guard let pending = try pendingRepo.loadPending() else { return nil }
+        let file = try cachedFile(filename: pending.trainingSetFilename)
+        let reader = try openReader(for: file)
+        do {
+            let allCandles = try reader.loadAllCandles()
+            let mt = try maxTick(from: allCandles)
+            let position = try decodePosition(pending.positionData)
+            let engine = try TrainingEngine.make(
+                .normal(fees: pending.feeSnapshot, maxTick: mt),
+                allCandles: allCandles,
+                initialTick: pending.globalTickIndex,
+                initialCapital: pending.accumulatedCapital,
+                initialCashBalance: pending.cashBalance,
+                initialPosition: position,
+                initialMarkers: markers(from: pending.tradeOperations),
+                initialDrawings: pending.drawings,
+                initialTradeOperations: pending.tradeOperations,
+                initialDrawdown: pending.drawdown,
+                initialUpperPeriod: pending.upperPeriod,
+                initialLowerPeriod: pending.lowerPeriod)
+            activeReader = reader
+            activeEngine = engine
+            return engine
+        } catch {
+            reader.close()
+            throw (error as? AppError) ?? .internalError(module: "E6a", detail: String(describing: error))
+        }
     }
 
     /// Review 模式（spec line 1653）
@@ -119,6 +146,30 @@ public final class TrainingSessionCoordinator {
             throw AppError.trainingSet(.emptyData)
         }
         return last.endGlobalIndex
+    }
+
+    /// 按 filename 在缓存中定位训练组文件；缺失 → 可恢复 .fileNotFound。
+    private func cachedFile(filename: String) throws -> TrainingSetFile {
+        guard let file = cache.listAvailable().first(where: { $0.filename == filename }) else {
+            throw AppError.trainingSet(.fileNotFound)
+        }
+        return file
+    }
+
+    /// D11 M0.4 边界：positionData 反序列化（唯一内部错误源）。损坏/被篡改存档的
+    /// PositionManager.init(from:) 抛 DecodingError（§4.2.1 入口 2）→ 翻译为可恢复 .dbCorrupted。
+    /// decode 必须在此私有 helper（M0.4 Gate 2：public 方法体禁 raw .decode）。
+    private func decodePosition(_ data: Data) throws -> PositionManager {
+        do {
+            return try JSONDecoder().decode(PositionManager.self, from: data)
+        } catch {
+            throw AppError.persistence(.dbCorrupted)
+        }
+    }
+
+    /// 从交易流水重建 UI 标记（TradeMarker 非 Codable，不持久 → resume/review 由 ops 重建）。
+    private func markers(from ops: [TradeOperation]) -> [TradeMarker] {
+        ops.map { TradeMarker(globalTick: $0.globalTick, price: $0.price, direction: $0.direction) }
     }
 }
 

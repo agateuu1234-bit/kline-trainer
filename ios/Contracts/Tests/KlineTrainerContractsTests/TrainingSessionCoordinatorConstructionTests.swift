@@ -201,4 +201,91 @@ struct TrainingSessionCoordinatorConstructionTests {
         #expect(coord.activeEngine == nil)
         #expect(coord.activeReader == nil)
     }
+
+    static func pending(
+        filename: String = "set.sqlite",
+        tick: Int = 3,
+        position: PositionManager = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000),
+        cash: Double = 90_000,
+        accumulated: Double = 100_000,
+        positionDataOverride: Data? = nil,
+        ops: [TradeOperation] = []
+    ) throws -> PendingTraining {
+        let posData = try positionDataOverride ?? JSONEncoder().encode(position)
+        return PendingTraining(
+            trainingSetFilename: filename, globalTickIndex: tick,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: posData, cashBalance: cash,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            tradeOperations: ops, drawings: [], startedAt: 1,
+            accumulatedCapital: accumulated, drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 5_000))
+    }
+
+    @Test("resumePending: 无 pending → 返回 nil（不抛、不写 active）")
+    func resume_noPending_returnsNil() async throws {
+        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let engine = try await coord.resumePending()
+        #expect(engine == nil)
+        #expect(coord.activeEngine == nil)
+    }
+
+    @Test("resumePending: 有 pending → 重建 tick/position/cash/drawdown/periods + active 写入")
+    func resume_happy_rebuildsState() async throws {
+        let (coord, _, pendingRepo) = Self.makeCoordinator(candles: Self.validCandles())
+        try pendingRepo.savePending(try Self.pending(tick: 3, cash: 90_000, accumulated: 100_000))
+        let engine = try #require(try await coord.resumePending())
+        #expect(engine.tick.globalTickIndex == 3)        // D7：initialTick = pending.globalTickIndex
+        #expect(engine.position.shares == 100)            // decode 还原
+        #expect(engine.cashBalance == 90_000)
+        #expect(engine.initialCapital == 100_000)         // accumulatedCapital
+        #expect(engine.upperPanel.period == .m60)
+        #expect(engine.lowerPanel.period == .daily)
+        #expect(coord.activeReader != nil)
+    }
+
+    @Test("resumePending: positionData 损坏 → .persistence(.dbCorrupted)（D11）+ reader 关闭")
+    func resume_corruptPosition_throwsDbCorrupted() async throws {
+        let store = SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000))
+        let spy = Self.SpyReader(candles: Self.validCandles())
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let pendingRepo = InMemoryPendingTrainingRepository()
+        try pendingRepo.savePending(try Self.pending(positionDataOverride: Data("not json".utf8)))
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: InMemoryRecordRepository(), pendingRepo: pendingRepo,
+            settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
+        await #expect(throws: AppError.persistence(.dbCorrupted)) {
+            try await coord.resumePending()
+        }
+        #expect(spy.closed == true)
+        #expect(coord.activeEngine == nil)
+    }
+
+    @Test("resumePending: 训练组文件不在缓存 → .trainingSet(.fileNotFound)")
+    func resume_fileMissing_throwsFileNotFound() async throws {
+        let (coord, _, pendingRepo) = Self.makeCoordinator(candles: Self.validCandles(), seedFile: nil)
+        try pendingRepo.savePending(try Self.pending())
+        await #expect(throws: AppError.trainingSet(.fileNotFound)) {
+            try await coord.resumePending()
+        }
+    }
+
+    @Test("resumePending: stale tick 超出 maxTick → make 抛 .emptyData + reader 关闭（D7/D9）")
+    func resume_staleTick_throwsEmptyDataClosesReader() async throws {
+        let store = SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000))
+        let spy = Self.SpyReader(candles: Self.validCandles(m3Count: 8))   // maxTick = 7
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let pendingRepo = InMemoryPendingTrainingRepository()
+        try pendingRepo.savePending(try Self.pending(tick: 99))            // 超出 allowedTickRange 0...7（训练组被替换）
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: InMemoryRecordRepository(), pendingRepo: pendingRepo,
+            settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
+        await #expect(throws: AppError.trainingSet(.emptyData)) {
+            try await coord.resumePending()
+        }
+        #expect(spy.closed == true)
+        #expect(coord.activeEngine == nil)
+        #expect(coord.activeReader == nil)
+    }
 }
