@@ -359,6 +359,7 @@ import CoreGraphics
     }
 
     @Test func sellFailsWhenFlatWithDisabled() {
+        // 这里 NormalFlow.canBuySell()==true（非 review）；.disabled 来自 quoteSell(holding==0)，非模式门。
         let e = Self.tradeEngine(closes: [10, 10, 10], position: .init())
         let r = e.sell(panel: .upper, tier: .tier5)
         #expect(r == .failure(.trade(.disabled)))   // quoteSell holding==0 → .disabled
@@ -402,6 +403,10 @@ import CoreGraphics
         #expect(fc?.globalTick == 1)
         #expect(fc?.shares == 1000)
         #expect(fc?.stampDuty == 5)
+        // I2：强平后 drawdown 第二次 update 把已扣费 realized 总资金并入回撤——
+        // peak(seed=initialCapital 10000) - realized(9990) = 10（手续费造成的回撤）。
+        // 守住「forceCloseIfEnded 的第二次 drawdown.update 不可删」契约（mutation killer）。
+        #expect(e.maxDrawdown == 10)
     }
 
     @Test func advancingToEndWithoutHoldingDoesNotForceClose() {

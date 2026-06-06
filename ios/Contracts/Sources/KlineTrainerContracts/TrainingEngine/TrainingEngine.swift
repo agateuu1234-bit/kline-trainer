@@ -410,6 +410,9 @@ public final class TrainingEngine {
             shares: quote.shares, positionTier: .tier5,
             commission: quote.commission, stampDuty: quote.stampDuty,
             totalCost: quote.proceeds, createdAt: candleDatetime(atTick: tickAtClose)))
+        // 强平后再次更新：把到手 proceeds（已扣佣金+印花税）的实现总资金反映进最大回撤——
+        // 这是 advanceAndAccount 内首次 update（仅市值，仓未平）之外的第二次 update，不可省略
+        // （否则末根手续费造成的回撤被低报）。对应测试 advancingToEndWithHoldingForceCloses 的 maxDrawdown 断言。
         drawdown.update(currentCapital: currentTotalCapital)
     }
 
