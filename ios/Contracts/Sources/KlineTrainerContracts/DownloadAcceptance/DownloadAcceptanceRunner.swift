@@ -116,7 +116,32 @@ public final class DownloadAcceptanceRunner: Sendable {
     }
 
     public func runBatch(lease: LeaseResponse, concurrency: Int = 1) async -> [AcceptanceResult] {
-        fatalError("Task 6")
+        let sets = lease.sets
+        guard !sets.isEmpty else { return [] }
+        let limit = min(max(1, concurrency), sets.count)
+        let leaseId = lease.leaseId
+        var results = [AcceptanceResult?](repeating: nil, count: sets.count)
+
+        await withTaskGroup(of: (Int, AcceptanceResult).self) { group in
+            var next = 0
+            // 初始注入至多 limit 个任务
+            while next < limit {
+                let i = next
+                group.addTask { (i, await self.run(meta: sets[i], leaseId: leaseId)) }
+                next += 1
+            }
+            // 完成一个补一个，维持在飞 ≤ limit
+            while let (idx, res) = await group.next() {
+                results[idx] = res
+                if next < sets.count {
+                    let i = next
+                    group.addTask { (i, await self.run(meta: sets[i], leaseId: leaseId)) }
+                    next += 1
+                }
+            }
+        }
+        // 每个 index 恰好被一个任务填充一次 → 全非 nil（force-unwrap 安全）。
+        return results.map { $0! }
     }
 
     public func retryPendingConfirmations() async {
