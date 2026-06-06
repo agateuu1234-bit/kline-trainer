@@ -120,7 +120,19 @@ public final class DownloadAcceptanceRunner: Sendable {
     }
 
     public func retryPendingConfirmations() async {
-        fatalError("Task 5")
+        let stored = (try? journal.listByState(.stored)) ?? []
+        let pending = (try? journal.listByState(.confirmPending)) ?? []
+        for row in stored + pending {
+            let outcome = await attemptConfirm(trainingSetId: row.trainingSetId,
+                                               leaseId: row.leaseId,
+                                               sqliteLocalPath: row.sqliteLocalPath)
+            if case .rejected = outcome {        // 409/404 → 清本地 cache 副本
+                if let file = cache.listAvailable().first(where: { $0.id == row.trainingSetId }) {
+                    try? cache.delete(file)
+                }
+            }
+            // confirmed / pending：journal 已更新；pending 保留文件
+        }
     }
 
     // MARK: - confirm 子状态机（run + retry 共用）

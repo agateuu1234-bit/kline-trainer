@@ -303,4 +303,123 @@ struct DownloadAcceptanceRunnerTests {
         #expect(result == .rejected(.internalError(module: "P2", detail: "cancelled")))
         #expect(try journal.listByState(.rejected).count == 1)
     }
+
+    // MARK: - Task 5: retryPendingConfirmations
+
+    /// 直接在 journal 灌一条已 stored 的行（绕过 run，模拟「上次运行落盘后崩溃」）。
+    private func seedStored(_ journal: AcceptanceJournalDAO, id: Int, leaseId: String,
+                           path: String, hash: String = "0badf00d") throws {
+        try journal.upsert(trainingSetId: id, leaseId: leaseId, state: .downloaded,
+                           sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try journal.upsert(trainingSetId: id, leaseId: leaseId, state: .crcOK,
+                           sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try journal.upsert(trainingSetId: id, leaseId: leaseId, state: .unzipped,
+                           sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try journal.upsert(trainingSetId: id, leaseId: leaseId, state: .dbVerified,
+                           sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try journal.upsert(trainingSetId: id, leaseId: leaseId, state: .stored,
+                           sqliteLocalPath: path, contentHash: hash, lastError: nil)
+    }
+
+    @Test func retry_storedRow_confirmSuccess_becomesConfirmed() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        try seedStored(journal, id: 1, leaseId: "L1", path: "/tmp/a.sqlite")
+        let runner = makeRunner(api: FakeAPIClient(confirmError: nil), journal: journal)
+        await runner.retryPendingConfirmations()
+        #expect(try journal.listByState(.confirmed).count == 1)
+        #expect(try journal.listByState(.stored).isEmpty)
+    }
+
+    @Test func retry_confirmPendingRow_confirmSuccess_becomesConfirmed() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        try seedStored(journal, id: 2, leaseId: "L2", path: "/tmp/b.sqlite")
+        try journal.upsert(trainingSetId: 2, leaseId: "L2", state: .confirmPending,
+                           sqliteLocalPath: "/tmp/b.sqlite", contentHash: nil, lastError: nil)
+        let runner = makeRunner(api: FakeAPIClient(confirmError: nil), journal: journal)
+        await runner.retryPendingConfirmations()
+        #expect(try journal.listByState(.confirmed).count == 1)
+    }
+
+    @Test func retry_scansBothStoredAndConfirmPending() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        try seedStored(journal, id: 1, leaseId: "L1", path: "/tmp/1.sqlite")          // stored
+        try seedStored(journal, id: 2, leaseId: "L2", path: "/tmp/2.sqlite")
+        try journal.upsert(trainingSetId: 2, leaseId: "L2", state: .confirmPending,
+                           sqliteLocalPath: "/tmp/2.sqlite", contentHash: nil, lastError: nil)  // confirmPending
+        let runner = makeRunner(api: FakeAPIClient(confirmError: nil), journal: journal)
+        await runner.retryPendingConfirmations()
+        #expect(try journal.listByState(.confirmed).count == 2)   // 两类都被扫到
+    }
+
+    @Test func retry_confirm409_rejectsAndDeletesCacheFile() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = InMemoryCacheManager()
+        // 先把文件灌进 cache（id=9）
+        _ = try cache.store(downloadedZip: URL(fileURLWithPath: "/tmp/9.zip"), meta: makeMeta(id: 9))
+        try seedStored(journal, id: 9, leaseId: "L9", path: "/tmp/9.sqlite")
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.leaseNotFound)),
+                                cache: cache, journal: journal)
+        await runner.retryPendingConfirmations()
+        #expect(try journal.listByState(.rejected).count == 1)
+        #expect(cache.listAvailable().contains(where: { $0.id == 9 }) == false)  // 本地副本已删
+    }
+
+    @Test func retry_confirmNetworkUncertain_staysPending_keepsFile() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = InMemoryCacheManager()
+        _ = try cache.store(downloadedZip: URL(fileURLWithPath: "/tmp/8.zip"), meta: makeMeta(id: 8))
+        try seedStored(journal, id: 8, leaseId: "L8", path: "/tmp/8.sqlite")
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.offline)),
+                                cache: cache, journal: journal)
+        await runner.retryPendingConfirmations()
+        #expect(try journal.listByState(.confirmPending).count == 1)
+        #expect(try journal.listByState(.rejected).isEmpty)
+        #expect(cache.listAvailable().contains(where: { $0.id == 8 }))  // 保留
+    }
+
+    @Test func retry_emptyJournal_noCrash() async {
+        let runner = makeRunner(journal: InMemoryAcceptanceJournalDAO())
+        await runner.retryPendingConfirmations()   // 无行 → 安全 no-op
+    }
+
+    // MARK: - Task 6: runBatch
+
+    private func makeLease(ids: [Int], leaseId: String = "BL") -> LeaseResponse {
+        LeaseResponse(leaseId: leaseId, expiresAt: "2026-12-31T00:00:00Z",
+                      sets: ids.map { makeMeta(id: $0) })
+    }
+
+    @Test func runBatch_empty_returnsEmpty() async {
+        let runner = makeRunner()
+        let results = await runner.runBatch(lease: makeLease(ids: []))
+        #expect(results.isEmpty)
+    }
+
+    @Test func runBatch_serial_resultsInInputOrder() async throws {
+        let runner = makeRunner(api: FakeAPIClient(confirmError: nil))
+        let results = await runner.runBatch(lease: makeLease(ids: [10, 11, 12]), concurrency: 1)
+        #expect(results.count == 3)
+        for r in results { if case .rejected = r { Issue.record("expected all confirmed") } }
+        // 保序：confirmed file.id 与输入顺序一致
+        let ids = results.map { r -> Int? in if case .confirmed(let f) = r { return f.id } else { return nil } }
+        #expect(ids == [10, 11, 12])
+    }
+
+    @Test func runBatch_concurrency2_allProcessed_orderPreserved() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let runner = makeRunner(api: FakeAPIClient(confirmError: nil), journal: journal)
+        let results = await runner.runBatch(lease: makeLease(ids: [1, 2, 3, 4, 5]), concurrency: 2)
+        let ids = results.map { r -> Int? in if case .confirmed(let f) = r { return f.id } else { return nil } }
+        #expect(ids == [1, 2, 3, 4, 5])
+        // 并发写不互相污染 journal：每个 id 各有独立 confirmed 行（R1 Low-2 修订）
+        #expect(try journal.listByState(.confirmed).count == 5)
+    }
+
+    @Test func runBatch_mixedOutcomes_orderPreserved() async throws {
+        // 全部 confirm 用 leaseNotFound → 全 rejected，但仍保序、数量正确
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.leaseNotFound)))
+        let results = await runner.runBatch(lease: makeLease(ids: [20, 21]), concurrency: 1)
+        #expect(results.count == 2)
+        #expect(results == [.rejected(.network(.leaseNotFound)), .rejected(.network(.leaseNotFound))])
+    }
 }
