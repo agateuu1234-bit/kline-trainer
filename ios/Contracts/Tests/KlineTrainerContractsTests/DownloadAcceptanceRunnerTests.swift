@@ -96,6 +96,25 @@ private struct CancellingIntegrity: ZipIntegrityVerifying {
     func verify(zipURL: URL, expectedCRC32Hex: String) throws { throw CancellationError() }
 }
 
+/// 让 id 越小睡越久（越晚完成）——用于验证 runBatch 按输入序而非完成序返回。
+private final class DelayedDownloadAPIClient: APIClient, @unchecked Sendable {
+    private let downloadURL: URL
+    private let unitNanos: UInt64
+    init(downloadURL: URL = URL(fileURLWithPath: "/tmp/ZipExtract-d/x.sqlite"),
+         unitNanos: UInt64 = 20_000_000) {  // 20ms
+        self.downloadURL = downloadURL; self.unitNanos = unitNanos
+    }
+    func reserveTrainingSets(count: Int) async throws -> LeaseResponse {
+        throw AppError.internalError(module: "test", detail: "unused")
+    }
+    func downloadTrainingSet(id: Int) async throws -> URL {
+        // 低 id 睡更久：id=1 睡 3*unit，id=2 睡 2*unit，id=3 睡 1*unit（假设 ids 1...N）
+        try? await Task.sleep(nanoseconds: unitNanos * UInt64(max(1, 5 - id)))
+        return downloadURL
+    }
+    func confirmTrainingSet(id: Int, leaseId: String) async throws {}  // 成功
+}
+
 /// store 固定抛错的 cache 替身（测 step 6 失败）。其它方法 no-op。
 private final class ThrowingStoreCache: CacheManager, @unchecked Sendable {
     private let error: AppError
@@ -132,7 +151,7 @@ struct DownloadAcceptanceRunnerTests {
 
     /// 构造一个除指定失败点外全成功的 runner。
     private func makeRunner(
-        api: FakeAPIClient = FakeAPIClient(),
+        api: any APIClient = FakeAPIClient(),
         cache: CacheManager = InMemoryCacheManager(),
         journal: AcceptanceJournalDAO = InMemoryAcceptanceJournalDAO(),
         factory: TrainingSetDBFactory = StubDBFactory(),
@@ -309,6 +328,8 @@ struct DownloadAcceptanceRunnerTests {
     /// 直接在 journal 灌一条已 stored 的行（绕过 run，模拟「上次运行落盘后崩溃」）。
     private func seedStored(_ journal: AcceptanceJournalDAO, id: Int, leaseId: String,
                            path: String, hash: String = "0badf00d") throws {
+        // 状态机要求顺序推进 downloaded→crcOK→unzipped→dbVerified→stored；
+        // 少灌任一步，InMemoryAcceptanceJournalDAO 会因非法 transition 抛 AppError.internalError。
         try journal.upsert(trainingSetId: id, leaseId: leaseId, state: .downloaded,
                            sqliteLocalPath: nil, contentHash: nil, lastError: nil)
         try journal.upsert(trainingSetId: id, leaseId: leaseId, state: .crcOK,
@@ -413,6 +434,21 @@ struct DownloadAcceptanceRunnerTests {
         #expect(ids == [1, 2, 3, 4, 5])
         // 并发写不互相污染 journal：每个 id 各有独立 confirmed 行（R1 Low-2 修订）
         #expect(try journal.listByState(.confirmed).count == 5)
+    }
+
+    @Test func runBatch_resultsOrderedByInputNotCompletion() async throws {
+        // concurrency=3 同时起跑；id=3 最先完成、id=1 最后完成。
+        // 若 runBatch 按完成序返回会是 [3,2,1]；正确实现按输入序 [1,2,3]。
+        let runner = makeRunner(api: DelayedDownloadAPIClient())
+        let results = await runner.runBatch(lease: makeLease(ids: [1, 2, 3]), concurrency: 3)
+        let ids = results.map { r -> Int? in if case .confirmed(let f) = r { return f.id } else { return nil } }
+        #expect(ids == [1, 2, 3])
+    }
+
+    @Test func runBatch_zeroConcurrency_treatedAsOne() async throws {
+        let runner = makeRunner(api: FakeAPIClient(confirmError: nil))
+        let results = await runner.runBatch(lease: makeLease(ids: [1, 2]), concurrency: 0)
+        #expect(results.count == 2)
     }
 
     @Test func runBatch_mixedOutcomes_orderPreserved() async throws {
