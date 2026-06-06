@@ -48,7 +48,71 @@ public final class DownloadAcceptanceRunner: Sendable {
     }
 
     public func run(meta: TrainingSetMetaItem, leaseId: String) async -> AcceptanceResult {
-        fatalError("Task 2")
+        // Step 1：下载 zip（download 完成前不写 journal 行——spec L1820 step 0/1）
+        let zipURL: URL
+        do {
+            zipURL = try await api.downloadTrainingSet(id: meta.id)
+        } catch {
+            return .rejected(Self.asAppError(error))   // 网络失败，无 journal 行
+        }
+
+        var tempURLs: [URL] = [zipURL]
+        do {
+            // 首条 journal 行 .downloaded
+            try journal.upsert(trainingSetId: meta.id, leaseId: leaseId, state: .downloaded,
+                               sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+
+            // Step 2：CRC32
+            try integrity.verify(zipURL: zipURL, expectedCRC32Hex: meta.contentHash)
+            try journal.upsert(trainingSetId: meta.id, leaseId: leaseId, state: .crcOK,
+                               sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+
+            // Step 3：解压（解压临时目录 = sqlite 的父目录，纳入清理）
+            let sqliteURL = try extractor.extract(zipURL: zipURL)
+            tempURLs.append(sqliteURL.deletingLastPathComponent())
+            try journal.upsert(trainingSetId: meta.id, leaseId: leaseId, state: .unzipped,
+                               sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+
+            // Step 4+5：openAndVerify + verifyNonEmpty（reader 在 cache.store/cleanup 前关闭）
+            do {
+                let reader = try dbFactory.openAndVerify(file: sqliteURL,
+                                                         expectedSchemaVersion: TRAINING_SET_SCHEMA_VERSION)
+                defer { reader.close() }
+                try journal.upsert(trainingSetId: meta.id, leaseId: leaseId, state: .dbVerified,
+                                   sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+                try dataVerifier.verifyNonEmpty(reader: reader)   // 保持 dbVerified
+            }
+
+            // Step 6：把**解压后的 sqlite** 存入 cache。
+            // ⚠️ store 参数名 `downloadedZip` 是 Wave 0 冻结代码的误导名——生产
+            // DefaultFileSystemCacheManager.store 把入参当**已解压 sqlite**：stageFile(copyItem)
+            // 后 readSchemaVersion 开 DatabaseQueue 读 PRAGMA user_version（DefaultFileSystemCacheManager.swift
+            // L45-46 注释 + L52/L64）。传 zip 必失败。故传 sqliteURL（extractor 产物），不是 zipURL。
+            let file = try cache.store(downloadedZip: sqliteURL, meta: meta)
+            try journal.upsert(trainingSetId: meta.id, leaseId: leaseId, state: .stored,
+                               sqliteLocalPath: file.localURL.path, contentHash: meta.contentHash,
+                               lastError: nil)
+
+            // Step 7：confirm（stored → confirmPending → confirmed/rejected/停留）
+            let outcome = await attemptConfirm(trainingSetId: meta.id, leaseId: leaseId,
+                                               sqliteLocalPath: file.localURL.path)
+            cleaner.cleanup(tempURLs: tempURLs)   // 清 temp zip + 解压目录（非 cache 副本）
+            switch outcome {
+            case .confirmed:
+                return .confirmed(file)
+            case .rejected(let e):                // 409/404 → 删本地 cache 副本
+                try? cache.delete(file)
+                return .rejected(e)
+            case .pending(let e):                 // 网络不确定 → 保留 cache 副本待重试
+                return .rejected(e)
+            }
+        } catch {
+            let appErr = Self.asAppError(error)
+            try? journal.upsert(trainingSetId: meta.id, leaseId: leaseId, state: .rejected,
+                                sqliteLocalPath: nil, contentHash: nil, lastError: appErr.userMessage)
+            cleaner.cleanup(tempURLs: tempURLs)
+            return .rejected(appErr)
+        }
     }
 
     public func runBatch(lease: LeaseResponse, concurrency: Int = 1) async -> [AcceptanceResult] {
@@ -57,5 +121,40 @@ public final class DownloadAcceptanceRunner: Sendable {
 
     public func retryPendingConfirmations() async {
         fatalError("Task 5")
+    }
+
+    // MARK: - confirm 子状态机（run + retry 共用）
+
+    private enum ConfirmOutcome { case confirmed; case rejected(AppError); case pending(AppError) }
+
+    /// 先标 confirmPending（状态机要求 + 崩溃安全），再调 confirm。
+    /// 成功 → confirmed；409/404 → rejected；其余 → 停留 confirmPending。
+    private func attemptConfirm(trainingSetId: Int, leaseId: String,
+                                sqliteLocalPath: String?) async -> ConfirmOutcome {
+        try? journal.upsert(trainingSetId: trainingSetId, leaseId: leaseId, state: .confirmPending,
+                            sqliteLocalPath: sqliteLocalPath, contentHash: nil, lastError: nil)
+        do {
+            try await api.confirmTrainingSet(id: trainingSetId, leaseId: leaseId)
+            try? journal.upsert(trainingSetId: trainingSetId, leaseId: leaseId, state: .confirmed,
+                                sqliteLocalPath: sqliteLocalPath, contentHash: nil, lastError: nil)
+            return .confirmed
+        } catch {
+            let e = Self.asAppError(error)
+            switch e {
+            case .network(.leaseExpired), .network(.leaseNotFound):
+                try? journal.upsert(trainingSetId: trainingSetId, leaseId: leaseId, state: .rejected,
+                                    sqliteLocalPath: nil, contentHash: nil, lastError: e.userMessage)
+                return .rejected(e)
+            default:
+                return .pending(e)   // 停留 confirmPending；本地文件保留
+            }
+        }
+    }
+
+    /// 边界翻译：上游协议已 throws AppError；DefaultAPIClient 协作取消重抛 CancellationError → 标 P2 内部。
+    private static func asAppError(_ error: Error) -> AppError {
+        if let e = error as? AppError { return e }
+        if error is CancellationError { return .internalError(module: "P2", detail: "cancelled") }
+        return .internalError(module: "P2", detail: "unexpected")
     }
 }

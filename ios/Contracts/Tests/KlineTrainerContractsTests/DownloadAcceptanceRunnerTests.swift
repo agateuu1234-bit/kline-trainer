@@ -124,4 +124,44 @@ struct DownloadAcceptanceRunnerTests {
             cleaner: FakeDownloadAcceptanceCleaner())
         let _: any Sendable = runner   // 编译期断言 Sendable
     }
+
+    @Test func run_happyPath_returnsConfirmed_walksFullStateMachine() async throws {
+        let meta = makeMeta(id: 7, contentHash: "0badf00d")
+        let api = FakeAPIClient(confirmError: nil)               // confirm 成功
+        let cache = InMemoryCacheManager()
+        let journal = RecordingJournalDAO()
+        let cleaner = FakeDownloadAcceptanceCleaner()
+        let factory = StubDBFactory()
+        let runner = DownloadAcceptanceRunner(
+            api: api, cache: cache, dbFactory: factory, journal: journal,
+            integrity: FakeZipIntegrityVerifier(),
+            extractor: FakeZipExtractor(returnURL: URL(fileURLWithPath: "/tmp/ZipExtract-x/set7.sqlite")),
+            dataVerifier: FakeTrainingSetDataVerifier(),
+            cleaner: cleaner)
+
+        let result = await runner.run(meta: meta, leaseId: "11111111-1111-1111-1111-111111111111")
+
+        // 1) 返回 confirmed + file 落在 cache
+        guard case .confirmed(let file) = result else {
+            Issue.record("expected .confirmed, got \(result)"); return
+        }
+        #expect(file.id == 7)
+        #expect(cache.listAvailable().contains(where: { $0.id == 7 }))
+
+        // 2) 状态推进顺序（含中间态；stored→confirmed 必经 confirmPending）
+        #expect(journal.sequence == [.downloaded, .crcOK, .unzipped, .dbVerified, .stored, .confirmPending, .confirmed])
+
+        // 3) 最终 applied 状态 = confirmed（1 行）
+        #expect(try journal.listByState(.confirmed).count == 1)
+        #expect(try journal.listByState(.stored).isEmpty)
+
+        // 4) reader 已关闭；expectedSchemaVersion 传共享常量
+        #expect(factory.lastReader?.closed == true)
+        #expect(factory.lastExpectedVersion == TRAINING_SET_SCHEMA_VERSION)
+
+        // 5) temp 已清理（下载 zip + 解压临时目录），cache 副本不在清理列表
+        let cleaned = cleaner.cleanedURLs().map(\.path)
+        #expect(cleaned.contains("/tmp/ZipExtract-test/dl.zip"))
+        #expect(cleaned.contains("/tmp/ZipExtract-x"))   // = sqlite.deletingLastPathComponent()
+    }
 }
