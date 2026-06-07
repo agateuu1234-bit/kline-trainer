@@ -35,6 +35,11 @@ public final class TrainingEngine {
 
     private let animators: (upper: DecelerationAnimator, lower: DecelerationAnimator)
 
+    /// C8b：渲染路径缓存的最近 bounds（按面板）。`activateDrawingTool` 算 candleRange 复用
+    /// （spec `activateDrawingTool` 签名无 bounds 参数 → 缓存，D1）。`@ObservationIgnored`：
+    /// 渲染层 `recordRenderBounds` 写入不得触发观察重建（否则 updateUIView 写 → 重渲染循环）。
+    @ObservationIgnored private var lastRenderedBounds: (upper: CGRect, lower: CGRect) = (.zero, .zero)
+
     /// 构造运行时引擎（D9 校验边界契约）。
     ///
     /// **`allCandles` 必须是已校验数据。** 训练组数据的「可恢复」校验（空 `[:]` / 缺 `.m3` /
@@ -63,7 +68,9 @@ public final class TrainingEngine {
                 initialTradeOperations: [TradeOperation] = [],
                 initialDrawdown: DrawdownAccumulator = .initial,
                 initialUpperPeriod: Period = .m60,             // 默认上区 60m（plan v1.5 L777）；resume 传 PendingTraining.upperPeriod
-                initialLowerPeriod: Period = .daily) {          // 默认下区 日线；resume 传 PendingTraining.lowerPeriod
+                initialLowerPeriod: Period = .daily,            // 默认下区 日线；resume 传 PendingTraining.lowerPeriod
+                decelerationDriverFactory: @escaping (@escaping @MainActor (CGFloat) -> Bool) -> FrameDriving =
+                    { onTick in RealFrameDriver(onTick: onTick) }) {   // C8b/D5：可注入减速帧驱动（默认真实）
         // 前置不变量（NormalFlow 同风格：trap 调用方 bug，不防御 clamp）
         precondition(maxTick >= 0, "maxTick must be >= 0")
         // R4-F1：fail-fast flow/maxTick 契约，杜绝 TickEngine 静默 clamp 掩盖 record/训练组版本错位。
@@ -118,7 +125,13 @@ public final class TrainingEngine {
         self.lowerPanel = PanelViewState(period: initialLowerPeriod, interactionMode: .autoTracking,
                                          visibleCount: 0, offset: 0, revision: 0)
 
-        self.animators = (upper: DecelerationAnimator(), lower: DecelerationAnimator())
+        self.animators = (
+            upper: DecelerationAnimator(makeDriver: decelerationDriverFactory),
+            lower: DecelerationAnimator(makeDriver: decelerationDriverFactory))
+        // C8b：减速每帧 delta 必经 reducer offsetApplied（spec §C2 闸门 #2 F2，禁直写 offset）。
+        // self 此时已全初始化（animators 为最后一个无默认值的存储属性；lastRenderedBounds 有默认值）。
+        self.animators.upper.onUpdate = { [weak self] delta in self?.applyOffsetDelta(delta, panel: .upper) }
+        self.animators.lower.onUpdate = { [weak self] delta in self?.applyOffsetDelta(delta, panel: .lower) }
     }
 
     /// `make` 的构造输入：工厂内部据此**先验 maxTick 再建 flow**，杜绝外部传入会 trap 的非法 flow——
@@ -443,6 +456,48 @@ public final class TrainingEngine {
             guard c.period == .m3, c.globalIndex == i, c.endGlobalIndex == i else { return false }
         }
         return true
+    }
+}
+
+// MARK: - C8b 交互编排（C7 手势接线下游 + 画线激活 H1 production handler）
+// 同文件 extension：可访问 `private let animators` / `private(set) var drawings` / `lastRenderedBounds`
+// （Swift `private` 文件作用域；免破坏 E5a init internal 的 trust boundary）。
+
+extension TrainingEngine {
+
+    // MARK: 私有 helper（面板/动画/bounds 取址 + 经 reducer 的 offset 派发）
+
+    private func panelState(_ panel: PanelId) -> PanelViewState {
+        panel == .upper ? upperPanel : lowerPanel
+    }
+
+    private func renderBounds(_ panel: PanelId) -> CGRect {
+        panel == .upper ? lastRenderedBounds.upper : lastRenderedBounds.lower
+    }
+
+    private func animator(for panel: PanelId) -> DecelerationAnimator {
+        panel == .upper ? animators.upper : animators.lower
+    }
+
+    /// 把 ChartAction 派给对应面板的 reducer（统一面板 mutate 入口）。
+    @discardableResult
+    private func reduce(_ action: ChartAction, on panel: PanelId) -> ChartReduceEffect {
+        switch panel {
+        case .upper: return upperPanel.reduce(action)
+        case .lower: return lowerPanel.reduce(action)
+        }
+    }
+
+    /// 减速 onUpdate + 单指 pan `.changed` 共用：每帧 delta 经 reducer offsetApplied
+    /// （drawing 吞 / autoTracking·freeScrolling 累加 + bump，spec L1123-1129）。
+    private func applyOffsetDelta(_ delta: CGFloat, panel: PanelId) {
+        _ = reduce(.offsetApplied(deltaPixels: delta), on: panel)
+    }
+
+    /// 停两面板减速（D7：硬切 autoTracking / 画线激活前调）。
+    private func stopAllDeceleration() {
+        animators.upper.stop()
+        animators.lower.stop()
     }
 }
 
