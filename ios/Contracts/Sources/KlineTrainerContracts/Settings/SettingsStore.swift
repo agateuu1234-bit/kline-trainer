@@ -25,6 +25,8 @@ public final class SettingsStore {
     /// R5 H-1：暴露为 public read-only，让 caller (E6/E5) 在调 snapshotFees / 进 trade flow 前 guard。
     private var _loadError: AppError?
     public var loadError: AppError? { _loadError }
+    /// Wave 2 顺位 1 RFC §四：retryReload() 失败后置位；forceResetAndReload 强制「先试 retryReload」顺序。
+    private var _retryReloadFailed = false
 
     private static let zeroDefault = AppSettings(
         commissionRate: 0, minCommissionEnabled: false,
@@ -96,6 +98,39 @@ public final class SettingsStore {
     public func snapshotFeesIfReady() throws -> FeeSnapshot {
         if let e = _loadError { throw e }
         return snapshotFees()
+    }
+
+    // MARK: - Wave 2 顺位 1 RFC §四：loadError 两层恢复
+
+    /// 仅 `.persistence(.dbCorrupted)` 是 corruption-class（数据真不可解，破坏才有意义）；
+    /// diskFull/ioError/schemaMismatch 等一律 transient（不允许破坏）。
+    private static func isDBCorrupted(_ error: AppError) -> Bool {
+        if case .persistence(.dbCorrupted) = error { return true }
+        return false
+    }
+
+    /// 非破坏性 transient 恢复（首选）。要求 loadError != nil；纯重读不写库。
+    /// 成功 → MainActor 先 settings=loaded 再清 loadError+flag（保留 DB 真实用户设置）。
+    /// 失败 → 置 _retryReloadFailed + 更新 _loadError 为本次最新错误（不留 stale init 错误）+ throws。
+    public func retryReload() async throws {
+        guard _loadError != nil else {
+            throw AppError.internalError(module: "P6", detail: "retryReload 仅在 loadError 态可用")
+        }
+        let dao = self.settingsDAO
+        do {
+            let loaded = try await Task.detached(priority: .userInitiated) {
+                try dao.loadSettings()
+            }.value
+            self.settings = loaded          // R2-high 不变量：先刷新 settings
+            self._loadError = nil           // 再清错误位
+            self._retryReloadFailed = false
+        } catch {
+            let appErr = (error as? AppError)
+                ?? .internalError(module: "P6", detail: String(describing: error))
+            self._retryReloadFailed = true
+            self._loadError = appErr        // FR7：更新为最新错误，不留 stale
+            throw appErr
+        }
     }
 }
 
