@@ -193,9 +193,39 @@ public final class TrainingSessionCoordinator {
         try pendingRepo.savePending(pending)
     }
 
-    /// 正式结束（spec line 1663）
+    /// 正式结束（spec L1663/L1679）：构造 TrainingRecord + ops + drawings 入账，清 pending，返回 recordId。
+    /// `flow.shouldSaveRecord()==false`（Review/Replay）→ 早返 nil，不插记录、不动 pending（D2）。
+    /// total_capital = 本局**起始**资金（方案 A / D1）；maxDrawdown 元→负比率（D6）；起始年月按 UTC+8（D7）。
+    /// 缺活跃上下文 → .internalError（D9）。
     public func finalize(engine: TrainingEngine) async throws -> Int64? {
-        fatalError("Wave 2 E6 impl")
+        guard engine.flow.shouldSaveRecord() else { return nil }   // D2：Review/Replay 不入账
+        guard let file = activeFile, let reader = activeReader else {
+            throw AppError.internalError(module: "E6b", detail: "finalize without active session context")
+        }
+        let meta = try reader.loadMeta()
+        let starting = engine.initialCapital                       // D1：起始资金
+        let profit = engine.currentTotalCapital - starting
+        let (year, month) = Self.startYearMonth(from: meta.startDatetime)
+        let record = TrainingRecord(
+            id: nil,
+            trainingSetFilename: file.filename,
+            createdAt: now(),                                      // D5
+            stockCode: meta.stockCode,
+            stockName: meta.stockName,
+            startYear: year,
+            startMonth: month,
+            totalCapital: starting,                               // D1：本局起始资金
+            profit: profit,
+            returnRate: engine.returnRate,
+            maxDrawdown: Self.drawdownRatio(absolute: engine.drawdown.maxDrawdown,
+                                            peak: engine.drawdown.peakCapital),   // D6
+            buyCount: engine.tradeOperations.filter { $0.direction == .buy }.count,    // D8
+            sellCount: engine.tradeOperations.filter { $0.direction == .sell }.count,
+            feeSnapshot: engine.fees,
+            finalTick: engine.tick.globalTickIndex)
+        let id = try recordRepo.insertRecord(record, ops: engine.tradeOperations, drawings: engine.drawings)
+        try pendingRepo.clearPending()
+        return id
     }
 
     /// session 结束清理（spec L1666/L1684，不 throws）：关闭 reader 并清空全部活跃上下文（D10）。

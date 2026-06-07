@@ -252,4 +252,156 @@ struct TrainingSessionPersistenceTests {
         #expect(y == 2022)
         #expect(m == 1)
     }
+
+    // MARK: - Task 4: finalize 集成测试
+
+    /// 构造一个确定性 pending：resume 后 tick=7、price=10.7、cash=90000、shares=100、accumulated=100000，
+    /// → currentTotal=91070、profit=-8930、drawdown abs=8930/peak=100000。
+    static func deterministicPending() throws -> PendingTraining {
+        let pos = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000)
+        return PendingTraining(
+            trainingSetFilename: "set.sqlite", globalTickIndex: 7,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: try JSONEncoder().encode(pos), cashBalance: 90_000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0002, minCommissionEnabled: true),
+            tradeOperations: [
+                TradeOperation(globalTick: 2, period: .m3, direction: .buy, price: 10.2, shares: 100,
+                               positionTier: .tier1, commission: 1, stampDuty: 0, totalCost: 1020, createdAt: 0),
+                TradeOperation(globalTick: 5, period: .m3, direction: .sell, price: 10.5, shares: 100,
+                               positionTier: .tier1, commission: 1, stampDuty: 1, totalCost: 1048, createdAt: 0)
+            ],
+            drawings: [], startedAt: 1,
+            accumulatedCapital: 100_000,
+            drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 5_000))
+    }
+
+    /// resume 路径 coordinator（StubFactory + MetaSpyReader 控制 meta；pending 注入）。
+    static func resumeCoordinator(
+        meta: TrainingSetMeta
+    ) throws -> (TrainingSessionCoordinator, InMemoryRecordRepository, InMemoryPendingTrainingRepository, MetaSpyReader) {
+        let spy = MetaSpyReader(candles: validCandles(), meta: meta)
+        let cache = InMemoryCacheManager(); cache._seedForTesting([cachedFile()])
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        try pending.savePending(try deterministicPending())
+        let coord = TrainingSessionCoordinator(
+            dbFactory: StubFactory(reader: spy),
+            recordRepo: records, pendingRepo: pending,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache, settings: SettingsStore(settingsDAO: CapitalDAO(capital: 10_000)))
+        return (coord, records, pending, spy)
+    }
+
+    @Test("finalize: Normal 入账 record 全字段（total=起始≠结束 killer / profit / 回撤比率 / 买卖次数 / 年月 / 清 pending）")
+    func finalize_normal_insertsRecordCorrectly() async throws {
+        // startDatetime = 2021-08-15 12:00 北京时
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let startEpoch = Int64(cal.date(from: DateComponents(year: 2021, month: 8, day: 15, hour: 12))!
+                                .timeIntervalSince1970)
+        let meta = TrainingSetMeta(stockCode: "600519", stockName: "贵州茅台",
+                                   startDatetime: startEpoch, endDatetime: startEpoch + 1)
+        let (coord, records, pending, _) = try Self.resumeCoordinator(meta: meta)
+        coord.now = { 1_700_000_000 }
+        let engine = try #require(try await coord.resumePending())   // tick 7, shares 100
+        let id = try #require(try await coord.finalize(engine: engine))
+
+        let (rec, ops, _) = try records.loadRecordBundle(id: id)
+        #expect(rec.totalCapital == 100_000)                          // D1 方案 A：起始资金
+        #expect(rec.totalCapital != 91_070)                           // killer：非结束总资金
+        #expect(abs(rec.profit - (-8_930)) < 1e-6)                    // 91070 - 100000（容差，FP）
+        #expect(abs(rec.returnRate - (-0.0893)) < 1e-9)              // profit/起始
+        #expect(abs(rec.maxDrawdown - (-0.0893)) < 1e-9)            // -(8930/100000)，D6
+        #expect(rec.buyCount == 1)                                    // D8
+        #expect(rec.sellCount == 1)
+        #expect(rec.stockCode == "600519")
+        #expect(rec.stockName == "贵州茅台")
+        #expect(rec.startYear == 2021)                                // D7 UTC+8
+        #expect(rec.startMonth == 8)
+        #expect(rec.createdAt == 1_700_000_000)                       // D5 now()
+        #expect(rec.finalTick == 7)
+        #expect(rec.trainingSetFilename == "set.sqlite")
+        #expect(rec.feeSnapshot.commissionRate == 0.0002)
+        #expect(ops.count == 2)                                       // ops 一并入账
+        #expect(try pending.loadPending() == nil)                    // D2：清 pending
+    }
+
+    @Test("finalize: review 模式 → nil（不插记录、不动 pending，D2）")
+    func finalize_review_returnsNil() async throws {
+        let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let id = try records.insertRecord(
+            TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
+                           stockCode: "X", stockName: "X", startYear: 2020, startMonth: 1,
+                           totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                           buyCount: 0, sellCount: 0,
+                           feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+                           finalTick: 7),
+            ops: [], drawings: [])
+        let countBefore = try records.listRecords(limit: nil).count
+        let engine = try await coord.review(recordId: id)
+        let result = try await coord.finalize(engine: engine)
+        #expect(result == nil)
+        #expect(try records.listRecords(limit: nil).count == countBefore)   // 未新增记录
+    }
+
+    @Test("finalize: replay 模式 → nil（不入账，D2）")
+    func finalize_replay_returnsNil() async throws {
+        let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let id = try records.insertRecord(
+            TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
+                           stockCode: "X", stockName: "X", startYear: 2020, startMonth: 1,
+                           totalCapital: 80_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                           buyCount: 0, sellCount: 0,
+                           feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+                           finalTick: 7),
+            ops: [], drawings: [])
+        let countBefore = try records.listRecords(limit: nil).count
+        let engine = try await coord.replay(recordId: id)
+        let result = try await coord.finalize(engine: engine)
+        #expect(result == nil)
+        #expect(try records.listRecords(limit: nil).count == countBefore)
+    }
+
+    @Test("finalize: Normal 但缺活跃上下文（endSession 后）→ .internalError（D9）")
+    func finalize_noActiveContext_throws() async throws {
+        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let engine = try await coord.startNewNormalSession()
+        await coord.endSession()
+        await #expect(throws: AppError.internalError(module: "E6b",
+                      detail: "finalize without active session context")) {
+            _ = try await coord.finalize(engine: engine)
+        }
+    }
+
+    @Test("finalize: 局终自动强平产生的 sell 计入 sellCount（D8 覆盖）")
+    func finalize_forceCloseSell_countedInSellCount() async throws {
+        // resume 在 tick 3 持仓 100；holdOrObserve(.upper) 走 m60 步进 3→7（maxTick）→ 触发局终强平卖出。
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 2)
+        let spy = Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let pos = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000)
+        try pending.savePending(PendingTraining(
+            trainingSetFilename: "set.sqlite", globalTickIndex: 3,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: try JSONEncoder().encode(pos), cashBalance: 90_000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            tradeOperations: [], drawings: [], startedAt: 1,
+            accumulatedCapital: 100_000, drawdown: .initial))
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: records, pendingRepo: pending,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000)))
+        let engine = try #require(try await coord.resumePending())
+        #expect(engine.tick.globalTickIndex == 3)
+        engine.holdOrObserve(panel: .upper)              // 3 → 7（m60 步进）→ 局终强平 100 股
+        #expect(engine.tick.globalTickIndex == 7)
+        #expect(engine.position.shares == 0)             // 强平后空仓
+        let id = try #require(try await coord.finalize(engine: engine))
+        let (rec, _, _) = try records.loadRecordBundle(id: id)
+        #expect(rec.sellCount == 1)                       // 仅强平 1 笔 sell（pending ops 为空，D8）
+        #expect(rec.buyCount == 0)
+        #expect(rec.finalTick == 7)
+    }
 }
