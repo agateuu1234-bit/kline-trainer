@@ -170,9 +170,27 @@ public final class TrainingSessionCoordinator {
         }
     }
 
-    /// 保存进度（spec line 1659）
+    /// 保存进度（spec L1659/L1677：U2 退出 / 每 N tick 自动调用）。仅 Normal 模式持久化
+    /// （review 只读、replay 不入账 → 无 pending 语义，D3 no-op）。缺活跃上下文 → .internalError（D9）。
     public func saveProgress(engine: TrainingEngine) async throws {
-        fatalError("Wave 2 E6 impl")
+        guard engine.flow.mode == .normal else { return }     // D3：仅 Normal 持久化
+        guard let file = activeFile, let started = activeStartedAt else {
+            throw AppError.internalError(module: "E6b", detail: "saveProgress without active session context")
+        }
+        let pending = PendingTraining(
+            trainingSetFilename: file.filename,
+            globalTickIndex: engine.tick.globalTickIndex,
+            upperPeriod: engine.upperPanel.period,
+            lowerPeriod: engine.lowerPanel.period,
+            positionData: try encodePosition(engine.position),
+            cashBalance: engine.cashBalance,
+            feeSnapshot: engine.fees,
+            tradeOperations: engine.tradeOperations,
+            drawings: engine.drawings,
+            startedAt: started,
+            accumulatedCapital: engine.initialCapital,         // D4：本局起始资金
+            drawdown: engine.drawdown)
+        try pendingRepo.savePending(pending)
     }
 
     /// 正式结束（spec line 1663）
@@ -229,6 +247,16 @@ public final class TrainingSessionCoordinator {
             return try JSONDecoder().decode(PositionManager.self, from: data)
         } catch {
             throw AppError.persistence(.dbCorrupted)
+        }
+    }
+
+    /// D9 M0.4 边界：PositionManager 序列化（saveProgress 唯一编码点）。in-memory 不变量保证 finite，
+    /// encode 失败 = 内部 bug（非可恢复存档损坏）→ .internalError（与 decodePosition 的 .dbCorrupted 非对称有意）。
+    private func encodePosition(_ position: PositionManager) throws -> Data {
+        do {
+            return try JSONEncoder().encode(position)
+        } catch {
+            throw AppError.internalError(module: "E6b", detail: "position encode failed: \(error)")
         }
     }
 

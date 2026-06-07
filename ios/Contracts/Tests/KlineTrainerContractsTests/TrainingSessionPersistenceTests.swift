@@ -115,4 +115,84 @@ struct TrainingSessionPersistenceTests {
         await coord.endSession()
         #expect(spy.closed == true)
     }
+
+    @Test("saveProgress: Normal 局 → 持久化 PendingTraining 全字段（含 startedAt=now()、accumulated=起始资金）")
+    func saveProgress_normal_persistsAllFields() async throws {
+        let (coord, _, pending) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
+        coord.now = { 111 }                                  // 控制 startedAt
+        let engine = try await coord.startNewNormalSession()  // fresh：tick 0、空仓、cash 50000
+        try await coord.saveProgress(engine: engine)
+        let p = try #require(try pending.loadPending())
+        #expect(p.trainingSetFilename == "set.sqlite")        // D4：activeFile.filename
+        #expect(p.globalTickIndex == 0)
+        #expect(p.upperPeriod == .m60)
+        #expect(p.lowerPeriod == .daily)
+        #expect(p.cashBalance == 50_000)
+        #expect(p.accumulatedCapital == 50_000)               // D4：engine.initialCapital
+        #expect(p.startedAt == 111)                            // D4/D5：fresh=now() at start
+        #expect(p.tradeOperations.isEmpty)
+        #expect(p.drawings.isEmpty)
+        // positionData 可解回空仓（D9 encode 往返）
+        let pos = try JSONDecoder().decode(PositionManager.self, from: p.positionData)
+        #expect(pos.shares == 0)
+    }
+
+    @Test("saveProgress: review 模式 → no-op（不写 pending，D3）")
+    func saveProgress_review_noop() async throws {
+        let (coord, records, pending) = Self.makeCoordinator(candles: Self.validCandles())
+        let id = try records.insertRecord(
+            TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
+                           stockCode: "X", stockName: "X", startYear: 2020, startMonth: 1,
+                           totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                           buyCount: 0, sellCount: 0,
+                           feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+                           finalTick: 7),
+            ops: [], drawings: [])
+        let engine = try await coord.review(recordId: id)
+        try await coord.saveProgress(engine: engine)
+        #expect(try pending.loadPending() == nil)             // review 不持久化
+    }
+
+    @Test("saveProgress: replay 模式 → no-op（不写 pending，D3）")
+    func saveProgress_replay_noop() async throws {
+        let (coord, records, pending) = Self.makeCoordinator(candles: Self.validCandles())
+        let id = try records.insertRecord(
+            TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
+                           stockCode: "X", stockName: "X", startYear: 2020, startMonth: 1,
+                           totalCapital: 80_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                           buyCount: 0, sellCount: 0,
+                           feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+                           finalTick: 7),
+            ops: [], drawings: [])
+        let engine = try await coord.replay(recordId: id)
+        try await coord.saveProgress(engine: engine)
+        #expect(try pending.loadPending() == nil)
+    }
+
+    @Test("saveProgress: 缺活跃上下文（endSession 后）→ .internalError（D9）")
+    func saveProgress_noActiveContext_throws() async throws {
+        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let engine = try await coord.startNewNormalSession()
+        await coord.endSession()                               // 清空 activeFile/activeStartedAt
+        await #expect(throws: AppError.internalError(module: "E6b",
+                      detail: "saveProgress without active session context")) {
+            try await coord.saveProgress(engine: engine)
+        }
+    }
+
+    @Test("saveProgress → resumePending round-trip：状态还原一致（D4 跨方法集成）")
+    func saveProgress_thenResume_roundTrips() async throws {
+        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
+        coord.now = { 222 }
+        let engine = try await coord.startNewNormalSession()
+        try await coord.saveProgress(engine: engine)
+        await coord.endSession()
+        let resumed = try #require(try await coord.resumePending())
+        #expect(resumed.tick.globalTickIndex == 0)
+        #expect(resumed.cashBalance == 50_000)
+        #expect(resumed.initialCapital == 50_000)
+        #expect(resumed.position.shares == 0)
+        #expect(resumed.upperPanel.period == .m60)
+        #expect(resumed.lowerPanel.period == .daily)
+    }
 }
