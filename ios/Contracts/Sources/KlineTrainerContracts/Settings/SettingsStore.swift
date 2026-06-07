@@ -25,6 +25,8 @@ public final class SettingsStore {
     /// R5 H-1：暴露为 public read-only，让 caller (E6/E5) 在调 snapshotFees / 进 trade flow 前 guard。
     private var _loadError: AppError?
     public var loadError: AppError? { _loadError }
+    /// Wave 2 顺位 1 RFC §四：retryReload() 失败后置位；forceResetAndReload 强制「先试 retryReload」顺序。
+    private var _retryReloadFailed = false
 
     private static let zeroDefault = AppSettings(
         commissionRate: 0, minCommissionEnabled: false,
@@ -96,6 +98,87 @@ public final class SettingsStore {
     public func snapshotFeesIfReady() throws -> FeeSnapshot {
         if let e = _loadError { throw e }
         return snapshotFees()
+    }
+
+    // MARK: - Wave 2 顺位 1 RFC §四：loadError 两层恢复
+
+    /// 仅 `.persistence(.dbCorrupted)` 是 corruption-class（数据真不可解，破坏才有意义）；
+    /// diskFull/ioError/schemaMismatch 等一律 transient（不允许破坏）。
+    private static func isDBCorrupted(_ error: AppError) -> Bool {
+        if case .persistence(.dbCorrupted) = error { return true }
+        return false
+    }
+
+    /// 非破坏性 transient 恢复（首选）。要求 loadError != nil；纯重读不写库。
+    /// 成功 → MainActor 先 settings=loaded 再清 loadError+flag（保留 DB 真实用户设置）。
+    /// 失败 → 置 _retryReloadFailed + 更新 _loadError 为本次最新错误（不留 stale init 错误）+ throws。
+    public func retryReload() async throws {
+        guard _loadError != nil else {
+            throw AppError.internalError(module: "P6", detail: "retryReload 仅在 loadError 态可用")
+        }
+        let dao = self.settingsDAO
+        do {
+            let loaded = try await Task.detached(priority: .userInitiated) {
+                try dao.loadSettings()
+            }.value
+            self.settings = loaded          // R2-high 不变量：先刷新 settings
+            self._loadError = nil           // 再清错误位
+            self._retryReloadFailed = false
+        } catch {
+            let appErr = (error as? AppError)
+                ?? .internalError(module: "P6", detail: String(describing: error))
+            self._retryReloadFailed = true
+            self._loadError = appErr        // FR7：更新为最新错误，不留 stale
+            throw appErr
+        }
+    }
+
+    /// 破坏性 last-resort（仅持久损坏）。守卫编码进 state（非 prose 约定）：
+    /// ① loadError != nil ② _retryReloadFailed == true（已先试 retryReload 且失败）
+    /// ③ loadError 是 corruption-class .persistence(.dbCorrupted)。
+    /// 任一不满足 → throws 且不调 saveSettings（零破坏；transient 走 retry-only）。
+    /// 过门后破坏前最后非破坏 reload：成功（transient 已恢复）→ 保留真实设置不写库；
+    /// 失败且 final error 也是 dbCorrupted → saveSettings(.default) → reload；
+    /// 失败但 final 是 transient → 更新 loadError + throws + 不破坏（FR3 混合错误）。
+    public func forceResetAndReload(confirmation: SettingsResetConfirmation) async throws {
+        _ = confirmation  // deliberate-intent 信号（构造即意图）；真正数据安全靠下方守卫
+        guard let entryError = _loadError else {
+            throw AppError.internalError(module: "P6", detail: "forceReset 仅在 loadError 态可用")
+        }
+        guard _retryReloadFailed else {
+            throw AppError.internalError(module: "P6", detail: "forceReset 须先失败的 retryReload")
+        }
+        guard Self.isDBCorrupted(entryError) else {
+            throw entryError   // 非 dbCorrupted（transient）→ retry-only，零破坏
+        }
+        let dao = self.settingsDAO
+        do {
+            // 破坏前最后非破坏 reload
+            let loaded = try await Task.detached(priority: .userInitiated) {
+                try dao.loadSettings()
+            }.value
+            self.settings = loaded          // transient 已恢复：保留真实设置
+            self._loadError = nil
+            self._retryReloadFailed = false
+            return                          // 零破坏（不 saveSettings）
+        } catch {
+            let finalError = (error as? AppError)
+                ?? .internalError(module: "P6", detail: String(describing: error))
+            guard Self.isDBCorrupted(finalError) else {
+                self._loadError = finalError  // 混合错误：更新为 transient
+                throw finalError              // 不破坏
+            }
+            // 确认持久损坏 → 破坏性 reset
+            try await Task.detached(priority: .userInitiated) {
+                try dao.saveSettings(AppSettings.default)
+            }.value                           // 写失败则抛出，_loadError 保留 dbCorrupted
+            let reloaded = try await Task.detached(priority: .userInitiated) {
+                try dao.loadSettings()
+            }.value
+            self.settings = reloaded
+            self._loadError = nil
+            self._retryReloadFailed = false
+        }
     }
 }
 

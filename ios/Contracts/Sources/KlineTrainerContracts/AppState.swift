@@ -163,3 +163,14 @@ public struct AppSettings: Equatable, Sendable {
         self.displayMode = displayMode
     }
 }
+
+// MARK: - Named default (Wave 2 顺位 10 引入；P6 forceResetAndReload reset 目标值)
+// RFC docs/superpowers/specs/2026-06-03-wave2-pr1-baseline-h1-rfc-design.md §四：
+// 含合理起始本金（非 0 资本）的命名默认值；不复用 capital 0 的 SettingsStore.zeroDefault。
+public extension AppSettings {
+    static let `default` = AppSettings(
+        commissionRate: 0.0001,      // §6.4 佣金初始值 1（万分之一）
+        minCommissionEnabled: false, // §6.4 未规定 免5 初始值；false=免5（无最低 5 元）
+        totalCapital: 100_000,       // §6.4 重置资金 → 10 万元
+        displayMode: .system)
+}
