@@ -225,4 +225,19 @@ struct RenderStateBuilderTests {
         let b = RenderStateBuilder.make(engine: engine, panel: .upper, bounds: Self.bounds)
         #expect(a == b)
     }
+
+    @Test("perf smoke（非权威）：5000 根 makeViewport 装配开销")
+    func perfSmoke() {
+        let cs = Self.candles(period: .m3, count: 5000)
+        let panel = Self.panel()
+        let start = Date()
+        for _ in 0..<100 {
+            _ = RenderStateBuilder.makeViewport(panelState: panel, candles: cs,
+                                                tick: 4000, bounds: Self.bounds)
+        }
+        let ms = Date().timeIntervalSince(start) * 1000 / 100
+        // 非权威 smoke：仅记录单次装配毫秒；spec「120Hz 单帧 <4ms」完整 draw 帧预算归 C8b/顺位 9。
+        print("[C8a perf smoke] makeViewport avg = \(ms) ms (non-authoritative; not the spec frame budget)")
+        #expect(ms < 50)   // 极宽松上界，仅防病态退化（partitioningIndex O(log n) + 切片 O(80)）
+    }
 }
