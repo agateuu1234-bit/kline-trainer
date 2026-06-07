@@ -7,7 +7,6 @@
 // 视口几何 spec 无公式 → 本 PR 固定 defaultVisibleCount=80 分母 + 条件锚定 + offset 分解（Wave 2 占位；
 // pinch 缩放改 visibleCount 属 Wave 3）。
 
-import Foundation
 import CoreGraphics
 
 public enum RenderStateBuilder {
@@ -55,7 +54,7 @@ public enum RenderStateBuilder {
 
     /// 视口几何推导（唯一拥有 startIndex/pixelShift 装配的函数；make 与 visibleCandleRange 都经它）。
     /// **前置约束**：`candles` 非空、`bounds.width > 0`（调用方 make/visibleCandleRange 已守 .empty/空）。
-    /// Task 1：offset=0 路径（startIndex=clamp(baseStartIndex)，pixelShift=0）。Task 2 泛化非零 offset。
+    /// 支持 autoTracking（offset=0）与 freeScrolling（非零 offset 分解 + 边界饱和）；C8b H1 handler 复用点。
     static func makeViewport(panelState: PanelViewState, candles: [KLineCandle],
                              tick: Int, bounds: CGRect) -> ChartViewport {
         let mainFrame = ChartPanelFrames.split(in: bounds).mainChart
