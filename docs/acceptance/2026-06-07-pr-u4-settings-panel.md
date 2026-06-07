@@ -7,23 +7,25 @@
 
 ## 一、自动测试（恢复 API + 内容层 + 默认值）
 
+> **注（rebase 后重验）**：本分支已 rebase 到含 E6a(#83)+C8a(#84) 的最新 `origin/main`（codereview I1），下方数字均为**集成后整棵树**实跑。
+
 ### 1.1 全量测试绿
 
 - **操作**：终端运行 `swift test`
-- **预期**：最后一行显示「Test run with 658 tests in 109 suites passed」（数字 ≥658，0 失败）
-- **真实输出（本次实跑）**：
+- **预期**：最后一行显示「Test run with 696 tests in 111 suites passed」（数字 ≥696，0 失败）
+- **真实输出（集成后实跑）**：
   ```
-  ✔ Test run with 658 tests in 109 suites passed after 22.444 seconds.
+  ✔ Test run with 696 tests in 111 suites passed after 22.323 seconds.
   ```
 - **通过判定**：出现 `passed` 且无 `✘`/`failed` → 通过；任何 `failed` → 不通过
 
 ### 1.2 恢复状态机 11 场景全覆盖
 
 - **操作**：运行 `swift test --filter SettingsStoreRecoveryTests`
-- **预期**：13 个测试通过（11 RFC 场景 + retryReload 健康态/失败更新错误 2 个单元）
+- **预期**：14 个测试通过（11 RFC 场景 + retryReload 健康态/失败更新错误 2 单元 + 9b post-save reload 失败 codereview M1）
 - **真实输出**：
   ```
-  ✔ Test run with 13 tests in 1 suite passed after 0.001 seconds.
+  ✔ Test run with 14 tests in 1 suite passed after 0.002 seconds.
   ```
 - **覆盖对照（RFC §四 场景号 ↔ 测试名）**：
   | RFC 场景 | 测试 | 含义（中文） |
@@ -132,8 +134,8 @@
 
 | 项 | 结果 |
 |---|---|
-| 1.1 全量 658 测试 | 通过 |
-| 1.2 恢复 11 场景（13 测试） | 通过 |
+| 1.1 全量 696 测试（集成 E6a+C8a 后） | 通过 |
+| 1.2 恢复 11 场景（14 测试，含 9b） | 通过 |
 | 1.3 守卫 mutation 实证 | 通过 |
 | 1.4 内容层 6 测试 | 通过 |
 | 1.5 默认值 2 测试 | 通过 |

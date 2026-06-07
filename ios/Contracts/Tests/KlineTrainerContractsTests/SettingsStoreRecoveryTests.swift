@@ -231,4 +231,24 @@ struct SettingsStoreRecoveryTests {
         }
         #expect(dao.saveCallCount == 0)
     }
+
+    // ── 场景 9b（codereview M1）：save 成功但破坏后 reload 仍失败 → loadError 保留 + throws ──
+    // 与场景 9（save 写失败 → saveCallCount==0）区分：本例 saveCallCount==1（写成功），失败在 post-save reload。
+    @Test("场景9b 破坏后 reload 失败：saveSettings 成功但 post-save reload 仍 dbCorrupted → 保留 + throws + saveCallCount==1")
+    func s9b_postSaveReloadFails() async throws {
+        let dao = RecoverySettingsDAO(loadScript: [
+            .failure(AppError.persistence(.dbCorrupted)),  // init
+            .failure(AppError.persistence(.dbCorrupted)),  // retry
+            .failure(AppError.persistence(.dbCorrupted)),  // forceReset 破坏前最后 reload
+            .failure(AppError.persistence(.dbCorrupted)),  // post-save reload 仍失败
+        ])
+        let store = SettingsStore(settingsDAO: dao)
+        await #expect(throws: (any Error).self) { try await store.retryReload() }
+
+        await #expect(throws: (any Error).self) {
+            try await store.forceResetAndReload(confirmation: SettingsResetConfirmation())
+        }
+        #expect(store.loadError == .persistence(.dbCorrupted))  // 保留
+        #expect(dao.saveCallCount == 1)                         // 写成功，区别于场景 9
+    }
 }
