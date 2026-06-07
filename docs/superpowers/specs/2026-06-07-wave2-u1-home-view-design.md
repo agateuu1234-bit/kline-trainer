@@ -105,15 +105,15 @@ public enum ProfitSign: Equatable, Sendable { case positive, negative, zero }
 
 | 字段 | 规则 | 决策 |
 |---|---|---|
-| `totalSessions` | `"\(totalCount) 局"` | — |
-| `winRate` | `totalCount==0` → `"—"`（U+2014）；否则 `winCount/totalCount×100` 四舍五入到整数 + `"%"`（如 `"67%"`） | D2 / D7 |
-| `totalCapital`（统计栏） | `totalCount==0` → 格式化 `configuredCapital`；否则格式化 `statistics.currentCapital`。格式 = `formatCapital`（下行） | D13 |
+| `totalSessions` | `"\(statistics.totalCount) 局"`。**N 恒取 `statistics.totalCount`（DB 全量计数），不得用 `rows.count`**（D12 compactMap 后 rows 可能少于 totalCount，二者刻意允许不等，见 D12） | D12 |
+| `winRate` | `totalCount==0` → `"—"`（U+2014）；否则 `(Double(winCount)/Double(totalCount)*100).rounded()` → `Int` → `+"%"`（`.rounded()` = `.toNearestOrAwayFromZero`，半数远离零，如 12.5→13） | D2 / D7 |
+| `totalCapital`（统计栏） | **判据 = `statistics.totalCount`**：`==0` → 格式化 `configuredCapital`；`>0` → **无条件**格式化 `statistics.currentCapital`（即便其值为 `0.0`，那是真实清零局结果，不回退）。格式 = `formatCapital`（下行） | D13 |
 | `formatCapital`（统计栏 + row totalCapital + row 盈亏额共用） | `"¥ "` + POSIX(`en_US_POSIX`) 千分位 + 强制 2 位小数（沿用 U3 `formatCapital` 字面规则，本地副本）。**¥ 后恒一个空格，全 PR 一致** | D3 |
 | `primaryActionLabel` | `hasPending ? "继续训练" : "开始训练"` | — |
 | row `dateTime` | `createdAt`（epoch 秒）→ `DateFormatter("yyyy-MM-dd HH:mm")`，locale `en_US_POSIX`，`timeZone` 注入（默认 `.current`；**测试必须显式传固定 TimeZone**，见 §五） | D5 |
 | row `stock` | `"\(name)（\(code)）"`（全角括号 U+FF08/U+FF09） | D4 |
 | row `startMonth` | `"\(year)年" + String(format:"%02d",month) + "月"` | — |
-| row `profitAndRate` | `符号 + "¥ " + 千分位(\|profit\|, 2 位) + "（" + 符号 + (returnRate×100, 2 位) + "%）"`；签名零归一化（`==0` → 取 `+`，含 `-0.0`，沿用 U3 D5）。例：`"+¥ 2,345.67（+2.34%）"` / `"-¥ 1,234.56（-1.23%）"` / `"+¥ 0.00（+0.00%）"` | D8 |
+| row `profitAndRate` | `profit符号 + "¥ " + 千分位(\|profit\|, 2 位) + "（" + rate符号 + (\|returnRate\|×100, 2 位) + "%）"`。**`profit` 的符号与 `returnRate` 的符号各自独立**按 `==0→"+"`（含 `-0.0`）归一化，互不影响（两者是 `TrainingRecord` 两个独立 `Double` 字段，可一零一非零）。例：`"+¥ 2,345.67（+2.34%）"` / `"-¥ 1,234.56（-1.23%）"` / 双零 `"+¥ 0.00（+0.00%）"` / 混合 `profit=-0.0,rate=0.0234→"+¥ 0.00（+2.34%）"` | D8 |
 | row `sign` | `profit > 0` → `.positive`；`profit < 0` → `.negative`；`profit == 0`（含 `-0.0`）→ `.zero` | D9 |
 
 **spec §6.1.3 L880 行示例为 illustrative（D8/D3 统一声明）**：spec 历史行示例 `¥102,345  +¥2,345（+2.3%）` 同时**省略角分、省略 ¥ 后空格、收益率只 1 位小数**——三处都是示意松写。权威格式以本设计为准：所有金额 = `"¥ "`（带空格，对齐统计栏 plan §6.1.1 L855 `¥ XXX,XXX` 字面 + U3 结算屏先例）+ 2 位小数；收益率 2 位小数（对齐 U3 `formatSignedRate` + 结算屏 §6.3 L998 `+2.34%`）。此声明消除「同行内两个 ¥ 字段间距不一致」与「精度偏离 L880」两条挑战路径。
@@ -156,13 +156,13 @@ public struct HomeView: View {
 | **D4** | 股票名格式 | `name（code）` 全角括号 | spec §6.1.3 L880 字面；自包含不复用 sibling |
 | **D5** | 日期格式 | `yyyy-MM-dd HH:mm` + 注入 `timeZone`（默认 `.current`，**测试禁用默认必传固定时区**） | host 测试钉死时区保证确定性；POSIX locale 防格式漂移 |
 | **D6** | 点击历史行 | 只 fire `onSelectRecord(id)`；U6 sheet + 复盘/再来一次 路由归顺位 11 | 保持 view-only，避免 HomeView 反向耦合 U6 + 原始 records；review/replay 的 coordinator 调用本归顺位 11（user 批准推荐）。**承接缝隙见 §七 R2 须登记** |
-| **D7** | 胜率精度 | 整数百分比四舍五入 | spec §6.1.1 字面 "X%" 无小数 |
+| **D7** | 胜率精度 | 整数百分比，`.rounded()`（`.toNearestOrAwayFromZero`，半数远离零） | spec §6.1.1 字面 "X%" 无小数；显式钉 rounding 模式防实施期浮点边界返工（防 PR#66 dash ULP 同类教训），§五加 .5 边界用例锁定 |
 | **D8** | 盈亏格式 | `±¥ 金额（±rate%）` 2 位小数 + 签名零归一化 | spec §6.1.3 L880 示例（illustrative）；沿用 U3 D5 signed-zero + 2 位精度 |
 | **D9** | `ProfitSign` 来源 | 据 `profit` 定（非 returnRate） | spec §6.1.3「颜色：正数红色，负数绿色」修饰盈亏额 |
 | **D10** | 历史排序 | Content 内部 `createdAt` desc + `id` desc 兜底 | 不依赖 caller；确定性防测试 flaky |
 | **D11** | 空缓存提示 | 注入 `hasCachedSets`，view inline `.alert` | spec §6.1.2 把提示归 HomeView；只 alert 不路由仍属 view-only（user 批准） |
 | **D12** | `HomeHistoryRow.id` 可选性 | `compactMap` 跳过 `id==nil` 记录，禁强解包 | `TrainingRecord.id: Int64?`（AppState.swift:20）；listRecords 契约保证已落库 id 非 nil，compactMap 为纵深防御 + 解包后排序/回传 |
-| **D13** | 零局总资金 | 增 `configuredCapital` 参数；`totalCount==0` 显示它而非 `currentCapital`(=0) | `statistics().currentCapital` 无记录时返 0（impl `?? 0`），直接显示违反 plan §6.1.1 L861「初始 10 万」；镜像 coordinator `startingCapital()` 规则 |
+| **D13** | 零局总资金 | 增 `configuredCapital` 参数；**回退判据 = `statistics.totalCount==0`**（非 `currentCapital==0`），此时显示 configuredCapital；`totalCount>0` 无条件显示 currentCapital（即便 0.0） | 无记录时 `statistics().currentCapital` 返 0（impl `?? 0`），直接显示 "¥ 0.00" 违反 plan §6.1.1 L861「初始 10 万」；判据与 coordinator `startingCapital()`（TrainingSessionCoordinator.swift L249 `totalCount>0 ? currentCapital : settings.totalCapital`）**字面一致**，避免 `currentCapital==0` 误判清零局 |
 
 ---
 
@@ -170,11 +170,12 @@ public struct HomeView: View {
 
 **`HomeContentTests`（host 真断言，Swift Testing）** —— 覆盖矩阵：
 
-- 统计栏：`totalSessions` 计数；`winRate` 正常（如 2/3→"67%"、四舍五入边界如 1/2→"50%"）、**totalCount==0→"—"**、全胜 "100%"；`totalCapital` 千分位 + 2 位小数 + POSIX + **精确串含 `"¥ "` 带空格**。
-- **零局总资金（D13）**：`totalCount==0` + `configuredCapital=100000` → `totalCapital=="¥ 100,000.00"`（不是 "¥ 0.00"）；`totalCount>0` 时显示 `currentCapital` 而非 configuredCapital。
+- 统计栏：`totalSessions` 计数；`winRate` 正常（2/3→"67%"、1/2→"50%"）、**.5 边界锁 rounding 模式**（1/8=12.5→"13%"、7/8=87.5→"88%"，证明 `.toNearestOrAwayFromZero`）、**totalCount==0→"—"**、全胜 "100%"；`totalCapital` 千分位 + 2 位小数 + POSIX + **精确串含 `"¥ "` 带空格**。
+- **`totalSessions` 来源隔离（D12/M2）**：`statistics.totalCount=3` + 传入 records 含 1 条 `id==nil`（compactMap 后 rows.count=2）→ `totalSessions=="3 局"` 且 `rows.count==2`（钉死 N 取 statistics.totalCount 非 rows.count）。
+- **零局总资金（D13）**：`totalCount==0` + `configuredCapital=100000` → `totalCapital=="¥ 100,000.00"`（不是 "¥ 0.00"）；**`totalCount=1` + `currentCapital=0.0` → `totalCapital=="¥ 0.00"`**（钉死 totalCount>0 不回退，即便真清零局）；`totalCount>0` 显示 currentCapital 而非 configuredCapital。
 - 按钮：`hasPending=true`→`primaryActionLabel="继续训练"` & `isResuming=true`；`false`→"开始训练" & `isResuming=false`。
 - `hasCachedSets` 透传 true/false。
-- 历史 rows：**排序** createdAt desc（含乱序输入 + createdAt 相等用 id desc 兜底）；逐字段格式（dateTime、stock 全角括号、startMonth 零填充、totalCapital 含 `"¥ "`）；`profitAndRate` 三签名精确串（正 `"+¥ 2,345.67（+2.34%）"`/负 `"-¥ 1,234.56（-1.23%）"`/零 `"+¥ 0.00（+0.00%）"`）；signed-zero（`profit=-0.0`、`returnRate=-0.0` → 取 `+`）；`sign` 正确（正/负/零，含 `-0.0`→`.zero`）。
+- 历史 rows：**排序** createdAt desc（含乱序输入 + createdAt 相等用 id desc 兜底）；逐字段格式（dateTime、stock 全角括号、startMonth 零填充、totalCapital 含 `"¥ "`）；`profitAndRate` 三签名精确串（正 `"+¥ 2,345.67（+2.34%）"`/负 `"-¥ 1,234.56（-1.23%）"`/双零 `"+¥ 0.00（+0.00%）"`）；**混合零（M3）**：`profit=-0.0,returnRate=0.0234→"+¥ 0.00（+2.34%）"` 与 `profit=2345.67,returnRate=-0.0→"+¥ 2,345.67（+0.00%）"`（钉死 profit/rate 符号各自独立归一化）；`sign` 正确（正/负/零，含 `-0.0`→`.zero`）。
 - **id 可选性（D12）**：输入含一条 `id==nil` 记录 → 被 `compactMap` 跳过，不出现在 rows、不 trap；其余正常记录保留。
 - **dateTime 时区（D5，硬规则）**：所有 dateTime 断言**必须显式传 `TimeZone(identifier:)`，禁用默认 `.current`**；至少一条跨时区边界用例（同一 `createdAt` 在 `UTC` vs `Asia/Shanghai` 落不同日期/小时，验证 timeZone 真生效）。
 - 空历史：`records=[]` → `isHistoryEmpty=true` & `rows=[]`。
@@ -207,3 +208,4 @@ public struct HomeView: View {
 |---|---|---|
 | 2026-06-07 | v1 | 起草；shell-mode 双层；D1-D11 决策（user 批准 shell-mode / 胜率@0="—" / hasCachedSets 入 shell / D6 onSelectRecord） |
 | 2026-06-07 | v2（spec opus 4.8 对抗评审 R1 修） | **[H]** D12 `HomeHistoryRow.id` 可选性：`TrainingRecord.id: Int64?`，compactMap 跳 nil 禁强解包 + 测试；**[M]** D13 零局总资金：增 `configuredCapital` 参数，`totalCount==0` 显示它而非 `currentCapital`(=0)，修 plan §6.1.1 L861「初始 10 万」冲突 + 测试；**[M]** ¥ 间距统一为 `"¥ "`（带空格）全 PR 一致 + L880 illustrative 声明；**[M]** 精度偏离 L880 显式声明 illustrative（金额/收益率均 2 位）；**[M]** R2 U6 sheet 呈现 outline 顺位 11 缝隙登记；**[L]** R1 modules §U1 接线式 init reconcile 登记；**[L]** D5 timeZone 测试硬规则（禁默认 + 跨时区用例） |
+| 2026-06-07 | v3（spec opus 4.8 对抗评审 R2 修） | **[H]** D13 理由自相矛盾修正：回退判据钉死 `totalCount==0`（非 `currentCapital==0`），`totalCount>0` 无条件显示 currentCapital 即便 0.0 + 清零局测试；**[M]** D7 winRate rounding 模式钉 `.rounded()`（`.toNearestOrAwayFromZero`）+ .5 边界用例（1/8→13%、7/8→88%）；**[M]** M2 `totalSessions` 来源隔离：钉死取 `statistics.totalCount` 非 `rows.count` + 不等测试；**[M]** M3 profit/returnRate 符号各自独立 signed-zero 归一化 + 混合零精确串用例 |
