@@ -46,11 +46,13 @@ public struct SettingsPanel: View {
                 showCommissionEditor = true
             }
 
-            // 2. 免5 开关
-            Toggle("免5（不收最低 5 元佣金）", isOn: Binding(
-                get: { !settings.settings.minCommissionEnabled },
+            // 2. 免5 开关（§6.4 字面极性：开启=不免5=收最低 5 元；关闭=免5=无最低限制）
+            //    直接绑定 minCommissionEnabled（true=收最低 5 元），不反转——与 §6.4 + 数据语义一致。
+            //    label 写明「开=收最低 5 元 / 关=免5」消歧，避免「免5 开关 ON 反而不免5」的歧义。
+            Toggle("最低 5 元佣金（开=收 / 关=免5）", isOn: Binding(
+                get: { settings.settings.minCommissionEnabled },
                 set: { newValue in
-                    Task { try? await settings.update { $0.minCommissionEnabled = !newValue } }
+                    Task { try? await settings.update { $0.minCommissionEnabled = newValue } }
                 }))
 
             // 3. 重置资金
