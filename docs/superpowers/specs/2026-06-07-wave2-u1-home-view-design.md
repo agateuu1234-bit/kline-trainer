@@ -170,7 +170,7 @@ public struct HomeView: View {
 
 **`HomeContentTests`（host 真断言，Swift Testing）** —— 覆盖矩阵：
 
-- 统计栏：`totalSessions` 计数；`winRate` 正常（2/3→"67%"、1/2→"50%"）、**.5 边界锁 rounding 模式**（1/8=12.5→"13%"、7/8=87.5→"88%"，证明 `.toNearestOrAwayFromZero`）、**totalCount==0→"—"**、全胜 "100%"；`totalCapital` 千分位 + 2 位小数 + POSIX + **精确串含 `"¥ "` 带空格**。
+- 统计栏：`totalSessions` 计数；`winRate` 正常（2/3→"67%"、1/2→"50%"）、**.5 边界锁 rounding 模式**（1/8=12.5→"13%" 与 5/8=62.5→"63%"——两条均 `toNearestOrEven` 给偶数 12/62、`toNearestOrAwayFromZero` 给 13/63，构成**真双判别锚**，banker's rounding 会让两条都 FAIL，杜绝空洞 demonstrator）、**totalCount==0→"—"**、全胜 "100%"；`totalCapital` 千分位 + 2 位小数 + POSIX + **精确串含 `"¥ "` 带空格**。
 - **`totalSessions` 来源隔离（D12/M2）**：`statistics.totalCount=3` + 传入 records 含 1 条 `id==nil`（compactMap 后 rows.count=2）→ `totalSessions=="3 局"` 且 `rows.count==2`（钉死 N 取 statistics.totalCount 非 rows.count）。
 - **零局总资金（D13）**：`totalCount==0` + `configuredCapital=100000` → `totalCapital=="¥ 100,000.00"`（不是 "¥ 0.00"）；**`totalCount=1` + `currentCapital=0.0` → `totalCapital=="¥ 0.00"`**（钉死 totalCount>0 不回退，即便真清零局）；`totalCount>0` 显示 currentCapital 而非 configuredCapital。
 - 按钮：`hasPending=true`→`primaryActionLabel="继续训练"` & `isResuming=true`；`false`→"开始训练" & `isResuming=false`。
@@ -208,4 +208,5 @@ public struct HomeView: View {
 |---|---|---|
 | 2026-06-07 | v1 | 起草；shell-mode 双层；D1-D11 决策（user 批准 shell-mode / 胜率@0="—" / hasCachedSets 入 shell / D6 onSelectRecord） |
 | 2026-06-07 | v2（spec opus 4.8 对抗评审 R1 修） | **[H]** D12 `HomeHistoryRow.id` 可选性：`TrainingRecord.id: Int64?`，compactMap 跳 nil 禁强解包 + 测试；**[M]** D13 零局总资金：增 `configuredCapital` 参数，`totalCount==0` 显示它而非 `currentCapital`(=0)，修 plan §6.1.1 L861「初始 10 万」冲突 + 测试；**[M]** ¥ 间距统一为 `"¥ "`（带空格）全 PR 一致 + L880 illustrative 声明；**[M]** 精度偏离 L880 显式声明 illustrative（金额/收益率均 2 位）；**[M]** R2 U6 sheet 呈现 outline 顺位 11 缝隙登记；**[L]** R1 modules §U1 接线式 init reconcile 登记；**[L]** D5 timeZone 测试硬规则（禁默认 + 跨时区用例） |
-| 2026-06-07 | v3（spec opus 4.8 对抗评审 R2 修） | **[H]** D13 理由自相矛盾修正：回退判据钉死 `totalCount==0`（非 `currentCapital==0`），`totalCount>0` 无条件显示 currentCapital 即便 0.0 + 清零局测试；**[M]** D7 winRate rounding 模式钉 `.rounded()`（`.toNearestOrAwayFromZero`）+ .5 边界用例（1/8→13%、7/8→88%）；**[M]** M2 `totalSessions` 来源隔离：钉死取 `statistics.totalCount` 非 `rows.count` + 不等测试；**[M]** M3 profit/returnRate 符号各自独立 signed-zero 归一化 + 混合零精确串用例 |
+| 2026-06-07 | v3（spec opus 4.8 对抗评审 R2 修） | **[H]** D13 理由自相矛盾修正：回退判据钉死 `totalCount==0`（非 `currentCapital==0`），`totalCount>0` 无条件显示 currentCapital 即便 0.0 + 清零局测试；**[M]** D7 winRate rounding 模式钉 `.rounded()`（`.toNearestOrAwayFromZero`）+ .5 边界用例；**[M]** M2 `totalSessions` 来源隔离：钉死取 `statistics.totalCount` 非 `rows.count` + 不等测试；**[M]** M3 profit/returnRate 符号各自独立 signed-zero 归一化 + 混合零精确串用例 |
+| 2026-06-07 | v4（spec opus 4.8 对抗评审 R3 修） | **[M]** winRate .5 边界第二锚 `7/8=87.5→88` 是空洞 demonstrator（87.5 在 toNearestOrEven 与 awayFromZero 同值 88，不判别模式）→ 换 `5/8=62.5→63`（even→62 vs away→63），与 `1/8=12.5→13` 构成真双判别锚（防 PR#62/#65 空洞 killer test 教训） |
