@@ -82,4 +82,69 @@ import CoreGraphics
         e.cancelPan(panel: .upper)
         #expect(fakes().isEmpty)            // 未调 animator.start
     }
+
+    @Test("交易硬切 autoTracking 时停减速：trade 后 stale 帧不漂移 offset")
+    func tradeStopsDecelerationNoDriftAfter() {
+        let (e, fakes) = Self.engine()
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 30, panel: .upper)
+        e.endPan(velocity: 1000, panel: .upper)
+        let upperFake = fakes()[0]
+        _ = e.buy(panel: .upper, tier: .tier1)          // tradeTriggered → 硬切 autoTracking + stopAllDeceleration
+        #expect(e.upperPanel.interactionMode == .autoTracking)
+        #expect(upperFake.isInvalidated == true)         // 减速被停（驱动失活）
+        let off = e.upperPanel.offset
+        let fired = upperFake.fire(1.0 / 120.0)          // 模拟延迟帧
+        #expect(fired == false)                          // 驱动自失活，不再发 onUpdate
+        #expect(e.upperPanel.offset == off)              // 无 offsetApplied 漂移
+    }
+
+    @Test("硬切 autoTracking 后 offset 经 reducer 归零（D8 不变量：autoTracking ⇒ offset==0）")
+    func autoTrackingOffsetZeroedAfterTrade() {
+        let (e, _) = Self.engine()
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 45, panel: .upper)   // freeScrolling, offset=45
+        #expect(e.upperPanel.offset == 45)
+        _ = e.holdOrObserve(panel: .upper)                 // 经 advanceAndAccount 硬切 + 归零
+        #expect(e.upperPanel.interactionMode == .autoTracking)
+        #expect(e.upperPanel.offset == 0)                  // 归零（makeViewport mode-agnostic 下保 autoTracking 锁最新）
+    }
+
+    @Test("switchPeriodCombo 硬切 autoTracking 同样停减速 + 归零")
+    func periodComboStopsAndZeroes() {
+        // 双面板需多周期数据：用 60m/日 默认组合，向 toSmaller 切到 15m/60m
+        let (e, fakes) = Self.engineMultiPeriod()
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 30, panel: .upper)
+        e.endPan(velocity: 1000, panel: .upper)
+        let upperFake = fakes()[0]
+        e.switchPeriodCombo(direction: .toSmaller)
+        #expect(upperFake.isInvalidated == true)
+        #expect(e.upperPanel.offset == 0)
+        #expect(e.upperPanel.interactionMode == .autoTracking)
+    }
+
+    /// 多周期 engine（默认 60m/日 组合可向 toSmaller 切 15m/60m）+ 注入 fake 驱动。
+    static func engineMultiPeriod() -> (TrainingEngine, () -> [FakeFrameDriver]) {
+        final class Box { var fakes: [FakeFrameDriver] = [] }
+        let box = Box()
+        func candle(_ p: Period, start: Int, end: Int) -> KLineCandle {
+            KLineCandle(period: p, datetime: Int64(start) * 180, open: 10, high: 11, low: 9, close: 10,
+                        volume: 1, amount: nil, ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: start, endGlobalIndex: end)
+        }
+        let m3 = (0..<8).map { candle(.m3, start: $0, end: $0) }
+        let m15 = [candle(.m15, start: 0, end: 3), candle(.m15, start: 4, end: 7)]
+        let m60 = [candle(.m60, start: 0, end: 3), candle(.m60, start: 4, end: 7)]
+        let daily = [candle(.daily, start: 0, end: 7)]
+        let all: [Period: [KLineCandle]] = [.m3: m3, .m15: m15, .m60: m60, .daily: daily]
+        let e = TrainingEngine(
+            flow: NormalFlow(fees: fees, maxTick: 7), allCandles: all, maxTick: 7,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m60, initialLowerPeriod: .daily,
+            decelerationDriverFactory: { onTick in
+                let f = FakeFrameDriver(onTick: onTick); box.fakes.append(f); return f
+            })
+        return (e, { box.fakes })
+    }
 }

@@ -294,10 +294,13 @@ public final class TrainingEngine {
         // D8 数据完整性守卫：避免后续 stepsForPeriod/渲染落在无数据周期
         guard let u = allCandles[next.upper], !u.isEmpty,
               let l = allCandles[next.lower], !l.isEmpty else { return }
+        stopAllDeceleration()                       // D7
         upperPanel.period = next.upper
         lowerPanel.period = next.lower
         _ = upperPanel.reduce(.periodComboSwitched)
         _ = lowerPanel.reduce(.periodComboSwitched)
+        resetOffsetAfterAutoTracking(.upper)        // D8
+        resetOffsetAfterAutoTracking(.lower)
     }
 
     // MARK: - 持有 / 观察（E5b）
@@ -332,8 +335,11 @@ public final class TrainingEngine {
 
     /// 两面板硬切 autoTracking（D4，plan v1.5 L235）→ 推进 tick → 更新回撤 → 局终强平（Task 6 接入）。
     private func advanceAndAccount(panel: PanelId) {
+        stopAllDeceleration()                       // D7：立即中断 free-scrolling 惯性（spec L235）
         _ = upperPanel.reduce(.tradeTriggered)
         _ = lowerPanel.reduce(.tradeTriggered)
+        resetOffsetAfterAutoTracking(.upper)        // D8：autoTracking ⇒ offset==0
+        resetOffsetAfterAutoTracking(.lower)
         _ = tick.advance(steps: stepsForPeriod(period(of: panel)))
         drawdown.update(currentCapital: currentTotalCapital)
         forceCloseIfEnded()
@@ -498,6 +504,15 @@ extension TrainingEngine {
     private func stopAllDeceleration() {
         animators.upper.stop()
         animators.lower.stop()
+    }
+
+    /// D8：硬切 autoTracking 后经 reducer 把 offset 归零（spec L1153「offset 只经 reducer」）。
+    /// 必须在 reduce(.tradeTriggered/.periodComboSwitched) **之后**调——此时 mode 已 autoTracking，
+    /// offsetApplied 不被 drawing 吞、被 autoTracking 分支累加。autoTracking + makeViewport mode-agnostic
+    /// 下，offset!=0 会令视口偏移，故须归零以「锁定最新」（D8）。
+    private func resetOffsetAfterAutoTracking(_ panel: PanelId) {
+        let off = panelState(panel).offset
+        if off != 0 { _ = reduce(.offsetApplied(deltaPixels: -off), on: panel) }
     }
 
     // MARK: 单指 pan 手势派发（C7 arbiter onPan 回调下游）
