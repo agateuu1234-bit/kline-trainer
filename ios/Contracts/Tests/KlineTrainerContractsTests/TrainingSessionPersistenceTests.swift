@@ -132,6 +132,8 @@ struct TrainingSessionPersistenceTests {
         #expect(p.startedAt == 111)                            // D4/D5：fresh=now() at start
         #expect(p.tradeOperations.isEmpty)
         #expect(p.drawings.isEmpty)
+        #expect(p.feeSnapshot == FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false))  // 自 settings 快照
+        #expect(p.drawdown == DrawdownAccumulator(peakCapital: 50_000, maxDrawdown: 0))  // fresh：peak=起始总资金 seed
         // positionData 可解回空仓（D9 encode 往返）
         let pos = try JSONDecoder().decode(PositionManager.self, from: p.positionData)
         #expect(pos.shares == 0)
