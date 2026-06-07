@@ -93,4 +93,66 @@ struct RenderStateBuilderTests {
         #expect(vp.startIndex == 0)
         #expect(vp.visibleCount == 50)
     }
+
+    // count=200, tick=150 → baseStartIndex=71, candleStep=10, upperBound=120
+    @Test("offset：中段正 offset → wholeShift + pixelShift 余量")
+    func offsetMidScroll() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: 25), candles: cs, tick: 150, bounds: Self.bounds)
+        // wholeShift=floor(25/10)=2 → startIndex=71-2=69（非边界）；pixelShift=25-20=5
+        #expect(vp.startIndex == 69)
+        #expect(abs(vp.pixelShift - 5) < 1e-9)
+    }
+
+    @Test("offset：负 offset → 余量仍落 [0,candleStep)")
+    func offsetNegative() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: -25), candles: cs, tick: 150, bounds: Self.bounds)
+        // wholeShift=floor(-2.5)=-3 → startIndex=71-(-3)=74；pixelShift=-25-(-30)=5
+        #expect(vp.startIndex == 74)
+        #expect(vp.pixelShift >= 0 && vp.pixelShift < 10)
+        #expect(abs(vp.pixelShift - 5) < 1e-9)
+    }
+
+    @Test("饱和(顶过左界)：offset 把 startIndex clamp 到 0 → pixelShift=0")
+    func saturateLeftClamped() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: 750), candles: cs, tick: 150, bounds: Self.bounds)
+        // wholeShift=75 → unclamped=71-75=-4 → clamp 0
+        #expect(vp.startIndex == 0)
+        #expect(vp.pixelShift == 0)
+    }
+
+    @Test("饱和(顶过右界)：offset 把 startIndex clamp 到 upperBound → pixelShift=0")
+    func saturateRightClamped() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: -600), candles: cs, tick: 150, bounds: Self.bounds)
+        // wholeShift=floor(-60)=-60 → unclamped=71+60=131 → clamp upperBound 120
+        #expect(vp.startIndex == 120)
+        #expect(vp.pixelShift == 0)
+    }
+
+    @Test("饱和(F3：恰落左界 + 非零余量，clamp 不改值)→ pixelShift=0")
+    func saturateLeftExactBoundary() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: 715), candles: cs, tick: 150, bounds: Self.bounds)
+        // wholeShift=71 → unclamped=71-71=0（==下界，clamp 不改）；余量=715-710=5 → 按落位归 0
+        #expect(vp.startIndex == 0)
+        #expect(vp.pixelShift == 0)
+    }
+
+    @Test("饱和(F3：恰落右界 + 非零余量，clamp 不改值)→ pixelShift=0")
+    func saturateRightExactBoundary() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: -485), candles: cs, tick: 150, bounds: Self.bounds)
+        // wholeShift=floor(-48.5)=-49 → unclamped=71+49=120（==upperBound，clamp 不改）；余量=-485-(-490)=5 → 0
+        #expect(vp.startIndex == 120)
+        #expect(vp.pixelShift == 0)
+    }
 }

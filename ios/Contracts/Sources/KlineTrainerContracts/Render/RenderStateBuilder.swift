@@ -38,8 +38,14 @@ public enum RenderStateBuilder {
         // autoTracking 锚定：当前 candle 落最右被绘制 slot（baseStartIndex 可能 <0，下方 clamp）。
         let baseStartIndex = currentIdx - (visibleCount - 1)
         let upperBound = max(0, count - visibleCount)
-        let startIndex = min(max(baseStartIndex, 0), upperBound)   // offset=0：pixelShift 恒 0
-        let pixelShift: CGFloat = 0
+        // offset 分解（C8b freeScrolling 复用；C8a offset 恒 0 时 wholeShift=0/pixelShift=0）。
+        // 符号契约（CoordinateMapper Geometry.swift L136）：pixelShift>0 = candles 右移。
+        let wholeShift = Int((panelState.offset / candleStep).rounded(.down))   // floor
+        let startIndex = min(max(baseStartIndex - wholeShift, 0), upperBound)
+        // 余量 ∈ [0,candleStep)；按 startIndex *落位* 判饱和（非按 clamp 是否改值，F3）：
+        // 处硬边界（最老 startIndex==0 / 最新 ==upperBound，无更多可揭示）→ pixelShift=0（边缘钉面板边）。
+        var pixelShift = panelState.offset - CGFloat(wholeShift) * candleStep
+        if startIndex == 0 || startIndex == upperBound { pixelShift = 0 }
 
         let sliceEnd = min(startIndex + visibleCount, count)
         let slice = candles[startIndex ..< sliceEnd]
