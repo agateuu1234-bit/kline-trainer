@@ -23,6 +23,15 @@ public final class TrainingSessionCoordinator {
     public private(set) var activeEngine: TrainingEngine?
     public private(set) var activeReader: (any TrainingSetReader)?
 
+    // MARK: - E6b 会话持久化上下文（saveProgress/finalize 需文件名+起始时间，engine 不携带）
+
+    /// 当前 session 的训练组文件（4 open 方法成功时记录；endSession 清空）。
+    @ObservationIgnored private var activeFile: TrainingSetFile?
+    /// 当前 session 的起始时间（fresh Normal=now()；resume=保留 pending.startedAt；review/replay=nil）。
+    @ObservationIgnored private var activeStartedAt: Int64?
+    /// 可注入时钟（public init 已冻结，不能加参数）。默认系统时钟；@testable 测试可覆盖（D5）。
+    @ObservationIgnored var now: () -> Int64 = { Int64(Date().timeIntervalSince1970) }
+
     public init(dbFactory: TrainingSetDBFactory,
                 recordRepo: RecordRepository,
                 pendingRepo: PendingTrainingRepository,
@@ -59,6 +68,8 @@ public final class TrainingSessionCoordinator {
                 initialCapital: start, initialCashBalance: start)
             activeReader = reader
             activeEngine = engine
+            activeFile = file
+            activeStartedAt = now()                 // D4：fresh Normal 局起始时间
             return engine
         } catch {
             reader.close()                                   // D9：失败关闭已开 reader，不留半态
@@ -92,6 +103,8 @@ public final class TrainingSessionCoordinator {
                 initialLowerPeriod: pending.lowerPeriod)
             activeReader = reader
             activeEngine = engine
+            activeFile = file
+            activeStartedAt = pending.startedAt      // D4：resume 保留原局起始时间
             return engine
         } catch {
             reader.close()
@@ -123,6 +136,8 @@ public final class TrainingSessionCoordinator {
                 initialTradeOperations: ops)
             activeReader = reader
             activeEngine = engine
+            activeFile = file
+            activeStartedAt = nil                    // D4：review 只读，无进度保存
             return engine
         } catch {
             reader.close()
@@ -146,6 +161,8 @@ public final class TrainingSessionCoordinator {
                 initialCashBalance: record.totalCapital)
             activeReader = reader
             activeEngine = engine
+            activeFile = file
+            activeStartedAt = nil                    // D4：replay 不入账，无进度保存
             return engine
         } catch {
             reader.close()
@@ -163,9 +180,13 @@ public final class TrainingSessionCoordinator {
         fatalError("Wave 2 E6 impl")
     }
 
-    /// session 结束清理（spec line 1666，不 throws）
+    /// session 结束清理（spec L1666/L1684，不 throws）：关闭 reader 并清空全部活跃上下文（D10）。
     public func endSession() async {
-        fatalError("Wave 2 E6 impl")
+        activeReader?.close()
+        activeReader = nil
+        activeEngine = nil
+        activeFile = nil
+        activeStartedAt = nil
     }
 
     // MARK: - 私有构造 helper（E6a）
