@@ -499,6 +499,31 @@ extension TrainingEngine {
         animators.upper.stop()
         animators.lower.stop()
     }
+
+    // MARK: 单指 pan 手势派发（C7 arbiter onPan 回调下游）
+
+    /// onPan `.began`：autoTracking → freeScrolling（spec 状态转换表 L231）。
+    public func beginPan(panel: PanelId) {
+        _ = reduce(.panStarted, on: panel)
+    }
+
+    /// onPan `.changed`：freeScrolling 下 offset 累加（drawing 模式 arbiter 截获不到此处）。
+    public func applyPanOffset(deltaPixels: CGFloat, panel: PanelId) {
+        applyOffsetDelta(deltaPixels, panel: panel)
+    }
+
+    /// onPan `.ended`：panEnded → `.startDeceleration` effect → 启动惯性（spec C2/闸门 #2）。
+    public func endPan(velocity: CGFloat, panel: PanelId) {
+        if case .startDeceleration(let v) = reduce(.panEnded(velocity: velocity), on: panel) {
+            animator(for: panel).start(initialVelocity: v)
+        }
+    }
+
+    /// onPan `.cancelled`（两指接管 / drawing 截获结算后）：结束 freeScrolling，**不**启动惯性。
+    /// 经 reducer `panEnded(0)` 关闭 freeScrolling 相位；忽略其 `.startDeceleration(0)` effect（不调 start）。
+    public func cancelPan(panel: PanelId) {
+        _ = reduce(.panEnded(velocity: 0), on: panel)
+    }
 }
 
 #if DEBUG

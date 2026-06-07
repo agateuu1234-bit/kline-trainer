@@ -39,4 +39,47 @@ import CoreGraphics
         #expect(e.upperPanel.offset != before)          // offset 被 reducer 累加
         #expect(e.upperPanel.interactionMode == .freeScrolling)
     }
+
+    @Test("beginPan: autoTracking → freeScrolling + revision bump")
+    func beginPanEntersFreeScrolling() {
+        let (e, _) = Self.engine()
+        let r0 = e.upperPanel.revision
+        e.beginPan(panel: .upper)
+        #expect(e.upperPanel.interactionMode == .freeScrolling)
+        #expect(e.upperPanel.revision == r0 + 1)
+    }
+
+    @Test("applyPanOffset: freeScrolling offset 累加")
+    func applyPanOffsetAccumulates() {
+        let (e, _) = Self.engine()
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 12, panel: .upper)
+        e.applyPanOffset(deltaPixels: 8, panel: .upper)
+        #expect(e.upperPanel.offset == 20)
+    }
+
+    @Test("endPan: freeScrolling + 有限速度 → 启动减速（驱动创建、未失活）")
+    func endPanStartsDeceleration() {
+        let (e, fakes) = Self.engine()
+        e.beginPan(panel: .upper)
+        e.endPan(velocity: 1000, panel: .upper)
+        #expect(fakes().count >= 1)
+        #expect(fakes()[0].isInvalidated == false)
+    }
+
+    @Test("endPan: 速度低于阈值 → 不启动（start guard no-op，无 fake 创建）")
+    func endPanBelowThresholdNoStart() {
+        let (e, fakes) = Self.engine()
+        e.beginPan(panel: .upper)
+        e.endPan(velocity: 0.1, panel: .upper)   // < stopThreshold 0.5 → animator.start no-op
+        #expect(fakes().isEmpty)
+    }
+
+    @Test("cancelPan: 不启动减速（freeScrolling 结束但无惯性）")
+    func cancelPanNoDeceleration() {
+        let (e, fakes) = Self.engine()
+        e.beginPan(panel: .upper)
+        e.cancelPan(panel: .upper)
+        #expect(fakes().isEmpty)            // 未调 animator.start
+    }
 }
