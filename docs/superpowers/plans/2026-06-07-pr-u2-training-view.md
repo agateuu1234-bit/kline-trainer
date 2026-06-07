@@ -19,7 +19,10 @@
 
 **phase_delivery**：true（1 plan = 1 phase）。acceptance = UI/feature + 生命周期机制验证。
 
-**trust-boundary 触点**：本 PR 新增 `ios/**/*.swift` + `docs/superpowers/plans/**` —— **二者均属 `trust_boundary_globs`**（`.claude/workflow-rules.json`），故**需对抗性 review**（本 PR 由 opus 4.8 xhigh 双闸门满足）。但**不**触 `.github`/`.claude`/schema/`openapi`/CODEOWNERS（`codeowners_required_globs`），亦不改冻结契约文件（modules/plan spec、frozen E5/E6/U3）—— 故无需 user Approve gate，走标准对抗性 review 即可。
+**trust-boundary 触点**：本 PR 新增 `ios/**/*.swift` + `docs/superpowers/plans/**`。
+- `ios/**/*.swift` ∈ `trust_boundary_globs` → **需对抗性 review**（本 PR 由 opus 4.8 xhigh 双闸门满足）。
+- `docs/superpowers/plans/**` ∈ **`codeowners_required_globs`**（`.claude/workflow-rules.json`，且 `.github/CODEOWNERS` 映射 `@agateuu1234-bit`）→ 触发 **CODEOWNERS-required approval**（session-start hook：codeowners_required_globs 变更须 user Approve）。本 plan doc 即落此 glob，**该要求由 canonical code owner `@agateuu1234-bit`（user 本人）执行 merge/approve 满足**（同既往 plan PR #84/#86/#87 user TTY + `--admin` merge 先例）。
+- **不**触 `.github`/`.claude`/schema/`openapi`/CODEOWNERS 文件本身，亦不改冻结契约文件（modules/plan spec、frozen E5/E6/U3）。
 
 ---
 
