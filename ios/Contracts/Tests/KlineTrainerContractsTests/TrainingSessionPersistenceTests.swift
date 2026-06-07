@@ -255,8 +255,9 @@ struct TrainingSessionPersistenceTests {
 
     // MARK: - Task 4: finalize 集成测试
 
-    /// 构造一个确定性 pending：resume 后 tick=7、price=10.7、cash=90000、shares=100、accumulated=100000，
-    /// → currentTotal=91070、profit=-8930、drawdown abs=8930/peak=100000。
+    /// 构造一个确定性 pending：**stored** drawdown abs=5000/peak=100000；resume 后 tick=7、price=10.7、
+    /// cash=90000、shares=100、accumulated=100000 → currentTotal=91070、profit=-8930。engine.init 的
+    /// seededDrawdown.update(91070) 因 peak(100000)-currentTotal(91070)=8930>5000 → maxDrawdown 提升到 8930。
     static func deterministicPending() throws -> PendingTraining {
         let pos = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000)
         return PendingTraining(
