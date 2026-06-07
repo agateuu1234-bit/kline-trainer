@@ -15,9 +15,9 @@
 
 | # | 操作（在 `ios/Contracts` 下运行） | 预期输出 | 判定 |
 |---|---|---|---|
-| 1 | `swift test 2>&1 \| tail -1` | 末行包含 `693 tests` 且包含 `passed`，不含 `failed` | 末行同时满足「出现 693 tests」「出现 passed」「不出现 failed」=PASS；否则 FAIL |
+| 1 | `swift test 2>&1 \| tail -1` | 末行包含 `694 tests` 且包含 `passed`，不含 `failed` | 末行同时满足「出现 694 tests」「出现 passed」「不出现 failed」=PASS；否则 FAIL |
 | 2 | `swift build --build-tests 2>&1 \| grep -ci warning` | 输出 `0` | 输出恰为 `0`=PASS；非 0=FAIL |
-| 3 | `swift test --filter "TrainingSessionPersistence" 2>&1 \| tail -1` | 末行包含 `19 tests` 且 `passed` | 同时满足「出现 19 tests」「出现 passed」=PASS；否则 FAIL |
+| 3 | `swift test --filter "TrainingSessionPersistence" 2>&1 \| tail -1` | 末行包含 `20 tests` 且 `passed` | 同时满足「出现 20 tests」「出现 passed」=PASS；否则 FAIL |
 | 4 | iOS-17 模拟器类型检查：`swiftc -typecheck -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" -target arm64-apple-ios17.0-simulator $(find Sources/KlineTrainerContracts -name "*.swift")` ；随后运行 `echo $?` | `echo $?` 输出 `0` | 输出恰为 `0`=PASS；非 0=FAIL |
 | 5 | 确认 3 个收尾方法不再是占位：`grep -c 'fatalError' Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift` | 输出 `0`（`fatalError` 仅余文件头注释，命令统计正文行——若仅命中第 3 行注释也算 0 正文，见下注） | 输出 `0` 或仅命中文件头第 3 行注释（无任何方法体 `fatalError`）=PASS；否则 FAIL |
 
@@ -56,6 +56,7 @@
 | 16 | `swift test --filter "finalize_replay_returnsNil"` | `passed`。语义：再来一次模式正式结束 = 返回空（不入账）| 通用规则 |
 | 17 | `swift test --filter "finalize_noActiveContext_throws"` | `passed`。语义：无活跃会话时正式结束 = 抛内部错误 | 通用规则 |
 | 18 | `swift test --filter "finalize_forceCloseSell_countedInSellCount"` | `passed`。语义：局终持仓被自动强平产生的卖出，计入历史记录的「卖出次数」 | 通用规则 |
+| 18b | `swift test --filter "finalizeSaveProgress_foreignEngine_throws"` | `passed`。语义：把「非当前活跃会话」的引擎传给 finalize/saveProgress = 抛内部错误（防止把活跃会话的文件/元数据记到外来引擎数据上 → 写错存档/记录）| 通用规则 |
 
 ### 2.4 纯换算函数（最大回撤比率 + 起始年月时区）
 
@@ -72,6 +73,7 @@
 |---|---|---|
 | `saveProgress(engine:)` | 无活跃会话上下文 | `saveProgress_noActiveContext_throws`（抛 `.internalError(module:"E6b")`）|
 | `finalize(engine:)` | 无活跃会话上下文 | `finalize_noActiveContext_throws`（抛 `.internalError(module:"E6b")`）|
+| `saveProgress` / `finalize` | 传入非活跃 engine（身份不符）| `finalizeSaveProgress_foreignEngine_throws`（抛 `.internalError(module:"E6b")`）|
 | `saveProgress(engine:)` | `positionData` 编码失败 | 防御性/不可达：PositionManager 不变量保证字段 finite，`JSONEncoder().encode` 无法真失败 → 无对应 `@Test`（catch 分支为纵深防御，翻译为 `.internalError`）|
 
 M0.4 静态自检（在 `Sources/KlineTrainerContracts/TrainingEngine` 下）：
