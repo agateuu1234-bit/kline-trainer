@@ -197,4 +197,59 @@ struct TrainingSessionPersistenceTests {
         #expect(resumed.upperPanel.period == .m60)
         #expect(resumed.lowerPanel.period == .daily)
     }
+
+    // MARK: - 纯函数单元（D6/D7/D11）
+
+    @Test("drawdownRatio: peak<=0 → 0（无有效峰值）")
+    func drawdownRatio_zeroPeak_returnsZero() {
+        #expect(TrainingSessionCoordinator.drawdownRatio(absolute: 0, peak: 0) == 0)
+        #expect(TrainingSessionCoordinator.drawdownRatio(absolute: 100, peak: 0) == 0)
+        #expect(TrainingSessionCoordinator.drawdownRatio(absolute: 0, peak: -5) == 0)
+    }
+
+    @Test("drawdownRatio: 绝对额(元)→负比率 = -(abs/peak)")
+    func drawdownRatio_normal_negativeRatio() {
+        #expect(abs(TrainingSessionCoordinator.drawdownRatio(absolute: 8930, peak: 100_000) - (-0.0893)) < 1e-12)
+        #expect(abs(TrainingSessionCoordinator.drawdownRatio(absolute: 12_000, peak: 100_000) - (-0.12)) < 1e-12)
+    }
+
+    @Test("drawdownRatio: 零回撤 → 0（无亏损）")
+    func drawdownRatio_zeroDrawdown_returnsZero() {
+        #expect(TrainingSessionCoordinator.drawdownRatio(absolute: 0, peak: 100_000) == 0)
+    }
+
+    @Test("startYearMonth: 普通时刻按 UTC+8 取年/月")
+    func startYearMonth_normal() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let epoch = Int64(cal.date(from: DateComponents(year: 2021, month: 8, day: 15, hour: 12))!
+                            .timeIntervalSince1970)
+        let (y, m) = TrainingSessionCoordinator.startYearMonth(from: epoch)
+        #expect(y == 2021)
+        #expect(m == 8)
+    }
+
+    @Test("startYearMonth: 用 UTC+8 而非 UTC（跨月边界 killer）")
+    func startYearMonth_usesBeijingTZ_notUTC() {
+        // 2021-08-01 02:00 北京时 == 2021-07-31 18:00 UTC：UTC+8→8月，误用 UTC→7月。
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let epoch = Int64(cal.date(from: DateComponents(year: 2021, month: 8, day: 1, hour: 2))!
+                            .timeIntervalSince1970)
+        let (y, m) = TrainingSessionCoordinator.startYearMonth(from: epoch)
+        #expect(y == 2021)
+        #expect(m == 8)               // 误用 UTC 会得 7 → 测试失败
+    }
+
+    @Test("startYearMonth: 年初边界（跨年）按 UTC+8")
+    func startYearMonth_yearBoundary() {
+        // 2022-01-01 01:00 北京时 == 2021-12-31 17:00 UTC：UTC+8→2022/1，误用 UTC→2021/12。
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let epoch = Int64(cal.date(from: DateComponents(year: 2022, month: 1, day: 1, hour: 1))!
+                            .timeIntervalSince1970)
+        let (y, m) = TrainingSessionCoordinator.startYearMonth(from: epoch)
+        #expect(y == 2022)
+        #expect(m == 1)
+    }
 }

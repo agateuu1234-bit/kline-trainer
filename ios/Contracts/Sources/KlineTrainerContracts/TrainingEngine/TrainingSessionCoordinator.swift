@@ -250,6 +250,24 @@ public final class TrainingSessionCoordinator {
         }
     }
 
+    /// D6：最大回撤额(元，非负) → 记录用比率(负值，如 -0.12)。peak<=0 → 0。
+    /// 注：v1.3 `DrawdownAccumulator` 改存绝对额并只留最终 peak，无法精确还原原 plan v1.5 L744-747
+    /// 的逐时刻比率；以**最终 peakCapital** 为基准换算（标准定义 回撤额/峰值）。lossy 性见 residual E6b-R2。
+    static func drawdownRatio(absolute: Double, peak: Double) -> Double {
+        guard peak > 0 else { return 0 }
+        return -(absolute / peak)
+    }
+
+    /// D7：训练组起始 Unix 秒(UTC) → 年/月，按北京时 UTC+8（与 CrosshairLayout 显示口径一致；后端 UTC 存储）。
+    /// 28800 在 TimeZone 合法范围（±64800）→ 强解包永不 nil。
+    static func startYearMonth(from startDatetime: Int64) -> (year: Int, month: Int) {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let comps = cal.dateComponents([.year, .month],
+                                       from: Date(timeIntervalSince1970: TimeInterval(startDatetime)))
+        return (comps.year ?? 0, comps.month ?? 0)
+    }
+
     /// D9 M0.4 边界：PositionManager 序列化（saveProgress 唯一编码点）。in-memory 不变量保证 finite，
     /// encode 失败 = 内部 bug（非可恢复存档损坏）→ .internalError（与 decodePosition 的 .dbCorrupted 非对称有意）。
     private func encodePosition(_ position: PositionManager) throws -> Data {
