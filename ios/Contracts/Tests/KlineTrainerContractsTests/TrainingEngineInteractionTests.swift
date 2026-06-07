@@ -124,6 +124,54 @@ import CoreGraphics
         #expect(e.upperPanel.interactionMode == .autoTracking)
     }
 
+    @Test("activateDrawingTool: autoTracking → drawing，snapshot 含 viewport candleRange")
+    func activateDrawingEntersDrawingMode() {
+        let (e, _) = Self.engine()
+        e.recordRenderBounds(Self.bounds, panel: .upper)
+        let expected = RenderStateBuilder.visibleCandleRange(
+            panelState: e.upperPanel, candles: e.allCandles[.m3]!,
+            tick: e.tick.globalTickIndex, bounds: Self.bounds)
+        e.activateDrawingTool(.trend, panel: .upper)
+        guard case .drawing(let snap) = e.upperPanel.interactionMode else {
+            Issue.record("应进入 drawing 模式"); return
+        }
+        #expect(snap.frozen.candleRange == expected)
+    }
+
+    @Test("activateDrawingTool: drawing 模式下再激活 → no-op（工具切换归 DrawingToolManager/Wave 3）")
+    func activateDrawingWhileDrawingNoOp() {
+        let (e, _) = Self.engine()
+        e.recordRenderBounds(Self.bounds, panel: .upper)
+        e.activateDrawingTool(.trend, panel: .upper)
+        let modeBefore = e.upperPanel.interactionMode
+        e.activateDrawingTool(.ray, panel: .upper)
+        #expect(e.upperPanel.interactionMode == modeBefore)   // 仍 drawing(同 snapshot)
+    }
+
+    @Test("deleteDrawing: 按 index 从 engine.drawings 删除")
+    func deleteDrawingRemovesByIndex() {
+        let d0 = DrawingObject(toolType: .trend, anchors: [], isExtended: false, panelPosition: 0)
+        let d1 = DrawingObject(toolType: .ray, anchors: [], isExtended: false, panelPosition: 0)
+        let (e, _) = Self.engineWithDrawings([d0, d1])
+        e.deleteDrawing(at: 0)
+        #expect(e.drawings.count == 1)
+        #expect(e.drawings[0].toolType == .ray)
+    }
+
+    static func engineWithDrawings(_ drawings: [DrawingObject]) -> (TrainingEngine, () -> [FakeFrameDriver]) {
+        final class Box { var fakes: [FakeFrameDriver] = [] }
+        let box = Box()
+        let e = TrainingEngine(
+            flow: NormalFlow(fees: fees, maxTick: 99),
+            allCandles: TrainingEngineActionsTests.m3Candles(Array(repeating: 10, count: 100)),
+            maxTick: 99, initialCapital: 100_000, initialCashBalance: 100_000,
+            initialDrawings: drawings, initialUpperPeriod: .m3, initialLowerPeriod: .m3,
+            decelerationDriverFactory: { onTick in
+                let f = FakeFrameDriver(onTick: onTick); box.fakes.append(f); return f
+            })
+        return (e, { box.fakes })
+    }
+
     /// 多周期 engine（默认 60m/日 组合可向 toSmaller 切 15m/60m）+ 注入 fake 驱动。
     static func engineMultiPeriod() -> (TrainingEngine, () -> [FakeFrameDriver]) {
         final class Box { var fakes: [FakeFrameDriver] = [] }

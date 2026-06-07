@@ -539,6 +539,42 @@ extension TrainingEngine {
     public func cancelPan(panel: PanelId) {
         _ = reduce(.panEnded(velocity: 0), on: panel)
     }
+
+    // MARK: bounds 记录（渲染路径每次 updateUIView 调）
+
+    /// ChartContainerView.updateUIView 调：缓存该面板最近渲染 bounds，供 `activateDrawingTool` 算 range（D1）。
+    public func recordRenderBounds(_ bounds: CGRect, panel: PanelId) {
+        switch panel {
+        case .upper: lastRenderedBounds.upper = bounds
+        case .lower: lastRenderedBounds.lower = bounds
+        }
+    }
+
+    // MARK: 画线激活 H1 production handler（spec §C1b 闸门 #4 F3 + effect 合约 L1026-1032）
+
+    /// 画线工具激活（spec `activateDrawingTool`；C8b 加 `panel` 参数，D2）。
+    /// **顺序契约（spec Reducer effect L1026-1032，闸门 #2 F2）**：
+    ///   ① `animator.stop()`（防 stale 漂移；必须在算 range 之前——停后无新帧可改 offset）
+    ///   ② 基于当前（已冻结）面板状态算 candleRange（复用 C8a `visibleCandleRange`）
+    ///   ③ 派 `setDrawingSnapshot`（同步无漂移 → 进 drawing；理论 stale → 留 autoTracking）
+    public func activateDrawingTool(_ tool: DrawingToolType, panel: PanelId) {
+        guard case .requestDrawingSnapshotAfterStoppingAnimator(let t, let baseRev) =
+                reduce(.activateDrawing(tool), on: panel) else {
+            return   // 已在 drawing（.none）等 → no-op（工具切换归 DrawingToolManager/Wave 3）
+        }
+        animator(for: panel).stop()                                   // ①
+        let ps = panelState(panel)                                    // ② 当前=已冻结 offset
+        let range = RenderStateBuilder.visibleCandleRange(
+            panelState: ps, candles: allCandles[ps.period] ?? [],
+            tick: tick.globalTickIndex, bounds: renderBounds(panel))
+        _ = reduce(.setDrawingSnapshot(tool: t, baseRevision: baseRev, candleRange: range), on: panel)   // ③
+    }
+
+    /// 删除已完成绘线（spec `deleteDrawing(at:)`）。越界 trap（caller bug，与 spec precondition 同风格）。
+    public func deleteDrawing(at index: Int) {
+        precondition(drawings.indices.contains(index), "deleteDrawing index out of bounds")
+        drawings.remove(at: index)
+    }
 }
 
 #if DEBUG
