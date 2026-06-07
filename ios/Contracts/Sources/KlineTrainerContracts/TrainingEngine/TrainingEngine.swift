@@ -35,6 +35,11 @@ public final class TrainingEngine {
 
     private let animators: (upper: DecelerationAnimator, lower: DecelerationAnimator)
 
+    /// C8b：渲染路径缓存的最近 bounds（按面板）。`activateDrawingTool` 算 candleRange 复用
+    /// （spec `activateDrawingTool` 签名无 bounds 参数 → 缓存，D1）。`@ObservationIgnored`：
+    /// 渲染层 `recordRenderBounds` 写入不得触发观察重建（否则 updateUIView 写 → 重渲染循环）。
+    @ObservationIgnored private var lastRenderedBounds: (upper: CGRect, lower: CGRect) = (.zero, .zero)
+
     /// 构造运行时引擎（D9 校验边界契约）。
     ///
     /// **`allCandles` 必须是已校验数据。** 训练组数据的「可恢复」校验（空 `[:]` / 缺 `.m3` /
@@ -63,7 +68,9 @@ public final class TrainingEngine {
                 initialTradeOperations: [TradeOperation] = [],
                 initialDrawdown: DrawdownAccumulator = .initial,
                 initialUpperPeriod: Period = .m60,             // 默认上区 60m（plan v1.5 L777）；resume 传 PendingTraining.upperPeriod
-                initialLowerPeriod: Period = .daily) {          // 默认下区 日线；resume 传 PendingTraining.lowerPeriod
+                initialLowerPeriod: Period = .daily,            // 默认下区 日线；resume 传 PendingTraining.lowerPeriod
+                decelerationDriverFactory: @escaping (@escaping @MainActor (CGFloat) -> Bool) -> FrameDriving =
+                    { onTick in RealFrameDriver(onTick: onTick) }) {   // C8b/D5：可注入减速帧驱动（默认真实）
         // 前置不变量（NormalFlow 同风格：trap 调用方 bug，不防御 clamp）
         precondition(maxTick >= 0, "maxTick must be >= 0")
         // R4-F1：fail-fast flow/maxTick 契约，杜绝 TickEngine 静默 clamp 掩盖 record/训练组版本错位。
@@ -118,7 +125,13 @@ public final class TrainingEngine {
         self.lowerPanel = PanelViewState(period: initialLowerPeriod, interactionMode: .autoTracking,
                                          visibleCount: 0, offset: 0, revision: 0)
 
-        self.animators = (upper: DecelerationAnimator(), lower: DecelerationAnimator())
+        self.animators = (
+            upper: DecelerationAnimator(makeDriver: decelerationDriverFactory),
+            lower: DecelerationAnimator(makeDriver: decelerationDriverFactory))
+        // C8b：减速每帧 delta 必经 reducer offsetApplied（spec §C2 闸门 #2 F2，禁直写 offset）。
+        // self 此时已全初始化（animators 为最后一个无默认值的存储属性；lastRenderedBounds 有默认值）。
+        self.animators.upper.onUpdate = { [weak self] delta in self?.applyOffsetDelta(delta, panel: .upper) }
+        self.animators.lower.onUpdate = { [weak self] delta in self?.applyOffsetDelta(delta, panel: .lower) }
     }
 
     /// `make` 的构造输入：工厂内部据此**先验 maxTick 再建 flow**，杜绝外部传入会 trap 的非法 flow——
@@ -281,10 +294,13 @@ public final class TrainingEngine {
         // D8 数据完整性守卫：避免后续 stepsForPeriod/渲染落在无数据周期
         guard let u = allCandles[next.upper], !u.isEmpty,
               let l = allCandles[next.lower], !l.isEmpty else { return }
+        stopAllDeceleration()                       // D7
         upperPanel.period = next.upper
         lowerPanel.period = next.lower
         _ = upperPanel.reduce(.periodComboSwitched)
         _ = lowerPanel.reduce(.periodComboSwitched)
+        resetOffsetAfterAutoTracking(.upper)        // D8
+        resetOffsetAfterAutoTracking(.lower)
     }
 
     // MARK: - 持有 / 观察（E5b）
@@ -319,8 +335,11 @@ public final class TrainingEngine {
 
     /// 两面板硬切 autoTracking（D4，plan v1.5 L235）→ 推进 tick → 更新回撤 → 局终强平（Task 6 接入）。
     private func advanceAndAccount(panel: PanelId) {
+        stopAllDeceleration()                       // D7：立即中断 free-scrolling 惯性（spec L235）
         _ = upperPanel.reduce(.tradeTriggered)
         _ = lowerPanel.reduce(.tradeTriggered)
+        resetOffsetAfterAutoTracking(.upper)        // D8：autoTracking ⇒ offset==0
+        resetOffsetAfterAutoTracking(.lower)
         _ = tick.advance(steps: stepsForPeriod(period(of: panel)))
         drawdown.update(currentCapital: currentTotalCapital)
         forceCloseIfEnded()
@@ -443,6 +462,122 @@ public final class TrainingEngine {
             guard c.period == .m3, c.globalIndex == i, c.endGlobalIndex == i else { return false }
         }
         return true
+    }
+}
+
+// MARK: - C8b 交互编排（C7 手势接线下游 + 画线激活 H1 production handler）
+// 同文件 extension：可访问 `private let animators` / `public private(set) var drawings`（setter 文件作用域）/
+// `lastRenderedBounds`（Swift `private`/`private(set)` setter 文件作用域；免破坏 E5a init internal 的 trust boundary）。
+
+extension TrainingEngine {
+
+    // MARK: 私有 helper（面板/动画/bounds 取址 + 经 reducer 的 offset 派发）
+
+    private func panelState(_ panel: PanelId) -> PanelViewState {
+        panel == .upper ? upperPanel : lowerPanel
+    }
+
+    private func renderBounds(_ panel: PanelId) -> CGRect {
+        panel == .upper ? lastRenderedBounds.upper : lastRenderedBounds.lower
+    }
+
+    private func animator(for panel: PanelId) -> DecelerationAnimator {
+        panel == .upper ? animators.upper : animators.lower
+    }
+
+    /// 把 ChartAction 派给对应面板的 reducer（统一面板 mutate 入口）。
+    @discardableResult
+    private func reduce(_ action: ChartAction, on panel: PanelId) -> ChartReduceEffect {
+        switch panel {
+        case .upper: return upperPanel.reduce(action)
+        case .lower: return lowerPanel.reduce(action)
+        }
+    }
+
+    /// 减速 onUpdate + 单指 pan `.changed` 共用：每帧 delta 经 reducer offsetApplied
+    /// （drawing 吞 / autoTracking·freeScrolling 累加 + bump，spec L1123-1129）。
+    private func applyOffsetDelta(_ delta: CGFloat, panel: PanelId) {
+        _ = reduce(.offsetApplied(deltaPixels: delta), on: panel)
+    }
+
+    /// 停两面板减速（D7：硬切 autoTracking / 画线激活前调）。
+    private func stopAllDeceleration() {
+        animators.upper.stop()
+        animators.lower.stop()
+    }
+
+    /// D8：硬切 autoTracking 后经 reducer 把 offset 归零（spec L1153「offset 只经 reducer」）。
+    /// 必须在 reduce(.tradeTriggered/.periodComboSwitched) **之后**调——此时 mode 已 autoTracking，
+    /// offsetApplied 不被 drawing 吞、被 autoTracking 分支累加。autoTracking + makeViewport mode-agnostic
+    /// 下，offset!=0 会令视口偏移，故须归零以「锁定最新」（D8）。
+    private func resetOffsetAfterAutoTracking(_ panel: PanelId) {
+        let off = panelState(panel).offset
+        if off != 0 { _ = reduce(.offsetApplied(deltaPixels: -off), on: panel) }
+    }
+
+    // MARK: 单指 pan 手势派发（C7 arbiter onPan 回调下游）
+
+    /// onPan `.began`：autoTracking → freeScrolling（spec 状态转换表 L231）。
+    /// 新一次抓取必须**先停**本面板进行中的减速（标准惯性滚动语义：手指落下即截住惯性）——否则 re-grab 期间
+    /// 残余减速 onUpdate 与手指 `applyPanOffset` 同时喂 `offsetApplied` 致跳动（final-review F1，与 D7 硬切同精神）。
+    public func beginPan(panel: PanelId) {
+        animator(for: panel).stop()
+        _ = reduce(.panStarted, on: panel)
+    }
+
+    /// onPan `.changed`：freeScrolling 下 offset 累加（drawing 模式 arbiter 截获不到此处）。
+    public func applyPanOffset(deltaPixels: CGFloat, panel: PanelId) {
+        applyOffsetDelta(deltaPixels, panel: panel)
+    }
+
+    /// onPan `.ended`：panEnded → `.startDeceleration` effect → 启动惯性（spec C2/闸门 #2）。
+    public func endPan(velocity: CGFloat, panel: PanelId) {
+        if case .startDeceleration(let v) = reduce(.panEnded(velocity: velocity), on: panel) {
+            animator(for: panel).start(initialVelocity: v)
+        }
+    }
+
+    /// onPan `.cancelled`（两指接管 / drawing 截获结算后）：结束本次拖动，**不**启动惯性。
+    /// 经 reducer `panEnded(0)` bump revision 但**不改 interactionMode**（freeScrolling 维持，offset 冻结于当前值；
+    /// 后续两指切周期/交易再硬切 autoTracking）；忽略其 `.startDeceleration(0)` effect（不调 start）。
+    public func cancelPan(panel: PanelId) {
+        _ = reduce(.panEnded(velocity: 0), on: panel)
+    }
+
+    // MARK: bounds 记录（渲染路径每次 updateUIView 调）
+
+    /// ChartContainerView.updateUIView 调：缓存该面板最近渲染 bounds，供 `activateDrawingTool` 算 range（D1）。
+    public func recordRenderBounds(_ bounds: CGRect, panel: PanelId) {
+        switch panel {
+        case .upper: lastRenderedBounds.upper = bounds
+        case .lower: lastRenderedBounds.lower = bounds
+        }
+    }
+
+    // MARK: 画线激活 H1 production handler（spec §C1b 闸门 #4 F3 + effect 合约 L1026-1032）
+
+    /// 画线工具激活（spec `activateDrawingTool`；C8b 加 `panel` 参数，D2）。
+    /// **顺序契约（spec Reducer effect L1026-1032，闸门 #2 F2）**：
+    ///   ① `animator.stop()`（防 stale 漂移；必须在算 range 之前——停后无新帧可改 offset）
+    ///   ② 基于当前（已冻结）面板状态算 candleRange（复用 C8a `visibleCandleRange`）
+    ///   ③ 派 `setDrawingSnapshot`（同步无漂移 → 进 drawing；理论 stale → 留 autoTracking）
+    public func activateDrawingTool(_ tool: DrawingToolType, panel: PanelId) {
+        guard case .requestDrawingSnapshotAfterStoppingAnimator(let t, let baseRev) =
+                reduce(.activateDrawing(tool), on: panel) else {
+            return   // 已在 drawing（.none）等 → no-op（工具切换归 DrawingToolManager/Wave 3）
+        }
+        animator(for: panel).stop()                                   // ①
+        let ps = panelState(panel)                                    // ② 当前=已冻结 offset
+        let range = RenderStateBuilder.visibleCandleRange(
+            panelState: ps, candles: allCandles[ps.period] ?? [],
+            tick: tick.globalTickIndex, bounds: renderBounds(panel))
+        _ = reduce(.setDrawingSnapshot(tool: t, baseRevision: baseRev, candleRange: range), on: panel)   // ③
+    }
+
+    /// 删除已完成绘线（spec `deleteDrawing(at:)`）。越界 trap（caller bug，与 spec precondition 同风格）。
+    public func deleteDrawing(at index: Int) {
+        precondition(drawings.indices.contains(index), "deleteDrawing index out of bounds")
+        drawings.remove(at: index)
     }
 }
 
