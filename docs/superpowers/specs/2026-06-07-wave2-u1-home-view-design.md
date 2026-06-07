@@ -111,8 +111,8 @@ public enum ProfitSign: Equatable, Sendable { case positive, negative, zero }
 | `formatCapital`（统计栏 + row totalCapital + row 盈亏额共用） | `"¥ "` + POSIX(`en_US_POSIX`) 千分位 + 强制 2 位小数（沿用 U3 `formatCapital` 字面规则，本地副本）。**¥ 后恒一个空格，全 PR 一致** | D3 |
 | `primaryActionLabel` | `hasPending ? "继续训练" : "开始训练"` | — |
 | row `dateTime` | `createdAt`（epoch 秒）→ `DateFormatter("yyyy-MM-dd HH:mm")`，locale `en_US_POSIX`，`timeZone` 注入（默认 `.current`；**测试必须显式传固定 TimeZone**，见 §五） | D5 |
-| row `stock` | `"\(name)（\(code)）"`（全角括号 U+FF08/U+FF09） | D4 |
-| row `startMonth` | `"\(year)年" + String(format:"%02d",month) + "月"` | — |
+| row `stock` | `"\(record.stockName)（\(record.stockCode)）"`（全角括号 U+FF08/U+FF09） | D4 |
+| row `startMonth` | `"\(record.startYear)年" + String(format:"%02d", record.startMonth) + "月"` | — |
 | row `profitAndRate` | `profit符号 + "¥ " + 千分位(\|profit\|, 2 位) + "（" + rate符号 + (\|returnRate\|×100, 2 位) + "%）"`。**`profit` 的符号与 `returnRate` 的符号各自独立**按 `==0→"+"`（含 `-0.0`）归一化，互不影响（两者是 `TrainingRecord` 两个独立 `Double` 字段，可一零一非零）。例：`"+¥ 2,345.67（+2.34%）"` / `"-¥ 1,234.56（-1.23%）"` / 双零 `"+¥ 0.00（+0.00%）"` / 混合 `profit=-0.0,rate=0.0234→"+¥ 0.00（+2.34%）"` | D8 |
 | row `sign` | `profit > 0` → `.positive`；`profit < 0` → `.negative`；`profit == 0`（含 `-0.0`）→ `.zero` | D9 |
 
