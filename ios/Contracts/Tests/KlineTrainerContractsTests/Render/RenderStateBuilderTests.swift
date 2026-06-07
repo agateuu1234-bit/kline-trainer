@@ -226,6 +226,23 @@ struct RenderStateBuilderTests {
         #expect(a == b)
     }
 
+    @Test("crosshair 参数透传到 renderState.crosshairPoint")
+    @MainActor
+    func crosshairPassthrough() {
+        let e = TrainingEngine.preview()
+        let pt = CGPoint(x: 120, y: 240)
+        let rs = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds, crosshair: pt)
+        #expect(rs.crosshairPoint == pt)
+    }
+
+    @Test("crosshair 默认 nil（既有 C8a 调用面不变）")
+    @MainActor
+    func crosshairDefaultsNil() {
+        let e = TrainingEngine.preview()
+        let rs = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
+        #expect(rs.crosshairPoint == nil)
+    }
+
     @Test("perf smoke（非权威）：5000 根 makeViewport 装配开销")
     func perfSmoke() {
         let cs = Self.candles(period: .m3, count: 5000)

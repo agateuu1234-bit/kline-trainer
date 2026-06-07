@@ -17,7 +17,8 @@ public enum RenderStateBuilder {
     /// 主入口：装配完整 KLineRenderState。空 candle / bounds.width 或 height <=0 → .empty。
     /// 不取 displayScale（renderState 无该字段；亚像素对齐在 KLineView.draw 用 traitCollection.displayScale）。
     @MainActor
-    public static func make(engine: TrainingEngine, panel: PanelId, bounds: CGRect) -> KLineRenderState {
+    public static func make(engine: TrainingEngine, panel: PanelId, bounds: CGRect,
+                            crosshair: CGPoint? = nil) -> KLineRenderState {
         let panelState = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
         let candles = engine.allCandles[panelState.period] ?? []
         guard !candles.isEmpty, bounds.width > 0, bounds.height > 0 else { return .empty }
@@ -39,7 +40,7 @@ public enum RenderStateBuilder {
             macdRange: macdRange,
             markers: engine.markers,
             drawings: engine.drawings,
-            crosshairPoint: nil)   // 长按十字光标属 C8b
+            crosshairPoint: crosshair)   // C8b：长按十字光标由 ChartContainerView.Coordinator 视图层透传（D3）
     }
 
     /// C8b H1 handler 复用：当前可见 candle 索引半开区间。委托 makeViewport 单一真相。
