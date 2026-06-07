@@ -23,6 +23,15 @@ public final class TrainingSessionCoordinator {
     public private(set) var activeEngine: TrainingEngine?
     public private(set) var activeReader: (any TrainingSetReader)?
 
+    // MARK: - E6b 会话持久化上下文（saveProgress/finalize 需文件名+起始时间，engine 不携带）
+
+    /// 当前 session 的训练组文件（4 open 方法成功时记录；endSession 清空）。
+    @ObservationIgnored private var activeFile: TrainingSetFile?
+    /// 当前 session 的起始时间（fresh Normal=now()；resume=保留 pending.startedAt；review/replay=nil）。
+    @ObservationIgnored private var activeStartedAt: Int64?
+    /// 可注入时钟（public init 已冻结，不能加参数）。默认系统时钟；@testable 测试可覆盖（D5）。
+    @ObservationIgnored var now: () -> Int64 = { Int64(Date().timeIntervalSince1970) }
+
     public init(dbFactory: TrainingSetDBFactory,
                 recordRepo: RecordRepository,
                 pendingRepo: PendingTrainingRepository,
@@ -59,6 +68,8 @@ public final class TrainingSessionCoordinator {
                 initialCapital: start, initialCashBalance: start)
             activeReader = reader
             activeEngine = engine
+            activeFile = file
+            activeStartedAt = now()                 // D4：fresh Normal 局起始时间
             return engine
         } catch {
             reader.close()                                   // D9：失败关闭已开 reader，不留半态
@@ -92,6 +103,8 @@ public final class TrainingSessionCoordinator {
                 initialLowerPeriod: pending.lowerPeriod)
             activeReader = reader
             activeEngine = engine
+            activeFile = file
+            activeStartedAt = pending.startedAt      // D4：resume 保留原局起始时间
             return engine
         } catch {
             reader.close()
@@ -123,6 +136,8 @@ public final class TrainingSessionCoordinator {
                 initialTradeOperations: ops)
             activeReader = reader
             activeEngine = engine
+            activeFile = file
+            activeStartedAt = nil                    // D4：review 只读，无进度保存
             return engine
         } catch {
             reader.close()
@@ -146,6 +161,8 @@ public final class TrainingSessionCoordinator {
                 initialCashBalance: record.totalCapital)
             activeReader = reader
             activeEngine = engine
+            activeFile = file
+            activeStartedAt = nil                    // D4：replay 不入账，无进度保存
             return engine
         } catch {
             reader.close()
@@ -153,19 +170,75 @@ public final class TrainingSessionCoordinator {
         }
     }
 
-    /// 保存进度（spec line 1659）
+    /// 保存进度（spec L1659/L1677：U2 退出 / 每 N tick 自动调用）。仅 Normal 模式持久化
+    /// （review 只读、replay 不入账 → 无 pending 语义，D3 no-op）。缺活跃上下文 → .internalError（D9）。
     public func saveProgress(engine: TrainingEngine) async throws {
-        fatalError("Wave 2 E6 impl")
+        guard engine.flow.mode == .normal else { return }     // D3：仅 Normal 持久化
+        // D4 加固（final-review L2）：engine 必须是当前活跃 session 的引擎，否则会把活跃 session 的
+        // 文件/起始时间记到外来 engine 上 → 写错存档。activeEngine 为 nil（无会话）时身份不符亦在此拒绝。
+        guard activeEngine === engine, let file = activeFile, let started = activeStartedAt else {
+            throw AppError.internalError(module: "E6b", detail: "saveProgress without active session context")
+        }
+        let pending = PendingTraining(
+            trainingSetFilename: file.filename,
+            globalTickIndex: engine.tick.globalTickIndex,
+            upperPeriod: engine.upperPanel.period,
+            lowerPeriod: engine.lowerPanel.period,
+            positionData: try encodePosition(engine.position),
+            cashBalance: engine.cashBalance,
+            feeSnapshot: engine.fees,
+            tradeOperations: engine.tradeOperations,
+            drawings: engine.drawings,
+            startedAt: started,
+            accumulatedCapital: engine.initialCapital,         // D4：本局起始资金
+            drawdown: engine.drawdown)
+        try pendingRepo.savePending(pending)
     }
 
-    /// 正式结束（spec line 1663）
+    /// 正式结束（spec L1663/L1679）：构造 TrainingRecord + ops + drawings 入账，清 pending，返回 recordId。
+    /// `flow.shouldSaveRecord()==false`（Review/Replay）→ 早返 nil，不插记录、不动 pending（D2）。
+    /// total_capital = 本局**起始**资金（方案 A / D1）；maxDrawdown 元→负比率（D6）；起始年月按 UTC+8（D7）。
+    /// 缺活跃上下文 → .internalError（D9）。
     public func finalize(engine: TrainingEngine) async throws -> Int64? {
-        fatalError("Wave 2 E6 impl")
+        guard engine.flow.shouldSaveRecord() else { return nil }   // D2：Review/Replay 不入账
+        // D4 加固（final-review L2）：engine 必须是当前活跃 session 的引擎，否则会把活跃 session 的
+        // 文件/股票元数据记到外来 engine 的交易数据上 → 写错历史记录。activeEngine 为 nil 时亦在此拒绝。
+        guard activeEngine === engine, let file = activeFile, let reader = activeReader else {
+            throw AppError.internalError(module: "E6b", detail: "finalize without active session context")
+        }
+        let meta = try reader.loadMeta()
+        let starting = engine.initialCapital                       // D1：起始资金
+        let profit = engine.currentTotalCapital - starting
+        let (year, month) = Self.startYearMonth(from: meta.startDatetime)
+        let record = TrainingRecord(
+            id: nil,
+            trainingSetFilename: file.filename,
+            createdAt: now(),                                      // D5
+            stockCode: meta.stockCode,
+            stockName: meta.stockName,
+            startYear: year,
+            startMonth: month,
+            totalCapital: starting,                               // D1：本局起始资金
+            profit: profit,
+            returnRate: engine.returnRate,
+            maxDrawdown: Self.drawdownRatio(absolute: engine.drawdown.maxDrawdown,
+                                            peak: engine.drawdown.peakCapital),   // D6
+            buyCount: engine.tradeOperations.filter { $0.direction == .buy }.count,    // D8
+            sellCount: engine.tradeOperations.filter { $0.direction == .sell }.count,
+            feeSnapshot: engine.fees,
+            finalTick: engine.tick.globalTickIndex)
+        let id = try recordRepo.insertRecord(record, ops: engine.tradeOperations, drawings: engine.drawings)
+        try pendingRepo.clearPending()
+        return id
     }
 
-    /// session 结束清理（spec line 1666，不 throws）
+    /// session 结束清理（spec L1666/L1684，不 throws）：关闭 reader 并清空全部活跃上下文（D10）。
     public func endSession() async {
-        fatalError("Wave 2 E6 impl")
+        activeReader?.close()
+        activeReader = nil
+        activeEngine = nil
+        activeFile = nil
+        activeStartedAt = nil
     }
 
     // MARK: - 私有构造 helper（E6a）
@@ -208,6 +281,34 @@ public final class TrainingSessionCoordinator {
             return try JSONDecoder().decode(PositionManager.self, from: data)
         } catch {
             throw AppError.persistence(.dbCorrupted)
+        }
+    }
+
+    /// D6：最大回撤额(元，非负) → 记录用比率(负值，如 -0.12)。peak<=0 → 0。
+    /// 注：v1.3 `DrawdownAccumulator` 改存绝对额并只留最终 peak，无法精确还原原 plan v1.5 L744-747
+    /// 的逐时刻比率；以**最终 peakCapital** 为基准换算（标准定义 回撤额/峰值）。lossy 性见 residual E6b-R2。
+    static func drawdownRatio(absolute: Double, peak: Double) -> Double {
+        guard peak > 0 else { return 0 }
+        return -(absolute / peak)
+    }
+
+    /// D7：训练组起始 Unix 秒(UTC) → 年/月，按北京时 UTC+8（与 CrosshairLayout 显示口径一致；后端 UTC 存储）。
+    /// 28800 在 TimeZone 合法范围（±64800）→ 强解包永不 nil。
+    static func startYearMonth(from startDatetime: Int64) -> (year: Int, month: Int) {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let comps = cal.dateComponents([.year, .month],
+                                       from: Date(timeIntervalSince1970: TimeInterval(startDatetime)))
+        return (comps.year ?? 0, comps.month ?? 0)
+    }
+
+    /// D9 M0.4 边界：PositionManager 序列化（saveProgress 唯一编码点）。in-memory 不变量保证 finite，
+    /// encode 失败 = 内部 bug（非可恢复存档损坏）→ .internalError（与 decodePosition 的 .dbCorrupted 非对称有意）。
+    private func encodePosition(_ position: PositionManager) throws -> Data {
+        do {
+            return try JSONEncoder().encode(position)
+        } catch {
+            throw AppError.internalError(module: "E6b", detail: "position encode failed: \(error)")
         }
     }
 
