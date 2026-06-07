@@ -174,7 +174,9 @@ public final class TrainingSessionCoordinator {
     /// （review 只读、replay 不入账 → 无 pending 语义，D3 no-op）。缺活跃上下文 → .internalError（D9）。
     public func saveProgress(engine: TrainingEngine) async throws {
         guard engine.flow.mode == .normal else { return }     // D3：仅 Normal 持久化
-        guard let file = activeFile, let started = activeStartedAt else {
+        // D4 加固（final-review L2）：engine 必须是当前活跃 session 的引擎，否则会把活跃 session 的
+        // 文件/起始时间记到外来 engine 上 → 写错存档。activeEngine 为 nil（无会话）时身份不符亦在此拒绝。
+        guard activeEngine === engine, let file = activeFile, let started = activeStartedAt else {
             throw AppError.internalError(module: "E6b", detail: "saveProgress without active session context")
         }
         let pending = PendingTraining(
@@ -199,7 +201,9 @@ public final class TrainingSessionCoordinator {
     /// 缺活跃上下文 → .internalError（D9）。
     public func finalize(engine: TrainingEngine) async throws -> Int64? {
         guard engine.flow.shouldSaveRecord() else { return nil }   // D2：Review/Replay 不入账
-        guard let file = activeFile, let reader = activeReader else {
+        // D4 加固（final-review L2）：engine 必须是当前活跃 session 的引擎，否则会把活跃 session 的
+        // 文件/股票元数据记到外来 engine 的交易数据上 → 写错历史记录。activeEngine 为 nil 时亦在此拒绝。
+        guard activeEngine === engine, let file = activeFile, let reader = activeReader else {
             throw AppError.internalError(module: "E6b", detail: "finalize without active session context")
         }
         let meta = try reader.loadMeta()

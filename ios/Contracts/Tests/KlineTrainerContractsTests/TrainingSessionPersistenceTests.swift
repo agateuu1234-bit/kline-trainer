@@ -405,4 +405,19 @@ struct TrainingSessionPersistenceTests {
         #expect(rec.buyCount == 0)
         #expect(rec.finalTick == 7)
     }
+
+    @Test("finalize/saveProgress: 传入非活跃 engine → .internalError（engine 身份守门，final-review L2 加固）")
+    func finalizeSaveProgress_foreignEngine_throws() async throws {
+        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        _ = try await coord.startNewNormalSession()         // activeEngine = 本 session 引擎
+        let foreign = TrainingEngine.preview()              // 不同实例，normal 模式（过 mode/shouldSaveRecord 首守门）
+        await #expect(throws: AppError.internalError(module: "E6b",
+                      detail: "finalize without active session context")) {
+            _ = try await coord.finalize(engine: foreign)
+        }
+        await #expect(throws: AppError.internalError(module: "E6b",
+                      detail: "saveProgress without active session context")) {
+            try await coord.saveProgress(engine: foreign)
+        }
+    }
 }
