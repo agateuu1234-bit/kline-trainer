@@ -83,6 +83,19 @@ import CoreGraphics
         #expect(fakes().isEmpty)            // 未调 animator.start
     }
 
+    @Test("beginPan 停掉进行中的减速（re-grab 截住惯性，标准滚动语义；final-review F1）")
+    func beginPanStopsRunningDeceleration() {
+        let (e, fakes) = Self.engine()
+        e.beginPan(panel: .upper)
+        e.endPan(velocity: 1000, panel: .upper)   // 启动减速 → 创建 upper 驱动 fakes[0]
+        let upperFake = fakes()[0]
+        #expect(upperFake.isInvalidated == false)
+        e.beginPan(panel: .upper)                  // re-grab → 必须先停减速
+        #expect(upperFake.isInvalidated == true)
+        let fired = upperFake.fire(1.0 / 120.0)    // 旧驱动延迟帧
+        #expect(fired == false)                    // 已停，不再发 onUpdate / 不漂移
+    }
+
     @Test("交易硬切 autoTracking 时停减速：trade 后 stale 帧不漂移 offset")
     func tradeStopsDecelerationNoDriftAfter() {
         let (e, fakes) = Self.engine()

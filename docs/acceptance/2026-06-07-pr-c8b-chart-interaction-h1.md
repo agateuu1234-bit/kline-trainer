@@ -5,8 +5,8 @@
 | # | 操作（action） | 预期（expected） | pass / fail |
 |---|---|---|---|
 | 1 | 终端 `cd ios/Contracts && swift test --filter TrainingEngineDrawingHandlerH1Tests` | 末行 `Test run with 4 tests in 1 suite passed`，0 failures | pass = 4 tests 且 passed 且 0 failures |
-| 2 | 终端 `cd ios/Contracts && swift test --filter TrainingEngineInteractionTests` | 末行 passed，0 failures（12 tests） | pass = 0 failures 且 ≥12 tests |
-| 3 | 终端 `cd ios/Contracts && swift test` （全量） | 末行 `Test run with N tests in M suites passed`，0 failures。实测 **694 tests in 111 suites**（基线 commit 22c88de 674→C8b 新增 Interaction 12 + H1 4 + GestureRouting 2 + RenderStateBuilder 2 + ChartContainerViewCompile 2 = +20，合计 694） | pass = 0 failures 且 N ≥ 692 |
+| 2 | 终端 `cd ios/Contracts && swift test --filter TrainingEngineInteractionTests` | 末行 passed，0 failures（13 tests） | pass = 0 failures 且 ≥13 tests |
+| 3 | 终端 `cd ios/Contracts && swift test` （全量） | 末行 `Test run with N tests in M suites passed`，0 failures。实测 **695 tests in 111 suites**（基线 commit 22c88de 674→C8b 新增 Interaction 13 + H1 4 + GestureRouting 2 + RenderStateBuilder 2 + ChartContainerViewCompile 2 = +21，合计 695） | pass = 0 failures 且 N ≥ 693 |
 | 4 | 终端 `grep -n "animator(for: panel).stop()" ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift` | 命中 `activateDrawingTool` 内 stop 行（① 早于算 range）；实测：line 565 | pass = 恰 1 处命中且在 activateDrawingTool 体内 |
 | 5 | 终端 `grep -n "decelerationDriverFactory" ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift` | 命中 init 参数 + 2 处 animators 构造复用；实测：lines 72/129/130（3 处） | pass = ≥2 处命中 |
 | 6 | CI：PR 页 `Mac Catalyst build-for-testing on macos-15` required check | 绿色 success（ChartContainerView+Coordinator 编译链接通过） | pass = 该 required check success（本地 `xcodebuild build-for-testing -destination 'platform=macOS,variant=Mac Catalyst'` 得 `** TEST BUILD SUCCEEDED **` 无 error/warning；实测：CATALYST GATE PASS） |

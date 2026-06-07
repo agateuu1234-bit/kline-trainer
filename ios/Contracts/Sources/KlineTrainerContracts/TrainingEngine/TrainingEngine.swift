@@ -518,7 +518,10 @@ extension TrainingEngine {
     // MARK: 单指 pan 手势派发（C7 arbiter onPan 回调下游）
 
     /// onPan `.began`：autoTracking → freeScrolling（spec 状态转换表 L231）。
+    /// 新一次抓取必须**先停**本面板进行中的减速（标准惯性滚动语义：手指落下即截住惯性）——否则 re-grab 期间
+    /// 残余减速 onUpdate 与手指 `applyPanOffset` 同时喂 `offsetApplied` 致跳动（final-review F1，与 D7 硬切同精神）。
     public func beginPan(panel: PanelId) {
+        animator(for: panel).stop()
         _ = reduce(.panStarted, on: panel)
     }
 
