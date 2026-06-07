@@ -15,6 +15,44 @@ public enum RenderStateBuilder {
     static let defaultVisibleCount = 80
     static let candleWidthRatio: CGFloat = 0.7
 
+    /// 主入口：装配完整 KLineRenderState。空 candle / bounds.width 或 height <=0 → .empty。
+    /// 不取 displayScale（renderState 无该字段；亚像素对齐在 KLineView.draw 用 traitCollection.displayScale）。
+    @MainActor
+    public static func make(engine: TrainingEngine, panel: PanelId, bounds: CGRect) -> KLineRenderState {
+        let panelState = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
+        let candles = engine.allCandles[panelState.period] ?? []
+        guard !candles.isEmpty, bounds.width > 0, bounds.height > 0 else { return .empty }
+        let viewport = makeViewport(panelState: panelState, candles: candles,
+                                    tick: engine.tick.globalTickIndex, bounds: bounds)
+        let slice = candles[viewport.startIndex ..< viewport.startIndex + viewport.visibleCount]
+        // C3-C6 渲染收口（modules L1443-1452 字面）：volume 含 0 下界、macd 全 nil/零 fallback。
+        let volumeRange = NonDegenerateRange.make(
+            values: [0.0] + slice.map { Double($0.volume) }, fallback: 0.0...1.0)
+        let macdRange = NonDegenerateRange.make(
+            values: slice.flatMap { [$0.macdDiff, $0.macdDea, $0.macdBar].compactMap { $0 } },
+            fallback: -0.001...0.001)
+        return KLineRenderState(
+            panel: panelState,
+            frames: ChartPanelFrames.split(in: bounds),
+            viewport: viewport,
+            visibleCandles: slice,
+            volumeRange: volumeRange,
+            macdRange: macdRange,
+            markers: engine.markers,
+            drawings: engine.drawings,
+            crosshairPoint: nil)   // 长按十字光标属 C8b
+    }
+
+    /// C8b H1 handler 复用：当前可见 candle 索引半开区间。委托 makeViewport 单一真相。
+    /// 〔C8b 调用面 provisional〕：handler 在 animator.stop() 后取当时 engine 的 panelState（offset 冻结）
+    /// + candles + tick + bounds 调本函数；若 C8b 实测签名不足按 C8b 自有 review 调整，不回改 C8a 数学。
+    public static func visibleCandleRange(panelState: PanelViewState, candles: [KLineCandle],
+                                          tick: Int, bounds: CGRect) -> Range<Int> {
+        guard !candles.isEmpty, bounds.width > 0 else { return 0..<0 }
+        let vp = makeViewport(panelState: panelState, candles: candles, tick: tick, bounds: bounds)
+        return vp.startIndex ..< vp.startIndex + vp.visibleCount
+    }
+
     /// 视口几何推导（唯一拥有 startIndex/pixelShift 装配的函数；make 与 visibleCandleRange 都经它）。
     /// **前置约束**：`candles` 非空、`bounds.width > 0`（调用方 make/visibleCandleRange 已守 .empty/空）。
     /// Task 1：offset=0 路径（startIndex=clamp(baseStartIndex)，pixelShift=0）。Task 2 泛化非零 offset。

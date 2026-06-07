@@ -155,4 +155,74 @@ struct RenderStateBuilderTests {
         #expect(vp.startIndex == 120)
         #expect(vp.pixelShift == 0)
     }
+
+    @MainActor
+    @Test("make：preview 引擎装配完整 renderState（透传 markers/drawings、crosshair nil）")
+    func makeAssembles() {
+        let engine = TrainingEngine.preview()
+        let rs = RenderStateBuilder.make(engine: engine, panel: .upper, bounds: Self.bounds)
+        #expect(rs.panel.period == engine.upperPanel.period)
+        #expect(rs.crosshairPoint == nil)
+        #expect(rs.markers == engine.markers)
+        #expect(rs.drawings == engine.drawings)
+        #expect(rs.frames == ChartPanelFrames.split(in: Self.bounds))
+        #expect(!rs.visibleCandles.isEmpty)
+        // 值域来自真实 make（F4：直接验 rs.* 而非仅 NonDegenerateRange 约定）：
+        // preview .m60 candles macd 全 nil → macdRange 走 fallback；volume 含 0 下界。
+        #expect(rs.volumeRange.lower < rs.volumeRange.upper)
+        #expect(rs.macdRange.lower < rs.macdRange.upper)
+        #expect(rs.volumeRange.lower <= 0)   // [0.0]+ 保证下界 ≤ 0
+    }
+
+    @Test("值域 fallback 约定（contract characterization；make 内部同款调用）")
+    func valueRangeContract() {
+        let macd = NonDegenerateRange.make(values: [], fallback: -0.001...0.001)
+        #expect(macd.lower < macd.upper)
+        let vol = NonDegenerateRange.make(values: [0.0] + [Double](repeating: 0, count: 5),
+                                          fallback: 0.0...1.0)
+        #expect(vol.lower < vol.upper)
+    }
+
+    @MainActor
+    @Test("守卫：bounds==.zero → .empty")
+    func emptyBoundsGuard() {
+        let engine = TrainingEngine.preview()
+        let rs = RenderStateBuilder.make(engine: engine, panel: .upper, bounds: .zero)
+        #expect(rs == KLineRenderState.empty)
+    }
+
+    @MainActor
+    @Test("守卫：zero-height bounds → .empty")
+    func zeroHeightGuard() {
+        let engine = TrainingEngine.preview()
+        let rs = RenderStateBuilder.make(engine: engine, panel: .upper,
+                                         bounds: CGRect(x: 0, y: 0, width: 800, height: 0))
+        #expect(rs == KLineRenderState.empty)
+    }
+
+    @Test("visibleCandleRange 委托 makeViewport（同 startIndex..<+visibleCount）")
+    func visibleRangeDelegates() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(), candles: cs, tick: 150, bounds: Self.bounds)
+        let range = RenderStateBuilder.visibleCandleRange(
+            panelState: Self.panel(), candles: cs, tick: 150, bounds: Self.bounds)
+        #expect(range == vp.startIndex ..< vp.startIndex + vp.visibleCount)
+    }
+
+    @Test("visibleCandleRange 空 candles → 0..<0（不崩）")
+    func visibleRangeEmpty() {
+        let range = RenderStateBuilder.visibleCandleRange(
+            panelState: Self.panel(), candles: [], tick: 0, bounds: Self.bounds)
+        #expect(range == 0..<0)
+    }
+
+    @MainActor
+    @Test("Equatable 短路*前提*：同 engine 状态两次 make → 结果 ==（host 仅证前提，didSet 抑制属 device）")
+    func equalityPrecondition() {
+        let engine = TrainingEngine.preview()
+        let a = RenderStateBuilder.make(engine: engine, panel: .upper, bounds: Self.bounds)
+        let b = RenderStateBuilder.make(engine: engine, panel: .upper, bounds: Self.bounds)
+        #expect(a == b)
+    }
 }
