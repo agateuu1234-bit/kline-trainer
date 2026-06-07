@@ -4,6 +4,8 @@
 // TrainingEnginePreviewFactory（TrainingEngine.preview(mode:)）：spec line 2111，
 //   依赖 Wave 2 E5 完整 init + E4 flows，dep-graph 阻塞，本 PR 不交付
 
+import Foundation
+
 #if canImport(Observation)
 import Observation
 #endif
@@ -37,24 +39,118 @@ public final class TrainingSessionCoordinator {
         self.activeReader = nil
     }
 
-    /// 开始新 Normal 训练（spec line 1647）
+    /// 开始新 Normal 训练（spec L1664）：fail-closed 取费 → 随机选训练组 → 打开 reader →
+    /// 累计本金构造 NormalFlow 引擎。loadError 时早抛、零副作用（D2/D9）。
+    /// **前置（D10）**：caller 须先 `endSession()` 关闭上一 session 的 reader，否则上一
+    /// `activeReader` 被覆盖泄漏（E6a 不替前一 session 收尾——E6b/caller 契约）。
     public func startNewNormalSession() async throws -> TrainingEngine {
-        fatalError("Wave 2 E6 impl")
+        let fees = try settings.snapshotFeesIfReady()        // D2 fail-closed：loadError → throw（reader 未开）
+        guard let file = cache.pickRandom() else {
+            throw AppError.trainingSet(.fileNotFound)         // 无可用缓存训练组
+        }
+        let start = try startingCapital()                    // D4 累计模型（reader 未开，throw 无副作用）
+        let reader = try openReader(for: file)
+        do {
+            let allCandles = try reader.loadAllCandles()
+            let mt = try maxTick(from: allCandles)            // D3
+            let engine = try TrainingEngine.make(
+                .normal(fees: fees, maxTick: mt),
+                allCandles: allCandles,
+                initialCapital: start, initialCashBalance: start)
+            activeReader = reader
+            activeEngine = engine
+            return engine
+        } catch {
+            reader.close()                                   // D9：失败关闭已开 reader，不留半态
+            // D11 M0.4：单表达式可静态证明类型（禁裸变量 `throw error`，m04 gate 规则1）
+            throw (error as? AppError) ?? .internalError(module: "E6a", detail: String(describing: error))
+        }
     }
 
-    /// 继续中断训练（spec line 1650）
+    /// 继续中断训练（spec L1667）：loadPending → 按 filename 打开 reader → 从 pending 重建引擎（D7）。
+    /// 无 pending 返回 nil（**仅**此情形返 nil；其它失败均 throw 可恢复 AppError）。
     public func resumePending() async throws -> TrainingEngine? {
-        fatalError("Wave 2 E6 impl")
+        guard let pending = try pendingRepo.loadPending() else { return nil }
+        let file = try cachedFile(filename: pending.trainingSetFilename)
+        let reader = try openReader(for: file)
+        do {
+            let allCandles = try reader.loadAllCandles()
+            let mt = try maxTick(from: allCandles)
+            let position = try decodePosition(pending.positionData)
+            let engine = try TrainingEngine.make(
+                .normal(fees: pending.feeSnapshot, maxTick: mt),
+                allCandles: allCandles,
+                initialTick: pending.globalTickIndex,
+                initialCapital: pending.accumulatedCapital,
+                initialCashBalance: pending.cashBalance,
+                initialPosition: position,
+                initialMarkers: markers(from: pending.tradeOperations),
+                initialDrawings: pending.drawings,
+                initialTradeOperations: pending.tradeOperations,
+                initialDrawdown: pending.drawdown,
+                initialUpperPeriod: pending.upperPeriod,
+                initialLowerPeriod: pending.lowerPeriod)
+            activeReader = reader
+            activeEngine = engine
+            return engine
+        } catch {
+            reader.close()
+            throw (error as? AppError) ?? .internalError(module: "E6a", detail: String(describing: error))
+        }
     }
 
-    /// Review 模式（spec line 1653）
+    /// Review 模式（spec L1670）：record bundle → 打开 reader → 构造只读 ReviewFlow 引擎，
+    /// 还原全部标记/绘线、固定末态（D5）。费率/起始年月均来自 record，不读当前 settings。
+    /// **D5 不变量**：review 仅供只读展示；`initialCashBalance = totalCapital + profit`（末态全现金，
+    /// 强平后）使引擎实时 `returnRate == record.returnRate`（flat-ending-cash 假设下自洽）；**不**改写
+    /// record 真值（settlement 若直读 record 则此重建只影响训练页状态栏显示，安全）。
+    /// **前置（D10）**：caller 须先 `endSession()`（同 startNewNormalSession）。
     public func review(recordId: Int64) async throws -> TrainingEngine {
-        fatalError("Wave 2 E6 impl")
+        let (record, ops, drawings) = try recordRepo.loadRecordBundle(id: recordId)
+        let file = try cachedFile(filename: record.trainingSetFilename)
+        let reader = try openReader(for: file)
+        do {
+            // maxTick 由 .review(record) 内部据 record.finalTick 派生；make 亦校验 .m3 非空 +
+            // m3.last.endGlobalIndex >= finalTick，故此处不重复 maxTick(from:)（D3 / LOW#8）。
+            let allCandles = try reader.loadAllCandles()
+            let engine = try TrainingEngine.make(
+                .review(record: record),
+                allCandles: allCandles,
+                initialCapital: record.totalCapital,
+                initialCashBalance: record.totalCapital + record.profit,   // 末态全现金（强平后）
+                initialMarkers: markers(from: ops),
+                initialDrawings: drawings,
+                initialTradeOperations: ops)
+            activeReader = reader
+            activeEngine = engine
+            return engine
+        } catch {
+            reader.close()
+            throw (error as? AppError) ?? .internalError(module: "E6a", detail: String(describing: error))
+        }
     }
 
-    /// Replay 模式（spec line 1656）
+    /// Replay 模式（spec L1673）：record → 打开 reader → 从头构造 ReplayFlow 引擎（只继承原局
+    /// feeSnapshot，不还原标记/绘线、不入账，D6）。起始本金 = record 原局起始本金。
     public func replay(recordId: Int64) async throws -> TrainingEngine {
-        fatalError("Wave 2 E6 impl")
+        let (record, _, _) = try recordRepo.loadRecordBundle(id: recordId)
+        let file = try cachedFile(filename: record.trainingSetFilename)
+        let reader = try openReader(for: file)
+        do {
+            let allCandles = try reader.loadAllCandles()
+            let mt = try maxTick(from: allCandles)
+            let engine = try TrainingEngine.make(
+                .replay(fees: record.feeSnapshot, maxTick: mt),
+                allCandles: allCandles,
+                initialCapital: record.totalCapital,
+                initialCashBalance: record.totalCapital)
+            activeReader = reader
+            activeEngine = engine
+            return engine
+        } catch {
+            reader.close()
+            throw (error as? AppError) ?? .internalError(module: "E6a", detail: String(describing: error))
+        }
     }
 
     /// 保存进度（spec line 1659）
@@ -70,6 +166,54 @@ public final class TrainingSessionCoordinator {
     /// session 结束清理（spec line 1666，不 throws）
     public func endSession() async {
         fatalError("Wave 2 E6 impl")
+    }
+
+    // MARK: - 私有构造 helper（E6a）
+
+    /// D4：新局起始资金 = 累计模型。有记录 → 末条 total_capital+profit；无记录 → settings 配置本金。
+    private func startingCapital() throws -> Double {
+        let stats = try recordRepo.statistics()
+        return stats.totalCount > 0 ? stats.currentCapital : settings.settings.totalCapital
+    }
+
+    /// D8：按 M0.1 schema 版本打开训练组（每次新 reader 实例，spec L1830）。
+    private func openReader(for file: TrainingSetFile) throws -> TrainingSetReader {
+        // M0.1 TRAINING_SET_SCHEMA_VERSION = 1（modules L1847/L2202）。E6a 硬编码避免与并行
+        // 顺位 6 P2 PR 重复定义共享常量致编译冲突；shared-constant 单一 owner 见 PR body（residual E6a-R1）。
+        try dbFactory.openAndVerify(file: file.localURL, expectedSchemaVersion: 1)
+    }
+
+    /// D3：从已校验 candle 取 maxTick = .m3 末根 endGlobalIndex（连续轴 = count-1）。
+    /// .m3 缺/空 → 可恢复 .emptyData（make 也二次校验，但 FlowInput.normal/.replay 需先得 maxTick）。
+    private func maxTick(from allCandles: [Period: [KLineCandle]]) throws -> Int {
+        guard let m3 = allCandles[.m3], let last = m3.last else {
+            throw AppError.trainingSet(.emptyData)
+        }
+        return last.endGlobalIndex
+    }
+
+    /// 按 filename 在缓存中定位训练组文件；缺失 → 可恢复 .fileNotFound。
+    private func cachedFile(filename: String) throws -> TrainingSetFile {
+        guard let file = cache.listAvailable().first(where: { $0.filename == filename }) else {
+            throw AppError.trainingSet(.fileNotFound)
+        }
+        return file
+    }
+
+    /// D11 M0.4 边界：positionData 反序列化（唯一内部错误源）。损坏/被篡改存档的
+    /// PositionManager.init(from:) 抛 DecodingError（§4.2.1 入口 2）→ 翻译为可恢复 .dbCorrupted。
+    /// decode 必须在此私有 helper（M0.4 Gate 2：public 方法体禁 raw .decode）。
+    private func decodePosition(_ data: Data) throws -> PositionManager {
+        do {
+            return try JSONDecoder().decode(PositionManager.self, from: data)
+        } catch {
+            throw AppError.persistence(.dbCorrupted)
+        }
+    }
+
+    /// 从交易流水重建 UI 标记（TradeMarker 非 Codable，不持久 → resume/review 由 ops 重建）。
+    private func markers(from ops: [TradeOperation]) -> [TradeMarker] {
+        ops.map { TradeMarker(globalTick: $0.globalTick, price: $0.price, direction: $0.direction) }
     }
 }
 
