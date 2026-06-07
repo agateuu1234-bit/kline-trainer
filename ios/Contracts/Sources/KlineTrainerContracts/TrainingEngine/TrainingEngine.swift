@@ -466,8 +466,8 @@ public final class TrainingEngine {
 }
 
 // MARK: - C8b 交互编排（C7 手势接线下游 + 画线激活 H1 production handler）
-// 同文件 extension：可访问 `private let animators` / `private(set) var drawings` / `lastRenderedBounds`
-// （Swift `private` 文件作用域；免破坏 E5a init internal 的 trust boundary）。
+// 同文件 extension：可访问 `private let animators` / `public private(set) var drawings`（setter 文件作用域）/
+// `lastRenderedBounds`（Swift `private`/`private(set)` setter 文件作用域；免破坏 E5a init internal 的 trust boundary）。
 
 extension TrainingEngine {
 
@@ -534,8 +534,9 @@ extension TrainingEngine {
         }
     }
 
-    /// onPan `.cancelled`（两指接管 / drawing 截获结算后）：结束 freeScrolling，**不**启动惯性。
-    /// 经 reducer `panEnded(0)` 关闭 freeScrolling 相位；忽略其 `.startDeceleration(0)` effect（不调 start）。
+    /// onPan `.cancelled`（两指接管 / drawing 截获结算后）：结束本次拖动，**不**启动惯性。
+    /// 经 reducer `panEnded(0)` bump revision 但**不改 interactionMode**（freeScrolling 维持，offset 冻结于当前值；
+    /// 后续两指切周期/交易再硬切 autoTracking）；忽略其 `.startDeceleration(0)` effect（不调 start）。
     public func cancelPan(panel: PanelId) {
         _ = reduce(.panEnded(velocity: 0), on: panel)
     }
