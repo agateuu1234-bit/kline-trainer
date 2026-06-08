@@ -73,6 +73,48 @@ public final class AppRouter {
         }
     }
 
+    public func startTraining() async {
+        do {
+            let engine = try await coordinator.startNewNormalSession()
+            activeTraining = ActiveTraining(lifecycle: TrainingSessionLifecycle(engine: engine, coordinator: coordinator))
+        } catch { setError(error) }
+    }
+
+    public func continueTraining() async {
+        do {
+            if let engine = try await coordinator.resumePending() {
+                activeTraining = ActiveTraining(lifecycle: TrainingSessionLifecycle(engine: engine, coordinator: coordinator))
+            }
+        } catch { setError(error) }
+    }
+
+    public func selectRecord(id: Int64) {
+        if let r = records.first(where: { $0.id == id }) { activeModal = .history(r) }
+    }
+
+    public func review(id: Int64) async {
+        activeModal = nil
+        do {
+            let engine = try await coordinator.review(recordId: id)
+            activeTraining = ActiveTraining(lifecycle: TrainingSessionLifecycle(engine: engine, coordinator: coordinator))
+        } catch { setError(error) }
+    }
+
+    public func replay(id: Int64) async {
+        activeModal = nil
+        do {
+            let engine = try await coordinator.replay(recordId: id)
+            activeTraining = ActiveTraining(lifecycle: TrainingSessionLifecycle(engine: engine, coordinator: coordinator))
+        } catch { setError(error) }
+    }
+
+    public func openSettings() { activeModal = .settings }
+
+    public func exitTraining() async {
+        activeTraining = nil            // 经 TrainingView「返回」按钮触发，其 lifecycle.back() 已 saveProgress+endSession；此处不再 endSession 防双调
+        await loadHome()
+    }
+
     func setError(_ error: Error) {
         errorMessage = (error as? AppError)?.userMessage ?? "操作失败"
     }

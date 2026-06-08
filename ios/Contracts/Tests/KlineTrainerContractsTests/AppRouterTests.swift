@@ -115,4 +115,52 @@ struct AppRouterTests {
         #expect(f.router.homeContent.hasCachedSets == false)
         #expect(f.router.homeContent.isHistoryEmpty == true)
     }
+
+    @Test("startTraining 成功 → activeTraining 非 nil（normal 模式）")
+    func startTraining_success() async {
+        let f = Self.makeRouter()
+        await f.router.startTraining()
+        #expect(f.router.activeTraining != nil)
+        #expect(f.router.activeTraining?.lifecycle.engine.flow.mode == .normal)
+        #expect(f.router.errorMessage == nil)
+    }
+
+    @Test("startTraining 失败（无缓存集）→ errorMessage 且 activeTraining nil")
+    func startTraining_noCache_error() async {
+        let f = Self.makeRouter(seedFiles: [])
+        await f.router.startTraining()
+        #expect(f.router.activeTraining == nil)
+        #expect(f.router.errorMessage != nil)
+    }
+
+    @Test("continueTraining 无 pending → 不 push")
+    func continue_noPending() async {
+        let f = Self.makeRouter()
+        await f.router.continueTraining()
+        #expect(f.router.activeTraining == nil)
+    }
+
+    @Test("selectRecord → activeModal=.history(对应 record)")
+    func selectRecord_setsHistoryModal() async {
+        let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] 单 record → 实际 id=1
+        await f.router.loadHome()              // 填 router.records 缓存
+        f.router.selectRecord(id: 1)
+        if case .history(let r)? = f.router.activeModal { #expect(r.id == 1) } else { Issue.record("expected .history") }
+    }
+
+    @Test("review(id) → push review 模式 engine")
+    func review_pushesReviewMode() async {
+        let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] 查询用 insert-order id=1
+        await f.router.review(id: 1)
+        #expect(f.router.activeModal == nil)
+        #expect(f.router.activeTraining?.lifecycle.engine.flow.mode == .review)
+    }
+
+    @Test("exitTraining → activeTraining nil + reload home")
+    func exitTraining_clears() async {
+        let f = Self.makeRouter()
+        await f.router.startTraining()
+        await f.router.exitTraining()
+        #expect(f.router.activeTraining == nil)
+    }
 }
