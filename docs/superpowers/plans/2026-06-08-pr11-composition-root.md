@@ -955,3 +955,5 @@ plan 经一轮 opus 4.8 xhigh 对抗性审查；生产代码（AppRouter/AppCont
 ### v3 plan-review R2 响应
 R2 复核：5 个 R1 修正 VERIFIED；但挖出 1 个新 C（R1 漏）：
 - **[C2] `InMemoryRecordRepository.insertRecord` 丢弃传入 id、自增分配 insert-order id**（1,2,3…，mirror 生产 server-assigned rowid，`InMemoryFakes.swift:66-76`）→ 按 seeded id（7/3/9/4）查询的 6 个测试 miss（4 FAIL + 2 vacuous）。修：所有按 id 查询的测试改用 insert-order id（单 record→`id:1`）+ record fixture 加注释；并对 replay/settlement 测试加正向断言（mode==.replay / activeModal != nil）证路径真走通非静默抛错。生产代码仍零改动。R2 其余（7-tuple / endAfterSettlement 链 / pbxproj / 文件名解析）全 verified-correct。
+
+> **plan-stage opus 4.8 xhigh 对抗性审查 R3 = APPROVE（收敛）**：C2 修正 VERIFIED；review/replay 全 guard 经默认 fixture 实测通过；零 C/H/M/L 残留。进 subagent-driven development。
