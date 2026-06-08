@@ -31,9 +31,9 @@
 |---|---|---|---|
 | `DefaultAPIClient` | Persistence | `init(baseURL: URL, transport: HTTPRequesting = URLSession.shared)`（actor） | 非 throws；方法 async throws |
 | `DefaultAppDB` | Persistence | `init(dbPath: URL) throws`（class） | **构造同步跑 migration，可 throw**（`.ioError`/`.diskFull`）；满足 `AppDB = RecordRepository & PendingTrainingRepository & SettingsDAO & AcceptanceJournalDAO` |
-| `DefaultFileSystemCacheManager` | Persistence | （需核实 init 形参，预计 `init(rootDir: URL)`） | 满足 `CacheManager` |
-| `DefaultTrainingSetDBFactory` | Persistence | （需核实） | 满足 `TrainingSetDBFactory` |
-| 4× P2 default 端口 | Persistence | `DefaultZipIntegrityVerifier`/`DefaultZipExtractor`/`DefaultTrainingSetDataVerifier?`/`DefaultDownloadAcceptanceCleaner`（需核实各 init） | runner 的 integrity/extractor/dataVerifier/cleaner |
+| `DefaultFileSystemCacheManager` | Persistence | `init(cacheRoot: URL)` | 满足 `CacheManager` |
+| `DefaultTrainingSetDBFactory` | Persistence | `init()`（无参） | 满足 `TrainingSetDBFactory` |
+| 4× P2 default 端口 | Persistence | `DefaultZipIntegrityVerifier()`/`DefaultZipExtractor()`/`DefaultTrainingSetDataVerifier()`/`DefaultDownloadAcceptanceCleaner()` 全 `init()` 无参 | runner 的 integrity/extractor/dataVerifier/cleaner |
 | `SettingsStore` | Contracts | `init(settingsDAO: SettingsDAO)`（@MainActor @Observable，**非 throws**，init 内 eager load，失败置 loadError 降级 zeroDefault） | |
 | `DownloadAcceptanceRunner` | Contracts | `init(api:cache:dbFactory:journal:integrity:extractor:dataVerifier:cleaner:)`（final Sendable，非 throws）；`run/runBatch/retryPendingConfirmations() async` | retryPendingConfirmations 无 throw |
 | `TrainingSessionCoordinator` | Contracts | `init(dbFactory:recordRepo:pendingRepo:settingsDAO:cache:settings:)`（@MainActor @Observable，非 throws）；`startNewNormalSession/resumePending/review/replay async throws` + `saveProgress/finalize/endSession` | |
@@ -131,8 +131,8 @@ public final class AppContainer {
 **构造顺序**（依赖拓扑）：
 1. `api = DefaultAPIClient(baseURL: config.backendBaseURL)`
 2. `db = try DefaultAppDB(dbPath: config.dbPath)` ← **唯一 throws 点**（migration/IO）；失败则整图无法构造 → 上抛，app entry 渲染错误视图
-3. `cache = DefaultFileSystemCacheManager(rootDir: config.cacheRootDir)`
-4. 4× P2 default 端口 + `dbFactory = DefaultTrainingSetDBFactory(...)`
+3. `cache = DefaultFileSystemCacheManager(cacheRoot: config.cacheRootDir)`（**核实**：init label 是 `cacheRoot:` 非 `rootDir:`）
+4. `dbFactory = DefaultTrainingSetDBFactory()` + 4× P2 default 端口 `DefaultZipIntegrityVerifier()`/`DefaultZipExtractor()`/`DefaultTrainingSetDataVerifier()`/`DefaultDownloadAcceptanceCleaner()`（**核实**：全部 `init()` 无参）
 5. `settings = SettingsStore(settingsDAO: db)`（db 同时是 SettingsDAO；非 throws，内部降级 loadError）
 6. `acceptance = DownloadAcceptanceRunner(api:cache:dbFactory:journal:db, integrity:..., ...)`（journal = db）
 7. `coordinator = TrainingSessionCoordinator(dbFactory:recordRepo:db, pendingRepo:db, settingsDAO:db, cache:settings:)`
@@ -156,52 +156,53 @@ public final class AppRouter {
 
 **导航状态**：
 ```swift
-public enum Route: Equatable { case home }   // home 常驻根；training 用 NavigationStack path
 public enum Modal: Identifiable, Equatable {  // 互斥 sheet
     case settings
     case history(recordId: Int64)
-    case settlement(SettlementPayload)        // 见 4.5
+    case settlement(recordId: Int64)          // 见 4.5（仅 Normal 持久 record；retreat 后无 ephemeral 变体）
 }
 @MainActor 状态：
-  var homeContent: HomeContent?               // loadHome 后填
-  var trainingPath: [TrainingDestination]     // NavigationStack 绑定（≤1 项）
+  var homeContent: HomeContent = .emptyState  // 见下「空态」；非 optional，避免 ?? 与不存在的 .empty
+  var activeTraining: ActiveTraining?         // nil=首页；非 nil=已 push 训练页（仅单层，故用 isPresented 绑定非 path 数组）
   var activeModal: Modal?
   var errorMessage: String?                   // 转换失败 → alert
   private var didRunLaunchRecovery = false
 ```
+**`ActiveTraining`**（router 内值/引用，**非** NavigationStack path 元素，规避 Hashable 约束）：持 `lifecycle: TrainingSessionLifecycle`（engine+coordinator）；`mode` 读自 `lifecycle.engine.flow.mode`（`flow` 是 `public let`，`mode` public，已核实可达）。router 在 `sessionEnded(nil)` 时仍持有它（pop 前），用于区分 replay vs error。
+**空态 HomeContent**（[C] 修：`HomeContent` 是冻结 U1 纯值类型，**无** `.empty` 静态成员）：router 用零值显式构造 `HomeContent(statistics:(0,0,0), configuredCapital:0, records:[], hasPending:false, hasCachedSets:false)` 作为 `.emptyState`（在 AppRouter 内定义的私有 helper，不改 HomeContent）。
 
 **意图方法**（async，捕获 coordinator throws → errorMessage，不 crash）：
 | 入口 | 行为 |
 |---|---|
-| `runLaunchRecovery()` | 幂等门 `didRunLaunchRecovery`；`await acceptance.retryPendingConfirmations()`；然后 `await loadHome()` |
-| `loadHome()` | 从 recordRepo.statistics/listRecords + settings + pendingRepo + cache 装配 `HomeContent`；读失败 → errorMessage + 空 HomeContent |
-| `startTraining()` | `engine = try await coordinator.startNewNormalSession()` → push `TrainingDestination(lifecycle:)`；throw → errorMessage（如 loadError/无缓存集） |
-| `continueTraining()` | `if let e = try await coordinator.resumePending() { push }`，nil → 忽略（或刷新 home） |
-| `selectRecord(id)` | `activeModal = .history(id)`（壳据 id 从 records 取 record 建 sheet） |
-| `review(id)` | dismiss modal → `engine = try await coordinator.review(recordId:)` → push training |
-| `replay(id)` | dismiss modal → `engine = try await coordinator.replay(recordId:)` → push training |
+| `runLaunchRecovery()` | 幂等门 `didRunLaunchRecovery`（**恰一次属性来自此 router 门，非 runner——runner 每次全量重扫不去重**）；`await acceptance.retryPendingConfirmations()`；然后 `await loadHome()` |
+| `loadHome()` | 从 recordRepo.statistics()/listRecords(limit:) + settings.settings.totalCapital + pendingRepo.loadPending() + cache.listAvailable() 装配 `HomeContent`；读失败 → errorMessage + `.emptyState` |
+| `startTraining()` | `engine = try await coordinator.startNewNormalSession()` → `activeTraining = ActiveTraining(lifecycle:)`；throw → errorMessage（如 loadError/无缓存集） |
+| `continueTraining()` | `if let e = try await coordinator.resumePending() { activeTraining = … }`，nil → 忽略（或刷新 home） |
+| `selectRecord(id)` | `activeModal = .history(id)`（壳据 id 从 `homeContent.records` 取 record 建 sheet） |
+| `review(id)` | dismiss modal → `engine = try await coordinator.review(recordId:)` → `activeTraining = …` |
+| `replay(id)` | dismiss modal → `engine = try await coordinator.replay(recordId:)` → `activeTraining = …` |
 | `openSettings()` | `activeModal = .settings` |
-| `exitTraining()` | pop trainingPath → `await loadHome()`（records 可能变） |
+| `exitTraining()` | `activeTraining = nil` → `await loadHome()`（records 可能变） |
 | `sessionEnded(recordId:)` | 见 4.5 结算路由 |
-| `confirmSettlement()` | `await lifecycle.endAfterSettlement()` → dismiss → pop → `await loadHome()` |
-
-**TrainingDestination**：持 `TrainingSessionLifecycle`（engine+coordinator）+ mode，供 AppRootView push `TrainingView`。
+| `confirmSettlement()` | `await activeTraining?.lifecycle.endAfterSettlement()` → `activeModal=nil` → `activeTraining=nil` → `await loadHome()` |
 
 ### 4.4 `AppRootView`（Contracts，SwiftUI 薄壳，`#if canImport(UIKit)`）
 **init**：`init(router: AppRouter, settings: SettingsStore, api: any APIClient, cache: any CacheManager, acceptance: DownloadAcceptanceRunner)`——只吃 Contracts 抽象（**不**吃 `AppContainer`，避免 Contracts 依赖 Persistence）。settings/api/cache/acceptance 仅为构造 `SettingsPanel` 透传；其余路由全经 router。
-- `NavigationStack(path: $router.trainingPath)`：根 = `HomeView(content: router.homeContent ?? .empty, onStartTraining: { Task{ await router.startTraining() }}, …)`；`.navigationDestination(for: TrainingDestination.self) { TrainingView(lifecycle:onExit:onSessionEnded:) }`。
-- `.sheet(item: $router.activeModal)`：`.settings` → `SettingsPanel(...)`；`.history(id)` → 取 record → `HistoryActionSheet(onReview/onReplay/onCancel)`；`.settlement(payload)` → `SettlementView(record:onConfirm:)`。
-- `.alert(router.errorMessage)`、`.task { await router.runLaunchRecovery() }`（幂等门保证仅一次）、`.onAppear`/return 后 `loadHome`。
+- `NavigationStack { HomeView(content: router.homeContent, onStartTraining: { Task{ await router.startTraining() }}, …).navigationDestination(isPresented: <binding to router.activeTraining != nil>) { if let t = router.activeTraining { TrainingView(lifecycle: t.lifecycle, onExit:{ Task{ await router.exitTraining() }}, onSessionEnded:{ id in Task{ await router.sessionEnded(recordId: id) }}) } } }`。**用 `navigationDestination(isPresented:)` 单层 push**（非 `path:` 数组）——规避 `TrainingDestination` 须 Hashable 而 lifecycle 不可 Hashable 的约束；training 只有一层。
+- `.sheet(item: $router.activeModal)`：`.settings` → `SettingsPanel(settings:api:cache:acceptance:)`；`.history(id)` → 从 `router.homeContent.records` 取 record → `HistoryActionSheet(onReview/onReplay/onCancel)`；`.settlement(id)` → 取 record → `SettlementView(record:onConfirm:)`。
+- `.alert(router.errorMessage)`、`.task { await router.runLaunchRecovery() }`（幂等门保证仅一次）。
 - **不含路由逻辑**——全部 delegate router 方法（壳仅绑定 + 渲染，同 TrainingView 范式）。
 
-### 4.5 结算路由（D2 + U2-R4）
-`TrainingView.onSessionEnded(Int64?)`：
-- **Normal 正常结束**：`recordId != nil` → 从 recordRepo 取 `TrainingRecord` → `activeModal = .settlement(.persisted(record))` → SettlementView → confirm → `endAfterSettlement` → 回 home。
-- **error（finalize 抛，mode==normal，recordId==nil）**：直接 pop + loadHome（+ 可选 errorMessage）。router 据它持有的 `engine.flow.mode` 区分 replay vs error。
-- **Replay 结束（mode==replay，recordId==nil，U2-R4）**：lifecycle 注释「结算窗由顺位 11 据 engine 末态呈现」。SettlementView 吃 `TrainingRecord`——replay 无持久 record。**scope 决策**：
-  - **首选（若 ≤500 行且不改冻结 SettlementView）**：从 engine 末态构造**临时（非持久）`TrainingRecord`** 喂 SettlementView（`.settlement(.ephemeral(record))`）。需核实 `TrainingRecord` 可由 engine 末态字段无副作用构造。
-  - **退路（若构造临时 record 触碰冻结类型语义或撑爆行数）**：replay 结束直接回 home，**U2-R4 作为 PR11-R2 residual 显式 carry-forward**（不静默丢）。
-  - plan 阶段据 `TrainingRecord` 字段可达性 + 行数二择一，并在 acceptance 标注实际选择。
+### 4.5 结算路由（D2 + U2-R4 决策：retreat）
+`TrainingView.onSessionEnded(Int64?)` → `router.sessionEnded(recordId:)`。`recordId` 来自 `lifecycle.finalizeForSettlement()`；`TrainingView.maybeAutoEnd` 在 finalize 抛错时也回调 `onSessionEnded(nil)`（`TrainingView.swift:116-120`），故 `nil` 在 replay-成功 与 normal-finalize-失败 间二义。router 用**它仍持有的** `activeTraining.lifecycle.engine.flow.mode` 消歧（pop 前 mode 可读）：
+
+| 情形 | 判据 | 行为 |
+|---|---|---|
+| Normal 正常结束 | `recordId != nil` | `activeModal = .settlement(recordId)`；壳用 `recordRepo.loadRecordBundle(id:).0` 取 `TrainingRecord`（**核实**：`RecordRepository` 无 `loadRecord(id:)`，只有 `loadRecordBundle(id:) throws -> (TrainingRecord, [TradeOperation], [DrawingObject])`，取 `.0` 弃后两项；throws→catch→errorMessage；刚 finalize 的 id 必在）→ SettlementView → confirm → `endAfterSettlement` → 回 home |
+| Replay 结束 | `recordId == nil` 且 `mode == .replay` | **retreat**：`activeTraining=nil` → `loadHome()`，**不弹结算**。U2-R4 作 **PR11-R2 deferred** carry-forward |
+| Normal finalize 失败 | `recordId == nil` 且 `mode == .normal` | `errorMessage`（结算入账失败）→ `activeTraining=nil` → `loadHome()` |
+
+**为何 retreat（替代 v1 的「构造 ephemeral record」首选）**：审查 [H] 实证——`SettlementContent` 渲染 `stockName/stockCode/startYear/startMonth`（`SettlementContent.swift:27-28,44`），但 `TrainingEngine` 不暴露这些（仅 capital/returnRate/tradeOps/drawdown/initialCapital，`TrainingEngine.swift`），stock/月份元信息在 `reader.loadMeta()` 被 coordinator 私有持有且 replay() 返回后丢弃。**无法**从 engine 末态构造完整 record；用 `loadRecordBundle(原id)` 又会显示**原局**而非本次 replay 的 P&L（replay 不入账）——语义错误。忠实实现需触碰冻结 E5/E6（surfacing meta）或冻结 SettlementView（改签名）= scope creep。故 replay 结束直接回首页（行为正确但最简），settlement 窗作 PR11-R2 显式 deferred。outline §四 顺位 11 验收项（依赖图实例化 / 从启动可达训练设置 / 恢复路径）**不含** replay 结算，retreat 不损核心验收。
 
 ---
 
@@ -221,9 +222,9 @@ HomeView
 TrainingView
   ├ 返回 → lifecycle.back()(saveProgress+endSession) → onExit → pop → loadHome
   └ 自动结束 → lifecycle.finalizeForSettlement() → onSessionEnded(recordId?)
-        ├ normal recordId → sheet SettlementView(persisted) → confirm → endAfterSettlement → pop → loadHome
-        ├ replay nil → sheet SettlementView(ephemeral) 或 直接 pop（U2-R4 二择一）
-        └ error nil → pop → loadHome
+        ├ normal recordId → loadRecordBundle(id).0 → sheet SettlementView → confirm → endAfterSettlement → 回 home
+        ├ replay nil（mode==replay）→ 直接回 home（U2-R4 deferred PR11-R2，不弹结算）
+        └ normal nil（finalize 抛）→ errorMessage → 回 home
 ```
 
 ---
@@ -231,18 +232,19 @@ TrainingView
 ## 六、测试策略
 
 **host 全测（swift test）**：
-- `AppRouterTests`（Contracts）：注 `InMemoryRecordRepository`/`InMemoryPendingTrainingRepository`/`InMemoryCacheManager`/`Fake*` P2 + 真 coordinator/settings（吃 InMemory DAO）。覆盖：
-  - launch recovery 幂等（retryPendingConfirmations 恰一次：用计数 fake/journal 观察）。
+- `AppRouterTests`（Contracts）。**测试替身**（[M] 修——现存 `FakeAPIClient` 全 `private` 于各 test 文件不可复用）：复用 `InMemoryRecordRepository`/`InMemoryPendingTrainingRepository`/`InMemoryCacheManager`/`InMemoryAcceptanceJournalDAO`/`InMemorySettingsDAO`（PR #45/#46，public）+ `Fake*` P2 端口（P2Fakes，public）+ **本 PR 新写 `CountingAPIClient`**（Contracts test target 内的 APIClient 测试 double，记 `confirmTrainingSet` 调用数）。coordinator/settings 用真类吃 InMemory DAO。覆盖：
+  - **launch recovery 恰一次**（[M] 修——属性来自 router `didRunLaunchRecovery` 门，非 runner）：journal 预置 N 条 `.stored`/`.confirmPending` 行 + `CountingAPIClient`；连调 `runLaunchRecovery()` 两次 → `confirmCount == N`（不是 `2N`），证 router 门拦住第二次重扫。
   - loadHome 装配正确（statistics/records/capital/hasPending/hasCachedSets 映射）。
-  - startTraining 成功 push / 失败（settings loadError 或无缓存）→ errorMessage 且不 push。
-  - continue：有 pending → push；无 → 不 push。
-  - selectRecord → modal=.history；review/replay → push 对应 mode engine。
-  - sessionEnded：normal recordId → settlement(persisted)；error nil(normal) → 回 home；replay nil → 按 4.5 选择的分支。
-  - confirmSettlement → endAfterSettlement 调用 + 回 home + reload。
-- `AppContainerTests`（Persistence）：临时目录真 `DefaultAppDB` → `try AppContainer(config:)` 7 依赖非 nil；不可写路径 → init throws。
+  - **空态**：0 records + 无缓存集 + settings loadError-降级 → loadHome 得 `.emptyState`-等价值不 crash。
+  - startTraining 成功 → `activeTraining != nil` / 失败（settings loadError 或无缓存集）→ errorMessage 且 `activeTraining == nil`。
+  - continue：有 pending → `activeTraining != nil`；无 → 仍 nil。
+  - selectRecord → `activeModal == .history(id)`；review/replay → `activeTraining` 持对应 mode engine。
+  - sessionEnded：normal recordId → `activeModal == .settlement(id)`；normal nil → errorMessage + `activeTraining==nil`；replay nil → `activeTraining==nil` 且无 settlement（retreat）。
+  - confirmSettlement → endAfterSettlement 调用 + `activeTraining==nil` + reload。
+- `AppContainerTests`（Persistence）：临时目录真 `DefaultAppDB` → `try AppContainer(config:)` 各依赖（含 router）非 nil；不可写路径 → init throws。
 
 **非 host-测（编译/运行时兜底）**：
-- `AppRootView` + `KlineTrainerApp.swift`：Catalyst build（Contracts 部分）+ 本地 `xcodebuild -project ios/KlineTrainer/KlineTrainer.xcodeproj -scheme KlineTrainer build`（app 部分，CI 不覆盖）。
+- `AppRootView` + `KlineTrainerApp.swift`：Catalyst build（Contracts 部分）+ 本地 `xcodebuild -project ios/KlineTrainer/KlineTrainer.xcodeproj -scheme KlineTrainer build`（app 部分，CI 不覆盖）。**[H] 修**：app target **当前无 shared scheme**（`xcshareddata/xcschemes/` 不存在）→ 本 PR pbxproj 改动须**创建并 commit** `KlineTrainer.xcscheme`（shared），否则 `-scheme KlineTrainer` 依赖未提交的 autogen scheme 不稳定。
 - 运行时可达性（从启动到训练/设置、恢复路径）：手动 simulator/device 验收（runbook，沿用 C8b/U2 运行时验收 doc 范式），满足 outline §四 顺位 11「从启动可达训练/设置 + 恢复路径」要求。
 
 ---
@@ -251,7 +253,7 @@ TrainingView
 
 **app target 不被任何 CI 构建**（Catalyst CI 只 build `KlineTrainerContracts` scheme）。决策：
 - **不**新增 app-build CI job——那是 trust-boundary/workflow 变更（需 codex review + 扩 scope），outline 顺位 11 未要求；且 app target 历来不 CI-build。
-- 改 pbxproj + app entry 后**本地** `xcodebuild` app scheme 验证编译链接（local toolchain 是此处唯一编译验证，与 `feedback_swift_local_toolchain_blindspot` 方向相反——此处 CI 根本不覆盖 app，本地是唯一闸门）。
+- 改 pbxproj（加本地 SPM 包依赖 + link 两 product）+ **创建并 commit shared `KlineTrainer.xcscheme`** + app entry 后，**本地** `xcodebuild -scheme KlineTrainer build` 验证编译链接（local toolchain 是此处唯一编译验证，与 `feedback_swift_local_toolchain_blindspot` 方向相反——此处 CI 根本不覆盖 app，本地是唯一闸门）。
 - gap 显式记为 **PR11-R3 residual**：app target 无 CI 守护（依赖本地 build + 运行时验收）。
 
 ---
@@ -275,12 +277,24 @@ TrainingView
 | 启动孤儿确认恢复 | `AppRouterTests` launch-recovery 幂等 + retryPendingConfirmations 恰一次 |
 
 ## 十一、residuals
-- **PR11-R1**：生产 `backendBaseURL` = placeholder（NAS 部署后替换）。
-- **PR11-R2**：replay 结束结算窗（U2-R4）——若退路则 carry-forward。
-- **PR11-R3**：app target 无 CI 构建守护（本地 build + 运行时验收兜底）。
+- **PR11-R1**：生产 `backendBaseURL` = placeholder（NAS 部署后替换；download/reserve 真实网络路径在 NAS 上线前不通——本就 out-of-scope）。
+- **PR11-R2**：replay 结束结算窗（U2-R4）**deferred**——retreat 决策（§4.5），replay 结束直接回首页，结算窗忠实实现需触碰冻结 E5/E6/SettlementView，留后续 anchor。
+- **PR11-R3**：app target 无 CI 构建守护（本地 `xcodebuild -scheme KlineTrainer` + 运行时验收兜底）。
 
-## 十二、待 plan 阶段核实
-- `DefaultFileSystemCacheManager` / `DefaultTrainingSetDBFactory` / 4× P2 default 端口的真实 init 形参。
-- `TrainingRecord` 能否由 engine 末态无副作用构造（决定 PR11-R2 首选 vs 退路）。
+## 十二、待 plan 阶段核实（v2：端口 init 已核实并入正文，下列为剩余）
 - 生产 app.sqlite / cache 目录的标准 iOS 路径（App Support vs Documents；Caches）。
-- pbxproj 加本地 SPM 包依赖的正确改法（XCLocalSwiftPackageReference + 两 product link）。
+- pbxproj 加本地 SPM 包依赖的正确改法（XCLocalSwiftPackageReference + 两 product link）+ shared scheme 文件格式。
+- `loadRecordBundle(id:)` 在刚 finalize 的 id 上确不会因事务可见性返回空（预期 finalize 已提交，立即可读；plan 测试以 InMemory repo 验证调用序）。
+
+## 十三、v2 对抗性审查（opus 4.8 xhigh）响应
+spec 经一轮 opus 4.8 xhigh 对抗性审查，2C+4H+3M+2L 全部 valid（无驳回），逐条修入正文：
+- **[C] cache init label** `rootDir:`→`cacheRoot:`（§一/§4.2，自 grep 独立确认）。
+- **[C] `HomeContent.empty` 不存在**（冻结 U1 类型）→ router 显式零值 `.emptyState` helper（§4.3）。
+- **[H] replay ephemeral record 不可行**（SettlementContent 需 stock/月份元信息，engine 不暴露）→ retreat，U2-R4 deferred PR11-R2（§4.5）。
+- **[H] `onSessionEnded(nil)` 二义** → router 读 retained `activeTraining.lifecycle.engine.flow.mode` 消歧（§4.3/§4.5）。
+- **[H] app target 无 shared scheme** → 本 PR 创建并 commit `KlineTrainer.xcscheme`（§六/§七）。
+- **[M] 无可复用 APIClient fake** → 新写 `CountingAPIClient` test double（§六）。
+- **[M] exactly-once 是 router 级非 runner 级** → 经 `CountingAPIClient.confirmCount==N`（非 2N）断言（§六）。
+- **[M] Normal 结算 re-fetch** → `loadRecordBundle(id:).0` + throws 处理（§4.5）。
+- **[L] DBFactory/4 端口 init** → 全 `init()` 无参（§4.2，已核实）。
+- 设计自查另修：`NavigationStack(path:)` 须 Hashable 元素 vs lifecycle 不可 Hashable → 改 `navigationDestination(isPresented:)` 单层 push（§4.3/§4.4）。
