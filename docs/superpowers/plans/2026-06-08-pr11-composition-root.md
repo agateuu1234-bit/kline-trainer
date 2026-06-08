@@ -99,10 +99,12 @@ struct AppRouterTests {
     }
 
     static func record(id: Int64, profit: Double = 0) -> TrainingRecord {
-        TrainingRecord(id: id, trainingSetFilename: "t.sqlite", createdAt: 0,
+        // [H] 修：trainingSetFilename 必须匹配 cache 里 seed 的文件名（review/replay 据它在 cache 解析文件），否则 .trainingSet(.fileNotFound)
+        TrainingRecord(id: id, trainingSetFilename: "set1.sqlite", createdAt: 0,
                        stockCode: "000001", stockName: "测试股", startYear: 2020, startMonth: 1,
                        totalCapital: 100_000, profit: profit, returnRate: 0, maxDrawdown: 0,
-                       buyCount: 0, sellCount: 0, feeSnapshot: FeeSnapshot.zero, finalTick: 2)
+                       buyCount: 0, sellCount: 0,
+                       feeSnapshot: FeeSnapshot(commissionRate: 0, minCommissionEnabled: false), finalTick: 2)  // [C] 修：无 FeeSnapshot.zero
     }
 
     /// 组装一个 router + 暴露其内部依赖供测试断言/seed。
@@ -115,9 +117,9 @@ struct AppRouterTests {
         api: any APIClient = CountingAPIClient()
     ) -> (router: AppRouter, records: InMemoryRecordRepository,
           pending: InMemoryPendingTrainingRepository, journal: InMemoryAcceptanceJournalDAO,
-          cache: InMemoryCacheManager, api: any APIClient) {
+          cache: InMemoryCacheManager, api: any APIClient, coordinator: TrainingSessionCoordinator) {
         let records = InMemoryRecordRepository()
-        for r in seedRecords { try? records.insertRecord(r) }
+        for r in seedRecords { try? records.insertRecord(r, ops: [], drawings: []) }   // [C] 修：insertRecord 是 3 参
         let pending = InMemoryPendingTrainingRepository()
         let journal = InMemoryAcceptanceJournalDAO()
         let cache = InMemoryCacheManager()
@@ -134,17 +136,17 @@ struct AppRouterTests {
             cleaner: FakeDownloadAcceptanceCleaner())
         let router = AppRouter(coordinator: coordinator, settings: settings, acceptance: runner,
                                recordRepo: records, pendingRepo: pending, cache: cache)
-        return (router, records, pending, journal, cache, api)
+        return (router, records, pending, journal, cache, api, coordinator)
     }
 
-    @Test("loadHome 装配 statistics/capital/hasPending/hasCachedSets/records")
+    // [C] 修：HomeContent 的 configuredCapital/hasPending 只是 init 参，非 stored property——断言改读 stored 派生属性
+    //         （hasCachedSets / isHistoryEmpty 是 stored；hasPending→isResuming 派生）。
+    @Test("loadHome 装配：有缓存集 + 有 records → hasCachedSets=true / isHistoryEmpty=false / 无错误")
     func loadHome_assembles() async {
-        let f = Self.makeRouter(capital: 88_000,
-                                seedRecords: [Self.record(id: 1, profit: 100), Self.record(id: 2, profit: -50)])
+        let f = Self.makeRouter(seedRecords: [Self.record(id: 1, profit: 100), Self.record(id: 2, profit: -50)])
         await f.router.loadHome()
-        #expect(f.router.homeContent.configuredCapital == 88_000)
         #expect(f.router.homeContent.hasCachedSets == true)
-        #expect(f.router.homeContent.hasPending == false)
+        #expect(f.router.homeContent.isHistoryEmpty == false)
         #expect(f.router.errorMessage == nil)
     }
 
@@ -154,7 +156,7 @@ struct AppRouterTests {
                                 seedFiles: [], seedRecords: [])
         await f.router.loadHome()
         #expect(f.router.homeContent.hasCachedSets == false)
-        #expect(f.router.homeContent.hasPending == false)
+        #expect(f.router.homeContent.isHistoryEmpty == true)
     }
 }
 ```
@@ -458,13 +460,13 @@ func sessionEnded_replayRetreat() async {
     #expect(f.router.activeModal == nil)
 }
 
-@Test("teardown：replay 结束后能立即再 startTraining（证 reader 已 endSession 关闭）")
+@Test("teardown：replay 结束(retreat)后 coordinator.activeReader == nil（证 endAfterSettlement→endSession 被调）")
 func sessionEnded_replayTearsDownReader() async {
     let f = Self.makeRouter(seedRecords: [Self.record(id: 4)])
     await f.router.replay(id: 4)
-    await f.router.sessionEnded(recordId: nil)      // retreat 须 endAfterSettlement
-    await f.router.startTraining()                  // 若 reader 未关 → coordinator 抛 → activeTraining nil
-    #expect(f.router.activeTraining != nil)
+    #expect(f.coordinator.activeReader != nil)      // replay 成功 → reader 开（前提：filename 匹配，见 record fixture）
+    await f.router.sessionEnded(recordId: nil)      // retreat 须 endAfterSettlement → endSession
+    #expect(f.coordinator.activeReader == nil)      // 直接断言 reader 关闭（若漏调 endAfterSettlement 则非 nil → FAIL）
 }
 
 @Test("confirmSettlement → activeTraining nil + modal nil + reload")
@@ -646,7 +648,7 @@ public final class AppContainer {
 - [ ] **Step 4：跑测试确认通过**
 
 Run: `cd ios/Contracts && swift test --filter AppContainer`
-Expected: PASS。**注**：若 `validConfig_buildsGraph` 因 cache 目录不存在报错（`DefaultFileSystemCacheManager` 可能要求 cacheRoot 存在），在 AppContainer 构造 cache 前 `try? FileManager.default.createDirectory(at: config.cacheRootDir, withIntermediateDirectories: true)`；并核实 DefaultAppDB 是否自建父目录，否则同样先建 `config.dbPath.deletingLastPathComponent()`。
+Expected: PASS。**注**（plan-review 已核实，无需额外建目录）：`DefaultAppDB.init` 自建父目录；`DefaultFileSystemCacheManager.init(cacheRoot:)` 仅存 URL，`listAvailable` 缺目录安全（返 []）；`validConfig_buildsGraph` 只实例化 + 读 `router`（不 store/loadHome），故不需预建 cache 目录。
 
 - [ ] **Step 5：跑全量 swift test 确认无回归**
 
@@ -934,4 +936,14 @@ git add -A && git commit -m "顺位11 Task7：整体验证（swift test + Cataly
 - **spec 覆盖**：组合根(Task4) / 路由(Task1-3) / 根视图(Task5) / app entry+pbxproj+scheme(Task6) / 启动恢复(Task3) / 结算 retreat(Task3) / CI gap(Task6-7) / 验收映射(Task7) ——全 spec 章节有对应 task。
 - **占位扫描**：无 TBD；test double/fixture/pbxproj 均给真实代码（journal seed、CountingAPIClient、pbxproj object ID）。
 - **类型一致**：`AppRouter`/`AppContainer`/`AppConfig`/`Modal`/`ActiveTraining` 跨 task 命名一致；`activeTraining`/`activeModal`/`homeContent`/`errorMessage`/`records` 状态名贯穿；方法名 `startTraining/continueTraining/selectRecord/review/replay/openSettings/exitTraining/sessionEnded/confirmSettlement/runLaunchRecovery/loadHome/clearError/emptyHome` 一致。
-- **风险点**（实施时核对真实签名，编译器/Catalyst 兜底）：HomeView/SettlementView/HistoryActionSheet/SettingsPanel init 标签（Task5）；journal upsert validateInvariants 顺序（Task3）；DefaultFileSystemCacheManager/DefaultAppDB 是否自建目录（Task4）；pbxproj 本地包格式（Task6）；`TrainingMode` 枚举名与 `.normal/.review/.replay`（Task2-3）。
+- **风险点**（实施时核对真实签名，编译器/Catalyst 兜底）：HomeView/SettlementView/HistoryActionSheet/SettingsPanel init 标签（Task5，plan-review 已逐一核实 match）；`TrainingMode` 枚举名与 `.normal/.review/.replay`（Task2-3，已核实 Models.swift:33）；pbxproj 本地包格式（Task6）。
+
+## v2 plan-review（opus 4.8 xhigh）响应
+plan 经一轮 opus 4.8 xhigh 对抗性审查；生产代码（AppRouter/AppContainer/AppRootView）、依赖图接线、journal seed、exactly-once 设计、pbxproj 5 处编辑**全部 verified-correct**；4 个真实 bug + 1 vacuous test 全在 `AppRouterTests` fixture/断言，已修：
+- **[C] `FeeSnapshot.zero` 不存在** → `FeeSnapshot(commissionRate: 0, minCommissionEnabled: false)`（Task1 record fixture）。
+- **[C] `insertRecord` 3 参** → `insertRecord(r, ops: [], drawings: [])`（Task1 makeRouter）。
+- **[C] `HomeContent` 无 `configuredCapital`/`hasPending` 属性**（仅 init 参）→ 断言改 stored 派生 `hasCachedSets`/`isHistoryEmpty`（Task1 loadHome 测试）。
+- **[H] fixture 文件名错配**（record `t.sqlite` vs cache `set1.sqlite`，致 review/replay `.fileNotFound`）→ record 改 `set1.sqlite`（Task1）。
+- **[M] teardown 测试 vacuous** → makeRouter 返回 `coordinator`，`sessionEnded_replayTearsDownReader` 直接断言 `coordinator.activeReader == nil`（Task3）。
+- **[L] Task4 建目录 note 多余**（DefaultAppDB 自建父目录 / cache 缺目录安全）→ 简化（Task4）。
+**plan 收敛信号**：仅测试 fixture 局部一行级修正，生产设计零改动。
