@@ -11,13 +11,13 @@
 | 1 | `cd ios/Contracts && swift build 2>&1 \| tail -2` | 末行 `Build complete!` | ☐ |
 | 2 | `cd ios/Contracts && swift test 2>&1 \| tail -2` | 末行 `Test run with <N> tests in <M> suites passed`，含 `0 failures` | ☐ |
 | 3 | `cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 \| tail -3` | 出现 `** TEST BUILD SUCCEEDED **` | ☐ |
-| 4 | `grep -n "fatalError\|TODO\|FIXME" ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift ios/Contracts/Sources/KlineTrainerContracts/UI/HomeView.swift; echo "exit=$?"` | 无输出，`exit=1`（无占位） | ☐ |
+| 4 | `grep -n -e fatalError -e TODO -e FIXME ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift ios/Contracts/Sources/KlineTrainerContracts/UI/HomeView.swift; echo "exit=$?"` | 无输出，`exit=1`（无占位。用多 `-e` 而非 `\|` alternation：避免 markdown 表格转义与 ERE/BRE 歧义导致空洞守卫） | ☐ |
 
 ## 二、view-only 守卫
 
 | # | 操作 | 期望 | 判定 |
 |---|---|---|---|
-| 5 | `grep -nE "TrainingSessionCoordinator\|SettingsStore\|DownloadAcceptanceRunner" ios/Contracts/Sources/KlineTrainerContracts/UI/HomeView.swift ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift; echo "exit=$?"` | 无输出，`exit=1`（不引用运行时依赖，D1） | ☐ |
+| 5 | `grep -n -e TrainingSessionCoordinator -e SettingsStore -e DownloadAcceptanceRunner ios/Contracts/Sources/KlineTrainerContracts/UI/HomeView.swift ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift; echo "exit=$?"` | 无输出，`exit=1`（不引用运行时依赖，D1。多 `-e` 而非 `\|`：对真引用文件能 exit=0 抓到，守卫非空洞——已实证） | ☐ |
 | 6 | `grep -cE "^import SwiftUI" ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift` | 输出 `0`（HomeContent 无 `import SwiftUI` 语句，host 全测。锚 `^import` 排除注释行「不 import SwiftUI」的假匹配） | ☐ |
 
 ## 三、统计栏 / 按钮逐项（定向测试）

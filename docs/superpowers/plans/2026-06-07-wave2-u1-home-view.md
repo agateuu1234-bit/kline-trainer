@@ -673,11 +673,11 @@ Expected: `** TEST BUILD SUCCEEDED **`（HomeView SwiftUI 在 Catalyst 编译 + 
 
 Run:
 ```bash
-grep -nE "TrainingSessionCoordinator|SettingsStore|DownloadAcceptanceRunner" \
+grep -n -e TrainingSessionCoordinator -e SettingsStore -e DownloadAcceptanceRunner \
   ios/Contracts/Sources/KlineTrainerContracts/UI/HomeView.swift \
   ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift; echo "exit=$?"
 ```
-Expected: 无输出，`exit=1`（HomeView/HomeContent 不引用任何运行时依赖，view-only D1 成立）。
+Expected: 无输出，`exit=1`（HomeView/HomeContent 不引用任何运行时依赖，view-only D1 成立）。用多 `-e` 而非 `\|` alternation：守卫对真引用文件能 exit=0 抓到（非空洞），且无 markdown 表格转义/ERE-BRE 歧义。
 
 - [ ] **Step 4：写 acceptance 文档**（内容见下方「附：验收清单」整段，落盘到 `docs/acceptance/2026-06-07-wave2-u1-home-view.md`）
 
@@ -706,13 +706,13 @@ git commit -m "docs(U1): 验收清单 + 实施计划"
 | 1 | `cd ios/Contracts && swift build 2>&1 \| tail -2` | 末行 `Build complete!` | ☐ |
 | 2 | `cd ios/Contracts && swift test 2>&1 \| tail -2` | 末行 `Test run with <N> tests in <M> suites passed`，含 `0 failures` | ☐ |
 | 3 | `cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 \| tail -3` | 出现 `** TEST BUILD SUCCEEDED **` | ☐ |
-| 4 | `grep -n "fatalError\|TODO\|FIXME" ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift ios/Contracts/Sources/KlineTrainerContracts/UI/HomeView.swift; echo "exit=$?"` | 无输出，`exit=1`（无占位） | ☐ |
+| 4 | `grep -n -e fatalError -e TODO -e FIXME ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift ios/Contracts/Sources/KlineTrainerContracts/UI/HomeView.swift; echo "exit=$?"` | 无输出，`exit=1`（无占位；多 `-e` 避免空洞守卫） | ☐ |
 
 ## 二、view-only 守卫
 
 | # | 操作 | 期望 | 判定 |
 |---|---|---|---|
-| 5 | `grep -nE "TrainingSessionCoordinator\|SettingsStore\|DownloadAcceptanceRunner" ios/Contracts/Sources/KlineTrainerContracts/UI/HomeView.swift ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift; echo "exit=$?"` | 无输出，`exit=1`（不引用运行时依赖，D1） | ☐ |
+| 5 | `grep -n -e TrainingSessionCoordinator -e SettingsStore -e DownloadAcceptanceRunner ios/Contracts/Sources/KlineTrainerContracts/UI/HomeView.swift ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift; echo "exit=$?"` | 无输出，`exit=1`（不引用运行时依赖，D1；多 `-e` 守卫非空洞，已实证） | ☐ |
 | 6 | `grep -cE "^import SwiftUI" ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift` | 输出 `0`（HomeContent 无 `import SwiftUI` 语句；锚 `^import` 排除注释假匹配） | ☐ |
 
 ## 三、统计栏 / 按钮逐项（定向测试）
