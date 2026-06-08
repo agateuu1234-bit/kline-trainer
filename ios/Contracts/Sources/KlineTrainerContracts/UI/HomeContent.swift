@@ -132,6 +132,7 @@ public struct HomeContent: Equatable, Sendable {
         return .zero
     }
 
+    /// 从已解包 id + TrainingRecord 组装历史行显示快照（D12：id 已由 compactMap 过滤非 nil）。
     static func makeRow(id: Int64, record: TrainingRecord, timeZone: TimeZone) -> HomeHistoryRow {
         HomeHistoryRow(
             id: id,
