@@ -18,7 +18,7 @@
 | # | 操作 | 期望 | 判定 |
 |---|---|---|---|
 | 5 | `grep -nE "TrainingSessionCoordinator\|SettingsStore\|DownloadAcceptanceRunner" ios/Contracts/Sources/KlineTrainerContracts/UI/HomeView.swift ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift; echo "exit=$?"` | 无输出，`exit=1`（不引用运行时依赖，D1） | ☐ |
-| 6 | `grep -nc "import SwiftUI" ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift` | 输出 `0`（HomeContent 不 import SwiftUI，host 全测） | ☐ |
+| 6 | `grep -cE "^import SwiftUI" ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift` | 输出 `0`（HomeContent 无 `import SwiftUI` 语句，host 全测。锚 `^import` 排除注释行「不 import SwiftUI」的假匹配） | ☐ |
 
 ## 三、统计栏 / 按钮逐项（定向测试）
 
