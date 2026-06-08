@@ -200,7 +200,7 @@ struct HomeContentTests {
         let c = makeContent(totalCount: 3, records: [
             makeRecord(id: 1, createdAt: 100), makeRecord(id: nil, createdAt: 200)])
         #expect(c.totalSessions == "3 局")   // 来自 statistics
-        #expect(c.rows.count == 2 - 1)        // compactMap 后 = 1，证明二者解耦
+        #expect(c.rows.count == 1)            // 2 输入 − 1 nil-id（compactMap 后），证明二者解耦
     }
 
     @Test("行字段格式（stock 全角括号 / startMonth 零填充 / totalCapital ¥ 空格）")
