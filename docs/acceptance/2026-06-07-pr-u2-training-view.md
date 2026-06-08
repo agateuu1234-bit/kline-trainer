@@ -4,10 +4,12 @@
 
 ## 一、host 单元（机器执行）
 
+> 前置：终端先 `cd ios/Contracts`（本节各行沿用此目录）。
+
 | # | action | expected | pass/fail |
 |---|---|---|---|
-| 1 | `cd ios/Contracts && swift test --filter TrainingSessionLifecycle` | 12 测试全 passed，0 failure | pass = 终端打印 `12 tests ... passed` |
-| 2 | `swift test --filter TrainingTopBarContent` | 8 测试全 passed | pass = 终端打印 `8 tests ... passed` |
+| 1 | `swift test --filter TrainingSessionLifecycle` | 12 测试全 passed，0 failure | pass = 终端打印 `12 tests ... passed` 且 0 failure |
+| 2 | `swift test --filter TrainingTopBarContent` | 8 测试全 passed，0 failure | pass = 终端打印 `8 tests ... passed` 且 0 failure |
 | 3 | `swift test` 全量 | `757 tests ... passed`（737 基线 + 20 新），0 failure | pass = 全量 0 failure |
 
 ## 二、生命周期 5 路径矩阵（host 测断言，逐条对应）
@@ -37,7 +39,7 @@
 
 | # | action | expected | pass/fail |
 |---|---|---|---|
-| 11 | `grep -nE "结束本局\|画线\|仓位 X/5\|forceClose" ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift` | 仅命中注释里的延后说明（D6/D7/D8），无对应功能代码 | pass = 无延后项功能代码 |
+| 11 | `grep -nE "结束本局|画线|仓位 X/5|forceClose" ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift`（注：`-E` 下用裸 `|` 交替，勿写 `\|`，否则匹配字面竖线致假阳性） | 仅命中注释里的延后说明（D7/D8 的「画线」「仓位 X/5」），无对应功能代码 | pass = 命中仅注释行、无延后项功能代码 |
 
 ## 六、延后项（residual，本 PR 不交付，文档化上交）
 

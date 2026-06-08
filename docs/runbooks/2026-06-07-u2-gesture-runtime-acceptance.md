@@ -5,6 +5,7 @@
 
 > 前置：在 iPad / Mac Catalyst 运行含 `TrainingView(lifecycle:onExit:onSessionEnded:)` 的宿主
 > （顺位 11 组合根，或最小 SwiftUI 宿主用 `TrainingSessionLifecycle(engine: .preview(mode: .normal), coordinator: .preview())`）。
+> **步骤 5 验 Review 模式**：须改用 `.preview(mode: .review)` 启动宿主（交易按钮组应隐藏）。
 > 本 runbook 验 C7 手势仲裁运行时；C2 减速 + C8 帧预算见 `2026-06-07-c8b-runtime-acceptance.md`。
 >
 > **注（独立 preview 宿主）**：最小 preview 宿主用两个**独立** `.preview()`（engine 非 coordinator 的活跃 engine）
@@ -14,8 +15,8 @@
 
 | # | action | expected | pass/fail |
 |---|---|---|---|
-| 1 | 单指水平拖动上区 K 线 | 图表随手指水平滚动（pan 截获），松手有惯性减速 | pass = 跟手滚动且松手减速 |
-| 2 | 两指同向上下滑动 | 周期组合切换（上区/下区 period 同步平移一档，如 60m/日→日/周） | pass = 两指滑触发周期切换、单指不触发 |
+| 1 | 单指水平拖动上区 K 线 | 图表随手指水平滚动（pan 截获）；单指不触发周期切换/缩放（惯性减速归 c8b runbook 步骤 1，本表只验 C7 截获） | pass = 跟手水平滚动且 pan 截获、单指不触发周期切换 |
+| 2 | 两指上下滑动 | 周期组合切换（上区/下区 period 同步平移一档，如 60m/日→日/周） | pass = 两指滑触发周期切换、单指不触发 |
 | 3 | 长按 K 线并拖动 | 出现十字光标随手指移动；松手消失 | pass = 十字光标显示/跟随/消失 |
 | 4 | Normal 模式点「买入」选档 → 确认 | 触发交易，所有周期对应 K 线同步出现红点 B 标记 | pass = 标记同步出现 |
 | 5 | Review 模式进入训练页 | 交易按钮组隐藏（capability matrix L833 / canBuySell()==false），仅可浏览/十字光标 | pass = 无买卖持有按钮 |
