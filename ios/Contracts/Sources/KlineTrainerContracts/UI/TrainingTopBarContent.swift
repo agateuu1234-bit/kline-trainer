@@ -9,7 +9,7 @@
 
 import Foundation
 
-public struct TrainingTopBarContent: Equatable {
+public struct TrainingTopBarContent: Equatable, Sendable {
     public let totalCapital: String   // "¥ 102,345.67"
     public let holdingCost: String    // "¥ 0.00"
     public let returnRate: String     // "+2.34%" / "-8.32%" / "+0.00%"
@@ -30,6 +30,8 @@ public struct TrainingTopBarContent: Equatable {
         f.decimalSeparator = "."
         f.minimumFractionDigits = 2
         f.maximumFractionDigits = 2
+        // `??` 兜底实际不可达（NumberFormatter 对 NaN/Inf 返 "NaN"/"+∞" 非 nil）；留作纵深防御，同
+        // SettlementContent.formatCapital L58-59。业务上 totalCapital/holdingCost 非负且有限（M0.3 冻结）。
         let body = f.string(from: NSNumber(value: value)) ?? String(format: "%.2f", value)
         return "¥ \(body)"
     }
