@@ -611,7 +611,7 @@ public struct TrainingView: View {
 - [ ] **Step 2：host swift test 确认整体编译 + 既有测试全绿（本壳被 `#if canImport(UIKit)` 跳过编译）**
 
 Run: `swift test 2>&1 | tail -5`
-Expected: `Test run with N tests ... passed`（N = 737 + 本 PR 新增 17；本壳 host 不编译，Task 1/2 测试通过）
+Expected: `Test run with N tests ... passed`（N = 737 + 本 PR 新增 20 = 757；本壳 host 不编译，Task 1/2 测试通过）
 
 - [ ] **Step 3：Mac Catalyst build-for-testing 确认本壳编译通过（本地 de-risk）**
 
