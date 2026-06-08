@@ -40,7 +40,7 @@
 | **D7** | **画线工具面板（plan v1.5 §6.2.6）延后**，不在 U2 交付（顶栏「画线」按钮 + 7 工具开关 + 锚点输入）。 | 画线**输入**（DrawingInputController / onTap 锚点）属 Wave 3（modules L2155 + C8b Coordinator 注 L90「onTap 画线锚点需 DrawingInputController（Wave 3）→ C8b 不接」）。无锚点输入则画线面板无功能。residual **U2-R2**：画线面板 + DrawingInputController 归 Wave 3。 |
 | **D8** | **「仓位 X/5」顶栏字段延后**，顶栏交付总资金/持仓成本/收益率三项 + 返回按钮。 | `PositionManager` 公共面仅 `shares`/`holdingCost`（无「当前档位 X/5」存值）；项目**显式拒绝臆造 tier 推导公式**（E5b D1「功能式 ∃tier，无 tier 推导公式」，TrainingEngine L256-257 注）。强算 X/5 = 臆造公式，违既定立场。residual **U2-R3**：仓位档位显示待 tier 反推契约定义。 |
 | **D9** | **交易按钮 `PositionPickerView` 全档启用 `Set(PositionTier.allCases)`**，点不可买档由 `engine.buy` 返 `.failure(.insufficientCash)` 兜（本 PR 壳忽略 failure，不 toast——toast UI 非 U2 scope）。买/卖按钮整体启用由 `engine.buyEnabled`/`sellEnabled` 控（`.disabled`）。 | plan v1.5 L735「点不可买的档由 buy 返 .insufficientCash（toast）——单一真值源，无 tier 公式臆造」（TrainingEngine L257-258 注）。避免在壳内重算 per-tier 启用 = 重复 engine ∃tier 逻辑。 |
-| **D10** | **交易按钮仅 Normal/Replay 显示**，Review 隐藏（`engine.flow.mode != .review`）。持有/观察按钮文案随 `engine.position.shares > 0` 切「持有」/「观察」。 | capability matrix L833「买入/卖出/持有/观察按钮 Normal ✅ / Review ❌隐藏 / Replay ✅」；L944「有仓位显示『持有』图标，空仓显示『观察』图标」。 |
+| **D10** | **交易按钮仅 Normal/Replay 显示**，Review 隐藏——可见性用权威谓词 `engine.flow.canBuySell()`（Normal/Replay=true、Review=false）而非硬编码 `mode != .review`（与按钮自身 `buyEnabled/sellEnabled` 同源 canBuySell，杜绝谓词漂移，code-review Task3）。持有/观察按钮文案随 `engine.position.shares > 0` 切「持有」/「观察」。 | capability matrix L833「买入/卖出/持有/观察按钮 Normal ✅ / Review ❌隐藏 / Replay ✅」；L944「有仓位显示『持有』图标，空仓显示『观察』图标」。 |
 | **D11** | **`TrainingView` 加 `#if canImport(UIKit)` 平台门**；host swift test 不编译本壳，Catalyst build-for-testing 编译闸门守护。 | 本壳嵌 `ChartContainerView`（UIViewRepresentable，`#if canImport(UIKit)`，ChartContainerView.swift L12）；macOS host 无 UIKit → `ChartContainerView` 不存在 → 不门则 host 编译失败。同 C8 壳门策略。`TrainingSessionLifecycle`/`TrainingTopBarContent` **不**门（无 UIKit 依赖，host 全编译全测）。 |
 | **D12** | **`TrainingSessionLifecycle` 为 `@MainActor struct`**（持引用型 `engine`/`coordinator`，无可变存储）；3 async 方法 + 1 计算属性。 | coordinator/engine 皆 `@MainActor`；struct 值语义无保留环。方法 `async`（coordinator 调用 async）。 |
 
@@ -502,7 +502,7 @@ public struct TrainingView: View {
     }
 
     private var engine: TrainingEngine { lifecycle.engine }
-    private var showsTradeButtons: Bool { engine.flow.mode != .review }   // D10
+    private var showsTradeButtons: Bool { engine.flow.canBuySell() }   // D10：权威谓词，非 mode 字面
 
     public var body: some View {
         VStack(spacing: 0) {

@@ -32,7 +32,10 @@ public struct TrainingView: View {
     }
 
     private var engine: TrainingEngine { lifecycle.engine }
-    private var showsTradeButtons: Bool { engine.flow.mode != .review }   // D10
+    // D10：交易按钮组可见性用权威能力谓词 `canBuySell()`（Normal/Replay=true、Review=false），而非硬编码
+    // `mode != .review`——与按钮自身 `buyEnabled/sellEnabled` 同源（二者均 guard canBuySell），杜绝谓词漂移
+    // （code-review Task3 Important；同 Task1 shouldShowSettlement 范式）。
+    private var showsTradeButtons: Bool { engine.flow.canBuySell() }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -65,6 +68,9 @@ public struct TrainingView: View {
                                         holdingCost: engine.holdingCost,
                                         returnRate: engine.returnRate)
         return HStack(spacing: 12) {
+            // 返回为 best-effort：保存进度后必回首页。`back()` 仅在「无活跃 session 上下文」抛 .internalError
+            // （活跃 Normal 局不会发生；review/replay 的 saveProgress 是 no-op 不抛）→ `try?` 吞掉这一不可达错误以
+            // 保证「点返回必退出」UX；不把保存失败上交（错误通道属顺位 11 路由 scope，code-review Task3 Minor）。
             Button("返回") { Task { try? await lifecycle.back(); onExit() } }
             Spacer()
             Text(bar.totalCapital)
@@ -90,6 +96,8 @@ public struct TrainingView: View {
                 .disabled(!engine.buyEnabled)
             Button("卖出") { pickerRequest = PickerRequest(panel: id, action: .sell) }
                 .disabled(!engine.sellEnabled)
+            // 持有/观察始终可用（无 .disabled）：不变量靠 `showsTradeButtons==canBuySell()` 已排除唯一
+            // 不可步进模式 Review（canAdvance==false）；Normal/Replay 两可见模式 canAdvance 恒 true（plan v1.5 L944）。
             Button(engine.position.shares > 0 ? "持有" : "观察") {   // D10
                 engine.holdOrObserve(panel: id)
             }
