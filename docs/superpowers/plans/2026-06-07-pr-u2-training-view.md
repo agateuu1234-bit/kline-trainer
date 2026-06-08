@@ -34,7 +34,7 @@
 | **D2** | **U2 不呈现 `SettlementView`**；自动结束时 `TrainingView` 调 `lifecycle.finalizeForSettlement()` 得 `recordId?` 后**经注入回调 `onSessionEnded(_:)` 上交**，由顺位 11 组合根加载 record（Normal）/装配 engine 数据（Replay）并呈现结算窗。 | frozen E6（`TrainingSessionCoordinator`，PR #86 已 merged）**无** record-by-id / 活跃 meta 公共访问面；`finalize` 仅返 `Int64?`。结算窗须 stockName/code + 起始年月（plan v1.5 §6.3），来源于 `TrainingSetMeta`（reader 私有），engine 不携带。**在 U2 内呈现结算 = 要么破冻结 E6 加访问面（越界 governance），要么臆造 meta**。顺位 11 是路由+repo owner（outline §四 L122「HomeView 须路由到 TrainingView/SettingsPanel」），结算呈现+record 加载属其职责。U2 仿 U1「导航意图注入，组合根接线」（outline §52 L51）。**U2 仍完整交付 §124：lifecycle 接线全部三 E6 调用 + 5 路径 host 测**。 |
 | **D3** | **返回（back）路径 = `saveProgress(engine)` 然后 `endSession()`**，对所有模式统一调用（review/replay 的 `saveProgress` 在 coordinator 内 `guard mode==.normal else return` no-op，**先于**活跃上下文守门，故不抛）。 | plan v1.5 §6.2.1 L920「点击返回：保存进度到 pending_training，返回首页」。coordinator `saveProgress` L176 对非 Normal 早返（PR #86）。统一调用使生命周期对称、review/replay 走「非保存分支」（§124）。 |
 | **D4** | **自动结束检测 = `engine.tick.globalTickIndex >= engine.tick.maxTick`**，且仅对**可步进且应结算**模式触发（`mode != .review`）。Review `allowedTickRange = finalTick...finalTick`（固定末态，capability matrix L836「❌ 固定最终态」），`isAtEnd` 构造即真但**不**触发结算（Review 结算弹窗 ❌，L842；Review 只经返回退出，L837）。 | 局终强平由 engine 内部在步进到 maxTick 时完成（E6b 测试 L399 实证 `holdOrObserve` 步到 maxTick → 强平 shares=0）。U2 仅**检测**并调 `finalize`。`engine.tick` 为 `public private(set)`（TrainingEngine L20），`maxTick` public（TickEngine L6）。 |
-| **D5** | **自动结算判定逻辑下放到 host-测 lifecycle**：`shouldAutoFinalize(didFinalize:) = isAtEnd && mode != .review && !didFinalize`（**纯函数，Task 1 host 测**）。`TrainingView` 的 `@State didFinalize` + `maybeAutoEnd()` 仅作壳触发器，决策逻辑全在被测纯层（plan-review H1：模式门 + 一次性门不得只活在不可测的 View 壳）。 | `finalize` 第二次调会因 record 已插/pending 已清而重复入账；幂等由一次性闸门保证。Review `allowedTickRange=finalTick...finalTick`（TrainingFlowController L64-65）→ `isAtEnd` 构造即真，**必须**靠 `mode != .review` 抑制误结算 → 该逻辑必须 host 测（killer：review-at-end→false / normal-at-end→true / normal-already-finalized→false / fresh→false）。 |
+| **D5** | **自动结算判定逻辑下放到 host-测 lifecycle**：`shouldAutoFinalize(didFinalize:) = isAtEnd && flow.shouldShowSettlement() && !didFinalize`（**纯函数，Task 1 host 测**）。用权威能力谓词 `shouldShowSettlement()`（Normal=true/Review=false/Replay=true，TrainingFlowController L50/71/95）而非硬编码 `mode != .review`——与 `buyEnabled` 用 `canBuySell()` 同范式，单一真值源、抗矩阵漂移（code-review Task1 建议）。`TrainingView` 的 `@State didFinalize` + `maybeAutoEnd()` 仅作壳触发器，决策逻辑全在被测纯层（plan-review H1：模式门 + 一次性门不得只活在不可测的 View 壳）。 | `finalize` 第二次调会因 record 已插/pending 已清而重复入账；幂等由一次性闸门保证。Review `allowedTickRange=finalTick...finalTick`（TrainingFlowController L65）→ `isAtEnd` 构造即真，**必须**靠 `shouldShowSettlement()==false` 抑制误结算 → 该逻辑必须 host 测（killer：review-at-end→false / normal-at-end→true / normal-already-finalized→false / fresh→false）。 |
 | **D13** | **结算时序相对 spec §6.2.5「先弹窗→确认后保存」反转为「检测即 finalize（save+clearPending）→ 上交 onSessionEnded → 顺位 11 呈现结算窗」**（plan-review M3）。 | frozen E6 `finalize`（PR #86 L230-231）**原子**插 record + 清 pending，无「先存不清/确认后清」拆分原语；拆分须破冻结 E6（越界）。反转良性：plan v1.5 §6.3 结算窗**仅「确认」无「取消」** → 不存在「取消结算回到进行中局」语义 → 「确认前 pending 已清」无副作用。Normal 经 recordId 让顺位 11 加载已存 record 呈现；Replay finalize 返 nil（无 record），顺位 11 据 engine 末态呈现（residual U2-R4）。 |
 | **D6** | **手动「结束本局」按钮（plan v1.5 §6.2.2，含点「是」先强平）延后**，不在 U2 交付。 | §6.2.2 要求「若有持仓，先按最后收盘价**强制平仓**」，但 frozen E5 `TrainingEngine` 公共面**无**手动强平方法（强平仅在步进到 maxTick 时自动发生，TrainingEngine L5-6 注 + E6b 测 L399）。在 U2 实现手动强平须扩 E5（越界本 PR 冻结面）。outline §124 五路径矩阵（back/auto-end/settlement-confirm/review/replay）**不含**手动结束。residual **U2-R1**：手动结束按钮 + E5 `forceCloseAndEnd()` 归后续 PR / Wave 3。自动结束路径（§6.2.5）本 PR 交付。 |
 | **D7** | **画线工具面板（plan v1.5 §6.2.6）延后**，不在 U2 交付（顶栏「画线」按钮 + 7 工具开关 + 锚点输入）。 | 画线**输入**（DrawingInputController / onTap 锚点）属 Wave 3（modules L2155 + C8b Coordinator 注 L90「onTap 画线锚点需 DrawingInputController（Wave 3）→ C8b 不接」）。无锚点输入则画线面板无功能。residual **U2-R2**：画线面板 + DrawingInputController 归 Wave 3。 |
@@ -235,7 +235,7 @@ struct TrainingSessionLifecycleTests {
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
         #expect(life.shouldAutoFinalize(didFinalize: false) == false)
     }
-    // 注：Replay-at-end 与 Normal-at-end 同走 `mode != .review` 真分支（仅 Review 被门抑制），
+    // 注：Replay-at-end 与 Normal-at-end 同走 `shouldShowSettlement()==true` 真分支（仅 Review 被门抑制），
     // 由上「正例」覆盖该路径；不另构造步进至末态的 Replay 引擎（步进粒度依周期，测试脆弱）。
 }
 ```
@@ -276,11 +276,13 @@ public struct TrainingSessionLifecycle {
         engine.tick.globalTickIndex >= engine.tick.maxTick
     }
 
-    /// 是否应触发自动结算（D5 / plan-review H1）：到末态 + 非 Review（Review 固定末态 isAtEnd 恒真但
-    /// 结算弹窗 ❌，capability matrix L842）+ 未结算过（一次性门，防 onChange 末态多次触发）。
+    /// 是否应触发自动结算（D5 / plan-review H1）：到末态 + 该模式应弹结算窗（`flow.shouldShowSettlement()`：
+    /// Normal=true/Review=false/Replay=true，capability matrix L842）+ 未结算过（一次性门，防 onChange 末态多次
+    /// 触发）。用权威谓词而非硬编码 `mode != .review`（同 buyEnabled 用 canBuySell 范式，code-review Task1 建议）。
+    /// Replay 谓词 true 同走真分支，但 finalizeForSettlement 因 shouldSaveRecord==false 返 nil（U2-R4）。
     /// 纯函数，host 全测；`TrainingView.maybeAutoEnd` 仅作壳触发器调用本判定。
     public func shouldAutoFinalize(didFinalize: Bool) -> Bool {
-        isAtEnd && engine.flow.mode != .review && !didFinalize
+        isAtEnd && engine.flow.shouldShowSettlement() && !didFinalize
     }
 
     /// 返回按钮（plan v1.5 §6.2.1 L920）：保存进度（Normal 真存；review/replay 在 coordinator 内 no-op）

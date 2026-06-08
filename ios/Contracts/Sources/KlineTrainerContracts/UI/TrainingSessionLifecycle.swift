@@ -25,10 +25,14 @@ public struct TrainingSessionLifecycle {
         engine.tick.globalTickIndex >= engine.tick.maxTick
     }
 
-    /// 是否应触发自动结算（D5）：到末态 + 非 Review（Review 固定末态 isAtEnd 恒真但结算弹窗 ❌）+ 未结算过
-    /// （一次性门，防 onChange 末态多次触发）。纯函数 host 全测；TrainingView.maybeAutoEnd 仅作壳触发器。
+    /// 是否应触发自动结算（D5）：到末态 + 该模式应弹结算窗 + 未结算过（一次性门，防 onChange 末态多次触发）。
+    /// 用权威能力谓词 `flow.shouldShowSettlement()`（Normal=true / Review=false / Replay=true，capability
+    /// matrix L842）而非硬编码 `mode != .review`，与 `buyEnabled` 用 `canBuySell()` 同范式——单一真值源、
+    /// 抗矩阵/新模式漂移（code-review Task1 建议）。Review 固定末态 isAtEnd 恒真，靠此谓词为 false 抑制误结算。
+    /// **Replay**：谓词 true → shouldAutoFinalize 同走真分支，但 `finalizeForSettlement` 因 `shouldSaveRecord()==false`
+    /// 返 nil（不入账）；结算窗由顺位 11 据 engine 末态呈现（D13 / residual U2-R4）。纯函数 host 全测。
     public func shouldAutoFinalize(didFinalize: Bool) -> Bool {
-        isAtEnd && engine.flow.mode != .review && !didFinalize
+        isAtEnd && engine.flow.shouldShowSettlement() && !didFinalize
     }
 
     /// 返回按钮（plan v1.5 §6.2.1 L920）：保存进度（Normal 真存；review/replay 在 coordinator 内 no-op）
