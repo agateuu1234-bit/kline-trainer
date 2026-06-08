@@ -115,6 +115,40 @@ public final class AppRouter {
         await loadHome()
     }
 
+    public func runLaunchRecovery() async {
+        guard !didRunLaunchRecovery else { return }   // 恰一次门：runner 每次全量重扫不去重，property 来自此门
+        didRunLaunchRecovery = true                   // 同步置位（首次 await 前）防并发双跑
+        await acceptance.retryPendingConfirmations()
+        await loadHome()
+    }
+
+    public func sessionEnded(recordId: Int64?) async {
+        let mode = activeTraining?.lifecycle.engine.flow.mode
+        if let id = recordId {
+            // Normal 正常结束：结算窗（reader 在结算期间保持开，confirm 时才关）
+            do {
+                let record = try recordRepo.loadRecordBundle(id: id).0
+                activeModal = .settlement(record)
+            } catch {
+                await activeTraining?.lifecycle.endAfterSettlement()   // 取 record 失败也须关 reader
+                setError(error); activeTraining = nil; await loadHome()
+            }
+        } else {
+            // recordId==nil：replay 结束（retreat）或 normal finalize 失败——两者均须先关 reader
+            await activeTraining?.lifecycle.endAfterSettlement()
+            if mode == .normal { errorMessage = "结算入账失败，请重试" }   // replay 不报错（正常 retreat）
+            activeTraining = nil
+            await loadHome()
+        }
+    }
+
+    public func confirmSettlement() async {
+        await activeTraining?.lifecycle.endAfterSettlement()
+        activeModal = nil
+        activeTraining = nil
+        await loadHome()
+    }
+
     func setError(_ error: Error) {
         errorMessage = (error as? AppError)?.userMessage ?? "操作失败"
     }

@@ -64,6 +64,17 @@ struct AppRouterTests {
                        feeSnapshot: FeeSnapshot(commissionRate: 0, minCommissionEnabled: false), finalTick: 2)  // [C] 修：无 FeeSnapshot.zero
     }
 
+    /// 走状态机种入一条 confirmPending 行（downloaded→…→stored→confirmPending）。
+    static func seedConfirmPending(_ j: InMemoryAcceptanceJournalDAO, tsId: Int, lease: String) throws {
+        let path = "/tmp/\(tsId).sqlite"; let hash = "abcd1234"   // 8-char lowercase hex(CRC32)
+        try j.upsert(trainingSetId: tsId, leaseId: lease, state: .downloaded, sqliteLocalPath: nil, contentHash: nil, lastError: nil)
+        try j.upsert(trainingSetId: tsId, leaseId: lease, state: .crcOK, sqliteLocalPath: nil, contentHash: hash, lastError: nil)
+        try j.upsert(trainingSetId: tsId, leaseId: lease, state: .unzipped, sqliteLocalPath: path, contentHash: hash, lastError: nil)
+        try j.upsert(trainingSetId: tsId, leaseId: lease, state: .dbVerified, sqliteLocalPath: path, contentHash: hash, lastError: nil)
+        try j.upsert(trainingSetId: tsId, leaseId: lease, state: .stored, sqliteLocalPath: path, contentHash: hash, lastError: nil)
+        try j.upsert(trainingSetId: tsId, leaseId: lease, state: .confirmPending, sqliteLocalPath: path, contentHash: hash, lastError: nil)
+    }
+
     /// 组装一个 router + 暴露其内部依赖供测试断言/seed。
     static func makeRouter(
         candles: [Period: [KLineCandle]] = validCandles(),
@@ -162,5 +173,62 @@ struct AppRouterTests {
         await f.router.startTraining()
         await f.router.exitTraining()
         #expect(f.router.activeTraining == nil)
+    }
+
+    @Test("runLaunchRecovery 恰一次：连调两次 → confirmCount==N 非 2N（router didRunLaunchRecovery 门）")
+    func launchRecovery_exactlyOnce() async throws {
+        let counting = CountingAPIClient()
+        let f = Self.makeRouter(api: counting)
+        try Self.seedConfirmPending(f.journal, tsId: 1, lease: "L1")
+        await f.router.runLaunchRecovery()
+        await f.router.runLaunchRecovery()
+        #expect(await counting.confirmCount == 1)
+    }
+
+    @Test("sessionEnded normal recordId → activeModal=.settlement(record)")
+    func sessionEnded_normalShowsSettlement() async {
+        let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] insert-order id=1
+        await f.router.startTraining()                 // activeTraining = normal
+        await f.router.sessionEnded(recordId: 1)
+        if case .settlement(let r)? = f.router.activeModal { #expect(r.id == 1) } else { Issue.record("expected .settlement") }
+    }
+
+    @Test("sessionEnded normal nil（finalize 抛）→ errorMessage + activeTraining nil")
+    func sessionEnded_normalNilError() async {
+        let f = Self.makeRouter()
+        await f.router.startTraining()
+        await f.router.sessionEnded(recordId: nil)     // mode==normal + nil → 入账失败分支
+        #expect(f.router.activeTraining == nil)
+        #expect(f.router.errorMessage != nil)
+    }
+
+    @Test("sessionEnded replay nil → retreat：activeTraining nil 且无 settlement")
+    func sessionEnded_replayRetreat() async {
+        let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] insert-order id=1
+        await f.router.replay(id: 1)                    // activeTraining = replay
+        #expect(f.router.activeTraining?.lifecycle.engine.flow.mode == .replay)   // 证 replay 真成功（非静默抛错）
+        await f.router.sessionEnded(recordId: nil)
+        #expect(f.router.activeTraining == nil)
+        #expect(f.router.activeModal == nil)
+    }
+
+    @Test("teardown：replay 结束(retreat)后 coordinator.activeReader == nil（证 endAfterSettlement→endSession 被调）")
+    func sessionEnded_replayTearsDownReader() async {
+        let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] insert-order id=1
+        await f.router.replay(id: 1)
+        #expect(f.coordinator.activeReader != nil)      // replay 成功 → reader 开（前提：filename 匹配 + id=1，见 record fixture）
+        await f.router.sessionEnded(recordId: nil)      // retreat 须 endAfterSettlement → endSession
+        #expect(f.coordinator.activeReader == nil)      // 直接断言 reader 关闭（若漏调 endAfterSettlement 则非 nil → FAIL）
+    }
+
+    @Test("confirmSettlement → activeTraining nil + modal nil + reload")
+    func confirmSettlement_clears() async {
+        let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] insert-order id=1
+        await f.router.startTraining()
+        await f.router.sessionEnded(recordId: 1)
+        #expect(f.router.activeModal != nil)            // 证结算窗已弹（loadRecordBundle(1) 成功）
+        await f.router.confirmSettlement()
+        #expect(f.router.activeTraining == nil)
+        #expect(f.router.activeModal == nil)
     }
 }
