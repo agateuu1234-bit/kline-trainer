@@ -98,6 +98,8 @@ struct AppRouterTests {
                         schemaVersion: 1, lastAccessedAt: 1, downloadedAt: 1)
     }
 
+    // [C2 修] 注意：`InMemoryRecordRepository.insertRecord` 丢弃此处传入的 id，自增分配 insert-order id（1,2,3…，mirror 生产 server-assigned rowid）。
+    // 故测试**查询时用 insert-order id（单 record→1）**，非这里传入值。下方 id 参数仅为可读性（被 fake 丢弃）。
     static func record(id: Int64, profit: Double = 0) -> TrainingRecord {
         // [H] 修：trainingSetFilename 必须匹配 cache 里 seed 的文件名（review/replay 据它在 cache 解析文件），否则 .trainingSet(.fileNotFound)
         TrainingRecord(id: id, trainingSetFilename: "set1.sqlite", createdAt: 0,
@@ -315,16 +317,16 @@ func continue_noPending() async {
 
 @Test("selectRecord → activeModal=.history(对应 record)")
 func selectRecord_setsHistoryModal() async {
-    let f = Self.makeRouter(seedRecords: [Self.record(id: 7)])
+    let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] 单 record → 实际 id=1
     await f.router.loadHome()              // 填 router.records 缓存
-    f.router.selectRecord(id: 7)
-    if case .history(let r)? = f.router.activeModal { #expect(r.id == 7) } else { Issue.record("expected .history") }
+    f.router.selectRecord(id: 1)
+    if case .history(let r)? = f.router.activeModal { #expect(r.id == 1) } else { Issue.record("expected .history") }
 }
 
 @Test("review(id) → push review 模式 engine")
 func review_pushesReviewMode() async {
-    let f = Self.makeRouter(seedRecords: [Self.record(id: 3)])
-    await f.router.review(id: 3)
+    let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] 查询用 insert-order id=1
+    await f.router.review(id: 1)
     #expect(f.router.activeModal == nil)
     #expect(f.router.activeTraining?.lifecycle.engine.flow.mode == .review)
 }
@@ -436,10 +438,10 @@ func launchRecovery_exactlyOnce() async throws {
 
 @Test("sessionEnded normal recordId → activeModal=.settlement(record)")
 func sessionEnded_normalShowsSettlement() async {
-    let f = Self.makeRouter(seedRecords: [Self.record(id: 9)])
+    let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] insert-order id=1
     await f.router.startTraining()                 // activeTraining = normal
-    await f.router.sessionEnded(recordId: 9)
-    if case .settlement(let r)? = f.router.activeModal { #expect(r.id == 9) } else { Issue.record("expected .settlement") }
+    await f.router.sessionEnded(recordId: 1)
+    if case .settlement(let r)? = f.router.activeModal { #expect(r.id == 1) } else { Issue.record("expected .settlement") }
 }
 
 @Test("sessionEnded normal nil（finalize 抛）→ errorMessage + activeTraining nil")
@@ -453,8 +455,9 @@ func sessionEnded_normalNilError() async {
 
 @Test("sessionEnded replay nil → retreat：activeTraining nil 且无 settlement")
 func sessionEnded_replayRetreat() async {
-    let f = Self.makeRouter(seedRecords: [Self.record(id: 4)])
-    await f.router.replay(id: 4)                    // activeTraining = replay
+    let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] insert-order id=1
+    await f.router.replay(id: 1)                    // activeTraining = replay
+    #expect(f.router.activeTraining?.lifecycle.engine.flow.mode == .replay)   // 证 replay 真成功（非静默抛错）
     await f.router.sessionEnded(recordId: nil)
     #expect(f.router.activeTraining == nil)
     #expect(f.router.activeModal == nil)
@@ -462,18 +465,19 @@ func sessionEnded_replayRetreat() async {
 
 @Test("teardown：replay 结束(retreat)后 coordinator.activeReader == nil（证 endAfterSettlement→endSession 被调）")
 func sessionEnded_replayTearsDownReader() async {
-    let f = Self.makeRouter(seedRecords: [Self.record(id: 4)])
-    await f.router.replay(id: 4)
-    #expect(f.coordinator.activeReader != nil)      // replay 成功 → reader 开（前提：filename 匹配，见 record fixture）
+    let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] insert-order id=1
+    await f.router.replay(id: 1)
+    #expect(f.coordinator.activeReader != nil)      // replay 成功 → reader 开（前提：filename 匹配 + id=1，见 record fixture）
     await f.router.sessionEnded(recordId: nil)      // retreat 须 endAfterSettlement → endSession
     #expect(f.coordinator.activeReader == nil)      // 直接断言 reader 关闭（若漏调 endAfterSettlement 则非 nil → FAIL）
 }
 
 @Test("confirmSettlement → activeTraining nil + modal nil + reload")
 func confirmSettlement_clears() async {
-    let f = Self.makeRouter(seedRecords: [Self.record(id: 9)])
+    let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] insert-order id=1
     await f.router.startTraining()
-    await f.router.sessionEnded(recordId: 9)
+    await f.router.sessionEnded(recordId: 1)
+    #expect(f.router.activeModal != nil)            // 证结算窗已弹（loadRecordBundle(1) 成功）
     await f.router.confirmSettlement()
     #expect(f.router.activeTraining == nil)
     #expect(f.router.activeModal == nil)
@@ -947,3 +951,7 @@ plan 经一轮 opus 4.8 xhigh 对抗性审查；生产代码（AppRouter/AppCont
 - **[M] teardown 测试 vacuous** → makeRouter 返回 `coordinator`，`sessionEnded_replayTearsDownReader` 直接断言 `coordinator.activeReader == nil`（Task3）。
 - **[L] Task4 建目录 note 多余**（DefaultAppDB 自建父目录 / cache 缺目录安全）→ 简化（Task4）。
 **plan 收敛信号**：仅测试 fixture 局部一行级修正，生产设计零改动。
+
+### v3 plan-review R2 响应
+R2 复核：5 个 R1 修正 VERIFIED；但挖出 1 个新 C（R1 漏）：
+- **[C2] `InMemoryRecordRepository.insertRecord` 丢弃传入 id、自增分配 insert-order id**（1,2,3…，mirror 生产 server-assigned rowid，`InMemoryFakes.swift:66-76`）→ 按 seeded id（7/3/9/4）查询的 6 个测试 miss（4 FAIL + 2 vacuous）。修：所有按 id 查询的测试改用 insert-order id（单 record→`id:1`）+ record fixture 加注释；并对 replay/settlement 测试加正向断言（mode==.replay / activeModal != nil）证路径真走通非静默抛错。生产代码仍零改动。R2 其余（7-tuple / endAfterSettlement 链 / pbxproj / 文件名解析）全 verified-correct。
