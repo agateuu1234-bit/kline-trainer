@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		CFF11FAD2F90FC5300467161 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = CFF11FAC2F90FC5300467161 /* GRDB */; };
+		AA00000000000000000001 /* KlineTrainerContracts in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000000000000000003 /* KlineTrainerContracts */; };
+		AA00000000000000000002 /* KlineTrainerPersistence in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000000000000000004 /* KlineTrainerPersistence */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +30,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				CFF11FAD2F90FC5300467161 /* GRDB in Frameworks */,
+				AA00000000000000000001 /* KlineTrainerContracts in Frameworks */,
+				AA00000000000000000002 /* KlineTrainerPersistence in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -71,6 +75,8 @@
 			name = KlineTrainer;
 			packageProductDependencies = (
 				CFF11FAC2F90FC5300467161 /* GRDB */,
+				AA00000000000000000003 /* KlineTrainerContracts */,
+				AA00000000000000000004 /* KlineTrainerPersistence */,
 			);
 			productName = KlineTrainer;
 			productReference = CFF11F9D2F90FB4300467161 /* KlineTrainer.app */;
@@ -102,6 +108,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				CFF11FAB2F90FC5300467161 /* XCRemoteSwiftPackageReference "GRDB" */,
+				AA00000000000000000005 /* XCLocalSwiftPackageReference "Contracts" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CFF11F9E2F90FB4300467161 /* Products */;
@@ -355,11 +362,28 @@
 		};
 /* End XCRemoteSwiftPackageReference section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		AA00000000000000000005 /* XCLocalSwiftPackageReference "Contracts" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Contracts;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		CFF11FAC2F90FC5300467161 /* GRDB */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = CFF11FAB2F90FC5300467161 /* XCRemoteSwiftPackageReference "GRDB" */;
 			productName = GRDB;
+		};
+		AA00000000000000000003 /* KlineTrainerContracts */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA00000000000000000005 /* XCLocalSwiftPackageReference "Contracts" */;
+			productName = KlineTrainerContracts;
+		};
+		AA00000000000000000004 /* KlineTrainerPersistence */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA00000000000000000005 /* XCLocalSwiftPackageReference "Contracts" */;
+			productName = KlineTrainerPersistence;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
