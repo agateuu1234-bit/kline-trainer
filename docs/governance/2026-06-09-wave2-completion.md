@@ -66,6 +66,8 @@
 | PR11-R2 | replay 结束结算窗（U2-R4 retreat） | **DEFERRED → Wave 3**：忠实结算需触碰冻结 E5/E6/SettlementView | Wave 3 replay |
 | PR11-R3 | app target 无 CI 构建守护 | **DEFERRED → Wave 3 / infra**：本地 build + 手动运行时验收兜底 | Wave 3+ infra |
 
+**已闭合不另列行的 residual**：E6a-R1（`TRAINING_SET_SCHEMA_VERSION` 共享常量）**CLOSED**（顺位 6 P2 #82 `DownloadAcceptanceRunner.swift` 定义 `TRAINING_SET_SCHEMA_VERSION = 1`）；E6a-R2（既存 activeReader 清理归 endSession）**CLOSED**（顺位 5 E6b #86 `TrainingSessionCoordinator.endSession()` + `endSession_closesReaderClearsActive` 测试）；E6b-R2（maxDrawdown 换算）**CLOSED**（#86 finalize）。
+
 **净结果**：Wave 2 协议级 / 集成级 residual（fail-closed fees / loadError 恢复 / arbiter 接线 / E6 生命周期 / 组合根等）**全部 CLOSED（实现完成）**；其余明确 **DEFERRED**（Wave 3 打磨 / NAS 部署 / user 运行时回填），均有 target + 证据指针。C8b-R1 doc loose end 在本收尾 CLOSED。Wave 2 scope 内无悬挂承诺。
 
 ---
@@ -105,3 +107,11 @@ Wave 3 候选范围（汇总自各 anchor DEFERRED）：
 - **部署 / NAS**：W1-R1（image digest pin）、W1-R2（样本数据）、PR11-R1（backendBaseURL）。
 
 Wave 3 排序为独立规划 session（brainstorming + writing-plans），不在本轻量收尾内。
+
+---
+
+## 七、评审记录
+
+本收尾 doc 经 **opus 4.8 xhigh 对抗审查 R1 = APPROVE**（13 SHA 逐一核 git log 精确 / H1 闭环不 overclaim / 运行时 gate 诚实"pending"〔c8b runbook #3 `____ ms` 未填实证〕/ C8b-R1 闭口已验〔plan 确不在 #87，现还原内容匹配 ChartContainerView.swift:4〕/ W1-R1·R2 正确 OPEN / doc-only 0 code/CI/ruleset）。E6a-R1/R2/E6b-R2 已闭合补注（§三 footnote）。
+
+**已知 pre-existing nit（不在本 PR scope，mention 不 fix per 仓 §3 surgical-changes）**：`docs/superpowers/specs/2026-06-02-wave2-outline-design.md:1` 标题写 `（v2）` 但 changelog 至 v7（L171）+ #78 subject "11 anchor"——本 doc 引用「outline（v7，PR #78）」是正确版本号；outline 标题 stale 留待后续 doc 维护。
