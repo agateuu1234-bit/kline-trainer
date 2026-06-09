@@ -149,6 +149,8 @@ public final class AppRouter {
         await loadHome()
     }
 
+    public func clearError() { errorMessage = nil }
+
     func setError(_ error: Error) {
         errorMessage = (error as? AppError)?.userMessage ?? "操作失败"
     }
