@@ -110,8 +110,11 @@ def test_cli_normalize_only():
     assert "id" not in out and out.get("name") == "main"
 
 # CLI --list-contexts：打印 canonical REQUIRED_CONTEXTS（供下游派生单一真相）
+# stdin=DEVNULL pin no-hang 不变量（codex review L1）：--list-contexts 必须在读 stdin 前 early-return；
+# 若未来 refactor 把 stdin 读移到 early-return 前，闭合 stdin 会让本测试挂起/失败而非静默回归。
 def test_list_contexts_cli():
-    p = subprocess.run([sys.executable, str(SCRIPT), "--list-contexts"], capture_output=True, text=True)
+    p = subprocess.run([sys.executable, str(SCRIPT), "--list-contexts"],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=10)
     assert p.returncode == 0
     assert json.loads(p.stdout) == [CATALYST, APP_BUILD]
 
