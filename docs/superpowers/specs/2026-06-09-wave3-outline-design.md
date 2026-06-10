@@ -1,4 +1,4 @@
-# Wave 3 outline（v7）—— 客户端端到端功能完成 wave 单线顺位
+# Wave 3 outline（v8）—— 客户端端到端功能完成 wave 双轨并行顺位
 
 **前置**：Wave 2 全 11 anchor 已 merged（PR #78-#91；轻量收尾 PR #91 `8ab0a52` merged 2026-06-09，**未打 freeze tag**，见 `docs/governance/2026-06-09-wave2-completion.md`）。本 outline 规划 Wave 3「客户端端到端功能完成」阶段的执行顺位。
 
@@ -38,7 +38,7 @@
 
 ## 一、排序策略
 
-- **单线 anchor**：沿用 Wave 0 v6 / Wave 1 v20 / Wave 2 v7 单线模式（用户 2026-06-09 确认全包、单线、前置 RFC）。
+- **双轨并行 anchor（v8，user 2026-06-10 要求提效）**：在依赖 DAG + 文件不相交基础上并行执行（不再 Wave 0/1/2 的纯单线），见 §二·并行执行模型。轨道隔离纪律（per `feedback`「P2 并行 session 串味 → reset + G6 加固」）：每轨独立 git worktree、勤 rebase onto main、不共写文件。**真实吞吐上限 = codex 评审串行 + 周配额**（并行加速编码/plan-stage，但 merge 仍经单一 required-check 管道串行，一锚 merge 其余 rebase）。
 - **每 PR ≤3 子项 / ≤500 行 prod**（per memory `feedback_planner_packaging_bias`）。某锚 plan 阶段实测 >500 行按需拆子 anchor。
 - **codex 4-5 轮内收敛**（per `feedback_codex_plan_budget_overshoot`；超 5 轮 escalate user，per `feedback_big_pr_codex_noncovergence`）。
 - **scope shrink before split**：先 grep 验证文档归属（per `feedback_brainstorming_grep_first`）；同模块 brainstorming abort ≥2 次 = 换 anchor 或开独立 spec 升级窗口（per `feedback_module_level_abort_signal`）。
@@ -74,7 +74,39 @@
 - D 磨光（9-12：夜间模式 / 边界+错误+生产路径 smoke / 边缘 bounce / 性能）
 - E 收尾（13：completion doc + 运行时矩阵阻塞 + freeze tag 决策）
 
-**依赖满足校验**（每锚上游均在更早顺位 merged 或 Wave 0/1/2 已完成）：1 RFC(无依赖) → 2 CI 守护+锁竖屏(无依赖；早于所有 app-target 改动) → 3 Pinch(需 2；C7/C8 Wave 2 已落) → 4 绘线全链路(需 1+2+3；C6 Wave 1 infra 已落) → 5 十字光标(需 2；C5 Wave 1 已落) → 6 E5/E6 扩展(需 1+2) → 7 U2 交易 UI(需 6+1) → 8 Replay 结算(需 6+7+1) → 9 夜间(需 1；F2 Wave 0 已落) → 10 边界+smoke(各模块已落) → 11 bounce(需 2；C2 Wave 1 已落) → 12 性能(全渲染已在场) → 13 收尾(需全部 + Wave 3 运行时矩阵记录)。无逆向依赖。
+**依赖满足校验**（每锚上游均在更早顺位 merged 或 Wave 0/1/2 已完成）：1 RFC(无依赖) → 2 CI 守护+锁竖屏(无依赖；早于所有 app-target 改动) → 3 Pinch(需 2；C7/C8 Wave 2 已落) → 4 绘线全链路(需 1+2+3；C6 Wave 1 infra 已落) → 5 十字光标(需 2；C5 Wave 1 已落) → 6 E5/E6 扩展(需 1+2) → 7 U2 交易 UI(需 6+1) → 8 Replay 结算(需 6+7+1) → 9 夜间(需 1；F2 Wave 0 已落) → 10 持久化健壮性+边界(需 1+6，加固 4/7 故排其后) → 11 bounce(需 2；C2 Wave 1 已落) → 12 性能(全渲染已在场) → 13 收尾(需全部 + Wave 3 运行时矩阵记录)。无逆向依赖。
+
+---
+
+## 二·并行执行模型（双轨，v8 / user 2026-06-10 提效要求）
+
+**轨道分配**（依文件触碰集，最小化跨轨写冲突）：
+
+| 轨 | 触碰主文件集 | anchor（轨内顺序） |
+|---|---|---|
+| **Gate 治理** | `docs/`（1）/ `.github`+pbxproj（2），互不相交 | **1 RFC ∥ 2 CI+orientation**（真并行） |
+| **轨 G 图表/手势** | `ChartContainerView`/`KLineView`/`Render*`/`ChartGestureArbiter`/`Drawing*`/`DecelerationAnimator` | 3 Pinch → 4 Drawing\* ；5 Crosshair ；11 Bounce |
+| **轨 T 交易/持久化** | `TrainingEngine`/`TrainingSessionCoordinator`/`TrainingView`/`SettlementView`/`AppRouter`/`*Repository` | 6 E5/E6 → 7 U2 trade → 8 Replay ；10 持久化健壮性\*\* |
+| **同步/收口** | 跨全部 | 9 夜间\*\*\* → 12 性能 → 13 收尾 |
+
+**执行波次（并行）**：
+- **W0 Gate**：1 RFC ∥ 2 CI（disjoint 文件）。**1 RFC 是轨 T 全部 + 轨 G 的 4 的硬门**——RFC 未 merge 这些不能动。
+- **W1 双轨并行**（W0 后）：轨 G 起 3/5/11；轨 T 起 6。两轨文件集基本不相交 → 真并行（独立 worktree）。
+- **W2**：轨 G 3→4\*（4 需 RFC + 3）；轨 T 6→7。
+- **W3**：轨 T 7→8；10 持久化（需 6 + 加固 4/7，**跨轨同步点**——等轨 G 的 4 + 轨 T 的 7）。
+- **W4 收口**（串行）：9 夜间（两轨 view 落定后）→ 12 性能（全渲染在场）→ 13 收尾。
+
+**跨轨标注**：
+- **\* 4 Drawing = cross-cut**：碰 `engine.drawings`（轨 T 区）+ chart input（轨 G 区）+ reducer + 持久化 → 虽列轨 G，须与轨 T 协调（engine mutation API 由 RFC item 4c 治理，先于编码定）。
+- **\*\* 10 持久化 = 跨轨汇合**：加固 drawing(4)+trade(7) 的 save/finalize → 须排 4 + 7 之后（W3 末）。
+- **\*\*\* 9 夜间** 碰所有 view 颜色 → 排两轨之后（W4），避免与每个 feature 锚撞色值文件。
+
+**关键路径**（决定总时长）：`W0 RFC → 6 → 7 → 8`（轨 T 最长链）与 `→ 10 → 9 → 12 → 13` 收口 ≈ **7-8 个串行身位**（vs 纯单线 13 身位）。轨 G（3→4 + 5/11）在轨 T 推进时并行消化。
+
+**并行纪律（硬约束，per `feedback` P2 串味教训）**：
+1. 每轨独立 git worktree；轨内 anchor 顺序 merge；跨轨不共写文件（共享文件改动须串行化或经 RFC 协调）。
+2. merge 仍经**单一 required-check 管道串行**（codex 评审 + Catalyst + app-target CI）——一锚 merge，其余 worktree `rebase onto main`。**并行加速编码/plan-stage，不加速评审吞吐**（codex 周配额是真上限）。
+3. 跨轨同步点（4 / 10 / 9）到达前，下游轨须等上游 merge + rebase，不抢跑。
 
 ---
 
@@ -186,3 +218,4 @@
 | 2026-06-10 | v5 (codex branch-diff R4 修) | 均 grep 核实：**F1**（high，全接受）：`Coordinator:230-231` insertRecord+clearPending 分离事务 → 丢局/重复 record → 顺位 10 owns 原子/幂等 finalize + insert 前/后故障注入；**F2**（high，**部分接受+pushback**）：codex「module 契约要求周期保存」不成立（spec scenePhase L2059-2063/L119 by-design 纯动画，无周期 checkpoint 要求）；但 saveProgress 仅 Back 触发杀/切后台丢局属真 gap → §〇 baseline 改诚实 + 中断持久化作顺位 1 RFC 契约决策；不照 codex 自动 mandate 周期 checkpoint |
 | 2026-06-10 | v6 (codex branch-diff R5 修) | **F1**（high，**撤回 v5 pushback**）：codex cite `modules:1676` 证 `saveProgress`「U2 退出 / **每 N tick 自动调用**」= 既有 spec 周期契约（v5「无周期要求」误判，我漏读该行）→ 周期保存是合规义务非可选，「save-on-Back only」不可接受；RFC item 6 改参数化（N/coalescing/background-flush）+ 顺位 10 实现周期 autosave + §〇/§三.2 改诚实；**F2**（high，全接受）：原子事务不足以保 session——`TrainingView:118-119` finalize 失败→`onSessionEnded(nil)` teardown 直接丢已完成局，retry 不可达 → RFC item 7 新增 finalize 失败保留 session 契约 + 顺位 10 owns 失败保留（不 teardown）+ 原子 + 幂等 retry 仅记一次 + 故障注入；顺位 10 升 ~500+ 行须拆 10a/10b |
 | 2026-06-10 | v7 (codex branch-diff R6 修) | 持久化-finalize 角深化（distributed-reliability drilldown，per `feedback_codex_distributed_reliability_drilldown`）：**F1**（high）：周期 autosave 与 finalize/discard 终态竞争——终态 tick 排队 save 可在 finalize 后重建 `pending_training` → 重启重复 finalize/record → RFC item 7 加终态 fence（finalize/discard 前 drain/拒绝排队 save + 双序测试）；**F2**（high）：mandate 原子 insert+clear 但 coordinator 仅分离两 port 各自 `dbQueue.write` 无单事务契约 → RFC item 7 加治理的 session-finalization port（单 `DefaultAppDB` 事务，禁 unsafe downcast）；均折入 RFC item 7 + 顺位 10。**escalate 点**：breadth 已收敛至 finalize 单角，进入 reliability 子case 无止境下钻模式 → 提请 user 裁决 accept+override vs 续轮 |
+| 2026-06-10 | v8 (user 提效要求：双轨并行) | user 2026-06-10 要求「尽可能并行提效」→ §一 单线→双轨并行 + 新增 §二·并行执行模型（轨 G 图表/手势 ∥ 轨 T 交易/持久化，文件集不相交；Gate 1∥2；4/10/9 跨轨同步点；关键路径 ~7-8 身位 vs 单线 13）+ 并行纪律（独立 worktree/勤 rebase/merge 仍串行/codex 评审是真吞吐上限，per P2 串味教训）。0 anchor 内容变更，仅加并行执行结构。R6 escalate 决策 user 改选「先定并行结构」→ v8 后连同 R6 收敛再过一轮 codex |
