@@ -192,7 +192,7 @@ iPhone 行：`old` →
 ```
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait";
 ```
-**注意保留原始 tab 缩进**（pbxproj 用 tab；Edit old_string 须含确切前导 tab）。
+**注意保留原始缩进 = 4 个 tab**（`od -c` 实证前导 `\t\t\t\t`；codex plan-R1 L1；Edit old_string 须含确切 4 tab，不可用空格）。
 
 - [ ] **Step 2: 加 `UIRequiresFullScreen = YES`（两 config，按字母序插在 UILaunchScreen_Generation 之后、UISupportedInterfaceOrientations 之前）**
 
@@ -247,17 +247,22 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Modify: `scripts/governance/build-protection-put-payload.py`
 - Test: `tests/scripts/governance/test_build_payload.py`
 
-- [ ] **Step 1: 改 test_build_payload.py 期待多 context（先写失败测试）**
+- [ ] **Step 1: 改 test_build_payload.py 期待多 context（先写失败测试；ENUMERATE 每处编辑，codex plan-R1 H1/H2）**
 
-在 `tests/scripts/governance/test_build_payload.py`：
-- 第 15 行后加：`APP_BUILD = "iOS app build-for-running on macos-15"`
-- 把 `_catalyst_entries` 泛化为 `_entries_for(payload, ctx)`：
+在 `tests/scripts/governance/test_build_payload.py` 做**以下全部**编辑（不可遗漏任一——`_catalyst_entries` 与 `ensure_catalyst` 关键字若有残留会致 `NameError`/`TypeError` → run-all RED）：
+
+(a) 第 15 行 `CATALYST = ...` 后加常量：
+```python
+APP_BUILD = "iOS app build-for-running on macos-15"
+```
+(b) **替换**（非新增）helper `_catalyst_entries`（`:21-23`）为泛型 `_entries_for`：
 ```python
 def _entries_for(payload, ctx):
     rsc = next(r for r in payload["rules"] if r["type"] == "required_status_checks")
     return [c for c in rsc["parameters"]["required_status_checks"] if c["context"] == ctx]
 ```
-- 把 `test_adds_missing_check` / `test_idempotent_when_present` / `test_fixes_anysource_drift` 改为对 `CATALYST` **和** `APP_BUILD` 都断言恰 1 条 + `integration_id == APP_ID`。例：
+(c) **迁移 `_catalyst_entries` 的全部 4 个调用点**（`:28`→已随 (b) 删；`:34`、`:39`、`:91`）：
+- `test_adds_missing_check`（`:26-29`）→ 改名 `test_adds_missing_checks` + 遍历两 context：
 ```python
 def test_adds_missing_checks():
     out = mod.build_payload(_ruleset("ruleset-without-check.json"))
@@ -265,15 +270,33 @@ def test_adds_missing_checks():
         es = _entries_for(out, ctx)
         assert len(es) == 1 and es[0]["integration_id"] == APP_ID
 ```
-- 把 `test_normalize_only_preserves_without_adding` 改为断言 `_entries_for(out, APP_BUILD) == []` 也成立（normalize-only 不加任一）。
-- 新增 `test_list_contexts_cli`：
+- `test_idempotent_when_present`（`:32-34`）→ `assert len(_entries_for(out, CATALYST)) == 1`（用 `_entries_for(out, CATALYST)` 替 `_catalyst_entries(out)`）。
+- `test_fixes_anysource_drift`（`:37-40`）→ 同 (c) 第一条样式，遍历两 context 断言 `len==1 and integration_id==APP_ID`。
+- `test_normalize_only_preserves_without_adding`（`:89-93`）→ **整体改为**：
+```python
+def test_normalize_only_preserves_without_adding():
+    out = mod.build_payload(_ruleset("ruleset-without-check.json"), ensure_required=False)
+    assert _entries_for(out, CATALYST) == [] and _entries_for(out, APP_BUILD) == []   # 不添加任一
+    for ro in ("id", "node_id", "_links", "source", "source_type", "created_at", "updated_at"):
+        assert ro not in out
+```
+（注意：此处同时把 `_catalyst_entries(out)` 替为 `_entries_for(out, ...)` **且** 把关键字 `ensure_catalyst=False` 改为 `ensure_required=False`——见 (d)。）
+(d) **重命名关键字 `ensure_catalyst=False`→`ensure_required=False`** 的**全部** test 调用点：`:90`（已在 (c) 覆盖）+ `test_normalize_only_no_rsc_ok`（`:96-98`）：
+```python
+def test_normalize_only_no_rsc_ok():
+    out = mod.build_payload(_ruleset("ruleset-no-rsc.json"), ensure_required=False)
+    assert "rules" in out and "id" not in out
+```
+(e) 新增 `test_list_contexts_cli`：
 ```python
 def test_list_contexts_cli():
     p = subprocess.run([sys.executable, str(SCRIPT), "--list-contexts"], capture_output=True, text=True)
     assert p.returncode == 0
     assert json.loads(p.stdout) == [CATALYST, APP_BUILD]
 ```
-- 新增 `test_required_contexts_constant`：`assert mod.REQUIRED_CONTEXTS == [CATALYST, APP_BUILD]`。
+(f) 新增 `test_required_contexts_constant`：`assert mod.REQUIRED_CONTEXTS == [CATALYST, APP_BUILD]`。
+
+**收尾自检（必跑）**：`grep -n "_catalyst_entries\|ensure_catalyst" tests/scripts/governance/test_build_payload.py` 须**零命中**（证全部迁移完）。
 
 - [ ] **Step 2: 运行测试确认失败**
 
