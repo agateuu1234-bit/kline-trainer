@@ -254,7 +254,7 @@ git commit -m "Wave3 PR1 RFC: outline §3.1 supersede marker (契约已由顺位
 源数组：`modules=kline_trainer_modules_v1.4.md`、`plan=kline_trainer_plan_v1.5.md`、`outline=docs/superpowers/specs/2026-06-09-wave3-outline-design.md`、`rfc=docs/superpowers/specs/2026-06-10-wave3-pr1-spec-gap-rfc-design.md`。
 
 - **(a) 七契约权威锚在位（正向，全须命中）**：
-  - modules：`grep -cF "currentPositionTier"` ≥1；`grep -cF "func appendDrawing(_ drawing: DrawingObject)"` ≥1；`grep -cF "on-demand 手动强平"` ≥1；`grep -cF "AUTOSAVE_TICK_INTERVAL"` ≥1；`grep -cF "单事务 session-finalization port"` ≥1；`grep -cF "durable session key"` ≥1；`grep -cF "light/dark 双 token 集"` ≥1。
+  - modules：`grep -cF "currentPositionTier"` ≥1；`grep -cF "func appendDrawing(_ drawing: DrawingObject)"` ≥1；`grep -cF "pinch/zoom panel-state mutation"` ≥1（§4.4d zoom 机器锚，opus 整体 review R1-L1）；`grep -cF "on-demand 手动强平"` ≥1；`grep -cF "AUTOSAVE_TICK_INTERVAL"` ≥1；`grep -cF "单事务 session-finalization port"` ≥1；`grep -cF "durable session key"` ≥1；`grep -cF "light/dark 双 token 集"` ≥1。
   - plan：`grep -cF "仓位档位 X/5 派生公式"` ≥1；`grep -cF "Wave 3 顺位 1 RFC §4.3"` ≥1。
   - pass = 全锚 ≥1（任一缺 → (a) FAIL）。
 - **(b) §4.2 结算 reconcile 文本在位（正向，取代 vacuous 负搜）**：plan `grep -cF "本局实时总资金 = 现金 + 持仓市值"` ≥1（顶栏 = currentTotalCapital）**且** `grep -cF "本局结束冻结值"` ≥1（结算 = total_capital）。pass = 两锚命中。（均 backtick-free 连续子串。）

@@ -25,6 +25,7 @@
 | # | 操作 | 期望 | 判定 |
 |---|---|---|---|
 | 2 | 运行：`grep -cF "currentPositionTier" kline_trainer_modules_v1.4.md` | ≥1（tier accessor 契约锚在位，§4.1 根据 modules §E5 RFC 增量块） | ☐ |
+| 2b | 运行：`grep -cF "pinch/zoom panel-state mutation" kline_trainer_modules_v1.4.md` | ≥1（§4.4d pinch/zoom panel-state engine-owned mutation 契约锚在位） | ☐ |
 | 3 | 运行：`grep -cF "仓位档位 X/5 派生公式" kline_trainer_plan_v1.5.md` | ≥1（plan §6.2.1 tier 派生公式权威 anchor） | ☐ |
 | 4 | 运行：`grep -cF "本局实时总资金 = 现金 + 持仓市值" kline_trainer_plan_v1.5.md && grep -cF "本局结束冻结值" kline_trainer_plan_v1.5.md` | 各 ≥1（§4.2 结算 reconcile 顶栏语义锚 + 结算窗语义锚双锚在位） | ☐ |
 | 5 | 运行：`grep -cF "fail-closed 禁自动删" kline_trainer_modules_v1.4.md` | ≥1（provenance 安全红线：app.sqlite 损坏禁自动删，§4.7f） | ☐ |

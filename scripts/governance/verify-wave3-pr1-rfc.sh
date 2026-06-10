@@ -46,6 +46,7 @@ rc=0
 a_ok=1
 ggF "currentPositionTier" "$modules";                             [ -n "$HITS" ] || a_ok=0
 ggF "func appendDrawing(_ drawing: DrawingObject)" "$modules";    [ -n "$HITS" ] || a_ok=0
+ggF "pinch/zoom panel-state mutation" "$modules";                 [ -n "$HITS" ] || a_ok=0
 ggF "on-demand 手动强平" "$modules";                              [ -n "$HITS" ] || a_ok=0
 ggF "AUTOSAVE_TICK_INTERVAL" "$modules";                          [ -n "$HITS" ] || a_ok=0
 ggF "单事务 session-finalization port" "$modules";                [ -n "$HITS" ] || a_ok=0
