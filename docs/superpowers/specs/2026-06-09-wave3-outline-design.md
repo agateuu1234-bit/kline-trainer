@@ -1,4 +1,4 @@
-# Wave 3 outline（v8）—— 客户端端到端功能完成 wave 双轨并行顺位
+# Wave 3 outline（v9）—— 客户端端到端功能完成 wave 双轨并行顺位
 
 **前置**：Wave 2 全 11 anchor 已 merged（PR #78-#91；轻量收尾 PR #91 `8ab0a52` merged 2026-06-09，**未打 freeze tag**，见 `docs/governance/2026-06-09-wave2-completion.md`）。本 outline 规划 Wave 3「客户端端到端功能完成」阶段的执行顺位。
 
@@ -57,13 +57,13 @@
 | 2 | **app-target CI 守护 + 竖屏/窗口策略**（`KlineTrainer.xcodeproj` build-for-testing 加入 CI〔trust-boundary workflow〕+ 设为 required check + 对顺位 3-12 实施 PR 强制 + pbxproj orientation 去 Landscape 仅留 Portrait + **iPad 多任务/窗口场景竖屏策略**〔机制归 plan；pbxproj orientation 在 iPad Stage Manager/Split View 可能不足，per codex R3-F3〕+ 旋转/窗口验证） | A 治理 + infra | CI workflow + pbxproj/scene 改动；0 业务代码 | — | PR11-R3 + 竖屏/iPad 窗口锁定（codex R1-F2 / R2-F3 / R3-F3） |
 | 3 | **Pinch 缩放**（C8a 去硬编码 `visibleCount=80`/`candleWidthRatio=0.7` + 两指 pinch 手势与 C7 仲裁器集成〔pinch vs 两指周期切换的仲裁归 plan〕 + clamp 边界 + 缩放后视口还原 + 运行时 runbook 条目） | B 手势 | ~250-350 行 | 2 | C8a 视口硬编码 |
 | 4 | **水平线绘线 MVP + 画线 source-of-truth 全链路**（Phase 2.5：input controller pan 截获→`DrawingAnchor{period,candleIndex,price}` → **`manager.completedDrawings`→`engine.drawings` 单一真相投影** + engine 画线 mutation〔按 RFC〕+ ChartReducer `.drawingCommitted/.drawingCancelled/.setDrawingSnapshot` 流转 + **pending 持久化/resume/review 还原**〔复用已有 `TrainingSessionCoordinator` engine.drawings 路径〕 + 跨缩放/平移还原 + E2E save/resume 测试 + 运行时 runbook 条目） | B 手势 | ~350-500 行（plan 若超 500 拆 4a 输入+投影 / 4b 持久化+还原） | 1 RFC + 2 + 3 | U2-R2 + C6 deferred 投影/持久化/reducer 集成（codex R2-F2；仅水平线，6 种完整工具属 Phase 4 排除） |
-| 5 | **十字光标吸附 + HUD**（snap 到最近蜡烛 + 价格/时间 label 显示 + 运行时 runbook 条目） | B 手势 | ~200-300 行 | 2 | Phase 2.5 收口 |
+| 5 | **十字光标吸附 + HUD**（snap 到最近蜡烛 + 价格/时间 label 显示 + 运行时 runbook 条目） | B 手势 | ~200-300 行 | 2 + **3**（共享 post-pinch 视口几何，吸附须基于缩放后坐标，codex R7-F1） | Phase 2.5 收口 |
 | 6 | **E5/E6 交易扩展**（手动强平方法 + tier 公式 accessor，严格按顺位 1 RFC） | C 交易 | ~250-350 行 | 1 RFC + 2 | U2-R1 / U2-R3（逻辑面） |
 | 7 | **U2 交易 UI 接线 + 交易反馈**（手动强平按钮 + 顶栏「仓位 X/5」+ 结束总资金显示语义，按 RFC + **交易结果 Toast**〔失败可见性：资金不足/持仓不足，plan L735/736/1250〕+ **成功 .heavy 触觉反馈**〔normal/replay，review 无；plan L841/955/1195〕+ 运行时 runbook 条目〔含失败不 mutate/不震动断言〕） | C 交易 | ~300-450 行 SwiftUI（plan 超 500 拆 交易动作接线 / 反馈层） | 6 + 1 RFC | U2-R1 / U2-R3（UI 面）/ E6b-R1 / 交易 Toast+haptic（codex R3-F4） |
 | 8 | **Replay 结算窗**（replay 结束触发忠实结算窗，按 RFC 契约；触碰 E5/E6/SettlementView 扩展边界 + 运行时 runbook 条目） | C 交易 | ~250-350 行 | 6 + 7 + 1 RFC | PR11-R2 |
 | 9 | **夜间模式**（白天/夜间/跟随系统 + 暗色调色板，按 RFC + F2 ThemeController 基础设施 + 运行时 runbook 条目） | D 磨光 | ~250-350 行 | 1 RFC | Phase 5 显示模式 |
 | 10 | **会话持久化健壮性 + 边界 + 统一错误处理 + 全 app fixture provisioning**（按顺位 1 RFC：**周期 autosave**〔每 N tick + background/inactive flush，落实 `modules:1676` 契约，R5-F1〕+ **back-save 失败契约**〔留局内 retry/discard，discard 调 `endSession`，成功前不 `onExit`，R3-F1〕+ **finalize 原子+失败保留+终态 fence**〔按 RFC item 7：治理的 session-finalization port 单 `DefaultAppDB` 事务 insert+clear、失败保留 session 不 teardown、幂等 retry 仅记一次、finalize/discard 前 drain/拒绝排队 autosave 防 pending resurrection/重复 record；R4-F1/R5-F2/R6-F1/R6-F2〕+ kill/relaunch 恢复测试 + 故障注入 + save-before/after-finalize 双序测试；训练组损坏/下载中断/磁盘满 + 网络 Toast/解析失败/SQLite 损坏自动清理重下 + cache touch-on-use + **全 app fixture provisioning**〔debug-only seed 经 AppContainer 注入缓存+pending+history，R3-F2〕+ 真实 DownloadAcceptanceRunner 路径 fixture E2E smoke） | D 磨光 | ~500+ 行（plan **须拆**：10a 会话持久化健壮性〔autosave+back-save+finalize 保留+恢复测试〕/ 10b 边界错误处理+fixture+smoke） | 1 RFC + 各模块 | Phase 5 边界 / E6a-R3 / smoke（R1-F1）/ back-save（R3-F1）/ fixture（R3-F2）/ 原子 finalize（R4-F1）/ 周期 autosave（R5-F1）/ finalize 保留（R5-F2） |
-| 11 | **边缘 bounce 动画**（DecelerationAnimator 扩展：到边界回弹 + 运行时 runbook 条目） | D 磨光 | ~200-300 行 | 2 | Phase 5 |
+| 11 | **边缘 bounce 动画**（DecelerationAnimator 扩展：到边界回弹 + 运行时 runbook 条目） | D 磨光 | ~200-300 行 | 2（**+ 3**：若碰 `ChartContainerView`/视口几何/手势路由则排 Pinch 后，plan 须先证隔离，codex R7-F1） | Phase 5 |
 | 12 | **性能评审 + Bitmap Cache 按需**（Instruments 性能 pass；Bitmap Cache 仅当实测单帧 >4ms 才引入；交付帧预算验收判据） | D 磨光 | 条件性 Bitmap Cache | 全渲染在场 | C8 性能 / C2·C7 运行时回填判据 |
 | 13 | **Wave 3 收尾**（completion doc + residual 终态回填 + **Wave 3 全交互运行时矩阵验收完成作阻塞依赖** + **freeze tag 决策**） | E 收尾 | doc-only（freeze 走则 + tag ceremony） | 全部 + **Wave 3 运行时矩阵记录**（见 §三.3） | C2/C7/C8 + 新交互运行时实测回填（codex R1-F3 / R2-F1） |
 
@@ -74,7 +74,7 @@
 - D 磨光（9-12：夜间模式 / 边界+错误+生产路径 smoke / 边缘 bounce / 性能）
 - E 收尾（13：completion doc + 运行时矩阵阻塞 + freeze tag 决策）
 
-**依赖满足校验**（每锚上游均在更早顺位 merged 或 Wave 0/1/2 已完成）：1 RFC(无依赖) → 2 CI 守护+锁竖屏(无依赖；早于所有 app-target 改动) → 3 Pinch(需 2；C7/C8 Wave 2 已落) → 4 绘线全链路(需 1+2+3；C6 Wave 1 infra 已落) → 5 十字光标(需 2；C5 Wave 1 已落) → 6 E5/E6 扩展(需 1+2) → 7 U2 交易 UI(需 6+1) → 8 Replay 结算(需 6+7+1) → 9 夜间(需 1；F2 Wave 0 已落) → 10 持久化健壮性+边界(需 1+6，加固 4/7 故排其后) → 11 bounce(需 2；C2 Wave 1 已落) → 12 性能(全渲染已在场) → 13 收尾(需全部 + Wave 3 运行时矩阵记录)。无逆向依赖。
+**依赖满足校验**（每锚上游均在更早顺位 merged 或 Wave 0/1/2 已完成）：1 RFC(无依赖) → 2 CI 守护+锁竖屏(无依赖；早于所有 app-target 改动) → 3 Pinch(需 2；C7/C8 Wave 2 已落) → 4 绘线全链路(需 1+2+3；C6 Wave 1 infra 已落) → 5 十字光标(需 2+**3** 共享 post-pinch 视口，codex R7-F1) → 6 E5/E6 扩展(需 1+2) → 7 U2 交易 UI(需 6+1) → 8 Replay 结算(需 6+7+1) → 9 夜间(需 1；F2 Wave 0 已落) → 10 持久化健壮性+边界(需 1+6，加固 4/7 故排其后) → 11 bounce(需 2；若碰视口几何则排 **3** 后，codex R7-F1) → 12 性能(全渲染已在场) → 13 收尾(需全部 + Wave 3 运行时矩阵记录)。无逆向依赖。
 
 ---
 
@@ -85,23 +85,27 @@
 | 轨 | 触碰主文件集 | anchor（轨内顺序） |
 |---|---|---|
 | **Gate 治理** | `docs/`（1）/ `.github`+pbxproj（2），互不相交 | **1 RFC ∥ 2 CI+orientation**（真并行） |
-| **轨 G 图表/手势** | `ChartContainerView`/`KLineView`/`Render*`/`ChartGestureArbiter`/`Drawing*`/`DecelerationAnimator` | 3 Pinch → 4 Drawing\* ；5 Crosshair ；11 Bounce |
-| **轨 T 交易/持久化** | `TrainingEngine`/`TrainingSessionCoordinator`/`TrainingView`/`SettlementView`/`AppRouter`/`*Repository` | 6 E5/E6 → 7 U2 trade → 8 Replay ；10 持久化健壮性\*\* |
+| **轨 G 图表/手势** | `ChartContainerView`/`KLineView`/`Render*`/`ChartGestureArbiter`/`Drawing*`/`DecelerationAnimator` | **轨内串行**：3 Pinch → 5 Crosshair → 4 Drawing\* ；11 Bounce†（共享视口几何/手势路由状态，不可轨内并行，codex R7-F1） |
+| **轨 T 交易/持久化** | `TrainingEngine`/`TrainingSessionCoordinator`/`TrainingView`/`SettlementView`/`AppRouter`/`*Repository` | **轨内串行**：6 E5/E6 → 7 U2 trade → 8 Replay ；10 持久化健壮性\*\* |
 | **同步/收口** | 跨全部 | 9 夜间\*\*\* → 12 性能 → 13 收尾 |
 
-**执行波次（并行）**：
-- **W0 Gate**：1 RFC ∥ 2 CI（disjoint 文件）。**1 RFC 是轨 T 全部 + 轨 G 的 4 的硬门**——RFC 未 merge 这些不能动。
-- **W1 双轨并行**（W0 后）：轨 G 起 3/5/11；轨 T 起 6。两轨文件集基本不相交 → 真并行（独立 worktree）。
-- **W2**：轨 G 3→4\*（4 需 RFC + 3）；轨 T 6→7。
-- **W3**：轨 T 7→8；10 持久化（需 6 + 加固 4/7，**跨轨同步点**——等轨 G 的 4 + 轨 T 的 7）。
-- **W4 收口**（串行）：9 夜间（两轨 view 落定后）→ 12 性能（全渲染在场）→ 13 收尾。
+**轨内串行规则（codex R7-F1）**：轨道 ≠ 内部全并行。共享**视口几何 / 手势路由 / engine 状态**的锚有**语义耦合**（文本 rebase 不能检测：代码干净合并但行为错——如 crosshair 基于 pre-pinch 视口实现，pinch 落地后吸附即错）。故**轨内按状态依赖串行**；真并行 = **轨 G 链 ∥ 轨 T 链**（两链文件集基本不相交）。
 
-**跨轨标注**：
-- **\* 4 Drawing = cross-cut**：碰 `engine.drawings`（轨 T 区）+ chart input（轨 G 区）+ reducer + 持久化 → 虽列轨 G，须与轨 T 协调（engine mutation API 由 RFC item 4c 治理，先于编码定）。
-- **\*\* 10 持久化 = 跨轨汇合**：加固 drawing(4)+trade(7) 的 save/finalize → 须排 4 + 7 之后（W3 末）。
-- **\*\*\* 9 夜间** 碰所有 view 颜色 → 排两轨之后（W4），避免与每个 feature 锚撞色值文件。
+**执行波次（轨间并行 / 轨内串行）**：
+- **W0 Gate**：1 RFC ∥ 2 CI（disjoint 文件）。**1 RFC 是轨 T 全部 + 轨 G 的 4 的硬门**。
+- **W1 双轨起**（W0 后）：轨 G 起 **3 Pinch**（建立 post-pinch 视口几何，轨 G 后续锚的基础）；轨 T 起 **6 E5/E6**。
+- **W2**：轨 G **3→5**（crosshair 消费 post-pinch 视口）；轨 T **6→7**。11 Bounce† 仅当其 plan 证不碰 `ChartContainerView`/手势路由/`TrainingEngine` 才可此时并行，否则串排 3 之后。
+- **W3**：轨 G **5→4\***（drawing 需 RFC + post-pinch 视口）；轨 T **7→8**。
+- **W4 跨轨同步**：10 持久化（需 6 + 加固 4/7 → 等轨 G 的 4 + 轨 T 的 7 都 merged）。
+- **W5 收口**（串行）：9 夜间（两轨 view 落定后）→ 12 性能 → 13 收尾。
 
-**关键路径**（决定总时长）：`W0 RFC → 6 → 7 → 8`（轨 T 最长链）与 `→ 10 → 9 → 12 → 13` 收口 ≈ **7-8 个串行身位**（vs 纯单线 13 身位）。轨 G（3→4 + 5/11）在轨 T 推进时并行消化。
+**跨轨/共享状态标注（每个共享关系一条显式 ordering edge，codex next-step）**：
+- **† 11 Bounce**：DecelerationAnimator 扩展，但边界回弹触发于视口边缘 → 若碰 `ChartContainerView`/视口几何则**排 3 之后**；plan 须先证隔离才允许与 3 并行。
+- **\* 4 Drawing = cross-cut**：碰 `engine.drawings`（轨 T 区）+ chart input（轨 G 区）+ reducer + 持久化 → 列轨 G 但须与轨 T 协调（engine mutation API 由 RFC item 4(c) 先于编码治理）；排 post-pinch 视口（3）之后。
+- **\*\* 10 持久化 = 跨轨汇合**：加固 drawing(4)+trade(7) save/finalize → 排 4 + 7 之后（W4）。
+- **\*\*\* 9 夜间** 碰所有 view 颜色 → 排两轨之后（W5）。
+
+**关键路径**（决定总时长）：轨 T `W0 RFC → 6 → 7 → 8`（3 身位）与轨 G `W0 → 3 → 5 → 4`（3 身位）并行推进 → 汇合 `10 → 9 → 12 → 13`（4 身位）≈ **约 8 个串行身位**（vs 纯单线 13）。两轨链长相近故并行收益接近理论上限。
 
 **并行纪律（硬约束，per `feedback` P2 串味教训）**：
 1. 每轨独立 git worktree；轨内 anchor 顺序 merge；跨轨不共写文件（共享文件改动须串行化或经 RFC 协调）。
@@ -219,3 +223,4 @@
 | 2026-06-10 | v6 (codex branch-diff R5 修) | **F1**（high，**撤回 v5 pushback**）：codex cite `modules:1676` 证 `saveProgress`「U2 退出 / **每 N tick 自动调用**」= 既有 spec 周期契约（v5「无周期要求」误判，我漏读该行）→ 周期保存是合规义务非可选，「save-on-Back only」不可接受；RFC item 6 改参数化（N/coalescing/background-flush）+ 顺位 10 实现周期 autosave + §〇/§三.2 改诚实；**F2**（high，全接受）：原子事务不足以保 session——`TrainingView:118-119` finalize 失败→`onSessionEnded(nil)` teardown 直接丢已完成局，retry 不可达 → RFC item 7 新增 finalize 失败保留 session 契约 + 顺位 10 owns 失败保留（不 teardown）+ 原子 + 幂等 retry 仅记一次 + 故障注入；顺位 10 升 ~500+ 行须拆 10a/10b |
 | 2026-06-10 | v7 (codex branch-diff R6 修) | 持久化-finalize 角深化（distributed-reliability drilldown，per `feedback_codex_distributed_reliability_drilldown`）：**F1**（high）：周期 autosave 与 finalize/discard 终态竞争——终态 tick 排队 save 可在 finalize 后重建 `pending_training` → 重启重复 finalize/record → RFC item 7 加终态 fence（finalize/discard 前 drain/拒绝排队 save + 双序测试）；**F2**（high）：mandate 原子 insert+clear 但 coordinator 仅分离两 port 各自 `dbQueue.write` 无单事务契约 → RFC item 7 加治理的 session-finalization port（单 `DefaultAppDB` 事务，禁 unsafe downcast）；均折入 RFC item 7 + 顺位 10。**escalate 点**：breadth 已收敛至 finalize 单角，进入 reliability 子case 无止境下钻模式 → 提请 user 裁决 accept+override vs 续轮 |
 | 2026-06-10 | v8 (user 提效要求：双轨并行) | user 2026-06-10 要求「尽可能并行提效」→ §一 单线→双轨并行 + 新增 §二·并行执行模型（轨 G 图表/手势 ∥ 轨 T 交易/持久化，文件集不相交；Gate 1∥2；4/10/9 跨轨同步点；关键路径 ~7-8 身位 vs 单线 13）+ 并行纪律（独立 worktree/勤 rebase/merge 仍串行/codex 评审是真吞吐上限，per P2 串味教训）。0 anchor 内容变更，仅加并行执行结构。R6 escalate 决策 user 改选「先定并行结构」→ v8 后连同 R6 收敛再过一轮 codex |
+| 2026-06-10 | v9 (codex branch-diff R7 修) | **持久化角已收敛**（R6 finalize fix 被接受不再 flag）；codex 转审并行模型。**F1**（high）：W1 并发 3/5/11 违反自身文件隔离规则——3 Pinch 改视口几何、5 Crosshair 依赖视口几何，5 基于 pre-pinch 实现则 3 落地后吸附语义错（文本 rebase 检测不到）→ 加**轨内串行规则**（共享视口/手势/engine 状态的锚语义耦合，轨内按状态依赖串行；真并行 = 轨 G 链 ∥ 轨 T 链）+ 5 dep 加 3 + 11 conditional（plan 证隔离否则排 3 后）+ 每共享关系显式 ordering edge + 波次重排（W1 各轨起 3/6；关键路径仍 ~8 身位两链等长）|
