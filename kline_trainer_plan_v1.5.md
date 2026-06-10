@@ -917,6 +917,10 @@ enum TrainingMode {
 - **收益率**：本局至今的净收益率（含佣金和印花税）
 - **绘线工具按钮**：位于顶部最右侧
 
+**仓位档位 X/5 派生公式（Wave 3 顺位 1 RFC §4.1 钉死，顺位 6 accessor `currentPositionTier` + 顺位 7 显示）**：顶栏「仓位 X/5」的 X = 当前持仓档位派生值——令 `holdingValue = 持仓股数 × 当前价`、`total = 实时总资金（现金 + 持仓市值）`；`total <= 0 → X = 0`，否则 `X = clamp(round(holdingValue / total × 5), 0, 5)`。**市值 / 当前总资金基准 + round（非成本基准 / 非 floor）**；空仓 0/5、满仓 5/5。派生非状态（无持久 tier 字段）。
+
+**结算 vs 顶栏总资金显示语义（RFC §4.2 reconcile，E6b-R1 消解）**：训练中**顶栏** = `currentTotalCapital`（本局实时总资金 = 现金 + 持仓市值，含浮盈，Normal/Review/Replay 一致）；**结算窗** = `total_capital`（本局结束冻结值；Normal 持久化 `TrainingRecord` / Review 读历史 record / Replay in-memory 不持久化）。二者是两个字段用于两个场景，**非 dispute**。
+
 **点击返回按钮：** 保存进度到 pending_training 表，返回首页，按钮变为「继续训练」。
 
 #### 6.2.2 底部结束按钮
