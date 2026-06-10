@@ -1228,6 +1228,7 @@ def generate_one_training_set(stock_code):
 ### Phase 5：磨光
 
 1. 白天/夜间/跟随系统显示模式（切换颜色常量）
+   - **契约（Wave 3 顺位 1 RFC §4.3 / modules §F2，顺位 9 实现）**：light/dark **双 token 集** + per-scheme 选取接线（现有 13 token = dark 集，新增 light 集）；具体 RGBA 归顺位 9 plan 依 WCAG AA 设备实测；持久化 `display_mode`（无 schema 改动）。
 2. UI 细节（图标、间距、字体）
 3. 性能优化（Instruments Profiler，单帧 >4ms 时引入 Bitmap Cache）
 4. 边缘 bounce 动画（DecelerationAnimator 扩展）
