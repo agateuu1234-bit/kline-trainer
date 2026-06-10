@@ -62,7 +62,7 @@
 
 ### 4.1 tier 显示公式（仓位 X/5 派生）
 
-**spec 现状：action tier explicit（plan L602-610 买入「总资金 × 1/5..5/5」、L640 卖出「持仓股数 × 比例」；modules L403 `PositionTier` "1/5".."5/5"）；顶栏「当前持仓档位 X/5」(plan L916) 的派生公式 silent。** 代码：`TrainingEngine.currentTotalCapital`（`TrainingEngine.swift:235`）+ `cashBalance` 在；**无 `currentPositionTier` accessor**（`buyEnabled` L259 仅探测 `PositionTier.allCases` 可买性，不算当前档位）。
+**spec 现状：action tier explicit（plan L602-610 买入「总资金 × 1/5..5/5」、L640 卖出「持仓股数 × 比例」；modules L403 `PositionTier` "1/5".."5/5"）；顶栏「当前持仓档位 X/5」(plan L916) 的派生公式 silent。** 代码：`TrainingEngine.currentTotalCapital`（`TrainingEngine.swift:235`）+ `cashBalance` 在；**无 `currentPositionTier` accessor**（`buyEnabled` L257 仅探测 `PositionTier.allCases` 可买性，不算当前档位）。
 
 **契约（顺位 6 加 accessor，顺位 7 显示）**：
 
@@ -80,11 +80,11 @@ engine.currentPositionTier: Int   // 0...5，read-only computed
 3. **空仓 = 0/5**（shares==0 → holdingValue==0 → 0）。本 app 不允许做空 + buy 要求现金足够（资金不足取消），故 `cashBalance ≥ 0`、`holdingValue ≥ 0`、`total ≥ holdingValue`，ratio ∈ [0,1]，clamp 仅作 FP 边界兜底。`total<=0`（全零）守为 0/5。
 4. **派生非状态**：无持久化「当前 tier」字段（buy 以总资金、sell 以持仓为基准，二者无单一持久 tier）。accessor 每次从 live 状态算，与现有 `currentTotalCapital`/`returnRate` computed 一致。
 
-**acceptance（顺位 6/7 验收）**：空仓 → 0/5；买 3/5 后立即 → 3/5（容 round）；满仓 5/5；部分卖出后按市值比例 round；`total<=0` → 0/5 不崩。
+**acceptance（顺位 6/7 验收）**：空仓 → 0/5；买 3/5 后立即 → 3/5（容 round）；满仓 5/5；`total<=0` → 0/5 不崩；**锁基准数值向量（opus R1-L5，防顺位 6/7 误用成本基准仍「通过」prose）**：买 4/5 → 价 ×2（持仓市值涨至 ~89% 总资金）→ 卖「持仓的 2/5」→ 期望 **3/5（非 4/5）**——钉死「市值/当前总资金基准 + round」，成本基准会得 4/5。
 
 ### 4.2 结束总资金 vs 当前总资金 显示语义（reconcile，无新契约）
 
-**spec 现状：explicit。** 顶栏 = `currentCapital`（plan L914「总资金：本局实时总资金（现金 + 持仓市值）」= `TrainingEngine.currentTotalCapital`）；结算窗 = `total_capital`（plan L997「总资金：¥102,345.67」= 本局结束冻结值；modules L416「total_capital 本局结束时的总资金」）。结算时已强平、无持仓，故该刻 `currentCapital == total_capital`，无矛盾。
+**spec 现状：explicit。** 顶栏 = `currentCapital`（plan L914「总资金：本局实时总资金（现金 + 持仓市值）」= `TrainingEngine.currentTotalCapital`）；结算窗 = `total_capital`（plan L997「总资金：¥102,345.67」= 本局结束冻结值；plan L416/L885「本局结束时的总资金」——该描述性注释在 plan 非 modules，modules 同字段 `TrainingRecord.totalCapital` L497 无注释，opus R1-L1 citation 修正）。结算时已强平、无持仓，故该刻 `currentCapital == total_capital`，无矛盾。
 
 **契约（仅 reconcile）**：
 - **训练中顶栏**：显示 `engine.currentTotalCapital`（实时，含浮盈）。所有 flow（Normal/Review/Replay）一致。
@@ -114,10 +114,10 @@ engine.currentPositionTier: Int   // 0...5，read-only computed
 
 #### 4.4a 手动强平（on-demand force-close）
 
-**spec 现状：行为 explicit（plan L922-927 底部「结束本局」→ 有持仓按最后收盘价强平 → 结算；L960-965 自动 maxTick 同语义；L751 强平定义）；on-demand API silent。** 代码：`forceCloseIfEnded()`（`TrainingEngine.swift:417`）**仅** `guard tick.globalTickIndex >= tick.maxTick` 触发——无用户主动提前结束的入口。
+**spec 现状：行为 explicit（plan L922-927 底部「结束本局」→ 有持仓按最后收盘价强平 → 结算；L960-965 自动 maxTick 同语义；L751 强平定义；**modules L342「手动结束 = 用户点击结束时的值」= 手动强平按当前 tick 价、非 maxTick 末根的权威，opus R1-L4**）；on-demand API silent。** 代码：`forceCloseIfEnded()`（`TrainingEngine.swift:417`）**仅** `guard tick.globalTickIndex >= tick.maxTick` 触发——无用户主动提前结束的入口。
 
 **契约（顺位 6）**：engine 暴露 **on-demand 强平方法**（语义等同 `forceCloseIfEnded` 体，但去掉 `>= maxTick` 门）：
-- 前置：`flow.canBuySell()`（Normal ✅ / Review ❌ / Replay ✅，对齐 plan L841 矩阵——Review 无主动结束）。
+- 前置：`flow.canBuySell()`（Normal ✅ / Review ❌ / Replay ✅，对齐 plan L841「结束按钮」行——Review 无主动结束）。**注（opus R1-L4）**：`canBuySell()` 此处是「结束按钮」capability 行的 **intentional load-bearing proxy**，恰与「买卖按钮」行同值；若未来某 flow 使两行分叉，顺位 6/7 须改用专门 manual-end capability 谓词，不可沿用本 proxy。
 - 语义：若 `position.shares > 0` → 按 `currentPrice`（当前 tick 收盘，非 maxTick 末根；用户此刻结束即按此刻价）走 `TradeCalculator.forceCloseOnEnd` → append forced sell `TradeOperation`/`TradeMarker`（`positionTier: .tier5`，佣金+印花税）→ `position.shares == 0`、`drawdown.update`。
 - **幂等**：第二次调用 shares==0 短路 no-op（与 `forceCloseIfEnded` 幂等不变量一致）。
 - **复用**：auto（maxTick）与 manual 共用同一 force-close 体，仅触发门不同，杜绝两套强平逻辑漂移。
@@ -146,7 +146,7 @@ engine.currentPositionTier: Int   // 0...5，read-only computed
 
 **契约（顺位 6）**：engine 暴露 **panel-state zoom mutation**：
 - 语义：改 `panelState.visibleCount` 于 clamp `[MIN_VISIBLE, MAX_VISIBLE]` 内 + 保持 focus（pinch 中点下的 candle x 不动，重算 offset）。
-- **ephemeral 非持久**：`visibleCount` 不在 `pending_training`（无该列，核实 `ios/sql/app_schema_v1.sql` pending 12 列无 visibleCount）→ zoom 是内存视图态，不跨 session 持久、不进 finalize。
+- **ephemeral 非持久**：`visibleCount` 不在 `pending_training`（核实 `ios/sql/app_schema_v1.sql` pending 现有 13 列均无 visibleCount，opus R1-M2 count 修正）→ zoom 是内存视图态，不跨 session 持久、不进 finalize。
 - **clamp 边界 + pinch→count 映射数值 + 与 C7 仲裁器集成 归顺位 3 plan**（本 RFC 只钉「engine 拥有 visibleCount mutation + clamp 契约 + focus 不变量 + ephemeral」，不内联 MIN/MAX/灵敏度常量，遵守 outline 抽象纪律）。
 
 **实施**：顺位 6 加 mutation；顺位 3 消费（去硬编码 80 + pinch 手势接线）。
@@ -190,7 +190,7 @@ engine.currentPositionTier: Int   // 0...5，read-only computed
 - `coordinator.finalize`（`TrainingSessionCoordinator.swift:230-231`）：`recordRepo.insertRecord(...)` 与 `pendingRepo.clearPending()` 是**分离两次 `dbQueue.write`**（`RecordRepositoryImpl` 内部单事务插 record+ops+drawings，但 clearPending 是独立事务）→ insert 成功 + clear 失败 → 重启再 finalize = **重复 record**。
 - `TrainingView.swift:118-119`：finalize 任何失败 → `onSessionEnded(nil)` → AppRouter 关 reader + 清 `activeTraining` = **已完成局直接拆毁丢失**（pending stale/absent，retry 不可达）。
 - `endSession()`（:236-242）：仅关 reader + 清 active context，**不清 `pending_training`** → 周期 autosave 后 discard 会留旧 checkpoint 被首页/重启复活。
-- `pending_training` 是 singleton `CHECK (id = 1)`（`ios/sql/app_schema_v1.sql:49`）**无 session 身份列**；`training_records` `AUTOINCREMENT id` **无唯一约束** → 无幂等去重锚。
+- `pending_training` 是 singleton `CHECK (id = 1)`（`ios/sql/app_schema_v1.sql:50`）**无 session 身份列**；`training_records` `AUTOINCREMENT id` **无唯一约束** → 无幂等去重锚。
 - app DB schema 经 GRDB `DatabaseMigrator`（`AppDBMigrations.swift` `0001_v1.4_baseline` / `0003_v1.4_purge_leased` + `PRAGMA user_version`）演进；`PersistenceReason` 有 `.dbCorrupted`/`.schemaMismatch`/`.diskFull`/`.ioError`。
 - **provenance 未分流**：training-set DB 与 app.sqlite 损坏**均**映射 `.persistence(.dbCorrupted)`（`PersistenceErrorMapping`，含 `DecodingError`）——调用点 source 已知但错误类型不可区分。
 
@@ -223,7 +223,7 @@ engine.currentPositionTier: Int   // 0...5，read-only computed
 谓词全部**锚定具体短语 + 排除合法残留 + fail-closed**，防 codex 拿裸措辞无限挑战（per `feedback_acceptance_grep_anchoring` + `feedback_codex_distributed_reliability_drilldown`）。封装为 `scripts/governance/verify-wave3-pr1-rfc.sh`，acceptance 调它。
 
 - **(a) 七契约权威锚在 modules/plan 在位**：modules 含 `currentPositionTier`（§4.1 accessor 名）+ `appendDrawing`（§4.4c）+ on-demand 强平契约 marker + `AUTOSAVE_TICK_INTERVAL`（§4.6）+ 单事务 finalization port marker + durable session key marker；plan 含 tier 派生公式 marker + 夜间 light/dark 双集 marker。pass = 全锚命中（code fence/精确短语，非裸名）。
-- **(b) 「未定 / 拒臆造 / dispute」残留清零**：搜 live 权威源（modules + plan）中「tier 公式未定」「拒臆造」「显示语义 dispute」「未定契约」等 outline §三.1 措辞；**排除** Wave 3 outline 本身（保留历史 + supersede banner 守护）、本 RFC 引用、changelog。pass = live spec 0 命中。
+- **(b) §4.2 结算显示 reconcile 文本在位（正向断言，取代易 vacuous 的负向搜索；opus R1-M1）**：opus R1 实测「未定/拒臆造/显示语义 dispute」措辞**本不在 modules/plan**（残留在 Wave 3 outline〔由 (c) supersede marker 守护〕+ `docs/governance/2026-06-09-wave2-completion.md`〔point-in-time 完成记录，§二不改写〕），故对 modules/plan 做负向搜索近乎空洞、恒 PASS。改**正向断言**：`kline_trainer_plan_v1.5.md` §6.2 顶栏/结算区须含 §4.2 钉死的两字段 reconcile 锚——顶栏「实时总资金 = `currentTotalCapital`（现金+持仓市值）」/ 结算「`total_capital`（本局结束冻结）」并存且互不混用。pass = plan 命中该 reconcile 锚 ≥1（证 §4.2 已落地，非空搜）。
 - **(c) Wave 3 outline supersede marker 位置在位**：marker `本节契约已由顺位 1 RFC 钉死` 须位于 outline `### 3.1` heading 之后、首个 stale 措辞之前（断言 heading 行 < marker 行 < 首个 stale 行）；防 planner 先读旧「未定」字面。
 - **(d) provenance 安全红线在位**：modules §E6 含「app.sqlite 损坏禁自动删 / fail-closed」契约短语（§4.7f 安全红线，防顺位 10 误删）。pass = 命中 ≥1。
 - **(e) replay non-persisting 不变量在位**：modules §E6 含「replay … 不写 training_records / 不触 pending_training」短语（§4.4e/§4.5）。pass = 命中 ≥1。
@@ -264,3 +264,4 @@ engine.currentPositionTier: Int   // 0...5，read-only computed
 | 日期 | 版本 | 变更 |
 |---|---|---|
 | 2026-06-10 | v1 | 起草；落 Wave 3 outline §三.1 八项为七契约权威定义 + 设计理由块；grep-first 校正（多数项 spec 已 explicit，RFC 多为 reconcile + 引用）；D1 zoom = engine-owned panel-state；§4.6 触发面校正（state-dirtying 非仅 tick）；§4.7 最重契约（单事务 port + 幂等 schema 迁移 + fence + discard + provenance 安全红线）；grep gate 七谓词 fail-closed |
+| 2026-06-10 | v1.1 | opus 4.8 xhigh 对抗评审 R1 = **VERDICT: APPROVE**（0 Critical / 0 High；2 Medium + 4 Low，全为 premise-precision/gate-correctness，非设计缺陷）。应用 6 修正：§五(b) 易-vacuous 负搜 → 正向 reconcile 断言（R1-M1）；§4.4d pending 列数 12→13（R1-M2）；§4.2 citation modules→plan L416/L885（R1-L1）；§4.7 `CHECK(id=1)` 行 49→50（R1-L2）；§4.1 `buyEnabled` L259→L257（R1-L2）；§4.4a 加 modules L342 手动结束按当前价权威 + canBuySell() proxy load-bearing 注（R1-L4）；§4.1 acceptance 加市值基准数值锁向量 4/5→×2→卖2/5→3/5（R1-L5）。**plan L997 经实测裁决保留**（R1 误称 L996，grep 证 L997）。契约面零改动 |
