@@ -1,4 +1,4 @@
-# Wave 3 outline（v12）—— 客户端端到端功能完成 wave 双轨并行顺位
+# Wave 3 outline（v13）—— 客户端端到端功能完成 wave 双轨并行顺位
 
 **前置**：Wave 2 全 11 anchor 已 merged（PR #78-#91；轻量收尾 PR #91 `8ab0a52` merged 2026-06-09，**未打 freeze tag**，见 `docs/governance/2026-06-09-wave2-completion.md`）。本 outline 规划 Wave 3「客户端端到端功能完成」阶段的执行顺位。
 
@@ -62,7 +62,7 @@
 | 7 | **U2 交易 UI 接线 + 交易反馈**（手动强平按钮 + 顶栏「仓位 X/5」+ 结束总资金显示语义，按 RFC + **交易结果 Toast**〔失败可见性：资金不足/持仓不足，plan L735/736/1250〕+ **成功 .heavy 触觉反馈**〔normal/replay，review 无；plan L841/955/1195〕+ 运行时 runbook 条目〔含失败不 mutate/不震动断言〕） | C 交易 | ~300-450 行 SwiftUI（plan 超 500 拆 交易动作接线 / 反馈层） | 6 + 1 RFC | U2-R1 / U2-R3（UI 面）/ E6b-R1 / 交易 Toast+haptic（codex R3-F4） |
 | 8 | **Replay 结算窗（UI/routing-only，R9-F1）**（replay 结束触发忠实结算窗：**消费 6 的 replay-settlement engine 支持** + SettlementView 呈现 + 路由，**不自改 E5/E6 契约** + 运行时 runbook 条目） | C 交易 | ~200-300 行 | 6（replay-settlement 支持）+ 7 + 1 RFC | PR11-R2 |
 | 9 | **夜间模式**（白天/夜间/跟随系统 + 暗色调色板，按 RFC + F2 ThemeController 基础设施 + 运行时 runbook 条目） | D 磨光 | ~250-350 行 | 1 RFC | Phase 5 显示模式 |
-| 10 | **会话持久化健壮性 + 边界 + 统一错误处理 + 全 app fixture provisioning**（按顺位 1 RFC：**周期 autosave**〔每 N tick + background/inactive flush，落实 `modules:1676` 契约，R5-F1〕+ **back-save 失败契约**〔留局内 retry/discard，discard 调 `endSession`，成功前不 `onExit`，R3-F1〕+ **finalize 原子+失败保留+终态 fence**〔按 RFC item 7：治理的 session-finalization port 单 `DefaultAppDB` 事务 insert+clear、失败保留 session 不 teardown、幂等 retry 仅记一次、finalize/discard 前 drain/拒绝排队 autosave 防 pending resurrection/重复 record + **discard 清 `pending_training` durable 终态**〔不复活，R8-F2〕；R4-F1/R5-F2/R6-F1/R6-F2/R8-F2〕+ kill/relaunch 恢复测试 + 故障注入 + save-before/after-finalize 双序测试 + discard-with-autosave relaunch 测试 + **P4 schema 迁移**〔durable session key 列入 pending+records + record 唯一约束 + existing-row 迁移语义；fresh-install/upgrade/crash-after-commit/retry 测试，使幂等 finalize 真不重复，codex R10-F2〕；训练组损坏/下载中断/磁盘满 + 网络 Toast/解析失败/SQLite 损坏自动清理重下 + cache touch-on-use + **全 app fixture provisioning**〔debug-only seed 经 AppContainer 注入缓存+pending+history，R3-F2〕+ 真实 DownloadAcceptanceRunner 路径 fixture E2E smoke） | D 磨光 | ~500+ 行（plan **须拆**：10a 会话持久化健壮性 + **P4 schema 迁移**〔autosave+back-save+finalize 保留+session key 列迁移+恢复测试，R10-F2〕/ 10b 边界错误处理+fixture+smoke） | 1 + 6 + 4 + 7 + **8**（共享 finalize/teardown 路径，R10-F1） | Phase 5 边界 / E6a-R3 / smoke（R1-F1）/ back-save（R3-F1）/ finalize（R4-F1/R5-F2）/ autosave（R5-F1）/ schema 迁移（R10-F2） |
+| 10 | **会话持久化健壮性 + 边界 + 统一错误处理 + 全 app fixture provisioning**（按顺位 1 RFC：**周期 autosave**〔每 N tick + background/inactive flush，落实 `modules:1676` 契约，R5-F1〕+ **back-save 失败契约**〔留局内 retry/discard，discard 调 `endSession`，成功前不 `onExit`，R3-F1〕+ **finalize 原子+失败保留+终态 fence**〔按 RFC item 7：治理的 session-finalization port 单 `DefaultAppDB` 事务 insert+clear、失败保留 session 不 teardown、幂等 retry 仅记一次、finalize/discard 前 drain/拒绝排队 autosave 防 pending resurrection/重复 record + **discard 清 `pending_training` durable 终态**〔不复活，R8-F2〕；R4-F1/R5-F2/R6-F1/R6-F2/R8-F2〕+ kill/relaunch 恢复测试 + 故障注入 + save-before/after-finalize 双序测试 + discard-with-autosave relaunch 测试 + **P4 schema 迁移**〔durable session key 列入 pending+records + record 唯一约束 + existing-row 迁移语义；fresh-install/upgrade/crash-after-commit/retry 测试，使幂等 finalize 真不重复，codex R10-F2〕；训练组损坏/下载中断/磁盘满 + 网络 Toast/解析失败 + **provenance-aware 恢复**〔training-set DB 损坏（可弃）= 自动删+重下；**`app.sqlite` 损坏（含 history/pending/settings 不可逆）= fail-closed 非破坏恢复，禁自动删**；二者现均报 `.dbCorrupted` 须按来源分流，codex R11-F3〕 + cache touch-on-use + **全 app fixture provisioning**〔debug-only seed 经 AppContainer 注入缓存+pending+history，R3-F2〕+ 真实 DownloadAcceptanceRunner 路径 fixture E2E smoke） | D 磨光 | ~500+ 行（plan **须拆 + 异波次调度**：**10a 持久化基础**〔原子 finalize port + 失败保留 + session-key schema 迁移；**W1 早置，6 后 / 7/8 前**，R11-F1〕/ **10b 持久化集成**〔周期 autosave + 终态 fence + 跨 feature 故障注入 + provenance 恢复 + 边界 + fixture/smoke；W3 晚置，4/7/8 后〕） | 10a ← 1+6（早）；10b ← 1+6+10a+4+7+8（晚，共享 finalize/teardown，R10-F1/R11-F1） | Phase 5 边界 / E6a-R3 / smoke（R1-F1）/ back-save（R3-F1）/ finalize（R4-F1/R5-F2）/ autosave（R5-F1）/ schema 迁移（R10-F2）/ provenance 恢复（R11-F3） |
 | 11 | **边缘 bounce 动画**（DecelerationAnimator 扩展：到边界回弹 + 运行时 runbook 条目） | D 磨光 | ~200-300 行 | 2（**+ 3**：若碰 `ChartContainerView`/视口几何/手势路由则排 Pinch 后，plan 须先证隔离，codex R7-F1） | Phase 5 |
 | 12 | **性能评审 + Bitmap Cache 按需**（Instruments 性能 pass；Bitmap Cache 仅当实测单帧 >4ms 才引入；交付帧预算验收判据） | D 磨光 | 条件性 Bitmap Cache | 全渲染在场 | C8 性能 / C2·C7 运行时回填判据 |
 | 13 | **Wave 3 收尾**（completion doc + residual 终态回填 + **Wave 3 全交互运行时矩阵验收完成作阻塞依赖** + **freeze tag 决策**） | E 收尾 | doc-only（freeze 走则 + tag ceremony） | 全部 + **Wave 3 运行时矩阵记录**（见 §三.3） | C2/C7/C8 + 新交互运行时实测回填（codex R1-F3 / R2-F1） |
@@ -78,12 +78,13 @@
 
 **Canonical DAG（每锚 → 直接上游 Wave 3 边；Wave 0/1/2 已落不计）**：
 - 1 RFC ← ∅ ｜ 2 CI+竖屏 ← ∅（Gate，1∥2）
-- 6 engine neck ← 1（W1，先于全部 engine 消费锚）
+- 6 engine neck ← **1, 2**（W1，先于全部 engine 消费锚；2 app-target CI 须先于全部 impl 锚 3-12，codex R11-F2）
+- **10a 持久化基础**（原子 finalize port + 失败保留 + session-key schema 迁移）← 1, 6（**早置**：7/8 在其后，使 manual-end/replay 完成路径建于已修 finalize，codex R11-F1）
 - 3 Pinch ← 2, 6†（†若 pinch 需 engine zoom 字段；RFC item 4(d) 定 engine-free 则仅 2）
 - 5 Crosshair ← 2, 3（共享 post-pinch 视口）｜ 4 Drawing ← 1, 2, 3, 6（消费 engine 画线 API + 视口）
-- 7 U2 trade ← 1, 6 ｜ 8 Replay ← 1, 6, 7（消费 6 的 replay-settlement 支持）
+- 7 U2 trade ← 1, 6, **10a**（建于已修 finalize）｜ 8 Replay ← 1, 6, 7, **10a**（消费 6 的 replay-settlement 支持 + 已修 finalize）
 - 11 Bounce ← 2（+3 若碰视口几何）
-- 10 持久化 ← 1, 6, **4, 7, 8**（加固 drawing/trade/**replay** 的 save/finalize/teardown；8 改 replay 完成路由 TrainingView/AppRouter/SettlementView，与 10 改同路径冲突，须 8 merged，codex R10-F1）
+- **10b 持久化集成**（周期 autosave + 终态 fence + 跨 feature 故障注入 + 边界错误 + recovery provenance + fixture/smoke）← 1, 6, 10a, **4, 7, 8**（加固 drawing/trade/replay 的 save/finalize/teardown；8 改 replay 完成路由与之同路径冲突，须 4/7/8 merged，codex R10-F1/R11-F1）
 - 9 夜间 ← 1, **4, 5, 7, 8**（碰全部 view 颜色，排所有 feature view 之后）
 - 12 性能 ← 全渲染锚（3,4,5,11）｜ 13 收尾 ← 全部 + Wave 3 运行时矩阵记录
 - **无环**（engine 写集中 6；消费锚单向依赖 6；同步点 4/10/9 单向汇合）。波次/关键路径由此 DAG 生成（见 §二）。
@@ -107,11 +108,11 @@
 
 **执行波次（engine 序列化 → 消费锚双轨并行）**：
 - **W0 Gate**：1 RFC ∥ 2 CI（disjoint 文件）。**1 RFC 是 engine 扩展 + 全 feature 锚的硬门**。
-- **W1 engine 基础（serial neck，codex R8-F1）**：**6 E5/E6**——所有 Wave 3 engine 契约变更（trade + tier accessor + 画线 mutation API + pinch/zoom panel-state 字段，按 RFC item 4）。可与之并行的**仅** plan 证 engine-free 的纯渲染/动画锚（如 11 bounce 若纯 `DecelerationAnimator`、不碰 ChartContainerView/视口）。
+- **W1 engine + 持久化基础（serial neck，codex R8-F1/R11-F1）**：**6 E5/E6**（所有 Wave 3 engine 契约变更）+ **10a 持久化基础**（原子 finalize port + 失败保留 + session-key schema 迁移；**早置于 7/8** 使完成路径建于已修 finalize）。可与之并行的**仅** plan 证 engine-free 的纯渲染/动画锚（如 11 bounce 若纯 `DecelerationAnimator`）。
 - **W2 消费锚双轨并行**（6 后，engine API 冻结，两轨文件真 disjoint）：
   - **chart 链**（render/gesture 文件）：3 Pinch（消费 zoom API + 建立 post-pinch 视口）→ 5 Crosshair（消费视口）→ 4 Drawing\*（消费 drawing mutation API + 视口）
   - **trade-UI 链**（TrainingView/Settlement 文件）：7 U2 trade（消费 trade API）→ 8 Replay
-- **W3 跨轨同步**：10 持久化（需 6 + 加固 4/7/**8** → 等 chart 链的 4 + trade 链的 7+8 都 merged，codex R10-F1）。
+- **W3 跨轨同步**：**10b 持久化集成**（周期 autosave + 终态 fence + 跨 feature 故障注入 + recovery provenance + 边界 + fixture/smoke；需 10a + 加固 4/7/8 → 等 chart 链的 4 + trade 链的 7+8 都 merged，codex R10-F1/R11-F1）。
 - **W4 收口**（串行）：9 夜间（两轨 view 落定后）→ 12 性能 → 13 收尾。
 
 **跨轨/共享状态标注（每个共享关系一条显式 ordering edge，codex next-step）**：
@@ -243,3 +244,4 @@
 | 2026-06-10 | v10 (codex branch-diff R8 修) | **F1**（high，并行模型真结构修）：grep 证 `TrainingEngine` 拥 `upperPanel/lowerPanel`（pinch 改）+`drawings`（4 投影）+trade（6/7/8）→ 两轨共写 engine，非 disjoint → 采 codex 选项 b：**所有 Wave 3 engine 契约变更集中顺位 6 序列化**（serial neck：trade+tier+画线 mutation API+pinch/zoom panel-state 字段），chart/UI 锚（3/4/7/8）只消费冻结 engine API 不改契约；3 dep+6、4 dep+6、波次重排（W1 engine 基础→W2 消费锚双轨并行）、关键路径 ~9 身位；**F2**（high）：`endSession` 不清 `pending_training`，discard 后 autosave checkpoint 被 Home/重启复活 → RFC item 7(e) + 顺位 10 加 discard durable 终态（fence→清 pending→end，清失败保留 retry）+ relaunch 测试。**8 轮 escalate**：engine 序列化是 finite 结构修；持久化-finalize/discard 是 documented reliability drilldown → 提请 user accept+override |
 | 2026-06-10 | v11 (codex branch-diff R9 修) | codex 确认 v10 engine 序列化主修被接受；发现 3 处**未把同一原则贯彻一致**（全流 A 结构非 reliability 下钻）：**F1**（high）：anchor 8 Replay 结算本身需改 E5/E6（finalize 返 nil + 要 TrainingRecord），违 engine 序列化 → 6 吸收 replay-settlement engine 支持（RFC item 4(e)/5），8 降为 UI/routing-only；**F2**（high）：DAG 自相矛盾（加 3→6 后位依赖但校验行仍 claim「更早顺位」）→ 声明顺位编号 = 标识符非执行顺序 + 重写 canonical DAG（补 10→4+7、9→all-views 边、3→6†）+ 执行顺序权威 = 波次 DAG；**F3**（med）：6 的 zoom API 未在 RFC item 4 治理 → item 4(d) 加 zoom/panel-state 契约或定 pinch engine-free。user 裁决「R9 验证并行修」→ R9 出更多流 A 结构修（非 reliability）故续修 + 拟 R10 复验 |
 | 2026-06-10 | v12 (codex branch-diff R10 修) | codex 确认 v11 一致性修 present。**F1**（high）：DAG 缺 8→10 边（8 改 replay 完成路由 TrainingView/AppRouter/SettlementView，10 改同 finalize/teardown 路径）→ 补 10←8 edge（canonical DAG + W3 + dep）；**F2**（high）：finalize 幂等 durable session key 需 P4 schema 迁移但无 owner（现 schema 无 session 身份/唯一约束）→ RFC item 7(c) 定 session key 列+唯一约束+existing-row 迁移语义 + 顺位 10a owns 迁移（fresh/upgrade/crash/retry 测试）。流 A DAG edge 与 reliability schema-owner 各补一；结构趋完整 |
+| 2026-06-10 | v13 (codex branch-diff R11 修) | **F1**（high）：finalize 数据丢失 fix 排在 10（晚），7/8 先在 broken finalize 上加完成路径 → 持久化基础 **10a**（原子 port+失败保留+session-key schema）早置 W1（6 后/7/8 前），7/8 ← 10a，跨 feature 集成留 **10b** 晚置；**F2**（med）：canonical DAG「6←1」漏 2 → 改 6←1,2（app-target CI 先于全 impl 锚）；**F3**（med）：「SQLite 损坏自动清理重下」对 `app.sqlite`（不可逆 history/pending/settings）危险 → provenance-aware 恢复（training-set 自动删+重下 / app.sqlite fail-closed 非破坏）。**收口点**：codex 确认主结构已 present，R9-R11 均细粒度 scheduling/DAG/safety 精炼（Wave 1 v18 edge-mining 同型）→ 拟 accept+override，剩余交下游 plan-stage |
