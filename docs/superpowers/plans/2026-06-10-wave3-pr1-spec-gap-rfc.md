@@ -76,7 +76,7 @@ Expected: 无输出 `rc=1`。
 
 - [ ] **Step 2: 在 §E5 代码围栏外插入契约增量块（opus plan R1-H：务必围栏外）**
 
-**插入位置（内容锚，不靠绝对行号）**：紧接**关闭 §E5 `TrainingSessionCoordinator` ```swift 代码围栏的那一行 ``` **（围栏 L1588 开、L1732 关；`saveProgress` 在 L1677 **围栏内**——增量块若落围栏内会被渲染成 swift 字面、破坏文档且 grep 仍 PASS 掩盖错误）**之后**、`## 八、iOS 持久化模块`（L1736）**之前**插入下方 markdown（注意：modules 无独立 `### E6` heading，E5/E6 运行时同居 §E5）：
+**插入位置（内容锚，不靠绝对行号）**：紧接**关闭 §E5 `TrainingSessionCoordinator` ```swift 代码围栏的那一行 ``` **（围栏 L1588 开、L1732 关；`saveProgress` 在 L1677 **围栏内**——增量块若落围栏内会被渲染成 swift 字面、破坏文档且 grep 仍 PASS 掩盖错误）**之后**、**现存 `---` 分隔线（L1734，位于 `## 八、iOS 持久化模块` L1736 之前）之前**插入下方 markdown（即落在 fence-close 与 `---` 之间，使增量留在 §E5 区内；注意：modules 无独立 `### E6` heading，E5/E6 运行时同居 §E5）：
 
 ```markdown
 #### E5 Wave 3 顺位 1 RFC 契约增量（见 `docs/superpowers/specs/2026-06-10-wave3-pr1-spec-gap-rfc-design.md` §4.1/§4.4；顺位 6 序列化实现，serial neck，所有 Wave 3 engine 契约变更集中此锚，消费锚 3/4/7/8 不改 engine 契约）
@@ -113,7 +113,7 @@ Expected: 无输出 `rc=1`。
 
 - [ ] **Step 2: 紧接 Task 2 的 E5 增量块之后插入 E6 持久化契约增量块（同在 §E5 围栏外）**
 
-**插入位置（内容锚）**：紧接 Task 2 插入的 `#### E5 Wave 3 顺位 1 RFC 契约增量` 块**之后**、`## 八、iOS 持久化模块`（L1736）**之前**插入下方 markdown（代码围栏外；E6 持久化契约紧邻其所扩展的 coordinator 文档，便于后续实施锚 grep 发现）：
+**插入位置（内容锚）**：紧接 Task 2 插入的 `#### E5 Wave 3 顺位 1 RFC 契约增量` 块**之后**、**同一 `---` 分隔线（L1734 原址）之前**插入下方 markdown（代码围栏外；E6 持久化契约紧邻其所扩展的 coordinator 文档，便于后续实施锚 grep 发现）：
 
 ```markdown
 #### E6 Wave 3 顺位 1 RFC 契约增量（见 RFC §4.4e/§4.5/§4.6/§4.7）
