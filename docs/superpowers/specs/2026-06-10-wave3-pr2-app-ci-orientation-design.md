@@ -45,11 +45,14 @@
 - **不改** `TARGETED_DEVICE_FAMILY`（保持 `1,2`，iPad 留在 scope，仅锁定；横屏 layout 适配是 §六排除项）。
 
 ### Group C — required-check 强制泛化（trust-boundary `scripts/governance/`；`codeowners_required_globs` → 须 user Approve）
-**泛化是全 26 处 + 测试的真实改动，非「文案 only」（codex H2）**。`REQUIRED_CONTEXTS` 作单一真相来源（builder + verifier 两模式 + 测试共享），全部 26 处同步：
+**泛化是全 26 处 + 测试的真实改动，非「文案 only」（codex H2）**。canonical 列表的「单一真相」须用**显式机制**实现，**不**靠多处 copy-paste（codex H-NEW-2：verifier 的两个 `python3 <<'PY'` heredoc 只 `import json,os,sys`，不 import builder 模块 → 无法直接共享 `.py` 常量）。机制（plan 落地，二选一）：
+- **(A 优选) 派生式**：canonical `REQUIRED_CONTEXTS` 仅定义在 `build-protection-put-payload.py`；builder 加 `--list-contexts`（打印 JSON 列表）；`verify-required-checks.sh` 调 `$BUILDER --list-contexts` 一次，经 env 注入两 heredoc（已有 env 注入先例 `RULESET_JSON`/`MODE`）；`test_build_payload.py` 直接 import 模块。**真单源**。
+- **(B 兜底) 同步式**：若某站点派生不可行，该处保留字面列表 + 加**一致性测试**断言它与 builder 的 canonical 列表逐字相等（fail-closed 防漂移）。
+全部 26 处据此同步：
 - `build-protection-put-payload.py`：`CATALYST_CONTEXT`（单值）→ `REQUIRED_CONTEXTS`（列表：Catalyst + app-build）。对列表中每个 context 幂等 ensure-present + 强制 `integration_id=15368` + 去重，**保留**现有单 context 的全部语义（修 any-source 漂移 / dedup / fail-closed 无 rsc 规则则拒新建 / 只读字段剥离 / 确定性序列化）。
 - `verify-required-checks.sh`：assert（`:70`）+ **diff（`:142` 第二独立常量，易漏）** 两模式从「仅查 Catalyst」→「查 `REQUIRED_CONTEXTS` 全部在位 + 各自 `integration_id=15368`」。diff 打印器（`:146-155`）已泛型迭代 `des.items()`，但须测 add-one-of-two。
-- `admin-configure-required-checks.sh`：泛化文案（Catalyst → app-target required checks）+ 成功消息；`preservation_ok` 的 `checks(desired) <= checks(actual)` 子集比已天然支持多 context（但须测 2-context）；no-op-skip `diff -q payload rollback` 对 add-context 正确（实测 DIFFERS → 会 PUT）。
-- **测试 + fixtures**：`test-verify-required-checks.sh` + `test-admin-runbook.sh`（`one_catalyst()` → 断言两 context 均在位）+ `test_build_payload.py` + 相关 fixtures。新增用例须含 **partial-state**（Catalyst 在、app-build 缺）的 assert / diff / preservation_ok 路径——这是当前零覆盖的新代码路径，非仅「多 context happy / 缺其一 / 错 integration_id」。
+- `admin-configure-required-checks.sh`：泛化文案（Catalyst → app-target required checks）+ 成功消息；`preservation_ok` 的 `checks(desired) <= checks(actual)` 子集比已天然支持多 context（但须测 2-context）；no-op-skip `diff -q payload rollback` 对 add-context 正确（实测 DIFFERS → 会 PUT）。**关键依赖（codex M-NEW-1）**：admin 的 2-context **成功判定**经 `post_put_classify → assert_and_evidence --mode assert` 流过 **verifier assert-mode（`:119-128`）**——即 2-context 正确性靠 assert-mode 已泛化为遍历 `REQUIRED_CONTEXTS`，**非**靠 `preservation_ok` 子集比（后者只保证 desired⊆actual，不保证两 required context 都在）。测试须覆盖「post-PUT 缺 app-build → assert FAIL → 人工介入不假绿」。
+- **测试 + fixtures**：`test-verify-required-checks.sh` + `test-admin-runbook.sh`（`one_catalyst()` → 改为断言两 context 均在位）+ `test_build_payload.py` + 相关 fixtures。新增用例须含 **partial-state**（Catalyst 在、app-build 缺）的 assert / diff / preservation_ok 路径——这是当前零覆盖的新代码路径，非仅「多 context happy / 缺其一 / 错 integration_id」。**fixture 命名（codex M-NEW-2）**：新建**独立** fixture（如 `ruleset-catalyst-only.json` = Catalyst 在、app-build 缺）；**不**复用既有 `ruleset-partial.json`（其语义是 Catalyst **缺**席 = `[swift-contracts-smoke, extra-smoke]`，被 `test-admin-runbook.sh:123` N3 unknown-state 路径占用），避免碰撞。
 - **实际 ruleset `--apply`（加第 12 条 context）= post-merge user-TTY admin 步骤**（真实 mutation，非 1c no-op）；本 PR 交付 runbook + evidence 模板（镜像 1c）。**cross-PR 时序见 §三.C1**。
 
 ### 交付文档
@@ -90,7 +93,8 @@
 **A5. gate = `** BUILD SUCCEEDED **` 在位 + 无 `** BUILD FAILED **` + 无编译/链接 `error:`；不做 blanket no-warning 断言。**
 - **实测依据**：app target build 必产 `appintentsmetadataprocessor ... warning:`（SwiftUI app 无 AppIntents.framework 的良性工具 warning，确定性出现）。catalyst-build 的 `! grep -E "(^|[[:space:]])(error|warning):"` 会被此行**误 fail**。
 - 决策：app-build gate 是**编译/链接守护**（能否 build），不是 warning-policy gate。Swift 源 warning 纪律仍由 Contracts 包侧（catalyst-build + swift-contracts-smoke）覆盖——app shell 仅 `KlineTrainerApp.swift` + `AppLaunchErrorView.swift` 两文件薄壳。
-- **gate 三断言（精确 pin，codex M1，plan/impl 不得漂移）**：
+- **step 结构 + exit code 是首要信号（codex H-NEW-1，plan/impl 不得漂移）**：镜像 catalyst-build.yml（build step `:41` 与 gate step `:49` 分离）——`xcodebuild build` 作**独立 step** 在 `set -o pipefail` 下运行（`... 2>&1 | tee log`），其**非零 exit 独立 fail job**（GHA：任一 step 非零则 job 失败）。**xcodebuild exit code = 首要失败信号**；下面的三 grep 断言是 belt-and-suspenders 次要信号（防 exit 0 但日志异常的边角，如某 action 报 SUCCEEDED 而整体非零）。**反**：不得把 build + gate 合并进一个 step 而吞掉 xcodebuild exit（否则非零 exit + 仍打印 SUCCEEDED 会漏过）。
+- **gate 三断言（精确 pin，codex M1，plan/impl 不得漂移；在 build step 之后的独立 gate step）**：
   1. `grep -F "** BUILD SUCCEEDED **" log`（正向，必须在位；不在位 → exit 1）；
   2. `if grep -F "** BUILD FAILED **" log; then exit 1; fi`（显式拒 BUILD FAILED，防 SUCCEEDED 缺失但 grep#1 漏判的歧义）；
   3. `if grep -E "(^|[[:space:]])error:" log; then exit 1; fi`（**anchored ERE，仅 `error:`，不含 `warning:`**——锚定行首/空白前缀，避开 `AppLaunchErrorView.swift` 文件名等 `error` 子串误判；捕获 `clang: error:`/`ld: error:`/Swift `error:`）。
@@ -167,7 +171,7 @@
 3. `build-protection-put-payload.py` + `verify-required-checks.sh` 泛化为多 context（Catalyst + app-build），governance 脚本测试全绿（含新增多-context 用例）。
 4. 首次 CI：`iOS app build-for-running on macos-15` job 报告且**绿**（编译守护实证）+ 既有 11 check 不回归。
 5. 中文非-coder 验收清单 + 运行时 runbook 条目 + post-merge admin runbook/evidence 模板交付。
-6. grep gate：本锚不残留未决措辞；required-check 工具无遗漏的硬编码单-Catalyst 路径。
+6. grep gate：本锚不残留未决措辞；required-check 工具无遗漏的硬编码单-Catalyst 路径。**grep scope（codex L-NEW-1）**：「未决措辞」断言须 carve-out 排除 Wave 3 outline doc + 本 spec 自身 changelog（mirror outline §三.1 item 8 carve-out 模式），否则 outline 行字面「build-for-testing」等上游措辞会假阳。
 
 ---
 
@@ -176,4 +180,5 @@
 | 日期 | 版本 | 变更 |
 |---|---|---|
 | 2026-06-10 | v1 (draft) | 起草；3 子项（A app-build CI / B orientation+全屏 / C required-check 泛化）；含 worktree 实测 de-risk（本地 build SUCCEEDED + appintents warning gate 发现 + 现有 11 check snapshot）；待 opus 4.8 xhigh 对抗 review |
+| 2026-06-10 | v3 (opus 4.8 xhigh 对抗 review R2 修，R1 七 finding 全 RESOLVED + 2 新 H+2M+1L) | **H-NEW-1**：gate exit-code 权威未 pin → §三.A5 加 step 结构（xcodebuild 独立 step + `set -o pipefail` + 非零 exit 独立 fail job = 首要信号，grep 为次要），镜像 catalyst-build 两-step；**H-NEW-2**：「单一真相」跨 .py + 两 heredoc 架构不可达（heredoc 不 import builder）→ §一 Group C 改为显式机制二选一（A 派生 `--list-contexts` 经 env 注入 / B 同步式 + 一致性测试）；**M-NEW-1**：admin 2-context 成功判定靠 verifier assert-mode 泛化非 `preservation_ok` 子集比 → §一 Group C 加依赖说明 + 测试；**M-NEW-2**：partial-state fixture 与既有 `ruleset-partial.json`（Catalyst 缺席）碰撞 → 新建独立 `ruleset-catalyst-only.json`；**L-NEW-1**：§七.6 grep gate 加 outline+changelog carve-out |
 | 2026-06-10 | v2 (opus 4.8 xhigh 对抗 review R1 修，3H+2M+1L 全收) | **H1**：cross-PR required-check 死锁（加第 12 条 context 后，并行顺位 1 RFC 的 `docs/`-only 分支无 app-build.yml → 永久 Expected）→ §三.C1 加 runbook 硬约束（`--apply` 须在其它 in-flight PR rebase 后 / 顺位 1 先 merge 后）；**H2**：Group C 泛化被低估为「文案 only」→ grep 实证 26 处（含 verify `:142` 第二 diff-mode 常量 + `test-admin-runbook.sh one_catalyst()` + `test_build_payload.py` + fixtures）→ §〇/§一/§三.C2 改为全 26 处 + 单一真相 `REQUIRED_CONTEXTS` + partial-state 测试覆盖；**H3**：R3「CODEOWNERS 机械强制 user Approve」事实错误（ruleset `require_code_owner_review=false`/`count=0`）→ 校正为 advisory + 真实强制 = `codex-review-verify` required check + admin 纪律（PROJECT 规则 vs GitHub 机制）；**M1**：gate 三断言精确 pin（SUCCEEDED 在位 + 无 FAILED + anchored `error:`，非 blanket no-warning）；**M2**：补 Group B 键 de-risk 实测（override 构建 SUCCEEDED + 生成 plist `UIRequiresFullScreen=true`+Portrait-only ~ipad/~iphone），§〇 de-risk 边界改诚实；**M3**：`build` 满足 outline「build-for-testing」mandate（空 testables 等价）；**L1**：版本感知措辞调和 |
