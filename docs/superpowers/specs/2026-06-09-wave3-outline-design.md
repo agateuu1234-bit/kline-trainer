@@ -1,4 +1,4 @@
-# Wave 3 outline（v4）—— 客户端端到端功能完成 wave 单线顺位
+# Wave 3 outline（v5）—— 客户端端到端功能完成 wave 单线顺位
 
 **前置**：Wave 2 全 11 anchor 已 merged（PR #78-#91；轻量收尾 PR #91 `8ab0a52` merged 2026-06-09，**未打 freeze tag**，见 `docs/governance/2026-06-09-wave2-completion.md`）。本 outline 规划 Wave 3「客户端端到端功能完成」阶段的执行顺位。
 
@@ -18,7 +18,7 @@
 |---|---|---|
 | TrainingFlowController + Normal/Review/Replay | **已完成** | E4 PR #63（Wave 1）+ E5/E6 Wave 2 |
 | GRDB 模型 + 训练记录/交易/绘线 CRUD | **已完成** | P3/P4 Wave 0（PR #41/#42/#43） |
-| 训练进度保存/恢复（pending_training） | **已完成** | E6b PR #86（Wave 2） |
+| 训练进度保存/恢复（pending_training）机制 | **机制已完成；触发受限** | E6b PR #86 落 `saveProgress/finalize`；**但 `saveProgress` 仅 Back 按钮触发**（`TrainingSessionLifecycle:41`），scenePhase 责任链按 spec L2059-2063/L119 **by-design 纯动画**（`.active`→`onSceneActivated`），**无 background/inactive/周期保存** → 杀/切后台/内存压力（Back 前）丢当前局。中断持久化是否扩 = 顺位 1 RFC 契约决策（codex R4-F2，见 §三.1 item 7）|
 | 离线缓存下载（验收状态机 + LRU） | **已完成** | P2 PR #82（Wave 2） |
 | HomeView / TrainingView / SettingsPanel 壳 | **已完成** | U1/U2/U4 Wave 2（#89/#88/#85） |
 | 历史复盘（Review）/ 再来一次（Replay）逻辑 | **已完成** | E4 + E6 Wave 1/2 |
@@ -53,7 +53,7 @@
 
 | 顺位 | Anchor | 组 | 范围估算 | 依赖（仅列上游 Wave 3） | 关键 residual 折入 |
 |---|---|---|---|---|---|
-| 1 | **spec-gap 治理 RFC**（tier 公式 + 结束总资金显示语义 + 夜间调色板 + E5/E6 扩展边界〔手动强平 + tier accessor + 画线 engine mutation API〕 + replay 结算契约 公式化钉死 + grep gate） | A 治理 | 仅 spec/governance 文档；0 业务代码 | — | U2-R3 / E6b-R1 / PR11-R2 契约定义（见 §三.1） |
+| 1 | **spec-gap 治理 RFC**（tier 公式 + 结束总资金显示语义 + 夜间调色板 + E5/E6 扩展边界〔手动强平 + tier accessor + 画线 engine mutation API〕 + replay 结算契约 + **中断持久化契约**〔scenePhase 是否扩 background 保存 vs save-on-Back〕 公式化钉死 + grep gate） | A 治理 | 仅 spec/governance 文档；0 业务代码 | — | U2-R3 / E6b-R1 / PR11-R2 / 中断持久化 契约定义（见 §三.1） |
 | 2 | **app-target CI 守护 + 竖屏/窗口策略**（`KlineTrainer.xcodeproj` build-for-testing 加入 CI〔trust-boundary workflow〕+ 设为 required check + 对顺位 3-12 实施 PR 强制 + pbxproj orientation 去 Landscape 仅留 Portrait + **iPad 多任务/窗口场景竖屏策略**〔机制归 plan；pbxproj orientation 在 iPad Stage Manager/Split View 可能不足，per codex R3-F3〕+ 旋转/窗口验证） | A 治理 + infra | CI workflow + pbxproj/scene 改动；0 业务代码 | — | PR11-R3 + 竖屏/iPad 窗口锁定（codex R1-F2 / R2-F3 / R3-F3） |
 | 3 | **Pinch 缩放**（C8a 去硬编码 `visibleCount=80`/`candleWidthRatio=0.7` + 两指 pinch 手势与 C7 仲裁器集成〔pinch vs 两指周期切换的仲裁归 plan〕 + clamp 边界 + 缩放后视口还原 + 运行时 runbook 条目） | B 手势 | ~250-350 行 | 2 | C8a 视口硬编码 |
 | 4 | **水平线绘线 MVP + 画线 source-of-truth 全链路**（Phase 2.5：input controller pan 截获→`DrawingAnchor{period,candleIndex,price}` → **`manager.completedDrawings`→`engine.drawings` 单一真相投影** + engine 画线 mutation〔按 RFC〕+ ChartReducer `.drawingCommitted/.drawingCancelled/.setDrawingSnapshot` 流转 + **pending 持久化/resume/review 还原**〔复用已有 `TrainingSessionCoordinator` engine.drawings 路径〕 + 跨缩放/平移还原 + E2E save/resume 测试 + 运行时 runbook 条目） | B 手势 | ~350-500 行（plan 若超 500 拆 4a 输入+投影 / 4b 持久化+还原） | 1 RFC + 2 + 3 | U2-R2 + C6 deferred 投影/持久化/reducer 集成（codex R2-F2；仅水平线，6 种完整工具属 Phase 4 排除） |
@@ -62,7 +62,7 @@
 | 7 | **U2 交易 UI 接线 + 交易反馈**（手动强平按钮 + 顶栏「仓位 X/5」+ 结束总资金显示语义，按 RFC + **交易结果 Toast**〔失败可见性：资金不足/持仓不足，plan L735/736/1250〕+ **成功 .heavy 触觉反馈**〔normal/replay，review 无；plan L841/955/1195〕+ 运行时 runbook 条目〔含失败不 mutate/不震动断言〕） | C 交易 | ~300-450 行 SwiftUI（plan 超 500 拆 交易动作接线 / 反馈层） | 6 + 1 RFC | U2-R1 / U2-R3（UI 面）/ E6b-R1 / 交易 Toast+haptic（codex R3-F4） |
 | 8 | **Replay 结算窗**（replay 结束触发忠实结算窗，按 RFC 契约；触碰 E5/E6/SettlementView 扩展边界 + 运行时 runbook 条目） | C 交易 | ~250-350 行 | 6 + 7 + 1 RFC | PR11-R2 |
 | 9 | **夜间模式**（白天/夜间/跟随系统 + 暗色调色板，按 RFC + F2 ThemeController 基础设施 + 运行时 runbook 条目） | D 磨光 | ~250-350 行 | 1 RFC | Phase 5 显示模式 |
-| 10 | **边界 + 统一错误处理 + back-save 失败契约 + 全 app fixture provisioning**（训练组损坏/下载中断/磁盘满 + 网络 Toast/解析失败/SQLite 损坏自动清理重下 + cache touch-on-use + **back-save 失败契约**〔返回时 `back()` save 失败：留在局内 retry/discard，discard 必调 `endSession`，save/discard 成功前不 `onExit`；disk-full/db 故障注入测试，per codex R3-F1〕+ **全 app fixture provisioning**〔debug-only seed 经 AppContainer 注入缓存+pending+history，使运行时矩阵可在真 composition root 跑，per codex R3-F2〕+ 走真实 DownloadAcceptanceRunner 代码路径的 fixture 下载→确认→训练组可用 E2E smoke） | D 磨光 | ~350-500 行（plan 超 500 拆 错误处理 / fixture provisioning+smoke） | 各模块 | Phase 5 边界 / E6a-R3 / 生产路径 smoke（R1-F1）/ back-save 契约（R3-F1）/ fixture provisioning（R3-F2） |
+| 10 | **持久化健壮性 + 边界 + 统一错误处理 + 全 app fixture provisioning**（训练组损坏/下载中断/磁盘满 + 网络 Toast/解析失败/SQLite 损坏自动清理重下 + cache touch-on-use + **back-save 失败契约**〔`back()` save 失败：留局内 retry/discard，discard 必调 `endSession`，成功前不 `onExit`；R3-F1〕+ **原子/幂等 finalize**〔`insertRecord`+`clearPending` 单事务或幂等 key，insert 前/后故障注入，防丢局/重复 record，per codex R4-F1〕+ **全 app fixture provisioning**〔debug-only seed 经 AppContainer 注入缓存+pending+history，使运行时矩阵可在真 composition root 跑，R3-F2〕+ 真实 DownloadAcceptanceRunner 路径 fixture E2E smoke） | D 磨光 | ~400-500 行（plan 超 500 拆 持久化健壮性 / 边界错误处理+fixture） | 各模块 | Phase 5 边界 / E6a-R3 / 生产路径 smoke（R1-F1）/ back-save（R3-F1）/ fixture provisioning（R3-F2）/ 原子 finalize（R4-F1） |
 | 11 | **边缘 bounce 动画**（DecelerationAnimator 扩展：到边界回弹 + 运行时 runbook 条目） | D 磨光 | ~200-300 行 | 2 | Phase 5 |
 | 12 | **性能评审 + Bitmap Cache 按需**（Instruments 性能 pass；Bitmap Cache 仅当实测单帧 >4ms 才引入；交付帧预算验收判据） | D 磨光 | 条件性 Bitmap Cache | 全渲染在场 | C8 性能 / C2·C7 运行时回填判据 |
 | 13 | **Wave 3 收尾**（completion doc + residual 终态回填 + **Wave 3 全交互运行时矩阵验收完成作阻塞依赖** + **freeze tag 决策**） | E 收尾 | doc-only（freeze 走则 + tag ceremony） | 全部 + **Wave 3 运行时矩阵记录**（见 §三.3） | C2/C7/C8 + 新交互运行时实测回填（codex R1-F3 / R2-F1） |
@@ -90,7 +90,8 @@
 3. **夜间调色板（Phase 5 显示模式）**：F2 ThemeController + 13 默认色 + RGBA 层基础设施已在（Wave 0 PR #39）。RFC 须定义 暗色色板取值来源 + 「跟随系统」语义（监听 `colorScheme`）+ 切换持久化（settings 表 `display_mode` key）。
 4. **E5/E6 扩展边界**：Wave 2 未冻结但扩展须治理。RFC 须钉死 (a) 手动强平方法的契约（U2-R1：调用时机 / 与自动局终强平的关系 / 不变量）；(b) tier accessor 暴露面；(c) **画线 engine mutation API**（顺位 4 把 `manager.completedDrawings` 投影进 `engine.drawings` 所需的 TrainingEngine 公共 mutation 面——commit/append/同步语义；C6 deferred，须治理后实施）。
 5. **Replay 结算契约（PR11-R2）**：replay 结束触发结算窗的契约——「忠实结算需触碰冻结 E5/E6/SettlementView」。RFC 须定义 replay 模式结束时 settlement 数据来源 + 复用原局 FeeSnapshot 的语义。
-6. **grep gate**（acceptance 项）：RFC merge 后断言全仓无「tier 公式未定 / 拒臆造」「显示语义 dispute」等未决措辞残留（除本 outline §三 + RFC 自身引用 / changelog）。
+6. **中断持久化契约（codex R4-F2）**：现状 `saveProgress` 仅 Back 触发，scenePhase 责任链 spec L2059-2063/L119 **by-design 纯动画**（无 background/inactive/周期保存），杀/切后台丢局。**注：spec 无「周期 checkpoint」要求**（codex「module 契约要求周期保存」断言不成立，已 pushback）。RFC 须**决策**：维持 save-on-Back 模型（接受杀前丢局）**或** 扩 scenePhase 契约加 inactive/background `saveProgress`（则须 amend modules L2059-2063 animation-only 契约 + 定 serialized/coalesced 写 + 失败可见处理）。决策后实施落顺位 7（U2 scenePhase 接线）或顺位 10。
+7. **grep gate**（acceptance 项）：RFC merge 后断言全仓无「tier 公式未定 / 拒臆造」「显示语义 dispute」等未决措辞残留（除本 outline §三 + RFC 自身引用 / changelog）。
 - 0 业务代码改动（仅 spec/governance 文档）。顺位 4/6/7/8/9 据此契约实施，不自行定义公共面。
 
 **撞 ≥3 轮 codex 立即 escalate**（per `feedback_big_pr_codex_noncovergence`）；RFC 类设计文档若 codex 反复就同一 spec 论点复述 ≥3 次 = permanent-bias，走 attestation residual + admin merge（per `feedback_codex_round6_self_contradiction`）。
@@ -103,6 +104,8 @@
 - **交易三锚（6/7/8）拆点**：逻辑面（E5/E6 扩展，6）与 UI 面（U2 接线，7）分离（沿用 Wave 2 U2 view / E6 逻辑拆法）；Replay 结算窗（8）依赖前两者 + 单独触碰 SettlementView，独立 anchor。
 - **交易反馈归顺位 7（codex R3-F4）**：当前 `TrainingView` 丢弃 buy/sell 的 `Result`（`UI/TrainingView.swift:57-58` `_ = engine.buy/sell`），失败（资金不足/持仓不足）静默 no-op；亦无 `UIImpactFeedbackGenerator`。plan 明确要求失败 Toast（L735/736/1250）+ 成功 .heavy 触觉（L955/1195；L841 矩阵 normal/replay ✅、review ❌）。故顺位 7 owns 交易结果 Toast + 成功 haptic，测试覆盖失败可见性 + runbook 断言失败不 mutate/不震动。
 - **back-save 失败契约归顺位 10（codex R3-F1）**：当前 `TrainingView.swift:74` `try? await lifecycle.back(); onExit()` 吞 `back()` 错误后仍 `onExit()`——disk-full/db 错误下 save 失败、`endSession` 跳过、AppRouter 丢 `activeTraining`、coordinator 留 reader（下一局可覆写）= 数据丢失 + reader 泄漏。泛化「磁盘满」措辞不足。顺位 10 owns 显式契约：save 失败留在局内（retry/discard），discard 必调 `endSession`，save/discard 成功前不 `onExit`；disk-full/db 故障注入测试。
+- **原子/幂等 finalize 归顺位 10（codex R4-F1）**：`TrainingSessionCoordinator.swift:230-231` `insertRecord(...)` 与 `clearPending()` 分离两步非单事务——insert 失败丢已完成局；insert 成功但 clearPending 失败 → record 入库 + pending 残留 → 重启恢复再 finalize = **重复 record**。顺位 10 owns 原子（两 repo 共 `AppDB` DatabaseQueue 单事务）或幂等（durable session key）finalize + insert 前/后故障注入测试。
+- **中断持久化 = 契约决策非自动扩（codex R4-F2，部分接受 + pushback）**：codex 称「module 契约要求周期保存」**不成立**——spec scenePhase 责任链 L2059-2063/L119 **by-design 纯动画**（`.active`→`onSceneActivated`），全仓无周期 checkpoint 要求。但真实 gap 成立（saveProgress 仅 Back 触发，杀/切后台丢局）。故**不**照 codex 自动 mandate 周期 checkpoint，而是把「是否扩 scenePhase 为含 background/inactive 保存」作**顺位 1 RFC 契约决策**（§三.1 item 6）——维持 save-on-Back 或扩契约二选一，决策后实施落顺位 7/10。§〇 baseline 已改诚实（不再 overclaim「已完成」）。
 - **iPad 窗口策略归顺位 2（codex R3-F3）**：pbxproj orientation 单独在 iPad 多任务/窗口场景（Stage Manager/Split View）不足以锁住 layout；顺位 2 plan 须定版本感知的 iPad 窗口/旋转策略（机制归 plan，本 outline 不内联具体 API）+ 测旋转/窗口缩放。
 - **磨光四锚（9-12）拆点**：夜间模式（主题切换）、边界+错误处理+生产路径 smoke（跨模块健壮性）、边缘 bounce（动画扩展）、性能评审（条件性 Bitmap Cache）四者无强耦合。Bitmap Cache 为**条件性**引入（仅当 Instruments 实测单帧 >4ms），plan 阶段若实测达标则该子项 no-op，仅交付性能评审 artifact。
 - **排除项**（§六明列）：Phase 4 完整 6 种画线工具、NAS 部署/样本数据/生产 endpoint、iPad 横屏 layout 功能（锁竖屏本身 = 顺位 2 in-scope）。
@@ -138,6 +141,8 @@
 | 边界处理（训练组损坏/下载中断/磁盘满）+ 统一错误处理 | plan v1.5 §Phase 5 | 顺位 10 | 10 |
 | E6a-R3 cache touch-on-use（DAO 运维优化） | `project_wave2_completion` §三 | 折入顺位 10 运维健壮性 | 10 |
 | back-save 失败数据丢失 + reader 泄漏（`TrainingView.swift:74` try? + onExit） | codex R3-F1 | 顺位 10 owns back-save 失败契约（留局内 retry/discard，discard 调 endSession，不提前 onExit）+ 故障注入测试 | 10 |
+| finalize 非原子（`Coordinator:230-231` insertRecord+clearPending 分离事务）→ 丢局/重复 record | codex R4-F1 | 顺位 10 owns 原子/幂等 finalize（单事务或幂等 key）+ insert 前/后故障注入 | 10 |
+| 中断持久化（saveProgress 仅 Back 触发；scenePhase by-design 纯动画，杀/切后台丢局） | codex R4-F2（部分接受；spec 无周期保存契约，已 pushback） | 顺位 1 RFC 决策（维持 save-on-Back vs 扩 scenePhase background 保存）+ 实施落顺位 7/10 | 1 + 7/10 |
 | 全 app fixture provisioning（debug seed 经 AppContainer，使运行时矩阵可在真 app 跑） | codex R3-F2 | 顺位 10 交付确定性 seed 路径（缓存+pending+history）；运行时矩阵经此执行 | 10 |
 | 生产路径 fixture E2E smoke（下载→确认→训练组可用） | codex R1-F1 | 顺位 10 走真实 DownloadAcceptanceRunner 代码路径的 fixture E2E | 10 |
 | 边缘 bounce 动画 | plan v1.5 §Phase 5 | 顺位 11 DecelerationAnimator 扩展 | 11 |
@@ -172,3 +177,4 @@
 | 2026-06-09 | v2 (codex branch-diff R1 修) | **F1**（high）：「可上架」claim 与排除生产路径自相矛盾 → 重述为「客户端端到端功能完成」+ §六明列二门为未完成 ship 门 + 顺位 10 加生产路径 fixture E2E smoke；**F2**（high）：app-target CI 守护从末位提为前置独立顺位 2 + 对顺位 3-12 强制 required check；**F3**（high）：运行时验收设为顺位 13 + freeze 阻塞依赖；anchor 12→13 |
 | 2026-06-09 | v3 (codex branch-diff R2 修) | **F1**（high）：收尾仅依赖 Wave 2 两 runbook 不覆盖 Wave 3 新交互 → 每新交互锚（3/4/5/7/8/9/11）交付运行时 runbook 条目 + 顺位 13 阻塞全 Wave 3 运行时矩阵（§三.3）；**F2**（high）：画线 commit→engine.drawings 无投影路径（C6 显式 defer 到 Wave 3）→ 顺位 4 扩为 source-of-truth 全链路（input+投影+reducer+持久化/还原+E2E）+ engine mutation API 纳入顺位 1 RFC + 依赖加 1 + plan 超 500 拆 4a/4b + §〇 现状核实块；**F3**（med）：pbxproj 实际启用 Landscape 与 plan「锁竖屏」冲突 + v2 误写「上架后」→ 顺位 2 owns 锁竖屏（pbxproj→Portrait+旋转验证）+ §六 修「上架前」+ §〇 orientation 现状块；全表/依赖图/residual 同步 |
 | 2026-06-09 | v4 (codex branch-diff R3 修) | 均 grep 核实为真：**F1**（high）：`TrainingView.swift:74` `try? back(); onExit()` 吞错仍退 = 数据丢失+reader 泄漏 → 顺位 10 owns back-save 失败契约（留局内 retry/discard，discard 调 endSession，成功前不 onExit）+ 故障注入测试；**F2**（high）：运行时矩阵无法在真 app 跑（硬编码 .local + 无数据资产 + HomeView 无缓存拒启动）→ 顺位 10 交付全 app fixture provisioning（debug seed 经 AppContainer）+ §三.3 矩阵经此执行（解 v3-F1 引入的不可满足 gate）；**F3**（med）：pbxproj orientation 单独锁不住 iPad Stage Manager/Split View → 顺位 2 加版本感知 iPad 窗口策略（机制归 plan）；**F4**（med）：`TrainingView.swift:57-58` 丢 buy/sell Result 失败静默 + 无 haptic，plan 要求 Toast（L735/736/1250）+ 成功 .heavy 触觉（L841/955/1195）→ 顺位 7 owns 交易 Toast+haptic+失败不 mutate/震动断言；顺位 7/10 范围上调 + 超 500 拆点注 |
+| 2026-06-10 | v5 (codex branch-diff R4 修) | 均 grep 核实：**F1**（high，全接受）：`Coordinator:230-231` insertRecord+clearPending 分离事务 → 丢局/重复 record → 顺位 10 owns 原子/幂等 finalize + insert 前/后故障注入；**F2**（high，**部分接受+pushback**）：codex「module 契约要求周期保存」不成立（spec scenePhase L2059-2063/L119 by-design 纯动画，无周期 checkpoint 要求）；但 saveProgress 仅 Back 触发杀/切后台丢局属真 gap → §〇 baseline 改诚实（不再 overclaim「已完成」）+ 中断持久化「是否扩 scenePhase background 保存 vs 维持 save-on-Back」作顺位 1 RFC 契约决策（§三.1 item 6）+ 实施落顺位 7/10；不照 codex 自动 mandate 周期 checkpoint |
