@@ -848,6 +848,10 @@ enum AppColor {
 }
 ```
 
+#### F2 Wave 3 顺位 1 RFC 契约增量（见 RFC §4.3，顺位 9 实现）
+
+夜间模式 = **light/dark 双 token 集**：现有 13 个 `AppColorRGBA` 默认 token（背景近黑）= **dark/夜间集**；新增 **light/白天集**（背景近白 / 文本近黑 / 语义色保持红涨绿跌 / 辅助线按白底降明度，**具体 RGBA 归顺位 9 plan 依 WCAG AA 设备实测**）。render 层按 `themeController.resolve(trait:)` 返回的 `AppColorScheme` 选 light/dark 集（机制——token 参数化或双 static 集——归顺位 9 plan）。`displayMode == .system` 跟随 `UITraitCollection` 变化重解析重渲染。持久化经 `AppSettings.displayMode`（settings key `display_mode`，**无 schema 改动**）。
+
 ---
 
 ## 六、iOS 图表引擎模块（10 个，v1.3 C1 拆 3）
