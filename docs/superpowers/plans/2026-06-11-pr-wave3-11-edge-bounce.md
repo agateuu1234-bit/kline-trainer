@@ -387,6 +387,25 @@ struct EdgeBounceModelTests {
         #expect(m.debugOffset == big * 0.99)   // 安全钉 edge（不溢出 inf）
     }
 
+    // P6 opposite-extreme：offset 与 edge 异极、归一修正不可表示（codex Plan-R3-F1）→ inert（拒绝），
+    //     绝不外溢 -inf delta、绝不内部 snap 致 model/consumer 失步（offset 不变）。
+    @Test("opposite-extreme non-representable geometry is inert (no inf, no desync)")
+    func oppositeExtremeInert() {
+        let big = CGFloat.greatestFiniteMagnitude
+        // bounds 都在 -MAX，offset 在 +MAX → 归一修正 edge−offset = -2·MAX 不可表示
+        var m = EdgeBounceModel(initialVelocity: 0, offset: big, minOffset: -big, maxOffset: -big)
+        #expect(m.shouldRun == false)              // 动画器据此 no-op，根本不启动
+        // 防御：即便直接 advance（normal 与 abnormal dt 两路）均 finish(nil)，不外溢、offset 不变
+        let normal = m.advance(dt: ref)
+        guard case .finish(let fdN, _) = normal else { Issue.record("expected finish (normal)"); return }
+        #expect(fdN == nil)
+        #expect(m.debugOffset == big)              // 无 desync：未内部 snap
+        let abnormal = m.advance(dt: 2.0)
+        guard case .finish(let fdA, _) = abnormal else { Issue.record("expected finish (abnormal)"); return }
+        #expect(fdA == nil)
+        #expect(m.debugOffset == big)
+    }
+
     // P3 端到端（codex R8-F1/R10-F1）：始界内·跨边，多子步跨边 case → 不同帧率 seed/峰值容差内一致
     @Test("end-to-end crossing seeds spring near edge across frame rates")
     func endToEndCrossingFrameRates() {
@@ -508,28 +527,38 @@ struct EdgeBounceModel: Equatable, Sendable {
          stiffness: CGFloat = EdgeBounceModel.defaultStiffness,
          posTol: CGFloat = EdgeBounceModel.defaultPosTol,
          velTol: CGFloat = EdgeBounceModel.defaultVelTol) {
-        let geomValid = minOffset.isFinite && maxOffset.isFinite
+        let boundsValid = minOffset.isFinite && maxOffset.isFinite
             && minOffset <= maxOffset && offset.isFinite
-        self.geometryValid = geomValid
-        self.minOffset = geomValid ? minOffset : 0
-        self.maxOffset = geomValid ? maxOffset : 0
+        let lo = boundsValid ? minOffset : 0
+        let hi = boundsValid ? maxOffset : 0
+        // 净化非有限速度（codex R10-F2）：几何有效时不因坏速度 strand 越界 offset
+        let v = initialVelocity.isFinite ? initialVelocity : 0
+        // 先定相 + springEdge（用校验后 lo/hi）
+        let ph: Phase
+        let edge: CGFloat
+        if boundsValid, offset > hi {
+            ph = .springing; edge = hi
+        } else if boundsValid, offset < lo {
+            ph = .springing; edge = lo
+        } else {
+            ph = .decelerating; edge = (v >= 0) ? hi : lo
+        }
+        // 可操作性（codex Plan-R3-F1）：越界但归一修正 `edge−offset` 不可表示（offset 与 edge 异极致溢出）
+        // → inert（拒绝；动画器 no-op，绝不外溢 ±inf delta、绝不内部 snap 致 model/consumer 失步）。
+        let operable = boundsValid && (ph == .decelerating || (offset - edge).isFinite)
+
+        self.geometryValid = operable
+        self.minOffset = lo
+        self.maxOffset = hi
         let k = (stiffness.isFinite && stiffness > 0) ? stiffness : EdgeBounceModel.defaultStiffness
         self.omega = sqrt(k)
         self.posTol = (posTol.isFinite && posTol > 0) ? posTol : EdgeBounceModel.defaultPosTol
         self.velTol = (velTol.isFinite && velTol > 0) ? velTol : EdgeBounceModel.defaultVelTol
-        // 净化非有限速度（codex R10-F2）：几何有效时不因坏速度 strand 越界 offset
-        let v = initialVelocity.isFinite ? initialVelocity : 0
         self.velocity = v
         self.offset = offset
         self.decel = DecelerationModel(friction: friction, stopThreshold: stopThreshold, velocity: v)
-        // 初始相 + springEdge
-        if geomValid, offset > maxOffset {
-            self.phase = .springing; self.springEdge = self.maxOffset
-        } else if geomValid, offset < minOffset {
-            self.phase = .springing; self.springEdge = self.minOffset
-        } else {
-            self.phase = .decelerating; self.springEdge = (v >= 0) ? self.maxOffset : self.minOffset
-        }
+        self.phase = ph
+        self.springEdge = edge
     }
 
     /// 是否值得启动一次 run（几何无效 → 不运行；界内且亚阈速度 → 无可动 → 不运行）。
@@ -552,13 +581,13 @@ struct EdgeBounceModel: Equatable, Sendable {
     mutating func advance(dt: CGFloat) -> FrameOutcome {
         let frameEntry = offset
         guard geometryValid else { return .finish(finalDelta: nil, notifyFinish: true) }
-        // abnormal dt（含 dt≥1.0 后台恢复）：归位（越界）+ 触发 onFinish（与既有契约一致，codex R6-F3）
+        // abnormal dt（含 dt≥1.0 后台恢复）：归位（越界）+ 触发 onFinish（与既有契约一致，codex R6-F3）。
+        // 越界经 settleFinish（含 delta 有限性 guard，codex Plan-R3-F1：opposite-extreme 已在 init 拒为 inert）。
         guard dt > 0, dt < 1.0 else {
             switch phase {
             case .springing:
                 offset = springEdge; velocity = 0
-                let d = offset - frameEntry
-                return .finish(finalDelta: d == 0 ? nil : d, notifyFinish: true)
+                return settleFinish(frameEntry: frameEntry)
             case .decelerating:
                 return .finish(finalDelta: nil, notifyFinish: true)
             }
@@ -639,13 +668,13 @@ struct EdgeBounceModel: Equatable, Sendable {
         return .finish(finalDelta: (d.isFinite && d != 0) ? d : nil, notifyFinish: true)
     }
 
-    /// 后台/reset 归位：越界 → 钉 edge，返回归一 delta（nil 若无需归位）。
+    /// 后台/reset 归位：越界 → 钉 edge，返回归一 delta（nil 若无需归位 / delta 非有限）。
     mutating func normalizeToEdgeDelta() -> CGFloat? {
         guard phase == .springing else { return nil }
         let prev = offset
         offset = springEdge; velocity = 0
         let d = offset - prev
-        return d == 0 ? nil : d
+        return (d.isFinite && d != 0) ? d : nil   // codex Plan-R3-F1：绝不外溢非有限 delta
     }
 }
 ```
@@ -1021,7 +1050,8 @@ Expected: 编译失败（`start(initialVelocity:fromOffset:minOffset:maxOffset:)
         isDecelerating = false
         driver?.invalidate()
         driver = nil
-        if let finalDelta, finalDelta != 0 { onUpdate?(finalDelta) }   // 此回调可能重入 start/stop/reset
+        // 集中的非有限守门（codex Plan-R3-F1）：绝不把 ±inf/NaN delta 转发给 consumer 污染 reducer。
+        if let finalDelta, finalDelta.isFinite, finalDelta != 0 { onUpdate?(finalDelta) }   // 回调可能重入 start/stop/reset
         if notifyFinish, runEpoch == myEpoch { onFinish?() }
     }
 ```
