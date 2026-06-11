@@ -320,19 +320,28 @@ struct EdgeBounceModelTests {
         }
     }
 
-    // P1 exact-edge：起点恰在 outward edge + 外向速度 → 立即进弹簧、终止精确钉 edge（codex Plan-R1-F1）
-    @Test("outward fling starting exactly on edge settles at edge (upper + lower)")
+    // P1 exact-edge：起点恰在 outward edge + 外向速度 → **第一帧立即进弹簧（seed 满速，无 decel 衰减）**，
+    //     完成内终止、精确钉 edge（codex Plan-R1-F1 + Plan-R4-F2：删 atOrPastOutwardEdge guard 会先衰减再 strand → 须断言首帧 state + finished）
+    @Test("outward fling exactly on edge: immediate full-velocity spring then settles at edge")
     func exactEdgeOutwardFling() {
-        // 上界：offset==max 10，v=+1000 → 越上界后回弹钉 10
+        let omega = sqrt(EdgeBounceModel.defaultStiffness)   // √200
+        let expectedX = (1000 * ref) * exp(-omega * ref)     // seed=edge, A=0, B=1000 → 首帧 overscroll
+        // 上界：offset==max 10，v=+1000
         var hi = EdgeBounceModel(initialVelocity: 1000, offset: 10, minOffset: 0, maxOffset: 10)
         #expect(hi.shouldRun)
-        var n = 0
-        while n < 5000 { n += 1; if case .finish = hi.advance(dt: ref) { break } }
+        guard case .move = hi.advance(dt: ref) else { Issue.record("expected first frame .move (hi)"); return }
+        #expect(abs(hi.debugOverscroll - expectedX) < 1e-4)  // **满速 1000 seed**（破 guard → 用衰减 940 → 偏离）
+        var n = 0; var finished = false
+        while n < 5000, !finished { n += 1; if case .finish = hi.advance(dt: ref) { finished = true } }
+        #expect(finished)
         #expect(hi.debugOffset == 10)
-        // 下界：offset==min 0，v=-1000 → 越下界后回弹钉 0
+        // 下界对称：offset==min 0，v=-1000
         var lo = EdgeBounceModel(initialVelocity: -1000, offset: 0, minOffset: 0, maxOffset: 10)
-        n = 0
-        while n < 5000 { n += 1; if case .finish = lo.advance(dt: ref) { break } }
+        guard case .move = lo.advance(dt: ref) else { Issue.record("expected first frame .move (lo)"); return }
+        #expect(abs(lo.debugOverscroll - (-expectedX)) < 1e-4)
+        n = 0; finished = false
+        while n < 5000, !finished { n += 1; if case .finish = lo.advance(dt: ref) { finished = true } }
+        #expect(finished)
         #expect(lo.debugOffset == 0)
     }
 
@@ -820,17 +829,21 @@ struct DecelerationAnimatorBounceTests {
         #expect(finishes == 0)  // 旧续延 onFinish 被 epoch 守门抑制
     }
 
-    // 5. resetOnSceneActive 越界 → 归位 delta + onFinish 静默
-    @Test("resetOnSceneActive normalizes overscroll silently")
+    // 5. resetOnSceneActive 越界 → 归位 delta（consumer offset 真回 edge）+ onFinish 静默（codex Plan-R4-F1）
+    @Test("resetOnSceneActive normalizes consumer offset back to edge silently")
     func resetNormalizesSilently() {
         let (a, fake) = makeWithFake()
         var updates: [CGFloat] = []; var finishes = 0
         a.onUpdate = { updates.append($0) }; a.onFinish = { finishes += 1 }
         a.start(initialVelocity: 1000, fromOffset: 9, minOffset: 0, maxOffset: 10)
-        _ = fake()?.fire(ref)        // 跨边进 spring（offset 越界）
+        _ = fake()?.fire(ref)        // 跨边进 spring（offset 越界 > 10）
+        let updatesBeforeReset = updates.count
         a.resetOnSceneActive()       // 归位至 edge
         #expect(finishes == 0)       // 静默
         #expect(!a.isDecelerating)
+        #expect(updates.count == updatesBeforeReset + 1)        // 发出一条归一 update（normalize 真发生）
+        #expect(abs((9 + updates.reduce(0, +)) - 10) < 1e-6)    // **consumer offset 真回 edge 10**（破 normalize 即失败）
+        #expect(fake()?.isInvalidated == true)                  // driver 失活
     }
 
     // 6. 零速越界 start（服务 cancelPan，codex R3-F2）→ 弹簧回弹，非 no-op
