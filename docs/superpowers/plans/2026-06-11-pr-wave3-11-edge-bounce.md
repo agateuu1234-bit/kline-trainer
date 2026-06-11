@@ -289,21 +289,75 @@ struct EdgeBounceModelTests {
         #expect(minSeen >= 10 - 1e-9)        // 全程从不进内侧（< 10）
     }
 
-    // P3: 弹簧 state 分区不变（给定同 seed，不同 dt 切分末态一致）
-    @Test("spring state is partition-invariant given identical seed")
-    func springPartitionInvariant() {
-        // 越界起点（spring 相），同初值不同 dt 切分 → 末 offset 一致
-        func endOffset(dt: CGFloat) -> CGFloat {
+    // P3: 弹簧 state 分区不变 —— 比**固定 elapsed 时刻**（settle 前）的 offset+velocity，
+    //     不同分区（单步/拆分/不规则/亚-ref）一致（codex Plan-R1-F3：避免「都 snap 到 edge」的恒等 tautology）
+    @Test("spring offset+velocity invariant across partitions at fixed pre-settle elapsed")
+    func springPartitionInvariantState() {
+        // seed: 越界 offset 15 ∈ [0,10]，v=0 → x0=5, omega≈14.14；t=0.05 时 x≈4.2（仍越界、未 settle）
+        func stateAt(elapsed: CGFloat, partition: [CGFloat]) -> (offset: CGFloat, velocity: CGFloat, finished: Bool) {
             var m = EdgeBounceModel(initialVelocity: 0, offset: 15, minOffset: 0, maxOffset: 10)
-            var frames = 0
-            while frames < 5000 {
-                frames += 1
-                if case .finish = m.advance(dt: dt) { break }
+            var remaining = elapsed
+            var i = 0
+            var finished = false
+            while remaining > 1e-12 {
+                let step = Swift.min(partition[i % partition.count], remaining)
+                if case .finish = m.advance(dt: step) { finished = true; break }
+                remaining -= step
+                i += 1
             }
-            return m.debugOffset
+            return (m.debugOffset, m.debugVelocity, finished)
         }
-        #expect(abs(endOffset(dt: ref) - endOffset(dt: ref / 3)) < 1e-6)
-        #expect(abs(endOffset(dt: ref) - 10) < 1e-6)
+        let elapsed: CGFloat = 0.05
+        let single    = stateAt(elapsed: elapsed, partition: [ref])
+        let split     = stateAt(elapsed: elapsed, partition: [ref / 3])
+        let irregular = stateAt(elapsed: elapsed, partition: [ref * 0.7, ref * 1.3, ref * 0.4])
+        let subRef    = stateAt(elapsed: elapsed, partition: [ref / 5])
+        // 仍在瞬态（未 settle、仍越界）→ 比的是真实弹簧 state，非 snap 后的恒等值
+        #expect(!single.finished && single.offset > 10)
+        for other in [split, irregular, subRef] {
+            #expect(abs(single.offset - other.offset) < 1e-3)      // 解析组合精确（Euler 会大幅发散）
+            #expect(abs(single.velocity - other.velocity) < 1e-1)
+        }
+    }
+
+    // P1 exact-edge：起点恰在 outward edge + 外向速度 → 立即进弹簧、终止精确钉 edge（codex Plan-R1-F1）
+    @Test("outward fling starting exactly on edge settles at edge (upper + lower)")
+    func exactEdgeOutwardFling() {
+        // 上界：offset==max 10，v=+1000 → 越上界后回弹钉 10
+        var hi = EdgeBounceModel(initialVelocity: 1000, offset: 10, minOffset: 0, maxOffset: 10)
+        #expect(hi.shouldRun)
+        var n = 0
+        while n < 5000 { n += 1; if case .finish = hi.advance(dt: ref) { break } }
+        #expect(hi.debugOffset == 10)
+        // 下界：offset==min 0，v=-1000 → 越下界后回弹钉 0
+        var lo = EdgeBounceModel(initialVelocity: -1000, offset: 0, minOffset: 0, maxOffset: 10)
+        n = 0
+        while n < 5000 { n += 1; if case .finish = lo.advance(dt: ref) { break } }
+        #expect(lo.debugOffset == 0)
+    }
+
+    // P6 extreme-finite：极端有限 offset（弹簧数学溢出）→ 不外溢 inf/NaN delta，安全钉 edge（codex Plan-R1-F2）
+    @Test("extreme finite overscroll never emits non-finite delta")
+    func extremeFiniteNoNonFiniteDelta() {
+        var m = EdgeBounceModel(initialVelocity: 0,
+                                offset: CGFloat.greatestFiniteMagnitude / 2,
+                                minOffset: 0, maxOffset: 10)
+        var frames = 0
+        var sawNonFinite = false
+        var finished = false
+        while frames < 5000, !finished {
+            frames += 1
+            switch m.advance(dt: ref) {
+            case .move(let d):
+                if !d.isFinite { sawNonFinite = true }
+            case .finish(let fd, _):
+                if let fd, !fd.isFinite { sawNonFinite = true }
+                finished = true
+            }
+        }
+        #expect(!sawNonFinite)
+        #expect(finished)
+        #expect(m.debugOffset == 10)   // 最终安全钉 edge
     }
 
     // P3 端到端（codex R8-F1/R10-F1）：始界内·跨边，多子步跨边 case → 不同帧率 seed/峰值容差内一致
@@ -460,6 +514,7 @@ struct EdgeBounceModel: Equatable, Sendable {
 
     // 测试缝（internal，@testable 可见）
     var debugOffset: CGFloat { offset }
+    var debugVelocity: CGFloat { velocity }
     /// 越过最近被违反边界的量（界内 = 0；正 = 越上界，负 = 越下界）。供峰值穿透测量。
     var debugOverscroll: CGFloat {
         if offset > maxOffset { return offset - maxOffset }
@@ -490,6 +545,14 @@ struct EdgeBounceModel: Equatable, Sendable {
     // 减速相：boundary-aware；跨边即 seed 弹簧于 edge、对剩余帧时间走弹簧
     private mutating func advanceDecel(dt: CGFloat, frameEntry: CGFloat) -> FrameOutcome {
         let edge = (velocity >= 0) ? maxOffset : minOffset
+        // 起点恰在/越过 outward edge（boundaryDistance==0，codex Plan-R1-F1）→ 立即进弹簧，
+        // 否则 boundary-aware 的 `need != 0` 守门会吞掉跨边、把 offset 滑出界外永不回弹。
+        let atOrPastOutwardEdge = (velocity >= 0) ? (offset >= maxOffset) : (offset <= minOffset)
+        if atOrPastOutwardEdge {
+            springEdge = edge
+            phase = .springing
+            return springStep(tau: dt, frameEntry: frameEntry)
+        }
         switch decel.advance(dt: dt, boundaryDistance: edge - offset) {
         case .moved(let d):
             offset += d
@@ -507,32 +570,43 @@ struct EdgeBounceModel: Equatable, Sendable {
         }
     }
 
-    // 弹簧相：临界阻尼 ζ=1 解析闭式；首次过边 clamp + 渐近 settle
+    // 弹簧相：临界阻尼 ζ=1 解析闭式；首次过边 clamp + 渐近 settle + 非有限防御
     private mutating func springStep(tau: CGFloat, frameEntry: CGFloat) -> FrameOutcome {
         let x = offset - springEdge
         let v = velocity
         let A = x
         let B = v + omega * x
         // 首次过边 zero-crossing（codex R1-F2）：x 跨 0 → clamp + settle
-        if B != 0 {
+        if B.isFinite, B != 0 {
             let tzc = -A / B
             if tzc > 0, tzc <= tau {
                 offset = springEdge; velocity = 0
-                return .finish(finalDelta: offset - frameEntry, notifyFinish: true)
+                return settleFinish(frameEntry: frameEntry)
             }
         }
         // 解析推进 tau（任意分区精确，spec P3）
         let e = exp(-omega * tau)
         let xNew = (A + B * tau) * e
         let vNew = (B * (1 - omega * tau) - omega * A) * e
+        // 极端有限输入溢出防御（codex Plan-R1-F2）：派生值非有限 → 钉 edge + 终止，绝不外溢 inf/NaN delta
+        guard xNew.isFinite, vNew.isFinite else {
+            offset = springEdge; velocity = 0
+            return settleFinish(frameEntry: frameEntry)
+        }
         offset = springEdge + xNew
         velocity = vNew
         // 渐近 settle-threshold（≤1 帧有界回调时序，spec R7-F2）
         if abs(xNew) < posTol && abs(vNew) < velTol {
             offset = springEdge; velocity = 0
-            return .finish(finalDelta: offset - frameEntry, notifyFinish: true)
+            return settleFinish(frameEntry: frameEntry)
         }
         return .move(delta: offset - frameEntry)
+    }
+
+    /// 终止时构造 finalDelta（钉 edge 后调）；delta 非有限或为 0 → nil（绝不外溢 inf/NaN）。
+    private func settleFinish(frameEntry: CGFloat) -> FrameOutcome {
+        let d = offset - frameEntry
+        return .finish(finalDelta: (d.isFinite && d != 0) ? d : nil, notifyFinish: true)
     }
 
     /// 后台/reset 归位：越界 → 钉 edge，返回归一 delta（nil 若无需归位）。
