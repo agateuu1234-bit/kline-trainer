@@ -134,6 +134,8 @@
 
 ### 3.1 顺位 1：spec-gap 治理 RFC（前置钉死全部未定契约）
 
+> **【顺位 1 RFC 已落地（`docs/superpowers/specs/2026-06-10-wave3-pr1-spec-gap-rfc-design.md`，2026-06-10）**：本节所列各未决契约（仓位档位 X/5 派生 / 结算显示语义 / 夜间调色板 / 中断周期持久化 / E5·E6 engine 扩展 / replay 结算）**已由 RFC §4.1-§4.7 钉死权威定义**。后续 planner 以 RFC 为准，下方历史描述仅作背景；**本节契约已由顺位 1 RFC 钉死**。】
+
 **决策（user 2026-06-09 选「前置一个治理 RFC 锁住」）**：顺位 1 开**纯文档 governance PR**（沿用 Wave 2 顺位 1 + E2 RFC `project_pr64_e2rfc_merged` 先例），把 Wave 3 全部 spec gap 一次性公式化钉死，再进入实施锚。理由：实施锚不会被 codex 拿未定 spec 字面无限挑战（per `feedback_codex_distributed_reliability_drilldown` 同类无止境下钻风险）。
 
 **顺位 1 RFC 须钉死的契约（每项给出权威定义 + 设计理由块）**：

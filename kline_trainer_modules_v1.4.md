@@ -848,6 +848,10 @@ enum AppColor {
 }
 ```
 
+#### F2 Wave 3 顺位 1 RFC 契约增量（见 RFC §4.3，顺位 9 实现）
+
+夜间模式 = **light/dark 双 token 集**：现有 13 个 `AppColorRGBA` 默认 token（背景近黑）= **dark/夜间集**；新增 **light/白天集**（背景近白 / 文本近黑 / 语义色保持红涨绿跌 / 辅助线按白底降明度，**具体 RGBA 归顺位 9 plan 依 WCAG AA 设备实测**）。render 层按 `themeController.resolve(trait:)` 返回的 `AppColorScheme` 选 light/dark 集（机制——token 参数化或双 static 集——归顺位 9 plan）。`displayMode == .system` 跟随 `UITraitCollection` 变化重解析重渲染。持久化经 `AppSettings.displayMode`（settings key `display_mode`，**无 schema 改动**）。
+
 ---
 
 ## 六、iOS 图表引擎模块（10 个，v1.3 C1 拆 3）
@@ -1730,6 +1734,23 @@ extension TrainingRecord {
 }
 #endif
 ```
+
+#### E5 Wave 3 顺位 1 RFC 契约增量（见 `docs/superpowers/specs/2026-06-10-wave3-pr1-spec-gap-rfc-design.md` §4.1/§4.4；顺位 6 序列化实现，serial neck，所有 Wave 3 engine 契约变更集中此锚，消费锚 3/4/7/8 不改 engine 契约）
+
+- **`var currentPositionTier: Int { get }`（§4.1）**：read-only computed，0...5。`holdingValue = position.shares × currentPrice`、`total = currentTotalCapital`；`total <= 0 → 0`，否则 `clamp(Int((holdingValue / total × 5).rounded(.toNearestOrAwayFromZero)), 0, 5)`。市值 / 当前总资金基准 + round（非成本基准 / 非 floor）。
+- **on-demand 手动强平（§4.4a）**：前置 `flow.canBuySell()`（「结束按钮」capability proxy，Normal✅/Review❌/Replay✅）；`position.shares > 0` → 按 `currentPrice`（modules L342「手动结束 = 用户点击结束时的值」）走 `TradeCalculator.forceCloseOnEnd` append forced sell（`.tier5`，佣金+印花税）→ `shares == 0`；幂等（再调 no-op）；与 auto-end（`forceCloseIfEnded`，`>= maxTick` 门）共用同一 force-close 体。
+- **`func appendDrawing(_ drawing: DrawingObject)`（§4.4c）**：把 committed 画线追加进 `drawings`（更新 revision 重渲染 + 进 finalize/pending 持久化）。restore（`initialDrawings`）+ delete（`deleteDrawing`）已在，本子项只补 live commit 投影；`drawings` 是唯一渲染+持久化真相，manager.completedDrawings 仅输入暂存。
+- **pinch/zoom panel-state mutation（§4.4d，D1：engine-owned 非 render-free）**：改 `panelState.visibleCount` 于 clamp `[MIN_VISIBLE, MAX_VISIBLE]` + 保持 focus（pinch 中点 candle x 不动，重算 offset）；**ephemeral**——不在 `pending_training`（现 13 列无 visibleCount），不跨 session 持久、不进 finalize。clamp/灵敏度数值 + C7 仲裁集成归顺位 3 plan。理由：crosshair(5)/drawing(4) 消费 post-pinch 视口几何，engine-free 会致双视口真相。
+
+#### E6 Wave 3 顺位 1 RFC 契约增量（见 RFC §4.4e/§4.5/§4.6/§4.7）
+
+- **周期 autosave 参数化（§4.6，顺位 10）**：`saveProgress` 触发 = **任何 state-dirtying mutation**（tick 推进 + 交易 buy/sell + 画线 commit/delete，**非仅 tick**——buy 未推 tick 仍须存，否则 inter-tick 丢交易）。cadence floor `AUTOSAVE_TICK_INTERVAL = N`（默认 1，可上调 `≤ AUTOSAVE_MAX_INTERVAL`，不变量：未落盘丢失 ≤ N tick 等价脏窗）；coalescing 单写者 latest-wins（in-flight 写中又脏→写完再存，不排队）；background/inactive flush（scenePhase `.inactive`/`.background` 立即 flush，**additive** 到 `.active → onSceneActivated` 动画链，不替换）；失败可见、不 teardown session。
+- **replay non-persisting settlement payload（§4.4e/§4.5，顺位 6 产 / 顺位 8 消费）**：replay 结束强平后构造 in-memory `TrainingRecord`（原局 FeeSnapshot + 强平终态：total_capital/收益率/回撤/trade ops），**不写 `training_records`、不触 `pending_training`、`finalize` 对 replay 仍返 nil**；replay 结束后 DB 完全不变。
+- **单事务 session-finalization port（§4.7b，顺位 10a）**：新 port 把 `insertRecord` + `clearPending` 收进单一 `DefaultAppDB` 事务（原子：要么 record 入库且 pending 清，要么都不）；注入 coordinator，禁 unsafe concrete downcast。
+- **finalize 失败保留 session（§4.7a）**：finalize 失败 → 保留 active session（retry/discard，不 teardown reader/activeTraining）；**禁** `onSessionEnded(nil)` 拆毁路径。
+- **durable session key + P4 schema 迁移（§4.7c，顺位 10a）**：session 启动生成稳定 key 落 `pending_training` + 随 record 入库；**additive named migration（如 `0004_*`）**加 session-key 列 + `training_records` 唯一约束（retry 同 key → `ON CONFLICT` no-op 返已存 id，幂等）；existing-row 回填；fresh-install/upgrade/crash-after-commit/retry 四态测试；**版本 bump MANDATORY**（随迁移原子 ship，列名/DDL/目标版本号归顺位 10a plan）。
+- **终态 fence（§4.7d，顺位 10b）+ discard 终态（§4.7e）**：finalize/discard 前 drain/cancel 排队 autosave + finalization 启动后拒绝新 autosave（防终态脏写重建 `pending_training` → 重启重复 finalize/record）；discard = fence → 清 `pending_training` → endSession → exit（durable 终态，不复活；清 pending 失败则保留 session retry）。
+- **provenance-aware 恢复（§4.7f，顺位 10b，安全红线）**：按 **source** 分流（非 `.dbCorrupted` error 类型，二者现同类型但调用点 source 已知）——training-set DB 损坏可弃（自动删 + 重下）；**`app.sqlite` 损坏 fail-closed 禁自动删**（settings 走 §P6 `forceResetAndReload(confirmation:)` 两层恢复；history/pending 无自动抹）。
 
 ---
 
