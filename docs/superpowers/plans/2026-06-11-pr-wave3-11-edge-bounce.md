@@ -916,14 +916,15 @@ Expected: 编译失败（`start(initialVelocity:fromOffset:minOffset:maxOffset:)
 
 3b. 两个 `init` 中 `self.model = DecelerationModel(...)` 替换为 configModel + runModel：
 
-替换（两处 init 各一行）：
+替换（两处 init 各一行）。**用 local `config`**（不可读 `self.configModel` 派生 `runModel`——`makeDriver` 等尚未初始化，Swift 报 "self used before all stored properties initialized"，codex Plan-R5-F1）：
 ```swift
         self.model = DecelerationModel(friction: friction, stopThreshold: stopThreshold)
 ```
 为：
 ```swift
-        self.configModel = DecelerationModel(friction: friction, stopThreshold: stopThreshold)
-        self.runModel = .decel(self.configModel)
+        let config = DecelerationModel(friction: friction, stopThreshold: stopThreshold)
+        self.configModel = config
+        self.runModel = .decel(config)
 ```
 
 3c. 替换既有 `start(initialVelocity:)`（行为 byte-for-byte 不变，仅重构存储 + 抽 `beginRun`）+ 追加 bounce start：
