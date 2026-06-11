@@ -360,6 +360,33 @@ struct EdgeBounceModelTests {
         #expect(m.debugOffset == 10)   // 最终安全钉 edge
     }
 
+    // P6 large-edge overflow：xNew 有限但 springEdge+xNew 溢出（codex Plan-R2-F1 反例）→ 仍不外溢 inf delta
+    @Test("large finite edge: reconstructed offset overflow is guarded")
+    func largeEdgeReconstructedOverflowGuarded() {
+        let big = CGFloat.greatestFiniteMagnitude
+        // edge=0.99·MAX，offset=0.995·MAX（越上界），velocity=0.9·MAX（有限）
+        // → x、B、xNew 各自有限，但 springEdge(0.99·MAX)+xNew 溢出 → 须 guard 重构 offset
+        var m = EdgeBounceModel(initialVelocity: big * 0.9, offset: big * 0.995,
+                                minOffset: -big, maxOffset: big * 0.99)
+        #expect(m.shouldRun)
+        var sawNonFinite = false
+        var finished = false
+        var frames = 0
+        while frames < 5000, !finished {
+            frames += 1
+            switch m.advance(dt: ref) {
+            case .move(let d):
+                if !d.isFinite { sawNonFinite = true }
+            case .finish(let fd, _):
+                if let fd, !fd.isFinite { sawNonFinite = true }
+                finished = true
+            }
+        }
+        #expect(!sawNonFinite)
+        #expect(finished)
+        #expect(m.debugOffset == big * 0.99)   // 安全钉 edge（不溢出 inf）
+    }
+
     // P3 端到端（codex R8-F1/R10-F1）：始界内·跨边，多子步跨边 case → 不同帧率 seed/峰值容差内一致
     @Test("end-to-end crossing seeds spring near edge across frame rates")
     func endToEndCrossingFrameRates() {
@@ -588,19 +615,22 @@ struct EdgeBounceModel: Equatable, Sendable {
         let e = exp(-omega * tau)
         let xNew = (A + B * tau) * e
         let vNew = (B * (1 - omega * tau) - omega * A) * e
-        // 极端有限输入溢出防御（codex Plan-R1-F2）：派生值非有限 → 钉 edge + 终止，绝不外溢 inf/NaN delta
-        guard xNew.isFinite, vNew.isFinite else {
+        // 极端有限输入溢出防御（codex Plan-R1-F2/R2-F1）：派生值**及重构 offset/delta**非有限 → 钉 edge + 终止。
+        // 注意：xNew/vNew 有限不代表 `springEdge + xNew` 有限（大 edge 下其和可溢出，codex R2-F1）→ 须验重构值。
+        let newOffset = springEdge + xNew
+        let moveDelta = newOffset - frameEntry
+        guard xNew.isFinite, vNew.isFinite, newOffset.isFinite, moveDelta.isFinite else {
             offset = springEdge; velocity = 0
             return settleFinish(frameEntry: frameEntry)
         }
-        offset = springEdge + xNew
+        offset = newOffset
         velocity = vNew
         // 渐近 settle-threshold（≤1 帧有界回调时序，spec R7-F2）
         if abs(xNew) < posTol && abs(vNew) < velTol {
             offset = springEdge; velocity = 0
             return settleFinish(frameEntry: frameEntry)
         }
-        return .move(delta: offset - frameEntry)
+        return .move(delta: moveDelta)
     }
 
     /// 终止时构造 finalDelta（钉 edge 后调）；delta 非有限或为 0 → nil（绝不外溢 inf/NaN）。
@@ -719,8 +749,9 @@ struct DecelerationAnimatorBounceTests {
         #expect(seq1 == seq2)              // isDecelerating 翻转帧逐帧一致
     }
 
-    // 3. P9 re-entrancy：终止帧 onUpdate 内重入 start() → 新 run 存活 + 旧 onFinish 不触发
-    @Test("re-entrant start in terminal onUpdate keeps new run, suppresses old onFinish")
+    // 3. P9 re-entrancy（codex R4-F3/Plan-R2-F2）：终止帧 onUpdate 内重入**真正的新 run** → 新 run 存活
+    //    （新 driver 未被旧续延 invalidate）+ 旧 onFinish 抑制；新 run 仍可跑到完成各触发一次。
+    @Test("re-entrant start in terminal onUpdate keeps the NEW run alive and suppresses old onFinish")
     func reentrantStartInTerminalUpdate() {
         let (a, fake) = makeWithFake()
         var finishes = 0; var restarted = false
@@ -728,15 +759,24 @@ struct DecelerationAnimatorBounceTests {
         a.onUpdate = { _ in
             if !restarted {
                 restarted = true
-                a.start(initialVelocity: 0, fromOffset: 5, minOffset: 0, maxOffset: 10) // 界内亚阈 → no-op? 用越界确保启动
+                // 重入一个**越界**新 run（shouldRun=true，真建新 driver）
+                a.start(initialVelocity: 0, fromOffset: 15, minOffset: 0, maxOffset: 10)
             }
         }
-        // 用一个会发出归一 delta 的终止：abnormal-dt 越界 → finish 带 finalDelta（触发 onUpdate）
-        a.start(initialVelocity: 0, fromOffset: 15, minOffset: 0, maxOffset: 10)  // 越界 spring
-        _ = fake()?.fire(2.0)   // abnormal dt → 归位 delta（onUpdate）+ 本应 onFinish；但 onUpdate 重入 start
-        // onUpdate 里 start(.. fromOffset 5 界内 v=0) → shouldRun=false → no-op；epoch 仍 bump（stop 内）
-        // 关键断言：旧 onFinish 因 epoch 改变被抑制
-        #expect(finishes == 0)
+        a.start(initialVelocity: 0, fromOffset: 15, minOffset: 0, maxOffset: 10)  // 第一 run（越界 spring）
+        let firstDriver = fake()
+        _ = firstDriver?.fire(2.0)   // abnormal-dt 终止帧外溢归一 delta（onUpdate）→ 重入 start 建新 run
+        #expect(restarted)
+        #expect(a.isDecelerating)                       // 新 run 存活
+        let secondDriver = fake()
+        #expect(secondDriver !== firstDriver)           // 确为新 driver
+        #expect(secondDriver?.isInvalidated == false)   // 新 driver 未被旧续延 invalidate
+        #expect(finishes == 0)                          // 旧 run onFinish 被 epoch 守门抑制（此刻仅旧 run 已终止）
+        // 驱动新 run 到完成：证其真活 + 新 run 自身 onFinish 触发恰一次
+        var n = 0
+        while a.isDecelerating, n < 5000 { n += 1; _ = fake()?.fire(ref) }
+        #expect(!a.isDecelerating)
+        #expect(finishes == 1)                          // 新 run 完成触发一次（旧仍为 0，故总为 1）
     }
 
     // 4. P9 reset re-entrancy（codex R9-F2）：终止帧 onUpdate 内重入 resetOnSceneActive() → epoch bump → 旧 onFinish 不触发
