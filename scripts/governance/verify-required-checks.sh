@@ -21,6 +21,8 @@ REPO="${REPO:-agateuu1234-bit/kline-trainer}"
 GH_CMD="${GH_CMD:-gh}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILDER="$SCRIPT_DIR/build-protection-put-payload.py"
+# canonical 必需 context 单一真相（codex H-NEW-2）：从 builder 派生，不在本脚本硬编码
+REQUIRED_CONTEXTS_JSON="$("$BUILDER" --list-contexts)" || { echo "FAIL: 取 REQUIRED_CONTEXTS 失败（观测失败）" >&2; exit 3; }
 MODE=""
 RULESET_JSON=""
 
@@ -64,10 +66,10 @@ set -e
 case "$MODE" in
   preflight|assert)
     set +e
-    RESULT=$(RULESET_JSON="$RULESET" MODE="$MODE" python3 <<'PY'
+    RESULT=$(RULESET_JSON="$RULESET" MODE="$MODE" REQUIRED_CONTEXTS_JSON="$REQUIRED_CONTEXTS_JSON" python3 <<'PY'
 import json, os, sys, fnmatch
 APP_ID = 15368
-CATALYST = "Mac Catalyst build-for-testing on macos-15"
+required = json.loads(os.environ['REQUIRED_CONTEXTS_JSON'])
 mode = os.environ['MODE']
 try:
     rs = json.loads(os.environ['RULESET_JSON'])
@@ -114,18 +116,22 @@ checks = (rsc.get('parameters') or {}).get('required_status_checks') or []
 if mode == 'preflight':
     print("OK: preflight（main branch ruleset + 绑默认分支 + active + 有 required_status_checks 规则 + bypass 仅 admin）"); sys.exit(0)
 
-# assert（enforcement/name/target 已在上面 fail-closed，这里只判 Catalyst check）
+# assert（enforcement/name/target 已在上面 fail-closed，这里判 REQUIRED_CONTEXTS 全在位 + 各自绑 app）
 reasons = []
-cat = [c for c in checks if c.get('context') == CATALYST]
-if not cat:
-    reasons.append(f"缺 required check '{CATALYST}'")
-else:
-    for c in cat:
-        if c.get('integration_id') != APP_ID:
-            reasons.append(f"'{CATALYST}' integration_id={c.get('integration_id')} != {APP_ID}（any-source 伪造风险）")
+by_ctx = {}
+for c in checks:
+    by_ctx.setdefault(c.get('context'), []).append(c)
+for ctx in required:
+    entries = by_ctx.get(ctx, [])
+    if not entries:
+        reasons.append(f"缺 required check '{ctx}'")
+    else:
+        for c in entries:
+            if c.get('integration_id') != APP_ID:
+                reasons.append(f"'{ctx}' integration_id={c.get('integration_id')} != {APP_ID}（any-source 伪造风险）")
 if reasons:
     print("FAIL: " + " | ".join(reasons)); sys.exit(1)
-print(f"OK: main branch ruleset + 绑默认分支 + active + '{CATALYST}' 在位 + integration_id={APP_ID} + bypass 仅 admin"); sys.exit(0)
+print(f"OK: main branch ruleset + 绑默认分支 + active + required contexts {required} 全在位 + integration_id={APP_ID} + bypass 仅 admin"); sys.exit(0)
 PY
 )
     PY_EXIT=$?
@@ -139,7 +145,6 @@ PY
     set +e
     RESULT=$(CURRENT_JSON="$RULESET" DESIRED_JSON="$DESIRED" python3 <<'PY'
 import json, os
-CATALYST = "Mac Catalyst build-for-testing on macos-15"
 def checks(d):
     rsc = next((r for r in (d.get('rules') or []) if r.get('type') == 'required_status_checks'), None)
     return (rsc.get('parameters') or {}).get('required_status_checks') or [] if rsc else []

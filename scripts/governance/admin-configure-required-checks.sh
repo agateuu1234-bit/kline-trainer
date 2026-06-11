@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# admin-configure-required-checks.sh — 1c admin 执行的 runbook：幂等配置 main ruleset 的 Catalyst required check。
+# admin-configure-required-checks.sh — admin 执行的 runbook：幂等配置 main ruleset 的 app-target required checks（Catalyst + app-build；canonical 列表见 build-protection-put-payload.py REQUIRED_CONTEXTS）。
 #
 # 缺省 dry-run（只打印 diff 不 mutate）；--apply 才真改。源真相 = Rulesets API。
 # mutation safety：discover+snapshot(raw 计算 / redacted 审计分离) → preflight(name/target/绑默认分支/active/有 rsc 规则) →
@@ -68,7 +68,7 @@ assert_and_evidence() {
   fi
   rm -f "$tmp"
   if [ "$rc" -eq 0 ]; then
-    echo "GATE PASS：Catalyst required check 已绑 app + active。evidence: $ARTIFACT_DIR/verify-evidence.txt"
+    echo "GATE PASS：app-target required checks（Catalyst + app-build）已绑 app + active。evidence: $ARTIFACT_DIR/verify-evidence.txt"
   fi
   return "$rc"
 }

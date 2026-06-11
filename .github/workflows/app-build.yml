@@ -1,0 +1,52 @@
+name: iOS App Build
+
+# Wave 3 顺位 2（PR11-R3 + codex R1-F2）：app target KlineTrainer.xcodeproj 的 CI 编译守护。
+# 现有 catalyst-build.yml 仅构建 ios/Contracts SwiftPM 包；本 workflow 补 app target 外壳
+# （KlineTrainerApp / AppRootView / AppContainer 经本地 Contracts 包）的编译守护。
+# always-trigger（无 paths filter），镜像 catalyst-build H9 决议（§15.4 ledger H9），
+# 使 required check 在每个 PR 必跑必报，消除 paths-filter→required-check-永不报告→死锁。
+# 注意：required check 以 job name 匹配；job name "iOS app build-for-running on macos-15" 必须保持不变。
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Trust-boundary hardening（对齐 catalyst-build.yml）：least-privilege 只读 token + checkout pin full SHA。
+permissions:
+  contents: read
+
+jobs:
+  app-build:
+    name: iOS app build-for-running on macos-15
+    runs-on: macos-15
+    timeout-minutes: 20
+    # 依赖 runner 默认 Xcode（macos-15 image）；不硬编码 Xcode 路径（镜像 catalyst-build）。
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Assert Xcode >= 16
+        run: |
+          xcodebuild -version
+          XCODE_VER=$(xcodebuild -version | head -1 | awk '{print $2}')
+          MAJOR=$(echo "$XCODE_VER" | cut -d. -f1)
+          if [[ -z "$XCODE_VER" || "$MAJOR" -lt 16 ]]; then
+            echo "FAIL: Xcode 16+ required；runner provides $XCODE_VER"
+            echo "Available Xcode installs:"
+            ls -la /Applications | grep -i xcode || true
+            exit 1
+          fi
+          echo "Xcode $XCODE_VER OK"
+      - name: Build iOS app target (build-for-running, iOS Simulator)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project ios/KlineTrainer/KlineTrainer.xcodeproj \
+            -scheme KlineTrainer \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath /tmp/app-derived \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee /tmp/app-build.log
+      - name: Gate — BUILD SUCCEEDED + no error (not blanket no-warning)
+        run: |
+          grep -F "** BUILD SUCCEEDED **" /tmp/app-build.log || { echo "BUILD SUCCEEDED 缺失"; exit 1; }
+          if grep -F "** BUILD FAILED **" /tmp/app-build.log; then echo "BUILD FAILED 触发 gate"; exit 1; fi
+          if grep -E "(^|[[:space:]])error:" /tmp/app-build.log; then echo "编译/链接 error: 触发 gate"; exit 1; fi
+          echo "GATE PASS: app target 编译守护（PR11-R3 关闭）"

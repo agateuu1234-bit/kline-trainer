@@ -72,6 +72,14 @@ set +e; out=$("$V" --mode diff --ruleset-json "$FIX/ruleset-anysource.json" 2>&1
 check "diff anysource → 0" 0 "$rc"
 echo "$out" | grep -q "Mac Catalyst" && echo "PASS: diff shows change" || { echo "FAIL: diff shows change"; fail=1; }
 
+# partial-state（codex M-NEW-2）：Catalyst 在但 app-build 缺 → assert 1（REQUIRED_CONTEXTS 不全）
+set +e; "$V" --mode assert --ruleset-json "$FIX/ruleset-catalyst-only.json" >/dev/null 2>&1; rc=$?; set -e
+check "assert catalyst-only(缺 app-build) → 1" 1 "$rc"
+# diff：catalyst-only → 0 且输出含 app-build context（显示将新增）
+set +e; out=$("$V" --mode diff --ruleset-json "$FIX/ruleset-catalyst-only.json" 2>&1); rc=$?; set -e
+check "diff catalyst-only → 0" 0 "$rc"
+echo "$out" | grep -q "iOS app build-for-running on macos-15" && echo "PASS: diff 显示新增 app-build" || { echo "FAIL: diff 未显示 app-build"; fail=1; }
+
 # bad mode → 2
 set +e; "$V" --mode bogus --ruleset-json "$FIX/ruleset-with-check.json" >/dev/null 2>&1; rc=$?; set -e
 check "bad mode → 2" 2 "$rc"
