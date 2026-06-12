@@ -460,30 +460,31 @@ struct EdgeBounceModelTests {
         #expect(m.debugOffset == big)
     }
 
-    // P3 端到端（codex R8-F1：方案 A 累加器）：始界内·跨边·回弹，峰值穿透在 60/120Hz/不规则/亚-ref
-    //     **精确无关（紧容差）**——覆盖真实甩速包络 1000/2000/5000（方案 B 会给 v5000 下 ~5pt 差）。
-    @Test("end-to-end crossing: peak overscroll partition-invariant across frame rates and velocities")
+    // P3 端到端（codex Plan-R8-F1 方案 A 累加器 + R9-F1）：始界内·跨边·回弹，**比共时 elapsed 的 model state**
+    //     （非帧采样峰值——帧采样会在不同帧率采到同一解析轨迹的不同点，~0.4pt 假差，codex R9-F1）。
+    //     累加器使 floor(elapsed/refInterval) 固定步数与分区无关 ⇒ 共时 state **精确无关（紧容差）**；覆盖 v=1000/2000/5000。
+    @Test("end-to-end crossing: model state at common elapsed time is partition-invariant")
     func endToEndCrossingFrameRates() {
-        func peak(velocity: CGFloat, partition: [CGFloat]) -> CGFloat {
+        func stateAt(velocity: CGFloat, elapsed: CGFloat, partition: [CGFloat]) -> (offset: CGFloat, velocity: CGFloat, finished: Bool) {
             var m = EdgeBounceModel(initialVelocity: velocity, offset: 990, minOffset: 0, maxOffset: 1000)
-            var p: CGFloat = 0; var i = 0; var frames = 0
-            while frames < 20000 {
-                frames += 1
-                let step = partition[i % partition.count]; i += 1
-                switch m.advance(dt: step) {
-                case .move: p = Swift.max(p, m.debugOverscroll)
-                case .finish: return p
-                }
+            var rem = elapsed; var i = 0; var fin = false
+            while rem > 1e-12 {
+                let step = Swift.min(partition[i % partition.count], rem)
+                if case .finish = m.advance(dt: step) { fin = true; break }
+                rem -= step; i += 1
             }
-            return p
+            return (m.debugOffset, m.debugVelocity, fin)
         }
+        let T: CGFloat = 0.04   // 跨边(~ms)后、settle 前的弹簧穿透段（spring 峰值时 ~1/ω≈0.07s）
         for v in [CGFloat(1000), 2000, 5000] {
-            let p120 = peak(velocity: v, partition: [ref])
-            let p60  = peak(velocity: v, partition: [2 * ref])
-            let pSub = peak(velocity: v, partition: [ref / 3])
-            let pIrr = peak(velocity: v, partition: [ref * 0.7, ref * 1.3, ref * 0.4])
-            #expect(p120 > 0)
-            for p in [p60, pSub, pIrr] { #expect(abs(p120 - p) < 0.1) }   // 累加器 → 峰值帧率/分区精确无关（紧容差）
+            let s120 = stateAt(velocity: v, elapsed: T, partition: [ref])
+            let s60  = stateAt(velocity: v, elapsed: T, partition: [2 * ref])
+            let sSub = stateAt(velocity: v, elapsed: T, partition: [ref / 3])
+            let sIrr = stateAt(velocity: v, elapsed: T, partition: [ref * 0.7, ref * 1.3, ref * 0.4])
+            #expect(!s120.finished && s120.offset > 1000)   // 仍越界、未 settle（真瞬态）
+            for s in [s60, sSub, sIrr] {
+                #expect(abs(s120.offset - s.offset) < 1e-3 && abs(s120.velocity - s.velocity) < 1e-1)
+            }
         }
     }
 

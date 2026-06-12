@@ -101,7 +101,7 @@
 |---|---|---|
 | P1 | **钉边界收敛**：任意越界起点，轨迹收敛到**精确** edge 后停 | 末帧后 `offset==edge`（位精确，snap）；`.stop` 抵达 |
 | P2 | **无内侧穿越（首次过边 clamp，任意 v0）**：回弹到 edge 即 clamp+stop，绝不进内侧——**靠首次过边 clamp 保证，非靠 ζ**（codex R1-F2：x0=10,k=100,v0=-1000 强内向起点临界阻尼解析解会过 0，必须 clamp）；ζ=1 额外保证外向穿透段无振荡 | 双边界 × 外向/内向初速度：overscroll 抵 0 即停于 edge，全程从不取内侧符号 |
-| P3 | **帧率无关端到端（方案 A 累加器，user 裁决，codex Plan-R8-F1）**：减速持久固定步累加器 + 弹簧解析闭式 → **回弹峰值/轨迹在任意帧率/分区精确无关**（含真实甩速包络 1000/2000/5000；方案 B 会给 v5000 下 ~5pt 漂移）；**回调时序 ≤1 帧有界**（R7-F2，onFinish 落含事件的 display tick） | **模型层**：弹簧 state + **端到端始界内·跨边·回弹** 在 60/120Hz/不规则/亚-ref 下峰值穿透 **紧容差（<0.1pt）** 一致（覆盖 v=1000/2000/5000）；累加器分区不变（同 elapsed velocity+dist 一致）；zero-crossing event-time 解析精确。**动画器层**：onFinish 帧 ±1 帧有界 |
+| P3 | **帧率无关端到端（方案 A 累加器，user 裁决，codex Plan-R8-F1）**：减速持久固定步累加器 + 弹簧解析闭式 → **回弹峰值/轨迹在任意帧率/分区精确无关**（含真实甩速包络 1000/2000/5000；方案 B 会给 v5000 下 ~5pt 漂移）；**回调时序 ≤1 帧有界**（R7-F2，onFinish 落含事件的 display tick） | **模型层**：弹簧 state + **端到端始界内·跨边·回弹** 在 60/120Hz/不规则/亚-ref 下**共时 elapsed 的 model state（offset+velocity）紧容差一致**（覆盖 v=1000/2000/5000；**比 state 不比帧采样峰值**——帧采样在不同帧率采同一解析轨迹的不同点有 ~0.4pt 假差，codex R9-F1）；累加器分区不变（同 elapsed velocity+dist 一致）；zero-crossing event-time 解析精确。**动画器层**：onFinish 帧 ±1 帧有界 |
 | P4 | **界内减速 within-substep parity（方案 A，codex Plan-R7-F1/R8-F1）**：累加器与既有 `DecelerationModel.advance(dt)` 仅相差 sub-refInterval 余量延迟；**ref 对齐（dt==refInterval）下逐帧字节相等**（含 move-then-stop lifecycle 时序，非早一帧） | ref 对齐：与同参 DecelerationModel **逐帧 delta 严格相等 + isDecelerating/onFinish 帧一致**；总滑行距离 **< 一固定步位移** 内一致；edge 判定同 |
 | P5 | **穿透有界**（外向起点）：最大 overscroll 有限，随初速度增、随 stiffness 减 | 单调性断言（v↑→峰值↑；k↑→峰值↓） |
 | P6 | **防御（可达 + 分层，codex R7-F3/R10-F2）**：分离端点 CGFloat（非 `ClosedRange`，后者 NaN 构造即 trap）→ 模型内校验。**offset/bounds 非有限** → 安全停；**仅 velocity 非有限 + offset/bounds 有限** → velocity 净化为 0，**越界仍归位**（不 strand 有效越界 offset）；绝不外溢 NaN/inf delta | NaN/inf `min/max/offset` → 安全退化无 trap；`min>max` → 无 bounce；**NaN/inf velocity + 有限越界 offset → spring 归位至 edge（不滞留）** |
@@ -152,7 +152,7 @@
   - **弹簧 state 分区不变（P3，codex R1-F3）**：**给定同一 seed** 的弹簧相，同 elapsed 下 60/120Hz/不规则/亚-refInterval 分区 → 末 offset + 峰值穿透 **严格浮点容差**内一致；「推进 τ 一次 ≡ 拆两次」直证解析组合性（**仅弹簧 state，不含 decel handoff seed**）；
   - **模型事件时刻解析精确（P3 model-layer，codex R5-F1/R7-F2）**：弹簧 zero-crossing `t_zc=−A/B` 经模型暴露的 consumed/event-time **解析精确断言**（与回调帧分离；动画器层 onFinish ±1 帧另测，见动画器 bullet）；
   - **decel within-substep parity（P4，方案 A）**：ref 对齐时累加器与 `DecelerationModel.advance` 逐帧相等；非 ref 时总滑行差 < 一固定步（余量延迟）；
-  - **端到端跨边帧率无关（P3 端到端，方案 A 累加器）**：**始界内·跨边·回弹**，60/120Hz/不规则/亚-ref → 峰值穿透 **紧容差（<0.1pt）** 一致，**覆盖真实甩速包络 v=1000/2000/5000**（方案 B 在 v5000 给 ~5pt 漂移，累加器消除之）；
+  - **端到端跨边帧率无关（P3 端到端，方案 A 累加器，codex R9-F1）**：**始界内·跨边·回弹**，60/120Hz/不规则/亚-ref → **共时 elapsed 的 model state（offset+velocity）紧容差一致**（非帧采样峰值，避免 ~0.4pt 采样假差），**覆盖真实甩速包络 v=1000/2000/5000**（方案 B 在 v5000 给 ~5pt 漂移，累加器消除之）；
   - **零速越界回弹（codex R3-F2）**：`start(initialVelocity:0, fromOffset:越界, minOffset:maxOffset:)` **不 no-op**，弹簧回弹至 edge 停（服务 cancelPan）；`velocity` 亚阈 + `offset∈[min,max]` 才 no-op；
   - **多子段终止帧 finalDelta（P8，codex R4-F1）**：单 tick 内「减速→跨边→弹簧→settle」全发生 → `.finish.finalDelta == offset_final - frameEntry`（含全部子段位移，**非**仅末 snap）；界内速度衰到阈的终止帧亦报全帧位移不丢；
   - **bounds 端点防御可达（P6，codex R7-F3）**：注入 NaN/inf `minOffset`/`maxOffset` 或 `min>max` → 安全退化无 trap（分离端点使 P6 守门可达，非 `ClosedRange` 构造即 trap）；
