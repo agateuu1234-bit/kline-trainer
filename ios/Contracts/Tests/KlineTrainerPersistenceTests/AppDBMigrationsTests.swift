@@ -46,8 +46,8 @@ final class AppDBMigrationsTests: XCTestCase {
         XCTAssertTrue(indexes.contains("idx_journal_state"))
     }
 
-    // MARK: - migrator 跑过的 PRAGMA user_version
-    func test_baseline_sets_user_version_1() throws {
+    // MARK: - migrator 跑过的 PRAGMA user_version（0004 起终态 = 2）
+    func test_full_migrator_sets_user_version_2() throws {
         let dbURL = try AppDBFixture.makeFreshDB()
         defer { try? FileManager.default.removeItem(at: dbURL.deletingLastPathComponent()) }
 
@@ -55,7 +55,7 @@ final class AppDBMigrationsTests: XCTestCase {
         let version: Int = try queue.read { db in
             try Int.fetchOne(db, sql: "PRAGMA user_version") ?? 0
         }
-        XCTAssertEqual(version, 1)
+        XCTAssertEqual(version, 2)   // 0001 置 1，0004 bump 至 2（RFC §4.7c MANDATORY bump）
     }
 
     // MARK: - 0003_v1.4_purge_leased 实际删 leased 行
@@ -148,6 +148,123 @@ final class AppDBMigrationsTests: XCTestCase {
             default:
                 XCTFail("意外错误类型 \(appErr)")
             }
+        }
+    }
+
+    // MARK: - 0004_v1.6_session_key（fresh-install 态）
+
+    func test_0004_fresh_install_has_session_key_columns_and_unique_index() throws {
+        let dbURL = try AppDBFixture.makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: dbURL.deletingLastPathComponent()) }
+        let queue = try AppDBFixture.openRaw(at: dbURL)
+        try queue.read { db in
+            let pendingCols = try Row.fetchAll(db, sql: "PRAGMA table_info(pending_training)")
+                .map { $0["name"] as String }
+            XCTAssertTrue(pendingCols.contains("session_key"), "pending_training 须有 session_key 列")
+            let recordCols = try Row.fetchAll(db, sql: "PRAGMA table_info(training_records)")
+                .map { $0["name"] as String }
+            XCTAssertTrue(recordCols.contains("session_key"), "training_records 须有 session_key 列")
+            let idx = try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM sqlite_master
+                WHERE type = 'index' AND name = 'idx_training_records_session_key'
+                """) ?? 0
+            XCTAssertEqual(idx, 1, "session_key UNIQUE index 须存在")
+        }
+    }
+
+    // MARK: - 0004（upgrade 态：v1.5 库含既有 pending 行 + 2 条 records → 回填/NULL 语义 + 数据无损）
+
+    func test_0004_upgrade_backfills_pending_key_and_leaves_record_keys_null() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("appdb-up-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dbURL = dir.appendingPathComponent("app.sqlite")
+
+        // partial migrator（0001+0003，无 0004）模拟 v1.5 装机 —— AppDBFixture.makeV1_3SimulatedDB 同范式
+        let queue = try DatabaseQueue(path: dbURL.path)
+        var partial = DatabaseMigrator()
+        partial.registerMigration("0001_v1.4_baseline") { db in
+            try db.execute(sql: AppDBMigrations.v1_4_baselineDDL)
+        }
+        partial.registerMigration("0003_v1.4_purge_leased") { db in
+            try db.execute(sql: "DELETE FROM download_acceptance_journal WHERE state = 'leased'")
+        }
+        try partial.migrate(queue)
+        try queue.write { db in
+            // 旧世界 pending 行（无 session_key 列时代写入）
+            try db.execute(sql: """
+                INSERT INTO pending_training
+                  (id, training_set_filename, global_tick_index, upper_period, lower_period,
+                   position_data, fee_snapshot, trade_operations, drawings,
+                   started_at, accumulated_capital, cash_balance, drawdown)
+                VALUES (1, 'legacy.sqlite', 5, 'm60', 'm3', '', '{}', '[]', '[]', 100, 50000, 50000, '{}')
+                """)
+            // 2 条 legacy records
+            for i in 0..<2 {
+                try db.execute(sql: """
+                    INSERT INTO training_records
+                      (training_set_filename, created_at, stock_code, stock_name, start_year,
+                       start_month, total_capital, profit, return_rate, max_drawdown,
+                       buy_count, sell_count, fee_snapshot, final_tick)
+                    VALUES ('legacy.sqlite', ?, 'C', 'N', 2020, 1, 50000, 0, 0, 0, 0, 0, '{}', 7)
+                    """, arguments: [100 + i])
+            }
+        }
+
+        // 跑完整 migrator（含 0004）= 升级
+        try AppDBMigrations.makeMigrator().migrate(queue)
+
+        try queue.read { db in
+            let pendingKey = try String.fetchOne(db,
+                sql: "SELECT session_key FROM pending_training WHERE id = 1")
+            XCTAssertNotNil(pendingKey, "升级须回填既有 pending 行的 session_key")
+            XCTAssertFalse((pendingKey ?? "").isEmpty)
+            let nullKeyRecords = try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM training_records WHERE session_key IS NULL") ?? 0
+            XCTAssertEqual(nullKeyRecords, 2, "legacy records 保持 NULL（不回填）")
+            // 数据无损
+            let recCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM training_records") ?? 0
+            XCTAssertEqual(recCount, 2)
+            let filename = try String.fetchOne(db,
+                sql: "SELECT training_set_filename FROM pending_training WHERE id = 1")
+            XCTAssertEqual(filename, "legacy.sqlite")
+        }
+    }
+
+    // MARK: - 0004：legacy 多 NULL 与 UNIQUE index 共存（NULLs are distinct）
+
+    func test_0004_unique_index_allows_multiple_null_session_keys() throws {
+        let dbURL = try AppDBFixture.makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: dbURL.deletingLastPathComponent()) }
+        let queue = try AppDBFixture.openRaw(at: dbURL)
+        try queue.write { db in
+            for i in 0..<2 {     // session_key 不给 → NULL；两条 NULL 不撞 UNIQUE
+                try db.execute(sql: """
+                    INSERT INTO training_records
+                      (training_set_filename, created_at, stock_code, stock_name, start_year,
+                       start_month, total_capital, profit, return_rate, max_drawdown,
+                       buy_count, sell_count, fee_snapshot, final_tick)
+                    VALUES ('f.sqlite', ?, 'C', 'N', 2020, 1, 1, 0, 0, 0, 0, 0, '{}', 0)
+                    """, arguments: [i])
+            }
+            let dup = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM training_records") ?? 0
+            XCTAssertEqual(dup, 2)
+            // 同非-NULL key 二次插入必撞 UNIQUE
+            try db.execute(sql: """
+                INSERT INTO training_records
+                  (training_set_filename, created_at, stock_code, stock_name, start_year,
+                   start_month, total_capital, profit, return_rate, max_drawdown,
+                   buy_count, sell_count, fee_snapshot, final_tick, session_key)
+                VALUES ('f.sqlite', 9, 'C', 'N', 2020, 1, 1, 0, 0, 0, 0, 0, '{}', 0, 'K1')
+                """)
+            XCTAssertThrowsError(try db.execute(sql: """
+                INSERT INTO training_records
+                  (training_set_filename, created_at, stock_code, stock_name, start_year,
+                   start_month, total_capital, profit, return_rate, max_drawdown,
+                   buy_count, sell_count, fee_snapshot, final_tick, session_key)
+                VALUES ('f.sqlite', 10, 'C', 'N', 2020, 1, 1, 0, 0, 0, 0, 0, '{}', 0, 'K1')
+                """), "同 session_key 第二次 INSERT 须撞 UNIQUE")
         }
     }
 }
