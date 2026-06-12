@@ -450,6 +450,14 @@ struct EdgeBounceModelTests {
         }
     }
 
+    // P6 大 edge 量级悬殊点级失步（codex Plan-R14-F1）：edge=1e15、offset=1e21 → 重构丢 ~1e15 点（旧相对容差 1e6
+    //   会误收）→ ULP+绝对容差应拒（≳ 亚像素失步即 inert）。
+    @Test("large-edge magnitude-disparate offset is inert (capped tolerance)")
+    func largeEdgeDisparateInert() {
+        let m = EdgeBounceModel(initialVelocity: 0, offset: 1e21, minOffset: 0, maxOffset: 1e15)
+        #expect(m.shouldRun == false)
+    }
+
     // P6 large-edge overflow（round-trippable）：xNew 有限但 springEdge+xNew 溢出（codex Plan-R2-F1）→ guard；
     //   且 **consumer offset（从初值累积外溢 delta）真到 model edge**（codex Plan-R11-F1：track consumer，非只 model）。
     @Test("large finite round-trippable edge: consumer offset reaches model edge, no inf delta")
@@ -718,7 +726,9 @@ struct EdgeBounceModel: Equatable, Sendable {
         // 普通有限几何如 offset=-100/edge=-35.9 的 1-ULP 差；而量级悬殊失步的重构误差 ≈ |edge|（整端丢失）≫ 容差）。
         let correction = edge - offset
         let reconstructed = offset + correction
-        let roundTripTol = abs(edge) * 1e-9 + 1e-9
+        // 物理上限容差（codex Plan-R13-F1/R14-F1）：相对容差 `|edge|*1e-9` 在大 edge 处膨胀（edge=1e15→1e6 点）会误收
+        // 32768 点失步 → 改 **几 ULP(edge) + 绝对亚像素 epsilon**（容 1-ULP 重构噪声、拒任何 ≳ 亚像素的点级失步）。
+        let roundTripTol = 8 * edge.ulp + 1e-6
         let operable = boundsValid && correction.isFinite
             && abs(reconstructed - edge) <= roundTripTol
 
