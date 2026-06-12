@@ -4,7 +4,7 @@
 
 **Goal:** 交付一个纯物理、几何无关、可注入边界的边缘回弹组件（`EdgeBounceModel` + `DecelerationModel` boundary-aware 推进 + `DecelerationAnimator` additive bounce 路径），完全单测闭合；实时可见接线 deferred 为 residual `W3-11-R1`。
 
-**Architecture:** 减速段**复用 `DecelerationModel` damp-then-move 律**（新增 boundary-aware 推进，子步内跨边停在 edge 报帧相对剩余时间，无跨边时逐帧等价既有 `advance`）；越界段用**临界阻尼解析弹簧**（ζ=1 闭式传播 + 首次过边 clamp + 渐近 settle）。动画器新增 bounce-enabled 启动面，经统一 `FrameOutcome` + 共享 re-entrancy-safe `terminate`，既有 `start(initialVelocity:)`/`DecelerationModel.advance` 行为 byte-for-byte 不变。
+**Architecture（方案 A：帧率无关回弹，user 2026-06-12 裁决）：** 减速段用 **`DecelerationModel` damp-then-move 律 + 持久固定步累加器**（新增 boundary-aware 推进 `advance(dt:boundaryDistance:)` + additive `carry` 字段：固定 refInterval 步、跨 `advance` 携带余量 → 到达边界的速度/时刻**任意帧率/分区精确无关**，P3 端到端）；越界段用**临界阻尼解析弹簧**（ζ=1 闭式传播 + 首次过边 clamp + 渐近 settle）。动画器新增 bounce-enabled 启动面，经统一 `FrameOutcome` + 共享 re-entrancy-safe `terminate`。**既有 `start(initialVelocity:)` + `DecelerationModel.advance(dt:)` 行为 byte-for-byte 不变（P7）**；累加器与 `advance(dt:)` 仅相差 sub-refInterval 余量延迟（P4 within-substep，肉眼不可感知）。
 
 **Tech Stack:** Swift 6 / Swift Testing（`@Suite`/`@Test`/`#expect`）/ CoreGraphics / SwiftPM package `KlineTrainerContracts`（macOS host 全测 + Mac Catalyst build-for-testing required CI）。
 
@@ -54,27 +54,64 @@ struct DecelerationModelBoundaryTests {
     private let ref: CGFloat = 1.0 / 120.0
     private let thr: CGFloat = 0.5
 
-    // A. 无跨边时与 advance(dt:) 逐帧 delta + 终止序列严格相等（P4/P7 reduce 证）
-    @Test("no-crossing reduces to advance(dt:) frame-by-frame")
-    func noCrossingParity() {
-        // 边界远在前方（10_000pt），永不跨边
+    // A0. ref 对齐时累加器 == advance(dt:) 逐帧（dt==refInterval 整步，无 partial 余量 → exact parity）
+    @Test("ref-aligned: accumulator matches advance(dt:) frame-by-frame")
+    func refAlignedParity() {
         var plain = DecelerationModel(friction: f, stopThreshold: thr, refInterval: ref, velocity: 1000)
         var bounded = DecelerationModel(friction: f, stopThreshold: thr, refInterval: ref, velocity: 1000)
         var safety = 0
         while true {
             safety += 1; #expect(safety < 5000)
             let p = plain.advance(dt: ref)
-            let b = bounded.advance(dt: ref, boundaryDistance: 10_000)
+            let b = bounded.advance(dt: ref, boundaryDistance: 10_000)   // 边界远（永不跨边）
             switch (p, b) {
-            case (.move(let dp), .moved(let db)):
-                #expect(abs(dp - db) < 1e-12)
-            case (.stop, .stopped(let db)):
-                #expect(db == 0)
-                return                                  // 两者同帧终止
-            default:
-                Issue.record("outcome mismatch: \(p) vs \(b)"); return
+            case (.move(let dp), .moved(let db)): #expect(abs(dp - db) < 1e-12)
+            case (.stop, .stopped(let db)): #expect(db == 0); return     // 两者同帧终止
+            default: Issue.record("outcome mismatch: \(p) vs \(b)"); return
             }
         }
+    }
+
+    // A1. **累加器分区不变（方案 A 核心）**：同 elapsed、不同 dt 分区（ref / ref/3 / 不规则）→ velocity + 累计位移一致。
+    @Test("accumulator is partition-invariant over equal elapsed time")
+    func accumulatorPartitionInvariant() {
+        func runFor(elapsed: CGFloat, dt: CGFloat) -> (vel: CGFloat, dist: CGFloat) {
+            var m = DecelerationModel(friction: f, stopThreshold: thr, refInterval: ref, velocity: 1000)
+            var dist: CGFloat = 0; var t: CGFloat = 0
+            while t < elapsed - 1e-9 {
+                let step = Swift.min(dt, elapsed - t)
+                switch m.advance(dt: step, boundaryDistance: 1e9) {   // 边界极远（永不跨边）
+                case .moved(let d), .stopped(let d): dist += d
+                case .crossed: Issue.record("unexpected crossing"); return (m.velocity, dist)
+                }
+                t += step
+            }
+            return (m.velocity, dist)
+        }
+        let elapsed = 5 * ref
+        let a = runFor(elapsed: elapsed, dt: ref)          // 5 帧
+        let b = runFor(elapsed: elapsed, dt: ref / 3)      // 15 帧（前两帧 0 步，第 3 帧落 1 固定步…）
+        let c = runFor(elapsed: elapsed, dt: 2.5 * ref)    // 不规则
+        #expect(abs(a.vel - b.vel) < 1e-6 && abs(a.dist - b.dist) < 1e-6)
+        #expect(abs(a.vel - c.vel) < 1e-6 && abs(a.dist - c.dist) < 1e-6)
+    }
+
+    // A2. within-substep parity：累加器总滑行距离与 `advance(dt:)` 差 < 一个固定步位移（余量延迟，P4）。
+    @Test("accumulator total glide distance within one substep of DecelerationModel")
+    func accumulatorWithinSubstepParity() {
+        var acc = DecelerationModel(friction: f, stopThreshold: thr, refInterval: ref, velocity: 1000)
+        var accDist: CGFloat = 0
+        while true {
+            switch acc.advance(dt: ref / 3, boundaryDistance: 1e9) {   // 非 ref 对齐 → 余量延迟显现
+            case .moved(let d), .stopped(let d): accDist += d
+            case .crossed: break
+            }
+            if acc.velocity == 0 { break }
+        }
+        var plain = DecelerationModel(friction: f, stopThreshold: thr, refInterval: ref, velocity: 1000)
+        var plainDist: CGFloat = 0
+        while case .move(let d) = plain.advance(dt: ref) { plainDist += d }
+        #expect(abs(accDist - plainDist) < 1000 * ref)     // < 一个固定步位移（≈8.3pt @v1000）
     }
 
     // B. 跨边：停在 edge，delta == boundaryDistance，crossingVelocity 满足 damp-then-move
@@ -160,49 +197,57 @@ Expected: 编译失败（`advance(dt:boundaryDistance:)` / `BoundaryOutcome` 未
 
 - [ ] **Step 3: 实现 boundary-aware advancement（additive）**
 
-在 `DecelerationModel.swift` 的 `struct DecelerationModel { ... }` **内部**、`advance(dt:)` 方法**之后**追加（既有成员一行不改）：
+**(i)** 在 `struct DecelerationModel` 的 stored properties 区（紧随 `var velocity`）追加 **additive 字段**（既有 `advance(dt:)` **不碰它**，默认 0 → 既有行为/测试零改动；自定义 init 不设它用默认值）：
+```swift
+    /// boundary-aware 累加器的时间余量（跨 `advance(dt:boundaryDistance:)` 调用携带）。
+    /// 既有 `advance(dt:)` 路径不使用（默认 0）。spec 方案 A（帧率无关回弹）。
+    var carry: CGFloat = 0
+```
+
+**(ii)** 在 `advance(dt:)` 方法**之后**追加 `BoundaryOutcome` + **累加器** boundary-aware 推进（既有 `Outcome`/`advance(dt:)` 一行不改）：
 
 ```swift
     /// 单帧 boundary-aware 推进结果。
     enum BoundaryOutcome: Equatable, Sendable {
-        case moved(delta: CGFloat)                                            // 推进 delta，仍在界内
+        case moved(delta: CGFloat)                                            // 推进 delta（可为 0），仍在界内
         case stopped(delta: CGFloat)                                          // 界内自然停（速度 < 阈值）；delta 可为 0
         case crossed(delta: CGFloat, velocity: CGFloat, remainingTime: CGFloat) // 抵 edge：delta 恰到 edge；velocity=跨边速度；remainingTime=帧相对剩余
     }
 
-    /// 与 `advance(dt:)` 同 damp-then-move 子步律，但当累积位移在本帧内抵达 `boundaryDistance`
-    /// （带符号，delta-空间，= edge−当前offset）时，停在 edge 并报跨边速度 + **帧相对**剩余时间
-    /// （含跨边前所有完整子步，spec R10-F1）。无跨边时逐帧 delta 与 `advance(dt:)` 严格相等（spec P4/P7）。
+    /// **持久固定步累加器**（spec 方案 A，帧率无关回弹）：同 damp-then-move 律，但**固定 refInterval 步、
+    /// 跨 `advance` 调用携带余量 `carry`** → 物理推进与帧边界解耦 ⇒ 任意 dt 分区（不规则/亚-ref）下到达边界的
+    /// 速度/时刻**精确无关**（P3 端到端）。`boundaryDistance`（带符号，= edge−当前offset）；跨边在固定步内解析
+    /// 求子时、报帧相对 `remainingTime`。**注**：与既有 `advance(dt:)` 仅相差 sub-refInterval 余量延迟（P4 within-substep）。
     mutating func advance(dt: CGFloat, boundaryDistance: CGFloat) -> BoundaryOutcome {
-        guard dt > 0, dt < 1.0 else { velocity = 0; return .stopped(delta: 0) }
-        var remaining = dt
-        var consumed: CGFloat = 0
+        guard dt > 0, dt < 1.0 else { velocity = 0; carry = 0; return .stopped(delta: 0) }
+        carry += dt
         var totalDelta: CGFloat = 0
-        while remaining > 1e-9 {
-            let step = Swift.min(remaining, refInterval)
-            velocity *= pow(friction, step / refInterval)
-            guard velocity.isFinite else { velocity = 0; return .stopped(delta: totalDelta) }
-            if abs(velocity) < stopThreshold { velocity = 0; break }
-            // 子步内匀速（velocity 已在步首衰减）；检查是否抵达边界
-            let need = boundaryDistance - totalDelta
-            if need != 0, (need > 0) == (velocity > 0), abs(velocity * step) >= abs(need) {
-                let tWithin = need / velocity                       // ∈ (0, step]
-                return .crossed(delta: boundaryDistance, velocity: velocity,
-                                remainingTime: dt - (consumed + tWithin))
+        while carry >= refInterval {
+            velocity *= friction                                  // 整 refInterval 步衰减（step == refInterval）
+            guard velocity.isFinite else { velocity = 0; carry = 0; return .stopped(delta: totalDelta) }
+            if abs(velocity) < stopThreshold {
+                velocity = 0; carry = 0
+                return totalDelta != 0 ? .moved(delta: totalDelta) : .stopped(delta: 0)
             }
-            totalDelta += velocity * step
-            consumed += step
-            remaining -= step
+            let need = boundaryDistance - totalDelta
+            let stepDelta = velocity * refInterval                // 固定步内匀速（velocity 已步首衰减）
+            if need != 0, (need > 0) == (velocity > 0), abs(stepDelta) >= abs(need) {
+                let tWithin = need / velocity                     // ∈ (0, refInterval]
+                let remainingTime = carry - tWithin               // 跨边后本次 advance 剩余物理时间（含未消耗余量）
+                carry = 0
+                return .crossed(delta: boundaryDistance, velocity: velocity, remainingTime: remainingTime)
+            }
+            totalDelta += stepDelta
+            carry -= refInterval
         }
-        if velocity == 0 { return totalDelta != 0 ? .moved(delta: totalDelta) : .stopped(delta: 0) }
-        return .moved(delta: totalDelta)
+        return .moved(delta: totalDelta)                          // 余量 carry < refInterval 留下次（本帧 totalDelta 可能为 0）
     }
 ```
 
 - [ ] **Step 4: 跑测试确认通过 + 既有全绿**
 
 Run: `cd ios/Contracts && swift test 2>&1 | tail -5`
-Expected: PASS；总数 ≥ 799 + 6 新（DecelerationModelBoundaryTests）；既有 `DecelerationModel` 15 测零改动通过。
+Expected: PASS；总数 ≥ 799 + 新（DecelerationModelBoundaryTests）；既有 `DecelerationModel` 15 测零改动通过（`carry` 默认 0、`advance(dt:)` 不碰它）。
 
 - [ ] **Step 5: Commit**
 
@@ -415,15 +460,14 @@ struct EdgeBounceModelTests {
         #expect(m.debugOffset == big)
     }
 
-    // P3 端到端（codex R8-F1/R10-F1/R6-F1）：始界内·跨边，多子步跨边 → 60/120Hz/**不规则/亚-ref** 峰值穿透
-    //     全在 decel 子步容差内（聚合整帧过冲 bug 会给 ~7pt 差；子帧 handoff → < 1pt）。
-    @Test("end-to-end crossing: peak overscroll bounded across frame rates and partitions")
+    // P3 端到端（codex R8-F1：方案 A 累加器）：始界内·跨边·回弹，峰值穿透在 60/120Hz/不规则/亚-ref
+    //     **精确无关（紧容差）**——覆盖真实甩速包络 1000/2000/5000（方案 B 会给 v5000 下 ~5pt 差）。
+    @Test("end-to-end crossing: peak overscroll partition-invariant across frame rates and velocities")
     func endToEndCrossingFrameRates() {
-        func peak(partition: [CGFloat]) -> CGFloat {
-            // bounds [0, 1000], offset 990, velocity +1000 → 约 130pt 滑行 → 远超 → 跨边
-            var m = EdgeBounceModel(initialVelocity: 1000, offset: 990, minOffset: 0, maxOffset: 1000)
+        func peak(velocity: CGFloat, partition: [CGFloat]) -> CGFloat {
+            var m = EdgeBounceModel(initialVelocity: velocity, offset: 990, minOffset: 0, maxOffset: 1000)
             var p: CGFloat = 0; var i = 0; var frames = 0
-            while frames < 5000 {
+            while frames < 20000 {
                 frames += 1
                 let step = partition[i % partition.count]; i += 1
                 switch m.advance(dt: step) {
@@ -433,12 +477,14 @@ struct EdgeBounceModelTests {
             }
             return p
         }
-        let p120 = peak(partition: [ref])
-        let p60  = peak(partition: [2 * ref])
-        let pSub = peak(partition: [ref / 3])
-        let pIrr = peak(partition: [ref * 0.7, ref * 1.3, ref * 0.4])
-        #expect(p120 > 0)
-        for p in [p60, pSub, pIrr] { #expect(abs(p120 - p) < 1.0) }   // 子帧 handoff → 峰值帧率/分区无关至子步容差
+        for v in [CGFloat(1000), 2000, 5000] {
+            let p120 = peak(velocity: v, partition: [ref])
+            let p60  = peak(velocity: v, partition: [2 * ref])
+            let pSub = peak(velocity: v, partition: [ref / 3])
+            let pIrr = peak(velocity: v, partition: [ref * 0.7, ref * 1.3, ref * 0.4])
+            #expect(p120 > 0)
+            for p in [p60, pSub, pIrr] { #expect(abs(p120 - p) < 0.1) }   // 累加器 → 峰值帧率/分区精确无关（紧容差）
+        }
     }
 
     // P3 zero-crossing 事件时刻解析精确（codex R6-F1）：内向越界 → 解析 tzc=-A/B；跨前轨迹分区无关 + 终止精确钉 edge
@@ -1153,7 +1199,7 @@ Expected: 编译失败（`start(initialVelocity:fromOffset:minOffset:maxOffset:)
         guard isDecelerating, generation == currentGeneration else { return }
         switch runModel.advance(dt: dt) {
         case .move(let delta):
-            onUpdate?(delta)
+            if delta != 0 { onUpdate?(delta) }   // 累加器在 dt<refInterval 帧可返 0（既有路径 .move 恒非 0，guard 无害）
         case .finish(let finalDelta, let notifyFinish):
             terminate(finalDelta: finalDelta, notifyFinish: notifyFinish)
         }
@@ -1250,7 +1296,7 @@ git commit -m "docs(bounce): acceptance checklist + W3-11-R1 residual/runbook de
 
 ## Self-Review（plan 作者执行）
 
-**Spec coverage：** P1 钉边界（outwardSettlesAtEdge + exactEdgeOutwardFling）/ P2 首次过边 clamp（inwardClampsNoCrossing）/ P3 弹簧分区不变 + 端到端(60/120/不规则/亚-ref) + zero-crossing 事件时刻 + animator ≤1 帧界（springPartitionInvariantState + endToEndCrossingFrameRates + springZeroCrossingEventTime + Task3 finishLandsInEventTick + Task1 multi-substep）/ P4 界内 parity（inBoundsNoSpring + Task3 noCrossingLifecycleParity）/ **P5 单调性（peakMonotonicity：v↑→峰值↑ / k↑→峰值↓ + finiteness）**/ P6 防御（nonFiniteVelocityNormalizes + nonFiniteBoundsInert + extreme/largeEdge/oppositeExtreme + Task1 abnormalDt）/ P7 既有零改动（Task3 Step4 gate + Task1 noCrossingParity）/ P8 原子终止+finalDelta+onFinish 一致（abnormalDtOverscrolled + **sameTickMultiPhaseFinalDelta** + Task3 bounceSettles 累积落 edge）/ P9 re-entrancy（reentrantStart/ResetInTerminalUpdate）/ W3-11-R1 + runbook deferral（Task4）。**全覆盖。**
+**Spec coverage：** P1 钉边界（outwardSettlesAtEdge + exactEdgeOutwardFling）/ P2 首次过边 clamp（inwardClampsNoCrossing）/ P3 帧率无关端到端（方案 A 累加器，紧容差，覆盖 v1000/2000/5000）+ 弹簧分区不变 + 累加器分区不变 + zero-crossing 事件时刻 + animator ≤1 帧界（endToEndCrossingFrameRates + springPartitionInvariantState + Task1 accumulatorPartitionInvariant + springZeroCrossingEventTime + Task3 finishLandsInEventTick）/ P4 within-substep parity（Task1 refAlignedParity + accumulatorWithinSubstepParity + inBoundsNoSpring + Task3 noCrossingLifecycleParity〔ref 对齐〕）/ **P5 单调性（peakMonotonicity：v↑→峰值↑ / k↑→峰值↓ + finiteness）**/ P6 防御（nonFiniteVelocityNormalizes + nonFiniteBoundsInert + extreme/largeEdge/oppositeExtreme + Task1 abnormalDt）/ P7 既有零改动（Task3 Step4 gate + Task1 refAlignedParity + carry 默认 0）/ P8 原子终止+finalDelta+onFinish 一致（abnormalDtOverscrolled + **sameTickMultiPhaseFinalDelta** + Task3 bounceSettles 累积落 edge）/ P9 re-entrancy（reentrantStart/ResetInTerminalUpdate）/ W3-11-R1 + runbook deferral（Task4）。**全覆盖。**
 
 **类型一致性：** `BoundaryOutcome`（Task1）/ `FrameOutcome`（Task2 定义，Task3 复用）/ `EdgeBounceModel.advance→FrameOutcome` / `RunModel.advance→FrameOutcome` / `start(initialVelocity:fromOffset:minOffset:maxOffset:)` / `normalizeToEdgeDelta()` / `shouldRun`/`debugOffset`/`debugOverscroll` —— 跨 Task 签名一致。
 
