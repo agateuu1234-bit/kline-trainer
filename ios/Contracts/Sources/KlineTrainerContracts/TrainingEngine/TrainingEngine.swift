@@ -428,27 +428,76 @@ public final class TrainingEngine {
     // MARK: - 局终自动强平（E5b / §4.2.1 入口 1b / D7）
 
     /// 推进到 `>= maxTick` 且仍有持仓 → 按末根 .m3 收盘价强制全平（plan v1.5 L751）。
-    /// 走 E3 `forceCloseOnEnd`（裸 SellQuote，holding==position.shares 满足入口 1b caller 不变量）。
     /// 幂等：强平后 shares==0，再次到顶 guard 短路。
     private func forceCloseIfEnded() {
         guard tick.globalTickIndex >= tick.maxTick, position.shares > 0 else { return }
+        performForceClose()
+    }
+
+    /// 手动 on-demand 强平（RFC §4.4a）：用户点「结束本局」时调用，去掉 `>= maxTick` 门。
+    /// 前置 `flow.canBuySell()`（Normal/Replay ✅，Review ❌；opus R1-L4：「结束按钮」capability
+    /// 行的 intentional load-bearing proxy，恰与「买卖按钮」行同值）。按当前 tick 价、不推进 tick。
+    /// 幂等：空仓短路。**返回 `isSettlementSafe`** —— 顺位 7 caller 的路由信号（只在确认平仓**且**
+    /// finalize 用到的全部派生财务量有限时才返 true；否则 false，caller 不路由结算）。
+    /// **Review/disabled 恒返 false**（codex R3-medium：Review 禁手动结束，flat Review 不得误报可结算）。
+    /// ended UI 态 / 结算路由本身归顺位 7/8，非 engine 契约。
+    @discardableResult
+    public func forceCloseManually() -> Bool {
+        guard flow.canBuySell() else { return false }   // R3-medium：Review/disabled 永不经手动结束达成可结算
+        if position.shares > 0 { performForceClose() }
+        return isSettlementSafe
+    }
+
+    /// 终态结算安全谓词（codex plan R3/R4/R5）：持仓已平 **且** finalize 持久化用到的引擎级派生量全有限
+    /// —— `currentTotalCapital`（→ totalCapital/profit）、`returnRate`（→ 收益率；`initialCapital` 极小如
+    /// 1e-308 时 `(total-initial)/initial` 会溢出 inf，codex R5#2）、`drawdown`（→ maxDrawdown）。
+    /// 任一非有限即 false → caller 不路由结算（**安全降级**），避免 finalize 持久化 NaN/inf。
+    /// 注：污染源（init 派生 startTotal / advance drawdown / reader 病态价）根治归顺位 10；本谓词
+    /// 仅做 engine 级诚实门。**finalize 真正持久化的输出**（含 maxDrawdown 比率换算）的完整 fail-closed
+    /// 校验 + auto/manual 双路强制 = RFC §4.7 「单事务 finalization port」= 顺位 10a/10b（见 Scope 边界 3）。
+    /// 另含 `currentTotalCapital >= 0`（codex R6#2）：与引擎**既有非负资金不变量**（init 前置
+    /// `cashBalance >= 0`）一致。低面值清仓（如 100 股 ×0.01，最低佣金 5 → proceeds 负）会让 cash 转负；
+    /// 该 mutation 是否允许（负债 / floor / 拒绝）= **预先存在的 spec 级语义决定，归顺位 10 + 治理 residual**；
+    /// 本谓词只保证「结算门不把负资金态误报为可结算」。
+    private var isSettlementSafe: Bool {
+        position.shares == 0
+            && currentTotalCapital.isFinite
+            && currentTotalCapital >= 0
+            && returnRate.isFinite
+            && drawdown.peakCapital.isFinite
+            && drawdown.maxDrawdown.isFinite
+    }
+
+    /// 强平共用体（局终自动 + 手动 on-demand 共用，仅触发门不同 → 杜绝两套强平逻辑漂移）：
+    /// 按 `currentPrice` 全量清仓 → 记 sell marker/operation(.tier5) → `drawdown.update` 把
+    /// 已扣费 realized 总资金并入回撤（否则末根手续费造成的回撤被低报）。caller 须先验 `shares > 0`。
+    /// 走 E3 `forceCloseOnEnd`（裸 SellQuote，holding==position.shares 满足入口 1b caller 不变量）。
+    /// **整笔原子性（codex plan R2/R4）**：先算完整终态 `newCash = cashBalance + proceeds` 并校验
+    /// quote 各被写字段 **+ newCash** 全有限，**全有限才提交任一 mutation**；否则整笔原子 no-op 返 false。
+    /// 覆盖三类病态：①price≤0/非有限 → forceCloseOnEnd 返全零报价（shares==0 短路）；②有限极端价
+    /// → `makeSellQuote` 的 notional/proceeds 溢出 inf/NaN（quote 字段守）；③两有限值相加溢出
+    /// （`cashBalance + proceeds` → inf，newCash 守）。杜绝把非有限写进 cash/record / 留半平仓态。
+    @discardableResult
+    private func performForceClose() -> Bool {
         let price = currentPrice
         let quote = TradeCalculator.forceCloseOnEnd(
             holding: position.shares, averageCost: position.averageCost, price: price, fees: fees)
-        guard quote.shares > 0 else { return }   // 全零报价(非法 price)→ no-op
+        let newCash = cashBalance + quote.proceeds
+        guard quote.shares > 0,
+              quote.proceeds.isFinite, quote.commission.isFinite, quote.stampDuty.isFinite,
+              newCash.isFinite
+        else { return false }   // 报价溢出 / cash 和溢出 → 校验在 mutation 之前 → 整笔原子 no-op
         let tickAtClose = tick.globalTickIndex
         position.sell(shares: quote.shares)
-        cashBalance += quote.proceeds
+        cashBalance = newCash                       // 用预校验过的终值（codex R4：mutation 前已验完整终态）
         markers.append(TradeMarker(globalTick: tickAtClose, price: price, direction: .sell))
         tradeOperations.append(TradeOperation(
             globalTick: tickAtClose, period: .m3, direction: .sell, price: price,
             shares: quote.shares, positionTier: .tier5,
             commission: quote.commission, stampDuty: quote.stampDuty,
             totalCost: quote.proceeds, createdAt: candleDatetime(atTick: tickAtClose)))
-        // 强平后再次更新：把到手 proceeds（已扣佣金+印花税）的实现总资金反映进最大回撤——
-        // 这是 advanceAndAccount 内首次 update（仅市值，仓未平）之外的第二次 update，不可省略
-        // （否则末根手续费造成的回撤被低报）。对应测试 advancingToEndWithHoldingForceCloses 的 maxDrawdown 断言。
         drawdown.update(currentCapital: currentTotalCapital)
+        return true
     }
 
     // MARK: - 场景生命周期中继（D6）
