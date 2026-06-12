@@ -592,13 +592,15 @@ struct TrainingSessionPersistenceTests {
             _ = try await coord.finalize(engine: engine)
         }
         // RFC §4.7a：失败后 session 仍活跃（activeEngine/Reader/SessionKey 均非 nil）
-        #expect(coord.activeEngine != nil)
+        #expect(coord.activeEngine === engine)
         #expect(coord.activeReader != nil)
         #expect(coord.activeSessionKey != nil)
+        #expect(try pending.loadPending() != nil)              // 失败保留：pending 仍存在（§4.7a）
         // 重试成功
         let id = try #require(try await coord.finalize(engine: engine))
         #expect(id > 0)
         #expect(try pending.loadPending() == nil)              // 成功后 pending 清空
+        #expect(port.finalizeCallCount == 2)                   // port 调用两次（首次失败 + 重试成功）
     }
 
     @Test("finalize 幂等：同 sessionKey 重试 → 返相同 id（RFC §4.7c 幂等锚）")
