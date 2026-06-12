@@ -286,6 +286,7 @@ import CoreGraphics
 struct EdgeBounceModelTests {
 
     private let ref: CGFloat = 1.0 / 120.0
+    private let f: CGFloat = 0.94          // friction（与 DecelerationModel 默认一致；codex Plan-R13-F2：本 suite 自带）
 
     /// 跑到终止，返回 (累积位移, onFinish 是否触发, 帧数, 末速度峰值穿透绝对值)。
     @discardableResult
@@ -434,6 +435,19 @@ struct EdgeBounceModelTests {
         // offset=-MAX/2 in-bounds [-MAX, 10]，velocity+ → 向 edge 10 减速，但 10-(-MAX/2) 舍入丢小端 → 不可逆
         let m = EdgeBounceModel(initialVelocity: big * 0.5, offset: -big / 2, minOffset: -big, maxOffset: 10)
         #expect(m.shouldRun == false)                 // 减速相也查 round-trip → 拒绝
+    }
+
+    // P6 round-trip 容差不误拒普通几何（codex Plan-R13-F1）：裸 == 会因 1-ULP 误拒 offset=-100/edge=-35.9；
+    //   ULP-scaled 容差应放行。+ 普通量级确定性扫（越界或界内有速度均应 shouldRun）。
+    @Test("ordinary finite geometry not falsely rejected by round-trip tolerance")
+    func ordinaryFiniteOperable() {
+        #expect(EdgeBounceModel(initialVelocity: 0, offset: -100, minOffset: -35.9, maxOffset: 1000).shouldRun)
+        for offI in stride(from: -2000, through: 2000, by: 173) {
+            for hi in [CGFloat(10), 100, 1000] {
+                let m = EdgeBounceModel(initialVelocity: 1000, offset: CGFloat(offI), minOffset: -hi, maxOffset: hi)
+                #expect(m.shouldRun)                  // 普通量级 round-trip 必成立 → 不误拒
+            }
+        }
     }
 
     // P6 large-edge overflow（round-trippable）：xNew 有限但 springEdge+xNew 溢出（codex Plan-R2-F1）→ guard；
@@ -698,12 +712,15 @@ struct EdgeBounceModel: Equatable, Sendable {
         } else {
             ph = .decelerating; edge = (v >= 0) ? hi : lo
         }
-        // 可操作性（codex Plan-R3-F1/R11-F1/R12-F1）：到所选 edge 的归一修正 `edge−offset` 须 **round-trippable**——
-        // 即 `offset + (edge−offset) == edge`（不仅有限）。**减速相也须查**（codex R12-F1：减速可跨边后 snap model 至 edge，
-        // 而累积 delta 因量级悬殊使 consumer 落 0 = 失步；减速中 offset 仅**更靠近** edge，故 init 查 `edge−offset` 已足）。
-        // 不可逆（offset 与 edge 量级悬殊：MAX/2 vs 10，修正舍入丢小端）→ inert（no-op，绝不 snap 致失步）。
+        // 可操作性（codex Plan-R3-F1/R11-F1/R12-F1/R13-F1）：到所选 edge 的归一修正须 **round-trippable**——
+        // `offset + (edge−offset) ≈ edge`。**减速相也查**（R12-F1：减速跨边后 snap model 至 edge，而累积 delta 因量级悬殊
+        // 使 consumer 失步；减速中 offset 仅更靠近 edge，init 查已足）。**用 ULP-scaled 容差**（R13-F1：裸 `==` 会误拒
+        // 普通有限几何如 offset=-100/edge=-35.9 的 1-ULP 差；而量级悬殊失步的重构误差 ≈ |edge|（整端丢失）≫ 容差）。
         let correction = edge - offset
-        let operable = boundsValid && correction.isFinite && offset + correction == edge
+        let reconstructed = offset + correction
+        let roundTripTol = abs(edge) * 1e-9 + 1e-9
+        let operable = boundsValid && correction.isFinite
+            && abs(reconstructed - edge) <= roundTripTol
 
         self.geometryValid = operable
         self.minOffset = lo
