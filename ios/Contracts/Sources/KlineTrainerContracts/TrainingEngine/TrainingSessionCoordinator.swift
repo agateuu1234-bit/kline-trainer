@@ -232,6 +232,43 @@ public final class TrainingSessionCoordinator {
         return id
     }
 
+    /// 非持久化 replay 结算 payload（RFC §4.4e）：replay 结束强平后，构造 in-memory `TrainingRecord`
+    /// （复用类型）供顺位 8 SettlementView 呈现。**不持久化不变量**：不写 `training_records`、不触
+    /// `pending_training`、不改 `finalize`（其对 replay 仍返 nil）。用**原局 FeeSnapshot**（replay 构造时
+    /// 继承）+ 强平后终态。字段语义刻意镜像 `finalize`（D1 方案 A：totalCapital=起始资金；profit/收益率/
+    /// 回撤比率/计数同口径），由 drift-guard 测试守；**有意不抽 finalize 共享 helper**，保 finalize 不在
+    /// 本 PR diff 内（§4.7 finalize-gating residual 归顺位 10，不被本 PR 触碰）。
+    /// 前置：replay 模式 + 活跃会话（caller=顺位 8 路由）。强平由 caller 先行（本方法只读终态）。
+    public func replaySettlementPayload(engine: TrainingEngine) throws -> TrainingRecord {
+        guard engine.flow.mode == .replay else {
+            throw AppError.internalError(module: "E6b", detail: "replaySettlementPayload requires replay flow")
+        }
+        guard activeEngine === engine, let reader = activeReader, let file = activeFile else {
+            throw AppError.internalError(module: "E6b", detail: "replaySettlementPayload without active session context")
+        }
+        let meta = try reader.loadMeta()
+        let starting = engine.initialCapital
+        let profit = engine.currentTotalCapital - starting
+        let (year, month) = Self.startYearMonth(from: meta.startDatetime)
+        return TrainingRecord(
+            id: nil,
+            trainingSetFilename: file.filename,
+            createdAt: now(),
+            stockCode: meta.stockCode,
+            stockName: meta.stockName,
+            startYear: year,
+            startMonth: month,
+            totalCapital: starting,
+            profit: profit,
+            returnRate: engine.returnRate,
+            maxDrawdown: Self.drawdownRatio(absolute: engine.drawdown.maxDrawdown,
+                                            peak: engine.drawdown.peakCapital),
+            buyCount: engine.tradeOperations.filter { $0.direction == .buy }.count,
+            sellCount: engine.tradeOperations.filter { $0.direction == .sell }.count,
+            feeSnapshot: engine.fees,
+            finalTick: engine.tick.globalTickIndex)
+    }
+
     /// session 结束清理（spec L1666/L1684，不 throws）：关闭 reader 并清空全部活跃上下文（D10）。
     public func endSession() async {
         activeReader?.close()

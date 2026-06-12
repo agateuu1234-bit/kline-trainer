@@ -644,6 +644,14 @@ extension TrainingEngine {
         precondition(drawings.indices.contains(index), "deleteDrawing index out of bounds")
         drawings.remove(at: index)
     }
+
+    /// 追加一条 committed 画线进 `engine.drawings`（RFC §4.4c）。`engine.drawings` 是唯一渲染 +
+    /// 持久化真相（`@Observable` 数组突变自动触发重渲染，同 `deleteDrawing`；进入 finalize/pending
+    /// 持久化路径）。顺位 4 `DrawingInputController` 在 `manager.commit()` 后调本方法，使
+    /// `manager.completedDrawings → engine.drawings` 单一真相（manager 仅作输入暂存）。
+    public func appendDrawing(_ drawing: DrawingObject) {
+        drawings.append(drawing)
+    }
 }
 
 #if DEBUG

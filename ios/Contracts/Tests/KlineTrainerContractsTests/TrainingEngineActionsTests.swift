@@ -680,4 +680,30 @@ import CoreGraphics
         #expect(e.cashBalance < 0)                       // 负现金（fee>proceeds 预先存在）
         #expect(safe == false)                           // 结算门据非负不变量拒报可结算
     }
+
+    // MARK: - Wave 3 顺位 6b：appendDrawing（RFC §4.4c 画线投影单一真相）
+
+    static func horizontalDrawing(price: Double, candleIndex: Int = 0) -> DrawingObject {
+        DrawingObject(toolType: .horizontal,
+                      anchors: [DrawingAnchor(period: .m3, candleIndex: candleIndex, price: price)],
+                      isExtended: false, panelPosition: 0)
+    }
+
+    @Test func appendDrawingAddsToDrawings() {
+        let e = Self.tradeEngine(closes: [10, 10, 10])
+        #expect(e.drawings.isEmpty)
+        let d = Self.horizontalDrawing(price: 10.5)
+        e.appendDrawing(d)
+        #expect(e.drawings.count == 1)
+        #expect(e.drawings.last == d)                // 追加进唯一真相
+    }
+
+    @Test func appendDrawingAccumulatesInOrder() {
+        let e = Self.tradeEngine(closes: [10, 10, 10])
+        let d0 = Self.horizontalDrawing(price: 10.1)
+        let d1 = Self.horizontalDrawing(price: 10.2)
+        e.appendDrawing(d0)
+        e.appendDrawing(d1)
+        #expect(e.drawings == [d0, d1])              // 顺序保留、累加
+    }
 }
