@@ -621,8 +621,8 @@ struct TrainingSessionPersistenceTests {
             settings: SettingsStore(settingsDAO: CapitalDAO(capital: 10_000)))
         let engine = try #require(try await coord.resumePending())
         let id1 = try #require(try await coord.finalize(engine: engine))
-        // 模拟 crash-recovery：手动重新注入 pending（同 sessionKey "SK-test"）以允许再次 finalize
-        // 但 port 已经 keyed["SK-test"] → 返同 id（幂等）
+        // 证明 fake 层幂等（§4.7c）：重新注入同 sessionKey pending → port.keyed["SK-test"] 已存 → 返同 id。
+        // 注：真实 DB 层幂等由 SessionFinalizationPortTests 覆盖；此处仅验证 fake 契约正确。
         try pending.savePending(try Self.deterministicPending())
         // 重建 session（resumePending 会从 pending 取回 "SK-test"）
         let coord2 = TrainingSessionCoordinator(

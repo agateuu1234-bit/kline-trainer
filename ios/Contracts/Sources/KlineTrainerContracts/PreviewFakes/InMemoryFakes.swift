@@ -144,13 +144,18 @@ public final class InMemoryPendingTrainingRepository: PendingTrainingRepository,
 /// Wave 3 顺位 10a：SessionFinalizationPort 的 in-memory fake。
 /// 组合既有 record/pending 两 fake（保证 fake 状态一致）；mirror 生产单事务语义：
 /// 失败注入时**零状态变更**（原子）；同 sessionKey 重试幂等返已存 id。
+/// 通常由 @MainActor 测试驱动；fake 本身标 @unchecked Sendable 以满足协议要求。
 public final class InMemorySessionFinalizationPort: SessionFinalizationPort, @unchecked Sendable {
     private let lock = NSLock()
     private let records: InMemoryRecordRepository
     private let pending: InMemoryPendingTrainingRepository
     private var keyed: [String: Int64] = [:]
-    /// 注入下一次 finalizeSession 抛错（消费后自动清除）。
-    public var failNextFinalize: AppError?
+    /// 注入下一次 finalizeSession 抛错（消费后自动清除）。lock 保护读写。
+    private var _failNextFinalize: AppError?
+    public var failNextFinalize: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextFinalize }
+        set { lock.lock(); defer { lock.unlock() }; _failNextFinalize = newValue }
+    }
     /// 调用计数（review/replay 不触 port 的断言用）。
     public private(set) var finalizeCallCount = 0
 
@@ -161,19 +166,24 @@ public final class InMemorySessionFinalizationPort: SessionFinalizationPort, @un
 
     public func finalizeSession(record: TrainingRecord, ops: [TradeOperation],
                                 drawings: [DrawingObject], sessionKey: String) throws -> Int64 {
-        lock.lock(); defer { lock.unlock() }
+        // 自有 lock 只护 spy/keyed 状态；不持锁调用内层 fake（各有自锁），杜绝嵌套锁
+        lock.lock()
         finalizeCallCount += 1
-        if let err = failNextFinalize {
-            failNextFinalize = nil
+        if let err = _failNextFinalize {
+            _failNextFinalize = nil
+            lock.unlock()
             throw err            // 原子：抛前零状态变更（mirror 生产事务 rollback）
         }
-        if let existing = keyed[sessionKey] {       // 幂等：命中仍需清 pending（mirror 生产）
+        let existing = keyed[sessionKey]
+        lock.unlock()
+
+        if let existing {                       // 幂等：命中仍清 pending（mirror 生产 §4.7c）
             try pending.clearPending()
             return existing
         }
         let id = try records.insertRecord(record, ops: ops, drawings: drawings)
-        keyed[sessionKey] = id
         try pending.clearPending()
+        lock.lock(); keyed[sessionKey] = id; lock.unlock()
         return id
     }
 }

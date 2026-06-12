@@ -214,6 +214,7 @@ public final class TrainingSessionCoordinator {
     /// `flow.shouldSaveRecord()==false`（Review/Replay）→ 早返 nil，不插记录、不动 pending（D2）。
     /// total_capital = 本局**起始**资金（方案 A / D1）；maxDrawdown 元→负比率（D6）；起始年月按 UTC+8（D7）。
     /// 缺活跃上下文 → .internalError（D9）。
+    /// 通过 SessionFinalizationPort 单事务执行（§4.7b）；同 sessionKey 重试幂等（§4.7c）。
     public func finalize(engine: TrainingEngine) async throws -> Int64? {
         guard engine.flow.shouldSaveRecord() else { return nil }   // D2：Review/Replay 不入账
         // D4 加固（final-review L2）：engine 必须是当前活跃 session 的引擎，否则会把活跃 session 的
