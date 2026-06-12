@@ -89,11 +89,12 @@ struct DecelerationModelBoundaryTests {
             return (m.velocity, dist)
         }
         let elapsed = 5 * ref
-        let a = runFor(elapsed: elapsed, dt: ref)          // 5 帧
-        let b = runFor(elapsed: elapsed, dt: ref / 3)      // 15 帧（前两帧 0 步，第 3 帧落 1 固定步…）
-        let c = runFor(elapsed: elapsed, dt: 2.5 * ref)    // 不规则
-        #expect(abs(a.vel - b.vel) < 1e-6 && abs(a.dist - b.dist) < 1e-6)
-        #expect(abs(a.vel - c.vel) < 1e-6 && abs(a.dist - c.dist) < 1e-6)
+        let a = runFor(elapsed: elapsed, dt: ref)          // 基准：恰 5 固定步
+        // 含 codex Plan-R10-F1 反例 dt=2.5ref（浮点累积曾丢一步）+ 整数倍邻域（ULP 容差稳健性）
+        for dt in [ref / 3, 2.5 * ref, ref * 0.999999, ref * 1.000001, 5 * ref] {
+            let r = runFor(elapsed: elapsed, dt: dt)
+            #expect(abs(a.vel - r.vel) < 1e-6 && abs(a.dist - r.dist) < 1e-6)   // 同 5 固定步 → state 一致
+        }
     }
 
     // A2. within-substep parity：累加器总滑行距离与 `advance(dt:)` 差 < 一个固定步位移（余量延迟，P4）。
@@ -221,8 +222,11 @@ Expected: 编译失败（`advance(dt:boundaryDistance:)` / `BoundaryOutcome` 未
     mutating func advance(dt: CGFloat, boundaryDistance: CGFloat) -> BoundaryOutcome {
         guard dt > 0, dt < 1.0 else { velocity = 0; carry = 0; return .stopped(delta: 0) }
         carry += dt
+        // ULP-scaled 容差（codex Plan-R10-F1）：`carry += dt` 累积浮点误差，使 carry 在固定步整数倍处可差几 ULP，
+        // 裸 `carry >= refInterval` 会丢一固定步 → 破坏分区不变（如 elapsed=5ref 在 dt=2.5ref 分区只跑 4 步）。
+        let tol = refInterval * 1e-9
         var totalDelta: CGFloat = 0
-        while carry >= refInterval {
+        while carry >= refInterval - tol {                        // 容差防丢步
             velocity *= friction                                  // 整 refInterval 步衰减（step == refInterval）
             guard velocity.isFinite else { velocity = 0; carry = 0; return .stopped(delta: totalDelta) }
             if abs(velocity) < stopThreshold {
@@ -233,13 +237,14 @@ Expected: 编译失败（`advance(dt:boundaryDistance:)` / `BoundaryOutcome` 未
             let stepDelta = velocity * refInterval                // 固定步内匀速（velocity 已步首衰减）
             if need != 0, (need > 0) == (velocity > 0), abs(stepDelta) >= abs(need) {
                 let tWithin = need / velocity                     // ∈ (0, refInterval]
-                let remainingTime = carry - tWithin               // 跨边后本次 advance 剩余物理时间（含未消耗余量）
+                let remainingTime = Swift.max(0, carry - tWithin) // 跨边后本次 advance 剩余物理时间（含未消耗余量）
                 carry = 0
                 return .crossed(delta: boundaryDistance, velocity: velocity, remainingTime: remainingTime)
             }
             totalDelta += stepDelta
             carry -= refInterval
         }
+        if carry < tol { carry = 0 }                              // clamp 微小（含 -tol..tol）残留，防累积偏差/下次丢步
         return .moved(delta: totalDelta)                          // 余量 carry < refInterval 留下次（本帧 totalDelta 可能为 0）
     }
 ```
