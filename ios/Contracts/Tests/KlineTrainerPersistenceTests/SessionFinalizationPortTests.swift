@@ -105,14 +105,29 @@ struct SessionFinalizationPortTests {
             let pages = try Int.fetchOne(d, sql: "PRAGMA page_count") ?? 1
             try d.execute(sql: "PRAGMA max_page_count = \(pages)")
         }
+        defer { try? db.dbQueue.write { d in try d.execute(sql: "PRAGMA max_page_count = 1073741823") } }
         let bigOps = (0..<2_000).map { Self.op(tick: $0) }   // 足量 payload 强制页分配
         #expect(throws: (any Error).self) {
             _ = try db.finalizeSession(record: Self.record(), ops: bigOps,
                                        drawings: [], sessionKey: "SK-F")
         }
-        // 解除上限后验证两效果都未发生（rollback 双向）
-        try db.dbQueue.write { d in try d.execute(sql: "PRAGMA max_page_count = 1073741823") }
+        // 验证两效果都未发生（rollback 双向）；defer 在作用域末尾解除上限
         #expect(try db.loadPending() != nil, "pending 须原样保留")
         #expect(try db.listRecords(limit: nil).isEmpty, "record 须未入库")
+    }
+
+    @Test("retry 幂等 + 残留 pending：幂等命中路径仍清 pending（§4.7c retry 完整语义）")
+    func finalize_idempotent_hit_still_clears_stale_pending() throws {
+        let dbURL = try AppDBFixture.makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: dbURL.deletingLastPathComponent()) }
+        let db = try DefaultAppDB(dbPath: dbURL)
+        try db.savePending(Self.pending(sessionKey: "SK-R2"))
+        let id1 = try db.finalizeSession(record: Self.record(), ops: [], drawings: [], sessionKey: "SK-R2")
+        // 模拟 stale pending 复存（如 crash 前最后一次 autosave 落盘晚于 finalize 观测）
+        try db.savePending(Self.pending(sessionKey: "SK-R2"))
+        let id2 = try db.finalizeSession(record: Self.record(createdAt: 99), ops: [], drawings: [], sessionKey: "SK-R2")
+        #expect(id1 == id2)
+        #expect(try db.loadPending() == nil, "幂等命中路径必须同样清 pending")
+        #expect(try db.listRecords(limit: nil).count == 1)
     }
 }
