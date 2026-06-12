@@ -436,4 +436,83 @@ struct TrainingSessionPersistenceTests {
         let p = try #require(try pending.loadPending())
         #expect(p.drawings == [d])                   // engine.drawings → pending.drawings 单一真相
     }
+
+    // MARK: - Wave 3 顺位 6b：replaySettlementPayload（RFC §4.4e 非持久化 replay 结算 payload）
+
+    /// 建一个活跃 replay 会话（seed 源 record + 注入可控 meta 的 reader），返回 (coord, engine, records, pending)。
+    static func makeReplaySession(
+        capital: Double = 100_000,
+        meta: TrainingSetMeta = TrainingSetMeta(stockCode: "600000", stockName: "测试股",
+                                                startDatetime: 1_583_000_000, endDatetime: 1_583_100_000)
+    ) async throws -> (TrainingSessionCoordinator, TrainingEngine,
+                       InMemoryRecordRepository, InMemoryPendingTrainingRepository) {
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile(filename: "set.sqlite")])
+        let src = TrainingRecord(
+            id: nil, trainingSetFilename: "set.sqlite", createdAt: 0,
+            stockCode: "ignored", stockName: "ignored", startYear: 2000, startMonth: 1,
+            totalCapital: capital, profit: 0, returnRate: 0, maxDrawdown: 0,
+            buyCount: 0, sellCount: 0,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true), finalTick: 7)
+        let srcId = try records.insertRecord(src, ops: [], drawings: [])
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)),
+            recordRepo: records, pendingRepo: pending,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: capital)))
+        let engine = try await coord.replay(recordId: srcId)
+        return (coord, engine, records, pending)
+    }
+
+    @Test("replaySettlementPayload: 强平后终态 → in-memory TrainingRecord（原局 fees + meta）")
+    func replaySettlementPayload_returnsTerminalStateRecord() async throws {
+        let (coord, engine, _, _) = try await Self.makeReplaySession(capital: 100_000)
+        _ = engine.buy(panel: .upper, tier: .tier1)      // replay 可交易；建非平凡终态
+        engine.forceCloseManually()                       // 6a：强平 → 持仓平
+        #expect(engine.position.shares == 0)
+        let payload = try coord.replaySettlementPayload(engine: engine)
+        #expect(payload.id == nil)                                       // 非持久（无 server id）
+        #expect(payload.totalCapital == engine.initialCapital)          // D1 方案 A：起始资金
+        #expect(payload.profit == engine.currentTotalCapital - engine.initialCapital)
+        #expect(payload.returnRate == engine.returnRate)
+        #expect(payload.feeSnapshot == engine.fees)                      // 原局 FeeSnapshot
+        #expect(payload.stockCode == "600000")                          // 来自 reader.loadMeta()
+        #expect(payload.stockName == "测试股")
+        #expect(payload.finalTick == 3)                                 // buy@tick0 → m60 步进 3 → tick3（非自指）
+        #expect(payload.buyCount == 1)                                  // 1 笔买入
+        #expect(payload.sellCount == 1)                                 // forceCloseManually 的 1 笔强平卖出
+    }
+
+    @Test("replaySettlementPayload: 非持久化不变量 —— 不写 record、不触 pending，DB 不变")
+    func replaySettlementPayload_doesNotPersist() async throws {
+        let (coord, engine, records, pending) = try await Self.makeReplaySession()
+        let recordsBefore = try records.listRecords(limit: nil).count   // = 1（仅 seed 的源 record）
+        _ = engine.buy(panel: .upper, tier: .tier1)
+        engine.forceCloseManually()
+        _ = try coord.replaySettlementPayload(engine: engine)
+        #expect(try records.listRecords(limit: nil).count == recordsBefore)   // 无新 insert
+        #expect(try pending.loadPending() == nil)                             // pending 不动
+        // finalize 对 replay 仍返 nil（持久化路径不变）
+        #expect(try await coord.finalize(engine: engine) == nil)
+        #expect(try records.listRecords(limit: nil).count == recordsBefore)   // finalize 也未插
+    }
+
+    @Test("replaySettlementPayload: 非 replay 模式 → throws（caller-contract 守卫）")
+    func replaySettlementPayload_throwsInNonReplayMode() async throws {
+        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
+        let engine = try await coord.startNewNormalSession()   // .normal
+        #expect(throws: AppError.self) {
+            _ = try coord.replaySettlementPayload(engine: engine)
+        }
+    }
+
+    @Test("replaySettlementPayload: 无活跃会话 / engine 身份不符 → throws")
+    func replaySettlementPayload_throwsWithoutActiveSession() async throws {
+        let (coord, engine, _, _) = try await Self.makeReplaySession()
+        await coord.endSession()                               // 清活跃上下文
+        #expect(throws: AppError.self) {
+            _ = try coord.replaySettlementPayload(engine: engine)
+        }
+    }
 }
