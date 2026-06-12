@@ -90,7 +90,8 @@ struct AppStateCodableTests {
             drawings: [],
             startedAt: 1_700_000_000,
             accumulatedCapital: 10_000,
-            drawdown: DrawdownAccumulator(peakCapital: 10_000, maxDrawdown: 500)
+            drawdown: DrawdownAccumulator(peakCapital: 10_000, maxDrawdown: 500),
+            sessionKey: "SK-test"
         )
         let data = try JSONEncoder().encode(pend)
         let decoded = try JSONDecoder().decode(PendingTraining.self, from: data)

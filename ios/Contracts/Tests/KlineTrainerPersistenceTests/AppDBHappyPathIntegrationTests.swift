@@ -32,7 +32,8 @@ final class AppDBHappyPathIntegrationTests: XCTestCase {
             drawings: [],
             startedAt: 1_700_000_000_000,
             accumulatedCapital: 10_000,
-            drawdown: .initial)
+            drawdown: .initial,
+            sessionKey: "SK-test")
         try db.savePending(pending)
 
         // ④ session 结算 → 写 record + clear pending

@@ -410,7 +410,8 @@ final class InMemoryDBFakesTests: XCTestCase {
                         feeSnapshot: FeeSnapshot(commissionRate: 0, minCommissionEnabled: false),
                         tradeOperations: [], drawings: [],
                         startedAt: 0, accumulatedCapital: 0,
-                        drawdown: .initial)
+                        drawdown: .initial,
+                        sessionKey: "SK-test")
     }
 }
 #endif

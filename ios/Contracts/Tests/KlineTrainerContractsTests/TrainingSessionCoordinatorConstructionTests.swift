@@ -218,7 +218,8 @@ struct TrainingSessionCoordinatorConstructionTests {
             positionData: posData, cashBalance: cash,
             feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
             tradeOperations: ops, drawings: [], startedAt: 1,
-            accumulatedCapital: accumulated, drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 5_000))
+            accumulatedCapital: accumulated, drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 5_000),
+            sessionKey: "SK-test")
     }
 
     @Test("resumePending: 无 pending → 返回 nil（不抛、不写 active）")

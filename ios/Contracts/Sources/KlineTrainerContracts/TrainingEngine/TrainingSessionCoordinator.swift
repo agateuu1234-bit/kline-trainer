@@ -191,7 +191,8 @@ public final class TrainingSessionCoordinator {
             drawings: engine.drawings,
             startedAt: started,
             accumulatedCapital: engine.initialCapital,         // D4：本局起始资金
-            drawdown: engine.drawdown)
+            drawdown: engine.drawdown,
+            sessionKey: "")                                    // Task 4 接线占位（10a plan Task 4 会替换为 activeSessionKey）
         try pendingRepo.savePending(pending)
     }
 

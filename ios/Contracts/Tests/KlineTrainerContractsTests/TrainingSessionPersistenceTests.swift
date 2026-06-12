@@ -273,7 +273,8 @@ struct TrainingSessionPersistenceTests {
             ],
             drawings: [], startedAt: 1,
             accumulatedCapital: 100_000,
-            drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 5_000))
+            drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 5_000),
+            sessionKey: "SK-test")
     }
 
     /// resume 路径 coordinator（StubFactory + MetaSpyReader 控制 meta；pending 注入）。
@@ -388,7 +389,8 @@ struct TrainingSessionPersistenceTests {
             positionData: try JSONEncoder().encode(pos), cashBalance: 90_000,
             feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
             tradeOperations: [], drawings: [], startedAt: 1,
-            accumulatedCapital: 100_000, drawdown: .initial))
+            accumulatedCapital: 100_000, drawdown: .initial,
+            sessionKey: "SK-test"))
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pending,

@@ -65,11 +65,20 @@ final class DefaultPendingTrainingRepositoryTests: XCTestCase {
         XCTAssertNoThrow(try db.clearPending())
     }
 
+    // 用例 6：sessionKey round-trip（session_key 列读写，RFC §4.7c）
+    func test_savePending_roundTrips_sessionKey() throws {
+        let pending = makePending(globalTickIndex: 1, sessionKey: "SK-roundtrip-1")
+        try db.savePending(pending)
+        let loaded = try db.loadPending()
+        XCTAssertEqual(loaded?.sessionKey, "SK-roundtrip-1")
+    }
+
     // MARK: - Helper
 
     private func makePending(globalTickIndex: Int = 0,
                              cashBalance: Double = 10_000,
-                             accumulatedCapital: Double = 10_000) -> PendingTraining {
+                             accumulatedCapital: Double = 10_000,
+                             sessionKey: String = "SK-default") -> PendingTraining {
         PendingTraining(
             trainingSetFilename: "set-A.zip",
             globalTickIndex: globalTickIndex,
@@ -90,7 +99,8 @@ final class DefaultPendingTrainingRepositoryTests: XCTestCase {
             ],
             startedAt: 1_700_000_000_000,
             accumulatedCapital: accumulatedCapital,
-            drawdown: DrawdownAccumulator(peakCapital: 11_000, maxDrawdown: 500)
+            drawdown: DrawdownAccumulator(peakCapital: 11_000, maxDrawdown: 500),
+            sessionKey: sessionKey
         )
     }
 }
