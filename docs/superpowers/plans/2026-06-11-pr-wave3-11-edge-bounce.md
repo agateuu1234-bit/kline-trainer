@@ -507,6 +507,49 @@ struct EdgeBounceModelTests {
         #expect(abs(fd! - (10 - 15)) < 1e-9)            // finalDelta = edge - frameEntry
         #expect(m.debugOffset == 10)
     }
+
+    // P8 same-tick 多相：一帧内 decel→跨边→spring→settle 全发生 → finalDelta = finalOffset - frameEntry
+    //    （含 pre-snap 减速段，不丢，codex Plan-R7-F2：丢早期子段位移会致 consumer 与 model 失步）
+    @Test("same-tick decel->cross->spring->settle reports full frame delta")
+    func sameTickMultiPhaseFinalDelta() {
+        // dt=0.6（大但 <1.0）：界内 offset 9，v=1000 → 一帧内减速跨边 10 + 弹簧充分 settle → finish
+        var m = EdgeBounceModel(initialVelocity: 1000, offset: 9, minOffset: 0, maxOffset: 10)
+        let out = m.advance(dt: 0.6)
+        guard case .finish(let fd, let nf) = out else { Issue.record("expected one-tick finish, got \(out)"); return }
+        #expect(nf == true)
+        #expect(fd != nil)
+        #expect(abs(fd! - 1.0) < 1e-6)                  // 全帧位移 = finalOffset(10) - frameEntry(9)（含减速段）
+        #expect(m.debugOffset == 10)
+    }
+
+    // P5 单调性：峰值穿透随初速度增、随 stiffness 减（codex Plan-R7-F3；忽略/反转 stiffness 即失败）
+    @Test("P5 peak overscroll increases with velocity and decreases with stiffness")
+    func peakMonotonicity() {
+        func peak(velocity: CGFloat, stiffness: CGFloat) -> CGFloat {
+            // 起点恰在 edge（offset==max），外向 → 立即弹簧 seed 满速；峰值 = v/(omega·e)
+            var m = EdgeBounceModel(initialVelocity: velocity, offset: 10,
+                                    minOffset: 0, maxOffset: 10, stiffness: stiffness)
+            var p: CGFloat = 0; var n = 0
+            loop: while n < 5000 {
+                n += 1
+                switch m.advance(dt: ref) {
+                case .move: p = Swift.max(p, m.debugOverscroll)
+                case .finish: break loop
+                }
+            }
+            return p
+        }
+        let k = EdgeBounceModel.defaultStiffness
+        let pv1 = peak(velocity: 500, stiffness: k)
+        let pv2 = peak(velocity: 1000, stiffness: k)
+        let pv3 = peak(velocity: 2000, stiffness: k)
+        #expect(pv1.isFinite && pv2.isFinite && pv3.isFinite)
+        #expect(pv1 < pv2 && pv2 < pv3)                 // v↑ → 峰值↑
+        let pk1 = peak(velocity: 1000, stiffness: 100)
+        let pk2 = peak(velocity: 1000, stiffness: 400)
+        let pk3 = peak(velocity: 1000, stiffness: 1600)
+        #expect(pk1 > pk2 && pk2 > pk3)                 // k↑ → 峰值↓
+    }
 }
 ```
 
@@ -1166,14 +1209,30 @@ git commit -m "feat(bounce): DecelerationAnimator additive bounce path + re-entr
 
 每条给 action（命令）/ expected（输出）/ pass-fail 勾选位。
 
-- [ ] **Step 2: 运行范围 gate 自检**
+- [ ] **Step 2: 运行范围 gate 自检（fail-closed 全仓 allowlist，codex Plan-R7-F1）**
 
-Run:
+Run（在 worktree 根）:
 ```bash
-cd "<worktree-root>" && git diff --stat origin/main...HEAD -- ios/Contracts/Sources \
- | grep -E "RenderStateBuilder|TrainingEngine|ChartContainerView|Reducer" && echo "SCOPE-VIOLATION" || echo "SCOPE-OK"
+set -euo pipefail
+ALLOW='ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/DecelerationModel.swift
+ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/DecelerationAnimator.swift
+ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/EdgeBounceModel.swift
+ios/Contracts/Tests/KlineTrainerContractsTests/DecelerationModelBoundaryTests.swift
+ios/Contracts/Tests/KlineTrainerContractsTests/EdgeBounceModelTests.swift
+ios/Contracts/Tests/KlineTrainerContractsTests/DecelerationAnimatorBounceTests.swift
+docs/superpowers/specs/2026-06-11-pr-wave3-11-edge-bounce-design.md
+docs/superpowers/plans/2026-06-11-pr-wave3-11-edge-bounce.md
+docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md'
+changed=$(git diff --name-only origin/main...HEAD)        # set -e：git 失败即 abort（fail-closed）
+violations=0
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  grep -Fxq -- "$f" <<<"$ALLOW" || { echo "SCOPE-VIOLATION: $f"; violations=$((violations+1)); }
+done <<<"$changed"
+[ "$violations" -eq 0 ] && echo "SCOPE-OK" || { echo "SCOPE-FAIL ($violations 个越界文件)"; exit 1; }
 ```
-Expected: `SCOPE-OK`（无 engine/geometry 改动）。
+Expected: `SCOPE-OK`（**每个** changed 文件都在 allowlist 内；任一越界文件 → 非零退出）。
+> fail-closed：`set -e` 下 `git diff` 失败即 abort（不再误落 SCOPE-OK）；逐文件比对全仓 allowlist（不止 `ios/Contracts/Sources`）。
 
 - [ ] **Step 3: 全量测试**
 
@@ -1191,7 +1250,7 @@ git commit -m "docs(bounce): acceptance checklist + W3-11-R1 residual/runbook de
 
 ## Self-Review（plan 作者执行）
 
-**Spec coverage：** P1 钉边界（Task2 outwardSettlesAtEdge）/ P2 首次过边 clamp（inwardClampsNoCrossing）/ P3 弹簧分区不变 + 端到端跨边（springPartitionInvariant + endToEndCrossingFrameRates + Task1 multi-substep）/ P4 界内 parity（inBoundsNoSpring + Task3 noCrossingLifecycleParity）/ P5 穿透有界（peakOverscroll>0 + 端到端）/ P6 防御（nonFiniteVelocityNormalizes + nonFiniteBoundsInert + Task1 abnormalDt）/ P7 既有零改动（Task3 Step4 gate）/ P8 原子终止+finalDelta+onFinish 一致（abnormalDtOverscrolled）/ P9 re-entrancy（reentrantStart/ResetInTerminalUpdate）/ W3-11-R1 + runbook deferral（Task4）。**全覆盖。**
+**Spec coverage：** P1 钉边界（outwardSettlesAtEdge + exactEdgeOutwardFling）/ P2 首次过边 clamp（inwardClampsNoCrossing）/ P3 弹簧分区不变 + 端到端(60/120/不规则/亚-ref) + zero-crossing 事件时刻 + animator ≤1 帧界（springPartitionInvariantState + endToEndCrossingFrameRates + springZeroCrossingEventTime + Task3 finishLandsInEventTick + Task1 multi-substep）/ P4 界内 parity（inBoundsNoSpring + Task3 noCrossingLifecycleParity）/ **P5 单调性（peakMonotonicity：v↑→峰值↑ / k↑→峰值↓ + finiteness）**/ P6 防御（nonFiniteVelocityNormalizes + nonFiniteBoundsInert + extreme/largeEdge/oppositeExtreme + Task1 abnormalDt）/ P7 既有零改动（Task3 Step4 gate + Task1 noCrossingParity）/ P8 原子终止+finalDelta+onFinish 一致（abnormalDtOverscrolled + **sameTickMultiPhaseFinalDelta** + Task3 bounceSettles 累积落 edge）/ P9 re-entrancy（reentrantStart/ResetInTerminalUpdate）/ W3-11-R1 + runbook deferral（Task4）。**全覆盖。**
 
 **类型一致性：** `BoundaryOutcome`（Task1）/ `FrameOutcome`（Task2 定义，Task3 复用）/ `EdgeBounceModel.advance→FrameOutcome` / `RunModel.advance→FrameOutcome` / `start(initialVelocity:fromOffset:minOffset:maxOffset:)` / `normalizeToEdgeDelta()` / `shouldRun`/`debugOffset`/`debugOverscroll` —— 跨 Task 签名一致。
 
