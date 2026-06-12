@@ -395,39 +395,31 @@ struct EdgeBounceModelTests {
         #expect(lo.debugOffset == 0)
     }
 
-    // P6 extreme-finite：极端有限 offset（弹簧数学溢出）→ 不外溢 inf/NaN delta，安全钉 edge（codex Plan-R1-F2）
-    @Test("extreme finite overscroll never emits non-finite delta")
-    func extremeFiniteNoNonFiniteDelta() {
+    // P6 量级悬殊 non-round-trippable：offset=MAX/2、edge=10 → 修正 `edge−offset` 舍入为 -offset
+    //   （consumer 落 0 而非 edge，model/consumer 失步）→ inert 拒绝（codex Plan-R11-F1）。
+    @Test("magnitude-disparate non-round-trippable geometry is inert")
+    func magnitudeDisparateInert() {
         var m = EdgeBounceModel(initialVelocity: 0,
                                 offset: CGFloat.greatestFiniteMagnitude / 2,
                                 minOffset: 0, maxOffset: 10)
-        var frames = 0
-        var sawNonFinite = false
-        var finished = false
-        while frames < 5000, !finished {
-            frames += 1
-            switch m.advance(dt: ref) {
-            case .move(let d):
-                if !d.isFinite { sawNonFinite = true }
-            case .finish(let fd, _):
-                if let fd, !fd.isFinite { sawNonFinite = true }
-                finished = true
-            }
-        }
-        #expect(!sawNonFinite)
-        #expect(finished)
-        #expect(m.debugOffset == 10)   // 最终安全钉 edge
+        #expect(m.shouldRun == false)                 // 不可逆 → 不运行（consumer 不被改）
+        let out = m.advance(dt: ref)                  // 防御：直接 advance 也 finish(nil)、offset 不变
+        guard case .finish(let fd, _) = out else { Issue.record("expected finish"); return }
+        #expect(fd == nil)
+        #expect(m.debugOffset == CGFloat.greatestFiniteMagnitude / 2)
     }
 
-    // P6 large-edge overflow：xNew 有限但 springEdge+xNew 溢出（codex Plan-R2-F1 反例）→ 仍不外溢 inf delta
-    @Test("large finite edge: reconstructed offset overflow is guarded")
-    func largeEdgeReconstructedOverflowGuarded() {
+    // P6 large-edge overflow（round-trippable）：xNew 有限但 springEdge+xNew 溢出（codex Plan-R2-F1）→ guard；
+    //   且 **consumer offset（从初值累积外溢 delta）真到 model edge**（codex Plan-R11-F1：track consumer，非只 model）。
+    @Test("large finite round-trippable edge: consumer offset reaches model edge, no inf delta")
+    func largeEdgeConsumerReachesEdge() {
         let big = CGFloat.greatestFiniteMagnitude
-        // edge=0.99·MAX，offset=0.995·MAX（越上界），velocity=0.9·MAX（有限）
-        // → x、B、xNew 各自有限，但 springEdge(0.99·MAX)+xNew 溢出 → 须 guard 重构 offset
-        var m = EdgeBounceModel(initialVelocity: big * 0.9, offset: big * 0.995,
+        // edge=0.99·MAX，offset=0.995·MAX（越上界，量级可比 → round-trippable），velocity=0.9·MAX
+        let off0 = big * 0.995
+        var m = EdgeBounceModel(initialVelocity: big * 0.9, offset: off0,
                                 minOffset: -big, maxOffset: big * 0.99)
-        #expect(m.shouldRun)
+        #expect(m.shouldRun)                          // round-trippable → 运行
+        var consumer = off0                           // 模拟 consumer：初值 + 累积外溢 delta
         var sawNonFinite = false
         var finished = false
         var frames = 0
@@ -435,15 +427,16 @@ struct EdgeBounceModelTests {
             frames += 1
             switch m.advance(dt: ref) {
             case .move(let d):
-                if !d.isFinite { sawNonFinite = true }
+                if !d.isFinite { sawNonFinite = true } else { consumer += d }
             case .finish(let fd, _):
-                if let fd, !fd.isFinite { sawNonFinite = true }
+                if let fd { if !fd.isFinite { sawNonFinite = true } else { consumer += fd } }
                 finished = true
             }
         }
         #expect(!sawNonFinite)
         #expect(finished)
-        #expect(m.debugOffset == big * 0.99)   // 安全钉 edge（不溢出 inf）
+        #expect(m.debugOffset == big * 0.99)          // model 钉 edge
+        #expect(consumer == big * 0.99)               // **consumer 也到 edge**（round-trip 成立，无 desync）
     }
 
     // P6 opposite-extreme：offset 与 edge 异极、归一修正不可表示（codex Plan-R3-F1）→ inert（拒绝），
@@ -678,9 +671,13 @@ struct EdgeBounceModel: Equatable, Sendable {
         } else {
             ph = .decelerating; edge = (v >= 0) ? hi : lo
         }
-        // 可操作性（codex Plan-R3-F1）：越界但归一修正 `edge−offset` 不可表示（offset 与 edge 异极致溢出）
-        // → inert（拒绝；动画器 no-op，绝不外溢 ±inf delta、绝不内部 snap 致 model/consumer 失步）。
-        let operable = boundsValid && (ph == .decelerating || (offset - edge).isFinite)
+        // 可操作性（codex Plan-R3-F1/R11-F1）：越界则归一修正 `edge−offset` 须 **round-trippable**——
+        // 即 `offset + (edge−offset) == edge`（不仅有限）。否则（offset 与 edge 量级悬殊：如 offset=MAX/2、edge=10，
+        // 修正舍入为 -offset → consumer 落 0 而 model snap edge）= **不可逆 → inert**（动画器 no-op，
+        // 绝不外溢 ±inf delta、绝不内部 snap 致 model/consumer 失步）。
+        let correction = edge - offset
+        let operable = boundsValid
+            && (ph == .decelerating || (correction.isFinite && offset + correction == edge))
 
         self.geometryValid = operable
         self.minOffset = lo
