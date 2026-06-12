@@ -249,6 +249,22 @@ public final class TrainingEngine {
     /// 本 accessor 不做换算，调用方勿当比率使用。
     public var maxDrawdown: Double { drawdown.maxDrawdown }
 
+    /// 当前持仓档位 X/5（0...5），read-only computed（RFC §4.4b / §4.1）。
+    /// 基准 = 持仓市值 / 当前总资金（与顶栏「总资金 = 现金 + 持仓市值」同口径，plan v1.5 L914），
+    /// round（四舍五入）非 floor（反映用户意图档位）。**派生非状态**：每次从 live 状态算
+    /// （buy 以总资金、sell 以持仓为基准，无单一持久 tier 字段）。顺位 7 顶栏「仓位 X/5」显示。
+    /// **非有限守卫（codex plan R1）**：`shares × price` 在极端有限价下可溢出至 inf → `inf/inf=NaN`，
+    /// `Int(NaN)` 会 trap 崩溃。`total > 0` 不挡 `+inf`（inf>0 为真），故须显式 `isFinite` 守卫
+    /// （与 `forceCloseOnEnd` 的 `price.isFinite`、init 的 finite money 前置同风格）→ 退化 0/5 不崩。
+    public var currentPositionTier: Int {
+        let holdingValue = Double(position.shares) * currentPrice
+        let total = currentTotalCapital
+        guard total > 0, total.isFinite, holdingValue.isFinite else { return 0 }
+        // 此处 holdingValue 有限、total 有限且 >0 → ratio 有限、×5 有限、rounded 有限 → Int 安全。
+        let raw = (holdingValue / total * 5).rounded(.toNearestOrAwayFromZero)
+        return min(max(Int(raw), 0), 5)
+    }
+
     // MARK: - 动作可用性门（E5b / D1：功能式 ∃tier，无 tier 推导公式）
 
     /// 买入按钮可用：当前模式允许交易 **且** 存在某档 `quoteBuy` 成功。

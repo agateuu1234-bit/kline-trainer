@@ -440,4 +440,54 @@ import CoreGraphics
         #expect(e.tradeOperations[1].direction == .sell)
         #expect(e.tradeOperations[1].positionTier == .tier5)
     }
+
+    // MARK: - Wave 3 顺位 6a：currentPositionTier（RFC §4.1 / §4.4b）
+
+    @Test func currentPositionTierZeroWhenFlat() {
+        let e = Self.tradeEngine(closes: [10, 10, 10], position: .init())
+        #expect(e.currentPositionTier == 0)        // shares==0 → holdingValue 0 → 0/5
+    }
+
+    @Test func currentPositionTierZeroWhenTotalCapitalNonPositive() {
+        // total == 0（cash 0 + 空仓）→ guard total>0 false → 0（不崩、不除零）
+        let e = Self.tradeEngine(closes: [10, 10, 10], cash: 0, capital: 100_000, position: .init())
+        #expect(e.currentPositionTier == 0)
+    }
+
+    @Test func currentPositionTierThreeAfterBuyingSixtyPercent() {
+        // 买 3/5（60% of 100_000 / 10 = 6000 股），价不变：6000*10=60000 / (39994+60000=99994) = .60003 → ×5=3.0002 → round 3
+        let e = Self.tradeEngine(closes: [10, 10, 10], cash: 100_000, capital: 100_000)
+        _ = e.buy(panel: .upper, tier: .tier3)
+        #expect(e.position.shares == 6000)
+        #expect(e.currentPositionTier == 3)
+    }
+
+    @Test func currentPositionTierFiveWhenFullyInvested() {
+        // 满仓态：10000 股 @10、cash 0 → holdingValue 100000 / total 100000 = 1.0 → ×5=5 → 5/5
+        let e = Self.tradeEngine(closes: [10, 10], cash: 0, capital: 100_000,
+                                 position: PositionManager(shares: 10_000, averageCost: 10, totalInvested: 100_000))
+        #expect(e.currentPositionTier == 5)
+    }
+
+    @Test func currentPositionTierUsesMarketValueBasisNotStatefulBuyTier() {
+        // RFC §4.1 acceptance 锁向量（opus R1-L5）：买 4/5 → 价 ×2 → 卖 持仓 2/5 → 期望 3/5（非 4/5）。
+        // 钉死「持仓市值 / 当前总资金基准 + round」；stateful「记住买入档位」实现会卡在 4/5 → 第二个断言失败。
+        // maxTick=3：buy@tick0→tick1、sell@tick1→tick2（tick2<3，不触局终强平）。
+        let e = Self.tradeEngine(closes: [10, 20, 20, 20], cash: 100_000, capital: 100_000)
+        _ = e.buy(panel: .upper, tier: .tier4)      // 80% of 100000 / 10 = 8000 股；advance→tick1（价 20）
+        #expect(e.position.shares == 8000)
+        #expect(e.currentPositionTier == 4)         // 8000*20=160000 / (19992+160000=179992) = .8889 → ×5=4.44 → round 4
+        _ = e.sell(panel: .upper, tier: .tier2)     // 卖 持仓 40% = 3200 股；advance→tick2（价 20，不强平）
+        #expect(e.position.shares == 4800)
+        #expect(e.currentPositionTier == 3)         // 4800*20=96000 / (83953.6+96000=179953.6) = .5335 → ×5=2.667 → round 3
+    }
+
+    @Test func currentPositionTierZeroOnNonFiniteOverflow() {
+        // codex plan R1-high：有限但极端的收盘价 × 持仓股数 溢出 Double → holdingValue = +inf（非 finite）。
+        // 若无 isFinite 守卫，holdingValue/total = inf/inf = NaN，Int(NaN) **trap 崩溃**。守卫须返 0、不崩。
+        let e = Self.tradeEngine(closes: [.greatestFiniteMagnitude, .greatestFiniteMagnitude],
+                                 cash: 100_000, capital: 100_000,
+                                 position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
+        #expect(e.currentPositionTier == 0)         // 1000 × 1.8e308 → +inf → guard → 0（不 trap）
+    }
 }
