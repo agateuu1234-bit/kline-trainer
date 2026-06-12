@@ -440,4 +440,244 @@ import CoreGraphics
         #expect(e.tradeOperations[1].direction == .sell)
         #expect(e.tradeOperations[1].positionTier == .tier5)
     }
+
+    // MARK: - Wave 3 顺位 6a：currentPositionTier（RFC §4.1 / §4.4b）
+
+    @Test func currentPositionTierZeroWhenFlat() {
+        let e = Self.tradeEngine(closes: [10, 10, 10], position: .init())
+        #expect(e.currentPositionTier == 0)        // shares==0 → holdingValue 0 → 0/5
+    }
+
+    @Test func currentPositionTierZeroWhenTotalCapitalNonPositive() {
+        // total == 0（cash 0 + 空仓）→ guard total>0 false → 0（不崩、不除零）
+        let e = Self.tradeEngine(closes: [10, 10, 10], cash: 0, capital: 100_000, position: .init())
+        #expect(e.currentPositionTier == 0)
+    }
+
+    @Test func currentPositionTierThreeAfterBuyingSixtyPercent() {
+        // 买 3/5（60% of 100_000 / 10 = 6000 股），价不变：6000*10=60000 / (39994+60000=99994) = .60003 → ×5=3.0002 → round 3
+        let e = Self.tradeEngine(closes: [10, 10, 10], cash: 100_000, capital: 100_000)
+        _ = e.buy(panel: .upper, tier: .tier3)
+        #expect(e.position.shares == 6000)
+        #expect(e.currentPositionTier == 3)
+    }
+
+    @Test func currentPositionTierFiveWhenFullyInvested() {
+        // 满仓态：10000 股 @10、cash 0 → holdingValue 100000 / total 100000 = 1.0 → ×5=5 → 5/5
+        let e = Self.tradeEngine(closes: [10, 10], cash: 0, capital: 100_000,
+                                 position: PositionManager(shares: 10_000, averageCost: 10, totalInvested: 100_000))
+        #expect(e.currentPositionTier == 5)
+    }
+
+    @Test func currentPositionTierUsesMarketValueBasisNotStatefulBuyTier() {
+        // RFC §4.1 acceptance 锁向量（opus R1-L5）：买 4/5 → 价 ×2 → 卖 持仓 2/5 → 期望 3/5（非 4/5）。
+        // 钉死「持仓市值 / 当前总资金基准 + round」；stateful「记住买入档位」实现会卡在 4/5 → 第二个断言失败。
+        // maxTick=3：buy@tick0→tick1、sell@tick1→tick2（tick2<3，不触局终强平）。
+        let e = Self.tradeEngine(closes: [10, 20, 20, 20], cash: 100_000, capital: 100_000)
+        _ = e.buy(panel: .upper, tier: .tier4)      // 80% of 100000 / 10 = 8000 股；advance→tick1（价 20）
+        #expect(e.position.shares == 8000)
+        #expect(e.currentPositionTier == 4)         // 8000*20=160000 / (19992+160000=179992) = .8889 → ×5=4.44 → round 4
+        _ = e.sell(panel: .upper, tier: .tier2)     // 卖 持仓 40% = 3200 股；advance→tick2（价 20，不强平）
+        #expect(e.position.shares == 4800)
+        #expect(e.currentPositionTier == 3)         // 4800*20=96000 / (83953.6+96000=179953.6) = .5335 → ×5=2.667 → round 3
+    }
+
+    @Test func currentPositionTierZeroOnNonFiniteOverflow() {
+        // codex plan R1-high：有限但极端的收盘价 × 持仓股数 溢出 Double → holdingValue = +inf（非 finite）。
+        // 若无 isFinite 守卫，holdingValue/total = inf/inf = NaN，Int(NaN) **trap 崩溃**。守卫须返 0、不崩。
+        let e = Self.tradeEngine(closes: [.greatestFiniteMagnitude, .greatestFiniteMagnitude],
+                                 cash: 100_000, capital: 100_000,
+                                 position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
+        #expect(e.currentPositionTier == 0)         // 1000 × 1.8e308 → +inf → guard → 0（不 trap）
+    }
+
+    // MARK: - Wave 3 顺位 6a：forceCloseManually（RFC §4.4a on-demand 强平）
+
+    @Test func forceCloseManuallyClosesHoldingAtCurrentTickPrice() {
+        // 局中（tick0 < maxTick2）主动结束：按当前 tick 价 10 全平，不推进 tick。
+        let e = Self.tradeEngine(closes: [10, 10, 10], cash: 0, capital: 10_000,
+                                 position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
+        #expect(e.forceCloseManually() == true)         // 平仓成功 → 安全可结算（position.shares==0）
+        #expect(e.position.shares == 0)                 // 已强平
+        #expect(e.cashBalance == 9990)                  // proceeds：notional10000 - comm5 - stamp5
+        #expect(e.tick.globalTickIndex == 0)            // **不推进 tick**（区别于 buy/sell）
+        #expect(e.markers.contains { $0.direction == .sell && $0.globalTick == 0 })
+        let fc = e.tradeOperations.last
+        #expect(fc?.direction == .sell)
+        #expect(fc?.positionTier == .tier5)
+        #expect(fc?.period == .m3)
+        #expect(fc?.globalTick == 0)
+        #expect(fc?.shares == 1000)
+        #expect(fc?.stampDuty == 5)
+        #expect(e.maxDrawdown == 10)                    // peak(10000) - realized(9990)：第二次 drawdown.update 并入
+    }
+
+    @Test func forceCloseManuallyUsesCurrentTickPriceNotEndPrice() {
+        // 末根价 99，当前 tick0 价 10：手动强平须按 10（当前价），非 99（末根）。杀「误用末根价」实现。
+        let e = Self.tradeEngine(closes: [10, 99], cash: 0, capital: 10_000,
+                                 position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
+        e.forceCloseManually()
+        #expect(e.tradeOperations.last?.price == 10)
+    }
+
+    @Test func forceCloseManuallyNoOpWhenFlat() {
+        // 空仓 → 幂等短路 no-op：无 marker / 无 operation；已平 → 返 true（安全可结算）。
+        let e = Self.tradeEngine(closes: [10, 10, 10], position: .init())
+        #expect(e.forceCloseManually() == true)         // 已平（无新平仓）→ 安全可结算
+        #expect(e.position.shares == 0)
+        #expect(e.markers.isEmpty)
+        #expect(e.tradeOperations.isEmpty)
+    }
+
+    @Test func forceCloseManuallyDisabledInReviewMode() {
+        // Review canBuySell()==false → 前置门 no-op：持仓不动、无 operation。
+        let e = Self.tradeEngine(closes: [10, 10, 10], cash: 0, capital: 10_000,
+                                 position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000),
+                                 mode: .review)
+        #expect(e.forceCloseManually() == false)        // 持仓未平 → 不安全（不可结算）
+        #expect(e.position.shares == 1000)              // 未平
+        #expect(e.tradeOperations.isEmpty)
+    }
+
+    @Test func forceCloseManuallyAllowedInReplayMode() {
+        // Replay canBuySell()==true → 可手动强平。
+        let e = Self.tradeEngine(closes: [10, 10, 10], cash: 0, capital: 10_000,
+                                 position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000),
+                                 mode: .replay)
+        #expect(e.forceCloseManually() == true)
+        #expect(e.position.shares == 0)
+        #expect(e.tradeOperations.last?.direction == .sell)
+    }
+
+    @Test func forceCloseManuallyIsIdempotent() {
+        // 第二次调用 shares==0 → 短路，无新 operation；仍返 true（已平 = 安全可结算）。
+        let e = Self.tradeEngine(closes: [10, 10, 10], cash: 0, capital: 10_000,
+                                 position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
+        #expect(e.forceCloseManually() == true)         // 首次平仓
+        let opsAfterFirst = e.tradeOperations.count
+        #expect(e.forceCloseManually() == true)         // 已平 → 仍 true，无新 operation
+        #expect(e.tradeOperations.count == opsAfterFirst)
+        #expect(e.position.shares == 0)
+    }
+
+    // —— codex plan R2-high：force-close 非法/溢出报价的原子 no-mutation（不写 NaN，不留半平仓态）——
+
+    @Test func forceCloseManuallyNoOpOnZeroPrice() {
+        // 当前价 0 → forceCloseOnEnd 的 `price > 0` 守 → 全零报价 → 原子 no-op：持仓与现金不动、无 operation、返 false。
+        let e = Self.tradeEngine(closes: [0, 0], cash: 0, capital: 10_000,
+                                 position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
+        #expect(e.forceCloseManually() == false)
+        #expect(e.position.shares == 1000)              // 未平
+        #expect(e.cashBalance == 0)                     // 未写入
+        #expect(e.tradeOperations.isEmpty)
+        #expect(e.markers.isEmpty)
+    }
+
+    @Test func forceCloseManuallyNoOpOnNonFinitePrice() {
+        // 当前价 inf → forceCloseOnEnd 的 `price.isFinite` 守 → 全零报价 → 原子 no-op。
+        let e = Self.tradeEngine(closes: [.infinity, .infinity], cash: 0, capital: 10_000,
+                                 position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
+        #expect(e.forceCloseManually() == false)
+        #expect(e.position.shares == 1000)
+        #expect(e.cashBalance == 0)
+        #expect(e.tradeOperations.isEmpty)
+    }
+
+    @Test func forceCloseManuallyNoOpOnFiniteOverflowPrice() {
+        // 有限但极端价 → makeSellQuote 的 notional/proceeds 溢出 inf/NaN（forceCloseOnEnd 的 price.isFinite 放行）。
+        // performForceClose 的**新 quote-finite 守卫**须挡住 → 原子 no-op：现金不被写成 NaN、持仓保留、无 operation、返 false。
+        let e = Self.tradeEngine(closes: [.greatestFiniteMagnitude, .greatestFiniteMagnitude],
+                                 cash: 0, capital: 10_000,
+                                 position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
+        #expect(e.forceCloseManually() == false)
+        #expect(e.position.shares == 1000)              // 未平（不留半平仓态）
+        #expect(e.cashBalance == 0)                     // **未写入 NaN**
+        #expect(e.cashBalance.isFinite)                 // 显式守住「现金保持有限」
+        #expect(e.tradeOperations.isEmpty)
+        #expect(e.markers.isEmpty)
+    }
+
+    @Test func forceCloseManuallyReturnsFalseInFlatReviewMode() {
+        // codex R3-medium：生产 Review engine 构造即空仓。Review 禁手动结束 → 即使空仓也**不得**返 true
+        // 误导 caller 路由结算（绕过模式限制）。canBuySell()==false → 恒 false。
+        let e = Self.tradeEngine(closes: [10, 10, 10], position: .init(), mode: .review)
+        #expect(e.forceCloseManually() == false)
+        #expect(e.tradeOperations.isEmpty)
+    }
+
+    @Test func autoForceCloseOnOverflowPriceLeavesCashFinite() {
+        // codex R3-high 回归：[10, .greatestFiniteMagnitude] reader-valid。tick0 买入 → advance 到 maxTick(1)
+        // → auto forceCloseIfEnded 在末根极端价算出溢出 quote（proceeds NaN）。6a 的 quote-finite 守卫
+        // （performForceClose 共用体）须挡住 → **不把 NaN 写进 cash**（pre-6a 会写 NaN）。
+        // 残留终态（持仓未平 / 市值含 inf）的 finalize gating 归 RFC §4.7 顺位 10a/10b，**非 6a**；
+        // 本测试只钉死 6a 不变量「force-close 体不腐蚀 cash」。
+        let e = Self.tradeEngine(closes: [10, .greatestFiniteMagnitude], cash: 100_000, capital: 100_000)
+        let r = e.buy(panel: .upper, tier: .tier1)      // tick0@10 买入 → advance→tick1(=maxTick) → auto force-close 触发
+        guard case .success = r else { Issue.record("buy@tick0 应成功"); return }
+        #expect(e.tick.globalTickIndex == 1)
+        #expect(e.cashBalance.isFinite)                 // **cash 未被写 NaN**（6a finite 守卫）
+        #expect(e.cashBalance == 79_995)                // 仅 tick0 买入扣款（100000-20005）；末根强平因溢出 no-op，未再动 cash
+    }
+
+    @Test func forceCloseManuallyNoOpOnCashSumOverflow() {
+        // codex R4-high：quote 各字段**有限**，但 `cashBalance + proceeds` 两有限值相加溢出 inf。
+        // newCash.isFinite 守卫须在 mutation 前挡住 → 整笔原子 no-op：cash 不被写 inf、持仓保留、无 op、返 false。
+        // 价 1e308（finite，notional 1×1e308 不溢出）；cash 1.5e308 → 和 = 2.5e308 > Double.max → inf。
+        let e = Self.tradeEngine(closes: [1e308, 1e308], cash: 1.5e308, capital: 1.5e308,
+                                 position: PositionManager(shares: 1, averageCost: 10, totalInvested: 10))
+        #expect(e.forceCloseManually() == false)
+        #expect(e.position.shares == 1)                 // 未平
+        #expect(e.cashBalance == 1.5e308)               // **未写入 inf**
+        #expect(e.cashBalance.isFinite)
+        #expect(e.tradeOperations.isEmpty)
+    }
+
+    @Test func autoForceCloseNoOpOnCashSumOverflow() {
+        // codex R4-high（auto 路径同守）：holdOrObserve 推进到 maxTick → auto 强平算出有限 quote，但
+        // cashBalance + proceeds 溢出 → 整笔原子 no-op，cash 保持有限不变。
+        let e = Self.tradeEngine(closes: [1e308, 1e308], cash: 1.5e308, capital: 1.5e308,
+                                 position: PositionManager(shares: 1, averageCost: 10, totalInvested: 10))
+        e.holdOrObserve(panel: .upper)                  // tick0 → tick1(=maxTick) → auto forceCloseIfEnded
+        #expect(e.tick.globalTickIndex == 1)
+        #expect(e.cashBalance == 1.5e308)               // 和溢出 → no-op，cash 未动
+        #expect(e.cashBalance.isFinite)
+        #expect(e.position.shares == 1)                 // 未平
+        #expect(e.tradeOperations.isEmpty)
+    }
+
+    @Test func forceCloseManuallyReturnsFalseWhenDrawdownNonFinite() {
+        // codex R4-high：force-close 后 cash 有限、持仓已平，但 drawdown 在 advance 路径被病态价污染成非有限
+        // （持仓 × 1e308 → inf 市值 → drawdown.update(inf) → peakCapital=inf）。isSettlementSafe 须据此返 false，
+        // 不让 caller 路由结算去 finalize 持久化 NaN/inf。污染源（advance drawdown）根治归顺位 10，非 6a。
+        // 序列 [10, 1e308, 10]：买@tick0 → 持有推进 tick1（污染 drawdown）→ 推进 tick2(=maxTick) 末根价 10 干净强平。
+        let e = Self.tradeEngine(closes: [10, 1e308, 10], cash: 100_000, capital: 100_000)
+        let r = e.buy(panel: .upper, tier: .tier1)      // tick0@10 买 2000 股 → advance tick1（价 1e308 → drawdown 污染 inf）
+        guard case .success = r else { Issue.record("buy@tick0 应成功"); return }
+        e.holdOrObserve(panel: .upper)                  // tick1 → tick2(=maxTick)，末根价 10 干净 auto 强平 → 持仓平、cash 有限
+        #expect(e.position.shares == 0)                 // 已平
+        #expect(e.cashBalance.isFinite)                 // cash 有限
+        #expect(e.drawdown.peakCapital.isFinite == false)  // 但 drawdown 已被 tick1 病态价污染成非有限
+        #expect(e.forceCloseManually() == false)        // → isSettlementSafe 据非有限 drawdown 返 false（安全降级）
+    }
+
+    @Test func forceCloseManuallyReturnsFalseWhenReturnRateNonFinite() {
+        // codex R4/R5#2：极小 initialCapital(1e-308) → returnRate = (total-initial)/initial 溢出 inf，
+        // 即便 total/cash/drawdown 都有限。isSettlementSafe 须校验 returnRate（finalize 持久化收益率）→ false。
+        let e = Self.tradeEngine(closes: [10, 10, 10], cash: 10, capital: 1e-308, position: .init())
+        #expect(e.returnRate.isFinite == false)         // (10 - 1e-308)/1e-308 ≈ 1e309 → inf
+        #expect(e.currentTotalCapital.isFinite)         // total 本身有限（10）
+        #expect(e.forceCloseManually() == false)        // → isSettlementSafe 据 returnRate 非有限 → false
+    }
+
+    @Test func forceCloseManuallyReturnsFalseWhenLiquidationGoesNegative() {
+        // codex R6#2：低面值清仓 100 股 @0.01 + 最低佣金 5 → proceeds = 1 - 5 - 0.0005 = -4.0005 → 负现金。
+        // force-close **仍执行**（是否允许负债/floor = 预先存在 spec 语义，归顺位 10 + 治理 residual）；
+        // 但 isSettlementSafe 据「非负资金不变量」返 false → caller 不会被误导去结算负资金态。
+        let e = Self.tradeEngine(closes: [0.01, 0.01], cash: 0, capital: 1,
+                                 position: PositionManager(shares: 100, averageCost: 0.01, totalInvested: 1))
+        let safe = e.forceCloseManually()
+        #expect(e.position.shares == 0)                 // 已平（mutation 发生 = residual）
+        #expect(e.cashBalance < 0)                       // 负现金（fee>proceeds 预先存在）
+        #expect(safe == false)                           // 结算门据非负不变量拒报可结算
+    }
 }
