@@ -89,6 +89,23 @@ public final class DefaultAppDB: AppDB {
         catch { throw PersistenceErrorMapping.translate(error) }
     }
 
+    // MARK: - SessionFinalizationPort（Wave 3 顺位 10a，RFC §4.7b）
+
+    /// 单事务：insert record(+ops+drawings, sessionKey 幂等) + clearPending。
+    /// dbQueue.write 即事务边界 —— 任一步抛错整体 rollback（要么都成要么都不成）。
+    public func finalizeSession(record: TrainingRecord, ops: [TradeOperation],
+                                drawings: [DrawingObject], sessionKey: String) throws -> Int64 {
+        do {
+            return try dbQueue.write { db in
+                let id = try RecordRepositoryImpl.insertRecord(
+                    db, record: record, ops: ops, drawings: drawings, sessionKey: sessionKey)
+                try PendingTrainingRepositoryImpl.clearPending(db)
+                return id
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
     // MARK: - PendingTrainingRepository
 
     public func savePending(_ p: PendingTraining) throws {
