@@ -473,6 +473,33 @@ struct EdgeBounceModelTests {
         #expect(m.shouldRun == false)                 // 0.99·MAX 的 ulp ≫ 亚像素 cap → fail-closed
     }
 
+    // P6 极端有限 velocity 动态安全（codex Plan-R18-F1）：普通 edge（10）但巨大 velocity（MAX/2）→ 弹簧本会生成
+    //   ~3.5e305 finite offset（渲染器 offset→Int trap + reset 归一失步）；springStep 动态 round-trip guard 应钉 edge、
+    //   不暴露 enormous 中间态。覆盖 normal advance + abnormal-dt（reset 安全 by-construction：offset 从不变 huge）。
+    @Test("extreme finite velocity never exposes unsafe spring offset")
+    func extremeFiniteVelocitySafe() {
+        let big = CGFloat.greatestFiniteMagnitude
+        // normal advance
+        var m = EdgeBounceModel(initialVelocity: big / 2, offset: 9, minOffset: 0, maxOffset: 10)
+        #expect(m.shouldRun)
+        var consumer: CGFloat = 9
+        var maxAbs: CGFloat = 9; var frames = 0; var finished = false
+        while frames < 5000, !finished {
+            frames += 1
+            switch m.advance(dt: ref) {
+            case .move(let d): consumer += d; maxAbs = Swift.max(maxAbs, abs(m.debugOffset))
+            case .finish(let fd, _): if let fd { consumer += fd }; finished = true
+            }
+        }
+        #expect(finished)
+        #expect(m.debugOffset == 10 && consumer == 10)   // 钉 edge、consumer 追到（无失步）
+        #expect(maxAbs < 1e12)                            // 从不暴露 enormous offset（渲染器 Int 不 trap）
+        // abnormal-dt：巨大速度 + 大 dt（界内）→ finish、不进弹簧、不暴露
+        var m2 = EdgeBounceModel(initialVelocity: big / 2, offset: 9, minOffset: 0, maxOffset: 10)
+        guard case .finish = m2.advance(dt: 2.0) else { Issue.record("expected abnormal-dt finish"); return }
+        #expect(abs(m2.debugOffset) < 1e12)
+    }
+
     // P6 opposite-extreme：offset 与 edge 异极、归一修正不可表示（codex Plan-R3-F1）→ inert（拒绝），
     //     绝不外溢 -inf delta、绝不内部 snap 致 model/consumer 失步（offset 不变）。
     @Test("opposite-extreme non-representable geometry is inert (no inf, no desync)")
@@ -666,6 +693,8 @@ struct EdgeBounceModel: Equatable, Sendable {
     static let defaultStiffness: CGFloat = 200
     static let defaultPosTol: CGFloat = 0.5
     static let defaultVelTol: CGFloat = 5.0
+    /// round-trip 安全的固定亚像素物理上限（init 可操作性 + springStep 动态校验共用，codex Plan-R15-F1/R18-F1）。
+    static let roundTripCap: CGFloat = 1e-3
 
     // —— config（不可变）——
     private let minOffset: CGFloat
@@ -715,7 +744,7 @@ struct EdgeBounceModel: Equatable, Sendable {
         // `8*edge.ulp` 在大 edge 处仍膨胀（edge=-1e21 → 容差 ~1e6 点）会误收百万点失步。改为**固定亚像素 cap**
         // `1e-3` 点 + **fail-closed 当 edge 表示分辨率（8 ULP）超 cap**（edge 大到无法亚像素精确归一即拒）。
         // ∴ 容差有上界、不可被更大 edge 撑开；普通几何（|edge| ≪ ~10¹¹ 点）的 1-ULP 噪声远小于 cap → 不误拒。
-        let roundTripTol: CGFloat = 1e-3
+        let roundTripTol = EdgeBounceModel.roundTripCap
         let operable = boundsValid && correction.isFinite
             && 8 * edge.ulp <= roundTripTol
             && abs(reconstructed - edge) <= roundTripTol
@@ -811,11 +840,18 @@ struct EdgeBounceModel: Equatable, Sendable {
         let e = exp(-omega * tau)
         let xNew = (A + B * tau) * e
         let vNew = (B * (1 - omega * tau) - omega * A) * e
-        // 极端有限输入溢出防御（codex Plan-R1-F2/R2-F1）：派生值**及重构 offset/delta**非有限 → 钉 edge + 终止。
-        // 注意：xNew/vNew 有限不代表 `springEdge + xNew` 有限（大 edge 下其和可溢出，codex R2-F1）→ 须验重构值。
+        // 派生值/重构 offset/delta 非有限 → 钉 edge 终止（codex Plan-R1-F2/R2-F1）。
         let newOffset = springEdge + xNew
         let moveDelta = newOffset - frameEntry
-        guard xNew.isFinite, vNew.isFinite, newOffset.isFinite, moveDelta.isFinite else {
+        // **动态 round-trip 安全（codex Plan-R18-F1）**：init 只校验起点 offset；但 huge **velocity**（如 v=MAX/2）可使
+        // 弹簧生成 finite-but-enormous offset（~6e305，渲染器 offset→Int 转换 trap + reset 归一 `edge−offset` 丢 edge 致失步）。
+        // 故每帧验：① delta 重构 `frameEntry+moveDelta≈newOffset`；② 该 offset 未来归一可逆 `newOffset+(edge−newOffset)≈edge`。
+        // 任一失败（offset 大到无法亚像素归一）→ **不暴露不安全中间态**，钉 edge 终止。
+        let cap = EdgeBounceModel.roundTripCap
+        let safe = xNew.isFinite && vNew.isFinite && newOffset.isFinite && moveDelta.isFinite
+            && abs((frameEntry + moveDelta) - newOffset) <= cap
+            && abs((newOffset + (springEdge - newOffset)) - springEdge) <= cap
+        guard safe else {
             offset = springEdge; velocity = 0
             return settleFinish(frameEntry: frameEntry)
         }
