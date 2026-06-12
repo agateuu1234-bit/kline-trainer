@@ -415,25 +415,56 @@ struct EdgeBounceModelTests {
         #expect(m.debugOffset == big)
     }
 
-    // P3 端到端（codex R8-F1/R10-F1）：始界内·跨边，多子步跨边 case → 不同帧率 seed/峰值容差内一致
-    @Test("end-to-end crossing seeds spring near edge across frame rates")
+    // P3 端到端（codex R8-F1/R10-F1/R6-F1）：始界内·跨边，多子步跨边 → 60/120Hz/**不规则/亚-ref** 峰值穿透
+    //     全在 decel 子步容差内（聚合整帧过冲 bug 会给 ~7pt 差；子帧 handoff → < 1pt）。
+    @Test("end-to-end crossing: peak overscroll bounded across frame rates and partitions")
     func endToEndCrossingFrameRates() {
-        func peak(dt: CGFloat) -> CGFloat {
-            // bounds [0, 1000], offset 990, velocity +1000 → 冲过 1000（约 130pt 总滑行 → 远超 → 跨边）
+        func peak(partition: [CGFloat]) -> CGFloat {
+            // bounds [0, 1000], offset 990, velocity +1000 → 约 130pt 滑行 → 远超 → 跨边
             var m = EdgeBounceModel(initialVelocity: 1000, offset: 990, minOffset: 0, maxOffset: 1000)
-            var p: CGFloat = 0
-            var frames = 0
+            var p: CGFloat = 0; var i = 0; var frames = 0
             while frames < 5000 {
                 frames += 1
-                switch m.advance(dt: dt) {
+                let step = partition[i % partition.count]; i += 1
+                switch m.advance(dt: step) {
                 case .move: p = Swift.max(p, m.debugOverscroll)
                 case .finish: return p
                 }
             }
             return p
         }
-        // 60Hz vs 120Hz 峰值穿透在 decel 子步容差内（非聚合整帧过冲的大差）
-        #expect(abs(peak(dt: ref) - peak(dt: 2 * ref)) < 1.0)
+        let p120 = peak(partition: [ref])
+        let p60  = peak(partition: [2 * ref])
+        let pSub = peak(partition: [ref / 3])
+        let pIrr = peak(partition: [ref * 0.7, ref * 1.3, ref * 0.4])
+        #expect(p120 > 0)
+        for p in [p60, pSub, pIrr] { #expect(abs(p120 - p) < 1.0) }   // 子帧 handoff → 峰值帧率/分区无关至子步容差
+    }
+
+    // P3 zero-crossing 事件时刻解析精确（codex R6-F1）：内向越界 → 解析 tzc=-A/B；跨前轨迹分区无关 + 终止精确钉 edge
+    @Test("spring zero-crossing: pre-crossing trajectory partition-invariant, terminates exactly at edge")
+    func springZeroCrossingEventTime() {
+        // offset 10.1（越上界 0.1），v=-50 内向 → 解析 tzc ≈ 0.00206s（< 1 frame）
+        func stateAt(elapsed: CGFloat, partition: [CGFloat]) -> (offset: CGFloat, velocity: CGFloat, crossed: Bool) {
+            var m = EdgeBounceModel(initialVelocity: -50, offset: 10.1, minOffset: 0, maxOffset: 10)
+            var rem = elapsed; var i = 0; var crossed = false
+            while rem > 1e-12 {
+                let step = Swift.min(partition[i % partition.count], rem)
+                if case .finish = m.advance(dt: step) { crossed = true; break }
+                rem -= step; i += 1
+            }
+            return (m.debugOffset, m.debugVelocity, crossed)
+        }
+        let pre: CGFloat = 0.001   // < tzc → 尚未 cross
+        let s1 = stateAt(elapsed: pre, partition: [ref])      // 单步（0.001<ref）
+        let s2 = stateAt(elapsed: pre, partition: [pre / 4])  // 4 子步
+        #expect(!s1.crossed && !s2.crossed)
+        #expect(s1.offset > 10)                               // 仍越界（真瞬态）
+        #expect(abs(s1.offset - s2.offset) < 1e-6 && abs(s1.velocity - s2.velocity) < 1e-3)  // 解析精确
+        // cross 后精确钉 edge（单 ref 帧足够覆盖 tzc）
+        var m = EdgeBounceModel(initialVelocity: -50, offset: 10.1, minOffset: 0, maxOffset: 10)
+        guard case .finish = m.advance(dt: ref) else { Issue.record("expected zero-crossing within ref"); return }
+        #expect(m.debugOffset == 10)
     }
 
     // P4: 界内不足达边 → 与 DecelerationModel 同律（无弹簧，末 offset 不越界）
@@ -866,6 +897,36 @@ struct DecelerationAnimatorBounceTests {
         a.start(initialVelocity: 0.1, fromOffset: 5, minOffset: 0, maxOffset: 10)
         #expect(!a.isDecelerating)
         #expect(fake() == nil)
+    }
+
+    // 8. ≤1 帧 finish 时序界（codex R7-F2/Plan-R6-F1）：zero-crossing 事件 tzc 在含它的 display tick 终止；
+    //    模型 state 精确钉 edge。内向越界 offset 10.1/v=-50 → tzc≈0.00206s < 1 frame → 第 1 帧终止。
+    @Test("bounce finish lands in the display tick containing the analytic zero-crossing event")
+    func finishLandsInEventTick() {
+        // 120Hz：tzc < ref → 第 1 帧终止
+        let (a120, f120) = makeWithFake()
+        var u120: [CGFloat] = []; var fin120 = 0; var finFrame120 = -1; var fr = 0
+        a120.onUpdate = { u120.append($0) }; a120.onFinish = { fin120 += 1 }
+        a120.start(initialVelocity: -50, fromOffset: 10.1, minOffset: 0, maxOffset: 10)
+        while a120.isDecelerating, fr < 5000 {
+            fr += 1; _ = f120()?.fire(ref)
+            if !a120.isDecelerating, finFrame120 < 0 { finFrame120 = fr }
+        }
+        #expect(fin120 == 1)
+        #expect(finFrame120 == 1)                                   // tzc < ref → 含事件的 tick = 第 1 帧
+        #expect(abs((10.1 + u120.reduce(0, +)) - 10) < 1e-6)        // 模型 state 精确钉 edge
+        // 60Hz：tzc < 2·ref → 仍第 1 帧终止（≤1 帧界跨帧率成立）
+        let (a60, f60) = makeWithFake()
+        var u60: [CGFloat] = []; var fin60 = 0; var finFrame60 = -1; fr = 0
+        a60.onUpdate = { u60.append($0) }; a60.onFinish = { fin60 += 1 }
+        a60.start(initialVelocity: -50, fromOffset: 10.1, minOffset: 0, maxOffset: 10)
+        while a60.isDecelerating, fr < 5000 {
+            fr += 1; _ = f60()?.fire(2 * ref)
+            if !a60.isDecelerating, finFrame60 < 0 { finFrame60 = fr }
+        }
+        #expect(fin60 == 1)
+        #expect(finFrame60 == 1)
+        #expect(abs((10.1 + u60.reduce(0, +)) - 10) < 1e-6)
     }
 }
 ```
