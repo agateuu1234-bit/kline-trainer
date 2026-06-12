@@ -450,42 +450,27 @@ struct EdgeBounceModelTests {
         }
     }
 
-    // P6 大 edge 量级悬殊点级失步（codex Plan-R14-F1）：edge=1e15、offset=1e21 → 重构丢 ~1e15 点（旧相对容差 1e6
-    //   会误收）→ ULP+绝对容差应拒（≳ 亚像素失步即 inert）。
-    @Test("large-edge magnitude-disparate offset is inert (capped tolerance)")
+    // P6 大 edge 点级失步（codex Plan-R14-F1/R15-F1）：固定 cap + edge 分辨率 fail-closed → 任意大 edge 量级悬殊均 inert
+    //   （旧相对/8·ulp 容差会随 edge 膨胀放过百万点失步）。覆盖 codex R15 反例 edge=±1e15/1e21。
+    @Test("large-edge magnitude-disparate offset is inert (fixed-cap fail-closed)")
     func largeEdgeDisparateInert() {
-        let m = EdgeBounceModel(initialVelocity: 0, offset: 1e21, minOffset: 0, maxOffset: 1e15)
-        #expect(m.shouldRun == false)
+        // springEdge 量级大（ulp 超亚像素 cap）→ fail-closed，不论 offset：越上界（springEdge=max=1e15）
+        #expect(EdgeBounceModel(initialVelocity: 0, offset: 1e21, minOffset: 0, maxOffset: 1e15).shouldRun == false)
+        // 越上界，springEdge=max=-1e21（codex R15 反例量级）
+        #expect(EdgeBounceModel(initialVelocity: 0, offset: 9.382072597219299e21, minOffset: -1e22, maxOffset: -1e21).shouldRun == false)
+        // 越下界，springEdge=min=-1e15
+        #expect(EdgeBounceModel(initialVelocity: 0, offset: -1e18, minOffset: -1e15, maxOffset: 1e15).shouldRun == false)
     }
 
-    // P6 large-edge overflow（round-trippable）：xNew 有限但 springEdge+xNew 溢出（codex Plan-R2-F1）→ guard；
-    //   且 **consumer offset（从初值累积外溢 delta）真到 model edge**（codex Plan-R11-F1：track consumer，非只 model）。
-    @Test("large finite round-trippable edge: consumer offset reaches model edge, no inf delta")
-    func largeEdgeConsumerReachesEdge() {
+    // P6 MAX 量级 edge 在固定 cap 下亦 inert（codex Plan-R2-F1→R11-F1→R15-F1 演进）：固定 cap fail-closed 后
+    //   `|edge|` 大到 8·ulp > 亚像素 cap（含 0.99·MAX）一律 init 拒 → **spring 重构溢出 guard（springStep
+    //   newOffset.isFinite，R2-F1）成为不可达 belt-and-suspenders 防御**（operable 路径 springEdge 有界、不溢出）。
+    @Test("MAX-magnitude edge is inert under fixed-cap fail-closed")
+    func maxMagnitudeEdgeInert() {
         let big = CGFloat.greatestFiniteMagnitude
-        // edge=0.99·MAX，offset=0.995·MAX（越上界，量级可比 → round-trippable），velocity=0.9·MAX
-        let off0 = big * 0.995
-        var m = EdgeBounceModel(initialVelocity: big * 0.9, offset: off0,
+        let m = EdgeBounceModel(initialVelocity: big * 0.9, offset: big * 0.995,
                                 minOffset: -big, maxOffset: big * 0.99)
-        #expect(m.shouldRun)                          // round-trippable → 运行
-        var consumer = off0                           // 模拟 consumer：初值 + 累积外溢 delta
-        var sawNonFinite = false
-        var finished = false
-        var frames = 0
-        while frames < 5000, !finished {
-            frames += 1
-            switch m.advance(dt: ref) {
-            case .move(let d):
-                if !d.isFinite { sawNonFinite = true } else { consumer += d }
-            case .finish(let fd, _):
-                if let fd { if !fd.isFinite { sawNonFinite = true } else { consumer += fd } }
-                finished = true
-            }
-        }
-        #expect(!sawNonFinite)
-        #expect(finished)
-        #expect(m.debugOffset == big * 0.99)          // model 钉 edge
-        #expect(consumer == big * 0.99)               // **consumer 也到 edge**（round-trip 成立，无 desync）
+        #expect(m.shouldRun == false)                 // 0.99·MAX 的 ulp ≫ 亚像素 cap → fail-closed
     }
 
     // P6 opposite-extreme：offset 与 edge 异极、归一修正不可表示（codex Plan-R3-F1）→ inert（拒绝），
@@ -726,10 +711,13 @@ struct EdgeBounceModel: Equatable, Sendable {
         // 普通有限几何如 offset=-100/edge=-35.9 的 1-ULP 差；而量级悬殊失步的重构误差 ≈ |edge|（整端丢失）≫ 容差）。
         let correction = edge - offset
         let reconstructed = offset + correction
-        // 物理上限容差（codex Plan-R13-F1/R14-F1）：相对容差 `|edge|*1e-9` 在大 edge 处膨胀（edge=1e15→1e6 点）会误收
-        // 32768 点失步 → 改 **几 ULP(edge) + 绝对亚像素 epsilon**（容 1-ULP 重构噪声、拒任何 ≳ 亚像素的点级失步）。
-        let roundTripTol = 8 * edge.ulp + 1e-6
+        // **固定物理上限容差（不随 edge 量级增长，codex Plan-R13-F1/R14-F1/R15-F1）**：
+        // `8*edge.ulp` 在大 edge 处仍膨胀（edge=-1e21 → 容差 ~1e6 点）会误收百万点失步。改为**固定亚像素 cap**
+        // `1e-3` 点 + **fail-closed 当 edge 表示分辨率（8 ULP）超 cap**（edge 大到无法亚像素精确归一即拒）。
+        // ∴ 容差有上界、不可被更大 edge 撑开；普通几何（|edge| ≪ ~10¹¹ 点）的 1-ULP 噪声远小于 cap → 不误拒。
+        let roundTripTol: CGFloat = 1e-3
         let operable = boundsValid && correction.isFinite
+            && 8 * edge.ulp <= roundTripTol
             && abs(reconstructed - edge) <= roundTripTol
 
         self.geometryValid = operable
