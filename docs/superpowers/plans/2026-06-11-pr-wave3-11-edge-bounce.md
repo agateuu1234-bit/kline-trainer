@@ -254,7 +254,7 @@ Expected: 编译失败（`advance(dt:boundaryDistance:)` / `BoundaryOutcome` 未
 
 - [ ] **Step 4: 跑测试确认通过 + 既有全绿**
 
-Run: `cd ios/Contracts && swift test 2>&1 | tail -5`
+Run: `set -o pipefail; cd ios/Contracts && swift test 2>&1 | tail -5`  （**`pipefail` 必带**：否则管道返回 `tail` 的 0 退出码、掩盖测试失败，codex Plan-R17-F1）
 Expected: PASS；总数 ≥ 799 + 新（DecelerationModelBoundaryTests）；既有 `DecelerationModel` 15 测零改动通过（`carry` 默认 0、`advance(dt:)` 不碰它）。
 
 - [ ] **Step 5: Commit**
@@ -848,7 +848,7 @@ struct EdgeBounceModel: Equatable, Sendable {
 
 - [ ] **Step 4: 跑测试确认通过 + 既有全绿**
 
-Run: `cd ios/Contracts && swift test 2>&1 | tail -5`
+Run: `set -o pipefail; cd ios/Contracts && swift test 2>&1 | tail -5`  （**`pipefail` 必带**：否则管道返回 `tail` 的 0 退出码、掩盖测试失败，codex Plan-R17-F1）
 Expected: PASS；EdgeBounceModelTests 全过；总数 ≥ 799 + 6（Task1）+ EdgeBounce 测试数；既有零改动。
 
 - [ ] **Step 5: Commit**
@@ -1260,7 +1260,7 @@ Expected: 编译失败（`start(initialVelocity:fromOffset:minOffset:maxOffset:)
 
 - [ ] **Step 4: 跑测试确认通过 + 既有动画器测试零改动全绿**
 
-Run: `cd ios/Contracts && swift test 2>&1 | tail -8`
+Run: `set -o pipefail; cd ios/Contracts && swift test 2>&1 | tail -8`  （**`pipefail` 必带**，codex Plan-R17-F1）
 Expected: PASS；`DecelerationAnimator bounce` 全过；**既有 `DecelerationAnimator` 13+ 测试零改动通过**（P7 回归门）；总数全绿。
 
 > 若既有 `DecelerationAnimatorTests` 有失败：说明 P7 parity 破坏，**停下排查**（不得改既有测试）。重点查 `start(initialVelocity:)` 的 guard 是否仍用校验后的 `configModel.stopThreshold`、move-then-stop 序列是否保持。
@@ -1320,7 +1320,7 @@ Expected: `SCOPE-OK`（**每个** changed 文件都在 allowlist 内；任一越
 
 - [ ] **Step 3: 全量测试**
 
-Run: `cd ios/Contracts && swift test 2>&1 | tail -3`
+Run: `set -o pipefail; cd ios/Contracts && swift test 2>&1 | tail -3`  （**`pipefail` 必带**，codex Plan-R17-F1）
 Expected: `Test run with N tests in M suites passed`，0 failures，N ≥ 799 + 新增。
 
 - [ ] **Step 4: Commit**
