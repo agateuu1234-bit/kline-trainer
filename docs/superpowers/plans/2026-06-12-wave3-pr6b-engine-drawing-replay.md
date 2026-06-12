@@ -202,7 +202,7 @@ git commit -m "feat(6b): appendDrawing 画线 commit 投影单一真相（RFC §
         #expect(payload.feeSnapshot == engine.fees)                      // 原局 FeeSnapshot
         #expect(payload.stockCode == "600000")                          // 来自 reader.loadMeta()
         #expect(payload.stockName == "测试股")
-        #expect(payload.finalTick == engine.tick.globalTickIndex)
+        #expect(payload.finalTick == 3)                                 // buy@tick0 → m60 步进 3 → tick3（非自指）
         #expect(payload.buyCount == 1)                                  // 1 笔买入
         #expect(payload.sellCount == 1)                                 // forceCloseManually 的 1 笔强平卖出
     }
