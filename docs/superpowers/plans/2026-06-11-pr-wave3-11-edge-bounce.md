@@ -235,8 +235,11 @@ Expected: 编译失败（`advance(dt:boundaryDistance:)` / `BoundaryOutcome` 未
             }
             let need = boundaryDistance - totalDelta
             let stepDelta = velocity * refInterval                // 固定步内匀速（velocity 已步首衰减）
-            if need != 0, (need > 0) == (velocity > 0), abs(stepDelta) >= abs(need) {
-                let tWithin = need / velocity                     // ∈ (0, refInterval]
+            // 跨边：`need==0`（offset 恰在 outward edge → 立即跨，tWithin=0，用**已衰减**速度，与 edge-ε 极限连续，
+            // 消除 exact-edge 用满速 vs edge-ε 用衰减速度的回弹幅度跳变，codex R12-F2）；或 need 与 velocity 同向且本步够达边。
+            if (need == 0 && velocity != 0)
+                || (need != 0 && (need > 0) == (velocity > 0) && abs(stepDelta) >= abs(need)) {
+                let tWithin = (need == 0) ? 0 : need / velocity   // ∈ [0, refInterval]
                 let remainingTime = Swift.max(0, carry - tWithin) // 跨边后本次 advance 剩余物理时间（含未消耗余量）
                 carry = 0
                 return .crossed(delta: boundaryDistance, velocity: velocity, remainingTime: remainingTime)
@@ -370,17 +373,17 @@ struct EdgeBounceModelTests {
         }
     }
 
-    // P1 exact-edge：起点恰在 outward edge + 外向速度 → **第一帧立即进弹簧（seed 满速，无 decel 衰减）**，
-    //     完成内终止、精确钉 edge（codex Plan-R1-F1 + Plan-R4-F2：删 atOrPastOutwardEdge guard 会先衰减再 strand → 须断言首帧 state + finished）
-    @Test("outward fling exactly on edge: immediate full-velocity spring then settles at edge")
+    // P1 exact-edge：起点恰在 outward edge + 外向速度 → 第一帧进弹簧（boundary-aware `need==0` 用**已衰减**速度
+    //     seed，与 edge-ε 极限连续），完成内终止、精确钉 edge（codex Plan-R1-F1/R12-F2）。
+    @Test("outward fling exactly on edge: continuous (damped-seed) spring then settles at edge")
     func exactEdgeOutwardFling() {
         let omega = sqrt(EdgeBounceModel.defaultStiffness)   // √200
-        let expectedX = (1000 * ref) * exp(-omega * ref)     // seed=edge, A=0, B=1000 → 首帧 overscroll
-        // 上界：offset==max 10，v=+1000
+        let damped = 1000 * f                                // need==0 用已衰减速度（= v0*friction）
+        let expectedX = (damped * ref) * exp(-omega * ref)   // seed=edge, A=0, B=damped → 首帧 overscroll
         var hi = EdgeBounceModel(initialVelocity: 1000, offset: 10, minOffset: 0, maxOffset: 10)
         #expect(hi.shouldRun)
         guard case .move = hi.advance(dt: ref) else { Issue.record("expected first frame .move (hi)"); return }
-        #expect(abs(hi.debugOverscroll - expectedX) < 1e-4)  // **满速 1000 seed**（破 guard → 用衰减 940 → 偏离）
+        #expect(abs(hi.debugOverscroll - expectedX) < 1e-4)
         var n = 0; var finished = false
         while n < 5000, !finished { n += 1; if case .finish = hi.advance(dt: ref) { finished = true } }
         #expect(finished)
@@ -395,6 +398,20 @@ struct EdgeBounceModelTests {
         #expect(lo.debugOffset == 0)
     }
 
+    // P1 epsilon-limit：exact-edge（offset=max）与 edge-ε（offset=max-ε）首帧弹簧 overscroll **收敛**（codex R12-F2：
+    //     连续 handoff，无幅度跳变）。ε→0 时两者首帧 overscroll 差 → 0。
+    @Test("exact-edge and edge-epsilon spring seeds converge (no amplitude jump)")
+    func exactEdgeEpsilonContinuity() {
+        func firstOverscroll(offset: CGFloat) -> CGFloat {
+            var m = EdgeBounceModel(initialVelocity: 1000, offset: offset, minOffset: 0, maxOffset: 10)
+            _ = m.advance(dt: ref)
+            return m.debugOverscroll
+        }
+        let exact = firstOverscroll(offset: 10)
+        let nearE = firstOverscroll(offset: 10 - 1e-6)       // edge-ε
+        #expect(abs(exact - nearE) < 1e-3)                   // 连续：跳变 → 0（旧 atOrPastOutwardEdge 会给 ~0.45pt 跳）
+    }
+
     // P6 量级悬殊 non-round-trippable：offset=MAX/2、edge=10 → 修正 `edge−offset` 舍入为 -offset
     //   （consumer 落 0 而非 edge，model/consumer 失步）→ inert 拒绝（codex Plan-R11-F1）。
     @Test("magnitude-disparate non-round-trippable geometry is inert")
@@ -407,6 +424,16 @@ struct EdgeBounceModelTests {
         guard case .finish(let fd, _) = out else { Issue.record("expected finish"); return }
         #expect(fd == nil)
         #expect(m.debugOffset == CGFloat.greatestFiniteMagnitude / 2)
+    }
+
+    // P6 in-bounds 减速相不可逆（codex R12-F1）：offset 极端但 in-bounds、减速会向小 edge 跨边，
+    //   修正 `edge−offset` 不可逆（量级悬殊）→ 减速相 round-trip 校验亦拒绝 → inert（防 consumer 跨边后失步）。
+    @Test("in-bounds extreme decelerating toward non-round-trippable edge is inert")
+    func inBoundsExtremeDecelInert() {
+        let big = CGFloat.greatestFiniteMagnitude
+        // offset=-MAX/2 in-bounds [-MAX, 10]，velocity+ → 向 edge 10 减速，但 10-(-MAX/2) 舍入丢小端 → 不可逆
+        let m = EdgeBounceModel(initialVelocity: big * 0.5, offset: -big / 2, minOffset: -big, maxOffset: 10)
+        #expect(m.shouldRun == false)                 // 减速相也查 round-trip → 拒绝
     }
 
     // P6 large-edge overflow（round-trippable）：xNew 有限但 springEdge+xNew 溢出（codex Plan-R2-F1）→ guard；
@@ -671,13 +698,12 @@ struct EdgeBounceModel: Equatable, Sendable {
         } else {
             ph = .decelerating; edge = (v >= 0) ? hi : lo
         }
-        // 可操作性（codex Plan-R3-F1/R11-F1）：越界则归一修正 `edge−offset` 须 **round-trippable**——
-        // 即 `offset + (edge−offset) == edge`（不仅有限）。否则（offset 与 edge 量级悬殊：如 offset=MAX/2、edge=10，
-        // 修正舍入为 -offset → consumer 落 0 而 model snap edge）= **不可逆 → inert**（动画器 no-op，
-        // 绝不外溢 ±inf delta、绝不内部 snap 致 model/consumer 失步）。
+        // 可操作性（codex Plan-R3-F1/R11-F1/R12-F1）：到所选 edge 的归一修正 `edge−offset` 须 **round-trippable**——
+        // 即 `offset + (edge−offset) == edge`（不仅有限）。**减速相也须查**（codex R12-F1：减速可跨边后 snap model 至 edge，
+        // 而累积 delta 因量级悬殊使 consumer 落 0 = 失步；减速中 offset 仅**更靠近** edge，故 init 查 `edge−offset` 已足）。
+        // 不可逆（offset 与 edge 量级悬殊：MAX/2 vs 10，修正舍入丢小端）→ inert（no-op，绝不 snap 致失步）。
         let correction = edge - offset
-        let operable = boundsValid
-            && (ph == .decelerating || (correction.isFinite && offset + correction == edge))
+        let operable = boundsValid && correction.isFinite && offset + correction == edge
 
         self.geometryValid = operable
         self.minOffset = lo
@@ -730,17 +756,11 @@ struct EdgeBounceModel: Equatable, Sendable {
         }
     }
 
-    // 减速相：boundary-aware；跨边即 seed 弹簧于 edge、对剩余帧时间走弹簧
+    // 减速相：boundary-aware；跨边即 seed 弹簧于 edge、对剩余帧时间走弹簧。
+    // 起点恰在 outward edge（boundaryDistance==0）由 boundary-aware 的 `need==0` 分支处理（立即跨、用已衰减速度，
+    // 与 edge-ε 极限连续，codex R1-F1/R12-F2）——故此处**不再**特判 atOrPastOutwardEdge（避免幅度跳变）。
     private mutating func advanceDecel(dt: CGFloat, frameEntry: CGFloat) -> FrameOutcome {
         let edge = (velocity >= 0) ? maxOffset : minOffset
-        // 起点恰在/越过 outward edge（boundaryDistance==0，codex Plan-R1-F1）→ 立即进弹簧，
-        // 否则 boundary-aware 的 `need != 0` 守门会吞掉跨边、把 offset 滑出界外永不回弹。
-        let atOrPastOutwardEdge = (velocity >= 0) ? (offset >= maxOffset) : (offset <= minOffset)
-        if atOrPastOutwardEdge {
-            springEdge = edge
-            phase = .springing
-            return springStep(tau: dt, frameEntry: frameEntry)
-        }
         switch decel.advance(dt: dt, boundaryDistance: edge - offset) {
         case .moved(let d):
             offset += d
