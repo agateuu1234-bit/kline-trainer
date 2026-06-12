@@ -420,4 +420,20 @@ struct TrainingSessionPersistenceTests {
             try await coord.saveProgress(engine: foreign)
         }
     }
+
+    // MARK: - Wave 3 顺位 6b：appendDrawing 进入持久化路径
+
+    @Test("appendDrawing: 追加的画线经 saveProgress 落 pending.drawings（§4.4c 单一真相→持久化）")
+    func appendDrawing_flowsIntoPendingPersistence() async throws {
+        let (coord, _, pending) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
+        coord.now = { 222 }
+        let engine = try await coord.startNewNormalSession()
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 1, price: 10.4)],
+                              isExtended: false, panelPosition: 0)
+        engine.appendDrawing(d)
+        try await coord.saveProgress(engine: engine)
+        let p = try #require(try pending.loadPending())
+        #expect(p.drawings == [d])                   // engine.drawings → pending.drawings 单一真相
+    }
 }
