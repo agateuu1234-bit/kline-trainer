@@ -16,6 +16,7 @@ public final class TrainingSessionCoordinator {
     private let dbFactory: TrainingSetDBFactory       // P3a
     private let recordRepo: RecordRepository          // P4
     private let pendingRepo: PendingTrainingRepository // P4
+    private let finalization: SessionFinalizationPort  // Wave 3 顺位 10a：单事务终结 port（RFC §4.7b）
     private let settingsDAO: SettingsDAO              // P4
     private let cache: CacheManager                   // P5
     private let settings: SettingsStore               // P6
@@ -32,15 +33,23 @@ public final class TrainingSessionCoordinator {
     /// 可注入时钟（public init 已冻结，不能加参数）。默认系统时钟；@testable 测试可覆盖（D5）。
     @ObservationIgnored var now: () -> Int64 = { Int64(Date().timeIntervalSince1970) }
 
+    /// 当前 Normal session 的 durable session key（RFC §4.7c）：fresh=makeSessionKey()；
+    /// resume=pending.sessionKey；review/replay=nil；endSession 清空。finalize 幂等锚。
+    @ObservationIgnored private(set) var activeSessionKey: String?
+    /// 可注入 key 生成器（mirror `now` 范式，D5）。默认 UUID；@testable 测试可覆盖。
+    @ObservationIgnored var makeSessionKey: () -> String = { UUID().uuidString }
+
     public init(dbFactory: TrainingSetDBFactory,
                 recordRepo: RecordRepository,
                 pendingRepo: PendingTrainingRepository,
+                finalization: SessionFinalizationPort,
                 settingsDAO: SettingsDAO,
                 cache: CacheManager,
                 settings: SettingsStore) {
         self.dbFactory = dbFactory
         self.recordRepo = recordRepo
         self.pendingRepo = pendingRepo
+        self.finalization = finalization
         self.settingsDAO = settingsDAO
         self.cache = cache
         self.settings = settings
@@ -70,6 +79,7 @@ public final class TrainingSessionCoordinator {
             activeEngine = engine
             activeFile = file
             activeStartedAt = now()                 // D4：fresh Normal 局起始时间
+            activeSessionKey = makeSessionKey()     // RFC §4.7c：fresh Normal 生成新 session key
             return engine
         } catch {
             reader.close()                                   // D9：失败关闭已开 reader，不留半态
@@ -105,6 +115,7 @@ public final class TrainingSessionCoordinator {
             activeEngine = engine
             activeFile = file
             activeStartedAt = pending.startedAt      // D4：resume 保留原局起始时间
+            activeSessionKey = pending.sessionKey    // RFC §4.7c：resume 恢复已存 session key
             return engine
         } catch {
             reader.close()
@@ -138,6 +149,7 @@ public final class TrainingSessionCoordinator {
             activeEngine = engine
             activeFile = file
             activeStartedAt = nil                    // D4：review 只读，无进度保存
+            activeSessionKey = nil                   // RFC §4.7c：review 无 session key
             return engine
         } catch {
             reader.close()
@@ -163,6 +175,7 @@ public final class TrainingSessionCoordinator {
             activeEngine = engine
             activeFile = file
             activeStartedAt = nil                    // D4：replay 不入账，无进度保存
+            activeSessionKey = nil                   // RFC §4.7c：replay 无 session key
             return engine
         } catch {
             reader.close()
@@ -176,7 +189,8 @@ public final class TrainingSessionCoordinator {
         guard engine.flow.mode == .normal else { return }     // D3：仅 Normal 持久化
         // D4 加固（final-review L2）：engine 必须是当前活跃 session 的引擎，否则会把活跃 session 的
         // 文件/起始时间记到外来 engine 上 → 写错存档。activeEngine 为 nil（无会话）时身份不符亦在此拒绝。
-        guard activeEngine === engine, let file = activeFile, let started = activeStartedAt else {
+        guard activeEngine === engine, let file = activeFile, let started = activeStartedAt,
+              let key = activeSessionKey else {
             throw AppError.internalError(module: "E6b", detail: "saveProgress without active session context")
         }
         let pending = PendingTraining(
@@ -192,7 +206,7 @@ public final class TrainingSessionCoordinator {
             startedAt: started,
             accumulatedCapital: engine.initialCapital,         // D4：本局起始资金
             drawdown: engine.drawdown,
-            sessionKey: "")                                    // Task 4 接线占位（10a plan Task 4 会替换为 activeSessionKey）
+            sessionKey: key)                                   // RFC §4.7c：durable session key
         try pendingRepo.savePending(pending)
     }
 
@@ -204,7 +218,8 @@ public final class TrainingSessionCoordinator {
         guard engine.flow.shouldSaveRecord() else { return nil }   // D2：Review/Replay 不入账
         // D4 加固（final-review L2）：engine 必须是当前活跃 session 的引擎，否则会把活跃 session 的
         // 文件/股票元数据记到外来 engine 的交易数据上 → 写错历史记录。activeEngine 为 nil 时亦在此拒绝。
-        guard activeEngine === engine, let file = activeFile, let reader = activeReader else {
+        guard activeEngine === engine, let file = activeFile, let reader = activeReader,
+              let key = activeSessionKey else {
             throw AppError.internalError(module: "E6b", detail: "finalize without active session context")
         }
         let meta = try reader.loadMeta()
@@ -228,8 +243,11 @@ public final class TrainingSessionCoordinator {
             sellCount: engine.tradeOperations.filter { $0.direction == .sell }.count,
             feeSnapshot: engine.fees,
             finalTick: engine.tick.globalTickIndex)
-        let id = try recordRepo.insertRecord(record, ops: engine.tradeOperations, drawings: engine.drawings)
-        try pendingRepo.clearPending()
+        // RFC §4.7b：单事务（insertRecord + clearPending 原子）+ §4.7c 幂等锚（sessionKey）
+        let id = try finalization.finalizeSession(record: record,
+                                                  ops: engine.tradeOperations,
+                                                  drawings: engine.drawings,
+                                                  sessionKey: key)
         return id
     }
 
@@ -277,6 +295,7 @@ public final class TrainingSessionCoordinator {
         activeEngine = nil
         activeFile = nil
         activeStartedAt = nil
+        activeSessionKey = nil                       // RFC §4.7c：清空 session key
     }
 
     // MARK: - 私有构造 helper（E6a）
@@ -362,10 +381,13 @@ public final class TrainingSessionCoordinator {
 @MainActor
 extension TrainingSessionCoordinator {
     public static func preview() -> TrainingSessionCoordinator {
-        TrainingSessionCoordinator(
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        return TrainingSessionCoordinator(
             dbFactory: PreviewTrainingSetDBFactory(),
-            recordRepo: InMemoryRecordRepository(),
-            pendingRepo: InMemoryPendingTrainingRepository(),
+            recordRepo: records,
+            pendingRepo: pending,
+            finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: InMemoryCacheManager(),
             settings: SettingsStore.preview()

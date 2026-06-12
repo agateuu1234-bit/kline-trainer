@@ -25,6 +25,7 @@ public final class AppContainer {
             dataVerifier: DefaultTrainingSetDataVerifier(), cleaner: DefaultDownloadAcceptanceCleaner())
         let coordinator = TrainingSessionCoordinator(
             dbFactory: dbFactory, recordRepo: db, pendingRepo: db,
+            finalization: db,
             settingsDAO: db, cache: cache, settings: settings)
         let router = AppRouter(coordinator: coordinator, settings: settings, acceptance: acceptance,
                                recordRepo: db, pendingRepo: db, cache: cache)

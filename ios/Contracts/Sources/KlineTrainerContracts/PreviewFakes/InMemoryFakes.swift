@@ -141,6 +141,43 @@ public final class InMemoryPendingTrainingRepository: PendingTrainingRepository,
     }
 }
 
+/// Wave 3 顺位 10a：SessionFinalizationPort 的 in-memory fake。
+/// 组合既有 record/pending 两 fake（保证 fake 状态一致）；mirror 生产单事务语义：
+/// 失败注入时**零状态变更**（原子）；同 sessionKey 重试幂等返已存 id。
+public final class InMemorySessionFinalizationPort: SessionFinalizationPort, @unchecked Sendable {
+    private let lock = NSLock()
+    private let records: InMemoryRecordRepository
+    private let pending: InMemoryPendingTrainingRepository
+    private var keyed: [String: Int64] = [:]
+    /// 注入下一次 finalizeSession 抛错（消费后自动清除）。
+    public var failNextFinalize: AppError?
+    /// 调用计数（review/replay 不触 port 的断言用）。
+    public private(set) var finalizeCallCount = 0
+
+    public init(records: InMemoryRecordRepository, pending: InMemoryPendingTrainingRepository) {
+        self.records = records
+        self.pending = pending
+    }
+
+    public func finalizeSession(record: TrainingRecord, ops: [TradeOperation],
+                                drawings: [DrawingObject], sessionKey: String) throws -> Int64 {
+        lock.lock(); defer { lock.unlock() }
+        finalizeCallCount += 1
+        if let err = failNextFinalize {
+            failNextFinalize = nil
+            throw err            // 原子：抛前零状态变更（mirror 生产事务 rollback）
+        }
+        if let existing = keyed[sessionKey] {       // 幂等：命中仍需清 pending（mirror 生产）
+            try pending.clearPending()
+            return existing
+        }
+        let id = try records.insertRecord(record, ops: ops, drawings: drawings)
+        keyed[sessionKey] = id
+        try pending.clearPending()
+        return id
+    }
+}
+
 public final class InMemorySettingsDAO: SettingsDAO, @unchecked Sendable {
     private let lock = NSLock()
     private var settings: AppSettings = AppSettings(

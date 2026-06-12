@@ -57,6 +57,7 @@ struct TrainingSessionCoordinatorConstructionTests {
             dbFactory: PreviewTrainingSetDBFactory(candles: candles),
             recordRepo: records,
             pendingRepo: pending,
+            finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,
             settings: SettingsStore(settingsDAO: CapitalDAO(capital: capital)))
@@ -124,10 +125,13 @@ struct TrainingSessionCoordinatorConstructionTests {
     ) -> TrainingSessionCoordinator {
         let cache = InMemoryCacheManager()
         if let f = seedFile { cache._seedForTesting([f]) }
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
         return TrainingSessionCoordinator(
             dbFactory: factory,
-            recordRepo: InMemoryRecordRepository(),
-            pendingRepo: InMemoryPendingTrainingRepository(),
+            recordRepo: records,
+            pendingRepo: pending,
+            finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,
             settings: settings)
@@ -251,9 +255,11 @@ struct TrainingSessionCoordinatorConstructionTests {
         let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
         let pendingRepo = InMemoryPendingTrainingRepository()
         try pendingRepo.savePending(try Self.pending(positionDataOverride: Data("not json".utf8)))
+        let records2 = InMemoryRecordRepository()
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
-            recordRepo: InMemoryRecordRepository(), pendingRepo: pendingRepo,
+            recordRepo: records2, pendingRepo: pendingRepo,
+            finalization: InMemorySessionFinalizationPort(records: records2, pending: pendingRepo),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.persistence(.dbCorrupted)) {
             try await coord.resumePending()
@@ -278,9 +284,11 @@ struct TrainingSessionCoordinatorConstructionTests {
         let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
         let pendingRepo = InMemoryPendingTrainingRepository()
         try pendingRepo.savePending(try Self.pending(tick: 99))            // 超出 allowedTickRange 0...7（训练组被替换）
+        let records3 = InMemoryRecordRepository()
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
-            recordRepo: InMemoryRecordRepository(), pendingRepo: pendingRepo,
+            recordRepo: records3, pendingRepo: pendingRepo,
+            finalization: InMemorySessionFinalizationPort(records: records3, pending: pendingRepo),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.trainingSet(.emptyData)) {
             try await coord.resumePending()
@@ -347,9 +355,11 @@ struct TrainingSessionCoordinatorConstructionTests {
         let id = try Self.seedRecord(records, ops: [])
         let spy = Self.SpyReader(candles: [:], loadError: .persistence(.ioError("x")))
         let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let pendingR = InMemoryPendingTrainingRepository()
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
-            recordRepo: records, pendingRepo: InMemoryPendingTrainingRepository(),
+            recordRepo: records, pendingRepo: pendingR,
+            finalization: InMemorySessionFinalizationPort(records: records, pending: pendingR),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.persistence(.ioError("x"))) {
             try await coord.review(recordId: id)
@@ -393,9 +403,11 @@ struct TrainingSessionCoordinatorConstructionTests {
         let id = try Self.seedRecord(records, ops: [])
         let spy = Self.SpyReader(candles: [:], loadError: .persistence(.diskFull))
         let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let pendingP = InMemoryPendingTrainingRepository()
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
-            recordRepo: records, pendingRepo: InMemoryPendingTrainingRepository(),
+            recordRepo: records, pendingRepo: pendingP,
+            finalization: InMemorySessionFinalizationPort(records: records, pending: pendingP),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.persistence(.diskFull)) {
             try await coord.replay(recordId: id)

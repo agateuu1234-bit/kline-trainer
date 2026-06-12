@@ -66,24 +66,26 @@ struct TrainingSessionPersistenceTests {
         candles: [Period: [KLineCandle]],
         capital: Double = 50_000,
         seedFile: TrainingSetFile? = cachedFile()
-    ) -> (TrainingSessionCoordinator, InMemoryRecordRepository, InMemoryPendingTrainingRepository) {
+    ) -> (TrainingSessionCoordinator, InMemoryRecordRepository, InMemoryPendingTrainingRepository, InMemorySessionFinalizationPort) {
         let records = InMemoryRecordRepository()
         let pending = InMemoryPendingTrainingRepository()
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
         let cache = InMemoryCacheManager()
         if let f = seedFile { cache._seedForTesting([f]) }
         let coord = TrainingSessionCoordinator(
             dbFactory: PreviewTrainingSetDBFactory(candles: candles),
             recordRepo: records,
             pendingRepo: pending,
+            finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,
             settings: SettingsStore(settingsDAO: CapitalDAO(capital: capital)))
-        return (coord, records, pending)
+        return (coord, records, pending, port)
     }
 
     @Test("endSession: 关闭 reader + 清空 active 状态（D10）")
     func endSession_closesReaderClearsActive() async throws {
-        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles())
         _ = try await coord.startNewNormalSession()
         #expect(coord.activeReader != nil)
         #expect(coord.activeEngine != nil)
@@ -94,7 +96,7 @@ struct TrainingSessionPersistenceTests {
 
     @Test("endSession: never-started → 安全 no-op（不崩）")
     func endSession_neverStarted_noop() async throws {
-        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles())
         await coord.endSession()     // 全 nil，不崩
         #expect(coord.activeReader == nil)
         #expect(coord.activeEngine == nil)
@@ -104,10 +106,13 @@ struct TrainingSessionPersistenceTests {
     func endSession_closesInjectedReader() async throws {
         let spy = Self.MetaSpyReader(candles: Self.validCandles())
         let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
-            recordRepo: InMemoryRecordRepository(),
-            pendingRepo: InMemoryPendingTrainingRepository(),
+            recordRepo: records,
+            pendingRepo: pending,
+            finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,
             settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000)))
@@ -118,8 +123,9 @@ struct TrainingSessionPersistenceTests {
 
     @Test("saveProgress: Normal 局 → 持久化 PendingTraining 全字段（含 startedAt=now()、accumulated=起始资金）")
     func saveProgress_normal_persistsAllFields() async throws {
-        let (coord, _, pending) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
+        let (coord, _, pending, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
         coord.now = { 111 }                                  // 控制 startedAt
+        coord.makeSessionKey = { "fixed-key" }               // 控制 sessionKey（RFC §4.7c）
         let engine = try await coord.startNewNormalSession()  // fresh：tick 0、空仓、cash 50000
         try await coord.saveProgress(engine: engine)
         let p = try #require(try pending.loadPending())
@@ -130,6 +136,7 @@ struct TrainingSessionPersistenceTests {
         #expect(p.cashBalance == 50_000)
         #expect(p.accumulatedCapital == 50_000)               // D4：engine.initialCapital
         #expect(p.startedAt == 111)                            // D4/D5：fresh=now() at start
+        #expect(p.sessionKey == "fixed-key")                  // RFC §4.7c：sessionKey 落 pending
         #expect(p.tradeOperations.isEmpty)
         #expect(p.drawings.isEmpty)
         #expect(p.feeSnapshot == FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false))  // 自 settings 快照
@@ -141,7 +148,7 @@ struct TrainingSessionPersistenceTests {
 
     @Test("saveProgress: review 模式 → no-op（不写 pending，D3）")
     func saveProgress_review_noop() async throws {
-        let (coord, records, pending) = Self.makeCoordinator(candles: Self.validCandles())
+        let (coord, records, pending, _) = Self.makeCoordinator(candles: Self.validCandles())
         let id = try records.insertRecord(
             TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
                            stockCode: "X", stockName: "X", startYear: 2020, startMonth: 1,
@@ -157,7 +164,7 @@ struct TrainingSessionPersistenceTests {
 
     @Test("saveProgress: replay 模式 → no-op（不写 pending，D3）")
     func saveProgress_replay_noop() async throws {
-        let (coord, records, pending) = Self.makeCoordinator(candles: Self.validCandles())
+        let (coord, records, pending, _) = Self.makeCoordinator(candles: Self.validCandles())
         let id = try records.insertRecord(
             TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
                            stockCode: "X", stockName: "X", startYear: 2020, startMonth: 1,
@@ -173,7 +180,7 @@ struct TrainingSessionPersistenceTests {
 
     @Test("saveProgress: 缺活跃上下文（endSession 后）→ .internalError（D9）")
     func saveProgress_noActiveContext_throws() async throws {
-        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles())
         let engine = try await coord.startNewNormalSession()
         await coord.endSession()                               // 清空 activeFile/activeStartedAt
         await #expect(throws: AppError.internalError(module: "E6b",
@@ -184,7 +191,7 @@ struct TrainingSessionPersistenceTests {
 
     @Test("saveProgress → resumePending round-trip：状态还原一致（D4 跨方法集成）")
     func saveProgress_thenResume_roundTrips() async throws {
-        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
+        let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
         coord.now = { 222 }
         let engine = try await coord.startNewNormalSession()
         try await coord.saveProgress(engine: engine)
@@ -286,9 +293,11 @@ struct TrainingSessionPersistenceTests {
         let records = InMemoryRecordRepository()
         let pending = InMemoryPendingTrainingRepository()
         try pending.savePending(try deterministicPending())
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
         let coord = TrainingSessionCoordinator(
             dbFactory: StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pending,
+            finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache, settings: SettingsStore(settingsDAO: CapitalDAO(capital: 10_000)))
         return (coord, records, pending, spy)
@@ -329,7 +338,7 @@ struct TrainingSessionPersistenceTests {
 
     @Test("finalize: review 模式 → nil（不插记录、不动 pending，D2）")
     func finalize_review_returnsNil() async throws {
-        let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let (coord, records, _, _) = Self.makeCoordinator(candles: Self.validCandles())
         let id = try records.insertRecord(
             TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
                            stockCode: "X", stockName: "X", startYear: 2020, startMonth: 1,
@@ -347,7 +356,7 @@ struct TrainingSessionPersistenceTests {
 
     @Test("finalize: replay 模式 → nil（不入账，D2）")
     func finalize_replay_returnsNil() async throws {
-        let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let (coord, records, _, _) = Self.makeCoordinator(candles: Self.validCandles())
         let id = try records.insertRecord(
             TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
                            stockCode: "X", stockName: "X", startYear: 2020, startMonth: 1,
@@ -365,7 +374,7 @@ struct TrainingSessionPersistenceTests {
 
     @Test("finalize: Normal 但缺活跃上下文（endSession 后）→ .internalError（D9）")
     func finalize_noActiveContext_throws() async throws {
-        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles())
         let engine = try await coord.startNewNormalSession()
         await coord.endSession()
         await #expect(throws: AppError.internalError(module: "E6b",
@@ -391,9 +400,11 @@ struct TrainingSessionPersistenceTests {
             tradeOperations: [], drawings: [], startedAt: 1,
             accumulatedCapital: 100_000, drawdown: .initial,
             sessionKey: "SK-test"))
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pending,
+            finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000)))
         let engine = try #require(try await coord.resumePending())
@@ -410,7 +421,7 @@ struct TrainingSessionPersistenceTests {
 
     @Test("finalize/saveProgress: 传入非活跃 engine → .internalError（engine 身份守门，final-review L2 加固）")
     func finalizeSaveProgress_foreignEngine_throws() async throws {
-        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles())
         _ = try await coord.startNewNormalSession()         // activeEngine = 本 session 引擎
         let foreign = TrainingEngine.preview()              // 不同实例，normal 模式（过 mode/shouldSaveRecord 首守门）
         await #expect(throws: AppError.internalError(module: "E6b",
@@ -427,7 +438,7 @@ struct TrainingSessionPersistenceTests {
 
     @Test("appendDrawing: 追加的画线经 saveProgress 落 pending.drawings（§4.4c 单一真相→持久化）")
     func appendDrawing_flowsIntoPendingPersistence() async throws {
-        let (coord, _, pending) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
+        let (coord, _, pending, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
         coord.now = { 222 }
         let engine = try await coord.startNewNormalSession()
         let d = DrawingObject(toolType: .horizontal,
@@ -461,6 +472,7 @@ struct TrainingSessionPersistenceTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)),
             recordRepo: records, pendingRepo: pending,
+            finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: capital)))
         let engine = try await coord.replay(recordId: srcId)
@@ -502,7 +514,7 @@ struct TrainingSessionPersistenceTests {
 
     @Test("replaySettlementPayload: 非 replay 模式 → throws（caller-contract 守卫）")
     func replaySettlementPayload_throwsInNonReplayMode() async throws {
-        let (coord, _, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
+        let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
         let engine = try await coord.startNewNormalSession()   // .normal
         #expect(throws: AppError.self) {
             _ = try coord.replaySettlementPayload(engine: engine)
@@ -516,5 +528,130 @@ struct TrainingSessionPersistenceTests {
         #expect(throws: AppError.self) {
             _ = try coord.replaySettlementPayload(engine: engine)
         }
+    }
+
+    // MARK: - Wave 3 顺位 10a：sessionKey 生命周期 + finalize 单事务 + 幂等（RFC §4.7a/b/c）
+
+    @Test("sessionKey 生命周期：fresh Normal → activeSessionKey 非空；endSession → nil")
+    func sessionKey_lifecycle_fresh_normal() async throws {
+        let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        coord.makeSessionKey = { "K1" }
+        #expect(coord.activeSessionKey == nil)                 // 初始为 nil
+        _ = try await coord.startNewNormalSession()
+        #expect(coord.activeSessionKey == "K1")               // fresh 后已设置
+        await coord.endSession()
+        #expect(coord.activeSessionKey == nil)                 // endSession 清空
+    }
+
+    @Test("sessionKey 生命周期：resume → activeSessionKey == pending.sessionKey")
+    func sessionKey_lifecycle_resume_restores() async throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 2)
+        let (coord, _, _, _) = try Self.resumeCoordinator(meta: meta)
+        _ = try await coord.resumePending()
+        #expect(coord.activeSessionKey == "SK-test")          // deterministicPending 内 sessionKey
+    }
+
+    @Test("sessionKey 生命周期：review/replay → activeSessionKey == nil")
+    func sessionKey_lifecycle_review_replay_nil() async throws {
+        let (coord, records, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let id = try records.insertRecord(
+            TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
+                           stockCode: "X", stockName: "X", startYear: 2020, startMonth: 1,
+                           totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                           buyCount: 0, sellCount: 0,
+                           feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+                           finalTick: 7),
+            ops: [], drawings: [])
+        _ = try await coord.review(recordId: id)
+        #expect(coord.activeSessionKey == nil)                 // review → nil（RFC §4.7c）
+        await coord.endSession()
+        _ = try await coord.replay(recordId: id)
+        #expect(coord.activeSessionKey == nil)                 // replay → nil
+    }
+
+    @Test("finalize 失败：port 注入错误 → session 保持活跃（RFC §4.7a：失败不拆 session）")
+    func finalize_failure_preserves_session_then_retry_succeeds() async throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 2)
+        let spy = Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        try pending.savePending(try Self.deterministicPending())
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: records, pendingRepo: pending,
+            finalization: port,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache, settings: SettingsStore(settingsDAO: CapitalDAO(capital: 10_000)))
+        let engine = try #require(try await coord.resumePending())
+
+        // 注入首次 finalize 失败
+        port.failNextFinalize = AppError.persistence(.ioError("disk"))
+        await #expect(throws: AppError.persistence(.ioError("disk"))) {
+            _ = try await coord.finalize(engine: engine)
+        }
+        // RFC §4.7a：失败后 session 仍活跃（activeEngine/Reader/SessionKey 均非 nil）
+        #expect(coord.activeEngine != nil)
+        #expect(coord.activeReader != nil)
+        #expect(coord.activeSessionKey != nil)
+        // 重试成功
+        let id = try #require(try await coord.finalize(engine: engine))
+        #expect(id > 0)
+        #expect(try pending.loadPending() == nil)              // 成功后 pending 清空
+    }
+
+    @Test("finalize 幂等：同 sessionKey 重试 → 返相同 id（RFC §4.7c 幂等锚）")
+    func finalize_retry_after_committed_returns_same_id() async throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 2)
+        // 手动组装，保持 port 引用
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        try pending.savePending(try Self.deterministicPending())
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)),
+            recordRepo: records, pendingRepo: pending,
+            finalization: port,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache,
+            settings: SettingsStore(settingsDAO: CapitalDAO(capital: 10_000)))
+        let engine = try #require(try await coord.resumePending())
+        let id1 = try #require(try await coord.finalize(engine: engine))
+        // 模拟 crash-recovery：手动重新注入 pending（同 sessionKey "SK-test"）以允许再次 finalize
+        // 但 port 已经 keyed["SK-test"] → 返同 id（幂等）
+        try pending.savePending(try Self.deterministicPending())
+        // 重建 session（resumePending 会从 pending 取回 "SK-test"）
+        let coord2 = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)),
+            recordRepo: records, pendingRepo: pending,
+            finalization: port,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache,
+            settings: SettingsStore(settingsDAO: CapitalDAO(capital: 10_000)))
+        let engine2 = try #require(try await coord2.resumePending())  // 恢复 sessionKey = "SK-test"
+        let id2 = try #require(try await coord2.finalize(engine: engine2))
+        #expect(id1 == id2)                                    // 幂等：同 key 返同 id
+        #expect(port.finalizeCallCount == 2)                  // port 调用两次（幂等由 port 处理）
+    }
+
+    @Test("finalize：review/replay 不触 port（shouldSaveRecord() 早返 nil 在 key guard 之前）")
+    func finalize_review_replay_do_not_touch_port() async throws {
+        let (coord, records, _, port) = Self.makeCoordinator(candles: Self.validCandles())
+        let id = try records.insertRecord(
+            TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
+                           stockCode: "X", stockName: "X", startYear: 2020, startMonth: 1,
+                           totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                           buyCount: 0, sellCount: 0,
+                           feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+                           finalTick: 7),
+            ops: [], drawings: [])
+        let reviewEngine = try await coord.review(recordId: id)
+        _ = try await coord.finalize(engine: reviewEngine)    // 早返 nil（review）
+        await coord.endSession()
+        let replayEngine = try await coord.replay(recordId: id)
+        _ = try await coord.finalize(engine: replayEngine)    // 早返 nil（replay）
+        #expect(port.finalizeCallCount == 0)                   // port 从未被触发
     }
 }

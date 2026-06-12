@@ -181,10 +181,13 @@ struct TrainingSessionCoordinatorShapeTests {
 
     // 复用 Task 4 in-memory fakes 构造 TSC
     private func makeCoordinator() -> TrainingSessionCoordinator {
-        TrainingSessionCoordinator(
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        return TrainingSessionCoordinator(
             dbFactory: PreviewTrainingSetDBFactory(),
-            recordRepo: InMemoryRecordRepository(),
-            pendingRepo: InMemoryPendingTrainingRepository(),
+            recordRepo: records,
+            pendingRepo: pending,
+            finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: InMemoryCacheManager(),
             settings: SettingsStore(settingsDAO: InMemorySettingsDAO())
