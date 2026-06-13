@@ -50,6 +50,19 @@ public struct TrainingView: View {
     // （code-review Task3 Important；同 Task1 shouldShowSettlement 范式）。
     private var showsTradeButtons: Bool { engine.flow.canBuySell() }
 
+    // 顺位 4：上栏是否在画线模式（按钮选中态 + toggle 语义）。
+    private var isDrawingActive: Bool {
+        if case .drawing = engine.upperPanel.interactionMode { return true }
+        return false
+    }
+    private func toggleDrawing() {
+        if isDrawingActive {
+            engine.cancelDrawing(panel: .upper)
+        } else {
+            engine.activateDrawingTool(.horizontal, panel: .upper)
+        }
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
             topBar
@@ -109,6 +122,10 @@ public struct TrainingView: View {
             // （活跃 Normal 局不会发生；review/replay 的 saveProgress 是 no-op 不抛）→ `try?` 吞掉这一不可达错误以
             // 保证「点返回必退出」UX；不把保存失败上交（错误通道属顺位 11 路由 scope，code-review Task3 Minor）。
             Button("返回") { Task { try? await lifecycle.back(); onExit() } }
+            if showsTradeButtons {
+                Button(isDrawingActive ? "结束画线" : "水平线") { toggleDrawing() }
+                    .tint(isDrawingActive ? .orange : nil)
+            }
             Spacer()
             Text(bar.totalCapital)
             Text("持仓成本\(bar.holdingCost)")
