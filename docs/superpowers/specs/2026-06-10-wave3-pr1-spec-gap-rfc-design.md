@@ -15,7 +15,7 @@
 - **(A) tier 显示公式**（§4.1）：U2-R3「顶栏仓位 X/5」。**buy/sell action tier 已 explicit**（plan L602-610），缺的是**当前持仓档位 X 的派生公式**（如何从 shares/price/capital 算 0..5）。RFC 定派生公式 + 边界。
 - **(B) 结束 vs 当前总资金 显示语义**（§4.2，E6b-R1）：**spec 已 explicit**（plan L914 顶栏实时 / L997 结算冻结）。RFC 只 reconcile + 引用 + 杀「dispute / 未定」措辞，**不新增契约**。
 - **(C) 夜间调色板 + display_mode**（§4.3）：**解析 + 持久化 + DisplayMode 枚举已 explicit**（Theme.swift / modules L406 / plan L472）；现有 13 token 已是 dark 取向。缺的是 **light 变体 + per-scheme token 选取接线** 的契约。
-- **(D) E5/E6 engine 契约扩展**（§4.4，全 Wave 3 engine 变更集中顺位 6，serial neck，outline R8-F1）：5 子项（手动强平 on-demand / tier accessor / 画线 commit append / pinch zoom panel-state / replay-settlement payload）的 engine API 面。**行为多已 spec'd，缺 API surface**。
+- **(D) E5/E6 engine 契约扩展**（§4.4，全 Wave 3 engine 变更集中顺位 6，serial neck，outline R8-F1）：5 子项（手动强平 on-demand / tier accessor / 画线 commit append / pinch zoom panel-state / replay-settlement payload）的 engine API 面。**行为多已 spec'd，缺 API surface**。（zoom 除外，见 §4.4 总纲注记）
 - **(E) Replay 结算契约**（§4.5，PR11-R2）：replay 结束触发结算窗的数据来源（消费 §4.4e payload）；顺位 8 = UI/routing-only。
 - **(F) 中断持久化参数化**（§4.6，outline item 6）：`saveProgress`「每 N tick 自动调用」**契约已存在**（modules:1676）但 **N + coalescing + background flush + 失败处理 未定**。RFC 参数化（不决策「是否做」——spec 已定要做）。
 - **(G) finalize 原子性 + 失败保留 + 单事务 port + 幂等 + schema 迁移 + 终态 fence + discard 终态 + provenance 恢复**（§4.7，outline item 7 + R11-F3）：最重契约。现状有真实数据丢失 / 重复 record / pending 复活 / 误删 app.sqlite 风险。
@@ -46,7 +46,7 @@
 | 1 | tier 显示公式 | `kline_trainer_plan_v1.5.md` §6.2 顶栏（L916 区块）| 加「当前持仓档位 X 派生公式」契约块（§4.1）| 6 accessor + 7 显示 |
 | 2 | 结束 vs 当前总资金 | `kline_trainer_plan_v1.5.md` L914/L997 区块 | reconcile 措辞 + 引用本 RFC §4.2；杀「dispute/未定」| 7 |
 | 3 | 夜间调色板 + display_mode | `kline_trainer_modules_v1.4.md` §F2 Theme（L834 区块）+ `kline_trainer_plan_v1.5.md` §Phase 5 / L472 | 加「light/dark 双 token 集 + per-scheme 选取 + 持久化」契约块（§4.3）| 9 |
-| 4 | E5/E6 engine 扩展 | `kline_trainer_modules_v1.4.md` §E5/§E6（saveProgress L1676 区块 + engine 契约段）| 加 5 子项 engine API 契约块（§4.4）| 6 实现，3/4/7/8 消费 |
+| 4 | E5/E6 engine 扩展 | `kline_trainer_modules_v1.4.md` §E5/§E6（saveProgress L1676 区块 + engine 契约段）| 加 5 子项 engine API 契约块（§4.4）| 6 实现，3/4/7/8 消费（zoom 除外，见 §4.4 总纲注记） |
 | 5 | Replay 结算契约 | `kline_trainer_modules_v1.4.md` §E6 finalize 区块 | 加 replay-settlement payload 来源契约（§4.5）| 6 payload + 8 UI |
 | 6 | 中断持久化参数化 | `kline_trainer_modules_v1.4.md` §E6 saveProgress（L1676 区块）| 加 N/coalescing/background-flush/失败 契约块（§4.6）| 10 |
 | 7 | finalize 原子性 + 恢复 | `kline_trainer_modules_v1.4.md` §E6 finalize/endSession 区块 | 加 失败保留 + 单事务 port + 幂等 + schema 迁移 + fence + discard + provenance 契约块（§4.7）| 10a/10b |
@@ -108,9 +108,10 @@ engine.currentPositionTier: Int   // 0...5，read-only computed
 
 **acceptance（顺位 9 验收）**：三模式切换即时生效 + 持久化跨重启；system 模式跟随系统切换重渲染；light 集 13 token 齐全且语义色保持红涨绿跌。
 
-### 4.4 E5/E6 engine 契约扩展（全 Wave 3 engine 变更集中顺位 6，serial neck，outline R8-F1）
+### 4.4 E5/E6 engine 契约扩展（全 Wave 3 engine 变更集中顺位 6，serial neck，outline R8-F1）（zoom 除外，见总纲注记）
 
 **总纲**：`TrainingEngine` 跨「轨 G 图表」与「轨 T 交易」共享（drawings / panelState / trade 状态）。outline 采序列化策略：**所有 engine 契约变更集中顺位 6**，先于全部消费锚（3/4/7/8）；消费锚只用冻结 API、不改 engine 契约。本节钉死该 5 子项 API 面。
+> 【neck-doctrine zoom 例外注记（user 2026-06-12 裁决；顺位 3 PR 落档）：§4.4d zoom 经裁决移顺位 3 同 PR 实施（顺位 3 新增 `ChartAction.zoomApplied` + `engine.applyPinch` + pinch 手势态）；本总纲「所有 engine 契约变更集中顺位 6 / 消费锚不改 engine 契约」对 zoom 部分 superseded，对其余 §4.1/§4.4a-c/§4.4e 仍成立。本注记适用 RFC 全文同款表述（§一(D)、§三 概览表「6 实现，3/4/7/8 消费」行、§4.4 标题）。】
 
 #### 4.4a 手动强平（on-demand force-close）
 
@@ -146,10 +147,12 @@ engine.currentPositionTier: Int   // 0...5，read-only computed
 
 **契约（顺位 6）**：engine 暴露 **panel-state zoom mutation**：
 - 语义：改 `panelState.visibleCount` 于 clamp `[MIN_VISIBLE, MAX_VISIBLE]` 内 + 保持 focus（pinch 中点下的 candle x 不动，重算 offset）。
+> 【focus 语义裁决注记（user 2026-06-13 裁决，顺位 3 设计 R1-H1 上浮）：focus 不变量限定 freeScrolling；autoTracking = 右锚缩放（offset 恒 0，「锁定最新」优先）。理由与被否选项见 `docs/superpowers/specs/2026-06-13-wave3-pr3-pinch-zoom-design.md` D2。】
 - **ephemeral 非持久**：`visibleCount` 不在 `pending_training`（核实 `ios/sql/app_schema_v1.sql` pending 现有 13 列均无 visibleCount，opus R1-M2 count 修正）→ zoom 是内存视图态，不跨 session 持久、不进 finalize。
 - **clamp 边界 + pinch→count 映射数值 + 与 C7 仲裁器集成 归顺位 3 plan**（本 RFC 只钉「engine 拥有 visibleCount mutation + clamp 契约 + focus 不变量 + ephemeral」，不内联 MIN/MAX/灵敏度常量，遵守 outline 抽象纪律）。
 
 **实施**：顺位 6 加 mutation；顺位 3 消费（去硬编码 80 + pinch 手势接线）。
+> 【impl-anchor 重指派注记（user 2026-06-12 裁决，PR #97 6b plan §Scope；顺位 3 PR 落档）：§4.4d 整条（mutation + focus + 去硬编码 + pinch 手势）移顺位 3 同 PR 实施，上行「顺位 6 加 mutation / 顺位 3 消费」拆分 superseded。】
 
 #### 4.4e replay-settlement payload 支持
 

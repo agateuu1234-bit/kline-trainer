@@ -1034,7 +1034,7 @@ enum TrainingMode {
 
 | 手势 | 行为 | 实现 |
 |------|------|------|
-| 两指捏合/张开 | K 线缩放（以捏合焦点为中心） | UIPinchGestureRecognizer |
+| 两指捏合/张开 | K 线缩放（freeScrolling 以捏合焦点为中心；autoTracking 右锚锁定最新——user 2026-06-13 裁决，见顺位 3 设计 D2） | UIPinchGestureRecognizer |
 | 单指左右滑动 | K 线平移（切到 Free-Scrolling） | UIPanGestureRecognizer + DecelerationAnimator |
 | 两指上下滑动 | 切换周期组合 | UIPanGestureRecognizer (touches=2)，主方向判定 |
 | 长按 | 十字光标，松手退出 | UILongPressGestureRecognizer |
@@ -1177,7 +1177,7 @@ def generate_one_training_set(stock_code):
    - PriceRange 包含 BOLL/MA66 范围
 9. 实现手势系统：
    - UIPanGestureRecognizer + DecelerationAnimator（含 sceneDidBecomeActive reset）
-   - UIPinchGestureRecognizer → 缩放（以焦点为中心）
+   - UIPinchGestureRecognizer → 缩放（freeScrolling 以焦点为中心；autoTracking 右锚——user 2026-06-13 裁决，见顺位 3 设计 D2）
    - UILongPressGestureRecognizer → 十字光标
    - 手势仲裁规则（见一、手势方案节）
 10. UIViewRepresentable 封装（ChartContainerView），注意 @Observable 桥接刷新

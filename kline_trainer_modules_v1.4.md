@@ -1735,12 +1735,12 @@ extension TrainingRecord {
 #endif
 ```
 
-#### E5 Wave 3 顺位 1 RFC 契约增量（见 `docs/superpowers/specs/2026-06-10-wave3-pr1-spec-gap-rfc-design.md` §4.1/§4.4；顺位 6 序列化实现，serial neck，所有 Wave 3 engine 契约变更集中此锚，消费锚 3/4/7/8 不改 engine 契约）
+#### E5 Wave 3 顺位 1 RFC 契约增量（见 `docs/superpowers/specs/2026-06-10-wave3-pr1-spec-gap-rfc-design.md` §4.1/§4.4；顺位 6 序列化实现，serial neck，所有 Wave 3 engine 契约变更集中此锚，消费锚 3/4/7/8 不改 engine 契约；**§4.4d zoom 除外**：经 user 2026-06-12 裁决移顺位 3 同 PR 实施〔`zoomApplied`+`applyPinch`〕，neck 对其余 §4.1/§4.4a-c/§4.4e 仍成立）
 
 - **`var currentPositionTier: Int { get }`（§4.1）**：read-only computed，0...5。`holdingValue = position.shares × currentPrice`、`total = currentTotalCapital`；`total <= 0 → 0`，否则 `clamp(Int((holdingValue / total × 5).rounded(.toNearestOrAwayFromZero)), 0, 5)`。市值 / 当前总资金基准 + round（非成本基准 / 非 floor）。
 - **on-demand 手动强平（§4.4a）**：前置 `flow.canBuySell()`（「结束按钮」capability proxy，Normal✅/Review❌/Replay✅）；`position.shares > 0` → 按 `currentPrice`（modules L342「手动结束 = 用户点击结束时的值」）走 `TradeCalculator.forceCloseOnEnd` append forced sell（`.tier5`，佣金+印花税）→ `shares == 0`；幂等（再调 no-op）；与 auto-end（`forceCloseIfEnded`，`>= maxTick` 门）共用同一 force-close 体。
 - **`func appendDrawing(_ drawing: DrawingObject)`（§4.4c）**：把 committed 画线追加进 `drawings`（更新 revision 重渲染 + 进 finalize/pending 持久化）。restore（`initialDrawings`）+ delete（`deleteDrawing`）已在，本子项只补 live commit 投影；`drawings` 是唯一渲染+持久化真相，manager.completedDrawings 仅输入暂存。
-- **pinch/zoom panel-state mutation（§4.4d，D1：engine-owned 非 render-free）**：改 `panelState.visibleCount` 于 clamp `[MIN_VISIBLE, MAX_VISIBLE]` + 保持 focus（pinch 中点 candle x 不动，重算 offset）；**ephemeral**——不在 `pending_training`（现 13 列无 visibleCount），不跨 session 持久、不进 finalize。clamp/灵敏度数值 + C7 仲裁集成归顺位 3 plan。理由：crosshair(5)/drawing(4) 消费 post-pinch 视口几何，engine-free 会致双视口真相。
+- **pinch/zoom panel-state mutation（§4.4d，D1：engine-owned 非 render-free）**：改 `panelState.visibleCount` 于 clamp `[MIN_VISIBLE, MAX_VISIBLE]` + 保持 focus（pinch 中点 candle x 不动，重算 offset）〔focus 限 freeScrolling：autoTracking = 右锚缩放（offset 恒 0，锁定最新优先），user 2026-06-13 裁决，见顺位 3 设计 D2〕；**ephemeral**——不在 `pending_training`（现 13 列无 visibleCount），不跨 session 持久、不进 finalize。clamp/灵敏度数值 + C7 仲裁集成归顺位 3 plan。理由：crosshair(5)/drawing(4) 消费 post-pinch 视口几何，engine-free 会致双视口真相。
 
 #### E6 Wave 3 顺位 1 RFC 契约增量（见 RFC §4.4e/§4.5/§4.6/§4.7）
 
