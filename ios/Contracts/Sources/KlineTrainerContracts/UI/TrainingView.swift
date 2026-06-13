@@ -24,6 +24,9 @@ public struct TrainingView: View {
     @State private var finalizeFailed = false
     @State private var finalizing = false      // R1-H2：in-flight 门，阻重试双击/并发 finalize Task
     @State private var pickerRequest: PickerRequest?
+    @State private var toastMessage: String?
+    @State private var toastToken = 0
+    @State private var confirmingEnd = false
 
     public init(lifecycle: TrainingSessionLifecycle,
                 onExit: @escaping () -> Void,
@@ -45,6 +48,7 @@ public struct TrainingView: View {
             panel(.upper)
             Divider()
             panel(.lower)
+            if showsTradeButtons { bottomBar }
         }
         .onAppear { maybeAutoEnd() }                                            // M2：resume-at-maxTick
         .onChange(of: engine.tick.globalTickIndex) { _, _ in maybeAutoEnd() }   // D4/D5
@@ -55,10 +59,7 @@ public struct TrainingView: View {
             PositionPickerView(
                 enabledTiers: Set(PositionTier.allCases),                       // D9
                 onPick: { tier in
-                    switch req.action {
-                    case .buy:  _ = engine.buy(panel: req.panel, tier: tier)
-                    case .sell: _ = engine.sell(panel: req.panel, tier: tier)
-                    }
+                    performTrade(req.action, panel: req.panel, tier: tier)
                     pickerRequest = nil
                 },
                 onCancel: { pickerRequest = nil })
@@ -73,12 +74,28 @@ public struct TrainingView: View {
         } message: {
             Text("本局结果尚未写入历史记录。可重试入账，或放弃结算退出（进度保留至最近存档）。")
         }
+        .confirmationDialog("结束本局训练", isPresented: $confirmingEnd, titleVisibility: .visible) {
+            Button("是", role: .destructive) { endManually() }
+            Button("否", role: .cancel) {}
+        }
+        .overlay(alignment: .top) {
+            if let toast = toastMessage {
+                Text(toast)
+                    .font(.callout)
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: toastMessage)
     }
 
     private var topBar: some View {
         let bar = TrainingTopBarContent(totalCapital: engine.currentTotalCapital,
                                         holdingCost: engine.holdingCost,
-                                        returnRate: engine.returnRate)
+                                        returnRate: engine.returnRate,
+                                        positionTier: engine.currentPositionTier)
         return HStack(spacing: 12) {
             // 返回为 best-effort：保存进度后必回首页。`back()` 仅在「无活跃 session 上下文」抛 .internalError
             // （活跃 Normal 局不会发生；review/replay 的 saveProgress 是 no-op 不抛）→ `try?` 吞掉这一不可达错误以
@@ -87,6 +104,7 @@ public struct TrainingView: View {
             Spacer()
             Text(bar.totalCapital)
             Text("持仓成本\(bar.holdingCost)")
+            Text(bar.position)
             Text(bar.returnRate)
         }
         .padding(.horizontal, 12)
@@ -118,6 +136,42 @@ public struct TrainingView: View {
         .padding(.horizontal, 8)
     }
 
+    // 交易动作执行：调 engine.buy/sell → TradeFeedback（纯值决策）→ 触觉/Toast（壳执行）。
+    private func performTrade(_ action: PickerRequest.Action, panel: PanelId, tier: PositionTier) {
+        let result: Result<TradeOperation, AppError>
+        switch action {
+        case .buy:  result = engine.buy(panel: panel, tier: tier)
+        case .sell: result = engine.sell(panel: panel, tier: tier)
+        }
+        let feedback = TradeFeedback(result: result)
+        if feedback.firesHaptic {
+            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()   // D2：仅成功（plan §6.2.4）
+        }
+        if let message = feedback.toastMessage {
+            presentToast(message)
+        }
+    }
+
+    // latest-wins 自动消失 Toast（壳层 UX，不 host 测）。
+    private func presentToast(_ message: String) {
+        toastToken += 1
+        let token = toastToken
+        toastMessage = message
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            if toastToken == token { toastMessage = nil }
+        }
+    }
+
+    // 手动结束（plan §6.2.2 / RFC §4.4a）：强平 + settlement-safe 自检（engine）→ 安全则复用 runFinalize（D3）。
+    // 返 false（Review/disabled/非有限财务量安全降级）→ no-op 不路由。didFinalize 置位防重入。
+    private func endManually() {
+        guard !didFinalize else { return }
+        guard engine.forceCloseManually() else { return }
+        didFinalize = true
+        runFinalize()
+    }
+
     // D4/D5：判定下放 host-测 lifecycle.shouldAutoFinalize；壳仅持一次性 didFinalize + 触发 finalize。
     // .onAppear（resume-at-maxTick）与 .onChange(globalTickIndex)（步进至末态）双触发，!didFinalize 门保证仅一次。
     private func maybeAutoEnd() {
@@ -144,6 +198,17 @@ public struct TrainingView: View {
                 finalizeFailed = true
             }
         }
+    }
+
+    // 底部「结束本局」（plan §6.2.2：屏幕底部左侧）。可见性同交易按钮（canBuySell）。
+    private var bottomBar: some View {
+        HStack {
+            Button("结束本局") { confirmingEnd = true }
+                .buttonStyle(.bordered)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     private struct PickerRequest: Identifiable {
