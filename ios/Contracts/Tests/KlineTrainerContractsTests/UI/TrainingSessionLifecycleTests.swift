@@ -147,4 +147,30 @@ struct TrainingSessionLifecycleTests {
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
         #expect(life.shouldAutoFinalize(didFinalize: false) == false)
     }
+
+    // MARK: - Wave 3 顺位 8：replaySettlementRecord（RFC §4.4e/§4.5 非持久 replay 结算 payload 转发）
+
+    @Test("replaySettlementRecord: Replay 交易+强平后 → 非持久 payload（id nil + totalCapital=起始资金 + profit 直通 + 原局 fees）")
+    func replaySettlementRecord_replay_returnsPayload() async throws {
+        let (coord, records, _, _) = H.makeCoordinator(candles: H.validCandles())
+        let id = try Self.seedRecord(records, total: 80_000)
+        let engine = try await coord.replay(recordId: id)
+        let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
+        _ = engine.buy(panel: .upper, tier: .tier1)       // 建非平凡终态（replay 可交易）
+        engine.forceCloseManually()                       // 强平须 caller 先行（D4）→ 持仓平
+        #expect(engine.position.shares == 0)
+        let payload = try life.replaySettlementRecord()
+        #expect(payload.id == nil)                        // 非持久（无 server id）
+        #expect(payload.totalCapital == engine.initialCapital)   // D1 方案 A：起始资金
+        #expect(payload.profit == engine.currentTotalCapital - engine.initialCapital)   // 终态收益直通
+        #expect(payload.feeSnapshot == engine.fees)       // 原局 FeeSnapshot
+    }
+
+    @Test("replaySettlementRecord: Normal → throws（非 replay 守卫，转发 coordinator caller-contract）")
+    func replaySettlementRecord_normal_throws() async throws {
+        let (coord, _, _, _) = H.makeCoordinator(candles: H.validCandles())
+        let engine = try await coord.startNewNormalSession()
+        let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
+        #expect(throws: AppError.self) { _ = try life.replaySettlementRecord() }
+    }
 }
