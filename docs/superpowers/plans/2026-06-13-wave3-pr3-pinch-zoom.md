@@ -273,9 +273,9 @@ public enum PinchZoomModel {
 - [ ] **Step 1.4: 跑测试确认通过 + 全量回归**
 
 Run: `cd ios/Contracts && swift test --filter PinchZoomModelTests 2>&1 | tail -3`
-Expected: PASS（11 tests）。
+Expected: PASS（13 tests）。
 Run: `cd ios/Contracts && swift test 2>&1 | tail -2`
-Expected: `Test run with 875 tests in 124 suites passed`（864 + 11，0 failures；抽谓词零行为变化）。
+Expected: `Test run with 877 tests in 124 suites passed`（864 + 13，0 failures；抽谓词零行为变化）。
 
 - [ ] **Step 1.5: mutation-verify（设计 D3 义务，FP demonstrator 教训）**
 
@@ -372,7 +372,7 @@ Expected: `fortyVisible`/`oneSixtyVisibleSaturates`/`leftFillWhenDataShort` FAIL
 
 - [ ] **Step 2.3: 实现去硬编码**
 
-`RenderStateBuilder.swift` makeViewport 内（L62-68 区）：
+`RenderStateBuilder.swift` makeViewport 内（替换 L62-66：count/visibleCount/注释/candleStep；**geometry 块 L67-69 保留不动，复用新 candleStep**）：
 
 ```swift
         let count = candles.count
@@ -386,13 +386,13 @@ Expected: `fortyVisible`/`oneSixtyVisibleSaturates`/`leftFillWhenDataShort` FAIL
 ```
 
 同步更新两处 stale 注释（本 PR 使其失真，surgical 范围内）：
-- 文件头 L7-8：`// 视口几何 spec 无公式 → 固定 defaultVisibleCount=80 分母 + 条件锚定 + offset 分解（Wave 2 占位；\n// pinch 缩放改 visibleCount 属 Wave 3）。` → `// 视口几何：分母 = panelState.visibleCount（顺位 3 去硬编码；≤0 fallback 80）+ 条件锚定 + offset 分解。`
+- 文件头 L7-8（旧串逐字：`// 视口几何 spec 无公式 → 本 PR 固定 defaultVisibleCount=80 分母 + 条件锚定 + offset 分解（Wave 2 占位；\n// pinch 缩放改 visibleCount 属 Wave 3）。`，注意「本 PR 」）→ `// 视口几何：分母 = panelState.visibleCount（顺位 3 去硬编码；≤0 fallback 80）+ 条件锚定 + offset 分解。`
 - L13：`/// 渲染常量（spec 无公式，本 PR 占位）。pinch 缩放改 visibleCount 属 Wave 3/C8b。` → `/// 渲染常量。defaultVisibleCount = seed/fallback 单一来源（engine init 与 ≤0 兜底共用）；zoom clamp 在 PinchZoomModel。`
 
 - [ ] **Step 2.4: 跑测试确认通过 + 全量回归**
 
 Run: `cd ios/Contracts && swift test 2>&1 | tail -2`
-Expected: `880 tests in 124 suites passed`（875 + 5；既有 RenderStateBuilder/C5/C8b 等消费方全绿 = 80-parity 实证）。
+Expected: `882 tests in 124 suites passed`（877 + 5；既有 RenderStateBuilder/C5/C8b 等消费方全绿 = 80-parity 实证）。
 
 - [ ] **Step 2.5: Commit**
 
@@ -502,7 +502,7 @@ reduce switch 的 offsetApplied 块之后（L162 后）加：
 - [ ] **Step 3.4: 跑测试确认通过 + 全量回归**
 
 Run: `cd ios/Contracts && swift test 2>&1 | tail -2`
-Expected: `883 tests in 125 suites passed`（880 + 3）。
+Expected: `885 tests in 125 suites passed`（882 + 3）。
 
 - [ ] **Step 3.5: Commit**
 
@@ -667,7 +667,10 @@ import CoreGraphics
         let tick = e.tick.globalTickIndex
         let vpBefore = RenderStateBuilder.makeViewport(panelState: e.upperPanel, candles: candles,
                                                        tick: tick, bounds: Self.bounds)
-        let fx: CGFloat = 405   // slot 中心附近（step=10, pixelShift=5）
+        // NormalFlow.initialTick==0 → currentIdx==0 → before 视口左缘饱和（startIndex=0/pixelShift=0）；
+        // fx=405 仍为 candle 40 槽中心（远离 candle 边界，离散锚有判别力），前后离散索引恒 40。
+        // 非饱和-中段 focus 路径由 Task 1 endToEndFocusInvariant（tick=150）覆盖。
+        let fx: CGFloat = 405
         let uBefore = CGFloat(vpBefore.startIndex) + (fx - vpBefore.pixelShift) / vpBefore.geometry.candleStep
         e.applyPinch(scale: 1.0, focusX: fx, phase: .began, panel: .upper)
         e.applyPinch(scale: 2.0, focusX: fx, phase: .changed, panel: .upper)
@@ -802,7 +805,7 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'applyPinch
 - [ ] **Step 4.4: 跑测试确认通过 + 全量回归**
 
 Run: `cd ios/Contracts && swift test 2>&1 | tail -2`
-Expected: `894 tests in 126 suites passed`（883 + 11）。特别确认既有 E5a/E5b/E6/C8b 套件全绿（init seed 0→80 无既有断言依赖 0，设计 R1/R5 已实证）。
+Expected: `896 tests in 126 suites passed`（885 + 11）。特别确认既有 E5a/E5b/E6/C8b 套件全绿（init seed 0→80 无既有断言依赖 0，设计 R1/R5 已实证）。
 
 - [ ] **Step 4.5: Commit**
 
@@ -877,7 +880,7 @@ git commit -m "feat(pinch): ChartContainerView onPinch → engine.applyPinch 接
 (b) 在行 `- 语义：改 \`panelState.visibleCount\` 于 clamp \`[MIN_VISIBLE, MAX_VISIBLE]\` 内 + 保持 focus（pinch 中点下的 candle x 不动，重算 offset）。` 之后追加新行：
 
 ```markdown
-> 【focus 语义裁决注记（user 2026-06-13，顺位 3 设计 R1-H1 上浮）：focus 不变量限定 freeScrolling；autoTracking = 右锚缩放（offset 恒 0，「锁定最新」优先）。理由与被否选项见 `docs/superpowers/specs/2026-06-13-wave3-pr3-pinch-zoom-design.md` D2。】
+> 【focus 语义裁决注记（user 2026-06-13 裁决，顺位 3 设计 R1-H1 上浮）：focus 不变量限定 freeScrolling；autoTracking = 右锚缩放（offset 恒 0，「锁定最新」优先）。理由与被否选项见 `docs/superpowers/specs/2026-06-13-wave3-pr3-pinch-zoom-design.md` D2。】
 ```
 
 - [ ] **Step 6.2: RFC §4.4 总纲 canonical neck caveat + 三处短标（D9.1 c）**
@@ -960,7 +963,7 @@ git commit -m "docs(pinch): 四 doc amendment——zoom 6→3 重指派 + focus 
 
 | # | Action | Expected | Pass/Fail |
 |---|---|---|---|
-| 1 | `cd ios/Contracts && swift test 2>&1 \| tail -2` | `894 tests in 126 suites passed`，`0 failures`（864 baseline + 30 新增） | ☐ |
+| 1 | `cd ios/Contracts && swift test 2>&1 \| tail -2` | `896 tests in 126 suites passed`，`0 failures`（864 baseline + 32 新增） | ☐ |
 | 2 | `git diff origin/main...HEAD --stat -- ios/` 逐行核对 | 改动 Swift 文件集 ⊆ {PinchZoomModel.swift(新), RenderStateBuilder.swift, Reducer.swift, TrainingEngine.swift, ChartContainerView.swift} + 4 测试文件；无 .sql/schema/CONTRACT_VERSION/workflow 改动 | ☐ |
 | 3 | `git diff origin/main...HEAD -- ios/ \| grep -E "func (saveProgress\|finalize)" ; echo rc=$?` | `rc=1`（零命中 = saveProgress/finalize 方法体零改动，ephemeral 不变量；RFC §4.4d） | ☐ |
 | 4 | `bash scripts/governance/verify-wave3-pr1-rfc.sh` | `(a)(b)(c)(d)(e)(g) PASS`；仅 `(f) FAIL`（实施分支改 .swift 属预期，scope 谓词为顺位 1 PR 专属） | ☐ |
@@ -1018,4 +1021,4 @@ git commit -m "docs(pinch): acceptance checklist + 运行时 runbook 条目 + re
 
 **3. Type consistency：** `PinchZoomModel.targetVisibleCount(base:effectiveScale:)`/`rezoomOffset(viewport:currentIdx:focusX:newCount:mainWidth:)`（Task 1 定义 = Task 4 调用）；`RenderStateBuilder.currentCandleIndex(candles:tick:)`（Task 1 = Task 4）；`ChartAction.zoomApplied(visibleCount:offset:)`（Task 3 = Task 4）；`applyPinch(scale:focusX:phase:panel:)`（Task 4 = Task 5）。✅
 
-**已知偏差声明：** 测试计数（875/880/883/894）按各 Task 新增数推算，实测若有出入以实测为准（acceptance 同步），不得反向改测试凑数。
+**已知偏差声明：** 测试计数（877/882/885/896）按各 Task 新增数推算（Task 1=13 / Task 2=5 / Task 3=3 / Task 4=11，Plan-R1 校正），实测若有出入以实测为准（acceptance 同步），不得反向改测试凑数。
