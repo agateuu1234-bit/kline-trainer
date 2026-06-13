@@ -1021,4 +1021,14 @@ git commit -m "docs(pinch): acceptance checklist + 运行时 runbook 条目 + re
 
 **3. Type consistency：** `PinchZoomModel.targetVisibleCount(base:effectiveScale:)`/`rezoomOffset(viewport:currentIdx:focusX:newCount:mainWidth:)`（Task 1 定义 = Task 4 调用）；`RenderStateBuilder.currentCandleIndex(candles:tick:)`（Task 1 = Task 4）；`ChartAction.zoomApplied(visibleCount:offset:)`（Task 3 = Task 4）；`applyPinch(scale:focusX:phase:panel:)`（Task 4 = Task 5）。✅
 
-**已知偏差声明：** 测试计数（876/882/885/896）按各 Task 新增数推算（Task 1=12 / Task 2=6 / Task 3=3 / Task 4=11，Plan-R1 计数校正 + Plan-R2 PR2-01 endToEnd 移 Task 2），实测若有出入以实测为准（acceptance 同步），不得反向改测试凑数。
+**已知偏差声明：** 测试计数（876/882/885/896）按各 Task 新增数推算（Task 1=12 / Task 2=6 / Task 3=3 / Task 4=11，Plan-R1 计数校正 + Plan-R2 PR2-01 endToEnd 移 Task 2），实测若有出入以实测为准（acceptance 同步），不得反向改测试凑数。基线 864/123 已于 2026-06-13 worktree 实测确认（Plan-R3 PR3-L1 满足）。
+
+---
+
+## Plan 评审记录（opus 4.8 xhigh 对抗，user session 契约）
+
+| 轮次 | 结果 |
+|---|---|
+| Plan-R1 | NEEDS-ATTENTION（0C/1H/1M/3L）。PR1-01 acceptance #5 grep 「user 2026-06-13 裁决」对 RFC 必返 0（6.1(b) 用逗号）→ 措辞统一；PR1-02 Task 1 实 13 测计数偏低 → 链 877/882/885/896；PR1-03 Task 2 区间越界含 geometry；PR1-04 文件头 old-string 漏「本 PR 」；PR1-05 freeScrolling 注释 pixelShift 与 tick=0 饱和不符。 |
+| Plan-R2 | NEEDS-ATTENTION（0C/1H/0M/1L）。PR2-01 endToEndFocusInvariant 在 Task 1 依赖 Task 2 去硬编码、Task 1 绿门不可达（手算 uAfter=70≠110.5）→ 移 Task 2 Step 2.1，计数链改 876/882/885/896；PR2-02 Task 2 Files 头指针 62-68→62-66。 |
+| Plan-R3 | **VERDICT: APPROVE**（0C/0H/0M/1L info）。Plan-R2 两修复实证真实完整正确；全 Task 红/绿门成因核净（endToEnd 唯一倒置已修）；全测试向量手算复核无误；四 doc amendment old-string 逐字唯一存在 + 机器锚不破；gate (a)-(e)+(g) PASS/(f) FAIL/exit=1 与脚本实际一致；新 case 无外溢穷尽 switch 回归。PR3-L1（基线未独立复跑）已由 worktree 实测 864 满足。**plan 收敛，进 subagent-driven development。** |
