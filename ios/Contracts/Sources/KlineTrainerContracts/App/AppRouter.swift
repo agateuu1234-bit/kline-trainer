@@ -135,7 +135,9 @@ public final class AppRouter {
             }
         } else {
             // recordId==nil：replay 结束（retreat）正常路径。normal finalize 失败自 Wave 3 10a 起
-            // 不再走此路径（TrainingView 失败保留 + 重试/放弃，§4.7a）；normal-nil 分支保留作防御。
+            // 不再走此路径（TrainingView 失败保留 + 重试/放弃，§4.7a）；normal-nil 分支保留作防御性守卫，
+            // 并由 AppRouterTests.sessionEnded_normalNilError 单测覆盖（直接注入 nil 验 errorMessage）；
+            // 若生产回归命中本路径则说明 §4.7a 调用链有漏洞。
             await activeTraining?.lifecycle.endAfterSettlement()
             if mode == .normal { errorMessage = "结算入账失败，请重试" }   // replay 不报错（正常 retreat）
             activeTraining = nil

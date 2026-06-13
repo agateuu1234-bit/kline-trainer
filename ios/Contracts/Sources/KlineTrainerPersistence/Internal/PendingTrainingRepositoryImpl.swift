@@ -52,7 +52,7 @@ enum PendingTrainingRepositoryImpl {
                                                                             as: [DrawingObject].self)
         let drawdown: DrawdownAccumulator = try RecordRepositoryImpl.jsonDecode(drawdownJSON,
                                                                                 as: DrawdownAccumulator.self)
-        // 0004 迁移已对既有行做 UUID 回填，理论不可达；防御性守卫
+        // 完整 migrator 路径下（0004 回填 + savePending 恒写）理论不可达；防御性守卫 raw-SQL/未来 fixture 漏写
         let keyOpt: String? = row["session_key"]
         guard let key = keyOpt else { throw AppError.persistence(.dbCorrupted) }
         return PendingTraining(
