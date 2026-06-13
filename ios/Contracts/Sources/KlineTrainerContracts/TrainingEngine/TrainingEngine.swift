@@ -729,6 +729,22 @@ extension TrainingEngine {
     public func appendDrawing(_ drawing: DrawingObject) {
         drawings.append(drawing)
     }
+
+    /// 提交当前 drawing：dispatch reducer `.drawingCommitted` 退出 `.drawing` → `.autoTracking`
+    /// （RFC §4.4 总纲注记：画线激活-FSM handler 家族，user 2026-06-13 裁决 supersede neck）。
+    /// 封装 snapshot.frozen.baseRevision 细节（caller 不碰 revision）。非 drawing 态 no-op（幂等）。
+    /// 不改 `drawings`（数据投影是 `appendDrawing` 的职责）；不 bump revision（reducer 契约）。
+    public func commitDrawing(panel: PanelId) {
+        guard case .drawing(let snap) = panelState(panel).interactionMode else { return }
+        _ = reduce(.drawingCommitted(baseRevision: snap.frozen.baseRevision), on: panel)
+    }
+
+    /// 取消当前 drawing：dispatch reducer `.drawingCancelled` 退出 `.drawing` → `.autoTracking`。
+    /// 非 drawing 态 no-op。无数据投影。
+    public func cancelDrawing(panel: PanelId) {
+        guard case .drawing(let snap) = panelState(panel).interactionMode else { return }
+        _ = reduce(.drawingCancelled(baseRevision: snap.frozen.baseRevision), on: panel)
+    }
 }
 
 #if DEBUG
