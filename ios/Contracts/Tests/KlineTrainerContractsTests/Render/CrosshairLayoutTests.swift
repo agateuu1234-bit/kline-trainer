@@ -85,3 +85,109 @@ struct SnappedIndexTests {
         }
     }
 }
+
+@Suite("CrosshairLayout.resolve 聚合 + HUD")
+struct ResolveTests {
+
+    // 矩阵 2：snappedX == indexToX(snappedIndex)，竖线两端点同 x（mirror-the-mapper）
+    @Test("竖线 x = indexToX(snappedIndex)（两端点一致，经 mapper 推导）")
+    func verticalSnapsToCenter() {
+        let m = makeMapper(visibleCount: 10)
+        let c = makeCandles(count: 10)[0..<10]
+        let r = CrosshairLayout.resolve(at: CGPoint(x: 23, y: 300), mapper: m, candles: c)
+        #expect(r != nil)
+        guard let r else { return }
+        let snappedX = m.indexToX(r.snappedIndex)
+        #expect(r.lines.vertical.from.x == snappedX)
+        #expect(r.lines.vertical.to.x == snappedX)
+        #expect(r.snappedIndex == 2)                       // 23 → 中心 20（idx2）
+        // 横线自由 Y：跨 frame 全宽、y == point.y
+        #expect(r.lines.horizontal.from == CGPoint(x: 0, y: 300))
+        #expect(r.lines.horizontal.to == CGPoint(x: 1000, y: 300))
+    }
+
+    // 矩阵 5：价格 label 自由 Y（吸附不影响）+ 镜像 yToPrice
+    @Test("价格 label 文本恒 = yToPrice(point.y)，与 point.x（吸附）无关 + 镜像 mapper")
+    func priceLabelFreeY() {
+        let m = makeMapper(visibleCount: 10)
+        let c = makeCandles(count: 10)[0..<10]
+        for x: CGFloat in [3, 23, 47, 500] {               // 变 x（吸附不同蜡烛）
+            let r = CrosshairLayout.resolve(at: CGPoint(x: x, y: 300), mapper: m, candles: c)
+            #expect(r?.priceLabel.text == String(format: "%.2f", m.yToPrice(300)))  // y=300 → 50.00
+        }
+        for y: CGFloat in [50, 150, 450, 550] {            // 镜像 yToPrice
+            let r = CrosshairLayout.resolve(at: CGPoint(x: 100, y: y), mapper: m, candles: c)
+            #expect(r?.priceLabel.text == String(format: "%.2f", m.yToPrice(y)))
+        }
+        // 价签右贴 frame.maxX、垂直居中 point.y
+        let r = CrosshairLayout.resolve(at: CGPoint(x: 100, y: 300), mapper: m, candles: c)
+        #expect(r?.priceLabel.rect.maxX == 1000)
+        #expect(r?.priceLabel.rect.midY == 300)
+    }
+
+    // 矩阵 6：时间 label 吸附 X + 吸附蜡烛 datetime（mirror-the-mapper）
+    @Test("时间 label midX = indexToX(snappedIndex)（非原始 x）+ 文本 = 吸附蜡烛 datetime")
+    func timeLabelSnapsX() {
+        let m = makeMapper(visibleCount: 3)
+        let candles = [mc(0, datetime: 1735781400),        // 2025-01-02 09:30 北京
+                       mc(1, datetime: 1735781580),        // 09:33
+                       mc(2, datetime: 1735781760)]        // 09:36
+        let c = candles[0..<3]
+        // point.x=16 → 吸附 idx2（中心 20，16>15）；时签 midX == indexToX(2)=20
+        let r = CrosshairLayout.resolve(at: CGPoint(x: 16, y: 300), mapper: m, candles: c)
+        #expect(r != nil)
+        #expect(r?.snappedIndex == 2)
+        #expect(r?.timeLabel.rect.midX == m.indexToX(2))
+        #expect(r?.timeLabel.text == "2025-01-02 09:36")
+        #expect(r?.timeLabel.rect.maxY == 600)
+    }
+
+    // 矩阵 7：frame 外 → nil（4 角半开区间）+ point==nil → nil
+    @Test("frame 外 point → nil（半开 [minX,maxX)×[minY,maxY)）；nil point → nil")
+    func outsideFrameNil() {
+        let m = makeMapper(visibleCount: 10)
+        let c = makeCandles(count: 10)[0..<10]
+        #expect(CrosshairLayout.resolve(at: nil, mapper: m, candles: c) == nil)
+        #expect(CrosshairLayout.resolve(at: CGPoint(x: 0, y: 0), mapper: m, candles: c) != nil)      // 左上 ∈
+        #expect(CrosshairLayout.resolve(at: CGPoint(x: 1000, y: 0), mapper: m, candles: c) == nil)   // 右上 ∉
+        #expect(CrosshairLayout.resolve(at: CGPoint(x: 0, y: 600), mapper: m, candles: c) == nil)    // 左下 ∉
+        #expect(CrosshairLayout.resolve(at: CGPoint(x: 1000, y: 600), mapper: m, candles: c) == nil) // 右下 ∉
+    }
+
+    // 矩阵 8：post-pinch demonstrator（同 x，不同 candleStep → 不同蜡烛中心）。displayScale=3 真像素取整。
+    @Test("post-pinch：同 point.x 在 zoom 前后吸附到不同蜡烛中心（消费 candleStep 变化）")
+    func postPinchSnap() {
+        let c = makeCandles(count: 80)
+        // 默认 viewport：visibleCount=80, candleStep=1000/80=12.5
+        let mDefault = makeMapper(visibleCount: 80, candleStep: 1000.0 / 80.0,
+                                  displayScale: 3, frameWidth: 1000)
+        // pinch 后 viewport：visibleCount=40, candleStep=1000/40=25
+        let mPinch = makeMapper(visibleCount: 40, candleStep: 1000.0 / 40.0,
+                                displayScale: 3, frameWidth: 1000)
+        let idxDefault = CrosshairLayout.snappedCandleIndex(at: 300, mapper: mDefault, candles: c[0..<80])
+        let idxPinch = CrosshairLayout.snappedCandleIndex(at: 300, mapper: mPinch, candles: c[0..<40])
+        #expect(idxDefault == 24)                          // round(300/12.5)=24
+        #expect(idxPinch == 12)                            // round(300/25)=12
+        #expect(idxDefault != idxPinch)                    // mutation：固定 80 分母则二者相等 → 失败
+        // resolve 的竖线 x 用各自 mapper 的 indexToX（mirror）
+        let r = CrosshairLayout.resolve(at: CGPoint(x: 300, y: 300), mapper: mPinch, candles: c[0..<40])
+        #expect(r?.lines.vertical.from.x == mPinch.indexToX(12))
+    }
+
+    // 矩阵 9：locale 中性时间格式
+    @Test("时间格式跨设备 locale 稳定（en_US_POSIX + UTC+8）")
+    func localeNeutral() {
+        let m = makeMapper(visibleCount: 1)
+        let c = [mc(0, datetime: 1735689600)][0..<1]       // 2025-01-01 00:00 UTC = 08:00 北京
+        let r = CrosshairLayout.resolve(at: CGPoint(x: 0, y: 300), mapper: m, candles: c)
+        #expect(r?.timeLabel.text == "2025-01-01 08:00")
+    }
+
+    // 矩阵 10：空切片守卫（visibleCount==0 + 非 .zero frame + in-frame point）→ nil（不崩）
+    @Test("空切片 → resolve nil（先于 clamp，不触发窗口反转崩溃）")
+    func emptyCandlesNil() {
+        let m = makeMapper(visibleCount: 0)                // 非 .zero frame
+        let empty = makeCandles(count: 0)[0..<0]
+        #expect(CrosshairLayout.resolve(at: CGPoint(x: 100, y: 300), mapper: m, candles: empty) == nil)
+    }
+}
