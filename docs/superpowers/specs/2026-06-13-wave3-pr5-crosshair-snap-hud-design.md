@@ -55,7 +55,7 @@
   1. **种子** `c = viewport.startIndex + Int(((point.x − viewport.pixelShift) / geometry.candleStep).rounded(.toNearestOrAwayFromZero))`。
   2. **两侧校正**：在 `{c−1, c, c+1}` 中取 `|indexToX(·) − point.x|` 最小者（`indexToX` 对任意 `Int` 线性有定义，越界邻居照常参与比较，无需先 clamp）；**tie → 取较小 index**。
   3. **clamp**：将校正结果 clamp 到可见区间（见 D3）→ frame 内点恒落真实可见蜡烛。
-- **tie-break 取较小 index 是硬契约**：恰好落两中心中点时若依赖 `round(.toNearestOrAwayFromZero)`，away-from-zero 会随 `point.x` 符号翻向（正坐标取高 index、负坐标取低 index），致跨设备/正负坐标不一致 → 必须由 step 2 的确定性 tie-break（取较小）覆盖。
+- **tie-break 取较小 index 是硬契约**：恰落两中心中点时 `{c−1, c}` 的 `|indexToX − point.x|` 精确相等（IEEE-754 真 tie，**仅发生于 logical 坐标 `point.x − pixelShift > 0` 的内部蜡烛区**——logical `< 0` 点恒落首蜡烛中心左侧、由 clamp 收到 `startIndex`，不构成 tie）。step 2 的「取 min」若用 `<` vs `<=` 会非确定性选边，且 seed 的 `.toNearestOrAwayFromZero` 取整方向本身随坐标符号变 → 必须由确定性 tie-break（取较小 index）钉死，跨设备/工具链稳定。
 - 三步独立于 fractional `pixelShift`/`candleStep`/`displayScale`（已实测：跨 step=3/4/25、shift=−7.7/1.9/4.3、scale=2/3 与暴力 nearest-center 零偏差）。
 
 ### D3：吸附 index clamp 到可见蜡烛索引区间 + 空切片守卫
@@ -128,7 +128,7 @@
 | # | 断言 | 防回归点 |
 |---|---|---|
 | 1 | **nearest-center round 跳变**：`point.x` 从中心 A 向 B 移动，过 (A,B) 中点前吸附 A、过后吸附 B | D2 round 非 floor |
-| 1b | **恰中点 tie-break = 取较小 index**：`point.x` 恰落两中心中点 → `snappedIndex == 较小者`。away-from-zero 翻向由**逻辑坐标 `(point.x − pixelShift)` 的符号**决定（非 `point.x`），故须各测一次 **逻辑坐标 > 0** 与 **逻辑坐标 < 0**（后者用正 `pixelShift` 令某 frame 内点的 `point.x − pixelShift < 0`）的恰中点，二者均须取较小 index | D2 tie-break 硬契约 |
+| 1b | **恰中点 tie-break = 取较小 index**：构造 logical 坐标 `(point.x − pixelShift) > 0` 的内部蜡烛**精确 IEEE-754 中点**（`{c−1,c}` 距离恰相等）→ `snappedIndex == 较小者`，且结果独立于 seed `.toNearestOrAwayFromZero` 取整方向。注：精确 tie 仅发生于 logical `>0` 区（logical `<0` 点恒在首蜡烛左侧、走 clamp 非 tie，见 D2 + 测试 4），故 1b 用单个 logical>0 真 tie 作 demonstrator | D2 tie-break 硬契约 |
 | 2 | **`snappedX == indexToX(snappedIndex)`**：竖线恒落真实中心；`lines.vertical.from.x == lines.vertical.to.x == mapper.indexToX(snappedIndex)`（期望值经 mapper 推导，非手算 `startIndex+i*candleStep`，见下方 mirror 注） | D2 / L2 displayScale 像素取整 |
 | 3 | **clamp 右**：`count < visibleCount`（viewport.visibleCount = slice.count < target），`point.x` 在右侧 padding 空白区 → `snappedIndex == 最末可见` + 时间 label 非 nil | D3（含 viewport.visibleCount 源） |
 | 4 | **clamp 左**：`point.x` < 第一蜡烛中心 → `snappedIndex == startIndex` | D3 |
@@ -174,6 +174,6 @@
 | 风险 | 对策 |
 |---|---|
 | 整合 `resolve` 改 `CrosshairLayout` 公共面 | grep 证仅 `drawCrosshair` + 单测调用；二者均本锚 scope；非跨模块破坏 |
-| nearest-center 浮点边界（恰中点 round away-from-zero 随符号翻向） | 两侧 `{c−1,c,c+1}` 距离校正 + **tie 取较小 index** 确定性契约（D2）；测试 1（中点两侧）+ 1b（恰中点正/近零两区域）锁定；沿用 `xToIndex` 鲁棒先例 |
+| nearest-center 浮点边界（恰中点 `{c−1,c}` 距离精确相等的选边） | 两侧 `{c−1,c,c+1}` 距离校正 + **tie 取较小 index** 确定性契约（D2）；测试 1（中点两侧）+ 1b（logical>0 真 IEEE tie）锁定；沿用 `xToIndex` 鲁棒先例 |
 | post-pinch「双视口真相」 | 吸附用 `renderState.viewport`（post-pinch panelState 单一来源），不在 Coordinator 重算（D5.3）；测试 8 mutation-verify |
 | 与顺位 4 画线（同轨 G、后续锚）冲突 | 顺位 5 仅碰 `CrosshairLayout`/`KLineView+Crosshair`；顺位 4 碰 `Drawing*`/reducer/投影，文件不相交；轨内串行 merge（outline §二） |
