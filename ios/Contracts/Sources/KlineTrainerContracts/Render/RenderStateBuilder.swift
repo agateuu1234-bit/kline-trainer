@@ -68,10 +68,7 @@ public enum RenderStateBuilder {
                                      candleWidth: candleStep * candleWidthRatio,
                                      gap: candleStep - candleStep * candleWidthRatio)
 
-        // 当前 candle 索引：面板自身 period 中首个 endGlobalIndex>=tick（超末根取末根）。
-        // 仅谓词同 E5 currentPrice；序列为面板自身 period（聚合面板必须在自身序列定位，勿改读 .m3）。
-        let rawIdx = candles.partitioningIndex { $0.endGlobalIndex >= tick }
-        let currentIdx = min(rawIdx, count - 1)
+        let currentIdx = currentCandleIndex(candles: candles, tick: tick)
 
         // autoTracking 锚定：当前 candle 落最右被绘制 slot（baseStartIndex 可能 <0，下方 clamp）。
         let baseStartIndex = currentIdx - (visibleCount - 1)
@@ -91,5 +88,14 @@ public enum RenderStateBuilder {
                              pixelShift: pixelShift, geometry: geometry,
                              priceRange: PriceRange.calculate(from: slice),
                              mainChartFrame: mainFrame)
+    }
+
+    /// 当前 candle 索引单一谓词（顺位 3 D3/R1-M1：makeViewport 与 engine.applyPinch 共用，禁双实现）。
+    /// 面板自身 period 中首个 endGlobalIndex>=tick（超末根取末根）。
+    /// 仅谓词同 E5 currentPrice；序列为面板自身 period（聚合面板必须在自身序列定位，勿改读 .m3）。
+    /// **前置**：candles 非空。
+    static func currentCandleIndex(candles: [KLineCandle], tick: Int) -> Int {
+        let rawIdx = candles.partitioningIndex { $0.endGlobalIndex >= tick }
+        return min(rawIdx, candles.count - 1)
     }
 }
