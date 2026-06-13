@@ -23,6 +23,26 @@ struct CrosshairLines: Equatable, Sendable {
 
 enum CrosshairLayout {
 
+    /// 吸附核心（spec D2/D3）：返回离 `x` 最近蜡烛中心的索引，clamp 到 `candles` 切片自身界限。
+    /// 算法：seed = round((x − pixelShift)/candleStep) + startIndex；两侧 {seed−1,seed,seed+1}
+    /// 取 |indexToX − x| 最小（严格 <，tie 保留较小 index）；再 clamp [candles.startIndex, candles.endIndex−1]。
+    /// 调用方须先保证 !candles.isEmpty（resolve 已守）；indexToX 对任意 Int 线性有定义，越界邻居照常参与比较。
+    static func snappedCandleIndex(at x: CGFloat, mapper: CoordinateMapper,
+                                   candles: ArraySlice<KLineCandle>) -> Int {
+        let vp = mapper.viewport
+        let seed = vp.startIndex
+            + Int(((x - vp.pixelShift) / vp.geometry.candleStep).rounded(.toNearestOrAwayFromZero))
+        // 两侧校正：从较小者起遍历，严格 < ⇒ 距离相等时保留较小 index（确定性 tie-break）。
+        var best = seed - 1
+        var bestDist = abs(mapper.indexToX(seed - 1) - x)
+        for cand in [seed, seed + 1] {
+            let d = abs(mapper.indexToX(cand) - x)
+            if d < bestDist { best = cand; bestDist = d }
+        }
+        // clamp 到切片自身有效索引（slice-safe total；生产下 == viewport 窗口）。
+        return min(max(best, candles.startIndex), candles.endIndex - 1)
+    }
+
     /// D7/D8：point 在 mainChartFrame 内则返回穿 frame 全宽全高的横/竖线对；否则 nil。
     static func lines(at point: CGPoint, mapper: CoordinateMapper) -> CrosshairLines? {
         let frame = mapper.viewport.mainChartFrame
