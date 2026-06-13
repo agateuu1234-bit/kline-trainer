@@ -25,6 +25,8 @@
 - `ios/Contracts/Sources/KlineTrainerContracts/Render/ChartContainerView.swift` — Coordinator 持 manager+inputController、sync 对齐、onTap 接线
 - `ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift` — "水平线" toggle 按钮（gated by canBuySell）
 
+> **测试文件归属（supersede spec §二 组件表，plan-R1-L）**：spec 组件表示意的 `DrawingPersistenceE2ETests.swift`（独立文件）+ commit 测「或并入 H1 文件」——本 plan 实际选择更 DRY 的归属：E2E 并入 `TrainingSessionPersistenceTests.swift`（复用其 `makeCoordinator`/`validCandles` static helper），commit 测独立 `TrainingEngineDrawingCommitTests.swift`。以本 plan File-Structure 为准。
+
 **新增/扩展 test（4）**
 - `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/HorizontalLineToolTests.swift`（新）
 - `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DefaultDrawingInputControllerTests.swift`（新）
@@ -726,7 +728,7 @@ git commit -m "Task 8: TrainingView 水平线 toggle 按钮（canBuySell 门 + a
 - [ ] **Step 1: 全量 host 测**
 
 Run: `swift test 2>&1 | tail -5`
-Expected: 全 PASS；count = 908 + 本 plan 新增（Task1 6 + Task2 4 + Task3 5 + Task4 1 + Task5 1 = 17）→ ~925 tests。0 failures。
+Expected: 全 PASS；count = 908 + 本 plan 新增（Task1 6 + Task2 4 + Task3 5 + Task4 1 + Task5 1 = 17）= **925 tests**。0 failures。
 
 - [ ] **Step 2: Catalyst build-for-testing（验证全部 UIKit 改动编译 + 链接）**
 
