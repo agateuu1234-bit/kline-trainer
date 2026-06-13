@@ -59,7 +59,9 @@
 - 三步独立于 fractional `pixelShift`/`candleStep`/`displayScale`（已实测：跨 step=3/4/25、shift=−7.7/1.9/4.3、scale=2/3 与暴力 nearest-center 零偏差）。
 
 ### D3：吸附 index clamp 到可见蜡烛索引区间 + 空切片守卫
-- **clamp 源 = viewport 的 visibleCount（非 panelState）**：clamp 到 `[viewport.startIndex, viewport.startIndex + viewport.visibleCount − 1]`，即 **`viewport.visibleCount`（= `visibleCandles.count`），不是 `panelState.visibleCount`（zoom target）**。二者在 `count < target`（早期数据）时分叉：`makeViewport` 置 `visibleCount = min(target, count)` 且 viewport 报 `slice.count`（`RenderStateBuilder.swift:89` `visibleCount: slice.count`）；若用 target（如 80）clamp 而实际只有 `count` 根 → 窗口越过切片长度 → `candles[snappedIndex]` 越界。clamp 窗口与切片 `candles[startIndex..<startIndex+visibleCount]` 的有效索引**逐位一致**（已核实 `viewport.visibleCount == slice.count`）。
+- **clamp 源 = 传入 `candles` 切片自身的索引区间（intrinsically slice-safe）**：clamp 到 **`[candles.startIndex, candles.endIndex − 1]`**。`resolve` 随后以 `candles[snappedIndex]` 取值，clamp 用切片自身界限 → 不论调用方切片与 viewport 是否对齐都不越界（纯函数 total，闭合 R2-M）。
+  - **绝不用 `panelState.visibleCount`（zoom target）**：`makeViewport` 置 `viewport.visibleCount = min(target, count)`（`RenderStateBuilder.swift:65`）且 viewport 报 `slice.count`（`:89`），二者在 `count < target`（早期数据）时分叉；用 target clamp 会越过切片长度。
+  - 生产路径下 `candles.startIndex == viewport.startIndex`（`RenderStateBuilder.swift:26` 切片 `candles[viewport.startIndex ..< …]`）且 `candles.count == viewport.visibleCount`（`:89`），故「切片自身界限」与「viewport 窗口」逐位一致——但 clamp 写切片界限是结构安全的来源，与测试 11 的 `candles.startIndex/endIndex` 界限断言同源。
 - frame 内点**恒落真实可见蜡烛**：
   - 早期数据（`count < visibleCount`，右侧 padding 空白区）或末根右侧长按 → 吸附**最末可见蜡烛**；左侧越界 → 第一可见蜡烛。
   - 消除 C5 `timeLabel` 的 nil-skip：frame 内长按**始终**有时间 label。
@@ -126,19 +128,19 @@
 | # | 断言 | 防回归点 |
 |---|---|---|
 | 1 | **nearest-center round 跳变**：`point.x` 从中心 A 向 B 移动，过 (A,B) 中点前吸附 A、过后吸附 B | D2 round 非 floor |
-| 1b | **恰中点 tie-break = 取较小 index**：`point.x` 恰落两中心中点 → `snappedIndex == 较小者`；**在正坐标区域 + `(point.x − pixelShift)` 接近 0 的区域各测一次**，证结果不随 `point.x` 符号 away-from-zero 翻向 | D2 tie-break 硬契约 |
+| 1b | **恰中点 tie-break = 取较小 index**：`point.x` 恰落两中心中点 → `snappedIndex == 较小者`。away-from-zero 翻向由**逻辑坐标 `(point.x − pixelShift)` 的符号**决定（非 `point.x`），故须各测一次 **逻辑坐标 > 0** 与 **逻辑坐标 < 0**（后者用正 `pixelShift` 令某 frame 内点的 `point.x − pixelShift < 0`）的恰中点，二者均须取较小 index | D2 tie-break 硬契约 |
 | 2 | **`snappedX == indexToX(snappedIndex)`**：竖线恒落真实中心；`lines.vertical.from.x == lines.vertical.to.x == mapper.indexToX(snappedIndex)`（期望值经 mapper 推导，非手算 `startIndex+i*candleStep`，见下方 mirror 注） | D2 / L2 displayScale 像素取整 |
 | 3 | **clamp 右**：`count < visibleCount`（viewport.visibleCount = slice.count < target），`point.x` 在右侧 padding 空白区 → `snappedIndex == 最末可见` + 时间 label 非 nil | D3（含 viewport.visibleCount 源） |
 | 4 | **clamp 左**：`point.x` < 第一蜡烛中心 → `snappedIndex == startIndex` | D3 |
 | 5 | **价格 label 自由 Y**：固定 `point.y`、变 `point.x`，价格 label 文本恒 = `yToPrice(point.y)`（吸附不影响价格读数）+ 镜像 `yToPrice`（禁纯层重算 ratio） | D1/D4 |
 | 6 | **时间 label 吸附 X**：`timeLabel.rect.midX == mapper.indexToX(snappedIndex)`（非原始 `point.x`；经 mapper 推导）+ 文本 = `candles[snappedIndex].datetime`（UTC+8） | D2/D4 |
 | 7 | **frame 外 → nil**：4 角半开区间（左上 ∈；右上/左下/右下 ∉） | D3 frame 守卫 |
-| 8 | **post-pinch demonstrator**：非默认 `visibleCount`（candleStep 变）+ 非零 `pixelShift` 的 viewport 下吸附正确——同一 `point.x` 在 zoom 前后吸附到**不同**蜡烛中心，证 `candleStep` 变化被吸附消费（mutation-verify：固定 80 分母则该向量失败）。**viewport 用非整除 `candleStep`（如 `mainFrame.width/80` @ `displayScale 3`）**，使 `indexToX` 像素取整真实参与，避免 demonstrator 因恰整除而失真 | post-pinch 集成（5←3 核心验收）+ L2 |
+| 8 | **post-pinch demonstrator**：非默认 `visibleCount`（candleStep 变）+ 非零 `pixelShift` 的 viewport 下吸附正确——同一 `point.x` 在 zoom 前后吸附到**不同**蜡烛中心，证 `candleStep` 变化被吸附消费（mutation-verify：固定 80 分母则该向量失败）。**viewport 用 `displayScale 3`**（1/3 px 非终止 → `indexToX` 的 `(raw*scale).rounded()/scale` 像素取整真实偏离手算 `startIndex+i*candleStep`），令 mirror-the-mapper 纪律真实受测 | post-pinch 集成（5←3 核心验收）+ L2 |
 | 9 | **locale 中性**：时间格式跨设备 locale 稳定（`en_US_POSIX` + UTC+8） | 沿用 C5 |
 | 10 | **空切片守卫**：`candles.isEmpty`（viewport.visibleCount==0）+ 非 `.zero` frame + frame 内 point → `resolve == nil`（不崩，不进 clamp 反转） | D3 / M1 pure-function precondition |
 | 11 | **结构 bounds 不变量**：遍历多个 frame 内 point → `candles.startIndex <= snappedIndex < candles.endIndex` 恒成立（独立于 clamp 实现，替代被移除的 C5 `timeLabelOutside` 守卫） | L1 / D6 索引界限 |
 
-**mirror-the-mapper 纪律（L2）**：所有 `snappedX` / label 锚位期望值**经 `mapper.indexToX(snappedIndex)` 推导**，禁手算 `startIndex + i*candleStep`——`indexToX` 含 `(raw*displayScale).rounded()/displayScale` 像素取整（`Geometry.swift:140`），非整除 `candleStep` 下手算会偏。同 `yToPrice` 价格哨兵纪律（沿用仓库「非整除浮点 host 测须 mirror mapper / 用容差」教训，memory `feedback_swift_local_toolchain_blindspot`）。
+**mirror-the-mapper 纪律（L2）**：所有 `snappedX` / label 锚位期望值**经 `mapper.indexToX(snappedIndex)` 推导**，禁手算 `startIndex + i*candleStep`——`indexToX` 含 `(raw*displayScale).rounded()/displayScale` 像素取整（`Geometry.swift:140`），在**非整除 `candleStep` 或非 2 次幂 `displayScale`（如 3，1/3 px 非终止）**下手算会偏。同 `yToPrice` 价格哨兵纪律（沿用仓库「非整除浮点 host 测须 mirror mapper / 用容差」教训，memory `feedback_swift_local_toolchain_blindspot`）。
 
 **Catalyst CI**：`drawCrosshair` UIKit 薄层经 `Mac Catalyst build-for-testing` required check（仅编译/链接，运行时行为见 runbook）。
 
