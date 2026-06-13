@@ -99,6 +99,8 @@ public enum ChartAction: Equatable, Sendable {
     case tradeTriggered
     case periodComboSwitched
     case offsetApplied(deltaPixels: CGFloat)
+    /// 顺位 3 §4.4d pinch 缩放：几何在 engine 侧算好（PinchZoomModel），reducer 只收最终值。
+    case zoomApplied(visibleCount: Int, offset: CGFloat)
 }
 
 // MARK: - 副作用 (modules L1009-1023)
@@ -158,6 +160,20 @@ extension PanelViewState {
         case (.autoTracking, .offsetApplied(let d)),
              (.freeScrolling, .offsetApplied(let d)):
             offset += d
+            revision &+= 1
+            return .none
+
+        // —— zoomApplied（顺位 3 §4.4d：drawing 吞；autoTracking 右锚置 0；freeScrolling focus offset）——
+        case (.drawing, .zoomApplied):
+            return .none
+        case (.autoTracking, .zoomApplied(let v, _)):
+            visibleCount = v
+            offset = 0      // user 2026-06-13 裁决 A 右锚：显式置 0（防未来 drawingCommitted 残留 offset，R1-M3/L5）
+            revision &+= 1
+            return .none
+        case (.freeScrolling, .zoomApplied(let v, let o)):
+            visibleCount = v
+            offset = o
             revision &+= 1
             return .none
 

@@ -67,6 +67,8 @@
 | 12 | **性能评审 + Bitmap Cache 按需**（Instruments 性能 pass；Bitmap Cache 仅当实测单帧 >4ms 才引入；交付帧预算验收判据） | D 磨光 | 条件性 Bitmap Cache | 全渲染在场 | C8 性能 / C2·C7 运行时回填判据 |
 | 13 | **Wave 3 收尾**（completion doc + residual 终态回填 + **Wave 3 全交互运行时矩阵验收完成作阻塞依赖** + **freeze tag 决策**） | E 收尾 | doc-only（freeze 走则 + tag ceremony） | 全部 + **Wave 3 运行时矩阵记录**（见 §三.3） | C2/C7/C8 + 新交互运行时实测回填（codex R1-F3 / R2-F1） |
 
+> 【§4.4d zoom 重指派 callout（document-scoped；user 2026-06-12 + 2026-06-13 两裁决；顺位 3 PR 落档）：§4.4d zoom 整条（engine mutation `zoomApplied`/`applyPinch` + focus + 去硬编码 80 + pinch 手势）经 user 2026-06-12 裁决移顺位 3 同 PR 实施。本 callout 适用**全文**所有「engine 契约变更集中顺位 6 / 消费锚（含 3）不改 engine 契约 / serial neck」表述——§二 row 3（L58 prose 与依赖格「2 + 6（若需…归 6；纯 render 则仅 2）」条件分支已由裁决 resolve：zoom 落顺位 3）、row 6（L61）、§三 DAG（L81/L90）、W1 波次（L111）、关键路径（L124）——以上对 zoom 部分 superseded，对其余 §4.1/§4.4a-c/§4.4e 契约仍成立；版本历史 log 行不改（历史保真）。neck 目的不破：仅顺位 3〔轨 G〕改 panelState.visibleCount/zoom 契约，轨 T 不碰，无并发冲突（PR #97 6b plan 已论证）。focus 语义：user 2026-06-13 裁决 A——focus 不变量限 freeScrolling，autoTracking 右锚（顺位 3 设计 D2）。】
+
 **Phase 划分**：
 - A 治理前置（1：spec-gap RFC；2：app-target CI 守护 + 锁竖屏早置）
 - B 图表手势/交互打磨（3-5：Pinch 缩放 / 水平线绘线 MVP+source-of-truth / 十字光标 HUD）

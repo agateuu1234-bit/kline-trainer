@@ -87,7 +87,11 @@ public struct ChartContainerView: UIViewRepresentable {
                 case .ended, .cancelled: self.setCrosshair(nil)
                 }
             }
-            // onPinch（缩放改 visibleCount）属 Wave 3；onTap（画线锚点）需 DrawingInputController（Wave 3）→ C8b 不接。
+            arbiter.onPinch = { [weak self] scale, focus, phase in
+                guard let self, let engine = self.engine else { return }
+                engine.applyPinch(scale: scale, focusX: focus.x, phase: phase, panel: self.panel)
+            }
+            // onTap（画线锚点）需 DrawingInputController（顺位 4）→ 本锚不接。
             arbiter.attach(to: view)
         }
 

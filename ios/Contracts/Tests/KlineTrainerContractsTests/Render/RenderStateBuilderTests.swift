@@ -257,4 +257,94 @@ struct RenderStateBuilderTests {
         print("[C8a perf smoke] makeViewport avg = \(ms) ms (non-authoritative; not the spec frame budget)")
         #expect(ms < 50)   // 极宽松上界，仅防病态退化（partitioningIndex O(log n) + 切片 O(80)）
     }
+
+    // MARK: 顺位 3 D5：去硬编码 80（target = panelState.visibleCount，≤0 → fallback 80）
+
+    /// 非 0 显式入参 + 80 golden parity（独立金值硬编码，R1-L3 防 tautology）
+    @Test("D5 parity：visibleCount=80 显式入参 ≡ 旧 80 行为（金值：step=10/startIndex=71/count=80）")
+    func explicitEightyMatchesGolden() {
+        let ps = PanelViewState(period: .m3, interactionMode: .autoTracking,
+                                visibleCount: 80, offset: 0, revision: 0)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: ps, candles: Self.candles(period: .m3, count: 200),
+            tick: 150, bounds: Self.bounds)
+        #expect(abs(vp.geometry.candleStep - 10) < 1e-9)   // 800/80（金值手算，非新公式推导）
+        #expect(vp.startIndex == 71)                        // 150−79
+        #expect(vp.visibleCount == 80)
+        #expect(abs(vp.geometry.candleWidth - 7) < 1e-9)
+    }
+
+    @Test("D5 缩放生效：visibleCount=40 → step=20、startIndex=111（右锚 40 根）")
+    func fortyVisible() {
+        let ps = PanelViewState(period: .m3, interactionMode: .autoTracking,
+                                visibleCount: 40, offset: 0, revision: 0)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: ps, candles: Self.candles(period: .m3, count: 200),
+            tick: 150, bounds: Self.bounds)
+        #expect(abs(vp.geometry.candleStep - 20) < 1e-9)   // 800/40
+        #expect(vp.startIndex == 111)                       // 150−39
+        #expect(vp.visibleCount == 40)
+    }
+
+    @Test("D5 放宽视野撞老边界：visibleCount=160、currentIdx=150 → startIndex clamp 后边缘饱和")
+    func oneSixtyVisibleSaturates() {
+        let ps = PanelViewState(period: .m3, interactionMode: .freeScrolling,
+                                visibleCount: 160, offset: 15, revision: 0)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: ps, candles: Self.candles(period: .m3, count: 200),
+            tick: 150, bounds: Self.bounds)
+        #expect(abs(vp.geometry.candleStep - 5) < 1e-9)    // 800/160
+        // baseStart=150−159=−9，wholeShift=floor(15/5)=3 → −12 → clamp 0；startIndex==0 → pixelShift 饱和置 0
+        #expect(vp.startIndex == 0)
+        #expect(vp.pixelShift == 0)
+        #expect(vp.visibleCount == 160)
+    }
+
+    @Test("D5 数据不足左对齐：count=100 < target=160 → visibleCount=100、分母仍 target（step=5）")
+    func leftFillWhenDataShort() {
+        let ps = PanelViewState(period: .m3, interactionMode: .autoTracking,
+                                visibleCount: 160, offset: 0, revision: 0)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: ps, candles: Self.candles(period: .m3, count: 100),
+            tick: 99, bounds: Self.bounds)
+        #expect(vp.visibleCount == 100)
+        #expect(abs(vp.geometry.candleStep - 5) < 1e-9)    // 800/160：分母 = target 非 count
+        #expect(vp.startIndex == 0)
+    }
+
+    @Test("D5 fallback：visibleCount=0（旧构造）→ 80（既有 helper 兼容性显式断言）")
+    func zeroFallsBackToEighty() {
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(), candles: Self.candles(period: .m3, count: 200),
+            tick: 150, bounds: Self.bounds)
+        #expect(abs(vp.geometry.candleStep - 10) < 1e-9)
+        #expect(vp.visibleCount == 80)
+    }
+
+    // 端到端 focus 不变量（Plan-R2 PR2-01：从 Task 1 移此处——依赖去硬编码后 makeViewport honor visibleCount）。
+    @Test("D5 端到端 focus：makeViewport 缩放前后 u(fx) 连续域 <1e-9 + 离散 candle 不变（fx 取 candle 中心）")
+    func endToEndFocusInvariant() {
+        let candles = Self.candles(period: .m3, count: 200)
+        // freeScrolling offset=15：vpBefore startIndex=70/pixelShift=5/step=10（非饱和中段，R1-L4）
+        var before = PanelViewState(period: .m3, interactionMode: .freeScrolling,
+                                    visibleCount: 80, offset: 15, revision: 0)
+        let vpBefore = RenderStateBuilder.makeViewport(panelState: before, candles: candles,
+                                                       tick: 150, bounds: Self.bounds)
+        let cIdx = RenderStateBuilder.currentCandleIndex(candles: candles, tick: 150)
+        // fx = 第 40 个可见 slot 中心 x = 40·10 + 5 + 5 = 410；uBefore = 70 + (410−5)/10 = 110.5
+        let fx: CGFloat = 410
+        let uBefore = CGFloat(vpBefore.startIndex) + (fx - vpBefore.pixelShift) / vpBefore.geometry.candleStep
+        let newCount = 40
+        let newOffset = PinchZoomModel.rezoomOffset(viewport: vpBefore, currentIdx: cIdx,
+                                                    focusX: fx, newCount: newCount, mainWidth: 800)
+        before.visibleCount = newCount
+        before.offset = newOffset
+        let vpAfter = RenderStateBuilder.makeViewport(panelState: before, candles: candles,
+                                                      tick: 150, bounds: Self.bounds)
+        let uAfter = CGFloat(vpAfter.startIndex) + (fx - vpAfter.pixelShift) / vpAfter.geometry.candleStep
+        #expect(abs(uAfter - uBefore) < 1e-9)          // uAfter = 90 + (410−0)/20 = 110.5
+        let mBefore = CoordinateMapper(viewport: vpBefore, displayScale: 1)
+        let mAfter = CoordinateMapper(viewport: vpAfter, displayScale: 1)
+        #expect(mBefore.xToIndex(fx) == mAfter.xToIndex(fx))
+    }
 }
