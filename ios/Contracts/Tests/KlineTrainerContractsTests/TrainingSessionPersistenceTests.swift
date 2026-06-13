@@ -530,6 +530,21 @@ struct TrainingSessionPersistenceTests {
         }
     }
 
+    @Test("E2E（顺位 4）: 画线 → saveProgress → endSession → resume：engine.drawings 逐字段还原")
+    func drawing_saveProgress_thenResume_restoresDrawings() async throws {
+        let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
+        coord.now = { 222 }
+        let engine = try await coord.startNewNormalSession()
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m60, candleIndex: 3, price: 10.55)],
+                              isExtended: true, panelPosition: 0)
+        engine.appendDrawing(d)
+        try await coord.saveProgress(engine: engine)
+        await coord.endSession()
+        let resumed = try #require(try await coord.resumePending())
+        #expect(resumed.drawings == [d])              // resume 经 initialDrawings 逐字段还原画线
+    }
+
     // MARK: - Wave 3 顺位 10a：sessionKey 生命周期 + finalize 单事务 + 幂等（RFC §4.7a/b/c）
 
     @Test("sessionKey 生命周期：fresh Normal → activeSessionKey 非空；endSession → nil")
