@@ -4,13 +4,12 @@
 // Design: docs/superpowers/specs/2026-06-07-pr-c8a-chart-container-render-design.md
 //
 // 平台无关（无 UIKit）：host 全量单测 + C8b H1 handler 复用 makeViewport/visibleCandleRange。
-// 视口几何 spec 无公式 → 本 PR 固定 defaultVisibleCount=80 分母 + 条件锚定 + offset 分解（Wave 2 占位；
-// pinch 缩放改 visibleCount 属 Wave 3）。
+// 视口几何：分母 = panelState.visibleCount（顺位 3 去硬编码；≤0 fallback 80）+ 条件锚定 + offset 分解。
 
 import CoreGraphics
 
 public enum RenderStateBuilder {
-    /// 渲染常量（spec 无公式，本 PR 占位）。pinch 缩放改 visibleCount 属 Wave 3/C8b。
+    /// 渲染常量。defaultVisibleCount = seed/fallback 单一来源（engine init 与 ≤0 兜底共用）；zoom clamp 在 PinchZoomModel。
     static let defaultVisibleCount = 80
     static let candleWidthRatio: CGFloat = 0.7
 
@@ -60,10 +59,13 @@ public enum RenderStateBuilder {
                              tick: Int, bounds: CGRect) -> ChartViewport {
         let mainFrame = ChartPanelFrames.split(in: bounds).mainChart
         let count = candles.count
-        let visibleCount = min(defaultVisibleCount, count)
+        // 顺位 3 D5 去硬编码：target = panelState.visibleCount（≤0 → fallback 80 兼容旧构造；
+        // engine init 已 seed 80，新路径不依赖 fallback）。
+        let target = panelState.visibleCount > 0 ? panelState.visibleCount : defaultVisibleCount
+        let visibleCount = min(target, count)
 
-        // 几何：固定 80 分母（早期数据少时 candle 宽度稳定，count<80 左对齐填充）。
-        let candleStep = mainFrame.width / CGFloat(defaultVisibleCount)
+        // 几何：分母 = target（count<target 时左对齐填充、candle 宽度稳定；target==80 与旧行为逐位一致）。
+        let candleStep = mainFrame.width / CGFloat(target)
         let geometry = ChartGeometry(candleStep: candleStep,
                                      candleWidth: candleStep * candleWidthRatio,
                                      gap: candleStep - candleStep * candleWidthRatio)
