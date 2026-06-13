@@ -160,35 +160,8 @@ struct PinchZoomModelTests {
         #expect(abs(o - 15) < 1e-9)
     }
 
-    @Test("端到端不变量：makeViewport 前后 u(fx) 连续域偏差 < 1e-9 + 离散域 candle 不变（fx 取 candle 中心）")
-    @MainActor
-    func endToEndFocusInvariant() {
-        let candles = RenderStateBuilderTests.candles(period: .m3, count: 200)
-        let bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
-        // 非饱和 freeScrolling：offset=15
-        var before = PanelViewState(period: .m3, interactionMode: .freeScrolling,
-                                    visibleCount: 80, offset: 15, revision: 0)
-        let vpBefore = RenderStateBuilder.makeViewport(panelState: before, candles: candles,
-                                                       tick: 150, bounds: bounds)
-        let cIdx = RenderStateBuilder.currentCandleIndex(candles: candles, tick: 150)
-        // fx 取 slot 中心（远离 candle 边界，R1-L4）：startIndex=70, pixelShift=5, step=10
-        // → 第 40 个可见 slot 中心 x = 40·10 + 5 + 5 = 410
-        let fx: CGFloat = 410
-        let uBefore = CGFloat(vpBefore.startIndex) + (fx - vpBefore.pixelShift) / vpBefore.geometry.candleStep
-        let newCount = 40
-        let newOffset = PinchZoomModel.rezoomOffset(viewport: vpBefore, currentIdx: cIdx,
-                                                    focusX: fx, newCount: newCount, mainWidth: 800)
-        before.visibleCount = newCount
-        before.offset = newOffset
-        let vpAfter = RenderStateBuilder.makeViewport(panelState: before, candles: candles,
-                                                      tick: 150, bounds: bounds)
-        let uAfter = CGFloat(vpAfter.startIndex) + (fx - vpAfter.pixelShift) / vpAfter.geometry.candleStep
-        #expect(abs(uAfter - uBefore) < 1e-9)
-        // 离散域副锚：fx 下 candle 索引不变
-        let mBefore = CoordinateMapper(viewport: vpBefore, displayScale: 1)
-        let mAfter = CoordinateMapper(viewport: vpAfter, displayScale: 1)
-        #expect(mBefore.xToIndex(fx) == mAfter.xToIndex(fx))
-    }
+    // 注：端到端 makeViewport focus 不变量测试（endToEndFocusInvariant）放 Task 2（依赖去硬编码后
+    // makeViewport honor visibleCount；放此处 Task 1 时 makeViewport 仍恒 80 分母 → 必 FAIL，破 TDD 绿门，Plan-R2 PR2-01）。
 }
 ```
 
@@ -273,13 +246,13 @@ public enum PinchZoomModel {
 - [ ] **Step 1.4: 跑测试确认通过 + 全量回归**
 
 Run: `cd ios/Contracts && swift test --filter PinchZoomModelTests 2>&1 | tail -3`
-Expected: PASS（13 tests）。
+Expected: PASS（12 tests）。
 Run: `cd ios/Contracts && swift test 2>&1 | tail -2`
-Expected: `Test run with 877 tests in 124 suites passed`（864 + 13，0 failures；抽谓词零行为变化）。
+Expected: `Test run with 876 tests in 124 suites passed`（864 + 12，0 failures；抽谓词零行为变化）。
 
 - [ ] **Step 1.5: mutation-verify（设计 D3 义务，FP demonstrator 教训）**
 
-把 `rezoomOffset` 中 `+ CGFloat(newCount) - 1` 临时改为 `+ CGFloat(newCount)`，跑 `swift test --filter PinchZoomModelTests`，**预期至少 4 个 focus 向量测试 FAIL**（杀手验证）；恢复原公式，复跑确认全绿。在 commit message 记录「mutation-verified」。
+把 `rezoomOffset` 中 `+ CGFloat(newCount) - 1` 临时改为 `+ CGFloat(newCount)`，跑 `swift test --filter PinchZoomModelTests`，**预期至少 4 个 focus 向量测试 FAIL**（Task 1 内 rightEdge/mid/nonzero/identity 四向量直构视口、不依赖 makeViewport，杀手有效）；恢复原公式，复跑确认 12 tests 全绿。在 commit message 记录「mutation-verified」。
 
 - [ ] **Step 1.6: Commit**
 
@@ -295,8 +268,8 @@ git commit -m "feat(pinch): PinchZoomModel 纯数学（clamp+focus）+ currentCa
 ### Task 2: makeViewport 去硬编码（D5）
 
 **Files:**
-- Modify: `ios/Contracts/Sources/KlineTrainerContracts/Render/RenderStateBuilder.swift:62-68`
-- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/RenderStateBuilderTests.swift`（追加用例）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/Render/RenderStateBuilder.swift:62-66`（geometry 块 L67-69 保留）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/RenderStateBuilderTests.swift`（追加用例，含 endToEndFocusInvariant）
 
 - [ ] **Step 2.1: 写失败测试（追加到 RenderStateBuilderTests）**
 
@@ -363,12 +336,39 @@ git commit -m "feat(pinch): PinchZoomModel 纯数学（clamp+focus）+ currentCa
         #expect(abs(vp.geometry.candleStep - 10) < 1e-9)
         #expect(vp.visibleCount == 80)
     }
+
+    // 端到端 focus 不变量（Plan-R2 PR2-01：从 Task 1 移此处——依赖去硬编码后 makeViewport honor visibleCount）。
+    @Test("D5 端到端 focus：makeViewport 缩放前后 u(fx) 连续域 <1e-9 + 离散 candle 不变（fx 取 candle 中心）")
+    func endToEndFocusInvariant() {
+        let candles = Self.candles(period: .m3, count: 200)
+        // freeScrolling offset=15：vpBefore startIndex=70/pixelShift=5/step=10（非饱和中段，R1-L4）
+        var before = PanelViewState(period: .m3, interactionMode: .freeScrolling,
+                                    visibleCount: 80, offset: 15, revision: 0)
+        let vpBefore = RenderStateBuilder.makeViewport(panelState: before, candles: candles,
+                                                       tick: 150, bounds: Self.bounds)
+        let cIdx = RenderStateBuilder.currentCandleIndex(candles: candles, tick: 150)
+        // fx = 第 40 个可见 slot 中心 x = 40·10 + 5 + 5 = 410；uBefore = 70 + (410−5)/10 = 110.5
+        let fx: CGFloat = 410
+        let uBefore = CGFloat(vpBefore.startIndex) + (fx - vpBefore.pixelShift) / vpBefore.geometry.candleStep
+        let newCount = 40
+        let newOffset = PinchZoomModel.rezoomOffset(viewport: vpBefore, currentIdx: cIdx,
+                                                    focusX: fx, newCount: newCount, mainWidth: 800)
+        before.visibleCount = newCount
+        before.offset = newOffset
+        let vpAfter = RenderStateBuilder.makeViewport(panelState: before, candles: candles,
+                                                      tick: 150, bounds: Self.bounds)
+        let uAfter = CGFloat(vpAfter.startIndex) + (fx - vpAfter.pixelShift) / vpAfter.geometry.candleStep
+        #expect(abs(uAfter - uBefore) < 1e-9)          // uAfter = 90 + (410−0)/20 = 110.5
+        let mBefore = CoordinateMapper(viewport: vpBefore, displayScale: 1)
+        let mAfter = CoordinateMapper(viewport: vpAfter, displayScale: 1)
+        #expect(mBefore.xToIndex(fx) == mAfter.xToIndex(fx))
+    }
 ```
 
 - [ ] **Step 2.2: 跑测试确认失败**
 
 Run: `cd ios/Contracts && swift test --filter RenderStateBuilderTests 2>&1 | tail -5`
-Expected: `fortyVisible`/`oneSixtyVisibleSaturates`/`leftFillWhenDataShort` FAIL（现实现忽略 panelState.visibleCount，恒 80 分母）；parity/fallback 两条 PASS。
+Expected: `fortyVisible`/`oneSixtyVisibleSaturates`/`leftFillWhenDataShort`/`endToEndFocusInvariant` FAIL（现实现忽略 panelState.visibleCount，恒 80 分母——endToEnd 的 vpAfter 用 step=10 → uAfter=70≠110.5）；parity/fallback 两条 PASS。
 
 - [ ] **Step 2.3: 实现去硬编码**
 
@@ -392,7 +392,7 @@ Expected: `fortyVisible`/`oneSixtyVisibleSaturates`/`leftFillWhenDataShort` FAIL
 - [ ] **Step 2.4: 跑测试确认通过 + 全量回归**
 
 Run: `cd ios/Contracts && swift test 2>&1 | tail -2`
-Expected: `882 tests in 124 suites passed`（877 + 5；既有 RenderStateBuilder/C5/C8b 等消费方全绿 = 80-parity 实证）。
+Expected: `882 tests in 124 suites passed`（876 + 6；既有 RenderStateBuilder/C5/C8b 等消费方全绿 = 80-parity 实证）。
 
 - [ ] **Step 2.5: Commit**
 
@@ -1021,4 +1021,4 @@ git commit -m "docs(pinch): acceptance checklist + 运行时 runbook 条目 + re
 
 **3. Type consistency：** `PinchZoomModel.targetVisibleCount(base:effectiveScale:)`/`rezoomOffset(viewport:currentIdx:focusX:newCount:mainWidth:)`（Task 1 定义 = Task 4 调用）；`RenderStateBuilder.currentCandleIndex(candles:tick:)`（Task 1 = Task 4）；`ChartAction.zoomApplied(visibleCount:offset:)`（Task 3 = Task 4）；`applyPinch(scale:focusX:phase:panel:)`（Task 4 = Task 5）。✅
 
-**已知偏差声明：** 测试计数（877/882/885/896）按各 Task 新增数推算（Task 1=13 / Task 2=5 / Task 3=3 / Task 4=11，Plan-R1 校正），实测若有出入以实测为准（acceptance 同步），不得反向改测试凑数。
+**已知偏差声明：** 测试计数（876/882/885/896）按各 Task 新增数推算（Task 1=12 / Task 2=6 / Task 3=3 / Task 4=11，Plan-R1 计数校正 + Plan-R2 PR2-01 endToEnd 移 Task 2），实测若有出入以实测为准（acceptance 同步），不得反向改测试凑数。
