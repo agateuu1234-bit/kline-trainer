@@ -5,18 +5,21 @@
 // 平台无关纯值（host 全测）：把 engine 实时数值格式化为顶栏显示串。格式口径**对齐** SettlementContent
 // （`¥ ` + 一空格 + POSIX 千分位 + 2 位小数；收益率 `%+.2f` + `-0.0` 归一）—— 与 U3 结算窗同 ¥/% 口径。
 // SettlementContent 的 formatter 为 private static（U3 冻结），本文件独立实现**同口径**（不抽共享，避免动冻结 U3）。
-// 决议 D8：本 PR 不含「仓位 X/5」（PositionManager 无档位存值 + 项目拒绝臆造 tier 公式，residual U2-R3）。
+// 决议 D8（Wave 3 顺位 7 兑现）：加「仓位 X/5」= `position`，由 engine.currentPositionTier（RFC §4.1/§4.4b
+// 派生公式 = round(持仓市值/当前总资金×5)，clamp 0...5）格式化；不在本壳臆造公式（顺位 6 accessor 已钉死）。
 
 import Foundation
 
 public struct TrainingTopBarContent: Equatable, Sendable {
     public let totalCapital: String   // "¥ 102,345.67"
     public let holdingCost: String    // "¥ 0.00"
+    public let position: String       // "仓位 3/5"（Wave 3 顺位 7）
     public let returnRate: String     // "+2.34%" / "-8.32%" / "+0.00%"
 
-    public init(totalCapital: Double, holdingCost: Double, returnRate: Double) {
+    public init(totalCapital: Double, holdingCost: Double, returnRate: Double, positionTier: Int) {
         self.totalCapital = Self.currency(totalCapital)
         self.holdingCost = Self.currency(holdingCost)
+        self.position = "仓位 \(positionTier)/5"
         self.returnRate = Self.percent(returnRate)
     }
 
