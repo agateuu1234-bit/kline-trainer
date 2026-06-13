@@ -40,6 +40,11 @@ public final class TrainingEngine {
     /// 渲染层 `recordRenderBounds` 写入不得触发观察重建（否则 updateUIView 写 → 重渲染循环）。
     @ObservationIgnored private var lastRenderedBounds: (upper: CGRect, lower: CGRect) = (.zero, .zero)
 
+    /// 顺位 3 pinch per-gesture 状态（设计 D6）：`.began` 捕获（base visibleCount, scaleAtBegan）；
+    /// `.ended/.cancelled` 清空。scaleAtBegan 用于锁定点归一（D4，消 ±2% 死区）。
+    @ObservationIgnored private var pinchBase:
+        (upper: (base: Int, scaleAtBegan: CGFloat)?, lower: (base: Int, scaleAtBegan: CGFloat)?) = (nil, nil)
+
     /// 构造运行时引擎（D9 校验边界契约）。
     ///
     /// **`allCandles` 必须是已校验数据。** 训练组数据的「可恢复」校验（空 `[:]` / 缺 `.m3` /
@@ -120,10 +125,13 @@ public final class TrainingEngine {
         self.tradeOperations = initialTradeOperations
 
         // D7：初始周期组合默认 上区 60m / 下区 日线（plan v1.5 L777）；resume 传入保存的组合（R6）。
+        // visibleCount seed 80（顺位 3 D5；zoom ephemeral 不持久，resume 重建恒 80）。
         self.upperPanel = PanelViewState(period: initialUpperPeriod, interactionMode: .autoTracking,
-                                         visibleCount: 0, offset: 0, revision: 0)
+                                         visibleCount: RenderStateBuilder.defaultVisibleCount,
+                                         offset: 0, revision: 0)
         self.lowerPanel = PanelViewState(period: initialLowerPeriod, interactionMode: .autoTracking,
-                                         visibleCount: 0, offset: 0, revision: 0)
+                                         visibleCount: RenderStateBuilder.defaultVisibleCount,
+                                         offset: 0, revision: 0)
 
         self.animators = (
             upper: DecelerationAnimator(makeDriver: decelerationDriverFactory),
@@ -607,6 +615,75 @@ extension TrainingEngine {
     /// 后续两指切周期/交易再硬切 autoTracking）；忽略其 `.startDeceleration(0)` effect（不调 start）。
     public func cancelPan(panel: PanelId) {
         _ = reduce(.panEnded(velocity: 0), on: panel)
+    }
+
+    // MARK: pinch 缩放手势派发（C7 arbiter onPinch 回调下游；RFC §4.4d + 设计 D6）
+
+    /// onPinch 全相位入口。autoTracking = 右锚缩放（offset 置 0，user 2026-06-13 裁决 A）；
+    /// freeScrolling = focus 不变量（pinch 中点 candle x 不动，PinchZoomModel.rezoomOffset）；
+    /// drawing 由 reducer 吞没（engine 不预判，统一派发）。
+    /// scale 为识别器 per-gesture 累积值，按 `.began` 时刻 scaleAtBegan 归一（D4）。
+    public func applyPinch(scale: CGFloat, focusX: CGFloat, phase: GesturePhase, panel: PanelId) {
+        switch phase {
+        case .began:
+            animator(for: panel).stop()        // 同 beginPan 先例：手势起手截住惯性
+            setPinchBase(seedPinchBase(scale: scale, panel: panel), panel: panel)
+        case .changed:
+            // R2-L1：非有限/非正 scale → 真无操作（不派发、状态零改动；防御在 engine 不在模型）
+            guard scale.isFinite, scale > 0 else { return }
+            let bounds = renderBounds(panel)
+            guard bounds.width > 0, bounds.height > 0 else { return }   // 未渲染过 → no-op
+            // 自愈（D6）：base 缺失或非法（began 携非法 scale）→ 以当前值+当前 scale 重 seed；
+            // 重 seed 后首拍 effectiveScale=1 → target==current → 跳过，无跳变。
+            var base = pinchBaseFor(panel) ?? seedPinchBase(scale: scale, panel: panel)
+            if !(base.scaleAtBegan.isFinite && base.scaleAtBegan > 0) {
+                base = seedPinchBase(scale: scale, panel: panel)
+            }
+            setPinchBase(base, panel: panel)
+            let target = PinchZoomModel.targetVisibleCount(base: base.base,
+                                                           effectiveScale: scale / base.scaleAtBegan)
+            let ps = panelState(panel)
+            guard target != effectiveVisibleCount(ps) else { return }   // N 不变 → 跳过（不 bump）
+            switch ps.interactionMode {
+            case .freeScrolling:
+                assert(bounds.origin == .zero, "focus 数学假设 view-local bounds 原点 .zero（R1-L6）")
+                let candles = allCandles[ps.period] ?? []
+                guard !candles.isEmpty else { return }
+                let vp = RenderStateBuilder.makeViewport(panelState: ps, candles: candles,
+                                                         tick: tick.globalTickIndex, bounds: bounds)
+                let cIdx = RenderStateBuilder.currentCandleIndex(candles: candles,
+                                                                 tick: tick.globalTickIndex)
+                let offset = PinchZoomModel.rezoomOffset(viewport: vp, currentIdx: cIdx,
+                                                         focusX: focusX, newCount: target,
+                                                         mainWidth: vp.mainChartFrame.width)
+                _ = reduce(.zoomApplied(visibleCount: target, offset: offset), on: panel)
+            case .autoTracking, .drawing:
+                // autoTracking：reducer 右锚显式置 0；drawing：reducer 吞没（入参不被读取）
+                _ = reduce(.zoomApplied(visibleCount: target, offset: 0), on: panel)
+            }
+        case .ended, .cancelled:
+            setPinchBase(nil, panel: panel)
+        }
+    }
+
+    /// 有效 visibleCount（≤0 → 80 fallback；engine init 已 seed 80，此处纯防御，D5/R1-L7）。
+    private func effectiveVisibleCount(_ ps: PanelViewState) -> Int {
+        ps.visibleCount > 0 ? ps.visibleCount : RenderStateBuilder.defaultVisibleCount
+    }
+
+    private func seedPinchBase(scale: CGFloat, panel: PanelId) -> (base: Int, scaleAtBegan: CGFloat) {
+        (base: effectiveVisibleCount(panelState(panel)), scaleAtBegan: scale)
+    }
+
+    private func pinchBaseFor(_ panel: PanelId) -> (base: Int, scaleAtBegan: CGFloat)? {
+        panel == .upper ? pinchBase.upper : pinchBase.lower
+    }
+
+    private func setPinchBase(_ v: (base: Int, scaleAtBegan: CGFloat)?, panel: PanelId) {
+        switch panel {
+        case .upper: pinchBase.upper = v
+        case .lower: pinchBase.lower = v
+        }
     }
 
     // MARK: bounds 记录（渲染路径每次 updateUIView 调）
