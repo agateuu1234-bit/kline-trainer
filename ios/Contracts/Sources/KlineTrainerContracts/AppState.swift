@@ -81,6 +81,7 @@ public struct DrawdownAccumulator: Codable, Equatable, Sendable {
 }
 
 // MARK: - Pending Training（含 cashBalance + drawdown；v1.3 denormalize）
+// v1.6（Wave 3 10a）：+sessionKey（durable session key，RFC §4.7c）
 
 public struct PendingTraining: Codable, Equatable, Sendable {
     public let trainingSetFilename: String
@@ -95,6 +96,7 @@ public struct PendingTraining: Codable, Equatable, Sendable {
     public let startedAt: Int64
     public let accumulatedCapital: Double
     public let drawdown: DrawdownAccumulator
+    public let sessionKey: String
 
     public init(
         trainingSetFilename: String,
@@ -108,7 +110,8 @@ public struct PendingTraining: Codable, Equatable, Sendable {
         drawings: [DrawingObject],
         startedAt: Int64,
         accumulatedCapital: Double,
-        drawdown: DrawdownAccumulator
+        drawdown: DrawdownAccumulator,
+        sessionKey: String
     ) {
         self.trainingSetFilename = trainingSetFilename
         self.globalTickIndex = globalTickIndex
@@ -122,6 +125,7 @@ public struct PendingTraining: Codable, Equatable, Sendable {
         self.startedAt = startedAt
         self.accumulatedCapital = accumulatedCapital
         self.drawdown = drawdown
+        self.sessionKey = sessionKey
     }
 }
 

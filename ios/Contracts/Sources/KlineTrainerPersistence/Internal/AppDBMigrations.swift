@@ -103,6 +103,23 @@ enum AppDBMigrations {
             try db.execute(sql: "DELETE FROM download_acceptance_journal WHERE state = 'leased'")
         }
 
+        // 0004：v1.6 session-key（RFC §4.7c，Wave 3 顺位 10a）
+        // additive：pending_training + training_records 加 session_key 列；
+        // records 列上 UNIQUE index = finalize retry 幂等锚（同 key 重试返已存 id，不重复入账）。
+        // 既有 pending 行回填 fresh UUID（升级后 resume→finalize 全链路恒有 key）；
+        // 既有 records 保持 NULL（历史记录无 retry 语义；SQLite UNIQUE 视 NULL 互异，多 NULL 合法）。
+        migrator.registerMigration("0004_v1.6_session_key") { db in
+            try db.execute(sql: "ALTER TABLE pending_training ADD COLUMN session_key TEXT")
+            try db.execute(sql: "ALTER TABLE training_records ADD COLUMN session_key TEXT")
+            try db.execute(sql: "UPDATE pending_training SET session_key = ? WHERE session_key IS NULL",
+                           arguments: [UUID().uuidString])
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_training_records_session_key
+                ON training_records(session_key)
+                """)
+            try db.execute(sql: "PRAGMA user_version = 2")
+        }
+
         return migrator
     }
 }

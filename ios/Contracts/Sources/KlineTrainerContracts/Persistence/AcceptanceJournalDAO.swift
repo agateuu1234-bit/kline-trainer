@@ -68,3 +68,4 @@ public typealias AppDB = RecordRepository
                       & PendingTrainingRepository
                       & SettingsDAO
                       & AcceptanceJournalDAO
+                      & SessionFinalizationPort

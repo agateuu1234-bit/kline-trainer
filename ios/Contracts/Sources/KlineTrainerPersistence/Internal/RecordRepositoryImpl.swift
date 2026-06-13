@@ -8,21 +8,29 @@ enum RecordRepositoryImpl {
 
     static func insertRecord(_ db: Database, record: TrainingRecord,
                              ops: [TradeOperation],
-                             drawings: [DrawingObject]) throws -> Int64 {
+                             drawings: [DrawingObject],
+                             sessionKey: String? = nil) throws -> Int64 {
+        // §4.7c 幂等锚：同 key 已入库（前次事务已 commit）→ no-op 返已存 id，不重插 ops/drawings。
+        // 单写者 DatabaseQueue + 事务内查询无 race；UNIQUE index 兜底逻辑漏洞（漏判 → SQLITE_CONSTRAINT）。
+        if let key = sessionKey,
+           let existing = try Int64.fetchOne(db, sql:
+               "SELECT id FROM training_records WHERE session_key = ?", arguments: [key]) {
+            return existing
+        }
         let feeJSON = try jsonEncode(record.feeSnapshot)
         try db.execute(sql: """
             INSERT INTO training_records
               (training_set_filename, created_at, stock_code, stock_name,
                start_year, start_month, total_capital, profit, return_rate,
-               max_drawdown, buy_count, sell_count, fee_snapshot, final_tick)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               max_drawdown, buy_count, sell_count, fee_snapshot, final_tick, session_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, arguments: [
                 record.trainingSetFilename, record.createdAt,
                 record.stockCode, record.stockName,
                 record.startYear, record.startMonth,
                 record.totalCapital, record.profit, record.returnRate,
                 record.maxDrawdown, record.buyCount, record.sellCount,
-                feeJSON, record.finalTick
+                feeJSON, record.finalTick, sessionKey
             ])
         let recordId = db.lastInsertedRowID
 

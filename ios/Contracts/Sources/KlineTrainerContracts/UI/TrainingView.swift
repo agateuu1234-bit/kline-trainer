@@ -21,6 +21,8 @@ public struct TrainingView: View {
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var didFinalize = false
+    @State private var finalizeFailed = false
+    @State private var finalizing = false      // R1-H2：in-flight 门，阻重试双击/并发 finalize Task
     @State private var pickerRequest: PickerRequest?
 
     public init(lifecycle: TrainingSessionLifecycle,
@@ -60,6 +62,16 @@ public struct TrainingView: View {
                     pickerRequest = nil
                 },
                 onCancel: { pickerRequest = nil })
+        }
+        .alert("结算入账失败", isPresented: $finalizeFailed) {
+            Button("重试") { runFinalize() }
+            // 放弃 = 关 reader + 清活跃上下文 + 回首页（§4.7a 用户显式选择；pending 留存可恢复，
+            // durable discard〔清 pending + fence〕归顺位 10b §4.7e）
+            Button("放弃", role: .cancel) {
+                Task { await lifecycle.endAfterSettlement(); onExit() }
+            }
+        } message: {
+            Text("本局结果尚未写入历史记录。可重试入账，或放弃结算退出（进度保留至最近存档）。")
         }
     }
 
@@ -111,12 +123,25 @@ public struct TrainingView: View {
     private func maybeAutoEnd() {
         guard lifecycle.shouldAutoFinalize(didFinalize: didFinalize) else { return }
         didFinalize = true
+        runFinalize()
+    }
+
+    // §4.7a 失败保留：finalize 抛错 → 保留 session（不 onSessionEnded(nil) 拆毁）→ alert 重试/放弃。
+    // didFinalize 保持 true：阻 .onChange 重入；重试是显式用户动作（alert 按钮）再次调用本方法。
+    // finalizing in-flight 门（R1-H2）：阻重试双击产生并发 finalize Task（port 幂等兜数据层，
+    // 此门兜 UI 层——防 onSessionEnded 双发/alert 与 settlement 路由交错）。@MainActor 串行置位无 race。
+    // replay 的 finalizeForSettlement 是不抛的早返 nil（shouldSaveRecord()==false）→ 仍走
+    // onSessionEnded(nil) = 正常 retreat 路径，不受本 alert 影响。
+    private func runFinalize() {
+        guard !finalizing else { return }
+        finalizing = true
         Task {
+            defer { finalizing = false }
             do {
                 let id = try await lifecycle.finalizeForSettlement()
                 onSessionEnded(id)
             } catch {
-                onSessionEnded(nil)
+                finalizeFailed = true
             }
         }
     }

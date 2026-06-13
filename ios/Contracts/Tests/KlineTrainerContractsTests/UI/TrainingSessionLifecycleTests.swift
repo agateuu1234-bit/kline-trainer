@@ -21,7 +21,7 @@ struct TrainingSessionLifecycleTests {
 
     @Test("back: Normal 局 → saveProgress 写 pending + endSession 清活跃")
     func back_normal_savesAndEnds() async throws {
-        let (coord, _, pending) = H.makeCoordinator(candles: H.validCandles(), capital: 50_000)
+        let (coord, _, pending, _) = H.makeCoordinator(candles: H.validCandles(), capital: 50_000)
         coord.now = { 111 }
         let engine = try await coord.startNewNormalSession()
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
@@ -33,7 +33,7 @@ struct TrainingSessionLifecycleTests {
 
     @Test("back: Review 局 → 不写 pending（非保存分支）+ endSession")
     func back_review_noSaveButEnds() async throws {
-        let (coord, records, pending) = H.makeCoordinator(candles: H.validCandles())
+        let (coord, records, pending, _) = H.makeCoordinator(candles: H.validCandles())
         let id = try Self.seedRecord(records)
         let engine = try await coord.review(recordId: id)
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
@@ -45,7 +45,7 @@ struct TrainingSessionLifecycleTests {
 
     @Test("back: Replay 局 → 不写 pending（非保存分支）+ endSession")
     func back_replay_noSaveButEnds() async throws {
-        let (coord, records, pending) = H.makeCoordinator(candles: H.validCandles())
+        let (coord, records, pending, _) = H.makeCoordinator(candles: H.validCandles())
         let id = try Self.seedRecord(records, total: 80_000)
         let engine = try await coord.replay(recordId: id)
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
@@ -57,7 +57,7 @@ struct TrainingSessionLifecycleTests {
 
     @Test("isAtEnd: fresh Normal tick0 < maxTick → false")
     func isAtEnd_freshNormal_false() async throws {
-        let (coord, _, _) = H.makeCoordinator(candles: H.validCandles())
+        let (coord, _, _, _) = H.makeCoordinator(candles: H.validCandles())
         let engine = try await coord.startNewNormalSession()
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
         #expect(life.isAtEnd == false)
@@ -81,7 +81,7 @@ struct TrainingSessionLifecycleTests {
 
     @Test("auto-end: Review → finalizeForSettlement 返 nil，不入账")
     func autoEnd_review_returnsNil() async throws {
-        let (coord, records, _) = H.makeCoordinator(candles: H.validCandles())
+        let (coord, records, _, _) = H.makeCoordinator(candles: H.validCandles())
         let id = try Self.seedRecord(records)
         let before = try records.listRecords(limit: nil).count
         let engine = try await coord.review(recordId: id)
@@ -92,7 +92,7 @@ struct TrainingSessionLifecycleTests {
 
     @Test("auto-end: Replay → finalizeForSettlement 返 nil，不入账")
     func autoEnd_replay_returnsNil() async throws {
-        let (coord, records, _) = H.makeCoordinator(candles: H.validCandles())
+        let (coord, records, _, _) = H.makeCoordinator(candles: H.validCandles())
         let id = try Self.seedRecord(records, total: 80_000)
         let before = try records.listRecords(limit: nil).count
         let engine = try await coord.replay(recordId: id)
@@ -103,7 +103,7 @@ struct TrainingSessionLifecycleTests {
 
     @Test("settlement-confirm: endAfterSettlement → 仅 endSession 清活跃")
     func endAfterSettlement_endsSession() async throws {
-        let (coord, _, _) = H.makeCoordinator(candles: H.validCandles())
+        let (coord, _, _, _) = H.makeCoordinator(candles: H.validCandles())
         let engine = try await coord.startNewNormalSession()
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
         await life.endAfterSettlement()
@@ -132,7 +132,7 @@ struct TrainingSessionLifecycleTests {
 
     @Test("shouldAutoFinalize: Review at-end → false（mode-gate killer）")
     func shouldAutoFinalize_review_false() async throws {
-        let (coord, records, _) = H.makeCoordinator(candles: H.validCandles())
+        let (coord, records, _, _) = H.makeCoordinator(candles: H.validCandles())
         let id = try Self.seedRecord(records)
         let engine = try await coord.review(recordId: id)
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
@@ -142,7 +142,7 @@ struct TrainingSessionLifecycleTests {
 
     @Test("shouldAutoFinalize: fresh Normal not-at-end → false（isAtEnd-gate）")
     func shouldAutoFinalize_freshNormal_false() async throws {
-        let (coord, _, _) = H.makeCoordinator(candles: H.validCandles())
+        let (coord, _, _, _) = H.makeCoordinator(candles: H.validCandles())
         let engine = try await coord.startNewNormalSession()
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
         #expect(life.shouldAutoFinalize(didFinalize: false) == false)

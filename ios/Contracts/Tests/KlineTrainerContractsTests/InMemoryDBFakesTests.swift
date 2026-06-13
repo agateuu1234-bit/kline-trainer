@@ -361,6 +361,102 @@ final class InMemoryDBFakesTests: XCTestCase {
         XCTAssertEqual(try dao.listByState(.downloaded).count, 0)
     }
 
+    // MARK: - InMemorySessionFinalizationPort
+
+    /// I-1 (1) success: finalizeSession inserts into records, clears pending, finalizeCallCount == 1
+    func test_finalizationPort_success_inserts_record_and_clears_pending() throws {
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+
+        // 预存一个 pending，验证 finalize 后被清除
+        try pending.savePending(makePending(filename: "S001.sqlite"))
+        XCTAssertNotNil(try pending.loadPending())
+
+        let id = try port.finalizeSession(
+            record: makeRecord(id: nil), ops: [makeOp(direction: .buy)],
+            drawings: [makeDrawing()], sessionKey: "SK-1")
+
+        XCTAssertEqual(port.finalizeCallCount, 1)
+        XCTAssertEqual(id, 1)
+        let listed = try records.listRecords(limit: nil)
+        XCTAssertEqual(listed.count, 1)
+        XCTAssertNil(try pending.loadPending())   // pending 已清
+    }
+
+    /// I-1 (2) atomic fail injection: failNextFinalize → throw, ZERO state change; keyed not poisoned
+    func test_finalizationPort_failNextFinalize_throws_and_leaves_zero_state_change() throws {
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+
+        // 预存一个 pending
+        try pending.savePending(makePending(filename: "S001.sqlite"))
+
+        // 注入错误
+        port.failNextFinalize = AppError.persistence(.ioError("inject-test"))
+
+        XCTAssertThrowsError(
+            try port.finalizeSession(record: makeRecord(id: nil), ops: [],
+                                     drawings: [], sessionKey: "SK-atomic")
+        ) { err in
+            guard case AppError.persistence(.ioError) = err else {
+                XCTFail("expected .persistence(.ioError), got \(err)"); return
+            }
+        }
+
+        // finalizeCallCount 在错误路径也递增
+        XCTAssertEqual(port.finalizeCallCount, 1)
+        // 零状态变更：records 仍空，pending 仍存在
+        XCTAssertEqual(try records.listRecords(limit: nil).count, 0)
+        XCTAssertNotNil(try pending.loadPending())
+
+        // 同 key 后续成功不受毒：keyed map 未被污染
+        let id = try port.finalizeSession(record: makeRecord(id: nil), ops: [],
+                                          drawings: [], sessionKey: "SK-atomic")
+        XCTAssertEqual(port.finalizeCallCount, 2)
+        XCTAssertEqual(try records.listRecords(limit: nil).count, 1)
+        XCTAssertEqual(id, 1)
+    }
+
+    /// I-1 (3) idempotent same-key: two calls with same sessionKey → same id, count stays 1
+    func test_finalizationPort_idempotent_same_key_returns_same_id() throws {
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+
+        let id1 = try port.finalizeSession(record: makeRecord(id: nil), ops: [],
+                                           drawings: [], sessionKey: "SK-idem")
+        XCTAssertEqual(try records.listRecords(limit: nil).count, 1)
+
+        // 在两次调用之间存入一个 stale pending
+        try pending.savePending(makePending(filename: "stale.sqlite"))
+        XCTAssertNotNil(try pending.loadPending())
+
+        let id2 = try port.finalizeSession(record: makeRecord(id: nil), ops: [],
+                                           drawings: [], sessionKey: "SK-idem")
+
+        XCTAssertEqual(id1, id2)
+        XCTAssertEqual(try records.listRecords(limit: nil).count, 1)  // 仍只有 1 条
+        XCTAssertNil(try pending.loadPending())                        // 第二次调用也清了 pending
+    }
+
+    /// I-1 (4) distinct keys → two different ids, records count 2
+    func test_finalizationPort_distinct_keys_produce_two_ids() throws {
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+
+        let id1 = try port.finalizeSession(record: makeRecord(id: nil, profit: 100), ops: [],
+                                           drawings: [], sessionKey: "SK-A")
+        let id2 = try port.finalizeSession(record: makeRecord(id: nil, profit: 200), ops: [],
+                                           drawings: [], sessionKey: "SK-B")
+
+        XCTAssertNotEqual(id1, id2)
+        XCTAssertEqual(try records.listRecords(limit: nil).count, 2)
+        XCTAssertEqual(port.finalizeCallCount, 2)
+    }
+
     // MARK: - 并发安全 smoke
 
     func test_recordRepo_concurrent_inserts_no_data_race_or_lost_writes() throws {
@@ -410,7 +506,8 @@ final class InMemoryDBFakesTests: XCTestCase {
                         feeSnapshot: FeeSnapshot(commissionRate: 0, minCommissionEnabled: false),
                         tradeOperations: [], drawings: [],
                         startedAt: 0, accumulatedCapital: 0,
-                        drawdown: .initial)
+                        drawdown: .initial,
+                        sessionKey: "SK-test")
     }
 }
 #endif

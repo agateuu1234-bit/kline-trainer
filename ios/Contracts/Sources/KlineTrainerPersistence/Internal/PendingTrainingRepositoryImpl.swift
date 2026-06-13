@@ -17,13 +17,14 @@ enum PendingTrainingRepositoryImpl {
             INSERT OR REPLACE INTO pending_training
               (id, training_set_filename, global_tick_index, upper_period, lower_period,
                position_data, fee_snapshot, trade_operations, drawings,
-               started_at, accumulated_capital, cash_balance, drawdown)
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               started_at, accumulated_capital, cash_balance, drawdown, session_key)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, arguments: [
                 p.trainingSetFilename, p.globalTickIndex,
                 p.upperPeriod.rawValue, p.lowerPeriod.rawValue,
                 positionB64, feeJSON, opsJSON, drawingsJSON,
-                p.startedAt, p.accumulatedCapital, p.cashBalance, drawdownJSON
+                p.startedAt, p.accumulatedCapital, p.cashBalance, drawdownJSON,
+                p.sessionKey
             ])
     }
 
@@ -51,6 +52,9 @@ enum PendingTrainingRepositoryImpl {
                                                                             as: [DrawingObject].self)
         let drawdown: DrawdownAccumulator = try RecordRepositoryImpl.jsonDecode(drawdownJSON,
                                                                                 as: DrawdownAccumulator.self)
+        // 完整 migrator 路径下（0004 回填 + savePending 恒写）理论不可达；防御性守卫 raw-SQL/未来 fixture 漏写
+        let keyOpt: String? = row["session_key"]
+        guard let key = keyOpt else { throw AppError.persistence(.dbCorrupted) }
         return PendingTraining(
             trainingSetFilename: row["training_set_filename"],
             globalTickIndex: row["global_tick_index"],
@@ -61,7 +65,8 @@ enum PendingTrainingRepositoryImpl {
             tradeOperations: ops, drawings: drawings,
             startedAt: row["started_at"],
             accumulatedCapital: row["accumulated_capital"],
-            drawdown: drawdown
+            drawdown: drawdown,
+            sessionKey: key
         )
     }
 
