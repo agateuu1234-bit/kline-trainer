@@ -347,4 +347,22 @@ struct RenderStateBuilderTests {
         let mAfter = CoordinateMapper(viewport: vpAfter, displayScale: 1)
         #expect(mBefore.xToIndex(fx) == mAfter.xToIndex(fx))
     }
+
+    // MARK: - Wave 3 顺位 4：panelPosition 过滤（横线只渲本面板）
+
+    @Test("make: drawings 按 panelPosition 过滤 —— 上栏(0)在 .upper，下栏(1)被排除")
+    @MainActor
+    func drawingsFilteredByPanelPositionUpper() {
+        let (e, _) = TrainingEngineInteractionTests.engine()
+        e.appendDrawing(DrawingObject(toolType: .horizontal,
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 0, price: 10)],
+                                      isExtended: true, panelPosition: 0))    // 上栏
+        e.appendDrawing(DrawingObject(toolType: .horizontal,
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 0, price: 11)],
+                                      isExtended: true, panelPosition: 1))    // 下栏
+        let rs = RenderStateBuilder.make(engine: e, panel: .upper,
+                                         bounds: TrainingEngineInteractionTests.bounds)
+        #expect(rs.drawings.count == 1)
+        #expect(rs.drawings.allSatisfy { $0.panelPosition == 0 })            // 仅上栏；下栏被排除
+    }
 }

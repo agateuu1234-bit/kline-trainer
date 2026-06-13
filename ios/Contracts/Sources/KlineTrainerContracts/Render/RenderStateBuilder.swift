@@ -38,7 +38,7 @@ public enum RenderStateBuilder {
             volumeRange: volumeRange,
             macdRange: macdRange,
             markers: engine.markers,
-            drawings: engine.drawings,
+            drawings: engine.drawings.filter { $0.panelPosition == (panel == .upper ? 0 : 1) },
             crosshairPoint: crosshair)   // C8b：长按十字光标由 ChartContainerView.Coordinator 视图层透传（D3）
     }
 
