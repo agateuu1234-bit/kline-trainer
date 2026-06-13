@@ -1,5 +1,5 @@
 // ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift
-// Kline Trainer Swift Contracts — U2 训练页 SwiftUI 薄壳（Wave 2 顺位 9）
+// Kline Trainer Swift Contracts — U2 训练页 SwiftUI 薄壳（Wave 2 顺位 9；Wave 3 顺位 7 扩：仓位 X/5 + 结束本局手动强平 + 交易 Toast/触觉）
 // Spec: kline_trainer_modules_v1.4.md §U2 L2049-2068（scenePhase 中继）
 //     + kline_trainer_plan_v1.5.md §6.2（顶栏 / 双 K 线区 / 交易按钮 / 自动结束）。
 //
@@ -9,7 +9,9 @@
 // - D4 自动结束检测 tick>=maxTick 且 shouldShowSettlement()（Review 抑制）；D5 didFinalize 一次性闸门。
 // - D9 PositionPicker 全档启用，buy 返 failure 兜；D10 交易按钮仅 Normal/Replay，持有/观察随持仓切文案。
 // - D11 #if canImport(UIKit)：嵌 ChartContainerView（UIViewRepresentable）故同门；host 不编译，Catalyst 编译闸门。
-// - 延后（D6 手动结束按钮 / D7 画线面板 / D8 仓位 X/5）：见 plan residual U2-R1/R2/R3。
+// - D6 手动结束按钮 + D8 仓位 X/5：**Wave 3 顺位 7 已兑现**（结束本局确认弹窗→engine.forceCloseManually→runFinalize；
+//   顶栏 currentPositionTier；交易失败 Toast + 成功 .heavy 触觉，plan §6.2.4 / RFC §4.1/§4.4a/§4.4b）。
+// - 延后（D7 画线面板）：顺位 4（U2-R2）。
 
 #if canImport(UIKit)
 import SwiftUI
