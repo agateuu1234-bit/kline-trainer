@@ -30,8 +30,7 @@ public struct TrainingView: View {
     @State private var finalizeFailed = false
     @State private var finalizing = false      // R1-H2：in-flight 门，阻重试双击/并发 finalize Task
     @State private var pickerRequest: PickerRequest?
-    @State private var toastMessage: String?
-    @State private var toastToken = 0
+    @State private var toast = ToastState()      // §B.1：latest-wins 调度核（host-tested）
     @State private var confirmingEnd = false
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
@@ -138,17 +137,7 @@ public struct TrainingView: View {
             Button("是", role: .destructive) { endManually() }
             Button("否", role: .cancel) {}
         }
-        .overlay(alignment: .top) {
-            if let toast = toastMessage {
-                Text(toast)
-                    .font(.callout)
-                    .padding(.horizontal, 16).padding(.vertical, 10)
-                    .background(.regularMaterial, in: Capsule())
-                    .padding(.top, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: toastMessage)
+        .toastOverlay(toast.message)             // §B.1 复用呈现壳（消费 ToastState.message）
     }
 
     private var topBar: some View {
@@ -226,14 +215,12 @@ public struct TrainingView: View {
         }
     }
 
-    // latest-wins 自动消失 Toast（壳层 UX，不 host 测）。
+    // latest-wins 自动消失 Toast（驱动 host-tested ToastState；计时留壳层，不 host 测）。
     private func presentToast(_ message: String) {
-        toastToken += 1
-        let token = toastToken
-        toastMessage = message
+        let token = toast.present(message)
         Task {
             try? await Task.sleep(for: .seconds(2))
-            if toastToken == token { toastMessage = nil }
+            toast.expire(token: token)
         }
     }
 
