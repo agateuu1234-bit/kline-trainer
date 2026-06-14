@@ -63,4 +63,17 @@ struct CacheTouchOnUseTests {
         #expect(!cache.touchedFilenames.contains("bad.sqlite"), "损坏文件不应被 touch（已删）")
         #expect(cache.touchedFilenames == ["good.sqlite"], "仅成功打开的 good 被 touch")
     }
+
+    // codex-13a-F2 mutation-killer：openReader 成功但 candle-load（maxTick）失败 → 文件**不**被 touch。
+    // 空 candles 使 openAndVerify 成功（默认 meta 合法）但 maxTick(from: [:]) 抛 .emptyData → 引擎构造前失败。
+    // 旧实现（openReader 后即 touch）此处会 touch 一个不可用文件；新实现（make 成功后才 touch）不 touch。
+    @Test("openReader 成功但 candle 校验失败 → 不 touch（touch 仅在引擎构造成功后）")
+    func openSucceedsButBuildFails_notTouched() async throws {
+        let (coord, _, cache, _) = PIFixtures.makeProvenanceCoordinator(
+            files: ["a.sqlite"], corrupt: [], candles: [:])   // 空 candles：开成功，maxTick 抛 .emptyData
+        await #expect(throws: AppError.self) {
+            _ = try await coord.startNewNormalSession()
+        }
+        #expect(cache.touchedFilenames.isEmpty, "未完整构造会话的文件不应被 touch（LRU 不假性续命）")
+    }
 }

@@ -57,4 +57,35 @@ struct AutosaveBannerTests {
         _ = try await coord.startNewNormalSession()
         #expect(coord.autosaveBannerError == nil)
     }
+
+    // codex-13a-F1 mutation-killer：连续两次**相同**错误的 autosave 失败 → autosaveErrorGeneration 递增两次。
+    // 防「重复同错首条 toast 过期后静默」=持久故障（如磁盘满每 tick 失败）数据不可见性（codex high）。
+    // 仅观察 autosaveBannerError（值不变）时 onChange 不 fire → 本计数是「保持可见」契约的可测锚。
+    @Test("连续两次相同错误 autosave 失败 → autosaveErrorGeneration 递增两次（重复同错保持可见）")
+    func repeatedSameError_incrementsGenerationEachFailure() async throws {
+        let (coord, _, pending, _) = PIFixtures.makeCoordinator()
+        let engine = try await coord.startNewNormalSession()
+        // 第 1 次失败
+        pending.failNextSavePending = .persistence(.diskFull)
+        coord.requestAutosave(engine: engine, immediate: true)
+        await coord.drainAutosaveForTesting()
+        #expect(coord.autosaveErrorGeneration == 1)
+        #expect(coord.autosaveBannerError == .persistence(.diskFull))
+        // 第 2 次失败（相同错误）：banner 值不变，但 generation 必须再增（否则 onChange 不 fire = 静默 bug）
+        pending.failNextSavePending = .persistence(.diskFull)
+        coord.requestAutosave(engine: engine, immediate: true)
+        await coord.drainAutosaveForTesting()
+        #expect(coord.autosaveErrorGeneration == 2, "重复同错须递增 generation（驱动第二次 toast）")
+        #expect(coord.autosaveBannerError == .persistence(.diskFull))
+    }
+
+    @Test("autosave 成功后 autosaveErrorGeneration 不变（仅失败递增）")
+    func success_doesNotIncrementGeneration() async throws {
+        let (coord, _, _, _) = PIFixtures.makeCoordinator()
+        let engine = try await coord.startNewNormalSession()
+        engine.holdOrObserve(panel: .upper)
+        coord.requestAutosave(engine: engine, immediate: true)
+        await coord.drainAutosaveForTesting()
+        #expect(coord.autosaveErrorGeneration == 0)
+    }
 }

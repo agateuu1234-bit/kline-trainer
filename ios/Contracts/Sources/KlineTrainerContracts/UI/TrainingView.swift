@@ -90,10 +90,13 @@ public struct TrainingView: View {
         .onChange(of: engine.drawings.count) { _, _ in
             lifecycle.autosave(immediate: true)                 // §4.6：画线即存（commit/delete 不推 tick，D9）
         }
-        .onChange(of: lifecycle.coordinator.autosaveBannerError) { _, newError in
-            // §B.2：autosave 失败非阻塞 surface（不 teardown；与 finalize 失败 blocking alert 区分）。
-            // shouldShowToast 过滤 .internalError 等不适合 toast 的错误。
-            if let e = newError, e.shouldShowToast { presentToast(e.userMessage) }
+        .onChange(of: lifecycle.coordinator.autosaveErrorGeneration) { _, _ in
+            // §B.2 + codex-13a-F1：观察失败**计数**（非错误值）——每次失败都递增 → 重复同一错误也 surface，
+            // 持久故障（如磁盘满每 tick 失败）保持可见，非首条 toast 过期即静默。非阻塞、不 teardown
+            // （与 finalize 失败 blocking alert 区分）。shouldShowToast 过滤 .internalError 等。
+            if let e = lifecycle.coordinator.autosaveBannerError, e.shouldShowToast {
+                presentToast(e.userMessage)
+            }
         }
         .sheet(item: $pickerRequest) { req in
             PositionPickerView(
