@@ -154,7 +154,9 @@ struct ResolveTests {
         #expect(CrosshairLayout.resolve(at: CGPoint(x: 1000, y: 600), mapper: m, candles: c) == nil) // 右下 ∉
     }
 
-    // 矩阵 8：post-pinch demonstrator（同 x，不同 candleStep → 不同蜡烛中心）。displayScale=3 真像素取整。
+    // 矩阵 8：post-pinch demonstrator（同 x，不同 candleStep → 不同蜡烛中心，证 candleStep 被消费）。
+    // displayScale=3 = 真实非默认 scale；竖线 x 期望经 mapper.indexToX 推导（mirror-the-mapper，对像素取整稳健）。
+    // 注：本向量 x=300 恰落整数中心（300/12.5=24、300/25=12），indexToX 取整无偏移；非 vacuous 由 ==24/==12/!= 索引断言保证。
     @Test("post-pinch：同 point.x 在 zoom 前后吸附到不同蜡烛中心（消费 candleStep 变化）")
     func postPinchSnap() {
         let c = makeCandles(count: 80)
