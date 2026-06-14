@@ -107,7 +107,7 @@ public final class DownloadAcceptanceRunner: Sendable {
             switch outcome {
             case .confirmed:
                 return .confirmed(file)
-            case .rejected(let e):                // 409/404 → 删本地 cache 副本
+            case .rejected(let e):                // 终态（409/404/4xx/internalError）→ 删本地 cache 副本（lease/响应不可信）
                 try? cache.delete(file)
                 return .rejected(e)
             case .pending:                        // 网络不确定 → 保留 cache 副本待重试（文件可用，非失败，codex-13a-R3）
@@ -172,7 +172,9 @@ public final class DownloadAcceptanceRunner: Sendable {
     private enum ConfirmOutcome { case confirmed; case rejected(AppError); case pending(AppError) }
 
     /// 先标 confirmPending（状态机要求 + 崩溃安全），再调 confirm。
-    /// 成功 → confirmed；409/404 → rejected；其余 → 停留 confirmPending。
+    /// 成功 → confirmed；**瞬态**（timeout/offline/5xx）→ 停留 confirmPending（pending，文件保留待重试）；
+    /// **终态**（409/404 lease 失效 + 4xx 如 403 未授权 + internalError 畸形响应）→ rejected（surface）。
+    /// codex-13a-R4：仅瞬态归 pending——否则终态确认失败被藏进 pending，无限重试 + 用户不可见。
     private func attemptConfirm(trainingSetId: Int, leaseId: String,
                                 sqliteLocalPath: String?) async -> ConfirmOutcome {
         try? journal.upsert(trainingSetId: trainingSetId, leaseId: leaseId, state: .confirmPending,
@@ -185,12 +187,16 @@ public final class DownloadAcceptanceRunner: Sendable {
         } catch {
             let e = Self.asAppError(error)
             switch e {
-            case .network(.leaseExpired), .network(.leaseNotFound):
+            case .network(.timeout), .network(.offline):
+                return .pending(e)   // 瞬态网络 → 停留 confirmPending；本地文件保留待重试
+            case .network(.serverError(let code)) where (500...599).contains(code):
+                return .pending(e)   // 5xx 服务端瞬时 → 同上（4xx 不在此，落 default 终态）
+            default:
+                // 终态：409/404（lease 失效）+ 4xx（403 等）+ internalError（畸形响应）→ 标 rejected 并 surface，
+                // 不藏 pending（codex-13a-R4）。
                 try? journal.upsert(trainingSetId: trainingSetId, leaseId: leaseId, state: .rejected,
                                     sqliteLocalPath: nil, contentHash: nil, lastError: e.userMessage)
                 return .rejected(e)
-            default:
-                return .pending(e)   // 停留 confirmPending；本地文件保留
             }
         }
     }

@@ -323,6 +323,30 @@ struct DownloadAcceptanceRunnerTests {
         #expect(try journal.listByState(.confirmPending).count == 1)
     }
 
+    // codex-13a-R4：终态 confirm 失败（4xx 403 / internalError 畸形响应）→ .rejected（surface），
+    // 不藏 pending。否则无限重试 + 用户不可见。
+    @Test func run_confirm4xxForbidden_terminalRejected() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = InMemoryCacheManager()
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.serverError(code: 403))),
+                                cache: cache, journal: journal)
+        let result = await runner.run(meta: makeMeta(id: 7), leaseId: "lease")
+        #expect(result == .rejected(.network(.serverError(code: 403))), "403 终态 → rejected（非 pending）")
+        #expect(try journal.listByState(.rejected).count == 1)
+        #expect(try journal.listByState(.confirmPending).isEmpty)
+    }
+
+    @Test func run_confirmInternalError_terminalRejected() async throws {
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = InMemoryCacheManager()
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .internalError(module: "P1", detail: "malformed 200 body")),
+                                cache: cache, journal: journal)
+        let result = await runner.run(meta: makeMeta(id: 8), leaseId: "lease")
+        #expect(result == .rejected(.internalError(module: "P1", detail: "malformed 200 body")), "畸形响应 internalError 终态 → rejected（非 pending）")
+        #expect(try journal.listByState(.rejected).count == 1)
+        #expect(try journal.listByState(.confirmPending).isEmpty)
+    }
+
     @Test func run_cancellationError_mappedToInternalP2() async throws {
         let journal = InMemoryAcceptanceJournalDAO()
         let runner = makeRunner(journal: journal, integrity: CancellingIntegrity())
