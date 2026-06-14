@@ -368,7 +368,9 @@ git commit -m "feat(13a): ToastState latest-wins 调度核（§B.1 host-testable
 
 - [ ] **Step 1: 实现 content-agnostic toast overlay modifier**
 
-把 TrainingView 内联的 `.overlay(.top)` 呈现（`:141-151` + `.animation` `:151`）抽为复用 modifier，行为字节对齐（top / regularMaterial Capsule / move+opacity transition / easeInOut 0.2）：
+把 TrainingView 内联的 `.overlay(.top)` 呈现（`:141-151` + `.animation` `:151`）抽为复用 modifier，行为字节对齐（top / regularMaterial Capsule / move+opacity transition / easeInOut 0.2）。
+
+**⚠️ 不可加 `#if canImport(UIKit)` 闸门（plan-review R1-Critical，已编译复现）**：`SettingsPanel.swift` 是 **host-compiled**（plain `import SwiftUI`，无 UIKit gate）且 Task 10 调用 `.toastOverlay`——若把 `ToastOverlay` 包在 `#if canImport(UIKit)` 内，host 构建（`canImport(UIKit)==false`）下 `toastOverlay` 符号不存在 → `swift test` CI（macos-15 host）编译失败。modifier 仅用跨平台 SwiftUI API（`Text`/`.overlay`/`.regularMaterial`/`Capsule`/`.transition`/`.animation`，macOS host SwiftUI 全可用，与 `SettingsPanel` 现有 host 编译一致），故**不 gate**，host + Catalyst 双可编译。TrainingView（自身 UIKit-gated）调用本未 gate 的符号亦合法。
 
 ```swift
 // ios/Contracts/Sources/KlineTrainerContracts/UI/ToastOverlay.swift
@@ -376,9 +378,10 @@ git commit -m "feat(13a): ToastState latest-wins 调度核（§B.1 host-testable
 //
 // content-agnostic SwiftUI 复用 modifier：行为字节对齐 Wave 3 顺位 7 TrainingView 内联 toast
 // （顶部 / regularMaterial Capsule / move+opacity / easeInOut 0.2）。latest-wins/计时由调用方
-// 持 ToastState 驱动（本壳只渲染传入 message）。薄 UI 壳，不 host 测；Catalyst 编译闸门守护。
+// 持 ToastState 驱动（本壳只渲染传入 message）。薄 UI 壳，不 host 单测（无 snapshot infra）；
+// 仅用跨平台 SwiftUI API → host + Catalyst 双可编译（不 #if canImport(UIKit) 闸门，
+// 否则 host-compiled SettingsPanel 调用处编译失败，plan-review R1-Critical）。
 
-#if canImport(UIKit)
 import SwiftUI
 
 public struct ToastOverlay: ViewModifier {
@@ -406,12 +409,13 @@ public extension View {
         modifier(ToastOverlay(message: message))
     }
 }
-#endif
 ```
 
-- [ ] **Step 2: 编译确认（Catalyst，UIKit-gated）**
+- [ ] **Step 2: 编译确认（host + Catalyst 双门）**
 
-Run: `cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' -derivedDataPath /tmp/derived-13a 2>&1 | tail -5`
+Run（host，防 R1-Critical 回归）: `cd ios/Contracts && swift build --target KlineTrainerContracts`
+Expected: build 成功（`toastOverlay` 在 host 可见）。
+Run（Catalyst）: `cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' -derivedDataPath /tmp/derived-13a 2>&1 | tail -5`
 Expected: `** TEST BUILD SUCCEEDED **`（无 error/warning）。
 
 - [ ] **Step 3: Commit**
@@ -645,6 +649,8 @@ git commit -m "feat(13a): coordinator autosaveBannerError observable 信号（§
         }
 ```
 
+**预期行为（plan-review R1-Low，确认为 intended）**：同一错误连续失败（如磁盘满每 tick autosave 都失败）→ `autosaveBannerError` 值不变（恒 `.diskFull`）→ `.onChange` 不重复 fire → 仅一条 toast（持久故障不刷屏，符合非阻塞「指示」语义）。失败→成功（清 nil）→再同错失败 = 值变化两次 → 重新 fire（正确）。此为有意设计，非 gap。
+
 - [ ] **Step 2: Catalyst 编译确认**
 
 Run: `cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' -derivedDataPath /tmp/derived-13a 2>&1 | tail -5`
@@ -838,9 +844,11 @@ git commit -m "feat(13a): DownloadBatchFeedback 下载失败文案纯值（§B.3
     }
 ```
 
-- [ ] **Step 5: Catalyst 编译确认**
+- [ ] **Step 5: 编译确认（host + Catalyst；SettingsPanel 是 host-compiled，须先 host）**
 
-Run: `cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' -derivedDataPath /tmp/derived-13a 2>&1 | tail -5`
+Run（host，关键——SettingsPanel 走 host 编译，`toastOverlay` 须 host 可见，防 plan-review R1-Critical 回归）: `cd ios/Contracts && swift build --target KlineTrainerContracts`
+Expected: build 成功。
+Run（Catalyst）: `cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' -derivedDataPath /tmp/derived-13a 2>&1 | tail -5`
 Expected: `** TEST BUILD SUCCEEDED **`（无 error/warning）。
 
 - [ ] **Step 6: Commit**
@@ -893,7 +901,7 @@ git commit -m "feat(13a): SettingsPanel 下载 per-item 失败原因 toast（§B
 - [ ] **Step 2: 全量 host 测**
 
 Run: `cd ios/Contracts && swift test 2>&1 | tail -3`
-Expected: `Test run with 988 tests in N suites passed`（baseline 972 + §A 5 + §B.1 3 + §B.2 4 + §B.3 4 = 988），0 failures。
+Expected: `Test run with 988 tests in 141 suites passed`（tests：baseline 972 + §A 5 + §B.1 3 + §B.2 4 + §B.3 4 = 988；suites：137 + 4 新 suite = 141），0 failures。
 
 - [ ] **Step 3: Catalyst 全量编译闸门**
 
