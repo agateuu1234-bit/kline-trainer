@@ -11,7 +11,7 @@
 | 3 | `cd ios/Contracts && swift test --filter makePerfSmoke` | 测试 PASS（1 test passed）；stdout 含字符串 `make() avg`（host smoke 输出装配耗时；若打印被框架抑制，加 `--verbose` 重跑——PASS 为主判据） | PASS（必要）且含 `make() avg`（加 `--verbose` 后）= 通过 |
 | 4 | 一条命令链（任一检查失败即停、不打印末尾标记）：`R=docs/runbooks/2026-06-14-wave3-pr12-frame-budget.md; test -f "$R" && echo "4ms计数=$(grep -c 4ms "$R")" && grep -q L1471 "$R" && echo HAS_L1471 && grep -q 回填 "$R" && echo HAS_BACKFILL` | 依次输出：`4ms计数=` 后数字 ≥ 4（4 录制场景 + 判据 + 决议门）、`HAS_L1471`（权威行号 L1471 非 L1467）、`HAS_BACKFILL`（回填栏） | 三行标记齐全且计数 ≥ 4 = 通过；缺任一 = 不通过 |
 | 5 | `grep -c "no-op" docs/governance/2026-06-14-wave3-pr12-performance-review.md` | 输出 ≥ 1（Bitmap Cache 决议门双分支——< 4ms no-op / ≥ 4ms 独立引入——均在 doc 中表述） | 计数 ≥ 1 = 通过；0 = 不通过 |
-| 6 | `git diff --stat main..HEAD -- ios/Contracts/Sources` | 输出为空（0 生产代码改动；`ios/Contracts/Sources` 目录下无变更） | 空输出 = 通过；任何行输出 = 不通过 |
+| 6 | `git fetch origin -q && git diff --stat "origin/main...HEAD" -- ios/Contracts/Sources`（**三点** = 对 merge-base 比较，只显示本分支自身改动，免受本地 `main` 滞后影响；本分支基于 `origin/main`） | 输出为空（本 PR 0 生产代码改动；`ios/Contracts/Sources` 无本分支变更——顺位 4 等上游生产文件属 base，不计入） | 空输出 = 通过；任何行输出 = 不通过 |
 | 7 | 从仓库根运行下方【命令块 A】，对三个交付文件做 forbidden phrases 自检（禁用短语从 `.claude/workflow-rules.json` 的 `verification_template.forbidden_phrases` 动态读取，本清单不逐字列出以免自命中） | 命令块 A 无任何输出（grep 无匹配；grep 无命中时正常退出，无须看 exit code） | 无输出 = 通过；有输出（命中禁用短语）= 不通过 |
 
 **命令块 A**（item 7；从仓库根目录运行，命令在代码块内不受表格管道符转义影响）：

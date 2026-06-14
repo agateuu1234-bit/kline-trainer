@@ -181,7 +181,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   3. host smoke 通过：`cd ios/Contracts && swift test --filter makePerfSmoke` → PASS 且 stdout 含 `make() avg`。
   4. 帧预算 runbook 可执行：`test -f docs/runbooks/2026-06-14-wave3-pr12-frame-budget.md` 且含 4 录制场景 + 4ms 判据 + 回填栏 + L1471（非 L1467）。
   5. Bitmap Cache 决议门双分支在 doc：`grep -c "no-op\|独立后续 anchor" docs/governance/2026-06-14-wave3-pr12-performance-review.md` ≥ 1。
-  6. 0 生产代码改动：`git diff --stat main..HEAD -- ios/Contracts/Sources` → 空（仅 Tests + docs 改动；与 Task 5 Step 2 同 `main..HEAD` 形式，仅比已提交差异）。
+  6. 0 生产代码改动：`git fetch origin -q && git diff --stat "origin/main...HEAD" -- ios/Contracts/Sources` → 空（**三点** merge-base 比较，免本地 `main` 滞后误报；仅显示本分支自身改动）。
   7. forbidden phrases 自检：`grep -rnE "验证通过即可|看起来正常|应该没问题|should work|looks fine" docs/governance/2026-06-14-wave3-pr12-performance-review.md docs/runbooks/2026-06-14-wave3-pr12-frame-budget.md docs/acceptance/2026-06-14-wave3-pr12-perf-review.md` → 无输出（CLEAN）。
 
 - [ ] **Step 2: 自检 forbidden phrases（清单自身）**
@@ -211,9 +211,9 @@ Expected: 0 failures。
 
 - [ ] **Step 2: 0 生产代码改动确认**
 
-Run: `git diff --stat main..HEAD -- ios/Contracts/Sources`
-Expected: 空输出。
-Run: `git diff --stat main..HEAD`
+Run: `git fetch origin -q && git diff --stat "origin/main...HEAD" -- ios/Contracts/Sources`
+Expected: 空输出（三点 merge-base 比较，免本地 `main` 滞后误报）。
+Run: `git diff --stat "origin/main...HEAD"`
 Expected: 仅 `docs/**` + `RenderStateBuilderTests.swift`。
 
 - [ ] **Step 3: 全仓 forbidden-phrase 终检**
