@@ -1,0 +1,174 @@
+# 设计：本地 codex-attest 解耦自动更新插件缓存，改用钉死并校验的 codex（治理 RFC）
+
+**性质**：治理/工具变更（codex 评审通道的本地执行层）。0 业务代码。沿用 governance 走 brainstorming → writing-plans → codex:adversarial-review → PR review。
+
+**触发**：PR #100（Wave 3 顺位 7）merge 时发现本地 `codex-attest.sh` 因 codex 插件缓存 1.0.3→1.0.4 自动更新而硬报错，导致 codex 本地评审通道仓库级失效（当次只能 opus-xhigh + attest-override 兜底）。
+
+---
+
+## 一、背景与根因（grep-first 核实 2026-06-14）
+
+codex 评审有**两条独立执行通道**（对齐 `.claude/workflow-rules.json` `adversarial_review_loop.execution_venue_by_stage`）：
+
+| 通道 | 文件 | 取 codex 的方式 | 现状 |
+|---|---|---|---|
+| **CI（不可伪造第二层 backstop）** | `.github/workflows/codex-review-verify.yml` | 按 `codex.pin.json` 的 `codex_plugin_cc.tag=v1.0.3` + `commit_sha` 从 GitHub `git clone --depth 1 --branch <tag>`，核 commit，再 `verify-codex-tree.mjs` 校验全文件树 sha256，从该克隆跑 | **未坏**（不依赖本地插件缓存） |
+| **本地（best-effort 第一层）** | `.claude/scripts/codex-attest.sh` | **写死** `$HOME/.claude/plugins/cache/openai-codex/codex/1.0.3/scripts/codex-companion.mjs`（第 64 行） | **已坏**：Claude 插件缓存被自动更新为 `1.0.4`，`1.0.3` 目录已删 → 路径检查硬 fail（exit 3） |
+
+**根因**：本地通道依赖**会被 Claude 插件系统自动更新、我们控制不了的缓存目录**，并把单一版本号写死在脚本里。任何缓存自动更新都会再次断（升 1.0.4 只是把问题推到下次 → 1.0.5 又断）。
+
+**关键事实**：
+- `codex.pin.json`（仓库根，已 commit）是权威 pin 清单：`codex_cli`（`@openai/codex@0.120.0` + npm integrity）+ `codex_plugin_cc`（repo + `tag=v1.0.3` + `commit_sha=11a720b7…` + 40+ 文件的 `file_tree` sha256，含 `scripts/codex-companion.mjs: sha256:352730455…`）。
+- `.claude/scripts/verify-codex-tree.mjs <pin.json> <plugin-root>` 已存在（CI 在用），逐文件核 sha256。
+- `.claude/scripts/codex-attest.sh` 另有一段**可选** `PIN_FILE=.claude/scripts/codex-companion.sha256` 检查（69–77 行）；该文件**不存在** → 此检查恒被跳过（弱于 file_tree 校验，且面向已弃用的缓存路径）。
+- `.claude/settings.json:41` 写死 `Bash(node …/codex/1.0.3/scripts/codex-companion.mjs:*)` 允许（stale）；第 147 行通配 `Bash(node */codex-companion.mjs*)` 已覆盖任意路径的 codex-companion 调用。
+
+---
+
+## 二、目标与决策
+
+**目标**：本地 `codex-attest.sh` 不再依赖会自动更新的插件缓存，改成像 CI 一样从 `codex.pin.json` 钉死的 `v1.0.3`（tag + commit + 文件树指纹）取一份**已校验**的 codex，根治「缓存更新即断」，并与 CI 通道版本对齐（评审口径一致）。
+
+**已定决策（user 2026-06-14）**：
+- **D1 持久修，非快速补丁**：解耦自动更新缓存，本地用钉死并校验的版本。
+- **D2 保持 v1.0.3，不升 1.0.4**：不动 `codex.pin.json`、不动 `.github/workflows`（CI 本就用 v1.0.3 跑得通；升级评审器版本是另一项独立的供应链信任决策，不在本 RFC）。
+- **D3 按需克隆 + 校验 + 本地缓存**（非 vendor 进仓库）：首次按 pin 的 tag/commit 从 GitHub 克隆到仓库外缓存目录，`verify-codex-tree.mjs` 全树校验后从该目录跑；离线/校验失败 → fail-closed 回退 `attest-override`。
+
+---
+
+## 三、架构（最小触点 + 单一职责）
+
+| 文件 | 动作 | 职责 |
+|---|---|---|
+| `.claude/scripts/resolve-pinned-codex.sh` | **新增** | 唯一职责：输出一份「已校验的钉死 `codex-companion.mjs` 绝对路径」；失败即非零退出。可被 `codex-attest.sh` 调用、可独立测试。 |
+| `.claude/scripts/codex-attest.sh` | **改** | (a) 把 `--dry-run` 短路**移到解析钉死 codex 之前**（避免 dry-run 触发克隆）；(b) 用 `CODEX_PATH=$(bash "$SCRIPT_DIR/resolve-pinned-codex.sh")` 替换写死 1.0.3 路径块（第 64 行）+ 存在性检查 + 可选 `codex-companion.sha256` 块（69–77 行）+ export `CLAUDE_PLUGIN_ROOT`。其余（node 二进制白名单 40–61、verdict 解析、ledger 写入）原样。 |
+| `tests/scripts/test-resolve-pinned-codex.sh` | **新增** | resolver 的 host 可跑、不真联网测试（stub git + fixture pin + CODEX_PINNED_CACHE 注入）。 |
+
+**不动**：`codex.pin.json`、`.github/workflows/**`、`verify-codex-tree.mjs`、`.claude/settings.json`、attest 账本/guard/override 机制本身、任何业务代码。
+
+**`.claude/settings.json:41` 不在本 PR 改（settings-scope 校正）**：该行写死 `node …/codex/1.0.3/…codex-companion.mjs` 允许，因缓存升 1.0.4 已成 stale——但它是 **harmless dead config**（该路径已不存在、永不匹配；第 147 行通配 `node */codex-companion.mjs*` 已覆盖任意真实直调），且**非本 PR 引入**（缓存自动更新所致，非「我的 mess」）。改 `settings.json` 会触发 `hardening_6_gate.yml`（其 path filter 含 `settings.json`）这条**与本变更无关**的闸门，徒增 surface。故**不改**，列为 cosmetic residual（§六）。codex-attest.sh 内部的 `node codex-companion.mjs` 是 `bash codex-attest.sh` 的子进程、不经 Claude Bash 权限层，故新解析路径**无需** settings.json 允许。
+
+### 3.1 `resolve-pinned-codex.sh` 契约
+
+**输入**：脚本自定位（不依赖 cwd / PATH-git）。
+
+**信任根锚定（codex R3 §high）**：`REPO_ROOT` 取自 `BASH_SOURCE`（`SCRIPT_DIR/../..`），`VERIFY=$SCRIPT_DIR/verify-codex-tree.mjs`——**不**用 PATH-resolved `git rev-parse` 定位，防 shadow `git` 把信任根重定位到攻击者目录。
+
+**信任边界（codex R2 §high）**：`CODEX_PIN_FILE` / `CODEX_PINNED_CACHE` / `CODEX_PINNED_GIT` 三个覆盖 env **仅在 `CODEX_ATTEST_TEST_MODE=1` 下生效**（测试 seam，与 `codex-attest.sh:49` 的 node-allowlist test-mode 同闸）。**生产恒用钉死默认值**（`PIN=$REPO_ROOT/codex.pin.json`、`GIT_BIN=git`、`CACHE_ROOT=$HOME/.cache/kline-trainer-codex`），忽略一切继承的覆盖。
+
+**接受残留（codex R3 §high 不可约部分，§九）**：本地 resolver 是「best-effort 第一层」；一个**控制本地执行环境**（PATH / env / 能设 `CODEX_ATTEST_TEST_MODE`）的攻击者本就有本地任意代码执行能力（可直接改 ledger / 跑任意命令），故无法被本地脚本彻底防住。**真正不可伪造的强制 = CI `codex-review-verify.yml`**（干净 runner + 从 GitHub clone 钉死 commit + 自带 git/node + verify-tree）。本 PR 把第一层从「依赖可变缓存 + 无条件 honor 覆盖 + PATH-git 信任根」硬化到「钉死缓存 + test-mode 门 + BASH_SOURCE 信任根」，**不声称**第一层对本地环境攻击者免疫——那是第二层 CI 的职责。
+
+**输出**：stdout **仅**打印一行——已校验插件的 `…/plugins/codex/scripts/codex-companion.mjs` 绝对路径（diagnostics 全走 stderr，确保 `$(…)` 捕获干净）。**`CLAUDE_PLUGIN_ROOT` 不由本脚本 export**（`$(bash resolve.sh)` 子壳的 export 不传回父进程）——由调用方 `codex-attest.sh` 从打印的路径派生并 export（见 §3.2），对齐 CI 第 142–143 行的 `CLAUDE_PLUGIN_ROOT=$PLUGIN_DIR`。
+
+**算法（v4：BASH_SOURCE 信任根 + test-mode seam 门 + owner-token lock 串行 staged 原子发布，codex R1/R2/R3）**：
+0. **信任根锚定 + seam 门**：`SCRIPT_DIR=dirname(BASH_SOURCE)`；`REPO_ROOT=$SCRIPT_DIR/../..`；`VERIFY=$SCRIPT_DIR/verify-codex-tree.mjs`。`CODEX_ATTEST_TEST_MODE=1` → honor 覆盖 seam；否则钉死生产默认（§输入）。
+1. 从 `$PIN` 读 `codex_plugin_cc.tag/commit_sha/repo`。任一缺失 → exit 2。
+2. commit 入键：`SRC="$CACHE_ROOT/<commit>/src"`；`PLUGIN="$SRC/plugins/codex"`；`COMPANION="$PLUGIN/scripts/codex-companion.mjs"`。
+3. **冷缓存取得**（缺 `$COMPANION` 时）——**owner-token lock 串行发布**（codex R2 §medium：`mv` 进已存在目录会 nest；R3 §medium：偷锁会致 takeover 删活树）：
+   - **取锁**：`lock="$CACHE_ROOT/<commit>/.publish.lock"`；`mkdir "$lock"`（**原子**）。**不偷锁**（去掉 age-based steal，杜绝 takeover 竞争）。
+   - **持锁者**（mkdir 成功）：写 `$lock/owner=$$`（owner token）；`trap` **仅当 `$lock/owner==$$`** 时删锁 + 删自己的 stage（不误删他人锁）。复核 `$COMPANION` 仍缺 → stage clone（离线 fail-closed）→ `rev-parse == commit`（fail-closed，不重试）→ verify stage（fail-closed）→ **再 recheck `$COMPANION` 仍缺** → `rm -rf "$SRC"`（清崩溃残留 partial：无 `$COMPANION` 的 `$SRC` 非已发布树、无读者用它、持锁无并发发布者）→ `mv "$stage/src" "$SRC"`（rename 进不存在的 `$SRC` → 原子不 nest）。
+   - **非持锁者**（mkdir 失败）：有界轮询等 `$COMPANION`（~60s 超时 fail-closed + 指引清缓存）→ 复用胜出方已发布树。
+4. **发布后校验**（每次都跑）：`node $VERIFY $PIN "$PLUGIN"`；非零 → fail-closed + 指引 `rm -rf "$CACHE_ROOT/<commit>"`。**绝不**在此动**已发布树**。
+5. 打印 `$COMPANION`，退出 0。
+
+**fail-closed 不变量**：任一步失败 → 非零退出，绝不回落未校验/未钉死副本。
+**并发不变量（codex R1/R2/R3 §medium）**：发布经 `mkdir` 原子锁串行；持锁者 rename 进不存在的 `$SRC`（不 nest）；owner-token 保证只删自己的锁；rm `$SRC` 前 recheck `$COMPANION`（绝不删已发布树）；**不偷锁** → 无 takeover 删活树。**接受残留**：硬崩溃的 owner 留锁 → waiter ~60s 超时 fail-closed + 指引手动 `rm -rf $CACHE_ROOT/<commit>`（对本地串行工具：宁可 fail-closed 也不冒删活树的险；§九）。
+
+### 3.2 `codex-attest.sh` 集成点
+
+原结构（第 63–85 行）：locate 写死路径（63–77）→ HEAD echo（79–80）→ `--dry-run` 短路（82–85，消息引用 `$CODEX_PATH`）。**问题**：dry-run 在解析路径之后，改用 resolver 后会让 `--dry-run` 也触发克隆（破坏既有 `test-codex-attest.sh` Test 2 + CI 无网）。**故须 reorder**：先 HEAD echo → 再 `--dry-run` 短路（消息改为不依赖已解析路径、但仍含字面 `codex-companion`）→ 最后才 resolver。替换 63–85 为：
+
+```sh
+HEAD_SHA_GIT=$(git rev-parse HEAD 2>/dev/null || echo "untracked")
+echo "[codex-attest] auto HEAD=$HEAD_SHA_GIT  scope=$SCOPE"
+
+# Dry-run short-circuits BEFORE resolving the pinned codex (no clone on dry-run).
+if $DRY_RUN; then
+    echo "[codex-attest] DRY RUN - would execute: node <pinned codex-companion.mjs via resolve-pinned-codex.sh> adversarial-review --wait --scope $SCOPE $FOCUS"
+    exit 0
+fi
+
+# Resolve pinned + verified codex-companion.mjs (decoupled from auto-updating plugin cache).
+CODEX_PATH="$(bash "$SCRIPT_DIR/resolve-pinned-codex.sh")" || {
+    echo "[codex-attest] ERROR: cannot resolve pinned codex (offline / verify failed); use attest-override.sh on a tty." >&2
+    exit 3
+}
+export CLAUDE_PLUGIN_ROOT="$(dirname "$(dirname "$CODEX_PATH")")"   # …/plugins/codex
+```
+
+（`SCRIPT_DIR` 已在脚本顶部定义。dry-run 消息保留字面 `codex-companion` 子串 → `test-codex-attest.sh` Test 2 仍过、且不再克隆。node 二进制白名单检查 40–61 行保留——它校验调用 `codex-companion.mjs` 的 `node` 解释器可信，与本变更正交。）
+
+---
+
+## 四、错误处理 / 离线回退
+
+- **离线 / 克隆失败 / commit 不符 / 文件树校验不符** → `resolve-pinned-codex.sh` 非零 → `codex-attest.sh` 带清晰提示退出 → 用户走既有 **`attest-override`（user TTY）** 兜底。**永不**运行未校验/未钉死的评审器（fail-closed 红线）。
+- 与现状对比：现状是「缓存版本漂移 → 硬 fail（exit 3）」；新设计是「钉死版本可取且校验通过 → 跑；否则 fail-closed → override」。后者把失败面从「缓存版本是否恰好等于写死值」收窄到「能否取到并校验那个钉死版本」。
+
+---
+
+## 五、测试策略
+
+沿用现有 hook/脚本测试风格（`tests/scripts/`、`tests/hooks/`，`CODEX_*_TEST_MODE` / env 注入），**host 可跑、不真联网**：
+
+1. **缓存命中**：预置一个「已校验」的假 `$CODEX_PINNED_CACHE/<commit>/src/plugins/codex` 树（含与测试用 `codex.pin.json` 匹配的文件 + sha256）→ resolver 不克隆、直接打印路径、exit 0。
+2. **校验失败 fail-closed**：缓存目录里某文件被改 → `verify-codex-tree.mjs` 失败 → resolver 非零退出。
+3. **pin 缺字段**：测试 `codex.pin.json` 缺 `commit_sha` → 报错非零退出。
+4. **克隆失败（离线）**：注入一个会失败的 `git`（PATH 前置 stub 或 `CODEX_PINNED_GIT` 注入）→ resolver 非零退出（不静默成功）。
+5. **commit 不符**：stub git 克隆出错误 commit → resolver fail-closed。
+6. `codex-attest.sh` 集成：`--dry-run` 路径下 resolver 被调用且失败时 attest 非零退出（不写账本）。
+
+测试用的 `codex.pin.json` + 假插件树为 fixture，不触真实 GitHub / 真实缓存。
+
+---
+
+## 六、本 PR 的 review 策略
+
+- 本 PR **不碰** `.github/workflows`、**不碰** `codex.pin.json` → trust-boundary glob `.github/workflows` 未触发；CI 的 codex 评审通道（未坏）会照常在本 PR 上跑。故**走正经 codex:adversarial-review**（同时 dogfood 我们在修的通道）。
+- 分支上的 `resolve-pinned-codex.sh` 一落地，本地 `codex-attest.sh` 即可用修好的版本自举 attest（self-host 验证）。
+- **真正变量 = OpenAI 配额**：配额可用 → 真 codex verdict 到收敛；配额耗尽 → 按 `feedback_review_tool_switch_must_ask` escalate（user 已显式选 codex，不擅自换），经确认后 opus 4.8 xhigh + `attest-override` 兜底。
+- 其它 CI 须真绿：本 PR 无 Swift 代码，Catalyst/swift-test 不受影响（应 skip 或 trivially pass）。
+- 撞 ≥3 轮 codex needs-attention / permanent-bias → 按 `feedback_big_pr_codex_noncovergence` + `feedback_codex_round6_self_contradiction` escalate + accept residual + override，不绕 required checks。
+
+### 6.1 codex 对抗 review log（本地 codex-attest 自举 dogfood，OpenAI 配额可用，真 codex 跑）
+
+| 轮 | verdict | finding | 处理 |
+|---|---|---|---|
+| R1 | needs-attention | HIGH resolver 集成断既有 hook 测试；MEDIUM cache `rm`-during-read 竞争 | **全修**：conftest 钉死 resolver 输入；resolver v2 staged + 原子发布 |
+| R2 | needs-attention | HIGH seam 无条件 honor（伪造 ledger）；MEDIUM `mv` 进已存在目录 nest 成 `$SRC/src` | **全修**：seam gating（test-mode 门）；resolver v3 lock 串行；+ 回归测试 case 7/8 |
+| R3 | needs-attention | HIGH PATH-git 信任根 + test-mode env 可控；MEDIUM age-steal lock takeover 删活树 | **修真核**：v4 BASH_SOURCE 信任根 + owner-token 不偷锁 + rm 前 recheck；**剩余不可约部分入 accept-residual** |
+| R4 | needs-attention | HIGH 校验用 bare `node`（非 captured NODE_BIN）；HIGH 本地 codex **CLI** 未 pin（PATH 控制） | **accept-residual + override**（user 2026-06-14 Option A：v4 后仍 drilldown → override） |
+
+### 6.2 接受残留（user TTY override + admin merge，§九 stop-rule）
+
+R3/R4 剩余两类均为**本地「best-effort 第一层」对本地执行环境攻击者的不可约极限**——控制 PATH/env（能换 `node`/`git`/`codex` CLI、能设 `CODEX_ATTEST_TEST_MODE`）的攻击者本就有本地任意代码执行（可直接改 ledger / 跑任意命令），非本地 bash 脚本能彻底防住。**真正不可伪造的强制 = CI `codex-review-verify.yml`**（干净 runner + 从 npm/GitHub 装钉死 `codex_cli`@0.120.0 + 钉死 plugin commit + 自带 git/node + verify-tree + integrity）。本 PR 把第一层从「可变缓存 + 无条件 honor 覆盖 + PATH-git 信任根 + 恒跳过的 sha 检查」**实质硬化**到「BASH_SOURCE 信任根 + test-mode seam 门 + 钉死 clone + 全树 verify + owner-token 原子发布 + fail-closed」，**并已修掉 R1/R2 全部 + R3 真核**。
+
+**两条 accept-residual（明列，CI 已覆盖）**：
+- **R4-a 校验用 bare `node`**：可进一步把 codex-attest 的 captured 绝对 `NODE_BIN` 传入 resolver——边际收益（仍挡不住 PATH-mutation-mid-run 的本地攻击者），列**下游 follow-up**，非本 PR 阻塞。
+- **R4-b 本地 codex CLI 未 pin**：本地 `codex` CLI 一直（本 PR 前即如此）来自用户 codex 安装、非 pin——pin 本地 npm `@openai/codex` runtime 是**独立的、更大的 scope**（本 PR 只解耦**插件**解析自自动更新缓存），且 **CI 已 pin CLI**。列**独立 follow-up**。
+
+---
+
+## 七、明确 OUT of scope
+
+- 不升级到 1.0.4、不改 `codex.pin.json`（保持 v1.0.3）。
+- 不改 `.github/workflows/**`（CI 通道未坏）。
+- **不改 `.claude/settings.json`**（§三：stale 1.0.3 allow 是 harmless dead config + 非本 PR 引入 + 改它触发无关的 hardening_6_gate；列 cosmetic residual）。
+- 不碰 attest 账本 / `guard-attest-ledger.sh` / `attest-override.sh` 机制本身。
+- 不 vendor 插件文件进仓库。
+- 不重构 `codex-attest.sh` 的其它部分（node 白名单 / verdict 解析 / ledger 写入原样）。
+- 不改业务代码 / Swift / schema。
+- **不 pin 本地 codex CLI binary（codex R4-b，独立 follow-up）**：本 PR 只解耦**插件**解析；pin 本地 npm `@openai/codex` runtime 是独立更大 scope，CI 已 pin。
+- **不把 captured `NODE_BIN` 传入 resolver（codex R4-a，下游 follow-up）**：边际硬化，CI 不可伪造层已覆盖 PATH-attacker 类。
+
+---
+
+## 八、威胁模型对齐
+
+`codex.pin.json` 的存在意义 = 评审跑的是**精确、已校验、未被篡改**的源（CI 不可伪造第二层即据此）。本设计让本地通道也建立在同一钉死源上（clone 钉死 commit + 全树 sha256 校验 + fail-closed），**强于**现状（现状依赖可变缓存 + 一个恒被跳过的可选 sha256 检查）。本地仍是「best-effort 第一层」（OpenAI 配额/网络可用性不保证），真正强制仍由 CI required-check 兜底——本设计不改变该分层，只是让第一层不再因缓存漂移而脆断、且口径与第二层一致。
+
+---
+
+## 九、停止规则（永久偏见护栏）
+
+沿用 `feedback_codex_round6_self_contradiction`：§三/§四的契约一旦写入即权威答案。判 permanent-bias 须同时满足：①要求的补救 = 已被 §二决策显式否决的同一补救（如要求升 1.0.4 已 D2 否决 / 要求 vendor 进仓库已 D3 否决 / 要求本地放弃 fail-closed 已 §四红线否决）；②未引入任何新事实/新失败路径。命中 → user TTY override + admin merge，不实施。「指出某断言事实上错」永不算复述。

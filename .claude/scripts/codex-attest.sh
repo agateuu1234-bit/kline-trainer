@@ -60,29 +60,21 @@ if [ "${CODEX_ATTEST_TEST_MODE:-0}" != "1" ]; then
     esac
 fi
 
-# Locate codex-companion.mjs at pinned path
-CODEX_PATH="$HOME/.claude/plugins/cache/openai-codex/codex/1.0.3/scripts/codex-companion.mjs"
-if [ ! -f "$CODEX_PATH" ]; then
-    echo "[codex-attest] ERROR: codex-companion.mjs not at pinned path $CODEX_PATH" >&2
-    exit 3
-fi
-PIN_FILE=".claude/scripts/codex-companion.sha256"
-if [ -f "$PIN_FILE" ]; then
-    expected=$(cat "$PIN_FILE")
-    actual=$(shasum -a 256 "$CODEX_PATH" | awk '{print $1}')
-    if [ "$expected" != "$actual" ]; then
-        echo "[codex-attest] ERROR: codex-companion sha256 mismatch." >&2
-        exit 4
-    fi
-fi
-
 HEAD_SHA_GIT=$(git rev-parse HEAD 2>/dev/null || echo "untracked")
 echo "[codex-attest] auto HEAD=$HEAD_SHA_GIT  scope=$SCOPE"
 
+# Dry-run short-circuits BEFORE resolving the pinned codex (no clone on dry-run).
 if $DRY_RUN; then
-    echo "[codex-attest] DRY RUN - would execute: node $CODEX_PATH adversarial-review --wait --scope $SCOPE $FOCUS"
+    echo "[codex-attest] DRY RUN - would execute: node <pinned codex-companion.mjs via resolve-pinned-codex.sh> adversarial-review --wait --scope $SCOPE $FOCUS"
     exit 0
 fi
+
+# Resolve pinned + verified codex-companion.mjs (decoupled from auto-updating plugin cache).
+CODEX_PATH="$(bash "$SCRIPT_DIR/resolve-pinned-codex.sh")" || {
+    echo "[codex-attest] ERROR: cannot resolve pinned codex (offline / verify failed); use attest-override.sh on a tty." >&2
+    exit 3
+}
+export CLAUDE_PLUGIN_ROOT="$(dirname "$(dirname "$CODEX_PATH")")"   # …/plugins/codex
 
 # Run codex; capture stdout to both terminal and buffer so we can parse verdict.
 echo "[codex-attest] invoking codex-companion"
