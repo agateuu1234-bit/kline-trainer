@@ -24,6 +24,7 @@ struct TrainingSessionProvenanceTests {
         await #expect(throws: AppError.trainingSet(.fileNotFound)) {
             _ = try await coord.startNewNormalSession()
         }
+        // 2 删除：fake delete 从 store 移除 → attempts(=count+1=3) 跑 删a/删b/取空 → .fileNotFound
         #expect(cache.deletedFilenames.count == 2)
     }
 
