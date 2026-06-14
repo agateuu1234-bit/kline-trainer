@@ -22,7 +22,7 @@
 |---|---|---|
 | `buildRenderState` | `RenderStateBuilder.make(engine:panel:bounds:crosshair:)`（`Render/RenderStateBuilder.swift:18-43`） | 平台无关纯函数，host 全量可测；切片 + 装配 `KLineRenderState` |
 | 视口几何 | `RenderStateBuilder.makeViewport`（同上 `:58-93`） | 纯函数；`partitioningIndex` O(log n) + 切片 O(visibleCount) |
-| `draw` 派发 | `KLineView.draw(_:)`（`Render/KLineView.swift:33-60`） | UIKit-only；建 3 个 mapper + 派发 8 个 `drawXxx` |
+| `draw` 派发 | `KLineView.draw(_:)`（`Render/KLineView.swift:36-63`） | UIKit-only；建 3 个 mapper + 派发 8 个 `drawXxx` |
 | 8 绘制 pass | `KLineView+Candles/MACD/Crosshair.swift` 等 | UIKit-only；Core Graphics 描边/填充 |
 | 重绘触发 | `KLineView.renderState.didSet`（`KLineView.swift:16-21`） | **Equatable 短路**：`renderState != oldValue` 才 `setNeedsDisplay()` |
 | 重建触发 | `ChartContainerView.updateUIView`（`Render/ChartContainerView.swift:34-41`） | 每次 SwiftUI `@Bindable engine` 状态变更重建 renderState；长按十字光标走 `Coordinator.setCrosshair` 视图层旁路重建 |

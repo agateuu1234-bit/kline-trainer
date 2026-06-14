@@ -33,7 +33,7 @@
 |---|---|---|---|
 | 1 | Instruments Time Profiler / Core Animation 录制：**纯水平滚动 + 惯性减速**（快速拖动后释放，观察 DecelerationAnimator CADisplayLink 帧序列）；在 Time Profiler 中按 `KLineView.draw(_:)` 过滤，取峰值单帧耗时 | 峰值单帧 draw < 4ms；实测峰值 ms：**____**（回填） | 峰值 < 4ms = 通过 |
 | 2 | Instruments Time Profiler 录制：**pinch 缩放**（双指开合 3-5 次，含 defaultVisibleCount 从 80 变到更大/更小范围）；取 `KLineView.draw(_:)` 峰值单帧耗时 | 峰值单帧 draw < 4ms；实测峰值 ms：**____**（回填） | 峰值 < 4ms = 通过 |
-| 3 | Instruments Time Profiler 录制：**水平线绘制 + 跨缩放/平移后验证还原**（长按起始→拖到终点画一条线，再 pinch 缩放 + pan，确认线随视口正确变换）；取峰值单帧耗时 | 峰值单帧 draw < 4ms；实测峰值 ms：**____**（回填） | 峰值 < 4ms = 通过 |
+| 3 | Instruments Time Profiler 录制：**水平线绘制 + 跨缩放/平移后验证还原**（长按起始→拖到终点画一条线，再 pinch 缩放 + pan，确认线随视口正确变换）；取峰值单帧耗时（前置：顺位 4 #103 已注册 `HorizontalLineTool` 并 merged，`drawDrawings` 实际描画——线可见） | 峰值单帧 draw < 4ms；实测峰值 ms：**____**（回填） | 峰值 < 4ms = 通过 |
 | 4 | Instruments Time Profiler 录制：**长按十字光标拖动**（长按激活 crosshair snap，缓慢横扫全屏蜡烛区域）；取 `KLineView.draw(_:)` 峰值单帧耗时 | 峰值单帧 draw < 4ms；实测峰值 ms：**____**（回填） | 峰值 < 4ms = 通过 |
 | 5 | **Equatable 短路验证**：在 Instruments Core Animation 模板中，保持 engine 状态不变（不滚动、不缩放），连续 updateUIView 多次；观察 Core Animation commit 帧数量，确认无冗余重绘 | `KLineView.draw(_:)` 不被重复调用（Core Animation 无多余 layer commit）；Instruments frame timeline 稳定无多余峰值 | 无冗余重绘 = 通过 |
 

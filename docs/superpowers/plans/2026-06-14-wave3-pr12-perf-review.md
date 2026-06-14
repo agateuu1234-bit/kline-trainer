@@ -101,7 +101,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - [ ] **Step 1: 写评审 doc**，须含以下小节与**核实过的**内容（行号引用必须与代码一致）：
 
   1. **〇 摘要 + 依赖状态**：顺位 12 = 静态评审 + 帧预算判据 + Bitmap Cache 决议 + host 绊线，0 生产代码；依赖锚 3/4/5/11 均 merged。
-  2. **一 热路径结构**：`make()`（纯，host，`RenderStateBuilder.swift:18-43`）vs `draw()`（UIKit 8 pass，`KLineView.swift:33-60`）拆分；重建触发 = `ChartContainerView.updateUIView`（`ChartContainerView.swift:34-41`）每次 `@Bindable` 变更；重绘触发 = `KLineView.renderState.didSet` Equatable 短路（`KLineView.swift:18-19`）；帧驱动 = `DecelerationAnimator`（UIKit `CADisplayLink` 原生 Hz、未设 `preferredFramesPerSecond`；macOS `Timer(1.0/120.0)`，`DecelerationAnimator.swift:200`），每帧 1 个 `onUpdate(delta)`，**animator 内不调 `make()`**。
+  2. **一 热路径结构**：`make()`（纯，host，`RenderStateBuilder.swift:18-43`）vs `draw()`（UIKit 8 pass，`KLineView.swift:36-63`，post-顺位4-rebase）拆分；重建触发 = `ChartContainerView.updateUIView`（`ChartContainerView.swift:34-41`）每次 `@Bindable` 变更；重绘触发 = `KLineView.renderState.didSet` Equatable 短路（`KLineView.swift:18-19`）；帧驱动 = `DecelerationAnimator`（UIKit `CADisplayLink` 原生 Hz、未设 `preferredFramesPerSecond`；macOS `Timer(1.0/120.0)`，`DecelerationAnimator.swift:200`），每帧 1 个 `onUpdate(delta)`，**animator 内不调 `make()`**。
   3. **二 每帧 CG 调用量级账**（对照 plan v1.5 L31「600-700 次/帧，瓶颈线 >5000」）：
      - `drawCandles`（`KLineView+Candles.swift:13-27`）：per-candle 1 `strokePath`（影线）+ 1 `fill`（实体）+ `setFill`/`setStroke`；可见根默认 **80**（`RenderStateBuilder.defaultVisibleCount=80`，**非** plan 文案的 93）→ ~80×(2 path + 2 color) ≈ 320 ops。
      - `drawMA66`（`:30-44`）1 折线；`drawBOLL`（`:47-67`）3 轨虚线 + `setLineDash`；`drawVolume`/`drawMACD` ~80 rect + 折线 + ~80 bar。
