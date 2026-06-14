@@ -50,27 +50,29 @@ codex 评审有**两条独立执行通道**（对齐 `.claude/workflow-rules.jso
 
 ### 3.1 `resolve-pinned-codex.sh` 契约
 
-**输入**：cwd = 仓库根（`codex.pin.json` + `.claude/scripts/verify-codex-tree.mjs` 可读）。
+**输入**：脚本自定位（不依赖 cwd / PATH-git）。
 
-**信任边界（codex R2 §high）**：`CODEX_PIN_FILE` / `CODEX_PINNED_CACHE` / `CODEX_PINNED_GIT` 三个覆盖 env **仅在 `CODEX_ATTEST_TEST_MODE=1` 下生效**（测试 seam，与 `codex-attest.sh:49` 的 node-allowlist test-mode 同闸）。**生产恒用钉死默认值**（`PIN=$REPO_ROOT/codex.pin.json`、`GIT_BIN=git`、`CACHE_ROOT=$HOME/.cache/kline-trainer-codex`），**忽略一切继承的覆盖** → 防恶意继承环境注入假 pin + 预置缓存伪造 `Verdict: approve` / 任意 node 执行（伪造 ledger）。
+**信任根锚定（codex R3 §high）**：`REPO_ROOT` 取自 `BASH_SOURCE`（`SCRIPT_DIR/../..`），`VERIFY=$SCRIPT_DIR/verify-codex-tree.mjs`——**不**用 PATH-resolved `git rev-parse` 定位，防 shadow `git` 把信任根重定位到攻击者目录。
+
+**信任边界（codex R2 §high）**：`CODEX_PIN_FILE` / `CODEX_PINNED_CACHE` / `CODEX_PINNED_GIT` 三个覆盖 env **仅在 `CODEX_ATTEST_TEST_MODE=1` 下生效**（测试 seam，与 `codex-attest.sh:49` 的 node-allowlist test-mode 同闸）。**生产恒用钉死默认值**（`PIN=$REPO_ROOT/codex.pin.json`、`GIT_BIN=git`、`CACHE_ROOT=$HOME/.cache/kline-trainer-codex`），忽略一切继承的覆盖。
+
+**接受残留（codex R3 §high 不可约部分，§九）**：本地 resolver 是「best-effort 第一层」；一个**控制本地执行环境**（PATH / env / 能设 `CODEX_ATTEST_TEST_MODE`）的攻击者本就有本地任意代码执行能力（可直接改 ledger / 跑任意命令），故无法被本地脚本彻底防住。**真正不可伪造的强制 = CI `codex-review-verify.yml`**（干净 runner + 从 GitHub clone 钉死 commit + 自带 git/node + verify-tree）。本 PR 把第一层从「依赖可变缓存 + 无条件 honor 覆盖 + PATH-git 信任根」硬化到「钉死缓存 + test-mode 门 + BASH_SOURCE 信任根」，**不声称**第一层对本地环境攻击者免疫——那是第二层 CI 的职责。
 
 **输出**：stdout **仅**打印一行——已校验插件的 `…/plugins/codex/scripts/codex-companion.mjs` 绝对路径（diagnostics 全走 stderr，确保 `$(…)` 捕获干净）。**`CLAUDE_PLUGIN_ROOT` 不由本脚本 export**（`$(bash resolve.sh)` 子壳的 export 不传回父进程）——由调用方 `codex-attest.sh` 从打印的路径派生并 export（见 §3.2），对齐 CI 第 142–143 行的 `CLAUDE_PLUGIN_ROOT=$PLUGIN_DIR`。
 
-**算法（v3：trust-root gating + lock 串行 staged 原子发布，codex R1 §medium + R2 §high/§medium）**：
-0. **信任根选择**：`CODEX_ATTEST_TEST_MODE=1` → honor seams（`PIN/GIT_BIN/CACHE_ROOT` 取覆盖 env 或默认）；否则 → 钉死生产默认值，忽略覆盖（§输入·信任边界）。
-1. 从 `$PIN` 读 `codex_plugin_cc.tag`、`commit_sha`、`repo`（python3 解析，与 CI 同源字段）。任一缺失 → 非零退出（exit 2）。
-2. commit 入键：`SRC="$CACHE_ROOT/<commit_sha>/src"`；`PLUGIN="$SRC/plugins/codex"`；`COMPANION="$PLUGIN/scripts/codex-companion.mjs"`。
-3. **冷缓存取得**（缺 `$COMPANION` 时）——**lock 串行发布**（codex R2 §medium：`mv` 进已存在目录会 nest 成 `$SRC/src` 而非失败，故不能靠 `mv` 失败判竞争）：
-   - **取锁**：`lock="$CACHE_ROOT/<commit>/.publish.lock"`；先偷走明显过期锁（`find -mmin -10` 为空 = >10min 未变更 = 崩溃残留 → `rm -rf`）；`mkdir "$lock"`（**原子**）。
-   - **持锁者**（mkdir 成功，sole publisher）：复核 `$COMPANION` 仍缺 → `stage=$(mktemp -d "$CACHE_ROOT/.staging.XXXXXX")` → `git clone --depth 1 --branch <tag> <repo> "$stage/src"`（离线 fail-closed）→ `rev-parse HEAD == commit_sha`（不符 fail-closed，不重试）→ `node verify-codex-tree.mjs $PIN "$stage/src/plugins/codex"`（fail-closed）→ `rm -rf "$SRC"`（清崩溃残留 partial；**安全**：无 `$COMPANION` 的 `$SRC` 非已发布树、无读者用它、且持锁无并发发布者）→ `mv "$stage/src" "$SRC"`（rename 进**不存在**的 `$SRC` → 原子、**不 nest**）。`trap` 清 lock+stage。
-   - **非持锁者**（mkdir 失败，他人正发布）：有界轮询等 `$COMPANION` 出现（~30s 超时则 fail-closed + 指引清缓存）→ 复用胜出方已发布树。
-4. **发布后校验**（每次都跑，含缓存命中）：`node verify-codex-tree.mjs $PIN "$PLUGIN"`；非零 → fail-closed + 指引 `rm -rf "$CACHE_ROOT/<commit>"`。**绝不**在此 `rm`/替换**已发布树**（有 `$COMPANION`、并发只读者可能持文件句柄）。
+**算法（v4：BASH_SOURCE 信任根 + test-mode seam 门 + owner-token lock 串行 staged 原子发布，codex R1/R2/R3）**：
+0. **信任根锚定 + seam 门**：`SCRIPT_DIR=dirname(BASH_SOURCE)`；`REPO_ROOT=$SCRIPT_DIR/../..`；`VERIFY=$SCRIPT_DIR/verify-codex-tree.mjs`。`CODEX_ATTEST_TEST_MODE=1` → honor 覆盖 seam；否则钉死生产默认（§输入）。
+1. 从 `$PIN` 读 `codex_plugin_cc.tag/commit_sha/repo`。任一缺失 → exit 2。
+2. commit 入键：`SRC="$CACHE_ROOT/<commit>/src"`；`PLUGIN="$SRC/plugins/codex"`；`COMPANION="$PLUGIN/scripts/codex-companion.mjs"`。
+3. **冷缓存取得**（缺 `$COMPANION` 时）——**owner-token lock 串行发布**（codex R2 §medium：`mv` 进已存在目录会 nest；R3 §medium：偷锁会致 takeover 删活树）：
+   - **取锁**：`lock="$CACHE_ROOT/<commit>/.publish.lock"`；`mkdir "$lock"`（**原子**）。**不偷锁**（去掉 age-based steal，杜绝 takeover 竞争）。
+   - **持锁者**（mkdir 成功）：写 `$lock/owner=$$`（owner token）；`trap` **仅当 `$lock/owner==$$`** 时删锁 + 删自己的 stage（不误删他人锁）。复核 `$COMPANION` 仍缺 → stage clone（离线 fail-closed）→ `rev-parse == commit`（fail-closed，不重试）→ verify stage（fail-closed）→ **再 recheck `$COMPANION` 仍缺** → `rm -rf "$SRC"`（清崩溃残留 partial：无 `$COMPANION` 的 `$SRC` 非已发布树、无读者用它、持锁无并发发布者）→ `mv "$stage/src" "$SRC"`（rename 进不存在的 `$SRC` → 原子不 nest）。
+   - **非持锁者**（mkdir 失败）：有界轮询等 `$COMPANION`（~60s 超时 fail-closed + 指引清缓存）→ 复用胜出方已发布树。
+4. **发布后校验**（每次都跑）：`node $VERIFY $PIN "$PLUGIN"`；非零 → fail-closed + 指引 `rm -rf "$CACHE_ROOT/<commit>"`。**绝不**在此动**已发布树**。
 5. 打印 `$COMPANION`，退出 0。
 
-**并发不变量（codex R1+R2 §medium）**：发布经 `mkdir` 原子锁串行；持锁者 rename 进不存在的 `$SRC`（不 nest）；从不删**已发布**树。并发冷启动至多一方发布、其余等待复用，**无 `$SRC/src` 嵌套、无重复 checkout**。
-
-**fail-closed 不变量**：任一步失败 → 非零退出，**绝不**回落到未校验/未钉死的缓存或任何其它路径。
-**并发安全不变量（codex R1 §medium）**：克隆/校验只在唯一 staging 目录；发布只经一次原子 `rename`；resolver **从不** `rm -rf`/clone 进已发布的 `$SRC`。并发冷启动至多一方胜出发布、其余复用之；并发只读者不会被另一进程的 `rm` 抽掉文件。
+**fail-closed 不变量**：任一步失败 → 非零退出，绝不回落未校验/未钉死副本。
+**并发不变量（codex R1/R2/R3 §medium）**：发布经 `mkdir` 原子锁串行；持锁者 rename 进不存在的 `$SRC`（不 nest）；owner-token 保证只删自己的锁；rm `$SRC` 前 recheck `$COMPANION`（绝不删已发布树）；**不偷锁** → 无 takeover 删活树。**接受残留**：硬崩溃的 owner 留锁 → waiter ~60s 超时 fail-closed + 指引手动 `rm -rf $CACHE_ROOT/<commit>`（对本地串行工具：宁可 fail-closed 也不冒删活树的险；§九）。
 
 ### 3.2 `codex-attest.sh` 集成点
 

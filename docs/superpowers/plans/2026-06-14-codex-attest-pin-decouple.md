@@ -141,12 +141,15 @@ Expected: 失败（`.claude/scripts/resolve-pinned-codex.sh` 不存在 → 各 r
 # 按 commit 入键 clone 到本地缓存，verify-codex-tree.mjs 全树校验后打印路径。
 # Fail-closed：任一步失败即非零退出，绝不回落到未校验副本。
 # stdout：仅一行（路径）；所有诊断走 stderr。
+# 信任根锚定（codex R3 §high）：REPO_ROOT 取自 BASH_SOURCE（不依赖 PATH-git，防 shadow git 重定位）。
 # 信任边界（codex R2 §high）：CODEX_PIN_FILE / CODEX_PINNED_CACHE / CODEX_PINNED_GIT 覆盖
 # 仅在 CODEX_ATTEST_TEST_MODE=1 下生效（测试 seam）；生产恒用钉死默认值、忽略一切继承的覆盖。
 set -euo pipefail
 
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-VERIFY="$REPO_ROOT/.claude/scripts/verify-codex-tree.mjs"
+SELF="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+VERIFY="$SCRIPT_DIR/verify-codex-tree.mjs"
 
 if [ "${CODEX_ATTEST_TEST_MODE:-0}" = "1" ]; then
     PIN="${CODEX_PIN_FILE:-$REPO_ROOT/codex.pin.json}"
@@ -173,15 +176,15 @@ SRC="$CACHE_ROOT/$COMMIT/src"
 PLUGIN="$SRC/plugins/codex"
 COMPANION="$PLUGIN/scripts/codex-companion.mjs"
 
-# 冷缓存：lock 串行发布（mkdir 原子）。持锁者在唯一 staging clone+核 commit+校验，再原子 rename
-# 到不存在的 $SRC（不 nest，codex R2 §medium）。非持锁者有界等待复用之。绝不删已发布树（R1+R2 §medium）。
+# 冷缓存：owner-token lock 串行发布（mkdir 原子）。不偷锁（去 age-steal，杜绝 takeover 删活树，codex R3 §medium）。
+# 持锁者在唯一 staging clone+核 commit+校验，rm $SRC 前 recheck COMPANION，再原子 rename 进不存在的 $SRC（不 nest）。
 if [ ! -f "$COMPANION" ]; then
     mkdir -p "$CACHE_ROOT/$COMMIT"
     lock="$CACHE_ROOT/$COMMIT/.publish.lock"
-    if [ -d "$lock" ] && [ -z "$(find "$lock" -maxdepth 0 -mmin -10 2>/dev/null)" ]; then rm -rf "$lock" 2>/dev/null || true; fi
     if mkdir "$lock" 2>/dev/null; then
+        printf '%s' "$$" > "$lock/owner" 2>/dev/null || true
         stage=""
-        trap 'rm -rf "$lock" ${stage:+"$stage"} 2>/dev/null' EXIT
+        trap 'if [ "$(cat "$lock/owner" 2>/dev/null)" = "$$" ]; then rm -rf "$lock"; fi; [ -n "${stage:-}" ] && rm -rf "$stage" 2>/dev/null || true' EXIT
         if [ ! -f "$COMPANION" ]; then
             stage="$(mktemp -d "$CACHE_ROOT/.staging.XXXXXX")" || { err "mktemp failed; fail-closed"; exit 1; }
             "$GIT_BIN" clone --depth 1 --branch "$TAG" "$REPO_URL" "$stage/src" >&2 \
@@ -192,15 +195,16 @@ if [ ! -f "$COMPANION" ]; then
                 || { err "commit mismatch: expected $COMMIT got $actual; fail-closed"; exit 1; }
             node "$VERIFY" "$PIN" "$stage/src/plugins/codex" >&2 \
                 || { err "staged tree verify failed; fail-closed"; exit 1; }
-            rm -rf "$SRC" 2>/dev/null || true   # 清崩溃残留 partial（无 COMPANION 的 $SRC 非已发布树）
-            mv "$stage/src" "$SRC" || { err "publish rename failed; fail-closed"; exit 1; }
+            if [ ! -f "$COMPANION" ]; then    # recheck：绝不动已发布树
+                rm -rf "$SRC" 2>/dev/null || true   # 清崩溃残留 partial（无 COMPANION 的 $SRC 非已发布树）
+                mv "$stage/src" "$SRC" || { err "publish rename failed; fail-closed"; exit 1; }
+            fi
         fi
-        rm -rf "$lock" ${stage:+"$stage"} 2>/dev/null || true; trap - EXIT
     else
         waited=0
         while [ ! -f "$COMPANION" ]; do
             sleep 0.2; waited=$((waited+1))
-            [ "$waited" -ge 150 ] && { err "timed out (~30s) waiting for concurrent publish; if stuck: rm -rf \"$CACHE_ROOT/$COMMIT\"; fail-closed"; exit 1; }
+            [ "$waited" -ge 300 ] && { err "timed out (~60s) waiting for concurrent publish; if a publisher crashed: rm -rf \"$CACHE_ROOT/$COMMIT\"; fail-closed"; exit 1; }
         done
     fi
 fi

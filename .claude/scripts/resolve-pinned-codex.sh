@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # resolve-pinned-codex.sh
 # 输出一份已校验的、钉死版本的 codex-companion.mjs 绝对路径，解耦自会自动更新的 Claude 插件缓存。
-# 读 codex.pin.json 的 codex_plugin_cc.{repo,tag,commit_sha,file_tree}，按 commit 入键 clone 到本地缓存
-# （lock 串行 + staged + 原子 rename 发布，并发安全），全树校验后打印路径。
 # Fail-closed：任一步失败即非零退出，绝不回落到未校验副本。stdout 仅一行（路径）；诊断走 stderr。
-# 信任边界（codex R2 §high）：CODEX_PIN_FILE / CODEX_PINNED_CACHE / CODEX_PINNED_GIT 覆盖仅在
-# CODEX_ATTEST_TEST_MODE=1 下生效（测试 seam）；生产恒用钉死默认值、忽略一切继承的覆盖。
+# 信任根锚定（codex R3 §high）：REPO_ROOT 取自 BASH_SOURCE（本脚本位置），不依赖 PATH-resolved git
+#   → 防 shadow git 重定位信任根。覆盖 seam（CODEX_PIN_FILE/CACHE/GIT）仅在 CODEX_ATTEST_TEST_MODE=1 生效。
+# 并发（codex R1/R2/R3 §medium）：mkdir 原子锁 + owner-token 仅删自己的锁 + rm $SRC 前 recheck COMPANION
+#   + 不偷锁（崩溃 owner → waiter 超时 fail-closed + 指引清缓存，绝不冒删活树的险）。
 set -euo pipefail
 
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-VERIFY="$REPO_ROOT/.claude/scripts/verify-codex-tree.mjs"
+SELF="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+VERIFY="$SCRIPT_DIR/verify-codex-tree.mjs"
 
 if [ "${CODEX_ATTEST_TEST_MODE:-0}" = "1" ]; then
     PIN="${CODEX_PIN_FILE:-$REPO_ROOT/codex.pin.json}"
@@ -39,10 +41,10 @@ COMPANION="$PLUGIN/scripts/codex-companion.mjs"
 if [ ! -f "$COMPANION" ]; then
     mkdir -p "$CACHE_ROOT/$COMMIT"
     lock="$CACHE_ROOT/$COMMIT/.publish.lock"
-    if [ -d "$lock" ] && [ -z "$(find "$lock" -maxdepth 0 -mmin -10 2>/dev/null)" ]; then rm -rf "$lock" 2>/dev/null || true; fi
     if mkdir "$lock" 2>/dev/null; then
+        printf '%s' "$$" > "$lock/owner" 2>/dev/null || true
         stage=""
-        trap 'rm -rf "$lock" ${stage:+"$stage"} 2>/dev/null' EXIT
+        trap 'if [ "$(cat "$lock/owner" 2>/dev/null)" = "$$" ]; then rm -rf "$lock"; fi; [ -n "${stage:-}" ] && rm -rf "$stage" 2>/dev/null || true' EXIT
         if [ ! -f "$COMPANION" ]; then
             stage="$(mktemp -d "$CACHE_ROOT/.staging.XXXXXX")" || { err "mktemp failed; fail-closed"; exit 1; }
             "$GIT_BIN" clone --depth 1 --branch "$TAG" "$REPO_URL" "$stage/src" >&2 \
@@ -53,15 +55,16 @@ if [ ! -f "$COMPANION" ]; then
                 || { err "commit mismatch: expected $COMMIT got $actual; fail-closed"; exit 1; }
             node "$VERIFY" "$PIN" "$stage/src/plugins/codex" >&2 \
                 || { err "staged tree verify failed; fail-closed"; exit 1; }
-            rm -rf "$SRC" 2>/dev/null || true
-            mv "$stage/src" "$SRC" || { err "publish rename failed; fail-closed"; exit 1; }
+            if [ ! -f "$COMPANION" ]; then
+                rm -rf "$SRC" 2>/dev/null || true
+                mv "$stage/src" "$SRC" || { err "publish rename failed; fail-closed"; exit 1; }
+            fi
         fi
-        rm -rf "$lock" ${stage:+"$stage"} 2>/dev/null || true; trap - EXIT
     else
         waited=0
         while [ ! -f "$COMPANION" ]; do
             sleep 0.2; waited=$((waited+1))
-            [ "$waited" -ge 150 ] && { err "timed out (~30s) waiting for concurrent publish; if stuck: rm -rf \"$CACHE_ROOT/$COMMIT\"; fail-closed"; exit 1; }
+            [ "$waited" -ge 300 ] && { err "timed out (~60s) waiting for concurrent publish; if a publisher crashed: rm -rf \"$CACHE_ROOT/$COMMIT\"; fail-closed"; exit 1; }
         done
     fi
 fi
