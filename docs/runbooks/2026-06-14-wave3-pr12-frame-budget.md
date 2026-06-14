@@ -21,7 +21,7 @@
 
 ## 前置准备
 
-1. 在真机（推荐 A17 Pro / ProMotion 屏）或 Retina iPhone Simulator 上构建 Debug 包
+1. 在真机（推荐 A17 Pro / ProMotion 屏）或 Retina iPhone Simulator 上构建 **Release（优化）包**（Xcode ⌘I Profile 默认 Release；**勿用 Debug**——未优化构建会虚高单帧耗时，可能误触 Bitmap Cache 引入）
 2. Xcode → Product → Profile（⌘I）→ 选 **Time Profiler** 模板（或 **Core Animation** 模板）
 3. 每场景独立录制 30 秒，取帧渲染耗时峰值（非平均值）
 
