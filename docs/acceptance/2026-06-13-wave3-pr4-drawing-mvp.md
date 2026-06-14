@@ -25,11 +25,11 @@
 
 | Step | Action（在 `ios/Contracts/` 目录跑） | Expected（二元） | Pass / Fail |
 |---|---|---|---|
-| T1 | `swift test 2>&1 \| tail -1` | 末行含 `Test run with 925 tests in 130 suites passed`（0 failures） | □ Pass / □ Fail |
+| T1 | `swift test 2>&1 \| tail -1` | 末行含 `Test run with 935 tests in 132 suites passed`（0 failures） | □ Pass / □ Fail |
 | T2 | `xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 \| tail -3` | 含 `** TEST BUILD SUCCEEDED **` | □ Pass / □ Fail |
 
-**已采集证据（本 PR 实测，2026-06-14）**：
-- T1：`✔ Test run with 925 tests in 130 suites passed after 22.4 seconds.`（基线 908 + 本 PR 新增 17：HorizontalLineTool 6 / DefaultDrawingInputController 4 / engine commit-cancel 5 / panelPosition 过滤 1 / drawing E2E save-resume 1）
+**已采集证据（本 PR 实测，rebase 至 origin/main d991c77 含顺位 7 #100 后，2026-06-14）**：
+- T1：`✔ Test run with 935 tests in 132 suites passed after 22.3 seconds.`（基线 917〔含顺位 7 #100 的 TradeFeedback/TopBar 测〕+ 本 PR 新增 18：HorizontalLineTool 6 / DefaultDrawingInputController 4 / engine commit-cancel 5 / panelPosition 过滤 2〔上栏+下栏〕/ drawing E2E save-resume 1）
 - T2：`** TEST BUILD SUCCEEDED **`（Mac Catalyst，Swift 6，arm64-apple-ios17.0-macabi）
 
 ---
