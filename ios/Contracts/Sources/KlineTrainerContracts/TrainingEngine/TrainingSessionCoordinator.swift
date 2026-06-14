@@ -59,6 +59,10 @@ public final class TrainingSessionCoordinator {
     /// 机制；**user-facing 非阻塞指示（banner/toast）归顺位 10c 边界错误统一 Toast 层**（磁盘满可见性同类），
     /// 届时连同 §4.6 item5 一并 surface（@testable 现已读以证机制在位）。
     @ObservationIgnored public private(set) var lastAutosaveError: AppError?
+    /// §B.2（PR 13a）user-facing autosave 失败信号（observable，供 TrainingView toast）。
+    /// 与内部 `lastAutosaveError`（@ObservationIgnored 机制状态）解耦：本字段仅作 UI re-render 信号，
+    /// 不参与 autosave coalescing/fence 状态机。置位/清零与 `lastAutosaveError` 同步（catch / endSession / reset）。
+    public private(set) var autosaveBannerError: AppError?
 
     /// 请求 autosave（脏动作后调）。immediate=交易/画线/background flush（绕 N 节流）；
     /// 非 immediate=tick 推进（按 autosaveTickInterval 节流）。terminating/非 Normal → no-op（§4.7d/§4.6）。
@@ -82,9 +86,12 @@ public final class TrainingSessionCoordinator {
                 do {
                     try await self.saveProgress(engine: engine)
                     self.lastAutosaveError = nil
+                    self.autosaveBannerError = nil                  // §B.2：成功清 UI 信号
                 } catch {
-                    self.lastAutosaveError = (error as? AppError)
+                    let appError = (error as? AppError)
                         ?? .internalError(module: "E6b", detail: "autosave: \(error)")
+                    self.lastAutosaveError = appError
+                    self.autosaveBannerError = appError             // §B.2：失败置 UI 信号（observable → toast）
                 }
             }
             self.autosaveTask = nil
@@ -408,6 +415,7 @@ public final class TrainingSessionCoordinator {
         autosaveTask = nil
         autosaveDirty = false
         lastAutosaveError = nil
+        autosaveBannerError = nil                    // §B.2：清 UI 信号防跨局 stale toast
         ticksSinceAutosave = 0
         activeReader?.close()
         activeReader = nil
@@ -513,6 +521,7 @@ public final class TrainingSessionCoordinator {
         autosaveDirty = false
         ticksSinceAutosave = 0
         lastAutosaveError = nil
+        autosaveBannerError = nil                    // §B.2：新 session 清 UI 信号
     }
 
     /// 10b-D7（§4.7f）：训练组文件可弃损坏判据（dbFactory.openAndVerify 对坏文件抛的可恢复错误）。
