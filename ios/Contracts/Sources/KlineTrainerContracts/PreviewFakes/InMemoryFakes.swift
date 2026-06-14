@@ -428,6 +428,11 @@ public final class InMemoryCacheManager: CacheManager, @unchecked Sendable {
     public var deletedFilenames: [String] {
         lock.lock(); defer { lock.unlock() }; return _deletedFilenames
     }
+    /// Wave 3 PR 13a §A spy：touch 调用文件名记录（touch-on-use 断言）。lock 保护读。
+    private var _touchedFilenames: [String] = []
+    public var touchedFilenames: [String] {
+        lock.lock(); defer { lock.unlock() }; return _touchedFilenames
+    }
 
     public init() {}
 
@@ -471,6 +476,7 @@ public final class InMemoryCacheManager: CacheManager, @unchecked Sendable {
             lastAccessedAt: now,
             downloadedAt: existing.downloadedAt
         )
+        _touchedFilenames.append(existing.filename)
     }
 
     public func delete(_ file: TrainingSetFile) throws {
