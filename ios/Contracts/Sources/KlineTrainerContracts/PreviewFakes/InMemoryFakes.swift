@@ -133,31 +133,46 @@ public final class InMemoryPendingTrainingRepository: PendingTrainingRepository,
     private let lock = NSLock()
     private var pending: PendingTraining?
 
-    /// 注入下一次 savePending/clearPending/loadPending 抛错（消费后自动清除）；mirror 生产：抛前零状态变更。
-    public var failNextSavePending: AppError?
-    public var failNextClearPending: AppError?
-    public var failNextLoadPending: AppError?
-    /// savePending 成功落盘次数（coalescing/cadence 断言用）。
-    public private(set) var saveCount = 0
+    /// 注入下一次 savePending/clearPending/loadPending 抛错（消费后自动清除）；mirror 生产：抛前零状态变更。lock 保护读写。
+    private var _failNextSavePending: AppError?
+    public var failNextSavePending: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextSavePending }
+        set { lock.lock(); defer { lock.unlock() }; _failNextSavePending = newValue }
+    }
+    private var _failNextClearPending: AppError?
+    public var failNextClearPending: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextClearPending }
+        set { lock.lock(); defer { lock.unlock() }; _failNextClearPending = newValue }
+    }
+    private var _failNextLoadPending: AppError?
+    public var failNextLoadPending: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextLoadPending }
+        set { lock.lock(); defer { lock.unlock() }; _failNextLoadPending = newValue }
+    }
+    /// savePending 成功落盘次数（coalescing/cadence 断言用）。lock 保护读。
+    private var _saveCount = 0
+    public var saveCount: Int {
+        lock.lock(); defer { lock.unlock() }; return _saveCount
+    }
 
     public init() {}
 
     public func savePending(_ p: PendingTraining) throws {
         lock.lock(); defer { lock.unlock() }
-        if let e = failNextSavePending { failNextSavePending = nil; throw e }
+        if let e = _failNextSavePending { _failNextSavePending = nil; throw e }
         pending = p
-        saveCount += 1
+        _saveCount += 1
     }
 
     public func loadPending() throws -> PendingTraining? {
         lock.lock(); defer { lock.unlock() }
-        if let e = failNextLoadPending { failNextLoadPending = nil; throw e }
+        if let e = _failNextLoadPending { _failNextLoadPending = nil; throw e }
         return pending
     }
 
     public func clearPending() throws {
         lock.lock(); defer { lock.unlock() }
-        if let e = failNextClearPending { failNextClearPending = nil; throw e }
+        if let e = _failNextClearPending { _failNextClearPending = nil; throw e }
         pending = nil
     }
 }
@@ -402,10 +417,17 @@ public final class InMemoryCacheManager: CacheManager, @unchecked Sendable {
     private let lock = NSLock()
     private var store: [Int: TrainingSetFile] = [:]
 
-    /// Wave 3 顺位 10b Task 0 knob：测试可注入确定性选取（默认 nil = randomElement）。根治 provenance 测试 flake。
-    public var pickOverride: (([TrainingSetFile]) -> TrainingSetFile?)?
-    /// Wave 3 顺位 10b Task 0 spy：delete 调用文件名记录（provenance 删重试断言）。
-    public private(set) var deletedFilenames: [String] = []
+    /// Wave 3 顺位 10b Task 0 knob：测试可注入确定性选取（默认 nil = randomElement）。根治 provenance 测试 flake。lock 保护读写。
+    private var _pickOverride: (([TrainingSetFile]) -> TrainingSetFile?)?
+    public var pickOverride: (([TrainingSetFile]) -> TrainingSetFile?)? {
+        get { lock.lock(); defer { lock.unlock() }; return _pickOverride }
+        set { lock.lock(); defer { lock.unlock() }; _pickOverride = newValue }
+    }
+    /// Wave 3 顺位 10b Task 0 spy：delete 调用文件名记录（provenance 删重试断言）。lock 保护读。
+    private var _deletedFilenames: [String] = []
+    public var deletedFilenames: [String] {
+        lock.lock(); defer { lock.unlock() }; return _deletedFilenames
+    }
 
     public init() {}
 
@@ -417,7 +439,7 @@ public final class InMemoryCacheManager: CacheManager, @unchecked Sendable {
     public func pickRandom() -> TrainingSetFile? {
         lock.lock(); defer { lock.unlock() }
         let fs = sortedLocked()
-        if let o = pickOverride { return o(fs) }
+        if let o = _pickOverride { return o(fs) }
         return fs.randomElement()
     }
 
@@ -459,7 +481,7 @@ public final class InMemoryCacheManager: CacheManager, @unchecked Sendable {
         guard self.store.removeValue(forKey: file.id) != nil else {
             throw AppError.trainingSet(.fileNotFound)
         }
-        deletedFilenames.append(file.filename)
+        _deletedFilenames.append(file.filename)
     }
 
     // MARK: - Internal helpers
