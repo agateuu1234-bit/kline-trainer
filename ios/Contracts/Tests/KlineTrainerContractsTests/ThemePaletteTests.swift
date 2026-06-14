@@ -71,6 +71,14 @@ struct AppPaletteTests {
         }
     }
 
+    @MainActor
+    @Test("画线描边（固定暗橙）vs light/dark 底 对比 ≥ 3:1（codex R2-F1）")
+    func drawingStrokeContrastWCAG() {
+        let stroke = HorizontalLineTool.strokeRGBA
+        #expect(wcagContrastRatio(stroke, AppPalette.light.background) >= 3.0)
+        #expect(wcagContrastRatio(stroke, AppPalette.dark.background) >= 3.0)
+    }
+
     @Test("light ≠ dark：关键 token 取值切换")
     func lightDistinctFromDark() {
         #expect(AppPalette.light.background != AppPalette.dark.background)

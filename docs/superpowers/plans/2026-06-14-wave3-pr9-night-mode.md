@@ -36,7 +36,7 @@
 ### 范围边界（明确排除）
 - **SwiftUI chrome 无需逐视图改色**：全 UI 显式色均为系统/语义色（`.secondary`/`.primary`/`.red`/`.green`/`.orange`/`.regularMaterial`，见 HomeView/Settlement/SettingsPanel/TrainingView），**原生随 `colorScheme` 适配**，单一 `.preferredColorScheme` 即覆盖。
   - **两条独立色轨澄清（R1-Med5）**：SwiftUI 盈亏色（`HomeView.swift:128-129` `.red`/`.green`）= SwiftUI 系统 `.red/.green`（light/dark 两个系统值），与 UIKit 图表 light/dark 集（定制 RGBA）是**独立两轨**：仅保证「红涨绿跌」**方向**一致，**不**保证与图表 token 逐字同深浅（dark 模式下已是现状，非本 PR 引入）。统一两轨超本 PR 范围（YAGNI，不做）。acceptance/runbook 据此措辞，勿以「HomeView light red ≠ 图表 light candleUp」判不一致。
-- **画线工具颜色不 token 化**：`HorizontalLineTool.swift:30` 固定橙 `CGColor(srgbRed:0.95,green:0.6,blue:0.1)`，源注释「MVP 固定橙；token 化属后续」——橙在近白/近黑底均有对比，**不属本 PR 13-token 契约**，保持不变。
+- **画线工具颜色保持固定（非 13-token），但修正取值（codex R2-F1）**：`HorizontalLineTool` 固定橙原 `0.95/0.6/0.1` 在**近白底仅 2.15:1 < 3:1**（plan v1 误称「橙在近白/近黑底均有对比」——错，仅近黑底 7.78:1 好）。改暗橙 `0.82/0.40/0`（白底 3.59:1 + 黑底 4.66:1 均 ≥3:1，`drawingStrokeContrastWCAG` 测）。仍为**固定 scheme-independent 色**（非 13-token，完整 scheme-aware 画线 token 化属 Phase 4），仅纠正取值使双 scheme 可读。
 - **gridLine 不强制高对比**：与 dark 集一致，网格线刻意低对比（dark 用 alpha 0.25），light 集同理刻意 subtle，不纳入 ≥0.4 对比断言。
 
 ---

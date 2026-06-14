@@ -23,11 +23,17 @@ public struct HorizontalLineTool: DrawingTool {
     /// 命中容差（点）：point.y 距横线 y 在此内即命中。MVP 不接删除 UI（Phase 4）。
     private static let hitTolerance: CGFloat = 8
 
+    /// 画线描边色（固定 scheme-independent）。顺位9/codex R2-F1：旧 0.95/0.6/0.1 在白底仅 2.15:1<3，
+    /// 改暗橙 0.82/0.40/0 → 白底 3.59:1 + 黑底 4.66:1 均 ≥3:1（图形元素阈，`drawingStrokeContrastWCAG` 测）。
+    /// 完整 scheme-aware 画线 token 化仍属后续（Phase 4）；此处为满足双 scheme 可读的最小修正。
+    nonisolated public static let strokeRGBA = AppColorRGBA(red: 0.82, green: 0.40, blue: 0.0)
+
     public func render(ctx: CGContext, mapper: CoordinateMapper, anchors: [DrawingAnchor]) {
         guard let y = lineY(anchors: anchors, mapper: mapper) else { return }
         let frame = mapper.viewport.mainChartFrame
         ctx.saveGState()
-        ctx.setStrokeColor(CGColor(srgbRed: 0.95, green: 0.6, blue: 0.1, alpha: 1))  // MVP 固定橙；token 化属后续
+        ctx.setStrokeColor(CGColor(srgbRed: CGFloat(Self.strokeRGBA.red), green: CGFloat(Self.strokeRGBA.green),
+                                   blue: CGFloat(Self.strokeRGBA.blue), alpha: CGFloat(Self.strokeRGBA.alpha)))
         ctx.setLineWidth(1.5)
         ctx.move(to: CGPoint(x: frame.minX, y: y))
         ctx.addLine(to: CGPoint(x: frame.maxX, y: y))
