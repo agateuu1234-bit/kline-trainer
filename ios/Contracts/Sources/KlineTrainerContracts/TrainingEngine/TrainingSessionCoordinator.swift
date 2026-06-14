@@ -96,6 +96,13 @@ public final class TrainingSessionCoordinator {
     func drainAutosaveForTesting() async { await autosaveTask?.value }
     #endif
 
+    /// §4.7d 终态栅栏：置 terminating（拒新 autosave）+ 排空在飞写（排空时见 terminating 即退出不落盘）。
+    /// 单线程 @MainActor 保证 finalize/discard 与 autosave Task 不并发（await 时 Task 运行并见 terminating）。
+    private func fenceAndDrainAutosaves() async {
+        terminating = true
+        await autosaveTask?.value
+    }
+
     public init(dbFactory: TrainingSetDBFactory,
                 recordRepo: RecordRepository,
                 pendingRepo: PendingTrainingRepository,
@@ -275,7 +282,8 @@ public final class TrainingSessionCoordinator {
     /// 缺活跃上下文 → .internalError（D9）。
     /// 通过 SessionFinalizationPort 单事务执行（§4.7b）；同 sessionKey 重试幂等（§4.7c）。
     public func finalize(engine: TrainingEngine) async throws -> Int64? {
-        guard engine.flow.shouldSaveRecord() else { return nil }   // D2：Review/Replay 不入账
+        guard engine.flow.shouldSaveRecord() else { return nil }   // D2：Review/Replay 不入账（fence 前 return）
+        await fenceAndDrainAutosaves()           // §4.7d：单事务入账前排空排队 autosave，防终态脏写复活 pending
         // D4 加固（final-review L2）：engine 必须是当前活跃 session 的引擎，否则会把活跃 session 的
         // 文件/股票元数据记到外来 engine 的交易数据上 → 写错历史记录。activeEngine 为 nil 时亦在此拒绝。
         guard activeEngine === engine, let file = activeFile, let reader = activeReader,
