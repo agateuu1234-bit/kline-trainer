@@ -56,6 +56,7 @@ public struct AppRootView: View {
             Button("好", role: .cancel) { router.clearError() }
         } message: { Text(router.errorMessage ?? "") }
         .task { await router.runLaunchRecovery() }
+        .preferredColorScheme(displayModePrefersDark(settings.settings.displayMode).map { $0 ? .dark : .light })
     }
 }
 #endif

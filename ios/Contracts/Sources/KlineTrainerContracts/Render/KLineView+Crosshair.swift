@@ -22,8 +22,8 @@ extension KLineView {
         ctx.saveGState()
         defer { ctx.restoreGState() }
 
-        // D3：crosshair 线 = AppColor.text（白 0.92），1 device pixel 宽。
-        AppColor.text.setStroke()
+        // D3：crosshair 线 = currentPalette.text，1 device pixel 宽。
+        currentPalette.text.setStroke()
         ctx.setLineWidth(1 / mapper.displayScale)
         let lines = resolved.lines
         ctx.move(to: lines.horizontal.from); ctx.addLine(to: lines.horizontal.to); ctx.strokePath()
@@ -36,11 +36,11 @@ extension KLineView {
 
     /// D4：标签框 = background 实心 + text 文字，10pt 系统字体，居中。
     private func drawLabelBox(ctx: CGContext, rect: CGRect, text: String) {
-        AppColor.background.setFill()
+        currentPalette.background.setFill()
         ctx.fill(rect)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: UIFont.systemFont(ofSize: 10),
-            .foregroundColor: AppColor.text,
+            .foregroundColor: currentPalette.text,
         ]
         let str = text as NSString
         let size = str.size(withAttributes: attrs)

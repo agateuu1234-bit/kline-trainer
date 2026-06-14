@@ -9,7 +9,7 @@ import CoreGraphics
 
 extension KLineView {
     /// C4 MACD：DIF（白）+ DEA（黄）折线（实线，D3）+ 柱（正红负绿，D11 基线钳制）。
-    /// 颜色 token: AppColor.macdDIF / .macdDEA / .macdBarPositive / .macdBarNegative（D4，F2 已冻结）。
+    /// 颜色 token: currentPalette.macdDIF / .macdDEA / .macdBarPositive / .macdBarNegative（D4；顺位9 scheme-aware，dark 集 = F2 冻结值）。
     func drawMACD(ctx: CGContext, mapper: IndicatorMapper, candles: ArraySlice<KLineCandle>) {
         guard !candles.isEmpty else { return }
         ctx.saveGState()
@@ -17,7 +17,7 @@ extension KLineView {
 
         // 柱先画（在折线下方视觉层次）
         for bar in SubChartLayout.macdBars(for: candles, mapper: mapper) {
-            let color = bar.isPositive ? AppColor.macdBarPositive : AppColor.macdBarNegative
+            let color = bar.isPositive ? currentPalette.macdBarPositive : currentPalette.macdBarNegative
             color.setFill()
             ctx.fill(bar.rect)
         }
@@ -27,14 +27,14 @@ extension KLineView {
         ctx.setLineWidth(1 / mapper.displayScale)
         ctx.setLineJoin(.round)
 
-        AppColor.macdDIF.setStroke()
+        currentPalette.macdDIF.setStroke()
         for segment in lines.dif where segment.count >= 2 {
             ctx.move(to: segment[0])
             for point in segment.dropFirst() { ctx.addLine(to: point) }
             ctx.strokePath()
         }
 
-        AppColor.macdDEA.setStroke()
+        currentPalette.macdDEA.setStroke()
         for segment in lines.dea where segment.count >= 2 {
             ctx.move(to: segment[0])
             for point in segment.dropFirst() { ctx.addLine(to: point) }

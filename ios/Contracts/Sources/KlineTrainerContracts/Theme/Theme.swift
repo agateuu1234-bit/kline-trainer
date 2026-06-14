@@ -63,6 +63,59 @@ public enum AppColorTokens {
     public static let text            = AppColorRGBA(white: 0.92)
 }
 
+// MARK: - 顺位9 夜间：light/dark 双调色板 + scheme 选取（纯值，macOS host 直跑）
+
+/// 13-token 调色板值集。`AppColorScheme` 选取 light/dark（RFC §4.3）。
+/// `.dark` = F2 已 ship 的 `AppColorTokens`（PR #39，复用为夜间集，零破坏）；
+/// `.light` = dark 派生白天集（背景近白 / 文本近黑 / 红涨绿跌色相保 / 辅助线白底加深保对比）。
+public struct AppPalette: Equatable, Sendable {
+    public let candleUp, candleDown, ma66, bollLine, macdDIF, macdDEA: AppColorRGBA
+    public let macdBarPositive, macdBarNegative, profitRed, lossGreen: AppColorRGBA
+    public let background, gridLine, text: AppColorRGBA
+
+    /// 夜间集 = `AppColorTokens` 同名 token（单一真相；冻结复用）。
+    public static let dark = AppPalette(
+        candleUp: AppColorTokens.candleUp, candleDown: AppColorTokens.candleDown,
+        ma66: AppColorTokens.ma66, bollLine: AppColorTokens.bollLine,
+        macdDIF: AppColorTokens.macdDIF, macdDEA: AppColorTokens.macdDEA,
+        macdBarPositive: AppColorTokens.macdBarPositive, macdBarNegative: AppColorTokens.macdBarNegative,
+        profitRed: AppColorTokens.profitRed, lossGreen: AppColorTokens.lossGreen,
+        background: AppColorTokens.background, gridLine: AppColorTokens.gridLine, text: AppColorTokens.text)
+
+    /// 白天集 = dark 派生。`up`/`down` 抽出复用，保证 D-3 alias（macdBar/盈亏 = candle）与红涨绿跌色相。
+    /// RGBA 取值见 plan §D2；前景 token 经 WCAG 相对亮度对比 ≥ 3:1 vs 白底（`lightForegroundContrastWCAG` 测；
+    /// codex R1-F1 修：旧 maxChannelDiff 代理放过 DEA 2.74:1，改真亮度对比闸门）。
+    public static let light: AppPalette = {
+        let up   = AppColorRGBA(red: 0.82, green: 0.10, blue: 0.12)   // 红涨（白底加深）
+        let down = AppColorRGBA(red: 0.05, green: 0.55, blue: 0.25)   // 绿跌（白底加深）
+        return AppPalette(
+            candleUp: up, candleDown: down,
+            ma66: AppColorRGBA(red: 0.42, green: 0.25, blue: 0.72),
+            bollLine: AppColorRGBA(red: 0.75, green: 0.50, blue: 0.05),
+            macdDIF: AppColorRGBA(red: 0.15, green: 0.15, blue: 0.18),
+            macdDEA: AppColorRGBA(red: 0.70, green: 0.45, blue: 0.0),  // codex R1-F1：0.80/0.55→0.70/0.45（2.74:1→3.76:1 ≥3）
+            macdBarPositive: up, macdBarNegative: down,
+            profitRed: up, lossGreen: down,
+            background: AppColorRGBA(red: 0.98, green: 0.98, blue: 0.99),
+            gridLine: AppColorRGBA(white: 0.45, alpha: 0.30),
+            text: AppColorRGBA(white: 0.13))
+    }()
+
+    public static func forScheme(_ scheme: AppColorScheme) -> AppPalette {
+        scheme == .dark ? .dark : .light
+    }
+}
+
+/// `display_mode` → `preferredColorScheme` 偏好：true=强制夜间 / false=强制白天 / nil=跟随系统。
+/// `AppRootView` 据此把 `ColorScheme?` 推给整窗（含嵌入 UIKit 图表的 trait）。
+public func displayModePrefersDark(_ mode: DisplayMode) -> Bool? {
+    switch mode {
+    case .light:  return false
+    case .dark:   return true
+    case .system: return nil
+    }
+}
+
 // MARK: - UIKit shell 层（仅 iOS / iOS Simulator 编译；macOS host 跳过）
 
 #if canImport(UIKit)
@@ -113,5 +166,31 @@ public enum AppColor {
     public static let background      = UIColor(rgba: AppColorTokens.background)
     public static let gridLine        = UIColor(rgba: AppColorTokens.gridLine)
     public static let text            = UIColor(rgba: AppColorTokens.text)
+}
+
+/// scheme-aware UIKit 调色板：`AppPalette` 经 `UIColor(rgba:)` 桥。
+/// `.dark`/`.light` 为缓存 static（无逐帧分配）；`KLineView.currentPalette` 据 trait 选取。
+/// `: Sendable`：Swift 6 strict-concurrency 下 `public static let` 全局须 Sendable；
+/// 字段 `UIColor` 在当前 SDK 视为 Sendable（既有 `AppColor` 同款 static UIColor 已编译过）。
+public struct UIChartPalette: Sendable {
+    public let candleUp, candleDown, ma66, bollLine, macdDIF, macdDEA: UIColor
+    public let macdBarPositive, macdBarNegative, profitRed, lossGreen: UIColor
+    public let background, gridLine, text: UIColor
+
+    public init(_ p: AppPalette) {
+        candleUp = UIColor(rgba: p.candleUp);   candleDown = UIColor(rgba: p.candleDown)
+        ma66 = UIColor(rgba: p.ma66);           bollLine = UIColor(rgba: p.bollLine)
+        macdDIF = UIColor(rgba: p.macdDIF);     macdDEA = UIColor(rgba: p.macdDEA)
+        macdBarPositive = UIColor(rgba: p.macdBarPositive); macdBarNegative = UIColor(rgba: p.macdBarNegative)
+        profitRed = UIColor(rgba: p.profitRed); lossGreen = UIColor(rgba: p.lossGreen)
+        background = UIColor(rgba: p.background); gridLine = UIColor(rgba: p.gridLine)
+        text = UIColor(rgba: p.text)
+    }
+
+    public static let dark  = UIChartPalette(.dark)
+    public static let light = UIChartPalette(.light)
+    public static func forScheme(_ scheme: AppColorScheme) -> UIChartPalette {
+        scheme == .dark ? dark : light
+    }
 }
 #endif
