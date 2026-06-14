@@ -54,14 +54,20 @@ codex 评审有**两条独立执行通道**（对齐 `.claude/workflow-rules.jso
 
 **输出**：stdout **仅**打印一行——已校验插件的 `…/plugins/codex/scripts/codex-companion.mjs` 绝对路径（diagnostics 全走 stderr，确保 `$(…)` 捕获干净）。**`CLAUDE_PLUGIN_ROOT` 不由本脚本 export**（`$(bash resolve.sh)` 子壳的 export 不传回父进程）——由调用方 `codex-attest.sh` 从打印的路径派生并 export（见 §3.2），对齐 CI 第 142–143 行的 `CLAUDE_PLUGIN_ROOT=$PLUGIN_DIR`。
 
-**算法**：
-1. 从 `codex.pin.json` 读 `codex_plugin_cc.tag`、`commit_sha`、`repo`（python3 解析，与 CI 同源字段）。任一缺失 → stderr 报错 + 非零退出。
-2. 缓存目录按 commit 取键：`CACHE_ROOT="${CODEX_PINNED_CACHE:-$HOME/.cache/kline-trainer-codex}"`；`SRC="$CACHE_ROOT/<commit_sha>/src"`；`PLUGIN="$SRC/plugins/codex"`（commit 入路径 → re-pin 换 commit 自动用新目录，旧缓存不复用）。
-3. **取得**（缺 `$PLUGIN/scripts/codex-companion.mjs` 时）：`git clone --depth 1 --branch <tag> <repo> "$SRC"` → `ACTUAL=$(git -C "$SRC" rev-parse HEAD)`；`ACTUAL != commit_sha` → **直接 fail-closed（不重试）**。理由：commit 不符 = 钉死 tag 与 pinned commit 真分叉（tag 被移动 / 投毒），对同一 tag 重克隆是确定性、徒劳的——fail-fast 才是正确的完整性信号（重试只对 step 4 的瞬时部分/损坏内容有意义）。（镜像 CI 第 113–117 行的 commit 核对；CI 同样不对 mismatch 重试。）
-4. **校验**（每次都跑，含缓存命中）：`node .claude/scripts/verify-codex-tree.mjs codex.pin.json "$PLUGIN"`；非零 → 删 `$SRC` 重克隆一次 → 再非零 → fail-closed。（防本地缓存被篡改/残缺。）
-5. 打印 `$PLUGIN/scripts/codex-companion.mjs`，退出 0。
+**算法（v2：staged + atomic publish，并发安全，codex R1 §medium）**：
+1. 从 `codex.pin.json` 读 `codex_plugin_cc.tag`、`commit_sha`、`repo`（python3 解析，与 CI 同源字段）。任一缺失 → stderr 报错 + 非零退出（exit 2）。
+2. 缓存目录按 commit 取键：`CACHE_ROOT="${CODEX_PINNED_CACHE:-$HOME/.cache/kline-trainer-codex}"`；`SRC="$CACHE_ROOT/<commit_sha>/src"`；`PLUGIN="$SRC/plugins/codex"`；`COMPANION="$PLUGIN/scripts/codex-companion.mjs"`（commit 入路径 → re-pin 换 commit 自动用新目录，旧缓存不复用）。
+3. **冷缓存取得**（缺 `$COMPANION` 时）——**全程在唯一 staging 临时目录内进行，绝不直接写/删已发布的 `$SRC`**：
+   - `stage=$(mktemp -d "$CACHE_ROOT/.staging.XXXXXX")`（与 `$SRC` 同文件系统 → rename 原子）；`trap 'rm -rf "$stage"' EXIT` 兜底清理。
+   - `git clone --depth 1 --branch <tag> <repo> "$stage/src"` → 失败（离线）fail-closed。
+   - `ACTUAL=$(git -C "$stage/src" rev-parse HEAD)`；`ACTUAL != commit_sha` → **直接 fail-closed（不重试）**：commit 不符 = 钉死 tag 与 pinned commit 真分叉（tag 被移动/投毒），同 tag 重克隆确定性徒劳，fail-fast 才是正确完整性信号。（镜像 CI 第 113–117 行；CI 同样不重试。）
+   - `node verify-codex-tree.mjs codex.pin.json "$stage/src/plugins/codex"` → 非零 fail-closed（在 staging 内校验，不污染缓存）。
+   - **原子发布**：`mv "$stage/src" "$SRC"`——`$SRC` 不存在时 rename 原子成功（本进程胜出）；若已存在（并发进程已发布一份**已校验**树）→ rename 失败 → 丢弃本 stage、复用对方（`[ -f "$COMPANION" ]` 即视为胜出方有效）。
+4. **发布后校验**（每次都跑，含缓存命中）：`node verify-codex-tree.mjs codex.pin.json "$PLUGIN"`；非零 → **fail-closed 并指引** `rm -rf "$CACHE_ROOT/<commit>"` 重试。**绝不**在此 `rm`/替换已发布树（并发只读者可能正持有其文件句柄）——把「已校验树损坏」这一极罕见态降级为人工清缓存，换取彻底的并发安全（codex R1 §medium「never delete the published tree while another invocation may use it」）。
+5. 打印 `$COMPANION`，退出 0。
 
 **fail-closed 不变量**：任一步失败 → 非零退出，**绝不**回落到未校验/未钉死的缓存或任何其它路径。
+**并发安全不变量（codex R1 §medium）**：克隆/校验只在唯一 staging 目录；发布只经一次原子 `rename`；resolver **从不** `rm -rf`/clone 进已发布的 `$SRC`。并发冷启动至多一方胜出发布、其余复用之；并发只读者不会被另一进程的 `rm` 抽掉文件。
 
 ### 3.2 `codex-attest.sh` 集成点
 

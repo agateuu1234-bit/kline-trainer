@@ -2,7 +2,7 @@
 # resolve-pinned-codex.sh
 # 输出一份已校验的、钉死版本的 codex-companion.mjs 绝对路径，解耦自会自动更新的
 # Claude 插件缓存。读 codex.pin.json 的 codex_plugin_cc.{repo,tag,commit_sha,file_tree}，
-# 按 commit 入键 clone 到本地缓存，verify-codex-tree.mjs 全树校验后打印路径。
+# 按 commit 入键 clone 到本地缓存（staged + atomic publish，并发安全），全树校验后打印路径。
 # Fail-closed：任一步失败即非零退出，绝不回落到未校验副本。
 # stdout：仅一行（路径）；所有诊断走 stderr。
 # 测试 seam（默认即生产值）：CODEX_PIN_FILE / CODEX_PINNED_CACHE / CODEX_PINNED_GIT。
@@ -27,25 +27,32 @@ REPO_URL="$(read_pin repo)"     || { err "pin missing codex_plugin_cc.repo"; exi
 CACHE_ROOT="${CODEX_PINNED_CACHE:-$HOME/.cache/kline-trainer-codex}"
 SRC="$CACHE_ROOT/$COMMIT/src"
 PLUGIN="$SRC/plugins/codex"
+COMPANION="$PLUGIN/scripts/codex-companion.mjs"
 
-clone_and_check() {
-    rm -rf "$SRC"
-    mkdir -p "$(dirname "$SRC")"
-    "$GIT_BIN" clone --depth 1 --branch "$TAG" "$REPO_URL" "$SRC" >&2 || { err "git clone failed"; return 1; }
-    local actual
-    actual="$("$GIT_BIN" -C "$SRC" rev-parse HEAD 2>/dev/null)" || { err "rev-parse failed"; return 1; }
-    [ "$actual" = "$COMMIT" ] || { err "commit mismatch: expected $COMMIT got $actual"; return 1; }
-    return 0
+# 冷缓存：全程在唯一 staging 目录 clone+核 commit+校验，再原子 rename 发布到 $SRC。
+# 绝不直接写/删已发布的 $SRC → 并发安全（codex R1 §medium）。
+if [ ! -f "$COMPANION" ]; then
+    mkdir -p "$CACHE_ROOT/$COMMIT"
+    stage="$(mktemp -d "$CACHE_ROOT/.staging.XXXXXX")" || { err "mktemp failed under $CACHE_ROOT; fail-closed"; exit 1; }
+    trap 'rm -rf "$stage"' EXIT
+    "$GIT_BIN" clone --depth 1 --branch "$TAG" "$REPO_URL" "$stage/src" >&2 \
+        || { err "git clone failed (offline?); fail-closed"; exit 1; }
+    actual="$("$GIT_BIN" -C "$stage/src" rev-parse HEAD 2>/dev/null)" \
+        || { err "rev-parse failed; fail-closed"; exit 1; }
+    [ "$actual" = "$COMMIT" ] \
+        || { err "commit mismatch: expected $COMMIT got $actual; fail-closed"; exit 1; }
+    node "$VERIFY" "$PIN" "$stage/src/plugins/codex" >&2 \
+        || { err "staged tree verify failed; fail-closed"; exit 1; }
+    if ! mv "$stage/src" "$SRC" 2>/dev/null; then
+        [ -f "$COMPANION" ] || { err "publish race lost but no valid cache present; fail-closed"; exit 1; }
+    fi
+    rm -rf "$stage"; trap - EXIT
+fi
+
+node "$VERIFY" "$PIN" "$PLUGIN" >&2 || {
+    err "published codex tree failed integrity check at $SRC."
+    err "clear it and retry:  rm -rf \"$CACHE_ROOT/$COMMIT\""
+    exit 1
 }
 
-if [ ! -f "$PLUGIN/scripts/codex-companion.mjs" ]; then
-    clone_and_check || { err "acquire failed (offline / commit mismatch); fail-closed"; exit 1; }
-fi
-
-if ! node "$VERIFY" "$PIN" "$PLUGIN" >&2; then
-    err "tree verify failed; re-cloning once"
-    clone_and_check || { err "re-clone failed; fail-closed"; exit 1; }
-    node "$VERIFY" "$PIN" "$PLUGIN" >&2 || { err "tree verify failed after re-clone; fail-closed"; exit 1; }
-fi
-
-printf '%s\n' "$PLUGIN/scripts/codex-companion.mjs"
+printf '%s\n' "$COMPANION"

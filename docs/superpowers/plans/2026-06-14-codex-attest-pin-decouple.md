@@ -163,28 +163,39 @@ REPO_URL="$(read_pin repo)"     || { err "pin missing codex_plugin_cc.repo"; exi
 CACHE_ROOT="${CODEX_PINNED_CACHE:-$HOME/.cache/kline-trainer-codex}"
 SRC="$CACHE_ROOT/$COMMIT/src"
 PLUGIN="$SRC/plugins/codex"
+COMPANION="$PLUGIN/scripts/codex-companion.mjs"
 
-clone_and_check() {
-    rm -rf "$SRC"
-    mkdir -p "$(dirname "$SRC")"
-    "$GIT_BIN" clone --depth 1 --branch "$TAG" "$REPO_URL" "$SRC" >&2 || { err "git clone failed"; return 1; }
-    local actual
-    actual="$("$GIT_BIN" -C "$SRC" rev-parse HEAD 2>/dev/null)" || { err "rev-parse failed"; return 1; }
-    [ "$actual" = "$COMMIT" ] || { err "commit mismatch: expected $COMMIT got $actual"; return 1; }
-    return 0
+# 冷缓存：全程在唯一 staging 目录 clone+核 commit+校验，再原子 rename 发布到 $SRC。
+# 绝不直接写/删已发布的 $SRC → 并发安全（codex R1 §medium）。
+if [ ! -f "$COMPANION" ]; then
+    mkdir -p "$CACHE_ROOT/$COMMIT"
+    stage="$(mktemp -d "$CACHE_ROOT/.staging.XXXXXX")" || { err "mktemp failed under $CACHE_ROOT; fail-closed"; exit 1; }
+    trap 'rm -rf "$stage"' EXIT
+    "$GIT_BIN" clone --depth 1 --branch "$TAG" "$REPO_URL" "$stage/src" >&2 \
+        || { err "git clone failed (offline?); fail-closed"; exit 1; }
+    actual="$("$GIT_BIN" -C "$stage/src" rev-parse HEAD 2>/dev/null)" \
+        || { err "rev-parse failed; fail-closed"; exit 1; }
+    [ "$actual" = "$COMMIT" ] \
+        || { err "commit mismatch: expected $COMMIT got $actual; fail-closed"; exit 1; }
+    node "$VERIFY" "$PIN" "$stage/src/plugins/codex" >&2 \
+        || { err "staged tree verify failed; fail-closed"; exit 1; }
+    # 原子发布：rename 仅在 $SRC 不存在时成功（本进程胜出）；否则并发进程已发布
+    # 一份已校验树 → 丢弃本 stage、复用对方。
+    if ! mv "$stage/src" "$SRC" 2>/dev/null; then
+        [ -f "$COMPANION" ] || { err "publish race lost but no valid cache present; fail-closed"; exit 1; }
+    fi
+    rm -rf "$stage"; trap - EXIT
+fi
+
+# 发布后校验（每次都跑，防 post-publish 篡改/损坏）。绝不在此 rm/替换已发布树
+# （并发只读者可能正持有其文件句柄）→ 失败即 fail-closed 并指引人工清缓存。
+node "$VERIFY" "$PIN" "$PLUGIN" >&2 || {
+    err "published codex tree failed integrity check at $SRC."
+    err "clear it and retry:  rm -rf \"$CACHE_ROOT/$COMMIT\""
+    exit 1
 }
 
-if [ ! -f "$PLUGIN/scripts/codex-companion.mjs" ]; then
-    clone_and_check || { err "acquire failed (offline / commit mismatch); fail-closed"; exit 1; }
-fi
-
-if ! node "$VERIFY" "$PIN" "$PLUGIN" >&2; then
-    err "tree verify failed; re-cloning once"
-    clone_and_check || { err "re-clone failed; fail-closed"; exit 1; }
-    node "$VERIFY" "$PIN" "$PLUGIN" >&2 || { err "tree verify failed after re-clone; fail-closed"; exit 1; }
-fi
-
-printf '%s\n' "$PLUGIN/scripts/codex-companion.mjs"
+printf '%s\n' "$COMPANION"
 ```
 
 然后 `chmod +x .claude/scripts/resolve-pinned-codex.sh`。
@@ -304,14 +315,14 @@ git commit -m "docs(codex-pin): 非-coder 验收清单"
 | spec 需求 | 实现任务 |
 |---|---|
 | §三 resolve-pinned-codex.sh（clone+verify+cache+fail-closed，三 env seam）| Task 1 Step 3 |
-| §3.1 算法（读 pin / commit-keyed cache / clone+核 commit / 每次 verify / 失败 re-clone 一次 / fail-closed）| Task 1 Step 3（clone_and_check + verify 重试块）|
+| §3.1 算法（读 pin / commit-keyed cache / staged clone+核 commit+verify / 原子 rename 发布 / 发布后每次 verify / fail-closed / 并发安全）| Task 1 Step 3（staging + atomic publish 块）|
 | §3.2 codex-attest 接入 + dry-run 前移（消息保留 `codex-companion`）| Task 2 Step 1 |
 | §四 离线/校验失败 fail-closed → override | Task 1（exit 1/2）+ Task 2 Step 1（exit 3 提示 override）|
 | §五 测试（cache-hit/verify-fail/缺字段/clone-fail/commit-mismatch/集成）| Task 1 Step 1（6 case）+ Task 2 Step 2/3 |
 | §七 不改 codex.pin.json/CI/settings.json | Task 3 验收 #5 守 |
 
 **Placeholder 扫描：** 无 TBD/TODO；每 code step 给完整代码。
-**类型/命名一致性：** env seam `CODEX_PIN_FILE`/`CODEX_PINNED_CACHE`/`CODEX_PINNED_GIT` 在 resolver 定义、测试使用一致；`SRC`/`PLUGIN`/`clone_and_check` 自洽；codex-attest 用 `$SCRIPT_DIR/resolve-pinned-codex.sh` 与 Task 1 创建路径一致。
+**类型/命名一致性：** env seam `CODEX_PIN_FILE`/`CODEX_PINNED_CACHE`/`CODEX_PINNED_GIT` 在 resolver 定义、测试使用一致；`SRC`/`PLUGIN`/`COMPANION`/`stage` 自洽；codex-attest 用 `$SCRIPT_DIR/resolve-pinned-codex.sh` 与 Task 1 创建路径一致。
 
 ---
 
