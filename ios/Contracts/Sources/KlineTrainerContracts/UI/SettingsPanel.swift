@@ -21,6 +21,7 @@ public struct SettingsPanel: View {
     @State private var isDownloading = false
     @State private var recoveryMessage = ""
     @State private var isRecovering = false   // M1：禁用恢复按钮防并发双触发 clobber
+    @State private var toast = ToastState()   // §B.3：下载 per-item 失败原因非阻塞 toast
 
     public init(settings: SettingsStore, api: any APIClient,
                 cache: any CacheManager, acceptance: DownloadAcceptanceRunner) {
@@ -76,6 +77,7 @@ public struct SettingsPanel: View {
             .pickerStyle(.segmented)
         }
         .padding(24)
+        .toastOverlay(toast.message)
         // 佣金编辑
         .alert("佣金费率（万分之一）", isPresented: $showCommissionEditor) {
             TextField("如 1.000", text: $commissionInput)
@@ -147,9 +149,22 @@ public struct SettingsPanel: View {
                 let results = await acceptance.runBatch(lease: lease)
                 let ok = results.filter { if case .confirmed = $0 { return true }; return false }.count
                 downloadStatus = "完成：\(ok)/\(results.count) 成功"
+                // §B.3：per-item 失败原因非阻塞 toast（此前丢弃）；进度/aggregate 仍由 downloadStatus 标签呈现。
+                if let message = DownloadBatchFeedback(results: results).toastMessage {
+                    presentDownloadToast(message)
+                }
             } catch {
                 downloadStatus = "下载失败：\((error as? AppError)?.userMessage ?? "网络错误")"
             }
+        }
+    }
+
+    // latest-wins 自动消失 Toast（驱动 host-tested ToastState；计时留壳层）。
+    private func presentDownloadToast(_ message: String) {
+        let token = toast.present(message)
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            toast.expire(token: token)
         }
     }
 }
