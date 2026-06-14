@@ -78,7 +78,7 @@
 | profitRed | =candleUp | =candleUp(light) | D-3 alias 保持 |
 | lossGreen | =candleDown | =candleDown(light) | D-3 alias 保持 |
 
-**对比测试（codex R1-F1 升级）**：单元测试用**真 WCAG 相对亮度对比**（`wcagContrastRatio`：sRGB→线性 + `0.2126R+0.7152G+0.0722B` + `(L_hi+0.05)/(L_lo+0.05)`），断言 light 7 个图形前景 token vs 近白底 **≥ 3:1**（图形元素阈），替换原 `maxChannelDiff ≥ 0.4` 通道距离代理（该代理放过 DEA 2.74:1）。**marker 字母对比（codex R1-F2）**：交易标记字母为饱和涨/跌圆点上的覆盖文字 = **固定白**（scheme-independent，不用 `currentPalette.text`——light 下 text 近黑会在彩色点上失对比，属回归），断言固定白 vs light/dark 涨跌点 **≥ 3:1**。设备真观感（亮/色温）仍是运行时矩阵项（outline §三.3）。gridLine 刻意 subtle 不计对比。
+**对比测试（codex R1-F1 升级）**：单元测试用**真 WCAG 相对亮度对比**（`wcagContrastRatio`：sRGB→线性 + `0.2126R+0.7152G+0.0722B` + `(L_hi+0.05)/(L_lo+0.05)`），断言 light 7 个图形前景 token vs 近白底 **≥ 3:1**（图形元素阈），替换原 `maxChannelDiff ≥ 0.4` 通道距离代理（该代理放过 DEA 2.74:1）。**marker 字母对比（codex R1-F2 + R3-F1）**：交易标记字母为饱和涨/跌圆点上的 10pt 覆盖**小文字**（须 **≥4.5:1**，非图形 3:1）。不用 `currentPalette.text`（light 下近黑在彩色点失对比，R1 回归）；按 fill 选高对比——**buy 红点→白字（4.71/5.42:1）、sell 绿点→黑字（7.0/4.86:1）**，方向固定两 scheme 通用（红点偏暗白胜、绿点偏亮黑胜）。断言 4 组合（buy/sell × light/dark）均 ≥4.5:1。**不改冻结 F2 涨跌色**（dark 绿点白字仅 3.05:1 不可达 4.5，故 sell 改黑字而非动 F2）。设备真观感（亮/色温）仍是运行时矩阵项（outline §三.3）。gridLine 刻意 subtle 不计对比。
 
 **`background` token 作用域澄清（R1-Med4）**：`KLineView.backgroundColor = .clear`（`KLineView.swift:28`），图表画布**透明、无 chart-area 底色填充**——图表大面积底色来自 SwiftUI 宿主窗口背景（系统色，随 `colorScheme` 经 `.preferredColorScheme` 适配）。`background` token **仅**用于 `KLineView+Crosshair.drawLabelBox` 的十字光标价签/时签框填充。故 light `background=0.98,0.98,0.99` 只改标签框底色，不改图表大底色（那由 SwiftUI 侧适配）。runbook/acceptance 据此措辞，勿把 `background` token 当图表画布底色契约。
 

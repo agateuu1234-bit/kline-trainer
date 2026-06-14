@@ -16,6 +16,7 @@ private func wcagContrastRatio(_ a: AppColorRGBA, _ b: AppColorRGBA) -> Double {
     return (hi + 0.05) / (lo + 0.05)
 }
 private let wcagWhite = AppColorRGBA(white: 1.0)
+private let wcagBlack = AppColorRGBA(white: 0.0)
 
 @Suite("AppPalette light/dark 双集 + scheme 选取（顺位9 夜间）")
 struct AppPaletteTests {
@@ -62,12 +63,12 @@ struct AppPaletteTests {
         #expect(wcagContrastRatio(p.macdDEA, bg) >= 3.0)
     }
 
-    @Test("marker 字母（固定白）vs 涨/跌彩色圆点 对比 ≥ 3:1（light+dark，codex R1-F2）")
+    @Test("marker 字母 vs 涨/跌点 对比 ≥ 4.5:1（小文字阈；buy 白 / sell 黑，light+dark，codex R3-F1）")
     func markerGlyphContrastWCAG() {
-        // 交易标记字母为饱和圆点上的覆盖文字 = 固定白；两 scheme 的涨/跌点底色均须与白足够对比。
+        // 10pt 文字须 ≥4.5:1。buy 红点用白字、sell 绿点用黑字（按 fill 选高对比，方向固定两 scheme 通用）。
         for pal in [AppPalette.light, AppPalette.dark] {
-            #expect(wcagContrastRatio(wcagWhite, pal.candleUp) >= 3.0)
-            #expect(wcagContrastRatio(wcagWhite, pal.candleDown) >= 3.0)
+            #expect(wcagContrastRatio(wcagWhite, pal.candleUp) >= 4.5)   // B：白字 on 红点
+            #expect(wcagContrastRatio(wcagBlack, pal.candleDown) >= 4.5) // S：黑字 on 绿点
         }
     }
 
