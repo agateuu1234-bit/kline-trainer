@@ -9,7 +9,7 @@ import CoreGraphics
 
 extension KLineView {
     /// C5 交易标记：遍历 markers，二分定位候选 K 线（D9 越界跳过），
-    /// dot center 锚到收盘价 Y（D10），buy = AppColor.candleUp + "B"，sell = AppColor.candleDown + "S"。
+    /// dot center 锚到收盘价 Y（D10），buy = currentPalette.candleUp + "B"，sell = currentPalette.candleDown + "S"（顺位9 scheme-aware）。
     func drawMarkers(ctx: CGContext,
                      viewport: ChartViewport,
                      mapper: CoordinateMapper,
@@ -28,15 +28,15 @@ extension KLineView {
         let font = UIFont.boldSystemFont(ofSize: 10)
         let textAttrs: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: AppColor.text,
+            .foregroundColor: currentPalette.text,
         ]
 
         for p in placements {
             let color: UIColor
             let letter: String
             switch p.direction {
-            case .buy:  color = AppColor.candleUp;   letter = "B"
-            case .sell: color = AppColor.candleDown; letter = "S"
+            case .buy:  color = currentPalette.candleUp;   letter = "B"
+            case .sell: color = currentPalette.candleDown; letter = "S"
             }
             color.setFill()
             let dotRect = CGRect(x: p.center.x - radius, y: p.center.y - radius,

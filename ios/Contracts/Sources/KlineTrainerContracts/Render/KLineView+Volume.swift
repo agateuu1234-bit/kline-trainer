@@ -15,7 +15,7 @@ extension KLineView {
         ctx.saveGState()
         defer { ctx.restoreGState() }
         for bar in SubChartLayout.volumeBars(for: candles, mapper: mapper) {
-            let color = bar.isUp ? AppColor.candleUp : AppColor.candleDown
+            let color = bar.isUp ? currentPalette.candleUp : currentPalette.candleDown
             color.setFill()
             ctx.fill(bar.rect)
         }

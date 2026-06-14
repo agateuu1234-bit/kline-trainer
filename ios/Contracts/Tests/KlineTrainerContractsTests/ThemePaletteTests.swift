@@ -86,3 +86,68 @@ struct DisplayModePrefersDarkTests {
         #expect(displayModePrefersDark(.system) == nil)
     }
 }
+
+#if canImport(UIKit)
+import UIKit
+
+@Suite("UIChartPalette（UIKit 桥；scheme 选取）")
+struct UIChartPaletteTests {
+
+    private func channels(_ c: UIColor) -> (Double, Double, Double, Double) {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        c.getRed(&r, green: &g, blue: &b, alpha: &a)
+        return (Double(r), Double(g), Double(b), Double(a))
+    }
+
+    private func expectBridges(_ ui: UIColor, _ rgba: AppColorRGBA) {
+        let (r, g, b, a) = channels(ui)
+        #expect(abs(r - rgba.red) < 0.01)
+        #expect(abs(g - rgba.green) < 0.01)
+        #expect(abs(b - rgba.blue) < 0.01)
+        #expect(abs(a - rgba.alpha) < 0.01)
+    }
+
+    @Test("forScheme(.dark) 13 字段桥 = AppPalette.dark")
+    func darkBridge() {
+        let u = UIChartPalette.forScheme(.dark); let p = AppPalette.dark
+        expectBridges(u.candleUp, p.candleUp);       expectBridges(u.candleDown, p.candleDown)
+        expectBridges(u.ma66, p.ma66);               expectBridges(u.bollLine, p.bollLine)
+        expectBridges(u.macdDIF, p.macdDIF);         expectBridges(u.macdDEA, p.macdDEA)
+        expectBridges(u.macdBarPositive, p.macdBarPositive); expectBridges(u.macdBarNegative, p.macdBarNegative)
+        expectBridges(u.profitRed, p.profitRed);     expectBridges(u.lossGreen, p.lossGreen)
+        expectBridges(u.background, p.background);    expectBridges(u.gridLine, p.gridLine)
+        expectBridges(u.text, p.text)
+    }
+
+    @Test("forScheme(.light) 13 字段桥 = AppPalette.light")
+    func lightBridge() {
+        let u = UIChartPalette.forScheme(.light); let p = AppPalette.light
+        expectBridges(u.candleUp, p.candleUp);       expectBridges(u.candleDown, p.candleDown)
+        expectBridges(u.ma66, p.ma66);               expectBridges(u.bollLine, p.bollLine)
+        expectBridges(u.macdDIF, p.macdDIF);         expectBridges(u.macdDEA, p.macdDEA)
+        expectBridges(u.macdBarPositive, p.macdBarPositive); expectBridges(u.macdBarNegative, p.macdBarNegative)
+        expectBridges(u.profitRed, p.profitRed);     expectBridges(u.lossGreen, p.lossGreen)
+        expectBridges(u.background, p.background);    expectBridges(u.gridLine, p.gridLine)
+        expectBridges(u.text, p.text)
+    }
+
+    @Test("light/dark UIColor 真不同（防退化为单集）")
+    func uiDistinct() {
+        let l = UIChartPalette.light, d = UIChartPalette.dark
+        let (lr, _, _, _) = channels(l.background); let (dr, _, _, _) = channels(d.background)
+        #expect(abs(lr - dr) > 0.5)
+    }
+
+    @MainActor
+    @Test("trait dark → 选 dark 集 / trait light → 选 light 集（currentPalette 选取链）")
+    func traitSelectsPalette() {
+        let tc = ThemeController()
+        let darkSel  = UIChartPalette.forScheme(tc.resolve(trait: UITraitCollection(userInterfaceStyle: .dark)))
+        let lightSel = UIChartPalette.forScheme(tc.resolve(trait: UITraitCollection(userInterfaceStyle: .light)))
+        let (dr, _, _, _) = channels(darkSel.background)
+        let (lr, _, _, _) = channels(lightSel.background)
+        #expect(abs(dr - 0.10) < 0.02)
+        #expect(abs(lr - 0.98) < 0.02)
+    }
+}
+#endif

@@ -166,4 +166,30 @@ public enum AppColor {
     public static let gridLine        = UIColor(rgba: AppColorTokens.gridLine)
     public static let text            = UIColor(rgba: AppColorTokens.text)
 }
+
+/// scheme-aware UIKit 调色板：`AppPalette` 经 `UIColor(rgba:)` 桥。
+/// `.dark`/`.light` 为缓存 static（无逐帧分配）；`KLineView.currentPalette` 据 trait 选取。
+/// `: Sendable`：Swift 6 strict-concurrency 下 `public static let` 全局须 Sendable；
+/// 字段 `UIColor` 在当前 SDK 视为 Sendable（既有 `AppColor` 同款 static UIColor 已编译过）。
+public struct UIChartPalette: Sendable {
+    public let candleUp, candleDown, ma66, bollLine, macdDIF, macdDEA: UIColor
+    public let macdBarPositive, macdBarNegative, profitRed, lossGreen: UIColor
+    public let background, gridLine, text: UIColor
+
+    public init(_ p: AppPalette) {
+        candleUp = UIColor(rgba: p.candleUp);   candleDown = UIColor(rgba: p.candleDown)
+        ma66 = UIColor(rgba: p.ma66);           bollLine = UIColor(rgba: p.bollLine)
+        macdDIF = UIColor(rgba: p.macdDIF);     macdDEA = UIColor(rgba: p.macdDEA)
+        macdBarPositive = UIColor(rgba: p.macdBarPositive); macdBarNegative = UIColor(rgba: p.macdBarNegative)
+        profitRed = UIColor(rgba: p.profitRed); lossGreen = UIColor(rgba: p.lossGreen)
+        background = UIColor(rgba: p.background); gridLine = UIColor(rgba: p.gridLine)
+        text = UIColor(rgba: p.text)
+    }
+
+    public static let dark  = UIChartPalette(.dark)
+    public static let light = UIChartPalette(.light)
+    public static func forScheme(_ scheme: AppColorScheme) -> UIChartPalette {
+        scheme == .dark ? dark : light
+    }
+}
 #endif

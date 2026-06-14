@@ -20,12 +20,26 @@ public final class KLineView: UIView {
         }
     }
 
+    /// 顺位9 夜间：图表 scheme 解析器。`displayMode` 保持 `.system`——override 由 SwiftUI
+    /// `AppRootView.preferredColorScheme` 烤进 trait，本控制器只读生效 trait（RFC §4.3 item 3）。
+    private let themeController = ThemeController()
+
+    /// 当前生效调色板：按 trait 解析 scheme 选 light/dark 集（`forScheme` 返缓存 static，无逐帧分配）。
+    var currentPalette: UIChartPalette {
+        UIChartPalette.forScheme(themeController.resolve(trait: traitCollection))
+    }
+
     /// Wave 3 顺位 4：注册具体 DrawingTool。MVP 单工具内联（6 种工具 + 注册表机制属 Phase 4）。
     private static let drawingTools: [DrawingToolType: any DrawingTool] = [.horizontal: HorizontalLineTool()]
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
+        // 顺位9：trait 的 userInterfaceStyle 变化（系统切暗/亮，或 preferredColorScheme 改 display_mode）→ 重绘。
+        // 用「系统传入实例」重载 (view, previousTrait)，零 self 捕获，无 retain cycle（勿改成捕获 self）。
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: KLineView, _: UITraitCollection) in
+            view.setNeedsDisplay()
+        }
     }
 
     @available(*, unavailable)

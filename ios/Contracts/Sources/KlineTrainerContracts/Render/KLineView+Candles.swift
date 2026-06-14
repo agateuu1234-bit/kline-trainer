@@ -16,7 +16,7 @@ extension KLineView {
         defer { ctx.restoreGState() }
         ctx.setLineWidth(1 / mapper.displayScale)
         for shape in MainChartLayout.candleShapes(for: candles, mapper: mapper) {
-            let color = shape.isUp ? AppColor.candleUp : AppColor.candleDown
+            let color = shape.isUp ? currentPalette.candleUp : currentPalette.candleDown
             color.setFill()
             color.setStroke()
             ctx.move(to: shape.wickTop)
@@ -26,13 +26,13 @@ extension KLineView {
         }
     }
 
-    /// C3 MA66：读预计算 candle.ma66 折线（实线），AppColor.ma66 着色（D1/D4）。
+    /// C3 MA66：读预计算 candle.ma66 折线（实线），currentPalette.ma66 着色（D1/D4；顺位9 scheme-aware）。
     func drawMA66(ctx: CGContext, mapper: CoordinateMapper, candles: ArraySlice<KLineCandle>) {
         let segments = MainChartLayout.ma66Polyline(for: candles, mapper: mapper)
         guard !segments.isEmpty else { return }
         ctx.saveGState()
         defer { ctx.restoreGState() }
-        AppColor.ma66.setStroke()
+        currentPalette.ma66.setStroke()
         ctx.setLineWidth(1 / mapper.displayScale)
         ctx.setLineJoin(.round)
         // 单点段无法成线，跳过（D9：polylineSegments 在 nil 处断段，孤立单点是边角产物）。
@@ -43,14 +43,14 @@ extension KLineView {
         }
     }
 
-    /// C3 BOLL：上/中/下三轨虚线（D3 plan v1.5 L6），无填充（D2），AppColor.bollLine 着色（D4）。
+    /// C3 BOLL：上/中/下三轨虚线（D3 plan v1.5 L6），无填充（D2），currentPalette.bollLine 着色（D4；顺位9 scheme-aware）。
     func drawBOLL(ctx: CGContext, mapper: CoordinateMapper, candles: ArraySlice<KLineCandle>) {
         let boll = MainChartLayout.bollPolylines(for: candles, mapper: mapper)
         let lines = [boll.upper, boll.mid, boll.lower]
         guard lines.contains(where: { !$0.isEmpty }) else { return }
         ctx.saveGState()
         defer { ctx.restoreGState() }
-        AppColor.bollLine.setStroke()
+        currentPalette.bollLine.setStroke()
         ctx.setLineWidth(1 / mapper.displayScale)
         // D3：BOLL 虚线。dash 段长由 host 已测的 MainChartLayout.dashPattern 提供（H1 修订）。
         // saveGState/restoreGState（上方 defer）配对保证 dash 不泄漏给后续 drawVolume/drawMACD——
