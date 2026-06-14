@@ -365,4 +365,20 @@ struct RenderStateBuilderTests {
         #expect(rs.drawings.count == 1)
         #expect(rs.drawings.allSatisfy { $0.panelPosition == 0 })            // 仅上栏；下栏被排除
     }
+
+    @Test("make: drawings 按 panelPosition 过滤 —— 反之 .lower 仅含下栏(1)，上栏(0)被排除")
+    @MainActor
+    func drawingsFilteredByPanelPositionLower() {
+        let (e, _) = TrainingEngineInteractionTests.engine()
+        e.appendDrawing(DrawingObject(toolType: .horizontal,
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 0, price: 10)],
+                                      isExtended: true, panelPosition: 0))    // 上栏
+        e.appendDrawing(DrawingObject(toolType: .horizontal,
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 0, price: 11)],
+                                      isExtended: true, panelPosition: 1))    // 下栏
+        let rs = RenderStateBuilder.make(engine: e, panel: .lower,
+                                         bounds: TrainingEngineInteractionTests.bounds)
+        #expect(rs.drawings.count == 1)
+        #expect(rs.drawings.allSatisfy { $0.panelPosition == 1 })            // 仅下栏；上栏被排除
+    }
 }
