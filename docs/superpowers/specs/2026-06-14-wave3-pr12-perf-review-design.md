@@ -4,7 +4,7 @@
 **Anchor**：Wave 3 顺位 12（D 磨光组）
 **类型**：性能评审 artifact + 帧预算验收判据 + Bitmap Cache 条件引入决议（docs + test-only，**0 生产代码改动**）
 **依赖（Wave 3 上游）**：全渲染锚 3 Pinch（#98）/ 4 Drawing（#103）/ 5 Crosshair（#101）/ 11 Bounce（#96）—— **均已 merged**，依赖满足（outline §canonical DAG L91 `12 性能 ← 全渲染锚(3,4,5,11)`）。
-**下游**：顺位 13 收尾 **阻塞依赖** = 本锚交付的帧预算判据 + C2/C7/C8 既有运行时实测的 device/sim 记录回填（outline residual L214）。
+**下游**：分工（outline residual L214）—— 顺位 **12**（本锚）own「帧预算验收判据」；顺位 **13** 收尾 own「C2/C7/C8 + Wave 3 新交互的 device/sim 实测**数值**已记录」并以此作收尾**阻塞依赖**。本锚交付判据，不交付数值。
 
 ---
 
@@ -83,7 +83,7 @@
    - `drawVolume` / `drawMACD`：~80 rect + diff/dea 折线 + ~80 histogram bar。
    - 合计量级与 plan L31「600-700 次/帧」**同阶**；远低于「瓶颈线 >5000」。**精确 device 单帧 ms 归 runbook（§3.2）**——静态评审不 claim 实测值。
 3. **可识别热点（静态，供 Codex/opus 审）**：
-   - **每帧分配**：`MainChartLayout.candleShapes/ma66Polyline/bollPolylines` 每帧新建数组（`make()` 侧 `slice.map`/`flatMap` 同理）。GC/ARC 压力来源候选；当前规模下据 plan 无压力，记录为「若 device 实测逼近预算，首查点」。
+   - **每帧分配（分两侧记录，勿混）**：**draw() 侧**——`MainChartLayout.candleShapes/ma66Polyline/bollPolylines`（由 `KLineView+Candles/MACD/Volume` 调用）每帧新建数组；**make() 侧**——`RenderStateBuilder.make` 的 `slice.map`（volumeRange）/`flatMap`（macdRange，`:29/31`）每帧新建数组。GC/ARC 压力来源候选；当前规模下据 plan 无压力，记录为「若 device 实测逼近预算，首查点」。
    - **per-candle 颜色态**：`drawCandles` 循环内 `color.setFill()/setStroke()` 每根设色（涨跌分组批绘是潜在优化，**仅当实测 >4ms 才值得**）。
    - **Equatable 短路依赖**：`KLineRenderState` 含 `visibleCandles: ArraySlice` 等大字段，短路靠值相等比较；评审确认短路语义正确（相同 engine 状态不重绘，modules L1471），并记录「短路本身的比较成本」为已接受。
 4. **结论**：Phase 1 纯 draw 策略在 spec 规模假设下达标；**是否真达标的裁决权属 §3.2 device 实测**；本静态评审不放行也不否决帧预算，只交付热点清单 + 量级账 + 条件门。
@@ -93,7 +93,7 @@
 **权威判据（本锚 own）**：单帧 `buildRenderState(make) + draw(_:)` < 4ms @ 120Hz，在具名 device/sim profile 上经 Instruments Time Profiler / Core Animation 实测。
 
 - 在性能评审 doc 内**复述并 own** 该判据（含 pass/fail 定义 + Bitmap Cache 决议门，见 §3.3）。
-- **runbook 步骤**：新增 `docs/runbooks/2026-06-14-wave3-pr12-frame-budget.md`，给出非编码者可执行的 Instruments 测量流程 + 回填栏（峰值单帧 ms / device 型号 / 触发场景：滚动+减速+pinch+绘线+十字光标）。**引用而不修改** c8b runbook item #3（保历史 + 避免与既有 PR 文件冲突）；新 runbook 作为顺位 12 自有、覆盖 Wave 3 新交互（pinch/绘线/HUD）的帧预算条目。
+- **runbook 步骤**：新增 `docs/runbooks/2026-06-14-wave3-pr12-frame-budget.md`，给出非编码者可执行的 Instruments 测量流程 + 回填栏（峰值单帧 ms / device 型号 / 触发场景：滚动+减速+pinch+绘线+十字光标）。**引用而不修改** c8b runbook item #3（保历史 + 避免与既有 PR 文件冲突）；新 runbook 作为顺位 12 自有、覆盖 Wave 3 新交互（pinch/绘线/HUD）的帧预算条目。**权威行号校正**：c8b item #3 的「spec L1467」为陈旧行号（modules L1467 实为代码块行），权威帧预算验收 = **modules v1.4 L1471**；新 runbook 引用 L1471，不沿袭 L1467。
 - **明示**：实测数值是 **user device 职责** + **顺位 13 收尾阻塞依赖**；本锚交付判据 + 流程，不交付数值。
 
 ### 3.3 Bitmap Cache 条件引入决议 + 设计草图（doc，**不编码**）
@@ -117,7 +117,7 @@
 
 ### 3.5 验收清单（Chinese，非编码者可执行；governance backstop #2）
 
-`docs/acceptance/2026-06-14-wave3-pr12-perf-review.md`，action/expected/pass-fail 三列，覆盖：评审 doc 存在性 + 量级账与代码一致 + 帧预算 runbook 可执行性 + Bitmap Cache 决议门表述 + host smoke 通过 + grep 断言无遗留占位。
+`docs/acceptance/2026-06-14-wave3-pr12-perf-review.md`，action/expected/pass-fail 三列，覆盖：评审 doc 存在性 + 量级账与代码一致 + 帧预算 runbook 可执行性 + Bitmap Cache 决议门表述 + host smoke 通过 + grep 断言无遗留占位。**清单自身 grep 断言无 `.claude/workflow-rules.json` forbidden phrases**（验证通过即可 / 看起来正常 / 应该没问题 / should work / looks fine），满足 governance backstop #2。
 
 ---
 
