@@ -130,6 +130,23 @@ export CLAUDE_PLUGIN_ROOT="$(dirname "$(dirname "$CODEX_PATH")")"   # …/plugin
 - 其它 CI 须真绿：本 PR 无 Swift 代码，Catalyst/swift-test 不受影响（应 skip 或 trivially pass）。
 - 撞 ≥3 轮 codex needs-attention / permanent-bias → 按 `feedback_big_pr_codex_noncovergence` + `feedback_codex_round6_self_contradiction` escalate + accept residual + override，不绕 required checks。
 
+### 6.1 codex 对抗 review log（本地 codex-attest 自举 dogfood，OpenAI 配额可用，真 codex 跑）
+
+| 轮 | verdict | finding | 处理 |
+|---|---|---|---|
+| R1 | needs-attention | HIGH resolver 集成断既有 hook 测试；MEDIUM cache `rm`-during-read 竞争 | **全修**：conftest 钉死 resolver 输入；resolver v2 staged + 原子发布 |
+| R2 | needs-attention | HIGH seam 无条件 honor（伪造 ledger）；MEDIUM `mv` 进已存在目录 nest 成 `$SRC/src` | **全修**：seam gating（test-mode 门）；resolver v3 lock 串行；+ 回归测试 case 7/8 |
+| R3 | needs-attention | HIGH PATH-git 信任根 + test-mode env 可控；MEDIUM age-steal lock takeover 删活树 | **修真核**：v4 BASH_SOURCE 信任根 + owner-token 不偷锁 + rm 前 recheck；**剩余不可约部分入 accept-residual** |
+| R4 | needs-attention | HIGH 校验用 bare `node`（非 captured NODE_BIN）；HIGH 本地 codex **CLI** 未 pin（PATH 控制） | **accept-residual + override**（user 2026-06-14 Option A：v4 后仍 drilldown → override） |
+
+### 6.2 接受残留（user TTY override + admin merge，§九 stop-rule）
+
+R3/R4 剩余两类均为**本地「best-effort 第一层」对本地执行环境攻击者的不可约极限**——控制 PATH/env（能换 `node`/`git`/`codex` CLI、能设 `CODEX_ATTEST_TEST_MODE`）的攻击者本就有本地任意代码执行（可直接改 ledger / 跑任意命令），非本地 bash 脚本能彻底防住。**真正不可伪造的强制 = CI `codex-review-verify.yml`**（干净 runner + 从 npm/GitHub 装钉死 `codex_cli`@0.120.0 + 钉死 plugin commit + 自带 git/node + verify-tree + integrity）。本 PR 把第一层从「可变缓存 + 无条件 honor 覆盖 + PATH-git 信任根 + 恒跳过的 sha 检查」**实质硬化**到「BASH_SOURCE 信任根 + test-mode seam 门 + 钉死 clone + 全树 verify + owner-token 原子发布 + fail-closed」，**并已修掉 R1/R2 全部 + R3 真核**。
+
+**两条 accept-residual（明列，CI 已覆盖）**：
+- **R4-a 校验用 bare `node`**：可进一步把 codex-attest 的 captured 绝对 `NODE_BIN` 传入 resolver——边际收益（仍挡不住 PATH-mutation-mid-run 的本地攻击者），列**下游 follow-up**，非本 PR 阻塞。
+- **R4-b 本地 codex CLI 未 pin**：本地 `codex` CLI 一直（本 PR 前即如此）来自用户 codex 安装、非 pin——pin 本地 npm `@openai/codex` runtime 是**独立的、更大的 scope**（本 PR 只解耦**插件**解析自自动更新缓存），且 **CI 已 pin CLI**。列**独立 follow-up**。
+
 ---
 
 ## 七、明确 OUT of scope
@@ -141,6 +158,8 @@ export CLAUDE_PLUGIN_ROOT="$(dirname "$(dirname "$CODEX_PATH")")"   # …/plugin
 - 不 vendor 插件文件进仓库。
 - 不重构 `codex-attest.sh` 的其它部分（node 白名单 / verdict 解析 / ledger 写入原样）。
 - 不改业务代码 / Swift / schema。
+- **不 pin 本地 codex CLI binary（codex R4-b，独立 follow-up）**：本 PR 只解耦**插件**解析；pin 本地 npm `@openai/codex` runtime 是独立更大 scope，CI 已 pin。
+- **不把 captured `NODE_BIN` 传入 resolver（codex R4-a，下游 follow-up）**：边际硬化，CI 不可伪造层已覆盖 PATH-attacker 类。
 
 ---
 

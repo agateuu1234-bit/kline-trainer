@@ -14,4 +14,6 @@
 
 **残留（cosmetic）：** `.claude/settings.json:41` 写死 1.0.3 的 allow 仍在（harmless dead path，第 147 行通配已覆盖；改它会触发无关 hardening_6_gate，故不在本 PR）。
 
+**codex 对抗 review（本地 dogfood，真 codex 跑 4 轮）：** R1/R2 全修 + R3 真核全修（v4 BASH_SOURCE 信任根 + owner-token 不偷锁 + rm 前 recheck）；R3/R4 剩余（PATH/env 本地攻击者不可约 + 本地 codex CLI 未 pin）= **accept-residual + user TTY override**（CI `codex-review-verify.yml` 干净 runner 钉死 CLI+plugin+git/node 是不可伪造第二层兜底；详见 design §6.1/§6.2）。两条 follow-up：R4-a 传 NODE_BIN 入 resolver / R4-b pin 本地 codex CLI（独立更大 scope）。
+
 **provenance 说明：** `.claude/scripts/**` 为 deny-protected 强制脚本（Claude 不能 Edit/Write）；`resolve-pinned-codex.sh`（新文件）由 subagent Bash 落地、`codex-attest.sh`（既有强制脚本）改动由 user TTY 落写。两者均经 plan-stage 评审 + 本分支 codex/opus 对抗 review + user merge 把关（human-in-loop）。
