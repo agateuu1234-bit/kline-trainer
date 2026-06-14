@@ -34,6 +34,7 @@ public struct TrainingView: View {
     @State private var toastToken = 0
     @State private var confirmingEnd = false
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
+    @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
 
     public init(lifecycle: TrainingSessionLifecycle,
                 onExit: @escaping () -> Void,
@@ -82,7 +83,7 @@ public struct TrainingView: View {
             case .active:
                 engine.onSceneActivated()                       // modules §U2 既有动画链（不替换）
             case .inactive, .background:
-                Task { await lifecycle.flushForBackground() }   // §4.6：后台立即 flush
+                Task { await lifecycle.flushForBackground() }   // §4.6 item4：失活/后台立即 flush（OS 可能随后杀进程）
             @unknown default:
                 break
             }
@@ -103,17 +104,32 @@ public struct TrainingView: View {
             Button("重试") { runFinalize() }
             // 放弃 = durable discard（fence→清 pending→关 reader→回首页，§4.7e）
             Button("放弃", role: .cancel) {
-                Task { try? await lifecycle.discard(); onExit() }
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    try? await lifecycle.discard(); onExit()
+                }
             }
         } message: {
             Text("本局结果尚未写入历史记录。可重试入账，或放弃结算退出（进度保留至最近存档）。")
         }
         .alert("保存进度失败", isPresented: $backFailed) {
             Button("重试") {
-                Task { do { try await lifecycle.back(); onExit() } catch { backFailed = true } }
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    do { try await lifecycle.back(); onExit() } catch { backFailed = true }
+                }
             }
             Button("放弃", role: .destructive) {
-                Task { try? await lifecycle.discard(); onExit() }   // durable 弃局退出
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    try? await lifecycle.discard(); onExit()   // durable 弃局退出
+                }
             }
         } message: {
             Text("当前进度未能写入存档。可重试保存，或放弃本局退出。")
@@ -144,7 +160,10 @@ public struct TrainingView: View {
             // 返回保存失败保留（§4.7a/§4.6 D5）：back() 抛（saveProgress 失败）→ session 留存（reader 未关）
             // → backFailed alert 让用户选重试或放弃；不用 try? 吞错误，防进度丢失。
             Button("返回") {
+                guard !exitInFlight else { return }
+                exitInFlight = true
                 Task {
+                    defer { exitInFlight = false }
                     do { try await lifecycle.back(); onExit() }
                     catch { backFailed = true }                 // §4.7a/§4.6：保存失败留局内，不丢数据/不泄漏 reader
                 }
