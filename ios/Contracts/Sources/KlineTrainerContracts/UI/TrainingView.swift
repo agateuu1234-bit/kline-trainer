@@ -90,6 +90,11 @@ public struct TrainingView: View {
         .onChange(of: engine.drawings.count) { _, _ in
             lifecycle.autosave(immediate: true)                 // §4.6：画线即存（commit/delete 不推 tick，D9）
         }
+        .onChange(of: lifecycle.coordinator.autosaveBannerError) { _, newError in
+            // §B.2：autosave 失败非阻塞 surface（不 teardown；与 finalize 失败 blocking alert 区分）。
+            // shouldShowToast 过滤 .internalError 等不适合 toast 的错误。
+            if let e = newError, e.shouldShowToast { presentToast(e.userMessage) }
+        }
         .sheet(item: $pickerRequest) { req in
             PositionPickerView(
                 enabledTiers: Set(PositionTier.allCases),                       // D9
