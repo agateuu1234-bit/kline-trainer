@@ -10,6 +10,12 @@ import Foundation
 import Observation
 #endif
 
+/// RFC §4.6：周期 autosave cadence floor（命名契约常量，modules:1747）。
+/// N=1 = 每 state-dirtying 动作即存（coalesced）；不变量：未落盘进度丢失 ≤ N tick 等价脏窗。
+public let AUTOSAVE_TICK_INTERVAL = 1
+/// cadence 上限（实测写延迟超帧预算时可上调 N ≤ 此值；本 PR 不上调）。
+public let AUTOSAVE_MAX_INTERVAL = 5
+
 @MainActor
 @Observable
 public final class TrainingSessionCoordinator {
@@ -39,6 +45,70 @@ public final class TrainingSessionCoordinator {
     /// 可注入 key 生成器（mirror `now` 范式，D5）。默认 UUID；@testable 测试可覆盖。
     @ObservationIgnored var makeSessionKey: () -> String = { UUID().uuidString }
 
+    // MARK: - Wave 3 顺位 10b：周期 autosave 状态机（RFC §4.6）+ 终态 fence（§4.7d）
+
+    @ObservationIgnored private var autosaveTask: Task<Void, Never>?     // 在飞写句柄（fence drain）
+    @ObservationIgnored private var autosaveDirty = false                // 写中又脏 → 写完再存一次
+    @ObservationIgnored private var terminating = false                  // §4.7d 栅栏
+    @ObservationIgnored private var ticksSinceAutosave = 0               // N-tick cadence 计数
+    /// 可注入 cadence（@testable）。clamp 到 [1, AUTOSAVE_MAX_INTERVAL]：防 0/负间隔（每 tick 永真）+ 兑现 N≤MAX 不变量。
+    @ObservationIgnored var autosaveTickInterval = AUTOSAVE_TICK_INTERVAL {
+        didSet { autosaveTickInterval = min(max(autosaveTickInterval, 1), AUTOSAVE_MAX_INTERVAL) }
+    }
+    /// §4.6 失败可见：最近一次 autosave 失败（不 teardown）。本 PR 在 coordinator 层闭合「记录 + 非阻塞 + 不拆毁」
+    /// 机制；**user-facing 非阻塞指示（banner/toast）归顺位 10c 边界错误统一 Toast 层**（磁盘满可见性同类），
+    /// 届时连同 §4.6 item5 一并 surface（@testable 现已读以证机制在位）。
+    @ObservationIgnored public private(set) var lastAutosaveError: AppError?
+
+    /// 请求 autosave（脏动作后调）。immediate=交易/画线/background flush（绕 N 节流）；
+    /// 非 immediate=tick 推进（按 autosaveTickInterval 节流）。terminating/非 Normal → no-op（§4.7d/§4.6）。
+    public func requestAutosave(engine: TrainingEngine, immediate: Bool) {
+        guard !terminating, engine.flow.mode == .normal else { return }
+        if !immediate {
+            ticksSinceAutosave += 1
+            guard ticksSinceAutosave >= autosaveTickInterval else { return }
+        }
+        ticksSinceAutosave = 0
+        autosaveDirty = true
+        guard autosaveTask == nil else { return }            // 已排程 → 合并
+        // 不变量（coalescing/fence/flush 正确性所依）：`saveProgress`/`savePending` 是 @MainActor 上
+        // 同步 throws（GRDB dbQueue.write 阻塞，非真 async）—— 故下方 while 循环 + `autosaveTask = nil`
+        // 在单次 @MainActor 续跑内原子完成，无真挂起点供 endSession/finalize 交错抢写。改 repo 为真 async
+        // 须同步重审本机制（协议签名为 sync throws，编译期锁此不变量）。
+        autosaveTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while self.autosaveDirty && !self.terminating {
+                self.autosaveDirty = false
+                do {
+                    try await self.saveProgress(engine: engine)
+                    self.lastAutosaveError = nil
+                } catch {
+                    self.lastAutosaveError = (error as? AppError)
+                        ?? .internalError(module: "E6b", detail: "autosave: \(error)")
+                }
+            }
+            self.autosaveTask = nil
+        }
+    }
+
+    /// background/inactive 立即 flush（绕 N）+ 等写完成（OS 可能随后杀进程）。§4.6 item 4。
+    public func flushAutosave(engine: TrainingEngine) async {
+        requestAutosave(engine: engine, immediate: true)
+        await autosaveTask?.value
+    }
+
+    #if DEBUG
+    /// 测试钩子：等在飞 autosave 写完成（生产无 await 点，测试需确定性排空）。
+    func drainAutosaveForTesting() async { await autosaveTask?.value }
+    #endif
+
+    /// §4.7d 终态栅栏：置 terminating（拒新 autosave）+ 排空在飞写（排空时见 terminating 即退出不落盘）。
+    /// 单线程 @MainActor 保证 finalize/discard 与 autosave Task 不并发（await 时 Task 运行并见 terminating）。
+    private func fenceAndDrainAutosaves() async {
+        terminating = true
+        await autosaveTask?.value
+    }
+
     public init(dbFactory: TrainingSetDBFactory,
                 recordRepo: RecordRepository,
                 pendingRepo: PendingTrainingRepository,
@@ -63,11 +133,24 @@ public final class TrainingSessionCoordinator {
     /// `activeReader` 被覆盖泄漏（E6a 不替前一 session 收尾——E6b/caller 契约）。
     public func startNewNormalSession() async throws -> TrainingEngine {
         let fees = try settings.snapshotFeesIfReady()        // D2 fail-closed：loadError → throw（reader 未开）
-        guard let file = cache.pickRandom() else {
-            throw AppError.trainingSet(.fileNotFound)         // 无可用缓存训练组
+        let start = try startingCapital()                    // app.sqlite source；reader 未开，throw 无副作用
+        // §4.7f provenance：选训练组 → 打开；损坏（source=训练组只读 DB）→ 删 + 重试另一文件。
+        var attempts = cache.listAvailable().count + 1       // 有界（即便 delete 静默失败仍终止）
+        var opened: (reader: any TrainingSetReader, file: TrainingSetFile)?
+        while attempts > 0, opened == nil {
+            attempts -= 1
+            guard let file = cache.pickRandom() else {
+                throw AppError.trainingSet(.fileNotFound)    // 缓存耗尽 → caller 重下
+            }
+            do {
+                opened = (try openReader(for: file), file)
+            } catch where isCorruptTrainingSet(error) {
+                try? cache.delete(file)   // best-effort 删损坏训练组（可弃）：.fileNotFound=已删 / .diskFull=留待下次；均不阻重试
+            }
         }
-        let start = try startingCapital()                    // D4 累计模型（reader 未开，throw 无副作用）
-        let reader = try openReader(for: file)
+        guard let (reader, file) = opened else {
+            throw AppError.trainingSet(.fileNotFound)
+        }
         do {
             let allCandles = try reader.loadAllCandles()
             let mt = try maxTick(from: allCandles)            // D3
@@ -80,6 +163,7 @@ public final class TrainingSessionCoordinator {
             activeFile = file
             activeStartedAt = now()                 // D4：fresh Normal 局起始时间
             activeSessionKey = makeSessionKey()     // RFC §4.7c：fresh Normal 生成新 session key
+            resetAutosaveState()                     // 新 session：清栅栏/脏/cadence/错误（D3）
             return engine
         } catch {
             reader.close()                                   // D9：失败关闭已开 reader，不留半态
@@ -92,8 +176,16 @@ public final class TrainingSessionCoordinator {
     /// 无 pending 返回 nil（**仅**此情形返 nil；其它失败均 throw 可恢复 AppError）。
     public func resumePending() async throws -> TrainingEngine? {
         guard let pending = try pendingRepo.loadPending() else { return nil }
+        // Note: loadPending() is app.sqlite source — its .dbCorrupted propagates ABOVE this catch (fail-closed).
         let file = try cachedFile(filename: pending.trainingSetFilename)
-        let reader = try openReader(for: file)
+        let reader: any TrainingSetReader
+        do {
+            reader = try openReader(for: file)
+        } catch where isCorruptTrainingSet(error) {
+            try? cache.delete(file)                          // 同上（best-effort 可弃）：训练组损坏，孤儿 pending 不可恢复
+            try pendingRepo.clearPending()                   // durable 清（app.sqlite 写，非删）
+            return nil                                       // 首页降级到新局
+        }
         do {
             let allCandles = try reader.loadAllCandles()
             let mt = try maxTick(from: allCandles)
@@ -116,6 +208,7 @@ public final class TrainingSessionCoordinator {
             activeFile = file
             activeStartedAt = pending.startedAt      // D4：resume 保留原局起始时间
             activeSessionKey = pending.sessionKey    // RFC §4.7c：resume 恢复已存 session key
+            resetAutosaveState()                     // 新 session：清栅栏/脏/cadence/错误（D3）
             return engine
         } catch {
             reader.close()
@@ -131,8 +224,15 @@ public final class TrainingSessionCoordinator {
     /// **前置（D10）**：caller 须先 `endSession()`（同 startNewNormalSession）。
     public func review(recordId: Int64) async throws -> TrainingEngine {
         let (record, ops, drawings) = try recordRepo.loadRecordBundle(id: recordId)
+        // Note: loadRecordBundle() is app.sqlite source — its .dbCorrupted propagates ABOVE this catch (fail-closed).
         let file = try cachedFile(filename: record.trainingSetFilename)
-        let reader = try openReader(for: file)
+        let reader: any TrainingSetReader
+        do {
+            reader = try openReader(for: file)
+        } catch where isCorruptTrainingSet(error) {
+            try? cache.delete(file)                          // 同上（best-effort 可弃）：训练组损坏；record 仍在 app.sqlite（不删）
+            throw AppError.persistence(.dbCorrupted)         // 无法替代，surface
+        }
         do {
             // maxTick 由 .review(record) 内部据 record.finalTick 派生；make 亦校验 .m3 非空 +
             // m3.last.endGlobalIndex >= finalTick，故此处不重复 maxTick(from:)（D3 / LOW#8）。
@@ -161,8 +261,15 @@ public final class TrainingSessionCoordinator {
     /// feeSnapshot，不还原标记/绘线、不入账，D6）。起始本金 = record 原局起始本金。
     public func replay(recordId: Int64) async throws -> TrainingEngine {
         let (record, _, _) = try recordRepo.loadRecordBundle(id: recordId)
+        // Note: loadRecordBundle() is app.sqlite source — its .dbCorrupted propagates ABOVE this catch (fail-closed).
         let file = try cachedFile(filename: record.trainingSetFilename)
-        let reader = try openReader(for: file)
+        let reader: any TrainingSetReader
+        do {
+            reader = try openReader(for: file)
+        } catch where isCorruptTrainingSet(error) {
+            try? cache.delete(file)                          // 同上（best-effort 可弃）：训练组损坏；record 仍在 app.sqlite（不删）
+            throw AppError.persistence(.dbCorrupted)         // 无法替代，surface
+        }
         do {
             let allCandles = try reader.loadAllCandles()
             let mt = try maxTick(from: allCandles)
@@ -216,7 +323,8 @@ public final class TrainingSessionCoordinator {
     /// 缺活跃上下文 → .internalError（D9）。
     /// 通过 SessionFinalizationPort 单事务执行（§4.7b）；同 sessionKey 重试幂等（§4.7c）。
     public func finalize(engine: TrainingEngine) async throws -> Int64? {
-        guard engine.flow.shouldSaveRecord() else { return nil }   // D2：Review/Replay 不入账
+        guard engine.flow.shouldSaveRecord() else { return nil }   // D2：Review/Replay 不入账（fence 前 return）
+        await fenceAndDrainAutosaves()           // §4.7d：单事务入账前排空排队 autosave，防终态脏写复活 pending
         // D4 加固（final-review L2）：engine 必须是当前活跃 session 的引擎，否则会把活跃 session 的
         // 文件/股票元数据记到外来 engine 的交易数据上 → 写错历史记录。activeEngine 为 nil 时亦在此拒绝。
         guard activeEngine === engine, let file = activeFile, let reader = activeReader,
@@ -291,12 +399,31 @@ public final class TrainingSessionCoordinator {
 
     /// session 结束清理（spec L1666/L1684，不 throws）：关闭 reader 并清空全部活跃上下文（D10）。
     public func endSession() async {
+        terminating = true          // fence：阻止 teardown 后排队 autosave 复活 pending（§4.7d 同型）
+        autosaveTask = nil
+        autosaveDirty = false
+        lastAutosaveError = nil
+        ticksSinceAutosave = 0
         activeReader?.close()
         activeReader = nil
         activeEngine = nil
         activeFile = nil
         activeStartedAt = nil
         activeSessionKey = nil                       // RFC §4.7c：清空 session key
+    }
+
+    /// §4.7e discard 持久终态：fence autosaves → 清 `pending_training` → endSession（durable 不复活）。
+    /// 清 pending 失败 → 保留 active session（不 teardown）供 retry，透传 AppError。
+    /// review/replay：clearPending 删 0 行无害（D4 M3），失败语义一致。
+    public func discardSession() async throws {
+        await fenceAndDrainAutosaves()
+        do {
+            try pendingRepo.clearPending()
+        } catch {
+            throw (error as? AppError)
+                ?? .internalError(module: "E6b", detail: "discard clearPending: \(error)")
+        }
+        await endSession()
     }
 
     // MARK: - 私有构造 helper（E6a）
@@ -373,6 +500,25 @@ public final class TrainingSessionCoordinator {
     /// 从交易流水重建 UI 标记（TradeMarker 非 Codable，不持久 → resume/review 由 ops 重建）。
     private func markers(from ops: [TradeOperation]) -> [TradeMarker] {
         ops.map { TradeMarker(globalTick: $0.globalTick, price: $0.price, direction: $0.direction) }
+    }
+
+    /// session 启动重置 autosave 栅栏/状态（D3）。
+    private func resetAutosaveState() {
+        terminating = false
+        autosaveDirty = false
+        ticksSinceAutosave = 0
+        lastAutosaveError = nil
+    }
+
+    /// 10b-D7（§4.7f）：训练组文件可弃损坏判据（dbFactory.openAndVerify 对坏文件抛的可恢复错误）。
+    /// 仅在 openReader 调用栈内用 → 保证 app.sqlite source 永不命中（安全红线，§4.7f）。
+    private func isCorruptTrainingSet(_ error: Error) -> Bool {
+        switch error as? AppError {
+        case .persistence(.dbCorrupted): return true
+        case .trainingSet(.emptyData), .trainingSet(.versionMismatch),
+             .trainingSet(.crcFailed), .trainingSet(.unzipFailed): return true
+        default: return false                      // fileNotFound/diskFull/internalError 不删
+        }
     }
 }
 

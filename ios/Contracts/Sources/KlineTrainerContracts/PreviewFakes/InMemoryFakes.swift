@@ -16,9 +16,15 @@ import Foundation
 public struct PreviewTrainingSetDBFactory: TrainingSetDBFactory {
     private let meta: TrainingSetMeta
     private let candles: [Period: [KLineCandle]]
+    /// Wave 3 顺位 10b Task 0 knob：命中 file.lastPathComponent → 抛 .persistence(.dbCorrupted)。
+    public let corruptFilenames: Set<String>
+    /// Wave 3 顺位 10b Task 0 knob：任意 file 抛此错误（测非损坏不删）；优先于 corruptFilenames。
+    public let openErrorAll: AppError?
 
     public init(meta: TrainingSetMeta? = nil,
-                candles: [Period: [KLineCandle]] = [:]) {
+                candles: [Period: [KLineCandle]] = [:],
+                corruptFilenames: Set<String> = [],
+                openErrorAll: AppError? = nil) {
         // R4 修订（codex round-4 high-1）：占位 meta 必须满足 production
         // DefaultTrainingSetDBFactory line 65-68 的 sanity check（startDatetime > 0
         // + endDatetime >= startDatetime + 非空 stock fields），否则 fake/production
@@ -29,9 +35,13 @@ public struct PreviewTrainingSetDBFactory: TrainingSetDBFactory {
             startDatetime: 1,
             endDatetime: 1)
         self.candles = candles
+        self.corruptFilenames = corruptFilenames
+        self.openErrorAll = openErrorAll
     }
 
     public func openAndVerify(file: URL, expectedSchemaVersion: Int) throws -> TrainingSetReader {
+        if let e = openErrorAll { throw e }
+        if corruptFilenames.contains(file.lastPathComponent) { throw AppError.persistence(.dbCorrupted) }
         // R4 修订（codex round-4 high-1）：每次 openAndVerify 校验注入的 meta
         // mirror DefaultTrainingSetDBFactory line 65-68
         try Self.validateMeta(meta)
@@ -123,20 +133,46 @@ public final class InMemoryPendingTrainingRepository: PendingTrainingRepository,
     private let lock = NSLock()
     private var pending: PendingTraining?
 
+    /// 注入下一次 savePending/clearPending/loadPending 抛错（消费后自动清除）；mirror 生产：抛前零状态变更。lock 保护读写。
+    private var _failNextSavePending: AppError?
+    public var failNextSavePending: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextSavePending }
+        set { lock.lock(); defer { lock.unlock() }; _failNextSavePending = newValue }
+    }
+    private var _failNextClearPending: AppError?
+    public var failNextClearPending: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextClearPending }
+        set { lock.lock(); defer { lock.unlock() }; _failNextClearPending = newValue }
+    }
+    private var _failNextLoadPending: AppError?
+    public var failNextLoadPending: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextLoadPending }
+        set { lock.lock(); defer { lock.unlock() }; _failNextLoadPending = newValue }
+    }
+    /// savePending 成功落盘次数（coalescing/cadence 断言用）。lock 保护读。
+    private var _saveCount = 0
+    public var saveCount: Int {
+        lock.lock(); defer { lock.unlock() }; return _saveCount
+    }
+
     public init() {}
 
     public func savePending(_ p: PendingTraining) throws {
         lock.lock(); defer { lock.unlock() }
+        if let e = _failNextSavePending { _failNextSavePending = nil; throw e }
         pending = p
+        _saveCount += 1
     }
 
     public func loadPending() throws -> PendingTraining? {
         lock.lock(); defer { lock.unlock() }
+        if let e = _failNextLoadPending { _failNextLoadPending = nil; throw e }
         return pending
     }
 
     public func clearPending() throws {
         lock.lock(); defer { lock.unlock() }
+        if let e = _failNextClearPending { _failNextClearPending = nil; throw e }
         pending = nil
     }
 }
@@ -381,6 +417,18 @@ public final class InMemoryCacheManager: CacheManager, @unchecked Sendable {
     private let lock = NSLock()
     private var store: [Int: TrainingSetFile] = [:]
 
+    /// Wave 3 顺位 10b Task 0 knob：测试可注入确定性选取（默认 nil = randomElement）。根治 provenance 测试 flake。lock 保护读写。
+    private var _pickOverride: (([TrainingSetFile]) -> TrainingSetFile?)?
+    public var pickOverride: (([TrainingSetFile]) -> TrainingSetFile?)? {
+        get { lock.lock(); defer { lock.unlock() }; return _pickOverride }
+        set { lock.lock(); defer { lock.unlock() }; _pickOverride = newValue }
+    }
+    /// Wave 3 顺位 10b Task 0 spy：delete 调用文件名记录（provenance 删重试断言）。lock 保护读。
+    private var _deletedFilenames: [String] = []
+    public var deletedFilenames: [String] {
+        lock.lock(); defer { lock.unlock() }; return _deletedFilenames
+    }
+
     public init() {}
 
     public func listAvailable() -> [TrainingSetFile] {
@@ -390,7 +438,9 @@ public final class InMemoryCacheManager: CacheManager, @unchecked Sendable {
 
     public func pickRandom() -> TrainingSetFile? {
         lock.lock(); defer { lock.unlock() }
-        return sortedLocked().randomElement()
+        let fs = sortedLocked()
+        if let o = _pickOverride { return o(fs) }
+        return fs.randomElement()
     }
 
     public func store(downloadedZip: URL, meta: TrainingSetMetaItem) throws -> TrainingSetFile {
@@ -431,6 +481,7 @@ public final class InMemoryCacheManager: CacheManager, @unchecked Sendable {
         guard self.store.removeValue(forKey: file.id) != nil else {
             throw AppError.trainingSet(.fileNotFound)
         }
+        _deletedFilenames.append(file.filename)
     }
 
     // MARK: - Internal helpers
