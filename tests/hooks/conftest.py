@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
-def temp_git_repo(tmp_path: Path) -> Path:
+def temp_git_repo(tmp_path: Path, monkeypatch) -> Path:
     """Create a temp git repo with .claude/state/ scaffolding."""
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@local"], cwd=tmp_path, check=True)
@@ -19,7 +19,11 @@ def temp_git_repo(tmp_path: Path) -> Path:
     state_dir.mkdir(parents=True)
     (state_dir / ".gitkeep").touch()
     # Copy scripts/hooks under test into the temp repo so paths match.
+    # resolve-pinned-codex.sh + verify-codex-tree.mjs are required because
+    # codex-attest.sh now resolves the codex-companion via the pinned resolver.
     for rel in [".claude/scripts/ledger-lib.sh", ".claude/scripts/codex-attest.sh",
+                ".claude/scripts/resolve-pinned-codex.sh",
+                ".claude/scripts/verify-codex-tree.mjs",
                 ".claude/scripts/attest-override.sh",
                 ".claude/hooks/guard-attest-ledger.sh",
                 ".claude/hooks/pre-commit-diff-scan.sh",
@@ -32,6 +36,22 @@ def temp_git_repo(tmp_path: Path) -> Path:
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(src.read_bytes())
             dst.chmod(0o755)
+    # Deterministic, offline pinned-codex setup so resolve-pinned-codex.sh succeeds
+    # without network in hook tests. The PATH-shadowed `node` stub each test installs
+    # intercepts BOTH the resolver's verify-codex-tree call and the real codex call,
+    # so the file_tree sha256 here is never actually checked — the resolver only needs
+    # the pin fields (commit/tag/repo) + a cache-hit (pre-seeded companion) to skip any
+    # git clone. The real verify path is covered by tests/scripts/test-resolve-pinned-codex.sh.
+    test_commit = "0" * 40
+    pin = {"codex_plugin_cc": {
+        "repo": "file:///unused-in-tests", "tag": "vtest", "commit_sha": test_commit,
+        "file_tree": {"scripts/codex-companion.mjs": "sha256:stub-intercepts-verify"}}}
+    (tmp_path / "codex.pin.json").write_text(json.dumps(pin))
+    cache = tmp_path / ".codex-cache"
+    companion = cache / test_commit / "src" / "plugins" / "codex" / "scripts" / "codex-companion.mjs"
+    companion.parent.mkdir(parents=True)
+    companion.write_text("// stub companion (test); real codex call intercepted by node stub on PATH\n")
+    monkeypatch.setenv("CODEX_PINNED_CACHE", str(cache))
     return tmp_path
 
 
