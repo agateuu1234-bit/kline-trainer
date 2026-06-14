@@ -20,9 +20,11 @@ struct CacheTouchOnUseTests {
         engine.holdOrObserve(panel: .upper)
         try await coord.saveProgress(engine: engine)
         await coord.endSession()
+        let before = cache.touchedFilenames.count            // 与 setup 的 startNewNormal touch 区分（非 vacuous）
         let resumed = try await coord.resumePending()
         #expect(resumed != nil)
-        #expect(cache.touchedFilenames.contains("a.sqlite"))
+        #expect(cache.touchedFilenames.count == before + 1, "resumePending 自身须 touch（不靠 setup）")
+        #expect(cache.touchedFilenames.last == "a.sqlite")
         _ = pending
     }
 
@@ -33,8 +35,10 @@ struct CacheTouchOnUseTests {
         while engine.tick.globalTickIndex < engine.tick.maxTick { engine.holdOrObserve(panel: .upper) }
         let id = try await coord.finalize(engine: engine)
         await coord.endSession()
+        let before = cache.touchedFilenames.count            // 与 setup 的 startNewNormal touch 区分（非 vacuous）
         _ = try await coord.review(recordId: id!)
-        #expect(cache.touchedFilenames.contains("a.sqlite"))
+        #expect(cache.touchedFilenames.count == before + 1, "review 自身须 touch（不靠 setup）")
+        #expect(cache.touchedFilenames.last == "a.sqlite")
     }
 
     @Test("replay 成功打开 → touch 该训练组")
@@ -44,8 +48,10 @@ struct CacheTouchOnUseTests {
         while engine.tick.globalTickIndex < engine.tick.maxTick { engine.holdOrObserve(panel: .upper) }
         let id = try await coord.finalize(engine: engine)
         await coord.endSession()
+        let before = cache.touchedFilenames.count            // 与 setup 的 startNewNormal touch 区分（非 vacuous）
         _ = try await coord.replay(recordId: id!)
-        #expect(cache.touchedFilenames.contains("a.sqlite"))
+        #expect(cache.touchedFilenames.count == before + 1, "replay 自身须 touch（不靠 setup）")
+        #expect(cache.touchedFilenames.last == "a.sqlite")
     }
 
     @Test("损坏训练组被删除而非 touch（startNewNormal 跳损坏选下一个）")
