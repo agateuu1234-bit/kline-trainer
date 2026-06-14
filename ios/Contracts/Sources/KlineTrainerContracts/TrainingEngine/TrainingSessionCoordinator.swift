@@ -371,6 +371,20 @@ public final class TrainingSessionCoordinator {
         activeSessionKey = nil                       // RFC §4.7c：清空 session key
     }
 
+    /// §4.7e discard 持久终态：fence autosaves → 清 `pending_training` → endSession（durable 不复活）。
+    /// 清 pending 失败 → 保留 active session（不 teardown）供 retry，透传 AppError。
+    /// review/replay：clearPending 删 0 行无害（D4 M3），失败语义一致。
+    public func discardSession() async throws {
+        await fenceAndDrainAutosaves()
+        do {
+            try pendingRepo.clearPending()
+        } catch {
+            throw (error as? AppError)
+                ?? .internalError(module: "E6b", detail: "discard clearPending: \(error)")
+        }
+        await endSession()
+    }
+
     // MARK: - 私有构造 helper（E6a）
 
     /// D4：新局起始资金 = 累计模型。有记录 → 末条 total_capital+profit；无记录 → settings 配置本金。

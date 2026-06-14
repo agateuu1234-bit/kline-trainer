@@ -53,6 +53,11 @@ public struct TrainingSessionLifecycle {
         await coordinator.endSession()
     }
 
+    /// §4.7e：durable 放弃当前局（清 pending + 关 reader + 清 context）。清 pending 失败抛（caller 保留重试）。
+    public func discard() async throws {
+        try await coordinator.discardSession()
+    }
+
     /// 顺位 8（RFC §4.4e/§4.5）：replay 结束的**非持久化**结算 payload。转发 frozen
     /// `coordinator.replaySettlementPayload`（只读终态 in-memory `TrainingRecord`；不写 `training_records`、
     /// 不触 `pending_training`、`finalize` 对 replay 仍返 nil）。**强平须 caller 先行**（壳层 manual

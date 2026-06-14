@@ -54,4 +54,46 @@ struct TrainingSessionFenceTests {
         await coord.drainAutosaveForTesting()
         #expect(try pending.loadPending() != nil)
     }
+
+    @Test("discard durable: fence → 清 pending → endSession；resume 返 nil（无复活）§4.7e")
+    func discard_clears_pending_and_tears_down() async throws {
+        let (coord, _, pending, _) = PIFixtures.makeCoordinator()
+        let engine = try await coord.startNewNormalSession()
+        engine.holdOrObserve(panel: .upper)
+        coord.requestAutosave(engine: engine, immediate: true)
+        await coord.drainAutosaveForTesting()
+        #expect(try pending.loadPending() != nil)
+        try await coord.discardSession()
+        #expect(try pending.loadPending() == nil)
+        #expect(coord.activeEngine == nil)
+        #expect(coord.activeReader == nil)
+        #expect(try await coord.resumePending() == nil)
+    }
+
+    @Test("discard 后迟到 autosave 被拒（terminating）→ 不重建 pending")
+    func discard_fences_late_autosave() async throws {
+        let (coord, _, pending, _) = PIFixtures.makeCoordinator()
+        let engine = try await coord.startNewNormalSession()
+        engine.holdOrObserve(panel: .upper)
+        try await coord.discardSession()
+        coord.requestAutosave(engine: engine, immediate: true)
+        await coord.drainAutosaveForTesting()
+        #expect(try pending.loadPending() == nil)
+    }
+
+    @Test("discard clearPending 失败: 保留 active session（不 teardown）供 retry §4.7e")
+    func discard_clear_failure_preserves_session() async throws {
+        let (coord, _, pending, _) = PIFixtures.makeCoordinator()
+        let engine = try await coord.startNewNormalSession()
+        engine.holdOrObserve(panel: .upper)
+        coord.requestAutosave(engine: engine, immediate: true)
+        await coord.drainAutosaveForTesting()
+        pending.failNextClearPending = .persistence(.diskFull)
+        await #expect(throws: AppError.self) { try await coord.discardSession() }
+        #expect(coord.activeEngine === engine)
+        #expect(coord.activeReader != nil)
+        try await coord.discardSession()                 // retry 成功
+        #expect(coord.activeEngine == nil)
+        #expect(try pending.loadPending() == nil)
+    }
 }
