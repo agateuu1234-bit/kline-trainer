@@ -147,10 +147,11 @@ public struct SettingsPanel: View {
             do {
                 let lease = try await api.reserveTrainingSets(count: count)
                 let results = await acceptance.runBatch(lease: lease)
-                let ok = results.filter { if case .confirmed = $0 { return true }; return false }.count
-                downloadStatus = "完成：\(ok)/\(results.count) 成功"
-                // §B.3：per-item 失败原因非阻塞 toast（此前丢弃）；进度/aggregate 仍由 downloadStatus 标签呈现。
-                if let message = DownloadBatchFeedback(results: results).toastMessage {
+                // §B.3 + codex-13a-R3：statusSummary 诚实区分 成功/待确认/失败（pending 不误报失败）；
+                // toast 仅列终态失败原因（此前丢弃）。
+                let feedback = DownloadBatchFeedback(results: results)
+                downloadStatus = feedback.statusSummary
+                if let message = feedback.toastMessage {
                     presentDownloadToast(message)
                 }
             } catch {

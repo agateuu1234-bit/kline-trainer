@@ -11,10 +11,43 @@ struct DownloadBatchFeedbackTests {
                         schemaVersion: 1, lastAccessedAt: 1, downloadedAt: 1)
     }
 
-    @Test("全成功 → toastMessage nil（无失败不打扰）")
+    @Test("全成功 → toastMessage nil（无失败不打扰）+ statusSummary 仅成功")
     func allConfirmed_noToast() {
         let fb = DownloadBatchFeedback(results: [.confirmed(file(1)), .confirmed(file(2))])
         #expect(fb.toastMessage == nil)
+        #expect(fb.confirmedCount == 2)
+        #expect(fb.failedCount == 0)
+        #expect(fb.statusSummary == "完成：2 成功")
+    }
+
+    // codex-13a-R3：pendingConfirmation（本地已缓存待确认）**不**计失败、不弹失败 toast。
+    @Test("pendingConfirmation 不计失败：toast nil + statusSummary 标待确认")
+    func pendingConfirmation_notCountedAsFailure() {
+        let fb = DownloadBatchFeedback(results: [
+            .confirmed(file(1)),
+            .pendingConfirmation(file(2)),
+            .pendingConfirmation(file(3))
+        ])
+        #expect(fb.toastMessage == nil, "待确认不是失败，不弹失败 toast")
+        #expect(fb.confirmedCount == 1)
+        #expect(fb.pendingCount == 2)
+        #expect(fb.failedCount == 0)
+        #expect(fb.statusSummary == "完成：1 成功，2 待确认")
+    }
+
+    // codex-13a-R3：三态混合 → 计数精确 + statusSummary 三段 + toast 仅终态失败原因。
+    @Test("混合 confirmed/pending/rejected：计数精确，toast 仅终态失败")
+    func mixedThreeStates_countsAndToast() {
+        let fb = DownloadBatchFeedback(results: [
+            .confirmed(file(1)),
+            .pendingConfirmation(file(2)),
+            .rejected(.trainingSet(.crcFailed))
+        ])
+        #expect(fb.confirmedCount == 1)
+        #expect(fb.pendingCount == 1)
+        #expect(fb.failedCount == 1)
+        #expect(fb.statusSummary == "完成：1 成功，1 待确认，1 失败")
+        #expect(fb.toastMessage == "1 个失败：训练组文件校验失败")
     }
 
     @Test("部分失败 → 文案含失败数 + distinct userMessage")

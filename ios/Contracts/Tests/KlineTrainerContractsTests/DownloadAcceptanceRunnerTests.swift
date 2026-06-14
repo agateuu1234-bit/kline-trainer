@@ -291,13 +291,17 @@ struct DownloadAcceptanceRunnerTests {
         #expect(cache.listAvailable().contains(where: { $0.id == 4 }) == false)
     }
 
-    @Test func run_confirmNetworkUncertain_rejected_butKeepsFileAndPending() async throws {
+    @Test func run_confirmNetworkUncertain_pendingConfirmation_keepsFileAndPending() async throws {
         let journal = InMemoryAcceptanceJournalDAO()
         let cache = InMemoryCacheManager()
         let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.timeout)),
                                 cache: cache, journal: journal)
         let result = await runner.run(meta: makeMeta(id: 5), leaseId: "lease")
-        #expect(result == .rejected(.network(.timeout)))
+        // codex-13a-R3：网络不确定 confirm → .pendingConfirmation（文件可用，非 .rejected 失败）
+        guard case .pendingConfirmation(let file) = result else {
+            Issue.record("expected .pendingConfirmation, got \(result)"); return
+        }
+        #expect(file.id == 5)
         // 文件保留 + journal 停 confirmPending（待启动重试）
         #expect(cache.listAvailable().contains(where: { $0.id == 5 }))
         #expect(try journal.listByState(.confirmPending).count == 1)
@@ -310,7 +314,11 @@ struct DownloadAcceptanceRunnerTests {
         let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.serverError(code: 503))),
                                 cache: cache, journal: journal)
         let result = await runner.run(meta: makeMeta(id: 6), leaseId: "lease")
-        #expect(result == .rejected(.network(.serverError(code: 503))))
+        // codex-13a-R3：5xx confirm（非 409/404）→ .pendingConfirmation（文件保留可用）
+        guard case .pendingConfirmation(let file) = result else {
+            Issue.record("expected .pendingConfirmation, got \(result)"); return
+        }
+        #expect(file.id == 6)
         #expect(cache.listAvailable().contains(where: { $0.id == 6 }))   // 5xx 非 409/404 → 保留
         #expect(try journal.listByState(.confirmPending).count == 1)
     }

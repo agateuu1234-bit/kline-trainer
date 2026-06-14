@@ -14,10 +14,17 @@ import Foundation
 public let TRAINING_SET_SCHEMA_VERSION = 1
 
 /// 下载验收的同步结果（spec §P2 L1764-1767）。
-/// 注：`.rejected` 同时覆盖「服务端明确拒收(409/404)」与「网络不确定」两种结局——
-/// 区别在 journal 状态 + 是否删本地文件，不在 return type（详见 plan 关键决策 5）。
+/// 三态结局（codex-13a-R3 精炼 plan 决策 5）：
+/// - `.confirmed`：服务端确认 + 本地缓存可用。
+/// - `.pendingConfirmation`：本地下载/校验/落盘**已成功且文件保留**，仅服务端确认网络不确定（timeout/5xx）→
+///   journal 停 `confirmPending` 待 `retryPendingConfirmations` 重试。**文件可用**，**非失败**。
+/// - `.rejected`：终态失败——下载/CRC/解压/校验/落盘失败，或服务端明确拒收(409/404，本地副本已删)。
+/// 原决策 5「pending 与 rejected 同 return type，靠 journal 区分」在**有 journal 访问的调用方**成立；
+/// 但 UI 消费方（顺位 13a DownloadBatchFeedback）无 journal 访问 → 会把可用的 pending 误报为「失败」，
+/// 故提升为独立 case（codex-13a-R3 high-value，consumer-need-driven）。
 public enum AcceptanceResult: Equatable, Sendable {
     case confirmed(TrainingSetFile)
+    case pendingConfirmation(TrainingSetFile)
     case rejected(AppError)
 }
 
@@ -103,8 +110,8 @@ public final class DownloadAcceptanceRunner: Sendable {
             case .rejected(let e):                // 409/404 → 删本地 cache 副本
                 try? cache.delete(file)
                 return .rejected(e)
-            case .pending(let e):                 // 网络不确定 → 保留 cache 副本待重试
-                return .rejected(e)
+            case .pending:                        // 网络不确定 → 保留 cache 副本待重试（文件可用，非失败，codex-13a-R3）
+                return .pendingConfirmation(file)
             }
         } catch {
             let appErr = Self.asAppError(error)
