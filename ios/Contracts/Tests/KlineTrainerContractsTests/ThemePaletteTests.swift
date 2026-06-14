@@ -175,6 +175,13 @@ struct UIChartPaletteTests {
     }
 
     @MainActor
+    @Test("KLineView 非 opaque（codex R4-F1：透明画布须 isOpaque=false，防 scheme 切换残留伪影）")
+    func klineViewIsNonOpaque() {
+        let view = KLineView(frame: .zero)
+        #expect(view.isOpaque == false)
+    }
+
+    @MainActor
     @Test("trait dark → 选 dark 集 / trait light → 选 light 集（currentPalette 选取链）")
     func traitSelectsPalette() {
         let tc = ThemeController()

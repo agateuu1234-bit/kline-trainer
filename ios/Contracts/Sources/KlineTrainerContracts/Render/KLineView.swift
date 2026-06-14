@@ -35,6 +35,11 @@ public final class KLineView: UIView {
     public override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
+        // 顺位9/codex R4-F1：画布透明（底色来自 SwiftUI 系统背景，随 preferredColorScheme 适配）须配 isOpaque=false。
+        // UIView 默认 opaque——opaque 视图绘制上下文不在帧间清空，且要求填满 bounds；本 view draw() 仅稀疏描绘
+        // candle/线/标记，不填整 bounds。切换 scheme 重绘时残留旧 scheme 像素 → 明暗混杂伪影。isOpaque=false
+        // 令 UIKit 每帧清空上下文 + 透出 SwiftUI 底色，消除伪影并符合透明画布设计意图。
+        isOpaque = false
         // 顺位9：trait 的 userInterfaceStyle 变化（系统切暗/亮，或 preferredColorScheme 改 display_mode）→ 重绘。
         // 用「系统传入实例」重载 (view, previousTrait)，零 self 捕获，无 retain cycle（勿改成捕获 self）。
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: KLineView, _: UITraitCollection) in
