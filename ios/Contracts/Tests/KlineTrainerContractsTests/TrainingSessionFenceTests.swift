@@ -75,10 +75,13 @@ struct TrainingSessionFenceTests {
         let (coord, _, pending, _) = PIFixtures.makeCoordinator()
         let engine = try await coord.startNewNormalSession()
         engine.holdOrObserve(panel: .upper)
-        try await coord.discardSession()
-        coord.requestAutosave(engine: engine, immediate: true)
+        coord.requestAutosave(engine: engine, immediate: true)   // 先有 pending checkpoint
         await coord.drainAutosaveForTesting()
-        #expect(try pending.loadPending() == nil)
+        #expect(try pending.loadPending() != nil)                // 确证 discard 前有 pending
+        try await coord.discardSession()                         // durable 清 + fence
+        coord.requestAutosave(engine: engine, immediate: true)   // 迟到脏写
+        await coord.drainAutosaveForTesting()
+        #expect(try pending.loadPending() == nil)                // 栅栏拒绝 → 无复活
     }
 
     @Test("discard clearPending 失败: 保留 active session（不 teardown）供 retry §4.7e")
