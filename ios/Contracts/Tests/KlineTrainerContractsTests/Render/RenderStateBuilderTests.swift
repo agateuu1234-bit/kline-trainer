@@ -258,6 +258,32 @@ struct RenderStateBuilderTests {
         #expect(ms < 50)   // 极宽松上界，仅防病态退化（partitioningIndex O(log n) + 切片 O(80)）
     }
 
+    @Test("perf smoke（非权威）：完整 make() 装配开销（含 volume/macd range + 装配）")
+    @MainActor
+    func makePerfSmoke() {
+        // make() 的成本由 ≤80 根可见切片的 map/flatMap + KLineRenderState 装配主导
+        //（总根数仅影响 makeViewport 的 O(log n) 二分，已由既有 perfSmoke 覆盖）。
+        // preview() 仅 8 根不足以压装配，故直接造 5000 根 .m3 engine。
+        let cs = Self.candles(period: .m3, count: 5000, macd: true)
+        let maxTick = cs.count - 1
+        let engine = TrainingEngine(
+            flow: NormalFlow(
+                fees: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+                maxTick: maxTick),
+            allCandles: [.m3: cs],
+            maxTick: maxTick,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m3, initialLowerPeriod: .m3)
+        let start = Date()
+        for _ in 0..<100 {
+            _ = RenderStateBuilder.make(engine: engine, panel: .upper, bounds: Self.bounds)
+        }
+        let ms = Date().timeIntervalSince(start) * 1000 / 100
+        // 非权威 host smoke：draw 侧帧预算唯一权威 = device Instruments runbook（2026-06-14 frame-budget）。
+        print("[顺位12 perf smoke] make() avg = \(ms) ms (non-authoritative; not the spec frame budget)")
+        #expect(ms < 50)   // 极宽松上界，仅防病态退化（同既有 perfSmoke 量级）
+    }
+
     // MARK: 顺位 3 D5：去硬编码 80（target = panelState.visibleCount，≤0 → fallback 80）
 
     /// 非 0 显式入参 + 80 golden parity（独立金值硬编码，R1-L3 防 tautology）
