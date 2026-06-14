@@ -244,8 +244,11 @@ struct AppRouterTests {
         let life = try #require(f.router.activeTraining?.lifecycle)
         let payload = try life.replaySettlementRecord()               // id==nil 非持久 payload
         f.router.presentReplaySettlement(record: payload)
-        if case .settlement(let r)? = f.router.activeModal { #expect(r.id == nil) }
-        else { Issue.record("expected .settlement") }
+        if case .settlement(let r)? = f.router.activeModal {
+            #expect(r.id == nil)                                       // in-memory 非持久
+            #expect(r.stockCode == payload.stockCode)                 // modal 携带的正是该 payload（无变换/串味）
+            #expect(r.totalCapital == payload.totalCapital)
+        } else { Issue.record("expected .settlement") }
         #expect(try f.records.listRecords(limit: nil).count == recordsBefore)   // 不写 record
         #expect(try f.pending.loadPending() == nil)                            // 不触 pending
     }
