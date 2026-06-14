@@ -127,11 +127,26 @@ public final class TrainingSessionCoordinator {
     /// `activeReader` 被覆盖泄漏（E6a 不替前一 session 收尾——E6b/caller 契约）。
     public func startNewNormalSession() async throws -> TrainingEngine {
         let fees = try settings.snapshotFeesIfReady()        // D2 fail-closed：loadError → throw（reader 未开）
-        guard let file = cache.pickRandom() else {
-            throw AppError.trainingSet(.fileNotFound)         // 无可用缓存训练组
+        let start = try startingCapital()                    // app.sqlite source；reader 未开，throw 无副作用
+        // §4.7f provenance：选训练组 → 打开；损坏（source=训练组只读 DB）→ 删 + 重试另一文件。
+        var attempts = cache.listAvailable().count + 1       // 有界（即便 delete 静默失败仍终止）
+        var openedReader: (any TrainingSetReader)?
+        var openedFile: TrainingSetFile?
+        while attempts > 0, openedReader == nil {
+            attempts -= 1
+            guard let file = cache.pickRandom() else {
+                throw AppError.trainingSet(.fileNotFound)    // 缓存耗尽 → caller 重下
+            }
+            do {
+                openedReader = try openReader(for: file)
+                openedFile = file
+            } catch where isCorruptTrainingSet(error) {
+                try? cache.delete(file)                      // 删损坏训练组文件（可弃），重试
+            }
         }
-        let start = try startingCapital()                    // D4 累计模型（reader 未开，throw 无副作用）
-        let reader = try openReader(for: file)
+        guard let reader = openedReader, let file = openedFile else {
+            throw AppError.trainingSet(.fileNotFound)
+        }
         do {
             let allCandles = try reader.loadAllCandles()
             let mt = try maxTick(from: allCandles)            // D3
@@ -157,8 +172,16 @@ public final class TrainingSessionCoordinator {
     /// 无 pending 返回 nil（**仅**此情形返 nil；其它失败均 throw 可恢复 AppError）。
     public func resumePending() async throws -> TrainingEngine? {
         guard let pending = try pendingRepo.loadPending() else { return nil }
+        // Note: loadPending() is app.sqlite source — its .dbCorrupted propagates ABOVE this catch (fail-closed).
         let file = try cachedFile(filename: pending.trainingSetFilename)
-        let reader = try openReader(for: file)
+        let reader: any TrainingSetReader
+        do {
+            reader = try openReader(for: file)
+        } catch where isCorruptTrainingSet(error) {
+            try? cache.delete(file)                          // 训练组损坏，孤儿 pending 不可恢复
+            try pendingRepo.clearPending()                   // durable 清（app.sqlite 写，非删）
+            return nil                                       // 首页降级到新局
+        }
         do {
             let allCandles = try reader.loadAllCandles()
             let mt = try maxTick(from: allCandles)
@@ -197,8 +220,15 @@ public final class TrainingSessionCoordinator {
     /// **前置（D10）**：caller 须先 `endSession()`（同 startNewNormalSession）。
     public func review(recordId: Int64) async throws -> TrainingEngine {
         let (record, ops, drawings) = try recordRepo.loadRecordBundle(id: recordId)
+        // Note: loadRecordBundle() is app.sqlite source — its .dbCorrupted propagates ABOVE this catch (fail-closed).
         let file = try cachedFile(filename: record.trainingSetFilename)
-        let reader = try openReader(for: file)
+        let reader: any TrainingSetReader
+        do {
+            reader = try openReader(for: file)
+        } catch where isCorruptTrainingSet(error) {
+            try? cache.delete(file)                          // 训练组损坏可弃；record 仍在 app.sqlite（不删）
+            throw AppError.persistence(.dbCorrupted)         // 无法替代，surface
+        }
         do {
             // maxTick 由 .review(record) 内部据 record.finalTick 派生；make 亦校验 .m3 非空 +
             // m3.last.endGlobalIndex >= finalTick，故此处不重复 maxTick(from:)（D3 / LOW#8）。
@@ -227,8 +257,15 @@ public final class TrainingSessionCoordinator {
     /// feeSnapshot，不还原标记/绘线、不入账，D6）。起始本金 = record 原局起始本金。
     public func replay(recordId: Int64) async throws -> TrainingEngine {
         let (record, _, _) = try recordRepo.loadRecordBundle(id: recordId)
+        // Note: loadRecordBundle() is app.sqlite source — its .dbCorrupted propagates ABOVE this catch (fail-closed).
         let file = try cachedFile(filename: record.trainingSetFilename)
-        let reader = try openReader(for: file)
+        let reader: any TrainingSetReader
+        do {
+            reader = try openReader(for: file)
+        } catch where isCorruptTrainingSet(error) {
+            try? cache.delete(file)                          // 训练组损坏可弃；record 仍在 app.sqlite（不删）
+            throw AppError.persistence(.dbCorrupted)         // 无法替代，surface
+        }
         do {
             let allCandles = try reader.loadAllCandles()
             let mt = try maxTick(from: allCandles)
@@ -467,6 +504,17 @@ public final class TrainingSessionCoordinator {
         autosaveDirty = false
         ticksSinceAutosave = 0
         lastAutosaveError = nil
+    }
+
+    /// D7：训练组文件可弃损坏判据（dbFactory.openAndVerify 对坏文件抛的可恢复错误）。
+    /// 仅在 openReader 调用栈内用 → 保证 app.sqlite source 永不命中（安全红线，§4.7f）。
+    private func isCorruptTrainingSet(_ error: Error) -> Bool {
+        switch error as? AppError {
+        case .persistence(.dbCorrupted): return true
+        case .trainingSet(.emptyData), .trainingSet(.versionMismatch),
+             .trainingSet(.crcFailed), .trainingSet(.unzipFailed): return true
+        default: return false                      // fileNotFound/diskFull/internalError 不删
+        }
     }
 }
 

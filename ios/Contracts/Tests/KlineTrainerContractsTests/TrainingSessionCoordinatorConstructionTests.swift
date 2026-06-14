@@ -191,14 +191,16 @@ struct TrainingSessionCoordinatorConstructionTests {
         #expect(coord.activeReader == nil)
     }
 
-    @Test("startNewNormalSession: openAndVerify 抛 .versionMismatch → 传播 + 不写 active（reader 未建）")
+    @Test("startNewNormalSession: openAndVerify 抛 .versionMismatch（损坏）→ 删文件重试，单文件耗尽 → .fileNotFound + 不写 active（RFC §4.7f）")
     func startNew_openThrows_propagatesNoActive() async throws {
         let store = SettingsStore(settingsDAO: CapitalDAO(capital: 10_000))
         let spy = SpyReader(candles: Self.validCandles())
         let coord = Self.makeCoordinator(
             factory: StubFactory(reader: spy, openError: .trainingSet(.versionMismatch(expected: 1, got: 2))),
             settings: store)
-        await #expect(throws: AppError.trainingSet(.versionMismatch(expected: 1, got: 2))) {
+        // §4.7f: versionMismatch is a corrupt training-set error → delete + retry;
+        // with 1 file in cache, after deletion the retry exhausts → .fileNotFound (caller re-downloads).
+        await #expect(throws: AppError.trainingSet(.fileNotFound)) {
             try await coord.startNewNormalSession()
         }
         #expect(spy.closed == false)                     // openAndVerify 抛 → 无 reader 返回，无可关
