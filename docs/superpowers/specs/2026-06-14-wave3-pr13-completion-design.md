@@ -178,8 +178,9 @@
 - **诚实 claim（codex R1-F1）**：「客户端 feature 完整 + fixture 端到端可玩」，**非** store-ready、**非** 已正式关闭（运行时实测待回填）。
 - **未完成 ship 门显式列**：PR11-R1（生产 backendBaseURL）+ W1-R2（真实样本训练组数据，H7，需 NAS）——不计入 Wave 3 功能完成度，且为正式上架前提。
 
-**E.2 运行时矩阵 runbook**（`docs/acceptance/` 或 governance）：列 Wave 3 全新交互的 device/sim 验收步骤（非-coder 可执行），覆盖：pinch 聚焦/clamp（顺位 3）、水平线绘制+跨缩放还原（4）、十字光标 snap/HUD（5）、手动强平（7）、replay 结算窗（8）、主题切换视觉（9）、边缘 bounce（11）、**+ 经 §C fixture seed 的 save-resume / 复盘 / replay 端到端 + autosave 失败 toast / 下载失败 toast 可见性（§B）**。
+**E.2 运行时矩阵 runbook**（`docs/acceptance/` 或 governance）：列 Wave 3 全新交互的 device/sim 验收步骤（非-coder 可执行），覆盖经 §C fixture seed 可达的 **happy-path** 交互：pinch 聚焦/clamp（顺位 3）、水平线绘制+跨缩放还原（4）、十字光标 snap/HUD（5）、手动强平（7）、replay 结算窗（8）、主题切换视觉（9）、边缘 bounce（11）、**+ 经 §C fixture seed 的 save-resume / 复盘 / replay 端到端**。
 - 各交互的运行时 runbook 条目此前已随锚交付（outline §三.3）；本 doc **汇总成单一矩阵** + 标注「经 §C fixture 执行」。
+- **§B toast 可见性（autosave 失败 / 下载失败）的覆盖归属澄清（spec-review R2-Med）**：§C seed 仅 provision **有效**数据（无 fault injection：不模拟磁盘满 / 不强制下载 reject），故 device 矩阵**无法**经 happy-path seed 触发这两条 toast。其**自动化证明归 §B host 测**（test 项 ②/④，注入失败 → 断言 toast 文案/不 teardown），**非** device 矩阵。device 矩阵仅验 happy-path seeded 交互；§B toast 由 §B host 测覆盖（除非 13b plan 选择性加 debug fault-injection 开关，则可纳入矩阵——属 plan-stage 可选）。
 - **device/sim 实测结果回填 = 用户 device 职责**；runbook 提供步骤 + 结果记录表格（待填）。
 
 **E.3 residual 终态回填**：更新 residual ledger（`project_wave2_completion` §三 / outline §四 风格）——A/B/C/D 四项从 DEFERRED → CLOSED（引 13a/13b PR）；运行时矩阵 = PARTIAL（runbook 交付，device 实测待用户）；PR11-R1 + W1-R2 = OPEN（NAS）。
@@ -230,3 +231,4 @@
 |---|---|---|
 | 2026-06-14 | v1 (draft) | 起草；4 deferred 项（A touch-on-use / B 统一 Toast / C fixture provisioning / D E2E smoke）+ E 顺位 13 收尾；3-PR 拆分（13a robustness / 13b harness / 13c 收尾 doc）；grep-first baseline 核实（972 tests 绿）；freeze tag = 自主裁决不打 + 文档 deferred-pending-matrix |
 | 2026-06-14 | v2 (opus 4.8 xhigh 对抗 review R1 修) | 全 9 finding 应用：**High**——§E 不再 claim Wave 3 正式关闭（outline §3.3「recorded 矩阵」是顺位 13 收尾本身硬门，未满足）→ reframe「功能交付确认 + 运行时验收待回填」+ 显式 reconcile outline §3.3，正式关闭 + tag 均 post-matrix。**Med**：§C 明确 fixture 生成须新写 `#if DEBUG` Sources（测试 target 不可 import）+ seed 数据集 rich 到驱动全 §E.2 矩阵作硬验收项 + reset 故事（app.sqlite singleton 删 app 重置）；§B.1 latest-wins/auto-dismiss 抽 host-testable 注入时钟调度核（取代空头 snapshot 守护）；§B.2 升 plan-stage 硬约束（值类型 lifecycle 的 Observation 穿透须证可行 + 新信号字段须在 endSession:405/resetAutosaveState:510 清零防 stale toast）；§B 加边界错误类→处置映射表（明确「统一」= transient 走新 toast、blocking 保留 alert）；§五 加 13a/13b trust-boundary（`ios/**/*.swift`）须经 codex:adversarial-review。**Low**：baseline 972 vs PR#107 962 = snapshot delta 注；§A/§二 line 号校正（openReader :146/:183/:231/:268）|
+| 2026-06-14 | v2.1 (opus 4.8 xhigh 对抗 review R2 = APPROVE) | R2 复核 R1 全 9 finding RESOLVED + 无 Critical/High。折入 R2 新 1 Med：§E.2 澄清 §C happy-path seed 无 fault-injection → autosave/下载失败 toast 的覆盖归 §B host 测（注入失败），非 device 矩阵（device 矩阵仅 happy-path seeded 交互）。carry 到 plan-stage 的 1 Low（disposition 表 row1 autosave `.dbCorrupted` toast 文案「本地数据损坏」措辞精炼，不违 §4.7f——§4.7f 管 app.sqlite *读/恢复*，§4.6-item5 管 autosave *写* 不 teardown）。**spec 收敛。** |
