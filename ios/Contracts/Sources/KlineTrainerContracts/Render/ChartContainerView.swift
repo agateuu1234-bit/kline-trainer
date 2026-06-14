@@ -47,6 +47,10 @@ public struct ChartContainerView: UIViewRepresentable {
         private weak var engine: TrainingEngine?
         private weak var view: KLineView?
         private let arbiter = ChartGestureArbiter()
+        /// Wave 3 顺位 4：画线输入暂存（仅 .horizontal）+ 逆映射 controller。manager 是输入暂存，
+        /// engine.drawings 才是单一真相（spec §D-MANAGER）。
+        private let manager = DrawingToolManager(enabledTools: [.horizontal])
+        private let inputController: DrawingInputController = DefaultDrawingInputController()
         /// 视图层瞬态十字光标（D3，不进 engine）。长按时设置，松手清空。
         public private(set) var crosshairPoint: CGPoint?
 
@@ -60,8 +64,14 @@ public struct ChartContainerView: UIViewRepresentable {
             self.panel = panel
             self.engine = engine
             self.view = view
-            // drawing 模式下 arbiter 截获单指 pan（spec §C7 L1393）：按当前面板 mode 同步开关。
-            arbiter.drawingMode = isDrawing(engine: engine, panel: panel)
+            // drawing 模式下 arbiter 截获单指 pan（spec §C7）+ 对齐 manager.activeTool（顺位 4）。
+            let drawing = isDrawing(engine: engine, panel: panel)
+            arbiter.drawingMode = drawing
+            if drawing {
+                if manager.activeTool == nil { manager.toggle(.horizontal) }     // 进入：对齐（条件 toggle，非每帧盲翻）
+            } else if manager.activeTool != nil {
+                manager.cancel()                                                  // 退出：复位暂存
+            }
         }
 
         /// attach-once（C7 R6 幂等）：makeUIView 调一次；路由 5 类回调进 engine。
@@ -91,7 +101,9 @@ public struct ChartContainerView: UIViewRepresentable {
                 guard let self, let engine = self.engine else { return }
                 engine.applyPinch(scale: scale, focusX: focus.x, phase: phase, panel: self.panel)
             }
-            // onTap（画线锚点）需 DrawingInputController（顺位 4）→ 本锚不接。
+            arbiter.onTap = { [weak self] point in
+                self?.handleDrawingTap(at: point)
+            }
             arbiter.attach(to: view)
         }
 
@@ -107,6 +119,26 @@ public struct ChartContainerView: UIViewRepresentable {
             guard let view, let engine else { return }
             view.renderState = RenderStateBuilder.make(
                 engine: engine, panel: panel, bounds: view.bounds, crosshair: point)
+        }
+
+        /// 顺位 4：drawing 模式单指点击落锚 → 投影 engine.drawings → 退出 .drawing。
+        /// 全链路：tapToAnchor（逆映射）→ manager.addAnchor/commit → engine.appendDrawing → engine.commitDrawing。
+        private func handleDrawingTap(at point: CGPoint) {
+            guard let engine, let view else { return }
+            guard isDrawing(engine: engine, panel: panel), manager.activeTool != nil else { return }
+            // 空图表（candleStep==0）→ xToIndex 会 Int(NaN) 崩溃 → 守卫（spec §四 load-bearing）。
+            let viewport = view.renderState.viewport
+            guard viewport.geometry.candleStep > 0 else { return }
+            let mapper = CoordinateMapper(viewport: viewport, displayScale: view.traitCollection.displayScale)
+            let ps = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
+            let anchor = inputController.tapToAnchor(at: point, panel: ps, mapper: mapper)
+            manager.addAnchor(anchor)
+            guard inputController.shouldCommit(current: manager.pendingAnchors, tool: .horizontal) else { return }
+            manager.commit(isExtended: true, panelPosition: panel == .upper ? 0 : 1)
+            if let committed = manager.completedDrawings.last {
+                engine.appendDrawing(committed)              // 投影：单一真相 engine.drawings
+            }
+            engine.commitDrawing(panel: panel)               // 退出 reducer .drawing
         }
     }
 }

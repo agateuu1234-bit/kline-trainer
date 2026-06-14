@@ -108,10 +108,11 @@ engine.currentPositionTier: Int   // 0...5，read-only computed
 
 **acceptance（顺位 9 验收）**：三模式切换即时生效 + 持久化跨重启；system 模式跟随系统切换重渲染；light 集 13 token 齐全且语义色保持红涨绿跌。
 
-### 4.4 E5/E6 engine 契约扩展（全 Wave 3 engine 变更集中顺位 6，serial neck，outline R8-F1）（zoom 除外，见总纲注记）
+### 4.4 E5/E6 engine 契约扩展（全 Wave 3 engine 变更集中顺位 6，serial neck，outline R8-F1）（zoom + 画线-FSM-退出 handler 除外，见总纲注记）
 
 **总纲**：`TrainingEngine` 跨「轨 G 图表」与「轨 T 交易」共享（drawings / panelState / trade 状态）。outline 采序列化策略：**所有 engine 契约变更集中顺位 6**，先于全部消费锚（3/4/7/8）；消费锚只用冻结 API、不改 engine 契约。本节钉死该 5 子项 API 面。
 > 【neck-doctrine zoom 例外注记（user 2026-06-12 裁决；顺位 3 PR 落档）：§4.4d zoom 经裁决移顺位 3 同 PR 实施（顺位 3 新增 `ChartAction.zoomApplied` + `engine.applyPinch` + pinch 手势态）；本总纲「所有 engine 契约变更集中顺位 6 / 消费锚不改 engine 契约」对 zoom 部分 superseded，对其余 §4.1/§4.4a-c/§4.4e 仍成立。本注记适用 RFC 全文同款表述（§一(D)、§三 概览表「6 实现，3/4/7/8 消费」行、§4.4 标题）。】
+> 【neck-doctrine 画线-FSM-退出 handler 家族例外注记（user 2026-06-13 裁决；顺位 4 PR 落档）：**画线激活-FSM 编排 handler 家族**（`activateDrawingTool`〔C8b #87 落〕→ 顺位 4 新增 `engine.commitDrawing`/`cancelDrawing`〔reducer `.drawing` 态**唯一**退出口，dispatch 已 ship 的 `.drawingCommitted`/`.drawingCancelled`，封装 baseRevision 细节〕）认定为 **C8b 起 / 顺位 4 收**的独立 handler 家族，与顺位-6 冻结的业务 API 面（§4.1/§4.4a-c/§4.4e）**正交**；本总纲对该家族 superseded，对其余仍成立。**事实依据**：`activateDrawingTool` 仅 C8b #87 加，6a #95 / 6b #97 均未碰它（6b 顺位-6 交付是 §4.4c `appendDrawing`）；serial-neck 防的并发-改-engine 风险已消解（3/6a/6b/10a/11 全 merged、无 open PR、顺位 4 唯一活跃）。详见 `docs/superpowers/specs/2026-06-13-wave3-pr4-drawing-mvp-design.md` §D-ENGINE。】
 
 #### 4.4a 手动强平（on-demand force-close）
 

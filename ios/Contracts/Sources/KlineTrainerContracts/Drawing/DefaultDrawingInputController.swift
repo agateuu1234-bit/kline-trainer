@@ -1,0 +1,32 @@
+// ios/Contracts/Sources/KlineTrainerContracts/Drawing/DefaultDrawingInputController.swift
+// Spec: docs/superpowers/specs/2026-06-13-wave3-pr4-drawing-mvp-design.md §一.2 + §四
+// Wave 3 顺位 4：具体 DrawingInputController。tapToAnchor 经 CoordinateMapper 逆映射；
+// shouldCommit 经显式 enum→最小锚数映射（requiredAnchors 在 DrawingTool 实例非 enum，评审 R2-L）。
+//
+// 跨平台：CoreGraphics + 跨平台值类型；无 UIKit。protocol 是 @MainActor → 本类 @MainActor final class。
+
+import CoreGraphics
+
+@MainActor
+public final class DefaultDrawingInputController: DrawingInputController {
+    public init() {}
+
+    public func tapToAnchor(at point: CGPoint, panel: PanelViewState, mapper: CoordinateMapper) -> DrawingAnchor {
+        DrawingAnchor(period: panel.period,
+                      candleIndex: mapper.xToIndex(point.x),
+                      price: mapper.yToPrice(point.y))
+    }
+
+    /// MVP 显式映射 enum→最小锚数（requiredAnchors 是 tool 实例属性、非 enum 可达）。
+    private func minAnchors(for tool: DrawingToolType) -> Int {
+        switch tool {
+        case .horizontal: return 1
+        // 其余 6 工具属 Phase 4（enabledTools 仅 .horizontal，不会到达）。
+        case .ray, .trend, .golden, .wave, .cycle, .time: return Int.max
+        }
+    }
+
+    public func shouldCommit(current: [DrawingAnchor], tool: DrawingToolType) -> Bool {
+        current.count >= minAnchors(for: tool)
+    }
+}
