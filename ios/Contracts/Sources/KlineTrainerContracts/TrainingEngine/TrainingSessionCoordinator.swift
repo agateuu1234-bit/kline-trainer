@@ -55,7 +55,9 @@ public final class TrainingSessionCoordinator {
     @ObservationIgnored var autosaveTickInterval = AUTOSAVE_TICK_INTERVAL {
         didSet { autosaveTickInterval = min(max(autosaveTickInterval, 1), AUTOSAVE_MAX_INTERVAL) }
     }
-    /// §4.6 失败可见：最近一次 autosave 失败（非阻塞指示；UI/@testable 读；不 teardown）。
+    /// §4.6 失败可见：最近一次 autosave 失败（不 teardown）。本 PR 在 coordinator 层闭合「记录 + 非阻塞 + 不拆毁」
+    /// 机制；**user-facing 非阻塞指示（banner/toast）归顺位 10c 边界错误统一 Toast 层**（磁盘满可见性同类），
+    /// 届时连同 §4.6 item5 一并 surface（@testable 现已读以证机制在位）。
     @ObservationIgnored public private(set) var lastAutosaveError: AppError?
 
     /// 请求 autosave（脏动作后调）。immediate=交易/画线/background flush（绕 N 节流）；
@@ -69,6 +71,10 @@ public final class TrainingSessionCoordinator {
         ticksSinceAutosave = 0
         autosaveDirty = true
         guard autosaveTask == nil else { return }            // 已排程 → 合并
+        // 不变量（coalescing/fence/flush 正确性所依）：`saveProgress`/`savePending` 是 @MainActor 上
+        // 同步 throws（GRDB dbQueue.write 阻塞，非真 async）—— 故下方 while 循环 + `autosaveTask = nil`
+        // 在单次 @MainActor 续跑内原子完成，无真挂起点供 endSession/finalize 交错抢写。改 repo 为真 async
+        // 须同步重审本机制（协议签名为 sync throws，编译期锁此不变量）。
         autosaveTask = Task { @MainActor [weak self] in
             guard let self else { return }
             while self.autosaveDirty && !self.terminating {

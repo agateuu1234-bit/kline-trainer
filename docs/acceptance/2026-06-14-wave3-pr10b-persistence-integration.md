@@ -70,3 +70,5 @@ cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -
 ## 范围外（10c）
 
 以下项目属于顺位 10c，本 PR 不交付：全 app fixture provisioning（debug seed 经 `AppContainer`）、生产路径 fixture E2E smoke（真实 `DownloadAcceptanceRunner`）、边界错误统一 Toast 层（下载中断/磁盘满网络可见性）、cache touch-on-use（E6a-R3）。这些归 10c 须先于顺位 13 收尾完成。
+
+> **autosave 失败 user-facing 指示（§4.6 item5「可见」）**：本 PR 在 coordinator 层闭合机制（`lastAutosaveError` 记录 + 不 teardown，由「失败可见」单测证），但 user-facing 非阻塞 banner/toast 归 10c「边界错误统一 Toast 层」（磁盘满可见性同类）一并 surface——**明示延后非遗漏**（整体 opus review flag）。
