@@ -203,7 +203,7 @@ struct AppRouterTests {
         #expect(f.router.errorMessage != nil)
     }
 
-    @Test("sessionEnded replay nil → retreat：activeTraining nil 且无 settlement")
+    @Test("[D7 防御路径] sessionEnded replay nil → retreat：activeTraining nil 且无 settlement")
     func sessionEnded_replayRetreat() async {
         let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] insert-order id=1
         await f.router.replay(id: 1)                    // activeTraining = replay
@@ -213,7 +213,7 @@ struct AppRouterTests {
         #expect(f.router.activeModal == nil)
     }
 
-    @Test("teardown：replay 结束(retreat)后 coordinator.activeReader == nil（证 endAfterSettlement→endSession 被调）")
+    @Test("[D7 防御路径] teardown：replay nil 兜底后 coordinator.activeReader == nil（endAfterSettlement→endSession）")
     func sessionEnded_replayTearsDownReader() async {
         let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] insert-order id=1
         await f.router.replay(id: 1)
@@ -231,5 +231,38 @@ struct AppRouterTests {
         await f.router.confirmSettlement()
         #expect(f.router.activeTraining == nil)
         #expect(f.router.activeModal == nil)
+    }
+
+    // MARK: - Wave 3 顺位 8：replay 结算窗（present 设 .settlement modal + 非持久化不变量）
+
+    @Test("presentReplaySettlement: 设 .settlement(in-memory record) modal 且不持久化（records/pending 不变）")
+    func presentReplaySettlement_showsModalNoPersist() async throws {
+        let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])   // [C2] insert-order id=1
+        await f.router.replay(id: 1)                                  // activeTraining = replay，reader 开
+        #expect(f.router.activeTraining?.lifecycle.engine.flow.mode == .replay)
+        let recordsBefore = try f.records.listRecords(limit: nil).count   // = 1（仅 seed 源 record）
+        let life = try #require(f.router.activeTraining?.lifecycle)
+        let payload = try life.replaySettlementRecord()               // id==nil 非持久 payload
+        f.router.presentReplaySettlement(record: payload)
+        if case .settlement(let r)? = f.router.activeModal { #expect(r.id == nil) }
+        else { Issue.record("expected .settlement") }
+        #expect(try f.records.listRecords(limit: nil).count == recordsBefore)   // 不写 record
+        #expect(try f.pending.loadPending() == nil)                            // 不触 pending
+    }
+
+    @Test("replay 结算 confirm → teardown reader + activeTraining/modal nil + 仍不持久化")
+    func presentReplaySettlement_confirmTearsDown() async throws {
+        let f = Self.makeRouter(seedRecords: [Self.record(id: 1)])
+        await f.router.replay(id: 1)
+        #expect(f.coordinator.activeReader != nil)
+        let life = try #require(f.router.activeTraining?.lifecycle)
+        f.router.presentReplaySettlement(record: try life.replaySettlementRecord())
+        let before = try f.records.listRecords(limit: nil).count
+        await f.router.confirmSettlement()
+        #expect(f.router.activeTraining == nil)
+        #expect(f.router.activeModal == nil)
+        #expect(f.coordinator.activeReader == nil)                    // endAfterSettlement→endSession 关 reader
+        #expect(try f.records.listRecords(limit: nil).count == before)   // confirm 不持久化
+        #expect(try f.pending.loadPending() == nil)
     }
 }
