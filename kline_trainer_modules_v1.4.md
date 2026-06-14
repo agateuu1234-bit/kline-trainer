@@ -850,7 +850,7 @@ enum AppColor {
 
 #### F2 Wave 3 顺位 1 RFC 契约增量（见 RFC §4.3，顺位 9 已落地）
 
-夜间模式 = **light/dark 双 token 集**：现有 13 个 `AppColorRGBA` 默认 token（背景近黑）= **dark/夜间集**；新增 **light/白天集**（背景近白 / 文本近黑 / 语义色保持红涨绿跌 / 辅助线按白底降明度，**具体 RGBA 已落地：`AppPalette.light` 13 token（双 static 集机制；maxChannelDiff≥0.4 代理对比，真 WCAG AA 亮度对比属运行时矩阵设备实测）**）。render 层按 `themeController.resolve(trait:)` 返回的 `AppColorScheme` 选 light/dark 集（已落地 = `UIChartPalette.forScheme(_:)`；`KLineView` 经 `registerForTraitChanges` 在 trait 变化重渲染）。`displayMode == .system` 跟随 `UITraitCollection` 变化重解析重渲染（`AppRootView.preferredColorScheme` 据 `display_mode` 驱动全窗 + 嵌入图表 trait）。持久化经 `AppSettings.displayMode`（settings key `display_mode`，**无 schema 改动**）。
+夜间模式 = **light/dark 双 token 集**：现有 13 个 `AppColorRGBA` 默认 token（背景近黑）= **dark/夜间集**；新增 **light/白天集**（背景近白 / 文本近黑 / 语义色保持红涨绿跌 / 辅助线按白底降明度，**具体 RGBA 已落地：`AppPalette.light` 13 token（双 static 集机制；前景 token 经 WCAG 相对亮度对比 ≥3:1 单测闸门；marker 字母固定白 vs 涨跌点 ≥3:1；真 WCAG AA 设备观感属运行时矩阵）**）。render 层按 `themeController.resolve(trait:)` 返回的 `AppColorScheme` 选 light/dark 集（已落地 = `UIChartPalette.forScheme(_:)`；`KLineView` 经 `registerForTraitChanges` 在 trait 变化重渲染）。`displayMode == .system` 跟随 `UITraitCollection` 变化重解析重渲染（`AppRootView.preferredColorScheme` 据 `display_mode` 驱动全窗 + 嵌入图表 trait）。持久化经 `AppSettings.displayMode`（settings key `display_mode`，**无 schema 改动**）。
 
 > **顺位 9 已落地**：实现见 plan `docs/superpowers/plans/2026-06-14-wave3-pr9-night-mode.md` §D2（light RGBA 取值）+ `Theme.swift`（`AppPalette`/`UIChartPalette`/`displayModePrefersDark`）+ `KLineView.currentPalette` + `AppRootView.preferredColorScheme`。
 

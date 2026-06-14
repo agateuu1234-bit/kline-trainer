@@ -72,13 +72,13 @@
 | ma66 | 0.55,0.40,0.85 | 0.42,0.25,0.72 | 紫加深 |
 | bollLine | 0.95,0.70,0.20 | 0.75,0.50,0.05 | 金加深（亮黄白底失对比）|
 | macdDIF | white 1.0 | 0.15,0.15,0.18 | 白底白线不可见→近黑 |
-| macdDEA | 1.00,0.84,0.20 | 0.80,0.55,0.0 | 黄加深为琥珀 |
+| macdDEA | 1.00,0.84,0.20 | 0.70,0.45,0.0 | 黄加深为暗琥珀（codex R1-F1：0.80/0.55/0 仅 2.74:1<3，改 3.76:1）|
 | macdBarPositive | =candleUp | =candleUp(light) | D-3 alias 保持 |
 | macdBarNegative | =candleDown | =candleDown(light) | D-3 alias 保持 |
 | profitRed | =candleUp | =candleUp(light) | D-3 alias 保持 |
 | lossGreen | =candleDown | =candleDown(light) | D-3 alias 保持 |
 
-**测试用 `maxChannelDiff ≥ 0.4`**（沿用 F2 dark 集 `chartPaletteContrastWithBackground` 同阈值同方法）作通道距离代理；**真 WCAG AA 亮度对比是顺位 9 运行时验收项**（outline §三.3 运行时矩阵，设备实测），plan/单元测试不冒充亮度对比，如实记。
+**对比测试（codex R1-F1 升级）**：单元测试用**真 WCAG 相对亮度对比**（`wcagContrastRatio`：sRGB→线性 + `0.2126R+0.7152G+0.0722B` + `(L_hi+0.05)/(L_lo+0.05)`），断言 light 7 个图形前景 token vs 近白底 **≥ 3:1**（图形元素阈），替换原 `maxChannelDiff ≥ 0.4` 通道距离代理（该代理放过 DEA 2.74:1）。**marker 字母对比（codex R1-F2）**：交易标记字母为饱和涨/跌圆点上的覆盖文字 = **固定白**（scheme-independent，不用 `currentPalette.text`——light 下 text 近黑会在彩色点上失对比，属回归），断言固定白 vs light/dark 涨跌点 **≥ 3:1**。设备真观感（亮/色温）仍是运行时矩阵项（outline §三.3）。gridLine 刻意 subtle 不计对比。
 
 **`background` token 作用域澄清（R1-Med4）**：`KLineView.backgroundColor = .clear`（`KLineView.swift:28`），图表画布**透明、无 chart-area 底色填充**——图表大面积底色来自 SwiftUI 宿主窗口背景（系统色，随 `colorScheme` 经 `.preferredColorScheme` 适配）。`background` token **仅**用于 `KLineView+Crosshair.drawLabelBox` 的十字光标价签/时签框填充。故 light `background=0.98,0.98,0.99` 只改标签框底色，不改图表大底色（那由 SwiftUI 侧适配）。runbook/acceptance 据此措辞，勿把 `background` token 当图表画布底色契约。
 

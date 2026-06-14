@@ -24,11 +24,13 @@ extension KLineView {
         defer { ctx.restoreGState() }
 
         // D10：dot 半径 5pt，字母 10pt bold 白色居中。
+        // 顺位9：字母为饱和涨/跌圆点上的覆盖文字 → 固定白（scheme-independent），不随 scheme 用
+        // currentPalette.text（light 下 text=近黑会在彩色点上失对比，codex R1-F2 回归修复）。点底色仍 scheme-aware。
         let radius: CGFloat = 5
         let font = UIFont.boldSystemFont(ofSize: 10)
         let textAttrs: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: currentPalette.text,
+            .foregroundColor: UIColor.white,
         ]
 
         for p in placements {

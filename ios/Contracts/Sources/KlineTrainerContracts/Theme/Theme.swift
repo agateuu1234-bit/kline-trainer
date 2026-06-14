@@ -83,7 +83,8 @@ public struct AppPalette: Equatable, Sendable {
         background: AppColorTokens.background, gridLine: AppColorTokens.gridLine, text: AppColorTokens.text)
 
     /// 白天集 = dark 派生。`up`/`down` 抽出复用，保证 D-3 alias（macdBar/盈亏 = candle）与红涨绿跌色相。
-    /// RGBA 取值见 plan §D2；maxChannelDiff ≥ 0.4 代理对比，真 WCAG AA 设备实测（运行时矩阵）。
+    /// RGBA 取值见 plan §D2；前景 token 经 WCAG 相对亮度对比 ≥ 3:1 vs 白底（`lightForegroundContrastWCAG` 测；
+    /// codex R1-F1 修：旧 maxChannelDiff 代理放过 DEA 2.74:1，改真亮度对比闸门）。
     public static let light: AppPalette = {
         let up   = AppColorRGBA(red: 0.82, green: 0.10, blue: 0.12)   // 红涨（白底加深）
         let down = AppColorRGBA(red: 0.05, green: 0.55, blue: 0.25)   // 绿跌（白底加深）
@@ -92,7 +93,7 @@ public struct AppPalette: Equatable, Sendable {
             ma66: AppColorRGBA(red: 0.42, green: 0.25, blue: 0.72),
             bollLine: AppColorRGBA(red: 0.75, green: 0.50, blue: 0.05),
             macdDIF: AppColorRGBA(red: 0.15, green: 0.15, blue: 0.18),
-            macdDEA: AppColorRGBA(red: 0.80, green: 0.55, blue: 0.0),
+            macdDEA: AppColorRGBA(red: 0.70, green: 0.45, blue: 0.0),  // codex R1-F1：0.80/0.55→0.70/0.45（2.74:1→3.76:1 ≥3）
             macdBarPositive: up, macdBarNegative: down,
             profitRed: up, lossGreen: down,
             background: AppColorRGBA(red: 0.98, green: 0.98, blue: 0.99),

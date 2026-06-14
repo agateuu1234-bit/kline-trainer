@@ -2,6 +2,21 @@ import Testing
 import Foundation
 @testable import KlineTrainerContracts
 
+// MARK: - WCAG 相对亮度对比 helper（codex R1-F1：替换 maxChannelDiff 代理为真亮度对比闸门）
+// WCAG 2.x：先 sRGB→线性，再 L=0.2126R+0.7152G+0.0722B；对比比 =(L_hi+0.05)/(L_lo+0.05)。
+private func wcagLinear(_ c: Double) -> Double {
+    c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+}
+private func wcagRelativeLuminance(_ c: AppColorRGBA) -> Double {
+    0.2126 * wcagLinear(c.red) + 0.7152 * wcagLinear(c.green) + 0.0722 * wcagLinear(c.blue)
+}
+private func wcagContrastRatio(_ a: AppColorRGBA, _ b: AppColorRGBA) -> Double {
+    let la = wcagRelativeLuminance(a), lb = wcagRelativeLuminance(b)
+    let hi = max(la, lb), lo = min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+}
+private let wcagWhite = AppColorRGBA(white: 1.0)
+
 @Suite("AppPalette light/dark 双集 + scheme 选取（顺位9 夜间）")
 struct AppPaletteTests {
 
@@ -35,12 +50,24 @@ struct AppPaletteTests {
         #expect(down.green > up.green)
     }
 
-    @Test("light 对比代理：前景 token vs 近白背景 通道差 ≥ 0.4")
-    func lightContrast() {
+    @Test("light WCAG 对比：前景 token vs 近白背景 相对亮度对比 ≥ 3:1（图形元素，codex R1-F1）")
+    func lightForegroundContrastWCAG() {
         let bg = AppPalette.light.background
         let p = AppPalette.light
+        // 7 个图形前景 token（gridLine 刻意 subtle 不计；text 同时是文字，下限更高自然满足）。
         for c in [p.text, p.candleUp, p.candleDown, p.ma66, p.bollLine, p.macdDIF, p.macdDEA] {
-            #expect(c.maxChannelDiff(to: bg) >= 0.4)
+            #expect(wcagContrastRatio(c, bg) >= 3.0)
+        }
+        // macdDEA 是 codex R1-F1 修复点：确保它真过 3:1（旧 0.80/0.55/0 仅 2.74:1）。
+        #expect(wcagContrastRatio(p.macdDEA, bg) >= 3.0)
+    }
+
+    @Test("marker 字母（固定白）vs 涨/跌彩色圆点 对比 ≥ 3:1（light+dark，codex R1-F2）")
+    func markerGlyphContrastWCAG() {
+        // 交易标记字母为饱和圆点上的覆盖文字 = 固定白；两 scheme 的涨/跌点底色均须与白足够对比。
+        for pal in [AppPalette.light, AppPalette.dark] {
+            #expect(wcagContrastRatio(wcagWhite, pal.candleUp) >= 3.0)
+            #expect(wcagContrastRatio(wcagWhite, pal.candleDown) >= 3.0)
         }
     }
 
