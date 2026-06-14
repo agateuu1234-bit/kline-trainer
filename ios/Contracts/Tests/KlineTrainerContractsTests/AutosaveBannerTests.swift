@@ -88,4 +88,18 @@ struct AutosaveBannerTests {
         await coord.drainAutosaveForTesting()
         #expect(coord.autosaveErrorGeneration == 0)
     }
+
+    // codex-13a-R2：后台 flush 失败 → autosaveBannerError 持续置位（TrainingView 回前台 .active 重放的前提）。
+    // 后台 flush 失败时 toast 在 app 不可见时弹+过期；banner 不被清（仅成功/endSession/reset 清）→ 回前台可重放。
+    // UI 重放本身（scenePhase .active 分支）走 Catalyst 编译闸门；本测试守 coordinator 层「错误留存」契约。
+    @Test("flushAutosave 失败 → autosaveBannerError 持续置位（供前台重放，不 teardown）")
+    func backgroundFlushFailure_bannerPersistsForForegroundReplay() async throws {
+        let (coord, _, pending, _) = PIFixtures.makeCoordinator()
+        let engine = try await coord.startNewNormalSession()
+        pending.failNextSavePending = .persistence(.diskFull)
+        await coord.flushAutosave(engine: engine)               // 模拟 scenePhase→background 的 flush（失败）
+        #expect(coord.autosaveBannerError == .persistence(.diskFull), "失败 banner 须留存供回前台重放")
+        #expect(coord.autosaveErrorGeneration == 1)
+        #expect(coord.activeEngine === engine)                  // 不 teardown
+    }
 }

@@ -81,6 +81,12 @@ public struct TrainingView: View {
             switch newPhase {
             case .active:
                 engine.onSceneActivated()                       // modules §U2 既有动画链（不替换）
+                // codex-13a-R2：回前台重放未确认的 autosave 失败。后台 flush 失败时 generation observer
+                // 在 app 不可见时已弹过 toast 并 2s 过期 → 用户回前台无感知「进度可能未落盘」。banner 仍置位
+                // （仅成功/endSession/reset 清），故此处重放使其在可见时呈现。非阻塞、不 teardown。
+                if let e = lifecycle.coordinator.autosaveBannerError, e.shouldShowToast {
+                    presentToast(e.userMessage)
+                }
             case .inactive, .background:
                 Task { await lifecycle.flushForBackground() }   // §4.6 item4：失活/后台立即 flush（OS 可能随后杀进程）
             @unknown default:
