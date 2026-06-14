@@ -57,7 +57,7 @@ codex 评审有**两条独立执行通道**（对齐 `.claude/workflow-rules.jso
 **算法**：
 1. 从 `codex.pin.json` 读 `codex_plugin_cc.tag`、`commit_sha`、`repo`（python3 解析，与 CI 同源字段）。任一缺失 → stderr 报错 + 非零退出。
 2. 缓存目录按 commit 取键：`CACHE_ROOT="${CODEX_PINNED_CACHE:-$HOME/.cache/kline-trainer-codex}"`；`SRC="$CACHE_ROOT/<commit_sha>/src"`；`PLUGIN="$SRC/plugins/codex"`（commit 入路径 → re-pin 换 commit 自动用新目录，旧缓存不复用）。
-3. **取得**（缺 `$PLUGIN/scripts/codex-companion.mjs` 时）：`git clone --depth 1 --branch <tag> <repo> "$SRC"` → `ACTUAL=$(git -C "$SRC" rev-parse HEAD)`；`ACTUAL != commit_sha` → 删 `$SRC` 重试一次；再不符 → fail-closed。（镜像 CI 第 113–117 行。）
+3. **取得**（缺 `$PLUGIN/scripts/codex-companion.mjs` 时）：`git clone --depth 1 --branch <tag> <repo> "$SRC"` → `ACTUAL=$(git -C "$SRC" rev-parse HEAD)`；`ACTUAL != commit_sha` → **直接 fail-closed（不重试）**。理由：commit 不符 = 钉死 tag 与 pinned commit 真分叉（tag 被移动 / 投毒），对同一 tag 重克隆是确定性、徒劳的——fail-fast 才是正确的完整性信号（重试只对 step 4 的瞬时部分/损坏内容有意义）。（镜像 CI 第 113–117 行的 commit 核对；CI 同样不对 mismatch 重试。）
 4. **校验**（每次都跑，含缓存命中）：`node .claude/scripts/verify-codex-tree.mjs codex.pin.json "$PLUGIN"`；非零 → 删 `$SRC` 重克隆一次 → 再非零 → fail-closed。（防本地缓存被篡改/残缺。）
 5. 打印 `$PLUGIN/scripts/codex-companion.mjs`，退出 0。
 
