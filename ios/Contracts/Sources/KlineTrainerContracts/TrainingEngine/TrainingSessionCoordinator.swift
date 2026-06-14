@@ -521,7 +521,7 @@ public final class TrainingSessionCoordinator {
         autosaveDirty = false
         ticksSinceAutosave = 0
         lastAutosaveError = nil
-        autosaveBannerError = nil                    // §B.2：新 session 清 UI 信号
+        autosaveBannerError = nil                    // §B.2：新 session 清 UI 信号（防御性冗余：D10 下 endSession 必先清，belt-and-suspenders）
     }
 
     /// 10b-D7（§4.7f）：训练组文件可弃损坏判据（dbFactory.openAndVerify 对坏文件抛的可恢复错误）。

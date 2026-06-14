@@ -41,8 +41,12 @@ struct AutosaveBannerTests {
         #expect(coord.autosaveBannerError == nil)
     }
 
-    @Test("新 session 启动（resetAutosaveState）清零 banner")
-    func newSession_clearsBanner() async throws {
+    // 真实用户场景：上一局 autosave 失败（banner 置位）→ 退出（endSession 清）→ 开新局 → 无 stale toast。
+    // 注：本测试覆盖 end→new-session 整链；`resetAutosaveState` 的 banner 清零（coordinator 第二处）是
+    // 防御性冗余——D10 precondition 保证 startNewNormalSession 前必 endSession（已清），故 reset 处的清零
+    // 在合规调用序下恒见 nil。两处清零是 spec §B.2 要求的 belt-and-suspenders（code-quality review Low 记录）。
+    @Test("end→新 session 整链：上一局失败 banner 退出后不复活（无跨局 stale toast）")
+    func endThenNewSession_noStaleBanner() async throws {
         let (coord, _, pending, _) = PIFixtures.makeCoordinator()
         let e1 = try await coord.startNewNormalSession()
         pending.failNextSavePending = .persistence(.diskFull)
