@@ -323,28 +323,36 @@ struct DownloadAcceptanceRunnerTests {
         #expect(try journal.listByState(.confirmPending).count == 1)
     }
 
-    // codex-13a-R4：终态 confirm 失败（4xx 403 / internalError 畸形响应）→ .rejected（surface），
-    // 不藏 pending。否则无限重试 + 用户不可见。
-    @Test func run_confirm4xxForbidden_terminalRejected() async throws {
+    // codex-13a-R5（安全红线）：模糊 confirm 失败（403 / 畸形 200 响应 → internalError）= 服务端**可能已提交**
+    // → .pendingConfirmation（保留缓存 + confirmPending 待重试），**不**据模糊失败 reject+删文件致不可逆失同步。
+    @Test func run_confirm403_ambiguous_pendingNotRejected() async throws {
         let journal = InMemoryAcceptanceJournalDAO()
         let cache = InMemoryCacheManager()
         let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.serverError(code: 403))),
                                 cache: cache, journal: journal)
         let result = await runner.run(meta: makeMeta(id: 7), leaseId: "lease")
-        #expect(result == .rejected(.network(.serverError(code: 403))), "403 终态 → rejected（非 pending）")
-        #expect(try journal.listByState(.rejected).count == 1)
-        #expect(try journal.listByState(.confirmPending).isEmpty)
+        guard case .pendingConfirmation(let file) = result else {
+            Issue.record("expected .pendingConfirmation (ambiguous → retain), got \(result)"); return
+        }
+        #expect(file.id == 7)
+        #expect(cache.listAvailable().contains(where: { $0.id == 7 }), "模糊失败不删文件（可能已提交）")
+        #expect(try journal.listByState(.confirmPending).count == 1)
+        #expect(try journal.listByState(.rejected).isEmpty)
     }
 
-    @Test func run_confirmInternalError_terminalRejected() async throws {
+    @Test func run_confirmMalformedResponse_ambiguous_pendingNotRejected() async throws {
         let journal = InMemoryAcceptanceJournalDAO()
         let cache = InMemoryCacheManager()
         let runner = makeRunner(api: FakeAPIClient(confirmError: .internalError(module: "P1", detail: "malformed 200 body")),
                                 cache: cache, journal: journal)
         let result = await runner.run(meta: makeMeta(id: 8), leaseId: "lease")
-        #expect(result == .rejected(.internalError(module: "P1", detail: "malformed 200 body")), "畸形响应 internalError 终态 → rejected（非 pending）")
-        #expect(try journal.listByState(.rejected).count == 1)
-        #expect(try journal.listByState(.confirmPending).isEmpty)
+        guard case .pendingConfirmation(let file) = result else {
+            Issue.record("expected .pendingConfirmation (ambiguous → retain), got \(result)"); return
+        }
+        #expect(file.id == 8)
+        #expect(cache.listAvailable().contains(where: { $0.id == 8 }), "畸形响应不删文件（可能已提交）")
+        #expect(try journal.listByState(.confirmPending).count == 1)
+        #expect(try journal.listByState(.rejected).isEmpty)
     }
 
     @Test func run_cancellationError_mappedToInternalP2() async throws {

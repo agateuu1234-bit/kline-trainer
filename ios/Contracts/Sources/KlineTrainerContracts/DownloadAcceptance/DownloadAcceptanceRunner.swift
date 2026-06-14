@@ -14,11 +14,12 @@ import Foundation
 public let TRAINING_SET_SCHEMA_VERSION = 1
 
 /// 下载验收的同步结果（spec §P2 L1764-1767）。
-/// 三态结局（codex-13a-R3 精炼 plan 决策 5）：
+/// 三态结局（codex-13a-R3 精炼 plan 决策 5；分类口径见 R5 安全红线）：
 /// - `.confirmed`：服务端确认 + 本地缓存可用。
-/// - `.pendingConfirmation`：本地下载/校验/落盘**已成功且文件保留**，仅服务端确认网络不确定（timeout/5xx）→
-///   journal 停 `confirmPending` 待 `retryPendingConfirmations` 重试。**文件可用**，**非失败**。
-/// - `.rejected`：终态失败——下载/CRC/解压/校验/落盘失败，或服务端明确拒收(409/404，本地副本已删)。
+/// - `.pendingConfirmation`：本地下载/校验/落盘**已成功且文件保留可用**，但服务端确认未明确成功——**除明确 lease
+///   失效(409/404)外的一切不确定 confirm 结局**（timeout/offline/5xx/429/403/cancellation/畸形响应）均归此（codex-13a-R5：
+///   confirm 幂等 side-effecting，服务端可能已提交，保留待 `retryPendingConfirmations` 重试）。**文件可用，非失败**。
+/// - `.rejected`：终态失败——下载/CRC/解压/校验/落盘失败，或服务端**明确拒收**(409/404 lease 失效，本地副本已删)。
 /// 原决策 5「pending 与 rejected 同 return type，靠 journal 区分」在**有 journal 访问的调用方**成立；
 /// 但 UI 消费方（顺位 13a DownloadBatchFeedback）无 journal 访问 → 会把可用的 pending 误报为「失败」，
 /// 故提升为独立 case（codex-13a-R3 high-value，consumer-need-driven）。
@@ -107,7 +108,7 @@ public final class DownloadAcceptanceRunner: Sendable {
             switch outcome {
             case .confirmed:
                 return .confirmed(file)
-            case .rejected(let e):                // 终态（409/404/4xx/internalError）→ 删本地 cache 副本（lease/响应不可信）
+            case .rejected(let e):                // 仅 409/404 明确 lease 失效 → 删本地 cache 副本（服务端确定未提交）
                 try? cache.delete(file)
                 return .rejected(e)
             case .pending:                        // 网络不确定 → 保留 cache 副本待重试（文件可用，非失败，codex-13a-R3）
@@ -172,9 +173,11 @@ public final class DownloadAcceptanceRunner: Sendable {
     private enum ConfirmOutcome { case confirmed; case rejected(AppError); case pending(AppError) }
 
     /// 先标 confirmPending（状态机要求 + 崩溃安全），再调 confirm。
-    /// 成功 → confirmed；**瞬态**（timeout/offline/5xx）→ 停留 confirmPending（pending，文件保留待重试）；
-    /// **终态**（409/404 lease 失效 + 4xx 如 403 未授权 + internalError 畸形响应）→ rejected（surface）。
-    /// codex-13a-R4：仅瞬态归 pending——否则终态确认失败被藏进 pending，无限重试 + 用户不可见。
+    /// 成功 → confirmed；**仅明确 lease 失效（409/404）→ rejected**（删本地副本）；**其余一切不确定结局**
+    /// （timeout/offline/5xx/429/4xx-403/cancellation/畸形 200 → internalError）→ 停留 confirmPending（pending）。
+    /// codex-13a-R5（安全红线，覆盖 R4）：confirm 是 side-effecting + 幂等——response 校验失败前服务端**可能已提交**；
+    /// 故除明确 lease 失效外，**保留缓存 + confirmPending 待重试**，不可据模糊失败 reject+删文件致服务端/客户端不可逆失同步。
+    /// 持久不可确认（如坏 lease 403）经 retryPendingConfirmations 有界重试，feedback 显「待确认」（非「失败」，文件本地可用）。
     private func attemptConfirm(trainingSetId: Int, leaseId: String,
                                 sqliteLocalPath: String?) async -> ConfirmOutcome {
         try? journal.upsert(trainingSetId: trainingSetId, leaseId: leaseId, state: .confirmPending,
@@ -187,16 +190,13 @@ public final class DownloadAcceptanceRunner: Sendable {
         } catch {
             let e = Self.asAppError(error)
             switch e {
-            case .network(.timeout), .network(.offline):
-                return .pending(e)   // 瞬态网络 → 停留 confirmPending；本地文件保留待重试
-            case .network(.serverError(let code)) where (500...599).contains(code):
-                return .pending(e)   // 5xx 服务端瞬时 → 同上（4xx 不在此，落 default 终态）
-            default:
-                // 终态：409/404（lease 失效）+ 4xx（403 等）+ internalError（畸形响应）→ 标 rejected 并 surface，
-                // 不藏 pending（codex-13a-R4）。
+            case .network(.leaseExpired), .network(.leaseNotFound):
+                // 仅明确 lease 失效（409/404）= 服务端确定未提交 → rejected + 删副本（安全）。
                 try? journal.upsert(trainingSetId: trainingSetId, leaseId: leaseId, state: .rejected,
                                     sqliteLocalPath: nil, contentHash: nil, lastError: e.userMessage)
                 return .rejected(e)
+            default:
+                return .pending(e)   // 其余一切不确定 confirm 结局 → 停留 confirmPending；本地文件保留待重试（codex-13a-R5）
             }
         }
     }
