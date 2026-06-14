@@ -32,7 +32,8 @@ public struct AppRootView: View {
                     if let t = router.activeTraining {
                         TrainingView(lifecycle: t.lifecycle,
                                      onExit: { Task { await router.exitTraining() } },
-                                     onSessionEnded: { id in Task { await router.sessionEnded(recordId: id) } })
+                                     onSessionEnded: { id in Task { await router.sessionEnded(recordId: id) } },
+                                     onReplaySettlement: { record in router.presentReplaySettlement(record: record) })
                             .navigationBarBackButtonHidden(true)            // 抑制系统返回+back-swipe，强制经「返回」按钮 teardown
                     }
                 }

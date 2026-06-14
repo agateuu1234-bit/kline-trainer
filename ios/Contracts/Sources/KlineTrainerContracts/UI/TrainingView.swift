@@ -1,11 +1,14 @@
 // ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift
-// Kline Trainer Swift Contracts — U2 训练页 SwiftUI 薄壳（Wave 2 顺位 9；Wave 3 顺位 7 扩：仓位 X/5 + 结束本局手动强平 + 交易 Toast/触觉）
+// Kline Trainer Swift Contracts — U2 训练页 SwiftUI 薄壳（Wave 2 顺位 9；Wave 3 顺位 7 扩：仓位 X/5 + 结束本局手动强平 + 交易 Toast/触觉；Wave 3 顺位 8 扩：Replay 结束分流非持久结算窗）
 // Spec: kline_trainer_modules_v1.4.md §U2 L2049-2068（scenePhase 中继）
 //     + kline_trainer_plan_v1.5.md §6.2（顶栏 / 双 K 线区 / 交易按钮 / 自动结束）。
 //
 // 决议（D1/D2/D4/D5/D9/D10/D11）：
 // - D1 init 扩 (lifecycle:, onExit:, onSessionEnded:)（modules §U2 示意，outline §124 权威接线）。
-// - D2 不呈现 SettlementView：自动结束调 finalizeForSettlement → recordId? 经 onSessionEnded 上交顺位 11。
+// - D2 Normal/Review 不呈现 SettlementView：结束调 finalizeForSettlement → recordId? 经 onSessionEnded 上交顺位 11。
+//   **Wave 3 顺位 8（D-replay-route）**：结束路由按 mode 分流（routeEndOfSession）——Replay 取非持久 in-memory
+//   payload（lifecycle.replaySettlementRecord）经 onReplaySettlement 上交 AppRouter 呈现结算窗（RFC §4.5，不入账）；
+//   Normal 仍走 onSessionEnded。
 // - D4 自动结束检测 tick>=maxTick 且 shouldShowSettlement()（Review 抑制）；D5 didFinalize 一次性闸门。
 // - D9 PositionPicker 全档启用，buy 返 failure 兜；D10 交易按钮仅 Normal/Replay，持有/观察随持仓切文案。
 // - D11 #if canImport(UIKit)：嵌 ChartContainerView（UIViewRepresentable）故同门；host 不编译，Catalyst 编译闸门。
@@ -20,6 +23,7 @@ public struct TrainingView: View {
     private let lifecycle: TrainingSessionLifecycle
     private let onExit: () -> Void
     private let onSessionEnded: (Int64?) -> Void
+    private let onReplaySettlement: (TrainingRecord) -> Void
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var didFinalize = false
@@ -32,10 +36,12 @@ public struct TrainingView: View {
 
     public init(lifecycle: TrainingSessionLifecycle,
                 onExit: @escaping () -> Void,
-                onSessionEnded: @escaping (Int64?) -> Void) {
+                onSessionEnded: @escaping (Int64?) -> Void,
+                onReplaySettlement: @escaping (TrainingRecord) -> Void) {
         self.lifecycle = lifecycle
         self.onExit = onExit
         self.onSessionEnded = onSessionEnded
+        self.onReplaySettlement = onReplaySettlement
     }
 
     private var engine: TrainingEngine { lifecycle.engine }
@@ -171,7 +177,7 @@ public struct TrainingView: View {
         guard !didFinalize else { return }
         guard engine.forceCloseManually() else { return }
         didFinalize = true
-        runFinalize()
+        routeEndOfSession()
     }
 
     // D4/D5：判定下放 host-测 lifecycle.shouldAutoFinalize；壳仅持一次性 didFinalize + 触发 finalize。
@@ -179,7 +185,7 @@ public struct TrainingView: View {
     private func maybeAutoEnd() {
         guard lifecycle.shouldAutoFinalize(didFinalize: didFinalize) else { return }
         didFinalize = true
-        runFinalize()
+        routeEndOfSession()
     }
 
     // §4.7a 失败保留：finalize 抛错 → 保留 session（不 onSessionEnded(nil) 拆毁）→ alert 重试/放弃。
@@ -199,6 +205,21 @@ public struct TrainingView: View {
             } catch {
                 finalizeFailed = true
             }
+        }
+    }
+
+    // 顺位 8（RFC §4.5）：结束路由分流。Replay → 非持久结算窗（取 in-memory payload 经 onReplaySettlement
+    // 上交 AppRouter）；Normal → 入账（runFinalize，字节不变）。Review 不可达此方法
+    // （shouldAutoFinalize 抑制 + forceCloseManually 对 Review 返 false），故 else 恒为 Normal。
+    // 读 engine.flow.mode 与既有 showsTradeButtons=canBuySell() 同范式（壳层 flow-capability 分流）。
+    private func routeEndOfSession() {
+        guard engine.flow.mode == .replay else { runFinalize(); return }
+        do {
+            let record = try lifecycle.replaySettlementRecord()   // 强平已由上面 caller 先行（D4）
+            onReplaySettlement(record)
+        } catch {
+            // 不可达（replay + 活跃会话已保证）；防御性 retreat（不入账，走 AppRouter replay-nil 兜底）
+            onSessionEnded(nil)
         }
     }
 
@@ -226,7 +247,8 @@ public struct TrainingView: View {
     TrainingView(
         lifecycle: TrainingSessionLifecycle(engine: .preview(), coordinator: .preview()),
         onExit: {},
-        onSessionEnded: { _ in })
+        onSessionEnded: { _ in },
+        onReplaySettlement: { _ in })
 }
 #endif
 #endif

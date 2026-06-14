@@ -134,8 +134,10 @@ public final class AppRouter {
                 setError(error); activeTraining = nil; await loadHome()
             }
         } else {
-            // recordId==nil：replay 结束（retreat）正常路径。normal finalize 失败自 Wave 3 10a 起
-            // 不再走此路径（TrainingView 失败保留 + 重试/放弃，§4.7a）；normal-nil 分支保留作防御性守卫，
+            // recordId==nil：防御性兜底分支。自 Wave 3 顺位 8 起，**replay 结束改经 onReplaySettlement →
+            // presentReplaySettlement 走结算窗**（RFC §4.5），不再经此 nil 路径；replay-nil 仅在
+            // TrainingView.routeEndOfSession 的不可达 catch 兜底时到达。normal finalize 失败自 Wave 3 10a 起
+            // 亦不再走此路径（TrainingView 失败保留 + 重试/放弃，§4.7a）；两者均保留作防御性守卫，
             // 并由 AppRouterTests.sessionEnded_normalNilError 单测覆盖（直接注入 nil 验 errorMessage）；
             // 若生产回归命中本路径则说明 §4.7a 调用链有漏洞。
             await activeTraining?.lifecycle.endAfterSettlement()
@@ -150,6 +152,14 @@ public final class AppRouter {
         activeModal = nil
         activeTraining = nil
         await loadHome()
+    }
+
+    /// 顺位 8（RFC §4.5）：replay 结束的**非持久化**结算窗。caller（TrainingView）已强平 + 经
+    /// `lifecycle.replaySettlementRecord()` 取 in-memory payload（`coordinator.replaySettlementPayload`，
+    /// 不写 record / 不触 pending）→ 此处仅设 `.settlement` modal。确认复用 `confirmSettlement()`
+    /// （`endAfterSettlement`→`endSession` 关 reader，无持久化）。replay 不计入统计、pending 不动。
+    public func presentReplaySettlement(record: TrainingRecord) {
+        activeModal = .settlement(record)
     }
 
     public func clearError() { errorMessage = nil }
