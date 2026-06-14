@@ -20,6 +20,7 @@ public struct TrainingView: View {
     private let lifecycle: TrainingSessionLifecycle
     private let onExit: () -> Void
     private let onSessionEnded: (Int64?) -> Void
+    private let onReplaySettlement: (TrainingRecord) -> Void
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var didFinalize = false
@@ -32,10 +33,12 @@ public struct TrainingView: View {
 
     public init(lifecycle: TrainingSessionLifecycle,
                 onExit: @escaping () -> Void,
-                onSessionEnded: @escaping (Int64?) -> Void) {
+                onSessionEnded: @escaping (Int64?) -> Void,
+                onReplaySettlement: @escaping (TrainingRecord) -> Void) {
         self.lifecycle = lifecycle
         self.onExit = onExit
         self.onSessionEnded = onSessionEnded
+        self.onReplaySettlement = onReplaySettlement
     }
 
     private var engine: TrainingEngine { lifecycle.engine }
@@ -171,7 +174,7 @@ public struct TrainingView: View {
         guard !didFinalize else { return }
         guard engine.forceCloseManually() else { return }
         didFinalize = true
-        runFinalize()
+        routeEndOfSession()
     }
 
     // D4/D5：判定下放 host-测 lifecycle.shouldAutoFinalize；壳仅持一次性 didFinalize + 触发 finalize。
@@ -179,7 +182,7 @@ public struct TrainingView: View {
     private func maybeAutoEnd() {
         guard lifecycle.shouldAutoFinalize(didFinalize: didFinalize) else { return }
         didFinalize = true
-        runFinalize()
+        routeEndOfSession()
     }
 
     // §4.7a 失败保留：finalize 抛错 → 保留 session（不 onSessionEnded(nil) 拆毁）→ alert 重试/放弃。
@@ -199,6 +202,21 @@ public struct TrainingView: View {
             } catch {
                 finalizeFailed = true
             }
+        }
+    }
+
+    // 顺位 8（RFC §4.5）：结束路由分流。Replay → 非持久结算窗（取 in-memory payload 经 onReplaySettlement
+    // 上交 AppRouter）；Normal → 入账（runFinalize，字节不变）。Review 不可达此方法
+    // （shouldAutoFinalize 抑制 + forceCloseManually 对 Review 返 false），故 else 恒为 Normal。
+    // 读 engine.flow.mode 与既有 showsTradeButtons=canBuySell() 同范式（壳层 flow-capability 分流）。
+    private func routeEndOfSession() {
+        guard engine.flow.mode == .replay else { runFinalize(); return }
+        do {
+            let record = try lifecycle.replaySettlementRecord()   // 强平已由上面 caller 先行（D4）
+            onReplaySettlement(record)
+        } catch {
+            // 不可达（replay + 活跃会话已保证）；防御性 retreat（不入账，走 AppRouter replay-nil 兜底）
+            onSessionEnded(nil)
         }
     }
 
@@ -226,7 +244,8 @@ public struct TrainingView: View {
     TrainingView(
         lifecycle: TrainingSessionLifecycle(engine: .preview(), coordinator: .preview()),
         onExit: {},
-        onSessionEnded: { _ in })
+        onSessionEnded: { _ in },
+        onReplaySettlement: { _ in })
 }
 #endif
 #endif
