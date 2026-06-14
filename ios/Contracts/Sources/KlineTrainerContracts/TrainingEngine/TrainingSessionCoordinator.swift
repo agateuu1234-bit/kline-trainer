@@ -143,7 +143,9 @@ public final class TrainingSessionCoordinator {
                 throw AppError.trainingSet(.fileNotFound)    // 缓存耗尽 → caller 重下
             }
             do {
-                opened = (try openReader(for: file), file)
+                let reader = try openReader(for: file)
+                cache.touch(file)                          // §A touch-on-use（E6a-R3）：成功打开即刷 LRU mtime
+                opened = (reader, file)
             } catch where isCorruptTrainingSet(error) {
                 try? cache.delete(file)   // best-effort 删损坏训练组（可弃）：.fileNotFound=已删 / .diskFull=留待下次；均不阻重试
             }
@@ -186,6 +188,7 @@ public final class TrainingSessionCoordinator {
             try pendingRepo.clearPending()                   // durable 清（app.sqlite 写，非删）
             return nil                                       // 首页降级到新局
         }
+        cache.touch(file)                                    // §A touch-on-use：成功打开即刷 LRU mtime
         do {
             let allCandles = try reader.loadAllCandles()
             let mt = try maxTick(from: allCandles)
@@ -233,6 +236,7 @@ public final class TrainingSessionCoordinator {
             try? cache.delete(file)                          // 同上（best-effort 可弃）：训练组损坏；record 仍在 app.sqlite（不删）
             throw AppError.persistence(.dbCorrupted)         // 无法替代，surface
         }
+        cache.touch(file)                                    // §A touch-on-use：成功打开即刷 LRU mtime
         do {
             // maxTick 由 .review(record) 内部据 record.finalTick 派生；make 亦校验 .m3 非空 +
             // m3.last.endGlobalIndex >= finalTick，故此处不重复 maxTick(from:)（D3 / LOW#8）。
@@ -270,6 +274,7 @@ public final class TrainingSessionCoordinator {
             try? cache.delete(file)                          // 同上（best-effort 可弃）：训练组损坏；record 仍在 app.sqlite（不删）
             throw AppError.persistence(.dbCorrupted)         // 无法替代，surface
         }
+        cache.touch(file)                                    // §A touch-on-use：成功打开即刷 LRU mtime
         do {
             let allCandles = try reader.loadAllCandles()
             let mt = try maxTick(from: allCandles)
