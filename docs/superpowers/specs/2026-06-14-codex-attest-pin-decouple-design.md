@@ -41,11 +41,12 @@ codex 评审有**两条独立执行通道**（对齐 `.claude/workflow-rules.jso
 | 文件 | 动作 | 职责 |
 |---|---|---|
 | `.claude/scripts/resolve-pinned-codex.sh` | **新增** | 唯一职责：输出一份「已校验的钉死 `codex-companion.mjs` 绝对路径」；失败即非零退出。可被 `codex-attest.sh` 调用、可独立测试。 |
-| `.claude/scripts/codex-attest.sh` | **改** | 用 `CODEX_PATH=$(bash .claude/scripts/resolve-pinned-codex.sh)` 替换写死 1.0.3 路径块（第 64 行）+ 存在性检查 + 可选 `codex-companion.sha256` 块（69–77 行）。其余（node 二进制白名单 40–61、verdict 解析、ledger 写入）原样。 |
-| `.claude/settings.json` | **改** | 删第 41 行 stale 的 1.0.3 写死允许（第 147 行通配已覆盖）。 |
-| `tests/scripts/test-resolve-pinned-codex.sh`（或并入现有 test 风格） | **新增** | resolver 的 host 可跑、不真联网测试。 |
+| `.claude/scripts/codex-attest.sh` | **改** | (a) 把 `--dry-run` 短路**移到解析钉死 codex 之前**（避免 dry-run 触发克隆）；(b) 用 `CODEX_PATH=$(bash "$SCRIPT_DIR/resolve-pinned-codex.sh")` 替换写死 1.0.3 路径块（第 64 行）+ 存在性检查 + 可选 `codex-companion.sha256` 块（69–77 行）+ export `CLAUDE_PLUGIN_ROOT`。其余（node 二进制白名单 40–61、verdict 解析、ledger 写入）原样。 |
+| `tests/scripts/test-resolve-pinned-codex.sh` | **新增** | resolver 的 host 可跑、不真联网测试（stub git + fixture pin + CODEX_PINNED_CACHE 注入）。 |
 
-**不动**：`codex.pin.json`、`.github/workflows/**`、`verify-codex-tree.mjs`、attest 账本/guard/override 机制本身、任何业务代码。
+**不动**：`codex.pin.json`、`.github/workflows/**`、`verify-codex-tree.mjs`、`.claude/settings.json`、attest 账本/guard/override 机制本身、任何业务代码。
+
+**`.claude/settings.json:41` 不在本 PR 改（settings-scope 校正）**：该行写死 `node …/codex/1.0.3/…codex-companion.mjs` 允许，因缓存升 1.0.4 已成 stale——但它是 **harmless dead config**（该路径已不存在、永不匹配；第 147 行通配 `node */codex-companion.mjs*` 已覆盖任意真实直调），且**非本 PR 引入**（缓存自动更新所致，非「我的 mess」）。改 `settings.json` 会触发 `hardening_6_gate.yml`（其 path filter 含 `settings.json`）这条**与本变更无关**的闸门，徒增 surface。故**不改**，列为 cosmetic residual（§六）。codex-attest.sh 内部的 `node codex-companion.mjs` 是 `bash codex-attest.sh` 的子进程、不经 Claude Bash 权限层，故新解析路径**无需** settings.json 允许。
 
 ### 3.1 `resolve-pinned-codex.sh` 契约
 
@@ -64,9 +65,18 @@ codex 评审有**两条独立执行通道**（对齐 `.claude/workflow-rules.jso
 
 ### 3.2 `codex-attest.sh` 集成点
 
-原（第 63–77 行）写死路径 + 存在检查 + 可选 sha256 块，替换为：
+原结构（第 63–85 行）：locate 写死路径（63–77）→ HEAD echo（79–80）→ `--dry-run` 短路（82–85，消息引用 `$CODEX_PATH`）。**问题**：dry-run 在解析路径之后，改用 resolver 后会让 `--dry-run` 也触发克隆（破坏既有 `test-codex-attest.sh` Test 2 + CI 无网）。**故须 reorder**：先 HEAD echo → 再 `--dry-run` 短路（消息改为不依赖已解析路径、但仍含字面 `codex-companion`）→ 最后才 resolver。替换 63–85 为：
 
 ```sh
+HEAD_SHA_GIT=$(git rev-parse HEAD 2>/dev/null || echo "untracked")
+echo "[codex-attest] auto HEAD=$HEAD_SHA_GIT  scope=$SCOPE"
+
+# Dry-run short-circuits BEFORE resolving the pinned codex (no clone on dry-run).
+if $DRY_RUN; then
+    echo "[codex-attest] DRY RUN - would execute: node <pinned codex-companion.mjs via resolve-pinned-codex.sh> adversarial-review --wait --scope $SCOPE $FOCUS"
+    exit 0
+fi
+
 # Resolve pinned + verified codex-companion.mjs (decoupled from auto-updating plugin cache).
 CODEX_PATH="$(bash "$SCRIPT_DIR/resolve-pinned-codex.sh")" || {
     echo "[codex-attest] ERROR: cannot resolve pinned codex (offline / verify failed); use attest-override.sh on a tty." >&2
@@ -75,7 +85,7 @@ CODEX_PATH="$(bash "$SCRIPT_DIR/resolve-pinned-codex.sh")" || {
 export CLAUDE_PLUGIN_ROOT="$(dirname "$(dirname "$CODEX_PATH")")"   # …/plugins/codex
 ```
 
-（`SCRIPT_DIR` 已在脚本顶部定义。node 二进制白名单检查 40–61 行保留——它校验调用 `codex-companion.mjs` 的 `node` 解释器可信，与本变更正交。）
+（`SCRIPT_DIR` 已在脚本顶部定义。dry-run 消息保留字面 `codex-companion` 子串 → `test-codex-attest.sh` Test 2 仍过、且不再克隆。node 二进制白名单检查 40–61 行保留——它校验调用 `codex-companion.mjs` 的 `node` 解释器可信，与本变更正交。）
 
 ---
 
@@ -115,6 +125,7 @@ export CLAUDE_PLUGIN_ROOT="$(dirname "$(dirname "$CODEX_PATH")")"   # …/plugin
 
 - 不升级到 1.0.4、不改 `codex.pin.json`（保持 v1.0.3）。
 - 不改 `.github/workflows/**`（CI 通道未坏）。
+- **不改 `.claude/settings.json`**（§三：stale 1.0.3 allow 是 harmless dead config + 非本 PR 引入 + 改它触发无关的 hardening_6_gate；列 cosmetic residual）。
 - 不碰 attest 账本 / `guard-attest-ledger.sh` / `attest-override.sh` 机制本身。
 - 不 vendor 插件文件进仓库。
 - 不重构 `codex-attest.sh` 的其它部分（node 白名单 / verdict 解析 / ledger 写入原样）。
