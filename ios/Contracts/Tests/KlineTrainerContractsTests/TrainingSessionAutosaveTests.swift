@@ -35,6 +35,7 @@ struct TrainingSessionAutosaveTests {
         for _ in 0..<3 {
             engine.holdOrObserve(panel: .upper)
             coord.requestAutosave(engine: engine, immediate: false)
+            // drain 在前 2 次（未达 cadence、无 Task）为 no-op；第 3 次落盘后排空
             await coord.drainAutosaveForTesting()
         }
         #expect(pending.saveCount == 1)                      // 第 3 次才落盘

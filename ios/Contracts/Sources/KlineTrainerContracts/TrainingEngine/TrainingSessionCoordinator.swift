@@ -51,7 +51,10 @@ public final class TrainingSessionCoordinator {
     @ObservationIgnored private var autosaveDirty = false                // 写中又脏 → 写完再存一次
     @ObservationIgnored private var terminating = false                  // §4.7d 栅栏
     @ObservationIgnored private var ticksSinceAutosave = 0               // N-tick cadence 计数
-    @ObservationIgnored var autosaveTickInterval = AUTOSAVE_TICK_INTERVAL // 可注入（@testable）
+    /// 可注入 cadence（@testable）。clamp 到 [1, AUTOSAVE_MAX_INTERVAL]：防 0/负间隔（每 tick 永真）+ 兑现 N≤MAX 不变量。
+    @ObservationIgnored var autosaveTickInterval = AUTOSAVE_TICK_INTERVAL {
+        didSet { autosaveTickInterval = min(max(autosaveTickInterval, 1), AUTOSAVE_MAX_INTERVAL) }
+    }
     /// §4.6 失败可见：最近一次 autosave 失败（非阻塞指示；UI/@testable 读；不 teardown）。
     @ObservationIgnored public private(set) var lastAutosaveError: AppError?
 
@@ -347,8 +350,11 @@ public final class TrainingSessionCoordinator {
 
     /// session 结束清理（spec L1666/L1684，不 throws）：关闭 reader 并清空全部活跃上下文（D10）。
     public func endSession() async {
-        autosaveTask?.cancel(); autosaveTask = nil
-        autosaveDirty = false; lastAutosaveError = nil; ticksSinceAutosave = 0
+        terminating = true          // fence：阻止 teardown 后排队 autosave 复活 pending（§4.7d 同型）
+        autosaveTask = nil
+        autosaveDirty = false
+        lastAutosaveError = nil
+        ticksSinceAutosave = 0
         activeReader?.close()
         activeReader = nil
         activeEngine = nil
