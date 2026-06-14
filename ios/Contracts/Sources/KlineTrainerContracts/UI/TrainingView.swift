@@ -33,6 +33,7 @@ public struct TrainingView: View {
     @State private var toastMessage: String?
     @State private var toastToken = 0
     @State private var confirmingEnd = false
+    @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
 
     public init(lifecycle: TrainingSessionLifecycle,
                 onExit: @escaping () -> Void,
@@ -72,9 +73,22 @@ public struct TrainingView: View {
             if showsTradeButtons { bottomBar }
         }
         .onAppear { maybeAutoEnd() }                                            // M2：resume-at-maxTick
-        .onChange(of: engine.tick.globalTickIndex) { _, _ in maybeAutoEnd() }   // D4/D5
+        .onChange(of: engine.tick.globalTickIndex) { _, _ in
+            lifecycle.autosave(immediate: false)                // §4.6：tick 推进按 N 节流
+            maybeAutoEnd()
+        }                                                       // D4/D5
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active { engine.onSceneActivated() }                // modules §U2 唯一链路
+            switch newPhase {
+            case .active:
+                engine.onSceneActivated()                       // modules §U2 既有动画链（不替换）
+            case .inactive, .background:
+                Task { await lifecycle.flushForBackground() }   // §4.6：后台立即 flush
+            @unknown default:
+                break
+            }
+        }
+        .onChange(of: engine.drawings.count) { _, _ in
+            lifecycle.autosave(immediate: true)                 // §4.6：画线即存（commit/delete 不推 tick，D9）
         }
         .sheet(item: $pickerRequest) { req in
             PositionPickerView(
@@ -87,13 +101,22 @@ public struct TrainingView: View {
         }
         .alert("结算入账失败", isPresented: $finalizeFailed) {
             Button("重试") { runFinalize() }
-            // 放弃 = 关 reader + 清活跃上下文 + 回首页（§4.7a 用户显式选择；pending 留存可恢复，
-            // durable discard〔清 pending + fence〕归顺位 10b §4.7e）
+            // 放弃 = durable discard（fence→清 pending→关 reader→回首页，§4.7e）
             Button("放弃", role: .cancel) {
-                Task { await lifecycle.endAfterSettlement(); onExit() }
+                Task { try? await lifecycle.discard(); onExit() }
             }
         } message: {
             Text("本局结果尚未写入历史记录。可重试入账，或放弃结算退出（进度保留至最近存档）。")
+        }
+        .alert("保存进度失败", isPresented: $backFailed) {
+            Button("重试") {
+                Task { do { try await lifecycle.back(); onExit() } catch { backFailed = true } }
+            }
+            Button("放弃", role: .destructive) {
+                Task { try? await lifecycle.discard(); onExit() }   // durable 弃局退出
+            }
+        } message: {
+            Text("当前进度未能写入存档。可重试保存，或放弃本局退出。")
         }
         .confirmationDialog("结束本局训练", isPresented: $confirmingEnd, titleVisibility: .visible) {
             Button("是", role: .destructive) { endManually() }
@@ -118,10 +141,14 @@ public struct TrainingView: View {
                                         returnRate: engine.returnRate,
                                         positionTier: engine.currentPositionTier)
         return HStack(spacing: 12) {
-            // 返回为 best-effort：保存进度后必回首页。`back()` 仅在「无活跃 session 上下文」抛 .internalError
-            // （活跃 Normal 局不会发生；review/replay 的 saveProgress 是 no-op 不抛）→ `try?` 吞掉这一不可达错误以
-            // 保证「点返回必退出」UX；不把保存失败上交（错误通道属顺位 11 路由 scope，code-review Task3 Minor）。
-            Button("返回") { Task { try? await lifecycle.back(); onExit() } }
+            // 返回保存失败保留（§4.7a/§4.6 D5）：back() 抛（saveProgress 失败）→ session 留存（reader 未关）
+            // → backFailed alert 让用户选重试或放弃；不用 try? 吞错误，防进度丢失。
+            Button("返回") {
+                Task {
+                    do { try await lifecycle.back(); onExit() }
+                    catch { backFailed = true }                 // §4.7a/§4.6：保存失败留局内，不丢数据/不泄漏 reader
+                }
+            }
             if showsTradeButtons {
                 Button(isDrawingActive ? "结束画线" : "水平线") { toggleDrawing() }
                     .tint(isDrawingActive ? .orange : nil)
@@ -167,6 +194,9 @@ public struct TrainingView: View {
         switch action {
         case .buy:  result = engine.buy(panel: panel, tier: tier)
         case .sell: result = engine.sell(panel: panel, tier: tier)
+        }
+        if case .success = result {
+            lifecycle.autosave(immediate: true)                 // §4.6：buy/sell 成交即时 durable（D9）
         }
         let feedback = TradeFeedback(result: result)
         if feedback.firesHaptic {
