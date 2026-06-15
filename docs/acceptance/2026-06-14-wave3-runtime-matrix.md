@@ -44,9 +44,9 @@
 
 **边缘 bounce（顺位 11）不列上方 device happy-path 矩阵**。顺位 11 acceptance（`docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md:1-3`）头部明文「**无实时可见运行时接线**（接线 deferred 为 residual `W3-11-R1`）」——真 app 屏幕**无可见回弹运行时**，组件层物理（`EdgeBounceModel` / `DecelerationModel` boundary-aware 推进 / `DecelerationAnimator` bounce 启动面）仅确定性单测闭合。
 
-故 bounce **不**进 device 矩阵：device 验收无可肉眼观察的回弹对象。`W3-11-R1` 标 **OPEN**（live 接线 = 顺位 3 后 fast-follow 独立 PR）。本 runbook 据此排除而非列入（ledger 完整性见 `docs/governance/2026-06-14-wave3-completion.md` §三）。
+故 bounce **不**进 device 矩阵：device 验收无可肉眼观察的回弹对象（device 验收本身 BLOCKED 在 W3-11-R1 live 接线上）。`W3-11-R1` 标 **OPEN**，且它是 **Wave 3 功能完成门 + 正式关闭前提**（顺位 11 承诺交互未上线 → Wave 3 功能完整性 PENDING-W3-11-R1，codex review High）——**非**可无视的 fast-follow nice-to-have。解门 = 实现 live 接线（fast-follow 实施 PR）+ 回填本节 bounce 运行时 acceptance。本 runbook 据此排除出**上方 device 矩阵**而非列入（ledger 完整性见 `docs/governance/2026-06-14-wave3-completion.md` §二/§三/§五）。
 
-> spec §E.2 把 bounce 列进运行时矩阵 = overclaim（真 app 看不到回弹）→ completion doc 如实纠正：W3-11-R1 OPEN + 矩阵不列 bounce device 行。不回改 spec，但 ledger 完整。
+> spec §E.2 把 bounce 列进运行时矩阵 = overclaim（真 app 看不到回弹）→ completion doc 如实纠正：W3-11-R1 OPEN + 矩阵不列 bounce device 行。**但排除 ≠ 抹账**：bounce 是承诺的 Wave 3 交互，W3-11-R1 升为功能完成/关闭门，Wave 3 功能完整性标 PENDING-W3-11-R1。不回改 spec，但 ledger 完整。
 
 ---
 

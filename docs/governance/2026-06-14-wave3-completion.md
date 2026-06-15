@@ -1,10 +1,11 @@
 # Wave 3 功能交付确认（非『Wave 3 正式关闭』，运行时验收待回填）
 
 **日期**：2026-06-14
-**性质**：Wave 3 outline（PR #92）全 anchor 落地后的**功能交付确认 + 运行时验收待回填**——residual 终态回填 + completion 确认 + 单一运行时矩阵 runbook 交付。**非『Wave 3 正式关闭』**：outline §三.3 把「Wave 3 全交互运行时矩阵的 device/sim 实测结果已记录」定为顺位 13 收尾本身的硬前提，该硬门在本 doc merge 时**未满足**（runbook + fixture 已交付可执行，device 实测待用户回填）。**不打 freeze tag**（见 §五）。0 业务代码 / 0 CI / 0 ruleset 改动。
+**性质**：Wave 3 outline（PR #92）全 anchor 落地后的**功能交付确认（除 W3-11-R1 外）+ 运行时验收待回填**——residual 终态回填 + completion 确认 + 单一运行时矩阵 runbook 交付。**非『Wave 3 正式关闭』**：outline §三.3 把「Wave 3 全交互运行时矩阵的 device/sim 实测结果已记录」定为顺位 13 收尾本身的硬前提，该硬门在本 doc merge 时**未满足**（runbook + fixture 已交付可执行，device 实测待用户回填）。**且功能完整性本身有保留**：顺位 11 承诺的边缘 bounce 交互其 **live 接线（W3-11-R1）仍 OPEN**（未上线到真 app）——故 Wave 3 功能完整性标 **PENDING-W3-11-R1**，非无条件 feature-complete（见 §二/§三）；W3-11-R1 是 Wave 3 功能完成门 + 正式关闭前提（**不同于** §四 PR11-R1/W1-R2 的 NAS ship 门）。**不打 freeze tag**（见 §五）。0 业务代码 / 0 CI / 0 ruleset 改动。
 
 <!-- WAVE3-STATUS (machine-readable; consumed by scripts/governance/verify-wave3-completion.sh — DO NOT reword keys/values)
-status: feature-complete-fixture-playable
+status: anchors-merged-fixture-playable
+feature-completeness: PENDING-W3-11-R1-bounce-live-wiring
 store-ready: NO
 formal-closure: PENDING-runtime-matrix-device-record
 runtime-matrix: PARTIAL
@@ -69,6 +70,8 @@ ship-gate-W1-R2-sample-data: OPEN
 
 **点名对 spec §E.2 矩阵清单的 bounce 纠正（ledger 完整性优先）**：spec §E.2（`docs/superpowers/specs/2026-06-14-wave3-pr13-completion-design.md` L181）把「边缘 bounce（顺位 11）」列进运行时矩阵 happy-path 交互。经核实，顺位 11 acceptance（`docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md:1-3`）头部明文「**无实时可见运行时接线**（接线 deferred 为 residual `W3-11-R1`）」——真 app 屏幕**无可见回弹运行时**，组件层物理仅确定性单测闭合。把 bounce 列进 device 运行时矩阵属 **overclaim**。本 doc 如实纠正：**W3-11-R1 标 OPEN**（见三节）+ **运行时矩阵不列 bounce device happy-path 行**（矩阵 runbook 在「排除/OPEN」节单列 W3-11-R1）。本 doc **不回改 spec §E.2**（spec 已冻结，散文措辞留待 doc 维护），但 residual ledger 须完整——ledger 完整性优先于逐字照搬 spec 的错误清单。故 device happy-path 矩阵实为 **6** 条交互（pinch 3 / 水平线 4 / 十字光标 5 / 手动强平 7 / replay 结算 8 / 主题 9）+ §C fixture 的 save-resume/复盘/replay 端到端。
 
+**但排除 bounce 出矩阵 ≠ 把它从功能完整性账上抹掉（codex review High）**：边缘 bounce 是 outline §三.3 列举的 Wave 3 **承诺用户可见交互**（顺位 11）；其 live 接线（W3-11-R1）OPEN = 该承诺交互**未上线到真 app**。若仅「排除出矩阵 + 标 OPEN fast-follow」而让剩余 6 行矩阵全过即宣告 Wave 3 feature-complete，则构成**另一个方向的 overclaim**（承诺交互未实现却 claim 完整）。故本 doc 取 codex option (b)：**Wave 3 功能完整性标 `PENDING-W3-11-R1`**（WAVE3-STATUS `feature-completeness: PENDING-W3-11-R1-bounce-live-wiring`）+ **W3-11-R1 升为 Wave 3 功能完成门 + 正式关闭/freeze 前提**（§三/§五）。实现 W3-11-R1（恢复 bounce 进矩阵）超 13c doc-only scope，归 fast-follow 实施 PR；本 doc 仅如实标 pending、不僭越 claim 完整。
+
 ---
 
 ## 三、Wave 3 residual 终态回填
@@ -80,7 +83,7 @@ ship-gate-W1-R2-sample-data: OPEN
 | **C. 全 app fixture provisioning** | §107 deferred / spec §C | **CLOSED** | 13b PR #109 `fc46fef`（`AppContainer+DebugSeed` `#if DEBUG` seed 经 `AppContainer.init(debugSeedFixtures:)` 注入 cache+history+pending+settings，全 6 周期；全空 guard 不破坏真实数据） |
 | **D. 生产路径 E2E smoke** | §107 deferred / spec §D | **CLOSED** | 13b PR #109 `fc46fef`（真 `DownloadAcceptanceRunner` 下游可消费 smoke：download→verify→commit→available→openable 全链） |
 | **运行时矩阵（device/sim 实测）** | outline §三.3 硬门 | **PARTIAL** | runbook 交付（`docs/acceptance/2026-06-14-wave3-runtime-matrix.md`）+ §C fixture 使其可执行；device 实测结果待用户回填 |
-| **W3-11-R1**（bounce live 接线） | 顺位 11 #96 设计 D8 / bounce acceptance L3 | **OPEN** | 组件层物理已确定性单测闭合（`docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md`）；**真 app 无可见回弹运行时** → **不**入 device 矩阵；live 接线 = fast-follow 独立 PR |
+| **W3-11-R1**（bounce live 接线） | 顺位 11 #96 设计 D8 / bounce acceptance L3 | **OPEN（Wave 3 功能完成门 + 正式关闭前提）** | 组件层物理已确定性单测闭合（`docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md`）；但 live 接线未上线 = 顺位 11 **承诺交互未实现** → **不**入 device 矩阵（无可 device 测对象）**且** Wave 3 功能完整性标 PENDING-W3-11-R1（codex review High）；解门 = 实现 live 接线（fast-follow 实施 PR）+ 回填其运行时 acceptance。**非** NAS ship 门（区别于四节 PR11-R1/W1-R2） |
 | **PR11-R1**（生产 backendBaseURL） | Wave 2 §三 carried（见四节） | **OPEN** | NAS 部署 PR（out-of-Wave-3-scope ship 门；`KlineTrainerApp.swift` 硬编码 `http://kline-trainer.local`） |
 | **W1-R2**（真实样本训练组数据，H7） | Wave 1 §四 carried（见四节） | **OPEN** | 需 NAS 真实 CSV 数据源 + B1/B2 真跑 |
 
@@ -103,13 +106,14 @@ ship-gate-W1-R2-sample-data: OPEN
 
 **决策**：13c **不打 freeze tag**，沿用 Wave 1/2 轻量收尾先例（`project_wave1_completion` / `docs/governance/2026-06-09-wave2-completion.md` §五均未打 tag）。WAVE3-STATUS 记 `freeze-tag: NOT-TAGGED`。
 
-**3 理由**：
+**4 理由**：
 
 1. **无 recorded 矩阵不满足 outline §三.3 硬门**：outline §三.3 / L181 把「Wave 3 运行时矩阵 + Wave 2 两份 runbook device 实测已记录 + Instruments 帧预算已回填」（**三连合取**，见 §二）定为 freeze tag 与正式关闭的**共同**硬前提；本 doc 交付 runbook 但不代跑 device 实测，三合取均未满足 → tag 语义不成立。
-2. **ship 门未关 store-frozen 语义不成立**：PR11-R1（生产 backendBaseURL）+ W1-R2（真实样本数据）= OPEN（四节），store-ship readiness 未达 → 无可冻结的「上架就绪」语义。
-3. **与 Wave 1/2 一致**：前两 wave 均轻量收尾不打 tag；Wave 3 为客户端功能完成 wave（非 spec 契约首冻），无散落各实施 PR 的契约首冻语义。
+2. **W3-11-R1 未解，功能完整性本身 PENDING（codex review High）**：顺位 11 承诺的边缘 bounce 交互 live 接线 OPEN（未上线）→ Wave 3 功能完整性标 PENDING-W3-11-R1（§二/§三）。冻结「客户端功能完整性」的语义在功能本身不完整时不成立 → 解 W3-11-R1（实现 live 接线 + 回填其运行时 acceptance）是正式关闭/freeze 的功能侧前提。
+3. **ship 门未关 store-frozen 语义不成立**：PR11-R1（生产 backendBaseURL）+ W1-R2（真实样本数据）= OPEN（四节），store-ship readiness 未达 → 无可冻结的「上架就绪」语义。
+4. **与 Wave 1/2 一致**：前两 wave 均轻量收尾不打 tag；Wave 3 为客户端功能完成 wave（非 spec 契约首冻），无散落各实施 PR 的契约首冻语义。
 
-**后续**：用户在 device 跑完**三连硬门全部**（Wave 3 矩阵 runbook + Wave 2 两份 runbook + Instruments 帧预算 runbook，见 §二）并记录结果后，若希望冻结客户端功能完整性，可走独立 tag ceremony（轻流程，per outline §三.3 / spec §E.4）。本决策按用户「尽可能不要找我」自主裁决为「不打 tag + 文档化 deferred-pending-recorded-matrix + 推荐」；若用户事后希望打 tag，属 follow-up，不阻塞 Wave 3 功能交付确认。
+**后续**：用户在 ① device 跑完**三连硬门全部**（Wave 3 矩阵 runbook + Wave 2 两份 runbook + Instruments 帧预算 runbook，见 §二）并记录结果 + ② W3-11-R1（bounce live 接线）实现并回填其运行时 acceptance 后，Wave 3 方达「功能完整 + 运行时验收记录」，若希望冻结客户端功能完整性，可走独立 tag ceremony（轻流程，per outline §三.3 / spec §E.4）。本决策按用户「尽可能不要找我」自主裁决为「不打 tag + 文档化 deferred-pending-recorded-matrix + 推荐」；若用户事后希望打 tag，属 follow-up，不阻塞 Wave 3 功能交付确认。
 
 ---
 
