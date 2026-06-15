@@ -131,30 +131,25 @@ import CoreGraphics
         #expect(e.lowerPanel.visibleCount == 80)
     }
 
-    @Test("freeScrolling focus 端到端：缩放前后 pinch 中点连续索引不变 + 离散 candle 不变")
-    func freeScrollingFocusInvariant() {
+    @Test("freeScrolling focus 落未来 slot（currentIdx==0）→ 退化为 reveal-pin（禁前窥必然，spec C1'）")
+    func freeScrollingFocusOnFuturePinsToRevealedEdge() {
         let (e, _) = Self.engine()
         e.beginPan(panel: .upper)
         e.applyPanOffset(deltaPixels: 15, panel: .upper)     // freeScrolling offset=15
         let candles = e.allCandles[.m3]!
-        let tick = e.tick.globalTickIndex
+        let tick = e.tick.globalTickIndex                    // ==0 → currentIdx==0
+        let fx: CGFloat = 405                                // slot 40 = 未来（> currentIdx 0）
         let vpBefore = RenderStateBuilder.makeViewport(panelState: e.upperPanel, candles: candles,
                                                        tick: tick, bounds: Self.bounds)
-        // NormalFlow.initialTick==0 → currentIdx==0 → before 视口左缘饱和（startIndex=0/pixelShift=0）；
-        // fx=405 仍为 candle 40 槽中心（远离 candle 边界，离散锚有判别力），前后离散索引恒 40。
-        // 非饱和-中段 focus 路径由 Task 1 endToEndFocusInvariant（tick=150）覆盖。
-        let fx: CGFloat = 405
-        let uBefore = CGFloat(vpBefore.startIndex) + (fx - vpBefore.pixelShift) / vpBefore.geometry.candleStep
+        #expect(vpBefore.startIndex == 0)                    // reveal：upperBound=max(0,−79)=0 → 左缘 pin
+        #expect(vpBefore.pixelShift == 0)
         e.applyPinch(scale: 1.0, focusX: fx, phase: .began, panel: .upper)
         e.applyPinch(scale: 2.0, focusX: fx, phase: .changed, panel: .upper)
         #expect(e.upperPanel.visibleCount == 40)
         let vpAfter = RenderStateBuilder.makeViewport(panelState: e.upperPanel, candles: candles,
                                                       tick: tick, bounds: Self.bounds)
-        let uAfter = CGFloat(vpAfter.startIndex) + (fx - vpAfter.pixelShift) / vpAfter.geometry.candleStep
-        #expect(abs(uAfter - uBefore) < 1e-9)
-        let mB = CoordinateMapper(viewport: vpBefore, displayScale: 1)
-        let mA = CoordinateMapper(viewport: vpAfter, displayScale: 1)
-        #expect(mB.xToIndex(fx) == mA.xToIndex(fx))
+        #expect(vpAfter.startIndex == 0)                     // reveal：缩放后仍 pin 在已揭示最新边（无前窥）
+        #expect(vpAfter.pixelShift == 0)
         #expect(e.upperPanel.interactionMode == .freeScrolling)   // 不切 mode
     }
 
@@ -169,5 +164,41 @@ import CoreGraphics
         #expect(e.upperPanel.revision == r0 + 1)
         e.applyPinch(scale: 2.1, focusX: 400, phase: .changed, panel: .upper)   // 80/2.1→38
         #expect(e.upperPanel.revision == r0 + 2)
+    }
+
+    @Test("freeScrolling focus 端到端（mid-tick，focus 落已揭示 candle）→ 缩放前后连续索引不变 + 离散不变")
+    func freeScrollingFocusInvariantMidTickRevealedCandle() {
+        // mid-tick engine（initialTick=150 ∈ 0...199，currentIdx=150，非饱和 startIndex=70）：
+        // focus 落已揭示 candle（uBefore=110.5 ≤ 150）→ reveal 下 focus 不变量仍成立（经 engine 编排路径）。
+        let maxTick = 199
+        let e = TrainingEngine(
+            flow: NormalFlow(fees: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+                             maxTick: maxTick),
+            allCandles: TrainingEngineActionsTests.m3Candles(Array(repeating: 10, count: 200)),
+            maxTick: maxTick,
+            initialTick: 150,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m3, initialLowerPeriod: .m3,
+            decelerationDriverFactory: { FakeFrameDriver(onTick: $0) })
+        e.recordRenderBounds(Self.bounds, panel: .upper)
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 15, panel: .upper)     // freeScrolling offset=15 → startIndex=70/pixelShift=5
+        let candles = e.allCandles[.m3]!
+        let tick = e.tick.globalTickIndex
+        let vpBefore = RenderStateBuilder.makeViewport(panelState: e.upperPanel, candles: candles,
+                                                       tick: tick, bounds: Self.bounds)
+        let fx: CGFloat = 410                                // uBefore = 70 + (410−5)/10 = 110.5 ≤ currentIdx 150
+        let uBefore = CGFloat(vpBefore.startIndex) + (fx - vpBefore.pixelShift) / vpBefore.geometry.candleStep
+        e.applyPinch(scale: 1.0, focusX: fx, phase: .began, panel: .upper)
+        e.applyPinch(scale: 2.0, focusX: fx, phase: .changed, panel: .upper)
+        #expect(e.upperPanel.visibleCount == 40)
+        let vpAfter = RenderStateBuilder.makeViewport(panelState: e.upperPanel, candles: candles,
+                                                      tick: tick, bounds: Self.bounds)
+        let uAfter = CGFloat(vpAfter.startIndex) + (fx - vpAfter.pixelShift) / vpAfter.geometry.candleStep
+        #expect(abs(uAfter - uBefore) < 1e-9)                // 110.5 == 110.5（focus 落已揭示 candle，invariant 成立）
+        let mB = CoordinateMapper(viewport: vpBefore, displayScale: 1)
+        let mA = CoordinateMapper(viewport: vpAfter, displayScale: 1)
+        #expect(mB.xToIndex(fx) == mA.xToIndex(fx))
+        #expect(e.upperPanel.interactionMode == .freeScrolling)
     }
 }
