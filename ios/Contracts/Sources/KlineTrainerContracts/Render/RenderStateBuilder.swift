@@ -54,7 +54,7 @@ public enum RenderStateBuilder {
             macdRange: macdRange,
             markers: engine.markers,
             drawings: engine.drawings.filter { $0.panelPosition == (panel == .upper ? 0 : 1) },
-            crosshairPoint: crosshair)
+            crosshairPoint: crosshair)   // C8b：长按十字光标由 ChartContainerView.Coordinator 视图层透传（D3）
     }
 
     /// C8b H1 handler 复用：当前可见 candle 索引半开区间。委托 makeViewport 单一真相。
