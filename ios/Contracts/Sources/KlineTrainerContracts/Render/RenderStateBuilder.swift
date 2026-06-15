@@ -88,13 +88,15 @@ public enum RenderStateBuilder {
     /// **FP round-trip（codex R1-M）**：maxOffset 经 makeViewport plain `floor(offset/step)` 反算须得回 baseStartIndex——
     /// 非整除 step（如 1000/21）下 `integer·step` 可 FP 偏移致 floor 偏 1 → `roundTripEdge` verify-and-correct 钉死。
     /// **非有限几何（codex R2-M）**：width/step 非有限 → 返单点 [0,0] 安全退化（交 R1b-wire EdgeBounceModel 端点校验），不 trap。
+    /// **空 candle（codex R3 branch-diff）**：candleCount==0 → visibleCount==0 → 退化 [0,0]，**不依赖 caller 传的 currentIdx**——
+    /// 否则 visibleCount=0 使 baseStartIndex=currentIdx+1，哨兵 currentIdx=0 → upperBound=1 漏过守卫 → 伪非零 maxOffset。
     static func offsetBounds(mainFrameWidth: CGFloat, rawVisible: Int,
                              candleCount: Int, currentIdx: Int)
         -> (minOffset: CGFloat, maxOffset: CGFloat, candleStep: CGFloat) {
         let core = geometryCore(mainFrameWidth: mainFrameWidth, rawVisible: rawVisible,
                                 candleCount: candleCount, currentIdx: currentIdx)
-        // 非有限几何（NaN/inf width → NaN/inf step）或无滚动空间 → 单点 [0,0] 安全退化（codex R2-M / 退化）。
-        guard core.candleStep.isFinite, core.candleStep > 0, core.upperBound > 0 else {
+        // 空 candle（visibleCount==0）/ 非有限几何（NaN/inf width → NaN/inf step）/ 无滚动空间 → 单点 [0,0] 安全退化（codex R3 / R2-M / 退化）。
+        guard core.visibleCount > 0, core.candleStep.isFinite, core.candleStep > 0, core.upperBound > 0 else {
             let safeStep = core.candleStep.isFinite ? core.candleStep : 0
             return (minOffset: 0, maxOffset: 0, candleStep: safeStep)
         }

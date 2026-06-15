@@ -349,6 +349,20 @@ struct RenderStateBuilderTests {
         #expect(b.candleStep == 10)
     }
 
+    // codex R3（branch-diff）：空 candle（candleCount==0 → visibleCount==0）须退化 [0,0]，**不依赖 caller 传的 currentIdx**。
+    // 旧洞：count=0 → visibleCount=0 → baseStartIndex=currentIdx−(0−1)=currentIdx+1；哨兵 currentIdx=0 → upperBound=max(0,1)=1>0
+    // 漏过守卫 → maxOffset=roundTripEdge(1)=step（伪非零）。修：offsetBounds 守卫加 visibleCount>0。
+    @Test("offsetBounds 空 candle 退化（codex R3）：candleCount==0 → [0,0]，任意 currentIdx 哨兵（含 0）不漏")
+    func offsetBounds_emptyCandlesDegenerate() {
+        let w = ChartPanelFrames.split(in: Self.bounds).mainChart.width
+        for sentinelIdx in [-1, 0, 5, 100] {
+            let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: 0,
+                                                    candleCount: 0, currentIdx: sentinelIdx)
+            #expect(b.minOffset == 0, "currentIdx=\(sentinelIdx) empty → minOffset 0")
+            #expect(b.maxOffset == 0, "currentIdx=\(sentinelIdx) empty → maxOffset 0")
+        }
+    }
+
     // reveal D5：早 tick currentIdx=10 → baseStartIndex=10−79=−69 → upperBound=max(0,−69)=0 → offsetBounds=[0,0]
     // （无滚动空间：已显最旧 candles[0..]，前向不可越 currentIdx=禁前窥）。区别于旧 true-motion-range [-1890,-690]（codex R2-H 旧解，reveal 后失效）。
     @Test("offsetBounds 早 tick（reveal D5）：base<0 → [0,0]（无滚动空间，已显最旧+禁前窥），任意 offset 仍 clamp 到 autoTracking")
