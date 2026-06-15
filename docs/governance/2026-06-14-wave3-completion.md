@@ -13,7 +13,7 @@ freeze-tag: NOT-TAGGED
 residual-A-cache-touch-on-use: CLOSED 13a #108
 residual-B-unified-toast-layer: CLOSED 13a #108
 residual-C-fixture-provisioning: CLOSED 13b #109
-residual-D-e2e-smoke: CLOSED 13b #109
+residual-D-e2e-smoke: PARTIAL 13b #109
 residual-W3-11-R1-bounce-live-wiring: OPEN
 known-defect-13a-R2-cross-lease-cache-deletion: OPEN
 ship-gate-PR11-R1-prod-backend-url: OPEN
@@ -82,7 +82,7 @@ ship-gate-W1-R2-sample-data: OPEN
 | **A. cache touch-on-use**（E6a-R3） | §107 deferred #4 / Wave 2 §三 | **CLOSED** | 13a PR #108 `9400361`（coordinator 4 read 路径 startNewNormalSession/resumePending/review/replay 成功打开后 touch-on-use；损坏文件不 touch） |
 | **B. 边界错误统一 Toast 层** | outline §四 L204（损坏/中断/磁盘满 + 统一错误） | **CLOSED** | 13a PR #108 `9400361`（ToastState/ToastOverlay 承载 transient：autosave 失败可见 + 下载 per-item 失败可见；blocking 错误故意保留 alert，不回归 §4.7f/§4.7a 安全语义） |
 | **C. 全 app fixture provisioning** | §107 deferred / spec §C | **CLOSED** | 13b PR #109 `fc46fef`（`AppContainer+DebugSeed` `#if DEBUG` seed 经 `AppContainer.init(debugSeedFixtures:)` 注入 cache+history+pending+settings，全 6 周期；全空 guard 不破坏真实数据） |
-| **D. 生产路径 E2E smoke** | §107 deferred / spec §D | **CLOSED** | 13b PR #109 `fc46fef`（真 `DownloadAcceptanceRunner` 下游可消费 smoke：download→verify→commit→available→openable 全链） |
+| **D. 生产路径 E2E smoke** | §107 deferred / spec §D | **PARTIAL** | 13b PR #109 `fc46fef`：真 `DownloadAcceptanceRunner` runner 管线 E2E（download/crc/unzip/db-open/store/confirm/journal/下游 open）已 smoke 闭合。**但 smoke 注入 `FakeTrainingSetDataVerifier`（13b-R2）** → runner ↔ 真 `DefaultTrainingSetDataVerifier` 接线**未被 smoke 覆盖**（真 verifier 六周期 warm-up 规则由 `DefaultTrainingSetDataVerifierTests` 专测）→ 整条生产验收组合未一次性端到端 → 标 **PARTIAL**（codex review R4-Med；非无条件 CLOSED）。满足真 verifier 的 ≥30-全周期-含-monthly fixture 不现实（13b accept residual），但 D 终态如实 PARTIAL 不掩盖 |
 | **运行时矩阵（device/sim 实测）** | outline §三.3 硬门 | **PARTIAL** | runbook 交付（`docs/acceptance/2026-06-14-wave3-runtime-matrix.md`）+ §C fixture 使其可执行；device 实测结果待用户回填 |
 | **W3-11-R1**（bounce live 接线） | 顺位 11 #96 设计 D8 / bounce acceptance L3 | **OPEN（Wave 3 功能完成门 + 正式关闭前提）** | 组件层物理已确定性单测闭合（`docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md`）；但 live 接线未上线 = 顺位 11 **承诺交互未实现** → **不**入 device 矩阵（无可 device 测对象）**且** Wave 3 功能完整性标 PENDING-W3-11-R1（codex review High）；解门 = 实现 live 接线（fast-follow 实施 PR）+ 回填其运行时 acceptance。**非** NAS ship 门（区别于四节 PR11-R1/W1-R2） |
 | **13a-R2**（跨 lease cache 误删，**已知 data-loss**） | codex 13a review R6（**pre-existing 基线 bug**，13a 未触碰该代码） | **OPEN（已知缺陷，正式关闭前提）** | `retryPendingConfirmations` reject 清理仅按 `trainingSetId` 选 cache 项，但 journal 按 `(trainingSetId, leaseId)` 作用域 → 旧 lease 409 重试可删**新** lease 重下的 cache 文件（跨 lease data-loss）。pre-existing（非 Wave 3 引入），路由 **P2-confirm-reliability RFC**（cache 所有权改 lease/version-aware + 回归测试）。**提升进顶层 ledger（codex review R3-High）**：不埋脚注——已知 data-loss 路径须可见，正式关闭前须经 P2 RFC 解决 |
