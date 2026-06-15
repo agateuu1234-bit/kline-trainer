@@ -337,6 +337,28 @@ struct RenderStateBuilderTests {
         #expect(aboveMin.startIndex == 70)
     }
 
+    // codex R2（branch-diff）：offsetBounds.minOffset==0 是 reveal **硬钳**（最新边=当前 tick），**非对称弹簧边**。
+    // R1b-wire 若把最新边当 EdgeBounceModel 对称弹簧端点 + 负速 fling → 会 spring offset below 0 = 前向揭示。
+    // 本测证 **R1a render 层已兜底**：即便 caller 喂 offset 低于 minOffset（负，模拟该误用），makeViewport 仍把 startIndex
+    // 钳在 upperBound、pixelShift==0、slice 末根==currentIdx（无前向揭示）。R1b-wire 据此把最新边实现为硬钳（spec §六 B4 NOTE）。
+    @Test("offsetBounds.minOffset 是 reveal 硬钳非弹簧：offset 低于 minOffset → makeViewport 钳最新边、无前向揭示（codex R2）")
+    func offsetBounds_minOffsetIsHardClampNotSpring() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let b = RenderStateBuilder.offsetBounds(
+            mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
+            rawVisible: 0, candleCount: 200, currentIdx: 150)
+        #expect(b.minOffset == 0)
+        let currentIdx = RenderStateBuilder.currentCandleIndex(candles: cs, tick: 150)   // 150
+        // 喂 offset 远低于 minOffset（负=前向/朝新）：R1b 误把最新边当弹簧 + 负速会产生此类 offset。
+        for belowMin in [b.minOffset - b.candleStep, b.minOffset - 100, CGFloat(-1000)] {
+            let vp = RenderStateBuilder.makeViewport(
+                panelState: Self.panel(offset: belowMin), candles: cs, tick: 150, bounds: Self.bounds)
+            #expect(vp.startIndex == 71, "belowMin=\(belowMin) 钳最新边 upperBound==71")
+            #expect(vp.pixelShift == 0, "belowMin=\(belowMin) 边缘 pin（无前向间隙，非 overscroll gap）")
+            #expect(vp.startIndex + vp.visibleCount - 1 <= currentIdx, "belowMin=\(belowMin) slice 末根 ≤ currentIdx（无未来）")
+        }
+    }
+
     @Test("offsetBounds 退化：count<=visibleCount(无滚动空间) → upperBound==0, min/max 同号无区间")
     func offsetBounds_degenerate() {
         // count=30 < target=80 → visibleCount=min(80,30)=30, step=10; currentIdx=29(最新根) → baseStartIndex=29-29=0

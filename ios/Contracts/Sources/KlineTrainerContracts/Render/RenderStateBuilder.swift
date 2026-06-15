@@ -83,6 +83,11 @@ public enum RenderStateBuilder {
     /// 与 makeViewport 的 startIndex clamp **共用 geometryCore**（D4 单一真相，upperBound=max(0,baseStartIndex)）：
     /// maxOffset=roundTripEdge(baseStartIndex)、minOffset=roundTripEdge(baseStartIndex−upperBound)=roundTripEdge(0)=0。
     /// 供 R1b-wire 的 Coordinator 喂 engine——bounce/overscroll 在 [0, maxOffset]（仅 freeScrolling；autoTracking rest offset=0 照旧 pin）。
+    /// **⚠️ 边非对称（codex R2，reveal）**：`minOffset=0` 是**硬钳**（最新边=当前 tick，前向=未来），**非对称弹簧边**——
+    /// R1b-wire **不可**把最新边当 `EdgeBounceModel` 对称弹簧端点（否则负速 fling 会 spring offset<0 = 前向揭示）；
+    /// 须抑制最新边负速 / below-min spring → **单边 bounce：仅 maxOffset 最老边弹**（spec §六 B4 NOTE）。
+    /// R1a 的 makeViewport 已在 render 层兜底（offset<0 → startIndex 钳 upperBound + pixelShift=0，无前向间隙；
+    /// 见测 `offsetBounds_minOffsetIsHardClampNotSpring`），但 R1b 仍须按硬钳语义接线以保正确 UX。
     /// **span == upperBound·candleStep**（=max(0,base)·step）：早 tick base<0 → upperBound=0 → 单点 [0,0]
     /// （无滚动空间，已显最旧 + 无未来）；中/晚 tick span 随 base 渐增（不再是与 tick 无关常数）。
     /// **FP round-trip（codex R1-M）**：maxOffset 经 makeViewport plain `floor(offset/step)` 反算须得回 baseStartIndex——

@@ -65,6 +65,8 @@ geometryCore(mainFrameWidth: CGFloat, rawVisible: Int, candleCount: Int, current
 
 ### B4. render overscroll 橡皮筋（只动 pixelShift，不动 startIndex；双边符号）
 > **⚠️ reveal RFC #113 含义（R1b-wire 待重导；本 R1a redux 不改本节机制）**：reveal 后 `minOffset=0`（最新边=当前 tick，禁前窥）→ **最新边无前向 overscroll/bounce**（offset<0 被 makeViewport clamp 回 autoTracking，不渲未来）。故下文「offset < minOffset 最新边越界」分支在 reveal 下**不可达**；bounce/overscroll **仅最老边**（offset>maxOffset）。R1b-wire 实施时据此收窄为单边（最老边）橡皮筋，并重导 §三数据流 + 本节双边叙述。
+>
+> **R1b-wire 强制义务（codex R2 branch-diff）= residual `W3-11-R1b-wire 单边 bounce`**：现有 `EdgeBounceModel` 把任一端点当**对称弹簧**（`boundaryDistance==0` 即 cross + seed spring）。reveal 下 R1b **必须**把最新边（`minOffset=0`）实现为**硬钳而非弹簧**——抑制最新边负速 / below-min spring，否则 fling 会 spring `offset<0` = 前向揭示。R1a 的 `offsetBounds` 返对称 `(minOffset,maxOffset)` 仅是 numeric 区间，**该单边策略归 R1b 接线层**；R1a 的 makeViewport 已 render 层兜底（`offset<0` 钳 upperBound 无前向间隙，测 `offsetBounds_minOffsetIsHardClampNotSpring`），但 R1b 须显式单边化接线以保正确 UX。
 
 `makeViewport` 边缘分支改（opus H3/H4，**双边叙述待 R1b-wire 按上方 NOTE 收窄为单边**）：
 - **offset > maxOffset（最老边越界）**：`startIndex` 仍 clamp ==0（**不动，防数组越界**），`pixelShift = offset − maxOffset`（**>0 = candles 右移、左露间隙**，符 `Geometry.swift:136` 符号契约）。
