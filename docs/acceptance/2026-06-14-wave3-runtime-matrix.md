@@ -2,7 +2,7 @@
 
 **性质**：device/simulator **手动**验收，非编码者可执行。CI 仅 `Mac Catalyst build-for-testing on macos-15` 编译守护（验 build + 链接），**不执行**手势/动画/触觉/Toast/路由/像素重渲染等运行时行为。本矩阵汇总 6 份既有 per-anchor 运行时 runbook 为单一矩阵，经 §C fixture（`KLINE_SEED_FIXTURE=1`）在真 composition root 执行。
 
-**用法**：照「前置」启动 app 后，逐行照「详细 runbook 指针」打开对应 per-anchor runbook 执行细节步骤，把 device 实测结果填进本表的「device pass/fail」列（留空 = 未跑）。本矩阵是顺位 13 正式关闭 + freeze tag 的共同硬前提（per outline §三.3）；device 实测结果回填后，Wave 3 方可正式关闭（见 `docs/governance/2026-06-14-wave3-completion.md` §二/§五）。
+**用法**：照「前置」启动 app 后，逐行照「详细 runbook 指针」打开对应 per-anchor runbook 执行细节步骤，把 device 实测结果填进本表的「device pass/fail」列（留空 = 未跑）。本矩阵是顺位 13 正式关闭 + freeze tag 硬前提的**合取项 ①**（per outline §三.3 三连合取：① 本矩阵 + ② Wave 2 两 runbook + ③ Instruments 帧预算，见下方「关闭前其余硬门」节）；**仅**回填本矩阵不满足硬门，三者皆 device 实测回填后，Wave 3 方可正式关闭（见 `docs/governance/2026-06-14-wave3-completion.md` §二/§五）。
 
 ---
 
