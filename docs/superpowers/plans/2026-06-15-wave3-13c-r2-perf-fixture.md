@@ -257,7 +257,7 @@ git commit -m "feat(13c-R2): seed 调用点接 fullLoadM3Count + 端到端 seede
 **RESOLVED（Wave 3 13c-R2 fast-follow PR，2026-06-15）**：根治 = `DebugFixtureData` 新增 `fullLoadM3Count`=9600 并由 `AppContainer.seedDebugFixtures` 使用 → §C seed 现满载：每周期 ≥ `defaultVisibleCount`(80)、make 默认面板 `.m60`=480/`.daily`=240 ≥ `maxVisibleCount`(240，pinch 最远档)。回归测试 `DebugFixtureDataTests.fullLoadFixture_*` + `AppContainerDebugSeedTests.seededFixture_isFullLoad`（原 accept-residual 表述见 git 历史）
 ```
 
-> 注：**不**在本单元格内写「13c-R1」字样——保持 `grep "13c-R1"` 仅命中 13c-R1 自身行（消除跨行 grep 歧义，见 Step 4 / Task 4 item 7）。13c-R1 行保持 `accept residual` 不变。
+> 注：**不**在本单元格内写「13c-R1」字样——使本 RESOLVED 单元格不被 `grep "13c-R1"` 命中。`grep "13c-R1"` 在 completion doc 命中两处（13c-R1 residual 行 + 收敛说明 prose 行），**两处均含 `accept residual`、均不含 `RESOLVED`**（见 Step 4 / Task 4 item 7）。13c-R1 行保持 `accept residual` 不变。
 
 - [ ] **Step 2: runtime-matrix R8-H2 caveat 更新**
 
@@ -296,7 +296,7 @@ grep -n "13c-R1" docs/acceptance/2026-06-14-wave3-pr13c-completion.md
 ```
 Expected:
 - 每处 `13c-R2` 命中行均含 `RESOLVED`，且无与 RESOLVED 矛盾的「accept residual / 未来时 fast-follow」并存于同一 13c-R2 行；
-- completion doc 的 `13c-R1` 命中**仅其自身 residual 行**（无跨行歧义，因 Step 1 已确保 13c-R2 单元格不含「13c-R1」字样），且该行仍含 `accept residual`、**不**含 `RESOLVED`（13c-R1 未被本 PR 关闭）。
+- completion doc 的 `13c-R1` 命中**两行**（residual 行 + 收敛说明 prose 行；Step 1 已确保 13c-R2 RESOLVED 单元格不含「13c-R1」字样故不混入），且**每个命中行均含 `accept residual`、均不含 `RESOLVED`**（13c-R1 未被本 PR 关闭）。
 
 - [ ] **Step 5: 提交**
 
@@ -349,7 +349,7 @@ forbidden_phrases（`.claude/workflow-rules.json`，禁止出现）：`验证通
 | # | 操作（action） | 预期（expected） | 通过/不通过 |
 |---|---|---|---|
 | 6 | 运行 `grep -n "13c-R2" docs/acceptance/2026-06-14-wave3-pr13c-completion.md` | 命中行含 `RESOLVED`；无「accept residual」与之并存的未关闭表述 | ☐ Pass / ☐ Fail |
-| 7 | 运行 `grep -n "13c-R1" docs/acceptance/2026-06-14-wave3-pr13c-completion.md` | 命中其 residual 行仍含 `accept residual`、且**不**含 `RESOLVED`（13c-R1 采样≠帧相关 未被本 PR 关闭） | ☐ Pass / ☐ Fail |
+| 7 | 运行 `grep -n "13c-R1" docs/acceptance/2026-06-14-wave3-pr13c-completion.md` | 所有命中行（residual 行 + 收敛说明行）均含 `accept residual`、且均**不**含 `RESOLVED`（13c-R1 采样≠帧相关 未被本 PR 关闭） | ☐ Pass / ☐ Fail |
 
 ## 四、device 帧预算（可选，非本 PR 关闭门）
 
