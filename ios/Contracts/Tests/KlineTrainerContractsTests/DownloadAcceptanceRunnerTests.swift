@@ -42,6 +42,26 @@ private final class FakeAPIClient: APIClient, @unchecked Sendable {
     var downloadCallCount: Int { lock.withLock { _downloadCalls.count } }
 }
 
+/// 包装 InMemory，仅对指定 state 的 listByState 抛错——测 ownership-guard 的 fail-safe 分支
+/// （重试列表建立读 .stored/.confirmPending 仍走 inner，故能跑到删除决策；helper 查 throwState 时抛）。
+private final class ThrowOnStateJournal: AcceptanceJournalDAO, @unchecked Sendable {
+    let inner = InMemoryAcceptanceJournalDAO()
+    private let throwState: P2JournalState
+    init(throwOn: P2JournalState) { throwState = throwOn }
+    func upsert(trainingSetId: Int, leaseId: String, state: P2JournalState,
+                sqliteLocalPath: String?, contentHash: String?, lastError: String?) throws {
+        try inner.upsert(trainingSetId: trainingSetId, leaseId: leaseId, state: state,
+                         sqliteLocalPath: sqliteLocalPath, contentHash: contentHash, lastError: lastError)
+    }
+    func listByState(_ state: P2JournalState) throws -> [AcceptanceJournalRow] {
+        if state == throwState { throw AppError.persistence(.dbCorrupted) }
+        return try inner.listByState(state)
+    }
+    func deleteByIdLease(trainingSetId: Int, leaseId: String) throws {
+        try inner.deleteByIdLease(trainingSetId: trainingSetId, leaseId: leaseId)
+    }
+}
+
 /// 极简 reader：dataVerifier 是 fake 会忽略它；唯一观测点是 close() 是否被调用。
 private final class StubReader: TrainingSetReader, @unchecked Sendable {
     private let lock = NSLock()
@@ -414,6 +434,86 @@ struct DownloadAcceptanceRunnerTests {
     @Test func retry_emptyJournal_noCrash() async {
         let runner = makeRunner(journal: InMemoryAcceptanceJournalDAO())
         await runner.retryPendingConfirmations()   // 无行 → 安全 no-op
+    }
+
+    @Test func retry_crossLease_doesNotDeleteNewerLeaseFile() async throws {
+        // 13a-R2 核心回归：旧 lease 孤儿 confirm 被拒（lease 过期），不得删掉新 lease 占有的同 tid cache 文件。
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = InMemoryCacheManager()
+        // 当前 cache 中 id=42 的文件 = 新 lease 重下并已确认的有效文件
+        _ = try cache.store(downloadedZip: URL(fileURLWithPath: "/tmp/42.sqlite"), meta: makeMeta(id: 42))
+        // 新 lease：推进到 confirmed（存活 owner，终态，不被重试扫到）
+        try seedStored(journal, id: 42, leaseId: "leaseNew", path: "/tmp/42.sqlite")
+        try journal.upsert(trainingSetId: 42, leaseId: "leaseNew", state: .confirmPending,
+                           sqliteLocalPath: "/tmp/42.sqlite", contentHash: nil, lastError: nil)
+        try journal.upsert(trainingSetId: 42, leaseId: "leaseNew", state: .confirmed,
+                           sqliteLocalPath: "/tmp/42.sqlite", contentHash: nil, lastError: nil)
+        // 旧 lease：停在 confirmPending（孤儿，会被重试）
+        try seedStored(journal, id: 42, leaseId: "leaseOld", path: "/tmp/42.sqlite")
+        try journal.upsert(trainingSetId: 42, leaseId: "leaseOld", state: .confirmPending,
+                           sqliteLocalPath: "/tmp/42.sqlite", contentHash: nil, lastError: nil)
+        // 重试：旧 lease confirm 因 lease 过期被服务端拒收
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.leaseExpired)),
+                                cache: cache, journal: journal)
+        await runner.retryPendingConfirmations()
+        // 旧 lease → rejected；新 lease 仍 confirmed；文件保留、未被删
+        #expect(try journal.listByState(.rejected).count == 1)
+        #expect(try journal.listByState(.confirmed).count == 1)
+        #expect(cache.listAvailable().contains(where: { $0.id == 42 }))
+        #expect(cache.deletedFilenames.isEmpty)
+    }
+
+    @Test func retry_twoOrphanLeasesSameTid_bothRejected_fileDeleted() async throws {
+        // 收敛性：两孤儿 lease 同 tid 都被拒 → 最后一个被拒时已无 owning 行 → 文件应被删（guard 不永久泄漏）。
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = InMemoryCacheManager()
+        _ = try cache.store(downloadedZip: URL(fileURLWithPath: "/tmp/42.sqlite"), meta: makeMeta(id: 42))
+        try seedStored(journal, id: 42, leaseId: "L1", path: "/tmp/42.sqlite")
+        try journal.upsert(trainingSetId: 42, leaseId: "L1", state: .confirmPending,
+                           sqliteLocalPath: "/tmp/42.sqlite", contentHash: nil, lastError: nil)
+        try seedStored(journal, id: 42, leaseId: "L2", path: "/tmp/42.sqlite")
+        try journal.upsert(trainingSetId: 42, leaseId: "L2", state: .confirmPending,
+                           sqliteLocalPath: "/tmp/42.sqlite", contentHash: nil, lastError: nil)
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.leaseExpired)),
+                                cache: cache, journal: journal)
+        await runner.retryPendingConfirmations()
+        #expect(try journal.listByState(.rejected).count == 2)
+        #expect(cache.listAvailable().contains(where: { $0.id == 42 }) == false)
+    }
+
+    @Test func retry_competingStoredClaim_blocksDeletion() async throws {
+        // 新 lease 的 stored 行（尚未 confirmed）也算存活占有 → 旧 lease 拒收时保护该文件。
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = InMemoryCacheManager()
+        _ = try cache.store(downloadedZip: URL(fileURLWithPath: "/tmp/42.sqlite"), meta: makeMeta(id: 42))
+        // 新 lease：stored（retryPendingConfirmations 按 `stored + pending` 拼接序迭代 → stored 行恒先于
+        // confirmPending 行处理，与 listByState 的 id 排序无关；故新 lease 先被 confirm 成功 → confirmed）
+        try seedStored(journal, id: 42, leaseId: "leaseNew", path: "/tmp/42.sqlite")
+        // 旧 lease：confirmPending（后处理，confirm 拒收）
+        try seedStored(journal, id: 42, leaseId: "leaseOld", path: "/tmp/42.sqlite")
+        try journal.upsert(trainingSetId: 42, leaseId: "leaseOld", state: .confirmPending,
+                           sqliteLocalPath: "/tmp/42.sqlite", contentHash: nil, lastError: nil)
+        // confirm 调用序：#1 = 新 lease(stored，先处理) 成功；#2 = 旧 lease(confirmPending) 拒收
+        let runner = makeRunner(
+            api: FakeAPIClient(confirmSequence: [nil, .network(.leaseExpired)]),
+            cache: cache, journal: journal)
+        await runner.retryPendingConfirmations()
+        #expect(try journal.listByState(.confirmed).count == 1)   // 新 lease confirmed
+        #expect(try journal.listByState(.rejected).count == 1)     // 旧 lease rejected
+        #expect(cache.listAvailable().contains(where: { $0.id == 42 }))  // 文件保留
+    }
+
+    @Test func retry_journalReadFails_failSafe_doesNotDelete() async throws {
+        // fail-safe：所有权查询读失败 → 保守不删（对比单孤儿正常会删；若 helper 用 ?? [] 则会误删 → 本测试为 fail-safe killer）。
+        let journal = ThrowOnStateJournal(throwOn: .confirmed)   // 重试列表读 .stored/.confirmPending 不抛；helper 查 .confirmed 时抛
+        let cache = InMemoryCacheManager()
+        _ = try cache.store(downloadedZip: URL(fileURLWithPath: "/tmp/9.sqlite"), meta: makeMeta(id: 9))
+        try seedStored(journal, id: 9, leaseId: "L9", path: "/tmp/9.sqlite")
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.leaseNotFound)),
+                                cache: cache, journal: journal)
+        await runner.retryPendingConfirmations()
+        #expect(cache.listAvailable().contains(where: { $0.id == 9 }))   // 读失败 → 未删
+        #expect(cache.deletedFilenames.isEmpty)
     }
 
     // MARK: - Task 6: runBatch

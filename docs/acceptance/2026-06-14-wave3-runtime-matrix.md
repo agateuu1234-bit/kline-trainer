@@ -84,4 +84,4 @@ outline §三.3 的关闭/freeze 阻塞依赖是**三连合取**：①本 Wave 3
 
 - device 跑完逐行填上方矩阵 + 端到端表 + 「关闭前其余硬门」表的 pass/fail。
 - **关闭判据 = 全部 PASS，非「仅回填」（codex review R3-Med）**：顺位 13 正式关闭 + freeze tag 的硬前提 = 上述全部行（本 Wave 3 矩阵 ① + 端到端 + Wave 2 两份 runbook ② + Instruments 帧预算 ③）**每行显式 PASS**——**任一行留空 / 标 FAIL / 帧预算实测 ≥ 4ms = 关闭前提未满足**（记录到一个 FAIL = 运行时 build 已知坏，**禁**据此正式关闭/freeze）。**仅**跑完本矩阵 ① 不满足硬门；三连合取**全部 PASS** 后，Wave 3 方可从「功能交付确认」转「正式关闭」（见 `docs/governance/2026-06-14-wave3-completion.md` §二/§五）。
-- W3-11-R1（bounce live 接线）+ 13a-R2（跨 lease cache data-loss）+ PR11-R1（生产 backendBaseURL）+ W1-R2（真实样本数据）= OPEN，不在本矩阵 device 验收范围（见 completion doc §三/§四）；其中 W3-11-R1 + 13a-R2 是关闭前须解的功能/缺陷门。
+- W3-11-R1（bounce live 接线）+ PR11-R1（生产 backendBaseURL）+ W1-R2（真实样本数据）= OPEN，不在本矩阵 device 验收范围（见 completion doc §三/§四）；其中 W3-11-R1 是关闭前须解的功能门。**13a-R2（跨 lease cache data-loss）已由本 PR 解决（2026-06-15，lease-aware ownership-guard），不再是关闭前缺陷门。**

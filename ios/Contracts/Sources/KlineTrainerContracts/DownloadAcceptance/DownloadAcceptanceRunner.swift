@@ -100,8 +100,8 @@ public final class DownloadAcceptanceRunner: Sendable {
             switch outcome {
             case .confirmed:
                 return .confirmed(file)
-            case .rejected(let e):                // 409/404 → 删本地 cache 副本
-                try? cache.delete(file)
+            case .rejected(let e):                // 409/404 → 清本 lease cache 副本（lease-aware，13a-R2 defense-in-depth）
+                deleteCachedFileIfUnowned(trainingSetId: meta.id)
                 return .rejected(e)
             case .pending(let e):                 // 网络不确定 → 保留 cache 副本待重试
                 return .rejected(e)
@@ -151,12 +151,34 @@ public final class DownloadAcceptanceRunner: Sendable {
             let outcome = await attemptConfirm(trainingSetId: row.trainingSetId,
                                                leaseId: row.leaseId,
                                                sqliteLocalPath: row.sqliteLocalPath)
-            if case .rejected = outcome {        // 409/404 → 清本地 cache 副本
-                if let file = cache.listAvailable().first(where: { $0.id == row.trainingSetId }) {
-                    try? cache.delete(file)
-                }
+            if case .rejected = outcome {        // 409/404 → 清孤儿 cache 副本（lease-aware，13a-R2）
+                deleteCachedFileIfUnowned(trainingSetId: row.trainingSetId)
             }
             // confirmed / pending：journal 已更新；pending 保留文件
+        }
+    }
+
+    // MARK: - 13a-R2：lease-aware 删除（run + retry 共用单一删除决策点）
+
+    /// 仅当无任何存活 lease 占有该 trainingSetId 的 cache 文件时，才删除其本地副本。
+    /// 所有权真相 = journal 的 lease-aware 行集：tid 在 {.stored, .confirmPending, .confirmed}
+    /// 任一状态有行 = 某存活 lease 仍占有该 tid 的 cache 文件（cache 仅按 id 键控、同 id 覆盖，
+    /// 故跨 lease 共享同一文件）。fail-safe：任一 owning-state 读失败 → 不删（宁留有效文件不误删）。
+    private func deleteCachedFileIfUnowned(trainingSetId: Int) {
+        let owningStates: [P2JournalState] = [.stored, .confirmPending, .confirmed]
+        for state in owningStates {
+            guard let rows = try? journal.listByState(state) else {
+                return   // journal 读失败 → fail-safe 不删
+            }
+            if rows.contains(where: { $0.trainingSetId == trainingSetId }) {
+                return   // 该 tid 仍被某存活 lease 占有 → 跳过删除（跨 lease 保护，13a-R2）
+            }
+        }
+        // 注：所有权检查与 delete 非跨 journal+cache 原子；并发 store 理论上可在此窗口插入新文件。
+        // 该窗口仅在「同 tid 并发双 lease」下出现（app 不如此用，§4.4 单 lease 不变量），且严格不劣于
+        // 修复前（旧逻辑无条件删）；cache pinning/acquisition 的 TOCTOU 根治归 13a-R3（P5-cache-pinning RFC）。
+        if let file = cache.listAvailable().first(where: { $0.id == trainingSetId }) {
+            try? cache.delete(file)
         }
     }
 
