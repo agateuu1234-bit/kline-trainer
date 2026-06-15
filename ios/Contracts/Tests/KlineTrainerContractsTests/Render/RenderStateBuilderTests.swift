@@ -355,10 +355,11 @@ struct RenderStateBuilderTests {
     func offsetBounds_earlyTickNoScrollRoom() {
         let w = ChartPanelFrames.split(in: Self.bounds).mainChart.width
         let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: 0, candleCount: 200, currentIdx: 10)
-        #expect(b.maxOffset == 0)           // base<0 → upperBound 守卫返单点 [0,0]
-        #expect(b.minOffset == 0)
+        #expect(b.maxOffset == 0)           // base<0 → upperBound 守卫返单点 [0,0]（**reveal-upperBound 判别在此**：
+        #expect(b.minOffset == 0)           //   mutation upperBound 退回 count−vc → max/min≠0 被抓，见 Stage2 review）
         #expect(b.candleStep == 10)
-        // 无滚动空间证：正 offset（朝更老，已最旧）/负 offset（朝新，禁前窥）喂回 makeViewport 都 clamp 到 autoTracking startIndex==0
+        // no-OOB smoke（**非** reveal-upperBound 判别——早 tick 下 startIndex 的 max(…,0) 下界 clamp 先于 upperBound 生效）：
+        // 正 offset（朝更老，已最旧）/负 offset（朝新，禁前窥）喂回 makeViewport 都落 autoTracking startIndex==0 且不 OOB。
         let cs = Self.candles(period: .m3, count: 200)
         let pos = RenderStateBuilder.makeViewport(
             panelState: Self.panel(offset: 100), candles: cs, tick: 10, bounds: Self.bounds)
