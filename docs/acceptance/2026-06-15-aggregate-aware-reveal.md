@@ -1,6 +1,6 @@
 # 验收清单 — 聚合感知 reveal（进行中聚合 K 线 partial 合成）
 
-**交付物：** `PartialAggregateCandle.synthesize` 纯函数 + `RenderStateBuilder.make` 合成挂钩（base 索引契约 + priceRange 重算）= 消除聚合面板（默认 m60/日线）进行中 K 线未来泄漏。设计经 opus 4.8 xhigh spec-review R1→R2 APPROVE 收敛；计划经 opus 4.8 xhigh plan-review R1 收敛；整体 opus + codex:adversarial-review 收敛。关闭 reveal RFC（PR #113）聚合 HIGH residual。
+**交付物：** `PartialAggregateCandle.synthesize` 纯函数 + `RenderStateBuilder.make` 合成挂钩（base 索引契约 + priceRange 重算）= 消除聚合面板（默认 m60/日线）进行中 K 线未来泄漏。设计经 opus 4.8 xhigh spec-review R1→R2 APPROVE 收敛；计划经 opus 4.8 xhigh plan-review R1 收敛；整体 opus APPROVE；codex:adversarial-review R1-R3 三 [HIGH] 真修（assert→clamp / datetime+volume 容损 / 全数组 COW→就地 slice），**R4（datetime 单调性）经 user 接受为 HIGH residual + attest-override**（见下）。关闭 reveal RFC（PR #113）聚合 HIGH residual。
 
 | # | Action | Expected | Pass/Fail |
 |---|---|---|---|
@@ -22,4 +22,5 @@
 
 ## Residuals
 - 关闭 reveal RFC（PR #113）聚合 HIGH residual：本 RFC 已根治。
+- **【HIGH · codex R4，user 2026-06-16 接受 + attest-override】`.m3` datetime 单调性未在数据边界校验**：合成 start 用 `partitioningIndex{datetime>=…}`，依赖 `.m3` datetime 严格递增；reader 仅校验 index/endGlobalIndex 连续，不校验 datetime 单调。良性数据 pipeline 保证有序故正确；损坏但可加载数据下合成有界错根（**不崩/不泄未来/Y 轴不越界**，成分 ⊆ 已揭示 = GIGO；与现有代码对 endGlobalIndex 排序的 per-render 信任同类）。真修 = reader/persistence 边界加 datetime 单调 + 聚合 open 落窗校验（M0.x trust-boundary，独立后续 RFC，超本渲染 RFC 作用域 D5）。codex 维持 needs-attention；本 PR 经 user attest-override 接受合入（非自我裁定推翻）。
 - D6 完成跳变：vendor 各周期独立源，理论一帧轻微 OHLC/量变化（真实数据 close 连续，因当前价=m3 close）；列 R4 device 验收。
