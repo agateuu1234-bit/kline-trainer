@@ -1,130 +1,155 @@
-# W3-11-R1 边缘 bounce 实时接线（MVP 释放回弹）—— 设计文档
+# W3-11-R1 边缘 bounce 实时接线（MVP 释放回弹）—— 设计文档 v2
 
 **日期**：2026-06-15
-**性质**：Wave 3 fast-follow，关闭 residual **W3-11-R1**（顺位 11 #96 `7eaf00b` 交付组件层 bounce 物理但未接线；live 接线 deferred）。把已就绪的 bounce 物理接进真 app 的手势/渲染管线，使**松手后的边缘回弹可见**，闭合 Wave 3 `feature-completeness: PENDING-W3-11-R1` 功能门之一。**改 `ios/**/*.swift`（trust-boundary）→ 经 `codex:adversarial-review`**。
+**性质**：Wave 3 fast-follow，关闭 residual **W3-11-R1**（顺位 11 #96 `7eaf00b` 交付组件层 bounce 物理但未接线）。把已就绪的 bounce 物理接进真 app 的手势/渲染管线，使**甩动到边缘后弹簧 overscroll+回弹可见**，闭合 Wave 3 `feature-completeness: PENDING-W3-11-R1` 功能门。**改 `ios/**/*.swift`（trust-boundary）→ 经 `codex:adversarial-review`**。
 
-**前置（已满足）**：顺位 3 Pinch（PR #98 `3187072`，去硬编码 `visibleCount`、动态视口几何）已 merged——这正是顺位 11 把 bounce 接线 defer 的阻塞依赖（设计 `2026-06-11-pr-wave3-11-edge-bounce-design.md` L11/L13/L25：「接线依赖 3 的视口几何，3 未开工故 defer」）。今接线不再返工。
+**前置（已满足）**：顺位 3 Pinch（PR #98 `3187072`，去硬编码 `visibleCount`、动态视口几何）已 merged——这是顺位 11 把 bounce 接线 defer 的阻塞依赖。
 
-**范围裁决（user 2026-06-15）**：**MVP 释放回弹**——甩动/拖到边缘**松手后**弹簧 overscroll+回弹可见；手指拖拽期保持当前 clamp（不跟手过边）。**Out of scope**：拖拽期跟手橡皮筋阻尼（独立 follow-up **R1b**）；device/sim 实测本身（runbook 交付，user 职责）。
+**范围裁决（user 2026-06-15）**：**MVP 释放回弹**——**甩动**到边缘松手 → 弹簧 overscroll+回弹可见；手指拖拽期保持当前 clamp（不跟手过边）。**Out of scope**：拖拽期跟手橡皮筋阻尼（follow-up **R1b**）；device 实测本身（runbook 交付，user 职责）。
+
+**v2 修订（opus spec-review R1：3 Critical + 4 High + 4 Med）**：bounds 坐标模型从「绝对 `[0,(count−visibleCount)·step]`」**纠正为锚相对带符号**（C1）；candleStep 几何纠正（C2）；drag-clamp 后零速松手不弹 → runbook 收窄（C3）；overscroll 只动 pixelShift 不动 startIndex（H3）+ 双边符号（H4）；drag-clamp 每帧需 bounds（H2）；strand 义务纳入（M3）；P7 回归面点名（M2）；bounds 测试改行为对拍（M4）；packaging 拆 2 子 PR（L1）。
 
 ---
 
-## 一、现状与接线缺口（grep 核实 2026-06-15，见 §七 file refs）
+## 一、现状与接线缺口（grep 核实 2026-06-15）
 
-bounce 物理三组件**已就绪 + 全单测**（顺位 11）：
-- `EdgeBounceModel`（`ChartEngine/EdgeBounceModel.swift`）：注入 `initialVelocity/offset/minOffset/maxOffset` 的纯物理；`advance(dt)->FrameOutcome`（界内减速相用持久固定步累加器 + 越界临界阻尼弹簧相）；`normalizeToEdgeDelta()` scene-active 归一；`shouldRun` 守门。
-- `DecelerationModel`（`DecelerationModel.swift`）：新增 `advance(dt:boundaryDistance:)->BoundaryOutcome`（`.moved/.stopped/.crossed`），既有 `advance(dt:)` 逐字不变（向后兼容 P7）。
-- `DecelerationAnimator`（`DecelerationAnimator.swift:104-116`）：**已就绪但 live 未调用**的 bounce 启动面
-  `public func start(initialVelocity:fromOffset:minOffset:maxOffset:)`（分离端点 CGFloat 防 NaN-trap；no-op guard = 亚阈速度**且** offset 界内才不弹，越界即便零速仍弹）。共享 generation/driver/`stop()`/`onUpdate`/`onFinish`/`resetOnSceneActive()` 生命周期。
+bounce 物理三组件**已就绪 + 全单测**（顺位 11，本 PR 不改）：
+- `EdgeBounceModel`（`ChartEngine/EdgeBounceModel.swift`）：注入 `initialVelocity/offset/minOffset/maxOffset` 纯物理；`advance(dt)->FrameOutcome`；`normalizeToEdgeDelta()` 归一；`shouldRun` 守门（**亚阈速度且 offset 界内 → false 不弹**；越界即便零速 → true）。
+- `DecelerationModel`：boundary-aware `advance(dt:boundaryDistance:)`，既有 `advance(dt:)` 逐字不变（P7）。
+- `DecelerationAnimator.swift:104-116`：**已就绪未调用**的 `start(initialVelocity:fromOffset:minOffset:maxOffset:)`（分离端点 CGFloat 防 NaN-trap）；共享 `onUpdate`/`onFinish`/`stop()`/`resetOnSceneActive()`/generation 生命周期；既有无界 `start(initialVelocity:)` 保留（live 当前调用面）。
 
 **接线缺口（= W3-11-R1）**：
-1. `TrainingEngine.endPan(velocity:panel:)`（`TrainingEngine.swift:607-611`）只调 `animator.start(initialVelocity:)`（**无边界**）→ 永不进 bounce。
-2. **几何 offset 边界无来源**：`min=0` / `max=(count−visibleCount)·candleStep`，`candleStep=mainFrame.width/visibleCount` 是**渲染层像素几何**，engine/reducer 不持有 panel 像素宽 → endPan 拿不到 bounds。
-3. `RenderStateBuilder.makeViewport`（`RenderStateBuilder.swift:82-85`）在边缘**静默钉死 `pixelShift=0`**（无 overscroll 渲染）→ 即便 offset 越界也看不到回弹。
-4. 顺位 11 设计 §五**显式指派给 W3-11-R1** 的归一义务（`cancelPan` 越界归位 / `resetOnSceneActive` 接线）未接。
+1. `TrainingEngine.endPan(velocity:panel:)`（`TrainingEngine.swift:607-611`）只调 `animator.start(initialVelocity:)`（无边界）→ 永不进 bounce。
+2. **几何 offset 边界无来源**（见 §二.B1 真实模型）：边界依赖渲染层像素几何（`mainFrame.width`/`target`/`currentIdx`），engine/reducer 不持有。
+3. `RenderStateBuilder.makeViewport`（`:80-85`）边缘**静默 `pixelShift=0`**（无 overscroll 渲染）→ offset 越界也不可见。
+4. 顺位 11 设计 §五 指派给 W3-11-R1 的归一/strand 义务（`cancelPan`/`resetOnSceneActive`/`activateDrawingTool`/视口几何变更期间）未接。
 
 ---
 
-## 二、架构（5 个接线单元，additive，不改 bounce 物理）
+## 二、架构（接线，additive，不改 bounce 物理）
 
-### B1. 共享 offset-bounds 纯函数（单一真相，根治几何漂移）
-把边界公式抽成**平台无关纯函数**（落 `Render/` 或 `ChartEngine/` 值类型层），供两处共用：
-- 输入：`panelPixelWidth: CGFloat`、`visibleCount: Int`、`candleCount: Int`。
-- 输出：`(minOffset: CGFloat, maxOffset: CGFloat, candleStep: CGFloat)`，其中 `candleStep = panelPixelWidth / CGFloat(visibleCount)`、`minOffset = 0`、`maxOffset = CGFloat(max(0, candleCount − visibleCount)) · candleStep`。
-- **`RenderStateBuilder.makeViewport` 改为消费此函数**算 clamp（行为等价重构，不变像素）；**bounce-start 路径消费同一函数**算 bounds。→ render 钉死的边界与 bounce 弹回的边界**字节同源**。
-- 退化：`candleCount ≤ visibleCount` → `maxOffset == minOffset == 0`（无滚动空间，合法；任意越界回弹至单点，`EdgeBounceModel` 已守 `min==max`）。
+### B1. 共享 offset-bounds 纯函数（单一真相；落 Render 层，复用 makeViewport 子算）
+**核实的真实 offset 坐标模型**（`RenderStateBuilder.swift:60-85`，opus C1/C2 纠正）：offset **非绝对位移**，是相对 autoTracking 锚 `baseStartIndex` 的带符号量：
+- `mainFrame = ChartPanelFrames.split(in: bounds).mainChart`（**非** bounds 全宽——split 切掉量价/MACD 子面板）；
+- `target = panelState.visibleCount>0 ? visibleCount : 80`；`visibleCount = min(target, count)`；
+- `candleStep = mainFrame.width / CGFloat(target)`（**分母 target，非 visibleCount**）；
+- `currentIdx = currentCandleIndex(candles, tick)`；`baseStartIndex = currentIdx − (visibleCount−1)`；`upperBound = max(0, count − visibleCount)`；
+- `wholeShift = floor(offset / candleStep)`；`startIndex = clamp(baseStartIndex − wholeShift, 0, upperBound)`；正 offset → 最老边（startIndex→0）、负 offset → 最新边（startIndex→upperBound）。
 
-### B2. 几何边界喂进 engine（顺位 11 §residual 指派）
-- `ChartContainerView.Coordinator`（持 panel 像素宽 `view.bounds.width` + 读 `renderState`/engine 的 `visibleCount` + `candleCount`）在 pan-end 用 B1 算 `(min,max)`。
-- `TrainingEngine` 暴露 bounce-aware pan-end 接线面（**沿既有手势契约扩展，顺位 11 设计 + 顺位 1 RFC 已预指派**）：传 `(velocity, offsetBounds, panel)`；`startDeceleration` 效果触发时转发 `animator(for:panel).start(initialVelocity: v, fromOffset: <engine 当前 offset>, minOffset: min, maxOffset: max)`。`fromOffset` 取 engine 自身 panelState.offset（组件无状态，offset 真值在 engine）。
-- **既有 `start(initialVelocity:)` 无边界面保留**（任何未提供 bounds 的旧调用路径行为不变，P7）。
+**故真实 offset 边界（带符号）**：
+- **maxOffset（最老边，startIndex==0）= `baseStartIndex · candleStep`**（≥0）；
+- **minOffset（最新边，startIndex==upperBound）= `(baseStartIndex − upperBound) · candleStep`**（通常 <0）。
 
-### B3. 拖拽期保持 pin（MVP 无跟手橡皮筋）
-- **在 `applyPanOffset`（手指 drag 入口 engine 方法）clamp**，**不**在 reducer `.offsetApplied` clamp（关键，见 D2）：`applyPanOffset(deltaPixels, offsetBounds, panel)` 算 `clampedDelta = clamp(offset+delta, min, max) − offset`，再 `reduce(.offsetApplied(clampedDelta))`。bounds 由 B2 的 Coordinator 同源喂入。→ 拖拽 offset 恒 `∈[min,max]`、不累积 overscroll，render 照旧 pin。
-- **reducer `.offsetApplied` 逐字不变（仍无界累加）** → bounce 动画的 `onUpdate`→`applyOffsetDelta(delta)`→`.offsetApplied` **不经 clamp**，弹簧 overscroll 可正常突破边界（D2）。两条写入路径在 **engine 方法层** 区分（`applyPanOffset` clamp / `applyOffsetDelta` 不 clamp），非在 reducer action 层（二者同为 `.offsetApplied`，无法按 action 区分）。
-- **结论：overscroll 只可能由「松手后弹簧」产生** → 使 B4 的 render 保持**无状态**判据「offset 越界即显 overscroll」，无需 render 耦合动画状态。
-- 设计取舍（记录）：备选 = 不 clamp drag + render 加 `overscrollActive` flag（bounce 起置位/settle 清）；本设计选 **clamp drag-entry**（render 无状态更干净、杜绝「松手瞬间从 pin 跳到 drag 累积 overscroll」的视觉突跳、零 reducer 改动）。
+B1 纯函数签名（Render 层；输入须含 **currentIdx 与 mainFrameWidth**，opus C1：原 `(width,visibleCount,count)` 不足）：
+```
+offsetBounds(mainFrameWidth: CGFloat, visibleCount rawVisible: Int, candleCount: Int, currentIdx: Int)
+  -> (minOffset: CGFloat, maxOffset: CGFloat, candleStep: CGFloat)
+```
+内部按上式（含 target/visibleCount/baseStartIndex/upperBound 派生）。**makeViewport 重构为调用 B1 的同一 startIndex/bounds 子算**（D4 单一真相，行为等价不变像素）。退化 `count ≤ visibleCount` → upperBound==0、baseStartIndex 可能 ≤0 → min/max 可能相等或 min>max 的退化区间，交 `EdgeBounceModel` 端点校验（`min>max`→安全无 bounce；`min==max`→单点回弹）。
 
-### B4. render overscroll 橡皮筋（顺位 3 已 merged，视口几何可碰）
-- `makeViewport`：当 `offset` 越界（`offset > maxOffset` 或 `< minOffset`，**仅弹簧期发生**）→ 把 overscroll 量（`offset − maxOffset` 或 `offset − minOffset`）渲成**面板平移**（边缘露出 rubber-band 间隙），取代 `pixelShift=0` 静默钉死。
-- `offset` 界内（`[min,max]`）→ **行为逐字不变**（现有 clamp + 边缘 pin）。
-- overscroll 渲染量纲：直接用 overscroll 像素作平移（弹簧物理本身已是阻尼轨迹，render 不再二次阻尼，避免双重衰减语义）。
+### B2. 几何边界喂进 engine（D1：Coordinator 算 + 喂 numbers，engine 不持像素）
+- `ChartContainerView.Coordinator`（Render 层，持 `view.bounds` + 可调 `ChartPanelFrames.split`/`currentCandleIndex` + 读 engine `visibleCount`/`candles.count`/`tick`）用 **B1 算 `(min,max)`**，把 **numeric 边界**喂进 engine（engine 收数值、零像素/几何知识）。
+- **pan-end（release）**：`engine.endPan(velocity:offsetBounds:panel:)` → `startDeceleration` 时转发 `animator.start(initialVelocity:v, fromOffset:<engine 当前 offset>, minOffset:min, maxOffset:max)`。
+- **drag（changed，H2：每帧需 bounds）**：`engine.applyPanOffset(deltaPixels:offsetBounds:panel:)` → 见 B3 clamp。
+- 既有无界 `start(initialVelocity:)` / 不带 bounds 的旧 endPan 路径保留（P7）。
 
-### B5. 归一/cancel 接线（顺位 11 §五指派）
-- `resetOnSceneActive()`（已在组件）→ 接进 app scene-active 路径（engine `onSceneActivated` 中继已存在，挂 animator 归一）使中途 bounce 越界 offset 归 edge（防 strand）。
-- `cancelPan`-越界 → 经 bounce 启动面零速归位（组件 no-op guard 已支持「越界即便零速仍弹」）。
-- 净效果：bounce 自然 settle / scene-active / cancel 三路径后 **engine offset 精确 == edge**，resume/持久化看到干净 clamped offset（无残留 overscroll）。
+### B3. 拖拽期保持 pin（MVP，drag-clamp 在 applyPanOffset 不在 reducer）
+- **clamp 在 `applyPanOffset`（drag 入口 engine 方法）**，**不在 reducer `.offsetApplied`**：`applyPanOffset(deltaPixels, offsetBounds, panel)` 算 `clampedDelta = clamp(offset+delta, min, max) − offset`，再 `reduce(.offsetApplied(clampedDelta))`。→ drag offset 恒 `∈[min,max]`，render 照旧 pin。
+- **reducer `.offsetApplied` 逐字不变（无界累加）** → bounce 的 `onUpdate`→`applyOffsetDelta(delta)`→`.offsetApplied` **不经 clamp**，弹簧 overscroll 可突破边界。两路径在 **engine 方法层**区分（`applyPanOffset` clamp / `applyOffsetDelta` 不 clamp），reducer 无法按 action 区分（同为 `.offsetApplied`）。**D2 killer 测**：bounce delta 经 `applyOffsetDelta` 须能使 offset 越界。
+- **结论**：overscroll 只可能由「松手后弹簧」产生 → B4 render 无状态判据「offset 越界即显 overscroll」成立。
+
+### B4. render overscroll 橡皮筋（只动 pixelShift，不动 startIndex；双边符号）
+`makeViewport` 边缘分支改（opus H3/H4）：
+- **offset > maxOffset（最老边越界）**：`startIndex` 仍 clamp ==0（**不动，防数组越界**），`pixelShift = offset − maxOffset`（**>0 = candles 右移、左露间隙**，符 `Geometry.swift:136` 符号契约）。
+- **offset < minOffset（最新边越界）**：`startIndex` 仍 ==upperBound，`pixelShift = offset − minOffset`（**<0 = candles 左移、右露间隙**）。
+- **offset ∈ [minOffset, maxOffset]（界内）**：**行为逐字不变**（现有 `startIndex` clamp + 边缘 `pixelShift=0` pin + 非边缘正常 pixelShift）。
+- slice 仍 `candles[startIndex..<min(startIndex+visibleCount,count)]`，startIndex∈[0,upperBound] 不变 → **无 OOB**（H3 测须断言越界态 startIndex 仍合法、slice 非空）。
+- **不二次阻尼**（D3）：弹簧物理已是阻尼轨迹，render 直接 1:1 平移 overscroll 像素。
+
+### B5. 归一 / strand 接线（顺位 11 §五指派；opus M3：本 PR 即接线 PR，strand 现可显现须处理）
+- `resetOnSceneActive()`（组件已有）→ 接 app scene-active 路径（engine `onSceneActivated` 中继）：中途 bounce 越界 offset 静默归 edge（防 strand）。
+- `cancelPan`-越界 → 经 bounce 启动面零速归位（组件 `shouldRun` 越界即弹支持）。
+- **`activateDrawingTool` / 周期切换 / pinch / 窗口 resize 期间正在 bounce**（顺位 11 §五 item 4/6，opus M3）：这些动作会 `animator.stop()` 或改视口几何使 bounds 失效。处置：任何中断 bounce 的动作（已有 `stop()` 调用面）后，若 offset 越界则下一次几何稳定时经 `resetOnSceneActive`-同源归一路径落 edge；**pinch/resize 改 visibleCount → bounds 变** → 进行中的 bounce 用旧 bounds，settle 后若新几何下越界则 scene/下一手势收口。**MVP 取：bounce 中途遇视口几何变更 → `stop()` + 归一到（旧或新）edge，不追求中途无缝续弹**（无缝续弹属 R1b/后续）。本 PR 须测「bounce 中途 activateDrawingTool/周期切换 → offset 不 strand 在界外」。
+- 净效果：bounce 自然 settle / scene-active / cancel / 中断三类后 **engine offset 精确落 edge**，resume/持久化看到干净 clamped offset。
 
 ---
 
 ## 三、数据流（释放回弹）
 
 ```
-手势 arbiter.onPan(.ended, velocityX)
-  → ChartContainerView.Coordinator：B1 算 (min,max) from (view.width, visibleCount, candleCount)
-  → engine bounce-aware endPan(velocity, offsetBounds, panel)
+手势 arbiter.onPan(.changed, deltaX)  → engine.applyPanOffset(deltaX, bounds=B1(...), panel)  [drag-clamp，offset∈[min,max]]
+手势 arbiter.onPan(.ended, velocityX) → Coordinator B1 算 (min,max) → engine.endPan(velocityX, (min,max), panel)
   → reduce(.panEnded(velocity)) → 若 .startDeceleration(v)
-  → animator(panel).start(initialVelocity: v, fromOffset: engine.offset, minOffset, maxOffset)
-  → 每帧 EdgeBounceModel.advance(dt) -> FrameOutcome
-       界内减速相 → 到边界 cross → seed 弹簧于 edge → 越界弹簧相 → settle 于 edge
-  → onUpdate(delta) → engine.applyOffsetDelta → reduce(.offsetApplied(delta))
-       offset 沿 bounce 轨迹（overscroll 峰值 → 回落 edge），drag-clamp 不挡（B3 仅挡 drag 非 bounce delta，见 §五 D2）
-  → RenderStateBuilder.makeViewport：offset 越界 → B4 渲 overscroll 平移（弹簧期可见）；落 edge 后回正
-  → onFinish（自然 settle）→ offset == edge 精确
+  → animator.start(initialVelocity:v, fromOffset:engine.offset(==某 edge 或界内), minOffset, maxOffset)
+       · 甩动朝界外 → 减速到 edge → cross → 弹簧 overscroll → settle 于 edge（可见回弹）
+       · 甩动朝界内 → 纯减速、不 cross、不 overscroll（普通滚动，H1 主路径）
+       · 轻拖到 edge 零速松手 → offset==edge 界内亚阈 → shouldRun=false → 不弹（只停 edge，C3）
+  → onUpdate(delta) → engine.applyOffsetDelta(delta)（**不 clamp**）→ reduce(.offsetApplied(delta))
+  → makeViewport：offset 越界 → B4 渲 overscroll 平移（弹簧期可见）；界内 → 现状
+  → onFinish（自然 settle）→ offset==edge 精确
 ```
 
 ---
 
 ## 四、错误处理 / 边界
 
-- `candleCount ≤ visibleCount`（无滚动空间，`min==max==0`）：B1 返单点边界；`EdgeBounceModel` `min==max` 合法（任意越界回弹至该点）；正常无 bounce（offset 恒 0）。
-- 非有限几何（NaN/inf width/count）：B1 须返安全值（或 bounce-start 端点校验 → 组件 `shouldRun==false` 安全无 bounce）。
-- scene-active 中途 bounce：`resetOnSceneActive()` 经组件共享 `terminate(notifyFinish:false)` 静默归 edge（B5）。
-- `beginPan` re-grab 中途 bounce：既有 `animator.stop()` 保位（标准惯性语义，顺位 11 §五指派「保位由后续 pan/松手 bounce 收口」），不归一。
-- drag-clamp 与 bounce delta 区分（§五 D2 关键不变量）：drag（`applyPanOffset`）clamp；bounce（`onUpdate`→`offsetApplied`）**不可被 clamp 挡**（否则弹簧 overscroll 被吞、无可见回弹）。
+- `count ≤ visibleCount`（无滚动空间）→ B1 退化区间，`EdgeBounceModel` 端点校验守（min>max 无 bounce / min==max 单点）。
+- 非有限几何（NaN/inf width/count/currentIdx）→ B1 须返安全值或 bounce-start 端点校验 → `shouldRun=false` 安全无 bounce。
+- scene-active / 中断中途 bounce → `resetOnSceneActive`-同源归一（B5）。
+- `beginPan` re-grab 中途 bounce → 既有 `animator.stop()` 保位（标准惯性，由后续松手 bounce 收口）。
 
 ---
 
 ## 五、关键设计决策
 
-- **D1 边界来源 = Coordinator 算 + 喂 engine**（非 engine 自算）：engine/reducer 不持 panel 像素宽（render-layer 值），故由持几何的 Coordinator 用 B1 算 bounds 喂入。保 engine 不侵入 UIKit 像素层。
-- **D2 drag-clamp 不可误挡 bounce delta**（核心不变量，spec 级钉死）：clamp **只在 `applyPanOffset`（drag 入口）**，**不在 reducer `.offsetApplied`**——因 drag 与 bounce delta 同经 `.offsetApplied`（reducer 无法按 action 区分），若在 reducer clamp 则弹簧 overscroll 被吞、无可见回弹。故机制 = `applyPanOffset` 算 clampedDelta 后再 reduce（drag 恒界内）；bounce `applyOffsetDelta` 直传不 clamp（overscroll 突破边界，settle 由弹簧物理精确落 edge）。reducer 零改动。B3-3/D2 killer 测：注入 bounce delta 经 `applyOffsetDelta` 须能使 offset 越界。
-- **D3 overscroll 渲染不二次阻尼**：弹簧物理已是阻尼轨迹，B4 render 直接平移 overscroll 像素，不再叠加 render 层阻尼（否则双重衰减、与物理 settle 点不一致）。
-- **D4 单一真相 bounds**：B1 纯函数被 render clamp 与 bounce bounds 共用，杜绝两套几何公式漂移（顺位 3 动态 visibleCount 后尤其重要）。
-- **D5 治理边界**：`endPan` 扩 bounds + 归一接线是**顺位 11 设计 §residual/§五 + 顺位 1 RFC 已预先指派给 W3-11-R1 的 wiring 义务**（非新 engine 契约），不另起 RFC；改 `RenderStateBuilder` 的 overscroll 渲染属顺位 3 已解锁的视口几何域。opus/codex review 复核此归属。
+- **D1 边界来源 = Coordinator 算（B1）+ 喂 numeric 给 engine**：engine/reducer 不持像素几何（`mainFrame.width`/split 是 Render 层）；Coordinator 持 view + 可调 Render helper → 算 numeric bounds 喂入，engine 收数值。保 engine 不侵入 UIKit 像素层（不让 engine 反向依赖 `ChartPanelFrames`）。
+- **D2 drag-clamp 只在 applyPanOffset、不在 reducer**（核心不变量，spec 级钉死）：drag 与 bounce delta 同经 `.offsetApplied`，reducer 不可区分 → clamp 在 `applyPanOffset`（drag 恒界内）、`applyOffsetDelta`（bounce）直传不 clamp（overscroll 突破、settle 由物理落 edge）。reducer 零改动。
+- **D3 overscroll 不二次阻尼**：弹簧已含阻尼，B4 render 1:1 平移 overscroll 像素。
+- **D4 单一真相 bounds**：B1 纯函数被 makeViewport clamp 与 bounce bounds 共用（makeViewport 重构调 B1）；杜绝两套几何公式漂移（顺位 3 动态 visibleCount 后尤甚）。
+- **D5 锚相对带符号坐标（opus C1 核心纠正）**：bounds = `maxOffset=baseStartIndex·candleStep`（正，最老边）/ `minOffset=(baseStartIndex−upperBound)·candleStep`（通常负，最新边）；candleStep=mainFrame.width/target；依赖 currentIdx（tick）+ 像素宽。**tick 仅用户动作（交易/周期切换）推进、非 pan/bounce 中推进** → 单次 bounce 期间 bounds 稳定（pinch/resize 改 visibleCount 才变，B5 处置）。
+- **D6 runbook 收窄（opus C3）**：MVP drag-clamp 下「轻拖到边缘零速松手」offset==edge 界内亚阈 → 不弹（iOS 原生一致）；**只有甩动（fling 速度≥阈）越界才回弹**。runbook §六.7 删/改「拖到边缘松手→回弹」为「甩到边缘→回弹 / 轻拖到边松手→停 edge 不弹」。
+- **D7 治理边界**：`endPan`/`applyPanOffset` 扩 bounds + makeViewport overscroll + 归一接线 = **顺位 11 设计 §residual/§五 + 顺位 1 RFC 已预先指派给 W3-11-R1 的 wiring 义务**（非新契约）；**但 bounds 公式本身是本 PR 新设计**（opus M1），须经 codex/opus 数值核验。
 
 ---
 
 ## 六、测试（host，平台无关优先）
 
-1. **B1 bounds 纯函数**：given (width, visibleCount, candleCount) → (min,max,candleStep) 数值正确；**与 `makeViewport` clamp 公式一致**（同输入下 render clamp 的 upperBound·candleStep == maxOffset）；退化 count≤visibleCount → min==max==0。
-2. **B2 endPan 带 bounds**：注入 fake `FrameDriving` + 探针 animator，断言 bounce-aware endPan 在 `startDeceleration` 时以**正确 `fromOffset`(engine 当前 offset)/min/max** 调 `start(...bounds)`；无 velocity（界内亚阈）→ 不启 bounce。
-3. **B3 drag clamp**：`applyPanOffset` 推过边界 → offset clamp 到 `[min,max]`（不累积 overscroll）；**bounce onUpdate delta 不被 clamp**（overscroll 可越界，D2 killer 测）。
-4. **B4 makeViewport overscroll**：offset 越界 → renderState 含 overscroll 平移（量纲 == overscroll 像素）；offset 界内 → 与现状逐字一致（pin 不变，回归）。
-5. **B5 归一**：scene-active 中途越界 → resetOnSceneActive 后 offset==edge；bounce 自然 settle → offset==edge 精确。
-6. **回归**：既有 `DecelerationAnimator`/`DecelerationModel`/plain-decel endPan 路径 host 测全绿（P7 向后兼容）；既有 makeViewport 界内测全绿。
-7. **device/sim 运行时 runbook**（W3-11-R1 device 验收，闭合 Wave 3 矩阵 bounce 行）：非-coder 可执行——甩到最老/最新边缘松手 → 见弹簧 overscroll+回弹+落边缘；拖到边缘松手（无甩）→ 回弹；切周期/缩放后边缘 bounce 仍正确（消费动态 visibleCount）；中途切后台再回前台 → 无残留越界。**实测回填 = user 职责**。
+1. **B1 bounds 纯函数 + 行为对拍（opus M4，非公式自等）**：给 (mainFrameWidth, visibleCount, count, currentIdx) → 算 (min,max,step)；**把算出的 maxOffset/minOffset 喂回 `makeViewport` → 断言 `startIndex∈{0,upperBound}` 且 `pixelShift==0`**（真到 render 边缘）；maxOffset+ε → startIndex 仍 0 但 pixelShift>0（越界）；退化 count≤visibleCount。
+2. **B2 endPan 带 bounds**：注入 fake `FrameDriving` + 探针 animator，断言 `startDeceleration` 时以**正确 fromOffset(engine 当前 offset)/min/max** 调 `start(...bounds)`；界内亚阈速度 → 不启 bounce（D6）。
+3. **B3 drag clamp（D2 killer）**：`applyPanOffset` 推过边界 → offset clamp 到 `[min,max]`；**bounce `applyOffsetDelta` delta 不被 clamp → offset 可越界**（killer，证两路径分离）。
+4. **B4 makeViewport overscroll（H3/H4）**：offset>maxOffset → pixelShift>0（左间隙）+ **startIndex==0 不变、slice 非空**（无 OOB）；offset<minOffset → pixelShift<0（右间隙）+ startIndex==upperBound；offset 界内 → 与现状逐字一致（回归）。
+5. **B5 归一/strand**：scene-active 中途越界 → resetOnSceneActive 后 offset==edge；bounce 中途 `activateDrawingTool`/周期切换 → offset 不 strand 界外（归 edge）；bounce 自然 settle → offset==edge 精确。
+6. **H1 主路径**：edge 起点 + 朝界内 velocity → 纯减速、无 overscroll、render 全程界内（不触 B4）。
+7. **P7 回归（opus M2 点名）**：drag-clamp 改 `applyPanOffset` 行为 → 既有 freeScrolling **无界**累加断言测试（`TrainingEngineInteractionTests`/`ReducerTests` 中 offset 累加）须更新为「drag 经 bounds 后界内」——区分**真回归** vs **预期行为变更**，逐条标注；既有 `DecelerationAnimator`/`DecelerationModel`/plain-decel endPan/界内 makeViewport 测全绿。
+8. **device/sim 运行时 runbook**（W3-11-R1 device 验收，闭合 Wave 3 矩阵 bounce 行；user 实测回填）：**甩**到最老/最新边松手 → 弹簧 overscroll+回弹+落边缘；**轻拖**到边松手（无甩）→ 停边缘**不**回弹（D6）；切周期/缩放后边缘 bounce 仍正确（消费动态 visibleCount/新 bounds）；bounce 中途切后台→前台 / 开画线工具 → 无残留越界。
 
 ---
 
 ## 七、file refs（grep 核实 2026-06-15）
 
-- `ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/EdgeBounceModel.swift`（物理，就绪）
-- `ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/DecelerationModel.swift`（boundary-aware，就绪）
-- `ios/Contracts/Sources/KlineTrainerContracts/ChartEngine/DecelerationAnimator.swift:104-116`（bounce 启动面，就绪未调用）
-- `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift:607-611`（endPan 接线缺口）+ `:596-604`（beginPan/applyPanOffset）+ `:499-501`（applyOffsetDelta）+ `:141-142`（animator.onUpdate setup）
-- `ios/Contracts/Sources/KlineTrainerContracts/Reducer/Reducer.swift:138-143`（panEnded→startDeceleration）+ `:160-164`（offsetApplied 无界累加，**逐字不变**——clamp 在 `applyPanOffset` engine 方法，非 reducer，D2）
-- `ios/Contracts/Sources/KlineTrainerContracts/Render/RenderStateBuilder.swift:58-92`（makeViewport offset 分解 + 边缘 pin，待抽 B1 + overscroll）
-- `ios/Contracts/Sources/KlineTrainerContracts/Render/ChartContainerView.swift:80-87`（Coordinator onPan 接线）
+- `ChartEngine/EdgeBounceModel.swift`（物理，就绪）/ `DecelerationModel.swift`（boundary-aware，就绪）/ `DecelerationAnimator.swift:104-116`（bounce 启动面，就绪未调用）+ `:141-142`(onUpdate setup)
+- `TrainingEngine/TrainingEngine.swift:607-611`（endPan 缺口）+ `:596-604`（beginPan/applyPanOffset）+ `:572-574`（**applyOffsetDelta**，opus L2 纠正：原引 :499-501 错）
+- `Reducer/Reducer.swift:138-143`（panEnded→startDeceleration）+ `:160-164`（offsetApplied 累加，**逐字不变**——clamp 在 applyPanOffset 非 reducer，D2）
+- `Render/RenderStateBuilder.swift:58-93`（makeViewport：split/target/candleStep/baseStartIndex/startIndex/pixelShift——待抽 B1 + B4 overscroll）+ `:95-99`（currentCandleIndex）+ `ChartPanelFrames.split`/`Geometry.swift:136`（pixelShift 符号）
+- `Render/ChartContainerView.swift:80-87`（Coordinator onPan 接线，待加每帧 bounds）
 - 顺位 11 设计：`docs/superpowers/specs/2026-06-11-pr-wave3-11-edge-bounce-design.md`（§residual L43-47 / §五 stop 调用面归一指派）
 
 ---
 
-## 八、验收 / 治理
+## 八、Packaging（opus L1：5 单元 + 测 + runbook 超 ≤3 子项 → 拆 2 子 PR）
 
-- **评审通道**：改 `ios/**/*.swift` → `codex:adversarial-review`（唯一通道；配额耗尽 fallback opus 4.8 xhigh，documented）+ Catalyst + app-build required check。
-- **非-coder acceptance checklist**（CLAUDE.md §2）：含 host 测核 + §六.7 device runbook。
-- **闭环**：W3-11-R1 merged + device runbook 实测回填后，Wave 3 completion doc 的 `feature-completeness` 从 `PENDING-W3-11-R1` 解（更新 `residual-W3-11-R1-bounce-live-wiring: OPEN→CLOSED` + 矩阵 bounce 行从「排除/OPEN」转 device 行）——该 ledger 更新属本 PR 或紧随收尾。
+- **W3-11-R1a（纯几何/渲染，host 全测）**：B1 bounds 纯函数 + makeViewport 重构调 B1 + B4 overscroll 渲染。零 engine/gesture 改，纯 Render 层 + host 测（行为对拍 + overscroll 符号 + 无 OOB + 界内回归）。
+- **W3-11-R1b-wire（engine/gesture 接线）**：B2 endPan/applyPanOffset 扩 bounds + B3 drag-clamp + Coordinator 每帧喂 bounds + B5 归一/strand + device runbook。依赖 R1a 的 B1。
+- （拖拽期跟手橡皮筋阻尼 = 另一独立 follow-up **R1b-drag**，本 spec out of scope。）
+- 注：W3-11-R1a/R1b-wire 同属 Render/engine 域、串行（R1b-wire 依赖 R1a 的 B1 + makeViewport overscroll）；与并行编排（`2026-06-15-wave3-fastfollow-parallelization.md`）Track A 一致。
+
+---
+
+## 九、验收 / 治理
+
+- **评审通道**：改 `ios/**/*.swift` → `codex:adversarial-review`（配额耗尽 fallback opus 4.8 xhigh）+ Catalyst + app-build。
+- **非-coder acceptance checklist**：host 测核 + §六.8 device runbook。
+- **ledger**：本 PR（业务轨）**不碰** `wave3-completion.md`/`verify-wave3-completion.sh`/runtime-matrix（per 并行编排 §四 ledger-B）；`feature-completeness: PENDING-W3-11-R1` 的翻转 + 矩阵 bounce 行转 device 行留收尾 reconciliation PR。本 PR 仅记自身 `docs/acceptance/2026-06-15-w3-11-r1-*.md`。
 
 ---
 
@@ -132,4 +157,5 @@ bounce 物理三组件**已就绪 + 全单测**（顺位 11）：
 
 | 日期 | 版本 | 说明 |
 |---|---|---|
-| 2026-06-15 | v1 (draft) | MVP 释放回弹接线设计；5 单元（bounds 纯函数 / 喂 engine / drag-clamp / render overscroll / 归一接线）；user 裁决 MVP（拖拽期橡皮筋 = R1b follow-up）；前置顺位 3 已 merged 解阻塞；待 opus 4.8 xhigh 对抗 review 到收敛 |
+| 2026-06-15 | v1 | MVP 释放回弹接线设计；5 单元；user 裁决 MVP |
+| 2026-06-15 | v2 (opus spec-review R1 修) | **C1 bounds 坐标纠正为锚相对带符号**（maxOffset=baseStartIndex·step / minOffset=(baseStartIndex−upperBound)·step，含 currentIdx+mainFrameWidth）；C2 candleStep=mainFrame.width/target；C3/D6 drag-clamp 后零速松手不弹→runbook 收窄（甩动才弹）；H1 朝界内主路径覆盖；H2 drag 每帧需 bounds；H3 overscroll 只动 pixelShift 不动 startIndex；H4 双边符号；M2 P7 freeScrolling 回归点名；M3 strand（activateDrawingTool/pinch/resize 中途 bounce）纳入处置；M4 bounds 测改行为对拍；L1 拆 R1a 几何/R1b-wire 接线 2 子 PR；L2 applyOffsetDelta 行号 :572-574；ledger-B（业务轨不碰治理 doc）。待 opus 复核到收敛 |
