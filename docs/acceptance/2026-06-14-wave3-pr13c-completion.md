@@ -1,0 +1,40 @@
+# PR Wave 3 13c 验收清单（中文非-coder 可执行）
+
+**PR 范围**：Wave 3 顺位 13 收尾 doc-only 三件套——completion doc（功能交付确认 + reconcile §三.3 + residual 终态回填 + freeze 决策）+ 单一运行时矩阵 runbook + 机器可校验 grep gate + 本验收清单。**0 业务代码 / 0 CI workflow / 0 ruleset 改动**。
+
+**source-of-truth**：spec `docs/superpowers/specs/2026-06-14-wave3-pr13-completion-design.md` §E；outline `docs/superpowers/specs/2026-06-09-wave3-outline-design.md` §三.3；plan `docs/superpowers/plans/2026-06-14-wave3-pr13c-completion.md`。
+
+**评审通道**：doc-only 经 `codex:adversarial-review`（治理 doc 类，唯一 review 通道）；codex 周配额耗尽时 fallback opus 4.8 xhigh（documented）。
+
+---
+
+## 非-coder 可执行验收步骤
+
+| Step | Action | Expected | Pass / Fail |
+|---|---|---|---|
+| 1 | 浏览器打开本 PR | 见 4 新文件（completion doc `docs/governance/2026-06-14-wave3-completion.md` + 矩阵 runbook `docs/acceptance/2026-06-14-wave3-runtime-matrix.md` + grep gate `scripts/governance/verify-wave3-completion.sh` + 本 acceptance）；0 业务 `.swift` / 0 CI workflow / 0 ruleset 改动 | □ Pass / □ Fail |
+| 2 | 看 completion doc 一节 anchor 表 | 17 行（顺位 — / 1 / 2 / 3 / 4 / 5 / 6a / 6b / 7 / 8 / 9 / 10a / 10b / 11 / 12 / 13a / 13b / 13c）+ squash SHA 与 `git log origin/main` 一致；非-anchor #105 `2d2e28f` 作脚注 | □ Pass / □ Fail |
+| 3 | 看二节 reconcile | 含 outline §三.3 原文引用「其完成是 Wave 3 关闭的硬前提，非『某天再说』」+「为何不宣布 closure」论证 + 点名对 spec §E.2 矩阵清单的 bounce 纠正（W3-11-R1 OPEN，矩阵不列 bounce device 行） | □ Pass / □ Fail |
+| 4 | 看三节 residual 表（8 行） | A/B/C/D = CLOSED（引 13a #108 / 13b #109）；运行时矩阵 = PARTIAL；**W3-11-R1**（bounce live 接线）/ PR11-R1（生产 backendBaseURL）/ W1-R2（真实样本数据）= OPEN；人读表与机器块 WAVE3-STATUS 事实一致 | □ Pass / □ Fail |
+| 5 | 看五节 freeze 决策 | 含字面「不打 freeze tag」+ 3 理由（无 recorded 矩阵不满足 §三.3 硬门 / ship 门未关 store-frozen 语义不成立 / 与 Wave 1/2 一致） | □ Pass / □ Fail |
+| 6 | 终端进工作树根目录后跑 `bash scripts/governance/verify-wave3-completion.sh` | 末行 `[verify-wave3-completion] PASS：…`，退出码 0（A/B/C/D CLOSED + W3-11-R1/PR11-R1/W1-R2 OPEN + WAVE3-STATUS 诚实 + 矩阵 fixture 机制就位） | □ Pass / □ Fail |
+| 7 | 看矩阵 runbook | 含 `KLINE_SEED_FIXTURE=1` 启动机制 + 6 条 happy-path 交互（pinch 3 / 水平线 4 / 十字光标 5 / 手动强平 7 / replay 结算 8 / 主题 9）+ save-resume/复盘/replay 端到端 + bounce/W3-11-R1 排除节 + §B toast 归属澄清块 | □ Pass / □ Fail |
+| 8 | 看 codex 对抗 review verdict | APPROVE（或 codex 配额耗尽 → opus 4.8 xhigh fallback APPROVE / accept residual + override） | □ Pass / □ Fail |
+
+---
+
+## 范围注（诚实边界）
+
+- 本 PR 定位 = **「Wave 3 功能交付确认 + 运行时验收待回填」**，**非「Wave 3 正式关闭」**。device/sim 运行时矩阵实测执行 = 用户 device 职责（本 PR 仅交付可执行 runbook + §C fixture 使其可玩）。
+- **正式关闭 + freeze tag** 待用户在 device 跑完矩阵 runbook 并记录结果后（per outline §三.3 硬门；见 completion doc §二/§五）。
+- W3-11-R1（bounce live 接线）/ PR11-R1（生产 backendBaseURL）/ W1-R2（真实样本数据）= OPEN，不计入 Wave 3 功能完成度（W3-11-R1 = fast-follow PR；PR11-R1 + W1-R2 = NAS scope ship 门）。
+
+---
+
+## Residual（如有 review 残留）
+
+| Residual | 来源 | 处理 |
+|---|---|---|
+| （待 codex review 回填） | — | — |
+
+**codex review 收敛说明**：（待回填——doc-only 经 codex 对抗 review 治理 doc 类；如配额耗尽 fallback opus 4.8 xhigh，沿用 Wave 1/2 + 13a/13b 先例）。
