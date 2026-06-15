@@ -21,6 +21,7 @@
 3. **运行时矩阵 = PARTIAL**：runbook 交付（可执行），device 实测待用户回填。
 4. **freeze tag = 不打**：沿用 Wave 1/2 轻量收尾先例；理由 = 无 recorded 矩阵不满足 outline 硬门 + ship 门未关 + 与前两 wave 一致。
 5. **§B toast 覆盖归属**：§C seed 仅 provision 有效数据（无 fault injection）→ device happy-path 矩阵**无法**触发 autosave 失败 / 下载失败 toast；其自动化证明归 **§B host 测**（13a），矩阵 runbook 须显式注明此归属，**不**把这两条 toast 列为 device 矩阵项。
+6. **bounce（顺位 11）不入 device 矩阵**（opus plan-review C1）：bounce live 接线 = **W3-11-R1 OPEN**（真 app 无可见回弹运行时，组件层物理仅单测闭合）。spec §E.2 把 bounce 列进运行时矩阵属 overclaim → completion doc **如实纠正**：W3-11-R1 标 OPEN residual + 矩阵**不列** bounce device happy-path 行；诚实边界节点名此对 spec §E.2 矩阵清单的纠正（ledger 完整性优先于逐字照搬 spec 的错误）。device happy-path 矩阵实为 **6** 条交互（pinch 3 / 水平线 4 / 十字光标 5 / 手动强平 7 / replay 结算 8 / 主题 9）+ §C fixture 的 save-resume/复盘/replay 端到端。
 
 ---
 
@@ -67,8 +68,11 @@
 | **C. 全 app fixture provisioning** | §107 deferred / spec §C | **CLOSED** | 13b PR #109 `fc46fef`（DebugFixtures #if DEBUG seed 经 AppContainer 注入 cache+history+pending+settings，全 6 周期） |
 | **D. 生产路径 E2E smoke** | §107 deferred / spec §D | **CLOSED** | 13b PR #109 `fc46fef`（真 DownloadAcceptanceRunner 下游可消费 smoke） |
 | **运行时矩阵（device/sim 实测）** | outline §三.3 硬门 | **PARTIAL** | runbook 交付（`2026-06-14-wave3-runtime-matrix.md`）；device 实测待用户回填 |
+| **W3-11-R1**（bounce live 接线） | 顺位 11 #96 设计 D8 / pinch acceptance L30 | **OPEN** | 组件层物理已单测闭合（`docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md`）；live 接线 = 顺位 3 后 fast-follow 独立 PR，**真 app 无可见回弹运行时** → **不**入 device 矩阵 |
 | **PR11-R1**（生产 backendBaseURL） | Wave 2 §三 carried | **OPEN** | NAS 部署 PR（out-of-Wave-3-scope ship 门） |
 | **W1-R2**（真实样本训练组数据，H7） | Wave 1 §四 carried | **OPEN** | 需 NAS 真实 CSV 数据源 + B1/B2 真跑 |
+
+> **W3-11-R1 由 opus plan-review C1 补入**（spec §E.2 + outline §三.3 漏列）：bounce（顺位 11）头部明文「无实时可见运行时接线，接线 deferred 为 residual W3-11-R1」。spec §E.2 把 bounce 列进运行时矩阵 = overclaim（真 app 看不到回弹）→ completion doc 如实把 W3-11-R1 标 OPEN + **矩阵不列 bounce device 行**。completion doc 诚实边界节须点名此处对 spec §E.2 矩阵清单的纠正（不回改 spec，但 ledger 须完整）。
 
 **13a/13b 各自的 PR-内 residual（13b-R1/R2/R3 等）**：已在各自 acceptance doc + merge 内 accept residual + override 处置；本 completion doc **不**重复逐条列举，仅在 §三脚注指针引用（避免双重账本）。
 
@@ -84,7 +88,7 @@
 - **机器可读 WAVE3-STATUS 块**（紧跟头部，供 grep gate 消费，见下方 Step 2 字面）。
 - 一、Wave 3 anchor 交付清单（上方「Anchor SHA 权威表」全 17 行 + 非-anchor #105 脚注）。
 - 二、reconcile outline §三.3 硬门（**关键 High，解 spec-review R1**）：引用原文「实测结果已记录是顺位 13 收尾本身硬前提，非『某天再说』」→ 说明本 doc 交付 runbook+fixture（可执行）但不代跑 → 故**不**宣布 closure；Wave 1/2 先例作「功能交付确认」语义旁证但**不**用以推翻 §三.3 更严表述。
-- 三、Wave 3 residual 终态回填（上方「residual 回填映射表」7 行 + 13a/13b PR-内 residual 脚注指针）。
+- 三、Wave 3 residual 终态回填（上方「residual 回填映射表」**8 行**〔含 W3-11-R1〕+ 13a/13b PR-内 residual 终态核对脚注，见 Step 1b）。
 - 四、carried residual（PR11-R1 / W1-R2 仍 OPEN，NAS scope）。
 - 五、freeze tag 决策（**不打**；3 理由：无 recorded 矩阵不满足 §三.3 硬门 + ship 门未关 store-frozen 语义不成立 + 与 Wave 1/2 一致；用户跑完矩阵后若需冻结走独立轻流程 tag ceremony）。
 - 六、评审通道说明（13c doc-only 经 codex:adversarial-review 治理 doc 类；codex 周配额耗尽 fallback opus 4.8 xhigh）。
@@ -94,23 +98,37 @@
 
 按上方结构与两张权威表逐节写。**硬要求**：
 - 一节 anchor 表 17 行 SHA 与「Anchor SHA 权威表」逐字一致。
-- 二节须含 outline §三.3 原文引用 + 「为何不宣布 closure」论证。
-- 三节 residual 表 7 行，A/B/C/D 行各含字面 `CLOSED` + 对应 13a/13b PR 号；运行时矩阵行含 `PARTIAL`；PR11-R1/W1-R2 行含 `OPEN`。
+- 二节须含 outline §三.3 原文引用 + 「为何不宣布 closure」论证 + **点名对 spec §E.2 矩阵清单的 bounce 纠正**（W3-11-R1 OPEN，见诚实边界 #6）。
+- 三节 residual 表 **8 行**（含 W3-11-R1 OPEN），A/B/C/D 行各含字面 `CLOSED` + 对应 13a/13b PR 号；运行时矩阵行含 `PARTIAL`；W3-11-R1/PR11-R1/W1-R2 行含 `OPEN`。
 - 五节 freeze 决策含字面「不打 freeze tag」。
 - 标题/性质含字面「功能交付确认」+「非正式关闭」（或「非『Wave 3 正式关闭』」）。
 
-- [ ] **Step 2: 嵌入机器可读 WAVE3-STATUS 块**
+- [ ] **Step 1b: 核对 13a/13b PR-内 residual 终态（opus plan-review M3）**
 
-在头部之后插入（grep gate 谓词 3 消费此块，规避散文措辞匹配脆弱性）：
+Run（确认 13a/13b 各自 acceptance 的 PR-内 residual 均 CLOSED 或 accept-residual+override，否则未 close 的须进位本 doc ledger）：
+```bash
+grep -nE "Residual|13a-R|13b-R|accept residual|CLOSED|override" docs/acceptance/2026-06-14-wave3-pr13a-robustness.md docs/acceptance/2026-06-14-wave3-pr13b-fixture-smoke.md
+```
+Expected: 13a-R1/R2/R3 + 13b-R1/R2/R3 均已在各自 doc accept residual + override 处置（debug-only / surgical 边角）。completion doc §三脚注据此写「13a/13b PR-内 residual（13a-R1/R2/R3、13b-R1/R2/R3）已在各自 acceptance accept-residual+override，均非协议级悬挂，指针见各 acceptance」。**若发现任一未处置** → 进位本 doc ledger 作 OPEN/PARTIAL 并加 WAVE3-STATUS 行。
+
+- [ ] **Step 2: 嵌入机器可读 WAVE3-STATUS 块（含 residual ledger，grep gate 单行精确消费）**
+
+在头部之后插入（grep gate 谓词 1/2/3 全消费此块——每项一行固定串，杜绝散文/跨行假 PASS，per opus plan-review H1）。**人读 residual 表（三节）与本机器块须事实一致**：
 
 ```markdown
-<!-- WAVE3-STATUS (machine-readable; consumed by scripts/governance/verify-wave3-completion.sh — DO NOT reword keys)
+<!-- WAVE3-STATUS (machine-readable; consumed by scripts/governance/verify-wave3-completion.sh — DO NOT reword keys/values)
 status: feature-complete-fixture-playable
 store-ready: NO
 formal-closure: PENDING-runtime-matrix-device-record
 runtime-matrix: PARTIAL
-ship-gates-open: PR11-R1 W1-R2
 freeze-tag: NOT-TAGGED
+residual-A-cache-touch-on-use: CLOSED 13a #108
+residual-B-unified-toast-layer: CLOSED 13a #108
+residual-C-fixture-provisioning: CLOSED 13b #109
+residual-D-e2e-smoke: CLOSED 13b #109
+residual-W3-11-R1-bounce-live-wiring: OPEN
+ship-gate-PR11-R1-prod-backend-url: OPEN
+ship-gate-W1-R2-sample-data: OPEN
 -->
 ```
 
@@ -128,16 +146,17 @@ git commit -m "docs(13c): Wave 3 completion doc（功能交付确认 + reconcile
 **Files:**
 - Create: `docs/acceptance/2026-06-14-wave3-runtime-matrix.md`
 
-**汇总源**（6 份既有 per-anchor 运行时 runbook/acceptance；矩阵**引用**而非复制其细节）：
+**汇总源**（**6** 份既有 per-anchor 运行时 runbook/acceptance；矩阵**引用**而非复制其细节。bounce 顺位 11 **不在内**——见下方排除说明）：
 - 顺位 3 Pinch：`docs/acceptance/2026-06-13-wave3-pr3-pinch-zoom.md`
 - 顺位 4 水平线绘制+跨缩放还原：`docs/acceptance/2026-06-13-wave3-pr4-drawing-mvp.md`
 - 顺位 5 十字光标 snap/HUD：`docs/acceptance/2026-06-13-wave3-pr5-crosshair-snap-hud.md`
 - 顺位 7 手动强平 + 交易反馈：`docs/runbooks/2026-06-13-wave3-pr7-trade-ui-runtime-acceptance.md`
 - 顺位 8 replay 结算窗：`docs/runbooks/2026-06-13-wave3-pr8-replay-settlement-runtime-acceptance.md`
 - 顺位 9 主题切换视觉：`docs/runbooks/2026-06-14-wave3-pr9-night-mode-runtime-acceptance.md`
-- 顺位 11 边缘 bounce：`docs/acceptance/2026-06-13-wave3-pr8-replay-settlement.md` 同级查找 PR #96 acceptance（执行时 grep 定位，见 Step 1）
 
-- [ ] **Step 1: 核实 6 anchor 的 runbook 路径存在**
+**bounce（顺位 11）排除**（opus plan-review C1）：bounce 头部明文「无实时可见运行时接线，接线 deferred = W3-11-R1 OPEN」（`docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md:1-3`）→ 真 app 无可见回弹运行时 → **不**列 device happy-path 矩阵；改在矩阵的「排除/OPEN」节单列 W3-11-R1 OPEN（组件层物理已单测闭合，live 接线 = fast-follow PR）。
+
+- [ ] **Step 1: 核实 6 anchor 的 runbook 路径存在 + bounce 确无 runtime runbook**
 
 Run:
 ```bash
@@ -146,17 +165,18 @@ ls docs/runbooks/2026-06-13-wave3-pr7-trade-ui-runtime-acceptance.md \
    docs/runbooks/2026-06-14-wave3-pr9-night-mode-runtime-acceptance.md \
    docs/acceptance/2026-06-13-wave3-pr3-pinch-zoom.md \
    docs/acceptance/2026-06-13-wave3-pr4-drawing-mvp.md \
-   docs/acceptance/2026-06-13-wave3-pr5-crosshair-snap-hud.md
-ls docs/acceptance/ docs/runbooks/ | grep -iE "pr11|bounce|顺位 11" || echo "顺位11 runbook 待 grep 确认"
+   docs/acceptance/2026-06-13-wave3-pr5-crosshair-snap-hud.md \
+   docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md
 ```
-Expected: 6 路径全存在；顺位 11 bounce 的 runbook 路径经第二条 grep 确认（C2 bounce PR #96，若无专属 runbook 则矩阵注「bounce 运行时随 #96 acceptance；纯组件层动画」并引用其 acceptance 文件）。
+Expected: 7 路径全存在（前 6 = device 矩阵引用源；第 7 = bounce 组件层 acceptance，证 bounce 无 runtime runbook、属 W3-11-R1 OPEN，矩阵据此排除而非列入）。
 
 - [ ] **Step 2: 写矩阵 runbook 主体**
 
 结构：
 - 头部：性质（device/sim **手动**验收，非-coder 可执行；CI 仅 Catalyst/app-build 编译守护不验运行时）+ **前置（关键）**：在 Xcode scheme 的 Run → Arguments → Environment Variables 设 `KLINE_SEED_FIXTURE=1`，启动 `KlineTrainer` app target → 经 §C fixture seed 自动 provision 缓存训练组（全 6 周期）+ 历史 + pending + 设置，使下列交互可达（引用机制 `ios/KlineTrainer/KlineTrainer/KlineTrainerApp.swift:19-23`）。
-- **汇总矩阵表**（每行：顺位 / 交互 / 经 §C fixture 可达性 / 详细 runbook 指针 / device pass-fail 留空）：覆盖 happy-path 交互——pinch 聚焦/clamp（3）、水平线绘制+跨缩放还原（4）、十字光标 snap/HUD（5）、手动强平（7）、replay 结算窗（8）、主题切换视觉（9）、边缘 bounce（11）。
+- **汇总矩阵表**（每行：顺位 / 交互 / 经 §C fixture 可达性 / 详细 runbook 指针 / device pass-fail 留空）：覆盖 **6** 条 happy-path 交互——pinch 聚焦/clamp（3）、水平线绘制+跨缩放还原（4）、十字光标 snap/HUD（5）、手动强平（7）、replay 结算窗（8）、主题切换视觉（9）。
 - **§C fixture 端到端附加行**：save-resume（推几 tick → 杀 app → 重启 resume pending）、复盘（review 既有 record）、replay（replay 既有 record + 结算）——三者经 seed 的 history/pending 可达。
+- **排除/OPEN 节**：bounce（顺位 11）= **W3-11-R1 OPEN**，组件层物理已单测闭合，真 app 无可见回弹 device 运行时，**不**列上表；live 接线 = fast-follow PR（引 `docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md`）。
 - **§B toast 覆盖归属澄清块**（关键，解 spec-review R2-Med / R2 新 Med）：明确 §C seed 仅 provision **有效**数据（无 fault injection：不模拟磁盘满 / 不强制下载 reject）→ device happy-path 矩阵**无法**触发 autosave 失败 / 下载失败 toast → 其自动化证明归 **§B host 测**（13a PR #108 的 Toast 测试），**非** device 矩阵。
 - 尾部：回填说明（device 跑完逐行填 pass/fail；本矩阵是顺位 13 正式关闭 + freeze tag 的共同硬前提，per outline §三.3）。
 
@@ -164,7 +184,7 @@ Expected: 6 路径全存在；顺位 11 bounce 的 runbook 路径经第二条 gr
 
 ```bash
 git add docs/acceptance/2026-06-14-wave3-runtime-matrix.md
-git commit -m "docs(13c): Wave 3 运行时矩阵 runbook（汇总 7 交互 + §C fixture 执行 + §B toast 归属）"
+git commit -m "docs(13c): Wave 3 运行时矩阵 runbook（汇总 6 device 交互 + §C fixture 执行 + bounce/W3-11-R1 排除 + §B toast 归属）"
 ```
 
 ---
@@ -174,16 +194,17 @@ git commit -m "docs(13c): Wave 3 运行时矩阵 runbook（汇总 7 交互 + §C
 **Files:**
 - Create: `scripts/governance/verify-wave3-completion.sh`
 
-**设计纪律**（per `feedback_acceptance_grep_anchoring`）：用 `if grep … ; then echo FAIL; exit 1; fi` 显式分支，**不**用 `set -e` 下的 `! grep`（负向断言会因 `set -e` 提前死闸或假 PASS）；多串用多个 `-e` 或 `grep -F` 固定串，**不**用 ERE `\|`（在 ERE 下是字面竖线）；谓词 3 匹配机器可读 WAVE3-STATUS 块（不靠散文措辞）。
+**设计纪律**（per `feedback_acceptance_grep_anchoring` + opus plan-review H1）：用 `grep -Fq "$固定串" || fail` 显式分支（fail 即 `exit 1`），**不**用 `set -e` 下的 `! grep`（负向断言会因 `set -e` 提前死闸或假 PASS）；**全部谓词消费 completion doc 头部的机器可读 WAVE3-STATUS 块**——每项一行固定串（`residual-X: CLOSED` / `ship-gate-Y: OPEN` / `store-ready: NO`），单行精确匹配，杜绝「标签出现于 ledger 行 + 脚注两处 → 跨行假 PASS」（H1 的根因：旧谓词 `grep -F item | grep -q CLOSED` 在多行下 CLOSED 可被别行满足）。
 
 - [ ] **Step 1: 写 grep gate 脚本**
 
 ```bash
 #!/usr/bin/env bash
-# verify-wave3-completion.sh — Wave 3 13c 收尾 doc grep gate（fail-closed，3 谓词）
-# 谓词 1：residual ledger A/B/C/D 标 CLOSED
-# 谓词 2：ship 门 PR11-R1 / W1-R2 标 OPEN
-# 谓词 3：机器可读 WAVE3-STATUS 块声明 store-ready=NO + formal-closure=PENDING（无误 claim 上架/已关闭）
+# verify-wave3-completion.sh — Wave 3 13c 收尾 doc grep gate（fail-closed，全谓词消费机器可读 WAVE3-STATUS 块）
+# 谓词 1：residual A/B/C/D 标 CLOSED（机器块单行精确，杜绝跨行假 PASS，per opus plan-review H1）
+# 谓词 2：W3-11-R1 + ship 门 PR11-R1 / W1-R2 标 OPEN
+# 谓词 3：高层状态 store-ready=NO + formal-closure=PENDING + matrix PARTIAL + freeze NOT-TAGGED（无误 claim 上架/已关闭）
+# 谓词 3b：矩阵 runbook 含 §C fixture 启动机制
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -195,34 +216,33 @@ fail() { echo "[verify-wave3-completion] FAIL: $1" >&2; exit 1; }
 [ -f "$DOC" ] || fail "completion doc 缺失：$DOC"
 [ -f "$MATRIX" ] || fail "运行时矩阵 runbook 缺失：$MATRIX"
 
-# 谓词 1：A/B/C/D 四项各自所在行须含 CLOSED
-for item in \
-  "A. cache touch-on-use" \
-  "B. 边界错误统一 Toast" \
-  "C. 全 app fixture provisioning" \
-  "D. 生产路径 E2E smoke"; do
-  if ! grep -F "$item" "$DOC" | grep -q "CLOSED"; then
-    fail "residual「$item」未标 CLOSED"
-  fi
+# 谓词 1：residual A/B/C/D = CLOSED（单行固定串，机器块）
+for line in \
+  "residual-A-cache-touch-on-use: CLOSED" \
+  "residual-B-unified-toast-layer: CLOSED" \
+  "residual-C-fixture-provisioning: CLOSED" \
+  "residual-D-e2e-smoke: CLOSED"; do
+  grep -Fq "$line" "$DOC" || fail "residual ledger 缺『$line』"
 done
 
-# 谓词 2：ship 门 OPEN
-for gate in "PR11-R1" "W1-R2"; do
-  if ! grep -F "$gate" "$DOC" | grep -q "OPEN"; then
-    fail "ship 门「$gate」未标 OPEN"
-  fi
+# 谓词 2：W3-11-R1 + ship 门 = OPEN（单行固定串，机器块）
+for line in \
+  "residual-W3-11-R1-bounce-live-wiring: OPEN" \
+  "ship-gate-PR11-R1-prod-backend-url: OPEN" \
+  "ship-gate-W1-R2-sample-data: OPEN"; do
+  grep -Fq "$line" "$DOC" || fail "OPEN 门缺『$line』"
 done
 
-# 谓词 3：机器可读状态块（无上架/已关闭误 claim）
+# 谓词 3：高层状态（无 store-ready / 正式关闭 误 claim）
 grep -Fq "store-ready: NO" "$DOC" || fail "WAVE3-STATUS 缺 store-ready: NO（防 store-ready 误 claim）"
 grep -Fq "formal-closure: PENDING" "$DOC" || fail "WAVE3-STATUS 缺 formal-closure: PENDING（防『正式关闭』误 claim）"
 grep -Fq "runtime-matrix: PARTIAL" "$DOC" || fail "WAVE3-STATUS 缺 runtime-matrix: PARTIAL"
 grep -Fq "freeze-tag: NOT-TAGGED" "$DOC" || fail "WAVE3-STATUS 缺 freeze-tag: NOT-TAGGED"
 
-# 谓词 3b：矩阵 runbook 须含 §C fixture 启动机制 + §B toast 归属澄清
+# 谓词 3b：矩阵 runbook 须含 §C fixture 启动机制
 grep -Fq "KLINE_SEED_FIXTURE=1" "$MATRIX" || fail "矩阵 runbook 缺 §C fixture 启动机制 KLINE_SEED_FIXTURE=1"
 
-echo "[verify-wave3-completion] PASS：A/B/C/D CLOSED + PR11-R1/W1-R2 OPEN + WAVE3-STATUS 诚实 + 矩阵 fixture 机制就位"
+echo "[verify-wave3-completion] PASS：A/B/C/D CLOSED + W3-11-R1/PR11-R1/W1-R2 OPEN + WAVE3-STATUS 诚实 + 矩阵 fixture 机制就位"
 ```
 
 - [ ] **Step 2: 赋可执行 + 跑（须 PASS）**
@@ -234,23 +254,37 @@ bash scripts/governance/verify-wave3-completion.sh
 ```
 Expected: 退出码 0，末行 `[verify-wave3-completion] PASS：…`。
 
-- [ ] **Step 3: 红验证（证 gate 真有判别力，非 vacuous）**
+- [ ] **Step 3: 红验证 ×3（证 3 类谓词各有判别力，非 vacuous；per opus plan-review H2）**
 
-Run（临时把 completion doc 的 `store-ready: NO` 改成 `store-ready: YES` 跑一次，须 FAIL，然后还原）：
+Run（逐一临时破坏 → 须 FAIL → 还原 → 须 PASS）：
 ```bash
 cp docs/governance/2026-06-14-wave3-completion.md /tmp/w3doc.bak
-sed -i '' 's/store-ready: NO/store-ready: YES/' docs/governance/2026-06-14-wave3-completion.md
-bash scripts/governance/verify-wave3-completion.sh; echo "exit=$?"   # 期望 FAIL exit=1
+
+# 红 1：谓词 1（CLOSED）—— residual-A CLOSED→TODO 须 FAIL
+sed -i '' 's/residual-A-cache-touch-on-use: CLOSED/residual-A-cache-touch-on-use: TODO/' docs/governance/2026-06-14-wave3-completion.md
+bash scripts/governance/verify-wave3-completion.sh; echo "红1 exit=$?"   # 期望 exit=1
 cp /tmp/w3doc.bak docs/governance/2026-06-14-wave3-completion.md
-bash scripts/governance/verify-wave3-completion.sh; echo "exit=$?"   # 还原后期望 PASS exit=0
+
+# 红 2：谓词 2（OPEN）—— ship-gate-PR11-R1 OPEN→CLOSED 须 FAIL
+sed -i '' 's/ship-gate-PR11-R1-prod-backend-url: OPEN/ship-gate-PR11-R1-prod-backend-url: CLOSED/' docs/governance/2026-06-14-wave3-completion.md
+bash scripts/governance/verify-wave3-completion.sh; echo "红2 exit=$?"   # 期望 exit=1
+cp /tmp/w3doc.bak docs/governance/2026-06-14-wave3-completion.md
+
+# 红 3：谓词 3（store-ready）—— store-ready NO→YES 须 FAIL
+sed -i '' 's/store-ready: NO/store-ready: YES/' docs/governance/2026-06-14-wave3-completion.md
+bash scripts/governance/verify-wave3-completion.sh; echo "红3 exit=$?"   # 期望 exit=1
+cp /tmp/w3doc.bak docs/governance/2026-06-14-wave3-completion.md
+
+# 还原后须 PASS
+bash scripts/governance/verify-wave3-completion.sh; echo "还原 exit=$?"   # 期望 exit=0
 ```
-Expected: 改后 `exit=1`（FAIL: WAVE3-STATUS 缺 store-ready: NO）；还原后 `exit=0`（PASS）。
+Expected: 红1/红2/红3 各 `exit=1`（分别 FAIL 于谓词 1/2/3）；还原后 `exit=0`（PASS）。证三类谓词均真有判别力。
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add scripts/governance/verify-wave3-completion.sh
-git commit -m "test(13c): verify-wave3-completion grep gate（A/B/C/D CLOSED + ship 门 OPEN + WAVE3-STATUS 诚实，红验证过）"
+git commit -m "test(13c): verify-wave3-completion grep gate（机器块消费：A/B/C/D CLOSED + W3-11-R1/ship 门 OPEN + 状态诚实，红验证 ×3 过）"
 ```
 
 ---
@@ -268,10 +302,10 @@ git commit -m "test(13c): verify-wave3-completion grep gate（A/B/C/D CLOSED + s
   1. 浏览器打开 PR，见 4 新文件（completion doc + 矩阵 runbook + grep gate + 本 acceptance），0 业务/CI/ruleset 改动。
   2. 看 completion doc 一节 anchor 表 17 行 SHA 与 git log 一致。
   3. 看二节 reconcile：含 outline §三.3 原文引用 + 「不宣布 closure」论证。
-  4. 看三节 residual 表：A/B/C/D = CLOSED（引 13a/13b PR）；运行时矩阵 = PARTIAL；PR11-R1/W1-R2 = OPEN。
+  4. 看三节 residual 表（8 行）：A/B/C/D = CLOSED（引 13a/13b PR）；运行时矩阵 = PARTIAL；**W3-11-R1**（bounce live 接线）/ PR11-R1 / W1-R2 = OPEN。
   5. 看五节 freeze 决策 = 不打 tag（3 理由）。
   6. 跑 `bash scripts/governance/verify-wave3-completion.sh` → PASS。
-  7. 看矩阵 runbook：含 `KLINE_SEED_FIXTURE=1` 启动机制 + 7 happy-path 交互 + save-resume/复盘/replay 端到端 + §B toast 归属澄清块。
+  7. 看矩阵 runbook：含 `KLINE_SEED_FIXTURE=1` 启动机制 + **6** happy-path 交互（3/4/5/7/8/9）+ save-resume/复盘/replay 端到端 + **bounce/W3-11-R1 排除节** + §B toast 归属澄清块。
   8. 看 codex 对抗 review verdict = APPROVE（或配额耗尽 fallback opus 4.8 xhigh / accept residual + override）。
 - 范围注：device/sim 运行时矩阵实测执行 = 用户职责（本 PR 仅交付可执行 runbook）；正式关闭 + freeze tag 待用户回填矩阵后。
 - Residual 表（如有 review 残留）+ codex 收敛说明。
@@ -288,16 +322,16 @@ git commit -m "docs(13c): 非-coder 验收清单（completion + 矩阵 + grep ga
 ## Self-Review
 
 **1. Spec 覆盖**（§E.1–E.4 + §五）：
-- E.1 completion doc → Task 1 ✓（anchor 表 + reconcile §3.3）
-- E.2 运行时矩阵 runbook → Task 2 ✓（汇总 6 runbook + §C fixture + §B toast 归属）
-- E.3 residual 终态回填 → Task 1 三节 ✓（A/B/C/D CLOSED + 矩阵 PARTIAL + PR11-R1/W1-R2 OPEN）
+- E.1 completion doc → Task 1 ✓（anchor 表 + reconcile §3.3 + bounce/W3-11-R1 纠正点名）
+- E.2 运行时矩阵 runbook → Task 2 ✓（汇总 6 device runbook + §C fixture + bounce 排除 + §B toast 归属）
+- E.3 residual 终态回填 → Task 1 三节 ✓（A/B/C/D CLOSED + 矩阵 PARTIAL + W3-11-R1/PR11-R1/W1-R2 OPEN）
 - E.4 freeze 决策 → Task 1 五节 ✓（不打 tag + 3 理由）
-- §五 grep gate → Task 3 ✓（3 谓词 fail-closed + 红验证）
+- §五 grep gate → Task 3 ✓（谓词 1/2/3/3b fail-closed + 红验证 ×3）
 - §五 非-coder acceptance → Task 4 ✓
 - §五 13c 经 codex 对抗 review → 交付后流程（plan 外，merge 仪式覆盖）✓
 
 **2. Placeholder 扫描**：grep gate 脚本为完整 bash（无 TODO）；completion doc / 矩阵 / acceptance 的散文主体由实施时按结构 + 权威表写实（表数据全部内联此 plan，非留白）。七节骨架 + 两权威表 + WAVE3-STATUS 字面块均给全 → 无 "类似 Task N" / "TBD"。
 
-**3. 类型/标识一致性**：grep gate 谓词字符串（`A. cache touch-on-use` / `B. 边界错误统一 Toast` / `C. 全 app fixture provisioning` / `D. 生产路径 E2E smoke` / `PR11-R1` / `W1-R2` / `store-ready: NO` / `formal-closure: PENDING` / `runtime-matrix: PARTIAL` / `freeze-tag: NOT-TAGGED` / `KLINE_SEED_FIXTURE=1`）与 Task 1 residual 表标签 + WAVE3-STATUS 块 key + Task 2 fixture 机制**逐字对齐**（grep gate 与 doc 是同一份字面契约，实施时若调 doc 措辞须同步改 gate）。
+**3. 类型/标识一致性**（grep gate 与 doc 是同一份字面契约）：grep gate **全部谓词消费 WAVE3-STATUS 机器块的固定串**——`residual-A-cache-touch-on-use: CLOSED` / `residual-B-unified-toast-layer: CLOSED` / `residual-C-fixture-provisioning: CLOSED` / `residual-D-e2e-smoke: CLOSED` / `residual-W3-11-R1-bounce-live-wiring: OPEN` / `ship-gate-PR11-R1-prod-backend-url: OPEN` / `ship-gate-W1-R2-sample-data: OPEN` / `store-ready: NO` / `formal-closure: PENDING` / `runtime-matrix: PARTIAL` / `freeze-tag: NOT-TAGGED`（在 completion doc）+ `KLINE_SEED_FIXTURE=1`（在矩阵）——与 Task 1 Step 2 WAVE3-STATUS 块 key/value **逐字一致**（不再依赖散文标签子串匹配，消除 L3 「差『层』字靠巧合」隐患 + H1 跨行假 PASS）。实施时若调机器块措辞须同步改 gate。
 
-**潜在风险已消解**：①grep 负向断言陷阱 → 用 `if grep…then fail` + 机器可读状态块（非散文）；②顺位 11 bounce runbook 路径不确定 → Task 2 Step 1 grep 兜底确认；③双重 residual 账本 → 13a/13b PR-内 residual 仅脚注指针不重列。
+**潜在风险已消解（含 opus plan-review R1 全 finding）**：①grep 负向断言陷阱（旧 H1 跨行假 PASS）→ 全谓词改消费机器块单行固定串；②红验证仅覆盖谓词 3（旧 H2）→ 红验证 ×3 覆盖谓词 1/2/3；③bounce 无 live 运行时却列 device 矩阵（旧 C1）→ 排除 bounce + 补 W3-11-R1 OPEN residual + 诚实边界 #6 点名 spec §E.2 纠正；④13a/13b PR-内 residual 仅脚注未核终态（旧 M3）→ Task 1 Step 1b 实开 acceptance 核对；⑤双重 residual 账本 → 13a/13b PR-内 residual 仅脚注指针不重列。
