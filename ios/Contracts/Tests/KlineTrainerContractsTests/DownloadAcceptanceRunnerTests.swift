@@ -416,6 +416,33 @@ struct DownloadAcceptanceRunnerTests {
         await runner.retryPendingConfirmations()   // 无行 → 安全 no-op
     }
 
+    @Test func retry_crossLease_doesNotDeleteNewerLeaseFile() async throws {
+        // 13a-R2 核心回归：旧 lease 孤儿 confirm 被拒（lease 过期），不得删掉新 lease 占有的同 tid cache 文件。
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = InMemoryCacheManager()
+        // 当前 cache 中 id=42 的文件 = 新 lease 重下并已确认的有效文件
+        _ = try cache.store(downloadedZip: URL(fileURLWithPath: "/tmp/42.sqlite"), meta: makeMeta(id: 42))
+        // 新 lease：推进到 confirmed（存活 owner，终态，不被重试扫到）
+        try seedStored(journal, id: 42, leaseId: "leaseNew", path: "/tmp/42.sqlite")
+        try journal.upsert(trainingSetId: 42, leaseId: "leaseNew", state: .confirmPending,
+                           sqliteLocalPath: "/tmp/42.sqlite", contentHash: nil, lastError: nil)
+        try journal.upsert(trainingSetId: 42, leaseId: "leaseNew", state: .confirmed,
+                           sqliteLocalPath: "/tmp/42.sqlite", contentHash: nil, lastError: nil)
+        // 旧 lease：停在 confirmPending（孤儿，会被重试）
+        try seedStored(journal, id: 42, leaseId: "leaseOld", path: "/tmp/42.sqlite")
+        try journal.upsert(trainingSetId: 42, leaseId: "leaseOld", state: .confirmPending,
+                           sqliteLocalPath: "/tmp/42.sqlite", contentHash: nil, lastError: nil)
+        // 重试：旧 lease confirm 因 lease 过期被服务端拒收
+        let runner = makeRunner(api: FakeAPIClient(confirmError: .network(.leaseExpired)),
+                                cache: cache, journal: journal)
+        await runner.retryPendingConfirmations()
+        // 旧 lease → rejected；新 lease 仍 confirmed；文件保留、未被删
+        #expect(try journal.listByState(.rejected).count == 1)
+        #expect(try journal.listByState(.confirmed).count == 1)
+        #expect(cache.listAvailable().contains(where: { $0.id == 42 }))
+        #expect(cache.deletedFilenames.isEmpty)
+    }
+
     // MARK: - Task 6: runBatch
 
     private func makeLease(ids: [Int], leaseId: String = "BL") -> LeaseResponse {
