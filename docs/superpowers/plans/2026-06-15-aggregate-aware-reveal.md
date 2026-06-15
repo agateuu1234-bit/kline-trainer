@@ -10,7 +10,7 @@
 
 **收敛设计（spec）：** `docs/superpowers/specs/2026-06-15-aggregate-aware-reveal-design.md`（opus spec-review R1→R2 APPROVE 收敛）。
 
-**基线：** main `bb0d597`（含 reveal 修复）= `1021 tests in 144 suites`（实施时跑确认）。本计划净增约 12 测。
+**基线：** main `bb0d597`（含 reveal 修复）= `1021 tests in 144 suites`（实施时跑确认）。本计划净增 **10** 测（Task1 5 + Task2 5）→ `1031 tests in 145 suites`（+1 suite = PartialAggregateCandle；opus plan-R1 实跑确认）。
 
 ---
 
@@ -46,11 +46,15 @@ struct PartialAggregateCandleTests {
                    highs: [Int: Double] = [:], lows: [Int: Double] = [:],
                    closes: [Int: Double] = [:], vols: [Int: Int64] = [:]) -> [KLineCandle] {
         (0..<count).map { i in
-            KLineCandle(period: .m3, datetime: Int64(i) * 180,
-                        open: Double(i), high: highs[i] ?? Double(i) + 1, low: lows[i] ?? Double(i) - 1,
-                        close: closes[i] ?? Double(i) + 0.5, volume: vols[i] ?? 100,
-                        amount: 999, ma66: 1, bollUpper: 1, bollMid: 1, bollLower: 1,
-                        macdDiff: 1, macdDea: 1, macdBar: 1, globalIndex: i, endGlobalIndex: i)
+            // 字段先 hoist 到 typed local（避免 dict-coalescing + 算术挤爆 Swift 类型检查器，opus plan-R1-H）
+            let h: Double = highs[i] ?? (Double(i) + 1)
+            let lo: Double = lows[i] ?? (Double(i) - 1)
+            let cl: Double = closes[i] ?? (Double(i) + 0.5)
+            let v: Int64 = vols[i] ?? 100
+            return KLineCandle(period: .m3, datetime: Int64(i) * 180,
+                               open: Double(i), high: h, low: lo, close: cl, volume: v,
+                               amount: 999, ma66: 1, bollUpper: 1, bollMid: 1, bollLower: 1,
+                               macdDiff: 1, macdDea: 1, macdBar: 1, globalIndex: i, endGlobalIndex: i)
         }
     }
 
@@ -169,7 +173,7 @@ public enum PartialAggregateCandle {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd ios/Contracts && swift test --filter PartialAggregateCandle 2>&1 | tail -8`
-Expected: `6 tests` 全 PASS。
+Expected: `5 tests` 全 PASS。
 
 - [ ] **Step 5: Commit**
 
@@ -341,7 +345,7 @@ Expected: 全 PASS（5 新聚合测 + 既有 reveal/几何测全绿）。
 - [ ] **Step 5: 跑全量 host 测试**
 
 Run: `cd ios/Contracts && swift test 2>&1 | tail -3`
-Expected: `Test run with ~1033 tests in 145 suites passed`，`0 failures`（1021 baseline + 6 Task1 + 5 Task2；suite +1 为 PartialAggregateCandle）。若有非聚合测失败 → 停下排查（勿改无关测试凑绿）。
+Expected: `Test run with 1031 tests in 145 suites passed`，`0 failures`（1021 baseline + 5 Task1 + 5 Task2；suite +1 为 PartialAggregateCandle）。**注**：`TrainingEngine.preview()` 上区为 .m60、tick 0 → 合成会 fire（makeAssembles/equalityPrecondition/crosshair* 仍 PASS：其断言不探末根 OHLC/指标，量/macd range 仍有效）。若有非聚合测失败 → 停下排查（勿改无关测试凑绿）。
 
 - [ ] **Step 6: Commit**
 
@@ -367,7 +371,7 @@ git commit -m "feat(aggregate-reveal): make() 合成进行中聚合 K 线 + pric
 
 | # | Action | Expected | Pass/Fail |
 |---|---|---|---|
-| 1 | `cd ios/Contracts && swift test 2>&1 \| tail -2` | `~1033 tests ... passed`，`0 failures` | ☐ |
+| 1 | `cd ios/Contracts && swift test 2>&1 \| tail -2` | `1031 tests in 145 suites passed`，`0 failures` | ☐ |
 | 2 | `git diff origin/main...HEAD --stat -- ios/` | 改动集 ⊆ {PartialAggregateCandle.swift(新), RenderStateBuilder.swift, PartialAggregateCandleTests.swift(新), RenderStateBuilderTests.swift}；无 .sql/schema/workflow/CONTRACT_VERSION | ☐ |
 | 3 | `cd ios/Contracts && swift test --filter allVisibleWithinTick 2>&1 \| tail -2` | PASS（聚合面板跨 tick 所有可见根 endGlobalIndex≤tick，无未来） | ☐ |
 | 4 | `grep -n "PartialAggregateCandle.synthesize" ios/Contracts/Sources/KlineTrainerContracts/Render/RenderStateBuilder.swift; echo rc=$?` | 命中 `rc=0`（合成挂钩已落地） | ☐ |
@@ -391,7 +395,7 @@ git commit -m "feat(aggregate-reveal): make() 合成进行中聚合 K 线 + pric
 - [ ] **Step 2: 最终验证（host + Catalyst）**
 
 Run: `cd ios/Contracts && swift test 2>&1 | tail -3`
-Expected: `~1033 tests ... passed`，`0 failures`。
+Expected: `1031 tests in 145 suites passed`，`0 failures`。
 
 Run: `cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 | tail -5`
 Expected: `** TEST BUILD SUCCEEDED **`。
