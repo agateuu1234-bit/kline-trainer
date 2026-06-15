@@ -486,7 +486,8 @@ struct DownloadAcceptanceRunnerTests {
         let journal = InMemoryAcceptanceJournalDAO()
         let cache = InMemoryCacheManager()
         _ = try cache.store(downloadedZip: URL(fileURLWithPath: "/tmp/42.sqlite"), meta: makeMeta(id: 42))
-        // 新 lease：stored（重试先处理 stored 行，confirm 成功 → confirmed）
+        // 新 lease：stored（retryPendingConfirmations 按 `stored + pending` 拼接序迭代 → stored 行恒先于
+        // confirmPending 行处理，与 listByState 的 id 排序无关；故新 lease 先被 confirm 成功 → confirmed）
         try seedStored(journal, id: 42, leaseId: "leaseNew", path: "/tmp/42.sqlite")
         // 旧 lease：confirmPending（后处理，confirm 拒收）
         try seedStored(journal, id: 42, leaseId: "leaseOld", path: "/tmp/42.sqlite")

@@ -174,6 +174,9 @@ public final class DownloadAcceptanceRunner: Sendable {
                 return   // 该 tid 仍被某存活 lease 占有 → 跳过删除（跨 lease 保护，13a-R2）
             }
         }
+        // 注：所有权检查与 delete 非跨 journal+cache 原子；并发 store 理论上可在此窗口插入新文件。
+        // 该窗口仅在「同 tid 并发双 lease」下出现（app 不如此用，§4.4 单 lease 不变量），且严格不劣于
+        // 修复前（旧逻辑无条件删）；cache pinning/acquisition 的 TOCTOU 根治归 13a-R3（P5-cache-pinning RFC）。
         if let file = cache.listAvailable().first(where: { $0.id == trainingSetId }) {
             try? cache.delete(file)
         }
