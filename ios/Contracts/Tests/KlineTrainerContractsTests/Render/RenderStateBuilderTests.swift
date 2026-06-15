@@ -380,10 +380,13 @@ struct RenderStateBuilderTests {
     func offsetBounds_nonFiniteGeometrySafe() {
         let bInf = RenderStateBuilder.offsetBounds(mainFrameWidth: .infinity, rawVisible: 0, candleCount: 200, currentIdx: 150)
         #expect(bInf.minOffset == 0 && bInf.maxOffset == 0)
+        #expect(bInf.candleStep == 0)   // R1a code-quality Minor1：非有限 step 净化为 0（钉死 safeStep 分支，防 inf/NaN 泄入）
         let bNaN = RenderStateBuilder.offsetBounds(mainFrameWidth: .nan, rawVisible: 0, candleCount: 200, currentIdx: 150)
         #expect(bNaN.minOffset == 0 && bNaN.maxOffset == 0)
-        _ = RenderStateBuilder.roundTripEdge(integer: 71, step: .infinity)   // 喂 inf step 不 trap
-        _ = RenderStateBuilder.roundTripEdge(integer: 71, step: .nan)        // 喂 NaN step 不 trap
+        #expect(bNaN.candleStep == 0)   // 同上：NaN step → 0
+        // roundTripEdge 喂非有限 step 不 trap（命中 :107 early guard 返 integer·step；内层 q.isFinite 守是 belt-and-suspenders）
+        _ = RenderStateBuilder.roundTripEdge(integer: 71, step: .infinity)
+        _ = RenderStateBuilder.roundTripEdge(integer: 71, step: .nan)
         #expect(Bool(true))   // 到达此行即证未 trap
     }
 
