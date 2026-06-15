@@ -68,7 +68,10 @@ outline §三.3 的关闭/freeze 阻塞依赖是**三连合取**：①本 Wave 3
 | ② Wave 2 手势 | `docs/runbooks/2026-06-07-u2-gesture-runtime-acceptance.md` | 单指 pan / 两指周期切换 / 长按十字光标 / 模式交易行为 / 局终自动 | ☐ |
 | ③ Instruments 帧预算（顺位 12） | `docs/runbooks/2026-06-14-wave3-pr12-frame-budget.md` | Instruments Time Profiler 录制各交互**单帧 `RenderStateBuilder.make` + `KLineView.draw(_:)` 合并峰值 < 4ms**（`____` ms 占位待回填）+ Equatable 短路验证 | ☐ |
 
-> **§C seed（Debug）↔ 帧预算 runbook（Release）衔接（codex review R5-Med）**：§C fixture seed 是 **Debug-only**（`#if DEBUG`，Release 编译期剔除），而 Instruments 帧预算 runbook 要求 **Release（优化）包**（Debug 未优化构建虚高单帧耗时，不可用作 <4ms 判据）。**衔接路径**：①先以 Debug 包 + `KLINE_SEED_FIXTURE=1` 启动一次——seed 写入 app **持久 sandbox**（`app.sqlite` + 缓存训练组文件，非 Caches-only），②**不删 app**，直接对同 bundle id 构建并 Profile（⌘I）**Release 包**——Release 包虽不再 seed（`#if DEBUG` 剔除），但**读取**同一持久 sandbox 中 Debug 已 seed 的数据 → 帧预算在真实数据 + Release 优化下测得。**关键约束**：Debug-seed 与 Release-profile 之间**不可删除 app**（删则 sandbox 清空、Release 无数据回落空局）。若某 device sandbox 不跨 Debug→Release 复用，则该 device 帧预算实测 = OPEN 限制（记录于回填表），不得以 Debug 构建虚高数值假 PASS。
+> **§C seed（Debug）↔ 帧预算 runbook（Release）衔接 + 已知 fragility（codex review R5-Med / R6-High）**：§C fixture seed 是 **Debug-only**（`#if DEBUG`，Release 编译期剔除），而 Instruments 帧预算 runbook 要求 **Release（优化）包**（Debug 未优化虚高单帧耗时，不可用作 <4ms 判据）。**衔接路径**：①先以 Debug 包 + `KLINE_SEED_FIXTURE=1` 启动一次 seed，②**不删 app**，直接对同 bundle id 构建并 Profile（⌘I）**Release 包**——Release 不再 seed 但**读取**已 seed 的数据。
+> **存储位置精确（R6-High 纠正前文「非 Caches-only」误述）**：`KlineTrainerApp.swift:16-17` 实际把 `app.sqlite`（history/pending/settings）放 **Application Support（持久）**，但**训练组缓存 `cacheRootDir` 放 `.cachesDirectory`（iOS 可单独清除！）**。
+> **已知 fragility（OPEN 限制，关联 13b-R1）**：iOS 若在 Debug-seed 与 Release-profile 之间清除 Caches，则训练组缓存丢失、而 `app.sqlite` 的 history/pending/settings 仍在 → **全空 guard 拒绝重 seed**（非全空）、Release 又无 seed 代码 → Release run **无训练组数据**、帧预算落空局/错误路径。根治需把训练组缓存移 Application Support 或加 Release-兼容 provisioning（超 13c doc-only scope）。
+> **强制 pre-profile 自检（R6-High）**：采集任何计时**前**，须先确认首页见非空缓存训练组 + 能进一局见蜡烛渲染（= 缓存未被清）。**若缓存已被清**（首页空局/无缓存）→ 删 app → Debug-seed → **立即**（不留 app 闲置）Release-profile 重试；仍不可达则该 device 帧预算 = **OPEN（未测）记录于回填表，禁以 Debug 虚高数值或空局假 PASS**。
 
 ---
 

@@ -115,9 +115,12 @@ Expected: 13a-R1/R2/R3 + 13b-R1/R2/R3 均已在各自 doc accept residual + over
 
 在头部之后插入（grep gate 谓词 1/2/3 全消费此块——每项一行固定串，杜绝散文/跨行假 PASS，per opus plan-review H1）。**人读 residual 表（三节）与本机器块须事实一致**：
 
+> ⚠️ **SUPERSEDED — 下方为 plan-stage 初稿示意，非最终权威（codex review R6-Med）**。最终权威 WAVE3-STATUS ledger = **`docs/governance/2026-06-14-wave3-completion.md` 机器块**（经 codex:adversarial-review R1–R6 演进）。本 plan 是规划 source-of-truth（任务结构/判据），**非状态 ledger**；下方块已同步至最终值仅供参照，权威以 completion doc 为准。
+
 ```markdown
 <!-- WAVE3-STATUS (machine-readable; consumed by scripts/governance/verify-wave3-completion.sh — DO NOT reword keys/values)
-status: feature-complete-fixture-playable
+status: anchors-merged-fixture-playable
+feature-completeness: PENDING-W3-11-R1-bounce-live-wiring
 store-ready: NO
 formal-closure: PENDING-runtime-matrix-device-record
 runtime-matrix: PARTIAL
@@ -125,8 +128,9 @@ freeze-tag: NOT-TAGGED
 residual-A-cache-touch-on-use: CLOSED 13a #108
 residual-B-unified-toast-layer: CLOSED 13a #108
 residual-C-fixture-provisioning: CLOSED 13b #109
-residual-D-e2e-smoke: CLOSED 13b #109
+residual-D-e2e-smoke: PARTIAL 13b #109
 residual-W3-11-R1-bounce-live-wiring: OPEN
+known-defect-13a-R2-cross-lease-cache-deletion: OPEN
 ship-gate-PR11-R1-prod-backend-url: OPEN
 ship-gate-W1-R2-sample-data: OPEN
 -->

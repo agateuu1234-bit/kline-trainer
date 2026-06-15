@@ -2,7 +2,7 @@
 
 **PR 范围**：Wave 3 顺位 13 收尾 doc-only 三件套——completion doc（功能交付确认 + reconcile §三.3 + residual 终态回填 + freeze 决策）+ 单一运行时矩阵 runbook + 机器可校验 grep gate + 本验收清单。**0 业务代码 / 0 CI workflow / 0 ruleset 改动**。
 
-**source-of-truth**：spec `docs/superpowers/specs/2026-06-14-wave3-pr13-completion-design.md` §E；outline `docs/superpowers/specs/2026-06-09-wave3-outline-design.md` §三.3；plan `docs/superpowers/plans/2026-06-14-wave3-pr13c-completion.md`。
+**source-of-truth**：spec `docs/superpowers/specs/2026-06-14-wave3-pr13-completion-design.md` §E；outline `docs/superpowers/specs/2026-06-09-wave3-outline-design.md` §三.3；plan `docs/superpowers/plans/2026-06-14-wave3-pr13c-completion.md`（**规划** source-of-truth = 任务结构/判据）。**权威状态 ledger = `docs/governance/2026-06-14-wave3-completion.md` 的 WAVE3-STATUS 机器块**（codex review R6-Med：plan 内 WAVE3-STATUS 示意块为 plan-stage 初稿、已标 SUPERSEDED，勿作权威状态引用）。
 
 **评审通道**：doc-only 经 `codex:adversarial-review`（治理 doc 类，唯一 review 通道）；codex 周配额耗尽时 fallback opus 4.8 xhigh（documented）。
 
