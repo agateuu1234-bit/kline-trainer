@@ -354,6 +354,7 @@ Expected: 全 PASS。**本任务不产生 commit**（仅验证；工作树须回
 - 「正式关闭 = …**解 W3-11-R1 与 13a-R2**（功能门 + 已知 data-loss 缺陷，§三）后」→ 「…**解 W3-11-R1**（13a-R2 已由本 PR #<PR> 解决，2026-06-15）后」。
 - §「后续」第 ③ 项「13a-R2（跨 lease cache data-loss）经 P2-confirm RFC 解决后」→ 「13a-R2 已由本 PR #<PR> 解决（lease-aware ownership-guard）」。
 - 脚注「**13a-R2（跨 lease cache data-loss）已提升进上方顶层 ledger 作 OPEN**」→ 「**13a-R2（跨 lease cache data-loss）已由本 PR #<PR> 解决（RESOLVED，见上方顶层 ledger）**」。
+- §六 评审通道说明行（L124，grep gate 断言描述）：把 `W3-11-R1/**13a-R2**/PR11-R1/W1-R2 OPEN` 改为 `W3-11-R1/PR11-R1/W1-R2 OPEN + **13a-R2 RESOLVED（本 PR）**`——使 §六 对 gate 断言的散文描述与翻转后的机器块/gate 一致（避免 machine-block↔prose 自相矛盾，per `feedback_codex_round6_self_contradiction`）。
 
 - [ ] **Step 4: 改 gate L51 + 注释 + echo**
 
@@ -406,8 +407,9 @@ Expected: 全 PASS，0 failures；总数 = 1009 + 4（新增测试：core + two-
 
 - [ ] **Step 2: grep 残留旧模式**
 
-Run: `cd ios/Contracts && grep -rn "listAvailable().first(where: { \$0.id ==" Sources/`
-Expected: 仅出现在 `deleteCachedFileIfUnowned` helper 内（1 处）；`retryPendingConfirmations` / `run()` 不再裸用。
+Run（**必须用 `-F` 固定串**——macOS BSD grep 下 `{ ` 会被当 BRE interval 致整模式 0 匹配 vacuous，见 `feedback_acceptance_grep_anchoring`）：
+`cd ios/Contracts && grep -rnF 'listAvailable().first(where: { $0.id ==' Sources/`
+Expected: 恰 1 处，且在 `deleteCachedFileIfUnowned` helper 内（`DownloadAcceptanceRunner.swift`）；`retryPendingConfirmations` / `run()` 不再裸用此模式。
 
 ---
 
