@@ -3,7 +3,8 @@
 # 健壮性（codex:adversarial-review R2 High/Med）：状态谓词**只解析 WAVE3-STATUS 注释块**，块内
 #   anchored 全行精确匹配 + 拒重复 key——杜绝散文重复掩盖被改的块值（旧版搜整文档 = fail-open）。
 # 谓词 1：residual A/B/C/D 标 CLOSED（块内全行）
-# 谓词 2：W3-11-R1 + ship 门 PR11-R1 / W1-R2 标 OPEN（块内全行）
+# 谓词 2：W3-11-R1 + 已知 data-loss 缺陷 13a-R2 + ship 门 PR11-R1 / W1-R2 标 OPEN（块内全行；13a-R2 per R3-High）
+# 结构守卫（R3-Med）：WAVE3-STATUS 须恰 1 开标记 + 其后有闭合 -->（拒未闭合注释吞后文）
 # 谓词 3：高层状态 store-ready=NO + formal-closure=PENDING + feature-completeness=PENDING-W3-11-R1
 #         + runtime-matrix=PARTIAL + freeze-tag=NOT-TAGGED（块内全行；无误 claim 上架/已关闭/feature-complete）
 # 谓词 3b：矩阵 runbook 含 §C fixture 启动机制
@@ -18,6 +19,13 @@ fail() { echo "[verify-wave3-completion] FAIL: $1" >&2; exit 1; }
 
 [ -f "$DOC" ] || fail "completion doc 缺失：$DOC"
 [ -f "$MATRIX" ] || fail "运行时矩阵 runbook 缺失：$MATRIX"
+
+# WAVE3-STATUS 块须恰 1 个开标记 + 其后有闭合 `-->`（codex R3-Med：未闭合注释会把后文吞进 comment，
+# 旧 awk 跑到 EOF 仍非空 → 假 PASS）。先验证结构良好再提取。
+OPEN_N=$(grep -Fc "<!-- WAVE3-STATUS" "$DOC" || true)
+[ "$OPEN_N" = "1" ] || fail "WAVE3-STATUS 开标记须恰 1 个（实测 ${OPEN_N}）"
+awk '/<!-- WAVE3-STATUS/{o=1; next} o&&/^-->/{print "OK"; exit}' "$DOC" | grep -Fxq "OK" \
+  || fail "WAVE3-STATUS 块未闭合（开标记后无 -->，markdown 会把后文吞进注释，fail-closed）"
 
 # 仅提取 WAVE3-STATUS 注释块内容（`<!-- WAVE3-STATUS` 行之后、首个 `-->` 行之前）。
 BLOCK=$(awk '/<!-- WAVE3-STATUS/{f=1; next} /^-->/{if(f) exit} f' "$DOC")
@@ -38,8 +46,9 @@ require_kv "residual-B-unified-toast-layer" "CLOSED 13a #108"
 require_kv "residual-C-fixture-provisioning" "CLOSED 13b #109"
 require_kv "residual-D-e2e-smoke" "CLOSED 13b #109"
 
-# 谓词 2：W3-11-R1 + ship 门 = OPEN
+# 谓词 2：W3-11-R1 + 已知 data-loss 缺陷 13a-R2 + ship 门 = OPEN
 require_kv "residual-W3-11-R1-bounce-live-wiring" "OPEN"
+require_kv "known-defect-13a-R2-cross-lease-cache-deletion" "OPEN"
 require_kv "ship-gate-PR11-R1-prod-backend-url" "OPEN"
 require_kv "ship-gate-W1-R2-sample-data" "OPEN"
 
