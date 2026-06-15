@@ -74,8 +74,8 @@
 |---|---|---|
 | `ios/Contracts/Sources/KlineTrainerPersistence/DebugFixtures/DebugFixtureData.swift` | Modify | 新增 `public static let fullLoadM3Count = 9600`（含推导注释）；`make`/聚合逻辑不动 |
 | `ios/Contracts/Sources/KlineTrainerPersistence/DebugFixtures/AppContainer+DebugSeed.swift` | Modify | seed 调用点 `DebugFixtureData.make(m3Count: 240)` → `make(m3Count: DebugFixtureData.fullLoadM3Count)` |
-| `ios/Contracts/Tests/KlineTrainerPersistenceTests/DebugFixtureDataTests.swift` | Modify | 新增纯函数满载回归测试（每周期 ≥80 + 默认面板 ≥240 + 满载下结构不变量仍成立） |
-| `ios/Contracts/Tests/KlineTrainerPersistenceTests/AppContainerDebugSeedTests.swift` | Modify | 新增端到端测试：打开实际 seeded 缓存 fixture，`loadAllCandles()` 验每周期 ≥80 + 默认面板 ≥240 |
+| `ios/Contracts/Tests/KlineTrainerPersistenceTests/DebugFixtureDataTests.swift` | Modify | import 改 `@testable import KlineTrainerContracts`（引用 internal `defaultVisibleCount`）；新增纯函数满载回归测试（每周期 ≥80 + 默认面板 ≥240 + 满载下结构不变量仍成立） |
+| `ios/Contracts/Tests/KlineTrainerPersistenceTests/AppContainerDebugSeedTests.swift` | Modify | import 改 `@testable import KlineTrainerContracts`；新增端到端测试：打开实际 seeded 缓存 fixture，`loadAllCandles()` 验每周期 ≥80 + 默认面板 ≥240 |
 | `docs/acceptance/2026-06-14-wave3-pr13c-completion.md` | Modify | Residual 表 13c-R2 → RESOLVED（保留原描述，附本 PR 解决说明）；13c-R1 保持 OPEN |
 | `docs/acceptance/2026-06-14-wave3-runtime-matrix.md` | Modify | R8-H2 caveat：标注 perf-fixture 代码增强已 ship（本 PR），§C seed 现满载（≥80 全周期 / ≥240 默认面板）；保留「回填记录周期+蜡烛数」实践 |
 | `docs/governance/2026-06-14-wave3-completion.md` | Modify | 运行时矩阵行：fixture 欠载（13c-R2）标 RESOLVED；采样≠帧相关（13c-R1）保持记录 |
@@ -91,7 +91,9 @@
 
 - [ ] **Step 1: 写失败测试（RED——编译失败 + 行为断言）**
 
-在 `DebugFixtureDataTests.swift` 的 `#if DEBUG ... struct DebugFixtureDataTests { ... }` 内新增（注意 import 已含 `import KlineTrainerContracts`，可直接引用 `RenderStateBuilder` / `PinchZoomModel`）：
+**先改 import：** `DebugFixtureDataTests.swift` 第 4 行 `import KlineTrainerContracts` → `@testable import KlineTrainerContracts`。原因：`RenderStateBuilder.defaultVisibleCount`(80) 是 **`internal`**（`RenderStateBuilder.swift:13`，无 `public`；`RenderStateBuilder` 枚举本身 public 但该成员 internal），跨模块普通 import 不可见，需 `@testable` 才能引用；`PinchZoomModel.maxVisibleCount`(240) 是 `public`，但同文件统一用 `@testable` 即可。`@testable` 在 `swift test` / build-for-testing 下编译成立（同包 target 均开 testability，既有 `@testable import KlineTrainerPersistence` 为证）。
+
+在 `DebugFixtureDataTests.swift` 的 `#if DEBUG ... struct DebugFixtureDataTests { ... }` 内新增：
 
 ```swift
     // 13c-R2 根治：满载 fixture——每周期 ≥ defaultVisibleCount(80)，默认面板 .m60/.daily ≥ maxVisibleCount(240)。
@@ -168,10 +170,12 @@ git commit -m "feat(13c-R2): DebugFixtureData.fullLoadM3Count=9600 满载常量 
 ## Task 2：seed 调用点接满载常量 + 端到端 seeded-fixture 满载测试
 
 **Files:**
-- Modify: `ios/Contracts/Sources/KlineTrainerPersistence/DebugFixtures/AppContainer+DebugSeed.swift:38`（`make(m3Count: 240)` 调用点）
-- Test: `ios/Contracts/Tests/KlineTrainerPersistenceTests/AppContainerDebugSeedTests.swift`
+- Modify: `ios/Contracts/Sources/KlineTrainerPersistence/DebugFixtures/AppContainer+DebugSeed.swift:32`（`make(m3Count: 240)` 调用点）
+- Test: `ios/Contracts/Tests/KlineTrainerPersistenceTests/AppContainerDebugSeedTests.swift`（含第 4 行 import 改 `@testable`）
 
 - [ ] **Step 1: 写失败测试（RED——seeded 缓存 fixture 仍欠载）**
+
+**先改 import：** `AppContainerDebugSeedTests.swift` 第 4 行 `import KlineTrainerContracts` → `@testable import KlineTrainerContracts`（同 Task 1：引用 `internal` 的 `RenderStateBuilder.defaultVisibleCount`）。
 
 在 `AppContainerDebugSeedTests.swift` 的 `#if DEBUG ... struct AppContainerDebugSeedTests { ... }` 内新增（`makeConfig()` helper 已存在，可复用）：
 
@@ -379,7 +383,7 @@ git commit -m "docs(13c-R2): 非编码者验收清单（满载 fixture host 测 
 **3. 类型一致性：**
 - `fullLoadM3Count`（`public static let`，Int 9600）—— Task 1 定义、Task 2 测试 + seed 调用点引用，命名一致。✓
 - `DebugFixtureData.make(m3Count:)` / `.candles` / `PeriodCandles.rows` / `CandleRow.endGlobalIndex`/`.globalIndex` —— 对齐既有源码（已读）。✓
-- `RenderStateBuilder.defaultVisibleCount`(80) / `PinchZoomModel.maxVisibleCount`(240) —— `public static let`，测试目标 import `KlineTrainerContracts` 可见。✓
+- `PinchZoomModel.maxVisibleCount`(240) 是 `public`（`PinchZoomModel.swift:11`）；`RenderStateBuilder.defaultVisibleCount`(80) 是 **`internal`**（`RenderStateBuilder.swift:13`，无 `public`）——两测试文件须改用 `@testable import KlineTrainerContracts` 方可引用（Task 1/2 Step 1 已含该 import 改动；不改生产访问级）。✓
 - `DefaultTrainingSetDBFactory().openAndVerify(file:expectedSchemaVersion:)` + `reader.loadAllCandles() -> [Period:[KLineCandle]]` + `c.cache.listAvailable().first!.localURL` —— 对齐既有 `AppContainerDebugSeedTests` 与 reader 协议。✓
 - `Period.allCases` —— `Period` 是 `CaseIterable`（`Models.swift:11`）。✓
 
