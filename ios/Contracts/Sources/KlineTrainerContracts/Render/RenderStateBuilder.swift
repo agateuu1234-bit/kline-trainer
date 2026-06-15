@@ -76,17 +76,16 @@ public enum RenderStateBuilder {
                             candleStep: candleStep, visibleCount: visibleCount)
     }
 
-    /// bounce 接线所需的 offset **真实运动区间**（spec §二.B1 / D5）：带符号——
-    /// `maxOffset = base·step`（最老边 startIndex==0 的 offset）、`minOffset = (base−upper)·step`（最新边 startIndex==upperBound）。
-    /// 与 makeViewport 的 startIndex clamp **共用 geometryCore**（D4 单一真相）。供 R1b-wire 的 Coordinator 喂 engine。
-    /// **span == upperBound·candleStep（codex R2-H）**：区间宽度恰为可滚动 candle 数·step，**无死区**——
-    /// 区间内任一 candle-step 位移都改 startIndex（早 tick base<0 时区间整体为负，autoTracking offset=0 在区间**外**的左填充 plateau）。
-    /// **R1b-wire 消费契约（codex R2-H/R1-H 正解 = normalize-on-freeScrolling）**：
-    ///   (a) 进入 freeScrolling（pan-start）时把 offset **归一进 [minOffset,maxOffset]**（早 tick：0→clamp 到 maxOffset，**视觉无缝**——0 与 maxOffset 同 render startIndex==0）；
-    ///   (b) overscroll 渲染 / bounce **仅在 freeScrolling**（autoTracking rest offset=0 照旧 pin，不渲 overscroll、不 bounce）。
-    ///   → 故 autoTracking offset=0 在早 tick 虽 ∉ 真区间，rest 态 mode-gate 下不触发 bounce/gap；freeScrolling 态 offset 已归一进区间。
-    /// upperBound==0（count≤visibleCount，无滚动空间）→ 单点 [0,0]。
-    /// **FP round-trip（codex R1-M）**：edge 经 makeViewport plain `floor(offset/step)` 反算须得回 integer——
+    /// bounce 接线所需的 offset 边界（spec §二.B1 / §五.D5，**reveal RFC #113 后**）：带符号——
+    /// `maxOffset = max(0, baseStartIndex)·step`（最老边 startIndex==0 的 offset）、`minOffset = 0`（最新边 = 当前 tick）。
+    /// reveal 禁前窥：autoTracking 锚（baseStartIndex）即最新可见边，前向滚动不可越当前 tick → 故 **minOffset 恒 0**
+    /// （offset=0 即 autoTracking rest = 最新边，在区间内，**无早 tick 负 minOffset 歧义**，消旧 normalize-on-freeScrolling 契约）。
+    /// 与 makeViewport 的 startIndex clamp **共用 geometryCore**（D4 单一真相，upperBound=max(0,baseStartIndex)）：
+    /// maxOffset=roundTripEdge(baseStartIndex)、minOffset=roundTripEdge(baseStartIndex−upperBound)=roundTripEdge(0)=0。
+    /// 供 R1b-wire 的 Coordinator 喂 engine——bounce/overscroll 在 [0, maxOffset]（仅 freeScrolling；autoTracking rest offset=0 照旧 pin）。
+    /// **span == upperBound·candleStep**（=max(0,base)·step）：早 tick base<0 → upperBound=0 → 单点 [0,0]
+    /// （无滚动空间，已显最旧 + 无未来）；中/晚 tick span 随 base 渐增（不再是与 tick 无关常数）。
+    /// **FP round-trip（codex R1-M）**：maxOffset 经 makeViewport plain `floor(offset/step)` 反算须得回 baseStartIndex——
     /// 非整除 step（如 1000/21）下 `integer·step` 可 FP 偏移致 floor 偏 1 → `roundTripEdge` verify-and-correct 钉死。
     /// **非有限几何（codex R2-M）**：width/step 非有限 → 返单点 [0,0] 安全退化（交 R1b-wire EdgeBounceModel 端点校验），不 trap。
     static func offsetBounds(mainFrameWidth: CGFloat, rawVisible: Int,

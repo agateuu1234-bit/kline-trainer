@@ -12,7 +12,9 @@
 
 **关键不变量（行为中性证明）**：既有 `RenderStateBuilderTests` 全部 case 重构后**逐一仍绿** = makeViewport 输出等价。R1a **不**改任何 startIndex/pixelShift/slice 输出。
 
-**坐标模型（spec §二.B1 核实，`RenderStateBuilder.swift:58-93`）**：`target = rawVisible>0 ? rawVisible : 80`；`visibleCount = min(target, count)`；`candleStep = mainFrameWidth/target`；`baseStartIndex = currentIdx − (visibleCount−1)`；`upperBound = max(0, count − visibleCount)`；`maxOffset = baseStartIndex·candleStep`（最老边，startIndex==0 临界）；`minOffset = (baseStartIndex − upperBound)·candleStep`（最新边，startIndex==upperBound 临界，通常 <0）。
+> **⚠️ D5 REWORK AMENDMENT（2026-06-16，reveal RFC #113 merged）**：本计划的 Task 1/2 代码块与数值（`upperBound=max(0,count−visibleCount)` / `minOffset=(base−upper)·step` / geometryCore upper=120 / offsetBounds min=−490 / earlyTick true-motion-range 等）反映 **pre-reveal** 的旧几何，**已被 reveal D5 superseded**。post-reveal 权威公式见下方「坐标模型」+ bounce spec changelog `2026-06-16` + 实现 `RenderStateBuilder.swift`：`upperBound=max(0,baseStartIndex)`（禁前窥）、`minOffset=0`、`maxOffset=max(0,baseStartIndex)·step`。offsetBounds **代码零改**（D4 单一真相：upperBound 一改即自动产出 D5），仅 docstring + 6 测试期望按 D5 重算。本分支已 rebase onto `bb0d597`。
+
+**坐标模型（reveal D5，spec §三 + `RenderStateBuilder.swift`）**：`target = rawVisible>0 ? rawVisible : 80`；`visibleCount = min(target, count)`；`candleStep = mainFrameWidth/target`；`baseStartIndex = currentIdx − (visibleCount−1)`；**`upperBound = max(0, baseStartIndex)`（reveal 禁前窥，非旧 count−visibleCount）**；`maxOffset = max(0, baseStartIndex)·candleStep`（最老边，startIndex==0 临界）；**`minOffset = 0`（最新边 = 当前 tick，前向不可越 → 恒 0）**。早 tick base<0 → upperBound=0 → [0,0]（无滚动空间）。
 
 **ledger**：本 PR 业务轨**不碰** `wave3-completion.md`/`verify-wave3-completion.sh`/runtime-matrix（per 并行编排 ledger-B）。
 
