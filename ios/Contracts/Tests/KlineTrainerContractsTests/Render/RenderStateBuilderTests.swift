@@ -284,6 +284,205 @@ struct RenderStateBuilderTests {
         #expect(ms < 50)   // 极宽松上界，仅防病态退化（同既有 perfSmoke 量级）
     }
 
+    // MARK: - W3-11-R1a：geometryCore 共享几何内核（行为中性抽取）
+
+    @Test("geometryCore（reveal D5）：count=200/currentIdx=150/width=800/rawVisible=0→80 → base=71,upper=71,step=10,vc=80")
+    func geometryCore_known() {
+        let core = RenderStateBuilder.geometryCore(
+            mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
+            rawVisible: 0, candleCount: 200, currentIdx: 150)
+        #expect(core.visibleCount == 80)
+        #expect(core.candleStep == 10)          // 800/80
+        #expect(core.baseStartIndex == 71)      // 150 − 79
+        #expect(core.upperBound == 71)          // reveal RFC：max(0, baseStartIndex)=max(0,71)（禁前窥；非旧 count−vc=120）
+    }
+
+    @Test("offsetBounds（reveal D5）：count=200/currentIdx=150/width=800 → max=710,min=0,step=10")
+    func offsetBounds_known() {
+        let b = RenderStateBuilder.offsetBounds(
+            mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
+            rawVisible: 0, candleCount: 200, currentIdx: 150)
+        #expect(b.maxOffset == 710)     // baseStartIndex 71 · step 10（最老边）
+        #expect(b.minOffset == 0)       // reveal D5：最新边 = 当前 tick（offset 0），前向不可越（禁前窥）
+        #expect(b.candleStep == 10)
+        #expect(b.bounceEdges == [.max])   // codex R3：有滚动空间 → 仅最老边可弹（.min 硬钳不在内）
+    }
+
+    // D4 行为对拍（opus M4 + R1-Low1/Low2，reveal D5 更新）：把 offsetBounds 算出的 edge-offset 喂回 makeViewport，
+    // 须落到 render 边缘且 pixelShift==0，证 bounds 与 render clamp 同源。
+    // 双侧锚（Low1）：max 是 startIndex==0 的**确切下确界**——max−step 时 startIndex 须 ==1（未到最老边）；
+    //                min(=0, reveal 最新边)是 startIndex==upperBound 的**确切上确界**——min+step（朝更老）时 startIndex 须 ==upperBound−1。
+    // currentIdx 显式锚（Low2）：钉死「offsetBounds 字面入参 currentIdx」== makeViewport 的 tick→currentIdx，防同向漂移。
+    @Test("offsetBounds 行为对拍（reveal D5）：maxOffset→startIndex==0 pin / minOffset(0)→upperBound pin / 双侧确界 + currentIdx 同源")
+    func offsetBounds_matchesRenderClamp() {
+        let cs = Self.candles(period: .m3, count: 200)
+        #expect(RenderStateBuilder.currentCandleIndex(candles: cs, tick: 150) == 150)  // Low2：钉死前提同源
+        let b = RenderStateBuilder.offsetBounds(
+            mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
+            rawVisible: 0, candleCount: 200, currentIdx: 150)
+        let atMax = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: b.maxOffset), candles: cs, tick: 150, bounds: Self.bounds)
+        #expect(atMax.startIndex == 0)          // 最老边
+        #expect(atMax.pixelShift == 0)          // 边缘 pin
+        // Low1 对侧锚：max−step 未到边 → startIndex==1（证 maxOffset 是 startIndex==0 的确切下确界，非任意大值）
+        let belowMax = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: b.maxOffset - b.candleStep), candles: cs, tick: 150, bounds: Self.bounds)
+        #expect(belowMax.startIndex == 1)
+        let atMin = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: b.minOffset), candles: cs, tick: 150, bounds: Self.bounds)
+        #expect(atMin.startIndex == 71)         // reveal D5：upperBound==max(0,base)==71（最新边=当前 tick），非旧 120
+        #expect(atMin.pixelShift == 0)
+        // Low1 对侧锚：min+step（朝更老）未到最新边 → startIndex==70（=upperBound−1，确切上确界）
+        let aboveMin = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: b.minOffset + b.candleStep), candles: cs, tick: 150, bounds: Self.bounds)
+        #expect(aboveMin.startIndex == 70)
+    }
+
+    // codex R2（branch-diff）：offsetBounds.minOffset==0 是 reveal **硬钳**（最新边=当前 tick），**非对称弹簧边**。
+    // R1b-wire 若把最新边当 EdgeBounceModel 对称弹簧端点 + 负速 fling → 会 spring offset below 0 = 前向揭示。
+    // 本测证 **R1a render 层已兜底**：即便 caller 喂 offset 低于 minOffset（负，模拟该误用），makeViewport 仍把 startIndex
+    // 钳在 upperBound、pixelShift==0、slice 末根==currentIdx（无前向揭示）。R1b-wire 据此把最新边实现为硬钳（spec §六 B4 NOTE）。
+    @Test("offsetBounds.minOffset 是 reveal 硬钳非弹簧：offset 低于 minOffset → makeViewport 钳最新边、无前向揭示（codex R2）")
+    func offsetBounds_minOffsetIsHardClampNotSpring() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let b = RenderStateBuilder.offsetBounds(
+            mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
+            rawVisible: 0, candleCount: 200, currentIdx: 150)
+        #expect(b.minOffset == 0)
+        let currentIdx = RenderStateBuilder.currentCandleIndex(candles: cs, tick: 150)   // 150
+        // 喂 offset 远低于 minOffset（负=前向/朝新）：R1b 误把最新边当弹簧 + 负速会产生此类 offset。
+        for belowMin in [b.minOffset - b.candleStep, b.minOffset - 100, CGFloat(-1000)] {
+            let vp = RenderStateBuilder.makeViewport(
+                panelState: Self.panel(offset: belowMin), candles: cs, tick: 150, bounds: Self.bounds)
+            #expect(vp.startIndex == 71, "belowMin=\(belowMin) 钳最新边 upperBound==71")
+            #expect(vp.pixelShift == 0, "belowMin=\(belowMin) 边缘 pin（无前向间隙，非 overscroll gap）")
+            #expect(vp.startIndex + vp.visibleCount - 1 <= currentIdx, "belowMin=\(belowMin) slice 末根 ≤ currentIdx（无未来）")
+        }
+    }
+
+    // codex R3：bounceEdges **类型级**不变量——`.min` 永不在 bounceEdges（最新边硬钳），且 `[.max]` iff 有滚动空间（max>min）。
+    // 扫 tick × vc 钉死单边 bounce 策略由返回类型编码（R1b 读 bounceEdges 即不会误把最新边当弹簧）。
+    @Test("offsetBounds.bounceEdges 不变量（codex R3）：.min 永不可弹（硬钳）+ [.max] iff 有滚动空间")
+    func offsetBounds_bounceEdgesAsymmetryInvariant() {
+        let w = ChartPanelFrames.split(in: Self.bounds).mainChart.width
+        for tickIdx in [0, 5, 79, 80, 150, 199] {
+            for vc in [0, 40, 80, 160] {
+                let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: vc,
+                                                        candleCount: 200, currentIdx: tickIdx)
+                #expect(!b.bounceEdges.contains(.min), "tick=\(tickIdx) vc=\(vc)：.min 永不可弹（最新边硬钳）")
+                let hasRoom = b.maxOffset > b.minOffset
+                #expect(b.bounceEdges == (hasRoom ? [.max] : []), "tick=\(tickIdx) vc=\(vc)：[.max] iff 有滚动空间")
+            }
+        }
+    }
+
+    @Test("offsetBounds 退化：count<=visibleCount(无滚动空间) → upperBound==0, min/max 同号无区间")
+    func offsetBounds_degenerate() {
+        // count=30 < target=80 → visibleCount=min(80,30)=30, step=10; currentIdx=29(最新根) → baseStartIndex=29-29=0
+        // reveal upperBound=max(0, baseStartIndex=0)=0（无滚动空间）→ max=0, min=0（单点，无 overscroll 空间）
+        let b = RenderStateBuilder.offsetBounds(
+            mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
+            rawVisible: 0, candleCount: 30, currentIdx: 29)
+        #expect(b.maxOffset == 0)
+        #expect(b.minOffset == 0)
+        #expect(b.candleStep == 10)
+        #expect(b.bounceEdges.isEmpty)   // codex R3：无滚动空间 → 无边可弹
+    }
+
+    // codex R3（branch-diff）：空 candle（candleCount==0 → visibleCount==0）须退化 [0,0]，**不依赖 caller 传的 currentIdx**。
+    // 旧洞：count=0 → visibleCount=0 → baseStartIndex=currentIdx−(0−1)=currentIdx+1；哨兵 currentIdx=0 → upperBound=max(0,1)=1>0
+    // 漏过守卫 → maxOffset=roundTripEdge(1)=step（伪非零）。修：offsetBounds 守卫加 visibleCount>0。
+    @Test("offsetBounds 空 candle 退化（codex R3）：candleCount==0 → [0,0]，任意 currentIdx 哨兵（含 0）不漏")
+    func offsetBounds_emptyCandlesDegenerate() {
+        let w = ChartPanelFrames.split(in: Self.bounds).mainChart.width
+        for sentinelIdx in [-1, 0, 5, 100] {
+            let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: 0,
+                                                    candleCount: 0, currentIdx: sentinelIdx)
+            #expect(b.minOffset == 0, "currentIdx=\(sentinelIdx) empty → minOffset 0")
+            #expect(b.maxOffset == 0, "currentIdx=\(sentinelIdx) empty → maxOffset 0")
+            #expect(b.bounceEdges.isEmpty, "currentIdx=\(sentinelIdx) empty → 无边可弹")
+        }
+    }
+
+    // reveal D5：早 tick currentIdx=10 → baseStartIndex=10−79=−69 → upperBound=max(0,−69)=0 → offsetBounds=[0,0]
+    // （无滚动空间：已显最旧 candles[0..]，前向不可越 currentIdx=禁前窥）。区别于旧 true-motion-range [-1890,-690]（codex R2-H 旧解，reveal 后失效）。
+    @Test("offsetBounds 早 tick（reveal D5）：base<0 → [0,0]（无滚动空间，已显最旧+禁前窥），任意 offset 仍 clamp 到 autoTracking")
+    func offsetBounds_earlyTickNoScrollRoom() {
+        let w = ChartPanelFrames.split(in: Self.bounds).mainChart.width
+        let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: 0, candleCount: 200, currentIdx: 10)
+        #expect(b.maxOffset == 0)           // base<0 → upperBound 守卫返单点 [0,0]（**reveal-upperBound 判别在此**：
+        #expect(b.minOffset == 0)           //   mutation upperBound 退回 count−vc → max/min≠0 被抓，见 Stage2 review）
+        #expect(b.candleStep == 10)
+        #expect(b.bounceEdges.isEmpty)      // codex R3：早 tick 无滚动空间 → 无边可弹
+        // no-OOB smoke（**非** reveal-upperBound 判别——早 tick 下 startIndex 的 max(…,0) 下界 clamp 先于 upperBound 生效）：
+        // 正 offset（朝更老，已最旧）/负 offset（朝新，禁前窥）喂回 makeViewport 都落 autoTracking startIndex==0 且不 OOB。
+        let cs = Self.candles(period: .m3, count: 200)
+        let pos = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: 100), candles: cs, tick: 10, bounds: Self.bounds)
+        #expect(pos.startIndex == 0)
+        let neg = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: -100), candles: cs, tick: 10, bounds: Self.bounds)
+        #expect(neg.startIndex == 0)
+    }
+
+    // reveal D5：span == upperBound·step == max(0, baseStartIndex)·step（早 tick base<0 → span 0；中/晚 tick 渐增）。
+    // 不再是与 tick 无关的常数（旧 true-motion-range，codex R2-H 旧解）——upperBound 现随 tick 变（=max(0,base)）。
+    @Test("offsetBounds span==upperBound·step（reveal D5：tick 10/150/199 → span 0/710/1200）")
+    func offsetBounds_spanEqualsUpperBoundStep() {
+        let w = ChartPanelFrames.split(in: Self.bounds).mainChart.width
+        let cases: [(tick: Int, span: CGFloat)] = [(10, 0), (150, 710), (199, 1200)]
+        for c in cases {
+            let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: 0,
+                                                    candleCount: 200, currentIdx: c.tick)
+            let upperBound = CGFloat(max(0, c.tick - 79))   // vc=80, base=tick−79
+            #expect(b.maxOffset - b.minOffset == upperBound * 10, "tick=\(c.tick) span==upperBound·step")
+            #expect(b.maxOffset - b.minOffset == c.span, "tick=\(c.tick) 金值 span")
+        }
+    }
+
+    // codex R2-M：非有限几何（inf/NaN width → 非有限 step）→ 安全退化 [0,0]，roundTripEdge 不 Int(NaN/inf) trap。
+    @Test("offsetBounds 非有限几何安全退化（codex R2-M）：inf/NaN width → [0,0] 不 trap")
+    func offsetBounds_nonFiniteGeometrySafe() {
+        let bInf = RenderStateBuilder.offsetBounds(mainFrameWidth: .infinity, rawVisible: 0, candleCount: 200, currentIdx: 150)
+        #expect(bInf.minOffset == 0 && bInf.maxOffset == 0)
+        #expect(bInf.candleStep == 0)   // R1a code-quality Minor1：非有限 step 净化为 0（钉死 safeStep 分支，防 inf/NaN 泄入）
+        let bNaN = RenderStateBuilder.offsetBounds(mainFrameWidth: .nan, rawVisible: 0, candleCount: 200, currentIdx: 150)
+        #expect(bNaN.minOffset == 0 && bNaN.maxOffset == 0)
+        #expect(bNaN.candleStep == 0)   // 同上：NaN step → 0
+        // roundTripEdge 喂非有限 step 不 trap（命中 :107 early guard 返 integer·step；内层 q.isFinite 守是 belt-and-suspenders）
+        _ = RenderStateBuilder.roundTripEdge(integer: 71, step: .infinity)
+        _ = RenderStateBuilder.roundTripEdge(integer: 71, step: .nan)
+        #expect(Bool(true))   // 到达此行即证未 trap
+    }
+
+    // codex R1-M：非整除 step（width/vc 不整除）下 edge=integer·step 经 makeViewport plain floor 反算可偏 1；
+    // roundTripEdge verify-and-correct 钉死：喂 maxOffset/minOffset 回 makeViewport 精确落边 + pixelShift==0。
+    @Test("offsetBounds 非整除 step round-trip：vc 20...120 × width=1000 → edge 精确反算落边 pin")
+    func offsetBounds_roundTripNonIntegral() {
+        let cs = Self.candles(period: .m3, count: 300)
+        let bounds = CGRect(x: 0, y: 0, width: 1000, height: 600)   // 1000/vc 多数非整除
+        let w = ChartPanelFrames.split(in: bounds).mainChart.width
+        for vc in 20...120 {
+            let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: vc,
+                                                    candleCount: 300, currentIdx: 200)
+            let pMax = PanelViewState(period: .m3, interactionMode: .autoTracking,
+                                      visibleCount: vc, offset: b.maxOffset, revision: 0)
+            let vpMax = RenderStateBuilder.makeViewport(panelState: pMax, candles: cs, tick: 200, bounds: bounds)
+            if b.maxOffset > 0 {
+                #expect(vpMax.startIndex == 0, "vc=\(vc) maxOffset round-trip→startIndex 0")
+                #expect(vpMax.pixelShift == 0, "vc=\(vc) maxOffset pixelShift pin")
+            }
+            // reveal D5：minOffset 恒 0（vc 20...120 → base=201−vc>0 → minOffset=roundTripEdge(0)=0）；
+            // 喂回落 autoTracking 锚 startIndex==baseStartIndex==201−vc（==upperBound），pin。
+            let pMin = PanelViewState(period: .m3, interactionMode: .autoTracking,
+                                      visibleCount: vc, offset: b.minOffset, revision: 0)
+            let vpMin = RenderStateBuilder.makeViewport(panelState: pMin, candles: cs, tick: 200, bounds: bounds)
+            #expect(b.minOffset == 0, "vc=\(vc) reveal minOffset==0")
+            #expect(vpMin.startIndex == 201 - vc, "vc=\(vc) minOffset(0)→autoTracking 锚")
+            #expect(vpMin.pixelShift == 0, "vc=\(vc) minOffset pixelShift pin")
+        }
+    }
+
     // MARK: 顺位 3 D5：去硬编码 80（target = panelState.visibleCount，≤0 → fallback 80）
 
     /// 非 0 显式入参 + 80 golden parity（独立金值硬编码，R1-L3 防 tautology）

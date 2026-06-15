@@ -52,6 +52,93 @@ public enum RenderStateBuilder {
         return vp.startIndex ..< vp.startIndex + vp.visibleCount
     }
 
+    /// 共享几何内核（spec §二.B1 / D4 单一真相）：makeViewport 的 startIndex 派生与 offsetBounds 的边界派生
+    /// 都消费它，杜绝两套几何公式漂移。纯值、平台无关。
+    struct GeometryCore: Equatable, Sendable {
+        let baseStartIndex: Int
+        let upperBound: Int
+        let candleStep: CGFloat
+        let visibleCount: Int
+    }
+
+    static func geometryCore(mainFrameWidth: CGFloat, rawVisible: Int,
+                             candleCount: Int, currentIdx: Int) -> GeometryCore {
+        let target = rawVisible > 0 ? rawVisible : defaultVisibleCount
+        let visibleCount = min(target, candleCount)
+        let candleStep = mainFrameWidth / CGFloat(target)
+        let baseStartIndex = currentIdx - (visibleCount - 1)
+        // reveal RFC（2026-06-15, #113）：upperBound 从 max(0, count−visibleCount) 收紧为 max(0, baseStartIndex)
+        // = autoTracking 锚（baseStartIndex）即最新可见边，前向滚动（朝新）不可越当前 tick（禁前窥）。
+        // 早 tick base<0 → upperBound=0（无滚动空间，已显最旧 + 无未来）。makeViewport startIndex clamp 与
+        // offsetBounds 边界派生都经此，故 reveal 语义在两处一致（D4）。
+        let upperBound = max(0, baseStartIndex)
+        return GeometryCore(baseStartIndex: baseStartIndex, upperBound: upperBound,
+                            candleStep: candleStep, visibleCount: visibleCount)
+    }
+
+    /// bounce 接线所需的 offset 边界（spec §二.B1 / §五.D5，**reveal RFC #113 后**）：带符号——
+    /// `maxOffset = max(0, baseStartIndex)·step`（最老边 startIndex==0 的 offset）、`minOffset = 0`（最新边 = 当前 tick）。
+    /// reveal 禁前窥：autoTracking 锚（baseStartIndex）即最新可见边，前向滚动不可越当前 tick → 故 **minOffset 恒 0**
+    /// （offset=0 即 autoTracking rest = 最新边，在区间内，**无早 tick 负 minOffset 歧义**，消旧 normalize-on-freeScrolling 契约）。
+    /// 与 makeViewport 的 startIndex clamp **共用 geometryCore**（D4 单一真相，upperBound=max(0,baseStartIndex)）：
+    /// maxOffset=roundTripEdge(baseStartIndex)、minOffset=roundTripEdge(baseStartIndex−upperBound)=roundTripEdge(0)=0。
+    /// 供 R1b-wire 的 Coordinator 喂 engine——bounce/overscroll 在 [0, maxOffset]（仅 freeScrolling；autoTracking rest offset=0 照旧 pin）。
+    /// **⚠️ 边非对称（codex R2/R3，reveal）**：`minOffset=0` 是**硬钳**（最新边=当前 tick，前向=未来），**非对称弹簧边**——
+    /// 返回的 `OffsetBounds.bounceEdges` **类型级编码**该非对称（仅含 `.max` 最老边、或无滚动空间时为空；**永不含 `.min`**），
+    /// R1b-wire 据此单边化 `EdgeBounceModel`——**不可**把最新边当对称弹簧端点（否则负速 fling 会 spring offset<0 = 前向揭示）。
+    /// R1a 的 makeViewport 已在 render 层兜底（offset<0 → startIndex 钳 upperBound + pixelShift=0，无前向间隙；
+    /// 见测 `offsetBounds_minOffsetIsHardClampNotSpring`），但 R1b 仍须按 `bounceEdges` 硬钳语义接线以保正确 UX。
+    /// **span == upperBound·candleStep**（=max(0,base)·step）：早 tick base<0 → upperBound=0 → 单点 [0,0]
+    /// （无滚动空间，已显最旧 + 无未来）；中/晚 tick span 随 base 渐增（不再是与 tick 无关常数）。
+    /// **FP round-trip（codex R1-M）**：maxOffset 经 makeViewport plain `floor(offset/step)` 反算须得回 baseStartIndex——
+    /// 非整除 step（如 1000/21）下 `integer·step` 可 FP 偏移致 floor 偏 1 → `roundTripEdge` verify-and-correct 钉死。
+    /// **非有限几何（codex R2-M）**：width/step 非有限 → 返单点 [0,0] 安全退化（交 R1b-wire EdgeBounceModel 端点校验），不 trap。
+    /// **空 candle（codex R3 branch-diff）**：candleCount==0 → visibleCount==0 → 退化 [0,0]，**不依赖 caller 传的 currentIdx**——
+    /// 否则 visibleCount=0 使 baseStartIndex=currentIdx+1，哨兵 currentIdx=0 → upperBound=1 漏过守卫 → 伪非零 maxOffset。
+    /// offsetBounds 返回（codex R3）：offset 区间 + reveal 单边 bounce 策略。`minOffset/maxOffset/candleStep`
+    /// 同旧 tuple；`bounceEdges` **类型级编码非对称**——仅最老边（`.max`）可弹，最新边（`minOffset` 硬钳）**永不可弹**。
+    struct OffsetBounds: Equatable, Sendable {
+        let minOffset: CGFloat       // 最新边硬钳（reveal：=当前 tick offset 0，前向不可越，非弹簧）
+        let maxOffset: CGFloat       // 最老边（≥ minOffset）
+        let candleStep: CGFloat
+        enum Edge: Hashable, Sendable { case min, max }
+        /// reveal 单边 bounce 策略：有滚动空间（max>min）→ `[.max]`（仅最老边弹）；否则空。**`.min` 永不在内**（硬钳）。
+        var bounceEdges: Set<Edge> { maxOffset > minOffset ? [.max] : [] }
+    }
+
+    static func offsetBounds(mainFrameWidth: CGFloat, rawVisible: Int,
+                             candleCount: Int, currentIdx: Int) -> OffsetBounds {
+        let core = geometryCore(mainFrameWidth: mainFrameWidth, rawVisible: rawVisible,
+                                candleCount: candleCount, currentIdx: currentIdx)
+        // 空 candle（visibleCount==0）/ 非有限几何（NaN/inf width → NaN/inf step）/ 无滚动空间 → 单点 [0,0] 安全退化（codex R3 / R2-M / 退化）。
+        guard core.visibleCount > 0, core.candleStep.isFinite, core.candleStep > 0, core.upperBound > 0 else {
+            let safeStep = core.candleStep.isFinite ? core.candleStep : 0
+            return OffsetBounds(minOffset: 0, maxOffset: 0, candleStep: safeStep)
+        }
+        let maxOffset = roundTripEdge(integer: core.baseStartIndex, step: core.candleStep)
+        let minOffset = roundTripEdge(integer: core.baseStartIndex - core.upperBound, step: core.candleStep)
+        return OffsetBounds(minOffset: minOffset, maxOffset: maxOffset, candleStep: core.candleStep)
+    }
+
+    /// FP round-trip 守门（codex R1-M / C1a verify-and-correct）：返回一个 edge，使 makeViewport 的
+    /// plain `Int((edge/step).rounded(.down)) == integer`。`integer·step` 在非整除 step 下可 FP 偏移致 floor 偏 1；
+    /// 按 floor 方向 ULP-nudge 至吻合（bounded）。**调用方须先保 step 有限正（offsetBounds 已守，codex R2-M）**——
+    /// 但本函数对非有限 quotient 仍 fail-safe（quotient 非有限 → 直接返 integer·step 不进 Int() 防 trap）。
+    static func roundTripEdge(integer: Int, step: CGFloat) -> CGFloat {
+        guard step.isFinite, step > 0 else { return CGFloat(integer) * step }
+        var edge = CGFloat(integer) * step
+        var n = 0
+        while n < 32 {
+            let q = edge / step
+            guard q.isFinite else { break }   // 防 Int(NaN/inf) trap（codex R2-M）
+            let f = Int(q.rounded(.down))
+            if f == integer { break }
+            edge = f < integer ? edge.nextUp : edge.nextDown
+            n += 1
+        }
+        return edge
+    }
+
     /// 视口几何推导（唯一拥有 startIndex/pixelShift 装配的函数；make 与 visibleCandleRange 都经它）。
     /// **前置约束**：`candles` 非空、`bounds.width > 0`（调用方 make/visibleCandleRange 已守 .empty/空）。
     /// 支持 autoTracking（offset=0）与 freeScrolling（非零 offset 分解 + 边界饱和）；C8b H1 handler 复用点。
@@ -59,24 +146,16 @@ public enum RenderStateBuilder {
                              tick: Int, bounds: CGRect) -> ChartViewport {
         let mainFrame = ChartPanelFrames.split(in: bounds).mainChart
         let count = candles.count
-        // 顺位 3 D5 去硬编码：target = panelState.visibleCount（≤0 → fallback 80 兼容旧构造；
-        // engine init 已 seed 80，新路径不依赖 fallback）。
-        let target = panelState.visibleCount > 0 ? panelState.visibleCount : defaultVisibleCount
-        let visibleCount = min(target, count)
-
-        // 几何：分母 = target（count<target 时左对齐填充、candle 宽度稳定；target==80 与旧行为逐位一致）。
-        let candleStep = mainFrame.width / CGFloat(target)
+        let currentIdx = currentCandleIndex(candles: candles, tick: tick)
+        let core = geometryCore(mainFrameWidth: mainFrame.width, rawVisible: panelState.visibleCount,
+                                candleCount: count, currentIdx: currentIdx)
+        let candleStep = core.candleStep
         let geometry = ChartGeometry(candleStep: candleStep,
                                      candleWidth: candleStep * candleWidthRatio,
                                      gap: candleStep - candleStep * candleWidthRatio)
-
-        let currentIdx = currentCandleIndex(candles: candles, tick: tick)
-
-        // autoTracking 锚定：当前 candle 落最右被绘制 slot（baseStartIndex 可能 <0，下方 clamp）。
-        let baseStartIndex = currentIdx - (visibleCount - 1)
-        // reveal RFC（2026-06-15）：upperBound 从 max(0,count−visibleCount) 收紧为 max(0,baseStartIndex)
-        // = autoTracking 即最新可见边，前向滚动（朝新）不可越当前 tick（禁前窥）。
-        let upperBound = max(0, baseStartIndex)
+        let baseStartIndex = core.baseStartIndex
+        let upperBound = core.upperBound        // reveal RFC：= max(0, baseStartIndex)（禁前窥，语义在 geometryCore）
+        let visibleCount = core.visibleCount
         // offset 分解（C8b freeScrolling 复用；C8a offset 恒 0 时 wholeShift=0/pixelShift=0）。
         // 符号契约（CoordinateMapper Geometry.swift L136）：pixelShift>0 = candles 右移。
         let wholeShift = Int((panelState.offset / candleStep).rounded(.down))   // floor
