@@ -115,7 +115,9 @@ struct DebugFixtureDataTests {
         let data = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count)
         let maxM3End = data.candles.first(where: { $0.period == .m3 })!.rows.map(\.endGlobalIndex).max()!
         for period in Period.allCases {
-            let rows = data.candles.first(where: { $0.period == period })!.rows
+            guard let rows = data.candles.first(where: { $0.period == period })?.rows else {
+                Issue.record("周期 \(period) 缺失于满载 fixture"); continue
+            }
             #expect(!rows.isEmpty)
             var prevEnd = -1
             for c in rows {

@@ -84,12 +84,12 @@ public enum DebugFixtureData {
             return rows
         }
         let candles = [
-            PeriodCandles(period: .m3, rows: m3Rows),                  // span 1：240 根
-            PeriodCandles(period: .m15, rows: aggregate(span: 5)),     // 48 根
-            PeriodCandles(period: .m60, rows: aggregate(span: 20)),    // 12 根（make 默认上区）
-            PeriodCandles(period: .daily, rows: aggregate(span: 40)),  // 6 根（make 默认下区）
-            PeriodCandles(period: .weekly, rows: aggregate(span: 80)), // 3 根
-            PeriodCandles(period: .monthly, rows: aggregate(span: 120)), // 2 根
+            PeriodCandles(period: .m3, rows: m3Rows),                  // m3Count 根（默认 240 / 满载 fullLoadM3Count=9600）
+            PeriodCandles(period: .m15, rows: aggregate(span: 5)),     // m3Count/5 根
+            PeriodCandles(period: .m60, rows: aggregate(span: 20)),    // m3Count/20 根（make 默认上区）
+            PeriodCandles(period: .daily, rows: aggregate(span: 40)),  // m3Count/40 根（make 默认下区）
+            PeriodCandles(period: .weekly, rows: aggregate(span: 80)), // m3Count/80 根
+            PeriodCandles(period: .monthly, rows: aggregate(span: 120)), // m3Count/120 根
         ]
 
         let meta = TrainingSetMeta(
