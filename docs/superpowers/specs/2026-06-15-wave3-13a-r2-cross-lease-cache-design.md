@@ -9,7 +9,7 @@
 
 ## 〇、问题陈述（事实，2026-06-15 在 `ee5cc55` 核实）
 
-`DownloadAcceptanceRunner.retryPendingConfirmations()`（`ios/Contracts/Sources/KlineTrainerContracts/DownloadAcceptance/DownloadAcceptanceRunner.swift:147-161`）在重试孤儿确认时，若 confirm 返回服务端拒收（409 `leaseExpired` / 404 `leaseNotFound`），按如下逻辑清理本地 cache 副本：
+`DownloadAcceptanceRunner.retryPendingConfirmations()`（`ios/Contracts/Sources/KlineTrainerContracts/DownloadAcceptance/DownloadAcceptanceRunner.swift:147-161`，id-only 删除在 `:154-157`）在重试孤儿确认时，若 confirm 返回服务端拒收（409 `leaseExpired` / 404 `leaseNotFound`），按如下逻辑清理本地 cache 副本：
 
 ```swift
 if case .rejected = outcome {        // 409/404 → 清本地 cache 副本
@@ -105,7 +105,7 @@ reject 重试仅更新 journal 为 rejected，**永不**从重试路径删 cache
 - `.rejected`：文件应被删（或已删），非占有。
 - 更早状态（`downloaded`/`crcOK`/`unzipped`/`dbVerified`）：尚未入 cache（`stored` 前 `sqliteLocalPath` 为 nil），与 cache 删除无关。
 
-**关键不变量**：进入删除决策时，被拒的行 `(tid, thisLease)` 已被 `attemptConfirm` 置为 `.rejected`（`:182`，run + retry 两路一致）。故对该 tid 在 owning 状态查到的任何行**必然是其它 lease 的存活占有**——无需显式比较 leaseId。
+**关键不变量**：进入删除决策时，被拒的行 `(tid, thisLease)` **通常**已被 `attemptConfirm` 置为 `.rejected`（`:182`，run + retry 两路一致；该 upsert 是 best-effort `try?`，罕见 journal 写失败时该行仍停 `.confirmPending`，此时 helper 会因查到自身行而**保守跳过删除**——fail-safe，不误删，文件留待 LRU 回收）。故在正常情形下，对该 tid 在 owning 状态查到的任何行**必然是其它 lease 的存活占有**——helper 无需显式比较 leaseId。
 
 ### 4.2 helper（`DownloadAcceptanceRunner` 私有，无契约改动）
 
@@ -200,10 +200,12 @@ case .rejected(let e):
 
 ## 六、ledger + gate 关闭（把 13a-R2 推到 RESOLVED）
 
-- `docs/governance/2026-06-14-wave3-completion.md`：
-  - 机器块 L18 `known-defect-13a-R2-cross-lease-cache-deletion: OPEN` → `RESOLVED <PR#> <sha>`。
-  - 顶层 ledger 表（L88）+ §三 关闭前提 prose（L68/L118）：13a-R2 标 RESOLVED + 指向本 PR；**保留** W3-11-R1 + 运行时矩阵作其余关闭前提（不 claim 正式关闭）。
-- `scripts/governance/verify-wave3-completion.sh:51`：`require_kv "known-defect-13a-R2-cross-lease-cache-deletion" "OPEN"` → 改断言新值（与机器块逐字一致）；L73 echo 摘要同步。
+- `docs/governance/2026-06-14-wave3-completion.md`（**权威 ledger**）：
+  - 机器块 L18 `known-defect-13a-R2-cross-lease-cache-deletion: OPEN` → `known-defect-13a-R2-cross-lease-cache-deletion: CLOSED 13a-R2 #<PR>`。**沿用既有 CLOSED 惯例**（L13 `residual-A-cache-touch-on-use: CLOSED 13a #108` 同型，**PR-号 only、不含 SHA**——squash SHA merge 前未知，含 SHA 会令 in-PR gate 无法通过且 post-merge 编辑不再被校验）。
+  - 顶层 ledger 表（L88）+ §三 关闭前提 prose（L68/L118）：13a-R2 标 CLOSED/RESOLVED + 指向本 PR；**保留** W3-11-R1 + 运行时矩阵作其余关闭前提（不 claim 正式关闭）。
+- `scripts/governance/verify-wave3-completion.sh:51`：`require_kv "known-defect-13a-R2-cross-lease-cache-deletion" "OPEN"` → 改断言为新值，**与机器块该行逐字一致**（`require_kv` 用 `grep -Fxq "${key}: ${expected}"` 整行精确匹配，machine-block↔gate verbatim 耦合是 doc 自身 L124 强制的不变量）；L73 echo 摘要同步把 13a-R2 从 OPEN 改 RESOLVED。
+- `docs/acceptance/2026-06-14-wave3-runtime-matrix.md:87`（**live doc**）：该行将 13a-R2 列为"关闭前须解的功能/缺陷门" → 更新为"13a-R2 已解（本 PR），W3-11-R1 仍为关闭前功能门"，避免与翻转后的 completion doc 自相矛盾。
+- **有意保留为历史记录、不追溯改写**（避免改写已合并 PR 的当时如实记录）：`docs/acceptance/2026-06-14-wave3-pr13a-robustness.md`（#108 当时把 13a-R2 routed-out 的如实记录）、`docs/acceptance/2026-06-14-wave3-pr13c-completion.md`（#110 历史）、`docs/superpowers/plans/2026-06-14-wave3-pr13c-completion.md`（其 13a-R2 OPEN 机器块块已在 L118 标 `SUPERSEDED`、非权威）。plan 阶段须显式声明此三处有意留作历史，供后续审查者不误判 drift。
 - 诚实边界：本 PR 仅关 13a-R2 一项 data-loss 缺陷；不改 store-ready/formal-closure/feature-completeness/matrix/freeze 任何状态。
 
 > ⚠️ `docs/governance/**` + `scripts/**` 属 `codeowners_required_globs` → 合并需用户 Approve；`ios/**/*.swift` + `docs/**` + `scripts/**` 属 `trust_boundary_globs` → 必经 `codex:adversarial-review`（codex 配额耗尽走 opus 4.8 xhigh fallback，documented）。
@@ -219,12 +221,13 @@ case .rejected(let e):
 | 3 | `swift test`（host） | 全绿，0 failure；含新增 5 类回归测试 + 既有 P2 run/retry 测试全过 | □ Pass / □ Fail |
 | 4 | 看核心回归测试 `retry_crossLease_doesNotDeleteNewerLeaseFile` | 新 lease confirmed + 旧 lease 孤儿 reject 后，id=42 文件**保留**、不在 `deletedFilenames` | □ Pass / □ Fail |
 | 5 | 临时还原 helper 为 id-only 删除跑测试 | 核心回归测试 **FAIL**（mutation 证其为 killer） | □ Pass / □ Fail |
-| 6 | 看 `verify-wave3-completion.sh` + 完成 ledger | 13a-R2 = RESOLVED（机器块与 gate 逐字一致）；W3-11-R1 / 运行时矩阵仍 OPEN；store-ready/closure 未改 | □ Pass / □ Fail |
-| 7 | 跑 `scripts/governance/verify-wave3-completion.sh` | PASS（断言与新机器块一致） | □ Pass / □ Fail |
-| 8 | grep 全仓 `ios/**` | 无残留"按 trainingSetId 单独选 cache 项删除"的旧模式（两处均经 helper） | □ Pass / □ Fail |
+| 6 | 看 `verify-wave3-completion.sh` + 完成 ledger | 13a-R2 机器块 = `CLOSED 13a-R2 #<PR>`（PR-号 only 无 SHA，沿用既有 CLOSED 惯例），gate 该行断言与机器块**逐字一致**；runtime-matrix.md:87 同步；W3-11-R1 / 运行时矩阵仍 OPEN；store-ready/closure 未改 | □ Pass / □ Fail |
+| 7 | 跑 `scripts/governance/verify-wave3-completion.sh` | PASS（断言与新机器块逐字一致） | □ Pass / □ Fail |
+| 8 | grep 全仓 `ios/**` | 无残留"按 trainingSetId 单独选 cache 项删除"的旧模式（runner 两处均经 helper；`TrainingSessionCoordinator` 的 4 处损坏删除按已打开文件删、属另一缺陷类、不在范围） | □ Pass / □ Fail |
 
 ---
 
 ## 八、变更日志
 
-- v1（2026-06-15）：首版。方案 A（journal 驱动 ownership-guard，fail-safe）；应用 `retryPendingConfirmations`（本体）+ `run()`（defense-in-depth）；5 类回归测试；ledger + gate 关闭 13a-R2。待 opus 4.8 xhigh 对抗性评审收敛。
+- v1（2026-06-15）：首版。方案 A（journal 驱动 ownership-guard，fail-safe）；应用 `retryPendingConfirmations`（本体）+ `run()`（defense-in-depth）；5 类回归测试；ledger + gate 关闭 13a-R2。
+- v2（2026-06-15）：应用 opus 4.8 xhigh 对抗性评审 R1（**VERDICT APPROVE，0 Critical + 0 High**）的 2 M + 2 L findings：(M1) gate/ledger 值改 PR-号 only `CLOSED 13a-R2 #<PR>` 惯例、去 SHA、强调 machine-block↔gate verbatim 耦合；(M2) §六 补 `runtime-matrix.md:87` live doc 更新 + 显式声明 pr13a/pr13c 历史记录有意保留不追溯改写；(L1) §4.1 不变量软化（`try?` 罕见失败 → fail-safe 保守不删）；(L2) §〇 行号补 `:154-157`。评审已逐项对真实代码核实通过（bug 真实、fail-safe 真需要且生效、5 测试可 seed、killer 测试为真、scope 完整、零契约改动）。**收敛。**
