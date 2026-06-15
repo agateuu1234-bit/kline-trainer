@@ -41,4 +41,5 @@
 
 | Residual | 来源 | 处理 |
 |---|---|---|
-| **13b-R1：极端 partial-seed**——全空 guard + cache-last 已 cover 常见 partial（db 写失败 → cache 仍空 → 下次重 seed）；但 db 写**到一半**（如 record0 写了 record1 失败）后，全空 guard（history 非空）会跳过 → 留 partial。DEBUG-only、IO 失败罕见 → **删 app 重置** | codex-13b-R2（partial-failure 健壮性）| **accept residual**（debug-only 工具；durable seed-marker + 事务 retry 属过度工程）。13c freeze 前如需可在独立 follow-up 加 marker |
+| **13b-R1：极端 partial-seed**——全空 guard + cache-last 已 cover 常见 partial（db 写失败 → cache 仍空 → 下次重 seed）；但 db 写**到一半**（如 record0 写了 record1 失败）后，全空 guard（history 非空）会跳过 → 留 partial。DEBUG-only、IO 失败罕见 → **删 app 重置** | codex-13b-R2-F2 + R3-F3（partial-failure 健壮性）| **accept residual**（debug-only 工具；durable seed-marker + 单事务 retry 属过度工程）。如需可独立 follow-up 加 marker |
+| **13b-R2：§D smoke 用 fake `TrainingSetDataVerifier`**——§D 沿用既有 happy-path 约定（`FakeTrainingSetDataVerifier` 放行）。真 `DefaultTrainingSetDataVerifier` 要求**每周期 startDatetime 前 ≥30 warm-up**（含 monthly ≥30 = 数千根 m3 + 多年数据），对测试 fixture 不现实；verifier 规则由 `DefaultTrainingSetDataVerifierTests` 专测 | codex-13b-R2-F4（§D verifier）| **accept residual**：§D 覆盖 runner 真实路径（download/crc/unzip/db-open/store/confirm/journal/下游 open），仅 verifier 一步用 fake（有独立专测）。满足真 verifier 的 ≥30-全周期-含-monthly fixture 不现实 |

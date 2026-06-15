@@ -37,7 +37,6 @@ public enum DebugFixtureData {
 
     private static let baseEpoch: Int64 = 1_700_000_000
     private static let m3Step: Int64 = 180
-    private static let dailySpan = 80
 
     public static func make(m3Count: Int = 240) -> Seed {
         let filename = "debug-fixture-600001.sqlite"
@@ -58,22 +57,33 @@ public enum DebugFixtureData {
                 volume: 1000 + i * 10, ma66: ma66,
                 globalIndex: i, endGlobalIndex: i))
         }
-        var dailyRows: [CandleRow] = []
-        var start = 0
-        while start < m3Count {
-            let end = min(start + dailySpan - 1, m3Count - 1)
-            let slice = m3Rows[start...end]
-            let o = slice.first!.open, c = slice.last!.close
-            let hi = slice.map(\.high).max()!, lo = slice.map(\.low).min()!
-            dailyRows.append(CandleRow(
-                datetime: m3Rows[start].datetime,
-                open: o, high: hi, low: lo, close: c,
-                volume: slice.map(\.volume).reduce(0, +), ma66: nil,
-                globalIndex: nil, endGlobalIndex: end))
-            start += dailySpan
+        // 全 6 周期（codex-13b-R2-F1）：m3 原始 + 其余按 span 聚合。`TrainingEngine.make` 默认上区 .m60/下区
+        // .daily 且校验两 panel 周期非空；周期切换 combo 覆盖全 6 周期——故 fresh start/review/replay + 切换需全周期。
+        // 聚合 candle：global_index=nil、end_global_index=该组末 m3 index（组内单调、<= max m3 end，满足 reader 不变量）。
+        func aggregate(span: Int) -> [CandleRow] {
+            var rows: [CandleRow] = []
+            var start = 0
+            while start < m3Count {
+                let end = min(start + span - 1, m3Count - 1)
+                let slice = m3Rows[start...end]
+                rows.append(CandleRow(
+                    datetime: m3Rows[start].datetime,
+                    open: slice.first!.open, high: slice.map(\.high).max()!,
+                    low: slice.map(\.low).min()!, close: slice.last!.close,
+                    volume: slice.map(\.volume).reduce(0, +), ma66: nil,
+                    globalIndex: nil, endGlobalIndex: end))
+                start += span
+            }
+            return rows
         }
-        let candles = [PeriodCandles(period: .m3, rows: m3Rows),
-                       PeriodCandles(period: .daily, rows: dailyRows)]
+        let candles = [
+            PeriodCandles(period: .m3, rows: m3Rows),                  // span 1：240 根
+            PeriodCandles(period: .m15, rows: aggregate(span: 5)),     // 48 根
+            PeriodCandles(period: .m60, rows: aggregate(span: 20)),    // 12 根（make 默认上区）
+            PeriodCandles(period: .daily, rows: aggregate(span: 40)),  // 6 根（make 默认下区）
+            PeriodCandles(period: .weekly, rows: aggregate(span: 80)), // 3 根
+            PeriodCandles(period: .monthly, rows: aggregate(span: 120)), // 2 根
+        ]
 
         let meta = TrainingSetMeta(
             stockCode: "600001", stockName: "示例训练股",

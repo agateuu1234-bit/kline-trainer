@@ -117,5 +117,48 @@ struct AppContainerDebugSeedTests {
         #expect(try c.db.loadSettings().totalCapital == 555_555, "真实 settings 未被 fixture 覆盖")
         #expect(c.cache.listAvailable().isEmpty, "未 seed cache")
     }
+
+    // codex-13b-R2-F1：seeded 训练组须能 fresh start（make 默认上区 .m60/下区 .daily 非空）。
+    @Test("seeded 训练组：startNewNormalSession（默认 .m60/.daily）成功开局")
+    func seed_freshStartSucceeds() async throws {
+        let (cfg, dir) = try makeConfig()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let c = try AppContainer(config: cfg, debugSeedFixtures: true)
+        let engine = try await c.coordinator.startNewNormalSession()
+        #expect(engine.upperPanel.period == .m60)
+        #expect(engine.lowerPanel.period == .daily)
+    }
+
+    // codex-13b-R2-F1：seeded 训练组须能 review + replay 既有 record（全 6 周期 → make 默认 panel 可开）。
+    @Test("seeded 训练组：review + replay 既有 record 成功")
+    func seed_reviewAndReplaySucceed() async throws {
+        let (cfg, dir) = try makeConfig()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let c = try AppContainer(config: cfg, debugSeedFixtures: true)
+        let recId = try c.db.listRecords(limit: nil).first!.id!
+        let reviewEngine = try await c.coordinator.review(recordId: recId)
+        #expect(reviewEngine.flow.mode == .review)
+        await c.coordinator.endSession()
+        let replayEngine = try await c.coordinator.replay(recordId: recId)
+        #expect(replayEngine.flow.mode == .replay)
+    }
+
+    // codex-13b-R2-F2：cache/history/pending 全空但 settings 被自定义 → seed 拒绝（不覆盖 settings）。
+    @Test("全空 guard：仅 settings 被自定义（cache/history/pending 空）→ seed no-op 不覆盖")
+    func seed_refusesWhenOnlySettingsCustomized() async throws {
+        let (cfg, dir) = try makeConfig()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let c = try AppContainer(config: cfg, debugSeedFixtures: false)
+        try c.db.saveSettings(AppSettings(commissionRate: 0.0007, minCommissionEnabled: true,
+                                          totalCapital: 333_333, displayMode: .system))
+        #expect(c.cache.listAvailable().isEmpty)
+        #expect(try c.db.statistics().totalCount == 0)
+        #expect(try c.db.loadPending() == nil)
+
+        try AppContainer.seedDebugFixtures(db: c.db, cache: c.cache)
+
+        #expect(try c.db.loadSettings().totalCapital == 333_333, "自定义 settings 未被 fixture 覆盖")
+        #expect(c.cache.listAvailable().isEmpty, "未 seed")
+    }
 }
 #endif

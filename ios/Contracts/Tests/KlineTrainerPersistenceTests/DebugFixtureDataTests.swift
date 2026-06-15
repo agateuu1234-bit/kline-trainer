@@ -68,5 +68,27 @@ struct DebugFixtureDataTests {
         #expect(data.trainingSetFilename.hasSuffix(".sqlite"))
         #expect(data.pending!.trainingSetFilename == data.trainingSetFilename)
     }
+
+    // codex-13b-R2-F1：全 6 周期非空（make 默认 .m60/.daily + 周期切换 combo 须全覆盖 → fresh start/review/replay 可开）。
+    @Test("全 6 周期非空 + 每周期 end_global_index 单调 <= max m3 end（含 make 默认 .m60/.daily）")
+    func allSixPeriods_present_andValid() {
+        let data = DebugFixtureData.make(m3Count: 240)
+        let maxM3End = data.candles.first(where: { $0.period == .m3 })!.rows.map(\.endGlobalIndex).max()!
+        for period in Period.allCases {
+            guard let pc = data.candles.first(where: { $0.period == period }) else {
+                Issue.record("周期 \(period) 缺失"); continue
+            }
+            #expect(!pc.rows.isEmpty, "周期 \(period) 须非空")
+            var prevEnd = -1
+            for c in pc.rows {
+                #expect(c.endGlobalIndex <= maxM3End)
+                if period != .m3 { #expect(c.globalIndex == nil) }
+                #expect(c.endGlobalIndex > prevEnd)   // 单调递增（m3 逐根 / 聚合逐组）
+                prevEnd = c.endGlobalIndex
+            }
+        }
+        #expect(data.candles.first(where: { $0.period == .m60 })?.rows.isEmpty == false, "make 默认上区 .m60")
+        #expect(data.candles.first(where: { $0.period == .daily })?.rows.isEmpty == false, "make 默认下区 .daily")
+    }
 }
 #endif

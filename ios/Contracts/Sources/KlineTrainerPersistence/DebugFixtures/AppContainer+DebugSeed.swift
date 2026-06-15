@@ -18,9 +18,15 @@ extension AppContainer {
     /// partial-failure（codex-13b-R2 缓解）：db 写在前、cache 最后——db 写失败 → cache 仍空 → 下次全空 guard
     /// 重 seed；极端 partial（db 写到一半）→ 删 app 重置（DEBUG-only，记 residual 13b-R1）。
     static func seedDebugFixtures(db: any AppDB, cache: any CacheManager) throws {
+        // 全空 guard：cache + history + pending + **settings 全为零值默认**（= 未被用户自定义）才 seed。
+        // codex-13b-R2-F2：settings 单独被自定义（fees/capital/显示模式）而其余空 → 不可视为 pristine，否则覆盖。
+        let s = try db.loadSettings()
+        let settingsPristine = s.commissionRate == 0 && s.totalCapital == 0
+            && s.minCommissionEnabled == false && s.displayMode == .system
         guard cache.listAvailable().isEmpty,
               try db.statistics().totalCount == 0,
-              try db.loadPending() == nil
+              try db.loadPending() == nil,
+              settingsPristine
         else { return }
 
         let seed = DebugFixtureData.make(m3Count: 240)
