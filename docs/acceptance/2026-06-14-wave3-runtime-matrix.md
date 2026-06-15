@@ -58,8 +58,20 @@
 
 ---
 
+## 关闭前其余硬门（§三.3 同列，非本矩阵）
+
+outline §三.3 的关闭/freeze 阻塞依赖是**三连合取**：①本 Wave 3 运行时矩阵（上表，经 §C fixture）+ **②Wave 2 两份 runbook device/sim 实测已记录 + ③Instruments 帧预算实测数值已回填**。本矩阵仅覆盖合取项 ①（Wave 3 新交互）；合取项 ②③ 由各自既有 runbook 承载、实测同样 pending——**跑完本矩阵 ≠ 满足硬门**，须连同下列一并回填：
+
+| 合取项 | runbook 指针 | 内容 | device pass/fail |
+|---|---|---|---|
+| ② Wave 2 减速/帧预算 | `docs/runbooks/2026-06-07-c8b-runtime-acceptance.md` | 惯性衰减 / 减速中点交易立停 / 帧 < 4ms / 后台前台无跳帧 | ☐ |
+| ② Wave 2 手势 | `docs/runbooks/2026-06-07-u2-gesture-runtime-acceptance.md` | 单指 pan / 两指周期切换 / 长按十字光标 / 模式交易行为 / 局终自动 | ☐ |
+| ③ Instruments 帧预算（顺位 12） | `docs/runbooks/2026-06-14-wave3-pr12-frame-budget.md` | Instruments Time Profiler 录制各交互峰值单帧 < 4ms（`____` ms 占位待回填）+ Equatable 短路验证 | ☐ |
+
+---
+
 ## 回填说明
 
-- device 跑完逐行填上方矩阵 + 端到端表的 pass/fail（留空 = 未跑）。
-- 本矩阵 device 实测结果记录是**顺位 13 正式关闭 + freeze tag 的共同硬前提**（per outline §三.3）。回填后，Wave 3 方可从「功能交付确认」转「正式关闭」（见 `docs/governance/2026-06-14-wave3-completion.md` §二/§五）。
+- device 跑完逐行填上方矩阵 + 端到端表 + 「关闭前其余硬门」表的 pass/fail（留空 = 未跑）。
+- 顺位 13 正式关闭 + freeze tag 的共同硬前提 = **三连合取全部回填**（本 Wave 3 矩阵 ① + Wave 2 两份 runbook ② + Instruments 帧预算 ③，per outline §三.3）。**仅**跑完本矩阵 ① 不满足硬门。三者皆回填后，Wave 3 方可从「功能交付确认」转「正式关闭」（见 `docs/governance/2026-06-14-wave3-completion.md` §二/§五）。
 - W3-11-R1（bounce live 接线）+ PR11-R1（生产 backendBaseURL）+ W1-R2（真实样本数据）= OPEN，不在本矩阵 device 验收范围（见 completion doc §三/§四）。

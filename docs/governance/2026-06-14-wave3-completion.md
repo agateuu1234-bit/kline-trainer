@@ -58,7 +58,12 @@ ship-gate-W1-R2-sample-data: OPEN
 - **运行时矩阵 runbook**（`docs/acceptance/2026-06-14-wave3-runtime-matrix.md`）：汇总 6 条 device happy-path 交互 + §C fixture 端到端，每行 device pass/fail 留空。
 - **§C fixture provisioning**（13b PR #109 已 merged）：经 `KLINE_SEED_FIXTURE=1` 在真 composition root provision 缓存 + 历史 + pending + 设置，使矩阵**可执行**。
 
-本 doc **不代跑 device/sim 实测**（运行时验收是用户 device 职责，per outline §三.3）。故该硬门在 13c merge 时**未满足** → 本 doc 定位 = **「功能交付确认 + 运行时验收待回填」**，**不**宣布「Wave 3 正式关闭」。正式关闭 = 用户跑完矩阵 runbook 并记录 device 结果后（届时若需冻结，走 §五 tag ceremony）。
+**§三.3 硬门是三连合取，正式关闭须三者皆回填（不止本矩阵）**：上引原文把关闭/freeze 阻塞依赖定为 **①Wave 3 运行时矩阵（经 §C fixture，= 本 doc 交付的 runbook）+ ②Wave 2 两份 runbook 的 device/sim 实测已记录 + ③Instruments 帧预算实测数值已回填**。本 doc 交付的运行时矩阵 runbook 仅覆盖合取项 ①（Wave 3 新交互）；合取项 ②③ 由各自既有 runbook 承载、实测同样 pending：
+- ② Wave 2 减速/帧预算 + 手势：`docs/runbooks/2026-06-07-c8b-runtime-acceptance.md` + `docs/runbooks/2026-06-07-u2-gesture-runtime-acceptance.md`。
+- ③ Instruments 帧预算（顺位 12）：`docs/runbooks/2026-06-14-wave3-pr12-frame-budget.md`（`____` 占位待回填）。
+矩阵 runbook 的「关闭前其余硬门」节汇总此二指针，避免用户误以为跑完 ① 即满足硬门。
+
+本 doc **不代跑 device/sim 实测**（运行时验收是用户 device 职责，per outline §三.3）。故该硬门（三合取）在 13c merge 时**未满足** → 本 doc 定位 = **「功能交付确认 + 运行时验收待回填」**，**不**宣布「Wave 3 正式关闭」。正式关闭 = 用户跑完**三连硬门全部**（① 本 Wave 3 矩阵 runbook + ② Wave 2 两份 runbook + ③ Instruments 帧预算 runbook）并记录三者 device 结果后（届时若需冻结，走 §五 tag ceremony）。
 
 **Wave 1/2 先例作语义旁证（不推翻 §三.3）**：Wave 1（`project_wave1_completion`）/ Wave 2（`docs/governance/2026-06-09-wave2-completion.md` §二）均在 device runbook 未实测时记「completion / 功能交付确认」，运行时实测标 pending（用户职责）。本 doc 沿用「功能交付确认」语义，但**不**用 Wave 1/2 先例推翻 outline §三.3「非某天再说」的更严表述——本 doc 用 WAVE3-STATUS 的 `formal-closure: PENDING-runtime-matrix-device-record` + `runtime-matrix: PARTIAL` 如实表达「待回填」。
 
@@ -100,11 +105,11 @@ ship-gate-W1-R2-sample-data: OPEN
 
 **3 理由**：
 
-1. **无 recorded 矩阵不满足 outline §三.3 硬门**：outline §三.3 / L181 把「运行时矩阵 device/sim 实测结果已记录」定为 freeze tag 与正式关闭的**共同**硬前提；本 doc 交付 runbook 但不代跑 device 实测，硬前提未满足 → tag 语义不成立。
+1. **无 recorded 矩阵不满足 outline §三.3 硬门**：outline §三.3 / L181 把「Wave 3 运行时矩阵 + Wave 2 两份 runbook device 实测已记录 + Instruments 帧预算已回填」（**三连合取**，见 §二）定为 freeze tag 与正式关闭的**共同**硬前提；本 doc 交付 runbook 但不代跑 device 实测，三合取均未满足 → tag 语义不成立。
 2. **ship 门未关 store-frozen 语义不成立**：PR11-R1（生产 backendBaseURL）+ W1-R2（真实样本数据）= OPEN（四节），store-ship readiness 未达 → 无可冻结的「上架就绪」语义。
 3. **与 Wave 1/2 一致**：前两 wave 均轻量收尾不打 tag；Wave 3 为客户端功能完成 wave（非 spec 契约首冻），无散落各实施 PR 的契约首冻语义。
 
-**后续**：用户在 device 跑完矩阵 runbook 并记录结果后，若希望冻结客户端功能完整性，可走独立 tag ceremony（轻流程，per outline §三.3 / spec §E.4）。本决策按用户「尽可能不要找我」自主裁决为「不打 tag + 文档化 deferred-pending-recorded-matrix + 推荐」；若用户事后希望打 tag，属 follow-up，不阻塞 Wave 3 功能交付确认。
+**后续**：用户在 device 跑完**三连硬门全部**（Wave 3 矩阵 runbook + Wave 2 两份 runbook + Instruments 帧预算 runbook，见 §二）并记录结果后，若希望冻结客户端功能完整性，可走独立 tag ceremony（轻流程，per outline §三.3 / spec §E.4）。本决策按用户「尽可能不要找我」自主裁决为「不打 tag + 文档化 deferred-pending-recorded-matrix + 推荐」；若用户事后希望打 tag，属 follow-up，不阻塞 Wave 3 功能交付确认。
 
 ---
 

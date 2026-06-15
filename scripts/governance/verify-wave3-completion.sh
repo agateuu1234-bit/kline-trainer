@@ -4,6 +4,7 @@
 # 谓词 2：W3-11-R1 + ship 门 PR11-R1 / W1-R2 标 OPEN
 # 谓词 3：高层状态 store-ready=NO + formal-closure=PENDING + matrix PARTIAL + freeze NOT-TAGGED（无误 claim 上架/已关闭）
 # 谓词 3b：矩阵 runbook 含 §C fixture 启动机制
+# 谓词 3c：矩阵 runbook 列 §三.3 三连合取其余两硬门指针（Instruments 帧预算 + Wave 2 减速/帧预算）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -41,4 +42,8 @@ grep -Fq "freeze-tag: NOT-TAGGED" "$DOC" || fail "WAVE3-STATUS 缺 freeze-tag: N
 # 谓词 3b：矩阵 runbook 须含 §C fixture 启动机制
 grep -Fq "KLINE_SEED_FIXTURE=1" "$MATRIX" || fail "矩阵 runbook 缺 §C fixture 启动机制 KLINE_SEED_FIXTURE=1"
 
-echo "[verify-wave3-completion] PASS：A/B/C/D CLOSED + W3-11-R1/PR11-R1/W1-R2 OPEN + WAVE3-STATUS 诚实 + 矩阵 fixture 机制就位"
+# 谓词 3c：矩阵 runbook 须列 §三.3 三连合取其余两硬门（防关闭路径塌缩成单矩阵，per 最终 review M1）
+grep -Fq "2026-06-14-wave3-pr12-frame-budget.md" "$MATRIX" || fail "矩阵 runbook 缺 Instruments 帧预算 runbook 指针（§三.3 合取项 ③）"
+grep -Fq "2026-06-07-c8b-runtime-acceptance.md" "$MATRIX" || fail "矩阵 runbook 缺 Wave 2 减速/帧预算 runbook 指针（§三.3 合取项 ②）"
+
+echo "[verify-wave3-completion] PASS：A/B/C/D CLOSED + W3-11-R1/PR11-R1/W1-R2 OPEN + WAVE3-STATUS 诚实 + 矩阵 fixture 机制 + §三.3 三连合取硬门指针就位"
