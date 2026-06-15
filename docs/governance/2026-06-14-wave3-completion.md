@@ -15,7 +15,7 @@ residual-B-unified-toast-layer: CLOSED 13a #108
 residual-C-fixture-provisioning: CLOSED 13b #109
 residual-D-e2e-smoke: PARTIAL 13b #109
 residual-W3-11-R1-bounce-live-wiring: OPEN
-known-defect-13a-R2-cross-lease-cache-deletion: OPEN
+known-defect-13a-R2-cross-lease-cache-deletion: CLOSED 13a-R2 #<PR>
 ship-gate-PR11-R1-prod-backend-url: OPEN
 ship-gate-W1-R2-sample-data: OPEN
 -->
@@ -65,7 +65,7 @@ ship-gate-W1-R2-sample-data: OPEN
 - ③ Instruments 帧预算（顺位 12）：`docs/runbooks/2026-06-14-wave3-pr12-frame-budget.md`（`____` 占位待回填）。
 矩阵 runbook 的「关闭前其余硬门」节汇总此二指针，避免用户误以为跑完 ① 即满足硬门。
 
-本 doc **不代跑 device/sim 实测**（运行时验收是用户 device 职责，per outline §三.3）。故该硬门（三合取）在 13c merge 时**未满足** → 本 doc 定位 = **「功能交付确认 + 运行时验收待回填」**，**不**宣布「Wave 3 正式关闭」。正式关闭 = 用户跑完**三连硬门全部**（① 本 Wave 3 矩阵 runbook + ② Wave 2 两份 runbook + ③ Instruments 帧预算 runbook）且三者**每行显式 PASS**（任一 FAIL / 留空 / 帧 ≥4ms = 未满足，codex review R3-Med）+ **解 W3-11-R1 与 13a-R2**（功能门 + 已知 data-loss 缺陷，§三）后（届时若需冻结，走 §五 tag ceremony）。
+本 doc **不代跑 device/sim 实测**（运行时验收是用户 device 职责，per outline §三.3）。故该硬门（三合取）在 13c merge 时**未满足** → 本 doc 定位 = **「功能交付确认 + 运行时验收待回填」**，**不**宣布「Wave 3 正式关闭」。正式关闭 = 用户跑完**三连硬门全部**（① 本 Wave 3 矩阵 runbook + ② Wave 2 两份 runbook + ③ Instruments 帧预算 runbook）且三者**每行显式 PASS**（任一 FAIL / 留空 / 帧 ≥4ms = 未满足，codex review R3-Med）+ **解 W3-11-R1**（13a-R2 已由本 PR #<PR> 解决，2026-06-15）后（届时若需冻结，走 §五 tag ceremony）。
 
 **Wave 1/2 先例作语义旁证（不推翻 §三.3）**：Wave 1（`project_wave1_completion`）/ Wave 2（`docs/governance/2026-06-09-wave2-completion.md` §二）均在 device runbook 未实测时记「completion / 功能交付确认」，运行时实测标 pending（用户职责）。本 doc 沿用「功能交付确认」语义，但**不**用 Wave 1/2 先例推翻 outline §三.3「非某天再说」的更严表述——本 doc 用 WAVE3-STATUS 的 `formal-closure: PENDING-runtime-matrix-device-record` + `runtime-matrix: PARTIAL` 如实表达「待回填」。
 
@@ -85,11 +85,11 @@ ship-gate-W1-R2-sample-data: OPEN
 | **D. 生产路径 E2E smoke** | §107 deferred / spec §D | **PARTIAL** | 13b PR #109 `fc46fef`：真 `DownloadAcceptanceRunner` runner 管线 E2E（download/crc/unzip/db-open/store/confirm/journal/下游 open）已 smoke 闭合。**但 smoke 注入 `FakeTrainingSetDataVerifier`（13b-R2）** → runner ↔ 真 `DefaultTrainingSetDataVerifier` 接线**未被 smoke 覆盖**（真 verifier 六周期 warm-up 规则由 `DefaultTrainingSetDataVerifierTests` 专测）→ 整条生产验收组合未一次性端到端 → 标 **PARTIAL**（codex review R4-Med；非无条件 CLOSED）。满足真 verifier 的 ≥30-全周期-含-monthly fixture 不现实（13b accept residual），但 D 终态如实 PARTIAL 不掩盖 |
 | **运行时矩阵（device/sim 实测）** | outline §三.3 硬门 | **PARTIAL** | runbook 交付（`docs/acceptance/2026-06-14-wave3-runtime-matrix.md`，7 项 + 三连合取关闭门）+ §C fixture 使其可执行；device 实测结果待用户回填。**帧预算 device 测量精度限制**（采样≠帧相关 / fixture 欠载）记 acceptance **13c-R1/R2**（codex R8，accept residual，根治 = fast-follow 性能代码 PR，超 doc-only scope；矩阵 ③ caveat 已如实标指示性上界 + 欠载） |
 | **W3-11-R1**（bounce live 接线） | 顺位 11 #96 设计 D8 / bounce acceptance L3 | **OPEN（Wave 3 功能完成门 + 正式关闭前提）** | 组件层物理已确定性单测闭合（`docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md`）；但 live 接线未上线 = 顺位 11 **承诺交互未实现** → **不**入 device 矩阵（无可 device 测对象）**且** Wave 3 功能完整性标 PENDING-W3-11-R1（codex review High）；解门 = 实现 live 接线（fast-follow 实施 PR）+ 回填其运行时 acceptance。**非** NAS ship 门（区别于四节 PR11-R1/W1-R2） |
-| **13a-R2**（跨 lease cache 误删，**已知 data-loss**） | codex 13a review R6（**pre-existing 基线 bug**，13a 未触碰该代码） | **OPEN（已知缺陷，正式关闭前提）** | `retryPendingConfirmations` reject 清理仅按 `trainingSetId` 选 cache 项，但 journal 按 `(trainingSetId, leaseId)` 作用域 → 旧 lease 409 重试可删**新** lease 重下的 cache 文件（跨 lease data-loss）。pre-existing（非 Wave 3 引入），路由 **P2-confirm-reliability RFC**（cache 所有权改 lease/version-aware + 回归测试）。**提升进顶层 ledger（codex review R3-High）**：不埋脚注——已知 data-loss 路径须可见，正式关闭前须经 P2 RFC 解决 |
+| **13a-R2**（跨 lease cache 误删，**已知 data-loss**） | codex 13a review R6（**pre-existing 基线 bug**，13a 未触碰该代码） | **RESOLVED（本 PR #<PR>，2026-06-15）** | 已由本 PR 修复：journal-driven lease-aware ownership-guard（删除前查 {stored,confirmPending,confirmed} 行集，存活占有则跳过、读失败 fail-safe）+ 5 类回归测试；设计见 docs/superpowers/specs/2026-06-15-wave3-13a-r2-cross-lease-cache-design.md。 |
 | **PR11-R1**（生产 backendBaseURL） | Wave 2 §三 carried（见四节） | **OPEN** | NAS 部署 PR（out-of-Wave-3-scope ship 门；`KlineTrainerApp.swift` 硬编码 `http://kline-trainer.local`） |
 | **W1-R2**（真实样本训练组数据，H7） | Wave 1 §四 carried（见四节） | **OPEN** | 需 NAS 真实 CSV 数据源 + B1/B2 真跑 |
 
-**13a/13b PR-内 residual 终态（脚注）**：**13a-R2（跨 lease cache data-loss）已提升进上方顶层 ledger 作 OPEN**（codex review R3-High：已知 data-loss 路径不埋脚注）。其余 13a-R1（confirm-state 反馈精度）/ 13a-R3（touch-on-use TOCTOU，幂等无害）已在 `docs/acceptance/2026-06-14-wave3-pr13a-robustness.md` 标 OUT of 13a scope（归 P2-confirm-reliability RFC）+ accept residual + override；13b-R1/R2/R3（极端 partial-seed / settings-row 零值歧义 / §D verifier 用 fake）已在 `docs/acceptance/2026-06-14-wave3-pr13b-fixture-smoke.md` 标 accept residual（debug-only 边角 / trust-boundary 协议扩展 = 过度工程）+ override。这些**均非已知 data-loss、非协议级悬挂**，指针见各自 acceptance；不进位本 ledger。
+**13a/13b PR-内 residual 终态（脚注）**：**13a-R2（跨 lease cache data-loss）已由本 PR #<PR> 解决（RESOLVED，见上方顶层 ledger）**。其余 13a-R1（confirm-state 反馈精度）/ 13a-R3（touch-on-use TOCTOU，幂等无害）已在 `docs/acceptance/2026-06-14-wave3-pr13a-robustness.md` 标 OUT of 13a scope（归 P2-confirm-reliability RFC）+ accept residual + override；13b-R1/R2/R3（极端 partial-seed / settings-row 零值歧义 / §D verifier 用 fake）已在 `docs/acceptance/2026-06-14-wave3-pr13b-fixture-smoke.md` 标 accept residual（debug-only 边角 / trust-boundary 协议扩展 = 过度工程）+ override。这些**均非已知 data-loss、非协议级悬挂**，指针见各自 acceptance；不进位本 ledger。
 
 ---
 
@@ -115,13 +115,13 @@ ship-gate-W1-R2-sample-data: OPEN
 3. **ship 门未关 store-frozen 语义不成立**：PR11-R1（生产 backendBaseURL）+ W1-R2（真实样本数据）= OPEN（四节），store-ship readiness 未达 → 无可冻结的「上架就绪」语义。
 4. **与 Wave 1/2 一致**：前两 wave 均轻量收尾不打 tag；Wave 3 为客户端功能完成 wave（非 spec 契约首冻），无散落各实施 PR 的契约首冻语义。
 
-**后续**：用户在 ① device 跑完**三连硬门全部**（Wave 3 矩阵 runbook + Wave 2 两份 runbook + Instruments 帧预算 runbook，见 §二）且**每行显式 PASS**（任一 FAIL / 留空 / 帧 ≥4ms = 未满足，codex review R3-Med）+ ② W3-11-R1（bounce live 接线）实现并回填其运行时 acceptance + ③ 13a-R2（跨 lease cache data-loss）经 P2-confirm RFC 解决后，Wave 3 方达「功能完整 + 运行时验收全 PASS + 无已知 data-loss」，若希望冻结客户端功能完整性，可走独立 tag ceremony（轻流程，per outline §三.3 / spec §E.4）。本决策按用户「尽可能不要找我」自主裁决为「不打 tag + 文档化 deferred-pending-recorded-matrix + 推荐」；若用户事后希望打 tag，属 follow-up，不阻塞 Wave 3 功能交付确认。
+**后续**：用户在 ① device 跑完**三连硬门全部**（Wave 3 矩阵 runbook + Wave 2 两份 runbook + Instruments 帧预算 runbook，见 §二）且**每行显式 PASS**（任一 FAIL / 留空 / 帧 ≥4ms = 未满足，codex review R3-Med）+ ② W3-11-R1（bounce live 接线）实现并回填其运行时 acceptance + ③ 13a-R2 已由本 PR #<PR> 解决（lease-aware ownership-guard）后，Wave 3 方达「功能完整 + 运行时验收全 PASS + 无已知 data-loss」，若希望冻结客户端功能完整性，可走独立 tag ceremony（轻流程，per outline §三.3 / spec §E.4）。本决策按用户「尽可能不要找我」自主裁决为「不打 tag + 文档化 deferred-pending-recorded-matrix + 推荐」；若用户事后希望打 tag，属 follow-up，不阻塞 Wave 3 功能交付确认。
 
 ---
 
 ## 六、评审通道说明
 
-13c 为 doc-only（0 业务代码 / 0 CI / 0 ruleset），经 `codex:adversarial-review`（治理 doc 类，唯一 review 通道，per CLAUDE.md backstop #1）。codex 周配额耗尽时方 fallback opus 4.8 xhigh（documented，沿用 Wave 1/2 + 13a/13b 各 anchor 先例）。grep gate（`scripts/governance/verify-wave3-completion.sh`）作机器可校验断言（**只解析 WAVE3-STATUS 块、anchored 全行**，与上方机器块逐字一致）：A/B/C CLOSED + **D PARTIAL** + W3-11-R1/**13a-R2**/PR11-R1/W1-R2 OPEN + WAVE3-STATUS 诚实（store-ready=NO / formal-closure=PENDING / **feature-completeness=PENDING-W3-11-R1** / matrix=PARTIAL / freeze=NOT-TAGGED）+ 矩阵 fixture 机制 + §三.3 三连合取（c8b/u2-gesture/帧预算）指针就位。
+13c 为 doc-only（0 业务代码 / 0 CI / 0 ruleset），经 `codex:adversarial-review`（治理 doc 类，唯一 review 通道，per CLAUDE.md backstop #1）。codex 周配额耗尽时方 fallback opus 4.8 xhigh（documented，沿用 Wave 1/2 + 13a/13b 各 anchor 先例）。grep gate（`scripts/governance/verify-wave3-completion.sh`）作机器可校验断言（**只解析 WAVE3-STATUS 块、anchored 全行**，与上方机器块逐字一致）：A/B/C CLOSED + **D PARTIAL** + W3-11-R1/PR11-R1/W1-R2 OPEN + **13a-R2 RESOLVED（本 PR）** + WAVE3-STATUS 诚实（store-ready=NO / formal-closure=PENDING / **feature-completeness=PENDING-W3-11-R1** / matrix=PARTIAL / freeze=NOT-TAGGED）+ 矩阵 fixture 机制 + §三.3 三连合取（c8b/u2-gesture/帧预算）指针就位。
 
 ---
 
