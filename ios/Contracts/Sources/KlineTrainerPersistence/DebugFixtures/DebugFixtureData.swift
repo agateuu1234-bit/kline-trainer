@@ -35,6 +35,13 @@ public enum DebugFixtureData {
         public let settings: AppSettings
     }
 
+    /// 帧预算满载 fixture 根数（Wave 3 13c-R2 根治）。
+    /// 按既有聚合 span（1/5/20/40/80/120），9600 根 m3 使**每周期 ≥ RenderStateBuilder.defaultVisibleCount(80)**
+    /// 且 **make 默认面板 .m60(=480)/.daily(=240) ≥ PinchZoomModel.maxVisibleCount(240)**（pinch 缩放最远档可见根数），
+    /// 故经 §C seed 的帧预算 runbook 测的是满载图表（非欠载）。
+    /// 推导：约束「monthly span=120 行数 ≥80」与「daily span=40 行数 ≥240」最小公共解 = 80×120 = 240×40 = 9600。
+    public static let fullLoadM3Count = 9600
+
     private static let baseEpoch: Int64 = 1_700_000_000
     private static let m3Step: Int64 = 180
 

@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 @testable import KlineTrainerPersistence
-import KlineTrainerContracts
+@testable import KlineTrainerContracts
 
 #if DEBUG
 @Suite("DebugFixtureData：确定性 rich 训练组蜡烛生成（§C，host 全测）")
@@ -89,6 +89,43 @@ struct DebugFixtureDataTests {
         }
         #expect(data.candles.first(where: { $0.period == .m60 })?.rows.isEmpty == false, "make 默认上区 .m60")
         #expect(data.candles.first(where: { $0.period == .daily })?.rows.isEmpty == false, "make 默认下区 .daily")
+    }
+
+    // 13c-R2 根治：满载 fixture——每周期 ≥ defaultVisibleCount(80)，默认面板 .m60/.daily ≥ maxVisibleCount(240)。
+    // 断言用渲染常量（非循环），把 fixture 直接绑到真实渲染负载。
+    @Test("满载常量 fullLoadM3Count：每周期 ≥ defaultVisibleCount(80)，默认面板 .m60/.daily ≥ maxVisibleCount(240)")
+    func fullLoadFixture_everyPeriodMeetsRenderLoad() {
+        let data = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count)
+        for period in Period.allCases {
+            let count = data.candles.first(where: { $0.period == period })?.rows.count ?? 0
+            #expect(count >= RenderStateBuilder.defaultVisibleCount,
+                    "周期 \(period) 蜡烛数 \(count) 须 ≥ defaultVisibleCount(\(RenderStateBuilder.defaultVisibleCount))（非欠载）")
+        }
+        let m60 = data.candles.first(where: { $0.period == .m60 })?.rows.count ?? 0
+        let daily = data.candles.first(where: { $0.period == .daily })?.rows.count ?? 0
+        #expect(m60 >= PinchZoomModel.maxVisibleCount,
+                "默认上区 .m60 蜡烛数 \(m60) 须 ≥ maxVisibleCount(\(PinchZoomModel.maxVisibleCount))（pinch 最远档满载）")
+        #expect(daily >= PinchZoomModel.maxVisibleCount,
+                "默认下区 .daily 蜡烛数 \(daily) 须 ≥ maxVisibleCount(\(PinchZoomModel.maxVisibleCount))（pinch 最远档满载）")
+    }
+
+    // 满载根数（9600）下，既有 reader 结构不变量仍成立（防大 count 触发聚合 off-by-one / end_global_index 越界）。
+    @Test("满载下：全 6 周期 end_global_index 单调递增 + <= max m3 end + 末行 == max m3 end")
+    func fullLoadFixture_invariantsStillHold() {
+        let data = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count)
+        let maxM3End = data.candles.first(where: { $0.period == .m3 })!.rows.map(\.endGlobalIndex).max()!
+        for period in Period.allCases {
+            let rows = data.candles.first(where: { $0.period == period })!.rows
+            #expect(!rows.isEmpty)
+            var prevEnd = -1
+            for c in rows {
+                #expect(c.endGlobalIndex <= maxM3End)
+                #expect(c.endGlobalIndex > prevEnd)
+                if period != .m3 { #expect(c.globalIndex == nil) }
+                prevEnd = c.endGlobalIndex
+            }
+            #expect(rows.last!.endGlobalIndex == maxM3End, "周期 \(period) 末行 end 须覆盖到 max m3 end")
+        }
     }
 }
 #endif
