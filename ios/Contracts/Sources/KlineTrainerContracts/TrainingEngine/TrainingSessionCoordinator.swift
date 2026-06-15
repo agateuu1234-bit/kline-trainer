@@ -59,6 +59,16 @@ public final class TrainingSessionCoordinator {
     /// 机制；**user-facing 非阻塞指示（banner/toast）归顺位 10c 边界错误统一 Toast 层**（磁盘满可见性同类），
     /// 届时连同 §4.6 item5 一并 surface（@testable 现已读以证机制在位）。
     @ObservationIgnored public private(set) var lastAutosaveError: AppError?
+    /// §B.2（PR 13a）user-facing autosave 失败信号（observable，供 TrainingView toast）。
+    /// 与内部 `lastAutosaveError`（@ObservationIgnored 机制状态）解耦：本字段仅作 UI re-render 信号，
+    /// 不参与 autosave coalescing/fence 状态机。置位/清零与 `lastAutosaveError` 同步（catch / endSession / reset）。
+    public private(set) var autosaveBannerError: AppError?
+    /// codex-13a-F1：autosave 失败的**单调事件计数**（observable）。每次失败 +1，使「重复同一错误」
+    /// 也产生可观察变化 → TrainingView `.onChange` 重新弹 toast。**理由**：仅观察 `autosaveBannerError`
+    /// 时，磁盘满每 tick 失败但错误值不变 → onChange 不再 fire → 首条 toast 过期后用户对持续的「进度未
+    /// 落盘」完全无感知（数据持久性不可见的安全隐患，codex high）。本计数是该「可见性」契约的触发锚。
+    /// 仅失败递增；成功不动；endSession/reset 归零。
+    public private(set) var autosaveErrorGeneration: Int = 0
 
     /// 请求 autosave（脏动作后调）。immediate=交易/画线/background flush（绕 N 节流）；
     /// 非 immediate=tick 推进（按 autosaveTickInterval 节流）。terminating/非 Normal → no-op（§4.7d/§4.6）。
@@ -82,9 +92,13 @@ public final class TrainingSessionCoordinator {
                 do {
                     try await self.saveProgress(engine: engine)
                     self.lastAutosaveError = nil
+                    self.autosaveBannerError = nil                  // §B.2：成功清 UI 信号
                 } catch {
-                    self.lastAutosaveError = (error as? AppError)
+                    let appError = (error as? AppError)
                         ?? .internalError(module: "E6b", detail: "autosave: \(error)")
+                    self.lastAutosaveError = appError
+                    self.autosaveBannerError = appError             // §B.2：失败置 UI 信号（observable → toast）
+                    self.autosaveErrorGeneration += 1               // codex-13a-F1：每次失败递增 → 重复同错也触发 onChange（持久故障保持可见）
                 }
             }
             self.autosaveTask = nil
@@ -161,6 +175,7 @@ public final class TrainingSessionCoordinator {
             activeReader = reader
             activeEngine = engine
             activeFile = file
+            cache.touch(file)                       // §A touch-on-use（E6a-R3）：仅在**完整读取 + 引擎构造成功**后刷 LRU mtime（codex-13a-F2：不在 openReader 后即 touch，防候选 candle 损坏文件假性续命）
             activeStartedAt = now()                 // D4：fresh Normal 局起始时间
             activeSessionKey = makeSessionKey()     // RFC §4.7c：fresh Normal 生成新 session key
             resetAutosaveState()                     // 新 session：清栅栏/脏/cadence/错误（D3）
@@ -206,6 +221,7 @@ public final class TrainingSessionCoordinator {
             activeReader = reader
             activeEngine = engine
             activeFile = file
+            cache.touch(file)                        // §A touch-on-use：完整读取+引擎构造成功后刷 LRU mtime（codex-13a-F2）
             activeStartedAt = pending.startedAt      // D4：resume 保留原局起始时间
             activeSessionKey = pending.sessionKey    // RFC §4.7c：resume 恢复已存 session key
             resetAutosaveState()                     // 新 session：清栅栏/脏/cadence/错误（D3）
@@ -248,6 +264,7 @@ public final class TrainingSessionCoordinator {
             activeReader = reader
             activeEngine = engine
             activeFile = file
+            cache.touch(file)                        // §A touch-on-use：完整读取+引擎构造成功后刷 LRU mtime（codex-13a-F2）
             activeStartedAt = nil                    // D4：review 只读，无进度保存
             activeSessionKey = nil                   // RFC §4.7c：review 无 session key
             return engine
@@ -281,6 +298,7 @@ public final class TrainingSessionCoordinator {
             activeReader = reader
             activeEngine = engine
             activeFile = file
+            cache.touch(file)                        // §A touch-on-use：完整读取+引擎构造成功后刷 LRU mtime（codex-13a-F2）
             activeStartedAt = nil                    // D4：replay 不入账，无进度保存
             activeSessionKey = nil                   // RFC §4.7c：replay 无 session key
             return engine
@@ -403,6 +421,8 @@ public final class TrainingSessionCoordinator {
         autosaveTask = nil
         autosaveDirty = false
         lastAutosaveError = nil
+        autosaveBannerError = nil                    // §B.2：清 UI 信号防跨局 stale toast
+        autosaveErrorGeneration = 0                  // codex-13a-F1：归零失败计数（新局从 0 起）
         ticksSinceAutosave = 0
         activeReader?.close()
         activeReader = nil
@@ -508,6 +528,8 @@ public final class TrainingSessionCoordinator {
         autosaveDirty = false
         ticksSinceAutosave = 0
         lastAutosaveError = nil
+        autosaveBannerError = nil                    // §B.2：新 session 清 UI 信号（防御性冗余：D10 下 endSession 必先清，belt-and-suspenders）
+        autosaveErrorGeneration = 0                  // codex-13a-F1：归零失败计数
     }
 
     /// 10b-D7（§4.7f）：训练组文件可弃损坏判据（dbFactory.openAndVerify 对坏文件抛的可恢复错误）。

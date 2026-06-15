@@ -30,8 +30,7 @@ public struct TrainingView: View {
     @State private var finalizeFailed = false
     @State private var finalizing = false      // R1-H2：in-flight 门，阻重试双击/并发 finalize Task
     @State private var pickerRequest: PickerRequest?
-    @State private var toastMessage: String?
-    @State private var toastToken = 0
+    @State private var toast = ToastState()      // §B.1：latest-wins 调度核（host-tested）
     @State private var confirmingEnd = false
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
@@ -82,6 +81,12 @@ public struct TrainingView: View {
             switch newPhase {
             case .active:
                 engine.onSceneActivated()                       // modules §U2 既有动画链（不替换）
+                // codex-13a-R2：回前台重放未确认的 autosave 失败。后台 flush 失败时 generation observer
+                // 在 app 不可见时已弹过 toast 并 2s 过期 → 用户回前台无感知「进度可能未落盘」。banner 仍置位
+                // （仅成功/endSession/reset 清），故此处重放使其在可见时呈现。非阻塞、不 teardown。
+                if let e = lifecycle.coordinator.autosaveBannerError, e.shouldShowToast {
+                    presentToast(e.userMessage)
+                }
             case .inactive, .background:
                 Task { await lifecycle.flushForBackground() }   // §4.6 item4：失活/后台立即 flush（OS 可能随后杀进程）
             @unknown default:
@@ -90,6 +95,14 @@ public struct TrainingView: View {
         }
         .onChange(of: engine.drawings.count) { _, _ in
             lifecycle.autosave(immediate: true)                 // §4.6：画线即存（commit/delete 不推 tick，D9）
+        }
+        .onChange(of: lifecycle.coordinator.autosaveErrorGeneration) { _, _ in
+            // §B.2 + codex-13a-F1：观察失败**计数**（非错误值）——每次失败都递增 → 重复同一错误也 surface，
+            // 持久故障（如磁盘满每 tick 失败）保持可见，非首条 toast 过期即静默。非阻塞、不 teardown
+            // （与 finalize 失败 blocking alert 区分）。shouldShowToast 过滤 .internalError 等。
+            if let e = lifecycle.coordinator.autosaveBannerError, e.shouldShowToast {
+                presentToast(e.userMessage)
+            }
         }
         .sheet(item: $pickerRequest) { req in
             PositionPickerView(
@@ -138,17 +151,7 @@ public struct TrainingView: View {
             Button("是", role: .destructive) { endManually() }
             Button("否", role: .cancel) {}
         }
-        .overlay(alignment: .top) {
-            if let toast = toastMessage {
-                Text(toast)
-                    .font(.callout)
-                    .padding(.horizontal, 16).padding(.vertical, 10)
-                    .background(.regularMaterial, in: Capsule())
-                    .padding(.top, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: toastMessage)
+        .toastOverlay(toast.message)             // §B.1 复用呈现壳（消费 ToastState.message）
     }
 
     private var topBar: some View {
@@ -226,14 +229,12 @@ public struct TrainingView: View {
         }
     }
 
-    // latest-wins 自动消失 Toast（壳层 UX，不 host 测）。
+    // latest-wins 自动消失 Toast（驱动 host-tested ToastState；计时留壳层，不 host 测）。
     private func presentToast(_ message: String) {
-        toastToken += 1
-        let token = toastToken
-        toastMessage = message
+        let token = toast.present(message)
         Task {
             try? await Task.sleep(for: .seconds(2))
-            if toastToken == token { toastMessage = nil }
+            toast.expire(token: token)
         }
     }
 

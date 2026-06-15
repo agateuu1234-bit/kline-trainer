@@ -23,7 +23,8 @@ enum PIFixtures {
     }
 
     /// provenance coordinator：多缓存文件 + 损坏/错误注入 + 确定性 pick（按 filename 升序，删后顺移）。
-    static func makeProvenanceCoordinator(files: [String], corrupt: Set<String>, openError: AppError? = nil)
+    static func makeProvenanceCoordinator(files: [String], corrupt: Set<String>, openError: AppError? = nil,
+                                          candles: [Period: [KLineCandle]] = TrainingSessionPersistenceTests.validCandles())
         -> (TrainingSessionCoordinator, PreviewTrainingSetDBFactory,
             InMemoryCacheManager, InMemoryPendingTrainingRepository) {
         let records = InMemoryRecordRepository()
@@ -33,7 +34,7 @@ enum PIFixtures {
         cache._seedForTesting(files.map { Self.file(filename: $0) })
         cache.pickOverride = { fs in fs.sorted { $0.filename < $1.filename }.first }   // 确定性
         let factory = PreviewTrainingSetDBFactory(
-            candles: TrainingSessionPersistenceTests.validCandles(),
+            candles: candles,                                     // 默认 validCandles；可注入 [:] 测「开成功但 candle-load 失败 → 不 touch」（codex-13a-F2）
             corruptFilenames: corrupt, openErrorAll: openError)   // knob 经 init（struct，禁后赋值）
         let coord = TrainingSessionCoordinator(
             dbFactory: factory, recordRepo: records, pendingRepo: pending, finalization: port,
