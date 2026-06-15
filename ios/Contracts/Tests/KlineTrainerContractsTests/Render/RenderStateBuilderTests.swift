@@ -348,36 +348,43 @@ struct RenderStateBuilderTests {
         #expect(b.candleStep == 10)
     }
 
-    // codex R1-H：早 tick currentIdx=10 → baseStartIndex=10-79=-69 → base·step=-690<0；
-    // 但 autoTracking offset=0 是合法态（既有 anchorEarlyTick：offset=0→startIndex==0）→ maxOffset 须 canonicalize 到 0，
-    // 否则 bounce 把 0 判越界弹到 -690。
-    @Test("offsetBounds 早 tick canonicalize：base<0 → maxOffset==0（非 -690），minOffset==-1890")
-    func offsetBounds_earlyTick_canonicalizesZero() {
-        let b = RenderStateBuilder.offsetBounds(
-            mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
-            rawVisible: 0, candleCount: 200, currentIdx: 10)
-        #expect(b.maxOffset == 0)        // max(0, -69*10) = 0
-        #expect(b.minOffset == -1890)    // min(0, (-69-120)*10)
+    // codex R2-H：早 tick currentIdx=10 → baseStartIndex=-69 → 真运动区间 [(-69-120)·10, -69·10]=[-1890,-690]，
+    // span==upperBound·step（无死区）。autoTracking offset=0 在区间外的左填充 plateau，由 R1b-wire normalize-on-freeScrolling 处理（mode-gate）。
+    @Test("offsetBounds 早 tick 真运动区间：base<0 → [-1890,-690]，span==upperBound·step，maxOffset-step 即移 startIndex（无死区）")
+    func offsetBounds_earlyTick_trueMotionRange() {
+        let w = ChartPanelFrames.split(in: Self.bounds).mainChart.width
+        let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: 0, candleCount: 200, currentIdx: 10)
+        #expect(b.maxOffset == -690)        // base(-69)·step(10)
+        #expect(b.minOffset == -1890)       // (base-upper)(-189)·step
+        #expect(b.maxOffset - b.minOffset == 1200)   // span == upperBound(120)·step(10)，无死区（codex R2-H）
+        // 无死区证：maxOffset 内移一 candle-step 即改 startIndex（非 plateau）
         let cs = Self.candles(period: .m3, count: 200)
-        let vp = RenderStateBuilder.makeViewport(
-            panelState: Self.panel(offset: 0), candles: cs, tick: 10, bounds: Self.bounds)
-        #expect(vp.startIndex == 0)      // 行为对拍：offset=0 → 既有 anchorEarlyTick 的 startIndex==0
+        let inward = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: b.maxOffset - b.candleStep), candles: cs, tick: 10, bounds: Self.bounds)
+        #expect(inward.startIndex == 1)
     }
 
-    // codex R1-H 不变量：autoTracking canonical offset=0 恒 ∈ [minOffset, maxOffset]（早/中/晚 tick）。
-    @Test("offsetBounds 不变量：offset=0 恒在 [min,max] 内（tick 10/150/199）+ 晚 tick min canonicalize")
-    func offsetBounds_zeroAlwaysInRange() {
+    // codex R2-H：span 恒 == upperBound·candleStep（无死区），与 currentIdx 无关（早/中/晚 tick 同 span）。
+    @Test("offsetBounds span==upperBound·step（无死区不变量，tick 10/150/199 同 span=1200）")
+    func offsetBounds_spanEqualsUpperBoundStep() {
         let w = ChartPanelFrames.split(in: Self.bounds).mainChart.width
         for tickIdx in [10, 150, 199] {
             let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: 0,
                                                     candleCount: 200, currentIdx: tickIdx)
-            #expect(b.minOffset <= 0, "tick=\(tickIdx) min<=0")
-            #expect(b.maxOffset >= 0, "tick=\(tickIdx) max>=0")
+            #expect(b.maxOffset - b.minOffset == 1200, "tick=\(tickIdx) span==upperBound(120)·step(10)")
         }
-        let bLate = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: 0,
-                                                    candleCount: 200, currentIdx: 199)
-        #expect(bLate.maxOffset == 1200)   // base=120·10
-        #expect(bLate.minOffset == 0)      // min(0, (120-120)·10)
+    }
+
+    // codex R2-M：非有限几何（inf/NaN width → 非有限 step）→ 安全退化 [0,0]，roundTripEdge 不 Int(NaN/inf) trap。
+    @Test("offsetBounds 非有限几何安全退化（codex R2-M）：inf/NaN width → [0,0] 不 trap")
+    func offsetBounds_nonFiniteGeometrySafe() {
+        let bInf = RenderStateBuilder.offsetBounds(mainFrameWidth: .infinity, rawVisible: 0, candleCount: 200, currentIdx: 150)
+        #expect(bInf.minOffset == 0 && bInf.maxOffset == 0)
+        let bNaN = RenderStateBuilder.offsetBounds(mainFrameWidth: .nan, rawVisible: 0, candleCount: 200, currentIdx: 150)
+        #expect(bNaN.minOffset == 0 && bNaN.maxOffset == 0)
+        _ = RenderStateBuilder.roundTripEdge(integer: 71, step: .infinity)   // 喂 inf step 不 trap
+        _ = RenderStateBuilder.roundTripEdge(integer: 71, step: .nan)        // 喂 NaN step 不 trap
+        #expect(Bool(true))   // 到达此行即证未 trap
     }
 
     // codex R1-M：非整除 step（width/vc 不整除）下 edge=integer·step 经 makeViewport plain floor 反算可偏 1；
