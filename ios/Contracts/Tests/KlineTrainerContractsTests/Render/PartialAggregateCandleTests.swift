@@ -99,5 +99,14 @@ struct PartialAggregateCandleTests {
         #expect(s.high == 6)                    // m3[5].high（仅已揭示，非未来）
         #expect(s.close == 5.5)                 // m3[5].close
         #expect(s.endGlobalIndex == 5)          // == tick
+        #expect(s.datetime == 5 * 180)          // 已揭示 m3[5].datetime（非 vendor 999_999；codex R2-H sanitize）
+    }
+
+    @Test("容损 fail-safe（codex R2-H）：巨量 m3 volume 累加饱和到 Int64.max 不 trap")
+    func volumeOverflowSaturates() {
+        let series = Self.m3(4, vols: [0: Int64.max, 1: 100])   // 损坏数据：单根近上限
+        let a = Self.agg(period: .m60, datetime: 0, endGlobalIndex: 3)
+        let s = PartialAggregateCandle.synthesize(original: a, m3: series, tick: 1)  // 成分 m3[0,1]
+        #expect(s.volume == .max)              // Int64.max + 100 饱和到 .max，不 trap
     }
 }

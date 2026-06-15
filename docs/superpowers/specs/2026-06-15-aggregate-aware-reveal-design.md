@@ -36,10 +36,11 @@
 | `high` | `max(m3[start … tick].high)` |
 | `low` | `min(m3[start … tick].low)` |
 | `close` | `m3[tick].close`（== 当前价；E5 `price(atTick:)` 同取 .m3） |
-| `volume` | `sum(m3[start … tick].volume)` |
+| `volume` | `sum(m3[start … tick].volume)`，**saturating（codex R2-H：损坏数据巨量累加饱和到 Int64.max，不 trap）** |
 | `amount` | `nil`（成交额非图表渲染字段；不累加避免与 vendor 口径分歧） |
 | `ma66 / bollUpper / bollMid / bollLower / macdDiff / macdDea / macdBar` | **`nil`**（D2） |
-| `period / datetime` | 保留原聚合 K 线身份（HUD 时间标签用 datetime） |
+| `period` | 保留原聚合 K 线 period |
+| `datetime` | **首成分 `m3[start].datetime`（codex R2-H）**：良性数据 == 原聚合 open（对齐其首根 m3）；损坏数据（聚合 datetime 越界）下不把未来时间戳带进 crosshair/HUD（fail-closed） |
 | `globalIndex` | `nil` |
 | `endGlobalIndex` | **`tick`**（D3：使「所有可见根 endGlobalIndex ≤ tick」成为干净可机检的无未来不变量） |
 
@@ -131,3 +132,4 @@
 | 2026-06-15 | v1.1 (opus spec-review R1 修) | **3 [H] 修**：**H1** start 改 datetime 定位（`m3.partitioningIndex{datetime>=original.datetime}`）—— backend 各周期独立 look-back 致 pre-window 聚合 endGlobalIndex clamp 到 0，predecessor+1 漏 m3[0]（首根 in-window，开局可达）；**H2** priceRange 必须用合成 slice 重算并装入 viewport 副本（原 priceRange 在 makeViewport 内由 pre-synth slice 算 → Y 轴仍泄漏未来 high/low+bands），核心不变量 + D4 增 Y 轴维度；**H3** 改 base 数组副本后用原 bounds 重切（保 `slice.startIndex==viewport.startIndex` base 索引契约）、严禁 `Array(candles[...])` 从 0 重索引致全面板错位 + 加 startIndex 断言测试。**M1** 补测：双面板皆聚合/switchPeriodCombo 不推进/weekly-monthly 极粗跨度。**L1** 去 `?? []` 死防御改 guard m3 覆盖。survived：close 连续性 / trigger 等价性 / endGlobalIndex=tick 对 MarkersLayout 二分单调性 / nil 指标断线 / reveal 组合（除 priceRange）opus 已核正确。 |
 | 2026-06-15 | v1.2 (opus spec-review R2 APPROVE 收敛) | R2 模拟 backend window 规则 + 实核 Geometry/RenderStateBuilder/Markers 契约 → **H1/H2/H3/M1/L1 全 RESOLVED**（datetime-start 跨午休/隔夜 session gap 亦对，因两侧同 bisect datetime；ChartViewport 6 字段 memberwise init 存在；re-slice 保 base 索引）。新 2 [L]（非阻塞，已纳入）：**Edge-E** trigger 下 `start≤tick` 恒真但加 assert + 测试钉死；**volume** 完成瞬间柱高/range 同 OHLC 一并轻变（D6 已注）。设计收敛 APPROVE。 |
 | 2026-06-16 | v1.3 (codex branch-diff attest R1 [HIGH] 容损) | 实施后 codex:adversarial-review 揭 [HIGH]：v1.2 的 `assert(start≤tick)` 对**接受但损坏的数据**（`.m3` datetime 非单调 / 聚合 datetime 越界，engine 仅按 endGlobalIndex 校验、不校验 datetime 单调）会在**渲染热路径 trap**（debug assert / release 闭区间越界），把可恢复脏数据变成 use-time crash（比 init fail-fast 差）。裁决：**assert → `start = min(rawStart, tick)` clamp**（fail-safe，不崩 + 成分 ⊆ 已揭示不泄漏）；reader-boundary temporal 强校验属 persistence trust-boundary、本渲染 RFC 作用域外（clamp 已使渲染路径安全）。补 malformed-data 回归测。opus R2-L assert 决策被本条 supersede。 |
+| 2026-06-16 | v1.4 (codex branch-diff attest R2 两 [HIGH] 容损收口) | R2 揭：v1.3 clamp 仅护 OHLC range，仍有两处损坏数据渲染面：①合成根保留 `original.datetime` → 越界聚合 datetime 经 crosshair/HUD 漏未来时间戳；②`volume` 用 checked `+` 累加 → 巨量损坏数据渲染期 Int64 overflow trap。裁决（render 作用域内全防御，no-op 于良性数据）：**datetime 改取 `m3[start].datetime`**（良性==原 open）；**volume 改 saturating `addingReportingOverflow`**（饱和 Int64.max 不 trap）。补 2 回归测（datetime sanitize + volume 饱和）。reader-boundary 强校验仍 defer persistence（render 已 fail-safe）。 |

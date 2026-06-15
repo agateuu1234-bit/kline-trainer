@@ -20,14 +20,22 @@ public enum PartialAggregateCandle {
         let rawStart = m3.partitioningIndex { $0.datetime >= original.datetime }
         let start = min(rawStart, tick)
         let constituents = m3[start ... tick]
+        // 成交量 overflow-safe（codex R2-H）：损坏数据下巨量累加饱和到 Int64.max，不在渲染期 trap。
+        var volume: Int64 = 0
+        for c in constituents {
+            let (sum, overflow) = volume.addingReportingOverflow(c.volume)
+            volume = overflow ? .max : sum
+        }
         return KLineCandle(
             period: original.period,
-            datetime: original.datetime,
+            // datetime 取已揭示首成分（codex R2-H）：良性数据 == original.datetime（聚合 open 对齐其首根 m3）；
+            // 损坏数据（聚合 datetime 越界）下不把未来时间戳带进 crosshair/HUD（fail-closed）。
+            datetime: constituents.first!.datetime,
             open: constituents.first!.open,
             high: constituents.map(\.high).max()!,
             low: constituents.map(\.low).min()!,
             close: constituents.last!.close,
-            volume: constituents.reduce(Int64(0)) { $0 + $1.volume },
+            volume: volume,
             amount: nil, ma66: nil,
             bollUpper: nil, bollMid: nil, bollLower: nil,
             macdDiff: nil, macdDea: nil, macdBar: nil,
