@@ -408,6 +408,93 @@ struct RenderStateBuilderTests {
         #expect(rs.drawings.allSatisfy { $0.panelPosition == 1 })            // 仅下栏；上栏被排除
     }
 
+    // MARK: - 聚合感知 reveal（进行中聚合 K 线 partial 合成；spec 2026-06-15-aggregate-aware-reveal）
+
+    /// m60 上区 engine：m3 driving（12 根，datetime=i*180）+ m60 聚合（sparse ends [3,7,11]，datetime 对齐 m3）。
+    @MainActor
+    static func aggregateEngine(tick: Int, m60FutureHigh: Double = 9999) -> TrainingEngine {
+        let m3 = (0..<12).map { i in
+            KLineCandle(period: .m3, datetime: Int64(i) * 180, open: Double(i), high: Double(i) + 1,
+                        low: Double(i) - 1, close: Double(i) + 0.5, volume: 100, amount: nil, ma66: nil,
+                        bollUpper: nil, bollMid: nil, bollLower: nil, macdDiff: nil, macdDea: nil, macdBar: nil,
+                        globalIndex: i, endGlobalIndex: i)
+        }
+        func m60(_ dtIdx: Int, end: Int) -> KLineCandle {
+            KLineCandle(period: .m60, datetime: Int64(dtIdx) * 180, open: 5, high: m60FutureHigh, low: -9999,
+                        close: 5, volume: 999_999, amount: nil, ma66: 8, bollUpper: 8, bollMid: 8, bollLower: 8,
+                        macdDiff: 8, macdDea: 8, macdBar: 8, globalIndex: nil, endGlobalIndex: end)
+        }
+        let m60s = [m60(0, end: 3), m60(4, end: 7), m60(8, end: 11)]
+        return TrainingEngine(
+            flow: NormalFlow(fees: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true), maxTick: 11),
+            allCandles: [.m3: m3, .m60: m60s],
+            maxTick: 11, initialTick: tick,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m60, initialLowerPeriod: .m60,
+            decelerationDriverFactory: { FakeFrameDriver(onTick: $0) })
+    }
+
+    @MainActor
+    @Test("聚合面板进行中根被 partial 合成：OHLC=partial、指标 nil、endGlobalIndex==tick（aggregate-leak 复现转正）")
+    func aggregateInProgressSynthesized() {
+        let e = Self.aggregateEngine(tick: 1)
+        let rs = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
+        let last = rs.visibleCandles.last!
+        #expect(last.endGlobalIndex == 1)
+        #expect(last.open == 0)
+        #expect(last.high == 2)
+        #expect(last.close == 1.5)
+        #expect(last.ma66 == nil && last.macdDiff == nil)
+    }
+
+    @MainActor
+    @Test("base 索引契约：合成后 visibleCandles.startIndex == viewport.startIndex（R1-H3）")
+    func synthesisPreservesBaseIndex() {
+        let e = Self.aggregateEngine(tick: 1)
+        let rs = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
+        #expect(rs.visibleCandles.startIndex == rs.viewport.startIndex)
+    }
+
+    @MainActor
+    @Test("Y 轴不泄漏：priceRange 只反映已揭示 partial，不含 vendor 未来 high（R1-H2）")
+    func priceRangeExcludesFuture() {
+        let e = Self.aggregateEngine(tick: 1, m60FutureHigh: 9999)
+        let rs = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
+        #expect(rs.viewport.priceRange.max < 100)
+    }
+
+    @MainActor
+    @Test("m3 驱动面板：currentIdx 那根 endGlobalIndex==tick → 不合成（原根原样）")
+    func m3PanelNotSynthesized() {
+        let m3 = (0..<200).map { i in
+            KLineCandle(period: .m3, datetime: Int64(i) * 180, open: 10, high: 11, low: 9, close: 10 + Double(i) * 0.1,
+                        volume: 1000, amount: nil, ma66: 7, bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: i, endGlobalIndex: i)
+        }
+        let e = TrainingEngine(
+            flow: NormalFlow(fees: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true), maxTick: 199),
+            allCandles: [.m3: m3], maxTick: 199, initialTick: 150,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m3, initialLowerPeriod: .m3,
+            decelerationDriverFactory: { FakeFrameDriver(onTick: $0) })
+        let rs = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
+        let last = rs.visibleCandles.last!
+        #expect(last.endGlobalIndex == 150)
+        #expect(last.ma66 == 7)
+    }
+
+    @MainActor
+    @Test("无未来不变量：聚合面板所有可见根 endGlobalIndex ≤ tick")
+    func allVisibleWithinTick() {
+        for t in [0, 1, 3, 5, 9, 11] {
+            let e = Self.aggregateEngine(tick: t)
+            let rs = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
+            for c in rs.visibleCandles {
+                #expect(c.endGlobalIndex <= t, "tick=\(t) 可见根 endGlobalIndex=\(c.endGlobalIndex) > tick")
+            }
+        }
+    }
+
     // MARK: - reveal 约束（已揭示前缀窗口；spec §五）
 
     @Test("reveal 不变量扫描：跨 tick × offset，slice 末根 ≤ currentIdx 且 visibleCount ≥ 1（禁前窥）")

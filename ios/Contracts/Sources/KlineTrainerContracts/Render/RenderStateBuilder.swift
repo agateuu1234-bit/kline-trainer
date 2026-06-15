@@ -21,9 +21,24 @@ public enum RenderStateBuilder {
         let panelState = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
         let candles = engine.allCandles[panelState.period] ?? []
         guard !candles.isEmpty, bounds.width > 0, bounds.height > 0 else { return .empty }
-        let viewport = makeViewport(panelState: panelState, candles: candles,
-                                    tick: engine.tick.globalTickIndex, bounds: bounds)
-        let slice = candles[viewport.startIndex ..< viewport.startIndex + viewport.visibleCount]
+        let tick = engine.tick.globalTickIndex
+        let viewport = makeViewport(panelState: panelState, candles: candles, tick: tick, bounds: bounds)
+        // 聚合感知 reveal（spec 2026-06-15-aggregate-aware-reveal）：进行中聚合 K 线（可见且 endGlobalIndex>tick）
+        // 用已揭示 m3 partial 合成；改 base 数组副本保 base 索引（R1-H3）+ 用合成 slice 重算 priceRange（R1-H2）。
+        var renderViewport = viewport
+        var slice = candles[viewport.startIndex ..< viewport.startIndex + viewport.visibleCount]
+        let currentIdx = currentCandleIndex(candles: candles, tick: tick)
+        let lastVisibleIdx = viewport.startIndex + viewport.visibleCount - 1
+        if lastVisibleIdx == currentIdx, candles[currentIdx].endGlobalIndex > tick,
+           let m3 = engine.allCandles[.m3], tick < m3.count {
+            var arr = candles
+            arr[currentIdx] = PartialAggregateCandle.synthesize(original: candles[currentIdx], m3: m3, tick: tick)
+            slice = arr[viewport.startIndex ..< viewport.startIndex + viewport.visibleCount]
+            renderViewport = ChartViewport(
+                startIndex: viewport.startIndex, visibleCount: viewport.visibleCount,
+                pixelShift: viewport.pixelShift, geometry: viewport.geometry,
+                priceRange: PriceRange.calculate(from: slice), mainChartFrame: viewport.mainChartFrame)
+        }
         // C3-C6 渲染收口（modules L1443-1452 字面）：volume 含 0 下界、macd 全 nil/零 fallback。
         let volumeRange = NonDegenerateRange.make(
             values: [0.0] + slice.map { Double($0.volume) }, fallback: 0.0...1.0)
@@ -33,13 +48,13 @@ public enum RenderStateBuilder {
         return KLineRenderState(
             panel: panelState,
             frames: ChartPanelFrames.split(in: bounds),
-            viewport: viewport,
+            viewport: renderViewport,
             visibleCandles: slice,
             volumeRange: volumeRange,
             macdRange: macdRange,
             markers: engine.markers,
             drawings: engine.drawings.filter { $0.panelPosition == (panel == .upper ? 0 : 1) },
-            crosshairPoint: crosshair)   // C8b：长按十字光标由 ChartContainerView.Coordinator 视图层透传（D3）
+            crosshairPoint: crosshair)
     }
 
     /// C8b H1 handler 复用：当前可见 candle 索引半开区间。委托 makeViewport 单一真相。
