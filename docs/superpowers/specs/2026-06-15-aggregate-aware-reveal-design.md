@@ -25,7 +25,7 @@
 
 ## 二、设计：进行中聚合 K 线 partial 实时合成（user 裁决）
 
-**核心不变量**：图表渲染的**每一根可见 K 线**其 OHLC/volume/指标**只含 ≤ tick 的已揭示数据**（`endGlobalIndex ≤ tick`）。reveal 已保证「窗口末根索引 ≤ currentIdx」；本 RFC 进一步保证「currentIdx 那根 K 线的**数据**也不含未来」。
+**核心不变量**：图表渲染的**每一根可见 K 线**其 OHLC/volume/指标**只含 ≤ tick 的已揭示数据**（`endGlobalIndex ≤ tick`），**且 Y 轴价格区间 `priceRange` 也只由已揭示数据派生**（opus R1-H2：priceRange 折入 high/low + boll/ma66，必须用合成后 slice 重算，否则 Y 轴刻度仍泄漏未来）。reveal 已保证「窗口末根索引 ≤ currentIdx」；本 RFC 进一步保证「currentIdx 那根 K 线的**数据 + 其撑起的 Y 轴刻度**也不含未来」。
 
 **方案（user 2026-06-15 裁决）**：进行中聚合 K 线**不隐藏**、也**不用 vendor 预存整根**，而是**从已揭示 m3 实时合成 partial**（像真实行情"正在长出来"）。
 
@@ -43,7 +43,7 @@
 | `globalIndex` | `nil` |
 | `endGlobalIndex` | **`tick`**（D3：使「所有可见根 endGlobalIndex ≤ tick」成为干净可机检的无未来不变量） |
 
-`start = (currentIdx == 0) ? 0 : aggCandles[currentIdx − 1].endGlobalIndex + 1`。
+**成分起点 `start`（opus R1-H1 修正）**：用**进行中聚合 K 线自身的 `datetime`** 在 m3 轴定位首根成分：`start = m3.partitioningIndex { $0.datetime >= original.datetime }`（匹配 backend `[open, nextOpen)` 窗口的下界）。**不能**用「上一根聚合 `endGlobalIndex + 1`」：backend 各周期独立 look-back（`generate_training_sets.py` `PERIOD_BEFORE_CAP`），落在 3m 窗口前的聚合根 `end_global_index` 被 clamp 到 0（`max(0, bisect_right(three_dts, …) − 1)`），故首根 in-window 聚合的 predecessor 也是 0 → predecessor+1=1 但真起点是 m3 索引 0（漏 `m3[0]` 的 open/极值）。datetime 定位对 predecessor clamping 免疫（实证：opus R1 模拟 `egi=[0×9,19,39,…]`，tick∈[1,19] 时 predecessor+1=1 ≠ true_start=0）。由合成纯函数**内部**计算（封装 + 单测），不依赖 caller 传 start。`start ∈ [0, tick]`（进行中根含 tick → open ≤ m3[tick].datetime）。
 
 ---
 
@@ -52,7 +52,7 @@
 - **D1 不隐藏（user 裁决，对比 reveal 后续选项 B）**：partial 合成 > 隐藏进行中根。理由：①真实行情语义（K 线正在形成）；②**顺带解决**隐藏方案的「开局聚合面板空白」问题（合成至少有 1 根 m3 即可画）；③**不改 `currentCandleIndex` 语义**（进行中根照常在 currentIdx，仅数据被替换）→ 不波及 pinch/autoTracking 锚（reveal RFC 已冻结的共享谓词）。
 - **D2 进行中那根不画指标（user 裁决）**：MA66/BOLL/MACD 是 vendor 按**整根**预算的、partial 无法无歧义重算（尤其 MACD 的 EMA 递归需复制后端逻辑到端上 = 双实现分歧风险）。合成根指标置 `nil`；渲染层**已对 nil 优雅断线**（`MainChartLayout.polylineSegments` `if let`、`SubChartLayout.macdBars` `guard let … else continue`，grep 核实）→ 指标线/柱自然终止在最后一根**已完成** K 线，无需改渲染层。多数真实行情软件指标亦"收盘才更新"。
 - **D3 合成根 `endGlobalIndex = tick`**：让无未来不变量统一可机检（`所有可见根 endGlobalIndex ≤ tick`）。安全性：`currentCandleIndex` 在**原** candles 数组上算（合成发生于其后），不回喂；x 位置按 slice 索引；HUD 时间用 datetime；priceRange 用 OHLC —— 均不依赖合成根的 endGlobalIndex。
-- **D4 单一真相 / 不动几何**：`makeViewport`（含 reveal 的 upperBound/sliceEnd）、`currentCandleIndex`、`visibleCandleRange`（返索引区间、与 OHLC 无关）**全不改**。合成是 `make()` 装配 slice 后的**纯数据替换**。
+- **D4 单一真相 / 不动几何（opus R1-H2 精修）**：`makeViewport` 的**几何**（startIndex/pixelShift/sliceEnd/candleStep/visibleCount）、`currentCandleIndex`、`visibleCandleRange`（返索引区间、与 OHLC 无关）**全不改**。合成是 `make()` 装配 slice 后的**纯数据替换** + **priceRange 重算**：`makeViewport` 仍照旧产出 viewport（含基于 pre-synthesis slice 的 priceRange），但 `make()` 在合成后**用合成 slice 重算 `PriceRange.calculate` 并以一份 `priceRange` 被替换的 viewport 副本装入 `KLineRenderState`**（几何字段逐一保留）。`visibleCandleRange`（drawing handler）不读 priceRange → 不受影响。
 - **D5 只做渲染合成（user 裁决，scope）**：不碰交易/tick/记账/持久化模型；当前价、tier、结算等仍走既有 .m3 路径（与合成 close 同源，一致）。
 - **D6 完成瞬间跳变（已知 cosmetic）**：K 线走完（`endGlobalIndex ≤ tick`）后不再合成、切回 vendor 预存整根（含指标）。vendor 各周期独立源，**若**与 3m 聚合不完全一致 → 完成瞬间一帧轻微 OHLC 跳变。close 维度预期连续（当前价 = m3[tick].close = 该周期收盘的同一标的价）；high/low/open 维度依赖 vendor 数据一致性 → 列 §六验收项（真实数据上肉眼无明显跳变）。**不**为完全 bit 一致投入（会要求渲染端永远自合成整根、丢弃 vendor 指标，得不偿失）。
 - **D7 治理边界**：改 `ios/**/*.swift` 渲染装配 = trust-boundary + RFC + opus 对抗 review 收敛 + codex:adversarial-review。**不** claim 行为中性（明为行为修正：聚合面板进行中根渲染变更）。
@@ -62,38 +62,52 @@
 ## 四、架构 / 单一职责
 
 - **新增纯函数**（平台无关，host 全测）：
-  `RenderStateBuilder.synthesizedInProgressAggregate(original: KLineCandle, m3: [KLineCandle], startGlobalIndex: Int, tick: Int) -> KLineCandle`
-  —— 读 `m3[startGlobalIndex … tick]` 算 partial OHLC/vol，返回保留 `original.period/datetime`、指标 nil、`endGlobalIndex=tick`、`globalIndex=nil` 的新 `KLineCandle`。前置：`m3` 非空且覆盖 `[startGlobalIndex, tick]`（engine init 已保证 .m3 连续 0…≥maxTick、`tick ≤ maxTick`）。放 `RenderStateBuilder`（render 装配 owner，与 `currentCandleIndex` 同处）或独立小文件 `Render/PartialAggregateCandle.swift`（plan 定，避免 RenderStateBuilder 膨胀）。
-- **挂钩 `RenderStateBuilder.make(engine:panel:bounds:)`**（伪码）：
+  `synthesizedInProgressAggregate(original: KLineCandle, m3: [KLineCandle], tick: Int) -> KLineCandle`
+  —— **内部**算 `start = m3.partitioningIndex { $0.datetime >= original.datetime }`（R1-H1），读 `m3[start … tick]` 算 partial OHLC/vol，返回保留 `original.period/datetime`、指标 nil、`amount=nil`、`endGlobalIndex=tick`、`globalIndex=nil` 的新 `KLineCandle`。前置：`m3` 非空且 `tick < m3.count`（engine init 保证 .m3 连续 0…≥maxTick、`tick ≤ maxTick`）。放 `RenderStateBuilder`（render 装配 owner，与 `currentCandleIndex` 同处）或独立小文件 `Render/PartialAggregateCandle.swift`（plan 定）。
+- **挂钩 `RenderStateBuilder.make(engine:panel:bounds:)`**（伪码，R1-H2/H3 修正）：
   ```
-  let viewport = makeViewport(panelState:candles:tick:bounds:)
-  var slice = Array(candles[viewport.startIndex ..< viewport.startIndex + viewport.visibleCount])
+  let viewport = makeViewport(panelState:candles:tick:bounds:)        // 几何 + pre-synth priceRange
   let currentIdx = currentCandleIndex(candles: candles, tick: tick)
   let lastVisibleIdx = viewport.startIndex + viewport.visibleCount - 1
-  if lastVisibleIdx == currentIdx, candles[currentIdx].endGlobalIndex > tick {        // 进行中且可见
-      let start = currentIdx == 0 ? 0 : candles[currentIdx - 1].endGlobalIndex + 1
-      slice[slice.count - 1] = synthesizedInProgressAggregate(
-          original: candles[currentIdx], m3: engine.allCandles[.m3] ?? [], startGlobalIndex: start, tick: tick)
+  var renderViewport = viewport
+  var slice = candles[viewport.startIndex ..< viewport.startIndex + viewport.visibleCount]   // ArraySlice，base 索引
+  if lastVisibleIdx == currentIdx,
+     candles[currentIdx].endGlobalIndex > tick,                       // 进行中且可见
+     let m3 = engine.allCandles[.m3], tick < m3.count {              // R1-L1：守 m3 覆盖（precondition 下恒真），缺则跳过不崩
+      let synth = synthesizedInProgressAggregate(original: candles[currentIdx], m3: m3, tick: tick)
+      var arr = candles                       // R1-H3：改 base 数组副本（COW），保 base 索引
+      arr[currentIdx] = synth
+      slice = arr[viewport.startIndex ..< viewport.startIndex + viewport.visibleCount]   // slice.startIndex == viewport.startIndex 不变
+      // R1-H2：用合成 slice 重算 priceRange，装入 viewport 副本（几何字段逐一保留）
+      renderViewport = ChartViewport(startIndex: viewport.startIndex, visibleCount: viewport.visibleCount,
+          pixelShift: viewport.pixelShift, geometry: viewport.geometry,
+          priceRange: PriceRange.calculate(from: slice), mainChartFrame: viewport.mainChartFrame)
   }
-  // 之后用替换后的 slice 算 volumeRange/macdRange/priceRange + visibleCandles
+  // 之后用 slice 算 volumeRange/macdRange + visibleCandles=slice，viewport=renderViewport
   ```
-- **触发条件精确**：`lastVisibleIdx == currentIdx`（即 reveal 下 `sliceEnd == currentIdx+1`，窗口确实含 currentIdx；用户**向后滚动浏览历史**时 `lastVisibleIdx < currentIdx` → 可见全为已完成根 → 不合成）**且** `candles[currentIdx].endGlobalIndex > tick`（进行中）。**m3 驱动面板**：currentIdx 那根 `endGlobalIndex == tick` → 条件 false → 天然 no-op。
-- **类型注记（plan 落实）**：`KLineRenderState.visibleCandles` 现为 `ArraySlice<KLineCandle>`；替换单根需改走 `Array` 或重建 slice。下游 layout 函数取 `ArraySlice` → 传 `array[...]`。属机械 impl 细节，plan 决定最小波及实现（如 visibleCandles 改 Array 或合成后重切）。
-- **排序**：`volumeRange/macdRange/priceRange` 必须**用替换后 slice** 计算（合成根 macd nil → 不入 macdRange compactMap；partial volume/high/low 入 range，无未来撑大）。
+- **触发条件精确**：`lastVisibleIdx == currentIdx`（reveal 下 `sliceEnd == currentIdx+1`，窗口确实含 currentIdx；**向后滚动浏览历史**时 `lastVisibleIdx < currentIdx` → 可见全为已完成根 → 不合成）**且** `candles[currentIdx].endGlobalIndex > tick`（进行中）。**m3 驱动面板**：currentIdx 那根 `endGlobalIndex == tick` → 条件 false → 天然 no-op。
+- **base 索引契约（opus R1-H3，load-bearing）**：渲染全链按 base 索引定位（`mapper.indexToX(i) = (i − viewport.startIndex)·step`；MainChart/SubChart/Markers/Crosshair layouts 迭代 `slice.indices`）。故合成必须**改 base 数组副本后用原 bounds 重切**（`ArraySlice` 保 base 索引），**不得** `Array(candles[...])`（从 0 重索引 → 全面板渲染错位）。`visibleCandles` 维持 `ArraySlice<KLineCandle>` 类型不变。性能：COW 仅在合成触发（聚合面板，序列短）时拷贝一次/帧，可忽略。
+- **排序**：`volumeRange/macdRange` + `priceRange` 必须**用替换后 slice** 计算（合成根 macd/boll/ma66 nil → 不入对应 range；partial volume/high/low 入 range、无未来撑大）。
 
 ---
 
 ## 五、测试
 
-1. **合成纯函数 host 测**：partial open/high/low/close/volume 正确（多 m3 取极值 + 累加）；指标全 nil；`endGlobalIndex==tick`；单 m3（start==tick）；首根（start=0）。
+1. **合成纯函数 host 测**：partial open/high/low/close/volume 正确（多 m3 取极值 + 累加）；指标 + amount 全 nil；`endGlobalIndex==tick`；单 m3（start==tick）；datetime 定位 start（含 **predecessor clamped 到 0 的首根 in-window 聚合**：predecessor endGlobalIndex==0，datetime 定位仍取 m3[0]——R1-H1 killer）；聚合 open datetime 早于 m3[0]（start clamp 到 0）。
 2. **make() 集成测**：
-   - 聚合面板进行中根被合成（sparse ends `[3,7,11]` @ m3 tick=1 → currentIdx=0 那根 OHLC=partial、`endGlobalIndex==1`、指标 nil；**之前 reveal 的 aggregate-leak 复现 → 现 PASS**）。
+   - 聚合面板进行中根被合成（sparse ends `[3,7,11]` + 对齐 datetime @ m3 tick=1 → currentIdx=0 那根 OHLC=partial、`endGlobalIndex==1`、指标 nil；**之前 reveal 的 aggregate-leak 复现 → 现 PASS**）。
+   - **R1-H3 base 索引契约**：合成后 `rs.visibleCandles.startIndex == rs.viewport.startIndex`（防 `Array(...)` 从 0 重索引致全面板错位；现有测试无此断言）。
+   - **R1-H2 Y 轴不泄漏**：构造进行中 vendor 聚合根 high 远超已揭示 m3（未来高点）→ 合成后 `rs.viewport.priceRange.max` 只反映已揭示 partial（不含 vendor 未来 high/boll）。
    - m3 驱动面板：currentIdx 那根 `endGlobalIndex==tick` → 不合成（原根原样）。
    - 向后滚动浏览（`lastVisibleIdx < currentIdx`）→ 不合成（可见全已完成）。
-   - priceRange/volumeRange 来自替换后 slice（不含未来 high/low）；macdRange 不含合成根（nil）。
+   - volumeRange 来自替换后 slice；macdRange 不含合成根（nil）。
 3. **无未来不变量扫描**：聚合面板跨 tick → 所有 `visibleCandles` 的 `endGlobalIndex ≤ tick`。
-4. **回归**：reveal 既有 + 全量 host 测全绿（合成只改 `make` 的 slice 数据，不动 `makeViewport`/`currentCandleIndex`/`visibleCandleRange`）。
-5. **全量 host + Catalyst**：`swift test` 全绿 + `** TEST BUILD SUCCEEDED **`。
+4. **多面板 / 周期组合（R1-M1）**：
+   - **双面板皆聚合**（如 daily/weekly 组合，TrainingEngine `periodCombos`）：两面板 `make()` 各自合成、互不串。
+   - **switchPeriodCombo 不推进 tick**：切组合后两面板可同时进行中 → 各自合成正确。
+   - **极粗聚合**（weekly/monthly，跨数百根 m3）：合成 start/极值/累加在大跨度下正确。
+5. **回归**：reveal 既有 + 全量 host 测全绿（合成只改 `make` 的 slice 数据 + priceRange，不动 `makeViewport` 几何 / `currentCandleIndex` / `visibleCandleRange`）。
+6. **全量 host + Catalyst**：`swift test` 全绿 + `** TEST BUILD SUCCEEDED **`。
 
 ---
 
@@ -114,3 +128,4 @@
 | 日期 | 版本 | 说明 |
 |---|---|---|
 | 2026-06-15 | v1 (draft) | partial 实时合成进行中聚合 K 线（OHLC/vol 从已揭示 m3、指标 nil、endGlobalIndex=tick）；挂钩 RenderStateBuilder.make slice 替换、不动 makeViewport/currentCandleIndex；D1-D7 决策；完成跳变列已知 cosmetic；关闭 reveal 聚合 HIGH residual |
+| 2026-06-15 | v1.1 (opus spec-review R1 修) | **3 [H] 修**：**H1** start 改 datetime 定位（`m3.partitioningIndex{datetime>=original.datetime}`）—— backend 各周期独立 look-back 致 pre-window 聚合 endGlobalIndex clamp 到 0，predecessor+1 漏 m3[0]（首根 in-window，开局可达）；**H2** priceRange 必须用合成 slice 重算并装入 viewport 副本（原 priceRange 在 makeViewport 内由 pre-synth slice 算 → Y 轴仍泄漏未来 high/low+bands），核心不变量 + D4 增 Y 轴维度；**H3** 改 base 数组副本后用原 bounds 重切（保 `slice.startIndex==viewport.startIndex` base 索引契约）、严禁 `Array(candles[...])` 从 0 重索引致全面板错位 + 加 startIndex 断言测试。**M1** 补测：双面板皆聚合/switchPeriodCombo 不推进/weekly-monthly 极粗跨度。**L1** 去 `?? []` 死防御改 guard m3 覆盖。survived：close 连续性 / trigger 等价性 / endGlobalIndex=tick 对 MarkersLayout 二分单调性 / nil 指标断线 / reveal 组合（除 priceRange）opus 已核正确。 |
