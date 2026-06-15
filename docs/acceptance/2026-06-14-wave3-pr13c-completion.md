@@ -12,8 +12,8 @@
 
 | Step | Action | Expected | Pass / Fail |
 |---|---|---|---|
-| 1 | 浏览器打开本 PR | 见 4 新文件（completion doc `docs/governance/2026-06-14-wave3-completion.md` + 矩阵 runbook `docs/acceptance/2026-06-14-wave3-runtime-matrix.md` + grep gate `scripts/governance/verify-wave3-completion.sh` + 本 acceptance）；0 业务 `.swift` / 0 CI workflow / 0 ruleset 改动 | □ Pass / □ Fail |
-| 2 | 看 completion doc 一节 anchor 表 | 17 行（顺位 — / 1 / 2 / 3 / 4 / 5 / 6a / 6b / 7 / 8 / 9 / 10a / 10b / 11 / 12 / 13a / 13b / 13c）+ squash SHA 与 `git log origin/main` 一致；非-anchor #105 `2d2e28f` 作脚注 | □ Pass / □ Fail |
+| 1 | 浏览器打开本 PR | 见 5 新文件：4 交付件（completion doc `docs/governance/2026-06-14-wave3-completion.md` + 矩阵 runbook `docs/acceptance/2026-06-14-wave3-runtime-matrix.md` + grep gate `scripts/governance/verify-wave3-completion.sh` + 本 acceptance）+ 1 plan（`docs/superpowers/plans/2026-06-14-wave3-pr13c-completion.md`）；0 业务 `.swift` / 0 CI workflow / 0 ruleset 改动 | □ Pass / □ Fail |
+| 2 | 看 completion doc 一节 anchor 表 | 18 行（含「—」起点行 + 17 anchor：顺位 — / 1 / 2 / 3 / 4 / 5 / 6a / 6b / 7 / 8 / 9 / 10a / 10b / 11 / 12 / 13a / 13b / 13c）+ squash SHA 与 `git log origin/main` 一致；非-anchor #105 `2d2e28f` 作脚注 | □ Pass / □ Fail |
 | 3 | 看二节 reconcile | 含 outline §三.3 原文引用「其完成是 Wave 3 关闭的硬前提，非『某天再说』」+「为何不宣布 closure」论证 + 点名对 spec §E.2 矩阵清单的 bounce 纠正（W3-11-R1 OPEN，矩阵不列 bounce device 行） | □ Pass / □ Fail |
 | 4 | 看三节 residual 表（8 行） | A/B/C/D = CLOSED（引 13a #108 / 13b #109）；运行时矩阵 = PARTIAL；**W3-11-R1**（bounce live 接线）/ PR11-R1（生产 backendBaseURL）/ W1-R2（真实样本数据）= OPEN；人读表与机器块 WAVE3-STATUS 事实一致 | □ Pass / □ Fail |
 | 5 | 看五节 freeze 决策 | 含字面「不打 freeze tag」+ 3 理由（无 recorded 矩阵不满足 §三.3 硬门 / ship 门未关 store-frozen 语义不成立 / 与 Wave 1/2 一致） | □ Pass / □ Fail |

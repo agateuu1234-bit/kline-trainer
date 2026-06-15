@@ -8,9 +8,9 @@
 
 ## 前置（关键）：经 §C fixture seed 启动可玩状态
 
-1. 用 Xcode 打开 `ios/KlineTrainer`，选 `KlineTrainer` app target + iPhone/iPad device 或 simulator（Debug config）。
+1. 用 Xcode 打开 `ios/KlineTrainer/KlineTrainer.xcodeproj`，选 `KlineTrainer` app target + iPhone/iPad device 或 simulator（Debug config）。
 2. 在 scheme：**Product → Scheme → Edit Scheme → Run → Arguments → Environment Variables**，新增一行 `KLINE_SEED_FIXTURE` = `1`。
-3. 运行 app target。`#if DEBUG` 下读 env `KLINE_SEED_FIXTURE=1` → 经 §C fixture seed 在真 composition root 自动 provision：缓存训练组（全 6 周期）+ 历史记录 + pending（in-flight）+ 设置默认，使下列交互可达（机制见 `ios/KlineTrainer/KlineTrainer/KlineTrainerApp.swift:19-23`）。
+3. 运行 app target。`#if DEBUG` 下读 env `KLINE_SEED_FIXTURE=1` → 经 §C fixture seed 在真 composition root 自动 provision：缓存训练组（全 6 周期）+ 历史记录 + pending（in-flight）+ 设置默认，使下列交互可达（机制见 `ios/KlineTrainer/KlineTrainer/KlineTrainerApp.swift:19-27`）。
 4. 首页应见非空历史 + 统计（非「空局」），可进一局 Normal 训练以观察图表交互。
 
 **幂等 + 安全**：seed 仅在 store 全空时写（不破坏真实数据）；Release 二进制无 seed 代码（`#if DEBUG` 编译期排除）。若需重置 seed → 删 app 重装（`app.sqlite` 为 singleton，per §C reset 故事）。
