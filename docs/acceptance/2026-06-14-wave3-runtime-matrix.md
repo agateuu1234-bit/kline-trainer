@@ -17,10 +17,11 @@
 
 ---
 
-## device happy-path 矩阵（6 条交互）
+## device happy-path 矩阵（7 项：6 数据交互 + 顺位 2 竖屏/窗口）
 
 | 顺位 | 交互 | 经 §C fixture 可达性 | 详细 runbook 指针 | device pass/fail |
 |---|---|---|---|---|
+| 2 | 竖屏锁 + iPad 全屏窗口（Portrait lock / Split View / Stage Manager 不泄漏） | app 启动即可（不强依赖 seed 数据；iPad 多任务须 iPadOS 16+ Stage Manager device/sim） | `docs/runbooks/2026-06-10-wave3-orientation-runtime-acceptance.md` | ☐ |
 | 3 | Pinch 缩放（聚焦 / clamp 20-240） | seed 缓存训练组（足够蜡烛可缩放）进一局 Normal | `docs/acceptance/2026-06-13-wave3-pr3-pinch-zoom.md` | ☐ |
 | 4 | 水平线绘制 + 跨缩放还原 | 同上一局 Normal，开画线模式绘水平线后缩放 | `docs/acceptance/2026-06-13-wave3-pr4-drawing-mvp.md` | ☐ |
 | 5 | 十字光标吸附 / HUD（跨周期 snap） | 同上一局 Normal，长按图表起十字光标 + 切周期 | `docs/acceptance/2026-06-13-wave3-pr5-crosshair-snap-hud.md` | ☐ |

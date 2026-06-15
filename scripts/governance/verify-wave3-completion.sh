@@ -67,4 +67,7 @@ grep -Fq "2026-06-14-wave3-pr12-frame-budget.md" "$MATRIX" || fail "矩阵缺 In
 grep -Fq "2026-06-07-c8b-runtime-acceptance.md" "$MATRIX" || fail "矩阵缺 Wave 2 减速/帧预算 runbook 指针（§三.3 合取项 ②a）"
 grep -Fq "2026-06-07-u2-gesture-runtime-acceptance.md" "$MATRIX" || fail "矩阵缺 Wave 2 手势 runbook 指针（§三.3 合取项 ②b）"
 
-echo "[verify-wave3-completion] PASS：A/B/C CLOSED + D PARTIAL + W3-11-R1/13a-R2/PR11-R1/W1-R2 OPEN + WAVE3-STATUS 块诚实（store-ready/closure/feature-completeness/matrix/freeze）+ 矩阵 fixture 机制 + §三.3 三连合取（c8b/u2-gesture/帧预算）指针就位"
+# 谓词 3d：矩阵 runbook 须列 顺位 2 竖屏/窗口 runbook（codex R7-High：该 runbook 自声明 Wave 3 矩阵项 + 顺位 13 blocker，不可漏）
+grep -Fq "2026-06-10-wave3-orientation-runtime-acceptance.md" "$MATRIX" || fail "矩阵缺 顺位 2 竖屏/iPad 窗口 runbook 指针（Wave 3 矩阵项 + 顺位 13 blocker，R7-High）"
+
+echo "[verify-wave3-completion] PASS：A/B/C CLOSED + D PARTIAL + W3-11-R1/13a-R2/PR11-R1/W1-R2 OPEN + WAVE3-STATUS 块诚实（store-ready/closure/feature-completeness/matrix/freeze）+ 矩阵 fixture 机制 + §三.3 三连合取（c8b/u2-gesture/帧预算）+ 顺位 2 orientation 指针就位"

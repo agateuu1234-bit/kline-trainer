@@ -18,7 +18,7 @@
 | 4 | 看三节 residual 表（9 行） | A/B/C = CLOSED（引 13a #108 / 13b #109）；**D = PARTIAL**（§D smoke 用 fake verifier，runner↔真 verifier 接线未 smoke 覆盖，codex R4-Med）；运行时矩阵 = PARTIAL；**W3-11-R1**（bounce live 接线）= OPEN 且标 **Wave 3 功能完成门**（codex High：承诺交互未上线 → 功能完整性 PENDING-W3-11-R1）；**13a-R2**（跨 lease cache **data-loss**）= OPEN 顶层可见（codex R3-High：pre-existing，路由 P2-confirm RFC）；PR11-R1 / W1-R2 = OPEN NAS ship 门；人读表与机器块 WAVE3-STATUS（含 `feature-completeness: PENDING-W3-11-R1` + `residual-D-e2e-smoke: PARTIAL` + `known-defect-13a-R2-…: OPEN`）事实一致 | □ Pass / □ Fail |
 | 5 | 看五节 freeze 决策 | 含字面「不打 freeze tag」+ 3 理由（无 recorded 矩阵不满足 §三.3 硬门 / ship 门未关 store-frozen 语义不成立 / 与 Wave 1/2 一致） | □ Pass / □ Fail |
 | 6 | 终端进工作树根目录后跑 `bash scripts/governance/verify-wave3-completion.sh` | 末行 `[verify-wave3-completion] PASS：…`，退出码 0（A/B/C CLOSED + D PARTIAL + W3-11-R1/13a-R2/PR11-R1/W1-R2 OPEN + WAVE3-STATUS 诚实〔含 feature-completeness PENDING-W3-11-R1〕+ 矩阵 fixture 机制 + §三.3 三连合取指针就位） | □ Pass / □ Fail |
-| 7 | 看矩阵 runbook | 含 `KLINE_SEED_FIXTURE=1` 启动机制 + 6 条 happy-path 交互（pinch 3 / 水平线 4 / 十字光标 5 / 手动强平 7 / replay 结算 8 / 主题 9）+ save-resume/复盘/replay 端到端 + bounce/W3-11-R1 排除节 + §B toast 归属澄清块 | □ Pass / □ Fail |
+| 7 | 看矩阵 runbook | 含 `KLINE_SEED_FIXTURE=1` 启动机制 + 7 项（6 数据交互 pinch 3 / 水平线 4 / 十字光标 5 / 手动强平 7 / replay 结算 8 / 主题 9 + **顺位 2 竖屏/iPad 窗口**）+ save-resume/复盘/replay 端到端 + 关闭前其余硬门（Wave 2 两 runbook + 帧预算，全 PASS 判据）+ bounce/W3-11-R1 排除节 + §B toast 归属澄清块 | □ Pass / □ Fail |
 | 8 | 看 codex 对抗 review verdict | APPROVE（或 codex 配额耗尽 → opus 4.8 xhigh fallback APPROVE / accept residual + override） | □ Pass / □ Fail |
 
 ---
