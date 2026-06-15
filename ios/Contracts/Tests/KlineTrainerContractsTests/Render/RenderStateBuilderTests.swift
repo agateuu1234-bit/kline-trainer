@@ -495,6 +495,40 @@ struct RenderStateBuilderTests {
         }
     }
 
+    @MainActor
+    @Test("base 索引契约（强 fixture，startIndex>0）：非空泛守 R1-H3 + 合成值在非零 base 正确（final-review R1-H）")
+    func synthesisPreservesBaseIndexNonZero() {
+        // 100 根 m60（各跨 3 m3，end=3k+2）→ tick=271 时 currentIdx=90、startIndex=11>0；
+        // 旧 fixture 仅 3 根 m60 → startIndex 恒 0 → 错误的 Array(candles[...]) 从 0 重索引也"通过"（vacuous）。
+        // 本强 fixture 使 base 索引契约可被回归捕获（Array(...) 会令 startIndex 变 0 != 11）。
+        let m3 = (0..<300).map { i in
+            KLineCandle(period: .m3, datetime: Int64(i) * 180, open: Double(i), high: Double(i) + 1,
+                        low: Double(i) - 1, close: Double(i) + 0.5, volume: 100, amount: nil, ma66: nil,
+                        bollUpper: nil, bollMid: nil, bollLower: nil, macdDiff: nil, macdDea: nil, macdBar: nil,
+                        globalIndex: i, endGlobalIndex: i)
+        }
+        let m60 = (0..<100).map { k in
+            KLineCandle(period: .m60, datetime: Int64(3 * k) * 180, open: 5, high: 9999, low: -9999,
+                        close: 5, volume: 999_999, amount: nil, ma66: 8, bollUpper: 8, bollMid: 8, bollLower: 8,
+                        macdDiff: 8, macdDea: 8, macdBar: 8, globalIndex: nil, endGlobalIndex: 3 * k + 2)
+        }
+        let e = TrainingEngine(
+            flow: NormalFlow(fees: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true), maxTick: 299),
+            allCandles: [.m3: m3, .m60: m60], maxTick: 299, initialTick: 271,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m60, initialLowerPeriod: .m60,
+            decelerationDriverFactory: { FakeFrameDriver(onTick: $0) })
+        let rs = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
+        #expect(rs.viewport.startIndex == 11)                            // 非零 base（vacuous 防回归前提）
+        #expect(rs.visibleCandles.startIndex == rs.viewport.startIndex)  // base 索引契约（Array(...) 重索引会 fail）
+        let last = rs.visibleCandles.last!
+        #expect(last.endGlobalIndex == 271)                             // == tick（合成）
+        #expect(last.open == 270)                                       // m3[270].open（合成 start=270）
+        #expect(last.high == 272)                                       // max(m3[270,271].high)，非 vendor 9999
+        #expect(last.close == 271.5)                                    // m3[271].close
+        #expect(last.ma66 == nil)                                       // 指标 nil
+    }
+
     // MARK: - reveal 约束（已揭示前缀窗口；spec §五）
 
     @Test("reveal 不变量扫描：跨 tick × offset，slice 末根 ≤ currentIdx 且 visibleCount ≥ 1（禁前窥）")
