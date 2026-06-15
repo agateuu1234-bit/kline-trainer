@@ -305,6 +305,7 @@ struct RenderStateBuilderTests {
         #expect(b.maxOffset == 710)     // baseStartIndex 71 · step 10（最老边）
         #expect(b.minOffset == 0)       // reveal D5：最新边 = 当前 tick（offset 0），前向不可越（禁前窥）
         #expect(b.candleStep == 10)
+        #expect(b.bounceEdges == [.max])   // codex R3：有滚动空间 → 仅最老边可弹（.min 硬钳不在内）
     }
 
     // D4 行为对拍（opus M4 + R1-Low1/Low2，reveal D5 更新）：把 offsetBounds 算出的 edge-offset 喂回 makeViewport，
@@ -359,6 +360,22 @@ struct RenderStateBuilderTests {
         }
     }
 
+    // codex R3：bounceEdges **类型级**不变量——`.min` 永不在 bounceEdges（最新边硬钳），且 `[.max]` iff 有滚动空间（max>min）。
+    // 扫 tick × vc 钉死单边 bounce 策略由返回类型编码（R1b 读 bounceEdges 即不会误把最新边当弹簧）。
+    @Test("offsetBounds.bounceEdges 不变量（codex R3）：.min 永不可弹（硬钳）+ [.max] iff 有滚动空间")
+    func offsetBounds_bounceEdgesAsymmetryInvariant() {
+        let w = ChartPanelFrames.split(in: Self.bounds).mainChart.width
+        for tickIdx in [0, 5, 79, 80, 150, 199] {
+            for vc in [0, 40, 80, 160] {
+                let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: vc,
+                                                        candleCount: 200, currentIdx: tickIdx)
+                #expect(!b.bounceEdges.contains(.min), "tick=\(tickIdx) vc=\(vc)：.min 永不可弹（最新边硬钳）")
+                let hasRoom = b.maxOffset > b.minOffset
+                #expect(b.bounceEdges == (hasRoom ? [.max] : []), "tick=\(tickIdx) vc=\(vc)：[.max] iff 有滚动空间")
+            }
+        }
+    }
+
     @Test("offsetBounds 退化：count<=visibleCount(无滚动空间) → upperBound==0, min/max 同号无区间")
     func offsetBounds_degenerate() {
         // count=30 < target=80 → visibleCount=min(80,30)=30, step=10; currentIdx=29(最新根) → baseStartIndex=29-29=0
@@ -369,6 +386,7 @@ struct RenderStateBuilderTests {
         #expect(b.maxOffset == 0)
         #expect(b.minOffset == 0)
         #expect(b.candleStep == 10)
+        #expect(b.bounceEdges.isEmpty)   // codex R3：无滚动空间 → 无边可弹
     }
 
     // codex R3（branch-diff）：空 candle（candleCount==0 → visibleCount==0）须退化 [0,0]，**不依赖 caller 传的 currentIdx**。
@@ -382,6 +400,7 @@ struct RenderStateBuilderTests {
                                                     candleCount: 0, currentIdx: sentinelIdx)
             #expect(b.minOffset == 0, "currentIdx=\(sentinelIdx) empty → minOffset 0")
             #expect(b.maxOffset == 0, "currentIdx=\(sentinelIdx) empty → maxOffset 0")
+            #expect(b.bounceEdges.isEmpty, "currentIdx=\(sentinelIdx) empty → 无边可弹")
         }
     }
 
@@ -394,6 +413,7 @@ struct RenderStateBuilderTests {
         #expect(b.maxOffset == 0)           // base<0 → upperBound 守卫返单点 [0,0]（**reveal-upperBound 判别在此**：
         #expect(b.minOffset == 0)           //   mutation upperBound 退回 count−vc → max/min≠0 被抓，见 Stage2 review）
         #expect(b.candleStep == 10)
+        #expect(b.bounceEdges.isEmpty)      // codex R3：早 tick 无滚动空间 → 无边可弹
         // no-OOB smoke（**非** reveal-upperBound 判别——早 tick 下 startIndex 的 max(…,0) 下界 clamp 先于 upperBound 生效）：
         // 正 offset（朝更老，已最旧）/负 offset（朝新，禁前窥）喂回 makeViewport 都落 autoTracking startIndex==0 且不 OOB。
         let cs = Self.candles(period: .m3, count: 200)

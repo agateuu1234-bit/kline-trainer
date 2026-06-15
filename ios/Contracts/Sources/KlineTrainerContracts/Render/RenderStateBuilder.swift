@@ -83,11 +83,11 @@ public enum RenderStateBuilder {
     /// 与 makeViewport 的 startIndex clamp **共用 geometryCore**（D4 单一真相，upperBound=max(0,baseStartIndex)）：
     /// maxOffset=roundTripEdge(baseStartIndex)、minOffset=roundTripEdge(baseStartIndex−upperBound)=roundTripEdge(0)=0。
     /// 供 R1b-wire 的 Coordinator 喂 engine——bounce/overscroll 在 [0, maxOffset]（仅 freeScrolling；autoTracking rest offset=0 照旧 pin）。
-    /// **⚠️ 边非对称（codex R2，reveal）**：`minOffset=0` 是**硬钳**（最新边=当前 tick，前向=未来），**非对称弹簧边**——
-    /// R1b-wire **不可**把最新边当 `EdgeBounceModel` 对称弹簧端点（否则负速 fling 会 spring offset<0 = 前向揭示）；
-    /// 须抑制最新边负速 / below-min spring → **单边 bounce：仅 maxOffset 最老边弹**（spec §六 B4 NOTE）。
+    /// **⚠️ 边非对称（codex R2/R3，reveal）**：`minOffset=0` 是**硬钳**（最新边=当前 tick，前向=未来），**非对称弹簧边**——
+    /// 返回的 `OffsetBounds.bounceEdges` **类型级编码**该非对称（仅含 `.max` 最老边、或无滚动空间时为空；**永不含 `.min`**），
+    /// R1b-wire 据此单边化 `EdgeBounceModel`——**不可**把最新边当对称弹簧端点（否则负速 fling 会 spring offset<0 = 前向揭示）。
     /// R1a 的 makeViewport 已在 render 层兜底（offset<0 → startIndex 钳 upperBound + pixelShift=0，无前向间隙；
-    /// 见测 `offsetBounds_minOffsetIsHardClampNotSpring`），但 R1b 仍须按硬钳语义接线以保正确 UX。
+    /// 见测 `offsetBounds_minOffsetIsHardClampNotSpring`），但 R1b 仍须按 `bounceEdges` 硬钳语义接线以保正确 UX。
     /// **span == upperBound·candleStep**（=max(0,base)·step）：早 tick base<0 → upperBound=0 → 单点 [0,0]
     /// （无滚动空间，已显最旧 + 无未来）；中/晚 tick span 随 base 渐增（不再是与 tick 无关常数）。
     /// **FP round-trip（codex R1-M）**：maxOffset 经 makeViewport plain `floor(offset/step)` 反算须得回 baseStartIndex——
@@ -95,19 +95,29 @@ public enum RenderStateBuilder {
     /// **非有限几何（codex R2-M）**：width/step 非有限 → 返单点 [0,0] 安全退化（交 R1b-wire EdgeBounceModel 端点校验），不 trap。
     /// **空 candle（codex R3 branch-diff）**：candleCount==0 → visibleCount==0 → 退化 [0,0]，**不依赖 caller 传的 currentIdx**——
     /// 否则 visibleCount=0 使 baseStartIndex=currentIdx+1，哨兵 currentIdx=0 → upperBound=1 漏过守卫 → 伪非零 maxOffset。
+    /// offsetBounds 返回（codex R3）：offset 区间 + reveal 单边 bounce 策略。`minOffset/maxOffset/candleStep`
+    /// 同旧 tuple；`bounceEdges` **类型级编码非对称**——仅最老边（`.max`）可弹，最新边（`minOffset` 硬钳）**永不可弹**。
+    struct OffsetBounds: Equatable, Sendable {
+        let minOffset: CGFloat       // 最新边硬钳（reveal：=当前 tick offset 0，前向不可越，非弹簧）
+        let maxOffset: CGFloat       // 最老边（≥ minOffset）
+        let candleStep: CGFloat
+        enum Edge: Hashable, Sendable { case min, max }
+        /// reveal 单边 bounce 策略：有滚动空间（max>min）→ `[.max]`（仅最老边弹）；否则空。**`.min` 永不在内**（硬钳）。
+        var bounceEdges: Set<Edge> { maxOffset > minOffset ? [.max] : [] }
+    }
+
     static func offsetBounds(mainFrameWidth: CGFloat, rawVisible: Int,
-                             candleCount: Int, currentIdx: Int)
-        -> (minOffset: CGFloat, maxOffset: CGFloat, candleStep: CGFloat) {
+                             candleCount: Int, currentIdx: Int) -> OffsetBounds {
         let core = geometryCore(mainFrameWidth: mainFrameWidth, rawVisible: rawVisible,
                                 candleCount: candleCount, currentIdx: currentIdx)
         // 空 candle（visibleCount==0）/ 非有限几何（NaN/inf width → NaN/inf step）/ 无滚动空间 → 单点 [0,0] 安全退化（codex R3 / R2-M / 退化）。
         guard core.visibleCount > 0, core.candleStep.isFinite, core.candleStep > 0, core.upperBound > 0 else {
             let safeStep = core.candleStep.isFinite ? core.candleStep : 0
-            return (minOffset: 0, maxOffset: 0, candleStep: safeStep)
+            return OffsetBounds(minOffset: 0, maxOffset: 0, candleStep: safeStep)
         }
         let maxOffset = roundTripEdge(integer: core.baseStartIndex, step: core.candleStep)
         let minOffset = roundTripEdge(integer: core.baseStartIndex - core.upperBound, step: core.candleStep)
-        return (minOffset: minOffset, maxOffset: maxOffset, candleStep: core.candleStep)
+        return OffsetBounds(minOffset: minOffset, maxOffset: maxOffset, candleStep: core.candleStep)
     }
 
     /// FP round-trip 守门（codex R1-M / C1a verify-and-correct）：返回一个 edge，使 makeViewport 的
