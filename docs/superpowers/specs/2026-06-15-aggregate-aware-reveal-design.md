@@ -75,10 +75,9 @@
   if lastVisibleIdx == currentIdx,
      candles[currentIdx].endGlobalIndex > tick,                       // 进行中且可见
      let m3 = engine.allCandles[.m3], tick < m3.count {              // R1-L1：守 m3 覆盖（precondition 下恒真），缺则跳过不崩
-      let synth = synthesizedInProgressAggregate(original: candles[currentIdx], m3: m3, tick: tick)
-      var arr = candles                       // R1-H3：改 base 数组副本（COW），保 base 索引
-      arr[currentIdx] = synth
-      slice = arr[viewport.startIndex ..< viewport.startIndex + viewport.visibleCount]   // slice.startIndex == viewport.startIndex 不变
+      // R3-H：就地改 base-indexed slice（ArraySlice COW 仅拷可见窗口 ≤target、保 base 索引 startIndex 不变、
+      // engine.allCandles 不变；实测 vs 全 period 数组拷贝 ~42×）。**不得** `var arr = candles`（拷全数组）或 `Array(...)`（从 0 重索引）。
+      slice[currentIdx] = synthesizedInProgressAggregate(original: candles[currentIdx], m3: m3, tick: tick)
       // R1-H2：用合成 slice 重算 priceRange，装入 viewport 副本（几何字段逐一保留）
       renderViewport = ChartViewport(startIndex: viewport.startIndex, visibleCount: viewport.visibleCount,
           pixelShift: viewport.pixelShift, geometry: viewport.geometry,
@@ -87,7 +86,7 @@
   // 之后用 slice 算 volumeRange/macdRange + visibleCandles=slice，viewport=renderViewport
   ```
 - **触发条件精确**：`lastVisibleIdx == currentIdx`（reveal 下 `sliceEnd == currentIdx+1`，窗口确实含 currentIdx；**向后滚动浏览历史**时 `lastVisibleIdx < currentIdx` → 可见全为已完成根 → 不合成）**且** `candles[currentIdx].endGlobalIndex > tick`（进行中）。**m3 驱动面板**：currentIdx 那根 `endGlobalIndex == tick` → 条件 false → 天然 no-op。
-- **base 索引契约（opus R1-H3，load-bearing）**：渲染全链按 base 索引定位（`mapper.indexToX(i) = (i − viewport.startIndex)·step`；MainChart/SubChart/Markers/Crosshair layouts 迭代 `slice.indices`）。故合成必须**改 base 数组副本后用原 bounds 重切**（`ArraySlice` 保 base 索引），**不得** `Array(candles[...])`（从 0 重索引 → 全面板渲染错位）。`visibleCandles` 维持 `ArraySlice<KLineCandle>` 类型不变。性能：COW 仅在合成触发（聚合面板，序列短）时拷贝一次/帧，可忽略。
+- **base 索引契约（opus R1-H3，load-bearing）**：渲染全链按 base 索引定位（`mapper.indexToX(i) = (i − viewport.startIndex)·step`；MainChart/SubChart/Markers/Crosshair layouts 迭代 `slice.indices`）。故合成必须保 `slice.startIndex == viewport.startIndex`：**就地改 base-indexed slice（`slice[currentIdx] = synth`）**——ArraySlice COW 仅拷可见窗口（≤target）、保 base 索引、`engine.allCandles` 不变（codex R3-H：**不得** `var arr = candles` 拷全 period 数组、亦**不得** `Array(candles[...])` 从 0 重索引）。`visibleCandles` 维持 `ArraySlice<KLineCandle>` 类型不变。性能：每帧仅拷 ≤target 窗口（实测 vs 全数组 ~42× 更省），large m15/m60 in-progress 由 `aggregateMakePerfSmoke` host 守 + device Instruments 为权威。
 - **排序**：`volumeRange/macdRange` + `priceRange` 必须**用替换后 slice** 计算（合成根 macd/boll/ma66 nil → 不入对应 range；partial volume/high/low 入 range、无未来撑大）。
 
 ---
@@ -133,3 +132,4 @@
 | 2026-06-15 | v1.2 (opus spec-review R2 APPROVE 收敛) | R2 模拟 backend window 规则 + 实核 Geometry/RenderStateBuilder/Markers 契约 → **H1/H2/H3/M1/L1 全 RESOLVED**（datetime-start 跨午休/隔夜 session gap 亦对，因两侧同 bisect datetime；ChartViewport 6 字段 memberwise init 存在；re-slice 保 base 索引）。新 2 [L]（非阻塞，已纳入）：**Edge-E** trigger 下 `start≤tick` 恒真但加 assert + 测试钉死；**volume** 完成瞬间柱高/range 同 OHLC 一并轻变（D6 已注）。设计收敛 APPROVE。 |
 | 2026-06-16 | v1.3 (codex branch-diff attest R1 [HIGH] 容损) | 实施后 codex:adversarial-review 揭 [HIGH]：v1.2 的 `assert(start≤tick)` 对**接受但损坏的数据**（`.m3` datetime 非单调 / 聚合 datetime 越界，engine 仅按 endGlobalIndex 校验、不校验 datetime 单调）会在**渲染热路径 trap**（debug assert / release 闭区间越界），把可恢复脏数据变成 use-time crash（比 init fail-fast 差）。裁决：**assert → `start = min(rawStart, tick)` clamp**（fail-safe，不崩 + 成分 ⊆ 已揭示不泄漏）；reader-boundary temporal 强校验属 persistence trust-boundary、本渲染 RFC 作用域外（clamp 已使渲染路径安全）。补 malformed-data 回归测。opus R2-L assert 决策被本条 supersede。 |
 | 2026-06-16 | v1.4 (codex branch-diff attest R2 两 [HIGH] 容损收口) | R2 揭：v1.3 clamp 仅护 OHLC range，仍有两处损坏数据渲染面：①合成根保留 `original.datetime` → 越界聚合 datetime 经 crosshair/HUD 漏未来时间戳；②`volume` 用 checked `+` 累加 → 巨量损坏数据渲染期 Int64 overflow trap。裁决（render 作用域内全防御，no-op 于良性数据）：**datetime 改取 `m3[start].datetime`**（良性==原 open）；**volume 改 saturating `addingReportingOverflow`**（饱和 Int64.max 不 trap）。补 2 回归测（datetime sanitize + volume 饱和）。reader-boundary 强校验仍 defer persistence（render 已 fail-safe）。 |
+| 2026-06-16 | v1.5 (codex branch-diff attest R3 [HIGH] 性能) | R3 揭：v1.1-H3 的 `var arr = candles; arr[currentIdx]=…` 对**聚合面板每帧**强制全 period 数组 COW（m15 可达数千根，engine.allCandles 仍持有原 storage），渲染热路径浪费；perf-smoke 仅测 .m3（合成不 fire）漏覆盖。裁决：**就地改 base-indexed slice `slice[currentIdx]=synth`**——实测 ArraySlice COW 仅拷可见窗口（≤80）且保 base 索引（startIndex 不变）、engine 数组不变，vs 全数组拷 ~42× 更省。补 `aggregateMakePerfSmoke`（大 m15 in-progress make() 回归 guard）。 |

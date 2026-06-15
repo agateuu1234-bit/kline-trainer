@@ -529,6 +529,37 @@ struct RenderStateBuilderTests {
         #expect(last.ma66 == nil)                                       // 指标 nil
     }
 
+    @MainActor
+    @Test("perf smoke（非权威）：大 in-progress 聚合面板 make() 装配开销（codex R3 全数组 COW 回归 guard）")
+    func aggregateMakePerfSmoke() {
+        // 大 m15 聚合（1000 根各跨 5 m3）+ 5000 m3，in-progress tick → 合成 fire。
+        // 防 codex R3 全 period 数组 per-frame COW 回归（就地 slice 突变仅拷窗口 ≤80）。device Instruments 为权威。
+        let m3 = (0..<5000).map { i in
+            KLineCandle(period: .m3, datetime: Int64(i) * 180, open: Double(i), high: Double(i) + 1,
+                        low: Double(i) - 1, close: Double(i) + 0.5, volume: 100, amount: nil, ma66: nil,
+                        bollUpper: nil, bollMid: nil, bollLower: nil, macdDiff: nil, macdDea: nil, macdBar: nil,
+                        globalIndex: i, endGlobalIndex: i)
+        }
+        let m15 = (0..<1000).map { k in
+            KLineCandle(period: .m15, datetime: Int64(5 * k) * 180, open: 5, high: 6, low: 4, close: 5,
+                        volume: 1, amount: nil, ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: nil, endGlobalIndex: 5 * k + 4)
+        }
+        let e = TrainingEngine(
+            flow: NormalFlow(fees: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true), maxTick: 4999),
+            allCandles: [.m3: m3, .m15: m15], maxTick: 4999, initialTick: 2502,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m15, initialLowerPeriod: .m15,
+            decelerationDriverFactory: { FakeFrameDriver(onTick: $0) })
+        let probe = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
+        #expect(probe.visibleCandles.last!.endGlobalIndex == 2502)   // 确认合成 fire（in-progress）
+        let start = Date()
+        for _ in 0..<100 { _ = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds) }
+        let ms = Date().timeIntervalSince(start) * 1000 / 100
+        print("[aggregate-reveal perf smoke] make() avg = \(ms) ms (non-authoritative; device Instruments 权威)")
+        #expect(ms < 50)   // 极宽松上界，仅防病态退化（就地 slice 突变下应远小于此）
+    }
+
     // MARK: - reveal 约束（已揭示前缀窗口；spec §五）
 
     @Test("reveal 不变量扫描：跨 tick × offset，slice 末根 ≤ currentIdx 且 visibleCount ≥ 1（禁前窥）")

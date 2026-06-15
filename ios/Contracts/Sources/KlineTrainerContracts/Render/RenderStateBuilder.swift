@@ -24,16 +24,15 @@ public enum RenderStateBuilder {
         let tick = engine.tick.globalTickIndex
         let viewport = makeViewport(panelState: panelState, candles: candles, tick: tick, bounds: bounds)
         // 聚合感知 reveal（spec 2026-06-15-aggregate-aware-reveal）：进行中聚合 K 线（可见且 endGlobalIndex>tick）
-        // 用已揭示 m3 partial 合成；改 base 数组副本保 base 索引（R1-H3）+ 用合成 slice 重算 priceRange（R1-H2）。
+        // 用已揭示 m3 partial 合成；**就地改 base-indexed slice**（ArraySlice COW 仅拷可见窗口 ≤target、保 base 索引
+        // slice.startIndex==viewport.startIndex，engine.allCandles 不变，codex R3-H：不拷全 period 数组）+ 重算 priceRange（R1-H2）。
         var renderViewport = viewport
         var slice = candles[viewport.startIndex ..< viewport.startIndex + viewport.visibleCount]
         let currentIdx = currentCandleIndex(candles: candles, tick: tick)
         let lastVisibleIdx = viewport.startIndex + viewport.visibleCount - 1
         if lastVisibleIdx == currentIdx, candles[currentIdx].endGlobalIndex > tick,
            let m3 = engine.allCandles[.m3], tick < m3.count {
-            var arr = candles
-            arr[currentIdx] = PartialAggregateCandle.synthesize(original: candles[currentIdx], m3: m3, tick: tick)
-            slice = arr[viewport.startIndex ..< viewport.startIndex + viewport.visibleCount]
+            slice[currentIdx] = PartialAggregateCandle.synthesize(original: candles[currentIdx], m3: m3, tick: tick)
             renderViewport = ChartViewport(
                 startIndex: viewport.startIndex, visibleCount: viewport.visibleCount,
                 pixelShift: viewport.pixelShift, geometry: viewport.geometry,
