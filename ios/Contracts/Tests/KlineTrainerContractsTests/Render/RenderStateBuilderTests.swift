@@ -53,13 +53,13 @@ struct RenderStateBuilderTests {
         #expect(150 - vp.startIndex == 79)
     }
 
-    @Test("锚定(b)：count>=80 但 currentIdx<79（早期 tick）→ startIndex==0，slot=currentIdx")
+    @Test("锚定(b)：count>=80 但 currentIdx<79（早期 tick）→ startIndex==0，只显已揭示前缀（reveal）")
     func anchorEarlyTick() {
         let cs = Self.candles(period: .m3, count: 200)
         let vp = RenderStateBuilder.makeViewport(
             panelState: Self.panel(), candles: cs, tick: 10, bounds: Self.bounds)
         #expect(vp.startIndex == 0)
-        #expect(vp.visibleCount == 80)
+        #expect(vp.visibleCount == 11)        // reveal：slice=candles[0..<11]（currentIdx+1），非旧 80
         #expect(10 - vp.startIndex == 10)
     }
 
@@ -94,7 +94,7 @@ struct RenderStateBuilderTests {
         #expect(vp.visibleCount == 50)
     }
 
-    // count=200, tick=150 → baseStartIndex=71, candleStep=10, upperBound=120
+    // count=200, tick=150 → baseStartIndex=71, candleStep=10, upperBound=max(0,baseStartIndex)=71（reveal）
     @Test("offset：中段正 offset → wholeShift + pixelShift 余量")
     func offsetMidScroll() {
         let cs = Self.candles(period: .m3, count: 200)
@@ -105,15 +105,15 @@ struct RenderStateBuilderTests {
         #expect(abs(vp.pixelShift - 5) < 1e-9)
     }
 
-    @Test("offset：负 offset → 余量仍落 [0,candleStep)")
+    @Test("offset：负 offset（前向/朝新）→ clamp 回 autoTracking（reveal 禁前窥）")
     func offsetNegative() {
         let cs = Self.candles(period: .m3, count: 200)
         let vp = RenderStateBuilder.makeViewport(
             panelState: Self.panel(offset: -25), candles: cs, tick: 150, bounds: Self.bounds)
-        // wholeShift=floor(-2.5)=-3 → startIndex=71-(-3)=74；pixelShift=-25-(-30)=5
-        #expect(vp.startIndex == 74)
-        #expect(vp.pixelShift >= 0 && vp.pixelShift < 10)
-        #expect(abs(vp.pixelShift - 5) < 1e-9)
+        // reveal：upperBound=max(0,baseStartIndex)=71；wholeShift=floor(-2.5)=-3 → unclamped=74 → clamp 71
+        //（前向滚动不可越当前 tick）；startIndex==71==upperBound → pixelShift 边 pin=0
+        #expect(vp.startIndex == 71)
+        #expect(vp.pixelShift == 0)
     }
 
     @Test("饱和(顶过左界)：offset 把 startIndex clamp 到 0 → pixelShift=0")
@@ -126,13 +126,13 @@ struct RenderStateBuilderTests {
         #expect(vp.pixelShift == 0)
     }
 
-    @Test("饱和(顶过右界)：offset 把 startIndex clamp 到 upperBound → pixelShift=0")
+    @Test("饱和(前向/朝新越界)：负大 offset → clamp 到 autoTracking（reveal），pixelShift=0")
     func saturateRightClamped() {
         let cs = Self.candles(period: .m3, count: 200)
         let vp = RenderStateBuilder.makeViewport(
             panelState: Self.panel(offset: -600), candles: cs, tick: 150, bounds: Self.bounds)
-        // wholeShift=floor(-60)=-60 → unclamped=71+60=131 → clamp upperBound 120
-        #expect(vp.startIndex == 120)
+        // reveal：upperBound=max(0,71)=71；wholeShift=floor(-60)=-60 → unclamped=131 → clamp 71（不越当前 tick）
+        #expect(vp.startIndex == 71)
         #expect(vp.pixelShift == 0)
     }
 
@@ -146,13 +146,13 @@ struct RenderStateBuilderTests {
         #expect(vp.pixelShift == 0)
     }
 
-    @Test("饱和(F3：恰落右界 + 非零余量，clamp 不改值)→ pixelShift=0")
+    @Test("饱和(前向恰落旧右界 + 非零余量)：reveal 下仍 clamp 到 autoTracking，pixelShift=0")
     func saturateRightExactBoundary() {
         let cs = Self.candles(period: .m3, count: 200)
         let vp = RenderStateBuilder.makeViewport(
             panelState: Self.panel(offset: -485), candles: cs, tick: 150, bounds: Self.bounds)
-        // wholeShift=floor(-48.5)=-49 → unclamped=71+49=120（==upperBound，clamp 不改）；余量=-485-(-490)=5 → 0
-        #expect(vp.startIndex == 120)
+        // reveal：upperBound=71；wholeShift=floor(-48.5)=-49 → unclamped=120 → clamp 71；余量按落位归 0
+        #expect(vp.startIndex == 71)
         #expect(vp.pixelShift == 0)
     }
 
@@ -312,7 +312,7 @@ struct RenderStateBuilderTests {
         #expect(vp.visibleCount == 40)
     }
 
-    @Test("D5 放宽视野撞老边界：visibleCount=160、currentIdx=150 → startIndex clamp 后边缘饱和")
+    @Test("D5 放宽视野 + reveal：visibleCount=160、currentIdx=150 → 早 tick 左填充至 currentIdx+1")
     func oneSixtyVisibleSaturates() {
         let ps = PanelViewState(period: .m3, interactionMode: .freeScrolling,
                                 visibleCount: 160, offset: 15, revision: 0)
@@ -320,10 +320,10 @@ struct RenderStateBuilderTests {
             panelState: ps, candles: Self.candles(period: .m3, count: 200),
             tick: 150, bounds: Self.bounds)
         #expect(abs(vp.geometry.candleStep - 5) < 1e-9)    // 800/160
-        // baseStart=150−159=−9，wholeShift=floor(15/5)=3 → −12 → clamp 0；startIndex==0 → pixelShift 饱和置 0
+        // baseStart=150−159=−9 → upperBound=max(0,−9)=0；wholeShift=floor(15/5)=3 → −12 → clamp 0 → pixelShift=0
         #expect(vp.startIndex == 0)
         #expect(vp.pixelShift == 0)
-        #expect(vp.visibleCount == 160)
+        #expect(vp.visibleCount == 151)    // reveal：sliceEnd=min(0+160, 150+1)=151，末根==currentIdx==150
     }
 
     @Test("D5 数据不足左对齐：count=100 < target=160 → visibleCount=100、分母仍 target（step=5）")
@@ -406,5 +406,59 @@ struct RenderStateBuilderTests {
                                          bounds: TrainingEngineInteractionTests.bounds)
         #expect(rs.drawings.count == 1)
         #expect(rs.drawings.allSatisfy { $0.panelPosition == 1 })            // 仅下栏；上栏被排除
+    }
+
+    // MARK: - reveal 约束（已揭示前缀窗口；spec §五）
+
+    @Test("reveal 不变量扫描：跨 tick × offset，slice 末根 ≤ currentIdx 且 visibleCount ≥ 1（禁前窥）")
+    func revealedPrefixInvariantScan() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let ticks = [0, 5, 10, 40, 79, 80, 150, 199]
+        let offsets: [CGFloat] = [0, 25, -25, 600, -600, 5000, -5000]
+        for t in ticks {
+            let currentIdx = RenderStateBuilder.currentCandleIndex(candles: cs, tick: t)
+            for off in offsets {
+                let vp = RenderStateBuilder.makeViewport(
+                    panelState: Self.panel(offset: off), candles: cs, tick: t, bounds: Self.bounds)
+                #expect(vp.visibleCount >= 1, "空切片 tick=\(t) offset=\(off)")
+                #expect(vp.startIndex + vp.visibleCount - 1 <= currentIdx,
+                        "前窥 tick=\(t) offset=\(off)：末根=\(vp.startIndex + vp.visibleCount - 1) > cIdx=\(currentIdx)")
+            }
+        }
+    }
+
+    @Test("reveal 前向滚动禁：任意负 offset → startIndex ≤ max(0, baseStartIndex)（不越 autoTracking）")
+    func forwardScrollClampedToAutoTracking() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let ticks = [10, 79, 150, 199]
+        let negOffsets: [CGFloat] = [-5, -25, -200, -600, -5000]
+        for t in ticks {
+            let currentIdx = RenderStateBuilder.currentCandleIndex(candles: cs, tick: t)
+            let cap = max(0, currentIdx - (min(80, cs.count) - 1))   // vc=80（panel visibleCount=0→fallback）
+            for off in negOffsets {
+                let vp = RenderStateBuilder.makeViewport(
+                    panelState: Self.panel(offset: off), candles: cs, tick: t, bounds: Self.bounds)
+                #expect(vp.startIndex <= cap, "前向越界 tick=\(t) offset=\(off)：si=\(vp.startIndex) > cap=\(cap)")
+            }
+        }
+    }
+
+    @Test("reveal 早 tick 修复：count=200/tick=10 → visibleCount==11、slice 末根==currentIdx==10（无未来）")
+    func earlyTickRevealsOnlyRevealedPrefix() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(), candles: cs, tick: 10, bounds: Self.bounds)
+        #expect(vp.startIndex == 0)
+        #expect(vp.visibleCount == 11)
+        #expect(vp.startIndex + vp.visibleCount - 1 == 10)   // 末根==currentIdx，无未来
+    }
+
+    @Test("reveal backward 历史：大正 offset → startIndex==0 + pixelShift==0（至最旧；regression 基准）")
+    func backwardScrollReachesOldest() {
+        let cs = Self.candles(period: .m3, count: 200)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: 5000), candles: cs, tick: 150, bounds: Self.bounds)
+        #expect(vp.startIndex == 0)
+        #expect(vp.pixelShift == 0)
     }
 }
