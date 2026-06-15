@@ -31,10 +31,11 @@
 
 ---
 
-## Residual（如有 review 残留）
+## Residual（codex review 残留）
 
 | Residual | 来源 | 处理 |
 |---|---|---|
-| （待 codex review 回填） | — | — |
+| **13c-R1：帧预算 device 测量「采样≠帧相关」** —— Time Profiler 分别取 make/draw 峰值相加 ≠ 同帧真实合并耗时（上/下双图实例 + make 调度 draw 延后）；严谨测量需 `os_signpost` 帧相关 instrumentation | codex R8-H1 | **accept residual**：根治 = 顺位 12 #104 **生产代码** signpost instrumentation，超 13c doc-only scope。doc-only 已做：矩阵 ③ caveat 标合并峰值为「指示性上界」，临界值须 signpost 复核 → fast-follow perf-instrumentation PR |
+| **13c-R2：帧预算 fixture 欠载** —— §C seed `.m60`=12/`.daily`=6 < `RenderStateBuilder` 80-visible 渲染负载 → 经 §C fixture 测的是欠载图表 | codex R8-H2 | **accept residual**：根治 = 13b `DebugFixtureData` **代码增强**（各 profiled 周期 ≥80 蜡烛），超 13c doc-only scope。doc-only 已做：矩阵 ③ caveat 要求记录周期+渲染蜡烛数，<80 标「欠载非满载 PASS」 → fast-follow perf-fixture PR |
 
-**codex review 收敛说明**：（待回填——doc-only 经 codex 对抗 review 治理 doc 类；如配额耗尽 fallback opus 4.8 xhigh，沿用 Wave 1/2 + 13a/13b 先例）。
+**codex review 收敛说明（accept residual + override）**：doc-only 13c 经 `codex:adversarial-review` **8 轮 branch-diff**（配额未耗尽，全程真 codex）。**R1–R7 全部实质 finding 已修**（每轮新的、bounded、in-scope honesty/robustness 问题，非重复）：R1 bounce/feature-completeness PENDING + W3-11-R1 功能门；R2 gate fail-open 根治（块解析）+ u2-gesture；R3 13a-R2 data-loss 升顶层 ledger + awk 拒未闭合块 + 关闭须全 PASS；R4 D→PARTIAL（fake verifier 不掩盖）+ PR12 手势修正；R5 make+draw 合并判据 + Debug↔Release seed 衔接 + 散文↔机器块 drift；R6 cache Caches-only 纠正 + action 列 make+draw + plan SUPERSEDED；R7 补 顺位 2 orientation 进闭关矩阵。**R8 两 High 转向 frame-budget 测量精度无止境下钻**，其根治均为**已 merged PR 的生产代码改动**（os_signpost 帧相关 instrumentation #104 / ≥80 蜡烛 perf fixture #109），**超 13c doc-only scope**。依 `feedback_big_pr_codex_noncovergence`（>5 轮 escalate；本 PR 已 8 轮）+ `feedback_codex_distributed_reliability_drilldown`（codex 子域无止境下钻、根治越界 → accept residual + override）：**doc-only 如实记录限制（矩阵 ③ caveat + 本残留 13c-R1/R2）已做；代码级根治 accept residual + user TTY attest-override + admin merge**。整体 opus 4.8 xhigh plan-review R1→R2 APPROVE + spec-compliance PASS + code-quality APPROVED + 最终整体 review R1→R2 APPROVE；grep gate fail-closed（块解析 + 全行 + 拒重复 + 拒未闭合 + 红验证多路）。
