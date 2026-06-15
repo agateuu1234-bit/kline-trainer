@@ -348,6 +348,65 @@ struct RenderStateBuilderTests {
         #expect(b.candleStep == 10)
     }
 
+    // codex R1-H：早 tick currentIdx=10 → baseStartIndex=10-79=-69 → base·step=-690<0；
+    // 但 autoTracking offset=0 是合法态（既有 anchorEarlyTick：offset=0→startIndex==0）→ maxOffset 须 canonicalize 到 0，
+    // 否则 bounce 把 0 判越界弹到 -690。
+    @Test("offsetBounds 早 tick canonicalize：base<0 → maxOffset==0（非 -690），minOffset==-1890")
+    func offsetBounds_earlyTick_canonicalizesZero() {
+        let b = RenderStateBuilder.offsetBounds(
+            mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
+            rawVisible: 0, candleCount: 200, currentIdx: 10)
+        #expect(b.maxOffset == 0)        // max(0, -69*10) = 0
+        #expect(b.minOffset == -1890)    // min(0, (-69-120)*10)
+        let cs = Self.candles(period: .m3, count: 200)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: 0), candles: cs, tick: 10, bounds: Self.bounds)
+        #expect(vp.startIndex == 0)      // 行为对拍：offset=0 → 既有 anchorEarlyTick 的 startIndex==0
+    }
+
+    // codex R1-H 不变量：autoTracking canonical offset=0 恒 ∈ [minOffset, maxOffset]（早/中/晚 tick）。
+    @Test("offsetBounds 不变量：offset=0 恒在 [min,max] 内（tick 10/150/199）+ 晚 tick min canonicalize")
+    func offsetBounds_zeroAlwaysInRange() {
+        let w = ChartPanelFrames.split(in: Self.bounds).mainChart.width
+        for tickIdx in [10, 150, 199] {
+            let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: 0,
+                                                    candleCount: 200, currentIdx: tickIdx)
+            #expect(b.minOffset <= 0, "tick=\(tickIdx) min<=0")
+            #expect(b.maxOffset >= 0, "tick=\(tickIdx) max>=0")
+        }
+        let bLate = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: 0,
+                                                    candleCount: 200, currentIdx: 199)
+        #expect(bLate.maxOffset == 1200)   // base=120·10
+        #expect(bLate.minOffset == 0)      // min(0, (120-120)·10)
+    }
+
+    // codex R1-M：非整除 step（width/vc 不整除）下 edge=integer·step 经 makeViewport plain floor 反算可偏 1；
+    // roundTripEdge verify-and-correct 钉死：喂 maxOffset/minOffset 回 makeViewport 精确落边 + pixelShift==0。
+    @Test("offsetBounds 非整除 step round-trip：vc 20...120 × width=1000 → edge 精确反算落边 pin")
+    func offsetBounds_roundTripNonIntegral() {
+        let cs = Self.candles(period: .m3, count: 300)
+        let bounds = CGRect(x: 0, y: 0, width: 1000, height: 600)   // 1000/vc 多数非整除
+        let w = ChartPanelFrames.split(in: bounds).mainChart.width
+        for vc in 20...120 {
+            let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: vc,
+                                                    candleCount: 300, currentIdx: 200)
+            let pMax = PanelViewState(period: .m3, interactionMode: .autoTracking,
+                                      visibleCount: vc, offset: b.maxOffset, revision: 0)
+            let vpMax = RenderStateBuilder.makeViewport(panelState: pMax, candles: cs, tick: 200, bounds: bounds)
+            if b.maxOffset > 0 {
+                #expect(vpMax.startIndex == 0, "vc=\(vc) maxOffset round-trip→startIndex 0")
+                #expect(vpMax.pixelShift == 0, "vc=\(vc) maxOffset pixelShift pin")
+            }
+            let pMin = PanelViewState(period: .m3, interactionMode: .autoTracking,
+                                      visibleCount: vc, offset: b.minOffset, revision: 0)
+            let vpMin = RenderStateBuilder.makeViewport(panelState: pMin, candles: cs, tick: 200, bounds: bounds)
+            if b.minOffset < 0 {
+                #expect(vpMin.startIndex == 300 - vc, "vc=\(vc) minOffset round-trip→upperBound")
+                #expect(vpMin.pixelShift == 0, "vc=\(vc) minOffset pixelShift pin")
+            }
+        }
+    }
+
     // MARK: 顺位 3 D5：去硬编码 80（target = panelState.visibleCount，≤0 → fallback 80）
 
     /// 非 0 显式入参 + 80 golden parity（独立金值硬编码，R1-L3 防 tautology）

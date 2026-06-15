@@ -76,16 +76,41 @@ public enum RenderStateBuilder {
                             candleStep: candleStep, visibleCount: visibleCount)
     }
 
-    /// bounce 接线所需的 offset 边界（spec §二.B1 / D5）：带符号——maxOffset≥0（最老边）、minOffset 通常 <0（最新边）。
+    /// bounce 接线所需的 offset 边界（spec §二.B1 / D5）：带符号——maxOffset≥0（最老边）、minOffset≤0（最新边）。
     /// 与 makeViewport 的 startIndex clamp **共用 geometryCore**（D4 单一真相）。供 R1b-wire 的 Coordinator 喂 engine。
+    /// **不变量（codex R1-H）**：autoTracking canonical offset=0 恒 ∈ [minOffset, maxOffset]——故 max 取 `max(0, base·step)`
+    /// （早 tick base<0 时 base·step<0，但 offset=0 仍是合法 autoTracking 态、不可判越界）、min 取 `min(0, …)`；
+    /// upperBound==0（count≤visibleCount，无滚动空间）→ 单点 [0,0]。
+    /// **FP round-trip（codex R1-M）**：edge 经 makeViewport 的 plain `floor(offset/step)` 反算须得回 integer——
+    /// 非整除 step（如 1000/21）下 `integer·step` 可 FP 下溢/上溢致 floor 偏 1 → `roundTripEdge` verify-and-correct 钉死。
     static func offsetBounds(mainFrameWidth: CGFloat, rawVisible: Int,
                              candleCount: Int, currentIdx: Int)
         -> (minOffset: CGFloat, maxOffset: CGFloat, candleStep: CGFloat) {
         let core = geometryCore(mainFrameWidth: mainFrameWidth, rawVisible: rawVisible,
                                 candleCount: candleCount, currentIdx: currentIdx)
-        let maxOffset = CGFloat(core.baseStartIndex) * core.candleStep
-        let minOffset = CGFloat(core.baseStartIndex - core.upperBound) * core.candleStep
+        // 无滚动空间 → 单点（任意越界回弹至 0，交 R1b-wire EdgeBounceModel）。
+        guard core.upperBound > 0 else {
+            return (minOffset: 0, maxOffset: 0, candleStep: core.candleStep)
+        }
+        let rawMax = roundTripEdge(integer: core.baseStartIndex, step: core.candleStep)
+        let rawMin = roundTripEdge(integer: core.baseStartIndex - core.upperBound, step: core.candleStep)
+        let maxOffset = max(0, rawMax)   // 保 0∈区间（早 tick base<0 → 0）
+        let minOffset = min(0, rawMin)   // 保 0∈区间（晚 tick base==upper → 0）
         return (minOffset: minOffset, maxOffset: maxOffset, candleStep: core.candleStep)
+    }
+
+    /// FP round-trip 守门（codex R1-M / C1a verify-and-correct）：返回一个 edge，使 makeViewport 的
+    /// plain `Int((edge/step).rounded(.down)) == integer`。`integer·step` 在非整除 step 下可 FP 偏移致 floor 偏 1；
+    /// 按 floor 方向 ULP-nudge 至吻合（bounded；step<=0 或已吻合则原样返回）。
+    static func roundTripEdge(integer: Int, step: CGFloat) -> CGFloat {
+        guard step > 0 else { return CGFloat(integer) * step }
+        var edge = CGFloat(integer) * step
+        var n = 0
+        while Int((edge / step).rounded(.down)) != integer && n < 32 {
+            edge = Int((edge / step).rounded(.down)) < integer ? edge.nextUp : edge.nextDown
+            n += 1
+        }
+        return edge
     }
 
     /// 视口几何推导（唯一拥有 startIndex/pixelShift 装配的函数；make 与 visibleCandleRange 都经它）。
