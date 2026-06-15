@@ -145,11 +145,14 @@ func offsetBounds_known() {
     #expect(b.candleStep == 10)
 }
 
-// D4 行为对拍（opus M4）：把 offsetBounds 算出的 edge-offset 喂回 makeViewport，
-// 须落到 render 边缘（startIndex∈{0,upperBound}）且 pixelShift==0（边缘 pin），证 bounds 与 render clamp 同源。
-@Test("offsetBounds 行为对拍：maxOffset→startIndex==0 pin / minOffset→startIndex==upperBound pin")
+// D4 行为对拍（opus M4 + R1-Low1/Low2）：把 offsetBounds 算出的 edge-offset 喂回 makeViewport，
+// 须落到 render 边缘且 pixelShift==0，证 bounds 与 render clamp 同源。
+// 双侧锚（Low1）：max 是 startIndex==0 的**确切下确界**——max−step 时 startIndex 须 ==1（未到边）；
+// currentIdx 显式锚（Low2）：钉死「offsetBounds 字面入参 currentIdx」== makeViewport 的 tick→currentIdx，防同向漂移。
+@Test("offsetBounds 行为对拍：maxOffset→startIndex==0 pin / minOffset→upperBound pin / 双侧确界 + currentIdx 同源")
 func offsetBounds_matchesRenderClamp() {
     let cs = Self.candles(period: .m3, count: 200)
+    #expect(RenderStateBuilder.currentCandleIndex(candles: cs, tick: 150) == 150)  // Low2：钉死前提同源
     let b = RenderStateBuilder.offsetBounds(
         mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
         rawVisible: 0, candleCount: 200, currentIdx: 150)
@@ -157,10 +160,18 @@ func offsetBounds_matchesRenderClamp() {
         panelState: Self.panel(offset: b.maxOffset), candles: cs, tick: 150, bounds: Self.bounds)
     #expect(atMax.startIndex == 0)          // 最老边
     #expect(atMax.pixelShift == 0)          // 边缘 pin
+    // Low1 对侧锚：max−step 未到边 → startIndex==1（证 maxOffset 是 startIndex==0 的确切下确界，非任意大值）
+    let belowMax = RenderStateBuilder.makeViewport(
+        panelState: Self.panel(offset: b.maxOffset - b.candleStep), candles: cs, tick: 150, bounds: Self.bounds)
+    #expect(belowMax.startIndex == 1)
     let atMin = RenderStateBuilder.makeViewport(
         panelState: Self.panel(offset: b.minOffset), candles: cs, tick: 150, bounds: Self.bounds)
     #expect(atMin.startIndex == 120)        // upperBound, 最新边
     #expect(atMin.pixelShift == 0)
+    // Low1 对侧锚：min+step 未到边 → startIndex==119（确切上确界）
+    let aboveMin = RenderStateBuilder.makeViewport(
+        panelState: Self.panel(offset: b.minOffset + b.candleStep), candles: cs, tick: 150, bounds: Self.bounds)
+    #expect(aboveMin.startIndex == 119)
 }
 ```
 
