@@ -71,4 +71,48 @@ struct DownloadAcceptanceRunnerIntegrationTests {
         // 真 cleaner 已清掉下载 zip（位于系统临时目录子树内）
         #expect(FileManager.default.fileExists(atPath: zipURL.path) == false)
     }
+
+    @Test func run_realPipeline_storedSetIsDownstreamConsumable() async throws {
+        let (sqliteFixtureURL, cleanupSqlite) = try TrainingSetSQLiteFixture.make()
+        defer { cleanupSqlite() }
+        let sqliteBytes = try Data(contentsOf: sqliteFixtureURL)
+
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("P2Smoke-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+        let (zipURL, crcHex) = try ZipFixture.makeMinimalSqliteZip(
+            in: workDir, sqliteFileName: "training.sqlite", sqlitePayload: sqliteBytes)
+
+        let cacheRoot = CacheFixture.makeTempCacheRoot()
+        defer { CacheFixture.cleanup(cacheRoot) }
+        let journal = InMemoryAcceptanceJournalDAO()
+        let runner = DownloadAcceptanceRunner(
+            api: FakeAPIClient(download: .success(zipURL), confirmError: nil),
+            cache: DefaultFileSystemCacheManager(cacheRoot: cacheRoot),
+            dbFactory: DefaultTrainingSetDBFactory(),
+            journal: journal,
+            integrity: DefaultZipIntegrityVerifier(),
+            extractor: DefaultZipExtractor(),
+            dataVerifier: FakeTrainingSetDataVerifier(),
+            cleaner: DefaultDownloadAcceptanceCleaner())
+        let meta = TrainingSetMetaItem(
+            id: 77, stockCode: "600001", stockName: "测试股票",
+            filename: "training.zip", schemaVersion: 1, contentHash: crcHex)
+
+        let result = await runner.run(meta: meta, leaseId: "22222222-2222-2222-2222-222222222222")
+        guard case .confirmed(let file) = result else {
+            Issue.record("expected .confirmed via real pipeline, got \(result)"); return
+        }
+
+        // §D 核心：stored 组下游可消费——真 factory open + 读 meta + 读全蜡烛
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(
+            file: file.localURL, expectedSchemaVersion: TRAINING_SET_SCHEMA_VERSION)
+        defer { reader.close() }
+        let loadedMeta = try reader.loadMeta()
+        #expect(loadedMeta.stockCode == "600001")
+        let candles = try reader.loadAllCandles()
+        #expect((candles[.m3]?.isEmpty == false), "下载组真能被会话读取消费（m3 蜡烛非空）")
+        #expect(candles[.m3]?.first?.globalIndex == 0)
+    }
 }
