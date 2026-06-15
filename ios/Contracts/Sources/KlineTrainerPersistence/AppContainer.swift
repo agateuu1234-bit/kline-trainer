@@ -13,12 +13,22 @@ public final class AppContainer {
     public let coordinator: TrainingSessionCoordinator
     public let router: AppRouter
 
-    public init(config: AppConfig) throws {
+    /// - Parameter debugSeedFixtures: `#if DEBUG` 全 app fixture provisioning 开关（默认关；Release 忽略）。
+    ///   true 时在 SettingsStore 构造**前** seed，使其 eager-load 到 seeded settings（codex-13b-R3 stale 修）。
+    public init(config: AppConfig, debugSeedFixtures: Bool = false) throws {
         let api = DefaultAPIClient(baseURL: config.backendBaseURL)
         let db = try DefaultAppDB(dbPath: config.dbPath)                  // 唯一 throws 点（migration/IO）
         let cache = DefaultFileSystemCacheManager(cacheRoot: config.cacheRootDir)
         let dbFactory = DefaultTrainingSetDBFactory()
-        let settings = SettingsStore(settingsDAO: db)                     // db 同时是 SettingsDAO
+        #if DEBUG
+        // §C debug fixture provisioning：须在 SettingsStore 构造**前** seed（让其 eager-load 到 seeded
+        // settings，解 codex-13b-R3 stale settings）。幂等 + 全空 guard（仅 cache+history+pending 全空才
+        // seed，解 codex-13b-R1：iOS 可单独清 Caches 但留 app.sqlite → cache 空 ≠ fresh install，不破坏真实数据）。
+        if debugSeedFixtures {
+            try Self.seedDebugFixtures(db: db, cache: cache)
+        }
+        #endif
+        let settings = SettingsStore(settingsDAO: db)                     // db 同时是 SettingsDAO（seed 后 load 到 fixture settings）
         let acceptance = DownloadAcceptanceRunner(
             api: api, cache: cache, dbFactory: dbFactory, journal: db,
             integrity: DefaultZipIntegrityVerifier(), extractor: DefaultZipExtractor(),

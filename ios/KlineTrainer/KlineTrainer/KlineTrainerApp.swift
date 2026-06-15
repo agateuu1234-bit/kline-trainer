@@ -16,7 +16,16 @@ struct KlineTrainerApp: App {
             let cfg = AppConfig(dbPath: support.appendingPathComponent("app.sqlite"),
                                 cacheRootDir: caches.appendingPathComponent("training-sets"),
                                 backendBaseURL: URL(string: "http://kline-trainer.local")!)  // TODO(NAS) PR11-R1：部署后替换
-            _container = State(initialValue: try AppContainer(config: cfg))
+            // 运行时 opt-in（默认关）：仅 env KLINE_SEED_FIXTURE=1 时 seed fixture，使运行时验收矩阵可在真
+            // composition root 跑。seed 在 AppContainer.init 内（SettingsStore 构造前，settings 不 stale）+
+            // 全空 guard（不破坏真实数据）。Release 二进制无 seed 代码（AppContainer 内 seed 块 #if DEBUG）。
+            #if DEBUG
+            let seedFixtures = ProcessInfo.processInfo.environment["KLINE_SEED_FIXTURE"] == "1"
+            #else
+            let seedFixtures = false
+            #endif
+            let container = try AppContainer(config: cfg, debugSeedFixtures: seedFixtures)
+            _container = State(initialValue: container)
         } catch {
             _initError = State(initialValue: error)
         }
