@@ -76,6 +76,18 @@ public enum RenderStateBuilder {
                             candleStep: candleStep, visibleCount: visibleCount)
     }
 
+    /// bounce 接线所需的 offset 边界（spec §二.B1 / D5）：带符号——maxOffset≥0（最老边）、minOffset 通常 <0（最新边）。
+    /// 与 makeViewport 的 startIndex clamp **共用 geometryCore**（D4 单一真相）。供 R1b-wire 的 Coordinator 喂 engine。
+    static func offsetBounds(mainFrameWidth: CGFloat, rawVisible: Int,
+                             candleCount: Int, currentIdx: Int)
+        -> (minOffset: CGFloat, maxOffset: CGFloat, candleStep: CGFloat) {
+        let core = geometryCore(mainFrameWidth: mainFrameWidth, rawVisible: rawVisible,
+                                candleCount: candleCount, currentIdx: currentIdx)
+        let maxOffset = CGFloat(core.baseStartIndex) * core.candleStep
+        let minOffset = CGFloat(core.baseStartIndex - core.upperBound) * core.candleStep
+        return (minOffset: minOffset, maxOffset: maxOffset, candleStep: core.candleStep)
+    }
+
     /// 视口几何推导（唯一拥有 startIndex/pixelShift 装配的函数；make 与 visibleCandleRange 都经它）。
     /// **前置约束**：`candles` 非空、`bounds.width > 0`（调用方 make/visibleCandleRange 已守 .empty/空）。
     /// 支持 autoTracking（offset=0）与 freeScrolling（非零 offset 分解 + 边界饱和）；C8b H1 handler 复用点。

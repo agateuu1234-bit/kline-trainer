@@ -297,6 +297,57 @@ struct RenderStateBuilderTests {
         #expect(core.upperBound == 120)         // 200 − 80
     }
 
+    @Test("offsetBounds：count=200/currentIdx=150/width=800 → max=710,min=-490,step=10")
+    func offsetBounds_known() {
+        let b = RenderStateBuilder.offsetBounds(
+            mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
+            rawVisible: 0, candleCount: 200, currentIdx: 150)
+        #expect(b.maxOffset == 710)     // baseStartIndex 71 · step 10
+        #expect(b.minOffset == -490)    // (71 − 120) · 10
+        #expect(b.candleStep == 10)
+    }
+
+    // D4 行为对拍（opus M4 + R1-Low1/Low2）：把 offsetBounds 算出的 edge-offset 喂回 makeViewport，
+    // 须落到 render 边缘且 pixelShift==0，证 bounds 与 render clamp 同源。
+    // 双侧锚（Low1）：max 是 startIndex==0 的**确切下确界**——max−step 时 startIndex 须 ==1（未到边）；
+    // currentIdx 显式锚（Low2）：钉死「offsetBounds 字面入参 currentIdx」== makeViewport 的 tick→currentIdx，防同向漂移。
+    @Test("offsetBounds 行为对拍：maxOffset→startIndex==0 pin / minOffset→upperBound pin / 双侧确界 + currentIdx 同源")
+    func offsetBounds_matchesRenderClamp() {
+        let cs = Self.candles(period: .m3, count: 200)
+        #expect(RenderStateBuilder.currentCandleIndex(candles: cs, tick: 150) == 150)  // Low2：钉死前提同源
+        let b = RenderStateBuilder.offsetBounds(
+            mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
+            rawVisible: 0, candleCount: 200, currentIdx: 150)
+        let atMax = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: b.maxOffset), candles: cs, tick: 150, bounds: Self.bounds)
+        #expect(atMax.startIndex == 0)          // 最老边
+        #expect(atMax.pixelShift == 0)          // 边缘 pin
+        // Low1 对侧锚：max−step 未到边 → startIndex==1（证 maxOffset 是 startIndex==0 的确切下确界，非任意大值）
+        let belowMax = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: b.maxOffset - b.candleStep), candles: cs, tick: 150, bounds: Self.bounds)
+        #expect(belowMax.startIndex == 1)
+        let atMin = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: b.minOffset), candles: cs, tick: 150, bounds: Self.bounds)
+        #expect(atMin.startIndex == 120)        // upperBound, 最新边
+        #expect(atMin.pixelShift == 0)
+        // Low1 对侧锚：min+step 未到边 → startIndex==119（确切上确界）
+        let aboveMin = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: b.minOffset + b.candleStep), candles: cs, tick: 150, bounds: Self.bounds)
+        #expect(aboveMin.startIndex == 119)
+    }
+
+    @Test("offsetBounds 退化：count<=visibleCount(无滚动空间) → upperBound==0, min/max 同号无区间")
+    func offsetBounds_degenerate() {
+        // count=30 < 80 → visibleCount=min(80,30)=30, target=80, step=10, upperBound=max(0,30-30)=0
+        // currentIdx=29(最新根) → baseStartIndex=29-29=0 → max=0, min=(0-0)*10=0（单点，无 overscroll 空间）
+        let b = RenderStateBuilder.offsetBounds(
+            mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
+            rawVisible: 0, candleCount: 30, currentIdx: 29)
+        #expect(b.maxOffset == 0)
+        #expect(b.minOffset == 0)
+        #expect(b.candleStep == 10)
+    }
+
     // MARK: 顺位 3 D5：去硬编码 80（target = panelState.visibleCount，≤0 → fallback 80）
 
     /// 非 0 显式入参 + 80 golden parity（独立金值硬编码，R1-L3 防 tautology）
