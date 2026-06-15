@@ -237,13 +237,23 @@ git commit -m "feat(13c-R2): seed 调用点接 fullLoadM3Count + 端到端 seede
 - Modify: `docs/acceptance/2026-06-14-wave3-runtime-matrix.md`（R8-H2 caveat）
 - Modify: `docs/governance/2026-06-14-wave3-completion.md`（运行时矩阵行）
 
-- [ ] **Step 1: completion doc Residual 表 —— 13c-R2 → RESOLVED**
+- [ ] **Step 1: completion doc Residual 表 —— 仅 13c-R2 → RESOLVED（13c-R1 行不动）**
 
-在 `docs/acceptance/2026-06-14-wave3-pr13c-completion.md` 的 Residual 表中，**保留** 13c-R2 行的「Residual / 来源」原文，把「处理」列改为：
+> **实施者：编辑前先 `Read` 该文件确认当前精确文本（含 `**` 粗体标记），做精确 old→new 替换。只改 13c-R2 行的「处理」单元格，绝不触 13c-R1 行（保持其 `accept residual` 原状）。**
+
+在 `docs/acceptance/2026-06-14-wave3-pr13c-completion.md` Residual 表中，把 **13c-R2 行的「处理」单元格**（当前为）：
 
 ```
-**RESOLVED（Wave 3 13c-R2 fast-follow PR，2026-06-15）**：`DebugFixtureData` 新增 `fullLoadM3Count=9600` 并由 `AppContainer.seedDebugFixtures` 使用 → §C seed 现满载：每周期 ≥ `defaultVisibleCount`(80)、make 默认面板 `.m60`=480/`.daily`=240 ≥ `maxVisibleCount`(240，pinch 最远档)。回归测试：`DebugFixtureDataTests.fullLoadFixture_*` + `AppContainerDebugSeedTests.seededFixture_isFullLoad`。**13c-R1（采样≠帧相关）仍 OPEN**（需 os_signpost 生产 instrumentation，另一 PR scope）。
+**accept residual**：根治 = 13b `DebugFixtureData` **代码增强**（各 profiled 周期 ≥80 蜡烛），超 13c doc-only scope。doc-only 已做：矩阵 ③ caveat 要求记录周期+渲染蜡烛数，<80 标「欠载非满载 PASS」 → fast-follow perf-fixture PR
 ```
+
+替换为：
+
+```
+**RESOLVED（Wave 3 13c-R2 fast-follow PR，2026-06-15）**：根治 = `DebugFixtureData` 新增 `fullLoadM3Count`=9600 并由 `AppContainer.seedDebugFixtures` 使用 → §C seed 现满载：每周期 ≥ `defaultVisibleCount`(80)、make 默认面板 `.m60`=480/`.daily`=240 ≥ `maxVisibleCount`(240，pinch 最远档)。回归测试 `DebugFixtureDataTests.fullLoadFixture_*` + `AppContainerDebugSeedTests.seededFixture_isFullLoad`（原 accept-residual 表述见 git 历史）
+```
+
+> 注：**不**在本单元格内写「13c-R1」字样——保持 `grep "13c-R1"` 仅命中 13c-R1 自身行（消除跨行 grep 歧义，见 Step 4 / Task 4 item 7）。13c-R1 行保持 `accept residual` 不变。
 
 - [ ] **Step 2: runtime-matrix R8-H2 caveat 更新**
 
@@ -253,21 +263,36 @@ git commit -m "feat(13c-R2): seed 调用点接 fullLoadM3Count + 端到端 seede
 > **【RESOLVED 2026-06-15，Wave 3 13c-R2 fast-follow】** perf-fixture 代码增强已 ship：`DebugFixtureData.fullLoadM3Count`(=9600) 经 `AppContainer.seedDebugFixtures` 使用 → §C seed 各周期 ≥ `defaultVisibleCount`(80)、make 默认面板 `.m60`(=480)/`.daily`(=240) ≥ `maxVisibleCount`(240)。**经 §C seed 剖析默认面板现为满载（非欠载）。** 回填仍须记录「所测周期 + 实际渲染蜡烛数」；若所测周期蜡烛数 ≥80 即满载达标，仅当人为切到行数 <80 的极端构造（非 §C 默认）才标欠载。
 ```
 
-- [ ] **Step 3: governance completion doc 行更新**
+- [ ] **Step 3: governance completion doc 行更新（精确替换，含 `**` 粗体标记 + 尾部括号）**
 
-在 `docs/governance/2026-06-14-wave3-completion.md` 运行时矩阵行中，把「帧预算 device 测量精度限制（采样≠帧相关 / fixture 欠载）记 acceptance 13c-R1/R2」改为：
+> **实施者：先 `Read` 确认精确文本。该行 13c-R1 与 13c-R2 同句 bundle，须拆开——13c-R2 标 RESOLVED、13c-R1 保持 accept residual。**
+
+在 `docs/governance/2026-06-14-wave3-completion.md` 运行时矩阵行中，把以下**精确子串**（注意 `**…**` 粗体与尾部括号）：
 
 ```
-**帧预算 device 测量精度限制**：采样≠帧相关（13c-R1，OPEN，需 os_signpost 生产 instrumentation）；fixture 欠载（13c-R2，**RESOLVED 2026-06-15**：`DebugFixtureData.fullLoadM3Count` 满载 perf fixture）。
+**帧预算 device 测量精度限制**（采样≠帧相关 / fixture 欠载）记 acceptance **13c-R1/R2**（codex R8，accept residual，根治 = fast-follow 性能代码 PR，超 doc-only scope；矩阵 ③ caveat 已如实标指示性上界 + 欠载）
+```
+
+替换为：
+
+```
+**帧预算 device 测量精度限制**：①采样≠帧相关（**13c-R1，accept residual / OPEN**，根治 = os_signpost 生产 instrumentation，超 doc-only scope）；②fixture 欠载（**13c-R2，RESOLVED 2026-06-15**：`DebugFixtureData.fullLoadM3Count`=9600 满载 perf fixture，§C seed 现 ≥80 全周期 / ≥240 默认面板）
 ```
 
 - [ ] **Step 4: grep 验证 doc drift（散文↔状态一致）**
 
-Run:
+Run（验证 13c-R2 已 flip RESOLVED，且 13c-R1 在 completion 表**未被** flip——保持 `accept residual`）：
 ```bash
-grep -n "13c-R2" docs/acceptance/2026-06-14-wave3-pr13c-completion.md docs/acceptance/2026-06-14-wave3-runtime-matrix.md docs/governance/2026-06-14-wave3-completion.md
+# 13c-R2 三处均带 RESOLVED
+grep -n "13c-R2" docs/acceptance/2026-06-14-wave3-pr13c-completion.md \
+                 docs/acceptance/2026-06-14-wave3-runtime-matrix.md \
+                 docs/governance/2026-06-14-wave3-completion.md
+# 13c-R1 在 completion residual 表仍为 accept residual（未误关闭）；且该行不含 RESOLVED
+grep -n "13c-R1" docs/acceptance/2026-06-14-wave3-pr13c-completion.md
 ```
-Expected: 每处 13c-R2 均带 `RESOLVED`；无任一处仍写「accept residual / 超 doc-only scope / fast-follow（未来时）」与 RESOLVED 矛盾。13c-R1 各处仍为 OPEN。
+Expected:
+- 每处 `13c-R2` 命中行均含 `RESOLVED`，且无与 RESOLVED 矛盾的「accept residual / 未来时 fast-follow」并存于同一 13c-R2 行；
+- completion doc 的 `13c-R1` 命中**仅其自身 residual 行**（无跨行歧义，因 Step 1 已确保 13c-R2 单元格不含「13c-R1」字样），且该行仍含 `accept residual`、**不**含 `RESOLVED`（13c-R1 未被本 PR 关闭）。
 
 - [ ] **Step 5: 提交**
 
@@ -320,7 +345,7 @@ forbidden_phrases（`.claude/workflow-rules.json`，禁止出现）：`验证通
 | # | 操作（action） | 预期（expected） | 通过/不通过 |
 |---|---|---|---|
 | 6 | 运行 `grep -n "13c-R2" docs/acceptance/2026-06-14-wave3-pr13c-completion.md` | 命中行含 `RESOLVED`；无「accept residual」与之并存的未关闭表述 | ☐ Pass / ☐ Fail |
-| 7 | 运行 `grep -n "13c-R1" docs/acceptance/2026-06-14-wave3-pr13c-completion.md` | 命中行仍含 `OPEN`（13c-R1 未被本 PR 关闭） | ☐ Pass / ☐ Fail |
+| 7 | 运行 `grep -n "13c-R1" docs/acceptance/2026-06-14-wave3-pr13c-completion.md` | 命中其 residual 行仍含 `accept residual`、且**不**含 `RESOLVED`（13c-R1 采样≠帧相关 未被本 PR 关闭） | ☐ Pass / ☐ Fail |
 
 ## 四、device 帧预算（可选，非本 PR 关闭门）
 
