@@ -15,9 +15,9 @@
 | 3 | 看 `DebugFixtureDataTests.swift` | 含 5 测试：m3 不变量 / daily end<=max / MA66 / 确定性 / 描述自洽 | □ Pass / □ Fail |
 | 4 | 看 `DebugTrainingSetWriter.swift` | `#if DEBUG`；schema 对齐（user_version=1 + meta + klines + 索引），与 `TrainingSetSQLiteFixture` 同口径 | □ Pass / □ Fail |
 | 5 | 看 `DebugTrainingSetWriterTests.swift` | 写出的 sqlite 经真 `DefaultTrainingSetDBFactory.openAndVerify` + `loadAllCandles` 240 m3 + daily | □ Pass / □ Fail |
-| 6 | 看 `AppContainer+DebugSeed.swift` | `#if DEBUG`；`seedDebugFixturesIfEmpty` 幂等（仅 cache 空时 seed）；经真 db/cache/settings 落库（cache.store + insertRecord + savePending + saveSettings） | □ Pass / □ Fail |
-| 7 | 看 `AppContainerDebugSeedTests.swift` | 含 3 测试：seed 填 cache/history/pending + loadHome `hasCachedSets`/`isResuming` 真 / 幂等不叠加 / pending 可 `resumePending` 真开局 | □ Pass / □ Fail |
-| 8 | 看 `KlineTrainerApp.swift` diff | `#if DEBUG` + `env KLINE_SEED_FIXTURE=="1"` 才 seed；默认关；Release 无本块 | □ Pass / □ Fail |
+| 6 | 看 `AppContainer.swift` + `AppContainer+DebugSeed.swift` | seed 在 `AppContainer.init(debugSeedFixtures:)` 内、**SettingsStore 构造前**调（codex-13b-R3：settings 不 stale）；`static seedDebugFixtures(db:cache:)` `#if DEBUG`；**全空 guard**（cache + history + pending 全空才 seed，codex-13b-R1：iOS 清 Caches 但留 app.sqlite → 不破坏真实数据）；cache 最后写（codex-13b-R2 缓解） | □ Pass / □ Fail |
+| 7 | 看 `AppContainerDebugSeedTests.swift` | 含 6 测试：seed 填 cache/history/pending + loadHome + **settings 反映 fixture（非 stale 0）** / 未 seed settings=0 对照 / 幂等不叠加 / pending 可 resume / **cache 空但 db 有真实 history → 拒绝** / **cache 空但有真实 pending/settings → 拒绝不覆盖** | □ Pass / □ Fail |
+| 8 | 看 `KlineTrainerApp.swift` diff | `#if DEBUG` 内读 `env KLINE_SEED_FIXTURE=="1"` → 传 `AppContainer(config:, debugSeedFixtures:)`；默认关；Release `seedFixtures=false` + AppContainer 内 seed 块 `#if DEBUG` 剔除 | □ Pass / □ Fail |
 | 9 | 看 `DownloadAcceptanceRunnerIntegrationTests.swift` diff | 新增 `run_realPipeline_storedSetIsDownstreamConsumable`：真栈 download→confirm→**重开 cache 副本 + loadAllCandles**（非输入 fixture） | □ Pass / □ Fail |
 | 10 | 看 CI 「swift test on macos-15」 | 绿（全量 1002 tests in 144 suites pass，新增 §C 9 + §D 1 = 10 测试无失败） | □ Pass / □ Fail |
 | 11 | 看 CI 「Mac Catalyst build-for-testing」+「app-build」 | 均绿（含 app target Debug 编译——本地无 iOS platform，靠 app-build CI 验证） | □ Pass / □ Fail |
@@ -36,3 +36,9 @@
 - **seed 周期面**：seed 写 `.m3` + `.daily` 两周期（运行时矩阵交互所需）。不满足下载验收 `verifyNonEmpty` 的全 6 周期×≥30 要求，但 seed 走 `cache.store` 直注**不经**验收路径；运行时矩阵的 start/resume/review/replay 均经 `openAndVerify`（不调 verifyNonEmpty），故 seed 组对全部会话路径可开。
 - **reset**：app.sqlite singleton → 删 app 重置（DEBUG-only 可接受）。
 - **运行时矩阵 device/sim 实测执行**归顺位 13c（runbook）+ 用户 device 职责。
+
+## Residual（codex 13b review）
+
+| Residual | 来源 | 处理 |
+|---|---|---|
+| **13b-R1：极端 partial-seed**——全空 guard + cache-last 已 cover 常见 partial（db 写失败 → cache 仍空 → 下次重 seed）；但 db 写**到一半**（如 record0 写了 record1 失败）后，全空 guard（history 非空）会跳过 → 留 partial。DEBUG-only、IO 失败罕见 → **删 app 重置** | codex-13b-R2（partial-failure 健壮性）| **accept residual**（debug-only 工具；durable seed-marker + 事务 retry 属过度工程）。13c freeze 前如需可在独立 follow-up 加 marker |
