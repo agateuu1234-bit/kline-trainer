@@ -413,13 +413,15 @@ Expected: 恰 1 处，且在 `deleteCachedFileIfUnowned` helper 内（`DownloadA
 
 ---
 
-## Finalize（创建 PR 后）
+## Finalize
 
-1. `gh pr create` 得到本 PR 编号 `N`。
-2. 把上述文件中字面 `#<PR>` 全替换为 `#N`（机器块 L18 + gate L51 + ledger 表/prose/脚注 + runtime-matrix L87）：
-   `cd <worktree> && grep -rln '#<PR>' docs/ scripts/ | xargs sed -i '' 's/#<PR>/#N/g'`（macOS sed）。
-3. `bash scripts/governance/verify-wave3-completion.sh` → PASS（gate 与机器块仍逐字一致）。
-4. commit `docs(13a-R2): 填入本 PR 编号 #N` + push。
+> **执行期裁决（2026-06-15，supersedes 下方 `#<PR>` fill 步骤）**：为最小化用户 TTY attest 轮次（"尽可能不要找我"），live docs 的机器块/gate 值不采用 merge 前未知的 PR 号，而是**就地落定为稳定日期值** `CLOSED 13a-R2 2026-06-15`（机器块 L18 + gate L51 逐字一致；prose/matrix 用「本 PR」不带号）。如此 branch 一次成终态、无需 push 后补提交 → **单轮 attest**。PR 号由 PR 本身 + commit 历史 + 本 plan/spec 提供可追溯性。gate 已本地 PASS。
+>
+> 下方原 `#<PR>` fill 步骤因此**作废**（保留作设计记录）：
+> 1. ~~`gh pr create` 得到编号 `N`。~~
+> 2. ~~`#<PR>` → `#N` 全替换。~~
+> 3. ~~重跑 gate。~~
+> 4. ~~commit 填号 + push。~~
 
 ---
 

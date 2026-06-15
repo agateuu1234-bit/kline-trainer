@@ -48,7 +48,7 @@ require_kv "residual-D-e2e-smoke" "PARTIAL 13b #109"
 
 # 谓词 2：W3-11-R1 + ship 门 PR11-R1/W1-R2 = OPEN；13a-R2 = RESOLVED（本 PR）
 require_kv "residual-W3-11-R1-bounce-live-wiring" "OPEN"
-require_kv "known-defect-13a-R2-cross-lease-cache-deletion" "CLOSED 13a-R2 #<PR>"
+require_kv "known-defect-13a-R2-cross-lease-cache-deletion" "CLOSED 13a-R2 2026-06-15"
 require_kv "ship-gate-PR11-R1-prod-backend-url" "OPEN"
 require_kv "ship-gate-W1-R2-sample-data" "OPEN"
 
