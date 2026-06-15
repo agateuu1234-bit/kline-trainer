@@ -121,7 +121,7 @@ ship-gate-W1-R2-sample-data: OPEN
 
 ## 六、评审通道说明
 
-13c 为 doc-only（0 业务代码 / 0 CI / 0 ruleset），经 `codex:adversarial-review`（治理 doc 类，唯一 review 通道，per CLAUDE.md backstop #1）。codex 周配额耗尽时方 fallback opus 4.8 xhigh（documented，沿用 Wave 1/2 + 13a/13b 各 anchor 先例）。grep gate（`scripts/governance/verify-wave3-completion.sh`）作机器可校验断言：A/B/C/D CLOSED + W3-11-R1/PR11-R1/W1-R2 OPEN + WAVE3-STATUS 诚实（store-ready=NO / formal-closure=PENDING / matrix=PARTIAL / freeze=NOT-TAGGED）+ 矩阵 fixture 机制就位。
+13c 为 doc-only（0 业务代码 / 0 CI / 0 ruleset），经 `codex:adversarial-review`（治理 doc 类，唯一 review 通道，per CLAUDE.md backstop #1）。codex 周配额耗尽时方 fallback opus 4.8 xhigh（documented，沿用 Wave 1/2 + 13a/13b 各 anchor 先例）。grep gate（`scripts/governance/verify-wave3-completion.sh`）作机器可校验断言（**只解析 WAVE3-STATUS 块、anchored 全行**，与上方机器块逐字一致）：A/B/C CLOSED + **D PARTIAL** + W3-11-R1/**13a-R2**/PR11-R1/W1-R2 OPEN + WAVE3-STATUS 诚实（store-ready=NO / formal-closure=PENDING / **feature-completeness=PENDING-W3-11-R1** / matrix=PARTIAL / freeze=NOT-TAGGED）+ 矩阵 fixture 机制 + §三.3 三连合取（c8b/u2-gesture/帧预算）指针就位。
 
 ---
 

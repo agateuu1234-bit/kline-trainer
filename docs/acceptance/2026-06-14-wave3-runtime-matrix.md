@@ -66,7 +66,9 @@ outline §三.3 的关闭/freeze 阻塞依赖是**三连合取**：①本 Wave 3
 |---|---|---|---|
 | ② Wave 2 减速/帧预算 | `docs/runbooks/2026-06-07-c8b-runtime-acceptance.md` | 惯性衰减 / 减速中点交易立停 / 帧 < 4ms / 后台前台无跳帧 | ☐ |
 | ② Wave 2 手势 | `docs/runbooks/2026-06-07-u2-gesture-runtime-acceptance.md` | 单指 pan / 两指周期切换 / 长按十字光标 / 模式交易行为 / 局终自动 | ☐ |
-| ③ Instruments 帧预算（顺位 12） | `docs/runbooks/2026-06-14-wave3-pr12-frame-budget.md` | Instruments Time Profiler 录制各交互峰值单帧 < 4ms（`____` ms 占位待回填）+ Equatable 短路验证 | ☐ |
+| ③ Instruments 帧预算（顺位 12） | `docs/runbooks/2026-06-14-wave3-pr12-frame-budget.md` | Instruments Time Profiler 录制各交互**单帧 `RenderStateBuilder.make` + `KLineView.draw(_:)` 合并峰值 < 4ms**（`____` ms 占位待回填）+ Equatable 短路验证 | ☐ |
+
+> **§C seed（Debug）↔ 帧预算 runbook（Release）衔接（codex review R5-Med）**：§C fixture seed 是 **Debug-only**（`#if DEBUG`，Release 编译期剔除），而 Instruments 帧预算 runbook 要求 **Release（优化）包**（Debug 未优化构建虚高单帧耗时，不可用作 <4ms 判据）。**衔接路径**：①先以 Debug 包 + `KLINE_SEED_FIXTURE=1` 启动一次——seed 写入 app **持久 sandbox**（`app.sqlite` + 缓存训练组文件，非 Caches-only），②**不删 app**，直接对同 bundle id 构建并 Profile（⌘I）**Release 包**——Release 包虽不再 seed（`#if DEBUG` 剔除），但**读取**同一持久 sandbox 中 Debug 已 seed 的数据 → 帧预算在真实数据 + Release 优化下测得。**关键约束**：Debug-seed 与 Release-profile 之间**不可删除 app**（删则 sandbox 清空、Release 无数据回落空局）。若某 device sandbox 不跨 Debug→Release 复用，则该 device 帧预算实测 = OPEN 限制（记录于回填表），不得以 Debug 构建虚高数值假 PASS。
 
 ---
 
