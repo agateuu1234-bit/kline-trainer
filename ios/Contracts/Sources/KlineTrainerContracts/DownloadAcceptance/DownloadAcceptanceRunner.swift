@@ -100,8 +100,8 @@ public final class DownloadAcceptanceRunner: Sendable {
             switch outcome {
             case .confirmed:
                 return .confirmed(file)
-            case .rejected(let e):                // 409/404 → 删本地 cache 副本
-                try? cache.delete(file)
+            case .rejected(let e):                // 409/404 → 清本 lease cache 副本（lease-aware，13a-R2 defense-in-depth）
+                deleteCachedFileIfUnowned(trainingSetId: meta.id)
                 return .rejected(e)
             case .pending(let e):                 // 网络不确定 → 保留 cache 副本待重试
                 return .rejected(e)
