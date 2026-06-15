@@ -74,7 +74,9 @@ public enum RenderStateBuilder {
 
         // autoTracking 锚定：当前 candle 落最右被绘制 slot（baseStartIndex 可能 <0，下方 clamp）。
         let baseStartIndex = currentIdx - (visibleCount - 1)
-        let upperBound = max(0, count - visibleCount)
+        // reveal RFC（2026-06-15）：upperBound 从 max(0,count−visibleCount) 收紧为 max(0,baseStartIndex)
+        // = autoTracking 即最新可见边，前向滚动（朝新）不可越当前 tick（禁前窥）。
+        let upperBound = max(0, baseStartIndex)
         // offset 分解（C8b freeScrolling 复用；C8a offset 恒 0 时 wholeShift=0/pixelShift=0）。
         // 符号契约（CoordinateMapper Geometry.swift L136）：pixelShift>0 = candles 右移。
         let wholeShift = Int((panelState.offset / candleStep).rounded(.down))   // floor
@@ -84,7 +86,9 @@ public enum RenderStateBuilder {
         var pixelShift = panelState.offset - CGFloat(wholeShift) * candleStep
         if startIndex == 0 || startIndex == upperBound { pixelShift = 0 }
 
-        let sliceEnd = min(startIndex + visibleCount, count)
+        // reveal RFC：可见窗口 ⊆ 已揭示前缀 candles[0...currentIdx]；slice 末根恒 ≤ currentIdx（看不到未来）。
+        // 早 tick 左填充时 visibleCount(返回) = sliceEnd−startIndex < target。currentIdx+1 ≤ count（界内）。
+        let sliceEnd = min(startIndex + visibleCount, currentIdx + 1)
         let slice = candles[startIndex ..< sliceEnd]
         return ChartViewport(startIndex: startIndex, visibleCount: slice.count,
                              pixelShift: pixelShift, geometry: geometry,
