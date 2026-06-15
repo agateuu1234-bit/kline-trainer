@@ -143,8 +143,10 @@ geometryCore(mainFrameWidth: CGFloat, rawVisible: Int, candleCount: Int, current
 
 ## 八、Packaging（opus L1：5 单元 + 测 + runbook 超 ≤3 子项 → 拆 2 子 PR）
 
-- **W3-11-R1a（纯几何/渲染，host 全测）**：B1 bounds 纯函数 + makeViewport 重构调 B1 + B4 overscroll 渲染。零 engine/gesture 改，纯 Render 层 + host 测（行为对拍 + overscroll 符号 + 无 OOB + 界内回归）。
-- **W3-11-R1b-wire（engine/gesture 接线）**：B2 endPan/applyPanOffset 扩 bounds + B3 drag-clamp + Coordinator 每帧喂 bounds + B5 归一/strand + device runbook。依赖 R1a 的 B1。
+- **W3-11-R1a（纯几何 helper + 重构，行为中性，host 全测）**：B1 `geometryCore` + `offsetBounds` 纯函数 + makeViewport **重构调 geometryCore**（行为等价、不变像素、**零行为改**）。纯 Render 层 + host 测（既有 makeViewport 测全绿 = 等价证明 + bounds 行为对拍）。**不含 B4 overscroll 渲染**——见下方 planning 修正。
+- **W3-11-R1b-wire（engine/gesture 接线 + B4 overscroll，一并交付）**：B4 overscroll 渲染 + B2 endPan/applyPanOffset 扩 bounds + B3 drag-clamp + Coordinator 每帧喂 bounds + B5 归一/strand + device runbook。依赖 R1a 的 `offsetBounds`/`geometryCore`。
+- **planning 修正（B4 从 R1a 移入 R1b-wire）**：B4 overscroll 渲染**不可独立于 bounce/drag-clamp 单发**——若 R1a 仅加 B4 而 deceleration 仍是无界 plain（不 clamp drag、不 bounce settle），则 plain 减速的越界 overshoot 会被 B4 渲成**只增不回的静态间隙**（当前是 pin 边缘，无视觉间隙）= 行为回归。故 B4 必须与 R1b-wire 的 bounce（有界 overscroll + 回弹 settle）+ drag-clamp（拦 drag overshoot）**同 PR 交付**，使越界 offset 只来自有界弹簧。R1a 因此收窄为**纯行为中性 refactor + helper**（独立可 merge、零运行时行为变）。
+- （拖拽期跟手橡皮筋阻尼 = 另一独立 follow-up **R1b-drag**，本 spec out of scope。）
 - （拖拽期跟手橡皮筋阻尼 = 另一独立 follow-up **R1b-drag**，本 spec out of scope。）
 - 注：W3-11-R1a/R1b-wire 同属 Render/engine 域、串行（R1b-wire 依赖 R1a 的 B1 + makeViewport overscroll）；与并行编排（`2026-06-15-wave3-fastfollow-parallelization.md`）Track A 一致。
 
