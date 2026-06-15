@@ -52,6 +52,30 @@ public enum RenderStateBuilder {
         return vp.startIndex ..< vp.startIndex + vp.visibleCount
     }
 
+    /// 共享几何内核（spec §二.B1 / D4 单一真相）：makeViewport 的 startIndex 派生与 offsetBounds 的边界派生
+    /// 都消费它，杜绝两套几何公式漂移。纯值、平台无关。
+    struct GeometryCore: Equatable, Sendable {
+        let baseStartIndex: Int
+        let upperBound: Int
+        let candleStep: CGFloat
+        let visibleCount: Int
+    }
+
+    static func geometryCore(mainFrameWidth: CGFloat, rawVisible: Int,
+                             candleCount: Int, currentIdx: Int) -> GeometryCore {
+        let target = rawVisible > 0 ? rawVisible : defaultVisibleCount
+        let visibleCount = min(target, candleCount)
+        let candleStep = mainFrameWidth / CGFloat(target)
+        let baseStartIndex = currentIdx - (visibleCount - 1)
+        // reveal RFC（2026-06-15, #113）：upperBound 从 max(0, count−visibleCount) 收紧为 max(0, baseStartIndex)
+        // = autoTracking 锚（baseStartIndex）即最新可见边，前向滚动（朝新）不可越当前 tick（禁前窥）。
+        // 早 tick base<0 → upperBound=0（无滚动空间，已显最旧 + 无未来）。makeViewport startIndex clamp 与
+        // offsetBounds 边界派生都经此，故 reveal 语义在两处一致（D4）。
+        let upperBound = max(0, baseStartIndex)
+        return GeometryCore(baseStartIndex: baseStartIndex, upperBound: upperBound,
+                            candleStep: candleStep, visibleCount: visibleCount)
+    }
+
     /// 视口几何推导（唯一拥有 startIndex/pixelShift 装配的函数；make 与 visibleCandleRange 都经它）。
     /// **前置约束**：`candles` 非空、`bounds.width > 0`（调用方 make/visibleCandleRange 已守 .empty/空）。
     /// 支持 autoTracking（offset=0）与 freeScrolling（非零 offset 分解 + 边界饱和）；C8b H1 handler 复用点。
@@ -59,24 +83,16 @@ public enum RenderStateBuilder {
                              tick: Int, bounds: CGRect) -> ChartViewport {
         let mainFrame = ChartPanelFrames.split(in: bounds).mainChart
         let count = candles.count
-        // 顺位 3 D5 去硬编码：target = panelState.visibleCount（≤0 → fallback 80 兼容旧构造；
-        // engine init 已 seed 80，新路径不依赖 fallback）。
-        let target = panelState.visibleCount > 0 ? panelState.visibleCount : defaultVisibleCount
-        let visibleCount = min(target, count)
-
-        // 几何：分母 = target（count<target 时左对齐填充、candle 宽度稳定；target==80 与旧行为逐位一致）。
-        let candleStep = mainFrame.width / CGFloat(target)
+        let currentIdx = currentCandleIndex(candles: candles, tick: tick)
+        let core = geometryCore(mainFrameWidth: mainFrame.width, rawVisible: panelState.visibleCount,
+                                candleCount: count, currentIdx: currentIdx)
+        let candleStep = core.candleStep
         let geometry = ChartGeometry(candleStep: candleStep,
                                      candleWidth: candleStep * candleWidthRatio,
                                      gap: candleStep - candleStep * candleWidthRatio)
-
-        let currentIdx = currentCandleIndex(candles: candles, tick: tick)
-
-        // autoTracking 锚定：当前 candle 落最右被绘制 slot（baseStartIndex 可能 <0，下方 clamp）。
-        let baseStartIndex = currentIdx - (visibleCount - 1)
-        // reveal RFC（2026-06-15）：upperBound 从 max(0,count−visibleCount) 收紧为 max(0,baseStartIndex)
-        // = autoTracking 即最新可见边，前向滚动（朝新）不可越当前 tick（禁前窥）。
-        let upperBound = max(0, baseStartIndex)
+        let baseStartIndex = core.baseStartIndex
+        let upperBound = core.upperBound        // reveal RFC：= max(0, baseStartIndex)（禁前窥，语义在 geometryCore）
+        let visibleCount = core.visibleCount
         // offset 分解（C8b freeScrolling 复用；C8a offset 恒 0 时 wholeShift=0/pixelShift=0）。
         // 符号契约（CoordinateMapper Geometry.swift L136）：pixelShift>0 = candles 右移。
         let wholeShift = Int((panelState.offset / candleStep).rounded(.down))   // floor

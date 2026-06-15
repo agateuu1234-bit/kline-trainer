@@ -284,6 +284,19 @@ struct RenderStateBuilderTests {
         #expect(ms < 50)   // 极宽松上界，仅防病态退化（同既有 perfSmoke 量级）
     }
 
+    // MARK: - W3-11-R1a：geometryCore 共享几何内核（行为中性抽取）
+
+    @Test("geometryCore：count=200/currentIdx=150/width=800/rawVisible=0→80 → base=71,upper=120,step=10,vc=80")
+    func geometryCore_known() {
+        let core = RenderStateBuilder.geometryCore(
+            mainFrameWidth: ChartPanelFrames.split(in: Self.bounds).mainChart.width,
+            rawVisible: 0, candleCount: 200, currentIdx: 150)
+        #expect(core.visibleCount == 80)
+        #expect(core.candleStep == 10)          // 800/80
+        #expect(core.baseStartIndex == 71)      // 150 − 79
+        #expect(core.upperBound == 120)         // 200 − 80
+    }
+
     // MARK: 顺位 3 D5：去硬编码 80（target = panelState.visibleCount，≤0 → fallback 80）
 
     /// 非 0 显式入参 + 80 golden parity（独立金值硬编码，R1-L3 防 tautology）
