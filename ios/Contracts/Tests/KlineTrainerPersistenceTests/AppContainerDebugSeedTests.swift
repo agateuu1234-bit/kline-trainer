@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 @testable import KlineTrainerPersistence
-import KlineTrainerContracts
+@testable import KlineTrainerContracts
 
 #if DEBUG
 @Suite("AppContainer debug seed：init 内 seed（settings 不 stale）+ 全空 guard（不破坏真实数据）（§C）")
@@ -159,6 +159,29 @@ struct AppContainerDebugSeedTests {
 
         #expect(try c.db.loadSettings().totalCapital == 333_333, "自定义 settings 未被 fixture 覆盖")
         #expect(c.cache.listAvailable().isEmpty, "未 seed")
+    }
+
+    // 13c-R2 根治端到端：实际 seeded + cached 的训练组（= 帧预算 runbook 真正剖析的那份）须满载。
+    // 直接打开缓存 sqlite，loadAllCandles() 验每周期渲染负载——证 seed 调用点确用满载根数（非仅 make 能力）。
+    @Test("seeded 缓存 fixture 满载：每周期 ≥ defaultVisibleCount(80)，默认面板 .m60/.daily ≥ maxVisibleCount(240)")
+    func seededFixture_isFullLoad() async throws {
+        let (cfg, dir) = try makeConfig()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let c = try AppContainer(config: cfg, debugSeedFixtures: true)
+        let file = c.cache.listAvailable().first!
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(
+            file: file.localURL, expectedSchemaVersion: TRAINING_SET_SCHEMA_VERSION)
+        defer { reader.close() }
+        let byPeriod = try reader.loadAllCandles()
+        for period in Period.allCases {
+            let count = byPeriod[period]?.count ?? 0
+            #expect(count >= RenderStateBuilder.defaultVisibleCount,
+                    "seeded 周期 \(period) 蜡烛数 \(count) 须 ≥ defaultVisibleCount(\(RenderStateBuilder.defaultVisibleCount))")
+        }
+        #expect((byPeriod[.m60]?.count ?? 0) >= PinchZoomModel.maxVisibleCount,
+                "seeded .m60 须 ≥ maxVisibleCount(\(PinchZoomModel.maxVisibleCount))")
+        #expect((byPeriod[.daily]?.count ?? 0) >= PinchZoomModel.maxVisibleCount,
+                "seeded .daily 须 ≥ maxVisibleCount(\(PinchZoomModel.maxVisibleCount))")
     }
 }
 #endif
