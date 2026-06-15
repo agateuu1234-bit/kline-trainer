@@ -8,12 +8,17 @@ import Foundation
 
 public enum PartialAggregateCandle {
     /// 合成进行中聚合 K 线。
-    /// - start = 首个 `datetime >= original.datetime` 的 m3（匹配 backend `[open,nextOpen)` 下界；
+    /// - rawStart = 首个 `datetime >= original.datetime` 的 m3（匹配 backend `[open,nextOpen)` 下界；
     ///   对 pre-window predecessor `endGlobalIndex` clamp 到 0 免疫，spec R1-H1）。
-    /// - 前置：`m3` 非空、按 datetime 升序（.m3 连续轴）、`tick < m3.count`；`start <= tick`（trigger 保证，assert 钉死）。
+    /// - 前置：`m3` 非空、`tick < m3.count`（make() 守）。
+    /// - **容损 fail-safe（codex R1-H）**：`start = min(rawStart, tick)` clamp 到 `[0, tick]`。良性数据下
+    ///   trigger 已保证 rawStart ≤ tick（clamp 无操作）；恶意/损坏数据（`.m3` datetime 非单调 / 聚合 datetime
+    ///   越界）可能令 rawStart > tick → 不再于渲染热路径 trap，而是 fail-closed：`m3[start...tick]` 恒有效
+    ///   （不崩）+ 成分恒 ⊆ 已揭示 m3（不渲染 vendor 整根、不泄漏未来）。temporal 一致性的强校验属
+    ///   reader/persistence trust-boundary（本渲染 RFC 作用域外）；clamp 使渲染路径对其失效亦安全。
     public static func synthesize(original: KLineCandle, m3: [KLineCandle], tick: Int) -> KLineCandle {
-        let start = m3.partitioningIndex { $0.datetime >= original.datetime }
-        assert(start <= tick, "PartialAggregateCandle.synthesize: start(\(start)) must be <= tick(\(tick))")
+        let rawStart = m3.partitioningIndex { $0.datetime >= original.datetime }
+        let start = min(rawStart, tick)
         let constituents = m3[start ... tick]
         return KLineCandle(
             period: original.period,

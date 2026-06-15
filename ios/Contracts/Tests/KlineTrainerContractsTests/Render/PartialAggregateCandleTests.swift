@@ -79,12 +79,25 @@ struct PartialAggregateCandleTests {
         #expect(s.endGlobalIndex == 3)
     }
 
-    @Test("trigger 下 start ≤ tick（assert 不触发，R2-L）")
+    @Test("trigger 下 rawStart ≤ tick（clamp 无操作，正常路径）")
     func startWithinTick() {
         let series = Self.m3(12)
         let a = Self.agg(period: .m60, datetime: Int64(8) * 180, endGlobalIndex: 11)
         let s = PartialAggregateCandle.synthesize(original: a, m3: series, tick: 9)
         #expect(s.open == 8)
         #expect(s.endGlobalIndex == 9)
+    }
+
+    @Test("容损 fail-safe（codex R1-H）：聚合 datetime 越界（> m3[tick]）→ start clamp 到 tick，单根合成不崩不泄漏")
+    func malformedAggregateDatetimeClampsNoTrap() {
+        // 损坏/恶意数据：聚合 datetime 远超所有已揭示 m3 → rawStart > tick（partitioningIndex==count）。
+        // clamp 到 tick → 单根 m3[tick] 合成：渲染期不 trap、成分 ⊆ 已揭示（不泄漏未来）。
+        let series = Self.m3(12)              // datetimes 0..11*180=1980
+        let a = Self.agg(period: .m60, datetime: 999_999, endGlobalIndex: 7)
+        let s = PartialAggregateCandle.synthesize(original: a, m3: series, tick: 5)
+        #expect(s.open == 5)                   // clamp start=5 → 单根 m3[5]
+        #expect(s.high == 6)                    // m3[5].high（仅已揭示，非未来）
+        #expect(s.close == 5.5)                 // m3[5].close
+        #expect(s.endGlobalIndex == 5)          // == tick
     }
 }

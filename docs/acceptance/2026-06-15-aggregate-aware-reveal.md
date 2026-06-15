@@ -4,7 +4,7 @@
 
 | # | Action | Expected | Pass/Fail |
 |---|---|---|---|
-| 1 | `cd ios/Contracts && swift test 2>&1 \| tail -2` | `1032 tests in 145 suites passed`，`0 failures` | ☐ |
+| 1 | `cd ios/Contracts && swift test 2>&1 \| tail -2` | `1033 tests in 145 suites passed`，`0 failures` | ☐ |
 | 2 | `git diff origin/main...HEAD --stat -- ios/` | 改动集 ⊆ {PartialAggregateCandle.swift(新), RenderStateBuilder.swift, PartialAggregateCandleTests.swift(新), RenderStateBuilderTests.swift}；无 .sql/schema/workflow/CONTRACT_VERSION | ☐ |
 | 3 | `cd ios/Contracts && swift test --filter allVisibleWithinTick 2>&1 \| tail -2` | PASS（聚合面板跨 tick 所有可见根 endGlobalIndex≤tick，无未来） | ☐ |
 | 4 | `grep -n "PartialAggregateCandle.synthesize" ios/Contracts/Sources/KlineTrainerContracts/Render/RenderStateBuilder.swift; echo rc=$?` | 命中 `rc=0`（合成挂钩已落地） | ☐ |
