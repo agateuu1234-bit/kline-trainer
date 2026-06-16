@@ -109,4 +109,55 @@ struct TrainingEngineBounceWiringTests {
         #expect(decelMin >= -1e-6)                                   // full 下界：从不 <0
         #expect(decelMax <= ob.maxOffset + 1e-6)                     // full 上界：从不 >max
     }
+
+    // §六.8 H3：re-grab 中途 overscroll → beginPan 归 maxOffset
+    @Test("H3：bounce overscroll 中途 beginPan → offset 归 maxOffset（不 strand）")
+    func interruptBeginPanNormalizes() {
+        let (e, fakes) = Self.makeEngine(count: 200, tick: 150)
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
+        #expect(ob.bounceEdges.contains(.max))
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset, offsetBounds: ob, panel: .upper)
+        e.endPan(velocity: 4000, offsetBounds: ob, panel: .upper)
+        var sawOverscroll = false
+        for _ in 0..<30 { _ = fakes().last?.fire(1.0 / 60.0); if e.upperPanel.offset > ob.maxOffset { sawOverscroll = true; break } }
+        #expect(sawOverscroll)                              // 确处于 overscroll 中
+        e.beginPan(panel: .upper)                           // re-grab 打断
+        #expect(abs(e.upperPanel.offset - ob.maxOffset) < 1e-6)   // 归 maxOffset，不 strand
+    }
+
+    // §六.8 M2-new：bounce overscroll 中途 activateDrawingTool → snapshot offset 归 maxOffset（顺序不变量 killer）
+    @Test("M2-new：overscroll 中途 activateDrawingTool → snap.frozen.offset==maxOffset（归一在算 range 前）")
+    func activateDrawingDuringOverscrollNormalizes() {
+        let (e, fakes) = Self.makeEngine(count: 200, tick: 150)
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
+        #expect(ob.bounceEdges.contains(.max))
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset, offsetBounds: ob, panel: .upper)
+        e.endPan(velocity: 6000, offsetBounds: ob, panel: .upper)
+        var overscrolled = false
+        for _ in 0..<30 { _ = fakes().last?.fire(1.0 / 60.0); if e.upperPanel.offset > ob.maxOffset + 5 { overscrolled = true; break } }
+        #expect(overscrolled)                               // 确处于 overscroll（offset>maxOffset）
+        e.activateDrawingTool(.trend, panel: .upper)        // 中断 + 归一须在算 range（捕获 baseRev）前
+        guard case .drawing(let snap) = e.upperPanel.interactionMode else { Issue.record("应进入 drawing"); return }
+        #expect(abs(snap.frozen.offset - ob.maxOffset) < 1e-6)   // 归一后 offset（无归一则 frozen.offset>maxOffset）
+        #expect(snap.frozen.offset <= ob.maxOffset + 1e-6)       // 绝非 overscrolled
+    }
+
+    // §六.8 stale 自纠正：动画 settle 后再 beginPan（isDecelerating==false）→ 不误钳一个当前合法 offset
+    @Test("stale 自纠正：settle 后 beginPan 不误钳一个当前合法 offset")
+    func interruptStaleSelfCorrect() {
+        let (e, fakes) = Self.makeEngine(count: 200, tick: 150)
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset * 0.5, offsetBounds: ob, panel: .upper)
+        e.endPan(velocity: -4000, offsetBounds: ob, panel: .upper)   // decel 到 0、settle
+        for _ in 0..<600 { _ = fakes().last?.fire(1.0 / 60.0) }
+        #expect(e.upperPanel.offset == 0)
+        e.beginPan(panel: .upper)                                     // 拖到合法中段
+        e.applyPanOffset(deltaPixels: ob.maxOffset * 0.5, offsetBounds: ob, panel: .upper)
+        let mid = e.upperPanel.offset
+        e.beginPan(panel: .upper)                                     // 无活跃动画 → 不应 clamp 改 mid
+        #expect(abs(e.upperPanel.offset - mid) < 1e-6)
+    }
 }

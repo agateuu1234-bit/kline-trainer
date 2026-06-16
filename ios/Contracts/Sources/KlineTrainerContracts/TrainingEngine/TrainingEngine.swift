@@ -603,6 +603,19 @@ extension TrainingEngine {
         if target != cur { applyOffsetDelta(target - cur, panel: panel) }           // L2-new：省 0-delta 空 bump
     }
 
+    /// 中断进行中减速/bounce（新交互起手：beginPan/activateDrawingTool/pinch.began，D10）：停 + 仅当**活跃** run 时
+    /// 把 overscroll 归界内。`isDecelerating`-guard：动画已 settle/cancel（activeBounds 残留旧几何）时不 clamp，防 stale 误钳。
+    private func interruptDeceleration(panel: PanelId) {
+        let a = animator(for: panel)
+        let wasRunning = a.isDecelerating
+        a.stop()
+        if wasRunning, let act = activeBoundsFor(panel) {
+            let cur = panelState(panel).offset
+            let clamped = min(max(cur, act.bounds.minOffset), act.bounds.maxOffset)
+            if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }   // overscroll(>max) 归 maxOffset
+        }
+    }
+
     /// 停两面板减速（D7：硬切 autoTracking / 画线激活前调）。
     private func stopAllDeceleration() {
         animators.upper.stop()
@@ -624,7 +637,7 @@ extension TrainingEngine {
     /// 新一次抓取必须**先停**本面板进行中的减速（标准惯性滚动语义：手指落下即截住惯性）——否则 re-grab 期间
     /// 残余减速 onUpdate 与手指 `applyPanOffset` 同时喂 `offsetApplied` 致跳动（final-review F1，与 D7 硬切同精神）。
     public func beginPan(panel: PanelId) {
-        animator(for: panel).stop()
+        interruptDeceleration(panel: panel)   // R1b-wire D10：停 + 归一中途 overscroll（H3），再 .panStarted
         _ = reduce(.panStarted, on: panel)
     }
 
@@ -680,7 +693,7 @@ extension TrainingEngine {
     public func applyPinch(scale: CGFloat, focusX: CGFloat, phase: GesturePhase, panel: PanelId) {
         switch phase {
         case .began:
-            animator(for: panel).stop()        // 同 beginPan 先例：手势起手截住惯性
+            interruptDeceleration(panel: panel)   // R1b-wire D10：同 beginPan 先例，停 + 归一中途 overscroll
             setPinchBase(seedPinchBase(scale: scale, panel: panel), panel: panel)
         case .changed:
             // R2-L1：非有限/非正 scale → 真无操作（不派发、状态零改动；防御在 engine 不在模型）
@@ -758,16 +771,19 @@ extension TrainingEngine {
     ///   ② 基于当前（已冻结）面板状态算 candleRange（复用 C8a `visibleCandleRange`）
     ///   ③ 派 `setDrawingSnapshot`（同步无漂移 → 进 drawing；理论 stale → 留 autoTracking）
     public func activateDrawingTool(_ tool: DrawingToolType, panel: PanelId) {
+        // R1b-wire R2-C1：interrupt 提顶（在捕获 baseRev 前）。其归一 `offsetApplied` 会 bump revision；若放在
+        // `reduce(.activateDrawing)` 之后则 baseRev 失配 setDrawingSnapshot 的 staleness 闸门 → 永不进 drawing。
+        // 提顶使 baseRev 捕获归一后 revision；含 stop（防 stale 漂移，原 ① 裸 stop 删除）+ 归一 overscroll（M3）。
+        interruptDeceleration(panel: panel)
         guard case .requestDrawingSnapshotAfterStoppingAnimator(let t, let baseRev) =
                 reduce(.activateDrawing(tool), on: panel) else {
-            return   // 已在 drawing（.none）等 → no-op（工具切换归 DrawingToolManager/Wave 3）
+            return   // 已在 drawing（.none）等 → no-op（interrupt 在 drawing 期无 animator 在跑 → no-op）
         }
-        animator(for: panel).stop()                                   // ①
-        let ps = panelState(panel)                                    // ② 当前=已冻结 offset
+        let ps = panelState(panel)                                    // 当前=已冻结+已归一 offset
         let range = RenderStateBuilder.visibleCandleRange(
             panelState: ps, candles: allCandles[ps.period] ?? [],
             tick: tick.globalTickIndex, bounds: renderBounds(panel))
-        _ = reduce(.setDrawingSnapshot(tool: t, baseRevision: baseRev, candleRange: range), on: panel)   // ③
+        _ = reduce(.setDrawingSnapshot(tool: t, baseRevision: baseRev, candleRange: range), on: panel)   // baseRev==revision ✓
     }
 
     /// 删除已完成绘线（spec `deleteDrawing(at:)`）。越界 trap（caller bug，与 spec precondition 同风格）。
