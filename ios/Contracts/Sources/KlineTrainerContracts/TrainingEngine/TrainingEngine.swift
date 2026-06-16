@@ -45,6 +45,15 @@ public final class TrainingEngine {
     @ObservationIgnored private var pinchBase:
         (upper: (base: Int, scaleAtBegan: CGFloat)?, lower: (base: Int, scaleAtBegan: CGFloat)?) = (nil, nil)
 
+    /// R1b-wire（D9/D10）：进行中减速/bounce 的 numeric 边界 + 是否允许 overscroll（bounce=true/decel=false）。
+    /// onUpdate 据此 floor（bounce 放最老边 overscroll）或 full（decel 硬停两边）clamp；interruptDeceleration 归一用。
+    /// `@ObservationIgnored`：纯 numeric（无像素，D1）；endPan 写入不得触发观察重建（同 lastRenderedBounds）。
+    struct ActiveDecel: Equatable, Sendable {
+        let bounds: RenderStateBuilder.OffsetBounds
+        let allowOverscroll: Bool
+    }
+    @ObservationIgnored private var activeBounds: (upper: ActiveDecel?, lower: ActiveDecel?) = (nil, nil)
+
     /// 构造运行时引擎（D9 校验边界契约）。
     ///
     /// **`allCandles` 必须是已校验数据。** 训练组数据的「可恢复」校验（空 `[:]` / 缺 `.m3` /
@@ -138,8 +147,9 @@ public final class TrainingEngine {
             lower: DecelerationAnimator(makeDriver: decelerationDriverFactory))
         // C8b：减速每帧 delta 必经 reducer offsetApplied（spec §C2 闸门 #2 F2，禁直写 offset）。
         // self 此时已全初始化（animators 为最后一个无默认值的存储属性；lastRenderedBounds 有默认值）。
-        self.animators.upper.onUpdate = { [weak self] delta in self?.applyOffsetDelta(delta, panel: .upper) }
-        self.animators.lower.onUpdate = { [weak self] delta in self?.applyOffsetDelta(delta, panel: .lower) }
+        // R1b-wire（D9）：减速/bounce 每帧 delta 经 floor-or-full clamp（bounce floor 放 overscroll / decel full 硬停）。
+        self.animators.upper.onUpdate = { [weak self] delta in self?.floorOrFullClampedOffsetDelta(delta, panel: .upper) }
+        self.animators.lower.onUpdate = { [weak self] delta in self?.floorOrFullClampedOffsetDelta(delta, panel: .lower) }
     }
 
     /// `make` 的构造输入：工厂内部据此**先验 maxTick 再建 flow**，杜绝外部传入会 trap 的非法 flow——
@@ -573,6 +583,26 @@ extension TrainingEngine {
         _ = reduce(.offsetApplied(deltaPixels: delta), on: panel)
     }
 
+    // MARK: R1b-wire offset clamp（D9：drag full / decel·bounce floor-or-full / reducer 无界 D2）
+
+    private func activeBoundsFor(_ panel: PanelId) -> ActiveDecel? {
+        panel == .upper ? activeBounds.upper : activeBounds.lower
+    }
+    private func setActiveBounds(_ v: ActiveDecel?, panel: PanelId) {
+        if panel == .upper { activeBounds.upper = v } else { activeBounds.lower = v }
+    }
+
+    /// 减速/bounce 每帧 delta（onUpdate）：bounce → floor `[min,+∞)`（放最老边 overscroll）；
+    /// decel → full `[min,max]`（硬停两边，含 v>0 无滚动空间不 strand，C1）。无 activeBounds → 无界（旧路径兼容）。
+    private func floorOrFullClampedOffsetDelta(_ delta: CGFloat, panel: PanelId) {
+        guard let a = activeBoundsFor(panel) else { applyOffsetDelta(delta, panel: panel); return }
+        let cur = panelState(panel).offset
+        let target = a.allowOverscroll
+            ? max(a.bounds.minOffset, cur + delta)                                  // bounce：仅 floor
+            : min(max(cur + delta, a.bounds.minOffset), a.bounds.maxOffset)         // decel：full
+        if target != cur { applyOffsetDelta(target - cur, panel: panel) }           // L2-new：省 0-delta 空 bump
+    }
+
     /// 停两面板减速（D7：硬切 autoTracking / 画线激活前调）。
     private func stopAllDeceleration() {
         animators.upper.stop()
@@ -598,14 +628,38 @@ extension TrainingEngine {
         _ = reduce(.panStarted, on: panel)
     }
 
-    /// onPan `.changed`：freeScrolling 下 offset 累加（drawing 模式 arbiter 截获不到此处）。
+    /// onPan `.changed`（旧签名，无界；既有测试/兼容面 byte-preserved）。
     public func applyPanOffset(deltaPixels: CGFloat, panel: PanelId) {
         applyOffsetDelta(deltaPixels, panel: panel)
     }
 
-    /// onPan `.ended`：panEnded → `.startDeceleration` effect → 启动惯性（spec C2/闸门 #2）。
+    /// onPan `.changed`（新签名，R1b-wire B3，Coordinator 用）：drag full-clamp 到 [min,max]（不跟手过边）。
+    /// internal（非 public）：`OffsetBounds` 是 internal geometry 类型，仅同模块 Coordinator 调（+ 测试 @testable）。
+    func applyPanOffset(deltaPixels: CGFloat, offsetBounds: RenderStateBuilder.OffsetBounds, panel: PanelId) {
+        let cur = panelState(panel).offset
+        let target = min(max(cur + deltaPixels, offsetBounds.minOffset), offsetBounds.maxOffset)
+        if target != cur { applyOffsetDelta(target - cur, panel: panel) }
+    }
+
+    /// onPan `.ended`（旧签名，无界 plain decel；既有测试/兼容面）。H1：体首清 activeBounds 防 stale 喂 onUpdate。
     public func endPan(velocity: CGFloat, panel: PanelId) {
+        setActiveBounds(nil, panel: panel)
         if case .startDeceleration(let v) = reduce(.panEnded(velocity: velocity), on: panel) {
+            animator(for: panel).start(initialVelocity: v)
+        }
+    }
+
+    /// onPan `.ended`（新签名，R1b-wire B2 + 机制 A，Coordinator 用）：存 numeric bounds + 按速度方向分派（D8）。
+    /// v>0 ∧ .max∈bounceEdges → 对称 bounce（最老边弹）；否则 plain decel（含 v≤0 与无滚动空间）。
+    /// internal（非 public）：`OffsetBounds` 是 internal geometry 类型，仅同模块 Coordinator 调（+ 测试 @testable）。
+    func endPan(velocity: CGFloat, offsetBounds: RenderStateBuilder.OffsetBounds, panel: PanelId) {
+        guard case .startDeceleration(let v) = reduce(.panEnded(velocity: velocity), on: panel) else { return }
+        if v > 0 && offsetBounds.bounceEdges.contains(.max) {
+            setActiveBounds(ActiveDecel(bounds: offsetBounds, allowOverscroll: true), panel: panel)
+            animator(for: panel).start(initialVelocity: v, fromOffset: panelState(panel).offset,
+                                       minOffset: offsetBounds.minOffset, maxOffset: offsetBounds.maxOffset)
+        } else {
+            setActiveBounds(ActiveDecel(bounds: offsetBounds, allowOverscroll: false), panel: panel)
             animator(for: panel).start(initialVelocity: v)
         }
     }
