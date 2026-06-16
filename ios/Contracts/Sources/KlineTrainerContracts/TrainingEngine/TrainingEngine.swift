@@ -54,6 +54,11 @@ public final class TrainingEngine {
     }
     @ObservationIgnored private var activeBounds: (upper: ActiveDecel?, lower: ActiveDecel?) = (nil, nil)
 
+    /// R1b-drag（D1）：单指 drag 期**未阻尼累计意图位移**（raw）。`beginPan` seed=归一后 offset；
+    /// `applyPanOffset` 累加；`endPan`/`cancelPan` 清 nil；`recordRenderBounds` resize 时重同步（E5）。
+    /// `@ObservationIgnored`：纯 numeric（同 activeBounds 模式）。
+    @ObservationIgnored private var dragRaw: (upper: CGFloat?, lower: CGFloat?) = (nil, nil)
+
     /// 构造运行时引擎（D9 校验边界契约）。
     ///
     /// **`allCandles` 必须是已校验数据。** 训练组数据的「可恢复」校验（空 `[:]` / 缺 `.m3` /
@@ -604,6 +609,12 @@ extension TrainingEngine {
     private func setActiveBounds(_ v: ActiveDecel?, panel: PanelId) {
         if panel == .upper { activeBounds.upper = v } else { activeBounds.lower = v }
     }
+    private func dragRawFor(_ panel: PanelId) -> CGFloat? {
+        panel == .upper ? dragRaw.upper : dragRaw.lower
+    }
+    private func setDragRaw(_ v: CGFloat?, panel: PanelId) {
+        if panel == .upper { dragRaw.upper = v } else { dragRaw.lower = v }
+    }
 
     /// 减速/bounce 每帧 delta（onUpdate）：bounce → floor `[min,+∞)`（放最老边 overscroll）；
     /// decel → full `[min,max]`（硬停两边，含 v>0 无滚动空间不 strand，C1）。无 activeBounds → 无界（旧路径兼容）。
@@ -650,7 +661,8 @@ extension TrainingEngine {
     /// 新一次抓取必须**先停**本面板进行中的减速（标准惯性滚动语义：手指落下即截住惯性）——否则 re-grab 期间
     /// 残余减速 onUpdate 与手指 `applyPanOffset` 同时喂 `offsetApplied` 致跳动（final-review F1，与 D7 硬切同精神）。
     public func beginPan(panel: PanelId) {
-        interruptDeceleration(panel: panel)   // R1b-wire D10：停 + 归一中途 overscroll（H3），再 .panStarted
+        interruptDeceleration(panel: panel)                  // R1b-wire D10：停 + 归一中途 overscroll（H3），再 seed/.panStarted
+        setDragRaw(panelState(panel).offset, panel: panel)   // R1b-drag D1：raw 基线=归一后 offset∈[0,maxOffset]（E1）
         _ = reduce(.panStarted, on: panel)
     }
 
@@ -665,8 +677,21 @@ extension TrainingEngine {
     public func applyPanOffset(deltaPixels: CGFloat, renderBounds: CGRect, panel: PanelId) {
         let ob = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds)
         let cur = panelState(panel).offset
-        let target = min(max(cur + deltaPixels, ob.minOffset), ob.maxOffset)
-        if target != cur { applyOffsetDelta(target - cur, panel: panel) }
+        // R1b-drag D1：raw 累加器（未阻尼累计意图位移）。E1：beginPan 已 seed；防御惰性回退当前 offset。
+        let raw0 = dragRawFor(panel) ?? cur
+        let raw = max(0, raw0 + deltaPixels)                     // E2 下钳 0：最新边硬钳无给 + 无反拖死区
+        setDragRaw(raw, panel: panel)
+        // D2 单边映射
+        let target: CGFloat
+        if !ob.bounceEdges.contains(.max) {                      // E6 无滚动空间（maxOffset==0）→ 硬钳 0
+            target = min(raw, ob.maxOffset)
+        } else if raw <= ob.maxOffset {                          // 界内 1:1（回归）
+            target = raw
+        } else {                                                 // 最老边阻尼
+            let mainW = ChartPanelFrames.split(in: renderBounds).mainChart.width
+            target = ob.maxOffset + RubberBand.damp(over: raw - ob.maxOffset, dimension: mainW)
+        }
+        if target != cur { applyOffsetDelta(target - cur, panel: panel) }   // L2-new：省 0-delta 空 bump
     }
 
     /// onPan `.ended`（旧签名，无界 plain decel）。**internal（codex R2-M2）**：同 applyPanOffset，不暴露 public 无界路径
@@ -681,11 +706,16 @@ extension TrainingEngine {
     /// onPan `.ended`（R1b-wire B2 + 机制 A，**public** gesture API）：传 `renderBounds`（CGRect，不暴露 OffsetBounds，
     /// codex R3）→ engine 内部算边界 + 按速度方向分派（D8）。v>0 ∧ .max∈bounceEdges → 对称 bounce（最老边弹）；否则 plain decel。
     public func endPan(velocity: CGFloat, renderBounds: CGRect, panel: PanelId) {
+        setDragRaw(nil, panel: panel)
         let ob = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds)
         guard case .startDeceleration(let v) = reduce(.panEnded(velocity: velocity), on: panel) else { return }
-        if v > 0 && ob.bounceEdges.contains(.max) {
+        let offset = panelState(panel).offset
+        // R1b-drag D3：drag-overscroll（offset>maxOffset）松手**不论速度方向**都弹簧回 maxOffset（防慢松手 no-op strand）；
+        //   否则 R1b-wire 机制 A 既有分派。L1 不变量：post-drag 面板恒 .freeScrolling → .panEnded 返 .startDeceleration（含 v=0）
+        //   → 本分支可达；**勿把 overscroll 检查移出本 guard / 勿放松 guard**（autoTracking/drawing 不经此路且已 offset=0）。
+        if offset > ob.maxOffset || (v > 0 && ob.bounceEdges.contains(.max)) {
             setActiveBounds(ActiveDecel(bounds: ob, allowOverscroll: true), panel: panel)
-            animator(for: panel).start(initialVelocity: v, fromOffset: panelState(panel).offset,
+            animator(for: panel).start(initialVelocity: v, fromOffset: offset,
                                        minOffset: ob.minOffset, maxOffset: ob.maxOffset)
         } else {
             setActiveBounds(ActiveDecel(bounds: ob, allowOverscroll: false), panel: panel)
@@ -697,7 +727,14 @@ extension TrainingEngine {
     /// 经 reducer `panEnded(0)` bump revision 但**不改 interactionMode**（freeScrolling 维持，offset 冻结于当前值；
     /// 后续两指切周期/交易再硬切 autoTracking）；忽略其 `.startDeceleration(0)` effect（不调 start）。
     public func cancelPan(panel: PanelId) {
+        setDragRaw(nil, panel: panel)
         _ = reduce(.panEnded(velocity: 0), on: panel)
+        // R1b-drag E4：cancel-于-overscroll（两指接管/drawing 截获于越界）→ 归一 maxOffset 防残留间隙。
+        //   复用 lastRenderedBounds（每帧 render 前 recordRenderBounds 已 seed；不改 public 签名）。
+        let ob = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds(panel))
+        let cur = panelState(panel).offset
+        let clamped = min(max(cur, ob.minOffset), ob.maxOffset)
+        if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }
     }
 
     // MARK: pinch 缩放手势派发（C7 arbiter onPinch 回调下游；RFC §4.4d + 设计 D6）
@@ -791,6 +828,8 @@ extension TrainingEngine {
         let cur = panelState(panel).offset
         let clamped = min(max(cur, fresh.minOffset), fresh.maxOffset)
         if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }
+        // R1b-drag E5：resize 中途 active drag → 重同步 dragRaw 到归一后 offset（防下一帧 delta 基于 stale raw 跳变）。
+        if dragRawFor(panel) != nil { setDragRaw(panelState(panel).offset, panel: panel) }
     }
 
     // MARK: 画线激活 H1 production handler（spec §C1b 闸门 #4 F3 + effect 合约 L1026-1032）
@@ -897,5 +936,12 @@ extension TrainingEngine {
                        totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
                        buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: finalTick)
     }
+}
+#endif
+
+#if DEBUG
+extension TrainingEngine {
+    /// R1b-drag 测试专用：读 dragRaw（生命周期断言）。
+    func debug_dragRawFor(_ panel: PanelId) -> CGFloat? { dragRawFor(panel) }
 }
 #endif
