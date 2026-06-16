@@ -336,5 +336,37 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
             guard case AppError.persistence(.dbCorrupted) = err else { XCTFail("expected dbCorrupted"); return }
         }
     }
+
+    // MARK: - 校验 2 镜像（persistence-scope RFC）
+
+    /// preview reader 拒聚合 open 越 endGlobalIndex 窗口（daily datetime=2 → s=2 > endGlobalIndex=1）
+    func test_reader_validation_aggregateOpenMustBeWithinWindow() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
+        let m3 = [validM3(0), validM3(1), validM3(2), validM3(3), validM3(4)]   // datetime 0..4 严格递增
+        let daily = KLineCandle(period: .daily, datetime: 2, open: 1, high: 2, low: 0.5, close: 1.5,
+                                volume: 100, amount: nil, ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                                macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: nil, endGlobalIndex: 1)
+        let r = PreviewTrainingSetReader(meta: meta, candles: [.m3: m3, .daily: [daily]])
+        XCTAssertThrowsError(try r.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else { XCTFail("expected dbCorrupted"); return }
+        }
+    }
+
+    /// pre-window 聚合（datetime 早于 m3[0]、endGlobalIndex=0）→ preview reader load 成功（R1-H1 不回归）
+    func test_reader_validation_preWindowAggregatePasses() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
+        // m3 datetime 10,20,30 严格递增；daily datetime=5 (< m3[0]=10) → s=0 ≤ endGlobalIndex=0
+        func m3c(_ i: Int, _ dt: Int64) -> KLineCandle {
+            KLineCandle(period: .m3, datetime: dt, open: 1, high: 2, low: 0.5, close: 1.5,
+                        volume: 100, amount: nil, ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: i, endGlobalIndex: i)
+        }
+        let daily = KLineCandle(period: .daily, datetime: 5, open: 1, high: 2, low: 0.5, close: 1.5,
+                                volume: 100, amount: nil, ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                                macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: nil, endGlobalIndex: 0)
+        let r = PreviewTrainingSetReader(meta: meta, candles: [.m3: [m3c(0, 10), m3c(1, 20), m3c(2, 30)], .daily: [daily]])
+        let loaded = try r.loadAllCandles()
+        XCTAssertEqual(loaded[.daily]?.count, 1)
+    }
 }
 #endif

@@ -124,6 +124,15 @@ public final class PreviewTrainingSetReader: TrainingSetReader, @unchecked Senda
                     }
                 }
             }
+            // 校验 2（persistence-scope RFC，镜像 DefaultTrainingSetReader）：聚合 open 落 endGlobalIndex 窗口。
+            for (period, list) in data where period != .m3 {
+                for c in list {
+                    let s = m3.partitioningIndex { $0.datetime >= c.datetime }
+                    guard s <= c.endGlobalIndex else {
+                        throw AppError.persistence(.dbCorrupted)
+                    }
+                }
+            }
         } else if !data.isEmpty {
             throw AppError.persistence(.dbCorrupted)
         }

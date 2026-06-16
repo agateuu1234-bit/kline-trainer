@@ -174,6 +174,17 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
                     }
                 }
             }
+            // 校验 2（persistence-scope RFC）：聚合 open 落 endGlobalIndex 窗口。bucket=[s,endGlobalIndex]，
+            // s=首个 datetime>=聚合 datetime 的 m3（= synthesize rawStart）。s>endGlobalIndex = 空 bucket /
+            // open 越窗末 / future-overflow → corrupt。依赖校验 1 已过（m3 datetime 单调 → partitioningIndex 良定义）。
+            for (period, candles) in result where period != .m3 {
+                for c in candles {
+                    let s = m3Candles.partitioningIndex { $0.datetime >= c.datetime }
+                    guard s <= c.endGlobalIndex else {
+                        throw AppError.persistence(.dbCorrupted)
+                    }
+                }
+            }
         } else if !result.isEmpty {
             // 高周期数据存在但无 m3 = 缺全局 tick 轴锚点
             throw AppError.persistence(.dbCorrupted)
