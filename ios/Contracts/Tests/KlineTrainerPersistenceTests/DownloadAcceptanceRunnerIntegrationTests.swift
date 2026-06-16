@@ -189,4 +189,48 @@ struct DownloadAcceptanceRunnerIntegrationTests {
         }
         #expect(loaded[.m3]?.first?.globalIndex == 0)
     }
+
+    @Test func run_realPipeline_withRealVerifier_rejectsWhenPeriodUnderThirtyBefore() async throws {
+        let startDT: Int64 = 1_700_000_000
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        // daily 丢 e=0 → 29 before（仍保 datetime=startDT−30+e 网格对齐，过 reader 校验2）；其余周期 38 根
+        opts.candles = Self.verifierValidCandles(startDT: startDT, dailyBeforeStart: 1)
+        let (sqliteFixtureURL, cleanupSqlite) = try TrainingSetSQLiteFixture.make(opts)
+        defer { cleanupSqlite() }
+        let sqliteBytes = try Data(contentsOf: sqliteFixtureURL)
+
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("P2RealVNeg-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+        let (zipURL, crcHex) = try ZipFixture.makeMinimalSqliteZip(
+            in: workDir, sqliteFileName: "training.sqlite", sqlitePayload: sqliteBytes)
+
+        let cacheRoot = CacheFixture.makeTempCacheRoot()
+        defer { CacheFixture.cleanup(cacheRoot) }
+        let journal = InMemoryAcceptanceJournalDAO()
+        let cache = DefaultFileSystemCacheManager(cacheRoot: cacheRoot)
+        let runner = DownloadAcceptanceRunner(
+            api: FakeAPIClient(download: .success(zipURL), confirmError: nil),
+            cache: cache,
+            dbFactory: DefaultTrainingSetDBFactory(),
+            journal: journal,
+            integrity: DefaultZipIntegrityVerifier(),
+            extractor: DefaultZipExtractor(),
+            dataVerifier: DefaultTrainingSetDataVerifier(),   // 真 verifier
+            cleaner: DefaultDownloadAcceptanceCleaner())
+        let meta = TrainingSetMetaItem(
+            id: 99, stockCode: "600001", stockName: "测试股票",
+            filename: "training.zip", schemaVersion: 1, contentHash: crcHex)
+
+        let result = await runner.run(meta: meta, leaseId: "44444444-4444-4444-4444-444444444444")
+        guard case .rejected(let err) = result else {
+            Issue.record("expected .rejected via real verifier (daily 29-before), got \(result)"); return
+        }
+        // 拒绝码精确 = verifier 的 trainingSet(.emptyData)（区分 reader 的 .persistence(.dbCorrupted) / confirm 的 .network*）
+        #expect(err == .trainingSet(.emptyData), "真 verifier 拒绝码应为 trainingSet(.emptyData)，实得 \(err)")
+        // verifier 在 cache.store 前抛错 → cache 无该组 + 无 confirmed journal
+        #expect(cache.listAvailable().contains(where: { $0.id == 99 }) == false)
+        #expect(try journal.listByState(.confirmed).isEmpty)
+    }
 }
