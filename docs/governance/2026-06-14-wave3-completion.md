@@ -57,7 +57,7 @@ ship-gate-W1-R2-sample-data: OPEN
 
 该硬门把「实测结果已记录」定为**顺位 13 收尾本身**（非仅 freeze tag）的硬前提。本 doc 交付：
 
-- **运行时矩阵 runbook**（`docs/acceptance/2026-06-14-wave3-runtime-matrix.md`）：汇总 6 条 device happy-path 交互 + §C fixture 端到端，每行 device pass/fail 留空。
+- **运行时矩阵 runbook**（`docs/acceptance/2026-06-14-wave3-runtime-matrix.md`）：汇总 8 项 device happy-path 交互（6 数据交互 + 顺位 2 竖屏/窗口 + 顺位 11 bounce）+ §C fixture 端到端，每行 device pass/fail 留空。
 - **§C fixture provisioning**（13b PR #109 已 merged）：经 `KLINE_SEED_FIXTURE=1` 在真 composition root provision 缓存 + 历史 + pending + 设置，使矩阵**可执行**。
 
 **§三.3 硬门是三连合取，正式关闭须三者皆回填（不止本矩阵）**：上引原文把关闭/freeze 阻塞依赖定为 **①Wave 3 运行时矩阵（经 §C fixture，= 本 doc 交付的 runbook）+ ②Wave 2 两份 runbook 的 device/sim 实测已记录 + ③Instruments 帧预算实测数值已回填**。本 doc 交付的运行时矩阵 runbook 仅覆盖合取项 ①（Wave 3 新交互）；合取项 ②③ 由各自既有 runbook 承载、实测同样 pending：
