@@ -164,8 +164,11 @@ git diff origin/main...HEAD -- ios/Contracts/Sources/KlineTrainerContracts/Chart
 
 ---
 
-## 评审 APPROVE 落账
+## 评审 APPROVE 落账（opus 4.8 xhigh 对抗性 review 代 codex，per user 指示）
 
-- **R1（NEEDS-ATTENTION）**：opus 4.8 xhigh 对抗性 review，识别 1 High（asymptote 阈值 790 数学错→790修为785，实 788.53）+ 1 Medium（Step-2 fail-first 分类混淆）+ 2 Low（存储锚 off-by-one / baseline 计数）。
-- **R2（APPROVE）**：独立复验三修复正确 + 承重事实全复确认 + 0 新缺陷。plan 收敛，可实施。
-- **评审通道**：per user 指示，本 PR trust-boundary 改 `ios/**/*.swift`，配额耗尽 fallback opus 4.8 xhigh 代 codex:adversarial-review。
+- **Spec review R1 = APPROVE**：reviewer 实编验证橡皮筋公式性质 / dragRaw 反拖解绕 / D3 strand 真实 + 弹回路径 / 单边不变量 / 零渲染。0C/0H，2 Low 折入 plan。
+- **Plan review R1（NEEDS-ATTENTION）→ R2（APPROVE）**：R1 识别 1 High（asymptote 阈值 790 数学错→修 785，实 788.53）+ 1 Medium（Step-2 fail-first 分类混淆）+ 2 Low；R2 独立复验三修复正确 + 承重事实全复确认（mainW=800/maxOffset=710/弹簧 frame 37 settle）+ 0 新缺陷。plan 收敛。
+- **Subagent-driven 两阶段 review**：spec-compliance = **YES**（9/9 合规，1 Minor 注释恢复已修）；code-quality = **APPROVE**（0C/0I，2 Minor robustness/perf 留记）。
+- **Verification**：host **1085 tests / 149 suites / 0 failures**；Mac Catalyst build-for-testing **TEST BUILD SUCCEEDED + 0 error/warning（GATE PASS）**；行为中性（render/physics/arbiter 空 diff）。
+- **Final overall review = READY TO MERGE: YES**：独立重跑 1085/0 + 全面 correctness hunt（offset<0 不可达 / 无 min==max 误弹 / dragRaw 生命周期闭合）+ 行为中性 + governance/honesty，0C/0I/2 Minor（ship-acceptable）。
+- **评审通道**：本 PR trust-boundary 改 `ios/**/*.swift`，codex 配额耗尽 → opus 4.8 xhigh 代 `codex:adversarial-review`；merge 经 user TTY `attest-override` + `--admin` bypass 缺失 `codex-verify-pass`（Catalyst CI 真绿不绕）。
