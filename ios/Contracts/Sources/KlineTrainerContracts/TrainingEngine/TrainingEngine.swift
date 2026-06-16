@@ -727,8 +727,14 @@ extension TrainingEngine {
     /// 经 reducer `panEnded(0)` bump revision 但**不改 interactionMode**（freeScrolling 维持，offset 冻结于当前值；
     /// 后续两指切周期/交易再硬切 autoTracking）；忽略其 `.startDeceleration(0)` effect（不调 start）。
     public func cancelPan(panel: PanelId) {
-        setDragRaw(nil, panel: panel)                        // R1b-drag：清 raw
+        setDragRaw(nil, panel: panel)
         _ = reduce(.panEnded(velocity: 0), on: panel)
+        // R1b-drag E4：cancel-于-overscroll（两指接管/drawing 截获于越界）→ 归一 maxOffset 防残留间隙。
+        //   复用 lastRenderedBounds（每帧 render 前 recordRenderBounds 已 seed；不改 public 签名）。
+        let ob = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds(panel))
+        let cur = panelState(panel).offset
+        let clamped = min(max(cur, ob.minOffset), ob.maxOffset)
+        if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }
     }
 
     // MARK: pinch 缩放手势派发（C7 arbiter onPinch 回调下游；RFC §4.4d + 设计 D6）
@@ -822,6 +828,8 @@ extension TrainingEngine {
         let cur = panelState(panel).offset
         let clamped = min(max(cur, fresh.minOffset), fresh.maxOffset)
         if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }
+        // R1b-drag E5：resize 中途 active drag → 重同步 dragRaw 到归一后 offset（防下一帧 delta 基于 stale raw 跳变）。
+        if dragRawFor(panel) != nil { setDragRaw(panelState(panel).offset, panel: panel) }
     }
 
     // MARK: 画线激活 H1 production handler（spec §C1b 闸门 #4 F3 + effect 合约 L1026-1032）

@@ -121,4 +121,33 @@ struct TrainingEngineDragDampingTests {
         for _ in 0..<60 { _ = fakes().last?.fire(1.0 / 60.0) }
         #expect(abs(e.upperPanel.offset - before) < 1e-6)                         // 不动（v=0 界内不弹）
     }
+
+    @Test("cancel-于-overscroll（E4）：drag 过界后 cancelPan → 归一 maxOffset、dragRaw==nil")
+    func cancelAtOverscrollNormalizes() {
+        let (e, _) = Self.makeEngine()
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset + 600, renderBounds: Self.bounds, panel: .upper)  // 越界
+        #expect(e.upperPanel.offset > ob.maxOffset)
+        e.cancelPan(panel: .upper)                                  // 两指接管/drawing 截获
+        #expect(abs(e.upperPanel.offset - ob.maxOffset) < 1e-6)    // 归一 maxOffset（无残留越界间隙）
+        #expect(e.debug_dragRawFor(.upper) == nil)
+    }
+
+    @Test("resize 中途 active drag（E5）：bounds 变 → offset 归新几何 + dragRaw 重同步")
+    func resizeMidDragResyncsDragRaw() {
+        let (e, _) = Self.makeEngine()
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset, renderBounds: Self.bounds, panel: .upper)   // 到最老边 710
+        let narrow = CGRect(x: 0, y: 0, width: 400, height: 600)                                 // 窗口变窄 → 新几何
+        e.recordRenderBounds(narrow, panel: .upper)
+        let nb = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: narrow)
+        #expect(e.upperPanel.offset <= nb.maxOffset + 1e-6)        // offset 归新 [0,newMax]
+        #expect(e.debug_dragRawFor(.upper) == e.upperPanel.offset) // dragRaw 重同步=归一后 offset
+        // 续拖一帧不应基于 stale raw 跳变（delta 0 → offset 不变）
+        let after = e.upperPanel.offset
+        e.applyPanOffset(deltaPixels: 0, renderBounds: narrow, panel: .upper)
+        #expect(abs(e.upperPanel.offset - after) < 1e-6)
+    }
 }
