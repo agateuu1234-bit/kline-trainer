@@ -105,9 +105,10 @@ if startIndex == upperBound {
 
 ### 签名（**additive overload**：新带 bounds / 旧无 bounds 保留，H1/H2 修正）
 ```swift
-// 新（Coordinator 用）：
-public func applyPanOffset(deltaPixels: CGFloat, offsetBounds: RenderStateBuilder.OffsetBounds, panel: PanelId)  // full-clamp
-public func endPan(velocity: CGFloat, offsetBounds: RenderStateBuilder.OffsetBounds, panel: PanelId)              // 存 activeBounds + 分派
+// 新（**public** gesture API，Coordinator + 外部消费者用；codex R3：传 CGRect renderBounds 不暴露 internal OffsetBounds，
+//   engine 内部 `offsetBounds(engine:panel:bounds:)` 算边界）：
+public func applyPanOffset(deltaPixels: CGFloat, renderBounds: CGRect, panel: PanelId)  // 内部算 ob + full-clamp
+public func endPan(velocity: CGFloat, renderBounds: CGRect, panel: PanelId)             // 内部算 ob + 存 activeBounds + 机制 A 分派
 // 旧（**internal，codex R2-M2**：B4 后 offset>maxOffset 渲 overscroll 间隙，不暴露 public 无界 mutation；仅模块内测试 @testable 调）：
 func applyPanOffset(deltaPixels: CGFloat, panel: PanelId)   // 无界（行为不变；visibility public→internal）
 func endPan(velocity: CGFloat, panel: PanelId)             // 无界 plain decel；体首 activeBounds[panel]=nil
@@ -165,14 +166,13 @@ func interruptDeceleration(panel):
 - **scene-active**：既有 `resetOnSceneActive`——bounce 路径 `normalizeToEdgeDelta` 归 maxOffset；decel 路径 offset 已被 full-clamp 在界内。**不改**。
 - **resize 中途/之后 bounce（codex branch-diff R1+R2-M1 修，承袭父 §B5「几何变更 → stop+归一 edge」）**：`view.bounds` 变（旋转/分屏）后，**冻结的 `activeBounds`（中途 bounce）或 settled/drag-ended 的 offset** 在新几何下可能 >新 maxOffset → makeViewport 视其为 `offset>maxOffset` → 渲**持久 overscroll 间隙**直到下次手势。**处置（本 PR 修）**：`recordRenderBounds`（updateUIView 每次调）检测 `bounds` 变 → 按**新** bounds 算 `offsetBounds` 归一 offset 到 `[new min, new max]`；**归一不 gate on `isDecelerating`**（R2-M1：offset 可在无 animator 时 stale），若有 active run 额外 `stop()`+清 activeBounds。`bounds` 未变（常态每帧）→ no-op，不扰正常 bounce。pinch 由 `applyPinch(.began)` 的 `interruptDeceleration` 覆盖；resize 非手势几何变更，故在 `recordRenderBounds` 接。测 `resizeMidBounceNormalizes`（中途 bounce）+ `resizeAfterSettleNormalizes`（drag-ended 无 animator）。MVP：stop+归一（cut short），不追求无缝续弹。
 
-### Coordinator 喂 bounds（`ChartContainerView.Coordinator.attach` 的 `onPan`）
+### Coordinator 传 renderBounds（`ChartContainerView.Coordinator.attach` 的 `onPan`，codex R3 后简化）
 ```
-.changed: let b = RenderStateBuilder.offsetBounds(engine:self.engine!, panel:self.panel, bounds:view.bounds)
-          engine.applyPanOffset(deltaPixels:deltaX, offsetBounds:b, panel)
-.ended:   let b = ...同上; engine.endPan(velocity:velocityX, offsetBounds:b, panel)
+.changed: engine.applyPanOffset(deltaPixels:deltaX, renderBounds:view.bounds, panel)   // engine 内部算 ob
+.ended:   engine.endPan(velocity:velocityX, renderBounds:view.bounds, panel)
 .began/.cancelled: 不变
 ```
-新增 `RenderStateBuilder.offsetBounds(engine:panel:bounds:)` 便捷重载（复用 `make` 的 extraction）：
+engine 内部用 `RenderStateBuilder.offsetBounds(engine:panel:bounds:)` 便捷重载（internal，复用 `make` 的 extraction）算 OffsetBounds：
 ```swift
 @MainActor static func offsetBounds(engine: TrainingEngine, panel: PanelId, bounds: CGRect) -> OffsetBounds {
     let ps = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
@@ -243,6 +243,7 @@ func interruptDeceleration(panel):
 | 2026-06-16 | v1 | 锁机制 A；重导 §三/§B4 单边；三 clamp 层；engine activeBounds + Coordinator 喂 bounds；B5 strand。 |
 | 2026-06-16 | v2（opus xhigh R1 修：1C+3H+6M+3L） | **C1** onUpdate clamp 按 run 类型（bounce floor / decel full），修「v>0 无滚动空间 plain decel strand 正 offset」；**H1** 旧 endPan 清 activeBounds 防 stale；**H2** 旧签名 byte-preserved → 既有测试不变、P7 重述；**H3/M3** `interruptDeceleration`（`isDecelerating`-guard，D10）在 beginPan/activateDrawingTool/pinch.began 归一 overscroll、防 stale 误钳；**M1** activeBounds `@ObservationIgnored`；**M2** B4 复用 core.baseStartIndex；**M4** offsetBounds 重载传 raw visibleCount；**M5** §六.4 加「bounce 朝 maxOffset 移动」断言；**M6** cancelPan/两指 pan 期无 bounce 澄清；**L1/L2/L3** 测试框架修正（offset<0=回归断言 / 早tick vs 最新边分立 / killer 缝=driver factory）。opus R1 已核实正确项：机制 A 单边性、v≤0 单调、v==0 no-op、符号约定、B4 顺序、D4 同源、floor 不触发 bounce、OOB/partial-aggregate 保真、offsetBounds 重载可行。 |
 | 2026-06-16 | **v2.1（opus xhigh R2 = APPROVE）** | R2 独立核实 R1 全 1C+3H+6M+3L = RESOLVED + 机制 A/`isDecelerating`-guard/`allowOverscroll` floor-undershoot/同源 maxOffset 逐位相等/两面板独立/Sendable 全核实正确。折入 R2 实施级提示：**M1-new** resize 中途 bounce 残留显式 out-of-scope（承袭父 §B5）+ runbook 验证行；**M2-new** `activateDrawingTool` 的 `interruptDeceleration` 顺序不变量（在算 range 前）+ 测；**L1-new** `interruptDeceleration` 注释软化（非 resize 路径为当前几何）；**L2-new** onUpdate full-clamp `target==cur` 省 0-delta 空 bump。**设计收敛。** |
+| 2026-06-16 | **v2.5（codex branch-diff R3 修：1 high）** | R2-M2 把旧 public gesture 方法改 internal → **源兼容回归**（外部消费者失 public gesture API，且新 bounded 重载也 internal 因暴露 internal OffsetBounds）。**综合解**：新重载从 `(offsetBounds: OffsetBounds)` internal 改 **`(renderBounds: CGRect)` public**——消费者传 view bounds（CGRect public 类型，**不暴露 OffsetBounds**），engine 内部 `offsetBounds(engine:panel:bounds:)` 算边界 + clamp/分派。同时满足 R2-M2（无 public 无界）+ R3（有 public bounded 替代不暴露 OffsetBounds）。Coordinator 简化为传 view.bounds；bounce wiring 测 `offsetBounds:ob`→`renderBounds:Self.bounds`；+ non-@testable `PublicGestureSurfaceTests`（编译期 public 面保障，codex R3 要求）。1062 host + Catalyst 绿。 |
 | 2026-06-16 | **v2.4（codex branch-diff R2 修：2 medium）** | **R2-M1** v2.3 的 resize 修只 gate on `isDecelerating`，漏「offset settled/drag-ended 于旧 maxOffset、无 animator 时 resize」→ 仍 strand；改 `recordRenderBounds` 归一**不 gate on isDecelerating**（bounds 变即按新几何 clamp，有 active run 额外 stop+清）+ 测 `resizeAfterSettleNormalizes`。**R2-M2** 旧 public `endPan/applyPanOffset` 无界路径在 B4 后让超界 offset 渲持久 overscroll → 改 **internal**（生产无 caller 用旧签名，grep 核实；仅测试 @testable）。1062 host 绿。 |
 | 2026-06-16 | **v2.3（codex:adversarial-review branch-diff R1 修）** | codex 揪出真 medium：`endPan` 冻结 `activeBounds` 整个 bounce run，resize/旋转中途 bounce → settle 到旧 maxOffset → 新几何下持久 overscroll 间隙（no-ship）。**根因 = 我实现漏接 resize 非手势几何变更**（只接了 pinch 手势），比父 §B5「几何变更→stop+归一」更弱。**修：`recordRenderBounds` 检测 bounds 变 + isDecelerating → stop + 按新几何归一 offset + 清 activeBounds**（host 不可复现的 device 残留转为 host 可测）。+ 测 `resizeMidBounceNormalizes`；spec §五.B5/§七/§六.10 从「out-of-scope 残留」改「已修」。1061 host 绿。 |
 | 2026-06-16 | **v2.2（plan opus xhigh R1→R2→R3 反馈回填）** | plan-stage review 揪出两处需回填 spec 的修正：**M1（标签）** `interruptDeceleration` 的 `reduce(.offsetApplied(deltaPixels: …))` 必带 `deltaPixels:` 标签（原 spec 漏）；**plan R2-C1（M2-new reorder）** `interruptDeceleration` 的归一 `offsetApplied` 会 bump revision，若放在 `reduce(.activateDrawing)` 捕获 `baseRev` **之后**会令 `setDrawingSnapshot` 的 `baseRev==revision` staleness 闸门失配 → 永不进 drawing；**修法 = `interruptDeceleration` 提到 `activateDrawingTool` 最顶（在捕获 baseRev 之前）**，baseRev 捕获归一后 revision（plan R3 实证 `.activateDrawing` 不自 bump、既有 H1/pinch/interaction 全套不破）。plan（R1 3C+4H+4M+4L → R2 1C → R3 APPROVE）+ spec 双收敛。 |

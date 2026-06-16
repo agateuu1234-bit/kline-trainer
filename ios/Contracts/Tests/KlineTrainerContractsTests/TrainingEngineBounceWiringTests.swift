@@ -36,9 +36,9 @@ struct TrainingEngineBounceWiringTests {
         let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
         #expect(ob.bounceEdges.contains(.max))                       // 前提：有滚动空间（maxOffset≈710）
         e.beginPan(panel: .upper)
-        e.applyPanOffset(deltaPixels: ob.maxOffset + 999, offsetBounds: ob, panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset + 999, renderBounds: Self.bounds, panel: .upper)
         #expect(abs(e.upperPanel.offset - ob.maxOffset) < 1e-6)     // 钳上界
-        e.applyPanOffset(deltaPixels: -99999, offsetBounds: ob, panel: .upper)
+        e.applyPanOffset(deltaPixels: -99999, renderBounds: Self.bounds, panel: .upper)
         #expect(e.upperPanel.offset == 0)                            // 钳下界 0
     }
 
@@ -49,8 +49,8 @@ struct TrainingEngineBounceWiringTests {
         let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
         #expect(ob.bounceEdges.contains(.max))
         e.beginPan(panel: .upper)
-        e.applyPanOffset(deltaPixels: ob.maxOffset, offsetBounds: ob, panel: .upper)   // 起于最老边
-        e.endPan(velocity: 4000, offsetBounds: ob, panel: .upper)                       // 强甩朝最老边
+        e.applyPanOffset(deltaPixels: ob.maxOffset, renderBounds: Self.bounds, panel: .upper)   // 起于最老边
+        e.endPan(velocity: 4000, renderBounds: Self.bounds, panel: .upper)                       // 强甩朝最老边
         var maxSeen = e.upperPanel.offset
         for _ in 0..<240 { _ = fakes().last?.fire(1.0 / 60.0); maxSeen = max(maxSeen, e.upperPanel.offset) }
         #expect(maxSeen > ob.maxOffset)                              // 越界过冲（证 bounce 非 plain，方向朝 max）
@@ -64,8 +64,8 @@ struct TrainingEngineBounceWiringTests {
         let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
         #expect(ob.bounceEdges.contains(.max))
         e.beginPan(panel: .upper)
-        e.applyPanOffset(deltaPixels: ob.maxOffset * 0.5, offsetBounds: ob, panel: .upper)
-        e.endPan(velocity: -4000, offsetBounds: ob, panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset * 0.5, renderBounds: Self.bounds, panel: .upper)
+        e.endPan(velocity: -4000, renderBounds: Self.bounds, panel: .upper)
         var maxSeen = e.upperPanel.offset
         for _ in 0..<240 { _ = fakes().last?.fire(1.0 / 60.0); maxSeen = max(maxSeen, e.upperPanel.offset) }
         #expect(maxSeen <= ob.maxOffset + 1e-6)                      // 从不越界（plain，非 bounce）
@@ -79,7 +79,7 @@ struct TrainingEngineBounceWiringTests {
         let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
         #expect(ob.bounceEdges.isEmpty)                              // 前提：无滚动空间
         e.beginPan(panel: .upper)
-        e.endPan(velocity: 4000, offsetBounds: ob, panel: .upper)   // 正速
+        e.endPan(velocity: 4000, renderBounds: Self.bounds, panel: .upper)   // 正速
         for _ in 0..<240 { _ = fakes().last?.fire(1.0 / 60.0) }
         #expect(e.upperPanel.offset == 0)                            // 不 strand 成正值
     }
@@ -91,16 +91,16 @@ struct TrainingEngineBounceWiringTests {
         let ob = RenderStateBuilder.offsetBounds(engine: e1, panel: .upper, bounds: Self.bounds)
         #expect(ob.bounceEdges.contains(.max))
         e1.beginPan(panel: .upper)
-        e1.applyPanOffset(deltaPixels: ob.maxOffset, offsetBounds: ob, panel: .upper)
-        e1.endPan(velocity: 6000, offsetBounds: ob, panel: .upper)
+        e1.applyPanOffset(deltaPixels: ob.maxOffset, renderBounds: Self.bounds, panel: .upper)
+        e1.endPan(velocity: 6000, renderBounds: Self.bounds, panel: .upper)
         var bounceMax = e1.upperPanel.offset
         for _ in 0..<60 { _ = f1().last?.fire(1.0 / 60.0); bounceMax = max(bounceMax, e1.upperPanel.offset) }
         #expect(bounceMax > ob.maxOffset + 10)                       // floor：明确越界（不钳上界）
 
         let (e2, f2) = Self.makeEngine(count: 200, tick: 150)
         e2.beginPan(panel: .upper)
-        e2.applyPanOffset(deltaPixels: ob.maxOffset * 0.3, offsetBounds: ob, panel: .upper)
-        e2.endPan(velocity: -6000, offsetBounds: ob, panel: .upper)
+        e2.applyPanOffset(deltaPixels: ob.maxOffset * 0.3, renderBounds: Self.bounds, panel: .upper)
+        e2.endPan(velocity: -6000, renderBounds: Self.bounds, panel: .upper)
         var decelMin = e2.upperPanel.offset, decelMax = e2.upperPanel.offset
         for _ in 0..<240 {
             _ = f2().last?.fire(1.0 / 60.0)
@@ -117,8 +117,8 @@ struct TrainingEngineBounceWiringTests {
         let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
         #expect(ob.bounceEdges.contains(.max))
         e.beginPan(panel: .upper)
-        e.applyPanOffset(deltaPixels: ob.maxOffset, offsetBounds: ob, panel: .upper)
-        e.endPan(velocity: 4000, offsetBounds: ob, panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset, renderBounds: Self.bounds, panel: .upper)
+        e.endPan(velocity: 4000, renderBounds: Self.bounds, panel: .upper)
         var sawOverscroll = false
         for _ in 0..<30 { _ = fakes().last?.fire(1.0 / 60.0); if e.upperPanel.offset > ob.maxOffset { sawOverscroll = true; break } }
         #expect(sawOverscroll)                              // 确处于 overscroll 中
@@ -133,8 +133,8 @@ struct TrainingEngineBounceWiringTests {
         let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
         #expect(ob.bounceEdges.contains(.max))
         e.beginPan(panel: .upper)
-        e.applyPanOffset(deltaPixels: ob.maxOffset, offsetBounds: ob, panel: .upper)
-        e.endPan(velocity: 6000, offsetBounds: ob, panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset, renderBounds: Self.bounds, panel: .upper)
+        e.endPan(velocity: 6000, renderBounds: Self.bounds, panel: .upper)
         var overscrolled = false
         for _ in 0..<30 { _ = fakes().last?.fire(1.0 / 60.0); if e.upperPanel.offset > ob.maxOffset + 5 { overscrolled = true; break } }
         #expect(overscrolled)                               // 确处于 overscroll（offset>maxOffset）
@@ -150,12 +150,12 @@ struct TrainingEngineBounceWiringTests {
         let (e, fakes) = Self.makeEngine(count: 200, tick: 150)
         let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
         e.beginPan(panel: .upper)
-        e.applyPanOffset(deltaPixels: ob.maxOffset * 0.5, offsetBounds: ob, panel: .upper)
-        e.endPan(velocity: -4000, offsetBounds: ob, panel: .upper)   // decel 到 0、settle
+        e.applyPanOffset(deltaPixels: ob.maxOffset * 0.5, renderBounds: Self.bounds, panel: .upper)
+        e.endPan(velocity: -4000, renderBounds: Self.bounds, panel: .upper)   // decel 到 0、settle
         for _ in 0..<600 { _ = fakes().last?.fire(1.0 / 60.0) }
         #expect(e.upperPanel.offset == 0)
         e.beginPan(panel: .upper)                                     // 拖到合法中段
-        e.applyPanOffset(deltaPixels: ob.maxOffset * 0.5, offsetBounds: ob, panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset * 0.5, renderBounds: Self.bounds, panel: .upper)
         let mid = e.upperPanel.offset
         e.beginPan(panel: .upper)                                     // 无活跃动画 → 不应 clamp 改 mid
         #expect(abs(e.upperPanel.offset - mid) < 1e-6)
@@ -168,8 +168,8 @@ struct TrainingEngineBounceWiringTests {
         let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
         #expect(ob.bounceEdges.contains(.max))
         e.beginPan(panel: .upper)
-        e.applyPanOffset(deltaPixels: ob.maxOffset, offsetBounds: ob, panel: .upper)
-        e.endPan(velocity: 6000, offsetBounds: ob, panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset, renderBounds: Self.bounds, panel: .upper)
+        e.endPan(velocity: 6000, renderBounds: Self.bounds, panel: .upper)
         var overscrolled = false
         for _ in 0..<30 { _ = fakes().last?.fire(1.0 / 60.0); if e.upperPanel.offset > ob.maxOffset { overscrolled = true; break } }
         #expect(overscrolled)                               // 确处于 overscroll（offset>旧 maxOffset 710）
@@ -188,7 +188,7 @@ struct TrainingEngineBounceWiringTests {
         let (e, _) = Self.makeEngine(count: 200, tick: 150)
         let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
         e.beginPan(panel: .upper)
-        e.applyPanOffset(deltaPixels: ob.maxOffset, offsetBounds: ob, panel: .upper)   // drag 到旧最老边 710
+        e.applyPanOffset(deltaPixels: ob.maxOffset, renderBounds: Self.bounds, panel: .upper)   // drag 到旧最老边 710
         e.cancelPan(panel: .upper)                                                      // 结束 drag，**不启动惯性**（无 animator）
         #expect(abs(e.upperPanel.offset - ob.maxOffset) < 1e-6)                         // offset 停在 710
         let smaller = CGRect(x: 0, y: 0, width: 400, height: 600)

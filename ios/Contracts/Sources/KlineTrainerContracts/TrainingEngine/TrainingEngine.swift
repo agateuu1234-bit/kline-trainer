@@ -647,11 +647,12 @@ extension TrainingEngine {
         applyOffsetDelta(deltaPixels, panel: panel)
     }
 
-    /// onPan `.changed`（新签名，R1b-wire B3，Coordinator 用）：drag full-clamp 到 [min,max]（不跟手过边）。
-    /// internal（非 public）：`OffsetBounds` 是 internal geometry 类型，仅同模块 Coordinator 调（+ 测试 @testable）。
-    func applyPanOffset(deltaPixels: CGFloat, offsetBounds: RenderStateBuilder.OffsetBounds, panel: PanelId) {
+    /// onPan `.changed`（R1b-wire B3，**public** gesture API）：传渲染 `renderBounds`（CGRect，public 类型，
+    /// 不暴露 internal `OffsetBounds`，codex R3）→ engine 内部算 offset 边界 + drag full-clamp 到 [min,max]（不跟手过边）。
+    public func applyPanOffset(deltaPixels: CGFloat, renderBounds: CGRect, panel: PanelId) {
+        let ob = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds)
         let cur = panelState(panel).offset
-        let target = min(max(cur + deltaPixels, offsetBounds.minOffset), offsetBounds.maxOffset)
+        let target = min(max(cur + deltaPixels, ob.minOffset), ob.maxOffset)
         if target != cur { applyOffsetDelta(target - cur, panel: panel) }
     }
 
@@ -664,17 +665,17 @@ extension TrainingEngine {
         }
     }
 
-    /// onPan `.ended`（新签名，R1b-wire B2 + 机制 A，Coordinator 用）：存 numeric bounds + 按速度方向分派（D8）。
-    /// v>0 ∧ .max∈bounceEdges → 对称 bounce（最老边弹）；否则 plain decel（含 v≤0 与无滚动空间）。
-    /// internal（非 public）：`OffsetBounds` 是 internal geometry 类型，仅同模块 Coordinator 调（+ 测试 @testable）。
-    func endPan(velocity: CGFloat, offsetBounds: RenderStateBuilder.OffsetBounds, panel: PanelId) {
+    /// onPan `.ended`（R1b-wire B2 + 机制 A，**public** gesture API）：传 `renderBounds`（CGRect，不暴露 OffsetBounds，
+    /// codex R3）→ engine 内部算边界 + 按速度方向分派（D8）。v>0 ∧ .max∈bounceEdges → 对称 bounce（最老边弹）；否则 plain decel。
+    public func endPan(velocity: CGFloat, renderBounds: CGRect, panel: PanelId) {
+        let ob = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds)
         guard case .startDeceleration(let v) = reduce(.panEnded(velocity: velocity), on: panel) else { return }
-        if v > 0 && offsetBounds.bounceEdges.contains(.max) {
-            setActiveBounds(ActiveDecel(bounds: offsetBounds, allowOverscroll: true), panel: panel)
+        if v > 0 && ob.bounceEdges.contains(.max) {
+            setActiveBounds(ActiveDecel(bounds: ob, allowOverscroll: true), panel: panel)
             animator(for: panel).start(initialVelocity: v, fromOffset: panelState(panel).offset,
-                                       minOffset: offsetBounds.minOffset, maxOffset: offsetBounds.maxOffset)
+                                       minOffset: ob.minOffset, maxOffset: ob.maxOffset)
         } else {
-            setActiveBounds(ActiveDecel(bounds: offsetBounds, allowOverscroll: false), panel: panel)
+            setActiveBounds(ActiveDecel(bounds: ob, allowOverscroll: false), panel: panel)
             animator(for: panel).start(initialVelocity: v)
         }
     }

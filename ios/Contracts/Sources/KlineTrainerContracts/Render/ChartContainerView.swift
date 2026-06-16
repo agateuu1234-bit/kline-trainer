@@ -81,12 +81,10 @@ public struct ChartContainerView: UIViewRepresentable {
                 guard let self, let engine = self.engine, let view = self.view else { return }
                 switch phase {
                 case .began:   engine.beginPan(panel: self.panel)
-                case .changed:   // R1b-wire：算 numeric bounds 喂 engine（drag full-clamp，D1）
-                    let b = RenderStateBuilder.offsetBounds(engine: engine, panel: self.panel, bounds: view.bounds)
-                    engine.applyPanOffset(deltaPixels: deltaX, offsetBounds: b, panel: self.panel)
-                case .ended:     // R1b-wire：算 bounds 喂 endPan（机制 A 速度方向分派）
-                    let b = RenderStateBuilder.offsetBounds(engine: engine, panel: self.panel, bounds: view.bounds)
-                    engine.endPan(velocity: velocityX, offsetBounds: b, panel: self.panel)
+                case .changed:   // R1b-wire：传 view.bounds，engine 内部算边界 + drag full-clamp（D1）
+                    engine.applyPanOffset(deltaPixels: deltaX, renderBounds: view.bounds, panel: self.panel)
+                case .ended:     // R1b-wire：传 view.bounds，engine 内部算边界 + 机制 A 速度方向分派
+                    engine.endPan(velocity: velocityX, renderBounds: view.bounds, panel: self.panel)
                 case .cancelled: engine.cancelPan(panel: self.panel)
                 }
             }
