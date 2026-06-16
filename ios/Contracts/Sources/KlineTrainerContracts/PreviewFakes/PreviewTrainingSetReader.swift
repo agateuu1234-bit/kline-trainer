@@ -6,6 +6,7 @@
 // R3 修订（codex round-3 high-1）：mirror DefaultTrainingSetReader.loadAllCandles 全套数据校验
 //       (KlineTrainerPersistence/DefaultTrainingSetReader.swift line 84-173)
 //       维护契约：production validateCandles 改了 → 这里同步改。
+// persistence-scope RFC：mirror 校验 1（.m3 datetime 严格递增）+ 校验 2（聚合 open 落窗口）
 // fake 不持有 DatabaseQueue，但必须镜像 close-then-read = throw + data invariants 才能让
 // consumer 的 "reader 返回 = 已校验" 假设在测试和生产都成立。
 
@@ -109,10 +110,25 @@ public final class PreviewTrainingSetReader: TrainingSetReader, @unchecked Senda
                     throw AppError.persistence(.dbCorrupted)
                 }
             }
+            // 校验 1（persistence-scope RFC，镜像 DefaultTrainingSetReader）：.m3 datetime 严格递增。
+            for i in m3.indices.dropFirst() {
+                guard m3[i].datetime > m3[i - 1].datetime else {
+                    throw AppError.persistence(.dbCorrupted)
+                }
+            }
             let m3Max = m3.last?.endGlobalIndex ?? -1
             for (period, list) in data where period != .m3 {
                 for c in list {
                     if c.endGlobalIndex > m3Max {
+                        throw AppError.persistence(.dbCorrupted)
+                    }
+                }
+            }
+            // 校验 2（persistence-scope RFC，镜像 DefaultTrainingSetReader）：聚合 open 落 endGlobalIndex 窗口。
+            for (period, list) in data where period != .m3 {
+                for c in list {
+                    let s = m3.partitioningIndex { $0.datetime >= c.datetime }
+                    guard s <= c.endGlobalIndex else {
                         throw AppError.persistence(.dbCorrupted)
                     }
                 }

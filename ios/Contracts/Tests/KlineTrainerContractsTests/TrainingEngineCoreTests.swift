@@ -323,6 +323,34 @@ import CoreGraphics
         }
     }
 
+    @Test func makeThrowsOnNonMonotonicM3Datetime() {
+        // 合法连续轴（globalIndex==endGlobalIndex==i），datetime 非单调（100 → 50）→ 纵深防御抛 .emptyData
+        func m3c(_ i: Int, _ dt: Int64) -> KLineCandle {
+            KLineCandle(period: .m3, datetime: dt, open: 10, high: 10, low: 10, close: 10,
+                        volume: 1, amount: nil, ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: i, endGlobalIndex: i)
+        }
+        #expect(throws: AppError.trainingSet(.emptyData)) {
+            try TrainingEngine.make(.normal(fees: Self.fees, maxTick: 1),
+                                    allCandles: [.m3: [m3c(0, 100), m3c(1, 50)]],
+                                    initialCapital: 100_000, initialCashBalance: 100_000,
+                                    initialUpperPeriod: .m3, initialLowerPeriod: .m3)
+        }
+    }
+
+    @Test func makeSucceedsOnMonotonicM3Datetime() throws {
+        func m3c(_ i: Int, _ dt: Int64) -> KLineCandle {
+            KLineCandle(period: .m3, datetime: dt, open: 10, high: 10, low: 10, close: 10,
+                        volume: 1, amount: nil, ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: i, endGlobalIndex: i)
+        }
+        let e = try TrainingEngine.make(.normal(fees: Self.fees, maxTick: 1),
+                                        allCandles: [.m3: [m3c(0, 50), m3c(1, 100)]],
+                                        initialCapital: 100_000, initialCashBalance: 100_000,
+                                        initialUpperPeriod: .m3, initialLowerPeriod: .m3)
+        #expect(e.tick.maxTick == 1)   // TrainingEngine 暴露 tick: TickEngine；maxTick 是 TickEngine 成员
+    }
+
     @Test func makeThrowsOnNonFiniteMoney() {
         // Stage6 R4-F2：resume cash = NaN → 可恢复抛（防污染总资金/收益率/回撤）
         #expect(throws: AppError.trainingSet(.emptyData)) {

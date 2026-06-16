@@ -482,6 +482,99 @@ final class DefaultTrainingSetReaderTests: XCTestCase {
         reader.close()
     }
 
+    // MARK: - .m3 datetime 严格递增（persistence-scope RFC 校验 1）
+
+    /// .m3 datetime 随 endGlobalIndex 递增而下降（endGlobalIndex 仍严格递增，隔离校验 1，不触 L90）→ .dbCorrupted
+    func test_loadAllCandles_m3DatetimeDescending_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = [
+            (.m3, [(200, 0, 0), (100, 1, 1)]),   // datetime 200 → 100 下降；endGIdx 0,1 严格递增
+            (.daily, [(100, nil, 1)]),
+        ]
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
+
+    /// .m3 datetime 重复（500,500），endGlobalIndex 严格递增 0,1 → 隔离校验 1（非 L90）→ .dbCorrupted
+    func test_loadAllCandles_m3DatetimeDuplicate_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = [
+            (.m3, [(500, 0, 0), (500, 1, 1)]),
+            (.daily, [(500, nil, 1)]),
+        ]
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
+
+    // MARK: - 聚合 open 落 endGlobalIndex 窗口（persistence-scope RFC 校验 2）
+
+    /// 聚合 open datetime 解析到 s > endGlobalIndex（open 越窗末）→ .dbCorrupted
+    /// 强 fixture：m3 5 根，daily datetime=1360 → s=2，但 endGlobalIndex=1（s 在 m3 范围内但 > 窗末）。
+    func test_loadAllCandles_aggregateOpenPastWindowEnd_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = [
+            (.m3, [(1000, 0, 0), (1180, 1, 1), (1360, 2, 2), (1540, 3, 3), (1720, 4, 4)]),
+            (.daily, [(1360, nil, 1)]),   // s=partitioningIndex{>=1360}=2 > endGlobalIndex=1
+        ]
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
+
+    /// 聚合 datetime 大于所有 m3（future-overflow）→ s=m3.count > endGlobalIndex → .dbCorrupted
+    func test_loadAllCandles_aggregateFutureOverflow_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = [
+            (.m3, [(1000, 0, 0), (1180, 1, 1), (1360, 2, 2), (1540, 3, 3), (1720, 4, 4)]),
+            (.daily, [(9999, nil, 4)]),   // s=5 (=m3.count) > endGlobalIndex=4
+        ]
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
+
+    /// pre-window 聚合（datetime < m3[0]、endGlobalIndex=0 后端 clamp）→ s=0 ≤ 0 → 通过（R1-H1 不回归 killer）
+    func test_loadAllCandles_preWindowAggregate_loadsSuccessfully() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = [
+            (.m3, [(1000, 0, 0), (1180, 1, 1), (1360, 2, 2)]),
+            (.daily, [(500, nil, 0)]),    // datetime 500 < m3[0] 1000 → s=0 ≤ endGlobalIndex=0
+        ]
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+        let candles = try reader.loadAllCandles()
+        XCTAssertEqual(candles[.m3]?.count, 3)
+        XCTAssertEqual(candles[.daily]?.count, 1)
+        reader.close()
+    }
+
     /// klines optional REAL 列（amount/ma66/boll_*/macd_*）存 TEXT → typeof 校验拦截 → .dbCorrupted
     /// （codex round 5 MEDIUM；round 4 narrowing scope 时漏掉的 optional REAL 列补完）
     func test_loadAllCandles_klinesWrongTypeInOptionalRealColumn_throwsDbCorrupted() throws {

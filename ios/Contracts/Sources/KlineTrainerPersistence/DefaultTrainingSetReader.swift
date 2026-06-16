@@ -158,10 +158,29 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
                     throw AppError.persistence(.dbCorrupted)
                 }
             }
+            // 校验 1（persistence-scope RFC）：.m3 datetime 严格递增。synthesize/candleDatetime 的
+            // partitioningIndex{datetime>=X} 依赖此单调；非单调 → 定位错 start。必须在校验 2 之前
+            // （m3 按 endGlobalIndex 存储，仅此校验证明其 datetime 升序）。
+            for i in m3Candles.indices.dropFirst() {
+                guard m3Candles[i].datetime > m3Candles[i - 1].datetime else {
+                    throw AppError.persistence(.dbCorrupted)
+                }
+            }
             let m3Max = m3Candles.last?.endGlobalIndex ?? -1
             for (period, candles) in result where period != .m3 {
                 for c in candles {
                     if c.endGlobalIndex > m3Max {
+                        throw AppError.persistence(.dbCorrupted)
+                    }
+                }
+            }
+            // 校验 2（persistence-scope RFC）：聚合 open 落 endGlobalIndex 窗口。bucket=[s,endGlobalIndex]，
+            // s=首个 datetime>=聚合 datetime 的 m3（= synthesize rawStart）。s>endGlobalIndex = 空 bucket /
+            // open 越窗末 / future-overflow → corrupt。依赖校验 1 已过（m3 datetime 单调 → partitioningIndex 良定义）。
+            for (period, candles) in result where period != .m3 {
+                for c in candles {
+                    let s = m3Candles.partitioningIndex { $0.datetime >= c.datetime }
+                    guard s <= c.endGlobalIndex else {
                         throw AppError.persistence(.dbCorrupted)
                     }
                 }
