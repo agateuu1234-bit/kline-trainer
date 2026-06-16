@@ -25,7 +25,8 @@
 - **Spec review R1（NEEDS-ATTENTION：1 High §一L4 漏枚举 + 2 Med §二L68/L74·§五L114/L118 + 2 Low）→ R2（NEEDS-ATTENTION：2 High 同类穷尽性遗漏 §二L72 + §三表L86）→ R3 = APPROVE**：R3 per-hit 穷尽性表覆盖三文件 11 token，category-(b)（反转未覆盖）= 空；verify gate 结构守卫不破、翻转值 byte-match、无 scope creep、冻结 spec §E.2 保留。
 - **Plan review R1 = APPROVE**：reviewer **实证 gate PASS**（拷贝三文件套用 4 编辑跑 gate → exit 0）+ Task 3 不删任何 gate-grep 指针 + 九句 list 与 spec §二.1 逐字一致 + host 测不受影响。0 C/H，2 Low 非阻塞。
 - **实施 verification**：verify gate PASS；honesty 反向断言 8/8 各 1 命中（2 翻转正值 + 6 keep-pending）；机器块旧值 0 残留；matrix 8 项 + bounce 第 8 行；host 1085/149/0。
-- **两阶段 review + final overall opus review**：见 PR。
+- **Subagent-driven 两阶段 review**（inline 执行，per plan）：spec-compliance = **YES**（7/7 合规）；code-quality = **CHANGES-REQUESTED → 2 Important stale-count 修**（completion L60「6 条」→「8 项」+ matrix L3 去「6 份」硬计数；穷尽复扫所有 N-计数确认无其他遗漏）。
+- **Final overall opus review = READY TO MERGE: YES**：独立 gate PASS byte-match + stale-count category-(b) 空 + 5 honesty marker byte-unchanged + gate 收紧 7→8 + refs 存在 + scope 干净 + 验收命令实跑全对 + 无 forbidden phrase。0 C/I/Minor。
 - **评审通道**：改 `docs/**` + `scripts/governance/verify-wave3-completion.sh`（trust-boundary）→ codex 配额耗尽 → opus 4.8 xhigh 代 `codex:adversarial-review`；merge 经 user TTY `attest-override` + `--admin` bypass 缺失 `codex-verify-pass`。
 
 ## 仍 OPEN（本 PR **不**触碰，如实保留）
