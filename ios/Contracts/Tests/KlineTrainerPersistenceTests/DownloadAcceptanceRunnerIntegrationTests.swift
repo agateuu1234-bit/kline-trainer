@@ -115,4 +115,78 @@ struct DownloadAcceptanceRunnerIntegrationTests {
         #expect((candles[.m3]?.isEmpty == false), "下载组真能被会话读取消费（m3 蜡烛非空）")
         #expect(candles[.m3]?.first?.globalIndex == 0)
     }
+
+    /// 生成 verifier-valid candles：6 周期共享同一 datetime 网格（datetime = startDT − 30 + e，
+    /// e = end_global_index），使非 m3 的 reader 校验 2 `partitioningIndex{m3.dt>=c.dt}=e <= endgidx=e` 临界成立；
+    /// m3 globalIndex = endGlobalIndex = e 连续从 0。
+    /// - dailyBeforeStart: 0 = 正向（daily e∈0…37 → 30 before + 8 after）；
+    ///   1 = 反向（daily 丢 e=0 → e∈1…37 → 29 before + 8 after，仍保网格对齐过 reader 校验2）。
+    private static func verifierValidCandles(
+        startDT: Int64,
+        dailyBeforeStart: Int = 0
+    ) -> [(Period, [(datetime: Int64, gIdx: Int?, endGIdx: Int)])] {
+        Period.allCases.map { period in
+            let eStart = (period == .daily) ? dailyBeforeStart : 0
+            let rows: [(datetime: Int64, gIdx: Int?, endGIdx: Int)] = (eStart...37).map { e in
+                (datetime: startDT - 30 + Int64(e),
+                 gIdx: period == .m3 ? e : nil,
+                 endGIdx: e)
+            }
+            return (period, rows)
+        }
+    }
+
+    @Test func run_realPipeline_withRealVerifier_confirmsAndDownstreamConsumable() async throws {
+        let startDT: Int64 = 1_700_000_000   // == ConfigOptions 默认 meta.startDatetime
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = Self.verifierValidCandles(startDT: startDT)
+        let (sqliteFixtureURL, cleanupSqlite) = try TrainingSetSQLiteFixture.make(opts)
+        defer { cleanupSqlite() }
+        let sqliteBytes = try Data(contentsOf: sqliteFixtureURL)
+
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("P2RealV-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+        let (zipURL, crcHex) = try ZipFixture.makeMinimalSqliteZip(
+            in: workDir, sqliteFileName: "training.sqlite", sqlitePayload: sqliteBytes)
+
+        let cacheRoot = CacheFixture.makeTempCacheRoot()
+        defer { CacheFixture.cleanup(cacheRoot) }
+        let journal = InMemoryAcceptanceJournalDAO()
+        let runner = DownloadAcceptanceRunner(
+            api: FakeAPIClient(download: .success(zipURL), confirmError: nil),
+            cache: DefaultFileSystemCacheManager(cacheRoot: cacheRoot),
+            dbFactory: DefaultTrainingSetDBFactory(),
+            journal: journal,
+            integrity: DefaultZipIntegrityVerifier(),
+            extractor: DefaultZipExtractor(),
+            dataVerifier: DefaultTrainingSetDataVerifier(),   // 真 verifier（非 fake）
+            cleaner: DefaultDownloadAcceptanceCleaner())
+        let meta = TrainingSetMetaItem(
+            id: 88, stockCode: "600001", stockName: "测试股票",
+            filename: "training.zip", schemaVersion: 1, contentHash: crcHex)
+
+        let result = await runner.run(meta: meta, leaseId: "33333333-3333-3333-3333-333333333333")
+        guard case .confirmed(let file) = result else {
+            Issue.record("expected .confirmed via real verifier pipeline, got \(result)"); return
+        }
+        #expect(file.id == 88)
+        #expect(file.schemaVersion == TRAINING_SET_SCHEMA_VERSION)
+        #expect(try journal.listByState(.confirmed).count == 1)
+
+        // 下游可消费 + 复述真 verifier 通过条件（钉死真 verifier 真跑过：每周期 before≥30 / after 足）
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(
+            file: file.localURL, expectedSchemaVersion: TRAINING_SET_SCHEMA_VERSION)
+        defer { reader.close() }
+        let loaded = try reader.loadAllCandles()
+        for period in Period.allCases {
+            let arr = try #require(loaded[period], "周期 \(period) 应非空")
+            let before = arr.filter { $0.datetime < startDT }.count
+            let after = arr.filter { $0.datetime >= startDT }.count
+            #expect(before >= 30, "\(period) before=\(before) 应 ≥30")
+            #expect(after >= (period == .monthly ? 8 : 1), "\(period) after=\(after) 不足")
+        }
+        #expect(loaded[.m3]?.first?.globalIndex == 0)
+    }
 }
