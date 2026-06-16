@@ -2,7 +2,7 @@
 
 > Wave 3 后续 RFC。R4 残留真修：在数据信任边界补齐「`.m3` datetime 严格递增 + 聚合 open 落 `endGlobalIndex` 窗口」校验，使损坏训练集在 load 期被拒，而非靠渲染层 fail-safe 兜底（GIGO）。
 
-- **状态：** 已收敛（spec R2 APPROVE + plan R1 HIGH 反哺第二 reader）→ 进 subagent-driven
+- **状态：** 已实施（plan 全任务完成，待 codex:adversarial-review）
 - **作用域：** trust-boundary（持久化 ingest 校验）→ 须走 `codex:adversarial-review`
 - **前置：** 聚合感知 reveal RFC（PR #115，`7b1849a`）的 codex R4 HIGH residual
 - **版本：** v1.3
