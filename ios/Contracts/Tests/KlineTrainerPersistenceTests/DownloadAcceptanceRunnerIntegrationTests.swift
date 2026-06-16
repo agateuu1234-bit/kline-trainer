@@ -127,6 +127,8 @@ struct DownloadAcceptanceRunnerIntegrationTests {
     ) -> [(Period, [(datetime: Int64, gIdx: Int?, endGIdx: Int)])] {
         Period.allCases.map { period in
             let eStart = (period == .daily) ? dailyBeforeStart : 0
+            // e 上界 37 = 38 根（eStart=0 时 30 before [e:0..29] + 8 after [e:30..37]）：
+            // 满足真 verifier monthly after≥8 + 其余 before≥30；改 37 须同步上述阈值。
             let rows: [(datetime: Int64, gIdx: Int?, endGIdx: Int)] = (eStart...37).map { e in
                 (datetime: startDT - 30 + Int64(e),
                  gIdx: period == .m3 ? e : nil,
