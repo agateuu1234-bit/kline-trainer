@@ -121,7 +121,11 @@ ship-gate-W1-R2-sample-data: OPEN
 
 ## 六、评审通道说明
 
-13c 为 doc-only（0 业务代码 / 0 CI / 0 ruleset），经 `codex:adversarial-review`（治理 doc 类，唯一 review 通道，per CLAUDE.md backstop #1）。codex 周配额耗尽时方 fallback opus 4.8 xhigh（documented，沿用 Wave 1/2 + 13a/13b 各 anchor 先例）。grep gate（`scripts/governance/verify-wave3-completion.sh`）作机器可校验断言（**只解析 WAVE3-STATUS 块、anchored 全行**，与上方机器块逐字一致）：A/B/C CLOSED + **D CLOSED（residual-D 2026-06-16）** + W3-11-R1/PR11-R1/W1-R2 OPEN + **13a-R2 RESOLVED（本 PR）** + WAVE3-STATUS 诚实（store-ready=NO / formal-closure=PENDING / **feature-completeness=PENDING-W3-11-R1** / matrix=PARTIAL / freeze=NOT-TAGGED）+ 矩阵 fixture 机制 + §三.3 三连合取（c8b/u2-gesture/帧预算）指针就位。
+13c 为 doc-only（0 业务代码 / 0 CI / 0 ruleset），经 `codex:adversarial-review`（治理 doc 类，唯一 review 通道，per CLAUDE.md backstop #1）。codex 周配额耗尽时方 fallback opus 4.8 xhigh（documented，沿用 Wave 1/2 + 13a/13b 各 anchor 先例）。
+
+**注（residual-D 闭合更新，2026-06-16；codex branch-diff review R1-Med）**：§三 行 D 的 `PARTIAL→CLOSED` flip 由一个**独立的 test+governance 混合 PR**（**非** 13c 的 doc-only scope）交付——改 `ios/**/*.swift`（新增正/反向真-verifier E2E 测试）+ 本 doc + `scripts/governance/verify-wave3-completion.sh`。其 trust boundary 须经 `codex:adversarial-review`（本 PR 自身 branch-diff attest）+ swift-test + Mac Catalyst + app-build CI + CODEOWNERS approve（详见 `docs/acceptance/2026-06-16-wave3-residual-d-e2e.md`）。本 §六 首句「13c doc-only / 单一 review 通道」仅描述 **13c 自身**快照，**不**作 residual-D PR 的 merge 记录；residual-D 的权威 review 记录在其自身 acceptance + PR。同理 §三「13a-R2 RESOLVED（本 PR）」中的「本 PR」指 13c 上下文，亦非本 residual-D PR。
+
+grep gate（`scripts/governance/verify-wave3-completion.sh`）作机器可校验断言（**只解析 WAVE3-STATUS 块、anchored 全行**，与上方机器块逐字一致）：A/B/C CLOSED + **D CLOSED（residual-D 2026-06-16）** + W3-11-R1/PR11-R1/W1-R2 OPEN + **13a-R2 RESOLVED（本 PR）** + WAVE3-STATUS 诚实（store-ready=NO / formal-closure=PENDING / **feature-completeness=PENDING-W3-11-R1** / matrix=PARTIAL / freeze=NOT-TAGGED）+ 矩阵 fixture 机制 + §三.3 三连合取（c8b/u2-gesture/帧预算）指针就位。
 
 ---
 
