@@ -8,7 +8,7 @@
 
 **Tech Stack:** Swift 6；reader 测试 XCTest（`KlineTrainerPersistenceTests`，GRDB fixture）；make 测试 Swift Testing（`KlineTrainerContractsTests`）；`swift test`（host）+ Mac Catalyst `build-for-testing`。
 
-**Spec:** `docs/superpowers/specs/2026-06-16-persistence-scope-validation-design.md`（v1.2，opus 4.8 xhigh 已 APPROVE）。
+**Spec:** `docs/superpowers/specs/2026-06-16-persistence-scope-validation-design.md`（v1.3，opus 4.8 xhigh spec-review + plan-review 均收敛 APPROVE）。
 
 ---
 
