@@ -5,7 +5,7 @@
 
 <!-- WAVE3-STATUS (machine-readable; consumed by scripts/governance/verify-wave3-completion.sh — DO NOT reword keys/values)
 status: anchors-merged-fixture-playable
-feature-completeness: PENDING-W3-11-R1-bounce-live-wiring
+feature-completeness: COMPLETE
 store-ready: NO
 formal-closure: PENDING-runtime-matrix-device-record
 runtime-matrix: PARTIAL
@@ -14,7 +14,7 @@ residual-A-cache-touch-on-use: CLOSED 13a #108
 residual-B-unified-toast-layer: CLOSED 13a #108
 residual-C-fixture-provisioning: CLOSED 13b #109
 residual-D-e2e-smoke: CLOSED residual-D 2026-06-16
-residual-W3-11-R1-bounce-live-wiring: OPEN
+residual-W3-11-R1-bounce-live-wiring: CLOSED W3-11-R1 #117
 known-defect-13a-R2-cross-lease-cache-deletion: CLOSED 13a-R2 2026-06-15
 ship-gate-PR11-R1-prod-backend-url: OPEN
 ship-gate-W1-R2-sample-data: OPEN

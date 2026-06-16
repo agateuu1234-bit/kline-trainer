@@ -3,10 +3,10 @@
 # 健壮性（codex:adversarial-review R2 High/Med）：状态谓词**只解析 WAVE3-STATUS 注释块**，块内
 #   anchored 全行精确匹配 + 拒重复 key——杜绝散文重复掩盖被改的块值（旧版搜整文档 = fail-open）。
 # 谓词 1：residual A/B/C/D 标 CLOSED（块内全行；D=CLOSED residual-D 2026-06-16：本 PR 接真 verifier，runner↔真 verifier 经正/反向 E2E 覆盖）
-# 谓词 2：W3-11-R1 + ship 门 PR11-R1 / W1-R2 标 OPEN（块内全行）；13a-R2 已由本 PR RESOLVED（不再标 OPEN）
+# 谓词 2：ship 门 PR11-R1 / W1-R2 标 OPEN（块内全行）；W3-11-R1 已 CLOSED #117（bounce live 接线）；13a-R2 已 RESOLVED（不再标 OPEN）
 # 结构守卫（R3-Med）：WAVE3-STATUS 须恰 1 开标记 + 其后有闭合 -->（拒未闭合注释吞后文）
-# 谓词 3：高层状态 store-ready=NO + formal-closure=PENDING + feature-completeness=PENDING-W3-11-R1
-#         + runtime-matrix=PARTIAL + freeze-tag=NOT-TAGGED（块内全行；无误 claim 上架/已关闭/feature-complete）
+# 谓词 3：高层状态 store-ready=NO + formal-closure=PENDING + feature-completeness=COMPLETE
+#         + runtime-matrix=PARTIAL + freeze-tag=NOT-TAGGED（块内全行；feature-complete 合法 claim，但无误 claim 上架/已关闭）
 # 谓词 3b：矩阵 runbook 含 §C fixture 启动机制
 # 谓词 3c：矩阵 runbook 列 §三.3 三连合取其余硬门（Wave 2 减速/帧预算 + Wave 2 手势 + Instruments 帧预算）
 set -euo pipefail
@@ -46,16 +46,16 @@ require_kv "residual-B-unified-toast-layer" "CLOSED 13a #108"
 require_kv "residual-C-fixture-provisioning" "CLOSED 13b #109"
 require_kv "residual-D-e2e-smoke" "CLOSED residual-D 2026-06-16"
 
-# 谓词 2：W3-11-R1 + ship 门 PR11-R1/W1-R2 = OPEN；13a-R2 = RESOLVED（本 PR）
-require_kv "residual-W3-11-R1-bounce-live-wiring" "OPEN"
+# 谓词 2：ship 门 PR11-R1/W1-R2 = OPEN；W3-11-R1 = CLOSED #117（bounce live 接线）；13a-R2 = RESOLVED
+require_kv "residual-W3-11-R1-bounce-live-wiring" "CLOSED W3-11-R1 #117"
 require_kv "known-defect-13a-R2-cross-lease-cache-deletion" "CLOSED 13a-R2 2026-06-15"
 require_kv "ship-gate-PR11-R1-prod-backend-url" "OPEN"
 require_kv "ship-gate-W1-R2-sample-data" "OPEN"
 
-# 谓词 3：高层状态（无 store-ready / 正式关闭 / feature-complete 误 claim）
+# 谓词 3：高层状态（feature-complete 合法；无 store-ready / 正式关闭 误 claim）
 require_kv "store-ready" "NO"
 require_kv "formal-closure" "PENDING-runtime-matrix-device-record"
-require_kv "feature-completeness" "PENDING-W3-11-R1-bounce-live-wiring"
+require_kv "feature-completeness" "COMPLETE"
 require_kv "runtime-matrix" "PARTIAL"
 require_kv "freeze-tag" "NOT-TAGGED"
 
@@ -70,4 +70,4 @@ grep -Fq "2026-06-07-u2-gesture-runtime-acceptance.md" "$MATRIX" || fail "矩阵
 # 谓词 3d：矩阵 runbook 须列 顺位 2 竖屏/窗口 runbook（codex R7-High：该 runbook 自声明 Wave 3 矩阵项 + 顺位 13 blocker，不可漏）
 grep -Fq "2026-06-10-wave3-orientation-runtime-acceptance.md" "$MATRIX" || fail "矩阵缺 顺位 2 竖屏/iPad 窗口 runbook 指针（Wave 3 矩阵项 + 顺位 13 blocker，R7-High）"
 
-echo "[verify-wave3-completion] PASS：A/B/C CLOSED + D CLOSED + W3-11-R1/PR11-R1/W1-R2 OPEN + 13a-R2 RESOLVED + WAVE3-STATUS 块诚实（store-ready/closure/feature-completeness/matrix/freeze）+ 矩阵 fixture 机制 + §三.3 三连合取（c8b/u2-gesture/帧预算）+ 顺位 2 orientation 指针就位"
+echo "[verify-wave3-completion] PASS：A/B/C/D CLOSED + W3-11-R1 CLOSED #117 + PR11-R1/W1-R2 OPEN + 13a-R2 RESOLVED + WAVE3-STATUS 块诚实（feature-completeness=COMPLETE / store-ready=NO / closure·matrix·freeze pending）+ 矩阵 fixture 机制 + §三.3 三连合取（c8b/u2-gesture/帧预算）+ 顺位 2 orientation 指针就位"
