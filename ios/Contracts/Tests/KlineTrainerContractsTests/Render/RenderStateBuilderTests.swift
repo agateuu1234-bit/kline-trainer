@@ -116,14 +116,15 @@ struct RenderStateBuilderTests {
         #expect(vp.pixelShift == 0)
     }
 
-    @Test("饱和(顶过左界)：offset 把 startIndex clamp 到 0 → pixelShift=0")
+    @Test("最老边 overscroll（R1b-wire B4，P7 变更）：offset 顶过 maxOffset → startIndex==0 + pixelShift==offset−maxOffset")
     func saturateLeftClamped() {
         let cs = Self.candles(period: .m3, count: 200)
         let vp = RenderStateBuilder.makeViewport(
             panelState: Self.panel(offset: 750), candles: cs, tick: 150, bounds: Self.bounds)
-        // wholeShift=75 → unclamped=71-75=-4 → clamp 0
+        // wholeShift=75 → unclamped=71-75=-4 → clamp 0；offset 750 > maxOffset 710 → B4 overscroll 间隙（旧为 pin 0）。
+        // P7：drag 经 B3 full-clamp 后 ≤maxOffset 不可达此态；offset>maxOffset 仅来自 bounce → B4 单边渲间隙。
         #expect(vp.startIndex == 0)
-        #expect(vp.pixelShift == 0)
+        #expect(vp.pixelShift == 40)   // 750 − 710（最老边 overscroll）
     }
 
     @Test("饱和(前向/朝新越界)：负大 offset → clamp 到 autoTracking（reveal），pixelShift=0")
@@ -136,14 +137,14 @@ struct RenderStateBuilderTests {
         #expect(vp.pixelShift == 0)
     }
 
-    @Test("饱和(F3：恰落左界 + 非零余量，clamp 不改值)→ pixelShift=0")
+    @Test("最老边恰过界（R1b-wire B4，P7 变更）：offset=715>maxOffset → startIndex==0 + pixelShift==5")
     func saturateLeftExactBoundary() {
         let cs = Self.candles(period: .m3, count: 200)
         let vp = RenderStateBuilder.makeViewport(
             panelState: Self.panel(offset: 715), candles: cs, tick: 150, bounds: Self.bounds)
-        // wholeShift=71 → unclamped=71-71=0（==下界，clamp 不改）；余量=715-710=5 → 按落位归 0
+        // wholeShift=71 → unclamped=71-71=0（==下界，clamp 不改）；offset 715 > maxOffset 710 → B4 overscroll 5（旧为 pin 0）。
         #expect(vp.startIndex == 0)
-        #expect(vp.pixelShift == 0)
+        #expect(vp.pixelShift == 5)   // 715 − 710
     }
 
     @Test("饱和(前向恰落旧右界 + 非零余量)：reveal 下仍 clamp 到 autoTracking，pixelShift=0")
@@ -483,6 +484,78 @@ struct RenderStateBuilderTests {
         }
     }
 
+    // MARK: R1b-wire B4 — makeViewport 单边 overscroll（spec §四）
+    // 最老边 offset>maxOffset → pixelShift==offset−maxOffset（左露间隙）；最新边/早 tick 硬钉 pixelShift==0。
+    // 唯一行为新增 = b4OverscrollOldestEdge（其余 4 条为 interior/边缘/早tick/最新边回归守卫，改动前后皆绿）。
+
+    @Test("B4 overscroll：offset>maxOffset（最老边）→ startIndex==0 + pixelShift==offset−maxOffset")
+    func b4OverscrollOldestEdge() {
+        let w = ChartPanelFrames.split(in: Self.bounds).mainChart.width
+        let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: 0, candleCount: 200, currentIdx: 150)
+        let overshoot: CGFloat = 23
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: b.maxOffset + overshoot),
+            candles: Self.candles(period: .m3, count: 200), tick: 150, bounds: Self.bounds)
+        #expect(vp.startIndex == 0)
+        #expect(abs(vp.pixelShift - overshoot) < 1e-6)   // 完整 overscroll（可 > candleStep）
+        #expect(vp.visibleCount > 0)                      // slice 非空、无 OOB
+    }
+
+    @Test("B4 最老边钉：offset==maxOffset → startIndex==0 + pixelShift==0")
+    func b4OldestEdgePinned() {
+        let w = ChartPanelFrames.split(in: Self.bounds).mainChart.width
+        let b = RenderStateBuilder.offsetBounds(mainFrameWidth: w, rawVisible: 0, candleCount: 200, currentIdx: 150)
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: b.maxOffset),
+            candles: Self.candles(period: .m3, count: 200), tick: 150, bounds: Self.bounds)
+        #expect(vp.startIndex == 0)
+        #expect(vp.pixelShift == 0)
+    }
+
+    @Test("B4 内段回归：offset∈(0,maxOffset) → wholeShift+余量 逐字不变")
+    func b4InteriorUnchanged() {
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: 35),
+            candles: Self.candles(period: .m3, count: 200), tick: 150, bounds: Self.bounds)
+        let step = vp.geometry.candleStep
+        let wholeShift = Int((35 / step).rounded(.down))
+        #expect(vp.startIndex == min(max(71 - wholeShift, 0), 71))   // base=71,upper=71 → 68（内段）
+        #expect(abs(vp.pixelShift - (35 - CGFloat(wholeShift) * step)) < 1e-6)
+    }
+
+    @Test("B4 早 tick upperBound==0：任意大 offset → pixelShift==0（硬钉，不入 overscroll 分支）")
+    func b4EarlyTickPinned() {
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: 500),
+            candles: Self.candles(period: .m3, count: 200), tick: 10, bounds: Self.bounds)
+        #expect(vp.startIndex == 0)     // upperBound==0（base=10−79<0）
+        #expect(vp.pixelShift == 0)     // 硬钉，未误入 overscroll
+    }
+
+    @Test("B4 最新边（upperBound>0）：offset<0 → startIndex==upperBound + pixelShift==0（reveal 硬钉，回归断言）")
+    func b4NewestEdgePinnedWithScrollSpace() {
+        let vp = RenderStateBuilder.makeViewport(
+            panelState: Self.panel(offset: -50),
+            candles: Self.candles(period: .m3, count: 200), tick: 150, bounds: Self.bounds)
+        #expect(vp.startIndex == 71)    // upperBound（base=71）
+        #expect(vp.pixelShift == 0)     // 最新边硬钉，无前向间隙
+    }
+
+    // R1b-wire T2：offsetBounds(engine:panel:bounds:) 便捷重载 == 直接 extraction（D1 Coordinator 喂 bounds）。
+    @Test("offsetBounds(engine:panel:bounds:) 重载 == 直接 extraction（M4 raw visibleCount）")
+    @MainActor func offsetBoundsEngineOverload() {
+        let (engine, _) = TrainingEnginePinchTests.engine()          // 真实 helper（count 200, .m3 双面板, bounds 已记录）
+        let bounds = TrainingEnginePinchTests.bounds                  // 800×600
+        let got = RenderStateBuilder.offsetBounds(engine: engine, panel: .upper, bounds: bounds)
+        let cs = engine.allCandles[.m3]!
+        let mainW = ChartPanelFrames.split(in: bounds).mainChart.width
+        let want = RenderStateBuilder.offsetBounds(
+            mainFrameWidth: mainW, rawVisible: engine.upperPanel.visibleCount,
+            candleCount: cs.count,
+            currentIdx: RenderStateBuilder.currentCandleIndex(candles: cs, tick: engine.tick.globalTickIndex))
+        #expect(got == want)
+    }
+
     // MARK: 顺位 3 D5：去硬编码 80（target = panelState.visibleCount，≤0 → fallback 80）
 
     /// 非 0 显式入参 + 80 golden parity（独立金值硬编码，R1-L3 防 tautology）
@@ -804,12 +877,13 @@ struct RenderStateBuilderTests {
         #expect(vp.startIndex + vp.visibleCount - 1 == 10)   // 末根==currentIdx，无未来
     }
 
-    @Test("reveal backward 历史：大正 offset → startIndex==0 + pixelShift==0（至最旧；regression 基准）")
+    @Test("reveal backward 历史 + B4 overscroll（P7 变更）：大正 offset(5000)>maxOffset → startIndex==0 + pixelShift==4290")
     func backwardScrollReachesOldest() {
         let cs = Self.candles(period: .m3, count: 200)
         let vp = RenderStateBuilder.makeViewport(
             panelState: Self.panel(offset: 5000), candles: cs, tick: 150, bounds: Self.bounds)
+        // offset 5000 > maxOffset 710 → B4 最老边 overscroll 4290（旧为 pin 0；drag B3-clamp 后不可达，仅 bounce）。
         #expect(vp.startIndex == 0)
-        #expect(vp.pixelShift == 0)
+        #expect(vp.pixelShift == 4290)   // 5000 − 710
     }
 }

@@ -45,6 +45,15 @@ public final class TrainingEngine {
     @ObservationIgnored private var pinchBase:
         (upper: (base: Int, scaleAtBegan: CGFloat)?, lower: (base: Int, scaleAtBegan: CGFloat)?) = (nil, nil)
 
+    /// R1b-wire（D9/D10）：进行中减速/bounce 的 numeric 边界 + 是否允许 overscroll（bounce=true/decel=false）。
+    /// onUpdate 据此 floor（bounce 放最老边 overscroll）或 full（decel 硬停两边）clamp；interruptDeceleration 归一用。
+    /// `@ObservationIgnored`：纯 numeric（无像素，D1）；endPan 写入不得触发观察重建（同 lastRenderedBounds）。
+    struct ActiveDecel: Equatable, Sendable {
+        let bounds: RenderStateBuilder.OffsetBounds
+        let allowOverscroll: Bool
+    }
+    @ObservationIgnored private var activeBounds: (upper: ActiveDecel?, lower: ActiveDecel?) = (nil, nil)
+
     /// 构造运行时引擎（D9 校验边界契约）。
     ///
     /// **`allCandles` 必须是已校验数据。** 训练组数据的「可恢复」校验（空 `[:]` / 缺 `.m3` /
@@ -138,8 +147,9 @@ public final class TrainingEngine {
             lower: DecelerationAnimator(makeDriver: decelerationDriverFactory))
         // C8b：减速每帧 delta 必经 reducer offsetApplied（spec §C2 闸门 #2 F2，禁直写 offset）。
         // self 此时已全初始化（animators 为最后一个无默认值的存储属性；lastRenderedBounds 有默认值）。
-        self.animators.upper.onUpdate = { [weak self] delta in self?.applyOffsetDelta(delta, panel: .upper) }
-        self.animators.lower.onUpdate = { [weak self] delta in self?.applyOffsetDelta(delta, panel: .lower) }
+        // R1b-wire（D9）：减速/bounce 每帧 delta 经 floor-or-full clamp（bounce floor 放 overscroll / decel full 硬停）。
+        self.animators.upper.onUpdate = { [weak self] delta in self?.floorOrFullClampedOffsetDelta(delta, panel: .upper) }
+        self.animators.lower.onUpdate = { [weak self] delta in self?.floorOrFullClampedOffsetDelta(delta, panel: .lower) }
     }
 
     /// `make` 的构造输入：工厂内部据此**先验 maxTick 再建 flow**，杜绝外部传入会 trap 的非法 flow——
@@ -586,6 +596,39 @@ extension TrainingEngine {
         _ = reduce(.offsetApplied(deltaPixels: delta), on: panel)
     }
 
+    // MARK: R1b-wire offset clamp（D9：drag full / decel·bounce floor-or-full / reducer 无界 D2）
+
+    private func activeBoundsFor(_ panel: PanelId) -> ActiveDecel? {
+        panel == .upper ? activeBounds.upper : activeBounds.lower
+    }
+    private func setActiveBounds(_ v: ActiveDecel?, panel: PanelId) {
+        if panel == .upper { activeBounds.upper = v } else { activeBounds.lower = v }
+    }
+
+    /// 减速/bounce 每帧 delta（onUpdate）：bounce → floor `[min,+∞)`（放最老边 overscroll）；
+    /// decel → full `[min,max]`（硬停两边，含 v>0 无滚动空间不 strand，C1）。无 activeBounds → 无界（旧路径兼容）。
+    private func floorOrFullClampedOffsetDelta(_ delta: CGFloat, panel: PanelId) {
+        guard let a = activeBoundsFor(panel) else { applyOffsetDelta(delta, panel: panel); return }
+        let cur = panelState(panel).offset
+        let target = a.allowOverscroll
+            ? max(a.bounds.minOffset, cur + delta)                                  // bounce：仅 floor
+            : min(max(cur + delta, a.bounds.minOffset), a.bounds.maxOffset)         // decel：full
+        if target != cur { applyOffsetDelta(target - cur, panel: panel) }           // L2-new：省 0-delta 空 bump
+    }
+
+    /// 中断进行中减速/bounce（新交互起手：beginPan/activateDrawingTool/pinch.began，D10）：停 + 仅当**活跃** run 时
+    /// 把 overscroll 归界内。`isDecelerating`-guard：动画已 settle/cancel（activeBounds 残留旧几何）时不 clamp，防 stale 误钳。
+    private func interruptDeceleration(panel: PanelId) {
+        let a = animator(for: panel)
+        let wasRunning = a.isDecelerating
+        a.stop()
+        if wasRunning, let act = activeBoundsFor(panel) {
+            let cur = panelState(panel).offset
+            let clamped = min(max(cur, act.bounds.minOffset), act.bounds.maxOffset)
+            if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }   // overscroll(>max) 归 maxOffset
+        }
+    }
+
     /// 停两面板减速（D7：硬切 autoTracking / 画线激活前调）。
     private func stopAllDeceleration() {
         animators.upper.stop()
@@ -607,18 +650,45 @@ extension TrainingEngine {
     /// 新一次抓取必须**先停**本面板进行中的减速（标准惯性滚动语义：手指落下即截住惯性）——否则 re-grab 期间
     /// 残余减速 onUpdate 与手指 `applyPanOffset` 同时喂 `offsetApplied` 致跳动（final-review F1，与 D7 硬切同精神）。
     public func beginPan(panel: PanelId) {
-        animator(for: panel).stop()
+        interruptDeceleration(panel: panel)   // R1b-wire D10：停 + 归一中途 overscroll（H3），再 .panStarted
         _ = reduce(.panStarted, on: panel)
     }
 
-    /// onPan `.changed`：freeScrolling 下 offset 累加（drawing 模式 arbiter 截获不到此处）。
-    public func applyPanOffset(deltaPixels: CGFloat, panel: PanelId) {
+    /// onPan `.changed`（旧签名，无界）。**internal（codex R2-M2）**：B4 后 offset>maxOffset 渲成 overscroll 间隙，
+    /// 故不再暴露 public 无界 mutation 路径（生产 Coordinator 用带 bounds 的新重载；仅模块内测试 @testable 调本签名）。
+    func applyPanOffset(deltaPixels: CGFloat, panel: PanelId) {
         applyOffsetDelta(deltaPixels, panel: panel)
     }
 
-    /// onPan `.ended`：panEnded → `.startDeceleration` effect → 启动惯性（spec C2/闸门 #2）。
-    public func endPan(velocity: CGFloat, panel: PanelId) {
+    /// onPan `.changed`（R1b-wire B3，**public** gesture API）：传渲染 `renderBounds`（CGRect，public 类型，
+    /// 不暴露 internal `OffsetBounds`，codex R3）→ engine 内部算 offset 边界 + drag full-clamp 到 [min,max]（不跟手过边）。
+    public func applyPanOffset(deltaPixels: CGFloat, renderBounds: CGRect, panel: PanelId) {
+        let ob = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds)
+        let cur = panelState(panel).offset
+        let target = min(max(cur + deltaPixels, ob.minOffset), ob.maxOffset)
+        if target != cur { applyOffsetDelta(target - cur, panel: panel) }
+    }
+
+    /// onPan `.ended`（旧签名，无界 plain decel）。**internal（codex R2-M2）**：同 applyPanOffset，不暴露 public 无界路径
+    /// （生产用带 bounds 新重载；仅模块内测试 @testable 调）。H1：体首清 activeBounds 防 stale 喂 onUpdate。
+    func endPan(velocity: CGFloat, panel: PanelId) {
+        setActiveBounds(nil, panel: panel)
         if case .startDeceleration(let v) = reduce(.panEnded(velocity: velocity), on: panel) {
+            animator(for: panel).start(initialVelocity: v)
+        }
+    }
+
+    /// onPan `.ended`（R1b-wire B2 + 机制 A，**public** gesture API）：传 `renderBounds`（CGRect，不暴露 OffsetBounds，
+    /// codex R3）→ engine 内部算边界 + 按速度方向分派（D8）。v>0 ∧ .max∈bounceEdges → 对称 bounce（最老边弹）；否则 plain decel。
+    public func endPan(velocity: CGFloat, renderBounds: CGRect, panel: PanelId) {
+        let ob = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds)
+        guard case .startDeceleration(let v) = reduce(.panEnded(velocity: velocity), on: panel) else { return }
+        if v > 0 && ob.bounceEdges.contains(.max) {
+            setActiveBounds(ActiveDecel(bounds: ob, allowOverscroll: true), panel: panel)
+            animator(for: panel).start(initialVelocity: v, fromOffset: panelState(panel).offset,
+                                       minOffset: ob.minOffset, maxOffset: ob.maxOffset)
+        } else {
+            setActiveBounds(ActiveDecel(bounds: ob, allowOverscroll: false), panel: panel)
             animator(for: panel).start(initialVelocity: v)
         }
     }
@@ -639,7 +709,7 @@ extension TrainingEngine {
     public func applyPinch(scale: CGFloat, focusX: CGFloat, phase: GesturePhase, panel: PanelId) {
         switch phase {
         case .began:
-            animator(for: panel).stop()        // 同 beginPan 先例：手势起手截住惯性
+            interruptDeceleration(panel: panel)   // R1b-wire D10：同 beginPan 先例，停 + 归一中途 overscroll
             setPinchBase(seedPinchBase(scale: scale, panel: panel), panel: panel)
         case .changed:
             // R2-L1：非有限/非正 scale → 真无操作（不派发、状态零改动；防御在 engine 不在模型）
@@ -703,10 +773,24 @@ extension TrainingEngine {
 
     /// ChartContainerView.updateUIView 调：缓存该面板最近渲染 bounds，供 `activateDrawingTool` 算 range（D1）。
     public func recordRenderBounds(_ bounds: CGRect, panel: PanelId) {
+        let previous = renderBounds(panel)
         switch panel {
         case .upper: lastRenderedBounds.upper = bounds
         case .lower: lastRenderedBounds.lower = bounds
         }
+        // R1b-wire（codex branch-diff M1 + R2-M1）：bounds 变（resize/旋转）→ 按**新**几何归一 stale offset。
+        // 冻结 activeBounds（中途 bounce）**或** settled/drag-ended 的 offset 在新几何下可能 >新 maxOffset，
+        // B4 会渲成持久 overscroll 间隙直到下次手势。归一**不 gate on isDecelerating**（R2-M1：offset 可在无 animator 时 stale）；
+        // 若有 active run 额外 stop+清 activeBounds。bounds 未变（常态每帧）→ no-op，不扰正常 bounce。承袭父 §B5「几何变更 → stop+归一 edge」。
+        guard previous != bounds else { return }
+        if animator(for: panel).isDecelerating {
+            animator(for: panel).stop()
+            setActiveBounds(nil, panel: panel)
+        }
+        let fresh = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: bounds)
+        let cur = panelState(panel).offset
+        let clamped = min(max(cur, fresh.minOffset), fresh.maxOffset)
+        if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }
     }
 
     // MARK: 画线激活 H1 production handler（spec §C1b 闸门 #4 F3 + effect 合约 L1026-1032）
@@ -717,16 +801,19 @@ extension TrainingEngine {
     ///   ② 基于当前（已冻结）面板状态算 candleRange（复用 C8a `visibleCandleRange`）
     ///   ③ 派 `setDrawingSnapshot`（同步无漂移 → 进 drawing；理论 stale → 留 autoTracking）
     public func activateDrawingTool(_ tool: DrawingToolType, panel: PanelId) {
+        // R1b-wire R2-C1：interrupt 提顶（在捕获 baseRev 前）。其归一 `offsetApplied` 会 bump revision；若放在
+        // `reduce(.activateDrawing)` 之后则 baseRev 失配 setDrawingSnapshot 的 staleness 闸门 → 永不进 drawing。
+        // 提顶使 baseRev 捕获归一后 revision；含 stop（防 stale 漂移，原 ① 裸 stop 删除）+ 归一 overscroll（M3）。
+        interruptDeceleration(panel: panel)
         guard case .requestDrawingSnapshotAfterStoppingAnimator(let t, let baseRev) =
                 reduce(.activateDrawing(tool), on: panel) else {
-            return   // 已在 drawing（.none）等 → no-op（工具切换归 DrawingToolManager/Wave 3）
+            return   // 已在 drawing（.none）等 → no-op（interrupt 在 drawing 期无 animator 在跑 → no-op）
         }
-        animator(for: panel).stop()                                   // ①
-        let ps = panelState(panel)                                    // ② 当前=已冻结 offset
+        let ps = panelState(panel)                                    // 当前=已冻结+已归一 offset
         let range = RenderStateBuilder.visibleCandleRange(
             panelState: ps, candles: allCandles[ps.period] ?? [],
             tick: tick.globalTickIndex, bounds: renderBounds(panel))
-        _ = reduce(.setDrawingSnapshot(tool: t, baseRevision: baseRev, candleRange: range), on: panel)   // ③
+        _ = reduce(.setDrawingSnapshot(tool: t, baseRevision: baseRev, candleRange: range), on: panel)   // baseRev==revision ✓
     }
 
     /// 删除已完成绘线（spec `deleteDrawing(at:)`）。越界 trap（caller bug，与 spec precondition 同风格）。

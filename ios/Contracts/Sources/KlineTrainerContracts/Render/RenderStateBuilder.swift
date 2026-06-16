@@ -134,6 +134,19 @@ public enum RenderStateBuilder {
         return OffsetBounds(minOffset: minOffset, maxOffset: maxOffset, candleStep: core.candleStep)
     }
 
+    /// R1b-wire 便捷重载（D1）：从 engine 抽取 candles/tick/visibleCount + split 出 mainChart 宽，算 numeric
+    /// offset 边界喂 engine（Coordinator 用；engine 不反向依赖 ChartPanelFrames/像素）。复用 `make` 的 extraction。
+    /// M4：传 **raw** `visibleCount`（与 makeViewport 一致；≤0→80 fallback 在 geometryCore 内统一）。
+    @MainActor
+    static func offsetBounds(engine: TrainingEngine, panel: PanelId, bounds: CGRect) -> OffsetBounds {
+        let ps = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
+        let candles = engine.allCandles[ps.period] ?? []
+        let mainW = ChartPanelFrames.split(in: bounds).mainChart.width
+        let currentIdx = candles.isEmpty ? 0 : currentCandleIndex(candles: candles, tick: engine.tick.globalTickIndex)
+        return offsetBounds(mainFrameWidth: mainW, rawVisible: ps.visibleCount,
+                            candleCount: candles.count, currentIdx: currentIdx)
+    }
+
     /// FP round-trip 守门（codex R1-M / C1a verify-and-correct）：返回一个 edge，使 makeViewport 的
     /// plain `Int((edge/step).rounded(.down)) == integer`。`integer·step` 在非整除 step 下可 FP 偏移致 floor 偏 1；
     /// 按 floor 方向 ULP-nudge 至吻合（bounded）。**调用方须先保 step 有限正（offsetBounds 已守，codex R2-M）**——
@@ -176,8 +189,16 @@ public enum RenderStateBuilder {
         let startIndex = min(max(baseStartIndex - wholeShift, 0), upperBound)
         // 余量 ∈ [0,candleStep)；按 startIndex *落位* 判饱和（非按 clamp 是否改值，F3）：
         // 处硬边界（最老 startIndex==0 / 最新 ==upperBound，无更多可揭示）→ pixelShift=0（边缘钉面板边）。
+        // R1b-wire B4（spec §四，单边 overscroll）：最新边硬钉先判；最老边 offset>maxOffset 放开 overscroll 间隙。
         var pixelShift = panelState.offset - CGFloat(wholeShift) * candleStep
-        if startIndex == 0 || startIndex == upperBound { pixelShift = 0 }
+        if startIndex == upperBound {
+            pixelShift = 0                                   // 最新边硬钉（含早 tick upperBound==0；reveal offset<minOffset 前向不可达）
+        } else if startIndex == 0 {
+            // 最老边：offset>maxOffset → 左露 overscroll 间隙（pixelShift>0=candles 右移）；否则钉边
+            // M2：复用本函数 core 派生的 baseStartIndex/candleStep（勿重算 geometryCore、勿用 upperBound）
+            let maxOffset = roundTripEdge(integer: baseStartIndex, step: candleStep)   // 与 offsetBounds.maxOffset 同源（D4）
+            pixelShift = panelState.offset > maxOffset ? panelState.offset - maxOffset : 0
+        }
 
         // reveal RFC：可见窗口 ⊆ 已揭示前缀 candles[0...currentIdx]；slice 末根恒 ≤ currentIdx（看不到未来）。
         // 早 tick 左填充时 visibleCount(返回) = sliceEnd−startIndex < target。currentIdx+1 ≤ count（界内）。
