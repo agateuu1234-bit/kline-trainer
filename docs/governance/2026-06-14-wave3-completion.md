@@ -13,7 +13,7 @@ freeze-tag: NOT-TAGGED
 residual-A-cache-touch-on-use: CLOSED 13a #108
 residual-B-unified-toast-layer: CLOSED 13a #108
 residual-C-fixture-provisioning: CLOSED 13b #109
-residual-D-e2e-smoke: PARTIAL 13b #109
+residual-D-e2e-smoke: CLOSED residual-D 2026-06-16
 residual-W3-11-R1-bounce-live-wiring: OPEN
 known-defect-13a-R2-cross-lease-cache-deletion: CLOSED 13a-R2 2026-06-15
 ship-gate-PR11-R1-prod-backend-url: OPEN
@@ -82,7 +82,7 @@ ship-gate-W1-R2-sample-data: OPEN
 | **A. cache touch-on-use**（E6a-R3） | §107 deferred #4 / Wave 2 §三 | **CLOSED** | 13a PR #108 `9400361`（coordinator 4 read 路径 startNewNormalSession/resumePending/review/replay 成功打开后 touch-on-use；损坏文件不 touch） |
 | **B. 边界错误统一 Toast 层** | outline §四 L204（损坏/中断/磁盘满 + 统一错误） | **CLOSED** | 13a PR #108 `9400361`（ToastState/ToastOverlay 承载 transient：autosave 失败可见 + 下载 per-item 失败可见；blocking 错误故意保留 alert，不回归 §4.7f/§4.7a 安全语义） |
 | **C. 全 app fixture provisioning** | §107 deferred / spec §C | **CLOSED** | 13b PR #109 `fc46fef`（`AppContainer+DebugSeed` `#if DEBUG` seed 经 `AppContainer.init(debugSeedFixtures:)` 注入 cache+history+pending+settings，全 6 周期；全空 guard 不破坏真实数据） |
-| **D. 生产路径 E2E smoke** | §107 deferred / spec §D | **PARTIAL** | 13b PR #109 `fc46fef`：真 `DownloadAcceptanceRunner` runner 管线 E2E（download/crc/unzip/db-open/store/confirm/journal/下游 open）已 smoke 闭合。**但 smoke 注入 `FakeTrainingSetDataVerifier`（13b-R2）** → runner ↔ 真 `DefaultTrainingSetDataVerifier` 接线**未被 smoke 覆盖**（真 verifier 六周期 warm-up 规则由 `DefaultTrainingSetDataVerifierTests` 专测）→ 整条生产验收组合未一次性端到端 → 标 **PARTIAL**（codex review R4-Med；非无条件 CLOSED）。满足真 verifier 的 ≥30-全周期-含-monthly fixture 不现实（13b accept residual），但 D 终态如实 PARTIAL 不掩盖 |
+| **D. 生产路径 E2E smoke** | §107 deferred / spec §D | **CLOSED**（residual-D 2026-06-16） | 13b PR #109 `fc46fef` 已 smoke runner 管线（download/crc/unzip/db-open/store/confirm/journal/下游 open），但注入 `FakeTrainingSetDataVerifier`（13b-R2）→ runner ↔ 真 `DefaultTrainingSetDataVerifier` 接线未覆盖。**本 PR（residual-D）闭合该接线**：新增正/反向 E2E（`DownloadAcceptanceRunnerIntegrationTests.run_realPipeline_withRealVerifier_confirmsAndDownstreamConsumable` + `…_rejectsWhenPeriodUnderThirtyBefore`）用**真 verifier** 跑全真管线——verifier-valid fixture（6 周期各 30 before+8 after、非 m3 datetime 与 m3 网格对齐过 reader 校验 1/2）→ `.confirmed` + 下游可消费；daily 减至 29-before → runner 传播 `.rejected(.trainingSet(.emptyData))`。**13b-R2「满足真 verifier 的 fixture 不现实」评估据此证伪并解决**（真 verifier 逐周期独立计数、不要求物理聚合/多年跨度，~228 根即足；设计见 `docs/superpowers/specs/2026-06-16-wave3-residual-d-e2e-design.md`）。PR# merge 后回填 |
 | **运行时矩阵（device/sim 实测）** | outline §三.3 硬门 | **PARTIAL** | runbook 交付（`docs/acceptance/2026-06-14-wave3-runtime-matrix.md`，7 项 + 三连合取关闭门）+ §C fixture 使其可执行；device 实测结果待用户回填。**帧预算 device 测量精度限制**：①采样≠帧相关（**13c-R1**：机制 facet **交付 2026-06-16**——os_signpost 帧相关 instrumentation 已 ship + 帧预算 runbook 重写为最坏完整帧归并法；**device 最坏帧 <4ms 实测仍 OPEN**，归 runtime-matrix ③）；②fixture 欠载（**13c-R2，RESOLVED 2026-06-15**：`DebugFixtureData.fullLoadM3Count`=9600 满载 perf fixture，§C seed 现 ≥80 全周期 / ≥240 默认面板） |
 | **W3-11-R1**（bounce live 接线） | 顺位 11 #96 设计 D8 / bounce acceptance L3 | **OPEN（Wave 3 功能完成门 + 正式关闭前提）** | 组件层物理已确定性单测闭合（`docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md`）；但 live 接线未上线 = 顺位 11 **承诺交互未实现** → **不**入 device 矩阵（无可 device 测对象）**且** Wave 3 功能完整性标 PENDING-W3-11-R1（codex review High）；解门 = 实现 live 接线（fast-follow 实施 PR）+ 回填其运行时 acceptance。**非** NAS ship 门（区别于四节 PR11-R1/W1-R2） |
 | **13a-R2**（跨 lease cache 误删，**已知 data-loss**） | codex 13a review R6（**pre-existing 基线 bug**，13a 未触碰该代码） | **RESOLVED（本 PR，2026-06-15）** | 已由本 PR 修复：journal-driven lease-aware ownership-guard（删除前查 {stored,confirmPending,confirmed} 行集，存活占有则跳过、读失败 fail-safe）+ 5 类回归测试；设计见 docs/superpowers/specs/2026-06-15-wave3-13a-r2-cross-lease-cache-design.md。 |
@@ -121,7 +121,11 @@ ship-gate-W1-R2-sample-data: OPEN
 
 ## 六、评审通道说明
 
-13c 为 doc-only（0 业务代码 / 0 CI / 0 ruleset），经 `codex:adversarial-review`（治理 doc 类，唯一 review 通道，per CLAUDE.md backstop #1）。codex 周配额耗尽时方 fallback opus 4.8 xhigh（documented，沿用 Wave 1/2 + 13a/13b 各 anchor 先例）。grep gate（`scripts/governance/verify-wave3-completion.sh`）作机器可校验断言（**只解析 WAVE3-STATUS 块、anchored 全行**，与上方机器块逐字一致）：A/B/C CLOSED + **D PARTIAL** + W3-11-R1/PR11-R1/W1-R2 OPEN + **13a-R2 RESOLVED（本 PR）** + WAVE3-STATUS 诚实（store-ready=NO / formal-closure=PENDING / **feature-completeness=PENDING-W3-11-R1** / matrix=PARTIAL / freeze=NOT-TAGGED）+ 矩阵 fixture 机制 + §三.3 三连合取（c8b/u2-gesture/帧预算）指针就位。
+13c 为 doc-only（0 业务代码 / 0 CI / 0 ruleset），经 `codex:adversarial-review`（治理 doc 类，唯一 review 通道，per CLAUDE.md backstop #1）。codex 周配额耗尽时方 fallback opus 4.8 xhigh（documented，沿用 Wave 1/2 + 13a/13b 各 anchor 先例）。
+
+**注（residual-D 闭合更新，2026-06-16；codex branch-diff review R1-Med）**：§三 行 D 的 `PARTIAL→CLOSED` flip 由一个**独立的 test+governance 混合 PR**（**非** 13c 的 doc-only scope）交付——改 `ios/**/*.swift`（新增正/反向真-verifier E2E 测试）+ 本 doc + `scripts/governance/verify-wave3-completion.sh`。其 trust boundary 须经 `codex:adversarial-review`（本 PR 自身 branch-diff attest）+ swift-test + Mac Catalyst + app-build CI + CODEOWNERS approve（详见 `docs/acceptance/2026-06-16-wave3-residual-d-e2e.md`）。本 §六 首句「13c doc-only / 单一 review 通道」仅描述 **13c 自身**快照，**不**作 residual-D PR 的 merge 记录；residual-D 的权威 review 记录在其自身 acceptance + PR。同理 §三「13a-R2 RESOLVED（本 PR）」中的「本 PR」指 13c 上下文，亦非本 residual-D PR。
+
+grep gate（`scripts/governance/verify-wave3-completion.sh`）作机器可校验断言（**只解析 WAVE3-STATUS 块、anchored 全行**，与上方机器块逐字一致）：A/B/C CLOSED + **D CLOSED（residual-D 2026-06-16）** + W3-11-R1/PR11-R1/W1-R2 OPEN + **13a-R2 RESOLVED（本 PR）** + WAVE3-STATUS 诚实（store-ready=NO / formal-closure=PENDING / **feature-completeness=PENDING-W3-11-R1** / matrix=PARTIAL / freeze=NOT-TAGGED）+ 矩阵 fixture 机制 + §三.3 三连合取（c8b/u2-gesture/帧预算）指针就位。
 
 ---
 
