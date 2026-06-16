@@ -78,11 +78,15 @@ public struct ChartContainerView: UIViewRepresentable {
         func attach(to view: UIView) {
             self.view = view as? KLineView
             arbiter.onPan = { [weak self] deltaX, velocityX, phase in
-                guard let self, let engine = self.engine else { return }
+                guard let self, let engine = self.engine, let view = self.view else { return }
                 switch phase {
                 case .began:   engine.beginPan(panel: self.panel)
-                case .changed: engine.applyPanOffset(deltaPixels: deltaX, panel: self.panel)
-                case .ended:   engine.endPan(velocity: velocityX, panel: self.panel)
+                case .changed:   // R1b-wire：算 numeric bounds 喂 engine（drag full-clamp，D1）
+                    let b = RenderStateBuilder.offsetBounds(engine: engine, panel: self.panel, bounds: view.bounds)
+                    engine.applyPanOffset(deltaPixels: deltaX, offsetBounds: b, panel: self.panel)
+                case .ended:     // R1b-wire：算 bounds 喂 endPan（机制 A 速度方向分派）
+                    let b = RenderStateBuilder.offsetBounds(engine: engine, panel: self.panel, bounds: view.bounds)
+                    engine.endPan(velocity: velocityX, offsetBounds: b, panel: self.panel)
                 case .cancelled: engine.cancelPan(panel: self.panel)
                 }
             }
