@@ -320,5 +320,21 @@ final class PreviewTrainingSetReaderTests: XCTestCase {
             guard case AppError.persistence(.dbCorrupted) = err else { XCTFail("expected dbCorrupted"); return }
         }
     }
+
+    // MARK: - 校验 1 镜像（persistence-scope RFC）
+
+    /// preview reader 也拒 .m3 datetime 非严格递增（重复 datetime，endGlobalIndex 仍严格递增隔离校验 1）
+    func test_reader_validation_m3DatetimeMustStrictlyIncrease() throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "Y", startDatetime: 1, endDatetime: 1)
+        func m3(_ i: Int, _ dt: Int64) -> KLineCandle {
+            KLineCandle(period: .m3, datetime: dt, open: 1, high: 2, low: 0.5, close: 1.5,
+                        volume: 100, amount: nil, ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: i, endGlobalIndex: i)
+        }
+        let r = PreviewTrainingSetReader(meta: meta, candles: [.m3: [m3(0, 500), m3(1, 500)]])
+        XCTAssertThrowsError(try r.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else { XCTFail("expected dbCorrupted"); return }
+        }
+    }
 }
 #endif

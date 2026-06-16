@@ -158,6 +158,14 @@ public final class DefaultTrainingSetReader: TrainingSetReader, @unchecked Senda
                     throw AppError.persistence(.dbCorrupted)
                 }
             }
+            // 校验 1（persistence-scope RFC）：.m3 datetime 严格递增。synthesize/candleDatetime 的
+            // partitioningIndex{datetime>=X} 依赖此单调；非单调 → 定位错 start。必须在校验 2 之前
+            // （m3 按 endGlobalIndex 存储，仅此校验证明其 datetime 升序）。
+            for i in m3Candles.indices.dropFirst() {
+                guard m3Candles[i].datetime > m3Candles[i - 1].datetime else {
+                    throw AppError.persistence(.dbCorrupted)
+                }
+            }
             let m3Max = m3Candles.last?.endGlobalIndex ?? -1
             for (period, candles) in result where period != .m3 {
                 for c in candles {

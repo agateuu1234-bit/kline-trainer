@@ -482,6 +482,44 @@ final class DefaultTrainingSetReaderTests: XCTestCase {
         reader.close()
     }
 
+    // MARK: - .m3 datetime 严格递增（persistence-scope RFC 校验 1）
+
+    /// .m3 datetime 随 endGlobalIndex 递增而下降（endGlobalIndex 仍严格递增，隔离校验 1，不触 L90）→ .dbCorrupted
+    func test_loadAllCandles_m3DatetimeDescending_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = [
+            (.m3, [(200, 0, 0), (100, 1, 1)]),   // datetime 200 → 100 下降；endGIdx 0,1 严格递增
+            (.daily, [(100, nil, 1)]),
+        ]
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
+
+    /// .m3 datetime 重复（500,500），endGlobalIndex 严格递增 0,1 → 隔离校验 1（非 L90）→ .dbCorrupted
+    func test_loadAllCandles_m3DatetimeDuplicate_throwsDbCorrupted() throws {
+        var opts = TrainingSetSQLiteFixture.ConfigOptions()
+        opts.candles = [
+            (.m3, [(500, 0, 0), (500, 1, 1)]),
+            (.daily, [(500, nil, 1)]),
+        ]
+        let (url, cleanup) = try TrainingSetSQLiteFixture.make(opts)
+        cleanups.append(cleanup)
+        let reader = try DefaultTrainingSetDBFactory().openAndVerify(file: url, expectedSchemaVersion: 1)
+        XCTAssertThrowsError(try reader.loadAllCandles()) { err in
+            guard case AppError.persistence(.dbCorrupted) = err else {
+                return XCTFail("Expected .persistence(.dbCorrupted), got \(err)")
+            }
+        }
+        reader.close()
+    }
+
     /// klines optional REAL 列（amount/ma66/boll_*/macd_*）存 TEXT → typeof 校验拦截 → .dbCorrupted
     /// （codex round 5 MEDIUM；round 4 narrowing scope 时漏掉的 optional REAL 列补完）
     func test_loadAllCandles_klinesWrongTypeInOptionalRealColumn_throwsDbCorrupted() throws {
