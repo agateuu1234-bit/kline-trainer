@@ -84,4 +84,41 @@ struct TrainingEngineDragDampingTests {
         e.applyPanOffset(deltaPixels: 500, renderBounds: Self.bounds, panel: .upper)
         #expect(e.upperPanel.offset == 0)                      // 不给
     }
+
+    @Test("endPan 从 overscroll 慢松手（v=0）→ 启动弹簧回 maxOffset（非 no-op strand）D3 killer")
+    func endPanFromOverscrollZeroVelocitySprings() {
+        let (e, fakes) = Self.makeEngine()
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset + 600, renderBounds: Self.bounds, panel: .upper)  // 拖到 overscroll
+        #expect(e.upperPanel.offset > ob.maxOffset)
+        e.endPan(velocity: 0, renderBounds: Self.bounds, panel: .upper)            // 慢松手
+        for _ in 0..<300 { _ = fakes().last?.fire(1.0 / 60.0) }
+        #expect(abs(e.upperPanel.offset - ob.maxOffset) < 1.0)                     // 弹回 maxOffset（非 strand 在界外）
+    }
+
+    @Test("endPan 从 overscroll 内向甩（v<0）→ 弹回 maxOffset 不过冲/不下穿")
+    func endPanFromOverscrollInwardVelocitySprings() {
+        let (e, fakes) = Self.makeEngine()
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset + 600, renderBounds: Self.bounds, panel: .upper)
+        e.endPan(velocity: -2000, renderBounds: Self.bounds, panel: .upper)       // 内向甩
+        var minSeen = e.upperPanel.offset
+        for _ in 0..<300 { _ = fakes().last?.fire(1.0 / 60.0); minSeen = min(minSeen, e.upperPanel.offset) }
+        #expect(abs(e.upperPanel.offset - ob.maxOffset) < 1.0)                    // 落 maxOffset
+        #expect(minSeen >= ob.maxOffset - 2.0)                                    // 临界阻尼不显著下穿（容 settle 容差）
+    }
+
+    @Test("对照回归：界内 offset<maxOffset + v=0 endPan → 不弹（R1b-wire 既有）")
+    func endPanInBoundsZeroVelocityNoSpring() {
+        let (e, fakes) = Self.makeEngine()
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset * 0.5, renderBounds: Self.bounds, panel: .upper)
+        let before = e.upperPanel.offset
+        e.endPan(velocity: 0, renderBounds: Self.bounds, panel: .upper)
+        for _ in 0..<60 { _ = fakes().last?.fire(1.0 / 60.0) }
+        #expect(abs(e.upperPanel.offset - before) < 1e-6)                         // 不动（v=0 界内不弹）
+    }
 }

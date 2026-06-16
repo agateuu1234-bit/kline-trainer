@@ -706,12 +706,16 @@ extension TrainingEngine {
     /// onPan `.ended`（R1b-wire B2 + 机制 A，**public** gesture API）：传 `renderBounds`（CGRect，不暴露 OffsetBounds，
     /// codex R3）→ engine 内部算边界 + 按速度方向分派（D8）。v>0 ∧ .max∈bounceEdges → 对称 bounce（最老边弹）；否则 plain decel。
     public func endPan(velocity: CGFloat, renderBounds: CGRect, panel: PanelId) {
-        setDragRaw(nil, panel: panel)                        // R1b-drag：清 raw（Task 4 再加 D3 弹回分支）
+        setDragRaw(nil, panel: panel)
         let ob = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds)
         guard case .startDeceleration(let v) = reduce(.panEnded(velocity: velocity), on: panel) else { return }
-        if v > 0 && ob.bounceEdges.contains(.max) {
+        let offset = panelState(panel).offset
+        // R1b-drag D3：drag-overscroll（offset>maxOffset）松手**不论速度方向**都弹簧回 maxOffset（防慢松手 no-op strand）；
+        //   否则 R1b-wire 机制 A 既有分派。L1 不变量：post-drag 面板恒 .freeScrolling → .panEnded 返 .startDeceleration（含 v=0）
+        //   → 本分支可达；**勿把 overscroll 检查移出本 guard / 勿放松 guard**（autoTracking/drawing 不经此路且已 offset=0）。
+        if offset > ob.maxOffset || (v > 0 && ob.bounceEdges.contains(.max)) {
             setActiveBounds(ActiveDecel(bounds: ob, allowOverscroll: true), panel: panel)
-            animator(for: panel).start(initialVelocity: v, fromOffset: panelState(panel).offset,
+            animator(for: panel).start(initialVelocity: v, fromOffset: offset,
                                        minOffset: ob.minOffset, maxOffset: ob.maxOffset)
         } else {
             setActiveBounds(ActiveDecel(bounds: ob, allowOverscroll: false), panel: panel)
