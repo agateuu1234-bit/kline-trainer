@@ -677,8 +677,21 @@ extension TrainingEngine {
     public func applyPanOffset(deltaPixels: CGFloat, renderBounds: CGRect, panel: PanelId) {
         let ob = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds)
         let cur = panelState(panel).offset
-        let target = min(max(cur + deltaPixels, ob.minOffset), ob.maxOffset)
-        if target != cur { applyOffsetDelta(target - cur, panel: panel) }
+        // R1b-drag D1：raw 累加器（未阻尼累计意图位移）。E1：beginPan 已 seed；防御惰性回退当前 offset。
+        let raw0 = dragRawFor(panel) ?? cur
+        let raw = max(0, raw0 + deltaPixels)                     // E2 下钳 0：最新边硬钳无给 + 无反拖死区
+        setDragRaw(raw, panel: panel)
+        // D2 单边映射
+        let target: CGFloat
+        if !ob.bounceEdges.contains(.max) {                      // E6 无滚动空间（maxOffset==0）→ 硬钳 0
+            target = min(raw, ob.maxOffset)
+        } else if raw <= ob.maxOffset {                          // 界内 1:1（回归）
+            target = raw
+        } else {                                                 // 最老边阻尼
+            let mainW = ChartPanelFrames.split(in: renderBounds).mainChart.width
+            target = ob.maxOffset + RubberBand.damp(over: raw - ob.maxOffset, dimension: mainW)
+        }
+        if target != cur { applyOffsetDelta(target - cur, panel: panel) }   // L2-new：省 0-delta 空 bump
     }
 
     /// onPan `.ended`（旧签名，无界 plain decel）。**internal（codex R2-M2）**：同 applyPanOffset，不暴露 public 无界路径
