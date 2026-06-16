@@ -85,19 +85,20 @@ cd ios/Contracts && swift test --filter c1NoScrollSpacePositiveNoStrand 2>&1 | g
 
 ---
 
-## 第 5 条 · 中断归一（re-grab / 开画线中途 overscroll 不残留）
+## 第 5 条 · 中断归一（re-grab / 开画线 / resize 中途 overscroll 不残留）
 
-**目的**：确认 overscroll 进行中再次按下（re-grab）或开画线工具 → offset 归回最老边、不残留越界间隙（drawing 快照取归一后 offset）。
+**目的**：确认 overscroll 进行中再次按下（re-grab）、开画线工具、或旋转/分屏（resize）→ offset 归回界内、不残留越界间隙（drawing 快照取归一后 offset；resize 按新几何归一）。
 
-**操作命令**（两步）：
+**操作命令**（三步）：
 ```bash
 cd ios/Contracts && swift test --filter interruptBeginPanNormalizes 2>&1 | grep "✔ Test"; cd - >/dev/null
 cd ios/Contracts && swift test --filter activateDrawingDuringOverscrollNormalizes 2>&1 | grep "✔ Test"; cd - >/dev/null
+cd ios/Contracts && swift test --filter resizeMidBounceNormalizes 2>&1 | grep "✔ Test"; cd - >/dev/null
 ```
 
-**预期输出**：两行分别含 `✔ Test "H3：bounce overscroll 中途 beginPan → offset 归 maxOffset（不 strand）" passed` 与 `✔ Test "M2-new：overscroll 中途 activateDrawingTool → snap.frozen.offset==maxOffset（归一在算 range 前）" passed`。
+**预期输出**：三行分别含 `✔ Test "H3：bounce overscroll 中途 beginPan → offset 归 maxOffset（不 strand）" passed`、`✔ Test "M2-new：overscroll 中途 activateDrawingTool → snap.frozen.offset==maxOffset（归一在算 range 前）" passed`、`✔ Test "resize 中途 bounce：bounds 变 → stop + 按新几何归一（offset 不 strand 过新 maxOffset）" passed`。
 
-**判定**：两行均 `passed` → ✅；任一无输出或 `✘` → ❌。
+**判定**：三行均 `passed` → ✅；任一无输出或 `✘` → ❌。
 
 ---
 
@@ -111,7 +112,7 @@ cd ios/Contracts && swift test 2>&1 | grep -E "Test run with"; cd - >/dev/null
 cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 | tail -1; cd - >/dev/null
 ```
 
-**预期输出**：第一行 `Test run with 1060 tests in 146 suites passed`（数字 ≥ 1060，0 failures）；第二行 `** TEST BUILD SUCCEEDED **`。
+**预期输出**：第一行 `Test run with 1061 tests in 146 suites passed`（数字 ≥ 1061，0 failures）；第二行 `** TEST BUILD SUCCEEDED **`。
 
 **判定**：第一行含 `passed`（无 `failed`）且第二行含 `TEST BUILD SUCCEEDED` → ✅；任一含 `failed`/`FAILED`/`error` → ❌。
 
@@ -146,12 +147,12 @@ grep -F "wave3-w3-11-r1b-wire@$(git rev-parse HEAD)" .claude/state/codex-attest-
 | 8.5 | 切周期组合 / 缩放后，再甩到最老边 | 最老边 bounce 仍正确（消费新视口几何） | ☐ |
 | 8.6 | bounce 回弹**进行中**切后台→回前台 | 无残留越界间隙（offset 落边缘） | ☐ |
 | 8.7 | bounce 回弹**进行中**开画线工具 | 无残留越界间隙、画线锚点基于归一后视口 | ☐ |
-| 8.8 | bounce 回弹**进行中**旋转/分屏（M1-new，允许落旧边） | 不卡死、不 strand 越界（新几何下次手势收口） | ☐ |
+| 8.8 | bounce 回弹**进行中**旋转/分屏（codex R1 修） | 立即 stop+归一新几何、**无持久 overscroll 间隙**、不卡死 | ☐ |
 
 ---
 
 ## 残留（移交，非本交付义务）
 
 - **R1b-drag**：拖拽期跟手橡皮筋阻尼（独立 follow-up，本 spec out of scope）。
-- **M1-new resize 中途 bounce**：旋转/分屏中途 bounce 沿父 §B5 MVP（停 + 归一到可能旧边，下次手势/scene 收口），本 PR 不追求无缝续弹（§8.8 验证不 strand）。
+- **resize 无缝续弹**：旋转/分屏中途 bounce 现 **stop+归一新几何**（codex R1 修，§8.8）；无缝续弹（resize 后继续弹）属 R1b/后续，本 PR 取 MVP stop+归一。
 - **ledger-B**：`feature-completeness: PENDING-W3-11-R1` 的翻转 + 矩阵 bounce 行转 device 行留收尾 reconciliation PR；本 PR 不碰 `wave3-completion.md`/`verify-wave3-completion.sh`。

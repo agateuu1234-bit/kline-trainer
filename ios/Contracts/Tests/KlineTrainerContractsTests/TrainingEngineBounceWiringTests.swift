@@ -160,4 +160,25 @@ struct TrainingEngineBounceWiringTests {
         e.beginPan(panel: .upper)                                     // 无活跃动画 → 不应 clamp 改 mid
         #expect(abs(e.upperPanel.offset - mid) < 1e-6)
     }
+
+    // codex branch-diff M1：resize 中途 bounce → recordRenderBounds stop+归一新几何（不 strand 持久 overscroll 间隙）
+    @Test("resize 中途 bounce：bounds 变 → stop + 按新几何归一（offset 不 strand 过新 maxOffset）")
+    func resizeMidBounceNormalizes() {
+        let (e, fakes) = Self.makeEngine(count: 200, tick: 150)
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
+        #expect(ob.bounceEdges.contains(.max))
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset, offsetBounds: ob, panel: .upper)
+        e.endPan(velocity: 6000, offsetBounds: ob, panel: .upper)
+        var overscrolled = false
+        for _ in 0..<30 { _ = fakes().last?.fire(1.0 / 60.0); if e.upperPanel.offset > ob.maxOffset { overscrolled = true; break } }
+        #expect(overscrolled)                               // 确处于 overscroll（offset>旧 maxOffset 710）
+        // resize 到更小 bounds（新 maxOffset 更小）→ recordRenderBounds 触发 stop+归一
+        let smaller = CGRect(x: 0, y: 0, width: 400, height: 600)
+        let freshOb = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: smaller)
+        #expect(freshOb.maxOffset < ob.maxOffset)           // 前提：新 max 更小（旧 settled offset 会 strand）
+        e.recordRenderBounds(smaller, panel: .upper)
+        #expect(e.upperPanel.offset >= freshOb.minOffset - 1e-6)
+        #expect(e.upperPanel.offset <= freshOb.maxOffset + 1e-6)   // 不 strand 过新 maxOffset（归一新几何）
+    }
 }

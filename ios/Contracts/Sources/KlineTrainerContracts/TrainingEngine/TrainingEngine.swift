@@ -757,9 +757,21 @@ extension TrainingEngine {
 
     /// ChartContainerView.updateUIView 调：缓存该面板最近渲染 bounds，供 `activateDrawingTool` 算 range（D1）。
     public func recordRenderBounds(_ bounds: CGRect, panel: PanelId) {
+        let previous = renderBounds(panel)
         switch panel {
         case .upper: lastRenderedBounds.upper = bounds
         case .lower: lastRenderedBounds.lower = bounds
+        }
+        // R1b-wire（codex branch-diff M1）：resize/旋转中途 bounce → stop + 按**新**几何归一。否则冻结的 activeBounds
+        // 使 bounce settle 到旧 maxOffset，新几何下 makeViewport 视其为 offset>maxOffset → 渲持久 overscroll 间隙直到下次手势。
+        // 承袭父 §B5 MVP「视口几何变更 → stop()+归一 edge，不追求无缝续弹」。bounds 未变（常态每帧）→ no-op，不扰正常 bounce。
+        if previous != bounds, animator(for: panel).isDecelerating {
+            animator(for: panel).stop()
+            let fresh = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: bounds)
+            let cur = panelState(panel).offset
+            let clamped = min(max(cur, fresh.minOffset), fresh.maxOffset)
+            if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }
+            setActiveBounds(nil, panel: panel)
         }
     }
 

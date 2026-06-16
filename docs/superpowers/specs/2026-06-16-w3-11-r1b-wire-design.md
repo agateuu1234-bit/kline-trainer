@@ -162,7 +162,7 @@ func interruptDeceleration(panel):
 - **stale 自纠正（opus R1 隐患）**：`isDecelerating` guard 确保只在打断**活跃**动画时 clamp——动画早已 settle/cancel（activeBounds 残留旧几何）时 `isDecelerating==false` → 不 clamp → 不会用 stale bounds 误钳一个当前几何下合法的 offset。
 - **周期切换/交易**（`switchPeriodCombo`/`advanceAndAccount`）：既有 `stopAllDeceleration()` + `resetOffsetAfterAutoTracking`（offset→0）已清 overscroll，**不改**。
 - **scene-active**：既有 `resetOnSceneActive`——bounce 路径 `normalizeToEdgeDelta` 归 maxOffset；decel 路径 offset 已被 full-clamp 在界内。**不改**。
-- **M1-new resize 残留（显式 out-of-scope，承袭父 §B5）**：bounce overscroll 进行中 `view.bounds` 变（旋转/分屏）→ makeViewport 用新 `mainFrame.width` 算的 maxOffset 与进行中 bounce 的 `activeBounds.maxOffset`（旧几何）不再逐位相等；此刻 `beginPan` 的 `interruptDeceleration` 用旧 activeBounds 归一，新几何下可能微越界。**本 PR 不消除**——沿父 §B5（2026-06-15）MVP 取舍：「bounce 中途视口几何变更 → stop + 归一到（可能旧）edge，不追求无缝续弹」；新几何下残留越界由后续 drag full-clamp / 下一 settle / scene 归一收口。device runbook §六.10 含验证行。
+- **resize 中途 bounce（codex branch-diff R1 修，承袭父 §B5「几何变更 → stop+归一 edge」）**：bounce overscroll 进行中 `view.bounds` 变（旋转/分屏）→ 冻结的 `activeBounds.maxOffset`（旧几何）使 bounce settle 到旧 maxOffset；新几何下 makeViewport 视其为 `offset>maxOffset` → 渲**持久 overscroll 间隙**直到下次手势。**处置（本 PR 修）**：`recordRenderBounds`（updateUIView 每次调）检测 `bounds` 变 **且** `isDecelerating` → `stop()` + 按**新** bounds 算 `offsetBounds` 归一 offset 到 `[new min, new max]` + 清 activeBounds。`bounds` 未变（常态每帧）→ no-op，不扰正常 bounce。pinch 路径已由 `applyPinch(.began)` 的 `interruptDeceleration` 覆盖（pinch 是手势）；resize 是非手势几何变更，故须在 `recordRenderBounds` 接。测 `resizeMidBounceNormalizes`（缩 bounds 后 offset∈[new min,new max] 不 strand）。MVP：stop+归一（cut short 续弹），不追求无缝续弹（R1b/后续）。
 
 ### Coordinator 喂 bounds（`ChartContainerView.Coordinator.attach` 的 `onPan`）
 ```
@@ -200,7 +200,7 @@ func interruptDeceleration(panel):
 7. **v≤0 decel 单调硬停**：plain decel + full-clamp → offset 单调降、停 0、无正向反弹。
 8. **B5 中断归一（H3/M3）**：bounce overscroll 中途 → `beginPan` 后 offset==maxOffset（不 strand）；`activateDrawingTool` 中途 overscroll → **snapshot 前 offset==maxOffset 且 candleRange 基于归一后 offset**（M2-new 顺序不变量；drawing 期无 overscroll 间隙）；scene-active 中途 bounce → normalize maxOffset；**stale 自纠正**：动画已 settle 后再 `beginPan`（`isDecelerating==false`）→ 不误钳一个当前合法 offset。
 9. **P7 回归（H2 重述）**：既有调**旧签名**的 freeScrolling 累加/drawing/interaction 测**保持绿不改**；新增覆盖 = 新签名 clamp（§六.3）+ onUpdate floor/full（§六.5）；既有 `DecelerationAnimator`/`DecelerationModel`/界内 makeViewport/partial-aggregate 测全绿。
-10. **device/sim runbook**（W3-11-R1 device 验收，user 实测回填）：**甩**到最老边松手 → 弹簧 overscroll+回弹+落边；**轻拖**到最老边零速松手 → 停边不弹（父 D6）；**甩/拖向最新边** → 平滑减速回 autoTracking、停当前 tick、**无前向间隙/无回弹**；满屏（无滚动空间）甩动 → 不动不弹；切周期/缩放后最老边 bounce 仍正确；bounce 中途切后台→前台 / 开画线 → 无残留越界；**bounce 中途旋转/分屏（M1-new）→ 不 strand 越界**（允许落旧 edge，新几何下次手势收口）。
+10. **device/sim runbook**（W3-11-R1 device 验收，user 实测回填）：**甩**到最老边松手 → 弹簧 overscroll+回弹+落边；**轻拖**到最老边零速松手 → 停边不弹（父 D6）；**甩/拖向最新边** → 平滑减速回 autoTracking、停当前 tick、**无前向间隙/无回弹**；满屏（无滚动空间）甩动 → 不动不弹；切周期/缩放后最老边 bounce 仍正确；bounce 中途切后台→前台 / 开画线 → 无残留越界；**bounce 中途旋转/分屏（codex R1 修）→ 立即 stop+归一新几何、无持久 overscroll 间隙**。
 
 ---
 
@@ -210,7 +210,7 @@ func interruptDeceleration(panel):
 - `activeBounds[panel]==nil`（旧路径 / 首次 endPan 前）→ onUpdate 退化无界（安全、兼容）。
 - `interruptDeceleration` 仅在 `isDecelerating` 时归一 → 无 stale 误钳。
 - `beginPan` re-grab：先 `interruptDeceleration`（停+归一）再 `.panStarted`。`cancelPan`/两指接管：pan 期无 bounce（`beginPan` 已停），`cancelPan` 不启动画（M6）。
-- **resize 中途 bounce（M1-new，承袭父 §B5，本 PR out-of-scope）**：`view.bounds` 变使 `activeBounds`（旧几何）与新 makeViewport maxOffset 漂移；不在本 PR 消除，新几何下残留越界由后续 drag full-clamp / 下一 settle / scene 归一收口（host 不可复现，归 device runbook）。
+- **resize 中途 bounce（codex branch-diff R1 修）**：`recordRenderBounds` 检测 bounds 变 + `isDecelerating` → stop + 按新几何归一 offset 到 [new min,new max]（防冻结 activeBounds 致持久 overscroll 间隙）。测 `resizeMidBounceNormalizes`；device §六.10 旋转项。
 
 ---
 
@@ -241,4 +241,5 @@ func interruptDeceleration(panel):
 | 2026-06-16 | v1 | 锁机制 A；重导 §三/§B4 单边；三 clamp 层；engine activeBounds + Coordinator 喂 bounds；B5 strand。 |
 | 2026-06-16 | v2（opus xhigh R1 修：1C+3H+6M+3L） | **C1** onUpdate clamp 按 run 类型（bounce floor / decel full），修「v>0 无滚动空间 plain decel strand 正 offset」；**H1** 旧 endPan 清 activeBounds 防 stale；**H2** 旧签名 byte-preserved → 既有测试不变、P7 重述；**H3/M3** `interruptDeceleration`（`isDecelerating`-guard，D10）在 beginPan/activateDrawingTool/pinch.began 归一 overscroll、防 stale 误钳；**M1** activeBounds `@ObservationIgnored`；**M2** B4 复用 core.baseStartIndex；**M4** offsetBounds 重载传 raw visibleCount；**M5** §六.4 加「bounce 朝 maxOffset 移动」断言；**M6** cancelPan/两指 pan 期无 bounce 澄清；**L1/L2/L3** 测试框架修正（offset<0=回归断言 / 早tick vs 最新边分立 / killer 缝=driver factory）。opus R1 已核实正确项：机制 A 单边性、v≤0 单调、v==0 no-op、符号约定、B4 顺序、D4 同源、floor 不触发 bounce、OOB/partial-aggregate 保真、offsetBounds 重载可行。 |
 | 2026-06-16 | **v2.1（opus xhigh R2 = APPROVE）** | R2 独立核实 R1 全 1C+3H+6M+3L = RESOLVED + 机制 A/`isDecelerating`-guard/`allowOverscroll` floor-undershoot/同源 maxOffset 逐位相等/两面板独立/Sendable 全核实正确。折入 R2 实施级提示：**M1-new** resize 中途 bounce 残留显式 out-of-scope（承袭父 §B5）+ runbook 验证行；**M2-new** `activateDrawingTool` 的 `interruptDeceleration` 顺序不变量（在算 range 前）+ 测；**L1-new** `interruptDeceleration` 注释软化（非 resize 路径为当前几何）；**L2-new** onUpdate full-clamp `target==cur` 省 0-delta 空 bump。**设计收敛。** |
+| 2026-06-16 | **v2.3（codex:adversarial-review branch-diff R1 修）** | codex 揪出真 medium：`endPan` 冻结 `activeBounds` 整个 bounce run，resize/旋转中途 bounce → settle 到旧 maxOffset → 新几何下持久 overscroll 间隙（no-ship）。**根因 = 我实现漏接 resize 非手势几何变更**（只接了 pinch 手势），比父 §B5「几何变更→stop+归一」更弱。**修：`recordRenderBounds` 检测 bounds 变 + isDecelerating → stop + 按新几何归一 offset + 清 activeBounds**（host 不可复现的 device 残留转为 host 可测）。+ 测 `resizeMidBounceNormalizes`；spec §五.B5/§七/§六.10 从「out-of-scope 残留」改「已修」。1061 host 绿。 |
 | 2026-06-16 | **v2.2（plan opus xhigh R1→R2→R3 反馈回填）** | plan-stage review 揪出两处需回填 spec 的修正：**M1（标签）** `interruptDeceleration` 的 `reduce(.offsetApplied(deltaPixels: …))` 必带 `deltaPixels:` 标签（原 spec 漏）；**plan R2-C1（M2-new reorder）** `interruptDeceleration` 的归一 `offsetApplied` 会 bump revision，若放在 `reduce(.activateDrawing)` 捕获 `baseRev` **之后**会令 `setDrawingSnapshot` 的 `baseRev==revision` staleness 闸门失配 → 永不进 drawing；**修法 = `interruptDeceleration` 提到 `activateDrawingTool` 最顶（在捕获 baseRev 之前）**，baseRev 捕获归一后 revision（plan R3 实证 `.activateDrawing` 不自 bump、既有 H1/pinch/interaction 全套不破）。plan（R1 3C+4H+4M+4L → R2 1C → R3 APPROVE）+ spec 双收敛。 |
