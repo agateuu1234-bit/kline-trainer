@@ -165,6 +165,7 @@ E2E smoke 让 fixture sqlite 字节流过真管线，每一关都有不变量；
 - `docs/acceptance/2026-06-14-wave3-pr13b-fixture-smoke.md`（13b 历史快照，13b-R2 是当时诚实记录，不回写历史）。
 - `runtime-matrix: PARTIAL` / `formal-closure: PENDING` / `feature-completeness` / `freeze-tag` / W3-11-R1 / ship 门——residual-D（E2E smoke）与 device 运行时矩阵正交，**一律不动**。
 - 既有 fake-verifier 测试。
+- `docs/governance/2026-06-14-wave3-completion.md` **L92 的「13b PR-内 residual 脚注」**（叙述 13b-R1/R2/R3 在 `pr13b-fixture-smoke.md` 标 accept residual）——它是指向 **13b 历史快照**的脚注、不 claim 当前顶层 residual-D 状态、gate 不解析它；**审视后确认不改**（与「不回写 13b 历史快照」一致；R2-N1）。
 
 ---
 
