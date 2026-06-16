@@ -29,17 +29,18 @@ struct TrainingEngineBounceWiringTests {
         return (e, { box.fakes })
     }
 
-    // §六.3 drag full-clamp（新签名）
-    @Test("drag full-clamp：推过 maxOffset → 钳 maxOffset；推过 0 → 钳 0")
-    func dragFullClamp() {
+    // §六.3→R1b-drag 更新：drag 过最老边现为「阻尼跟手」（非硬钳）；最新边仍硬钳 0
+    @Test("drag 过最老边 → 阻尼跟手（offset>maxOffset 但被压缩）；推过 0 → 仍硬钳 0")
+    func dragPastEdgeRubberBands() {
         let (e, _) = Self.makeEngine(count: 200, tick: 150)
         let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
-        #expect(ob.bounceEdges.contains(.max))                       // 前提：有滚动空间（maxOffset≈710）
+        #expect(ob.bounceEdges.contains(.max))
         e.beginPan(panel: .upper)
         e.applyPanOffset(deltaPixels: ob.maxOffset + 999, renderBounds: Self.bounds, panel: .upper)
-        #expect(abs(e.upperPanel.offset - ob.maxOffset) < 1e-6)     // 钳上界
+        #expect(e.upperPanel.offset > ob.maxOffset)                  // 过界（阻尼跟手，非硬钳停 maxOffset）
+        #expect(e.upperPanel.offset < ob.maxOffset + 999)            // 被压缩
         e.applyPanOffset(deltaPixels: -99999, renderBounds: Self.bounds, panel: .upper)
-        #expect(e.upperPanel.offset == 0)                            // 钳下界 0
+        #expect(e.upperPanel.offset == 0)                            // 最新边仍硬钳 0（单边不变量）
     }
 
     // §六.4 机制 A 分派 killer：v>0 → bounce（offset 朝 maxOffset 越界过冲，M5）
