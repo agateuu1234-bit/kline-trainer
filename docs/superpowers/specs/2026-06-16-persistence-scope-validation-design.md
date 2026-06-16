@@ -2,10 +2,10 @@
 
 > Wave 3 后续 RFC。R4 残留真修：在数据信任边界补齐「`.m3` datetime 严格递增 + 聚合 open 落 `endGlobalIndex` 窗口」校验，使损坏训练集在 load 期被拒，而非靠渲染层 fail-safe 兜底（GIGO）。
 
-- **状态：** 已收敛（opus 4.8 xhigh 对抗 review R2 = APPROVE，0 C/H）→ 进 writing-plans
+- **状态：** 已收敛（spec R2 APPROVE + plan R1 HIGH 反哺第二 reader）→ 进 subagent-driven
 - **作用域：** trust-boundary（持久化 ingest 校验）→ 须走 `codex:adversarial-review`
 - **前置：** 聚合感知 reveal RFC（PR #115，`7b1849a`）的 codex R4 HIGH residual
-- **版本：** v1.2
+- **版本：** v1.3
 
 ---
 
@@ -38,6 +38,8 @@ codex 在该 RFC 的第 4 轮（R4 HIGH）指出：这两个前提**在运行时
 
 `TrainingEngine.make`（`TrainingEngine.swift:160`）是所有 candle 字典进入引擎的**唯一公共构造闸门**（四个 coordinator 方法均经此），它额外复校验 `isContiguousM3Axis`（m3 索引轴），失败抛 `AppError.trainingSet(.emptyData)`。
 
+**第二个 reader（`#if DEBUG` 镜像）：** `PreviewTrainingSetReader`（`PreviewFakes/PreviewTrainingSetReader.swift`，SwiftUI preview / debug seed 用）通过 `validateCandles` **逐项镜像** `DefaultTrainingSetReader.loadAllCandles` 的全套校验，并带 in-code 维护契约（line 8「production validateCandles 改了 → 这里同步改」），目的是让「reader 返回 = 已校验」不变量「在测试和生产都成立」。因此本 RFC 的两项 reader 校验**必须同步镜像进 `PreviewTrainingSetReader.validateCandles`**（否则 preview 路径静默漏校验、违反该契约）。
+
 **m3 datetime 的消费者（依赖排序但无任何保证）：** `synthesize`（`PartialAggregateCandle.swift:20`）、`candleDatetime`（交易记录时间戳，`TrainingEngine.swift:404`）直接读 **m3** `datetime` 排序；`CrosshairLayout.swift:89`（`candles[snappedIndex].datetime`）读**显示周期**（含聚合）datetime 作时间轴标签（仅显示，见 §8 R-B）。
 
 **未守的（本 RFC 补齐）：**
@@ -64,7 +66,7 @@ codex 在该 RFC 的第 4 轮（R4 HIGH）指出：这两个前提**在运行时
 
 闸门位置（用户拍板 = Reader + make 纵深）：
 
-- **Reader（生产信任边界，主校验）：** 两项全做，抛 `.persistence(.dbCorrupted)`，作为可恢复错误上抛 UI（与 reader 既有内容校验同行为；**不**自动删文件——详见 §五）。
+- **Reader（生产信任边界，主校验）：** 两项全做，抛 `.persistence(.dbCorrupted)`，作为可恢复错误上抛 UI（与 reader 既有内容校验同行为；**不**自动删文件——详见 §五）。**两项均同步镜像进 `PreviewTrainingSetReader.validateCandles`**（#if DEBUG 第二 reader，维护契约要求；§1.2）。
 - **`make`（普适末线，纵深防御）：** 镜像**校验 1（m3 datetime 单调）**，抛 `.trainingSet(.emptyData)`（与既有 `isContiguousM3Axis` 同族）。作用是**消除未定义行为**：使 `synthesize` 的 `partitioningIndex` 谓词在任何构造路径（fake / in-memory / 未来非 GRDB 源）上单调、结果良定义。**不**保证窗口正确性——非 GRDB 源喂入窗口越界聚合时，由 `synthesize` 的 `min(rawStart, tick)` clamp 兜底为**有界 fail-safe**（不崩 / 不泄未来 / Y 轴不越界），即 bounded-GIGO，不在 make 关闭（生产路径由 reader 校验 2 全覆盖）。
 
 ### 2.2 非目标（out of scope，文档登记）
@@ -204,3 +206,4 @@ require s <= C.endGlobalIndex
   - **#6 [LOW] 测试 fixture 约束：** §7 加「重复-datetime fixture 须保 endGlobalIndex 严格递增以归因校验 1」。
   - **#7 [LOW] CONTRACT_VERSION 确认 backend-safe：** §6 补 import_csv/generate 的 datetime 去重+排序证据 + 稀疏聚合 endGlobalIndex 既有 L90 拒的观察。
 - **v1.2**（2026-06-16）：opus 4.8 xhigh 对抗 review **R2 = APPROVE（0 Critical/0 High）**，所有 R1 项 confirmed-resolved，#2 精确匹配争议 R2 独立核 backend 后判作者方对。应用 R2 唯一 LOW（**N2**）：§4.2 前置改为**硬性顺序要求**——校验 2 的 `partitioningIndex` 之前校验 1 必须已过（m3 数组按 endGlobalIndex 存储、仅校验 1 证明其 datetime 升序，防实现重排引入 undefined）。设计收敛，进 writing-plans。
+- **v1.3**（2026-06-16）：writing-plans + opus 4.8 xhigh **plan-review R1 HIGH** 反哺——发现第二个 reader `PreviewTrainingSetReader`（#if DEBUG 镜像，带 in-code 维护契约）未被覆盖。§1.2/§2.1 补：两项校验须同步镜像进 `PreviewTrainingSetReader.validateCandles`（否则 preview 路径静默漏校验、违反契约）。plan 已把镜像折入 Task 1/2。
