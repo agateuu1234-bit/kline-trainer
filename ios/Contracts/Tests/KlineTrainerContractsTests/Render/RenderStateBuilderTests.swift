@@ -541,6 +541,21 @@ struct RenderStateBuilderTests {
         #expect(vp.pixelShift == 0)     // 最新边硬钉，无前向间隙
     }
 
+    // R1b-wire T2：offsetBounds(engine:panel:bounds:) 便捷重载 == 直接 extraction（D1 Coordinator 喂 bounds）。
+    @Test("offsetBounds(engine:panel:bounds:) 重载 == 直接 extraction（M4 raw visibleCount）")
+    @MainActor func offsetBoundsEngineOverload() {
+        let (engine, _) = TrainingEnginePinchTests.engine()          // 真实 helper（count 200, .m3 双面板, bounds 已记录）
+        let bounds = TrainingEnginePinchTests.bounds                  // 800×600
+        let got = RenderStateBuilder.offsetBounds(engine: engine, panel: .upper, bounds: bounds)
+        let cs = engine.allCandles[.m3]!
+        let mainW = ChartPanelFrames.split(in: bounds).mainChart.width
+        let want = RenderStateBuilder.offsetBounds(
+            mainFrameWidth: mainW, rawVisible: engine.upperPanel.visibleCount,
+            candleCount: cs.count,
+            currentIdx: RenderStateBuilder.currentCandleIndex(candles: cs, tick: engine.tick.globalTickIndex))
+        #expect(got == want)
+    }
+
     // MARK: 顺位 3 D5：去硬编码 80（target = panelState.visibleCount，≤0 → fallback 80）
 
     /// 非 0 显式入参 + 80 golden parity（独立金值硬编码，R1-L3 防 tautology）

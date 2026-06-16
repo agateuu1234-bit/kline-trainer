@@ -134,6 +134,19 @@ public enum RenderStateBuilder {
         return OffsetBounds(minOffset: minOffset, maxOffset: maxOffset, candleStep: core.candleStep)
     }
 
+    /// R1b-wire 便捷重载（D1）：从 engine 抽取 candles/tick/visibleCount + split 出 mainChart 宽，算 numeric
+    /// offset 边界喂 engine（Coordinator 用；engine 不反向依赖 ChartPanelFrames/像素）。复用 `make` 的 extraction。
+    /// M4：传 **raw** `visibleCount`（与 makeViewport 一致；≤0→80 fallback 在 geometryCore 内统一）。
+    @MainActor
+    static func offsetBounds(engine: TrainingEngine, panel: PanelId, bounds: CGRect) -> OffsetBounds {
+        let ps = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
+        let candles = engine.allCandles[ps.period] ?? []
+        let mainW = ChartPanelFrames.split(in: bounds).mainChart.width
+        let currentIdx = candles.isEmpty ? 0 : currentCandleIndex(candles: candles, tick: engine.tick.globalTickIndex)
+        return offsetBounds(mainFrameWidth: mainW, rawVisible: ps.visibleCount,
+                            candleCount: candles.count, currentIdx: currentIdx)
+    }
+
     /// FP round-trip 守门（codex R1-M / C1a verify-and-correct）：返回一个 edge，使 makeViewport 的
     /// plain `Int((edge/step).rounded(.down)) == integer`。`integer·step` 在非整除 step 下可 FP 偏移致 floor 偏 1；
     /// 按 floor 方向 ULP-nudge 至吻合（bounded）。**调用方须先保 step 有限正（offsetBounds 已守，codex R2-M）**——
