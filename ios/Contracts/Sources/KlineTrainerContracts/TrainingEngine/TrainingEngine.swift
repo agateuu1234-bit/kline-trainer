@@ -209,6 +209,9 @@ public final class TrainingEngine {
         guard TrainingEngine.isContiguousM3Axis(m3) else {
             throw AppError.trainingSet(.emptyData)            // .m3 轴非连续（gap / 乱序 / period 错）
         }
+        guard TrainingEngine.isStrictlyIncreasingM3Datetime(m3) else {
+            throw AppError.trainingSet(.emptyData)            // .m3 datetime 非严格递增（损坏 / 非 GRDB 源）
+        }
         // 钱字段 finite + 非负——`startTotal`/`currentTotalCapital`/`returnRate`/drawdown 数学的前置；
         // resume 状态可能 NaN/Inf 污染（codex final-R4-F2）。
         guard initialCapital.isFinite, initialCapital >= 0,
@@ -533,6 +536,16 @@ public final class TrainingEngine {
     private static func isContiguousM3Axis(_ m3: [KLineCandle]) -> Bool {
         for (i, c) in m3.enumerated() {
             guard c.period == .m3, c.globalIndex == i, c.endGlobalIndex == i else { return false }
+        }
+        return true
+    }
+
+    /// persistence-scope RFC 纵深防御：.m3 datetime 严格递增（synthesize 的 partitioningIndex{datetime>=X}
+    /// 谓词单调性前提）。reader 是生产主校验；此为 fake/非 GRDB 源喂 make 的普适末线——消除未定义行为，
+    /// 不保证窗口正确性（窗口越界由 synthesize 的 min(rawStart,tick) clamp 兜底为 bounded-GIGO）。
+    private static func isStrictlyIncreasingM3Datetime(_ m3: [KLineCandle]) -> Bool {
+        for i in m3.indices.dropFirst() {
+            guard m3[i].datetime > m3[i - 1].datetime else { return false }
         }
         return true
     }
