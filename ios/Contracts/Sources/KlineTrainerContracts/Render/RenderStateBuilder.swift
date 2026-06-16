@@ -176,8 +176,16 @@ public enum RenderStateBuilder {
         let startIndex = min(max(baseStartIndex - wholeShift, 0), upperBound)
         // 余量 ∈ [0,candleStep)；按 startIndex *落位* 判饱和（非按 clamp 是否改值，F3）：
         // 处硬边界（最老 startIndex==0 / 最新 ==upperBound，无更多可揭示）→ pixelShift=0（边缘钉面板边）。
+        // R1b-wire B4（spec §四，单边 overscroll）：最新边硬钉先判；最老边 offset>maxOffset 放开 overscroll 间隙。
         var pixelShift = panelState.offset - CGFloat(wholeShift) * candleStep
-        if startIndex == 0 || startIndex == upperBound { pixelShift = 0 }
+        if startIndex == upperBound {
+            pixelShift = 0                                   // 最新边硬钉（含早 tick upperBound==0；reveal offset<minOffset 前向不可达）
+        } else if startIndex == 0 {
+            // 最老边：offset>maxOffset → 左露 overscroll 间隙（pixelShift>0=candles 右移）；否则钉边
+            // M2：复用本函数 core 派生的 baseStartIndex/candleStep（勿重算 geometryCore、勿用 upperBound）
+            let maxOffset = roundTripEdge(integer: baseStartIndex, step: candleStep)   // 与 offsetBounds.maxOffset 同源（D4）
+            pixelShift = panelState.offset > maxOffset ? panelState.offset - maxOffset : 0
+        }
 
         // reveal RFC：可见窗口 ⊆ 已揭示前缀 candles[0...currentIdx]；slice 末根恒 ≤ currentIdx（看不到未来）。
         // 早 tick 左填充时 visibleCount(返回) = sliceEnd−startIndex < target。currentIdx+1 ≤ count（界内）。
