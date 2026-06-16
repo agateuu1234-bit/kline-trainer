@@ -31,8 +31,24 @@
 | `verify-wave3-completion.sh` L50 `require_kv` | `"OPEN"` | `"CLOSED W3-11-R1 #117"` |
 | `verify-wave3-completion.sh` L58 `require_kv` | `"PENDING-W3-11-R1-bounce-live-wiring"` | `"COMPLETE"` |
 | verify 脚本注释（L6/L8/L9）+ 末行 echo（L73） | 述「W3-11-R1 OPEN / feature PENDING」 | 述「W3-11-R1 CLOSED #117 / feature COMPLETE」 |
-| completion doc §三 W3-11-R1 行（L87）+ §二/§五/§六 叙述 + grep-gate 描述（L128） | OPEN / 功能门未解 / feature PENDING | RESOLVED by #117(+#120) / 功能门已解 / feature COMPLETE；**formal-closure 仍 gated on device** |
-| runtime-matrix「排除/OPEN bounce 节」（L44-50）+ device 矩阵标题（L20 「7 项」）+ L89 OPEN 清单 | bounce 排除（W3-11-R1 OPEN） | bounce **转 device happy-path 行**（第 8 项），device pass/fail 留空待回填；L89 移除 W3-11-R1 OPEN（保 PR11-R1/W1-R2） |
+| completion doc 叙述（**逐句**，见 §二.1 枚举表，不可当「轻触」批量改） | OPEN / 功能门未解 / feature PENDING / bounce 排除 | RESOLVED by #117(+#120) / 功能门已解 / feature COMPLETE；**formal-closure 仍 gated on device** |
+| runtime-matrix「排除/OPEN bounce 节」（L44-50）→ device 行；标题 L20 + L89 OPEN 清单（见 §二.2） | bounce 排除（W3-11-R1 OPEN）/ 标题「7 项」 | bounce **转 device happy-path 行**（第 8 项），device pass/fail 留空待回填；标题改 **「8 项：6 数据交互 + 顺位 2 竖屏/窗口 + 顺位 11 bounce」**；L89 移除 W3-11-R1 OPEN（保 PR11-R1/W1-R2） |
+
+### §二.1 completion doc 叙述逐句改点（reviewer R1-High/Med：每句单列，防漏改致机器块↔散文自相矛盾）
+| 位置 | 现（含 feature-PENDING/W3-11-R1-OPEN 真值） | 改后（与 `feature COMPLETE` / W3-11-R1 CLOSED 一致；**保 formal-closure pending**） |
+|---|---|---|
+| **§一 性质 L4**（reviewer R1-High：标题下最显眼段，5 处 PENDING 断言） | 「功能交付确认（**除 W3-11-R1 外**）」「live 接线（W3-11-R1）**仍 OPEN**」「功能完整性标 **PENDING-W3-11-R1**，非无条件 feature-complete」「W3-11-R1 是功能完成门 + 正式关闭前提」 | 「功能交付确认（**含 W3-11-R1**，bounce live 接线 #117 已上线 / drag 橡皮筋 #120）」「功能完整性 **COMPLETE**」；**保留**「**正式关闭仍 gated on device 矩阵回填**、非『正式关闭』、不打 tag」框架 |
+| **§二 L68** | 「正式关闭 = 三连硬门全 PASS **+ 解 W3-11-R1**（13a-R2 已解…）」 | 「W3-11-R1 **已解（#117）**；正式关闭 = 三连硬门全 PASS（W3-11-R1 不再列 pending 前提，仅余 device 矩阵合取）」 |
+| **§二 L74** | 整段「排除 bounce ≠ 抹账 → 取 codex option (b) feature 标 **PENDING-W3-11-R1** + W3-11-R1 升功能完成门」 | 重写：「bounce live 接线 #117 已上线 → 由矩阵『排除节』**转 device happy-path 行**（§二.2）+ 功能完整性 **COMPLETE**；W3-11-R1 功能门**已解**」 |
+| **§三 W3-11-R1 行 L87** | 「**OPEN（功能完成门 + 正式关闭前提）**…live 接线未上线…解门 = 实现 live 接线」 | 「**RESOLVED（#117 live 接线 + #120 drag 橡皮筋，2026-06-16）**…bounce 已上线、转 device 矩阵行；功能完整性 COMPLETE。**非** NAS ship 门」 |
+| **§五 L114**（freeze 理由 #2，reviewer R1-Med：前提反转） | 「W3-11-R1 **未解，功能完整性本身 PENDING**…冻结语义在功能不完整时不成立」 | 「W3-11-R1 **已解（#117），功能完整性 COMPLETE**；freeze 仍 deferred——**理由改 base 在 device 矩阵未回填（理由 #1），非功能不完整**」 |
+| **§五 L118**（后续步骤清单，reviewer R1-Med） | 「② **W3-11-R1（bounce live 接线）实现并回填**其运行时 acceptance」 | 「② W3-11-R1 live 接线 **#117 已实现**；仅余其 bounce **device runbook 回填**（并入 device 矩阵第 8 行）」 |
+| **§六 grep-gate 描述 L128** | 「W3-11-R1/PR11-R1/W1-R2 **OPEN** … **feature-completeness=PENDING-W3-11-R1**」 | 「**W3-11-R1 CLOSED（#117）** / PR11-R1/W1-R2 OPEN … **feature-completeness=COMPLETE**」 |
+
+### §二.2 runtime-matrix 改点
+- L44-50「排除/OPEN bounce 节」→ **device happy-path 第 8 行**（判据见 §四）。
+- L20 device 矩阵标题「7 项：6 数据交互 + 顺位 2 竖屏/窗口」→「**8 项：6 数据交互 + 顺位 2 竖屏/窗口 + 顺位 11 bounce**」。
+- L89 OPEN 清单：移除 `W3-11-R1 ... = OPEN` 项（保 `PR11-R1`/`W1-R2`）；若该行同时含「W3-11-R1 是关闭前须解的功能门」字样 → 改「W3-11-R1 已解（#117）」。
 
 ### 保留不动（仍真实 pending）
 | key/门 | 值 | 为何不动 |
@@ -73,7 +89,7 @@ device pass/fail 留空（用户 device 回填，与其余 7 行同）。引用 
 
 - **评审通道**：改 `docs/**` + `scripts/governance/verify-wave3-completion.sh`（trust-boundary）→ `codex:adversarial-review`（配额耗尽 fallback opus 4.8 xhigh）。本 spec + plan 阶段评审用 **opus 4.8 xhigh 对抗性 review 到收敛**（user 指定）。
 - **acceptance（机器可验）**：① `bash scripts/governance/verify-wave3-completion.sh` → **PASS**（新断言匹配新块值；结构守卫/其余谓词不破）；② grep 自洽：WAVE3-STATUS 块值 ↔ verify 脚本 require_kv ↔ completion 叙述 ↔ matrix 三处对 W3-11-R1/feature 门的措辞**互不矛盾**；③ host `swift test` **不受影响**（本 PR 0 业务代码，doc+script only，预期与 baseline 同 1085/0——但 host 测不读这些 doc，实为「无关」确认）；④ 无 forbidden phrases（`.claude/workflow-rules.json`）。
-- **honesty 反向断言**：grep WAVE3-STATUS 块确认 `store-ready: NO` / `formal-closure: PENDING-runtime-matrix-device-record` / `runtime-matrix: PARTIAL` / `freeze-tag: NOT-TAGGED` / `ship-gate-* OPEN` **逐字未变**（防误翻关闭/上架门）。
+- **honesty 反向断言**：grep WAVE3-STATUS 块确认 ①**翻转后正值**逐字落位：`feature-completeness: COMPLETE`（无尾随空格）+ `residual-W3-11-R1-bounce-live-wiring: CLOSED W3-11-R1 #117`；②**keep-pending 逐字未变**：`store-ready: NO` / `formal-closure: PENDING-runtime-matrix-device-record` / `runtime-matrix: PARTIAL` / `freeze-tag: NOT-TAGGED` / `ship-gate-PR11-R1-prod-backend-url: OPEN` / `ship-gate-W1-R2-sample-data: OPEN`（防误翻关闭/上架门）。`COMPLETE` 与 `PENDING-runtime-matrix-device-record` 是最易误读对——两者并存即「功能完成但未关闭」的诚实表达。
 - **非-coder acceptance checklist**：落 `docs/superpowers/acceptance/2026-06-16-wave3-ledger-reconcile-acceptance.md`（verify PASS / 块值对照 / honesty 反向断言 / device 矩阵 7→8 / 无 forbidden phrases）。
 
 ---
@@ -91,3 +107,4 @@ device pass/fail 留空（用户 device 回填，与其余 7 行同）。引用 
 | 日期 | 版本 | 说明 |
 |---|---|---|
 | 2026-06-16 | v1 | 锁范围：翻 `residual-W3-11-R1 OPEN→CLOSED #117` + `feature-completeness PENDING→COMPLETE`（本 PR 推荐，待 user 审 spec 确认）+ 同步 verify 脚本 L50/L58/注释/echo + completion §二/§三/§五/§六 叙述 + runtime-matrix bounce 排除节转 device 第 8 行（7→8）。honesty 不变量：formal-closure/store-ready/runtime-matrix/freeze/ship 门**全保留**；feature 门翻转 ≠ 关闭；矩阵收紧非放松。授权 = R1b-wire spec §九。 |
+| 2026-06-16 | **v1.1（opus 4.8 xhigh 对抗性 review R1 修：1 High + 2 Med + 2 Low）** | reviewer 实编验证全部承重事实正确（L50/L58 行号、§九 授权属实、#117 确接线 bounce、acceptance refs 存在、verify gate 完整、honesty key 正确、值格式、矩阵收紧）。**R1-High**：completion doc **§一 性质 L4**（5 处 feature-PENDING 断言）漏入 change-set → 翻 COMPLETE 后机器块↔标题散文自相矛盾 → 加 **§二.1 逐句枚举表**（§一 L4 + §二 L68/L74 + §三 L87 + §五 L114/L118 + §六 L128，各句 old→new）；**R1-Med×2**：§二 L68（「解 W3-11-R1」列 pending 前提）+ L74（option-(b) PENDING 论证）+ §五 L114（freeze 理由 #2「功能不完整」前提反转）+ L118（W3-11-R1 列未来步骤）逐句钉死；**R1-Low×2**：矩阵标题精确串「8 项：6 数据交互 + 顺位 2 + 顺位 11 bounce」+ §五 反向断言加钉翻转后正值（`COMPLETE` 无尾空格 / `CLOSED W3-11-R1 #117`）。**设计收敛待 R2。** |
