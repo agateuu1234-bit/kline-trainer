@@ -2,10 +2,10 @@
 
 > Wave 3 后续 RFC。R4 残留真修：在数据信任边界补齐「`.m3` datetime 严格递增 + 聚合 open 落 `endGlobalIndex` 窗口」校验，使损坏训练集在 load 期被拒，而非靠渲染层 fail-safe 兜底（GIGO）。
 
-- **状态：** 设计中（opus 4.8 xhigh 对抗 review 第 2 轮）
+- **状态：** 已收敛（opus 4.8 xhigh 对抗 review R2 = APPROVE，0 C/H）→ 进 writing-plans
 - **作用域：** trust-boundary（持久化 ingest 校验）→ 须走 `codex:adversarial-review`
 - **前置：** 聚合感知 reveal RFC（PR #115，`7b1849a`）的 codex R4 HIGH residual
-- **版本：** v1.1
+- **版本：** v1.2
 
 ---
 
@@ -105,7 +105,7 @@ m3[i+1].datetime > m3[i].datetime
 
 ### 4.2 校验 2：聚合 open 落 `endGlobalIndex` 窗口（仅 Reader）
 
-前置：校验 1 已通过（m3 datetime 严格单调，`partitioningIndex` 良定义）；m3 非空（reader 既有逻辑保证「有聚合则必有 m3」）。
+前置（**硬性顺序要求**）：校验 2 的任何 `partitioningIndex` 调用之前，**校验 1（m3 datetime 严格递增）必须已执行并通过**。原因：reader 取行是 `ORDER BY period, end_global_index`，m3 数组按 `endGlobalIndex` 存储顺序排列（既有 m3-axis 校验保证 `endGlobalIndex == 数组下标`），但**这只证明按下标有序、未证明按 datetime 有序**——「m3 数组的存储顺序恰为 datetime 升序」正是校验 1 才证明的事实。若实现把校验 2 排到校验 1 之前/之外，损坏文件的非单调 m3 datetime 会让 `partitioningIndex` 谓词非单调 → result undefined（`BinarySearch` 契约）→ 校验 2 可能伪通过或误拒。m3 非空（reader 既有逻辑保证「有聚合则必有 m3」；m3 缺失则 result 为空、无聚合可遍历、校验 2 vacuous）。
 
 **为何是窗口下界 `s <= endGlobalIndex` 而非精确匹配 `m3[s].datetime == C.datetime`：** 见 §3「聚合 bucket 构造」。聚合 `datetime` 是 vendor 周期 open 原始时间戳，不吸附到 3m；bucket = `[s, endGlobalIndex]`，`s = partitioningIndex{ datetime >= C.datetime }` 恰是真实首根成分索引。**精确匹配会误杀合法数据**——任何 vendor open 不恰好等于某 3m 时间戳的聚合（如 60m open=09:30 vs 首根 3m=09:33）都会被错拒。`m3[s]` 按区间定义**就是** bucket 真实首根成分，故 `m3[s].open` 正确；`synthesize` 取 `constituents.first!.datetime`（= `m3[s].datetime`，真实成分）而非 `original.datetime` 正是为兼容此偏移。结构不变量 `s <= endGlobalIndex` 才是正确的边界校验。
 
@@ -203,3 +203,4 @@ require s <= C.endGlobalIndex
   - **#5 [MEDIUM] 补漏消费者：** §1.2 加 `CrosshairLayout.swift:89`；§8 R-B 改为「唯一聚合 datetime 消费者是十字光标显示标签，乱序仅错标签非泄漏，接受」。
   - **#6 [LOW] 测试 fixture 约束：** §7 加「重复-datetime fixture 须保 endGlobalIndex 严格递增以归因校验 1」。
   - **#7 [LOW] CONTRACT_VERSION 确认 backend-safe：** §6 补 import_csv/generate 的 datetime 去重+排序证据 + 稀疏聚合 endGlobalIndex 既有 L90 拒的观察。
+- **v1.2**（2026-06-16）：opus 4.8 xhigh 对抗 review **R2 = APPROVE（0 Critical/0 High）**，所有 R1 项 confirmed-resolved，#2 精确匹配争议 R2 独立核 backend 后判作者方对。应用 R2 唯一 LOW（**N2**）：§4.2 前置改为**硬性顺序要求**——校验 2 的 `partitioningIndex` 之前校验 1 必须已过（m3 数组按 endGlobalIndex 存储、仅校验 1 证明其 datetime 升序，防实现重排引入 undefined）。设计收敛，进 writing-plans。
