@@ -1,6 +1,6 @@
 # Wave 3 运行时验收矩阵 runbook（device/sim 手动，中文非-coder 可执行）
 
-**性质**：device/simulator **手动**验收，非编码者可执行。CI 仅 `Mac Catalyst build-for-testing on macos-15` 编译守护（验 build + 链接），**不执行**手势/动画/触觉/Toast/路由/像素重渲染等运行时行为。本矩阵汇总 6 份既有 per-anchor 运行时 runbook 为单一矩阵，经 §C fixture（`KLINE_SEED_FIXTURE=1`）在真 composition root 执行。
+**性质**：device/simulator **手动**验收，非编码者可执行。CI 仅 `Mac Catalyst build-for-testing on macos-15` 编译守护（验 build + 链接），**不执行**手势/动画/触觉/Toast/路由/像素重渲染等运行时行为。本矩阵汇总各 per-anchor 运行时 runbook 为单一矩阵（含顺位 11 bounce，#117/#120 已上线），经 §C fixture（`KLINE_SEED_FIXTURE=1`）在真 composition root 执行。
 
 **用法**：照「前置」启动 app 后，逐行照「详细 runbook 指针」打开对应 per-anchor runbook 执行细节步骤，把 device 实测结果填进本表的「device pass/fail」列（留空 = 未跑）。本矩阵是顺位 13 正式关闭 + freeze tag 硬前提的**合取项 ①**（per outline §三.3 三连合取：① 本矩阵 + ② Wave 2 两 runbook + ③ Instruments 帧预算，见下方「关闭前其余硬门」节）；**仅**回填本矩阵不满足硬门，三者皆 device 实测回填后，Wave 3 方可正式关闭（见 `docs/governance/2026-06-14-wave3-completion.md` §二/§五）。
 
@@ -17,7 +17,7 @@
 
 ---
 
-## device happy-path 矩阵（7 项：6 数据交互 + 顺位 2 竖屏/窗口）
+## device happy-path 矩阵（8 项：6 数据交互 + 顺位 2 竖屏/窗口 + 顺位 11 bounce）
 
 | 顺位 | 交互 | 经 §C fixture 可达性 | 详细 runbook 指针 | device pass/fail |
 |---|---|---|---|---|
@@ -28,6 +28,7 @@
 | 7 | 手动强平 + 交易反馈（仓位 X/5 + Toast/触觉） | seed 缓存训练组进一局 Normal，建仓后手动强平 | `docs/runbooks/2026-06-13-wave3-pr7-trade-ui-runtime-acceptance.md` | ☐ |
 | 8 | Replay 结算窗（不入账） | seed 历史记录 → 首页对一条记录选「再来一次」进 Replay 局 | `docs/runbooks/2026-06-13-wave3-pr8-replay-settlement-runtime-acceptance.md` | ☐ |
 | 9 | 主题切换视觉（白天/夜间/跟随系统） | 设置面板「显示模式」分段选择器 + 已缓存训练组观察图表 | `docs/runbooks/2026-06-14-wave3-pr9-night-mode-runtime-acceptance.md` | ☐ |
+| 11 | 边缘 bounce（甩动到最老边 → 弹簧 overscroll+回弹可见 / 拖过最老边 → 跟手橡皮筋+松手回弹；最新边无给；满屏不动） | seed 缓存训练组进一局 Normal，最老边甩动 + 拖过边松手 | `docs/superpowers/acceptance/2026-06-16-w3-11-r1b-wire-acceptance.md`（#117 甩动 bounce）+ `docs/superpowers/acceptance/2026-06-16-w3-11-r1b-drag-acceptance.md` §六.11（#120 drag 橡皮筋） | ☐ |
 
 ---
 
@@ -41,13 +42,11 @@
 
 ---
 
-## 排除 / OPEN 节：bounce（顺位 11）= W3-11-R1 OPEN
+## 顺位 11 bounce：reconciliation（W3-11-R1 CLOSED #117/#120 → 已列入上方 device 矩阵）
 
-**边缘 bounce（顺位 11）不列上方 device happy-path 矩阵**。顺位 11 acceptance（`docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md:1-3`）头部明文「**无实时可见运行时接线**（接线 deferred 为 residual `W3-11-R1`）」——真 app 屏幕**无可见回弹运行时**，组件层物理（`EdgeBounceModel` / `DecelerationModel` boundary-aware 推进 / `DecelerationAnimator` bounce 启动面）仅确定性单测闭合。
+边缘 bounce（顺位 11）的 live 接线在 13c 当时为 residual `W3-11-R1` **OPEN**（真 app 无可见回弹，顺位 11 acceptance `docs/superpowers/acceptance/2026-06-11-pr-wave3-11-edge-bounce.md:1-3` 头部明文「无实时可见运行时接线」），故 13c runbook 曾**排除**出 device 矩阵（彼时列入即 overclaim）。
 
-故 bounce **不**进 device 矩阵：device 验收无可肉眼观察的回弹对象（device 验收本身 BLOCKED 在 W3-11-R1 live 接线上）。`W3-11-R1` 标 **OPEN**，且它是 **Wave 3 功能完成门 + 正式关闭前提**（顺位 11 承诺交互未上线 → Wave 3 功能完整性 PENDING-W3-11-R1，codex review High）——**非**可无视的 fast-follow nice-to-have。解门 = 实现 live 接线（fast-follow 实施 PR）+ 回填本节 bounce 运行时 acceptance。本 runbook 据此排除出**上方 device 矩阵**而非列入（ledger 完整性见 `docs/governance/2026-06-14-wave3-completion.md` §二/§三/§五）。
-
-> spec §E.2 把 bounce 列进运行时矩阵 = overclaim（真 app 看不到回弹）→ completion doc 如实纠正：W3-11-R1 OPEN + 矩阵不列 bounce device 行。**但排除 ≠ 抹账**：bounce 是承诺的 Wave 3 交互，W3-11-R1 升为功能完成/关闭门，Wave 3 功能完整性标 PENDING-W3-11-R1。不回改 spec，但 ledger 完整。
+**reconciliation（本收尾 PR，2026-06-16）**：#117（R1b-wire）已接 bounce live 接线（甩动到最老边 → 弹簧 overscroll+回弹可见）+ #120（R1b-drag）补 drag 跟手橡皮筋 → 真 app 现有可见回弹运行时 → `W3-11-R1` **CLOSED** → bounce **已列为上方 device happy-path 矩阵第 8 行（顺位 11）**，device 实测待用户回填。组件层物理（`EdgeBounceModel` / `DecelerationModel` boundary-aware 推进 / `DecelerationAnimator` bounce 启动面）仍由确定性单测闭合。**不回改已冻结 spec §E.2 散文**；ledger 见 `docs/governance/2026-06-14-wave3-completion.md` §二/§三/§五。
 
 ---
 
@@ -86,4 +85,4 @@ outline §三.3 的关闭/freeze 阻塞依赖是**三连合取**：①本 Wave 3
 
 - device 跑完逐行填上方矩阵 + 端到端表 + 「关闭前其余硬门」表的 pass/fail。
 - **关闭判据 = 全部 PASS，非「仅回填」（codex review R3-Med）**：顺位 13 正式关闭 + freeze tag 的硬前提 = 上述全部行（本 Wave 3 矩阵 ① + 端到端 + Wave 2 两份 runbook ② + Instruments 帧预算 ③）**每行显式 PASS**——**任一行留空 / 标 FAIL / 帧预算实测 ≥ 4ms = 关闭前提未满足**（记录到一个 FAIL = 运行时 build 已知坏，**禁**据此正式关闭/freeze）。**仅**跑完本矩阵 ① 不满足硬门；三连合取**全部 PASS** 后，Wave 3 方可从「功能交付确认」转「正式关闭」（见 `docs/governance/2026-06-14-wave3-completion.md` §二/§五）。
-- W3-11-R1（bounce live 接线）+ PR11-R1（生产 backendBaseURL）+ W1-R2（真实样本数据）= OPEN，不在本矩阵 device 验收范围（见 completion doc §三/§四）；其中 W3-11-R1 是关闭前须解的功能门。**13a-R2（跨 lease cache data-loss）已由本 PR 解决（2026-06-15，lease-aware ownership-guard），不再是关闭前缺陷门。**
+- PR11-R1（生产 backendBaseURL）+ W1-R2（真实样本数据）= OPEN（NAS ship 门），不在本矩阵 device 验收范围（见 completion doc §三/§四）。**W3-11-R1（bounce live 接线）已解（#117 live 接线 + #120 drag 橡皮筋，2026-06-16），现列上方 device 矩阵第 8 行（顺位 11）。****13a-R2（跨 lease cache data-loss）已由本 PR 解决（2026-06-15，lease-aware ownership-guard），不再是关闭前缺陷门。**
