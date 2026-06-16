@@ -183,6 +183,9 @@ git commit -m "docs(ledger-reconcile): 非-coder 验收 checklist（verify PASS 
 
 ---
 
+## Review Provenance（opus 4.8 xhigh 对抗性 review 代 codex，per user 指示）
+- **R1 = APPROVE**：reviewer **实证 gate PASS**（拷贝三文件套用 4 编辑跑 gate → exit 0；机器块值↔require_kv byte-identical，`#117` bash 双引号串内存活）+ Task 3 不删任何 gate-grep 指针（5 串都在别处，`grep -Fq` 全文存活）+ 九句 list 与 spec §二.1 逐字一致 + 矩阵 markdown 表第 8 行结构正确 + host 测不受影响 + honesty 锚定 grep 全匹配 + 范围干净 + inline 执行正当。**0 C/H，2 Low（非阻塞，无需改）**：①Task 2 Step-2 grep backstop 不覆盖 L68/L118（靠显式 9 句 checklist 兜底，执行须以 checklist 为准非 grep）；②Task 4 Step-1 honesty grep 省两 ship 门（Step-2 + gate require_kv L52/53 已覆盖）。执行采纳：L68/L118 严格走 checklist；验证 grep 补含 ship 门。**plan 收敛。**
+
 ## Self-Review
 - **spec 覆盖**：§二 机器块 flip（Task 1）/ §二.1 九句（Task 2 逐句 checklist）/ §二.2 矩阵（Task 3）/ §五 acceptance + honesty 反向（Task 4）。✓
 - **gate-critical byte 精确**：机器块 L8/L17 + require_kv L50/L58 逐字值在 plan 内（Task 1 Step 1/2）。✓
