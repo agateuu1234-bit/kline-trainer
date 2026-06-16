@@ -35,9 +35,13 @@ public struct ChartContainerView: UIViewRepresentable {
         // 每次重建刷新 Coordinator 的 engine/panel 引用（ChartContainerView 是值类型，可能换 engine）。
         context.coordinator.sync(panel: panel, engine: engine, view: view)
         engine.recordRenderBounds(view.bounds, panel: panel)   // D1：缓存 bounds 供 activateDrawingTool 算 range
-        view.renderState = RenderStateBuilder.make(
+        // Wave 3 13c-R1：区间仅界定 make 求值（赋值/didSet 不计入；L1471 判据符号 = RenderStateBuilder.make）
+        let makeToken = RenderSignposter.beginMake(panel: panel)
+        let newState = RenderStateBuilder.make(
             engine: engine, panel: panel, bounds: view.bounds,
             crosshair: context.coordinator.crosshairPoint)       // D3：透传视图层瞬态十字光标
+        RenderSignposter.end(makeToken)
+        view.renderState = newState
     }
 
     /// C7 手势仲裁接线（spec §C7 + plan v1.5 §手势仲裁规则）。持 arbiter + 视图层十字光标本地状态。
@@ -64,6 +68,7 @@ public struct ChartContainerView: UIViewRepresentable {
             self.panel = panel
             self.engine = engine
             self.view = view
+            view.panel = panel                                    // Wave 3 13c-R1：draw 区间归属上/下
             // drawing 模式下 arbiter 截获单指 pan（spec §C7）+ 对齐 manager.activeTool（顺位 4）。
             let drawing = isDrawing(engine: engine, panel: panel)
             arbiter.drawingMode = drawing
@@ -77,6 +82,7 @@ public struct ChartContainerView: UIViewRepresentable {
         /// attach-once（C7 R6 幂等）：makeUIView 调一次；路由 5 类回调进 engine。
         func attach(to view: UIView) {
             self.view = view as? KLineView
+            self.view?.panel = panel                              // Wave 3 13c-R1：首帧前初值（sync 后续刷新）
             arbiter.onPan = { [weak self] deltaX, velocityX, phase in
                 guard let self, let engine = self.engine, let view = self.view else { return }
                 switch phase {
@@ -119,8 +125,12 @@ public struct ChartContainerView: UIViewRepresentable {
         private func setCrosshair(_ point: CGPoint?) {
             crosshairPoint = point
             guard let view, let engine else { return }
-            view.renderState = RenderStateBuilder.make(
+            // Wave 3 13c-R1：crosshair 旁路 make 用独立区间名（make-crosshair-*），与 update-pass make 分离
+            let makeToken = RenderSignposter.beginMakeCrosshair(panel: panel)
+            let newState = RenderStateBuilder.make(
                 engine: engine, panel: panel, bounds: view.bounds, crosshair: point)
+            RenderSignposter.end(makeToken)
+            view.renderState = newState
         }
 
         /// 顺位 4：drawing 模式单指点击落锚 → 投影 engine.drawings → 退出 .drawing。

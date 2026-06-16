@@ -20,6 +20,10 @@ public final class KLineView: UIView {
         }
     }
 
+    /// Wave 3 13c-R1：本 view 的面板归属（上/下），由 ChartContainerView.Coordinator 设置。
+    /// draw 的 os_signpost 区间按此打 upper/lower 名（PanelViewState 无上/下字段，故 draw 侧须自带）。
+    public var panel: PanelId = .upper
+
     /// 顺位9 夜间：图表 scheme 解析器。`displayMode` 保持 `.system`——override 由 SwiftUI
     /// `AppRootView.preferredColorScheme` 烤进 trait，本控制器只读生效 trait（RFC §4.3 item 3）。
     private let themeController = ThemeController()
@@ -53,6 +57,9 @@ public final class KLineView: UIView {
     }
 
     public override func draw(_ rect: CGRect) {
+        // Wave 3 13c-R1：draw 区间（begin 前置于唯一早返 guard，defer 保证空 ctx 早返也闭合）
+        let drawToken = RenderSignposter.beginDraw(panel: panel)
+        defer { RenderSignposter.end(drawToken) }
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
         let scale = traitCollection.displayScale
         let mapper = CoordinateMapper(viewport: renderState.viewport, displayScale: scale)
