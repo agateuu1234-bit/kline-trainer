@@ -181,4 +181,20 @@ struct TrainingEngineBounceWiringTests {
         #expect(e.upperPanel.offset >= freshOb.minOffset - 1e-6)
         #expect(e.upperPanel.offset <= freshOb.maxOffset + 1e-6)   // 不 strand 过新 maxOffset（归一新几何）
     }
+
+    // codex R2-M1：drag 结束于旧最老边后（**无 animator**）resize → recordRenderBounds 仍归一（不 gate on isDecelerating）
+    @Test("R2-M1：drag 停旧最老边（无 animator）后 resize → 归一新几何，不 strand")
+    func resizeAfterSettleNormalizes() {
+        let (e, _) = Self.makeEngine(count: 200, tick: 150)
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: Self.bounds)
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset, offsetBounds: ob, panel: .upper)   // drag 到旧最老边 710
+        e.cancelPan(panel: .upper)                                                      // 结束 drag，**不启动惯性**（无 animator）
+        #expect(abs(e.upperPanel.offset - ob.maxOffset) < 1e-6)                         // offset 停在 710
+        let smaller = CGRect(x: 0, y: 0, width: 400, height: 600)
+        let freshOb = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: smaller)
+        #expect(freshOb.maxOffset < ob.maxOffset)
+        e.recordRenderBounds(smaller, panel: .upper)                                    // 无 animator 也须归一
+        #expect(e.upperPanel.offset <= freshOb.maxOffset + 1e-6)                        // 归一新 max 355，不 strand
+    }
 }

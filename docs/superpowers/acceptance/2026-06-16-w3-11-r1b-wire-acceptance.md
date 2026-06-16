@@ -94,11 +94,12 @@ cd ios/Contracts && swift test --filter c1NoScrollSpacePositiveNoStrand 2>&1 | g
 cd ios/Contracts && swift test --filter interruptBeginPanNormalizes 2>&1 | grep "✔ Test"; cd - >/dev/null
 cd ios/Contracts && swift test --filter activateDrawingDuringOverscrollNormalizes 2>&1 | grep "✔ Test"; cd - >/dev/null
 cd ios/Contracts && swift test --filter resizeMidBounceNormalizes 2>&1 | grep "✔ Test"; cd - >/dev/null
+cd ios/Contracts && swift test --filter resizeAfterSettleNormalizes 2>&1 | grep "✔ Test"; cd - >/dev/null
 ```
 
-**预期输出**：三行分别含 `✔ Test "H3：bounce overscroll 中途 beginPan → offset 归 maxOffset（不 strand）" passed`、`✔ Test "M2-new：overscroll 中途 activateDrawingTool → snap.frozen.offset==maxOffset（归一在算 range 前）" passed`、`✔ Test "resize 中途 bounce：bounds 变 → stop + 按新几何归一（offset 不 strand 过新 maxOffset）" passed`。
+**预期输出**：四行分别含 `✔ Test "H3：bounce overscroll 中途 beginPan → offset 归 maxOffset（不 strand）" passed`、`✔ Test "M2-new：overscroll 中途 activateDrawingTool → snap.frozen.offset==maxOffset（归一在算 range 前）" passed`、`✔ Test "resize 中途 bounce：bounds 变 → stop + 按新几何归一（offset 不 strand 过新 maxOffset）" passed`、`✔ Test "R2-M1：drag 停旧最老边（无 animator）后 resize → 归一新几何，不 strand" passed`。
 
-**判定**：三行均 `passed` → ✅；任一无输出或 `✘` → ❌。
+**判定**：四行均 `passed` → ✅；任一无输出或 `✘` → ❌。
 
 ---
 
@@ -112,7 +113,7 @@ cd ios/Contracts && swift test 2>&1 | grep -E "Test run with"; cd - >/dev/null
 cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 | tail -1; cd - >/dev/null
 ```
 
-**预期输出**：第一行 `Test run with 1061 tests in 146 suites passed`（数字 ≥ 1061，0 failures）；第二行 `** TEST BUILD SUCCEEDED **`。
+**预期输出**：第一行 `Test run with 1062 tests in 146 suites passed`（数字 ≥ 1062，0 failures）；第二行 `** TEST BUILD SUCCEEDED **`。
 
 **判定**：第一行含 `passed`（无 `failed`）且第二行含 `TEST BUILD SUCCEEDED` → ✅；任一含 `failed`/`FAILED`/`error` → ❌。
 

@@ -641,8 +641,9 @@ extension TrainingEngine {
         _ = reduce(.panStarted, on: panel)
     }
 
-    /// onPan `.changed`（旧签名，无界；既有测试/兼容面 byte-preserved）。
-    public func applyPanOffset(deltaPixels: CGFloat, panel: PanelId) {
+    /// onPan `.changed`（旧签名，无界）。**internal（codex R2-M2）**：B4 后 offset>maxOffset 渲成 overscroll 间隙，
+    /// 故不再暴露 public 无界 mutation 路径（生产 Coordinator 用带 bounds 的新重载；仅模块内测试 @testable 调本签名）。
+    func applyPanOffset(deltaPixels: CGFloat, panel: PanelId) {
         applyOffsetDelta(deltaPixels, panel: panel)
     }
 
@@ -654,8 +655,9 @@ extension TrainingEngine {
         if target != cur { applyOffsetDelta(target - cur, panel: panel) }
     }
 
-    /// onPan `.ended`（旧签名，无界 plain decel；既有测试/兼容面）。H1：体首清 activeBounds 防 stale 喂 onUpdate。
-    public func endPan(velocity: CGFloat, panel: PanelId) {
+    /// onPan `.ended`（旧签名，无界 plain decel）。**internal（codex R2-M2）**：同 applyPanOffset，不暴露 public 无界路径
+    /// （生产用带 bounds 新重载；仅模块内测试 @testable 调）。H1：体首清 activeBounds 防 stale 喂 onUpdate。
+    func endPan(velocity: CGFloat, panel: PanelId) {
         setActiveBounds(nil, panel: panel)
         if case .startDeceleration(let v) = reduce(.panEnded(velocity: velocity), on: panel) {
             animator(for: panel).start(initialVelocity: v)
@@ -762,17 +764,19 @@ extension TrainingEngine {
         case .upper: lastRenderedBounds.upper = bounds
         case .lower: lastRenderedBounds.lower = bounds
         }
-        // R1b-wire（codex branch-diff M1）：resize/旋转中途 bounce → stop + 按**新**几何归一。否则冻结的 activeBounds
-        // 使 bounce settle 到旧 maxOffset，新几何下 makeViewport 视其为 offset>maxOffset → 渲持久 overscroll 间隙直到下次手势。
-        // 承袭父 §B5 MVP「视口几何变更 → stop()+归一 edge，不追求无缝续弹」。bounds 未变（常态每帧）→ no-op，不扰正常 bounce。
-        if previous != bounds, animator(for: panel).isDecelerating {
+        // R1b-wire（codex branch-diff M1 + R2-M1）：bounds 变（resize/旋转）→ 按**新**几何归一 stale offset。
+        // 冻结 activeBounds（中途 bounce）**或** settled/drag-ended 的 offset 在新几何下可能 >新 maxOffset，
+        // B4 会渲成持久 overscroll 间隙直到下次手势。归一**不 gate on isDecelerating**（R2-M1：offset 可在无 animator 时 stale）；
+        // 若有 active run 额外 stop+清 activeBounds。bounds 未变（常态每帧）→ no-op，不扰正常 bounce。承袭父 §B5「几何变更 → stop+归一 edge」。
+        guard previous != bounds else { return }
+        if animator(for: panel).isDecelerating {
             animator(for: panel).stop()
-            let fresh = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: bounds)
-            let cur = panelState(panel).offset
-            let clamped = min(max(cur, fresh.minOffset), fresh.maxOffset)
-            if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }
             setActiveBounds(nil, panel: panel)
         }
+        let fresh = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: bounds)
+        let cur = panelState(panel).offset
+        let clamped = min(max(cur, fresh.minOffset), fresh.maxOffset)
+        if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }
     }
 
     // MARK: 画线激活 H1 production handler（spec §C1b 闸门 #4 F3 + effect 合约 L1026-1032）
