@@ -196,3 +196,4 @@
   - L（`StaticString` 非 Equatable）→ §六.1：命名契约断言走 `.description`（String）。
   - L（"1064" 未溯源）→ §六/§八：标 base `c7feea8` 实测基线，回归判据 = 0 failures 非定值 N。
   - **R2 实证（reviewer `swiftc -O`）**：runtime 选 `StaticString`（ternary/switch）可编可跑；`OSSignposter(subsystem:category:.pointsOfInterest)` 真 API；平台无关 host 可编。中心命名方案获证 sound。
+- **R3（fresh opus 4.8 adversarial convergence review）→ APPROVE（0C/0H/0M/1L）**：R1+R2 全 6 findings verified RESOLVED；唯一 Low = §四 D4 散文残留旧 end-method 名（`endMake`/`endMakeCrosshair`/`endDraw(state)`）与 D6 统一 `end(_ token:)` API 不一致 → 已改 D4 统一 `let t = begin…(panel:)` / `end(t)` / `defer { end(t) }`。spec 收敛。
