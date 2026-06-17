@@ -47,5 +47,26 @@ struct ChartContainerViewLayoutTests {
         // 去重 guard 若被移除，第二次 layout 会再触发 → calls==2 → 本断言 FAIL。
         #expect(calls == 1)
     }
+
+    @Test("布局重算同步 engine bounds → 静态界面后续 pinch 生效（codex R1-F1：不被 stale .zero bounds no-op）")
+    @MainActor
+    func layoutRebuildSyncsEngineBoundsForPinch() {
+        let engine = TrainingEngine.preview()
+        let coordinator = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
+        let view = KLineView(frame: .zero)
+        coordinator.attach(to: view)
+        // 静态界面（Review）：未经 observation 驱动的 updateUIView，engine 缓存 bounds 仍 .zero。
+        // 仅 layoutSubviews 把图画出来——该路径须同步 engine bounds，否则后续手势读到 stale .zero。
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 480)
+        view.setNeedsLayout(); view.layoutIfNeeded()
+        // applyPinch(.changed) guard bounds.width>0（读 engine 缓存 bounds）。缓存仍 .zero → no-op → visibleCount 不变。
+        let before = engine.upperPanel.visibleCount
+        engine.applyPinch(scale: 1.0, focusX: 160, phase: .began, panel: .upper)
+        engine.applyPinch(scale: 2.0, focusX: 160, phase: .changed, panel: .upper)
+        engine.applyPinch(scale: 2.0, focusX: 160, phase: .ended, panel: .upper)
+        // 修复前：layout 路径不同步 engine bounds → 缓存 .zero → pinch no-op → visibleCount 不变 → FAIL。
+        // 修复后：rebuildRenderState 先 recordRenderBounds → 缓存有效 → 缩放生效。
+        #expect(engine.upperPanel.visibleCount != before)
+    }
 }
 #endif
