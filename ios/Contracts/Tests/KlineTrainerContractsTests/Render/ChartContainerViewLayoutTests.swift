@@ -1,0 +1,51 @@
+// Kline Trainer Swift Contracts — C8 ChartContainerView 布局重算回归（修 #2 复盘静态界面空白）
+// Mirror: ChartContainerViewCompileTests（UIKit-only；macOS host 编译为空，模拟器/Catalyst 跑）
+//
+// 复现的 bug：renderState 仅在 ChartContainerView.updateUIView（@Bindable engine observation 变化）时
+// 用 view.bounds 重算；KLineView 无 layoutSubviews 自重算。静态 engine（Review：tick 冻结、canAdvance false、
+// 无交易）首帧若 bounds 未定（.zero）算出 .empty 后，再无 observation 触发 updateUIView → 永久空白。
+// Replay/Normal 因 tick 持续推进不断重触发故有图。修复：KLineView.layoutSubviews 在 bounds 变化时回调
+// Coordinator，用当前 engine + 真实 bounds 重算 renderState（不依赖 SwiftUI observation 再触发）。
+#if canImport(UIKit)
+import Testing
+import SwiftUI
+import UIKit
+@testable import KlineTrainerContracts
+
+@Suite("ChartContainerView 布局重算（修 #2 复盘静态界面空白）")
+struct ChartContainerViewLayoutTests {
+
+    @Test("布局到有效尺寸后 renderState 重算非空（静态 engine 不依赖 observation 再触发）")
+    @MainActor
+    func renderStateRecomputedOnLayoutForStaticEngine() {
+        let engine = TrainingEngine.preview()   // 静态：默认 tick，无 observation 变化驱动 updateUIView
+        let coordinator = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
+        let view = KLineView(frame: .zero)       // 首帧零尺寸：模拟 updateUIView 时 bounds 未定
+        coordinator.attach(to: view)
+        // 首帧（零 bounds / 未重算）renderState 为空——等价 make 在 bounds<=0 返回 .empty。
+        #expect(view.renderState.visibleCandles.isEmpty)
+
+        // SwiftUI 完成布局，view 拿到有效尺寸；静态 engine 无 observation 变化触发 updateUIView。
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 480)
+        view.setNeedsLayout()
+        view.layoutIfNeeded()                    // 触发 layoutSubviews
+
+        // 修复前：KLineView 无 layoutSubviews 重算 → renderState 仍空 → 复盘空白（本断言 FAIL）。
+        // 修复后：layoutSubviews 回调 Coordinator 用当前 engine + 真实 bounds 重算 → 非空。
+        #expect(!view.renderState.visibleCandles.isEmpty)
+    }
+
+    @Test("layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复 make）")
+    @MainActor
+    func boundsChangeDedupedForSameBounds() {
+        let view = KLineView(frame: .zero)
+        var calls = 0
+        view.onBoundsChange = { _ in calls += 1 }
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 480)
+        view.setNeedsLayout(); view.layoutIfNeeded()   // .zero → 320×480：变化，回调一次
+        view.setNeedsLayout(); view.layoutIfNeeded()   // bounds 未变：去重，不回调
+        // 去重 guard 若被移除，第二次 layout 会再触发 → calls==2 → 本断言 FAIL。
+        #expect(calls == 1)
+    }
+}
+#endif

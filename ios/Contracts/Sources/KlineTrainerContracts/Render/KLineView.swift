@@ -24,6 +24,13 @@ public final class KLineView: UIView {
     /// draw 的 os_signpost 区间按此打 upper/lower 名（PanelViewState 无上/下字段，故 draw 侧须自带）。
     public var panel: PanelId = .upper
 
+    /// Wave 3 修 #2：bounds 变化（layoutSubviews）回调，供 Coordinator 用当前 engine + 真实 bounds 重算 renderState。
+    /// renderState 仅在 ChartContainerView.updateUIView（@Bindable engine observation 变化）时用 bounds 重算；
+    /// 静态 engine（Review：tick 冻结 / canAdvance false / 无交易）首帧若 bounds 未定（.zero）算出 .empty 后，
+    /// 再无 observation 触发 updateUIView → 永久空白。本回调使 layout 拿到有效 bounds 时补算，不依赖 observation。
+    public var onBoundsChange: ((CGRect) -> Void)?
+    private var lastLaidOutBounds: CGRect = .zero
+
     /// 顺位9 夜间：图表 scheme 解析器。`displayMode` 保持 `.system`——override 由 SwiftUI
     /// `AppRootView.preferredColorScheme` 烤进 trait，本控制器只读生效 trait（RFC §4.3 item 3）。
     private let themeController = ThemeController()
@@ -54,6 +61,15 @@ public final class KLineView: UIView {
     @available(*, unavailable)
     public required init?(coder: NSCoder) {
         fatalError("init(coder:) not supported; KLineView is constructed via init(frame:)")
+    }
+
+    /// Wave 3 修 #2：bounds 真正变化时（首帧 .zero→有效尺寸、旋转/resize）回调 Coordinator 重算 renderState。
+    /// 仅 bounds 改变才触发（去重，避免重复 make）；回调内只改 renderState（didSet→setNeedsDisplay，不再触发 layout，无环）。
+    public override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds != lastLaidOutBounds else { return }
+        lastLaidOutBounds = bounds
+        onBoundsChange?(bounds)
     }
 
     public override func draw(_ rect: CGRect) {

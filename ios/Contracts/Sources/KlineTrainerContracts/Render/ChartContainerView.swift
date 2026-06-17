@@ -83,6 +83,12 @@ public struct ChartContainerView: UIViewRepresentable {
         func attach(to view: UIView) {
             self.view = view as? KLineView
             self.view?.panel = panel                              // Wave 3 13c-R1：首帧前初值（sync 后续刷新）
+            // Wave 3 修 #2：layout 拿到有效 bounds 时用当前 engine 重算 renderState。
+            // 静态 engine（Review：tick 冻结无 observation 触发 updateUIView）首帧零 bounds → .empty 后永不重算致空白；
+            // 本回调补此路径（attach-once，闭包读 self.engine/self.panel，sync 后续刷新引用故恒为当前值）。
+            self.view?.onBoundsChange = { [weak self] bounds in
+                self?.rebuildRenderState(bounds: bounds)
+            }
             arbiter.onPan = { [weak self] deltaX, velocityX, phase in
                 guard let self, let engine = self.engine, let view = self.view else { return }
                 switch phase {
@@ -113,6 +119,17 @@ public struct ChartContainerView: UIViewRepresentable {
                 self?.handleDrawingTap(at: point)
             }
             arbiter.attach(to: view)
+        }
+
+        /// Wave 3 修 #2：用当前 engine + 真实 bounds 重算 renderState（与 updateUIView 的 make 同源）。
+        /// 由 KLineView.layoutSubviews 经 onBoundsChange 调，覆盖静态界面（Review）无 observation 触发 updateUIView 的路径。
+        private func rebuildRenderState(bounds: CGRect) {
+            guard let view, let engine else { return }
+            let makeToken = RenderSignposter.beginMake(panel: panel)
+            let newState = RenderStateBuilder.make(
+                engine: engine, panel: panel, bounds: bounds, crosshair: crosshairPoint)
+            RenderSignposter.end(makeToken)
+            view.renderState = newState
         }
 
         private func isDrawing(engine: TrainingEngine, panel: PanelId) -> Bool {
