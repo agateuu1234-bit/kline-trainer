@@ -125,6 +125,10 @@ public struct ChartContainerView: UIViewRepresentable {
         /// 由 KLineView.layoutSubviews 经 onBoundsChange 调，覆盖静态界面（Review）无 observation 触发 updateUIView 的路径。
         private func rebuildRenderState(bounds: CGRect) {
             guard let view, let engine else { return }
+            // codex R2-F1：瞬态零尺寸 layout（导航/分屏/旋转过渡）不得改 engine 状态。recordRenderBounds(.zero)
+            // 会被当 resize → 零宽 offsetBounds → 把 panel offset clamp 到 0（吞掉用户滚动位置，不可逆）；
+            // make(.zero) 也只返 .empty。故无效 bounds 直接早返——零→有效的后续 layout 仍会重建（lastLaidOutBounds 已记 .zero）。
+            guard bounds.width > 0, bounds.height > 0 else { return }
             // codex R1-F1：与 updateUIView 同序先记录 bounds——pinch（读 engine 缓存 bounds，无 bounds 入参）/
             // 画线 range / resize 归一都依赖 lastRenderedBounds。静态界面（Review）只走本路径，若不同步则
             // 缓存停在 .zero → 出图后 pinch no-op。recordRenderBounds 内 `previous!=bounds` 守卫保幂等，不扰常态。

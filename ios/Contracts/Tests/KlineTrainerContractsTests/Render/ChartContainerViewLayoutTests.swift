@@ -68,5 +68,31 @@ struct ChartContainerViewLayoutTests {
         // 修复后：rebuildRenderState 先 recordRenderBounds → 缓存有效 → 缩放生效。
         #expect(engine.upperPanel.visibleCount != before)
     }
+
+    @Test("瞬态零尺寸 layout 不 clamp panel offset（codex R2-F1：滚动位置不被吞）")
+    @MainActor
+    func zeroSizeLayoutPreservesScrollOffset() {
+        // 200 根 + tick 150 → 有滚动空间（可造非零 offset）。
+        let (engine, _) = TrainingEngineBounceWiringTests.makeEngine(count: 200, tick: 150)
+        let coordinator = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
+        let view = KLineView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        coordinator.attach(to: view)
+        view.setNeedsLayout(); view.layoutIfNeeded()   // 有效 bounds 记录
+
+        // 滚动到非零 offset（freeScrolling，朝最老边）。
+        engine.beginPan(panel: .upper)
+        let ob = RenderStateBuilder.offsetBounds(engine: engine, panel: .upper, bounds: view.bounds)
+        engine.applyPanOffset(deltaPixels: ob.maxOffset * 0.5, renderBounds: view.bounds, panel: .upper)
+        let scrolled = engine.upperPanel.offset
+        #expect(scrolled > 0)   // 前置：确有非零滚动位置
+
+        // 瞬态零尺寸 layout（导航/分屏/旋转过渡）。
+        view.frame = .zero
+        view.setNeedsLayout(); view.layoutIfNeeded()
+
+        // 无 guard：rebuildRenderState → recordRenderBounds(.zero) → 零宽 offsetBounds → offset clamp 0 → FAIL。
+        // 有 guard：无效 bounds 早返 → 不改 engine 状态 → offset 保持。
+        #expect(engine.upperPanel.offset == scrolled)
+    }
 }
 #endif
