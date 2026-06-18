@@ -94,5 +94,28 @@ struct ChartContainerViewLayoutTests {
         // 有 guard：无效 bounds 早返 → 不改 engine 状态 → offset 保持。
         #expect(engine.upperPanel.offset == scrolled)
     }
+
+    @Test("零尺寸 rebuild（updateUIView 路径）不 clamp offset（codex R3-F1：observation 路径同护）")
+    @MainActor
+    func zeroBoundsRebuildPreservesScrollOffset() {
+        // updateUIView 现委托 rebuildRenderState(bounds: view.bounds)；SwiftUI 在瞬态零尺寸期触发
+        // updateUIView 即等价于此处直接以 .zero 调 rebuildRenderState——须同样不吞滚动位置。
+        let (engine, _) = TrainingEngineBounceWiringTests.makeEngine(count: 200, tick: 150)
+        let coordinator = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
+        let view = KLineView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        coordinator.attach(to: view)
+        view.setNeedsLayout(); view.layoutIfNeeded()
+
+        engine.beginPan(panel: .upper)
+        let ob = RenderStateBuilder.offsetBounds(engine: engine, panel: .upper, bounds: view.bounds)
+        engine.applyPanOffset(deltaPixels: ob.maxOffset * 0.5, renderBounds: view.bounds, panel: .upper)
+        let scrolled = engine.upperPanel.offset
+        #expect(scrolled > 0)
+
+        // 直接走 updateUIView 委托的 helper，模拟瞬态零尺寸 observation 更新。
+        coordinator.rebuildRenderState(bounds: .zero)
+
+        #expect(engine.upperPanel.offset == scrolled)
+    }
 }
 #endif

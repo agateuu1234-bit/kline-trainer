@@ -34,14 +34,9 @@ public struct ChartContainerView: UIViewRepresentable {
     public func updateUIView(_ view: KLineView, context: Context) {
         // 每次重建刷新 Coordinator 的 engine/panel 引用（ChartContainerView 是值类型，可能换 engine）。
         context.coordinator.sync(panel: panel, engine: engine, view: view)
-        engine.recordRenderBounds(view.bounds, panel: panel)   // D1：缓存 bounds 供 activateDrawingTool 算 range
-        // Wave 3 13c-R1：区间仅界定 make 求值（赋值/didSet 不计入；L1471 判据符号 = RenderStateBuilder.make）
-        let makeToken = RenderSignposter.beginMake(panel: panel)
-        let newState = RenderStateBuilder.make(
-            engine: engine, panel: panel, bounds: view.bounds,
-            crosshair: context.coordinator.crosshairPoint)       // D3：透传视图层瞬态十字光标
-        RenderSignposter.end(makeToken)
-        view.renderState = newState
+        // codex R3-F1：observation 路径与 layout 路径共用同一带 guard 的 rebuild helper（消除无效 bounds
+        // guard 在两路径漂移；SwiftUI 在视图瞬态零尺寸期触发 updateUIView 也不会 clamp offset 吞滚动位置）。
+        context.coordinator.rebuildRenderState(bounds: view.bounds)
     }
 
     /// C7 手势仲裁接线（spec §C7 + plan v1.5 §手势仲裁规则）。持 arbiter + 视图层十字光标本地状态。
@@ -121,9 +116,10 @@ public struct ChartContainerView: UIViewRepresentable {
             arbiter.attach(to: view)
         }
 
-        /// Wave 3 修 #2：用当前 engine + 真实 bounds 重算 renderState（与 updateUIView 的 make 同源）。
-        /// 由 KLineView.layoutSubviews 经 onBoundsChange 调，覆盖静态界面（Review）无 observation 触发 updateUIView 的路径。
-        private func rebuildRenderState(bounds: CGRect) {
+        /// Wave 3 修 #2：bounds 依赖渲染的**唯一**入口——updateUIView（observation 驱动）与 KLineView.layoutSubviews
+        /// （layout 驱动，经 onBoundsChange）都经此。先记录 bounds 再 make，含无效 bounds guard（两路径不漂移）。
+        /// 覆盖静态界面（Review）无 observation 触发 updateUIView 的路径 + observation/layout 瞬态零尺寸的 offset 保护。
+        func rebuildRenderState(bounds: CGRect) {
             guard let view, let engine else { return }
             // codex R2-F1：瞬态零尺寸 layout（导航/分屏/旋转过渡）不得改 engine 状态。recordRenderBounds(.zero)
             // 会被当 resize → 零宽 offsetBounds → 把 panel offset clamp 到 0（吞掉用户滚动位置，不可逆）；

@@ -3,7 +3,7 @@
 > **本交付性质**：bug 修复。复盘(Review)模式进入后图表区**完全无 K 线**（空白）。根因：`ChartContainerView`（UIViewRepresentable）只在 `updateUIView`（`@Bindable engine` observation 变化）时用 `view.bounds` 重算 `renderState`，而 `KLineView` 无 `layoutSubviews` 自重算；静态 engine（Review：tick 冻结 / `canAdvance()==false` / 无交易）首帧 bounds 为 `.zero` 时算出 `.empty`，之后再无 observation 触发重算 → 永久空白（Replay/Normal 因 tick 推进不断重触发故有图）。
 > **修复**：给 `KLineView` 加 `onBoundsChange` 回调 + `layoutSubviews`（bounds 真正变化时回调）；`ChartContainerView.Coordinator.attach` 接线该回调到 `rebuildRenderState`——先 `engine.recordRenderBounds(bounds, panel:)`（codex R1-F1：与 `updateUIView` 同序，使出图后 pinch/画线/resize 归一不读 stale `.zero` bounds；`recordRenderBounds` 内 `previous!=bounds` 守卫保幂等不扰常态），再 `RenderStateBuilder.make` 重算。改 2 生产 Swift + 1 测试 Swift + 本验收 doc。
 >
-> 验收判据 = **范围 gate + 3 个 UIKit 回归测试红→绿（renderState 出图 / bounds 去重 / pinch 后续生效）+ host 全量 + Catalyst build 零回归 + §5 模拟器 runbook（复盘出图，用户实测）+ codex APPROVE 落账**。
+> 验收判据 = **范围 gate + 5 个 UIKit 回归测试红→绿（renderState 出图 / bounds 去重 / pinch 后续生效 / 瞬态零尺寸保 offset：layout 路径 + updateUIView 路径）+ host 全量 + Catalyst build 零回归 + §5 模拟器 runbook（复盘出图，用户实测）+ codex APPROVE 落账**。
 >
 > **如何用**：你（非编码者）逐条把「操作命令」粘进终端回车，把屏幕输出对照「预期输出」，吻合勾 ✅，不吻合勾 ❌。每条二元判定，无需读代码。
 >
@@ -50,9 +50,9 @@ cd ios/Contracts && xcodebuild test -scheme KlineTrainerContracts-Package \
   | grep -E "Test run with|TEST (SUCCEEDED|FAILED)"; cd - >/dev/null
 ```
 
-**预期输出**：含 `Test run with 3 tests in 1 suite passed` 与 `** TEST SUCCEEDED **`（3 条 = renderState 出图 / bounds 去重 / pinch 后续生效）。
+**预期输出**：含 `Test run with 5 tests in 1 suite passed` 与 `** TEST SUCCEEDED **`（5 条 = renderState 出图 / bounds 去重 / pinch 后续生效 / 瞬态零尺寸保 offset：layout 路径 + updateUIView 路径）。
 
-**判定**：两行均出现且无 `FAILED` → ✅；出现 `TEST FAILED` 或测试数 < 3 → ❌。
+**判定**：两行均出现且无 `FAILED` → ✅；出现 `TEST FAILED` 或测试数 < 5 → ❌。
 
 ---
 
