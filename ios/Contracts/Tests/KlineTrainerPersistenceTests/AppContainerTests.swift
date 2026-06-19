@@ -35,12 +35,9 @@ struct AppContainerTests {
     // Task 5 — 接线集成验证：组合根已注入 TrainingResetPort，resetAllProgress 不抛「需注入端口」。
     @Test("AppContainer 接线：settings.resetAllProgress 已注入端口（不抛 internalError）")
     func settingsStore_resetAllProgress_wired() async throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ResetWire-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = Self.tmpDir()
         let cfg = AppConfig(dbPath: dir.appendingPathComponent("app.sqlite"),
-                            cacheRootDir: dir.appendingPathComponent("training-sets"),
+                            cacheRootDir: dir.appendingPathComponent("cache"),
                             backendBaseURL: URL(string: "http://debug.local")!)
         let c = try AppContainer(config: cfg)
         let rec = TrainingRecord(
