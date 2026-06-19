@@ -94,7 +94,7 @@ public struct SettingsPanel: View {
         }
         // 重置资金二次确认（破坏性：清空训练记录）
         .alert(SettingsPanelContent.resetConfirmTitle, isPresented: $showResetConfirm) {
-            Button("取消", role: .cancel) {}
+            Button("取消", role: .cancel) { resetErrorMessage = "" }
             Button("重置", role: .destructive) {
                 Task {
                     do { try await settings.resetAllProgress(); resetErrorMessage = "" }

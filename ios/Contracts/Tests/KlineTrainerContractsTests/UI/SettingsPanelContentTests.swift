@@ -65,8 +65,9 @@ struct SettingsPanelContentResetCopyTests {
         #expect(SettingsPanelContent.resetConfirmTitle.contains("100,000")
                 || SettingsPanelContent.resetConfirmMessage.contains("100,000"))
     }
-    @Test("按钮文案保留资金语义")
-    func resetButtonMentionsCapital() {
-        #expect(SettingsPanelContent.resetButtonLabel.contains("重置"))
+    @Test("按钮文案披露清空记录 + 资金额度")
+    func resetButtonDisclosesClearAndCapital() {
+        #expect(SettingsPanelContent.resetButtonLabel.contains("清空记录"))
+        #expect(SettingsPanelContent.resetButtonLabel.contains("100,000"))
     }
 }
