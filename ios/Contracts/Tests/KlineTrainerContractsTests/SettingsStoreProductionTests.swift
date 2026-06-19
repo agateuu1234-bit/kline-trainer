@@ -63,7 +63,7 @@ struct SettingsStoreProductionTests {
         #expect(port.resetToCapital == nil)   // loadError 先拦截，端口未触
     }
 
-    // MARK: - Task 6: update / resetCapital / concurrent / snapshot
+    // MARK: - Task 6: update / resetAllProgress / concurrent / snapshot
 
     @Test("update: mutate block 修改 settings 后 dao.saveSettings 被调；本地 settings 同步更新")
     func update_persistsViaDAO_updatesLocalSettings() async throws {
@@ -126,7 +126,9 @@ struct SettingsStoreProductionTests {
     @Test("resetAllProgress: 未注入端口 → internalError")
     func resetAllProgress_noPort_throwsInternal() async throws {
         let store = SettingsStore(settingsDAO: StubSettingsDAO(load: .success(.zero)))  // resetPort 默认 nil
-        await #expect(throws: AppError.self) { try await store.resetAllProgress() }
+        await #expect(throws: AppError.internalError(module: "P6", detail: "resetAllProgress 需注入 TrainingResetPort")) {
+            try await store.resetAllProgress()
+        }
     }
 
     // R1 H-3 regression: 并发 update 不丢字段
@@ -165,7 +167,7 @@ struct SettingsStoreProductionTests {
         #expect(fees.commissionRate == 0)
         #expect(fees.minCommissionEnabled == false)
 
-        // loadError 状态下 update / resetCapital 仍阻塞（同 H-3 测试已验）
+        // loadError 状态下 update / resetAllProgress 仍阻塞（同 H-3 测试已验）
     }
 
     // R6 H-1 partial regression: snapshotFeesIfReady throws on loadError

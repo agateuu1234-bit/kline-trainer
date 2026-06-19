@@ -4,7 +4,7 @@
 //
 // 设计要点（R1-R6 codex review 修订）：
 // - init eager-load via settingsDAO.loadSettings()；任意 load 失败 → zero-default + loadError 阻塞写
-// - update / resetCapital 用 inflight Task chain 串行化；snapshot value type 防写丢
+// - update / resetAllProgress 用 inflight Task chain 串行化；snapshot value type 防写丢
 // - update closure 标 `@escaping @Sendable`（Swift 6 strict concurrency 必需）
 // - snapshotFees 保留 fail-open（UI 显示路径）；snapshotFeesIfReady throws on loadError（trading flow 必须用）
 
@@ -74,6 +74,8 @@ public final class SettingsStore {
     /// 复用 loadError 写阻塞 + pendingMutations 串行化（与 update 同机制）。
     public func resetAllProgress() async throws {
         if let e = _loadError { throw e }   // block writes 直到 reload 成功
+        // port 在进入 pendingMutations 链前同步取出并守卫（fail-fast：nil 端口立即抛，不排队）；
+        // 端口副作用仍受下方 `guard let self else return` 闸门保护，self 释放即跳过（与 update() 一致）。
         guard let port = resetPort else {
             throw AppError.internalError(module: "P6", detail: "resetAllProgress 需注入 TrainingResetPort")
         }
@@ -81,7 +83,7 @@ public final class SettingsStore {
         let task = Task { [weak self] in
             _ = try? await prev?.value
             guard let self = self else { return }
-            try await Task.detached(priority: .userInitiated) {
+            try await Task.detached(priority: .userInitiated) { [port] in
                 try port.resetAllTrainingProgress(toCapital: AppSettings.defaultTotalCapital)
             }.value
             self.settings.totalCapital = AppSettings.defaultTotalCapital
