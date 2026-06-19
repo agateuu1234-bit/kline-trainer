@@ -57,6 +57,8 @@
 - Modify: `ios/Contracts/Sources/KlineTrainerPersistence/Internal/SettingsDAOImpl.swift:27, 87-91`
 - Test: `ios/Contracts/Tests/KlineTrainerPersistenceTests/DefaultSettingsDAOTests.swift`（case 1/4/5/10）
 - Test: `ios/Contracts/Tests/KlineTrainerPersistenceTests/AppContainerDebugSeedTests.swift`（对照测试 line 42-49）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/PreviewFakes/InMemoryFakes.swift:259-266`（`InMemorySettingsDAO.resetCapital` 镜像同步写默认 10 万）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/InMemoryDBFakesTests.swift:144-153`（断言改 100_000）
 
 - [ ] **Step 1: 改 4 个 DAO 测试为新默认（RED）** — `DefaultSettingsDAOTests.swift`
 
@@ -189,6 +191,8 @@ Expected: DefaultSettingsDAOTests 全 PASS。
 Run: `cd ios/Contracts && swift test 2>&1 | grep -iE "failed|error:" | head -40`
 Run（辅助定位）: `grep -rn "totalCapital, 0\|totalCapital == 0\|currentCapital, 0\|currentCapital == 0" ios/Contracts/Tests --include="*.swift"`
 对每个走**真实 `DefaultAppDB` 新库**且断言 capital/currentCapital==0 的用例改为 100_000；用 `StubSettingsDAO`/`CapitalDAO`/`InMemorySettingsDAO` 显式返回值或 `AppSettings.zero` 的用例**不受影响**（不走真实 `loadSettings` 默认）——逐个判断后修改。
+
+**另**（plan-stage R2 Low）：把 `InMemorySettingsDAO.resetCapital`（`InMemoryFakes.swift:259-266`）与生产 DAO 对齐——写 `AppSettings.defaultTotalCapital` 并改注释为「mirror production: resetCapital→默认 10 万」；其测试 `InMemoryDBFakesTests.swift:149` 断言由 `0` 改 `100_000`、用例名 `..._setsDefaultCapital`。保持 fake 为诚实镜像（虽 DAO 层 resetCapital 已被 TrainingResetPort 取代，但 fake 仍应与生产同语义）。
 
 - [ ] **Step 8: 全量 host 测试通过**
 
