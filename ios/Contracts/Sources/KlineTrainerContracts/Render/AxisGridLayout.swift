@@ -44,19 +44,21 @@ enum AxisGridLayout {
         let labelW: CGFloat = 56, labelH: CGFloat = 16
         var labels: [Label] = []
         var lines: [LineSegment] = []
-        for value in niceTickValues(lo: lo, hi: hi) {
+        let (values, step) = niceTickValues(lo: lo, hi: hi)
+        let decimals = max(2, Int(ceil(-log10(step))))   // step<0.01 → 更多小数位；常态 step≥0.01 → 2 位
+        for value in values {
             let y = mapper.priceToY(value)
             lines.append(LineSegment(from: CGPoint(x: frame.minX, y: y),
                                      to: CGPoint(x: frame.maxX, y: y)))
             let rect = CGRect(x: frame.maxX - labelW, y: y - labelH / 2, width: labelW, height: labelH)
-            labels.append(Label(rect: rect, text: String(format: "%.2f", value)))
+            labels.append(Label(rect: rect, text: String(format: "%.\(decimals)f", value)))
         }
         return (labels, lines)
     }
 
     /// nice-step：候选 {1,2,5}×10^k 由细到粗，取满足 count≤maxTicks 的最小 step（不超 6 档的最细网格）。
     /// 调用方已保 span>0、有限。极窄区间致空 → 回退单档（区间中点）。
-    private static func niceTickValues(lo: Double, hi: Double) -> [Double] {
+    private static func niceTickValues(lo: Double, hi: Double) -> (values: [Double], step: Double) {
         let span = hi - lo
         let baseExp = Int(floor(log10(span)))
         var candidates: [Double] = []
@@ -64,14 +66,14 @@ enum AxisGridLayout {
             for m in [1.0, 2.0, 5.0] { candidates.append(m * pow(10.0, Double(e))) }
         }
         candidates.sort()
-        func count(_ s: Double) -> Int { Int(floor(hi / s)) - Int(ceil(lo / s)) + 1 }
+        func count(_ s: Double) -> Double { (hi / s).rounded(.down) - (lo / s).rounded(.up) + 1 }
         var chosen = candidates.last!
-        for s in candidates where count(s) <= maxTicks { chosen = s; break }
+        for s in candidates where count(s) <= Double(maxTicks) { chosen = s; break }
         var ticks: [Double] = []
         var v = (lo / chosen).rounded(.up) * chosen        // first = ceil(lo/step)*step
         while v <= hi + chosen * 1e-9 { ticks.append(v); v += chosen }
         if ticks.isEmpty { ticks = [(lo + hi) / 2] }        // 防御性兜底（R2-N1；当前 2-decade 阶梯下不触发，细端 count≥~100）
-        return ticks
+        return (ticks, chosen)
     }
 
     /// 时间刻度 + 对齐的垂直网格线（贯穿三区）。**用绝对索引**（candles.startIndex + offset；

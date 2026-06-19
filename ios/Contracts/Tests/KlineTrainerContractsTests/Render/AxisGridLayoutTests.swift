@@ -77,6 +77,7 @@ struct PriceTicksTests {
         let (labels, _) = AxisGridLayout.priceTicks(mapper: m)
         #expect(!labels.isEmpty)
         #expect(labels.count <= 6)
+        #expect(Set(labels.map(\.text)).count == labels.count)   // 子分步长不得塌缩成重复标签
     }
 }
 
