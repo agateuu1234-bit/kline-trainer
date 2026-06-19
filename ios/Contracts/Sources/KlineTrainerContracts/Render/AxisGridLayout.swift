@@ -146,4 +146,20 @@ enum AxisGridLayout {
         let rect = CGRect(x: frame.maxX - labelW, y: y - labelH / 2, width: labelW, height: labelH)
         return (Label(rect: rect, text: "0"), line)
     }
+
+    /// 周期角标（左上角，mainChart 内）。
+    static func periodLabel(period: Period, frames: ChartPanelFrames) -> Label {
+        let text: String
+        switch period {
+        case .m3: text = "3分"
+        case .m15: text = "15分"
+        case .m60: text = "60分"
+        case .daily: text = "日"
+        case .weekly: text = "周"
+        case .monthly: text = "月"
+        }
+        let pad: CGFloat = 4, w: CGFloat = 44, h: CGFloat = 16
+        let rect = CGRect(x: frames.mainChart.minX + pad, y: frames.mainChart.minY + pad, width: w, height: h)
+        return Label(rect: rect, text: text)
+    }
 }

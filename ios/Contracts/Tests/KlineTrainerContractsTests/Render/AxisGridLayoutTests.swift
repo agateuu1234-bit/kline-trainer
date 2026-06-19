@@ -181,3 +181,27 @@ struct VolumeMacdTests {
         #expect(AxisGridLayout.macdZero(macdMapper: outRange) == nil)
     }
 }
+
+@Suite("AxisGridLayout.periodLabel 周期角标")
+struct PeriodLabelTests {
+    @Test("六周期文字映射")
+    func periodTexts() {
+        let f = makeFrames()
+        func txt(_ p: Period) -> String { AxisGridLayout.periodLabel(period: p, frames: f).text }
+        #expect(txt(.m3) == "3分")
+        #expect(txt(.m15) == "15分")
+        #expect(txt(.m60) == "60分")
+        #expect(txt(.daily) == "日")
+        #expect(txt(.weekly) == "周")
+        #expect(txt(.monthly) == "月")
+    }
+
+    @Test("角标定位左上角（mainChart 内）")
+    func cornerPlacement() {
+        let f = makeFrames()
+        let label = AxisGridLayout.periodLabel(period: .m60, frames: f)
+        #expect(label.rect.minX >= f.mainChart.minX)
+        #expect(label.rect.minY >= f.mainChart.minY)
+        #expect(label.rect.maxY <= f.mainChart.maxY)
+    }
+}
