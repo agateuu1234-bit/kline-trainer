@@ -63,7 +63,7 @@
 
 - 注入 `TrainingResetPort`（生产即 `DefaultAppDB`，它已作为 `settingsDAO` 注入 SettingsStore，可同体担当）。
 - 新增 `SettingsStore.resetAllProgress() async throws`：沿用 `resetCapital` 的 task-chain 模式（`_loadError` 拦写、串入 `pendingMutations`、`Task.detached` 跑阻塞 DB 调用），调用 `port.resetAllTrainingProgress(toCapital: 100_000)`，成功后置内存 `settings.totalCapital = 100_000`。
-- **移除被本次改动孤立的旧 `resetCapital` 生产路径**：`resetCapital` 仅 SettingsPanel 一处生产调用（`SettingsPanel.swift:95`）+ 测试引用。改用 `resetAllProgress` 后旧 `resetCapital`（SettingsStore + SettingsDAO + DefaultAppDB + SettingsDAOImpl 链）成为生产孤儿。按 surgical 原则清除本次改动造成的孤儿（其"写 capital"能力由 `setTotalCapital` 取代）。*（writing-plans 阶段确认无其它引用后删除；若删除面过大有风险，退化为保留 DAO 层 `setTotalCapital` 并删 store 层 `resetCapital`。）*
+- **旧 `resetCapital` 处置（plan-stage review 定案）**：store 层 `SettingsStore.resetCapital()` 被 `resetAllProgress()` 取代（仅 SettingsPanel 一处生产调用 + 少量测试引用，随改）。DAO 层 `SettingsDAO.resetCapital`（协议）+ `DefaultAppDB.resetCapital` + `SettingsDAOImpl.resetCapital` **保留**——移除会涟漪 ~9 个 conformer（StubSettingsDAO / RecoverySettingsDAO / InMemorySettingsDAO + 多个 inline test stub），违反 surgical 原则。但其原写值 `"0.0"` 与新「重置→10 万」语义及 #6 矛盾，是「未用方法写错值」地雷，故**把 DAO 层 resetCapital 的写值由 0 改为 `AppSettings.defaultTotalCapital`**（去地雷，零协议涟漪），并加注释标明已被 `TrainingResetPort` 全量重置取代。全量重置所需的 capital 写仍由新 `setTotalCapital(_:_:)` 在原子事务内完成（与 DAO 层 resetCapital 解耦）。
 
 ### 5.3 SettingsPanel（UI）
 - 按钮保留（`SettingsPanel.swift:60`）。确认对话框文案（`:92-97`）改为如实披露：标题/正文含"将清空所有训练记录，并将资金恢复为 ¥100,000"。
@@ -93,6 +93,7 @@
 
 - **无记录 / 无 pending**：幂等，仅确保 capital=100k。
 - **活动训练会话中触发**：`重置资金` 仅 Settings 面板可达，Settings 经 Home 路由进入——**前置条件：进入 Settings 时无活动训练会话**（无 live engine / 无 in-flight autosave）。因此事务直接清持久化 `pending_training` 行即可，无需 live-session 的 `discardSession` fence/drain。本设计明确不支持"训练进行中从设置重置"（该场景不可达）。
+  > **注（plan-stage review Low）**：该保证是**导航性**的，非代码强制——`AppRouter.openSettings()` 无 `activeTraining == nil` 守卫，安全性来自 `onOpenSettings` 仅接在 `HomeView`、且训练态 `TrainingView` 压在 Home 之上（Settings 入口不可见）。当前代码成立、无 ghost-pending 竞态；但属潜在脆弱点：未来若有代码从训练上下文调 `openSettings()`，会暴露 reset-vs-autosave 竞态。若后续放开该入口，须改为在重置前 `fenceAndDrainAutosaves` + `discardSession`，或加 `activeTraining==nil` 守卫。
 - **重置后再开局**：零记录 → `startingCapital()` 读 settings = 100k。✓
 - **全新安装**：缺键默认 100k（#6）→ 顶栏 100k、可交易。✓
 - **并发设置写**：串入 `pendingMutations`，与其它设置变更顺序化。
