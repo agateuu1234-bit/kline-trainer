@@ -22,6 +22,7 @@ public struct SettingsPanel: View {
     @State private var recoveryMessage = ""
     @State private var isRecovering = false   // M1：禁用恢复按钮防并发双触发 clobber
     @State private var toast = ToastState()   // §B.3：下载 per-item 失败原因非阻塞 toast
+    @State private var resetErrorMessage = ""
 
     public init(settings: SettingsStore, api: any APIClient,
                 cache: any CacheManager, acceptance: DownloadAcceptanceRunner) {
@@ -56,8 +57,11 @@ public struct SettingsPanel: View {
                     Task { try? await settings.update { $0.minCommissionEnabled = newValue } }
                 }))
 
-            // 3. 重置资金
-            Button("重置资金（→ ¥100,000）") { showResetConfirm = true }
+            // 3. 重置资金（运行时 #1：清记录 + 资金回 10 万）
+            Button(SettingsPanelContent.resetButtonLabel) { showResetConfirm = true }
+            if !resetErrorMessage.isEmpty {
+                Text(resetErrorMessage).font(.caption).foregroundStyle(.red)
+            }
 
             // 4. 离线缓存
             Button(isDownloading ? "下载中…" : "离线缓存下载") { showDownloadEditor = true }
@@ -88,12 +92,17 @@ public struct SettingsPanel: View {
                 }
             }
         }
-        // 重置资金二次确认
-        .alert("确认重置资金为 ¥100,000？", isPresented: $showResetConfirm) {
-            Button("取消", role: .cancel) {}
+        // 重置资金二次确认（破坏性：清空训练记录）
+        .alert(SettingsPanelContent.resetConfirmTitle, isPresented: $showResetConfirm) {
+            Button("取消", role: .cancel) { resetErrorMessage = "" }
             Button("重置", role: .destructive) {
-                Task { try? await settings.resetCapital() }
+                Task {
+                    do { try await settings.resetAllProgress(); resetErrorMessage = "" }
+                    catch { resetErrorMessage = "重置失败：\((error as? AppError)?.userMessage ?? "未知错误")" }
+                }
             }
+        } message: {
+            Text(SettingsPanelContent.resetConfirmMessage)
         }
         // 离线缓存数量输入
         .alert("下载数量（1~20）", isPresented: $showDownloadEditor) {

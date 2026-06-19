@@ -113,12 +113,12 @@ struct SettingsStoreShapeTests {
         let _: FeeSnapshot = store.snapshotFees()
     }
 
-    @Test("update / resetCapital 签名编译期解析")
+    @Test("update / resetAllProgress 签名编译期解析")
     func mutatorSignatures() {
         let store = SettingsStore(settingsDAO: StubDAO())
         // PR4b §8.1: update closure 标 @escaping @Sendable（Swift 6 strict concurrency 必需）
         let _: (@escaping @Sendable (inout AppSettings) -> Void) async throws -> Void = store.update
-        let _: () async throws -> Void = store.resetCapital
+        let _: () async throws -> Void = store.resetAllProgress
     }
 }
 

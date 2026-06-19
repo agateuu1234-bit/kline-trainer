@@ -39,13 +39,15 @@ struct AppContainerDebugSeedTests {
         #expect(c.settings.settings.totalCapital == 100_000, "settings 须 eager-load 到 seeded fixture（非 stale 0）")
     }
 
-    @Test("未 seed（debugSeedFixtures:false）：settings 为空库 zero-default（对照，证上一测非 vacuous）")
-    func noSeed_settingsIsZeroDefault() async throws {
+    @Test("未 seed（debugSeedFixtures:false）：cache/records/pending 皆空（对照，证 seed 测非 vacuous）")
+    func noSeed_isEmptyProgress() async throws {
         let (cfg, dir) = try makeConfig()
         defer { try? FileManager.default.removeItem(at: dir) }
         let c = try AppContainer(config: cfg, debugSeedFixtures: false)
         #expect(c.cache.listAvailable().isEmpty)
-        #expect(c.settings.settings.totalCapital == 0)   // 空库 zero-default，与 seeded 100_000 区分
+        #expect(try c.db.statistics().totalCount == 0)   // 区分：seeded 测断言 >= 2
+        #expect(try c.db.loadPending() == nil)           // 区分：seeded 测断言 != nil
+        #expect(c.settings.settings.totalCapital == 100_000)  // #6：空库现也默认 10 万（非 0）
     }
 
     @Test("幂等：同 config 第二个 container（seed:true）→ 全空 guard 跳过，records/cache 不叠加")
@@ -159,6 +161,24 @@ struct AppContainerDebugSeedTests {
 
         #expect(try c.db.loadSettings().totalCapital == 333_333, "自定义 settings 未被 fixture 覆盖")
         #expect(c.cache.listAvailable().isEmpty, "未 seed")
+    }
+
+    // Task 5 Medium-10：运行时 #1 端到端真协调器路径。
+    // seeded（有记录+pending+cache）→ resetAllProgress（清记录/pending，cache 保留）
+    // → startNewNormalSession（cache 仍在可开局）→ 零记录使 startingCapital 走 settings 分支 → 顶栏 10 万。
+    @Test("重置后开新局：startingCapital 走 settings=10 万（真协调器路径）")
+    func test_after_reset_freshStart_startsAtDefault() async throws {
+        let (cfg, dir) = try makeConfig()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let c = try AppContainer(config: cfg, debugSeedFixtures: true)
+        #expect(try c.db.statistics().totalCount >= 2)        // 前置：seed 有记录
+        try await c.settings.resetAllProgress()
+        #expect(try c.db.statistics().totalCount == 0)        // 记录已清
+        #expect(try c.db.loadPending() == nil)                // pending 已清
+        #expect(!c.cache.listAvailable().isEmpty)             // cache 保留（可开局）
+        let engine = try await c.coordinator.startNewNormalSession()
+        // currentTotalCapital = cashBalance + shares*price；开局无持仓 → = 起始资金。
+        #expect(engine.currentTotalCapital == 100_000)
     }
 
     // 13c-R2 根治端到端：实际 seeded + cached 的训练组（= 帧预算 runbook 真正剖析的那份）须满载。

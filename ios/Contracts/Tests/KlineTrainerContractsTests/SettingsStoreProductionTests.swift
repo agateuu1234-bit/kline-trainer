@@ -53,19 +53,17 @@ struct SettingsStoreProductionTests {
         #expect(dao.savedSettings == nil)
     }
 
-    @Test("init: dao throws .diskFull → resetCapital 抛同 error 阻塞写")
-    func init_daoThrowsDiskFull_resetCapitalThrowsLoadError() async throws {
+    @Test("init: dao throws .diskFull → resetAllProgress 抛同 error 阻塞写（端口不被调）")
+    func init_daoThrowsDiskFull_resetAllProgressThrowsLoadError() async throws {
         let dfErr = AppError.persistence(.diskFull)
         let dao = StubSettingsDAO(load: .failure(dfErr))
-        let store = SettingsStore(settingsDAO: dao)
-
-        await #expect(throws: dfErr) {
-            try await store.resetCapital()
-        }
-        #expect(!dao.resetCalled)
+        let port = FakeTrainingResetPort()
+        let store = SettingsStore(settingsDAO: dao, resetPort: port)
+        await #expect(throws: dfErr) { try await store.resetAllProgress() }
+        #expect(port.resetToCapital == nil)   // loadError 先拦截，端口未触
     }
 
-    // MARK: - Task 6: update / resetCapital / concurrent / snapshot
+    // MARK: - Task 6: update / resetAllProgress / concurrent / snapshot
 
     @Test("update: mutate block 修改 settings 后 dao.saveSettings 被调；本地 settings 同步更新")
     func update_persistsViaDAO_updatesLocalSettings() async throws {
@@ -98,20 +96,39 @@ struct SettingsStoreProductionTests {
         #expect(store.settings == initial)
     }
 
-    @Test("resetCapital: dao.resetCapital 被调；本地 settings.totalCapital 归 0")
-    func resetCapital_callsDAOAndZerosLocalCapital() async throws {
-        let initial = AppSettings(
-            commissionRate: 0.0001, minCommissionEnabled: true,
-            totalCapital: 999, displayMode: .dark)
+    @Test("resetAllProgress: 端口被调（toCapital=10 万）；本地 totalCapital→10 万，其它字段不变")
+    func resetAllProgress_callsPortAndSetsDefaultCapital() async throws {
+        let initial = AppSettings(commissionRate: 0.0001, minCommissionEnabled: true,
+                                  totalCapital: 999, displayMode: .dark)
         let dao = StubSettingsDAO(load: .success(initial))
-        let store = SettingsStore(settingsDAO: dao)
-
-        try await store.resetCapital()
-        #expect(dao.resetCalled)
-        #expect(store.settings.totalCapital == 0)
+        let port = FakeTrainingResetPort()
+        let store = SettingsStore(settingsDAO: dao, resetPort: port)
+        try await store.resetAllProgress()
+        #expect(port.resetToCapital == 100_000)
+        #expect(store.settings.totalCapital == 100_000)
         #expect(store.settings.commissionRate == 0.0001)
         #expect(store.settings.minCommissionEnabled == true)
         #expect(store.settings.displayMode == .dark)
+    }
+
+    @Test("resetAllProgress: 端口抛错 → 上抛 + 本地 capital 不变")
+    func resetAllProgress_portThrows_localUnchanged() async throws {
+        let initial = AppSettings(commissionRate: 0.0001, minCommissionEnabled: false,
+                                  totalCapital: 555, displayMode: .system)
+        let dao = StubSettingsDAO(load: .success(initial))
+        let port = FakeTrainingResetPort()
+        port.error = .persistence(.diskFull)
+        let store = SettingsStore(settingsDAO: dao, resetPort: port)
+        await #expect(throws: AppError.persistence(.diskFull)) { try await store.resetAllProgress() }
+        #expect(store.settings.totalCapital == 555)
+    }
+
+    @Test("resetAllProgress: 未注入端口 → internalError")
+    func resetAllProgress_noPort_throwsInternal() async throws {
+        let store = SettingsStore(settingsDAO: StubSettingsDAO(load: .success(.zero)))  // resetPort 默认 nil
+        await #expect(throws: AppError.internalError(module: "P6", detail: "resetAllProgress 需注入 TrainingResetPort")) {
+            try await store.resetAllProgress()
+        }
     }
 
     // R1 H-3 regression: 并发 update 不丢字段
@@ -150,7 +167,7 @@ struct SettingsStoreProductionTests {
         #expect(fees.commissionRate == 0)
         #expect(fees.minCommissionEnabled == false)
 
-        // loadError 状态下 update / resetCapital 仍阻塞（同 H-3 测试已验）
+        // loadError 状态下 update / resetAllProgress 仍阻塞（同 H-3 测试已验）
     }
 
     // R6 H-1 partial regression: snapshotFeesIfReady throws on loadError
@@ -173,21 +190,31 @@ struct SettingsStoreProductionTests {
         #expect(fees.minCommissionEnabled == true)
     }
 
-    // R1 H-3 regression: 并发 update + resetCapital
+    // R1 H-3 regression: 并发 update + resetAllProgress（端口设 10 万，不被 update 旧值覆盖）
     @Test("concurrent update+reset: reset 不被 update 旧 totalCapital overwrite")
     func concurrentUpdate_andReset_resetWins() async throws {
-        let initial = AppSettings(
-            commissionRate: 0.0001, minCommissionEnabled: false,
-            totalCapital: 50_000, displayMode: .system)
+        let initial = AppSettings(commissionRate: 0.0001, minCommissionEnabled: false,
+                                  totalCapital: 50_000, displayMode: .system)
         let dao = StubSettingsDAO(load: .success(initial))
-        let store = SettingsStore(settingsDAO: dao)
+        let port = FakeTrainingResetPort()
+        let store = SettingsStore(settingsDAO: dao, resetPort: port)
 
         async let a: Void = store.update { s in s.commissionRate = 0.0009 }
-        async let b: Void = store.resetCapital()
+        async let b: Void = store.resetAllProgress()
         _ = try await (a, b)
 
-        // commissionRate 修改应保留；totalCapital 必为 0（resetCapital 是后排还是前排都行，串行结果稳定）
-        #expect(store.settings.totalCapital == 0)
+        #expect(store.settings.totalCapital == 100_000)   // 串行结果稳定：reset 设默认 10 万
         #expect(store.settings.commissionRate == 0.0009)
+    }
+}
+
+/// 测试 fake：单线程 MainActor 测试中使用。写发生在被 await 的 Task.detached 内，
+/// `try await task.value` 建立 happens-before，读在 await 之后，故 @unchecked Sendable 安全。
+final class FakeTrainingResetPort: TrainingResetPort, @unchecked Sendable {
+    private(set) var resetToCapital: Double?
+    var error: AppError?
+    func resetAllTrainingProgress(toCapital: Double) throws {
+        if let e = error { throw e }
+        resetToCapital = toCapital
     }
 }

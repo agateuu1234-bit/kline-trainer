@@ -56,3 +56,18 @@ struct SettingsPanelContentTests {
         #expect(SettingsPanelContent.displayModeLabel(.system) == "跟随系统")
     }
 }
+
+@Suite("SettingsPanelContent 重置资金文案")
+struct SettingsPanelContentResetCopyTests {
+    @Test("确认文案披露将清空训练记录（破坏性如实告知）")
+    func resetConfirmDisclosesRecordClearing() {
+        #expect(SettingsPanelContent.resetConfirmTitle.contains("清空训练记录"))
+        #expect(SettingsPanelContent.resetConfirmTitle.contains("100,000")
+                || SettingsPanelContent.resetConfirmMessage.contains("100,000"))
+    }
+    @Test("按钮文案披露清空记录 + 资金额度")
+    func resetButtonDisclosesClearAndCapital() {
+        #expect(SettingsPanelContent.resetButtonLabel.contains("清空记录"))
+        #expect(SettingsPanelContent.resetButtonLabel.contains("100,000"))
+    }
+}

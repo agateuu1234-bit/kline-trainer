@@ -113,6 +113,14 @@ enum RecordRepositoryImpl {
         return (total, wins, cap)
     }
 
+    /// 删除全部训练记录及其 FK 子行（drawings / trade_operations）。
+    /// schema 无 ON DELETE CASCADE，故子表先删；调用方负责 dbQueue.write 事务包裹。
+    static func deleteAll(_ db: Database) throws {
+        try db.execute(sql: "DELETE FROM drawings")
+        try db.execute(sql: "DELETE FROM trade_operations")
+        try db.execute(sql: "DELETE FROM training_records")
+    }
+
     // MARK: - Row → Model
 
     private static func recordFromRow(_ row: Row) throws -> TrainingRecord {

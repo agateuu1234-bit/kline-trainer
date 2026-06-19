@@ -28,7 +28,7 @@ public final class AppContainer {
             try Self.seedDebugFixtures(db: db, cache: cache)
         }
         #endif
-        let settings = SettingsStore(settingsDAO: db)                     // db 同时是 SettingsDAO（seed 后 load 到 fixture settings）
+        let settings = SettingsStore(settingsDAO: db, resetPort: db)     // db 同时是 SettingsDAO + TrainingResetPort（seed 后 load 到 fixture settings）
         let acceptance = DownloadAcceptanceRunner(
             api: api, cache: cache, dbFactory: dbFactory, journal: db,
             integrity: DefaultZipIntegrityVerifier(), extractor: DefaultZipExtractor(),

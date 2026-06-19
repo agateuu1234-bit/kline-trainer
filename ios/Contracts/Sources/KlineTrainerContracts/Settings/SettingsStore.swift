@@ -4,7 +4,7 @@
 //
 // 设计要点（R1-R6 codex review 修订）：
 // - init eager-load via settingsDAO.loadSettings()；任意 load 失败 → zero-default + loadError 阻塞写
-// - update / resetCapital 用 inflight Task chain 串行化；snapshot value type 防写丢
+// - update / resetAllProgress 用 inflight Task chain 串行化；snapshot value type 防写丢
 // - update closure 标 `@escaping @Sendable`（Swift 6 strict concurrency 必需）
 // - snapshotFees 保留 fail-open（UI 显示路径）；snapshotFeesIfReady throws on loadError（trading flow 必须用）
 
@@ -20,6 +20,7 @@ public final class SettingsStore {
     public private(set) var settings: AppSettings
 
     private let settingsDAO: SettingsDAO
+    private let resetPort: TrainingResetPort?
     private var pendingMutations: Task<Void, Error>?
     /// R2 H-3 + R3 H-1 + R4 H-1：所有 load 失败（含 dbCorrupted）都阻塞写。
     /// R5 H-1：暴露为 public read-only，让 caller (E6/E5) 在调 snapshotFees / 进 trade flow 前 guard。
@@ -32,8 +33,9 @@ public final class SettingsStore {
         commissionRate: 0, minCommissionEnabled: false,
         totalCapital: 0, displayMode: .system)
 
-    public init(settingsDAO: SettingsDAO) {
+    public init(settingsDAO: SettingsDAO, resetPort: TrainingResetPort? = nil) {
         self.settingsDAO = settingsDAO
+        self.resetPort = resetPort
         do {
             self.settings = try settingsDAO.loadSettings()
         } catch {
@@ -67,17 +69,24 @@ public final class SettingsStore {
         try await task.value
     }
 
-    public func resetCapital() async throws {
-        if let e = _loadError { throw e }  // R2 H-3 + R4 H-1: block writes 直到 reload 成功
+    /// 重置资金「真正归零重来」(运行时 #1)：经注入端口在单事务内清空全部训练记录 +
+    /// 未完成对局，并把资金恢复为 AppSettings.defaultTotalCapital。
+    /// 复用 loadError 写阻塞 + pendingMutations 串行化（与 update 同机制）。
+    public func resetAllProgress() async throws {
+        if let e = _loadError { throw e }   // block writes 直到 reload 成功
+        // port 在进入 pendingMutations 链前同步取出并守卫（fail-fast：nil 端口立即抛，不排队）；
+        // 端口副作用仍受下方 `guard let self else return` 闸门保护，self 释放即跳过（与 update() 一致）。
+        guard let port = resetPort else {
+            throw AppError.internalError(module: "P6", detail: "resetAllProgress 需注入 TrainingResetPort")
+        }
         let prev = pendingMutations
         let task = Task { [weak self] in
             _ = try? await prev?.value
             guard let self = self else { return }
-            let dao = self.settingsDAO
-            try await Task.detached(priority: .userInitiated) {
-                try dao.resetCapital()
+            try await Task.detached(priority: .userInitiated) { [port] in
+                try port.resetAllTrainingProgress(toCapital: AppSettings.defaultTotalCapital)
             }.value
-            self.settings.totalCapital = 0
+            self.settings.totalCapital = AppSettings.defaultTotalCapital
         }
         pendingMutations = task
         try await task.value

@@ -13,7 +13,7 @@ enum SettingsDAOImpl {
 
     static func loadSettings(_ db: Database) throws -> AppSettings {
         // R1 修订（codex high-2）：分 missing vs malformed 两路。
-        // missing = 首次启动 / 新增 key 未写 → zero-value default（合法）
+        // missing = 首次启动 → 默认（capital=10 万 #6，其它 zero-value）
         // malformed = key 存在但 value 不可解析 → AppError.persistence(.dbCorrupted)
         //             静默回退会把损坏的 commission/capital 重置 0，影响财务计算
         let rows = try Row.fetchAll(db, sql: "SELECT key, value FROM settings")
@@ -24,7 +24,7 @@ enum SettingsDAOImpl {
 
         let commissionRate = try parseDouble(dict[keyCommissionRate], default: 0)
         let minCommissionEnabled = try parseBool(dict[keyMinCommissionEnabled], default: false)
-        let totalCapital = try parseDouble(dict[keyTotalCapital], default: 0)
+        let totalCapital = try parseDouble(dict[keyTotalCapital], default: AppSettings.defaultTotalCapital)
         let displayMode = try parseDisplayMode(dict[keyDisplayMode], default: .system)
 
         return AppSettings(commissionRate: commissionRate,
@@ -84,9 +84,23 @@ enum SettingsDAOImpl {
         }
     }
 
+    /// 遗留 capital-only 重置（协议兼容；当前 UI 改用 TrainingResetPort 全量重置）。
+    /// 运行时 #1：写值由 "0.0" 改为默认 10 万，避免「未用方法写错值」地雷（与 §6.4 一致）。
     static func resetCapital(_ db: Database) throws {
         try db.execute(sql:
             "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
-            arguments: [keyTotalCapital, "0.0"])
+            arguments: [keyTotalCapital, String(AppSettings.defaultTotalCapital)])
+    }
+
+    /// 参数化写 total_capital（供 TrainingResetPort 原子事务复用；不改其它 key）。
+    static func setTotalCapital(_ db: Database, _ value: Double) throws {
+        guard value.isFinite else {
+            throw AppError.internalError(
+                module: "P4-SettingsDAO",
+                detail: "setTotalCapital refused: value not finite (\(value))")
+        }
+        try db.execute(sql:
+            "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+            arguments: [keyTotalCapital, String(value)])
     }
 }
