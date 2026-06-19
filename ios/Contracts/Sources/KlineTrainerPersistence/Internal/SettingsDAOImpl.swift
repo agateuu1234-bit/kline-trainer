@@ -94,6 +94,11 @@ enum SettingsDAOImpl {
 
     /// 参数化写 total_capital（供 TrainingResetPort 原子事务复用；不改其它 key）。
     static func setTotalCapital(_ db: Database, _ value: Double) throws {
+        guard value.isFinite else {
+            throw AppError.internalError(
+                module: "P4-SettingsDAO",
+                detail: "setTotalCapital refused: value not finite (\(value))")
+        }
         try db.execute(sql:
             "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
             arguments: [keyTotalCapital, String(value)])

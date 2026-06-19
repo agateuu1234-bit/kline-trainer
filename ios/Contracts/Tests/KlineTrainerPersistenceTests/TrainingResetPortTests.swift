@@ -99,12 +99,26 @@ final class TrainingResetPortTests: XCTestCase {
         XCTAssertEqual(try db.loadSettings().totalCapital, 123_456)
     }
 
-    // 重置后「下一局起始资金」输入快照（注：本测试仅验持久层输入，不经协调器；
-    // 真协调器路径由 Task 5 AppContainerDebugSeedTests.test_after_reset_freshStart_startsAtDefault 验证）。
-    func test_after_reset_persistence_inputs_snapshot() throws {
+    // 验证 toCapital 参数确实被透传（用 ≠ 默认 10 万 的值），且重置后零记录使下一局走 settings 分支。
+    // 注：仅验持久层；真协调器路径由 Task 5 验证。
+    func test_resetAllTrainingProgress_threads_toCapital_param() throws {
         try seedProgress()
-        try db.resetAllTrainingProgress(toCapital: 100_000)
-        XCTAssertEqual(try db.statistics().totalCount, 0)            // startingCapital 将走 settings 分支
-        XCTAssertEqual(try db.loadSettings().totalCapital, 100_000)  // = 10 万
+        try db.resetAllTrainingProgress(toCapital: 88_000)
+        XCTAssertEqual(try db.statistics().totalCount, 0)
+        XCTAssertEqual(try db.loadSettings().totalCapital, 88_000)   // 参数透传，非硬编码 100_000
+    }
+
+    // setTotalCapital 的 isFinite 守卫：传 NaN → 抛 internalError，且事务整体回滚（记录/pending 不被删）。
+    func test_resetAllTrainingProgress_rejects_nonFinite_capital_and_rolls_back() throws {
+        try seedProgress()
+        XCTAssertThrowsError(try db.resetAllTrainingProgress(toCapital: .nan)) { err in
+            guard let appErr = err as? AppError, case .internalError = appErr else {
+                return XCTFail("期望 .internalError，实际 \(err)")
+            }
+        }
+        // 整体回滚：守卫在 setTotalCapital（事务最后一步）抛错 → deleteAll/clearPending 一并回滚。
+        XCTAssertEqual(try db.statistics().totalCount, 1)
+        XCTAssertNotNil(try db.loadPending())
+        XCTAssertEqual(try db.loadSettings().totalCapital, 123_456)
     }
 }
