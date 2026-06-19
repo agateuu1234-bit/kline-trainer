@@ -114,4 +114,36 @@ enum AxisGridLayout {
         case .monthly:        return "yyyy-MM"
         }
     }
+
+    /// 量图最大量：水平网格线 + 标签，定位 valueToY(maxVolume)（因 volumeRange 有 2% padding，
+    /// 此 y 略低于 frame 顶边——与最高量柱顶对齐，非贴 frame 顶）。
+    static func volumeAxis(volumeMapper: IndicatorMapper,
+                           candles: ArraySlice<KLineCandle>) -> (label: Label, gridLine: LineSegment)? {
+        guard let maxVol = candles.map(\.volume).max() else { return nil }
+        let y = volumeMapper.valueToY(Double(maxVol))
+        let frame = volumeMapper.frame
+        let line = LineSegment(from: CGPoint(x: frame.minX, y: y), to: CGPoint(x: frame.maxX, y: y))
+        let labelW: CGFloat = 56, labelH: CGFloat = 14
+        let rect = CGRect(x: frame.maxX - labelW, y: y, width: labelW, height: labelH)   // 顶端贴线
+        return (Label(rect: rect, text: formatVolume(maxVol)), line)
+    }
+
+    /// 成交量万/亿格式（≥1e8 亿、≥1e4 万，各一位小数；否则原值）。
+    static func formatVolume(_ v: Int64) -> String {
+        if v >= 100_000_000 { return String(format: "%.1f亿", Double(v) / 1e8) }
+        if v >= 10_000 { return String(format: "%.1f万", Double(v) / 1e4) }
+        return "\(v)"
+    }
+
+    /// MACD 0 轴：0 落在 valueRange 内 → 线 + "0" 标签；否则 nil。
+    static func macdZero(macdMapper: IndicatorMapper) -> (label: Label, gridLine: LineSegment)? {
+        let r = macdMapper.valueRange
+        guard r.lower <= 0, 0 <= r.upper else { return nil }
+        let y = macdMapper.valueToY(0)
+        let frame = macdMapper.frame
+        let line = LineSegment(from: CGPoint(x: frame.minX, y: y), to: CGPoint(x: frame.maxX, y: y))
+        let labelW: CGFloat = 20, labelH: CGFloat = 14
+        let rect = CGRect(x: frame.maxX - labelW, y: y - labelH / 2, width: labelW, height: labelH)
+        return (Label(rect: rect, text: "0"), line)
+    }
 }

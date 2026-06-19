@@ -136,3 +136,48 @@ struct TimeTicksTests {
         #expect(AxisGridLayout.timeTicks(mapper: m2, candles: c2, period: .m3, frames: f).labels.count == 2)
     }
 }
+
+private func makeIndicatorMapper(frame: CGRect, values: [Double],
+                                 candleStep: CGFloat = 10, displayScale: CGFloat = 2) -> IndicatorMapper {
+    let geom = ChartGeometry(candleStep: candleStep, candleWidth: candleStep * 0.7, gap: candleStep * 0.3)
+    let vp = ChartViewport(startIndex: 0, visibleCount: 10, pixelShift: 0, geometry: geom,
+                           priceRange: PriceRange(min: 0, max: 100), mainChartFrame: frame)
+    return IndicatorMapper(frame: frame, valueRange: NonDegenerateRange.make(values: values),
+                           geometry: geom, viewport: vp, displayScale: displayScale)
+}
+
+@Suite("AxisGridLayout 量图/MACD 标签")
+struct VolumeMacdTests {
+    @Test("formatVolume 万/亿分支")
+    func volumeFormat() {
+        #expect(AxisGridLayout.formatVolume(9999) == "9999")
+        #expect(AxisGridLayout.formatVolume(10_000) == "1.0万")
+        #expect(AxisGridLayout.formatVolume(150_000_000) == "1.5亿")
+    }
+
+    @Test("量图：标签在 valueToY(maxVolume)，y 略低于 frame 顶（2% padding）")
+    func volumeMaxLine() {
+        let frame = makeFrames().volumeChart
+        let candles = [mc(0, datetime: 1, volume: 5000), mc(1, datetime: 2, volume: 20000)][0..<2]
+        // mapper 的 valueRange 必须由同一组 volume 构造（含 0 下界，镜像 RenderStateBuilder）。
+        let vm = makeIndicatorMapper(frame: frame, values: [0] + candles.map { Double($0.volume) })
+        let result = AxisGridLayout.volumeAxis(volumeMapper: vm, candles: candles)
+        #expect(result != nil)
+        #expect(result!.gridLine.from.y == vm.valueToY(20000))   // 镜像 valueToY
+        #expect(result!.label.text == "2.0万")
+        #expect(result!.gridLine.from.y > frame.minY)            // 略低于顶边（2% padding）
+    }
+
+    @Test("MACD：0 在区间 → 线/标签在 valueToY(0)；0 不在区间 → nil")
+    func macdZeroBranches() {
+        let frame = makeFrames().macdChart
+        let inRange = makeIndicatorMapper(frame: frame, values: [-0.5, 0.5])
+        let r = AxisGridLayout.macdZero(macdMapper: inRange)
+        #expect(r != nil)
+        #expect(r!.gridLine.from.y == inRange.valueToY(0))
+        #expect(r!.label.text == "0")
+        // [1.0,2.0]+2% padding → [0.98,2.02]，0 不在区间 → nil
+        let outRange = makeIndicatorMapper(frame: frame, values: [1.0, 2.0])
+        #expect(AxisGridLayout.macdZero(macdMapper: outRange) == nil)
+    }
+}
