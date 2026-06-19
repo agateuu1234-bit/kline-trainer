@@ -34,14 +34,9 @@ public struct ChartContainerView: UIViewRepresentable {
     public func updateUIView(_ view: KLineView, context: Context) {
         // 每次重建刷新 Coordinator 的 engine/panel 引用（ChartContainerView 是值类型，可能换 engine）。
         context.coordinator.sync(panel: panel, engine: engine, view: view)
-        engine.recordRenderBounds(view.bounds, panel: panel)   // D1：缓存 bounds 供 activateDrawingTool 算 range
-        // Wave 3 13c-R1：区间仅界定 make 求值（赋值/didSet 不计入；L1471 判据符号 = RenderStateBuilder.make）
-        let makeToken = RenderSignposter.beginMake(panel: panel)
-        let newState = RenderStateBuilder.make(
-            engine: engine, panel: panel, bounds: view.bounds,
-            crosshair: context.coordinator.crosshairPoint)       // D3：透传视图层瞬态十字光标
-        RenderSignposter.end(makeToken)
-        view.renderState = newState
+        // codex R3-F1：observation 路径与 layout 路径共用同一带 guard 的 rebuild helper（消除无效 bounds
+        // guard 在两路径漂移；SwiftUI 在视图瞬态零尺寸期触发 updateUIView 也不会 clamp offset 吞滚动位置）。
+        context.coordinator.rebuildRenderState(bounds: view.bounds)
     }
 
     /// C7 手势仲裁接线（spec §C7 + plan v1.5 §手势仲裁规则）。持 arbiter + 视图层十字光标本地状态。
@@ -83,6 +78,12 @@ public struct ChartContainerView: UIViewRepresentable {
         func attach(to view: UIView) {
             self.view = view as? KLineView
             self.view?.panel = panel                              // Wave 3 13c-R1：首帧前初值（sync 后续刷新）
+            // Wave 3 修 #2：layout 拿到有效 bounds 时用当前 engine 重算 renderState。
+            // 静态 engine（Review：tick 冻结无 observation 触发 updateUIView）首帧零 bounds → .empty 后永不重算致空白；
+            // 本回调补此路径（attach-once，闭包读 self.engine/self.panel，sync 后续刷新引用故恒为当前值）。
+            self.view?.onBoundsChange = { [weak self] bounds in
+                self?.rebuildRenderState(bounds: bounds)
+            }
             arbiter.onPan = { [weak self] deltaX, velocityX, phase in
                 guard let self, let engine = self.engine, let view = self.view else { return }
                 switch phase {
@@ -113,6 +114,26 @@ public struct ChartContainerView: UIViewRepresentable {
                 self?.handleDrawingTap(at: point)
             }
             arbiter.attach(to: view)
+        }
+
+        /// Wave 3 修 #2：bounds 依赖渲染的**唯一**入口——updateUIView（observation 驱动）与 KLineView.layoutSubviews
+        /// （layout 驱动，经 onBoundsChange）都经此。先记录 bounds 再 make，含无效 bounds guard（两路径不漂移）。
+        /// 覆盖静态界面（Review）无 observation 触发 updateUIView 的路径 + observation/layout 瞬态零尺寸的 offset 保护。
+        func rebuildRenderState(bounds: CGRect) {
+            guard let view, let engine else { return }
+            // codex R2-F1：瞬态零尺寸 layout（导航/分屏/旋转过渡）不得改 engine 状态。recordRenderBounds(.zero)
+            // 会被当 resize → 零宽 offsetBounds → 把 panel offset clamp 到 0（吞掉用户滚动位置，不可逆）；
+            // make(.zero) 也只返 .empty。故无效 bounds 直接早返——零→有效的后续 layout 仍会重建（lastLaidOutBounds 已记 .zero）。
+            guard bounds.width > 0, bounds.height > 0 else { return }
+            // codex R1-F1：与 updateUIView 同序先记录 bounds——pinch（读 engine 缓存 bounds，无 bounds 入参）/
+            // 画线 range / resize 归一都依赖 lastRenderedBounds。静态界面（Review）只走本路径，若不同步则
+            // 缓存停在 .zero → 出图后 pinch no-op。recordRenderBounds 内 `previous!=bounds` 守卫保幂等，不扰常态。
+            engine.recordRenderBounds(bounds, panel: panel)
+            let makeToken = RenderSignposter.beginMake(panel: panel)
+            let newState = RenderStateBuilder.make(
+                engine: engine, panel: panel, bounds: bounds, crosshair: crosshairPoint)
+            RenderSignposter.end(makeToken)
+            view.renderState = newState
         }
 
         private func isDrawing(engine: TrainingEngine, panel: PanelId) -> Bool {
