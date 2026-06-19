@@ -258,10 +258,10 @@ public final class InMemorySettingsDAO: SettingsDAO, @unchecked Sendable {
 
     public func resetCapital() throws {
         lock.lock(); defer { lock.unlock() }
-        // mirror production: 只动 totalCapital
+        // mirror production: resetCapital→默认 10 万（与 SettingsDAOImpl.resetCapital 一致）
         settings = AppSettings(commissionRate: settings.commissionRate,
                                minCommissionEnabled: settings.minCommissionEnabled,
-                               totalCapital: 0,
+                               totalCapital: AppSettings.defaultTotalCapital,
                                displayMode: settings.displayMode)
     }
 }

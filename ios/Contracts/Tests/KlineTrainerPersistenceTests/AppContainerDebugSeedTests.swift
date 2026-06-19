@@ -39,13 +39,15 @@ struct AppContainerDebugSeedTests {
         #expect(c.settings.settings.totalCapital == 100_000, "settings 须 eager-load 到 seeded fixture（非 stale 0）")
     }
 
-    @Test("未 seed（debugSeedFixtures:false）：settings 为空库 zero-default（对照，证上一测非 vacuous）")
-    func noSeed_settingsIsZeroDefault() async throws {
+    @Test("未 seed（debugSeedFixtures:false）：cache/records/pending 皆空（对照，证 seed 测非 vacuous）")
+    func noSeed_isEmptyProgress() async throws {
         let (cfg, dir) = try makeConfig()
         defer { try? FileManager.default.removeItem(at: dir) }
         let c = try AppContainer(config: cfg, debugSeedFixtures: false)
         #expect(c.cache.listAvailable().isEmpty)
-        #expect(c.settings.settings.totalCapital == 0)   // 空库 zero-default，与 seeded 100_000 区分
+        #expect(try c.db.statistics().totalCount == 0)   // 区分：seeded 测断言 >= 2
+        #expect(try c.db.loadPending() == nil)           // 区分：seeded 测断言 != nil
+        #expect(c.settings.settings.totalCapital == 100_000)  // #6：空库现也默认 10 万（非 0）
     }
 
     @Test("幂等：同 config 第二个 container（seed:true）→ 全空 guard 跳过，records/cache 不叠加")

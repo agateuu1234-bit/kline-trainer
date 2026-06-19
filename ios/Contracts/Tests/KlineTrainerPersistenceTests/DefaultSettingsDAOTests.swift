@@ -17,12 +17,12 @@ final class DefaultSettingsDAOTests: XCTestCase {
         try? FileManager.default.removeItem(at: dbURL.deletingLastPathComponent())
     }
 
-    // 用例 1：fresh DB loadSettings 返回 zero-value default（不抛错）
+    // 用例 1：fresh DB loadSettings 返回默认（资金默认=初始 10 万 #6；其它字段 zero-value）
     func test_loadSettings_on_fresh_db_returns_defaults() throws {
         let s = try db.loadSettings()
         XCTAssertEqual(s.commissionRate, 0)
         XCTAssertEqual(s.minCommissionEnabled, false)
-        XCTAssertEqual(s.totalCapital, 0)
+        XCTAssertEqual(s.totalCapital, 100_000)   // #6：缺键默认 10 万（非 0），开局可交易
         XCTAssertEqual(s.displayMode, .system)
     }
 
@@ -57,27 +57,27 @@ final class DefaultSettingsDAOTests: XCTestCase {
         XCTAssertEqual(count, 4)
     }
 
-    // 用例 4：resetCapital 仅改 total_capital，其它字段保留
-    func test_resetCapital_only_zeros_capital_other_fields_intact() throws {
+    // 用例 4：resetCapital 把 total_capital 写回默认 10 万，其它字段保留
+    func test_resetCapital_sets_default_capital_other_fields_intact() throws {
         try db.saveSettings(AppSettings(commissionRate: 0.0003, minCommissionEnabled: true,
                                         totalCapital: 50_000, displayMode: .dark))
         try db.resetCapital()
         let loaded = try db.loadSettings()
-        XCTAssertEqual(loaded.totalCapital, 0)
+        XCTAssertEqual(loaded.totalCapital, 100_000)   // 去地雷：写默认 10 万（非 0）
         XCTAssertEqual(loaded.commissionRate, 0.0003, accuracy: 1e-9)
         XCTAssertEqual(loaded.minCommissionEnabled, true)
         XCTAssertEqual(loaded.displayMode, .dark)
     }
 
-    // 用例 5：resetCapital fresh DB 创建 total_capital=0 行
-    func test_resetCapital_on_fresh_db_creates_capital_row() throws {
+    // 用例 5：resetCapital fresh DB 创建 total_capital=默认 10 万 行
+    func test_resetCapital_on_fresh_db_creates_default_capital_row() throws {
         try db.resetCapital()
         let queue = try AppDBFixture.openRaw(at: dbURL)
         let val: String? = try queue.read { db in
             try String.fetchOne(db, sql:
                 "SELECT value FROM settings WHERE key = 'total_capital'")
         }
-        XCTAssertEqual(val, "0.0")
+        XCTAssertEqual(val, "100000.0")
     }
 
     // 用例 6：DisplayMode 三个 case 均可 roundtrip
@@ -137,11 +137,10 @@ final class DefaultSettingsDAOTests: XCTestCase {
         }
     }
 
-    // 用例 10（R1 新增）：partial keys（仅 commission_rate 存在）→ 缺失 key 走 default，存在 key 真解析
+    // 用例 10（R1 新增）：partial keys（仅 commission_rate）→ 缺失 key 走默认（capital 缺→10 万 #6）
     func test_loadSettings_partial_keys_missing_uses_default() throws {
         let queue = try AppDBFixture.openRaw(at: dbURL)
         try queue.write { db in
-            // 只写 commission_rate 一个 key，其它 3 个 key 缺失
             try db.execute(sql:
                 "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
                 arguments: ["commission_rate", "0.0005"])
@@ -149,7 +148,7 @@ final class DefaultSettingsDAOTests: XCTestCase {
         let s = try db.loadSettings()
         XCTAssertEqual(s.commissionRate, 0.0005, accuracy: 1e-9)
         XCTAssertEqual(s.minCommissionEnabled, false)
-        XCTAssertEqual(s.totalCapital, 0)
+        XCTAssertEqual(s.totalCapital, 100_000)   // #6
         XCTAssertEqual(s.displayMode, .system)
     }
 

@@ -141,12 +141,12 @@ final class InMemoryDBFakesTests: XCTestCase {
         XCTAssertEqual(try dao.loadSettings(), s)
     }
 
-    func test_settingsDAO_resetCapital_only_zeroes_totalCapital() throws {
+    func test_settingsDAO_resetCapital_setsDefaultCapital() throws {
         let dao = InMemorySettingsDAO()
         try dao.saveSettings(AppSettings(commissionRate: 0.0003, minCommissionEnabled: true, totalCapital: 50_000, displayMode: .dark))
         try dao.resetCapital()
         let after = try dao.loadSettings()
-        XCTAssertEqual(after.totalCapital, 0)
+        XCTAssertEqual(after.totalCapital, 100_000)
         XCTAssertEqual(after.commissionRate, 0.0003)
         XCTAssertTrue(after.minCommissionEnabled)
         XCTAssertEqual(after.displayMode, .dark)
