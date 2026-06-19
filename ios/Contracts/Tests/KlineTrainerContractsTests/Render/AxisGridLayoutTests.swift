@@ -79,3 +79,60 @@ struct PriceTicksTests {
         #expect(labels.count <= 6)
     }
 }
+
+private func makeFrames(width: CGFloat = 1000, height: CGFloat = 600) -> ChartPanelFrames {
+    ChartPanelFrames.split(in: CGRect(x: 0, y: 0, width: width, height: height))
+}
+
+@Suite("AxisGridLayout.timeTicks 时间刻度 + 垂直网格")
+struct TimeTicksTests {
+    @Test("首条垂直线 x == indexToX(candles.startIndex)，≠ indexToX(0)（防 slice-relative 索引陷阱）")
+    func absoluteIndexNotSliceRelative() {
+        // startIndex=5：indexToX(5)=0（左缘），indexToX(0)=-50（错位），两者可区分。
+        let m = makeMapper(startIndex: 5, visibleCount: 10, candleStep: 10)
+        let c = makeCandles(count: 15)[5..<15]
+        let (labels, lines) = AxisGridLayout.timeTicks(mapper: m, candles: c, period: .m3, frames: makeFrames())
+        #expect(lines.first!.from.x == m.indexToX(c.startIndex))   // == indexToX(5) == 0
+        #expect(lines.first!.from.x != m.indexToX(0))              // ≠ -50（错位陷阱）
+        #expect(labels.count == lines.count)
+    }
+
+    @Test("垂直线贯穿三区（mainChart.minY .. macdChart.maxY）")
+    func verticalSpansAllFrames() {
+        let f = makeFrames()
+        let m = makeMapper(visibleCount: 10)
+        let c = makeCandles(count: 10)[0..<10]
+        let (_, lines) = AxisGridLayout.timeTicks(mapper: m, candles: c, period: .m3, frames: f)
+        for line in lines {
+            #expect(line.from.y == f.mainChart.minY)
+            #expect(line.to.y == f.macdChart.maxY)
+        }
+    }
+
+    @Test("六周期日期格式分支（UTC+8 / en_US_POSIX）")
+    func periodDateFormats() {
+        let f = makeFrames()
+        // 2025-01-02 09:30 北京（datetime=1735781400）
+        func firstLabel(_ p: Period) -> String {
+            let c = makeCandles(count: 1, startDatetime: 1735781400, period: p)[0..<1]
+            let m = makeMapper(visibleCount: 1)
+            return AxisGridLayout.timeTicks(mapper: m, candles: c, period: p, frames: f).labels.first!.text
+        }
+        #expect(firstLabel(.m3)    == "01-02 09:30")
+        #expect(firstLabel(.m60)   == "01-02 09:30")
+        #expect(firstLabel(.daily) == "2025-01-02")
+        #expect(firstLabel(.weekly) == "2025-01-02")
+        #expect(firstLabel(.monthly) == "2025-01")
+    }
+
+    @Test("n=1 → 单刻度（索引集去重为 {startIndex}）；n=2 → 两刻度")
+    func dedupSmallN() {
+        let f = makeFrames()
+        let m1 = makeMapper(startIndex: 3, visibleCount: 1)
+        let c1 = makeCandles(count: 4)[3..<4]
+        #expect(AxisGridLayout.timeTicks(mapper: m1, candles: c1, period: .m3, frames: f).labels.count == 1)
+        let m2 = makeMapper(startIndex: 0, visibleCount: 2)
+        let c2 = makeCandles(count: 2)[0..<2]
+        #expect(AxisGridLayout.timeTicks(mapper: m2, candles: c2, period: .m3, frames: f).labels.count == 2)
+    }
+}

@@ -73,4 +73,45 @@ enum AxisGridLayout {
         if ticks.isEmpty { ticks = [(lo + hi) / 2] }        // 防御性兜底（R2-N1；当前 2-decade 阶梯下不触发，细端 count≥~100）
         return ticks
     }
+
+    /// 时间刻度 + 对齐的垂直网格线（贯穿三区）。**用绝对索引**（candles.startIndex + offset；
+    /// indexToX 内部减 viewport.startIndex，传 slice-relative 0 会错位 —— 修 spec-review High）。
+    static func timeTicks(mapper: CoordinateMapper, candles: ArraySlice<KLineCandle>,
+                          period: Period, frames: ChartPanelFrames) -> (labels: [Label], gridLines: [LineSegment]) {
+        guard !candles.isEmpty else { return ([], []) }
+        let n = candles.count
+        let start = candles.startIndex
+        var absIndices: [Int] = []
+        for k in 0...3 {
+            let idx = start + (n - 1) * k / 3      // 整数运算；k 升序故 idx 非降
+            if absIndices.last != idx { absIndices.append(idx) }   // 相邻去重（升序足够）
+        }
+        let fmt = DateFormatter()
+        fmt.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = dateFormat(for: period)
+        let labelW: CGFloat = 96, labelH: CGFloat = 16
+        var labels: [Label] = []
+        var lines: [LineSegment] = []
+        for idx in absIndices {
+            let x = mapper.indexToX(idx)
+            lines.append(LineSegment(from: CGPoint(x: x, y: frames.mainChart.minY),
+                                     to: CGPoint(x: x, y: frames.macdChart.maxY)))
+            let rawX = x - labelW / 2
+            let clampedX = min(max(rawX, frames.mainChart.minX), frames.mainChart.maxX - labelW)
+            let rect = CGRect(x: clampedX, y: frames.macdChart.maxY - labelH, width: labelW, height: labelH)
+            let date = Date(timeIntervalSince1970: TimeInterval(candles[idx].datetime))
+            labels.append(Label(rect: rect, text: fmt.string(from: date)))
+        }
+        return (labels, lines)
+    }
+
+    /// 周期自适应日期格式（与 CrosshairLayout.swift:91-94 同 formatter 配置；镜像配置非共享符号）。
+    private static func dateFormat(for period: Period) -> String {
+        switch period {
+        case .m3, .m15, .m60: return "MM-dd HH:mm"
+        case .daily, .weekly: return "yyyy-MM-dd"
+        case .monthly:        return "yyyy-MM"
+        }
+    }
 }
