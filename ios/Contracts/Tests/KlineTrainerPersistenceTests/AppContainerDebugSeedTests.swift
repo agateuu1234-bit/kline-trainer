@@ -163,6 +163,24 @@ struct AppContainerDebugSeedTests {
         #expect(c.cache.listAvailable().isEmpty, "未 seed")
     }
 
+    // Task 5 Medium-10：运行时 #1 端到端真协调器路径。
+    // seeded（有记录+pending+cache）→ resetAllProgress（清记录/pending，cache 保留）
+    // → startNewNormalSession（cache 仍在可开局）→ 零记录使 startingCapital 走 settings 分支 → 顶栏 10 万。
+    @Test("重置后开新局：startingCapital 走 settings=10 万（真协调器路径）")
+    func test_after_reset_freshStart_startsAtDefault() async throws {
+        let (cfg, dir) = try makeConfig()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let c = try AppContainer(config: cfg, debugSeedFixtures: true)
+        #expect(try c.db.statistics().totalCount >= 2)        // 前置：seed 有记录
+        try await c.settings.resetAllProgress()
+        #expect(try c.db.statistics().totalCount == 0)        // 记录已清
+        #expect(try c.db.loadPending() == nil)                // pending 已清
+        #expect(!c.cache.listAvailable().isEmpty)             // cache 保留（可开局）
+        let engine = try await c.coordinator.startNewNormalSession()
+        // currentTotalCapital = cashBalance + shares*price；开局无持仓 → = 起始资金。
+        #expect(engine.currentTotalCapital == 100_000)
+    }
+
     // 13c-R2 根治端到端：实际 seeded + cached 的训练组（= 帧预算 runbook 真正剖析的那份）须满载。
     // 直接打开缓存 sqlite，loadAllCandles() 验每周期渲染负载——证 seed 调用点确用满载根数（非仅 make 能力）。
     @Test("seeded 缓存 fixture 满载：每周期 ≥ defaultVisibleCount(80)，默认面板 .m60/.daily ≥ maxVisibleCount(240)")

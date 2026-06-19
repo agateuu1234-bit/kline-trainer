@@ -21,7 +21,8 @@ extension AppContainer {
         // 全空 guard：cache + history + pending + **settings 全为零值默认**（= 未被用户自定义）才 seed。
         // codex-13b-R2-F2：settings 单独被自定义（fees/capital/显示模式）而其余空 → 不可视为 pristine，否则覆盖。
         let s = try db.loadSettings()
-        let settingsPristine = s.commissionRate == 0 && s.totalCapital == 0
+        // #6 修：totalCapital 缺键默认现为 defaultTotalCapital（非 0），pristine 判据相应更新。
+        let settingsPristine = s.commissionRate == 0 && s.totalCapital == AppSettings.defaultTotalCapital
             && s.minCommissionEnabled == false && s.displayMode == .system
         guard cache.listAvailable().isEmpty,
               try db.statistics().totalCount == 0,
