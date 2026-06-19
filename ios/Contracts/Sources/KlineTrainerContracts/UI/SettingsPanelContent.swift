@@ -38,6 +38,12 @@ public enum SettingsPanelContent {
         return .valid(n)
     }
 
+    // MARK: - 重置资金文案（运行时 #1：破坏性，须如实披露清空训练记录）
+    /// 重置资金按钮 + 二次确认文案（运行时 #1：破坏性，须如实披露清空训练记录）。
+    static let resetButtonLabel = "重置资金（清空记录 → ¥100,000）"
+    static let resetConfirmTitle = "确认重置？将清空训练记录"
+    static let resetConfirmMessage = "此操作会删除全部训练记录与未完成的对局，并将资金恢复为 ¥100,000，且不可撤销。"
+
     // MARK: - 显示模式 label（§6.4：白天/夜间/跟随系统）
     public static func displayModeLabel(_ mode: DisplayMode) -> String {
         switch mode {
