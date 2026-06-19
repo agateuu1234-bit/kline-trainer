@@ -10,7 +10,7 @@ import KlineTrainerContracts
 /// - 4 个 protocol surface 用 4 个 extension 分别实现
 /// - 所有 GRDB 错误在 extension 边界 `try ... catch` 通过 PersistenceErrorMapping.translate
 /// - init 时同步跑 AppDBMigrations.makeMigrator().migrate(queue) → 失败抛 AppError
-public final class DefaultAppDB: AppDB {
+public final class DefaultAppDB: AppDB, TrainingResetPort {
 
     /// 唯一 GRDB queue；所有 4 个 protocol 方法共享。internal 给 same-target tests 看。
     let dbQueue: DatabaseQueue
@@ -154,6 +154,21 @@ public final class DefaultAppDB: AppDB {
     public func resetCapital() throws {
         do {
             try dbQueue.write { db in try SettingsDAOImpl.resetCapital(db) }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    // MARK: - TrainingResetPort（重置资金「真正归零重来」，运行时 #1）
+
+    /// 单事务：删全部记录(+ops+drawings 子行) + clearPending + setTotalCapital。
+    /// dbQueue.write 即事务边界 —— 任一步抛错整体 rollback（要么都成要么都不成）。
+    public func resetAllTrainingProgress(toCapital: Double) throws {
+        do {
+            try dbQueue.write { db in
+                try RecordRepositoryImpl.deleteAll(db)
+                try PendingTrainingRepositoryImpl.clearPending(db)
+                try SettingsDAOImpl.setTotalCapital(db, toCapital)
+            }
         } catch let appErr as AppError { throw appErr }
         catch { throw PersistenceErrorMapping.translate(error) }
     }

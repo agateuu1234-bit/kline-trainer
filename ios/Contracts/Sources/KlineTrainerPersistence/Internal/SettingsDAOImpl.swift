@@ -91,4 +91,11 @@ enum SettingsDAOImpl {
             "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
             arguments: [keyTotalCapital, String(AppSettings.defaultTotalCapital)])
     }
+
+    /// 参数化写 total_capital（供 TrainingResetPort 原子事务复用；不改其它 key）。
+    static func setTotalCapital(_ db: Database, _ value: Double) throws {
+        try db.execute(sql:
+            "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+            arguments: [keyTotalCapital, String(value)])
+    }
 }
