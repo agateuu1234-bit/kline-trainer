@@ -1,6 +1,6 @@
 # 重置资金·真正归零（清空记录 + 重置 10 万）— 非-coder 验收清单
 
-> **本交付性质**：功能修正。「重置资金」原实现只重置金额，训练记录不清空，与意图不符。本次在单一数据库事务内原子性地：删除全部训练记录（`training_sessions`）、未完成对局（`pending_sessions`），同时将总资金重置为 10 万元；取消操作则数据库不发生任何变更。SettingsPanel 确认文案同步更新以如实告知用户将清空训练记录。首次开局（冷启动 / 重置后开新局）的 `startingCapital` 始终从 SettingsStore 读取 `defaultTotalCapital`（10 万），消除归零前为 ¥0 的隐患。
+> **本交付性质**：功能修正。「重置资金」原实现只重置金额，训练记录不清空，与意图不符。本次在单一数据库事务内原子性地：删除全部训练记录（`training_records` 及其子表 `trade_operations`/`drawings`）、未完成对局（`pending_training`），同时将总资金重置为 10 万元；取消操作则数据库不发生任何变更。SettingsPanel 确认文案同步更新以如实告知用户将清空训练记录。首次开局（冷启动 / 重置后开新局）的 `startingCapital` 始终从 SettingsStore 读取 `defaultTotalCapital`（10 万），消除归零前为 ¥0 的隐患。
 >
 > 验收判据 = **范围 gate + persistence 新测试（5 条含真事务回滚）+ AppContainer 重置后开局测试 + SettingsStore/SettingsPanelContent 新测试 + host 全量 1091 条 + Catalyst build + iOS app build + §5 模拟器 runbook（三场景，用户实测）+ Opus 4.8 xhigh 对抗性 review APPROVE 落账**。
 >
@@ -165,4 +165,4 @@ grep -F "fix/w3-reset-capital@$(git rev-parse HEAD)" .claude/state/codex-attest-
 
 - **模拟器 runbook §6（第 6 条）**：用户实测后在本 doc 回填 ☐ → ✅/❌。
 - **Opus 4.8 xhigh APPROVE（第 7 条）**：branch-diff 闸门 review 在本 commit 之后单独跑并落账。
-- **后端 B3/B4 pending_sessions 清理**：`pending_sessions` 表在 iOS 本地清空（已覆盖），后端 lease 状态机（FastAPI B3）若有对应租约记录，清理属后端 scope，不在本计划范围内。
+- **后端租约清理**：iOS 本地 `pending_training` 表已在重置事务内清空（已覆盖）；后端 lease 状态机（FastAPI B3）若有对应租约记录，清理属后端 scope，不在本计划范围内。
