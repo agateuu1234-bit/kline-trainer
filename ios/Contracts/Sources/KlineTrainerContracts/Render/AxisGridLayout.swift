@@ -71,7 +71,12 @@ enum AxisGridLayout {
         for s in candidates where count(s) <= Double(maxTicks) { chosen = s; break }
         var ticks: [Double] = []
         var v = (lo / chosen).rounded(.up) * chosen        // first = ceil(lo/step)*step
-        while v <= hi + chosen * 1e-9 { ticks.append(v); v += chosen }
+        while v <= hi + chosen * 1e-9 {
+            ticks.append(v)
+            let next = v + chosen
+            if next == v { break }                          // FP 停滞守卫：chosen < ulp(v) 时 v+=chosen 无进展 → 防死循环（生产 ±5% padding 下 chosen≫ulp，不触发）
+            v = next
+        }
         if ticks.isEmpty { ticks = [(lo + hi) / 2] }        // 防御性兜底（R2-N1；当前 2-decade 阶梯下不触发，细端 count≥~100）
         return (ticks, chosen)
     }
