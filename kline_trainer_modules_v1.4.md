@@ -1318,6 +1318,18 @@ func findCandleIndex(for marker: TradeMarker,
 }
 ```
 
+### §C5b 坐标轴 / 网格 / 周期标注布局 `AxisGridLayout`（RFC 2026-06-20）
+
+平台无关纯类型 `AxisGridLayout`（internal，同 `CrosshairLayout`），draw-time 解析：
+- `priceTicks` / `timeTicks` / `volumeAxis` / `macdZero` / `periodLabel` / `resolve(...) -> AxisGridResolved?`
+- 全部输入来自既有 `KLineRenderState`（viewport / frames / visibleCandles / volumeRange / macdRange / panel.period）；
+  **`KLineRenderState` 契约不变（无新字段）**。
+- UIKit 绘制：`KLineView.draw` 新增 2 pass —— `drawGridLines`（最前，K 线背后，`gridLine` token）、
+  `drawAxisLabels`（在 `drawMarkers` 与 `drawCrosshair` 之间）。既有 8 个 draw 调用顺序不变。
+- 价格刻度：右缘整齐 nice-step（≤6 档，退化区间空）；时间刻度：底部周期自适应格式 + 绝对索引；
+  垂直网格贯穿三区；量图最大量（万/亿）、MACD 0 轴；周期角标左上。
+- 标签盒复用 `KLineView.drawLabelBox`（`private`→`internal`）。
+
 ### C6 绘线工具模块
 
 ```swift

@@ -35,7 +35,7 @@ extension KLineView {
     }
 
     /// D4：标签框 = background 实心 + text 文字，10pt 系统字体，居中。
-    private func drawLabelBox(ctx: CGContext, rect: CGRect, text: String) {
+    func drawLabelBox(ctx: CGContext, rect: CGRect, text: String) {
         currentPalette.background.setFill()
         ctx.fill(rect)
         let attrs: [NSAttributedString.Key: Any] = [

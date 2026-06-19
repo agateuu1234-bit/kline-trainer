@@ -57,3 +57,6 @@ DerivedData/
 # Git worktrees (project-local isolated workspaces for parallel plans)
 .worktrees/
 .claude/worktrees/
+
+# Superpowers brainstorming visual-companion scratch (mockups, server state)
+.superpowers/
