@@ -205,3 +205,38 @@ struct PeriodLabelTests {
         #expect(label.rect.maxY <= f.mainChart.maxY)
     }
 }
+
+@Suite("AxisGridLayout.resolve 组装")
+struct AxisGridResolveTests {
+    @Test("空切片 → nil")
+    func emptyCandlesNil() {
+        let m = makeMapper(visibleCount: 0)
+        let f = makeFrames()
+        let vm = makeIndicatorMapper(frame: f.volumeChart, values: [0, 1])
+        let mm = makeIndicatorMapper(frame: f.macdChart, values: [-1, 1])
+        #expect(AxisGridLayout.resolve(mapper: m, volumeMapper: vm, macdMapper: mm,
+                                       candles: makeCandles(count: 0)[0..<0], period: .m3, frames: f) == nil)
+    }
+
+    @Test("非空 → 组装各部件；gridLines = 价格 + 时间 + 量 + macd 合并")
+    func assembles() {
+        let f = makeFrames()
+        let m = makeMapper(visibleCount: 10, priceMin: 11.23, priceMax: 12.87)
+        let vm = makeIndicatorMapper(frame: f.volumeChart, values: [0, 100])
+        let mm = makeIndicatorMapper(frame: f.macdChart, values: [-0.5, 0.5])
+        let c = makeCandles(count: 10, volume: 100)[0..<10]
+        let r = AxisGridLayout.resolve(mapper: m, volumeMapper: vm, macdMapper: mm,
+                                       candles: c, period: .m60, frames: f)
+        #expect(r != nil)
+        guard let r else { return }
+        let price = AxisGridLayout.priceTicks(mapper: m)
+        let time = AxisGridLayout.timeTicks(mapper: m, candles: c, period: .m60, frames: f)
+        #expect(r.priceLabels == price.labels)
+        #expect(r.timeLabels == time.labels)
+        #expect(r.periodLabel.text == "60分")
+        #expect(r.volumeLabel != nil)
+        #expect(r.macdZeroLabel != nil)
+        // gridLines 合并计数 = 价格 + 时间 + 量(1) + macd(1)
+        #expect(r.gridLines.count == price.gridLines.count + time.gridLines.count + 2)
+    }
+}

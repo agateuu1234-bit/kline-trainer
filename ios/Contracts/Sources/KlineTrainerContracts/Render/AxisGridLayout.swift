@@ -162,4 +162,26 @@ enum AxisGridLayout {
         let rect = CGRect(x: frames.mainChart.minX + pad, y: frames.mainChart.minY + pad, width: w, height: h)
         return Label(rect: rect, text: text)
     }
+
+    /// 单次 draw-time 解析：组装全部部件。candles.isEmpty → nil（绘制层两 pass 都跳过）。
+    /// 各部件独立守卫：价格刻度退化→空、MACD 0 不在区间→nil、量图非空→有；周期角标恒在。
+    static func resolve(mapper: CoordinateMapper, volumeMapper: IndicatorMapper, macdMapper: IndicatorMapper,
+                        candles: ArraySlice<KLineCandle>, period: Period,
+                        frames: ChartPanelFrames) -> AxisGridResolved? {
+        guard !candles.isEmpty else { return nil }
+        let price = priceTicks(mapper: mapper)
+        let time = timeTicks(mapper: mapper, candles: candles, period: period, frames: frames)
+        let vol = volumeAxis(volumeMapper: volumeMapper, candles: candles)
+        let macd = macdZero(macdMapper: macdMapper)
+        var gridLines = price.gridLines + time.gridLines
+        if let vol { gridLines.append(vol.gridLine) }
+        if let macd { gridLines.append(macd.gridLine) }
+        return AxisGridResolved(
+            gridLines: gridLines,
+            priceLabels: price.labels,
+            timeLabels: time.labels,
+            volumeLabel: vol?.label,
+            macdZeroLabel: macd?.label,
+            periodLabel: periodLabel(period: period, frames: frames))
+    }
 }
