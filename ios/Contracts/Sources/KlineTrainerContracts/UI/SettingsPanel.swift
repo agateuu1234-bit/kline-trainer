@@ -92,7 +92,7 @@ public struct SettingsPanel: View {
         .alert("确认重置资金为 ¥100,000？", isPresented: $showResetConfirm) {
             Button("取消", role: .cancel) {}
             Button("重置", role: .destructive) {
-                Task { try? await settings.resetCapital() }
+                Task { try? await settings.resetAllProgress() }
             }
         }
         // 离线缓存数量输入

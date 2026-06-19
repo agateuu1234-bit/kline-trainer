@@ -20,6 +20,7 @@ public final class SettingsStore {
     public private(set) var settings: AppSettings
 
     private let settingsDAO: SettingsDAO
+    private let resetPort: TrainingResetPort?
     private var pendingMutations: Task<Void, Error>?
     /// R2 H-3 + R3 H-1 + R4 H-1：所有 load 失败（含 dbCorrupted）都阻塞写。
     /// R5 H-1：暴露为 public read-only，让 caller (E6/E5) 在调 snapshotFees / 进 trade flow 前 guard。
@@ -32,8 +33,9 @@ public final class SettingsStore {
         commissionRate: 0, minCommissionEnabled: false,
         totalCapital: 0, displayMode: .system)
 
-    public init(settingsDAO: SettingsDAO) {
+    public init(settingsDAO: SettingsDAO, resetPort: TrainingResetPort? = nil) {
         self.settingsDAO = settingsDAO
+        self.resetPort = resetPort
         do {
             self.settings = try settingsDAO.loadSettings()
         } catch {
@@ -67,17 +69,22 @@ public final class SettingsStore {
         try await task.value
     }
 
-    public func resetCapital() async throws {
-        if let e = _loadError { throw e }  // R2 H-3 + R4 H-1: block writes 直到 reload 成功
+    /// 重置资金「真正归零重来」(运行时 #1)：经注入端口在单事务内清空全部训练记录 +
+    /// 未完成对局，并把资金恢复为 AppSettings.defaultTotalCapital。
+    /// 复用 loadError 写阻塞 + pendingMutations 串行化（与 update 同机制）。
+    public func resetAllProgress() async throws {
+        if let e = _loadError { throw e }   // block writes 直到 reload 成功
+        guard let port = resetPort else {
+            throw AppError.internalError(module: "P6", detail: "resetAllProgress 需注入 TrainingResetPort")
+        }
         let prev = pendingMutations
         let task = Task { [weak self] in
             _ = try? await prev?.value
             guard let self = self else { return }
-            let dao = self.settingsDAO
             try await Task.detached(priority: .userInitiated) {
-                try dao.resetCapital()
+                try port.resetAllTrainingProgress(toCapital: AppSettings.defaultTotalCapital)
             }.value
-            self.settings.totalCapital = 0
+            self.settings.totalCapital = AppSettings.defaultTotalCapital
         }
         pendingMutations = task
         try await task.value
