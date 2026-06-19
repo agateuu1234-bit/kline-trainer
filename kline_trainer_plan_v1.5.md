@@ -234,6 +234,14 @@ enum ChartInteractionMode {
 
 **买入/卖出/持有/观察触发时：两面板立即中断 free-scrolling，硬切 auto-tracking，无平滑过渡。** 交易是强意图信号，延迟会造成认知混乱。
 
+#### 坐标轴 / 网格 / 周期标注（RFC 2026-06-20，#3）
+
+上下两面板主图 + 量图 + MACD 三区均渲染：价格轴（右缘，整齐 nice-step 刻度 + 水平网格）、
+时间轴（底部共享，周期自适应：分钟级 MM-dd HH:mm / 日·周 yyyy-MM-dd / 月 yyyy-MM）+ 垂直网格、
+量图最大量（万/亿）、MACD 0 轴、左上周期角标（3分/15分/60分/日/周/月）。
+**标签悬浮**（半透明/实心盒叠在 K 线上），**冻结的 60/15/25 三区几何与视口宽度不变**（非留白槽）。
+无最新价横线。详见 docs/superpowers/specs/2026-06-20-chart-axes-grid-period-design.md。
+
 ---
 
 ## 二、项目结构
