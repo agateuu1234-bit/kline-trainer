@@ -92,6 +92,12 @@ public final class KLineView: UIView {
             viewport: renderState.viewport,
             displayScale: scale)
 
+        let axisGrid = AxisGridLayout.resolve(
+            mapper: mapper, volumeMapper: volMapper, macdMapper: macdMapper,
+            candles: renderState.visibleCandles, period: renderState.panel.period,
+            frames: renderState.frames)
+        drawGridLines(ctx: ctx, resolved: axisGrid)
+
         drawCandles(ctx: ctx, mapper: mapper, candles: renderState.visibleCandles)
         drawMA66(ctx: ctx, mapper: mapper, candles: renderState.visibleCandles)
         drawBOLL(ctx: ctx, mapper: mapper, candles: renderState.visibleCandles)
@@ -101,6 +107,7 @@ public final class KLineView: UIView {
                      period: renderState.panel.period, tools: Self.drawingTools)
         drawMarkers(ctx: ctx, viewport: renderState.viewport, mapper: mapper,
                     markers: renderState.markers, candles: renderState.visibleCandles)
+        drawAxisLabels(ctx: ctx, resolved: axisGrid)
         drawCrosshair(ctx: ctx, at: renderState.crosshairPoint, viewport: renderState.viewport)
     }
 }
