@@ -112,7 +112,7 @@ struct PriceTicksTests {
         #expect(lines.isEmpty)
     }
 
-    @Test("极窄正区间 10.001..10.002 → 价格刻度非空（防 R2-N1 空档回归）")
+    @Test("极窄正区间 10.001..10.002 → 价格刻度非空、≤6 档（细端阶梯保证非空；非空性回归）")
     func ultraNarrowNonEmpty() {
         let m = makeMapper(priceMin: 10.001, priceMax: 10.002)
         let (labels, _) = AxisGridLayout.priceTicks(mapper: m)
@@ -204,7 +204,7 @@ enum AxisGridLayout {
         var ticks: [Double] = []
         var v = (lo / chosen).rounded(.up) * chosen        // first = ceil(lo/step)*step
         while v <= hi + chosen * 1e-9 { ticks.append(v); v += chosen }
-        if ticks.isEmpty { ticks = [(lo + hi) / 2] }        // 空档兜底（R2-N1）
+        if ticks.isEmpty { ticks = [(lo + hi) / 2] }        // 防御性兜底（R2-N1；当前 2-decade 阶梯下不触发，细端 count≥~100）
         return ticks
     }
 }
@@ -637,7 +637,7 @@ Expected: FAIL — `no member 'resolve'`。
 - [ ] **Step 4: 跑测试确认通过 + 全量回归**
 
 Run: `cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test --filter ResolveTests` 然后跑全量 `swift test`
-Expected: ResolveTests PASS；全量 host 测试无回归（基线 1091 tests，新增本套后增加，0 失败）。
+Expected: ResolveTests PASS；全量 host 测试无回归（≥ 基线测试数 + 本套新增，0 failures）。
 （5 个测试 Suite 的 type 名：PriceTicksTests / TimeTicksTests / VolumeMacdTests / PeriodLabelTests / ResolveTests；逐个可 `--filter <TypeName>`，全跑用无 filter 的 `swift test`。）
 
 - [ ] **Step 5: 提交**
