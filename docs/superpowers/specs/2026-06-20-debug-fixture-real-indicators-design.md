@@ -83,7 +83,7 @@ enum FixturePriceSeries {
 - **OHLC 构造**：`open[i] = close[i-1]`（首根 = close[0]）；`high = max(open,close) + spread_i`、`low = min(open,close) - spread_i`，`spread_i = vol_k 标定`（>0）→ 必满足 `high ≥ max(o,c) ≥ min(o,c) ≥ low`；`low > 0` 由价格近中枢 + 小 spread 保证（远高于 floor）。
 - **volume** `= base + round(k · |r_i|)` ∝ 当根波动（`r_0:=0` → `volume[0]=base`）→ 取代现状单调递增的 `1000+i*10`。
 
-**不变量（验收锚点）**：① 同种子两次 `generate(n)` 字节相等；② 全部 `open/high/low/close > 0 && isFinite`；③ `high ≥ max(open,close)`、`low ≤ min(open,close)`、`high ≥ low`；④ **非退化变动**——相邻 close 不恒等，整序列 return 标准差 > 0，且 **full-load(9600) m3 序列任意连续 20 根 close 的总体 std > ε**（**ε = visible-band 阈，价格相对约 `close·1e-3`，非仅 `>0` 排除精确重合** → BOLL 带肉眼可辨、永不三线重叠，直接守 #7 不局部复发；实测 vol_min~1% 下 20 窗口 std≈0.26 ≫ ε≈0.01）；⑤ `generate(n).count == n`；⑥ **永不贴边**——全序列无任何 close 触及 floor/ceil（硬安全网从不操作性触发，安全网 tripwire 非主守门）。
+**不变量（验收锚点）**：① 同种子两次 `generate(n)` 字节相等；② 全部 `open/high/low/close > 0 && isFinite`；③ `high ≥ max(open,close)`、`low ≤ min(open,close)`、`high ≥ low`；④ **非退化变动**——相邻 close 不恒等，整序列 return 标准差 > 0，且 **full-load(9600) m3 序列任意连续 20 根 close 的总体 std > ε**（**ε = visible-band 阈，价格相对约 `close·1e-3`，非仅 `>0` 排除精确重合** → BOLL 带肉眼可辨、永不三线重叠，直接守 #7 不局部复发；实跑 full-load = 0 退化窗口，最坏 20 窗口 std≈0.04 ≈ 4×ε，ε≈0.01）；⑤ `generate(n).count == n`；⑥ **永不贴边**——全序列无任何 close 触及 floor/ceil（硬安全网从不操作性触发，安全网 tripwire 非主守门）。
 
 ### 5.2 `FixtureIndicatorMath`（新，DEBUG）
 `ios/Contracts/Sources/KlineTrainerPersistence/DebugFixtures/FixtureIndicatorMath.swift`

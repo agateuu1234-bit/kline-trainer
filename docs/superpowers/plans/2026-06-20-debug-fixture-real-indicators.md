@@ -20,6 +20,8 @@
 
 **测试基线**：当前 main `bc31625` host `swift test` = **1127 tests / 158 suites / 0 fail**。本计划新增 **19 个 @Test**（7+8+3+1），完成后约 **1146 tests**（以 verification 实跑为准，不硬编码）。
 
+**消费者（无需改动）**：`ios/Contracts/Sources/KlineTrainerPersistence/DebugFixtures/AppContainer+DebugSeed.swift:33,50` 调 `DebugFixtureData.make(m3Count:)`/`DebugTrainingSetWriter.write` —— 仅用 `seed.{settings,records,pending,meta,trainingSetFilename}` 与不变的 `make` 签名，不碰任何 `CandleRow` 指标字段，故**无需编辑**（且它经 `cache.store` 在满载 9600 实跑整条写读链路）。
+
 **测试运行命令**（host，从仓库根）：
 ```bash
 cd "ios/Contracts" && swift test 2>&1 | tail -20
@@ -399,7 +401,7 @@ enum FixturePriceSeries {
 
 Run: `cd "ios/Contracts" && swift test --filter FixturePriceSeriesTests 2>&1 | tail -15`
 Expected: `Test run with 8 tests ... passed`。
-**实现者注**：若 `noDegenerate20Window` 报某窗口退化（极不可能——vol_min=0.012 每根注入运动，实测 20 窗口 std≈0.26 ≫ ε≈0.01），按 spec D6 的 by-construction 守门，把 `volMin` 以 0.003 增量上调并重跑直至绿；这是 plan 赋予的退化根治旋钮，不是占位。
+**实现者注**：本组常量经审查者实跑 `generate(9600)` 验证 = **0 退化窗口**，最坏 20 窗口 std≈0.04（≈**4×ε**，ε≈mean·1e-3≈0.01）——margin 不大但安全。若 `noDegenerate20Window` 报某窗口退化（不应发生），按 spec D6 的 by-construction 守门，把 `volMin` 以 0.003 增量上调并重跑直至绿；这是 plan 赋予的退化根治旋钮，不是占位。
 
 - [ ] **Step 5: 提交**
 
