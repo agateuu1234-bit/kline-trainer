@@ -83,7 +83,7 @@ enum FixturePriceSeries {
 - **OHLC 构造**：`open[i] = close[i-1]`（首根 = close[0]）；`high = max(open,close) + spread_i`、`low = min(open,close) - spread_i`，`spread_i = vol_k 标定`（>0）→ 必满足 `high ≥ max(o,c) ≥ min(o,c) ≥ low`；`low > 0` 由价格近中枢 + 小 spread 保证（远高于 floor）。
 - **volume** `= base + round(k · |r_i|)` ∝ 当根波动（`r_0:=0` → `volume[0]=base`）→ 取代现状单调递增的 `1000+i*10`。
 
-**不变量（验收锚点）**：① 同种子两次 `generate(n)` 字节相等；② 全部 `open/high/low/close > 0 && isFinite`；③ `high ≥ max(open,close)`、`low ≤ min(open,close)`、`high ≥ low`；④ **非退化变动**——相邻 close 不恒等，整序列 return 标准差 > 0，且 **full-load(9600) m3 序列任意连续 20 根 close 的总体 std > 0**（即 BOLL 永不三线重合，直接守 #7 不局部复发）；⑤ `generate(n).count == n`；⑥ **永不贴边**——全序列无任何 close 触及 floor/ceil（硬安全网从不操作性触发）。
+**不变量（验收锚点）**：① 同种子两次 `generate(n)` 字节相等；② 全部 `open/high/low/close > 0 && isFinite`；③ `high ≥ max(open,close)`、`low ≤ min(open,close)`、`high ≥ low`；④ **非退化变动**——相邻 close 不恒等，整序列 return 标准差 > 0，且 **full-load(9600) m3 序列任意连续 20 根 close 的总体 std > ε**（**ε = visible-band 阈，价格相对约 `close·1e-3`，非仅 `>0` 排除精确重合** → BOLL 带肉眼可辨、永不三线重叠，直接守 #7 不局部复发；实测 vol_min~1% 下 20 窗口 std≈0.26 ≫ ε≈0.01）；⑤ `generate(n).count == n`；⑥ **永不贴边**——全序列无任何 close 触及 floor/ceil（硬安全网从不操作性触发，安全网 tripwire 非主守门）。
 
 ### 5.2 `FixtureIndicatorMath`（新，DEBUG）
 `ios/Contracts/Sources/KlineTrainerPersistence/DebugFixtures/FixtureIndicatorMath.swift`
@@ -138,13 +138,13 @@ INSERT 把 `boll_upper/boll_mid/boll_lower/macd_diff/macd_dea/macd_bar` 从 `NUL
 | D7 | round 4/4/6 dp（同后端 DB DECIMAL(10,4)/(10,6)） | 忠实镜像真实 DB；让 isolated 测试断言后端精确数值；**连带更新现有 `ma66_rollingMean` 测试**（现断未舍入值） |
 | D8 | 零外溢：不改模型/不 bump CONTRACT_VERSION/不碰 render/env，全 #if DEBUG | fixture-only，生产零风险 |
 | D9 | 「每周期指标可见」断言用 `fullLoadM3Count`（9600） | 仅满载下 monthly(80)≥66、weekly(120)≥66 才有 MA66；240 下高周期暖机全 nil（非 bug） |
-| D10 | 退化守门：full-load m3 序列**任意 20 窗口总体 std>0** + **永不贴边** 两条不变量 + host 测试 | 直接守 #7 不局部复发（BOLL 三线重合=局部重现 invisible 症状）；review High 的 by-construction(D6) + by-test 双保险 |
+| D10 | 退化守门：full-load m3 序列**任意 20 窗口总体 std>ε（visible-band≈close·1e-3，非仅 >0）** + **永不贴边** 两条不变量 + host 测试 | 直接守 #7 不局部复发（BOLL 三线重合/重叠=局部重现 invisible 症状）；review High by-construction(D6) + by-test 双保险；ε 阈守「肉眼可辨」非仅「不精确重合」（review N1） |
 | D11 | 指标 golden 断言用**容差**（4dp→1e-4 / 6dp→1e-6，镜像后端 approx）；MACD 加**外部手算 golden**（`diff[1]≈0.007977…`）非仅循环参考；绑定值保持 `Double?→REAL/NULL` 过 reader 亲和门 | 避开 FP exact `==` 脆性（review M2）；杜绝 MACD 同源转写 bug 双过（review M1）；记录 reader `typeof()` 隐式约束（review L2） |
 
 ## 8. 测试策略
 
 1. **`FixtureIndicatorMathTests`**（新）：后端 ground-truth **用容差**（`|ma66@65-13.25|<1e-4` / BOLL@19 三值 `<1e-4` / **MACD 外部手算 golden `diff[1]≈0.007977`、`dea[1]≈0.001595`、`bar[1]≈0.012764`（`<1e-6`）+ `diff[0]/dea[0]/bar[0]==0` + 末根 vs 内联参考递推**）；**无暖机 nil**（`macd(ramp(1))` 三数组 `[0]` 非 nil）；暖机 nil 边界（ma66[64]=nil/[65]≠nil；boll[18]=nil/[19]≠nil）；空/短序列（count<window 全 nil）。
-2. **`FixturePriceSeriesTests`**（新）：确定性（同种子字节相等）；正值&有限；OHLC 不变量（high≥max(o,c)、low≤min(o,c)、high≥low）；**非退化守门（D10）**——full-load(9600) m3 序列**任意连续 20 根 close 总体 std > 0**（守 #7 不局部复发）+ **永不贴边**（无 close 触 floor/ceil）+ 整序列 return std>0；首根 `r_0:=0`（`open[0]==close[0]`）；计数 == n。
+2. **`FixturePriceSeriesTests`**（新）：确定性（同种子字节相等）；正值&有限；OHLC 不变量（high≥max(o,c)、low≤min(o,c)、high≥low）；**非退化守门（D10）**——full-load(9600) m3 序列**任意连续 20 根 close 总体 std > ε（≈close·1e-3 visible-band 阈，非仅 >0）**（守 #7 不局部复发）+ **永不贴边**（无 close 触 floor/ceil）+ 整序列 return std>0；首根 `r_0:=0`（`open[0]==close[0]`）；计数 == n。
 3. **`DebugFixtureDataTests`**（更新+新增）：
    - **更新** `ma66_rollingMean`：改断 `round(expected,4)`（D7）。
    - **新增**：满载下**每周期** ma66/boll/macd 在暖机后非 nil（监 #7 回归）；m3 与聚合周期 MA66 均非 nil（监 D4）；指标全 `isFinite`。
