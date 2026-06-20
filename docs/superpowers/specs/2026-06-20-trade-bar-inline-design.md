@@ -117,7 +117,7 @@ public struct TradeBarView: View {
 5. `performTrade(_ action: TradeAction, panel:tier:)`：签名形参类型从私有 `PickerRequest.Action` 改为顶层 `TradeAction`（其余体内逻辑——buy/sell 分派、autosave、触觉、toast——**字节不变**）。
 6. 私有 `PickerRequest`（含其嵌套 `enum Action`）→ 改名 `TradeStripRequest`，`action` 字段类型改用顶层 `TradeAction`（`PickerRequest.Action` 随之移除）。**决议：改名 + 换类型，非删除重建**（§4.6）。
 
-> **悬浮落位**：`TradeBarView` 横条需横向空间（5 chip + ✕），而买卖按钮在图表右侧窄列。决议用 `.overlay(alignment: .bottom)` 把小条悬浮在被点面板**底部**（横向占满面板宽、叠在图表下沿之上），而非塞进窄右列。这避免改面板 `HStack` 结构。**几何不变性（修 review-M1，诚实表述）**：`.overlay` 不改变 underlying `KLineView` 的 `frame`/`bounds`（SwiftUI overlay 按 underlying 尺寸绘制于其上、不动其 layout）→ 故 `onBoundsChange`/`layoutSubviews` 的几何重算**不触发**；`updateUIView` 仍可能因 SwiftUI body 重评估而重跑，但 `recordRenderBounds` 的 `previous != bounds` 守卫（`ChartContainerView.swift:130`）+ 零尺寸早返（L127）使其为 **no-op**、renderState 重建为**同值** → 零几何变化、不碰 RFC #3 轴几何 / PR #122 时序修复。小条短暂遮挡图表下沿（含 RFC #3 时间轴）属可接受（用户此刻聚焦交易决策，收起即恢复）。
+> **悬浮落位**：`TradeBarView` 横条需横向空间（5 chip + ✕），而买卖按钮在图表右侧窄列。决议用 `.overlay(alignment: .bottom)` 把小条悬浮在被点面板**底部**（横向占满面板宽、叠在图表下沿之上），而非塞进窄右列。这避免改面板 `HStack` 结构。**几何不变性（修 review-M1，诚实表述）**：`.overlay` 不改变 underlying `KLineView` 的 `frame`/`bounds`（SwiftUI overlay 按 underlying 尺寸绘制于其上、不动其 layout）→ 故 `onBoundsChange`/`layoutSubviews` 的几何重算**不触发**；`updateUIView` 仍可能因 SwiftUI body 重评估而重跑，但 `recordRenderBounds` 的 `previous != bounds` 守卫（`TrainingEngine.swift:822`；`recordRenderBounds` 定义于 L812）+ `ChartContainerView` 瞬态零尺寸早返（`ChartContainerView.swift:127`）使其为 **no-op**、renderState 重建为**同值** → 零几何变化、不碰 RFC #3 轴几何 / PR #122 时序修复。小条短暂遮挡图表下沿（含 RFC #3 时间轴）属可接受（用户此刻聚焦交易决策，收起即恢复）。
 
 ### 4.5 删除旧组件
 
@@ -127,7 +127,7 @@ public struct TradeBarView: View {
 - `ios/Contracts/Tests/KlineTrainerContractsTests/UI/PositionPickerContentTests.swift`（10 个 `@Test`）
 - **关联验收脚本 `scripts/acceptance/plan_u5_position_picker_view.sh` 一并删除**（修 review-H1/L1）：它在 `set -euo pipefail` 下对被删文件 `test -f` 会硬失败，是本改动造成的孤儿；review 已核验它**未接入任何 CI workflow**（CI 唯一验收闸是 `hardening_6_gate.yml`），故删除**不会 red-CI**。
 
-**文本引用同步（= §7 的 spec amendment 清单，非遗漏）**：对 `PositionPickerView` 的文字引用集中在 `modules §U5`（L2124-2131 init 块）+ `plan §6.2.4`（L950-960 HUD ASCII）+ `plan 目录树注释 L274`——这三处正是 §7 要 amend 的冻结 spec 段落。PR #71 的两份历史 plan/acceptance doc（`docs/.../2026-05-28-pr-u5-*`）**保留不改**（已 shipped 的过去交付凭证）。
+**文本引用同步（= §7 的 spec amendment 清单）**：需 amend 的**冻结 spec 段落**为 `modules §U5`（L2124-2131 init 块 **+ L2207 验收清单项 `- [ ] U5 PositionPickerView`**）+ `plan §6.2.4`（L950-963 模态仓位选择 HUD 描述/ASCII）+ `plan 目录树注释 L274`。其余对 `PositionPickerView` 的引用均为**历史交付凭证**（PR #71 的 `2026-05-28-pr-u5-*` plan+acceptance、U2 plan `2026-06-07-pr-u2-training-view.md`、Wave3-PR7 plan `2026-06-13-wave3-pr7-u2-trade-ui.md`、`wave1-completion`/`wave1-outline`），按已 shipped 原则**保留不改**、非 load-bearing（无 CI 解析，删除不 red-CI）。
 
 `PositionTier` 枚举（`Models.swift:25-31`）**保留**——引擎 `buy/sell` API + 持久化 record 用，非孤儿。`swift test` 无 `--filter`（`swift-contracts-smoke.yml:39`）→ 删 10 个 `@Test` 后总数自然下调、非硬编码、不 red-CI。
 
