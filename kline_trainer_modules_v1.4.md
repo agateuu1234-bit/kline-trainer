@@ -2133,7 +2133,7 @@ struct TradeBarView: View {
 // 引擎零改动：onPick(.tier5) 即现有全仓/清仓路径。模态 PositionPickerView 已删除（RFC #1）。
 ```
 
-### U6 历史动作表 `HistoryActionSheet.swift`
+### U6 历史动作弹窗（屏幕居中） `HistoryActionSheet.swift`
 
 ```swift
 struct HistoryActionSheet: View {
