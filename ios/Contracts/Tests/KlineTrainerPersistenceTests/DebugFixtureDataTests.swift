@@ -47,7 +47,7 @@ struct DebugFixtureDataTests {
         #expect(m3[0].ma66 == nil)
         #expect(m3[64].ma66 == nil)
         let expected65 = (0...65).map { m3[$0].close }.reduce(0, +) / 66.0
-        #expect(abs((m3[65].ma66 ?? -1) - expected65) < 1e-9)
+        #expect(abs((m3[65].ma66 ?? -1) - expected65) < 1e-4)   // D7：ma66 现 round 4dp
     }
 
     @Test("确定性：两次生成完全相同（无随机）")
@@ -128,6 +128,43 @@ struct DebugFixtureDataTests {
             }
             #expect(rows.last!.endGlobalIndex == maxM3End, "周期 \(period) 末行 end 须覆盖到 max m3 end")
         }
+    }
+
+    // 监 #7 指标看不到回归：满载下每周期暖机后 MA66/BOLL/MACD 均非 nil（每周期满载根数：m3=9600..monthly=80，均 ≥66/≥20）
+    @Test("满载：每周期暖机后 MA66@65 / BOLL@19 三轨 / MACD@0 均非 nil（监 #7）")
+    func fullLoad_everyPeriodHasIndicators() {
+        let data = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count)
+        for period in Period.allCases {
+            let rows = data.candles.first(where: { $0.period == period })!.rows
+            #expect(rows.count >= 66, "周期 \(period) 满载根数应 ≥66")
+            #expect(rows[65].ma66 != nil, "周期 \(period) MA66@65 应非 nil")
+            #expect(rows[19].bollUpper != nil && rows[19].bollMid != nil && rows[19].bollLower != nil,
+                    "周期 \(period) BOLL@19 三轨应非 nil")
+            #expect(rows[0].macdDiff != nil && rows[0].macdDea != nil && rows[0].macdBar != nil,
+                    "周期 \(period) MACD@0 应非 nil（无暖机）")
+        }
+    }
+
+    @Test("满载：所有非 nil 指标值均有限")
+    func fullLoad_indicatorsFinite() {
+        let data = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count)
+        for pc in data.candles {
+            for c in pc.rows {
+                for v in [c.ma66, c.bollUpper, c.bollMid, c.bollLower, c.macdDiff, c.macdDea, c.macdBar] {
+                    if let v { #expect(v.isFinite) }
+                }
+            }
+        }
+    }
+
+    // 监 D4：旧版聚合周期 ma66=nil；现逐周期算 → 聚合周期 MA66 亦非 nil
+    @Test("MA66 在 m3 与聚合周期(daily)均非 nil（监 D4 旧版聚合 nil 缺陷）")
+    func ma66_presentOnAggregatedPeriods() {
+        let data = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count)
+        let m3 = data.candles.first(where: { $0.period == .m3 })!.rows
+        let daily = data.candles.first(where: { $0.period == .daily })!.rows
+        #expect(m3[65].ma66 != nil)
+        #expect(daily[65].ma66 != nil, "聚合周期 daily 的 MA66 现应非 nil（旧版为 nil）")
     }
 }
 #endif
