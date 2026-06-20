@@ -113,21 +113,23 @@ public struct TradeBarView: View {
 1. `@State private var pickerRequest: PickerRequest?` → `@State private var tradeStrip: TradeStripRequest?`（`{ panel: PanelId, action: TradeAction }`，`Identifiable`；同时只开一个小条）。
 2. `tradeButtons(_:)`：买入按钮 `{ tradeStrip = TradeStripRequest(panel:id, action:.buy) }`、卖出 `{ … .sell }`（替换原 `pickerRequest = …`）；`.disabled(!buyEnabled/!sellEnabled)` 不变；持有/观察不变。
 3. 删 `.sheet(item: $pickerRequest){ PositionPickerView(...) }`（L107-115）。
-4. `panel(_:)` 改为 `.overlay(alignment: .bottom)` 条件渲染 `TradeBarView`：当 `tradeStrip?.panel == id` 时悬浮在该面板上（横条贴底、不挤压图表），`onPick = { tier in performTrade(action, panel:id, tier:tier); tradeStrip = nil }`、`onCancel = { tradeStrip = nil }`。
+4. `panel(_:)` 改为 `.overlay(alignment: .bottom)` 条件渲染 `TradeBarView`，**渲染条件 = `showsTradeButtons && tradeStrip?.panel == id`**（conjoint guard，非仅 panel 匹配；修 review-L3：防 Normal 置位的 `tradeStrip` 在模式翻转至 Review / 会话结束后残留致小条悬空）。`onPick`/`onCancel` 闭包 = 把现 `.sheet` 的 onPick 闭包逻辑（`TrainingView.swift:110-113`，`performTrade(req.action,…); pickerRequest = nil`）原样搬入（`performTrade(action, panel:id, tier:tier); tradeStrip = nil`）—— 这与 `performTrade` **函数体**（L214，唯一改动是形参类型 `PickerRequest.Action → TradeAction`）是**两处不同改点**（修 review-H2）。
 5. `performTrade(_ action: TradeAction, panel:tier:)`：签名形参类型从私有 `PickerRequest.Action` 改为顶层 `TradeAction`（其余体内逻辑——buy/sell 分派、autosave、触觉、toast——**字节不变**）。
 6. 私有 `PickerRequest`（含其嵌套 `enum Action`）→ 改名 `TradeStripRequest`，`action` 字段类型改用顶层 `TradeAction`（`PickerRequest.Action` 随之移除）。**决议：改名 + 换类型，非删除重建**（§4.6）。
 
-> **悬浮落位**：`TradeBarView` 横条需横向空间（5 chip + ✕），而买卖按钮在图表右侧窄列。决议用 `.overlay(alignment: .bottom)` 把小条悬浮在被点面板**底部**（横向占满面板宽、叠在图表下沿之上），而非塞进窄右列。这避免改面板 `HStack` 结构、避免图表 re-layout（不触发 `ChartContainerView.updateUIView` 的 bounds 重算 → 不碰 RFC #3 轴几何 / PR #122 时序修复）。小条短暂遮挡图表下沿（含 RFC #3 时间轴）属可接受（用户此刻聚焦交易决策，收起即恢复）。
+> **悬浮落位**：`TradeBarView` 横条需横向空间（5 chip + ✕），而买卖按钮在图表右侧窄列。决议用 `.overlay(alignment: .bottom)` 把小条悬浮在被点面板**底部**（横向占满面板宽、叠在图表下沿之上），而非塞进窄右列。这避免改面板 `HStack` 结构。**几何不变性（修 review-M1，诚实表述）**：`.overlay` 不改变 underlying `KLineView` 的 `frame`/`bounds`（SwiftUI overlay 按 underlying 尺寸绘制于其上、不动其 layout）→ 故 `onBoundsChange`/`layoutSubviews` 的几何重算**不触发**；`updateUIView` 仍可能因 SwiftUI body 重评估而重跑，但 `recordRenderBounds` 的 `previous != bounds` 守卫（`ChartContainerView.swift:130`）+ 零尺寸早返（L127）使其为 **no-op**、renderState 重建为**同值** → 零几何变化、不碰 RFC #3 轴几何 / PR #122 时序修复。小条短暂遮挡图表下沿（含 RFC #3 时间轴）属可接受（用户此刻聚焦交易决策，收起即恢复）。
 
 ### 4.5 删除旧组件
 
-本改动使 `PositionPickerView` 成孤儿（grep 确认唯一 caller = `TrainingView` 的 `.sheet`，本 RFC 删除该 sheet）。按 CLAUDE.md「Remove imports/variables/functions that YOUR changes made unused」，删除：
+本改动使 `PositionPickerView` 成孤儿（grep `*.swift` 确认唯一 Swift caller = `TrainingView` 的 `.sheet`，本 RFC 删除该 sheet；`performTrade`/`PickerRequest`/`pickerRequest` 全部局限于 `TrainingView.swift`、零外部引用——review 已核验）。按 CLAUDE.md「Remove … that YOUR changes made unused」，删除：
 - `ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerView.swift`
 - `ios/Contracts/Sources/KlineTrainerContracts/UI/PositionPickerContent.swift`
-- `ios/Contracts/Tests/KlineTrainerContractsTests/UI/PositionPickerContentTests.swift`
-- 关联验收脚本 `scripts/acceptance/plan_u5_position_picker_view.sh`（若 CI 引用则同步，否则留存为历史；plan 阶段核实引用图）。
+- `ios/Contracts/Tests/KlineTrainerContractsTests/UI/PositionPickerContentTests.swift`（10 个 `@Test`）
+- **关联验收脚本 `scripts/acceptance/plan_u5_position_picker_view.sh` 一并删除**（修 review-H1/L1）：它在 `set -euo pipefail` 下对被删文件 `test -f` 会硬失败，是本改动造成的孤儿；review 已核验它**未接入任何 CI workflow**（CI 唯一验收闸是 `hardening_6_gate.yml`），故删除**不会 red-CI**。
 
-`PositionTier` 枚举（`Models.swift:25-31`）**保留**——引擎 `buy/sell` API + 持久化 record 用，非孤儿。
+**文本引用同步（= §7 的 spec amendment 清单，非遗漏）**：对 `PositionPickerView` 的文字引用集中在 `modules §U5`（L2124-2131 init 块）+ `plan §6.2.4`（L950-960 HUD ASCII）+ `plan 目录树注释 L274`——这三处正是 §7 要 amend 的冻结 spec 段落。PR #71 的两份历史 plan/acceptance doc（`docs/.../2026-05-28-pr-u5-*`）**保留不改**（已 shipped 的过去交付凭证）。
+
+`PositionTier` 枚举（`Models.swift:25-31`）**保留**——引擎 `buy/sell` API + 持久化 record 用，非孤儿。`swift test` 无 `--filter`（`swift-contracts-smoke.yml:39`）→ 删 10 个 `@Test` 后总数自然下调、非硬编码、不 red-CI。
 
 ### 4.6 排除的备选
 - **常驻操作栏（B）/快捷优先（C）**：双面板各一份 → 垂直占位翻倍 / 语义改动大（brainstorming 已排除）。
@@ -157,6 +159,8 @@ public struct TradeBarView: View {
 - 小条内点某 chip → `performTrade(.buy/.sell, panel, tier)`（既有逻辑）→ 收起小条。
 - 点 ✕ → 收起小条（不成交）。
 - 点另一面板的买/卖或另一动作 → `tradeStrip` 改写（同时仅一个小条）。
+- **小条 overlay 渲染条件 = `showsTradeButtons && tradeStrip?.panel == id`（conjoint，修 review-L3）**：非仅 panel 匹配，须并入 `showsTradeButtons`——防 Normal 置位的 `tradeStrip` 在模式翻转至 Review / 会话结束后残留致小条悬空。
+- **零持仓清仓角落结构性排除（修 review-L2）**：sell 小条仅当 `sellEnabled == position.shares > 0`（`TrainingEngine.swift:312`）为真才可打开，故「零持仓点清仓」不可达（`quoteSell` 亦兜底返 `.disabled`）——review 已核验。
 - Review 模式 `showsTradeButtons == false` → 右列与小条均不渲染（能力矩阵不变）。
 
 ## 6. 测试策略（TDD）
@@ -165,6 +169,7 @@ public struct TradeBarView: View {
 - buy 态：`chips.map(\.label) == ["1/5","2/5","3/5","4/5","全仓"]`；`chips.map(\.tier) == [.tier1,.tier2,.tier3,.tier4,.tier5]`；仅 `chips[4].isShortcut`。
 - sell 态：末档 label `"清仓"`；其余同。
 - **买卖区分硬断言**：buy 与 sell 仅末档 label 不同（`全仓` vs `清仓`），前 4 档相同——杜绝「label 写死一套」的错误源（吸取 `feedback_acceptance_grep_anchoring` 的「真双判别锚」教训）。
+- **label↔tier↔shortcut 联合锁定（修 review-M2）**：同一断言内 `chips[4].tier == .tier5 && chips[4].isShortcut && chips[4].label == (action == .buy ? "全仓" : "清仓")`——防三者各自漂移（如 label 误标 `全仓` 但 tier 误设 `.tier4` 仅靠 label 断言仍通过）。
 - `chips.count == 5` 恒等；顺序 = `PositionTier.allCases`。
 - `tier5.rawValue == "5/5"` 不受 UI 重标影响（持久化契约不变佐证）。
 
@@ -178,7 +183,8 @@ public struct TradeBarView: View {
   - `kline_trainer_modules_v1.4.md` §U5：`PositionPickerView`（模态 HUD）→ `TradeBarView`（内联小条）+ `TradeBarContent`。登记新 init 签名 + `TradeAction`。
   - `kline_trainer_plan_v1.5.md` §6.2.4：买卖交互 ASCII 从「弹模态 5 档」改为「悬浮内联小条 + 全仓/清仓强调档」；显式声明引擎/TradeCalculator/反馈链路不变。
   - 新验收清单 `docs/superpowers/acceptance/2026-06-20-trade-bar-inline-acceptance.md`。
-- **`CONTRACT_VERSION`**：当前 `1.6`（`Models.swift:7`）。权威 bump 策略在 `docs/governance/m01-schema-versioning-contract.md`（A 类 = 跨系统/破坏性持久化/改既有语义）。本 RFC = UI 壳层改版，删除/新增 public **UI** 类型，但 **`PositionTier` 枚举与其 `rawValue`、record 持久格式、Codable、DDL 全不变** → 不命中 A 类 bump 触发 → **不 bump**。（删除 public `PositionPickerView` 是 Swift API 表层变化，非 M0.1 数据契约变化；plan 阶段复核 m01 确认。）
+- **`CONTRACT_VERSION`**：当前 `1.6`（`Models.swift:7`）。权威 bump 策略 = `docs/governance/m01-schema-versioning-contract.md` 的 **A 类触发定义清单**（DDL / OpenAPI / 跨系统 / 持久化语义破坏——逐条判定，与文档顶层版本号无关）。本 RFC = UI 壳层改版（删/增 public **UI** 类型），`PositionTier` 枚举与其 `rawValue`(`"5/5"`)、record 持久格式、Codable、DDL **全不变** → 不命中任何 A 类触发 → **不 bump**。删除 public `PositionPickerView` 是 Swift API 表层变化，非 M0.1 数据契约变化。
+  - ⚠️ **pre-existing 治理 drift（修 review-C1；非本 RFC 引入、非本 RFC 职责，登记 R6）**：(a) m01 文档顶层版本号仍标 `1.5`（代码已 `1.6`，PR #99 升级未回填 m01）；(b) `Models.swift:7` 注释指向的 `docs/contracts/contract-version-matrix.md` **不存在**（真权威是 m01）。本 RFC 的 no-bump 结论**只依赖 A 类触发清单的定义**（与 m01 陈旧版本号无关），故不受这两处 drift 影响；但 spec-freezing review 须显式声明而非静默依赖。
 - **非信任边界变更**：不动 `.github/workflows`、codeowners、ruleset。
 - 评审通道 = Opus 4.8 xhigh 对抗性 review（spec / plan / branch-diff 三道，各到收敛）。
 
@@ -189,6 +195,7 @@ public struct TradeBarView: View {
 - **R3**：删除 frozen public `PositionPickerView` 的连带引用（验收脚本 / CI / 目录树注释 / 其他 grep 命中）——plan 阶段做完整 grep 引用图，逐一处理或登记残留。
 - **R4**：`performTrade` 形参类型从 `PickerRequest.Action` 改 `TradeAction`——纯类型替换，体内逻辑字节不变；Catalyst 编译闸兜底。新增顶层 `TradeAction` 须先 grep 确认无命名碰撞（既有 `TradeOperation`/`TradeReason`/`TradeFeedback`/`TradeCalculator`，未见 `TradeAction`；plan 阶段硬核实）。
 - **R5**：`.borderedProminent` 注释/语义与未来 RFC 潜在碰撞（吸取 PR #72 G6/§G.3 borderedProminent 注释碰撞教训）——plan/impl 阶段注释措辞谨慎。
+- **R6**：pre-existing 治理 drift（修 review-C1；m01 版本号 1.5/1.6 滞后 + `Models.swift:7` 注释指向不存在的 `contract-version-matrix.md`）。非本 RFC 引入、非本 RFC 职责；plan 阶段可选做「`Models.swift:7` 注释指针一行外科修正 → 指向 m01」的 cleanup，或保留为登记残留交后续治理 PR。本 RFC no-bump 结论独立于此 drift（依赖 A 类触发清单定义）。
 
 ## 9. 成功标准
 
