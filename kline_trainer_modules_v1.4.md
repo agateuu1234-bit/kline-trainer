@@ -2121,14 +2121,16 @@ struct SettingsPanel: View {
 // 无印花税开关（v1.1 起保持）
 ```
 
-### U5 仓位选择 HUD `PositionPickerView.swift`
+### U5 买卖小操作栏 `TradeBarView.swift`（RFC 2026-06-20 #1：内联展开取代模态 PositionPickerView）
 
 ```swift
-struct PositionPickerView: View {
-    init(enabledTiers: Set<PositionTier>,
-         onPick: (PositionTier) -> Void,
+struct TradeBarView: View {
+    init(action: TradeAction,            // .buy / .sell
+         onPick: (PositionTier) -> Void,  // tier5 = 全仓(买)/清仓(卖)
          onCancel: () -> Void)
 }
+// 纯值 TradeBarContent(action:) 产出 5 chip（tier1–4="1/5".."4/5"；tier5="全仓"/"清仓" isShortcut 强调）。
+// 引擎零改动：onPick(.tier5) 即现有全仓/清仓路径。模态 PositionPickerView 已删除（RFC #1）。
 ```
 
 ### U6 历史动作表 `HistoryActionSheet.swift`
@@ -2204,7 +2206,7 @@ struct HistoryActionSheet: View {
 
 **UI 壳（1 人，Preview Fixture）**
 - [ ] U3 SettlementView
-- [ ] U5 PositionPickerView
+- [ ] U5 TradeBarView（RFC 2026-06-20 #1 内联买卖小操作栏，取代 PositionPickerView）
 - [ ] U6 HistoryActionSheet
 - [ ] ~~`TrainingEngine.preview()` + `SettingsStore.preview()` Fixture 数据~~（v1.3：前移至 Wave 0；此处不再占位）
 
