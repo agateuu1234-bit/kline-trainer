@@ -4,7 +4,7 @@
 // #if DEBUG only：确定性（无随机）生成 rich 训练组蜡烛 + records/pending/settings 描述，供
 // AppContainer 全 app fixture provisioning。Release 编译期剔除（整文件 #if DEBUG）。
 // 蜡烛满足 DefaultTrainingSetReader 不变量（0 基严格递增 global==end / 有效 OHLC / volume>=0 /
-// daily end<=max m3 end）。指标：MA66 rolling mean；BOLL/MACD 留 NULL（nullable；交互矩阵不需指标精度）。
+// daily end<=max m3 end）。指标：每周期经 FixtureIndicatorMath 复刻后端公式算 MA66/BOLL/MACD（真实值，非 NULL）。
 
 #if DEBUG
 import Foundation
@@ -17,6 +17,12 @@ public enum DebugFixtureData {
         public let open: Double, high: Double, low: Double, close: Double
         public let volume: Int
         public let ma66: Double?
+        public let bollUpper: Double?
+        public let bollMid: Double?
+        public let bollLower: Double?
+        public let macdDiff: Double?
+        public let macdDea: Double?
+        public let macdBar: Double?
         public let globalIndex: Int?
         public let endGlobalIndex: Int
     }
@@ -47,26 +53,20 @@ public enum DebugFixtureData {
 
     public static func make(m3Count: Int = 240) -> Seed {
         let filename = "debug-fixture-600001.sqlite"
+
+        // m3 原始 OHLCV 由确定性均值回复种子游走生成（替换旧正弦）；先建无指标骨架。
+        let ohlcv = FixturePriceSeries.generate(count: m3Count)
         var m3Rows: [CandleRow] = []
-        var closes: [Double] = []
         for i in 0..<m3Count {
-            let close = 10.0 + 2.0 * sin(Double(i) * 0.15)
-            let open = 10.0 + 2.0 * sin(Double(max(0, i - 1)) * 0.15)
-            let high = max(open, close) + 0.3
-            let low = min(open, close) - 0.3
-            closes.append(close)
-            let ma66: Double? = i >= 65
-                ? closes[(i - 65)...i].reduce(0, +) / 66.0
-                : nil
+            let c = ohlcv[i]
             m3Rows.append(CandleRow(
                 datetime: baseEpoch + Int64(i) * m3Step,
-                open: open, high: high, low: low, close: close,
-                volume: 1000 + i * 10, ma66: ma66,
+                open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
+                ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                macdDiff: nil, macdDea: nil, macdBar: nil,
                 globalIndex: i, endGlobalIndex: i))
         }
-        // 全 6 周期（codex-13b-R2-F1）：m3 原始 + 其余按 span 聚合。`TrainingEngine.make` 默认上区 .m60/下区
-        // .daily 且校验两 panel 周期非空；周期切换 combo 覆盖全 6 周期——故 fresh start/review/replay + 切换需全周期。
-        // 聚合 candle：global_index=nil、end_global_index=该组末 m3 index（组内单调、<= max m3 end，满足 reader 不变量）。
+        // 其余 5 周期按 span 聚合（与既有逻辑同：global_index=nil、end=组末 m3 index）；指标稍后逐周期填。
         func aggregate(span: Int) -> [CandleRow] {
             var rows: [CandleRow] = []
             var start = 0
@@ -77,19 +77,36 @@ public enum DebugFixtureData {
                     datetime: m3Rows[start].datetime,
                     open: slice.first!.open, high: slice.map(\.high).max()!,
                     low: slice.map(\.low).min()!, close: slice.last!.close,
-                    volume: slice.map(\.volume).reduce(0, +), ma66: nil,
+                    volume: slice.map(\.volume).reduce(0, +),
+                    ma66: nil, bollUpper: nil, bollMid: nil, bollLower: nil,
+                    macdDiff: nil, macdDea: nil, macdBar: nil,
                     globalIndex: nil, endGlobalIndex: end))
                 start += span
             }
             return rows
         }
+        // 逐周期：对该周期 close 序列复刻后端公式算 MA66/BOLL/MACD，装回新 CandleRow（修 D4：聚合周期亦填 ma66）。
+        func withIndicators(_ rows: [CandleRow]) -> [CandleRow] {
+            let closes = rows.map(\.close)
+            let ma = FixtureIndicatorMath.ma66(closes)
+            let bo = FixtureIndicatorMath.boll(closes)
+            let mc = FixtureIndicatorMath.macd(closes)
+            return rows.indices.map { i in
+                CandleRow(
+                    datetime: rows[i].datetime, open: rows[i].open, high: rows[i].high,
+                    low: rows[i].low, close: rows[i].close, volume: rows[i].volume,
+                    ma66: ma[i], bollUpper: bo.upper[i], bollMid: bo.mid[i], bollLower: bo.lower[i],
+                    macdDiff: mc.diff[i], macdDea: mc.dea[i], macdBar: mc.bar[i],
+                    globalIndex: rows[i].globalIndex, endGlobalIndex: rows[i].endGlobalIndex)
+            }
+        }
         let candles = [
-            PeriodCandles(period: .m3, rows: m3Rows),                  // m3Count 根（默认 240 / 满载 fullLoadM3Count=9600）
-            PeriodCandles(period: .m15, rows: aggregate(span: 5)),     // m3Count/5 根
-            PeriodCandles(period: .m60, rows: aggregate(span: 20)),    // m3Count/20 根（make 默认上区）
-            PeriodCandles(period: .daily, rows: aggregate(span: 40)),  // m3Count/40 根（make 默认下区）
-            PeriodCandles(period: .weekly, rows: aggregate(span: 80)), // m3Count/80 根
-            PeriodCandles(period: .monthly, rows: aggregate(span: 120)), // m3Count/120 根
+            PeriodCandles(period: .m3, rows: withIndicators(m3Rows)),
+            PeriodCandles(period: .m15, rows: withIndicators(aggregate(span: 5))),
+            PeriodCandles(period: .m60, rows: withIndicators(aggregate(span: 20))),
+            PeriodCandles(period: .daily, rows: withIndicators(aggregate(span: 40))),
+            PeriodCandles(period: .weekly, rows: withIndicators(aggregate(span: 80))),
+            PeriodCandles(period: .monthly, rows: withIndicators(aggregate(span: 120))),
         ]
 
         let meta = TrainingSetMeta(
