@@ -31,7 +31,7 @@
 
 ## 6. Opus 4.8 xhigh 对抗性 review ledger（代 codex，user explicit）
 - spec：R1 NEEDS-ATTENTION（2H/3M/2L）→ 全修 → R2 APPROVE。commits 577f44c / eb314cc / fcec521。
-- plan：<填 plan-stage review 结论>。
-- 实现期（subagent-driven，3 task 两阶段）：<填>。
-- verification：<填 host/Catalyst/app 三项实跑>。
-- branch-diff：<填整体对抗性 review 结论>。
+- plan：R1 NEEDS-ATTENTION（2C/2H/2M/1L，逐值复算抓出 scroll-space fixture 必红/空洞 + 漏 D10/跨周期引擎测 + R7 失效 killer）→ 全修 → R2 APPROVE（独立复算全部 fixture 数字字面坐实）。commits e06ba9e / 1ae90ee。
+- 实现期（subagent-driven，3 task 各两阶段 spec+quality）：Task1 PanLinkage spec✅/Approved（7 @Test killer，reviewer trace 对照 makeViewport 全 regime）；Task2 propagateLinkage spec✅/Approved（0 找点「教科书式纯追加」，propagate 只挂 3 函数 grep 证、单向无环、M2 真 period-swap killer）；Task3 文档 spec✅/Approved（零删除「每面板独立」+ 7/+14/1127）。commits 53146a1 / d1c466c / 9461ace。
+- verification（最终 HEAD 9461ace 亲跑）：host swift test **1127 tests / 158 suites / 0 failures** + Catalyst **TEST BUILD SUCCEEDED** + iOS app **BUILD SUCCEEDED**。
+- branch-diff（整体 whole-branch，opus 4.8 xhigh）：**APPROVE**（9 项拷问 file:line 实证全过；纯追加 26 插 0 删、单向无环、复用几何零重写、冻结契约零触碰；4 Low：plan 内部 stale「8」已修→7 / 2 防御 guard 不可达无测 / R7 健全性非 double-drive killer / 验收 row5 措辞张力）。
