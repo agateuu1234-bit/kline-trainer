@@ -42,9 +42,10 @@ public enum DebugTrainingSetWriter {
                     INSERT INTO klines (period, datetime, open, high, low, close, volume, amount, ma66,
                         boll_upper, boll_mid, boll_lower, macd_diff, macd_dea, macd_bar,
                         global_index, end_global_index)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, arguments: [pc.period.rawValue, r.datetime, r.open, r.high, r.low, r.close,
-                                     r.volume, r.ma66, r.globalIndex, r.endGlobalIndex])
+                                     r.volume, r.ma66, r.bollUpper, r.bollMid, r.bollLower,
+                                     r.macdDiff, r.macdDea, r.macdBar, r.globalIndex, r.endGlobalIndex])
                 }
             }
         }
