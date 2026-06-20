@@ -34,7 +34,7 @@
 
 ## 6. Opus 4.8 xhigh 对抗性 review ledger（代 codex，user explicit）
 - spec：R1 NEEDS-ATTENTION（2C/2H/3M/3L）→ 全修（撤销改名等）→ R2 APPROVE。commits 25d8a34 / 9b27cd3 / d90b668。
-- plan：<填 plan-stage review 结论>。
-- 实现期（subagent-driven，4 task 两阶段）：<填>。
-- verification：<填 host/Catalyst/app 三项实跑>。
-- branch-diff：<填整体对抗性 review 结论>。
+- plan：R1 APPROVE（探针文件实证编译可行性全过：ViewBuilder `let _ = assertionFailure` / `AppRouter.Modal` 非 actor 隔离 / `== nil` 不需 Equatable / `.overlay`+`.animation`；7 测真 killer；High-1 守卫作用域精确；行号 provenance 对账无杜撰）+ 3 Low 修（取消注释字面对齐 / D5·D12 编号 / 引用计数措辞）。commits 295e211 / e2eda36。
+- 实现期（subagent-driven，4 task 各两阶段 spec+quality）：Task1 spec✅/Approved（7 host @Test killer，1113 全绿）；Task2 spec✅/Approved（inner 字节级不变，host 0 fail + Catalyst SUCCEEDED）；Task3 spec✅/Approved（High-1 守卫逐字实证 + Catalyst+app SUCCEEDED）；Task4 spec✅/Approved（零改名泄漏 + 7/1113）。commits 96137ec / 9d542ec / a2bf62c / 139636c。
+- verification（最终 HEAD 139636c 亲跑）：host swift test **1113 tests / 156 suites / 0 failures** + Catalyst **TEST BUILD SUCCEEDED** + iOS app **BUILD SUCCEEDED**。
+- branch-diff（整体 whole-branch，opus 4.8 xhigh）：**APPROVE**（0 Critical/High/Medium；2 Low：plan 过程文档 stale「8」已修→7 / AppRootView dead 分支注释措辞略松，功能无影响）。分流 binding 状态机安全性逐路径推理 + 实测确认；AppRouter/HistoryActionContent/AppRouterTests 三者 git diff 皆空。
