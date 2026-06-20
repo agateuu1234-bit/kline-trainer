@@ -272,7 +272,7 @@ KlineTrainer/
 │   │   ├── SettingsPanel.swift           # 设置小面板（弹出式）
 │   │   ├── SettlementView.swift          # 结算弹窗
 │   │   ├── TradeBarView.swift           # 买卖小操作栏（内联 + 全仓/清仓快捷，RFC #1）
-│   │   └── HistoryActionSheet.swift      # 历史记录点击→复盘/再来一次
+│   │   └── HistoryActionSheet.swift      # 历史记录点击→复盘/再来一次（居中弹窗）
 │   ├── ChartEngine/
 │   │   ├── Core/
 │   │   │   ├── ChartViewport.swift
