@@ -53,6 +53,10 @@ struct DebugTrainingSetWriterTests {
         // 往返一致（容差 1e-9，REAL 精度足够）
         #expect(abs((read[19].bollUpper ?? -1) - (seedM3[19].bollUpper ?? -2)) < 1e-9)
         #expect(abs((read[0].macdBar ?? -1) - (seedM3[0].macdBar ?? -2)) < 1e-9)
+        #expect(abs((read[19].bollMid ?? -1) - (seedM3[19].bollMid ?? -2)) < 1e-9)
+        #expect(abs((read[19].bollLower ?? -1) - (seedM3[19].bollLower ?? -2)) < 1e-9)
+        #expect(abs((read[0].macdDiff ?? -1) - (seedM3[0].macdDiff ?? -2)) < 1e-9)
+        #expect(abs((read[0].macdDea ?? -1) - (seedM3[0].macdDea ?? -2)) < 1e-9)
     }
 }
 #endif
