@@ -108,6 +108,7 @@ BinarySearch（纯函数）
     → 可见数据分片
 PanelViewState × 2（每面板独立）
     → period / interactionMode / visibleCount / offset
+    （**pan/scroll 时间对齐联动（RFC #4）**：拖一面板，另一面板右缘按同一全局 tick 跟随（含惯性减速逐帧）；offset 仍各面板独立存储，由引擎 `PanLinkage` 跨周期换算单向驱动。）
 ChartViewport（计算属性）
     → startIndex / visibleCount / priceRange
 CoordinateMapper（纯数学）
@@ -550,6 +551,7 @@ TickEngine（唯一时间状态，全局共享）
 BinarySearch（纯函数，tick → endIndex）
     ↓
 PanelViewState × 2（每面板独立 period/mode/zoom）
+    （**pan/scroll 时间对齐联动（RFC #4）**：拖一面板，另一面板右缘按同一全局 tick 跟随（含惯性减速逐帧）；offset 仍各面板独立存储，由引擎 `PanLinkage` 跨周期换算单向驱动。）
     ↓
 Viewport（计算属性 + Fractional Offset）
     → startIndex / visibleCount / pixelShift
@@ -599,6 +601,8 @@ func stepsForPeriod(_ period: Period) -> Int {
 - 低级别周期：每步都自然追加 K 线
 - 高级别周期：只在 end_global_index <= globalTickIndex 时新增 1 根
 - 例如：60m 按钮步进 → globalTickIndex 推进到下一根 60m 的 end_global_index → 15m 自动 +4 根、3m 自动 +20 根、日线视情况 +0 或 +1
+
+> **注（disambiguation）**：此处「联动」指 **tick 步进**（一笔交易推进 globalTickIndex → 所有周期按 end_global_index 追加 K 线，既有）；与 **RFC #4 的 pan 时间联动**（拖动一图另一图右缘跟随）是两回事，勿混淆。
 
 ### 4.2 交易计算
 
