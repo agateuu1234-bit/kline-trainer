@@ -74,7 +74,7 @@
 | **D10** | inner 卡片内容 vs 外层结构 | **inner（标题 Text + 三 `.bordered` 按钮 + 各自 frame/padding + 末 `.padding(24)`）字面不变**；**外层新增** ZStack 遮罩 + `.frame(maxWidth:280)` + `.background(.regularMaterial,…)` + `.shadow`（D9） | 复盘→`onReview`、再来一次→`onReplay`、取消→`onCancel` 路由与按钮文案全不变；body 外层必然重塑（现 body 无遮罩/背景/maxWidth），故表述为「inner 不变 + 外层重塑」而非笼统「字节级不变」（修 Medium-3 D9/D10 矛盾）。 |
 | **D11** | `AppRouter` 逻辑 | **不改** | `selectRecord` 仍置 `.history`、`review`/`replay` 仍清 `activeModal`；状态机 host 测试（`AppRouterTests`）天然回归绿。 |
 | **D12** | DEBUG 预览 | `#Preview` 渲染**含遮罩的整体弹窗**；保留 `fileprivate extension TrainingRecord.preview()`（机制同 U3/U5/U6） | 预览即所见；fileprivate 防跨模块污染。 |
-| **D13** | 出现/消失动效 | overlay 条件视图挂 `.transition(.opacity)`，由 `AppRootView` 链上 `.animation(.easeInOut(0.2), value: isHistoryPresented)`（`isHistoryPresented:Bool` 计算属性）驱动 | 居中弹窗硬切突兀，淡入是标准润色。**关键（修 High-2）**：`.animation(_:value:)` 按观测值变化驱动，覆盖 onCancel/遮罩/`review`/`replay` **全部**清除路径——包括 `review`/`replay` 在 `AppRouter` 内部清 `activeModal`（D11 不改）的路径，**无需在赋值点包 `withAnimation` → 不触碰 `AppRouter`**。Bool 驱动值天然 `Equatable`（`Modal` 未声明 Equatable，故不能直接用 `value: activeModal`）。 |
+| **D13** | 出现/消失动效 | overlay 条件视图挂 `.transition(.opacity)`，由 `AppRootView` 链上 `.animation(.easeInOut(duration: 0.2), value: isHistoryPresented)`（`isHistoryPresented:Bool` 计算属性）驱动 | 居中弹窗硬切突兀，淡入是标准润色。**关键（修 High-2）**：`.animation(_:value:)` 按观测值变化驱动，覆盖 onCancel/遮罩/`review`/`replay` **全部**清除路径——包括 `review`/`replay` 在 `AppRouter` 内部清 `activeModal`（D11 不改）的路径，**无需在赋值点包 `withAnimation` → 不触碰 `AppRouter`**。Bool 驱动值天然 `Equatable`（`Modal` 未声明 Equatable，故不能直接用 `value: activeModal`）。 |
 
 ---
 
