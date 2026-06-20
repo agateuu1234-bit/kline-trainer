@@ -36,6 +36,7 @@
 
 ## 6. Opus 4.8 xhigh 对抗性 review ledger（代 codex，user explicit）
 - spec：R1 NEEDS-ATTENTION（C1+2H+2M+3L）→ 全修 → R2（2 引用精度）→ 收敛 APPROVE。commits 397a40b / aa03c94 / a07ba09。
-- plan：（实施前 review 回填）。
-- 实现期（subagent-driven）：（回填）。
-- branch-diff：（回填）。
+- plan：R1 即 APPROVE（编译可行性/测试非空洞/行号/删除安全/amendment 文字匹配全核验为真）+ 3 polish（L1 保留 D10 注释 / M1 app build workspace fallback / L2 路径精度）。commit 705cb66。
+- 实现期（subagent-driven，5 task 各两阶段 spec+quality review）：Task1 TradeBarContent SPEC✅/QUALITY Approved（mutation 实证非空洞）；Task2 TradeBarView SPEC✅/Approved；Task3 TrainingView 集成 SPEC✅/Approved（conjoint guard + performTrade 体不变 + 0 残留）；Task4 删 4 文件 SPEC✅/Approved（删除安全 + PositionTier 保留）；Task5 文档 SPEC✅/R1 Changes-Requested 2 Important（plan L843/L1220 残留旧模态名）→ fix 3be36e2 清零。commits fb99f85 / bea6d34 / 86e6656 / 722e12f / 8490ae9 / 3be36e2。
+- verification（最终 HEAD 3be36e2 亲跑）：host swift test 1106/155/0 fail + Catalyst TEST BUILD SUCCEEDED + iOS app BUILD SUCCEEDED。
+- branch-diff（整体 whole-branch，opus 4.8 xhigh）：**APPROVE**（0 Critical/High/Medium；3 Low cosmetic：panel:id↔strip.panel guard 不变量等价 / 注释 PositionPicker provenance / 本 ledger 占位已回填）。
