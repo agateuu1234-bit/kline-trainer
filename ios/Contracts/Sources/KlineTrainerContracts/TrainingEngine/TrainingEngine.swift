@@ -601,6 +601,28 @@ extension TrainingEngine {
         _ = reduce(.offsetApplied(deltaPixels: delta), on: panel)
     }
 
+    // MARK: RFC #4 — 两图 pan 时间对齐联动（D5/D6/D8）
+
+    /// 另一面板。
+    private func follower(of panel: PanelId) -> PanelId { panel == .upper ? .lower : .upper }
+
+    /// leader 帧后：把 follower 右缘对齐到 leader 右缘的同一 global tick（单向，经现有 .offsetApplied）。
+    /// 只由三个具名 gesture 函数（beginPan/applyPanOffset/floorOrFull）调；不挂通用 applyOffsetDelta（防与
+    /// lockstep reset 双驱，D5/R7）。drawing 态 follower 被 reducer 吞（D10）。无 bounds/空 candle → no-op。
+    private func propagateLinkage(fromLeader leader: PanelId) {
+        let f = follower(of: leader)
+        let lBounds = renderBounds(leader), fBounds = renderBounds(f)
+        let lCandles = allCandles[period(of: leader)] ?? []
+        let fCandles = allCandles[period(of: f)] ?? []
+        guard lBounds.width > 0, fBounds.width > 0, !lCandles.isEmpty, !fCandles.isEmpty else { return }
+        let leaderTick = PanLinkage.rightEdgeTick(offset: panelState(leader).offset, candles: lCandles,
+                            rawVisible: panelState(leader).visibleCount, bounds: lBounds, tick: tick.globalTickIndex)
+        let fTarget = PanLinkage.followerOffset(targetTick: leaderTick, candles: fCandles,
+                            rawVisible: panelState(f).visibleCount, bounds: fBounds, tick: tick.globalTickIndex)
+        let fCur = panelState(f).offset
+        if fTarget != fCur { applyOffsetDelta(fTarget - fCur, panel: f) }   // D6（drawing 态吞 D10）
+    }
+
     // MARK: R1b-wire offset clamp（D9：drag full / decel·bounce floor-or-full / reducer 无界 D2）
 
     private func activeBoundsFor(_ panel: PanelId) -> ActiveDecel? {
@@ -625,6 +647,7 @@ extension TrainingEngine {
             ? max(a.bounds.minOffset, cur + delta)                                  // bounce：仅 floor
             : min(max(cur + delta, a.bounds.minOffset), a.bounds.maxOffset)         // decel：full
         if target != cur { applyOffsetDelta(target - cur, panel: panel) }           // L2-new：省 0-delta 空 bump
+        propagateLinkage(fromLeader: panel)                                          // RFC #4：减速/bounce 每帧驱动 follower
     }
 
     /// 中断进行中减速/bounce（新交互起手：beginPan/activateDrawingTool/pinch.began，D10）：停 + 仅当**活跃** run 时
@@ -664,6 +687,8 @@ extension TrainingEngine {
         interruptDeceleration(panel: panel)                  // R1b-wire D10：停 + 归一中途 overscroll（H3），再 seed/.panStarted
         setDragRaw(panelState(panel).offset, panel: panel)   // R1b-drag D1：raw 基线=归一后 offset∈[0,maxOffset]（E1）
         _ = reduce(.panStarted, on: panel)
+        _ = reduce(.panStarted, on: follower(of: panel))     // RFC #4 D7：follower 转 freeScrolling（drawing 态 .none 自然不动）
+        propagateLinkage(fromLeader: panel)                  // RFC #4：起手对齐一次（含 interrupt-clamp 后新右缘，H1）
     }
 
     /// onPan `.changed`（旧签名，无界）。**internal（codex R2-M2）**：B4 后 offset>maxOffset 渲成 overscroll 间隙，
@@ -692,6 +717,7 @@ extension TrainingEngine {
             target = ob.maxOffset + RubberBand.damp(over: raw - ob.maxOffset, dimension: mainW)
         }
         if target != cur { applyOffsetDelta(target - cur, panel: panel) }   // L2-new：省 0-delta 空 bump
+        propagateLinkage(fromLeader: panel)                                  // RFC #4：drag 每帧驱动 follower
     }
 
     /// onPan `.ended`（旧签名，无界 plain decel）。**internal（codex R2-M2）**：同 applyPanOffset，不暴露 public 无界路径
