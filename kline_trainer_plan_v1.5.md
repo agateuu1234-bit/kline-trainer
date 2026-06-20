@@ -840,7 +840,7 @@ enum TrainingMode {
 | K线图渲染 | ✅ | ✅ | ✅ |
 | 买入/卖出/持有/观察按钮 | ✅ | ❌（隐藏） | ✅ |
 | 绘线工具 | ✅ | ✅（只读，不可新增） | ✅ |
-| 仓位选择弹窗 | ✅ | ❌ | ✅ |
+| 买卖小操作栏（内联） | ✅ | ❌ | ✅ |
 | TickEngine 可步进 | ✅ | ❌（固定最终态） | ✅（从头开始） |
 | 结束按钮 | ✅ | ❌（用返回退出） | ✅ |
 | 训练记录写入 | ✅ | ❌ | ❌ |
@@ -1217,7 +1217,7 @@ def generate_one_training_set(stock_code):
 ### Phase 3：页面与交互完整实现
 
 1. HomeView：统计栏、开始/继续训练、历史列表（含收益率、红盈绿亏颜色）、复盘/再来一次
-2. TrainingView：顶栏（持仓成本）、双 K 线区域、仓位选择 HUD、底部结束按钮
+2. TrainingView：顶栏（持仓成本）、双 K 线区域、买卖小操作栏（内联）、底部结束按钮
 3. SettingsPanel：佣金费率、免5、重置资金、离线缓存（进度条）、显示模式
 4. TrainingFlowController + Normal/Review/Replay 三实现
 5. GRDB 模型定义 + 训练记录/交易操作/绘线数据 CRUD
