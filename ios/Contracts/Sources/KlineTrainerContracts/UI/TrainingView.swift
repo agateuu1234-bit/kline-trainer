@@ -10,7 +10,7 @@
 //   payload（lifecycle.replaySettlementRecord）经 onReplaySettlement 上交 AppRouter 呈现结算窗（RFC §4.5，不入账）；
 //   Normal 仍走 onSessionEnded。
 // - D4 自动结束检测 tick>=maxTick 且 shouldShowSettlement()（Review 抑制）；D5 didFinalize 一次性闸门。
-// - D9 PositionPicker 全档启用，buy 返 failure 兜；D10 交易按钮仅 Normal/Replay，持有/观察随持仓切文案。
+// - D9（RFC #1 改）：买卖改内联 TradeBarView（点买/卖悬浮小条，非模态 PositionPicker）；全仓/清仓 = tier5 强调档；buyEnabled/sellEnabled 门控小条打开，失败仍走 TradeFeedback toast。D10 交易按钮仅 Normal/Replay，持有/观察随持仓切文案。
 // - D11 #if canImport(UIKit)：嵌 ChartContainerView（UIViewRepresentable）故同门；host 不编译，Catalyst 编译闸门。
 // - D6 手动结束按钮 + D8 仓位 X/5：**Wave 3 顺位 7 已兑现**（结束本局确认弹窗→engine.forceCloseManually→runFinalize；
 //   顶栏 currentPositionTier；交易失败 Toast + 成功 .heavy 触觉，plan §6.2.4 / RFC §4.1/§4.4a/§4.4b）。
@@ -29,7 +29,7 @@ public struct TrainingView: View {
     @State private var didFinalize = false
     @State private var finalizeFailed = false
     @State private var finalizing = false      // R1-H2：in-flight 门，阻重试双击/并发 finalize Task
-    @State private var pickerRequest: PickerRequest?
+    @State private var tradeStrip: TradeStripRequest?
     @State private var toast = ToastState()      // §B.1：latest-wins 调度核（host-tested）
     @State private var confirmingEnd = false
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
@@ -103,15 +103,6 @@ public struct TrainingView: View {
             if let e = lifecycle.coordinator.autosaveBannerError, e.shouldShowToast {
                 presentToast(e.userMessage)
             }
-        }
-        .sheet(item: $pickerRequest) { req in
-            PositionPickerView(
-                enabledTiers: Set(PositionTier.allCases),                       // D9
-                onPick: { tier in
-                    performTrade(req.action, panel: req.panel, tier: tier)
-                    pickerRequest = nil
-                },
-                onCancel: { pickerRequest = nil })
         }
         .alert("结算入账失败", isPresented: $finalizeFailed) {
             Button("重试") { runFinalize() }
@@ -192,13 +183,26 @@ public struct TrainingView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             if showsTradeButtons { tradeButtons(id) }
         }
+        // 内联买卖小条：仅当该面板被点开时悬浮贴底（conjoint guard 含 showsTradeButtons，
+        // 防 Normal 置位的 tradeStrip 在模式翻转至 Review/会话结束后悬空，spec §5.3 L3）。
+        .overlay(alignment: .bottom) {
+            if showsTradeButtons, let strip = tradeStrip, strip.panel == id {
+                TradeBarView(
+                    action: strip.action,
+                    onPick: { tier in
+                        performTrade(strip.action, panel: id, tier: tier)
+                        tradeStrip = nil
+                    },
+                    onCancel: { tradeStrip = nil })
+            }
+        }
     }
 
     private func tradeButtons(_ id: PanelId) -> some View {
         VStack(spacing: 8) {
-            Button("买入") { pickerRequest = PickerRequest(panel: id, action: .buy) }
+            Button("买入") { tradeStrip = TradeStripRequest(panel: id, action: .buy) }
                 .disabled(!engine.buyEnabled)
-            Button("卖出") { pickerRequest = PickerRequest(panel: id, action: .sell) }
+            Button("卖出") { tradeStrip = TradeStripRequest(panel: id, action: .sell) }
                 .disabled(!engine.sellEnabled)
             // 持有/观察始终可用（无 .disabled）：不变量靠 `showsTradeButtons==canBuySell()` 已排除唯一
             // 不可步进模式 Review（canAdvance==false）；Normal/Replay 两可见模式 canAdvance 恒 true（plan v1.5 L944）。
@@ -211,7 +215,7 @@ public struct TrainingView: View {
     }
 
     // 交易动作执行：调 engine.buy/sell → TradeFeedback（纯值决策）→ 触觉/Toast（壳执行）。
-    private func performTrade(_ action: PickerRequest.Action, panel: PanelId, tier: PositionTier) {
+    private func performTrade(_ action: TradeAction, panel: PanelId, tier: PositionTier) {
         let result: Result<TradeOperation, AppError>
         switch action {
         case .buy:  result = engine.buy(panel: panel, tier: tier)
@@ -301,10 +305,9 @@ public struct TrainingView: View {
         .padding(.vertical, 8)
     }
 
-    private struct PickerRequest: Identifiable {
-        enum Action { case buy, sell }
+    private struct TradeStripRequest: Identifiable {
         let panel: PanelId
-        let action: Action
+        let action: TradeAction
         var id: String { "\(panel)-\(action)" }
     }
 }
