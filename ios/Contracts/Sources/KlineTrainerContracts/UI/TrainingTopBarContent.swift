@@ -7,20 +7,44 @@
 // SettlementContent 的 formatter 为 private static（U3 冻结），本文件独立实现**同口径**（不抽共享，避免动冻结 U3）。
 // 决议 D8（Wave 3 顺位 7 兑现）：加「仓位 X/5」= `position`，由 engine.currentPositionTier（RFC §4.1/§4.4b
 // 派生公式 = round(持仓市值/当前总资金×5)，clamp 0...5）格式化；不在本壳臆造公式（顺位 6 accessor 已钉死）。
+// RFC-B D4 语义纠正：holdingCostPerShare = 每股成本（价位级，非总额），init 参数名 averageCost。
+// 新增 sharesText（千分位 + " 股"）、stockNameDisplay（标的名隐显）、positionShort（"X/5"）。
 
 import Foundation
 
 public struct TrainingTopBarContent: Equatable, Sendable {
-    public let totalCapital: String   // "¥ 102,345.67"
-    public let holdingCost: String    // "¥ 0.00"
-    public let position: String       // "仓位 3/5"（Wave 3 顺位 7）
-    public let returnRate: String     // "+2.34%" / "-8.32%" / "+0.00%"
+    public let totalCapital: String        // "¥ 99,999,999.00"
+    public let holdingCostPerShare: String // 每股成本 "¥ 1,683.50"（RFC-B D4：非总额）
+    public let sharesText: String          // "9,999,999 股"
+    public let position: String            // "仓位 3/5"（兼容）
+    public let positionShort: String       // "3/5"（顶栏格数值，免字符串截取）
+    public let returnRate: String          // "+2.34%"
+    public let stockNameDisplay: String    // "贵州茅台（600519）" 或 "训练标的 · 盲测"
 
-    public init(totalCapital: Double, holdingCost: Double, returnRate: Double, positionTier: Int) {
+    public init(totalCapital: Double, averageCost: Double, shares: Int,
+                returnRate: Double, positionTier: Int,
+                stockName: String?, stockCode: String?) {
         self.totalCapital = Self.currency(totalCapital)
-        self.holdingCost = Self.currency(holdingCost)
+        self.holdingCostPerShare = Self.currency(averageCost)
+        self.sharesText = "\(Self.grouped(shares)) 股"
         self.position = "仓位 \(positionTier)/5"
+        self.positionShort = "\(positionTier)/5"
         self.returnRate = Self.percent(returnRate)
+        if let name = stockName, let code = stockCode {
+            self.stockNameDisplay = "\(name)（\(code)）"   // 全角括号，同 formatStock 口径
+        } else {
+            self.stockNameDisplay = "训练标的 · 盲测"
+        }
+    }
+
+    /// 整数千分位（POSIX，跨 locale 稳定）。
+    private static func grouped(_ value: Int) -> String {
+        let f = NumberFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.numberStyle = .decimal
+        f.usesGroupingSeparator = true
+        f.groupingSeparator = ","
+        return f.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
     /// `¥` + 一空格 + 千分位 + 强制 2 位小数（POSIX，跨 locale 稳定）。同 SettlementContent.formatCapital。

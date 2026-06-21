@@ -147,9 +147,12 @@ public struct TrainingView: View {
 
     private var topBar: some View {
         let bar = TrainingTopBarContent(totalCapital: engine.currentTotalCapital,
-                                        holdingCost: engine.holdingCost,
+                                        averageCost: engine.position.averageCost,
+                                        shares: engine.position.shares,
                                         returnRate: engine.returnRate,
-                                        positionTier: engine.currentPositionTier)
+                                        positionTier: engine.currentPositionTier,
+                                        stockName: lifecycle.activeRecord?.stockName,
+                                        stockCode: lifecycle.activeRecord?.stockCode)
         return HStack(spacing: 12) {
             // 返回保存失败保留（§4.7a/§4.6 D5）：back() 抛（saveProgress 失败）→ session 留存（reader 未关）
             // → backFailed alert 让用户选重试或放弃；不用 try? 吞错误，防进度丢失。
@@ -168,7 +171,7 @@ public struct TrainingView: View {
             }
             Spacer()
             Text(bar.totalCapital)
-            Text("持仓成本\(bar.holdingCost)")
+            Text("持仓成本\(bar.holdingCostPerShare)")
             Text(bar.position)
             Text(bar.returnRate)
         }
