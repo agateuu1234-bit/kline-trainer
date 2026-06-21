@@ -167,10 +167,13 @@ public final class TrainingSessionCoordinator {
         }
         do {
             let allCandles = try reader.loadAllCandles()
+            let meta = try reader.loadMeta()                  // F2：起始点 tick 派生
             let mt = try maxTick(from: allCandles)            // D3
+            let startTick = TrainingEngine.startTick(forStartDatetime: meta.startDatetime, in: allCandles)
             let engine = try TrainingEngine.make(
                 .normal(fees: fees, maxTick: mt),
                 allCandles: allCandles,
+                initialTick: startTick,
                 initialCapital: start, initialCashBalance: start)
             activeReader = reader
             activeEngine = engine
@@ -289,10 +292,13 @@ public final class TrainingSessionCoordinator {
         }
         do {
             let allCandles = try reader.loadAllCandles()
+            let meta = try reader.loadMeta()                  // F2：起始点 tick 派生（replay 从头）
             let mt = try maxTick(from: allCandles)
+            let startTick = TrainingEngine.startTick(forStartDatetime: meta.startDatetime, in: allCandles)
             let engine = try TrainingEngine.make(
                 .replay(fees: record.feeSnapshot, maxTick: mt),
                 allCandles: allCandles,
+                initialTick: startTick,
                 initialCapital: record.totalCapital,
                 initialCashBalance: record.totalCapital)
             activeReader = reader

@@ -10,7 +10,7 @@ struct TrainingSessionPersistenceTests {
 
     static func validCandles(m3Count: Int = 8) -> [Period: [KLineCandle]] {
         func c(_ p: Period, gi: Int, egi: Int, close: Double) -> KLineCandle {
-            KLineCandle(period: p, datetime: Int64(gi) * 180, open: 10, high: 11, low: 9,
+            KLineCandle(period: p, datetime: 1 + Int64(gi) * 180, open: 10, high: 11, low: 9,
                         close: close, volume: 1000, amount: nil, ma66: nil,
                         bollUpper: nil, bollMid: nil, bollLower: nil,
                         macdDiff: nil, macdDea: nil, macdBar: nil,
@@ -456,7 +456,7 @@ struct TrainingSessionPersistenceTests {
     static func makeReplaySession(
         capital: Double = 100_000,
         meta: TrainingSetMeta = TrainingSetMeta(stockCode: "600000", stockName: "测试股",
-                                                startDatetime: 1_583_000_000, endDatetime: 1_583_100_000)
+                                                startDatetime: 1, endDatetime: 1_583_100_000)
     ) async throws -> (TrainingSessionCoordinator, TrainingEngine,
                        InMemoryRecordRepository, InMemoryPendingTrainingRepository) {
         let records = InMemoryRecordRepository()

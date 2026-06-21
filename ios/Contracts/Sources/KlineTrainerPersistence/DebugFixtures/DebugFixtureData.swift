@@ -41,17 +41,19 @@ public enum DebugFixtureData {
         public let settings: AppSettings
     }
 
-    /// 帧预算满载 fixture 根数（Wave 3 13c-R2 根治）。
-    /// 按既有聚合 span（1/5/20/40/80/120），9600 根 m3 使**每周期 ≥ RenderStateBuilder.defaultVisibleCount(80)**
-    /// 且 **make 默认面板 .m60(=480)/.daily(=240) ≥ PinchZoomModel.maxVisibleCount(240)**（pinch 缩放最远档可见根数），
-    /// 故经 §C seed 的帧预算 runbook 测的是满载图表（非欠载）。
-    /// 推导：约束「monthly span=120 行数 ≥80」与「daily span=40 行数 ≥240」最小公共解 = 80×120 = 240×40 = 9600。
-    public static let fullLoadM3Count = 9600
+    /// 帧预算满载 fixture 根数。新 span（5/20/80/160/240）下，约束「monthly span=240 行数 ≥80」
+    /// 与「daily span=80 行数 ≥240(maxVisibleCount)」最小公共解 = 80×240 = 240×80 = 19,200。
+    public static let fullLoadM3Count = 19_200
+    /// 满载 before-candle 根数（起始点前历史）；须为 lcm(spans)=480 倍数（12000=480×25），
+    /// 使各周期 before/after 边界皆落在该周期 candle 边界。daily before=150（对齐 spec §8.3）。
+    public static let fullLoadBeforeM3Count = 12_000
 
     private static let baseEpoch: Int64 = 1_700_000_000
     private static let m3Step: Int64 = 180
 
-    public static func make(m3Count: Int = 240) -> Seed {
+    public static func make(m3Count: Int = 240, beforeM3Count: Int = 0) -> Seed {
+        precondition(beforeM3Count >= 0 && beforeM3Count < m3Count,
+                     "beforeM3Count 须在 [0, m3Count)（防 m3Rows[beforeM3Count] 越界）")
         let filename = "debug-fixture-600001.sqlite"
 
         // m3 原始 OHLCV 由确定性均值回复种子游走生成（替换旧正弦）；先建无指标骨架。
@@ -104,14 +106,14 @@ public enum DebugFixtureData {
             PeriodCandles(period: .m3, rows: withIndicators(m3Rows)),
             PeriodCandles(period: .m15, rows: withIndicators(aggregate(span: 5))),
             PeriodCandles(period: .m60, rows: withIndicators(aggregate(span: 20))),
-            PeriodCandles(period: .daily, rows: withIndicators(aggregate(span: 40))),
-            PeriodCandles(period: .weekly, rows: withIndicators(aggregate(span: 80))),
-            PeriodCandles(period: .monthly, rows: withIndicators(aggregate(span: 120))),
+            PeriodCandles(period: .daily, rows: withIndicators(aggregate(span: 80))),
+            PeriodCandles(period: .weekly, rows: withIndicators(aggregate(span: 160))),
+            PeriodCandles(period: .monthly, rows: withIndicators(aggregate(span: 240))),
         ]
 
         let meta = TrainingSetMeta(
             stockCode: "600001", stockName: "示例训练股",
-            startDatetime: m3Rows.first!.datetime, endDatetime: m3Rows.last!.datetime)
+            startDatetime: m3Rows[beforeM3Count].datetime, endDatetime: m3Rows.last!.datetime)
 
         let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false)
         let records = [

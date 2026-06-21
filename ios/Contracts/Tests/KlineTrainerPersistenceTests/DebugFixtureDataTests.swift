@@ -109,7 +109,7 @@ struct DebugFixtureDataTests {
                 "默认下区 .daily 蜡烛数 \(daily) 须 ≥ maxVisibleCount(\(PinchZoomModel.maxVisibleCount))（pinch 最远档满载）")
     }
 
-    // 满载根数（9600）下，既有 reader 结构不变量仍成立（防大 count 触发聚合 off-by-one / end_global_index 越界）。
+    // 满载根数（19200）下，既有 reader 结构不变量仍成立（防大 count 触发聚合 off-by-one / end_global_index 越界）。
     @Test("满载下：全 6 周期 end_global_index 单调递增 + <= max m3 end + 末行 == max m3 end")
     func fullLoadFixture_invariantsStillHold() {
         let data = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count)
@@ -130,7 +130,7 @@ struct DebugFixtureDataTests {
         }
     }
 
-    // 监 #7 指标看不到回归：满载下每周期暖机后 MA66/BOLL/MACD 均非 nil（每周期满载根数：m3=9600..monthly=80，均 ≥66/≥20）
+    // 监 #7 指标看不到回归：满载下每周期暖机后 MA66/BOLL/MACD 均非 nil（每周期满载根数：m3=19200..monthly=80，均 ≥66/≥20）
     @Test("满载：每周期暖机后 MA66@65 / BOLL@19 三轨 / MACD@0 均非 nil（监 #7）")
     func fullLoad_everyPeriodHasIndicators() {
         let data = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count)
@@ -165,6 +165,31 @@ struct DebugFixtureDataTests {
         let daily = data.candles.first(where: { $0.period == .daily })!.rows
         #expect(m3[65].ma66 != nil)
         #expect(daily[65].ma66 != nil, "聚合周期 daily 的 MA66 现应非 nil（旧版为 nil）")
+    }
+
+    @Test("满载 before/after 结构：每周期根数 = 权威表 + startDatetime 指起始点")
+    func fullLoadBeforeAfterStructure() {
+        let data = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count,
+                                         beforeM3Count: DebugFixtureData.fullLoadBeforeM3Count)
+        func total(_ p: Period) -> Int { data.candles.first { $0.period == p }!.rows.count }
+        #expect(total(.m3) == 19_200)
+        #expect(total(.m15) == 3_840)
+        #expect(total(.m60) == 960)
+        #expect(total(.daily) == 240)
+        #expect(total(.weekly) == 120)
+        #expect(total(.monthly) == 80)
+        // 起始点 = 第 12000 根 m3 的 datetime（before=12000 根历史在其前）
+        let m3 = data.candles.first { $0.period == .m3 }!.rows
+        #expect(data.meta.startDatetime == m3[12_000].datetime)
+        // before 段：m3[0..<12000] datetime 严格 < startDatetime
+        #expect(m3[11_999].datetime < data.meta.startDatetime)
+    }
+
+    @Test("默认 beforeM3Count=0 → startDatetime 仍为首根（向后兼容）")
+    func defaultZeroBeforeBackCompat() {
+        let data = DebugFixtureData.make(m3Count: 240)
+        let m3 = data.candles.first { $0.period == .m3 }!.rows
+        #expect(data.meta.startDatetime == m3[0].datetime)
     }
 }
 #endif

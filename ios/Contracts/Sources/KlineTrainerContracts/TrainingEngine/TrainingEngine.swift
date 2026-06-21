@@ -538,6 +538,17 @@ public final class TrainingEngine {
     /// 现价查找（静态，供 init seeding 与实例 `currentPrice` 复用）：`.m3` 驱动序列中首个
     /// `endGlobalIndex >= target` 的 K 线收盘价；超末根夹取末根（D2）。`.m3` 与全局 tick 1:1，
     /// 避免聚合周期 close 取到未来价（codex R4-F2）。init 已保证 `.m3` 非空。
+    /// 从 meta.start_datetime 推训练起始点 tick：第一根 `datetime >= startDatetime` 的 `.m3` 下标。
+    /// `.m3` 轴连续（globalIndex==endGlobalIndex==index），故下标 == global tick。
+    /// 不变量：返回 0 **当且仅当** `startDatetime <= m3[0].datetime`；degenerate（start 超所有 m3）
+    /// → 钳到 `maxTick`（保 `0...maxTick` + 不变量，valid 数据不触发）。空 m3 → 0（make 已先验非空）。
+    nonisolated static func startTick(forStartDatetime startDatetime: Int64,
+                                      in allCandles: [Period: [KLineCandle]]) -> Int {
+        guard let m3 = allCandles[.m3], !m3.isEmpty else { return 0 }
+        let idx = m3.partitioningIndex { $0.datetime >= startDatetime }
+        return min(idx, m3.count - 1)
+    }
+
     private static func price(in allCandles: [Period: [KLineCandle]], atTick target: Int) -> Double {
         let candles = allCandles[.m3] ?? []
         guard let last = candles.last else { return 0 }

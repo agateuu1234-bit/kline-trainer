@@ -30,7 +30,8 @@ extension AppContainer {
               settingsPristine
         else { return }
 
-        let seed = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count)
+        let seed = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count,
+                                         beforeM3Count: DebugFixtureData.fullLoadBeforeM3Count)
 
         // db 写在前（settings → records → pending）
         try db.saveSettings(seed.settings)
