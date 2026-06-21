@@ -1,0 +1,175 @@
+<h2>整屏框架：交易区占位方式（最大化 K 线）</h2>
+<p class="subtitle">两图（上=60分 / 下=日线）训练界面。重点比较「交易/持有/结束本局」的空间占用方式。右侧价轴 gutter + 底部时间轴 gutter（不遮 K 线）两个方案都有。点一个卡片选你倾向的方向。</p>
+
+<style>
+  .cmp { display:flex; gap:28px; flex-wrap:wrap; justify-content:center; margin-top:8px; }
+  .col { width:300px; }
+  .col > h3 { text-align:center; margin:0 0 8px; }
+  .col > .note { text-align:center; font-size:12px; color:var(--muted,#8a8a99); min-height:34px; }
+  .phone { width:300px; height:600px; background:#0e0e12; border:6px solid #2a2a33; border-radius:26px;
+           overflow:hidden; display:flex; flex-direction:column; box-shadow:0 8px 30px rgba(0,0,0,.5); }
+  .z { position:relative; }
+  /* header */
+  .hd { background:#16161c; border-bottom:1px solid #26262f; padding:6px 8px; }
+  .hd-top { display:flex; justify-content:space-between; align-items:center; }
+  .hd-name { font-size:12px; color:#c9c9d4; font-weight:600; }
+  .hd-icons { display:flex; gap:8px; }
+  .chip { font-size:10px; color:#9a9aa6; border:1px solid #33333f; border-radius:6px; padding:2px 6px; }
+  .hd-metrics { display:flex; gap:6px; margin-top:5px; }
+  .metric { flex:1; display:flex; flex-direction:column; min-width:0; }
+  .ml { font-size:9px; color:#7d7d8a; line-height:1.2; }
+  .mv { font-size:12px; color:#e6e6ef; font-weight:600; line-height:1.25; white-space:nowrap; }
+  .mv.up { color:#e23030; } .mv.dn { color:#29a85c; }
+  /* chart */
+  .chart { flex:1; display:flex; flex-direction:column; min-height:0; }
+  .cbody { flex:1; display:flex; min-height:0; position:relative; }
+  .candles { flex:1; display:flex; align-items:flex-end; gap:1px; padding:6px 4px 2px 6px; position:relative; }
+  .ptag { position:absolute; top:5px; left:8px; font-size:10px; color:#8a8a99;
+          background:rgba(20,20,26,.7); padding:1px 5px; border-radius:4px; }
+  .gut { width:42px; border-left:1px dashed #2c2c38; display:flex; flex-direction:column;
+         justify-content:space-between; padding:6px 4px; }
+  .gut span { font-size:9px; color:#85858f; text-align:right; }
+  .tax { height:15px; border-top:1px dashed #2c2c38; display:flex; justify-content:space-around;
+         align-items:center; }
+  .tax span { font-size:9px; color:#85858f; }
+  .divider { height:5px; background:#16161c; border-top:1px solid #26262f; border-bottom:1px solid #26262f; }
+  /* candle */
+  .k { width:7px; position:relative; }
+  .wick { position:absolute; left:50%; width:1px; transform:translateX(-50%); background:inherit; }
+  .body { position:absolute; left:0; right:0; border-radius:.5px; }
+  .k.up { background:#e23030; } .k.dn { background:#29a85c; }
+  .k.up .body { background:#e23030; } .k.dn .body { background:#29a85c; }
+  /* trade variants */
+  .floatbar { position:absolute; left:0; right:0; bottom:0; height:30px; display:flex; align-items:center;
+              justify-content:center; gap:6px; background:rgba(22,22,28,.82); backdrop-filter:blur(2px);
+              border-top:1px solid #30303c; }
+  .floatbar .ftrig { font-size:11px; color:#dcdce6; border:1px solid #444452; border-radius:14px; padding:3px 16px; }
+  .fixedbar { height:46px; background:#16161c; border-top:1px solid #26262f; display:flex; align-items:center;
+              gap:6px; padding:0 8px; }
+  .btn { flex:1; text-align:center; font-size:12px; padding:8px 0; border-radius:8px; }
+  .btn.buy { background:#3a1414; color:#f06b6b; border:1px solid #5a1d1d; }
+  .btn.sell { background:#0f2a1b; color:#54c98a; border:1px solid #1d5a39; }
+  .btn.hold { background:#1d1d26; color:#bcbcc8; border:1px solid #34343f; }
+  .btn.end { flex:0 0 64px; background:#1d1d26; color:#9a9aa6; border:1px solid #34343f; }
+  .toolchip { position:absolute; left:8px; bottom:8px; font-size:11px; color:#cfa14a;
+              border:1px solid #4a3c1d; background:rgba(22,22,28,.8); border-radius:14px; padding:3px 10px; z-index:5; }
+</style>
+
+<div class="cmp">
+
+  <!-- ===================== OPTION A ===================== -->
+  <div class="col">
+    <h3>A · 双图最大化 + 悬浮交易</h3>
+    <div class="card phone-card" data-choice="A" onclick="toggleSelect(this)">
+    <div class="phone">
+      <!-- header -->
+      <div class="z hd">
+        <div class="hd-top">
+          <div class="hd-name">训练标的 · 已隐藏</div>
+          <div class="hd-icons"><span class="chip">⚙︎</span><span class="chip">结束</span><span class="chip">返回</span></div>
+        </div>
+        <div class="hd-metrics">
+          <div class="metric"><span class="ml">总资金</span><span class="mv">¥1,024,560</span></div>
+          <div class="metric"><span class="ml">持仓成本</span><span class="mv">1,680.00</span></div>
+          <div class="metric"><span class="ml">持仓股数</span><span class="mv">200 股</span></div>
+          <div class="metric"><span class="ml">浮动盈亏</span><span class="mv up">+2.34%</span></div>
+        </div>
+      </div>
+      <!-- chart 1 -->
+      <div class="z chart">
+        <div class="cbody">
+          <div class="candles" data-n="22" data-seed="11"><div class="ptag">60分</div></div>
+          <div class="gut"><span>1,720</span><span>1,690</span><span>1,660</span><span>1,630</span></div>
+        </div>
+        <div class="tax"><span>09:30</span><span>11:00</span><span>13:30</span><span>15:00</span></div>
+      </div>
+      <div class="divider"></div>
+      <!-- chart 2 -->
+      <div class="z chart">
+        <div class="cbody">
+          <div class="candles" data-n="22" data-seed="29"><div class="ptag">日线</div>
+            <div class="toolchip">✎ 画线</div>
+          </div>
+          <div class="gut"><span>1,760</span><span>1,700</span><span>1,640</span><span>1,580</span></div>
+        </div>
+        <div class="tax"><span>03/14</span><span>04/02</span><span>04/21</span><span>05/12</span></div>
+        <!-- floating trade trigger overlays the chart, no reserved height -->
+        <div class="floatbar"><span class="ftrig">买入</span><span class="ftrig">卖出</span><span class="ftrig">持有</span></div>
+      </div>
+    </div>
+    </div>
+    <div class="note">交易/持有不常驻：底部悬浮条浮在图上（不吃高度）。结束本局收进顶栏图标。画线=图角折叠 chip。K 线区最大。</div>
+  </div>
+
+  <!-- ===================== OPTION B ===================== -->
+  <div class="col">
+    <h3>B · 双图 + 底部固定薄操作条</h3>
+    <div class="card phone-card" data-choice="B" onclick="toggleSelect(this)">
+    <div class="phone">
+      <div class="z hd">
+        <div class="hd-top">
+          <div class="hd-name">训练标的 · 已隐藏</div>
+          <div class="hd-icons"><span class="chip">⚙︎</span><span class="chip">返回</span></div>
+        </div>
+        <div class="hd-metrics">
+          <div class="metric"><span class="ml">总资金</span><span class="mv">¥1,024,560</span></div>
+          <div class="metric"><span class="ml">持仓成本</span><span class="mv">1,680.00</span></div>
+          <div class="metric"><span class="ml">持仓股数</span><span class="mv">200 股</span></div>
+          <div class="metric"><span class="ml">浮动盈亏</span><span class="mv up">+2.34%</span></div>
+        </div>
+      </div>
+      <div class="z chart">
+        <div class="cbody">
+          <div class="candles" data-n="22" data-seed="11"><div class="ptag">60分</div></div>
+          <div class="gut"><span>1,720</span><span>1,690</span><span>1,660</span><span>1,630</span></div>
+        </div>
+        <div class="tax"><span>09:30</span><span>11:00</span><span>13:30</span><span>15:00</span></div>
+      </div>
+      <div class="divider"></div>
+      <div class="z chart">
+        <div class="cbody">
+          <div class="candles" data-n="22" data-seed="29"><div class="ptag">日线</div>
+            <div class="toolchip">✎ 画线</div>
+          </div>
+          <div class="gut"><span>1,760</span><span>1,700</span><span>1,640</span><span>1,580</span></div>
+        </div>
+        <div class="tax"><span>03/14</span><span>04/02</span><span>04/21</span><span>05/12</span></div>
+      </div>
+      <!-- fixed thin action bar -->
+      <div class="fixedbar">
+        <span class="btn buy">买入</span><span class="btn sell">卖出</span>
+        <span class="btn hold">持有</span><span class="btn end">结束</span>
+      </div>
+    </div>
+    </div>
+    <div class="note">底部一条固定薄操作条（买/卖/持有/结束），去掉左右两侧按钮列，横向全还给图。常驻 ~46pt，比现在省很多。</div>
+  </div>
+
+</div>
+
+<p class="subtitle" style="margin-top:18px;">注：A 股习惯 <span style="color:#e23030">红涨</span> / <span style="color:#29a85c">绿跌</span>。当前重点不是配色，而是<b>整体框架 + 交易区占位</b>。两侧的右价轴 gutter、底部时间轴都是「不遮 K 线」的新画法。</p>
+
+<script>
+(function(){
+  function seeded(s){ return function(){ s=(s*1103515245+12345)&0x7fffffff; return s/0x7fffffff; }; }
+  document.querySelectorAll('.candles').forEach(function(c){
+    var n=+c.getAttribute('data-n')||20, rnd=seeded(+c.getAttribute('data-seed')||1);
+    var price=0.5;
+    for(var i=0;i<n;i++){
+      var open=price;
+      var drift=(rnd()-0.48)*0.16; var close=Math.max(0.08,Math.min(0.92,open+drift));
+      var hi=Math.min(0.96,Math.max(open,close)+rnd()*0.06);
+      var lo=Math.max(0.04,Math.min(open,close)-rnd()*0.06);
+      price=close;
+      var up=close>=open;
+      var k=document.createElement('div'); k.className='k '+(up?'up':'dn');
+      var wick=document.createElement('div'); wick.className='wick';
+      wick.style.bottom=(lo*100)+'%'; wick.style.height=((hi-lo)*100)+'%';
+      var body=document.createElement('div'); body.className='body';
+      var bt=Math.max(open,close), bb=Math.min(open,close);
+      body.style.bottom=(bb*100)+'%'; body.style.height=(Math.max(0.02,bt-bb)*100)+'%';
+      k.appendChild(wick); k.appendChild(body); c.appendChild(k);
+    }
+  });
+})();
+</script>
