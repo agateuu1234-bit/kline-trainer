@@ -5,11 +5,12 @@
 
 ## 0. 当前状态 · 从这里继续（RESUME POINT，新会话/压缩后必读）
 
-- **进度**：brainstorming 全部完成、决策全定（见下）。**已建分支 `feat/fixture-period-preload`**，已提交本路线图（commit `ea5eeb9`）。本文件即权威计划，无需重新调研已定项。
+- **进度**：brainstorming 全部完成、决策全定（见下）。**RFC-F 已完成并 merge**（main squash `fd7ab64`；spec R1→R2 / plan R1→R2 / whole-branch 三道对抗 review 全 APPROVE / host 1155-0 / 真机 A1–A5 user 验收过）。本文件即权威计划，无需重新调研已定项。
 - **基线**：main `4be9c74`（= PR #128 fixture 真实指标 merged）。本路线图分支从 main 切出。
-- **下一个具体动作 = 开始顺位 1（RFC-F），走完整 superpowers 流程**：
-  1. **先做一个聚焦调查**把「开局预放 before-candles」机制查准（见 §F 的 ⚠️）——`RenderStateBuilder.currentCandleIndex` 的 tick→index 映射、`backend/generate_training_sets.py assign_global_indices` 的 before/after 结构、fixture 当前为何 tick=0 只显 1 根。**这是 F spec 唯一未钉死的点**；周期比例部分已钉死（见 §F 参数）。
-  2. 写 F spec → Opus 4.8 xhigh 对抗 review 到收敛 → writing-plans → review → subagent-driven → verification（host swift test + Catalyst + app build 三绿）→ whole-branch review → PR（user 终端 `--admin` merge，guard 拦 Claude push）。
+- **下一个具体动作 = 开始顺位 2（RFC-B 训练界面布局总重构），走完整 superpowers 流程**：
+  1. ⚠️ **动手前真开浏览器做布局 mock 给 user 看再定稿**（user 明确要求）——坐标轴不遮 K 线 + 顶栏固定分行/文字标签/金额留宽 + 划线可折叠工具条 + 曲线加深加粗 + 回收买卖/持有/结束本局空间最大化 K 线区。布局是「画布」跨切，早做免 A/C 返工。
+  2. 写 B spec → Opus 4.8 xhigh 对抗 review 到收敛 → writing-plans → review → subagent-driven → verification（host swift test + Catalyst + app build 三绿）→ whole-branch review → PR（user 终端 push + `--admin` merge，guard 拦 Claude push）。
+  - **RFC-F 经验（已完成）**：开局显历史是**生产引擎改动**（`startTick` 派生自 `meta.start_datetime`，非纯 fixture）；守则**勿把 `>=` 收紧成 byte-equality**。命令行真机部署：`xcodebuild -configuration Debug -destination 'platform=iOS,id=<udid>' -allowProvisioningUpdates build` → `devicectl device uninstall/install` → `DEVICECTL_CHILD_KLINE_SEED_FIXTURE=1 devicectl device process launch --terminate-existing`（`--terminate-existing` 必加，否则 app 已运行不带 env 重启=seed 不触发）。
 - **每个 RFC 都这样独立走一遍**，顺序 F→B→A→C→E。评审通道=Opus 4.8 xhigh 代 codex（codex 周配额耗尽；merge 走 `--admin` 旁路缺失的 codex-verify-pass，与 PR #122–128 一致）。
 - **B 特别注意**：动手前**真开浏览器做布局 mock 给 user 看**再定稿（user 明确要求）。
 - **运行/验证 app**：模拟器 iPhone 17 Pro（udid `DE0BA39D-C749-459D-A407-4418599B61CA`），`xcodebuild ... -scheme KlineTrainer`，`xcrun simctl install` + `SIMCTL_CHILD_KLINE_SEED_FIXTURE=1 xcrun simctl launch ... com.agateuu1234.KlineTrainer`。**改 fixture 后必须 `simctl uninstall` 再装**（全空守卫 `AppContainer+DebugSeed.swift:27` 挡重灌，否则看不到新数据——这是 PR #128 漏看指标的根因）。真机测试走 Xcode 开 `ios/KlineTrainer/KlineTrainer.xcodeproj`+签名+scheme 加 `KLINE_SEED_FIXTURE=1`。
