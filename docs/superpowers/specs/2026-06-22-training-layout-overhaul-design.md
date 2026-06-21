@@ -66,7 +66,7 @@ B 是布局重构。以下引擎/lifecycle 表面**调用点不得改语义**（
 ### 3.1 新增「只读表面」（additive accessor，零行为、零新 I/O、不 bump；R1-H1/H2 + R2-H2 修正）
 1. **价**：`public var currentPrice: Double { ... }`——`TrainingEngine.currentPrice` 现为 `private`（TrainingEngine:256），加只读 public 镜像供 T2 显示。已核：:256 是纯 computed 读、无副作用 → 加 public 镜像**零行为**。**不改取值逻辑**（仍 `.m3` 全局价）。
 2. **标的名（R2-H2 + R3-H 修正：retain 已加载 record，零新 I/O）**：名字**只在 review/replay 显示**。已核真实加载路径：
-   - `review(recordId:)`（coordinator:244）：`loadRecordBundle(id:)` 已加载完整 `(record,ops,drawings)`（:283），装进 `.review(record:)`（`ReviewFlow.record` 为 `public let`，TrainingFlowController:56）。
+   - `review(recordId:)`（coordinator:244）：`loadRecordBundle(id:)`（:245）已加载完整 `(record,ops,drawings)`，装进 `.review(record:)`（`ReviewFlow.record` 为 `public let`，TrainingFlowController:56）。
    - `replay(recordId:)`（coordinator:283）：**同样 `loadRecordBundle` 加载了完整 record**，但只取 `record.feeSnapshot` 装进 `ReplayFlow`（无 record 字段），**record 被丢弃**。⚠️ **不可**用 `replaySettlementPayload`（:405-410，含 `loadMeta()` 磁盘读）当名字源——那是新 I/O 反模式。
    - **统一 grounded 出口**：coordinator 加 `public private(set) var activeRecord: TrainingRecord?`（与现有 `activeEngine`/`activeReader` 同款，coordinator:30-31），在 review()/replay() 用**那个本就加载好的 `record`** 存一份（**零新 I/O**，record 两路都已在内存）；`TrainingSessionLifecycle` 透出 → 顶栏读 `activeRecord?.stockName/stockCode`。`TrainingRecord.stockName/stockCode` 为**非可选 `String`**（`TrainingRecord` 定义见 `AppState.swift`）。
    - normal（盲测）：`activeRecord==nil` → 名字隐藏=占位，**不需要任何名字源**。
