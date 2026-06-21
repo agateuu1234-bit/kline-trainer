@@ -11,7 +11,7 @@ struct TrainingSessionCoordinatorConstructionTests {
     /// m3: globalIndex==endGlobalIndex==i, i∈0..<count；m60/daily 覆盖到 maxTick。
     static func validCandles(m3Count: Int = 8) -> [Period: [KLineCandle]] {
         func c(_ p: Period, gi: Int, egi: Int, close: Double) -> KLineCandle {
-            KLineCandle(period: p, datetime: Int64(gi) * 180, open: 10, high: 11, low: 9,
+            KLineCandle(period: p, datetime: 1 + Int64(gi) * 180, open: 10, high: 11, low: 9,
                         close: close, volume: 1000, amount: nil, ma66: nil,
                         bollUpper: nil, bollMid: nil, bollLower: nil,
                         macdDiff: nil, macdDea: nil, macdBar: nil,
