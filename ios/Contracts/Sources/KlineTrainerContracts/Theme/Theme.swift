@@ -47,7 +47,7 @@ public enum AppColorTokens {
     public static let candleUp        = AppColorRGBA(red: 0.86, green: 0.18, blue: 0.20)
     public static let candleDown      = AppColorRGBA(red: 0.16, green: 0.66, blue: 0.36)
     // 主图叠加指标
-    public static let ma66            = AppColorRGBA(red: 0.55, green: 0.40, blue: 0.85)
+    public static let ma66            = AppColorRGBA(red: 0.60, green: 0.42, blue: 0.95)  // RFC-B D7：提饱和
     public static let bollLine        = AppColorRGBA(red: 0.95, green: 0.70, blue: 0.20)
     // MACD（v1.5 §2：DIF 白 + DEA 黄）
     public static let macdDIF         = AppColorRGBA(white: 1.0)
