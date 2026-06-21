@@ -63,6 +63,12 @@ B 是布局重构。以下引擎/lifecycle 表面**调用点不得改语义**（
 - `panel` 参数语义不变：只影响①记录 period ②推进步数（`stepsForPeriod`）。
 - tier 仍为 `PositionTier` 枚举（5 档，tier5=全仓/清仓），非裸 index。
 
+### 3.1 新增「只读表面」（additive accessor，零行为、不 bump；R1-H1/H2 修正）
+T2 薄条要显示价、顶栏要显示标的名，但二者**当前不可达**（R1 评审证实），需新增只读访问器——**纯读、零行为改动、不动任何写入/状态机**：
+1. `public var currentPrice: Double { ... }`（或 `displayPrice`）——`TrainingEngine.currentPrice` 现为 `private`（TrainingEngine:256），加只读 public 镜像供 T2 显示。**不改取值逻辑**（仍 `.m3` 全局价）。
+2. `public private(set) var activeMeta: TrainingSetMeta?`（存在 `TrainingSessionCoordinator`，由 `TrainingSessionLifecycle` 透出）——现 `meta` 仅在 coordinator 函数内 `let` 局部加载（:170/295/358/401）从不留存；改为加载后存一份只读，供顶栏取 `stockName/stockCode`。**不得**在 SwiftUI body 内调用 `loadMeta()`（throws + I/O）。
+- 二者均属 §11「additive read-only，无外部契约面」，不 bump `CONTRACT_VERSION`。
+
 ---
 
 ## 4. 详细设计（按 zone）
@@ -71,7 +77,8 @@ B 是布局重构。以下引擎/lifecycle 表面**调用点不得改语义**（
 - `UI/TrainingView.swift`（root VStack、topBar、panel、tradeButtons、tradeStrip overlay、bottomBar、toggleDrawing、新增 `activePanel` 状态）。
 - `UI/TrainingTopBarContent.swift`（顶栏值类型：新增字段/格式化，每股成本、股数、名称、宽度策略）。
 - `UI/TradeBarView.swift`（tier 条 —— 触发点改由 T2 薄条；视图本身基本不变）。
-- 新增：`UI/TradeActionBar*.swift`（T2 底部薄条视图 + 纯值类型）、`UI/DrawingToolFloatingView*.swift`（画线浮动控件 + 拖动/折叠纯逻辑）、`UI/TrainingActivePanel.swift`（active-panel 绑定纯逻辑，可选）。
+- 新增：`UI/TradeActionBar*.swift`（T2 底部薄条视图 + 纯值类型，含周期分段钮）、`UI/DrawingToolFloatingView*.swift`（画线浮动控件 + 拖动/折叠 clamp 纯逻辑）。
+- 只读访问器（§3.1，零行为）：`TrainingEngine.swift`（加 `public var currentPrice`）、`TrainingSessionCoordinator`（加 `public private(set) var activeMeta` + 加载时留存）、`TrainingSessionLifecycle`（透出 activeMeta）。
 - `Render/AxisGridLayout.swift`（价标 x 坐标改左缘；周期标移右上；去底框）。
 - `Render/KLineView+AxisGrid.swift` / `Render/KLineView+Crosshair.swift`（`drawLabelBox` 去背景填充，仅留文字+描边）。
 - `Render/KLineView+Candles.swift`（MA66/BOLL 线宽）、`Render/KLineView+MACD.swift`（DIF/DEA 线宽）、`Theme/Theme.swift`（指标色加深）。
@@ -91,14 +98,15 @@ root `VStack(spacing:0)`：`header` → `panel(.upper)` → `panelDivider(1px)` 
    - 宽度策略（防最坏值重叠）：总资金格预留 8 位 `¥99,999,999`；持仓股数格预留 7 位 `9,999,999 股`；持仓成本/股、仓位、浮动盈亏量级有限。**每格内容居中对称**，数字多少位都对称、不撑邻格。
    - 字段与取值：
      - 总资金 = `engine.currentTotalCapital`（格式化 `¥` + 千分位，8 位不撑宽）。
-     - **持仓成本/股 = `engine.position.averageCost`**（每股；替换原 `engine.holdingCost` 总额）。
+     - **持仓成本/股 = `engine.position.averageCost`**（每股；替换原 `engine.holdingCost` 总额）。`shares==0` 时 `averageCost==0` → 显示 `¥ 0.00`（与现 formatter 一致）。
      - 持仓股数 = `engine.position.shares`（千分位 + " 股"）。
      - 仓位 = `仓位 X/5`（沿用现 `positionTier`）。
      - 浮动盈亏 = `returnRate`（沿用现，含 ±0 归一 `+0.00%`）。
-- **D5 标的名隐显**：
-  - 数据源 = 训练集 meta（`Models.swift` `stockCode`/`stockName`）。
-  - 规则：`engine.flow.mode` 为正常训练（盲测）→ 显示占位「训练标的 · 盲测」（不泄露真名）；为 **review / replay** → 显示 `stockName（stockCode）`（全角括号）。
-  - ⚠️ **plan 阶段必须核实** meta→engine→TrainingView 的可达路径（meta 已在数据层，但训练 UI 现未接）。若引擎当前未持有 meta 名称，plan 需定最小只读注入路径；不可达则回退「训练隐藏、复盘暂仍占位」并在 spec 修订记录，**禁止**为显示名称改任何引擎行为。
+- **D5 标的名隐显**（R1-H2：路径**确证缺失**，非「待核实」，需落实注入）：
+  - 数据源 = 训练集 meta（`Models.swift` `stockCode`/`stockName`）。现状：`meta` 仅在 `TrainingSessionCoordinator` 函数内局部加载、从不留存；engine/coordinator/lifecycle 均未透出名称（R1 证实）。
+  - **落实注入（§3.1.2）**：`TrainingSessionCoordinator` 加 `public private(set) var activeMeta: TrainingSetMeta?`，加载训练集时存一份；`TrainingSessionLifecycle` 透出 → TrainingView 顶栏读取。只读、零引擎行为。
+  - 规则：`engine.flow.mode` 正常训练（盲测）→ 显示占位「训练标的 · 盲测」（不泄露真名）；**review / replay** → 显示 `stockName（stockCode）`（全角括号）。
+  - **fail-closed**：复盘/再训练若 `activeMeta==nil`（异常）→ 显示「标的信息缺失」而非静默占位真名位（§10#10 据此判 fail）。**禁止**为显示名称改任何引擎行为/写入。
 
 ### 4.3 坐标轴透明无框 + 价轴移左（D1）
 - `drawLabelBox`（`KLineView+Crosshair.swift`）：**去掉背景填充矩形**，只留文字 + 细描边/阴影（`shadow`/双描边，防糊在 K 线上不可读）。crosshair 的 label 同样去底框（保持与轴一致；crosshair 交互本体属 RFC-C，此处仅去底框不改交互）。
@@ -123,19 +131,24 @@ root `VStack(spacing:0)`：`header` → `panel(.upper)` → `panelDivider(1px)` 
   - 点 ✎ **展开**为工具条（含现有水平线工具入口 + 折叠图标）；展开保持，**仅手动点折叠图标才收回**（不自动收）。
   - 工具条**布局上为未来工具预留**，但 B 只挂 `.horizontal`，不放非功能按钮。
 - 行为保留：工具激活/取消仍调 `engine.activateDrawingTool(.horizontal, panel: .upper)` / `cancelDrawing(panel: .upper)`；anchor 仍靠点击图表（`ChartContainerView` 现有 `handleDrawingTap`，不改）。
+- **review 模式 gating（R1-M2）**：浮动 ✎ 控件**仅 `showsTradeButtons==true` 时渲染**（= 现 topBar 开关钮同一门 `engine.flow.canBuySell()`，TrainingView:165-168）；review 模式不出现。
+- **无障碍（R1-M2）**：✎ 折叠按钮 `accessibilityLabel("画线工具")`；展开后水平线工具 `accessibilityLabel("水平线")`、折叠图标 `accessibilityLabel("收起画线工具")`。
 - ⚠️ 画线仍 **upper-only**（保留现状）；per-panel 画线不在 B。
 
 ### 4.6 交易控件 T2 + active-panel 绑定（D10 / D3 布局部分）
 - **删除**：两 `panel` 内右侧 `tradeButtons` VStack 列；独立 `bottomBar`（仅含结束本局）整体移除，结束按钮上移顶栏（见 4.2）。
 - **新增 T2 底部薄条**（`tradeActionBar`，~38pt，仅 `showsTradeButtons`）：
-  - 左：`<active周期> 下单价 ¥<currentPrice>`（**价 = 全局 `currentPrice`，标签 = activePanel 周期**；见 §5）。
+  - 左：**周期分段钮 `[上图周期 | 下图周期]`**（如 `60分 | 日线`）= **active-panel 切换器**（见下）+ 中性价标 **`下单价 ¥<currentPrice>`**。
   - 右：买入 / 卖出 / 持有 三钮。买入/卖出 `.disabled(!buyEnabled/!sellEnabled)`；持有 label = `shares>0 ? 持有 : 观察`。
-- **active-panel 绑定**（新 `@State activePanel: PanelId`，默认 `.lower`，与 FINAL mock 高亮一致；点 panel 切换）：
-  - 点某 panel → `activePanel = 该 panel`，该 panel 高亮（红描边 inset）。
-  - 买入/卖出 → 弹**现有 tier 条**（`tradeStrip = TradeStripRequest(panel: activePanel, action:)`），overlay 仍按 `strip.panel==id` 落在 active panel 底部；选档 → `performTrade(action, panel: activePanel, tier:)` → `engine.buy/sell(panel:tier:)`（原样）。
+  - **无障碍**：三钮 `accessibilityLabel` = 「买入」「卖出」「持有/观察」；分段钮 = 「下单周期：<周期>」。
+- **价标措辞（R1-M1）**：B 用**中性**「下单价 ¥…」，**不**用 FINAL mock 里的「日线下单价」字样——因 B 阶段价为全局价、与周期无关，写「日线下单价」=对用户撒谎。mock 的「日线下单价」是 **A 时代措辞**（A 落地 per-period 价后才成立）。此为 §1「与 mock 基本一致」的**显式例外**（措辞层，非布局层）。
+- **active-panel 切换 = T2 条分段钮（R1-H3 改方案，避开手势雷区）**：
+  - 现状单击事件被 `ChartGestureArbiter.handleTap` 独占且仅 `drawingMode` 时触发（:185-188），非画线态无单击路径。**「点图切 active」需新加手势识别器/SwiftUI tap，会与已稳定的 UIKit 仲裁冲突（C7 历经 16 轮）→ B 不做。**
+  - 改用 **T2 条上的周期分段钮**切换 `@State activePanel: PanelId`（默认 `.lower`）；选中端高亮对应 panel（红描边 inset）。**零手势改动**。D3 本就允许「控件上 60分|日线 切换钮」。
+  - 买入/卖出 → 弹**现有 tier 条**：`tradeStrip = TradeStripRequest(panel: activePanel, action:)`，overlay 仍按 `strip.panel==id` 落 active panel 底部；选档 → `performTrade(action, panel: activePanel, tier:)` → `engine.buy/sell(panel:tier:)`（原样）。
   - 持有 → `engine.holdOrObserve(panel: activePanel)`。
-- **保留**：`tradeStrip` 状态、`performTrade`、haptic/toast、autosave 链路全不动。
-- ⚠️ 与现状的唯一交互差异：触发买卖的入口从「两侧各自 panel 的按钮」变为「统一薄条 + activePanel」。语义等价（panel 仍传入引擎），但需 §10 验收：在 upper / lower 分别 active 时买卖，记录的 period 与推进步数与旧版一致。
+- **保留**：`tradeStrip` 状态、`performTrade`、haptic/toast、autosave、`ChartGestureArbiter` 全不动（画线点击 anchor 路径不变）。
+- ⚠️ 与现状的唯一交互差异：买卖入口从「两侧各 panel 的按钮」→「统一薄条 + 分段钮选 active」。语义等价（`panel` 仍传引擎）。§10 验收：upper/lower 分别 active 时买卖，记录 period 与推进步数与旧版一致；且**画线模式下点图仍是落 anchor、不切 active**。
 
 ### 4.7 结束 / 返回（D6）
 - 返回：顶栏左，`lifecycle.back()`（不变）。
@@ -148,16 +161,18 @@ root `VStack(spacing:0)`：`header` → `panel(.upper)` → `panelDivider(1px)` 
 **B 不改定价模型。** 现状买卖价 = 全局 `.m3` 当前 tick 收盘（与点哪个 panel 无关）。D3「每周期取各自最后一根 K 线收盘」是**引擎行为改动**，归 **RFC-A**。
 
 B 在此只做两件**布局/显示**事：
-1. 控件统一到 T2 薄条 + `activePanel` 绑定（`panel` 参数本就由引擎接收，B 只换 `panel` 的来源 = activePanel，不新增定价语义）。
-2. 薄条**显示** activePanel 的周期标签 + 当前**全局**价（诚实：此价目前与周期无关；A 落地 per-period 价后，此显示自然变为「该周期价」）。
+1. 控件统一到 T2 薄条 + `activePanel`（分段钮选）绑定（`panel` 参数本就由引擎接收，B 只换 `panel` 的来源 = activePanel，不新增定价语义）。
+2. 薄条用**中性**「下单价 ¥…」显示当前**全局**价 + 周期分段钮标出 active 周期。**不写「<周期>下单价」**（避免对用户声称一个尚不存在的 per-period 价）。A 落地 per-period 价后，措辞可升级为「该周期价」。
 
 → spec 不承诺 B 阶段「不同周期不同价」。该承诺由 RFC-A 兑现。user 已在 D3 同意取价规则归 A。
+→ **与 mock 的差异（显式记录）**：FINAL mock 印「日线下单价 ¥1,680」属 A 时代措辞；B 实现取**中性措辞**，是 §1「与 mock 基本一致」在措辞层的有意例外（布局/位置仍照 mock）。
 
 ---
 
 ## 6. 数据流 / 新增状态
 
-- `@State activePanel: PanelId`（TrainingView，默认 `.lower`）——交易目标 panel；点 panel 更新；驱动高亮 + 传给 buy/sell/holdOrObserve/tradeStrip。
+- `@State activePanel: PanelId`（TrainingView，默认 `.lower`）——交易目标 panel；**由 T2 条周期分段钮更新**（不靠点图，R1-H3）；驱动高亮 + 传给 buy/sell/holdOrObserve/tradeStrip。
+- 新增只读访问器（§3.1）：`TrainingEngine.currentPrice`（public 只读镜像，供 T2 显示）、`TrainingSessionCoordinator.activeMeta`（透过 lifecycle 供顶栏标的名）。均零行为。
 - 画线浮动控件位置 `@State drawToolOffset: CGPoint` + 展开态 `@State drawToolExpanded: Bool`——纯 UI 状态；位置 clamp 逻辑抽纯函数 host 测。
 - 顶栏值类型 `TrainingTopBarContent` 扩展：加 `stockNameDisplay: String?`（隐显规则结果）、`holdingCostPerShare`（每股）、`shares`（格式化）字段；格式化函数 host 测（千分位 / 8 位 / 7 位 / 占位）。
 - 无新增引擎状态；无新增持久化。
@@ -177,10 +192,10 @@ B 在此只做两件**布局/显示**事：
 ## 8. 测试策略
 
 - **Host 可测纯逻辑**（Swift Testing）：
-  - `TrainingTopBarContent` 格式化（8 位总资金千分位、每股成本、7 位股数、±0 归一、占位/真实名隐显选择）。
-  - 画线浮动控件位置 clamp 纯函数（拖出边界回弹）。
-  - active-panel 绑定纯逻辑（若抽值类型）。
-  - 轴几何：`AxisGridLayout` 价标 x 落在左缘、周期标在右上（断言坐标，容差）。
+  - `TrainingTopBarContent` 格式化（8 位总资金千分位、每股成本、`shares==0`→`¥ 0.00`、7 位股数、±0 归一、占位/真实名/`activeMeta==nil` fail-closed 隐显选择）。**确有纯逻辑可测**。
+  - 画线浮动控件位置 clamp 纯函数（拖出边界回弹）。**确有纯逻辑可测**。
+  - 轴几何：`AxisGridLayout` 价标 x 落在左缘、周期标在右上（断言坐标，容差）。**`AxisGridLayout` 是纯值类型，确可测**。
+  - **active-panel：诚实声明无可抽纯单元**——它是 `@State` + 直传引擎的普通 SwiftUI 状态（R1-M3），不臆造 host 测试；由 §10#7 模拟器验收覆盖。
 - **构建验证**：`swift test` host 全绿；Mac Catalyst `build-for-testing` SUCCEEDED；iOS app build 成功。
 - **模拟器人工验收**：§10 清单逐条（iPhone 17 Pro，DEBUG fixture）。
 - 历史教训：等比浮点 host 断言用容差；负向 grep 断言用 `if/exit 1` 非 `! grep`（[[feedback_acceptance_grep_anchoring]]）。
@@ -205,24 +220,39 @@ B 在此只做两件**布局/显示**事：
 | 2 | 观察上下两个 K 线图 | 上下两图高度肉眼相等 | 截图量两图像素高度差 ≤ 2px = pass；否则 fail |
 | 3 | 观察价轴数字 | 价格数字在图**左侧**、透明无底框、不遮挡最右最新 K 线 | 最右 K 线完整可见且价标无实心底框 = pass；底框遮挡 = fail |
 | 4 | 观察周期标 / 时间轴 | 周期标在主图右上；时间标在 MACD 底部、透明 | 位置与透明均符 = pass；否则 fail |
-| 5 | 观察 MA66/BOLL/MACD 曲线 | 比改版前明显更粗更醒目（紫 MA / 琥珀 BOLL / 白黄 MACD） | 与旧版截图对比线宽变粗 = pass；无变化 = fail |
+| 5 | 查源码/截图量 MA66/BOLL/MACD 线宽（对照 §4.4 目标值） | MA66=`2/displayScale`、BOLL 三轨=`1.6/displayScale`、MACD DIF/DEA=`1.8/displayScale`；色为紫/琥珀/白黄 | 三类线宽各等于目标值（任一仍为 `1/displayScale` 即 fail）且配色符 = pass；否则 fail |
 | 6 | 点屏幕左上「✎」并拖动 | 出现可拖动圆按钮；拖到别处停住；点开展开工具条；再点折叠图标收回 | 拖动+展开+手动收回三动作均生效 = pass；任一失效 = fail |
-| 7 | 点上图，再点底部「买入」选 2/5；返回点下图同样买入 | 底部薄条「买入」弹 1/5..5/5 档条；选档成交；上图 active 时记 60分、下图记日线（推进步数随之） | 两 panel 各自成交且 period/步数与旧版一致 = pass；行为变化 = fail |
-| 8 | 顶栏「持仓成本/股」 | 显示**每股**成本（价位级，如 1,683.50），非总额 | 数值 ≈ 现价量级（每股）= pass；显示为总额（万级）= fail |
+| 7 | T2 条分段钮切到「上图(60分)」点「买入」选 2/5；再切「下图(日线)」同样买入 | 分段钮选中端对应图高亮；买入弹 1/5..5/5 档条；选档成交；60分记 60 分、日线记日线（推进步数随之） | 两周期各自成交且记录 period/步数与旧版一致 = pass；行为变化 = fail |
+| 8 | 顶栏「持仓成本/股」（持仓 >0 与 =0 两种） | 持仓>0 显示**每股**成本（价位级，如 1,683.50）；持仓=0 显示 `¥ 0.00` | 两种取值均符 = pass；显示为总额(万级)或 0 时异常 = fail |
 | 9 | 顶格压测：构造大额（资金千万级 / 股数百万级） | 总资金 8 位、持仓股数 7 位均不撑宽、不换行、不与邻格重叠 | 无重叠/换行 = pass；否则 fail |
-| 10 | 复盘(review)进入 | 顶栏显示真实标的名（代码）；无 T2 薄条/画线钮/结束 | 名称真实显示且交易控件按 review 隐藏 = pass；否则 fail |
-| 11 | 正常训练（盲测）进入 | 顶栏标的名为占位（不泄露真名） | 占位显示 = pass；泄露真名 = fail |
+| 10 | 复盘(review)进入（含构造 `activeMeta==nil` 异常） | 正常复盘顶栏显真实 `标的名（代码）`；`activeMeta==nil` 时显「标的信息缺失」（不静默占位）；无 T2 薄条/画线钮/结束 | 真实名显示且异常 fail-closed 且交易控件按 review 隐藏 = pass；任一不符 = fail |
+| 11 | 正常训练（盲测）进入 | 顶栏标的名为占位「训练标的 · 盲测」（不泄露真名） | 占位显示 = pass；泄露真名 = fail |
+| 12 | 进入画线模式后点图表 | 落下水平线 anchor（**不**切换 active panel） | 点击落 anchor 且 active 不变 = pass；点击改 active 或不落 anchor = fail |
+| 13 | 浅色与深色外观各进训练页 | 两种外观下左侧价标/时间标透明文字在红绿 K 线上均清晰可读（描边/阴影生效） | 两外观均可读 = pass；任一外观糊住读不清 = fail |
 
 ---
 
 ## 11. 不 bump `CONTRACT_VERSION` 论证
 
-`CONTRACT_VERSION` 钉持久化/跨端契约。B：0 DDL、0 持久化结构、0 序列化字段、0 后端、0 引擎行为；仅 iOS 表现层重排 + 只读取值（`averageCost`/`stockName` 早已存在）。无任何外部可观测契约变化 → **不 bump**（与 PR #122–128 UI 改版一致）。plan/impl 阶段若发现需触持久化结构（不预期），回到本节修订并 bump。
+`CONTRACT_VERSION` 钉持久化/跨端契约。B：0 DDL、0 持久化结构、0 序列化字段、0 后端、0 引擎**行为**；仅 iOS 表现层重排 + 只读取值。新增表面**仅 additive 只读**（§3.1）：`currentPrice` public 镜像（值逻辑不变）、`activeMeta` 只读留存（`stockName`/`averageCost` 数值本就存在，只是之前未透出到训练 UI）——均不进入任何持久化/序列化/跨端契约面。无任何外部可观测契约变化 → **不 bump**（与 PR #122–128 UI 改版一致）。plan/impl 阶段若发现需触持久化结构（不预期），回到本节修订并 bump。
 
 ---
 
 ## 12. 风险 / 未决（plan 阶段消解）
-- R1 标的名 meta→UI 可达性（§4.2 已标必核）。
+- ~~R1 标的名 meta→UI 可达性~~ → **已消解**：§3.1.2/§4.2 落实 `activeMeta` 只读注入 + fail-closed（R1-H2 修正）。
 - R2 价轴移左与 K 线占满区的内边距取舍（浮于上层 vs 让出 gutter）——优先浮于上层占满，plan 定细节，§10#3 验收兜底。
-- R3 透明轴文字浅色主题可读性（描边方案 plan 定，§10#3/#4 人工验收）。
-- R4 active-panel 默认值与「点 panel 即改 active」是否与 crosshair 长按、pan、pinch 手势冲突（plan 核手势仲裁 `ChartGestureArbiter`，单击选 active 不得吃掉长按/拖动）。
+- R3 透明轴文字浅色主题可读性（描边方案 plan 定，§10#3/#4/#13 双外观人工验收）。
+- ~~R4 「点 panel 即改 active」手势冲突~~ → **已消解**：改用 T2 条周期分段钮切 active，零手势改动（R1-H3 修正）；画线点击 anchor 路径不变（§10#12 兜底）。
+
+## 13. R1 对抗 review 修正记录（spec 自身可追溯）
+R1（Opus 4.8 xhigh，target blob `ac6efc8a`）判 NEEDS-ATTENTION，3H/4M/3L 全部成立、已修：
+- H1 `currentPrice` 私有 → §3.1.1 加 public 只读镜像。
+- H2 标的名路径缺失 → §3.1.2/§4.2 落实 `activeMeta` 注入 + §10#10 fail-closed。
+- H3 点图切 active 撞手势仲裁 → §4.6 改 T2 条分段钮，零手势改动。
+- M1 mock「日线下单价」误导 → §4.6/§5 改中性「下单价」措辞 + 记差异。
+- M2 a11y/review-gating → §4.5/§4.6 补 accessibilityLabel + 浮动钮 `showsTradeButtons` 门。
+- M3 测试性夸大 → §8 诚实声明 active-panel 无纯单元。
+- M4 §10#5「明显更粗」不可二值 → 改对照 §4.4 数值线宽。
+- L1 shares==0 取值 → §4.2 钉 `¥ 0.00` + §10#8 覆盖。
+- L2 双主题验收缺 → §10#13 新增。
+- L3 两图等高 1px divider 取整 → §10#2 容差 ≤2px 已吸收（无需改）。
