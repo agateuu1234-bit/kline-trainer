@@ -179,6 +179,7 @@ struct AppContainerDebugSeedTests {
         let engine = try await c.coordinator.startNewNormalSession()
         // currentTotalCapital = cashBalance + shares*price；开局无持仓 → = 起始资金。
         #expect(engine.currentTotalCapital == 100_000)
+        #expect(engine.tick.globalTickIndex == DebugFixtureData.fullLoadBeforeM3Count)  // 开局=起始点 12000（真 seeded→coordinator 端到端，app 开局非空）
     }
 
     // 13c-R2 根治端到端：实际 seeded + cached 的训练组（= 帧预算 runbook 真正剖析的那份）须满载。
