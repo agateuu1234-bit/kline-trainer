@@ -29,6 +29,9 @@ public final class TrainingSessionCoordinator {
 
     public private(set) var activeEngine: TrainingEngine?
     public private(set) var activeReader: (any TrainingSetReader)?
+    /// RFC-B D5：review/replay 留存「已 loadRecordBundle 到内存」的 record（零新 I/O），供顶栏标的名。
+    /// normal/resume 路径置 nil（盲测占位）。
+    public private(set) var activeRecord: TrainingRecord?
 
     // MARK: - E6b 会话持久化上下文（saveProgress/finalize 需文件名+起始时间，engine 不携带）
 
@@ -181,6 +184,7 @@ public final class TrainingSessionCoordinator {
             cache.touch(file)                       // §A touch-on-use（E6a-R3）：仅在**完整读取 + 引擎构造成功**后刷 LRU mtime（codex-13a-F2：不在 openReader 后即 touch，防候选 candle 损坏文件假性续命）
             activeStartedAt = now()                 // D4：fresh Normal 局起始时间
             activeSessionKey = makeSessionKey()     // RFC §4.7c：fresh Normal 生成新 session key
+            activeRecord = nil                      // RFC-B D5：盲测训练隐藏标的名
             resetAutosaveState()                     // 新 session：清栅栏/脏/cadence/错误（D3）
             return engine
         } catch {
@@ -227,6 +231,7 @@ public final class TrainingSessionCoordinator {
             cache.touch(file)                        // §A touch-on-use：完整读取+引擎构造成功后刷 LRU mtime（codex-13a-F2）
             activeStartedAt = pending.startedAt      // D4：resume 保留原局起始时间
             activeSessionKey = pending.sessionKey    // RFC §4.7c：resume 恢复已存 session key
+            activeRecord = nil                       // RFC-B D5：盲测训练隐藏标的名
             resetAutosaveState()                     // 新 session：清栅栏/脏/cadence/错误（D3）
             return engine
         } catch {
@@ -270,6 +275,7 @@ public final class TrainingSessionCoordinator {
             cache.touch(file)                        // §A touch-on-use：完整读取+引擎构造成功后刷 LRU mtime（codex-13a-F2）
             activeStartedAt = nil                    // D4：review 只读，无进度保存
             activeSessionKey = nil                   // RFC §4.7c：review 无 session key
+            activeRecord = record                    // RFC-B D5：复用已加载 record（零新 I/O）
             return engine
         } catch {
             reader.close()
@@ -307,6 +313,7 @@ public final class TrainingSessionCoordinator {
             cache.touch(file)                        // §A touch-on-use：完整读取+引擎构造成功后刷 LRU mtime（codex-13a-F2）
             activeStartedAt = nil                    // D4：replay 不入账，无进度保存
             activeSessionKey = nil                   // RFC §4.7c：replay 无 session key
+            activeRecord = record                    // RFC-B D5：复用已加载 record（原本被丢弃，零新 I/O）
             return engine
         } catch {
             reader.close()
@@ -436,6 +443,7 @@ public final class TrainingSessionCoordinator {
         activeFile = nil
         activeStartedAt = nil
         activeSessionKey = nil                       // RFC §4.7c：清空 session key
+        activeRecord = nil                           // RFC-B D5：防 review 结束后 stale 标的名
     }
 
     /// §4.7e discard 持久终态：fence autosaves → 清 `pending_training` → endSession（durable 不复活）。

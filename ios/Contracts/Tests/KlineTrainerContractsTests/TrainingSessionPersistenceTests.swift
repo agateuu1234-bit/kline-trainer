@@ -178,6 +178,26 @@ struct TrainingSessionPersistenceTests {
         #expect(try pending.loadPending() == nil)
     }
 
+    @Test("RFC-B：activeRecord 在 review 后 = record，normal 后 = nil")
+    func activeRecord_setAfterReview_nilAfterNormal() async throws {
+        let (coord, records, _, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let id = try records.insertRecord(
+            TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
+                           stockCode: "600000", stockName: "测试股", startYear: 2020, startMonth: 1,
+                           totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                           buyCount: 0, sellCount: 0,
+                           feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+                           finalTick: 7),
+            ops: [], drawings: [])
+        _ = try await coord.review(recordId: id)
+        #expect(coord.activeRecord?.stockName == "测试股")
+        #expect(coord.activeRecord?.stockCode == "600000")
+        await coord.endSession()                          // R2-M：teardown 清 activeRecord
+        #expect(coord.activeRecord == nil)                // 结束后无 stale 名
+        _ = try await coord.startNewNormalSession()        // 无参；盲测仍 nil
+        #expect(coord.activeRecord == nil)
+    }
+
     @Test("saveProgress: 缺活跃上下文（endSession 后）→ .internalError（D9）")
     func saveProgress_noActiveContext_throws() async throws {
         let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles())
