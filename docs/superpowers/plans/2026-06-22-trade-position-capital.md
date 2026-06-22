@@ -508,7 +508,15 @@ func test_retry_with_corrupt_capital_fails_closed() throws {
         guard case AppError.persistence(.dbCorrupted) = e else { return XCTFail("expected .dbCorrupted, got \(e)") }
     }
 }
+// codex R-plan-13-1：退化局（total_capital+profit < 0）→ 权威资金 floor 到 0（不写负值）。
+func test_finalize_floors_negative_net_capital_to_zero() throws {
+    let r = try db.finalizeSession(record: recordWithCapital(-5_000), ops: [], drawings: [], sessionKey: "kNeg")
+    XCTAssertEqual(r.totalCapital, 0, accuracy: 1e-6)                        // 返回 floor 后 0
+    XCTAssertEqual(try db.loadSettings().totalCapital, 0, accuracy: 1e-6)    // DB 写 0
+}
 ```
+
+`DefaultSettingsDAOTests` 加（R-plan-13-1：setTotalCapital 拒负）：`XCTAssertThrowsError(try db.setTotalCapital(-1))`（经端口/直调，沿用本套件范式）。
 
 SettingsStore 单测（沿用该文件现成测试框架 + `SettingsStore.preview()`/`InMemorySettingsDAO`）：
 
@@ -540,6 +548,16 @@ func test_finalize_refreshes_cache_from_returned_authority_not_engine() async th
     //   + 一个 currentTotalCapital≠777_000 的活跃 engine…
     _ = try await coordinator.finalize(engine: engine)
     XCTAssertEqual(injectedSettingsStore.settings.totalCapital, 777_000, accuracy: 1e-6)
+}
+// codex R-plan-13-1（局终自动强平退化局，整合）：构造低价持仓 + 免5 fees，使 maxTick 处自动 forceClose
+// 净 proceeds 为负、currentTotalCapital<0 的 Normal 局；跑完 finalize 后断言 **DB/缓存 settings.total_capital >= 0**
+// （floor 生效，非负权威资金；不动冻结的 performForceClose 记账，记录可仍记负 profit）。
+func test_auto_end_force_close_negative_proceeds_floors_capital() async throws {
+    // …startNewNormalSession（低价 fixture）→ 买满 → 推进到 maxTick 触发 forceCloseIfEnded → finalize…
+    let id = try await coordinator.finalize(engine: engine)
+    XCTAssertNotNil(id)
+    XCTAssertGreaterThanOrEqual(try appDB.loadSettings().totalCapital, 0)            // 权威资金不为负
+    XCTAssertGreaterThanOrEqual(injectedSettingsStore.settings.totalCapital, 0)      // 活缓存亦然
 }
 ```
 
@@ -600,14 +618,30 @@ Expected: 编译失败（`finalizeSession` 现返回 `Int64`、测试用 `r.tota
                 }
                 let tc: Double = row["total_capital"]
                 let p: Double = row["profit"]
-                let authoritativeCapital = tc + p
-                try SettingsDAOImpl.setTotalCapital(db, authoritativeCapital)   // setTotalCapital 自带 finite 守卫
+                // codex R-plan-13-1（user 拍板：持久化边界 floor）：权威资金不得为负（"不能欠钱"不变量）。
+                // 退化局（局终强平 手续费>持仓价值 → currentTotalCapital<0）→ floor 到 0（=破产；记录仍如实记负 profit）。
+                let authoritativeCapital = max(0, tc + p)
+                try SettingsDAOImpl.setTotalCapital(db, authoritativeCapital)   // setTotalCapital 自带 finite + ≥0 守卫
                 return (id, authoritativeCapital)
             }
         } catch let appErr as AppError { throw appErr }
         catch { throw PersistenceErrorMapping.translate(error) }
     }
 ```
+
+**同时给 `SettingsDAOImpl.setTotalCapital` 加 `≥0` 守卫（R-plan-13-1 持久化边界，防任何 caller 写负权威资金）**——现仅 `value.isFinite`，扩为：
+
+```swift
+    static func setTotalCapital(_ db: Database, _ value: Double) throws {
+        guard value.isFinite, value >= 0 else {       // R-plan-13-1：权威资金不得为负
+            throw AppError.internalError(module: "P4-SettingsDAO",
+                detail: "setTotalCapital refused: value invalid (\(value))")
+        }
+        try db.execute(sql: "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                       arguments: [keyTotalCapital, String(value)])
+    }
+```
+（`SettingsDAOImpl.swift` 已在 Task 1 Step 5 改过 commissionRate；此处同文件加 capital 守卫。）
 
 - [ ] **Step 3b: 改 `DefaultAppDB.resetAllTrainingProgress`**（去 `deleteAll`，保留记录）
 
@@ -789,10 +823,10 @@ Expected: FAIL（user_version 仍 2；total_capital 仍 100000，未回填）。
                 """) {
                 let tc: Double = row["total_capital"]
                 let p: Double = row["profit"]
-                let authoritative = tc + p
-                // codex R-plan-8-2：只在派生值有限时写——legacy 行 sum 溢出/非有限不得污染 total_capital
-                //（否则后续 loadSettings 判 .dbCorrupted、user_version 又挡重试）。非有限则跳过写、保留默认。
-                if authoritative.isFinite {
+                // codex R-plan-8-2：非有限（溢出）跳过写、保留默认（否则 loadSettings 判 .dbCorrupted + 版本号挡重试）。
+                // codex R-plan-13-1：负派生值 floor 到 0（与 finalize 同口径，权威资金不得为负）。
+                if (tc + p).isFinite {
+                    let authoritative = max(0, tc + p)
                     try db.execute(sql:
                         "INSERT OR REPLACE INTO settings(key, value) VALUES ('total_capital', ?)",
                         arguments: [String(authoritative)])
