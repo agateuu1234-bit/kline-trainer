@@ -86,6 +86,12 @@ public struct TrainingView: View {
             }
         }
         .onAppear { maybeAutoEnd() }                                            // M2：resume-at-maxTick
+        .onChange(of: activePanel) { _, _ in
+            // RFC-B(codex R1-medium 修)：切分段钮(下单目标周期)即清掉打开的买卖档位条——
+            // 否则条内捕获的 strip.panel 会过期（条显示在旧 panel、成交也按旧 panel），
+            // 切目标后再选档会对错周期下单（autosave 后不可逆）。切目标=取消未确认下单。
+            tradeStrip = nil
+        }
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
             lifecycle.autosave(immediate: false)                // §4.6：tick 推进按 N 节流
             maybeAutoEnd()
