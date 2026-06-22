@@ -166,6 +166,15 @@ struct TradeCalculatorShareHelperTests {
         // 正常正费率仍工作
         #expect(TradeCalculator.maxBuyableShares(cash: 10_001, price: 10, fees: noMin) == 1000)
     }
+    @Test("R-plan-10-2：极小有限价（商溢出 > Int.max）不 trap，返 0")
+    func tinyPriceNoTrap() {
+        let tiny = Double.leastNonzeroMagnitude          // cash/tiny → +inf
+        #expect(TradeCalculator.maxBuyableShares(cash: 100_000, price: tiny, fees: noMin) == 0)
+        #expect(TradeCalculator.sharesForBuyTier(cash: 100_000, price: tiny, tier: .tier1, fees: noMin) == 0)
+        #expect(TradeCalculator.sharesForBuyTier(cash: 100_000, price: tiny, tier: .tier5, fees: noMin) == 0)
+        // 商超 Int.max 但有限（cash 大、price 极小但非最小）：1e308/1e-300 ≈ 1e608=inf → 0；用可控值
+        #expect(TradeCalculator.maxBuyableShares(cash: 1e300, price: 1e-300, fees: noMin) == 0)
+    }
     @Test("sharesForBuyTier: 1/5..4/5 = cash 基准 lot-floor；全仓 = maxBuyable")
     func buyTier() {
         #expect(TradeCalculator.sharesForBuyTier(cash: 100_000, price: 10, tier: .tier1, fees: noMin) == 2000)
@@ -233,10 +242,13 @@ Expected: 编译失败（`quoteBuy(cash:shares:…)` 等方法未定义）。
     /// fee-aware 可买上限：满足 totalCost(N) ≤ cash 的最大 100 股整数倍。
     public static func maxBuyableShares(cash: Double, price: Double, fees: FeeSnapshot) -> Int {
         guard price > 0, cash > 0, price.isFinite, cash.isFinite else { return 0 }
-        // codex R-plan-6-1：守卫费率 finite 且 ≥0 → (1+rate)≥1>0 不除零、无 inf → robustFloor 的 Int() 不 trap。
+        // codex R-plan-6-1：守卫费率 finite 且 ≥0 → (1+rate)≥1>0 不除零、无 inf。
         guard fees.commissionRate.isFinite, fees.commissionRate >= 0 else { return 0 }
-        // 估算上界（忽略 min 佣金）：N ≤ cash / (price*(1+rate))
-        let est = robustFloor(cash / (price * (1 + fees.commissionRate)))
+        // codex R-plan-10-2：极小有限价会令商 +inf 或 > Int.max → robustFloor 的 Int() trap；
+        // 守卫商有限且在 Int 转换界内（degenerate 行情 → 返 0 禁买，不崩）。
+        let quotient = cash / (price * (1 + fees.commissionRate))
+        guard quotient.isFinite, quotient < Double(Int.max) else { return 0 }
+        let est = robustFloor(quotient)
         var lots = (est / shareLotSize) * shareLotSize
         // 向下校正：免5 下限 / FP 边界可能令估值略超 cash
         while lots > 0 {
@@ -252,7 +264,10 @@ Expected: 编译失败（`quoteBuy(cash:shares:…)` 等方法未定义）。
                                         fees: FeeSnapshot) -> Int {
         if tier == .tier5 { return maxBuyableShares(cash: cash, price: price, fees: fees) }
         guard price > 0, cash >= 0, price.isFinite, cash.isFinite else { return 0 }
-        let raw = robustFloor(cash * ratio(of: tier) / price)
+        // R-plan-10-2：同 maxBuyableShares，极小价令商溢出 → 守卫后 robustFloor 不 trap。
+        let quotient = cash * ratio(of: tier) / price
+        guard quotient.isFinite, quotient < Double(Int.max) else { return 0 }
+        let raw = robustFloor(quotient)
         return (raw / shareLotSize) * shareLotSize
     }
 
@@ -472,6 +487,14 @@ func test_stale_retry_after_newer_session_keeps_newer_capital() throws {
     XCTAssertEqual(r.totalCapital, 130_000, accuracy: 1e-6)                       // 返回当前(k2)，不回退
     XCTAssertEqual(try db.loadSettings().totalCapital, 130_000, accuracy: 1e-6)   // DB 仍 k2
 }
+// codex R-plan-10-1：过期 finalize 重试不得清掉**他人**在飞 pending。
+func test_stale_retry_does_not_clear_unrelated_pending() throws {
+    _ = try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1")  // k1 finalize
+    try db.savePending( /* 新 in-progress 局，session_key="k2"（沿用本套件 savePending 范式）*/ )
+    _ = try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1")  // k1 过期重试
+    XCTAssertNotNil(try db.loadPending())                       // k2 pending 仍在（未被误清）
+    XCTAssertEqual(try db.loadPending()?.sessionKey, "k2")
+}
 ```
 
 SettingsStore 单测（沿用该文件现成测试框架 + `SettingsStore.preview()`/`InMemorySettingsDAO`）：
@@ -531,7 +554,13 @@ Expected: 编译失败（`finalizeSession` 现返回 `Int64`、测试用 `r.tota
                     "SELECT id FROM training_records WHERE session_key = ?", arguments: [sessionKey]) != nil
                 let id = try RecordRepositoryImpl.insertRecord(
                     db, record: record, ops: ops, drawings: drawings, sessionKey: sessionKey)
-                try PendingTrainingRepositoryImpl.clearPending(db)
+                // R-plan-10-1：仅清「属于本次 finalize sessionKey」的 pending（pending_training 单例 id=1，0004 加了
+                // session_key）。过期重试 k1 时若当前 pending 是更新的 k2 在飞局 → key 不符 → 不清 → 防误删数据。
+                let pendingKey = try String.fetchOne(db, sql:
+                    "SELECT session_key FROM pending_training WHERE id = 1")
+                if pendingKey == sessionKey {
+                    try PendingTrainingRepositoryImpl.clearPending(db)
+                }
                 if alreadyExisted {
                     // 重复 sessionKey（含「更晚 session 已 finalize 后、旧 session 的过期重试」）：
                     // **不改权威资金**（否则会把 settings.total_capital 回退到旧 session 值）；
