@@ -539,11 +539,15 @@ func test_stale_retry_does_not_clear_unrelated_pending() throws {
 }
 // codex R-plan-12-2：重复重试遇**损坏**的 total_capital（非有限/畸形）→ finalize 抛 .dbCorrupted（不静默兜底 10万）。
 func test_retry_with_corrupt_capital_fails_closed() throws {
-    _ = try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1")
-    // 直接把 settings.total_capital 写成畸形（绕过 setTotalCapital 守卫，模拟 DB 损坏）
-    try db.rawWriteSetting("total_capital", "abc")   // 沿用本套件 raw 写/openRaw 范式
-    XCTAssertThrowsError(try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1")) { e in
-        guard case AppError.persistence(.dbCorrupted) = e else { return XCTFail("expected .dbCorrupted, got \(e)") }
+    // 畸形（非数字）+ 负值（R-plan-17-1）两路都 fail-closed，不返非负/不刷负缓存。
+    for bad in ["abc", "-1.0", "inf"] {
+        _ = try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1")
+        try db.rawWriteSetting("total_capital", bad)   // 绕过 setTotalCapital 守卫，模拟 DB 损坏
+        XCTAssertThrowsError(try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1"),
+                             "bad=\(bad)") { e in
+            guard case AppError.persistence(.dbCorrupted) = e else { return XCTFail("expected .dbCorrupted for \(bad), got \(e)") }
+        }
+        try db.rawWriteSetting("total_capital", String(AppSettings.defaultTotalCapital))   // 复位供下一轮
     }
 }
 // codex R-plan-13-1：退化局（total_capital+profit < 0）→ 权威资金 floor 到 0（不写负值）。
@@ -640,7 +644,7 @@ Expected: 编译失败（`finalizeSession` 现返回 `Int64`、测试用 `r.tota
                         "SELECT value FROM settings WHERE key = 'total_capital'")
                     let current: Double
                     if let txt {
-                        guard let v = Double(txt), v.isFinite else { throw AppError.persistence(.dbCorrupted) }
+                        guard let v = Double(txt), v.isFinite, v >= 0 else { throw AppError.persistence(.dbCorrupted) }  // R-plan-17-1：含拒负
                         current = v
                     } else {
                         current = AppSettings.defaultTotalCapital   // 缺失 = 从未设置，合法默认
