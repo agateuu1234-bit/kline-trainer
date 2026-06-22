@@ -190,6 +190,15 @@ struct TradeCalculatorShareHelperTests {
         // 商超 Int.max 但有限（cash 大、price 极小但非最小）：1e308/1e-300 ≈ 1e608=inf → 0；用可控值
         #expect(TradeCalculator.maxBuyableShares(cash: 1e300, price: 1e-300, fees: noMin) == 0)
     }
+    @Test("R-plan-15-1：tiny 有限价 + 免5 二分即时返回（不空转），边界正确")
+    func tinyPriceMinCommissionPrompt() {
+        let withMin = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+        let n = TradeCalculator.maxBuyableShares(cash: 1_000, price: 1e-9, fees: withMin)
+        #expect(n > 0 && n % 100 == 0)
+        // n 可行、n+100 不可行（证明二分取到精确最大手数，非近似；且必然瞬时返回=非空转）
+        #expect(Double(n) * 1e-9 + 5 <= 1_000.0 + 1e-6)
+        #expect(Double(n + 100) * 1e-9 + 5 > 1_000.0)
+    }
     @Test("sharesForBuyTier: 1/5..4/5 = cash 基准 lot-floor；全仓 = maxBuyable")
     func buyTier() {
         #expect(TradeCalculator.sharesForBuyTier(cash: 100_000, price: 10, tier: .tier1, fees: noMin) == 2000)
@@ -272,15 +281,23 @@ Expected: 编译失败（`quoteBuy(cash:shares:…)` 等方法未定义）。
         // 守卫商有限且在 Int 转换界内（degenerate 行情 → 返 0 禁买，不崩）。
         let quotient = cash / (price * (1 + fees.commissionRate))
         guard quotient.isFinite, quotient < Double(Int.max) else { return 0 }
-        let est = robustFloor(quotient)
-        var lots = (est / shareLotSize) * shareLotSize
-        // 向下校正：免5 下限 / FP 边界可能令估值略超 cash
-        while lots > 0 {
-            let notional = Double(lots) * price
-            if notional + computeCommission(notional: notional, fees: fees) <= cash { break }
-            lots -= shareLotSize
+        // 上界 = 忽略 min 佣金的估值（lot 数）；min 佣金只增成本 → 真值 ≤ 此上界。
+        let hiBound = robustFloor(quotient) / shareLotSize
+        guard hiBound >= 1 else { return 0 }
+        // totalCost(lots) 对 lots **单调增**（notional 增、commission = max(notional×rate, min) 增/平）→ 可二分。
+        func totalCost(_ lots: Int) -> Double {
+            let n = Double(lots * shareLotSize) * price
+            return n + computeCommission(notional: n, fees: fees)
         }
-        return max(0, lots)
+        // codex R-plan-15-1：用**二分**取代逐手递减循环（tiny 价+免5 时递减可达千万次 → UI 卡死）。O(log) ≤ ~60 次。
+        guard totalCost(1) <= cash else { return 0 }              // 1 手都买不起
+        if totalCost(hiBound) <= cash { return hiBound * shareLotSize }   // 上界即可行
+        var lo = 1, hi = hiBound                                  // lo 可行、hi 不可行
+        while lo + 1 < hi {
+            let mid = lo + (hi - lo) / 2
+            if totalCost(mid) <= cash { lo = mid } else { hi = mid }
+        }
+        return lo * shareLotSize
     }
 
     /// 比例 → 买入快捷股数（1/5..4/5 = cash 基准 lot-floor；全仓 = maxBuyableShares）。
