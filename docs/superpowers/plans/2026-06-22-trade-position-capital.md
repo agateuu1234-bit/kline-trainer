@@ -723,7 +723,9 @@ git commit -m "feat(A4): migration 0005 单键 total_capital 回填（user_versi
 
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift`（`capitalToShow` 恒用权威 `configuredCapital`，删 `totalCount>0 ? statistics.currentCapital` 派生分支）。
-- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/UI/HomeContentTests.swift`（加「totalCount>0 且 currentCapital≠configuredCapital → 显 configuredCapital 权威值」）。
+- Modify（R-plan-7-1 reset 后重建 homeContent）：`ios/Contracts/Sources/KlineTrainerContracts/App/AppRouter.swift`（加 `resetAllProgressAndReload()` = `resetAllProgress()` + `loadHome()`）+ `ios/Contracts/Sources/KlineTrainerContracts/UI/SettingsPanel.swift`（reset 确认动作改调路由的 reset-and-reload，经注入闭包）。
+- Modify（R-plan-7-2 文案）：`ios/Contracts/Sources/KlineTrainerContracts/UI/SettingsPanelContent.swift`（reset 三串文案改为「保留记录 + 资金回 10 万 + 仅清未完成局」）。
+- Test: `HomeContentTests.swift`（HomeContent 恒权威）+ AppRouter 测（reset-and-reload 后 `homeContent.totalCapital == "¥ 100,000.00"` 且记录保留）+ `SettingsPanelContentTests`（文案断言）。
 - 审计：`grep -rn "statistics()\.currentCapital\|\.currentCapital" ios/Contracts/Sources` 确认 **HomeContent 是唯一资金显示消费者**（其余 `currentCapital` 出现处 = `statistics()` 定义 / `startingCapital` 已 Task 3 改走 / 本测试）。
 
 **Interfaces:**
@@ -763,10 +765,50 @@ Expected: FAIL（现逻辑 totalCount=3 → 取 `statistics.currentCapital`=999_
 
 Run: `cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test --filter HomeContent` → PASS
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: reset 后重建 homeContent（R-plan-7-1）**
+
+> `SettingsPanel:100` 现直接 `try await settings.resetAllProgress()`，不重建 `router.homeContent` → reset 后主页仍显旧资金直到 reload/重启。改为路由中介：reset 后立即 `loadHome()` 重建。
+
+`AppRouter` 加（`settings`/`loadHome` 均已在 AppRouter）：
+
+```swift
+    public func resetAllProgressAndReload() async throws {
+        try await settings.resetAllProgress()   // Task3：去 deleteAll(保留记录) + 置 10 万 + 刷活缓存
+        await loadHome()                         // 用新 settings.totalCapital 重建 homeContent
+    }
+```
+
+`SettingsPanel` reset 确认动作（:100）由直接 `settings.resetAllProgress()` 改调路由 `resetAllProgressAndReload()`（经注入闭包 `onConfirmReset: () async throws -> Void`，在 SettingsPanel 实例化处接 `router.resetAllProgressAndReload`；按现成注入范式接线）。
+
+测试（AppRouter，沿用现成 router+AppDB+SettingsStore 构造范式）：
+```swift
+func test_reset_and_reload_home_shows_100k_and_keeps_records() async throws {
+    // …先入 N 条记录（末条派生资金 ≠ 10 万）…
+    try await router.resetAllProgressAndReload()
+    XCTAssertEqual(router.homeContent.totalCapital, "¥ 100,000.00")   // 主页即时显 10 万权威
+    XCTAssertEqual(try appDB.statistics().totalCount, N)              // 记录保留
+}
+```
+
+- [ ] **Step 6: reset 文案改非破坏性（R-plan-7-2）**
+
+`SettingsPanelContent.swift:42-44` 三串（现说「清空记录/删除全部/不可撤销」，与保留记录新行为矛盾）改为：
+
+```swift
+    public static let resetButtonLabel = "重置资金（→ ¥100,000，保留记录）"
+    public static let resetConfirmTitle = "确认重置资金？"
+    public static let resetConfirmMessage = "资金恢复为 ¥100,000，并清除当前未完成的对局；历史训练记录保留。"
+```
+
+测试（`SettingsPanelContentTests`）：断言三串含「保留」「¥100,000」、**不含**「删除全部 / 清空记录 / 不可撤销」（负向断言用 `if …{ … }` 非 `! grep`；`#expect(!str.contains(...))`）。
+
+- [ ] **Step 7: 跑确认通过 + 提交**
+
+Run: `cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test --filter "HomeContent|AppRouter|SettingsPanelContent"` → PASS
 
 ```bash
-git add -A && git commit -m "feat(A4/D6): 跨局当前资金显示统一读权威 settings.total_capital"
+git add ios/Contracts/Sources/KlineTrainerContracts/UI/HomeContent.swift ios/Contracts/Sources/KlineTrainerContracts/App/AppRouter.swift ios/Contracts/Sources/KlineTrainerContracts/UI/SettingsPanel.swift ios/Contracts/Sources/KlineTrainerContracts/UI/SettingsPanelContent.swift ios/Contracts/Tests/KlineTrainerContractsTests/
+git commit -m "feat(A4/D6): 主页资金恒权威 + reset 路由重建 homeContent + reset 文案改非破坏性"
 ```
 
 ---
