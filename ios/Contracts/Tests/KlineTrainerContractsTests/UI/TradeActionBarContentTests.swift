@@ -49,15 +49,19 @@ struct TradeActionBarContentTests {
         let _: any Sendable = TradeActionBarContent(price: 100)
     }
 
-    // codex R2-high 防过期下单守卫：买卖条捕获开条周期，执行前比对当前周期。
-    @Test("tradeStripStillValid：同周期=有效；周期被切=失效（拒绝对新周期下单）")
-    func tradeStripGuard_blocksOnPeriodChange() {
-        // 周期未变 → 守卫放行（可下单）
-        #expect(tradeStripStillValid(capturedPeriod: .m60, currentPeriod: .m60) == true)
-        #expect(tradeStripStillValid(capturedPeriod: .daily, currentPeriod: .daily) == true)
-        // 周期被切（分段钮 / 两指滑 switchPeriodCombo）→ 守卫拒绝，不对新周期下单
-        #expect(tradeStripStillValid(capturedPeriod: .m60, currentPeriod: .daily) == false)
-        #expect(tradeStripStillValid(capturedPeriod: .daily, currentPeriod: .m60) == false)
-        #expect(tradeStripStillValid(capturedPeriod: .m15, currentPeriod: .weekly) == false)
+    // codex R2/R3-high 防过期下单守卫：买卖条捕获开条 (周期, tick)，执行前比对当前 (周期, tick)。
+    @Test("tradeStripStillValid：(周期,tick) 都未变=有效；任一变=失效（拒绝过期下单）")
+    func tradeStripGuard_blocksOnStateChange() {
+        // 周期 + tick 都未变 → 守卫放行（可下单）
+        #expect(tradeStripStillValid(capturedPeriod: .m60, currentPeriod: .m60, capturedTick: 100, currentTick: 100) == true)
+        #expect(tradeStripStillValid(capturedPeriod: .daily, currentPeriod: .daily, capturedTick: 0, currentTick: 0) == true)
+        // 周期被切（分段钮 / 两指滑 switchPeriodCombo），tick 未变 → 拒绝
+        #expect(tradeStripStillValid(capturedPeriod: .m60, currentPeriod: .daily, capturedTick: 100, currentTick: 100) == false)
+        #expect(tradeStripStillValid(capturedPeriod: .daily, currentPeriod: .m60, capturedTick: 100, currentTick: 100) == false)
+        // 周期未变，tick 被推进（持有/观察/买卖）→ 拒绝（codex R3）
+        #expect(tradeStripStillValid(capturedPeriod: .m60, currentPeriod: .m60, capturedTick: 100, currentTick: 101) == false)
+        #expect(tradeStripStillValid(capturedPeriod: .daily, currentPeriod: .daily, capturedTick: 50, currentTick: 49) == false)
+        // 两者都变 → 拒绝
+        #expect(tradeStripStillValid(capturedPeriod: .daily, currentPeriod: .m60, capturedTick: 50, currentTick: 60) == false)
     }
 }

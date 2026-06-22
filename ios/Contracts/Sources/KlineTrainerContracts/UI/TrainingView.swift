@@ -85,8 +85,8 @@ public struct TrainingView: View {
                     buyEnabled: engine.buyEnabled,
                     sellEnabled: engine.sellEnabled,
                     holdLabel: engine.position.shares > 0 ? "持有" : "观察",
-                    onBuy:  { tradeStrip = TradeStripRequest(panel: activePanel, action: .buy, period: currentPeriod(of: activePanel)) },
-                    onSell: { tradeStrip = TradeStripRequest(panel: activePanel, action: .sell, period: currentPeriod(of: activePanel)) },
+                    onBuy:  { tradeStrip = TradeStripRequest(panel: activePanel, action: .buy, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
+                    onSell: { tradeStrip = TradeStripRequest(panel: activePanel, action: .sell, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
                     onHold: { engine.holdOrObserve(panel: activePanel) })
             }
         }
@@ -102,6 +102,7 @@ public struct TrainingView: View {
         .onChange(of: engine.upperPanel.period) { _, _ in tradeStrip = nil }
         .onChange(of: engine.lowerPanel.period) { _, _ in tradeStrip = nil }
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
+            tradeStrip = nil                                    // codex R3-high：tick 推进(含持有/观察)即作废未确认买卖条，防按新 tick 价成交
             lifecycle.autosave(immediate: false)                // §4.6：tick 推进按 N 节流
             maybeAutoEnd()
         }                                                       // D4/D5
@@ -241,10 +242,13 @@ public struct TrainingView: View {
                     TradeBarView(
                         action: strip.action,
                         onPick: { tier in
-                            // codex R2-high：执行前比对「开条捕获周期」vs「该 panel 当前周期」。
-                            // 周期被切（分段钮/两指滑）后作废，不对新周期下单（不依赖 onChange 时序）。
+                            // codex R2/R3-high：执行前比对「开条捕获的 (周期, tick)」vs「当前 (周期, tick)」。
+                            // 周期被切(分段钮/两指滑) 或 tick 被推进(持有/观察/买卖) 后作废，不按新状态下单
+                            // （不依赖 onChange 时序，执行时权威判定）。
                             guard tradeStripStillValid(capturedPeriod: strip.period,
-                                                       currentPeriod: currentPeriod(of: id)) else {
+                                                       currentPeriod: currentPeriod(of: id),
+                                                       capturedTick: strip.tick,
+                                                       currentTick: engine.tick.globalTickIndex) else {
                                 tradeStrip = nil; return
                             }
                             performTrade(strip.action, panel: id, tier: tier)
@@ -343,7 +347,8 @@ public struct TrainingView: View {
     private struct TradeStripRequest: Identifiable {
         let panel: PanelId
         let action: TradeAction
-        let period: Period          // codex R2-high：捕获开条时下单周期，执行前比对防过期下单
+        let period: Period          // codex R2-high：捕获开条时下单周期
+        let tick: Int               // codex R3-high：捕获开条时 globalTickIndex（防 tick 推进后按新价成交）
         var id: String { "\(panel)-\(action)" }
     }
 }
