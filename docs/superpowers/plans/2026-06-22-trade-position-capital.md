@@ -338,19 +338,24 @@ Run: `cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test 
 Expected: 全 PASS。
 Mutation-verify：临时把 `maxBuyableShares` 的 `<= cash` 改成 `< cash`，确认 `maxBuyable`（恰好够=1000）测试 FAIL（证明边界非空洞），改回。
 
-- [ ] **Step 5: 费率信任边界（R-plan-6-1）—— settings 拒负费率**
+- [ ] **Step 5: settings 非负信任边界（R-plan-6-1 费率 + R-plan-16-1 资金）—— 每个边界都守**
 
-> 防御纵深的「源头」一端：计算器守卫（Step 3）兜底不崩；这里阻止负费率**写入/读出** DB。
-> ① `SettingsDAOImpl.saveSettings`：现仅 `commissionRate.isFinite` 守卫，加 `&& commissionRate >= 0`（负 → `AppError.internalError` 拒写，同现 finite 守卫范式）。
-> ② `SettingsDAOImpl.parseDouble`（读 commission_rate 路径）：现接受任意 finite，加「读 commission_rate 时 `< 0` → `AppError.persistence(.dbCorrupted)`」（与现 malformed 同路径；仅对费率键，capital 不受影响）。
-> ③ `SettingsPanelContent`：用户输入费率校验拒负（沿用该文件现有数值校验范式）。
-> 测试（`DefaultSettingsDAOTests` XCTest）：`saveSettings(commissionRate: -0.1)` throws；含 `commission_rate=-0.1` 的库 `loadSettings()` throws `.dbCorrupted`。
+> `commissionRate` 与 `total_capital` 都是**非负**量；非负不变量必须落到 **load / save 双边界**（否则 legacy/腐坏负值能绕过 setTotalCapital 直接经 loadSettings 成为权威，R-plan-16-1）。
+> ① `SettingsDAOImpl.parseDouble`：现仅拒非有限，扩为**拒负**（`< 0` → `.persistence(.dbCorrupted)`，与现 malformed 同路径）。`parseDouble` 同时服务 commission_rate 与 total_capital，二者均非负 → 统一拒负即可（fail-closed；负值=腐坏，靠 reset 恢复）。
+> ② `SettingsDAOImpl.saveSettings`：现仅 `isFinite` 守卫，加 `commissionRate >= 0` **且** `totalCapital >= 0`（负 → `.internalError` 拒写）。
+> ③ `SettingsDAOImpl.setTotalCapital`：已在 Task 3 加 `finite && >= 0`（R-plan-13-1）。
+> ④ `SettingsPanelContent`：用户输入费率校验拒负（沿用该文件现有数值校验范式）。
+> 测试（`DefaultSettingsDAOTests` XCTest）：`saveSettings(commissionRate: -0.1)` / `saveSettings(totalCapital: -1)` throws；含 `commission_rate=-0.1` 或 **`total_capital=-1`** 的库 `loadSettings()` throws `.dbCorrupted`。
 
 ```swift
+// SettingsDAOImpl.parseDouble 守卫扩展（示意）：拒非有限 + 拒负
+guard let v = Double(raw), v.isFinite, v >= 0 else { throw AppError.persistence(.dbCorrupted) }
 // SettingsDAOImpl.saveSettings 守卫扩展（示意）
 guard s.commissionRate.isFinite, s.commissionRate >= 0 else {
-    throw AppError.internalError(module: "P4-SettingsDAO",
-        detail: "saveSettings refused: commissionRate invalid (\(s.commissionRate))")
+    throw AppError.internalError(module: "P4-SettingsDAO", detail: "saveSettings refused: commissionRate invalid (\(s.commissionRate))")
+}
+guard s.totalCapital.isFinite, s.totalCapital >= 0 else {
+    throw AppError.internalError(module: "P4-SettingsDAO", detail: "saveSettings refused: totalCapital invalid (\(s.totalCapital))")
 }
 ```
 
@@ -828,6 +833,17 @@ final class AppDB0005MigrationTests: XCTestCase {
         let cap = try q.read { try String.fetchOne($0, sql: "SELECT value FROM settings WHERE key='total_capital'") }
         XCTAssertEqual(Double(cap!)!, 100_000, accuracy: 1e-6)   // 非有限派生 → 不写，保留默认（合法）
     }
+    // codex R-plan-16-1：legacy 负 total_capital + 无记录 → 迁移清为默认（避免升级后 loadSettings 拒负 brick）。
+    func test_0005_cleans_legacy_negative_capital_no_records() throws {
+        let q = try DatabaseQueue(path: dbURL.path)
+        try Self.migrateTo0004(q)
+        try q.write { db in try db.execute(sql: "INSERT OR REPLACE INTO settings(key,value) VALUES ('total_capital','-1.0')") }
+        try AppDBMigrations.makeMigrator().migrate(q)
+        let cap = try q.read { try String.fetchOne($0, sql: "SELECT value FROM settings WHERE key='total_capital'") }
+        XCTAssertEqual(Double(cap!)!, 100_000, accuracy: 1e-6)   // 负值已清为默认 10万（非负）
+        // 迁移后 loadSettings 不再因负值抛 .dbCorrupted（开局不 brick）
+        XCTAssertNoThrow(try DefaultAppDB(dbPath: dbURL).loadSettings())
+    }
 
     // helpers：migrateTo0004(_:) 注册 0001/0003/0004（**与 AppDBMigrations 同 id 同体**，含 0001 用
     //   `AppDBMigrations.v1_4_baselineDDL`），跑 partial migration → grdb_migrations 标记三者 applied，
@@ -863,6 +879,20 @@ Expected: FAIL（user_version 仍 2；total_capital 仍 100000，未回填）。
                     try db.execute(sql:
                         "INSERT OR REPLACE INTO settings(key, value) VALUES ('total_capital', ?)",
                         arguments: [String(authoritative)])
+                }
+            }
+            // codex R-plan-16-1：清理 legacy **负/非有限** total_capital（无记录也清）——保证迁移后非负，
+            // 否则升级后 loadSettings 的「拒负 fail-closed」会让老用户开局即 .dbCorrupted brick。
+            // 读当前值：负/非有限 → 写默认 10万；缺失 → 不写（loadSettings 缺键默认）；有效非负 → 不动。
+            if let curTxt = try String.fetchOne(db, sql: "SELECT value FROM settings WHERE key = 'total_capital'") {
+                if let cur = Double(curTxt), !(cur.isFinite && cur >= 0) {
+                    try db.execute(sql:
+                        "INSERT OR REPLACE INTO settings(key, value) VALUES ('total_capital', ?)",
+                        arguments: [String(AppSettings.defaultTotalCapital)])
+                } else if Double(curTxt) == nil {   // 畸形串（非数字）→ 亦清为默认
+                    try db.execute(sql:
+                        "INSERT OR REPLACE INTO settings(key, value) VALUES ('total_capital', ?)",
+                        arguments: [String(AppSettings.defaultTotalCapital)])
                 }
             }
             try db.execute(sql: "PRAGMA user_version = 3")
