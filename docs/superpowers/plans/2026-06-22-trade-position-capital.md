@@ -328,6 +328,7 @@ git commit -m "feat(A1): TradeCalculator 按股数 API + maxBuyable/helpers（D7
 - `engine.buy(panel:.lower, shares:250)`（非整手）→ `.failure(.trade(.invalidShareCount))`。
 - 先全仓买、再 `engine.sell(panel:.lower, shares: position.shares)`（清仓，可能奇数）→ `position.shares==0`。
 - `engine.sell` 超持仓 → `.failure(.trade(.insufficientHolding))`。
+- **R-plan-8-1 溢出原子 no-op**（等价现有 `forceCloseManuallyNoOpOnFiniteOverflowPrice`）：构造一个使 `shares*price` 溢出非有限的极端有限价 tick（沿用现有 force-close 溢出测试的价/股构造），有持仓时 `engine.sell(panel:shares:)` → `.failure(.trade(.invalidShareCount))` 且 **`position`/`cashBalance`/`tradeOperations` 全不变**（整笔 no-op，不写非有限值）。
 
 （测试体照搬现成 engine fixture 构造；断言用上述行为。）
 
@@ -377,8 +378,15 @@ Expected: 编译失败（`buy(panel:shares:)` 未定义）。
         case .failure(let reason):
             return .failure(.trade(reason))
         case .success(let quote):
+            // codex R-plan-8-1：镜像 performForceClose 的原子有限性守卫——极端有限价下 shares*price 溢出
+            // 可令 proceeds/notional 非有限；校验在 mutation 之前 → 整笔原子 no-op，不污染 cash/op/autosave。
+            let newCash = cashBalance + quote.proceeds
+            guard quote.notional.isFinite, quote.commission.isFinite, quote.stampDuty.isFinite,
+                  quote.proceeds.isFinite, newCash.isFinite else {
+                return .failure(.trade(.invalidShareCount))
+            }
             position.sell(shares: quote.shares)
-            cashBalance += quote.proceeds
+            cashBalance = newCash                       // 用预校验过的终值
             markers.append(TradeMarker(globalTick: entryTick, price: price, direction: .sell))
             let tier = TradeCalculator.tierForFraction(
                 holdingBefore > 0 ? Double(quote.shares) / Double(holdingBefore) : 1)
@@ -393,6 +401,8 @@ Expected: 编译失败（`buy(panel:shares:)` 未定义）。
         }
     }
 ```
+
+> 买入路径 R-plan-8-1 已安全：`quoteBuy` 的 `guard totalCost <= cash` 对 `+inf`/`NaN` 返 false → `.insufficientCash`，故 success 必含有限 `totalCost`（且 ≤ cash → `cashBalance - totalCost` 有限非负），`position.buy(totalCost:)` precondition 不会被非有限值触发。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -666,6 +676,22 @@ final class AppDB0005MigrationTests: XCTestCase {
         XCTAssertEqual(Double(cap!)!, 100_000, accuracy: 1e-6)   // 无记录不动
     }
 
+    // codex R-plan-8-2：legacy 记录派生值溢出/非有限 → 0005 跳过写（保留默认）+ user_version=3，
+    //   后续 loadSettings 不判 dbCorrupted（资金仍合法）。
+    func test_0005_skips_write_on_non_finite_derived_capital() throws {
+        let q = try DatabaseQueue(path: dbURL.path)
+        try Self.migrateTo0004(q)
+        try q.write { db in
+            try db.execute(sql: "INSERT OR REPLACE INTO settings(key,value) VALUES ('total_capital','100000.0')")
+            // total_capital + profit 溢出为 +inf（两个接近 Double.greatestFiniteMagnitude 的有限值）
+            try Self.insertRecord(db, createdAt: 1000, total: .greatestFiniteMagnitude, profit: .greatestFiniteMagnitude)
+        }
+        try AppDBMigrations.makeMigrator().migrate(q)
+        XCTAssertEqual(try q.read { try Int.fetchOne($0, sql: "PRAGMA user_version") ?? 0 }, 3)   // 仍推进
+        let cap = try q.read { try String.fetchOne($0, sql: "SELECT value FROM settings WHERE key='total_capital'") }
+        XCTAssertEqual(Double(cap!)!, 100_000, accuracy: 1e-6)   // 非有限派生 → 不写，保留默认（合法）
+    }
+
     // helpers：migrateTo0004(_:) 注册 0001/0003/0004（**与 AppDBMigrations 同 id 同体**，含 0001 用
     //   `AppDBMigrations.v1_4_baselineDDL`），跑 partial migration → grdb_migrations 标记三者 applied，
     //   后续完整 migrator 跳过它们只跑 0005（同 AppDBMigrationsTests test_0004_upgrade_* 范式）。
@@ -693,9 +719,14 @@ Expected: FAIL（user_version 仍 2；total_capital 仍 100000，未回填）。
                 """) {
                 let tc: Double = row["total_capital"]
                 let p: Double = row["profit"]
-                try db.execute(sql:
-                    "INSERT OR REPLACE INTO settings(key, value) VALUES ('total_capital', ?)",
-                    arguments: [String(tc + p)])
+                let authoritative = tc + p
+                // codex R-plan-8-2：只在派生值有限时写——legacy 行 sum 溢出/非有限不得污染 total_capital
+                //（否则后续 loadSettings 判 .dbCorrupted、user_version 又挡重试）。非有限则跳过写、保留默认。
+                if authoritative.isFinite {
+                    try db.execute(sql:
+                        "INSERT OR REPLACE INTO settings(key, value) VALUES ('total_capital', ?)",
+                        arguments: [String(authoritative)])
+                }
             }
             try db.execute(sql: "PRAGMA user_version = 3")
         }
