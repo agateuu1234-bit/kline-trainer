@@ -70,7 +70,6 @@ public struct TrainingView: View {
             panel(.upper)
             Divider()
             panel(.lower)
-            if showsTradeButtons { bottomBar }
         }
         .onAppear { maybeAutoEnd() }                                            // M2：resume-at-maxTick
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
@@ -151,34 +150,56 @@ public struct TrainingView: View {
     }
 
     private var topBar: some View {
+        let rec = lifecycle.activeRecord
         let bar = TrainingTopBarContent(totalCapital: engine.currentTotalCapital,
                                         averageCost: engine.position.averageCost,
                                         shares: engine.position.shares,
                                         returnRate: engine.returnRate,
                                         positionTier: engine.currentPositionTier,
-                                        stockName: lifecycle.activeRecord?.stockName,
-                                        stockCode: lifecycle.activeRecord?.stockCode)
-        return HStack(spacing: 12) {
-            // 返回保存失败保留（§4.7a/§4.6 D5）：back() 抛（saveProgress 失败）→ session 留存（reader 未关）
-            // → backFailed alert 让用户选重试或放弃；不用 try? 吞错误，防进度丢失。
-            Button("返回") {
-                guard !exitInFlight else { return }
-                exitInFlight = true
-                Task {
-                    defer { exitInFlight = false }
-                    do { try await lifecycle.back(); onExit() }
-                    catch { backFailed = true }                 // §4.7a/§4.6：保存失败留局内，不丢数据/不泄漏 reader
+                                        stockName: rec?.stockName, stockCode: rec?.stockCode)
+        return VStack(spacing: 6) {
+            HStack {
+                Button("返回") {
+                    guard !exitInFlight else { return }
+                    exitInFlight = true
+                    Task {
+                        defer { exitInFlight = false }
+                        do { try await lifecycle.back(); onExit() }
+                        catch { backFailed = true }
+                    }
+                }
+                Spacer()
+                Text(bar.stockNameDisplay).font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                if showsTradeButtons {
+                    Button("结束") { confirmingEnd = true }
+                        .font(.callout).tint(.red)
+                        .accessibilityLabel("结束本局")
+                } else {
+                    // review 模式无结束：占位保持三段对称
+                    Color.clear.frame(width: 36, height: 1)
                 }
             }
-            Spacer()
-            Text(bar.totalCapital)
-            Text("持仓成本\(bar.holdingCostPerShare)")
-            Text(bar.position)
-            Text(bar.returnRate)
+            HStack(spacing: 0) {
+                metricCell("总资金", bar.totalCapital, width: 96)
+                metricCell("持仓成本/股", bar.holdingCostPerShare, width: 72)
+                metricCell("持仓股数", bar.sharesText, width: 86)
+                metricCell("仓位", bar.positionShort, width: 40)
+                metricCell("浮动盈亏", bar.returnRate, width: nil)   // 末格弹性
+            }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .font(.callout)
+        .padding(.vertical, 7)
+    }
+
+    /// 单个指标格：标签上 / 数值下，居中对称（RFC-B D4）。width=nil → 弹性末格。
+    private func metricCell(_ label: String, _ value: String, width: CGFloat?) -> some View {
+        VStack(spacing: 1) {
+            Text(label).font(.system(size: 9)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 12).weight(.semibold)).lineLimit(1)
+        }
+        .frame(width: width, alignment: .center)
+        .frame(maxWidth: width == nil ? .infinity : nil)
     }
 
     private func panel(_ id: PanelId) -> some View {
@@ -296,17 +317,6 @@ public struct TrainingView: View {
             // 不可达（replay + 活跃会话已保证）；防御性 retreat（不入账，走 AppRouter replay-nil 兜底）
             onSessionEnded(nil)
         }
-    }
-
-    // 底部「结束本局」（plan §6.2.2：屏幕底部左侧）。可见性同交易按钮（canBuySell）。
-    private var bottomBar: some View {
-        HStack {
-            Button("结束本局") { confirmingEnd = true }
-                .buttonStyle(.bordered)
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
     }
 
     private struct TradeStripRequest: Identifiable {
