@@ -48,4 +48,16 @@ struct TradeActionBarContentTests {
         #expect(TradeActionBarContent(price: 100) != TradeActionBarContent(price: 200))
         let _: any Sendable = TradeActionBarContent(price: 100)
     }
+
+    // codex R2-high 防过期下单守卫：买卖条捕获开条周期，执行前比对当前周期。
+    @Test("tradeStripStillValid：同周期=有效；周期被切=失效（拒绝对新周期下单）")
+    func tradeStripGuard_blocksOnPeriodChange() {
+        // 周期未变 → 守卫放行（可下单）
+        #expect(tradeStripStillValid(capturedPeriod: .m60, currentPeriod: .m60) == true)
+        #expect(tradeStripStillValid(capturedPeriod: .daily, currentPeriod: .daily) == true)
+        // 周期被切（分段钮 / 两指滑 switchPeriodCombo）→ 守卫拒绝，不对新周期下单
+        #expect(tradeStripStillValid(capturedPeriod: .m60, currentPeriod: .daily) == false)
+        #expect(tradeStripStillValid(capturedPeriod: .daily, currentPeriod: .m60) == false)
+        #expect(tradeStripStillValid(capturedPeriod: .m15, currentPeriod: .weekly) == false)
+    }
 }

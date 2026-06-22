@@ -52,6 +52,11 @@ public struct TrainingView: View {
     // （code-review Task3 Important；同 Task1 shouldShowSettlement 范式）。
     private var showsTradeButtons: Bool { engine.flow.canBuySell() }
 
+    /// 某 panel 当前下单周期（codex R2-high：买卖条捕获/比对用）。
+    private func currentPeriod(of id: PanelId) -> Period {
+        id == .upper ? engine.upperPanel.period : engine.lowerPanel.period
+    }
+
     // 顺位 4：上栏是否在画线模式（按钮选中态 + toggle 语义）。
     private var isDrawingActive: Bool {
         if case .drawing = engine.upperPanel.interactionMode { return true }
@@ -80,18 +85,22 @@ public struct TrainingView: View {
                     buyEnabled: engine.buyEnabled,
                     sellEnabled: engine.sellEnabled,
                     holdLabel: engine.position.shares > 0 ? "持有" : "观察",
-                    onBuy:  { tradeStrip = TradeStripRequest(panel: activePanel, action: .buy) },
-                    onSell: { tradeStrip = TradeStripRequest(panel: activePanel, action: .sell) },
+                    onBuy:  { tradeStrip = TradeStripRequest(panel: activePanel, action: .buy, period: currentPeriod(of: activePanel)) },
+                    onSell: { tradeStrip = TradeStripRequest(panel: activePanel, action: .sell, period: currentPeriod(of: activePanel)) },
                     onHold: { engine.holdOrObserve(panel: activePanel) })
             }
         }
         .onAppear { maybeAutoEnd() }                                            // M2：resume-at-maxTick
         .onChange(of: activePanel) { _, _ in
-            // RFC-B(codex R1-medium 修)：切分段钮(下单目标周期)即清掉打开的买卖档位条——
+            // RFC-B(codex R1-medium 修)：切分段钮(下单目标 panel)即清掉打开的买卖档位条——
             // 否则条内捕获的 strip.panel 会过期（条显示在旧 panel、成交也按旧 panel），
-            // 切目标后再选档会对错周期下单（autosave 后不可逆）。切目标=取消未确认下单。
+            // 切目标后再选档会对错 panel 下单（autosave 后不可逆）。切目标=取消未确认下单。
             tradeStrip = nil
         }
+        // codex R2-high：周期也能被两指上下滑手势改（switchPeriodCombo 改 panel.period，activePanel 不变）→
+        // 同样清掉打开的买卖条，防对新周期下单。与上面的执行时守卫(onPick)双保险。
+        .onChange(of: engine.upperPanel.period) { _, _ in tradeStrip = nil }
+        .onChange(of: engine.lowerPanel.period) { _, _ in tradeStrip = nil }
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
             lifecycle.autosave(immediate: false)                // §4.6：tick 推进按 N 节流
             maybeAutoEnd()
@@ -232,6 +241,12 @@ public struct TrainingView: View {
                     TradeBarView(
                         action: strip.action,
                         onPick: { tier in
+                            // codex R2-high：执行前比对「开条捕获周期」vs「该 panel 当前周期」。
+                            // 周期被切（分段钮/两指滑）后作废，不对新周期下单（不依赖 onChange 时序）。
+                            guard tradeStripStillValid(capturedPeriod: strip.period,
+                                                       currentPeriod: currentPeriod(of: id)) else {
+                                tradeStrip = nil; return
+                            }
                             performTrade(strip.action, panel: id, tier: tier)
                             tradeStrip = nil
                         },
@@ -328,6 +343,7 @@ public struct TrainingView: View {
     private struct TradeStripRequest: Identifiable {
         let panel: PanelId
         let action: TradeAction
+        let period: Period          // codex R2-high：捕获开条时下单周期，执行前比对防过期下单
         var id: String { "\(panel)-\(action)" }
     }
 }

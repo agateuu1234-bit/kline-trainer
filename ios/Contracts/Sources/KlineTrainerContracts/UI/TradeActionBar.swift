@@ -34,6 +34,13 @@ public struct TradeActionBarContent: Equatable, Sendable {
     }
 }
 
+/// 防过期下单守卫（codex R2-high）：买卖档位条捕获「开条时的下单周期」；选档执行前比对该 panel
+/// 当前周期。周期被切（分段钮换 activePanel / 两指滑 `switchPeriodCombo`）后捕获值与当前不符 →
+/// 该条作废，**不得对新周期下单**（否则推进错周期 + autosave 不可逆）。平台无关纯函数，host 测。
+public func tradeStripStillValid(capturedPeriod: Period, currentPeriod: Period) -> Bool {
+    capturedPeriod == currentPeriod
+}
+
 #if canImport(UIKit)
 import SwiftUI
 
