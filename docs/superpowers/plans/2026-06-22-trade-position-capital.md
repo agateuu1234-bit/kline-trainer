@@ -455,13 +455,22 @@ func test_finalize_returns_and_writes_capital_from_persisted_record() throws {
     XCTAssertEqual(r.totalCapital, 123_456, accuracy: 1e-6)                      // 返回的权威值
     XCTAssertEqual(try db.loadSettings().totalCapital, 123_456, accuracy: 1e-6)  // 写入 DB = 同值
 }
-// codex R-plan-2-1/5-1：同 sessionKey retry 用「发散现值」record，返回值 + DB 仍=首次持久记录派生值（幂等锚）
+// codex R-plan-2-1/5-1：同 sessionKey retry 用「发散现值」record，返回值 + DB 仍=首次值（无更晚 session）
 func test_finalize_retry_same_key_returns_first_capital() throws {
     _ = try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1")  // 123_456
-    let divergent = someRecordWithProfit(999_999)   // 若提交会派生 1_099_999
+    let divergent = someRecordWithProfit(999_999)
     let r2 = try db.finalizeSession(record: divergent, ops: [], drawings: [], sessionKey: "k1")
-    XCTAssertEqual(r2.totalCapital, 123_456, accuracy: 1e-6)                      // 返回首次权威值，非发散
+    XCTAssertEqual(r2.totalCapital, 123_456, accuracy: 1e-6)                      // 重复路径返回当前权威值(=首次)
     XCTAssertEqual(try db.loadSettings().totalCapital, 123_456, accuracy: 1e-6)   // DB 不被覆盖
+}
+// codex R-plan-9-1：finalize k1 → finalize k2(更新) → 过期重试 k1，权威资金**不回退**到 k1。
+// recordWithCapital(v)：构造 total_capital+profit==v 的记录。
+func test_stale_retry_after_newer_session_keeps_newer_capital() throws {
+    _ = try db.finalizeSession(record: recordWithCapital(110_000), ops: [], drawings: [], sessionKey: "k1")
+    _ = try db.finalizeSession(record: recordWithCapital(130_000), ops: [], drawings: [], sessionKey: "k2")
+    let r = try db.finalizeSession(record: recordWithCapital(110_000), ops: [], drawings: [], sessionKey: "k1")  // 过期重试
+    XCTAssertEqual(r.totalCapital, 130_000, accuracy: 1e-6)                       // 返回当前(k2)，不回退
+    XCTAssertEqual(try db.loadSettings().totalCapital, 130_000, accuracy: 1e-6)   // DB 仍 k2
 }
 ```
 
@@ -517,11 +526,22 @@ Expected: 编译失败（`finalizeSession` 现返回 `Int64`、测试用 `r.tota
         throws -> (id: Int64, totalCapital: Double) {
         do {
             return try dbQueue.write { db in
+                // R-plan-9-1：插入前判定「是否已存在该 sessionKey」——区分「新 finalize」vs「重复重试」。
+                let alreadyExisted = try Int64.fetchOne(db, sql:
+                    "SELECT id FROM training_records WHERE session_key = ?", arguments: [sessionKey]) != nil
                 let id = try RecordRepositoryImpl.insertRecord(
                     db, record: record, ops: ops, drawings: drawings, sessionKey: sessionKey)
                 try PendingTrainingRepositoryImpl.clearPending(db)
-                // A4 权威资金 = 该(幂等)持久记录的 total_capital+profit（读 DB 持久值，非 caller 现值）。
-                // 同 key 重试 insertRecord 返已存 id → 仍读首次提交值 → 不被发散现值覆盖。
+                if alreadyExisted {
+                    // 重复 sessionKey（含「更晚 session 已 finalize 后、旧 session 的过期重试」）：
+                    // **不改权威资金**（否则会把 settings.total_capital 回退到旧 session 值）；
+                    // 返回**当前**权威 settings 值 → coordinator 缓存刷新为 no-op，不回退。
+                    let txt = try String.fetchOne(db, sql:
+                        "SELECT value FROM settings WHERE key = 'total_capital'")
+                    let current = txt.flatMap(Double.init) ?? AppSettings.defaultTotalCapital
+                    return (id, current.isFinite ? current : AppSettings.defaultTotalCapital)
+                }
+                // 新插入（当前 session 首次 finalize）→ 推进权威资金 = 本记录 total_capital+profit。
                 guard let row = try Row.fetchOne(db, sql:
                     "SELECT total_capital, profit FROM training_records WHERE id = ?",
                     arguments: [id]) else {
@@ -531,8 +551,8 @@ Expected: 编译失败（`finalizeSession` 现返回 `Int64`、测试用 `r.tota
                 let tc: Double = row["total_capital"]
                 let p: Double = row["profit"]
                 let authoritativeCapital = tc + p
-                try SettingsDAOImpl.setTotalCapital(db, authoritativeCapital)
-                return (id, authoritativeCapital)   // 事务内产出权威值随成功返回（无 fallible 后置读）
+                try SettingsDAOImpl.setTotalCapital(db, authoritativeCapital)   // setTotalCapital 自带 finite 守卫
+                return (id, authoritativeCapital)
             }
         } catch let appErr as AppError { throw appErr }
         catch { throw PersistenceErrorMapping.translate(error) }
