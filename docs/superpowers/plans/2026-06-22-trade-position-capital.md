@@ -61,7 +61,7 @@
 - Consumes: 现有 `BuyQuote`/`SellQuote`（字段不变）、`TradeReason`、`FeeSnapshot`、`shareLotSize`、`robustFloor`、`computeCommission`、`makeSellQuote`、`ratio(of:)`、`PositionTier`。
 - Produces（Task 2/7/9 依赖这些精确签名）:
   - `static func quoteBuy(cash: Double, shares: Int, price: Double, fees: FeeSnapshot) -> Result<BuyQuote, TradeReason>`
-  - `static func quoteSell(holding: Int, shares: Int, price: Double, fees: FeeSnapshot) -> Result<SellQuote, TradeReason>`
+  - `static func quoteSell(cash: Double, holding: Int, shares: Int, price: Double, fees: FeeSnapshot) -> Result<SellQuote, TradeReason>`（cash 用于净现金非负校验，集中可执行性契约）
   - `static func maxBuyableShares(cash: Double, price: Double, fees: FeeSnapshot) -> Int`
   - `static func sharesForBuyTier(cash: Double, price: Double, tier: PositionTier, fees: FeeSnapshot) -> Int`
   - `static func sharesForSellTier(holding: Int, tier: PositionTier) -> Int`
@@ -103,7 +103,7 @@ struct TradeCalculatorBuySharesTests {
 struct TradeCalculatorSellSharesTests {
     @Test("happy: 部分整手卖")
     func happy() {
-        let r = TradeCalculator.quoteSell(holding: 1000, shares: 400, price: 20, fees: noMin)
+        let r = TradeCalculator.quoteSell(cash: 100_000, holding: 1000, shares: 400, price: 20, fees: noMin)
         guard case .success(let q) = r else { Issue.record("expected success, got \(r)"); return }
         #expect(q.shares == 400)
         #expect(approx(q.notional, 8_000))
@@ -113,19 +113,34 @@ struct TradeCalculatorSellSharesTests {
     }
     @Test("D7 清仓: shares==holding 奇数股放行")
     func clearOddLot() {
-        let r = TradeCalculator.quoteSell(holding: 150, shares: 150, price: 20, fees: noMin)
+        let r = TradeCalculator.quoteSell(cash: 100_000, holding: 150, shares: 150, price: 20, fees: noMin)
         guard case .success(let q) = r else { Issue.record("expected success, got \(r)"); return }
         #expect(q.shares == 150)
     }
     @Test("D7 部分卖非整手且≠holding → invalidShareCount")
     func partialOddLot() {
-        #expect(TradeCalculator.quoteSell(holding: 150, shares: 50, price: 20, fees: noMin)
+        #expect(TradeCalculator.quoteSell(cash: 100_000, holding: 150, shares: 50, price: 20, fees: noMin)
                 == .failure(.invalidShareCount))
     }
     @Test("超持仓 → insufficientHolding")
     func overSell() {
-        #expect(TradeCalculator.quoteSell(holding: 100, shares: 200, price: 20, fees: noMin)
+        #expect(TradeCalculator.quoteSell(cash: 100_000, holding: 100, shares: 200, price: 20, fees: noMin)
                 == .failure(.insufficientHolding))
+    }
+    @Test("R-plan-14-1：净现金<0（低价小手+免5、近零现金）→ insufficientHolding 之前先 insufficientCash")
+    func negativeNetCash() {
+        // 100 股 ×0.01 = notional 1；免5 commission=5；proceeds = 1-5-tiny ≈ -4.0005；cash=0 → newCash<0
+        #expect(TradeCalculator.quoteSell(cash: 0, holding: 100, shares: 100, price: 0.01, fees: withMin)
+                == .failure(.insufficientCash))
+        // 现金够覆盖净损（cash=10）→ 放行
+        if case .success = TradeCalculator.quoteSell(cash: 10, holding: 100, shares: 100, price: 0.01, fees: withMin) {} 
+        else { Issue.record("cash 够覆盖净损应放行") }
+    }
+    @Test("R-plan-14-1：极端价输出非有限 → invalidShareCount（不返非有限 quote）")
+    func nonFiniteOutput() {
+        #expect(TradeCalculator.quoteSell(cash: 1e300, holding: 1_000_000, shares: 1_000_000,
+                                          price: .greatestFiniteMagnitude, fees: noMin)
+                == .failure(.invalidShareCount))
     }
 }
 
@@ -162,7 +177,7 @@ struct TradeCalculatorShareHelperTests {
         #expect(TradeCalculator.maxBuyableShares(cash: 100_000, price: 10, fees: inf)  == 0)
         // quoteBuy/quoteSell 同样守卫 → .invalidShareCount（不崩）
         #expect(TradeCalculator.quoteBuy(cash: 100_000, shares: 1000, price: 10, fees: neg1) == .failure(.invalidShareCount))
-        #expect(TradeCalculator.quoteSell(holding: 1000, shares: 100, price: 10, fees: neg1) == .failure(.invalidShareCount))
+        #expect(TradeCalculator.quoteSell(cash: 100_000, holding: 1000, shares: 100, price: 10, fees: neg1) == .failure(.invalidShareCount))
         // 正常正费率仍工作
         #expect(TradeCalculator.maxBuyableShares(cash: 10_001, price: 10, fees: noMin) == 1000)
     }
@@ -227,16 +242,25 @@ Expected: 编译失败（`quoteBuy(cash:shares:…)` 等方法未定义）。
     }
 
     /// 按股数卖出报价。D7：shares==holding（清仓）放行任意股数（含奇数）；部分卖要求整手。
-    public static func quoteSell(holding: Int, shares: Int, price: Double,
+    /// 按股数卖出报价。R-plan-14-1：集中**可执行性契约**（输出有限 + 净现金非负），UI 与 engine 同源。
+    public static func quoteSell(cash: Double, holding: Int, shares: Int, price: Double,
                                  fees: FeeSnapshot) -> Result<SellQuote, TradeReason> {
-        guard price > 0, holding >= 0, price.isFinite else { return .failure(.invalidShareCount) }
+        guard price > 0, holding >= 0, price.isFinite, cash.isFinite else { return .failure(.invalidShareCount) }
         guard fees.commissionRate.isFinite, fees.commissionRate >= 0 else { return .failure(.invalidShareCount) }  // R-plan-6-1
         guard shares > 0 else { return .failure(.invalidShareCount) }
         guard shares <= holding else { return .failure(.insufficientHolding) }
         if shares != holding {                      // 部分卖才要求整手（清仓例外）
             guard shares % shareLotSize == 0 else { return .failure(.invalidShareCount) }
         }
-        return .success(makeSellQuote(shares: shares, price: price, fees: fees))
+        let q = makeSellQuote(shares: shares, price: price, fees: fees)
+        // R-plan-14-1：极端价 → 输出非有限 → 失败（防 UI 格式化非有限 / engine 写脏值）。
+        guard q.notional.isFinite, q.commission.isFinite, q.stampDuty.isFinite, q.proceeds.isFinite else {
+            return .failure(.invalidShareCount)
+        }
+        // R-plan-12-1/13-1：净现金不得为负（手续费>持仓价值且现金不够覆盖）→ 不可执行。
+        let newCash = cash + q.proceeds
+        guard newCash.isFinite, newCash >= 0 else { return .failure(.insufficientCash) }
+        return .success(q)
     }
 
     /// fee-aware 可买上限：满足 totalCost(N) ≤ cash 的最大 100 股整数倍。
@@ -390,22 +414,14 @@ Expected: 编译失败（`buy(panel:shares:)` 未定义）。
         let entryTick = tick.globalTickIndex
         let p = period(of: panel)
         let holdingBefore = position.shares
-        switch TradeCalculator.quoteSell(holding: holdingBefore, shares: shares, price: price, fees: fees) {
+        // R-plan-14-1：经集中契约的 quoteSell(cash:…)——success 已保证「输出有限 + cashBalance+proceeds≥0」，
+        // 故下方直接 mutate（与 TradeBoxContent 同一可执行性判定，UI/engine 不再发散）。
+        switch TradeCalculator.quoteSell(cash: cashBalance, holding: holdingBefore, shares: shares, price: price, fees: fees) {
         case .failure(let reason):
             return .failure(.trade(reason))
         case .success(let quote):
-            // codex R-plan-8-1：镜像 performForceClose 的原子有限性守卫——极端有限价下 shares*price 溢出
-            // 可令 proceeds/notional 非有限；校验在 mutation 之前 → 整笔原子 no-op，不污染 cash/op/autosave。
-            let newCash = cashBalance + quote.proceeds
-            guard quote.notional.isFinite, quote.commission.isFinite, quote.stampDuty.isFinite,
-                  quote.proceeds.isFinite, newCash.isFinite else {
-                return .failure(.trade(.invalidShareCount))
-            }
-            // codex R-plan-12-1：保持引擎**非负资金不变量**——低价小手 + 免5 下限可令 proceeds 为负；
-            // 若净额使现金为负 → 失败 no-op（否则 autosave 出负现金 pending → TrainingEngine.make 拒 <0 → 无法 resume）。
-            guard newCash >= 0 else { return .failure(.trade(.insufficientCash)) }
             position.sell(shares: quote.shares)
-            cashBalance = newCash                       // 用预校验过的终值
+            cashBalance += quote.proceeds               // quoteSell 已保证 cashBalance+proceeds 有限且 ≥0
             markers.append(TradeMarker(globalTick: entryTick, price: price, direction: .sell))
             let tier = TradeCalculator.tierForFraction(
                 holdingBefore > 0 ? Double(quote.shares) / Double(holdingBefore) : 1)
@@ -1081,6 +1097,21 @@ struct TradeBoxContentTests {
         #expect(c.confirmLabel == "卖出 150 股")
         #expect(c.confirmEnabled == true)               // 清仓放行奇数
     }
+    @Test("R-plan-14-1：UI 与 engine 同源——净负卖出框禁用、预估占位")
+    func sellNegativeProceedsDisabled() {
+        let withMin = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+        // 100 股 ×0.01=1，免5 → proceeds≈-4，cash=0 → quoteSell(cash:) 失败 → confirmEnabled false / 预估占位
+        let c = TradeBoxContent(action: .sell, price: 0.01, cash: 0, holding: 100, fees: withMin, qty: 100)
+        #expect(c.confirmEnabled == false)
+        #expect(c.estimateLabel == "预估 —")
+    }
+    @Test("R-plan-14-1：极端价输出非有限 → 卖出框禁用（不格式化非有限）")
+    func sellNonFiniteDisabled() {
+        let c = TradeBoxContent(action: .sell, price: .greatestFiniteMagnitude, cash: 1e300,
+                                holding: 1_000_000, fees: noMin, qty: 1_000_000)
+        #expect(c.confirmEnabled == false)
+        #expect(c.estimateLabel == "预估 —")
+    }
     @Test("非整手买入 250 → effectiveShares 200，显示==提交，使能")
     func buyNonLotNormalizes() {
         let c = TradeBoxContent(action: .buy, price: 10, cash: 100_000, holding: 0, fees: noMin, qty: 250)
@@ -1188,7 +1219,7 @@ public struct TradeBoxContent: Equatable, Sendable {
                 return "预估 ¥ \(Self.currency(q.totalCost))"
             }
         case .sell:
-            if case .success(let q) = TradeCalculator.quoteSell(holding: holding, shares: s, price: price, fees: fees) {
+            if case .success(let q) = TradeCalculator.quoteSell(cash: cash, holding: holding, shares: s, price: price, fees: fees) {
                 return "预估 ¥ \(Self.currency(q.proceeds))"
             }
         }
@@ -1203,7 +1234,7 @@ public struct TradeBoxContent: Equatable, Sendable {
         case .buy:
             if case .success = TradeCalculator.quoteBuy(cash: cash, shares: s, price: price, fees: fees) { return true }
         case .sell:
-            if case .success = TradeCalculator.quoteSell(holding: holding, shares: s, price: price, fees: fees) { return true }
+            if case .success = TradeCalculator.quoteSell(cash: cash, holding: holding, shares: s, price: price, fees: fees) { return true }
         }
         return false
     }
