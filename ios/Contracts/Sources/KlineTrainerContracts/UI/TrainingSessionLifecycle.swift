@@ -20,6 +20,9 @@ public struct TrainingSessionLifecycle {
         self.coordinator = coordinator
     }
 
+    /// RFC-B D5：当前局的 record（review/replay 非 nil；normal/resume 为 nil → 盲测占位）。只读。
+    public var activeRecord: TrainingRecord? { coordinator.activeRecord }
+
     /// 局是否已到末态（globalTickIndex 抵 maxTick）。调用方据 `engine.flow.mode` 决定是否触发结算（D4）。
     public var isAtEnd: Bool {
         engine.tick.globalTickIndex >= engine.tick.maxTick

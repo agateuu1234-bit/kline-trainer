@@ -34,6 +34,7 @@ public struct TrainingView: View {
     @State private var confirmingEnd = false
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
+    @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
 
     public init(lifecycle: TrainingSessionLifecycle,
                 onExit: @escaping () -> Void,
@@ -50,6 +51,11 @@ public struct TrainingView: View {
     // `mode != .review`——与按钮自身 `buyEnabled/sellEnabled` 同源（二者均 guard canBuySell），杜绝谓词漂移
     // （code-review Task3 Important；同 Task1 shouldShowSettlement 范式）。
     private var showsTradeButtons: Bool { engine.flow.canBuySell() }
+
+    /// 某 panel 当前下单周期（codex R2-high：买卖条捕获/比对用）。
+    private func currentPeriod(of id: PanelId) -> Period {
+        id == .upper ? engine.upperPanel.period : engine.lowerPanel.period
+    }
 
     // 顺位 4：上栏是否在画线模式（按钮选中态 + toggle 语义）。
     private var isDrawingActive: Bool {
@@ -70,10 +76,33 @@ public struct TrainingView: View {
             panel(.upper)
             Divider()
             panel(.lower)
-            if showsTradeButtons { bottomBar }
+            if showsTradeButtons {
+                TradeActionBar(
+                    content: TradeActionBarContent(price: engine.currentPrice),
+                    upperPeriod: engine.upperPanel.period,
+                    lowerPeriod: engine.lowerPanel.period,
+                    activePanel: $activePanel,
+                    buyEnabled: engine.buyEnabled,
+                    sellEnabled: engine.sellEnabled,
+                    holdLabel: engine.position.shares > 0 ? "持有" : "观察",
+                    onBuy:  { tradeStrip = TradeStripRequest(panel: activePanel, action: .buy, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
+                    onSell: { tradeStrip = TradeStripRequest(panel: activePanel, action: .sell, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
+                    onHold: { engine.holdOrObserve(panel: activePanel) })
+            }
         }
         .onAppear { maybeAutoEnd() }                                            // M2：resume-at-maxTick
+        .onChange(of: activePanel) { _, _ in
+            // RFC-B(codex R1-medium 修)：切分段钮(下单目标 panel)即清掉打开的买卖档位条——
+            // 否则条内捕获的 strip.panel 会过期（条显示在旧 panel、成交也按旧 panel），
+            // 切目标后再选档会对错 panel 下单（autosave 后不可逆）。切目标=取消未确认下单。
+            tradeStrip = nil
+        }
+        // codex R2-high：周期也能被两指上下滑手势改（switchPeriodCombo 改 panel.period，activePanel 不变）→
+        // 同样清掉打开的买卖条，防对新周期下单。与上面的执行时守卫(onPick)双保险。
+        .onChange(of: engine.upperPanel.period) { _, _ in tradeStrip = nil }
+        .onChange(of: engine.lowerPanel.period) { _, _ in tradeStrip = nil }
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
+            tradeStrip = nil                                    // codex R3-high：tick 推进(含持有/观察)即作废未确认买卖条，防按新 tick 价成交
             lifecycle.autosave(immediate: false)                // §4.6：tick 推进按 N 节流
             maybeAutoEnd()
         }                                                       // D4/D5
@@ -143,75 +172,96 @@ public struct TrainingView: View {
             Button("否", role: .cancel) {}
         }
         .toastOverlay(toast.message)             // §B.1 复用呈现壳（消费 ToastState.message）
+        .overlay(alignment: .topLeading) {
+            if showsTradeButtons {
+                DrawingToolFloatingView(isDrawingActive: isDrawingActive, onToggleTool: toggleDrawing)
+            }
+        }
     }
 
     private var topBar: some View {
+        let rec = lifecycle.activeRecord
         let bar = TrainingTopBarContent(totalCapital: engine.currentTotalCapital,
-                                        holdingCost: engine.holdingCost,
+                                        averageCost: engine.position.averageCost,
+                                        shares: engine.position.shares,
                                         returnRate: engine.returnRate,
-                                        positionTier: engine.currentPositionTier)
-        return HStack(spacing: 12) {
-            // 返回保存失败保留（§4.7a/§4.6 D5）：back() 抛（saveProgress 失败）→ session 留存（reader 未关）
-            // → backFailed alert 让用户选重试或放弃；不用 try? 吞错误，防进度丢失。
-            Button("返回") {
-                guard !exitInFlight else { return }
-                exitInFlight = true
-                Task {
-                    defer { exitInFlight = false }
-                    do { try await lifecycle.back(); onExit() }
-                    catch { backFailed = true }                 // §4.7a/§4.6：保存失败留局内，不丢数据/不泄漏 reader
+                                        positionTier: engine.currentPositionTier,
+                                        stockName: rec?.stockName, stockCode: rec?.stockCode)
+        return VStack(spacing: 6) {
+            HStack {
+                Button("返回") {
+                    guard !exitInFlight else { return }
+                    exitInFlight = true
+                    Task {
+                        defer { exitInFlight = false }
+                        do { try await lifecycle.back(); onExit() }
+                        catch { backFailed = true }
+                    }
+                }
+                Spacer()
+                Text(bar.stockNameDisplay).font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                if showsTradeButtons {
+                    Button("结束") { confirmingEnd = true }
+                        .font(.callout).tint(.red)
+                        .accessibilityLabel("结束本局")
+                } else {
+                    // review 模式无结束：占位保持三段对称
+                    Color.clear.frame(width: 36, height: 1)
                 }
             }
-            if showsTradeButtons {
-                Button(isDrawingActive ? "结束画线" : "水平线") { toggleDrawing() }
-                    .tint(isDrawingActive ? .orange : nil)
+            HStack(spacing: 0) {
+                metricCell("总资金", bar.totalCapital, width: 96)
+                metricCell("持仓成本/股", bar.holdingCostPerShare, width: 72)
+                metricCell("持仓股数", bar.sharesText, width: 86)
+                metricCell("仓位", bar.positionShort, width: 40)
+                metricCell("浮动盈亏", bar.returnRate, width: nil)   // 末格弹性
             }
-            Spacer()
-            Text(bar.totalCapital)
-            Text("持仓成本\(bar.holdingCost)")
-            Text(bar.position)
-            Text(bar.returnRate)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .font(.callout)
+        .padding(.vertical, 7)
+    }
+
+    /// 单个指标格：标签上 / 数值下，居中对称（RFC-B D4）。width=nil → 弹性末格。
+    private func metricCell(_ label: String, _ value: String, width: CGFloat?) -> some View {
+        VStack(spacing: 1) {
+            Text(label).font(.system(size: 9)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 12).weight(.semibold)).lineLimit(1)
+        }
+        .frame(width: width, alignment: .center)
+        .frame(maxWidth: width == nil ? .infinity : nil)
     }
 
     private func panel(_ id: PanelId) -> some View {
-        HStack(spacing: 0) {
-            ChartContainerView(panel: id, engine: engine)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if showsTradeButtons { tradeButtons(id) }
-        }
-        // 内联买卖小条：仅当该面板被点开时悬浮贴底（conjoint guard 含 showsTradeButtons，
-        // 防 Normal 置位的 tradeStrip 在模式翻转至 Review/会话结束后悬空，spec §5.3 L3）。
-        .overlay(alignment: .bottom) {
-            if showsTradeButtons, let strip = tradeStrip, strip.panel == id {
-                TradeBarView(
-                    action: strip.action,
-                    onPick: { tier in
-                        performTrade(strip.action, panel: id, tier: tier)
-                        tradeStrip = nil
-                    },
-                    onCancel: { tradeStrip = nil })
+        ChartContainerView(panel: id, engine: engine)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // 内联买卖小条：仅当该面板被点开时悬浮贴底（conjoint guard 含 showsTradeButtons，
+            // 防 Normal 置位的 tradeStrip 在模式翻转至 Review/会话结束后悬空，spec §5.3 L3）。
+            .overlay(alignment: .bottom) {
+                if showsTradeButtons, let strip = tradeStrip, strip.panel == id {
+                    TradeBarView(
+                        action: strip.action,
+                        onPick: { tier in
+                            // codex R2/R3-high：执行前比对「开条捕获的 (周期, tick)」vs「当前 (周期, tick)」。
+                            // 周期被切(分段钮/两指滑) 或 tick 被推进(持有/观察/买卖) 后作废，不按新状态下单
+                            // （不依赖 onChange 时序，执行时权威判定）。
+                            guard tradeStripStillValid(capturedPeriod: strip.period,
+                                                       currentPeriod: currentPeriod(of: id),
+                                                       capturedTick: strip.tick,
+                                                       currentTick: engine.tick.globalTickIndex) else {
+                                tradeStrip = nil; return
+                            }
+                            performTrade(strip.action, panel: id, tier: tier)
+                            tradeStrip = nil
+                        },
+                        onCancel: { tradeStrip = nil })
+                }
             }
-        }
-    }
-
-    private func tradeButtons(_ id: PanelId) -> some View {
-        VStack(spacing: 8) {
-            Button("买入") { tradeStrip = TradeStripRequest(panel: id, action: .buy) }
-                .disabled(!engine.buyEnabled)
-            Button("卖出") { tradeStrip = TradeStripRequest(panel: id, action: .sell) }
-                .disabled(!engine.sellEnabled)
-            // 持有/观察始终可用（无 .disabled）：不变量靠 `showsTradeButtons==canBuySell()` 已排除唯一
-            // 不可步进模式 Review（canAdvance==false）；Normal/Replay 两可见模式 canAdvance 恒 true（plan v1.5 L944）。
-            Button(engine.position.shares > 0 ? "持有" : "观察") {   // D10
-                engine.holdOrObserve(panel: id)
+            .overlay {   // active panel 高亮（红描边 inset，RFC-B T2 D10）
+                if showsTradeButtons && id == activePanel {
+                    Rectangle().strokeBorder(Color.red.opacity(0.45), lineWidth: 2).allowsHitTesting(false)
+                }
             }
-        }
-        .buttonStyle(.bordered)
-        .padding(.horizontal, 8)
     }
 
     // 交易动作执行：调 engine.buy/sell → TradeFeedback（纯值决策）→ 触觉/Toast（壳执行）。
@@ -294,20 +344,11 @@ public struct TrainingView: View {
         }
     }
 
-    // 底部「结束本局」（plan §6.2.2：屏幕底部左侧）。可见性同交易按钮（canBuySell）。
-    private var bottomBar: some View {
-        HStack {
-            Button("结束本局") { confirmingEnd = true }
-                .buttonStyle(.bordered)
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-    }
-
     private struct TradeStripRequest: Identifiable {
         let panel: PanelId
         let action: TradeAction
+        let period: Period          // codex R2-high：捕获开条时下单周期
+        let tick: Int               // codex R3-high：捕获开条时 globalTickIndex（防 tick 推进后按新价成交）
         var id: String { "\(panel)-\(action)" }
     }
 }

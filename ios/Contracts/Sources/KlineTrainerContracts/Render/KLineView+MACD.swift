@@ -24,7 +24,7 @@ extension KLineView {
 
         // DIF / DEA 折线（D3 实线 / D9a 单点段跳过）
         let lines = SubChartLayout.macdLines(for: candles, mapper: mapper)
-        ctx.setLineWidth(1 / mapper.displayScale)
+        ctx.setLineWidth(1.8 / mapper.displayScale)
         ctx.setLineJoin(.round)
 
         currentPalette.macdDIF.setStroke()

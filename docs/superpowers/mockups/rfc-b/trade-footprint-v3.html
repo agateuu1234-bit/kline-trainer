@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RFC-B 交易控件占位方案 v3</title>
+<style>
+  :root{--up:#e23030;--dn:#29a85c;--bg:#0e0e12;--panel:#16161c;--line:#26262f;--txt:#e6e6ef;--mut:#85858f;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:#0a0a0d;color:var(--txt);font:14px/1.5 -apple-system,"PingFang SC",system-ui;padding:20px;}
+  h1{font-size:18px;margin:0 0 4px;} .sub{color:var(--mut);font-size:13px;margin:0 0 16px;max-width:900px;}
+  .row{display:flex;gap:24px;flex-wrap:wrap;}
+  .opt{width:250px;}
+  .opt h3{font-size:14px;margin:0 0 2px;text-align:center;}
+  .opt .tag{text-align:center;font-size:11px;margin:0 0 8px;}
+  .tag.rec{color:#54c98a;} .tag.alt{color:#cfa14a;}
+  .phone{width:250px;height:500px;background:var(--bg);border:6px solid #2a2a33;border-radius:24px;
+         overflow:hidden;display:flex;flex-direction:column;position:relative;}
+  .hd{background:var(--panel);border-bottom:1px solid var(--line);padding:5px 7px;}
+  .hd-top{display:flex;justify-content:space-between;align-items:center;font-size:10px;}
+  .hd-top .bk{color:#9aa0ac;} .hd-top .nm{color:#c9c9d4;font-weight:600;} .hd-top .ed{color:#c97a7a;}
+  .hd-m{display:flex;gap:3px;margin-top:4px;}
+  .mc{flex:1;display:flex;flex-direction:column;min-width:0;}
+  .ml{font-size:7.5px;color:#7d7d8a;line-height:1.15;white-space:nowrap;}
+  .mv{font-size:10px;color:#e6e6ef;font-weight:600;line-height:1.2;white-space:nowrap;}
+  .mv.up{color:var(--up);}
+  .chart{flex:1;position:relative;min-height:0;}
+  .chart.active{box-shadow:inset 0 0 0 2px rgba(226,48,48,.5);}
+  .candles{position:absolute;inset:0;display:flex;align-items:flex-end;gap:1px;padding:6px 6px 4px 36px;}
+  .k{width:6px;position:relative;} .wick{position:absolute;left:50%;width:1px;transform:translateX(-50%);background:inherit;}
+  .body{position:absolute;left:0;right:0;} .k.up,.k.up .body{background:var(--up);} .k.dn,.k.dn .body{background:var(--dn);}
+  .ptag{position:absolute;top:4px;right:6px;font-size:9px;color:#a6a6b0;}      /* period -> top-right */
+  .plabels{position:absolute;top:0;left:3px;bottom:0;display:flex;flex-direction:column;justify-content:space-between;padding:14px 0 6px;pointer-events:none;} /* price -> LEFT */
+  .plabels span{font-size:8.5px;color:#c2c2cc;text-shadow:0 0 3px #000;}
+  .tlabels{position:absolute;left:30px;right:4px;bottom:1px;display:flex;justify-content:space-around;pointer-events:none;}
+  .tlabels span{font-size:8px;color:#9a9aa6;text-shadow:0 0 3px #000;}
+  .divider{height:1px;background:var(--line);}
+  .drawmini{position:absolute;left:8px;top:24px;width:26px;height:26px;border-radius:50%;
+            background:rgba(24,24,30,.92);border:1px solid #4a3c1d;color:#cfa14a;display:flex;
+            align-items:center;justify-content:center;font-size:12px;z-index:6;}
+  /* T1 floating pill */
+  .pill{position:absolute;left:50%;transform:translateX(-50%);bottom:10px;display:flex;align-items:center;gap:6px;
+        background:rgba(20,20,26,.95);border:1px solid #3a3a46;border-radius:16px;padding:5px 12px;font-size:10px;z-index:8;}
+  .pill .px{color:var(--up);font-weight:600;} .pill .cv{color:#9aa0ac;}
+  /* T2 thin fixed bar */
+  .thin{height:34px;background:var(--panel);border-top:1px solid var(--line);display:flex;align-items:center;gap:4px;padding:0 6px;}
+  .thin .pxn{font-size:8.5px;color:#9aa0ac;flex:0 0 auto;margin-right:2px;}
+  .tb{flex:1;text-align:center;font-size:10px;font-weight:600;padding:5px 0;border-radius:6px;}
+  .tb.buy{background:#3a1414;color:#f06b6b;} .tb.sell{background:#0f2a1b;color:#54c98a;} .tb.hold{background:#1d1d26;color:#bcbcc8;}
+  /* T3 edge handle */
+  .handle{position:absolute;right:0;bottom:60px;background:rgba(20,20,26,.95);border:1px solid #3a3a46;border-right:none;
+          border-radius:10px 0 0 10px;padding:8px 5px;font-size:10px;color:#dcdce6;writing-mode:vertical-rl;z-index:8;}
+  .foot{font-size:11px;color:var(--mut);margin-top:8px;line-height:1.45;}
+  .foot b{color:#e6e6ef;}
+</style></head>
+<body>
+<h1>交易控件占位方案 · 3 选 1（都含本轮锁定项）</h1>
+<p class="sub">每个手机都已是新布局：① 价轴移到<b>左侧</b>透明文字（不挡最右最新 K 线）② 顶行 返回(左)/标的名(中)/结束(右)、无齿轮 ③ 顶栏 5 指标含「持仓股数+仓位」 ④ 画线=左上小圆按钮(点开展开)。差异只在<b>交易控件怎么占空间</b>。下图(日线)=当前下单目标(红框高亮)。</p>
+<div class="row">
+
+  <!-- T1 -->
+  <div class="opt">
+    <h3>T1 · 浮动折叠药丸</h3>
+    <div class="tag rec">推荐 · K线最大 / 和画线一致</div>
+    <div class="card" data-choice="T1" onclick="toggleSelect&&toggleSelect(this)">
+    <div class="phone">
+      <div class="hd">
+        <div class="hd-top"><span class="bk">← 返回</span><span class="nm">训练标的·盲测</span><span class="ed">结束</span></div>
+        <div class="hd-m">
+          <div class="mc"><span class="ml">总资金</span><span class="mv">¥1,024,560</span></div>
+          <div class="mc"><span class="ml">持仓成本</span><span class="mv">1,680.00</span></div>
+          <div class="mc"><span class="ml">持仓股数</span><span class="mv">200股</span></div>
+          <div class="mc"><span class="ml">仓位</span><span class="mv">2/5</span></div>
+          <div class="mc"><span class="ml">浮动盈亏</span><span class="mv up">+2.34%</span></div>
+        </div>
+      </div>
+      <div class="chart">
+        <div class="candles" data-n="22" data-seed="11"></div>
+        <div class="ptag">60分</div><div class="plabels"><span>1720</span><span>1690</span><span>1660</span><span>1630</span></div>
+        <div class="tlabels"><span>09:30</span><span>11:00</span><span>13:30</span><span>15:00</span></div>
+        <div class="drawmini">✎</div>
+      </div>
+      <div class="divider"></div>
+      <div class="chart active">
+        <div class="candles" data-n="22" data-seed="29"></div>
+        <div class="ptag">日线·目标</div><div class="plabels"><span>1760</span><span>1700</span><span>1640</span><span>1580</span></div>
+        <div class="tlabels"><span>03/14</span><span>04/02</span><span>04/21</span><span>05/12</span></div>
+        <div class="pill"><span>买卖 ⌃</span><span class="cv">日线</span><span class="px">¥1,680</span></div>
+      </div>
+    </div>
+    </div>
+    <div class="foot"><b>默认</b>=小药丸显当前价；<b>点开</b>才弹出买/卖/持有，可拖动到任意处，再点收回。常驻占位≈0，K 线最大。代价：买卖多一次「点开」，且可被拖走。</div>
+  </div>
+
+  <!-- T2 -->
+  <div class="opt">
+    <h3>T2 · 底部极薄固定条</h3>
+    <div class="tag alt">最稳 · 买卖不误触</div>
+    <div class="card" data-choice="T2" onclick="toggleSelect&&toggleSelect(this)">
+    <div class="phone">
+      <div class="hd">
+        <div class="hd-top"><span class="bk">← 返回</span><span class="nm">训练标的·盲测</span><span class="ed">结束</span></div>
+        <div class="hd-m">
+          <div class="mc"><span class="ml">总资金</span><span class="mv">¥1,024,560</span></div>
+          <div class="mc"><span class="ml">持仓成本</span><span class="mv">1,680.00</span></div>
+          <div class="mc"><span class="ml">持仓股数</span><span class="mv">200股</span></div>
+          <div class="mc"><span class="ml">仓位</span><span class="mv">2/5</span></div>
+          <div class="mc"><span class="ml">浮动盈亏</span><span class="mv up">+2.34%</span></div>
+        </div>
+      </div>
+      <div class="chart">
+        <div class="candles" data-n="22" data-seed="11"></div>
+        <div class="ptag">60分</div><div class="plabels"><span>1720</span><span>1690</span><span>1660</span><span>1630</span></div>
+        <div class="tlabels"><span>09:30</span><span>11:00</span><span>13:30</span><span>15:00</span></div>
+        <div class="drawmini">✎</div>
+      </div>
+      <div class="divider"></div>
+      <div class="chart active">
+        <div class="candles" data-n="22" data-seed="29"></div>
+        <div class="ptag">日线·目标</div><div class="plabels"><span>1760</span><span>1700</span><span>1640</span><span>1580</span></div>
+        <div class="tlabels"><span>03/14</span><span>04/02</span><span>04/21</span><span>05/12</span></div>
+      </div>
+      <div class="thin"><span class="pxn">日线<br>¥1,680</span><span class="tb buy">买入</span><span class="tb sell">卖出</span><span class="tb hold">持有</span></div>
+    </div>
+    </div>
+    <div class="foot"><b>常驻</b>一条 ~34pt 薄条（比现在的右侧按钮列+底部条省很多）。买卖一步到位、不会误拖。代价：固定吃掉一点底部高度（约现在的 1/3）。</div>
+  </div>
+
+  <!-- T3 -->
+  <div class="opt">
+    <h3>T3 · 边缘抽屉 handle</h3>
+    <div class="tag alt">隐藏时零占位</div>
+    <div class="card" data-choice="T3" onclick="toggleSelect&&toggleSelect(this)">
+    <div class="phone">
+      <div class="hd">
+        <div class="hd-top"><span class="bk">← 返回</span><span class="nm">训练标的·盲测</span><span class="ed">结束</span></div>
+        <div class="hd-m">
+          <div class="mc"><span class="ml">总资金</span><span class="mv">¥1,024,560</span></div>
+          <div class="mc"><span class="ml">持仓成本</span><span class="mv">1,680.00</span></div>
+          <div class="mc"><span class="ml">持仓股数</span><span class="mv">200股</span></div>
+          <div class="mc"><span class="ml">仓位</span><span class="mv">2/5</span></div>
+          <div class="mc"><span class="ml">浮动盈亏</span><span class="mv up">+2.34%</span></div>
+        </div>
+      </div>
+      <div class="chart">
+        <div class="candles" data-n="22" data-seed="11"></div>
+        <div class="ptag">60分</div><div class="plabels"><span>1720</span><span>1690</span><span>1660</span><span>1630</span></div>
+        <div class="tlabels"><span>09:30</span><span>11:00</span><span>13:30</span><span>15:00</span></div>
+        <div class="drawmini">✎</div>
+      </div>
+      <div class="divider"></div>
+      <div class="chart active">
+        <div class="candles" data-n="22" data-seed="29"></div>
+        <div class="ptag">日线·目标</div><div class="plabels"><span>1760</span><span>1700</span><span>1640</span><span>1580</span></div>
+        <div class="tlabels"><span>03/14</span><span>04/02</span><span>04/21</span><span>05/12</span></div>
+        <div class="handle">交易 ›</div>
+      </div>
+    </div>
+    </div>
+    <div class="foot"><b>隐藏</b>时只剩贴右缘一个小 handle，零占位；<b>点开</b>从右侧滑出买/卖/持有，点空收回。K 线几乎全屏。代价：每次买卖要先点出抽屉，比 T2 多一步。</div>
+  </div>
+
+</div>
+<script>
+(function(){
+  function seeded(s){return function(){s=(s*1103515245+12345)&0x7fffffff;return s/0x7fffffff;};}
+  document.querySelectorAll('.candles').forEach(function(c){
+    var n=+c.getAttribute('data-n')||20,rnd=seeded(+c.getAttribute('data-seed')||1),price=0.5;
+    for(var i=0;i<n;i++){var open=price,close=Math.max(0.08,Math.min(0.92,open+(rnd()-0.48)*0.16));
+      var hi=Math.min(0.96,Math.max(open,close)+rnd()*0.06),lo=Math.max(0.04,Math.min(open,close)-rnd()*0.06);price=close;
+      var up=close>=open,k=document.createElement('div');k.className='k '+(up?'up':'dn');
+      var w=document.createElement('div');w.className='wick';w.style.bottom=(lo*100)+'%';w.style.height=((hi-lo)*100)+'%';
+      var b=document.createElement('div');b.className='body';var bt=Math.max(open,close),bb=Math.min(open,close);
+      b.style.bottom=(bb*100)+'%';b.style.height=(Math.max(0.02,bt-bb)*100)+'%';k.appendChild(w);k.appendChild(b);c.appendChild(k);}
+  });
+})();
+</script>
+</body></html>

@@ -34,10 +34,9 @@ extension KLineView {
         drawLabelBox(ctx: ctx, rect: resolved.timeLabel.rect, text: resolved.timeLabel.text)
     }
 
-    /// D4：标签框 = background 实心 + text 文字，10pt 系统字体，居中。
+    /// RFC-B D1：透明文字、无底框（同花顺式）。去掉 background 实心填充，
+    /// 加细阴影防糊在 K 线上不可读。10pt 系统字体，居中。轴标 + crosshair 标共用。
     func drawLabelBox(ctx: CGContext, rect: CGRect, text: String) {
-        currentPalette.background.setFill()
-        ctx.fill(rect)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: UIFont.systemFont(ofSize: 10),
             .foregroundColor: currentPalette.text,
@@ -46,6 +45,9 @@ extension KLineView {
         let size = str.size(withAttributes: attrs)
         let drawX = rect.midX - size.width / 2
         let drawY = rect.midY - size.height / 2
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
+        ctx.setShadow(offset: .zero, blur: 2.5, color: currentPalette.background.cgColor)  // 描边式阴影
         str.draw(at: CGPoint(x: drawX, y: drawY), withAttributes: attrs)
     }
 }

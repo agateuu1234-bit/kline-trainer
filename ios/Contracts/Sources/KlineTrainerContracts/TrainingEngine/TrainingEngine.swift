@@ -253,7 +253,7 @@ public final class TrainingEngine {
     // MARK: - 派生 accessor（只读纯值计算属性；买卖可用门见 E5b / D4）
 
     /// 现价：复用 Task 1 的静态 `price(...)`，固定 `.m3` 驱动序列（D2 / codex R4-F2）。
-    private var currentPrice: Double {
+    public var currentPrice: Double {
         TrainingEngine.price(in: allCandles, atTick: tick.globalTickIndex)
     }
 

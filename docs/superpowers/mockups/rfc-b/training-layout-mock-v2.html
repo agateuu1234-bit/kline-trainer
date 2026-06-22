@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RFC-B 训练界面布局 v2</title>
+<style>
+  :root{ --up:#e23030; --dn:#29a85c; --bg:#0e0e12; --panel:#16161c; --line:#26262f;
+         --txt:#e6e6ef; --mut:#85858f; }
+  *{box-sizing:border-box;}
+  body{margin:0;background:#0a0a0d;color:var(--txt);font:14px/1.5 -apple-system,"PingFang SC",system-ui;padding:20px;}
+  h1{font-size:18px;margin:0 0 4px;} .sub{color:var(--mut);font-size:13px;margin:0 0 18px;}
+  .wrap{display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start;}
+  /* phone */
+  .phone{width:340px;height:680px;background:var(--bg);border:7px solid #2a2a33;border-radius:30px;
+         overflow:hidden;display:flex;flex-direction:column;position:relative;box-shadow:0 10px 40px rgba(0,0,0,.55);}
+  .hd{background:var(--panel);border-bottom:1px solid var(--line);padding:7px 10px;}
+  .hd-top{display:flex;justify-content:space-between;align-items:center;}
+  .hd-name{font-size:12px;color:#c9c9d4;font-weight:600;}
+  .hd-name .lock{color:#6f6f7a;font-weight:400;}
+  .hd-icons{display:flex;gap:9px;align-items:center;}
+  .ic{font-size:12px;color:#9a9aa6;border:1px solid #33333f;border-radius:6px;padding:2px 7px;}
+  .ic.end{border-color:#4a2222;color:#c97a7a;position:relative;}
+  .hd-metrics{display:flex;gap:8px;margin-top:6px;}
+  .metric{flex:1;display:flex;flex-direction:column;min-width:0;}
+  .ml{font-size:9px;color:#7d7d8a;line-height:1.2;}
+  .mv{font-size:13px;color:#e6e6ef;font-weight:600;line-height:1.3;white-space:nowrap;}
+  .mv.up{color:var(--up);}
+  /* charts */
+  .chart{flex:1;display:flex;flex-direction:column;min-height:0;position:relative;}
+  .chart.active{box-shadow:inset 0 0 0 2px rgba(226,48,48,.55);}
+  .cbody{flex:1;position:relative;min-height:0;}
+  .candles{position:absolute;inset:0;display:flex;align-items:flex-end;gap:1.5px;padding:8px 6px 4px;}
+  .k{width:8px;position:relative;}
+  .wick{position:absolute;left:50%;width:1px;transform:translateX(-50%);background:inherit;}
+  .body{position:absolute;left:0;right:0;border-radius:.5px;}
+  .k.up{background:var(--up);} .k.dn{background:var(--dn);}
+  .k.up .body{background:var(--up);} .k.dn .body{background:var(--dn);}
+  /* TRANSPARENT axis labels — no box, float over candles (同花顺式) */
+  .ptag{position:absolute;top:6px;left:8px;font-size:11px;color:#a6a6b0;}
+  .plabels{position:absolute;top:0;right:4px;bottom:0;display:flex;flex-direction:column;
+           justify-content:space-between;padding:8px 0;pointer-events:none;}
+  .plabels span{font-size:10px;color:#c2c2cc;text-align:right;text-shadow:0 0 3px rgba(0,0,0,.9);}
+  .tlabels{position:absolute;left:0;right:0;bottom:2px;display:flex;justify-content:space-around;pointer-events:none;}
+  .tlabels span{font-size:10px;color:#9a9aa6;text-shadow:0 0 3px rgba(0,0,0,.9);}
+  .divider{height:1px;background:var(--line);}
+  /* floating draggable widgets */
+  .float{position:absolute;z-index:10;}
+  .grip{font-size:10px;color:#6f6f7a;text-align:center;letter-spacing:2px;cursor:grab;}
+  /* drawing widget – expanded toolbar */
+  .draw{left:10px;top:30px;background:rgba(24,24,30,.94);border:1px solid #3a3a46;border-radius:12px;
+        padding:5px;box-shadow:0 6px 18px rgba(0,0,0,.5);}
+  .draw .tools{display:flex;gap:4px;}
+  .dtool{font-size:11px;color:#dcdce6;border:1px solid #3f3f4c;border-radius:8px;padding:5px 8px;background:#20202a;}
+  .dtool.icon{background:#cfa14a18;border-color:#4a3c1d;color:#cfa14a;}
+  /* drawing widget – collapsed (shown as a hint inset elsewhere) */
+  .drawmini{width:38px;height:38px;border-radius:50%;background:rgba(24,24,30,.94);border:1px solid #4a3c1d;
+            color:#cfa14a;display:flex;align-items:center;justify-content:center;font-size:16px;}
+  /* trade widget – ONE set, bound to active panel */
+  .trade{left:50%;transform:translateX(-50%);bottom:14px;width:300px;background:rgba(20,20,26,.95);
+         border:1px solid #34343f;border-radius:14px;padding:8px 10px;box-shadow:0 8px 22px rgba(0,0,0,.55);}
+  .trade .thead{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;}
+  .trade .bind{font-size:11px;color:#bcbcc8;} .trade .bind b{color:#fff;} .trade .px{color:var(--up);font-weight:600;}
+  .pseg{display:flex;gap:3px;}
+  .pseg span{font-size:10px;color:#9a9aa6;border:1px solid #34343f;border-radius:6px;padding:2px 6px;}
+  .pseg span.on{background:#2a2a33;color:#fff;border-color:#50505c;}
+  .trow{display:flex;gap:7px;}
+  .tbtn{flex:1;text-align:center;font-size:13px;font-weight:600;padding:9px 0;border-radius:9px;}
+  .tbtn.buy{background:#3a1414;color:#f06b6b;border:1px solid #5a1d1d;}
+  .tbtn.sell{background:#0f2a1b;color:#54c98a;border:1px solid #1d5a39;}
+  .tbtn.hold{background:#1d1d26;color:#bcbcc8;border:1px solid #34343f;}
+  /* legend */
+  .legend{width:330px;}
+  .legend h3{font-size:14px;margin:0 0 8px;}
+  .litem{display:flex;gap:8px;margin-bottom:11px;font-size:13px;}
+  .lnum{flex:0 0 22px;height:22px;border-radius:50%;background:#23232c;border:1px solid #3a3a46;color:#cfcfd8;
+        display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;}
+  .lnum.lock{background:#16331f;border-color:#1d5a39;color:#54c98a;}
+  .lnum.open{background:#33231f;border-color:#5a3a1d;color:#cfa14a;}
+  .ltext b{color:#fff;} .ltext .t{color:var(--mut);font-size:12px;}
+  .badge{position:absolute;width:20px;height:20px;border-radius:50%;background:#000a;border:1px solid #6f6f7a;
+         color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;z-index:20;}
+  .k.up{} /* keep */
+</style></head>
+<body>
+<h1>RFC-B 训练界面布局 · v2（吸收本轮反馈）</h1>
+<p class="sub">绿✓=已按你的反馈锁定；橙=仍待定。红涨绿跌（A股习惯）。</p>
+<div class="wrap">
+
+  <div class="phone">
+    <!-- header -->
+    <div class="hd">
+      <div class="hd-top">
+        <div class="hd-name">← 返回 &nbsp;·&nbsp; <span class="lock">训练标的（盲测·已隐藏）</span></div>
+        <div class="hd-icons"><span class="ic">⚙︎</span><span class="ic end">结束<span class="badge" style="position:static;border:none;background:none;color:#cfa14a;width:auto;">?</span></span></div>
+      </div>
+      <div class="hd-metrics">
+        <div class="metric"><span class="ml">总资金</span><span class="mv">¥1,024,560</span></div>
+        <div class="metric"><span class="ml">持仓成本</span><span class="mv">1,680.00</span></div>
+        <div class="metric"><span class="ml">持仓股数</span><span class="mv">200 股</span></div>
+        <div class="metric"><span class="ml">浮动盈亏</span><span class="mv up">+2.34%</span></div>
+      </div>
+      <div class="badge" style="top:8px;left:118px;">5</div>
+      <div class="badge" style="top:40px;left:172px;">4</div>
+    </div>
+
+    <!-- chart 1 : 60min -->
+    <div class="chart">
+      <div class="cbody">
+        <div class="candles" data-n="26" data-seed="11"></div>
+        <div class="ptag">60分</div>
+        <div class="plabels"><span>1,720</span><span>1,690</span><span>1,660</span><span>1,630</span></div>
+        <div class="tlabels"><span>09:30</span><span>11:00</span><span>13:30</span><span>15:00</span></div>
+      </div>
+      <!-- floating draggable DRAWING widget (expanded) -->
+      <div class="float draw">
+        <div class="grip">⠿ 拖动</div>
+        <div class="tools">
+          <span class="dtool icon">✎</span><span class="dtool">— 水平线</span><span class="dtool">/ 趋势线</span><span class="dtool">⌫</span>
+        </div>
+      </div>
+      <div class="badge" style="top:6px;right:8px;">1</div>
+      <div class="badge" style="top:30px;left:14px;">2</div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- chart 2 : daily — ACTIVE (trade target) -->
+    <div class="chart active">
+      <div class="cbody">
+        <div class="candles" data-n="26" data-seed="29"></div>
+        <div class="ptag">日线 · 下单目标</div>
+        <div class="plabels"><span>1,760</span><span>1,700</span><span>1,640</span><span>1,580</span></div>
+        <div class="tlabels"><span>03/14</span><span>04/02</span><span>04/21</span><span>05/12</span></div>
+      </div>
+      <!-- floating draggable TRADE widget — ONE set, bound to active panel -->
+      <div class="float trade">
+        <div class="grip">⠿ 拖动</div>
+        <div class="thead">
+          <span class="bind">下单 · <b>日线</b> <span class="px">@ ¥1,680.00</span></span>
+          <span class="pseg"><span>60分</span><span class="on">日线</span></span>
+        </div>
+        <div class="trow"><span class="tbtn buy">买入</span><span class="tbtn sell">卖出</span><span class="tbtn hold">持有</span></div>
+      </div>
+      <div class="badge" style="top:6px;right:8px;">1</div>
+      <div class="badge" style="bottom:120px;left:12px;">3</div>
+    </div>
+  </div>
+
+  <!-- legend -->
+  <div class="legend">
+    <h3>编号说明</h3>
+    <div class="litem"><div class="lnum lock">1</div><div class="ltext"><b>坐标轴 = 透明文字，无底框</b><div class="t">✓ 保持现有轴位置，只去掉数字后面的小底框 → 文字悬浮在 K 线上不再遮挡，K 线面积变大（同花顺式）。右价 / 底时间 / 周期标都这样。</div></div></div>
+    <div class="litem"><div class="lnum lock">2</div><div class="ltext"><b>画线 = 浮动可拖动控件</b><div class="t">✓ 点 ✎ 展开成工具条（水平线/趋势线/删除…可扩展）；不点则可整条拖到任意位置；再点 ✎ 收回成一个圆按钮。只有手动点才收，不自动收。</div></div></div>
+    <div class="litem"><div class="lnum open">3</div><div class="ltext"><b>交易 = 一套控件，绑定目标周期</b><div class="t">⟡ 只一套买/卖/持有。头部显示绑定的 panel + 取价「日线 @ ¥1,680」；点另一个图或用「60分/日线」切换钮即改下单目标 → 一套覆盖多周期不同价。取价精确规则留给 RFC-A。<b>待定：这个交易控件也做成浮动可拖动，还是底部固定？</b></div></div></div>
+    <div class="litem"><div class="lnum lock">4</div><div class="ltext"><b>顶栏指标：持仓股数（去掉仓位%）</b><div class="t">✓ 按路线图：训练/复盘显「持仓股数」，仓位% 不再是主元素。标签在上、数值在下、金额留宽。<span style="color:#cfa14a">请确认你 OK。</span></div></div></div>
+    <div class="litem"><div class="lnum lock">5</div><div class="ltext"><b>标的名：训练隐藏 / 复盘显示</b><div class="t">✓ 正常盲测训练隐藏；复盘(review)/再训练时显示真实标的名+代码。</div></div></div>
+    <div class="litem"><div class="lnum open">?</div><div class="ltext"><b>结束本局按钮位置</b><div class="t">⟡ 先放顶栏右上占位。你说「先定交易按钮再看结束放哪」——交易方案定了我们再回来定它。</div></div></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  function seeded(s){return function(){s=(s*1103515245+12345)&0x7fffffff;return s/0x7fffffff;};}
+  document.querySelectorAll('.candles').forEach(function(c){
+    var n=+c.getAttribute('data-n')||20,rnd=seeded(+c.getAttribute('data-seed')||1),price=0.5;
+    for(var i=0;i<n;i++){
+      var open=price,close=Math.max(0.08,Math.min(0.92,open+(rnd()-0.48)*0.16));
+      var hi=Math.min(0.96,Math.max(open,close)+rnd()*0.06),lo=Math.max(0.04,Math.min(open,close)-rnd()*0.06);
+      price=close;var up=close>=open;
+      var k=document.createElement('div');k.className='k '+(up?'up':'dn');
+      var w=document.createElement('div');w.className='wick';w.style.bottom=(lo*100)+'%';w.style.height=((hi-lo)*100)+'%';
+      var b=document.createElement('div');b.className='body';var bt=Math.max(open,close),bb=Math.min(open,close);
+      b.style.bottom=(bb*100)+'%';b.style.height=(Math.max(0.02,bt-bb)*100)+'%';
+      k.appendChild(w);k.appendChild(b);c.appendChild(k);
+    }
+  });
+})();
+</script>
+</body></html>

@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RFC-B 布局 v4 · iPhone 灵动岛</title>
+<style>
+  :root{--up:#e23030;--dn:#29a85c;--bg:#0c0c10;--panel:#16161c;--line:#262630;--txt:#e8e8f0;--mut:#86868f;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:#08080b;color:var(--txt);font:14px/1.5 -apple-system,"PingFang SC",system-ui;padding:22px;}
+  h1{font-size:18px;margin:0 0 4px;} .sub{color:var(--mut);font-size:13px;margin:0 0 18px;max-width:760px;}
+  .wrap{display:flex;gap:30px;flex-wrap:wrap;align-items:flex-start;}
+  /* ===== iPhone device with Dynamic Island ===== */
+  .device{width:392px;height:812px;background:#000;border-radius:54px;padding:11px;
+          box-shadow:0 0 0 2px #3a3a42,0 18px 50px rgba(0,0,0,.6);position:relative;}
+  .screen{width:100%;height:100%;background:var(--bg);border-radius:44px;overflow:hidden;
+          display:flex;flex-direction:column;position:relative;}
+  /* status bar / safe area top */
+  .statusbar{height:52px;flex:0 0 52px;display:flex;align-items:flex-start;justify-content:space-between;
+             padding:14px 30px 0;position:relative;z-index:5;}
+  .sb-time{font-size:15px;font-weight:600;letter-spacing:.3px;}
+  .sb-right{display:flex;align-items:center;gap:6px;height:18px;}
+  .signal{display:flex;align-items:flex-end;gap:2px;height:11px;}
+  .signal i{width:3px;background:#fff;border-radius:1px;} .signal i:nth-child(1){height:4px;}
+  .signal i:nth-child(2){height:6px;} .signal i:nth-child(3){height:8px;} .signal i:nth-child(4){height:11px;}
+  .wifi{font-size:13px;} .batt{width:24px;height:12px;border:1px solid #fff;border-radius:3px;position:relative;padding:1px;}
+  .batt::after{content:"";position:absolute;right:-3px;top:3px;width:2px;height:6px;background:#fff;border-radius:0 1px 1px 0;}
+  .batt i{display:block;height:100%;width:78%;background:#fff;border-radius:1px;}
+  .island{position:absolute;left:50%;top:11px;transform:translateX(-50%);width:122px;height:34px;background:#000;
+          border-radius:20px;z-index:6;display:flex;align-items:center;justify-content:flex-end;padding-right:12px;}
+  .island::after{content:"";width:8px;height:8px;border-radius:50%;background:#15151c;box-shadow:inset 0 0 2px #2a2a35;}
+  /* ===== app content (below safe area) ===== */
+  .app{flex:1;display:flex;flex-direction:column;min-height:0;}
+  .hd{background:var(--panel);border-bottom:1px solid var(--line);padding:6px 12px 7px;}
+  .hd-top{display:flex;justify-content:space-between;align-items:center;height:24px;}
+  .hd-top .bk{font-size:13px;color:#aab0bc;} .hd-top .nm{font-size:13px;color:#d2d2db;font-weight:600;}
+  .hd-top .ed{font-size:13px;color:#d08585;}
+  .hd-m{display:flex;margin-top:7px;}
+  .mc{display:flex;flex-direction:column;justify-content:center;min-width:0;padding:0 9px;border-left:1px solid #23232c;}
+  .mc:first-child{padding-left:0;border-left:none;}
+  .mc.cap{flex:0 0 132px;} .mc.cost{flex:0 0 78px;} .mc.sh{flex:1 1 auto;} .mc.pos{flex:0 0 44px;} .mc.pl{flex:0 0 62px;}
+  .ml{font-size:9px;color:#7a7a86;line-height:1.25;white-space:nowrap;}
+  .mv{font-size:13px;color:#ececf4;font-weight:600;line-height:1.3;white-space:nowrap;}
+  .mv.big{font-size:13px;} .mv.up{color:var(--up);}
+  /* charts */
+  .chart{flex:1 1 0;min-height:0;position:relative;}
+  .chart.active::before{content:"";position:absolute;inset:0;box-shadow:inset 0 0 0 2px rgba(226,48,48,.45);pointer-events:none;z-index:3;}
+  .candles{position:absolute;inset:0;display:flex;align-items:flex-end;gap:1.5px;padding:8px 8px 16px 42px;}
+  .k{width:7px;position:relative;} .wick{position:absolute;left:50%;width:1px;transform:translateX(-50%);background:inherit;}
+  .body{position:absolute;left:0;right:0;border-radius:.5px;} .k.up,.k.up .body{background:var(--up);} .k.dn,.k.dn .body{background:var(--dn);}
+  .ptag{position:absolute;top:6px;right:8px;font-size:10px;color:#a6a6b0;}                 /* period top-right */
+  .plabels{position:absolute;top:0;left:5px;bottom:0;display:flex;flex-direction:column;justify-content:space-between;padding:16px 0;pointer-events:none;} /* price LEFT */
+  .plabels span{font-size:10px;color:#cfcfd8;text-shadow:0 0 4px #000,0 0 4px #000;}
+  .tlabels{position:absolute;left:42px;right:8px;bottom:2px;display:flex;justify-content:space-around;pointer-events:none;}
+  .tlabels span{font-size:9.5px;color:#9a9aa6;text-shadow:0 0 4px #000,0 0 4px #000;}
+  .ind{position:absolute;top:6px;left:46px;font-size:9px;color:#8a8a96;}
+  .divider{height:1px;background:var(--line);flex:0 0 1px;}
+  .drawmini{position:absolute;left:8px;top:30px;width:30px;height:30px;border-radius:50%;background:rgba(22,22,28,.94);
+            border:1px solid #4a3c1d;color:#cfa14a;display:flex;align-items:center;justify-content:center;font-size:14px;z-index:7;}
+  /* T2 thin fixed trade bar */
+  .tradebar{flex:0 0 38px;background:var(--panel);border-top:1px solid var(--line);display:flex;align-items:center;gap:6px;padding:0 10px;}
+  .tb-px{display:flex;flex-direction:column;line-height:1.15;flex:0 0 auto;margin-right:2px;}
+  .tb-px .a{font-size:8.5px;color:#8a8a96;} .tb-px .b{font-size:11px;color:var(--up);font-weight:600;}
+  .tb{flex:1;text-align:center;font-size:13px;font-weight:600;padding:7px 0;border-radius:8px;}
+  .tb.buy{background:#3a1414;color:#f3736f;border:1px solid #5a1d1d;} .tb.sell{background:#0f2a1b;color:#5ccf90;border:1px solid #1d5a39;}
+  .tb.hold{background:#1d1d26;color:#c2c2cc;border:1px solid #34343f;}
+  /* home indicator */
+  .home{flex:0 0 22px;display:flex;align-items:center;justify-content:center;}
+  .home i{width:128px;height:5px;border-radius:3px;background:#54545e;}
+  /* legend */
+  .legend{width:340px;}
+  .legend h3{font-size:14px;margin:2px 0 10px;}
+  .li{display:flex;gap:9px;margin-bottom:13px;font-size:13px;}
+  .ln{flex:0 0 22px;height:22px;border-radius:50%;background:#16331f;border:1px solid #1d5a39;color:#5ccf90;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;}
+  .lt b{color:#fff;} .lt .t{color:var(--mut);font-size:12px;}
+</style></head>
+<body>
+<h1>RFC-B 训练界面布局 · v4（iPhone 灵动岛 / T2 / 两图等高）</h1>
+<p class="sub">这是接近定稿的整屏。改用带灵动岛的 iPhone 框，app 内容落在安全区下。绿圈=已锁定项。红涨绿跌。</p>
+<div class="wrap">
+
+  <div class="device">
+    <div class="screen">
+      <!-- status bar + dynamic island -->
+      <div class="statusbar">
+        <div class="sb-time">9:41</div>
+        <div class="island"></div>
+        <div class="sb-right">
+          <div class="signal"><i></i><i></i><i></i><i></i></div>
+          <span class="wifi">📶</span>
+          <div class="batt"><i></i></div>
+        </div>
+      </div>
+
+      <div class="app">
+        <!-- header -->
+        <div class="hd">
+          <div class="hd-top">
+            <span class="bk">‹ 返回</span>
+            <span class="nm">训练标的 · 盲测</span>
+            <span class="ed">结束 ▢</span>
+          </div>
+          <div class="hd-m">
+            <div class="mc cap"><span class="ml">总资金</span><span class="mv big">¥286,400,000</span></div>
+            <div class="mc cost"><span class="ml">持仓成本/股</span><span class="mv">1,683.50</span></div>
+            <div class="mc sh"><span class="ml">持仓股数</span><span class="mv">200 股</span></div>
+            <div class="mc pos"><span class="ml">仓位</span><span class="mv">2/5</span></div>
+            <div class="mc pl"><span class="ml">浮动盈亏</span><span class="mv up">+2.34%</span></div>
+          </div>
+        </div>
+
+        <!-- chart 1 : 60min -->
+        <div class="chart">
+          <div class="candles" data-n="30" data-seed="11"></div>
+          <div class="ind">MA66 · BOLL（加深加粗）</div>
+          <div class="ptag">60分</div>
+          <div class="plabels"><span>1720</span><span>1700</span><span>1680</span><span>1660</span><span>1640</span></div>
+          <div class="tlabels"><span>09:30</span><span>10:30</span><span>11:30</span><span>14:00</span><span>15:00</span></div>
+          <div class="drawmini">✎</div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- chart 2 : daily — ACTIVE -->
+        <div class="chart active">
+          <div class="candles" data-n="30" data-seed="29"></div>
+          <div class="ind">MA66 · BOLL（加深加粗）</div>
+          <div class="ptag">日线 · 下单目标</div>
+          <div class="plabels"><span>1760</span><span>1700</span><span>1640</span><span>1600</span><span>1560</span></div>
+          <div class="tlabels"><span>03/14</span><span>03/28</span><span>04/15</span><span>05/02</span><span>05/20</span></div>
+        </div>
+
+        <!-- T2 thin fixed trade bar -->
+        <div class="tradebar">
+          <div class="tb-px"><span class="a">日线下单价</span><span class="b">¥1,680</span></div>
+          <span class="tb buy">买入</span><span class="tb sell">卖出</span><span class="tb hold">持有</span>
+        </div>
+
+        <div class="home"><i></i></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <h3>本版已锁定</h3>
+    <div class="li"><div class="ln">D12</div><div class="lt"><b>灵动岛 iPhone 框</b><div class="t">状态栏(时间/信号/WiFi/电量)+灵动岛；app 内容在安全区下，不被遮挡；底部 home indicator。</div></div></div>
+    <div class="li"><div class="ln">D11</div><div class="lt"><b>上下两图严格等高</b><div class="t">60分/日线各 flex:1 平分，中间 1px 分隔；T2 薄条在两图之外，不偏吃下图。</div></div></div>
+    <div class="li"><div class="ln">D10</div><div class="lt"><b>T2 底部薄条交易</b><div class="t">~38pt 常驻：左显「日线下单价 ¥1,680」+ 买入/卖出/持有。一套控件绑定下单目标周期(高亮图)。</div></div></div>
+    <div class="li"><div class="ln">D4</div><div class="lt"><b>顶栏重排</b><div class="t">总资金留 <b>9 位</b>(¥286,400,000 示例不撑宽)；<b>持仓成本/股</b>=每股成本(含税费, 价位级 1,683.50)；持仓股数+仓位都留；标签上/数值下；格间细分隔线，不再挤一起。</div></div></div>
+    <div class="li"><div class="ln">D1</div><div class="lt"><b>价轴移左 + 透明文字</b><div class="t">价标在<b>左缘</b>透明文字(不挡最右最新K线)；周期标移右上；时间轴在底部；均无底框。</div></div></div>
+    <div class="li"><div class="ln">D6</div><div class="lt"><b>顶行三件套</b><div class="t">返回(左) / 标的名(中, 训练隐藏·复盘显示) / 结束(右)；无设置齿轮。</div></div></div>
+    <div class="li"><div class="ln">D2</div><div class="lt"><b>画线浮动按钮</b><div class="t">左上 ✎ 圆按钮，点开展开工具条、可拖动、手动点才收。</div></div></div>
+  </div>
+</div>
+<script>
+(function(){
+  function seeded(s){return function(){s=(s*1103515245+12345)&0x7fffffff;return s/0x7fffffff;};}
+  document.querySelectorAll('.candles').forEach(function(c){
+    var n=+c.getAttribute('data-n')||20,rnd=seeded(+c.getAttribute('data-seed')||1),price=0.5;
+    for(var i=0;i<n;i++){var open=price,close=Math.max(0.08,Math.min(0.92,open+(rnd()-0.48)*0.16));
+      var hi=Math.min(0.96,Math.max(open,close)+rnd()*0.06),lo=Math.max(0.04,Math.min(open,close)-rnd()*0.06);price=close;
+      var up=close>=open,k=document.createElement('div');k.className='k '+(up?'up':'dn');
+      var w=document.createElement('div');w.className='wick';w.style.bottom=(lo*100)+'%';w.style.height=((hi-lo)*100)+'%';
+      var b=document.createElement('div');b.className='body';var bt=Math.max(open,close),bb=Math.min(open,close);
+      b.style.bottom=(bb*100)+'%';b.style.height=(Math.max(0.02,bt-bb)*100)+'%';k.appendChild(w);k.appendChild(b);c.appendChild(k);}
+  });
+})();
+</script>
+</body></html>
