@@ -344,6 +344,7 @@ git commit -m "feat(A1): TradeCalculator 按股数 API + maxBuyable/helpers（D7
 - 先全仓买、再 `engine.sell(panel:.lower, shares: position.shares)`（清仓，可能奇数）→ `position.shares==0`。
 - `engine.sell` 超持仓 → `.failure(.trade(.insufficientHolding))`。
 - **R-plan-8-1 溢出原子 no-op**（等价现有 `forceCloseManuallyNoOpOnFiniteOverflowPrice`）：构造一个使 `shares*price` 溢出非有限的极端有限价 tick（沿用现有 force-close 溢出测试的价/股构造），有持仓时 `engine.sell(panel:shares:)` → `.failure(.trade(.invalidShareCount))` 且 **`position`/`cashBalance`/`tradeOperations` 全不变**（整笔 no-op，不写非有限值）。
+- **R-plan-12-1 净负现金 no-op**：低价小手 + **免5 下限**（`minCommissionEnabled` fees）、现金近零，卖该手 `quote.proceeds<0` 使 `newCash<0` → `engine.sell(panel:shares:)` → `.failure(.trade(.insufficientCash))` 且 `position`/`cashBalance`/`tradeOperations` **全不变**（保非负资金不变量，autosave 不出负现金）。
 
 （测试体照搬现成 engine fixture 构造；断言用上述行为。）
 
@@ -400,6 +401,9 @@ Expected: 编译失败（`buy(panel:shares:)` 未定义）。
                   quote.proceeds.isFinite, newCash.isFinite else {
                 return .failure(.trade(.invalidShareCount))
             }
+            // codex R-plan-12-1：保持引擎**非负资金不变量**——低价小手 + 免5 下限可令 proceeds 为负；
+            // 若净额使现金为负 → 失败 no-op（否则 autosave 出负现金 pending → TrainingEngine.make 拒 <0 → 无法 resume）。
+            guard newCash >= 0 else { return .failure(.trade(.insufficientCash)) }
             position.sell(shares: quote.shares)
             cashBalance = newCash                       // 用预校验过的终值
             markers.append(TradeMarker(globalTick: entryTick, price: price, direction: .sell))
@@ -495,6 +499,15 @@ func test_stale_retry_does_not_clear_unrelated_pending() throws {
     XCTAssertNotNil(try db.loadPending())                       // k2 pending 仍在（未被误清）
     XCTAssertEqual(try db.loadPending()?.sessionKey, "k2")
 }
+// codex R-plan-12-2：重复重试遇**损坏**的 total_capital（非有限/畸形）→ finalize 抛 .dbCorrupted（不静默兜底 10万）。
+func test_retry_with_corrupt_capital_fails_closed() throws {
+    _ = try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1")
+    // 直接把 settings.total_capital 写成畸形（绕过 setTotalCapital 守卫，模拟 DB 损坏）
+    try db.rawWriteSetting("total_capital", "abc")   // 沿用本套件 raw 写/openRaw 范式
+    XCTAssertThrowsError(try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1")) { e in
+        guard case AppError.persistence(.dbCorrupted) = e else { return XCTFail("expected .dbCorrupted, got \(e)") }
+    }
+}
 ```
 
 SettingsStore 单测（沿用该文件现成测试框架 + `SettingsStore.preview()`/`InMemorySettingsDAO`）：
@@ -565,10 +578,18 @@ Expected: 编译失败（`finalizeSession` 现返回 `Int64`、测试用 `r.tota
                     // 重复 sessionKey（含「更晚 session 已 finalize 后、旧 session 的过期重试」）：
                     // **不改权威资金**（否则会把 settings.total_capital 回退到旧 session 值）；
                     // 返回**当前**权威 settings 值 → coordinator 缓存刷新为 no-op，不回退。
+                    // codex R-plan-12-2：与 SettingsDAOImpl.loadSettings 同口径 fail-closed——缺失→默认；
+                    // 存在但畸形/非有限→抛 .dbCorrupted（**不静默兜底 10万**，否则掩盖 DB 损坏）。
                     let txt = try String.fetchOne(db, sql:
                         "SELECT value FROM settings WHERE key = 'total_capital'")
-                    let current = txt.flatMap(Double.init) ?? AppSettings.defaultTotalCapital
-                    return (id, current.isFinite ? current : AppSettings.defaultTotalCapital)
+                    let current: Double
+                    if let txt {
+                        guard let v = Double(txt), v.isFinite else { throw AppError.persistence(.dbCorrupted) }
+                        current = v
+                    } else {
+                        current = AppSettings.defaultTotalCapital   // 缺失 = 从未设置，合法默认
+                    }
+                    return (id, current)
                 }
                 // 新插入（当前 session 首次 finalize）→ 推进权威资金 = 本记录 total_capital+profit。
                 guard let row = try Row.fetchOne(db, sql:
