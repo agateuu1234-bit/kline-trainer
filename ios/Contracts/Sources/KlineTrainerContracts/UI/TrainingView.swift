@@ -34,6 +34,7 @@ public struct TrainingView: View {
     @State private var confirmingEnd = false
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
+    @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
 
     public init(lifecycle: TrainingSessionLifecycle,
                 onExit: @escaping () -> Void,
@@ -70,6 +71,19 @@ public struct TrainingView: View {
             panel(.upper)
             Divider()
             panel(.lower)
+            if showsTradeButtons {
+                TradeActionBar(
+                    content: TradeActionBarContent(price: engine.currentPrice),
+                    upperPeriod: engine.upperPanel.period,
+                    lowerPeriod: engine.lowerPanel.period,
+                    activePanel: $activePanel,
+                    buyEnabled: engine.buyEnabled,
+                    sellEnabled: engine.sellEnabled,
+                    holdLabel: engine.position.shares > 0 ? "持有" : "观察",
+                    onBuy:  { tradeStrip = TradeStripRequest(panel: activePanel, action: .buy) },
+                    onSell: { tradeStrip = TradeStripRequest(panel: activePanel, action: .sell) },
+                    onHold: { engine.holdOrObserve(panel: activePanel) })
+            }
         }
         .onAppear { maybeAutoEnd() }                                            // M2：resume-at-maxTick
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
@@ -203,40 +217,26 @@ public struct TrainingView: View {
     }
 
     private func panel(_ id: PanelId) -> some View {
-        HStack(spacing: 0) {
-            ChartContainerView(panel: id, engine: engine)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if showsTradeButtons { tradeButtons(id) }
-        }
-        // 内联买卖小条：仅当该面板被点开时悬浮贴底（conjoint guard 含 showsTradeButtons，
-        // 防 Normal 置位的 tradeStrip 在模式翻转至 Review/会话结束后悬空，spec §5.3 L3）。
-        .overlay(alignment: .bottom) {
-            if showsTradeButtons, let strip = tradeStrip, strip.panel == id {
-                TradeBarView(
-                    action: strip.action,
-                    onPick: { tier in
-                        performTrade(strip.action, panel: id, tier: tier)
-                        tradeStrip = nil
-                    },
-                    onCancel: { tradeStrip = nil })
+        ChartContainerView(panel: id, engine: engine)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // 内联买卖小条：仅当该面板被点开时悬浮贴底（conjoint guard 含 showsTradeButtons，
+            // 防 Normal 置位的 tradeStrip 在模式翻转至 Review/会话结束后悬空，spec §5.3 L3）。
+            .overlay(alignment: .bottom) {
+                if showsTradeButtons, let strip = tradeStrip, strip.panel == id {
+                    TradeBarView(
+                        action: strip.action,
+                        onPick: { tier in
+                            performTrade(strip.action, panel: id, tier: tier)
+                            tradeStrip = nil
+                        },
+                        onCancel: { tradeStrip = nil })
+                }
             }
-        }
-    }
-
-    private func tradeButtons(_ id: PanelId) -> some View {
-        VStack(spacing: 8) {
-            Button("买入") { tradeStrip = TradeStripRequest(panel: id, action: .buy) }
-                .disabled(!engine.buyEnabled)
-            Button("卖出") { tradeStrip = TradeStripRequest(panel: id, action: .sell) }
-                .disabled(!engine.sellEnabled)
-            // 持有/观察始终可用（无 .disabled）：不变量靠 `showsTradeButtons==canBuySell()` 已排除唯一
-            // 不可步进模式 Review（canAdvance==false）；Normal/Replay 两可见模式 canAdvance 恒 true（plan v1.5 L944）。
-            Button(engine.position.shares > 0 ? "持有" : "观察") {   // D10
-                engine.holdOrObserve(panel: id)
+            .overlay {   // active panel 高亮（红描边 inset，RFC-B T2 D10）
+                if showsTradeButtons && id == activePanel {
+                    Rectangle().strokeBorder(Color.red.opacity(0.45), lineWidth: 2).allowsHitTesting(false)
+                }
             }
-        }
-        .buttonStyle(.bordered)
-        .padding(.horizontal, 8)
     }
 
     // 交易动作执行：调 engine.buy/sell → TradeFeedback（纯值决策）→ 触觉/Toast（壳执行）。
