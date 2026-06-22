@@ -51,24 +51,35 @@ struct TradeActionBar: View {
     let onHold: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
+        // 单行：周期钮 + 小下单价 + 买/卖/持有 大按钮（controlSize 大=更高更大点击区）。
+        // 整条 ignoresSafeArea(.bottom) 下探进底部 home-indicator 空白 → 增加的高度来自那条 strip，
+        // 不从上方 K 线/顶栏借（保证图与顶栏高度不变）。横向内收 16pt 离开底部圆角两角。
+        HStack(spacing: 8) {
             Picker("下单周期", selection: $activePanel) {
                 Text(upperPeriod.shortLabel).tag(PanelId.upper)
                 Text(lowerPeriod.shortLabel).tag(PanelId.lower)
             }
             .pickerStyle(.segmented)
-            .frame(width: 110)
+            .frame(width: 104)
             .accessibilityLabel("下单周期")
-            Text(content.priceLabel).font(.system(size: 11)).foregroundStyle(.secondary)
-            Spacer(minLength: 4)
-            Button("买入", action: onBuy).disabled(!buyEnabled).tint(.red).accessibilityLabel("买入")
-            Button("卖出", action: onSell).disabled(!sellEnabled).tint(.green).accessibilityLabel("卖出")
-            Button(holdLabel, action: onHold).accessibilityLabel(holdLabel)
+            Text(content.priceLabel)
+                .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                .lineLimit(1).fixedSize()
+            Button("买入", action: onBuy).disabled(!buyEnabled).tint(.red)
+                .accessibilityLabel("买入").frame(maxWidth: .infinity)
+            Button("卖出", action: onSell).disabled(!sellEnabled).tint(.green)
+                .accessibilityLabel("卖出").frame(maxWidth: .infinity)
+            Button(holdLabel, action: onHold)
+                .accessibilityLabel(holdLabel).frame(maxWidth: .infinity)
         }
         .buttonStyle(.bordered)
-        .font(.system(size: 13).weight(.semibold))
-        .padding(.horizontal, 9).padding(.vertical, 5)
-        .background(.bar)
+        .controlSize(.regular)       // 默认大小：large 会让条体高过原始高度 → 盖住下图 MACD
+        .font(.system(size: 14).weight(.semibold))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)        // ≈ 原始高度 → 图区不压缩、不盖 MACD
+        .frame(maxWidth: .infinity)
+        // 仅**背景**下探到屏幕底（吃 home-indicator 空白的视觉），按钮内容留在安全区内 → 不进 home-indicator、不盖图
+        .background(.bar, ignoresSafeAreaEdges: .bottom)
     }
 }
 #endif
