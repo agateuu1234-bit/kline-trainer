@@ -58,7 +58,7 @@ struct PriceTicksTests {
             #expect(line.from.y == m.priceToY(value))
             #expect(line.from.x == m.viewport.mainChartFrame.minX)
             #expect(line.to.x == m.viewport.mainChartFrame.maxX)
-            #expect(label.rect.maxX == m.viewport.mainChartFrame.maxX)   // 右贴右缘
+            #expect(label.rect.minX == m.viewport.mainChartFrame.minX)   // RFC-B D1：左贴左缘
             #expect(label.rect.midY == m.priceToY(value))
         }
     }
@@ -197,13 +197,32 @@ struct PeriodLabelTests {
         #expect(txt(.monthly) == "月")
     }
 
-    @Test("角标定位左上角（mainChart 内）")
+    @Test("角标定位右上角（RFC-B D1：mainChart 右上，mainChart 内）")
     func cornerPlacement() {
         let f = makeFrames()
         let label = AxisGridLayout.periodLabel(period: .m60, frames: f)
         #expect(label.rect.minX >= f.mainChart.minX)
         #expect(label.rect.minY >= f.mainChart.minY)
         #expect(label.rect.maxY <= f.mainChart.maxY)
+    }
+}
+
+@Suite("AxisGridLayout 价轴移左 + 周期移右上（RFC-B D1）")
+struct RfcBPlacementTests {
+    @Test("价格标签贴左缘（RFC-B D1：左贴左缘）")
+    func priceLabels_anchoredLeft() {
+        let mapper = makeMapper(priceMin: 11.23, priceMax: 12.87)
+        let (labels, _) = AxisGridLayout.priceTicks(mapper: mapper)
+        let frame = mapper.viewport.mainChartFrame
+        #expect(!labels.isEmpty)
+        for l in labels { #expect(abs(l.rect.minX - frame.minX) < 0.5) }
+    }
+
+    @Test("周期角标贴右上（RFC-B D1：maxX - pad - w，容差 0.5）")
+    func periodLabel_anchoredTopRight() {
+        let frames = makeFrames()
+        let l = AxisGridLayout.periodLabel(period: .m60, frames: frames)
+        #expect(abs(l.rect.maxX - (frames.mainChart.maxX - 4)) < 0.5)
     }
 }
 

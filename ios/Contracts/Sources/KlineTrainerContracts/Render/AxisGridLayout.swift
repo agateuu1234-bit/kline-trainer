@@ -50,7 +50,7 @@ enum AxisGridLayout {
             let y = mapper.priceToY(value)
             lines.append(LineSegment(from: CGPoint(x: frame.minX, y: y),
                                      to: CGPoint(x: frame.maxX, y: y)))
-            let rect = CGRect(x: frame.maxX - labelW, y: y - labelH / 2, width: labelW, height: labelH)
+            let rect = CGRect(x: frame.minX, y: y - labelH / 2, width: labelW, height: labelH)
             labels.append(Label(rect: rect, text: String(format: "%.\(decimals)f", value)))
         }
         return (labels, lines)
@@ -131,7 +131,7 @@ enum AxisGridLayout {
         let frame = volumeMapper.frame
         let line = LineSegment(from: CGPoint(x: frame.minX, y: y), to: CGPoint(x: frame.maxX, y: y))
         let labelW: CGFloat = 56, labelH: CGFloat = 14
-        let rect = CGRect(x: frame.maxX - labelW, y: y, width: labelW, height: labelH)   // 顶端贴线
+        let rect = CGRect(x: frame.minX, y: y, width: labelW, height: labelH)   // RFC-B D1：左缘
         return (Label(rect: rect, text: formatVolume(maxVol)), line)
     }
 
@@ -150,7 +150,7 @@ enum AxisGridLayout {
         let frame = macdMapper.frame
         let line = LineSegment(from: CGPoint(x: frame.minX, y: y), to: CGPoint(x: frame.maxX, y: y))
         let labelW: CGFloat = 20, labelH: CGFloat = 14
-        let rect = CGRect(x: frame.maxX - labelW, y: y - labelH / 2, width: labelW, height: labelH)
+        let rect = CGRect(x: frame.minX, y: y - labelH / 2, width: labelW, height: labelH)
         return (Label(rect: rect, text: "0"), line)
     }
 
@@ -166,7 +166,7 @@ enum AxisGridLayout {
         case .monthly: text = "月"
         }
         let pad: CGFloat = 4, w: CGFloat = 44, h: CGFloat = 16
-        let rect = CGRect(x: frames.mainChart.minX + pad, y: frames.mainChart.minY + pad, width: w, height: h)
+        let rect = CGRect(x: frames.mainChart.maxX - pad - w, y: frames.mainChart.minY + pad, width: w, height: h)
         return Label(rect: rect, text: text)
     }
 
