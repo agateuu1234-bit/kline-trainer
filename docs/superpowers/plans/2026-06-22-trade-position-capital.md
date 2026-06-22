@@ -771,12 +771,35 @@ struct TradeBoxContentTests {
         #expect(c.confirmLabel == "卖出 150 股")
         #expect(c.confirmEnabled == true)               // 清仓放行奇数
     }
-    @Test("qty=0 / 超限 → 确认禁用")
-    func disabled() {
+    @Test("非整手买入 250 → effectiveShares 200，显示==提交，使能")
+    func buyNonLotNormalizes() {
+        let c = TradeBoxContent(action: .buy, price: 10, cash: 100_000, holding: 0, fees: noMin, qty: 250)
+        #expect(c.effectiveShares == 200)
+        #expect(c.confirmLabel == "买入 200 股")        // 显示=提交（不再 250 显示/200 提交）
+        #expect(c.confirmEnabled == true)
+    }
+    @Test("部分卖非整手（holding 150 输 50）→ effectiveShares 0，禁用")
+    func sellPartialOddDisabled() {
+        let c = TradeBoxContent(action: .sell, price: 20, cash: 0, holding: 150, fees: noMin, qty: 50)
+        #expect(c.effectiveShares == 0)                 // 50 lot-floor=0（非清仓，不放行奇数）
+        #expect(c.confirmEnabled == false)
+    }
+    @Test("清仓 holding 150 输 150 → effectiveShares 150，放行，显示==提交")
+    func sellClearOddEnabled() {
+        let c = TradeBoxContent(action: .sell, price: 20, cash: 0, holding: 150, fees: noMin, qty: 150)
+        #expect(c.effectiveShares == 150)               // 清仓例外
+        #expect(c.confirmLabel == "卖出 150 股")
+        #expect(c.confirmEnabled == true)
+    }
+    @Test("qty=0 / 超限 → effectiveShares 受限、确认禁用或 clamp")
+    func disabledAndClamp() {
         #expect(TradeBoxContent(action: .buy, price: 10, cash: 100_000, holding: 0,
                                 fees: noMin, qty: 0).confirmEnabled == false)
-        #expect(TradeBoxContent(action: .buy, price: 10, cash: 100_000, holding: 0,
-                                fees: noMin, qty: 100_000).confirmEnabled == false)  // 超可买
+        // 超可买：effectiveShares clamp 到 limit(9900)，仍是合法可买量 → 使能且显示 clamp 后值
+        let over = TradeBoxContent(action: .buy, price: 10, cash: 100_000, holding: 0, fees: noMin, qty: 100_000)
+        #expect(over.effectiveShares == 9900)
+        #expect(over.confirmLabel == "买入 9,900 股")
+        #expect(over.confirmEnabled == true)
     }
     @Test("快捷档填入股数：买 1/5/全仓；卖 1/5/清仓")
     func tierFills() {
@@ -838,26 +861,47 @@ public struct TradeBoxContent: Equatable, Sendable {
         return action == .buy ? "可买 \(n) 股" : "可卖 \(n) 股"
     }
 
-    /// 预估：买=totalCost / 卖=proceeds；非法 qty → "—"。
+    /// 唯一有效下单股数（codex R-plan-1）：预估/确认文案/使能/提交全用它，杜绝「显示≠提交」。
+    /// D7 卖清仓例外：qty==holding(>0) → 原值（含奇数）；否则 lot-floor 后 clamp [0, limitShares]。
+    public var effectiveShares: Int {
+        if action == .sell && qty == holding && holding > 0 { return holding }
+        let lot = (qty / TradeCalculator.shareLotSize) * TradeCalculator.shareLotSize
+        return min(max(0, lot), limitShares)
+    }
+
+    /// 预估：买=totalCost / 卖=proceeds；用 effectiveShares 经 quote 校验，非法 → "—"。
     public var estimateLabel: String {
+        let s = effectiveShares
         switch action {
         case .buy:
-            if case .success(let q) = TradeCalculator.quoteBuy(cash: cash, shares: qty, price: price, fees: fees) {
+            if case .success(let q) = TradeCalculator.quoteBuy(cash: cash, shares: s, price: price, fees: fees) {
                 return "预估 ¥ \(Self.currency(q.totalCost))"
             }
         case .sell:
-            if case .success(let q) = TradeCalculator.quoteSell(holding: holding, shares: qty, price: price, fees: fees) {
+            if case .success(let q) = TradeCalculator.quoteSell(holding: holding, shares: s, price: price, fees: fees) {
                 return "预估 ¥ \(Self.currency(q.proceeds))"
             }
         }
         return "预估 —"
     }
 
-    public var confirmEnabled: Bool { qty > 0 && qty <= limitShares }
+    /// 确认使能 = effectiveShares 经 quote 精确校验成功（非仅 ≤limit；非整手/0 → 禁用）。
+    public var confirmEnabled: Bool {
+        let s = effectiveShares
+        guard s > 0 else { return false }
+        switch action {
+        case .buy:
+            if case .success = TradeCalculator.quoteBuy(cash: cash, shares: s, price: price, fees: fees) { return true }
+        case .sell:
+            if case .success = TradeCalculator.quoteSell(holding: holding, shares: s, price: price, fees: fees) { return true }
+        }
+        return false
+    }
 
+    /// 确认文案 = effectiveShares（与提交一致）。
     public var confirmLabel: String {
         let verb = action == .buy ? "买入" : "卖出"
-        return "\(verb) \(Self.grouped(qty)) 股"
+        return "\(verb) \(Self.grouped(effectiveShares)) 股"
     }
 
     /// 比例快捷填入股数（点击后填入数量框）。
@@ -954,12 +998,13 @@ public struct TradeBoxView: View {
                     .accessibilityLabel("关闭")
             }
             HStack(spacing: 8) {
-                Button("−100") { qty = max(0, qty - TradeCalculator.shareLotSize) }
+                Button("−100") { qty = max(0, live.effectiveShares - TradeCalculator.shareLotSize) }
                     .buttonStyle(.bordered).accessibilityLabel("减100股")
                 TextField("数量", value: $qty, format: .number)
                     .multilineTextAlignment(.center).frame(maxWidth: .infinity)
                     .textFieldStyle(.roundedBorder).accessibilityLabel("数量")
-                Button("+100") { qty = min(live.limitShares, qty + TradeCalculator.shareLotSize) }
+                    .onSubmit { qty = live.effectiveShares }   // 提交时规范化进 state → 显示==提交
+                Button("+100") { qty = min(live.limitShares, live.effectiveShares + TradeCalculator.shareLotSize) }
                     .buttonStyle(.bordered).accessibilityLabel("加100股")
             }
             Text(live.estimateLabel).font(.system(size: 11)).foregroundStyle(.secondary)
@@ -970,20 +1015,13 @@ public struct TradeBoxView: View {
                         .accessibilityLabel(label)
                 }
             }
-            Button(action: { onConfirm(normalizedQty()) }) {
+            Button(action: { onConfirm(live.effectiveShares) }) {   // 提交 = 显示的 effectiveShares（显示==提交）
                 Text(live.confirmLabel).frame(maxWidth: .infinity).padding(.vertical, 4)
             }
             .buttonStyle(.borderedProminent).tint(tint).disabled(!live.confirmEnabled)
             .accessibilityLabel(live.confirmLabel)
         }
         .padding(12).background(.thinMaterial)
-    }
-
-    // 手动输入向下取整到手 + clamp 到可买/可卖（清仓 holding 例外由 confirmEnabled + engine 守卫兜底）
-    private func normalizedQty() -> Int {
-        if content.action == .sell && qty == content.holding { return qty }   // 清仓放行
-        let lot = (qty / TradeCalculator.shareLotSize) * TradeCalculator.shareLotSize
-        return min(max(0, lot), live.limitShares)
     }
 }
 ```
