@@ -143,6 +143,11 @@ public struct TrainingView: View {
             Button("否", role: .cancel) {}
         }
         .toastOverlay(toast.message)             // §B.1 复用呈现壳（消费 ToastState.message）
+        .overlay(alignment: .topLeading) {
+            if showsTradeButtons {
+                DrawingToolFloatingView(isDrawingActive: isDrawingActive, onToggleTool: toggleDrawing)
+            }
+        }
     }
 
     private var topBar: some View {
@@ -164,10 +169,6 @@ public struct TrainingView: View {
                     do { try await lifecycle.back(); onExit() }
                     catch { backFailed = true }                 // §4.7a/§4.6：保存失败留局内，不丢数据/不泄漏 reader
                 }
-            }
-            if showsTradeButtons {
-                Button(isDrawingActive ? "结束画线" : "水平线") { toggleDrawing() }
-                    .tint(isDrawingActive ? .orange : nil)
             }
             Spacer()
             Text(bar.totalCapital)
