@@ -63,7 +63,7 @@ struct TradeActionBar: View {
             Spacer(minLength: 4)
             Button("买入", action: onBuy).disabled(!buyEnabled).tint(.red).accessibilityLabel("买入")
             Button("卖出", action: onSell).disabled(!sellEnabled).tint(.green).accessibilityLabel("卖出")
-            Button(holdLabel, action: onHold).accessibilityLabel("持有")
+            Button(holdLabel, action: onHold).accessibilityLabel(holdLabel)
         }
         .buttonStyle(.bordered)
         .font(.system(size: 13).weight(.semibold))

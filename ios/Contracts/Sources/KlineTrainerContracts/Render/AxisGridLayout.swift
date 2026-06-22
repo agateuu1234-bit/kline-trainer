@@ -154,7 +154,7 @@ enum AxisGridLayout {
         return (Label(rect: rect, text: "0"), line)
     }
 
-    /// 周期角标（左上角，mainChart 内）。
+    /// 周期角标（右上角，mainChart 内）。
     static func periodLabel(period: Period, frames: ChartPanelFrames) -> Label {
         let text: String
         switch period {
