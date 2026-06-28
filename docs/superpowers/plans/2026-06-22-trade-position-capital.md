@@ -1262,8 +1262,21 @@ struct TradeBoxContentTests {
         #expect(buy != TradeBoxContent.boxIdentity(panel: .lower, action: .buy, tick: 6))   // tick 变
         #expect(buy == TradeBoxContent.boxIdentity(panel: .lower, action: .buy, tick: 5))   // 同请求 → 同身份(稳定)
     }
+    @Test("R-plan-23-1：高费率快捷填入超 max-buyable → effectiveShares clamp 到 limit（显示==提交）")
+    func fillExceedsLimitClamps() {
+        let hi = FeeSnapshot(commissionRate: 0.3, minCommissionEnabled: false)
+        let c = TradeBoxContent(action: .buy, price: 10, cash: 10_000, holding: 0, fees: hi, qty: 0)
+        #expect(c.fillShares(.tier4) == 800)     // cash 基准 4/5（未含高佣金）= 800
+        #expect(c.limitShares == 700)            // maxBuyable 含高佣金 = 700
+        // 把 fill(800) 填进 qty → effectiveShares 必 clamp 到 limit(700) = 实际提交值（View setQty/确认同口径）
+        let filled = TradeBoxContent(action: .buy, price: 10, cash: 10_000, holding: 0, fees: hi, qty: 800)
+        #expect(filled.effectiveShares == 700)
+        #expect(filled.confirmLabel == "买入 700 股")   // 显示==提交
+    }
 }
 ```
+
+> **显示==提交 契约（host 可测部分）**：View 的步进/填入/失焦/确认四处都把 `qty` 经 `normalize(_)`（= `TradeBoxContent.effectiveShares`）规范化，故「字段显示值 == `effectiveShares` == 提交值」由构造保证；上述 `effectiveShares` 测试（非整手 250→200、超限 clamp、超买快捷 800→700）即覆盖三类输入的「显示==提交」。SwiftUI 失焦/确认时机本身（框架行为）由 §10#14 人工验收兜底。
 
 - [ ] **Step 2: 跑确认失败**
 
@@ -1417,6 +1430,7 @@ import SwiftUI
 public struct TradeBoxView: View {
     private let content: TradeBoxContent
     @State private var qty: Int
+    @FocusState private var qtyFocused: Bool   // R-plan-23-1：失焦规范化数量
     private let onConfirm: (Int) -> Void
     private let onCancel: () -> Void
 
@@ -1448,24 +1462,27 @@ public struct TradeBoxView: View {
                     .accessibilityLabel("关闭")
             }
             HStack(spacing: 8) {
-                Button("−100") { qty = max(0, live.effectiveShares - TradeCalculator.shareLotSize) }
+                Button("−100") { setQty(live.effectiveShares - TradeCalculator.shareLotSize) }
                     .buttonStyle(.bordered).accessibilityLabel("减100股")
                 TextField("数量", value: $qty, format: .number)
                     .multilineTextAlignment(.center).frame(maxWidth: .infinity)
                     .textFieldStyle(.roundedBorder).accessibilityLabel("数量")
-                    .onSubmit { qty = live.effectiveShares }   // 提交时规范化进 state → 显示==提交
-                Button("+100") { qty = min(live.limitShares, live.effectiveShares + TradeCalculator.shareLotSize) }
+                    .focused($qtyFocused)
+                    .onSubmit { qty = normalize(qty) }
+                    // R-plan-23-1：**失焦**时规范化（手动输入期间不抖；输入完移焦即 floor/clamp 进 state）。
+                    .onChange(of: qtyFocused) { _, focused in if !focused { qty = normalize(qty) } }
+                Button("+100") { setQty(live.effectiveShares + TradeCalculator.shareLotSize) }
                     .buttonStyle(.bordered).accessibilityLabel("加100股")
             }
             Text(live.estimateLabel).font(.system(size: 11)).foregroundStyle(.secondary)
             HStack(spacing: 6) {
                 ForEach(Array(zip(PositionTier.allCases, live.tierLabels)), id: \.0) { tier, label in
-                    Button(label) { qty = live.fillShares(tier) }
+                    Button(label) { setQty(live.fillShares(tier)) }   // R-plan-23-1：填入即 clamp（高费率超买亦不超 limit）
                         .buttonStyle(.bordered).frame(maxWidth: .infinity)
                         .accessibilityLabel(label)
                 }
             }
-            Button(action: { onConfirm(live.effectiveShares) }) {   // 提交 = 显示的 effectiveShares（显示==提交）
+            Button(action: { let s = live.effectiveShares; qty = s; onConfirm(s) }) {  // R-plan-23-1：提交前把字段=提交值
                 Text(live.confirmLabel).frame(maxWidth: .infinity).padding(.vertical, 4)
             }
             .buttonStyle(.borderedProminent).tint(tint).disabled(!live.confirmEnabled)
@@ -1473,6 +1490,14 @@ public struct TradeBoxView: View {
         }
         .padding(12).background(.thinMaterial)
     }
+
+    // R-plan-23-1：把任意原始数量规范化为有效下单股数（lot-floor + clamp [0,limit]，含 D7 清仓例外），
+    // 写回 qty @State → 字段显示**始终 == 将提交的 effectiveShares**（步进/填入/编辑/确认四处统一）。
+    private func normalize(_ raw: Int) -> Int {
+        TradeBoxContent(action: content.action, price: content.price, cash: content.cash,
+                        holding: content.holding, fees: content.fees, qty: raw).effectiveShares
+    }
+    private func setQty(_ raw: Int) { qty = normalize(raw) }
 }
 ```
 
