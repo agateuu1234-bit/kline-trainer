@@ -451,6 +451,65 @@ public final class TrainingEngine {
         }
     }
 
+    // MARK: - RFC-A 按股数交易入口（A1）
+
+    /// 按股数买入：当前 tick 价成交 → 记 marker/operation(entryTick) → 推进 → 联动 → 局终强平。
+    /// 失败(模式不允许 / quoteBuy 校验失败)返 `.failure(.trade(...))`，**不** mutate、**不** advance（D9）。
+    public func buy(panel: PanelId, shares: Int) -> Result<TradeOperation, AppError> {
+        guard flow.canBuySell() else { return .failure(.trade(.disabled)) }
+        let price = currentPrice
+        let entryTick = tick.globalTickIndex
+        let p = period(of: panel)
+        let cashBefore = cashBalance
+        switch TradeCalculator.quoteBuy(cash: cashBefore, shares: shares, price: price, fees: fees) {
+        case .failure(let reason):
+            return .failure(.trade(reason))
+        case .success(let quote):
+            position.buy(shares: quote.shares, totalCost: quote.totalCost)
+            cashBalance -= quote.totalCost
+            markers.append(TradeMarker(globalTick: entryTick, price: price, direction: .buy))
+            // D4：positionTier 仅记录展示，由占比反推（cashBefore>0 已由 quote 成功保证）
+            let tier = TradeCalculator.tierForFraction(cashBefore > 0 ? quote.totalCost / cashBefore : 1)
+            let op = TradeOperation(
+                globalTick: entryTick, period: p, direction: .buy, price: price,
+                shares: quote.shares, positionTier: tier,
+                commission: quote.commission, stampDuty: 0,
+                totalCost: quote.totalCost, createdAt: candleDatetime(atTick: entryTick))
+            tradeOperations.append(op)
+            advanceAndAccount(panel: panel)
+            return .success(op)
+        }
+    }
+
+    /// 按股数卖出：当前 tick 价成交 → 记 marker/operation(entryTick) → 推进 → 联动 → 局终强平。
+    /// R-plan-14-1：经集中契约的 quoteSell(cash:…)——success 已保证「输出有限 + cashBalance+proceeds≥0」，
+    /// 故下方直接 mutate（与 TradeBoxContent 同一可执行性判定，UI/engine 不再发散）。
+    public func sell(panel: PanelId, shares: Int) -> Result<TradeOperation, AppError> {
+        guard flow.canBuySell() else { return .failure(.trade(.disabled)) }
+        let price = currentPrice
+        let entryTick = tick.globalTickIndex
+        let p = period(of: panel)
+        let holdingBefore = position.shares
+        switch TradeCalculator.quoteSell(cash: cashBalance, holding: holdingBefore, shares: shares, price: price, fees: fees) {
+        case .failure(let reason):
+            return .failure(.trade(reason))
+        case .success(let quote):
+            position.sell(shares: quote.shares)
+            cashBalance += quote.proceeds               // quoteSell 已保证 cashBalance+proceeds 有限且 ≥0
+            markers.append(TradeMarker(globalTick: entryTick, price: price, direction: .sell))
+            let tier = TradeCalculator.tierForFraction(
+                holdingBefore > 0 ? Double(quote.shares) / Double(holdingBefore) : 1)
+            let op = TradeOperation(
+                globalTick: entryTick, period: p, direction: .sell, price: price,
+                shares: quote.shares, positionTier: tier,
+                commission: quote.commission, stampDuty: quote.stampDuty,
+                totalCost: quote.proceeds, createdAt: candleDatetime(atTick: entryTick))
+            tradeOperations.append(op)
+            advanceAndAccount(panel: panel)
+            return .success(op)
+        }
+    }
+
     // MARK: - 局终自动强平（E5b / §4.2.1 入口 1b / D7）
 
     /// 推进到 `>= maxTick` 且仍有持仓 → 按末根 .m3 收盘价强制全平（plan v1.5 L751）。
