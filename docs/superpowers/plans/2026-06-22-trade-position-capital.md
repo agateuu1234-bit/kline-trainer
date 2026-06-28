@@ -16,7 +16,7 @@
 - **D7 清仓奇数股例外**：`quoteSell` 在 `shares == holding` 时放行任意股数；仅部分卖要求整手。
 - **0 持仓禁卖**；买卖均经全局 `currentPrice`（**不做 per-period 取价**）。
 - **bump `CONTRACT_VERSION` `"1.6"`→`"1.7"`**（m01 §A 类「改既有语义」，同 E2 1.4→1.5 先例）。
-- **无 DDL 表结构改动**；migration `0005` = 仅 `key='total_capital'` 单键 DML upsert + `user_version` 2→3。**禁止无 WHERE 的 `UPDATE settings SET value=…`**。
+- **无 DDL 表结构改动**；migration `0005` = `user_version` 2→3 的**纯 DML 数据迁移**：① 回填 `total_capital`（末条记录派生，floor≥0）；② **有界清理非负 settings 键（`total_capital`/`commission_rate`）的 legacy 腐坏值**（负/非有限/畸形→安全默认；codex R-plan-19-1/20-1，配合 Task 1 把 loadSettings 拒负 fail-closed）。**每处都按 `key=?` 单键 upsert，禁止无 WHERE 的 `UPDATE settings SET value=…`**。合法值不动。
 - **资金权威源** = `settings.total_capital`（DB）；`startingCapital()` 直读 DB；finalize 在终结事务内写；reset 置 10 万 + **保留**记录。
 - 等比/FP host 断言用容差（`approx`，1e-6）且 FP demonstrator 须 mutation-verify 非空洞；负向 grep 断言用 `if … ; exit 1` 非 `! grep`。
 - 评审通道 = `codex:adversarial-review`（唯一权威；经 `.claude/scripts/codex-attest.sh`）。
