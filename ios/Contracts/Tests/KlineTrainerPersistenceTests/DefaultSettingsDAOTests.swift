@@ -208,4 +208,61 @@ final class DefaultSettingsDAOTests: XCTestCase {
             }
         }
     }
+
+    // 用例 15（R-plan-6-1）：saveSettings 入参负 commissionRate → 拒绝（internalError）
+    func test_saveSettings_with_negative_commission_throws_internalError() throws {
+        let bad = AppSettings(commissionRate: -0.1, minCommissionEnabled: false,
+                              totalCapital: 10_000, displayMode: .system)
+        XCTAssertThrowsError(try db.saveSettings(bad)) { err in
+            guard let appErr = err as? AppError,
+                  case .internalError(let module, _) = appErr else {
+                return XCTFail("期望 .internalError，实际 \(err)")
+            }
+            XCTAssertTrue(module.contains("SettingsDAO"))
+        }
+    }
+
+    // 用例 16（R-plan-6-1）：saveSettings 入参负 totalCapital → 拒绝（internalError）
+    func test_saveSettings_with_negative_capital_throws_internalError() throws {
+        let bad = AppSettings(commissionRate: 0.0001, minCommissionEnabled: false,
+                              totalCapital: -1, displayMode: .system)
+        XCTAssertThrowsError(try db.saveSettings(bad)) { err in
+            guard let appErr = err as? AppError,
+                  case .internalError = appErr else {
+                return XCTFail("期望 .internalError，实际 \(err)")
+            }
+        }
+    }
+
+    // 用例 17（R-plan-6-1）：DB 含 commission_rate=-0.1 → loadSettings 抛 .dbCorrupted
+    func test_loadSettings_negative_commission_rate_throws_dbCorrupted() throws {
+        let queue = try AppDBFixture.openRaw(at: dbURL)
+        try queue.write { db in
+            try db.execute(sql:
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                arguments: ["commission_rate", "-0.1"])
+        }
+        XCTAssertThrowsError(try db.loadSettings()) { err in
+            guard let appErr = err as? AppError,
+                  case .persistence(.dbCorrupted) = appErr else {
+                return XCTFail("期望 .persistence(.dbCorrupted) on negative commission，实际 \(err)")
+            }
+        }
+    }
+
+    // 用例 18（R-plan-6-1）：DB 含 total_capital=-1 → loadSettings 抛 .dbCorrupted
+    func test_loadSettings_negative_total_capital_throws_dbCorrupted() throws {
+        let queue = try AppDBFixture.openRaw(at: dbURL)
+        try queue.write { db in
+            try db.execute(sql:
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                arguments: ["total_capital", "-1"])
+        }
+        XCTAssertThrowsError(try db.loadSettings()) { err in
+            guard let appErr = err as? AppError,
+                  case .persistence(.dbCorrupted) = appErr else {
+                return XCTFail("期望 .persistence(.dbCorrupted) on negative capital，实际 \(err)")
+            }
+        }
+    }
 }

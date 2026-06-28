@@ -15,10 +15,11 @@ public enum SettingsPanelContent {
         String(format: "%.3f", uiDisplayTenThousandth(fromCommissionRate: rate))
     }
 
-    /// §6.4「不能为空」：解析 UI 万分之一输入 → 存储小数率；空/非数字 → nil。
+    /// §6.4「不能为空」：解析 UI 万分之一输入 → 存储小数率；空/非数字/负数 → nil。
+    /// R-plan-6-1：输入层拒负费率，与 SettingsDAOImpl.saveSettings 守卫形成双层防护。
     public static func parseCommissionUIInput(_ input: String) -> Double? {
         let t = input.trimmingCharacters(in: .whitespaces)
-        guard !t.isEmpty, let ui = Double(t) else { return nil }
+        guard !t.isEmpty, let ui = Double(t), ui >= 0 else { return nil }
         return commissionRate(fromUIInputTenThousandth: ui)
     }
 

@@ -35,8 +35,9 @@ enum SettingsDAOImpl {
 
     private static func parseDouble(_ raw: String?, default def: Double) throws -> Double {
         guard let raw = raw else { return def }       // missing → default
-        guard let v = Double(raw), v.isFinite else {  // present but malformed / NaN / inf → corrupt
+        guard let v = Double(raw), v.isFinite, v >= 0 else {  // present but malformed / NaN / inf / negative → corrupt
             // R2 修订（codex med-3）：拒 NaN / +inf / -inf —— 这些值会污染 commission/capital 计算
+            // R-plan-6-1：commission_rate 与 total_capital 均非负量；负值=腐坏，靠 reset 恢复。
             throw AppError.persistence(.dbCorrupted)
         }
         return v
@@ -61,15 +62,16 @@ enum SettingsDAOImpl {
 
     static func saveSettings(_ db: Database, settings s: AppSettings) throws {
         // R2 修订（codex med-3）：拒入参为 NaN / inf 的 commission/capital，避免毒入 DB
-        guard s.commissionRate.isFinite else {
+        // R-plan-6-1：同时拒负值（commission 与 capital 均为非负量）。
+        guard s.commissionRate.isFinite, s.commissionRate >= 0 else {
             throw AppError.internalError(
                 module: "P4-SettingsDAO",
-                detail: "saveSettings refused: commissionRate not finite (\(s.commissionRate))")
+                detail: "saveSettings refused: commissionRate invalid (\(s.commissionRate))")
         }
-        guard s.totalCapital.isFinite else {
+        guard s.totalCapital.isFinite, s.totalCapital >= 0 else {
             throw AppError.internalError(
                 module: "P4-SettingsDAO",
-                detail: "saveSettings refused: totalCapital not finite (\(s.totalCapital))")
+                detail: "saveSettings refused: totalCapital invalid (\(s.totalCapital))")
         }
         let pairs: [(String, String)] = [
             (keyCommissionRate, String(s.commissionRate)),
