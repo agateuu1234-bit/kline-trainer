@@ -91,6 +91,37 @@ struct TrainingTopBarContentTests {
     }
 }
 
+// MARK: - RFC-A A3: 持仓未实现盈亏（Task 6）
+
+@Suite("TrainingTopBarContent holdingPnL")
+struct TrainingTopBarContentHoldingPnLTests {
+
+    @Test("持仓>0：浮动盈亏 = (现价-成本)*股数，元+%")
+    func holdingPnLPositive() {
+        let c = TrainingTopBarContent(totalCapital: 100_000, averageCost: 10, shares: 1000,
+                                      returnRate: 0.05, positionTier: 1,
+                                      stockName: nil, stockCode: nil, currentPrice: 12)
+        // (12-10)*1000 = +2000；(12-10)/10 = +20.00%
+        #expect(c.holdingPnL == "+¥ 2,000.00 (+20.00%)")
+    }
+
+    @Test("持仓=0：浮动盈亏 +¥ 0.00 (+0.00%)")
+    func holdingPnLZero() {
+        let c = TrainingTopBarContent(totalCapital: 100_000, averageCost: 0, shares: 0,
+                                      returnRate: 0, positionTier: 0,
+                                      stockName: nil, stockCode: nil, currentPrice: 12)
+        #expect(c.holdingPnL == "+¥ 0.00 (+0.00%)")
+    }
+
+    @Test("亏损：负号 + 负%")
+    func holdingPnLNegative() {
+        let c = TrainingTopBarContent(totalCapital: 100_000, averageCost: 10, shares: 1000,
+                                      returnRate: -0.1, positionTier: 1,
+                                      stockName: nil, stockCode: nil, currentPrice: 9)
+        #expect(c.holdingPnL == "-¥ 1,000.00 (-10.00%)")
+    }
+}
+
 @Suite("TrainingTopBarContent 仓位 X/5")
 struct TrainingTopBarPositionTierTests {
     @Test("空仓 → 仓位 0/5")

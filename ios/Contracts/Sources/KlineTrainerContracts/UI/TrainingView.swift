@@ -186,7 +186,8 @@ public struct TrainingView: View {
                                         shares: engine.position.shares,
                                         returnRate: engine.returnRate,
                                         positionTier: engine.currentPositionTier,
-                                        stockName: rec?.stockName, stockCode: rec?.stockCode)
+                                        stockName: rec?.stockName, stockCode: rec?.stockCode,
+                                        currentPrice: engine.currentPrice)
         return VStack(spacing: 6) {
             HStack {
                 Button("返回") {
@@ -215,7 +216,7 @@ public struct TrainingView: View {
                 metricCell("持仓成本/股", bar.holdingCostPerShare, width: 72)
                 metricCell("持仓股数", bar.sharesText, width: 86)
                 metricCell("仓位", bar.positionShort, width: 40)
-                metricCell("浮动盈亏", bar.returnRate, width: nil)   // 末格弹性
+                metricCell("浮动盈亏", bar.holdingPnL, width: nil)   // 末格弹性（RFC-A A3：持仓未实现盈亏）
             }
         }
         .padding(.horizontal, 12)

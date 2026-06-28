@@ -19,17 +19,27 @@ public struct TrainingTopBarContent: Equatable, Sendable {
     public let position: String            // "仓位 3/5"（兼容）
     public let positionShort: String       // "3/5"（顶栏格数值，免字符串截取）
     public let returnRate: String          // "+2.34%"
+    public let holdingPnL: String          // RFC-A A3：持仓未实现盈亏 "+¥ 2,000.00 (+20.00%)"
     public let stockNameDisplay: String    // "贵州茅台（600519）" 或 "训练标的 · 盲测"
 
     public init(totalCapital: Double, averageCost: Double, shares: Int,
                 returnRate: Double, positionTier: Int,
-                stockName: String?, stockCode: String?) {
+                stockName: String?, stockCode: String?,
+                currentPrice: Double = 0.0) {
         self.totalCapital = Self.currency(totalCapital)
         self.holdingCostPerShare = Self.currency(averageCost)
         self.sharesText = "\(Self.grouped(shares)) 股"
         self.position = "仓位 \(positionTier)/5"
         self.positionShort = "\(positionTier)/5"
         self.returnRate = Self.percent(returnRate)
+        // RFC-A A3：持仓浮动盈亏（元 + %）= (现价 − 每股成本) × 股数。
+        if shares > 0 && averageCost > 0 {
+            let amount = (currentPrice - averageCost) * Double(shares)
+            let pct = (currentPrice - averageCost) / averageCost
+            self.holdingPnL = "\(Self.signedCurrency(amount)) (\(Self.percent(pct)))"
+        } else {
+            self.holdingPnL = "\(Self.signedCurrency(0)) (\(Self.percent(0)))"
+        }
         if let name = stockName, let code = stockCode {
             self.stockNameDisplay = "\(name)（\(code)）"   // 全角括号，同 formatStock 口径
         } else {
@@ -68,5 +78,17 @@ public struct TrainingTopBarContent: Equatable, Sendable {
         let raw = rate * 100
         let pct = (raw == 0) ? 0.0 : raw                  // IEEE-754：±0 均 ==0 → 归一 +0.0
         return "\(String(format: "%+.2f", pct))%"
+    }
+
+    /// 带符号 `+¥ 1,234.56` / `-¥ 1,234.56`（±0 归一为 `+`）。RFC-A A3 holdingPnL 用。
+    private static func signedCurrency(_ value: Double) -> String {
+        let v = (value == 0) ? 0.0 : value
+        let sign = v >= 0 ? "+" : "-"
+        let f = NumberFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.numberStyle = .decimal; f.usesGroupingSeparator = true; f.groupingSeparator = ","
+        f.decimalSeparator = "."; f.minimumFractionDigits = 2; f.maximumFractionDigits = 2
+        let body = f.string(from: NSNumber(value: abs(v))) ?? String(format: "%.2f", abs(v))
+        return "\(sign)¥ \(body)"
     }
 }
