@@ -76,8 +76,8 @@ enum SettingsDAOImpl {
         let pairs: [(String, String)] = [
             (keyCommissionRate, String(s.commissionRate)),
             (keyMinCommissionEnabled, s.minCommissionEnabled ? "true" : "false"),
-            (keyTotalCapital, String(s.totalCapital)),
             (keyDisplayMode, s.displayMode.rawValue),
+            // R-plan-22-1：不再写 total_capital（单写者经 setTotalCapital / finalize / reset / repairAllToDefaults）
         ]
         for (k, v) in pairs {
             try db.execute(sql:
@@ -94,15 +94,33 @@ enum SettingsDAOImpl {
             arguments: [keyTotalCapital, String(AppSettings.defaultTotalCapital)])
     }
 
-    /// 参数化写 total_capital（供 TrainingResetPort 原子事务复用；不改其它 key）。
+    /// 参数化写 total_capital（供 TrainingResetPort / finalize 原子事务复用；不改其它 key）。
     static func setTotalCapital(_ db: Database, _ value: Double) throws {
-        guard value.isFinite else {
+        guard value.isFinite, value >= 0 else {       // R-plan-13-1：权威资金不得为负
             throw AppError.internalError(
                 module: "P4-SettingsDAO",
-                detail: "setTotalCapital refused: value not finite (\(value))")
+                detail: "setTotalCapital refused: value invalid (\(value))")
         }
         try db.execute(sql:
             "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
             arguments: [keyTotalCapital, String(value)])
+    }
+
+    /// R-plan-24-1：腐坏恢复用——把**全部**键写默认（含 total_capital=默认 10 万，绕开 saveSettings 单写者豁免）。
+    /// **仅** SettingsStore.forceResetAndReload 调用；不走偏好竞态路径（saveSettings 不写 total_capital，
+    /// 单靠它修不掉腐坏/负 total_capital）。
+    static func repairAllToDefaults(_ db: Database) throws {
+        let d = AppSettings.default
+        let pairs: [(String, String)] = [
+            (keyCommissionRate, String(d.commissionRate)),
+            (keyMinCommissionEnabled, d.minCommissionEnabled ? "true" : "false"),
+            (keyTotalCapital, String(d.totalCapital)),
+            (keyDisplayMode, d.displayMode.rawValue),
+        ]
+        for (k, v) in pairs {
+            try db.execute(sql:
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                arguments: [k, v])
+        }
     }
 }

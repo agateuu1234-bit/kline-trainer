@@ -39,7 +39,8 @@ struct TrainingSessionStartTickIntegrationTests {
             dbFactory: PreviewTrainingSetDBFactory(meta: meta, candles: Self.candles()),
             recordRepo: records, pendingRepo: pending,
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
-            settingsDAO: InMemorySettingsDAO(), cache: cache,
+            // A4：settingsDAO 与 SettingsStore 同源（startingCapital 直读 DAO）。
+            settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: 100_000), cache: cache,
             settings: SettingsStore(settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: 100_000)))
         coord.now = { 1_700_000_000 }
         return (coord, records)

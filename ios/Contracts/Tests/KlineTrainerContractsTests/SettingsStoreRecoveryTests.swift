@@ -27,9 +27,9 @@ struct SettingsStoreRecoveryTests {
         #expect(store.settings == Self.userSettings)   // 原用户设置，非 default
         #expect(store.loadError == nil)
         #expect(dao.saveCallCount == 0)                 // 零破坏
-        // 解阻：update 不再抛
-        try await store.update { $0.totalCapital = 99_999 }
-        #expect(store.settings.totalCapital == 99_999)
+        // 解阻：update 不再抛（用偏好字段；total_capital 单写者保留，R-plan-22-1）
+        try await store.update { $0.displayMode = .light }
+        #expect(store.settings.displayMode == .light)
     }
 
     // ── 场景 3a：健康态 retryReload throws 不动 ──

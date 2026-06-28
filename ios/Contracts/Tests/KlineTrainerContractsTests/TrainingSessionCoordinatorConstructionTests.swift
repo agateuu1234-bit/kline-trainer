@@ -58,7 +58,8 @@ struct TrainingSessionCoordinatorConstructionTests {
             recordRepo: records,
             pendingRepo: pending,
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
-            settingsDAO: InMemorySettingsDAO(),
+            // A4：settingsDAO 与 SettingsStore 同源（startingCapital 直读 DAO）。
+            settingsDAO: CapitalDAO(capital: capital),
             cache: cache,
             settings: SettingsStore(settingsDAO: CapitalDAO(capital: capital)))
         return (coord, records, pending)
@@ -137,8 +138,9 @@ struct TrainingSessionCoordinatorConstructionTests {
             settings: settings)
     }
 
-    @Test("startNewNormalSession: 有记录 → 起始本金取 statistics().currentCapital（末条 total+profit）")
-    func startNew_withRecords_usesAccumulatedCapital() async throws {
+    // A4：startingCapital 直读权威 settings.total_capital，**不**再从记录累计（推翻旧累计模型）。
+    @Test("startNewNormalSession: 有记录也取权威 settings.totalCapital（A4，非 statistics() 末条累计）")
+    func startNew_withRecords_usesAuthoritativeSettingsCapital() async throws {
         let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
         _ = try records.insertRecord(
             TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 100,
@@ -149,8 +151,9 @@ struct TrainingSessionCoordinatorConstructionTests {
                            finalTick: 7),
             ops: [], drawings: [])
         let engine = try await coord.startNewNormalSession()
-        #expect(engine.initialCapital == 62_000)         // 50000 + 12000，非 settings 50000
-        #expect(engine.cashBalance == 62_000)
+        #expect(engine.initialCapital == 50_000)         // A4 权威 settings；非记录累计 62_000
+        #expect(engine.initialCapital != 62_000)         // killer：不再用 statistics().currentCapital
+        #expect(engine.cashBalance == 50_000)
     }
 
     @Test("startNewNormalSession: settings.loadError → throws 且不写 active（fail-closed D2/D9）")

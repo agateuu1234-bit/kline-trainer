@@ -375,7 +375,7 @@ final class InMemoryDBFakesTests: XCTestCase {
 
         let id = try port.finalizeSession(
             record: makeRecord(id: nil), ops: [makeOp(direction: .buy)],
-            drawings: [makeDrawing()], sessionKey: "SK-1")
+            drawings: [makeDrawing()], sessionKey: "SK-1").id
 
         XCTAssertEqual(port.finalizeCallCount, 1)
         XCTAssertEqual(id, 1)
@@ -413,7 +413,7 @@ final class InMemoryDBFakesTests: XCTestCase {
 
         // 同 key 后续成功不受毒：keyed map 未被污染
         let id = try port.finalizeSession(record: makeRecord(id: nil), ops: [],
-                                          drawings: [], sessionKey: "SK-atomic")
+                                          drawings: [], sessionKey: "SK-atomic").id
         XCTAssertEqual(port.finalizeCallCount, 2)
         XCTAssertEqual(try records.listRecords(limit: nil).count, 1)
         XCTAssertEqual(id, 1)
@@ -426,7 +426,7 @@ final class InMemoryDBFakesTests: XCTestCase {
         let port = InMemorySessionFinalizationPort(records: records, pending: pending)
 
         let id1 = try port.finalizeSession(record: makeRecord(id: nil), ops: [],
-                                           drawings: [], sessionKey: "SK-idem")
+                                           drawings: [], sessionKey: "SK-idem").id
         XCTAssertEqual(try records.listRecords(limit: nil).count, 1)
 
         // 在两次调用之间存入一个 stale pending
@@ -434,7 +434,7 @@ final class InMemoryDBFakesTests: XCTestCase {
         XCTAssertNotNil(try pending.loadPending())
 
         let id2 = try port.finalizeSession(record: makeRecord(id: nil), ops: [],
-                                           drawings: [], sessionKey: "SK-idem")
+                                           drawings: [], sessionKey: "SK-idem").id
 
         XCTAssertEqual(id1, id2)
         XCTAssertEqual(try records.listRecords(limit: nil).count, 1)  // 仍只有 1 条
@@ -448,9 +448,9 @@ final class InMemoryDBFakesTests: XCTestCase {
         let port = InMemorySessionFinalizationPort(records: records, pending: pending)
 
         let id1 = try port.finalizeSession(record: makeRecord(id: nil, profit: 100), ops: [],
-                                           drawings: [], sessionKey: "SK-A")
+                                           drawings: [], sessionKey: "SK-A").id
         let id2 = try port.finalizeSession(record: makeRecord(id: nil, profit: 200), ops: [],
-                                           drawings: [], sessionKey: "SK-B")
+                                           drawings: [], sessionKey: "SK-B").id
 
         XCTAssertNotEqual(id1, id2)
         XCTAssertEqual(try records.listRecords(limit: nil).count, 2)

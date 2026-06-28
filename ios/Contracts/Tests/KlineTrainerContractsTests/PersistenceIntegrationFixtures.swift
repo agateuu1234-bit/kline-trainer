@@ -17,7 +17,8 @@ enum PIFixtures {
         let coord = TrainingSessionCoordinator(
             dbFactory: PreviewTrainingSetDBFactory(candles: TrainingSessionPersistenceTests.validCandles()),
             recordRepo: records, pendingRepo: pending, finalization: port,
-            settingsDAO: InMemorySettingsDAO(), cache: cache,
+            // A4：settingsDAO 与 SettingsStore 同源（mirror 生产同一 DefaultAppDB）——startingCapital 直读 DAO。
+            settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: capital), cache: cache,
             settings: SettingsStore(settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: capital)))
         return (coord, records, pending, port)
     }
@@ -38,7 +39,8 @@ enum PIFixtures {
             corruptFilenames: corrupt, openErrorAll: openError)   // knob 经 init（struct，禁后赋值）
         let coord = TrainingSessionCoordinator(
             dbFactory: factory, recordRepo: records, pendingRepo: pending, finalization: port,
-            settingsDAO: InMemorySettingsDAO(), cache: cache,
+            // A4：settingsDAO 与 SettingsStore 同源（startingCapital 直读 DAO）。
+            settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: 50_000), cache: cache,
             settings: SettingsStore(settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: 50_000)))
         return (coord, factory, cache, pending)
     }
