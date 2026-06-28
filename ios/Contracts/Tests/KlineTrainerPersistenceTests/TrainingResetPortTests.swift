@@ -74,7 +74,7 @@ final class TrainingResetPortTests: XCTestCase {
         XCTAssertEqual(counts.1, 1)
         XCTAssertEqual(counts.2, 1)
         let uv: Int = try queue.read { d in try Int.fetchOne(d, sql: "PRAGMA user_version") ?? -1 }
-        XCTAssertEqual(uv, 2)   // 纯数据操作，无新迁移
+        XCTAssertEqual(uv, 3)   // 0005 后完整 migrator 终态 = 3（纯数据操作，无额外迁移）
     }
 
     // 幂等：空库重置也合法，只确保 capital。
