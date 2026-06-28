@@ -1229,6 +1229,15 @@ struct TradeBoxContentTests {
         #expect(TradeBoxContent(action: .sell, price: 10, cash: 0, holding: 1, fees: noMin, qty: 0)
                     .tierLabels.last == "清仓")
     }
+    @Test("R-plan-21-1：boxIdentity 随 (panel,action,tick) 变化 → 同 panel/tick 切 action 必换身份(强制 @State 重置)")
+    func boxIdentityDistinct() {
+        let buy = TradeBoxContent.boxIdentity(panel: .lower, action: .buy, tick: 5)
+        let sell = TradeBoxContent.boxIdentity(panel: .lower, action: .sell, tick: 5)  // 同 panel/tick、仅 action 不同
+        #expect(buy != sell)                                                            // 关键：action 变 → 身份变
+        #expect(buy != TradeBoxContent.boxIdentity(panel: .upper, action: .buy, tick: 5))   // panel 变
+        #expect(buy != TradeBoxContent.boxIdentity(panel: .lower, action: .buy, tick: 6))   // tick 变
+        #expect(buy == TradeBoxContent.boxIdentity(panel: .lower, action: .buy, tick: 5))   // 同请求 → 同身份(稳定)
+    }
 }
 ```
 
@@ -1329,6 +1338,11 @@ public struct TradeBoxContent: Equatable, Sendable {
         PositionTier.allCases.map { tier in
             tier == .tier5 ? (action == .buy ? "全仓" : "清仓") : tier.rawValue
         }
+    }
+
+    /// R-plan-21-1：买卖框 SwiftUI 视图身份键——绑 (panel, action, tick)，请求任一变即新身份 → @State qty 重置。
+    public static func boxIdentity(panel: PanelId, action: TradeAction, tick: Int) -> String {
+        "\(panel)-\(action)-\(tick)"
     }
 
     private static func grouped(_ v: Int) -> String {
@@ -1474,6 +1488,11 @@ public struct TradeBoxView: View {
                             tradeStrip = nil
                         },
                         onCancel: { tradeStrip = nil })
+                    // codex R-plan-21-1：SwiftUI @State 由视图身份保持，不因 action/panel 变化重置。
+                    // 同 panel 上 买入→卖出 切换若不绑身份，旧 qty 会残留进新框并可被提交。
+                    // 把身份绑到 strip 请求 → 请求(panel/action/tick)变即新身份 → qty @State 重置为 initialQty(0)。
+                    // 键用纯函数（host 可测身份随请求变化）。
+                    .id(TradeBoxContent.boxIdentity(panel: strip.panel, action: strip.action, tick: strip.tick))
                 }
             }
 ```
