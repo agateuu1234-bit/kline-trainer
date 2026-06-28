@@ -26,7 +26,7 @@
 
 | 维度 | 当前版本 | 变更触发 bump 的条件 |
 |---|---|---|
-| `CONTRACT_VERSION`（顶层标识） | `"1.5"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
+| `CONTRACT_VERSION`（顶层标识） | `"1.7"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
 | PostgreSQL schema（`schema.sql` migration id） | `0003_v1.3` | 任何 PostgreSQL DDL 变更（含加列）；联动顶层 |
 | 训练组 SQLite `PRAGMA user_version` | `1` | 训练组 schema 结构变更；联动顶层 |
 | app.sqlite GRDB migration | `0003_v1.4_purge_leased` | app.sqlite DDL / 新表 / **DML 数据清理 migration**（v1.4 新增：删除 v1.3 残留 `state='leased'` journal 行）；联动顶层 |
@@ -34,6 +34,8 @@
 | `P2 journal states` enum | `v2` | 删除 / 改 raw value / 改既有语义 / 改恢复扫描集 → bump 顶层；仅追加本地中间态 → 只 bump 本子版本，reader 须显式处理未知 state |
 
 > **bump 记录（2026-05-25，Wave 1 顺位 8 E2）**：顶层 `CONTRACT_VERSION` `"1.4"` → `"1.5"`。触发 = E2 PositionManager typed throwing `init(from:)` 把 `position_data` 列从"任何字节"收紧为"合法否则拒收"，命中 §Bump 策略 **A 类"改既有语义"**。**无 DDL 变更**（`position_data` 仍 `TEXT NOT NULL`，收紧属 reader 侧语义），故仅 bump 顶层标识，三套存储 sub-version（PostgreSQL/训练组/app.sqlite）不变、不新增 migration 文件。详见 `kline_trainer_plan_v1.5.md` §4.2.7。
+
+> **bump 记录（2026-06-22，RFC-A 顺位 3）**：顶层 `CONTRACT_VERSION` `"1.6"` → `"1.7"`。触发 = A 类「改既有语义」：`settings.total_capital` 语义从「配置起始本金」改为「权威滚动当前资金」+ reset 改为保留记录 + migration `0005`（app.sqlite DML 数据 migration，user_version 2→3）。无表结构变更（settings KV 键已存在）。同 E2 1.4→1.5「reader 侧改既有语义」先例。注：`"1.5"` → `"1.6"` 的 bump 由前序 RFC-A Task 8（TradeEngine 股数化语义变更）落地，矩阵 cell 此前 stale 为 `"1.5"`，本次同步校正至 `"1.7"`。详见 `docs/superpowers/specs/2026-06-22-trade-position-capital-design.md` §11。
 
 **存储表位 速查**（spec L129-131）：
 

@@ -15,10 +15,11 @@ public enum SettingsPanelContent {
         String(format: "%.3f", uiDisplayTenThousandth(fromCommissionRate: rate))
     }
 
-    /// §6.4「不能为空」：解析 UI 万分之一输入 → 存储小数率；空/非数字 → nil。
+    /// §6.4「不能为空」：解析 UI 万分之一输入 → 存储小数率；空/非数字/负数 → nil。
+    /// R-plan-6-1：输入层拒负费率，与 SettingsDAOImpl.saveSettings 守卫形成双层防护。
     public static func parseCommissionUIInput(_ input: String) -> Double? {
         let t = input.trimmingCharacters(in: .whitespaces)
-        guard !t.isEmpty, let ui = Double(t) else { return nil }
+        guard !t.isEmpty, let ui = Double(t), ui >= 0 else { return nil }
         return commissionRate(fromUIInputTenThousandth: ui)
     }
 
@@ -38,10 +39,10 @@ public enum SettingsPanelContent {
         return .valid(n)
     }
 
-    // MARK: - 重置资金文案（运行时 #1：破坏性，须如实披露清空训练记录）
-    public static let resetButtonLabel = "重置资金（清空记录 → ¥100,000）"
-    public static let resetConfirmTitle = "确认重置？将清空训练记录"
-    public static let resetConfirmMessage = "此操作会删除全部训练记录与未完成的对局，并将资金恢复为 ¥100,000，且不可撤销。"
+    // MARK: - 重置资金文案（RFC-A R-plan-7-2：非破坏性——保留历史记录，仅清未完成对局 + 资金回 10 万）
+    public static let resetButtonLabel = "重置资金（→ ¥100,000，保留记录）"
+    public static let resetConfirmTitle = "确认重置资金？"
+    public static let resetConfirmMessage = "资金恢复为 ¥100,000，并清除当前未完成的对局；历史训练记录保留。"
 
     // MARK: - 显示模式 label（§6.4：白天/夜间/跟随系统）
     public static func displayModeLabel(_ mode: DisplayMode) -> String {

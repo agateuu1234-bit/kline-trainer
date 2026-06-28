@@ -291,21 +291,14 @@ public final class TrainingEngine {
         return min(max(Int(raw), 0), 5)
     }
 
-    // MARK: - 动作可用性门（E5b / D1：功能式 ∃tier，无 tier 推导公式）
+    // MARK: - 动作可用性门（E5b / D1）
 
-    /// 买入按钮可用：当前模式允许交易 **且** 存在某档 `quoteBuy` 成功。
-    /// 满仓(现金耗尽)→所有档 totalCost>cash 失败→false(disabled，plan v1.5 L734)。
-    /// 部分档成功→true；点不可买的档由 `buy` 返 `.insufficientCash`(toast，L735)——单一真值源，无 tier 公式臆造。
+    /// 买入按钮可用：当前模式允许交易 **且** fee-aware 至少能买 1 手（RFC-A D3）。
     public var buyEnabled: Bool {
         guard flow.canBuySell() else { return false }
-        let total = currentTotalCapital, cash = cashBalance, price = currentPrice
-        return PositionTier.allCases.contains { tier in
-            if case .success = TradeCalculator.quoteBuy(totalCapital: total, cash: cash,
-                                                        tier: tier, price: price, fees: fees) {
-                return true
-            }
-            return false
-        }
+        // RFC-A：能买至少 1 手即使能（fee-aware）。
+        return TradeCalculator.maxBuyableShares(cash: cashBalance, price: currentPrice, fees: fees)
+            >= TradeCalculator.shareLotSize
     }
 
     /// 卖出按钮可用：当前模式允许交易 **且** 有持仓（plan v1.5 L733 空仓灰置）。
@@ -387,34 +380,6 @@ public final class TrainingEngine {
         forceCloseIfEnded()
     }
 
-    // MARK: - 买入（E5b / §4.2.1 入口 1a：E3 Result 通道 → position.buy precondition）
-
-    /// 买入：当前 tick 价成交 → 记 marker/operation(entryTick) → 推进 → 联动 → 局终强平。
-    /// 失败(模式不允许 / E3 校验失败)返 `.failure(.trade(...))`，**不** mutate、**不** advance（D9）。
-    public func buy(panel: PanelId, tier: PositionTier) -> Result<TradeOperation, AppError> {
-        guard flow.canBuySell() else { return .failure(.trade(.disabled)) }
-        let price = currentPrice
-        let entryTick = tick.globalTickIndex
-        let p = period(of: panel)
-        switch TradeCalculator.quoteBuy(totalCapital: currentTotalCapital, cash: cashBalance,
-                                        tier: tier, price: price, fees: fees) {
-        case .failure(let reason):
-            return .failure(.trade(reason))
-        case .success(let quote):
-            position.buy(shares: quote.shares, totalCost: quote.totalCost)
-            cashBalance -= quote.totalCost
-            markers.append(TradeMarker(globalTick: entryTick, price: price, direction: .buy))
-            let op = TradeOperation(
-                globalTick: entryTick, period: p, direction: .buy, price: price,
-                shares: quote.shares, positionTier: tier,
-                commission: quote.commission, stampDuty: 0,   // D6：买入无印花税
-                totalCost: quote.totalCost, createdAt: candleDatetime(atTick: entryTick))
-            tradeOperations.append(op)
-            advanceAndAccount(panel: panel)
-            return .success(op)
-        }
-    }
-
     /// 成交时刻（D5）：成交 tick 的 `.m3` candle datetime；超末根夹取末根，缺数据 0。
     private func candleDatetime(atTick target: Int) -> Int64 {
         let m3 = allCandles[.m3] ?? []
@@ -423,28 +388,59 @@ public final class TrainingEngine {
         return idx < m3.count ? m3[idx].datetime : last.datetime
     }
 
-    // MARK: - 卖出（E5b / §4.2.1 入口 1a）
+    // MARK: - RFC-A 按股数交易入口（A1）
 
-    /// 卖出：当前 tick 价成交 → 记 marker/operation(entryTick) → 推进 → 联动 → 局终强平。
-    public func sell(panel: PanelId, tier: PositionTier) -> Result<TradeOperation, AppError> {
+    /// 按股数买入：当前 tick 价成交 → 记 marker/operation(entryTick) → 推进 → 联动 → 局终强平。
+    /// 失败(模式不允许 / quoteBuy 校验失败)返 `.failure(.trade(...))`，**不** mutate、**不** advance（D9）。
+    public func buy(panel: PanelId, shares: Int) -> Result<TradeOperation, AppError> {
         guard flow.canBuySell() else { return .failure(.trade(.disabled)) }
         let price = currentPrice
         let entryTick = tick.globalTickIndex
         let p = period(of: panel)
-        switch TradeCalculator.quoteSell(holding: position.shares, averageCost: position.averageCost,
-                                         tier: tier, price: price, fees: fees) {
+        let cashBefore = cashBalance
+        switch TradeCalculator.quoteBuy(cash: cashBefore, shares: shares, price: price, fees: fees) {
+        case .failure(let reason):
+            return .failure(.trade(reason))
+        case .success(let quote):
+            position.buy(shares: quote.shares, totalCost: quote.totalCost)
+            cashBalance -= quote.totalCost
+            markers.append(TradeMarker(globalTick: entryTick, price: price, direction: .buy))
+            // D4：positionTier 仅记录展示，由占比反推（cashBefore>0 已由 quote 成功保证）
+            let tier = TradeCalculator.tierForFraction(cashBefore > 0 ? quote.totalCost / cashBefore : 1)
+            let op = TradeOperation(
+                globalTick: entryTick, period: p, direction: .buy, price: price,
+                shares: quote.shares, positionTier: tier,
+                commission: quote.commission, stampDuty: 0,
+                totalCost: quote.totalCost, createdAt: candleDatetime(atTick: entryTick))
+            tradeOperations.append(op)
+            advanceAndAccount(panel: panel)
+            return .success(op)
+        }
+    }
+
+    /// 按股数卖出：当前 tick 价成交 → 记 marker/operation(entryTick) → 推进 → 联动 → 局终强平。
+    /// R-plan-14-1：经集中契约的 quoteSell(cash:…)——success 已保证「输出有限 + cashBalance+proceeds≥0」，
+    /// 故下方直接 mutate（与 TradeBoxContent 同一可执行性判定，UI/engine 不再发散）。
+    public func sell(panel: PanelId, shares: Int) -> Result<TradeOperation, AppError> {
+        guard flow.canBuySell() else { return .failure(.trade(.disabled)) }
+        let price = currentPrice
+        let entryTick = tick.globalTickIndex
+        let p = period(of: panel)
+        let holdingBefore = position.shares
+        switch TradeCalculator.quoteSell(cash: cashBalance, holding: holdingBefore, shares: shares, price: price, fees: fees) {
         case .failure(let reason):
             return .failure(.trade(reason))
         case .success(let quote):
             position.sell(shares: quote.shares)
-            cashBalance += quote.proceeds
+            cashBalance += quote.proceeds               // quoteSell 已保证 cashBalance+proceeds 有限且 ≥0
             markers.append(TradeMarker(globalTick: entryTick, price: price, direction: .sell))
+            let tier = TradeCalculator.tierForFraction(
+                holdingBefore > 0 ? Double(quote.shares) / Double(holdingBefore) : 1)
             let op = TradeOperation(
                 globalTick: entryTick, period: p, direction: .sell, price: price,
                 shares: quote.shares, positionTier: tier,
                 commission: quote.commission, stampDuty: quote.stampDuty,
-                totalCost: quote.proceeds,   // D6：sell totalCost = 到手 proceeds
-                createdAt: candleDatetime(atTick: entryTick))
+                totalCost: quote.proceeds, createdAt: candleDatetime(atTick: entryTick))
             tradeOperations.append(op)
             advanceAndAccount(panel: panel)
             return .success(op)

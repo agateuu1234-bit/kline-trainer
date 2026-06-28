@@ -116,7 +116,8 @@ struct AppContainerDebugSeedTests {
         try AppContainer.seedDebugFixtures(db: c.db, cache: c.cache)
 
         #expect(try c.db.loadPending()?.sessionKey == "real-user-session", "真实 pending 未被 fixture 覆盖")
-        #expect(try c.db.loadSettings().totalCapital == 555_555, "真实 settings 未被 fixture 覆盖")
+        // R-plan-22-1：total_capital 单写者，saveSettings 不写 → 验偏好键（commissionRate）未被覆盖。
+        #expect(try c.db.loadSettings().commissionRate == 0.0009, "真实 settings 未被 fixture 覆盖")
         #expect(c.cache.listAvailable().isEmpty, "未 seed cache")
     }
 
@@ -159,21 +160,22 @@ struct AppContainerDebugSeedTests {
 
         try AppContainer.seedDebugFixtures(db: c.db, cache: c.cache)
 
-        #expect(try c.db.loadSettings().totalCapital == 333_333, "自定义 settings 未被 fixture 覆盖")
+        // R-plan-22-1：total_capital 单写者，saveSettings 不写 → 验偏好键（commissionRate）未被覆盖。
+        #expect(try c.db.loadSettings().commissionRate == 0.0007, "自定义 settings 未被 fixture 覆盖")
         #expect(c.cache.listAvailable().isEmpty, "未 seed")
     }
 
     // Task 5 Medium-10：运行时 #1 端到端真协调器路径。
-    // seeded（有记录+pending+cache）→ resetAllProgress（清记录/pending，cache 保留）
-    // → startNewNormalSession（cache 仍在可开局）→ 零记录使 startingCapital 走 settings 分支 → 顶栏 10 万。
-    @Test("重置后开新局：startingCapital 走 settings=10 万（真协调器路径）")
+    // seeded（有记录+pending+cache）→ resetAllProgress（RFC-A：清 pending+置资金，**保留**记录，cache 保留）
+    // → startNewNormalSession（cache 仍在可开局）→ A4 startingCapital 直读权威 settings=10 万（不论记录）。
+    @Test("重置后开新局：startingCapital 走权威 settings=10 万（真协调器路径）")
     func test_after_reset_freshStart_startsAtDefault() async throws {
         let (cfg, dir) = try makeConfig()
         defer { try? FileManager.default.removeItem(at: dir) }
         let c = try AppContainer(config: cfg, debugSeedFixtures: true)
         #expect(try c.db.statistics().totalCount >= 2)        // 前置：seed 有记录
         try await c.settings.resetAllProgress()
-        #expect(try c.db.statistics().totalCount == 0)        // 记录已清
+        #expect(try c.db.statistics().totalCount >= 2)        // RFC-A：reset 保留历史记录（不再清）
         #expect(try c.db.loadPending() == nil)                // pending 已清
         #expect(!c.cache.listAvailable().isEmpty)             // cache 保留（可开局）
         let engine = try await c.coordinator.startNewNormalSession()

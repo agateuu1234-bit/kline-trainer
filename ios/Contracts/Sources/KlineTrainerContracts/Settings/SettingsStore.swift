@@ -63,14 +63,23 @@ public final class SettingsStore {
             try await Task.detached(priority: .userInitiated) {
                 try dao.saveSettings(snapshot)
             }.value
-            self.settings = snapshot
+            // R-plan-22-1：提交缓存时保留**当前权威 total_capital**（detached save 期间 finalize/reset
+            // 可能已推进）——override 旧快照/closure 对 total_capital 的任何改动，防偏好保存回滚权威资金。
+            var committed = snapshot
+            committed.totalCapital = self.settings.totalCapital
+            self.settings = committed
         }
         pendingMutations = task
         try await task.value
     }
 
-    /// 重置资金「真正归零重来」(运行时 #1)：经注入端口在单事务内清空全部训练记录 +
-    /// 未完成对局，并把资金恢复为 AppSettings.defaultTotalCapital。
+    /// A4：finalize/外部写库后把权威 total_capital 同步进活缓存（不再写库）。
+    public func refreshTotalCapital(_ value: Double) {
+        settings.totalCapital = value
+    }
+
+    /// 重置资金(运行时 #1)：经注入端口在单事务内**保留历史训练记录**、仅清未完成对局，
+    /// 并把资金恢复为 AppSettings.defaultTotalCapital（RFC-A：reset 不再删记录）。
     /// 复用 loadError 写阻塞 + pendingMutations 串行化（与 update 同机制）。
     public func resetAllProgress() async throws {
         if let e = _loadError { throw e }   // block writes 直到 reload 成功
@@ -178,8 +187,10 @@ public final class SettingsStore {
                 throw finalError              // 不破坏
             }
             // 确认持久损坏 → 破坏性 reset
+            // R-plan-24-1：用 repairAllToDefaults（写全键含 total_capital），**不**用 saveSettings——
+            // 单写者下 saveSettings 已豁免 total_capital，靠它修不掉腐坏/负 total_capital。
             try await Task.detached(priority: .userInitiated) {
-                try dao.saveSettings(AppSettings.default)
+                try dao.repairAllToDefaults()
             }.value                           // 写失败则抛出，_loadError 保留 dbCorrupted
             let reloaded = try await Task.detached(priority: .userInitiated) {
                 try dao.loadSettings()

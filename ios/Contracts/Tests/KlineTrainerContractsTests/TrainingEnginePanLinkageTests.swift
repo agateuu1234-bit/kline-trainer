@@ -70,7 +70,7 @@ struct TrainingEnginePanLinkageTests {
         e.beginPan(panel: .upper)
         e.applyPanOffset(deltaPixels: 300, renderBounds: Self.bounds, panel: .upper)
         #expect(e.lowerPanel.offset > 0)                                 // 联动已驱 follower 离 0（使下面归零有意义）
-        _ = e.buy(panel: .upper, tier: .tier1)                           // trade → resetOffsetAfterAutoTracking 两面板
+        _ = e.buy(panel: .upper, shares: 2000)                           // trade → resetOffsetAfterAutoTracking 两面板
         #expect(e.upperPanel.offset == 0)
         #expect(e.lowerPanel.offset == 0)                                // 两图都归 0（reset 路径未被联动破坏）
     }

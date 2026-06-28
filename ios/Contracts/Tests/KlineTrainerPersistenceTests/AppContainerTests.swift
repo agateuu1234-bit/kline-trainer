@@ -49,7 +49,7 @@ struct AppContainerTests {
             finalTick: 40)
         _ = try c.db.insertRecord(rec, ops: [], drawings: [])
         try await c.settings.resetAllProgress()   // 未接端口会抛 internalError「需注入端口」
-        #expect(try c.db.statistics().totalCount == 0)
+        #expect(try c.db.statistics().totalCount == 1)   // RFC-A：reset 保留历史记录
         #expect(c.settings.settings.totalCapital == 100_000)
     }
 }

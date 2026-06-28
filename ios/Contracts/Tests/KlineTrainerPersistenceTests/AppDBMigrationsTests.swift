@@ -46,8 +46,8 @@ final class AppDBMigrationsTests: XCTestCase {
         XCTAssertTrue(indexes.contains("idx_journal_state"))
     }
 
-    // MARK: - migrator 跑过的 PRAGMA user_version（0004 起终态 = 2）
-    func test_full_migrator_sets_user_version_2() throws {
+    // MARK: - migrator 跑过的 PRAGMA user_version（0005 起终态 = 3）
+    func test_full_migrator_sets_user_version_3() throws {
         let dbURL = try AppDBFixture.makeFreshDB()
         defer { try? FileManager.default.removeItem(at: dbURL.deletingLastPathComponent()) }
 
@@ -55,7 +55,7 @@ final class AppDBMigrationsTests: XCTestCase {
         let version: Int = try queue.read { db in
             try Int.fetchOne(db, sql: "PRAGMA user_version") ?? 0
         }
-        XCTAssertEqual(version, 2)   // 0001 置 1，0004 bump 至 2（RFC §4.7c MANDATORY bump）
+        XCTAssertEqual(version, 3)   // 0001 置 1，0004 bump 至 2，0005（RFC-A A4）bump 至 3
     }
 
     // MARK: - 0003_v1.4_purge_leased 实际删 leased 行

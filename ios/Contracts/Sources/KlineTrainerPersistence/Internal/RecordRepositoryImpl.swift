@@ -126,6 +126,7 @@ enum RecordRepositoryImpl {
     private static func recordFromRow(_ row: Row) throws -> TrainingRecord {
         let feeJSON: String = row["fee_snapshot"]
         let fee: FeeSnapshot = try jsonDecode(feeJSON, as: FeeSnapshot.self)
+            .sanitizedForLegacyCorruption()  // WB-1：清除 legacy 负/非有限 commissionRate
         return TrainingRecord(
             id: row["id"], trainingSetFilename: row["training_set_filename"],
             createdAt: row["created_at"],

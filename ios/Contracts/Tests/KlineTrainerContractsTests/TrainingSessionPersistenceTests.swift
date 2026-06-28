@@ -77,7 +77,8 @@ struct TrainingSessionPersistenceTests {
             recordRepo: records,
             pendingRepo: pending,
             finalization: port,
-            settingsDAO: InMemorySettingsDAO(),
+            // A4：settingsDAO 与 SettingsStore 同源（mirror 生产同一 DefaultAppDB）——startingCapital 直读 DAO。
+            settingsDAO: CapitalDAO(capital: capital),
             cache: cache,
             settings: SettingsStore(settingsDAO: CapitalDAO(capital: capital)))
         return (coord, records, pending, port)
@@ -356,6 +357,33 @@ struct TrainingSessionPersistenceTests {
         #expect(try pending.loadPending() == nil)                    // D2：清 pending
     }
 
+    /// 注入固定 (id, totalCapital) 的 finalization stub（验 coordinator 刷缓存用**返回值**非 engine 现值）。
+    struct StubFinalization: SessionFinalizationPort {
+        let fixed: (id: Int64, totalCapital: Double)
+        func finalizeSession(record: TrainingRecord, ops: [TradeOperation],
+                             drawings: [DrawingObject], sessionKey: String)
+            throws -> (id: Int64, totalCapital: Double) { fixed }
+    }
+
+    // codex R-plan-5-1：coordinator 刷缓存用 finalizeSession **返回的权威值**，非 engine 现值。
+    @Test("finalize: 活缓存刷为返回的权威值（777_000），非 engine.currentTotalCapital")
+    func test_finalize_refreshes_cache_from_returned_authority_not_engine() async throws {
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let injectedStore = SettingsStore(settingsDAO: Self.CapitalDAO(capital: 50_000))   // engine 现值=50_000
+        let coord = TrainingSessionCoordinator(
+            dbFactory: PreviewTrainingSetDBFactory(candles: Self.validCandles()),
+            recordRepo: records, pendingRepo: pending,
+            finalization: StubFinalization(fixed: (1, 777_000)),   // 刻意 ≠ engine.currentTotalCapital
+            settingsDAO: Self.CapitalDAO(capital: 50_000),
+            cache: cache, settings: injectedStore)
+        let engine = try await coord.startNewNormalSession()
+        #expect(engine.currentTotalCapital == 50_000)                       // engine 现值 ≠ 777_000
+        _ = try await coord.finalize(engine: engine)
+        #expect(abs(injectedStore.settings.totalCapital - 777_000) < 1e-6)  // 活缓存 == 返回值（非 engine 现值）
+    }
+
     @Test("finalize: review 模式 → nil（不插记录、不动 pending，D2）")
     func finalize_review_returnsNil() async throws {
         let (coord, records, _, _) = Self.makeCoordinator(candles: Self.validCandles())
@@ -454,6 +482,76 @@ struct TrainingSessionPersistenceTests {
         }
     }
 
+    // MARK: - A4 Step 3d：pending cashBalance 边界 floor（崩溃恢复防 brick）
+
+    /// 全 0.01 低价 candle（强平 100 股 → notional 1，最低佣金 5 → proceeds 负 → cash 转负）。
+    static func lowPriceCandles(m3Count: Int = 8) -> [Period: [KLineCandle]] {
+        func c(_ p: Period, gi: Int, egi: Int) -> KLineCandle {
+            KLineCandle(period: p, datetime: 1 + Int64(gi) * 180, open: 0.01, high: 0.01, low: 0.01,
+                        close: 0.01, volume: 1000, amount: nil, ma66: nil,
+                        bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil, globalIndex: gi, endGlobalIndex: egi)
+        }
+        let m3 = (0..<m3Count).map { c(.m3, gi: $0, egi: $0) }
+        let last = m3Count - 1
+        let m60 = [c(.m60, gi: 0, egi: last / 2), c(.m60, gi: last / 2 + 1, egi: last)]
+        let daily = [c(.daily, gi: 0, egi: last)]
+        return [.m3: m3, .m60: m60, .daily: daily]
+    }
+
+    /// resume 路径 coordinator：低价 100 股持仓 + 小额现金 3（起始本金 3）→ 推进 maxTick 强平产负现金。
+    static func negativeCashCoordinator()
+        throws -> (TrainingSessionCoordinator, InMemoryRecordRepository, InMemoryPendingTrainingRepository) {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 2)
+        let spy = MetaSpyReader(candles: lowPriceCandles(), meta: meta)
+        let cache = InMemoryCacheManager(); cache._seedForTesting([cachedFile()])
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let pos = PositionManager(shares: 100, averageCost: 0.01, totalInvested: 1.0)
+        try pending.savePending(PendingTraining(
+            trainingSetFilename: "set.sqlite", globalTickIndex: 3,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: try JSONEncoder().encode(pos), cashBalance: 3,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+            tradeOperations: [], drawings: [], startedAt: 1,
+            accumulatedCapital: 3, drawdown: .initial, sessionKey: "kNeg"))
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+        let coord = TrainingSessionCoordinator(
+            dbFactory: StubFactory(reader: spy), recordRepo: records, pendingRepo: pending,
+            finalization: port, settingsDAO: CapitalDAO(capital: 3),
+            cache: cache, settings: SettingsStore(settingsDAO: CapitalDAO(capital: 3)))
+        return (coord, records, pending)
+    }
+
+    // codex R-plan-18-2/25-1：saveProgress floor max(0,cash)；崩溃恢复局记 floored P&L，正常 finalize 如实记负。
+    @Test("Step 3d: pending cash floor + 崩溃恢复记 floored P&L vs 正常 finalize 如实记负")
+    func test_pending_cash_floor_recovery_vs_normal_finalize() async throws {
+        // ③ 正常 finalize（无崩溃）：直接对负现金引擎 finalize → 记录**如实**负 profit。
+        let (coordA, recordsA, _) = try Self.negativeCashCoordinator()
+        let engineA = try #require(try await coordA.resumePending())   // cash 3, shares 100, tick 3
+        engineA.holdOrObserve(panel: .upper)                            // → maxTick 强平 → cash 转负
+        #expect(engineA.cashBalance < 0)
+        let kNeg = engineA.cashBalance                                  // 真实负现金（= currentTotalCapital，已空仓）
+        let idA = try #require(try await coordA.finalize(engine: engineA))
+        let (recA, _, _) = try recordsA.loadRecordBundle(id: idA)
+        #expect(abs(recA.profit - (kNeg - 3)) < 1e-6)                   // 如实记负：currentTotalCapital - 起始 3
+
+        // ①② 崩溃恢复：saveProgress floor cash → resume 不 brick → 恢复后 finalize 记 floored 终值。
+        let (coordB, recordsB, pendingB) = try Self.negativeCashCoordinator()
+        let engineB = try #require(try await coordB.resumePending())
+        engineB.holdOrObserve(panel: .upper)                            // 强平 → cash 负
+        #expect(engineB.cashBalance < 0)
+        try await coordB.saveProgress(engine: engineB)                  // autosave 落盘负现金局
+        let saved = try #require(try pendingB.loadPending())
+        #expect(saved.cashBalance == 0)                                 // ① floor max(0,cash)
+        await coordB.endSession()                                       // 模拟重启
+        let resumed = try #require(try await coordB.resumePending())    // ① 不抛 = 不 brick（cash 0 ≥ 0）
+        #expect(resumed.cashBalance == 0)
+        let idB = try #require(try await coordB.finalize(engine: resumed))
+        let (recB, _, _) = try recordsB.loadRecordBundle(id: idB)
+        #expect(abs(recB.profit - (0 - 3)) < 1e-6)                      // ② floored P&L（0 - 起始 3），非真实 kNeg-3
+    }
+
     // MARK: - Wave 3 顺位 6b：appendDrawing 进入持久化路径
 
     @Test("appendDrawing: 追加的画线经 saveProgress 落 pending.drawings（§4.4c 单一真相→持久化）")
@@ -502,7 +600,7 @@ struct TrainingSessionPersistenceTests {
     @Test("replaySettlementPayload: 强平后终态 → in-memory TrainingRecord（原局 fees + meta）")
     func replaySettlementPayload_returnsTerminalStateRecord() async throws {
         let (coord, engine, _, _) = try await Self.makeReplaySession(capital: 100_000)
-        _ = engine.buy(panel: .upper, tier: .tier1)      // replay 可交易；建非平凡终态
+        _ = engine.buy(panel: .upper, shares: 2000)      // replay 可交易；建非平凡终态
         engine.forceCloseManually()                       // 6a：强平 → 持仓平
         #expect(engine.position.shares == 0)
         let payload = try coord.replaySettlementPayload(engine: engine)
@@ -522,7 +620,7 @@ struct TrainingSessionPersistenceTests {
     func replaySettlementPayload_doesNotPersist() async throws {
         let (coord, engine, records, pending) = try await Self.makeReplaySession()
         let recordsBefore = try records.listRecords(limit: nil).count   // = 1（仅 seed 的源 record）
-        _ = engine.buy(panel: .upper, tier: .tier1)
+        _ = engine.buy(panel: .upper, shares: 2000)
         engine.forceCloseManually()
         _ = try coord.replaySettlementPayload(engine: engine)
         #expect(try records.listRecords(limit: nil).count == recordsBefore)   // 无新 insert

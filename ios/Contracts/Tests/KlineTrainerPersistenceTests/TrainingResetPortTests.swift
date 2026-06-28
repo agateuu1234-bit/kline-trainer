@@ -36,6 +36,8 @@ final class TrainingResetPortTests: XCTestCase {
         try db.savePending(Self.makePending())
         try db.saveSettings(AppSettings(commissionRate: 0.0003, minCommissionEnabled: true,
                                         totalCapital: 123_456, displayMode: .dark))
+        // R-plan-22-1：saveSettings 不再写 total_capital（单写者）→ 经 setTotalCapital 立非默认值。
+        try db.dbQueue.write { try SettingsDAOImpl.setTotalCapital($0, 123_456) }
     }
 
     private static func makePending() -> PendingTraining {
@@ -49,30 +51,30 @@ final class TrainingResetPortTests: XCTestCase {
             sessionKey: "sess-1")
     }
 
-    // 主用例：重置后三表清空 + capital=10 万；不需迁移（user_version 仍 2）。
-    func test_resetAllTrainingProgress_wipes_records_pending_and_sets_capital() throws {
+    // 主用例（RFC-A A4：重置**保留**历史记录，仅清 pending + 置 capital；推翻 #123 的 deleteAll）。
+    func test_reset_keeps_records_and_sets_capital_100k() throws {
         try seedProgress()
         XCTAssertEqual(try db.statistics().totalCount, 1)        // 前置：确有记录
         XCTAssertNotNil(try db.loadPending())                    // 前置：确有 pending
 
         try db.resetAllTrainingProgress(toCapital: 100_000)
 
-        XCTAssertEqual(try db.statistics().totalCount, 0)        // 记录清空
-        XCTAssertNil(try db.loadPending())                       // pending 清空
+        XCTAssertEqual(try db.statistics().totalCount, 1)        // 记录**保留**（不再 deleteAll）
+        XCTAssertNil(try db.loadPending())                       // pending 仍清空
         XCTAssertEqual(try db.loadSettings().totalCapital, 100_000)  // 资金回 10 万
 
-        // 物理验证：子表无 FK 残留。
+        // 物理验证：记录及其 FK 子行均保留（RFC-A 保留历史）。
         let queue = try AppDBFixture.openRaw(at: dbURL)
         let counts: (Int, Int, Int) = try queue.read { d in
             (try Int.fetchOne(d, sql: "SELECT COUNT(*) FROM trade_operations") ?? -1,
              try Int.fetchOne(d, sql: "SELECT COUNT(*) FROM drawings") ?? -1,
              try Int.fetchOne(d, sql: "SELECT COUNT(*) FROM training_records") ?? -1)
         }
-        XCTAssertEqual(counts.0, 0)
-        XCTAssertEqual(counts.1, 0)
-        XCTAssertEqual(counts.2, 0)
+        XCTAssertEqual(counts.0, 1)
+        XCTAssertEqual(counts.1, 1)
+        XCTAssertEqual(counts.2, 1)
         let uv: Int = try queue.read { d in try Int.fetchOne(d, sql: "PRAGMA user_version") ?? -1 }
-        XCTAssertEqual(uv, 2)   // 纯数据操作，无新迁移
+        XCTAssertEqual(uv, 3)   // 0005 后完整 migrator 终态 = 3（纯数据操作，无额外迁移）
     }
 
     // 幂等：空库重置也合法，只确保 capital。
@@ -99,12 +101,12 @@ final class TrainingResetPortTests: XCTestCase {
         XCTAssertEqual(try db.loadSettings().totalCapital, 123_456)
     }
 
-    // 验证 toCapital 参数确实被透传（用 ≠ 默认 10 万 的值），且重置后零记录使下一局走 settings 分支。
-    // 注：仅验持久层；真协调器路径由 Task 5 验证。
+    // 验证 toCapital 参数确实被透传（用 ≠ 默认 10 万 的值）；RFC-A 下记录保留。
+    // 注：仅验持久层；真协调器路径由 coordinator 测验证。
     func test_resetAllTrainingProgress_threads_toCapital_param() throws {
         try seedProgress()
         try db.resetAllTrainingProgress(toCapital: 88_000)
-        XCTAssertEqual(try db.statistics().totalCount, 0)
+        XCTAssertEqual(try db.statistics().totalCount, 1)            // RFC-A：记录保留
         XCTAssertEqual(try db.loadSettings().totalCapital, 88_000)   // 参数透传，非硬编码 100_000
     }
 

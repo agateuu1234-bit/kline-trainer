@@ -82,7 +82,8 @@ struct AppRouterTests {
         settingsLoadError: AppError? = nil,
         seedFiles: [TrainingSetFile] = [cachedFile()],
         seedRecords: [TrainingRecord] = [],
-        api: any APIClient = CountingAPIClient()
+        api: any APIClient = CountingAPIClient(),
+        resetPort: (any TrainingResetPort)? = nil
     ) -> (router: AppRouter, records: InMemoryRecordRepository,
           pending: InMemoryPendingTrainingRepository, journal: InMemoryAcceptanceJournalDAO,
           cache: InMemoryCacheManager, api: any APIClient, coordinator: TrainingSessionCoordinator) {
@@ -92,7 +93,8 @@ struct AppRouterTests {
         let journal = InMemoryAcceptanceJournalDAO()
         let cache = InMemoryCacheManager()
         cache._seedForTesting(seedFiles)
-        let settings = SettingsStore(settingsDAO: CapitalDAO(capital: capital, loadErr: settingsLoadError))
+        let settings = SettingsStore(settingsDAO: CapitalDAO(capital: capital, loadErr: settingsLoadError),
+                                     resetPort: resetPort)
         let coordinator = TrainingSessionCoordinator(
             dbFactory: PreviewTrainingSetDBFactory(candles: candles),
             recordRepo: records, pendingRepo: pending,
@@ -267,5 +269,28 @@ struct AppRouterTests {
         #expect(f.coordinator.activeReader == nil)                    // endAfterSettlement→endSession 关 reader
         #expect(try f.records.listRecords(limit: nil).count == before)   // confirm 不持久化
         #expect(try f.pending.loadPending() == nil)
+    }
+
+    // MARK: - RFC-A R-plan-7-1：resetAllProgressAndReload
+
+    @Test("resetAndReload：homeContent 即时显权威 10 万，历史记录保留（D6）")
+    func resetAndReload_homeShows100kKeepsRecords() async throws {
+        let port = FakeTrainingResetPort()   // FakeTrainingResetPort 在 SettingsStoreProductionTests.swift 同 target
+        // seed 2 条记录（末条 currentCapital ≠ 10 万），configuredCapital 初始也设大于 10 万
+        let f = Self.makeRouter(capital: 200_000,
+                                seedRecords: [Self.record(id: 1, profit: 50_000),
+                                              Self.record(id: 2, profit: 80_000)],
+                                resetPort: port)
+        await f.router.loadHome()
+        // 前提：初始 homeContent.totalCapital 反映 configuredCapital=200_000
+        #expect(f.router.homeContent.totalCapital == "¥ 200,000.00")
+        // 执行
+        try await f.router.resetAllProgressAndReload()
+        // 断言：homeContent 立即显 10 万权威（SettingsStore.resetAllProgress 置 defaultTotalCapital=100_000）
+        #expect(f.router.homeContent.totalCapital == "¥ 100,000.00")
+        // 断言：历史记录保留（FakeTrainingResetPort 不删记录，模拟保留行为）
+        #expect(try f.records.listRecords(limit: nil).count == 2)
+        // 副作用：port 收到了 resetAllTrainingProgress 调用
+        #expect(port.resetToCapital == AppSettings.defaultTotalCapital)
     }
 }

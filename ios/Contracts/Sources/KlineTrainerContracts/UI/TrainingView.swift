@@ -10,7 +10,7 @@
 //   payload（lifecycle.replaySettlementRecord）经 onReplaySettlement 上交 AppRouter 呈现结算窗（RFC §4.5，不入账）；
 //   Normal 仍走 onSessionEnded。
 // - D4 自动结束检测 tick>=maxTick 且 shouldShowSettlement()（Review 抑制）；D5 didFinalize 一次性闸门。
-// - D9（RFC #1 改）：买卖改内联 TradeBarView（点买/卖悬浮小条，非模态 PositionPicker）；全仓/清仓 = tier5 强调档；buyEnabled/sellEnabled 门控小条打开，失败仍走 TradeFeedback toast。D10 交易按钮仅 Normal/Replay，持有/观察随持仓切文案。
+// - D9（RFC-A 改）：点买/卖弹**数量框** TradeBoxView（active-panel overlay，非旧 5 档条/模态 PositionPicker）；按股数下单、显示==提交（.id 绑 strip 请求重置）；buyEnabled=可买≥1手(fee-aware)，失败仍走 TradeFeedback toast。D10 交易按钮仅 Normal/Replay，持有/观察随持仓切文案。
 // - D11 #if canImport(UIKit)：嵌 ChartContainerView（UIViewRepresentable）故同门；host 不编译，Catalyst 编译闸门。
 // - D6 手动结束按钮 + D8 仓位 X/5：**Wave 3 顺位 7 已兑现**（结束本局确认弹窗→engine.forceCloseManually→runFinalize；
 //   顶栏 currentPositionTier；交易失败 Toast + 成功 .heavy 触觉，plan §6.2.4 / RFC §4.1/§4.4a/§4.4b）。
@@ -186,7 +186,8 @@ public struct TrainingView: View {
                                         shares: engine.position.shares,
                                         returnRate: engine.returnRate,
                                         positionTier: engine.currentPositionTier,
-                                        stockName: rec?.stockName, stockCode: rec?.stockCode)
+                                        stockName: rec?.stockName, stockCode: rec?.stockCode,
+                                        currentPrice: engine.currentPrice)
         return VStack(spacing: 6) {
             HStack {
                 Button("返回") {
@@ -215,7 +216,7 @@ public struct TrainingView: View {
                 metricCell("持仓成本/股", bar.holdingCostPerShare, width: 72)
                 metricCell("持仓股数", bar.sharesText, width: 86)
                 metricCell("仓位", bar.positionShort, width: 40)
-                metricCell("浮动盈亏", bar.returnRate, width: nil)   // 末格弹性
+                metricCell("浮动盈亏", bar.holdingPnL, width: nil)   // 末格弹性（RFC-A A3：持仓未实现盈亏）
             }
         }
         .padding(.horizontal, 12)
@@ -239,22 +240,26 @@ public struct TrainingView: View {
             // 防 Normal 置位的 tradeStrip 在模式翻转至 Review/会话结束后悬空，spec §5.3 L3）。
             .overlay(alignment: .bottom) {
                 if showsTradeButtons, let strip = tradeStrip, strip.panel == id {
-                    TradeBarView(
-                        action: strip.action,
-                        onPick: { tier in
-                            // codex R2/R3-high：执行前比对「开条捕获的 (周期, tick)」vs「当前 (周期, tick)」。
-                            // 周期被切(分段钮/两指滑) 或 tick 被推进(持有/观察/买卖) 后作废，不按新状态下单
-                            // （不依赖 onChange 时序，执行时权威判定）。
+                    TradeBoxView(
+                        action: strip.action, price: engine.currentPrice,
+                        cash: engine.cashBalance, holding: engine.position.shares,
+                        fees: engine.fees, initialQty: 0,
+                        onConfirm: { shares in
                             guard tradeStripStillValid(capturedPeriod: strip.period,
                                                        currentPeriod: currentPeriod(of: id),
                                                        capturedTick: strip.tick,
                                                        currentTick: engine.tick.globalTickIndex) else {
                                 tradeStrip = nil; return
                             }
-                            performTrade(strip.action, panel: id, tier: tier)
+                            performTrade(strip.action, panel: id, shares: shares)
                             tradeStrip = nil
                         },
                         onCancel: { tradeStrip = nil })
+                    // codex R-plan-21-1：SwiftUI @State 由视图身份保持，不因 action/panel 变化重置。
+                    // 同 panel 上 买入→卖出 切换若不绑身份，旧 qty 会残留进新框并可被提交。
+                    // 把身份绑到 strip 请求 → 请求(panel/action/tick)变即新身份 → qty @State 重置为 initialQty(0)。
+                    // 键用纯函数（host 可测身份随请求变化）。
+                    .id(TradeBoxContent.boxIdentity(panel: strip.panel, action: strip.action, tick: strip.tick))
                 }
             }
             .overlay {   // active panel 高亮（红描边 inset，RFC-B T2 D10）
@@ -265,22 +270,16 @@ public struct TrainingView: View {
     }
 
     // 交易动作执行：调 engine.buy/sell → TradeFeedback（纯值决策）→ 触觉/Toast（壳执行）。
-    private func performTrade(_ action: TradeAction, panel: PanelId, tier: PositionTier) {
+    private func performTrade(_ action: TradeAction, panel: PanelId, shares: Int) {
         let result: Result<TradeOperation, AppError>
         switch action {
-        case .buy:  result = engine.buy(panel: panel, tier: tier)
-        case .sell: result = engine.sell(panel: panel, tier: tier)
+        case .buy:  result = engine.buy(panel: panel, shares: shares)
+        case .sell: result = engine.sell(panel: panel, shares: shares)
         }
-        if case .success = result {
-            lifecycle.autosave(immediate: true)                 // §4.6：buy/sell 成交即时 durable（D9）
-        }
+        if case .success = result { lifecycle.autosave(immediate: true) }
         let feedback = TradeFeedback(result: result)
-        if feedback.firesHaptic {
-            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()   // D2：仅成功（plan §6.2.4）
-        }
-        if let message = feedback.toastMessage {
-            presentToast(message)
-        }
+        if feedback.firesHaptic { UIImpactFeedbackGenerator(style: .heavy).impactOccurred() }
+        if let message = feedback.toastMessage { presentToast(message) }
     }
 
     // latest-wins 自动消失 Toast（驱动 host-tested ToastState；计时留壳层，不 host 测）。

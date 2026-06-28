@@ -91,16 +91,57 @@ public final class DefaultAppDB: AppDB, TrainingResetPort {
 
     // MARK: - SessionFinalizationPort（Wave 3 顺位 10a，RFC §4.7b）
 
-    /// 单事务：insert record(+ops+drawings, sessionKey 幂等) + clearPending。
+    /// 单事务：insert record(+ops+drawings, sessionKey 幂等) + 条件清 pending + 派生权威资金。
+    /// A4（RFC-A）：事务内从持久记录 `total_capital+profit` 派生权威 `settings.total_capital` 并随成功
+    /// 返回 `(id, totalCapital)`（retry 幂等：同 key 重试返当前权威值，不回退）。
     /// dbQueue.write 即事务边界 —— 任一步抛错整体 rollback（要么都成要么都不成）。
     public func finalizeSession(record: TrainingRecord, ops: [TradeOperation],
-                                drawings: [DrawingObject], sessionKey: String) throws -> Int64 {
+                                drawings: [DrawingObject], sessionKey: String)
+        throws -> (id: Int64, totalCapital: Double) {
         do {
             return try dbQueue.write { db in
+                // R-plan-9-1：插入前判定「是否已存在该 sessionKey」——区分「新 finalize」vs「重复重试」。
+                let alreadyExisted = try Int64.fetchOne(db, sql:
+                    "SELECT id FROM training_records WHERE session_key = ?", arguments: [sessionKey]) != nil
                 let id = try RecordRepositoryImpl.insertRecord(
                     db, record: record, ops: ops, drawings: drawings, sessionKey: sessionKey)
-                try PendingTrainingRepositoryImpl.clearPending(db)
-                return id
+                // R-plan-10-1：仅清「属于本次 finalize sessionKey」的 pending（pending_training 单例 id=1，0004 加了
+                // session_key）。过期重试 k1 时若当前 pending 是更新的 k2 在飞局 → key 不符 → 不清 → 防误删数据。
+                let pendingKey = try String.fetchOne(db, sql:
+                    "SELECT session_key FROM pending_training WHERE id = 1")
+                if pendingKey == sessionKey {
+                    try PendingTrainingRepositoryImpl.clearPending(db)
+                }
+                if alreadyExisted {
+                    // 重复 sessionKey（含「更晚 session 已 finalize 后、旧 session 的过期重试」）：
+                    // **不改权威资金**（否则会把 settings.total_capital 回退到旧 session 值）；
+                    // 返回**当前**权威 settings 值 → coordinator 缓存刷新为 no-op，不回退。
+                    // codex R-plan-12-2/17-1/25-2：本分支 alreadyExisted=true ⇒ 记录已存在 ⇒ 首次 finalize
+                    // 必已 setTotalCapital 写过权威值。故此处 total_capital **缺失/畸形/非有限/负** 都属
+                    // **不一致 DB 状态**（settings 行丢失/迁移偏差），非「全新安装」→ 一律 fail-closed `.dbCorrupted`
+                    // （**不静默兜底 10万**，否则把累积资金悄悄重置回 10万、下局从 10万起、丢弃已结算盈亏）。
+                    // 恢复经 SettingsStore.forceResetAndReload→repairAllToDefaults（R-plan-24-1）。
+                    let txt = try String.fetchOne(db, sql:
+                        "SELECT value FROM settings WHERE key = 'total_capital'")
+                    guard let txt, let v = Double(txt), v.isFinite, v >= 0 else {
+                        throw AppError.persistence(.dbCorrupted)
+                    }
+                    return (id, v)
+                }
+                // 新插入（当前 session 首次 finalize）→ 推进权威资金 = 本记录 total_capital+profit。
+                guard let row = try Row.fetchOne(db, sql:
+                    "SELECT total_capital, profit FROM training_records WHERE id = ?",
+                    arguments: [id]) else {
+                    throw AppError.internalError(module: "P4-finalize",
+                                                 detail: "persisted record id=\(id) not found")
+                }
+                let tc: Double = row["total_capital"]
+                let p: Double = row["profit"]
+                // codex R-plan-13-1（user 拍板：持久化边界 floor）：权威资金不得为负（"不能欠钱"不变量）。
+                // 退化局（局终强平 手续费>持仓价值 → currentTotalCapital<0）→ floor 到 0（=破产；记录仍如实记负 profit）。
+                let authoritativeCapital = max(0, tc + p)
+                try SettingsDAOImpl.setTotalCapital(db, authoritativeCapital)   // setTotalCapital 自带 finite + ≥0 守卫
+                return (id, authoritativeCapital)
             }
         } catch let appErr as AppError { throw appErr }
         catch { throw PersistenceErrorMapping.translate(error) }
@@ -158,14 +199,23 @@ public final class DefaultAppDB: AppDB, TrainingResetPort {
         catch { throw PersistenceErrorMapping.translate(error) }
     }
 
+    /// R-plan-24-1：腐坏恢复——写全部键含 total_capital=默认（override 协议默认，后者经 saveSettings
+    /// 修不掉 total_capital，因单写者已豁免该键）。仅 SettingsStore.forceResetAndReload 调用。
+    public func repairAllToDefaults() throws {
+        do {
+            try dbQueue.write { db in try SettingsDAOImpl.repairAllToDefaults(db) }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
     // MARK: - TrainingResetPort（重置资金「真正归零重来」，运行时 #1）
 
-    /// 单事务：删全部记录(+ops+drawings 子行) + clearPending + setTotalCapital。
+    /// 单事务：清 pending + setTotalCapital（**保留**历史记录）。
+    /// RFC-A：去掉 deleteAll（推翻 #123），重置只清未完成对局 + 置资金；历史记录保留。
     /// dbQueue.write 即事务边界 —— 任一步抛错整体 rollback（要么都成要么都不成）。
     public func resetAllTrainingProgress(toCapital: Double) throws {
         do {
             try dbQueue.write { db in
-                try RecordRepositoryImpl.deleteAll(db)
                 try PendingTrainingRepositoryImpl.clearPending(db)
                 try SettingsDAOImpl.setTotalCapital(db, toCapital)
             }

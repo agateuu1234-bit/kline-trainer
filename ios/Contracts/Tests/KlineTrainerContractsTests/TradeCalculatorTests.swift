@@ -9,165 +9,6 @@ private func approx(_ a: Double, _ b: Double, _ tol: Double = 1e-6) -> Bool {
 private let noMin = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false)
 private let withMin = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
 
-@Suite("TradeCalculator.quoteBuy")
-struct TradeCalculatorBuyTests {
-
-    @Test("happy: 整手买入，佣金按实际")
-    func happy() {
-        let r = TradeCalculator.quoteBuy(totalCapital: 100_000, cash: 100_000,
-                                         tier: .tier1, price: 10, fees: noMin)
-        guard case .success(let q) = r else { Issue.record("expected success, got \(r)"); return }
-        #expect(q.shares == 2000)                       // floor(100000*0.2/10)=2000
-        #expect(approx(q.notional, 20_000))
-        #expect(approx(q.commission, 2.0))              // 20000*0.0001
-        #expect(approx(q.totalCost, 20_002))
-    }
-
-    @Test("lot rounding: 非整百原始股数 floor 至 100 倍")
-    func lotRounding() {
-        let r = TradeCalculator.quoteBuy(totalCapital: 100_000, cash: 100_000,
-                                         tier: .tier1, price: 33, fees: noMin)
-        guard case .success(let q) = r else { Issue.record("expected success"); return }
-        #expect(q.shares == 600)                        // floor(20000/33)=606 -> floor(606/100)*100=600
-        #expect(approx(q.notional, 19_800))
-        #expect(approx(q.commission, 1.98))
-        #expect(approx(q.totalCost, 19_801.98))
-    }
-
-    @Test("FP 根治: 价格非二进制精确(0.07)时 robustFloor 防掉股")
-    func fpRobustFloor() {
-        // 1001/0.07 真值=14300，但 IEEE-754 下 = 14299.999999999998；
-        // 朴素 Int(floor) 得 14299 -> lot 14200；robustFloor 进位回 14300 -> lot 14300。
-        // 此输入经 toolchain 验证会 undershoot——该测试在 robustFloor 换成朴素 floor 时
-        // 必须 FAIL（否则未真正覆盖机制）。
-        let r = TradeCalculator.quoteBuy(totalCapital: 1_001, cash: 1_000_000,
-                                         tier: .tier5, price: 0.07, fees: noMin)
-        guard case .success(let q) = r else { Issue.record("expected success"); return }
-        #expect(q.shares == 14_300)
-        #expect(approx(q.notional, 1_001.0))
-    }
-
-    @Test("insufficientCash: floor 后股数=0")
-    func roundsToZero() {
-        let r = TradeCalculator.quoteBuy(totalCapital: 1_000, cash: 1_000,
-                                         tier: .tier1, price: 10, fees: noMin)
-        #expect(r == .failure(.insufficientCash))       // floor(200/10)=20 -> lot 0
-    }
-
-    @Test("insufficientCash: 总成本 > 可用现金")
-    func costExceedsCash() {
-        let r = TradeCalculator.quoteBuy(totalCapital: 100_000, cash: 50_000,
-                                         tier: .tier5, price: 10, fees: noMin)
-        #expect(r == .failure(.insufficientCash))       // shares 10000 totalCost 100010 > 50000
-    }
-
-    @Test("min commission: 免5开启且佣金<5 计 5")
-    func minCommission() {
-        let r = TradeCalculator.quoteBuy(totalCapital: 100_000, cash: 100_000,
-                                         tier: .tier1, price: 10, fees: withMin)
-        guard case .success(let q) = r else { Issue.record("expected success"); return }
-        #expect(approx(q.commission, 5.0))              // raw 2.0 < 5 -> 5
-        #expect(approx(q.totalCost, 20_005))
-    }
-
-    @Test("invalidShareCount: price<=0")
-    func invalidPrice() {
-        #expect(TradeCalculator.quoteBuy(totalCapital: 100_000, cash: 100_000,
-                                         tier: .tier1, price: 0, fees: noMin) == .failure(.invalidShareCount))
-        #expect(TradeCalculator.quoteBuy(totalCapital: 100_000, cash: 100_000,
-                                         tier: .tier1, price: -5, fees: noMin) == .failure(.invalidShareCount))
-    }
-
-    @Test("invalidShareCount: 负输入")
-    func invalidNegative() {
-        #expect(TradeCalculator.quoteBuy(totalCapital: -1, cash: 100_000,
-                                         tier: .tier1, price: 10, fees: noMin) == .failure(.invalidShareCount))
-        #expect(TradeCalculator.quoteBuy(totalCapital: 100_000, cash: -1,
-                                         tier: .tier1, price: 10, fees: noMin) == .failure(.invalidShareCount))
-    }
-}
-
-@Suite("TradeCalculator.quoteSell")
-struct TradeCalculatorSellTests {
-
-    @Test("happy: 整手卖出，佣金+印花税")
-    func happy() {
-        let r = TradeCalculator.quoteSell(holding: 1000, averageCost: 15,
-                                          tier: .tier2, price: 20, fees: noMin)
-        guard case .success(let q) = r else { Issue.record("expected success, got \(r)"); return }
-        #expect(q.shares == 400)                        // floor(1000*0.4/100)*100=400
-        #expect(approx(q.notional, 8_000))
-        #expect(approx(q.commission, 0.8))              // 8000*0.0001
-        #expect(approx(q.stampDuty, 4.0))               // 8000*0.0005
-        #expect(approx(q.proceeds, 7_995.2))            // 8000-0.8-4.0
-    }
-
-    @Test("清仓 5/5: 不取整，允许零股（奇数持仓全卖）")
-    func clearOddLot() {
-        let r = TradeCalculator.quoteSell(holding: 1050, averageCost: 15,
-                                          tier: .tier5, price: 20, fees: noMin)
-        guard case .success(let q) = r else { Issue.record("expected success"); return }
-        #expect(q.shares == 1050)                       // 清仓全卖不取整
-        #expect(approx(q.notional, 21_000))
-    }
-
-    @Test("清仓 5/5: 持仓 < 100 也全卖")
-    func clearSubLot() {
-        let r = TradeCalculator.quoteSell(holding: 50, averageCost: 15,
-                                          tier: .tier5, price: 20, fees: noMin)
-        guard case .success(let q) = r else { Issue.record("expected success"); return }
-        #expect(q.shares == 50)
-        #expect(approx(q.notional, 1_000))              // 50*20
-        #expect(approx(q.commission, 0.1))              // 1000*0.0001
-        #expect(approx(q.stampDuty, 0.5))               // 1000*0.0005
-        #expect(approx(q.proceeds, 999.4))              // 1000-0.1-0.5
-    }
-
-    @Test("tier3 整手卖出: 500*0.6=300 -> lot 300")
-    func tier3LotRounding() {
-        // 整手卖出正确性测试（非 FP demo：整数 holding × 0.6 不会 FP 下溢，
-        // sell 路径 robustFloor 仅为与 buy 对称的防御层）。
-        let r = TradeCalculator.quoteSell(holding: 500, averageCost: 15,
-                                          tier: .tier3, price: 10, fees: noMin)
-        guard case .success(let q) = r else { Issue.record("expected success"); return }
-        #expect(q.shares == 300)
-        #expect(approx(q.notional, 3_000))
-    }
-
-    @Test("insufficientHolding: 非清仓且 floor 后股数=0")
-    func roundsToZero() {
-        let r = TradeCalculator.quoteSell(holding: 250, averageCost: 15,
-                                          tier: .tier1, price: 20, fees: noMin)
-        #expect(r == .failure(.insufficientHolding))    // floor(250*0.2)=50 -> lot 0，tier1 非清仓
-    }
-
-    @Test("disabled: 空仓点卖出")
-    func emptyHolding() {
-        #expect(TradeCalculator.quoteSell(holding: 0, averageCost: 0,
-                                          tier: .tier1, price: 20, fees: noMin) == .failure(.disabled))
-        // 空仓即使点 5/5 清仓也是 disabled（无仓可清）
-        #expect(TradeCalculator.quoteSell(holding: 0, averageCost: 0,
-                                          tier: .tier5, price: 20, fees: noMin) == .failure(.disabled))
-    }
-
-    @Test("invalidShareCount: price<=0 / holding<0")
-    func invalid() {
-        #expect(TradeCalculator.quoteSell(holding: 1000, averageCost: 15,
-                                          tier: .tier1, price: 0, fees: noMin) == .failure(.invalidShareCount))
-        #expect(TradeCalculator.quoteSell(holding: -1, averageCost: 15,
-                                          tier: .tier1, price: 20, fees: noMin) == .failure(.invalidShareCount))
-    }
-
-    @Test("min commission: 卖出免5开启且佣金<5 计 5")
-    func minCommission() {
-        let r = TradeCalculator.quoteSell(holding: 1000, averageCost: 15,
-                                          tier: .tier2, price: 20, fees: withMin)
-        guard case .success(let q) = r else { Issue.record("expected success"); return }
-        #expect(approx(q.commission, 5.0))              // raw 0.8 < 5 -> 5
-        #expect(approx(q.proceeds, 7_991.0))            // 8000-5-4
-    }
-}
-
 @Suite("TradeCalculator.forceCloseOnEnd")
 struct TradeCalculatorForceCloseTests {
 
@@ -225,5 +66,157 @@ struct TradeCalculatorForceCloseTests {
                                                 price: 20, fees: noMin)
         #expect(q.shares == 0)
         #expect(approx(q.proceeds, 0))
+    }
+}
+
+@Suite("TradeCalculator.quoteBuy(shares:)")
+struct TradeCalculatorBuySharesTests {
+    @Test("happy: 整手买入，cost=notional+commission")
+    func happy() {
+        let r = TradeCalculator.quoteBuy(cash: 100_000, shares: 2000, price: 10, fees: noMin)
+        guard case .success(let q) = r else { Issue.record("expected success, got \(r)"); return }
+        #expect(q.shares == 2000)
+        #expect(approx(q.notional, 20_000))
+        #expect(approx(q.commission, 2.0))      // 20000*0.0001
+        #expect(approx(q.totalCost, 20_002))
+    }
+    @Test("非整手 → invalidShareCount")
+    func notLot() {
+        #expect(TradeCalculator.quoteBuy(cash: 100_000, shares: 250, price: 10, fees: noMin)
+                == .failure(.invalidShareCount))
+    }
+    @Test("0/负股 → invalidShareCount")
+    func zeroShares() {
+        #expect(TradeCalculator.quoteBuy(cash: 100_000, shares: 0, price: 10, fees: noMin)
+                == .failure(.invalidShareCount))
+    }
+    @Test("现金不足 → insufficientCash")
+    func cashShort() {
+        // 1000 股 ×10 = 10000，+佣金 1 = 10001 > 10000
+        #expect(TradeCalculator.quoteBuy(cash: 10_000, shares: 1000, price: 10, fees: noMin)
+                == .failure(.insufficientCash))
+    }
+}
+
+@Suite("TradeCalculator.quoteSell(shares:)")
+struct TradeCalculatorSellSharesTests {
+    @Test("happy: 部分整手卖")
+    func happy() {
+        let r = TradeCalculator.quoteSell(cash: 100_000, holding: 1000, shares: 400, price: 20, fees: noMin)
+        guard case .success(let q) = r else { Issue.record("expected success, got \(r)"); return }
+        #expect(q.shares == 400)
+        #expect(approx(q.notional, 8_000))
+        #expect(approx(q.commission, 0.8))      // 8000*0.0001
+        #expect(approx(q.stampDuty, 4.0))       // 8000*0.0005
+        #expect(approx(q.proceeds, 7_995.2))
+    }
+    @Test("D7 清仓: shares==holding 奇数股放行")
+    func clearOddLot() {
+        let r = TradeCalculator.quoteSell(cash: 100_000, holding: 150, shares: 150, price: 20, fees: noMin)
+        guard case .success(let q) = r else { Issue.record("expected success, got \(r)"); return }
+        #expect(q.shares == 150)
+    }
+    @Test("D7 部分卖非整手且≠holding → invalidShareCount")
+    func partialOddLot() {
+        #expect(TradeCalculator.quoteSell(cash: 100_000, holding: 150, shares: 50, price: 20, fees: noMin)
+                == .failure(.invalidShareCount))
+    }
+    @Test("超持仓 → insufficientHolding")
+    func overSell() {
+        #expect(TradeCalculator.quoteSell(cash: 100_000, holding: 100, shares: 200, price: 20, fees: noMin)
+                == .failure(.insufficientHolding))
+    }
+    @Test("R-plan-14-1：净现金<0（低价小手+免5、近零现金）→ insufficientHolding 之前先 insufficientCash")
+    func negativeNetCash() {
+        // 100 股 ×0.01 = notional 1；免5 commission=5；proceeds = 1-5-tiny ≈ -4.0005；cash=0 → newCash<0
+        #expect(TradeCalculator.quoteSell(cash: 0, holding: 100, shares: 100, price: 0.01, fees: withMin)
+                == .failure(.insufficientCash))
+        // 现金够覆盖净损（cash=10）→ 放行
+        if case .success = TradeCalculator.quoteSell(cash: 10, holding: 100, shares: 100, price: 0.01, fees: withMin) {}
+        else { Issue.record("cash 够覆盖净损应放行") }
+    }
+    @Test("R-plan-14-1：极端价输出非有限 → invalidShareCount（不返非有限 quote）")
+    func nonFiniteOutput() {
+        #expect(TradeCalculator.quoteSell(cash: 1e300, holding: 1_000_000, shares: 1_000_000,
+                                          price: .greatestFiniteMagnitude, fees: noMin)
+                == .failure(.invalidShareCount))
+    }
+}
+
+@Suite("TradeCalculator share helpers")
+struct TradeCalculatorShareHelperTests {
+    @Test("maxBuyableShares: fee-aware 上限（差1手 vs 恰好够）")
+    func maxBuyable() {
+        // cash=10_001, price=10, rate=0.0001：1000 股 notional=10000 commission=1 total=10001≤10001 ✓；
+        // 1100 股 total=11001.1 > 10001 ✗ → 上限 1000
+        #expect(TradeCalculator.maxBuyableShares(cash: 10_001, price: 10, fees: noMin) == 1000)
+        // cash=10_000：1000 股 total=10001 > 10000 → 退到 900
+        #expect(TradeCalculator.maxBuyableShares(cash: 10_000, price: 10, fees: noMin) == 900)
+    }
+    @Test("maxBuyableShares: 免5 下限触发")
+    func maxBuyableMinComm() {
+        // withMin：佣金下限 5。cash=1005, price=1：1000 股 notional=1000 commission=max(0.1,5)=5 total=1005≤1005 ✓
+        #expect(TradeCalculator.maxBuyableShares(cash: 1_005, price: 1, fees: withMin) == 1000)
+        // cash=1004：1000 股 total=1005>1004 → 900（notional900 comm5 total905≤1004）
+        #expect(TradeCalculator.maxBuyableShares(cash: 1_004, price: 1, fees: withMin) == 900)
+    }
+    @Test("maxBuyableShares: 现金/价非法 → 0")
+    func maxBuyableGuard() {
+        #expect(TradeCalculator.maxBuyableShares(cash: 0, price: 10, fees: noMin) == 0)
+        #expect(TradeCalculator.maxBuyableShares(cash: 100, price: 0, fees: noMin) == 0)
+    }
+    @Test("R-plan-6-1：负/近-1/非有限费率不 trap，返 0 / 失败")
+    func badCommissionRateNoTrap() {
+        let neg1 = FeeSnapshot(commissionRate: -1, minCommissionEnabled: false)      // (1+rate)=0 → 旧码除零 +inf → Int() trap
+        let near = FeeSnapshot(commissionRate: -0.9999, minCommissionEnabled: false)  // 旧码巨大值超 Int 范围 → trap
+        let inf  = FeeSnapshot(commissionRate: .infinity, minCommissionEnabled: false)
+        // 守卫后：不崩，返 0
+        #expect(TradeCalculator.maxBuyableShares(cash: 100_000, price: 10, fees: neg1) == 0)
+        #expect(TradeCalculator.maxBuyableShares(cash: 100_000, price: 10, fees: near) == 0)
+        #expect(TradeCalculator.maxBuyableShares(cash: 100_000, price: 10, fees: inf)  == 0)
+        // quoteBuy/quoteSell 同样守卫 → .invalidShareCount（不崩）
+        #expect(TradeCalculator.quoteBuy(cash: 100_000, shares: 1000, price: 10, fees: neg1) == .failure(.invalidShareCount))
+        #expect(TradeCalculator.quoteSell(cash: 100_000, holding: 1000, shares: 100, price: 10, fees: neg1) == .failure(.invalidShareCount))
+        // 正常正费率仍工作
+        #expect(TradeCalculator.maxBuyableShares(cash: 10_001, price: 10, fees: noMin) == 1000)
+    }
+    @Test("R-plan-10-2：极小有限价（商溢出 > Int.max）不 trap，返 0")
+    func tinyPriceNoTrap() {
+        let tiny = Double.leastNonzeroMagnitude          // cash/tiny → +inf
+        #expect(TradeCalculator.maxBuyableShares(cash: 100_000, price: tiny, fees: noMin) == 0)
+        #expect(TradeCalculator.sharesForBuyTier(cash: 100_000, price: tiny, tier: .tier1, fees: noMin) == 0)
+        #expect(TradeCalculator.sharesForBuyTier(cash: 100_000, price: tiny, tier: .tier5, fees: noMin) == 0)
+        // 商超 Int.max 但有限（cash 大、price 极小但非最小）：1e308/1e-300 ≈ 1e608=inf → 0；用可控值
+        #expect(TradeCalculator.maxBuyableShares(cash: 1e300, price: 1e-300, fees: noMin) == 0)
+    }
+    @Test("R-plan-15-1：tiny 有限价 + 免5 二分即时返回（不空转），边界正确")
+    func tinyPriceMinCommissionPrompt() {
+        let withMin = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+        let n = TradeCalculator.maxBuyableShares(cash: 1_000, price: 1e-9, fees: withMin)
+        #expect(n > 0 && n % 100 == 0)
+        // n 可行、n+100 不可行（证明二分取到精确最大手数，非近似；且必然瞬时返回=非空转）
+        #expect(Double(n) * 1e-9 + 5 <= 1_000.0 + 1e-6)
+        #expect(Double(n + 100) * 1e-9 + 5 > 1_000.0)
+    }
+    @Test("sharesForBuyTier: 1/5..4/5 = cash 基准 lot-floor；全仓 = maxBuyable")
+    func buyTier() {
+        #expect(TradeCalculator.sharesForBuyTier(cash: 100_000, price: 10, tier: .tier1, fees: noMin) == 2000)
+        #expect(TradeCalculator.sharesForBuyTier(cash: 100_000, price: 10, tier: .tier4, fees: noMin) == 8000)
+        // 全仓：cash=100_000 →maxBuyable=9900（10000 股 total=100010>100000）
+        #expect(TradeCalculator.sharesForBuyTier(cash: 100_000, price: 10, tier: .tier5, fees: noMin) == 9900)
+    }
+    @Test("sharesForSellTier: 1/5..4/5 = holding 基准 lot-floor；清仓 = 全部（含奇数）")
+    func sellTier() {
+        #expect(TradeCalculator.sharesForSellTier(holding: 1000, tier: .tier2) == 400)
+        #expect(TradeCalculator.sharesForSellTier(holding: 150, tier: .tier5) == 150)   // 清仓含奇数
+        #expect(TradeCalculator.sharesForSellTier(holding: 0, tier: .tier5) == 0)
+    }
+    @Test("tierForFraction: round×5 clamp 1..5")
+    func tierFrac() {
+        #expect(TradeCalculator.tierForFraction(0.0) == .tier1)   // clamp 下限 1
+        #expect(TradeCalculator.tierForFraction(0.2) == .tier1)
+        #expect(TradeCalculator.tierForFraction(0.5) == .tier3)   // round(2.5)=2... 见实现：rounded() banker? 用 .toNearestOrAwayFromZero
+        #expect(TradeCalculator.tierForFraction(1.0) == .tier5)
+        #expect(TradeCalculator.tierForFraction(2.0) == .tier5)   // clamp 上限 5
     }
 }

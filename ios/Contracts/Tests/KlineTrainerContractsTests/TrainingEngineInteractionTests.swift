@@ -103,7 +103,7 @@ import CoreGraphics
         e.applyPanOffset(deltaPixels: 30, panel: .upper)
         e.endPan(velocity: 1000, panel: .upper)
         let upperFake = fakes()[0]
-        _ = e.buy(panel: .upper, tier: .tier1)          // tradeTriggered → 硬切 autoTracking + stopAllDeceleration
+        _ = e.buy(panel: .upper, shares: 2000)          // tradeTriggered → 硬切 autoTracking + stopAllDeceleration
         #expect(e.upperPanel.interactionMode == .autoTracking)
         #expect(upperFake.isInvalidated == true)         // 减速被停（驱动失活）
         let off = e.upperPanel.offset

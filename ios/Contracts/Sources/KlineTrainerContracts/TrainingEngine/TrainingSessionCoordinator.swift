@@ -337,7 +337,11 @@ public final class TrainingSessionCoordinator {
             upperPeriod: engine.upperPanel.period,
             lowerPeriod: engine.lowerPanel.period,
             positionData: try encodePosition(engine.position),
-            cashBalance: engine.cashBalance,
+            // R-plan-18-2/25-1：持久化边界 floor —— 退化局（局终强平 手续费>持仓价值 → cashBalance<0）若被
+            // autosave 写进 pending，且崩溃在 finalize 清 pending 前 → 下次 make 拒负 initialCashBalance →
+            // resume 被 brick。floor max(0,_) 防 brick。明确契约：仅崩溃恢复局按 floored(cash=0) 入历史记录
+            // （少记 ≤ 一次强平佣金，偏保守）；正常 finalize 仍读 engine.currentTotalCapital 如实记负。
+            cashBalance: max(0, engine.cashBalance),
             feeSnapshot: engine.fees,
             tradeOperations: engine.tradeOperations,
             drawings: engine.drawings,
@@ -384,11 +388,14 @@ public final class TrainingSessionCoordinator {
             feeSnapshot: engine.fees,
             finalTick: engine.tick.globalTickIndex)
         // RFC §4.7b：单事务（insertRecord + clearPending 原子）+ §4.7c 幂等锚（sessionKey）
-        let id = try finalization.finalizeSession(record: record,
-                                                  ops: engine.tradeOperations,
-                                                  drawings: engine.drawings,
-                                                  sessionKey: key)
-        return id
+        let result = try finalization.finalizeSession(record: record,
+                                                      ops: engine.tradeOperations,
+                                                      drawings: engine.drawings,
+                                                      sessionKey: key)
+        // R-plan-5-1：刷缓存用「事务内产出、随成功返回的 DB 权威值」result.totalCapital —— retry 也 = 持久
+        // 记录值（非 retry engine 现值）→ 缓存恒 == DB 权威；R-plan-4-2：值随成功返回、无 fallible 后置读。
+        settings.refreshTotalCapital(result.totalCapital)
+        return result.id
     }
 
     /// 非持久化 replay 结算 payload（RFC §4.4e）：replay 结束强平后，构造 in-memory `TrainingRecord`
@@ -462,10 +469,10 @@ public final class TrainingSessionCoordinator {
 
     // MARK: - 私有构造 helper（E6a）
 
-    /// D4：新局起始资金 = 累计模型。有记录 → 末条 total_capital+profit；无记录 → settings 配置本金。
+    /// A4：新局起始资金 = 权威 `settings.total_capital`（直读 DB，绕开缓存陈旧）。
+    /// finalize/reset 已把累积资金写进该字段（单写者）→ 不再从记录累计重算。
     private func startingCapital() throws -> Double {
-        let stats = try recordRepo.statistics()
-        return stats.totalCount > 0 ? stats.currentCapital : settings.settings.totalCapital
+        try settingsDAO.loadSettings().totalCapital
     }
 
     /// D8：按 M0.1 schema 版本打开训练组（每次新 reader 实例，spec L1830）。

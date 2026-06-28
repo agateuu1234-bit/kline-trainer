@@ -35,8 +35,9 @@ enum SettingsDAOImpl {
 
     private static func parseDouble(_ raw: String?, default def: Double) throws -> Double {
         guard let raw = raw else { return def }       // missing → default
-        guard let v = Double(raw), v.isFinite else {  // present but malformed / NaN / inf → corrupt
+        guard let v = Double(raw), v.isFinite, v >= 0 else {  // present but malformed / NaN / inf / negative → corrupt
             // R2 修订（codex med-3）：拒 NaN / +inf / -inf —— 这些值会污染 commission/capital 计算
+            // R-plan-6-1：commission_rate 与 total_capital 均非负量；负值=腐坏，靠 reset 恢复。
             throw AppError.persistence(.dbCorrupted)
         }
         return v
@@ -61,21 +62,22 @@ enum SettingsDAOImpl {
 
     static func saveSettings(_ db: Database, settings s: AppSettings) throws {
         // R2 修订（codex med-3）：拒入参为 NaN / inf 的 commission/capital，避免毒入 DB
-        guard s.commissionRate.isFinite else {
+        // R-plan-6-1：同时拒负值（commission 与 capital 均为非负量）。
+        guard s.commissionRate.isFinite, s.commissionRate >= 0 else {
             throw AppError.internalError(
                 module: "P4-SettingsDAO",
-                detail: "saveSettings refused: commissionRate not finite (\(s.commissionRate))")
+                detail: "saveSettings refused: commissionRate invalid (\(s.commissionRate))")
         }
-        guard s.totalCapital.isFinite else {
+        guard s.totalCapital.isFinite, s.totalCapital >= 0 else {
             throw AppError.internalError(
                 module: "P4-SettingsDAO",
-                detail: "saveSettings refused: totalCapital not finite (\(s.totalCapital))")
+                detail: "saveSettings refused: totalCapital invalid (\(s.totalCapital))")
         }
         let pairs: [(String, String)] = [
             (keyCommissionRate, String(s.commissionRate)),
             (keyMinCommissionEnabled, s.minCommissionEnabled ? "true" : "false"),
-            (keyTotalCapital, String(s.totalCapital)),
             (keyDisplayMode, s.displayMode.rawValue),
+            // R-plan-22-1：不再写 total_capital（单写者经 setTotalCapital / finalize / reset / repairAllToDefaults）
         ]
         for (k, v) in pairs {
             try db.execute(sql:
@@ -92,15 +94,33 @@ enum SettingsDAOImpl {
             arguments: [keyTotalCapital, String(AppSettings.defaultTotalCapital)])
     }
 
-    /// 参数化写 total_capital（供 TrainingResetPort 原子事务复用；不改其它 key）。
+    /// 参数化写 total_capital（供 TrainingResetPort / finalize 原子事务复用；不改其它 key）。
     static func setTotalCapital(_ db: Database, _ value: Double) throws {
-        guard value.isFinite else {
+        guard value.isFinite, value >= 0 else {       // R-plan-13-1：权威资金不得为负
             throw AppError.internalError(
                 module: "P4-SettingsDAO",
-                detail: "setTotalCapital refused: value not finite (\(value))")
+                detail: "setTotalCapital refused: value invalid (\(value))")
         }
         try db.execute(sql:
             "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
             arguments: [keyTotalCapital, String(value)])
+    }
+
+    /// R-plan-24-1：腐坏恢复用——把**全部**键写默认（含 total_capital=默认 10 万，绕开 saveSettings 单写者豁免）。
+    /// **仅** SettingsStore.forceResetAndReload 调用；不走偏好竞态路径（saveSettings 不写 total_capital，
+    /// 单靠它修不掉腐坏/负 total_capital）。
+    static func repairAllToDefaults(_ db: Database) throws {
+        let d = AppSettings.default
+        let pairs: [(String, String)] = [
+            (keyCommissionRate, String(d.commissionRate)),
+            (keyMinCommissionEnabled, d.minCommissionEnabled ? "true" : "false"),
+            (keyTotalCapital, String(d.totalCapital)),
+            (keyDisplayMode, d.displayMode.rawValue),
+        ]
+        for (k, v) in pairs {
+            try db.execute(sql:
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                arguments: [k, v])
+        }
     }
 }

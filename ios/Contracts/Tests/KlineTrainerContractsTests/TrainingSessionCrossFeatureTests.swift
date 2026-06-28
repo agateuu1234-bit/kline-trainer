@@ -11,8 +11,9 @@ struct TrainingSessionCrossFeatureTests {
         let (coord, _, _, _) = PIFixtures.makeCoordinator()
         let engine = try await coord.startNewNormalSession()
         let before = engine.tradeOperations.count
-        let r = engine.buy(panel: .upper, tier: .tier1)              // 改 position/cash + 推 tick
-        guard case .success = r else { Issue.record("buy 须成功（50_000 本金可成交 tier1）"); return }
+        // 1000 = 20%×50_000÷10（等价买入档 1/5）
+        let r = engine.buy(panel: .upper, shares: 1000)              // 改 position/cash + 推 tick
+        guard case .success = r else { Issue.record("buy 须成功（50_000 本金可成交 1000 股）"); return }
         coord.requestAutosave(engine: engine, immediate: true)
         await coord.drainAutosaveForTesting()
         await coord.endSession()

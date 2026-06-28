@@ -186,6 +186,8 @@ public final class InMemorySessionFinalizationPort: SessionFinalizationPort, @un
     private let records: InMemoryRecordRepository
     private let pending: InMemoryPendingTrainingRepository
     private var keyed: [String: Int64] = [:]
+    /// A4：每 sessionKey 首次派生的权威资金（retry 返首次值，mirror 生产锚定首次记录）。
+    private var keyedCapital: [String: Double] = [:]
     /// 注入下一次 finalizeSession 抛错（消费后自动清除）。lock 保护读写。
     private var _failNextFinalize: AppError?
     public var failNextFinalize: AppError? {
@@ -201,7 +203,8 @@ public final class InMemorySessionFinalizationPort: SessionFinalizationPort, @un
     }
 
     public func finalizeSession(record: TrainingRecord, ops: [TradeOperation],
-                                drawings: [DrawingObject], sessionKey: String) throws -> Int64 {
+                                drawings: [DrawingObject], sessionKey: String)
+        throws -> (id: Int64, totalCapital: Double) {
         // 自有 lock 只护 spy/keyed 状态；不持锁调用内层 fake（各有自锁），杜绝嵌套锁
         lock.lock()
         finalizeCallCount += 1
@@ -211,16 +214,19 @@ public final class InMemorySessionFinalizationPort: SessionFinalizationPort, @un
             throw err            // 原子：抛前零状态变更（mirror 生产事务 rollback）
         }
         let existing = keyed[sessionKey]
+        let existingCapital = keyedCapital[sessionKey]
         lock.unlock()
 
-        if let existing {                       // 幂等：命中仍清 pending（mirror 生产 §4.7c）
+        if let existing, let existingCapital {  // 幂等：命中仍清 pending + 返首次派生权威值（mirror 生产 §4.7c）
             try pending.clearPending()
-            return existing
+            return (existing, existingCapital)
         }
         let id = try records.insertRecord(record, ops: ops, drawings: drawings)
         try pending.clearPending()
-        lock.lock(); keyed[sessionKey] = id; lock.unlock()
-        return id
+        // A4：派生权威资金 = 本记录 total_capital+profit（floor 到 0，mirror 生产 R-plan-13-1）
+        let capital = max(0, record.totalCapital + record.profit)
+        lock.lock(); keyed[sessionKey] = id; keyedCapital[sessionKey] = capital; lock.unlock()
+        return (id, capital)
     }
 }
 
@@ -263,6 +269,12 @@ public final class InMemorySettingsDAO: SettingsDAO, @unchecked Sendable {
                                minCommissionEnabled: settings.minCommissionEnabled,
                                totalCapital: AppSettings.defaultTotalCapital,
                                displayMode: settings.displayMode)
+    }
+
+    /// R-plan-24-1：腐坏恢复——写全部键为默认（含 total_capital=默认 10 万）。
+    public func repairAllToDefaults() throws {
+        lock.lock(); defer { lock.unlock() }
+        settings = .default
     }
 }
 
