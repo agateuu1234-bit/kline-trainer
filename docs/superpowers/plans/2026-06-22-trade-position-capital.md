@@ -765,7 +765,11 @@ Expected: 编译失败（`finalizeSession` 现返回 `Int64`、测试用 `r.tota
 ```
 ③ 既有 `DefaultSettingsDAOTests` 中「`saveSettings` 持久化 total_capital」的断言需更新（saveSettings 不再写该键；total_capital 经 `setTotalCapital`/reset 验证）。
 
-测试（race 回归，沿用 in-memory fake DB + SettingsStore）：先 `settings.update{ $0.commissionRate=… }` 取**旧** total_capital 快照但**延迟其 detached save**；其间 `setTotalCapital(DB, 250_000)` + `refreshTotalCapital(250_000)`；放行 update 完成 → 断言 **DB 与缓存 total_capital 仍 == 250_000**（未被旧快照回滚）。
+④ **腐坏恢复路径修复（codex R-plan-24-1）**：`SettingsStore.forceResetAndReload` 现靠 `dao.saveSettings(.default)` 重写修复 dbCorrupted，但 saveSettings 不再写 total_capital → 腐坏/负 total_capital 修不掉、reload 再失败、无 in-app 修复。→ 给 `SettingsDAO` 协议加 **`repairAllToDefaults() throws`**（写**全部**键含 `total_capital`=`AppSettings.defaultTotalCapital`、commission/min/display=默认；**仅腐坏恢复用**、不走偏好竞态路径），`DefaultSettingsDAO` + 所有 fake（`InMemorySettingsDAO`）同步实现；`forceResetAndReload` 内 `dao.saveSettings(.default)` 改 `dao.repairAllToDefaults()`。
+
+测试：
+- race 回归（沿用 in-memory fake DB + SettingsStore）：先 `settings.update{ $0.commissionRate=… }` 取**旧** total_capital 快照但**延迟其 detached save**；其间 `setTotalCapital(DB, 250_000)` + `refreshTotalCapital(250_000)`；放行 update 完成 → 断言 **DB 与缓存 total_capital 仍 == 250_000**（未被旧快照回滚）。
+- 腐坏恢复（R-plan-24-1）：库里 `total_capital` 写成 `'-1.0'`/`'abc'` → `loadSettings()` throws `.dbCorrupted` → `forceResetAndReload(...)` **成功**（`repairAllToDefaults` 重写 total_capital=10万）→ 再 `loadSettings()` 不抛、`totalCapital==100_000`。
 
 - [ ] **Step 4: 跑确认通过 + 全量回归**
 
