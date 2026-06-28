@@ -78,8 +78,8 @@ public final class SettingsStore {
         settings.totalCapital = value
     }
 
-    /// 重置资金「真正归零重来」(运行时 #1)：经注入端口在单事务内清空全部训练记录 +
-    /// 未完成对局，并把资金恢复为 AppSettings.defaultTotalCapital。
+    /// 重置资金(运行时 #1)：经注入端口在单事务内**保留历史训练记录**、仅清未完成对局，
+    /// 并把资金恢复为 AppSettings.defaultTotalCapital（RFC-A：reset 不再删记录）。
     /// 复用 loadError 写阻塞 + pendingMutations 串行化（与 update 同机制）。
     public func resetAllProgress() async throws {
         if let e = _loadError { throw e }   // block writes 直到 reload 成功

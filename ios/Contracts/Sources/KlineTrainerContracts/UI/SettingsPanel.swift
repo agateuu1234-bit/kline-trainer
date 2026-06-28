@@ -97,7 +97,7 @@ public struct SettingsPanel: View {
                 }
             }
         }
-        // 重置资金二次确认（破坏性：清空训练记录）
+        // 重置资金二次确认（RFC-A 非破坏性：保留历史记录，仅清未完成对局 + 资金回 10 万）
         .alert(SettingsPanelContent.resetConfirmTitle, isPresented: $showResetConfirm) {
             Button("取消", role: .cancel) { resetErrorMessage = "" }
             Button("重置", role: .destructive) {
