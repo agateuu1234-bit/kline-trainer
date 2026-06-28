@@ -743,6 +743,30 @@ Expected: 编译失败（`finalizeSession` 现返回 `Int64`、测试用 `r.tota
 
 测试（沿用 `TrainingSessionPersistenceTests` 范式）：构造负现金退化局，**注入 finalize 失败/模拟重启**（直接 saveProgress 后 loadPending + `TrainingEngine.make`），断言 pending 的 `cashBalance >= 0` 且 resume **不抛**（不 brick）。
 
+- [ ] **Step 3e: total_capital 单写者（codex R-plan-22-1）—— 偏好保存不回滚权威资金**
+
+> `SettingsStore.update` 快照整个 AppSettings 存所有键 → 延迟的偏好改动（佣金/主题）会把**旧快照的 total_capital** 写回 DB+缓存、回滚 finalize 已推进的资金。根治 = **total_capital 单写者**（只 setTotalCapital 经 finalize/reset/migration 写 DB；只 refreshTotalCapital/reset 改缓存）。
+
+① `SettingsDAOImpl.saveSettings`：**移除 `total_capital` 写入键**，只写 `commission_rate`/`min_commission_enabled`/`display_mode`（偏好）。
+```swift
+        let pairs: [(String, String)] = [
+            (keyCommissionRate, String(s.commissionRate)),
+            (keyMinCommissionEnabled, s.minCommissionEnabled ? "true" : "false"),
+            (keyDisplayMode, s.displayMode.rawValue),
+            // R-plan-22-1：不再写 total_capital（单写者经 setTotalCapital）
+        ]
+```
+② `SettingsStore.update`：提交缓存时**保留当前权威 total_capital**（detached save 期间 finalize/reset 可能已推进），override 掉快照/closure 对 total_capital 的任何改动：
+```swift
+            try await Task.detached(priority: .userInitiated) { try dao.saveSettings(snapshot) }.value
+            var committed = snapshot
+            committed.totalCapital = self.settings.totalCapital   // R-plan-22-1：保留权威，不被旧快照回滚
+            self.settings = committed
+```
+③ 既有 `DefaultSettingsDAOTests` 中「`saveSettings` 持久化 total_capital」的断言需更新（saveSettings 不再写该键；total_capital 经 `setTotalCapital`/reset 验证）。
+
+测试（race 回归，沿用 in-memory fake DB + SettingsStore）：先 `settings.update{ $0.commissionRate=… }` 取**旧** total_capital 快照但**延迟其 detached save**；其间 `setTotalCapital(DB, 250_000)` + `refreshTotalCapital(250_000)`；放行 update 完成 → 断言 **DB 与缓存 total_capital 仍 == 250_000**（未被旧快照回滚）。
+
 - [ ] **Step 4: 跑确认通过 + 全量回归**
 
 Run: `cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test --filter "TrainingResetPortTests|SessionFinalizationPortTests"` → PASS
