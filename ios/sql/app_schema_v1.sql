@@ -1,6 +1,7 @@
 -- Kline Trainer app.sqlite schema v1（v1.4 fresh state）
 -- GRDB DatabaseMigrator 在 P4 初始化时 registerMigration("0001_v1.4_baseline") 中执行本文件
 -- 变更策略：破坏性变更新增 migration id + 反向 migration（P4 owner）
+-- runtime user_version 终态由 migrator 推进至 3（0005 RFC-A A4 资金权威化，纯 DML，无结构变更）
 
 PRAGMA user_version = 1;
 

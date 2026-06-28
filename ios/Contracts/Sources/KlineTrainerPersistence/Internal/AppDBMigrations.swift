@@ -1,5 +1,6 @@
 import Foundation
 @preconcurrency import GRDB
+import KlineTrainerContracts
 
 /// app.sqlite GRDB DatabaseMigrator 注册表。
 /// **Schema 必须 mirror `ios/sql/app_schema_v1.sql`**（CI 脚本 `scripts/check_app_schema_drift.sh` 校验）。
@@ -118,6 +119,42 @@ enum AppDBMigrations {
                 ON training_records(session_key)
                 """)
             try db.execute(sql: "PRAGMA user_version = 2")
+        }
+
+        // 0005：RFC-A A4 资金权威化数据迁移（user_version 2→3）。
+        // 仅 key='total_capital' 单键回填 = 末条记录(total_capital+profit)，排序对齐 statistics()
+        // (created_at DESC, id DESC) 防同时间戳非确定性。无记录则不动（保留默认 10 万）。
+        // 禁止无 WHERE 的 UPDATE settings（会覆盖 commission/主题等所有键 → DB 判损）。
+        migrator.registerMigration("0005_v1.7_capital_authoritative") { db in
+            if let row = try Row.fetchOne(db, sql: """
+                SELECT total_capital, profit FROM training_records
+                ORDER BY created_at DESC, id DESC LIMIT 1
+                """) {
+                let tc: Double = row["total_capital"]
+                let p: Double = row["profit"]
+                // codex R-plan-8-2：非有限（溢出）跳过写、保留默认（否则 loadSettings 判 .dbCorrupted + 版本号挡重试）。
+                // codex R-plan-13-1：负派生值 floor 到 0（与 finalize 同口径，权威资金不得为负）。
+                if (tc + p).isFinite {
+                    let authoritative = max(0, tc + p)
+                    try db.execute(sql:
+                        "INSERT OR REPLACE INTO settings(key, value) VALUES ('total_capital', ?)",
+                        arguments: [String(authoritative)])
+                }
+            }
+            // codex R-plan-16-1/19-1：清理 legacy 腐坏的非负 settings 键（负/非有限/畸形）为安全默认（无记录也清）——
+            // 否则升级后 loadSettings 的「拒负/拒畸形 fail-closed」会让老用户开局即 .dbCorrupted brick。
+            // **total_capital 与 commission_rate 都是非负量、parseDouble 都已拒负 → 两键对称清理**。
+            // 缺失 → 不写（loadSettings 缺键默认）；合法非负有限 → 不动；其余（负/非有限/非数字）→ 写默认。
+            func cleanNonNegativeSettingKey(_ key: String, default def: Double) throws {
+                guard let txt = try String.fetchOne(db, sql:
+                    "SELECT value FROM settings WHERE key = ?", arguments: [key]) else { return }
+                if let v = Double(txt), v.isFinite, v >= 0 { return }   // 合法 → 不动
+                try db.execute(sql: "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                               arguments: [key, String(def)])
+            }
+            try cleanNonNegativeSettingKey("total_capital", default: AppSettings.defaultTotalCapital)
+            try cleanNonNegativeSettingKey("commission_rate", default: AppSettings.default.commissionRate)
+            try db.execute(sql: "PRAGMA user_version = 3")
         }
 
         return migrator
