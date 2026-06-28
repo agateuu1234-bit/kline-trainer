@@ -505,6 +505,18 @@ func test_reset_keeps_records_and_sets_capital_100k() throws {
 
 `SessionFinalizationPortTests.swift` 加（`someRecord`：total_capital=100_000, profit=23_456 → 派生 123_456）：
 
+> **测试辅助**（绕过 `setTotalCapital`/`saveSettings` 守卫，直写/删 `settings` 行模拟 DB 损坏/行丢失；经本套件持有的底层 `DatabaseQueue`——沿用 AppDB 测试 setup 的 `dbQueue` 访问范式）：
+> ```swift
+> func rawWriteSetting(_ key: String, _ value: String) throws {
+>     try dbQueue.write { try $0.execute(sql:
+>         "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", arguments: [key, value]) }
+> }
+> func rawDeleteSetting(_ key: String) throws {
+>     try dbQueue.write { try $0.execute(sql: "DELETE FROM settings WHERE key = ?", arguments: [key]) }
+> }
+> ```
+> （上文测试写作 `db.rawWriteSetting(...)` 是简写；按本套件实际持有 queue 的方式调用等价 raw 写/删。）
+
 ```swift
 func test_finalize_returns_and_writes_capital_from_persisted_record() throws {
     let r = try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1")
@@ -539,7 +551,7 @@ func test_stale_retry_does_not_clear_unrelated_pending() throws {
 }
 // codex R-plan-12-2：重复重试遇**损坏**的 total_capital（非有限/畸形）→ finalize 抛 .dbCorrupted（不静默兜底 10万）。
 func test_retry_with_corrupt_capital_fails_closed() throws {
-    // 畸形（非数字）+ 负值（R-plan-17-1）两路都 fail-closed，不返非负/不刷负缓存。
+    // 畸形（非数字）+ 负值（R-plan-17-1）都 fail-closed，不返非负/不刷负缓存。
     for bad in ["abc", "-1.0", "inf"] {
         _ = try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1")
         try db.rawWriteSetting("total_capital", bad)   // 绕过 setTotalCapital 守卫，模拟 DB 损坏
@@ -548,6 +560,15 @@ func test_retry_with_corrupt_capital_fails_closed() throws {
             guard case AppError.persistence(.dbCorrupted) = e else { return XCTFail("expected .dbCorrupted for \(bad), got \(e)") }
         }
         try db.rawWriteSetting("total_capital", String(AppSettings.defaultTotalCapital))   // 复位供下一轮
+    }
+}
+// codex R-plan-25-2：重复 finalize（记录已存在）但 total_capital **缺失** = 不一致状态（非全新安装）
+// → fail-closed，**不得**返 10万（否则把累积资金悄悄重置、丢弃已结算盈亏）。
+func test_retry_with_missing_capital_but_record_exists_fails_closed() throws {
+    _ = try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1")  // 首次：记录+权威写入
+    try db.rawDeleteSetting("total_capital")   // 模拟 settings 行丢失/迁移偏差（记录仍在）
+    XCTAssertThrowsError(try db.finalizeSession(record: someRecord, ops: [], drawings: [], sessionKey: "k1")) { e in
+        guard case AppError.persistence(.dbCorrupted) = e else { return XCTFail("expected .dbCorrupted, got \(e)") }
     }
 }
 // codex R-plan-13-1：退化局（total_capital+profit < 0）→ 权威资金 floor 到 0（不写负值）。
@@ -638,18 +659,17 @@ Expected: 编译失败（`finalizeSession` 现返回 `Int64`、测试用 `r.tota
                     // 重复 sessionKey（含「更晚 session 已 finalize 后、旧 session 的过期重试」）：
                     // **不改权威资金**（否则会把 settings.total_capital 回退到旧 session 值）；
                     // 返回**当前**权威 settings 值 → coordinator 缓存刷新为 no-op，不回退。
-                    // codex R-plan-12-2：与 SettingsDAOImpl.loadSettings 同口径 fail-closed——缺失→默认；
-                    // 存在但畸形/非有限→抛 .dbCorrupted（**不静默兜底 10万**，否则掩盖 DB 损坏）。
+                    // codex R-plan-12-2/17-1/25-2：本分支 alreadyExisted=true ⇒ 记录已存在 ⇒ 首次 finalize
+                    // 必已 setTotalCapital 写过权威值。故此处 total_capital **缺失/畸形/非有限/负** 都属
+                    // **不一致 DB 状态**（settings 行丢失/迁移偏差），非「全新安装」→ 一律 fail-closed `.dbCorrupted`
+                    // （**不静默兜底 10万**，否则把累积资金悄悄重置回 10万、下局从 10万起、丢弃已结算盈亏）。
+                    // 恢复经 SettingsStore.forceResetAndReload→repairAllToDefaults（R-plan-24-1）。
                     let txt = try String.fetchOne(db, sql:
                         "SELECT value FROM settings WHERE key = 'total_capital'")
-                    let current: Double
-                    if let txt {
-                        guard let v = Double(txt), v.isFinite, v >= 0 else { throw AppError.persistence(.dbCorrupted) }  // R-plan-17-1：含拒负
-                        current = v
-                    } else {
-                        current = AppSettings.defaultTotalCapital   // 缺失 = 从未设置，合法默认
+                    guard let txt, let v = Double(txt), v.isFinite, v >= 0 else {
+                        throw AppError.persistence(.dbCorrupted)
                     }
-                    return (id, current)
+                    return (id, v)
                 }
                 // 新插入（当前 session 首次 finalize）→ 推进权威资金 = 本记录 total_capital+profit。
                 guard let row = try Row.fetchOne(db, sql:
@@ -734,14 +754,16 @@ Expected: 编译失败（`finalizeSession` 现返回 `Int64`、测试用 `r.tota
         return result.id
 ```
 
-- [ ] **Step 3d: pending 保存边界 floor cash（codex R-plan-18-2）**
+- [ ] **Step 3d: pending 保存边界 floor cash（codex R-plan-18-2/25-1）**
 
 > 退化局（局终自动强平 手续费>持仓价值 → `engine.cashBalance < 0`）若在 finalize 前被 autosave 写进 pending，
 > 且 app 在 finalize 清 pending 前被杀 → 下次 `TrainingEngine.make` 拒负 `initialCashBalance` → **resume 被 brick**。
 > finalize 的「权威资金 floor」管不到 pending 的原始 cashBalance。user 的「持久化边界 floor」决策**延伸到 pending 边界**：
 > `saveProgress` 持久化 `pending.cashBalance` 时取 `max(0, engine.cashBalance)`（grep coordinator `saveProgress`/`PendingTraining(` 构造点，cashBalance 字段处 floor）。
+>
+> **明确契约（codex R-plan-25-1，非静默）**：此 floor 改变了**崩溃恢复局**的序列化终态——若 app 在「局终强平产生负现金」与「finalize 清 pending」之间被杀，**恢复后的那一局**按 floored（cash=0）终值入历史记录，即记录的盈亏比真实负现金**少记 ≤ 一次强平佣金**（极罕见：退化局 × 崩溃窗双重小概率；方向偏保守=不夸大亏损）。**正常（无崩溃）finalize 仍如实记负 profit**（读 `engine.currentTotalCapital` 原值）。此差额按 user「不能欠钱 / 持久化边界 floor」决策接受，**不**为此恢复角宣称真实负历史（spec §3.4 同步限定）。
 
-测试（沿用 `TrainingSessionPersistenceTests` 范式）：构造负现金退化局，**注入 finalize 失败/模拟重启**（直接 saveProgress 后 loadPending + `TrainingEngine.make`），断言 pending 的 `cashBalance >= 0` 且 resume **不抛**（不 brick）。
+测试（沿用 `TrainingSessionPersistenceTests` 范式）：构造负现金退化局（如真实终态 `cashBalance == -k`，k>0），**注入 finalize 失败/模拟重启**（saveProgress 后 loadPending + `TrainingEngine.make`），断言：① pending `cashBalance == 0`（floored）且 resume **不抛**（不 brick）；② 恢复后 finalize 的记录终值 = floored 值（`profit == 0 - startingCapital`，**非** `-k - startingCapital`）——把「恢复角记 floored P&L」钉成定义行为（非静默）。另加一条**正常 finalize**（无崩溃、负现金直接 finalize）断言 `profit == -k - startingCapital`（如实记负），证明仅恢复角 floored。
 
 - [ ] **Step 3e: total_capital 单写者（codex R-plan-22-1）—— 偏好保存不回滚权威资金**
 
