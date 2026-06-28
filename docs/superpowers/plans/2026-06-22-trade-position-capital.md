@@ -857,6 +857,16 @@ final class AppDB0005MigrationTests: XCTestCase {
         // 迁移后 loadSettings 不再因负值抛 .dbCorrupted（开局不 brick）
         XCTAssertNoThrow(try DefaultAppDB(dbPath: dbURL).loadSettings())
     }
+    // codex R-plan-19-1：legacy 负 commission_rate 升级前 → 迁移清为默认 → loadSettings 不 brick（与 capital 对称）。
+    func test_0005_cleans_legacy_negative_commission_rate() throws {
+        let q = try DatabaseQueue(path: dbURL.path)
+        try Self.migrateTo0004(q)
+        try q.write { db in try db.execute(sql: "INSERT OR REPLACE INTO settings(key,value) VALUES ('commission_rate','-0.1')") }
+        try AppDBMigrations.makeMigrator().migrate(q)
+        let rate = try q.read { try String.fetchOne($0, sql: "SELECT value FROM settings WHERE key='commission_rate'") }
+        XCTAssertEqual(Double(rate!)!, 0.0001, accuracy: 1e-9)   // 负费率已清为默认 0.0001
+        XCTAssertNoThrow(try DefaultAppDB(dbPath: dbURL).loadSettings())   // 升级后开局不 brick
+    }
 
     // helpers：migrateTo0004(_:) 注册 0001/0003/0004（**与 AppDBMigrations 同 id 同体**，含 0001 用
     //   `AppDBMigrations.v1_4_baselineDDL`），跑 partial migration → grdb_migrations 标记三者 applied，
@@ -896,20 +906,19 @@ Expected: FAIL（user_version 仍 2；total_capital 仍 100000，未回填）。
                         arguments: [String(authoritative)])
                 }
             }
-            // codex R-plan-16-1：清理 legacy **负/非有限** total_capital（无记录也清）——保证迁移后非负，
-            // 否则升级后 loadSettings 的「拒负 fail-closed」会让老用户开局即 .dbCorrupted brick。
-            // 读当前值：负/非有限 → 写默认 10万；缺失 → 不写（loadSettings 缺键默认）；有效非负 → 不动。
-            if let curTxt = try String.fetchOne(db, sql: "SELECT value FROM settings WHERE key = 'total_capital'") {
-                if let cur = Double(curTxt), !(cur.isFinite && cur >= 0) {
-                    try db.execute(sql:
-                        "INSERT OR REPLACE INTO settings(key, value) VALUES ('total_capital', ?)",
-                        arguments: [String(AppSettings.defaultTotalCapital)])
-                } else if Double(curTxt) == nil {   // 畸形串（非数字）→ 亦清为默认
-                    try db.execute(sql:
-                        "INSERT OR REPLACE INTO settings(key, value) VALUES ('total_capital', ?)",
-                        arguments: [String(AppSettings.defaultTotalCapital)])
-                }
+            // codex R-plan-16-1/19-1：清理 legacy 腐坏的非负 settings 键（负/非有限/畸形）为安全默认（无记录也清）——
+            // 否则升级后 loadSettings 的「拒负/拒畸形 fail-closed」会让老用户开局即 .dbCorrupted brick。
+            // **total_capital 与 commission_rate 都是非负量、parseDouble 都已拒负 → 两键对称清理**。
+            // 缺失 → 不写（loadSettings 缺键默认）；合法非负有限 → 不动；其余（负/非有限/非数字）→ 写默认。
+            func cleanNonNegativeSettingKey(_ key: String, default def: Double) throws {
+                guard let txt = try String.fetchOne(db, sql:
+                    "SELECT value FROM settings WHERE key = ?", arguments: [key]) else { return }
+                if let v = Double(txt), v.isFinite, v >= 0 { return }   // 合法 → 不动
+                try db.execute(sql: "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                               arguments: [key, String(def)])
             }
+            try cleanNonNegativeSettingKey("total_capital", default: AppSettings.defaultTotalCapital)
+            try cleanNonNegativeSettingKey("commission_rate", default: AppSettings.default.commissionRate)
             try db.execute(sql: "PRAGMA user_version = 3")
         }
 ```
