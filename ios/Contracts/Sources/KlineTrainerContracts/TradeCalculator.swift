@@ -34,55 +34,6 @@ public enum TradeCalculator {
     public static let minCommissionAmount: Double = 5  // 免5关闭时的最低佣金
     public static let shareLotSize: Int = 100          // A股一手 = 100 股
 
-    // MARK: - Buy
-
-    public static func quoteBuy(totalCapital: Double, cash: Double,
-                                tier: PositionTier, price: Double,
-                                fees: FeeSnapshot) -> Result<BuyQuote, TradeReason> {
-        guard price > 0, totalCapital >= 0, cash >= 0,
-              price.isFinite, totalCapital.isFinite, cash.isFinite else {
-            return .failure(.invalidShareCount)
-        }
-        let targetAmount = totalCapital * ratio(of: tier)
-        let rawShares = robustFloor(targetAmount / price)
-        let lotShares = (rawShares / shareLotSize) * shareLotSize
-        guard lotShares > 0 else { return .failure(.insufficientCash) }
-
-        let notional = Double(lotShares) * price
-        let commission = computeCommission(notional: notional, fees: fees)
-        let totalCost = notional + commission
-        guard totalCost <= cash else { return .failure(.insufficientCash) }
-
-        return .success(BuyQuote(shares: lotShares, notional: notional,
-                                 commission: commission, totalCost: totalCost))
-    }
-
-    // MARK: - Sell
-
-    public static func quoteSell(holding: Int, averageCost: Double,
-                                 tier: PositionTier, price: Double,
-                                 fees: FeeSnapshot) -> Result<SellQuote, TradeReason> {
-        // averageCost 属冻结签名；E3 不用它（已实现盈亏由 E5 调用方按 averageCost 计算），
-        // 故有意不做 isFinite 校验（未参与计算，校验无意义）。
-        guard price > 0, holding >= 0, price.isFinite else {
-            return .failure(.invalidShareCount)
-        }
-        guard holding > 0 else { return .failure(.disabled) }
-
-        let sellShares: Int
-        if tier == .tier5 {
-            sellShares = holding                        // 清仓：全部持仓，不取整，允许零股
-        } else {
-            // robustFloor 在 sell 路径为防御性对称（整数 holding × 5 档比例不会 FP 下溢），
-            // 与 buy 路径保持一致 floor 语义。
-            sellShares = (robustFloor(Double(holding) * ratio(of: tier)) / shareLotSize) * shareLotSize
-        }
-        // 仅 non-tier5 可达：tier5 分支已令 sellShares = holding（holding>0 已由上方 guard 保证）
-        guard sellShares > 0 else { return .failure(.insufficientHolding) }
-
-        return .success(makeSellQuote(shares: sellShares, price: price, fees: fees))
-    }
-
     // MARK: - Force close (end of game)
 
     public static func forceCloseOnEnd(holding: Int, averageCost: Double,

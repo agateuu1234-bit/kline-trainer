@@ -1,8 +1,14 @@
 // ios/Contracts/Sources/KlineTrainerContracts/UI/TradeBoxContent.swift
 // RFC-A A2：买卖框纯值。给定 action/price/cash/holding/fees/qty → 可买可卖/预估/各档填入/确认使能。
-// 仅 import Foundation —— host 全测。TradeAction 复用 TradeBarContent.swift 定义。
+// 仅 import Foundation —— host 全测。
 
 import Foundation
+
+/// 交易方向（买 / 卖）。
+public enum TradeAction: Equatable, Sendable {
+    case buy
+    case sell
+}
 
 public struct TradeBoxContent: Equatable, Sendable {
     public let action: TradeAction

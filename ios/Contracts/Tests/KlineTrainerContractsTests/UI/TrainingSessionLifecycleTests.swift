@@ -156,7 +156,7 @@ struct TrainingSessionLifecycleTests {
         let id = try Self.seedRecord(records, total: 80_000)
         let engine = try await coord.replay(recordId: id)
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
-        _ = engine.buy(panel: .upper, tier: .tier1)       // 建非平凡终态（replay 可交易）
+        _ = engine.buy(panel: .upper, shares: 1600)       // 建非平凡终态（replay 可交易；1600 = 20%×80_000÷10）
         engine.forceCloseManually()                       // 强平须 caller 先行（D4）→ 持仓平
         #expect(engine.position.shares == 0)
         let payload = try life.replaySettlementRecord()

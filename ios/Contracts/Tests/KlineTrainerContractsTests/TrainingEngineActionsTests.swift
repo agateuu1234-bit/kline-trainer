@@ -87,6 +87,19 @@ import CoreGraphics
         #expect(e.sellEnabled == false)
     }
 
+    @Test func buyEnabledFalseOnNegativeCommissionRate() {
+        // R-plan-6-1：负费率 → maxBuyableShares 守卫返 0 < shareLotSize → buyEnabled false（不崩）
+        let negFees = FeeSnapshot(commissionRate: -1, minCommissionEnabled: false)
+        let maxTick = 2
+        let e = TrainingEngine(
+            flow: NormalFlow(fees: negFees, maxTick: maxTick),
+            allCandles: Self.m3Candles([10, 10, 10]),
+            maxTick: maxTick,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m3, initialLowerPeriod: .m3)
+        #expect(e.buyEnabled == false)   // maxBuyableShares 守卫负费率 → 0 < 100 → false，不崩
+    }
+
     // MARK: - switchPeriodCombo fixture
 
     /// 全 6 周期 fixture（switchPeriodCombo 需 target 周期有数据）。
@@ -246,8 +259,8 @@ import CoreGraphics
 
     @Test func buySuccessDeductsCashAddsPositionAndAdvances() {
         let e = Self.tradeEngine(closes: [10, 10, 10], cash: 100_000, capital: 100_000)
-        // tier1 = 20% of 100_000 / 10 = 2000 股；notional 20000；commission max(20000*0.0001=2,5)=5；totalCost 20005
-        let r = e.buy(panel: .upper, tier: .tier1)
+        // shares=2000（tier1 等价：20%×100_000÷10=2000）；notional 20000；commission max(2,5)=5；totalCost 20005
+        let r = e.buy(panel: .upper, shares: 2000)
         guard case .success(let op) = r else { Issue.record("expected success"); return }
         #expect(e.position.shares == 2000)
         #expect(e.cashBalance == 100_000 - 20_005)
@@ -266,7 +279,7 @@ import CoreGraphics
 
     @Test func buyRecordsBuyMarkerAtEntryTick() {
         let e = Self.tradeEngine(closes: [10, 10, 10])
-        _ = e.buy(panel: .upper, tier: .tier1)
+        _ = e.buy(panel: .upper, shares: 2000)
         #expect(e.markers.count == 1)
         #expect(e.markers[0].direction == .buy)
         #expect(e.markers[0].globalTick == 0)
@@ -276,16 +289,16 @@ import CoreGraphics
     @Test func buyUsesEntryTickPriceNotPostAdvancePrice() {
         // 价格在 advance 后变化；成交价必须是 entryTick 价(10)，非 advance 后价(99)
         let e = Self.tradeEngine(closes: [10, 99, 99])
-        let r = e.buy(panel: .upper, tier: .tier1)
+        let r = e.buy(panel: .upper, shares: 2000)
         guard case .success(let op) = r else { Issue.record("expected success"); return }
         #expect(op.price == 10)
     }
 
     @Test func buyFailureInsufficientCashLeavesStateUnchanged() {
-        // 现金不足买任何一手：cash 50，price 100 → 任何档取整 0 股 或 totalCost>cash
+        // 现金不足 1 手：cash 50，price 100 → 100 股 totalCost=10005 > 50
         let e = Self.tradeEngine(closes: [100, 100, 100], cash: 50, capital: 50)
         let before = (e.position.shares, e.cashBalance, e.tick.globalTickIndex)
-        let r = e.buy(panel: .upper, tier: .tier1)
+        let r = e.buy(panel: .upper, shares: 100)
         #expect(r == .failure(.trade(.insufficientCash)))
         #expect(e.position.shares == before.0)
         #expect(e.cashBalance == before.1)
@@ -296,7 +309,7 @@ import CoreGraphics
 
     @Test func buyFailsInReviewModeWithDisabled() {
         let e = Self.tradeEngine(closes: [10, 10, 10], mode: .review)
-        let r = e.buy(panel: .upper, tier: .tier1)
+        let r = e.buy(panel: .upper, shares: 2000)
         #expect(r == .failure(.trade(.disabled)))
     }
 
@@ -304,7 +317,7 @@ import CoreGraphics
         // R2-C1：证「两面板 revision 自增」= buy 经 advanceAndAccount 对两面板派发 .tradeTriggered。
         let e = Self.tradeEngine(closes: [10, 10, 10])
         let upRev = e.upperPanel.revision, lowRev = e.lowerPanel.revision
-        _ = e.buy(panel: .upper, tier: .tier1)
+        _ = e.buy(panel: .upper, shares: 2000)
         #expect(e.upperPanel.interactionMode == .autoTracking)
         #expect(e.lowerPanel.interactionMode == .autoTracking)
         #expect(e.upperPanel.revision > upRev)
@@ -313,7 +326,7 @@ import CoreGraphics
 
     @Test func buyAppendsTradeOperation() {
         let e = Self.tradeEngine(closes: [10, 10, 10])
-        _ = e.buy(panel: .upper, tier: .tier1)
+        _ = e.buy(panel: .upper, shares: 2000)
         #expect(e.tradeOperations.count == 1)
         #expect(e.tradeOperations[0].direction == .buy)
     }
@@ -321,11 +334,11 @@ import CoreGraphics
     // MARK: - sell
 
     @Test func sellSuccessAddsCashReducesPositionAndAdvances() {
-        // 持仓 1000 股 @avg10；tier5 全清；price 10；notional 10000；commission max(1,5)=5；
+        // 持仓 1000 股；清仓 1000 shares；price 10；notional 10000；commission max(1,5)=5；
         // stampDuty 10000*0.0005=5；proceeds 10000-5-5=9990
         let e = Self.tradeEngine(closes: [10, 10, 10], cash: 0, capital: 10_000,
                                  position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
-        let r = e.sell(panel: .upper, tier: .tier5)
+        let r = e.sell(panel: .upper, shares: 1000)
         guard case .success(let op) = r else { Issue.record("expected success"); return }
         #expect(e.position.shares == 0)
         #expect(e.cashBalance == 9990)
@@ -342,34 +355,34 @@ import CoreGraphics
     @Test func sellRecordsSellMarker() {
         let e = Self.tradeEngine(closes: [10, 10, 10], cash: 0, capital: 10_000,
                                  position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
-        _ = e.sell(panel: .upper, tier: .tier5)
+        _ = e.sell(panel: .upper, shares: 1000)
         #expect(e.markers.count == 1)
         #expect(e.markers[0].direction == .sell)
         #expect(e.markers[0].globalTick == 0)
     }
 
     @Test func sellPartialTierKeepsRemainingShares() {
-        // 1000 股 tier1(20%)：目标 200 股 → floor100 = 200 股卖出；剩 800
+        // 1000 股 部分卖 200 股（tier1 等价 20%）；剩 800
         let e = Self.tradeEngine(closes: [10, 10, 10], cash: 0, capital: 10_000,
                                  position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))
-        let r = e.sell(panel: .upper, tier: .tier1)
+        let r = e.sell(panel: .upper, shares: 200)
         guard case .success(let op) = r else { Issue.record("expected success"); return }
         #expect(op.shares == 200)
         #expect(e.position.shares == 800)
     }
 
-    @Test func sellFailsWhenFlatWithDisabled() {
-        // 这里 NormalFlow.canBuySell()==true（非 review）；.disabled 来自 quoteSell(holding==0)，非模式门。
+    @Test func sellFailsWhenFlatInsufficientHolding() {
+        // 空仓卖出：holding==0 → shares(100) > holding(0) → .insufficientHolding（模式门外）
         let e = Self.tradeEngine(closes: [10, 10, 10], position: .init())
-        let r = e.sell(panel: .upper, tier: .tier5)
-        #expect(r == .failure(.trade(.disabled)))   // quoteSell holding==0 → .disabled
+        let r = e.sell(panel: .upper, shares: 100)
+        #expect(r == .failure(.trade(.insufficientHolding)))
     }
 
-    @Test func sellFailsInsufficientHoldingWhenRoundsToZero() {
-        // 持仓 50 股(<100)，非 tier5：floor(50*0.2=10 /100)*100 = 0 → insufficientHolding
+    @Test func sellFailsWhenSharesExceedHolding() {
+        // 持仓 50 股；卖 100（1 手）> 持仓 → insufficientHolding（失败不 mutate）
         let e = Self.tradeEngine(closes: [10, 10, 10], cash: 0, capital: 500,
                                  position: PositionManager(shares: 50, averageCost: 10, totalInvested: 500))
-        let r = e.sell(panel: .upper, tier: .tier1)
+        let r = e.sell(panel: .upper, shares: 100)
         #expect(r == .failure(.trade(.insufficientHolding)))
         #expect(e.position.shares == 50)        // 失败不 mutate
         #expect(e.tick.globalTickIndex == 0)    // 失败不 advance
@@ -380,7 +393,7 @@ import CoreGraphics
         let e = Self.tradeEngine(closes: [10, 10, 10],
                                  position: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000),
                                  mode: .review)
-        let r = e.sell(panel: .upper, tier: .tier5)
+        let r = e.sell(panel: .upper, shares: 1000)
         #expect(r == .failure(.trade(.disabled)))
     }
 
@@ -430,7 +443,7 @@ import CoreGraphics
     @Test func buyThatAdvancesToEndTriggersForceClose() {
         // maxTick=1，tick0 买入推进到 tick1(=maxTick) → 持仓被强平
         let e = Self.tradeEngine(closes: [10, 10], cash: 100_000, capital: 100_000)
-        let r = e.buy(panel: .upper, tier: .tier1)
+        let r = e.buy(panel: .upper, shares: 2000)
         guard case .success = r else { Issue.record("expected success"); return }
         #expect(e.tick.globalTickIndex == 1)
         #expect(e.position.shares == 0)             // 买入后立即被局终强平
@@ -455,9 +468,9 @@ import CoreGraphics
     }
 
     @Test func currentPositionTierThreeAfterBuyingSixtyPercent() {
-        // 买 3/5（60% of 100_000 / 10 = 6000 股），价不变：6000*10=60000 / (39994+60000=99994) = .60003 → ×5=3.0002 → round 3
+        // 买 6000 股（tier3 等价 60%×100_000÷10=6000），价不变：6000*10=60000 / (39994+60000=99994) = .60003 → ×5=3.0002 → round 3
         let e = Self.tradeEngine(closes: [10, 10, 10], cash: 100_000, capital: 100_000)
-        _ = e.buy(panel: .upper, tier: .tier3)
+        _ = e.buy(panel: .upper, shares: 6000)
         #expect(e.position.shares == 6000)
         #expect(e.currentPositionTier == 3)
     }
@@ -474,10 +487,10 @@ import CoreGraphics
         // 钉死「持仓市值 / 当前总资金基准 + round」；stateful「记住买入档位」实现会卡在 4/5 → 第二个断言失败。
         // maxTick=3：buy@tick0→tick1、sell@tick1→tick2（tick2<3，不触局终强平）。
         let e = Self.tradeEngine(closes: [10, 20, 20, 20], cash: 100_000, capital: 100_000)
-        _ = e.buy(panel: .upper, tier: .tier4)      // 80% of 100000 / 10 = 8000 股；advance→tick1（价 20）
+        _ = e.buy(panel: .upper, shares: 8000)      // 80%×100_000÷10=8000；advance→tick1（价 20）
         #expect(e.position.shares == 8000)
         #expect(e.currentPositionTier == 4)         // 8000*20=160000 / (19992+160000=179992) = .8889 → ×5=4.44 → round 4
-        _ = e.sell(panel: .upper, tier: .tier2)     // 卖 持仓 40% = 3200 股；advance→tick2（价 20，不强平）
+        _ = e.sell(panel: .upper, shares: 3200)     // 40%×8000=3200；advance→tick2（价 20，不强平）
         #expect(e.position.shares == 4800)
         #expect(e.currentPositionTier == 3)         // 4800*20=96000 / (83953.6+96000=179953.6) = .5335 → ×5=2.667 → round 3
     }
@@ -612,7 +625,7 @@ import CoreGraphics
         // 残留终态（持仓未平 / 市值含 inf）的 finalize gating 归 RFC §4.7 顺位 10a/10b，**非 6a**；
         // 本测试只钉死 6a 不变量「force-close 体不腐蚀 cash」。
         let e = Self.tradeEngine(closes: [10, .greatestFiniteMagnitude], cash: 100_000, capital: 100_000)
-        let r = e.buy(panel: .upper, tier: .tier1)      // tick0@10 买入 → advance→tick1(=maxTick) → auto force-close 触发
+        let r = e.buy(panel: .upper, shares: 2000)      // tick0@10 买入 → advance→tick1(=maxTick) → auto force-close 触发
         guard case .success = r else { Issue.record("buy@tick0 应成功"); return }
         #expect(e.tick.globalTickIndex == 1)
         #expect(e.cashBalance.isFinite)                 // **cash 未被写 NaN**（6a finite 守卫）
@@ -651,7 +664,7 @@ import CoreGraphics
         // 不让 caller 路由结算去 finalize 持久化 NaN/inf。污染源（advance drawdown）根治归顺位 10，非 6a。
         // 序列 [10, 1e308, 10]：买@tick0 → 持有推进 tick1（污染 drawdown）→ 推进 tick2(=maxTick) 末根价 10 干净强平。
         let e = Self.tradeEngine(closes: [10, 1e308, 10], cash: 100_000, capital: 100_000)
-        let r = e.buy(panel: .upper, tier: .tier1)      // tick0@10 买 2000 股 → advance tick1（价 1e308 → drawdown 污染 inf）
+        let r = e.buy(panel: .upper, shares: 2000)      // tick0@10 买 2000 股 → advance tick1（价 1e308 → drawdown 污染 inf）
         guard case .success = r else { Issue.record("buy@tick0 应成功"); return }
         e.holdOrObserve(panel: .upper)                  // tick1 → tick2(=maxTick)，末根价 10 干净 auto 强平 → 持仓平、cash 有限
         #expect(e.position.shares == 0)                 // 已平

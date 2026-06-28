@@ -600,7 +600,7 @@ struct TrainingSessionPersistenceTests {
     @Test("replaySettlementPayload: 强平后终态 → in-memory TrainingRecord（原局 fees + meta）")
     func replaySettlementPayload_returnsTerminalStateRecord() async throws {
         let (coord, engine, _, _) = try await Self.makeReplaySession(capital: 100_000)
-        _ = engine.buy(panel: .upper, tier: .tier1)      // replay 可交易；建非平凡终态
+        _ = engine.buy(panel: .upper, shares: 2000)      // replay 可交易；建非平凡终态
         engine.forceCloseManually()                       // 6a：强平 → 持仓平
         #expect(engine.position.shares == 0)
         let payload = try coord.replaySettlementPayload(engine: engine)
@@ -620,7 +620,7 @@ struct TrainingSessionPersistenceTests {
     func replaySettlementPayload_doesNotPersist() async throws {
         let (coord, engine, records, pending) = try await Self.makeReplaySession()
         let recordsBefore = try records.listRecords(limit: nil).count   // = 1（仅 seed 的源 record）
-        _ = engine.buy(panel: .upper, tier: .tier1)
+        _ = engine.buy(panel: .upper, shares: 2000)
         engine.forceCloseManually()
         _ = try coord.replaySettlementPayload(engine: engine)
         #expect(try records.listRecords(limit: nil).count == recordsBefore)   // 无新 insert

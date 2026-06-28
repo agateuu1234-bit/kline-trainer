@@ -61,7 +61,7 @@ struct CoordinatorCapitalIntegrationTests {
         let (coord, store) = Self.makeCoordinator(appDB: appDB,
             candles: Self.candles(close: { 10 + Double($0) }))
         let engine = try await coord.startNewNormalSession()   // 起始本金 = DB 权威 10 万
-        _ = engine.buy(panel: .upper, tier: .tier1)            // 建仓 + 推进 → 价升 → 盈利
+        _ = engine.buy(panel: .upper, shares: 2000)            // 建仓 + 推进 → 价升 → 盈利
         let id = try await coord.finalize(engine: engine)
         #expect(id != nil)
         // 同一注入 SettingsStore：缓存值 == DB 权威值（无需重启/reload）
