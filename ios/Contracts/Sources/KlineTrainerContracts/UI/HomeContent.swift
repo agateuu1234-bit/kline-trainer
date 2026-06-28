@@ -47,9 +47,9 @@ public struct HomeContent: Equatable, Sendable {
         // 统计栏 §6.1.1
         self.totalSessions = "\(statistics.totalCount) 局"   // M2：N 取 statistics.totalCount，非 rows.count
         self.winRate = Self.formatWinRate(winCount: statistics.winCount, totalCount: statistics.totalCount)
-        // D13：回退判据 = totalCount==0（与 coordinator.startingCapital 字面一致），>0 无条件显示 currentCapital
-        let capitalToShow = statistics.totalCount == 0 ? configuredCapital : statistics.currentCapital
-        self.totalCapital = Self.formatCapital(capitalToShow)
+        // RFC-A D6（codex R-plan-4-1）：当前资金恒用权威 settings.total_capital（经 configuredCapital 注入，
+        // 活缓存已 finalize/reset 刷新）；不再用 statistics.currentCapital 派生（reset 保留记录后派生值会陈旧）。
+        self.totalCapital = Self.formatCapital(configuredCapital)
         // 按钮 §6.1.2
         self.isResuming = hasPending
         self.primaryActionLabel = hasPending ? "继续训练" : "开始训练"

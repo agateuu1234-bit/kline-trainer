@@ -11,6 +11,9 @@ public struct SettingsPanel: View {
     private let api: any APIClient
     private let cache: any CacheManager
     private let acceptance: DownloadAcceptanceRunner
+    /// RFC-A R-plan-7-1：reset 确认后经此闭包路由（调用方注入 router.resetAllProgressAndReload），
+    /// 使 reset 后 homeContent 立即用权威 10 万重建，而非等下一次 loadHome。
+    private let onConfirmReset: () async throws -> Void
 
     @State private var commissionInput = ""
     @State private var showCommissionEditor = false
@@ -25,11 +28,13 @@ public struct SettingsPanel: View {
     @State private var resetErrorMessage = ""
 
     public init(settings: SettingsStore, api: any APIClient,
-                cache: any CacheManager, acceptance: DownloadAcceptanceRunner) {
+                cache: any CacheManager, acceptance: DownloadAcceptanceRunner,
+                onConfirmReset: @escaping () async throws -> Void) {
         self.settings = settings
         self.api = api
         self.cache = cache
         self.acceptance = acceptance
+        self.onConfirmReset = onConfirmReset
     }
 
     public var body: some View {
@@ -97,7 +102,7 @@ public struct SettingsPanel: View {
             Button("取消", role: .cancel) { resetErrorMessage = "" }
             Button("重置", role: .destructive) {
                 Task {
-                    do { try await settings.resetAllProgress(); resetErrorMessage = "" }
+                    do { try await onConfirmReset(); resetErrorMessage = "" }
                     catch { resetErrorMessage = "重置失败：\((error as? AppError)?.userMessage ?? "未知错误")" }
                 }
             }
@@ -201,6 +206,7 @@ private func _previewRunner() -> DownloadAcceptanceRunner {
 
 #Preview {
     SettingsPanel(settings: .preview(), api: _PreviewSettingsAPIClient(),
-                  cache: InMemoryCacheManager(), acceptance: _previewRunner())
+                  cache: InMemoryCacheManager(), acceptance: _previewRunner(),
+                  onConfirmReset: { /* preview: no-op */ })
 }
 #endif

@@ -57,17 +57,47 @@ struct SettingsPanelContentTests {
     }
 }
 
-@Suite("SettingsPanelContent 重置资金文案")
+@Suite("SettingsPanelContent 重置资金文案（RFC-A R-plan-7-2：非破坏性）")
 struct SettingsPanelContentResetCopyTests {
-    @Test("确认文案披露将清空训练记录（破坏性如实告知）")
-    func resetConfirmDisclosesRecordClearing() {
-        #expect(SettingsPanelContent.resetConfirmTitle.contains("清空训练记录"))
-        #expect(SettingsPanelContent.resetConfirmTitle.contains("100,000")
-                || SettingsPanelContent.resetConfirmMessage.contains("100,000"))
-    }
-    @Test("按钮文案披露清空记录 + 资金额度")
-    func resetButtonDisclosesClearAndCapital() {
-        #expect(SettingsPanelContent.resetButtonLabel.contains("清空记录"))
+    // --- 正向：含「保留」「¥100,000」 ---
+
+    @Test("按钮文案含保留记录 + 资金额度")
+    func resetButtonContainsRetainAndCapital() {
+        #expect(SettingsPanelContent.resetButtonLabel.contains("保留"))
         #expect(SettingsPanelContent.resetButtonLabel.contains("100,000"))
+    }
+
+    @Test("确认标题含重置资金（非破坏性措辞）")
+    func resetConfirmTitleContainsReset() {
+        #expect(SettingsPanelContent.resetConfirmTitle.contains("重置资金"))
+    }
+
+    @Test("确认消息含保留记录 + 资金额度")
+    func resetConfirmMessageContainsRetainAndCapital() {
+        #expect(SettingsPanelContent.resetConfirmMessage.contains("保留"))
+        #expect(SettingsPanelContent.resetConfirmMessage.contains("100,000"))
+    }
+
+    // --- 负向：不含旧的破坏性措辞 ---
+
+    @Test("三串均不含「删除全部」（旧破坏性文案）")
+    func noDeleteAll() {
+        #expect(!SettingsPanelContent.resetButtonLabel.contains("删除全部"))
+        #expect(!SettingsPanelContent.resetConfirmTitle.contains("删除全部"))
+        #expect(!SettingsPanelContent.resetConfirmMessage.contains("删除全部"))
+    }
+
+    @Test("三串均不含「清空记录」（旧破坏性文案）")
+    func noClearRecords() {
+        #expect(!SettingsPanelContent.resetButtonLabel.contains("清空记录"))
+        #expect(!SettingsPanelContent.resetConfirmTitle.contains("清空记录"))
+        #expect(!SettingsPanelContent.resetConfirmMessage.contains("清空记录"))
+    }
+
+    @Test("三串均不含「不可撤销」（旧破坏性文案）")
+    func noIrreversible() {
+        #expect(!SettingsPanelContent.resetButtonLabel.contains("不可撤销"))
+        #expect(!SettingsPanelContent.resetConfirmTitle.contains("不可撤销"))
+        #expect(!SettingsPanelContent.resetConfirmMessage.contains("不可撤销"))
     }
 }

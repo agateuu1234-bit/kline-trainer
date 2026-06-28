@@ -162,6 +162,14 @@ public final class AppRouter {
         activeModal = .settlement(record)
     }
 
+    /// RFC-A R-plan-7-1：重置资金后立即重建 homeContent，使主页当权威 10 万即时可见。
+    /// settings.resetAllProgress（Task 3/4 已将 deleteAll-records 去除，仅清 pending + 置 10 万） +
+    /// loadHome（用新 settings.totalCapital 重建 homeContent）。
+    public func resetAllProgressAndReload() async throws {
+        try await settings.resetAllProgress()   // Task 3：保留记录 + 置 10 万 + 刷活缓存
+        await loadHome()                         // 用新 settings.totalCapital 重建 homeContent
+    }
+
     public func clearError() { errorMessage = nil }
 
     func setError(_ error: Error) {

@@ -81,26 +81,40 @@ struct HomeContentTests {
         #expect(makeContent(totalCount: 5, winCount: 0).winRate == "0%")
     }
 
-    @Test("总资金正常显示 currentCapital，¥ 带空格 + 千分位 + 2 位小数")
-    func totalCapitalNormal() {
-        #expect(makeContent(totalCount: 3, currentCapital: 108_900).totalCapital == "¥ 108,900.00")
+    @Test("RFC-A D6：totalCount>0 时当前资金用权威 configuredCapital，非派生 currentCapital")
+    func capitalUsesAuthoritative() {
+        let c = HomeContent(statistics: (totalCount: 3, winCount: 1, currentCapital: 999_999),
+                            configuredCapital: 100_000, records: [],
+                            hasPending: false, hasCachedSets: false)
+        #expect(c.totalCapital == "¥ 100,000.00")   // 权威 settings 值，非派生 999_999
     }
 
-    @Test("D13 零局总资金回退 configuredCapital（非 ¥ 0.00）")
+    @Test("D6 总资金恒用权威 configuredCapital（非 statistics.currentCapital 派生）")
+    func totalCapitalUsesConfigured() {
+        // totalCount>0 且 currentCapital≠configuredCapital → 仍显 configuredCapital
+        #expect(makeContent(totalCount: 3, currentCapital: 108_900, configuredCapital: 100_000)
+            .totalCapital == "¥ 100,000.00")
+        // configuredCapital 格式：¥ 带空格 + 千分位 + 2 位小数
+        #expect(makeContent(totalCount: 1, currentCapital: 0, configuredCapital: 108_900)
+            .totalCapital == "¥ 108,900.00")
+    }
+
+    @Test("D6 零局总资金用 configuredCapital（统一路径，无需特判 totalCount==0）")
     func totalCapitalZeroGameFallback() {
         #expect(makeContent(totalCount: 0, currentCapital: 0, configuredCapital: 100_000)
             .totalCapital == "¥ 100,000.00")
     }
 
-    @Test("D13 totalCount>0 即便 currentCapital==0.0 也不回退（真实清零局）")
-    func totalCapitalClearedSessionNoFallback() {
-        #expect(makeContent(totalCount: 1, currentCapital: 0.0, configuredCapital: 100_000)
-            .totalCapital == "¥ 0.00")
+    @Test("D6 reset 后 totalCount>0 仍显 configuredCapital（reset 保留记录，不被末条派生值污染）")
+    func totalCapitalAfterResetKeepsConfigured() {
+        // 模拟 reset 后：有 3 条记录（currentCapital 为末条派生），但 configuredCapital 已重置回 10 万
+        #expect(makeContent(totalCount: 3, currentCapital: 150_000, configuredCapital: 100_000)
+            .totalCapital == "¥ 100,000.00")
     }
 
-    @Test("超大资金用千分位不科学记数")
+    @Test("超大 configuredCapital 用千分位不科学记数")
     func totalCapitalLarge() {
-        #expect(makeContent(totalCount: 1, currentCapital: 12_345_678.99).totalCapital == "¥ 12,345,678.99")
+        #expect(makeContent(totalCount: 1, configuredCapital: 12_345_678.99).totalCapital == "¥ 12,345,678.99")
     }
 
     // MARK: - 按钮 §6.1.2

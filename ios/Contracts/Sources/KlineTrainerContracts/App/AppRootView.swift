@@ -58,7 +58,8 @@ public struct AppRootView: View {
         .sheet(item: sheetModalBinding) { modal in
             switch modal {
             case .settings:
-                SettingsPanel(settings: settings, api: api, cache: cache, acceptance: acceptance)
+                SettingsPanel(settings: settings, api: api, cache: cache, acceptance: acceptance,
+                              onConfirmReset: { try await router.resetAllProgressAndReload() })
             case .settlement(let r):
                 SettlementView(record: r, onConfirm: { Task { await router.confirmSettlement() } })
             case .history:
