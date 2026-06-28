@@ -148,6 +148,19 @@ public struct FeeSnapshot: Codable, Equatable, Sendable {
         self.commissionRate = commissionRate
         self.minCommissionEnabled = minCommissionEnabled
     }
+
+    /// 持久化解码边界守卫：清除 legacy 负 / 非有限 commissionRate（老 app 存入前无非负约束）。
+    /// 腐坏值替换为 AppSettings.default.commissionRate；其余字段原样保留。
+    /// 合法值原样返回（无拷贝开销：struct 值语义 + 编译器 copy-elision）。
+    public func sanitizedForLegacyCorruption() -> FeeSnapshot {
+        guard commissionRate >= 0, commissionRate.isFinite else {
+            return FeeSnapshot(
+                commissionRate: AppSettings.default.commissionRate,
+                minCommissionEnabled: minCommissionEnabled
+            )
+        }
+        return self
+    }
 }
 
 public struct TradeOperation: Codable, Equatable, Sendable {

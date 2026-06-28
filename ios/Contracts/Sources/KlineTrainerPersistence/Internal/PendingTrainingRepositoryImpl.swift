@@ -46,6 +46,7 @@ enum PendingTrainingRepositoryImpl {
             throw AppError.persistence(.dbCorrupted)
         }
         let fee: FeeSnapshot = try RecordRepositoryImpl.jsonDecode(feeJSON, as: FeeSnapshot.self)
+            .sanitizedForLegacyCorruption()  // WB-1：清除 legacy 负/非有限 commissionRate
         let ops: [TradeOperation] = try RecordRepositoryImpl.jsonDecode(opsJSON,
                                                                        as: [TradeOperation].self)
         let drawings: [DrawingObject] = try RecordRepositoryImpl.jsonDecode(drawingsJSON,
