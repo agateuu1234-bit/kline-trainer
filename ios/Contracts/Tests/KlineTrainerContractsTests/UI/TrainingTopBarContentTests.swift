@@ -159,6 +159,30 @@ struct TrainingTopBarContentTests {
         #expect(c.sessionPnLPercent == "—")
         #expect(c.sessionPnLSign == 0)
     }
+
+    // MARK: - task-review M1/M2 边界补测
+
+    @Test("本局盈亏：returnRate 独立 NaN（profit 有限）→ — / — / sign=0")
+    func sessionPnL_returnRateNaN_independentPath() {
+        // profit=10_000 有限，但 returnRate=.nan 非有限 → `|| !returnRate.isFinite` 分支触发
+        let c = TrainingTopBarContent(totalCapital: 110_000, initialCapital: 100_000,
+                                      averageCost: 0, shares: 0, returnRate: .nan,
+                                      positionTier: 0, stockName: nil, stockCode: nil)
+        #expect(c.sessionPnLAmount == "—")
+        #expect(c.sessionPnLPercent == "—")
+        #expect(c.sessionPnLSign == 0)
+    }
+
+    @Test("本局盈亏：超大额 profit（> Int64.max 附近）不崩 + 正号前缀")
+    func sessionPnL_hugeProfitNoIntTrap() {
+        // profit = 9.0e18（有限，Double 可表达，> Int64.max≈9.22e18 量级附近）
+        // signedCurrencyInt 用 Double.rounded() 非 Int() 转换，验证不 trap + 正常格式化路径
+        let c = TrainingTopBarContent(totalCapital: 9.0e18, initialCapital: 0,
+                                      averageCost: 0, shares: 0, returnRate: 1.0e14,
+                                      positionTier: 0, stockName: nil, stockCode: nil)
+        #expect(c.sessionPnLAmount.hasPrefix("+¥"))
+        #expect(c.sessionPnLSign == 1)
+    }
 }
 
 @Suite("TrainingTopBarContent 仓位 X/5")
