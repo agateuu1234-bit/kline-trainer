@@ -15,7 +15,7 @@
 - **去小数**：总资金、浮动盈亏金额、股数 = 0 位小数；**成本/股 + 浮动盈亏% = 2 位小数**。
 - signed-zero 归一：`-0.0` → `+`（沿用现 `percent`/`signedCurrency` 的 `(x==0) ? 0.0 : x`）。
 - FP/字符串 host 断言：选值用精确二进制浮点（整数 + .50 之类），字符串等值即可。
-- **不 bump** CONTRACT_VERSION（纯展示值/线宽，无持久/契约语义）。
+- **不 bump** CONTRACT_VERSION（codex plan-R5 复核）：m01 只 gate 跨系统/破坏性持久化/schema；`TrainingTopBarContent` 是 UI 纯展示值、grep 证实唯一消费者=`TrainingView` 同模块（app target/Persistence 无引用），拆字段=in-module 源级重构、零持久化影响 → 不在 gate 范围。详见 spec §6。
 - **验证命令 fail-closed（codex plan-R4）**：piped 命令加 `set -o pipefail` + 检 `${PIPESTATUS[0]}`，**绝不让 `tail`/`grep` 掩盖** build/test 的非零退出；build 显式 `grep -q "BUILD SUCCEEDED" || exit 1`；测试负向断言用 `if grep 失败串; then exit 1; fi`（非 `! grep`，[[feedback_acceptance_grep_anchoring]]）。
 - **本批不含** fixture（#5 已移出，见 spec §9）。提交只 add 本任务文件，**绝不** `git add -A`/`.`（工作树可能有无关 untracked）。
 - 分支 `feat/training-ui-polish`（已在）。
@@ -296,9 +296,15 @@ SIM=$(xcrun simctl list devices available | grep -oE 'iPhone[^(]*\(([0-9A-F-]+)\
 xcodebuild build -project "$PROJ" -scheme KlineTrainer -destination "platform=iOS Simulator,id=$SIM" 2>&1 | tee /tmp/polish_ios.log | tail -5; rc=${PIPESTATUS[0]}
 { [ "$rc" -eq 0 ] && grep -q "BUILD SUCCEEDED" /tmp/polish_ios.log; } || { echo "iOS build FAILED (rc=$rc)"; exit 1; }
 echo "iOS BUILD SUCCEEDED ✅"
-# Mac Catalyst：本机无 Catalyst destination 时 xcodebuild 报「destination not found」→ 记录 CI 兜底（不算失败，沿用既往 RFC-A/B）
-xcodebuild build-for-testing -project "$PROJ" -scheme KlineTrainer -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 | tee /tmp/polish_cat.log | tail -5
-if grep -q "TEST BUILD SUCCEEDED" /tmp/polish_cat.log; then echo "Catalyst ✅"; else echo "Catalyst 本机不可用 → CI job 兜底（记录，非失败）"; fi
+# Mac Catalyst（fail-closed：区分「destination 本机不可用=合法跳过须 CI」vs「destination 在但编译失败=真回归 exit 1」）
+xcodebuild build-for-testing -project "$PROJ" -scheme KlineTrainer -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 | tee /tmp/polish_cat.log | tail -8
+if grep -q "TEST BUILD SUCCEEDED" /tmp/polish_cat.log; then
+  echo "Catalyst ✅"
+elif grep -qiE "Unable to find a destination|no destinations are available|not currently available|requested but .*not available|Available destinations" /tmp/polish_cat.log; then
+  echo "⚠️ Catalyst destination 本机不可用 → 本地跳过；**三绿须** CI job 'Mac Catalyst build-for-testing on macos-15' 绿（PR 阶段确认，非本地失败）"
+else
+  echo "❌ Catalyst destination 在但编译失败（真回归）"; exit 1
+fi
 ```
 
 - [ ] **Step 3: 整体 whole-branch Codex review**

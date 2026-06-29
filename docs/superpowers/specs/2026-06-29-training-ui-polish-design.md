@@ -85,7 +85,10 @@
 - `KLineView+Candles.swift` / `KLineView+MACD.swift` — 线宽常量。
 - `TrainingTopBarContentTests.swift`（host）、相关测试更新。
 
-**CONTRACT_VERSION：不 bump**。`TrainingTopBarContent` 是 UI 纯展示值、仅 `TrainingView` 同模块消费；拆字段/改格式无持久化 / schema / 跨模块契约语义变更。指标线宽、fixture span 同理。（spec 阶段 codex 复核此判断。）
+**CONTRACT_VERSION：不 bump（codex plan-R5 复核，有据）**。
+- m01 的 `CONTRACT_VERSION` 文义 = 只 gate **跨系统 / 破坏性持久化 / schema** 变更（两次先例 1.4→1.5 E2 `position_data` reader 收紧、1.6→1.7 RFC-A `settings.total_capital` 语义 + migration 0005，**均为持久/reader 语义**）。它**不是** gate 每个 public Swift 符号。
+- `TrainingTopBarContent` 是 **UI 纯展示值类型**，`public` 仅为 host 可测；**grep 证实唯一消费者 = `TrainingView`（同 `KlineTrainerContracts` 模块）+ 其测试**，app target（`ios/KlineTrainer`）与 `KlineTrainerPersistence` **均无引用**（无 persistence / DTO / 跨 target / 外部消费者）。
+- 拆 `holdingPnL` 为三字段 = **in-module 源级重构**，零持久化 / schema / 跨系统影响 → **不在 CONTRACT_VERSION gate 范围**。单 SwiftPM target 整体编译，无部分编译 version-skew。指标线宽同理。
 
 ## 7. 测试策略
 
