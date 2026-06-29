@@ -122,24 +122,48 @@ struct TrainingTopBarContentTests {
 
     // MARK: - 负零回归修复（fix-negzero）
 
-    @Test("sub-yuan 亏损：舍入后 0 元 → +¥0 非 -¥0，sign = 0 非 -1")
+    @Test("sub-yuan 亏损：舍入后 0 元 → +¥0 非 -¥0，sign = 0 非 -1，百分比也归零（Fix 2 A方案）")
     func pnlSubYuanLoss_noNegativeZero() {
-        // amount = (10.0 − 10.001) × 100 = −0.1 元，舍入为 0 → 应显 "+¥0"，颜色平仓（0）
+        // amount = (10.0 − 10.001) × 100 = −0.1 元，舍入为 0 → 整格当持平：金额/百分比/sign 全中性
         let c = TrainingTopBarContent(totalCapital: 0, averageCost: 10.001, shares: 100,
                                       returnRate: 0, positionTier: 1, stockName: nil, stockCode: nil,
                                       currentPrice: 10.0)
-        #expect(c.holdingPnLAmount == "+¥0")   // 非 "-¥0"
-        #expect(c.holdingPnLSign == 0)          // 非 -1
+        #expect(c.holdingPnLAmount == "+¥0")         // 非 "-¥0"
+        #expect(c.holdingPnLPercent == "+0.00%")     // Fix 2：金额舍入 0 → 百分比也归零（非 "-0.01%"）
+        #expect(c.holdingPnLSign == 0)               // 非 -1
     }
 
-    @Test("大额亏损：−100 元 → -¥100，sign = -1（确认正常亏损路径未受影响）")
+    @Test("大额亏损：−100 元 → -¥100，sign = -1，百分比 -9.09%（确认正常亏损路径未受影响）")
     func pnlLargeActualLoss_unaffected() {
-        // amount = (10 − 11) × 100 = −100 元
+        // amount = (10 − 11) × 100 = −100 元；pct = (10−11)/11 = −1/11 ≈ −9.09%
         let c = TrainingTopBarContent(totalCapital: 0, averageCost: 11, shares: 100,
                                       returnRate: 0, positionTier: 1, stockName: nil, stockCode: nil,
                                       currentPrice: 10.0)
         #expect(c.holdingPnLAmount == "-¥100")
+        #expect(c.holdingPnLPercent == "-9.09%")     // −1/11×100 → −9.0909...% → 2位 = −9.09%
         #expect(c.holdingPnLSign == -1)
+    }
+
+    @Test("sub-yuan 盈利：+0.1 元舍入 0 → 整格持平（+¥0 / +0.00% / sign=0）")
+    func pnlSubYuanProfit_roundsToZero() {
+        // amount = (10 − 9.999) × 100 = 0.1 元，舍入为 0 → 整格当持平
+        let c = TrainingTopBarContent(totalCapital: 0, averageCost: 9.999, shares: 100,
+                                      returnRate: 0, positionTier: 1, stockName: nil, stockCode: nil,
+                                      currentPrice: 10.0)
+        #expect(c.holdingPnLAmount == "+¥0")
+        #expect(c.holdingPnLPercent == "+0.00%")
+        #expect(c.holdingPnLSign == 0)
+    }
+
+    @Test("超 Int 范围大额 → 不 trap，holdingPnLAmount 以 +¥ 开头（Fix 1 no-Int-overflow）")
+    func pnlGiantAmount_noIntTrap() {
+        // amount = (10_000_000_000_000 − 1) × 1_000_000 ≈ 9.999e18 > Int64.max（9.22e18）→ 旧 Int() 会 trap
+        let c = TrainingTopBarContent(totalCapital: 0, averageCost: 1, shares: 1_000_000,
+                                      returnRate: 0, positionTier: 5, stockName: nil, stockCode: nil,
+                                      currentPrice: 10_000_000_000_000.0)
+        #expect(c.holdingPnLAmount.hasPrefix("+¥"))  // 不崩，且带正号
+        #expect(!c.holdingPnLAmount.isEmpty)
+        #expect(c.holdingPnLSign == 1)               // 盈利
     }
 
     @Test("浮动盈亏：亏（绿）+ 空仓（平·归零）")

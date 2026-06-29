@@ -37,11 +37,18 @@ public struct TrainingTopBarContent: Equatable, Sendable {
         // 持仓浮动盈亏（元 + %）= (现价 − 每股成本) × 股数。
         if shares > 0 && averageCost > 0 {
             let amount = (currentPrice - averageCost) * Double(shares)
-            let pct = (currentPrice - averageCost) / averageCost
-            let roundedInt = Int(amount.rounded())                       // 与 signedCurrencyInt 同精度
+            let rounded = amount.rounded()                               // Double 取整，无 Int 溢出 trap
             self.holdingPnLAmount = Self.signedCurrencyInt(amount)
-            self.holdingPnLPercent = Self.percent(pct)
-            self.holdingPnLSign = roundedInt > 0 ? 1 : (roundedInt < 0 ? -1 : 0)
+            if rounded == 0 {
+                // 金额按显示精度（整数元）舍入到 0 → 整格当持平：百分比/符号/颜色统一中性，
+                // 杜绝「+¥0 配 -0.01%」矛盾（user 选 A：买入后微赔手续费视为持平）。
+                self.holdingPnLPercent = Self.percent(0)
+                self.holdingPnLSign = 0
+            } else {
+                let pct = (currentPrice - averageCost) / averageCost
+                self.holdingPnLPercent = Self.percent(pct)
+                self.holdingPnLSign = rounded > 0 ? 1 : -1
+            }
         } else {
             self.holdingPnLAmount = Self.signedCurrencyInt(0)
             self.holdingPnLPercent = Self.percent(0)
@@ -74,11 +81,17 @@ public struct TrainingTopBarContent: Equatable, Sendable {
         return "¥\(body)"
     }
 
-    /// 带符号 `+¥12,345,678` / `-¥12,345,678`，0 位小数无空格。符号取自**舍入后整数元**（sub-yuan 归 `+¥0`，无负零）。浮动盈亏金额用。
+    /// 带符号 `+¥12,345,678` / `-¥12,345,678`，0 位小数无空格。符号取自**舍入后整数元**（sub-yuan 归 `+¥0`，无负零）。非有限值兜底不崩。浮动盈亏金额用。
     private static func signedCurrencyInt(_ value: Double) -> String {
-        let rounded = Int(value.rounded())                           // 四舍五入到整数元
-        let sign = rounded > 0 ? "+" : (rounded < 0 ? "-" : "+")   // 0 → "+"，杜绝 -¥0
-        return "\(sign)¥\(grouped(abs(rounded)))"                   // 复用既有 grouped(Int) 千分位
+        guard value.isFinite else { return "¥0" }                  // 非有限兜底，杜绝 Int(NaN/inf) trap
+        let rounded = value.rounded()                              // Double 取整，无 Int 溢出 trap
+        let sign = rounded > 0 ? "+" : (rounded < 0 ? "-" : "+")  // 0 / -0.0 → "+"，杜绝 -¥0
+        let f = NumberFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX"); f.numberStyle = .decimal
+        f.usesGroupingSeparator = true; f.groupingSeparator = ","
+        f.maximumFractionDigits = 0; f.minimumFractionDigits = 0
+        let body = f.string(from: NSNumber(value: abs(rounded))) ?? String(format: "%.0f", abs(rounded))
+        return "\(sign)¥\(body)"
     }
 
     /// 千分位 + 2 位小数，**无 ¥**（成本/股用，省宽防截断）。
