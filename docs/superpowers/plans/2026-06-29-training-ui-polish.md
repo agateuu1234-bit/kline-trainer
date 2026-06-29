@@ -16,6 +16,7 @@
 - signed-zero 归一：`-0.0` → `+`（沿用现 `percent`/`signedCurrency` 的 `(x==0) ? 0.0 : x`）。
 - FP/字符串 host 断言：选值用精确二进制浮点（整数 + .50 之类），字符串等值即可。
 - **不 bump** CONTRACT_VERSION（纯展示值/线宽，无持久/契约语义）。
+- **验证命令 fail-closed（codex plan-R4）**：piped 命令加 `set -o pipefail` + 检 `${PIPESTATUS[0]}`，**绝不让 `tail`/`grep` 掩盖** build/test 的非零退出；build 显式 `grep -q "BUILD SUCCEEDED" || exit 1`；测试负向断言用 `if grep 失败串; then exit 1; fi`（非 `! grep`，[[feedback_acceptance_grep_anchoring]]）。
 - **本批不含** fixture（#5 已移出，见 spec §9）。提交只 add 本任务文件，**绝不** `git add -A`/`.`（工作树可能有无关 untracked）。
 - 分支 `feat/training-ui-polish`（已在）。
 
@@ -226,13 +227,16 @@ git commit -m "feat(ui): 顶栏数字去小数 + 拆 holdingPnL 为金额/百分
 ```
 （删旧 `metricCell` 的 `.frame(width:alignment:.center)` + `.frame(maxWidth: width == nil ? .infinity : nil)` 实现，用上面新版；旧弹性末格 `metricCell("浮动盈亏", bar.holdingPnL, width: nil)` 调用删除，由 `pnlCell` 取代。Step 1 的 `HStack(alignment: .top, spacing: 0)` 因各格 height 固定相同，`.top` 仍正确。）
 
-- [ ] **Step 3: build 验证**（host 不编译此 UIKit 文件）
+- [ ] **Step 3: build 验证（fail-closed；host 不编译此 UIKit 文件）**
 
-Run（先 `xcodebuild -list -project ios/KlineTrainer/KlineTrainer.xcodeproj` 找 scheme）：
+```bash
+ROOT="$(git rev-parse --show-toplevel)"; PROJ="$ROOT/ios/KlineTrainer/KlineTrainer.xcodeproj"; set -o pipefail
+SIM=$(xcrun simctl list devices available | grep -oE 'iPhone[^(]*\(([0-9A-F-]+)\)' | grep -oE '[0-9A-F-]{36}' | head -1)
+xcodebuild build -project "$PROJ" -scheme KlineTrainer -destination "platform=iOS Simulator,id=$SIM" 2>&1 | tee /tmp/polish_t2.log | tail -5; rc=${PIPESTATUS[0]}
+{ [ "$rc" -eq 0 ] && grep -q "BUILD SUCCEEDED" /tmp/polish_t2.log; } || { echo "iOS build FAILED (rc=$rc)"; exit 1; }
+echo "BUILD SUCCEEDED ✅"
 ```
-cd "$(git rev-parse --show-toplevel)" && xcodebuild build -project "ios/KlineTrainer/KlineTrainer.xcodeproj" -scheme KlineTrainer -destination 'platform=iOS Simulator,id=DE0BA39D-C749-459D-A407-4418599B61CA' 2>&1 | tail -5
-```
-Expected: `** BUILD SUCCEEDED **`（若该模拟器 id 不存在，`xcrun simctl list devices available | grep iPhone` 换一个）。host `swift test` 仍全绿（Task 1 纯值未回归）。
+host `swift test` 仍全绿（Task 1 纯值未回归）：`cd "$ROOT/ios/Contracts" && swift test`（退出码 0）。
 
 - [ ] **Step 4: 提交**
 ```bash
@@ -271,15 +275,31 @@ git commit -m "feat(render): 指标线加粗 MA66 2→3 / BOLL 1.6→2.2 / MACD 
 
 **Files:** 无生产改动（验证）。
 
-- [ ] **Step 1: host 两框架全绿**
+- [ ] **Step 1: host 两框架全绿（fail-closed）**
 
-Run: `cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test 2>&1 | grep -iE "Test Suite 'All tests'|Test run with [0-9]+ tests|with [1-9][0-9]* failure"`
-Expected: Swift Testing `Test run with N tests ... passed` + XCTest `Test Suite 'All tests' ... passed`，**无**非零失败行（两框架都查）。
+Run（**保留原命令退出码** + 显式断言两框架全过 + 拒失败串；codex plan-R4）：
+```bash
+ROOT="$(git rev-parse --show-toplevel)"; set -o pipefail
+cd "$ROOT/ios/Contracts" && swift test 2>&1 | tee /tmp/polish_test.log; rc=${PIPESTATUS[0]}
+[ "$rc" -eq 0 ] || { echo "swift test 退出码 $rc ≠0"; exit 1; }
+grep -qE "Test run with [0-9]+ tests in [0-9]+ suites passed" /tmp/polish_test.log || { echo "Swift Testing 未全过"; exit 1; }
+grep -q "Test Suite 'All tests' passed" /tmp/polish_test.log || { echo "XCTest 未全过"; exit 1; }
+if grep -qE "with [1-9][0-9]* failure" /tmp/polish_test.log; then echo "有测试失败"; exit 1; fi
+echo "两框架全绿 ✅"
+```
 
-- [ ] **Step 2: iOS Simulator build + Mac Catalyst build**
+- [ ] **Step 2: iOS Simulator build + Mac Catalyst build（fail-closed）**
 
-Run iOS：同上 `xcodebuild build ... -destination 'platform=iOS Simulator,id=…'` → `** BUILD SUCCEEDED **`。
-Run Catalyst：`xcodebuild build-for-testing -project ios/KlineTrainer/KlineTrainer.xcodeproj -scheme KlineTrainer -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 | tail -5`（本机无 Catalyst destination 则记录「CI 兜底」，沿用既往）。
+```bash
+ROOT="$(git rev-parse --show-toplevel)"; PROJ="$ROOT/ios/KlineTrainer/KlineTrainer.xcodeproj"; set -o pipefail
+SIM=$(xcrun simctl list devices available | grep -oE 'iPhone[^(]*\(([0-9A-F-]+)\)' | grep -oE '[0-9A-F-]{36}' | head -1)
+xcodebuild build -project "$PROJ" -scheme KlineTrainer -destination "platform=iOS Simulator,id=$SIM" 2>&1 | tee /tmp/polish_ios.log | tail -5; rc=${PIPESTATUS[0]}
+{ [ "$rc" -eq 0 ] && grep -q "BUILD SUCCEEDED" /tmp/polish_ios.log; } || { echo "iOS build FAILED (rc=$rc)"; exit 1; }
+echo "iOS BUILD SUCCEEDED ✅"
+# Mac Catalyst：本机无 Catalyst destination 时 xcodebuild 报「destination not found」→ 记录 CI 兜底（不算失败，沿用既往 RFC-A/B）
+xcodebuild build-for-testing -project "$PROJ" -scheme KlineTrainer -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 | tee /tmp/polish_cat.log | tail -5
+if grep -q "TEST BUILD SUCCEEDED" /tmp/polish_cat.log; then echo "Catalyst ✅"; else echo "Catalyst 本机不可用 → CI job 兜底（记录，非失败）"; fi
+```
 
 - [ ] **Step 3: 整体 whole-branch Codex review**
 
