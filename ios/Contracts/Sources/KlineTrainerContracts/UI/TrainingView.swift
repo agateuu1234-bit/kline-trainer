@@ -26,6 +26,7 @@ public struct TrainingView: View {
     private let onReplaySettlement: (TrainingRecord) -> Void
 
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
     @State private var didFinalize = false
     @State private var finalizeFailed = false
     @State private var finalizing = false      // R1-H2：in-flight 门，阻重试双击/并发 finalize Task
@@ -238,7 +239,8 @@ public struct TrainingView: View {
 
     /// 浮动盈亏格（弹性末格）：标签顶 + 金额一行 / 百分比一行；盈红亏绿平中性（红涨绿跌）。同 metricRowH 固定高。
     private func pnlCell(amount: String, percent: String, sign: Int) -> some View {
-        let color: Color = sign > 0 ? .red : (sign < 0 ? .green : .secondary)
+        let palette = UIChartPalette.forScheme(colorScheme == .dark ? .dark : .light)
+        let color: Color = sign > 0 ? Color(uiColor: palette.profitRed) : (sign < 0 ? Color(uiColor: palette.lossGreen) : .secondary)
         return VStack(spacing: 1) {
             Text("浮动盈亏").font(.system(size: 9)).foregroundStyle(.secondary)
             Spacer(minLength: 0)

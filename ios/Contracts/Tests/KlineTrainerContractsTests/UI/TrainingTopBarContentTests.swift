@@ -114,6 +114,12 @@ struct TrainingTopBarContentTests {
         #expect(c.holdingPnLSign == 1)                   // 盈
     }
 
+    @Test("总资金 currencyInt 对小数输入去小数（锁舍入行为）")
+    func totalCapital_fractional_truncated() {
+        let c = TrainingTopBarContent(totalCapital: 102_345.67, averageCost: 0, shares: 0, returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil)
+        #expect(c.totalCapital == "¥102,346")   // NumberFormatter maxFractionDigits=0 四舍五入：102345.67 → 102346
+    }
+
     @Test("浮动盈亏：亏（绿）+ 空仓（平·归零）")
     func pnlLossAndFlat() {
         let loss = TrainingTopBarContent(totalCapital: 0, averageCost: 10, shares: 100,
