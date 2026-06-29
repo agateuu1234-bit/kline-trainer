@@ -37,17 +37,24 @@ public struct TrainingTopBarContent: Equatable, Sendable {
         // 持仓浮动盈亏（元 + %）= (现价 − 每股成本) × 股数。
         if shares > 0 && averageCost > 0 {
             let amount = (currentPrice - averageCost) * Double(shares)
-            let rounded = amount.rounded()                               // Double 取整，无 Int 溢出 trap
-            self.holdingPnLAmount = Self.signedCurrencyInt(amount)
-            if rounded == 0 {
-                // 金额按显示精度（整数元）舍入到 0 → 整格当持平：百分比/符号/颜色统一中性，
-                // 杜绝「+¥0 配 -0.01%」矛盾（user 选 A：买入后微赔手续费视为持平）。
-                self.holdingPnLPercent = Self.percent(0)
+            let pct = (currentPrice - averageCost) / averageCost
+            if !amount.isFinite || !pct.isFinite {
+                // 溢出/退化数据：显式占位，不伪装成 ¥0（codex r5）。"—" = 全角破折号，sign 0 中性。
+                self.holdingPnLAmount = "—"
+                self.holdingPnLPercent = "—"
                 self.holdingPnLSign = 0
             } else {
-                let pct = (currentPrice - averageCost) / averageCost
-                self.holdingPnLPercent = Self.percent(pct)
-                self.holdingPnLSign = rounded > 0 ? 1 : -1
+                let rounded = amount.rounded()                           // Double 取整，无 Int 溢出 trap
+                self.holdingPnLAmount = Self.signedCurrencyInt(amount)
+                if rounded == 0 {
+                    // 金额按显示精度（整数元）舍入到 0 → 整格当持平：百分比/符号/颜色统一中性，
+                    // 杜绝「+¥0 配 -0.01%」矛盾（user 选 A：买入后微赔手续费视为持平）。
+                    self.holdingPnLPercent = Self.percent(0)
+                    self.holdingPnLSign = 0
+                } else {
+                    self.holdingPnLPercent = Self.percent(pct)
+                    self.holdingPnLSign = rounded > 0 ? 1 : -1
+                }
             }
         } else {
             self.holdingPnLAmount = Self.signedCurrencyInt(0)

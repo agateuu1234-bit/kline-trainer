@@ -158,12 +158,26 @@ struct TrainingTopBarContentTests {
     @Test("超 Int 范围大额 → 不 trap，holdingPnLAmount 以 +¥ 开头（Fix 1 no-Int-overflow）")
     func pnlGiantAmount_noIntTrap() {
         // amount = (10_000_000_000_000 − 1) × 1_000_000 ≈ 9.999e18 > Int64.max（9.22e18）→ 旧 Int() 会 trap
+        // 注：9.999e18 < Double.max（1.8e308），乘积有限，走正常路径（非退化路径）
         let c = TrainingTopBarContent(totalCapital: 0, averageCost: 1, shares: 1_000_000,
                                       returnRate: 0, positionTier: 5, stockName: nil, stockCode: nil,
                                       currentPrice: 10_000_000_000_000.0)
         #expect(c.holdingPnLAmount.hasPrefix("+¥"))  // 不崩，且带正号
         #expect(!c.holdingPnLAmount.isEmpty)
         #expect(c.holdingPnLSign == 1)               // 盈利
+    }
+
+    @Test("有限输入但乘积溢出到 inf → 三字段退化占位，非 ¥0 伪装（codex r5）")
+    func pnlOverflowToInf_degradesExplicitly() {
+        // amount = (1e306 − 1) × 1_000_000 ≈ 1e312 > Double.max → inf；输入全有限
+        // 旧代码：signedCurrencyInt(inf) 返 "¥0" 伪装，percent/sign 仍算 inf% 和 sign=1，三字段不一致
+        // 新代码：守卫上移 init，非有限 → "—" / "—" / 0，杜绝伪装（codex r5）
+        let c = TrainingTopBarContent(totalCapital: 0, averageCost: 1, shares: 1_000_000,
+                                      returnRate: 0, positionTier: 5, stockName: nil, stockCode: nil,
+                                      currentPrice: 1e306)
+        #expect(c.holdingPnLAmount == "—")    // 全角破折号，非 "¥0"
+        #expect(c.holdingPnLPercent == "—")   // 全角破折号，非 inf%
+        #expect(c.holdingPnLSign == 0)        // 中性，非 1
     }
 
     @Test("浮动盈亏：亏（绿）+ 空仓（平·归零）")
