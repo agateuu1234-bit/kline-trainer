@@ -39,7 +39,7 @@
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/UI/TrainingTopBarContentTests.swift`
 
 **Interfaces:**
-- Produces（Task 2 消费）：`totalCapital`（"¥99,999,999" 无小数）、`holdingCostPerShare`（"¥ 1,683.50" 2 位，不变）、`sharesText`（"9,999,999" 无「股」后缀）、`positionShort`（"5/5" 不变）、`holdingPnLAmount`（"+¥12,345,678" 无小数带符号）、`holdingPnLPercent`（"+4,900.00%" 2 位 signed-zero）、`holdingPnLSign`（`Int`：+1 盈 / -1 亏 / 0 平·空仓）。删除旧 `holdingPnL` 单串字段。
+- Produces（Task 2 消费）：`totalCapital`（"¥99,999,999" 无小数）、`holdingCostPerShare`（**"1,683.50" 无 ¥、2 位**，codex plan-R1 省宽防截断）、`sharesText`（"9,999,999" 无「股」后缀）、`positionShort`（"5/5" 不变）、`holdingPnLAmount`（"+¥12,345,678" 无小数带符号）、`holdingPnLPercent`（"+4,900.00%" 2 位 signed-zero）、`holdingPnLSign`（`Int`：+1 盈 / -1 亏 / 0 平·空仓）。删除旧 `holdingPnL` 单串字段。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -53,7 +53,7 @@ func intFormats() {
                                   currentPrice: 1_683.5)
     #expect(c.totalCapital == "¥10,000,000")        // 无小数
     #expect(c.sharesText == "9,999,999")            // 无「股」后缀
-    #expect(c.holdingCostPerShare == "¥ 1,683.50")  // 2 位，不变
+    #expect(c.holdingCostPerShare == "1,683.50")    // 2 位、去 ¥（codex plan-R1 省宽）
     #expect(c.positionShort == "5/5")
 }
 @Test("浮动盈亏拆两字段：盈（金额无小数 + 百分比2位）+ sign")
@@ -106,7 +106,10 @@ Expected: 编译失败（`holdingPnLAmount`/`holdingPnLPercent`/`holdingPnLSign`
 ```swift
         self.sharesText = Self.grouped(shares)                 // 原 "\(Self.grouped(shares)) 股"
 ```
-`holdingCostPerShare`、`positionShort`、`returnRate`、`stockNameDisplay` **不变**。
+`positionShort`、`returnRate`、`stockNameDisplay` **不变**。`holdingCostPerShare` 改用新 `decimal2`（去 ¥、2 位）：
+```swift
+        self.holdingCostPerShare = Self.decimal2(averageCost)   // 原 Self.currency(averageCost)；去 ¥
+```
 init 里 `holdingPnL` 那段改为：
 ```swift
         if shares > 0 && averageCost > 0 {
@@ -143,8 +146,16 @@ helper 区加两个**无小数**版（仿现有 `currency`/`signedCurrency`，`m
         let body = f.string(from: NSNumber(value: abs(v))) ?? String(format: "%.0f", abs(v))
         return "\(sign)¥\(body)"
     }
+    /// 千分位 + 2 位小数，**无 ¥**（成本/股用，省宽防截断）。
+    private static func decimal2(_ value: Double) -> String {
+        let f = NumberFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX"); f.numberStyle = .decimal
+        f.usesGroupingSeparator = true; f.groupingSeparator = ","
+        f.decimalSeparator = "."; f.minimumFractionDigits = 2; f.maximumFractionDigits = 2
+        return f.string(from: NSNumber(value: value)) ?? String(format: "%.2f", value)
+    }
 ```
-（`currency` 2 位版仍被 `holdingCostPerShare` 用，保留；`signedCurrency` 旧 2 位版若不再被引用则删除——grep 确认后处理。）
+（改造后 `currency`/`signedCurrency`（旧 2 位 ¥ 版）均不再被引用 → grep 确认后删除；新增 `currencyInt`/`signedCurrencyInt`/`decimal2`。）
 
 - [ ] **Step 4: 跑确认通过**
 
@@ -189,7 +200,7 @@ git commit -m "feat(ui): 顶栏数字去小数 + 拆 holdingPnL 为金额/百分
         VStack(spacing: 1) {
             Text(label).font(.system(size: 9)).foregroundStyle(.secondary)
             Spacer(minLength: 0)
-            Text(value).font(.system(size: 12).weight(.semibold)).lineLimit(1)
+            Text(value).font(.system(size: 12).weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
             Spacer(minLength: 0)
         }
         .frame(width: width)
@@ -202,8 +213,8 @@ git commit -m "feat(ui): 顶栏数字去小数 + 拆 holdingPnL 为金额/百分
         return VStack(spacing: 1) {
             Text("浮动盈亏").font(.system(size: 9)).foregroundStyle(.secondary)
             Spacer(minLength: 0)
-            Text(amount).font(.system(size: 12).weight(.semibold)).foregroundStyle(color).lineLimit(1)
-            Text(percent).font(.system(size: 11).weight(.semibold)).foregroundStyle(color).lineLimit(1)
+            Text(amount).font(.system(size: 12).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.8)
+            Text(percent).font(.system(size: 11).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.8)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -272,7 +283,7 @@ Run: `.claude/scripts/codex-attest.sh --scope branch-diff --head feat/training-u
 
 - [ ] **Step 4: 真机/模拟器人工验收**
 
-按 spec §8 的 5 条（顶栏去小数 / 浮动盈亏两行盈红亏绿 / 标签齐头数字居中 / 两图等高 / 指标更粗）逐条对照（真机部署见 backlog memory 命令）。
+按 spec §8 的 5 条（顶栏去小数 / 浮动盈亏两行盈红亏绿 / 标签齐头数字居中 / 两图等高 / 指标更粗）逐条对照（真机部署见 backlog memory 命令）。**§8#1 用最坏值（总资金 1000万、股数千万、浮动盈亏千万+几十倍、成本/股 ¥9,999.99）必须附截图，证明各固定宽格无省略号截断**（minimumScaleFactor 兜底）。
 
 ---
 
