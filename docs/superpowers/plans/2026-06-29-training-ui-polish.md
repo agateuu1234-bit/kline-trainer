@@ -184,16 +184,21 @@ git commit -m "feat(ui): 顶栏数字去小数 + 拆 holdingPnL 为金额/百分
 
 - [ ] **Step 1: 改 topBar 指标行**（现 `HStack(spacing: 0)` 5 个 metricCell）
 
-把现 `topBar` 里第二行 `HStack(spacing: 0) { metricCell(...×5) }` 改为：标签简化、宽度收窄、`alignment: .top`（标签齐头）、浮动盈亏独立两行格：
+把现 `topBar` 里第二行 `HStack(spacing: 0) { metricCell(...×5) }` 改为：标签简化、`alignment: .top`（标签齐头）、**方案 A 横向均匀分布**（每格 worst-case 定宽 + 格间等距 `Spacer` 摊匀剩余，PnL 不再独吞）、浮动盈亏独立两行格：
 ```swift
             HStack(alignment: .top, spacing: 0) {
-                metricCell("总资金", bar.totalCapital, width: 84)
+                metricCell("总资金", bar.totalCapital, width: 80)
+                Spacer(minLength: 4)
                 metricCell("成本/股", bar.holdingCostPerShare, width: 56)
-                metricCell("股数", bar.sharesText, width: 62)
-                metricCell("仓位", bar.positionShort, width: 30)
+                Spacer(minLength: 4)
+                metricCell("股数", bar.sharesText, width: 64)
+                Spacer(minLength: 4)
+                metricCell("仓位", bar.positionShort, width: 28)
+                Spacer(minLength: 4)
                 pnlCell(amount: bar.holdingPnLAmount, percent: bar.holdingPnLPercent, sign: bar.holdingPnLSign)
             }
 ```
+（方案 A：各格 worst-case 定宽留够极限值，4 个 `Spacer` 把剩余横向空间**均匀**摊到格间隙、自适应屏宽；浮动盈亏格也定宽 `92`、**不再 `maxWidth: .infinity`**（见 Step 2）。`Spacer(minLength: 4)` 保证窄屏最小间隙、Σ定宽320+间隙 ≤ 375pt 内容宽。）
 
 - [ ] **Step 2: 改 `metricCell`/`pnlCell` 为「标签顶 + 数值居中 + 固定有界行高」**
 
@@ -224,7 +229,7 @@ git commit -m "feat(ui): 顶栏数字去小数 + 拆 holdingPnL 为金额/百分
             Text(percent).font(.system(size: 11).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.8)
             Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity).frame(height: Self.metricRowH, alignment: .top)
+        .frame(width: 92, height: Self.metricRowH, alignment: .top)   // 方案A：定宽留够 worst-case「+¥12,345,678」，不再 maxWidth:.infinity 吃光剩余
     }
 ```
 （删旧 `metricCell` 的 `.frame(width:alignment:.center)` + `.frame(maxWidth: width == nil ? .infinity : nil)` 实现，用上面新版；旧弹性末格 `metricCell("浮动盈亏", bar.holdingPnL, width: nil)` 调用删除，由 `pnlCell` 取代。Step 1 的 `HStack(alignment: .top, spacing: 0)` 因各格 height 固定相同，`.top` 仍正确。）

@@ -212,11 +212,17 @@ public struct TrainingView: View {
                     Color.clear.frame(width: 36, height: 1)
                 }
             }
+            // 方案A 横向均匀分布：每格 worst-case 定宽（留够极限值）+ 格间等距 Spacer 把剩余空间均匀摊到间隙；
+            // 浮动盈亏不再独吞剩余（定宽 92），自适应屏宽（宽屏间隙等比增大）。Σ定宽320+min间隙 ≤ 375pt 内容宽。
             HStack(alignment: .top, spacing: 0) {
-                metricCell("总资金", bar.totalCapital, width: 84)
+                metricCell("总资金", bar.totalCapital, width: 80)
+                Spacer(minLength: 4)
                 metricCell("成本/股", bar.holdingCostPerShare, width: 56)
-                metricCell("股数", bar.sharesText, width: 62)
-                metricCell("仓位", bar.positionShort, width: 30)
+                Spacer(minLength: 4)
+                metricCell("股数", bar.sharesText, width: 64)
+                Spacer(minLength: 4)
+                metricCell("仓位", bar.positionShort, width: 28)
+                Spacer(minLength: 4)
                 pnlCell(amount: bar.holdingPnLAmount, percent: bar.holdingPnLPercent, sign: bar.holdingPnLSign)
             }
         }
@@ -241,9 +247,8 @@ public struct TrainingView: View {
     private func pnlCell(amount: String, percent: String, sign: Int) -> some View {
         let palette = UIChartPalette.forScheme(colorScheme == .dark ? .dark : .light)
         let color: Color = sign > 0 ? Color(uiColor: palette.profitRed) : (sign < 0 ? Color(uiColor: palette.lossGreen) : .secondary)
-        // 最小受支持设备=iPhone SE2/3=375pt（部署目标 iOS 17.6，无 320pt 设备）：内容宽 375−24(padding)=351，
-        // 固定格 84+56+62+30=232 → PnL 弹性余量≈119pt，worst-case `+¥12,345,678`/`-12,345,678` 满刻度(~85pt)即放得下。
-        // minimumScaleFactor 0.5 是「窄于受支持下限」的安全网（受支持设备永不触发缩放），保证任意窄屏也不截断（codex r4）。
+        // 方案A：定宽 92 留够 worst-case「+¥12,345,678」（不再 maxWidth:.infinity 吃光剩余）。
+        // minimumScaleFactor 0.5 = 任意窄屏安全网（受支持设备 375pt+ 满刻度即放得下、永不触发缩放，codex r4）。
         return VStack(spacing: 1) {
             Text("浮动盈亏").font(.system(size: 9)).foregroundStyle(.secondary)
             Spacer(minLength: 0)
@@ -251,7 +256,7 @@ public struct TrainingView: View {
             Text(percent).font(.system(size: 11).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.5)
             Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity).frame(height: Self.metricRowH, alignment: .top)
+        .frame(width: 92, height: Self.metricRowH, alignment: .top)
     }
 
     private func panel(_ id: PanelId) -> some View {
