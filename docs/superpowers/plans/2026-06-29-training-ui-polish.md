@@ -1,0 +1,289 @@
+# 训练界面验收回归微调（顶栏空间 + 指标加粗）Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现。步骤用 `- [ ]` checkbox。
+
+**Goal:** 顶栏数字去小数 + 浮动盈亏两行（盈红亏绿）+ 标签简化/收窄/齐头居中对齐；技术指标线再加粗。
+
+**Architecture:** 纯展示层微调。`TrainingTopBarContent`（平台无关纯值，host 全测）改格式 helper + 拆 `holdingPnL` 为两字段；`TrainingView.topBar`（UIKit 守卫，build 闸门）改 metricCell 标签/宽度 + 浮动盈亏两行渲染 + 对齐 + 颜色；`KLineView+Candles`/`+MACD` 改线宽常量。零引擎/资金/持久层改动。
+
+**Tech Stack:** Swift / SwiftUI（iOS 17 / Catalyst）；Swift Testing（Contracts host：`@Suite`/`@Test`/`#expect`）。
+
+## Global Constraints
+
+- 基准 = **现网代码**（main `8b7a6c2`），非 mockup。spec 权威：`docs/superpowers/specs/2026-06-29-training-ui-polish-design.md`。
+- **颜色 = 红涨绿跌**：浮动盈亏 盈=**红**(`.red`) / 亏=**绿**(`.green`) / 平·空仓=中性(`.secondary`)。**绝不**西式绿盈。
+- **去小数**：总资金、浮动盈亏金额、股数 = 0 位小数；**成本/股 + 浮动盈亏% = 2 位小数**。
+- signed-zero 归一：`-0.0` → `+`（沿用现 `percent`/`signedCurrency` 的 `(x==0) ? 0.0 : x`）。
+- FP/字符串 host 断言：选值用精确二进制浮点（整数 + .50 之类），字符串等值即可。
+- **不 bump** CONTRACT_VERSION（纯展示值/线宽，无持久/契约语义）。
+- **本批不含** fixture（#5 已移出，见 spec §9）。提交只 add 本任务文件，**绝不** `git add -A`/`.`（工作树可能有无关 untracked）。
+- 分支 `feat/training-ui-polish`（已在）。
+
+---
+
+## File Structure
+
+- `ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingTopBarContent.swift` — 格式 helper（加 `currencyInt`/`signedCurrencyInt`）+ 字段（`totalCapital` 无小数、`sharesText` 去「股」、拆 `holdingPnL`→`holdingPnLAmount`/`holdingPnLPercent`/`holdingPnLSign`）。Task 1。
+- `ios/Contracts/Tests/KlineTrainerContractsTests/UI/TrainingTopBarContentTests.swift` — 更新/新增断言。Task 1。
+- `ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift` — `topBar` 的 `metricCell` 标签/宽度 + 浮动盈亏两行格 + 对齐 + 颜色。Task 2。
+- `ios/Contracts/Sources/KlineTrainerContracts/Render/KLineView+Candles.swift`（MA66/BOLL）+ `KLineView+MACD.swift`（MACD）— 线宽常量。Task 3。
+
+**依赖序**：1（纯值 + 字段，Task 2 消费）→ 2（View 接线）→ 3（线宽，独立）→ 4（验收）。
+
+---
+
+### Task 1: TrainingTopBarContent 格式 + 拆 holdingPnL（纯值，host 测）
+
+**Files:**
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingTopBarContent.swift`
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/UI/TrainingTopBarContentTests.swift`
+
+**Interfaces:**
+- Produces（Task 2 消费）：`totalCapital`（"¥99,999,999" 无小数）、`holdingCostPerShare`（"¥ 1,683.50" 2 位，不变）、`sharesText`（"9,999,999" 无「股」后缀）、`positionShort`（"5/5" 不变）、`holdingPnLAmount`（"+¥12,345,678" 无小数带符号）、`holdingPnLPercent`（"+4,900.00%" 2 位 signed-zero）、`holdingPnLSign`（`Int`：+1 盈 / -1 亏 / 0 平·空仓）。删除旧 `holdingPnL` 单串字段。
+
+- [ ] **Step 1: 写失败测试**
+
+`TrainingTopBarContentTests.swift` —— 用现有 init（`TrainingTopBarContent(totalCapital:averageCost:shares:returnRate:positionTier:stockName:stockCode:currentPrice:)`）：
+
+```swift
+@Test("总资金/股数无小数；成本/股保留2位")
+func intFormats() {
+    let c = TrainingTopBarContent(totalCapital: 10_000_000, averageCost: 1_683.5, shares: 9_999_999,
+                                  returnRate: 0, positionTier: 5, stockName: "x", stockCode: "1",
+                                  currentPrice: 1_683.5)
+    #expect(c.totalCapital == "¥10,000,000")        // 无小数
+    #expect(c.sharesText == "9,999,999")            // 无「股」后缀
+    #expect(c.holdingCostPerShare == "¥ 1,683.50")  // 2 位，不变
+    #expect(c.positionShort == "5/5")
+}
+@Test("浮动盈亏拆两字段：盈（金额无小数 + 百分比2位）+ sign")
+func pnlProfit() {
+    // 现价 1683.5、成本 1.0、股数 9,999,999 → 金额≈(1682.5)×9999999、% 巨大；用可控值：
+    let c = TrainingTopBarContent(totalCapital: 0, averageCost: 10, shares: 100,
+                                  returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil,
+                                  currentPrice: 12)   // 盈 (12-10)×100=+200；%=(2/10)=+20%
+    #expect(c.holdingPnLAmount == "+¥200")           // 无小数
+    #expect(c.holdingPnLPercent == "+20.00%")        // 2 位
+    #expect(c.holdingPnLSign == 1)                   // 盈
+}
+@Test("浮动盈亏：亏（绿）+ 空仓（平·归零）")
+func pnlLossAndFlat() {
+    let loss = TrainingTopBarContent(totalCapital: 0, averageCost: 10, shares: 100,
+                                     returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil,
+                                     currentPrice: 9)    // 亏 (9-10)×100=-100；%=-10%
+    #expect(loss.holdingPnLAmount == "-¥100")
+    #expect(loss.holdingPnLPercent == "-10.00%")
+    #expect(loss.holdingPnLSign == -1)
+    let flat = TrainingTopBarContent(totalCapital: 0, averageCost: 0, shares: 0,
+                                     returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil,
+                                     currentPrice: 0)    // 空仓
+    #expect(flat.holdingPnLAmount == "+¥0")            // signed-zero 归一 +
+    #expect(flat.holdingPnLPercent == "+0.00%")
+    #expect(flat.holdingPnLSign == 0)                 // 平
+}
+```
+
+（删/改任何引用旧 `holdingPnL` 单串字段的既有断言。）
+
+- [ ] **Step 2: 跑确认失败**
+
+Run: `cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test --filter TrainingTopBarContent`
+Expected: 编译失败（`holdingPnLAmount`/`holdingPnLPercent`/`holdingPnLSign` 不存在）。
+
+- [ ] **Step 3: 实现**
+
+`TrainingTopBarContent.swift` 字段区：删 `public let holdingPnL: String`，加：
+```swift
+    public let holdingPnLAmount: String   // "+¥12,345,678"（无小数带符号）
+    public let holdingPnLPercent: String  // "+4,900.00%"（2 位 signed-zero）
+    public let holdingPnLSign: Int        // +1 盈 / -1 亏 / 0 平·空仓
+```
+`totalCapital` 改用新整数 helper：
+```swift
+        self.totalCapital = Self.currencyInt(totalCapital)     // 原 Self.currency(totalCapital)
+```
+`sharesText` 去「股」后缀：
+```swift
+        self.sharesText = Self.grouped(shares)                 // 原 "\(Self.grouped(shares)) 股"
+```
+`holdingCostPerShare`、`positionShort`、`returnRate`、`stockNameDisplay` **不变**。
+init 里 `holdingPnL` 那段改为：
+```swift
+        if shares > 0 && averageCost > 0 {
+            let amount = (currentPrice - averageCost) * Double(shares)
+            let pct = (currentPrice - averageCost) / averageCost
+            self.holdingPnLAmount = Self.signedCurrencyInt(amount)
+            self.holdingPnLPercent = Self.percent(pct)
+            self.holdingPnLSign = amount > 0 ? 1 : (amount < 0 ? -1 : 0)
+        } else {
+            self.holdingPnLAmount = Self.signedCurrencyInt(0)
+            self.holdingPnLPercent = Self.percent(0)
+            self.holdingPnLSign = 0
+        }
+```
+helper 区加两个**无小数**版（仿现有 `currency`/`signedCurrency`，`maximum/minimumFractionDigits = 0`，¥ 后**无空格**）：
+```swift
+    /// `¥` + 千分位 + 0 位小数（无空格）。总资金用。
+    private static func currencyInt(_ value: Double) -> String {
+        let f = NumberFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX"); f.numberStyle = .decimal
+        f.usesGroupingSeparator = true; f.groupingSeparator = ","
+        f.maximumFractionDigits = 0; f.minimumFractionDigits = 0
+        let body = f.string(from: NSNumber(value: value)) ?? String(format: "%.0f", value)
+        return "¥\(body)"
+    }
+    /// 带符号 `+¥12,345,678` / `-¥12,345,678`（±0 归一 `+`），0 位小数无空格。浮动盈亏金额用。
+    private static func signedCurrencyInt(_ value: Double) -> String {
+        let v = (value == 0) ? 0.0 : value
+        let sign = v >= 0 ? "+" : "-"
+        let f = NumberFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX"); f.numberStyle = .decimal
+        f.usesGroupingSeparator = true; f.groupingSeparator = ","
+        f.maximumFractionDigits = 0; f.minimumFractionDigits = 0
+        let body = f.string(from: NSNumber(value: abs(v))) ?? String(format: "%.0f", abs(v))
+        return "\(sign)¥\(body)"
+    }
+```
+（`currency` 2 位版仍被 `holdingCostPerShare` 用，保留；`signedCurrency` 旧 2 位版若不再被引用则删除——grep 确认后处理。）
+
+- [ ] **Step 4: 跑确认通过**
+
+Run: `cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test`
+Expected: 全 PASS（两框架），含上面 3 个新测试。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingTopBarContent.swift ios/Contracts/Tests/KlineTrainerContractsTests/UI/TrainingTopBarContentTests.swift
+git commit -m "feat(ui): 顶栏数字去小数 + 拆 holdingPnL 为金额/百分比/sign 三字段"
+```
+
+---
+
+### Task 2: TrainingView.topBar 接线（标签/宽度 + 浮动盈亏两行 + 对齐 + 颜色）
+
+**Files:**
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift`（`topBar` + `metricCell`，UIKit 守卫，host 不编译）
+
+**Interfaces:**
+- Consumes（Task 1）：`bar.totalCapital`/`holdingCostPerShare`/`sharesText`/`positionShort`/`holdingPnLAmount`/`holdingPnLPercent`/`holdingPnLSign`。
+
+- [ ] **Step 1: 改 topBar 指标行**（现 `HStack(spacing: 0)` 5 个 metricCell）
+
+把现 `topBar` 里第二行 `HStack(spacing: 0) { metricCell(...×5) }` 改为：标签简化、宽度收窄、`alignment: .top`（标签齐头）、浮动盈亏独立两行格：
+```swift
+            HStack(alignment: .top, spacing: 0) {
+                metricCell("总资金", bar.totalCapital, width: 84)
+                metricCell("成本/股", bar.holdingCostPerShare, width: 56)
+                metricCell("股数", bar.sharesText, width: 62)
+                metricCell("仓位", bar.positionShort, width: 30)
+                pnlCell(amount: bar.holdingPnLAmount, percent: bar.holdingPnLPercent, sign: bar.holdingPnLSign)
+            }
+```
+
+- [ ] **Step 2: 改 `metricCell` 为「标签顶 + 数值区居中 + 撑满行高」**
+
+```swift
+    /// 单行指标格：标签顶部齐头 + 数值在剩余空间上下居中；撑满行高（= 浮动盈亏两行格高），各格等高（RFC-A polish）。
+    private func metricCell(_ label: String, _ value: String, width: CGFloat?) -> some View {
+        VStack(spacing: 1) {
+            Text(label).font(.system(size: 9)).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Text(value).font(.system(size: 12).weight(.semibold)).lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .frame(width: width)
+        .frame(maxHeight: .infinity, alignment: .top)   // 撑满行高，内容 label 顶 / value 居中
+    }
+
+    /// 浮动盈亏格（弹性末格）：标签顶 + 金额一行 / 百分比一行；盈红亏绿平中性（红涨绿跌）。本格两行=行高最高 → 撑起整行。
+    private func pnlCell(amount: String, percent: String, sign: Int) -> some View {
+        let color: Color = sign > 0 ? .red : (sign < 0 ? .green : .secondary)
+        return VStack(spacing: 1) {
+            Text("浮动盈亏").font(.system(size: 9)).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Text(amount).font(.system(size: 12).weight(.semibold)).foregroundStyle(color).lineLimit(1)
+            Text(percent).font(.system(size: 11).weight(.semibold)).foregroundStyle(color).lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+```
+（删旧 `metricCell` 的 `.frame(width:alignment:.center)` + `.frame(maxWidth: width == nil ? .infinity : nil)` 实现，用上面新版；旧弹性末格 `metricCell("浮动盈亏", bar.holdingPnL, width: nil)` 调用删除，由 `pnlCell` 取代。）
+
+- [ ] **Step 3: build 验证**（host 不编译此 UIKit 文件）
+
+Run（先 `xcodebuild -list -project ios/KlineTrainer/KlineTrainer.xcodeproj` 找 scheme）：
+```
+cd "/Users/maziming/Coding/Prj_Kline trainer" && xcodebuild build -project "ios/KlineTrainer/KlineTrainer.xcodeproj" -scheme KlineTrainer -destination 'platform=iOS Simulator,id=DE0BA39D-C749-459D-A407-4418599B61CA' 2>&1 | tail -5
+```
+Expected: `** BUILD SUCCEEDED **`（若该模拟器 id 不存在，`xcrun simctl list devices available | grep iPhone` 换一个）。host `swift test` 仍全绿（Task 1 纯值未回归）。
+
+- [ ] **Step 4: 提交**
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift
+git commit -m "feat(ui): 顶栏标签简化/收窄 + 浮动盈亏两行(盈红亏绿) + 标签齐头数字居中对齐"
+```
+
+---
+
+### Task 3: 技术指标线加粗
+
+**Files:**
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/Render/KLineView+Candles.swift`（MA66:36 / BOLL:54）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/Render/KLineView+MACD.swift`（:27）
+
+- [ ] **Step 1: 改线宽**
+
+`KLineView+Candles.swift` `drawMA66`：`ctx.setLineWidth(2 / mapper.displayScale)` → `ctx.setLineWidth(3 / mapper.displayScale)`。
+`KLineView+Candles.swift` `drawBOLL`：`ctx.setLineWidth(1.6 / mapper.displayScale)` → `ctx.setLineWidth(2.2 / mapper.displayScale)`。
+`KLineView+MACD.swift`：`ctx.setLineWidth(1.8 / mapper.displayScale)` → `ctx.setLineWidth(2.4 / mapper.displayScale)`。
+（蜡烛 `:17` 的 `1`、AxisGrid、Crosshair 线宽**不动**；BOLL dash 不动。）
+
+- [ ] **Step 2: build 验证**
+
+Run: 同 Task 2 Step 3 的 iOS Simulator build → `** BUILD SUCCEEDED **`。host `swift test` 全绿（线宽不影响 host 测）。
+
+- [ ] **Step 3: 提交**
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/Render/KLineView+Candles.swift ios/Contracts/Sources/KlineTrainerContracts/Render/KLineView+MACD.swift
+git commit -m "feat(render): 指标线加粗 MA66 2→3 / BOLL 1.6→2.2 / MACD 1.8→2.4"
+```
+
+---
+
+### Task 4: 验收（三绿）+ 整体 review 准备
+
+**Files:** 无生产改动（验证）。
+
+- [ ] **Step 1: host 两框架全绿**
+
+Run: `cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test 2>&1 | grep -iE "Test Suite 'All tests'|Test run with [0-9]+ tests|with [1-9][0-9]* failure"`
+Expected: Swift Testing `Test run with N tests ... passed` + XCTest `Test Suite 'All tests' ... passed`，**无**非零失败行（两框架都查）。
+
+- [ ] **Step 2: iOS Simulator build + Mac Catalyst build**
+
+Run iOS：同上 `xcodebuild build ... -destination 'platform=iOS Simulator,id=…'` → `** BUILD SUCCEEDED **`。
+Run Catalyst：`xcodebuild build-for-testing -project ios/KlineTrainer/KlineTrainer.xcodeproj -scheme KlineTrainer -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 | tail -5`（本机无 Catalyst destination 则记录「CI 兜底」，沿用既往）。
+
+- [ ] **Step 3: 整体 whole-branch Codex review**
+
+Run: `.claude/scripts/codex-attest.sh --scope branch-diff --head feat/training-ui-polish --base main` → 收敛 approve。
+
+- [ ] **Step 4: 真机/模拟器人工验收**
+
+按 spec §8 的 5 条（顶栏去小数 / 浮动盈亏两行盈红亏绿 / 标签齐头数字居中 / 两图等高 / 指标更粗）逐条对照（真机部署见 backlog memory 命令）。
+
+---
+
+## Self-Review
+
+- **spec §3.1 数字格式**：Task 1（currencyInt/signedCurrencyInt + 字段）✓
+- **spec §3.2 浮动盈亏两字段两行盈红亏绿**：Task 1（拆字段 + sign）+ Task 2（pnlCell 两行 + color）✓
+- **spec §3.3 标签简化/收窄/对齐**：Task 2（metricCell + HStack .top + 撑满居中）✓
+- **spec §3.4 高度/两图等高**：Task 2（pnlCell 撑起行高，两图 maxHeight:.infinity 自动均分，无需改 panel）✓
+- **spec §4 (Part 2) 指标加粗**：Task 3 ✓
+- **不 bump CONTRACT_VERSION**：无 Models 改动 ✓
+- **不含 fixture**：无 DebugFixtureData 改动 ✓
+- 占位扫描：无 TBD/TODO；代码完整。
+- 类型一致：Task 1 产出字段名（holdingPnLAmount/Percent/Sign）与 Task 2 消费一致 ✓。
