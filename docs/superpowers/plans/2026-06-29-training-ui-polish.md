@@ -93,6 +93,8 @@ Expected: 编译失败（`holdingPnLAmount`/`holdingPnLPercent`/`holdingPnLSign`
 
 - [ ] **Step 3: 实现**
 
+> **删 `holdingPnL` 干净、不留兼容字段（codex plan-R5/R6 复核）**：`KlineTrainerContracts` 是**本地 path 依赖包**（`@ local`，非发布/分发库），monorepo = 完整消费集，grep 证唯一消费者 = `TrainingView` 同模块、无外部/跨 target 消费者。且若保留 `holdingPnL` 兼容字段，其值会随新 helper 变成**新格式**（无小数）→ 对假想外部消费者是**误导性兼容**（语义已变），比删除更糟。故干净删除。
+
 `TrainingTopBarContent.swift` 字段区：删 `public let holdingPnL: String`，加：
 ```swift
     public let holdingPnLAmount: String   // "+¥12,345,678"（无小数带符号）
