@@ -60,13 +60,19 @@
 
 ## 4. Part 2 — DEBUG fixture 周期比例修正（#5，`#if DEBUG` only，零生产影响）
 
-`DebugFixtureData.make` 用固定 span 聚合 m3：现 `weekly=160`、`monthly=240`，与真实日历比例不符（A 股 240 分/日 → 日线=80 m3；周=5 交易日=400；月≈20 交易日≈1600）。
+`DebugFixtureData.make` 用固定 span 聚合 m3：现 `weekly=160`、`monthly=240`，与真实日历比例不符（A 股 240 分/日 → 日线=80 m3；周=5 交易日=400；月≈20 交易日≈1600）。现状 daily 240/weekly 120/monthly 80 根 = 各周期跨度不一（日 1 年、周 2.3 年、月 6.7 年），故「周线1根≈日线2根」。
 
-- **weekly span 160 → 400**（= 5×日线）。
-- **monthly span 240 → 1600**（= 20×日线）。
-- `fullLoadM3Count = 19,200` 下：日线 240 根 / 周线 **48** 根 / 月线 **12** 根（合理，比例 5×/20× 正确）。
+**改聚合 span 为真实日历比例**：
+- **weekly span 160 → 400**（= 5×日线）、**monthly span 240 → 1600**（= 20×日线）。m15=5/m60=20/daily=80 不变。
+
+**连锁约束（必须一并处理，否则破坏 fixture 不变量）**：
+1. **新 `lcm(spans)` = lcm(5,20,80,400,1600) = 1600**（旧为 480）。`fullLoadM3Count` 与 `fullLoadBeforeM3Count` **都须为 1600 的倍数**（保证「各周期 before/after 边界落在该周期 candle 边界」不变量，line 47-48）。
+   - `fullLoadM3Count = 19,200` = 1600×12 ✓（**不变**）。
+   - `fullLoadBeforeM3Count = 12,000` = 1600×7.5 ✗ → 改 **12,800**（=1600×8；daily-before 160≈旧 150，仍 < 19,200）。原「daily before=150 对齐 spec §8.3」放宽为「对齐新 lcm」（fixture 内部参数，无外部契约）。
+2. **新根数（fullLoad 19,200）**：日线 **240** / 周线 **48** / 月线 **12**——**各周期均≈1 年、比例正确**（240 交易日≈1 年、48 周≈1 年、12 月=1 年）。月线 12 根**是真实的**（真实月线图本就只十几根），非「太少」；推翻旧注释「monthly≥80」的人为约束（那是旧小 span 的产物）。
+3. **更新代码注释**（line 44-49 的 fullLoad 推导说明：lcm 480→1600、根数、约束）+ **fixture 测试**（凡断言旧 weekly=120/monthly=80 的，改 48/12；before-对齐测试若有，改 12,800/新 lcm）。
 - 生产 `import_csv`（按真实 datetime 聚合）**本就正确、不动**。仅改 DEBUG fixture。
-- **附带（已应用）**：fixture 开局 pending 的周期对 `upperPeriod: .m3 → .m60`（与 `lowerPeriod: .daily` 相邻、对齐生产默认 m60/daily + periodCombos 阶梯；原 m3/daily 不相邻）。真机验收时已改并验证，纳入本批一起提交。
+- **m60 周期对**（实现阶段一并做，不在 spec 分支预改）：fixture 开局 pending 的 `upperPeriod: .m3 → .m60`（与 `lowerPeriod: .daily` 相邻、对齐生产默认 m60/daily + periodCombos 阶梯；原 m3/daily 不相邻）。真机验收时临时改过验证可行，正式实现纳入本批 Part 2。
 
 ## 5. Part 3 — 技术指标线再加粗（#6，生产渲染）
 

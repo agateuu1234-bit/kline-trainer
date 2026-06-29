@@ -130,7 +130,7 @@ public enum DebugFixtureData {
         let emptyPosition = try! JSONEncoder().encode(PositionManager())
         let pending = PendingTraining(
             trainingSetFilename: filename, globalTickIndex: m3Count / 2,
-            upperPeriod: .m60, lowerPeriod: .daily,   // 相邻周期对（对齐生产默认 m60/daily + periodCombos 阶梯）；原 .m3 与 daily 不相邻
+            upperPeriod: .m3, lowerPeriod: .daily,
             positionData: emptyPosition, cashBalance: 100_000, feeSnapshot: fees,
             tradeOperations: [], drawings: [], startedAt: baseEpoch + 172_800,
             accumulatedCapital: 100_000,
