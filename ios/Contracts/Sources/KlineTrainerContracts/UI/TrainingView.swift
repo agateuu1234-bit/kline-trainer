@@ -211,26 +211,42 @@ public struct TrainingView: View {
                     Color.clear.frame(width: 36, height: 1)
                 }
             }
-            HStack(spacing: 0) {
-                metricCell("总资金", bar.totalCapital, width: 96)
-                metricCell("持仓成本/股", bar.holdingCostPerShare, width: 72)
-                metricCell("持仓股数", bar.sharesText, width: 86)
-                metricCell("仓位", bar.positionShort, width: 40)
-                metricCell("浮动盈亏", bar.holdingPnL, width: nil)   // 末格弹性（RFC-A A3：持仓未实现盈亏）
+            HStack(alignment: .top, spacing: 0) {
+                metricCell("总资金", bar.totalCapital, width: 84)
+                metricCell("成本/股", bar.holdingCostPerShare, width: 56)
+                metricCell("股数", bar.sharesText, width: 62)
+                metricCell("仓位", bar.positionShort, width: 30)
+                pnlCell(amount: bar.holdingPnLAmount, percent: bar.holdingPnLPercent, sign: bar.holdingPnLSign)
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
     }
 
-    /// 单个指标格：标签上 / 数值下，居中对称（RFC-B D4）。width=nil → 弹性末格。
+    private static let metricRowH: CGFloat = 44   // 顶栏指标行固定高（容标签+浮动盈亏两行）；有界=不与图表抢空间
+
+    /// 单值指标格：标签顶部齐头 + 数值在固定行高内上下居中；各格同 metricRowH → 等高、标签齐平。
     private func metricCell(_ label: String, _ value: String, width: CGFloat?) -> some View {
         VStack(spacing: 1) {
             Text(label).font(.system(size: 9)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 12).weight(.semibold)).lineLimit(1)
+            Spacer(minLength: 0)
+            Text(value).font(.system(size: 12).weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
+            Spacer(minLength: 0)
         }
-        .frame(width: width, alignment: .center)
-        .frame(maxWidth: width == nil ? .infinity : nil)
+        .frame(width: width, height: Self.metricRowH, alignment: .top)   // 固定有界高，label 顶 / value 居中
+    }
+
+    /// 浮动盈亏格（弹性末格）：标签顶 + 金额一行 / 百分比一行；盈红亏绿平中性（红涨绿跌）。同 metricRowH 固定高。
+    private func pnlCell(amount: String, percent: String, sign: Int) -> some View {
+        let color: Color = sign > 0 ? .red : (sign < 0 ? .green : .secondary)
+        return VStack(spacing: 1) {
+            Text("浮动盈亏").font(.system(size: 9)).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Text(amount).font(.system(size: 12).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.8)
+            Text(percent).font(.system(size: 11).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.8)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity).frame(height: Self.metricRowH, alignment: .top)
     }
 
     private func panel(_ id: PanelId) -> some View {
