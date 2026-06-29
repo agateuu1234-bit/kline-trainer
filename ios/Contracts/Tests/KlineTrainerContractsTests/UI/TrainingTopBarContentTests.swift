@@ -4,22 +4,22 @@ import Testing
 @Suite("TrainingTopBarContent")
 struct TrainingTopBarContentTests {
 
-    @Test("总资金：¥ + 一空格 + 千分位 + 2 位小数（对齐 SettlementContent 口径）")
+    @Test("总资金：¥ + 千分位 + 无小数（无空格）")
     func totalCapital_thousands() {
-        let c = TrainingTopBarContent(totalCapital: 102_345.67, averageCost: 0, shares: 0, returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil)
-        #expect(c.totalCapital == "¥ 102,345.67")
+        let c = TrainingTopBarContent(totalCapital: 102_345, averageCost: 0, shares: 0, returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil)
+        #expect(c.totalCapital == "¥102,345")
     }
 
-    @Test("持仓成本：空仓 0 → ¥ 0.00")
+    @Test("持仓成本：空仓 0 → 0.00（无 ¥）")
     func holdingCost_zero() {
         let c = TrainingTopBarContent(totalCapital: 0, averageCost: 0, shares: 0, returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil)
-        #expect(c.holdingCostPerShare == "¥ 0.00")
+        #expect(c.holdingCostPerShare == "0.00")
     }
 
-    @Test("持仓成本：含小数千分位")
+    @Test("持仓成本：含小数千分位（无 ¥）")
     func holdingCost_value() {
         let c = TrainingTopBarContent(totalCapital: 0, averageCost: 12_040.5, shares: 0, returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil)
-        #expect(c.holdingCostPerShare == "¥ 12,040.50")
+        #expect(c.holdingCostPerShare == "12,040.50")
     }
 
     @Test("收益率：正 → +X.XX%")
@@ -59,20 +59,20 @@ struct TrainingTopBarContentTests {
         let c = TrainingTopBarContent(totalCapital: 12_840_650, averageCost: 1_683.50,
                                       shares: 200, returnRate: 0.0234, positionTier: 2,
                                       stockName: nil, stockCode: nil)
-        #expect(c.holdingCostPerShare == "¥ 1,683.50")   // 每股价位级，非总额
+        #expect(c.holdingCostPerShare == "1,683.50")   // 每股价位级，无 ¥
     }
 
-    @Test func sharesText_grouped_with_unit() {
+    @Test func sharesText_grouped_no_unit() {
         let c = TrainingTopBarContent(totalCapital: 0, averageCost: 0, shares: 9_999_999,
                                       returnRate: 0, positionTier: 5, stockName: nil, stockCode: nil)
-        #expect(c.sharesText == "9,999,999 股")           // 7 位千分位 + 单位
+        #expect(c.sharesText == "9,999,999")           // 7 位千分位，无「股」后缀
     }
 
     @Test func sharesZero_costZero() {
         let c = TrainingTopBarContent(totalCapital: 0, averageCost: 0, shares: 0,
                                       returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil)
-        #expect(c.sharesText == "0 股")
-        #expect(c.holdingCostPerShare == "¥ 0.00")
+        #expect(c.sharesText == "0")
+        #expect(c.holdingCostPerShare == "0.00")
     }
 
     @Test func stockName_hiddenWhenNil_shownWhenPresent() {
@@ -87,38 +87,47 @@ struct TrainingTopBarContentTests {
     @Test func totalCapital_8digit_noTruncation() {
         let c = TrainingTopBarContent(totalCapital: 99_999_999, averageCost: 0, shares: 0,
                                       returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil)
-        #expect(c.totalCapital == "¥ 99,999,999.00")    // 8 位整数位完整千分位
-    }
-}
-
-// MARK: - RFC-A A3: 持仓未实现盈亏（Task 6）
-
-@Suite("TrainingTopBarContent holdingPnL")
-struct TrainingTopBarContentHoldingPnLTests {
-
-    @Test("持仓>0：浮动盈亏 = (现价-成本)*股数，元+%")
-    func holdingPnLPositive() {
-        let c = TrainingTopBarContent(totalCapital: 100_000, averageCost: 10, shares: 1000,
-                                      returnRate: 0.05, positionTier: 1,
-                                      stockName: nil, stockCode: nil, currentPrice: 12)
-        // (12-10)*1000 = +2000；(12-10)/10 = +20.00%
-        #expect(c.holdingPnL == "+¥ 2,000.00 (+20.00%)")
+        #expect(c.totalCapital == "¥99,999,999")    // 8 位整数位完整千分位，无小数无空格
     }
 
-    @Test("持仓=0：浮动盈亏 +¥ 0.00 (+0.00%)")
-    func holdingPnLZero() {
-        let c = TrainingTopBarContent(totalCapital: 100_000, averageCost: 0, shares: 0,
-                                      returnRate: 0, positionTier: 0,
-                                      stockName: nil, stockCode: nil, currentPrice: 12)
-        #expect(c.holdingPnL == "+¥ 0.00 (+0.00%)")
+    // MARK: - Task 1：顶栏格式改造 + holdingPnL 拆三字段
+
+    @Test("总资金/股数无小数；成本/股保留2位")
+    func intFormats() {
+        let c = TrainingTopBarContent(totalCapital: 10_000_000, averageCost: 1_683.5, shares: 9_999_999,
+                                      returnRate: 0, positionTier: 5, stockName: "x", stockCode: "1",
+                                      currentPrice: 1_683.5)
+        #expect(c.totalCapital == "¥10,000,000")        // 无小数
+        #expect(c.sharesText == "9,999,999")            // 无「股」后缀
+        #expect(c.holdingCostPerShare == "1,683.50")    // 2 位、去 ¥（codex plan-R1 省宽）
+        #expect(c.positionShort == "5/5")
     }
 
-    @Test("亏损：负号 + 负%")
-    func holdingPnLNegative() {
-        let c = TrainingTopBarContent(totalCapital: 100_000, averageCost: 10, shares: 1000,
-                                      returnRate: -0.1, positionTier: 1,
-                                      stockName: nil, stockCode: nil, currentPrice: 9)
-        #expect(c.holdingPnL == "-¥ 1,000.00 (-10.00%)")
+    @Test("浮动盈亏拆两字段：盈（金额无小数 + 百分比2位）+ sign")
+    func pnlProfit() {
+        // 现价 12、成本 10、股数 100 → 金额 +200；% +20%
+        let c = TrainingTopBarContent(totalCapital: 0, averageCost: 10, shares: 100,
+                                      returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil,
+                                      currentPrice: 12)   // 盈 (12-10)×100=+200；%=(2/10)=+20%
+        #expect(c.holdingPnLAmount == "+¥200")           // 无小数
+        #expect(c.holdingPnLPercent == "+20.00%")        // 2 位
+        #expect(c.holdingPnLSign == 1)                   // 盈
+    }
+
+    @Test("浮动盈亏：亏（绿）+ 空仓（平·归零）")
+    func pnlLossAndFlat() {
+        let loss = TrainingTopBarContent(totalCapital: 0, averageCost: 10, shares: 100,
+                                         returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil,
+                                         currentPrice: 9)    // 亏 (9-10)×100=-100；%=-10%
+        #expect(loss.holdingPnLAmount == "-¥100")
+        #expect(loss.holdingPnLPercent == "-10.00%")
+        #expect(loss.holdingPnLSign == -1)
+        let flat = TrainingTopBarContent(totalCapital: 0, averageCost: 0, shares: 0,
+                                         returnRate: 0, positionTier: 0, stockName: nil, stockCode: nil,
+                                         currentPrice: 0)    // 空仓
+        #expect(flat.holdingPnLAmount == "+¥0")            // signed-zero 归一 +
+        #expect(flat.holdingPnLPercent == "+0.00%")
+        #expect(flat.holdingPnLSign == 0)                 // 平
     }
 }
 
