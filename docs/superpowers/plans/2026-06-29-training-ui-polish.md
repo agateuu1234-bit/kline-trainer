@@ -87,7 +87,7 @@ func pnlLossAndFlat() {
 
 - [ ] **Step 2: 跑确认失败**
 
-Run: `cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test --filter TrainingTopBarContent`
+Run: `cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter TrainingTopBarContent`
 Expected: 编译失败（`holdingPnLAmount`/`holdingPnLPercent`/`holdingPnLSign` 不存在）。
 
 - [ ] **Step 3: 实现**
@@ -159,7 +159,7 @@ helper 区加两个**无小数**版（仿现有 `currency`/`signedCurrency`，`m
 
 - [ ] **Step 4: 跑确认通过**
 
-Run: `cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test`
+Run: `cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test`
 Expected: 全 PASS（两框架），含上面 3 个新测试。
 
 - [ ] **Step 5: 提交**
@@ -230,7 +230,7 @@ git commit -m "feat(ui): 顶栏数字去小数 + 拆 holdingPnL 为金额/百分
 
 Run（先 `xcodebuild -list -project ios/KlineTrainer/KlineTrainer.xcodeproj` 找 scheme）：
 ```
-cd "/Users/maziming/Coding/Prj_Kline trainer" && xcodebuild build -project "ios/KlineTrainer/KlineTrainer.xcodeproj" -scheme KlineTrainer -destination 'platform=iOS Simulator,id=DE0BA39D-C749-459D-A407-4418599B61CA' 2>&1 | tail -5
+cd "$(git rev-parse --show-toplevel)" && xcodebuild build -project "ios/KlineTrainer/KlineTrainer.xcodeproj" -scheme KlineTrainer -destination 'platform=iOS Simulator,id=DE0BA39D-C749-459D-A407-4418599B61CA' 2>&1 | tail -5
 ```
 Expected: `** BUILD SUCCEEDED **`（若该模拟器 id 不存在，`xcrun simctl list devices available | grep iPhone` 换一个）。host `swift test` 仍全绿（Task 1 纯值未回归）。
 
@@ -273,7 +273,7 @@ git commit -m "feat(render): 指标线加粗 MA66 2→3 / BOLL 1.6→2.2 / MACD 
 
 - [ ] **Step 1: host 两框架全绿**
 
-Run: `cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test 2>&1 | grep -iE "Test Suite 'All tests'|Test run with [0-9]+ tests|with [1-9][0-9]* failure"`
+Run: `cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test 2>&1 | grep -iE "Test Suite 'All tests'|Test run with [0-9]+ tests|with [1-9][0-9]* failure"`
 Expected: Swift Testing `Test run with N tests ... passed` + XCTest `Test Suite 'All tests' ... passed`，**无**非零失败行（两框架都查）。
 
 - [ ] **Step 2: iOS Simulator build + Mac Catalyst build**
