@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>RFC-A 顶栏微调 — 整屏对比</title>
+<style>
+  body { background:#15171c; color:#e8e8ea; font-family:-apple-system,"PingFang SC",sans-serif; margin:0; padding:24px; }
+  h1 { font-size:18px; font-weight:600; }
+  .note { font-size:12px; color:#9aa0aa; line-height:1.7; max-width:900px; }
+  .row { display:flex; gap:40px; align-items:flex-start; flex-wrap:wrap; }
+  .col h2 { font-size:14px; color:#cfd3da; margin:18px 0 8px; }
+  /* iPhone 15 Pro Max 逻辑 430×932，按比例缩到 300 宽展示 */
+  .phone { width:300px; height:650px; background:#0b0c10; border:6px solid #2a2d35; border-radius:26px; overflow:hidden; display:flex; flex-direction:column; }
+  /* ===== 顶栏 ===== */
+  .topbar { padding:6px 9px; background:#0e0f13; border-bottom:1px solid #1c1f26; flex:none; }
+  .r1 { display:flex; align-items:center; height:18px; }
+  .r1 .nav { font-size:12px; color:#3a86ff; }
+  .r1 .name { flex:1; text-align:center; font-size:11px; color:#9aa0aa; }
+  .r1 .end { font-size:12px; color:#ff453a; }
+  .r2 { display:flex; margin-top:4px; }
+  .cell { display:flex; flex-direction:column; }
+  .cell .lab { font-size:8px; color:#8a909a; line-height:1.2; text-align:center; }
+  .cell .val { font-size:10px; font-weight:600; line-height:1.25; white-space:nowrap; text-align:center; }
+  .cell.flex { flex:1; min-width:0; }
+  .pos { color:#2ec27e; } .neg { color:#ff453a; }
+  /* 现状：5 格顶对齐、单行、浮动盈亏括号截断 */
+  .old .r2 .cell { align-items:center; justify-content:flex-start; }
+  .old .val.clip { overflow:hidden; text-overflow:ellipsis; }
+  /* 新版：其余格上下居中、浮动盈亏两行 */
+  .new .r2 { align-items:stretch; }
+  .new .r2 .cell { align-items:center; justify-content:center; }   /* ← 上下居中 */
+  .new .pnl { display:flex; flex-direction:column; align-items:center; line-height:1.1; }
+  .new .pnl .amt { font-size:10px; font-weight:600; }
+  .new .pnl .pct { font-size:9px; font-weight:600; }
+  /* ===== 图表区（示意，两版完全相同）===== */
+  .chart { flex:1; position:relative; border-bottom:1px solid #1c1f26; background:
+      repeating-linear-gradient(0deg,#0e0f13,#0e0f13 23px,#13151b 23px,#13151b 24px); }
+  .chart .ptag { position:absolute; top:4px; left:6px; font-size:9px; color:#8a909a; }
+  .chart .axis { position:absolute; top:0; right:2px; height:100%; width:34px; }
+  .chart .axis span { position:absolute; right:0; font-size:8px; color:#6b7280; }
+  .candles { position:absolute; left:8px; right:38px; top:18px; bottom:6px; display:flex; align-items:flex-end; gap:3px; }
+  .k { width:5px; background:#2ec27e; } .k.d { background:#ff453a; }
+  /* ===== T2 交易条（两版相同）===== */
+  .t2 { flex:none; height:34px; display:flex; align-items:center; padding:0 8px; gap:6px; background:#0e0f13; border-top:1px solid #1c1f26; }
+  .seg { display:flex; border:1px solid #2a2d35; border-radius:6px; overflow:hidden; font-size:10px; }
+  .seg span { padding:3px 7px; color:#9aa0aa; } .seg span.on { background:#23262e; color:#e8e8ea; }
+  .px { font-size:11px; color:#e8e8ea; }
+  .acts { margin-left:auto; display:flex; gap:5px; }
+  .acts b { font-size:11px; font-weight:600; padding:4px 9px; border-radius:6px; }
+  .buy { background:#2ec27e22; color:#2ec27e; } .sell { background:#ff453a22; color:#ff453a; } .hold { background:#23262e; color:#cfd3da; }
+  .hl { outline:2px solid #ffd60a; outline-offset:1px; border-radius:4px; }
+  .delta { font-size:11px; color:#ffd60a; }
+</style>
+</head>
+<body>
+<h1>RFC-A 顶栏微调 — 整屏对比（左=现状，右=新版；最坏值压测）</h1>
+<p class="note">
+除<span class="hl">顶栏</span>外，上下两图、坐标轴、T2 交易条<b>一律不动</b>（示意图里左右两版的图表区/交易条完全相同）。
+<b class="delta">注意行高：</b>新版顶栏因「浮动盈亏分两行」比现状<b>高约 13pt</b>，图表区相应少 ~13pt（这是 C 不截断的代价）。
+</p>
+
+<div class="row">
+  <!-- ============ 现状 ============ -->
+  <div class="col">
+    <h2>现状（顶栏矮，但浮动盈亏最坏值被截 ✂️）</h2>
+    <div class="phone old">
+      <div class="topbar">
+        <div class="r1"><span class="nav">返回</span><span class="name">贵州茅台（600519）</span><span class="end">结束</span></div>
+        <div class="r2 hl">
+          <div class="cell" style="width:62px"><span class="lab">总资金</span><span class="val">¥10,000,000.00</span></div>
+          <div class="cell" style="width:48px"><span class="lab">持仓成本/股</span><span class="val">¥1,683.50</span></div>
+          <div class="cell" style="width:54px"><span class="lab">持仓股数</span><span class="val">9,999,999 股</span></div>
+          <div class="cell" style="width:26px"><span class="lab">仓位</span><span class="val">5/5</span></div>
+          <div class="cell flex"><span class="lab">浮动盈亏</span><span class="val pos clip">+¥12,3…</span></div>
+        </div>
+      </div>
+      <div class="chart"><span class="ptag">60分</span><div class="axis"><span style="top:10%">1720</span><span style="top:50%">1683</span><span style="top:88%">1650</span></div>
+        <div class="candles"><i class="k" style="height:40%"></i><i class="k d" style="height:55%"></i><i class="k" style="height:35%"></i><i class="k" style="height:62%"></i><i class="k d" style="height:48%"></i><i class="k" style="height:70%"></i><i class="k" style="height:58%"></i><i class="k d" style="height:44%"></i><i class="k" style="height:66%"></i><i class="k" style="height:52%"></i><i class="k d" style="height:38%"></i><i class="k" style="height:60%"></i></div></div>
+      <div class="chart"><span class="ptag">日线</span><div class="axis"><span style="top:12%">1750</span><span style="top:52%">1680</span><span style="top:90%">1600</span></div>
+        <div class="candles"><i class="k" style="height:50%"></i><i class="k" style="height:64%"></i><i class="k d" style="height:42%"></i><i class="k" style="height:72%"></i><i class="k" style="height:58%"></i><i class="k d" style="height:46%"></i><i class="k" style="height:68%"></i><i class="k" style="height:54%"></i></div></div>
+      <div class="t2">
+        <div class="seg"><span>日线</span><span class="on">60分</span></div>
+        <span class="px">现价 ¥1,704.10</span>
+        <div class="acts"><b class="buy">买入</b><b class="sell">卖出</b><b class="hold">持有</b></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 新版 ============ -->
+  <div class="col">
+    <h2>新版（去小数 + 标签简化 + 浮动盈亏两行居中，不截断 ✅）</h2>
+    <div class="phone new">
+      <div class="topbar">
+        <div class="r1"><span class="nav">返回</span><span class="name">贵州茅台（600519）</span><span class="end">结束</span></div>
+        <div class="r2 hl">
+          <div class="cell" style="width:62px"><span class="lab">总资金</span><span class="val">¥10,000,000</span></div>
+          <div class="cell" style="width:48px"><span class="lab">成本/股</span><span class="val">¥1,683.50</span></div>
+          <div class="cell" style="width:50px"><span class="lab">股数</span><span class="val">9,999,999</span></div>
+          <div class="cell" style="width:24px"><span class="lab">仓位</span><span class="val">5/5</span></div>
+          <div class="cell flex"><span class="lab">浮动盈亏</span>
+            <span class="pnl pos"><span class="amt">+¥12,345,678</span><span class="pct">+4,900.00%</span></span></div>
+        </div>
+      </div>
+      <div class="chart"><span class="ptag">60分</span><div class="axis"><span style="top:10%">1720</span><span style="top:50%">1683</span><span style="top:88%">1650</span></div>
+        <div class="candles"><i class="k" style="height:40%"></i><i class="k d" style="height:55%"></i><i class="k" style="height:35%"></i><i class="k" style="height:62%"></i><i class="k d" style="height:48%"></i><i class="k" style="height:70%"></i><i class="k" style="height:58%"></i><i class="k d" style="height:44%"></i><i class="k" style="height:66%"></i><i class="k" style="height:52%"></i><i class="k d" style="height:38%"></i><i class="k" style="height:60%"></i></div></div>
+      <div class="chart"><span class="ptag">日线</span><div class="axis"><span style="top:12%">1750</span><span style="top:52%">1680</span><span style="top:90%">1600</span></div>
+        <div class="candles"><i class="k" style="height:50%"></i><i class="k" style="height:64%"></i><i class="k d" style="height:42%"></i><i class="k" style="height:72%"></i><i class="k" style="height:58%"></i><i class="k d" style="height:46%"></i><i class="k" style="height:68%"></i><i class="k" style="height:54%"></i></div></div>
+      <div class="t2">
+        <div class="seg"><span>日线</span><span class="on">60分</span></div>
+        <span class="px">现价 ¥1,704.10</span>
+        <div class="acts"><b class="buy">买入</b><b class="sell">卖出</b><b class="hold">持有</b></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p class="note" style="margin-top:20px">
+黄框 = 唯一改动区（顶栏第二行）。新版其余格已<b>上下居中</b>（不再顶对齐）。<br>
+要你拍板：① 接受顶栏 <b>+~13pt</b> 换浮动盈亏永不截（C），还是顶栏高度不变但极端值省略（B）？② 其它（图表/T2 条）确认没动。
+</p>
+</body>
+</html>
