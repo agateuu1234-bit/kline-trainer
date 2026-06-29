@@ -33,7 +33,7 @@ extension KLineView {
         ctx.saveGState()
         defer { ctx.restoreGState() }
         currentPalette.ma66.setStroke()
-        ctx.setLineWidth(2 / mapper.displayScale)
+        ctx.setLineWidth(3 / mapper.displayScale)
         ctx.setLineJoin(.round)
         // 单点段无法成线，跳过（D9：polylineSegments 在 nil 处断段，孤立单点是边角产物）。
         for segment in segments where segment.count >= 2 {
@@ -51,7 +51,7 @@ extension KLineView {
         ctx.saveGState()
         defer { ctx.restoreGState() }
         currentPalette.bollLine.setStroke()
-        ctx.setLineWidth(1.6 / mapper.displayScale)
+        ctx.setLineWidth(2.2 / mapper.displayScale)
         // D3：BOLL 虚线。dash 段长由 host 已测的 MainChartLayout.dashPattern 提供（H1 修订）。
         // saveGState/restoreGState（上方 defer）配对保证 dash 不泄漏给后续 drawVolume/drawMACD——
         // 此配对正确性靠 defer 紧跟 saveGState 的惯用法 + code review，无运行期自动验证（H1 如实记录）。
