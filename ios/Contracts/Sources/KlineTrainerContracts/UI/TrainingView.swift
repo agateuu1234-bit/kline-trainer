@@ -241,11 +241,14 @@ public struct TrainingView: View {
     private func pnlCell(amount: String, percent: String, sign: Int) -> some View {
         let palette = UIChartPalette.forScheme(colorScheme == .dark ? .dark : .light)
         let color: Color = sign > 0 ? Color(uiColor: palette.profitRed) : (sign < 0 ? Color(uiColor: palette.lossGreen) : .secondary)
+        // 最小受支持设备=iPhone SE2/3=375pt（部署目标 iOS 17.6，无 320pt 设备）：内容宽 375−24(padding)=351，
+        // 固定格 84+56+62+30=232 → PnL 弹性余量≈119pt，worst-case `+¥12,345,678`/`-12,345,678` 满刻度(~85pt)即放得下。
+        // minimumScaleFactor 0.5 是「窄于受支持下限」的安全网（受支持设备永不触发缩放），保证任意窄屏也不截断（codex r4）。
         return VStack(spacing: 1) {
             Text("浮动盈亏").font(.system(size: 9)).foregroundStyle(.secondary)
             Spacer(minLength: 0)
-            Text(amount).font(.system(size: 12).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.8)
-            Text(percent).font(.system(size: 11).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.8)
+            Text(amount).font(.system(size: 12).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.5)
+            Text(percent).font(.system(size: 11).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.5)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity).frame(height: Self.metricRowH, alignment: .top)

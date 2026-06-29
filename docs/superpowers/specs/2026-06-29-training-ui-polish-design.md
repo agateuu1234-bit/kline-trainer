@@ -40,7 +40,9 @@
 
 - 新增整数货币 helper（如 `currencyInt(_)` / `signedCurrencyInt(_)`）= `¥`/带符号 + 千分位 + **0 位小数**；`holdingCostPerShare` 仍用现有 2 位 `currency`。
 - ¥ 与数字之间空格：新整数版 `totalCapital`/`holdingPnLAmount` = `¥` 紧贴数字无空格（`¥99,999,999`）。`holdingCostPerShare` **完全去 ¥**（见上表）。
-- **防截断（codex plan-R1）**：顶栏所有数值 `Text` 加 `minimumScaleFactor(0.8)` + `lineLimit(1)`——固定宽格遇超长值**缩放而非省略号**；§8#1 最坏值人工验收**附截图**证明不截断。
+- **防截断（codex plan-R1 / r4）**：顶栏所有数值 `Text` 加 `minimumScaleFactor` + `lineLimit(1)`——固定宽格遇超长值**缩放而非省略号**；§8#1 最坏值人工验收**附截图**证明不截断。
+  - 固定格用 `0.8`（其宽固定、内容必合）；**浮动盈亏弹性格用 `0.5`** 作窄屏安全网。
+  - **设备底线 = 375pt**（部署目标 iOS 17.6 → 最小设备 iPhone SE2/3，无 320pt 设备）：内容宽 375−24=351，固定格 84+56+62+30=232 → PnL 弹性余量≈**119pt**，worst-case `+¥12,345,678` 满刻度(~85pt)即放得下、**受支持设备永不触发缩放**；`0.5` 仅保任意更窄屏（codex r4 假设的 320pt）也不截断。
 
 ### 3.2 浮动盈亏拆字段 + 两行渲染（#3 + 方案 C）
 
