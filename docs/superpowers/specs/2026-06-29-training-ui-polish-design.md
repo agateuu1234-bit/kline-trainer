@@ -66,6 +66,7 @@
 - **monthly span 240 → 1600**（= 20×日线）。
 - `fullLoadM3Count = 19,200` 下：日线 240 根 / 周线 **48** 根 / 月线 **12** 根（合理，比例 5×/20× 正确）。
 - 生产 `import_csv`（按真实 datetime 聚合）**本就正确、不动**。仅改 DEBUG fixture。
+- **附带（已应用）**：fixture 开局 pending 的周期对 `upperPeriod: .m3 → .m60`（与 `lowerPeriod: .daily` 相邻、对齐生产默认 m60/daily + periodCombos 阶梯；原 m3/daily 不相邻）。真机验收时已改并验证，纳入本批一起提交。
 
 ## 5. Part 3 — 技术指标线再加粗（#6，生产渲染）
 
