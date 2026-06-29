@@ -120,6 +120,28 @@ struct TrainingTopBarContentTests {
         #expect(c.totalCapital == "¥102,346")   // NumberFormatter maxFractionDigits=0 四舍五入：102345.67 → 102346
     }
 
+    // MARK: - 负零回归修复（fix-negzero）
+
+    @Test("sub-yuan 亏损：舍入后 0 元 → +¥0 非 -¥0，sign = 0 非 -1")
+    func pnlSubYuanLoss_noNegativeZero() {
+        // amount = (10.0 − 10.001) × 100 = −0.1 元，舍入为 0 → 应显 "+¥0"，颜色平仓（0）
+        let c = TrainingTopBarContent(totalCapital: 0, averageCost: 10.001, shares: 100,
+                                      returnRate: 0, positionTier: 1, stockName: nil, stockCode: nil,
+                                      currentPrice: 10.0)
+        #expect(c.holdingPnLAmount == "+¥0")   // 非 "-¥0"
+        #expect(c.holdingPnLSign == 0)          // 非 -1
+    }
+
+    @Test("大额亏损：−100 元 → -¥100，sign = -1（确认正常亏损路径未受影响）")
+    func pnlLargeActualLoss_unaffected() {
+        // amount = (10 − 11) × 100 = −100 元
+        let c = TrainingTopBarContent(totalCapital: 0, averageCost: 11, shares: 100,
+                                      returnRate: 0, positionTier: 1, stockName: nil, stockCode: nil,
+                                      currentPrice: 10.0)
+        #expect(c.holdingPnLAmount == "-¥100")
+        #expect(c.holdingPnLSign == -1)
+    }
+
     @Test("浮动盈亏：亏（绿）+ 空仓（平·归零）")
     func pnlLossAndFlat() {
         let loss = TrainingTopBarContent(totalCapital: 0, averageCost: 10, shares: 100,

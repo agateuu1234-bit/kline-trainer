@@ -38,9 +38,10 @@ public struct TrainingTopBarContent: Equatable, Sendable {
         if shares > 0 && averageCost > 0 {
             let amount = (currentPrice - averageCost) * Double(shares)
             let pct = (currentPrice - averageCost) / averageCost
+            let roundedInt = Int(amount.rounded())                       // 与 signedCurrencyInt 同精度
             self.holdingPnLAmount = Self.signedCurrencyInt(amount)
             self.holdingPnLPercent = Self.percent(pct)
-            self.holdingPnLSign = amount > 0 ? 1 : (amount < 0 ? -1 : 0)
+            self.holdingPnLSign = roundedInt > 0 ? 1 : (roundedInt < 0 ? -1 : 0)
         } else {
             self.holdingPnLAmount = Self.signedCurrencyInt(0)
             self.holdingPnLPercent = Self.percent(0)
@@ -73,16 +74,11 @@ public struct TrainingTopBarContent: Equatable, Sendable {
         return "¥\(body)"
     }
 
-    /// 带符号 `+¥12,345,678` / `-¥12,345,678`（±0 归一 `+`），0 位小数无空格。浮动盈亏金额用。
+    /// 带符号 `+¥12,345,678` / `-¥12,345,678`，0 位小数无空格。符号取自**舍入后整数元**（sub-yuan 归 `+¥0`，无负零）。浮动盈亏金额用。
     private static func signedCurrencyInt(_ value: Double) -> String {
-        let v = (value == 0) ? 0.0 : value
-        let sign = v >= 0 ? "+" : "-"
-        let f = NumberFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX"); f.numberStyle = .decimal
-        f.usesGroupingSeparator = true; f.groupingSeparator = ","
-        f.maximumFractionDigits = 0; f.minimumFractionDigits = 0
-        let body = f.string(from: NSNumber(value: abs(v))) ?? String(format: "%.0f", abs(v))
-        return "\(sign)¥\(body)"
+        let rounded = Int(value.rounded())                           // 四舍五入到整数元
+        let sign = rounded > 0 ? "+" : (rounded < 0 ? "-" : "+")   // 0 → "+"，杜绝 -¥0
+        return "\(sign)¥\(grouped(abs(rounded)))"                   // 复用既有 grouped(Int) 千分位
     }
 
     /// 千分位 + 2 位小数，**无 ¥**（成本/股用，省宽防截断）。
