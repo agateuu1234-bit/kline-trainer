@@ -192,10 +192,15 @@ git commit -m "feat(ui): 顶栏数字去小数 + 拆 holdingPnL 为金额/百分
             }
 ```
 
-- [ ] **Step 2: 改 `metricCell` 为「标签顶 + 数值区居中 + 撑满行高」**
+- [ ] **Step 2: 改 `metricCell`/`pnlCell` 为「标签顶 + 数值居中 + 固定有界行高」**
 
+**关键（codex plan-R2）**：顶栏与两个 `maxHeight:.infinity` 图表 panel 同级，指标格**绝不能用 `.frame(maxHeight: .infinity)`**（会让顶栏行变贪婪、跟图表抢竖向空间）。改用**固定有界高度** `metricRowH`（够两行 PnL），格内 value 上下居中。`metricRowH` 经 build/截图验证够放「标签 9pt + 金额 12pt + 百分比 11pt」两行（约 44pt，不够则调大；这是顶栏比现状增高的来源，有界）。
+
+在 `TrainingView` 加常量 + 两个 helper：
 ```swift
-    /// 单行指标格：标签顶部齐头 + 数值在剩余空间上下居中；撑满行高（= 浮动盈亏两行格高），各格等高（RFC-A polish）。
+    private static let metricRowH: CGFloat = 44   // 顶栏指标行固定高（容标签+浮动盈亏两行）；有界=不与图表抢空间
+
+    /// 单值指标格：标签顶部齐头 + 数值在固定行高内上下居中；各格同 metricRowH → 等高、标签齐平。
     private func metricCell(_ label: String, _ value: String, width: CGFloat?) -> some View {
         VStack(spacing: 1) {
             Text(label).font(.system(size: 9)).foregroundStyle(.secondary)
@@ -203,11 +208,10 @@ git commit -m "feat(ui): 顶栏数字去小数 + 拆 holdingPnL 为金额/百分
             Text(value).font(.system(size: 12).weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
             Spacer(minLength: 0)
         }
-        .frame(width: width)
-        .frame(maxHeight: .infinity, alignment: .top)   // 撑满行高，内容 label 顶 / value 居中
+        .frame(width: width, height: Self.metricRowH, alignment: .top)   // 固定有界高，label 顶 / value 居中
     }
 
-    /// 浮动盈亏格（弹性末格）：标签顶 + 金额一行 / 百分比一行；盈红亏绿平中性（红涨绿跌）。本格两行=行高最高 → 撑起整行。
+    /// 浮动盈亏格（弹性末格）：标签顶 + 金额一行 / 百分比一行；盈红亏绿平中性（红涨绿跌）。同 metricRowH 固定高。
     private func pnlCell(amount: String, percent: String, sign: Int) -> some View {
         let color: Color = sign > 0 ? .red : (sign < 0 ? .green : .secondary)
         return VStack(spacing: 1) {
@@ -217,10 +221,10 @@ git commit -m "feat(ui): 顶栏数字去小数 + 拆 holdingPnL 为金额/百分
             Text(percent).font(.system(size: 11).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.8)
             Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity).frame(height: Self.metricRowH, alignment: .top)
     }
 ```
-（删旧 `metricCell` 的 `.frame(width:alignment:.center)` + `.frame(maxWidth: width == nil ? .infinity : nil)` 实现，用上面新版；旧弹性末格 `metricCell("浮动盈亏", bar.holdingPnL, width: nil)` 调用删除，由 `pnlCell` 取代。）
+（删旧 `metricCell` 的 `.frame(width:alignment:.center)` + `.frame(maxWidth: width == nil ? .infinity : nil)` 实现，用上面新版；旧弹性末格 `metricCell("浮动盈亏", bar.holdingPnL, width: nil)` 调用删除，由 `pnlCell` 取代。Step 1 的 `HStack(alignment: .top, spacing: 0)` 因各格 height 固定相同，`.top` 仍正确。）
 
 - [ ] **Step 3: build 验证**（host 不编译此 UIKit 文件）
 
