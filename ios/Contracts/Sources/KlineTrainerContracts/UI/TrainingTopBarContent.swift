@@ -2,43 +2,50 @@
 // Kline Trainer Swift Contracts — U2 顶栏数值格式化纯值（Wave 2 顺位 9）
 // Spec: kline_trainer_plan_v1.5.md §6.2.1 L905-918（总资金 / 持仓成本 / 收益率）。
 //
-// 平台无关纯值（host 全测）：把 engine 实时数值格式化为顶栏显示串。格式口径**对齐** SettlementContent
-// （`¥ ` + 一空格 + POSIX 千分位 + 2 位小数；收益率 `%+.2f` + `-0.0` 归一）—— 与 U3 结算窗同 ¥/% 口径。
-// SettlementContent 的 formatter 为 private static（U3 冻结），本文件独立实现**同口径**（不抽共享，避免动冻结 U3）。
+// 平台无关纯值（host 全测）：把 engine 实时数值格式化为顶栏显示串。
+// SettlementContent 的 formatter 为 private static（U3 冻结），本文件独立实现（不抽共享，避免动冻结 U3）。
 // 决议 D8（Wave 3 顺位 7 兑现）：加「仓位 X/5」= `position`，由 engine.currentPositionTier（RFC §4.1/§4.4b
 // 派生公式 = round(持仓市值/当前总资金×5)，clamp 0...5）格式化；不在本壳臆造公式（顺位 6 accessor 已钉死）。
 // RFC-B D4 语义纠正：holdingCostPerShare = 每股成本（价位级，非总额），init 参数名 averageCost。
-// 新增 sharesText（千分位 + " 股"）、stockNameDisplay（标的名隐显）、positionShort（"X/5"）。
+// Task 1 格式改造：totalCapital 无小数无空格、holdingCostPerShare 去 ¥ 2 位、sharesText 去「股」后缀；PnL 拆三字段（带符号金额/百分比/sign）。
+// Task 5（spec §3.5）：sessionPnL*（整局级：totalCapital − initialCapital）；删 currentPrice 入参。
 
 import Foundation
 
 public struct TrainingTopBarContent: Equatable, Sendable {
-    public let totalCapital: String        // "¥ 99,999,999.00"
-    public let holdingCostPerShare: String // 每股成本 "¥ 1,683.50"（RFC-B D4：非总额）
-    public let sharesText: String          // "9,999,999 股"
+    public let totalCapital: String        // "¥99,999,999"（无小数无空格）
+    public let holdingCostPerShare: String // 每股成本 "1,683.50"（无 ¥，2 位，RFC-B D4：非总额）
+    public let sharesText: String          // "9,999,999"（千分位，无「股」后缀）
     public let position: String            // "仓位 3/5"（兼容）
     public let positionShort: String       // "3/5"（顶栏格数值，免字符串截取）
     public let returnRate: String          // "+2.34%"
-    public let holdingPnL: String          // RFC-A A3：持仓未实现盈亏 "+¥ 2,000.00 (+20.00%)"
+    public let sessionPnLAmount: String    // "+¥12,345,678"（无小数带符号）整局级
+    public let sessionPnLPercent: String   // "+4,900.00%"（2 位 signed-zero）整局级
+    public let sessionPnLSign: Int         // +1 盈 / -1 亏 / 0 平（整局级）
     public let stockNameDisplay: String    // "贵州茅台（600519）" 或 "训练标的 · 盲测"
 
-    public init(totalCapital: Double, averageCost: Double, shares: Int,
+    public init(totalCapital: Double, initialCapital: Double,
+                averageCost: Double, shares: Int,
                 returnRate: Double, positionTier: Int,
-                stockName: String?, stockCode: String?,
-                currentPrice: Double = 0.0) {
-        self.totalCapital = Self.currency(totalCapital)
-        self.holdingCostPerShare = Self.currency(averageCost)
-        self.sharesText = "\(Self.grouped(shares)) 股"
+                stockName: String?, stockCode: String?) {
+        self.totalCapital = Self.currencyInt(totalCapital)
+        self.holdingCostPerShare = Self.decimal2(averageCost)
+        self.sharesText = Self.grouped(shares)
         self.position = "仓位 \(positionTier)/5"
         self.positionShort = "\(positionTier)/5"
         self.returnRate = Self.percent(returnRate)
-        // RFC-A A3：持仓浮动盈亏（元 + %）= (现价 − 每股成本) × 股数。
-        if shares > 0 && averageCost > 0 {
-            let amount = (currentPrice - averageCost) * Double(shares)
-            let pct = (currentPrice - averageCost) / averageCost
-            self.holdingPnL = "\(Self.signedCurrency(amount)) (\(Self.percent(pct)))"
+        // 本局盈亏 = 实时总资金 − 开局本金（含已实现+未实现）；% 用引擎 returnRate。
+        let profit = totalCapital - initialCapital
+        if !profit.isFinite || !returnRate.isFinite {
+            self.sessionPnLAmount = "—"; self.sessionPnLPercent = "—"; self.sessionPnLSign = 0
         } else {
-            self.holdingPnL = "\(Self.signedCurrency(0)) (\(Self.percent(0)))"
+            let rounded = profit.rounded()
+            self.sessionPnLAmount = Self.signedCurrencyInt(profit)
+            if rounded == 0 {
+                self.sessionPnLPercent = Self.percent(0); self.sessionPnLSign = 0
+            } else {
+                self.sessionPnLPercent = Self.percent(returnRate); self.sessionPnLSign = rounded > 0 ? 1 : -1
+            }
         }
         if let name = stockName, let code = stockCode {
             self.stockNameDisplay = "\(name)（\(code)）"   // 全角括号，同 formatStock 口径
@@ -57,20 +64,36 @@ public struct TrainingTopBarContent: Equatable, Sendable {
         return f.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
-    /// `¥` + 一空格 + 千分位 + 强制 2 位小数（POSIX，跨 locale 稳定）。同 SettlementContent.formatCapital。
-    private static func currency(_ value: Double) -> String {
+    /// `¥` + 千分位 + 0 位小数（无空格）。总资金用。
+    private static func currencyInt(_ value: Double) -> String {
         let f = NumberFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.numberStyle = .decimal
-        f.usesGroupingSeparator = true
-        f.groupingSeparator = ","
-        f.decimalSeparator = "."
-        f.minimumFractionDigits = 2
-        f.maximumFractionDigits = 2
-        // `??` 兜底实际不可达（NumberFormatter 对 NaN/Inf 返 "NaN"/"+∞" 非 nil）；留作纵深防御，同
-        // SettlementContent.formatCapital L58-59。业务上 totalCapital/holdingCost 非负且有限（M0.3 冻结）。
-        let body = f.string(from: NSNumber(value: value)) ?? String(format: "%.2f", value)
-        return "¥ \(body)"
+        f.locale = Locale(identifier: "en_US_POSIX"); f.numberStyle = .decimal
+        f.usesGroupingSeparator = true; f.groupingSeparator = ","
+        f.maximumFractionDigits = 0; f.minimumFractionDigits = 0
+        let body = f.string(from: NSNumber(value: value)) ?? String(format: "%.0f", value)
+        return "¥\(body)"
+    }
+
+    /// 带符号 `+¥12,345,678` / `-¥12,345,678`，0 位小数无空格。符号取自**舍入后整数元**（sub-yuan 归 `+¥0`，无负零）。非有限值兜底不崩。浮动盈亏金额用。
+    private static func signedCurrencyInt(_ value: Double) -> String {
+        guard value.isFinite else { return "¥0" }                  // 非有限兜底，杜绝 Int(NaN/inf) trap
+        let rounded = value.rounded()                              // Double 取整，无 Int 溢出 trap
+        let sign = rounded > 0 ? "+" : (rounded < 0 ? "-" : "+")  // 0 / -0.0 → "+"，杜绝 -¥0
+        let f = NumberFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX"); f.numberStyle = .decimal
+        f.usesGroupingSeparator = true; f.groupingSeparator = ","
+        f.maximumFractionDigits = 0; f.minimumFractionDigits = 0
+        let body = f.string(from: NSNumber(value: abs(rounded))) ?? String(format: "%.0f", abs(rounded))
+        return "\(sign)¥\(body)"
+    }
+
+    /// 千分位 + 2 位小数，**无 ¥**（成本/股用，省宽防截断）。
+    private static func decimal2(_ value: Double) -> String {
+        let f = NumberFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX"); f.numberStyle = .decimal
+        f.usesGroupingSeparator = true; f.groupingSeparator = ","
+        f.decimalSeparator = "."; f.minimumFractionDigits = 2; f.maximumFractionDigits = 2
+        return f.string(from: NSNumber(value: value)) ?? String(format: "%.2f", value)
     }
 
     /// 收益率小数 ×100 + `%+.2f` 带符号 + `%`；`-0.0` 归一为 `+0.00%`。同 SettlementContent.formatSignedRate。
@@ -78,17 +101,5 @@ public struct TrainingTopBarContent: Equatable, Sendable {
         let raw = rate * 100
         let pct = (raw == 0) ? 0.0 : raw                  // IEEE-754：±0 均 ==0 → 归一 +0.0
         return "\(String(format: "%+.2f", pct))%"
-    }
-
-    /// 带符号 `+¥ 1,234.56` / `-¥ 1,234.56`（±0 归一为 `+`）。RFC-A A3 holdingPnL 用。
-    private static func signedCurrency(_ value: Double) -> String {
-        let v = (value == 0) ? 0.0 : value
-        let sign = v >= 0 ? "+" : "-"
-        let f = NumberFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.numberStyle = .decimal; f.usesGroupingSeparator = true; f.groupingSeparator = ","
-        f.decimalSeparator = "."; f.minimumFractionDigits = 2; f.maximumFractionDigits = 2
-        let body = f.string(from: NSNumber(value: abs(v))) ?? String(format: "%.2f", abs(v))
-        return "\(sign)¥ \(body)"
     }
 }
