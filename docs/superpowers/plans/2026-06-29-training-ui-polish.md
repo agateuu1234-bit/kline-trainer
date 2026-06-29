@@ -324,6 +324,50 @@ Run: `.claude/scripts/codex-attest.sh --scope branch-diff --head feat/training-u
 
 ---
 
+### Task 5: 「本局盈亏」语义重定义（真机验收新增；持仓级 → 整局级）
+
+**Files:** `TrainingTopBarContent.swift`（init 参数 + session PnL 公式 + 字段重命名）/ `TrainingView.swift`（topBar 传参 + pnlCell 标签/字段）/ `TrainingTopBarContentTests.swift`（重写 PnL 测试为整局级 + 边界）。**零引擎改动**（引擎已具 `currentTotalCapital`/`initialCapital`/`returnRate`）。
+
+**Interfaces:**
+- Consumes: `engine.currentTotalCapital`（实时盯市=现金+股数×现价）、`engine.initialCapital`（本局开局本金）、`engine.returnRate`（=(cur−init)/init）。
+- Produces: `sessionPnLAmount/Percent/Sign`（取代 `holdingPnLAmount/Percent/Sign`）。
+
+- [ ] **Step 1: 改 `TrainingTopBarContent`（先改测试 RED）**
+  - init：**加** `initialCapital: Double`；**删** `currentPrice`（改后无引用）。
+  - 重命名字段 `holdingPnL*` → `sessionPnL*`（amount/percent/sign）。
+  - PnL 计算块换成整局级（保留 sub-yuan 持平 + 非有限退化）：
+```swift
+        // 本局盈亏 = 实时总资金 − 开局本金（含已实现+未实现）；% 用引擎 returnRate。
+        let profit = totalCapital - initialCapital
+        if !profit.isFinite || !returnRate.isFinite {
+            self.sessionPnLAmount = "—"; self.sessionPnLPercent = "—"; self.sessionPnLSign = 0
+        } else {
+            let rounded = profit.rounded()
+            self.sessionPnLAmount = Self.signedCurrencyInt(profit)
+            if rounded == 0 {
+                self.sessionPnLPercent = Self.percent(0); self.sessionPnLSign = 0
+            } else {
+                self.sessionPnLPercent = Self.percent(returnRate); self.sessionPnLSign = rounded > 0 ? 1 : -1
+            }
+        }
+```
+  （删原 `shares > 0 && averageCost > 0` 持仓级分支 + 其 else；`averageCost`/`shares` 仍供 `holdingCostPerShare`/`sharesText`，保留这两个入参。`signedCurrencyInt`/`percent`/`currencyInt`/`decimal2` 不动。）
+
+- [ ] **Step 2: 改 `TrainingView`**
+  - topBar 构造：加 `initialCapital: engine.initialCapital`，**删** `currentPrice: engine.currentPrice` 实参。
+  - `pnlCell` 标签 `"浮动盈亏"` → `"本局盈亏"`；字段引用 `bar.holdingPnL*` → `bar.sessionPnL*`。
+
+- [ ] **Step 3: 重写测试**
+  - 删/改原持仓级 PnL 测试（构造用 `averageCost/shares/currentPrice` 的）→ 改构造 `totalCapital`/`initialCapital`/`returnRate`。
+  - 覆盖：盈（cur>init→`+¥...`/`+x.xx%`/sign1 红）/ 亏（cur<init→`-¥...`/sign−1 绿）/ 持平（cur==init→`+¥0`/`+0.00%`/0）/ sub-yuan（profit −0.1→`+¥0`/`+0.00%`/0）/ 非有限（totalCapital=inf→`—`/`—`/0）。先 RED 后 GREEN，实际值先跑后锁。
+  - host `swift test`（两框架 0 失败，fail-closed 自查）。
+
+- [ ] **Step 4: build + 提交**
+  - iOS Simulator build fail-closed（同 Task 2 Step 3）。
+  - 提交**只 add** 这 3 文件；不 bump CONTRACT_VERSION；不 `git add -A`。
+
+---
+
 ## Self-Review
 
 - **spec §3.1 数字格式**：Task 1（currencyInt/signedCurrencyInt + 字段）✓

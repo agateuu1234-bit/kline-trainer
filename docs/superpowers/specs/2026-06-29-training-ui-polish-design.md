@@ -70,6 +70,18 @@
 - **指标行用固定有界高度**（`metricRowH≈44pt`），**绝不用 `maxHeight: .infinity`**（codex plan-R2：顶栏与两个贪婪 `maxHeight:.infinity` 图表 panel 同级，若指标格无界会跟图表抢竖向空间致大幅塌缩）。固定高 = 顶栏只确定性增高这一点点。
 - 两图 panel 均 `maxHeight: .infinity` → SwiftUI **自动均分剩余竖向空间** → 顶栏增高后两图各缩约一半、**仍等高**（框架处理奇数零头，无需手工 +1pt）。T2 交易条高度不变。
 
+### 3.5 「本局盈亏」语义重定义（真机验收新增 / user 确认）
+
+- **问题**：原「浮动盈亏」= **持仓级**未实现盈亏（`(现价−持仓均价)×股数`），只反映当前未平仓那一笔。user 要的是**整局级**总盈亏：开局本金（如 10 万）起，不管中间买卖/平仓多少次，实时显示「现在一共比开局赚/亏了多少」（**含已实现 + 未实现**）。
+- **改动（零引擎改动，引擎已具备）**：
+  - **标签** 「浮动盈亏」→ **「本局盈亏」**。
+  - **金额** = `engine.currentTotalCapital − engine.initialCapital`（`currentTotalCapital = 现金 + 持仓股数×现价`，实时盯市；`initialCapital` = 本局开局本金/`accumulatedCapital`）。
+  - **百分比** = `engine.returnRate`（= `(currentTotalCapital − initialCapital)/initialCapital`，引擎已算好；**不再**用持仓收益率 `(现价−均价)/均价`）。
+  - **字段重命名**：`holdingPnLAmount/Percent/Sign` → `sessionPnLAmount/Percent/Sign`（语义已变，名须准；in-module 重构）。
+  - `TrainingTopBarContent` 新增入参 `initialCapital: Double`；**移除** `currentPrice` 入参（改后仅 session 公式不再用它，删死参）。`totalCapital`（已是 `currentTotalCapital`）、`returnRate`（已传入）复用。
+- **沿用不变**：盈=红 亏=绿（红涨绿跌、scheme-aware palette）；两行（金额/百分比）；舍入到 ¥0 → 整格持平 `+¥0`/`+0.00%`/中性；非有限 → 退化 `—`/`—`/sign 0；`minimumScaleFactor`、固定有界高、均匀分布（方案A）全不变。
+- **不 bump** CONTRACT_VERSION（纯展示值、in-module、零持久化）。
+
 ## 4. Part 2 — 技术指标线再加粗（#6，生产渲染）
 
 `setLineWidth(x / displayScale)`：
