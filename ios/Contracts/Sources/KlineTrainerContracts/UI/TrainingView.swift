@@ -183,12 +183,12 @@ public struct TrainingView: View {
     private var topBar: some View {
         let rec = lifecycle.activeRecord
         let bar = TrainingTopBarContent(totalCapital: engine.currentTotalCapital,
+                                        initialCapital: engine.initialCapital,
                                         averageCost: engine.position.averageCost,
                                         shares: engine.position.shares,
                                         returnRate: engine.returnRate,
                                         positionTier: engine.currentPositionTier,
-                                        stockName: rec?.stockName, stockCode: rec?.stockCode,
-                                        currentPrice: engine.currentPrice)
+                                        stockName: rec?.stockName, stockCode: rec?.stockCode)
         return VStack(spacing: 6) {
             HStack {
                 Button("返回") {
@@ -223,7 +223,7 @@ public struct TrainingView: View {
                 Spacer(minLength: 4)
                 metricCell("仓位", bar.positionShort, width: 28)
                 Spacer(minLength: 4)
-                pnlCell(amount: bar.holdingPnLAmount, percent: bar.holdingPnLPercent, sign: bar.holdingPnLSign)
+                pnlCell(amount: bar.sessionPnLAmount, percent: bar.sessionPnLPercent, sign: bar.sessionPnLSign)
             }
         }
         .padding(.horizontal, 12)
@@ -250,7 +250,7 @@ public struct TrainingView: View {
         // 方案A：定宽 92 留够 worst-case「+¥12,345,678」（不再 maxWidth:.infinity 吃光剩余）。
         // minimumScaleFactor 0.5 = 任意窄屏安全网（受支持设备 375pt+ 满刻度即放得下、永不触发缩放，codex r4）。
         return VStack(spacing: 1) {
-            Text("浮动盈亏").font(.system(size: 9)).foregroundStyle(.secondary)
+            Text("本局盈亏").font(.system(size: 9)).foregroundStyle(.secondary)
             Spacer(minLength: 0)
             Text(amount).font(.system(size: 12).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.5)
             Text(percent).font(.system(size: 11).weight(.semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.5)

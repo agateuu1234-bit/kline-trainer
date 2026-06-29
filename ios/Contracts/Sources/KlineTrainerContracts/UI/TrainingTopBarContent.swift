@@ -7,8 +7,8 @@
 // 决议 D8（Wave 3 顺位 7 兑现）：加「仓位 X/5」= `position`，由 engine.currentPositionTier（RFC §4.1/§4.4b
 // 派生公式 = round(持仓市值/当前总资金×5)，clamp 0...5）格式化；不在本壳臆造公式（顺位 6 accessor 已钉死）。
 // RFC-B D4 语义纠正：holdingCostPerShare = 每股成本（价位级，非总额），init 参数名 averageCost。
-// Task 1 格式改造：totalCapital 无小数无空格、holdingCostPerShare 去 ¥ 2 位、sharesText 去「股」后缀；
-// holdingPnL 拆三字段：holdingPnLAmount（带符号无小数）/ holdingPnLPercent（2 位）/ holdingPnLSign（Int）。
+// Task 1 格式改造：totalCapital 无小数无空格、holdingCostPerShare 去 ¥ 2 位、sharesText 去「股」后缀；PnL 拆三字段（带符号金额/百分比/sign）。
+// Task 5（spec §3.5）：sessionPnL*（整局级：totalCapital − initialCapital）；删 currentPrice 入参。
 
 import Foundation
 
@@ -19,47 +19,33 @@ public struct TrainingTopBarContent: Equatable, Sendable {
     public let position: String            // "仓位 3/5"（兼容）
     public let positionShort: String       // "3/5"（顶栏格数值，免字符串截取）
     public let returnRate: String          // "+2.34%"
-    public let holdingPnLAmount: String    // "+¥12,345,678"（无小数带符号）
-    public let holdingPnLPercent: String   // "+4,900.00%"（2 位 signed-zero）
-    public let holdingPnLSign: Int         // +1 盈 / -1 亏 / 0 平·空仓
+    public let sessionPnLAmount: String    // "+¥12,345,678"（无小数带符号）整局级
+    public let sessionPnLPercent: String   // "+4,900.00%"（2 位 signed-zero）整局级
+    public let sessionPnLSign: Int         // +1 盈 / -1 亏 / 0 平（整局级）
     public let stockNameDisplay: String    // "贵州茅台（600519）" 或 "训练标的 · 盲测"
 
-    public init(totalCapital: Double, averageCost: Double, shares: Int,
+    public init(totalCapital: Double, initialCapital: Double,
+                averageCost: Double, shares: Int,
                 returnRate: Double, positionTier: Int,
-                stockName: String?, stockCode: String?,
-                currentPrice: Double = 0.0) {
+                stockName: String?, stockCode: String?) {
         self.totalCapital = Self.currencyInt(totalCapital)
         self.holdingCostPerShare = Self.decimal2(averageCost)
         self.sharesText = Self.grouped(shares)
         self.position = "仓位 \(positionTier)/5"
         self.positionShort = "\(positionTier)/5"
         self.returnRate = Self.percent(returnRate)
-        // 持仓浮动盈亏（元 + %）= (现价 − 每股成本) × 股数。
-        if shares > 0 && averageCost > 0 {
-            let amount = (currentPrice - averageCost) * Double(shares)
-            let pct = (currentPrice - averageCost) / averageCost
-            if !amount.isFinite || !pct.isFinite {
-                // 溢出/退化数据：显式占位，不伪装成 ¥0（codex r5）。"—" = 全角破折号，sign 0 中性。
-                self.holdingPnLAmount = "—"
-                self.holdingPnLPercent = "—"
-                self.holdingPnLSign = 0
-            } else {
-                let rounded = amount.rounded()                           // Double 取整，无 Int 溢出 trap
-                self.holdingPnLAmount = Self.signedCurrencyInt(amount)
-                if rounded == 0 {
-                    // 金额按显示精度（整数元）舍入到 0 → 整格当持平：百分比/符号/颜色统一中性，
-                    // 杜绝「+¥0 配 -0.01%」矛盾（user 选 A：买入后微赔手续费视为持平）。
-                    self.holdingPnLPercent = Self.percent(0)
-                    self.holdingPnLSign = 0
-                } else {
-                    self.holdingPnLPercent = Self.percent(pct)
-                    self.holdingPnLSign = rounded > 0 ? 1 : -1
-                }
-            }
+        // 本局盈亏 = 实时总资金 − 开局本金（含已实现+未实现）；% 用引擎 returnRate。
+        let profit = totalCapital - initialCapital
+        if !profit.isFinite || !returnRate.isFinite {
+            self.sessionPnLAmount = "—"; self.sessionPnLPercent = "—"; self.sessionPnLSign = 0
         } else {
-            self.holdingPnLAmount = Self.signedCurrencyInt(0)
-            self.holdingPnLPercent = Self.percent(0)
-            self.holdingPnLSign = 0
+            let rounded = profit.rounded()
+            self.sessionPnLAmount = Self.signedCurrencyInt(profit)
+            if rounded == 0 {
+                self.sessionPnLPercent = Self.percent(0); self.sessionPnLSign = 0
+            } else {
+                self.sessionPnLPercent = Self.percent(returnRate); self.sessionPnLSign = rounded > 0 ? 1 : -1
+            }
         }
         if let name = stockName, let code = stockCode {
             self.stockNameDisplay = "\(name)（\(code)）"   // 全角括号，同 formatStock 口径
