@@ -1,5 +1,9 @@
 # 训练界面验收回归微调（顶栏空间 + 指标加粗 + fixture 周期比例）设计
 
+## 0. 文档状态 / 范围（codex spec-R3）
+
+**本文件 = 设计文档（brainstorming 产物），非实现。** 当前分支 `feat/training-ui-polish` 在 spec 阶段**只含本 spec + canonical mockup**，**刻意不含**任何生产代码/测试改动。实现按既定 superpowers 流程在**同一分支后续提交**：本 spec 收敛 → `writing-plans` 出实现计划 → `subagent-driven-development` 逐任务实现 + host 测 → 三绿（host/Catalyst/iOS build）→ **whole-branch Codex review 审实现**（那一关才校验 §6 命名文件 + 测试齐全）→ PR。本 spec-阶段 review 仅审**设计质量**；分支**实现完成前不 merge**。§2「做」列的是本批待实现项，非「本分支已交付」。
+
 > RFC-A（已 merge PR #132）真机验收时 user 提的一批界面微调。基准 = **现网代码**（main `8b7a6c2` 之后），非任何 mockup（mockup 仅设计预览，已知与代码有漂移）。
 > 关联 [[project_trade_ui_backlog_2026_06_21]]。设计 mockup：`docs/superpowers/mockups/2026-06-29-rfc-a-topbar-on-rfcb.html`（基于 RFC-B 定稿改顶栏 + 真实底栏 + 加粗指标）。
 
