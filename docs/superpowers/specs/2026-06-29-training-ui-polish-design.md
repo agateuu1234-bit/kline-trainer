@@ -1,4 +1,4 @@
-# 训练界面验收回归微调（顶栏空间 + 指标加粗 + fixture 周期比例）设计
+# 训练界面验收回归微调（顶栏空间 + 指标加粗）设计
 
 ## 0. 文档状态 / 范围（codex spec-R3）
 
@@ -9,16 +9,17 @@
 
 ## 1. 目标
 
-三组互相独立的微调，打包为一个验收回归 PR：
+两组互相独立的微调，打包为一个验收回归 PR：
 - **顶栏空间优化**：顶栏一行挤不下大数字（尤其浮动盈亏常被截），改数字格式 + 布局，让最坏值也放得下。
-- **DEBUG fixture 周期比例修正**：周/月线聚合 span 与真实日历比例不符（周线1根≈日线2根，应≈5根）。
 - **技术指标线再加粗**：MA66/BOLL/MACD 线 RFC-B 已加粗一轮，仍偏细，再加粗。
+
+> **DEBUG fixture 周期比例（#5）+ m60 周期对：本批移除**（codex spec-R4 揭示真实代价超预期——见 §9）。
 
 ## 2. 范围
 
-**做（本 spec）**：① 顶栏（`TrainingTopBarContent` + `TrainingView.topBar`）；② fixture 周期 span（`DebugFixtureData`，DEBUG only）；③ 指标线宽（`KLineView+Candles` MA66/BOLL + `KLineView+MACD`）。
+**做（本 spec）**：① 顶栏（`TrainingTopBarContent` + `TrainingView.topBar`）；② 指标线宽（`KLineView+Candles` MA66/BOLL + `KLineView+MACD`）。
 
-**不做（明确排除）**：复盘从初始位置进入 + 往后浏览（单独排期，与 replay 续局一起设计）；交易框/交易条逻辑；引擎/资金/持久层；坐标轴/蜡烛/十字线样式。
+**不做（明确排除）**：**DEBUG fixture 周期比例 + m60 周期对（#5，移到单独排期，见 §9）**；复盘从初始位置进入 + 往后浏览（单独排期，与 replay 续局一起设计）；交易框/交易条逻辑；引擎/资金/持久层；坐标轴/蜡烛/十字线样式。
 
 ## 3. Part 1 — 顶栏空间优化（生产 UI，host 可测纯值 + UIKit 薄层）
 
@@ -62,23 +63,7 @@
 - 浮动盈亏两行使顶栏第二行比现状**高约一行文字（~12–14pt）**；这是方案 C「永不截断」的代价（user 已知并接受）。
 - 两图 panel 均 `maxHeight: .infinity` → SwiftUI **自动均分剩余竖向空间** → 顶栏增高后两图各缩约一半、**仍等高**（框架处理奇数零头，无需手工 +1pt）。T2 交易条高度不变。
 
-## 4. Part 2 — DEBUG fixture 周期比例修正（#5，`#if DEBUG` only，零生产影响）
-
-`DebugFixtureData.make` 用固定 span 聚合 m3：现 `weekly=160`、`monthly=240`，与真实日历比例不符（A 股 240 分/日 → 日线=80 m3；周=5 交易日=400；月≈20 交易日≈1600）。现状 daily 240/weekly 120/monthly 80 根 = 各周期跨度不一（日 1 年、周 2.3 年、月 6.7 年），故「周线1根≈日线2根」。
-
-**改聚合 span 为真实日历比例**：
-- **weekly span 160 → 400**（= 5×日线）、**monthly span 240 → 1600**（= 20×日线）。m15=5/m60=20/daily=80 不变。
-
-**连锁约束（必须一并处理，否则破坏 fixture 不变量）**：
-1. **新 `lcm(spans)` = lcm(5,20,80,400,1600) = 1600**（旧为 480）。`fullLoadM3Count` 与 `fullLoadBeforeM3Count` **都须为 1600 的倍数**（保证「各周期 before/after 边界落在该周期 candle 边界」不变量，line 47-48）。
-   - `fullLoadM3Count = 19,200` = 1600×12 ✓（**不变**）。
-   - `fullLoadBeforeM3Count = 12,000` = 1600×7.5 ✗ → 改 **12,800**（=1600×8；daily-before 160≈旧 150，仍 < 19,200）。原「daily before=150 对齐 spec §8.3」放宽为「对齐新 lcm」（fixture 内部参数，无外部契约）。
-2. **新根数（fullLoad 19,200）**：日线 **240** / 周线 **48** / 月线 **12**——**各周期均≈1 年、比例正确**（240 交易日≈1 年、48 周≈1 年、12 月=1 年）。月线 12 根**是真实的**（真实月线图本就只十几根），非「太少」；推翻旧注释「monthly≥80」的人为约束（那是旧小 span 的产物）。
-3. **更新代码注释**（line 44-49 的 fullLoad 推导说明：lcm 480→1600、根数、约束）+ **fixture 测试**（凡断言旧 weekly=120/monthly=80 的，改 48/12；before-对齐测试若有，改 12,800/新 lcm）。
-- 生产 `import_csv`（按真实 datetime 聚合）**本就正确、不动**。仅改 DEBUG fixture。
-- **m60 周期对**（实现阶段一并做，不在 spec 分支预改）：fixture 开局 pending 的 `upperPeriod: .m3 → .m60`（与 `lowerPeriod: .daily` 相邻、对齐生产默认 m60/daily + periodCombos 阶梯；原 m3/daily 不相邻）。真机验收时临时改过验证可行，正式实现纳入本批 Part 2。
-
-## 5. Part 3 — 技术指标线再加粗（#6，生产渲染）
+## 4. Part 2 — 技术指标线再加粗（#6，生产渲染）
 
 `setLineWidth(x / displayScale)`：
 
@@ -95,7 +80,6 @@
 
 - `TrainingTopBarContent.swift` — 格式 helper + 拆 holdingPnL 两字段 + 各字段口径（host 全测）。
 - `TrainingView.swift` — `topBar` 标签/宽度 + 浮动盈亏两行渲染 + 对齐（UIKit 守卫，Catalyst/iOS build 闸门）。
-- `DebugFixtureData.swift` — weekly/monthly span。
 - `KLineView+Candles.swift` / `KLineView+MACD.swift` — 线宽常量。
 - `TrainingTopBarContentTests.swift`（host）、相关测试更新。
 
@@ -105,7 +89,6 @@
 
 - **顶栏纯值**（host）：`TrainingTopBarContent` 各字段格式逐字断言——总资金/股数/浮动盈亏金额无小数；成本/股、浮动盈亏% 2 位；浮动盈亏拆两字段值正确；盈/亏/平/0 持仓四态；signed-zero 归一；最坏值（千万级 + 几十倍）不崩。FP 断言用容差或字符串等值（选值为精确二进制浮点）。
 - **顶栏布局/对齐 + 浮动盈亏两行 + 颜色**：SwiftUI 视图行为，host 不可测 → iOS Simulator/Catalyst build 闸门 + §8 人工验收（沿用 RFC-A UI 壳惯例）。
-- **fixture span**（host，Persistence）：断言 weekly 根数 ≈ m3Count/400、monthly ≈ m3Count/1600，且 weekly/daily 根数比 ≈ 1:5、monthly/daily ≈ 1:20（或直接断言聚合 span 常量）。
 - **指标线宽**：常量改动，渲染行为 host 不可测 → build 闸门 + 人工验收（曲线明显更粗）。
 
 ## 8. 验收清单（模拟器/真机，非程序员可执行）
@@ -116,9 +99,9 @@
 | 2 | 看浮动盈亏格 | **金额一行、百分比一行**两行；**盈红亏绿**；不截断/不省略 | 两行+颜色对=pass |
 | 3 | 看顶栏标签行 | 总资金/成本/股/股数/仓位/浮动盈亏 标签**齐头同高**；单行数字在格内**上下居中** | 齐头+居中=pass |
 | 4 | 看上下两图 | 高度仍**相等**；顶栏略增高但图未明显变形 | 两图等高=pass |
-| 5 | 切到周线/日线对比 | 1 根周线 ≈ **5 根**日线（非 2 根）；月线≈20 日线 | 比例对=pass |
-| 6 | 看 MA66/BOLL/MACD 线 | 比改前**明显更粗**、醒目 | 更粗=pass |
+| 5 | 看 MA66/BOLL/MACD 线 | 比改前**明显更粗**、醒目 | 更粗=pass |
 
-## 9. 非目标
+## 9. 非目标 + 移出本批（单独排期）
 
-复盘初始位置/浏览、交易逻辑、坐标轴样式、生产周期聚合（已正确）、CONTRACT_VERSION bump。
+- **DEBUG fixture 周期比例（#5）+ m60 周期对**：移出本批。codex spec-R4 揭示真实代价超预期——fixture 不变量要求**每周期 ≥ defaultVisibleCount(80) 根 + 每周期 MA66 warmup（`rows[65].ma66 != nil`，需 ≥66 根）**；旧 span（monthly=240）正是反推自「19,200/240=80」。日历精确的 monthly=1600 要满足「≥80 月线根」需 m3Count ≥ 80×1600 = **128,000**（现 19,200 的 6.7×）→ DEBUG seed 显著变大、开局变慢。**紧凑 fixture（≥80根/周期）与日历精确比例根本矛盾**。**生产数据（真实 NAS 经 `import_csv` 按 datetime 聚合）比例本就正确**，仅 DEBUG 假数据有此妥协。→ user 拍板**本批去掉 #5**；将来若要修需专门设计放大 fixture（或放宽 ≥80/周期约束），单独走流程。m60 周期对（trivial，但属 fixture 范畴）一并随该任务做。
+- 其它非目标：复盘初始位置/浏览、交易逻辑、坐标轴样式、生产周期聚合（已正确）、CONTRACT_VERSION bump。
