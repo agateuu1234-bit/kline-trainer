@@ -895,6 +895,24 @@ func makeSlot(recordId: Int64, filename: String = "rec.sqlite") -> PendingReplay
 }
 
 @MainActor
+@Test func resumePendingReplay_corruptPositionJSON_clearsAndFallsBack() async throws {
+    // codex plan-R18-F1：position_data 合法存在但非法 PositionManager JSON → decodePosition 抛 .dbCorrupted
+    // → 与 loadReplay 损坏同路径：清槽 + nil（回退从头），不卡死
+    let h = try CoordinatorTestHarness.make()
+    var slot = makeSlot(recordId: h.seededRecordId)
+    slot = PendingReplay(recordId: slot.recordId, trainingSetFilename: slot.trainingSetFilename,
+        globalTickIndex: slot.globalTickIndex, upperPeriod: slot.upperPeriod, lowerPeriod: slot.lowerPeriod,
+        positionData: Data("{not-valid-position-json".utf8),   // 合法 Data、非法 PositionManager JSON
+        cashBalance: slot.cashBalance, feeSnapshot: slot.feeSnapshot, tradeOperations: slot.tradeOperations,
+        drawings: slot.drawings, startedAt: slot.startedAt, accumulatedCapital: slot.accumulatedCapital,
+        drawdown: slot.drawdown)
+    try h.pendingReplayRepo.saveReplay(slot)   // fake 不解码 → loadReplay 成功返回；decodePosition 才抛
+    let e = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+    #expect(e == nil)
+    #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil)   // 损坏槽已清
+}
+
+@MainActor
 @Test func resumePendingReplay_corruptSlot_clearFails_propagatesKeepsSlot() async throws {
     // codex plan-R12-F1：本记录损坏槽 + 清档失败（瞬态 DB）→ 不吞、传播可重试错误、槽保留（不伪装"无暂存"开 fresh）
     let h = try CoordinatorTestHarness.make()
@@ -964,15 +982,19 @@ public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine?
     // 1) 轻量元数据先判归属（codex plan-R11-F1）：不解码 payload → 别记录的损坏槽不阻塞本记录的 replay。
     //    slotInfo 自身错误=DB 级瞬态（whole-db 不可达）→ 传播。无槽/不匹配 → nil（不清档）。
     guard let info = try pendingReplayRepo.loadReplaySlotInfo(), info.recordId == recordId else { return nil }
-    // 2) 本记录槽：全量解码。.dbCorrupted（已验证损坏 payload）→ 清 + 回退从头；其他（瞬态）→ 传播。
+    // 2) 本记录槽：全量解码 **含 position（codex plan-R18-F1：position 的 PositionManager JSON 解码也是 slot
+    //    payload，须与 loadReplay 同走 .dbCorrupted→清 路径；decodePosition 已把所有解码错误包成 .dbCorrupted）**。
+    //    .dbCorrupted（已验证损坏 payload）→ 清 + 回退从头；其他（瞬态）→ 传播。
     let pending: PendingReplay
+    let position: PositionManager
     do {
         guard let p = try pendingReplayRepo.loadReplay() else { return nil }   // 竞态：刚被清 → nil
         pending = p
+        position = try decodePosition(p.positionData)   // slot payload 解码（移到此处，与 loadReplay 同 .dbCorrupted 路径）
     } catch let e as AppError {
         if case .persistence(.dbCorrupted) = e {
-            // 本记录损坏槽 → durable 清 + 回退从头（router fresh）。**不用 try?**（codex plan-R12-F1）：
-            // 清失败=瞬态 DB（满/不可用）→ 传播可重试错误，**不**伪装"无暂存"而留损坏行卡死。
+            // 本记录损坏槽（loadReplay JSON 或 position JSON）→ durable 清 + 回退从头（router fresh）。**不用 try?**
+            // （codex plan-R12-F1）：清失败=瞬态 DB（满/不可用）→ 传播可重试错误，**不**伪装"无暂存"而留损坏行卡死。
             try pendingReplayRepo.clearReplay()
             return nil
         }
@@ -998,7 +1020,7 @@ public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine?
     do {
         let allCandles = try reader.loadAllCandles()
         let mt = try maxTick(from: allCandles)
-        let position = try decodePosition(pending.positionData)
+        // position 已在 step 2 解码（slot payload，.dbCorrupted 已处理）；此块仅训练集/transient 错误 → 传播
         let engine = try TrainingEngine.make(
             .replay(fees: pending.feeSnapshot, maxTick: mt),
             allCandles: allCandles,
