@@ -31,3 +31,46 @@ import Foundation
     try repo.clearReplay()
     #expect(try repo.loadReplay() == nil)
 }
+
+// MARK: - A2 coverage: novel methods
+
+@Test func inMemoryPendingReplay_loadSlotInfo_doesNotConsumeFailNextLoadReplay() throws {
+    let repo = InMemoryPendingReplayRepository()
+    let p = PendingReplay(recordId: 99, trainingSetFilename: "c.sqlite", globalTickIndex: 3,
+        upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
+        feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+        tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+    try repo.saveReplay(p)
+    repo.failNextLoadReplay = .persistence(.dbCorrupted)
+    // loadReplaySlotInfo must NOT consume failNextLoadReplay and must succeed
+    let slot = try repo.loadReplaySlotInfo()
+    #expect(slot?.recordId == 99)
+    #expect(slot?.trainingSetFilename == "c.sqlite")
+    // failNextLoadReplay is still armed — loadReplay must throw
+    #expect(throws: AppError.self) { try repo.loadReplay() }
+}
+
+@Test func inMemoryPendingReplay_clearReplayIfRecordId_matching_clears() throws {
+    let repo = InMemoryPendingReplayRepository()
+    let p = PendingReplay(recordId: 7, trainingSetFilename: "d.sqlite", globalTickIndex: 0,
+        upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
+        feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+        tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+    try repo.saveReplay(p)
+    try repo.clearReplay(ifRecordId: 7)
+    #expect(try repo.loadReplay() == nil)
+}
+
+@Test func inMemoryPendingReplay_clearReplayIfRecordId_nonMatching_keeps() throws {
+    let repo = InMemoryPendingReplayRepository()
+    let p = PendingReplay(recordId: 7, trainingSetFilename: "d.sqlite", globalTickIndex: 0,
+        upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
+        feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+        tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+    try repo.saveReplay(p)
+    try repo.clearReplay(ifRecordId: 999)   // mismatched recordId — slot must be retained
+    #expect(try repo.loadReplaySlotInfo()?.recordId == 7)
+}
