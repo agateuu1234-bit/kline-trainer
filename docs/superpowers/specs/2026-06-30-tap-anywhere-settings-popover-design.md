@@ -18,7 +18,7 @@
 - 不改光标的视觉、吸附、进入（长按）、单指竖滑切周期等 RFC-C 既有行为。
 - 不改设置项的内容、佣金/重置/下载/显示模式等任何业务逻辑，仅换呈现容器。
 - 零引擎 / 持久层 / 契约改动，**不 bump CONTRACT_VERSION（保持 1.7）**。
-- **保 public API 源 + 行为兼容（强制，codex spec-R4-H1 / R5-H1）**：**不删任何现有 public 符号**且**不断其行为接线**（`ChartGestureArbiter.onTap` 保留且 drawing 锚点仍 fire 它）、**不给现有 init 加必填参**（HomeView 新参带默认值或走重载）。tap-anywhere 仅**新增**一个 optional 谓词回调 `onShouldExitRemoteCrosshair`（纯加法）。即「无契约/view-only」必须连**编译期源兼容 + 旧回调运行期行为**一并成立，否则下游/preview 编译失败或回调静默失效而内部测试绿。沿 RFC-C WB-high 教训。
+- **保 public API 源 + 行为 + 类型标识兼容（强制，codex spec-R4-H1 / R5-H1 / R6-H1）**：**不删任何现有 public 符号**且**不断其行为接线**（`ChartGestureArbiter.onTap` 保留且 drawing 锚点仍 fire 它）、**不给现有 init 加必填参**、**不改 public 类型标识**（`HomeView` 保持非泛型 concrete，新内容走 `AnyView` 类型擦除 + 新泛型 init）。tap-anywhere 仅**新增**一个 optional 谓词回调 `onShouldExitRemoteCrosshair`（纯加法）。即「无契约/view-only」必须连**编译期源兼容（含类型标识）+ 旧回调运行期行为**一并成立，否则下游/preview 编译失败或回调静默失效而内部测试绿。沿 RFC-C WB-high 教训。
 
 ## 1. 现状（已核实，含 file:line）
 
@@ -164,11 +164,12 @@ extension CrosshairTapResolver {
 
 齿轮在 HomeView、设置依赖（`settings/api/cache/acceptance/onConfirmReset`）在 AppRootView。原生 `.popover` 必须挂在锚点视图（齿轮）上，故把呈现下沉进 HomeView，但保持 HomeView 的 **view-only（D1）** 边界——HomeView 不 import settings/acceptance，只渲染注入的内容视图。
 
-**改动 1 — HomeView 加 popover 锚点（`HomeView.swift`），源兼容（codex spec-R4-H1）**
-- 泛型化 `HomeView<SettingsContent: View>`，init 新增两参，**全部带默认值**保旧 5 参 init 调用点不变即编译（2 个 `#Preview` + 任何外部调用）：
-  - `isSettingsPresented: Binding<Bool> = .constant(false)`
-  - `@ViewBuilder settingsContent: () -> SettingsContent = { EmptyView() }`（省略时推断 `SettingsContent=EmptyView`、不显 popover；保 view-only D1，HomeView 不 import settings/acceptance）
-  - 若默认泛型推断在某 Swift 版本不可用，**退化为重载**：保留原非泛型 `init(content:onStartTraining:onContinueTraining:onSelectRecord:onOpenSettings:)` 委托到 `EmptyView` 版 + 新增泛型 init。**二选一，硬要求=旧调用点零改动编译**（plan 编译实证）。
+**改动 1 — HomeView 加 popover 锚点（`HomeView.swift`），源兼容保类型标识（codex spec-R4-H1 / R6-H1）**
+- ⚠️ **`HomeView` 保持 `public struct HomeView: View` 非泛型 concrete 类型不变**（codex spec-R6-H1：泛型化会破坏类型标识——外部可把 `HomeView` 当返回类型/存储属性/泛型约束/typealias 引用，泛型化强制其加泛型参数，重载救不回）。
+- 用**类型擦除**承载 popover 内容：新增私有存储 `private let settingsContent: () -> AnyView` + `private let isSettingsPresented: Binding<Bool>`。
+- **两个 init**：
+  - **保留**原 5 参 `init(content:onStartTraining:onContinueTraining:onSelectRecord:onOpenSettings:)`（源兼容）→ 委托到下方泛型 init，传 `isSettingsPresented:.constant(false), settingsContent:{ EmptyView() }`（不显 popover）。2 个 `#Preview` + 任何旧调用点零改动编译。
+  - **新增泛型** `init<SettingsContent: View>(content:…, onOpenSettings:, isSettingsPresented: Binding<Bool>, @ViewBuilder settingsContent: @escaping () -> SettingsContent)`，体内 `self.settingsContent = { AnyView(settingsContent()) }` 擦除。AnyView 仅用于设置 popover（非热路径，性能可忽略）。保 view-only D1（HomeView 不 import settings/acceptance，只渲染注入视图）。
 - 齿轮 Button 挂：
   ```swift
   Button(action: onOpenSettings) { Image(systemName: "gearshape").font(.title2) }
@@ -238,7 +239,7 @@ extension CrosshairTapResolver {
   - `CrosshairTapResolver.resolveSyncExit(...)` 真值表（codex spec-R2-M1 守门）：「被接管=exitTakenOver」（incomingOwner=另一 panel）、「self→nil=exitOwnerCleared」（incomingOwner=nil, previousOwner=panel）、**「standalone 恒 nil=none」**（incomingOwner=nil, previousOwner=nil, active=true）、「无 active=none」。
   - `HistoryDialogPresentation.sheetItem(for:)`：`.settings→nil`、`.settlement→放行`、`.history→nil`；以及 `isHistoryPresented` 等既有断言不回归。
 - **壳层（UIKit/SwiftUI）**：tap-anywhere 的两图互点退出、popover 锚定 / dismiss / 双弹排除 → 走**真机验收**（本仓约定，UIKit 手势 + SwiftUI present 难单测）。
-- **源 + 行为兼容守卫（codex spec-R4-H1 / R5-H1）**：①`HomeView` 旧 5 参 init（2 个 `#Preview` 即编译守卫，prod build 必带过）；②`resolve(localCrosshairMode:false, drawingMode:true, remoteOwnerPresent:false)==.drawingAnchor` host 测——证「无远端光标时 drawing tap 仍归 `onTap`」（`onTap` 行为接线未断，codex spec-R5-H1）；③一条 host 测设 `arbiter.onTap = { _ in }` / `arbiter.onShouldExitRemoteCrosshair = { false }`（证符号 public 可设）。CI 三绿覆盖编译期。
+- **源 + 行为兼容守卫（codex spec-R4-H1 / R5-H1 / R6-H1）**：①`HomeView` 旧 5 参 init 仍可调（2 个 `#Preview` 即编译守卫）；②**bare 类型标识守卫**：host 测含 `let _: HomeView = HomeView(content:…, onOpenSettings: {})`——把 `HomeView` 当**裸 concrete 类型**引用（非仅构造），泛型化即编译失败（codex spec-R6-H1）；③`resolve(localCrosshairMode:false, drawingMode:true, remoteOwnerPresent:false)==.drawingAnchor` host 测——证「无远端光标时 drawing tap 仍归 `onTap`」（codex spec-R5-H1）；④一条 host 测设 `arbiter.onTap = { _ in }` / `arbiter.onShouldExitRemoteCrosshair = { false }`（证符号 public 可设）。CI 三绿覆盖编译期。
 - **三绿**：host swift test（Swift Testing + XCTest 两框架都看「All tests passed / 末行 0 failures」）+ Mac Catalyst build-for-testing + iOS Simulator app build。
 - 负向 grep 断言用 `if/exit 1` 非 `! grep`（[[feedback_acceptance_grep_anchoring]]）。
 
@@ -258,7 +259,7 @@ extension CrosshairTapResolver {
 ## 6. 风险与残留
 
 - **R1（已核实解决）**：`.presentationCompactAdaptation(.popover)` 需 iOS 16.4+；`Package.swift` 部署目标 `.iOS(.v17)` → 满足。
-- **R2（已纳入源兼容契约）**：HomeView 泛型化新参带默认值/重载 → 既有 2 个 `#Preview` + AppRootView 构造点零改动编译（§3.1 改动 1 + §0 源兼容硬要求）。
+- **R2（已纳入源兼容契约，含类型标识）**：`HomeView` **保持非泛型 concrete**，新内容走 `AnyView` 类型擦除 + 新泛型 init；旧 5 参 init 委托保留 → 既有 2 个 `#Preview` + AppRootView 构造点 + bare 类型引用零改动编译（§3.1 改动 1 + §0 源兼容硬要求 + §4 bare 类型守卫）。
 - **R3（已升级为强制契约 §3.4，非残留）**：popover 内 `SettingsPanel` 的 toast / 恢复段 / 下载状态在小容器内必须可滚动可读 → 见 §3.4 + A_worst_reachable。
 - **残留（post-merge，非阻塞，沿 RFC-C）**：`DateFormatter` 每帧分配（CrosshairLayout + CrosshairSidebarContent）→ static let 缓存，择机做，不在本轮范围。
 
