@@ -4,7 +4,7 @@
 
 **Goal:** 让十字光标显示时轻点任一图表区域即退光标（含两图互点、drawing 图），并把首页设置齿轮从底部 sheet 改为锚定齿轮的 popover。
 
-**Architecture:** 两件纯 view/手势层小事。F1 抽一个平台无关纯函数 `CrosshairTapResolver`（tap 归属 + sync 退出决策），UIKit 手势壳（`ChartGestureArbiter`）与 Coordinator（`ChartContainerView`）调它；复用 RFC-C 已 merged 的共享 `crosshairOwner`。F2 把 `HomeView` 齿轮挂原生 `.popover`（保 `HomeView` 非泛型 concrete + `AnyView` 类型擦除注入内容），`AppRootView` 桥接 `router.activeModal==.settings` 为 popover binding，`HistoryDialogPresentation` 滤 `.settings` 出共享 sheet。
+**Architecture:** 两件纯 view/手势层小事。F1 抽一个平台无关纯函数 `CrosshairTapResolver`（tap 归属 + sync 退出决策），UIKit 手势壳（`ChartGestureArbiter`）与 Coordinator（`ChartContainerView`）调它；复用 RFC-C 已 merged 的共享 `crosshairOwner`。F2 把 `HomeView` 齿轮挂原生 `.popover`（保 `HomeView` 非泛型 concrete + `AnyView` 类型擦除注入内容），`AppRootView` 桥接 `router.activeModal` 的 settings 态（经 `isSettings` 谓词）为 popover binding，`HistoryDialogPresentation` 滤 `.settings` 出共享 sheet。
 
 **Tech Stack:** Swift 6 / SwiftUI + UIKit（`#if canImport(UIKit)`）/ Swift Testing（host）/ Mac Catalyst build-for-testing + iOS Simulator build（壳层闸门）。Spec：`docs/superpowers/specs/2026-06-30-tap-anywhere-settings-popover-design.md`。
 
@@ -541,8 +541,9 @@ git commit -m "feat(settings): HomeView 齿轮挂 popover（非泛型 concrete +
 在 `AppRootView.swift` 的 `sheetModalBinding`（约第 25-33 行）之后插入：
 
 ```swift
-    // RFC-E：锚齿轮 popover 的 Bool binding —— 由 router.activeModal==.settings 驱动（单一真相）。
-    // dismiss 回写仅当当前是 .settings 才清（守卫防误清已切换到 .settlement/.history 的模态）。
+    // RFC-E：锚齿轮 popover 的 Bool binding —— 由 HistoryDialogPresentation.isSettings(router.activeModal) 判定（单一真相）。
+    // dismiss 回写仅当当前是 settings 才清（守卫防误清已切换到 .settlement/.history 的模态）。
+    // 注：Modal 非 Equatable，必须用 isSettings 谓词（禁 == 比较，见全局约束 + Step 4 grep 守卫）。
     private var settingsPopoverBinding: Binding<Bool> {
         Binding(
             get: { HistoryDialogPresentation.isSettings(router.activeModal) },

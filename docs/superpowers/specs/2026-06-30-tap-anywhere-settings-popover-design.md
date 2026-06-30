@@ -233,7 +233,7 @@ extension CrosshairTapResolver {
 ### 3.5 边界与不变量（codex 核查清单）
 
 - **无双弹**：`.settings` 必须同时（a）驱动 popover、（b）被 `sheetItem` 滤出 sheet。两者缺一即 bug（要么不显、要么 sheet+popover 同弹）。host 测覆盖谓词；真机验收覆盖呈现。
-- **dismiss 回写**：popover 外部点击 / 下滑关闭 → `set(false)` → 仅当 `activeModal==.settings` 时清为 nil（守卫防把已切换到 `.settlement`/`.history` 的模态误清）。
+- **dismiss 回写**：popover 外部点击 / 下滑关闭 → `set(false)` → 仅当当前态为 settings（`isSettings`）时清为 nil（守卫防把已切换到 `.settlement`/`.history` 的模态误清）。
 - **重置资金后（强制收口，codex spec-R1-M1）**：`onConfirmReset` 成功 → 显式 `router.activeModal = nil` 收 popover（§3.1 改动 2）。**不可**依赖 `resetAllProgressAndReload()` 自身清——它当前只 `settings.resetAllProgress()`+`loadHome()`（AppRouter.swift:168-171），不碰 `activeModal`。失败则不清、popover 保留供重试。验收 A_reset_dismiss 覆盖。
 - **下载 toast / 状态可见**：见 §3.4 契约 3——下载状态必须在 popover 内可读不裁剪。
 - **平台**：iPad 原生 popover 带箭头锚齿轮；iPhone 经 `presentationCompactAdaptation(.popover)` 强制锚定 popover 不退化 sheet。`.presentationCompactAdaptation` 需 iOS 16.4+，项目 iOS17 满足（`HomeView.swift:12` 注明跨 iOS17）。
