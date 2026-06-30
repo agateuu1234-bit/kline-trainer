@@ -32,6 +32,20 @@ public struct AppRootView: View {
         )
     }
 
+    // RFC-E：锚齿轮 popover 的 Bool binding —— 由 HistoryDialogPresentation.isSettings(router.activeModal) 判定（单一真相）。
+    // dismiss 回写仅当当前是 settings 才清（守卫防误清已切换到 .settlement/.history 的模态）。
+    // 注：Modal 非 Equatable，必须用 isSettings 谓词（禁 == 比较，见全局约束 + Step 4 grep 守卫）。
+    private var settingsPopoverBinding: Binding<Bool> {
+        Binding(
+            get: { HistoryDialogPresentation.isSettings(router.activeModal) },
+            set: { newValue in
+                if !newValue && HistoryDialogPresentation.isSettings(router.activeModal) {
+                    router.activeModal = nil
+                }
+            }
+        )
+    }
+
     // RFC #2：驱动 .history 居中弹窗淡入淡出的 Equatable 值（覆盖 onCancel/遮罩/review/replay 全部清除路径）
     private var isHistoryPresented: Bool {
         HistoryDialogPresentation.isHistoryPresented(router.activeModal)
@@ -43,7 +57,15 @@ public struct AppRootView: View {
                      onStartTraining: { Task { await router.startTraining() } },
                      onContinueTraining: { Task { await router.continueTraining() } },
                      onSelectRecord: { id in router.selectRecord(id: id) },
-                     onOpenSettings: { router.openSettings() })
+                     onOpenSettings: { router.openSettings() },
+                     isSettingsPresented: settingsPopoverBinding,
+                     settingsContent: {
+                        SettingsPanel(settings: settings, api: api, cache: cache, acceptance: acceptance,
+                                      onConfirmReset: {
+                                          try await router.resetAllProgressAndReload()
+                                          router.activeModal = nil   // RFC-E：reset 成功 → 收 popover（spec-R1-M1 / A_reset_dismiss）
+                                      })
+                     })
                 .navigationDestination(isPresented: trainingBinding) {
                     if let t = router.activeTraining {
                         TrainingView(lifecycle: t.lifecycle,
@@ -54,18 +76,14 @@ public struct AppRootView: View {
                     }
                 }
         }
-        // RFC #2：.history 经下方 .overlay 居中呈现；.settings/.settlement 仍走底部 sheet。
+        // RFC #2 / RFC-E：.history 居中 overlay、.settings 锚齿轮 popover；共享 sheet 仅剩 .settlement。
         .sheet(item: sheetModalBinding) { modal in
             switch modal {
-            case .settings:
-                SettingsPanel(settings: settings, api: api, cache: cache, acceptance: acceptance,
-                              onConfirmReset: { try await router.resetAllProgressAndReload() })
             case .settlement(let r):
                 SettlementView(record: r, onConfirm: { Task { await router.confirmSettlement() } })
-            case .history:
-                // sheetModalBinding 已把 .history 滤成 nil → 此分支永不到达，仅为 switch 穷尽。
-                // 到达即分流 binding 失效（assertionFailure 在 release 为 no-op，DEBUG 下暴露）。
-                let _ = assertionFailure("sheetModalBinding 必须把 .history 滤到居中 overlay")
+            case .settings, .history:
+                // sheetModalBinding 已把 .settings/.history 滤成 nil → 此分支永不到达，仅为 switch 穷尽。
+                let _ = assertionFailure("sheetModalBinding 必须把 .settings/.history 滤出共享 sheet")
                 EmptyView()
             }
         }
