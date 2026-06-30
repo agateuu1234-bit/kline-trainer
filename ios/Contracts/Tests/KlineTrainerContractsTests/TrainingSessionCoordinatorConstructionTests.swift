@@ -331,7 +331,7 @@ struct TrainingSessionCoordinatorConstructionTests {
                        createdAt: 0)
     }
 
-    @Test("review: 只读末态 + 还原标记 + tick=finalTick + 收益率与 record 自洽（D5）")
+    @Test("review: 从训练起点开演 + 还原标记 + tick=派生 startTick + 收益率与 record 自洽（D5 / B3）")
     func review_happy_restoresEndState() async throws {
         let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles())
         let id = try Self.seedRecord(records, totalCapital: 100_000, profit: 8_000, finalTick: 7,
@@ -340,7 +340,9 @@ struct TrainingSessionCoordinatorConstructionTests {
         let engine = try await coord.review(recordId: id)
         #expect(engine.flow.mode == .review)
         #expect(engine.flow.canBuySell() == false)        // ReviewFlow 全能力关
-        #expect(engine.tick.globalTickIndex == 7)          // initialTick = finalTick
+        #expect(engine.tick.globalTickIndex == 0)          // B3: initialTick = derived startTick (startDatetime=1 → m3[0])
+        #expect(engine.tick.globalTickIndex < 7)           // 起点不是末根
+        #expect(engine.flow.allowedTickRange.upperBound == 7)  // 末根仍是 finalTick
         #expect(engine.markers.count == 2)                 // 还原全部标记
         #expect(engine.tradeOperations.count == 2)
         #expect(engine.initialCapital == 100_000)

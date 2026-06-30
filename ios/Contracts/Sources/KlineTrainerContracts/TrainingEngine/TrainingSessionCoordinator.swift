@@ -276,8 +276,10 @@ public final class TrainingSessionCoordinator {
             // maxTick 由 .review(record) 内部据 record.finalTick 派生；make 亦校验 .m3 非空 +
             // m3.last.endGlobalIndex >= finalTick，故此处不重复 maxTick(from:)（D3 / LOW#8）。
             let allCandles = try reader.loadAllCandles()
+            let meta = try reader.loadMeta()                  // B3：起始点 tick 派生（review 从训练起点重演）
+            let startTick = TrainingEngine.startTick(forStartDatetime: meta.startDatetime, in: allCandles)
             let engine = try TrainingEngine.make(
-                .review(record: record, startTick: record.finalTick),   // B3 将改为真实起始 tick
+                .review(record: record, startTick: startTick),
                 allCandles: allCandles,
                 initialCapital: record.totalCapital,
                 initialCashBalance: record.totalCapital + record.profit,   // 末态全现金（强平后）

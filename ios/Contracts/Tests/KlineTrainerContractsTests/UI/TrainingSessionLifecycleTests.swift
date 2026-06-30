@@ -130,13 +130,13 @@ struct TrainingSessionLifecycleTests {
         #expect(life.shouldAutoFinalize(didFinalize: true) == false)
     }
 
-    @Test("shouldAutoFinalize: Review at-end → false（mode-gate killer）")
+    @Test("shouldAutoFinalize: Review（B3：从训练起点非末根）→ false（mode-gate killer）")
     func shouldAutoFinalize_review_false() async throws {
         let (coord, records, _, _) = H.makeCoordinator(candles: H.validCandles())
         let id = try Self.seedRecord(records)
         let engine = try await coord.review(recordId: id)
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
-        #expect(life.isAtEnd == true)
+        #expect(life.isAtEnd == false)   // B3: review 从派生 startTick 开始，不在末根
         #expect(life.shouldAutoFinalize(didFinalize: false) == false)
     }
 

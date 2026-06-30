@@ -14,6 +14,8 @@ struct CoordinatorTestHarness {
     let pendingReplayRepo: InMemoryPendingReplayRepository
     let recordRepo: InMemoryRecordRepository
     let seededRecordId: Int64
+    /// finalTick of the seeded record; used to assert review opens at startTick < finalTick.
+    let seededRecordFinalTick: Int
 
     /// 组装含单条 record（trainingSetFilename="set.sqlite"）的 harness。
     static func make() throws -> CoordinatorTestHarness {
@@ -49,6 +51,8 @@ struct CoordinatorTestHarness {
             settings: SettingsStore(settingsDAO: settingsDAO))
 
         // Seed records（fake insertRecord 自增 id）
+        // finalTick = m3Count - 1 = 7（与 makeCandles 默认一致，使 derived startTick 0 < finalTick 7）
+        let seededFinalTick = 7
         var firstId: Int64 = 0
         for _ in seedRecordIds {
             let id = try records.insertRecord(
@@ -58,7 +62,7 @@ struct CoordinatorTestHarness {
                                returnRate: 0.05, maxDrawdown: -0.03,
                                buyCount: 1, sellCount: 1,
                                feeSnapshot: FeeSnapshot(commissionRate: 0.0002, minCommissionEnabled: false),
-                               finalTick: 7),
+                               finalTick: seededFinalTick),
                 ops: [], drawings: [])
             if firstId == 0 { firstId = id }
         }
@@ -68,7 +72,8 @@ struct CoordinatorTestHarness {
             pendingRepo: pending,
             pendingReplayRepo: pendingReplay,
             recordRepo: records,
-            seededRecordId: firstId)
+            seededRecordId: firstId,
+            seededRecordFinalTick: seededFinalTick)
     }
 
     struct CapitalDAO: SettingsDAO {
@@ -203,6 +208,17 @@ struct CoordinatorReplayPersistenceTests {
         h.coordinator.requestAutosave(engine: reviewEngine, immediate: true)
         await h.coordinator.drainAutosaveForTesting()
         #expect(h.pendingReplayRepo.saveCount == before)   // review 不存（shouldPersistProgress=false）
+    }
+
+    // MARK: - B3: review() derives startTick from training-set metadata
+
+    @Test func review_startsAtTrainingStartTick_notFinalTick() async throws {
+        let h = try CoordinatorTestHarness.make()
+        let engine = try await h.coordinator.review(recordId: h.seededRecordId)
+        #expect(engine.flow.mode == .review)
+        #expect(engine.tick.globalTickIndex == engine.flow.initialTick)
+        #expect(engine.tick.globalTickIndex < h.seededRecordFinalTick)   // 起点不是末根
+        #expect(engine.flow.allowedTickRange.upperBound == h.seededRecordFinalTick)
     }
 
     // MARK: - A5: resumePendingReplay + hasResumableReplay
