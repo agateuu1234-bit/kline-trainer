@@ -28,11 +28,27 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     public var onLongPress: ((CGPoint, GesturePhase) -> Void)?
     /// 单指点击：location。仅 Drawing 模式触发。
     public var onTap: ((CGPoint) -> Void)?
-    /// 两指上下滑动切周期：松手离散触发一次。
+    /// 两指上下滑动切周期：松手离散触发一次。（RFC-C：Coordinator 已不接此回调，two-finger 不再切周期）
     public var onTwoFingerSwipe: ((SwipeDirection) -> Void)?
+
+    /// RFC-C 单指竖滑切周期（普通态，一甩一档）。
+    public var onVerticalSwipe: ((SwipeDirection) -> Void)?
+    /// RFC-C 十字光标模式：crosshairMode 下单指拖动移动光标的绝对触点。
+    public var onCrosshairMove: ((CGPoint) -> Void)?
+    /// RFC-C 十字光标模式下单指点击 → 退出。
+    public var onCrosshairExit: (() -> Void)?
 
     /// Drawing 模式开关。true 时单指 Pan 被绘线截获、单指点击 fire onTap。
     public var drawingMode: Bool = false
+    /// RFC-C 十字光标模式开关（Coordinator 长按进入时设 true、点击退出时设 false）。
+    /// true 时：单指拖动 → onCrosshairMove（不平移）；两指/捏合抑制（整图冻结）；单指点击 → onCrosshairExit。
+    /// **false→true 转换立即 supersede 进行中的单指 pan**（发残量 + .cancelled 给 onPan）——防长按前已激活的
+    /// 小幅 pan 的终止事件被 crosshairMode 早返吞掉、致 engine pan/deceleration 状态悬空（codex R5-M1）。
+    public var crosshairMode: Bool = false {
+        didSet {
+            if crosshairMode && !oldValue { supersedeSinglePanForMultitouch(in: attachedView) }
+        }
+    }
 
     // 弱引用：两指仲裁需跨识别器读对方实时值；view 持有识别器，weak 避免 arbiter↔recognizer 环。
     private weak var pinchRecognizer: UIPinchGestureRecognizer?
@@ -137,6 +153,11 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
 
     @objc private func handleSinglePan(_ g: UIPanGestureRecognizer) {
         guard let ph = phase(from: g.state) else { return }
+        // RFC-C：crosshairMode 下单指 = 移动光标（整图冻结，不发 onPan/切周期）
+        if crosshairMode {
+            if ph == .began || ph == .changed { onCrosshairMove?(g.location(in: g.view)) }
+            return
+        }
         // 生命周期决策全在纯函数 singlePanStep：垂直/ambiguous → emission==nil 不触碰 reducer；
         // drawing 截获 → 始终 reset state 不发回调（R4 finding：防 mid-flight 切入残留）。
         let step = singlePanStep(phase: ph,
@@ -148,10 +169,12 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
         singlePanLifecycle = step.lifecycle
         lastSinglePanTranslationX = step.lastTranslationX
         for e in step.emissions { onPan?(e.deltaX, e.velocityX, e.phase) }
+        if let dir = step.periodSwipe { onVerticalSwipe?(dir) }   // RFC-C 单指竖滑切周期
     }
 
     // 两指 pan 与 pinch 两识别器都喂入同一 twoFingerStep 状态机（顺序无关）；各读对方实时值。
     @objc private func handleTwoFingerPan(_ g: UIPanGestureRecognizer) {
+        if crosshairMode { return }                                           // RFC-C：光标模式整图冻结
         guard let ph = phase(from: g.state) else { return }
         if ph == .began { supersedeSinglePanForMultitouch(in: g.view) }   // 第 2 指落 → 取消单指（R10 finding-1）
         let scale = pinchRecognizer?.scale ?? 1.0
@@ -161,6 +184,7 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     }
 
     @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
+        if crosshairMode { return }                                           // RFC-C：光标模式不缩放
         guard let ph = phase(from: g.state) else { return }
         if ph == .began { supersedeSinglePanForMultitouch(in: g.view) }   // 捏合起手 → 取消单指（R10 finding-1）
         let translation = twoFingerPanRecognizer?.translation(in: g.view) ?? .zero
@@ -183,7 +207,9 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     }
 
     @objc private func handleTap(_ g: UITapGestureRecognizer) {
-        guard drawingMode, g.state == .ended else { return }   // 仅 Drawing 模式确定锚点
+        guard g.state == .ended else { return }
+        if crosshairMode { onCrosshairExit?(); return }   // RFC-C：光标模式点击退出
+        guard drawingMode else { return }                  // 仅 Drawing 模式确定锚点
         onTap?(g.location(in: g.view))
     }
 
