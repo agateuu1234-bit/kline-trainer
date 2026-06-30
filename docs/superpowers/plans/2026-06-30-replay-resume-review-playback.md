@@ -566,10 +566,11 @@ git commit -m "feat(A3): pending_replay migration 0006 + impl + DefaultAppDB con
     // codex plan-R6-F1：加画线→存(拥有槽)→删画线(count 回基线)→存 → 槽须更新为无画线（不被 clean-skip 残留）
     let h = try CoordinatorTestHarness.make()
     let e = try await h.coordinator.replay(recordId: h.seededRecordId)
-    <在 e 上添加一条画线（engine 画线 API，如 activateDrawingTool + commit，以源码为准）>
+    // 用引擎公共 API 加一条画线（appendDrawing；anchors 内容对本测试无关，空数组即可）
+    e.appendDrawing(DrawingObject(toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0))
     try await h.coordinator.saveProgress(engine: e)            // 写槽（含 1 画线）→ replayHasPersisted=true
     #expect(try h.pendingReplayRepo.loadReplay()?.drawings.count == 1)
-    <在 e 上删除该画线 → e.drawings.count 回到 0（==fresh 基线 count）>
+    e.deleteDrawing(at: 0)                                     // 删除 → e.drawings.count 回到 0（==fresh 基线 count）
     try await h.coordinator.saveProgress(engine: e)            // 已拥有槽 → 不 clean-skip → 写无画线
     #expect(try h.pendingReplayRepo.loadReplay()?.drawings.isEmpty == true)   // 无残留
 }
@@ -910,6 +911,32 @@ git commit -m "feat(A5): resumePendingReplay + hasResumableReplay + AppRouter re
 }
 
 @MainActor
+@Test func replayTerminal_missingRecordContext_throwsNotSilent() async throws {
+    // codex plan-R8-F1：终局缺 activeRecord.id → throw、保留会话（不静默返回 record 而留陈旧槽）
+    let h = try CoordinatorTestHarness.make()
+    let e = try await h.coordinator.replay(recordId: h.seededRecordId)
+    e.holdOrObserve(panel: .upper)
+    try await h.coordinator.saveProgress(engine: e)
+    h.coordinator.setActiveRecordNilForTesting()   // DEBUG 钩子：制造缺上下文（见 Step 3）
+    await #expect(throws: (any Error).self) {
+        _ = try await h.coordinator.replaySettlementPayload(engine: e)
+    }
+    #expect(try h.pendingReplayRepo.loadReplay() != nil)   // 槽未被静默清
+}
+
+@MainActor
+@Test func replayDiscard_missingRecordContext_throws() async throws {
+    let h = try CoordinatorTestHarness.make()
+    let e = try await h.coordinator.replay(recordId: h.seededRecordId)
+    e.holdOrObserve(panel: .upper)
+    try await h.coordinator.saveProgress(engine: e)
+    h.coordinator.setActiveRecordNilForTesting()
+    await #expect(throws: (any Error).self) {
+        try await h.coordinator.discardSession()
+    }
+}
+
+@MainActor
 @Test func replayTerminal_conditionalClear_preservesOtherRecordSlot() async throws {
     // codex plan-R3-F1：A 有暂停槽；开新 replay B 未成功保存即到终局（手动结束）→ 终局条件清不删 A
     let h = try CoordinatorTestHarness.make(seedRecordIds: [101, 202])   // 两条 record（harness 支持多 seed）
@@ -945,16 +972,14 @@ git commit -m "feat(A5): resumePendingReplay + hasResumableReplay + AppRouter re
 - [ ] **Step 2: 跑测试确认失败** — FAIL（replaySettlementPayload sync / discard 不清 replay / reset 不清 replay）。
 
 - [ ] **Step 3a: `replaySettlementPayload` 改 async + fence→构建 payload→成功后才 clear**（codex plan-R1-F2：清档**不得**早于 payload 全部 throwing 工作成功，否则 loadMeta 抛会"既删槽又无结算"）。
-签名 `public func replaySettlementPayload(engine:) throws -> TrainingRecord` → `... async throws -> TrainingRecord`。**顺序**：①两 `guard`（mode+活跃上下文）→ ②`await fenceAndDrainAutosaves()`（排空排队 autosave，此后无并发写）→ ③`let meta = try reader.loadMeta()` + 构造 `record`（**全部 throwing payload 工作，槽仍在**，字段计算不变）→ ④**仅在 payload 构建成功后**用**条件清** `if let id = activeRecord?.id { try pendingReplayRepo.clearReplay(ifRecordId: id) }`（**绝不**用无条件 `clearReplay()`——那会误删别记录 A 的槽，codex plan-R3-F1/R5-F2；无条件 `clearReplay()` 仅 reset/corrupt-恢复用）→ ⑤`return record`。
+签名 `public func replaySettlementPayload(engine:) throws -> TrainingRecord` → `... async throws -> TrainingRecord`。**顺序**：①两 `guard`（mode + 活跃上下文）——**把 `activeRecord?.id` 也纳入 guard 的 let 绑定**（`guard activeEngine === engine, let reader = activeReader, let file = activeFile, let recordId = activeRecord?.id else { throw .internalError(...) }`），**缺则 throw、保留会话**（fail-closed，codex plan-R8-F1；不可静默成功）→ ②`await fenceAndDrainAutosaves()`（排空排队 autosave，此后无并发写）→ ③`let meta = try reader.loadMeta()` + 构造 `record`（**全部 throwing payload 工作，槽仍在**，字段计算不变）→ ④**仅在 payload 构建成功后**用**条件清** `try pendingReplayRepo.clearReplay(ifRecordId: recordId)`（recordId 来自 guard 绑定；**绝不**用无条件 `clearReplay()`——那会误删别记录 A 的槽，codex plan-R3-F1/R5-F2；无条件 `clearReplay()` 仅 reset/corrupt-恢复用）→ ⑤`return record`。
 即在 `return TrainingRecord(...)` 之前先 `let record = TrainingRecord(...)`，然后：
 ```swift
         // 新需求10：fence 已在上方排空 autosave；payload 构建成功后才清槽（codex plan-R1-F2）。
         // **条件清（codex plan-R3-F1）**：仅清属于当前 replay 记录的槽——防"开新 replay B 未存即到终局"
-        // 误删另一记录 A 的暂停槽。activeRecord 已由 replay()/resumePendingReplay() 设（guard 取 id）。
+        // 误删另一记录 A 的暂停槽。recordId 来自顶部 guard 绑定（缺则已 throw=fail-closed，codex plan-R8-F1）。
         // clearReplay 抛 → 方法抛、record 不返回 → caller 保留 session+槽、可重试（见 TrainingView）。
-        if let activeId = activeRecord?.id {
-            try pendingReplayRepo.clearReplay(ifRecordId: activeId)
-        }
+        try pendingReplayRepo.clearReplay(ifRecordId: recordId)
         return record
 ```
 （`await fenceAndDrainAutosaves()` 插在两 guard 之后、`loadMeta` 之前。）
@@ -962,9 +987,13 @@ git commit -m "feat(A5): resumePendingReplay + hasResumableReplay + AppRouter re
 - [ ] **Step 3b: `discardSession` 清 replay（条件清）** — `discardSession()` 内（已 `await fenceAndDrainAutosaves()`）在清 pending 处加 replay 分支：
 ```swift
         // 新需求10：replay 局 discard 条件清 replay 槽（仅属当前记录，防误删别的记录槽，codex plan-R3-F1）；
+        // **fail-closed（codex plan-R8-F1）**：replay 缺 activeRecord.id → throw、保留会话（不静默结束留陈旧槽）；
         // normal 清 pending_training（原逻辑）。
         if activeEngine?.flow.mode == .replay {
-            if let activeId = activeRecord?.id { try pendingReplayRepo.clearReplay(ifRecordId: activeId) }
+            guard let activeId = activeRecord?.id else {
+                throw AppError.internalError(module: "E6b", detail: "replay discard without active record")
+            }
+            try pendingReplayRepo.clearReplay(ifRecordId: activeId)
         } else {
             try pendingRepo.clearPending()    // 原逻辑
         }
@@ -1029,7 +1058,14 @@ public func resetAllTrainingProgress(toCapital: Double) throws {
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过** — `swift test --filter replayTerminal_fencesAndClears_evenWithQueuedAutosave` / `--filter discardSession_replay_clears` + reset 测 → PASS。
+- [ ] **Step 3f: DEBUG 测试钩子**（coordinator，镜像现有 `drainAutosaveForTesting`，仅供 fail-closed 守卫测试制造缺上下文）：
+```swift
+    #if DEBUG
+    func setActiveRecordNilForTesting() { activeRecord = nil }
+    #endif
+```
+
+- [ ] **Step 4: 跑测试确认通过** — `swift test --filter replayTerminal_fencesAndClears_evenWithQueuedAutosave` / `--filter discardSession_replay_clears` / `--filter replayTerminal_missingRecordContext_throwsNotSilent` / `--filter replayDiscard_missingRecordContext_throws` + reset 测 → PASS。
 
 - [ ] **Step 5: 全量 host 不回归** — `swift test` → 0 失败（注意：`replaySettlementPayload`/`replaySettlementRecord` 的现有调用点已全部 await 化）。
 
