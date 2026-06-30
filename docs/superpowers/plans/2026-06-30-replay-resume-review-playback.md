@@ -826,7 +826,8 @@ git commit -m "feat(A4): coordinator replay autosave gate + saveProgress routing
 > **错误纪律（codex plan-R1/R10/R11/R12-F1，权威——下方代码以此为准）**：
 > - **元数据先判归属（R11）**：`loadReplaySlotInfo()` 只读 record_id/filename 不解码 → 非本记录/无槽返 nil（不被别记录损坏 payload 阻塞）。
 > - **本记录全量 `loadReplay()`**：**`.dbCorrupted`（已验证损坏 payload）→ durable `try clearReplay()` + 返回 nil（清成功=回退从头 fresh；清失败=瞬态 DB → 传播可重试、槽留，R12-F1）**；**非 `.dbCorrupted`（瞬态）→ 传播**（不清、不 fresh，防丢有效档）。⚠️ **不是"含 .dbCorrupted 一律传播"**——那会让永久损坏槽卡死按钮（R13-F1）。
-> - **其他清档点**：openReader `isCorruptTrainingSet`（`cache.delete + clearReplay`）、pending 文件名 ≠ 记录文件名（`clearReplay`，R10）。`loadRecordBundle`/`loadAllCandles`/`make` 错误传播（记录不被单独删除，故 loadRecordBundle 必瞬态）。
+> - **其他清档点**：openReader `isCorruptTrainingSet`（`cache.delete + clearReplay`）、pending 文件名 ≠ 记录文件名（`clearReplay`，R10）、**scalar slot 越界/非有限（make 前预判，`clearReplay`，whole-branch R1-F1）**。`loadRecordBundle`/`loadAllCandles`/**真训练集故障的 make 抛错** 传播（记录不被单独删除，故 loadRecordBundle 必瞬态）。
+> - **scalar 损坏槽分流（whole-branch R1-F1）**：`make`（L220/L236-240）对越界 `globalTickIndex` / 非有限·负 cash·capital·drawdown 抛 `.trainingSet(.emptyData)`，与真训练集故障不可区分 → 必须在 `make` **前**对 pending scalar 显式 guard，损坏 → durable `clearReplay + nil`（回退从头），否则 resume-first 永久 brick 该记录。
 > - **路由 = resume-first 权威**（不用 `hasResumableReplay` 当路由门）：transient throw → router setError → **不 fresh、不覆盖槽**；返 nil（无槽/不匹配/已清损坏槽）→ fresh。
 
 - [ ] **Step 1: 写失败测试**
@@ -956,6 +957,36 @@ func makeSlot(recordId: Int64, filename: String = "rec.sqlite") -> PendingReplay
     // 槽仍在（failNext 已消费，本次 load 成功）
     #expect(try h.pendingReplayRepo.loadReplay() != nil)
 }
+
+// codex whole-branch R1-F1：损坏 scalar slot（越界 tick / 非有限 money）= 损坏槽 → make 前分流清档 + nil（不传播 brick）
+// 种坏槽用全量 `PendingReplay(...)` 字面（仅改受测的那个 scalar）；`h.seededRecordFinalTick` == 训练集 maxTick。
+@Test func resumePendingReplay_tickBeyondMaxTick_clearsAndReturnsNil() async throws {
+    let h = try CoordinatorTestHarness.make()
+    let badSlot = PendingReplay(recordId: h.seededRecordId, trainingSetFilename: "set.sqlite",
+        globalTickIndex: h.seededRecordFinalTick + 1,   // 越界：> maxTick → scalar guard 检出（永不到 make）
+        upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
+        feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+        tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+    try h.pendingReplayRepo.saveReplay(badSlot)
+    let e = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+    #expect(e == nil)                                            // 回退从头
+    #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil) // 槽已清
+}
+
+@Test func resumePendingReplay_nonFiniteMoney_clearsAndReturnsNil() async throws {
+    let h = try CoordinatorTestHarness.make()
+    let badSlot = PendingReplay(recordId: h.seededRecordId, trainingSetFilename: "set.sqlite",
+        globalTickIndex: 1, upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(),
+        cashBalance: .infinity,                          // 非有限 → scalar guard 检出（isFinite=false）
+        feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+        tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+    try h.pendingReplayRepo.saveReplay(badSlot)
+    let e = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+    #expect(e == nil)
+    #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil) // 槽已清
+}
 ```
 
 - [ ] **Step 2: 跑测试确认失败** — FAIL（方法不存在）。
@@ -1017,10 +1048,32 @@ public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine?
         try pendingReplayRepo.clearReplay()      // durable 清（唯一清档点）
         return nil                               // 调用方回退从头 replay
     }
+    // candle-load 段（真训练集/transient 错误 → 传播）
+    let allCandles: [Period: [KLineCandle]]
+    let mt: Int
     do {
-        let allCandles = try reader.loadAllCandles()
-        let mt = try maxTick(from: allCandles)
-        // position 已在 step 2 解码（slot payload，.dbCorrupted 已处理）；此块仅训练集/transient 错误 → 传播
+        allCandles = try reader.loadAllCandles()
+        mt = try maxTick(from: allCandles)
+    } catch {
+        reader.close()
+        throw (error as? AppError) ?? .internalError(module: "E6b", detail: String(describing: error))
+    }
+    // scalar 前置校验段（codex whole-branch R1-F1）：make L220/L236-240 对越界 tick / 非有限·负 money·drawdown
+    // 抛 .trainingSet(.emptyData)，与真训练集故障不可区分；若交给 make 段宽 catch 传播 → 不清槽 → resume-first
+    // 每次撞同一损坏 scalar 槽 → 记录永久 brick。故 make 前分流：损坏 scalar = 损坏槽 → reader.close + durable
+    // clearReplay（try：清失败=瞬态传播可重试）+ nil（回退从头）。fee 已被 loadReplay sanitized，非 brick 向量。
+    guard (0...mt).contains(pending.globalTickIndex),
+          pending.cashBalance.isFinite, pending.cashBalance >= 0,
+          pending.accumulatedCapital.isFinite, pending.accumulatedCapital >= 0,
+          pending.drawdown.peakCapital.isFinite, pending.drawdown.peakCapital >= 0,
+          pending.drawdown.maxDrawdown.isFinite, pending.drawdown.maxDrawdown >= 0
+    else {
+        reader.close()
+        try pendingReplayRepo.clearReplay()
+        return nil
+    }
+    // make 段：position 已在 step 2 解码（slot payload，.dbCorrupted 已处理）；此块仅真训练集/transient 错误 → 传播
+    do {
         let engine = try TrainingEngine.make(
             .replay(fees: pending.feeSnapshot, maxTick: mt),
             allCandles: allCandles,
