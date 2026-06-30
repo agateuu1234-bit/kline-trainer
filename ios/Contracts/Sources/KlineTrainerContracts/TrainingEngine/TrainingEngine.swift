@@ -351,6 +351,30 @@ public final class TrainingEngine {
         advanceAndAccount(panel: panel)
     }
 
+    // MARK: - 新需求10：复盘步进（B2）
+
+    /// 复盘「快进到结尾」。仅 canJumpToEnd()（Review）生效；设 tick=maxTick + 镜头吸附 autoTracking。
+    /// 无成交、无 marker；无 forceClose（复盘无持仓）。K线/标记随 currentIdx 自动全揭示。
+    public func jumpToEnd() {
+        guard flow.canJumpToEnd() else { return }
+        stopAllDeceleration()
+        tick.reset(to: tick.maxTick)
+        _ = upperPanel.reduce(.tradeTriggered)
+        _ = lowerPanel.reduce(.tradeTriggered)
+        resetOffsetAfterAutoTracking(.upper)
+        resetOffsetAfterAutoTracking(.lower)
+        drawdown.update(currentCapital: currentTotalCapital)
+    }
+
+    /// 复盘「下一根」逐根推进。**按两 panel 中更细（stepsForPeriod 更小）的周期步进**，
+    /// 而非 activePanel（复盘隐藏了周期选择条，activePanel 停在默认 .lower=粗周期会一击跳一整天）。
+    /// 复用 holdOrObserve（canAdvance 门控 + 只读无成交）。用户可单指竖滑切周期组合改粒度。
+    public func stepReviewForward() {
+        let finerPanel: PanelId =
+            stepsForPeriod(upperPanel.period) <= stepsForPeriod(lowerPanel.period) ? .upper : .lower
+        holdOrObserve(panel: finerPanel)
+    }
+
     // MARK: - 私有：步进 + 联动 + 记账（buy/sell/holdOrObserve 共用）
 
     /// 被点击面板对应的周期。
