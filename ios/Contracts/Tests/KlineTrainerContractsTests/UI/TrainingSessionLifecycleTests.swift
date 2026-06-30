@@ -140,6 +140,17 @@ struct TrainingSessionLifecycleTests {
         #expect(life.shouldAutoFinalize(didFinalize: false) == false)
     }
 
+    @Test("shouldAutoFinalize: Review 步进至 maxTick（isAtEnd==true）→ false（mode-gate 恒阻，不自动结算）")
+    func shouldAutoFinalize_review_atMaxTick_false() async throws {
+        let (coord, records, _, _) = H.makeCoordinator(candles: H.validCandles())
+        let id = try Self.seedRecord(records)
+        let engine = try await coord.review(recordId: id)
+        engine.jumpToEnd()   // ReviewFlow.canJumpToEnd()==true → tick=maxTick
+        let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
+        #expect(life.isAtEnd == true)
+        #expect(life.shouldAutoFinalize(didFinalize: false) == false)
+    }
+
     @Test("shouldAutoFinalize: fresh Normal not-at-end → false（isAtEnd-gate）")
     func shouldAutoFinalize_freshNormal_false() async throws {
         let (coord, _, _, _) = H.makeCoordinator(candles: H.validCandles())
