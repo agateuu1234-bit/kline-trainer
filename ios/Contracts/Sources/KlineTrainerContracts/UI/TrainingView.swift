@@ -54,6 +54,10 @@ public struct TrainingView: View {
     // `mode != .review`——与按钮自身 `buyEnabled/sellEnabled` 同源（二者均 guard canBuySell），杜绝谓词漂移
     // （code-review Task3 Important；同 Task1 shouldShowSettlement 范式）。
     private var showsTradeButtons: Bool { engine.flow.canBuySell() }
+    // B4：复盘控件条可见性——canAdvance=true（Review）且 canBuySell=false（非交易态），两谓词合取。
+    // 与 showsTradeButtons 互斥：正常/Replay 时 canBuySell=true → showsReviewControls=false；
+    // Review 时 canBuySell=false + canAdvance=true → showsReviewControls=true。
+    private var showsReviewControls: Bool { engine.flow.canAdvance() && !engine.flow.canBuySell() }
 
     /// 某 panel 当前下单周期（codex R2-high：买卖条捕获/比对用）。
     private func currentPeriod(of id: PanelId) -> Period {
@@ -91,6 +95,14 @@ public struct TrainingView: View {
                     onBuy:  { tradeStrip = TradeStripRequest(panel: activePanel, action: .buy, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
                     onSell: { tradeStrip = TradeStripRequest(panel: activePanel, action: .sell, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
                     onHold: { engine.holdOrObserve(panel: activePanel) })
+            } else if showsReviewControls {
+                // B4：复盘控件条——仅 Review 可步进态显示（canAdvance && !canBuySell）。
+                ReviewControlBar(showsJumpToEnd: engine.flow.canJumpToEnd()) { action in
+                    switch action {
+                    case .step:      engine.stepReviewForward()   // 逐根步进（B2）
+                    case .jumpToEnd: engine.jumpToEnd()            // 快进到结尾（B2）
+                    }
+                }
             }
         }
         .onAppear { maybeAutoEnd() }                                            // M2：resume-at-maxTick
@@ -102,8 +114,8 @@ public struct TrainingView: View {
         }
         // codex R2-high：周期也能被两指上下滑手势改（switchPeriodCombo 改 panel.period，activePanel 不变）→
         // 同样清掉打开的买卖条，防对新周期下单。与上面的执行时守卫(onPick)双保险。
-        .onChange(of: engine.upperPanel.period) { _, _ in tradeStrip = nil }
-        .onChange(of: engine.lowerPanel.period) { _, _ in tradeStrip = nil }
+        .onChange(of: engine.upperPanel.period) { _, _ in tradeStrip = nil; lifecycle.autosave(immediate: false) }
+        .onChange(of: engine.lowerPanel.period) { _, _ in tradeStrip = nil; lifecycle.autosave(immediate: false) }
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
             tradeStrip = nil                                    // codex R3-high：tick 推进(含持有/观察)即作废未确认买卖条，防按新 tick 价成交
             lifecycle.autosave(immediate: false)                // §4.6：tick 推进按 N 节流
