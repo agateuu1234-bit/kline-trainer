@@ -57,6 +57,7 @@ struct TrainingSessionCoordinatorConstructionTests {
             dbFactory: PreviewTrainingSetDBFactory(candles: candles),
             recordRepo: records,
             pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             // A4：settingsDAO 与 SettingsStore 同源（startingCapital 直读 DAO）。
             settingsDAO: CapitalDAO(capital: capital),
@@ -132,6 +133,7 @@ struct TrainingSessionCoordinatorConstructionTests {
             dbFactory: factory,
             recordRepo: records,
             pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,
@@ -264,6 +266,7 @@ struct TrainingSessionCoordinatorConstructionTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records2, pendingRepo: pendingRepo,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records2, pending: pendingRepo),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.persistence(.dbCorrupted)) {
@@ -293,6 +296,7 @@ struct TrainingSessionCoordinatorConstructionTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records3, pendingRepo: pendingRepo,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records3, pending: pendingRepo),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.trainingSet(.emptyData)) {
@@ -364,6 +368,7 @@ struct TrainingSessionCoordinatorConstructionTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pendingR,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pendingR),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.persistence(.ioError("x"))) {
@@ -412,6 +417,7 @@ struct TrainingSessionCoordinatorConstructionTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pendingP,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pendingP),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.persistence(.diskFull)) {

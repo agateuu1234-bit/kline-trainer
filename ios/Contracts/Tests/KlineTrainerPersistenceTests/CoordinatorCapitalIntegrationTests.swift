@@ -42,7 +42,9 @@ struct CoordinatorCapitalIntegrationTests {
         let store = SettingsStore(settingsDAO: appDB)
         let coord = TrainingSessionCoordinator(
             dbFactory: PreviewTrainingSetDBFactory(candles: candles),
-            recordRepo: appDB, pendingRepo: appDB, finalization: appDB,
+            recordRepo: appDB, pendingRepo: appDB,
+            pendingReplayRepo: appDB,
+            finalization: appDB,
             settingsDAO: appDB, cache: cache, settings: store)
         return (coord, store)
     }

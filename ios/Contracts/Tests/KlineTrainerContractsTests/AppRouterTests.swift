@@ -98,6 +98,7 @@ struct AppRouterTests {
         let coordinator = TrainingSessionCoordinator(
             dbFactory: PreviewTrainingSetDBFactory(candles: candles),
             recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: settings)
         let runner = DownloadAcceptanceRunner(
