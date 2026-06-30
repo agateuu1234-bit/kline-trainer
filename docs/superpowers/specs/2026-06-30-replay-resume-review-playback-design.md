@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
    - **错误纪律（关键）**：`loadReplay()` / `loadRecordBundle` / `loadAllCandles` / `make` / decode 的错误**一律传播**（throw，**不清档、不覆盖槽**；含 `.dbCorrupted`——fail-closed，同 resumePending 的 loadPending 传播）。瞬态错误经路由 setError、**不回退从头**（防丢有效暂停档）。**唯一清档点 = openReader「已验证损坏」(`isCorruptTrainingSet`)** → `cache.delete + clearReplay + 返回 nil`。
    - `loadReplay()` 无槽 或 `pending.recordId != recordId` → 返回 nil（**不清档**；调用方回退从头）。
    - `recordRepo.loadRecordBundle(id: pending.recordId)`：错误传播（记录不被单独删除——reset 连带清槽无孤儿——故必为瞬态）。设 `activeRecord = bundle.record`。
+   - **文件名一致性 guard（codex plan-R10-F1）**：`guard pending.trainingSetFilename == bundle.record.trainingSetFilename else { clearReplay(); return nil }`——内部不一致（stale/corrupt 槽）会让记录 A 的 id 配文件 B 的 candles → 显错标的、清理失准；当损坏槽清 + 回退从头（router fresh replay 用记录权威文件名）。
    - open reader：corrupt(`isCorruptTrainingSet`)→ `cache.delete` + `clearReplay()` + 返回 nil（镜像 normal resume）；其他错误传播。
    - load candles → `.replay(fees: pending.feeSnapshot, maxTick:)` 重建，注入 saved 状态：`initialTick=pending.globalTickIndex` / `initialCapital=pending.accumulatedCapital` / `initialCashBalance=pending.cashBalance` / `initialPosition=decode(pending.positionData)` / `initialMarkers=markers(from: pending.tradeOperations)` / `initialDrawings=pending.drawings` / `initialTradeOperations=pending.tradeOperations` / `initialDrawdown=pending.drawdown` / `initialUpper/LowerPeriod`。
    - 成功后会话上下文：`activeReader/activeEngine/activeFile`、`cache.touch(file)`、`activeStartedAt = pending.startedAt`、`activeRecord = bundle.record`、`activeSessionKey = nil`、`replayBaseline=(resumed 态)`、**`replayHasPersisted = true`（续局本就拥有该记录槽 → 永不 clean-skip）**、`resetAutosaveState()`。
@@ -145,7 +146,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
   - 卡片更小（去掉一颗按钮 + 末尾 `Spacer`，`maxWidth` 视觉收紧；具体值 plan 定）。
 
 ### A.6 错误处理（精确镜像 normal resume；**区分瞬态 vs 已验证损坏**，codex plan-R1-F1）
-- **唯一清档 = 训练集 open「已验证损坏」(`isCorruptTrainingSet`)** → `cache.delete + clearReplay + 返回 nil`（孤儿槽不可恢复）。
+- **清档（仅"已验证损坏槽"）= ① 训练集 open `isCorruptTrainingSet`（`cache.delete + clearReplay + nil`，孤儿槽不可恢复）；② pending 文件名 ≠ 记录文件名（内部不一致，`clearReplay + nil`，codex plan-R10-F1）。**
 - **瞬态/未分类错误一律传播（不清档、不覆盖槽）**：`loadReplay`（含 decode `.dbCorrupted`，fail-closed）、`loadRecordBundle`、`loadAllCandles`、`make`/decode position 失败 → throw → 路由 setError、不回退从头。
 - `pending.recordId` 不匹配 / 无槽 → 返回 nil（**不清档**）。
 - 自动保存 fencing / `terminating` 机制对 replay 复用（同一 coordinator 状态机）。

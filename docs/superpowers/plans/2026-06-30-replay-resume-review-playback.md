@@ -762,6 +762,22 @@ git commit -m "feat(A4): coordinator replay autosave gate + saveProgress routing
 }
 
 @MainActor
+@Test func resumePendingReplay_filenameMismatch_clearsAndReturnsNil() async throws {
+    // codex plan-R10-F1：pending.recordId 匹配但 trainingSetFilename 与记录不符（stale/corrupt 槽）→ 清 + nil（不拿错文件续局）
+    let h = try CoordinatorTestHarness.make()
+    let bad = PendingReplay(
+        recordId: h.seededRecordId, trainingSetFilename: "WRONG-not-the-record-file.sqlite",
+        globalTickIndex: 1, upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(),
+        cashBalance: 100_000, feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+        tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
+        drawdown: DrawdownAccumulator(peakCapital: 100_000))
+    try h.pendingReplayRepo.saveReplay(bad)
+    let e = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+    #expect(e == nil)
+    #expect(try h.pendingReplayRepo.loadReplay() == nil)   // 损坏槽已清
+}
+
+@MainActor
 @Test func resumePendingReplay_transientLoadFailure_propagates_keepsSlot() async throws {
     let h = try CoordinatorTestHarness.make()
     let e1 = try await h.coordinator.replay(recordId: h.seededRecordId)
@@ -800,6 +816,12 @@ public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine?
     guard let pending = try pendingReplayRepo.loadReplay(), pending.recordId == recordId else { return nil }
     // 记录不会被单独删除（reset 连带清槽，无孤儿）→ loadRecordBundle 错误必瞬态 → 传播（不清档）
     let bundle = try recordRepo.loadRecordBundle(id: pending.recordId)
+    // codex plan-R10-F1：pending 的文件名须与记录一致——否则 stale/corrupt 槽会让记录 A 的 id 配文件 B 的
+    // candles/metadata（显错标的、终局清理失准）。内部不一致=已验证损坏槽 → 清 + 返回 nil（router 回退从头 replay，用记录权威文件名）。
+    guard pending.trainingSetFilename == bundle.record.trainingSetFilename else {
+        try pendingReplayRepo.clearReplay()
+        return nil
+    }
     let file = try cachedFile(filename: pending.trainingSetFilename)
     let reader: any TrainingSetReader
     do {
