@@ -43,12 +43,12 @@ public struct CrosshairSidebarContent: Equatable, Sendable {
 
         let (dateText, timeText) = formatDateTime(datetime: candle.datetime, period: candle.period)
 
+        // 所有价格字段（开/高/低/收）按方向上色 = vs 前一根收盘（红高/绿低/白平），对齐主流（文华财经）。
         var rows: [Row] = [
-            Row(label: "开", value: price2(candle.open), color: .neutral),
-            Row(label: "高", value: price2(candle.high), color: .neutral),
-            Row(label: "低", value: price2(candle.low), color: .neutral),
-            Row(label: "收", value: price2(candle.close),
-                color: directionColor(value: candle.close, base: previousClose)),
+            Row(label: "开", value: price2(candle.open), color: directionColor(value: candle.open, base: previousClose)),
+            Row(label: "高", value: price2(candle.high), color: directionColor(value: candle.high, base: previousClose)),
+            Row(label: "低", value: price2(candle.low), color: directionColor(value: candle.low, base: previousClose)),
+            Row(label: "收", value: price2(candle.close), color: directionColor(value: candle.close, base: previousClose)),
         ]
 
         // 涨跌 / 涨跌幅（vs 前收；首根无基准 → 「—」中性白）
@@ -67,7 +67,7 @@ public struct CrosshairSidebarContent: Equatable, Sendable {
         if let amount = candle.amount, candle.volume > 0 {
             let avg = amount / Double(candle.volume)
             if avg >= candle.low && avg <= candle.high {
-                rows.append(Row(label: "均价", value: price2(avg), color: .neutral))
+                rows.append(Row(label: "均价", value: price2(avg), color: directionColor(value: avg, base: previousClose)))
             }
         }
 

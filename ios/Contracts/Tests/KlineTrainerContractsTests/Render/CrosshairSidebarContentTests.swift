@@ -51,15 +51,16 @@ struct CrosshairSidebarContentTests {
         #expect(fl.cursorPriceColor == .flat)
     }
 
-    // 收盘价颜色 vs prevClose；开/高/低 = neutral(黄)
-    @Test("收 vs 前收上色；开/高/低 = neutral")
+    // 开/高/低/收 全按方向 vs 前收上色（红高/绿低/白平）——主流对齐，开高低不再 neutral
+    @Test("开/高/低/收 全 vs 前收上色")
     func ohlcColors() {
+        // candle(): open 1672.40 / high 1689.00 / low 1668.20 / close 1683.50；前收 1672.40
         let c = CrosshairSidebarContent.make(candle: candle(close: 1683.50), previousClose: 1672.40,
                                              cursorPrice: 1683.5, snappedX: 100, mainChartMidX: 500)
-        let close = c.rows.first { $0.label == "收" }
-        let open = c.rows.first { $0.label == "开" }
-        #expect(close?.color == .up)        // 1683.5 > 1672.4
-        #expect(open?.color == .neutral)    // 开 = 黄
+        #expect(c.rows.first { $0.label == "收" }?.color == .up)    // 1683.5 > 1672.4 红
+        #expect(c.rows.first { $0.label == "开" }?.color == .flat)  // 1672.4 == 1672.4 持平白
+        #expect(c.rows.first { $0.label == "高" }?.color == .up)    // 1689.0 > 1672.4 红
+        #expect(c.rows.first { $0.label == "低" }?.color == .down)  // 1668.2 < 1672.4 绿
     }
 
     // 涨跌 / 涨跌幅 派生 + 颜色
@@ -95,7 +96,7 @@ struct CrosshairSidebarContentTests {
                                              snappedX: 100, mainChartMidX: 500)
         let avg = c.rows.first { $0.label == "均价" }
         #expect(avg?.value == "1679.80")
-        #expect(avg?.color == .neutral)
+        #expect(avg?.color == .up)   // 均价 1679.8 > 前收 1672.4 → 红（价格字段按方向上色）
     }
 
     @Test("均价越界([低,高]外, 如手/元差100倍) → 隐藏该行")

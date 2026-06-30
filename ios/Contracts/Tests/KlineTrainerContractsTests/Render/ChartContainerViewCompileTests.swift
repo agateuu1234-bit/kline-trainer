@@ -13,7 +13,7 @@ struct ChartContainerViewCompileTests {
     @MainActor
     func instantiates() {
         let engine = TrainingEngine.preview()
-        let view = ChartContainerView(panel: .upper, engine: engine)
+        let view = ChartContainerView(panel: .upper, engine: engine, crosshairOwner: .constant(nil))
         #expect(view.panel == .upper)
         let _: any UIViewRepresentable = view   // 编译期符合性
     }
@@ -22,7 +22,7 @@ struct ChartContainerViewCompileTests {
     @MainActor
     func coordinatorAttachesRecognizers() {
         let engine = TrainingEngine.preview()
-        let view = ChartContainerView(panel: .upper, engine: engine)
+        let view = ChartContainerView(panel: .upper, engine: engine, crosshairOwner: .constant(nil))
         let coordinator = view.makeCoordinator()
         let host = KLineView(frame: .zero)
         coordinator.attach(to: host)
@@ -35,7 +35,7 @@ struct ChartContainerViewCompileTests {
     @MainActor
     func coordinatorCrosshairDefaultsNil() {
         let engine = TrainingEngine.preview()
-        let coordinator = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
+        let coordinator = ChartContainerView(panel: .upper, engine: engine, crosshairOwner: .constant(nil)).makeCoordinator()
         #expect(coordinator.crosshairPoint == nil)
     }
 }
