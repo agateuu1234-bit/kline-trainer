@@ -165,3 +165,14 @@ struct TrainingFlowBoundaryTests {
         #expect(flow.allowedTickRange == 0...0)
     }
 }
+
+@Test func shouldPersistProgress_matrix() {
+    let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+    #expect(NormalFlow(fees: fees, maxTick: 100).shouldPersistProgress() == true)
+    #expect(ReplayFlow(feeSnapshotFromOriginal: fees, maxTick: 100).shouldPersistProgress() == true)
+    // Review 用最小 record 构造（finalTick 任意；B1 之后 init 增 startTick——见 Task B1，届时本行同步改）
+    let rec = TrainingRecord(id: 1, trainingSetFilename: "x.sqlite", createdAt: 0, stockCode: "1", stockName: "n",
+                             startYear: 2021, startMonth: 1, totalCapital: 100000, profit: 0, returnRate: 0,
+                             maxDrawdown: 0, buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: 100)
+    #expect(ReviewFlow(record: rec).shouldPersistProgress() == false)
+}

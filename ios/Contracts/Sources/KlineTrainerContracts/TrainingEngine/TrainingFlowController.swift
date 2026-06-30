@@ -23,6 +23,7 @@ public protocol TrainingFlowController {
     func shouldAccumulateCapital() -> Bool
     func shouldShowSettlement() -> Bool
     func shouldGiveHapticFeedback() -> Bool
+    func shouldPersistProgress() -> Bool
 }
 
 /// 正常训练：全能力开放。
@@ -49,6 +50,7 @@ public struct NormalFlow: TrainingFlowController {
     public func shouldAccumulateCapital() -> Bool { true }
     public func shouldShowSettlement() -> Bool { true }
     public func shouldGiveHapticFeedback() -> Bool { true }
+    public func shouldPersistProgress() -> Bool { true }
 }
 
 /// 复盘（只读）：固定在原局结束态，全能力关闭。
@@ -70,6 +72,7 @@ public struct ReviewFlow: TrainingFlowController {
     public func shouldAccumulateCapital() -> Bool { false }
     public func shouldShowSettlement() -> Bool { false }
     public func shouldGiveHapticFeedback() -> Bool { false }
+    public func shouldPersistProgress() -> Bool { false }
 }
 
 /// 再来一次：可操作但不入账，沿用原局 FeeSnapshot。
@@ -94,4 +97,5 @@ public struct ReplayFlow: TrainingFlowController {
     public func shouldAccumulateCapital() -> Bool { false }
     public func shouldShowSettlement() -> Bool { true }
     public func shouldGiveHapticFeedback() -> Bool { true }
+    public func shouldPersistProgress() -> Bool { true }
 }
