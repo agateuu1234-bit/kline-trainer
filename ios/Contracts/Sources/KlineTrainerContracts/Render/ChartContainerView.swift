@@ -68,6 +68,8 @@ public struct ChartContainerView: UIViewRepresentable {
         private let snapHaptic = UIImpactFeedbackGenerator(style: .light)
         /// RFC-C 跨面板光标互斥：写共享 crosshairOwner（updateUIView 每帧刷新；仅手势回调/延后调用，不在 view-update 期同步改 @State）。
         private var setCrosshairOwner: ((PanelId?) -> Void)?
+        /// RFC-E follow-up（tap-anywhere）：上一次 sync 观察到的共享 owner（供 self→nil 跃迁判定 + 谓词读）。
+        private var lastSyncedOwner: PanelId?
 
         public init(panel: PanelId, engine: TrainingEngine) {
             self.panel = panel
@@ -83,10 +85,16 @@ public struct ChartContainerView: UIViewRepresentable {
             self.view = view
             self.setCrosshairOwner = setCrosshairOwner
             view.panel = panel                                    // Wave 3 13c-R1：draw 区间归属上/下
-            // RFC-C 跨面板互斥：另一面板持有光标 → 退出本面板（不释放共享态，对方仍持有）。
-            if let owner = crosshairOwner, owner != panel, crosshairActive {
-                exitCrosshair(releaseOwnership: false)
+            // RFC-C 跨面板互斥 + RFC-E tap-anywhere 对称退出（纯函数决策，含 standalone 黏滞持久性门控）。
+            switch CrosshairTapResolver.resolveSyncExit(incomingOwner: crosshairOwner,
+                                                        previousOwner: lastSyncedOwner,
+                                                        panel: panel, crosshairActive: crosshairActive) {
+            case .exitTakenOver, .exitOwnerCleared:
+                exitCrosshair(releaseOwnership: false)   // owner 已是对方/nil，本面板仅清自身不重写共享态
+            case .none:
+                break
             }
+            lastSyncedOwner = crosshairOwner             // 末尾刷新：下次 sync 的 previousOwner
             // drawing 模式下 arbiter 截获单指 pan（spec §C7）+ 对齐 manager.activeTool（顺位 4）。
             let drawing = isDrawing(engine: engine, panel: panel)
             if drawing && crosshairActive {                       // RFC-C：进画线模式先退黏滞光标（双向互斥，codex R5-M2）
@@ -146,6 +154,9 @@ public struct ChartContainerView: UIViewRepresentable {
             }
             arbiter.onCrosshairExit = { [weak self] in
                 self?.exitCrosshair()
+            }
+            arbiter.onShouldExitRemoteCrosshair = { [weak self] in
+                self?.lastSyncedOwner != nil          // 本面板非持有时（handleTap 已先排除持有），nil≠ = 别人持光标
             }
             arbiter.onPinch = { [weak self] scale, focus, phase in
                 guard let self, let engine = self.engine else { return }
