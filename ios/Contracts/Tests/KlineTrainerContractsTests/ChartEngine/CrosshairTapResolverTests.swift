@@ -9,9 +9,12 @@ struct CrosshairTapResolverTests {
 
     // MARK: - resolve（tap 归属，顺序：exitLocal > requestGlobalExit > drawingAnchor > noop）
 
-    @Test("localCrosshairMode=true → exitLocal（无视 drawing/remote）")
+    @Test("localCrosshairMode=true → exitLocal（无视 drawing/remote，全 4 格）")
     func localOwnerExitsLocal() {
+        // 全 4 个 localCrosshairMode=true 组合 → exitLocal（spec §4「全 8 格」之上半，余 4 格 false 见下方各测）
         #expect(CrosshairTapResolver.resolve(localCrosshairMode: true, drawingMode: true, remoteOwnerPresent: true) == .exitLocal)
+        #expect(CrosshairTapResolver.resolve(localCrosshairMode: true, drawingMode: true, remoteOwnerPresent: false) == .exitLocal)
+        #expect(CrosshairTapResolver.resolve(localCrosshairMode: true, drawingMode: false, remoteOwnerPresent: true) == .exitLocal)
         #expect(CrosshairTapResolver.resolve(localCrosshairMode: true, drawingMode: false, remoteOwnerPresent: false) == .exitLocal)
     }
 
