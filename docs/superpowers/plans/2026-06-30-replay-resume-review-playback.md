@@ -614,6 +614,8 @@ git commit -m "feat(A4): coordinator replay autosave gate + saveProgress routing
   - `coordinator.hasResumableReplay(recordId: Int64) -> Bool`
 - Consumes: `pendingReplayRepo`（A4）、`recordRepo.loadRecordBundle`（既有）
 
+> **错误纪律（codex plan-R1-F1，精确镜像 `resumePending`）**：瞬态/未分类错误 **传播**（不清档、不覆盖槽）；**只在 openReader「已验证损坏」(`isCorruptTrainingSet`)** 时 `cache.delete + clearReplay + 返回 nil`。`loadReplay()`/`loadRecordBundle`/`loadAllCandles`/`make` 的错误**一律传播**（含 `.dbCorrupted`——fail-closed，同 resumePending 的 loadPending 传播）。记录不会被单独删除（reset 保留记录 + 连带清 replay 槽，无孤儿）→ `loadRecordBundle` 错误必为瞬态 → 传播。**路由 = resume-first 权威**（不再用 `hasResumableReplay` 当路由门）：transient throw → router setError → **不 fresh、不覆盖槽**。
+
 - [ ] **Step 1: 写失败测试**
 ```swift
 @MainActor
@@ -633,7 +635,7 @@ git commit -m "feat(A4): coordinator replay autosave gate + saveProgress routing
 }
 
 @MainActor
-@Test func resumePendingReplay_recordIdMismatch_returnsNil() async throws {
+@Test func resumePendingReplay_recordIdMismatch_returnsNil_noClear() async throws {
     let h = try CoordinatorTestHarness.make()
     let e1 = try await h.coordinator.replay(recordId: h.seededRecordId)
     e1.holdOrObserve(panel: .upper)
@@ -642,64 +644,83 @@ git commit -m "feat(A4): coordinator replay autosave gate + saveProgress routing
     #expect(h.coordinator.hasResumableReplay(recordId: 999999) == false)
     let e = try await h.coordinator.resumePendingReplay(recordId: 999999)
     #expect(e == nil)
+    // 不匹配不清档：另一记录的槽仍在
+    #expect(try h.pendingReplayRepo.loadReplay() != nil)
+}
+
+@MainActor
+@Test func resumePendingReplay_transientLoadFailure_propagates_keepsSlot() async throws {
+    let h = try CoordinatorTestHarness.make()
+    let e1 = try await h.coordinator.replay(recordId: h.seededRecordId)
+    e1.holdOrObserve(panel: .upper)
+    try await h.coordinator.saveProgress(engine: e1)
+    await h.coordinator.endSession()
+    // 注入一次瞬态 loadReplay 失败：resumePendingReplay 须抛（不返 nil、不清档）
+    h.pendingReplayRepo.failNextLoadReplay = .internalError(module: "test", detail: "transient")
+    await #expect(throws: (any Error).self) {
+        _ = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+    }
+    // 槽仍在（failNext 已消费，本次 load 成功）
+    #expect(try h.pendingReplayRepo.loadReplay() != nil)
 }
 ```
 
 - [ ] **Step 2: 跑测试确认失败** — FAIL（方法不存在）。
 
-- [ ] **Step 3a: `hasResumableReplay`**（coordinator 加）
+- [ ] **Step 3a: `hasResumableReplay`**（coordinator 加；**display-only / advisory**）
 ```swift
-/// 新需求10：该记录是否有可续局的 replay 暂存（按钮文案与路由同源）。读失败保守返 false。
+/// 新需求10：该记录是否有可续局 replay 暂存。**display-only/advisory**（历史弹窗按钮文案）。
+/// 读失败保守返 false 安全：路由是 resume-first 权威（replay(id:) 总先试 resumePendingReplay），
+/// 故此处一次瞬态 false 至多让按钮文案短暂误显「再次训练」，点击仍走 resume-first 不会丢槽。
 public func hasResumableReplay(recordId: Int64) -> Bool {
     (try? pendingReplayRepo.loadReplay())?.recordId == recordId
 }
 ```
 
-- [ ] **Step 3b: `resumePendingReplay`**（coordinator 加，镜像 `resumePending` 的 corrupt/缺失处理）
+- [ ] **Step 3b: `resumePendingReplay`**（coordinator 加，**精确镜像 `resumePending` 错误纪律**）
 ```swift
-/// 新需求10：续局 replay。镜像 resumePending：载暂存→校验记录存在→open reader（corrupt 清档）→
-/// 按存档 tick/状态重建 replay 引擎。recordId 不匹配 / 记录缺失 / corrupt → clearReplay + 返回 nil（调用方回退从头）。
+/// 新需求10：续局 replay。镜像 resumePending：载暂存→校验记录→open reader→按存档 tick/状态重建 replay 引擎。
+/// 错误纪律：loadReplay/loadRecordBundle/loadAllCandles/make 错误**传播**（不清档）；**仅 openReader 已验证损坏
+/// (isCorruptTrainingSet)** 才 cache.delete + clearReplay + 返回 nil。无槽 / recordId 不匹配 → 返回 nil（不清档）。
 public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine? {
+    // loadReplay 错误传播（含 .dbCorrupted，fail-closed 同 resumePending 的 loadPending）；无槽/不匹配 → nil（不清档）
     guard let pending = try pendingReplayRepo.loadReplay(), pending.recordId == recordId else { return nil }
-    let bundle: (record: TrainingRecord, ops: [TradeOperation], drawings: [DrawingObject])
-    do {
-        bundle = try recordRepo.loadRecordBundle(id: pending.recordId)
-    } catch {
-        try? pendingReplayRepo.clearReplay()
-        return nil
-    }
+    // 记录不会被单独删除（reset 连带清槽，无孤儿）→ loadRecordBundle 错误必瞬态 → 传播（不清档）
+    let bundle = try recordRepo.loadRecordBundle(id: pending.recordId)
     let file = try cachedFile(filename: pending.trainingSetFilename)
     let reader: any TrainingSetReader
     do {
         reader = try openReader(for: file)
     } catch where isCorruptTrainingSet(error) {
-        try? cache.delete(file)
-        try? pendingReplayRepo.clearReplay()
-        return nil
+        try? cache.delete(file)                 // best-effort：训练组损坏，孤儿槽不可恢复
+        try pendingReplayRepo.clearReplay()      // durable 清（唯一清档点）
+        return nil                               // 调用方回退从头 replay
     }
     do {
         let allCandles = try reader.loadAllCandles()
-        let mt = <maxTick from allCandles，同 replay()/resumePending() 求法>
+        let mt = try maxTick(from: allCandles)
+        let position = try decodePosition(pending.positionData)
         let engine = try TrainingEngine.make(
             .replay(fees: pending.feeSnapshot, maxTick: mt),
             allCandles: allCandles,
             initialTick: pending.globalTickIndex,
             initialCapital: pending.accumulatedCapital,
             initialCashBalance: pending.cashBalance,
-            initialPosition: <decodePosition(pending.positionData)，同 resumePending>,
+            initialPosition: position,
             initialMarkers: markers(from: pending.tradeOperations),
             initialDrawings: pending.drawings,
             initialTradeOperations: pending.tradeOperations,
             initialDrawdown: pending.drawdown,
             initialUpperPeriod: pending.upperPeriod,
             initialLowerPeriod: pending.lowerPeriod)
-        activeEngine = engine
         activeReader = reader
+        activeEngine = engine
         activeFile = file
-        activeRecord = bundle.record
+        cache.touch(file)                        // §A touch-on-use（同 resumePending）
+        activeRecord = bundle.record             // replay 续局需 record（fees/标的名 + 终局 payload）
         activeStartedAt = pending.startedAt
-        activeSessionKey = nil
-        <reset autosave state，同 resumePending 末尾>
+        activeSessionKey = nil                    // replay 无 sessionKey
+        resetAutosaveState()                      // 新 session：清栅栏/脏/cadence/错误
         return engine
     } catch {
         reader.close()
@@ -707,16 +728,17 @@ public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine?
     }
 }
 ```
-> implementer：`<...>` 处严格复用 `resumePending` 同名逻辑（maxTick 求法、decodePosition、reset autosave state、TrainingEngine.make 的精确参数名以源码 `make` 签名为准）。
+> implementer：`maxTick(from:)`/`decodePosition`/`markers(from:)`/`resetAutosaveState()`/`cache.touch` 均为 `resumePending` 同款既有 helper（精确签名以源码为准）。`bundle` 解构若编译器需具名用 `let bundle = try recordRepo.loadRecordBundle(...)` 后取 `bundle.0`/`.record`（以 `loadRecordBundle` 返回类型为准）。
 
-- [ ] **Step 3c: AppRouter 分流** — `App/AppRouter.swift` `replay(id:)`：
+- [ ] **Step 3c: AppRouter 分流（resume-first 权威，codex plan-R1-F1）** — `App/AppRouter.swift` `replay(id:)`：
 ```swift
 public func replay(id: Int64) async {
     activeModal = nil
     do {
+        // resume-first：总先试续局；返 nil（无槽/不匹配/已验证损坏已清）才从头。
+        // throw（瞬态）→ setError → 不 fresh、不覆盖槽（防丢有效暂停档）。
         let engine: TrainingEngine
-        if coordinator.hasResumableReplay(recordId: id),
-           let resumed = try await coordinator.resumePendingReplay(recordId: id) {
+        if let resumed = try await coordinator.resumePendingReplay(recordId: id) {
             engine = resumed
         } else {
             engine = try await coordinator.replay(recordId: id)   // 从头
@@ -772,17 +794,38 @@ git commit -m "feat(A5): resumePendingReplay + hasResumableReplay + AppRouter re
     try await h.coordinator.discardSession()
     #expect(try h.pendingReplayRepo.loadReplay() == nil)
 }
+
+@MainActor
+@Test func replayTerminal_clearFailureAfterPayload_keepsSlot_retryable() async throws {
+    // codex plan-R1-F2：清档在 payload 构建成功之后；clearReplay 抛 → 方法抛 + 槽保留（可重试）
+    let h = try CoordinatorTestHarness.make()
+    let e = try await h.coordinator.replay(recordId: h.seededRecordId)
+    e.holdOrObserve(panel: .upper)
+    try await h.coordinator.saveProgress(engine: e)
+    h.pendingReplayRepo.failNextClearReplay = .internalError(module: "test", detail: "transient clear")
+    await #expect(throws: (any Error).self) {
+        _ = try await h.coordinator.replaySettlementPayload(engine: e)
+    }
+    #expect(try h.pendingReplayRepo.loadReplay() != nil)      // 槽保留
+    // 重试成功（failNext 已消费）→ 清空
+    _ = try await h.coordinator.replaySettlementPayload(engine: e)
+    #expect(try h.pendingReplayRepo.loadReplay() == nil)
+}
 ```
 > reset 清档在 persistence 层测（A3 的 `PendingReplayPersistenceTests` 追加：写一行 pending_replay 后调 `db.resetAllTrainingProgress(toCapital:)`，断言 `loadReplay()==nil` 且 `loadPending()==nil`）。
 
 - [ ] **Step 2: 跑测试确认失败** — FAIL（replaySettlementPayload sync / discard 不清 replay / reset 不清 replay）。
 
-- [ ] **Step 3a: `replaySettlementPayload` 改 async + fence+clear** —
-签名 `public func replaySettlementPayload(engine:) throws -> TrainingRecord` → `... async throws -> TrainingRecord`；在两 `guard` 之后、`loadMeta` 之前插入：
+- [ ] **Step 3a: `replaySettlementPayload` 改 async + fence→构建 payload→成功后才 clear**（codex plan-R1-F2：清档**不得**早于 payload 全部 throwing 工作成功，否则 loadMeta 抛会"既删槽又无结算"）。
+签名 `public func replaySettlementPayload(engine:) throws -> TrainingRecord` → `... async throws -> TrainingRecord`。**顺序**：①两 `guard`（mode+活跃上下文）→ ②`await fenceAndDrainAutosaves()`（排空排队 autosave，此后无并发写）→ ③`let meta = try reader.loadMeta()` + 构造 `record`（**全部 throwing payload 工作，槽仍在**，字段计算不变）→ ④`try pendingReplayRepo.clearReplay()`（**仅在 payload 构建成功后**）→ ⑤`return record`。
+即在 `return TrainingRecord(...)` 之前先 `let record = TrainingRecord(...)`，然后：
 ```swift
-        await fenceAndDrainAutosaves()          // 新需求10：终局清档前排空排队 autosave，防复活 pending_replay（镜像 finalize §4.7d）
+        // 新需求10：fence 已在上方排空 autosave；payload 构建成功后才清槽（codex plan-R1-F2）。
+        // clearReplay 抛 → 整个方法抛、record 不返回 → caller 保留 session+槽、可重试（见 TrainingView）。
         try pendingReplayRepo.clearReplay()
+        return record
 ```
+（`await fenceAndDrainAutosaves()` 插在两 guard 之后、`loadMeta` 之前。）
 
 - [ ] **Step 3b: `discardSession` 清 replay** — `discardSession()` 内（已 `await fenceAndDrainAutosaves()`）在清 pending 处加 replay 分支：
 ```swift
@@ -802,19 +845,41 @@ public func replaySettlementRecord() async throws -> TrainingRecord {
 }
 ```
 
-- [ ] **Step 3d: `TrainingView.routeEndOfSession` replay 分支 Task 包裹**（async 化）
+- [ ] **Step 3d: `TrainingView` replay 终局 async + 失败保留 session 可重试**（codex plan-R1-F2：失败**不** `onSessionEnded(nil)` 拆毁）。
+加 `@State private var replaySettlementFailed = false`。新增 `runReplaySettlement()`（镜像 `runFinalize` 的 `finalizing` 重入门 + 失败置 alert，**不拆 session**）：
 ```swift
-    private func routeEndOfSession() {
-        guard engine.flow.mode == .replay else { runFinalize(); return }
+    // replay 终局：fence→构建 payload→清槽（coordinator）。失败=保留 session+槽（不 onSessionEnded(nil)），
+    // 弹可重试 alert（镜像 runFinalize）。didFinalize 已由 maybeAutoEnd/endManually 置 true，防 onChange 重入；
+    // 重试=显式 alert 按钮再调本方法（fence/payload/clear 均幂等）。
+    private func runReplaySettlement() {
+        guard !finalizing else { return }
+        finalizing = true
         Task {
+            defer { finalizing = false }
             do {
                 let record = try await lifecycle.replaySettlementRecord()
                 onReplaySettlement(record)
             } catch {
-                onSessionEnded(nil)
+                replaySettlementFailed = true
             }
         }
     }
+```
+`routeEndOfSession` replay 分支改调它：
+```swift
+    private func routeEndOfSession() {
+        guard engine.flow.mode == .replay else { runFinalize(); return }
+        runReplaySettlement()
+    }
+```
+加 alert（紧邻既有 `结算入账失败` alert）：
+```swift
+        .alert("结算失败", isPresented: $replaySettlementFailed) {
+            Button("重试") { runReplaySettlement() }
+            Button("退出本局", role: .cancel) { onSessionEnded(nil) }   // 用户显式选退出
+        } message: {
+            Text("本局结算未能完成。可重试，或退出本局（暂存进度保留，可在历史记录返回训练）。")
+        }
 ```
 
 - [ ] **Step 3e: `DefaultAppDB.resetAllTrainingProgress` 加 clearReplay**
