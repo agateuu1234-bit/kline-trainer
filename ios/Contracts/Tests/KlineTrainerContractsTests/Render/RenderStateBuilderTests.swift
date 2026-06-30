@@ -887,3 +887,25 @@ struct RenderStateBuilderTests {
         #expect(vp.pixelShift == 4290)   // 5000 − 710
     }
 }
+
+// MARK: - RFC-C Task 6: previousCloseBeforeVisible helper
+
+@Suite("RenderStateBuilder.previousCloseBeforeVisible")
+struct PrevCloseBeforeVisibleTests {
+    private func cs(_ closes: [Double]) -> [KLineCandle] {
+        closes.enumerated().map { i, c in
+            KLineCandle(period: .m3, datetime: Int64(1_735_689_600 + i * 180),
+                        open: c, high: c + 1, low: c - 1, close: c,
+                        volume: 100, amount: nil, ma66: nil,
+                        bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil,
+                        globalIndex: i, endGlobalIndex: i)
+        }
+    }
+    @Test("startIndex>0 → 前一根收盘；startIndex==0 → nil")
+    func prevClose() {
+        let arr = cs([10, 20, 30, 40, 50])
+        #expect(RenderStateBuilder.previousCloseBeforeVisible(candles: arr, startIndex: 3) == 30)
+        #expect(RenderStateBuilder.previousCloseBeforeVisible(candles: arr, startIndex: 0) == nil)
+    }
+}
