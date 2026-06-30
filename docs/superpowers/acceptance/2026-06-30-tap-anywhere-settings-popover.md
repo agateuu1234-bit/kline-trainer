@@ -35,7 +35,9 @@
 | 源/行为/类型兼容 | `arbiter.onTap`/`onCrosshairExit` 仍 public 且 onTap 仍 fire（drawing 锚点）；`HomeView` 仍非泛型 concrete（bare 类型守卫测）；无 `== .settings`（`grep -rn "== *\.settings" ios/Contracts/Sources` 空） | 全满足 = pass |
 | 契约版本 | CONTRACT_VERSION 未改（仍 1.7） | 未变 = pass |
 
-> 本轮自动闸门已在 HEAD `0b36f78` 全绿（host 1241/0 + 255/0；Catalyst TEST BUILD SUCCEEDED；iOS BUILD SUCCEEDED；grep 守卫空；CONTRACT_VERSION 1.7 未动）。A1–A7/A_drawing_remote_exit/A_reset_dismiss/A_worst_reachable 为人工真机/模拟器验收，附截图佐证后逐条判定。
+> 本轮自动闸门已在 HEAD `c32730f` 全绿（host 1242/0 + 255/0；Catalyst TEST BUILD SUCCEEDED ci-gate=0；iOS BUILD SUCCEEDED；`== .settings` grep 守卫空；CONTRACT_VERSION 1.7 未动）。
+> **Codex whole-branch**：spec/plan 阶段全收敛；whole-branch R1–R4 未取 approve——R3 真 bug 已修，剩 R1↔R2↔R4 在「为不存在的外部消费者保兼容」上振荡（详见 spec §8）。**user 拍板选项 C：判为理论性残留、走 override 旁路合并**（单 app 内部模块、唯一消费者已迁，功能正确）。
+> A1–A7/A_drawing_remote_exit/A_reset_dismiss/A_worst_reachable 为人工真机/模拟器验收，附截图佐证后逐条判定。
 
 ## 运行/部署命令（参考）
 

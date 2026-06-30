@@ -276,4 +276,19 @@ extension CrosshairTapResolver {
 
 ## 7. 交付流程
 
-brainstorming（本 spec）→ **Codex 对抗 review spec 到收敛** → writing-plans → **Codex review plan 到收敛** → subagent-driven（TDD）→ verification（三绿）→ requesting-code-review → **whole-branch Codex 对抗 review 到收敛** → PR（user 终端 push + `--admin` merge，guard 拦 Claude push）。Codex 配额耗尽则等额度恢复后第一时间续，不用 opus 代打。
+brainstorming（本 spec）→ **Codex 对抗 review spec 到收敛** → writing-plans → **Codex review plan 到收敛** → subagent-driven（TDD）→ verification（三绿）→ requesting-code-review → **whole-branch Codex 对抗 review** → PR（user 终端 push + override/`--admin` merge，guard 拦 Claude push）。
+
+## 8. Codex whole-branch 评审记录与收口决策（如实）
+
+spec/plan 阶段真 Codex 全收敛（spec R1–R7 APPROVE `@87ccda8` / plan R1–R3 真缺陷收敛）。**whole-branch 阶段 R1–R4 未取得 approve**，每轮如实记录：
+- **WB-R1（medium）**：`sheetItem` 全局滤 `.settings` + 保留旧 init 委托 `.constant(false)` → 旧式调用静默丢设置 UI。建议「移除旧 init（编译期响亮失败）」。
+- **WB-R2（high，与 R1 矛盾）**：移除 public init = 源破坏。建议「恢复为 deprecated overload 委托主 init」。→ 实施 WB-2（恢复 deprecated overload）。
+- **WB-R3（medium，新真 bug）**：`onShouldExitRemoteCrosshair` 未排除自持 → drawing 异步释放窗口吞首个画线 tap。→ **已修**（抽 `remoteOwnerPresent` 纯函数排除自持 + host 守门测，`@c32730f`）。
+- **WB-R4（medium，回到 R1/R2 议题再矛盾）**：deprecated overload「warning 不够」，要么 functional fallback 要么 hard obsolete。
+
+**收口决策（user 拍 = 选项 C，2026-06-30）**：R1↔R2↔R4 在「为**不存在的外部消费者**保多少向后兼容」上振荡（超治理 `adversarial_review_loop.max_rounds=3` → escalate user）。**关键事实**：`KlineTrainerContracts` 是本 app 内部模块，**唯一消费者 AppRootView 已迁主 init、设置 popover 正常工作**，codex 反复保护的外部老调用方在本仓**不存在**。每轮真功能 bug（WB-R3 自持）均已修；剩余纯理论性 public-API 洁癖。user 决策：**维持现状（WB-2 deprecated overload + WB-3 修复，`@c32730f`）**，将 WB-R4 判为**理论性残留**，走 **override 旁路合并**（codex 停在 needs-attention，真 approve 因振荡拿不到；沿 [[feedback_codex_round6_self_contradiction]] TTY override 先例）。**app 功能正确、三绿全程**（host 1242/0+255/0 / Catalyst TEST BUILD SUCCEEDED ci-gate0 / iOS BUILD SUCCEEDED）。
+- **理论性残留 WB-R4**（post-merge 可选）：若未来 `KlineTrainerContracts` 真要对外发布，再走 functional-fallback（保 legacy sheet 路由）或 hard-obsolete 收口。本单 app 内部模块下无影响。
+
+## 9. 风险与残留（补）
+
+- **残留（post-merge，非阻塞，沿 RFC-C）**：`DateFormatter` 每帧分配（CrosshairLayout + CrosshairSidebarContent）→ static let 缓存，择机做，不在本轮范围。
