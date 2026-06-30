@@ -8,10 +8,10 @@
 //
 // 决议（D1/D2/D6-D13，RFC #2 修订）：
 // - D1 自定义居中卡片（遮罩 + 居中 ZStack），不用系统 .alert；跨 iOS17/macOS14/Catalyst 原生 SwiftUI
-// - D2 点半透明遮罩 = 取消（onCancel）；卡片内仍保留显式「取消」按钮
+// - D2 点半透明遮罩 = 取消（onCancel）；卡片内无显式「取消」按钮（点遮罩即取消）
 // - D7 维持 import SwiftUI（不加 #if canImport(UIKit)）；Color/RoundedRectangle/.regularMaterial 均跨平台
 // - D9 遮罩 Color.black.opacity(0.4).ignoresSafeArea()；卡片 .frame(maxWidth:280) + .regularMaterial 圆角16 + 阴影
-// - D10 inner（标题 + 三 .bordered 按钮 + 各 frame/padding + 末 .padding(24)）字面不变；外层 ZStack/frame/background/shadow 新增
+// - D10 inner（标题 + 两 .bordered 按钮（复盘 + 再次训练/返回训练）+ 各 frame/padding + 末 .padding(24)）字面不变；外层 ZStack/frame/background/shadow 新增
 // - D13（原文件）Button tap 仅 fire callback，不调 dismiss（presentation 由 caller/router 负责）
 // - 文件不引业务运行时类型；onReview/onReplay/onCancel @escaping（Swift 编译强制）
 

@@ -15,7 +15,7 @@ final class AppDB0005MigrationTests: XCTestCase {
     override func tearDown() async throws { try? FileManager.default.removeItem(at: dbURL.deletingLastPathComponent()) }
 
     // fresh-install 终态：单独用 makeFreshDB（跑完整 migrator）断言 user_version=4（0006 新增）
-    func test_fresh_install_full_migrator_user_version_3() throws {
+    func test_fresh_install_full_migrator_user_version_4() throws {
         let freshURL = try AppDBFixture.makeFreshDB()
         defer { try? FileManager.default.removeItem(at: freshURL.deletingLastPathComponent()) }
         let q = try AppDBFixture.openRaw(at: freshURL)

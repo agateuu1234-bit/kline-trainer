@@ -345,7 +345,8 @@ public final class TrainingEngine {
     // MARK: - 持有 / 观察（E5b）
 
     /// 持有(有仓)/观察(空仓)：仅推进 tick（plan v1.5 L944「直接推进 1 根当前周期 K 线」），
-    /// 无成交、无 marker/operation。review 模式 canAdvance()==false → no-op（capability matrix L836）。
+    /// 无成交、无 marker/operation。review 现 canAdvance()==true（新需求10 复盘可步进），
+    /// advanceAndAccount 在 review 下无成交、无 forceClose（capability matrix L836）。
     public func holdOrObserve(panel: PanelId) {
         guard flow.canAdvance() else { return }
         advanceAndAccount(panel: panel)

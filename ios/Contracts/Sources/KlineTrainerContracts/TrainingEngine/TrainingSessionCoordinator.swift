@@ -365,7 +365,6 @@ public final class TrainingSessionCoordinator {
                base.lower == engine.lowerPanel.period {
                 return
             }
-            _ = file   // file.filename 同 normal 取活跃文件名（下方 trainingSetFilename 用）
             let replay = PendingReplay(
                 recordId: recordId,
                 trainingSetFilename: file.filename,
@@ -635,7 +634,7 @@ public final class TrainingSessionCoordinator {
             }
         } catch {
             throw (error as? AppError)
-                ?? .internalError(module: "E6b", detail: "discard clearPending: \(error)")
+                ?? .internalError(module: "E6b", detail: "discard clear: \(error)")
         }
         await endSession()
     }

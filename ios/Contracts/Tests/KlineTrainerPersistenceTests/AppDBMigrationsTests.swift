@@ -48,7 +48,7 @@ final class AppDBMigrationsTests: XCTestCase {
     }
 
     // MARK: - migrator 跑过的 PRAGMA user_version（0006 起终态 = 4）
-    func test_full_migrator_sets_user_version_3() throws {
+    func test_full_migrator_sets_user_version_4() throws {
         let dbURL = try AppDBFixture.makeFreshDB()
         defer { try? FileManager.default.removeItem(at: dbURL.deletingLastPathComponent()) }
 
