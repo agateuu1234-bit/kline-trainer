@@ -118,31 +118,33 @@ CREATE TABLE IF NOT EXISTS pending_replay (
    - 设 `activeStartedAt = now()`（replay 会话起始，供 `PendingReplay.started_at`）；`activeRecord = record`（已设）。`activeSessionKey` 保持 nil。
    - 其余装配不变（fresh：无 initialMarkers/position）。
    - 边界：开新 replay B 后**零操作**即退出（无 autosave）→ 旧档 A 仍在（B 无进度可存），A 仍显"返回训练"、B 显"再次训练"——可接受（无进度=无可存，优于丢 A）。注：当 slot==A 时记录 A 的按钮本就显"返回训练"(resume)，不可达"对 A 开从头 replay"，无自我冲突。
-3. **新增 `resumePendingReplay(recordId:) async throws -> TrainingEngine?`**（镜像 `resumePending`）：
-   - `loadReplay()`；若 nil 或 `pending.recordId != recordId` → 返回 nil（调用方回退到从头 replay）。
-   - 载 `recordRepo.loadRecordBundle(id: pending.recordId)`（取 fees/股票名等 + 设 `activeRecord`）；若记录不存在 → `clearReplay()` + 返回 nil。
-   - 定位 `pending.trainingSetFilename`，open reader；corrupt → `clearReplay()` + 返回 nil（镜像 normal resume 的 corrupt 处理）。
+3. **新增 `resumePendingReplay(recordId:) async throws -> TrainingEngine?`**（**精确镜像 `resumePending` 的错误纪律**，codex plan-R1-F1）：
+   - **错误纪律（关键）**：`loadReplay()` / `loadRecordBundle` / `loadAllCandles` / `make` / decode 的错误**一律传播**（throw，**不清档、不覆盖槽**；含 `.dbCorrupted`——fail-closed，同 resumePending 的 loadPending 传播）。瞬态错误经路由 setError、**不回退从头**（防丢有效暂停档）。**唯一清档点 = openReader「已验证损坏」(`isCorruptTrainingSet`)** → `cache.delete + clearReplay + 返回 nil`。
+   - `loadReplay()` 无槽 或 `pending.recordId != recordId` → 返回 nil（**不清档**；调用方回退从头）。
+   - `recordRepo.loadRecordBundle(id: pending.recordId)`：错误传播（记录不被单独删除——reset 连带清槽无孤儿——故必为瞬态）。设 `activeRecord = bundle.record`。
+   - open reader：corrupt(`isCorruptTrainingSet`)→ `cache.delete` + `clearReplay()` + 返回 nil（镜像 normal resume）；其他错误传播。
    - load candles → `.replay(fees: pending.feeSnapshot, maxTick:)` 重建，注入 saved 状态：`initialTick=pending.globalTickIndex` / `initialCapital=pending.accumulatedCapital` / `initialCashBalance=pending.cashBalance` / `initialPosition=decode(pending.positionData)` / `initialMarkers=markers(from: pending.tradeOperations)` / `initialDrawings=pending.drawings` / `initialTradeOperations=pending.tradeOperations` / `initialDrawdown=pending.drawdown` / `initialUpper/LowerPeriod`。
-   - 恢复会话上下文：`activeStartedAt = pending.startedAt`、`activeRecord = record`、`activeSessionKey = nil`。
+   - 成功后会话上下文：`activeReader/activeEngine/activeFile`、`cache.touch(file)`、`activeStartedAt = pending.startedAt`、`activeRecord = bundle.record`、`activeSessionKey = nil`、`resetAutosaveState()`。
 4. **清档时机（关键——区分"续局保留" vs "终局清除"，且终局须 fence）**：
    - **`endSession()` 对 replay 不清 `pending_replay`**。理由：`back()` = `saveProgress`(写 pending_replay) + `endSession()`；若 endSession 清档则续局立即失效。endSession 仅关 reader/清活跃上下文（原语义，含 `terminating=true` fence）。
    - **终局清档须 fence+drain（codex spec-R1-F2）**：replay 走到结算（到 maxTick 自动结算 **或** 手动「结束本局」）→ 终局清档前**必须 `await fenceAndDrainAutosaves()` 再 `clearReplay()`**，否则末根 tick 的 `onChange` 已排队的 autosave 会在 clear 后跑、把 maxTick 终态写回 `pending_replay` → 按钮错显"返回训练"、再进=终态陈旧局。镜像 Normal `finalize`（L362 先 fence 再单事务）。
-     - 实现：`replaySettlementPayload` 现为 **sync `throws` 且无 fence**（其注释明示原"不触 pending"不变量——本 PR 刻意打破）→ 改为 **async**：开头 `await fenceAndDrainAutosaves(); try pendingReplayRepo.clearReplay()`，再返回 in-memory payload（payload 字段计算不变）。连带 `lifecycle.replaySettlementRecord()` 改 async；`TrainingView.routeEndOfSession` 的 replay 分支用 `Task { … }` 包裹（同 `runFinalize` 既有范式）。`fenceAndDrainAutosaves` 单 `@MainActor` + 同步 GRDB 写保证 drain 后无并发脏写（与 finalize 同保证）。`clearReplay` 幂等（DELETE）。
+     - 实现：`replaySettlementPayload` 现为 **sync `throws` 且无 fence**（注释明示原"不触 pending"不变量——本 PR 刻意打破）→ 改为 **async**，**顺序（codex plan-R1-F2）**：①两 guard → ②`await fenceAndDrainAutosaves()`（此后无并发写）→ ③`loadMeta` + 构造 `record`（**全部 throwing payload 工作，槽仍在**）→ ④**成功后才** `try clearReplay()` → ⑤return record。**清档绝不早于 payload 全部成功**，否则 loadMeta 抛会"既删槽又无结算"。clearReplay 抛 → 方法抛、record 不返回 → **caller 保留 session+槽、可重试**（不 `onSessionEnded(nil)` 拆毁）。连带 `lifecycle.replaySettlementRecord()` 改 async；`TrainingView` 新增 `runReplaySettlement()`（镜像 `runFinalize` 重入门）+ `replaySettlementFailed` alert（重试/退出本局）；`routeEndOfSession` replay 分支调它。`fenceAndDrainAutosaves` 单 `@MainActor` + 同步 GRDB 写保证 drain 后无并发脏写。`clearReplay` 幂等（DELETE）。
    - **丢弃清档**：`discardSession()` 当 `mode==.replay` 清 `pending_replay`（已先 `fenceAndDrainAutosaves`，L460 原逻辑；normal 时清 `pending_training`）。
    - 故 pending_replay 生命周期：`replay()`(从头, **不清旧档**) → 玩(autosave 写档) → `back()`(saveProgress 写档, endSession **不清**) → 续局 `resumePendingReplay` → … → 终局结算(**fence→clear**) **或** discard(fence→clear) **或** 被新 replay 首存 `INSERT OR REPLACE` 覆盖。
-5. **新增查询 `hasResumableReplay(recordId:) -> Bool`**：`loadReplay()?.recordId == recordId`。按钮文案与路由**同源**（见 §A.5 D-A2）。
+5. **新增查询 `hasResumableReplay(recordId:) -> Bool`**：`(try? loadReplay())?.recordId == recordId`。**display-only / advisory**（仅历史弹窗按钮文案）；**不当路由门**。读失败保守返 false 安全，因路由是 resume-first 权威（见 §A.5）：一次瞬态 false 至多让按钮短暂误显"再次训练"，点击仍走 resume-first、不会丢槽。
 
-### A.5 路由 + UI
-- **`AppRouter.replay(id:)` 分流**：`coordinator.hasResumableReplay(id)` 为真 → `resumePendingReplay(id)`（若意外返 nil 则回退从头 `replay(id)`）；否则 `replay(id)`（从头）。
-- **历史弹窗呈现**：`selectRecord`/AppRootView 呈现 `HistoryActionSheet` 时，把 `coordinator.hasResumableReplay(record.id)` 算出的 `Bool` 传入 sheet（**呈现瞬间求值一次**，与路由同源，见 D-A2）。
+### A.5 路由 + UI（**resume-first 权威**，codex plan-R1-F1）
+- **`AppRouter.replay(id:)` 分流**：**总先试** `resumePendingReplay(id)`——返非 nil→续局；返 nil（无槽/不匹配/已验证损坏已清）→从头 `replay(id)`；**throw（瞬态）→ setError，不 fresh、不覆盖槽**。**不**用 `hasResumableReplay` 当路由门（防其瞬态 false 触发 fresh 覆盖有效槽）。
+- **历史弹窗呈现**：`AppRootView` 呈现 `HistoryActionSheet` 时把 `coordinator.hasResumableReplay(record.id)`（display-only）传入 sheet 决定钮文案。文案与路由可在罕见瞬态错误下短暂不一致，但方向安全（点击 resume-first 不丢槽）。
 - **`HistoryActionSheet` 改动**：
   - 去掉「取消」按钮（遮罩 `.onTapGesture { onCancel() }` 仍在，`onCancel` 回调保留）。
   - replay 钮文案：新增参数 `hasResumableReplay: Bool` → 文案 `hasResumableReplay ? "返回训练" : "再次训练"`（替换原 "再来一次"）。「复盘」不变。
   - 卡片更小（去掉一颗按钮 + 末尾 `Spacer`，`maxWidth` 视觉收紧；具体值 plan 定）。
 
-### A.6 错误处理（镜像 normal resume）
-- 训练集文件缺失/损坏、记录已不存在、`pending.recordId` 不匹配 → `clearReplay()` + 回退为从头 replay（或不显示"返回训练"）。
-- decode position/drawings 失败 → 沿用 normal resume 的容错（清档回退）。
+### A.6 错误处理（精确镜像 normal resume；**区分瞬态 vs 已验证损坏**，codex plan-R1-F1）
+- **唯一清档 = 训练集 open「已验证损坏」(`isCorruptTrainingSet`)** → `cache.delete + clearReplay + 返回 nil`（孤儿槽不可恢复）。
+- **瞬态/未分类错误一律传播（不清档、不覆盖槽）**：`loadReplay`（含 decode `.dbCorrupted`，fail-closed）、`loadRecordBundle`、`loadAllCandles`、`make`/decode position 失败 → throw → 路由 setError、不回退从头。
+- `pending.recordId` 不匹配 / 无槽 → 返回 nil（**不清档**）。
 - 自动保存 fencing / `terminating` 机制对 replay 复用（同一 coordinator 状态机）。
 
 ### A.7 重置
@@ -204,7 +206,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 | # | 决策 | 选择 | 理由 |
 |---|---|---|---|
 | D-A1 | replay 暂存范围 | **单个暂存档**（单行 `pending_replay`） | user 拍板；与 normal 单行模型一致、最简、风险最低；按钮文案仍按记录正确显示 |
-| D-A2 | 按钮文案 vs 路由一致性 | 二者**同源** `hasResumableReplay(recordId:)`，弹窗呈现瞬间求值一次 | 防"显示返回训练但路由走从头"漂移；竞态（呈现后被重置）→ 路由侧 `resumePendingReplay` 返 nil 时**回退从头**兜底 |
+| D-A2 | 按钮文案 vs 路由 | **路由 = resume-first 权威**（总先试 `resumePendingReplay`）；`hasResumableReplay` 仅 display-only 决定钮文案（codex plan-R1-F1） | 旧"同源"方案下 `hasResumableReplay` 瞬态 false 会让路由走 fresh→首存覆盖有效槽=数据丢失；resume-first 把路由与脆弱 Bool 解耦，瞬态 throw→setError 不覆盖槽 |
 | D-A3 | replay 与 normal 暂存关系 | **独立两槽**（`pending_training` + `pending_replay` 各单行） | 可同时各暂停 1 局；开 replay 不动 normal 复利进度（RFC-A） |
 | D-A4 | 单槽覆盖机制 | **不前置 clear**；靠新 replay 首次保存 `INSERT OR REPLACE`(id=1) 覆盖旧档（codex spec-R1-F3） | 开新 replay 即覆盖语义保留，但**失败装配不丢旧档**；不在 UI 做确认弹窗（练习数据、低风险，YAGNI） |
 | D-A7 | replay autosave 启用点 | 改 **`requestAutosave` 入口门** `mode==.normal`→`shouldPersistProgress()`（非仅改 saveProgress）（codex spec-R1-F1） | autosave 真入口在 requestAutosave；不改它则 replay 仅 Back 存、crash/后台丢档 |
@@ -236,9 +238,10 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 - `Models/Models.swift`（CONTRACT_VERSION 1.7→1.8）
 - `KlineTrainerPersistence/DefaultAppDB.swift`（conform `PendingReplayRepository`：saveReplay/loadReplay/clearReplay 委托 Impl + 错误映射；`resetAllTrainingProgress` 加 `clearReplay`）
 - `KlineTrainerPersistence/AppContainer.swift`（coordinator 注入 `pendingReplayRepo: db`）
-- `App/AppRouter.swift`（replay 分流；history sheet 传 `hasResumableReplay` bool；reset 清 replay）
+- `App/AppRouter.swift`（`replay(id:)` resume-first 分流：先 `resumePendingReplay`，nil→fresh，throw→setError）
+- `App/AppRootView.swift`（历史弹窗传 display-only `hasResumableReplay` bool）
 - `UI/HistoryActionSheet.swift`（去「取消」按钮、`hasResumableReplay` 文案切换参数、缩小）
-- `UI/TrainingView.swift`（+`showsReviewControls = canAdvance && !canBuySell`；复盘控件条「下一根」+「快进到结尾」；**`routeEndOfSession` 的 replay 分支 `Task{}` 包裹 async `replaySettlementRecord`**；review autosave/maybeAutoEnd 已证安全）+ 可能新增 `UI/ReviewControlBar.swift`（精简控件条，平台无关纯内容 + 薄壳，plan 定是否拆文件）
+- `UI/TrainingView.swift`（+`showsReviewControls = canAdvance && !canBuySell`；复盘控件条「下一根」+「快进到结尾」；**replay 终局 `runReplaySettlement()`（async）+ `replaySettlementFailed` 可重试 alert，不 `onSessionEnded(nil)` 拆毁**；review autosave/maybeAutoEnd 已证安全）+ 可能新增 `UI/ReviewControlBar.swift`（精简控件条，平台无关纯内容 + 薄壳，plan 定是否拆文件）
 - composition root（注入 `PendingReplayRepository`：`DefaultAppDB`/`AppContainer` 装配）+ `settings.resetAllProgress`/`DefaultAppDB.resetAllTrainingProgress`（清 pending_replay）+ AppRootView 历史弹窗呈现处（传 `hasResumableReplay`、去 `onCancel` 按钮无关——遮罩仍用）
 
 ---
@@ -250,9 +253,9 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 - Coordinator（in-memory fakes）：
   - replay 从头 → `saveProgress` 写 `pending_replay`（recordId 正确）；`hasResumableReplay` 真。
   - **autosave 入口（spec-R1-F1）**：replay 的 `requestAutosave(immediate:false)`（tick 节流）、`requestAutosave(immediate:true)`（交易/画线）、`flushAutosave`（后台）均**写 `pending_replay`**；**review 的 requestAutosave 仍 no-op**（不写任何 pending）。
-  - `resumePendingReplay` 还原 tick/cash/position/markers/drawings/drawdown；recordId 不匹配 → nil；记录缺失 → 清档 nil；corrupt → 清档 nil。
+  - `resumePendingReplay` 还原 tick/cash/position/markers/drawings/drawdown；recordId 不匹配 → nil（**不清档**）；**瞬态 loadReplay/loadRecordBundle 失败 → 传播 throw + 槽保留**（不清、不 fresh，codex plan-R1-F1）；仅 openReader 已验证损坏 → 清档 nil。
   - **单槽覆盖（spec-R1-F3）**：已有 `pending_replay`(A)，开新 replay(B) 并保存 → slot 变 B（`INSERT OR REPLACE` 覆盖）；**failed fresh replay 回归**：已有 A、开 B 但装配抛错 → A 仍在（未被清）。
-  - **终局清档 fence 回归（spec-R1-F2）**：replay 步进到 maxTick 且有一个排队的 autosave → 终局 fence+clear 后 `pending_replay` 仍为空（排队 autosave 不复活）；`discardSession`(replay) → 清档。
+  - **终局清档 fence + payload-before-clear 回归（spec-R1-F2 / plan-R1-F2）**：replay 步进到 maxTick 且有一个排队的 autosave → 终局 fence→构建 payload→clear 后 `pending_replay` 仍为空（排队 autosave 不复活）；**clearReplay 抛 → 方法抛 + 槽保留（可重试）**；`discardSession`(replay) → 清档。
   - `saveProgress` 在 review 模式 = no-op；normal 路径回归不变（写 `pending_training`，字节级）。
   - reset → `pending_replay` 同 `pending_training` 一起清空。
 - 引擎：`jumpToEnd` 设 tick=maxTick + 镜头吸附 + 非 review/canJumpToEnd=false 时 no-op；review 步进经 `holdOrObserve` 推进且不交易；review 顶栏 `currentTotalCapital==record.totalCapital+profit` 恒定。
