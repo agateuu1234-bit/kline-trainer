@@ -18,6 +18,7 @@
 - 不改光标的视觉、吸附、进入（长按）、单指竖滑切周期等 RFC-C 既有行为。
 - 不改设置项的内容、佣金/重置/下载/显示模式等任何业务逻辑，仅换呈现容器。
 - 零引擎 / 持久层 / 契约改动，**不 bump CONTRACT_VERSION（保持 1.7）**。
+- **`AppRouter.Modal` 非 Equatable（强制，codex plan-R1-H1）**：Modal 仅 `Identifiable`，**一律用 `if case .settings` / `HistoryDialogPresentation.isSettings(_:)` 谓词，禁止 `== .settings`**（编译失败）。落地后 grep 守卫 sources 无 `== .settings`。
 - **保 public API 源 + 行为 + 类型标识兼容（强制，codex spec-R4-H1 / R5-H1 / R6-H1）**：**不删任何现有 public 符号**且**不断其行为接线**（`ChartGestureArbiter.onTap` 保留且 drawing 锚点仍 fire 它）、**不给现有 init 加必填参**、**不改 public 类型标识**（`HomeView` 保持非泛型 concrete，新内容走 `AnyView` 类型擦除 + 新泛型 init）。tap-anywhere 仅**新增**一个 optional 谓词回调 `onShouldExitRemoteCrosshair`（纯加法）。即「无契约/view-only」必须连**编译期源兼容（含类型标识）+ 旧回调运行期行为**一并成立，否则下游/preview 编译失败或回调静默失效而内部测试绿。沿 RFC-C WB-high 教训。
 
 ## 1. 现状（已核实，含 file:line）
@@ -178,7 +179,7 @@ extension CrosshairTapResolver {
           ScrollView {                                        // 强制：内容可滚动，最坏情况全部可达（见 §3.4 布局契约）
               settingsContent()
           }
-          .frame(minWidth: 280, idealWidth: 300, maxHeight: 480)   // 约束宽 + 限高，避免铺满/溢出裁剪
+          .frame(minWidth: 280, idealWidth: 300, maxWidth: 320, maxHeight: 480)   // **上限宽 320 + 限高 480**：防长标签撑宽（idealWidth 非上限，codex plan-R1-M1）
           .presentationCompactAdaptation(.popover)            // iPhone 强制 popover 样式（iOS16.4+；项目 iOS17 满足）
       }
   ```
@@ -186,12 +187,14 @@ extension CrosshairTapResolver {
 - **强制 §3.4 popover 布局契约**：见下，非 plan-time 可选项。
 
 **改动 2 — AppRootView 桥接 binding + content（`AppRootView.swift`）**
-- 新增 `settingsPopoverBinding: Binding<Bool>`：
+- 新增 `settingsPopoverBinding: Binding<Bool>`：⚠️ `AppRouter.Modal` 仅 `Identifiable` **非 Equatable** → **不可** `== .settings`（编译失败，codex plan-R1-H1），用 `HistoryDialogPresentation.isSettings(_:)` 谓词（改动 3 新增）：
   ```swift
   Binding(
-      get: { router.activeModal == .settings },
+      get: { HistoryDialogPresentation.isSettings(router.activeModal) },
       set: { newValue in
-          if !newValue && router.activeModal == .settings { router.activeModal = nil }   // 仅当前是 settings 才清，防误清其它模态
+          if !newValue && HistoryDialogPresentation.isSettings(router.activeModal) {
+              router.activeModal = nil   // 仅当前是 settings 才清，防误清其它模态
+          }
       }
   )
   ```
@@ -210,7 +213,10 @@ extension CrosshairTapResolver {
 - 从 `.sheet` 移除 `.settings` 分支（`.sheet` 只剩 `.settlement`；`.history` 仍走 overlay）。
 
 **改动 3 — `HistoryDialogPresentation` 谓词扩展（纯函数，已有 host 测）**
-- `sheetItem(for:)` 把 `.settings` 一并滤成 nil（防 sheet 与 popover 双弹）。新增/更新对应 host 测：`.settings → sheet=nil`、`.settlement → 放行`、`.history → nil`。
+- `sheetItem(for:)` 把 `.settings` 一并滤成 nil（防 sheet 与 popover 双弹）。
+- **新增 `isSettings(_ modal:) -> Bool`**（`if case .settings`）供改动 2 的 binding（Modal 非 Equatable）。
+- `sheetDismissMayApply(current:)` 对 `.settings` 返 false（与 `.history` 一致——settings 由 popover 驱动，sheet dismiss 回写须拦）。
+- host 测更新/新增：`sheetItem(.settings)==nil`、`isSettings(.settings)==true / 其余==false`、`sheetDismissMayApply(.settings)==false`、`.settlement` 仍放行。
 
 ### 3.2 设置项 = 原样保留
 
