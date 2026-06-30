@@ -19,19 +19,39 @@ public struct HomeView: View {
     private let onContinueTraining: () -> Void
     private let onSelectRecord: (Int64) -> Void
     private let onOpenSettings: () -> Void
+    private let isSettingsPresented: Binding<Bool>
+    private let settingsContent: () -> AnyView
 
     @State private var showEmptyCacheAlert = false
 
+    /// 源兼容：旧 5 参 init 保留 → 委托泛型 init，不显 popover（codex spec-R4-H1/R6-H1）。
     public init(content: HomeContent,
                 onStartTraining: @escaping () -> Void,
                 onContinueTraining: @escaping () -> Void,
                 onSelectRecord: @escaping (Int64) -> Void,
                 onOpenSettings: @escaping () -> Void) {
+        self.init(content: content,
+                  onStartTraining: onStartTraining, onContinueTraining: onContinueTraining,
+                  onSelectRecord: onSelectRecord, onOpenSettings: onOpenSettings,
+                  isSettingsPresented: .constant(false), settingsContent: { EmptyView() })
+    }
+
+    /// RFC-E：新泛型 init —— 类型擦除 settingsContent → AnyView（仅设置 popover，非热路径）。
+    /// HomeView 本体保持非泛型 concrete（类型标识不变）。保 view-only D1：不 import settings/acceptance。
+    public init<SettingsContent: View>(content: HomeContent,
+                onStartTraining: @escaping () -> Void,
+                onContinueTraining: @escaping () -> Void,
+                onSelectRecord: @escaping (Int64) -> Void,
+                onOpenSettings: @escaping () -> Void,
+                isSettingsPresented: Binding<Bool>,
+                @ViewBuilder settingsContent: @escaping () -> SettingsContent) {
         self.content = content
         self.onStartTraining = onStartTraining
         self.onContinueTraining = onContinueTraining
         self.onSelectRecord = onSelectRecord
         self.onOpenSettings = onOpenSettings
+        self.isSettingsPresented = isSettingsPresented
+        self.settingsContent = { AnyView(settingsContent()) }
     }
 
     public var body: some View {
@@ -61,6 +81,13 @@ public struct HomeView: View {
                 Image(systemName: "gearshape").font(.title2)
             }
             .accessibilityLabel("设置")
+            .popover(isPresented: isSettingsPresented) {
+                ScrollView {                                          // 强制布局契约：内容可滚动，最坏情况全部可达（spec §3.4）
+                    settingsContent()
+                }
+                .frame(minWidth: 280, idealWidth: 300, maxWidth: 320, maxHeight: 480)   // **上限宽 320 + 限高 480**：防长标签撑宽（idealWidth 非上限，codex plan-R1-M1）
+                .presentationCompactAdaptation(.popover)              // iPhone 强制 popover 样式（iOS16.4+；项目 iOS17 满足）
+            }
         }
     }
 
