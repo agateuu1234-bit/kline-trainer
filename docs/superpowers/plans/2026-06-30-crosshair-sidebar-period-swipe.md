@@ -196,6 +196,18 @@ struct CrosshairSidebarContentTests {
         #expect(c.dateText == "2024-03-28")
         #expect(c.timeText == nil)
     }
+
+    // 单位一致性（codex R3）：importer 约定 amount = close × volume → 均价 = close ∈[低,高] 显示；成交量单位「股」非「手」
+    @Test("amount=close×volume → 均价=close 显示；成交量标『股』")
+    func volumeUnitConsistency() {
+        let close = 10.0, vol: Int64 = 1000
+        let c = candle(open: 9.8, high: 10.2, low: 9.7, close: close,
+                       volume: vol, amount: close * Double(vol))     // amount = 10000
+        let r = CrosshairSidebarContent.make(candle: c, previousClose: 9.9,
+                                             cursorPrice: close, snappedX: 100, mainChartMidX: 500)
+        #expect(r.rows.first { $0.label == "均价" }?.value == "10.00")       // amount/volume = close ∈ [低,高]
+        #expect(r.rows.first { $0.label == "成交量" }?.value == "1,000 股")   // 单位 = 股（非手）
+    }
 }
 ```
 
@@ -280,8 +292,8 @@ public struct CrosshairSidebarContent: Equatable, Sendable {
             }
         }
 
-        // 成交量（千分位 + 手）
-        rows.append(Row(label: "成交量", value: groupedInt(candle.volume) + " 手", color: .neutral))
+        // 成交量（千分位 + 股）：importer 约定 amount = close × volume → volume 为 share-count，单位「股」非「手」（codex R3-M）
+        rows.append(Row(label: "成交量", value: groupedInt(candle.volume) + " 股", color: .neutral))
 
         // 成交额（amount 非 nil 才显；亿/万 自适应）
         if let amount = candle.amount {
@@ -1144,8 +1156,7 @@ git commit -m "docs(rfc-c): 验收清单（14 条二值可判）"
 - `KLineRenderState.previousCloseBeforeVisible` + `RenderStateBuilder.previousCloseBeforeVisible(candles:startIndex:)`（Task 6 Step 1-4 定义）→ Task 6 Step 5 draw 层消费（最左可见根前收）。✅
 - `currentPalette.candleUp/.candleDown`（已核 `Theme.swift:176`）+ `SwipeDirection`（已核 `Models.swift:49`）。✅
 
-**已知 plan-时未定项（实现者按代码核实，不阻塞）：**
-- 成交量单位「手」vs「股」：Task 1 默认「手」（A 股惯例 + mockup）；实现者跑 fixture 核实量级，若为股改标签（均价自检不受影响）。
+**已知 plan-时未定项：** 无（成交量单位经 codex R3 核实 = **股**，见下 R3 记录；其余实名/类型均已核）。
 
 ---
 
@@ -1158,3 +1169,6 @@ git commit -m "docs(rfc-c): 验收清单（14 条二值可判）"
 
 **R2（real Codex，verdict=needs-attention，1 medium、已修；R1 两项 verified gone）：**
 - **M 最左可见根丢真实前收**（Task 6）：`previousClose` 仅从 `renderState.visibleCandles`（base-indexed `ArraySlice`）派生，`snappedIndex==candles.startIndex` 返 nil。但 `make` 切片 `candles[viewport.startIndex...]`、`startIndex` 滚动后可 >0 → 最左可见根的前一根其实在完整数组里、只在切片外 → 涨跌/涨跌幅/收·光标颜色错显「—」+ 白。长按最左可见根即触发（常见）。→ **修**：`KLineRenderState` 加 additive 字段 `previousCloseBeforeVisible`（`RenderStateBuilder.make` 从 `engine.allCandles[period]` 完整数组算 `startIndex>0 ? candles[startIndex-1].close : nil`）；draw 层 prevClose = 切片内 `candles[idx-1]` 或最左根用 `renderState.previousCloseBeforeVisible`。纯 helper host 测（Task 6 Step 1-4）+ 验收 #16。零引擎/契约改动（渲染态 additive，非持久契约）。
+
+**R3（real Codex，verdict=needs-attention，1 medium、已修；R2 verified gone）：**
+- **M 成交量单位错标「手」**（Task 1）：硬编码 `" 手"`，但 importer fixtures（`backend/tests/test_import_csv.py:37`、`test_generate_training_sets.py:45`）约定 `amount = round(close × volume, 2)` → volume 是 **share-count（股）**，非手（若为手 amount 应 ×100）。显「手」=100× 高估。→ **修**：改 `" 股"`（与 importer 约定一致）；加一致性测试 `volumeUnitConsistency`（amount=close×volume → 均价=close∈[低,高] 显示 + 成交量「1,000 股」）。iOS DEBUG fixture amount=NULL（均价/成交额隐藏，acceptance #14 覆盖）；真实数据路径 amount 来自 CSV。「未定项」就此定。
