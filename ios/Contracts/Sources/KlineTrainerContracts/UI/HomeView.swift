@@ -24,13 +24,26 @@ public struct HomeView: View {
 
     @State private var showEmptyCacheAlert = false
 
-    /// RFC-E：唯一泛型 init —— 类型擦除 settingsContent → AnyView（仅设置 popover，非热路径）。
+    /// 源兼容 deprecated overload（codex whole-branch WB-2）：保留旧 5 参 init 不破坏下游编译，
+    /// 但 `@available(deprecated)` 使「不接线设置 popover」**显式非静默**（codex WB-1 的静默丢 UI 顾虑）。
+    /// 委托新 init 传 `.constant(false)`+`EmptyView`：本 init 构造的 HomeView **不呈现设置 popover**——
+    /// 要呈现设置须用下方带 `isSettingsPresented`/`settingsContent` 的 init（如 AppRootView）。
+    /// 仅声明保留（内部不使用，故 Catalyst 零-warning gate 不破；使用点才告警，提示下游迁移）。
+    @available(*, deprecated, message: "此 init 不接线设置 popover（settingsContent=EmptyView）。要呈现设置请用带 isSettingsPresented/settingsContent 的 init；本重载仅为源兼容保留。")
+    public init(content: HomeContent,
+                onStartTraining: @escaping () -> Void,
+                onContinueTraining: @escaping () -> Void,
+                onSelectRecord: @escaping (Int64) -> Void,
+                onOpenSettings: @escaping () -> Void) {
+        self.init(content: content,
+                  onStartTraining: onStartTraining, onContinueTraining: onContinueTraining,
+                  onSelectRecord: onSelectRecord, onOpenSettings: onOpenSettings,
+                  isSettingsPresented: .constant(false), settingsContent: { EmptyView() })
+    }
+
+    /// RFC-E：主 init —— 类型擦除 settingsContent → AnyView（仅设置 popover，非热路径）。
     /// HomeView 本体保持非泛型 concrete（类型标识不变，codex spec-R6-H1）。保 view-only D1：不 import settings/acceptance。
-    ///
-    /// ⚠️ **不保留旧 5 参 init**（codex whole-branch WB-1）：旧 init 委托 `.constant(false)`+`EmptyView` →
-    /// 配合 `sheetItem` 滤掉 `.settings`，用旧式调用会**既无 sheet 也无 popover = 静默丢失设置 UI**。
-    /// 故每个调用方必须**显式**决定设置呈现：传真 `isSettingsPresented`/`settingsContent`（如 AppRootView），
-    /// 或显式 `.constant(false)`+`{ EmptyView() }` 退出（如不呈现设置的 #Preview）。误用旧签名 = **响亮编译错**（非静默丢 UI）。
+    /// 呈现设置须经此 init 注入 `isSettingsPresented`/`settingsContent`；不呈现设置的调用方显式传 `.constant(false)`+`{ EmptyView() }`。
     public init<SettingsContent: View>(content: HomeContent,
                 onStartTraining: @escaping () -> Void,
                 onContinueTraining: @escaping () -> Void,
