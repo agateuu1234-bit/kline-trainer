@@ -152,12 +152,15 @@ enum CrosshairTapResolver {
   Button(action: onOpenSettings) { Image(systemName: "gearshape").font(.title2) }
       .accessibilityLabel("设置")
       .popover(isPresented: isSettingsPresented) {
-          settingsContent()
-              .frame(minWidth: 280, idealWidth: 300)        // 约束宽度，避免铺满
-              .presentationCompactAdaptation(.popover)       // iPhone 强制 popover 样式（iOS16.4+；项目 iOS17 满足）
+          ScrollView {                                        // 强制：内容可滚动，最坏情况全部可达（见 §3.4 布局契约）
+              settingsContent()
+          }
+          .frame(minWidth: 280, idealWidth: 300, maxHeight: 480)   // 约束宽 + 限高，避免铺满/溢出裁剪
+          .presentationCompactAdaptation(.popover)            // iPhone 强制 popover 样式（iOS16.4+；项目 iOS17 满足）
       }
   ```
 - `onOpenSettings` 保留：仍 `router.openSettings()` 置 `activeModal=.settings`，作为单一真相；popover 由下方 binding 驱动。
+- **强制 §3.4 popover 布局契约**：见下，非 plan-time 可选项。
 
 **改动 2 — AppRootView 桥接 binding + content（`AppRootView.swift`）**
 - 新增 `settingsPopoverBinding: Binding<Bool>`：
@@ -170,7 +173,17 @@ enum CrosshairTapResolver {
   )
   ```
   （守卫沿用 `sheetModalBinding` 的「dismiss 回写不误清」精神。）
-- 构造 HomeView 时传入 binding + `settingsContent: { SettingsPanel(settings:api:cache:acceptance:onConfirmReset:) }`。
+- 构造 HomeView 时传入 binding + `settingsContent`，**`onConfirmReset` 必须在 reset 成功后显式收 popover**（codex spec-R1-M1：`resetAllProgressAndReload()` 当前只 `settings.resetAllProgress()`+`loadHome()`、**不清 `activeModal`**，否则破坏性 reset 完成后 popover 残留在重置后的首页上）：
+  ```swift
+  settingsContent: {
+      SettingsPanel(settings: settings, api: api, cache: cache, acceptance: acceptance,
+                    onConfirmReset: {
+                        try await router.resetAllProgressAndReload()
+                        router.activeModal = nil               // 强制：reset 成功 → 收 popover（A6/A_reset_dismiss）
+                    })
+  }
+  ```
+  （仅成功后清；`resetAllProgressAndReload` 抛错则不清，错误经既有 `router.errorMessage` alert 呈现、popover 保留供重试。）
 - 从 `.sheet` 移除 `.settings` 分支（`.sheet` 只剩 `.settlement`；`.history` 仍走 overlay）。
 
 **改动 3 — `HistoryDialogPresentation` 谓词扩展（纯函数，已有 host 测）**
@@ -178,16 +191,23 @@ enum CrosshairTapResolver {
 
 ### 3.2 设置项 = 原样保留
 
-5 项（佣金费率 / 最低 5 元佣金 / 重置资金 / 离线缓存下载 / 显示模式）+ loadError 恢复段，内容与逻辑**逐字不变**，仅容器从 sheet 换 popover、约束宽度。`onConfirmReset` 仍走 `router.resetAllProgressAndReload()`。
+5 项（佣金费率 / 最低 5 元佣金 / 重置资金 / 离线缓存下载 / 显示模式）+ loadError 恢复段，内容与**业务**逻辑**逐字不变**，仅换呈现容器（sheet→popover）+ 套布局契约（§3.4）+ reset 成功后收 popover（§3.1 改动 2）。`onConfirmReset` 走 `router.resetAllProgressAndReload()` 后清 `activeModal`。
 
-### 3.3 边界与不变量（codex 核查清单）
+### 3.4 popover 布局契约（强制 · 非 plan-time 可选，codex spec-R1-M2）
+
+小 popover 容器装得下 `SettingsPanel` 的最坏内容是**硬要求**——`SettingsPanel` 为 padded `VStack`，叠加 loadError 恢复段 + 下载状态文字 + reset 错误文字 + segmented picker + toast 时，无 ScrollView/限高会在小机型上溢出裁剪、使恢复/设置操作**不可达**。故落地必须满足：
+1. **可滚动**：popover 内容包在 `ScrollView`（或等效）里，纵向可滚，保证所有控件可达。
+2. **有界尺寸**：宽 ~300pt、`maxHeight` 受限（≤ 可用 popover 高度，建议 ≤480pt 或屏高减锚区），不铺满、不溢出。
+3. **状态可见**：下载状态 / reset 错误 / loadError 恢复段**不被裁剪**——toast/status 若被 ScrollView 裁剪则移到 popover 外或固定在容器内可读位置。
+4. **最坏情况验收**：在**最小支持机型**上，构造 `loadError != nil`（恢复段出现）+ 下载状态文字同现，核实全部可滚动可达、reset/重试按钮可点。
+
+### 3.5 边界与不变量（codex 核查清单）
 
 - **无双弹**：`.settings` 必须同时（a）驱动 popover、（b）被 `sheetItem` 滤出 sheet。两者缺一即 bug（要么不显、要么 sheet+popover 同弹）。host 测覆盖谓词；真机验收覆盖呈现。
 - **dismiss 回写**：popover 外部点击 / 下滑关闭 → `set(false)` → 仅当 `activeModal==.settings` 时清为 nil（守卫防把已切换到 `.settlement`/`.history` 的模态误清）。
-- **重置资金后**：`onConfirmReset` → `resetAllProgressAndReload()` 重建 homeContent；popover 应随之关闭（reload 后 `activeModal` 由 router 清；plan 核实 reset 路径会把 `activeModal` 置 nil 或显式收 popover）。
-- **下载 toast**：`SettingsPanel` 自带 `.toastOverlay`；popover 容器较小可能裁剪——plan/验收核实下载状态可见（必要时把 toast 提到 popover 外或 popover 内可读）。
+- **重置资金后（强制收口，codex spec-R1-M1）**：`onConfirmReset` 成功 → 显式 `router.activeModal = nil` 收 popover（§3.1 改动 2）。**不可**依赖 `resetAllProgressAndReload()` 自身清——它当前只 `settings.resetAllProgress()`+`loadHome()`（AppRouter.swift:168-171），不碰 `activeModal`。失败则不清、popover 保留供重试。验收 A_reset_dismiss 覆盖。
+- **下载 toast / 状态可见**：见 §3.4 契约 3——下载状态必须在 popover 内可读不裁剪。
 - **平台**：iPad 原生 popover 带箭头锚齿轮；iPhone 经 `presentationCompactAdaptation(.popover)` 强制锚定 popover 不退化 sheet。`.presentationCompactAdaptation` 需 iOS 16.4+，项目 iOS17 满足（`HomeView.swift:12` 注明跨 iOS17）。
-- **可滚动**：5 项 + 恒可能出现的恢复段在小 popover 内若超高 → 内容自适应 / 允许滚动（plan 定 `ScrollView` 与否）。
 
 ## 4. 测试策略
 
@@ -206,13 +226,15 @@ enum CrosshairTapResolver {
 - A4 无光标时轻点图表 → 无异常（不误触发任何模式）。
 - A5 点齿轮 → 锚齿轮的 popover 弹出（非底部大 sheet），含全部 5 项。
 - A6 popover 外部点击 / 下滑 → 关闭；不残留、不双弹。
-- A7 popover 内重置资金 / 改显示模式 / 下载 → 行为与原 sheet 一致。
+- A7 popover 内改显示模式 / 下载 → 行为与原 sheet 一致；下载状态文字在 popover 内可见不裁剪。
+- **A_reset_dismiss**（强制，codex spec-R1-M1）：popover 内重置资金 → 确认 → reset 成功后 **popover 自动关闭**、回到重置后的首页（资金 ¥100,000、记录保留）；不残留在重置后首页上。
+- **A_worst_reachable**（强制，codex spec-R1-M2）：在最小支持机型构造 `loadError != nil`（恢复段出现）+ 下载状态同现 → popover 内全部控件可滚动可达、reset/重试按钮可点。
 
 ## 6. 风险与残留
 
 - **R1**：`.presentationCompactAdaptation(.popover)` 若部署目标 < iOS 16.4 不可用 → plan 阶段核实 deployment target（预期满足）。
 - **R2**：HomeView 泛型化（`HomeView<SettingsContent>`）可能影响既有 `#Preview` / 调用点 → plan 核实所有构造点并更新（含 DEBUG preview）。
-- **R3**：popover 内 `SettingsPanel` 的 toast / 恢复段在小容器内的可读性 → 真机验收确认。
+- **R3（已升级为强制契约 §3.4，非残留）**：popover 内 `SettingsPanel` 的 toast / 恢复段 / 下载状态在小容器内必须可滚动可读 → 见 §3.4 + A_worst_reachable。
 - **残留（post-merge，非阻塞，沿 RFC-C）**：`DateFormatter` 每帧分配（CrosshairLayout + CrosshairSidebarContent）→ static let 缓存，择机做，不在本轮范围。
 
 ## 7. 交付流程
