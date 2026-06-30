@@ -27,9 +27,22 @@ struct HistoryDialogPresentationTests {
         #expect(HistoryDialogPresentation.sheetItem(for: .history(makeRecord())) == nil)
     }
 
-    @Test("sheetItem 对 .settings 原样透传")
-    func sheetItemPassesSettings() {
-        #expect(HistoryDialogPresentation.sheetItem(for: .settings)?.id == "settings")
+    @Test("sheetItem 对 .settings 返 nil（RFC-E：改由 popover 驱动，滤出共享 sheet）")
+    func sheetItemFiltersSettings() {
+        #expect(HistoryDialogPresentation.sheetItem(for: .settings) == nil)
+    }
+
+    @Test("isSettings 仅对 .settings 为 true")
+    func isSettingsPredicate() {
+        #expect(HistoryDialogPresentation.isSettings(.settings) == true)
+        #expect(HistoryDialogPresentation.isSettings(.history(makeRecord())) == false)
+        #expect(HistoryDialogPresentation.isSettings(.settlement(makeRecord())) == false)
+        #expect(HistoryDialogPresentation.isSettings(nil) == false)
+    }
+
+    @Test("sheetDismissMayApply 对 .settings 返 false（RFC-E：settings 由 popover 驱动，sheet dismiss 回写须拦）")
+    func sheetDismissBlocksSettings() {
+        #expect(HistoryDialogPresentation.sheetDismissMayApply(current: .settings) == false)
     }
 
     @Test("sheetItem 对 .settlement 原样透传")
@@ -59,9 +72,8 @@ struct HistoryDialogPresentationTests {
         #expect(HistoryDialogPresentation.sheetDismissMayApply(current: .history(makeRecord())) == false)
     }
 
-    @Test("sheetDismissMayApply 对 settings/settlement/nil 返 true（正常 dismiss）")
+    @Test("sheetDismissMayApply 对 settlement/nil 返 true（正常 dismiss）")
     func dismissGuardAllowsOthers() {
-        #expect(HistoryDialogPresentation.sheetDismissMayApply(current: .settings) == true)
         #expect(HistoryDialogPresentation.sheetDismissMayApply(current: .settlement(makeRecord())) == true)
         #expect(HistoryDialogPresentation.sheetDismissMayApply(current: nil) == true)
     }
