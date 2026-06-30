@@ -119,9 +119,9 @@ struct ResolveTests {
             let r = CrosshairLayout.resolve(at: CGPoint(x: 100, y: y), mapper: m, candles: c)
             #expect(r?.priceLabel.text == String(format: "%.2f", m.yToPrice(y)))
         }
-        // 价签右贴 frame.maxX、垂直居中 point.y
+        // 价签左贴 frame.minX、垂直居中 point.y
         let r = CrosshairLayout.resolve(at: CGPoint(x: 100, y: 300), mapper: m, candles: c)
-        #expect(r?.priceLabel.rect.maxX == 1000)
+        #expect(r?.priceLabel.rect.minX == 0)
         #expect(r?.priceLabel.rect.midY == 300)
     }
 
@@ -191,5 +191,56 @@ struct ResolveTests {
         let m = makeMapper(visibleCount: 0)                // 非 .zero frame
         let empty = makeCandles(count: 0)[0..<0]
         #expect(CrosshairLayout.resolve(at: CGPoint(x: 100, y: 300), mapper: m, candles: empty) == nil)
+    }
+}
+
+private func makeFrames(mainTop: CGFloat = 0, mainH: CGFloat = 360,
+                       volH: CGFloat = 90, macdH: CGFloat = 150,
+                       width: CGFloat = 1000) -> ChartPanelFrames {
+    let main = CGRect(x: 0, y: mainTop, width: width, height: mainH)
+    let vol = CGRect(x: 0, y: mainTop + mainH, width: width, height: volH)
+    let macd = CGRect(x: 0, y: mainTop + mainH + volH, width: width, height: macdH)
+    return ChartPanelFrames(mainChart: main, volumeChart: vol, macdChart: macd)
+}
+
+@Suite("CrosshairLayout frames 贯穿整 panel")
+struct CrosshairWholePanelTests {
+
+    @Test("传 frames → 竖线从 mainChart.minY 到 macdChart.maxY（贯穿三子图）")
+    func verticalSpansWholePanel() {
+        let m = makeMapper(visibleCount: 10, frameHeight: 360)
+        let c = makeCandles(count: 10)[0..<10]
+        let frames = makeFrames()                                 // macdChart.maxY = 600
+        let r = CrosshairLayout.resolve(at: CGPoint(x: 35, y: 100), mapper: m, candles: c, frames: frames)
+        #expect(r != nil)
+        #expect(r!.lines.vertical.from.y == 0)                    // mainChart.minY
+        #expect(r!.lines.vertical.to.y == 600)                    // macdChart.maxY
+    }
+
+    @Test("传 frames → 时签底贴 macdChart.maxY")
+    func timeLabelAtPanelBottom() {
+        let m = makeMapper(visibleCount: 10, frameHeight: 360)
+        let c = makeCandles(count: 10)[0..<10]
+        let frames = makeFrames()
+        let r = CrosshairLayout.resolve(at: CGPoint(x: 35, y: 100), mapper: m, candles: c, frames: frames)
+        #expect(r!.timeLabel.rect.maxY == 600)
+    }
+
+    @Test("不传 frames（nil）→ 保持现状（竖线/时签限 mainChartFrame）")
+    func nilFramesKeepsLegacy() {
+        let m = makeMapper(visibleCount: 10, frameHeight: 360)
+        let c = makeCandles(count: 10)[0..<10]
+        let r = CrosshairLayout.resolve(at: CGPoint(x: 35, y: 100), mapper: m, candles: c)
+        #expect(r!.lines.vertical.to.y == 360)
+        #expect(r!.timeLabel.rect.maxY == 360)
+    }
+
+    @Test("价标在左缘：priceLabel.rect.minX == mainChartFrame.minX")
+    func priceLabelOnLeftEdge() {
+        let m = makeMapper(visibleCount: 10, frameHeight: 360)
+        let c = makeCandles(count: 10)[0..<10]
+        let r = CrosshairLayout.resolve(at: CGPoint(x: 35, y: 100), mapper: m, candles: c, frames: makeFrames())
+        #expect(r!.priceLabel.rect.minX == 0)
+        #expect(r!.priceLabel.rect.midY == 100)
     }
 }

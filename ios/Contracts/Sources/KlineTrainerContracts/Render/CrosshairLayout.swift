@@ -11,7 +11,7 @@
 import Foundation
 import CoreGraphics
 
-/// 十字光标一对横竖线段（端点已对齐 mainChartFrame 四边）。
+/// 十字光标一对横竖线段（竖线端点 = 整 panel（frames 非 nil）或 mainChartFrame）。
 struct CrosshairLines: Equatable, Sendable {
     let horizontal: LineSegment
     let vertical: LineSegment
@@ -57,43 +57,48 @@ enum CrosshairLayout {
         return min(max(best, candles.startIndex), candles.endIndex - 1)
     }
 
-    /// 单一入口（spec D6）：long-press 原始 point + 当前 mapper（post-pinch viewport）+ 可见 candles
-    /// → 吸附后的十字光标几何 + HUD labels。point==nil / frame 外 / 空切片 → nil（spec D3 守卫）。
-    /// 竖线吸附 X（snappedX）、横线自由 Y；价签自由 Y、时签吸附 X；竖线与时签共用同一 snappedIndex。
+    /// 单一入口（spec D6 + RFC-C frames 扩展）。frames 非 nil → 竖线贯穿整 panel + 时签底贴 macdChart.maxY。
+    /// point==nil / frame 外 / 空切片 → nil（spec D3 守卫）。触发区仍限 mainChartFrame。
     static func resolve(at point: CGPoint?, mapper: CoordinateMapper,
-                        candles: ArraySlice<KLineCandle>) -> CrosshairResolved? {
+                        candles: ArraySlice<KLineCandle>,
+                        frames: ChartPanelFrames? = nil) -> CrosshairResolved? {
         guard let point else { return nil }
         let frame = mapper.viewport.mainChartFrame
-        guard frame.contains(point) else { return nil }     // D8 frame 守卫
-        guard !candles.isEmpty else { return nil }          // D3 空切片守卫（先于 clamp）
+        guard frame.contains(point) else { return nil }     // D8 frame 守卫（触发区仍限主图）
+        guard !candles.isEmpty else { return nil }          // D3 空切片守卫
 
         let snappedIndex = snappedCandleIndex(at: point.x, mapper: mapper, candles: candles)
         let snappedX = mapper.indexToX(snappedIndex)
 
-        // 竖线吸附 snappedX；横线自由 point.y（D1 X-only snap）。
+        // 竖线纵向延展：frames 非 nil → 贯穿 mainChart.minY..macdChart.maxY；nil → 限 mainChartFrame（旧行为）。
+        let verticalTop = frames?.mainChart.minY ?? frame.minY
+        let verticalBottom = frames?.macdChart.maxY ?? frame.maxY
+
         let lines = CrosshairLines(
             horizontal: .init(from: CGPoint(x: frame.minX, y: point.y),
                               to:   CGPoint(x: frame.maxX, y: point.y)),
-            vertical:   .init(from: CGPoint(x: snappedX, y: frame.minY),
-                              to:   CGPoint(x: snappedX, y: frame.maxY)))
+            vertical:   .init(from: CGPoint(x: snappedX, y: verticalTop),
+                              to:   CGPoint(x: snappedX, y: verticalBottom)))
 
-        // 价签：自由 Y（镜像 yToPrice，D4）；右贴 maxX、垂直居中 point.y。
+        // RFC-C：价标移左缘（对齐 RFC-B 左移价轴）；自由 Y 不变。
         let price = mapper.yToPrice(point.y)
         let priceWidth: CGFloat = 60, priceHeight: CGFloat = 18
-        let priceRect = CGRect(x: frame.maxX - priceWidth, y: point.y - priceHeight / 2,
+        let priceRect = CGRect(x: frame.minX, y: point.y - priceHeight / 2,
                                width: priceWidth, height: priceHeight)
         let priceLabel = CrosshairResolved.Label(rect: priceRect,
                                                  text: String(format: "%.2f", price))
 
-        // 时签：吸附蜡烛 datetime（UTC+8 / en_US_POSIX，D4）；水平居中 snappedX、底贴 maxY。
+        // 时签：吸附蜡烛 datetime（UTC+8 / en_US_POSIX，D4）；水平居中 snappedX。
+        // 时签底：frames 非 nil → macdChart.maxY（整图最底）；nil → mainChartFrame.maxY（旧）。
         let datetime = candles[snappedIndex].datetime
         let date = Date(timeIntervalSince1970: TimeInterval(datetime))
         let formatter = DateFormatter()
         formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        let timeBottom = frames?.macdChart.maxY ?? frame.maxY
         let timeWidth: CGFloat = 120, timeHeight: CGFloat = 18
-        let timeRect = CGRect(x: snappedX - timeWidth / 2, y: frame.maxY - timeHeight,
+        let timeRect = CGRect(x: snappedX - timeWidth / 2, y: timeBottom - timeHeight,
                               width: timeWidth, height: timeHeight)
         let timeLabel = CrosshairResolved.Label(rect: timeRect, text: formatter.string(from: date))
 
