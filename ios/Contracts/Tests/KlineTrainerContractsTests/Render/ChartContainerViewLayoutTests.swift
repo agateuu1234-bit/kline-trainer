@@ -19,7 +19,7 @@ struct ChartContainerViewLayoutTests {
     @MainActor
     func renderStateRecomputedOnLayoutForStaticEngine() {
         let engine = TrainingEngine.preview()   // 静态：默认 tick，无 observation 变化驱动 updateUIView
-        let coordinator = ChartContainerView(panel: .upper, engine: engine, crosshairOwner: .constant(nil)).makeCoordinator()
+        let coordinator = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
         let view = KLineView(frame: .zero)       // 首帧零尺寸：模拟 updateUIView 时 bounds 未定
         coordinator.attach(to: view)
         // 首帧（零 bounds / 未重算）renderState 为空——等价 make 在 bounds<=0 返回 .empty。
@@ -52,7 +52,7 @@ struct ChartContainerViewLayoutTests {
     @MainActor
     func layoutRebuildSyncsEngineBoundsForPinch() {
         let engine = TrainingEngine.preview()
-        let coordinator = ChartContainerView(panel: .upper, engine: engine, crosshairOwner: .constant(nil)).makeCoordinator()
+        let coordinator = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
         let view = KLineView(frame: .zero)
         coordinator.attach(to: view)
         // 静态界面（Review）：未经 observation 驱动的 updateUIView，engine 缓存 bounds 仍 .zero。
@@ -74,7 +74,7 @@ struct ChartContainerViewLayoutTests {
     func zeroSizeLayoutPreservesScrollOffset() {
         // 200 根 + tick 150 → 有滚动空间（可造非零 offset）。
         let (engine, _) = TrainingEngineBounceWiringTests.makeEngine(count: 200, tick: 150)
-        let coordinator = ChartContainerView(panel: .upper, engine: engine, crosshairOwner: .constant(nil)).makeCoordinator()
+        let coordinator = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
         let view = KLineView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
         coordinator.attach(to: view)
         view.setNeedsLayout(); view.layoutIfNeeded()   // 有效 bounds 记录
@@ -101,7 +101,7 @@ struct ChartContainerViewLayoutTests {
         // updateUIView 现委托 rebuildRenderState(bounds: view.bounds)；SwiftUI 在瞬态零尺寸期触发
         // updateUIView 即等价于此处直接以 .zero 调 rebuildRenderState——须同样不吞滚动位置。
         let (engine, _) = TrainingEngineBounceWiringTests.makeEngine(count: 200, tick: 150)
-        let coordinator = ChartContainerView(panel: .upper, engine: engine, crosshairOwner: .constant(nil)).makeCoordinator()
+        let coordinator = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
         let view = KLineView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
         coordinator.attach(to: view)
         view.setNeedsLayout(); view.layoutIfNeeded()

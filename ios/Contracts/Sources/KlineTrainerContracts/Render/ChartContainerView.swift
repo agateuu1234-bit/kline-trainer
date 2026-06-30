@@ -20,7 +20,9 @@ public struct ChartContainerView: UIViewRepresentable {
     /// RFC-C 跨面板光标互斥：当前持有十字光标的面板（nil=无）。共享 view-state（**不进 engine**，守 spec §4.2 原则）。
     @Binding public var crosshairOwner: PanelId?
 
-    public init(panel: PanelId, engine: TrainingEngine, crosshairOwner: Binding<PanelId?>) {
+    /// `crosshairOwner` 默认 `.constant(nil)`：保旧 2-arg `init(panel:engine:)` 源兼容（public API 不破坏，codex WB-high）；
+    /// TrainingView 传真 binding 启用跨面板互斥，其余调用方（含测试 2-arg）走默认=无跨面板协调。
+    public init(panel: PanelId, engine: TrainingEngine, crosshairOwner: Binding<PanelId?> = .constant(nil)) {
         self.panel = panel
         self._engine = Bindable(wrappedValue: engine)
         self._crosshairOwner = crosshairOwner
