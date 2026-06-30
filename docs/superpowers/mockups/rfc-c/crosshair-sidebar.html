@@ -76,8 +76,8 @@
   .cxrow .k{color:#86868f;} .cxrow .v{color:#e8e8f0;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.2px;}
   .cxrow .v.up{color:var(--up);} .cxrow .v.dn{color:var(--dn);}
   .cxrow .v.yl{color:#f0d23a;} .cxrow .v.fl{color:#fff;}            /* 黄=非涨跌字段 / 白=平 */
-  .cxrow.now{font-size:11px;padding-bottom:5px;margin-bottom:4px;border-bottom:1px solid #2b2b35;}
-  .cxrow.now .k{color:#aeaeba;} .cxrow.now .v{font-size:13px;}
+  .cxrow.now{justify-content:center;padding-bottom:5px;margin-bottom:4px;border-bottom:1px solid #2b2b35;}
+  .cxrow.now .v{font-size:15px;}
   .cxrow.sep{margin-top:3px;padding-top:3px;border-top:1px dashed #26262f;}
   .exit{margin-top:6px;font-size:8.5px;color:#6f6f7a;text-align:center;}
   /* legend column */
@@ -92,7 +92,7 @@
 <body>
 <h1>RFC-C · 长按十字光标 + 悬浮信息栏（自适应左右）</h1>
 <p class="sub">长按主图 → 进入<b>黏滞十字光标模式</b>（整图冻结，松手保留，<b>点一下退出</b>）。竖线吸附最近 K 线（<b>每换一根短震动</b>）、横线跟手指 Y、<b>光标中心对齐手指触点</b>（细实线，无偏移）。
-信息栏<b>悬浮</b>在图上（不占固定空间，左右停靠位置固定不跟手）：<b>十字标在中心偏右 → 栏靠左；在中心或偏左 → 栏靠右</b>（防手指遮挡）。栏顶「光标价」=横线纵轴读数。颜色：涨红/跌绿/平白，其余黄。下面左右两机演示两种停靠。</p>
+信息栏<b>悬浮</b>在图上（不占固定空间，左右停靠位置固定不跟手）：<b>十字标在中心偏右 → 栏靠左；在中心或偏左 → 栏靠右</b>（防手指遮挡）。栏顶居中实时价=横线纵轴读数。颜色：涨红/跌绿/平白(基准=前一根收盘)，其余黄。下面左右两机演示两种停靠。</p>
 
 <div class="wrap">
 
@@ -124,9 +124,8 @@
           <div class="plabels"><span>1720</span><span>1700</span><span>1680</span><span>1660</span><span>1640</span></div>
           <!-- 悬浮信息栏 (dock 左) -->
           <div class="cxinfo dockL">
-            <div class="cxrow now"><span class="k">光标价</span><span class="v up">1,681.20</span></div>
-            <div class="cxrow"><span class="k">日期</span><span class="v yl">03-28</span></div>
-            <div class="cxrow"><span class="k">时间</span><span class="v yl">14:00</span></div>
+            <div class="cxrow now"><span class="v up">1,681.20</span></div>
+            <div class="cxrow"><span class="v yl">2024-03-28</span><span class="v yl">14:00</span></div>
             <div class="cxrow sep"><span class="k">开</span><span class="v yl">1672.40</span></div>
             <div class="cxrow"><span class="k">高</span><span class="v yl">1689.00</span></div>
             <div class="cxrow"><span class="k">低</span><span class="v yl">1668.20</span></div>
@@ -198,9 +197,8 @@
           <div class="plabels"><span>1720</span><span>1700</span><span>1680</span><span>1660</span><span>1640</span></div>
           <!-- 悬浮信息栏 (dock 右) -->
           <div class="cxinfo dockR">
-            <div class="cxrow now"><span class="k">光标价</span><span class="v dn">1,660.50</span></div>
-            <div class="cxrow"><span class="k">日期</span><span class="v yl">03-26</span></div>
-            <div class="cxrow"><span class="k">时间</span><span class="v yl">10:30</span></div>
+            <div class="cxrow now"><span class="v dn">1,660.50</span></div>
+            <div class="cxrow"><span class="v yl">2024-03-26</span><span class="v yl">10:30</span></div>
             <div class="cxrow sep"><span class="k">开</span><span class="v yl">1664.00</span></div>
             <div class="cxrow"><span class="k">高</span><span class="v yl">1671.20</span></div>
             <div class="cxrow"><span class="k">低</span><span class="v yl">1655.80</span></div>
@@ -250,11 +248,11 @@
     <div class="li"><div class="ln on">自适应</div><div class="lt"><b>信息栏躲手指</b><div class="t">十字标在中心偏右 → 栏靠左（机 A）；在中心或偏左 → 栏靠右（机 B）。临界点 = 主图水平中线。</div></div></div>
     <div class="li"><div class="ln on">吸附</div><div class="lt"><b>竖线逐根吸附 · 细实线 · 震动</b><div class="t">竖线落最近 K 线中心；<b>每吸附到新一根 K 线触发一次短震动(haptic)</b>，手感清晰。横线跟手指 Y 自由读价。光标中心 = 手指触摸点（取消右偏，对齐主流），细实线非虚线。左缘价标随光标。</div></div></div>
     <div class="li"><div class="ln on">双面板</div><div class="lt"><b>点哪图显哪图</b><div class="t">长按上图 = 显示 60分 那根 K 线明细；长按下图 = 显示日线明细（各自独立）。本图演示长按上图(60分)。</div></div></div>
-    <div class="li"><div class="ln on">价位</div><div class="lt"><b>栏顶「光标价」+ 颜色规则</b><div class="t">栏最上一行 = 横线在价轴上的读数（<code>yToPrice</code>，纯纵轴价位，<b>与哪根 K 线无关</b>）。颜色：<b>涨=红 / 跌=绿 / 平=白</b>（光标价·收·涨跌·涨跌幅，基准=前一根收盘）；<b>其余=黄</b>（日期/时间/开/高/低/均价/量/额）。</div></div></div>
+    <div class="li"><div class="ln on">价位</div><div class="lt"><b>栏顶居中实时价 + 颜色规则</b><div class="t">栏最上一行 = 横线在价轴上的读数（<code>yToPrice</code>，纯纵轴价位，<b>与哪根 K 线无关</b>），<b>无标签、居中大字</b>。颜色：<b>涨=红 / 跌=绿 / 平=白</b>（光标价·收·涨跌·涨跌幅，基准=<b>前一根收盘</b>，已网查证主流同基准）；<b>其余=黄</b>（开/高/低/均价/量/额、日期·时间）。</div></div></div>
 
     <h3 style="margin-top:16px;">信息栏字段（已确认）</h3>
-    <div class="li"><div class="ln on">有</div><div class="lt"><b>光标价 / 日期 / 时间 / 开高低收 / 涨跌 / 涨跌幅 / 均价 / 成交量 / 成交额</b>
-      <div class="t">日内周期(3/15/60分)显「时:分」；日/周/月只显日期。<code>均价=成交额÷成交量</code>（plan 阶段用「均价∈[低,高]」做单位自检，过才显）。涨跌 = 收 vs 前一根收。</div></div></div>
+    <div class="li"><div class="ln on">有</div><div class="lt"><b>光标价 / 日期·时间(同行) / 开高低收 / 涨跌 / 涨跌幅 / 均价 / 成交量 / 成交额</b>
+      <div class="t"><b>日期+时间合并一行</b>（日期靠左、时间靠右）；日内周期(3/15/60分)有时分，日/周/月只显日期。<code>均价=成交额÷成交量</code>（plan 用「均价∈[低,高]」单位自检，过才显）。涨跌 = 收 vs 前一根收。</div></div></div>
     <div class="li"><div class="ln off">无</div><div class="lt"><b>换手率 / MA66值 / 可调字号</b><div class="t">换手率：缺流通股本数据 → 不做（以后有需要再说）。MA66：你选了不放（≠均价，是图上趋势线）。字号：固定可读，<b>不做运行时可调</b>。</div></div></div>
 
     <h3 style="margin-top:16px;">字号 / 浮层</h3>
