@@ -764,7 +764,11 @@ git commit -m "feat(A4): coordinator replay autosave gate + saveProgress routing
   - `coordinator.hasResumableReplay(recordId: Int64) -> Bool`
 - Consumes: `pendingReplayRepo`（A4）、`recordRepo.loadRecordBundle`（既有）
 
-> **错误纪律（codex plan-R1-F1，精确镜像 `resumePending`）**：瞬态/未分类错误 **传播**（不清档、不覆盖槽）；**只在 openReader「已验证损坏」(`isCorruptTrainingSet`)** 时 `cache.delete + clearReplay + 返回 nil`。`loadReplay()`/`loadRecordBundle`/`loadAllCandles`/`make` 的错误**一律传播**（含 `.dbCorrupted`——fail-closed，同 resumePending 的 loadPending 传播）。记录不会被单独删除（reset 保留记录 + 连带清 replay 槽，无孤儿）→ `loadRecordBundle` 错误必为瞬态 → 传播。**路由 = resume-first 权威**（不再用 `hasResumableReplay` 当路由门）：transient throw → router setError → **不 fresh、不覆盖槽**。
+> **错误纪律（codex plan-R1/R10/R11/R12-F1，权威——下方代码以此为准）**：
+> - **元数据先判归属（R11）**：`loadReplaySlotInfo()` 只读 record_id/filename 不解码 → 非本记录/无槽返 nil（不被别记录损坏 payload 阻塞）。
+> - **本记录全量 `loadReplay()`**：**`.dbCorrupted`（已验证损坏 payload）→ durable `try clearReplay()` + 返回 nil（清成功=回退从头 fresh；清失败=瞬态 DB → 传播可重试、槽留，R12-F1）**；**非 `.dbCorrupted`（瞬态）→ 传播**（不清、不 fresh，防丢有效档）。⚠️ **不是"含 .dbCorrupted 一律传播"**——那会让永久损坏槽卡死按钮（R13-F1）。
+> - **其他清档点**：openReader `isCorruptTrainingSet`（`cache.delete + clearReplay`）、pending 文件名 ≠ 记录文件名（`clearReplay`，R10）。`loadRecordBundle`/`loadAllCandles`/`make` 错误传播（记录不被单独删除，故 loadRecordBundle 必瞬态）。
+> - **路由 = resume-first 权威**（不用 `hasResumableReplay` 当路由门）：transient throw → router setError → **不 fresh、不覆盖槽**；返 nil（无槽/不匹配/已清损坏槽）→ fresh。
 
 - [ ] **Step 1: 写失败测试**
 ```swift
@@ -892,9 +896,11 @@ public func hasResumableReplay(recordId: Int64) -> Bool {
 
 - [ ] **Step 3b: `resumePendingReplay`**（coordinator 加，**精确镜像 `resumePending` 错误纪律**）
 ```swift
-/// 新需求10：续局 replay。镜像 resumePending：载暂存→校验记录→open reader→按存档 tick/状态重建 replay 引擎。
-/// 错误纪律：loadReplay/loadRecordBundle/loadAllCandles/make 错误**传播**（不清档）；**仅 openReader 已验证损坏
-/// (isCorruptTrainingSet)** 才 cache.delete + clearReplay + 返回 nil。无槽 / recordId 不匹配 → 返回 nil（不清档）。
+/// 新需求10：续局 replay。元数据先判归属→本记录全量解码→校验记录/文件名→open reader→按存档 tick/状态重建。
+/// 错误纪律：**本记录 loadReplay `.dbCorrupted` → durable clearReplay + nil（回退从头）**；
+/// **非 `.dbCorrupted` 的 loadReplay / loadRecordBundle / loadAllCandles / make 错误 → 传播**（不清、不 fresh）；
+/// 清档点 = openReader `isCorruptTrainingSet`（cache.delete+clearReplay）/ 文件名不一致（clearReplay）/ 本记录 `.dbCorrupted`。
+/// 无槽 / recordId 不匹配 → nil（不清档）。**注意：不是"loadReplay 错误一律传播"**（那会让永久损坏槽卡死，R13-F1）。
 public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine? {
     // 1) 轻量元数据先判归属（codex plan-R11-F1）：不解码 payload → 别记录的损坏槽不阻塞本记录的 replay。
     //    slotInfo 自身错误=DB 级瞬态（whole-db 不可达）→ 传播。无槽/不匹配 → nil（不清档）。

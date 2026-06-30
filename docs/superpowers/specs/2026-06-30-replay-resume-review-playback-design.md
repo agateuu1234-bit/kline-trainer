@@ -149,8 +149,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 ### A.6 错误处理（精确镜像 normal resume；**区分瞬态 vs 已验证损坏**，codex plan-R1/R10/R11-F1）
 - **元数据先判归属（R11-F1）**：`loadReplaySlotInfo` 不解码 payload → 别记录损坏槽不阻塞本记录；非本记录/无槽 → nil 不清档。
 - **清档（仅"已验证损坏槽"）= ① 训练集 open `isCorruptTrainingSet`（`cache.delete + clearReplay + nil`）；② **本记录槽** 全量 `loadReplay` 抛 `.dbCorrupted`（损坏 payload，`clearReplay + nil` 回退从头，R11-F1）；③ pending 文件名 ≠ 记录文件名（内部不一致，`clearReplay + nil`，R10-F1）。**
-- **传播（瞬态，不清不 fresh）**：slotInfo whole-db 错误、loadRecordBundle、loadAllCandles、make、非 `.dbCorrupted` 的 loadReplay 错误。
-- **瞬态/未分类错误一律传播（不清档、不覆盖槽）**：`loadReplay`（含 decode `.dbCorrupted`，fail-closed）、`loadRecordBundle`、`loadAllCandles`、`make`/decode position 失败 → throw → 路由 setError、不回退从头。
+- **传播（瞬态，不清不 fresh）**：slotInfo whole-db 错误、loadRecordBundle、loadAllCandles、make、**非 `.dbCorrupted`** 的 loadReplay 错误 → throw → 路由 setError、不回退从头。
 - `pending.recordId` 不匹配 / 无槽 → 返回 nil（**不清档**）。
 - 自动保存 fencing / `terminating` 机制对 replay 复用（同一 coordinator 状态机）。
 
