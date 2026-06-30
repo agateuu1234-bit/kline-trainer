@@ -560,9 +560,29 @@ public final class TrainingSessionCoordinator {
             try pendingReplayRepo.clearReplay()      // durable 清（唯一清档点）
             return nil                               // 调用方回退从头 replay
         }
+        let allCandles: [Period: [KLineCandle]]
+        let mt: Int
         do {
-            let allCandles = try reader.loadAllCandles()
-            let mt = try maxTick(from: allCandles)
+            allCandles = try reader.loadAllCandles()
+            mt = try maxTick(from: allCandles)
+        } catch {
+            reader.close()
+            throw (error as? AppError) ?? .internalError(module: "E6b", detail: String(describing: error))
+        }
+        // Scalar 前置校验（codex whole-branch R1 HIGH）：make L220/L236-240 对同一条件抛 .trainingSet(.emptyData)，
+        // 而 catch 仅 rethrow 不清槽 → AppRouter resume-first 每次都撞同一槽 → 记录永久 brick。
+        // 在此提前检出 → reader.close + durable clearReplay（try: 失败向上传播，调用方可重试）+ nil。
+        guard (0...mt).contains(pending.globalTickIndex),
+              pending.cashBalance.isFinite, pending.cashBalance >= 0,
+              pending.accumulatedCapital.isFinite, pending.accumulatedCapital >= 0,
+              pending.drawdown.peakCapital.isFinite, pending.drawdown.peakCapital >= 0,
+              pending.drawdown.maxDrawdown.isFinite, pending.drawdown.maxDrawdown >= 0
+        else {
+            reader.close()
+            try pendingReplayRepo.clearReplay()      // durable: clear failure propagates as retryable
+            return nil
+        }
+        do {
             // position 已在 step 2 解码（slot payload，.dbCorrupted 已处理）；此块仅训练集/transient 错误 → 传播
             let engine = try TrainingEngine.make(
                 .replay(fees: pending.feeSnapshot, maxTick: mt),

@@ -410,6 +410,52 @@ struct CoordinatorReplayPersistenceTests {
         _ = try await h.coordinator.replaySettlementPayload(engine: e)
         #expect(try h.pendingReplayRepo.loadReplay() == nil)
     }
+
+    // MARK: - Scalar corruption guard (codex whole-branch R1 HIGH fix)
+
+    @Test func resumePendingReplay_tickBeyondMaxTick_clearsAndReturnsNil() async throws {
+        // 训练组 maxTick = seededRecordFinalTick = 7（makeCandles m3Count=8，last endGlobalIndex=7）。
+        // 槽 globalTickIndex=8 超出 (0...7) → scalar guard 检出 → clearReplay + nil（永不到 make）。
+        let h = try CoordinatorTestHarness.make()
+        let outOfRangeTick = h.seededRecordFinalTick + 1   // 8 > maxTick(7)
+        let badSlot = PendingReplay(
+            recordId: h.seededRecordId,
+            trainingSetFilename: "set.sqlite",
+            globalTickIndex: outOfRangeTick,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: Data(),
+            cashBalance: 100_000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            tradeOperations: [], drawings: [],
+            startedAt: 1,
+            accumulatedCapital: 100_000,
+            drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+        try h.pendingReplayRepo.saveReplay(badSlot)
+        let engine = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+        #expect(engine == nil)
+        #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil)   // 槽已被 durable 清
+    }
+
+    @Test func resumePendingReplay_nonFiniteMoney_clearsAndReturnsNil() async throws {
+        // 槽 cashBalance=.infinity → scalar guard 检出（isFinite=false）→ clearReplay + nil。
+        let h = try CoordinatorTestHarness.make()
+        let badSlot = PendingReplay(
+            recordId: h.seededRecordId,
+            trainingSetFilename: "set.sqlite",
+            globalTickIndex: 1,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: Data(),
+            cashBalance: .infinity,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            tradeOperations: [], drawings: [],
+            startedAt: 1,
+            accumulatedCapital: 100_000,
+            drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+        try h.pendingReplayRepo.saveReplay(badSlot)
+        let engine = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+        #expect(engine == nil)
+        #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil)   // 槽已被 durable 清
+    }
 }
 
 // MARK: - A5 helper（损坏槽测试用最小 PendingReplay 工厂）
