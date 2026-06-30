@@ -546,6 +546,22 @@ git commit -m "feat(A3): pending_replay migration 0006 + impl + DefaultAppDB con
 }
 
 @MainActor
+@Test func freshReplayAfterTeardown_autosaveEnabled() async throws {
+    // codex plan-R7-F1：前一会话 endSession 留 terminating=true；fresh replay 须 resetAutosaveState 重开栅栏，
+    // 否则 tick/后台 autosave 全 no-op（只 back() 存）。验证 advance 后 flush 真写 pending_replay。
+    let h = try CoordinatorTestHarness.make()
+    let warmup = try await h.coordinator.replay(recordId: h.seededRecordId)
+    await h.coordinator.endSession()                         // 留 terminating=true
+    let e = try await h.coordinator.replay(recordId: h.seededRecordId)  // fresh：须重开栅栏
+    e.holdOrObserve(panel: .upper)                           // dirty
+    h.coordinator.requestAutosave(engine: e, immediate: false)  // tick 节流路径（terminating 若未重置则 no-op）
+    await h.coordinator.flushAutosave(engine: e)
+    await h.coordinator.drainAutosaveForTesting()
+    #expect(try h.pendingReplayRepo.loadReplay()?.recordId == h.seededRecordId)  // 已写（栅栏已重开）
+    _ = warmup
+}
+
+@MainActor
 @Test func replayDrawingAddThenDelete_noStaleSlot() async throws {
     // codex plan-R6-F1：加画线→存(拥有槽)→删画线(count 回基线)→存 → 槽须更新为无画线（不被 clean-skip 残留）
     let h = try CoordinatorTestHarness.make()
@@ -661,11 +677,17 @@ init 签名加参数（在 `pendingRepo:` 之后）+ 体内赋值：
 ```
 > implementer：`encodePosition`/`file.filename` 为 `saveProgress` 现有 normal 分支同款（同方法内已有，照抄）。`encodePosition` 是否 throwing 以源码为准（normal 分支怎么调就怎么调）。replay 不需要 `activeSessionKey`。
 
-- [ ] **Step 3d: `replay(recordId:)` 设 startedAt + baseline；`endSession()` 清 baseline** — 在 `replay(recordId:)` 装配成功、设 `activeRecord = record` 附近加：
+- [ ] **Step 3d: `replay(recordId:)` 设 startedAt + baseline + 重开 autosave 栅栏；`endSession()` 清** — 在 `replay(recordId:)` 装配成功块（`activeReader/activeEngine/activeFile = ...` 之后）**改/加**：
 ```swift
+        // 原 `activeStartedAt = nil` 改为：
         activeStartedAt = now()    // 新需求10：replay 会话起始，供 PendingReplay.started_at
+        activeRecord = record      // （原有）
         replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count)  // fresh：startTick/0/0
         replayHasPersisted = false  // fresh：尚未拥有槽（codex plan-R6-F1）
+        resetAutosaveState()        // 新需求10（codex plan-R7-F1）：重开 autosave 栅栏（terminating=false 等）——
+                                    // 否则前一会话 endSession 留的 terminating=true 会让 fresh replay 的 tick/后台
+                                    // autosave 全 no-op（requestAutosave 现 guard !terminating），crash/后台杀=丢档。
+                                    // 与 startNewNormalSession(L188)/resumePending(L235) 同款。
 ```
 `endSession()` 末尾（清活跃上下文处）加 `replayBaseline = nil; replayHasPersisted = false`（会话结束清；新会话由 replay()/resume 重设，防御性清）。
 （**不**前置 `clearReplay`——单槽靠首存 INSERT OR REPLACE 覆盖 + clean-skip 守 clean B；失败装配不丢旧档。）
