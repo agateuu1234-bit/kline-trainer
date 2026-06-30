@@ -149,8 +149,9 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 `settings.resetAllProgress()` / `DefaultAppDB.resetAllTrainingProgress`（RFC-A 后保留记录）连带 **清 `pending_replay`**（与清 `pending_training` 并列）。重置后所有记录按钮恢复"再次训练"。
 
 ### A.8 契约 / 迁移
-- 新 migration **0006**：`CREATE TABLE pending_replay ...`；`user_version` 3→4。
-- **`CONTRACT_VERSION` 1.7→1.8**（沿用"每 migration 必 bump"先例 0004→1.6 / 0005→1.7）。additive（新表，旧读者忽略）；连带 CODEOWNERS approve 门（trust-boundary：`*.swift`/`*.sql`/migrations）。
+- 新 migration **0006**（`AppDBMigrations.makeMigrator()` 末尾，命名 `0006_v1.8_pending_replay`）：`CREATE TABLE IF NOT EXISTS pending_replay (...)` + `PRAGMA user_version = 4`（镜像 0004/0005 风格）。
+- **⚠️ 只加 migration，绝不动 `ios/sql/app_schema_v1.sql` 与 `AppDBMigrations.v1_4_baselineDDL`**：二者＝**v1.4 冻结基线**（`pending_training` 都无 session_key——那是 0004 加的），由 CI `scripts/check_app_schema_drift.sh` 校验**严格相等**。`pending_replay` 是 v1.8 新表，与 session_key 同样只走 migration（fresh install 经 0001→…→0006 链建全表），改基线会 drift 红。
+- **`CONTRACT_VERSION` 1.7→1.8**（沿用"每 migration 必 bump"先例 0004→1.6 / 0005→1.7）。additive（新表，旧读者忽略）；连带 CODEOWNERS approve 门（trust-boundary：`*.swift`/migrations）。
 
 ---
 
@@ -221,9 +222,9 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 ## 3. 受影响文件（预估，plan 阶段精化）
 
 **新增**
-- `ios/Contracts/Sources/KlineTrainerPersistence/Internal/PendingReplayRepositoryImpl.swift`
-- `pending_replay` 表（`ios/sql/app_schema_v1.sql` 新建库路径）+ migration 0006（`AppDBMigrations.swift`）
-- `PendingReplayRepository` 协议 + `InMemoryPendingReplayRepository`（测试替身位置同现有 normal 替身）
+- `ios/Contracts/Sources/KlineTrainerPersistence/Internal/PendingReplayRepositoryImpl.swift`（enum 静态方法，镜像 `PendingTrainingRepositoryImpl`）
+- migration **0006**（`AppDBMigrations.swift` 内 `CREATE TABLE pending_replay`，**不动** `app_schema_v1.sql`/baseline DDL）
+- `PendingReplayRepository` 协议（`Persistence/PendingReplayRepository.swift`，sync throws 镜像 `PendingTrainingRepository`）+ `InMemoryPendingReplayRepository`（`PreviewFakes/InMemoryFakes.swift`，`#if DEBUG`，镜像 normal 替身含 fail-injection/saveCount）
 - 测试：flow 矩阵、coordinator replay save/resume/clear、review playback、jumpToEnd、按钮文案、reset 清档、sheet 去取消、迁移。
 
 **修改**
@@ -231,8 +232,10 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 - `TrainingEngine/TrainingSessionCoordinator.swift`（**`requestAutosave` 门 `mode==.normal`→`shouldPersistProgress()`**、saveProgress 分流、replay 会话 startedAt（不前置 clear）、resumePendingReplay、review 派生 startTick、**`replaySettlementPayload` 改 async + fence+clearReplay**、discard 清 replay、hasResumableReplay）
 - `UI/TrainingSessionLifecycle.swift`（`replaySettlementRecord()` 改 async 以承接 async `replaySettlementPayload`）
 - `TrainingEngine/TrainingEngine.swift`（+`jumpToEnd()`；`FlowInput.review(record:, startTick:)` + `make` 的 `.review` 分支 + preview fixture 分支）
-- `Models/AppState.swift`（+`PendingReplay`）
+- `AppState.swift`（+`PendingReplay` 结构，镜像 `PendingTraining` 去 sessionKey + 加 `recordId: Int64`）
 - `Models/Models.swift`（CONTRACT_VERSION 1.7→1.8）
+- `KlineTrainerPersistence/DefaultAppDB.swift`（conform `PendingReplayRepository`：saveReplay/loadReplay/clearReplay 委托 Impl + 错误映射；`resetAllTrainingProgress` 加 `clearReplay`）
+- `KlineTrainerPersistence/AppContainer.swift`（coordinator 注入 `pendingReplayRepo: db`）
 - `App/AppRouter.swift`（replay 分流；history sheet 传 `hasResumableReplay` bool；reset 清 replay）
 - `UI/HistoryActionSheet.swift`（去「取消」按钮、`hasResumableReplay` 文案切换参数、缩小）
 - `UI/TrainingView.swift`（+`showsReviewControls = canAdvance && !canBuySell`；复盘控件条「下一根」+「快进到结尾」；**`routeEndOfSession` 的 replay 分支 `Task{}` 包裹 async `replaySettlementRecord`**；review autosave/maybeAutoEnd 已证安全）+ 可能新增 `UI/ReviewControlBar.swift`（精简控件条，平台无关纯内容 + 薄壳，plan 定是否拆文件）
