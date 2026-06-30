@@ -216,7 +216,8 @@ public struct PendingReplay: Codable, Equatable, Sendable {
 public protocol PendingReplayRepository: Sendable {
     func saveReplay(_: PendingReplay) throws
     func loadReplay() throws -> PendingReplay?
-    func clearReplay() throws
+    func clearReplay() throws                       // 无条件（reset 用）
+    func clearReplay(ifRecordId: Int64) throws      // 仅当槽属于该记录才清（终局/discard 用，codex plan-R3-F1）
 }
 ```
 
@@ -261,6 +262,11 @@ public final class InMemoryPendingReplayRepository: PendingReplayRepository, @un
         lock.lock(); defer { lock.unlock() }
         if let e = _failNextClearReplay { _failNextClearReplay = nil; throw e }
         pending = nil
+    }
+    public func clearReplay(ifRecordId recordId: Int64) throws {
+        lock.lock(); defer { lock.unlock() }
+        if let e = _failNextClearReplay { _failNextClearReplay = nil; throw e }
+        if pending?.recordId == recordId { pending = nil }
     }
 }
 ```
@@ -430,6 +436,11 @@ enum PendingReplayRepositoryImpl {
     static func clearReplay(_ db: Database) throws {
         try db.execute(sql: "DELETE FROM pending_replay WHERE id = 1")
     }
+
+    // codex plan-R3-F1：条件清——仅当单槽属于该记录（终局/discard，防删别的记录的槽）。原子，无读写竞态。
+    static func clearReplay(_ db: Database, ifRecordId recordId: Int64) throws {
+        try db.execute(sql: "DELETE FROM pending_replay WHERE id = 1 AND record_id = ?", arguments: [recordId])
+    }
 }
 ```
 
@@ -457,6 +468,15 @@ public func clearReplay() throws {
     do {
         try dbQueue.write { db in
             try PendingReplayRepositoryImpl.clearReplay(db)
+        }
+    } catch let appErr as AppError { throw appErr }
+    catch { throw PersistenceErrorMapping.translate(error) }
+}
+
+public func clearReplay(ifRecordId recordId: Int64) throws {
+    do {
+        try dbQueue.write { db in
+            try PendingReplayRepositoryImpl.clearReplay(db, ifRecordId: recordId)
         }
     } catch let appErr as AppError { throw appErr }
     catch { throw PersistenceErrorMapping.translate(error) }
@@ -552,14 +572,20 @@ init 签名加参数（在 `pendingRepo:` 之后）+ 体内赋值：
 将 `guard engine.flow.mode == .normal else { return }` 改为 `guard engine.flow.shouldPersistProgress() else { return }`；在构造/写库处按 mode 分流：normal 走原 `PendingTraining`+`pendingRepo.savePending`；replay 走新分支：
 ```swift
         if engine.flow.mode == .replay {
-            guard let recordId = activeRecord?.id, let started = activeStartedAt else { return }
+            // codex plan-R3-F2：fail-closed（镜像 normal saveProgress 的活跃上下文守卫）——
+            // 缺上下文 throw（autosave/back 显错）而非静默 return（静默=用户无感的进度丢失）。
+            guard activeEngine === engine, let file = activeFile,
+                  let recordId = activeRecord?.id, let started = activeStartedAt else {
+                throw AppError.internalError(module: "E6b", detail: "replay saveProgress without active session context")
+            }
+            _ = file   // file.filename 同 normal 取活跃文件名（下方 trainingSetFilename 用）
             let replay = PendingReplay(
                 recordId: recordId,
-                trainingSetFilename: <file.filename，同 normal 取活跃文件>,
+                trainingSetFilename: file.filename,
                 globalTickIndex: engine.tick.globalTickIndex,
                 upperPeriod: engine.upperPanel.period,
                 lowerPeriod: engine.lowerPanel.period,
-                positionData: <encodePosition(engine.position)，同 normal>,
+                positionData: try encodePosition(engine.position),   // 同 normal 分支的 encodePosition helper
                 cashBalance: max(0, engine.cashBalance),
                 feeSnapshot: engine.fees,
                 tradeOperations: engine.tradeOperations,
@@ -572,7 +598,7 @@ init 签名加参数（在 `pendingRepo:` 之后）+ 体内赋值：
         }
         // 以下为原 normal 分支（一字不改）...
 ```
-> implementer：`<...>` 处复用 `saveProgress` 现有 normal 分支取 `activeFile`/`encodePosition` 的同款代码（同方法内已有，照抄字段）。replay 不需要 `activeSessionKey`。
+> implementer：`encodePosition`/`file.filename` 为 `saveProgress` 现有 normal 分支同款（同方法内已有，照抄）。`encodePosition` 是否 throwing 以源码为准（normal 分支怎么调就怎么调）。replay 不需要 `activeSessionKey`。
 
 - [ ] **Step 3d: `replay(recordId:)` 设 startedAt** — 在 `replay(recordId:)` 装配成功、设 `activeRecord = record` 附近加：
 ```swift
@@ -796,6 +822,20 @@ git commit -m "feat(A5): resumePendingReplay + hasResumableReplay + AppRouter re
 }
 
 @MainActor
+@Test func replayTerminal_conditionalClear_preservesOtherRecordSlot() async throws {
+    // codex plan-R3-F1：A 有暂停槽；开新 replay B 未成功保存即到终局（手动结束）→ 终局条件清不删 A
+    let h = try CoordinatorTestHarness.make(seedRecordIds: [101, 202])   // 两条 record（harness 支持多 seed）
+    let eA = try await h.coordinator.replay(recordId: 101)
+    eA.holdOrObserve(panel: .upper)
+    try await h.coordinator.saveProgress(engine: eA)        // slot = 101
+    await h.coordinator.endSession()
+    let eB = try await h.coordinator.replay(recordId: 202)  // 开新 B，零操作（slot 仍 = 101）
+    _ = try await h.coordinator.replaySettlementPayload(engine: eB)   // B 终局：条件清 ifRecordId=202 → 不动 101
+    let slot = try h.pendingReplayRepo.loadReplay()
+    #expect(slot?.recordId == 101)                          // A 的槽仍在
+}
+
+@MainActor
 @Test func replayTerminal_clearFailureAfterPayload_keepsSlot_retryable() async throws {
     // codex plan-R1-F2：清档在 payload 构建成功之后；clearReplay 抛 → 方法抛 + 槽保留（可重试）
     let h = try CoordinatorTestHarness.make()
@@ -821,17 +861,22 @@ git commit -m "feat(A5): resumePendingReplay + hasResumableReplay + AppRouter re
 即在 `return TrainingRecord(...)` 之前先 `let record = TrainingRecord(...)`，然后：
 ```swift
         // 新需求10：fence 已在上方排空 autosave；payload 构建成功后才清槽（codex plan-R1-F2）。
-        // clearReplay 抛 → 整个方法抛、record 不返回 → caller 保留 session+槽、可重试（见 TrainingView）。
-        try pendingReplayRepo.clearReplay()
+        // **条件清（codex plan-R3-F1）**：仅清属于当前 replay 记录的槽——防"开新 replay B 未存即到终局"
+        // 误删另一记录 A 的暂停槽。activeRecord 已由 replay()/resumePendingReplay() 设（guard 取 id）。
+        // clearReplay 抛 → 方法抛、record 不返回 → caller 保留 session+槽、可重试（见 TrainingView）。
+        if let activeId = activeRecord?.id {
+            try pendingReplayRepo.clearReplay(ifRecordId: activeId)
+        }
         return record
 ```
 （`await fenceAndDrainAutosaves()` 插在两 guard 之后、`loadMeta` 之前。）
 
-- [ ] **Step 3b: `discardSession` 清 replay** — `discardSession()` 内（已 `await fenceAndDrainAutosaves()`）在清 pending 处加 replay 分支：
+- [ ] **Step 3b: `discardSession` 清 replay（条件清）** — `discardSession()` 内（已 `await fenceAndDrainAutosaves()`）在清 pending 处加 replay 分支：
 ```swift
-        // 新需求10：replay 局 discard 清 replay 槽（normal 清 pending_training，原逻辑）
+        // 新需求10：replay 局 discard 条件清 replay 槽（仅属当前记录，防误删别的记录槽，codex plan-R3-F1）；
+        // normal 清 pending_training（原逻辑）。
         if activeEngine?.flow.mode == .replay {
-            try pendingReplayRepo.clearReplay()
+            if let activeId = activeRecord?.id { try pendingReplayRepo.clearReplay(ifRecordId: activeId) }
         } else {
             try pendingRepo.clearPending()    // 原逻辑
         }
@@ -998,6 +1043,24 @@ git commit -m "feat(A7): HistoryActionSheet drop 取消 + 再次训练/返回训
 ```
 （同时把 Task A1 的 `shouldPersistProgress_matrix` 里 `ReviewFlow(record:)` 改成 `ReviewFlow(record:, startTick:rec.finalTick)` 以编译。）
 
+加 make 守卫测试（codex plan-R3-F3：startTick > finalTick 须可恢复报错而非 trap）：
+```swift
+@MainActor
+@Test func make_review_startTickAfterFinalTick_throwsNotTrap() throws {
+    let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+    let rec = TrainingRecord(id: 1, trainingSetFilename: "x.sqlite", createdAt: 0, stockCode: "1", stockName: "n",
+        startYear: 2021, startMonth: 1, totalCapital: 100000, profit: 0, returnRate: 0,
+        maxDrawdown: 0, buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: 5)
+    // startTick(10) > finalTick(5)：guard 在候选校验/flow 构造前抛 → 不触 ClosedRange trap
+    #expect(throws: AppError.self) {
+        _ = try TrainingEngine.make(.review(record: rec, startTick: 10),
+                                    allCandles: [:],
+                                    initialCapital: 100_000, initialCashBalance: 100_000)
+    }
+}
+```
+> implementer：`make` 其余参数若无默认值则补最小合法值；关键是断言抛 `AppError`（不崩）。
+
 - [ ] **Step 2: 跑测试确认失败** — FAIL。
 
 - [ ] **Step 3a: 协议加 `canJumpToEnd`**（`TrainingFlowController` 协议 + 三 struct）
@@ -1032,9 +1095,13 @@ public struct ReviewFlow: TrainingFlowController {
 
 - [ ] **Step 3c: `FlowInput.review` 带 startTick + `make` 分支 + preview**
 - `FlowInput`：`case review(record: TrainingRecord)` → `case review(record: TrainingRecord, startTick: Int)`。
-- `make` 内 `case .review:`：
+- `make` 内 `case .review:`（**先校验 `finalTick >= startTick >= 0` 再构造 flow**，codex plan-R3-F3：损坏 record 的 finalTick < startTick 会让 `startTick...finalTick` ClosedRange 构造 trap 崩溃；须在构造前 throw 可恢复错误）：
 ```swift
         case .review(let record, let startTick):
+            // codex plan-R3-F3：startTick 越界（损坏 record/metadata）→ 可恢复 trainingSet 错误，非 ClosedRange trap
+            guard startTick >= 0, record.finalTick >= startTick else {
+                throw AppError.trainingSet(.emptyData)
+            }
             maxTick = record.finalTick
             flow = ReviewFlow(record: record, startTick: startTick)
 ```

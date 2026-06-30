@@ -112,7 +112,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
    - **`requestAutosave(engine:immediate:)`**（L78-79，**autosave 真入口**）：`guard !terminating, engine.flow.mode == .normal` → 改 `guard !terminating, engine.flow.shouldPersistProgress()`。这样 replay 的 tick 节流 / 交易·画线 immediate / 后台 flush 全部启用；**review 仍 `shouldPersistProgress()==false` → no-op**。`flushAutosave`/`flushForBackground` 只 await 已排程 task、无模式门，自动适配。
    - **`saveProgress()`**（L326-327）：`guard mode == .normal` → `guard shouldPersistProgress()`；体内按 mode 分流：
      - `mode == .normal` → 构造 `PendingTraining` 写 `pending_training`（**原逻辑一字不改**）。
-     - `mode == .replay` → 构造 `PendingReplay`（`recordId` 取 `activeRecord` 持久 id；防御性 `guard let id = activeRecord?.id else { return }`；其余字段同 normal 映射：`cash_balance = max(0, engine.cashBalance)`、`accumulated_capital = engine.initialCapital`、`global_tick_index = engine.tick.globalTickIndex` 等）写 `pending_replay`。replay 路由不依赖 `activeSessionKey`（无 sessionKey）；依赖 `activeRecord?.id` 与 `activeStartedAt`。
+     - `mode == .replay` → **fail-closed 守卫（codex plan-R3-F2，镜像 normal 活跃上下文守卫）**：`guard activeEngine === engine, let file = activeFile, let recordId = activeRecord?.id, let started = activeStartedAt else { throw .internalError(...) }`——缺上下文 **throw**（autosave/back 显错）而非静默 `return`（静默=用户无感进度丢失）。构造 `PendingReplay`（`trainingSetFilename=file.filename`、`cash_balance = max(0, engine.cashBalance)`、`accumulated_capital = engine.initialCapital`、`global_tick_index = engine.tick.globalTickIndex`、`startedAt=started`、`recordId` 等）写 `pending_replay`。replay 不依赖 `activeSessionKey`（无 sessionKey）。
 2. **`replay(recordId:)`（从头）补充**（codex spec-R1-F3：**不前置 clear**——易错装配失败会丢旧档）：
    - **不**在装配前 `clearReplay()`。**单槽覆盖靠首次保存的 `INSERT OR REPLACE`（id=1）自然覆盖**：新 replay 一旦 autosave/back 即写 `pending_replay(recordId=新)` 覆盖旧档。故"开新 replay 即覆盖"语义保留，且**装配（开 reader/load candles/构造引擎）任一步失败 → 旧暂停档原封不动**（无数据丢失）。
    - 设 `activeStartedAt = now()`（replay 会话起始，供 `PendingReplay.started_at`）；`activeRecord = record`（已设）。`activeSessionKey` 保持 nil。
@@ -128,9 +128,10 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 4. **清档时机（关键——区分"续局保留" vs "终局清除"，且终局须 fence）**：
    - **`endSession()` 对 replay 不清 `pending_replay`**。理由：`back()` = `saveProgress`(写 pending_replay) + `endSession()`；若 endSession 清档则续局立即失效。endSession 仅关 reader/清活跃上下文（原语义，含 `terminating=true` fence）。
    - **终局清档须 fence+drain（codex spec-R1-F2）**：replay 走到结算（到 maxTick 自动结算 **或** 手动「结束本局」）→ 终局清档前**必须 `await fenceAndDrainAutosaves()` 再 `clearReplay()`**，否则末根 tick 的 `onChange` 已排队的 autosave 会在 clear 后跑、把 maxTick 终态写回 `pending_replay` → 按钮错显"返回训练"、再进=终态陈旧局。镜像 Normal `finalize`（L362 先 fence 再单事务）。
-     - 实现：`replaySettlementPayload` 现为 **sync `throws` 且无 fence**（注释明示原"不触 pending"不变量——本 PR 刻意打破）→ 改为 **async**，**顺序（codex plan-R1-F2）**：①两 guard → ②`await fenceAndDrainAutosaves()`（此后无并发写）→ ③`loadMeta` + 构造 `record`（**全部 throwing payload 工作，槽仍在**）→ ④**成功后才** `try clearReplay()` → ⑤return record。**清档绝不早于 payload 全部成功**，否则 loadMeta 抛会"既删槽又无结算"。clearReplay 抛 → 方法抛、record 不返回 → **caller 保留 session+槽、可重试**（不 `onSessionEnded(nil)` 拆毁）。连带 `lifecycle.replaySettlementRecord()` 改 async；`TrainingView` 新增 `runReplaySettlement()`（镜像 `runFinalize` 重入门）+ `replaySettlementFailed` alert（重试/退出本局）；`routeEndOfSession` replay 分支调它。`fenceAndDrainAutosaves` 单 `@MainActor` + 同步 GRDB 写保证 drain 后无并发脏写。`clearReplay` 幂等（DELETE）。
-   - **丢弃清档**：`discardSession()` 当 `mode==.replay` 清 `pending_replay`（已先 `fenceAndDrainAutosaves`，L460 原逻辑；normal 时清 `pending_training`）。
-   - 故 pending_replay 生命周期：`replay()`(从头, **不清旧档**) → 玩(autosave 写档) → `back()`(saveProgress 写档, endSession **不清**) → 续局 `resumePendingReplay` → … → 终局结算(**fence→clear**) **或** discard(fence→clear) **或** 被新 replay 首存 `INSERT OR REPLACE` 覆盖。
+     - 实现：`replaySettlementPayload` 现为 **sync `throws` 且无 fence**（注释明示原"不触 pending"不变量——本 PR 刻意打破）→ 改为 **async**，**顺序（codex plan-R1-F2）**：①两 guard → ②`await fenceAndDrainAutosaves()`（此后无并发写）→ ③`loadMeta` + 构造 `record`（**全部 throwing payload 工作，槽仍在**）→ ④**成功后才** **条件清** `if let id = activeRecord?.id { try clearReplay(ifRecordId: id) }` → ⑤return record。**清档绝不早于 payload 全部成功**。clearReplay 抛 → 方法抛、record 不返回 → **caller 保留 session+槽、可重试**（不 `onSessionEnded(nil)` 拆毁）。连带 `lifecycle.replaySettlementRecord()` 改 async；`TrainingView` 新增 `runReplaySettlement()`（镜像 `runFinalize` 重入门）+ `replaySettlementFailed` alert（重试/退出本局）；`routeEndOfSession` replay 分支调它。
+   - **条件清（codex plan-R3-F1，关键）**：终局/discard 用 **`clearReplay(ifRecordId: activeRecord.id)`**（原子 `DELETE WHERE id=1 AND record_id=?`），**仅清属于当前 replay 记录的槽**。因"不前置 clear"——开新 replay B 在任何成功保存前就到终局（如开 B 立即「结束本局」）时槽仍 = 旧记录 A；无条件清会误删 A。条件清则 B 终局 no-op、A 保留。reset（§A.7）用无条件 `clearReplay()` 清全部。
+   - **丢弃清档**：`discardSession()` 当 `mode==.replay` 用 `clearReplay(ifRecordId: activeRecord.id)`（已先 `fenceAndDrainAutosaves`，L460；normal 时清 `pending_training`）。
+   - 故 pending_replay 生命周期：`replay()`(从头, **不清旧档**) → 玩(autosave 写档) → `back()`(saveProgress 写档, endSession **不清**) → 续局 `resumePendingReplay` → … → 终局结算/discard(**fence→条件清 ifRecordId**) **或** 被新 replay 首存 `INSERT OR REPLACE` 覆盖 **或** reset 无条件清。
 5. **新增查询 `hasResumableReplay(recordId:) -> Bool`**：`(try? loadReplay())?.recordId == recordId`。**display-only / advisory**（仅历史弹窗按钮文案）；**不当路由门**。读失败保守返 false 安全，因路由是 resume-first 权威（见 §A.5）：一次瞬态 false 至多让按钮短暂误显"再次训练"，点击仍走 resume-first、不会丢槽。
 
 ### A.5 路由 + UI（**resume-first 权威**，codex plan-R1-F1）
@@ -171,7 +172,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 
 ### B.2 startTick 派生（无 schema 改动）+ FlowInput 触点
 `coordinator.review(recordId:)` 增：load metadata（reader 已开），`startTick = TrainingEngine.startTick(forStartDatetime: meta.startDatetime, in: ...)`（与 replay 同一调用）；经 FlowInput 传入。**`TrainingRecord` 不加字段**（startTick 从训练集 metadata 确定性派生，记录引用同一 `trainingSetFilename` → 同 metadata → 同 startTick）。
-- **FlowInput 触点**（已勘实）：`TrainingEngine.FlowInput.review(record:)` → **`.review(record:, startTick:)`**；`make` 内 `case .review:` 改 `maxTick = record.finalTick`（不变）+ `flow = ReviewFlow(record: record, startTick: startTick)`。同步：preview fixture（`make` DEBUG 分支 `case .review`）补 startTick（preview 取 0 或派生值）。
+- **FlowInput 触点**（已勘实）：`TrainingEngine.FlowInput.review(record:)` → **`.review(record:, startTick:)`**；`make` 内 `case .review:` **先校验** `guard startTick >= 0, record.finalTick >= startTick else { throw .trainingSet(.emptyData) }`（**codex plan-R3-F3**：损坏 record 的 `finalTick < startTick` 会让 `startTick...finalTick` ClosedRange 构造 **trap 崩溃**；须在构造 flow 前抛可恢复错误）→ `maxTick = record.finalTick` + `flow = ReviewFlow(record: record, startTick: startTick)`。同步：preview fixture（`make` DEBUG 分支 `case .review`）补 startTick（preview 取 0 或派生值）。
 - 引擎前置仍满足（已勘实 L96/L106）：`allowedTickRange.contains(startTick)`（startTick∈start...final）；`upperBound==maxTick`（`.review` maxTick=record.finalTick 不变 = range 上界 finalTick）；`m3.last.endGlobalIndex >= maxTick` 用 `>=`（review m3 为训练组全集，末根可 > finalTick，安全）。
 
 ### B.3 引擎步进 / jump-to-end
@@ -236,7 +237,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 - `TrainingEngine/TrainingEngine.swift`（+`jumpToEnd()`；`FlowInput.review(record:, startTick:)` + `make` 的 `.review` 分支 + preview fixture 分支）
 - `AppState.swift`（+`PendingReplay` 结构，镜像 `PendingTraining` 去 sessionKey + 加 `recordId: Int64`）
 - `Models/Models.swift`（CONTRACT_VERSION 1.7→1.8）
-- `KlineTrainerPersistence/DefaultAppDB.swift`（conform `PendingReplayRepository`：saveReplay/loadReplay/clearReplay 委托 Impl + 错误映射；`resetAllTrainingProgress` 加 `clearReplay`）
+- `KlineTrainerPersistence/DefaultAppDB.swift`（conform `PendingReplayRepository`：saveReplay/loadReplay/clearReplay/**clearReplay(ifRecordId:)** 委托 Impl + 错误映射；`resetAllTrainingProgress` 加无条件 `clearReplay`）
 - `KlineTrainerPersistence/AppContainer.swift`（coordinator 注入 `pendingReplayRepo: db`）
 - `App/AppRouter.swift`（`replay(id:)` resume-first 分流：先 `resumePendingReplay`，nil→fresh，throw→setError）
 - `App/AppRootView.swift`（历史弹窗传 display-only `hasResumableReplay` bool）
@@ -255,6 +256,8 @@ CREATE TABLE IF NOT EXISTS pending_replay (
   - **autosave 入口（spec-R1-F1）**：replay 的 `requestAutosave(immediate:false)`（tick 节流）、`requestAutosave(immediate:true)`（交易/画线）、`flushAutosave`（后台）均**写 `pending_replay`**；**review 的 requestAutosave 仍 no-op**（不写任何 pending）。
   - `resumePendingReplay` 还原 tick/cash/position/markers/drawings/drawdown；recordId 不匹配 → nil（**不清档**）；**瞬态 loadReplay/loadRecordBundle 失败 → 传播 throw + 槽保留**（不清、不 fresh，codex plan-R1-F1）；仅 openReader 已验证损坏 → 清档 nil。
   - **单槽覆盖（spec-R1-F3）**：已有 `pending_replay`(A)，开新 replay(B) 并保存 → slot 变 B（`INSERT OR REPLACE` 覆盖）；**failed fresh replay 回归**：已有 A、开 B 但装配抛错 → A 仍在（未被清）。
+  - **条件清不删别记录槽（plan-R3-F1）**：A 有槽、开 B 未保存即终局/discard → 条件清 `ifRecordId=B` no-op → A 的槽保留。**fail-closed save（plan-R3-F2）**：缺活跃上下文（如 startedAt/recordId 缺、stale engine）→ saveProgress 对 replay **throw**（非静默 no-op）。
+  - **复盘 tick 范围守卫（plan-R3-F3）**：`make(.review(record:finalTick=5, startTick=10))` → 抛 `AppError.trainingSet(.emptyData)`（不 trap）。
   - **终局清档 fence + payload-before-clear 回归（spec-R1-F2 / plan-R1-F2）**：replay 步进到 maxTick 且有一个排队的 autosave → 终局 fence→构建 payload→clear 后 `pending_replay` 仍为空（排队 autosave 不复活）；**clearReplay 抛 → 方法抛 + 槽保留（可重试）**；`discardSession`(replay) → 清档。
   - `saveProgress` 在 review 模式 = no-op；normal 路径回归不变（写 `pending_training`，字节级）。
   - reset → `pending_replay` 同 `pending_training` 一起清空。
