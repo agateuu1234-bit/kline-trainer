@@ -391,6 +391,69 @@ struct TwoFingerStepTests {
     }
 }
 
+@Suite("单指竖滑切周期")
+struct SingleFingerVerticalSwipeTests {
+
+    // 竖直锁定（dy > dx*1.5 且 dy>=8）→ verticalRejected，过程不发 pan
+    @Test("竖直拖动过程不发 onPan emissions")
+    func verticalNoPanDuringChange() {
+        let began = singlePanStep(phase: .began, cumulative: CGPoint(x: 0, y: 30), velocityX: 0,
+                                  lifecycle: .idle, lastTranslationX: 0)
+        #expect(began.lifecycle == .verticalRejected)
+        #expect(began.emissions.isEmpty)
+        #expect(began.periodSwipe == nil)
+    }
+
+    // 松手净竖移 >= 阈值(40) → 发竖滑切周期；上滑(y<0)=up、下滑(y>0)=down
+    @Test("松手净竖移 >= 40 → 切周期；上滑 up / 下滑 down")
+    func endedAboveThresholdSwitches() {
+        // 上滑：y = -50
+        let up = singlePanStep(phase: .ended, cumulative: CGPoint(x: 0, y: -50), velocityX: 0,
+                               lifecycle: .verticalRejected, lastTranslationX: 0)
+        #expect(up.periodSwipe == .up)
+        #expect(up.emissions.isEmpty)            // 竖滑不发 pan
+        #expect(up.lifecycle == .idle)
+        // 下滑：y = +50
+        let dn = singlePanStep(phase: .ended, cumulative: CGPoint(x: 0, y: 50), velocityX: 0,
+                               lifecycle: .verticalRejected, lastTranslationX: 0)
+        #expect(dn.periodSwipe == .down)
+    }
+
+    // 松手净竖移 < 阈值 → 不切（防误触）
+    @Test("松手净竖移 < 40 → 不切周期")
+    func endedBelowThresholdNoSwitch() {
+        let r = singlePanStep(phase: .ended, cumulative: CGPoint(x: 0, y: -30), velocityX: 0,
+                              lifecycle: .verticalRejected, lastTranslationX: 0)
+        #expect(r.periodSwipe == nil)
+    }
+
+    // .cancelled（被两指接管等）→ 不切
+    @Test(".cancelled 不切周期")
+    func cancelledNoSwitch() {
+        let r = singlePanStep(phase: .cancelled, cumulative: CGPoint(x: 0, y: -80), velocityX: 0,
+                              lifecycle: .verticalRejected, lastTranslationX: 0)
+        #expect(r.periodSwipe == nil)
+    }
+
+    // 水平 pan 不受影响：仍发 onPan、periodSwipe == nil
+    @Test("水平拖动仍发 pan、不切周期")
+    func horizontalUnaffected() {
+        let began = singlePanStep(phase: .began, cumulative: CGPoint(x: 30, y: 0), velocityX: 5,
+                                  lifecycle: .idle, lastTranslationX: 0)
+        #expect(began.lifecycle == .horizontalActive)
+        #expect(began.periodSwipe == nil)
+        #expect(began.emissions.contains { $0.phase == .began })
+    }
+
+    // drawingTakesOver：竖直被绘线吃掉，不切周期
+    @Test("drawing 模式竖直 → 不切周期")
+    func drawingModeNoSwitch() {
+        let r = singlePanStep(phase: .ended, cumulative: CGPoint(x: 0, y: -80), velocityX: 0,
+                              lifecycle: .verticalRejected, lastTranslationX: 0, drawingTakesOver: true)
+        #expect(r.periodSwipe == nil)
+    }
+}
+
 @Suite("Gesture value types Equatable")
 struct GestureValueTypeTests {
     @Test("switchPeriod 方向区分")
