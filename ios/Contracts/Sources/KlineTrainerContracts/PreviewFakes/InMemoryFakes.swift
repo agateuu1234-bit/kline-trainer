@@ -177,6 +177,60 @@ public final class InMemoryPendingTrainingRepository: PendingTrainingRepository,
     }
 }
 
+public final class InMemoryPendingReplayRepository: PendingReplayRepository, @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: PendingReplay?
+
+    private var _failNextSaveReplay: AppError?
+    public var failNextSaveReplay: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextSaveReplay }
+        set { lock.lock(); defer { lock.unlock() }; _failNextSaveReplay = newValue }
+    }
+    private var _failNextClearReplay: AppError?
+    public var failNextClearReplay: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextClearReplay }
+        set { lock.lock(); defer { lock.unlock() }; _failNextClearReplay = newValue }
+    }
+    private var _failNextLoadReplay: AppError?
+    public var failNextLoadReplay: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextLoadReplay }
+        set { lock.lock(); defer { lock.unlock() }; _failNextLoadReplay = newValue }
+    }
+    private var _saveCount = 0
+    public var saveCount: Int { lock.lock(); defer { lock.unlock() }; return _saveCount }
+
+    public init() {}
+
+    public func saveReplay(_ p: PendingReplay) throws {
+        lock.lock(); defer { lock.unlock() }
+        if let e = _failNextSaveReplay { _failNextSaveReplay = nil; throw e }
+        pending = p
+        _saveCount += 1
+    }
+    public func loadReplay() throws -> PendingReplay? {
+        lock.lock(); defer { lock.unlock() }
+        if let e = _failNextLoadReplay { _failNextLoadReplay = nil; throw e }
+        return pending
+    }
+    /// 元数据读取**不消费** `failNextLoadReplay`（生产 Impl 只读简单列、不解码 payload，故不受 payload 损坏影响）。
+    /// 这样测试可"slotInfo 成功（返 recordId）+ loadReplay 抛 .dbCorrupted"模拟损坏 payload 的本记录槽。
+    public func loadReplaySlotInfo() throws -> ReplaySlotInfo? {
+        lock.lock(); defer { lock.unlock() }
+        guard let p = pending else { return nil }
+        return ReplaySlotInfo(recordId: p.recordId, trainingSetFilename: p.trainingSetFilename)
+    }
+    public func clearReplay() throws {
+        lock.lock(); defer { lock.unlock() }
+        if let e = _failNextClearReplay { _failNextClearReplay = nil; throw e }
+        pending = nil
+    }
+    public func clearReplay(ifRecordId recordId: Int64) throws {
+        lock.lock(); defer { lock.unlock() }
+        if let e = _failNextClearReplay { _failNextClearReplay = nil; throw e }
+        if pending?.recordId == recordId { pending = nil }
+    }
+}
+
 /// Wave 3 顺位 10a：SessionFinalizationPort 的 in-memory fake。
 /// 组合既有 record/pending 两 fake（保证 fake 状态一致）；mirror 生产单事务语义：
 /// 失败注入时**零状态变更**（原子）；同 sessionKey 重试幂等返已存 id。

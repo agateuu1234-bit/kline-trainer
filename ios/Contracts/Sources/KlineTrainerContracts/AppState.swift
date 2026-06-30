@@ -129,6 +129,54 @@ public struct PendingTraining: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - Pending Replay（新需求10 replay 续局；镜像 PendingTraining，去 sessionKey，加 recordId）
+
+public struct PendingReplay: Codable, Equatable, Sendable {
+    public let recordId: Int64
+    public let trainingSetFilename: String
+    public let globalTickIndex: Int
+    public let upperPeriod: Period
+    public let lowerPeriod: Period
+    public let positionData: Data
+    public let cashBalance: Double
+    public let feeSnapshot: FeeSnapshot
+    public let tradeOperations: [TradeOperation]
+    public let drawings: [DrawingObject]
+    public let startedAt: Int64
+    public let accumulatedCapital: Double
+    public let drawdown: DrawdownAccumulator
+
+    public init(
+        recordId: Int64,
+        trainingSetFilename: String,
+        globalTickIndex: Int,
+        upperPeriod: Period,
+        lowerPeriod: Period,
+        positionData: Data,
+        cashBalance: Double,
+        feeSnapshot: FeeSnapshot,
+        tradeOperations: [TradeOperation],
+        drawings: [DrawingObject],
+        startedAt: Int64,
+        accumulatedCapital: Double,
+        drawdown: DrawdownAccumulator
+    ) {
+        self.recordId = recordId
+        self.trainingSetFilename = trainingSetFilename
+        self.globalTickIndex = globalTickIndex
+        self.upperPeriod = upperPeriod
+        self.lowerPeriod = lowerPeriod
+        self.positionData = positionData
+        self.cashBalance = cashBalance
+        self.feeSnapshot = feeSnapshot
+        self.tradeOperations = tradeOperations
+        self.drawings = drawings
+        self.startedAt = startedAt
+        self.accumulatedCapital = accumulatedCapital
+        self.drawdown = drawdown
+    }
+}
+
 // MARK: - Training Set File (NOT Codable: localURL is runtime filesystem reference; P5 CacheManager scope)
 
 public struct TrainingSetFile: Equatable, Sendable {
