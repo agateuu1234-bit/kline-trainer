@@ -17,10 +17,15 @@ import CoreGraphics
 public struct ChartContainerView: UIViewRepresentable {
     public let panel: PanelId
     @Bindable public var engine: TrainingEngine
+    /// RFC-C 跨面板光标互斥：当前持有十字光标的面板（nil=无）。共享 view-state（**不进 engine**，守 spec §4.2 原则）。
+    @Binding public var crosshairOwner: PanelId?
 
-    public init(panel: PanelId, engine: TrainingEngine) {
+    /// `crosshairOwner` 默认 `.constant(nil)`：保旧 2-arg `init(panel:engine:)` 源兼容（public API 不破坏，codex WB-high）；
+    /// TrainingView 传真 binding 启用跨面板互斥，其余调用方（含测试 2-arg）走默认=无跨面板协调。
+    public init(panel: PanelId, engine: TrainingEngine, crosshairOwner: Binding<PanelId?> = .constant(nil)) {
         self.panel = panel
         self._engine = Bindable(wrappedValue: engine)
+        self._crosshairOwner = crosshairOwner
     }
 
     public func makeCoordinator() -> Coordinator { Coordinator(panel: panel, engine: engine) }
@@ -33,7 +38,10 @@ public struct ChartContainerView: UIViewRepresentable {
 
     public func updateUIView(_ view: KLineView, context: Context) {
         // 每次重建刷新 Coordinator 的 engine/panel 引用（ChartContainerView 是值类型，可能换 engine）。
-        context.coordinator.sync(panel: panel, engine: engine, view: view)
+        // RFC-C：传当前 crosshairOwner（跨面板互斥读）+ 刷新 setter（Coordinator 写共享态，仅手势回调/延后触发）。
+        context.coordinator.sync(panel: panel, engine: engine, view: view,
+                                 crosshairOwner: crosshairOwner,
+                                 setCrosshairOwner: { crosshairOwner = $0 })
         // codex R3-F1：observation 路径与 layout 路径共用同一带 guard 的 rebuild helper（消除无效 bounds
         // guard 在两路径漂移；SwiftUI 在视图瞬态零尺寸期触发 updateUIView 也不会 clamp offset 吞滚动位置）。
         context.coordinator.rebuildRenderState(bounds: view.bounds)
@@ -50,8 +58,16 @@ public struct ChartContainerView: UIViewRepresentable {
         /// engine.drawings 才是单一真相（spec §D-MANAGER）。
         private let manager = DrawingToolManager(enabledTools: [.horizontal])
         private let inputController: DrawingInputController = DefaultDrawingInputController()
-        /// 视图层瞬态十字光标（D3，不进 engine）。长按时设置，松手清空。
+        /// 视图层瞬态十字光标（D3，不进 engine）。RFC-C：黏滞——长按进入、点击才清。
         public private(set) var crosshairPoint: CGPoint?
+        /// RFC-C 黏滞模式是否激活（= crosshairPoint 已置且未点击退出）。
+        private var crosshairActive = false
+        /// RFC-C 吸附 haptic 去重：上次吸附到的 candle index。
+        private var lastSnappedIndex: Int?
+        /// RFC-C 吸附震动发生器（UIKit）。
+        private let snapHaptic = UIImpactFeedbackGenerator(style: .light)
+        /// RFC-C 跨面板光标互斥：写共享 crosshairOwner（updateUIView 每帧刷新；仅手势回调/延后调用，不在 view-update 期同步改 @State）。
+        private var setCrosshairOwner: ((PanelId?) -> Void)?
 
         public init(panel: PanelId, engine: TrainingEngine) {
             self.panel = panel
@@ -59,13 +75,25 @@ public struct ChartContainerView: UIViewRepresentable {
         }
 
         /// updateUIView 每次调：刷新引用（值类型 ChartContainerView 可能携新 engine/panel）。
-        func sync(panel: PanelId, engine: TrainingEngine, view: KLineView) {
+        func sync(panel: PanelId, engine: TrainingEngine, view: KLineView,
+                  crosshairOwner: PanelId? = nil,
+                  setCrosshairOwner: ((PanelId?) -> Void)? = nil) {
             self.panel = panel
             self.engine = engine
             self.view = view
+            self.setCrosshairOwner = setCrosshairOwner
             view.panel = panel                                    // Wave 3 13c-R1：draw 区间归属上/下
+            // RFC-C 跨面板互斥：另一面板持有光标 → 退出本面板（不释放共享态，对方仍持有）。
+            if let owner = crosshairOwner, owner != panel, crosshairActive {
+                exitCrosshair(releaseOwnership: false)
+            }
             // drawing 模式下 arbiter 截获单指 pan（spec §C7）+ 对齐 manager.activeTool（顺位 4）。
             let drawing = isDrawing(engine: engine, panel: panel)
+            if drawing && crosshairActive {                       // RFC-C：进画线模式先退黏滞光标（双向互斥，codex R5-M2）
+                exitCrosshair(releaseOwnership: false)            // 本地清（view-update 期安全）
+                let release = setCrosshairOwner
+                DispatchQueue.main.async { release?(nil) }        // 释放共享 owner 延后到 update 后（不在 view-update 期改 @State）
+            }
             arbiter.drawingMode = drawing
             if drawing {
                 if manager.activeTool == nil { manager.toggle(.horizontal) }     // 进入：对齐（条件 toggle，非每帧盲翻）
@@ -95,16 +123,29 @@ public struct ChartContainerView: UIViewRepresentable {
                 case .cancelled: engine.cancelPan(panel: self.panel)
                 }
             }
-            arbiter.onTwoFingerSwipe = { [weak self] swipe in
+            // RFC-C：two-finger 不再切周期（改单指竖滑）——不接 onTwoFingerSwipe。
+            arbiter.onVerticalSwipe = { [weak self] swipe in
                 guard let self, let engine = self.engine else { return }
                 engine.switchPeriodCombo(direction: periodDirection(for: swipe))
             }
             arbiter.onLongPress = { [weak self] location, phase in
                 guard let self else { return }
                 switch phase {
-                case .began, .changed: self.setCrosshair(location)
-                case .ended, .cancelled: self.setCrosshair(nil)
+                case .began:
+                    guard let engine = self.engine, !self.isDrawing(engine: engine, panel: self.panel) else { return }
+                    self.enterCrosshair(at: location)            // drawing 优先：drawing 时不进光标
+                case .changed:
+                    if self.crosshairActive { self.moveCrosshair(to: location) }
+                case .ended, .cancelled:
+                    break                                         // 黏滞：松手保留，不清
                 }
+            }
+            arbiter.onCrosshairMove = { [weak self] location in
+                guard let self, self.crosshairActive else { return }
+                self.moveCrosshair(to: location)                 // 松手后再拖动移光标（图仍冻结）
+            }
+            arbiter.onCrosshairExit = { [weak self] in
+                self?.exitCrosshair()
             }
             arbiter.onPinch = { [weak self] scale, focus, phase in
                 guard let self, let engine = self.engine else { return }
@@ -152,6 +193,50 @@ public struct ChartContainerView: UIViewRepresentable {
                 engine: engine, panel: panel, bounds: view.bounds, crosshair: point)
             RenderSignposter.end(makeToken)
             view.renderState = newState
+        }
+
+        /// RFC-C 进入黏滞十字光标：**先守卫（仅主图区 + 有效渲染态）再置状态**——防 volume/MACD/轴区
+        /// 长按导致「隐形冻结」（codex M1）。守卫不过 = no-op，不冻结、不置 crosshairMode。
+        private func enterCrosshair(at location: CGPoint) {
+            guard let view else { return }
+            let vp = view.renderState.viewport
+            guard vp.geometry.candleStep > 0,
+                  !view.renderState.visibleCandles.isEmpty,
+                  vp.mainChartFrame.contains(location) else { return }   // 非主图区 → 不进光标、不冻结
+            crosshairActive = true
+            arbiter.crosshairMode = true
+            setCrosshairOwner?(panel)              // RFC-C：宣示持有光标 → 另一面板 sync 见 owner≠自己即退出（跨面板互斥）
+            snapHaptic.prepare()
+            lastSnappedIndex = nil
+            moveCrosshair(to: location)
+        }
+
+        /// RFC-C 移动光标：**先守卫（主图区内）再刷新**；出主图区则忽略本次移动（保留上次有效位置，不消失）。
+        /// 吸附 index 变化时震一次（去重）。
+        private func moveCrosshair(to location: CGPoint) {
+            guard let view else { return }
+            let vp = view.renderState.viewport
+            guard vp.geometry.candleStep > 0,                            // 空图守卫（Int(NaN) 防崩）
+                  !view.renderState.visibleCandles.isEmpty,
+                  vp.mainChartFrame.contains(location) else { return }   // 出主图区忽略本次（保留上次）
+            setCrosshair(location)                                       // 既有：置点 + rebuild renderState
+            let mapper = CoordinateMapper(viewport: vp, displayScale: view.traitCollection.displayScale)
+            let idx = CrosshairLayout.snappedCandleIndex(at: location.x, mapper: mapper,
+                                                         candles: view.renderState.visibleCandles)
+            if idx != lastSnappedIndex {                                 // 每根一次（去重）
+                snapHaptic.impactOccurred()
+                lastSnappedIndex = idx
+            }
+        }
+
+        /// RFC-C 退出黏滞：清光标 + arbiter 解冻 + 复位 haptic 去重。
+        /// `releaseOwnership`：user 主动退出（点击）/进画线 → true 释放共享 owner；被另一面板接管退出 → false（对方持有，不碰）。
+        private func exitCrosshair(releaseOwnership: Bool = true) {
+            crosshairActive = false
+            arbiter.crosshairMode = false
+            lastSnappedIndex = nil
+            setCrosshair(nil)
+            if releaseOwnership { setCrosshairOwner?(nil) }
         }
 
         /// 顺位 4：drawing 模式单指点击落锚 → 投影 engine.drawings → 退出 .drawing。

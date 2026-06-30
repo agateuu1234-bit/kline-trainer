@@ -13,6 +13,12 @@ public enum RenderStateBuilder {
     static let defaultVisibleCount = 80
     static let candleWidthRatio: CGFloat = 0.7
 
+    /// RFC-C：可见切片首根之前一根的收盘（startIndex>0 时存在于完整数组、在切片外）。
+    /// 供十字光标信息栏算最左可见 K 线的真实涨跌基准（codex R2-M）。
+    static func previousCloseBeforeVisible(candles: [KLineCandle], startIndex: Int) -> Double? {
+        startIndex > 0 ? candles[startIndex - 1].close : nil
+    }
+
     /// 主入口：装配完整 KLineRenderState。空 candle / bounds.width 或 height <=0 → .empty。
     /// 不取 displayScale（renderState 无该字段；亚像素对齐在 KLineView.draw 用 traitCollection.displayScale）。
     @MainActor
@@ -53,7 +59,8 @@ public enum RenderStateBuilder {
             macdRange: macdRange,
             markers: engine.markers,
             drawings: engine.drawings.filter { $0.panelPosition == (panel == .upper ? 0 : 1) },
-            crosshairPoint: crosshair)   // C8b：长按十字光标由 ChartContainerView.Coordinator 视图层透传（D3）
+            crosshairPoint: crosshair,   // C8b：长按十字光标由 ChartContainerView.Coordinator 视图层透传（D3）
+            previousCloseBeforeVisible: previousCloseBeforeVisible(candles: candles, startIndex: viewport.startIndex))
     }
 
     /// C8b H1 handler 复用：当前可见 candle 索引半开区间。委托 makeViewport 单一真相。

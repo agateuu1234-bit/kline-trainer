@@ -36,6 +36,7 @@ public struct TrainingView: View {
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
     @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
+    @State private var crosshairOwner: PanelId? = nil  // RFC-C：当前持十字光标的面板（跨面板互斥，同时只一个图有光标）
 
     public init(lifecycle: TrainingSessionLifecycle,
                 onExit: @escaping () -> Void,
@@ -260,7 +261,7 @@ public struct TrainingView: View {
     }
 
     private func panel(_ id: PanelId) -> some View {
-        ChartContainerView(panel: id, engine: engine)
+        ChartContainerView(panel: id, engine: engine, crosshairOwner: $crosshairOwner)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             // 内联买卖小条：仅当该面板被点开时悬浮贴底（conjoint guard 含 showsTradeButtons，
             // 防 Normal 置位的 tradeStrip 在模式翻转至 Review/会话结束后悬空，spec §5.3 L3）。

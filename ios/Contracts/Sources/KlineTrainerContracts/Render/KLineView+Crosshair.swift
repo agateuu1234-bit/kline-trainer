@@ -17,21 +17,93 @@ extension KLineView {
         let mapper = CoordinateMapper(viewport: viewport,
                                       displayScale: self.traitCollection.displayScale)
         let candles = self.renderState.visibleCandles
-        guard let resolved = CrosshairLayout.resolve(at: point, mapper: mapper, candles: candles) else { return }
+        let frames = self.renderState.frames
+        guard let resolved = CrosshairLayout.resolve(at: point, mapper: mapper,
+                                                     candles: candles, frames: frames) else { return }
 
         ctx.saveGState()
         defer { ctx.restoreGState() }
 
-        // D3：crosshair 线 = currentPalette.text，1 device pixel 宽。
         currentPalette.text.setStroke()
         ctx.setLineWidth(1 / mapper.displayScale)
         let lines = resolved.lines
         ctx.move(to: lines.horizontal.from); ctx.addLine(to: lines.horizontal.to); ctx.strokePath()
         ctx.move(to: lines.vertical.from);   ctx.addLine(to: lines.vertical.to);   ctx.strokePath()
 
-        // HUD：价签（自由 Y）+ 时签（吸附 X，resolve 保证 in-frame 恒在）。
         drawLabelBox(ctx: ctx, rect: resolved.priceLabel.rect, text: resolved.priceLabel.text)
         drawLabelBox(ctx: ctx, rect: resolved.timeLabel.rect, text: resolved.timeLabel.text)
+
+        // RFC-C 悬浮信息卡
+        guard let p = point else { return }
+        let snapped = candles[resolved.snappedIndex]
+        // 前收：切片内取 candles[idx-1]；最左可见根(idx==startIndex)取切片外真实前收（codex R2-M）
+        let prevClose: Double? = resolved.snappedIndex > candles.startIndex
+            ? candles[resolved.snappedIndex - 1].close
+            : self.renderState.previousCloseBeforeVisible
+        let content = CrosshairSidebarContent.make(
+            candle: snapped, previousClose: prevClose,
+            cursorPrice: mapper.yToPrice(p.y),
+            snappedX: resolved.lines.vertical.from.x,
+            mainChartMidX: frames.mainChart.midX)
+        drawSidebar(ctx: ctx, content: content, panelFrame: frames.mainChart)
+    }
+
+    /// RFC-C 悬浮信息卡：半透明圆角卡 + 字段行（颜色 up=红/down=绿/flat=白/neutral=黄）。
+    /// 停靠：content.dock == .left → 贴 mainChart 左上；.right → 右上。固定不跟手指 Y。
+    private func drawSidebar(ctx: CGContext, content: CrosshairSidebarContent, panelFrame: CGRect) {
+        let pad: CGFloat = 7, cardW: CGFloat = 126, rowH: CGFloat = 15
+        let topRowH: CGFloat = 22
+        let rowCount = CGFloat(1 + content.rows.count)   // 日期时间行 + 字段行
+        let cardH = topRowH + rowCount * rowH + pad * 2
+        let inset: CGFloat = 7
+        let x = content.dock == .left ? panelFrame.minX + inset
+                                      : panelFrame.maxX - cardW - inset
+        let y = panelFrame.minY + inset
+        let card = CGRect(x: x, y: y, width: cardW, height: cardH)
+
+        // 背景
+        ctx.saveGState()
+        let bg = UIBezierPath(roundedRect: card, cornerRadius: 9)
+        UIColor.black.withAlphaComponent(0.82).setFill(); bg.fill()
+        UIColor(white: 0.25, alpha: 1).setStroke(); bg.lineWidth = 0.5; bg.stroke()
+        ctx.restoreGState()
+
+        func color(_ c: CrosshairSidebarContent.ValueColor) -> UIColor {
+            switch c {
+            case .up:   return currentPalette.candleUp      // 红涨（Theme.swift UIChartPalette.candleUp）
+            case .down: return currentPalette.candleDown    // 绿跌（UIChartPalette.candleDown）
+            case .flat: return .white
+            case .neutral: return UIColor(red: 0.94, green: 0.82, blue: 0.23, alpha: 1)   // 黄
+            }
+        }
+        func draw(_ s: String, _ rect: CGRect, _ col: UIColor, size: CGFloat = 10,
+                  align: NSTextAlignment = .left, weight: UIFont.Weight = .semibold) {
+            let para = NSMutableParagraphStyle(); para.alignment = align
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: size, weight: weight),
+                .foregroundColor: col, .paragraphStyle: para]
+            (s as NSString).draw(in: rect, withAttributes: attrs)
+        }
+
+        var cy = card.minY + pad
+        let lx = card.minX + 8, rx = card.maxX - 8, innerW = rx - lx
+        // 栏顶居中实时价
+        draw(content.cursorPriceText, CGRect(x: lx, y: cy, width: innerW, height: topRowH - 4),
+             color(content.cursorPriceColor), size: 15, align: .center)
+        cy += topRowH
+        // 日期(左) · 时间(右)
+        draw(content.dateText, CGRect(x: lx, y: cy, width: innerW, height: rowH), color(.neutral))
+        if let t = content.timeText {
+            draw(t, CGRect(x: lx, y: cy, width: innerW, height: rowH), color(.neutral), align: .right)
+        }
+        cy += rowH
+        // 字段行：标签左、值右
+        for row in content.rows {
+            draw(row.label, CGRect(x: lx, y: cy, width: innerW, height: rowH),
+                 UIColor(white: 0.55, alpha: 1), weight: .regular)
+            draw(row.value, CGRect(x: lx, y: cy, width: innerW, height: rowH), color(row.color), align: .right)
+            cy += rowH
+        }
     }
 
     /// RFC-B D1：透明文字、无底框（同花顺式）。去掉 background 实心填充，

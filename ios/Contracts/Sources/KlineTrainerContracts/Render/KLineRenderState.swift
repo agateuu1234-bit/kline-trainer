@@ -21,6 +21,7 @@ public struct KLineRenderState: Equatable, Sendable {
     public let markers: [TradeMarker]
     public let drawings: [DrawingObject]
     public let crosshairPoint: CGPoint?
+    public let previousCloseBeforeVisible: Double?   // RFC-C：可见首根前一根收盘（涨跌基准；切片外，codex R2-M）
 
     public init(panel: PanelViewState,
                 frames: ChartPanelFrames,
@@ -30,7 +31,8 @@ public struct KLineRenderState: Equatable, Sendable {
                 macdRange: NonDegenerateRange,
                 markers: [TradeMarker],
                 drawings: [DrawingObject],
-                crosshairPoint: CGPoint?) {
+                crosshairPoint: CGPoint?,
+                previousCloseBeforeVisible: Double? = nil) {
         self.panel = panel
         self.frames = frames
         self.viewport = viewport
@@ -40,6 +42,7 @@ public struct KLineRenderState: Equatable, Sendable {
         self.markers = markers
         self.drawings = drawings
         self.crosshairPoint = crosshairPoint
+        self.previousCloseBeforeVisible = previousCloseBeforeVisible
     }
 
     public static let empty: KLineRenderState = .init(

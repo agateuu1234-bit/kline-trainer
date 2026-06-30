@@ -5,6 +5,9 @@
 
 import CoreGraphics
 
+/// 单指竖滑切周期的最小净竖移（pt）。低于此不切（防误触）。真机手感可调（runbook 注明）。
+let verticalSwitchThreshold: CGFloat = 40
+
 /// 手势生命周期相位（spec §C7）。映射自 UIGestureRecognizer.State，本类型跨平台。
 public enum GesturePhase: Equatable, Sendable {
     case began, changed, ended, cancelled
@@ -88,6 +91,7 @@ struct SinglePanStep: Equatable, Sendable {
     let emissions: [SinglePanEmission]   // [] = 本步不触发任何 onPan 回调
     let lifecycle: SinglePanLifecycle    // 本手势更新后的生命周期态
     let lastTranslationX: CGFloat        // 下一步增量基线
+    let periodSwipe: SwipeDirection?     // 非 nil = 单指竖滑切周期（仅 .ended 终止且净竖移达阈值）
 }
 
 /// 单指平移生命周期纯决策。arbiter handler 把识别器原始值喂入、据返回更新状态并发回调。
@@ -112,9 +116,9 @@ func singlePanStep(phase: GesturePhase,
             var emissions: [SinglePanEmission] = []
             if residual != 0 { emissions.append(SinglePanEmission(deltaX: residual, velocityX: 0, phase: .changed)) }
             emissions.append(SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled))
-            return SinglePanStep(emissions: emissions, lifecycle: .idle, lastTranslationX: 0)
+            return SinglePanStep(emissions: emissions, lifecycle: .idle, lastTranslationX: 0, periodSwipe: nil)
         }
-        return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0)
+        return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0, periodSwipe: nil)
     }
     // 空闲态按当前累积分类（`.began` 与 idle `.changed` 共用）：水平→锁定+发 `.began`(panStarted)、基线设当前累积（deadzone 不计入）；
     // 垂直→latch verticalRejected；ambiguous→保持 idle 等待。
@@ -122,11 +126,11 @@ func singlePanStep(phase: GesturePhase,
         switch classifySingleFingerPan(translation: cumulative, minThreshold: minThreshold) {
         case .horizontal:
             return SinglePanStep(emissions: [SinglePanEmission(deltaX: 0, velocityX: velocityX, phase: .began)],
-                                 lifecycle: .horizontalActive, lastTranslationX: cumulative.x)
+                                 lifecycle: .horizontalActive, lastTranslationX: cumulative.x, periodSwipe: nil)
         case .vertical:
-            return SinglePanStep(emissions: [], lifecycle: .verticalRejected, lastTranslationX: 0)
+            return SinglePanStep(emissions: [], lifecycle: .verticalRejected, lastTranslationX: 0, periodSwipe: nil)
         case .ambiguous:
-            return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0)
+            return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0, periodSwipe: nil)
         }
     }
     switch phase {
@@ -139,13 +143,13 @@ func singlePanStep(phase: GesturePhase,
             let delta = panIncrement(current: cumulative.x, last: lastTranslationX)
             // 零 delta（识别器重复回调 x 不变）→ 不发，避免下游 offsetApplied(0) 空 bump revision（R13 finding-1）
             if delta == 0 {
-                return SinglePanStep(emissions: [], lifecycle: .horizontalActive, lastTranslationX: lastTranslationX)
+                return SinglePanStep(emissions: [], lifecycle: .horizontalActive, lastTranslationX: lastTranslationX, periodSwipe: nil)
             }
             return SinglePanStep(
                 emissions: [SinglePanEmission(deltaX: delta, velocityX: velocityX, phase: .changed)],
-                lifecycle: .horizontalActive, lastTranslationX: cumulative.x)
+                lifecycle: .horizontalActive, lastTranslationX: cumulative.x, periodSwipe: nil)
         case .verticalRejected:
-            return SinglePanStep(emissions: [], lifecycle: .verticalRejected, lastTranslationX: lastTranslationX)  // latch
+            return SinglePanStep(emissions: [], lifecycle: .verticalRejected, lastTranslationX: lastTranslationX, periodSwipe: nil)  // latch
         case .idle:
             return classifyFromIdle()
         }
@@ -158,9 +162,15 @@ func singlePanStep(phase: GesturePhase,
                 emissions.append(SinglePanEmission(deltaX: residual, velocityX: v, phase: .changed))
             }
             emissions.append(SinglePanEmission(deltaX: 0, velocityX: v, phase: phase))
-            return SinglePanStep(emissions: emissions, lifecycle: .idle, lastTranslationX: cumulative.x)
+            return SinglePanStep(emissions: emissions, lifecycle: .idle, lastTranslationX: cumulative.x, periodSwipe: nil)
         }
-        return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: lastTranslationX)  // idle/verticalRejected → 复位
+        // 竖直已锁定 + 正常结束 + 净竖移达阈值 → 单指竖滑切周期（一甩一档；.cancelled 不发）
+        if lifecycle == .verticalRejected, phase == .ended, abs(cumulative.y) >= verticalSwitchThreshold {
+            let dir: SwipeDirection = cumulative.y < 0 ? .up : .down
+            return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: lastTranslationX,
+                                 periodSwipe: dir)
+        }
+        return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: lastTranslationX, periodSwipe: nil)  // idle/verticalRejected → 复位
     }
 }
 
@@ -169,13 +179,13 @@ func singlePanStep(phase: GesturePhase,
 /// `idle`/`verticalRejected` → 无 emission。一律复位为 `.idle` + 基线 0（arbiter 据此同步更新，再物理 toggle 识别器作防御性清理）。
 func singlePanSupersede(lifecycle: SinglePanLifecycle, cumulative: CGPoint, lastTranslationX: CGFloat) -> SinglePanStep {
     guard lifecycle == .horizontalActive else {
-        return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0)
+        return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0, periodSwipe: nil)
     }
     let residual = panIncrement(current: cumulative.x, last: lastTranslationX)
     var emissions: [SinglePanEmission] = []
     if residual != 0 { emissions.append(SinglePanEmission(deltaX: residual, velocityX: 0, phase: .changed)) }
     emissions.append(SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled))
-    return SinglePanStep(emissions: emissions, lifecycle: .idle, lastTranslationX: 0)
+    return SinglePanStep(emissions: emissions, lifecycle: .idle, lastTranslationX: 0, periodSwipe: nil)
 }
 
 // MARK: - 两指手势生命周期状态机（纯函数，修正 R3 finding：意图须锁定，不得跨回调重分类）

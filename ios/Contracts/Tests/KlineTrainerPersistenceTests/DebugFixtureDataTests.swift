@@ -67,6 +67,10 @@ struct DebugFixtureDataTests {
         #expect(data.settings.totalCapital == 100_000)
         #expect(data.trainingSetFilename.hasSuffix(".sqlite"))
         #expect(data.pending!.trainingSetFilename == data.trainingSetFilename)
+        // seed pending 的周期组合**必须是 periodCombos 阶梯里相邻一档**——否则 switchPeriodCombo 永久 no-op
+        // （历史 bug：曾误设 (m3,daily) 非法档，单指竖滑切不动）。默认 60分/日线（路线图 P1）。
+        #expect(data.pending!.upperPeriod == .m60)
+        #expect(data.pending!.lowerPeriod == .daily)
     }
 
     // codex-13b-R2-F1：全 6 周期非空（make 默认 .m60/.daily + 周期切换 combo 须全覆盖 → fresh start/review/replay 可开）。
