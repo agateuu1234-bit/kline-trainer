@@ -18,7 +18,7 @@
 - 不改光标的视觉、吸附、进入（长按）、单指竖滑切周期等 RFC-C 既有行为。
 - 不改设置项的内容、佣金/重置/下载/显示模式等任何业务逻辑，仅换呈现容器。
 - 零引擎 / 持久层 / 契约改动，**不 bump CONTRACT_VERSION（保持 1.7）**。
-- **保 public API 源兼容（强制，codex spec-R4-H1）**：**不删任何现有 public 符号**（`ChartGestureArbiter.onTap` 等保留）、**不给现有 init 加必填参**（HomeView 新参带默认值或走重载）。即「无契约/view-only」必须连**编译期源兼容**一并成立，否则下游/preview 编译失败而内部测试绿。沿 RFC-C WB-high 教训。
+- **保 public API 源 + 行为兼容（强制，codex spec-R4-H1 / R5-H1）**：**不删任何现有 public 符号**且**不断其行为接线**（`ChartGestureArbiter.onTap` 保留且 drawing 锚点仍 fire 它）、**不给现有 init 加必填参**（HomeView 新参带默认值或走重载）。tap-anywhere 仅**新增**一个 optional 谓词回调 `onShouldExitRemoteCrosshair`（纯加法）。即「无契约/view-only」必须连**编译期源兼容 + 旧回调运行期行为**一并成立，否则下游/preview 编译失败或回调静默失效而内部测试绿。沿 RFC-C WB-high 教训。
 
 ## 1. 现状（已核实，含 file:line）
 
@@ -63,35 +63,32 @@
 
 ### 2.1 机制（三处改动 + 两个纯函数）
 
-**改动 A — `handleTap` 转发非本地退出 tap 给 Coordinator（`ChartGestureArbiter.swift`）**
-arbiter **不知道** `crosshairOwner`（保持其只懂局部态的边界），故 tap 的「drawing 锚点 vs 退远端光标」决策必须交给知道 owner 的 Coordinator。`handleTap` 改为：
+**改动 A — `handleTap` 加「远端光标存在？」前置门控，纯加法保 `onTap` 行为（`ChartGestureArbiter.swift`）**
+arbiter **不知道** `crosshairOwner`，故新增一个由 Coordinator 注入的**只读谓词闭包** `onShouldExitRemoteCrosshair: (() -> Bool)?`（返回「有别的面板持光标」）。`handleTap` 用纯函数 `resolve` 决策，**`onTap` 在 drawing 锚点分支照常 fire，行为零变化**：
 ```swift
 @objc private func handleTap(_ g: UITapGestureRecognizer) {
     guard g.state == .ended else { return }
-    if crosshairMode { onCrosshairExit?(); return }       // 本 panel 持光标 → 退（local，不变；无需 owner）
-    onTapEnded?(g.location(in: g.view))                   // 其余全交 Coordinator 用 resolver 决策（owner 优先于 drawing）
+    switch CrosshairTapResolver.resolve(localCrosshairMode: crosshairMode,
+                                        drawingMode: drawingMode,
+                                        remoteOwnerPresent: onShouldExitRemoteCrosshair?() ?? false) {
+    case .exitLocal, .requestGlobalExit: onCrosshairExit?()              // 本地退 / 退远端：均经 onCrosshairExit（releaseOwnership:true 清 owner → 远端 self→nil 自退）
+    case .drawingAnchor:                 onTap?(g.location(in: g.view))  // drawing 锚点：onTap 照常 fire（行为**不变**）
+    case .noop:                          break                           // 普通态：无操作（不变）
+    }
 }
 ```
-- **新增** `public var onTapEnded: ((CGPoint) -> Void)?`；**保留** `onTap`/`onCrosshairExit`/`onCrosshairMove` 公共声明**不删**（源兼容，codex spec-R4-H1 + 沿 RFC-C WB-high「不删旧 public 符号」教训）。`onTap` 仍作 drawing 锚点公共回调保留可用；`handleTap` 不再触发它（改走 `onTapEnded`），drawing 锚点由 Coordinator 的 `onTapEnded.drawingAnchor` 分支调 `handleDrawingTap`——`onTap` 为保留的 public shim，**非源破坏**。
-- ⚠️ 关键：**不可**在 arbiter 内 `if drawingMode { 落锚点; return }`——否则 drawing panel 的 tap 永不到达 Coordinator、退不掉对面光标（codex spec-R3-M1）。drawing 判定下沉 Coordinator。
+- **唯一新增 public 符号 = `onShouldExitRemoteCrosshair`（纯加法）**；`onTap`/`onCrosshairExit`/`onCrosshairMove` 声明与触发**全保留**（codex spec-R4-H1 + spec-R5-H1：`onTap` 不仅符号在、**行为仍接线**——drawing 锚点仍 fire `onTap`）。
+- **直接用 arbiter 的消费者**（未设 `onShouldExitRemoteCrosshair`）：谓词 `?? false` → `remoteOwnerPresent=false` → resolve 永不返 requestGlobalExit → 退化为旧真值表（crosshairMode→onCrosshairExit / drawingMode→onTap / 否则 noop），**行为逐格等价**。
+- ⚠️ 关键：远端门控**先于** drawing 分支（resolve 顺序保证），否则 drawing 图 tap 退不掉对面光标（codex spec-R3-M1）。
 
-**改动 B — Coordinator 接 `onTapEnded` + 记录上次同步的 owner（`ChartContainerView.swift`）**
+**改动 B — Coordinator 注入谓词 + 记录上次同步的 owner（`ChartContainerView.swift`）**
 - Coordinator 新增成员 `private var lastSyncedOwner: PanelId?`，在 `sync()` **末尾**刷新（`self.lastSyncedOwner = crosshairOwner`），即「上一次同步时观察到的共享 owner」。`updateUIView` 在每次 `@State` 变化时都会跑 → owner 任何变化都会刷新它。
-- 接线（用纯函数 `resolve` 统一决策，**owner 优先于 drawing**）：
+- 接线（谓词 = 本面板视角「有别人持光标」；本面板持有时其 `crosshairMode==true` 已被 resolve 的 exitLocal 优先短路，故无需排除自己）：
   ```swift
-  arbiter.onTapEnded = { [weak self] location in
-      guard let self, let engine = self.engine else { return }
-      switch CrosshairTapResolver.resolve(localCrosshairMode: self.crosshairActive,
-                                          drawingMode: self.isDrawing(engine: engine, panel: self.panel),
-                                          owner: self.lastSyncedOwner) {
-      case .requestGlobalExit: self.setCrosshairOwner?(nil)   // 任一面板持光标（本 panel 非持有）→ 置 nil → 持有面板 self→nil 自退（改动 C）
-      case .drawingAnchor:     self.handleDrawingTap(at: location)   // 无光标 + 本 panel drawing → 落锚点（行为不变）
-      case .exitLocal, .noop:  break                          // exitLocal 已在 arbiter 第一分支处理；noop=普通态无操作
-      }
-  }
+  arbiter.onShouldExitRemoteCrosshair = { [weak self] in self?.lastSyncedOwner != nil }
   ```
-- `crosshairActive==true` 的本地退出已在改动 A 第一分支（`onCrosshairExit`）处理，故 `onTapEnded` 内 `localCrosshairMode` 传 `crosshairActive` 时其值必为 false → resolver 落到 `requestGlobalExit`/`drawingAnchor`/`noop`。
-- standalone（`.constant(nil)` 默认 binding）下 `lastSyncedOwner` 恒 nil → 无光标时只可能 `drawingAnchor`（drawing 时）或 `noop`，本地光标退出仍走改动 A 第一分支。
+- 退远端光标的实际清除靠既有 `onCrosshairExit → exitCrosshair(releaseOwnership:true)`：本（非持有）面板调用它仅清自身（多为 no-op）+ `setCrosshairOwner(nil)` → 持有面板 sync 见 self→nil 跃迁自退（改动 C）。**不引入新的 setCrosshairOwner 直调路径**，复用 RFC-C 既有退出语义。
+- standalone（`.constant(nil)` 默认 binding）下 `lastSyncedOwner` 恒 nil → 谓词恒 false → 退化旧行为，本地光标退出仍走 `crosshairMode→onCrosshairExit`。
 
 **改动 C — `sync()` 加 owner==nil 对称退出路径，门控 self→nil 跃迁（`ChartContainerView.swift`）**
 ⚠️ **不能简单地「owner==nil && crosshairActive 就退」**（codex spec-R2-M1）：`ChartContainerView` 有 public 2-arg `init(panel:engine:)`，`crosshairOwner` 默认 `.constant(nil)`（无跨面板协调的调用方/测试用）。该模式下 `enterCrosshair` 的 `setCrosshairOwner(panel)` 写 constant binding = no-op → owner 恒 nil；若无门控，进光标后**下次 sync 立即自退** → standalone 黏滞光标失效（回归）。
@@ -117,9 +114,9 @@ self.lastSyncedOwner = crosshairOwner                    // sync 末尾刷新
 // ① tap 归属 —— 顺序即优先级：本地退 > 退远端光标 > drawing 锚点 > 无操作
 enum CrosshairTapOutcome: Equatable { case exitLocal, requestGlobalExit, drawingAnchor, noop }
 enum CrosshairTapResolver {
-    static func resolve(localCrosshairMode: Bool, drawingMode: Bool, owner: PanelId?) -> CrosshairTapOutcome {
+    static func resolve(localCrosshairMode: Bool, drawingMode: Bool, remoteOwnerPresent: Bool) -> CrosshairTapOutcome {
         if localCrosshairMode { return .exitLocal }      // 本 panel 持光标 → 退本地
-        if owner != nil { return .requestGlobalExit }    // 任一面板持光标（本 panel 非持有）→ 优先退光标（**先于 drawing**，codex spec-R3-M1）
+        if remoteOwnerPresent { return .requestGlobalExit }  // 别的面板持光标 → 优先退光标（**先于 drawing**，codex spec-R3-M1）
         if drawingMode { return .drawingAnchor }         // 无光标 + 本 panel drawing → 落锚点
         return .noop                                     // 普通态 → 无操作
     }
@@ -142,24 +139,24 @@ extension CrosshairTapResolver {
 ### 2.2 状态流（两图互点退出，举例）
 
 1. 长按上图 → 上图 `crosshairMode=true` + `setCrosshairOwner(.upper)`；下图 sync 见 `owner=.upper≠.lower && active` → 本地退（若它曾持光标）。共享 `crosshairOwner=.upper`。
-2. **轻点下图任意处** → 下图 `handleTap`：`crosshairMode==false` → `onTapEnded` → Coordinator `resolve(localCrosshairMode:false, drawingMode:下图是否 drawing, owner:.upper)` → owner 非 nil 优先 → `requestGlobalExit` → `setCrosshairOwner(nil)`。
+2. **轻点下图任意处** → 下图 `handleTap`：`resolve(localCrosshairMode:false, drawingMode:下图是否 drawing, remoteOwnerPresent:true)` → `requestGlobalExit` → `onCrosshairExit?()` → 下图 `exitCrosshair(releaseOwnership:true)` → `setCrosshairOwner(nil)`。
 3. owner 变 nil → SwiftUI 刷新两图 `updateUIView` → 两图 sync：
    - 上图（持光标）：`previousOwner(.upper)==panel(.upper) && owner==nil && crosshairActive` → `exitCrosshair(releaseOwnership:false)` → 清光标、解冻。
    - 下图：`previousOwner(.upper)≠panel(.lower)` 且 `crosshairActive==false` → no-op。
-4. 结果：光标消失、图恢复可平移/缩放/切周期。**轻点上图自身**仍走改动 A 第一分支（`crosshairMode==true → onCrosshairExit`），路径不变。
-5. **upper 画线 + lower 持光标，轻点 upper（drawing 图）**：upper `handleTap`：`crosshairMode(upper)==false` → `onTapEnded` → `resolve(false, drawingMode:true, owner:.lower)` → owner 非 nil **先于** drawingMode → `requestGlobalExit` → 清 lower 光标，**不落画线锚点**（codex spec-R3-M1 修复）。再点一次（owner 已 nil）才落锚点。
+4. 结果：光标消失、图恢复可平移/缩放/切周期。**轻点上图自身**走 `resolve(localCrosshairMode:true, …) → exitLocal → onCrosshairExit`，路径与现状等价。
+5. **upper 画线 + lower 持光标，轻点 upper（drawing 图）**：upper `handleTap`：`resolve(localCrosshairMode:false, drawingMode:true, remoteOwnerPresent:true)` → `remoteOwnerPresent` **先于** drawingMode → `requestGlobalExit` → `onCrosshairExit` 清 lower 光标，**不落画线锚点**（codex spec-R3-M1）。再点一次（remoteOwnerPresent 已 false）→ `drawingAnchor` → `onTap` 落锚点。
 
 ### 2.3 边界与不变量（codex 核查清单）
 
-- **持有 panel 自身 tap（含 volume/MACD 区）**：tap 识别器覆盖整 KLineView，`crosshairMode==true` → 第一分支退出，行为**不变**。
-- **普通态（无光标、非 drawing）panel tap**：`owner==nil` → `noop`，**不改变现状**（现状即 no-op）。
-- **Drawing × crosshair 跨面板可共存（codex spec-R3-M1 纠正）**：drawing 是 **per-panel**（`isDrawing` 读 `panel.interactionMode`），且画线浮动钮**只切 `.upper`**（`TrainingView.toggleDrawing` → `activateDrawingTool(panel:.upper)`）。`enterCrosshair` 长按守卫只挡「同 panel 在 drawing」（`onLongPress.began: !isDrawing(panel:self.panel)`），`sync()` 行 92 的 `if drawing && crosshairActive` 也只清**同 panel**。故 **upper 画线 + lower 持光标可共存**。此时点 upper：`resolve` 中 `owner != nil` **先于** `drawingMode` → `requestGlobalExit`（退 lower 光标），不落锚点。**「tap 任一图区退光标」对 drawing 图同样成立**。
-- **无光标 + drawing 图 tap**：`owner==nil` → `drawingAnchor`，画线落锚点行为**不变**。
-- **standalone 黏滞光标持久性（codex spec-R2-M1 回归守门）**：`init(panel:engine:)` 默认 `crosshairOwner=.constant(nil)`，进光标后 owner 恒 nil；新 owner==nil 退出门控在 `previousOwner==panel`，standalone 下 `previousOwner` 恒 nil ≠ panel → **永不自退**，黏滞光标保留。`onTapEnded` 同理（`lastSyncedOwner` 恒 nil → `resolve` 不返 requestGlobalExit）。纯函数 `resolveSyncExit(incomingOwner:nil, previousOwner:nil, panel:.upper, active:true)==.none` host 测守门。
-- **幂等**：`exitCrosshair` 反复调用安全（置 false/nil）；`setCrosshairOwner(nil)` 重复写安全。
-- **@State 修改时机**：`setCrosshairOwner(nil)` 在手势回调 `onTapEnded` 内调用（非 view-update 期），符合 `ChartContainerView.swift:69` 既定约束。
-- **owner 成员新鲜度**：`lastSyncedOwner` 在 sync 末尾刷新；owner 任何变化都触发 `updateUIView`→sync，故 tap 回调读到的值与当前 @State 一致。
-- **零引擎触达**：三处改动均在 view/手势层；crosshair pan/zoom/切周期抑制语义不变（仍由 `crosshairMode` 控制）。`init(panel:engine:)` 公共签名**不变**（不破坏源兼容，沿 RFC-C WB-high 教训）。
+- **持有 panel 自身 tap（含 volume/MACD 区）**：tap 识别器覆盖整 KLineView，`crosshairMode==true` → `exitLocal` → `onCrosshairExit`，行为**不变**。
+- **普通态（无光标、非 drawing）panel tap**：`remoteOwnerPresent==false` → `noop`，**不改变现状**（现状即 no-op）。
+- **`onTap` 行为兼容（codex spec-R5-H1 守门）**：drawing 锚点 tap（无远端光标）仍 `resolve(...,remoteOwnerPresent:false)==drawingAnchor → onTap`，`onTap` **照常 fire**；新增的 `onShouldExitRemoteCrosshair` 是纯加法谓词，未设它的直接消费者退化为旧真值表逐格等价。host 测 `resolve(localCrosshairMode:false, drawingMode:true, remoteOwnerPresent:false)==.drawingAnchor` 守门。
+- **Drawing × crosshair 跨面板可共存（codex spec-R3-M1 纠正）**：drawing 是 **per-panel**（`isDrawing` 读 `panel.interactionMode`），且画线浮动钮**只切 `.upper`**（`TrainingView.toggleDrawing` → `activateDrawingTool(panel:.upper)`）。`enterCrosshair` 长按守卫只挡「同 panel 在 drawing」，`sync()` 行 92 的 `if drawing && crosshairActive` 也只清**同 panel**。故 **upper 画线 + lower 持光标可共存**。此时点 upper：`remoteOwnerPresent` **先于** `drawingMode` → `requestGlobalExit`（退 lower 光标），不落锚点。**「tap 任一图区退光标」对 drawing 图同样成立**。
+- **standalone 黏滞光标持久性（codex spec-R2-M1 回归守门）**：`init(panel:engine:)` 默认 `crosshairOwner=.constant(nil)`，进光标后 owner 恒 nil；新 owner==nil 退出门控在 `previousOwner==panel`，standalone 下 `previousOwner` 恒 nil ≠ panel → **永不自退**，黏滞光标保留。谓词同理（`lastSyncedOwner` 恒 nil → false → 不返 requestGlobalExit）。纯函数 `resolveSyncExit(incomingOwner:nil, previousOwner:nil, panel:.upper, active:true)==.none` host 测守门。
+- **幂等**：`exitCrosshair` 反复调用安全（置 false/nil）；`setCrosshairOwner(nil)` 重复写安全。退远端时本（非持有）面板 `exitCrosshair(releaseOwnership:true)` 清自身多为 no-op，仅 `setCrosshairOwner(nil)` 起效。
+- **@State 修改时机**：`setCrosshairOwner(nil)`（经 `onCrosshairExit→exitCrosshair`）在手势回调 `handleTap` 内调用（非 view-update 期），符合 `ChartContainerView.swift:69` 既定约束。
+- **owner 成员新鲜度**：`lastSyncedOwner` 在 sync 末尾刷新；owner 任何变化都触发 `updateUIView`→sync，故谓词读到的值与当前 @State 一致。
+- **零引擎触达 + 源兼容**：改动均在 view/手势层；crosshair pan/zoom/切周期抑制语义不变（仍由 `crosshairMode` 控制）。`init(panel:engine:)` 公共签名 + `onTap`/`onCrosshairExit` 公共回调（声明与触发）**全不变**，仅**加** `onShouldExitRemoteCrosshair`（沿 RFC-C WB-high「不删旧 public 符号」教训）。
 
 ## 3. 设计 · F2 RFC-E 设置 popover
 
@@ -237,11 +234,11 @@ extension CrosshairTapResolver {
 ## 4. 测试策略
 
 - **纯函数 host 测**（Swift Testing）：
-  - `CrosshairTapResolver.resolve(...)` 决策真值表：4 类 outcome × 关键输入组合（localMode true/false × drawingMode × owner nil/.upper/.lower），含「持有自身=exitLocal」「另一面板=requestGlobalExit」「普通态=noop」「无光标+drawing=drawingAnchor」、**关键格「drawing=true 且 owner≠nil → requestGlobalExit（owner 先于 drawing）」**（codex spec-R3-M1 守门）、「localMode=true 时无视 drawing/owner 恒 exitLocal」。
+  - `CrosshairTapResolver.resolve(localCrosshairMode:drawingMode:remoteOwnerPresent:)` 决策真值表（3 Bool 全 8 格）：「localMode=true → 恒 exitLocal（无视 drawing/remote）」、「remoteOwnerPresent=true（localMode=false）→ requestGlobalExit」、**关键格「drawing=true 且 remoteOwnerPresent=true → requestGlobalExit（remote 先于 drawing）」**（codex spec-R3-M1）、**「drawing=true 且 remoteOwnerPresent=false → drawingAnchor（onTap 行为接线）」**（codex spec-R5-H1）、「全 false → noop」。
   - `CrosshairTapResolver.resolveSyncExit(...)` 真值表（codex spec-R2-M1 守门）：「被接管=exitTakenOver」（incomingOwner=另一 panel）、「self→nil=exitOwnerCleared」（incomingOwner=nil, previousOwner=panel）、**「standalone 恒 nil=none」**（incomingOwner=nil, previousOwner=nil, active=true）、「无 active=none」。
   - `HistoryDialogPresentation.sheetItem(for:)`：`.settings→nil`、`.settlement→放行`、`.history→nil`；以及 `isHistoryPresented` 等既有断言不回归。
 - **壳层（UIKit/SwiftUI）**：tap-anywhere 的两图互点退出、popover 锚定 / dismiss / 双弹排除 → 走**真机验收**（本仓约定，UIKit 手势 + SwiftUI present 难单测）。
-- **源兼容编译守卫（codex spec-R4-H1）**：保留旧 public 入口可编译——`HomeView` 旧 5 参 init（2 个 `#Preview` 即为编译守卫，prod build 必带过）+ 一条 host 测设 `arbiter.onTap = { _ in }`（证 `onTap` public 仍在）。CI 三绿即覆盖编译期。
+- **源 + 行为兼容守卫（codex spec-R4-H1 / R5-H1）**：①`HomeView` 旧 5 参 init（2 个 `#Preview` 即编译守卫，prod build 必带过）；②`resolve(localCrosshairMode:false, drawingMode:true, remoteOwnerPresent:false)==.drawingAnchor` host 测——证「无远端光标时 drawing tap 仍归 `onTap`」（`onTap` 行为接线未断，codex spec-R5-H1）；③一条 host 测设 `arbiter.onTap = { _ in }` / `arbiter.onShouldExitRemoteCrosshair = { false }`（证符号 public 可设）。CI 三绿覆盖编译期。
 - **三绿**：host swift test（Swift Testing + XCTest 两框架都看「All tests passed / 末行 0 failures」）+ Mac Catalyst build-for-testing + iOS Simulator app build。
 - 负向 grep 断言用 `if/exit 1` 非 `! grep`（[[feedback_acceptance_grep_anchoring]]）。
 
