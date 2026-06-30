@@ -60,7 +60,7 @@
 
 ## 2. 设计 · F1 tap-anywhere 退光标
 
-### 2.1 机制（两处改动 + 一个纯函数）
+### 2.1 机制（两处改动 + 两个纯函数）
 
 **改动 A — `handleTap` 加「空 tap」分支（`ChartGestureArbiter.swift`）**
 重构为三分支（前两分支语义与现状逐字等价，仅新增第三分支）：
@@ -74,40 +74,46 @@
 ```
 - 新增回调 `var onTapIdle: (() -> Void)?`（`ChartGestureArbiter`）。arbiter 仍**不知道** `crosshairOwner`（保持其只懂局部态的边界），由 Coordinator 决策。
 
-**改动 B — Coordinator 接 `onTapIdle` + 存最新 owner（`ChartContainerView.swift`）**
-- Coordinator 新增成员 `private var currentCrosshairOwner: PanelId?`，在 `sync()` 每次刷新（`self.currentCrosshairOwner = crosshairOwner`）。`updateUIView` 在每次 `@State` 变化时都会跑 → owner 变化时该成员恒为新值。
+**改动 B — Coordinator 接 `onTapIdle` + 记录上次同步的 owner（`ChartContainerView.swift`）**
+- Coordinator 新增成员 `private var lastSyncedOwner: PanelId?`，在 `sync()` **末尾**刷新（`self.lastSyncedOwner = crosshairOwner`），即「上一次同步时观察到的共享 owner」。`updateUIView` 在每次 `@State` 变化时都会跑 → owner 任何变化都会刷新它。
 - 接线：
   ```swift
   arbiter.onTapIdle = { [weak self] in
       guard let self else { return }
       // 另一面板持有光标 → 任一图区 tap 请求全局退出（tap-anywhere）
-      if self.currentCrosshairOwner != nil {
-          self.setCrosshairOwner?(nil)     // 置 nil → 持有面板 sync 见 owner==nil 自退（改动 C）
+      if self.lastSyncedOwner != nil {
+          self.setCrosshairOwner?(nil)     // 置 nil → 持有面板 sync 见「self→nil 跃迁」自退（改动 C）
       }
       // owner==nil（无人持光标）→ 维持现状 no-op，不改变普通态点击行为
   }
   ```
-- 到达 `onTapIdle` 时本 panel 必非持有者（持有者 `crosshairMode==true` 已在改动 A 第一分支 return）。故 `currentCrosshairOwner != nil` 必指向**另一** panel。
+- 到达 `onTapIdle` 时本 panel 必非持有者（持有者 `crosshairMode==true` 已在改动 A 第一分支 return）。故 `lastSyncedOwner != nil` 必指向**另一** panel。
+- standalone（`.constant(nil)` 默认 binding）下 `lastSyncedOwner` 恒 nil（写 constant 无效）→ `onTapIdle` 永不请求清，本地光标退出仍走改动 A 第一分支。
 
-**改动 C — `sync()` 加 owner==nil 对称退出路径（`ChartContainerView.swift`）**
-在现有跨面板互斥块旁加：
+**改动 C — `sync()` 加 owner==nil 对称退出路径，门控 self→nil 跃迁（`ChartContainerView.swift`）**
+⚠️ **不能简单地「owner==nil && crosshairActive 就退」**（codex spec-R2-M1）：`ChartContainerView` 有 public 2-arg `init(panel:engine:)`，`crosshairOwner` 默认 `.constant(nil)`（无跨面板协调的调用方/测试用）。该模式下 `enterCrosshair` 的 `setCrosshairOwner(panel)` 写 constant binding = no-op → owner 恒 nil；若无门控，进光标后**下次 sync 立即自退** → standalone 黏滞光标失效（回归）。
+
+故退出**门控在「本面板上次同步时正是 owner、本次变 nil」的 self→nil 跃迁**：
 ```swift
+let previousOwner = lastSyncedOwner                      // 改动 B 维护，sync 末尾才更新
 if let owner = crosshairOwner, owner != panel, crosshairActive {
     exitCrosshair(releaseOwnership: false)               // 既有：被另一面板接管
-} else if crosshairOwner == nil, crosshairActive {
-    exitCrosshair(releaseOwnership: false)               // 新增：owner 被清（含 tap-anywhere 请求）→ 持光标面板自退解冻
+} else if crosshairOwner == nil, previousOwner == panel, crosshairActive {
+    exitCrosshair(releaseOwnership: false)               // 新增：本面板曾持有、owner 被清（tap-anywhere）→ 自退解冻
 }
+// …（drawing 逻辑） …
+self.lastSyncedOwner = crosshairOwner                    // sync 末尾刷新
 ```
-- 持有 panel 经此退出时 `releaseOwnership:false`（owner 已 nil，无需重复写）。
-- 非持有、非持光标的 panel：`crosshairActive==false` → 两分支都不触发，no-op。
+- standalone：owner 恒 nil → `previousOwner` 恒 nil ≠ panel → 新分支**永不触发**，黏滞光标保留。
+- 协调态（TrainingView）：upper 持光标时 upper.`lastSyncedOwner==.upper`；lower tap 置 owner=nil → upper sync 见 `previousOwner(.upper)==panel(.upper) && owner==nil` → 退。lower 的 `previousOwner==.upper≠.lower` 且其 `crosshairActive==false` → no-op。
+- 持有 panel 经此退出 `releaseOwnership:false`（owner 已 nil，无需重复写）。
 
-**纯函数（host 可测，沿用本仓「平台无关纯函数 + 薄 UIKit 层」一贯模式）**
-把 tap 路由决策抽成纯函数，便于 host 单测且让 codex 能逐格核：
+**两个纯函数（host 可测，沿用本仓「平台无关纯函数 + 薄 UIKit 层」一贯模式）**
+把 tap 路由 + sync 退出两处决策抽成纯函数，便于 host 单测且让 codex 逐格核（尤其 standalone 持久性回归）：
 ```swift
+// ① tap 归属
 enum CrosshairTapOutcome: Equatable { case exitLocal, requestGlobalExit, drawingAnchor, noop }
-
 enum CrosshairTapResolver {
-    /// 给定本 panel 的局部模式 + 共享 owner，决定一次 tap 的归属。
     static func resolve(localCrosshairMode: Bool, drawingMode: Bool, owner: PanelId?) -> CrosshairTapOutcome {
         if localCrosshairMode { return .exitLocal }      // 本 panel 持光标 → 退本地
         if drawingMode { return .drawingAnchor }         // Drawing → 落锚点
@@ -115,16 +121,28 @@ enum CrosshairTapResolver {
         return .noop                                     // 普通态 → 无操作
     }
 }
+
+// ② sync 退出决策（含 standalone 持久性门控）
+enum CrosshairSyncExit: Equatable { case none, exitTakenOver, exitOwnerCleared }
+extension CrosshairTapResolver {
+    static func resolveSyncExit(incomingOwner: PanelId?, previousOwner: PanelId?,
+                                panel: PanelId, crosshairActive: Bool) -> CrosshairSyncExit {
+        guard crosshairActive else { return .none }
+        if let owner = incomingOwner, owner != panel { return .exitTakenOver }   // 被接管
+        if incomingOwner == nil, previousOwner == panel { return .exitOwnerCleared }  // self→nil（tap-anywhere）
+        return .none                                                             // 含 standalone 恒 nil → 不退
+    }
+}
 ```
-`handleTap` 可改为调用该函数后 switch（或保留内联三分支并用纯函数覆盖决策真值表）。plan 决定落地形态；**决策真值表必须有 host 测**。
+**决策真值表必须有 host 测**，含 standalone 关键格：`resolveSyncExit(incomingOwner:nil, previousOwner:nil, panel:.upper, crosshairActive:true) == .none`（黏滞光标持久性回归守门，codex spec-R2-M1）。plan 决定 `handleTap`/`sync` 是内联还是直接调纯函数 switch。
 
 ### 2.2 状态流（两图互点退出，举例）
 
 1. 长按上图 → 上图 `crosshairMode=true` + `setCrosshairOwner(.upper)`；下图 sync 见 `owner=.upper≠.lower && active` → 本地退（若它曾持光标）。共享 `crosshairOwner=.upper`。
-2. **轻点下图任意处** → 下图 `handleTap`：`crosshairMode==false`、非 drawing → `onTapIdle` → `currentCrosshairOwner==.upper≠nil` → `setCrosshairOwner(nil)`。
+2. **轻点下图任意处** → 下图 `handleTap`：`crosshairMode==false`、非 drawing → `onTapIdle` → `lastSyncedOwner==.upper≠nil` → `setCrosshairOwner(nil)`。
 3. owner 变 nil → SwiftUI 刷新两图 `updateUIView` → 两图 sync：
-   - 上图（持光标）：`owner==nil && crosshairActive` → `exitCrosshair(releaseOwnership:false)` → 清光标、解冻。
-   - 下图：`crosshairActive==false` → no-op。
+   - 上图（持光标）：`previousOwner(.upper)==panel(.upper) && owner==nil && crosshairActive` → `exitCrosshair(releaseOwnership:false)` → 清光标、解冻。
+   - 下图：`previousOwner(.upper)≠panel(.lower)` 且 `crosshairActive==false` → no-op。
 4. 结果：光标消失、图恢复可平移/缩放/切周期。**轻点上图自身**仍走改动 A 第一分支（`crosshairMode==true → onCrosshairExit`），路径不变。
 
 ### 2.3 边界与不变量（codex 核查清单）
@@ -132,10 +150,11 @@ enum CrosshairTapResolver {
 - **持有 panel 自身 tap（含 volume/MACD 区）**：tap 识别器覆盖整 KLineView，`crosshairMode==true` → 第一分支退出，行为**不变**。
 - **普通态（无光标、非 drawing）panel tap**：`owner==nil` → `noop`，**不改变现状**（现状即 no-op）。
 - **Drawing 模式 tap**：第二分支落锚点，**不变**。drawing 与 crosshair 互斥（单一浮动画线钮 + `sync()` 行 92 进 drawing 即退光标）→ 二者不共存，故 `onTapIdle` 路径下 owner 必为 drawing 之外的态；防御性地，即使共存，drawing panel 的 tap 也优先落锚点（第二分支先 return）。
+- **standalone 黏滞光标持久性（codex spec-R2-M1 回归守门）**：`init(panel:engine:)` 默认 `crosshairOwner=.constant(nil)`，进光标后 owner 恒 nil；新 owner==nil 退出门控在 `previousOwner==panel`，standalone 下 `previousOwner` 恒 nil ≠ panel → **永不自退**，黏滞光标保留。`onTapIdle` 同理（`lastSyncedOwner` 恒 nil → 不请求清）。纯函数 `resolveSyncExit(incomingOwner:nil, previousOwner:nil, panel:.upper, active:true)==.none` host 测守门。
 - **幂等**：`exitCrosshair` 反复调用安全（置 false/nil）；`setCrosshairOwner(nil)` 重复写安全。
 - **@State 修改时机**：`setCrosshairOwner(nil)` 在手势回调 `onTapIdle` 内调用（非 view-update 期），符合 `ChartContainerView.swift:69` 既定约束。
-- **owner 成员新鲜度**：`currentCrosshairOwner` 仅在 sync 刷新；owner 任何变化都触发 `updateUIView`→sync，故 tap 回调读到的值与当前 @State 一致。
-- **零引擎触达**：三处改动均在 view/手势层；crosshair pan/zoom/切周期抑制语义不变（仍由 `crosshairMode` 控制）。
+- **owner 成员新鲜度**：`lastSyncedOwner` 在 sync 末尾刷新；owner 任何变化都触发 `updateUIView`→sync，故 tap 回调读到的值与当前 @State 一致。
+- **零引擎触达**：三处改动均在 view/手势层；crosshair pan/zoom/切周期抑制语义不变（仍由 `crosshairMode` 控制）。`init(panel:engine:)` 公共签名**不变**（不破坏源兼容，沿 RFC-C WB-high 教训）。
 
 ## 3. 设计 · F2 RFC-E 设置 popover
 
@@ -213,6 +232,7 @@ enum CrosshairTapResolver {
 
 - **纯函数 host 测**（Swift Testing）：
   - `CrosshairTapResolver.resolve(...)` 决策真值表：4 类 outcome × 关键输入组合（localMode true/false × drawingMode × owner nil/.upper/.lower），含「持有自身=exitLocal」「另一面板=requestGlobalExit」「普通态=noop」「drawing=drawingAnchor」。
+  - `CrosshairTapResolver.resolveSyncExit(...)` 真值表（codex spec-R2-M1 守门）：「被接管=exitTakenOver」（incomingOwner=另一 panel）、「self→nil=exitOwnerCleared」（incomingOwner=nil, previousOwner=panel）、**「standalone 恒 nil=none」**（incomingOwner=nil, previousOwner=nil, active=true）、「无 active=none」。
   - `HistoryDialogPresentation.sheetItem(for:)`：`.settings→nil`、`.settlement→放行`、`.history→nil`；以及 `isHistoryPresented` 等既有断言不回归。
 - **壳层（UIKit/SwiftUI）**：tap-anywhere 的两图互点退出、popover 锚定 / dismiss / 双弹排除 → 走**真机验收**（本仓约定，UIKit 手势 + SwiftUI present 难单测）。
 - **三绿**：host swift test（Swift Testing + XCTest 两框架都看「All tests passed / 末行 0 failures」）+ Mac Catalyst build-for-testing + iOS Simulator app build。
