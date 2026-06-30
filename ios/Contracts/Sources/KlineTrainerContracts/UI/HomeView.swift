@@ -24,20 +24,13 @@ public struct HomeView: View {
 
     @State private var showEmptyCacheAlert = false
 
-    /// 源兼容：旧 5 参 init 保留 → 委托泛型 init，不显 popover（codex spec-R4-H1/R6-H1）。
-    public init(content: HomeContent,
-                onStartTraining: @escaping () -> Void,
-                onContinueTraining: @escaping () -> Void,
-                onSelectRecord: @escaping (Int64) -> Void,
-                onOpenSettings: @escaping () -> Void) {
-        self.init(content: content,
-                  onStartTraining: onStartTraining, onContinueTraining: onContinueTraining,
-                  onSelectRecord: onSelectRecord, onOpenSettings: onOpenSettings,
-                  isSettingsPresented: .constant(false), settingsContent: { EmptyView() })
-    }
-
-    /// RFC-E：新泛型 init —— 类型擦除 settingsContent → AnyView（仅设置 popover，非热路径）。
-    /// HomeView 本体保持非泛型 concrete（类型标识不变）。保 view-only D1：不 import settings/acceptance。
+    /// RFC-E：唯一泛型 init —— 类型擦除 settingsContent → AnyView（仅设置 popover，非热路径）。
+    /// HomeView 本体保持非泛型 concrete（类型标识不变，codex spec-R6-H1）。保 view-only D1：不 import settings/acceptance。
+    ///
+    /// ⚠️ **不保留旧 5 参 init**（codex whole-branch WB-1）：旧 init 委托 `.constant(false)`+`EmptyView` →
+    /// 配合 `sheetItem` 滤掉 `.settings`，用旧式调用会**既无 sheet 也无 popover = 静默丢失设置 UI**。
+    /// 故每个调用方必须**显式**决定设置呈现：传真 `isSettingsPresented`/`settingsContent`（如 AppRootView），
+    /// 或显式 `.constant(false)`+`{ EmptyView() }` 退出（如不呈现设置的 #Preview）。误用旧签名 = **响亮编译错**（非静默丢 UI）。
     public init<SettingsContent: View>(content: HomeContent,
                 onStartTraining: @escaping () -> Void,
                 onContinueTraining: @escaping () -> Void,
@@ -190,11 +183,13 @@ private func previewRecords() -> [TrainingRecord] {
 
 #Preview("有历史 + 继续训练") {
     HomeView(content: .preview(records: previewRecords()),
-             onStartTraining: {}, onContinueTraining: {}, onSelectRecord: { _ in }, onOpenSettings: {})
+             onStartTraining: {}, onContinueTraining: {}, onSelectRecord: { _ in }, onOpenSettings: {},
+             isSettingsPresented: .constant(false), settingsContent: { EmptyView() })   // preview 不呈现设置（显式退出）
 }
 
 #Preview("空历史 + 空缓存") {
     HomeView(content: .preview(hasPending: false, hasCachedSets: false, records: []),
-             onStartTraining: {}, onContinueTraining: {}, onSelectRecord: { _ in }, onOpenSettings: {})
+             onStartTraining: {}, onContinueTraining: {}, onSelectRecord: { _ in }, onOpenSettings: {},
+             isSettingsPresented: .constant(false), settingsContent: { EmptyView() })   // preview 不呈现设置（显式退出）
 }
 #endif

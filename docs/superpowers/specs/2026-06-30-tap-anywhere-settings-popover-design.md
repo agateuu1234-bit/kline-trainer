@@ -19,7 +19,7 @@
 - 不改设置项的内容、佣金/重置/下载/显示模式等任何业务逻辑，仅换呈现容器。
 - 零引擎 / 持久层 / 契约改动，**不 bump CONTRACT_VERSION（保持 1.7）**。
 - **`AppRouter.Modal` 非 Equatable（强制，codex plan-R1-H1）**：Modal 仅 `Identifiable`，**一律用 `if case .settings` / `HistoryDialogPresentation.isSettings(_:)` 谓词，禁止 `== .settings`**（编译失败）。落地后 grep 守卫 sources 无 `== .settings`。
-- **保 public API 源 + 行为 + 类型标识兼容（强制，codex spec-R4-H1 / R5-H1 / R6-H1）**：**不删任何现有 public 符号**且**不断其行为接线**（`ChartGestureArbiter.onTap` 保留且 drawing 锚点仍 fire 它）、**不给现有 init 加必填参**、**不改 public 类型标识**（`HomeView` 保持非泛型 concrete，新内容走 `AnyView` 类型擦除 + 新泛型 init）。tap-anywhere 仅**新增**一个 optional 谓词回调 `onShouldExitRemoteCrosshair`（纯加法）。即「无契约/view-only」必须连**编译期源兼容（含类型标识）+ 旧回调运行期行为**一并成立，否则下游/preview 编译失败或回调静默失效而内部测试绿。沿 RFC-C WB-high 教训。
+- **保 public API 行为 + 类型标识兼容（强制，codex spec-R4-H1 / R5-H1 / R6-H1 / WB-1）**：tap-anywhere 侧**不删 public 符号且不断行为接线**（`ChartGestureArbiter.onTap` 保留且 drawing 锚点仍 fire 它），仅**新增** optional 谓词 `onShouldExitRemoteCrosshair`（纯加法）。`HomeView` **类型标识保持非泛型 concrete 不变**（R6-H1 核心），新内容走 `AnyView` 类型擦除 + 唯一泛型 init。**WB-1 修订**：`HomeView` 旧 5 参 init **移除**（非保留）——保留它会因 `sheetItem` 滤 `.settings` 而**静默丢设置 UI**，故改为「误用 = 响亮编译错」（codex 首选解，优于静默行为破坏）。准则：宁可**编译期响亮失败**，不可**运行期静默失效**（沿 RFC-C WB-high + 本轮 spec-R5-H1 教训）。
 
 ## 1. 现状（已核实，含 file:line）
 
@@ -168,9 +168,9 @@ extension CrosshairTapResolver {
 **改动 1 — HomeView 加 popover 锚点（`HomeView.swift`），源兼容保类型标识（codex spec-R4-H1 / R6-H1）**
 - ⚠️ **`HomeView` 保持 `public struct HomeView: View` 非泛型 concrete 类型不变**（codex spec-R6-H1：泛型化会破坏类型标识——外部可把 `HomeView` 当返回类型/存储属性/泛型约束/typealias 引用，泛型化强制其加泛型参数，重载救不回）。
 - 用**类型擦除**承载 popover 内容：新增私有存储 `private let settingsContent: () -> AnyView` + `private let isSettingsPresented: Binding<Bool>`。
-- **两个 init**：
-  - **保留**原 5 参 `init(content:onStartTraining:onContinueTraining:onSelectRecord:onOpenSettings:)`（源兼容）→ 委托到下方泛型 init，传 `isSettingsPresented:.constant(false), settingsContent:{ EmptyView() }`（不显 popover）。2 个 `#Preview` + 任何旧调用点零改动编译。
+- **唯一泛型 init**（⚠️ **codex whole-branch WB-1 修订：不保留旧 5 参 init**）：
   - **新增泛型** `init<SettingsContent: View>(content:…, onOpenSettings:, isSettingsPresented: Binding<Bool>, @ViewBuilder settingsContent: @escaping () -> SettingsContent)`，体内 `self.settingsContent = { AnyView(settingsContent()) }` 擦除。AnyView 仅用于设置 popover（非热路径，性能可忽略）。保 view-only D1（HomeView 不 import settings/acceptance，只渲染注入视图）。
+  - **不保留旧 5 参 init**：原设计（spec-R4-H1/R6-H1）拟保留旧 init 委托 `.constant(false)`+`EmptyView`，但 codex whole-branch 指出——配合 `sheetItem` 滤掉 `.settings`，用旧式 5 参调用会**既无 sheet 也无 popover = 静默丢失设置 UI**。故采纳 codex 首选解「**intentionally fail migration at compile time**」：移除旧 init，每个调用方**显式**决定设置呈现（传真 binding/content，或显式 `.constant(false)`+`{ EmptyView() }` 退出）；误用旧签名 = **响亮编译错**（非静默丢 UI）。类型标识仍非泛型 concrete 不变（R6-H1 核心保住）；2 个 `#Preview` 迁新 init 显式退出。
 - 齿轮 Button 挂：
   ```swift
   Button(action: onOpenSettings) { Image(systemName: "gearshape").font(.title2) }
