@@ -50,7 +50,7 @@ struct NormalFlowTests {
 @Suite("ReviewFlow")
 struct ReviewFlowTests {
     private let record = makeRecord(finalTick: 742, feeSnapshot: originalFees)
-    private var flow: ReviewFlow { ReviewFlow(record: record) }
+    private var flow: ReviewFlow { ReviewFlow(record: record, startTick: record.finalTick) }
 
     @Test("属性：mode/feeSnapshot=原局/initialTick=finalTick/单点 range")
     func properties() {
@@ -60,21 +60,21 @@ struct ReviewFlowTests {
         #expect(flow.allowedTickRange == 742...742)
     }
 
-    @Test("能力：全 false（矩阵 Review 列）")
+    @Test("能力：canAdvance=true，其余 false（矩阵 Review 列，B1 起 canAdvance 改 true）")
     func capabilities() {
         #expect(!flow.canBuySell())
-        #expect(!flow.canAdvance())
+        #expect(flow.canAdvance())       // B1：复盘可步进重演
         #expect(!flow.shouldSaveRecord())
         #expect(!flow.shouldAccumulateCapital())
         #expect(!flow.shouldShowSettlement())
         #expect(!flow.shouldGiveHapticFeedback())
     }
 
-    @Test("验收：initialTick == record.finalTick，不是 maxTick（spec v1.1→v1.2 修正点）")
+    @Test("验收：startTick==finalTick 时 initialTick==finalTick，range 单点，canAdvance=true（B1 后）")
     func initialTickIsFinalTickNotMaxTick() {
         #expect(flow.initialTick == record.finalTick)
         #expect(flow.allowedTickRange.lowerBound == flow.allowedTickRange.upperBound)
-        #expect(!flow.canAdvance())
+        #expect(flow.canAdvance())      // B1：复盘可步进重演
     }
 }
 
@@ -123,10 +123,10 @@ struct TrainingFlowMatrixTests {
         #expect(column(f) == [true, true, true, true, true, true])
     }
 
-    @Test("Review 列 = 全 false")
+    @Test("Review 列 = canAdvance true，其余 false（B1 起）")
     func reviewColumn() {
-        let f: TrainingFlowController = ReviewFlow(record: makeRecord(finalTick: 742, feeSnapshot: originalFees))
-        #expect(column(f) == [false, false, false, false, false, false])
+        let f: TrainingFlowController = ReviewFlow(record: makeRecord(finalTick: 742, feeSnapshot: originalFees), startTick: 742)
+        #expect(column(f) == [false, true, false, false, false, false])
     }
 
     @Test("Replay 列 = T,T,F,F,T,T")
@@ -138,7 +138,7 @@ struct TrainingFlowMatrixTests {
     @Test("三列两两可区分（无两列相同，防复制粘贴塌缩）")
     func columnsAreDistinct() {
         let normal = column(NormalFlow(fees: normalFees, maxTick: 10))
-        let review = column(ReviewFlow(record: makeRecord(finalTick: 5, feeSnapshot: originalFees)))
+        let review = column(ReviewFlow(record: makeRecord(finalTick: 5, feeSnapshot: originalFees), startTick: 5))
         let replay = column(ReplayFlow(feeSnapshotFromOriginal: originalFees, maxTick: 10))
         #expect(normal != review)
         #expect(normal != replay)
@@ -160,7 +160,7 @@ struct TrainingFlowBoundaryTests {
 
     @Test("ReviewFlow finalTick==0 → 单点 0...0")
     func reviewZeroFinalTick() {
-        let flow = ReviewFlow(record: makeRecord(finalTick: 0, feeSnapshot: originalFees))
+        let flow = ReviewFlow(record: makeRecord(finalTick: 0, feeSnapshot: originalFees), startTick: 0)
         #expect(flow.initialTick == 0)
         #expect(flow.allowedTickRange == 0...0)
     }
@@ -174,5 +174,47 @@ struct TrainingFlowBoundaryTests {
     let rec = TrainingRecord(id: 1, trainingSetFilename: "x.sqlite", createdAt: 0, stockCode: "1", stockName: "n",
                              startYear: 2021, startMonth: 1, totalCapital: 100000, profit: 0, returnRate: 0,
                              maxDrawdown: 0, buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: 100)
-    #expect(ReviewFlow(record: rec).shouldPersistProgress() == false)
+    #expect(ReviewFlow(record: rec, startTick: rec.finalTick).shouldPersistProgress() == false)
+}
+
+// MARK: - Task B1: ReviewFlow 可步进重演 + canJumpToEnd + FlowInput/make 守卫
+
+@Test func reviewFlow_playable_matrix() {
+    let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+    let rec = TrainingRecord(id: 1, trainingSetFilename: "x.sqlite", createdAt: 0, stockCode: "1", stockName: "n",
+        startYear: 2021, startMonth: 1, totalCapital: 100000, profit: 0, returnRate: 0,
+        maxDrawdown: 0, buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: 1000)
+    let rf = ReviewFlow(record: rec, startTick: 200)
+    #expect(rf.initialTick == 200)
+    #expect(rf.allowedTickRange == 200...1000)
+    #expect(rf.canAdvance() == true)
+    #expect(rf.canBuySell() == false)
+    #expect(rf.canJumpToEnd() == true)
+    #expect(rf.shouldShowSettlement() == false)
+    #expect(NormalFlow(fees: fees, maxTick: 100).canJumpToEnd() == false)
+    #expect(ReplayFlow(feeSnapshotFromOriginal: fees, maxTick: 100).canJumpToEnd() == false)
+}
+
+@MainActor
+@Test func make_review_startTickAfterFinalTick_throwsNotTrap() throws {
+    let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+    let rec = TrainingRecord(id: 1, trainingSetFilename: "x.sqlite", createdAt: 0, stockCode: "1", stockName: "n",
+        startYear: 2021, startMonth: 1, totalCapital: 100000, profit: 0, returnRate: 0,
+        maxDrawdown: 0, buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: 5)
+    // startTick(10) > finalTick(5)：guard 在候选校验/flow 构造前抛 → 不触 ClosedRange trap
+    #expect(throws: AppError.self) {
+        _ = try TrainingEngine.make(.review(record: rec, startTick: 10),
+                                    allCandles: [:],
+                                    initialCapital: 100_000, initialCashBalance: 100_000)
+    }
+}
+
+@Test func reviewFlow_directBadStartTick_noTrap_degenerateRange() {
+    let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+    let rec = TrainingRecord(id: 1, trainingSetFilename: "x.sqlite", createdAt: 0, stockCode: "1", stockName: "n",
+        startYear: 2021, startMonth: 1, totalCapital: 100000, profit: 0, returnRate: 0,
+        maxDrawdown: 0, buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: 5)
+    let rf = ReviewFlow(record: rec, startTick: 10)   // startTick>finalTick：钳位为退化 5...5，不 trap
+    #expect(rf.allowedTickRange == 5...5)
+    #expect(rf.initialTick == 5)
 }

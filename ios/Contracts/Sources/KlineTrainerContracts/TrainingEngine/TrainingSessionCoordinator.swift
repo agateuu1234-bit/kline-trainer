@@ -277,7 +277,7 @@ public final class TrainingSessionCoordinator {
             // m3.last.endGlobalIndex >= finalTick，故此处不重复 maxTick(from:)（D3 / LOW#8）。
             let allCandles = try reader.loadAllCandles()
             let engine = try TrainingEngine.make(
-                .review(record: record),
+                .review(record: record, startTick: record.finalTick),   // B3 将改为真实起始 tick
                 allCandles: allCandles,
                 initialCapital: record.totalCapital,
                 initialCashBalance: record.totalCapital + record.profit,   // 末态全现金（强平后）

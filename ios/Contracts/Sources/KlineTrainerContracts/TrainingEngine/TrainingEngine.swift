@@ -162,7 +162,7 @@ public final class TrainingEngine {
     /// 无法不 trap 地预判（codex final-R8-F1）。maxTick 由此输入单一派生，结构上无 flow/maxTick 错位。
     public enum FlowInput {
         case normal(fees: FeeSnapshot, maxTick: Int)
-        case review(record: TrainingRecord)
+        case review(record: TrainingRecord, startTick: Int)
         case replay(fees: FeeSnapshot, maxTick: Int)
     }
 
@@ -196,9 +196,13 @@ public final class TrainingEngine {
         case .replay(let fees, let mt):
             guard mt >= 0 else { throw AppError.trainingSet(.emptyData) }
             maxTick = mt; flow = ReplayFlow(feeSnapshotFromOriginal: fees, maxTick: mt)
-        case .review(let record):
-            guard record.finalTick >= 0 else { throw AppError.trainingSet(.emptyData) }
-            maxTick = record.finalTick; flow = ReviewFlow(record: record)
+        case .review(let record, let startTick):
+            // codex plan-R3-F3：startTick 越界（损坏 record/metadata）→ 可恢复 trainingSet 错误，非 ClosedRange trap
+            guard startTick >= 0, record.finalTick >= startTick else {
+                throw AppError.trainingSet(.emptyData)
+            }
+            maxTick = record.finalTick
+            flow = ReviewFlow(record: record, startTick: startTick)
         }
         // flow 由 validated maxTick 建成 → allowedTickRange 安全、无 flow/maxTick 错位（R4-F1 由构造保证）。
         // final-R9-F2：佣金率 finite + 非负——负率 + 免5关闭会让 TradeCalculator 算出负佣金/虚增购买力。
@@ -933,7 +937,7 @@ extension TrainingEngine {
         let flow: TrainingFlowController
         switch mode {
         case .normal: flow = NormalFlow(fees: fees, maxTick: maxTick)
-        case .review: flow = ReviewFlow(record: previewRecord(fees: fees, finalTick: maxTick))
+        case .review: flow = ReviewFlow(record: previewRecord(fees: fees, finalTick: maxTick), startTick: 0)
         case .replay: flow = ReplayFlow(feeSnapshotFromOriginal: fees, maxTick: maxTick)
         }
         return TrainingEngine(
