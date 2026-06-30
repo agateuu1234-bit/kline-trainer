@@ -549,6 +549,12 @@ git commit -m "feat(A3): pending_replay migration 0006 + impl + DefaultAppDB con
 @Test func requestAutosave_replayEnabled_reviewNoOp() async throws {
     let h = try CoordinatorTestHarness.make()
     let replayEngine = try await h.coordinator.replay(recordId: h.seededRecordId)
+    // clean fresh replay：immediate autosave 不写槽（clean-skip 守卫，codex plan-R4/R5-F1）
+    h.coordinator.requestAutosave(engine: replayEngine, immediate: true)
+    await h.coordinator.drainAutosaveForTesting()
+    #expect(h.pendingReplayRepo.saveCount == 0)
+    // 有进度后：autosave 才写
+    replayEngine.holdOrObserve(panel: .upper)
     h.coordinator.requestAutosave(engine: replayEngine, immediate: true)
     await h.coordinator.drainAutosaveForTesting()
     #expect(h.pendingReplayRepo.saveCount >= 1)
@@ -558,7 +564,7 @@ git commit -m "feat(A3): pending_replay migration 0006 + impl + DefaultAppDB con
     let before = h.pendingReplayRepo.saveCount
     h.coordinator.requestAutosave(engine: reviewEngine, immediate: true)
     await h.coordinator.drainAutosaveForTesting()
-    #expect(h.pendingReplayRepo.saveCount == before)   // review 不存
+    #expect(h.pendingReplayRepo.saveCount == before)   // review 不存（shouldPersistProgress=false）
 }
 ```
 > 若现无 `CoordinatorTestHarness`，implementer 以现有 coordinator 测试的 setUp 内联等价构造（关键：注入 `InMemoryPendingReplayRepository` 并 seed 一条 record + fixture training-set 让 `replay()` 成功）。
@@ -895,7 +901,7 @@ git commit -m "feat(A5): resumePendingReplay + hasResumableReplay + AppRouter re
 - [ ] **Step 2: 跑测试确认失败** — FAIL（replaySettlementPayload sync / discard 不清 replay / reset 不清 replay）。
 
 - [ ] **Step 3a: `replaySettlementPayload` 改 async + fence→构建 payload→成功后才 clear**（codex plan-R1-F2：清档**不得**早于 payload 全部 throwing 工作成功，否则 loadMeta 抛会"既删槽又无结算"）。
-签名 `public func replaySettlementPayload(engine:) throws -> TrainingRecord` → `... async throws -> TrainingRecord`。**顺序**：①两 `guard`（mode+活跃上下文）→ ②`await fenceAndDrainAutosaves()`（排空排队 autosave，此后无并发写）→ ③`let meta = try reader.loadMeta()` + 构造 `record`（**全部 throwing payload 工作，槽仍在**，字段计算不变）→ ④`try pendingReplayRepo.clearReplay()`（**仅在 payload 构建成功后**）→ ⑤`return record`。
+签名 `public func replaySettlementPayload(engine:) throws -> TrainingRecord` → `... async throws -> TrainingRecord`。**顺序**：①两 `guard`（mode+活跃上下文）→ ②`await fenceAndDrainAutosaves()`（排空排队 autosave，此后无并发写）→ ③`let meta = try reader.loadMeta()` + 构造 `record`（**全部 throwing payload 工作，槽仍在**，字段计算不变）→ ④**仅在 payload 构建成功后**用**条件清** `if let id = activeRecord?.id { try pendingReplayRepo.clearReplay(ifRecordId: id) }`（**绝不**用无条件 `clearReplay()`——那会误删别记录 A 的槽，codex plan-R3-F1/R5-F2；无条件 `clearReplay()` 仅 reset/corrupt-恢复用）→ ⑤`return record`。
 即在 `return TrainingRecord(...)` 之前先 `let record = TrainingRecord(...)`，然后：
 ```swift
         // 新需求10：fence 已在上方排空 autosave；payload 构建成功后才清槽（codex plan-R1-F2）。
