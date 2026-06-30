@@ -91,6 +91,7 @@ public struct AppRootView: View {
         .overlay {
             if case .history(let r) = router.activeModal {
                 HistoryActionSheet(record: r,
+                                   hasResumableReplay: router.hasResumableReplay(id: r.id ?? -1),
                                    onReview: { Task { await router.review(id: r.id ?? -1) } },
                                    onReplay: { Task { await router.replay(id: r.id ?? -1) } },
                                    onCancel: { router.activeModal = nil })

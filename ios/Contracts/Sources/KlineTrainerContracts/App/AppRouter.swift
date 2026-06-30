@@ -115,6 +115,11 @@ public final class AppRouter {
         } catch { setError(error) }
     }
 
+    /// A7: 透传谓词，避免在 AppRootView 中暴露 private coordinator。
+    public func hasResumableReplay(id: Int64) -> Bool {
+        coordinator.hasResumableReplay(recordId: id)
+    }
+
     public func openSettings() { activeModal = .settings }
 
     public func exitTraining() async {

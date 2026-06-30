@@ -19,18 +19,26 @@ import SwiftUI
 
 public struct HistoryActionSheet: View {
     private let content: HistoryActionContent
+    private let hasResumableReplay: Bool
     private let onReview: () -> Void
     private let onReplay: () -> Void
     private let onCancel: () -> Void
 
     public init(record: TrainingRecord,
+                hasResumableReplay: Bool,
                 onReview: @escaping () -> Void,
                 onReplay: @escaping () -> Void,
                 onCancel: @escaping () -> Void) {
         self.content = HistoryActionContent(record: record)
+        self.hasResumableReplay = hasResumableReplay
         self.onReview = onReview
         self.onReplay = onReplay
         self.onCancel = onCancel
+    }
+
+    /// A7: 可测 static helper — 按是否有续局切换 replay 钮文案。
+    public static func replayButtonTitle(hasResumableReplay: Bool) -> String {
+        hasResumableReplay ? "返回训练" : "再次训练"
     }
 
     public var body: some View {
@@ -57,21 +65,11 @@ public struct HistoryActionSheet: View {
                 }
                 .buttonStyle(.bordered)
 
-                // D6: 再来一次 → onReplay
+                // A7: replay 钮文案随 hasResumableReplay 切换；「取消」按钮已移除（遮罩点击即取消）。
                 Button(action: onReplay) {
-                    Text("再来一次")
+                    Text(Self.replayButtonTitle(hasResumableReplay: hasResumableReplay))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
-                }
-                .buttonStyle(.bordered)
-
-                Spacer().frame(height: 8)
-
-                // D6: 取消置底 → onCancel（补满 modules §U6 init 字面要求）
-                Button(action: onCancel) {
-                    Text("取消")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
                 }
                 .buttonStyle(.bordered)
             }
@@ -113,6 +111,7 @@ fileprivate extension TrainingRecord {
     // D12: 渲染整体居中弹窗（含遮罩）
     HistoryActionSheet(
         record: .preview(),
+        hasResumableReplay: false,
         onReview: {},
         onReplay: {},
         onCancel: {}
