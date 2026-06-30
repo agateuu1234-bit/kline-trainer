@@ -826,8 +826,8 @@ git commit -m "feat(A4): coordinator replay autosave gate + saveProgress routing
 > **错误纪律（codex plan-R1/R10/R11/R12-F1，权威——下方代码以此为准）**：
 > - **元数据先判归属（R11）**：`loadReplaySlotInfo()` 只读 record_id/filename 不解码 → 非本记录/无槽返 nil（不被别记录损坏 payload 阻塞）。
 > - **本记录全量 `loadReplay()`**：**`.dbCorrupted`（已验证损坏 payload）→ durable `try clearReplay()` + 返回 nil（清成功=回退从头 fresh；清失败=瞬态 DB → 传播可重试、槽留，R12-F1）**；**非 `.dbCorrupted`（瞬态）→ 传播**（不清、不 fresh，防丢有效档）。⚠️ **不是"含 .dbCorrupted 一律传播"**——那会让永久损坏槽卡死按钮（R13-F1）。
-> - **其他清档点**：openReader `isCorruptTrainingSet`（`cache.delete + clearReplay`）、pending 文件名 ≠ 记录文件名（`clearReplay`，R10）、**scalar slot 越界/非有限（make 前预判，`clearReplay`，whole-branch R1-F1）**。`loadRecordBundle`/`loadAllCandles`/**真训练集故障的 make 抛错** 传播（记录不被单独删除，故 loadRecordBundle 必瞬态）。
-> - **scalar 损坏槽分流（whole-branch R1-F1）**：`make`（L220/L236-240）对越界 `globalTickIndex` / 非有限·负 cash·capital·drawdown 抛 `.trainingSet(.emptyData)`，与真训练集故障不可区分 → 必须在 `make` **前**对 pending scalar 显式 guard，损坏 → durable `clearReplay + nil`（回退从头），否则 resume-first 永久 brick 该记录。
+> - **其他清档点**：openReader `isCorruptTrainingSet`（`cache.delete + clearReplay`）、pending 文件名 ≠ 记录文件名（`clearReplay`，R10）、**scalar slot 越界/非有限（make 前预判，`clearReplay`，whole-branch R1-F1）**、**saved period 不在 candle map（make 前预判，`clearReplay`，whole-branch R2-F1）**。`loadRecordBundle`/`loadAllCandles`/**真训练集故障的 make 抛错** 传播（记录不被单独删除，故 loadRecordBundle 必瞬态）。
+> - **scalar/period 损坏槽分流（whole-branch R1-F1 + R2-F1）**：`make`（L220/L236-240 越界 `globalTickIndex` / 非有限·负 cash·capital·drawdown；**L244-245 final-R6-F1 saved upper/lower period 不在 `allCandles`**）抛 `.trainingSet(.emptyData)`，与真训练集故障不可区分 → 必须在 `make` **前**对 pending scalar + period 显式 guard，损坏 → durable `clearReplay + nil`（回退从头），否则 resume-first 永久 brick 该记录。
 > - **路由 = resume-first 权威**（不用 `hasResumableReplay` 当路由门）：transient throw → router setError → **不 fresh、不覆盖槽**；返 nil（无槽/不匹配/已清损坏槽）→ fresh。
 
 - [ ] **Step 1: 写失败测试**
@@ -987,6 +987,23 @@ func makeSlot(recordId: Int64, filename: String = "rec.sqlite") -> PendingReplay
     #expect(e == nil)
     #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil) // 槽已清
 }
+
+// codex whole-branch R2-F1：saved period 不在 candle map（make L244-245 final-R6-F1 抛 emptyData 同 brick）→ make 前清档
+// makeCandles 仅含 m3/m60/daily/weekly → .monthly 缺席。
+@Test func resumePendingReplay_periodAbsentFromCandleMap_clearsAndReturnsNil() async throws {
+    let h = try CoordinatorTestHarness.make()
+    let badSlot = PendingReplay(recordId: h.seededRecordId, trainingSetFilename: "set.sqlite",
+        globalTickIndex: 1,
+        upperPeriod: .monthly, lowerPeriod: .daily,   // .monthly 不在 candle map → guard 检出
+        positionData: Data(), cashBalance: 100_000,
+        feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+        tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+    try h.pendingReplayRepo.saveReplay(badSlot)
+    let e = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+    #expect(e == nil)                                            // 回退从头（不到 make）
+    #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil) // 槽已清
+}
 ```
 
 - [ ] **Step 2: 跑测试确认失败** — FAIL（方法不存在）。
@@ -1058,11 +1075,14 @@ public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine?
         reader.close()
         throw (error as? AppError) ?? .internalError(module: "E6b", detail: String(describing: error))
     }
-    // scalar 前置校验段（codex whole-branch R1-F1）：make L220/L236-240 对越界 tick / 非有限·负 money·drawdown
-    // 抛 .trainingSet(.emptyData)，与真训练集故障不可区分；若交给 make 段宽 catch 传播 → 不清槽 → resume-first
-    // 每次撞同一损坏 scalar 槽 → 记录永久 brick。故 make 前分流：损坏 scalar = 损坏槽 → reader.close + durable
-    // clearReplay（try：清失败=瞬态传播可重试）+ nil（回退从头）。fee 已被 loadReplay sanitized，非 brick 向量。
-    guard (0...mt).contains(pending.globalTickIndex),
+    // scalar + period 前置校验段（codex whole-branch R1-F1 + R2-F1）：make L220/L236-240（越界 tick / 非有限·负
+    // money·drawdown）+ L244-245 final-R6-F1（saved period 不在 candle map）对同一条件抛 .trainingSet(.emptyData)，
+    // 与真训练集故障不可区分；若交给 make 段宽 catch 传播 → 不清槽 → resume-first 每次撞同一损坏槽 → 记录永久 brick。
+    // 故 make 前分流：损坏 scalar/period = 损坏槽 → reader.close + durable clearReplay（try：清失败=瞬态传播可重试）
+    // + nil（回退从头）。fee 已被 loadReplay sanitized，非 brick 向量。
+    guard !(allCandles[pending.upperPeriod] ?? []).isEmpty,
+          !(allCandles[pending.lowerPeriod] ?? []).isEmpty,
+          (0...mt).contains(pending.globalTickIndex),
           pending.cashBalance.isFinite, pending.cashBalance >= 0,
           pending.accumulatedCapital.isFinite, pending.accumulatedCapital >= 0,
           pending.drawdown.peakCapital.isFinite, pending.drawdown.peakCapital >= 0,
@@ -1565,8 +1585,32 @@ git commit -m "feat(B1): ReviewFlow playable (startTick/range/canAdvance) + canJ
     #expect(delta > 0)
     #expect(delta < coarseDelta)   // 细周期步进 < 粗周期一根（不会一击跳整天）
 }
+
+// codex whole-branch R2-F2：更细周期先耗尽（stepsForPeriod==0）时不可选它（会 0 步卡死），选仍可进的较粗面板。
+// file-private helper：makeSparseCandlesForStepTest()（m3 连续 0...7；.m60 单根 egi=3；.daily 单根 egi=7）+ makeReviewRecord()（finalTick=7）。
+@Test func stepReviewForward_finerPeriodExhausted_advancesViaCoarser() throws {
+    let engine = try TrainingEngine.make(
+        .review(record: makeReviewRecord(), startTick: 4),   // tick 4：.m60 耗尽(0)，.daily steps=3
+        allCandles: makeSparseCandlesForStepTest(),
+        initialCapital: 100_000, initialCashBalance: 100_000,
+        initialUpperPeriod: .m60, initialLowerPeriod: .daily)
+    engine.stepReviewForward()
+    #expect(engine.tick.globalTickIndex > 4)             // 旧 <= 选 0 步 .m60 → 停 4；修后选 .daily → 4+3=7
+}
+
+@Test func stepReviewForward_bothExhausted_noOp() throws {
+    let engine = try TrainingEngine.make(
+        .review(record: makeReviewRecord(), startTick: 4),
+        allCandles: makeSparseCandlesForStepTest(),
+        initialCapital: 100_000, initialCashBalance: 100_000,
+        initialUpperPeriod: .m60, initialLowerPeriod: .daily)
+    engine.jumpToEnd()                                    // → maxTick=7，两周期皆耗尽
+    let atEnd = engine.tick.globalTickIndex
+    engine.stepReviewForward()
+    #expect(engine.tick.globalTickIndex == atEnd)         // no-op，不崩
+}
 ```
-> implementer：用现有 `TrainingEngine.preview(...)` / fixture 构造 review/normal 引擎（preview 现已支持 `.review`；若需 startTick 用 B1 的 preview 改动）。
+> implementer：`stepReviewForward_usesFinerPeriod` 用现有 `TrainingEngine.preview(...)`；两个 R2-F2 测试用 file-private helper 自建稀疏 map：`makeSparseCandlesForStepTest()`（m3 连续 0...7、gi==egi==i、datetime 严格递增、末根 egi≥maxTick；.m60 单根 egi=3；.daily 单根 egi=7）+ `makeReviewRecord()`（finalTick=7），经 `TrainingEngine.make(.review(record:startTick:4), allCandles:, initialCapital:, initialCashBalance:, initialUpperPeriod:.m60, initialLowerPeriod:.daily)`。record 字段以现有 `.review` 测试为准。
 
 - [ ] **Step 2: 跑测试确认失败** — FAIL（jumpToEnd 不存在）。
 
@@ -1585,13 +1629,25 @@ public func jumpToEnd() {
     drawdown.update(currentCapital: currentTotalCapital)
 }
 
-/// 新需求10（codex plan-R9-F1）：复盘「下一根」逐根推进。**按两 panel 中更细（stepsForPeriod 更小）的周期步进**，
+/// 新需求10（codex plan-R9-F1）：复盘「下一根」逐根推进。**按两 panel 中更细（stepsForPeriod 更小的正数步）的周期步进**，
 /// 而非 activePanel（复盘隐藏了周期选择条，activePanel 停在默认 .lower=粗周期会一击跳一整天）。复用 holdOrObserve
 /// （canAdvance 门控 + 只读无成交）。用户可单指竖滑切周期组合改粒度。
+/// 耗尽面板（stepsForPeriod==0）绝不被选中（codex whole-branch R2-F2）：旧 <= 把 0 当最小步 → 若更细周期先耗尽
+/// 会选中 0 步面板 → holdOrObserve 推进 0 根 → 反复点卡死。改为选最小正步；一方耗尽选另一方；皆耗尽 no-op。
 public func stepReviewForward() {
-    let finerPanel: PanelId =
-        stepsForPeriod(upperPanel.period) <= stepsForPeriod(lowerPanel.period) ? .upper : .lower
-    holdOrObserve(panel: finerPanel)
+    let upperSteps = stepsForPeriod(upperPanel.period)
+    let lowerSteps = stepsForPeriod(lowerPanel.period)
+    let panel: PanelId
+    if upperSteps > 0 && lowerSteps > 0 {
+        panel = upperSteps <= lowerSteps ? .upper : .lower   // 皆可推进 → 选更细
+    } else if upperSteps > 0 {
+        panel = .upper                                        // 仅 upper 能推进
+    } else if lowerSteps > 0 {
+        panel = .lower                                        // 仅 lower 能推进
+    } else {
+        return                                                // 皆耗尽=到结尾，no-op
+    }
+    holdOrObserve(panel: panel)
 }
 ```
 > implementer：`stopAllDeceleration` / `reduce(.tradeTriggered)` / `resetOffsetAfterAutoTracking` / `stepsForPeriod` 复用 `advanceAndAccount`/`holdOrObserve` 同款（以源码现有方法名/访问级为准；`stepsForPeriod` 已是引擎内部函数，本方法同文件可直接调）。
