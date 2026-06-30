@@ -832,6 +832,19 @@ func makeSlot(recordId: Int64, filename: String = "rec.sqlite") -> PendingReplay
 }
 
 @MainActor
+@Test func resumePendingReplay_corruptSlot_clearFails_propagatesKeepsSlot() async throws {
+    // codex plan-R12-F1：本记录损坏槽 + 清档失败（瞬态 DB）→ 不吞、传播可重试错误、槽保留（不伪装"无暂存"开 fresh）
+    let h = try CoordinatorTestHarness.make()
+    try h.pendingReplayRepo.saveReplay(makeSlot(recordId: h.seededRecordId))
+    h.pendingReplayRepo.failNextLoadReplay = .persistence(.dbCorrupted)
+    h.pendingReplayRepo.failNextClearReplay = .internalError(module: "test", detail: "transient clear")
+    await #expect(throws: (any Error).self) {
+        _ = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+    }
+    #expect(try h.pendingReplayRepo.loadReplaySlotInfo()?.recordId == h.seededRecordId)  // 清失败 → 槽仍在
+}
+
+@MainActor
 @Test func resumePendingReplay_filenameMismatch_clearsAndReturnsNil() async throws {
     // codex plan-R10-F1：pending.recordId 匹配但 trainingSetFilename 与记录不符（stale/corrupt 槽）→ 清 + nil（不拿错文件续局）
     let h = try CoordinatorTestHarness.make()
@@ -893,7 +906,9 @@ public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine?
         pending = p
     } catch let e as AppError {
         if case .persistence(.dbCorrupted) = e {
-            try? pendingReplayRepo.clearReplay()   // 本记录损坏槽 → 清 + 回退从头（router fresh，用记录权威文件名）
+            // 本记录损坏槽 → durable 清 + 回退从头（router fresh）。**不用 try?**（codex plan-R12-F1）：
+            // 清失败=瞬态 DB（满/不可用）→ 传播可重试错误，**不**伪装"无暂存"而留损坏行卡死。
+            try pendingReplayRepo.clearReplay()
             return nil
         }
         throw e                                    // 瞬态 → 传播（不清、不 fresh）
@@ -1291,6 +1306,19 @@ git commit -m "feat(A7): HistoryActionSheet drop 取消 + 再次训练/返回训
 ```
 > implementer：`make` 其余参数若无默认值则补最小合法值；关键是断言抛 `AppError`（不崩）。
 
+加 ReviewFlow 公共构造边界守卫测试（codex plan-R12-F2：直接用 public init 传坏 startTick 读 range 不得 trap）：
+```swift
+@Test func reviewFlow_directBadStartTick_noTrap_degenerateRange() {
+    let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+    let rec = TrainingRecord(id: 1, trainingSetFilename: "x.sqlite", createdAt: 0, stockCode: "1", stockName: "n",
+        startYear: 2021, startMonth: 1, totalCapital: 100000, profit: 0, returnRate: 0,
+        maxDrawdown: 0, buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: 5)
+    let rf = ReviewFlow(record: rec, startTick: 10)   // startTick>finalTick：钳位为退化 5...5，不 trap
+    #expect(rf.allowedTickRange == 5...5)
+    #expect(rf.initialTick == 5)
+}
+```
+
 - [ ] **Step 2: 跑测试确认失败** — FAIL。
 
 - [ ] **Step 3a: 协议加 `canJumpToEnd`**（`TrainingFlowController` 协议 + 三 struct）
@@ -1309,8 +1337,13 @@ public struct ReviewFlow: TrainingFlowController {
 
     public var mode: TrainingMode { .review }
     public var feeSnapshot: FeeSnapshot { record.feeSnapshot }
-    public var initialTick: Int { startTick }
-    public var allowedTickRange: ClosedRange<Int> { startTick...record.finalTick }
+    // codex plan-R12-F2：钳位防 `startTick...finalTick` ClosedRange trap（类型边界安全网——
+    // public init 可被直接传坏 startTick/corrupt record；`make` 守卫是正确-错误路径，此处保证读 range 永不崩）。
+    // 合法路径（0<=startTick<=finalTick）下 safeStart==startTick / safeFinal==finalTick，语义不变。
+    private var safeFinalTick: Int { max(0, record.finalTick) }
+    private var safeStartTick: Int { max(0, min(startTick, safeFinalTick)) }
+    public var initialTick: Int { safeStartTick }
+    public var allowedTickRange: ClosedRange<Int> { safeStartTick...safeFinalTick }
 
     public func canBuySell() -> Bool { false }
     public func canAdvance() -> Bool { true }          // 新需求10：复盘可步进重演
