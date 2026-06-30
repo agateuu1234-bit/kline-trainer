@@ -216,8 +216,20 @@ public struct PendingReplay: Codable, Equatable, Sendable {
 public protocol PendingReplayRepository: Sendable {
     func saveReplay(_: PendingReplay) throws
     func loadReplay() throws -> PendingReplay?
+    /// 轻量元数据（只读 record_id/training_set_filename，**不解码 payload**）。codex plan-R11-F1：
+    /// resume-first 用它先判槽归属，避免别记录的损坏 payload 阻塞所有 replay 入口。
+    func loadReplaySlotInfo() throws -> ReplaySlotInfo?
     func clearReplay() throws                       // 无条件（reset 用）
     func clearReplay(ifRecordId: Int64) throws      // 仅当槽属于该记录才清（终局/discard 用，codex plan-R3-F1）
+}
+
+public struct ReplaySlotInfo: Equatable, Sendable {
+    public let recordId: Int64
+    public let trainingSetFilename: String
+    public init(recordId: Int64, trainingSetFilename: String) {
+        self.recordId = recordId
+        self.trainingSetFilename = trainingSetFilename
+    }
 }
 ```
 
@@ -257,6 +269,13 @@ public final class InMemoryPendingReplayRepository: PendingReplayRepository, @un
         lock.lock(); defer { lock.unlock() }
         if let e = _failNextLoadReplay { _failNextLoadReplay = nil; throw e }
         return pending
+    }
+    /// 元数据读取**不消费** `failNextLoadReplay`（生产 Impl 只读简单列、不解码 payload，故不受 payload 损坏影响）。
+    /// 这样测试可"slotInfo 成功（返 recordId）+ loadReplay 抛 .dbCorrupted"模拟损坏 payload 的本记录槽。
+    public func loadReplaySlotInfo() throws -> ReplaySlotInfo? {
+        lock.lock(); defer { lock.unlock() }
+        guard let p = pending else { return nil }
+        return ReplaySlotInfo(recordId: p.recordId, trainingSetFilename: p.trainingSetFilename)
     }
     public func clearReplay() throws {
         lock.lock(); defer { lock.unlock() }
@@ -441,8 +460,17 @@ enum PendingReplayRepositoryImpl {
     static func clearReplay(_ db: Database, ifRecordId recordId: Int64) throws {
         try db.execute(sql: "DELETE FROM pending_replay WHERE id = 1 AND record_id = ?", arguments: [recordId])
     }
+
+    // codex plan-R11-F1：轻量元数据——只读 record_id/training_set_filename（简单列，不解码 payload），
+    // 故损坏 payload 不会让本方法抛。resume-first 用它先判槽归属，避免一条损坏槽阻塞所有记录的 replay。
+    static func loadReplaySlotInfo(_ db: Database) throws -> ReplaySlotInfo? {
+        guard let row = try Row.fetchOne(db, sql:
+            "SELECT record_id, training_set_filename FROM pending_replay WHERE id = 1") else { return nil }
+        return ReplaySlotInfo(recordId: row["record_id"], trainingSetFilename: row["training_set_filename"])
+    }
 }
 ```
+> **codex plan-R11-F1**：`loadReplay` 内**所有 payload 解码失败统一映射 `.dbCorrupted`**——base64/Period 已显式抛 `.dbCorrupted`；把 4 处 `RecordRepositoryImpl.jsonDecode(...)`（fee/ops/drawings/drawdown）包进 `do/catch { throw AppError.persistence(.dbCorrupted) }`（或确认 jsonDecode 失败经 DefaultAppDB 映射即为 `.dbCorrupted`）。目的：resumePendingReplay 能用"是否 `.dbCorrupted`"确定区分"已验证损坏槽（清+回退）"vs"瞬态（传播）"。
 
 - [ ] **Step 3d: `DefaultAppDB.swift` conform `PendingReplayRepository`**（紧邻现有 pending_training 三方法，镜像其错误映射）
 ```swift
@@ -459,6 +487,15 @@ public func loadReplay() throws -> PendingReplay? {
     do {
         return try dbQueue.read { db in
             try PendingReplayRepositoryImpl.loadReplay(db)
+        }
+    } catch let appErr as AppError { throw appErr }
+    catch { throw PersistenceErrorMapping.translate(error) }
+}
+
+public func loadReplaySlotInfo() throws -> ReplaySlotInfo? {
+    do {
+        return try dbQueue.read { db in
+            try PendingReplayRepositoryImpl.loadReplaySlotInfo(db)
         }
     } catch let appErr as AppError { throw appErr }
     catch { throw PersistenceErrorMapping.translate(error) }
@@ -761,6 +798,39 @@ git commit -m "feat(A4): coordinator replay autosave gate + saveProgress routing
     #expect(try h.pendingReplayRepo.loadReplay() != nil)
 }
 
+// 损坏槽测试用最小 PendingReplay 工厂（loadReplay 抛错先于文件名 guard，故 filename 无关）
+@MainActor
+func makeSlot(recordId: Int64, filename: String = "rec.sqlite") -> PendingReplay {
+    PendingReplay(recordId: recordId, trainingSetFilename: filename,
+        globalTickIndex: 1, upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(),
+        cashBalance: 100_000, feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+        tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
+        drawdown: DrawdownAccumulator(peakCapital: 100_000))
+}
+
+@MainActor
+@Test func resumePendingReplay_corruptSlot_nonMatchingRecord_notBlocked() async throws {
+    // codex plan-R11-F1：record A 的损坏 payload 槽不得阻塞 record B 的 replay 入口
+    let h = try CoordinatorTestHarness.make(seedRecordIds: [101, 202])
+    try h.pendingReplayRepo.saveReplay(makeSlot(recordId: 101))
+    h.pendingReplayRepo.failNextLoadReplay = .persistence(.dbCorrupted)  // 全量解码会抛（slotInfo 不受影响）
+    // 对 record 202 续局：slotInfo 返 101 ≠ 202 → 直接 nil，**不触发全量 loadReplay**（A 的损坏不阻塞 B）
+    let e = try await h.coordinator.resumePendingReplay(recordId: 202)
+    #expect(e == nil)
+    #expect(try h.pendingReplayRepo.loadReplaySlotInfo()?.recordId == 101)  // A 槽未被清（非本记录不动）
+}
+
+@MainActor
+@Test func resumePendingReplay_corruptSlot_matchingRecord_clearsAndFallsBack() async throws {
+    // codex plan-R11-F1：本记录损坏 payload 槽 → 清 + 返回 nil（router 回退从头 fresh）
+    let h = try CoordinatorTestHarness.make()
+    try h.pendingReplayRepo.saveReplay(makeSlot(recordId: h.seededRecordId))
+    h.pendingReplayRepo.failNextLoadReplay = .persistence(.dbCorrupted)  // 本记录槽全量解码损坏
+    let e = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+    #expect(e == nil)
+    #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil)  // 损坏槽已清
+}
+
 @MainActor
 @Test func resumePendingReplay_filenameMismatch_clearsAndReturnsNil() async throws {
     // codex plan-R10-F1：pending.recordId 匹配但 trainingSetFilename 与记录不符（stale/corrupt 槽）→ 清 + nil（不拿错文件续局）
@@ -799,10 +869,11 @@ git commit -m "feat(A4): coordinator replay autosave gate + saveProgress routing
 - [ ] **Step 3a: `hasResumableReplay`**（coordinator 加；**display-only / advisory**）
 ```swift
 /// 新需求10：该记录是否有可续局 replay 暂存。**display-only/advisory**（历史弹窗按钮文案）。
+/// 用轻量 `loadReplaySlotInfo`（不解码 payload，codex plan-R11-F1）：损坏 payload 不影响归属判断。
 /// 读失败保守返 false 安全：路由是 resume-first 权威（replay(id:) 总先试 resumePendingReplay），
 /// 故此处一次瞬态 false 至多让按钮文案短暂误显「再次训练」，点击仍走 resume-first 不会丢槽。
 public func hasResumableReplay(recordId: Int64) -> Bool {
-    (try? pendingReplayRepo.loadReplay())?.recordId == recordId
+    ((try? pendingReplayRepo.loadReplaySlotInfo()) ?? nil)?.recordId == recordId
 }
 ```
 
@@ -812,8 +883,21 @@ public func hasResumableReplay(recordId: Int64) -> Bool {
 /// 错误纪律：loadReplay/loadRecordBundle/loadAllCandles/make 错误**传播**（不清档）；**仅 openReader 已验证损坏
 /// (isCorruptTrainingSet)** 才 cache.delete + clearReplay + 返回 nil。无槽 / recordId 不匹配 → 返回 nil（不清档）。
 public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine? {
-    // loadReplay 错误传播（含 .dbCorrupted，fail-closed 同 resumePending 的 loadPending）；无槽/不匹配 → nil（不清档）
-    guard let pending = try pendingReplayRepo.loadReplay(), pending.recordId == recordId else { return nil }
+    // 1) 轻量元数据先判归属（codex plan-R11-F1）：不解码 payload → 别记录的损坏槽不阻塞本记录的 replay。
+    //    slotInfo 自身错误=DB 级瞬态（whole-db 不可达）→ 传播。无槽/不匹配 → nil（不清档）。
+    guard let info = try pendingReplayRepo.loadReplaySlotInfo(), info.recordId == recordId else { return nil }
+    // 2) 本记录槽：全量解码。.dbCorrupted（已验证损坏 payload）→ 清 + 回退从头；其他（瞬态）→ 传播。
+    let pending: PendingReplay
+    do {
+        guard let p = try pendingReplayRepo.loadReplay() else { return nil }   // 竞态：刚被清 → nil
+        pending = p
+    } catch let e as AppError {
+        if case .persistence(.dbCorrupted) = e {
+            try? pendingReplayRepo.clearReplay()   // 本记录损坏槽 → 清 + 回退从头（router fresh，用记录权威文件名）
+            return nil
+        }
+        throw e                                    // 瞬态 → 传播（不清、不 fresh）
+    }
     // 记录不会被单独删除（reset 连带清槽，无孤儿）→ loadRecordBundle 错误必瞬态 → 传播（不清档）
     let bundle = try recordRepo.loadRecordBundle(id: pending.recordId)
     // codex plan-R10-F1：pending 的文件名须与记录一致——否则 stale/corrupt 槽会让记录 A 的 id 配文件 B 的

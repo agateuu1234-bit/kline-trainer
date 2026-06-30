@@ -120,9 +120,10 @@ CREATE TABLE IF NOT EXISTS pending_replay (
    - 设 `activeStartedAt = now()`（原 `nil`→`now()`，供 `PendingReplay.started_at`）；`activeRecord = record`（已设）；**捕获 `replayBaseline = (tick, ops.count, drawings.count)`**（fresh = startTick/0/0）+ **`replayHasPersisted = false`**；**`resetAutosaveState()`**（codex plan-R7-F1：重开 autosave 栅栏 `terminating=false`——否则前一会话 endSession 留的 `terminating=true` 会让 fresh replay 的 tick/后台 autosave 全 no-op、crash/后台杀=丢档；与 startNewNormalSession/resumePending 同款）。`activeSessionKey` 保持 nil。
    - 其余装配不变（fresh：无 initialMarkers/position）。
    - 边界：开新 replay B 后**零操作**即退出 → **clean-skip 守卫**（§A.4.1）使 `back()`/后台 flush 不写槽 + **条件清**（§A.4.4）使 B 终局不动 A 的槽 → **旧档 A 完整保留**，A 仍显"返回训练"、B 显"再次训练"。B 一旦有进度（步进/交易/画线）再存 → 覆盖单槽为 B（last-active wins，符合 D-A1/D-A4）。注：slot==A 时记录 A 的按钮本就显"返回训练"，不可达"对 A 开从头 replay"。
-3. **新增 `resumePendingReplay(recordId:) async throws -> TrainingEngine?`**（**精确镜像 `resumePending` 的错误纪律**，codex plan-R1-F1）：
-   - **错误纪律（关键）**：`loadReplay()` / `loadRecordBundle` / `loadAllCandles` / `make` / decode 的错误**一律传播**（throw，**不清档、不覆盖槽**；含 `.dbCorrupted`——fail-closed，同 resumePending 的 loadPending 传播）。瞬态错误经路由 setError、**不回退从头**（防丢有效暂停档）。**唯一清档点 = openReader「已验证损坏」(`isCorruptTrainingSet`)** → `cache.delete + clearReplay + 返回 nil`。
-   - `loadReplay()` 无槽 或 `pending.recordId != recordId` → 返回 nil（**不清档**；调用方回退从头）。
+3. **新增 `resumePendingReplay(recordId:) async throws -> TrainingEngine?`**（错误纪律镜像 `resumePending`，codex plan-R1-F1/R11-F1）：
+   - **① 轻量元数据先判归属（codex plan-R11-F1，关键）**：`guard let info = try loadReplaySlotInfo(), info.recordId == recordId else { return nil }`。`loadReplaySlotInfo` 只读 `record_id/training_set_filename`、**不解码 payload** → **别记录的损坏 payload 槽不会阻塞本记录的 replay 入口**（避免 resume-first 下一条损坏槽让所有记录按钮永久报错）。无槽/不匹配 → nil（不清档）。slotInfo 自身错误=whole-db 瞬态 → 传播。
+   - **② 本记录槽全量解码**：`loadReplay()` —— **`.dbCorrupted`（已验证损坏 payload）→ `clearReplay()` + 返回 nil（清+回退从头 fresh）**；其他（瞬态）→ **传播**（不清、不 fresh，防丢有效档）。loadReplay 内所有 payload 解码失败统一映射 `.dbCorrupted`（base64/Period/JSON）以确定区分。
+   - 其余错误纪律：`loadRecordBundle` / `loadAllCandles` / `make` 错误**传播**；**清档点 = openReader `isCorruptTrainingSet`（`cache.delete + clearReplay`）+ 本记录槽 `.dbCorrupted`（`clearReplay`）+ 文件名不一致（`clearReplay`）**。
    - `recordRepo.loadRecordBundle(id: pending.recordId)`：错误传播（记录不被单独删除——reset 连带清槽无孤儿——故必为瞬态）。设 `activeRecord = bundle.record`。
    - **文件名一致性 guard（codex plan-R10-F1）**：`guard pending.trainingSetFilename == bundle.record.trainingSetFilename else { clearReplay(); return nil }`——内部不一致（stale/corrupt 槽）会让记录 A 的 id 配文件 B 的 candles → 显错标的、清理失准；当损坏槽清 + 回退从头（router fresh replay 用记录权威文件名）。
    - open reader：corrupt(`isCorruptTrainingSet`)→ `cache.delete` + `clearReplay()` + 返回 nil（镜像 normal resume）；其他错误传播。
@@ -135,7 +136,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
    - **条件清 + fail-closed（codex plan-R3-F1/R8-F1，关键）**：终局/discard 用 **`clearReplay(ifRecordId: recordId)`**（原子 `DELETE WHERE id=1 AND record_id=?`），**仅清属于当前 replay 记录的槽**（因"不前置 clear"——开新 B 未存即到终局/discard 时槽仍=旧记录 A；无条件清会误删 A）。**`recordId` 须纳入活跃上下文 guard**（`guard ..., let recordId = activeRecord?.id else { throw }`）：缺则 **throw、保留会话可重试**（fail-closed，**不可静默返回 record/结束会话却留陈旧槽**）。reset（§A.7）才用无条件 `clearReplay()` 清全部。
    - **丢弃清档**：`discardSession()` 当 `mode==.replay`：`guard let recordId = activeRecord?.id else { throw .internalError }` 再 `clearReplay(ifRecordId: recordId)`（已先 `fenceAndDrainAutosaves`，L460；normal 时清 `pending_training`）。DEBUG 测试钩子 `setActiveRecordNilForTesting()` 验两条 fail-closed。
    - 故 pending_replay 生命周期：`replay()`(从头, **不清旧档**) → 玩(autosave 写档) → `back()`(saveProgress 写档, endSession **不清**) → 续局 `resumePendingReplay` → … → 终局结算/discard(**fence→条件清 ifRecordId**) **或** 被新 replay 首存 `INSERT OR REPLACE` 覆盖 **或** reset 无条件清。
-5. **新增查询 `hasResumableReplay(recordId:) -> Bool`**：`(try? loadReplay())?.recordId == recordId`。**display-only / advisory**（仅历史弹窗按钮文案）；**不当路由门**。读失败保守返 false 安全，因路由是 resume-first 权威（见 §A.5）：一次瞬态 false 至多让按钮短暂误显"再次训练"，点击仍走 resume-first、不会丢槽。
+5. **新增查询 `hasResumableReplay(recordId:) -> Bool`**：用轻量 `loadReplaySlotInfo()`（不解码 payload，R11-F1）判 `recordId` 匹配。**display-only / advisory**（仅历史弹窗按钮文案）；**不当路由门**。读失败保守返 false 安全，因路由是 resume-first 权威（见 §A.5）：一次瞬态 false 至多让按钮短暂误显"再次训练"，点击仍走 resume-first、不会丢槽。
 
 ### A.5 路由 + UI（**resume-first 权威**，codex plan-R1-F1）
 - **`AppRouter.replay(id:)` 分流**：**总先试** `resumePendingReplay(id)`——返非 nil→续局；返 nil（无槽/不匹配/已验证损坏已清）→从头 `replay(id)`；**throw（瞬态）→ setError，不 fresh、不覆盖槽**。**不**用 `hasResumableReplay` 当路由门（防其瞬态 false 触发 fresh 覆盖有效槽）。
@@ -145,8 +146,10 @@ CREATE TABLE IF NOT EXISTS pending_replay (
   - replay 钮文案：新增参数 `hasResumableReplay: Bool` → 文案 `hasResumableReplay ? "返回训练" : "再次训练"`（替换原 "再来一次"）。「复盘」不变。
   - 卡片更小（去掉一颗按钮 + 末尾 `Spacer`，`maxWidth` 视觉收紧；具体值 plan 定）。
 
-### A.6 错误处理（精确镜像 normal resume；**区分瞬态 vs 已验证损坏**，codex plan-R1-F1）
-- **清档（仅"已验证损坏槽"）= ① 训练集 open `isCorruptTrainingSet`（`cache.delete + clearReplay + nil`，孤儿槽不可恢复）；② pending 文件名 ≠ 记录文件名（内部不一致，`clearReplay + nil`，codex plan-R10-F1）。**
+### A.6 错误处理（精确镜像 normal resume；**区分瞬态 vs 已验证损坏**，codex plan-R1/R10/R11-F1）
+- **元数据先判归属（R11-F1）**：`loadReplaySlotInfo` 不解码 payload → 别记录损坏槽不阻塞本记录；非本记录/无槽 → nil 不清档。
+- **清档（仅"已验证损坏槽"）= ① 训练集 open `isCorruptTrainingSet`（`cache.delete + clearReplay + nil`）；② **本记录槽** 全量 `loadReplay` 抛 `.dbCorrupted`（损坏 payload，`clearReplay + nil` 回退从头，R11-F1）；③ pending 文件名 ≠ 记录文件名（内部不一致，`clearReplay + nil`，R10-F1）。**
+- **传播（瞬态，不清不 fresh）**：slotInfo whole-db 错误、loadRecordBundle、loadAllCandles、make、非 `.dbCorrupted` 的 loadReplay 错误。
 - **瞬态/未分类错误一律传播（不清档、不覆盖槽）**：`loadReplay`（含 decode `.dbCorrupted`，fail-closed）、`loadRecordBundle`、`loadAllCandles`、`make`/decode position 失败 → throw → 路由 setError、不回退从头。
 - `pending.recordId` 不匹配 / 无槽 → 返回 nil（**不清档**）。
 - 自动保存 fencing / `terminating` 机制对 replay 复用（同一 coordinator 状态机）。
@@ -232,7 +235,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 **新增**
 - `ios/Contracts/Sources/KlineTrainerPersistence/Internal/PendingReplayRepositoryImpl.swift`（enum 静态方法，镜像 `PendingTrainingRepositoryImpl`）
 - migration **0006**（`AppDBMigrations.swift` 内 `CREATE TABLE pending_replay`，**不动** `app_schema_v1.sql`/baseline DDL）
-- `PendingReplayRepository` 协议（`Persistence/PendingReplayRepository.swift`，sync throws 镜像 `PendingTrainingRepository`）+ `InMemoryPendingReplayRepository`（`PreviewFakes/InMemoryFakes.swift`，`#if DEBUG`，镜像 normal 替身含 fail-injection/saveCount）
+- `PendingReplayRepository` 协议（`Persistence/PendingReplayRepository.swift`，sync throws：saveReplay/loadReplay/**loadReplaySlotInfo(R11-F1 轻量元数据)**/clearReplay/clearReplay(ifRecordId:)）+ `ReplaySlotInfo` 值类型 + `InMemoryPendingReplayRepository`（`PreviewFakes/InMemoryFakes.swift`，`#if DEBUG`，含 fail-injection/saveCount，slotInfo 不消费 failNext）
 - 测试：flow 矩阵、coordinator replay save/resume/clear、review playback、jumpToEnd、按钮文案、reset 清档、sheet 去取消、迁移。
 
 **修改**
@@ -259,7 +262,8 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 - Coordinator（in-memory fakes）：
   - replay 从头 → `saveProgress` 写 `pending_replay`（recordId 正确）；`hasResumableReplay` 真。
   - **autosave 入口（spec-R1-F1）**：replay 的 `requestAutosave(immediate:false)`（tick 节流）、`requestAutosave(immediate:true)`（交易/画线）、`flushAutosave`（后台）均**写 `pending_replay`**；**review 的 requestAutosave 仍 no-op**（不写任何 pending）。
-  - `resumePendingReplay` 还原 tick/cash/position/markers/drawings/drawdown；recordId 不匹配 → nil（**不清档**）；**瞬态 loadReplay/loadRecordBundle 失败 → 传播 throw + 槽保留**（不清、不 fresh，codex plan-R1-F1）；仅 openReader 已验证损坏 → 清档 nil。
+  - `resumePendingReplay` 还原 tick/cash/position/markers/drawings/drawdown；recordId 不匹配 → nil（**不清档**）；**瞬态 loadReplay/loadRecordBundle 失败 → 传播 throw + 槽保留**（不清、不 fresh，codex plan-R1-F1）；openReader 已验证损坏 / 文件名不一致 → 清档 nil。
+  - **损坏槽不阻塞 + 可恢复（plan-R11-F1）**：record A 损坏 payload 槽 → 对 record B 续局走 slotInfo 元数据判定直接 nil（**不触全量 loadReplay**、不被阻塞、A 槽不动）；对 record A（本记录）续局 → 全量 loadReplay 抛 `.dbCorrupted` → 清 A 槽 + nil（回退从头）。
   - **单槽覆盖（spec-R1-F3）**：已有 `pending_replay`(A)，开新 replay(B) 并保存 → slot 变 B（`INSERT OR REPLACE` 覆盖）；**failed fresh replay 回归**：已有 A、开 B 但装配抛错 → A 仍在（未被清）。
   - **条件清不删别记录槽（plan-R3-F1）**：A 有槽、开 B 未保存即终局/discard → 条件清 `ifRecordId=B` no-op → A 的槽保留。**fail-closed save（plan-R3-F2）**：缺活跃上下文（如 startedAt/recordId 缺、stale engine）→ saveProgress 对 replay **throw**（非静默 no-op）。
   - **clean-skip 不覆盖别记录槽（plan-R4-F1）**：A 有槽、开 fresh B 零操作 → `back()`(saveProgress) **与** 后台 `flushAutosave` 均跳过写 → A 仍在；B 有进度后存 → 覆盖为 B。
