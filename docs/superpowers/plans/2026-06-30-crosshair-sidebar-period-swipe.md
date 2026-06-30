@@ -438,6 +438,16 @@ struct CrosshairWholePanelTests {
         #expect(r!.lines.vertical.to.y == 360)                    // mainChartFrame.maxY（旧行为）
         #expect(r!.timeLabel.rect.maxY == 360)
     }
+
+    // RFC-C：价标移左缘（codex R4-M）。frame.minX==0；价标自由 Y 不变。
+    @Test("价标在左缘：priceLabel.rect.minX == mainChartFrame.minX（非右缘）")
+    func priceLabelOnLeftEdge() {
+        let m = makeMapper(visibleCount: 10, frameHeight: 360)    // mainChartFrame.minX == 0
+        let c = makeCandles(count: 10)[0..<10]
+        let r = CrosshairLayout.resolve(at: CGPoint(x: 35, y: 100), mapper: m, candles: c, frames: makeFrames())
+        #expect(r!.priceLabel.rect.minX == 0)                     // 左缘（非右缘 maxX==frameWidth）
+        #expect(r!.priceLabel.rect.midY == 100)                   // 自由 Y 不变
+    }
 }
 ```
 
@@ -475,7 +485,8 @@ Expected: 编译失败 `extra argument 'frames' in call`。
 
         let price = mapper.yToPrice(point.y)
         let priceWidth: CGFloat = 60, priceHeight: CGFloat = 18
-        let priceRect = CGRect(x: frame.maxX - priceWidth, y: point.y - priceHeight / 2,
+        // RFC-C：价标移**左缘**（对齐 RFC-B 左移价轴 + spec §4.2/mock；原 C5 在右缘 frame.maxX，codex R4-M）
+        let priceRect = CGRect(x: frame.minX, y: point.y - priceHeight / 2,
                                width: priceWidth, height: priceHeight)
         let priceLabel = CrosshairResolved.Label(rect: priceRect,
                                                  text: String(format: "%.2f", price))
@@ -499,6 +510,7 @@ Expected: 编译失败 `extra argument 'frames' in call`。
 ```
 
 > 注：`CrosshairLines` 仍标注「端点已对齐 mainChartFrame 四边」的注释（L14）已不精确——更新该行注释为「竖线端点 = 整 panel（frames 非 nil）或 mainChartFrame」。
+> ⚠️ **同步更新既有测试**（codex R4-M）：`CrosshairLayoutTests.swift:122-124` 的「价签右贴 frame.maxX」断言 `#expect(r?.priceLabel.rect.maxX == 1000)` 改为左缘 `#expect(r?.priceLabel.rect.minX == 0)`（注释「价签右贴」→「价签左贴 frame.minX」）；价标移左缘后旧右缘断言必失败，须改。
 
 - [ ] **Step 4: 跑全部 CrosshairLayout 测试**
 
@@ -1172,3 +1184,6 @@ git commit -m "docs(rfc-c): 验收清单（14 条二值可判）"
 
 **R3（real Codex，verdict=needs-attention，1 medium、已修；R2 verified gone）：**
 - **M 成交量单位错标「手」**（Task 1）：硬编码 `" 手"`，但 importer fixtures（`backend/tests/test_import_csv.py:37`、`test_generate_training_sets.py:45`）约定 `amount = round(close × volume, 2)` → volume 是 **share-count（股）**，非手（若为手 amount 应 ×100）。显「手」=100× 高估。→ **修**：改 `" 股"`（与 importer 约定一致）；加一致性测试 `volumeUnitConsistency`（amount=close×volume → 均价=close∈[低,高] 显示 + 成交量「1,000 股」）。iOS DEBUG fixture amount=NULL（均价/成交额隐藏，acceptance #14 覆盖）；真实数据路径 amount 来自 CSV。「未定项」就此定。
+
+**R4（real Codex，verdict=needs-attention，1 medium、已修；R3 verified gone）：**
+- **M 价标在错误一侧**（Task 2）：`resolve` 的 `priceRect` 仍锚 `frame.maxX - priceWidth`（右缘），但 spec §4.2/mock 要求价标在**左缘**（对齐 RFC-B 左移价轴；RFC-B §4.3 本就把 crosshair label 推给 RFC-C）。原 Task 2 只改竖线/时签、漏价标 → 编译通过但与 spec/mock 矛盾、且可能撞右侧图内容。→ **修**：`priceRect = CGRect(x: frame.minX, …)`（左缘）；新增 `priceLabelOnLeftEdge` frames-path 测试（`priceLabel.rect.minX == mainChartFrame.minX`）；**同步改既有 `CrosshairLayoutTests.swift:124`** 右缘断言 `maxX==1000` → 左缘 `minX==0`（否则旧断言必失败）。spec §4.2 标「价标改现状」。
