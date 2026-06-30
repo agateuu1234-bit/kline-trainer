@@ -190,8 +190,9 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 ### B.5 UI（训练界面控件门控）— 已勘实
 **事实**：`TrainingView.showsTradeButtons = engine.flow.canBuySell()` 门控**整条 `TradeActionBar`**（买/卖/观察捆在一起）。复盘 `canBuySell=false` → 整条不显示 → **当前复盘无任何步进控件**。故复盘步进**不能靠"翻 canAdvance 复用现条"**，须**新增 review 专用控件条**。
 - 新增谓词 `showsReviewControls = engine.flow.canAdvance() && !engine.flow.canBuySell()`（＝复盘可步进态），渲染一个**精简控件条**（不含买/卖）：
-  - 「下一根」→ `engine.stepReviewForward()`（按更细周期逐根；**不依赖 activePanel**，codex plan-R9-F1）。
-  - 「快进到结尾」→ `engine.jumpToEnd()`；**仅 `engine.flow.canJumpToEnd()` 为真时显示**。
+  - `ReviewControlBar` = **纯内容模型 `ReviewControlBarContent`（host-可测，codex plan-R15-F2）+ 动作枚举 `ReviewControlAction{.step,.jumpToEnd}` + SwiftUI 薄壳**（同 TradeActionBarContent 范式）。`showsJumpToEnd` 决定是否含「快进到结尾」按钮。
+  - 薄壳单一 `onAction` 上交；`TrainingView` 分发：`.step → engine.stepReviewForward()`（按更细周期逐根、不依赖 activePanel，R9-F1）、`.jumpToEnd → engine.jumpToEnd()`（仅 `canJumpToEnd()` 真时该按钮存在）。
+  - 测试分层：内容/动作面 host 测（ReviewControlBarContent.buttons）、引擎行为 host 测（stepReviewForward/jumpToEnd，B2）、onAction 接线 Catalyst 编译 + 验收。
   - 位置/样式 plan 定（建议占 TradeActionBar 同一槽位，复盘时以该条替之）。
 - 买/卖控件：复盘恒隐藏（`canBuySell=false` 不变）。
 - K 线 + 标记渐显：自动（§1.4），无改动。
@@ -248,7 +249,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 - `App/AppRouter.swift`（`replay(id:)` resume-first 分流：先 `resumePendingReplay`，nil→fresh，throw→setError）
 - `App/AppRootView.swift`（历史弹窗传 display-only `hasResumableReplay` bool）
 - `UI/HistoryActionSheet.swift`（去「取消」按钮、`hasResumableReplay` 文案切换参数、缩小）
-- `UI/TrainingView.swift`（+`showsReviewControls = canAdvance && !canBuySell`；复盘控件条「下一根」+「快进到结尾」；**replay 终局 `runReplaySettlement()`（async）+ `replaySettlementFailed` 可重试 alert，不 `onSessionEnded(nil)` 拆毁**；review autosave/maybeAutoEnd 已证安全）+ 可能新增 `UI/ReviewControlBar.swift`（精简控件条，平台无关纯内容 + 薄壳，plan 定是否拆文件）
+- `UI/TrainingView.swift`（+`showsReviewControls = canAdvance && !canBuySell`；复盘控件条「下一根」+「快进到结尾」；**replay 终局 `runReplaySettlement()`（async）+ `replaySettlementFailed` 可重试 alert，不 `onSessionEnded(nil)` 拆毁**；review autosave/maybeAutoEnd 已证安全）+ 新增 `UI/ReviewControlBar.swift`（`ReviewControlBarContent` 纯内容 host-可测 + `ReviewControlAction` 枚举 + SwiftUI 薄壳，codex plan-R15-F2）
 - composition root（注入 `PendingReplayRepository`：`DefaultAppDB`/`AppContainer` 装配）+ `settings.resetAllProgress`/`DefaultAppDB.resetAllTrainingProgress`（清 pending_replay）+ AppRootView 历史弹窗呈现处（传 `hasResumableReplay`、去 `onCancel` 按钮无关——遮罩仍用）
 
 ---
@@ -275,7 +276,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
   - reset → `pending_replay` 同 `pending_training` 一起清空。
 - 引擎：`jumpToEnd` 设 tick=maxTick + 镜头吸附 + 非 review/canJumpToEnd=false 时 no-op；review 步进经 `holdOrObserve` 推进且不交易；review 顶栏 `currentTotalCapital==record.totalCapital+profit` 恒定。
 - 渲染（host 纯函数）：currentIdx=startTick 时切片末根≤currentIdx；超 currentIdx 的 marker 不入 placement（回归确认自动渐显）。
-- UI 纯内容：`HistoryActionSheet` 文案随 `hasResumableReplay` 切换；无「取消」按钮但遮罩 `onCancel` 仍触发。
+- UI 纯内容：`HistoryActionSheet` 文案随 `hasResumableReplay` 切换；无「取消」按钮但遮罩 `onCancel` 仍触发。**`ReviewControlBarContent(showsJumpToEnd:)` 按钮集（plan-R15-F2）**：false→只「下一根」(.step)；true→「下一根」+「快进到结尾」(.jumpToEnd)。
 - 迁移：0006 后 `user_version==4`；`pending_replay` 表存在；旧库升级幂等。
 
 **Catalyst**：`KlineTrainerContracts` 包 scheme `build-for-testing` SUCCEEDED（UIKit-gated 代码编译闸门，含训练界面 UI 改动）。CI-gate `grep -E "(error|warning):"` count 0。

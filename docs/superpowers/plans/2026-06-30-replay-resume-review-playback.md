@@ -133,7 +133,7 @@ import Foundation
         feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [],
         startedAt: 1_700_000_000, accumulatedCapital: 100_000,
-        drawdown: DrawdownAccumulator(peakCapital: 100_000))
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
     let data = try JSONEncoder().encode(p)
     let back = try JSONDecoder().decode(PendingReplay.self, from: data)
     #expect(back == p)
@@ -146,7 +146,7 @@ import Foundation
         upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
         feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
-        drawdown: DrawdownAccumulator(peakCapital: 100_000))
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
     try repo.saveReplay(p)
     #expect(try repo.loadReplay() == p)
     #expect(repo.saveCount == 1)
@@ -154,7 +154,7 @@ import Foundation
     #expect(try repo.loadReplay() == nil)
 }
 ```
-> 注：`DrawdownAccumulator` 的真实初始化器以源码为准（implementer 用 `DrawdownAccumulator` 现有 init；上面 `peakCapital:` 仅示意，若签名不同改用真实 init）。
+> 注：`DrawdownAccumulator` 真实 init = `init(peakCapital: Double, maxDrawdown: Double)`（已勘实，AppState.swift:68），上方调用已用 2 参。
 
 - [ ] **Step 2: 跑测试确认失败** — `swift test --filter pendingReplay_codableRoundTrip` → FAIL（类型不存在）。
 
@@ -342,7 +342,7 @@ import Foundation
         upperPeriod: .m60, lowerPeriod: .daily, positionData: Data([7]), cashBalance: 88_000,
         feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [], startedAt: 123, accumulatedCapital: 100_000,
-        drawdown: DrawdownAccumulator(peakCapital: 100_000))
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
     try queue.write { try PendingReplayRepositoryImpl.saveReplay($0, replay: p) }
     let back = try queue.read { try PendingReplayRepositoryImpl.loadReplay($0) }
     #expect(back == p)
@@ -827,7 +827,7 @@ func makeSlot(recordId: Int64, filename: String = "rec.sqlite") -> PendingReplay
         globalTickIndex: 1, upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(),
         cashBalance: 100_000, feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
-        drawdown: DrawdownAccumulator(peakCapital: 100_000))
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
 }
 
 @MainActor
@@ -875,7 +875,7 @@ func makeSlot(recordId: Int64, filename: String = "rec.sqlite") -> PendingReplay
         globalTickIndex: 1, upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(),
         cashBalance: 100_000, feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
-        drawdown: DrawdownAccumulator(peakCapital: 100_000))
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
     try h.pendingReplayRepo.saveReplay(bad)
     let e = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
     #expect(e == nil)
@@ -1568,38 +1568,57 @@ git commit -m "feat(B3): coordinator review() starts at derived training startTi
     #expect(shows(NormalFlow(fees: fees, maxTick: 100)) == false)
     #expect(shows(ReplayFlow(feeSnapshotFromOriginal: fees, maxTick: 100)) == false)
 }
+
+// 真红测（codex plan-R15-F2）：保护 ReviewControlBar UI 内容/动作面——B4 前 ReviewControlBarContent 不存在 → 编译失败/红。
+// 谓词测试在 B1 后即绿、不足以要求 UI 存在；本测试要求内容模型存在且按 showsJumpToEnd 给出正确按钮+动作。
+@Test func reviewControlBarContent_buttons() {
+    #expect(ReviewControlBarContent(showsJumpToEnd: false).buttons
+            == [ReviewControlButton(action: .step, title: "下一根")])
+    #expect(ReviewControlBarContent(showsJumpToEnd: true).buttons
+            == [ReviewControlButton(action: .step, title: "下一根"),
+                ReviewControlButton(action: .jumpToEnd, title: "快进到结尾")])
+}
 ```
+> 说明：`ReviewControlBar`/`TrainingView` 的 onAction→`stepReviewForward()`/`jumpToEnd()` 接线属 UIKit-gated（host swift test 编译为空），由 **Catalyst build 编译闸门** + 真机/模拟器验收覆盖；`ReviewControlBarContent` 内容/动作面（按钮存在性+文案+动作枚举）由本 host 测保护，`stepReviewForward`/`jumpToEnd` 引擎行为由 B2 host 测保护——三者合起来覆盖"引擎能力 + UI 内容 + 接线编译"全链路。
 
-- [ ] **Step 2: 跑测试确认失败/通过基线** — `swift test --filter showsReviewControls_predicate`（此谓词测试在 B1 后即可 PASS；作为回归锚）。
+- [ ] **Step 2: 跑测试确认失败** — `swift test --filter reviewControlBarContent_buttons` → **FAIL/编译错**（`ReviewControlBarContent` 未建）。`showsReviewControls_predicate` 作回归锚（B1 后已绿）。
 
-- [ ] **Step 3a: 新建 `ReviewControlBar.swift`**
+- [ ] **Step 3a: 新建 `ReviewControlBar.swift`（纯内容模型 + 动作枚举 + 薄壳，codex plan-R15-F2）**——与 `TradeActionBarContent`/`SettlementContent` 同范式：内容 host-可测、薄壳 Catalyst 编译。
 ```swift
 import SwiftUI
 
-/// 复盘专用控件条（新需求10）：仅复盘可步进态显示。「下一根」步进、「快进到结尾」展开整局。
-/// 不含买/卖（canBuySell=false）。平台无关 SwiftUI 薄壳；动作经闭包上交。
-public struct ReviewControlBar: View {
-    private let showsJumpToEnd: Bool
-    private let onStep: () -> Void
-    private let onJumpToEnd: () -> Void
+/// 复盘控件条动作（新需求10）。Hashable 供 SwiftUI ForEach id。
+public enum ReviewControlAction: Hashable, Sendable { case step, jumpToEnd }
 
-    public init(showsJumpToEnd: Bool,
-                onStep: @escaping () -> Void,
-                onJumpToEnd: @escaping () -> Void) {
-        self.showsJumpToEnd = showsJumpToEnd
-        self.onStep = onStep
-        self.onJumpToEnd = onJumpToEnd
+public struct ReviewControlButton: Equatable, Sendable {
+    public let action: ReviewControlAction
+    public let title: String
+    public init(action: ReviewControlAction, title: String) { self.action = action; self.title = title }
+}
+
+/// 平台无关纯内容（host-可测）：决定复盘条按哪些按钮。`showsJumpToEnd` 决定是否含「快进到结尾」。
+public struct ReviewControlBarContent: Equatable, Sendable {
+    public let buttons: [ReviewControlButton]
+    public init(showsJumpToEnd: Bool) {
+        var b = [ReviewControlButton(action: .step, title: "下一根")]
+        if showsJumpToEnd { b.append(ReviewControlButton(action: .jumpToEnd, title: "快进到结尾")) }
+        self.buttons = b
     }
+}
 
+/// 复盘专用控件条 SwiftUI 薄壳：仅复盘可步进态显示；不含买/卖。动作经单一 onAction 闭包上交。
+public struct ReviewControlBar: View {
+    private let content: ReviewControlBarContent
+    private let onAction: (ReviewControlAction) -> Void
+    public init(showsJumpToEnd: Bool, onAction: @escaping (ReviewControlAction) -> Void) {
+        self.content = ReviewControlBarContent(showsJumpToEnd: showsJumpToEnd)
+        self.onAction = onAction
+    }
     public var body: some View {
         HStack(spacing: 12) {
-            Button(action: onStep) {
-                Text("下一根").frame(maxWidth: .infinity).padding(.vertical, 12)
-            }
-            .buttonStyle(.bordered)
-            if showsJumpToEnd {
-                Button(action: onJumpToEnd) {
-                    Text("快进到结尾").frame(maxWidth: .infinity).padding(.vertical, 12)
+            ForEach(content.buttons, id: \.action) { btn in
+                Button { onAction(btn.action) } label: {
+                    Text(btn.title).frame(maxWidth: .infinity).padding(.vertical, 12)
                 }
                 .buttonStyle(.bordered)
             }
@@ -1616,10 +1635,12 @@ public struct ReviewControlBar: View {
 body 内 `if showsTradeButtons { TradeActionBar(...) }` 之后加：
 ```swift
             } else if showsReviewControls {
-                ReviewControlBar(
-                    showsJumpToEnd: engine.flow.canJumpToEnd(),
-                    onStep: { engine.stepReviewForward() },   // codex plan-R9-F1：按更细周期逐根（不依赖隐藏的 activePanel）
-                    onJumpToEnd: { engine.jumpToEnd() })
+                ReviewControlBar(showsJumpToEnd: engine.flow.canJumpToEnd()) { action in
+                    switch action {
+                    case .step:      engine.stepReviewForward()   // codex plan-R9-F1：按更细周期逐根（不依赖隐藏的 activePanel）
+                    case .jumpToEnd: engine.jumpToEnd()
+                    }
+                }
 ```
 > implementer：将其并入既有 `if showsTradeButtons { ... }` 结构为 `if ... {} else if showsReviewControls {}`（保持 TradeActionBar 块原样，仅追加 else-if 分支占同槽位）。
 
@@ -1630,7 +1651,7 @@ body 内 `if showsTradeButtons { TradeActionBar(...) }` 之后加：
 ```
 > normal/replay：周期变化即落盘（含 upper/lowerPeriod），防"切周期后立即 crash/后台"丢周期；review：`shouldPersistProgress=false` → autosave no-op，无害。配 baseline 含周期（A4），切周期=脏 → Back/flush 也写。
 
-- [ ] **Step 4: 跑测试确认通过** — `swift test --filter showsReviewControls_predicate` → PASS。
+- [ ] **Step 4: 跑测试确认通过** — `swift test --filter reviewControlBarContent_buttons` 和 `--filter showsReviewControls_predicate` → PASS。
 
 - [ ] **Step 5: 全量 host 不回归** — `swift test` → 0 失败。
 
