@@ -50,6 +50,25 @@ import Foundation
     #expect(try queue.read { try PendingReplayRepositoryImpl.loadReplaySlotInfo($0) } == nil)
 }
 
+// 新需求10：resetAllTrainingProgress 连带清 pending_replay（单事务）
+@MainActor
+@Test func resetAllTrainingProgress_clears_bothPendingAndPendingReplay() throws {
+    let dbPath = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("test_reset_\(UUID().uuidString).sqlite")
+    let db = try DefaultAppDB(dbPath: dbPath)
+    // 写一条 pending_replay
+    let slot = PendingReplay(recordId: 9, trainingSetFilename: "z.sqlite", globalTickIndex: 3,
+        upperPeriod: .m60, lowerPeriod: .daily, positionData: Data([7]), cashBalance: 88_000,
+        feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+        tradeOperations: [], drawings: [], startedAt: 123, accumulatedCapital: 100_000,
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+    try db.saveReplay(slot)
+    #expect(try db.loadReplay() != nil)
+    // reset 连带清两个表
+    try db.resetAllTrainingProgress(toCapital: 100_000)
+    #expect(try db.loadReplay() == nil)        // pending_replay 已清
+    #expect(try db.loadPending() == nil)       // pending_training 也已清
+}
+
 // codex plan-R17-F1：payload 列损坏时 loadReplaySlotInfo 仍返元数据（不解码）；loadReplay 抛 .dbCorrupted（确定区分）
 @MainActor
 @Test func pendingReplayImpl_slotInfo_returnsMetadataDespiteCorruptPayload() throws {

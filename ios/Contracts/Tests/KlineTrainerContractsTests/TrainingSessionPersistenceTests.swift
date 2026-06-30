@@ -610,7 +610,7 @@ struct TrainingSessionPersistenceTests {
         _ = engine.buy(panel: .upper, shares: 2000)      // replay 可交易；建非平凡终态
         engine.forceCloseManually()                       // 6a：强平 → 持仓平
         #expect(engine.position.shares == 0)
-        let payload = try coord.replaySettlementPayload(engine: engine)
+        let payload = try await coord.replaySettlementPayload(engine: engine)
         #expect(payload.id == nil)                                       // 非持久（无 server id）
         #expect(payload.totalCapital == engine.initialCapital)          // D1 方案 A：起始资金
         #expect(payload.profit == engine.currentTotalCapital - engine.initialCapital)
@@ -629,7 +629,7 @@ struct TrainingSessionPersistenceTests {
         let recordsBefore = try records.listRecords(limit: nil).count   // = 1（仅 seed 的源 record）
         _ = engine.buy(panel: .upper, shares: 2000)
         engine.forceCloseManually()
-        _ = try coord.replaySettlementPayload(engine: engine)
+        _ = try await coord.replaySettlementPayload(engine: engine)
         #expect(try records.listRecords(limit: nil).count == recordsBefore)   // 无新 insert
         #expect(try pending.loadPending() == nil)                             // pending 不动
         // finalize 对 replay 仍返 nil（持久化路径不变）
@@ -641,8 +641,8 @@ struct TrainingSessionPersistenceTests {
     func replaySettlementPayload_throwsInNonReplayMode() async throws {
         let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
         let engine = try await coord.startNewNormalSession()   // .normal
-        #expect(throws: AppError.self) {
-            _ = try coord.replaySettlementPayload(engine: engine)
+        await #expect(throws: AppError.self) {
+            _ = try await coord.replaySettlementPayload(engine: engine)
         }
     }
 
@@ -650,8 +650,8 @@ struct TrainingSessionPersistenceTests {
     func replaySettlementPayload_throwsWithoutActiveSession() async throws {
         let (coord, engine, _, _) = try await Self.makeReplaySession()
         await coord.endSession()                               // 清活跃上下文
-        #expect(throws: AppError.self) {
-            _ = try coord.replaySettlementPayload(engine: engine)
+        await #expect(throws: AppError.self) {
+            _ = try await coord.replaySettlementPayload(engine: engine)
         }
     }
 

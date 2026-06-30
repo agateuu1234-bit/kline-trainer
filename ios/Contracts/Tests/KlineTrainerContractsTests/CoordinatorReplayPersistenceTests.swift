@@ -314,6 +314,86 @@ struct CoordinatorReplayPersistenceTests {
         // 槽仍在（failNext 已消费，本次 load 成功）
         #expect(try h.pendingReplayRepo.loadReplay() != nil)
     }
+
+    // MARK: - A6: replaySettlementPayload async + fence + conditional clear
+
+    @Test func replayTerminal_fencesAndClears_evenWithQueuedAutosave() async throws {
+        let h = try CoordinatorTestHarness.make()
+        let e = try await h.coordinator.replay(recordId: h.seededRecordId)
+        e.holdOrObserve(panel: .upper)
+        h.coordinator.requestAutosave(engine: e, immediate: false)   // 排队一个 autosave
+        _ = try await h.coordinator.replaySettlementPayload(engine: e)  // 终局：fence + clear
+        await h.coordinator.drainAutosaveForTesting()
+        #expect(try h.pendingReplayRepo.loadReplay() == nil)          // 不被排队 autosave 复活
+    }
+
+    @Test func discardSession_replay_clears() async throws {
+        let h = try CoordinatorTestHarness.make()
+        let e = try await h.coordinator.replay(recordId: h.seededRecordId)
+        e.holdOrObserve(panel: .upper)
+        try await h.coordinator.saveProgress(engine: e)
+        try await h.coordinator.discardSession()
+        #expect(try h.pendingReplayRepo.loadReplay() == nil)
+    }
+
+    @Test func replayTerminal_missingRecordContext_throwsNotSilent() async throws {
+        // codex plan-R8-F1：终局缺 activeRecord.id → throw、保留会话（不静默返回 record 而留陈旧槽）
+        let h = try CoordinatorTestHarness.make()
+        let e = try await h.coordinator.replay(recordId: h.seededRecordId)
+        e.holdOrObserve(panel: .upper)
+        try await h.coordinator.saveProgress(engine: e)
+        h.coordinator.setActiveRecordNilForTesting()   // DEBUG 钩子：制造缺上下文
+        await #expect(throws: (any Error).self) {
+            _ = try await h.coordinator.replaySettlementPayload(engine: e)
+        }
+        #expect(try h.pendingReplayRepo.loadReplay() != nil)   // 槽未被静默清
+    }
+
+    @Test func replayDiscard_missingRecordContext_throws() async throws {
+        let h = try CoordinatorTestHarness.make()
+        let e = try await h.coordinator.replay(recordId: h.seededRecordId)
+        e.holdOrObserve(panel: .upper)
+        try await h.coordinator.saveProgress(engine: e)
+        h.coordinator.setActiveRecordNilForTesting()
+        await #expect(throws: (any Error).self) {
+            try await h.coordinator.discardSession()
+        }
+        _ = e  // suppress unused warning
+    }
+
+    @Test func replayTerminal_conditionalClear_preservesOtherRecordSlot() async throws {
+        // codex plan-R3-F1：A 有暂停槽；开新 replay B 未成功保存即到终局 → 条件清不删 A
+        let h = try CoordinatorTestHarness.make(seedRecordIds: [1, 2])
+        let idA = h.seededRecordId
+        let allRecords = try h.recordRepo.listRecords(limit: nil)
+        let idB = allRecords.first(where: { $0.id != idA })!.id!
+
+        let eA = try await h.coordinator.replay(recordId: idA)
+        eA.holdOrObserve(panel: .upper)
+        try await h.coordinator.saveProgress(engine: eA)        // slot = idA
+        await h.coordinator.endSession()
+
+        let eB = try await h.coordinator.replay(recordId: idB)  // 开新 B，零操作（slot 仍 = idA）
+        _ = try await h.coordinator.replaySettlementPayload(engine: eB)   // B 终局：条件清 ifRecordId=idB → 不动 idA
+        let slot = try h.pendingReplayRepo.loadReplay()
+        #expect(slot?.recordId == idA)                          // A 的槽仍在
+    }
+
+    @Test func replayTerminal_clearFailureAfterPayload_keepsSlot_retryable() async throws {
+        // codex plan-R1-F2：清档在 payload 构建成功之后；clearReplay 抛 → 方法抛 + 槽保留（可重试）
+        let h = try CoordinatorTestHarness.make()
+        let e = try await h.coordinator.replay(recordId: h.seededRecordId)
+        e.holdOrObserve(panel: .upper)
+        try await h.coordinator.saveProgress(engine: e)
+        h.pendingReplayRepo.failNextClearReplay = .internalError(module: "test", detail: "transient clear")
+        await #expect(throws: (any Error).self) {
+            _ = try await h.coordinator.replaySettlementPayload(engine: e)
+        }
+        #expect(try h.pendingReplayRepo.loadReplay() != nil)      // 槽保留
+        // 重试成功（failNext 已消费）→ 清空
+        _ = try await h.coordinator.replaySettlementPayload(engine: e)
+        #expect(try h.pendingReplayRepo.loadReplay() == nil)
+    }
 }
 
 // MARK: - A5 helper（损坏槽测试用最小 PendingReplay 工厂）

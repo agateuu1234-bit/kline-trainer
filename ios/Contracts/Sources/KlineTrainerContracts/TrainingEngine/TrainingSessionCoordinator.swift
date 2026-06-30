@@ -128,6 +128,8 @@ public final class TrainingSessionCoordinator {
     #if DEBUG
     /// 测试钩子：等在飞 autosave 写完成（生产无 await 点，测试需确定性排空）。
     func drainAutosaveForTesting() async { await autosaveTask?.value }
+    /// 测试钩子：强置 activeRecord=nil，供 fail-closed 守卫测试制造缺上下文（镜像 drainAutosaveForTesting 范式）。
+    func setActiveRecordNilForTesting() { activeRecord = nil }
     #endif
 
     /// §4.7d 终态栅栏：置 terminating（拒新 autosave）+ 排空在飞写（排空时见 terminating 即退出不落盘）。
@@ -460,18 +462,27 @@ public final class TrainingSessionCoordinator {
     /// 回撤比率/计数同口径），由 drift-guard 测试守；**有意不抽 finalize 共享 helper**，保 finalize 不在
     /// 本 PR diff 内（§4.7 finalize-gating residual 归顺位 10，不被本 PR 触碰）。
     /// 前置：replay 模式 + 活跃会话（caller=顺位 8 路由）。强平由 caller 先行（本方法只读终态）。
-    public func replaySettlementPayload(engine: TrainingEngine) throws -> TrainingRecord {
+    /// 新需求10(A6)：async。顺序：①两 guard（fail-closed，含 recordId；缺则 throw、槽保留）→
+    /// ②`fenceAndDrainAutosaves`（终态栅栏，排空排队 autosave）→ ③构建 payload（全部 throwing 工作，槽仍在）→
+    /// ④成功后条件清槽（`clearReplay(ifRecordId:)`，防误删别记录槽）→ ⑤return record。
+    /// clearReplay 抛 → 方法抛（caller 保留 session+槽，可重试，codex plan-R1-F2）。
+    public func replaySettlementPayload(engine: TrainingEngine) async throws -> TrainingRecord {
         guard engine.flow.mode == .replay else {
             throw AppError.internalError(module: "E6b", detail: "replaySettlementPayload requires replay flow")
         }
-        guard activeEngine === engine, let reader = activeReader, let file = activeFile else {
+        // 新需求10(A6)：recordId 纳入 guard（fail-closed，codex plan-R8-F1）——缺则 throw、保留会话（不静默成功留陈旧槽）。
+        guard activeEngine === engine, let reader = activeReader, let file = activeFile,
+              let recordId = activeRecord?.id else {
             throw AppError.internalError(module: "E6b", detail: "replaySettlementPayload without active session context")
         }
+        // 新需求10(A6)：终态栅栏——排空排队 autosave，此后无并发写，自动 save 不复活已清槽（codex plan-R1-F2）。
+        await fenceAndDrainAutosaves()
+        // 全部 throwing payload 工作在此完成，槽仍在（任何抛错不清槽，fail-closed）。
         let meta = try reader.loadMeta()
         let starting = engine.initialCapital
         let profit = engine.currentTotalCapital - starting
         let (year, month) = Self.startYearMonth(from: meta.startDatetime)
-        return TrainingRecord(
+        let record = TrainingRecord(
             id: nil,
             trainingSetFilename: file.filename,
             createdAt: now(),
@@ -488,6 +499,12 @@ public final class TrainingSessionCoordinator {
             sellCount: engine.tradeOperations.filter { $0.direction == .sell }.count,
             feeSnapshot: engine.fees,
             finalTick: engine.tick.globalTickIndex)
+        // 新需求10(A6)：payload 构建成功后才清槽（codex plan-R1-F2）。
+        // 条件清（codex plan-R3-F1）：仅清属于当前 replay 记录的槽——防"开新 replay B 未存即到终局"
+        // 误删另一记录 A 的暂停槽。recordId 来自顶部 guard 绑定（缺则已 throw=fail-closed）。
+        // clearReplay 抛 → 方法抛、record 不返回 → caller 保留 session+槽、可重试。
+        try pendingReplayRepo.clearReplay(ifRecordId: recordId)
+        return record
     }
 
     /// 新需求10：该记录是否有可续局 replay 暂存。**display-only/advisory**（历史弹窗按钮文案）。
@@ -597,13 +614,23 @@ public final class TrainingSessionCoordinator {
         replayHasPersisted = false
     }
 
-    /// §4.7e discard 持久终态：fence autosaves → 清 `pending_training` → endSession（durable 不复活）。
-    /// 清 pending 失败 → 保留 active session（不 teardown）供 retry，透传 AppError。
-    /// review/replay：clearPending 删 0 行无害（D4 M3），失败语义一致。
+    /// §4.7e discard 持久终态：fence autosaves → 清持久化槽 → endSession（durable 不复活）。
+    /// 清槽失败 → 保留 active session（不 teardown）供 retry，透传 AppError。
+    /// 新需求10(A6)：replay 清 pending_replay（条件清，fail-closed）；normal 清 pending_training（原逻辑）。
     public func discardSession() async throws {
         await fenceAndDrainAutosaves()
         do {
-            try pendingRepo.clearPending()
+            // 新需求10(A6)：replay 局 discard 条件清 replay 槽（仅属当前记录，防误删别的记录槽，codex plan-R3-F1）；
+            // fail-closed（codex plan-R8-F1）：replay 缺 activeRecord.id → throw、保留会话（不静默结束留陈旧槽）；
+            // normal 清 pending_training（原逻辑）。
+            if activeEngine?.flow.mode == .replay {
+                guard let activeId = activeRecord?.id else {
+                    throw AppError.internalError(module: "E6b", detail: "replay discard without active record")
+                }
+                try pendingReplayRepo.clearReplay(ifRecordId: activeId)
+            } else {
+                try pendingRepo.clearPending()
+            }
         } catch {
             throw (error as? AppError)
                 ?? .internalError(module: "E6b", detail: "discard clearPending: \(error)")

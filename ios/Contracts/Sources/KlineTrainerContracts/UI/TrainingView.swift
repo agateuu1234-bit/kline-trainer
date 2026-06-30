@@ -30,6 +30,7 @@ public struct TrainingView: View {
     @State private var didFinalize = false
     @State private var finalizeFailed = false
     @State private var finalizing = false      // R1-H2：in-flight 门，阻重试双击/并发 finalize Task
+    @State private var replaySettlementFailed = false  // 新需求10(A6)：replay 结算失败 → 可重试 alert
     @State private var tradeStrip: TradeStripRequest?
     @State private var toast = ToastState()      // §B.1：latest-wins 调度核（host-tested）
     @State private var confirmingEnd = false
@@ -148,6 +149,14 @@ public struct TrainingView: View {
             }
         } message: {
             Text("本局结果尚未写入历史记录。可重试入账，或放弃结算退出（进度保留至最近存档）。")
+        }
+        // 新需求10(A6)：replay 结算失败（fence/payload/clear 中任一步抛）→ 保留 session+槽（可重试），
+        // 用户可显式选择重试（幂等）或放弃本局（onSessionEnded(nil)，不入账）。
+        .alert("结算失败", isPresented: $replaySettlementFailed) {
+            Button("重试") { runReplaySettlement() }
+            Button("退出本局", role: .cancel) { onSessionEnded(nil) }   // 用户显式选退出
+        } message: {
+            Text("本局结算未能完成。可重试，或退出本局（暂存进度保留，可在历史记录返回训练）。")
         }
         .alert("保存进度失败", isPresented: $backFailed) {
             Button("重试") {
@@ -355,18 +364,27 @@ public struct TrainingView: View {
         }
     }
 
-    // 顺位 8（RFC §4.5）：结束路由分流。Replay → 非持久结算窗（取 in-memory payload 经 onReplaySettlement
-    // 上交 AppRouter）；Normal → 入账（runFinalize，字节不变）。Review 不可达此方法
-    // （shouldAutoFinalize 抑制 + forceCloseManually 对 Review 返 false），故 else 恒为 Normal。
-    // 读 engine.flow.mode 与既有 showsTradeButtons=canBuySell() 同范式（壳层 flow-capability 分流）。
+    // 顺位 8（RFC §4.5）：结束路由分流。Replay → runReplaySettlement（async，含 fence+clear）；
+    // Normal → runFinalize（字节不变）。Review 不可达此方法（shouldAutoFinalize 抑制 + forceCloseManually 对 Review 返 false）。
     private func routeEndOfSession() {
         guard engine.flow.mode == .replay else { runFinalize(); return }
-        do {
-            let record = try lifecycle.replaySettlementRecord()   // 强平已由上面 caller 先行（D4）
-            onReplaySettlement(record)
-        } catch {
-            // 不可达（replay + 活跃会话已保证）；防御性 retreat（不入账，走 AppRouter replay-nil 兜底）
-            onSessionEnded(nil)
+        runReplaySettlement()
+    }
+
+    // 新需求10(A6)：replay 终局 async（fence→构建 payload→清槽）。失败=保留 session+槽（不 onSessionEnded(nil)），
+    // 弹可重试 alert（镜像 runFinalize）。didFinalize 已由 maybeAutoEnd/endManually 置 true，防 onChange 重入；
+    // 重试=显式 alert 按钮再调本方法（fence/payload/clear 均幂等）。
+    private func runReplaySettlement() {
+        guard !finalizing else { return }
+        finalizing = true
+        Task {
+            defer { finalizing = false }
+            do {
+                let record = try await lifecycle.replaySettlementRecord()
+                onReplaySettlement(record)
+            } catch {
+                replaySettlementFailed = true
+            }
         }
     }
 

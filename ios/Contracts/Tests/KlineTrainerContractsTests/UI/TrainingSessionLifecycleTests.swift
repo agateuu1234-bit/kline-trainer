@@ -159,7 +159,7 @@ struct TrainingSessionLifecycleTests {
         _ = engine.buy(panel: .upper, shares: 1600)       // 建非平凡终态（replay 可交易；1600 = 20%×80_000÷10）
         engine.forceCloseManually()                       // 强平须 caller 先行（D4）→ 持仓平
         #expect(engine.position.shares == 0)
-        let payload = try life.replaySettlementRecord()
+        let payload = try await life.replaySettlementRecord()
         #expect(payload.id == nil)                        // 非持久（无 server id）
         #expect(payload.totalCapital == engine.initialCapital)   // D1 方案 A：起始资金
         #expect(payload.profit == engine.currentTotalCapital - engine.initialCapital)   // 终态收益直通
@@ -171,6 +171,6 @@ struct TrainingSessionLifecycleTests {
         let (coord, _, _, _) = H.makeCoordinator(candles: H.validCandles())
         let engine = try await coord.startNewNormalSession()
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
-        #expect(throws: AppError.self) { _ = try life.replaySettlementRecord() }
+        await #expect(throws: AppError.self) { _ = try await life.replaySettlementRecord() }
     }
 }

@@ -257,13 +257,15 @@ public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayReposito
 
     // MARK: - TrainingResetPort（重置资金「真正归零重来」，运行时 #1）
 
-    /// 单事务：清 pending + setTotalCapital（**保留**历史记录）。
+    /// 单事务：清 pending + 清 pending_replay + setTotalCapital（**保留**历史记录）。
     /// RFC-A：去掉 deleteAll（推翻 #123），重置只清未完成对局 + 置资金；历史记录保留。
+    /// 新需求10(A6)：reset 连带清 pending_replay（无条件清，reset 清全局状态）。
     /// dbQueue.write 即事务边界 —— 任一步抛错整体 rollback（要么都成要么都不成）。
     public func resetAllTrainingProgress(toCapital: Double) throws {
         do {
             try dbQueue.write { db in
                 try PendingTrainingRepositoryImpl.clearPending(db)
+                try PendingReplayRepositoryImpl.clearReplay(db)     // 新需求10(A6)：reset 连带清 replay 槽
                 try SettingsDAOImpl.setTotalCapital(db, toCapital)
             }
         } catch let appErr as AppError { throw appErr }
