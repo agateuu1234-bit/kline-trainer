@@ -583,6 +583,19 @@ git commit -m "feat(A3): pending_replay migration 0006 + impl + DefaultAppDB con
 }
 
 @MainActor
+@Test func replayPeriodChange_isDirty_persistsPeriods() async throws {
+    // codex plan-R14-F1：replay 切周期组合（不动 tick/ops/drawings）须算脏并落盘 upper/lowerPeriod
+    let h = try CoordinatorTestHarness.make()
+    let e = try await h.coordinator.replay(recordId: h.seededRecordId)
+    let origUpper = e.upperPanel.period
+    e.switchPeriodCombo(.toLarger)               // 实际切周期 API（以源码为准）
+    #expect(e.upperPanel.period != origUpper)    // 周期已变（tick/ops/drawings 未变）
+    try await h.coordinator.saveProgress(engine: e)   // clean-skip 比较含周期 → 不跳过、写
+    #expect(try h.pendingReplayRepo.loadReplay()?.upperPeriod == e.upperPanel.period)
+    #expect(try h.pendingReplayRepo.loadReplay()?.lowerPeriod == e.lowerPanel.period)
+}
+
+@MainActor
 @Test func freshReplayAfterTeardown_autosaveEnabled() async throws {
     // codex plan-R7-F1：前一会话 endSession 留 terminating=true；fresh replay 须 resetAutosaveState 重开栅栏，
     // 否则 tick/后台 autosave 全 no-op（只 back() 存）。验证 advance 后 flush 真写 pending_replay。
@@ -645,8 +658,10 @@ git commit -m "feat(A3): pending_replay migration 0006 + impl + DefaultAppDB con
 ```
 并加 replay 会话基线（codex plan-R4-F1：clean fresh/resumed replay 不写槽，防覆盖别记录的槽）：
 ```swift
-    // 新需求10：当前 replay 会话创建时的状态基线（tick/交易数/画线数）。
-    @ObservationIgnored private var replayBaseline: (tick: Int, ops: Int, drawings: Int)?
+    // 新需求10：当前 replay 会话创建时的状态基线（tick/交易数/画线数/上下周期）。
+    // 含周期（codex plan-R14-F1）：单指竖滑切周期组合改 upper/lowerPanel.period 而不动 tick/ops/drawings，
+    // 须纳入 clean-skip 比较，否则切周期后 Back/flush 被当 clean 跳过 → 丢 PendingReplay 序列化的 upper/lowerPeriod。
+    @ObservationIgnored private var replayBaseline: (tick: Int, ops: Int, drawings: Int, upper: Period, lower: Period)?
     // 新需求10（codex plan-R6-F1）：本 replay 会话是否已成功写过槽（拥有槽）。
     // fresh=false、resumed=true（续局本就拥有该槽）、任一次成功 saveReplay 后=true。
     // clean-skip **仅在 !replayHasPersisted 时**生效——首写后永不跳过，否则"加画线→写→删画线(count 回基线)
@@ -689,7 +704,9 @@ init 签名加参数（在 `pendingRepo:` 之后）+ 体内赋值：
                let base = replayBaseline,
                base.tick == engine.tick.globalTickIndex,
                base.ops == engine.tradeOperations.count,
-               base.drawings == engine.drawings.count {
+               base.drawings == engine.drawings.count,
+               base.upper == engine.upperPanel.period,      // codex plan-R14-F1：切周期也算脏
+               base.lower == engine.lowerPanel.period {
                 return
             }
             _ = file   // file.filename 同 normal 取活跃文件名（下方 trainingSetFilename 用）
@@ -720,7 +737,8 @@ init 签名加参数（在 `pendingRepo:` 之后）+ 体内赋值：
         // 原 `activeStartedAt = nil` 改为：
         activeStartedAt = now()    // 新需求10：replay 会话起始，供 PendingReplay.started_at
         activeRecord = record      // （原有）
-        replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count)  // fresh：startTick/0/0
+        replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count,
+                          engine.upperPanel.period, engine.lowerPanel.period)  // fresh 基线（含周期，codex plan-R14-F1）
         replayHasPersisted = false  // fresh：尚未拥有槽（codex plan-R6-F1）
         resetAutosaveState()        // 新需求10（codex plan-R7-F1）：重开 autosave 栅栏（terminating=false 等）——
                                     // 否则前一会话 endSession 留的 terminating=true 会让 fresh replay 的 tick/后台
@@ -960,7 +978,8 @@ public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine?
         activeRecord = bundle.record             // replay 续局需 record（fees/标的名 + 终局 payload）
         activeStartedAt = pending.startedAt
         activeSessionKey = nil                    // replay 无 sessionKey
-        replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count)  // 续局基线=resumed 态（codex plan-R4-F1）
+        replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count,
+                          engine.upperPanel.period, engine.lowerPanel.period)  // 续局基线=resumed 态（含周期，codex plan-R4/R14-F1）
         replayHasPersisted = true                 // 续局本就拥有该记录的槽 → 永不 clean-skip（codex plan-R6-F1）
         resetAutosaveState()                      // 新 session：清栅栏/脏/cadence/错误
         return engine
@@ -1603,6 +1622,13 @@ body 内 `if showsTradeButtons { TradeActionBar(...) }` 之后加：
                     onJumpToEnd: { engine.jumpToEnd() })
 ```
 > implementer：将其并入既有 `if showsTradeButtons { ... }` 结构为 `if ... {} else if showsReviewControls {}`（保持 TradeActionBar 块原样，仅追加 else-if 分支占同槽位）。
+
+- [ ] **Step 3c: 周期变化触发 autosave（codex plan-R14-F1 crash-safety）** — 既有 `.onChange(of: engine.upperPanel.period)` / `.onChange(of: engine.lowerPanel.period)` 处理器（RFC-B 加，现仅 `tradeStrip = nil`）追加 `lifecycle.autosave(immediate: false)`：
+```swift
+        .onChange(of: engine.upperPanel.period) { _, _ in tradeStrip = nil; lifecycle.autosave(immediate: false) }
+        .onChange(of: engine.lowerPanel.period) { _, _ in tradeStrip = nil; lifecycle.autosave(immediate: false) }
+```
+> normal/replay：周期变化即落盘（含 upper/lowerPeriod），防"切周期后立即 crash/后台"丢周期；review：`shouldPersistProgress=false` → autosave no-op，无害。配 baseline 含周期（A4），切周期=脏 → Back/flush 也写。
 
 - [ ] **Step 4: 跑测试确认通过** — `swift test --filter showsReviewControls_predicate` → PASS。
 
