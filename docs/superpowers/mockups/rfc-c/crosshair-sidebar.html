@@ -248,7 +248,7 @@
     <div class="li"><div class="ln on">自适应</div><div class="lt"><b>信息栏躲手指</b><div class="t">十字标在中心偏右 → 栏靠左（机 A）；在中心或偏左 → 栏靠右（机 B）。临界点 = 主图水平中线。</div></div></div>
     <div class="li"><div class="ln on">吸附</div><div class="lt"><b>竖线逐根吸附 · 细实线 · 震动</b><div class="t">竖线落最近 K 线中心；<b>每吸附到新一根 K 线触发一次短震动(haptic)</b>，手感清晰。横线跟手指 Y 自由读价。光标中心 = 手指触摸点（取消右偏，对齐主流），细实线非虚线。左缘价标随光标。</div></div></div>
     <div class="li"><div class="ln on">双面板</div><div class="lt"><b>点哪图显哪图</b><div class="t">长按上图 = 显示 60分 那根 K 线明细；长按下图 = 显示日线明细（各自独立）。本图演示长按上图(60分)。</div></div></div>
-    <div class="li"><div class="ln on">价位</div><div class="lt"><b>栏顶居中实时价 + 颜色规则</b><div class="t">栏最上一行 = 横线在价轴上的读数（<code>yToPrice</code>，纯纵轴价位，<b>与哪根 K 线无关</b>），<b>无标签、居中大字</b>。颜色：<b>涨=红 / 跌=绿 / 平=白</b>（光标价·收·涨跌·涨跌幅，基准=<b>前一根收盘</b>，已网查证主流同基准）；<b>其余=黄</b>（开/高/低/均价/量/额、日期·时间）。</div></div></div>
+    <div class="li"><div class="ln on">价位</div><div class="lt"><b>栏顶居中实时价 + 颜色规则</b><div class="t">栏最上一行 = 横线在价轴上的读数（<code>yToPrice</code>，纯纵轴价位，<b>与哪根 K 线无关</b>），<b>无标签、居中大字</b>。颜色（<b>2026-06-30 真机后修订</b>）：<b>涨=红 / 跌=绿 / 平=白</b>（**所有价格字段**：光标价·开·高·低·收·涨跌·涨跌幅·均价，基准=<b>前一根收盘</b>，主流同基准）；<b>其余=黄</b>（日期·时间·量·额）。<b>⚠️ 例图单元格为 brainstorming 初版（开/高/低显黄），实现以 spec §4.5 为准（全价格方向上色）。</b></div></div></div>
 
     <h3 style="margin-top:16px;">信息栏字段（已确认）</h3>
     <div class="li"><div class="ln on">有</div><div class="lt"><b>光标价 / 日期·时间(同行) / 开高低收 / 涨跌 / 涨跌幅 / 均价 / 成交量 / 成交额</b>
