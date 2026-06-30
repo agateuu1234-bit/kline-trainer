@@ -526,6 +526,26 @@ git commit -m "feat(A3): pending_replay migration 0006 + impl + DefaultAppDB con
 }
 
 @MainActor
+@Test func cleanFreshReplay_backOrBackground_preservesOtherSlot() async throws {
+    // codex plan-R4-F1：A 有槽；开新 replay B 零操作 → back()(saveProgress) 与后台 flush 都不得覆盖 A
+    let h = try CoordinatorTestHarness.make(seedRecordIds: [101, 202])
+    let eA = try await h.coordinator.replay(recordId: 101)
+    eA.holdOrObserve(panel: .upper)
+    try await h.coordinator.saveProgress(engine: eA)         // slot = 101
+    await h.coordinator.endSession()
+    let eB = try await h.coordinator.replay(recordId: 202)   // fresh B，零操作
+    try await h.coordinator.saveProgress(engine: eB)         // back() 路径：clean → 跳过
+    #expect(try h.pendingReplayRepo.loadReplay()?.recordId == 101)
+    await h.coordinator.flushAutosave(engine: eB)            // 后台 flush：clean → 跳过
+    await h.coordinator.drainAutosaveForTesting()
+    #expect(try h.pendingReplayRepo.loadReplay()?.recordId == 101)   // A 仍在
+    // B 做了进度后再存 → 覆盖（单槽 last-active wins）
+    eB.holdOrObserve(panel: .upper)
+    try await h.coordinator.saveProgress(engine: eB)
+    #expect(try h.pendingReplayRepo.loadReplay()?.recordId == 202)
+}
+
+@MainActor
 @Test func requestAutosave_replayEnabled_reviewNoOp() async throws {
     let h = try CoordinatorTestHarness.make()
     let replayEngine = try await h.coordinator.replay(recordId: h.seededRecordId)
@@ -549,6 +569,12 @@ git commit -m "feat(A3): pending_replay migration 0006 + impl + DefaultAppDB con
 `TrainingSessionCoordinator.swift` 存储属性区（紧邻 `pendingRepo`）加：
 ```swift
     private let pendingReplayRepo: PendingReplayRepository  // 新需求10：replay 续局单槽
+```
+并加 replay 会话基线（codex plan-R4-F1：clean fresh/resumed replay 不写槽，防覆盖别记录的槽）：
+```swift
+    // 新需求10：当前 replay 会话创建/续局时的状态基线（tick/交易数/画线数）。
+    // saveProgress 的 replay 分支：当前态 == 基线（无进度变化）→ 跳过写槽，防 clean B 覆盖 A 的槽。
+    @ObservationIgnored private var replayBaseline: (tick: Int, ops: Int, drawings: Int)?
 ```
 init 签名加参数（在 `pendingRepo:` 之后）+ 体内赋值：
 ```swift
@@ -578,6 +604,15 @@ init 签名加参数（在 `pendingRepo:` 之后）+ 体内赋值：
                   let recordId = activeRecord?.id, let started = activeStartedAt else {
                 throw AppError.internalError(module: "E6b", detail: "replay saveProgress without active session context")
             }
+            // codex plan-R4-F1：clean 会话（相对创建/续局基线无 tick/交易/画线变化）跳过写槽——
+            // 否则 back()/后台 flush 会用 fresh B 的初始态覆盖另一记录 A 的槽。**与 F2 缺上下文 throw 区分**：
+            // 此 return 是"无进度可存"的正常跳过（如 git 无改动不提交），非错误。
+            if let base = replayBaseline,
+               base.tick == engine.tick.globalTickIndex,
+               base.ops == engine.tradeOperations.count,
+               base.drawings == engine.drawings.count {
+                return
+            }
             _ = file   // file.filename 同 normal 取活跃文件名（下方 trainingSetFilename 用）
             let replay = PendingReplay(
                 recordId: recordId,
@@ -600,11 +635,13 @@ init 签名加参数（在 `pendingRepo:` 之后）+ 体内赋值：
 ```
 > implementer：`encodePosition`/`file.filename` 为 `saveProgress` 现有 normal 分支同款（同方法内已有，照抄）。`encodePosition` 是否 throwing 以源码为准（normal 分支怎么调就怎么调）。replay 不需要 `activeSessionKey`。
 
-- [ ] **Step 3d: `replay(recordId:)` 设 startedAt** — 在 `replay(recordId:)` 装配成功、设 `activeRecord = record` 附近加：
+- [ ] **Step 3d: `replay(recordId:)` 设 startedAt + baseline；`endSession()` 清 baseline** — 在 `replay(recordId:)` 装配成功、设 `activeRecord = record` 附近加：
 ```swift
         activeStartedAt = now()    // 新需求10：replay 会话起始，供 PendingReplay.started_at
+        replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count)  // fresh：startTick/0/0
 ```
-（**不**前置 `clearReplay`——单槽靠首存 INSERT OR REPLACE 覆盖；失败装配不丢旧档。）
+`endSession()` 末尾（清活跃上下文处）加 `replayBaseline = nil`（会话结束清基线；新会话由 replay()/resume 重设，无 stale 读风险但防御性清）。
+（**不**前置 `clearReplay`——单槽靠首存 INSERT OR REPLACE 覆盖 + clean-skip 守 clean B；失败装配不丢旧档。）
 
 - [ ] **Step 3e: AppContainer 注入** — `AppContainer.swift` 构造处：
 ```swift
@@ -746,6 +783,7 @@ public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine?
         activeRecord = bundle.record             // replay 续局需 record（fees/标的名 + 终局 payload）
         activeStartedAt = pending.startedAt
         activeSessionKey = nil                    // replay 无 sessionKey
+        replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count)  // 续局基线=resumed 态（codex plan-R4-F1）
         resetAutosaveState()                      // 新 session：清栅栏/脏/cadence/错误
         return engine
     } catch {
