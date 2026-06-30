@@ -490,6 +490,93 @@ public final class TrainingSessionCoordinator {
             finalTick: engine.tick.globalTickIndex)
     }
 
+    /// 新需求10：该记录是否有可续局 replay 暂存。**display-only/advisory**（历史弹窗按钮文案）。
+    /// 用轻量 `loadReplaySlotInfo`（不解码 payload，codex plan-R11-F1）：损坏 payload 不影响归属判断。
+    /// 读失败保守返 false 安全：路由是 resume-first 权威（replay(id:) 总先试 resumePendingReplay），
+    /// 故此处一次瞬态 false 至多让按钮文案短暂误显「再次训练」，点击仍走 resume-first 不会丢槽。
+    public func hasResumableReplay(recordId: Int64) -> Bool {
+        ((try? pendingReplayRepo.loadReplaySlotInfo()) ?? nil)?.recordId == recordId
+    }
+
+    /// 新需求10：续局 replay。元数据先判归属→本记录全量解码→校验记录/文件名→open reader→按存档 tick/状态重建。
+    /// 错误纪律：**本记录 loadReplay `.dbCorrupted` → durable clearReplay + nil（回退从头）**；
+    /// **非 `.dbCorrupted` 的 loadReplay / loadRecordBundle / loadAllCandles / make 错误 → 传播**（不清、不 fresh）；
+    /// 清档点 = openReader `isCorruptTrainingSet`（cache.delete+clearReplay）/ 文件名不一致（clearReplay）/ 本记录 `.dbCorrupted`。
+    /// 无槽 / recordId 不匹配 → nil（不清档）。**注意：不是"loadReplay 错误一律传播"**（那会让永久损坏槽卡死，R13-F1）。
+    public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine? {
+        // 1) 轻量元数据先判归属（codex plan-R11-F1）：不解码 payload → 别记录的损坏槽不阻塞本记录的 replay。
+        //    slotInfo 自身错误=DB 级瞬态（whole-db 不可达）→ 传播。无槽/不匹配 → nil（不清档）。
+        guard let info = try pendingReplayRepo.loadReplaySlotInfo(), info.recordId == recordId else { return nil }
+        // 2) 本记录槽：全量解码 **含 position（codex plan-R18-F1：position 的 PositionManager JSON 解码也是 slot
+        //    payload，须与 loadReplay 同走 .dbCorrupted→清 路径；decodePosition 已把所有解码错误包成 .dbCorrupted）**。
+        //    .dbCorrupted（已验证损坏 payload）→ 清 + 回退从头；其他（瞬态）→ 传播。
+        let pending: PendingReplay
+        let position: PositionManager
+        do {
+            guard let p = try pendingReplayRepo.loadReplay() else { return nil }   // 竞态：刚被清 → nil
+            pending = p
+            position = try decodePosition(p.positionData)   // slot payload 解码（移到此处，与 loadReplay 同 .dbCorrupted 路径）
+        } catch let e as AppError {
+            if case .persistence(.dbCorrupted) = e {
+                // 本记录损坏槽（loadReplay JSON 或 position JSON）→ durable 清 + 回退从头（router fresh）。**不用 try?**
+                // （codex plan-R12-F1）：清失败=瞬态 DB（满/不可用）→ 传播可重试错误，**不**伪装"无暂存"而留损坏行卡死。
+                try pendingReplayRepo.clearReplay()
+                return nil
+            }
+            throw e                                    // 瞬态 → 传播（不清、不 fresh）
+        }
+        // 记录不会被单独删除（reset 连带清槽，无孤儿）→ loadRecordBundle 错误必瞬态 → 传播（不清档）
+        let (record, _, _) = try recordRepo.loadRecordBundle(id: pending.recordId)
+        // codex plan-R10-F1：pending 的文件名须与记录一致——否则 stale/corrupt 槽会让记录 A 的 id 配文件 B 的
+        // candles/metadata（显错标的、终局清理失准）。内部不一致=已验证损坏槽 → 清 + 返回 nil（router 回退从头 replay，用记录权威文件名）。
+        guard pending.trainingSetFilename == record.trainingSetFilename else {
+            try pendingReplayRepo.clearReplay()
+            return nil
+        }
+        let file = try cachedFile(filename: pending.trainingSetFilename)
+        let reader: any TrainingSetReader
+        do {
+            reader = try openReader(for: file)
+        } catch where isCorruptTrainingSet(error) {
+            try? cache.delete(file)                 // best-effort：训练组损坏，孤儿槽不可恢复
+            try pendingReplayRepo.clearReplay()      // durable 清（唯一清档点）
+            return nil                               // 调用方回退从头 replay
+        }
+        do {
+            let allCandles = try reader.loadAllCandles()
+            let mt = try maxTick(from: allCandles)
+            // position 已在 step 2 解码（slot payload，.dbCorrupted 已处理）；此块仅训练集/transient 错误 → 传播
+            let engine = try TrainingEngine.make(
+                .replay(fees: pending.feeSnapshot, maxTick: mt),
+                allCandles: allCandles,
+                initialTick: pending.globalTickIndex,
+                initialCapital: pending.accumulatedCapital,
+                initialCashBalance: pending.cashBalance,
+                initialPosition: position,
+                initialMarkers: markers(from: pending.tradeOperations),
+                initialDrawings: pending.drawings,
+                initialTradeOperations: pending.tradeOperations,
+                initialDrawdown: pending.drawdown,
+                initialUpperPeriod: pending.upperPeriod,
+                initialLowerPeriod: pending.lowerPeriod)
+            activeReader = reader
+            activeEngine = engine
+            activeFile = file
+            cache.touch(file)                        // §A touch-on-use（同 resumePending）
+            activeRecord = record                    // replay 续局需 record（fees/标的名 + 终局 payload）
+            activeStartedAt = pending.startedAt
+            activeSessionKey = nil                    // replay 无 sessionKey
+            replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count,
+                              engine.upperPanel.period, engine.lowerPanel.period)  // 续局基线=resumed 态（含周期，codex plan-R4/R14-F1）
+            replayHasPersisted = true                 // 续局本就拥有该记录的槽 → 永不 clean-skip（codex plan-R6-F1）
+            resetAutosaveState()                      // 新 session：清栅栏/脏/cadence/错误
+            return engine
+        } catch {
+            reader.close()
+            throw (error as? AppError) ?? .internalError(module: "E6b", detail: String(describing: error))
+        }
+    }
+
     /// session 结束清理（spec L1666/L1684，不 throws）：关闭 reader 并清空全部活跃上下文（D10）。
     public func endSession() async {
         terminating = true          // fence：阻止 teardown 后排队 autosave 复活 pending（§4.7d 同型）

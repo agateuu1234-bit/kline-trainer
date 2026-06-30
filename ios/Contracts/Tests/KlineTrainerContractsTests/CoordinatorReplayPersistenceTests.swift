@@ -204,4 +204,126 @@ struct CoordinatorReplayPersistenceTests {
         await h.coordinator.drainAutosaveForTesting()
         #expect(h.pendingReplayRepo.saveCount == before)   // review 不存（shouldPersistProgress=false）
     }
+
+    // MARK: - A5: resumePendingReplay + hasResumableReplay
+
+    @Test func resumePendingReplay_restoresState() async throws {
+        let h = try CoordinatorTestHarness.make()
+        let e1 = try await h.coordinator.replay(recordId: h.seededRecordId)
+        e1.holdOrObserve(panel: .upper)
+        let savedTick = e1.tick.globalTickIndex
+        try await h.coordinator.saveProgress(engine: e1)
+        await h.coordinator.endSession()
+
+        #expect(h.coordinator.hasResumableReplay(recordId: h.seededRecordId) == true)
+        let e2 = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+        #expect(e2 != nil)
+        #expect(e2?.tick.globalTickIndex == savedTick)
+        #expect(e2?.flow.mode == .replay)
+    }
+
+    @Test func resumePendingReplay_recordIdMismatch_returnsNil_noClear() async throws {
+        let h = try CoordinatorTestHarness.make()
+        let e1 = try await h.coordinator.replay(recordId: h.seededRecordId)
+        e1.holdOrObserve(panel: .upper)
+        try await h.coordinator.saveProgress(engine: e1)
+        await h.coordinator.endSession()
+        #expect(h.coordinator.hasResumableReplay(recordId: 999999) == false)
+        let e = try await h.coordinator.resumePendingReplay(recordId: 999999)
+        #expect(e == nil)
+        // 不匹配不清档：另一记录的槽仍在
+        #expect(try h.pendingReplayRepo.loadReplay() != nil)
+    }
+
+    @Test func resumePendingReplay_corruptSlot_nonMatchingRecord_notBlocked() async throws {
+        // codex plan-R11-F1：record A 的损坏 payload 槽不得阻塞 record B 的 replay 入口
+        let h = try CoordinatorTestHarness.make(seedRecordIds: [101, 202])
+        try h.pendingReplayRepo.saveReplay(makeSlot(recordId: 101))
+        h.pendingReplayRepo.failNextLoadReplay = .persistence(.dbCorrupted)  // 全量解码会抛（slotInfo 不受影响）
+        // 对 record 202 续局：slotInfo 返 101 ≠ 202 → 直接 nil，**不触发全量 loadReplay**（A 的损坏不阻塞 B）
+        let e = try await h.coordinator.resumePendingReplay(recordId: 202)
+        #expect(e == nil)
+        #expect(try h.pendingReplayRepo.loadReplaySlotInfo()?.recordId == 101)  // A 槽未被清（非本记录不动）
+    }
+
+    @Test func resumePendingReplay_corruptSlot_matchingRecord_clearsAndFallsBack() async throws {
+        // codex plan-R11-F1：本记录损坏 payload 槽 → 清 + 返回 nil（router 回退从头 fresh）
+        let h = try CoordinatorTestHarness.make()
+        try h.pendingReplayRepo.saveReplay(makeSlot(recordId: h.seededRecordId))
+        h.pendingReplayRepo.failNextLoadReplay = .persistence(.dbCorrupted)  // 本记录槽全量解码损坏
+        let e = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+        #expect(e == nil)
+        #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil)  // 损坏槽已清
+    }
+
+    @Test func resumePendingReplay_corruptPositionJSON_clearsAndFallsBack() async throws {
+        // codex plan-R18-F1：position_data 合法存在但非法 PositionManager JSON → decodePosition 抛 .dbCorrupted
+        // → 与 loadReplay 损坏同路径：清槽 + nil（回退从头），不卡死
+        let h = try CoordinatorTestHarness.make()
+        var slot = makeSlot(recordId: h.seededRecordId, filename: "set.sqlite")
+        slot = PendingReplay(recordId: slot.recordId, trainingSetFilename: slot.trainingSetFilename,
+            globalTickIndex: slot.globalTickIndex, upperPeriod: slot.upperPeriod, lowerPeriod: slot.lowerPeriod,
+            positionData: Data("{not-valid-position-json".utf8),   // 合法 Data、非法 PositionManager JSON
+            cashBalance: slot.cashBalance, feeSnapshot: slot.feeSnapshot, tradeOperations: slot.tradeOperations,
+            drawings: slot.drawings, startedAt: slot.startedAt, accumulatedCapital: slot.accumulatedCapital,
+            drawdown: slot.drawdown)
+        try h.pendingReplayRepo.saveReplay(slot)   // fake 不解码 → loadReplay 成功返回；decodePosition 才抛
+        let e = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+        #expect(e == nil)
+        #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil)   // 损坏槽已清
+    }
+
+    @Test func resumePendingReplay_corruptSlot_clearFails_propagatesKeepsSlot() async throws {
+        // codex plan-R12-F1：本记录损坏槽 + 清档失败（瞬态 DB）→ 不吞、传播可重试错误、槽保留（不伪装"无暂存"开 fresh）
+        let h = try CoordinatorTestHarness.make()
+        try h.pendingReplayRepo.saveReplay(makeSlot(recordId: h.seededRecordId))
+        h.pendingReplayRepo.failNextLoadReplay = .persistence(.dbCorrupted)
+        h.pendingReplayRepo.failNextClearReplay = .internalError(module: "test", detail: "transient clear")
+        await #expect(throws: (any Error).self) {
+            _ = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+        }
+        #expect(try h.pendingReplayRepo.loadReplaySlotInfo()?.recordId == h.seededRecordId)  // 清失败 → 槽仍在
+    }
+
+    @Test func resumePendingReplay_filenameMismatch_clearsAndReturnsNil() async throws {
+        // codex plan-R10-F1：pending.recordId 匹配但 trainingSetFilename 与记录不符（stale/corrupt 槽）→ 清 + nil（不拿错文件续局）
+        let h = try CoordinatorTestHarness.make()
+        let bad = PendingReplay(
+            recordId: h.seededRecordId, trainingSetFilename: "WRONG-not-the-record-file.sqlite",
+            globalTickIndex: 1, upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(),
+            cashBalance: 100_000, feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+            tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
+            drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+        try h.pendingReplayRepo.saveReplay(bad)
+        let e = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+        #expect(e == nil)
+        #expect(try h.pendingReplayRepo.loadReplay() == nil)   // 损坏槽已清
+    }
+
+    @Test func resumePendingReplay_transientLoadFailure_propagates_keepsSlot() async throws {
+        let h = try CoordinatorTestHarness.make()
+        let e1 = try await h.coordinator.replay(recordId: h.seededRecordId)
+        e1.holdOrObserve(panel: .upper)
+        try await h.coordinator.saveProgress(engine: e1)
+        await h.coordinator.endSession()
+        // 注入一次瞬态 loadReplay 失败：resumePendingReplay 须抛（不返 nil、不清档）
+        h.pendingReplayRepo.failNextLoadReplay = .internalError(module: "test", detail: "transient")
+        await #expect(throws: (any Error).self) {
+            _ = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+        }
+        // 槽仍在（failNext 已消费，本次 load 成功）
+        #expect(try h.pendingReplayRepo.loadReplay() != nil)
+    }
+}
+
+// MARK: - A5 helper（损坏槽测试用最小 PendingReplay 工厂）
+
+/// 损坏槽测试用最小 PendingReplay 工厂（loadReplay 抛错先于文件名 guard，故 filename 无关）。
+@MainActor
+private func makeSlot(recordId: Int64, filename: String = "rec.sqlite") -> PendingReplay {
+    PendingReplay(recordId: recordId, trainingSetFilename: filename,
+        globalTickIndex: 1, upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(),
+        cashBalance: 100_000, feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+        tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
 }

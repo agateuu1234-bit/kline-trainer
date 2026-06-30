@@ -103,7 +103,14 @@ public final class AppRouter {
     public func replay(id: Int64) async {
         activeModal = nil
         do {
-            let engine = try await coordinator.replay(recordId: id)
+            // resume-first：总先试续局；返 nil（无槽/不匹配/已验证损坏已清）才从头。
+            // throw（瞬态）→ setError → 不 fresh、不覆盖槽（防丢有效暂停档）。
+            let engine: TrainingEngine
+            if let resumed = try await coordinator.resumePendingReplay(recordId: id) {
+                engine = resumed
+            } else {
+                engine = try await coordinator.replay(recordId: id)   // 从头
+            }
             activeTraining = ActiveTraining(lifecycle: TrainingSessionLifecycle(engine: engine, coordinator: coordinator))
         } catch { setError(error) }
     }
