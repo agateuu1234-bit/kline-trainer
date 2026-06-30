@@ -10,7 +10,7 @@ import KlineTrainerContracts
 /// - 4 个 protocol surface 用 4 个 extension 分别实现
 /// - 所有 GRDB 错误在 extension 边界 `try ... catch` 通过 PersistenceErrorMapping.translate
 /// - init 时同步跑 AppDBMigrations.makeMigrator().migrate(queue) → 失败抛 AppError
-public final class DefaultAppDB: AppDB, TrainingResetPort {
+public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayRepository {
 
     /// 唯一 GRDB queue；所有 4 个 protocol 方法共享。internal 给 same-target tests 看。
     let dbQueue: DatabaseQueue
@@ -171,6 +171,53 @@ public final class DefaultAppDB: AppDB, TrainingResetPort {
         do {
             try dbQueue.write { db in
                 try PendingTrainingRepositoryImpl.clearPending(db)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    // MARK: - PendingReplayRepository
+
+    public func saveReplay(_ p: PendingReplay) throws {
+        do {
+            try dbQueue.write { db in
+                try PendingReplayRepositoryImpl.saveReplay(db, replay: p)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func loadReplay() throws -> PendingReplay? {
+        do {
+            return try dbQueue.read { db in
+                try PendingReplayRepositoryImpl.loadReplay(db)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func loadReplaySlotInfo() throws -> ReplaySlotInfo? {
+        do {
+            return try dbQueue.read { db in
+                try PendingReplayRepositoryImpl.loadReplaySlotInfo(db)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func clearReplay() throws {
+        do {
+            try dbQueue.write { db in
+                try PendingReplayRepositoryImpl.clearReplay(db)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func clearReplay(ifRecordId recordId: Int64) throws {
+        do {
+            try dbQueue.write { db in
+                try PendingReplayRepositoryImpl.clearReplay(db, ifRecordId: recordId)
             }
         } catch let appErr as AppError { throw appErr }
         catch { throw PersistenceErrorMapping.translate(error) }
