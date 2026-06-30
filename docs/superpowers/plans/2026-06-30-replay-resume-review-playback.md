@@ -546,6 +546,19 @@ git commit -m "feat(A3): pending_replay migration 0006 + impl + DefaultAppDB con
 }
 
 @MainActor
+@Test func replayDrawingAddThenDelete_noStaleSlot() async throws {
+    // codex plan-R6-F1：加画线→存(拥有槽)→删画线(count 回基线)→存 → 槽须更新为无画线（不被 clean-skip 残留）
+    let h = try CoordinatorTestHarness.make()
+    let e = try await h.coordinator.replay(recordId: h.seededRecordId)
+    <在 e 上添加一条画线（engine 画线 API，如 activateDrawingTool + commit，以源码为准）>
+    try await h.coordinator.saveProgress(engine: e)            // 写槽（含 1 画线）→ replayHasPersisted=true
+    #expect(try h.pendingReplayRepo.loadReplay()?.drawings.count == 1)
+    <在 e 上删除该画线 → e.drawings.count 回到 0（==fresh 基线 count）>
+    try await h.coordinator.saveProgress(engine: e)            // 已拥有槽 → 不 clean-skip → 写无画线
+    #expect(try h.pendingReplayRepo.loadReplay()?.drawings.isEmpty == true)   // 无残留
+}
+
+@MainActor
 @Test func requestAutosave_replayEnabled_reviewNoOp() async throws {
     let h = try CoordinatorTestHarness.make()
     let replayEngine = try await h.coordinator.replay(recordId: h.seededRecordId)
@@ -578,9 +591,13 @@ git commit -m "feat(A3): pending_replay migration 0006 + impl + DefaultAppDB con
 ```
 并加 replay 会话基线（codex plan-R4-F1：clean fresh/resumed replay 不写槽，防覆盖别记录的槽）：
 ```swift
-    // 新需求10：当前 replay 会话创建/续局时的状态基线（tick/交易数/画线数）。
-    // saveProgress 的 replay 分支：当前态 == 基线（无进度变化）→ 跳过写槽，防 clean B 覆盖 A 的槽。
+    // 新需求10：当前 replay 会话创建时的状态基线（tick/交易数/画线数）。
     @ObservationIgnored private var replayBaseline: (tick: Int, ops: Int, drawings: Int)?
+    // 新需求10（codex plan-R6-F1）：本 replay 会话是否已成功写过槽（拥有槽）。
+    // fresh=false、resumed=true（续局本就拥有该槽）、任一次成功 saveReplay 后=true。
+    // clean-skip **仅在 !replayHasPersisted 时**生效——首写后永不跳过，否则"加画线→写→删画线(count 回基线)
+    // →跳过"会残留已删画线。仅计数比较不足以判脏，故用"是否已拥有槽"门控。
+    @ObservationIgnored private var replayHasPersisted = false
 ```
 init 签名加参数（在 `pendingRepo:` 之后）+ 体内赋值：
 ```swift
@@ -610,10 +627,12 @@ init 签名加参数（在 `pendingRepo:` 之后）+ 体内赋值：
                   let recordId = activeRecord?.id, let started = activeStartedAt else {
                 throw AppError.internalError(module: "E6b", detail: "replay saveProgress without active session context")
             }
-            // codex plan-R4-F1：clean 会话（相对创建/续局基线无 tick/交易/画线变化）跳过写槽——
-            // 否则 back()/后台 flush 会用 fresh B 的初始态覆盖另一记录 A 的槽。**与 F2 缺上下文 throw 区分**：
-            // 此 return 是"无进度可存"的正常跳过（如 git 无改动不提交），非错误。
-            if let base = replayBaseline,
+            // codex plan-R4-F1 + R6-F1：clean-skip **仅在尚未拥有槽时**生效。fresh 会话首写前、且当前态==基线
+            // （无 tick/交易/画线变化）→ 跳过写，防 back()/后台 flush 用 fresh B 初始态覆盖另一记录 A 的槽。
+            // **首写后(replayHasPersisted)永不跳过**——否则"加画线→写→删画线(count 回基线)→跳过"会残留已删画线。
+            // 此 return 是"无进度可存"的正常跳过（≠ F2 缺上下文 throw）。
+            if !replayHasPersisted,
+               let base = replayBaseline,
                base.tick == engine.tick.globalTickIndex,
                base.ops == engine.tradeOperations.count,
                base.drawings == engine.drawings.count {
@@ -635,6 +654,7 @@ init 签名加参数（在 `pendingRepo:` 之后）+ 体内赋值：
                 accumulatedCapital: engine.initialCapital,
                 drawdown: engine.drawdown)
             try pendingReplayRepo.saveReplay(replay)
+            replayHasPersisted = true     // codex plan-R6-F1：已拥有槽，此后 saveProgress 永不 clean-skip
             return
         }
         // 以下为原 normal 分支（一字不改）...
@@ -645,8 +665,9 @@ init 签名加参数（在 `pendingRepo:` 之后）+ 体内赋值：
 ```swift
         activeStartedAt = now()    // 新需求10：replay 会话起始，供 PendingReplay.started_at
         replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count)  // fresh：startTick/0/0
+        replayHasPersisted = false  // fresh：尚未拥有槽（codex plan-R6-F1）
 ```
-`endSession()` 末尾（清活跃上下文处）加 `replayBaseline = nil`（会话结束清基线；新会话由 replay()/resume 重设，无 stale 读风险但防御性清）。
+`endSession()` 末尾（清活跃上下文处）加 `replayBaseline = nil; replayHasPersisted = false`（会话结束清；新会话由 replay()/resume 重设，防御性清）。
 （**不**前置 `clearReplay`——单槽靠首存 INSERT OR REPLACE 覆盖 + clean-skip 守 clean B；失败装配不丢旧档。）
 
 - [ ] **Step 3e: AppContainer 注入** — `AppContainer.swift` 构造处：
@@ -790,6 +811,7 @@ public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine?
         activeStartedAt = pending.startedAt
         activeSessionKey = nil                    // replay 无 sessionKey
         replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count)  // 续局基线=resumed 态（codex plan-R4-F1）
+        replayHasPersisted = true                 // 续局本就拥有该记录的槽 → 永不 clean-skip（codex plan-R6-F1）
         resetAutosaveState()                      // 新 session：清栅栏/脏/cadence/错误
         return engine
     } catch {

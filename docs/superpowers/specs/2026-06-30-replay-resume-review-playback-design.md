@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
    - **`saveProgress()`**（L326-327）：`guard mode == .normal` → `guard shouldPersistProgress()`；体内按 mode 分流：
      - `mode == .normal` → 构造 `PendingTraining` 写 `pending_training`（**原逻辑一字不改**）。
      - `mode == .replay` → **fail-closed 守卫（codex plan-R3-F2，镜像 normal 活跃上下文守卫）**：`guard activeEngine === engine, let file = activeFile, let recordId = activeRecord?.id, let started = activeStartedAt else { throw .internalError(...) }`——缺上下文 **throw**（autosave/back 显错）而非静默 `return`（静默=用户无感进度丢失）。
-       - **clean-skip 守卫（codex plan-R4-F1，关键）**：守卫后、写槽前 —— 若当前态 `(tick, ops.count, drawings.count)` == 会话**基线** `replayBaseline`（在 `replay()`/`resumePendingReplay()` 捕获）→ **`return`（跳过写）**。因 `back()` **无条件**调 saveProgress、`flushForBackground` 强制 flush——无此守卫则开 fresh replay B 零操作 Back/切后台会用 B 初始态**覆盖另一记录 A 的槽**。此 `return` 是"无进度可存"的正常跳过（≠ F2 缺上下文的 throw）。
+       - **clean-skip 守卫（codex plan-R4-F1/R6-F1，关键）**：守卫后、写槽前 —— 若 **`!replayHasPersisted`（本会话尚未写过槽）且** 当前态 `(tick, ops.count, drawings.count)` == 会话**基线** `replayBaseline` → **`return`（跳过写）**。因 `back()` **无条件**调 saveProgress、`flushForBackground` 强制 flush——无此守卫则开 fresh replay B 零操作 Back/切后台会用 B 初始态**覆盖另一记录 A 的槽**。**首写后 `replayHasPersisted=true` → 永不跳过**（否则"加画线→写→删画线(count 回基线)→跳过"会残留已删画线；仅计数不足判脏，用"是否已拥有槽"门控，codex plan-R6-F1）。`replayHasPersisted`：fresh=false / **resumed=true（续局本就拥有槽）** / 任一次成功 saveReplay 后=true；`endSession` 重置。此 `return` 是"无进度可存"正常跳过（≠ F2 缺上下文 throw）；写槽成功后置 `replayHasPersisted=true`。
        - 否则构造 `PendingReplay`（`trainingSetFilename=file.filename`、`cash_balance = max(0, engine.cashBalance)`、`accumulated_capital = engine.initialCapital`、`global_tick_index = engine.tick.globalTickIndex`、`startedAt=started`、`recordId` 等）写 `pending_replay`。replay 不依赖 `activeSessionKey`（无 sessionKey）。
 2. **`replay(recordId:)`（从头）补充**（codex spec-R1-F3：**不前置 clear**——易错装配失败会丢旧档）：
    - **不**在装配前 `clearReplay()`。**单槽覆盖靠首次保存的 `INSERT OR REPLACE`（id=1）自然覆盖**：新 replay 一旦 autosave/back 即写 `pending_replay(recordId=新)` 覆盖旧档。故"开新 replay 即覆盖"语义保留，且**装配（开 reader/load candles/构造引擎）任一步失败 → 旧暂停档原封不动**（无数据丢失）。
@@ -126,7 +126,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
    - `recordRepo.loadRecordBundle(id: pending.recordId)`：错误传播（记录不被单独删除——reset 连带清槽无孤儿——故必为瞬态）。设 `activeRecord = bundle.record`。
    - open reader：corrupt(`isCorruptTrainingSet`)→ `cache.delete` + `clearReplay()` + 返回 nil（镜像 normal resume）；其他错误传播。
    - load candles → `.replay(fees: pending.feeSnapshot, maxTick:)` 重建，注入 saved 状态：`initialTick=pending.globalTickIndex` / `initialCapital=pending.accumulatedCapital` / `initialCashBalance=pending.cashBalance` / `initialPosition=decode(pending.positionData)` / `initialMarkers=markers(from: pending.tradeOperations)` / `initialDrawings=pending.drawings` / `initialTradeOperations=pending.tradeOperations` / `initialDrawdown=pending.drawdown` / `initialUpper/LowerPeriod`。
-   - 成功后会话上下文：`activeReader/activeEngine/activeFile`、`cache.touch(file)`、`activeStartedAt = pending.startedAt`、`activeRecord = bundle.record`、`activeSessionKey = nil`、`resetAutosaveState()`。
+   - 成功后会话上下文：`activeReader/activeEngine/activeFile`、`cache.touch(file)`、`activeStartedAt = pending.startedAt`、`activeRecord = bundle.record`、`activeSessionKey = nil`、`replayBaseline=(resumed 态)`、**`replayHasPersisted = true`（续局本就拥有该记录槽 → 永不 clean-skip）**、`resetAutosaveState()`。
 4. **清档时机（关键——区分"续局保留" vs "终局清除"，且终局须 fence）**：
    - **`endSession()` 对 replay 不清 `pending_replay`**。理由：`back()` = `saveProgress`(写 pending_replay) + `endSession()`；若 endSession 清档则续局立即失效。endSession 仅关 reader/清活跃上下文（原语义，含 `terminating=true` fence）。
    - **终局清档须 fence+drain（codex spec-R1-F2）**：replay 走到结算（到 maxTick 自动结算 **或** 手动「结束本局」）→ 终局清档前**必须 `await fenceAndDrainAutosaves()` 再 `clearReplay()`**，否则末根 tick 的 `onChange` 已排队的 autosave 会在 clear 后跑、把 maxTick 终态写回 `pending_replay` → 按钮错显"返回训练"、再进=终态陈旧局。镜像 Normal `finalize`（L362 先 fence 再单事务）。
@@ -214,7 +214,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 | D-A4 | 单槽覆盖机制 | **不前置 clear**；靠新 replay 首次保存 `INSERT OR REPLACE`(id=1) 覆盖旧档（codex spec-R1-F3） | 开新 replay 即覆盖语义保留，但**失败装配不丢旧档**；不在 UI 做确认弹窗（练习数据、低风险，YAGNI） |
 | D-A7 | replay autosave 启用点 | 改 **`requestAutosave` 入口门** `mode==.normal`→`shouldPersistProgress()`（非仅改 saveProgress）（codex spec-R1-F1） | autosave 真入口在 requestAutosave；不改它则 replay 仅 Back 存、crash/后台丢档 |
 | D-A8 | replay 终局清档 | 先 `await fenceAndDrainAutosaves()` 再 **条件清** `clearReplay(ifRecordId:)`（payload 成功后）；`replaySettlementPayload` 改 async（codex spec-R1-F2 / plan-R3-F1） | 防末根排队 autosave 复活 slot；防误删别记录槽；镜像 Normal finalize §4.7d |
-| D-A9 | clean replay 不写槽 | replay save 设会话基线 `replayBaseline`，当前态==基线（无 tick/ops/drawings 变化）→ 跳过写（codex plan-R3-F1/R4-F1） | `back()`/后台 flush 无条件保存 → 无此守卫则 clean fresh B 用初始态覆盖别记录 A 的槽；clean-skip + 条件清双保险 |
+| D-A9 | clean replay 不写槽 | replay save 设会话基线 + `replayHasPersisted` 标志；**仅 `!replayHasPersisted && 当前态==baseline`** 才跳过写（codex plan-R4-F1/R6-F1） | `back()`/后台 flush 无条件保存→无守卫则 clean fresh B 覆盖别记录 A 槽；**仅计数判脏会让"加画线→删画线"残留**，故首写后(拥有槽)永不跳过；resumed 本就拥有槽=true |
 | D-A5 | CONTRACT_VERSION | 1.7→1.8 + migration 0006 | 沿用每 migration 必 bump 先例；additive 新表 |
 | D-A6 | 去「取消」按钮 | 去掉，遮罩点击取消，保留 `onCancel` | user 拍板；弹窗更小 |
 | D-B1 | 复盘起点 | metadata 派生 startTick，**不加 record 字段** | 确定性派生、零 schema 改动；与 normal/replay 同源 |
@@ -261,6 +261,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
   - **单槽覆盖（spec-R1-F3）**：已有 `pending_replay`(A)，开新 replay(B) 并保存 → slot 变 B（`INSERT OR REPLACE` 覆盖）；**failed fresh replay 回归**：已有 A、开 B 但装配抛错 → A 仍在（未被清）。
   - **条件清不删别记录槽（plan-R3-F1）**：A 有槽、开 B 未保存即终局/discard → 条件清 `ifRecordId=B` no-op → A 的槽保留。**fail-closed save（plan-R3-F2）**：缺活跃上下文（如 startedAt/recordId 缺、stale engine）→ saveProgress 对 replay **throw**（非静默 no-op）。
   - **clean-skip 不覆盖别记录槽（plan-R4-F1）**：A 有槽、开 fresh B 零操作 → `back()`(saveProgress) **与** 后台 `flushAutosave` 均跳过写 → A 仍在；B 有进度后存 → 覆盖为 B。
+  - **首写后不残留（plan-R6-F1）**：replay 加画线→存→删画线（count 回基线）→存 → 槽更新为无画线（`replayHasPersisted` 后不跳过），续局无陈旧画线。
   - **复盘 tick 范围守卫（plan-R3-F3）**：`make(.review(record:finalTick=5, startTick=10))` → 抛 `AppError.trainingSet(.emptyData)`（不 trap）。
   - **终局清档 fence + payload-before-clear 回归（spec-R1-F2 / plan-R1-F2）**：replay 步进到 maxTick 且有一个排队的 autosave → 终局 fence→构建 payload→clear 后 `pending_replay` 仍为空（排队 autosave 不复活）；**clearReplay 抛 → 方法抛 + 槽保留（可重试）**；`discardSession`(replay) → 清档。
   - `saveProgress` 在 review 模式 = no-op；normal 路径回归不变（写 `pending_training`，字节级）。
