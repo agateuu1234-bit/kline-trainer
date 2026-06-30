@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 - 引擎前置仍满足（已勘实 L96/L106）：`allowedTickRange.contains(startTick)`（startTick∈start...final）；`upperBound==maxTick`（`.review` maxTick=record.finalTick 不变 = range 上界 finalTick）；`m3.last.endGlobalIndex >= maxTick` 用 `>=`（review m3 为训练组全集，末根可 > finalTick，安全）。
 
 ### B.3 引擎步进 / jump-to-end
-- **步进**：复用现成 `holdOrObserve(panel:)`（`canAdvance()=true` 即生效）；review 无持仓 → `forceCloseIfEnded` no-op；`advanceAndAccount` 的面板 `.tradeTriggered` reduce 把镜头吸附到揭示前缘（与训练一致）。**不新增 advance API**。
+- **步进**：新增 `stepReviewForward()`（codex plan-R9-F1）——**按两 panel 中更细（`stepsForPeriod` 更小）的周期**调 `holdOrObserve(panel: finer)` 逐根推进，**不依赖 `activePanel`**（复盘隐藏了周期选择条，activePanel 停默认 `.lower`=粗周期会一击跳一整天，违"逐根"）。`canAdvance()=true` 生效；review 无持仓 → `forceCloseIfEnded` no-op；面板 `.tradeTriggered` reduce 吸附镜头到揭示前缘。用户可单指竖滑切周期组合改粒度。
 - **jump-to-end**：新增 `TrainingEngine.jumpToEnd()`：`guard flow.canJumpToEnd() else { return }`；`tick.reset(to: tick.maxTick)`；两面板吸附 autoTracking（镜像 `advanceAndAccount` 的 `resetOffsetAfterAutoTracking`/`.tradeTriggered`）；`drawdown.update`。无 `forceClose`（无持仓）。到末尾后 K 线+标记全揭示＝原冻结全貌。
 
 ### B.4 顶栏盈亏显示决策（D-B3）
@@ -188,7 +188,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 ### B.5 UI（训练界面控件门控）— 已勘实
 **事实**：`TrainingView.showsTradeButtons = engine.flow.canBuySell()` 门控**整条 `TradeActionBar`**（买/卖/观察捆在一起）。复盘 `canBuySell=false` → 整条不显示 → **当前复盘无任何步进控件**。故复盘步进**不能靠"翻 canAdvance 复用现条"**，须**新增 review 专用控件条**。
 - 新增谓词 `showsReviewControls = engine.flow.canAdvance() && !engine.flow.canBuySell()`（＝复盘可步进态），渲染一个**精简控件条**（不含买/卖）：
-  - 「下一根」→ `engine.holdOrObserve(panel: activePanel)`（复用现成步进；`canAdvance=true` 生效；activePanel 沿用现有选择，步长 = `stepsForPeriod(活动周期)`，与训练一致）。
+  - 「下一根」→ `engine.stepReviewForward()`（按更细周期逐根；**不依赖 activePanel**，codex plan-R9-F1）。
   - 「快进到结尾」→ `engine.jumpToEnd()`；**仅 `engine.flow.canJumpToEnd()` 为真时显示**。
   - 位置/样式 plan 定（建议占 TradeActionBar 同一槽位，复盘时以该条替之）。
 - 买/卖控件：复盘恒隐藏（`canBuySell=false` 不变）。
@@ -222,6 +222,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 | D-B3 | 复盘盈亏显示 | 全程显示记录**最终成绩**，步进只控揭示 | 避免逐 tick 重放交易的高复杂度；复盘=回看已完成成绩 |
 | D-B4 | 复盘是否持久化进度 | **否** | 续局需求只针对 replay；复盘每次从起点重进，简单 |
 | D-B5 | jump-to-end 实现 | 复用现成未调用的 `TickEngine.reset(to:)` + 新 `canJumpToEnd()` 门控 | 最小新增；语义清晰可测 |
+| D-B6 | 复盘步进粒度 | 新 `stepReviewForward()` 按**更细显示周期**逐根，不依赖 activePanel（codex plan-R9-F1） | activePanel 默认 `.lower`=粗周期 → 一击跳整天违"逐根"；细周期=最贴"像训练逐根"，用户单指竖滑切组合改粒度 |
 
 ---
 
@@ -237,7 +238,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 - `TrainingEngine/TrainingFlowController.swift`（+`shouldPersistProgress` +`canJumpToEnd`；ReviewFlow `init(record:, startTick:)`/范围 `start...final`/`canAdvance=true`；Normal/Replay 显式实现新方法）
 - `TrainingEngine/TrainingSessionCoordinator.swift`（**`requestAutosave` 门 `mode==.normal`→`shouldPersistProgress()`**、saveProgress 分流、replay 会话 startedAt（不前置 clear）、resumePendingReplay、review 派生 startTick、**`replaySettlementPayload` 改 async + fence+clearReplay**、discard 清 replay、hasResumableReplay）
 - `UI/TrainingSessionLifecycle.swift`（`replaySettlementRecord()` 改 async 以承接 async `replaySettlementPayload`）
-- `TrainingEngine/TrainingEngine.swift`（+`jumpToEnd()`；`FlowInput.review(record:, startTick:)` + `make` 的 `.review` 分支 + preview fixture 分支）
+- `TrainingEngine/TrainingEngine.swift`（+`jumpToEnd()` +`stepReviewForward()`；`FlowInput.review(record:, startTick:)` + `make` 的 `.review` 分支（含 `finalTick>=startTick` 守卫）+ preview fixture 分支）
 - `AppState.swift`（+`PendingReplay` 结构，镜像 `PendingTraining` 去 sessionKey + 加 `recordId: Int64`）
 - `Models/Models.swift`（CONTRACT_VERSION 1.7→1.8）
 - `KlineTrainerPersistence/DefaultAppDB.swift`（conform `PendingReplayRepository`：saveReplay/loadReplay/clearReplay/**clearReplay(ifRecordId:)** 委托 Impl + 错误映射；`resetAllTrainingProgress` 加无条件 `clearReplay`）

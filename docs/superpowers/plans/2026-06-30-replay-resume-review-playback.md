@@ -1269,12 +1269,28 @@ git commit -m "feat(B1): ReviewFlow playable (startTick/range/canAdvance) + canJ
     engine.jumpToEnd()
     #expect(engine.tick.globalTickIndex == before)   // canJumpToEnd()==false
 }
+
+@MainActor
+@Test func stepReviewForward_usesFinerPeriod_notCoarseDefault() throws {
+    // codex plan-R9-F1：复盘"下一根"按更细周期逐根，而非默认 activePanel(.lower=粗周期)跳一整天
+    let e = try TrainingEngine.previewReview(startTick: 5)   // combo 一细一粗（如 m60/daily）
+    let t0 = e.tick.globalTickIndex
+    e.stepReviewForward()
+    let delta = e.tick.globalTickIndex - t0
+    // 对照：粗周期(.lower)一根的 delta
+    let coarse = try TrainingEngine.previewReview(startTick: 5)
+    let c0 = coarse.tick.globalTickIndex
+    coarse.holdOrObserve(panel: .lower)
+    let coarseDelta = coarse.tick.globalTickIndex - c0
+    #expect(delta > 0)
+    #expect(delta < coarseDelta)   // 细周期步进 < 粗周期一根（不会一击跳整天）
+}
 ```
 > implementer：用现有 `TrainingEngine.preview(...)` / fixture 构造 review/normal 引擎（preview 现已支持 `.review`；若需 startTick 用 B1 的 preview 改动）。
 
 - [ ] **Step 2: 跑测试确认失败** — FAIL（jumpToEnd 不存在）。
 
-- [ ] **Step 3: 实现 `jumpToEnd()`**（紧邻 `advanceAndAccount` / `holdOrObserve`）
+- [ ] **Step 3: 实现 `jumpToEnd()` + `stepReviewForward()`**（紧邻 `advanceAndAccount` / `holdOrObserve`）
 ```swift
 /// 新需求10：复盘「快进到结尾」。仅 canJumpToEnd()（Review）生效；设 tick=maxTick + 镜头吸附 autoTracking。
 /// 无成交、无 marker；无 forceClose（复盘无持仓）。K线/标记随 currentIdx 自动全揭示。
@@ -1288,8 +1304,17 @@ public func jumpToEnd() {
     resetOffsetAfterAutoTracking(.lower)
     drawdown.update(currentCapital: currentTotalCapital)
 }
+
+/// 新需求10（codex plan-R9-F1）：复盘「下一根」逐根推进。**按两 panel 中更细（stepsForPeriod 更小）的周期步进**，
+/// 而非 activePanel（复盘隐藏了周期选择条，activePanel 停在默认 .lower=粗周期会一击跳一整天）。复用 holdOrObserve
+/// （canAdvance 门控 + 只读无成交）。用户可单指竖滑切周期组合改粒度。
+public func stepReviewForward() {
+    let finerPanel: PanelId =
+        stepsForPeriod(upperPanel.period) <= stepsForPeriod(lowerPanel.period) ? .upper : .lower
+    holdOrObserve(panel: finerPanel)
+}
 ```
-> implementer：`stopAllDeceleration` / `reduce(.tradeTriggered)` / `resetOffsetAfterAutoTracking` 复用 `advanceAndAccount` 同款调用（以源码现有方法名为准）。
+> implementer：`stopAllDeceleration` / `reduce(.tradeTriggered)` / `resetOffsetAfterAutoTracking` / `stepsForPeriod` 复用 `advanceAndAccount`/`holdOrObserve` 同款（以源码现有方法名/访问级为准；`stepsForPeriod` 已是引擎内部函数，本方法同文件可直接调）。
 
 - [ ] **Step 4: 跑测试确认通过** — `swift test --filter jumpToEnd_review_setsMaxTick` / `--filter jumpToEnd_normal_noOp` → PASS。
 
@@ -1429,7 +1454,7 @@ body 内 `if showsTradeButtons { TradeActionBar(...) }` 之后加：
             } else if showsReviewControls {
                 ReviewControlBar(
                     showsJumpToEnd: engine.flow.canJumpToEnd(),
-                    onStep: { engine.holdOrObserve(panel: activePanel) },
+                    onStep: { engine.stepReviewForward() },   // codex plan-R9-F1：按更细周期逐根（不依赖隐藏的 activePanel）
                     onJumpToEnd: { engine.jumpToEnd() })
 ```
 > implementer：将其并入既有 `if showsTradeButtons { ... }` 结构为 `if ... {} else if showsReviewControls {}`（保持 TradeActionBar 块原样，仅追加 else-if 分支占同槽位）。
