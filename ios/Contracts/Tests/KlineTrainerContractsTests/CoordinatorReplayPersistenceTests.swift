@@ -436,6 +436,30 @@ struct CoordinatorReplayPersistenceTests {
         #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil)   // 槽已被 durable 清
     }
 
+    @Test func resumePendingReplay_periodAbsentFromCandleMap_clearsAndReturnsNil() async throws {
+        // codex whole-branch R2-F1 HIGH：makeCandles() 仅含 .m3/.m60/.daily/.weekly；
+        // .monthly 是合法 Period case 但不在 candle map。
+        // 槽 upperPeriod=.monthly → scalar guard（period 校验）检出 → clearReplay + nil（永不到 make）。
+        let h = try CoordinatorTestHarness.make()
+        let badSlot = PendingReplay(
+            recordId: h.seededRecordId,
+            trainingSetFilename: "set.sqlite",
+            globalTickIndex: 1,           // valid tick（in range 0...7）
+            upperPeriod: .monthly,        // absent from candle map → guard fires
+            lowerPeriod: .daily,
+            positionData: Data(),
+            cashBalance: 100_000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            tradeOperations: [], drawings: [],
+            startedAt: 1,
+            accumulatedCapital: 100_000,
+            drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+        try h.pendingReplayRepo.saveReplay(badSlot)
+        let engine = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
+        #expect(engine == nil)
+        #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil)   // 槽已被 durable 清
+    }
+
     @Test func resumePendingReplay_nonFiniteMoney_clearsAndReturnsNil() async throws {
         // 槽 cashBalance=.infinity → scalar guard 检出（isFinite=false）→ clearReplay + nil。
         let h = try CoordinatorTestHarness.make()

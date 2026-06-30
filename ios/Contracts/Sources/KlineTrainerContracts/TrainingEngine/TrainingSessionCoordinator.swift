@@ -569,10 +569,14 @@ public final class TrainingSessionCoordinator {
             reader.close()
             throw (error as? AppError) ?? .internalError(module: "E6b", detail: String(describing: error))
         }
-        // Scalar 前置校验（codex whole-branch R1 HIGH）：make L220/L236-240 对同一条件抛 .trainingSet(.emptyData)，
-        // 而 catch 仅 rethrow 不清槽 → AppRouter resume-first 每次都撞同一槽 → 记录永久 brick。
+        // 前置校验（codex whole-branch R1 HIGH + R2-F1 HIGH）：make L244-245 和 L220/L236-240 对同一条件抛
+        // .trainingSet(.emptyData)，而 catch 仅 rethrow 不清槽 → AppRouter resume-first 每次都撞同一槽 → 永久 brick。
         // 在此提前检出 → reader.close + durable clearReplay（try: 失败向上传播，调用方可重试）+ nil。
-        guard (0...mt).contains(pending.globalTickIndex),
+        // 周期校验（codex whole-branch R2-F1）：saved period 不在 candle map 中 → make final-R6-F1 抛 emptyData →
+        // 同 brick 路径；在此镜像 make L244-245 提前清槽。
+        guard !(allCandles[pending.upperPeriod] ?? []).isEmpty,
+              !(allCandles[pending.lowerPeriod] ?? []).isEmpty,
+              (0...mt).contains(pending.globalTickIndex),
               pending.cashBalance.isFinite, pending.cashBalance >= 0,
               pending.accumulatedCapital.isFinite, pending.accumulatedCapital >= 0,
               pending.drawdown.peakCapital.isFinite, pending.drawdown.peakCapital >= 0,

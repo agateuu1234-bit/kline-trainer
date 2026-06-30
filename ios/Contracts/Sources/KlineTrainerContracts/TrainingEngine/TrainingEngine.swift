@@ -367,13 +367,25 @@ public final class TrainingEngine {
         drawdown.update(currentCapital: currentTotalCapital)
     }
 
-    /// 复盘「下一根」逐根推进。**按两 panel 中更细（stepsForPeriod 更小）的周期步进**，
+    /// 复盘「下一根」逐根推进。**按两 panel 中更细（stepsForPeriod 更小的正数步）的周期步进**，
     /// 而非 activePanel（复盘隐藏了周期选择条，activePanel 停在默认 .lower=粗周期会一击跳一整天）。
     /// 复用 holdOrObserve（canAdvance 门控 + 只读无成交）。用户可单指竖滑切周期组合改粒度。
+    /// 耗尽面板（stepsForPeriod==0）绝不被选中（codex whole-branch R2-F2）：若一方耗尽则选另一方；
+    /// 皆耗尽时（已到结尾）no-op。
     public func stepReviewForward() {
-        let finerPanel: PanelId =
-            stepsForPeriod(upperPanel.period) <= stepsForPeriod(lowerPanel.period) ? .upper : .lower
-        holdOrObserve(panel: finerPanel)
+        let upperSteps = stepsForPeriod(upperPanel.period)
+        let lowerSteps = stepsForPeriod(lowerPanel.period)
+        let panel: PanelId
+        if upperSteps > 0 && lowerSteps > 0 {
+            panel = upperSteps <= lowerSteps ? .upper : .lower   // 皆可推进 → 选更细
+        } else if upperSteps > 0 {
+            panel = .upper                                        // 仅 upper 能推进
+        } else if lowerSteps > 0 {
+            panel = .lower                                        // 仅 lower 能推进
+        } else {
+            return                                                // 皆耗尽=到结尾，no-op
+        }
+        holdOrObserve(panel: panel)
     }
 
     // MARK: - 私有：步进 + 联动 + 记账（buy/sell/holdOrObserve 共用）
