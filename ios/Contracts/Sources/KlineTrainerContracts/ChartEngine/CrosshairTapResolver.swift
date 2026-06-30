@@ -39,4 +39,12 @@ public enum CrosshairTapResolver {
         if incomingOwner == nil, previousOwner == panel { return .exitOwnerCleared }
         return .none
     }
+
+    /// 本面板视角「有**别的**面板持光标」（供 arbiter `onShouldExitRemoteCrosshair` 谓词 → resolve 的 `remoteOwnerPresent`）。
+    /// **排除自持**（`syncedOwner == panel`，codex WB-3）：自持时 `crosshairMode==true` 已由 `resolve` 的 `exitLocal` 优先短路；
+    /// 但 drawing 激活的**异步 owner 释放窗口**内 `crosshairMode` 已 false 而 `syncedOwner` 仍==自己——此时必须返 false，
+    /// 否则首个画线 tap 被误判 `requestGlobalExit` 吞掉（而非落锚点）。
+    public static func remoteOwnerPresent(syncedOwner: PanelId?, panel: PanelId) -> Bool {
+        syncedOwner != nil && syncedOwner != panel
+    }
 }

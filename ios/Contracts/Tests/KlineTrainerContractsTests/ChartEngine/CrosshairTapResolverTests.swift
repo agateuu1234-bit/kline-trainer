@@ -55,4 +55,14 @@ struct CrosshairTapResolverTests {
     func inactiveNone() {
         #expect(CrosshairTapResolver.resolveSyncExit(incomingOwner: .upper, previousOwner: .lower, panel: .lower, crosshairActive: false) == .none)
     }
+
+    // MARK: - remoteOwnerPresent（谓词：有别的面板持光标，排除自持，codex WB-3）
+
+    @Test("remoteOwnerPresent: nil→false / 自持→false / 别面板→true（codex WB-3）")
+    func remoteOwnerPresentPredicate() {
+        #expect(CrosshairTapResolver.remoteOwnerPresent(syncedOwner: nil, panel: .upper) == false)       // 无人持
+        #expect(CrosshairTapResolver.remoteOwnerPresent(syncedOwner: .upper, panel: .upper) == false)    // 自持（drawing 激活异步窗口）→ 放行画线锚点
+        #expect(CrosshairTapResolver.remoteOwnerPresent(syncedOwner: .lower, panel: .upper) == true)     // 别面板持 → 退远端
+        #expect(CrosshairTapResolver.remoteOwnerPresent(syncedOwner: .upper, panel: .lower) == true)
+    }
 }

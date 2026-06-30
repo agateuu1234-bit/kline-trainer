@@ -156,7 +156,10 @@ public struct ChartContainerView: UIViewRepresentable {
                 self?.exitCrosshair()
             }
             arbiter.onShouldExitRemoteCrosshair = { [weak self] in
-                self?.lastSyncedOwner != nil          // 本面板非持有时（handleTap 已先排除持有），nil≠ = 别人持光标
+                guard let self else { return false }
+                // 「有**别的**面板持光标」——必须排除自持（codex WB-3）：drawing 激活的异步 owner 释放窗口内
+                // crosshairMode 已 false 但 lastSyncedOwner 仍==自己，若不排除会把首个画线 tap 误判成退光标吞掉。
+                return CrosshairTapResolver.remoteOwnerPresent(syncedOwner: self.lastSyncedOwner, panel: self.panel)
             }
             arbiter.onPinch = { [weak self] scale, focus, phase in
                 guard let self, let engine = self.engine else { return }
