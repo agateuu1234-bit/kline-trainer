@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RFC-C 长按十字光标 + 悬浮信息栏 · 自适应左右</title>
+<style>
+  :root{--up:#e23030;--dn:#1fb866;--bg:#0c0c10;--panel:#15151b;--line:#262630;--txt:#e8e8f0;--mut:#86868f;
+        --ma:#9a78e8;--boll:#e8b53a;--dif:#f4f4f8;--dea:#f0d23a;--cx:#d8d8e2;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:#08080b;color:var(--txt);font:14px/1.5 -apple-system,"PingFang SC",system-ui;padding:22px;}
+  h1{font-size:18px;margin:0 0 4px;} .sub{color:var(--mut);font-size:13px;margin:0 0 18px;max-width:880px;}
+  .sub b{color:#cfcfd8;}
+  .wrap{display:flex;gap:30px;flex-wrap:wrap;align-items:flex-start;}
+  .cap{font-size:12.5px;color:#b9b9c4;margin:0 0 8px;font-weight:600;text-align:center;}
+  .cap .t{display:block;color:var(--mut);font-weight:400;font-size:11px;margin-top:2px;}
+  .device{width:392px;height:812px;background:#000;border-radius:54px;padding:11px;
+          box-shadow:0 0 0 2px #3a3a42,0 18px 50px rgba(0,0,0,.6);position:relative;}
+  .screen{width:100%;height:100%;background:var(--bg);border-radius:44px;overflow:hidden;display:flex;flex-direction:column;position:relative;}
+  .statusbar{height:50px;flex:0 0 50px;display:flex;align-items:flex-start;justify-content:space-between;padding:13px 30px 0;position:relative;z-index:5;}
+  .sb-time{font-size:15px;font-weight:600;} .sb-right{display:flex;align-items:center;gap:6px;height:16px;}
+  .signal{display:flex;align-items:flex-end;gap:2px;height:11px;} .signal i{width:3px;background:#fff;border-radius:1px;}
+  .signal i:nth-child(1){height:4px;}.signal i:nth-child(2){height:6px;}.signal i:nth-child(3){height:8px;}.signal i:nth-child(4){height:11px;}
+  .wifi{font-size:12px;} .batt{width:23px;height:12px;border:1px solid #fff;border-radius:3px;position:relative;padding:1px;}
+  .batt::after{content:"";position:absolute;right:-3px;top:3px;width:2px;height:6px;background:#fff;border-radius:0 1px 1px 0;}
+  .batt i{display:block;height:100%;width:80%;background:#fff;border-radius:1px;}
+  .island{position:absolute;left:50%;top:10px;transform:translateX(-50%);width:120px;height:33px;background:#000;border-radius:20px;z-index:6;}
+  .app{flex:1;display:flex;flex-direction:column;min-height:0;}
+  /* header */
+  .hd{background:var(--panel);border-bottom:1px solid var(--line);padding:6px 11px 7px;}
+  .hd-top{display:flex;justify-content:space-between;align-items:center;height:22px;}
+  .hd-top .bk{font-size:13px;color:#aab0bc;} .hd-top .nm{font-size:13px;color:#d2d2db;font-weight:600;}
+  .endbtn{font-size:11.5px;color:#e07a7a;border:1px solid #6a2626;border-radius:11px;padding:2px 10px;}
+  .hd-m{display:flex;margin-top:7px;}
+  .mc{display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;min-width:0;padding:0 5px;border-left:1px solid #21212a;}
+  .mc:first-child{padding-left:0;border-left:none;}
+  .mc.c1{flex:0 0 92px;} .mc.c2{flex:0 0 64px;} .mc.c3{flex:0 0 86px;} .mc.c4{flex:0 0 36px;} .mc.c5{flex:1 1 auto;}
+  .ml{font-size:8.5px;color:#7a7a86;line-height:1.25;white-space:nowrap;}
+  .mv{font-size:12px;color:#ececf4;font-weight:600;line-height:1.3;white-space:nowrap;letter-spacing:-.2px;}
+  .mv.up{color:var(--up);}
+  /* period panel */
+  .panel{flex:1 1 0;min-height:0;display:flex;flex-direction:column;position:relative;}
+  .panel.active::before{content:"";position:absolute;inset:0;box-shadow:inset 0 0 0 1.5px rgba(226,48,48,.4);pointer-events:none;z-index:4;}
+  .seg{position:relative;min-height:0;}
+  .seg.main{flex:0 0 60%;} .seg.vol{flex:0 0 15%;border-top:1px solid #1c1c24;} .seg.macd{flex:0 0 25%;border-top:1px solid #1c1c24;}
+  .seg svg{position:absolute;inset:0;width:100%;height:100%;display:block;}
+  .plabels{position:absolute;top:0;left:4px;bottom:0;display:flex;flex-direction:column;justify-content:space-between;padding:5px 0;pointer-events:none;z-index:3;}
+  .plabels span{font-size:9.5px;color:#cfcfd8;text-shadow:0 0 4px #000,0 0 4px #000;}
+  .ptag{position:absolute;top:4px;right:7px;font-size:10px;color:#b0b0ba;z-index:3;}
+  .leg{position:absolute;top:4px;left:40px;font-size:9px;z-index:3;white-space:nowrap;}
+  .leg .ma{color:var(--ma);} .leg .bl{color:var(--boll);}
+  .vlabel{position:absolute;top:2px;left:4px;font-size:8.5px;color:#8a8a96;z-index:3;text-shadow:0 0 4px #000;}
+  .mlabel{position:absolute;top:2px;left:4px;font-size:8.5px;z-index:3;text-shadow:0 0 4px #000;}
+  .mlabel .d1{color:var(--dif);} .mlabel .d2{color:var(--dea);}
+  .tlabels{position:absolute;left:40px;right:7px;bottom:1px;display:flex;justify-content:space-around;pointer-events:none;z-index:3;}
+  .tlabels span{font-size:9px;color:#9a9aa6;text-shadow:0 0 4px #000,0 0 4px #000;}
+  .pdivider{height:1px;background:#33333f;flex:0 0 1px;}
+  /* ===== CROSSHAIR ===== */
+  .cx-v{position:absolute;top:0;bottom:0;width:1px;z-index:6;pointer-events:none;background:rgba(232,232,242,.55);}
+  .cx-h{position:absolute;left:0;right:0;height:1px;z-index:6;pointer-events:none;background:rgba(232,232,242,.55);}
+  .cx-dot{position:absolute;width:5px;height:5px;border-radius:50%;background:var(--cx);
+          z-index:7;transform:translate(-50%,-50%);pointer-events:none;box-shadow:0 0 0 2px rgba(12,12,16,.85);}
+  /* price tag = LEFT edge (RFC-B 价轴在左) ; time tag = bottom */
+  .cx-ptag{position:absolute;left:0;height:15px;display:flex;align-items:center;padding:0 5px;
+           font-size:9.5px;font-weight:600;color:#0c0c10;background:var(--cx);border-radius:0 4px 4px 0;
+           transform:translateY(-50%);z-index:7;font-variant-numeric:tabular-nums;}
+  .cx-ttag{position:absolute;bottom:0;height:15px;display:flex;align-items:center;padding:0 5px;
+           font-size:9px;font-weight:600;color:#0c0c10;background:var(--cx);border-radius:4px 4px 0 0;
+           transform:translateX(-50%);z-index:7;white-space:nowrap;font-variant-numeric:tabular-nums;}
+  /* ===== floating info card (overlay, 自适应左右) ===== */
+  .cxinfo{position:absolute;top:6px;width:126px;z-index:8;border-radius:9px;padding:7px 9px 8px;
+          background:rgba(10,10,14,.84);border:1px solid #30303c;box-shadow:0 5px 16px #000b;
+          -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);}
+  .cxinfo.dockL{left:7px;} .cxinfo.dockR{right:7px;}
+  .cxinfo .ih{display:flex;justify-content:space-between;align-items:baseline;font-size:10px;color:#aeaeba;
+              border-bottom:1px solid #2b2b35;padding-bottom:4px;margin-bottom:5px;}
+  .cxinfo .ih b{color:#e6e6ef;font-size:11px;} .cxinfo .ih .pd{color:#8a8a96;font-size:9px;}
+  .cxrow{display:flex;justify-content:space-between;font-size:10px;line-height:1.66;}
+  .cxrow .k{color:#86868f;} .cxrow .v{color:#e8e8f0;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.2px;}
+  .cxrow .v.up{color:var(--up);} .cxrow .v.dn{color:var(--dn);}
+  .cxrow .v.yl{color:#f0d23a;} .cxrow .v.fl{color:#fff;}            /* 黄=非涨跌字段 / 白=平 */
+  .cxrow.now{font-size:11px;padding-bottom:5px;margin-bottom:4px;border-bottom:1px solid #2b2b35;}
+  .cxrow.now .k{color:#aeaeba;} .cxrow.now .v{font-size:13px;}
+  .cxrow.sep{margin-top:3px;padding-top:3px;border-top:1px dashed #26262f;}
+  .exit{margin-top:6px;font-size:8.5px;color:#6f6f7a;text-align:center;}
+  /* legend column */
+  .legend{width:340px;} .legend h3{font-size:14px;margin:2px 0 9px;}
+  .li{display:flex;gap:9px;margin-bottom:12px;font-size:12.5px;}
+  .ln{flex:0 0 22px;height:22px;border-radius:6px;background:#1c1c24;border:1px solid #34343f;color:#c9c9d4;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;}
+  .ln.on{background:#16331f;border-color:#1d5a39;color:#5ccf90;}
+  .ln.off{background:#331f1f;border-color:#5a2626;color:#e08a8a;}
+  .lt b{color:#fff;} .lt .t{color:var(--mut);font-size:11.5px;}
+  code{background:#1a1a22;border:1px solid #2c2c36;border-radius:4px;padding:0 4px;font-size:11px;color:#cdb;}
+</style></head>
+<body>
+<h1>RFC-C · 长按十字光标 + 悬浮信息栏（自适应左右）</h1>
+<p class="sub">长按主图 → 进入<b>黏滞十字光标模式</b>（整图冻结，松手保留，<b>点一下退出</b>）。竖线吸附最近 K 线（<b>每换一根短震动</b>）、横线跟手指 Y、<b>光标中心对齐手指触点</b>（细实线，无偏移）。
+信息栏<b>悬浮</b>在图上（不占固定空间，左右停靠位置固定不跟手）：<b>十字标在中心偏右 → 栏靠左；在中心或偏左 → 栏靠右</b>（防手指遮挡）。栏顶「光标价」=横线纵轴读数。颜色：涨红/跌绿/平白，其余黄。下面左右两机演示两种停靠。</p>
+
+<div class="wrap">
+
+  <!-- ============ DEVICE A : 光标偏右 → 信息栏靠左 ============ -->
+  <div>
+  <p class="cap">A · 十字标在「中心偏右」<span class="t">→ 信息栏停靠左侧</span></p>
+  <div class="device"><div class="screen">
+    <div class="statusbar">
+      <div class="sb-time">9:41</div><div class="island"></div>
+      <div class="sb-right"><div class="signal"><i></i><i></i><i></i><i></i></div><span class="wifi">📶</span><div class="batt"><i></i></div></div>
+    </div>
+    <div class="app">
+      <div class="hd">
+        <div class="hd-top"><span class="bk">‹ 返回</span><span class="nm">训练标的 · 盲测</span><span class="endbtn">结束</span></div>
+        <div class="hd-m">
+          <div class="mc c1"><span class="ml">总资金</span><span class="mv">¥1,284,650</span></div>
+          <div class="mc c2"><span class="ml">持仓成本/股</span><span class="mv">1,652.30</span></div>
+          <div class="mc c3"><span class="ml">持仓股数</span><span class="mv">3,400 股</span></div>
+          <div class="mc c4"><span class="ml">仓位</span><span class="mv">2/5</span></div>
+          <div class="mc c5"><span class="ml">浮动盈亏</span><span class="mv up">+1.89%</span></div>
+        </div>
+      </div>
+
+      <!-- upper panel : 60分 · 十字光标 active -->
+      <div class="panel" data-seed="11" data-n="34" data-cx="0.71" data-cy="0.30">
+        <div class="seg main">
+          <div class="leg"><span class="ma">MA66</span> · <span class="bl">BOLL(20,2)</span></div>
+          <div class="ptag">60分</div>
+          <div class="plabels"><span>1720</span><span>1700</span><span>1680</span><span>1660</span><span>1640</span></div>
+          <!-- 悬浮信息栏 (dock 左) -->
+          <div class="cxinfo dockL">
+            <div class="cxrow now"><span class="k">光标价</span><span class="v up">1,681.20</span></div>
+            <div class="cxrow"><span class="k">日期</span><span class="v yl">03-28</span></div>
+            <div class="cxrow"><span class="k">时间</span><span class="v yl">14:00</span></div>
+            <div class="cxrow sep"><span class="k">开</span><span class="v yl">1672.40</span></div>
+            <div class="cxrow"><span class="k">高</span><span class="v yl">1689.00</span></div>
+            <div class="cxrow"><span class="k">低</span><span class="v yl">1668.20</span></div>
+            <div class="cxrow"><span class="k">收</span><span class="v up">1683.50</span></div>
+            <div class="cxrow"><span class="k">涨跌</span><span class="v up">+11.10</span></div>
+            <div class="cxrow"><span class="k">涨跌幅</span><span class="v up">+0.66%</span></div>
+            <div class="cxrow sep"><span class="k">均价</span><span class="v yl">1679.80</span></div>
+            <div class="cxrow"><span class="k">成交量</span><span class="v yl">12,840 手</span></div>
+            <div class="cxrow"><span class="k">成交额</span><span class="v yl">2.16 亿</span></div>
+          </div>
+        </div>
+        <div class="seg vol"><div class="vlabel">成交量</div></div>
+        <div class="seg macd"><div class="mlabel">MACD <span class="d1">DIF</span> <span class="d2">DEA</span></div>
+          <div class="tlabels"><span>09:30</span><span>10:30</span><span>11:30</span><span>14:00</span><span>15:00</span></div>
+        </div>
+      </div>
+
+      <div class="pdivider"></div>
+
+      <!-- lower panel : 日线 (active trade target) -->
+      <div class="panel active" data-seed="73" data-n="34">
+        <div class="seg main">
+          <div class="leg"><span class="ma">MA66</span> · <span class="bl">BOLL(20,2)</span></div>
+          <div class="ptag">日线 · 下单目标</div>
+          <div class="plabels"><span>1760</span><span>1700</span><span>1640</span><span>1600</span><span>1560</span></div>
+        </div>
+        <div class="seg vol"><div class="vlabel">成交量</div></div>
+        <div class="seg macd"><div class="mlabel">MACD <span class="d1">DIF</span> <span class="d2">DEA</span></div>
+          <div class="tlabels"><span>03/14</span><span>03/28</span><span>04/15</span><span>05/02</span><span>05/20</span></div>
+        </div>
+      </div>
+
+      <div class="tradebar" style="flex:0 0 38px;background:var(--panel);border-top:1px solid var(--line);display:flex;align-items:center;gap:6px;padding:0 9px;">
+        <div style="display:flex;flex-direction:column;line-height:1.12;margin-right:2px;"><span style="font-size:8px;color:#8a8a96;">下单价</span><span style="font-size:11px;color:var(--up);font-weight:600;">¥1,680</span></div>
+        <span style="flex:1;text-align:center;font-size:13px;font-weight:600;padding:7px 0;border-radius:8px;background:#3a1414;color:#f3736f;border:1px solid #5a1d1d;">买入</span>
+        <span style="flex:1;text-align:center;font-size:13px;font-weight:600;padding:7px 0;border-radius:8px;background:#0d2a1a;color:#46cf86;border:1px solid #1d5a39;">卖出</span>
+        <span style="flex:1;text-align:center;font-size:13px;font-weight:600;padding:7px 0;border-radius:8px;background:#1d1d26;color:#c2c2cc;border:1px solid #34343f;">持有</span>
+      </div>
+      <div style="flex:0 0 20px;display:flex;align-items:center;justify-content:center;"><i style="width:126px;height:5px;border-radius:3px;background:#54545e;"></i></div>
+    </div>
+  </div></div>
+  </div>
+
+  <!-- ============ DEVICE B : 光标偏左 → 信息栏靠右 ============ -->
+  <div>
+  <p class="cap">B · 十字标在「中心或偏左」<span class="t">→ 信息栏停靠右侧</span></p>
+  <div class="device"><div class="screen">
+    <div class="statusbar">
+      <div class="sb-time">9:41</div><div class="island"></div>
+      <div class="sb-right"><div class="signal"><i></i><i></i><i></i><i></i></div><span class="wifi">📶</span><div class="batt"><i></i></div></div>
+    </div>
+    <div class="app">
+      <div class="hd">
+        <div class="hd-top"><span class="bk">‹ 返回</span><span class="nm">训练标的 · 盲测</span><span class="endbtn">结束</span></div>
+        <div class="hd-m">
+          <div class="mc c1"><span class="ml">总资金</span><span class="mv">¥1,284,650</span></div>
+          <div class="mc c2"><span class="ml">持仓成本/股</span><span class="mv">1,652.30</span></div>
+          <div class="mc c3"><span class="ml">持仓股数</span><span class="mv">3,400 股</span></div>
+          <div class="mc c4"><span class="ml">仓位</span><span class="mv">2/5</span></div>
+          <div class="mc c5"><span class="ml">浮动盈亏</span><span class="mv up">+1.89%</span></div>
+        </div>
+      </div>
+
+      <!-- upper panel : 60分 · 十字光标 active (偏左) -->
+      <div class="panel" data-seed="11" data-n="34" data-cx="0.29" data-cy="0.52">
+        <div class="seg main">
+          <div class="leg"><span class="ma">MA66</span> · <span class="bl">BOLL(20,2)</span></div>
+          <div class="ptag">60分</div>
+          <div class="plabels"><span>1720</span><span>1700</span><span>1680</span><span>1660</span><span>1640</span></div>
+          <!-- 悬浮信息栏 (dock 右) -->
+          <div class="cxinfo dockR">
+            <div class="cxrow now"><span class="k">光标价</span><span class="v dn">1,660.50</span></div>
+            <div class="cxrow"><span class="k">日期</span><span class="v yl">03-26</span></div>
+            <div class="cxrow"><span class="k">时间</span><span class="v yl">10:30</span></div>
+            <div class="cxrow sep"><span class="k">开</span><span class="v yl">1664.00</span></div>
+            <div class="cxrow"><span class="k">高</span><span class="v yl">1671.20</span></div>
+            <div class="cxrow"><span class="k">低</span><span class="v yl">1655.80</span></div>
+            <div class="cxrow"><span class="k">收</span><span class="v dn">1658.40</span></div>
+            <div class="cxrow"><span class="k">涨跌</span><span class="v dn">−7.60</span></div>
+            <div class="cxrow"><span class="k">涨跌幅</span><span class="v dn">−0.46%</span></div>
+            <div class="cxrow sep"><span class="k">均价</span><span class="v yl">1661.10</span></div>
+            <div class="cxrow"><span class="k">成交量</span><span class="v yl">9,260 手</span></div>
+            <div class="cxrow"><span class="k">成交额</span><span class="v yl">1.54 亿</span></div>
+          </div>
+        </div>
+        <div class="seg vol"><div class="vlabel">成交量</div></div>
+        <div class="seg macd"><div class="mlabel">MACD <span class="d1">DIF</span> <span class="d2">DEA</span></div>
+          <div class="tlabels"><span>09:30</span><span>10:30</span><span>11:30</span><span>14:00</span><span>15:00</span></div>
+        </div>
+      </div>
+
+      <div class="pdivider"></div>
+
+      <div class="panel active" data-seed="73" data-n="34">
+        <div class="seg main">
+          <div class="leg"><span class="ma">MA66</span> · <span class="bl">BOLL(20,2)</span></div>
+          <div class="ptag">日线 · 下单目标</div>
+          <div class="plabels"><span>1760</span><span>1700</span><span>1640</span><span>1600</span><span>1560</span></div>
+        </div>
+        <div class="seg vol"><div class="vlabel">成交量</div></div>
+        <div class="seg macd"><div class="mlabel">MACD <span class="d1">DIF</span> <span class="d2">DEA</span></div>
+          <div class="tlabels"><span>03/14</span><span>03/28</span><span>04/15</span><span>05/02</span><span>05/20</span></div>
+        </div>
+      </div>
+
+      <div class="tradebar" style="flex:0 0 38px;background:var(--panel);border-top:1px solid var(--line);display:flex;align-items:center;gap:6px;padding:0 9px;">
+        <div style="display:flex;flex-direction:column;line-height:1.12;margin-right:2px;"><span style="font-size:8px;color:#8a8a96;">下单价</span><span style="font-size:11px;color:var(--up);font-weight:600;">¥1,680</span></div>
+        <span style="flex:1;text-align:center;font-size:13px;font-weight:600;padding:7px 0;border-radius:8px;background:#3a1414;color:#f3736f;border:1px solid #5a1d1d;">买入</span>
+        <span style="flex:1;text-align:center;font-size:13px;font-weight:600;padding:7px 0;border-radius:8px;background:#0d2a1a;color:#46cf86;border:1px solid #1d5a39;">卖出</span>
+        <span style="flex:1;text-align:center;font-size:13px;font-weight:600;padding:7px 0;border-radius:8px;background:#1d1d26;color:#c2c2cc;border:1px solid #34343f;">持有</span>
+      </div>
+      <div style="flex:0 0 20px;display:flex;align-items:center;justify-content:center;"><i style="width:126px;height:5px;border-radius:3px;background:#54545e;"></i></div>
+    </div>
+  </div></div>
+  </div>
+
+  <!-- ============ LEGEND ============ -->
+  <div class="legend">
+    <h3>这版要确认的点</h3>
+    <div class="li"><div class="ln on">黏滞</div><div class="lt"><b>长按进入 / 点击退出</b><div class="t">长按主图弹十字光标，整图冻结（不平移/缩放）；松手后<b>保留</b>，点一下屏幕才退出 + 收信息栏。</div></div></div>
+    <div class="li"><div class="ln on">自适应</div><div class="lt"><b>信息栏躲手指</b><div class="t">十字标在中心偏右 → 栏靠左（机 A）；在中心或偏左 → 栏靠右（机 B）。临界点 = 主图水平中线。</div></div></div>
+    <div class="li"><div class="ln on">吸附</div><div class="lt"><b>竖线逐根吸附 · 细实线 · 震动</b><div class="t">竖线落最近 K 线中心；<b>每吸附到新一根 K 线触发一次短震动(haptic)</b>，手感清晰。横线跟手指 Y 自由读价。光标中心 = 手指触摸点（取消右偏，对齐主流），细实线非虚线。左缘价标随光标。</div></div></div>
+    <div class="li"><div class="ln on">双面板</div><div class="lt"><b>点哪图显哪图</b><div class="t">长按上图 = 显示 60分 那根 K 线明细；长按下图 = 显示日线明细（各自独立）。本图演示长按上图(60分)。</div></div></div>
+    <div class="li"><div class="ln on">价位</div><div class="lt"><b>栏顶「光标价」+ 颜色规则</b><div class="t">栏最上一行 = 横线在价轴上的读数（<code>yToPrice</code>，纯纵轴价位，<b>与哪根 K 线无关</b>）。颜色：<b>涨=红 / 跌=绿 / 平=白</b>（光标价·收·涨跌·涨跌幅，基准=前一根收盘）；<b>其余=黄</b>（日期/时间/开/高/低/均价/量/额）。</div></div></div>
+
+    <h3 style="margin-top:16px;">信息栏字段（已确认）</h3>
+    <div class="li"><div class="ln on">有</div><div class="lt"><b>光标价 / 日期 / 时间 / 开高低收 / 涨跌 / 涨跌幅 / 均价 / 成交量 / 成交额</b>
+      <div class="t">日内周期(3/15/60分)显「时:分」；日/周/月只显日期。<code>均价=成交额÷成交量</code>（plan 阶段用「均价∈[低,高]」做单位自检，过才显）。涨跌 = 收 vs 前一根收。</div></div></div>
+    <div class="li"><div class="ln off">无</div><div class="lt"><b>换手率 / MA66值 / 可调字号</b><div class="t">换手率：缺流通股本数据 → 不做（以后有需要再说）。MA66：你选了不放（≠均价，是图上趋势线）。字号：固定可读，<b>不做运行时可调</b>。</div></div></div>
+
+    <h3 style="margin-top:16px;">字号 / 浮层</h3>
+    <p class="t" style="color:var(--mut);font-size:11.5px;margin:0;">字号<b>固定可读</b>（约 10px 标签/13px 光标价），不做运行时可调。栏宽固定、半透明浮于图上、不占固定面积、左右停靠位置固定不跟手。</p>
+
+    <h3 style="margin-top:16px;">参考</h3>
+    <p class="t" style="color:var(--mut);font-size:11.5px;margin:0;">布局参考文华财经手机版十字光标信息框（侧边竖排字段 + 半透明卡片）。同花顺手机版十字线无侧栏只有顶部读数——我们取文华财经的侧栏方案，更贴你要的「左右信息栏」。</p>
+  </div>
+
+</div>
+
+<script>
+(function(){
+  function seeded(s){return function(){s=(s*1103515245+12345)&0x7fffffff;return s/0x7fffffff;};}
+  function ema(arr,span){var k=2/(span+1),out=[],prev=arr[0];for(var i=0;i<arr.length;i++){prev=i?arr[i]*k+prev*(1-k):arr[i];out.push(prev);}return out;}
+  function sma(arr,w){return arr.map(function(_,i){var a=arr.slice(Math.max(0,i-w+1),i+1);return a.reduce(function(x,y){return x+y;},0)/a.length;});}
+  function std(arr,w,m){return arr.map(function(_,i){var a=arr.slice(Math.max(0,i-w+1),i+1);var mu=m[i];var v=a.reduce(function(x,y){return x+(y-mu)*(y-mu);},0)/a.length;return Math.sqrt(v);});}
+  function poly(vals,col,wd,dash){var pts=vals.map(function(v,i){return (i+0.5).toFixed(2)+','+((1-v)*100).toFixed(2);}).join(' ');
+    return '<polyline points="'+pts+'" fill="none" stroke="'+col+'" stroke-width="'+wd+'" vector-effect="non-scaling-stroke" stroke-linejoin="round" '+(dash?'stroke-dasharray="'+dash+'" ':'')+'/>';}
+
+  document.querySelectorAll('.panel').forEach(function(p){
+    var n=+p.getAttribute('data-n'),rnd=seeded(+p.getAttribute('data-seed')),price=0.5,s=[];
+    for(var i=0;i<n;i++){var open=price,close=Math.max(0.12,Math.min(0.88,open+(rnd()-0.48)*0.14));
+      var hi=Math.min(0.95,Math.max(open,close)+rnd()*0.05),lo=Math.max(0.05,Math.min(open,close)-rnd()*0.05);
+      price=close;s.push({o:open,c:close,h:hi,l:lo,v:0.35+rnd()*0.6,up:close>=open});}
+    var close=s.map(function(d){return d.c;});
+    var cand='';for(i=0;i<n;i++){var d=s[i],col=d.up?'var(--up)':'var(--dn)',x=(i+0.5).toFixed(2);
+      cand+='<line x1="'+x+'" y1="'+((1-d.h)*100).toFixed(2)+'" x2="'+x+'" y2="'+((1-d.l)*100).toFixed(2)+'" stroke="'+col+'" stroke-width="1" vector-effect="non-scaling-stroke"/>';
+      var bt=Math.max(d.o,d.c),bb=Math.min(d.o,d.c);
+      cand+='<rect x="'+(i+0.14).toFixed(2)+'" y="'+((1-bt)*100).toFixed(2)+'" width="0.72" height="'+Math.max(0.6,(bt-bb)*100).toFixed(2)+'" fill="'+col+'"/>';}
+    var ma=ema(close,10);
+    var mid=sma(close,12),sd=std(close,12,mid);
+    var up=mid.map(function(m,i){return Math.min(0.99,m+1.8*sd[i]);}),lo=mid.map(function(m,i){return Math.max(0.01,m-1.8*sd[i]);});
+    var mainSvg='<svg viewBox="0 0 '+n+' 100" preserveAspectRatio="none">'+cand
+      +poly(up,'var(--boll)',1.4,'2 1.4')+poly(mid,'var(--boll)',1.6)+poly(lo,'var(--boll)',1.4,'2 1.4')
+      +poly(ma,'var(--ma)',2.2)+'</svg>';
+    p.querySelector('.seg.main').insertAdjacentHTML('afterbegin',mainSvg);
+    var vmax=Math.max.apply(null,s.map(function(d){return d.v;})),vbar='';
+    for(i=0;i<n;i++){var d=s[i],h=(d.v/vmax)*88,col=d.up?'var(--up)':'var(--dn)';
+      vbar+='<rect x="'+(i+0.14).toFixed(2)+'" y="'+(100-h).toFixed(2)+'" width="0.72" height="'+h.toFixed(2)+'" fill="'+col+'" opacity="0.85"/>';}
+    p.querySelector('.seg.vol').insertAdjacentHTML('afterbegin','<svg viewBox="0 0 '+n+' 100" preserveAspectRatio="none">'+vbar+'</svg>');
+    var ef=ema(close,6),es=ema(close,13),dif=ef.map(function(v,i){return v-es[i];}),dea=ema(dif,5);
+    var bar=dif.map(function(v,i){return 2*(v-dea[i]);});
+    var amax=Math.max.apply(null,bar.map(Math.abs).concat(dif.map(Math.abs)).concat(dea.map(Math.abs)))||0.01;
+    function my(v){return (50-(v/amax)*44).toFixed(2);}
+    var mb='<line x1="0" y1="50" x2="'+n+'" y2="50" stroke="#3a3a46" stroke-width="0.6" vector-effect="non-scaling-stroke"/>';
+    for(i=0;i<n;i++){var v=bar[i],y0=50,y1=50-(v/amax)*44,col=v>=0?'var(--up)':'var(--dn)';
+      mb+='<rect x="'+(i+0.22).toFixed(2)+'" y="'+Math.min(y0,y1).toFixed(2)+'" width="0.56" height="'+Math.max(0.5,Math.abs(y1-y0)).toFixed(2)+'" fill="'+col+'" opacity="0.9"/>';}
+    function mpoly(vals,col){var pts=vals.map(function(v,i){return (i+0.5).toFixed(2)+','+my(v);}).join(' ');
+      return '<polyline points="'+pts+'" fill="none" stroke="'+col+'" stroke-width="1.8" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>';}
+    p.querySelector('.seg.macd').insertAdjacentHTML('afterbegin','<svg viewBox="0 0 '+n+' 100" preserveAspectRatio="none">'+mb+mpoly(dif,'var(--dif)')+mpoly(dea,'var(--dea)')+'</svg>');
+
+    // ===== crosshair overlay (only panels carrying data-cx) =====
+    var cxr=p.getAttribute('data-cx');
+    if(cxr!==null){
+      var cx=+cxr, cy=+p.getAttribute('data-cy');
+      var main=p.querySelector('.seg.main');
+      // snap vertical line to nearest candle center; 光标中心 = 手指触摸点(无偏移)
+      var snapI=Math.round(cx*n-0.5); snapI=Math.max(0,Math.min(n-1,snapI));
+      var snapX=((snapI+0.5)/n)*100;            // percent within main width
+      // 竖线贯穿整 panel；横线只在主图；细实线
+      p.insertAdjacentHTML('beforeend','<div class="cx-v" style="left:'+snapX+'%"></div>');
+      main.insertAdjacentHTML('beforeend','<div class="cx-h" style="top:'+(cy*100)+'%"></div>');
+      main.insertAdjacentHTML('beforeend','<div class="cx-dot" style="left:'+snapX+'%;top:'+(cy*100)+'%"></div>');
+      // left-edge price tag at horizontal line; bottom time tag at vertical line
+      var priceTxt = (cx>0.5)? '1683.5' : '1658.4';
+      main.insertAdjacentHTML('beforeend','<div class="cx-ptag" style="top:'+(cy*100)+'%">'+priceTxt+'</div>');
+      var timeTxt = (cx>0.5)? '03-28 14:00' : '03-26 10:30';
+      p.querySelector('.seg.macd').insertAdjacentHTML('beforeend','<div class="cx-ttag" style="left:'+snapX+'%">'+timeTxt+'</div>');
+    }
+  });
+})();
+</script>
+</body></html>
