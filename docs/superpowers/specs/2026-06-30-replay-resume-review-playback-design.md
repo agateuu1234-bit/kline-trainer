@@ -1,0 +1,269 @@
+# 新需求 10 · Replay 续局 + 复盘可步进重演 — 设计 spec
+
+> 日期：2026-06-30　分支：`worktree-feat+replay-resume-review-playback`（基线 origin/main `16d57d8`）
+> 主题：**从历史记录重新体验** —— 两个相关改动合一个 PR。
+> 关联：[[project_trade_ui_backlog_2026_06_21]] §新需求10、RFC-A（PR #132 资金/仓位）、Wave 3（ReplayFlow/ReviewFlow 冻结语义）。
+
+---
+
+## 0. 目标 / 非目标
+
+### 目标
+1. **Replay 续局**：replay（历史记录→"再次训练"）从"设计上非持久"改为"中途状态可保存、可续局"。中途返回不再丢进度，再次进入可**回到原 tick/状态接着练**。
+2. **历史弹窗按钮文案切换**：replay 那颗按钮在 **「再次训练」**（无暂存档=从头开始）↔ **「返回训练」**（有暂存档=回原 tick 续练）之间按记录切换。
+3. **复盘可步进重演**：复盘（"复盘"按钮）从"冻结在最后一根 K 线"改为"进入即停在训练起点、可逐根向前步进重演（只看不交易）"，K 线 + 当时买卖标记随步进渐显；并提供 **「快进到结尾」** 一键展开整局（＝原冻结全貌画面）。
+4. **历史弹窗精简**：去掉「取消」按钮（点弹窗外遮罩即取消），弹窗更小。
+
+### 非目标（明确不做，YAGNI）
+- 不改 replay 的资金语义：replay 仍 **不累积资金**（`shouldAccumulateCapital=false`）、完成时 **不写 `training_records`**、结算仍是临时（`shouldShowSettlement=true` 但 ephemeral）。续局只让**中途状态**可保存/恢复。
+- 不支持"每条记录各自独立暂存"。**单个 replay 暂存槽**（user 决策：同时只 1 局暂停的 replay；对另一记录开新 replay 覆盖旧档）。replay 暂存与 normal 暂存（`pending_training`）相互独立（可各 1 局暂停）。
+- 复盘**不持久化进度**：复盘只读重演，离开即丢、下次重新从起点进入（续局需求只针对 replay 交易练习，不针对复盘观看）。
+- 复盘**不重演盈亏过程**：复盘步进只控制"图表/标记的揭示进度"，顶栏盈亏始终显示该记录的**最终成绩**（详见 §B.4 D-B3）。不在复盘中按 tick 逐步重算 cash/position（避免极高复杂度）。
+- 不支持"已有暂存档时从头重练"的独立入口（user 决策：单按钮切换文案；要重练把当前这局练到末尾即自动清档）。
+
+---
+
+## 1. 现状（事实，来自源码勘探）
+
+### 1.1 Flow 能力矩阵（`TrainingFlowController.swift`）
+协议方法：`mode / feeSnapshot / initialTick / allowedTickRange / canBuySell() / canAdvance() / shouldSaveRecord() / shouldAccumulateCapital() / shouldShowSettlement() / shouldGiveHapticFeedback()`。
+
+| 能力 | NormalFlow | ReviewFlow | ReplayFlow |
+|---|---|---|---|
+| `initialTick` | `0`（coordinator 实际传入 metadata 派生 startTick，RFC-F） | `record.finalTick` | `0`（coordinator 传 metadata 派生 startTick） |
+| `allowedTickRange` | `0...maxTick` | `finalTick...finalTick`（单点冻结） | `0...maxTick` |
+| `canBuySell` | ✓ | ✗ | ✓ |
+| `canAdvance` | ✓ | **✗** | ✓ |
+| `shouldSaveRecord` | ✓ | ✗ | ✗ |
+| `shouldAccumulateCapital` | ✓ | ✗ | ✗ |
+| `shouldShowSettlement` | ✓ | ✗ | ✓ |
+| `shouldGiveHapticFeedback` | ✓ | ✗ | ✓ |
+
+### 1.2 Normal 暂存/恢复（已有，可镜像）
+- 表 `pending_training`（单行 `CHECK(id=1)`，`app_schema_v1.sql`）：`training_set_filename / global_tick_index / upper_period / lower_period / position_data(base64 JSON) / fee_snapshot(JSON) / trade_operations(JSON) / drawings(JSON) / started_at / accumulated_capital / cash_balance / drawdown(JSON) / session_key`。
+- 模型 `PendingTraining`（`AppState.swift`）。
+- 仓储 `PendingTrainingRepository`（`savePending/loadPending/clearPending`）+ `PendingTrainingRepositoryImpl`（`INSERT OR REPLACE` id=1）。
+- `TrainingSessionCoordinator.saveProgress()`：**前置=必须 Normal 模式**（review/replay no-op）；构造 `PendingTraining` 写库。
+- `resumePending()`：载入 → 定位文件 → 重建引擎（`initialTick=pending.globalTickIndex` + 全部状态）。
+- `AppRouter.continueTraining()` → `resumePending()`。
+- 自动保存：lifecycle `autosave(immediate:)` / `flushForBackground()` → coalesced → `saveProgress()`；`back()` = `saveProgress()` + `endSession()`；`discardSession()` 清 pending + endSession；fencing/`terminating` 防竞态。
+
+### 1.3 Replay / Review 装配（`TrainingSessionCoordinator`）
+- `replay(recordId:)`：load 记录 bundle → open reader → load candles+metadata → `.replay(fees: record.feeSnapshot, maxTick:)` → `initialTick=startTick`（metadata 派生）`initialCapital=record.totalCapital` `initialCashBalance=record.totalCapital`（无持仓、不恢复 markers/drawings）→ `activeRecord=record` / `activeStartedAt=nil` / `activeSessionKey=nil`。
+- `review(recordId:)`：load bundle → open reader → load candles → `.review(record:)` → `initialCashBalance=record.totalCapital + record.profit`（末态全现金）+ `initialMarkers=markers(from: ops)` + `initialDrawings` → `activeRecord=record` / `activeStartedAt=nil` / `activeSessionKey=nil`。
+- startTick 派生：`TrainingEngine.startTick(forStartDatetime:in:)`（normal/replay 共用；review 当前未用）。
+
+### 1.4 引擎步进与 reveal（`TrainingEngine` / `TickEngine` / `RenderStateBuilder`）
+- 步进唯一入口 `advanceAndAccount(panel:)`：`tick.advance(steps: stepsForPeriod(...))` + 面板 `.tradeTriggered` reduce + `resetOffsetAfterAutoTracking` + `drawdown.update` + `forceCloseIfEnded`。被 `buy/sell` 调用；`holdOrObserve(panel:)` 也调它但 `guard flow.canAdvance() else { return }`。
+- `TickEngine.advance(steps:)`（钳 maxTick）；`TickEngine.reset(to:)` **存在但从未被调用**（可用于 jump-to-end）。
+- 引擎构造前置：`flow.allowedTickRange.contains(resolvedInitialTick)`、`flow.allowedTickRange.upperBound == maxTick`。
+- **K 线渐显自动**：`RenderStateBuilder` `currentIdx = currentCandleIndex(candles, tick)`；`sliceEnd = min(startIndex+visibleCount, currentIdx+1)`；可见切片 `candles[startIndex..<sliceEnd]` 恒 ≤ currentIdx（看不到未来）。
+- **标记渐显自动**：`drawMarkers` 收到的 `candles` = 可见切片；`MarkersLayout.markerPlacements` 用 `findCandleIndex(for: marker, in: 切片)`，超出切片（即超出 currentIdx）的标记 `continue` 跳过 → **不绘制**。故标记随 currentIdx 自动渐显，无需新增 tick 过滤。
+- 初始视口自动：面板初始 `offset=0`（autoTracking）→ 显示"已揭示前缀的最右 `defaultVisibleCount=80` 根"；tick=startTick 时即显示起点附近（含 RFC-F 的 before-candles），无需改视口逻辑。
+
+### 1.5 历史弹窗 / 路由
+- `HistoryActionSheet`（`UI/HistoryActionSheet.swift`）：ZStack（遮罩 `.onTapGesture { onCancel() }` + 居中卡片）；卡片内 标题 + 「复盘」(onReview) + 「再来一次」(onReplay) + 「取消」(onCancel)；`.frame(maxWidth: 280)`。
+- `AppRouter`：`selectRecord(id:)` → `activeModal=.history(record)`；`review(id:)`→`coordinator.review`；`replay(id:)`→`coordinator.replay`；`resetAllProgressAndReload()`→`settings.resetAllProgress()`(清 pending+资金回 10万) + `loadHome()`。
+
+### 1.6 契约
+- `CONTRACT_VERSION = "1.7"`（`Models.swift`）。最新 migration 0005（`user_version=3`）。迁移在 `AppDBMigrations.makeMigrator()`，`DefaultAppDB.init()` 注册。
+
+---
+
+## A. Replay 续局
+
+### A.1 数据模型（新增持久格式）
+新表 **`pending_replay`**（单行 `CHECK(id=1)`），列＝`pending_training` 全套 **＋ `record_id INTEGER NOT NULL`**（来源历史记录 id）：
+
+```sql
+CREATE TABLE IF NOT EXISTS pending_replay (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    record_id INTEGER NOT NULL,
+    training_set_filename TEXT NOT NULL,
+    global_tick_index INTEGER NOT NULL,
+    upper_period TEXT NOT NULL,
+    lower_period TEXT NOT NULL,
+    position_data TEXT NOT NULL,
+    fee_snapshot TEXT NOT NULL,
+    trade_operations TEXT NOT NULL,
+    drawings TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    accumulated_capital REAL NOT NULL,
+    cash_balance REAL NOT NULL,
+    drawdown TEXT NOT NULL
+);
+```
+- 无 `session_key`（replay 不写 `training_records`、无 finalize 幂等需求）。
+- 无外键：历史记录无"单条删除"路径；唯一清理来源＝重置（§A.7）＋恢复时校验记录仍存在（§A.6）。`accumulated_capital` 对 replay = 该局起始资金（`engine.initialCapital = record.totalCapital`），与 normal 字段含义对齐（不参与跨局复利）。
+
+### A.2 模型 + 仓储
+- `PendingReplay`（`AppState.swift`）：镜像 `PendingTraining` 全字段 **＋ `recordId: Int64`**。`Codable/Equatable/Sendable`。
+- `PendingReplayRepository`（协议）：`saveReplay(_:) / loadReplay() -> PendingReplay? / clearReplay()`。
+- `PendingReplayRepositoryImpl`：镜像 `PendingTrainingRepositoryImpl`（`INSERT OR REPLACE` id=1；base64 position；JSON 复杂字段；解码遗留 fee 容错沿用 WB-1 sanitize 模式）。
+- 测试替身 `InMemoryPendingReplayRepository`（镜像现有 `InMemoryPendingTrainingRepository`）。
+
+### A.3 Flow 能力新增
+`TrainingFlowController` 新增 **`shouldPersistProgress() -> Bool`**：
+- Normal = **true**、Replay = **true**、Review = **false**。
+- 取代 `saveProgress()` 里"仅 Normal"的硬判断。各 flow 显式实现（不用协议默认，沿用 [[project_pr63_e4_merged]] D2"矩阵权威、每 struct 显式"教训）。
+
+### A.4 Coordinator 改动
+1. **`saveProgress()` 按 flow/mode 分流**（取代"仅 Normal no-op"）：
+   - 前置：`engine.flow.shouldPersistProgress()` 为假 → no-op（review）。
+   - `mode == .normal` → 构造 `PendingTraining` 写 `pending_training`（**原逻辑一字不改**）。
+   - `mode == .replay` → 构造 `PendingReplay`（`recordId` 取 `activeRecord` 的持久 id——记录由 `loadRecordBundle` 载入、id 非 nil；防御性 `guard let id = activeRecord?.id else { return }` 不崩；其余字段同 normal 映射：`cash_balance = max(0, engine.cashBalance)`、`accumulated_capital = engine.initialCapital`、`global_tick_index = engine.tick.globalTickIndex` 等）写 `pending_replay`。
+   - replay 路由不依赖 `activeSessionKey`（replay 无 sessionKey）；依赖 `activeRecord?.id` 与 `activeStartedAt`（见下）。
+2. **`replay(recordId:)`（从头）补充**：
+   - 装配前 **`pendingReplayRepo.clearReplay()`**（单槽覆盖语义：开新 replay 即丢旧暂停档）。
+   - 设 `activeStartedAt = now()`（replay 会话起始，供 `PendingReplay.started_at`）；`activeRecord = record`（已设）。`activeSessionKey` 保持 nil。
+   - 其余装配不变（fresh：无 initialMarkers/position）。
+3. **新增 `resumePendingReplay(recordId:) async throws -> TrainingEngine?`**（镜像 `resumePending`）：
+   - `loadReplay()`；若 nil 或 `pending.recordId != recordId` → 返回 nil（调用方回退到从头 replay）。
+   - 载 `recordRepo.loadRecordBundle(id: pending.recordId)`（取 fees/股票名等 + 设 `activeRecord`）；若记录不存在 → `clearReplay()` + 返回 nil。
+   - 定位 `pending.trainingSetFilename`，open reader；corrupt → `clearReplay()` + 返回 nil（镜像 normal resume 的 corrupt 处理）。
+   - load candles → `.replay(fees: pending.feeSnapshot, maxTick:)` 重建，注入 saved 状态：`initialTick=pending.globalTickIndex` / `initialCapital=pending.accumulatedCapital` / `initialCashBalance=pending.cashBalance` / `initialPosition=decode(pending.positionData)` / `initialMarkers=markers(from: pending.tradeOperations)` / `initialDrawings=pending.drawings` / `initialTradeOperations=pending.tradeOperations` / `initialDrawdown=pending.drawdown` / `initialUpper/LowerPeriod`。
+   - 恢复会话上下文：`activeStartedAt = pending.startedAt`、`activeRecord = record`、`activeSessionKey = nil`。
+4. **清档时机（关键——区分"续局保留" vs "终局清除"）**：
+   - **`endSession()` 对 replay 不清 `pending_replay`**。理由：`back()` = `saveProgress`(写 pending_replay) + `endSession()`；若 endSession 清档则续局立即失效。endSession 仅关 reader/清活跃上下文（原语义）。
+   - **终局清档**：replay 走到结算（到 maxTick 自动结算 **或** 手动「结束本局」）→ 在 **`replaySettlementPayload()`**（replay 终局唯一 payload 计算点，**不写记录**）内 `clearReplay()` → 该局已结束，按钮恢复"再次训练"。`clearReplay` 幂等（DELETE）。
+   - **丢弃清档**：`discardSession()` 当 `mode==.replay` 清 `pending_replay`（normal 时清 `pending_training`，原逻辑）。
+   - 故 pending_replay 生命周期：`replay()`(从头, 先 clear 旧档) → 玩 → `back()`(saveProgress 写档, endSession **不清**) → 续局 `resumePendingReplay` → … → 终局结算 **或** discard 时 clear。
+5. **新增查询 `hasResumableReplay(recordId:) -> Bool`**：`loadReplay()?.recordId == recordId`。按钮文案与路由**同源**（见 §A.5 D-A2）。
+
+### A.5 路由 + UI
+- **`AppRouter.replay(id:)` 分流**：`coordinator.hasResumableReplay(id)` 为真 → `resumePendingReplay(id)`（若意外返 nil 则回退从头 `replay(id)`）；否则 `replay(id)`（从头）。
+- **历史弹窗呈现**：`selectRecord`/AppRootView 呈现 `HistoryActionSheet` 时，把 `coordinator.hasResumableReplay(record.id)` 算出的 `Bool` 传入 sheet（**呈现瞬间求值一次**，与路由同源，见 D-A2）。
+- **`HistoryActionSheet` 改动**：
+  - 去掉「取消」按钮（遮罩 `.onTapGesture { onCancel() }` 仍在，`onCancel` 回调保留）。
+  - replay 钮文案：新增参数 `hasResumableReplay: Bool` → 文案 `hasResumableReplay ? "返回训练" : "再次训练"`（替换原 "再来一次"）。「复盘」不变。
+  - 卡片更小（去掉一颗按钮 + 末尾 `Spacer`，`maxWidth` 视觉收紧；具体值 plan 定）。
+
+### A.6 错误处理（镜像 normal resume）
+- 训练集文件缺失/损坏、记录已不存在、`pending.recordId` 不匹配 → `clearReplay()` + 回退为从头 replay（或不显示"返回训练"）。
+- decode position/drawings 失败 → 沿用 normal resume 的容错（清档回退）。
+- 自动保存 fencing / `terminating` 机制对 replay 复用（同一 coordinator 状态机）。
+
+### A.7 重置
+`settings.resetAllProgress()` / `DefaultAppDB.resetAllTrainingProgress`（RFC-A 后保留记录）连带 **清 `pending_replay`**（与清 `pending_training` 并列）。重置后所有记录按钮恢复"再次训练"。
+
+### A.8 契约 / 迁移
+- 新 migration **0006**：`CREATE TABLE pending_replay ...`；`user_version` 3→4。
+- **`CONTRACT_VERSION` 1.7→1.8**（沿用"每 migration 必 bump"先例 0004→1.6 / 0005→1.7）。additive（新表，旧读者忽略）；连带 CODEOWNERS approve 门（trust-boundary：`*.swift`/`*.sql`/migrations）。
+
+---
+
+## B. 复盘可步进重演（含快进到结尾）
+
+### B.1 ReviewFlow 改动
+- 新增构造参数 `startTick: Int`（coordinator 从 metadata 派生传入）。
+- `initialTick = startTick`（原 `finalTick`）。
+- `allowedTickRange = startTick...record.finalTick`（原单点 `finalTick...finalTick`）。
+- `canAdvance() = true`（原 false）—— 解锁 `holdOrObserve` 步进。
+- `canBuySell() = false`（不变，只看不交易）。
+- 新增能力 **`canJumpToEnd() -> Bool`**：Review=true、Normal=false、Replay=false。
+- `shouldShowSettlement=false` / `shouldAccumulateCapital=false` / `shouldSaveRecord=false` / `shouldPersistProgress=false` 均不变。
+- `shouldGiveHapticFeedback`：保持 false（复盘步进不震动；如需可后续微调，本次不做）。
+
+### B.2 startTick 派生（无 schema 改动）+ FlowInput 触点
+`coordinator.review(recordId:)` 增：load metadata（reader 已开），`startTick = TrainingEngine.startTick(forStartDatetime: meta.startDatetime, in: ...)`（与 replay 同一调用）；经 FlowInput 传入。**`TrainingRecord` 不加字段**（startTick 从训练集 metadata 确定性派生，记录引用同一 `trainingSetFilename` → 同 metadata → 同 startTick）。
+- **FlowInput 触点**（已勘实）：`TrainingEngine.FlowInput.review(record:)` → **`.review(record:, startTick:)`**；`make` 内 `case .review:` 改 `maxTick = record.finalTick`（不变）+ `flow = ReviewFlow(record: record, startTick: startTick)`。同步：preview fixture（`make` DEBUG 分支 `case .review`）补 startTick（preview 取 0 或派生值）。
+- 引擎前置仍满足（已勘实 L96/L106）：`allowedTickRange.contains(startTick)`（startTick∈start...final）；`upperBound==maxTick`（`.review` maxTick=record.finalTick 不变 = range 上界 finalTick）；`m3.last.endGlobalIndex >= maxTick` 用 `>=`（review m3 为训练组全集，末根可 > finalTick，安全）。
+
+### B.3 引擎步进 / jump-to-end
+- **步进**：复用现成 `holdOrObserve(panel:)`（`canAdvance()=true` 即生效）；review 无持仓 → `forceCloseIfEnded` no-op；`advanceAndAccount` 的面板 `.tradeTriggered` reduce 把镜头吸附到揭示前缘（与训练一致）。**不新增 advance API**。
+- **jump-to-end**：新增 `TrainingEngine.jumpToEnd()`：`guard flow.canJumpToEnd() else { return }`；`tick.reset(to: tick.maxTick)`；两面板吸附 autoTracking（镜像 `advanceAndAccount` 的 `resetOffsetAfterAutoTracking`/`.tradeTriggered`）；`drawdown.update`。无 `forceClose`（无持仓）。到末尾后 K 线+标记全揭示＝原冻结全貌。
+
+### B.4 顶栏盈亏显示决策（D-B3）
+保持 `review()` 现有资金装配不变：`initialCapital=record.totalCapital`、`initialCashBalance=record.totalCapital+record.profit`、无持仓。则步进/快进全程 `currentTotalCapital=cashBalance`（持仓 0、currentPrice 变化不影响）＝该记录**最终成绩**恒定；`returnRate=(末-起)/起=record 的 return`。即复盘顶栏始终显示该局**最终盈亏**，步进只控制图表/标记揭示。
+- 理由：复盘=回看一局**已完成**记录的成绩与走势；不在复盘中按 tick 重算 cash/position（需逐根重放已记录交易，复杂度极高、易错），是明确取舍（非目标）。
+
+### B.5 UI（训练界面控件门控）— 已勘实
+**事实**：`TrainingView.showsTradeButtons = engine.flow.canBuySell()` 门控**整条 `TradeActionBar`**（买/卖/观察捆在一起）。复盘 `canBuySell=false` → 整条不显示 → **当前复盘无任何步进控件**。故复盘步进**不能靠"翻 canAdvance 复用现条"**，须**新增 review 专用控件条**。
+- 新增谓词 `showsReviewControls = engine.flow.canAdvance() && !engine.flow.canBuySell()`（＝复盘可步进态），渲染一个**精简控件条**（不含买/卖）：
+  - 「下一根」→ `engine.holdOrObserve(panel: activePanel)`（复用现成步进；`canAdvance=true` 生效；activePanel 沿用现有选择，步长 = `stepsForPeriod(活动周期)`，与训练一致）。
+  - 「快进到结尾」→ `engine.jumpToEnd()`；**仅 `engine.flow.canJumpToEnd()` 为真时显示**。
+  - 位置/样式 plan 定（建议占 TradeActionBar 同一槽位，复盘时以该条替之）。
+- 买/卖控件：复盘恒隐藏（`canBuySell=false` 不变）。
+- K 线 + 标记渐显：自动（§1.4），无改动。
+- 既有 `onChange(of: tick) { tradeStrip=nil; lifecycle.autosave(immediate:false); maybeAutoEnd() }` 对复盘步进的影响：`autosave` → `saveProgress` 因 `shouldPersistProgress()==false` 早返 no-op（无害）；`maybeAutoEnd` 见 §B.6 安全。
+
+### B.6 边界（含 maxTick 自动结算安全性）— 已勘实
+- **复盘步进/快进到 maxTick 不会误触自动结算/退出**：`lifecycle.shouldAutoFinalize = isAtEnd && flow.shouldShowSettlement() && !didFinalize`，按 **`shouldShowSettlement()`（Review=false）** 抑制（**非** `canAdvance()`）。故把 `canAdvance` 翻 true 后，复盘到末尾仍 `shouldShowSettlement=false → shouldAutoFinalize=false`，只显整局全貌、不退出。**前置约束：本 spec 保持 ReviewFlow `shouldShowSettlement=false` 不变**（若改动则破坏此抑制）。
+- `back()` 复盘 = `saveProgress`(no-op, shouldPersistProgress=false) + `endSession` → 复盘不持久（D-B4）。
+- 周期组合：记录无周期字段，复盘沿用现 review 的引擎默认周期组合（不改）。
+- `startTick == finalTick`（极短局）：range 退化单点，「下一根」无可推进、`jumpToEnd` no-op，等价旧冻结行为，安全。
+- 步进到 maxTick 后再「下一根」：`tick.advance` 返 false（已钳 maxTick），无副作用。
+
+---
+
+## 2. 决策汇总
+
+| # | 决策 | 选择 | 理由 |
+|---|---|---|---|
+| D-A1 | replay 暂存范围 | **单个暂存档**（单行 `pending_replay`） | user 拍板；与 normal 单行模型一致、最简、风险最低；按钮文案仍按记录正确显示 |
+| D-A2 | 按钮文案 vs 路由一致性 | 二者**同源** `hasResumableReplay(recordId:)`，弹窗呈现瞬间求值一次 | 防"显示返回训练但路由走从头"漂移；竞态（呈现后被重置）→ 路由侧 `resumePendingReplay` 返 nil 时**回退从头**兜底 |
+| D-A3 | replay 与 normal 暂存关系 | **独立两槽**（`pending_training` + `pending_replay` 各单行） | 可同时各暂停 1 局；开 replay 不动 normal 复利进度（RFC-A） |
+| D-A4 | 单槽覆盖时机 | 在 `replay()`（从头）装配前 `clearReplay()` | 开新 replay 即覆盖旧档；不在 UI 层做确认弹窗（练习数据、低风险，YAGNI） |
+| D-A5 | CONTRACT_VERSION | 1.7→1.8 + migration 0006 | 沿用每 migration 必 bump 先例；additive 新表 |
+| D-A6 | 去「取消」按钮 | 去掉，遮罩点击取消，保留 `onCancel` | user 拍板；弹窗更小 |
+| D-B1 | 复盘起点 | metadata 派生 startTick，**不加 record 字段** | 确定性派生、零 schema 改动；与 normal/replay 同源 |
+| D-B2 | 复盘是否双模式 | **单一可步进模式 + 快进到结尾** | user 拍板（统一方案）；一个模式覆盖"重走过程"+"看整体"，diff 更小、利于 codex 收敛 |
+| D-B3 | 复盘盈亏显示 | 全程显示记录**最终成绩**，步进只控揭示 | 避免逐 tick 重放交易的高复杂度；复盘=回看已完成成绩 |
+| D-B4 | 复盘是否持久化进度 | **否** | 续局需求只针对 replay；复盘每次从起点重进，简单 |
+| D-B5 | jump-to-end 实现 | 复用现成未调用的 `TickEngine.reset(to:)` + 新 `canJumpToEnd()` 门控 | 最小新增；语义清晰可测 |
+
+---
+
+## 3. 受影响文件（预估，plan 阶段精化）
+
+**新增**
+- `ios/Contracts/Sources/KlineTrainerPersistence/Internal/PendingReplayRepositoryImpl.swift`
+- `pending_replay` 表（`ios/sql/app_schema_v1.sql` 新建库路径）+ migration 0006（`AppDBMigrations.swift`）
+- `PendingReplayRepository` 协议 + `InMemoryPendingReplayRepository`（测试替身位置同现有 normal 替身）
+- 测试：flow 矩阵、coordinator replay save/resume/clear、review playback、jumpToEnd、按钮文案、reset 清档、sheet 去取消、迁移。
+
+**修改**
+- `TrainingEngine/TrainingFlowController.swift`（+`shouldPersistProgress` +`canJumpToEnd`；ReviewFlow `init(record:, startTick:)`/范围 `start...final`/`canAdvance=true`；Normal/Replay 显式实现新方法）
+- `TrainingEngine/TrainingSessionCoordinator.swift`（saveProgress 分流、replay clear+session、resumePendingReplay、review 派生 startTick、完成/discard 清档、hasResumableReplay）
+- `TrainingEngine/TrainingEngine.swift`（+`jumpToEnd()`；`FlowInput.review(record:, startTick:)` + `make` 的 `.review` 分支 + preview fixture 分支）
+- `Models/AppState.swift`（+`PendingReplay`）
+- `Models/Models.swift`（CONTRACT_VERSION 1.7→1.8）
+- `App/AppRouter.swift`（replay 分流；history sheet 传 `hasResumableReplay` bool；reset 清 replay）
+- `UI/HistoryActionSheet.swift`（去「取消」按钮、`hasResumableReplay` 文案切换参数、缩小）
+- `UI/TrainingView.swift`（+`showsReviewControls = canAdvance && !canBuySell`；复盘控件条「下一根」+「快进到结尾」；review autosave/maybeAutoEnd 已证安全）+ 可能新增 `UI/ReviewControlBar.swift`（精简控件条，平台无关纯内容 + 薄壳，plan 定是否拆文件）
+- composition root（注入 `PendingReplayRepository`：`DefaultAppDB`/`AppContainer` 装配）+ `settings.resetAllProgress`/`DefaultAppDB.resetAllTrainingProgress`（清 pending_replay）+ AppRootView 历史弹窗呈现处（传 `hasResumableReplay`、去 `onCancel` 按钮无关——遮罩仍用）
+
+---
+
+## 4. 测试计划
+
+**host `swift test`（两框架 0 失败）**
+- Flow 矩阵：`shouldPersistProgress`（N=✓/R=✓/Rev=✗）、`canJumpToEnd`（Rev=✓/N=✗/R=✗）、ReviewFlow `initialTick==startTick` / `allowedTickRange==start...final` / `canAdvance==true`。
+- Coordinator（in-memory fakes）：
+  - replay 从头 → `saveProgress` 写 `pending_replay`（recordId 正确）；`hasResumableReplay` 真。
+  - `resumePendingReplay` 还原 tick/cash/position/markers/drawings/drawdown；recordId 不匹配 → nil；记录缺失 → 清档 nil；corrupt → 清档 nil。
+  - 开新 replay（任意记录）→ 旧 `pending_replay` 被清（单槽）。
+  - replay 完成 → 清档；`discardSession`(replay) → 清档。
+  - `saveProgress` 在 review 模式 = no-op；normal 路径回归不变（写 `pending_training`）。
+  - reset → `pending_replay` 同 `pending_training` 一起清空。
+- 引擎：`jumpToEnd` 设 tick=maxTick + 镜头吸附 + 非 review/canJumpToEnd=false 时 no-op；review 步进经 `holdOrObserve` 推进且不交易；review 顶栏 `currentTotalCapital==record.totalCapital+profit` 恒定。
+- 渲染（host 纯函数）：currentIdx=startTick 时切片末根≤currentIdx；超 currentIdx 的 marker 不入 placement（回归确认自动渐显）。
+- UI 纯内容：`HistoryActionSheet` 文案随 `hasResumableReplay` 切换；无「取消」按钮但遮罩 `onCancel` 仍触发。
+- 迁移：0006 后 `user_version==4`；`pending_replay` 表存在；旧库升级幂等。
+
+**Catalyst**：`KlineTrainerContracts` 包 scheme `build-for-testing` SUCCEEDED（UIKit-gated 代码编译闸门，含训练界面 UI 改动）。CI-gate `grep -E "(error|warning):"` count 0。
+
+**iOS Simulator**：app `BUILD SUCCEEDED`。
+
+**模拟器/真机人工验收**（acceptance 清单，Chinese，action/expected/pass-fail）：见 `docs/superpowers/acceptance/2026-06-30-replay-resume-review-playback.md`（plan/实现阶段产出）。
+
+---
+
+## 5. 治理 / 风险
+
+- **触碰 Wave-1 冻结契约 `TrainingFlowController`**（加方法 + 改 ReviewFlow）→ codex 重点审；各 flow 显式实现新方法、不破坏既有调用点。
+- **CONTRACT_VERSION bump + 新 migration** → CODEOWNERS approve 门；migration 幂等 + 旧库升级路径测。
+- **`saveProgress` 分流**：normal 分支字节级不变（回归测护住）；replay 分支不依赖 sessionKey。
+- **单槽并发**：`hasResumableReplay`/路由同源 + resume 兜底回退（D-A2）。
+- **复盘语义变更**（冻结→可步进）：顶栏成绩恒定的取舍写死在 spec（D-B3），codex 易质疑"为何盈亏不随步进变"——已在非目标/决策中明确理由。
+- 评审通道＝真 Codex `codex-attest.sh --scope branch-diff --head worktree-feat+replay-resume-review-playback --base main`。
