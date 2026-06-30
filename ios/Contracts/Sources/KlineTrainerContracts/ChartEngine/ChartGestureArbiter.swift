@@ -37,6 +37,9 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     public var onCrosshairMove: ((CGPoint) -> Void)?
     /// RFC-C 十字光标模式下单指点击 → 退出。
     public var onCrosshairExit: (() -> Void)?
+    /// RFC-E follow-up（tap-anywhere）：本面板**非持有**光标时，是否有「别的面板」持光标。
+    /// Coordinator 注入（读共享 crosshairOwner）。未注入（直接消费者）→ 视为 false → 退化旧 tap 行为（源/行为兼容）。
+    public var onShouldExitRemoteCrosshair: (() -> Bool)?
 
     /// Drawing 模式开关。true 时单指 Pan 被绘线截获、单指点击 fire onTap。
     public var drawingMode: Bool = false
@@ -208,9 +211,14 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
 
     @objc private func handleTap(_ g: UITapGestureRecognizer) {
         guard g.state == .ended else { return }
-        if crosshairMode { onCrosshairExit?(); return }   // RFC-C：光标模式点击退出
-        guard drawingMode else { return }                  // 仅 Drawing 模式确定锚点
-        onTap?(g.location(in: g.view))
+        // tap-anywhere：远端光标存在时优先退（先于 drawing，spec-R3-M1）；onTap 仍为 drawing 锚点回调（spec-R5-H1）。
+        switch CrosshairTapResolver.resolve(localCrosshairMode: crosshairMode,
+                                            drawingMode: drawingMode,
+                                            remoteOwnerPresent: onShouldExitRemoteCrosshair?() ?? false) {
+        case .exitLocal, .requestGlobalExit: onCrosshairExit?()              // 本地退 / 退远端：均经 onCrosshairExit
+        case .drawingAnchor:                 onTap?(g.location(in: g.view))  // drawing 锚点：行为不变
+        case .noop:                          break
+        }
     }
 
     // MARK: - UIGestureRecognizerDelegate

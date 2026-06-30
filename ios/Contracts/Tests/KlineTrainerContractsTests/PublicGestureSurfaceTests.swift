@@ -15,3 +15,16 @@ func publicGestureSurfaceCompileCheck(engine: TrainingEngine, panel: PanelId) {
     engine.cancelPan(panel: panel)
     engine.recordRenderBounds(bounds, panel: panel)
 }
+
+#if canImport(UIKit)
+// RFC-E follow-up（tap-anywhere）：arbiter tap 公共面回归保障——
+// onTap（drawing 锚点）/onCrosshairExit（退出）保留，新增 onShouldExitRemoteCrosshair（纯加法）。
+// 存在即证 public 面完整（codex spec-R4-H1/R5-H1）；Catalyst 编译闸门覆盖。
+@MainActor
+func crosshairTapPublicSurfaceCompileCheck() {
+    let arbiter = ChartGestureArbiter()
+    arbiter.onTap = { _ in }
+    arbiter.onCrosshairExit = { }
+    arbiter.onShouldExitRemoteCrosshair = { false }
+}
+#endif

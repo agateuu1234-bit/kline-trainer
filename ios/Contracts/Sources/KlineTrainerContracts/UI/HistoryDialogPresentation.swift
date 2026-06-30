@@ -13,10 +13,11 @@ import Foundation
 
 public enum HistoryDialogPresentation {
 
-    /// 共享 `.sheet(item:)` 的 item 过滤：`.history` 走居中 overlay，不进 sheet → 返 nil；
-    /// `.settings` / `.settlement` 原样透传。
+    /// 共享 `.sheet(item:)` 的 item 过滤：`.history`（居中 overlay）/ `.settings`（RFC-E popover）走 sheet 之外 → 返 nil；
+    /// `.settlement` 原样透传。
     public static func sheetItem(for modal: AppRouter.Modal?) -> AppRouter.Modal? {
         if case .history = modal { return nil }
+        if case .settings = modal { return nil }   // RFC-E：settings 改由锚齿轮 popover 驱动，滤出共享 sheet 防双弹
         return modal
     }
 
@@ -26,10 +27,17 @@ public enum HistoryDialogPresentation {
         return false
     }
 
+    /// RFC-E：当前态是否为设置（驱动锚齿轮 popover 呈现 + dismiss 守卫）。
+    public static func isSettings(_ modal: AppRouter.Modal?) -> Bool {
+        if case .settings = modal { return true }
+        return false
+    }
+
     /// High-1 守卫：共享 sheet 的 dismiss 回写是否可生效。
-    /// 当前态为 `.history` 时返 false（history 本不由 sheet 驱动，其 set(nil) 回写须被拦），其余 true。
+    /// `.history`（居中 overlay）/ `.settings`（RFC-E popover）当前态返 false（二者非 sheet 驱动，其 set(nil) 回写须拦）。
     public static func sheetDismissMayApply(current: AppRouter.Modal?) -> Bool {
         if case .history = current { return false }
+        if case .settings = current { return false }   // RFC-E
         return true
     }
 }

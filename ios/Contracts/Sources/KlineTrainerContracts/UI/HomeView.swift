@@ -19,19 +19,45 @@ public struct HomeView: View {
     private let onContinueTraining: () -> Void
     private let onSelectRecord: (Int64) -> Void
     private let onOpenSettings: () -> Void
+    private let isSettingsPresented: Binding<Bool>
+    private let settingsContent: () -> AnyView
 
     @State private var showEmptyCacheAlert = false
 
+    /// 源兼容 deprecated overload（codex whole-branch WB-2）：保留旧 5 参 init 不破坏下游编译，
+    /// 但 `@available(deprecated)` 使「不接线设置 popover」**显式非静默**（codex WB-1 的静默丢 UI 顾虑）。
+    /// 委托新 init 传 `.constant(false)`+`EmptyView`：本 init 构造的 HomeView **不呈现设置 popover**——
+    /// 要呈现设置须用下方带 `isSettingsPresented`/`settingsContent` 的 init（如 AppRootView）。
+    /// 仅声明保留（内部不使用，故 Catalyst 零-warning gate 不破；使用点才告警，提示下游迁移）。
+    @available(*, deprecated, message: "此 init 不接线设置 popover（settingsContent=EmptyView）。要呈现设置请用带 isSettingsPresented/settingsContent 的 init；本重载仅为源兼容保留。")
     public init(content: HomeContent,
                 onStartTraining: @escaping () -> Void,
                 onContinueTraining: @escaping () -> Void,
                 onSelectRecord: @escaping (Int64) -> Void,
                 onOpenSettings: @escaping () -> Void) {
+        self.init(content: content,
+                  onStartTraining: onStartTraining, onContinueTraining: onContinueTraining,
+                  onSelectRecord: onSelectRecord, onOpenSettings: onOpenSettings,
+                  isSettingsPresented: .constant(false), settingsContent: { EmptyView() })
+    }
+
+    /// RFC-E：主 init —— 类型擦除 settingsContent → AnyView（仅设置 popover，非热路径）。
+    /// HomeView 本体保持非泛型 concrete（类型标识不变，codex spec-R6-H1）。保 view-only D1：不 import settings/acceptance。
+    /// 呈现设置须经此 init 注入 `isSettingsPresented`/`settingsContent`；不呈现设置的调用方显式传 `.constant(false)`+`{ EmptyView() }`。
+    public init<SettingsContent: View>(content: HomeContent,
+                onStartTraining: @escaping () -> Void,
+                onContinueTraining: @escaping () -> Void,
+                onSelectRecord: @escaping (Int64) -> Void,
+                onOpenSettings: @escaping () -> Void,
+                isSettingsPresented: Binding<Bool>,
+                @ViewBuilder settingsContent: @escaping () -> SettingsContent) {
         self.content = content
         self.onStartTraining = onStartTraining
         self.onContinueTraining = onContinueTraining
         self.onSelectRecord = onSelectRecord
         self.onOpenSettings = onOpenSettings
+        self.isSettingsPresented = isSettingsPresented
+        self.settingsContent = { AnyView(settingsContent()) }
     }
 
     public var body: some View {
@@ -61,6 +87,13 @@ public struct HomeView: View {
                 Image(systemName: "gearshape").font(.title2)
             }
             .accessibilityLabel("设置")
+            .popover(isPresented: isSettingsPresented) {
+                ScrollView {                                          // 强制布局契约：内容可滚动，最坏情况全部可达（spec §3.4）
+                    settingsContent()
+                }
+                .frame(minWidth: 280, idealWidth: 300, maxWidth: 320, maxHeight: 480)   // **上限宽 320 + 限高 480**：防长标签撑宽（idealWidth 非上限，codex plan-R1-M1）
+                .presentationCompactAdaptation(.popover)              // iPhone 强制 popover 样式（iOS16.4+；项目 iOS17 满足）
+            }
         }
     }
 
@@ -163,11 +196,13 @@ private func previewRecords() -> [TrainingRecord] {
 
 #Preview("有历史 + 继续训练") {
     HomeView(content: .preview(records: previewRecords()),
-             onStartTraining: {}, onContinueTraining: {}, onSelectRecord: { _ in }, onOpenSettings: {})
+             onStartTraining: {}, onContinueTraining: {}, onSelectRecord: { _ in }, onOpenSettings: {},
+             isSettingsPresented: .constant(false), settingsContent: { EmptyView() })   // preview 不呈现设置（显式退出）
 }
 
 #Preview("空历史 + 空缓存") {
     HomeView(content: .preview(hasPending: false, hasCachedSets: false, records: []),
-             onStartTraining: {}, onContinueTraining: {}, onSelectRecord: { _ in }, onOpenSettings: {})
+             onStartTraining: {}, onContinueTraining: {}, onSelectRecord: { _ in }, onOpenSettings: {},
+             isSettingsPresented: .constant(false), settingsContent: { EmptyView() })   // preview 不呈现设置（显式退出）
 }
 #endif
