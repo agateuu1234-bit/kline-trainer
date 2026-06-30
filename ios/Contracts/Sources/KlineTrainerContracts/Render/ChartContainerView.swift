@@ -50,8 +50,14 @@ public struct ChartContainerView: UIViewRepresentable {
         /// engine.drawings 才是单一真相（spec §D-MANAGER）。
         private let manager = DrawingToolManager(enabledTools: [.horizontal])
         private let inputController: DrawingInputController = DefaultDrawingInputController()
-        /// 视图层瞬态十字光标（D3，不进 engine）。长按时设置，松手清空。
+        /// 视图层瞬态十字光标（D3，不进 engine）。RFC-C：黏滞——长按进入、点击才清。
         public private(set) var crosshairPoint: CGPoint?
+        /// RFC-C 黏滞模式是否激活（= crosshairPoint 已置且未点击退出）。
+        private var crosshairActive = false
+        /// RFC-C 吸附 haptic 去重：上次吸附到的 candle index。
+        private var lastSnappedIndex: Int?
+        /// RFC-C 吸附震动发生器（UIKit）。
+        private let snapHaptic = UIImpactFeedbackGenerator(style: .light)
 
         public init(panel: PanelId, engine: TrainingEngine) {
             self.panel = panel
@@ -66,6 +72,7 @@ public struct ChartContainerView: UIViewRepresentable {
             view.panel = panel                                    // Wave 3 13c-R1：draw 区间归属上/下
             // drawing 模式下 arbiter 截获单指 pan（spec §C7）+ 对齐 manager.activeTool（顺位 4）。
             let drawing = isDrawing(engine: engine, panel: panel)
+            if drawing && crosshairActive { exitCrosshair() }   // RFC-C：进画线模式先退黏滞光标（双向互斥，codex R5-M2）
             arbiter.drawingMode = drawing
             if drawing {
                 if manager.activeTool == nil { manager.toggle(.horizontal) }     // 进入：对齐（条件 toggle，非每帧盲翻）
@@ -95,16 +102,29 @@ public struct ChartContainerView: UIViewRepresentable {
                 case .cancelled: engine.cancelPan(panel: self.panel)
                 }
             }
-            arbiter.onTwoFingerSwipe = { [weak self] swipe in
+            // RFC-C：two-finger 不再切周期（改单指竖滑）——不接 onTwoFingerSwipe。
+            arbiter.onVerticalSwipe = { [weak self] swipe in
                 guard let self, let engine = self.engine else { return }
                 engine.switchPeriodCombo(direction: periodDirection(for: swipe))
             }
             arbiter.onLongPress = { [weak self] location, phase in
                 guard let self else { return }
                 switch phase {
-                case .began, .changed: self.setCrosshair(location)
-                case .ended, .cancelled: self.setCrosshair(nil)
+                case .began:
+                    guard let engine = self.engine, !self.isDrawing(engine: engine, panel: self.panel) else { return }
+                    self.enterCrosshair(at: location)            // drawing 优先：drawing 时不进光标
+                case .changed:
+                    if self.crosshairActive { self.moveCrosshair(to: location) }
+                case .ended, .cancelled:
+                    break                                         // 黏滞：松手保留，不清
                 }
+            }
+            arbiter.onCrosshairMove = { [weak self] location in
+                guard let self, self.crosshairActive else { return }
+                self.moveCrosshair(to: location)                 // 松手后再拖动移光标（图仍冻结）
+            }
+            arbiter.onCrosshairExit = { [weak self] in
+                self?.exitCrosshair()
             }
             arbiter.onPinch = { [weak self] scale, focus, phase in
                 guard let self, let engine = self.engine else { return }
@@ -152,6 +172,47 @@ public struct ChartContainerView: UIViewRepresentable {
                 engine: engine, panel: panel, bounds: view.bounds, crosshair: point)
             RenderSignposter.end(makeToken)
             view.renderState = newState
+        }
+
+        /// RFC-C 进入黏滞十字光标：**先守卫（仅主图区 + 有效渲染态）再置状态**——防 volume/MACD/轴区
+        /// 长按导致「隐形冻结」（codex M1）。守卫不过 = no-op，不冻结、不置 crosshairMode。
+        private func enterCrosshair(at location: CGPoint) {
+            guard let view else { return }
+            let vp = view.renderState.viewport
+            guard vp.geometry.candleStep > 0,
+                  !view.renderState.visibleCandles.isEmpty,
+                  vp.mainChartFrame.contains(location) else { return }   // 非主图区 → 不进光标、不冻结
+            crosshairActive = true
+            arbiter.crosshairMode = true
+            snapHaptic.prepare()
+            lastSnappedIndex = nil
+            moveCrosshair(to: location)
+        }
+
+        /// RFC-C 移动光标：**先守卫（主图区内）再刷新**；出主图区则忽略本次移动（保留上次有效位置，不消失）。
+        /// 吸附 index 变化时震一次（去重）。
+        private func moveCrosshair(to location: CGPoint) {
+            guard let view else { return }
+            let vp = view.renderState.viewport
+            guard vp.geometry.candleStep > 0,                            // 空图守卫（Int(NaN) 防崩）
+                  !view.renderState.visibleCandles.isEmpty,
+                  vp.mainChartFrame.contains(location) else { return }   // 出主图区忽略本次（保留上次）
+            setCrosshair(location)                                       // 既有：置点 + rebuild renderState
+            let mapper = CoordinateMapper(viewport: vp, displayScale: view.traitCollection.displayScale)
+            let idx = CrosshairLayout.snappedCandleIndex(at: location.x, mapper: mapper,
+                                                         candles: view.renderState.visibleCandles)
+            if idx != lastSnappedIndex {                                 // 每根一次（去重）
+                snapHaptic.impactOccurred()
+                lastSnappedIndex = idx
+            }
+        }
+
+        /// RFC-C 退出黏滞：清光标 + arbiter 解冻 + 复位 haptic 去重。
+        private func exitCrosshair() {
+            crosshairActive = false
+            arbiter.crosshairMode = false
+            lastSnappedIndex = nil
+            setCrosshair(nil)
         }
 
         /// 顺位 4：drawing 模式单指点击落锚 → 投影 engine.drawings → 退出 .drawing。
