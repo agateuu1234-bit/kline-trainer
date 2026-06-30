@@ -349,7 +349,48 @@ import Foundation
     try queue.write { try PendingReplayRepositoryImpl.clearReplay($0) }
     #expect(try queue.read { try PendingReplayRepositoryImpl.loadReplay($0) } == nil)
 }
+
+// codex plan-R17-F1：GRDB-backed 测条件清的真 SQL（fake 测不护真 SQL：漏 WHERE record_id 会真丢档）
+@MainActor
+@Test func pendingReplayImpl_conditionalClear_onlyMatchingRecordId() throws {
+    let queue = try DatabaseQueue()
+    try AppDBMigrations.makeMigrator().migrate(queue)
+    let slotA = PendingReplay(recordId: 101, trainingSetFilename: "a.sqlite", globalTickIndex: 1,
+        upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
+        feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+        tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+    try queue.write { try PendingReplayRepositoryImpl.saveReplay($0, replay: slotA) }
+    try queue.write { try PendingReplayRepositoryImpl.clearReplay($0, ifRecordId: 202) }   // 不匹配 → 不删
+    #expect(try queue.read { try PendingReplayRepositoryImpl.loadReplaySlotInfo($0) }?.recordId == 101)
+    try queue.write { try PendingReplayRepositoryImpl.clearReplay($0, ifRecordId: 101) }   // 匹配 → 删
+    #expect(try queue.read { try PendingReplayRepositoryImpl.loadReplaySlotInfo($0) } == nil)
+}
+
+// codex plan-R17-F1：payload 列损坏时 loadReplaySlotInfo 仍返元数据（不解码）；loadReplay 抛 .dbCorrupted（确定区分）
+@MainActor
+@Test func pendingReplayImpl_slotInfo_returnsMetadataDespiteCorruptPayload() throws {
+    let queue = try DatabaseQueue()
+    try AppDBMigrations.makeMigrator().migrate(queue)
+    try queue.write { db in
+        // 直接 SQL 插入：record_id/filename/period 合法，payload 列填非法 base64/JSON
+        try db.execute(sql: """
+            INSERT INTO pending_replay
+              (id, record_id, training_set_filename, global_tick_index, upper_period, lower_period,
+               position_data, fee_snapshot, trade_operations, drawings,
+               started_at, accumulated_capital, cash_balance, drawdown)
+            VALUES (1, 77, 'rec.sqlite', 1, '60m', 'daily', '!!notbase64!!', '{bad', '{bad', '{bad', 1, 100000, 100000, '{bad')
+            """)
+    }
+    let info = try queue.read { try PendingReplayRepositoryImpl.loadReplaySlotInfo($0) }
+    #expect(info?.recordId == 77)                       // 元数据不解码 → 返回
+    #expect(info?.trainingSetFilename == "rec.sqlite")
+    #expect(throws: AppError.self) {                    // 全量解码损坏 → .dbCorrupted
+        _ = try queue.read { try PendingReplayRepositoryImpl.loadReplay($0) }
+    }
+}
 ```
+> 注：`upper_period='60m'`/`lower_period='daily'` 须是合法 `Period.rawValue`（m60='60m'/daily='daily'）；position_data 非法 base64 → loadReplay 先抛 `.dbCorrupted`。
 
 - [ ] **Step 2: 跑测试确认失败** — `swift test --filter migration0006_createsTable_userVersion4` → FAIL。
 
@@ -521,7 +562,7 @@ public func clearReplay(ifRecordId recordId: Int64) throws {
 ```
 并在 `DefaultAppDB` 的类型声明处加 `PendingReplayRepository` 一致性（找 `: ... PendingTrainingRepository ...` 处追加 `, PendingReplayRepository`）。
 
-- [ ] **Step 4: 跑测试确认通过** — `swift test --filter migration0006_createsTable_userVersion4` 和 `--filter pendingReplayImpl_roundTripAndClear` → PASS。
+- [ ] **Step 4: 跑测试确认通过** — `swift test --filter migration0006_createsTable_userVersion4` / `--filter pendingReplayImpl_roundTripAndClear` / `--filter pendingReplayImpl_conditionalClear_onlyMatchingRecordId` / `--filter pendingReplayImpl_slotInfo_returnsMetadataDespiteCorruptPayload` → PASS。
 
 - [ ] **Step 5: 全量 host + schema-drift 不回归** — `cd "ios/Contracts" && swift test` → 0 失败；`bash scripts/check_app_schema_drift.sh`（若该脚本可本地跑）→ PASS（确认未碰 baseline）。
 

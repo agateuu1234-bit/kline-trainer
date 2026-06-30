@@ -278,6 +278,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 - 渲染（host 纯函数）：currentIdx=startTick 时切片末根≤currentIdx；超 currentIdx 的 marker 不入 placement（回归确认自动渐显）。
 - UI 纯内容：`HistoryActionSheet` 文案随 `hasResumableReplay` 切换；无「取消」按钮但遮罩 `onCancel` 仍触发。**`ReviewControlBarContent(showsJumpToEnd:)` 按钮集（plan-R15-F2）**：false→只「下一根」(.step)；true→「下一根」+「快进到结尾」(.jumpToEnd)。
 - 迁移：0006 后 `user_version==4`；`pending_replay` 表存在；旧库升级幂等。
+- **GRDB-backed 边界（plan-R17-F1，非仅 in-memory fake）**：`clearReplay(ifRecordId:)` 真 SQL 只删匹配 record_id（存 A、清 ifRecordId=B → A 留；清 ifRecordId=A → 删）；`loadReplaySlotInfo` 对 payload 列损坏（非法 base64/JSON）仍返 record_id/filename，而 `loadReplay` 抛 `.dbCorrupted`。
 
 **Catalyst**：`KlineTrainerContracts` 包 scheme `build-for-testing` SUCCEEDED（UIKit-gated 代码编译闸门，含训练界面 UI 改动）。CI-gate `grep -E "(error|warning):"` count 0。
 
