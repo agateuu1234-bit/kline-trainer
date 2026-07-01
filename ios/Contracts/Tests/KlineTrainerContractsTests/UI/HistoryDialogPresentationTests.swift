@@ -27,9 +27,9 @@ struct HistoryDialogPresentationTests {
         #expect(HistoryDialogPresentation.sheetItem(for: .history(makeRecord())) == nil)
     }
 
-    @Test("sheetItem 对 .settings 返 nil（RFC-E：改由 popover 驱动，滤出共享 sheet）")
-    func sheetItemFiltersSettings() {
-        #expect(HistoryDialogPresentation.sheetItem(for: .settings) == nil)
+    @Test("sheetItem 对 .settings 原样透传（功能退路：settings 经共享 sheet；popover 专属过滤下沉 AppRootView）")
+    func sheetItemPassesSettings() {
+        #expect(HistoryDialogPresentation.sheetItem(for: .settings)?.id == "settings")
     }
 
     @Test("isSettings 仅对 .settings 为 true")
@@ -40,9 +40,9 @@ struct HistoryDialogPresentationTests {
         #expect(HistoryDialogPresentation.isSettings(nil) == false)
     }
 
-    @Test("sheetDismissMayApply 对 .settings 返 false（RFC-E：settings 由 popover 驱动，sheet dismiss 回写须拦）")
-    func sheetDismissBlocksSettings() {
-        #expect(HistoryDialogPresentation.sheetDismissMayApply(current: .settings) == false)
+    @Test("sheetDismissMayApply 对 .settings 返 true（功能退路：settings 经共享 sheet，legacy 消费者可正常 dismiss；popover 双弹由 AppRootView 本地拦）")
+    func sheetDismissAllowsSettings() {
+        #expect(HistoryDialogPresentation.sheetDismissMayApply(current: .settings) == true)
     }
 
     @Test("sheetItem 对 .settlement 原样透传")
