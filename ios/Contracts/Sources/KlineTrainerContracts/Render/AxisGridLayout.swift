@@ -32,6 +32,30 @@ enum AxisGridLayout {
         let to: CGPoint
     }
 
+    private static func makeFormatter(_ format: String) -> DateFormatter {
+        let f = DateFormatter()
+        f.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = format
+        return f
+    }
+    // 每 format 一个不可变 formatter（永不变异 → 无共享可变态、无竞争，spec §3.3 / codex spec-R1/R3）。
+    // DateFormatter 在 Xcode16 已 Sendable → 纯 static let（无 nonisolated(unsafe)，否则触发 "unnecessary" 告警）。
+    private static let intradayFormatter = makeFormatter("MM-dd HH:mm")  // m3/m15/m60
+    private static let dayFormatter      = makeFormatter("yyyy-MM-dd")   // daily/weekly
+    private static let monthFormatter    = makeFormatter("yyyy-MM")      // monthly
+    private static func formatter(for period: Period) -> DateFormatter {
+        switch period {
+        case .m3, .m15, .m60: return intradayFormatter
+        case .daily, .weekly: return dayFormatter
+        case .monthly:        return monthFormatter
+        }
+    }
+    /// 坐标轴时间标签串（internal 供并发压测直调）。
+    static func formatTimeLabel(datetime: Int64, period: Period) -> String {
+        formatter(for: period).string(from: Date(timeIntervalSince1970: TimeInterval(datetime)))
+    }
+
     private static let maxTicks = 6
 
     /// 价格刻度 + 对齐的水平网格线（主图）。退化/非有限区间 → 空（守卫，防 log10(0)/除零）。
@@ -93,10 +117,6 @@ enum AxisGridLayout {
             let idx = start + (n - 1) * k / 3      // 整数运算；k 升序故 idx 非降
             if absIndices.last != idx { absIndices.append(idx) }   // 相邻去重（升序足够）
         }
-        let fmt = DateFormatter()
-        fmt.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        fmt.locale = Locale(identifier: "en_US_POSIX")
-        fmt.dateFormat = dateFormat(for: period)
         let labelW: CGFloat = 96, labelH: CGFloat = 16
         var labels: [Label] = []
         var lines: [LineSegment] = []
@@ -107,19 +127,9 @@ enum AxisGridLayout {
             let rawX = x - labelW / 2
             let clampedX = min(max(rawX, frames.mainChart.minX), frames.mainChart.maxX - labelW)
             let rect = CGRect(x: clampedX, y: frames.macdChart.maxY - labelH, width: labelW, height: labelH)
-            let date = Date(timeIntervalSince1970: TimeInterval(candles[idx].datetime))
-            labels.append(Label(rect: rect, text: fmt.string(from: date)))
+            labels.append(Label(rect: rect, text: Self.formatTimeLabel(datetime: candles[idx].datetime, period: period)))
         }
         return (labels, lines)
-    }
-
-    /// 周期自适应日期格式（与 CrosshairLayout.swift:91-94 同 formatter 配置；镜像配置非共享符号）。
-    private static func dateFormat(for period: Period) -> String {
-        switch period {
-        case .m3, .m15, .m60: return "MM-dd HH:mm"
-        case .daily, .weekly: return "yyyy-MM-dd"
-        case .monthly:        return "yyyy-MM"
-        }
     }
 
     /// 量图最大量：水平网格线 + 标签，定位 valueToY(maxVolume)（因 volumeRange 有 2% padding，

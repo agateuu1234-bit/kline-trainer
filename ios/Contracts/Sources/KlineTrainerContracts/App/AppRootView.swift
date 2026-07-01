@@ -21,12 +21,20 @@ public struct AppRootView: View {
                 set: { if !$0 { Task { await router.exitTraining() } } })   // 系统返回键已隐藏，仅程序化 pop
     }
 
-    // RFC #2：共享 sheet 的 item binding —— 滤掉 .history（走居中 overlay）+ High-1 守卫（dismiss 回写不清 history）
+    // RFC #2 + WB-R4：共享 sheet 的 item binding。
+    // 本 view 用 popover 呈现 settings → 本地把 .settings 排除出自己的 sheet（防与 popover 双弹）；
+    // 公共 sheetItem 保持通用（settings 透传，供 legacy 消费者经 sheet 呈现）。
     private var sheetModalBinding: Binding<AppRouter.Modal?> {
         Binding(
-            get: { HistoryDialogPresentation.sheetItem(for: router.activeModal) },
+            get: {
+                if HistoryDialogPresentation.isSettings(router.activeModal) { return nil }
+                return HistoryDialogPresentation.sheetItem(for: router.activeModal)
+            },
             set: { newValue in
-                guard HistoryDialogPresentation.sheetDismissMayApply(current: router.activeModal) else { return }
+                // history 由 sheetDismissMayApply 拦；settings 由本地 !isSettings 拦——
+                // settlement→settings 跃迁时本 sheet 收起触发 set(nil)，不可清掉 popover 驱动的 settings。
+                guard HistoryDialogPresentation.sheetDismissMayApply(current: router.activeModal),
+                      !HistoryDialogPresentation.isSettings(router.activeModal) else { return }
                 router.activeModal = newValue
             }
         )

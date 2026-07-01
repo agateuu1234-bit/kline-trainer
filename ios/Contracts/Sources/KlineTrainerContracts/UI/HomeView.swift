@@ -24,12 +24,9 @@ public struct HomeView: View {
 
     @State private var showEmptyCacheAlert = false
 
-    /// 源兼容 deprecated overload（codex whole-branch WB-2）：保留旧 5 参 init 不破坏下游编译，
-    /// 但 `@available(deprecated)` 使「不接线设置 popover」**显式非静默**（codex WB-1 的静默丢 UI 顾虑）。
-    /// 委托新 init 传 `.constant(false)`+`EmptyView`：本 init 构造的 HomeView **不呈现设置 popover**——
-    /// 要呈现设置须用下方带 `isSettingsPresented`/`settingsContent` 的 init（如 AppRootView）。
-    /// 仅声明保留（内部不使用，故 Catalyst 零-warning gate 不破；使用点才告警，提示下游迁移）。
-    @available(*, deprecated, message: "此 init 不接线设置 popover（settingsContent=EmptyView）。要呈现设置请用带 isSettingsPresented/settingsContent 的 init；本重载仅为源兼容保留。")
+    /// Legacy 源兼容 overload（WB-R4 功能退路）：本 init 构造的 HomeView **不接线设置 popover**（settingsContent=EmptyView）；
+    /// 呈现设置由调用方经共享 sheet（`HistoryDialogPresentation.sheetItem` 透传 `.settings`）+ 自己的 `.sheet` 完成。
+    /// AppRootView 用主 init（popover）；老式消费者用本 init + 自己的 sheet。二者都能出设置 → 无静默丢、无源破坏。
     public init(content: HomeContent,
                 onStartTraining: @escaping () -> Void,
                 onContinueTraining: @escaping () -> Void,
