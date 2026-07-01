@@ -43,7 +43,9 @@
 - `App/AppRootView.swift`（历史弹窗传 `hasResumableReplay`）
 - `UI/HistoryActionSheet.swift`（去取消钮 + 文案切换）
 - `UI/TrainingSessionLifecycle.swift`（`replaySettlementRecord()` async）
-- `UI/TrainingView.swift`（review 控件条 + routeEndOfSession Task）
+- `UI/TrainingView.swift`（review 控件条 + routeEndOfSession Task + R4-F1 顶栏 reviewAware 显示）
+- `Render/RenderStateBuilder.swift`（R4-F1：画线按 tick 渐显 filter）
+- `UI/TrainingTopBarContent.swift`（R4-F1：`reviewAwareCapital`/`reviewAwareReturnRate` 纯函数）
 
 ---
 
@@ -1855,7 +1857,33 @@ body 内 `if showsTradeButtons { TradeActionBar(...) }` 之后加：
 ```
 > normal/replay：周期变化即落盘（含 upper/lowerPeriod），防"切周期后立即 crash/后台"丢周期；review：`shouldPersistProgress=false` → autosave no-op，无害。配 baseline 含周期（A4），切周期=脏 → Back/flush 也写。
 
-- [ ] **Step 4: 跑测试确认通过** — `swift test --filter reviewControlBarContent_buttons` 和 `--filter showsReviewControls_predicate` → PASS。
+- [ ] **Step 3d: 复盘防剧透 + 画线渐显（codex whole-branch R4-F1）** — 复盘步进时顶栏隐藏最终成绩、画线按 tick 渐显。
+  - **画线渐显（`Render/RenderStateBuilder.swift` `make`）**：`drawings` filter 除 `panelPosition` 外加锚点渐显——仅当画线所有锚点 `anchor.candleIndex <= currentCandleIndex(candles: engine.allCandles[anchor.period] ?? [], tick: tick)` 才渲染（`tick`/`currentCandleIndex` 已在 `make` 作用域）。未来锚点画线隐藏至步进到达；normal/replay no-op。
+```swift
+    drawings: engine.drawings.filter { drawing in
+        drawing.panelPosition == (panel == .upper ? 0 : 1)
+            && drawing.anchors.allSatisfy { anchor in
+                anchor.candleIndex <= currentCandleIndex(candles: engine.allCandles[anchor.period] ?? [], tick: tick)
+            }
+    },
+```
+  - **顶栏防剧透（`UI/TrainingTopBarContent.swift` 加纯函数 + `UI/TrainingView.swift` topBar 用）**：
+```swift
+public extension TrainingTopBarContent {
+    static func reviewAwareCapital(mode: TrainingMode, isAtEnd: Bool,
+                                   initialCapital: Double, currentTotalCapital: Double) -> Double {
+        (mode == .review && !isAtEnd) ? initialCapital : currentTotalCapital
+    }
+    static func reviewAwareReturnRate(mode: TrainingMode, isAtEnd: Bool, actualReturnRate: Double) -> Double {
+        (mode == .review && !isAtEnd) ? 0 : actualReturnRate
+    }
+}
+```
+  topBar 构造 `TrainingTopBarContent` 时 `totalCapital:`/`returnRate:` 改用两纯函数（传 `mode: engine.flow.mode, isAtEnd: lifecycle.isAtEnd, ...`），余字段不变。
+  - **测试**：`Render/RenderStateBuilderTests.swift` 加画线渐显测（未来锚点低 tick 排除 / 越过后包含）；`UI/TrainingTopBarContentTests.swift` 加 reviewAware 矩阵（review+!isAtEnd→起始/0；review+isAtEnd 及 normal/replay→真实）。
+  > 说明：这是**顶栏显示层**抑制（引擎 cash 仍最终值，D-B3 装配不变），**非**逐 tick P&L 重算——真逐根 P&L 属复盘重设计 RFC。
+
+- [ ] **Step 4: 跑测试确认通过** — `swift test --filter reviewControlBarContent_buttons` 和 `--filter showsReviewControls_predicate` 和 `--filter "drawingsReveal|reviewAware"` → PASS。
 
 - [ ] **Step 5: 全量 host 不回归** — `swift test` → 0 失败。
 

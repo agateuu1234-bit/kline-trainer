@@ -18,7 +18,7 @@
 - 不改 replay 的资金语义：replay 仍 **不累积资金**（`shouldAccumulateCapital=false`）、完成时 **不写 `training_records`**、结算仍是临时（`shouldShowSettlement=true` 但 ephemeral）。续局只让**中途状态**可保存/恢复。
 - 不支持"每条记录各自独立暂存"。**单个 replay 暂存槽**（user 决策：同时只 1 局暂停的 replay；对另一记录开新 replay 覆盖旧档）。replay 暂存与 normal 暂存（`pending_training`）相互独立（可各 1 局暂停）。
 - 复盘**不持久化进度**：复盘只读重演，离开即丢、下次重新从起点进入（续局需求只针对 replay 交易练习，不针对复盘观看）。
-- 复盘**不重演盈亏过程**：复盘步进只控制"图表/标记的揭示进度"，顶栏盈亏始终显示该记录的**最终成绩**（详见 §B.4 D-B3）。不在复盘中按 tick 逐步重算 cash/position（避免极高复杂度）。
+- 复盘**不重演盈亏过程**：复盘步进只控制"图表/标记/画线的揭示进度"；顶栏盈亏在**步进中隐藏最终成绩（显起始本金+0%）、到结尾/一键到底才显最终成绩**（whole-branch R4-F1；详见 §B.4 D-B3）。不在复盘中按 tick 逐步重算 cash/position（避免极高复杂度；逐根 P&L 重演属复盘重设计 RFC）。
 - 不支持"已有暂存档时从头重练"的独立入口（user 决策：单按钮切换文案；要重练把当前这局练到末尾即自动清档）。
 
 ---
@@ -59,6 +59,7 @@
 - 引擎构造前置：`flow.allowedTickRange.contains(resolvedInitialTick)`、`flow.allowedTickRange.upperBound == maxTick`。
 - **K 线渐显自动**：`RenderStateBuilder` `currentIdx = currentCandleIndex(candles, tick)`；`sliceEnd = min(startIndex+visibleCount, currentIdx+1)`；可见切片 `candles[startIndex..<sliceEnd]` 恒 ≤ currentIdx（看不到未来）。
 - **标记渐显自动**：`drawMarkers` 收到的 `candles` = 可见切片；`MarkersLayout.markerPlacements` 用 `findCandleIndex(for: marker, in: 切片)`，超出切片（即超出 currentIdx）的标记 `continue` 跳过 → **不绘制**。故标记随 currentIdx 自动渐显，无需新增 tick 过滤。
+- **画线渐显（whole-branch R4-F1）**：与标记不同，`RenderStateBuilder` 原样传全部画线（横线跨整屏、不随可见切片裁切）→ 复盘起点即显未来锚点画线，剧透。故 `RenderStateBuilder.make` 的 `drawings` filter 加**锚点渐显**：仅当画线**所有锚点** `anchor.candleIndex <= currentCandleIndex(allCandles[anchor.period], tick)`（各锚点在其自身 period 的揭示前缘之内）才渲染；未来锚点画线在步进到达前隐藏。normal/replay 画线恒历史锚（不受影响，no-op）。
 - 初始视口自动：面板初始 `offset=0`（autoTracking）→ 显示"已揭示前缀的最右 `defaultVisibleCount=80` 根"；tick=startTick 时即显示起点附近（含 RFC-F 的 before-candles），无需改视口逻辑。
 
 ### 1.5 历史弹窗 / 路由
@@ -185,9 +186,10 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 - **步进**：新增 `stepReviewForward()`（codex plan-R9-F1）——**按两 panel 中更细（`stepsForPeriod` 更小的正数步）的周期**调 `holdOrObserve(panel: finer)` 逐根推进，**不依赖 `activePanel`**（复盘隐藏了周期选择条，activePanel 停默认 `.lower`=粗周期会一击跳一整天，违"逐根"）。**耗尽面板（`stepsForPeriod==0`）绝不被选中（codex whole-branch R2-F2）**：`stepsForPeriod` 对无后续 K 线的周期返 0，旧 `<=` 比较把 0 当"最小步"→ 若更细周期先耗尽（如稀疏 candle map 下 upper 已到末根而 lower 仍可进）会选中 0 步面板 → `holdOrObserve` 推进 0 根 → 反复点「下一根」卡死在 maxTick 前。故改为**选最小正步**：两 panel 皆可进→选更细；仅一方可进→选该方；皆耗尽（到结尾）→ no-op。`canAdvance()=true` 生效；review 无持仓 → `forceCloseIfEnded` no-op；面板 `.tradeTriggered` reduce 吸附镜头到揭示前缘。用户可单指竖滑切周期组合改粒度。
 - **jump-to-end**：新增 `TrainingEngine.jumpToEnd()`：`guard flow.canJumpToEnd() else { return }`；`tick.reset(to: tick.maxTick)`；两面板吸附 autoTracking（镜像 `advanceAndAccount` 的 `resetOffsetAfterAutoTracking`/`.tradeTriggered`）；`drawdown.update`。无 `forceClose`（无持仓）。到末尾后 K 线+标记全揭示＝原冻结全貌。
 
-### B.4 顶栏盈亏显示决策（D-B3）
-保持 `review()` 现有资金装配不变：`initialCapital=record.totalCapital`、`initialCashBalance=record.totalCapital+record.profit`、无持仓。则步进/快进全程 `currentTotalCapital=cashBalance`（持仓 0、currentPrice 变化不影响）＝该记录**最终成绩**恒定；`returnRate=(末-起)/起=record 的 return`。即复盘顶栏始终显示该局**最终盈亏**，步进只控制图表/标记揭示。
-- 理由：复盘=回看一局**已完成**记录的成绩与走势；不在复盘中按 tick 重算 cash/position（需逐根重放已记录交易，复杂度极高、易错），是明确取舍（非目标）。
+### B.4 顶栏盈亏显示决策（D-B3，**whole-branch R4-F1 修订**）
+`review()` 引擎**资金装配不变**：`initialCapital=record.totalCapital`、`initialCashBalance=record.totalCapital+record.profit`、无持仓（`currentTotalCapital=cashBalance`＝最终成绩恒定，不逐 tick 重算 cash/position——高复杂度非目标）。
+- **whole-branch R4-F1（顶栏显示层修订）**：codex 指出"一进复盘（起点）顶栏即显最终成绩"对逐根重演有剧透/误导。故**顶栏显示**改为：**`mode==.review && !isAtEnd`（步进中）→ 显起始本金 + 0%**（`TrainingTopBarContent.reviewAwareCapital/reviewAwareReturnRate` 纯函数）；**到结尾（`isAtEnd`，含步进到 maxTick 或「快进到结尾」）→ 恢复真实（＝最终成绩）**。normal/replay 恒真实。**注意**：这是**顶栏显示层**的抑制（引擎 cash 仍是最终值），**非**逐 tick P&L 重算——真正的逐根 P&L 重演属复盘重设计 RFC（见 [[project_review_redesign_rfc_2026_07_01]] / backlog）。
+- 理由：复盘=回看一局**已完成**记录的走势与操作；逐根步进时不提前剧透最终盈亏（R4-F1），到结尾/一键到底才亮成绩；不逐根重放已记录交易重算 cash/position（复杂度极高、易错）是明确取舍（非目标）。
 
 ### B.5 UI（训练界面控件门控）— 已勘实
 **事实**：`TrainingView.showsTradeButtons = engine.flow.canBuySell()` 门控**整条 `TradeActionBar`**（买/卖/观察捆在一起）。复盘 `canBuySell=false` → 整条不显示 → **当前复盘无任何步进控件**。故复盘步进**不能靠"翻 canAdvance 复用现条"**，须**新增 review 专用控件条**。
@@ -207,6 +209,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 - `startTick == finalTick`（极短局）：range 退化单点，「下一根」无可推进、`jumpToEnd` no-op，等价旧冻结行为，安全。
 - 步进到 maxTick 后再「下一根」：`tick.advance` 返 false（已钳 maxTick），无副作用。
 - **更细周期先耗尽（whole-branch R2-F2）**：稀疏 candle map 下若更细面板已到末根（`stepsForPeriod==0`）而较粗面板仍可进，「下一根」选**较粗（仍可进）**面板继续推进，不卡死；两面板皆耗尽 → no-op（到结尾）。
+- **顶栏防剧透 + 画线渐显（whole-branch R4-F1）**：`reviewAwareCapital(.review, isAtEnd:false, init, final)==init`、`(.review, isAtEnd:true)==final`、`(.normal/.replay, *)==final`（returnRate 同型：review 步进 →0，余 →actual）—— host 纯函数测。画线渐显：未来锚点画线在低 tick 的 `RenderStateBuilder` 输出 `drawings` 中被排除、tick 越过锚点后包含 —— host RenderStateBuilder 测。
 
 ---
 
@@ -225,7 +228,7 @@ CREATE TABLE IF NOT EXISTS pending_replay (
 | D-A6 | 去「取消」按钮 | 去掉，遮罩点击取消，保留 `onCancel` | user 拍板；弹窗更小 |
 | D-B1 | 复盘起点 | metadata 派生 startTick，**不加 record 字段** | 确定性派生、零 schema 改动；与 normal/replay 同源 |
 | D-B2 | 复盘是否双模式 | **单一可步进模式 + 快进到结尾** | user 拍板（统一方案）；一个模式覆盖"重走过程"+"看整体"，diff 更小、利于 codex 收敛 |
-| D-B3 | 复盘盈亏显示 | 全程显示记录**最终成绩**，步进只控揭示 | 避免逐 tick 重放交易的高复杂度；复盘=回看已完成成绩 |
+| D-B3 | 复盘盈亏显示（**R4-F1 修订**） | 步进中（`review && !isAtEnd`）顶栏显**起始本金+0%**（防剧透）；到结尾/一键到底显**最终成绩**。画线亦按 tick 渐显。引擎 cash 仍最终值（顶栏显示层抑制，非逐 tick 重算） | codex R4：一进复盘即显最终成绩对逐根重演有剧透/误导；逐 tick P&L 重演的高复杂度=复盘重设计 RFC 范围 |
 | D-B4 | 复盘是否持久化进度 | **否** | 续局需求只针对 replay；复盘每次从起点重进，简单 |
 | D-B5 | jump-to-end 实现 | 复用现成未调用的 `TickEngine.reset(to:)` + 新 `canJumpToEnd()` 门控 | 最小新增；语义清晰可测 |
 | D-B6 | 复盘步进粒度 | 新 `stepReviewForward()` 按**更细显示周期**逐根，不依赖 activePanel（codex plan-R9-F1） | activePanel 默认 `.lower`=粗周期 → 一击跳整天违"逐根"；细周期=最贴"像训练逐根"，用户单指竖滑切组合改粒度 |
