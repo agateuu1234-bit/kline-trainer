@@ -180,3 +180,9 @@ private static func formatter(for period: Period) -> DateFormatter {
 
 ## 6. 交付流程
 brainstorming（本 spec）→ **Codex spec review 收敛** → writing-plans → **Codex plan review 收敛** → subagent-driven（TDD）→ verification 三绿 → requesting-code-review → **whole-branch Codex review** → PR（user 终端 push + override/`--admin` merge，guard 拦 Claude push）。Codex 配额耗尽等恢复续，不用 opus 代打。
+
+## 7. Codex whole-branch 评审记录 + 收口决策（如实）
+- spec 阶段真 Codex **R1–R4 APPROVE**（`@2eba044`；R1 AxisGridLayout 共享可变 formatter 竞争→per-format 不可变；R2 公共谓词行为声明+formatter 并发压测；R3 §3 引言矛盾；R4 approve）。plan R1（仅 doc-only「去实现」）。subagent-driven 4 task 全 fresh implementer + task-review Approved；Task1 Catalyst 抓 `nonisolated(unsafe)` 在 Xcode16(DateFormatter=Sendable)触发 12 条 "unnecessary" warning→删改纯 static let；Task3 reviewer 抓 stale 注释+CONTRACT_VERSION doc 1.7→1.8。**opus whole-branch review = Ready-to-merge YES**（0 C/I）。三绿亲核 @9bed51b（host 1300/0+255/0 / Catalyst SUCCEEDED CI-gate0 / iOS BUILD SUCCEEDED）。
+- **⚠️ whole-branch Codex 未取 approve（WB-R4 主题第 8+ 轮理论振荡 + 自相矛盾）**：whole-branch 抓 medium「旧 HomeView 5 参 init 去 deprecated 后仍 delegate no-popover→静默丢设置 UI，移除了下游信号」——要么 keep deprecated 要么 make truly functional。**但同一设计 codex 自己在 spec R1–R4 已 APPROVE**（功能退路=旧 init no-popover + sheetItem 回退 + AppRootView 本地排除，legacy 经 sheet 呈现）→ codex 自相矛盾。**关键事实**：`KlineTrainerContracts` 单 app 内部模块，**无任何旧 5 参 init 呈现设置的调用方**（AppRootView/preview 全用主 init）→ codex 保护的外部老调用方**不存在**、纯理论。WB-R4 主题累计 8+ 轮（#135 R1-R4+user override + 本 PR spec R1-R4 + whole-branch）远超治理 `max_rounds=3`。
+- **收口决策（user 拍 = 选项 A，2026-07-01）**：**override 合并**——判 whole-branch WB-R4 finding 为理论性残留（单 app 无外部消费者、codex 自相矛盾）；沿 #135 WB-R4 override 先例 [[feedback_codex_round6_self_contradiction]]。I2（DateFormatter）codex 完全无异议。app 功能正确、三绿全程。
+- **理论性残留（post-merge）**：若 `KlineTrainerContracts` 将来真对外发布，再对旧 HomeView 5 参 init 做 keep-deprecated 或 make-truly-functional 收口。本单 app 内部模块下无影响。
