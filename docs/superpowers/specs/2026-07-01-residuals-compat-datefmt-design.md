@@ -15,13 +15,13 @@
 
 **公共契约变更声明（codex spec-R2-H1 · 如实，非「无变更」）**
 - I1 **有意改变** `HistoryDialogPresentation.sheetItem(.settings)`（滤出→透传）+ `sheetDismissMayApply(.settings)`（false→true）的**公共谓词行为**——这是**恢复 #135 之前的通用契约**（settings 经共享 sheet 路由），正是功能退路的机制本身。**这是一次刻意的公共 UI 路由谓词行为变更，非"无变更"**。
-- **为何不 bump CONTRACT_VERSION**：本仓 `CONTRACT_VERSION` 语义 = **数据/持久化契约**（DB schema / DTO / 存储格式，见 m01 §A/E2 1.4→1.5/RFC-A 1.6→1.7 先例），**不覆盖 UI 路由谓词行为**。`HistoryDialogPresentation` 是纯 UI 呈现路由，无持久化格式改动 → CONTRACT_VERSION 不适用、保持 1.7。
+- **为何不 bump CONTRACT_VERSION**：本仓 `CONTRACT_VERSION` 语义 = **数据/持久化契约**（DB schema / DTO / 存储格式，见 m01 §A/E2 1.4→1.5/RFC-A 1.6→1.7 先例），**不覆盖 UI 路由谓词行为**。`HistoryDialogPresentation` 是纯 UI 呈现路由，无持久化格式改动 → CONTRACT_VERSION 不适用、**保持当前值 1.8**（#136 replay续局 已 bump 到 1.8；本 PR 不再动）。
 - **迁移说明（migration note）**：任何依赖 #135 版 `sheetItem` 会滤掉 `.settings` 的通用消费者，改版后 `.settings` 将**经共享 sheet 呈现**（回到 #135 前）；若某消费者用 popover 呈现 settings（如本仓 `AppRootView`），须**本地**把 `.settings` 排除出自己的 sheet（§2.2）以防双弹。本仓唯一消费者 AppRootView 已按此本地处理。
 
 **非目标 / Non-Goals**
 - 不改任何**用户可见行为**——I1 后 app 内设置仍经 popover 呈现（与 #135 逐像素一致，AppRootView 本地排除）；I2 缓存**输出逐字不变**（同 tz/locale/format 的同一字符串）。二者均为**呈现层结构/性能改进 + 上述公共谓词行为回退**，无数据契约改动。
 - `HomeContent.swift:110` 的 `DateFormatter()` **不动**（首页加载一次，非 per-frame 热路径）。
-- 零引擎 / 持久层 / **数据契约**改动；**不 bump CONTRACT_VERSION（数据契约版本，保持 1.7）**——公共 UI 谓词行为变更如上「公共契约变更声明」如实记录。
+- 零引擎 / 持久层 / **数据契约**改动；**不 bump CONTRACT_VERSION（数据契约版本，保持当前 1.8）**——公共 UI 谓词行为变更如上「公共契约变更声明」如实记录。
 
 **约束**
 - `AppRouter.Modal` 仅 `Identifiable` **非 Equatable** → 一律 `if case`/`isSettings` 谓词，**禁 `== .settings`**（沿 #135）。

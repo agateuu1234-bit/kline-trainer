@@ -9,7 +9,7 @@
 **Tech Stack:** Swift 6 / SwiftUI + UIKit（`#if canImport(UIKit)`）/ Swift Testing（host）/ Mac Catalyst build-for-testing + iOS Simulator build。Spec：`docs/superpowers/specs/2026-07-01-residuals-compat-datefmt-design.md`（codex spec R1–R4 APPROVE `@2eba044`）。基线 origin/main `d2eb431`。
 
 ## Global Constraints
-- 零引擎 / 持久层 / **数据契约**改动；**不 bump CONTRACT_VERSION（保持 1.7）**。I1 有意改变公共 UI 路由谓词 `sheetItem`/`sheetDismissMayApply` 对 `.settings` 的行为（恢复 #135 前通用契约），已在 spec「公共契约变更声明」如实记录——CONTRACT_VERSION 语义 = 数据契约，不覆盖 UI 谓词，故不 bump。
+- 零引擎 / 持久层 / **数据契约**改动；**不 bump CONTRACT_VERSION（保持当前 1.8）**。I1 有意改变公共 UI 路由谓词 `sheetItem`/`sheetDismissMayApply` 对 `.settings` 的行为（恢复 #135 前通用契约），已在 spec「公共契约变更声明」如实记录——CONTRACT_VERSION 语义 = 数据契约，不覆盖 UI 谓词，故不 bump。
 - `AppRouter.Modal` 仅 `Identifiable` **非 Equatable** → 一律 `if case`/`HistoryDialogPresentation.isSettings` 谓词，**禁 `== .settings`**（落地后 grep 守卫）。
 - **所有缓存 DateFormatter 建后不可变**（固定 tz `UTC+8(secondsFromGMT:8*3600)` + locale `en_US_POSIX` + 固定 dateFormat，**无 per-call 改 dateFormat**）→ 并发只读安全。**⚠️ 工具链对账（Task 1 Catalyst 亲验）**：本项目工具链（Xcode 16）`DateFormatter` 已 `Sendable` → 用**纯 `private static let`**（**不要加 `nonisolated(unsafe)`**——加了 Catalyst/本地都报 `'nonisolated(unsafe)' is unnecessary … 'Sendable' type 'DateFormatter'` 触发零-warning gate 红）。**本 plan 下文所有 `nonisolated(unsafe) static let` 示意 → 按纯 `static let` 读**。Catalyst build-for-testing 必须亲验 + CI-gate `(error|warning):` count=0。
 - I2 缓存**输出逐字不变**（同 tz/locale/format 的同一字符串）——现有 render 输出断言即回归守卫。
