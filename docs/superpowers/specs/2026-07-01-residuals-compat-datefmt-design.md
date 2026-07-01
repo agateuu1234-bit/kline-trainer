@@ -112,7 +112,7 @@ public init(content: HomeContent, onStartTraining: @escaping () -> Void,
 
 ## 3. 设计 · I2 DateFormatter 缓存（含 AxisGridLayout）
 
-**核心**：三处 per-frame `DateFormatter()` 分配 → `nonisolated(unsafe) static let` 缓存（固定 tz/locale）。crosshair 两处 format 固定 → 缓存不可变 formatter；AxisGridLayout format 随周期变 → 缓存一个 formatter、循环前设一次 `dateFormat`（省掉分配大头）。**输出逐字不变**。
+**核心**：三处 per-frame `DateFormatter()` 分配 → `nonisolated(unsafe) static let` **不可变** formatter 缓存（固定 tz/locale/format，**建后永不变异 dateFormat**）。crosshair 两处 format 固定 → 各 1-2 个不可变 formatter；AxisGridLayout format 随周期变 → **每个 format 一个不可变 formatter（共 3 个）+ `formatter(for:)` 选择器**（**非**「一个共享 formatter per-call 改 dateFormat」——那会造成共享可变态 off-main 竞争，codex spec-R1-H1/R3-H1；见 §3.3）。**dateFormat 赋值只在 formatter 工厂初始化里**，全程无变异。**输出逐字不变**。
 
 ### 3.1 `CrosshairLayout`（1 个固定 formatter）
 ```swift
