@@ -25,7 +25,7 @@
 
 **约束**
 - `AppRouter.Modal` 仅 `Identifiable` **非 Equatable** → 一律 `if case`/`isSettings` 谓词，**禁 `== .settings`**（沿 #135）。
-- **Swift 6 严格并发**：`static let DateFormatter`（DateFormatter 非 Sendable）触发数据竞争检查 → 用 `nonisolated(unsafe) static let`。**关键**：所有缓存 formatter **建后不可变**（无 per-call 改 dateFormat）→ 并发只读安全（DateFormatter formatting 线程安全）→ `nonisolated(unsafe)` 是真安全非未强制假设（codex spec-R1-H1）。⚠️ **本地工具链比 CI macos-15 宽松**（[[feedback_swift_local_ci_toolchain_strictness]]）→ Catalyst build-for-testing 必须亲验通过、零 warning。
+- **Swift 6 严格并发（⚠️ 实测修正，Task 1 Catalyst 亲验）**：**本项目工具链（Xcode 16）上 `DateFormatter` 已是 `Sendable`** → `static let DateFormatter` 是合法 Sendable 全局常量、编译器全检、**不需也不该加 `nonisolated(unsafe)`**（加了 Catalyst/本地都报 `warning: 'nonisolated(unsafe)' is unnecessary … 'Sendable' type 'DateFormatter'` → 触发 CI 零-warning gate 红）。故最终代码用**纯 `private static let`**。**关键**：所有缓存 formatter **建后不可变**（无 per-call 改 dateFormat）→ 不可变 Sendable 常量并发只读安全 by construction、零 suppression。**本 spec/plan 下文所有 `nonisolated(unsafe) static let` 示意 → 一律按纯 `static let` 读**（工具链对账）。⚠️ Catalyst build-for-testing 必须亲验 `** TEST BUILD SUCCEEDED **` + CI-gate `grep -E "(error|warning):"` count=0（[[feedback_swift_local_ci_toolchain_strictness]]）。
 - 负向 grep 断言用 `if/exit 1` 非 `! grep`。
 
 ## 1. 现状（基线 d2eb431，已核实）
@@ -170,7 +170,7 @@ private static func formatter(for period: Period) -> DateFormatter {
   - `HomeView`（I1）：源兼容守卫测改用**旧 5 参 init**（现已去 deprecated，无 warning）构造 `let _: HomeView = HomeView(content:…, onOpenSettings: {})` → 证 legacy 路由可用 + bare concrete 类型（一旦泛型化或重加 deprecated 即编译错/warning）。
   - `CrosshairLayout`/`CrosshairSidebarContent`/`AxisGridLayout`（I2）：①**现有 label/time 文本断言即输出回归守卫**（缓存不改输出）；如现有覆盖不足补 1 条「同输入同输出」断言。②**并发压力测试（codex spec-R2-H2 · 接受缓存的前提）**：`withTaskGroup` 起 200 并发任务用同一缓存 formatter 格式化固定 date，断言每个输出等于预期串（证不可变缓存并发只读安全、无崩溃/交叉污染）。
 - **源兼容 grep 守卫（I1）**：`if grep -rn "== *\.settings" ios/Contracts/Sources; then exit 1; fi`（`if/exit 1` 非 `! grep`）。
-- **三绿亲核**：host swift test（Swift Testing 末行 0 failures **且** XCTest「All tests passed」两框架分开看）+ Mac Catalyst `build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst'` → `** TEST BUILD SUCCEEDED **` **且** CI-gate `grep -E "(error|warning):"` count=0（**验 Swift6 `nonisolated(unsafe)` 通过 + 零 warning**）+ iOS Simulator app build `** BUILD SUCCEEDED **`。
+- **三绿亲核**：host swift test（Swift Testing 末行 0 failures **且** XCTest「All tests passed」两框架分开看）+ Mac Catalyst `build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst'` → `** TEST BUILD SUCCEEDED **` **且** CI-gate `grep -E "(error|warning):"` count=0（**验纯 `static let`（DateFormatter Sendable）零 warning、无 `nonisolated(unsafe)` "unnecessary" 告警**）+ iOS Simulator app build `** BUILD SUCCEEDED **`。
 
 ## 5. 验收（人工，中文 action/expected/pass-fail）
 - **A1（I1 无回归）**：首页点齿轮 → 锚齿轮 popover 弹出含 5 项（与 #135 一致）；popover 外点/下滑关闭、不双弹；重置资金后 popover 自动关。= pass。

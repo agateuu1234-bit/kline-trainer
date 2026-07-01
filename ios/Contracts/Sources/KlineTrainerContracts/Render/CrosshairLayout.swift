@@ -38,8 +38,8 @@ struct CrosshairResolved: Equatable, Sendable {
 enum CrosshairLayout {
 
     // per-frame 分配修复：不可变缓存 formatter（固定 tz/locale/format，建后永不变异 → 并发只读安全，spec §3.1）。
-    // DateFormatter 非 Sendable → nonisolated(unsafe)（真安全：无可变共享态）。
-    private nonisolated(unsafe) static let timeFormatter: DateFormatter = {
+    // DateFormatter 在项目工具链(Xcode16)已 Sendable → 纯 static let 即可（编译器全检、零 suppression；加 nonisolated(unsafe) 反触发 "unnecessary" 告警）。
+    private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
         f.locale = Locale(identifier: "en_US_POSIX")

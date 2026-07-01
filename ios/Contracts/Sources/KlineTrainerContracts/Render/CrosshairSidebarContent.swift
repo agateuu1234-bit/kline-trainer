@@ -122,14 +122,15 @@ public struct CrosshairSidebarContent: Equatable, Sendable {
         switch p { case .m3, .m15, .m60: return true; default: return false }
     }
 
-    private nonisolated(unsafe) static let dateFormatter: DateFormatter = {
+    // 不可变缓存 formatter（DateFormatter 在 Xcode16 已 Sendable → 纯 static let，无 nonisolated(unsafe)）。
+    private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd"
         return f
     }()
-    private nonisolated(unsafe) static let timeFormatter: DateFormatter = {
+    private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
         f.locale = Locale(identifier: "en_US_POSIX")

@@ -40,9 +40,10 @@ enum AxisGridLayout {
         return f
     }
     // 每 format 一个不可变 formatter（永不变异 → 无共享可变态、无竞争，spec §3.3 / codex spec-R1/R3）。
-    private nonisolated(unsafe) static let intradayFormatter = makeFormatter("MM-dd HH:mm")  // m3/m15/m60
-    private nonisolated(unsafe) static let dayFormatter      = makeFormatter("yyyy-MM-dd")   // daily/weekly
-    private nonisolated(unsafe) static let monthFormatter    = makeFormatter("yyyy-MM")      // monthly
+    // DateFormatter 在 Xcode16 已 Sendable → 纯 static let（无 nonisolated(unsafe)，否则触发 "unnecessary" 告警）。
+    private static let intradayFormatter = makeFormatter("MM-dd HH:mm")  // m3/m15/m60
+    private static let dayFormatter      = makeFormatter("yyyy-MM-dd")   // daily/weekly
+    private static let monthFormatter    = makeFormatter("yyyy-MM")      // monthly
     private static func formatter(for period: Period) -> DateFormatter {
         switch period {
         case .m3, .m15, .m60: return intradayFormatter

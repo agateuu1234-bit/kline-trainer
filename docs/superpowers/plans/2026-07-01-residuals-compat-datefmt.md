@@ -11,7 +11,7 @@
 ## Global Constraints
 - 零引擎 / 持久层 / **数据契约**改动；**不 bump CONTRACT_VERSION（保持 1.7）**。I1 有意改变公共 UI 路由谓词 `sheetItem`/`sheetDismissMayApply` 对 `.settings` 的行为（恢复 #135 前通用契约），已在 spec「公共契约变更声明」如实记录——CONTRACT_VERSION 语义 = 数据契约，不覆盖 UI 谓词，故不 bump。
 - `AppRouter.Modal` 仅 `Identifiable` **非 Equatable** → 一律 `if case`/`HistoryDialogPresentation.isSettings` 谓词，**禁 `== .settings`**（落地后 grep 守卫）。
-- **所有缓存 DateFormatter 建后不可变**（固定 tz `UTC+8(secondsFromGMT:8*3600)` + locale `en_US_POSIX` + 固定 dateFormat，**无 per-call 改 dateFormat**）→ 并发只读安全；`nonisolated(unsafe) static let`（DateFormatter 非 Sendable 的必需逃逸，此处真安全）。⚠️ **本地 Swift6 宽松 ≠ CI macos-15** → Catalyst build-for-testing 必须亲验通过 + 零 warning。
+- **所有缓存 DateFormatter 建后不可变**（固定 tz `UTC+8(secondsFromGMT:8*3600)` + locale `en_US_POSIX` + 固定 dateFormat，**无 per-call 改 dateFormat**）→ 并发只读安全。**⚠️ 工具链对账（Task 1 Catalyst 亲验）**：本项目工具链（Xcode 16）`DateFormatter` 已 `Sendable` → 用**纯 `private static let`**（**不要加 `nonisolated(unsafe)`**——加了 Catalyst/本地都报 `'nonisolated(unsafe)' is unnecessary … 'Sendable' type 'DateFormatter'` 触发零-warning gate 红）。**本 plan 下文所有 `nonisolated(unsafe) static let` 示意 → 按纯 `static let` 读**。Catalyst build-for-testing 必须亲验 + CI-gate `(error|warning):` count=0。
 - I2 缓存**输出逐字不变**（同 tz/locale/format 的同一字符串）——现有 render 输出断言即回归守卫。
 - 负向 grep 断言用 `if/exit 1` 非 `! grep`。
 
@@ -368,7 +368,7 @@ git commit -m "fix(settings): AppRootView 本地排除 settings 出 sheet + clob
 ## 验证（实现完成后，归 verification-before-completion）
 三绿亲核：
 1. **host swift test**：`swift test --package-path ios/Contracts` —— Swift Testing 末行 0 failures **且** XCTest「All tests passed」（含新并发压测 + revert 后的 HistoryDialog 断言 + HomeView legacy 守卫；render 输出断言不变仍过）。
-2. **Mac Catalyst build-for-testing**：`cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' -derivedDataPath <dd>` → `** TEST BUILD SUCCEEDED **` **且** CI-gate `grep -cE "(error|warning):" 日志 == 0`（**验 Swift6 `nonisolated(unsafe)` 通过 + AppRootView UIKit 编译 + 零 warning**）。
+2. **Mac Catalyst build-for-testing**：`cd ios/Contracts && xcodebuild build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' -derivedDataPath <dd>` → `** TEST BUILD SUCCEEDED **` **且** CI-gate `grep -cE "(error|warning):" 日志 == 0`（**验纯 `static let`（DateFormatter Sendable）零 warning、无 `nonisolated(unsafe)` "unnecessary" 告警 + AppRootView UIKit 编译**）。
 3. **iOS Simulator app build**：`xcodebuild build -project ios/KlineTrainer/KlineTrainer.xcodeproj -scheme KlineTrainer -destination 'generic/platform=iOS Simulator'` → `** BUILD SUCCEEDED **`。
 4. **`== .settings` grep 守卫**：sources 无匹配。
 
