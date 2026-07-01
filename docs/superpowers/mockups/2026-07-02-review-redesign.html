@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>复盘重设计 + replay 主界面标记 — Mockup v2 (2026-07-02)</title>
+<style>
+  :root{
+    --bg:#F2F2F7; --card:#FFFFFF; --sep:#E5E5EA; --sep2:#D1D1D6;
+    --ink:#1C1C1E; --sec:#8E8E93; --ter:#AEAEB2;
+    --profit:#E23B2E; --loss:#12A150; --blue:#007AFF;
+    --amber:#F08C00; --amberBg:#FFF1DB; --amberInk:#8A4B00;
+    --teal:#0E9F8E; --tealBg:#DBF3EF; --tealInk:#065349;
+    --replayBg:#E4EEFF; --replayInk:#1257C7;
+    --redframe:rgba(226,59,46,.6);
+  }
+  *{box-sizing:border-box;-webkit-font-smoothing:antialiased}
+  body{margin:0;background:#e9e9ee;color:var(--ink);
+    font-family:-apple-system,"SF Pro Text","PingFang SC","Helvetica Neue",Arial,sans-serif;
+    padding:26px 16px 90px;line-height:1.4}
+  h1{font-size:21px;margin:0 0 4px;text-align:center}
+  .lead{color:#48484a;max-width:940px;margin:0 auto 18px;font-size:13.5px;text-align:center}
+  .lead b{color:#000}
+  .wrap{max-width:1280px;margin:0 auto}
+  .row{display:flex;flex-wrap:wrap;gap:38px;justify-content:center;align-items:flex-start}
+  .col{display:flex;flex-direction:column;align-items:center;gap:10px}
+  .caption{font-size:12.5px;color:#3a3a3c;max-width:360px;text-align:center}
+  .caption b{color:#000}
+  .sectionTitle{text-align:center;margin:46px auto 6px;font-size:17px;font-weight:700;color:#2c2c2e;
+    border-top:1px dashed #b8b8be;padding-top:26px;max-width:1100px}
+  .sub{text-align:center;color:#5b5b60;font-size:13px;max-width:860px;margin:0 auto 8px}
+  .sub b{color:#000}
+
+  /* iPhone frame — realistic width */
+  .phone{width:392px;background:#000;border-radius:44px;padding:11px;
+    box-shadow:0 12px 36px rgba(0,0,0,.22)}
+  .screen{background:var(--bg);border-radius:34px;overflow:hidden;position:relative;height:730px;display:flex;flex-direction:column}
+  .screen.auto{height:auto;min-height:230px}
+  .notch{height:30px;flex:0 0 auto;display:flex;align-items:center;justify-content:center}
+  .notch::after{content:"";width:118px;height:26px;background:#000;border-radius:14px}
+
+  /* ---------- Home ---------- */
+  .homePad{padding:8px 18px 0;flex:1;display:flex;flex-direction:column;overflow:hidden}
+  .statsRow{display:flex;justify-content:space-between;align-items:flex-start}
+  .stats3{font-size:15px;color:var(--ink)}
+  .stats3 div{margin-bottom:4px}
+  .gear{font-size:22px;color:#3a3a3c}
+  .cta{background:var(--blue);color:#fff;text-align:center;border-radius:12px;
+    padding:12px;font-size:17px;font-weight:600;margin:14px 0 8px}
+  .list{flex:1;overflow:hidden}
+
+  .hrow{border-bottom:.5px solid var(--sep);padding:8px 2px}
+  .hrow .r{display:flex;justify-content:space-between;align-items:baseline}
+  .hrow .date{font-size:12px;color:var(--sec)}
+  .hrow .stock{font-size:15px;font-weight:700}
+  .hrow .mon{font-size:12px;color:#48484a}
+  .hrow .cap{font-size:12px;color:#48484a}
+  .r3{display:flex;justify-content:space-between;align-items:flex-start;margin-top:2px;gap:8px}
+  .hrow .pnl{font-size:15px;font-weight:400;flex:0 0 auto}
+  .up{color:var(--profit)} .dn{color:var(--loss)}
+  .markerCol{display:flex;flex-wrap:wrap;justify-content:flex-end;align-content:flex-start;gap:5px;max-width:184px}
+
+  .chip{font-size:11px;font-weight:600;padding:1.5px 8px;border-radius:999px;line-height:1.35;
+    display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+  .chip .dot{width:5px;height:5px;border-radius:50%}
+  .chip.replay{background:var(--replayBg);color:var(--replayInk)}
+  .chip.replay .dot{background:var(--replayInk)}
+  .chip.reviewing{background:var(--amberBg);color:var(--amberInk)}
+  .chip.reviewing .dot{background:var(--amber);animation:pulse 1.4s infinite}
+  .chip.reviewed{background:var(--tealBg);color:var(--tealInk)}
+  .chip.reviewed .dot{background:var(--teal)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* ---------- Action sheet ---------- */
+  .sheetScreen{background:rgba(0,0,0,.30);display:flex;align-items:center;justify-content:center;flex:1}
+  .sheet{background:#fbfbfd;border-radius:16px;width:262px;padding:16px 14px 14px;
+    box-shadow:0 12px 40px rgba(0,0,0,.25);text-align:center}
+  .sheet .t{font-size:15px;font-weight:700;margin-bottom:2px}
+  .sheet .st{font-size:11px;color:var(--sec);margin-bottom:13px}
+  .sbtn{display:block;width:100%;border-radius:10px;padding:10px;font-size:14.5px;font-weight:600;
+    border:1px solid var(--sep2);background:#fff;margin-bottom:9px;color:var(--ink)}
+  .sbtn.primary{background:#eef4ff;border-color:#cfe0ff;color:var(--blue)}
+  .sbtn.resumeR{background:var(--amberBg);border-color:#ffdca8;color:var(--amberInk)}
+  .sbtn.resumeT{background:var(--replayBg);border-color:#cfe0ff;color:var(--replayInk)}
+  .sbtn.cancel{color:var(--sec);margin-bottom:0;background:#fff}
+
+  /* ---------- Training/Review screen ---------- */
+  .tbar{background:#fff;padding:7px 12px 6px;border-bottom:.5px solid var(--sep);flex:0 0 auto}
+  .tbar .top{display:flex;align-items:center;justify-content:space-between}
+  .tbar .back{color:var(--blue);font-size:16px}
+  .tbar .name{color:var(--sec);font-size:15px}
+  .tbar .end{color:var(--profit);font-size:16px;font-weight:500}
+  .tbar .endph{width:34px}
+  .metrics{display:flex;align-items:flex-start;margin-top:6px;gap:4px}
+  .mcell{display:flex;flex-direction:column;align-items:center}
+  .mcell .lab{font-size:9px;color:var(--sec)}
+  .mcell .val{font-size:12px;font-weight:600;margin-top:5px;white-space:nowrap}
+  .w-cap{width:80px}.w-cost{width:56px}.w-shares{width:64px}.w-pos{width:28px}.w-pnl{width:92px;flex:1}
+  .spacer{flex:1}
+  .mcell.pnl .val{color:var(--profit)}
+  .mcell.pnl .val2{font-size:11px;font-weight:600;color:var(--profit);margin-top:1px}
+
+  .chart{position:relative;background:linear-gradient(180deg,#fcfcfe,#f3f3f6);overflow:hidden}
+  .chart .plabel{position:absolute;top:6px;left:8px;font-size:11px;color:var(--sec);
+    background:rgba(255,255,255,.8);border-radius:5px;padding:1px 6px;font-weight:600;z-index:3}
+  .chart.active{outline:2px solid var(--redframe);outline-offset:-2px}
+  .candles{position:absolute;inset:0;display:flex;align-items:flex-end;gap:4px;padding:24px 10px 14px}
+  .candle{flex:1;border-radius:1px;max-width:9px}
+  .drawFab{position:absolute;top:34px;left:8px;width:36px;height:36px;border-radius:50%;
+    background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.16);display:flex;align-items:center;justify-content:center;
+    font-size:16px;border:.5px solid var(--sep);z-index:4}
+  .drawnline{position:absolute;height:0;border-top:1.6px solid #6C4BD8;left:12%;right:26%;z-index:2}
+  .drawnline::after{content:"复盘中·新画线";position:absolute;right:0;top:-15px;font-size:9px;color:#6C4BD8;font-weight:600}
+
+  .divider{height:.5px;background:var(--sep2)}
+
+  /* NEW review bottom bar = training bar structure, 3 trade btns -> 2 step btns */
+  .revBar{background:#fbfbfd;border-top:.5px solid var(--sep);padding:7px 14px 12px;flex:0 0 auto;
+    display:flex;align-items:center;gap:7px}
+  .segPick{width:104px;background:#e4e4ea;border-radius:8px;padding:2px;display:flex;flex:0 0 auto}
+  .segPick .sg{flex:1;text-align:center;font-size:12px;padding:5px 0;border-radius:6px;color:#48484a}
+  .segPick .sg.on{background:#fff;font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.14);color:var(--profit)}
+  .rbtn{flex:1;text-align:center;border-radius:9px;padding:9px 0;font-size:14px;font-weight:600;border:1px solid}
+  .rbtn.next{background:#eaf2ff;border-color:#bcd6ff;color:var(--blue)}
+  .rbtn.jump{background:#fff;border-color:var(--sep2);color:#2c2c2e}
+
+  /* training bar for reference (side-by-side) */
+  .trBar{background:#fbfbfd;border-top:.5px solid var(--sep);padding:7px 16px 12px;flex:0 0 auto;
+    display:flex;align-items:center;gap:7px}
+  .price{font-size:10.5px;color:var(--sec);white-space:nowrap}
+  .tb{flex:1;text-align:center;border-radius:9px;padding:9px 0;font-size:14px;font-weight:600;border:1px solid}
+  .tb.buy{background:#fdeceb;border-color:#f6c9c5;color:var(--profit)}
+  .tb.sell{background:#e6f5ec;border-color:#bfe6cd;color:var(--loss)}
+  .tb.hold{background:#fff;border-color:var(--sep2);color:#2c2c2e}
+
+  /* save dialog */
+  .saveDlg{background:#fbfbfd;border-radius:16px;width:280px;padding:18px 16px 14px;text-align:center;
+    box-shadow:0 12px 40px rgba(0,0,0,.25)}
+  .saveDlg .t{font-size:16px;font-weight:700;margin-bottom:6px}
+  .saveDlg .m{font-size:12.5px;color:#48484a;margin-bottom:15px;line-height:1.55}
+  .saveDlg .m b{color:#000}
+
+  .note{max-width:1120px;margin:44px auto 0;background:#fff;border:1px solid #e0e0e5;border-radius:14px;padding:20px 26px}
+  .note h2{font-size:15px;margin:0 0 10px}
+  .note ol{margin:0;padding-left:20px;font-size:13.5px;color:#2c2c2e}
+  .note li{margin-bottom:10px}
+  .note .q{background:#FFF7E6;border-left:3px solid var(--amber);padding:2px 8px;border-radius:4px;display:inline-block;margin-top:3px}
+  .legend{display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin:4px auto 0;font-size:12px;color:#48484a}
+  .ok{color:var(--loss);font-weight:700}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>复盘(Review) 完整重设计 + replay 主界面标记 — Mockup v2</h1>
+  <p class="lead">
+    已按你反馈重画（照真实代码：首页统计三行/无「历史记录」标题/真机字号；训练底栏 <b>[上图周期|下图周期]</b> 两段选择器；顶栏 5 格超小字）。
+    标记文案：<b>再次训练中 / 复盘中 / 已复盘</b>，放在<b>总资金正下方（右对齐）</b>。
+  </p>
+  <div class="legend">
+    <span><span class="chip replay"><span class="dot"></span>再次训练中</span> replay 暂存槽（全局最多一条）</span>
+    <span><span class="chip reviewing"><span class="dot"></span>复盘中</span> 复盘未保存·可续</span>
+    <span><span class="chip reviewed"><span class="dot"></span>已复盘</span> 复盘已存档</span>
+    <span class="ok">复盘中 与 已复盘 互斥，不同时出现</span>
+  </div>
+
+  <!-- ============ 区 1：首页 ============ -->
+  <div class="sectionTitle">① 首页历史列表 — 行标记在「总资金正下方」右对齐</div>
+  <p class="sub">统计三行 + 齿轮；历史行三行结构（日期·股票 / 起始月·总资金 / 本局盈亏）。标记 chip 右对齐、贴在总资金那一列的正下方。第 4 行示范 replay 与复盘两个<b>正交</b>标记可并存（右对齐堆叠）。</p>
+  <div class="row">
+    <div class="col">
+      <div class="phone"><div class="screen">
+        <div class="notch"></div>
+        <div class="homePad">
+          <div class="statsRow">
+            <div class="stats3">
+              <div>总局次：12 局</div>
+              <div>胜率：58%</div>
+              <div>总资金：¥ 108,900.00</div>
+            </div>
+            <div class="gear">⚙</div>
+          </div>
+          <div class="cta">开始训练</div>
+          <div class="list">
+
+            <div class="hrow">
+              <div class="r"><span class="date">2024-03-15 20:00</span><span class="stock">贵州茅台（600519）</span></div>
+              <div class="r"><span class="mon">2021年08月</span><span class="cap">¥ 102,345.67</span></div>
+              <div class="r3"><span class="pnl up">+¥ 2,345.67（+2.34%）</span>
+                <div class="markerCol"><span class="chip replay"><span class="dot"></span>再次训练中</span></div></div>
+            </div>
+
+            <div class="hrow">
+              <div class="r"><span class="date">2024-03-12 09:30</span><span class="stock">平安银行（000001）</span></div>
+              <div class="r"><span class="mon">2022年11月</span><span class="cap">¥ 98,765.43</span></div>
+              <div class="r3"><span class="pnl dn">-¥ 1,234.57（-1.23%）</span>
+                <div class="markerCol"><span class="chip reviewing"><span class="dot"></span>复盘中</span></div></div>
+            </div>
+
+            <div class="hrow">
+              <div class="r"><span class="date">2024-03-08 14:10</span><span class="stock">宁德时代（300750）</span></div>
+              <div class="r"><span class="mon">2023年03月</span><span class="cap">¥ 111,020.00</span></div>
+              <div class="r3"><span class="pnl up">+¥ 11,020.00（+11.02%）</span>
+                <div class="markerCol"><span class="chip reviewed"><span class="dot"></span>已复盘</span></div></div>
+            </div>
+
+            <div class="hrow">
+              <div class="r"><span class="date">2024-03-05 11:00</span><span class="stock">比亚迪（002594）</span></div>
+              <div class="r"><span class="mon">2020年07月</span><span class="cap">¥ 95,300.10</span></div>
+              <div class="r3"><span class="pnl dn">-¥ 4,699.90（-4.70%）</span>
+                <div class="markerCol">
+                  <span class="chip replay"><span class="dot"></span>再次训练中</span>
+                  <span class="chip reviewing"><span class="dot"></span>复盘中</span>
+                </div></div>
+            </div>
+
+            <div class="hrow">
+              <div class="r"><span class="date">2024-02-28 16:20</span><span class="stock">中国平安（601318）</span></div>
+              <div class="r"><span class="mon">2019年05月</span><span class="cap">¥ 100,000.00</span></div>
+              <div class="r3"><span class="pnl" style="color:var(--ink)">+¥ 0.00（+0.00%）</span>
+                <div class="markerCol"></div></div>
+            </div>
+
+          </div>
+        </div>
+      </div></div>
+      <div class="caption"><b>首页</b>：标记 chip 贴在「总资金」正下方右对齐。第 4 行两标记堆叠（replay + 复盘正交）。第 5 行无标记。</div>
+    </div>
+  </div>
+
+  <!-- ============ 区 2：action sheet ============ -->
+  <div class="sectionTitle">② 记录 action sheet — 只两态×两态，无任何备注标签</div>
+  <p class="sub">复盘按钮 = <b>复盘 / 返回复盘</b> 两态；训练按钮 = <b>再次训练 / 返回训练</b> 两态。已复盘的记录点开也只显示纯「复盘」（进去重新逐根回顾，到结尾揭示已存画线）。</p>
+  <div class="row">
+    <div class="col">
+      <div class="phone"><div class="screen auto"><div class="notch"></div>
+        <div class="sheetScreen"><div class="sheet">
+          <div class="t">贵州茅台（600519）</div>
+          <div class="sbtn primary">复盘</div>
+          <div class="sbtn">再次训练</div>
+          <div class="sbtn cancel">取消</div>
+        </div></div>
+      </div></div>
+      <div class="caption">A：默认 → 复盘 + 再次训练</div>
+    </div>
+    <div class="col">
+      <div class="phone"><div class="screen auto"><div class="notch"></div>
+        <div class="sheetScreen"><div class="sheet">
+          <div class="t">平安银行（000001）</div>
+          <div class="sbtn resumeR">返回复盘</div>
+          <div class="sbtn">再次训练</div>
+          <div class="sbtn cancel">取消</div>
+        </div></div>
+      </div></div>
+      <div class="caption">B：复盘中 → 返回复盘</div>
+    </div>
+    <div class="col">
+      <div class="phone"><div class="screen auto"><div class="notch"></div>
+        <div class="sheetScreen"><div class="sheet">
+          <div class="t">贵州茅台（600519）</div>
+          <div class="sbtn primary">复盘</div>
+          <div class="sbtn resumeT">返回训练</div>
+          <div class="sbtn cancel">取消</div>
+        </div></div>
+      </div></div>
+      <div class="caption">C：再次训练中 → 返回训练</div>
+    </div>
+    <div class="col">
+      <div class="phone"><div class="screen auto"><div class="notch"></div>
+        <div class="sheetScreen"><div class="sheet">
+          <div class="t">比亚迪（002594）</div>
+          <div class="sbtn resumeR">返回复盘</div>
+          <div class="sbtn resumeT">返回训练</div>
+          <div class="sbtn cancel">取消</div>
+        </div></div>
+      </div></div>
+      <div class="caption">D：两者都在 → 返回复盘 + 返回训练</div>
+    </div>
+  </div>
+
+  <!-- ============ 区 3：复盘界面 ============ -->
+  <div class="sectionTitle">③ 复盘界面 = 训练界面原样，仅底栏 3 键→2 键</div>
+  <p class="sub">顶栏（返回 / 股票名 / <b>结束</b>）+ 5 格指标（<b>逐 tick 重算的运行值</b>）+ 双 K 线区 + 红框（active/步进面板）+ 划线钮，<b>全照训练界面</b>。唯一改动：底栏把 <span style="color:var(--profit)">买入</span>/<span style="color:var(--loss)">卖出</span>/持有 换成 <span style="color:var(--blue)">下一根</span> + 快进到结尾，保留 [上图|下图] 周期分段器。</p>
+  <div class="row">
+    <!-- reference: real training screen -->
+    <div class="col">
+      <div class="phone"><div class="screen"><div class="notch"></div>
+        <div class="tbar">
+          <div class="top"><span class="back">‹ 返回</span><span class="name">贵州茅台（600519）</span><span class="end">结束</span></div>
+          <div class="metrics">
+            <div class="mcell w-cap"><span class="lab">总资金</span><span class="val">¥104,860</span></div>
+            <div class="spacer"></div>
+            <div class="mcell w-cost"><span class="lab">成本/股</span><span class="val">1,715.00</span></div>
+            <div class="spacer"></div>
+            <div class="mcell w-shares"><span class="lab">股数</span><span class="val">40</span></div>
+            <div class="spacer"></div>
+            <div class="mcell w-pos"><span class="lab">仓位</span><span class="val">2/5</span></div>
+            <div class="spacer"></div>
+            <div class="mcell pnl w-pnl"><span class="lab">本局盈亏</span><span class="val">+¥4,860</span><span class="val2">+4.86%</span></div>
+          </div>
+        </div>
+        <div class="chart active" style="flex:1.25">
+          <span class="plabel">日线</span><div class="drawFab">✏️</div>
+          <div class="candles">
+            <div class="candle up" style="height:40%"></div><div class="candle up" style="height:55%"></div>
+            <div class="candle dn" style="height:48%"></div><div class="candle up" style="height:66%"></div>
+            <div class="candle up" style="height:78%"></div><div class="candle dn" style="height:60%"></div>
+            <div class="candle up" style="height:72%"></div><div class="candle up" style="height:88%"></div>
+            <div class="candle dn" style="height:70%"></div><div class="candle up" style="height:82%"></div>
+            <div class="candle up" style="height:92%"></div><div class="candle dn" style="height:64%"></div>
+          </div>
+          <div class="drawnline" style="top:44%"></div>
+        </div>
+        <div class="divider"></div>
+        <div class="chart" style="flex:1">
+          <span class="plabel">60分</span>
+          <div class="candles">
+            <div class="candle up" style="height:50%"></div><div class="candle dn" style="height:42%"></div>
+            <div class="candle up" style="height:60%"></div><div class="candle up" style="height:70%"></div>
+            <div class="candle dn" style="height:55%"></div><div class="candle up" style="height:64%"></div>
+            <div class="candle up" style="height:76%"></div><div class="candle dn" style="height:58%"></div>
+            <div class="candle up" style="height:80%"></div><div class="candle up" style="height:66%"></div>
+          </div>
+        </div>
+        <!-- NEW review bar: 保留分段器 + 实时价格，只把 3 键换 2 键 -->
+        <div class="revBar">
+          <div class="segPick"><div class="sg on">日线</div><div class="sg">60分</div></div>
+          <span class="price">下单价 ¥1,718.00</span>
+          <div class="rbtn next">下一根</div>
+          <div class="rbtn jump">快进到结尾</div>
+        </div>
+      </div></div>
+      <div class="caption"><b>复盘界面（步进中途）</b>：底栏 = [日线|60分] 分段器 + <b>下单价（保留）</b> + <span style="color:var(--blue)">下一根</span> + 快进到结尾。<br>红框在所选面板（日线）= 「下一根」步进该面板周期。顶栏 +4.86% 是"截至当前根"运行值。</div>
+    </div>
+
+    <!-- reference training bar for comparison -->
+    <div class="col">
+      <div class="phone"><div class="screen"><div class="notch"></div>
+        <div class="tbar">
+          <div class="top"><span class="back">‹ 返回</span><span class="name">贵州茅台（600519）</span><span class="end">结束</span></div>
+          <div class="metrics">
+            <div class="mcell w-cap"><span class="lab">总资金</span><span class="val">¥104,860</span></div>
+            <div class="spacer"></div>
+            <div class="mcell w-cost"><span class="lab">成本/股</span><span class="val">1,715.00</span></div>
+            <div class="spacer"></div>
+            <div class="mcell w-shares"><span class="lab">股数</span><span class="val">40</span></div>
+            <div class="spacer"></div>
+            <div class="mcell w-pos"><span class="lab">仓位</span><span class="val">2/5</span></div>
+            <div class="spacer"></div>
+            <div class="mcell pnl w-pnl"><span class="lab">本局盈亏</span><span class="val">+¥4,860</span><span class="val2">+4.86%</span></div>
+          </div>
+        </div>
+        <div class="chart active" style="flex:1.25">
+          <span class="plabel">日线</span><div class="drawFab">✏️</div>
+          <div class="candles">
+            <div class="candle up" style="height:40%"></div><div class="candle up" style="height:55%"></div>
+            <div class="candle dn" style="height:48%"></div><div class="candle up" style="height:66%"></div>
+            <div class="candle up" style="height:78%"></div><div class="candle dn" style="height:60%"></div>
+            <div class="candle up" style="height:72%"></div><div class="candle up" style="height:88%"></div>
+            <div class="candle dn" style="height:70%"></div><div class="candle up" style="height:82%"></div>
+            <div class="candle up" style="height:92%"></div><div class="candle dn" style="height:64%"></div>
+          </div>
+        </div>
+        <div class="divider"></div>
+        <div class="chart" style="flex:1">
+          <span class="plabel">60分</span>
+          <div class="candles">
+            <div class="candle up" style="height:50%"></div><div class="candle dn" style="height:42%"></div>
+            <div class="candle up" style="height:60%"></div><div class="candle up" style="height:70%"></div>
+            <div class="candle dn" style="height:55%"></div><div class="candle up" style="height:64%"></div>
+            <div class="candle up" style="height:76%"></div><div class="candle dn" style="height:58%"></div>
+            <div class="candle up" style="height:80%"></div><div class="candle up" style="height:66%"></div>
+          </div>
+        </div>
+        <div class="trBar">
+          <div class="segPick"><div class="sg on">日线</div><div class="sg">60分</div></div>
+          <span class="price">¥1,718.00</span>
+          <div class="tb buy">买入</div><div class="tb sell">卖出</div><div class="tb hold">持有</div>
+        </div>
+      </div></div>
+      <div class="caption"><b>训练界面（现状，对照用）</b>：底栏 = [日线|60分] + 下单价 + 买入/卖出/持有。<br>复盘只把这条底栏换成上一张的 2 键，其余全一样。</div>
+    </div>
+
+    <!-- save dialog -->
+    <div class="col">
+      <div class="phone"><div class="screen auto"><div class="notch"></div>
+        <div class="sheetScreen"><div class="saveDlg">
+          <div class="t">结束复盘</div>
+          <div class="m">是否保存本次复盘记录？</div>
+          <div class="sbtn primary">保存</div>
+          <div class="sbtn">不保存</div>
+          <div class="sbtn cancel">取消</div>
+        </div></div>
+      </div></div>
+      <div class="caption"><b>结束保存弹窗</b>（点顶栏「结束」触发，仅有改动时提示）：<br>保存=覆盖存档→回首页标「已复盘」；不保存=丢弃本次改动（有旧存档则保留旧的）→标「已复盘」或无标；取消=不结束，继续复盘。<br>点「返回」而非结束 → 回首页标「复盘中」，可续。</div>
+    </div>
+  </div>
+
+  <!-- ============ 决策 ============ -->
+  <div class="note">
+    <h2>UI 决策 — 全部已定（2026-07-02）</h2>
+    <ol>
+      <li><b>行标记</b>：再次训练中(蓝) / 复盘中(橙·脉动) / 已复盘(青)；放总资金正下方右对齐；单标记一行、双标记（replay+复盘正交）并排换行；复盘中与已复盘互斥。</li>
+      <li><b>action sheet</b>：复盘/返回复盘 · 再次训练/返回训练，无小字说明。</li>
+      <li><b>复盘底栏</b>：[上图|下图] 分段器 + <b>下单价</b>（保留原文案）+ 下一根 + 快进到结尾。<b>「下一根」步进所选（红框）面板的周期</b>。</li>
+      <li><b>复盘顶栏</b>：训练同款 5 格，显示<b>逐 tick 重算的运行值</b>。</li>
+      <li><b>结束弹窗</b>：结束复盘 → 是否保存本次复盘记录？ 保存 / 不保存 / 取消（有改动才提示）。</li>
+    </ol>
+  </div>
+</div>
+</body>
+</html>
