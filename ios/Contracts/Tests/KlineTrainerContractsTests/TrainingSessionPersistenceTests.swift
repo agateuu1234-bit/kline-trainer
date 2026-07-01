@@ -76,6 +76,7 @@ struct TrainingSessionPersistenceTests {
             dbFactory: PreviewTrainingSetDBFactory(candles: candles),
             recordRepo: records,
             pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: port,
             // A4：settingsDAO 与 SettingsStore 同源（mirror 生产同一 DefaultAppDB）——startingCapital 直读 DAO。
             settingsDAO: CapitalDAO(capital: capital),
@@ -113,6 +114,7 @@ struct TrainingSessionPersistenceTests {
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records,
             pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,
@@ -318,6 +320,7 @@ struct TrainingSessionPersistenceTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache, settings: SettingsStore(settingsDAO: CapitalDAO(capital: 10_000)))
@@ -375,6 +378,7 @@ struct TrainingSessionPersistenceTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: PreviewTrainingSetDBFactory(candles: Self.validCandles()),
             recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: StubFinalization(fixed: (1, 777_000)),   // 刻意 ≠ engine.currentTotalCapital
             settingsDAO: Self.CapitalDAO(capital: 50_000),
             cache: cache, settings: injectedStore)
@@ -452,6 +456,7 @@ struct TrainingSessionPersistenceTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000)))
@@ -518,6 +523,7 @@ struct TrainingSessionPersistenceTests {
         let port = InMemorySessionFinalizationPort(records: records, pending: pending)
         let coord = TrainingSessionCoordinator(
             dbFactory: StubFactory(reader: spy), recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: port, settingsDAO: CapitalDAO(capital: 3),
             cache: cache, settings: SettingsStore(settingsDAO: CapitalDAO(capital: 3)))
         return (coord, records, pending)
@@ -590,6 +596,7 @@ struct TrainingSessionPersistenceTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)),
             recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: capital)))
@@ -603,7 +610,7 @@ struct TrainingSessionPersistenceTests {
         _ = engine.buy(panel: .upper, shares: 2000)      // replay 可交易；建非平凡终态
         engine.forceCloseManually()                       // 6a：强平 → 持仓平
         #expect(engine.position.shares == 0)
-        let payload = try coord.replaySettlementPayload(engine: engine)
+        let payload = try await coord.replaySettlementPayload(engine: engine)
         #expect(payload.id == nil)                                       // 非持久（无 server id）
         #expect(payload.totalCapital == engine.initialCapital)          // D1 方案 A：起始资金
         #expect(payload.profit == engine.currentTotalCapital - engine.initialCapital)
@@ -622,7 +629,7 @@ struct TrainingSessionPersistenceTests {
         let recordsBefore = try records.listRecords(limit: nil).count   // = 1（仅 seed 的源 record）
         _ = engine.buy(panel: .upper, shares: 2000)
         engine.forceCloseManually()
-        _ = try coord.replaySettlementPayload(engine: engine)
+        _ = try await coord.replaySettlementPayload(engine: engine)
         #expect(try records.listRecords(limit: nil).count == recordsBefore)   // 无新 insert
         #expect(try pending.loadPending() == nil)                             // pending 不动
         // finalize 对 replay 仍返 nil（持久化路径不变）
@@ -634,8 +641,8 @@ struct TrainingSessionPersistenceTests {
     func replaySettlementPayload_throwsInNonReplayMode() async throws {
         let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 50_000)
         let engine = try await coord.startNewNormalSession()   // .normal
-        #expect(throws: AppError.self) {
-            _ = try coord.replaySettlementPayload(engine: engine)
+        await #expect(throws: AppError.self) {
+            _ = try await coord.replaySettlementPayload(engine: engine)
         }
     }
 
@@ -643,8 +650,8 @@ struct TrainingSessionPersistenceTests {
     func replaySettlementPayload_throwsWithoutActiveSession() async throws {
         let (coord, engine, _, _) = try await Self.makeReplaySession()
         await coord.endSession()                               // 清活跃上下文
-        #expect(throws: AppError.self) {
-            _ = try coord.replaySettlementPayload(engine: engine)
+        await #expect(throws: AppError.self) {
+            _ = try await coord.replaySettlementPayload(engine: engine)
         }
     }
 
@@ -714,6 +721,7 @@ struct TrainingSessionPersistenceTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache, settings: SettingsStore(settingsDAO: CapitalDAO(capital: 10_000)))
@@ -748,6 +756,7 @@ struct TrainingSessionPersistenceTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)),
             recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,
@@ -761,6 +770,7 @@ struct TrainingSessionPersistenceTests {
         let coord2 = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)),
             recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,

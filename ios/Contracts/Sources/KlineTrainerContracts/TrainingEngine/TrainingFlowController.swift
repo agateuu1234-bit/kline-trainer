@@ -23,6 +23,8 @@ public protocol TrainingFlowController {
     func shouldAccumulateCapital() -> Bool
     func shouldShowSettlement() -> Bool
     func shouldGiveHapticFeedback() -> Bool
+    func shouldPersistProgress() -> Bool
+    func canJumpToEnd() -> Bool
 }
 
 /// 正常训练：全能力开放。
@@ -49,27 +51,38 @@ public struct NormalFlow: TrainingFlowController {
     public func shouldAccumulateCapital() -> Bool { true }
     public func shouldShowSettlement() -> Bool { true }
     public func shouldGiveHapticFeedback() -> Bool { true }
+    public func shouldPersistProgress() -> Bool { true }
+    public func canJumpToEnd() -> Bool { false }
 }
 
-/// 复盘（只读）：固定在原局结束态，全能力关闭。
+/// 复盘可步进重演：从 startTick 开始，逐 K 线步进到 finalTick，只读不交易。
+/// - `startTick` 经防御性钳位（防 ClosedRange trap）：public init 可被直接传坏 startTick/corrupt record；
+///   合法路径（0 ≤ startTick ≤ finalTick）下 safeStart==startTick / safeFinal==finalTick，语义不变。
+/// - `make` 守卫是正确-错误路径（startTick > finalTick → 可恢复 AppError）；钳位是安全网（public init 直接构造）。
 public struct ReviewFlow: TrainingFlowController {
     public let record: TrainingRecord
+    public let startTick: Int
 
-    public init(record: TrainingRecord) {
+    public init(record: TrainingRecord, startTick: Int) {
         self.record = record
+        self.startTick = startTick
     }
 
     public var mode: TrainingMode { .review }
     public var feeSnapshot: FeeSnapshot { record.feeSnapshot }
-    public var initialTick: Int { record.finalTick }
-    public var allowedTickRange: ClosedRange<Int> { record.finalTick...record.finalTick }
+    private var safeFinalTick: Int { max(0, record.finalTick) }
+    private var safeStartTick: Int { max(0, min(startTick, safeFinalTick)) }
+    public var initialTick: Int { safeStartTick }
+    public var allowedTickRange: ClosedRange<Int> { safeStartTick...safeFinalTick }
 
     public func canBuySell() -> Bool { false }
-    public func canAdvance() -> Bool { false }
+    public func canAdvance() -> Bool { true }           // 新需求10：复盘可步进重演
     public func shouldSaveRecord() -> Bool { false }
     public func shouldAccumulateCapital() -> Bool { false }
     public func shouldShowSettlement() -> Bool { false }
     public func shouldGiveHapticFeedback() -> Bool { false }
+    public func shouldPersistProgress() -> Bool { false }
+    public func canJumpToEnd() -> Bool { true }
 }
 
 /// 再来一次：可操作但不入账，沿用原局 FeeSnapshot。
@@ -94,4 +107,6 @@ public struct ReplayFlow: TrainingFlowController {
     public func shouldAccumulateCapital() -> Bool { false }
     public func shouldShowSettlement() -> Bool { true }
     public func shouldGiveHapticFeedback() -> Bool { true }
+    public func shouldPersistProgress() -> Bool { true }
+    public func canJumpToEnd() -> Bool { false }
 }

@@ -157,6 +157,32 @@ enum AppDBMigrations {
             try db.execute(sql: "PRAGMA user_version = 3")
         }
 
+        // 0006：replay 续局持久化（新需求10，v1.8）。additive：新建 pending_replay 单行表
+        // （CHECK(id=1)），与 pending_training 同构 + record_id（来源历史记录），无 session_key
+        // （replay 不写 training_records、无 finalize 幂等）。**只走 migration，不动 v1_4_baselineDDL/
+        // app_schema_v1.sql（v1.4 冻结基线，drift-checked）**。fresh install 经 0001→…→0006 链建全表。
+        migrator.registerMigration("0006_v1.8_pending_replay") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS pending_replay (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    record_id INTEGER NOT NULL,
+                    training_set_filename TEXT NOT NULL,
+                    global_tick_index INTEGER NOT NULL,
+                    upper_period TEXT NOT NULL,
+                    lower_period TEXT NOT NULL,
+                    position_data TEXT NOT NULL,
+                    fee_snapshot TEXT NOT NULL,
+                    trade_operations TEXT NOT NULL,
+                    drawings TEXT NOT NULL,
+                    started_at INTEGER NOT NULL,
+                    accumulated_capital REAL NOT NULL,
+                    cash_balance REAL NOT NULL,
+                    drawdown TEXT NOT NULL
+                )
+                """)
+            try db.execute(sql: "PRAGMA user_version = 4")
+        }
+
         return migrator
     }
 }

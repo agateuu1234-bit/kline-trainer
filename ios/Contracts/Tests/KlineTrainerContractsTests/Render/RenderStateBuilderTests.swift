@@ -664,6 +664,45 @@ struct RenderStateBuilderTests {
         #expect(rs.drawings.allSatisfy { $0.panelPosition == 0 })            // 仅上栏；下栏被排除
     }
 
+    // MARK: - codex whole-branch R4-F1：画线逐 tick 揭示（镜像 markers reveal）
+
+    @Test("R4-F1：未来锚点画线在低 tick 被隐藏，tick 步进越过锚点后揭示")
+    @MainActor
+    func drawingsRevealByTick_futureAnchorHiddenUntilStepped() {
+        // Engine with 50 m3 candles (endGlobalIndex==i), starting at tick=5 → currentCandleIndex=5.
+        let candles = Self.candles(period: .m3, count: 50)
+        let maxTick = candles.count - 1
+        let e = TrainingEngine(
+            flow: NormalFlow(fees: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true), maxTick: maxTick),
+            allCandles: [.m3: candles],
+            maxTick: maxTick,
+            initialTick: 5,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m3, initialLowerPeriod: .m3,
+            decelerationDriverFactory: { FakeFrameDriver(onTick: $0) })
+        // Drawing A: anchor at candleIndex=3 (past, 3 ≤ currentCandleIndex(5)) → must appear.
+        e.appendDrawing(DrawingObject(toolType: .horizontal,
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 3, price: 10)],
+                                      isExtended: true, panelPosition: 0))
+        // Drawing B: anchor at candleIndex=8 (future, 8 > currentCandleIndex(5)) → must NOT appear at tick=5.
+        e.appendDrawing(DrawingObject(toolType: .horizontal,
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 8, price: 11)],
+                                      isExtended: true, panelPosition: 0))
+
+        // RED assertion (before advancing): only past-anchored drawing visible.
+        let rsAtTick5 = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
+        #expect(rsAtTick5.drawings.count == 1)
+        #expect(rsAtTick5.drawings.allSatisfy { $0.anchors.allSatisfy { $0.candleIndex == 3 } })
+
+        // Advance tick past candleIndex=8: call holdOrObserve 5× (tick 5→6→7→8→9→10).
+        for _ in 0..<5 { e.holdOrObserve(panel: .upper) }
+        #expect(e.tick.globalTickIndex == 10)   // currentCandleIndex=10 ≥ 8
+
+        // GREEN assertion (after advancing): both drawings now visible.
+        let rsAtTick10 = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
+        #expect(rsAtTick10.drawings.count == 2)
+    }
+
     @Test("make: drawings 按 panelPosition 过滤 —— 反之 .lower 仅含下栏(1)，上栏(0)被排除")
     @MainActor
     func drawingsFilteredByPanelPositionLower() {

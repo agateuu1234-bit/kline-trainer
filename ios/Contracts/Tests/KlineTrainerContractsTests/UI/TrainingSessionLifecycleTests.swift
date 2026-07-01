@@ -130,11 +130,22 @@ struct TrainingSessionLifecycleTests {
         #expect(life.shouldAutoFinalize(didFinalize: true) == false)
     }
 
-    @Test("shouldAutoFinalize: Review at-end → false（mode-gate killer）")
+    @Test("shouldAutoFinalize: Review（B3：从训练起点非末根）→ false（mode-gate killer）")
     func shouldAutoFinalize_review_false() async throws {
         let (coord, records, _, _) = H.makeCoordinator(candles: H.validCandles())
         let id = try Self.seedRecord(records)
         let engine = try await coord.review(recordId: id)
+        let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
+        #expect(life.isAtEnd == false)   // B3: review 从派生 startTick 开始，不在末根
+        #expect(life.shouldAutoFinalize(didFinalize: false) == false)
+    }
+
+    @Test("shouldAutoFinalize: Review 步进至 maxTick（isAtEnd==true）→ false（mode-gate 恒阻，不自动结算）")
+    func shouldAutoFinalize_review_atMaxTick_false() async throws {
+        let (coord, records, _, _) = H.makeCoordinator(candles: H.validCandles())
+        let id = try Self.seedRecord(records)
+        let engine = try await coord.review(recordId: id)
+        engine.jumpToEnd()   // ReviewFlow.canJumpToEnd()==true → tick=maxTick
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
         #expect(life.isAtEnd == true)
         #expect(life.shouldAutoFinalize(didFinalize: false) == false)
@@ -159,7 +170,7 @@ struct TrainingSessionLifecycleTests {
         _ = engine.buy(panel: .upper, shares: 1600)       // 建非平凡终态（replay 可交易；1600 = 20%×80_000÷10）
         engine.forceCloseManually()                       // 强平须 caller 先行（D4）→ 持仓平
         #expect(engine.position.shares == 0)
-        let payload = try life.replaySettlementRecord()
+        let payload = try await life.replaySettlementRecord()
         #expect(payload.id == nil)                        // 非持久（无 server id）
         #expect(payload.totalCapital == engine.initialCapital)   // D1 方案 A：起始资金
         #expect(payload.profit == engine.currentTotalCapital - engine.initialCapital)   // 终态收益直通
@@ -171,6 +182,6 @@ struct TrainingSessionLifecycleTests {
         let (coord, _, _, _) = H.makeCoordinator(candles: H.validCandles())
         let engine = try await coord.startNewNormalSession()
         let life = TrainingSessionLifecycle(engine: engine, coordinator: coord)
-        #expect(throws: AppError.self) { _ = try life.replaySettlementRecord() }
+        await #expect(throws: AppError.self) { _ = try await life.replaySettlementRecord() }
     }
 }

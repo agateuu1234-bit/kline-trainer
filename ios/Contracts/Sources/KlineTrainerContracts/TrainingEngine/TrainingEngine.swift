@@ -162,7 +162,7 @@ public final class TrainingEngine {
     /// 无法不 trap 地预判（codex final-R8-F1）。maxTick 由此输入单一派生，结构上无 flow/maxTick 错位。
     public enum FlowInput {
         case normal(fees: FeeSnapshot, maxTick: Int)
-        case review(record: TrainingRecord)
+        case review(record: TrainingRecord, startTick: Int)
         case replay(fees: FeeSnapshot, maxTick: Int)
     }
 
@@ -196,9 +196,13 @@ public final class TrainingEngine {
         case .replay(let fees, let mt):
             guard mt >= 0 else { throw AppError.trainingSet(.emptyData) }
             maxTick = mt; flow = ReplayFlow(feeSnapshotFromOriginal: fees, maxTick: mt)
-        case .review(let record):
-            guard record.finalTick >= 0 else { throw AppError.trainingSet(.emptyData) }
-            maxTick = record.finalTick; flow = ReviewFlow(record: record)
+        case .review(let record, let startTick):
+            // codex plan-R3-F3：startTick 越界（损坏 record/metadata）→ 可恢复 trainingSet 错误，非 ClosedRange trap
+            guard startTick >= 0, record.finalTick >= startTick else {
+                throw AppError.trainingSet(.emptyData)
+            }
+            maxTick = record.finalTick
+            flow = ReviewFlow(record: record, startTick: startTick)
         }
         // flow 由 validated maxTick 建成 → allowedTickRange 安全、无 flow/maxTick 错位（R4-F1 由构造保证）。
         // final-R9-F2：佣金率 finite + 非负——负率 + 免5关闭会让 TradeCalculator 算出负佣金/虚增购买力。
@@ -341,10 +345,47 @@ public final class TrainingEngine {
     // MARK: - 持有 / 观察（E5b）
 
     /// 持有(有仓)/观察(空仓)：仅推进 tick（plan v1.5 L944「直接推进 1 根当前周期 K 线」），
-    /// 无成交、无 marker/operation。review 模式 canAdvance()==false → no-op（capability matrix L836）。
+    /// 无成交、无 marker/operation。review 现 canAdvance()==true（新需求10 复盘可步进），
+    /// advanceAndAccount 在 review 下无成交、无 forceClose（capability matrix L836）。
     public func holdOrObserve(panel: PanelId) {
         guard flow.canAdvance() else { return }
         advanceAndAccount(panel: panel)
+    }
+
+    // MARK: - 新需求10：复盘步进（B2）
+
+    /// 复盘「快进到结尾」。仅 canJumpToEnd()（Review）生效；设 tick=maxTick + 镜头吸附 autoTracking。
+    /// 无成交、无 marker；无 forceClose（复盘无持仓）。K线/标记随 currentIdx 自动全揭示。
+    public func jumpToEnd() {
+        guard flow.canJumpToEnd() else { return }
+        stopAllDeceleration()
+        tick.reset(to: tick.maxTick)
+        _ = upperPanel.reduce(.tradeTriggered)
+        _ = lowerPanel.reduce(.tradeTriggered)
+        resetOffsetAfterAutoTracking(.upper)
+        resetOffsetAfterAutoTracking(.lower)
+        drawdown.update(currentCapital: currentTotalCapital)
+    }
+
+    /// 复盘「下一根」逐根推进。**按两 panel 中更细（stepsForPeriod 更小的正数步）的周期步进**，
+    /// 而非 activePanel（复盘隐藏了周期选择条，activePanel 停在默认 .lower=粗周期会一击跳一整天）。
+    /// 复用 holdOrObserve（canAdvance 门控 + 只读无成交）。用户可单指竖滑切周期组合改粒度。
+    /// 耗尽面板（stepsForPeriod==0）绝不被选中（codex whole-branch R2-F2）：若一方耗尽则选另一方；
+    /// 皆耗尽时（已到结尾）no-op。
+    public func stepReviewForward() {
+        let upperSteps = stepsForPeriod(upperPanel.period)
+        let lowerSteps = stepsForPeriod(lowerPanel.period)
+        let panel: PanelId
+        if upperSteps > 0 && lowerSteps > 0 {
+            panel = upperSteps <= lowerSteps ? .upper : .lower   // 皆可推进 → 选更细
+        } else if upperSteps > 0 {
+            panel = .upper                                        // 仅 upper 能推进
+        } else if lowerSteps > 0 {
+            panel = .lower                                        // 仅 lower 能推进
+        } else {
+            return                                                // 皆耗尽=到结尾，no-op
+        }
+        holdOrObserve(panel: panel)
     }
 
     // MARK: - 私有：步进 + 联动 + 记账（buy/sell/holdOrObserve 共用）
@@ -933,7 +974,7 @@ extension TrainingEngine {
         let flow: TrainingFlowController
         switch mode {
         case .normal: flow = NormalFlow(fees: fees, maxTick: maxTick)
-        case .review: flow = ReviewFlow(record: previewRecord(fees: fees, finalTick: maxTick))
+        case .review: flow = ReviewFlow(record: previewRecord(fees: fees, finalTick: maxTick), startTick: 0)
         case .replay: flow = ReplayFlow(feeSnapshotFromOriginal: fees, maxTick: maxTick)
         }
         return TrainingEngine(

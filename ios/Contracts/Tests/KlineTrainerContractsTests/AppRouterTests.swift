@@ -98,6 +98,7 @@ struct AppRouterTests {
         let coordinator = TrainingSessionCoordinator(
             dbFactory: PreviewTrainingSetDBFactory(candles: candles),
             recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: settings)
         let runner = DownloadAcceptanceRunner(
@@ -244,7 +245,7 @@ struct AppRouterTests {
         #expect(f.router.activeTraining?.lifecycle.engine.flow.mode == .replay)
         let recordsBefore = try f.records.listRecords(limit: nil).count   // = 1（仅 seed 源 record）
         let life = try #require(f.router.activeTraining?.lifecycle)
-        let payload = try life.replaySettlementRecord()               // id==nil 非持久 payload
+        let payload = try await life.replaySettlementRecord()               // id==nil 非持久 payload
         f.router.presentReplaySettlement(record: payload)
         if case .settlement(let r)? = f.router.activeModal {
             #expect(r.id == nil)                                       // in-memory 非持久
@@ -261,7 +262,7 @@ struct AppRouterTests {
         await f.router.replay(id: 1)
         #expect(f.coordinator.activeReader != nil)
         let life = try #require(f.router.activeTraining?.lifecycle)
-        f.router.presentReplaySettlement(record: try life.replaySettlementRecord())
+        f.router.presentReplaySettlement(record: try await life.replaySettlementRecord())
         let before = try f.records.listRecords(limit: nil).count
         await f.router.confirmSettlement()
         #expect(f.router.activeTraining == nil)

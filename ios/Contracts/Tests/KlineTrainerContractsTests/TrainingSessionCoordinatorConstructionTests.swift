@@ -57,6 +57,7 @@ struct TrainingSessionCoordinatorConstructionTests {
             dbFactory: PreviewTrainingSetDBFactory(candles: candles),
             recordRepo: records,
             pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             // A4：settingsDAO 与 SettingsStore 同源（startingCapital 直读 DAO）。
             settingsDAO: CapitalDAO(capital: capital),
@@ -132,6 +133,7 @@ struct TrainingSessionCoordinatorConstructionTests {
             dbFactory: factory,
             recordRepo: records,
             pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,
@@ -264,6 +266,7 @@ struct TrainingSessionCoordinatorConstructionTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records2, pendingRepo: pendingRepo,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records2, pending: pendingRepo),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.persistence(.dbCorrupted)) {
@@ -293,6 +296,7 @@ struct TrainingSessionCoordinatorConstructionTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records3, pendingRepo: pendingRepo,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records3, pending: pendingRepo),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.trainingSet(.emptyData)) {
@@ -327,7 +331,7 @@ struct TrainingSessionCoordinatorConstructionTests {
                        createdAt: 0)
     }
 
-    @Test("review: 只读末态 + 还原标记 + tick=finalTick + 收益率与 record 自洽（D5）")
+    @Test("review: 从训练起点开演 + 还原标记 + tick=派生 startTick + 收益率与 record 自洽（D5 / B3）")
     func review_happy_restoresEndState() async throws {
         let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles())
         let id = try Self.seedRecord(records, totalCapital: 100_000, profit: 8_000, finalTick: 7,
@@ -336,7 +340,9 @@ struct TrainingSessionCoordinatorConstructionTests {
         let engine = try await coord.review(recordId: id)
         #expect(engine.flow.mode == .review)
         #expect(engine.flow.canBuySell() == false)        // ReviewFlow 全能力关
-        #expect(engine.tick.globalTickIndex == 7)          // initialTick = finalTick
+        #expect(engine.tick.globalTickIndex == 0)          // B3: initialTick = derived startTick (startDatetime=1 → m3[0])
+        #expect(engine.tick.globalTickIndex < 7)           // 起点不是末根
+        #expect(engine.flow.allowedTickRange.upperBound == 7)  // 末根仍是 finalTick
         #expect(engine.markers.count == 2)                 // 还原全部标记
         #expect(engine.tradeOperations.count == 2)
         #expect(engine.initialCapital == 100_000)
@@ -364,6 +370,7 @@ struct TrainingSessionCoordinatorConstructionTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pendingR,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pendingR),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.persistence(.ioError("x"))) {
@@ -412,6 +419,7 @@ struct TrainingSessionCoordinatorConstructionTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pendingP,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pendingP),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.persistence(.diskFull)) {

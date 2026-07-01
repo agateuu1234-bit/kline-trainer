@@ -167,7 +167,7 @@ import CoreGraphics
     @Test func reviewModeStartsAtFinalTick() {
         let record = Self.previewRecordForTest()   // finalTick 2
         // R4-F1：ReviewFlow.allowedTickRange = finalTick...finalTick → engine maxTick 必须 == finalTick
-        let e = TrainingEngine(flow: ReviewFlow(record: record),
+        let e = TrainingEngine(flow: ReviewFlow(record: record, startTick: record.finalTick),
                                allCandles: Self.candles([10, 11, 12]),
                                maxTick: 2, initialCapital: 100_000,
                                initialCashBalance: 50_000,
@@ -406,7 +406,7 @@ import CoreGraphics
         // 现价用 tick 2 的 close=12，不取未来 13/14/15。未来 candle「不渲染」由 C8(顺位7)
         // 「揭示到 globalTickIndex」机制保证（所有模式同此机制，normal 亦不显未来）。
         let record = Self.previewRecordForTest(finalTick: 2)
-        let e = TrainingEngine(flow: ReviewFlow(record: record),
+        let e = TrainingEngine(flow: ReviewFlow(record: record, startTick: record.finalTick),
                                allCandles: Self.candles([10, 11, 12, 13, 14, 15]),
                                maxTick: 2, initialCapital: 100_000, initialCashBalance: 50_000,
                                initialPosition: PositionManager(shares: 1000, averageCost: 10, totalInvested: 10_000))

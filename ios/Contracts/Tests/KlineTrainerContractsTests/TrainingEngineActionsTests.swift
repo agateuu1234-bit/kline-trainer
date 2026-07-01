@@ -20,7 +20,7 @@ import CoreGraphics
         let flow: TrainingFlowController = switch mode {
         case .normal: NormalFlow(fees: fees, maxTick: maxTick)
         case .replay: ReplayFlow(feeSnapshotFromOriginal: fees, maxTick: maxTick)
-        case .review: ReviewFlow(record: previewRecord(finalTick: maxTick))
+        case .review: ReviewFlow(record: previewRecord(finalTick: maxTick), startTick: maxTick)
         }
         return TrainingEngine(
             flow: flow,

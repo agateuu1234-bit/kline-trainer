@@ -10,7 +10,7 @@ import KlineTrainerContracts
 /// - 4 个 protocol surface 用 4 个 extension 分别实现
 /// - 所有 GRDB 错误在 extension 边界 `try ... catch` 通过 PersistenceErrorMapping.translate
 /// - init 时同步跑 AppDBMigrations.makeMigrator().migrate(queue) → 失败抛 AppError
-public final class DefaultAppDB: AppDB, TrainingResetPort {
+public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayRepository {
 
     /// 唯一 GRDB queue；所有 4 个 protocol 方法共享。internal 给 same-target tests 看。
     let dbQueue: DatabaseQueue
@@ -176,6 +176,53 @@ public final class DefaultAppDB: AppDB, TrainingResetPort {
         catch { throw PersistenceErrorMapping.translate(error) }
     }
 
+    // MARK: - PendingReplayRepository
+
+    public func saveReplay(_ p: PendingReplay) throws {
+        do {
+            try dbQueue.write { db in
+                try PendingReplayRepositoryImpl.saveReplay(db, replay: p)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func loadReplay() throws -> PendingReplay? {
+        do {
+            return try dbQueue.read { db in
+                try PendingReplayRepositoryImpl.loadReplay(db)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func loadReplaySlotInfo() throws -> ReplaySlotInfo? {
+        do {
+            return try dbQueue.read { db in
+                try PendingReplayRepositoryImpl.loadReplaySlotInfo(db)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func clearReplay() throws {
+        do {
+            try dbQueue.write { db in
+                try PendingReplayRepositoryImpl.clearReplay(db)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func clearReplay(ifRecordId recordId: Int64) throws {
+        do {
+            try dbQueue.write { db in
+                try PendingReplayRepositoryImpl.clearReplay(db, ifRecordId: recordId)
+            }
+        } catch let appErr as AppError { throw appErr }
+        catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
     // MARK: - SettingsDAO
 
     public func loadSettings() throws -> AppSettings {
@@ -210,13 +257,15 @@ public final class DefaultAppDB: AppDB, TrainingResetPort {
 
     // MARK: - TrainingResetPort（重置资金「真正归零重来」，运行时 #1）
 
-    /// 单事务：清 pending + setTotalCapital（**保留**历史记录）。
+    /// 单事务：清 pending + 清 pending_replay + setTotalCapital（**保留**历史记录）。
     /// RFC-A：去掉 deleteAll（推翻 #123），重置只清未完成对局 + 置资金；历史记录保留。
+    /// 新需求10(A6)：reset 连带清 pending_replay（无条件清，reset 清全局状态）。
     /// dbQueue.write 即事务边界 —— 任一步抛错整体 rollback（要么都成要么都不成）。
     public func resetAllTrainingProgress(toCapital: Double) throws {
         do {
             try dbQueue.write { db in
                 try PendingTrainingRepositoryImpl.clearPending(db)
+                try PendingReplayRepositoryImpl.clearReplay(db)     // 新需求10(A6)：reset 连带清 replay 槽
                 try SettingsDAOImpl.setTotalCapital(db, toCapital)
             }
         } catch let appErr as AppError { throw appErr }

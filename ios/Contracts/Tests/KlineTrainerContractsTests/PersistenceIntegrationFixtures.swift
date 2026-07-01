@@ -16,7 +16,9 @@ enum PIFixtures {
         cache._seedForTesting([TrainingSessionPersistenceTests.cachedFile()])
         let coord = TrainingSessionCoordinator(
             dbFactory: PreviewTrainingSetDBFactory(candles: TrainingSessionPersistenceTests.validCandles()),
-            recordRepo: records, pendingRepo: pending, finalization: port,
+            recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
+            finalization: port,
             // A4：settingsDAO 与 SettingsStore 同源（mirror 生产同一 DefaultAppDB）——startingCapital 直读 DAO。
             settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: capital), cache: cache,
             settings: SettingsStore(settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: capital)))
@@ -38,7 +40,9 @@ enum PIFixtures {
             candles: candles,                                     // 默认 validCandles；可注入 [:] 测「开成功但 candle-load 失败 → 不 touch」（codex-13a-F2）
             corruptFilenames: corrupt, openErrorAll: openError)   // knob 经 init（struct，禁后赋值）
         let coord = TrainingSessionCoordinator(
-            dbFactory: factory, recordRepo: records, pendingRepo: pending, finalization: port,
+            dbFactory: factory, recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
+            finalization: port,
             // A4：settingsDAO 与 SettingsStore 同源（startingCapital 直读 DAO）。
             settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: 50_000), cache: cache,
             settings: SettingsStore(settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: 50_000)))

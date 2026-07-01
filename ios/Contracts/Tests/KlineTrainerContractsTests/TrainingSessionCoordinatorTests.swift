@@ -187,6 +187,7 @@ struct TrainingSessionCoordinatorShapeTests {
             dbFactory: PreviewTrainingSetDBFactory(),
             recordRepo: records,
             pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: InMemoryCacheManager(),

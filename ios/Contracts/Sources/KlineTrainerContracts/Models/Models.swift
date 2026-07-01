@@ -4,7 +4,7 @@
 import Foundation
 
 /// 顶层契约版本号。bump 策略见 docs/contracts/contract-version-matrix.md（Plan 1f 落地）。
-public let CONTRACT_VERSION = "1.7"
+public let CONTRACT_VERSION = "1.8"
 
 // MARK: - Enums
 

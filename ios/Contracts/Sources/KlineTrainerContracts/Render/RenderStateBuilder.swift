@@ -58,7 +58,15 @@ public enum RenderStateBuilder {
             volumeRange: volumeRange,
             macdRange: macdRange,
             markers: engine.markers,
-            drawings: engine.drawings.filter { $0.panelPosition == (panel == .upper ? 0 : 1) },
+            // codex whole-branch R4-F1：复盘步进时逐 tick 揭示画线（镜像 markers reveal 语义）。
+            // 锚点全部 ≤ 当前面板自身 period 的 currentCandleIndex 才渲染；未来锚点在步进到达前隐藏。
+            // normal/replay 下画线恒为历史锚（不受影响）；空锚点 drawing（allSatisfy 对空集为 true）保留但不渲染。
+            drawings: engine.drawings.filter { drawing in
+                drawing.panelPosition == (panel == .upper ? 0 : 1)
+                    && drawing.anchors.allSatisfy { anchor in
+                        anchor.candleIndex <= currentCandleIndex(candles: engine.allCandles[anchor.period] ?? [], tick: tick)
+                    }
+            },
             crosshairPoint: crosshair,   // C8b：长按十字光标由 ChartContainerView.Coordinator 视图层透传（D3）
             previousCloseBeforeVisible: previousCloseBeforeVisible(candles: candles, startIndex: viewport.startIndex))
     }

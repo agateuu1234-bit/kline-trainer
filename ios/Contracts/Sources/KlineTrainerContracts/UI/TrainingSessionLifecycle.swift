@@ -76,7 +76,8 @@ public struct TrainingSessionLifecycle {
     /// 不触 `pending_training`、`finalize` 对 replay 仍返 nil）。**强平须 caller 先行**（壳层 manual
     /// `forceCloseManually` / auto maxTick 步进已强平，同 `finalizeForSettlement` 的终态前提）。
     /// 仅 replay + 活跃会话合法；否则 coordinator 抛 `.internalError`（caller 守卫）。
-    public func replaySettlementRecord() throws -> TrainingRecord {
-        try coordinator.replaySettlementPayload(engine: engine)
+    /// 新需求10(A6)：async throws（镜像 coordinator.replaySettlementPayload 签名变更）。
+    public func replaySettlementRecord() async throws -> TrainingRecord {
+        try await coordinator.replaySettlementPayload(engine: engine)
     }
 }

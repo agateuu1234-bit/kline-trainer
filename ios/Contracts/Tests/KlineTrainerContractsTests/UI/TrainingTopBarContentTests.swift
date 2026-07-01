@@ -185,6 +185,72 @@ struct TrainingTopBarContentTests {
     }
 }
 
+// MARK: - codex whole-branch R4-F1：reviewAware helpers
+
+@Suite("TrainingTopBarContent reviewAware helpers")
+struct TrainingTopBarReviewAwareTests {
+
+    // MARK: reviewAwareCapital
+
+    @Test("reviewAwareCapital：review + !isAtEnd → initialCapital（隐藏最终成绩）")
+    func reviewAwareCapital_reviewNotAtEnd() {
+        let result = TrainingTopBarContent.reviewAwareCapital(
+            mode: .review, isAtEnd: false, initialCapital: 100_000, currentTotalCapital: 150_000)
+        #expect(result == 100_000)
+    }
+
+    @Test("reviewAwareCapital：review + isAtEnd → currentTotalCapital（揭示真实）")
+    func reviewAwareCapital_reviewAtEnd() {
+        let result = TrainingTopBarContent.reviewAwareCapital(
+            mode: .review, isAtEnd: true, initialCapital: 100_000, currentTotalCapital: 150_000)
+        #expect(result == 150_000)
+    }
+
+    @Test("reviewAwareCapital：normal + !isAtEnd → currentTotalCapital（恒真实）")
+    func reviewAwareCapital_normalNotAtEnd() {
+        let result = TrainingTopBarContent.reviewAwareCapital(
+            mode: .normal, isAtEnd: false, initialCapital: 100_000, currentTotalCapital: 150_000)
+        #expect(result == 150_000)
+    }
+
+    @Test("reviewAwareCapital：replay + !isAtEnd → currentTotalCapital（恒真实）")
+    func reviewAwareCapital_replayNotAtEnd() {
+        let result = TrainingTopBarContent.reviewAwareCapital(
+            mode: .replay, isAtEnd: false, initialCapital: 100_000, currentTotalCapital: 150_000)
+        #expect(result == 150_000)
+    }
+
+    // MARK: reviewAwareReturnRate
+
+    @Test("reviewAwareReturnRate：review + !isAtEnd → 0（隐藏收益率）")
+    func reviewAwareReturnRate_reviewNotAtEnd() {
+        let result = TrainingTopBarContent.reviewAwareReturnRate(
+            mode: .review, isAtEnd: false, actualReturnRate: 0.5)
+        #expect(result == 0)
+    }
+
+    @Test("reviewAwareReturnRate：review + isAtEnd → actualReturnRate（揭示真实）")
+    func reviewAwareReturnRate_reviewAtEnd() {
+        let result = TrainingTopBarContent.reviewAwareReturnRate(
+            mode: .review, isAtEnd: true, actualReturnRate: 0.5)
+        #expect(result == 0.5)
+    }
+
+    @Test("reviewAwareReturnRate：normal + !isAtEnd → actualReturnRate（恒真实）")
+    func reviewAwareReturnRate_normalNotAtEnd() {
+        let result = TrainingTopBarContent.reviewAwareReturnRate(
+            mode: .normal, isAtEnd: false, actualReturnRate: -0.2)
+        #expect(result == -0.2)
+    }
+
+    @Test("reviewAwareReturnRate：replay + !isAtEnd → actualReturnRate（恒真实）")
+    func reviewAwareReturnRate_replayNotAtEnd() {
+        let result = TrainingTopBarContent.reviewAwareReturnRate(
+            mode: .replay, isAtEnd: false, actualReturnRate: 0.1)
+        #expect(result == 0.1)
+    }
+}
+
 @Suite("TrainingTopBarContent 仓位 X/5")
 struct TrainingTopBarPositionTierTests {
     @Test("空仓 → 仓位 0/5")

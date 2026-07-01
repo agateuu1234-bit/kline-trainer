@@ -22,6 +22,7 @@ public final class TrainingSessionCoordinator {
     private let dbFactory: TrainingSetDBFactory       // P3a
     private let recordRepo: RecordRepository          // P4
     private let pendingRepo: PendingTrainingRepository // P4
+    private let pendingReplayRepo: PendingReplayRepository  // 新需求10：replay 续局单槽
     private let finalization: SessionFinalizationPort  // Wave 3 顺位 10a：单事务终结 port（RFC §4.7b）
     private let settingsDAO: SettingsDAO              // P4
     private let cache: CacheManager                   // P5
@@ -47,6 +48,16 @@ public final class TrainingSessionCoordinator {
     @ObservationIgnored private(set) var activeSessionKey: String?
     /// 可注入 key 生成器（mirror `now` 范式，D5）。默认 UUID；@testable 测试可覆盖。
     @ObservationIgnored var makeSessionKey: () -> String = { UUID().uuidString }
+
+    // 新需求10：当前 replay 会话创建时的状态基线（tick/交易数/画线数/上下周期）。
+    // 含周期（codex plan-R14-F1）：单指竖滑切周期组合改 upper/lowerPanel.period 而不动 tick/ops/drawings，
+    // 须纳入 clean-skip 比较，否则切周期后 Back/flush 被当 clean 跳过 → 丢 PendingReplay 序列化的 upper/lowerPeriod。
+    @ObservationIgnored private var replayBaseline: (tick: Int, ops: Int, drawings: Int, upper: Period, lower: Period)?
+    // 新需求10（codex plan-R6-F1）：本 replay 会话是否已成功写过槽（拥有槽）。
+    // fresh=false、任一次成功 saveReplay 后=true。
+    // clean-skip **仅在 !replayHasPersisted 时**生效——首写后永不跳过，否则"加画线→写→删画线(count 回基线)
+    // →跳过"会残留已删画线。
+    @ObservationIgnored private var replayHasPersisted = false
 
     // MARK: - Wave 3 顺位 10b：周期 autosave 状态机（RFC §4.6）+ 终态 fence（§4.7d）
 
@@ -76,7 +87,7 @@ public final class TrainingSessionCoordinator {
     /// 请求 autosave（脏动作后调）。immediate=交易/画线/background flush（绕 N 节流）；
     /// 非 immediate=tick 推进（按 autosaveTickInterval 节流）。terminating/非 Normal → no-op（§4.7d/§4.6）。
     public func requestAutosave(engine: TrainingEngine, immediate: Bool) {
-        guard !terminating, engine.flow.mode == .normal else { return }
+        guard !terminating, engine.flow.shouldPersistProgress() else { return }
         if !immediate {
             ticksSinceAutosave += 1
             guard ticksSinceAutosave >= autosaveTickInterval else { return }
@@ -117,6 +128,8 @@ public final class TrainingSessionCoordinator {
     #if DEBUG
     /// 测试钩子：等在飞 autosave 写完成（生产无 await 点，测试需确定性排空）。
     func drainAutosaveForTesting() async { await autosaveTask?.value }
+    /// 测试钩子：强置 activeRecord=nil，供 fail-closed 守卫测试制造缺上下文（镜像 drainAutosaveForTesting 范式）。
+    func setActiveRecordNilForTesting() { activeRecord = nil }
     #endif
 
     /// §4.7d 终态栅栏：置 terminating（拒新 autosave）+ 排空在飞写（排空时见 terminating 即退出不落盘）。
@@ -129,6 +142,7 @@ public final class TrainingSessionCoordinator {
     public init(dbFactory: TrainingSetDBFactory,
                 recordRepo: RecordRepository,
                 pendingRepo: PendingTrainingRepository,
+                pendingReplayRepo: PendingReplayRepository,
                 finalization: SessionFinalizationPort,
                 settingsDAO: SettingsDAO,
                 cache: CacheManager,
@@ -136,6 +150,7 @@ public final class TrainingSessionCoordinator {
         self.dbFactory = dbFactory
         self.recordRepo = recordRepo
         self.pendingRepo = pendingRepo
+        self.pendingReplayRepo = pendingReplayRepo
         self.finalization = finalization
         self.settingsDAO = settingsDAO
         self.cache = cache
@@ -261,8 +276,10 @@ public final class TrainingSessionCoordinator {
             // maxTick 由 .review(record) 内部据 record.finalTick 派生；make 亦校验 .m3 非空 +
             // m3.last.endGlobalIndex >= finalTick，故此处不重复 maxTick(from:)（D3 / LOW#8）。
             let allCandles = try reader.loadAllCandles()
+            let meta = try reader.loadMeta()                  // B3：起始点 tick 派生（review 从训练起点重演）
+            let startTick = TrainingEngine.startTick(forStartDatetime: meta.startDatetime, in: allCandles)
             let engine = try TrainingEngine.make(
-                .review(record: record),
+                .review(record: record, startTick: startTick),
                 allCandles: allCandles,
                 initialCapital: record.totalCapital,
                 initialCashBalance: record.totalCapital + record.profit,   // 末态全现金（强平后）
@@ -311,9 +328,13 @@ public final class TrainingSessionCoordinator {
             activeEngine = engine
             activeFile = file
             cache.touch(file)                        // §A touch-on-use：完整读取+引擎构造成功后刷 LRU mtime（codex-13a-F2）
-            activeStartedAt = nil                    // D4：replay 不入账，无进度保存
+            activeStartedAt = now()                  // 新需求10：replay 会话起始，供 PendingReplay.started_at
             activeSessionKey = nil                   // RFC §4.7c：replay 无 session key
             activeRecord = record                    // RFC-B D5：复用已加载 record（原本被丢弃，零新 I/O）
+            replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count,
+                              engine.upperPanel.period, engine.lowerPanel.period)  // fresh 基线（含周期，codex plan-R14-F1）
+            replayHasPersisted = false              // fresh：尚未拥有槽（codex plan-R6-F1）
+            resetAutosaveState()                    // 新需求10（codex plan-R7-F1）：重开 autosave 栅栏（terminating=false 等）
             return engine
         } catch {
             reader.close()
@@ -321,10 +342,47 @@ public final class TrainingSessionCoordinator {
         }
     }
 
-    /// 保存进度（spec L1659/L1677：U2 退出 / 每 N tick 自动调用）。仅 Normal 模式持久化
-    /// （review 只读、replay 不入账 → 无 pending 语义，D3 no-op）。缺活跃上下文 → .internalError（D9）。
+    /// 保存进度（spec L1659/L1677：U2 退出 / 每 N tick 自动调用）。Normal/Replay 模式持久化
+    /// （review 只读 → no-op，D3）。缺活跃上下文 → .internalError（D9）。
     public func saveProgress(engine: TrainingEngine) async throws {
-        guard engine.flow.mode == .normal else { return }     // D3：仅 Normal 持久化
+        guard engine.flow.shouldPersistProgress() else { return }  // D3：仅 Normal/Replay 持久化
+        if engine.flow.mode == .replay {
+            // codex plan-R3-F2：fail-closed（镜像 normal saveProgress 的活跃上下文守卫）——
+            // 缺上下文 throw（autosave/back 显错）而非静默 return（静默=用户无感的进度丢失）。
+            guard activeEngine === engine, let file = activeFile,
+                  let recordId = activeRecord?.id, let started = activeStartedAt else {
+                throw AppError.internalError(module: "E6b", detail: "replay saveProgress without active session context")
+            }
+            // codex plan-R4-F1 + R6-F1：clean-skip **仅在尚未拥有槽时**生效。fresh 会话首写前、且当前态==基线
+            // （无 tick/交易/画线变化）→ 跳过写，防 back()/后台 flush 用 fresh B 初始态覆盖另一记录 A 的槽。
+            // **首写后(replayHasPersisted)永不跳过**——否则"加画线→写→删画线(count 回基线)→跳过"会残留已删画线。
+            if !replayHasPersisted,
+               let base = replayBaseline,
+               base.tick == engine.tick.globalTickIndex,
+               base.ops == engine.tradeOperations.count,
+               base.drawings == engine.drawings.count,
+               base.upper == engine.upperPanel.period,      // codex plan-R14-F1：切周期也算脏
+               base.lower == engine.lowerPanel.period {
+                return
+            }
+            let replay = PendingReplay(
+                recordId: recordId,
+                trainingSetFilename: file.filename,
+                globalTickIndex: engine.tick.globalTickIndex,
+                upperPeriod: engine.upperPanel.period,
+                lowerPeriod: engine.lowerPanel.period,
+                positionData: try encodePosition(engine.position),
+                cashBalance: max(0, engine.cashBalance),
+                feeSnapshot: engine.fees,
+                tradeOperations: engine.tradeOperations,
+                drawings: engine.drawings,
+                startedAt: started,
+                accumulatedCapital: engine.initialCapital,
+                drawdown: engine.drawdown)
+            try pendingReplayRepo.saveReplay(replay)
+            replayHasPersisted = true     // codex plan-R6-F1：已拥有槽，此后 saveProgress 永不 clean-skip
+            return
+        }
         // D4 加固（final-review L2）：engine 必须是当前活跃 session 的引擎，否则会把活跃 session 的
         // 文件/起始时间记到外来 engine 上 → 写错存档。activeEngine 为 nil（无会话）时身份不符亦在此拒绝。
         guard activeEngine === engine, let file = activeFile, let started = activeStartedAt,
@@ -405,18 +463,27 @@ public final class TrainingSessionCoordinator {
     /// 回撤比率/计数同口径），由 drift-guard 测试守；**有意不抽 finalize 共享 helper**，保 finalize 不在
     /// 本 PR diff 内（§4.7 finalize-gating residual 归顺位 10，不被本 PR 触碰）。
     /// 前置：replay 模式 + 活跃会话（caller=顺位 8 路由）。强平由 caller 先行（本方法只读终态）。
-    public func replaySettlementPayload(engine: TrainingEngine) throws -> TrainingRecord {
+    /// 新需求10(A6)：async。顺序：①两 guard（fail-closed，含 recordId；缺则 throw、槽保留）→
+    /// ②`fenceAndDrainAutosaves`（终态栅栏，排空排队 autosave）→ ③构建 payload（全部 throwing 工作，槽仍在）→
+    /// ④成功后条件清槽（`clearReplay(ifRecordId:)`，防误删别记录槽）→ ⑤return record。
+    /// clearReplay 抛 → 方法抛（caller 保留 session+槽，可重试，codex plan-R1-F2）。
+    public func replaySettlementPayload(engine: TrainingEngine) async throws -> TrainingRecord {
         guard engine.flow.mode == .replay else {
             throw AppError.internalError(module: "E6b", detail: "replaySettlementPayload requires replay flow")
         }
-        guard activeEngine === engine, let reader = activeReader, let file = activeFile else {
+        // 新需求10(A6)：recordId 纳入 guard（fail-closed，codex plan-R8-F1）——缺则 throw、保留会话（不静默成功留陈旧槽）。
+        guard activeEngine === engine, let reader = activeReader, let file = activeFile,
+              let recordId = activeRecord?.id else {
             throw AppError.internalError(module: "E6b", detail: "replaySettlementPayload without active session context")
         }
+        // 新需求10(A6)：终态栅栏——排空排队 autosave，此后无并发写，自动 save 不复活已清槽（codex plan-R1-F2）。
+        await fenceAndDrainAutosaves()
+        // 全部 throwing payload 工作在此完成，槽仍在（任何抛错不清槽，fail-closed）。
         let meta = try reader.loadMeta()
         let starting = engine.initialCapital
         let profit = engine.currentTotalCapital - starting
         let (year, month) = Self.startYearMonth(from: meta.startDatetime)
-        return TrainingRecord(
+        let record = TrainingRecord(
             id: nil,
             trainingSetFilename: file.filename,
             createdAt: now(),
@@ -433,6 +500,123 @@ public final class TrainingSessionCoordinator {
             sellCount: engine.tradeOperations.filter { $0.direction == .sell }.count,
             feeSnapshot: engine.fees,
             finalTick: engine.tick.globalTickIndex)
+        // 新需求10(A6)：payload 构建成功后才清槽（codex plan-R1-F2）。
+        // 条件清（codex plan-R3-F1）：仅清属于当前 replay 记录的槽——防"开新 replay B 未存即到终局"
+        // 误删另一记录 A 的暂停槽。recordId 来自顶部 guard 绑定（缺则已 throw=fail-closed）。
+        // clearReplay 抛 → 方法抛、record 不返回 → caller 保留 session+槽、可重试。
+        try pendingReplayRepo.clearReplay(ifRecordId: recordId)
+        return record
+    }
+
+    /// 新需求10：该记录是否有可续局 replay 暂存。**display-only/advisory**（历史弹窗按钮文案）。
+    /// 用轻量 `loadReplaySlotInfo`（不解码 payload，codex plan-R11-F1）：损坏 payload 不影响归属判断。
+    /// 读失败保守返 false 安全：路由是 resume-first 权威（replay(id:) 总先试 resumePendingReplay），
+    /// 故此处一次瞬态 false 至多让按钮文案短暂误显「再次训练」，点击仍走 resume-first 不会丢槽。
+    public func hasResumableReplay(recordId: Int64) -> Bool {
+        ((try? pendingReplayRepo.loadReplaySlotInfo()) ?? nil)?.recordId == recordId
+    }
+
+    /// 新需求10：续局 replay。元数据先判归属→本记录全量解码→校验记录/文件名→open reader→按存档 tick/状态重建。
+    /// 错误纪律：**本记录 loadReplay `.dbCorrupted` → durable clearReplay + nil（回退从头）**；
+    /// **非 `.dbCorrupted` 的 loadReplay / loadRecordBundle / loadAllCandles / make 错误 → 传播**（不清、不 fresh）；
+    /// 清档点 = openReader `isCorruptTrainingSet`（cache.delete+clearReplay）/ 文件名不一致（clearReplay）/ 本记录 `.dbCorrupted`。
+    /// 无槽 / recordId 不匹配 → nil（不清档）。**注意：不是"loadReplay 错误一律传播"**（那会让永久损坏槽卡死，R13-F1）。
+    public func resumePendingReplay(recordId: Int64) async throws -> TrainingEngine? {
+        // 1) 轻量元数据先判归属（codex plan-R11-F1）：不解码 payload → 别记录的损坏槽不阻塞本记录的 replay。
+        //    slotInfo 自身错误=DB 级瞬态（whole-db 不可达）→ 传播。无槽/不匹配 → nil（不清档）。
+        guard let info = try pendingReplayRepo.loadReplaySlotInfo(), info.recordId == recordId else { return nil }
+        // 2) 本记录槽：全量解码 **含 position（codex plan-R18-F1：position 的 PositionManager JSON 解码也是 slot
+        //    payload，须与 loadReplay 同走 .dbCorrupted→清 路径；decodePosition 已把所有解码错误包成 .dbCorrupted）**。
+        //    .dbCorrupted（已验证损坏 payload）→ 清 + 回退从头；其他（瞬态）→ 传播。
+        let pending: PendingReplay
+        let position: PositionManager
+        do {
+            guard let p = try pendingReplayRepo.loadReplay() else { return nil }   // 竞态：刚被清 → nil
+            pending = p
+            position = try decodePosition(p.positionData)   // slot payload 解码（移到此处，与 loadReplay 同 .dbCorrupted 路径）
+        } catch let e as AppError {
+            if case .persistence(.dbCorrupted) = e {
+                // 本记录损坏槽（loadReplay JSON 或 position JSON）→ durable 清 + 回退从头（router fresh）。**不用 try?**
+                // （codex plan-R12-F1）：清失败=瞬态 DB（满/不可用）→ 传播可重试错误，**不**伪装"无暂存"而留损坏行卡死。
+                try pendingReplayRepo.clearReplay()
+                return nil
+            }
+            throw e                                    // 瞬态 → 传播（不清、不 fresh）
+        }
+        // 记录不会被单独删除（reset 连带清槽，无孤儿）→ loadRecordBundle 错误必瞬态 → 传播（不清档）
+        let (record, _, _) = try recordRepo.loadRecordBundle(id: pending.recordId)
+        // codex plan-R10-F1：pending 的文件名须与记录一致——否则 stale/corrupt 槽会让记录 A 的 id 配文件 B 的
+        // candles/metadata（显错标的、终局清理失准）。内部不一致=已验证损坏槽 → 清 + 返回 nil（router 回退从头 replay，用记录权威文件名）。
+        guard pending.trainingSetFilename == record.trainingSetFilename else {
+            try pendingReplayRepo.clearReplay()
+            return nil
+        }
+        let file = try cachedFile(filename: pending.trainingSetFilename)
+        let reader: any TrainingSetReader
+        do {
+            reader = try openReader(for: file)
+        } catch where isCorruptTrainingSet(error) {
+            try? cache.delete(file)                 // best-effort：训练组损坏，孤儿槽不可恢复
+            try pendingReplayRepo.clearReplay()      // durable 清（唯一清档点）
+            return nil                               // 调用方回退从头 replay
+        }
+        let allCandles: [Period: [KLineCandle]]
+        let mt: Int
+        do {
+            allCandles = try reader.loadAllCandles()
+            mt = try maxTick(from: allCandles)
+        } catch {
+            reader.close()
+            throw (error as? AppError) ?? .internalError(module: "E6b", detail: String(describing: error))
+        }
+        // 前置校验（codex whole-branch R1 HIGH + R2-F1 HIGH）：make L244-245 和 L220/L236-240 对同一条件抛
+        // .trainingSet(.emptyData)，而 catch 仅 rethrow 不清槽 → AppRouter resume-first 每次都撞同一槽 → 永久 brick。
+        // 在此提前检出 → reader.close + durable clearReplay（try: 失败向上传播，调用方可重试）+ nil。
+        // 周期校验（codex whole-branch R2-F1）：saved period 不在 candle map 中 → make final-R6-F1 抛 emptyData →
+        // 同 brick 路径；在此镜像 make L244-245 提前清槽。
+        guard !(allCandles[pending.upperPeriod] ?? []).isEmpty,
+              !(allCandles[pending.lowerPeriod] ?? []).isEmpty,
+              (0...mt).contains(pending.globalTickIndex),
+              pending.cashBalance.isFinite, pending.cashBalance >= 0,
+              pending.accumulatedCapital.isFinite, pending.accumulatedCapital >= 0,
+              pending.drawdown.peakCapital.isFinite, pending.drawdown.peakCapital >= 0,
+              pending.drawdown.maxDrawdown.isFinite, pending.drawdown.maxDrawdown >= 0
+        else {
+            reader.close()
+            try pendingReplayRepo.clearReplay()      // durable: clear failure propagates as retryable
+            return nil
+        }
+        do {
+            // position 已在 step 2 解码（slot payload，.dbCorrupted 已处理）；此块仅训练集/transient 错误 → 传播
+            let engine = try TrainingEngine.make(
+                .replay(fees: pending.feeSnapshot, maxTick: mt),
+                allCandles: allCandles,
+                initialTick: pending.globalTickIndex,
+                initialCapital: pending.accumulatedCapital,
+                initialCashBalance: pending.cashBalance,
+                initialPosition: position,
+                initialMarkers: markers(from: pending.tradeOperations),
+                initialDrawings: pending.drawings,
+                initialTradeOperations: pending.tradeOperations,
+                initialDrawdown: pending.drawdown,
+                initialUpperPeriod: pending.upperPeriod,
+                initialLowerPeriod: pending.lowerPeriod)
+            activeReader = reader
+            activeEngine = engine
+            activeFile = file
+            cache.touch(file)                        // §A touch-on-use（同 resumePending）
+            activeRecord = record                    // replay 续局需 record（fees/标的名 + 终局 payload）
+            activeStartedAt = pending.startedAt
+            activeSessionKey = nil                    // replay 无 sessionKey
+            replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count,
+                              engine.upperPanel.period, engine.lowerPanel.period)  // 续局基线=resumed 态（含周期，codex plan-R4/R14-F1）
+            replayHasPersisted = true                 // 续局本就拥有该记录的槽 → 永不 clean-skip（codex plan-R6-F1）
+            resetAutosaveState()                      // 新 session：清栅栏/脏/cadence/错误
+            return engine
+        } catch {
+            reader.close()
+            throw (error as? AppError) ?? .internalError(module: "E6b", detail: String(describing: error))
+        }
     }
 
     /// session 结束清理（spec L1666/L1684，不 throws）：关闭 reader 并清空全部活跃上下文（D10）。
@@ -451,18 +635,30 @@ public final class TrainingSessionCoordinator {
         activeStartedAt = nil
         activeSessionKey = nil                       // RFC §4.7c：清空 session key
         activeRecord = nil                           // RFC-B D5：防 review 结束后 stale 标的名
+        replayBaseline = nil
+        replayHasPersisted = false
     }
 
-    /// §4.7e discard 持久终态：fence autosaves → 清 `pending_training` → endSession（durable 不复活）。
-    /// 清 pending 失败 → 保留 active session（不 teardown）供 retry，透传 AppError。
-    /// review/replay：clearPending 删 0 行无害（D4 M3），失败语义一致。
+    /// §4.7e discard 持久终态：fence autosaves → 清持久化槽 → endSession（durable 不复活）。
+    /// 清槽失败 → 保留 active session（不 teardown）供 retry，透传 AppError。
+    /// 新需求10(A6)：replay 清 pending_replay（条件清，fail-closed）；normal 清 pending_training（原逻辑）。
     public func discardSession() async throws {
         await fenceAndDrainAutosaves()
         do {
-            try pendingRepo.clearPending()
+            // 新需求10(A6)：replay 局 discard 条件清 replay 槽（仅属当前记录，防误删别的记录槽，codex plan-R3-F1）；
+            // fail-closed（codex plan-R8-F1）：replay 缺 activeRecord.id → throw、保留会话（不静默结束留陈旧槽）；
+            // normal 清 pending_training（原逻辑）。
+            if activeEngine?.flow.mode == .replay {
+                guard let activeId = activeRecord?.id else {
+                    throw AppError.internalError(module: "E6b", detail: "replay discard without active record")
+                }
+                try pendingReplayRepo.clearReplay(ifRecordId: activeId)
+            } else {
+                try pendingRepo.clearPending()
+            }
         } catch {
             throw (error as? AppError)
-                ?? .internalError(module: "E6b", detail: "discard clearPending: \(error)")
+                ?? .internalError(module: "E6b", detail: "discard clear: \(error)")
         }
         await endSession()
     }
@@ -577,6 +773,7 @@ extension TrainingSessionCoordinator {
             dbFactory: PreviewTrainingSetDBFactory(),
             recordRepo: records,
             pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: InMemoryCacheManager(),
