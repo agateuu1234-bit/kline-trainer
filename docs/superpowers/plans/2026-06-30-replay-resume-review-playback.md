@@ -1248,6 +1248,26 @@ git commit -m "feat(A5): resumePendingReplay + hasResumableReplay + AppRouter re
     _ = try await h.coordinator.replaySettlementPayload(engine: e)
     #expect(try h.pendingReplayRepo.loadReplay() == nil)
 }
+
+// codex whole-branch R3-F1：结算失败后「退出本局」(=lifecycle.back()=saveProgress+endSession) durable 落终态槽（非旧检查点）。
+@Test func replaySettlementFailure_durableExit_persistsTerminalTickResumable() async throws {
+    let h = try CoordinatorTestHarness.make()
+    let e = try await h.coordinator.replay(recordId: h.seededRecordId)
+    e.holdOrObserve(panel: .upper)                            // firstTick
+    let firstTick = e.tick.globalTickIndex
+    try await h.coordinator.saveProgress(engine: e)           // 槽 = firstTick
+    e.holdOrObserve(panel: .upper)                            // 再进一根 → 终态 currentTick
+    let currentTick = e.tick.globalTickIndex
+    #expect(currentTick > firstTick)
+    h.pendingReplayRepo.failNextClearReplay = .internalError(module: "test", detail: "transient")
+    await #expect(throws: (any Error).self) {                 // 结算失败（fence 后抛，槽仍 firstTick）
+        _ = try await h.coordinator.replaySettlementPayload(engine: e)
+    }
+    try await h.coordinator.saveProgress(engine: e)           // 「退出本局」= back() 的 saveProgress
+    await h.coordinator.endSession()                          //             + endSession
+    let slot = try h.pendingReplayRepo.loadReplay()
+    #expect(slot?.globalTickIndex == currentTick)            // 续到终态（非旧检查点 firstTick）；非真空：仅 endSession 停 firstTick
+}
 ```
 > reset 清档在 persistence 层测（A3 的 `PendingReplayPersistenceTests` 追加：写一行 pending_replay 后调 `db.resetAllTrainingProgress(toCapital:)`，断言 `loadReplay()==nil` 且 `loadPending()==nil`）。
 
@@ -1320,11 +1340,23 @@ public func replaySettlementRecord() async throws -> TrainingRecord {
 ```swift
         .alert("结算失败", isPresented: $replaySettlementFailed) {
             Button("重试") { runReplaySettlement() }
-            Button("退出本局", role: .cancel) { onSessionEnded(nil) }   // 用户显式选退出
+            // codex whole-branch R3-F1：退出=保留进度（honor 提示文案）。fence 已置 terminating → autosave 协程死，
+            // 槽只剩旧检查点；须显式 lifecycle.back()（saveProgress 当前终态 + endSession）durable 落槽，
+            // 而非 onSessionEnded(nil)（不落盘 → 续局回旧检查点 / 提示落空）。保存失败 → 重弹 alert（可重试）。
+            Button("退出本局", role: .cancel) {
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    do { try await lifecycle.back(); onExit() }
+                    catch { replaySettlementFailed = true }
+                }
+            }
         } message: {
             Text("本局结算未能完成。可重试，或退出本局（暂存进度保留，可在历史记录返回训练）。")
         }
 ```
+> implementer：`exitInFlight` 是本 view 既有 `@State`（backFailed/finalizeFailed 退出按钮同款重入门）；`lifecycle.back()` = `coordinator.saveProgress`(显式写当前终态，不受 terminating 门控) + `endSession`。`onSessionEnded(nil)` 只 endSession 不落盘 → fence 后槽留旧检查点，故不可用于本退出。
 
 - [ ] **Step 3e: `DefaultAppDB.resetAllTrainingProgress` 加 clearReplay**
 ```swift
