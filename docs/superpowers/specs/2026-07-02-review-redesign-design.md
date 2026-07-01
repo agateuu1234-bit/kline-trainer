@@ -101,7 +101,7 @@ working_step_tick == NULL && saved != NULL → 已复盘
 
 ## 4. 复盘生命周期状态机
 
-`ReviewFlow` 能力扩展：`shouldPersistProgress` 对 review 改为 `true`（复盘进度落 `review_archive`，而非 `pending`/`pending_replay`）；`canBuySell` 仍 `false`。
+`ReviewFlow` 能力**不改**（`shouldPersistProgress` 保持 `false`、`canBuySell` 保持 `false`）——复盘持久化走**专用路径**（coordinator 新增 review 持久化方法 + 专用 autosave fence，落 `review_archive`），**不复用** `saveProgress`/pending 自动保存（那是 normal/replay 的 `pending`/`pending_replay` 通道，payload 语义不同，flip `shouldPersistProgress` 会误路由）。复盘顶栏账户改读 `ReviewLedger`（§5），engine 内部 cash/position（现构造为末态全现金）不用于复盘顶栏显示。
 
 **已提交基线**（§2）：`committed = saved_drawings`（`已复盘`）或 ∅（无 saved）。**所有净改动判定一律"当前工作集 vs committed"**，与是否从 resume 载入无关（codex R5-high）。
 
@@ -133,10 +133,13 @@ working_step_tick == NULL && saved != NULL → 已复盘
 
 ### 5.2 纯组件 `ReviewLedger`（平台无关，host 全测）
 ```
-struct ReviewLedgerState { cash; shares; averageCost; totalCapital; returnRate; positionTier; drawdown? }
-func state(atTick t, ops:[TradeOperation], initialCapital, markPriceAtTick:(Int)->Double) -> ReviewLedgerState
+struct ReviewLedgerState { cash; shares; averageCost; totalCapital; returnRate; positionTier }
+func state(atTick t, ops:[TradeOperation], initialCapital, markPriceAtTick:(Int)->Double) throws -> ReviewLedgerState
 ```
-- 折叠 `ops.filter { $0.globalTick <= t }`（按 `globalTick` 升序，`createdAt` 兜底稳定序）逐笔应用 **E2 `PositionManager` + E3 `TradeCalculator` 同款语义**（现金流用 op 自带的 `totalCost/commission/stampDuty`，持仓/成本用 direction+shares）。
+- **fail-closed（codex plan-R3/R6-high）**：折叠**先验后用**——逐 op 校验 `shares>0`、`price/commission/stampDuty` finite 且 `>=0`；**buy 分支**额外校验 `totalCost` finite 且 **`>0`**（`PositionManager.buy` 前置 >0）+ 加法后 `totalInvested` 有限（防溢出 inf）+ Int 防溢出；**sell 分支** `shares<=当前持仓`（**不校验 totalCost>=0**——sell 的 `proceeds` 引擎允许为负=低价清仓/force-close，codex plan-R9）+ **现金流有限性守卫**（`notional=price*shares`、`proceeds`、`newCash` 及末尾 `totalCapital` 均须 finite，防 finite 极端值乘法溢出 inf/NaN 渲染顶栏，codex plan-R11）；任一违反 → `throw .dbCorrupted`（**绝不** trap `PositionManager` precondition）。
+- **终局等式为强制入口不变量（codex plan-R5-high）**：复盘入口（`buildReviewEngine`）折叠一次到末 tick，**强制**重算终局 `profit(=totalCapital−initialCapital)`/`returnRate` 按显式容差（profit 1e-4 元、rate 1e-7）等于 `record.profit`/`record.returnRate`；throw 或不符 → `.dbCorrupted`、入口失败不开界面（`setError`）。顶栏逐帧 `try?`（入口已验，永不兜底）。
+- **mark price 单一入口（codex plan-R3-medium）**：`markPriceAtTick` 生产 = `engine.markPrice(atTick:)`（新暴露的唯一公开入口；现 `price(in:atTick:)` private → 暴露）；`currentPrice`/finalize/ReviewLedger 共用不重复实现。
+- 折叠 `ops.filter { $0.globalTick <= t }`（按 `globalTick` 升序，**仓库插入序=原始下标兜底确定序**——codex plan-R4-high：非 `createdAt`，防同 tick 同 createdAt 时 Swift 非稳定 sort 把同 tick 的 sell 乱序到 buy 前）逐笔应用 **E2 `PositionManager` + E3 `TradeCalculator` 同款语义**（现金流用 op 自带的 `totalCost/commission/stampDuty`，持仓/成本用 direction+shares）。
 - `totalCapital = cash + shares × markPriceAtTick(t)`；`returnRate = (totalCapital − initialCapital)/initialCapital`；`positionTier` = 现派生公式（`round(持仓市值/总资金×5) clamp 0...5`）。
 
 ### 5.2.1 规范 mark price 来源（codex R5-medium）
@@ -145,7 +148,7 @@ func state(atTick t, ops:[TradeOperation], initialCapital, markPriceAtTick:(Int)
 - **越界兜底**：`t` 落在 `[0, maxTick]` 内恒有值；仅作守卫的越界（`t<0` 或 `>maxTick`）clamp 到最近端收盘价（不返回 nil、不崩）。
 - **精度/round**：ReviewLedger 全程用与 finalize 相同的 `Double` 算术（`PositionManager`/`TradeCalculator`），**不额外 round**；显示层格式化独立（§5.3 顶栏用 `TrainingTopBarContent` 同款 formatter）。故 `state(atTick maxTick)` 的 `totalCapital` 与 finalize 存值**逐位一致**。
 
-- **一致性保证**：`state(atTick maxTick)` 逐值等于该记录 finalize 存的 `totalCapital/profit/returnRate`（因为这些 ops 正是产生它的输入 + 同价基同算术）——host 测断言 + mutation。
+- **一致性保证（codex plan-R10-high 更正）**：注意 `record.totalCapital` 字段存的是**初始资金**（finalize 语义，见 `TrainingSessionCoordinator.finalize`），运行总额存在 `record.profit`。故等式为：`finalState.totalCapital == record.totalCapital + record.profit`（即 `finalState.totalCapital − record.totalCapital == record.profit`）且 `finalState.returnRate == record.returnRate`（同价基同算术，逐位/显式容差）——**不可**用 `finalState.totalCapital == record.totalCapital` 比对（那是初始资金）。host 测断言 + mutation。
 - **测试**：缺价/越界 tick 的 clamp 行为；`maxTick` 精确等于持久化终局总额（多条 fixture）；中间 tick 运行值合理性；mutation（改 op 应用顺序/价基 → 断言失败）。
 
 ### 5.3 顶栏接线
@@ -237,8 +240,10 @@ func state(atTick t, ops:[TradeOperation], initialCapital, markPriceAtTick:(Int)
 ## 9. 错误处理 / fail-closed 纪律（镜像 replay）
 
 - `review_archive` 读写异常映射：JSON 解码失败 / 非法 period → `.dbCorrupted`。
-- resume 复盘（working 损坏）：`.dbCorrupted` → durable clear 该行 **working**（回到"无进行中"）+ 返回 nil（从头）；非 `.dbCorrupted` 瞬时错误 → 上抛可重试（不静默丢）。清理失败上抛（保留行可重试）。
-- **saved 存档损坏恢复（codex R4-medium）**：首页/action sheet 的「已复盘」判定用轻量查询（不解码 payload）→ 若 `saved_drawings` 实际损坏，进入复盘解码 saved 时 `.dbCorrupted`。处理：durable clear **仅** `saved_drawings`（置 NULL、移除「已复盘」标记；working 列不受影响）→ 以原训练记录为基线**从头进入复盘**（空 review 基线，可重新画线保存）→ toast 告知「复盘存档损坏已清除，可重新复盘保存」。杜绝"打开即崩且无法清坏档"死循环。清理失败上抛可重试。
+- **saved 与 working 独立解码（codex plan-R1-high）**：`saved_drawings` 与 `working_drawings` 的解码**互不牵连**——resume 只解码 working（`loadWorking`）、载 committed 基线只解码 saved（`loadSaved`）。**saved 坏绝不清/害有效 working；working 坏才清 working**。
+- resume 复盘（working 损坏）：`loadWorking` `.dbCorrupted` → durable clear **仅 working**（回到"无进行中"）+ 返回 nil（从头）；非 `.dbCorrupted` 瞬时错误 → 上抛可重试（不静默丢）。清理失败上抛（保留行可重试）。
+- **saved 存档损坏恢复（codex R4-medium）**：首页/action sheet 的「已复盘」判定用轻量查询（不解码 payload）→ 若 `saved_drawings` 实际损坏，载 committed 基线（`loadSaved`）时 `.dbCorrupted`。处理：durable clear **仅** `saved_drawings`（置 NULL、移除「已复盘」标记；**working 列不受影响、有效 working 保留可续**）→ 空 review 基线继续 → toast「复盘存档损坏已清除，可重新复盘保存」。杜绝"打开即崩且无法清坏档"死循环。清理失败上抛可重试。
+- **reset 保留 saved（codex plan-R1-high）**：`resetAllTrainingProgress`（保留历史记录）**只清未完成复盘 working**（与清 pending_replay 对称），**保留 `saved_drawings`**（留存记录的已复盘存档不得随重置资金丢失）。禁止整表 `DELETE FROM review_archive`。
 - 复盘**返回/结束保存**失败 → 弹「保存进度失败」重试/放弃 alert（镜像 `TrainingView` 现 `backFailed`/`finalizeFailed`），**不丢用户新画线**。
 - 首页标记查询失败 → 保守降级（不显示该标记，不阻塞列表；镜像 `hasResumableReplay` 的 try? 兜底）。
 
