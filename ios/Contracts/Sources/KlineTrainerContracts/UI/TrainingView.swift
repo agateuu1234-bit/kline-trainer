@@ -163,10 +163,23 @@ public struct TrainingView: View {
             Text("本局结果尚未写入历史记录。可重试入账，或放弃结算退出（进度保留至最近存档）。")
         }
         // 新需求10(A6)：replay 结算失败（fence/payload/clear 中任一步抛）→ 保留 session+槽（可重试），
-        // 用户可显式选择重试（幂等）或放弃本局（onSessionEnded(nil)，不入账）。
+        // 用户可显式选择重试（幂等）或退出本局（codex R3-F1：lifecycle.back() durable 落终态槽，
+        // 而非 onSessionEnded(nil)；fence 已置 terminating → autosave 协程死，槽仅剩旧检查点，
+        // 须显式 saveProgress 把终态 durable 落槽，保障「暂存进度保留，可在历史记录返回训练」承诺）。
         .alert("结算失败", isPresented: $replaySettlementFailed) {
             Button("重试") { runReplaySettlement() }
-            Button("退出本局", role: .cancel) { onSessionEnded(nil) }   // 用户显式选退出
+            Button("退出本局", role: .cancel) {
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    // codex whole-branch R3-F1：退出=保留进度（honor 提示文案）。fence 已置 terminating → autosave 协程死，
+                    // 槽只剩旧检查点；须显式 lifecycle.back()（saveProgress 当前终态 + endSession）把终态 durable 落槽，
+                    // 而非 onSessionEnded(nil)（不落盘 → 续局回旧检查点 / 提示落空）。保存失败 → 重弹 alert（可重试）。
+                    do { try await lifecycle.back(); onExit() }
+                    catch { replaySettlementFailed = true }
+                }
+            }
         } message: {
             Text("本局结算未能完成。可重试，或退出本局（暂存进度保留，可在历史记录返回训练）。")
         }

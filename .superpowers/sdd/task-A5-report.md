@@ -94,3 +94,26 @@ Updated the guard comment to cite both R1 and R2-F1. No other changes.
 - `stepReviewForward_bothExhausted_noOp`: `jumpToEnd()` first, then `stepReviewForward()`; asserts tick stays at maxTick=7, no crash.
 
 **Test results:** 1289 tests in 177 suites, 0 failures (Swift Testing); 255 XCTest tests, 0 failures.
+
+---
+
+## Post-merge fix: codex whole-branch R3 — 1 HIGH
+
+### R3-F1 HIGH — replaySettlementFailed 「退出本局」丢失终态：onSessionEnded(nil) 不落盘
+
+**Files changed:** `ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift` (alert button fix), `ios/Contracts/Tests/KlineTrainerContractsTests/CoordinatorReplayPersistenceTests.swift` (1 new test)
+
+**Bug:** When `replaySettlementPayload` threw (e.g. `reader.loadMeta()` or `clearReplay` failed), the 「结算失败」alert appeared. Its message promised "暂存进度保留，可在历史记录返回训练". But the 「退出本局」 button called `onSessionEnded(nil)`, which only navigates home (`endSession()` — no save). Crucially, `replaySettlementPayload` calls `fenceAndDrainAutosaves()` first, setting `terminating = true`. The autosave loop exits on `terminating` without writing. So after the fence, the slot held only an older pre-fence checkpoint; the terminal state was never persisted. User tapping 「退出本局」 → resumed later → stale checkpoint (not terminal state). Message promise broken.
+
+**Fix (`TrainingView.swift`, `replaySettlementFailed` alert, ~L165-183):** Changed 「退出本局」 button from synchronous `onSessionEnded(nil)` to the same async durable-exit pattern used by `backFailed`/`finalizeFailed` alerts:
+- Guard `exitInFlight` (reuses existing `@State` var).
+- `Task { defer { exitInFlight = false }; do { try await lifecycle.back(); onExit() } catch { replaySettlementFailed = true } }`.
+- `lifecycle.back()` = `coordinator.saveProgress(engine)` (explicit save, does NOT check `terminating`) + `coordinator.endSession()`. Writes current terminal state to slot before teardown.
+- Save failure → re-shows `replaySettlementFailed` alert (retryable).
+- Updated comment block above alert to document why `lifecycle.back()` is needed (not `onSessionEnded(nil)`).
+
+**Note:** `jumpToEnd()` is a no-op for `ReplayFlow` (`canJumpToEnd()` returns `false`). The regression test uses `holdOrObserve` twice to establish two distinct checkpoints.
+
+**Test added** (`replaySettlementFailure_durableExit_persistsTerminalTickResumable`): Coordinator-level test of the logic `lifecycle.back()` now invokes. Setup: replay → advance to T1 → `saveProgress` (checkpoint at T1) → advance to T2 → inject `failNextClearReplay` → `replaySettlementPayload` throws (fence kills autosave; slot stays at T1) → durable exit: `saveProgress` + `endSession` → assert `loadReplay()?.globalTickIndex == T2`. Non-vacuity: without `saveProgress`, fence prevents autosave from writing T2, so slot would stay at T1 — the `currentTick > firstTick` assert confirms the two ticks differ.
+
+**Test results:** 1290 tests in 177 suites, 0 failures (Swift Testing); 255 XCTest tests, 0 failures. Catalyst: `** TEST BUILD SUCCEEDED **`.

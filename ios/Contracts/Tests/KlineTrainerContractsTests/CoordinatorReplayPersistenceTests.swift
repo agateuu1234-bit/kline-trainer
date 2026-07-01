@@ -411,6 +411,41 @@ struct CoordinatorReplayPersistenceTests {
         #expect(try h.pendingReplayRepo.loadReplay() == nil)
     }
 
+    @Test func replaySettlementFailure_durableExit_persistsTerminalTickResumable() async throws {
+        // codex whole-branch R3-F1：结算失败后「退出本局」(=lifecycle.back()=saveProgress+endSession) 须把终态 durable 落槽，
+        // 而非 onSessionEnded(nil)（fence 后 autosave 已死 → 槽留旧检查点 → 续局回旧态/提示落空）。
+        //
+        // 非真空性：若只调 endSession()（无 saveProgress），fence 已置 terminating → autosave 死，
+        // 槽停在 firstTick（旧检查点）；durable exit 加了 saveProgress → 槽升至 currentTick（终态）。
+        // 本测试断言 slot.globalTickIndex == currentTick 即验证 saveProgress 的 durable 效果。
+        let h = try CoordinatorTestHarness.make()
+        let e = try await h.coordinator.replay(recordId: h.seededRecordId)
+
+        // 第一个检查点：advance → saveProgress → slot at firstTick
+        e.holdOrObserve(panel: .upper)
+        let firstTick = e.tick.globalTickIndex
+        try await h.coordinator.saveProgress(engine: e)
+
+        // 再前进一根，形成「终态 currentTick」（fence 后 autosave 不会写这一根）
+        e.holdOrObserve(panel: .upper)
+        let currentTick = e.tick.globalTickIndex
+        #expect(currentTick > firstTick)  // 确认前进有效
+
+        // 结算失败：fenceAndDrainAutosaves（terminating=true）→ clearReplay 抛 → 槽仍在 firstTick
+        h.pendingReplayRepo.failNextClearReplay = .internalError(module: "test", detail: "transient")
+        await #expect(throws: (any Error).self) {
+            _ = try await h.coordinator.replaySettlementPayload(engine: e)
+        }
+
+        // 「退出本局」durable exit = saveProgress(当前终态) + endSession
+        try await h.coordinator.saveProgress(engine: e)
+        await h.coordinator.endSession()
+
+        let slot = try h.pendingReplayRepo.loadReplay()
+        #expect(slot != nil)
+        #expect(slot?.globalTickIndex == currentTick)  // 可在历史记录「返回训练」续到终态（非旧检查点 firstTick）
+    }
+
     // MARK: - Scalar corruption guard (codex whole-branch R1 HIGH fix)
 
     @Test func resumePendingReplay_tickBeyondMaxTick_clearsAndReturnsNil() async throws {
