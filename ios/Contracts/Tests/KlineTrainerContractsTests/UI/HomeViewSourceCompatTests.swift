@@ -17,11 +17,10 @@ struct HomeViewSourceCompatTests {
                     hasPending: false, hasCachedSets: true, timeZone: .current)
     }
 
-    @Test("HomeView 为 bare concrete 类型（非泛型，codex spec-R6-H1）")
-    @MainActor func bareConcreteType() {
+    @Test("HomeView 为 bare concrete 类型 + 旧 5 参 init 可用无 deprecation（WB-R4 功能退路 / codex spec-R6-H1）")
+    @MainActor func bareConcreteTypeAndLegacyInit() {
         let _: HomeView = HomeView(content: makeContent(),
                                    onStartTraining: {}, onContinueTraining: {},
-                                   onSelectRecord: { _ in }, onOpenSettings: {},
-                                   isSettingsPresented: .constant(false), settingsContent: { EmptyView() })
+                                   onSelectRecord: { _ in }, onOpenSettings: {})
     }
 }
