@@ -37,7 +37,11 @@ public struct HistoryActionSheet: View {
     }
 
     /// A7: 可测 static helper — 按是否有续局切换 replay 钮文案。
-    public static func replayButtonTitle(hasResumableReplay: Bool) -> String {
+    /// `nonisolated`：纯函数（`Bool → String`，不碰 View 的 main-actor 状态）。HistoryActionSheet 是 SwiftUI
+    /// `View` → 隐式 `@MainActor`，若不加 `nonisolated`，严格 Swift 6 工具链会在非隔离测试的 `#expect` 里报
+    /// "call to main actor-isolated static method in a synchronous nonisolated context"（CI macos-15 编译失败，
+    /// 本地宽松工具链漏报——PR #136 CI `swift test` 红即此因）。
+    public nonisolated static func replayButtonTitle(hasResumableReplay: Bool) -> String {
         hasResumableReplay ? "返回训练" : "再次训练"
     }
 
