@@ -37,6 +37,21 @@ struct CrosshairResolved: Equatable, Sendable {
 
 enum CrosshairLayout {
 
+    // per-frame 分配修复：不可变缓存 formatter（固定 tz/locale/format，建后永不变异 → 并发只读安全，spec §3.1）。
+    // DateFormatter 非 Sendable → nonisolated(unsafe)（真安全：无可变共享态）。
+    private nonisolated(unsafe) static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f
+    }()
+
+    /// 吸附蜡烛 datetime → 时间标签串（internal 供并发压测直调）。
+    static func formatTimeLabel(_ datetime: Int64) -> String {
+        timeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(datetime)))
+    }
+
     /// 吸附核心（spec D2/D3）：返回离 `x` 最近蜡烛中心的索引，clamp 到 `candles` 切片自身界限。
     /// 算法：seed = round((x − pixelShift)/candleStep) + startIndex；两侧 {seed−1,seed,seed+1}
     /// 取 |indexToX − x| 最小（严格 <，tie 保留较小 index）；再 clamp [candles.startIndex, candles.endIndex−1]。
@@ -91,16 +106,11 @@ enum CrosshairLayout {
         // 时签：吸附蜡烛 datetime（UTC+8 / en_US_POSIX，D4）；水平居中 snappedX。
         // 时签底：frames 非 nil → macdChart.maxY（整图最底）；nil → mainChartFrame.maxY（旧）。
         let datetime = candles[snappedIndex].datetime
-        let date = Date(timeIntervalSince1970: TimeInterval(datetime))
-        let formatter = DateFormatter()
-        formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
         let timeBottom = frames?.macdChart.maxY ?? frame.maxY
         let timeWidth: CGFloat = 120, timeHeight: CGFloat = 18
         let timeRect = CGRect(x: snappedX - timeWidth / 2, y: timeBottom - timeHeight,
                               width: timeWidth, height: timeHeight)
-        let timeLabel = CrosshairResolved.Label(rect: timeRect, text: formatter.string(from: date))
+        let timeLabel = CrosshairResolved.Label(rect: timeRect, text: Self.formatTimeLabel(datetime))
 
         return CrosshairResolved(lines: lines, priceLabel: priceLabel,
                                  timeLabel: timeLabel, snappedIndex: snappedIndex)

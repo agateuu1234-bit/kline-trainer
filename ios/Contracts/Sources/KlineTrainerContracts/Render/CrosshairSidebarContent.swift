@@ -122,17 +122,27 @@ public struct CrosshairSidebarContent: Equatable, Sendable {
         switch p { case .m3, .m15, .m60: return true; default: return false }
     }
 
+    private nonisolated(unsafe) static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+    private nonisolated(unsafe) static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+
     /// 日期/时间格式化（UTC+8 / en_US_POSIX）。日内 → (yyyy-MM-dd, HH:mm)；日/周/月 → (yyyy-MM-dd, nil)。
     static func formatDateTime(datetime: Int64, period: Period) -> (String, String?) {
         let date = Date(timeIntervalSince1970: TimeInterval(datetime))
-        let df = DateFormatter()
-        df.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
-        df.locale = Locale(identifier: "en_US_POSIX")
-        df.dateFormat = "yyyy-MM-dd"
-        let dateText = df.string(from: date)
+        let dateText = dateFormatter.string(from: date)
         guard isIntraday(period) else { return (dateText, nil) }
-        df.dateFormat = "HH:mm"
-        return (dateText, df.string(from: date))
+        return (dateText, timeFormatter.string(from: date))
     }
 
     public init(cursorPriceText: String, cursorPriceColor: ValueColor,
