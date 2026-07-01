@@ -117,3 +117,35 @@ Updated the guard comment to cite both R1 and R2-F1. No other changes.
 **Test added** (`replaySettlementFailure_durableExit_persistsTerminalTickResumable`): Coordinator-level test of the logic `lifecycle.back()` now invokes. Setup: replay → advance to T1 → `saveProgress` (checkpoint at T1) → advance to T2 → inject `failNextClearReplay` → `replaySettlementPayload` throws (fence kills autosave; slot stays at T1) → durable exit: `saveProgress` + `endSession` → assert `loadReplay()?.globalTickIndex == T2`. Non-vacuity: without `saveProgress`, fence prevents autosave from writing T2, so slot would stay at T1 — the `currentTick > firstTick` assert confirms the two ticks differ.
 
 **Test results:** 1290 tests in 177 suites, 0 failures (Swift Testing); 255 XCTest tests, 0 failures. Catalyst: `** TEST BUILD SUCCEEDED **`.
+
+---
+
+## Post-merge fix: codex whole-branch R4 MEDIUM — review step-through leaks final outcome
+
+**Commit:** `b4a120e` — fix(review): codex whole-branch R4-F1 — reveal drawings by tick + suppress P&L spoiler
+
+### R4-F1A — drawings not revealed progressively by tick
+
+**Files changed:** `RenderStateBuilder.swift`, `RenderStateBuilderTests.swift` (1 new test)
+
+**Bug:** `RenderStateBuilder.make` filtered `engine.drawings` only by `panelPosition`. A drawing anchored to a future candleIndex was rendered from the start of review step-through, leaking visual information about when/where significant events occurred — undermining the "逐根复现" playback.
+
+**Fix:** Extended the drawings filter with an `allSatisfy` predicate mirroring the markers reveal semantic: a drawing is kept only when all its anchors satisfy `anchor.candleIndex <= currentCandleIndex(candles: engine.allCandles[anchor.period] ?? [], tick: tick)`. Empty-anchor drawings pass `allSatisfy` trivially and are kept (harmless: they render nothing). normal/replay are unaffected because drawings there are always past-anchored.
+
+**Test added** (`drawingsRevealByTick_futureAnchorHiddenUntilStepped`): NormalFlow engine at tick=5 with two upper-panel drawings (anchor candleIndex=3 past, anchor candleIndex=8 future). At tick=5: only past-anchored drawing in renderState. After 5× `holdOrObserve` (tick=10): both present.
+
+### R4-F1B — review top bar shows final P&L from step-through start (spoiler)
+
+**Files changed:** `TrainingTopBarContent.swift`, `TrainingView.swift`, `TrainingTopBarContentTests.swift` (8 new tests)
+
+**Bug:** Review mode seeds `initialCashBalance` equal to the final result (D-B3), so `engine.returnRate` and `engine.currentTotalCapital` already reflect the final outcome at review start. The top bar displayed these real values immediately, spoiling the "逐根复现" experience before the user stepped through any candles.
+
+**Fix:** Added two pure static helpers in a public extension on `TrainingTopBarContent`:
+- `reviewAwareCapital(mode:isAtEnd:initialCapital:currentTotalCapital:)` → returns `initialCapital` when `mode == .review && !isAtEnd`, else `currentTotalCapital`.
+- `reviewAwareReturnRate(mode:isAtEnd:actualReturnRate:)` → returns `0` when `mode == .review && !isAtEnd`, else `actualReturnRate`.
+
+`TrainingView.topBar` now passes these through both the `totalCapital:` and `returnRate:` arguments, using `engine.flow.mode` and `lifecycle.isAtEnd`. Once `isAtEnd` (either stepped-to-maxTick or jump-to-end), real values appear.
+
+**Tests added** (8 cases — full 2×4 matrix for both helpers): review+!isAtEnd / review+isAtEnd / normal+!isAtEnd / replay+!isAtEnd for each helper.
+
+**Test results:** 1299 Swift Testing tests in 178 suites, 0 failures; 255 XCTest tests, 0 failures. Catalyst: `** TEST BUILD SUCCEEDED **`.
