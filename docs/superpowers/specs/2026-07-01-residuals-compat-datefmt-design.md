@@ -13,10 +13,15 @@
 - I1：`HistoryDialogPresentation.swift`（+ 其 host 测）、`HomeView.swift`、`AppRootView.swift`。
 - I2：`CrosshairLayout.swift`、`CrosshairSidebarContent.swift`、`AxisGridLayout.swift`（三处 per-frame 分配）。
 
+**公共契约变更声明（codex spec-R2-H1 · 如实，非「无变更」）**
+- I1 **有意改变** `HistoryDialogPresentation.sheetItem(.settings)`（滤出→透传）+ `sheetDismissMayApply(.settings)`（false→true）的**公共谓词行为**——这是**恢复 #135 之前的通用契约**（settings 经共享 sheet 路由），正是功能退路的机制本身。**这是一次刻意的公共 UI 路由谓词行为变更，非"无变更"**。
+- **为何不 bump CONTRACT_VERSION**：本仓 `CONTRACT_VERSION` 语义 = **数据/持久化契约**（DB schema / DTO / 存储格式，见 m01 §A/E2 1.4→1.5/RFC-A 1.6→1.7 先例），**不覆盖 UI 路由谓词行为**。`HistoryDialogPresentation` 是纯 UI 呈现路由，无持久化格式改动 → CONTRACT_VERSION 不适用、保持 1.7。
+- **迁移说明（migration note）**：任何依赖 #135 版 `sheetItem` 会滤掉 `.settings` 的通用消费者，改版后 `.settings` 将**经共享 sheet 呈现**（回到 #135 前）；若某消费者用 popover 呈现 settings（如本仓 `AppRootView`），须**本地**把 `.settings` 排除出自己的 sheet（§2.2）以防双弹。本仓唯一消费者 AppRootView 已按此本地处理。
+
 **非目标 / Non-Goals**
-- 不改任何**用户可见行为**——I1 后 app 内设置仍经 popover 呈现（与 #135 逐像素一致）；I2 缓存**输出逐字不变**（同 tz/locale/format 的同一字符串）。二者均为纯结构/性能改进。
+- 不改任何**用户可见行为**——I1 后 app 内设置仍经 popover 呈现（与 #135 逐像素一致，AppRootView 本地排除）；I2 缓存**输出逐字不变**（同 tz/locale/format 的同一字符串）。二者均为**呈现层结构/性能改进 + 上述公共谓词行为回退**，无数据契约改动。
 - `HomeContent.swift:110` 的 `DateFormatter()` **不动**（首页加载一次，非 per-frame 热路径）。
-- 零引擎 / 持久层 / 契约改动；**不 bump CONTRACT_VERSION（保持 1.7）**。
+- 零引擎 / 持久层 / **数据契约**改动；**不 bump CONTRACT_VERSION（数据契约版本，保持 1.7）**——公共 UI 谓词行为变更如上「公共契约变更声明」如实记录。
 
 **约束**
 - `AppRouter.Modal` 仅 `Identifiable` **非 Equatable** → 一律 `if case`/`isSettings` 谓词，**禁 `== .settings`**（沿 #135）。
@@ -155,6 +160,7 @@ private static func formatter(for period: Period) -> DateFormatter {
 ### 3.4 边界（codex 核查清单）
 - **输出不变**：缓存 formatter 与原 per-call formatter 配置（tz/locale/format）逐字相同 → `.string(from:)` 输出相同 → 现有 host 测（断言 label/time 文本）即回归守卫。
 - **安全论据 = 不可变 + 只读线程安全（非「假设主线程」，codex spec-R1-H1 fix）**：所有缓存 formatter **建后永不变异**（固定 tz/locale/format，无 per-call 改写）；DateFormatter 的 `.string(from:)` 在 Apple 平台**线程安全**（iOS7+，不变异时可并发读）→ 不可变共享常量的并发只读**安全 by construction**，不依赖任何未强制的单线程/isolation 假设。`nonisolated(unsafe) static let` 仅为非 Sendable 全局常量的必需逃逸（DateFormatter 非 Sendable），此处是**真安全**（无可变共享态）。
+- **并发安全经验证（codex spec-R2-H2）**：`nonisolated(unsafe)` 压掉编译器保护 → 须**主动加并发压力测试**证不可变缓存并发只读安全（codex 明示的接受前提）：新 host 测 `withTaskGroup` 起 N（如 200）并发任务，各自用同一缓存 formatter 格式化多个固定 date，断言**每个输出等于预期串**（无崩溃、无交叉污染）。覆盖 CrosshairLayout / CrosshairSidebarContent 两 formatter + AxisGridLayout 3 formatter 各一组。
 - **Swift 6 Sendable**：⚠️ **本地 Swift6 宽松 ≠ CI macos-15**（[[feedback_swift_local_ci_toolchain_strictness]]），Catalyst build-for-testing 必须亲验通过 + **零 warning**（CI gate `grep -E "(error|warning):"`）。
 - **平台无关**：三文件为 `Render/` 纯布局函数（无 `#if canImport(UIKit)`）→ host swift test 也编译它们，Swift6 检查 host + Catalyst 双覆盖。
 
@@ -162,7 +168,7 @@ private static func formatter(for period: Period) -> DateFormatter {
 - **host 纯函数测（Swift Testing）**：
   - `HistoryDialogPresentation`（I1）：**更新 #135 的两条断言**——`sheetItem(.settings)` 现**透传**（返 `.settings`，`.id=="settings"`，非 nil）；`sheetDismissMayApply(.settings)` 现 **true**；`isSettings` 断言不变；`.history` 断言不变（仍滤/仍 false）；`.settlement` 透传不变。
   - `HomeView`（I1）：源兼容守卫测改用**旧 5 参 init**（现已去 deprecated，无 warning）构造 `let _: HomeView = HomeView(content:…, onOpenSettings: {})` → 证 legacy 路由可用 + bare concrete 类型（一旦泛型化或重加 deprecated 即编译错/warning）。
-  - `CrosshairLayout`/`CrosshairSidebarContent`/`AxisGridLayout`（I2）：**现有 label/time 文本断言即输出回归守卫**（缓存不改输出）；如现有覆盖不足，补 1 条「缓存前后同输入同输出」断言。
+  - `CrosshairLayout`/`CrosshairSidebarContent`/`AxisGridLayout`（I2）：①**现有 label/time 文本断言即输出回归守卫**（缓存不改输出）；如现有覆盖不足补 1 条「同输入同输出」断言。②**并发压力测试（codex spec-R2-H2 · 接受缓存的前提）**：`withTaskGroup` 起 200 并发任务用同一缓存 formatter 格式化固定 date，断言每个输出等于预期串（证不可变缓存并发只读安全、无崩溃/交叉污染）。
 - **源兼容 grep 守卫（I1）**：`if grep -rn "== *\.settings" ios/Contracts/Sources; then exit 1; fi`（`if/exit 1` 非 `! grep`）。
 - **三绿亲核**：host swift test（Swift Testing 末行 0 failures **且** XCTest「All tests passed」两框架分开看）+ Mac Catalyst `build-for-testing -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst'` → `** TEST BUILD SUCCEEDED **` **且** CI-gate `grep -E "(error|warning):"` count=0（**验 Swift6 `nonisolated(unsafe)` 通过 + 零 warning**）+ iOS Simulator app build `** BUILD SUCCEEDED **`。
 
