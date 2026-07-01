@@ -217,13 +217,19 @@ public struct TrainingView: View {
 
     private var topBar: some View {
         let rec = lifecycle.activeRecord
-        let bar = TrainingTopBarContent(totalCapital: engine.currentTotalCapital,
-                                        initialCapital: engine.initialCapital,
-                                        averageCost: engine.position.averageCost,
-                                        shares: engine.position.shares,
-                                        returnRate: engine.returnRate,
-                                        positionTier: engine.currentPositionTier,
-                                        stockName: rec?.stockName, stockCode: rec?.stockCode)
+        // codex whole-branch R4-F1：review 步进时显起始本金+0%（防剧透最终成绩）；到结尾或非 review 模式显真实值。
+        let bar = TrainingTopBarContent(
+            totalCapital: TrainingTopBarContent.reviewAwareCapital(
+                mode: engine.flow.mode, isAtEnd: lifecycle.isAtEnd,
+                initialCapital: engine.initialCapital, currentTotalCapital: engine.currentTotalCapital),
+            initialCapital: engine.initialCapital,
+            averageCost: engine.position.averageCost,
+            shares: engine.position.shares,
+            returnRate: TrainingTopBarContent.reviewAwareReturnRate(
+                mode: engine.flow.mode, isAtEnd: lifecycle.isAtEnd,
+                actualReturnRate: engine.returnRate),
+            positionTier: engine.currentPositionTier,
+            stockName: rec?.stockName, stockCode: rec?.stockCode)
         return VStack(spacing: 6) {
             HStack {
                 Button("返回") {
