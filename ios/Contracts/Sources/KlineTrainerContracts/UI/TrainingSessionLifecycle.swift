@@ -109,4 +109,10 @@ public struct TrainingSessionLifecycle {
     public func reviewNetChanged() -> Bool {
         coordinator.reviewNetChanged()
     }
+
+    /// codex whole-branch R1：scenePhase 后台/失活 flush review working 态（镜像 `flushForBackground`，
+    /// 但仅对 review 模式生效，不 invalidate session token）。
+    public func flushReviewForBackground(engine: TrainingEngine) async {
+        await coordinator.flushReviewForBackground(engine: engine)
+    }
 }

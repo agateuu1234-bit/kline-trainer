@@ -503,4 +503,67 @@ struct ReviewAutosaveFenceTests {
         #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings == [line(7)])
         #expect(h.coordinator.activeEngine == nil)   // endSession 已执行
     }
+
+    // MARK: - codex whole-branch R1（data-loss）：scenePhase 后台 flush review working 态
+    //
+    // 此前 scenePhase `.inactive/.background` 只调 `flushForBackground`（对 review no-op），review 全靠
+    // 排队 `autosaveReview` 落盘；若该 Task 尚未排空、OS 随后杀进程，工作态丢失且无 durable working 行。
+    // 本组验证新 `flushReviewForBackground`：① 未经手动 drain 即落盘当前 working 态；② 与终态栅栏
+    // `fenceAndDrainReviewAutosave` 的关键区别——**不** invalidate `reviewSessionToken`，session 继续
+    // （回前台后仍可正常 autosave，非 backReview/endReviewSave/endReviewDiscard 那种终态语义）。
+
+    // 1) 画线改动后排队 autosaveReview（故意不手动 drain）→ flushReviewForBackground → working 行已落盘。
+    @Test func flushReviewForBackground_persistsPendingWorkingState_withoutManualDrain() async throws {
+        let h = try ReviewTestHarness.make()
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+
+        e.setReviewDrawingsForTesting([line(42)])
+        h.coordinator.autosaveReview(engine: e)   // 排队，故意不 drainReviewAutosaveForTesting
+
+        await h.coordinator.flushReviewForBackground(engine: e)
+
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings == [line(42)])
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .inProgress)
+    }
+
+    // 2) 关键区别断言：flush 后 session 未终止——reviewSessionToken 未被 invalidate，activeEngine 仍在，
+    //    后续 autosaveReview 仍正常生效（若 token 被误清，此处第二次写会因 guard 早退而丢失）。
+    @Test func flushReviewForBackground_doesNotInvalidateSession_subsequentAutosaveStillWorks() async throws {
+        let h = try ReviewTestHarness.make()
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+
+        e.setReviewDrawingsForTesting([line(1)])
+        h.coordinator.autosaveReview(engine: e)
+        await h.coordinator.flushReviewForBackground(engine: e)
+
+        #expect(h.coordinator.activeEngine != nil)   // 未 endSession（与终态 backReview 不同）
+
+        e.setReviewDrawingsForTesting([line(1), line(2)])
+        h.coordinator.autosaveReview(engine: e)
+        await h.coordinator.drainReviewAutosaveForTesting()
+
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings == [line(1), line(2)])
+    }
+
+    // 3) 无复盘 session（normal 引擎）→ no-op，不误碰 repo。
+    @Test func flushReviewForBackground_normalMode_isNoOp() async throws {
+        let h = try ReviewTestHarness.make()
+        let e = try await h.coordinator.startNewNormalSession()
+
+        await h.coordinator.flushReviewForBackground(engine: e)
+
+        #expect(h.coordinator.loadReviewMarkers().isEmpty)
+    }
+
+    // 4) lifecycle 转发。
+    @Test func lifecycle_flushReviewForBackground_delegatesToCoordinator() async throws {
+        let h = try ReviewTestHarness.make()
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+        let lifecycle = TrainingSessionLifecycle(engine: e, coordinator: h.coordinator)
+
+        e.setReviewDrawingsForTesting([line(9)])
+        await lifecycle.flushReviewForBackground(engine: e)
+
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings == [line(9)])
+    }
 }

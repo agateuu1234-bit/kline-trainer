@@ -260,7 +260,12 @@ public struct TrainingView: View {
                     presentToast(e.userMessage)
                 }
             case .inactive, .background:
-                Task { await lifecycle.flushForBackground() }   // §4.6 item4：失活/后台立即 flush（OS 可能随后杀进程）
+                Task {
+                    await lifecycle.flushForBackground()        // §4.6 item4：失活/后台立即 flush（OS 可能随后杀进程）
+                    // codex whole-branch R1：review 的 autosave 只走排队 `autosaveReview`（上面这条对 review no-op），
+                    // 须单独 flush，否则未排空的画线/步进改动可能随进程被杀丢失。
+                    if engine.flow.mode == .review { await lifecycle.flushReviewForBackground(engine: engine) }
+                }
             @unknown default:
                 break
             }

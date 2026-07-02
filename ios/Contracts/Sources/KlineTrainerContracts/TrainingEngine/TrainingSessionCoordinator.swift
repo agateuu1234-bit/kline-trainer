@@ -882,6 +882,22 @@ public final class TrainingSessionCoordinator {
         await endSession()
     }
 
+    /// codex whole-branch R1（data-loss）：scenePhase 后台/失活 flush review working 态（镜像 normal/replay
+    /// 的 `flushAutosave`，§4.6 item 4），补齐此前只有 `flushForBackground`（对 review no-op）的缺口——
+    /// review 画线/步进只靠排队 `autosaveReview` 落盘，若 OS 在其排空前杀进程会丢工作态。
+    /// 与 `fenceAndDrainReviewAutosave`（终态栅栏，供 back/endReviewSave/endReviewDiscard）的关键区别：
+    /// **不** invalidate `reviewSessionToken`——这是后台 flush，非终态；回前台后 session 须能继续。
+    /// cancel + await 排空在飞排队 autosave（若有）→ 再显式 `persistReviewWorkingIfChanged` 落当前态（best-effort，
+    /// 镜像 normal `flushAutosave` 对失败静默处理——后台无法弹重试提示）。非 review 模式或无复盘 session
+    /// （`reviewRecordId == nil`）→ no-op。
+    public func flushReviewForBackground(engine: TrainingEngine) async {
+        guard engine.flow.mode == .review, reviewRecordId != nil else { return }
+        reviewAutosaveTask?.cancel()
+        await reviewAutosaveTask?.value
+        reviewAutosaveTask = nil
+        try? persistReviewWorkingIfChanged(engine: engine)
+    }
+
     // MARK: - 私有构造 helper（E6a）
 
     /// A4：新局起始资金 = 权威 `settings.total_capital`（直读 DB，绕开缓存陈旧）。
