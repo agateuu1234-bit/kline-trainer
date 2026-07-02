@@ -480,8 +480,8 @@ struct ReviewAutosaveFenceTests {
         e.setReviewDrawingsForTesting([line(7)])
         #expect(lifecycle.reviewNetChanged() == true)
 
-        lifecycle.autosaveReview()
-        try await lifecycle.backReview()
+        lifecycle.autosaveReview(engine: e)
+        try await lifecycle.backReview(engine: e)
 
         #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings == [line(7)])
         #expect(h.coordinator.activeEngine == nil)   // endSession 已执行

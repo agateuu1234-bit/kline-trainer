@@ -82,24 +82,26 @@ public struct TrainingSessionLifecycle {
     }
 
     // MARK: - review-redesign Task 7：复盘 autosave/终态 fence 转发（§6.3）
+    // 显式 `engine:` 参数（非 self.engine 隐式）：镜像 plan §Task 9 UI 接线调用点
+    // （`lifecycle.backReview(engine: engine)` 等，plan L1290-1292/1307/1326），与 coordinator 侧签名一致。
 
     /// 复盘中按需节流 autosave（画线/步进触发）。
-    public func autosaveReview() {
+    public func autosaveReview(engine: TrainingEngine) {
         coordinator.autosaveReview(engine: engine)
     }
 
     /// 复盘返回（drain → persistReviewWorkingIfChanged → endSession）。
-    public func backReview() async throws {
+    public func backReview(engine: TrainingEngine) async throws {
         try await coordinator.backReview(engine: engine)
     }
 
     /// 复盘保存结束（drain → commitReview → endSession）。
-    public func endReviewSave() async throws {
+    public func endReviewSave(engine: TrainingEngine) async throws {
         try await coordinator.endReviewSave(engine: engine)
     }
 
     /// 复盘丢弃结束（drain → discardReviewWorking → endSession）。
-    public func endReviewDiscard() async throws {
+    public func endReviewDiscard(engine: TrainingEngine) async throws {
         try await coordinator.endReviewDiscard(engine: engine)
     }
 
