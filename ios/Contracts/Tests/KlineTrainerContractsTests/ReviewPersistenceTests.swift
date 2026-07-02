@@ -152,6 +152,21 @@ struct ReviewNetChangeTests {
     @Test @MainActor func differentPrice_changed() {
         #expect(ReviewNetChange.changed(working: [line(5)], committed: [line(7)]) == true)
     }
+
+    // codex whole-branch review [medium]：key(_:) 曾遗漏 revealTick，致「同几何异渐显时机」被误判为无改动。
+    @Test @MainActor func sameGeometryDifferentRevealTick_changed() {
+        let anchors = [DrawingAnchor(period: .m3, candleIndex: 5, price: 10)]
+        let saved   = [DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
+        let working = [DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 200)]
+        #expect(ReviewNetChange.changed(working: working, committed: saved) == true)
+    }
+
+    @Test @MainActor func sameGeometrySameRevealTick_noChange() {
+        let anchors = [DrawingAnchor(period: .m3, candleIndex: 5, price: 10)]
+        let saved   = [DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
+        let working = [DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
+        #expect(ReviewNetChange.changed(working: working, committed: saved) == false)
+    }
 }
 
 // MARK: - Coordinator review-persistence

@@ -36,9 +36,9 @@ public enum ReviewNetChange {
     /// 净改动 = 工作画线集与 committed 基线不等（顺序无关：按稳定序列化后排序比较）。
     public static func changed(working: [DrawingObject], committed: [DrawingObject]) -> Bool {
         func key(_ d: DrawingObject) -> String {
-            // 稳定序：toolType|panel|isExtended|anchors(period,candleIndex,price)
+            // 稳定序：toolType|panel|isExtended|revealTick|anchors(period,candleIndex,price)
             let a = d.anchors.map { "\($0.period.rawValue):\($0.candleIndex):\($0.price)" }.joined(separator: ";")
-            return "\(d.toolType.rawValue)|\(d.panelPosition)|\(d.isExtended)|\(a)"
+            return "\(d.toolType.rawValue)|\(d.panelPosition)|\(d.isExtended)|\(d.revealTick)|\(a)"
         }
         return working.map(key).sorted() != committed.map(key).sorted()
     }
