@@ -32,6 +32,7 @@ final class AppDBMigrationsTests: XCTestCase {
             "drawings",
             "pending_replay",
             "pending_training",
+            "review_archive",
             "settings",
             "trade_operations",
             "training_records",
@@ -47,8 +48,8 @@ final class AppDBMigrationsTests: XCTestCase {
         XCTAssertTrue(indexes.contains("idx_journal_state"))
     }
 
-    // MARK: - migrator 跑过的 PRAGMA user_version（0006 起终态 = 4）
-    func test_full_migrator_sets_user_version_4() throws {
+    // MARK: - migrator 跑过的 PRAGMA user_version（0007 起终态 = 5）
+    func test_full_migrator_sets_user_version_5() throws {
         let dbURL = try AppDBFixture.makeFreshDB()
         defer { try? FileManager.default.removeItem(at: dbURL.deletingLastPathComponent()) }
 
@@ -56,7 +57,7 @@ final class AppDBMigrationsTests: XCTestCase {
         let version: Int = try queue.read { db in
             try Int.fetchOne(db, sql: "PRAGMA user_version") ?? 0
         }
-        XCTAssertEqual(version, 4)   // 0001 置 1，0004 bump 至 2，0005（RFC-A A4）bump 至 3，0006（A3）bump 至 4
+        XCTAssertEqual(version, 5)   // 0001 置 1，0004 bump 至 2，0005（RFC-A A4）bump 至 3，0006（A3）bump 至 4，0007（review-redesign）bump 至 5
     }
 
     // MARK: - 0003_v1.4_purge_leased 实际删 leased 行

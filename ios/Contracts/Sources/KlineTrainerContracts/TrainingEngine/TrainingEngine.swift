@@ -23,6 +23,12 @@ public final class TrainingEngine {
     public private(set) var drawdown: DrawdownAccumulator
     public private(set) var markers: [TradeMarker]
     public private(set) var drawings: [DrawingObject]
+    /// review-redesign Task 5 最小 shim + **Task 10 落地**：复盘 session 的工作画线集，供 coordinator
+    /// 持久化净改动判定（`ReviewNetChange.changed(working: engine.reviewDrawings, committed:)`）读取，
+    /// 也是复盘新画线的唯一写入面——`appendReviewDrawing`/`removeReviewDrawing`；`ChartContainerView`
+    /// commit 路径经 `routeDrawingCommit` 按 `flow.mode == .review` 路由至此，不污染 committed `drawings`
+    /// （committed `drawings` 在 review 中只读）。
+    public private(set) var reviewDrawings: [DrawingObject] = []
     public private(set) var upperPanel: PanelViewState
     public private(set) var lowerPanel: PanelViewState
     public private(set) var tradeOperations: [TradeOperation]
@@ -256,9 +262,21 @@ public final class TrainingEngine {
 
     // MARK: - 派生 accessor（只读纯值计算属性；买卖可用门见 E5b / D4）
 
-    /// 现价：复用 Task 1 的静态 `price(...)`，固定 `.m3` 驱动序列（D2 / codex R4-F2）。
+    /// 现价：`tick.globalTickIndex` 处的 `markPrice`（D2 / codex R4-F2）。
     public var currentPrice: Double {
-        TrainingEngine.price(in: allCandles, atTick: tick.globalTickIndex)
+        markPrice(atTick: tick.globalTickIndex)
+    }
+
+    /// review-redesign Task 6：复盘引擎播种 `reviewDrawings`（committed 基线 或 resume 的 working 画线集）
+    /// 的生产入口（由 coordinator `buildReviewEngine` 调用）。Task 5 的 `setReviewDrawingsForTesting`
+    /// 仅 DEBUG 测试专用，本方法是唯一生产路径。Task 10 补真实画线路由（appendReviewDrawing 等）后仍保留
+    /// 本 setter 作初始播种入口。
+    public func setReviewDrawings(_ ds: [DrawingObject]) { reviewDrawings = ds }
+
+    /// 规范 mark price（Task 9 收口）：global tick `t` 处 `.m3` 收盘价，越界 clamp 到端根、非 nil。
+    /// `currentPrice`／`ReviewLedger.state` 的 `markPriceAtTick`／finalize 三处共用同一入口，杜绝重复实现漂移。
+    public func markPrice(atTick t: Int) -> Double {
+        TrainingEngine.price(in: allCandles, atTick: t)
     }
 
     /// 本局实时总资金 = 现金 + 持仓市值（plan v1.5 L914）。
@@ -386,6 +404,17 @@ public final class TrainingEngine {
             return                                                // 皆耗尽=到结尾，no-op
         }
         holdOrObserve(panel: panel)
+    }
+
+    /// 复盘按指定面板步进一根（红框所选周期）。该面板已到末尾则步进另一面板；皆耗尽=到结尾 no-op。
+    public func stepReviewForward(panel requested: PanelId) {
+        let requestedSteps = stepsForPeriod(requested == .upper ? upperPanel.period : lowerPanel.period)
+        if requestedSteps > 0 {
+            holdOrObserve(panel: requested); return
+        }
+        let other: PanelId = requested == .upper ? .lower : .upper
+        let otherSteps = stepsForPeriod(other == .upper ? upperPanel.period : lowerPanel.period)
+        if otherSteps > 0 { holdOrObserve(panel: other) }   // 所选耗尽 → 用另一面板；皆耗尽 → no-op
     }
 
     // MARK: - 私有：步进 + 联动 + 记账（buy/sell/holdOrObserve 共用）
@@ -939,8 +968,35 @@ extension TrainingEngine {
     /// 持久化真相（`@Observable` 数组突变自动触发重渲染，同 `deleteDrawing`；进入 finalize/pending
     /// 持久化路径）。顺位 4 `DrawingInputController` 在 `manager.commit()` 后调本方法，使
     /// `manager.completedDrawings → engine.drawings` 单一真相（manager 仅作输入暂存）。
+    /// **review-redesign Task 10**：本方法保持不变（normal/replay 仍走它）——review 模式改经
+    /// `routeDrawingCommit`/`appendReviewDrawing` 写 `reviewDrawings`，不再直接调本方法。
     public func appendDrawing(_ drawing: DrawingObject) {
         drawings.append(drawing)
+    }
+
+    /// review-redesign Task 10：复盘新画线唯一写入面——追加进 `reviewDrawings`（不触碰 `drawings`，
+    /// 不污染原训练记录）。`RenderStateBuilder.make` review 模式据此叠加 `drawings + reviewDrawings`。
+    public func appendReviewDrawing(_ drawing: DrawingObject) {
+        reviewDrawings.append(drawing)
+    }
+
+    /// `deleteDrawing(at:)` 的 `reviewDrawings` 对应版本（复盘侧删除）。越界 trap，同风格。
+    public func removeReviewDrawing(at index: Int) {
+        precondition(reviewDrawings.indices.contains(index), "removeReviewDrawing index out of bounds")
+        reviewDrawings.remove(at: index)
+    }
+
+    /// review-redesign Task 10：画线提交路由单一真相——`review` 模式写 `reviewDrawings`，其余
+    /// （normal/replay）写 `drawings`。UIKit commit 路径（`ChartContainerView.handleDrawingTap`）调用
+    /// 本方法而非直接判 `flow.mode`，使路由逻辑落在平台无关引擎层，可被 host `swift test` 覆盖
+    /// （承载 commit 手势的 UIKit 文件本身在纯 macOS host 不编译）。
+    /// **关键不变量**：review commit 绝不写 `drawings`（不污染原训练记录）。
+    public func routeDrawingCommit(_ drawing: DrawingObject) {
+        if flow.mode == .review {
+            appendReviewDrawing(drawing)
+        } else {
+            appendDrawing(drawing)
+        }
     }
 
     /// 提交当前 drawing：dispatch reducer `.drawingCommitted` 退出 `.drawing` → `.autoTracking`
@@ -1017,5 +1073,9 @@ extension TrainingEngine {
 extension TrainingEngine {
     /// R1b-drag 测试专用：读 dragRaw（生命周期断言）。
     func debug_dragRawFor(_ panel: PanelId) -> CGFloat? { dragRawFor(panel) }
+
+    /// review-redesign Task 5 测试专用：注入 `reviewDrawings`（Task 10 真实路由落地后仍保留——
+    /// 供测试直接置状态，不经 `appendReviewDrawing`/`routeDrawingCommit` 手势路径）。
+    func setReviewDrawingsForTesting(_ drawings: [DrawingObject]) { reviewDrawings = drawings }
 }
 #endif

@@ -185,69 +185,26 @@ struct TrainingTopBarContentTests {
     }
 }
 
-// MARK: - codex whole-branch R4-F1：reviewAware helpers
+// MARK: - Task 9：review 顶栏读 ReviewLedgerState 运行值（替换 #136 R4 reviewAware* 隐藏行为，两个 static
+// helper 已随 TrainingView 调用点一并删除——production 唯一调用方已改用 ReviewLedger.state 运行值）。
 
-@Suite("TrainingTopBarContent reviewAware helpers")
-struct TrainingTopBarReviewAwareTests {
+@Suite("TrainingTopBarContent from ReviewLedgerState")
+struct TrainingTopBarReviewLedgerTests {
 
-    // MARK: reviewAwareCapital
-
-    @Test("reviewAwareCapital：review + !isAtEnd → initialCapital（隐藏最终成绩）")
-    func reviewAwareCapital_reviewNotAtEnd() {
-        let result = TrainingTopBarContent.reviewAwareCapital(
-            mode: .review, isAtEnd: false, initialCapital: 100_000, currentTotalCapital: 150_000)
-        #expect(result == 100_000)
-    }
-
-    @Test("reviewAwareCapital：review + isAtEnd → currentTotalCapital（揭示真实）")
-    func reviewAwareCapital_reviewAtEnd() {
-        let result = TrainingTopBarContent.reviewAwareCapital(
-            mode: .review, isAtEnd: true, initialCapital: 100_000, currentTotalCapital: 150_000)
-        #expect(result == 150_000)
-    }
-
-    @Test("reviewAwareCapital：normal + !isAtEnd → currentTotalCapital（恒真实）")
-    func reviewAwareCapital_normalNotAtEnd() {
-        let result = TrainingTopBarContent.reviewAwareCapital(
-            mode: .normal, isAtEnd: false, initialCapital: 100_000, currentTotalCapital: 150_000)
-        #expect(result == 150_000)
-    }
-
-    @Test("reviewAwareCapital：replay + !isAtEnd → currentTotalCapital（恒真实）")
-    func reviewAwareCapital_replayNotAtEnd() {
-        let result = TrainingTopBarContent.reviewAwareCapital(
-            mode: .replay, isAtEnd: false, initialCapital: 100_000, currentTotalCapital: 150_000)
-        #expect(result == 150_000)
-    }
-
-    // MARK: reviewAwareReturnRate
-
-    @Test("reviewAwareReturnRate：review + !isAtEnd → 0（隐藏收益率）")
-    func reviewAwareReturnRate_reviewNotAtEnd() {
-        let result = TrainingTopBarContent.reviewAwareReturnRate(
-            mode: .review, isAtEnd: false, actualReturnRate: 0.5)
-        #expect(result == 0)
-    }
-
-    @Test("reviewAwareReturnRate：review + isAtEnd → actualReturnRate（揭示真实）")
-    func reviewAwareReturnRate_reviewAtEnd() {
-        let result = TrainingTopBarContent.reviewAwareReturnRate(
-            mode: .review, isAtEnd: true, actualReturnRate: 0.5)
-        #expect(result == 0.5)
-    }
-
-    @Test("reviewAwareReturnRate：normal + !isAtEnd → actualReturnRate（恒真实）")
-    func reviewAwareReturnRate_normalNotAtEnd() {
-        let result = TrainingTopBarContent.reviewAwareReturnRate(
-            mode: .normal, isAtEnd: false, actualReturnRate: -0.2)
-        #expect(result == -0.2)
-    }
-
-    @Test("reviewAwareReturnRate：replay + !isAtEnd → actualReturnRate（恒真实）")
-    func reviewAwareReturnRate_replayNotAtEnd() {
-        let result = TrainingTopBarContent.reviewAwareReturnRate(
-            mode: .replay, isAtEnd: false, actualReturnRate: 0.1)
-        #expect(result == 0.1)
+    @Test("buy 后运行态：total 99995（-¥5）→ 顶栏本局盈亏 -¥5 / sign -1，非最终隐藏")
+    func reviewLedgerState_buildsRunningTopBar() {
+        // 同 ReviewLedgerTests.afterBuyRunningValueTracks：buy 100 @10, commission 5, totalCost 1005。
+        let state = ReviewLedgerState(cash: 98_995, shares: 100, averageCost: 10.05,
+                                      totalCapital: 99_995, returnRate: -5.0 / 100_000, positionTier: 0)
+        let c = TrainingTopBarContent(totalCapital: state.totalCapital, initialCapital: 100_000,
+                                      averageCost: state.averageCost, shares: state.shares,
+                                      returnRate: state.returnRate, positionTier: state.positionTier,
+                                      stockName: nil, stockCode: nil)
+        #expect(c.totalCapital == "¥99,995")
+        #expect(c.sessionPnLAmount == "-¥5")
+        #expect(c.sessionPnLSign == -1)
+        #expect(c.holdingCostPerShare == "10.05")
+        #expect(c.sharesText == "100")
     }
 }
 

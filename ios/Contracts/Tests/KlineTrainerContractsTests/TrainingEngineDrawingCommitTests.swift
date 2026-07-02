@@ -67,4 +67,59 @@ struct TrainingEngineDrawingCommitTests {
         #expect(e.upperPanel.interactionMode == .autoTracking)
         #expect(e.drawings == [d])                                 // commit 不改 drawings
     }
+
+    // MARK: - review-redesign Task 10：routeDrawingCommit（review→reviewDrawings / else→drawings）
+
+    /// review 模式 engine（复用 TrainingEngineActionsTests.m3Candles，同其余 helper 风格）。
+    static func reviewEngine(closes: [Double] = Array(repeating: 10, count: 100)) -> TrainingEngine {
+        let maxTick = closes.count - 1
+        let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+        let record = TrainingRecord(id: 1, trainingSetFilename: "t.sqlite", createdAt: 0,
+                                    stockCode: "000001", stockName: "测试", startYear: 2020, startMonth: 1,
+                                    totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                                    buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: maxTick)
+        return TrainingEngine(
+            flow: ReviewFlow(record: record, startTick: 0),
+            allCandles: TrainingEngineActionsTests.m3Candles(closes),
+            maxTick: maxTick,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m3, initialLowerPeriod: .m3)
+    }
+
+    @Test("routeDrawingCommit: review 模式写 reviewDrawings，engine.drawings 不变（关键不变量：不污染原训练记录）")
+    func routeDrawingCommitReviewGoesToReviewDrawings() {
+        let e = Self.reviewEngine()
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 1, price: 10.4)],
+                              isExtended: true, panelPosition: 0)
+        let drawingsCountBefore = e.drawings.count
+        e.routeDrawingCommit(d)
+        #expect(e.drawings.count == drawingsCountBefore)   // 不得写入 engine.drawings（不污染原训练记录）
+        #expect(e.reviewDrawings == [d])
+    }
+
+    @Test("routeDrawingCommit: 非 review（normal）模式写 drawings，engine.reviewDrawings 不变")
+    func routeDrawingCommitNormalGoesToDrawings() {
+        let (e, _) = TrainingEngineInteractionTests.engine()
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 1, price: 10.4)],
+                              isExtended: true, panelPosition: 0)
+        let reviewCountBefore = e.reviewDrawings.count
+        e.routeDrawingCommit(d)
+        #expect(e.drawings == [d])
+        #expect(e.reviewDrawings.count == reviewCountBefore)
+    }
+
+    @Test("removeReviewDrawing: 按 index 从 engine.reviewDrawings 删除（deleteDrawing 的复盘对应版本）")
+    func removeReviewDrawingRemovesByIndex() {
+        let e = Self.reviewEngine()
+        let d0 = DrawingObject(toolType: .trend, anchors: [], isExtended: false, panelPosition: 0)
+        let d1 = DrawingObject(toolType: .ray, anchors: [], isExtended: false, panelPosition: 0)
+        e.appendReviewDrawing(d0)
+        e.appendReviewDrawing(d1)
+        e.removeReviewDrawing(at: 0)
+        #expect(e.reviewDrawings.count == 1)
+        #expect(e.reviewDrawings[0].toolType == .ray)
+        #expect(e.drawings.isEmpty)   // 全程未碰 engine.drawings
+    }
 }

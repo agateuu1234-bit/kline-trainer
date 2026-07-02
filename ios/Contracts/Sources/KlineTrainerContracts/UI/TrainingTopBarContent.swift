@@ -103,17 +103,3 @@ public struct TrainingTopBarContent: Equatable, Sendable {
         return "\(String(format: "%+.2f", pct))%"
     }
 }
-
-public extension TrainingTopBarContent {
-    /// codex whole-branch R4-F1：复盘步进时隐藏最终盈亏。review 且未到结尾 → 顶栏显起始本金（杜绝"一进复盘即剧透最终成绩"）；
-    /// 到结尾(isAtEnd，含一键到底)恢复真实（= D-B3 最终成绩）。normal/replay 恒真实。
-    static func reviewAwareCapital(mode: TrainingMode, isAtEnd: Bool,
-                                   initialCapital: Double, currentTotalCapital: Double) -> Double {
-        (mode == .review && !isAtEnd) ? initialCapital : currentTotalCapital
-    }
-
-    static func reviewAwareReturnRate(mode: TrainingMode, isAtEnd: Bool,
-                                      actualReturnRate: Double) -> Double {
-        (mode == .review && !isAtEnd) ? 0 : actualReturnRate
-    }
-}

@@ -18,6 +18,7 @@ enum PIFixtures {
             dbFactory: PreviewTrainingSetDBFactory(candles: TrainingSessionPersistenceTests.validCandles()),
             recordRepo: records, pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: port,
             // A4：settingsDAO 与 SettingsStore 同源（mirror 生产同一 DefaultAppDB）——startingCapital 直读 DAO。
             settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: capital), cache: cache,
@@ -42,6 +43,7 @@ enum PIFixtures {
         let coord = TrainingSessionCoordinator(
             dbFactory: factory, recordRepo: records, pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: port,
             // A4：settingsDAO 与 SettingsStore 同源（startingCapital 直读 DAO）。
             settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: 50_000), cache: cache,

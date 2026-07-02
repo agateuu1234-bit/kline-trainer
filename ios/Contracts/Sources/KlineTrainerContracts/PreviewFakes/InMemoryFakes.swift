@@ -231,6 +231,117 @@ public final class InMemoryPendingReplayRepository: PendingReplayRepository, @un
     }
 }
 
+/// review-redesign：ReviewArchiveRepository 的 in-memory fake（mirror ReviewArchiveRepositoryImpl 状态机：
+/// 独立解码不适用于内存态——本 fake 无 JSON 序列化，saved/working 各自独立存储字段即天然独立）。
+public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @unchecked Sendable {
+    private let lock = NSLock()
+    private var saved: [Int64: [DrawingObject]] = [:]
+    private var working: [Int64: (stepTick: Int, drawings: [DrawingObject])] = [:]
+    /// review-redesign Task 6：一次性故障注入（mirror `InMemoryPendingReplayRepository` 的 `failNextLoadReplay`
+    /// 范式），供 coordinator saved-corrupt 恢复路径测试模拟 `.dbCorrupted` / clearSaved 失败。
+    private var _failNextLoadSaved: AppError?
+    public var failNextLoadSaved: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextLoadSaved }
+        set { lock.lock(); defer { lock.unlock() }; _failNextLoadSaved = newValue }
+    }
+    private var _failNextClearSaved: AppError?
+    public var failNextClearSaved: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextClearSaved }
+        set { lock.lock(); defer { lock.unlock() }; _failNextClearSaved = newValue }
+    }
+    /// final-review T6：一次性故障注入，供测试模拟 `loadWorking` 的 `.dbCorrupted`（working 独立解码坏路径）。
+    private var _failNextLoadWorking: AppError?
+    public var failNextLoadWorking: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextLoadWorking }
+        set { lock.lock(); defer { lock.unlock() }; _failNextLoadWorking = newValue }
+    }
+    /// codex whole-branch R2：一次性故障注入，供测试模拟 `reviewMarker` 瞬态错误（fail-closed resume 回归测试）。
+    private var _failNextReviewMarker: AppError?
+    public var failNextReviewMarker: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextReviewMarker }
+        set { lock.lock(); defer { lock.unlock() }; _failNextReviewMarker = newValue }
+    }
+    /// codex whole-branch R2：一次性故障注入，供测试模拟 `clearWorking` 失败（abandonReview 稳健 teardown 回归测试）。
+    private var _failNextClearWorking: AppError?
+    public var failNextClearWorking: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextClearWorking }
+        set { lock.lock(); defer { lock.unlock() }; _failNextClearWorking = newValue }
+    }
+    /// codex whole-branch R4 finding 1：一次性故障注入，供测试模拟 `saveWorking` 失败（review autosave/flush
+    /// 可观察错误回归测试，mirror `failNextClearWorking` 范式）。
+    private var _failNextSaveWorking: AppError?
+    public var failNextSaveWorking: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextSaveWorking }
+        set { lock.lock(); defer { lock.unlock() }; _failNextSaveWorking = newValue }
+    }
+
+    public init() {}
+
+    public func loadArchive(recordId: Int64) throws -> ReviewArchive? {
+        lock.lock(); defer { lock.unlock() }
+        let s = saved[recordId]
+        let w = working[recordId]
+        guard s != nil || w != nil else { return nil }
+        return ReviewArchive(recordId: recordId, savedDrawings: s,
+                             workingStepTick: w?.stepTick, workingDrawings: w?.drawings)
+    }
+
+    public func loadWorking(recordId: Int64) throws -> ReviewWorking? {
+        lock.lock(); defer { lock.unlock() }
+        if let e = _failNextLoadWorking { _failNextLoadWorking = nil; throw e }
+        guard let w = working[recordId] else { return nil }
+        return ReviewWorking(stepTick: w.stepTick, drawings: w.drawings)
+    }
+
+    public func loadSaved(recordId: Int64) throws -> [DrawingObject]? {
+        lock.lock(); defer { lock.unlock() }
+        if let e = _failNextLoadSaved { _failNextLoadSaved = nil; throw e }
+        return saved[recordId]
+    }
+
+    public func saveWorking(recordId: Int64, stepTick: Int, drawings: [DrawingObject]) throws {
+        lock.lock(); defer { lock.unlock() }
+        if let e = _failNextSaveWorking { _failNextSaveWorking = nil; throw e }
+        working[recordId] = (stepTick, drawings)
+    }
+
+    public func commitSaved(recordId: Int64, drawings: [DrawingObject]) throws {
+        lock.lock(); defer { lock.unlock() }
+        saved[recordId] = drawings
+        working[recordId] = nil
+    }
+
+    public func clearWorking(recordId: Int64) throws {
+        lock.lock(); defer { lock.unlock() }
+        if let e = _failNextClearWorking { _failNextClearWorking = nil; throw e }
+        working[recordId] = nil
+    }
+
+    public func clearSaved(recordId: Int64) throws {
+        lock.lock(); defer { lock.unlock() }
+        if let e = _failNextClearSaved { _failNextClearSaved = nil; throw e }
+        saved[recordId] = nil
+    }
+
+    public func loadMarkers() throws -> [Int64: ReviewMarker] {
+        lock.lock(); defer { lock.unlock() }
+        var out: [Int64: ReviewMarker] = [:]
+        for id in Set(saved.keys).union(working.keys) {
+            let marker: ReviewMarker = working[id] != nil ? .inProgress : (saved[id] != nil ? .saved : .none)
+            out[id] = marker
+        }
+        return out.filter { $0.value != .none }
+    }
+
+    public func reviewMarker(recordId: Int64) throws -> ReviewMarker {
+        lock.lock(); defer { lock.unlock() }
+        if let e = _failNextReviewMarker { _failNextReviewMarker = nil; throw e }
+        if working[recordId] != nil { return .inProgress }
+        if saved[recordId] != nil { return .saved }
+        return .none
+    }
+}
+
 /// Wave 3 顺位 10a：SessionFinalizationPort 的 in-memory fake。
 /// 组合既有 record/pending 两 fake（保证 fake 状态一致）；mirror 生产单事务语义：
 /// 失败注入时**零状态变更**（原子）；同 sessionKey 重试幂等返已存 id。

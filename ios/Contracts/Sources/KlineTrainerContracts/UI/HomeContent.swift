@@ -23,6 +23,8 @@ public struct HomeHistoryRow: Identifiable, Equatable, Sendable {
     public let totalCapital: String // "¥ 102,345.67"
     public let profitAndRate: String // "+¥ 2,345.67（+2.34%）"
     public let sign: ProfitSign
+    public let replayInProgress: Bool   // Task 11：该记录是否占用 replay 续局单槽（"再次训练中"）
+    public let reviewMarker: ReviewMarker // Task 11：复盘存档标记（"复盘中"/"已复盘"，与 replayInProgress 正交）
 }
 
 public struct HomeContent: Equatable, Sendable {
@@ -43,6 +45,8 @@ public struct HomeContent: Equatable, Sendable {
                 records: [TrainingRecord],
                 hasPending: Bool,
                 hasCachedSets: Bool,
+                replaySlotRecordId: Int64?,
+                reviewMarkers: [Int64: ReviewMarker],
                 timeZone: TimeZone = .current) {
         // 统计栏 §6.1.1
         self.totalSessions = "\(statistics.totalCount) 局"   // M2：N 取 statistics.totalCount，非 rows.count
@@ -63,7 +67,11 @@ public struct HomeContent: Equatable, Sendable {
                 ? lhs.record.createdAt > rhs.record.createdAt
                 : lhs.id > rhs.id
         }
-        self.rows = sorted.map { Self.makeRow(id: $0.id, record: $0.record, timeZone: timeZone) }
+        self.rows = sorted.map {
+            Self.makeRow(id: $0.id, record: $0.record, timeZone: timeZone,
+                        replayInProgress: $0.id == replaySlotRecordId,
+                        reviewMarker: reviewMarkers[$0.id] ?? .none)
+        }
         self.isHistoryEmpty = self.rows.isEmpty
     }
 
@@ -133,7 +141,8 @@ public struct HomeContent: Equatable, Sendable {
     }
 
     /// 从已解包 id + TrainingRecord 组装历史行显示快照（D12：id 已由 compactMap 过滤非 nil）。
-    static func makeRow(id: Int64, record: TrainingRecord, timeZone: TimeZone) -> HomeHistoryRow {
+    static func makeRow(id: Int64, record: TrainingRecord, timeZone: TimeZone,
+                        replayInProgress: Bool, reviewMarker: ReviewMarker) -> HomeHistoryRow {
         HomeHistoryRow(
             id: id,
             dateTime: formatDateTime(epochSeconds: record.createdAt, timeZone: timeZone),
@@ -141,6 +150,8 @@ public struct HomeContent: Equatable, Sendable {
             startMonth: formatStartMonth(year: record.startYear, month: record.startMonth),
             totalCapital: formatCapital(record.totalCapital),
             profitAndRate: formatProfitAndRate(profit: record.profit, returnRate: record.returnRate),
-            sign: profitSign(record.profit))
+            sign: profitSign(record.profit),
+            replayInProgress: replayInProgress,
+            reviewMarker: reviewMarker)
     }
 }

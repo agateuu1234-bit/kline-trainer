@@ -5,11 +5,11 @@ import Foundation
 @testable import KlineTrainerPersistence
 
 @MainActor
-@Test func migration0006_createsTable_userVersion4() throws {
+@Test func migration0006_createsTable_userVersion5() throws {
     let queue = try DatabaseQueue()        // in-memory
     try AppDBMigrations.makeMigrator().migrate(queue)
     let uv = try queue.read { try Int.fetchOne($0, sql: "PRAGMA user_version") }
-    #expect(uv == 4)
+    #expect(uv == 5)   // 完整 migrator 现终态 = 5（0007 review_archive 新增）
     let exists = try queue.read {
         try Int.fetchOne($0, sql:
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pending_replay'")

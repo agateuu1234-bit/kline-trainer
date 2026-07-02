@@ -53,7 +53,8 @@ public final class AppRouter {
 
     static func emptyHome() -> HomeContent {
         HomeContent(statistics: (totalCount: 0, winCount: 0, currentCapital: 0),
-                    configuredCapital: 0, records: [], hasPending: false, hasCachedSets: false)
+                    configuredCapital: 0, records: [], hasPending: false, hasCachedSets: false,
+                    replaySlotRecordId: nil, reviewMarkers: [:])
     }
 
     public func loadHome() async {
@@ -62,10 +63,13 @@ public final class AppRouter {
             let stats = try recordRepo.statistics()
             let hasPending = (try pendingRepo.loadPending()) != nil
             let hasCached = !cache.listAvailable().isEmpty
+            let reviewMarkers = coordinator.loadReviewMarkers()
+            let replaySlotId = coordinator.replaySlotRecordId()
             self.records = recs
             self.homeContent = HomeContent(statistics: stats,
                                            configuredCapital: settings.settings.totalCapital,
-                                           records: recs, hasPending: hasPending, hasCachedSets: hasCached)
+                                           records: recs, hasPending: hasPending, hasCachedSets: hasCached,
+                                           replaySlotRecordId: replaySlotId, reviewMarkers: reviewMarkers)
         } catch {
             self.records = []
             self.homeContent = AppRouter.emptyHome()
@@ -95,7 +99,13 @@ public final class AppRouter {
     public func review(id: Int64) async {
         activeModal = nil
         do {
-            let engine = try await coordinator.review(recordId: id)
+            // resume-first：总先试续复盘；返 nil（无进行中存档/竞态已清）才从头（review-redesign Task 6）。
+            let engine: TrainingEngine
+            if let resumed = try await coordinator.resumePendingReview(recordId: id) {
+                engine = resumed
+            } else {
+                engine = try await coordinator.review(recordId: id)   // 从头
+            }
             activeTraining = ActiveTraining(lifecycle: TrainingSessionLifecycle(engine: engine, coordinator: coordinator))
         } catch { setError(error) }
     }
@@ -118,6 +128,11 @@ public final class AppRouter {
     /// A7: 透传谓词，避免在 AppRootView 中暴露 private coordinator。
     public func hasResumableReplay(id: Int64) -> Bool {
         coordinator.hasResumableReplay(recordId: id)
+    }
+
+    /// Task 12: 镜像 hasResumableReplay，供 HistoryActionSheet 复盘钮文案切换。
+    public func hasReviewInProgress(id: Int64) -> Bool {
+        coordinator.hasReviewInProgress(recordId: id)
     }
 
     public func openSettings() { activeModal = .settings }

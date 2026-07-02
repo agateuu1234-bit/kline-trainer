@@ -23,6 +23,7 @@ public final class TrainingSessionCoordinator {
     private let recordRepo: RecordRepository          // P4
     private let pendingRepo: PendingTrainingRepository // P4
     private let pendingReplayRepo: PendingReplayRepository  // 新需求10：replay 续局单槽
+    private let reviewArchiveRepo: ReviewArchiveRepository  // review-redesign：复盘存档单记录
     private let finalization: SessionFinalizationPort  // Wave 3 顺位 10a：单事务终结 port（RFC §4.7b）
     private let settingsDAO: SettingsDAO              // P4
     private let cache: CacheManager                   // P5
@@ -59,6 +60,31 @@ public final class TrainingSessionCoordinator {
     // →跳过"会残留已删画线。
     @ObservationIgnored private var replayHasPersisted = false
 
+    // MARK: - review-redesign RFC：复盘 session 态（committed 基线 + 净改动判定，Task 5）
+
+    /// 当前复盘 session 绑定的 record id（`review()`/`resumePendingReview()` 设置，Task 6）；nil=无复盘 session。
+    @ObservationIgnored private var reviewRecordId: Int64?
+    /// 复盘 committed 基线：进入时 = saved ?? []；`commitReview` 提交后前移 = 刚提交的工作画线集。
+    /// 净改动判定 **恒对比 committed 基线**（非 resume 时加载的 working），见 `ReviewNetChange`。
+    @ObservationIgnored private var reviewCommittedBaseline: [DrawingObject] = []
+    /// Task 6：saved 存档解码损坏、已 `clearSaved` 恢复为空基线时置位（UI 读后清、经 toast 呈现
+    /// 「复盘存档损坏已清除，可重新复盘保存」）。
+    public private(set) var pendingReviewCorruptToast = false
+    /// UI（TrainingView.onAppear 或 AppRouter）消费后清位。
+    public func clearPendingReviewCorruptToast() { pendingReviewCorruptToast = false }
+
+    // MARK: - review-redesign Task 7：复盘 autosave 单写者 fence（token/revision/task，独立于下方 replay/normal autosave）
+
+    /// 每次进入复盘（`review()`/`resumePendingReview()` 内部 `buildReviewEngine` 处 mint）新铸一枚；
+    /// nil = 无复盘 session。终态方法（`backReview`/`endReviewSave`/`endReviewDiscard`）写前置 nil——
+    /// 陈旧排队 autosave 捕获的旧 token 与之比对不等 → 早退丢弃（in-memory 栅栏，非 DB 列）。
+    @ObservationIgnored private var reviewSessionToken: UUID?
+    /// 单调递增请求计数：`autosaveReview` 每次调用 +1；排队 Task 用以判定"调度期间是否又有新请求"
+    /// （同 token 内的陈旧合并，非跨 session 判据——跨 session 判据是上面的 token）。
+    @ObservationIgnored private var reviewRevision = 0
+    /// 在飞排队的节流 autosave Task（供终态 drain）。
+    @ObservationIgnored private var reviewAutosaveTask: Task<Void, Never>?
+
     // MARK: - Wave 3 顺位 10b：周期 autosave 状态机（RFC §4.6）+ 终态 fence（§4.7d）
 
     @ObservationIgnored private var autosaveTask: Task<Void, Never>?     // 在飞写句柄（fence drain）
@@ -84,6 +110,17 @@ public final class TrainingSessionCoordinator {
     /// 仅失败递增；成功不动；endSession/reset 归零。
     public private(set) var autosaveErrorGeneration: Int = 0
 
+    /// §B.2 + codex whole-branch R4 finding 1：autosave 失败的共享记录器——normal `requestAutosave` 与
+    /// review `autosaveReview`/`flushReviewForBackground` 均汇聚于此，确保两条路径产生同一套可观察信号
+    /// （`autosaveBannerError` + 单调 `autosaveErrorGeneration`），复用既有机制而非新增并行信号。
+    private func recordAutosaveError(_ error: Error) {
+        let appError = (error as? AppError)
+            ?? .internalError(module: "E6b", detail: "autosave: \(error)")
+        lastAutosaveError = appError
+        autosaveBannerError = appError             // §B.2：失败置 UI 信号（observable → toast）
+        autosaveErrorGeneration += 1               // codex-13a-F1：每次失败递增 → 重复同错也触发 onChange（持久故障保持可见）
+    }
+
     /// 请求 autosave（脏动作后调）。immediate=交易/画线/background flush（绕 N 节流）；
     /// 非 immediate=tick 推进（按 autosaveTickInterval 节流）。terminating/非 Normal → no-op（§4.7d/§4.6）。
     public func requestAutosave(engine: TrainingEngine, immediate: Bool) {
@@ -108,11 +145,7 @@ public final class TrainingSessionCoordinator {
                     self.lastAutosaveError = nil
                     self.autosaveBannerError = nil                  // §B.2：成功清 UI 信号
                 } catch {
-                    let appError = (error as? AppError)
-                        ?? .internalError(module: "E6b", detail: "autosave: \(error)")
-                    self.lastAutosaveError = appError
-                    self.autosaveBannerError = appError             // §B.2：失败置 UI 信号（observable → toast）
-                    self.autosaveErrorGeneration += 1               // codex-13a-F1：每次失败递增 → 重复同错也触发 onChange（持久故障保持可见）
+                    self.recordAutosaveError(error)
                 }
             }
             self.autosaveTask = nil
@@ -130,6 +163,15 @@ public final class TrainingSessionCoordinator {
     func drainAutosaveForTesting() async { await autosaveTask?.value }
     /// 测试钩子：强置 activeRecord=nil，供 fail-closed 守卫测试制造缺上下文（镜像 drainAutosaveForTesting 范式）。
     func setActiveRecordNilForTesting() { activeRecord = nil }
+    /// review-redesign Task 5 测试专用：注入复盘 session 态（`reviewRecordId`/`reviewCommittedBaseline`）。
+    /// 生产路径由 Task 6 的 `review()`/`resumePendingReview()` 设置；本 task 尚无产出这些字段的公开方法，
+    /// 故测试直接注入（镜像 `setActiveRecordNilForTesting` 范式）。
+    func setReviewSessionForTesting(recordId: Int64?, committedBaseline: [DrawingObject]) {
+        reviewRecordId = recordId
+        reviewCommittedBaseline = committedBaseline
+    }
+    /// review-redesign Task 7 测试专用：等在飞 review autosave Task 完成（镜像 `drainAutosaveForTesting`）。
+    func drainReviewAutosaveForTesting() async { await reviewAutosaveTask?.value }
     #endif
 
     /// §4.7d 终态栅栏：置 terminating（拒新 autosave）+ 排空在飞写（排空时见 terminating 即退出不落盘）。
@@ -143,6 +185,7 @@ public final class TrainingSessionCoordinator {
                 recordRepo: RecordRepository,
                 pendingRepo: PendingTrainingRepository,
                 pendingReplayRepo: PendingReplayRepository,
+                reviewArchiveRepo: ReviewArchiveRepository,
                 finalization: SessionFinalizationPort,
                 settingsDAO: SettingsDAO,
                 cache: CacheManager,
@@ -151,6 +194,7 @@ public final class TrainingSessionCoordinator {
         self.recordRepo = recordRepo
         self.pendingRepo = pendingRepo
         self.pendingReplayRepo = pendingReplayRepo
+        self.reviewArchiveRepo = reviewArchiveRepo
         self.finalization = finalization
         self.settingsDAO = settingsDAO
         self.cache = cache
@@ -261,8 +305,77 @@ public final class TrainingSessionCoordinator {
     /// 强平后）使引擎实时 `returnRate == record.returnRate`（flat-ending-cash 假设下自洽）；**不**改写
     /// record 真值（settlement 若直读 record 则此重建只影响训练页状态栏显示，安全）。
     /// **前置（D10）**：caller 须先 `endSession()`（同 startNewNormalSession）。
+    /// review-redesign Task 6：committed 基线 = saved（独立解码，坏 → 恢复为空 + toast），
+    /// `engine.reviewDrawings` 与 committed 基线均种自该 baseline（fresh review：working==committed）。
     public func review(recordId: Int64) async throws -> TrainingEngine {
-        let (record, ops, drawings) = try recordRepo.loadRecordBundle(id: recordId)
+        let baseline = try loadCommittedBaselineRecovering(recordId: recordId)
+        return try await buildReviewEngine(recordId: recordId, startTickOverride: nil,
+                                           reviewDrawings: baseline, committedBaseline: baseline)
+    }
+
+    /// review-redesign Task 6：resume-first 续复盘。命中 `.inProgress` → 从 `working.stepTick` 起、
+    /// `engine.reviewDrawings` = working 画线集，committed 基线仍 = saved（独立解码，非 working）。
+    /// **working 独立解码（codex plan-R1-high）**：working 坏 → 仅清 working、回退从头（不碰 saved）。
+    /// 未命中 `.inProgress` / 竞态清空 → nil（router 回退 fresh `review()`）。
+    public func resumePendingReview(recordId: Int64) async throws -> TrainingEngine? {
+        // codex whole-branch R2（high）：不得用 `try?` 吞掉瞬态读错误——那会把它收敛为 `.none`，
+        // 让 router 回退 fresh `review()`，随后放弃可能清掉仍有效的 `working_*` 行（数据丢失）。
+        // 瞬态错误须传播（async throws）；只有干净返回的非 `.inProgress` marker 才是合法「无需 resume」。
+        guard try reviewArchiveRepo.reviewMarker(recordId: recordId) == .inProgress else { return nil }
+        let working: ReviewWorking?
+        do {
+            working = try reviewArchiveRepo.loadWorking(recordId: recordId)
+        } catch let e as AppError where e.isDBCorrupted {
+            try reviewArchiveRepo.clearWorking(recordId: recordId)
+            return nil
+        }
+        guard let w = working else { return nil }             // 竞态：刚被清 → nil（router 从头）
+        // codex whole-branch R5（high）：`w.stepTick` 校验须先于 `buildReviewEngine`——否则越界 tick（schema
+        // 漂移/损坏；DB CHECK 只强制非空配对，不校验 tick 边界）会让 `TrainingEngine.make` 因
+        // `flow.allowedTickRange` 不含该 tick 而 trap-guard throw，但坏 `working_*` 行仍 `.inProgress`，
+        // 之后每次 tap 都重试同一失败 resume（永久 brick）。此处视越界为 WORKING 语义损坏（区别于
+        // record-ops 入口终局校验的 `.dbCorrupted`）：clearWorking + nil（router 回退 fresh `review()`，
+        // 不碰 saved/record）。顺带取一次 record bundle 供下方 `buildReviewEngine` 复用（避免重复加载）。
+        let bundle = try recordRepo.loadRecordBundle(id: recordId)
+        guard (0...max(0, bundle.0.finalTick)).contains(w.stepTick) else {
+            try reviewArchiveRepo.clearWorking(recordId: recordId)
+            return nil
+        }
+        let baseline = try loadCommittedBaselineRecovering(recordId: recordId)   // saved 坏 → 仅清 saved + toast，保住有效 working
+        return try await buildReviewEngine(recordId: recordId, startTickOverride: w.stepTick,
+                                           reviewDrawings: w.drawings, committedBaseline: baseline,
+                                           preloadedRecordBundle: bundle)
+    }
+
+    /// review-redesign Task 6：committed 基线 = saved（独立解码，只碰 saved 列，working 不动）。
+    /// saved 坏 → `clearSaved` + `pendingReviewCorruptToast=true` + 返回空基线继续（不致命）。
+    /// **clearSaved 失败不吞**（codex plan-R4-high，不用 `try?`）：只有清库成功才回退空基线+toast；
+    /// 清库失败 rethrow → review 入口失败（可重试），**绝不**在坏 saved 仍在库时以假空基线开界面。
+    private func loadCommittedBaselineRecovering(recordId: Int64) throws -> [DrawingObject] {
+        pendingReviewCorruptToast = false   // final-review M1：先复位，clean entry 绝不继承上次残留的 true
+        do {
+            return try reviewArchiveRepo.loadSaved(recordId: recordId) ?? []
+        } catch let e as AppError where e.isDBCorrupted {
+            try reviewArchiveRepo.clearSaved(recordId: recordId)
+            pendingReviewCorruptToast = true
+            return []
+        }
+    }
+
+    /// review-redesign Task 6：`review()`/`resumePendingReview()` 共享的引擎构造 + 入口终局校验。
+    /// `startTickOverride`：nil=用 meta.startDatetime 派生的训练起点（fresh review）；
+    /// 非 nil=resume 续到该 tick（committed 基线/flow 边界仍锚 meta 起点，不随 resume 漂移）。
+    /// **入口终局等式强制（codex plan-R3/R5-high）**：构造后重折叠全部 `ops` 到 `record.finalTick`，
+    /// 与 record 终局不符（损坏 op 序列 / totalCost 造假）→ `.dbCorrupted`（review 不开、reader 已关）。
+    /// 这样顶栏每帧 `ReviewLedger.state` 可 `try?`（入口已验，永不兜底），杜绝逐帧 trap。
+    /// `preloadedRecordBundle`：codex whole-branch R5——`resumePendingReview` 校验 `w.stepTick` 时已加载过
+    /// 一次 bundle，传入此处复用（避免同一 recordId 重复 `loadRecordBundle`）；nil（`review()` 路径）→ 自行加载。
+    private func buildReviewEngine(recordId: Int64, startTickOverride: Int?,
+                                    reviewDrawings: [DrawingObject],
+                                    committedBaseline: [DrawingObject],
+                                    preloadedRecordBundle: (TrainingRecord, [TradeOperation], [DrawingObject])? = nil
+                                    ) async throws -> TrainingEngine {
+        let (record, ops, drawings) = try preloadedRecordBundle ?? recordRepo.loadRecordBundle(id: recordId)
         // Note: loadRecordBundle() is app.sqlite source — its .dbCorrupted propagates ABOVE this catch (fail-closed).
         let file = try cachedFile(filename: record.trainingSetFilename)
         let reader: any TrainingSetReader
@@ -272,32 +385,54 @@ public final class TrainingSessionCoordinator {
             try? cache.delete(file)                          // 同上（best-effort 可弃）：训练组损坏；record 仍在 app.sqlite（不删）
             throw AppError.persistence(.dbCorrupted)         // 无法替代，surface
         }
+        let engine: TrainingEngine
         do {
             // maxTick 由 .review(record) 内部据 record.finalTick 派生；make 亦校验 .m3 非空 +
             // m3.last.endGlobalIndex >= finalTick，故此处不重复 maxTick(from:)（D3 / LOW#8）。
             let allCandles = try reader.loadAllCandles()
             let meta = try reader.loadMeta()                  // B3：起始点 tick 派生（review 从训练起点重演）
-            let startTick = TrainingEngine.startTick(forStartDatetime: meta.startDatetime, in: allCandles)
-            let engine = try TrainingEngine.make(
-                .review(record: record, startTick: startTick),
+            let metaStartTick = TrainingEngine.startTick(forStartDatetime: meta.startDatetime, in: allCandles)
+            engine = try TrainingEngine.make(
+                .review(record: record, startTick: metaStartTick),
                 allCandles: allCandles,
+                initialTick: startTickOverride ?? metaStartTick,   // resume 续到该 tick；fresh=训练起点
                 initialCapital: record.totalCapital,
                 initialCashBalance: record.totalCapital + record.profit,   // 末态全现金（强平后）
                 initialMarkers: markers(from: ops),
                 initialDrawings: drawings,
                 initialTradeOperations: ops)
-            activeReader = reader
-            activeEngine = engine
-            activeFile = file
-            cache.touch(file)                        // §A touch-on-use：完整读取+引擎构造成功后刷 LRU mtime（codex-13a-F2）
-            activeStartedAt = nil                    // D4：review 只读，无进度保存
-            activeSessionKey = nil                   // RFC §4.7c：review 无 session key
-            activeRecord = record                    // RFC-B D5：复用已加载 record（零新 I/O）
-            return engine
         } catch {
             reader.close()
             throw (error as? AppError) ?? .internalError(module: "E6a", detail: String(describing: error))
         }
+        // 入口终局等式强制校验（fail-closed）：损坏 op 序列（ReviewLedger.state 自身 throw）或终局不符
+        // （guard 手动 throw）都在此统一 close reader（避免上面的 catch-all 块二次 close）。
+        do {
+            let finalState = try ReviewLedger.state(atTick: engine.tick.maxTick, ops: engine.tradeOperations,
+                                                    initialCapital: engine.initialCapital,
+                                                    markPriceAtTick: { engine.markPrice(atTick: $0) })
+            // 显式容差（FP 折叠序噪声 ~1e-9 相对；毛损坏必远超）：profit 绝对 1e-4 元、rate 绝对 1e-7
+            guard abs((finalState.totalCapital - engine.initialCapital) - record.profit) <= 1e-4,
+                  abs(finalState.returnRate - record.returnRate) <= 1e-7
+            else { throw AppError.persistence(.dbCorrupted) }
+        } catch {
+            reader.close()
+            throw (error as? AppError) ?? .internalError(module: "E6a", detail: String(describing: error))
+        }
+        activeReader = reader
+        activeEngine = engine
+        activeFile = file
+        cache.touch(file)                        // §A touch-on-use：完整读取+引擎构造成功后刷 LRU mtime（codex-13a-F2）
+        activeStartedAt = nil                    // D4：review 只读，无进度保存
+        activeSessionKey = nil                   // RFC §4.7c：review 无 session key
+        activeRecord = record                    // RFC-B D5：复用已加载 record（零新 I/O）
+        engine.setReviewDrawings(reviewDrawings)
+        reviewRecordId = recordId
+        reviewCommittedBaseline = committedBaseline
+        reviewSessionToken = UUID()     // Task 7：新复盘 session mint 新 token（陈旧排队 autosave 靠此失效）
+        reviewAutosaveTask = nil        // final-review T7：belt-and-suspenders——新 token 已够，随手清掉陈旧排队引用
+        reviewRevision = 0
+        return engine
     }
 
     /// Replay 模式（spec L1673）：record → 打开 reader → 从头构造 ReplayFlow 引擎（只继承原局
@@ -516,6 +651,12 @@ public final class TrainingSessionCoordinator {
         ((try? pendingReplayRepo.loadReplaySlotInfo()) ?? nil)?.recordId == recordId
     }
 
+    /// review-redesign Task 11：当前 replay 续局单槽归属的 recordId（供首页"再次训练中"角标）。
+    /// 镜像 `hasResumableReplay`：轻量 `loadReplaySlotInfo`（不解码 payload），try? 兜底 nil。
+    public func replaySlotRecordId() -> Int64? {
+        ((try? pendingReplayRepo.loadReplaySlotInfo()) ?? nil)?.recordId
+    }
+
     /// 新需求10：续局 replay。元数据先判归属→本记录全量解码→校验记录/文件名→open reader→按存档 tick/状态重建。
     /// 错误纪律：**本记录 loadReplay `.dbCorrupted` → durable clearReplay + nil（回退从头）**；
     /// **非 `.dbCorrupted` 的 loadReplay / loadRecordBundle / loadAllCandles / make 错误 → 传播**（不清、不 fresh）；
@@ -628,6 +769,16 @@ public final class TrainingSessionCoordinator {
         autosaveBannerError = nil                    // §B.2：清 UI 信号防跨局 stale toast
         autosaveErrorGeneration = 0                  // codex-13a-F1：归零失败计数（新局从 0 起）
         ticksSinceAutosave = 0
+        reviewSessionToken = nil    // Task 7：软栅栏（同 terminating 范式）——陈旧排队 review autosave 靠 token 失效自然早退
+        reviewAutosaveTask?.cancel()
+        reviewAutosaveTask = nil
+        // codex whole-branch R3（high，data resurrection）：清复盘 session 态本身——`flushReviewForBackground`
+        // 此前只凭 `reviewRecordId != nil` 判活，若一枚在 endSession 前排队的后台 flush Task 捕获了旧
+        // engine，在 endReviewDiscard/abandonReview/backReview 收尾之后才跑到，会拿这两个陈旧字段把已丢弃/
+        // 已提交的工作态当"净改动"重新写回 working 行（用户已看到的丢弃/保存又"复活"）。终态收尾后二者必须
+        // 归位，使该陈旧 flush 命中下面的早退 guard（no-op）。
+        reviewRecordId = nil
+        reviewCommittedBaseline = []
         activeReader?.close()
         activeReader = nil
         activeEngine = nil
@@ -661,6 +812,168 @@ public final class TrainingSessionCoordinator {
                 ?? .internalError(module: "E6b", detail: "discard clear: \(error)")
         }
         await endSession()
+    }
+
+    // MARK: - review-redesign RFC：复盘持久化核心（committed 基线 + 净改动判定，Task 5）
+
+    /// 该记录是否有「进行中」复盘存档（display-only，供历史弹窗/首页角标）。try? 兜底 false。
+    public func hasReviewInProgress(recordId: Int64) -> Bool {
+        ((try? reviewArchiveRepo.reviewMarker(recordId: recordId)) ?? .none) == .inProgress
+    }
+
+    /// 批量加载全部复盘存档标记（供首页角标）。try? 兜底 [:]。
+    public func loadReviewMarkers() -> [Int64: ReviewMarker] {
+        (try? reviewArchiveRepo.loadMarkers()) ?? [:]
+    }
+
+    /// 当前复盘 session 是否有净改动：当前活跃引擎的 `reviewDrawings` vs committed 基线（顺序无关）。
+    public func reviewNetChanged() -> Bool {
+        ReviewNetChange.changed(working: activeEngine?.reviewDrawings ?? [], committed: reviewCommittedBaseline)
+    }
+
+    /// 复盘中按需持久化：有净改动（vs committed 基线）→ 写 working（`stepTick`=当前 tick）；
+    /// 无净改动 → 清 working（回退到 committed：saved 或删行）。无复盘 session（`reviewRecordId`==nil）→ no-op。
+    public func persistReviewWorkingIfChanged(engine: TrainingEngine) throws {
+        // codex whole-branch R3（high）：central review_archive 写者身份闸——`autosaveReview` 与
+        // `flushReviewForBackground` 均汇聚于此。一枚捕获了旧（已被终态收尾丢弃/提交）engine 的陈旧
+        // Task 即便 `reviewRecordId` 判活失败前碰巧未被 endSession 清（或跨 session 撞见另一局同名 id 的
+        // 边界情况），身份不符也在此再拦一次，绝不用非当前活跃 engine 的数据落 review_archive。
+        guard activeEngine === engine else { return }
+        guard let id = reviewRecordId else { return }
+        if ReviewNetChange.changed(working: engine.reviewDrawings, committed: reviewCommittedBaseline) {
+            try reviewArchiveRepo.saveWorking(recordId: id, stepTick: engine.tick.globalTickIndex,
+                                              drawings: engine.reviewDrawings)
+        } else {
+            try reviewArchiveRepo.clearWorking(recordId: id)
+        }
+    }
+
+    /// 提交复盘：saved = 当前 `reviewDrawings`，清 working；committed 基线前移到刚提交的画线集。
+    /// 无复盘 session → no-op。
+    /// codex whole-branch R4 finding 2：终态写者 fail-closed——`endReviewSave` 在此之前
+    /// `await fenceAndDrainReviewAutosave()`，@MainActor 重入窗口内会话状态可能已先被换成另一记录
+    /// （`activeEngine`/`reviewRecordId` 均已指向新 session）；陈旧调用方若仍持旧 `engine` 继续往下写，
+    /// 会把旧数据错误提交进新 `reviewRecordId` 的存档。engine 与当前活跃会话不符 → throw（非静默 no-op），
+    /// 绝不带着不明确的身份写 `review_archive`。
+    public func commitReview(engine: TrainingEngine) throws {
+        guard let id = reviewRecordId else { return }
+        guard activeEngine === engine, engine.flow.mode == .review else {
+            throw AppError.internalError(module: "review", detail: "terminal review write on stale/mismatched session")
+        }
+        try reviewArchiveRepo.commitSaved(recordId: id, drawings: engine.reviewDrawings)
+        reviewCommittedBaseline = engine.reviewDrawings
+    }
+
+    /// 丢弃复盘工作态：清 working（回退到 committed：saved 或删行）。无复盘 session → no-op。
+    /// codex whole-branch R4 finding 2：同 `commitReview` 的 fail-closed 身份闸（见上方注释）。
+    public func discardReviewWorking(engine: TrainingEngine) throws {
+        guard let id = reviewRecordId else { return }
+        guard activeEngine === engine, engine.flow.mode == .review else {
+            throw AppError.internalError(module: "review", detail: "terminal review write on stale/mismatched session")
+        }
+        try reviewArchiveRepo.clearWorking(recordId: id)
+    }
+
+    // MARK: - review-redesign Task 7：复盘 autosave 节流 + 终态 drain（§6.3）
+
+    /// 复盘中按需节流 autosave（画线/步进触发，无复盘 session → no-op）。token 于调用时同步捕获
+    /// （非排队 Task 内），保证跨 session 陈旧判定正确：捕获后若 `reviewSessionToken` 变化（终态置 nil
+    /// 或新 session 换新 token），排队写在执行时对比不等 → 早退丢弃。revision 用于同 token 内的合并
+    /// （调度期间又有新请求 → 追上最新再等一轮"静默窗口"，收敛为一次落最新态的写，而非逐次都写）。
+    /// 已有排队 Task（`reviewAutosaveTask != nil`）→ 仅递增 revision 合并，不重复排程。
+    public func autosaveReview(engine: TrainingEngine) {
+        guard let token = reviewSessionToken else { return }
+        reviewRevision += 1
+        guard reviewAutosaveTask == nil else { return }
+        reviewAutosaveTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.reviewAutosaveTask = nil }
+            var pendingRevision = self.reviewRevision
+            while true {
+                await Task.yield()                                             // 节流窗口
+                guard self.reviewSessionToken == token else { return }         // 陈旧（session 已切换/终止）→ 丢弃
+                guard self.reviewRevision == pendingRevision else {             // 窗口内又有新请求 → 追上重试
+                    pendingRevision = self.reviewRevision
+                    continue
+                }
+                break
+            }
+            // codex whole-branch R4 finding 1：不再用 `try?` 吞掉持久化失败——失败须走与 normal autosave
+            // 同一套可观察信号（`recordAutosaveError`），否则用户可能后台/杀进程时以为已存实则未存。
+            do {
+                try self.persistReviewWorkingIfChanged(engine: engine)
+            } catch {
+                self.recordAutosaveError(error)
+            }
+        }
+    }
+
+    /// 终态栅栏：invalidate token（陈旧排队写靠此早退）+ cancel（协作式，belt-and-suspenders，实际
+    /// 生效点是上面的 token 比对）+ await 排空在飞节流 Task，保证其后的权威终态写 last-wins。
+    /// 镜像 replay/normal 的 `fenceAndDrainAutosaves`（`terminating` flag），但 review 用独立的
+    /// token/revision/task ——不共用 `terminating`（review 有自己的生命周期，与 replay/normal saveProgress 无关）。
+    private func fenceAndDrainReviewAutosave() async {
+        reviewSessionToken = nil
+        reviewAutosaveTask?.cancel()
+        await reviewAutosaveTask?.value
+    }
+
+    /// 复盘返回（drain → persistReviewWorkingIfChanged → endSession）。
+    public func backReview(engine: TrainingEngine) async throws {
+        await fenceAndDrainReviewAutosave()
+        try persistReviewWorkingIfChanged(engine: engine)
+        await endSession()
+    }
+
+    /// 复盘保存结束（drain → commitReview → endSession）。
+    public func endReviewSave(engine: TrainingEngine) async throws {
+        await fenceAndDrainReviewAutosave()
+        try commitReview(engine: engine)
+        await endSession()
+    }
+
+    /// 复盘丢弃结束（drain → discardReviewWorking → endSession）。
+    public func endReviewDiscard(engine: TrainingEngine) async throws {
+        await fenceAndDrainReviewAutosave()
+        try discardReviewWorking(engine: engine)
+        await endSession()
+    }
+
+    /// codex whole-branch R2（medium）：稳健放弃——与 `endReviewDiscard` 不同，本方法**恒**收尾会话，
+    /// 即便清 working 失败也不放弃 `endSession`（那会让 coordinator 保留活跃 reader/session，而 router
+    /// 已摘视图 → 会话/reader 泄漏）。drain → best-effort 清 working（`try?`，失败不阻断）→ 恒 endSession。
+    /// 语义：放弃恒干净退出；若清档失败，`复盘中` marker 简单保留（可恢复——用户可重新进入再次结束）。
+    /// 供 UI「复盘保存失败」alert 的「放弃」按钮使用（不复用 `endReviewDiscard`——那个仍需在结束→不保存 /
+    /// 重试路径上把清档失败 rethrow 出去以重弹 alert，语义不同，不改动）。
+    public func abandonReview(engine: TrainingEngine) async {
+        await fenceAndDrainReviewAutosave()
+        try? discardReviewWorking(engine: engine)
+        await endSession()
+    }
+
+    /// codex whole-branch R1（data-loss）：scenePhase 后台/失活 flush review working 态（镜像 normal/replay
+    /// 的 `flushAutosave`，§4.6 item 4），补齐此前只有 `flushForBackground`（对 review no-op）的缺口——
+    /// review 画线/步进只靠排队 `autosaveReview` 落盘，若 OS 在其排空前杀进程会丢工作态。
+    /// 与 `fenceAndDrainReviewAutosave`（终态栅栏，供 back/endReviewSave/endReviewDiscard）的关键区别：
+    /// **不** invalidate `reviewSessionToken`——这是后台 flush，非终态；回前台后 session 须能继续。
+    /// cancel + await 排空在飞排队 autosave（若有）→ 再显式 `persistReviewWorkingIfChanged` 落当前态（best-effort
+    /// 不阻断 teardown/不 throw；但**失败须走 `recordAutosaveError`**——codex whole-branch R4 finding 1：此前
+    /// `try?` 静默吞错，回前台后用户对「后台未存成功」完全无感知；现失败置 `autosaveBannerError` +
+    /// 递增 `autosaveErrorGeneration`，供回前台后既有 scenePhase `.active` replay 呈现 toast）。非 review 模式或
+    /// 无复盘 session（`reviewRecordId == nil`）→ no-op。
+    public func flushReviewForBackground(engine: TrainingEngine) async {
+        // codex whole-branch R3（high）：同一身份闸提前到入口——陈旧 engine（session 已终态收尾，
+        // `activeEngine` 已变）即便 `reviewRecordId` 判活仍为真（例如已切到另一复盘 session），也不该
+        // 去 cancel/drain **当前**活跃 session 的 `reviewAutosaveTask`，更不该继续往下写。
+        guard activeEngine === engine, engine.flow.mode == .review, reviewRecordId != nil else { return }
+        reviewAutosaveTask?.cancel()
+        await reviewAutosaveTask?.value
+        reviewAutosaveTask = nil
+        do {
+            try persistReviewWorkingIfChanged(engine: engine)
+        } catch {
+            recordAutosaveError(error)
+        }
     }
 
     // MARK: - 私有构造 helper（E6a）
@@ -774,6 +1087,7 @@ extension TrainingSessionCoordinator {
             recordRepo: records,
             pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: InMemoryCacheManager(),
