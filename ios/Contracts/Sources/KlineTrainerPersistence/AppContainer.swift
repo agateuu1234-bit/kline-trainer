@@ -36,6 +36,7 @@ public final class AppContainer {
         let coordinator = TrainingSessionCoordinator(
             dbFactory: dbFactory, recordRepo: db, pendingRepo: db,
             pendingReplayRepo: db,
+            reviewArchiveRepo: db,
             finalization: db,
             settingsDAO: db, cache: cache, settings: settings)
         let router = AppRouter(coordinator: coordinator, settings: settings, acceptance: acceptance,

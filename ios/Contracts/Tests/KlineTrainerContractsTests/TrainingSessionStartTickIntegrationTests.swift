@@ -39,6 +39,7 @@ struct TrainingSessionStartTickIntegrationTests {
             dbFactory: PreviewTrainingSetDBFactory(meta: meta, candles: Self.candles()),
             recordRepo: records, pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             // A4：settingsDAO 与 SettingsStore 同源（startingCapital 直读 DAO）。
             settingsDAO: TrainingSessionPersistenceTests.CapitalDAO(capital: 100_000), cache: cache,

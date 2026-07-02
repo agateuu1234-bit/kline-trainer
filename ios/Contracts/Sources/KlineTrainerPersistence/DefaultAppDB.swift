@@ -10,7 +10,7 @@ import KlineTrainerContracts
 /// - 4 个 protocol surface 用 4 个 extension 分别实现
 /// - 所有 GRDB 错误在 extension 边界 `try ... catch` 通过 PersistenceErrorMapping.translate
 /// - init 时同步跑 AppDBMigrations.makeMigrator().migrate(queue) → 失败抛 AppError
-public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayRepository {
+public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayRepository, ReviewArchiveRepository {
 
     /// 唯一 GRDB queue；所有 4 个 protocol 方法共享。internal 给 same-target tests 看。
     let dbQueue: DatabaseQueue
@@ -221,6 +221,59 @@ public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayReposito
             }
         } catch let appErr as AppError { throw appErr }
         catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    // MARK: - ReviewArchiveRepository
+
+    public func loadArchive(recordId: Int64) throws -> ReviewArchive? {
+        do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.loadArchive($0, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func loadWorking(recordId: Int64) throws -> ReviewWorking? {
+        do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.loadWorking($0, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func loadSaved(recordId: Int64) throws -> [DrawingObject]? {
+        do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.loadSaved($0, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func saveWorking(recordId: Int64, stepTick: Int, drawings: [DrawingObject]) throws {
+        do {
+            try dbQueue.write { db in
+                try ReviewArchiveRepositoryImpl.saveWorking(db, recordId: recordId, stepTick: stepTick, drawings: drawings)
+            }
+        } catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func commitSaved(recordId: Int64, drawings: [DrawingObject]) throws {
+        do {
+            try dbQueue.write { db in
+                try ReviewArchiveRepositoryImpl.commitSaved(db, recordId: recordId, drawings: drawings)
+            }
+        } catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func clearWorking(recordId: Int64) throws {
+        do { try dbQueue.write { db in try ReviewArchiveRepositoryImpl.clearWorking(db, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func clearSaved(recordId: Int64) throws {
+        do { try dbQueue.write { db in try ReviewArchiveRepositoryImpl.clearSaved(db, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func loadMarkers() throws -> [Int64: ReviewMarker] {
+        do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.loadMarkers($0) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func reviewMarker(recordId: Int64) throws -> ReviewMarker {
+        do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.reviewMarker($0, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
     }
 
     // MARK: - SettingsDAO

@@ -23,6 +23,7 @@ public final class TrainingSessionCoordinator {
     private let recordRepo: RecordRepository          // P4
     private let pendingRepo: PendingTrainingRepository // P4
     private let pendingReplayRepo: PendingReplayRepository  // 新需求10：replay 续局单槽
+    private let reviewArchiveRepo: ReviewArchiveRepository  // review-redesign：复盘存档单记录
     private let finalization: SessionFinalizationPort  // Wave 3 顺位 10a：单事务终结 port（RFC §4.7b）
     private let settingsDAO: SettingsDAO              // P4
     private let cache: CacheManager                   // P5
@@ -143,6 +144,7 @@ public final class TrainingSessionCoordinator {
                 recordRepo: RecordRepository,
                 pendingRepo: PendingTrainingRepository,
                 pendingReplayRepo: PendingReplayRepository,
+                reviewArchiveRepo: ReviewArchiveRepository,
                 finalization: SessionFinalizationPort,
                 settingsDAO: SettingsDAO,
                 cache: CacheManager,
@@ -151,6 +153,7 @@ public final class TrainingSessionCoordinator {
         self.recordRepo = recordRepo
         self.pendingRepo = pendingRepo
         self.pendingReplayRepo = pendingReplayRepo
+        self.reviewArchiveRepo = reviewArchiveRepo
         self.finalization = finalization
         self.settingsDAO = settingsDAO
         self.cache = cache
@@ -774,6 +777,7 @@ extension TrainingSessionCoordinator {
             recordRepo: records,
             pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: InMemoryCacheManager(),

@@ -99,6 +99,7 @@ struct AppRouterTests {
             dbFactory: PreviewTrainingSetDBFactory(candles: candles),
             recordRepo: records, pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: settings)
         let runner = DownloadAcceptanceRunner(

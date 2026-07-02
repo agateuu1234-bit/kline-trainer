@@ -231,6 +231,74 @@ public final class InMemoryPendingReplayRepository: PendingReplayRepository, @un
     }
 }
 
+/// review-redesign：ReviewArchiveRepository 的 in-memory fake（mirror ReviewArchiveRepositoryImpl 状态机：
+/// 独立解码不适用于内存态——本 fake 无 JSON 序列化，saved/working 各自独立存储字段即天然独立）。
+public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @unchecked Sendable {
+    private let lock = NSLock()
+    private var saved: [Int64: [DrawingObject]] = [:]
+    private var working: [Int64: (stepTick: Int, drawings: [DrawingObject])] = [:]
+
+    public init() {}
+
+    public func loadArchive(recordId: Int64) throws -> ReviewArchive? {
+        lock.lock(); defer { lock.unlock() }
+        let s = saved[recordId]
+        let w = working[recordId]
+        guard s != nil || w != nil else { return nil }
+        return ReviewArchive(recordId: recordId, savedDrawings: s,
+                             workingStepTick: w?.stepTick, workingDrawings: w?.drawings)
+    }
+
+    public func loadWorking(recordId: Int64) throws -> ReviewWorking? {
+        lock.lock(); defer { lock.unlock() }
+        guard let w = working[recordId] else { return nil }
+        return ReviewWorking(stepTick: w.stepTick, drawings: w.drawings)
+    }
+
+    public func loadSaved(recordId: Int64) throws -> [DrawingObject]? {
+        lock.lock(); defer { lock.unlock() }
+        return saved[recordId]
+    }
+
+    public func saveWorking(recordId: Int64, stepTick: Int, drawings: [DrawingObject]) throws {
+        lock.lock(); defer { lock.unlock() }
+        working[recordId] = (stepTick, drawings)
+    }
+
+    public func commitSaved(recordId: Int64, drawings: [DrawingObject]) throws {
+        lock.lock(); defer { lock.unlock() }
+        saved[recordId] = drawings
+        working[recordId] = nil
+    }
+
+    public func clearWorking(recordId: Int64) throws {
+        lock.lock(); defer { lock.unlock() }
+        working[recordId] = nil
+    }
+
+    public func clearSaved(recordId: Int64) throws {
+        lock.lock(); defer { lock.unlock() }
+        saved[recordId] = nil
+    }
+
+    public func loadMarkers() throws -> [Int64: ReviewMarker] {
+        lock.lock(); defer { lock.unlock() }
+        var out: [Int64: ReviewMarker] = [:]
+        for id in Set(saved.keys).union(working.keys) {
+            let marker: ReviewMarker = working[id] != nil ? .inProgress : (saved[id] != nil ? .saved : .none)
+            out[id] = marker
+        }
+        return out.filter { $0.value != .none }
+    }
+
+    public func reviewMarker(recordId: Int64) throws -> ReviewMarker {
+        lock.lock(); defer { lock.unlock() }
+        if working[recordId] != nil { return .inProgress }
+        if saved[recordId] != nil { return .saved }
+        return .none
+    }
+}
+
 /// Wave 3 顺位 10a：SessionFinalizationPort 的 in-memory fake。
 /// 组合既有 record/pending 两 fake（保证 fake 状态一致）；mirror 生产单事务语义：
 /// 失败注入时**零状态变更**（原子）；同 sessionKey 重试幂等返已存 id。

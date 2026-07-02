@@ -44,6 +44,7 @@ struct CoordinatorCapitalIntegrationTests {
             dbFactory: PreviewTrainingSetDBFactory(candles: candles),
             recordRepo: appDB, pendingRepo: appDB,
             pendingReplayRepo: appDB,
+            reviewArchiveRepo: appDB,
             finalization: appDB,
             settingsDAO: appDB, cache: cache, settings: store)
         return (coord, store)

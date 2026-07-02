@@ -45,6 +45,7 @@ struct CoordinatorTestHarness {
             recordRepo: records,
             pendingRepo: pending,
             pendingReplayRepo: pendingReplay,
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: port,
             settingsDAO: settingsDAO,
             cache: cache,
