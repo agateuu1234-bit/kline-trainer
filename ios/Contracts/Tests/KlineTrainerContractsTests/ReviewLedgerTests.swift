@@ -73,6 +73,22 @@ import KlineTrainerContracts
         #expect(s.shares == 0)   // buy 后 sell → 平；若被排成 sell 先则会 throw oversell
     }
 
+    // final-review T3：上一条测试用 op() 硬编码 createdAt = tick，同 tick 时两者恰好相等，
+    // 无法证伪"排序 tiebreak 用的是 createdAt 而非插入序"。这里显式构造相反的 createdAt
+    // （buy.createdAt > sell.createdAt，插入序仍 buy 先）：若实现误用 createdAt 排序，
+    // sell 会被排到 buy 前 → oversell throw；插入序排序则不受影响，仍平仓 shares==0。
+    @Test func sameTickTiebreakUsesInsertionOrderNotCreatedAt() throws {
+        let buy = TradeOperation(globalTick: 5, period: .m3, direction: .buy, price: 10, shares: 100,
+                                  positionTier: .tier1, commission: 5, stampDuty: 0, totalCost: 1005,
+                                  createdAt: 200)   // createdAt 晚，若误用 createdAt 排序会被排到 sell 之后
+        let sell = TradeOperation(globalTick: 5, period: .m3, direction: .sell, price: 10, shares: 100,
+                                   positionTier: .tier1, commission: 5, stampDuty: 0, totalCost: 1000,
+                                   createdAt: 100)  // createdAt 早，若误用 createdAt 排序会被排到 buy 之前（→ oversell）
+        let ops = [buy, sell]   // 插入序：buy 先、sell 后
+        let s = try ReviewLedger.state(atTick: 5, ops: ops, initialCapital: 100_000, markPriceAtTick: price)
+        #expect(s.shares == 0)   // 未 throw 即证明排序未按 createdAt（否则 sell 先 → oversell throw）
+    }
+
     // codex plan-R9-medium：sell 的 proceeds(=totalCost) 允许为负（低价清仓/force-close），不得判损坏
     @Test func negativeSellProceedsIsValidNotCorrupt() throws {
         let ops = [op(5, .buy, price: 10, shares: 100, commission: 5, stampDuty: 0, totalCost: 1005),

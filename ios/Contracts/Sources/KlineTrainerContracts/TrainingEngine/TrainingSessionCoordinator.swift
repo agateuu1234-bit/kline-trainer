@@ -330,6 +330,7 @@ public final class TrainingSessionCoordinator {
     /// **clearSaved 失败不吞**（codex plan-R4-high，不用 `try?`）：只有清库成功才回退空基线+toast；
     /// 清库失败 rethrow → review 入口失败（可重试），**绝不**在坏 saved 仍在库时以假空基线开界面。
     private func loadCommittedBaselineRecovering(recordId: Int64) throws -> [DrawingObject] {
+        pendingReviewCorruptToast = false   // final-review M1：先复位，clean entry 绝不继承上次残留的 true
         do {
             return try reviewArchiveRepo.loadSaved(recordId: recordId) ?? []
         } catch let e as AppError where e.isDBCorrupted {
@@ -403,6 +404,7 @@ public final class TrainingSessionCoordinator {
         reviewRecordId = recordId
         reviewCommittedBaseline = committedBaseline
         reviewSessionToken = UUID()     // Task 7：新复盘 session mint 新 token（陈旧排队 autosave 靠此失效）
+        reviewAutosaveTask = nil        // final-review T7：belt-and-suspenders——新 token 已够，随手清掉陈旧排队引用
         reviewRevision = 0
         return engine
     }

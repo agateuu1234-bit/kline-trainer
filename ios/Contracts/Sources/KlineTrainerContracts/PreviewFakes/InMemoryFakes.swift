@@ -249,6 +249,12 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
         get { lock.lock(); defer { lock.unlock() }; return _failNextClearSaved }
         set { lock.lock(); defer { lock.unlock() }; _failNextClearSaved = newValue }
     }
+    /// final-review T6：一次性故障注入，供测试模拟 `loadWorking` 的 `.dbCorrupted`（working 独立解码坏路径）。
+    private var _failNextLoadWorking: AppError?
+    public var failNextLoadWorking: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextLoadWorking }
+        set { lock.lock(); defer { lock.unlock() }; _failNextLoadWorking = newValue }
+    }
 
     public init() {}
 
@@ -263,6 +269,7 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
 
     public func loadWorking(recordId: Int64) throws -> ReviewWorking? {
         lock.lock(); defer { lock.unlock() }
+        if let e = _failNextLoadWorking { _failNextLoadWorking = nil; throw e }
         guard let w = working[recordId] else { return nil }
         return ReviewWorking(stepTick: w.stepTick, drawings: w.drawings)
     }

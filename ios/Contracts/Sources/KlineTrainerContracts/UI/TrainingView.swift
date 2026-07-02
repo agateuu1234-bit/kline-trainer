@@ -335,7 +335,7 @@ public struct TrainingView: View {
                     .font(.callout).tint(.red)
                     .accessibilityLabel("结束复盘")
                 } else {
-                    // replay 无中途结束：占位保持三段对称
+                    // 不可达：Normal/Replay 命中 showsTradeButtons 分支、Review 命中 isReview 分支；占位保三段对称
                     Color.clear.frame(width: 36, height: 1)
                 }
             }

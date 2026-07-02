@@ -322,6 +322,23 @@ struct ReviewPersistenceTests {
         #expect(e2 == nil)
     }
 
+    // final-review T6（此前未测的 fail-closed 分支）：working 坏 → clearWorking + 返回 nil，
+    // 既有 saved 未被误清（marker 回退 .saved 非 .none）、且未留下悬空活跃 session 状态。
+    @Test func resumePendingReview_workingCorrupt_clearsWorking_returnsNil() async throws {
+        let h = try ReviewTestHarness.make()
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])       // 既有 saved
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, drawings: [line(20)])
+        h.reviewRepo.failNextLoadWorking = .persistence(.dbCorrupted)
+
+        let e = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
+
+        #expect(e == nil)
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)          // working 已清
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .saved)       // 回退到既有 saved（非 .none）
+        #expect(h.coordinator.activeEngine == nil)                                        // 未留下悬空活跃 session
+        #expect(h.coordinator.hasReviewInProgress(recordId: h.seededRecordId) == false)
+    }
+
     // MARK: - Task 6: 入口 ops 校验 + 终局等式强制
 
     @Test func review_oversellRecord_throwsDBCorrupted() async throws {
