@@ -120,29 +120,48 @@ public enum DebugFixtureData {
             startDatetime: m3Rows[beforeM3Count].datetime, endDatetime: m3Rows.last!.datetime)
 
         let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false)
-        // review-redesign Task 6：review() 新增入口终局等式校验，重折叠 ops 到 finalTick 须精确等于
-        // record.profit/returnRate（1 买 1 卖，零佣金印花，整数价保证 fold 精确）：
-        //   record 1：100_000 - 1000*90(buy) + 1000*98.9(sell) = 108_900 → profit 8_900, rate 0.089
-        //   record 2：108_900 - 500*200(buy) + 500*195.8(sell) = 106_800 → profit -2_100, rate ≈ -0.0192837
+        // 整改①：pending/交易须落在复盘窗口内（(beforeM3Count, m3Count-1)），否则续训完打复盘报
+        // 「训练组数据为空」。复盘窗口须容纳 4 个内部交易 tick + pending（所有真实调用 W≥100；
+        // full-load 7200——不破坏任何调用；codex plan R-med）。
+        precondition(m3Count - beforeM3Count >= 6,
+                     "DebugFixtureData: 复盘窗口 m3Count-beforeM3Count 须 ≥6（容纳 fixture 4 内部交易 tick + pending）")
+        // 4 个严格内部 tick（beforeM3Count < t < m3Count-1）+ pending，均匀分布，稳健于任意 W≥6（含窄尾窗口）。
+        let interiorFirst = beforeM3Count + 1
+        let interiorLast  = m3Count - 2                 // = finalTick - 1，严格 < finalTick
+        let span = interiorLast - interiorFirst         // >= 3（precondition 保证）
+        let tB1 = interiorFirst
+        let tS1 = interiorFirst + span / 3
+        let tB2 = interiorFirst + span * 2 / 3
+        let tS2 = interiorLast                          // 严格 < finalTick
+        let pendingTick = interiorFirst + span / 2      // 严格内部 ∈ (beforeM3Count, m3Count-1)
+        func closeAt(_ t: Int) -> Double { m3Rows[min(max(t, 0), m3Count - 1)].close }
+        // 可负担整百手（占用 ~40% 本金；价必 > 0）
+        func lots(_ price: Double, capital: Double) -> Int { max(100, Int((capital * 0.4 / price) / 100) * 100) }
+
+        let pB1 = closeAt(tB1), pS1 = closeAt(tS1)
+        let sh1 = lots(pB1, capital: 100_000)
         let record1Ops = [
-            TradeOperation(globalTick: 1, period: .m3, direction: .buy, price: 90, shares: 1000,
-                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: 90_000,
+            TradeOperation(globalTick: tB1, period: .m3, direction: .buy,  price: pB1, shares: sh1,
+                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: Double(sh1) * pB1,
                            createdAt: baseEpoch),
-            TradeOperation(globalTick: 2, period: .m3, direction: .sell, price: 98.9, shares: 1000,
-                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: 98_900,
+            TradeOperation(globalTick: tS1, period: .m3, direction: .sell, price: pS1, shares: sh1,
+                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: Double(sh1) * pS1,
                            createdAt: baseEpoch),
         ]
+        let record1Profit = Double(sh1) * (pS1 - pB1)   // fold 同表达式（zero fee → 现金净变 = shares×(卖−买)）
+        // record2 起始本金 = record1 结束本金（累计本金链，与生产 RFC-A 累计模型一致；codex plan R-med）
+        let record2StartingCapital = 100_000.0 + record1Profit
+        let pB2 = closeAt(tB2), pS2 = closeAt(tS2)
+        let sh2 = lots(pB2, capital: record2StartingCapital)
         let record2Ops = [
-            TradeOperation(globalTick: 1, period: .m3, direction: .buy, price: 200, shares: 500,
-                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: 100_000,
+            TradeOperation(globalTick: tB2, period: .m3, direction: .buy,  price: pB2, shares: sh2,
+                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: Double(sh2) * pB2,
                            createdAt: baseEpoch + 86_400),
-            TradeOperation(globalTick: 2, period: .m3, direction: .sell, price: 195.8, shares: 500,
-                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: 97_900,
+            TradeOperation(globalTick: tS2, period: .m3, direction: .sell, price: pS2, shares: sh2,
+                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: Double(sh2) * pS2,
                            createdAt: baseEpoch + 86_400),
         ]
-        // profit 用与 ReviewLedger fold 相同表达式计算（非独立手算字面量），杜绝任何浮点舍入偏差。
-        let record1Profit = 1000.0 * 98.9 - 1000.0 * 90.0     // ≈ 8_900
-        let record2Profit = 500.0 * 195.8 - 500.0 * 200.0     // ≈ -2_100
+        let record2Profit = Double(sh2) * (pS2 - pB2)   // record1Profit 已上移（record2 起始本金依赖它）
         let records = [
             TrainingRecord(id: nil, trainingSetFilename: filename, createdAt: baseEpoch,
                            stockCode: "600001", stockName: "示例训练股", startYear: 2023, startMonth: 11,
@@ -151,7 +170,8 @@ public enum DebugFixtureData {
                            buyCount: 1, sellCount: 1, feeSnapshot: fees, finalTick: m3Count - 1),
             TrainingRecord(id: nil, trainingSetFilename: filename, createdAt: baseEpoch + 86_400,
                            stockCode: "600001", stockName: "示例训练股", startYear: 2023, startMonth: 11,
-                           totalCapital: 108_900, profit: record2Profit, returnRate: record2Profit / 108_900,
+                           totalCapital: record2StartingCapital, profit: record2Profit,
+                           returnRate: record2Profit / record2StartingCapital,
                            maxDrawdown: -0.08,
                            buyCount: 1, sellCount: 1, feeSnapshot: fees, finalTick: m3Count - 1),
         ]
@@ -159,7 +179,7 @@ public enum DebugFixtureData {
 
         let emptyPosition = try! JSONEncoder().encode(PositionManager())
         let pending = PendingTraining(
-            trainingSetFilename: filename, globalTickIndex: m3Count / 2,
+            trainingSetFilename: filename, globalTickIndex: pendingTick,
             upperPeriod: .m60, lowerPeriod: .daily,   // 必须是 periodCombos 阶梯里相邻一档（(m3,daily) 非法→switchPeriodCombo no-op）；默认 60分/日线（路线图 P1）
             positionData: emptyPosition, cashBalance: 100_000, feeSnapshot: fees,
             tradeOperations: [], drawings: [], startedAt: baseEpoch + 172_800,
