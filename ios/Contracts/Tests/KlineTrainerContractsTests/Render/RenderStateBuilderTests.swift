@@ -664,12 +664,13 @@ struct RenderStateBuilderTests {
         #expect(rs.drawings.allSatisfy { $0.panelPosition == 0 })            // 仅上栏；下栏被排除
     }
 
-    // MARK: - codex whole-branch R4-F1：画线逐 tick 揭示（镜像 markers reveal）
+    // MARK: - review-redesign Task 3：画线逐 tick 揭示（迁移自 codex whole-branch R4-F1；
+    // 判据从「锚点 candleIndex ≤ 面板 currentCandleIndex」改为「revealTick ≤ 全局 tick」）。
 
-    @Test("R4-F1：未来锚点画线在低 tick 被隐藏，tick 步进越过锚点后揭示")
+    @Test("迁移自 R4-F1：未来 revealTick 画线在低 tick 被隐藏，tick 步进越过后揭示（锚点 candleIndex 与渐显解耦）")
     @MainActor
-    func drawingsRevealByTick_futureAnchorHiddenUntilStepped() {
-        // Engine with 50 m3 candles (endGlobalIndex==i), starting at tick=5 → currentCandleIndex=5.
+    func drawingsRevealByTick_futureRevealTickHiddenUntilStepped() {
+        // Engine with 50 m3 candles (endGlobalIndex==i), starting at tick=5.
         let candles = Self.candles(period: .m3, count: 50)
         let maxTick = candles.count - 1
         let e = TrainingEngine(
@@ -680,23 +681,25 @@ struct RenderStateBuilderTests {
             initialCapital: 100_000, initialCashBalance: 100_000,
             initialUpperPeriod: .m3, initialLowerPeriod: .m3,
             decelerationDriverFactory: { FakeFrameDriver(onTick: $0) })
-        // Drawing A: anchor at candleIndex=3 (past, 3 ≤ currentCandleIndex(5)) → must appear.
+        // Drawing A: revealTick=3（已到达，3 ≤ 当前 tick 5）→ 必须显现——锚点故意给「未来」candleIndex=8
+        // 证明渐显不再看锚点。
         e.appendDrawing(DrawingObject(toolType: .horizontal,
-                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 3, price: 10)],
-                                      isExtended: true, panelPosition: 0))
-        // Drawing B: anchor at candleIndex=8 (future, 8 > currentCandleIndex(5)) → must NOT appear at tick=5.
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 8, price: 10)],
+                                      isExtended: true, panelPosition: 0, revealTick: 3))
+        // Drawing B: revealTick=8（未来，8 > 当前 tick 5）→ tick=5 时必须隐藏——锚点故意给「过去」candleIndex=3
+        // 证明若仍按旧锚点判据这条本该显现，而新判据下必须隐藏。
         e.appendDrawing(DrawingObject(toolType: .horizontal,
-                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 8, price: 11)],
-                                      isExtended: true, panelPosition: 0))
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 3, price: 11)],
+                                      isExtended: true, panelPosition: 0, revealTick: 8))
 
-        // RED assertion (before advancing): only past-anchored drawing visible.
+        // RED assertion (before advancing): only revealTick=3 的画线可见。
         let rsAtTick5 = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
         #expect(rsAtTick5.drawings.count == 1)
-        #expect(rsAtTick5.drawings.allSatisfy { $0.anchors.allSatisfy { $0.candleIndex == 3 } })
+        #expect(rsAtTick5.drawings.allSatisfy { $0.revealTick == 3 })
 
-        // Advance tick past candleIndex=8: call holdOrObserve 5× (tick 5→6→7→8→9→10).
+        // Advance tick past revealTick=8: call holdOrObserve 5× (tick 5→6→7→8→9→10).
         for _ in 0..<5 { e.holdOrObserve(panel: .upper) }
-        #expect(e.tick.globalTickIndex == 10)   // currentCandleIndex=10 ≥ 8
+        #expect(e.tick.globalTickIndex == 10)   // revealTick=8 ≤ 10
 
         // GREEN assertion (after advancing): both drawings now visible.
         let rsAtTick10 = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
@@ -705,10 +708,10 @@ struct RenderStateBuilderTests {
 
     // MARK: - review-redesign Task 10：engine.reviewDrawings 两层叠加（review 模式专属）
 
-    @Test("Task 10：review 模式 drawings = engine.drawings(只读原训练) + engine.reviewDrawings，按 tick 各自渐显叠加")
+    @Test("Task 10（迁移自 R4-F1 判据）：review 模式 drawings = engine.drawings(只读原训练) + engine.reviewDrawings，按 revealTick 各自渐显叠加")
     @MainActor
     func reviewOverlayDrawingsRevealByTick() {
-        // Review engine：50 根 m3（endGlobalIndex==i），起始 tick=5 → currentCandleIndex=5。
+        // Review engine：50 根 m3（endGlobalIndex==i），起始 tick=5。
         let candles = Self.candles(period: .m3, count: 50)
         let maxTick = candles.count - 1
         let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
@@ -724,21 +727,21 @@ struct RenderStateBuilderTests {
             initialCapital: 100_000, initialCashBalance: 100_000,
             initialUpperPeriod: .m3, initialLowerPeriod: .m3,
             decelerationDriverFactory: { FakeFrameDriver(onTick: $0) })
-        // 原训练线（只读 engine.drawings）@ candleIndex=2（过去，2<=5）。
+        // 原训练线（只读 engine.drawings）revealTick=2（过去，2<=5）→ 显现——锚点故意给「未来」candleIndex=8。
         e.appendDrawing(DrawingObject(toolType: .horizontal,
-                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 2, price: 10)],
-                                      isExtended: true, panelPosition: 0))
-        // 复盘新画线（engine.reviewDrawings）@ candleIndex=8（未来，8>5，tick=5 时不应显示）。
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 8, price: 10)],
+                                      isExtended: true, panelPosition: 0, revealTick: 2))
+        // 复盘新画线（engine.reviewDrawings）revealTick=8（未来，8>5，tick=5 时不应显示）——锚点故意给「过去」candleIndex=2。
         e.setReviewDrawings([DrawingObject(toolType: .horizontal,
-                                           anchors: [DrawingAnchor(period: .m3, candleIndex: 8, price: 11)],
-                                           isExtended: true, panelPosition: 0)])
+                                           anchors: [DrawingAnchor(period: .m3, candleIndex: 2, price: 11)],
+                                           isExtended: true, panelPosition: 0, revealTick: 8)])
 
-        // tick=5：只含原训练线（复盘线锚点 8 未揭示）。
+        // tick=5：只含原训练线（复盘线 revealTick=8 未揭示）。
         let rsAtTick5 = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
         #expect(rsAtTick5.drawings.count == 1)
-        #expect(rsAtTick5.drawings.allSatisfy { $0.anchors.allSatisfy { $0.candleIndex == 2 } })
+        #expect(rsAtTick5.drawings.allSatisfy { $0.revealTick == 2 })
 
-        // 步进到 tick=10（越过锚点 8）。
+        // 步进到 tick=10（越过 revealTick=8）。
         for _ in 0..<5 { e.holdOrObserve(panel: .upper) }
         #expect(e.tick.globalTickIndex == 10)
 
@@ -775,6 +778,56 @@ struct RenderStateBuilderTests {
                                          bounds: TrainingEngineInteractionTests.bounds)
         #expect(rs.drawings.count == 1)
         #expect(rs.drawings.allSatisfy { $0.panelPosition == 1 })            // 仅下栏；上栏被排除
+    }
+
+    // MARK: - review-redesign Task 3：渐显改按 revealTick（创建时全局 tick），与锚点 candleIndex 解耦
+
+    /// 单一 .m3 双面板 engine（NormalFlow，起始 tick=0）+ 一条画线：revealTick/panelPosition/锚点
+    /// candleIndex 独立可控——用于证明渐显只认 `revealTick`，与锚点、面板自身 period 均无关。
+    @MainActor
+    static func makeEngineWithDrawing(revealTick: Int, panelPosition: Int, anchorCandleIndex: Int) -> TrainingEngine {
+        let candles = Self.candles(period: .m3, count: 200)
+        let maxTick = candles.count - 1
+        let e = TrainingEngine(
+            flow: NormalFlow(fees: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true), maxTick: maxTick),
+            allCandles: [.m3: candles],
+            maxTick: maxTick,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m3, initialLowerPeriod: .m3,
+            decelerationDriverFactory: { FakeFrameDriver(onTick: $0) })
+        e.appendDrawing(DrawingObject(toolType: .horizontal,
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: anchorCandleIndex, price: 10)],
+                                      isExtended: true, panelPosition: panelPosition, revealTick: revealTick))
+        return e
+    }
+
+    /// engine 逐 tick 步进到目标 tick（NormalFlow 下 `holdOrObserve` 每次 +1）。
+    @MainActor
+    static func step(_ engine: TrainingEngine, toTick target: Int) {
+        while engine.tick.globalTickIndex < target { engine.holdOrObserve(panel: .upper) }
+    }
+
+    @Test("revealTick 渐显：tick 未到 revealTick 前隐藏，到达后显现（与锚点 candleIndex 无关）")
+    @MainActor
+    func drawingReveal_byRevealTick_hiddenBeforeCreationTick() {
+        let engine = Self.makeEngineWithDrawing(revealTick: 100, panelPosition: 0, anchorCandleIndex: 0)
+        Self.step(engine, toTick: 99)
+        let s99 = RenderStateBuilder.make(engine: engine, panel: .upper, bounds: Self.bounds)
+        #expect(s99.drawings.isEmpty)              // revealTick 100 > 99：隐藏（即便锚 candleIndex=0）
+        Self.step(engine, toTick: 100)
+        let s100 = RenderStateBuilder.make(engine: engine, panel: .upper, bounds: Self.bounds)
+        #expect(s100.drawings.count == 1)          // revealTick 100 <= 100：显现
+    }
+
+    @Test("下栏画线按全局 revealTick 显现（不依赖面板自身 period 的 currentCandleIndex）")
+    @MainActor
+    func drawingReveal_lowerPanel_crossPeriod_byGlobalRevealTick() {
+        let engine = Self.makeEngineWithDrawing(revealTick: 100, panelPosition: 1, anchorCandleIndex: 0)  // 下栏
+        Self.step(engine, toTick: 100)
+        let up = RenderStateBuilder.make(engine: engine, panel: .upper, bounds: Self.bounds)
+        let low = RenderStateBuilder.make(engine: engine, panel: .lower, bounds: Self.bounds)
+        #expect(up.drawings.isEmpty)               // panelPosition=1 不进上栏
+        #expect(low.drawings.count == 1)           // 进下栏，按全局 revealTick 显现
     }
 
     // MARK: - 聚合感知 reveal（进行中聚合 K 线 partial 合成；spec 2026-06-15-aggregate-aware-reveal）

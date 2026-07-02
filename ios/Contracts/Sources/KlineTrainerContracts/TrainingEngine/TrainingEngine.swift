@@ -991,11 +991,16 @@ extension TrainingEngine {
     /// 本方法而非直接判 `flow.mode`，使路由逻辑落在平台无关引擎层，可被 host `swift test` 覆盖
     /// （承载 commit 手势的 UIKit 文件本身在纯 macOS host 不编译）。
     /// **关键不变量**：review commit 绝不写 `drawings`（不污染原训练记录）。
+    /// review-redesign Task 3：路由前先盖戳 `revealTick = tick.globalTickIndex`（提交那一刻的全局
+    /// tick），使 `RenderStateBuilder.make` 的渐显判据（`revealTick <= tick`）对这条画线生效。
     public func routeDrawingCommit(_ drawing: DrawingObject) {
+        let stamped = DrawingObject(toolType: drawing.toolType, anchors: drawing.anchors,
+                                    isExtended: drawing.isExtended, panelPosition: drawing.panelPosition,
+                                    revealTick: tick.globalTickIndex)
         if flow.mode == .review {
-            appendReviewDrawing(drawing)
+            appendReviewDrawing(stamped)
         } else {
-            appendDrawing(drawing)
+            appendDrawing(stamped)
         }
     }
 

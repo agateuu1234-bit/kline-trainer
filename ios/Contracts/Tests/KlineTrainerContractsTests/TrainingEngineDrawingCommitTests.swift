@@ -122,4 +122,42 @@ struct TrainingEngineDrawingCommitTests {
         #expect(e.reviewDrawings[0].toolType == .ray)
         #expect(e.drawings.isEmpty)   // 全程未碰 engine.drawings
     }
+
+    // MARK: - review-redesign Task 3：routeDrawingCommit 提交时盖戳 revealTick=当前全局 tick
+
+    /// normal engine 步进到指定 tick（复用 `TrainingEngineInteractionTests.engine()`）。
+    static func makeNormalEngineAtTick(_ target: Int) -> TrainingEngine {
+        let (e, _) = TrainingEngineInteractionTests.engine()
+        for _ in 0..<target { e.holdOrObserve(panel: .upper) }
+        return e
+    }
+
+    /// review engine 步进到指定 tick（复用本文件 `reviewEngine()`；ReviewFlow.canAdvance()==true 可步进）。
+    static func makeReviewEngineAtTick(_ target: Int) -> TrainingEngine {
+        let e = Self.reviewEngine()
+        for _ in 0..<target { e.holdOrObserve(panel: .upper) }
+        return e
+    }
+
+    @Test("routeDrawingCommit: normal 模式提交时盖戳 revealTick = 当前全局 tick")
+    func routeDrawingCommit_stampsRevealTick_normalMode() {
+        let engine = Self.makeNormalEngineAtTick(50)
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 3, price: 10)],
+                              isExtended: false, panelPosition: 0)   // revealTick 默认 0
+        engine.routeDrawingCommit(d)
+        #expect(engine.drawings.last?.revealTick == engine.tick.globalTickIndex)
+        #expect(engine.drawings.last?.revealTick == 50)
+    }
+
+    @Test("routeDrawingCommit: review 模式提交时盖戳 revealTick = 当前全局 tick，不污染 engine.drawings")
+    func routeDrawingCommit_stampsRevealTick_reviewMode() {
+        let engine = Self.makeReviewEngineAtTick(60)
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 3, price: 10)],
+                              isExtended: false, panelPosition: 0)
+        engine.routeDrawingCommit(d)
+        #expect(engine.reviewDrawings.last?.revealTick == 60)
+        #expect(engine.drawings.isEmpty)   // review commit 不污染训练层
+    }
 }

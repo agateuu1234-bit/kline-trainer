@@ -58,16 +58,14 @@ public enum RenderStateBuilder {
             volumeRange: volumeRange,
             macdRange: macdRange,
             markers: engine.markers,
-            // codex whole-branch R4-F1：复盘步进时逐 tick 揭示画线（镜像 markers reveal 语义）。
-            // 锚点全部 ≤ 当前面板自身 period 的 currentCandleIndex 才渲染；未来锚点在步进到达前隐藏。
-            // normal/replay 下画线恒为历史锚（不受影响）；空锚点 drawing（allSatisfy 对空集为 true）保留但不渲染。
+            // review-redesign Task 3：画线渐显按 `revealTick`（提交那一刻的全局 tick）而非锚点位置——
+            // `revealTick <= tick` 才渲染；未到达前隐藏，与锚点 candleIndex/面板自身 period 均无关
+            // （迁移自 codex whole-branch R4-F1 的锚点 candleIndex ≤ currentCandleIndex 判据）。
+            // normal/replay 下画线提交时即盖戳当前 tick（历史锚，恒已揭示）；review 步进时逐 tick 揭示。
             // review-redesign Task 10：review 模式叠加两层——只读原训练线 `engine.drawings` +
             // 复盘新画线 `engine.reviewDrawings`，两层共用同一渐显规则；非 review 模式仍只含 `drawings`。
             drawings: (engine.drawings + (engine.flow.mode == .review ? engine.reviewDrawings : [])).filter { drawing in
-                drawing.panelPosition == (panel == .upper ? 0 : 1)
-                    && drawing.anchors.allSatisfy { anchor in
-                        anchor.candleIndex <= currentCandleIndex(candles: engine.allCandles[anchor.period] ?? [], tick: tick)
-                    }
+                drawing.panelPosition == (panel == .upper ? 0 : 1) && drawing.revealTick <= tick
             },
             crosshairPoint: crosshair,   // C8b：长按十字光标由 ChartContainerView.Coordinator 视图层透传（D3）
             previousCloseBeforeVisible: previousCloseBeforeVisible(candles: candles, startIndex: viewport.startIndex))
