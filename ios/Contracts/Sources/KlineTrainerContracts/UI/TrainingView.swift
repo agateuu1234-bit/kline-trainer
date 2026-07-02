@@ -77,7 +77,81 @@ public struct TrainingView: View {
         }
     }
 
+    // codex/W3-review-redesign-Task10：body 原是单个巨型 modifier 链——加一条 `.onChange` 后编译器
+    // "unable to type-check this expression in reasonable time"（Catalyst build-for-testing 实测超时失败）。
+    // 拆成 `trainingContent`（VStack + 全部 onAppear/onChange） + `body`（alert/confirmationDialog/toast/overlay）
+    // 两段各自独立类型检查，纯行为中性重构（无逻辑改动，仅表达式分割）。
     public var body: some View {
+        trainingContent
+        .alert("结算入账失败", isPresented: $finalizeFailed) {
+            Button("重试") { runFinalize() }
+            // 放弃 = durable discard（fence→清 pending→关 reader→回首页，§4.7e）
+            Button("放弃", role: .cancel) {
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    try? await lifecycle.discard(); onExit()
+                }
+            }
+        } message: {
+            Text("本局结果尚未写入历史记录。可重试入账，或放弃结算退出（进度保留至最近存档）。")
+        }
+        // 新需求10(A6)：replay 结算失败（fence/payload/clear 中任一步抛）→ 保留 session+槽（可重试），
+        // 用户可显式选择重试（幂等）或退出本局（codex R3-F1：lifecycle.back() durable 落终态槽，
+        // 而非 onSessionEnded(nil)；fence 已置 terminating → autosave 协程死，槽仅剩旧检查点，
+        // 须显式 saveProgress 把终态 durable 落槽，保障「暂存进度保留，可在历史记录返回训练」承诺）。
+        .alert("结算失败", isPresented: $replaySettlementFailed) {
+            Button("重试") { runReplaySettlement() }
+            Button("退出本局", role: .cancel) {
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    // codex whole-branch R3-F1：退出=保留进度（honor 提示文案）。fence 已置 terminating → autosave 协程死，
+                    // 槽只剩旧检查点；须显式 lifecycle.back()（saveProgress 当前终态 + endSession）把终态 durable 落槽，
+                    // 而非 onSessionEnded(nil)（不落盘 → 续局回旧检查点 / 提示落空）。保存失败 → 重弹 alert（可重试）。
+                    do { try await lifecycle.back(); onExit() }
+                    catch { replaySettlementFailed = true }
+                }
+            }
+        } message: {
+            Text("本局结算未能完成。可重试，或退出本局（暂存进度保留，可在历史记录返回训练）。")
+        }
+        .alert("保存进度失败", isPresented: $backFailed) {
+            Button("重试") {
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    do { try await lifecycle.back(); onExit() } catch { backFailed = true }
+                }
+            }
+            Button("放弃", role: .destructive) {
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    try? await lifecycle.discard(); onExit()   // durable 弃局退出
+                }
+            }
+        } message: {
+            Text("当前进度未能写入存档。可重试保存，或放弃本局退出。")
+        }
+        .confirmationDialog("结束本局训练", isPresented: $confirmingEnd, titleVisibility: .visible) {
+            Button("是", role: .destructive) { endManually() }
+            Button("否", role: .cancel) {}
+        }
+        .toastOverlay(toast.message)             // §B.1 复用呈现壳（消费 ToastState.message）
+        .overlay(alignment: .topLeading) {
+            if showsTradeButtons {
+                DrawingToolFloatingView(isDrawingActive: isDrawingActive, onToggleTool: toggleDrawing)
+            }
+        }
+    }
+
+    /// body 前半段（拆分见 body 顶部注释）：主内容 VStack + 全部 onAppear/onChange 中继。
+    private var trainingContent: some View {
         VStack(spacing: 0) {
             topBar
             panel(.upper)
@@ -145,77 +219,17 @@ public struct TrainingView: View {
         .onChange(of: engine.drawings.count) { _, _ in
             lifecycle.autosave(immediate: true)                 // §4.6：画线即存（commit/delete 不推 tick，D9）
         }
+        .onChange(of: engine.reviewDrawings.count) { _, _ in
+            // review-redesign Task 10：复盘新画线走 reviewDrawings（非 drawings），故上面那条 onChange 不触发；
+            // 镜像同款「画线即存」语义，改调 autosaveReview（Task 7）。非 review 模式下 reviewDrawings 恒不变，no-op。
+            lifecycle.autosaveReview(engine: engine)
+        }
         .onChange(of: lifecycle.coordinator.autosaveErrorGeneration) { _, _ in
             // §B.2 + codex-13a-F1：观察失败**计数**（非错误值）——每次失败都递增 → 重复同一错误也 surface，
             // 持久故障（如磁盘满每 tick 失败）保持可见，非首条 toast 过期即静默。非阻塞、不 teardown
             // （与 finalize 失败 blocking alert 区分）。shouldShowToast 过滤 .internalError 等。
             if let e = lifecycle.coordinator.autosaveBannerError, e.shouldShowToast {
                 presentToast(e.userMessage)
-            }
-        }
-        .alert("结算入账失败", isPresented: $finalizeFailed) {
-            Button("重试") { runFinalize() }
-            // 放弃 = durable discard（fence→清 pending→关 reader→回首页，§4.7e）
-            Button("放弃", role: .cancel) {
-                guard !exitInFlight else { return }
-                exitInFlight = true
-                Task {
-                    defer { exitInFlight = false }
-                    try? await lifecycle.discard(); onExit()
-                }
-            }
-        } message: {
-            Text("本局结果尚未写入历史记录。可重试入账，或放弃结算退出（进度保留至最近存档）。")
-        }
-        // 新需求10(A6)：replay 结算失败（fence/payload/clear 中任一步抛）→ 保留 session+槽（可重试），
-        // 用户可显式选择重试（幂等）或退出本局（codex R3-F1：lifecycle.back() durable 落终态槽，
-        // 而非 onSessionEnded(nil)；fence 已置 terminating → autosave 协程死，槽仅剩旧检查点，
-        // 须显式 saveProgress 把终态 durable 落槽，保障「暂存进度保留，可在历史记录返回训练」承诺）。
-        .alert("结算失败", isPresented: $replaySettlementFailed) {
-            Button("重试") { runReplaySettlement() }
-            Button("退出本局", role: .cancel) {
-                guard !exitInFlight else { return }
-                exitInFlight = true
-                Task {
-                    defer { exitInFlight = false }
-                    // codex whole-branch R3-F1：退出=保留进度（honor 提示文案）。fence 已置 terminating → autosave 协程死，
-                    // 槽只剩旧检查点；须显式 lifecycle.back()（saveProgress 当前终态 + endSession）把终态 durable 落槽，
-                    // 而非 onSessionEnded(nil)（不落盘 → 续局回旧检查点 / 提示落空）。保存失败 → 重弹 alert（可重试）。
-                    do { try await lifecycle.back(); onExit() }
-                    catch { replaySettlementFailed = true }
-                }
-            }
-        } message: {
-            Text("本局结算未能完成。可重试，或退出本局（暂存进度保留，可在历史记录返回训练）。")
-        }
-        .alert("保存进度失败", isPresented: $backFailed) {
-            Button("重试") {
-                guard !exitInFlight else { return }
-                exitInFlight = true
-                Task {
-                    defer { exitInFlight = false }
-                    do { try await lifecycle.back(); onExit() } catch { backFailed = true }
-                }
-            }
-            Button("放弃", role: .destructive) {
-                guard !exitInFlight else { return }
-                exitInFlight = true
-                Task {
-                    defer { exitInFlight = false }
-                    try? await lifecycle.discard(); onExit()   // durable 弃局退出
-                }
-            }
-        } message: {
-            Text("当前进度未能写入存档。可重试保存，或放弃本局退出。")
-        }
-        .confirmationDialog("结束本局训练", isPresented: $confirmingEnd, titleVisibility: .visible) {
-            Button("是", role: .destructive) { endManually() }
-            Button("否", role: .cancel) {}
-        }
-        .toastOverlay(toast.message)             // §B.1 复用呈现壳（消费 ToastState.message）
-        .overlay(alignment: .topLeading) {
-            if showsTradeButtons {
-                DrawingToolFloatingView(isDrawingActive: isDrawingActive, onToggleTool: toggleDrawing)
             }
         }
     }

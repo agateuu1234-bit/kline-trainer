@@ -703,6 +703,64 @@ struct RenderStateBuilderTests {
         #expect(rsAtTick10.drawings.count == 2)
     }
 
+    // MARK: - review-redesign Task 10：engine.reviewDrawings 两层叠加（review 模式专属）
+
+    @Test("Task 10：review 模式 drawings = engine.drawings(只读原训练) + engine.reviewDrawings，按 tick 各自渐显叠加")
+    @MainActor
+    func reviewOverlayDrawingsRevealByTick() {
+        // Review engine：50 根 m3（endGlobalIndex==i），起始 tick=5 → currentCandleIndex=5。
+        let candles = Self.candles(period: .m3, count: 50)
+        let maxTick = candles.count - 1
+        let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+        let record = TrainingRecord(id: 1, trainingSetFilename: "t.sqlite", createdAt: 0,
+                                    stockCode: "000001", stockName: "测试", startYear: 2020, startMonth: 1,
+                                    totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                                    buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: maxTick)
+        let e = TrainingEngine(
+            flow: ReviewFlow(record: record, startTick: 0),
+            allCandles: [.m3: candles],
+            maxTick: maxTick,
+            initialTick: 5,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m3, initialLowerPeriod: .m3,
+            decelerationDriverFactory: { FakeFrameDriver(onTick: $0) })
+        // 原训练线（只读 engine.drawings）@ candleIndex=2（过去，2<=5）。
+        e.appendDrawing(DrawingObject(toolType: .horizontal,
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 2, price: 10)],
+                                      isExtended: true, panelPosition: 0))
+        // 复盘新画线（engine.reviewDrawings）@ candleIndex=8（未来，8>5，tick=5 时不应显示）。
+        e.setReviewDrawings([DrawingObject(toolType: .horizontal,
+                                           anchors: [DrawingAnchor(period: .m3, candleIndex: 8, price: 11)],
+                                           isExtended: true, panelPosition: 0)])
+
+        // tick=5：只含原训练线（复盘线锚点 8 未揭示）。
+        let rsAtTick5 = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
+        #expect(rsAtTick5.drawings.count == 1)
+        #expect(rsAtTick5.drawings.allSatisfy { $0.anchors.allSatisfy { $0.candleIndex == 2 } })
+
+        // 步进到 tick=10（越过锚点 8）。
+        for _ in 0..<5 { e.holdOrObserve(panel: .upper) }
+        #expect(e.tick.globalTickIndex == 10)
+
+        // tick=10：两条都显（原训练线 + 复盘线）。
+        let rsAtTick10 = RenderStateBuilder.make(engine: e, panel: .upper, bounds: Self.bounds)
+        #expect(rsAtTick10.drawings.count == 2)
+    }
+
+    @Test("Task 10：非 review 模式（normal/replay）drawings 恒不叠加 reviewDrawings")
+    @MainActor
+    func nonReviewModeIgnoresReviewDrawings() {
+        let (e, _) = TrainingEngineInteractionTests.engine()   // NormalFlow
+        e.appendDrawing(DrawingObject(toolType: .horizontal,
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 0, price: 10)],
+                                      isExtended: true, panelPosition: 0))
+        e.setReviewDrawingsForTesting([DrawingObject(toolType: .horizontal,
+                                       anchors: [DrawingAnchor(period: .m3, candleIndex: 0, price: 11)],
+                                       isExtended: true, panelPosition: 0)])
+        let rs = RenderStateBuilder.make(engine: e, panel: .upper, bounds: TrainingEngineInteractionTests.bounds)
+        #expect(rs.drawings.count == 1)   // reviewDrawings 未叠加（非 review 模式）
+    }
+
     @Test("make: drawings 按 panelPosition 过滤 —— 反之 .lower 仅含下栏(1)，上栏(0)被排除")
     @MainActor
     func drawingsFilteredByPanelPositionLower() {

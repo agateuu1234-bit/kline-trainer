@@ -253,8 +253,10 @@ public struct ChartContainerView: UIViewRepresentable {
             if releaseOwnership { setCrosshairOwner?(nil) }
         }
 
-        /// 顺位 4：drawing 模式单指点击落锚 → 投影 engine.drawings → 退出 .drawing。
-        /// 全链路：tapToAnchor（逆映射）→ manager.addAnchor/commit → engine.appendDrawing → engine.commitDrawing。
+        /// 顺位 4：drawing 模式单指点击落锚 → 投影 engine.drawings/reviewDrawings → 退出 .drawing。
+        /// 全链路：tapToAnchor（逆映射）→ manager.addAnchor/commit → engine.routeDrawingCommit → engine.commitDrawing。
+        /// review-redesign Task 10：投影目标改经 `routeDrawingCommit`——review 模式写 `reviewDrawings`，
+        /// 其余（normal/replay）写 `drawings`，防止复盘新画线污染原训练记录。
         private func handleDrawingTap(at point: CGPoint) {
             guard let engine, let view else { return }
             guard isDrawing(engine: engine, panel: panel), manager.activeTool != nil else { return }
@@ -268,7 +270,7 @@ public struct ChartContainerView: UIViewRepresentable {
             guard inputController.shouldCommit(current: manager.pendingAnchors, tool: .horizontal) else { return }
             manager.commit(isExtended: true, panelPosition: panel == .upper ? 0 : 1)
             if let committed = manager.completedDrawings.last {
-                engine.appendDrawing(committed)              // 投影：单一真相 engine.drawings
+                engine.routeDrawingCommit(committed)          // review→reviewDrawings；否则→drawings（Task 10）
             }
             engine.commitDrawing(panel: panel)               // 退出 reducer .drawing
         }
