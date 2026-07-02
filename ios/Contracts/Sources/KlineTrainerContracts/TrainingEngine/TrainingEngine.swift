@@ -23,6 +23,12 @@ public final class TrainingEngine {
     public private(set) var drawdown: DrawdownAccumulator
     public private(set) var markers: [TradeMarker]
     public private(set) var drawings: [DrawingObject]
+    /// review-redesign Task 5 最小 shim：复盘 session 的工作画线集，供 coordinator 持久化净改动判定
+    /// （`ReviewNetChange.changed(working: engine.reviewDrawings, committed:)`）读取。**Task 10 待完成**：
+    /// 真实画线路由（review 模式下 activateDrawingTool/appendDrawing/deleteDrawing 等应写入本属性而非
+    /// `drawings`——review 只读，不能污染 committed `drawings`）。本 task 仅占位存储 + DEBUG 测试专用
+    /// setter（`setReviewDrawingsForTesting`），不接手势/reducer 路径。
+    public private(set) var reviewDrawings: [DrawingObject] = []
     public private(set) var upperPanel: PanelViewState
     public private(set) var lowerPanel: PanelViewState
     public private(set) var tradeOperations: [TradeOperation]
@@ -1028,5 +1034,9 @@ extension TrainingEngine {
 extension TrainingEngine {
     /// R1b-drag 测试专用：读 dragRaw（生命周期断言）。
     func debug_dragRawFor(_ panel: PanelId) -> CGFloat? { dragRawFor(panel) }
+
+    /// review-redesign Task 5 测试专用：注入 `reviewDrawings`（Task 10 真实路由落地前，
+    /// 模拟"复盘中画一条/删一条"以驱动 coordinator 持久化净改动判定测试）。
+    func setReviewDrawingsForTesting(_ drawings: [DrawingObject]) { reviewDrawings = drawings }
 }
 #endif

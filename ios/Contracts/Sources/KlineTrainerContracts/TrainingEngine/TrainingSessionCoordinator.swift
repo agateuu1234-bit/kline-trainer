@@ -60,6 +60,14 @@ public final class TrainingSessionCoordinator {
     // →跳过"会残留已删画线。
     @ObservationIgnored private var replayHasPersisted = false
 
+    // MARK: - review-redesign RFC：复盘 session 态（committed 基线 + 净改动判定，Task 5）
+
+    /// 当前复盘 session 绑定的 record id（`review()`/`resumePendingReview()` 设置，Task 6）；nil=无复盘 session。
+    @ObservationIgnored private var reviewRecordId: Int64?
+    /// 复盘 committed 基线：进入时 = saved ?? []；`commitReview` 提交后前移 = 刚提交的工作画线集。
+    /// 净改动判定 **恒对比 committed 基线**（非 resume 时加载的 working），见 `ReviewNetChange`。
+    @ObservationIgnored private var reviewCommittedBaseline: [DrawingObject] = []
+
     // MARK: - Wave 3 顺位 10b：周期 autosave 状态机（RFC §4.6）+ 终态 fence（§4.7d）
 
     @ObservationIgnored private var autosaveTask: Task<Void, Never>?     // 在飞写句柄（fence drain）
@@ -131,6 +139,13 @@ public final class TrainingSessionCoordinator {
     func drainAutosaveForTesting() async { await autosaveTask?.value }
     /// 测试钩子：强置 activeRecord=nil，供 fail-closed 守卫测试制造缺上下文（镜像 drainAutosaveForTesting 范式）。
     func setActiveRecordNilForTesting() { activeRecord = nil }
+    /// review-redesign Task 5 测试专用：注入复盘 session 态（`reviewRecordId`/`reviewCommittedBaseline`）。
+    /// 生产路径由 Task 6 的 `review()`/`resumePendingReview()` 设置；本 task 尚无产出这些字段的公开方法，
+    /// 故测试直接注入（镜像 `setActiveRecordNilForTesting` 范式）。
+    func setReviewSessionForTesting(recordId: Int64?, committedBaseline: [DrawingObject]) {
+        reviewRecordId = recordId
+        reviewCommittedBaseline = committedBaseline
+    }
     #endif
 
     /// §4.7d 终态栅栏：置 terminating（拒新 autosave）+ 排空在飞写（排空时见 terminating 即退出不落盘）。
@@ -664,6 +679,49 @@ public final class TrainingSessionCoordinator {
                 ?? .internalError(module: "E6b", detail: "discard clear: \(error)")
         }
         await endSession()
+    }
+
+    // MARK: - review-redesign RFC：复盘持久化核心（committed 基线 + 净改动判定，Task 5）
+
+    /// 该记录是否有「进行中」复盘存档（display-only，供历史弹窗/首页角标）。try? 兜底 false。
+    public func hasReviewInProgress(recordId: Int64) -> Bool {
+        ((try? reviewArchiveRepo.reviewMarker(recordId: recordId)) ?? .none) == .inProgress
+    }
+
+    /// 批量加载全部复盘存档标记（供首页角标）。try? 兜底 [:]。
+    public func loadReviewMarkers() -> [Int64: ReviewMarker] {
+        (try? reviewArchiveRepo.loadMarkers()) ?? [:]
+    }
+
+    /// 当前复盘 session 是否有净改动：当前活跃引擎的 `reviewDrawings` vs committed 基线（顺序无关）。
+    public func reviewNetChanged() -> Bool {
+        ReviewNetChange.changed(working: activeEngine?.reviewDrawings ?? [], committed: reviewCommittedBaseline)
+    }
+
+    /// 复盘中按需持久化：有净改动（vs committed 基线）→ 写 working（`stepTick`=当前 tick）；
+    /// 无净改动 → 清 working（回退到 committed：saved 或删行）。无复盘 session（`reviewRecordId`==nil）→ no-op。
+    public func persistReviewWorkingIfChanged(engine: TrainingEngine) throws {
+        guard let id = reviewRecordId else { return }
+        if ReviewNetChange.changed(working: engine.reviewDrawings, committed: reviewCommittedBaseline) {
+            try reviewArchiveRepo.saveWorking(recordId: id, stepTick: engine.tick.globalTickIndex,
+                                              drawings: engine.reviewDrawings)
+        } else {
+            try reviewArchiveRepo.clearWorking(recordId: id)
+        }
+    }
+
+    /// 提交复盘：saved = 当前 `reviewDrawings`，清 working；committed 基线前移到刚提交的画线集。
+    /// 无复盘 session → no-op。
+    public func commitReview(engine: TrainingEngine) throws {
+        guard let id = reviewRecordId else { return }
+        try reviewArchiveRepo.commitSaved(recordId: id, drawings: engine.reviewDrawings)
+        reviewCommittedBaseline = engine.reviewDrawings
+    }
+
+    /// 丢弃复盘工作态：清 working（回退到 committed：saved 或删行）。无复盘 session → no-op。
+    public func discardReviewWorking(engine: TrainingEngine) throws {
+        guard let id = reviewRecordId else { return }
+        try reviewArchiveRepo.clearWorking(recordId: id)
     }
 
     // MARK: - 私有构造 helper（E6a）
