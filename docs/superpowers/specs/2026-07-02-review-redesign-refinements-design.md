@@ -81,7 +81,8 @@ revealTick = try container.decodeIfPresent(Int.self, forKey: .revealTick) ?? 0
 默认 0（从起点起可见）对 legacy 安全（本项目无生产用户数据，DEBUG 种子记录画线为空）。`CONTRACT_VERSION` `"1.9" → "1.10"`（逻辑契约演进标记；该常量仅在 `Models.swift` 定义、**不持久化、不与 DB user_version 门控**）。`user_version` `5 → 6`（迁移 0008）。`Equatable` 含 `revealTick`。
 
 ### 1.7 边界
-- 复盘入口终局等式校验 / `ReviewLedger` / 交易账目**完全不受影响**：`revealTick` 只影响画线**显示时机**，不进任何盈亏/持仓/存档净改动判定。`ReviewNetChange.changed` 比较 saved vs working 画线：因 `revealTick` 进入 `Equatable`，同一条线的 `revealTick` 在 saved 与 working 间保持一致（同次提交盖戳后不变），故不误判净改动。
+- 复盘入口终局等式校验 / `ReviewLedger` / 交易账目**完全不受影响**：`revealTick` 只影响画线**显示时机**，不进任何盈亏/持仓计算。
+- **净改动判定必须含 `revealTick`**：`revealTick` 已是持久化 + 渲染语义字段（渐显时机），故 `ReviewNetChange.changed` 比较 saved vs working 的稳定键**必须包含 `revealTick`**（连同 tool/panel/extension/anchors）。否则几何相同但渐显时刻不同的复盘编辑会被误判"无净改动"→ `persistReviewWorkingIfChanged` 清 working、结束不提示保存 = **静默丢失用户编辑**（codex whole-branch finding；`changed` 用手搓稳定键、非 `Equatable`）。
 - `revealTick` 可能 > finalTick 吗？不会：提交时 `tick.globalTickIndex ∈ 该模式 allowedTickRange ⊆ [_, finalTick]`。即便越界，`revealTick <= tick` 仍安全（只是永不显示，不崩溃）。
 
 ## 2. ③ 划线可画上下两个面板
