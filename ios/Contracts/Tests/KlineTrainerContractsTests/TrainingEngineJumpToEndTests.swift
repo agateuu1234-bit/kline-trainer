@@ -136,4 +136,51 @@ private func makeReviewRecord() -> TrainingRecord {
         engine.stepReviewForward()
         #expect(engine.tick.globalTickIndex == maxTick)
     }
+
+    // MARK: - Review Important gap: stepReviewForward(panel:) 回退/no-op 分支覆盖
+
+    /// review Important 覆盖缺口：stepReviewForward(panel:) 所选面板耗尽（steps==0）时应回退到
+    /// 另一面板推进，而非 no-op。复用稀疏 fixture：tick=4 时 .m60(upper) 已耗尽，.daily(lower) steps=3。
+    /// 请求已耗尽的 .upper → 方法应改选 .lower 推进 tick 4→7（本测试前该回退分支从未被跑到）。
+    @Test func stepReviewForwardPanel_selectedExhausted_fallsBackToOtherPanel() throws {
+        let candles = makeSparseCandlesForStepTest()
+        let record = makeReviewRecord()  // finalTick=7
+        let engine = try TrainingEngine.make(
+            .review(record: record, startTick: 4),
+            allCandles: candles,
+            initialCapital: 100_000,
+            initialCashBalance: 100_000,
+            initialUpperPeriod: .m60,
+            initialLowerPeriod: .daily)
+        // 验证前提：tick 起点=4，.m60(upper) 已耗尽，.daily(lower) 未耗尽
+        #expect(engine.tick.globalTickIndex == 4)
+        // 请求已耗尽的 upper → 应回退选 lower 推进（若回退分支失效则 tick 停在 4，本行会 FAIL）
+        engine.stepReviewForward(panel: .upper)
+        #expect(engine.tick.globalTickIndex > 4)
+        #expect(engine.tick.globalTickIndex == 7)   // .daily steps=3 → 4+3=7
+    }
+
+    /// review Important 覆盖缺口：stepReviewForward(panel:) 两面板皆耗尽（已到结尾）时应 no-op，
+    /// 无论请求哪个面板，都不应推进 tick、不崩溃。
+    @Test func stepReviewForwardPanel_bothExhausted_noOp() throws {
+        let candles = makeSparseCandlesForStepTest()
+        let record = makeReviewRecord()  // finalTick=7
+        let engine = try TrainingEngine.make(
+            .review(record: record, startTick: 4),
+            allCandles: candles,
+            initialCapital: 100_000,
+            initialCashBalance: 100_000,
+            initialUpperPeriod: .m60,
+            initialLowerPeriod: .daily)
+        // 快进到 maxTick=7 → 两周期皆耗尽
+        engine.jumpToEnd()
+        let maxTick = engine.tick.maxTick
+        #expect(engine.tick.globalTickIndex == maxTick)
+        // 请求 upper（皆耗尽）→ no-op
+        engine.stepReviewForward(panel: .upper)
+        #expect(engine.tick.globalTickIndex == maxTick)
+        // 请求 lower（皆耗尽）→ 同样 no-op
+        engine.stepReviewForward(panel: .lower)
+        #expect(engine.tick.globalTickIndex == maxTick)
+    }
 }
