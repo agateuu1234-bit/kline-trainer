@@ -330,9 +330,21 @@ public final class TrainingSessionCoordinator {
             return nil
         }
         guard let w = working else { return nil }             // 竞态：刚被清 → nil（router 从头）
+        // codex whole-branch R5（high）：`w.stepTick` 校验须先于 `buildReviewEngine`——否则越界 tick（schema
+        // 漂移/损坏；DB CHECK 只强制非空配对，不校验 tick 边界）会让 `TrainingEngine.make` 因
+        // `flow.allowedTickRange` 不含该 tick 而 trap-guard throw，但坏 `working_*` 行仍 `.inProgress`，
+        // 之后每次 tap 都重试同一失败 resume（永久 brick）。此处视越界为 WORKING 语义损坏（区别于
+        // record-ops 入口终局校验的 `.dbCorrupted`）：clearWorking + nil（router 回退 fresh `review()`，
+        // 不碰 saved/record）。顺带取一次 record bundle 供下方 `buildReviewEngine` 复用（避免重复加载）。
+        let bundle = try recordRepo.loadRecordBundle(id: recordId)
+        guard (0...max(0, bundle.0.finalTick)).contains(w.stepTick) else {
+            try reviewArchiveRepo.clearWorking(recordId: recordId)
+            return nil
+        }
         let baseline = try loadCommittedBaselineRecovering(recordId: recordId)   // saved 坏 → 仅清 saved + toast，保住有效 working
         return try await buildReviewEngine(recordId: recordId, startTickOverride: w.stepTick,
-                                           reviewDrawings: w.drawings, committedBaseline: baseline)
+                                           reviewDrawings: w.drawings, committedBaseline: baseline,
+                                           preloadedRecordBundle: bundle)
     }
 
     /// review-redesign Task 6：committed 基线 = saved（独立解码，只碰 saved 列，working 不动）。
@@ -356,10 +368,14 @@ public final class TrainingSessionCoordinator {
     /// **入口终局等式强制（codex plan-R3/R5-high）**：构造后重折叠全部 `ops` 到 `record.finalTick`，
     /// 与 record 终局不符（损坏 op 序列 / totalCost 造假）→ `.dbCorrupted`（review 不开、reader 已关）。
     /// 这样顶栏每帧 `ReviewLedger.state` 可 `try?`（入口已验，永不兜底），杜绝逐帧 trap。
+    /// `preloadedRecordBundle`：codex whole-branch R5——`resumePendingReview` 校验 `w.stepTick` 时已加载过
+    /// 一次 bundle，传入此处复用（避免同一 recordId 重复 `loadRecordBundle`）；nil（`review()` 路径）→ 自行加载。
     private func buildReviewEngine(recordId: Int64, startTickOverride: Int?,
                                     reviewDrawings: [DrawingObject],
-                                    committedBaseline: [DrawingObject]) async throws -> TrainingEngine {
-        let (record, ops, drawings) = try recordRepo.loadRecordBundle(id: recordId)
+                                    committedBaseline: [DrawingObject],
+                                    preloadedRecordBundle: (TrainingRecord, [TradeOperation], [DrawingObject])? = nil
+                                    ) async throws -> TrainingEngine {
+        let (record, ops, drawings) = try preloadedRecordBundle ?? recordRepo.loadRecordBundle(id: recordId)
         // Note: loadRecordBundle() is app.sqlite source — its .dbCorrupted propagates ABOVE this catch (fail-closed).
         let file = try cachedFile(filename: record.trainingSetFilename)
         let reader: any TrainingSetReader

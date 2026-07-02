@@ -89,6 +89,25 @@ import KlineTrainerContracts
         #expect(s.shares == 0)   // 未 throw 即证明排序未按 createdAt（否则 sell 先 → oversell throw）
     }
 
+    // codex whole-branch R5（medium）：损坏 op 流买超可用现金（totalCost > cash）必须 fail-closed
+    // throw .dbCorrupted，而非让 running cash 变负仍照常显示。合法流由 TradeCalculator.quoteBuy 保证
+    // totalCost <= cash，故此仅可能发生于损坏/伪造的 op 序列。
+    @Test func overCashBuy_throwsDBCorrupted() {
+        // initialCapital 100_000，totalCost 100_001 > cash → newCash = -1，远超 -1e-6 容差 → 必须 throw
+        let ops = [op(5, .buy, price: 1000, shares: 1, commission: 0, stampDuty: 0, totalCost: 100_001)]
+        #expect(throws: AppError.self) {
+            _ = try ReviewLedger.state(atTick: 5, ops: ops, initialCapital: 100_000, markPriceAtTick: price)
+        }
+    }
+
+    // 对照：恰好花光现金（totalCost == cash，newCash == 0）是合法买入，不得被容差误拒。
+    @Test func exactlyAffordableBuy_doesNotThrow() throws {
+        let ops = [op(5, .buy, price: 1000, shares: 100, commission: 0, stampDuty: 0, totalCost: 100_000)]
+        let s = try ReviewLedger.state(atTick: 5, ops: ops, initialCapital: 100_000, markPriceAtTick: price)
+        #expect(s.cash == 0)
+        #expect(s.shares == 100)
+    }
+
     // codex plan-R9-medium：sell 的 proceeds(=totalCost) 允许为负（低价清仓/force-close），不得判损坏
     @Test func negativeSellProceedsIsValidNotCorrupt() throws {
         let ops = [op(5, .buy, price: 10, shares: 100, commission: 5, stampDuty: 0, totalCost: 1005),

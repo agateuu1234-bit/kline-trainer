@@ -339,6 +339,41 @@ struct ReviewPersistenceTests {
         #expect(h.coordinator.hasReviewInProgress(recordId: h.seededRecordId) == false)
     }
 
+    // codex whole-branch R5（high）：`working.stepTick` 越界（负数或超过 record.finalTick——schema 漂移/
+    // 损坏，DB CHECK 只强制非空配对、不校验 tick 边界）此前直接传给 `buildReviewEngine`，令
+    // `TrainingEngine.make` 因 `flow.allowedTickRange` 不含该 tick 而 trap-guard throw；但坏 working 行
+    // 仍 `.inProgress`，之后每次 tap 都重试同一失败 resume（永久 brick，永远无法进复盘）。
+    // 修复后须先校验、越界 → clearWorking + nil（router 回退 fresh review，saved/record 不受影响）。
+    @Test func resumePendingReview_workingStepTickNegative_clearsWorking_returnsNil() async throws {
+        let h = try ReviewTestHarness.make()
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])   // 既有 saved，须保留
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: -1, drawings: [line(20)])   // 越界：负数
+
+        let e = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
+
+        #expect(e == nil)
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)          // working 已清
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .saved)       // 回退到既有 saved（非 .none）
+        #expect(try h.reviewRepo.loadSaved(recordId: h.seededRecordId) == [line(10)])      // saved 原样未动
+        #expect(h.coordinator.activeEngine == nil)                                        // 未留下悬空活跃 session
+        #expect(h.coordinator.hasReviewInProgress(recordId: h.seededRecordId) == false)
+    }
+
+    @Test func resumePendingReview_workingStepTickBeyondFinal_clearsWorking_returnsNil() async throws {
+        let h = try ReviewTestHarness.make()   // seededFinalTick == 7
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])   // 既有 saved，须保留
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 8, drawings: [line(20)])   // 越界：超过 finalTick=7
+
+        let e = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
+
+        #expect(e == nil)
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)          // working 已清
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .saved)       // 回退到既有 saved（非 .none）
+        #expect(try h.reviewRepo.loadSaved(recordId: h.seededRecordId) == [line(10)])      // saved 原样未动
+        #expect(h.coordinator.activeEngine == nil)                                        // 未留下悬空活跃 session
+        #expect(h.coordinator.hasReviewInProgress(recordId: h.seededRecordId) == false)
+    }
+
     // codex whole-branch R2（high）：`resumePendingReview` 此前用 `try?` 把 `reviewMarker` 的瞬态读错误
     // 收敛为 `.none`，router 据此回退 fresh `review()`——若此时存在有效 `working_*` 行，用户随后放弃会把它
     // 清掉，丢失一份仍在进行的复盘。修复后瞬态错误须 PROPAGATE（不得静默回退 nil），working 行原样保留。

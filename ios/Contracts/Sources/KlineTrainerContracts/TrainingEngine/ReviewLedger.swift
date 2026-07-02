@@ -40,8 +40,13 @@ public enum ReviewLedger {
                       (position.totalInvested + op.totalCost).isFinite,
                       op.shares <= Int.max - position.shares
                 else { throw AppError.persistence(.dbCorrupted) }
+                // codex whole-branch R5（medium）：损坏 op 流可能买超可用现金——校验 shares/cost/溢出后仍
+                // 盲目 `cash -= totalCost` 会让 running cash 变负且照常显示。容差 -1e-6（非 0）防止在
+                // cash≈0 的合法「恰好花光」买入上因 FP 舍入误报损坏；真正超支的损坏买入远超此容差。
+                let newCash = cash - op.totalCost
+                guard newCash.isFinite, newCash >= -1e-6 else { throw AppError.persistence(.dbCorrupted) }
                 position.buy(shares: op.shares, totalCost: op.totalCost)
-                cash -= op.totalCost
+                cash = newCash
             case .sell:
                 guard op.shares <= position.shares else { throw AppError.persistence(.dbCorrupted) }  // oversell / sell-before-buy
                 // 现金流有限性守卫（codex plan-R11-high）：finite 但极端值 price*shares 可能溢出 inf/NaN
