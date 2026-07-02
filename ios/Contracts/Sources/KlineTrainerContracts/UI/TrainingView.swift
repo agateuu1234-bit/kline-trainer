@@ -38,6 +38,11 @@ public struct TrainingView: View {
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
     @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
     @State private var crosshairOwner: PanelId? = nil  // RFC-C：当前持十字光标的面板（跨面板互斥，同时只一个图有光标）
+    // review-redesign Task 13：复盘「结束」保存弹窗 + 专用失败态（不复用 backFailed——那会误走
+    // lifecycle.back()=review no-op saveProgress，丢已 drain 的 saved）。
+    @State private var confirmingEndReview = false
+    private enum ReviewEndAction { case back, save, discard }
+    @State private var reviewFailedAction: ReviewEndAction?
 
     public init(lifecycle: TrainingSessionLifecycle,
                 onExit: @escaping () -> Void,
@@ -58,6 +63,10 @@ public struct TrainingView: View {
     // 与 showsTradeButtons 互斥：正常/Replay 时 canBuySell=true → showsReviewControls=false；
     // Review 时 canBuySell=false + canAdvance=true → showsReviewControls=true。
     private var showsReviewControls: Bool { engine.flow.canAdvance() && !engine.flow.canBuySell() }
+    // review-redesign Task 13：画线门控与交易门控解耦——复盘不可交易(showsTradeButtons==false)但仍可画线
+    // （routeDrawingCommit/appendReviewDrawing 写 reviewDrawings 层，Task 10 已接线）。买卖条仍严格仅
+    // showsTradeButtons（不受本谓词影响）。
+    private var showsDrawingTools: Bool { showsTradeButtons || engine.flow.mode == .review }
 
     /// 某 panel 当前下单周期（codex R2-high：买卖条捕获/比对用）。
     private func currentPeriod(of id: PanelId) -> Period {
@@ -142,9 +151,41 @@ public struct TrainingView: View {
             Button("是", role: .destructive) { endManually() }
             Button("否", role: .cancel) {}
         }
+        // review-redesign Task 13：复盘「结束」仅在有净改动时弹（ReviewEndPrompt.shouldPrompt 门控于 action 内）。
+        .confirmationDialog("结束复盘", isPresented: $confirmingEndReview, titleVisibility: .visible) {
+            Button("保存") { performReviewEnd(.save) }
+            Button("不保存", role: .destructive) { performReviewEnd(.discard) }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("是否保存本次复盘记录？")
+        }
+        // 专用 review 失败态（不复用 backFailed）：重试调**同一个**失败的动作，放弃=丢弃工作副本退出
+        // （已保存的复盘存档不受影响）。
+        .alert("复盘保存失败", isPresented: Binding(
+            get: { reviewFailedAction != nil },
+            set: { if !$0 { reviewFailedAction = nil } })) {
+            Button("重试") {
+                if let action = reviewFailedAction {
+                    reviewFailedAction = nil
+                    performReviewEnd(action)
+                }
+            }
+            Button("放弃", role: .destructive) {
+                reviewFailedAction = nil
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    try? await lifecycle.endReviewDiscard(engine: engine)
+                    onExit()
+                }
+            }
+        } message: {
+            Text("复盘进度未能写入。可重试，或放弃本次复盘改动退出（已保存的复盘存档不受影响）。")
+        }
         .toastOverlay(toast.message)             // §B.1 复用呈现壳（消费 ToastState.message）
         .overlay(alignment: .topLeading) {
-            if showsTradeButtons {
+            if showsDrawingTools {
                 DrawingToolFloatingView(isDrawingActive: isDrawingActive, onToggleTool: toggleDrawing)
             }
         }
@@ -184,7 +225,14 @@ public struct TrainingView: View {
                 }
             }
         }
-        .onAppear { maybeAutoEnd() }                                            // M2：resume-at-maxTick
+        .onAppear {
+            maybeAutoEnd()                                                       // M2：resume-at-maxTick
+            // review-redesign Task 13：进复盘时若 Task 6 已自动清掉损坏 saved 存档，一次性 toast 告知。
+            if engine.flow.mode == .review && lifecycle.coordinator.pendingReviewCorruptToast {
+                presentToast("复盘存档损坏已清除，可重新复盘保存")
+                lifecycle.coordinator.clearPendingReviewCorruptToast()
+            }
+        }
         .onChange(of: activePanel) { _, _ in
             // RFC-B(codex R1-medium 修)：切分段钮(下单目标 panel)即清掉打开的买卖档位条——
             // 否则条内捕获的 strip.panel 会过期（条显示在旧 panel、成交也按旧 panel），
@@ -197,7 +245,8 @@ public struct TrainingView: View {
         .onChange(of: engine.lowerPanel.period) { _, _ in tradeStrip = nil; lifecycle.autosave(immediate: false) }
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
             tradeStrip = nil                                    // codex R3-high：tick 推进(含持有/观察)即作废未确认买卖条，防按新 tick 价成交
-            lifecycle.autosave(immediate: false)                // §4.6：tick 推进按 N 节流
+            lifecycle.autosave(immediate: false)                // §4.6：tick 推进按 N 节流（review 恒 no-op，shouldPersistProgress==false）
+            if engine.flow.mode == .review { lifecycle.autosaveReview(engine: engine) }   // Task 13：复盘步进即存
             maybeAutoEnd()
         }                                                       // D4/D5
         .onChange(of: scenePhase) { _, newPhase in
@@ -256,6 +305,9 @@ public struct TrainingView: View {
         return VStack(spacing: 6) {
             HStack {
                 Button("返回") {
+                    // Task 13：review 走专用保存分支（失败进专用 alert，重试同动作——不误走 lifecycle.back()
+                    // 那是 review no-op saveProgress，会丢掉已 drain 的 saved）。
+                    if isReview { performReviewEnd(.back); return }
                     guard !exitInFlight else { return }
                     exitInFlight = true
                     Task {
@@ -271,8 +323,19 @@ public struct TrainingView: View {
                     Button("结束") { confirmingEnd = true }
                         .font(.callout).tint(.red)
                         .accessibilityLabel("结束本局")
+                } else if isReview {
+                    // Task 13：复盘「结束」——有净改动才弹保存确认，无改动直接丢弃退出。
+                    Button("结束") {
+                        if ReviewEndPrompt.shouldPrompt(netChanged: lifecycle.reviewNetChanged()) {
+                            confirmingEndReview = true
+                        } else {
+                            performReviewEnd(.discard)
+                        }
+                    }
+                    .font(.callout).tint(.red)
+                    .accessibilityLabel("结束复盘")
                 } else {
-                    // review 模式无结束：占位保持三段对称
+                    // replay 无中途结束：占位保持三段对称
                     Color.clear.frame(width: 36, height: 1)
                 }
             }
@@ -352,8 +415,8 @@ public struct TrainingView: View {
                     .id(TradeBoxContent.boxIdentity(panel: strip.panel, action: strip.action, tick: strip.tick))
                 }
             }
-            .overlay {   // active panel 高亮（红描边 inset，RFC-B T2 D10）
-                if showsTradeButtons && id == activePanel {
+            .overlay {   // active panel 高亮（红描边 inset，RFC-B T2 D10；Task 13：门控解耦至 showsDrawingTools，复盘也高亮）
+                if showsDrawingTools && id == activePanel {
                     Rectangle().strokeBorder(Color.red.opacity(0.45), lineWidth: 2).allowsHitTesting(false)
                 }
             }
@@ -438,6 +501,26 @@ public struct TrainingView: View {
                 onReplaySettlement(record)
             } catch {
                 replaySettlementFailed = true
+            }
+        }
+    }
+
+    // review-redesign Task 13：复盘退出统一入口（返回/结束-保存/结束-不保存三个动作共用），捕获**具体
+    // 动作**供失败重试——绝不重试成 lifecycle.back()（那是 review no-op saveProgress，会丢已 drain 的 saved）。
+    private func performReviewEnd(_ action: ReviewEndAction) {
+        guard !exitInFlight else { return }
+        exitInFlight = true
+        Task {
+            defer { exitInFlight = false }
+            do {
+                switch action {
+                case .back:    try await lifecycle.backReview(engine: engine)
+                case .save:    try await lifecycle.endReviewSave(engine: engine)
+                case .discard: try await lifecycle.endReviewDiscard(engine: engine)
+                }
+                onExit()
+            } catch {
+                reviewFailedAction = action   // 记住失败的具体动作，供专用 alert 重试
             }
         }
     }
