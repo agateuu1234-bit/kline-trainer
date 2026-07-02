@@ -74,6 +74,26 @@ private func makeReviewRecord() -> TrainingRecord {
         #expect(delta < coarseDelta)   // 细周期步进 < 粗周期一根
     }
 
+    // MARK: - Task 4: stepReviewForward(panel:) 按红框所选面板步进
+
+    /// stepReviewForward(panel:) 按「所选面板」的周期步进，而非固定选更细周期。
+    /// preview(mode: .review) 在 tick=0 时：upper=.m60 steps=3，lower=.daily steps=7。
+    /// 选 .lower（较粗）应比选 .upper（较细）步长更大。
+    @Test func stepReviewForwardPanel_selectedPanelGovernsGranularity() {
+        let upperEngine = TrainingEngine.preview(mode: .review)
+        let u0 = upperEngine.tick.globalTickIndex
+        upperEngine.stepReviewForward(panel: .upper)
+        let upperDelta = upperEngine.tick.globalTickIndex - u0
+
+        let lowerEngine = TrainingEngine.preview(mode: .review)
+        let l0 = lowerEngine.tick.globalTickIndex
+        lowerEngine.stepReviewForward(panel: .lower)
+        let lowerDelta = lowerEngine.tick.globalTickIndex - l0
+
+        #expect(upperDelta > 0)
+        #expect(lowerDelta > upperDelta)   // 所选面板决定步进粒度：粗周期步长更大
+    }
+
     // MARK: - codex whole-branch R2-F2 MEDIUM: exhausted panel is never chosen
 
     /// codex whole-branch R2-F2：upper(.m60) 耗尽（stepsForPeriod==0）时，stepReviewForward

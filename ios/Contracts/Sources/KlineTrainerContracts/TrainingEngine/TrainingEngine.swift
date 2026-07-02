@@ -388,6 +388,17 @@ public final class TrainingEngine {
         holdOrObserve(panel: panel)
     }
 
+    /// 复盘按指定面板步进一根（红框所选周期）。该面板已到末尾则步进另一面板；皆耗尽=到结尾 no-op。
+    public func stepReviewForward(panel requested: PanelId) {
+        let requestedSteps = stepsForPeriod(requested == .upper ? upperPanel.period : lowerPanel.period)
+        if requestedSteps > 0 {
+            holdOrObserve(panel: requested); return
+        }
+        let other: PanelId = requested == .upper ? .lower : .upper
+        let otherSteps = stepsForPeriod(other == .upper ? upperPanel.period : lowerPanel.period)
+        if otherSteps > 0 { holdOrObserve(panel: other) }   // 所选耗尽 → 用另一面板；皆耗尽 → no-op
+    }
+
     // MARK: - 私有：步进 + 联动 + 记账（buy/sell/holdOrObserve 共用）
 
     /// 被点击面板对应的周期。
