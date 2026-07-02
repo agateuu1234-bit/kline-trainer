@@ -73,17 +73,13 @@ public struct TrainingView: View {
         id == .upper ? engine.upperPanel.period : engine.lowerPanel.period
     }
 
-    // 顺位 4：上栏是否在画线模式（按钮选中态 + toggle 语义）。
+    // review-redesign Task 4：选中面板（activePanel）是否在画线模式（按钮选中态 + toggle 语义）；
+    // 双面板互斥核心逻辑落在 host 可测的 engine.toggleDrawingExclusive（薄壳仅转调）。
     private var isDrawingActive: Bool {
-        if case .drawing = engine.upperPanel.interactionMode { return true }
-        return false
+        engine.isDrawingActive(on: activePanel)
     }
     private func toggleDrawing() {
-        if isDrawingActive {
-            engine.cancelDrawing(panel: .upper)
-        } else {
-            engine.activateDrawingTool(.horizontal, panel: .upper)
-        }
+        engine.toggleDrawingExclusive(on: activePanel)
     }
 
     // codex/W3-review-redesign-Task10：body 原是单个巨型 modifier 链——加一条 `.onChange` 后编译器
@@ -240,6 +236,8 @@ public struct TrainingView: View {
             // 否则条内捕获的 strip.panel 会过期（条显示在旧 panel、成交也按旧 panel），
             // 切目标后再选档会对错 panel 下单（autosave 后不可逆）。切目标=取消未确认下单。
             tradeStrip = nil
+            // review-redesign Task 4：切分段钮同样退出画线态（双面板互斥，防旧面板 drawing 残留悬空）。
+            engine.cancelDrawingAllPanels()
         }
         // codex R2-high：周期也能被两指上下滑手势改（switchPeriodCombo 改 panel.period，activePanel 不变）→
         // 同样清掉打开的买卖条，防对新周期下单。与上面的执行时守卫(onPick)双保险。

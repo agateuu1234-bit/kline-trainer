@@ -71,9 +71,11 @@ public struct ReviewControlBar: View {
                 .font(.system(size: 10.5)).foregroundStyle(.secondary)
                 .lineLimit(1).fixedSize()
             ForEach(content.buttons, id: \.action) { btn in
-                Button(btn.title) { onAction(btn.action) }
-                    .frame(maxWidth: .infinity)
-                    .tint(btn.action == .step ? .blue : nil)   // 下一根强调
+                Button { onAction(btn.action) } label: {
+                    Text(btn.title).lineLimit(1).minimumScaleFactor(0.8)
+                }
+                .frame(maxWidth: .infinity)
+                .tint(.blue)
             }
         }
         .buttonStyle(.bordered)

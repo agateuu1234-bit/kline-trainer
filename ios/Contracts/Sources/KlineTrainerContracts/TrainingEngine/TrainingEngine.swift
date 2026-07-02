@@ -1019,6 +1019,30 @@ extension TrainingEngine {
         guard case .drawing(let snap) = panelState(panel).interactionMode else { return }
         _ = reduce(.drawingCancelled(baseRevision: snap.frozen.baseRevision), on: panel)
     }
+
+    // MARK: review-redesign Task 4：双面板划线互斥（host 可测核心，薄壳 TrainingView 转调）
+
+    /// 指定面板当前是否处于画线态。
+    public func isDrawingActive(on panel: PanelId) -> Bool {
+        if case .drawing = panelState(panel).interactionMode { return true }
+        return false
+    }
+
+    /// 取消两面板画线态（`cancelDrawing` 对非 drawing 态 no-op，故两次调用安全）。
+    public func cancelDrawingAllPanels() {
+        cancelDrawing(panel: .upper)   // 非 .drawing 态 no-op
+        cancelDrawing(panel: .lower)
+    }
+
+    /// 选中面板画线互斥：该面板已在画线→取消（toggle off）；否则取消两面板残留后激活选中面板。
+    public func toggleDrawingExclusive(on panel: PanelId) {
+        if isDrawingActive(on: panel) {
+            cancelDrawing(panel: panel)
+        } else {
+            cancelDrawingAllPanels()
+            activateDrawingTool(.horizontal, panel: panel)
+        }
+    }
 }
 
 #if DEBUG
