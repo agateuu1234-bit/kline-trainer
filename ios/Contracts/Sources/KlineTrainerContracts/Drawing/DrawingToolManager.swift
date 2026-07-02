@@ -65,7 +65,8 @@ public final class DrawingToolManager {
             toolType: activeTool!,
             anchors: pendingAnchors,
             isExtended: isExtended,
-            panelPosition: panelPosition
+            panelPosition: panelPosition,
+            revealTick: 0
         )
         completedDrawings.append(drawing)
         activeTool = nil

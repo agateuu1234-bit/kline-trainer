@@ -4,7 +4,7 @@
 import Foundation
 
 /// 顶层契约版本号。bump 策略见 docs/contracts/contract-version-matrix.md（Plan 1f 落地）。
-public let CONTRACT_VERSION = "1.9"
+public let CONTRACT_VERSION = "1.10"
 
 // MARK: - Enums
 
@@ -211,12 +211,39 @@ public struct DrawingObject: Codable, Equatable, Sendable {
     public let anchors: [DrawingAnchor]
     public let isExtended: Bool
     public let panelPosition: Int
+    /// review-redesign 整改④：提交这条画线时会话所处的全局 tick（= 渐显时机；锚点仅定位几何，不再决定渐显）。
+    public let revealTick: Int
 
-    public init(toolType: DrawingToolType, anchors: [DrawingAnchor], isExtended: Bool, panelPosition: Int) {
+    public init(toolType: DrawingToolType, anchors: [DrawingAnchor],
+                isExtended: Bool, panelPosition: Int, revealTick: Int = 0) {
         self.toolType = toolType
         self.anchors = anchors
         self.isExtended = isExtended
         self.panelPosition = panelPosition
+        self.revealTick = revealTick
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case toolType, anchors, isExtended, panelPosition, revealTick
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.toolType = try c.decode(DrawingToolType.self, forKey: .toolType)
+        self.anchors = try c.decode([DrawingAnchor].self, forKey: .anchors)
+        self.isExtended = try c.decode(Bool.self, forKey: .isExtended)
+        self.panelPosition = try c.decode(Int.self, forKey: .panelPosition)
+        // 向后兼容：旧 blob 无 revealTick → 0（从起点起可见）。
+        self.revealTick = try c.decodeIfPresent(Int.self, forKey: .revealTick) ?? 0
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(toolType, forKey: .toolType)
+        try c.encode(anchors, forKey: .anchors)
+        try c.encode(isExtended, forKey: .isExtended)
+        try c.encode(panelPosition, forKey: .panelPosition)
+        try c.encode(revealTick, forKey: .revealTick)
     }
 }
 
