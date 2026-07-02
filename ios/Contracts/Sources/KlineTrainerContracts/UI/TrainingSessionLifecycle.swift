@@ -80,4 +80,31 @@ public struct TrainingSessionLifecycle {
     public func replaySettlementRecord() async throws -> TrainingRecord {
         try await coordinator.replaySettlementPayload(engine: engine)
     }
+
+    // MARK: - review-redesign Task 7：复盘 autosave/终态 fence 转发（§6.3）
+
+    /// 复盘中按需节流 autosave（画线/步进触发）。
+    public func autosaveReview() {
+        coordinator.autosaveReview(engine: engine)
+    }
+
+    /// 复盘返回（drain → persistReviewWorkingIfChanged → endSession）。
+    public func backReview() async throws {
+        try await coordinator.backReview(engine: engine)
+    }
+
+    /// 复盘保存结束（drain → commitReview → endSession）。
+    public func endReviewSave() async throws {
+        try await coordinator.endReviewSave(engine: engine)
+    }
+
+    /// 复盘丢弃结束（drain → discardReviewWorking → endSession）。
+    public func endReviewDiscard() async throws {
+        try await coordinator.endReviewDiscard(engine: engine)
+    }
+
+    /// 当前复盘 session 是否有净改动（转发，供 UI 判断是否有未保存改动）。
+    public func reviewNetChanged() -> Bool {
+        coordinator.reviewNetChanged()
+    }
 }

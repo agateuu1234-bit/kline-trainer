@@ -14,11 +14,15 @@ private struct ReviewTestHarness {
     let recordRepo: InMemoryRecordRepository
     let seededRecordId: Int64
 
-    static func make() throws -> ReviewTestHarness {
+    /// `wrapRepoForTesting`：Task 7 延迟替身注入点（如 `SlowReviewArchiveRepo`）——包一层再传给
+    /// coordinator，`reviewRepo` 字段仍指向底层 in-memory repo，供测试直接断言落盘态。
+    static func make(wrapRepoForTesting wrap: ((InMemoryReviewArchiveRepository) -> ReviewArchiveRepository)? = nil)
+        throws -> ReviewTestHarness {
         let records = InMemoryRecordRepository()
         let pending = InMemoryPendingTrainingRepository()
         let pendingReplay = InMemoryPendingReplayRepository()
         let reviewRepo = InMemoryReviewArchiveRepository()
+        let injectedReviewRepo: ReviewArchiveRepository = wrap?(reviewRepo) ?? reviewRepo
         let port = InMemorySessionFinalizationPort(records: records, pending: pending)
         let cache = InMemoryCacheManager()
         let file = TrainingSetFile(id: 1, filename: "set.sqlite",
@@ -34,7 +38,7 @@ private struct ReviewTestHarness {
             recordRepo: records,
             pendingRepo: pending,
             pendingReplayRepo: pendingReplay,
-            reviewArchiveRepo: reviewRepo,
+            reviewArchiveRepo: injectedReviewRepo,
             finalization: port,
             settingsDAO: settingsDAO,
             cache: cache,
@@ -71,6 +75,46 @@ private func op(_ tick: Int, _ dir: TradeDirection, price: Double, shares: Int,
     TradeOperation(globalTick: tick, period: .m3, direction: dir, price: price, shares: shares,
                    positionTier: .tier5, commission: commission, stampDuty: stampDuty,
                    totalCost: totalCost, createdAt: Int64(tick))
+}
+
+/// Task 7：包一层真 repo，写方法前人为延迟（模拟慢速磁盘 I/O），放大『陈旧排队写 vs 终态权威写』的
+/// 时间窗口——用以验证即便底层写变慢，token/revision fence 仍保证终态 last-wins（而非仅因写得快、
+/// 凑巧没撞上竞态窗口才侥幸通过）。所有方法均转发到 `inner`（同底层状态，供测试直接断言）。
+private final class SlowReviewArchiveRepo: ReviewArchiveRepository, @unchecked Sendable {
+    private let inner: ReviewArchiveRepository
+    private let delay: TimeInterval
+
+    init(wrapping inner: ReviewArchiveRepository, delay: TimeInterval = 0.02) {
+        self.inner = inner
+        self.delay = delay
+    }
+
+    func loadWorking(recordId: Int64) throws -> ReviewWorking? { try inner.loadWorking(recordId: recordId) }
+    func loadSaved(recordId: Int64) throws -> [DrawingObject]? { try inner.loadSaved(recordId: recordId) }
+    func loadArchive(recordId: Int64) throws -> ReviewArchive? { try inner.loadArchive(recordId: recordId) }
+
+    func saveWorking(recordId: Int64, stepTick: Int, drawings: [DrawingObject]) throws {
+        Thread.sleep(forTimeInterval: delay)     // 模拟慢写：即便变慢，fence 仍须保证 last-wins
+        try inner.saveWorking(recordId: recordId, stepTick: stepTick, drawings: drawings)
+    }
+    func commitSaved(recordId: Int64, drawings: [DrawingObject]) throws {
+        try inner.commitSaved(recordId: recordId, drawings: drawings)
+    }
+    func clearWorking(recordId: Int64) throws { try inner.clearWorking(recordId: recordId) }
+    func clearSaved(recordId: Int64) throws { try inner.clearSaved(recordId: recordId) }
+    func loadMarkers() throws -> [Int64: ReviewMarker] { try inner.loadMarkers() }
+    func reviewMarker(recordId: Int64) throws -> ReviewMarker { try inner.reviewMarker(recordId: recordId) }
+}
+
+/// 第二条 record fixture（mirror harness 内 seed 用的字段：ops=[] / finalTick=7 / profit=0 / returnRate=0，
+/// 使入口终局等式校验同样通过），供跨 session token 隔离测试用。
+private func secondFixtureRecord() -> TrainingRecord {
+    TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 2,
+                   stockCode: "000002", stockName: "股B", startYear: 2020, startMonth: 1,
+                   totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: -0.02,
+                   buyCount: 0, sellCount: 0,
+                   feeSnapshot: FeeSnapshot(commissionRate: 0.0002, minCommissionEnabled: false),
+                   finalTick: 7)
 }
 
 // MARK: - ReviewNetChange (pure function)
@@ -333,5 +377,113 @@ struct ReviewPersistenceTests {
 
         let engine = try await h.coordinator.review(recordId: id)
         #expect(engine.flow.mode == .review)
+    }
+}
+
+// MARK: - Task 7: review autosave 单写者 fence（token/revision/drain，终态 last-wins）
+
+@MainActor
+@Suite("ReviewAutosaveFence")
+struct ReviewAutosaveFenceTests {
+
+    // 1) 快速多次 autosaveReview（延迟替身放大竞态窗口）后立即 backReview（终态）：
+    //    最终 working == 最后一次引擎状态，不被迟到的排队 autosave 覆盖。
+    @Test func burstAutosaveThenImmediateBackReview_finalStateIsTerminalNotStale() async throws {
+        let h = try ReviewTestHarness.make(wrapRepoForTesting: { SlowReviewArchiveRepo(wrapping: $0) })
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+
+        e.setReviewDrawingsForTesting([line(10)])
+        h.coordinator.autosaveReview(engine: e)
+        e.setReviewDrawingsForTesting([line(10), line(20)])
+        h.coordinator.autosaveReview(engine: e)
+        e.setReviewDrawingsForTesting([line(10), line(20), line(30)])
+        h.coordinator.autosaveReview(engine: e)
+
+        try await h.coordinator.backReview(engine: e)   // drain → persistReviewWorkingIfChanged → endSession
+
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings
+                == [line(10), line(20), line(30)])
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .inProgress)
+    }
+
+    // 同上，但终态走 endReviewSave（commitReview）：saved == 最后一次状态，working 已清。
+    @Test func burstAutosaveThenImmediateEndReviewSave_finalStateIsTerminalNotStale() async throws {
+        let h = try ReviewTestHarness.make(wrapRepoForTesting: { SlowReviewArchiveRepo(wrapping: $0) })
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+
+        e.setReviewDrawingsForTesting([line(1)])
+        h.coordinator.autosaveReview(engine: e)
+        e.setReviewDrawingsForTesting([line(1), line(2)])
+        h.coordinator.autosaveReview(engine: e)
+
+        try await h.coordinator.endReviewSave(engine: e)   // drain → commitReview → endSession
+
+        #expect(try h.reviewRepo.loadSaved(recordId: h.seededRecordId) == [line(1), line(2)])
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .saved)
+    }
+
+    // 同上，但终态走 endReviewDiscard：working 已清（放弃改动），与 autosave 排队写内容无关。
+    @Test func burstAutosaveThenImmediateEndReviewDiscard_workingCleared() async throws {
+        let h = try ReviewTestHarness.make(wrapRepoForTesting: { SlowReviewArchiveRepo(wrapping: $0) })
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+
+        e.setReviewDrawingsForTesting([line(5)])
+        h.coordinator.autosaveReview(engine: e)
+
+        try await h.coordinator.endReviewDiscard(engine: e)   // drain → discardReviewWorking → endSession
+
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .none)
+    }
+
+    // 2) 旧 token 的写被丢弃：session A 排队一次 autosave（token=TA，尚无 suspension 故尚未执行），
+    //    未经正规终态直接进入 session B（对抗性场景：mint 新 token=TB）。显式排空——A 排的 task 此刻
+    //    检查 reviewSessionToken(TB) != 捕获的 TA → 早退丢弃，两条记录均未被那次陈旧写触碰。
+    @Test func staleTokenAfterSessionSwitch_pendingAutosaveDropped_neitherRecordWritten() async throws {
+        let h = try ReviewTestHarness.make()
+        let idB = try h.recordRepo.insertRecord(secondFixtureRecord(), ops: [], drawings: [])
+
+        let eA = try await h.coordinator.review(recordId: h.seededRecordId)
+        eA.setReviewDrawingsForTesting([line(99)])
+        h.coordinator.autosaveReview(engine: eA)          // 排队写（token=TA），尚未执行
+
+        _ = try await h.coordinator.review(recordId: idB)  // mint 新 token=TB（未先 endSession，故意对抗）
+
+        await h.coordinator.drainReviewAutosaveForTesting() // 排空：A 排的 task 见 token 不符 → 早退丢弃
+
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)
+        #expect(try h.reviewRepo.loadWorking(recordId: idB) == nil)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .none)
+        #expect(try h.reviewRepo.reviewMarker(recordId: idB) == .none)
+    }
+
+    // 3) 无复盘 session（reviewSessionToken==nil）→ autosaveReview no-op，不排程 Task、不碰 repo。
+    @Test func autosaveReview_noReviewSession_isNoOp() async throws {
+        let h = try ReviewTestHarness.make()
+        let e = try await h.coordinator.startNewNormalSession()   // 非 review session
+
+        h.coordinator.autosaveReview(engine: e)
+        await h.coordinator.drainReviewAutosaveForTesting()       // 若误排程，这里会等到；no-op 应立即返回
+
+        #expect(h.coordinator.loadReviewMarkers().isEmpty)
+    }
+
+    // 4) lifecycle 转发：TrainingSessionLifecycle.autosaveReview/backReview/endReviewSave/endReviewDiscard/
+    //    reviewNetChanged 均正确转发到 coordinator。
+    @Test func lifecycleForwarders_delegateToCoordinator() async throws {
+        let h = try ReviewTestHarness.make()
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+        let lifecycle = TrainingSessionLifecycle(engine: e, coordinator: h.coordinator)
+
+        #expect(lifecycle.reviewNetChanged() == false)
+        e.setReviewDrawingsForTesting([line(7)])
+        #expect(lifecycle.reviewNetChanged() == true)
+
+        lifecycle.autosaveReview()
+        try await lifecycle.backReview()
+
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings == [line(7)])
+        #expect(h.coordinator.activeEngine == nil)   // endSession 已执行
     }
 }

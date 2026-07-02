@@ -73,6 +73,18 @@ public final class TrainingSessionCoordinator {
     /// UI（TrainingView.onAppear 或 AppRouter）消费后清位。
     public func clearPendingReviewCorruptToast() { pendingReviewCorruptToast = false }
 
+    // MARK: - review-redesign Task 7：复盘 autosave 单写者 fence（token/revision/task，独立于下方 replay/normal autosave）
+
+    /// 每次进入复盘（`review()`/`resumePendingReview()` 内部 `buildReviewEngine` 处 mint）新铸一枚；
+    /// nil = 无复盘 session。终态方法（`backReview`/`endReviewSave`/`endReviewDiscard`）写前置 nil——
+    /// 陈旧排队 autosave 捕获的旧 token 与之比对不等 → 早退丢弃（in-memory 栅栏，非 DB 列）。
+    @ObservationIgnored private var reviewSessionToken: UUID?
+    /// 单调递增请求计数：`autosaveReview` 每次调用 +1；排队 Task 用以判定"调度期间是否又有新请求"
+    /// （同 token 内的陈旧合并，非跨 session 判据——跨 session 判据是上面的 token）。
+    @ObservationIgnored private var reviewRevision = 0
+    /// 在飞排队的节流 autosave Task（供终态 drain）。
+    @ObservationIgnored private var reviewAutosaveTask: Task<Void, Never>?
+
     // MARK: - Wave 3 顺位 10b：周期 autosave 状态机（RFC §4.6）+ 终态 fence（§4.7d）
 
     @ObservationIgnored private var autosaveTask: Task<Void, Never>?     // 在飞写句柄（fence drain）
@@ -151,6 +163,8 @@ public final class TrainingSessionCoordinator {
         reviewRecordId = recordId
         reviewCommittedBaseline = committedBaseline
     }
+    /// review-redesign Task 7 测试专用：等在飞 review autosave Task 完成（镜像 `drainAutosaveForTesting`）。
+    func drainReviewAutosaveForTesting() async { await reviewAutosaveTask?.value }
     #endif
 
     /// §4.7d 终态栅栏：置 terminating（拒新 autosave）+ 排空在飞写（排空时见 terminating 即退出不落盘）。
@@ -388,6 +402,8 @@ public final class TrainingSessionCoordinator {
         engine.setReviewDrawings(reviewDrawings)
         reviewRecordId = recordId
         reviewCommittedBaseline = committedBaseline
+        reviewSessionToken = UUID()     // Task 7：新复盘 session mint 新 token（陈旧排队 autosave 靠此失效）
+        reviewRevision = 0
         return engine
     }
 
@@ -719,6 +735,8 @@ public final class TrainingSessionCoordinator {
         autosaveBannerError = nil                    // §B.2：清 UI 信号防跨局 stale toast
         autosaveErrorGeneration = 0                  // codex-13a-F1：归零失败计数（新局从 0 起）
         ticksSinceAutosave = 0
+        reviewSessionToken = nil    // Task 7：软栅栏（同 terminating 范式）——陈旧排队 review autosave 靠 token 失效自然早退
+        reviewAutosaveTask = nil
         activeReader?.close()
         activeReader = nil
         activeEngine = nil
@@ -795,6 +813,65 @@ public final class TrainingSessionCoordinator {
     public func discardReviewWorking(engine: TrainingEngine) throws {
         guard let id = reviewRecordId else { return }
         try reviewArchiveRepo.clearWorking(recordId: id)
+    }
+
+    // MARK: - review-redesign Task 7：复盘 autosave 节流 + 终态 drain（§6.3）
+
+    /// 复盘中按需节流 autosave（画线/步进触发，无复盘 session → no-op）。token 于调用时同步捕获
+    /// （非排队 Task 内），保证跨 session 陈旧判定正确：捕获后若 `reviewSessionToken` 变化（终态置 nil
+    /// 或新 session 换新 token），排队写在执行时对比不等 → 早退丢弃。revision 用于同 token 内的合并
+    /// （调度期间又有新请求 → 追上最新再等一轮"静默窗口"，收敛为一次落最新态的写，而非逐次都写）。
+    /// 已有排队 Task（`reviewAutosaveTask != nil`）→ 仅递增 revision 合并，不重复排程。
+    public func autosaveReview(engine: TrainingEngine) {
+        guard let token = reviewSessionToken else { return }
+        reviewRevision += 1
+        guard reviewAutosaveTask == nil else { return }
+        reviewAutosaveTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.reviewAutosaveTask = nil }
+            var pendingRevision = self.reviewRevision
+            while true {
+                await Task.yield()                                             // 节流窗口
+                guard self.reviewSessionToken == token else { return }         // 陈旧（session 已切换/终止）→ 丢弃
+                guard self.reviewRevision == pendingRevision else {             // 窗口内又有新请求 → 追上重试
+                    pendingRevision = self.reviewRevision
+                    continue
+                }
+                break
+            }
+            try? self.persistReviewWorkingIfChanged(engine: engine)
+        }
+    }
+
+    /// 终态栅栏：invalidate token（陈旧排队写靠此早退）+ cancel（协作式，belt-and-suspenders，实际
+    /// 生效点是上面的 token 比对）+ await 排空在飞节流 Task，保证其后的权威终态写 last-wins。
+    /// 镜像 replay/normal 的 `fenceAndDrainAutosaves`（`terminating` flag），但 review 用独立的
+    /// token/revision/task ——不共用 `terminating`（review 有自己的生命周期，与 replay/normal saveProgress 无关）。
+    private func fenceAndDrainReviewAutosave() async {
+        reviewSessionToken = nil
+        reviewAutosaveTask?.cancel()
+        await reviewAutosaveTask?.value
+    }
+
+    /// 复盘返回（drain → persistReviewWorkingIfChanged → endSession）。
+    public func backReview(engine: TrainingEngine) async throws {
+        await fenceAndDrainReviewAutosave()
+        try persistReviewWorkingIfChanged(engine: engine)
+        await endSession()
+    }
+
+    /// 复盘保存结束（drain → commitReview → endSession）。
+    public func endReviewSave(engine: TrainingEngine) async throws {
+        await fenceAndDrainReviewAutosave()
+        try commitReview(engine: engine)
+        await endSession()
+    }
+
+    /// 复盘丢弃结束（drain → discardReviewWorking → endSession）。
+    public func endReviewDiscard(engine: TrainingEngine) async throws {
+        await fenceAndDrainReviewAutosave()
+        try discardReviewWorking(engine: engine)
+        await endSession()
     }
 
     // MARK: - 私有构造 helper（E6a）
