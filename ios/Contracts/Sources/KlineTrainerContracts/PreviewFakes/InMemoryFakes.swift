@@ -267,6 +267,13 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
         get { lock.lock(); defer { lock.unlock() }; return _failNextClearWorking }
         set { lock.lock(); defer { lock.unlock() }; _failNextClearWorking = newValue }
     }
+    /// codex whole-branch R4 finding 1：一次性故障注入，供测试模拟 `saveWorking` 失败（review autosave/flush
+    /// 可观察错误回归测试，mirror `failNextClearWorking` 范式）。
+    private var _failNextSaveWorking: AppError?
+    public var failNextSaveWorking: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextSaveWorking }
+        set { lock.lock(); defer { lock.unlock() }; _failNextSaveWorking = newValue }
+    }
 
     public init() {}
 
@@ -294,6 +301,7 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
 
     public func saveWorking(recordId: Int64, stepTick: Int, drawings: [DrawingObject]) throws {
         lock.lock(); defer { lock.unlock() }
+        if let e = _failNextSaveWorking { _failNextSaveWorking = nil; throw e }
         working[recordId] = (stepTick, drawings)
     }
 

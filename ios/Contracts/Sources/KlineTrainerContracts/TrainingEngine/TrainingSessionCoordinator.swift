@@ -110,6 +110,17 @@ public final class TrainingSessionCoordinator {
     /// 仅失败递增；成功不动；endSession/reset 归零。
     public private(set) var autosaveErrorGeneration: Int = 0
 
+    /// §B.2 + codex whole-branch R4 finding 1：autosave 失败的共享记录器——normal `requestAutosave` 与
+    /// review `autosaveReview`/`flushReviewForBackground` 均汇聚于此，确保两条路径产生同一套可观察信号
+    /// （`autosaveBannerError` + 单调 `autosaveErrorGeneration`），复用既有机制而非新增并行信号。
+    private func recordAutosaveError(_ error: Error) {
+        let appError = (error as? AppError)
+            ?? .internalError(module: "E6b", detail: "autosave: \(error)")
+        lastAutosaveError = appError
+        autosaveBannerError = appError             // §B.2：失败置 UI 信号（observable → toast）
+        autosaveErrorGeneration += 1               // codex-13a-F1：每次失败递增 → 重复同错也触发 onChange（持久故障保持可见）
+    }
+
     /// 请求 autosave（脏动作后调）。immediate=交易/画线/background flush（绕 N 节流）；
     /// 非 immediate=tick 推进（按 autosaveTickInterval 节流）。terminating/非 Normal → no-op（§4.7d/§4.6）。
     public func requestAutosave(engine: TrainingEngine, immediate: Bool) {
@@ -134,11 +145,7 @@ public final class TrainingSessionCoordinator {
                     self.lastAutosaveError = nil
                     self.autosaveBannerError = nil                  // §B.2：成功清 UI 信号
                 } catch {
-                    let appError = (error as? AppError)
-                        ?? .internalError(module: "E6b", detail: "autosave: \(error)")
-                    self.lastAutosaveError = appError
-                    self.autosaveBannerError = appError             // §B.2：失败置 UI 信号（observable → toast）
-                    self.autosaveErrorGeneration += 1               // codex-13a-F1：每次失败递增 → 重复同错也触发 onChange（持久故障保持可见）
+                    self.recordAutosaveError(error)
                 }
             }
             self.autosaveTask = nil
@@ -827,15 +834,27 @@ public final class TrainingSessionCoordinator {
 
     /// 提交复盘：saved = 当前 `reviewDrawings`，清 working；committed 基线前移到刚提交的画线集。
     /// 无复盘 session → no-op。
+    /// codex whole-branch R4 finding 2：终态写者 fail-closed——`endReviewSave` 在此之前
+    /// `await fenceAndDrainReviewAutosave()`，@MainActor 重入窗口内会话状态可能已先被换成另一记录
+    /// （`activeEngine`/`reviewRecordId` 均已指向新 session）；陈旧调用方若仍持旧 `engine` 继续往下写，
+    /// 会把旧数据错误提交进新 `reviewRecordId` 的存档。engine 与当前活跃会话不符 → throw（非静默 no-op），
+    /// 绝不带着不明确的身份写 `review_archive`。
     public func commitReview(engine: TrainingEngine) throws {
         guard let id = reviewRecordId else { return }
+        guard activeEngine === engine, engine.flow.mode == .review else {
+            throw AppError.internalError(module: "review", detail: "terminal review write on stale/mismatched session")
+        }
         try reviewArchiveRepo.commitSaved(recordId: id, drawings: engine.reviewDrawings)
         reviewCommittedBaseline = engine.reviewDrawings
     }
 
     /// 丢弃复盘工作态：清 working（回退到 committed：saved 或删行）。无复盘 session → no-op。
+    /// codex whole-branch R4 finding 2：同 `commitReview` 的 fail-closed 身份闸（见上方注释）。
     public func discardReviewWorking(engine: TrainingEngine) throws {
         guard let id = reviewRecordId else { return }
+        guard activeEngine === engine, engine.flow.mode == .review else {
+            throw AppError.internalError(module: "review", detail: "terminal review write on stale/mismatched session")
+        }
         try reviewArchiveRepo.clearWorking(recordId: id)
     }
 
@@ -863,7 +882,13 @@ public final class TrainingSessionCoordinator {
                 }
                 break
             }
-            try? self.persistReviewWorkingIfChanged(engine: engine)
+            // codex whole-branch R4 finding 1：不再用 `try?` 吞掉持久化失败——失败须走与 normal autosave
+            // 同一套可观察信号（`recordAutosaveError`），否则用户可能后台/杀进程时以为已存实则未存。
+            do {
+                try self.persistReviewWorkingIfChanged(engine: engine)
+            } catch {
+                self.recordAutosaveError(error)
+            }
         }
     }
 
@@ -915,9 +940,11 @@ public final class TrainingSessionCoordinator {
     /// review 画线/步进只靠排队 `autosaveReview` 落盘，若 OS 在其排空前杀进程会丢工作态。
     /// 与 `fenceAndDrainReviewAutosave`（终态栅栏，供 back/endReviewSave/endReviewDiscard）的关键区别：
     /// **不** invalidate `reviewSessionToken`——这是后台 flush，非终态；回前台后 session 须能继续。
-    /// cancel + await 排空在飞排队 autosave（若有）→ 再显式 `persistReviewWorkingIfChanged` 落当前态（best-effort，
-    /// 镜像 normal `flushAutosave` 对失败静默处理——后台无法弹重试提示）。非 review 模式或无复盘 session
-    /// （`reviewRecordId == nil`）→ no-op。
+    /// cancel + await 排空在飞排队 autosave（若有）→ 再显式 `persistReviewWorkingIfChanged` 落当前态（best-effort
+    /// 不阻断 teardown/不 throw；但**失败须走 `recordAutosaveError`**——codex whole-branch R4 finding 1：此前
+    /// `try?` 静默吞错，回前台后用户对「后台未存成功」完全无感知；现失败置 `autosaveBannerError` +
+    /// 递增 `autosaveErrorGeneration`，供回前台后既有 scenePhase `.active` replay 呈现 toast）。非 review 模式或
+    /// 无复盘 session（`reviewRecordId == nil`）→ no-op。
     public func flushReviewForBackground(engine: TrainingEngine) async {
         // codex whole-branch R3（high）：同一身份闸提前到入口——陈旧 engine（session 已终态收尾，
         // `activeEngine` 已变）即便 `reviewRecordId` 判活仍为真（例如已切到另一复盘 session），也不该
@@ -926,7 +953,11 @@ public final class TrainingSessionCoordinator {
         reviewAutosaveTask?.cancel()
         await reviewAutosaveTask?.value
         reviewAutosaveTask = nil
-        try? persistReviewWorkingIfChanged(engine: engine)
+        do {
+            try persistReviewWorkingIfChanged(engine: engine)
+        } catch {
+            recordAutosaveError(error)
+        }
     }
 
     // MARK: - 私有构造 helper（E6a）

@@ -413,6 +413,60 @@ struct ReviewPersistenceTests {
         let engine = try await h.coordinator.review(recordId: id)
         #expect(engine.flow.mode == .review)
     }
+
+    // MARK: - codex whole-branch R4 finding 2：commitReview/discardReviewWorking 必须校验 engine 仍是 activeEngine
+    //
+    // `endReviewSave`/`endReviewDiscard` 在调用 `commitReview`/`discardReviewWorking` 前 `await
+    // fenceAndDrainReviewAutosave()`——@MainActor 重入窗口内若会话状态先被换成另一记录（`activeEngine`/
+    // `reviewRecordId` 均已指向新会话），陈旧调用方仍持旧 engine 会把旧数据错写进新 `reviewRecordId` 的存档。
+    // 修复=两个终态写者顶部加身份闸，不符 → throw `.internalError`（非静默 no-op，terminal writer 必须显错）。
+
+    @Test func commitReview_staleEngine_throwsInternalError_doesNotMutateArchive() async throws {
+        let h = try ReviewTestHarness.make()
+        let idB = try h.recordRepo.insertRecord(secondFixtureRecord(), ops: [], drawings: [])
+        let eA = try await h.coordinator.review(recordId: h.seededRecordId)
+        eA.setReviewDrawingsForTesting([line(99)])
+
+        _ = try await h.coordinator.review(recordId: idB)   // activeEngine → B 的引擎；reviewRecordId → idB
+
+        do {
+            try h.coordinator.commitReview(engine: eA)   // 陈旧调用方仍持 A 的引擎
+            Issue.record("expected commitReview(engine: eA) to throw for stale/mismatched engine")
+        } catch let e as AppError {
+            guard case .internalError = e else {
+                Issue.record("expected .internalError, got \(e)")
+                return
+            }
+        }
+
+        // A、B 的存档均未被这次陈旧写触碰。
+        #expect(try h.reviewRepo.reviewMarker(recordId: idB) == .none)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .none)
+    }
+
+    @Test func discardReviewWorking_staleEngine_throwsInternalError_doesNotMutateArchive() async throws {
+        let h = try ReviewTestHarness.make()
+        let idB = try h.recordRepo.insertRecord(secondFixtureRecord(), ops: [], drawings: [])
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, drawings: [line(20)])   // A 有 working
+        let eA = try #require(try await h.coordinator.resumePendingReview(recordId: h.seededRecordId))
+
+        try h.reviewRepo.saveWorking(recordId: idB, stepTick: 1, drawings: [line(50)])   // B 自己的合法 working
+        _ = try await h.coordinator.review(recordId: idB)   // activeEngine → B 的引擎；reviewRecordId → idB
+
+        do {
+            try h.coordinator.discardReviewWorking(engine: eA)   // 陈旧调用方仍持 A 的引擎
+            Issue.record("expected discardReviewWorking(engine: eA) to throw for stale/mismatched engine")
+        } catch let e as AppError {
+            guard case .internalError = e else {
+                Issue.record("expected .internalError, got \(e)")
+                return
+            }
+        }
+
+        // A、B 的 working 行均未被这次陈旧写触碰（尤其 B 的合法 working 不能被误清）。
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings == [line(20)])
+        #expect(try h.reviewRepo.loadWorking(recordId: idB)?.drawings == [line(50)])
+    }
 }
 
 // MARK: - Task 7: review autosave 单写者 fence（token/revision/drain，终态 last-wins）
@@ -732,5 +786,42 @@ struct ReviewAutosaveFenceTests {
         eB.setReviewDrawingsForTesting([line(77)])
         try h.coordinator.persistReviewWorkingIfChanged(engine: eB)
         #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .inProgress)   // 写的是当前指回的 seeded id
+    }
+
+    // MARK: - codex whole-branch R4 finding 1：review autosave/flush 持久化失败必须可观察（mirror normal autosave）
+    //
+    // 此前 `autosaveReview`/`flushReviewForBackground` 内部用 `try?` 吞掉 `persistReviewWorkingIfChanged`
+    // 的失败（DB 不可用/磁盘满）：用户可能后台/杀进程时以为画线/步进已存，实则未存，且无任何可观察信号。
+    // 修复=复用 normal autosave 已有的同一套可观察信号（`autosaveBannerError` + 单调 `autosaveErrorGeneration`），
+    // 供 `TrainingView` 既有 `.onChange(of: autosaveErrorGeneration)` + scenePhase `.active` replay 呈现 toast。
+
+    @Test func autosaveReview_saveWorkingFails_recordsObservableAutosaveError() async throws {
+        let h = try ReviewTestHarness.make()
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+        e.setReviewDrawingsForTesting([line(10)])   // 净改动 → persist 走 saveWorking 分支（非 clearWorking）
+        h.reviewRepo.failNextSaveWorking = .persistence(.diskFull)
+
+        h.coordinator.autosaveReview(engine: e)
+        await h.coordinator.drainReviewAutosaveForTesting()
+
+        #expect(h.coordinator.autosaveErrorGeneration == 1)
+        #expect(h.coordinator.autosaveBannerError == .persistence(.diskFull))
+        #expect(h.coordinator.autosaveBannerError?.shouldShowToast == true)
+        // 写确实失败了（fixture 未收到 working 行），非「碰巧失败前已写完」的假阳性。
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)
+    }
+
+    @Test func flushReviewForBackground_saveWorkingFails_recordsObservableAutosaveError() async throws {
+        let h = try ReviewTestHarness.make()
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+        e.setReviewDrawingsForTesting([line(10)])
+        h.reviewRepo.failNextSaveWorking = .persistence(.diskFull)
+
+        await h.coordinator.flushReviewForBackground(engine: e)
+
+        #expect(h.coordinator.autosaveErrorGeneration == 1)
+        #expect(h.coordinator.autosaveBannerError == .persistence(.diskFull))
+        #expect(h.coordinator.autosaveBannerError?.shouldShowToast == true)
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)
     }
 }
