@@ -11,6 +11,7 @@ import Foundation
 private struct ReviewTestHarness {
     let coordinator: TrainingSessionCoordinator
     let reviewRepo: InMemoryReviewArchiveRepository
+    let recordRepo: InMemoryRecordRepository
     let seededRecordId: Int64
 
     static func make() throws -> ReviewTestHarness {
@@ -40,17 +41,19 @@ private struct ReviewTestHarness {
             settings: SettingsStore(settingsDAO: settingsDAO))
 
         let seededFinalTick = 7
+        // profit/returnRate=0（非旧 5_000/0.05）：ops=[] 无交易 → Task 6 entry-validation 折叠终局 == 起始，
+        // 须与 record 声明一致（否则 review() 新增的入口终局等式校验会拒绝这条 fixture record）。
         let id = try records.insertRecord(
             TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
                            stockCode: "000001", stockName: "股", startYear: 2020, startMonth: 1,
-                           totalCapital: 100_000, profit: 5_000,
-                           returnRate: 0.05, maxDrawdown: -0.03,
+                           totalCapital: 100_000, profit: 0,
+                           returnRate: 0, maxDrawdown: -0.03,
                            buyCount: 1, sellCount: 1,
                            feeSnapshot: FeeSnapshot(commissionRate: 0.0002, minCommissionEnabled: false),
                            finalTick: seededFinalTick),
             ops: [], drawings: [])
 
-        return ReviewTestHarness(coordinator: coord, reviewRepo: reviewRepo, seededRecordId: id)
+        return ReviewTestHarness(coordinator: coord, reviewRepo: reviewRepo, recordRepo: records, seededRecordId: id)
     }
 }
 
@@ -60,6 +63,14 @@ private func line(_ price: Double) -> DrawingObject {
     DrawingObject(toolType: .horizontal,
                   anchors: [DrawingAnchor(period: .m3, candleIndex: 0, price: price)],
                   isExtended: false, panelPosition: 0)
+}
+
+/// Task 6 入口终局校验测试用的 TradeOperation fixture（mirror ReviewLedgerTests.op）。
+private func op(_ tick: Int, _ dir: TradeDirection, price: Double, shares: Int,
+                commission: Double, stampDuty: Double, totalCost: Double) -> TradeOperation {
+    TradeOperation(globalTick: tick, period: .m3, direction: dir, price: price, shares: shares,
+                   positionTier: .tier5, commission: commission, stampDuty: stampDuty,
+                   totalCost: totalCost, createdAt: Int64(tick))
 }
 
 // MARK: - ReviewNetChange (pure function)
@@ -177,17 +188,150 @@ struct ReviewPersistenceTests {
         #expect(h.coordinator.loadReviewMarkers()[h.seededRecordId] == .inProgress)
     }
 
-    // MARK: - No review session (Task 6 not landed yet) → guarded no-op, never throws
+    // MARK: - No review session → guarded no-op, never throws
+    // （Task 6 后 review()/resumePendingReview() 自动设置 reviewRecordId；本测试改用「从未进过复盘 session」
+    // 的 normal session engine 验证 3 个方法仍 guard 早返、不碰 repo——覆盖同一条 coordinator 内 guard 逻辑。）
 
     @Test func noReviewSession_persistCommitDiscard_areNoOps() async throws {
         let h = try ReviewTestHarness.make()
-        let e = try await h.coordinator.review(recordId: h.seededRecordId)
-        e.setReviewDrawingsForTesting([line(10)])   // reviewRecordId 从未设置（Task 6 未落）
+        let e = try await h.coordinator.startNewNormalSession()   // 非 review session：reviewRecordId 仍 nil
 
         try h.coordinator.persistReviewWorkingIfChanged(engine: e)
         try h.coordinator.commitReview(engine: e)
         try h.coordinator.discardReviewWorking(engine: e)
 
         #expect(h.coordinator.loadReviewMarkers().isEmpty)   // 全部 guard 早返，未触碰 repo
+    }
+
+    // MARK: - Task 6: review() 基线（committed = saved，非手动注入）
+
+    @Test func review_onSavedRecord_seedsDrawingsAndCommittedBaselineFromSaved() async throws {
+        let h = try ReviewTestHarness.make()
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])
+
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+        #expect(e.reviewDrawings == [line(10)])
+
+        // 未手动注入 reviewCommittedBaseline：不动画线 → persist → 应回退 .saved（证明 baseline==saved，
+        // 非手动 setReviewSessionForTesting；若 baseline 误为 [] 则此处会误判"改动"→.inProgress）。
+        try h.coordinator.persistReviewWorkingIfChanged(engine: e)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .saved)
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)
+    }
+
+    @Test func review_freshRecord_noSaved_seedsEmptyBaseline() async throws {
+        let h = try ReviewTestHarness.make()
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+        #expect(e.reviewDrawings == [])
+        #expect(h.coordinator.reviewNetChanged() == false)   // committed 基线 == [] == engine.reviewDrawings
+    }
+
+    // MARK: - Task 6: saved 损坏恢复
+
+    @Test func review_savedCorrupt_recoversToEmptyBaseline_marksNone() async throws {
+        let h = try ReviewTestHarness.make()
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])
+        h.reviewRepo.failNextLoadSaved = .persistence(.dbCorrupted)
+
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+
+        #expect(e.reviewDrawings == [])
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .none)   // clearSaved 已生效
+    }
+
+    @Test func review_savedCorruptAndClearSavedFails_throwsRetryable_keepsSavedRow() async throws {
+        let h = try ReviewTestHarness.make()
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])
+        h.reviewRepo.failNextLoadSaved = .persistence(.dbCorrupted)
+        h.reviewRepo.failNextClearSaved = .internalError(module: "test", detail: "transient clear")
+
+        await #expect(throws: (any Error).self) {
+            _ = try await h.coordinator.review(recordId: h.seededRecordId)
+        }
+        // 坏 saved 行仍在（clearSaved 失败未清）——不以空基线开界面。
+        #expect(try h.reviewRepo.loadArchive(recordId: h.seededRecordId)?.savedDrawings == [line(10)])
+        #expect(h.coordinator.activeEngine == nil)   // 入口失败前未写活跃状态
+    }
+
+    // MARK: - Task 6: resumePendingReview
+
+    @Test func resumePendingReview_hitInProgress_restoresStepTickAndDrawings() async throws {
+        let h = try ReviewTestHarness.make()
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, drawings: [line(20)])
+
+        let e = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
+        #expect(e != nil)
+        #expect(e?.tick.globalTickIndex == 4)
+        #expect(e?.reviewDrawings == [line(20)])
+        #expect(e?.flow.mode == .review)
+    }
+
+    @Test func resumePendingReview_notInProgress_returnsNil() async throws {
+        let h = try ReviewTestHarness.make()
+        // 无任何存档（marker == .none）
+        let e1 = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
+        #expect(e1 == nil)
+
+        // 仅 saved（marker == .saved，非 .inProgress）
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])
+        let e2 = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
+        #expect(e2 == nil)
+    }
+
+    // MARK: - Task 6: 入口 ops 校验 + 终局等式强制
+
+    @Test func review_oversellRecord_throwsDBCorrupted() async throws {
+        let h = try ReviewTestHarness.make()
+        let badOps = [op(1, .sell, price: 10, shares: 100, commission: 0, stampDuty: 0, totalCost: 1000)]
+        let rec = TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
+                                 stockCode: "000001", stockName: "股", startYear: 2020, startMonth: 1,
+                                 totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                                 buyCount: 0, sellCount: 1,
+                                 feeSnapshot: FeeSnapshot(commissionRate: 0.0002, minCommissionEnabled: false),
+                                 finalTick: 5)
+        let id = try h.recordRepo.insertRecord(rec, ops: badOps, drawings: [])
+
+        await #expect(throws: (any Error).self) {
+            _ = try await h.coordinator.review(recordId: id)
+        }
+    }
+
+    @Test func review_finalTotalsInconsistentWithRecord_throwsDBCorrupted() async throws {
+        let h = try ReviewTestHarness.make()
+        // 实际折叠：100_000 -1000(buy) +1000(sell,notional-0-0) = 100_000（flat，profit 实际=0）
+        let roundTripOps = [
+            op(1, .buy, price: 10, shares: 100, commission: 0, stampDuty: 0, totalCost: 1000),
+            op(2, .sell, price: 10, shares: 100, commission: 0, stampDuty: 0, totalCost: 1000),
+        ]
+        let rec = TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
+                                 stockCode: "000001", stockName: "股", startYear: 2020, startMonth: 1,
+                                 totalCapital: 100_000, profit: 999, returnRate: 0.00999, maxDrawdown: 0,
+                                 buyCount: 1, sellCount: 1,
+                                 feeSnapshot: FeeSnapshot(commissionRate: 0.0002, minCommissionEnabled: false),
+                                 finalTick: 5)
+        let id = try h.recordRepo.insertRecord(rec, ops: roundTripOps, drawings: [])
+
+        await #expect(throws: (any Error).self) {
+            _ = try await h.coordinator.review(recordId: id)
+        }
+    }
+
+    @Test func review_consistentRecord_succeeds() async throws {
+        let h = try ReviewTestHarness.make()
+        // 折叠：100_000 -50_000(buy 500@100) +68_000(sell 500@136, 0 佣金印花) = 118_000 → profit 18_000
+        let consistentOps = [
+            op(1, .buy, price: 100, shares: 500, commission: 0, stampDuty: 0, totalCost: 50_000),
+            op(2, .sell, price: 136, shares: 500, commission: 0, stampDuty: 0, totalCost: 68_000),
+        ]
+        let rec = TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
+                                 stockCode: "000001", stockName: "股", startYear: 2020, startMonth: 1,
+                                 totalCapital: 100_000, profit: 18_000, returnRate: 0.18, maxDrawdown: 0,
+                                 buyCount: 1, sellCount: 1,
+                                 feeSnapshot: FeeSnapshot(commissionRate: 0.0002, minCommissionEnabled: false),
+                                 finalTick: 5)
+        let id = try h.recordRepo.insertRecord(rec, ops: consistentOps, drawings: [])
+
+        let engine = try await h.coordinator.review(recordId: id)
+        #expect(engine.flow.mode == .review)
     }
 }

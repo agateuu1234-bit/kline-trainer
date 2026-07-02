@@ -54,13 +54,15 @@ struct CoordinatorTestHarness {
         // Seed records（fake insertRecord 自增 id）
         // finalTick = m3Count - 1 = 7（与 makeCandles 默认一致，使 derived startTick 0 < finalTick 7）
         let seededFinalTick = 7
+        // profit/returnRate=0（非旧 5_000/0.05）：ops=[] 无交易 → Task 6 entry-validation 折叠终局==起始，
+        // 须与 record 声明一致（否则 review() 的入口终局等式校验会拒绝这条 fixture record）。
         var firstId: Int64 = 0
         for _ in seedRecordIds {
             let id = try records.insertRecord(
                 TrainingRecord(id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
                                stockCode: "000001", stockName: "股", startYear: 2020, startMonth: 1,
-                               totalCapital: 100_000, profit: 5_000,
-                               returnRate: 0.05, maxDrawdown: -0.03,
+                               totalCapital: 100_000, profit: 0,
+                               returnRate: 0, maxDrawdown: -0.03,
                                buyCount: 1, sellCount: 1,
                                feeSnapshot: FeeSnapshot(commissionRate: 0.0002, minCommissionEnabled: false),
                                finalTick: seededFinalTick),

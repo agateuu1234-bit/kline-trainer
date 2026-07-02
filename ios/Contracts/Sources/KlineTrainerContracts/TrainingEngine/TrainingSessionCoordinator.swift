@@ -67,6 +67,11 @@ public final class TrainingSessionCoordinator {
     /// 复盘 committed 基线：进入时 = saved ?? []；`commitReview` 提交后前移 = 刚提交的工作画线集。
     /// 净改动判定 **恒对比 committed 基线**（非 resume 时加载的 working），见 `ReviewNetChange`。
     @ObservationIgnored private var reviewCommittedBaseline: [DrawingObject] = []
+    /// Task 6：saved 存档解码损坏、已 `clearSaved` 恢复为空基线时置位（UI 读后清、经 toast 呈现
+    /// 「复盘存档损坏已清除，可重新复盘保存」）。
+    public private(set) var pendingReviewCorruptToast = false
+    /// UI（TrainingView.onAppear 或 AppRouter）消费后清位。
+    public func clearPendingReviewCorruptToast() { pendingReviewCorruptToast = false }
 
     // MARK: - Wave 3 顺位 10b：周期 autosave 状态机（RFC §4.6）+ 终态 fence（§4.7d）
 
@@ -279,7 +284,56 @@ public final class TrainingSessionCoordinator {
     /// 强平后）使引擎实时 `returnRate == record.returnRate`（flat-ending-cash 假设下自洽）；**不**改写
     /// record 真值（settlement 若直读 record 则此重建只影响训练页状态栏显示，安全）。
     /// **前置（D10）**：caller 须先 `endSession()`（同 startNewNormalSession）。
+    /// review-redesign Task 6：committed 基线 = saved（独立解码，坏 → 恢复为空 + toast），
+    /// `engine.reviewDrawings` 与 committed 基线均种自该 baseline（fresh review：working==committed）。
     public func review(recordId: Int64) async throws -> TrainingEngine {
+        let baseline = try loadCommittedBaselineRecovering(recordId: recordId)
+        return try await buildReviewEngine(recordId: recordId, startTickOverride: nil,
+                                           reviewDrawings: baseline, committedBaseline: baseline)
+    }
+
+    /// review-redesign Task 6：resume-first 续复盘。命中 `.inProgress` → 从 `working.stepTick` 起、
+    /// `engine.reviewDrawings` = working 画线集，committed 基线仍 = saved（独立解码，非 working）。
+    /// **working 独立解码（codex plan-R1-high）**：working 坏 → 仅清 working、回退从头（不碰 saved）。
+    /// 未命中 `.inProgress` / 竞态清空 → nil（router 回退 fresh `review()`）。
+    public func resumePendingReview(recordId: Int64) async throws -> TrainingEngine? {
+        guard ((try? reviewArchiveRepo.reviewMarker(recordId: recordId)) ?? .none) == .inProgress else { return nil }
+        let working: ReviewWorking?
+        do {
+            working = try reviewArchiveRepo.loadWorking(recordId: recordId)
+        } catch let e as AppError where e.isDBCorrupted {
+            try reviewArchiveRepo.clearWorking(recordId: recordId)
+            return nil
+        }
+        guard let w = working else { return nil }             // 竞态：刚被清 → nil（router 从头）
+        let baseline = try loadCommittedBaselineRecovering(recordId: recordId)   // saved 坏 → 仅清 saved + toast，保住有效 working
+        return try await buildReviewEngine(recordId: recordId, startTickOverride: w.stepTick,
+                                           reviewDrawings: w.drawings, committedBaseline: baseline)
+    }
+
+    /// review-redesign Task 6：committed 基线 = saved（独立解码，只碰 saved 列，working 不动）。
+    /// saved 坏 → `clearSaved` + `pendingReviewCorruptToast=true` + 返回空基线继续（不致命）。
+    /// **clearSaved 失败不吞**（codex plan-R4-high，不用 `try?`）：只有清库成功才回退空基线+toast；
+    /// 清库失败 rethrow → review 入口失败（可重试），**绝不**在坏 saved 仍在库时以假空基线开界面。
+    private func loadCommittedBaselineRecovering(recordId: Int64) throws -> [DrawingObject] {
+        do {
+            return try reviewArchiveRepo.loadSaved(recordId: recordId) ?? []
+        } catch let e as AppError where e.isDBCorrupted {
+            try reviewArchiveRepo.clearSaved(recordId: recordId)
+            pendingReviewCorruptToast = true
+            return []
+        }
+    }
+
+    /// review-redesign Task 6：`review()`/`resumePendingReview()` 共享的引擎构造 + 入口终局校验。
+    /// `startTickOverride`：nil=用 meta.startDatetime 派生的训练起点（fresh review）；
+    /// 非 nil=resume 续到该 tick（committed 基线/flow 边界仍锚 meta 起点，不随 resume 漂移）。
+    /// **入口终局等式强制（codex plan-R3/R5-high）**：构造后重折叠全部 `ops` 到 `record.finalTick`，
+    /// 与 record 终局不符（损坏 op 序列 / totalCost 造假）→ `.dbCorrupted`（review 不开、reader 已关）。
+    /// 这样顶栏每帧 `ReviewLedger.state` 可 `try?`（入口已验，永不兜底），杜绝逐帧 trap。
+    private func buildReviewEngine(recordId: Int64, startTickOverride: Int?,
+                                    reviewDrawings: [DrawingObject],
+                                    committedBaseline: [DrawingObject]) async throws -> TrainingEngine {
         let (record, ops, drawings) = try recordRepo.loadRecordBundle(id: recordId)
         // Note: loadRecordBundle() is app.sqlite source — its .dbCorrupted propagates ABOVE this catch (fail-closed).
         let file = try cachedFile(filename: record.trainingSetFilename)
@@ -290,32 +344,51 @@ public final class TrainingSessionCoordinator {
             try? cache.delete(file)                          // 同上（best-effort 可弃）：训练组损坏；record 仍在 app.sqlite（不删）
             throw AppError.persistence(.dbCorrupted)         // 无法替代，surface
         }
+        let engine: TrainingEngine
         do {
             // maxTick 由 .review(record) 内部据 record.finalTick 派生；make 亦校验 .m3 非空 +
             // m3.last.endGlobalIndex >= finalTick，故此处不重复 maxTick(from:)（D3 / LOW#8）。
             let allCandles = try reader.loadAllCandles()
             let meta = try reader.loadMeta()                  // B3：起始点 tick 派生（review 从训练起点重演）
-            let startTick = TrainingEngine.startTick(forStartDatetime: meta.startDatetime, in: allCandles)
-            let engine = try TrainingEngine.make(
-                .review(record: record, startTick: startTick),
+            let metaStartTick = TrainingEngine.startTick(forStartDatetime: meta.startDatetime, in: allCandles)
+            engine = try TrainingEngine.make(
+                .review(record: record, startTick: metaStartTick),
                 allCandles: allCandles,
+                initialTick: startTickOverride ?? metaStartTick,   // resume 续到该 tick；fresh=训练起点
                 initialCapital: record.totalCapital,
                 initialCashBalance: record.totalCapital + record.profit,   // 末态全现金（强平后）
                 initialMarkers: markers(from: ops),
                 initialDrawings: drawings,
                 initialTradeOperations: ops)
-            activeReader = reader
-            activeEngine = engine
-            activeFile = file
-            cache.touch(file)                        // §A touch-on-use：完整读取+引擎构造成功后刷 LRU mtime（codex-13a-F2）
-            activeStartedAt = nil                    // D4：review 只读，无进度保存
-            activeSessionKey = nil                   // RFC §4.7c：review 无 session key
-            activeRecord = record                    // RFC-B D5：复用已加载 record（零新 I/O）
-            return engine
         } catch {
             reader.close()
             throw (error as? AppError) ?? .internalError(module: "E6a", detail: String(describing: error))
         }
+        // 入口终局等式强制校验（fail-closed）：损坏 op 序列（ReviewLedger.state 自身 throw）或终局不符
+        // （guard 手动 throw）都在此统一 close reader（避免上面的 catch-all 块二次 close）。
+        do {
+            let finalState = try ReviewLedger.state(atTick: engine.tick.maxTick, ops: engine.tradeOperations,
+                                                    initialCapital: engine.initialCapital,
+                                                    markPriceAtTick: { engine.markPrice(atTick: $0) })
+            // 显式容差（FP 折叠序噪声 ~1e-9 相对；毛损坏必远超）：profit 绝对 1e-4 元、rate 绝对 1e-7
+            guard abs((finalState.totalCapital - engine.initialCapital) - record.profit) <= 1e-4,
+                  abs(finalState.returnRate - record.returnRate) <= 1e-7
+            else { throw AppError.persistence(.dbCorrupted) }
+        } catch {
+            reader.close()
+            throw (error as? AppError) ?? .internalError(module: "E6a", detail: String(describing: error))
+        }
+        activeReader = reader
+        activeEngine = engine
+        activeFile = file
+        cache.touch(file)                        // §A touch-on-use：完整读取+引擎构造成功后刷 LRU mtime（codex-13a-F2）
+        activeStartedAt = nil                    // D4：review 只读，无进度保存
+        activeSessionKey = nil                   // RFC §4.7c：review 无 session key
+        activeRecord = record                    // RFC-B D5：复用已加载 record（零新 I/O）
+        engine.setReviewDrawings(reviewDrawings)
+        reviewRecordId = recordId
+        reviewCommittedBaseline = committedBaseline
+        return engine
     }
 
     /// Replay 模式（spec L1673）：record → 打开 reader → 从头构造 ReplayFlow 引擎（只继承原局

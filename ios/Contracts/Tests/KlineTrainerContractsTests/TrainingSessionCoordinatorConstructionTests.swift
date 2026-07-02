@@ -338,9 +338,11 @@ struct TrainingSessionCoordinatorConstructionTests {
     @Test("review: 从训练起点开演 + 还原标记 + tick=派生 startTick + 收益率与 record 自洽（D5 / B3）")
     func review_happy_restoresEndState() async throws {
         let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles())
+        // Task 6 入口终局等式校验：ops 折叠须精确等于 record.profit(8_000)——
+        // 100_000 - 10.00*100(buy) + 90.01*100 - 1(sell commission) = 108_000 → profit 8_000。
         let id = try Self.seedRecord(records, totalCapital: 100_000, profit: 8_000, finalTick: 7,
-                                     ops: [Self.op(tick: 2, price: 10.2, dir: .buy),
-                                           Self.op(tick: 5, price: 10.5, dir: .sell)])
+                                     ops: [Self.op(tick: 2, price: 10.00, dir: .buy),
+                                           Self.op(tick: 5, price: 90.01, dir: .sell)])
         let engine = try await coord.review(recordId: id)
         #expect(engine.flow.mode == .review)
         #expect(engine.flow.canBuySell() == false)        // ReviewFlow 全能力关
@@ -357,7 +359,8 @@ struct TrainingSessionCoordinatorConstructionTests {
     @Test("review: 费率来自 record 非当前 settings（D5）")
     func review_usesRecordFees() async throws {
         let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 10_000)
-        let id = try Self.seedRecord(records, ops: [])
+        // profit: 0（非默认 8_000）：ops=[] 无交易，须与 Task 6 entry-validation 折叠终局一致。
+        let id = try Self.seedRecord(records, profit: 0, ops: [])
         let engine = try await coord.review(recordId: id)
         #expect(engine.fees.commissionRate == 0.0002)      // record.feeSnapshot，非 settings 的 0.0001
         #expect(engine.fees.minCommissionEnabled == true)

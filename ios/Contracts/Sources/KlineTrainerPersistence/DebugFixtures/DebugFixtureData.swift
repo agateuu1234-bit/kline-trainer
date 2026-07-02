@@ -37,6 +37,10 @@ public enum DebugFixtureData {
         public let meta: TrainingSetMeta
         public let candles: [PeriodCandles]
         public let records: [TrainingRecord]
+        /// review-redesign Task 6：与 `records`（同下标）配对的交易流水。`review()` 新增的入口终局
+        /// 等式校验会重折叠 ops 到 `record.finalTick` 并与 `record.profit`/`returnRate` 比对——旧版本
+        /// `records` 声明 profit/returnRate 但配 `ops: []`（无交易），一致性不再成立，故须配真实 ops。
+        public let recordOps: [[TradeOperation]]
         public let pending: PendingTraining?
         public let settings: AppSettings
     }
@@ -116,16 +120,42 @@ public enum DebugFixtureData {
             startDatetime: m3Rows[beforeM3Count].datetime, endDatetime: m3Rows.last!.datetime)
 
         let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false)
+        // review-redesign Task 6：review() 新增入口终局等式校验，重折叠 ops 到 finalTick 须精确等于
+        // record.profit/returnRate（1 买 1 卖，零佣金印花，整数价保证 fold 精确）：
+        //   record 1：100_000 - 1000*90(buy) + 1000*98.9(sell) = 108_900 → profit 8_900, rate 0.089
+        //   record 2：108_900 - 500*200(buy) + 500*195.8(sell) = 106_800 → profit -2_100, rate ≈ -0.0192837
+        let record1Ops = [
+            TradeOperation(globalTick: 1, period: .m3, direction: .buy, price: 90, shares: 1000,
+                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: 90_000,
+                           createdAt: baseEpoch),
+            TradeOperation(globalTick: 2, period: .m3, direction: .sell, price: 98.9, shares: 1000,
+                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: 98_900,
+                           createdAt: baseEpoch),
+        ]
+        let record2Ops = [
+            TradeOperation(globalTick: 1, period: .m3, direction: .buy, price: 200, shares: 500,
+                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: 100_000,
+                           createdAt: baseEpoch + 86_400),
+            TradeOperation(globalTick: 2, period: .m3, direction: .sell, price: 195.8, shares: 500,
+                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: 97_900,
+                           createdAt: baseEpoch + 86_400),
+        ]
+        // profit 用与 ReviewLedger fold 相同表达式计算（非独立手算字面量），杜绝任何浮点舍入偏差。
+        let record1Profit = 1000.0 * 98.9 - 1000.0 * 90.0     // ≈ 8_900
+        let record2Profit = 500.0 * 195.8 - 500.0 * 200.0     // ≈ -2_100
         let records = [
             TrainingRecord(id: nil, trainingSetFilename: filename, createdAt: baseEpoch,
                            stockCode: "600001", stockName: "示例训练股", startYear: 2023, startMonth: 11,
-                           totalCapital: 100_000, profit: 8_900, returnRate: 0.089, maxDrawdown: -0.05,
-                           buyCount: 3, sellCount: 2, feeSnapshot: fees, finalTick: m3Count - 1),
+                           totalCapital: 100_000, profit: record1Profit, returnRate: record1Profit / 100_000,
+                           maxDrawdown: -0.05,
+                           buyCount: 1, sellCount: 1, feeSnapshot: fees, finalTick: m3Count - 1),
             TrainingRecord(id: nil, trainingSetFilename: filename, createdAt: baseEpoch + 86_400,
                            stockCode: "600001", stockName: "示例训练股", startYear: 2023, startMonth: 11,
-                           totalCapital: 108_900, profit: -2_100, returnRate: -0.019, maxDrawdown: -0.08,
+                           totalCapital: 108_900, profit: record2Profit, returnRate: record2Profit / 108_900,
+                           maxDrawdown: -0.08,
                            buyCount: 1, sellCount: 1, feeSnapshot: fees, finalTick: m3Count - 1),
         ]
+        let recordOps = [record1Ops, record2Ops]
 
         let emptyPosition = try! JSONEncoder().encode(PositionManager())
         let pending = PendingTraining(
@@ -138,7 +168,7 @@ public enum DebugFixtureData {
             sessionKey: "debug-fixture-pending")
 
         return Seed(trainingSetFilename: filename, meta: meta, candles: candles,
-                    records: records, pending: pending, settings: .default)
+                    records: records, recordOps: recordOps, pending: pending, settings: .default)
     }
 }
 #endif

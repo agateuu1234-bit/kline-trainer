@@ -237,6 +237,18 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
     private let lock = NSLock()
     private var saved: [Int64: [DrawingObject]] = [:]
     private var working: [Int64: (stepTick: Int, drawings: [DrawingObject])] = [:]
+    /// review-redesign Task 6：一次性故障注入（mirror `InMemoryPendingReplayRepository` 的 `failNextLoadReplay`
+    /// 范式），供 coordinator saved-corrupt 恢复路径测试模拟 `.dbCorrupted` / clearSaved 失败。
+    private var _failNextLoadSaved: AppError?
+    public var failNextLoadSaved: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextLoadSaved }
+        set { lock.lock(); defer { lock.unlock() }; _failNextLoadSaved = newValue }
+    }
+    private var _failNextClearSaved: AppError?
+    public var failNextClearSaved: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextClearSaved }
+        set { lock.lock(); defer { lock.unlock() }; _failNextClearSaved = newValue }
+    }
 
     public init() {}
 
@@ -257,6 +269,7 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
 
     public func loadSaved(recordId: Int64) throws -> [DrawingObject]? {
         lock.lock(); defer { lock.unlock() }
+        if let e = _failNextLoadSaved { _failNextLoadSaved = nil; throw e }
         return saved[recordId]
     }
 
@@ -278,6 +291,7 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
 
     public func clearSaved(recordId: Int64) throws {
         lock.lock(); defer { lock.unlock() }
+        if let e = _failNextClearSaved { _failNextClearSaved = nil; throw e }
         saved[recordId] = nil
     }
 

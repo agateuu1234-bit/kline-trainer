@@ -267,6 +267,19 @@ public final class TrainingEngine {
         TrainingEngine.price(in: allCandles, atTick: tick.globalTickIndex)
     }
 
+    /// review-redesign Task 6：复盘引擎播种 `reviewDrawings`（committed 基线 或 resume 的 working 画线集）
+    /// 的生产入口（由 coordinator `buildReviewEngine` 调用）。Task 5 的 `setReviewDrawingsForTesting`
+    /// 仅 DEBUG 测试专用，本方法是唯一生产路径。Task 10 补真实画线路由（appendReviewDrawing 等）后仍保留
+    /// 本 setter 作初始播种入口。
+    public func setReviewDrawings(_ ds: [DrawingObject]) { reviewDrawings = ds }
+
+    /// review-redesign Task 6 最小占位：复盘引擎入口终局校验（`ReviewLedger.state` 的 `markPriceAtTick`）
+    /// 复用的取价入口。当前实现等价 `currentPrice`（`.m3` 收盘、越界钳到末根、非 nil）。
+    /// **Task 9 将统一 currentPrice/markPrice 收口**（详见 task-6-report.md）。
+    public func markPrice(atTick t: Int) -> Double {
+        TrainingEngine.price(in: allCandles, atTick: t)
+    }
+
     /// 本局实时总资金 = 现金 + 持仓市值（plan v1.5 L914）。
     public var currentTotalCapital: Double {
         cashBalance + Double(position.shares) * currentPrice

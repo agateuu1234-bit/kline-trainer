@@ -95,7 +95,13 @@ public final class AppRouter {
     public func review(id: Int64) async {
         activeModal = nil
         do {
-            let engine = try await coordinator.review(recordId: id)
+            // resume-first：总先试续复盘；返 nil（无进行中存档/竞态已清）才从头（review-redesign Task 6）。
+            let engine: TrainingEngine
+            if let resumed = try await coordinator.resumePendingReview(recordId: id) {
+                engine = resumed
+            } else {
+                engine = try await coordinator.review(recordId: id)   // 从头
+            }
             activeTraining = ActiveTraining(lifecycle: TrainingSessionLifecycle(engine: engine, coordinator: coordinator))
         } catch { setError(error) }
     }
