@@ -172,6 +172,12 @@ public final class TrainingSessionCoordinator {
     }
     /// review-redesign Task 7 测试专用：等在飞 review autosave Task 完成（镜像 `drainAutosaveForTesting`）。
     func drainReviewAutosaveForTesting() async { await reviewAutosaveTask?.value }
+    /// codex whole-branch R6 回归测试专用：读当前 `reviewRevision`（供断言陈旧 `autosaveReview` 调用
+    /// 是否误递增计数，镜像其它 `xxxForTesting` 范式）。
+    var reviewRevisionForTesting: Int { reviewRevision }
+    /// codex whole-branch R6 回归测试专用：`reviewAutosaveTask` 是否已占用（供断言陈旧 `autosaveReview`
+    /// 调用是否误占排队槽位）。
+    var hasQueuedReviewAutosaveForTesting: Bool { reviewAutosaveTask != nil }
     #endif
 
     /// §4.7d 终态栅栏：置 terminating（拒新 autosave）+ 排空在飞写（排空时见 terminating 即退出不落盘）。
@@ -336,15 +342,24 @@ public final class TrainingSessionCoordinator {
         // 之后每次 tap 都重试同一失败 resume（永久 brick）。此处视越界为 WORKING 语义损坏（区别于
         // record-ops 入口终局校验的 `.dbCorrupted`）：clearWorking + nil（router 回退 fresh `review()`，
         // 不碰 saved/record）。顺带取一次 record bundle 供下方 `buildReviewEngine` 复用（避免重复加载）。
+        // **注**（codex whole-branch R6）：本 guard 只挡 `0...finalTick` 之外——真正的下界是训练组
+        // metadata 派生的 `metaStartTick`（可 >0），只有打开 reader/loadMeta 后才知道，故那段校验
+        // 移到 `buildReviewEngine` 内部（见下方 do/catch）。
         let bundle = try recordRepo.loadRecordBundle(id: recordId)
         guard (0...max(0, bundle.0.finalTick)).contains(w.stepTick) else {
             try reviewArchiveRepo.clearWorking(recordId: recordId)
             return nil
         }
         let baseline = try loadCommittedBaselineRecovering(recordId: recordId)   // saved 坏 → 仅清 saved + toast，保住有效 working
-        return try await buildReviewEngine(recordId: recordId, startTickOverride: w.stepTick,
-                                           reviewDrawings: w.drawings, committedBaseline: baseline,
-                                           preloadedRecordBundle: bundle)
+        do {
+            return try await buildReviewEngine(recordId: recordId, startTickOverride: w.stepTick,
+                                               reviewDrawings: w.drawings, committedBaseline: baseline,
+                                               preloadedRecordBundle: bundle)
+        } catch let e as AppError where e == Self.invalidResumeTickError {
+            // codex whole-branch R6（high）：`w.stepTick` 落在 `[0, metaStartTick)`——`buildReviewEngine`
+            // 已 clearWorking，此处只需回退 nil（router 回退 fresh `review()`，不碰 saved/record，无 brick）。
+            return nil
+        }
     }
 
     /// review-redesign Task 6：committed 基线 = saved（独立解码，只碰 saved 列，working 不动）。
@@ -361,6 +376,11 @@ public final class TrainingSessionCoordinator {
             return []
         }
     }
+
+    /// codex whole-branch R6（high）：resume tick 落在 `[0, metaStartTick)`（下界越界）时的可捕获哨兵信号——
+    /// `resumePendingReview` 精确捕获这一个值以回退 `nil`，与 ops-corruption 入口终局校验的
+    /// `.persistence(.dbCorrupted)`（那个不清 working）保持可区分。
+    private static let invalidResumeTickError = AppError.internalError(module: "review", detail: "invalidResumeTick")
 
     /// review-redesign Task 6：`review()`/`resumePendingReview()` 共享的引擎构造 + 入口终局校验。
     /// `startTickOverride`：nil=用 meta.startDatetime 派生的训练起点（fresh review）；
@@ -392,6 +412,21 @@ public final class TrainingSessionCoordinator {
             let allCandles = try reader.loadAllCandles()
             let meta = try reader.loadMeta()                  // B3：起始点 tick 派生（review 从训练起点重演）
             let metaStartTick = TrainingEngine.startTick(forStartDatetime: meta.startDatetime, in: allCandles)
+            // codex whole-branch R6（high）：R5 在 `resumePendingReview` 加的 guard 只挡 `w.stepTick`
+            // 越出 `0...finalTick`，未验下界——`metaStartTick`（训练组起点，可 >0）才是 `ReviewFlow.
+            // allowedTickRange` 真正的下界。`stepTick ∈ [0, metaStartTick)` 会绕过那条 guard，下方
+            // `TrainingEngine.make` 因 `flow.allowedTickRange` 不含该 tick 而 throw
+            // `AppError.trainingSet(.emptyData)`——若不在此拦截，该错误会直接冒泡给
+            // `resumePendingReview` 的调用方，但坏 `working_*` 行仍 `.inProgress`，之后每次 tap 都重试
+            // 同一失败 resume（永久 brick）。此处视越界为 WORKING 语义损坏（区别于 record-ops 入口
+            // 终局校验的 `.dbCorrupted`）：clearWorking + 抛专属可捕获信号，`resumePendingReview` 捕获后
+            // 回退 `nil`（fresh review()，不碰 saved/record）。仅在 resume 路径（`startTickOverride`
+            // 非 nil）校验——fresh `review()` 恒用 `metaStartTick` 自身，不可能越界。
+            if let override = startTickOverride,
+               override < metaStartTick || override > record.finalTick || override < 0 {
+                try reviewArchiveRepo.clearWorking(recordId: recordId)
+                throw Self.invalidResumeTickError
+            }
             engine = try TrainingEngine.make(
                 .review(record: record, startTick: metaStartTick),
                 allCandles: allCandles,
@@ -881,8 +916,15 @@ public final class TrainingSessionCoordinator {
     /// 或新 session 换新 token），排队写在执行时对比不等 → 早退丢弃。revision 用于同 token 内的合并
     /// （调度期间又有新请求 → 追上最新再等一轮"静默窗口"，收敛为一次落最新态的写，而非逐次都写）。
     /// 已有排队 Task（`reviewAutosaveTask != nil`）→ 仅递增 revision 合并，不重复排程。
+    /// codex whole-branch R6（medium）：顶部先做 `flushReviewForBackground` 同款身份闸——一枚刚终态收尾的
+    /// 陈旧 TrainingView 回调若在此之后才携旧 engine 调用本方法，此前会先递增 `reviewRevision` /
+    /// 占用 `reviewAutosaveTask` 槽位（因为身份校验此前只在 `persistReviewWorkingIfChanged` 内部真正落盘
+    /// 时才生效），导致新 session 紧随其后的合法 `autosaveReview` 因槽位已被占用而仅被合并（不重新排程）——
+    /// 但排队 Task 闭包捕获的仍是陈旧 engine，最终 no-op，新 session 这次改动直到下次触发才真正落盘，
+    /// 产生一个静默丢失窗口。在此提前拦截，陈旧 engine 早退、不占槽/不计数，新 session 的调用可正常排程。
     public func autosaveReview(engine: TrainingEngine) {
-        guard let token = reviewSessionToken else { return }
+        guard activeEngine === engine, engine.flow.mode == .review, reviewRecordId != nil,
+              let token = reviewSessionToken else { return }
         reviewRevision += 1
         guard reviewAutosaveTask == nil else { return }
         reviewAutosaveTask = Task { @MainActor [weak self] in

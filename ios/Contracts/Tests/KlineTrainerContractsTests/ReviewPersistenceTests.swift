@@ -16,7 +16,11 @@ private struct ReviewTestHarness {
 
     /// `wrapRepoForTesting`：Task 7 延迟替身注入点（如 `SlowReviewArchiveRepo`）——包一层再传给
     /// coordinator，`reviewRepo` 字段仍指向底层 in-memory repo，供测试直接断言落盘态。
-    static func make(wrapRepoForTesting wrap: ((InMemoryReviewArchiveRepository) -> ReviewArchiveRepository)? = nil)
+    /// `metaStartDatetime`：codex whole-branch R6 回归测试专用——注入非默认训练组 meta.startDatetime，
+    /// 使派生的 `metaStartTick` > 0（默认 fixture meta.startDatetime=1 恒使 metaStartTick==0，
+    /// 无法复现「working.stepTick 落在 [0, metaStartTick) 」这一 R6 场景）。nil=沿用默认 fixture meta。
+    static func make(wrapRepoForTesting wrap: ((InMemoryReviewArchiveRepository) -> ReviewArchiveRepository)? = nil,
+                      metaStartDatetime: Int64? = nil)
         throws -> ReviewTestHarness {
         let records = InMemoryRecordRepository()
         let pending = InMemoryPendingTrainingRepository()
@@ -31,7 +35,14 @@ private struct ReviewTestHarness {
         cache._seedForTesting([file])
 
         let candles = CoordinatorTestHarness.makeCandles()
-        let factory = PreviewTrainingSetDBFactory(candles: candles)
+        let factory: PreviewTrainingSetDBFactory
+        if let startDatetime = metaStartDatetime {
+            let meta = TrainingSetMeta(stockCode: "000001", stockName: "股",
+                                       startDatetime: startDatetime, endDatetime: startDatetime + 10_000)
+            factory = PreviewTrainingSetDBFactory(meta: meta, candles: candles)
+        } else {
+            factory = PreviewTrainingSetDBFactory(candles: candles)
+        }
         let settingsDAO = CoordinatorTestHarness.CapitalDAO(capital: 100_000)
         let coord = TrainingSessionCoordinator(
             dbFactory: factory,
@@ -372,6 +383,32 @@ struct ReviewPersistenceTests {
         #expect(try h.reviewRepo.loadSaved(recordId: h.seededRecordId) == [line(10)])      // saved 原样未动
         #expect(h.coordinator.activeEngine == nil)                                        // 未留下悬空活跃 session
         #expect(h.coordinator.hasReviewInProgress(recordId: h.seededRecordId) == false)
+    }
+
+    // codex whole-branch R6（high）：R5 加的 guard 只挡 `working.stepTick` 越出 `0...finalTick`，未验
+    // 训练组 metadata 派生的真实下界 `metaStartTick`（可 >0）。fixture 注入 metaStartDatetime 使
+    // metaStartTick==3（seededFinalTick==7），working.stepTick=2 落在 [0, metaStartTick) 内、通过 R5
+    // 的 0...7 guard，但仍是越界 resume tick——此前会让 `TrainingEngine.make` 的
+    // `AppError.trainingSet(.emptyData)` 直接冒泡给调用方，working 行却仍 `.inProgress`（永久 brick）。
+    // 修复后须 clearWorking + 返回 nil，且随后一次 fresh `review()` 必须能成功打开（无 brick）。
+    @Test func resumePendingReview_workingStepTickBelowMetaStartTick_clearsWorking_returnsNil_noBrick() async throws {
+        let h = try ReviewTestHarness.make(metaStartDatetime: 541)   // datetime=1+gi*180 → gi=3 时 541 → metaStartTick==3
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])   // 既有 saved，须保留
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 2, drawings: [line(20)])   // 越界：< metaStartTick(3)，但在 0...7 内
+
+        let e = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
+
+        #expect(e == nil)
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)          // working 已清
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .saved)       // 回退到既有 saved（非 .none）
+        #expect(try h.reviewRepo.loadSaved(recordId: h.seededRecordId) == [line(10)])      // saved 原样未动
+        #expect(h.coordinator.activeEngine == nil)                                        // 未留下悬空活跃 session
+        #expect(h.coordinator.hasReviewInProgress(recordId: h.seededRecordId) == false)
+
+        // 无 brick：随后一次 fresh review() 必须能正常打开（非重复撞同一失败 resume）。
+        let fresh = try await h.coordinator.review(recordId: h.seededRecordId)
+        #expect(fresh.flow.mode == .review)
+        #expect(fresh.tick.globalTickIndex == 3)   // metaStartTick
     }
 
     // codex whole-branch R2（high）：`resumePendingReview` 此前用 `try?` 把 `reviewMarker` 的瞬态读错误
@@ -858,5 +895,40 @@ struct ReviewAutosaveFenceTests {
         #expect(h.coordinator.autosaveBannerError == .persistence(.diskFull))
         #expect(h.coordinator.autosaveBannerError?.shouldShowToast == true)
         #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)
+    }
+
+    // MARK: - codex whole-branch R6（medium）：stale-engine `autosaveReview` 不得占用共享 task 槽位
+    //
+    // 缺陷：`autosaveReview` 此前只校验 `reviewSessionToken != nil`，未校验 `engine` 仍是 `activeEngine`——
+    // 一枚捕获了旧 session engine 的陈旧调用（例如刚切到新记录 B 之后，仍持 A 的 engine 的回调）会先
+    // 递增 `reviewRevision` / 占用 `reviewAutosaveTask` 槽位（该身份校验此前只在 `persistReviewWorkingIfChanged`
+    // 内部真正落盘时才生效），导致新 session 紧随其后的合法 `autosaveReview(engine: B)` 因槽位已占用
+    // 只被合并（不重新排程）——但排队 Task 闭包捕获的仍是陈旧的 A engine，最终因身份闸 no-op，
+    // B 的这次改动直到下一次触发才真正落盘（本测试若不修复会在此处静默丢失）。
+    @Test func autosaveReview_staleEngine_doesNotBumpRevisionOrOccupyTask_currentSessionStillWorks() async throws {
+        let h = try ReviewTestHarness.make()
+        let idB = try h.recordRepo.insertRecord(secondFixtureRecord(), ops: [], drawings: [])
+        let eA = try await h.coordinator.review(recordId: h.seededRecordId)   // session A: activeEngine=eA
+
+        _ = try await h.coordinator.review(recordId: idB)   // 切到 B（未先 endSession）：activeEngine 现为 B 的引擎，reviewRevision 归 0
+
+        let revisionBefore = h.coordinator.reviewRevisionForTesting
+        eA.setReviewDrawingsForTesting([line(99)])          // 陈旧引擎 A 内存中的"净改动"
+        h.coordinator.autosaveReview(engine: eA)            // 陈旧调用：activeEngine(B) !== eA → 应早退，不占槽/不计数
+
+        #expect(h.coordinator.reviewRevisionForTesting == revisionBefore)     // 未递增
+        #expect(h.coordinator.hasQueuedReviewAutosaveForTesting == false)     // 未占用排队槽位
+
+        // 当前会话 B 的合法 autosaveReview 必须仍能正常排程 + 落盘（未被陈旧调用"吃掉"）。
+        let eB = h.coordinator.activeEngine!
+        eB.setReviewDrawingsForTesting([line(5)])
+        h.coordinator.autosaveReview(engine: eB)
+        await h.coordinator.drainReviewAutosaveForTesting()
+
+        #expect(try h.reviewRepo.loadWorking(recordId: idB)?.drawings == [line(5)])
+        #expect(try h.reviewRepo.reviewMarker(recordId: idB) == .inProgress)
+        // A 的存档全程未被这次陈旧调用触碰。
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .none)
     }
 }
