@@ -170,13 +170,15 @@ public struct TrainingView: View {
                     performReviewEnd(action)
                 }
             }
+            // codex whole-branch R2（medium）：不用 `try? endReviewDiscard`——若其内部 clearWorking 抛错，
+            // endSession 从未执行，会话/reader 泄漏。改用 `abandonReview`：恒收尾会话，清档失败也不阻断退出。
             Button("放弃", role: .destructive) {
                 reviewFailedAction = nil
                 guard !exitInFlight else { return }
                 exitInFlight = true
                 Task {
                     defer { exitInFlight = false }
-                    try? await lifecycle.endReviewDiscard(engine: engine)
+                    await lifecycle.abandonReview(engine: engine)
                     onExit()
                 }
             }

@@ -255,6 +255,18 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
         get { lock.lock(); defer { lock.unlock() }; return _failNextLoadWorking }
         set { lock.lock(); defer { lock.unlock() }; _failNextLoadWorking = newValue }
     }
+    /// codex whole-branch R2：一次性故障注入，供测试模拟 `reviewMarker` 瞬态错误（fail-closed resume 回归测试）。
+    private var _failNextReviewMarker: AppError?
+    public var failNextReviewMarker: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextReviewMarker }
+        set { lock.lock(); defer { lock.unlock() }; _failNextReviewMarker = newValue }
+    }
+    /// codex whole-branch R2：一次性故障注入，供测试模拟 `clearWorking` 失败（abandonReview 稳健 teardown 回归测试）。
+    private var _failNextClearWorking: AppError?
+    public var failNextClearWorking: AppError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextClearWorking }
+        set { lock.lock(); defer { lock.unlock() }; _failNextClearWorking = newValue }
+    }
 
     public init() {}
 
@@ -293,6 +305,7 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
 
     public func clearWorking(recordId: Int64) throws {
         lock.lock(); defer { lock.unlock() }
+        if let e = _failNextClearWorking { _failNextClearWorking = nil; throw e }
         working[recordId] = nil
     }
 
@@ -314,6 +327,7 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
 
     public func reviewMarker(recordId: Int64) throws -> ReviewMarker {
         lock.lock(); defer { lock.unlock() }
+        if let e = _failNextReviewMarker { _failNextReviewMarker = nil; throw e }
         if working[recordId] != nil { return .inProgress }
         if saved[recordId] != nil { return .saved }
         return .none

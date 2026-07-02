@@ -311,7 +311,10 @@ public final class TrainingSessionCoordinator {
     /// **working 独立解码（codex plan-R1-high）**：working 坏 → 仅清 working、回退从头（不碰 saved）。
     /// 未命中 `.inProgress` / 竞态清空 → nil（router 回退 fresh `review()`）。
     public func resumePendingReview(recordId: Int64) async throws -> TrainingEngine? {
-        guard ((try? reviewArchiveRepo.reviewMarker(recordId: recordId)) ?? .none) == .inProgress else { return nil }
+        // codex whole-branch R2（high）：不得用 `try?` 吞掉瞬态读错误——那会把它收敛为 `.none`，
+        // 让 router 回退 fresh `review()`，随后放弃可能清掉仍有效的 `working_*` 行（数据丢失）。
+        // 瞬态错误须传播（async throws）；只有干净返回的非 `.inProgress` marker 才是合法「无需 resume」。
+        guard try reviewArchiveRepo.reviewMarker(recordId: recordId) == .inProgress else { return nil }
         let working: ReviewWorking?
         do {
             working = try reviewArchiveRepo.loadWorking(recordId: recordId)
@@ -879,6 +882,18 @@ public final class TrainingSessionCoordinator {
     public func endReviewDiscard(engine: TrainingEngine) async throws {
         await fenceAndDrainReviewAutosave()
         try discardReviewWorking(engine: engine)
+        await endSession()
+    }
+
+    /// codex whole-branch R2（medium）：稳健放弃——与 `endReviewDiscard` 不同，本方法**恒**收尾会话，
+    /// 即便清 working 失败也不放弃 `endSession`（那会让 coordinator 保留活跃 reader/session，而 router
+    /// 已摘视图 → 会话/reader 泄漏）。drain → best-effort 清 working（`try?`，失败不阻断）→ 恒 endSession。
+    /// 语义：放弃恒干净退出；若清档失败，`复盘中` marker 简单保留（可恢复——用户可重新进入再次结束）。
+    /// 供 UI「复盘保存失败」alert 的「放弃」按钮使用（不复用 `endReviewDiscard`——那个仍需在结束→不保存 /
+    /// 重试路径上把清档失败 rethrow 出去以重弹 alert，语义不同，不改动）。
+    public func abandonReview(engine: TrainingEngine) async {
+        await fenceAndDrainReviewAutosave()
+        try? discardReviewWorking(engine: engine)
         await endSession()
     }
 

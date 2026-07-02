@@ -105,6 +105,12 @@ public struct TrainingSessionLifecycle {
         try await coordinator.endReviewDiscard(engine: engine)
     }
 
+    /// codex whole-branch R2：稳健放弃（drain → best-effort 清 working → 恒 endSession，不因清档失败
+    /// 而泄漏会话）。供失败 alert 的「放弃」按钮使用。
+    public func abandonReview(engine: TrainingEngine) async {
+        await coordinator.abandonReview(engine: engine)
+    }
+
     /// 当前复盘 session 是否有净改动（转发，供 UI 判断是否有未保存改动）。
     public func reviewNetChanged() -> Bool {
         coordinator.reviewNetChanged()

@@ -339,6 +339,24 @@ struct ReviewPersistenceTests {
         #expect(h.coordinator.hasReviewInProgress(recordId: h.seededRecordId) == false)
     }
 
+    // codex whole-branch R2（high）：`resumePendingReview` 此前用 `try?` 把 `reviewMarker` 的瞬态读错误
+    // 收敛为 `.none`，router 据此回退 fresh `review()`——若此时存在有效 `working_*` 行，用户随后放弃会把它
+    // 清掉，丢失一份仍在进行的复盘。修复后瞬态错误须 PROPAGATE（不得静默回退 nil），working 行原样保留。
+    @Test func resumePendingReview_reviewMarkerTransientError_propagatesAndPreservesWorking() async throws {
+        let h = try ReviewTestHarness.make()
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, drawings: [line(20)])
+        h.reviewRepo.failNextReviewMarker = .internalError(module: "test", detail: "transient marker read")
+
+        await #expect(throws: (any Error).self) {
+            _ = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
+        }
+
+        // working 行未被清、未被覆盖——fail-closed 传播，非静默回退到 fresh review。
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings == [line(20)])
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .inProgress)
+        #expect(h.coordinator.activeEngine == nil)   // 未启动任何 fresh session（未 clobber）
+    }
+
     // MARK: - Task 6: 入口 ops 校验 + 终局等式强制
 
     @Test func review_oversellRecord_throwsDBCorrupted() async throws {
@@ -452,6 +470,55 @@ struct ReviewAutosaveFenceTests {
 
         #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)
         #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .none)
+    }
+
+    // codex whole-branch R2（medium）：失败 alert 的「放弃」此前调 `endReviewDiscard`——若其内部
+    // `discardReviewWorking`（clearWorking）抛错，`endSession` 从未执行 → coordinator 保留活跃
+    // reader/session，router 却已摘视图（会话/reader 泄漏）。`abandonReview` 须**恒**收尾：清档失败
+    // 也照常 endSession（working 行原样保留，`复盘中` marker 不变——可恢复，用户可重新进入再结束一次）。
+    @Test func abandonReview_clearWorkingThrows_stillEndsSessionAndPreservesWorkingRow() async throws {
+        let h = try ReviewTestHarness.make()
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, drawings: [line(20)])
+        let e = try #require(try await h.coordinator.resumePendingReview(recordId: h.seededRecordId))
+        h.reviewRepo.failNextClearWorking = .internalError(module: "test", detail: "transient clear failure")
+
+        await h.coordinator.abandonReview(engine: e)
+
+        #expect(h.coordinator.activeEngine == nil)     // 会话已恒收尾（reader/session 未泄漏）
+        #expect(h.coordinator.activeReader == nil)
+        // 清档失败 → working 行原样保留（未清），marker 仍 .inProgress（可恢复：重新进入再结束一次）。
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .inProgress)
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings == [line(20)])
+    }
+
+    // 对照：clearWorking 成功时 abandonReview 行为等价于既有 endReviewDiscard（working 已清 + 会话收尾）。
+    @Test func abandonReview_clearWorkingSucceeds_clearsWorkingAndEndsSession() async throws {
+        let h = try ReviewTestHarness.make()
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+        h.coordinator.setReviewSessionForTesting(recordId: h.seededRecordId, committedBaseline: [])
+        e.setReviewDrawingsForTesting([line(5)])
+        try h.coordinator.persistReviewWorkingIfChanged(engine: e)   // 落 working（.inProgress）
+
+        await h.coordinator.abandonReview(engine: e)
+
+        #expect(h.coordinator.activeEngine == nil)
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .none)
+    }
+
+    // lifecycle 转发：TrainingSessionLifecycle.abandonReview 正确转发到 coordinator。
+    @Test func lifecycle_abandonReview_delegatesToCoordinator() async throws {
+        let h = try ReviewTestHarness.make()
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+        h.coordinator.setReviewSessionForTesting(recordId: h.seededRecordId, committedBaseline: [])
+        e.setReviewDrawingsForTesting([line(3)])
+        try h.coordinator.persistReviewWorkingIfChanged(engine: e)
+        let lifecycle = TrainingSessionLifecycle(engine: e, coordinator: h.coordinator)
+
+        await lifecycle.abandonReview(engine: e)
+
+        #expect(h.coordinator.activeEngine == nil)
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)
     }
 
     // 2) 旧 token 的写被丢弃：session A 排队一次 autosave（token=TA，尚无 suspension 故尚未执行），
