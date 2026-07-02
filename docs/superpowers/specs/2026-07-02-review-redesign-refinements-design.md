@@ -66,15 +66,19 @@ drawings: (engine.drawings + (engine.flow.mode == .review ? engine.reviewDrawing
 - `revealTick <= tick`（全局 tick 直接比较，跨周期天然一致，无需 per-anchor per-period 映射）。
 - **对 normal/replay 亦成立**：训练/replay 只能在当前 tick 向前画，已画线的 `revealTick ≤ 当前 tick` 恒真 → 全显（与当前效果一致）；复盘步进过去区间时才逐 tick 揭示。行为对三模式统一且正确。
 
-### 1.6 持久化与向后兼容（无新 SQL 迁移）
-画线以 JSON blob 存于 `training_records` 画线列 / `review_archive.saved_drawings|working_drawings` / `pending_training.drawings`——**SQL schema 不变**，故**不新增迁移**（`PRAGMA user_version` 保持 5）。
-`DrawingObject` 采用自定义 `Codable`，对**缺失 `revealTick` 的旧 blob** 默认 0（向后兼容；本项目尚无生产用户数据，DEBUG 种子画线为空，故默认 0=从起点起可见 是安全且足够的 legacy 语义）：
+### 1.6 持久化与向后兼容（两条存储路径，其一需迁移）
+画线在本项目有**两条**持久化路径，`revealTick` 须两条都覆盖，否则训练记录画线 reload 后丢戳（codex plan review R-high）：
+
+1. **规范化 `drawings` 表（训练记录画线，`RecordRepositoryImpl`）**——按列存 `tool_type/panel_position/is_extended/anchors`，reload 时按列重建 `DrawingObject`。**必须新增迁移 0008**：`ALTER TABLE drawings ADD COLUMN reveal_tick INTEGER NOT NULL DEFAULT 0`，`PRAGMA user_version = 6`；`RecordRepositoryImpl` insert 写 `reveal_tick`、load 读 `reveal_tick → DrawingObject.revealTick`。**这是训练画线在复盘按创建 tick 渐显的必需持久化**（否则历史记录画线永远从 tick 0 显）。迁移只 additive、不动 v1.4 冻结基线 `v1_4_baselineDDL`/`app_schema_v1.sql`（drift-check 只校验基线，ALTER 不影响）。
+
+2. **JSON blob（TEXT）路径**——`review_archive.saved_drawings|working_drawings`、`pending_training.drawings`、`pending_replay.drawings` 均整块 `jsonEncode([DrawingObject])` 存 TEXT，reload 经 `DrawingObject` 的 `Codable`。此路径由**向后兼容 Codable** 覆盖，**无需迁移**：
 ```swift
-// init(from:) 内：
+// init(from:) 内：旧 blob 无 revealTick → 0
 revealTick = try container.decodeIfPresent(Int.self, forKey: .revealTick) ?? 0
 // encode(to:)：始终写 revealTick
 ```
-`CONTRACT_VERSION` `"1.9" → "1.10"`（逻辑契约演进标记；该常量仅在 `Models.swift` 定义、**不持久化、不与 DB user_version 门控**，故 bump 为纯标记，无副作用）。`Equatable` 含 `revealTick`。
+
+默认 0（从起点起可见）对 legacy 安全（本项目无生产用户数据，DEBUG 种子记录画线为空）。`CONTRACT_VERSION` `"1.9" → "1.10"`（逻辑契约演进标记；该常量仅在 `Models.swift` 定义、**不持久化、不与 DB user_version 门控**）。`user_version` `5 → 6`（迁移 0008）。`Equatable` 含 `revealTick`。
 
 ### 1.7 边界
 - 复盘入口终局等式校验 / `ReviewLedger` / 交易账目**完全不受影响**：`revealTick` 只影响画线**显示时机**，不进任何盈亏/持仓/存档净改动判定。`ReviewNetChange.changed` 比较 saved vs working 画线：因 `revealTick` 进入 `Equatable`，同一条线的 `revealTick` 在 saved 与 working 间保持一致（同次提交盖戳后不变），故不误判净改动。
@@ -105,12 +109,12 @@ revealTick = try container.decodeIfPresent(Int.self, forKey: .revealTick) ?? 0
 效果：继续训练完可正常复盘（不再报空）；record 1/2 复盘时顶栏逐 tick 盈亏真实滚动（交易在窗口内）。
 
 ## 5. 契约/版本
-- `DrawingObject` 加 `revealTick: Int` + 自定义 `Codable`（`decodeIfPresent ?? 0`）。
-- `CONTRACT_VERSION 1.9 → 1.10`（纯标记，无 DB 门控、无新迁移）。
-- `PRAGMA user_version` 保持 5，**不新增迁移**。
+- `DrawingObject` 加 `revealTick: Int` + 自定义 `Codable`（`decodeIfPresent ?? 0`），覆盖 JSON-blob 路径（review_archive/pending/pending_replay）。
+- `CONTRACT_VERSION 1.9 → 1.10`（纯标记，仅 `Models.swift`，不 DB 门控）。
+- **迁移 0008**：`drawings` 表加 `reveal_tick INTEGER NOT NULL DEFAULT 0`，`PRAGMA user_version = 6`；`RecordRepositoryImpl` 读写该列（规范化路径的训练记录画线）。additive、不动 v1.4 冻结基线。
 
 ## 6. 测试
-- **④**：`revealTick` 渐显单测——(a) 逐根 tick N 画线 → `revealTick=N`、tick<N 不显 / tick≥N 显；(b) 结尾画线 `revealTick=finalTick` → 仅最后一根显；(c) 原训练线按训练创建 tick 渐显；(d) 旧 blob（无 revealTick）解码默认 0 且渲染从起点可见；(e) 跨周期（上/下面板不同 period）按全局 tick 渐显；(f) `routeDrawingCommit` 盖戳 = 当前 `tick.globalTickIndex`（review 与 normal 各一）。
+- **④**：`revealTick` 渐显单测——(a) 逐根 tick N 画线 → `revealTick=N`、tick<N 不显 / tick≥N 显；(b) 结尾画线 `revealTick=finalTick` → 仅最后一根显；(c) 原训练线按训练创建 tick 渐显；(d) 旧 blob（无 revealTick）解码默认 0 且渲染从起点可见；(e) 跨周期（上/下面板不同 period）按全局 tick 渐显；(f) `routeDrawingCommit` 盖戳 = 当前 `tick.globalTickIndex`（review 与 normal 各一）；(g) **`RecordRepositoryImpl` round-trip：非零 `revealTick` 经 finalize→load 存活**（规范化 `drawings` 表 + 迁移 0008）。
 - **③**：所选面板划线的锚 period / panelPosition 单测（上、下各一，互不串面板）。
 - **①**：`DebugFixtureData` 一致性单测——`pending.globalTickIndex ∈ (metaStartTick, m3Count)`、两 record 交易 tick ∈ (metaStartTick, finalTick)、ReviewLedger fold(ops) == record.profit/returnRate。
 - **②**：走人工验收（样式）。
