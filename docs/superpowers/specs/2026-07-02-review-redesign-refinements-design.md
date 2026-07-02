@@ -103,7 +103,7 @@ revealTick = try container.decodeIfPresent(Int.self, forKey: .revealTick) ?? 0
 **根因**：`DebugFixtureData.make` 的 `pending.globalTickIndex = m3Count/2 = 9600`，小于复盘窗口起点 `metaStartTick = beforeM3Count = 12000`；record 交易在 tick 1/2（同样在窗口外）。继续训练该 pending 后 finalTick 落在 12000 之前 → 复盘 `make(.review)` 守卫 `record.finalTick >= startTick(=metaStartTick)` 失败 → 抛 `.trainingSet(.emptyData)`「训练组数据为空」。**真实"开始训练"从 metaStartTick 起跑、finalTick 恒 ≥ metaStartTick，复盘正常**——本项仅修 DEBUG 种子数据一致性，不动生产逻辑。
 
 **修正**（`DebugFixtureData.make`，`#if DEBUG`）：
-- `pending.globalTickIndex` 从 `m3Count/2` 改为**窗口内**值：`beforeM3Count + (m3Count - beforeM3Count) / 2`（fullLoad 下 = 12000 + 3600 = 15600，∈ (metaStartTick, m3Count)）。
+- `pending.globalTickIndex` 从 `m3Count/2` 改为**严格窗口内**值（复盘窗口中点）：`pendingTick = interiorFirst + span/2`（`interiorFirst = beforeM3Count+1`、`interiorLast = m3Count-2`、`span = interiorLast - interiorFirst`；fullLoad 下 ≈ 15599，∈ (metaStartTick, m3Count-1)）。精确派生见 plan Task 5。
 - 两条 record 的交易从 tick 1/2 挪到**窗口内**两个 tick（如 `beforeM3Count + Δ1`、`beforeM3Count + Δ2`，`metaStartTick < t_buy < t_sell < finalTick`）；成交价用**该 tick 的候选收盘价**（读同一确定性蜡烛序列，使买卖标记落在 K 线上、复盘时持仓段账户随真实收盘价逐 tick 滚动）；`record.profit/returnRate` 仍由 ReviewLedger 同款 fold 表达式计算（保证入口终局等式精确成立）。record `finalTick` 保持 `m3Count - 1`（≥ metaStartTick，复盘可开）。
 
 效果：继续训练完可正常复盘（不再报空）；record 1/2 复盘时顶栏逐 tick 盈亏真实滚动（交易在窗口内）。
