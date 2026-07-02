@@ -97,9 +97,14 @@ public struct TrainingView: View {
                     onHold: { engine.holdOrObserve(panel: activePanel) })
             } else if showsReviewControls {
                 // B4：复盘控件条——仅 Review 可步进态显示（canAdvance && !canBuySell）。
-                ReviewControlBar(showsJumpToEnd: engine.flow.canJumpToEnd()) { action in
+                // Task 8：训练底栏样式重设计——[上图|下图]分段器选中面板即「下一根」步进的目标面板。
+                ReviewControlBar(showsJumpToEnd: engine.flow.canJumpToEnd(),
+                                 price: engine.currentPrice,
+                                 upperPeriod: engine.upperPanel.period,
+                                 lowerPeriod: engine.lowerPanel.period,
+                                 activePanel: $activePanel) { action in
                     switch action {
-                    case .step:      engine.stepReviewForward()   // 逐根步进（B2）
+                    case .step:      engine.stepReviewForward(panel: activePanel)   // 逐根步进（Task 4 panel 重载）
                     case .jumpToEnd: engine.jumpToEnd()            // 快进到结尾（B2）
                     }
                 }
