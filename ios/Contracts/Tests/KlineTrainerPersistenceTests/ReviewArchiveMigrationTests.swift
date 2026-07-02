@@ -3,7 +3,7 @@ import GRDB
 @testable import KlineTrainerPersistence
 
 @Suite struct ReviewArchiveMigrationTests {
-    // Fresh install：空 DB 跑全 migrator（0001→…→0007）
+    // Fresh install：空 DB 跑全 migrator（0001→…→0008）
     @Test func freshInstallHasReviewArchiveV5() throws {
         let queue = try DatabaseQueue()   // in-memory
         try AppDBMigrations.makeMigrator().migrate(queue)
@@ -11,7 +11,7 @@ import GRDB
             let exists = try Bool.fetchOne(db, sql:
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='review_archive'") ?? false
             #expect(exists)
-            #expect((try Int.fetchOne(db, sql: "PRAGMA user_version") ?? -1) == 5)
+            #expect((try Int.fetchOne(db, sql: "PRAGMA user_version") ?? -1) == 6)
         }
     }
 
@@ -29,9 +29,9 @@ import GRDB
             // 造既有数据：一条 pending_replay 单槽（列同 0006 表；用最小合法值或复用 PendingReplayRepositoryTests 造法）
             try db.execute(sql: "INSERT INTO pending_replay (id, record_id, training_set_filename, global_tick_index, upper_period, lower_period, position_data, fee_snapshot, trade_operations, drawings, started_at, accumulated_capital, cash_balance, drawdown) VALUES (1, 7, 'a.sqlite', 3, '3m', '15m', '', '{}', '[]', '[]', 0, 100000, 100000, '{}')")
         }
-        try migrator.migrate(queue)                                     // 跑剩余（仅 0007）
+        try migrator.migrate(queue)                                     // 跑剩余（0007+0008）
         try queue.read { db in
-            #expect((try Int.fetchOne(db, sql: "PRAGMA user_version") ?? -1) == 5)   // 升级到 v5
+            #expect((try Int.fetchOne(db, sql: "PRAGMA user_version") ?? -1) == 6)   // 升级到 v6
             let hasReview = try Bool.fetchOne(db, sql:
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='review_archive'") ?? false
             #expect(hasReview)                                          // review_archive 建表

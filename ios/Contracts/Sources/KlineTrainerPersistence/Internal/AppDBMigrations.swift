@@ -200,6 +200,13 @@ enum AppDBMigrations {
             try db.execute(sql: "PRAGMA user_version = 5")
         }
 
+        // 0008：整改④ 训练记录画线 revealTick 持久化（v1.10）。additive：drawings 表加 reveal_tick 列。
+        // 只走 migration，不动 v1_4_baselineDDL/app_schema_v1.sql（v1.4 冻结基线，drift-checked）。
+        migrator.registerMigration("0008_v1.10_drawing_reveal_tick") { db in
+            try db.execute(sql: "ALTER TABLE drawings ADD COLUMN reveal_tick INTEGER NOT NULL DEFAULT 0")
+            try db.execute(sql: "PRAGMA user_version = 6")
+        }
+
         return migrator
     }
 }

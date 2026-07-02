@@ -51,11 +51,11 @@ enum RecordRepositoryImpl {
             let anchorsJSON = try jsonEncode(dr.anchors)
             try db.execute(sql: """
                 INSERT INTO drawings
-                  (record_id, tool_type, panel_position, is_extended, anchors)
-                VALUES (?, ?, ?, ?, ?)
+                  (record_id, tool_type, panel_position, is_extended, anchors, reveal_tick)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     recordId, dr.toolType.rawValue, dr.panelPosition,
-                    dr.isExtended ? 1 : 0, anchorsJSON
+                    dr.isExtended ? 1 : 0, anchorsJSON, dr.revealTick
                 ])
         }
 
@@ -169,7 +169,8 @@ enum RecordRepositoryImpl {
         let anchors: [DrawingAnchor] = try jsonDecode(anchorsJSON, as: [DrawingAnchor].self)
         let isExt: Int = row["is_extended"]
         return DrawingObject(toolType: tool, anchors: anchors,
-                             isExtended: isExt != 0, panelPosition: row["panel_position"])
+                             isExtended: isExt != 0, panelPosition: row["panel_position"],
+                             revealTick: row["reveal_tick"])
     }
 
     // MARK: - JSON helpers（共享给其它 *Impl.swift）
