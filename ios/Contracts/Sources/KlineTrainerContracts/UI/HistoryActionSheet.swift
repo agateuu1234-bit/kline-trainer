@@ -20,17 +20,20 @@ import SwiftUI
 public struct HistoryActionSheet: View {
     private let content: HistoryActionContent
     private let hasResumableReplay: Bool
+    private let hasReviewInProgress: Bool
     private let onReview: () -> Void
     private let onReplay: () -> Void
     private let onCancel: () -> Void
 
     public init(record: TrainingRecord,
                 hasResumableReplay: Bool,
+                hasReviewInProgress: Bool,
                 onReview: @escaping () -> Void,
                 onReplay: @escaping () -> Void,
                 onCancel: @escaping () -> Void) {
         self.content = HistoryActionContent(record: record)
         self.hasResumableReplay = hasResumableReplay
+        self.hasReviewInProgress = hasReviewInProgress
         self.onReview = onReview
         self.onReplay = onReplay
         self.onCancel = onCancel
@@ -43,6 +46,12 @@ public struct HistoryActionSheet: View {
     /// 本地宽松工具链漏报——PR #136 CI `swift test` 红即此因）。
     public nonisolated static func replayButtonTitle(hasResumableReplay: Bool) -> String {
         hasResumableReplay ? "返回训练" : "再次训练"
+    }
+
+    /// Task 12: 可测 static helper — 按是否有进行中复盘存档切换复盘钮文案。
+    /// `nonisolated`：同 `replayButtonTitle` 理由（纯函数，避免隐式 @MainActor 致非隔离测试编译红，PR#137 教训）。
+    public nonisolated static func reviewButtonTitle(inProgress: Bool) -> String {
+        inProgress ? "返回复盘" : "复盘"
     }
 
     public var body: some View {
@@ -61,9 +70,9 @@ public struct HistoryActionSheet: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.bottom, 8)
 
-                // D6: 复盘 → onReview
+                // D6: 复盘 → onReview；Task 12: 文案随 hasReviewInProgress 切换。
                 Button(action: onReview) {
-                    Text("复盘")
+                    Text(Self.reviewButtonTitle(inProgress: hasReviewInProgress))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
                 }
@@ -116,6 +125,7 @@ fileprivate extension TrainingRecord {
     HistoryActionSheet(
         record: .preview(),
         hasResumableReplay: false,
+        hasReviewInProgress: false,
         onReview: {},
         onReplay: {},
         onCancel: {}

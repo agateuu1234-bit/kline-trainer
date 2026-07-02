@@ -130,6 +130,11 @@ public final class AppRouter {
         coordinator.hasResumableReplay(recordId: id)
     }
 
+    /// Task 12: 镜像 hasResumableReplay，供 HistoryActionSheet 复盘钮文案切换。
+    public func hasReviewInProgress(id: Int64) -> Bool {
+        coordinator.hasReviewInProgress(recordId: id)
+    }
+
     public func openSettings() { activeModal = .settings }
 
     public func exitTraining() async {
