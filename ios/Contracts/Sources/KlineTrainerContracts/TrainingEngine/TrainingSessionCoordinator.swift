@@ -623,6 +623,12 @@ public final class TrainingSessionCoordinator {
         ((try? pendingReplayRepo.loadReplaySlotInfo()) ?? nil)?.recordId == recordId
     }
 
+    /// review-redesign Task 11：当前 replay 续局单槽归属的 recordId（供首页"再次训练中"角标）。
+    /// 镜像 `hasResumableReplay`：轻量 `loadReplaySlotInfo`（不解码 payload），try? 兜底 nil。
+    public func replaySlotRecordId() -> Int64? {
+        ((try? pendingReplayRepo.loadReplaySlotInfo()) ?? nil)?.recordId
+    }
+
     /// 新需求10：续局 replay。元数据先判归属→本记录全量解码→校验记录/文件名→open reader→按存档 tick/状态重建。
     /// 错误纪律：**本记录 loadReplay `.dbCorrupted` → durable clearReplay + nil（回退从头）**；
     /// **非 `.dbCorrupted` 的 loadReplay / loadRecordBundle / loadAllCandles / make 错误 → 传播**（不清、不 fresh）；

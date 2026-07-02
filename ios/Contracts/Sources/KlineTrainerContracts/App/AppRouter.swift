@@ -53,7 +53,8 @@ public final class AppRouter {
 
     static func emptyHome() -> HomeContent {
         HomeContent(statistics: (totalCount: 0, winCount: 0, currentCapital: 0),
-                    configuredCapital: 0, records: [], hasPending: false, hasCachedSets: false)
+                    configuredCapital: 0, records: [], hasPending: false, hasCachedSets: false,
+                    replaySlotRecordId: nil, reviewMarkers: [:])
     }
 
     public func loadHome() async {
@@ -62,10 +63,13 @@ public final class AppRouter {
             let stats = try recordRepo.statistics()
             let hasPending = (try pendingRepo.loadPending()) != nil
             let hasCached = !cache.listAvailable().isEmpty
+            let reviewMarkers = coordinator.loadReviewMarkers()
+            let replaySlotId = coordinator.replaySlotRecordId()
             self.records = recs
             self.homeContent = HomeContent(statistics: stats,
                                            configuredCapital: settings.settings.totalCapital,
-                                           records: recs, hasPending: hasPending, hasCachedSets: hasCached)
+                                           records: recs, hasPending: hasPending, hasCachedSets: hasCached,
+                                           replaySlotRecordId: replaySlotId, reviewMarkers: reviewMarkers)
         } catch {
             self.records = []
             self.homeContent = AppRouter.emptyHome()
