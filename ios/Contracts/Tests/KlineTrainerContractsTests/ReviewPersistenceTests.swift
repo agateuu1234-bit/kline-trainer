@@ -633,4 +633,104 @@ struct ReviewAutosaveFenceTests {
 
         #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings == [line(9)])
     }
+
+    // MARK: - codex whole-branch R3（high，data resurrection）：终态收尾后陈旧 background flush 不得复活
+    //
+    // 缺陷：`TrainingView` 在 scenePhase `.inactive/.background` 分支起一个 UNSTRUCTURED `Task`，捕获
+    // 当时的 `engine`，稍后才调 `flushReviewForBackground(engine:)`。若一个终态动作（`endReviewDiscard`/
+    // `abandonReview`/`backReview`）先完成收尾（working 已清或已提交、`endSession` 已跑），
+    // 该陈旧 Task 才轮到执行——此前 `flushReviewForBackground`/`persistReviewWorkingIfChanged` 只凭
+    // `reviewRecordId != nil` 判活，无法分辨"这颗 engine 是否还是当前活跃 session"，遂把陈旧 engine
+    // 内存里未清的 `reviewDrawings`（与 committed 基线不同）当净改动重新写回 working 行——用户已看到的
+    // 丢弃/保存又"复活"成`复盘中`。修复=双保险：① `endSession` 清 `reviewRecordId`/`reviewCommittedBaseline`；
+    // ② `persistReviewWorkingIfChanged`/`flushReviewForBackground` 顶部加 `activeEngine === engine` 身份闸。
+
+    // 1) 完整交错场景：先落一条 working（模拟画线未存），terminal `endReviewDiscard` 完成收尾（working 已清、
+    //    `reviewRecordId` 归 nil），随后陈旧 `flushReviewForBackground(engine: e)`（捕获的仍是同一个内存里
+    //    reviewDrawings 未变的 e）执行——必须 no-op，不得把 marker 从 `.saved` 又翻回 `.inProgress`。
+    @Test func staleFlushReviewForBackground_afterEndReviewDiscard_doesNotResurrectDiscardedWorking() async throws {
+        let h = try ReviewTestHarness.make()
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])   // 既有 saved 基线
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+
+        e.setReviewDrawingsForTesting([line(10), line(20)])            // 偏离 committed 基线
+        try h.coordinator.persistReviewWorkingIfChanged(engine: e)      // 模拟中途 autosave：落 working
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .inProgress)
+
+        // Terminal 动作先完成：discard working + endSession（reviewRecordId 归 nil，见 endSession 修复）。
+        try await h.coordinator.endReviewDiscard(engine: e)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .saved)
+
+        // 陈旧 background flush 才轮到执行：engine `e` 本身未被 discard/endSession 改动，
+        // `e.reviewDrawings` 仍是 [line(10), line(20)]（≠ 已清的 committed 基线）——必须 no-op。
+        await h.coordinator.flushReviewForBackground(engine: e)
+
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .saved)   // 未被翻回 .inProgress
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)       // 未被重新写入
+        #expect(try h.reviewRepo.loadSaved(recordId: h.seededRecordId) == [line(10)])  // saved 基线未被触碰
+    }
+
+    // 隔离验证 `endSession` 清 `reviewCommittedBaseline`（fix 1）本身：`reviewNetChanged()` 不经任何
+    // engine 身份闸——直接读 `activeEngine?.reviewDrawings ?? []` vs `reviewCommittedBaseline`。若终态
+    // 收尾后 `reviewCommittedBaseline` 残留非空陈旧基线，`activeEngine` 已 nil（working 侧退化为 []），
+    // 净改动判定会误判 `true`（非空 committed ≠ 空 working）——供 `ReviewEndPrompt` 用的
+    // `reviewNetChanged()` 会在无活跃会话时凭空报「有未保存改动」。本测试独立于 persist/flush 的
+    // `activeEngine === engine` 身份闸（那两处不覆盖 `reviewNetChanged()` 这条只读路径）。
+    @Test func endSession_clearsCommittedBaseline_reviewNetChangedFalseAfterTerminalTeardown() async throws {
+        let h = try ReviewTestHarness.make()
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])   // 非空 committed 基线
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+        #expect(h.coordinator.reviewNetChanged() == false)   // fresh：working==committed==[line(10)]
+
+        try await h.coordinator.endReviewDiscard(engine: e)   // 终态收尾：activeEngine→nil
+
+        #expect(h.coordinator.activeEngine == nil)
+        #expect(h.coordinator.reviewNetChanged() == false)    // 收尾后必须归零，非残留基线误判 true
+    }
+
+    // 同上，但 terminal 动作走 `abandonReview`（同类稳健放弃路径）。
+    @Test func staleFlushReviewForBackground_afterAbandonReview_doesNotResurrectDiscardedWorking() async throws {
+        let h = try ReviewTestHarness.make()
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])
+        let e = try await h.coordinator.review(recordId: h.seededRecordId)
+
+        e.setReviewDrawingsForTesting([line(10), line(30)])
+        try h.coordinator.persistReviewWorkingIfChanged(engine: e)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .inProgress)
+
+        await h.coordinator.abandonReview(engine: e)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .saved)
+
+        await h.coordinator.flushReviewForBackground(engine: e)
+
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .saved)
+        #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId) == nil)
+    }
+
+    // 2) 隔离验证「activeEngine === engine」身份闸本身（不依赖 endSession 清态）：人为把 `reviewRecordId`/
+    //    `reviewCommittedBaseline` 强制指回 A 记录（模拟"state 未被清"的极端场景），但 `activeEngine` 已经
+    //    是 B 记录的引擎——即便 guard 1（reviewRecordId != nil）会放行，身份闸也必须单独拦下 A 的陈旧写。
+    @Test func activeEngineIdentityGuard_blocksStaleEngine_evenWhenReviewRecordIdStillSet() async throws {
+        let h = try ReviewTestHarness.make()
+        let eA = try await h.coordinator.review(recordId: h.seededRecordId)   // activeEngine=eA, reviewRecordId=seeded
+        let idB = try h.recordRepo.insertRecord(secondFixtureRecord(), ops: [], drawings: [])
+        _ = try await h.coordinator.review(recordId: idB)                    // activeEngine 现在是 B 的引擎（≠ eA）
+
+        // 人为把复盘 session 态指回 A（模拟"未被清"的场景）：即便 reviewRecordId != nil 判活为真，
+        // activeEngine 已不是 eA。
+        h.coordinator.setReviewSessionForTesting(recordId: h.seededRecordId, committedBaseline: [])
+        eA.setReviewDrawingsForTesting([line(99)])                            // 陈旧 engine 内存中的"净改动"
+
+        try h.coordinator.persistReviewWorkingIfChanged(engine: eA)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .none)   // 身份闸拦下，未写
+
+        await h.coordinator.flushReviewForBackground(engine: eA)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .none)   // 同样拦下
+
+        // 对照：activeEngine 自己（B 的引擎）走同一路径应正常放行（证明身份闸只挡陈旧引擎，非全局失效）。
+        let eB = h.coordinator.activeEngine!
+        eB.setReviewDrawingsForTesting([line(77)])
+        try h.coordinator.persistReviewWorkingIfChanged(engine: eB)
+        #expect(try h.reviewRepo.reviewMarker(recordId: h.seededRecordId) == .inProgress)   // 写的是当前指回的 seeded id
+    }
 }

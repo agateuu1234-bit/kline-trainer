@@ -747,7 +747,15 @@ public final class TrainingSessionCoordinator {
         autosaveErrorGeneration = 0                  // codex-13a-F1：归零失败计数（新局从 0 起）
         ticksSinceAutosave = 0
         reviewSessionToken = nil    // Task 7：软栅栏（同 terminating 范式）——陈旧排队 review autosave 靠 token 失效自然早退
+        reviewAutosaveTask?.cancel()
         reviewAutosaveTask = nil
+        // codex whole-branch R3（high，data resurrection）：清复盘 session 态本身——`flushReviewForBackground`
+        // 此前只凭 `reviewRecordId != nil` 判活，若一枚在 endSession 前排队的后台 flush Task 捕获了旧
+        // engine，在 endReviewDiscard/abandonReview/backReview 收尾之后才跑到，会拿这两个陈旧字段把已丢弃/
+        // 已提交的工作态当"净改动"重新写回 working 行（用户已看到的丢弃/保存又"复活"）。终态收尾后二者必须
+        // 归位，使该陈旧 flush 命中下面的早退 guard（no-op）。
+        reviewRecordId = nil
+        reviewCommittedBaseline = []
         activeReader?.close()
         activeReader = nil
         activeEngine = nil
@@ -803,6 +811,11 @@ public final class TrainingSessionCoordinator {
     /// 复盘中按需持久化：有净改动（vs committed 基线）→ 写 working（`stepTick`=当前 tick）；
     /// 无净改动 → 清 working（回退到 committed：saved 或删行）。无复盘 session（`reviewRecordId`==nil）→ no-op。
     public func persistReviewWorkingIfChanged(engine: TrainingEngine) throws {
+        // codex whole-branch R3（high）：central review_archive 写者身份闸——`autosaveReview` 与
+        // `flushReviewForBackground` 均汇聚于此。一枚捕获了旧（已被终态收尾丢弃/提交）engine 的陈旧
+        // Task 即便 `reviewRecordId` 判活失败前碰巧未被 endSession 清（或跨 session 撞见另一局同名 id 的
+        // 边界情况），身份不符也在此再拦一次，绝不用非当前活跃 engine 的数据落 review_archive。
+        guard activeEngine === engine else { return }
         guard let id = reviewRecordId else { return }
         if ReviewNetChange.changed(working: engine.reviewDrawings, committed: reviewCommittedBaseline) {
             try reviewArchiveRepo.saveWorking(recordId: id, stepTick: engine.tick.globalTickIndex,
@@ -906,7 +919,10 @@ public final class TrainingSessionCoordinator {
     /// 镜像 normal `flushAutosave` 对失败静默处理——后台无法弹重试提示）。非 review 模式或无复盘 session
     /// （`reviewRecordId == nil`）→ no-op。
     public func flushReviewForBackground(engine: TrainingEngine) async {
-        guard engine.flow.mode == .review, reviewRecordId != nil else { return }
+        // codex whole-branch R3（high）：同一身份闸提前到入口——陈旧 engine（session 已终态收尾，
+        // `activeEngine` 已变）即便 `reviewRecordId` 判活仍为真（例如已切到另一复盘 session），也不该
+        // 去 cancel/drain **当前**活跃 session 的 `reviewAutosaveTask`，更不该继续往下写。
+        guard activeEngine === engine, engine.flow.mode == .review, reviewRecordId != nil else { return }
         reviewAutosaveTask?.cancel()
         await reviewAutosaveTask?.value
         reviewAutosaveTask = nil
