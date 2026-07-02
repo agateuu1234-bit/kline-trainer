@@ -183,6 +183,23 @@ enum AppDBMigrations {
             try db.execute(sql: "PRAGMA user_version = 4")
         }
 
+        // 0007：复盘存档 per-record（review-redesign RFC，v1.9）。additive：新建 review_archive
+        // 单记录行表（record_id PK + ON DELETE CASCADE）。working 两列同生同灭由 CHECK 强制（防半行）。
+        // 只走 migration，不动 v1_4_baselineDDL / app_schema_v1.sql（v1.4 冻结基线，drift-checked）。
+        migrator.registerMigration("0007_v1.9_review_archive") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS review_archive (
+                    record_id INTEGER PRIMARY KEY REFERENCES training_records(id) ON DELETE CASCADE,
+                    saved_drawings TEXT,
+                    working_step_tick INTEGER,
+                    working_drawings TEXT,
+                    updated_at INTEGER NOT NULL,
+                    CHECK ((working_step_tick IS NULL) = (working_drawings IS NULL))
+                )
+                """)
+            try db.execute(sql: "PRAGMA user_version = 5")
+        }
+
         return migrator
     }
 }

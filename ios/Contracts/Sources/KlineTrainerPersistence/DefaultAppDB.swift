@@ -260,12 +260,18 @@ public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayReposito
     /// 单事务：清 pending + 清 pending_replay + setTotalCapital（**保留**历史记录）。
     /// RFC-A：去掉 deleteAll（推翻 #123），重置只清未完成对局 + 置资金；历史记录保留。
     /// 新需求10(A6)：reset 连带清 pending_replay（无条件清，reset 清全局状态）。
+    /// review-redesign：reset 连带清 review_archive 的 working（未完成复盘），**保留** saved（已保存复盘存档）
+    /// ——记录本身保留 → 复盘存档也保留；**禁止**整表 DELETE review_archive（会丢已保存复盘）。
     /// dbQueue.write 即事务边界 —— 任一步抛错整体 rollback（要么都成要么都不成）。
     public func resetAllTrainingProgress(toCapital: Double) throws {
         do {
             try dbQueue.write { db in
                 try PendingTrainingRepositoryImpl.clearPending(db)
                 try PendingReplayRepositoryImpl.clearReplay(db)     // 新需求10(A6)：reset 连带清 replay 槽
+                // review-redesign：reset 清未完成复盘（working），保留已保存复盘存档（saved，记录留存 → 复盘留存）
+                try db.execute(sql: "UPDATE review_archive SET working_step_tick = NULL, working_drawings = NULL, updated_at = ? WHERE working_step_tick IS NOT NULL",
+                               arguments: [Int64(Date().timeIntervalSince1970)])
+                try db.execute(sql: "DELETE FROM review_archive WHERE working_step_tick IS NULL AND saved_drawings IS NULL")
                 try SettingsDAOImpl.setTotalCapital(db, toCapital)
             }
         } catch let appErr as AppError { throw appErr }

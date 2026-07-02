@@ -74,7 +74,7 @@ final class TrainingResetPortTests: XCTestCase {
         XCTAssertEqual(counts.1, 1)
         XCTAssertEqual(counts.2, 1)
         let uv: Int = try queue.read { d in try Int.fetchOne(d, sql: "PRAGMA user_version") ?? -1 }
-        XCTAssertEqual(uv, 4)   // 0006 后完整 migrator 终态 = 4（纯数据操作，无额外迁移）
+        XCTAssertEqual(uv, 5)   // 0007 后完整 migrator 终态 = 5（纯数据操作，无额外迁移）
     }
 
     // 幂等：空库重置也合法，只确保 capital。
@@ -122,5 +122,67 @@ final class TrainingResetPortTests: XCTestCase {
         XCTAssertEqual(try db.statistics().totalCount, 1)
         XCTAssertNotNil(try db.loadPending())
         XCTAssertEqual(try db.loadSettings().totalCapital, 123_456)
+    }
+
+    // review-redesign：reset 只清 working 复盘、保留 saved 复盘存档（禁止整表 DELETE）。
+    // 记录 1（saved+working）→ working 清、saved 留；记录 2（仅 working）→ 行删；记录 3（仅 saved）→ 不动。
+    private func minimalRecord(createdAt: Int64) -> TrainingRecord {
+        TrainingRecord(
+            id: nil, trainingSetFilename: "t.sqlite", createdAt: createdAt,
+            stockCode: "000001", stockName: "测试", startYear: 2020, startMonth: 3,
+            totalCapital: 100_000, profit: 0, returnRate: 0,
+            maxDrawdown: 0, buyCount: 0, sellCount: 0,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            finalTick: 0)
+    }
+
+    func test_reset_preserves_saved_review_clears_working_only() throws {
+        let recA = try db.insertRecord(minimalRecord(createdAt: 1), ops: [], drawings: [])
+        let recB = try db.insertRecord(minimalRecord(createdAt: 2), ops: [], drawings: [])
+        let recC = try db.insertRecord(minimalRecord(createdAt: 3), ops: [], drawings: [])
+        try db.dbQueue.write { d in
+            // 记录 1：saved + working 都有
+            try d.execute(sql: """
+                INSERT INTO review_archive (record_id, saved_drawings, working_step_tick, working_drawings, updated_at)
+                VALUES (?, '[]', 5, '[]', 0)
+                """, arguments: [recA])
+            // 记录 2：仅 working（无 saved）
+            try d.execute(sql: """
+                INSERT INTO review_archive (record_id, saved_drawings, working_step_tick, working_drawings, updated_at)
+                VALUES (?, NULL, 5, '[]', 0)
+                """, arguments: [recB])
+            // 记录 3：仅 saved（无 working）
+            try d.execute(sql: """
+                INSERT INTO review_archive (record_id, saved_drawings, working_step_tick, working_drawings, updated_at)
+                VALUES (?, '[]', NULL, NULL, 0)
+                """, arguments: [recC])
+        }
+
+        try db.resetAllTrainingProgress(toCapital: 100_000)
+
+        try db.dbQueue.read { d in
+            // 记录 1：working 清空，saved 留存 → 行仍在
+            let rowA = try Row.fetchOne(d, sql:
+                "SELECT saved_drawings, working_step_tick, working_drawings FROM review_archive WHERE record_id = ?",
+                arguments: [recA])
+            XCTAssertNotNil(rowA, "记录 1 saved 存在，行不应被删")
+            XCTAssertEqual(rowA?["saved_drawings"], "[]")
+            XCTAssertNil(rowA?["working_step_tick"] as Int64?)
+            XCTAssertNil(rowA?["working_drawings"] as String?)
+
+            // 记录 2：无 saved，working 清空后行应删除
+            let rowB = try Row.fetchOne(d, sql:
+                "SELECT * FROM review_archive WHERE record_id = ?", arguments: [recB])
+            XCTAssertNil(rowB, "记录 2 无 saved，working 清后应整行删除")
+
+            // 记录 3：无 working，不应被本次 reset 触碰
+            let rowC = try Row.fetchOne(d, sql:
+                "SELECT saved_drawings, working_step_tick, working_drawings FROM review_archive WHERE record_id = ?",
+                arguments: [recC])
+            XCTAssertNotNil(rowC, "记录 3 应不受影响")
+            XCTAssertEqual(rowC?["saved_drawings"], "[]")
+            XCTAssertNil(rowC?["working_step_tick"] as Int64?)
+            XCTAssertNil(rowC?["working_drawings"] as String?)
+        }
     }
 }
