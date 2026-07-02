@@ -262,9 +262,9 @@ public final class TrainingEngine {
 
     // MARK: - 派生 accessor（只读纯值计算属性；买卖可用门见 E5b / D4）
 
-    /// 现价：复用 Task 1 的静态 `price(...)`，固定 `.m3` 驱动序列（D2 / codex R4-F2）。
+    /// 现价：`tick.globalTickIndex` 处的 `markPrice`（D2 / codex R4-F2）。
     public var currentPrice: Double {
-        TrainingEngine.price(in: allCandles, atTick: tick.globalTickIndex)
+        markPrice(atTick: tick.globalTickIndex)
     }
 
     /// review-redesign Task 6：复盘引擎播种 `reviewDrawings`（committed 基线 或 resume 的 working 画线集）
@@ -273,9 +273,8 @@ public final class TrainingEngine {
     /// 本 setter 作初始播种入口。
     public func setReviewDrawings(_ ds: [DrawingObject]) { reviewDrawings = ds }
 
-    /// review-redesign Task 6 最小占位：复盘引擎入口终局校验（`ReviewLedger.state` 的 `markPriceAtTick`）
-    /// 复用的取价入口。当前实现等价 `currentPrice`（`.m3` 收盘、越界钳到末根、非 nil）。
-    /// **Task 9 将统一 currentPrice/markPrice 收口**（详见 task-6-report.md）。
+    /// 规范 mark price（Task 9 收口）：global tick `t` 处 `.m3` 收盘价，越界 clamp 到端根、非 nil。
+    /// `currentPrice`／`ReviewLedger.state` 的 `markPriceAtTick`／finalize 三处共用同一入口，杜绝重复实现漂移。
     public func markPrice(atTick t: Int) -> Double {
         TrainingEngine.price(in: allCandles, atTick: t)
     }
