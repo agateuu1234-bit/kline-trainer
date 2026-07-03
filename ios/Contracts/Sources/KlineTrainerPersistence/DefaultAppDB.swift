@@ -10,7 +10,7 @@ import KlineTrainerContracts
 /// - 4 个 protocol surface 用 4 个 extension 分别实现
 /// - 所有 GRDB 错误在 extension 边界 `try ... catch` 通过 PersistenceErrorMapping.translate
 /// - init 时同步跑 AppDBMigrations.makeMigrator().migrate(queue) → 失败抛 AppError
-public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayRepository {
+public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayRepository, ReviewArchiveRepository {
 
     /// 唯一 GRDB queue；所有 4 个 protocol 方法共享。internal 给 same-target tests 看。
     let dbQueue: DatabaseQueue
@@ -223,6 +223,59 @@ public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayReposito
         catch { throw PersistenceErrorMapping.translate(error) }
     }
 
+    // MARK: - ReviewArchiveRepository
+
+    public func loadArchive(recordId: Int64) throws -> ReviewArchive? {
+        do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.loadArchive($0, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func loadWorking(recordId: Int64) throws -> ReviewWorking? {
+        do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.loadWorking($0, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func loadSaved(recordId: Int64) throws -> [DrawingObject]? {
+        do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.loadSaved($0, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func saveWorking(recordId: Int64, stepTick: Int, drawings: [DrawingObject]) throws {
+        do {
+            try dbQueue.write { db in
+                try ReviewArchiveRepositoryImpl.saveWorking(db, recordId: recordId, stepTick: stepTick, drawings: drawings)
+            }
+        } catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func commitSaved(recordId: Int64, drawings: [DrawingObject]) throws {
+        do {
+            try dbQueue.write { db in
+                try ReviewArchiveRepositoryImpl.commitSaved(db, recordId: recordId, drawings: drawings)
+            }
+        } catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func clearWorking(recordId: Int64) throws {
+        do { try dbQueue.write { db in try ReviewArchiveRepositoryImpl.clearWorking(db, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func clearSaved(recordId: Int64) throws {
+        do { try dbQueue.write { db in try ReviewArchiveRepositoryImpl.clearSaved(db, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func loadMarkers() throws -> [Int64: ReviewMarker] {
+        do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.loadMarkers($0) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func reviewMarker(recordId: Int64) throws -> ReviewMarker {
+        do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.reviewMarker($0, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
     // MARK: - SettingsDAO
 
     public func loadSettings() throws -> AppSettings {
@@ -260,12 +313,18 @@ public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayReposito
     /// 单事务：清 pending + 清 pending_replay + setTotalCapital（**保留**历史记录）。
     /// RFC-A：去掉 deleteAll（推翻 #123），重置只清未完成对局 + 置资金；历史记录保留。
     /// 新需求10(A6)：reset 连带清 pending_replay（无条件清，reset 清全局状态）。
+    /// review-redesign：reset 连带清 review_archive 的 working（未完成复盘），**保留** saved（已保存复盘存档）
+    /// ——记录本身保留 → 复盘存档也保留；**禁止**整表 DELETE review_archive（会丢已保存复盘）。
     /// dbQueue.write 即事务边界 —— 任一步抛错整体 rollback（要么都成要么都不成）。
     public func resetAllTrainingProgress(toCapital: Double) throws {
         do {
             try dbQueue.write { db in
                 try PendingTrainingRepositoryImpl.clearPending(db)
                 try PendingReplayRepositoryImpl.clearReplay(db)     // 新需求10(A6)：reset 连带清 replay 槽
+                // review-redesign：reset 清未完成复盘（working），保留已保存复盘存档（saved，记录留存 → 复盘留存）
+                try db.execute(sql: "UPDATE review_archive SET working_step_tick = NULL, working_drawings = NULL, updated_at = ? WHERE working_step_tick IS NOT NULL",
+                               arguments: [Int64(Date().timeIntervalSince1970)])
+                try db.execute(sql: "DELETE FROM review_archive WHERE working_step_tick IS NULL AND saved_drawings IS NULL")
                 try SettingsDAOImpl.setTotalCapital(db, toCapital)
             }
         } catch let appErr as AppError { throw appErr }

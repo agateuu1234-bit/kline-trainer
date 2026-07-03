@@ -38,6 +38,11 @@ public struct TrainingView: View {
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
     @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
     @State private var crosshairOwner: PanelId? = nil  // RFC-C：当前持十字光标的面板（跨面板互斥，同时只一个图有光标）
+    // review-redesign Task 13：复盘「结束」保存弹窗 + 专用失败态（不复用 backFailed——那会误走
+    // lifecycle.back()=review no-op saveProgress，丢已 drain 的 saved）。
+    @State private var confirmingEndReview = false
+    private enum ReviewEndAction { case back, save, discard }
+    @State private var reviewFailedAction: ReviewEndAction?
 
     public init(lifecycle: TrainingSessionLifecycle,
                 onExit: @escaping () -> Void,
@@ -58,96 +63,31 @@ public struct TrainingView: View {
     // 与 showsTradeButtons 互斥：正常/Replay 时 canBuySell=true → showsReviewControls=false；
     // Review 时 canBuySell=false + canAdvance=true → showsReviewControls=true。
     private var showsReviewControls: Bool { engine.flow.canAdvance() && !engine.flow.canBuySell() }
+    // review-redesign Task 13：画线门控与交易门控解耦——复盘不可交易(showsTradeButtons==false)但仍可画线
+    // （routeDrawingCommit/appendReviewDrawing 写 reviewDrawings 层，Task 10 已接线）。买卖条仍严格仅
+    // showsTradeButtons（不受本谓词影响）。
+    private var showsDrawingTools: Bool { showsTradeButtons || engine.flow.mode == .review }
 
     /// 某 panel 当前下单周期（codex R2-high：买卖条捕获/比对用）。
     private func currentPeriod(of id: PanelId) -> Period {
         id == .upper ? engine.upperPanel.period : engine.lowerPanel.period
     }
 
-    // 顺位 4：上栏是否在画线模式（按钮选中态 + toggle 语义）。
+    // review-redesign Task 4：选中面板（activePanel）是否在画线模式（按钮选中态 + toggle 语义）；
+    // 双面板互斥核心逻辑落在 host 可测的 engine.toggleDrawingExclusive（薄壳仅转调）。
     private var isDrawingActive: Bool {
-        if case .drawing = engine.upperPanel.interactionMode { return true }
-        return false
+        engine.isDrawingActive(on: activePanel)
     }
     private func toggleDrawing() {
-        if isDrawingActive {
-            engine.cancelDrawing(panel: .upper)
-        } else {
-            engine.activateDrawingTool(.horizontal, panel: .upper)
-        }
+        engine.toggleDrawingExclusive(on: activePanel)
     }
 
+    // codex/W3-review-redesign-Task10：body 原是单个巨型 modifier 链——加一条 `.onChange` 后编译器
+    // "unable to type-check this expression in reasonable time"（Catalyst build-for-testing 实测超时失败）。
+    // 拆成 `trainingContent`（VStack + 全部 onAppear/onChange） + `body`（alert/confirmationDialog/toast/overlay）
+    // 两段各自独立类型检查，纯行为中性重构（无逻辑改动，仅表达式分割）。
     public var body: some View {
-        VStack(spacing: 0) {
-            topBar
-            panel(.upper)
-            Divider()
-            panel(.lower)
-            if showsTradeButtons {
-                TradeActionBar(
-                    content: TradeActionBarContent(price: engine.currentPrice),
-                    upperPeriod: engine.upperPanel.period,
-                    lowerPeriod: engine.lowerPanel.period,
-                    activePanel: $activePanel,
-                    buyEnabled: engine.buyEnabled,
-                    sellEnabled: engine.sellEnabled,
-                    holdLabel: engine.position.shares > 0 ? "持有" : "观察",
-                    onBuy:  { tradeStrip = TradeStripRequest(panel: activePanel, action: .buy, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
-                    onSell: { tradeStrip = TradeStripRequest(panel: activePanel, action: .sell, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
-                    onHold: { engine.holdOrObserve(panel: activePanel) })
-            } else if showsReviewControls {
-                // B4：复盘控件条——仅 Review 可步进态显示（canAdvance && !canBuySell）。
-                ReviewControlBar(showsJumpToEnd: engine.flow.canJumpToEnd()) { action in
-                    switch action {
-                    case .step:      engine.stepReviewForward()   // 逐根步进（B2）
-                    case .jumpToEnd: engine.jumpToEnd()            // 快进到结尾（B2）
-                    }
-                }
-            }
-        }
-        .onAppear { maybeAutoEnd() }                                            // M2：resume-at-maxTick
-        .onChange(of: activePanel) { _, _ in
-            // RFC-B(codex R1-medium 修)：切分段钮(下单目标 panel)即清掉打开的买卖档位条——
-            // 否则条内捕获的 strip.panel 会过期（条显示在旧 panel、成交也按旧 panel），
-            // 切目标后再选档会对错 panel 下单（autosave 后不可逆）。切目标=取消未确认下单。
-            tradeStrip = nil
-        }
-        // codex R2-high：周期也能被两指上下滑手势改（switchPeriodCombo 改 panel.period，activePanel 不变）→
-        // 同样清掉打开的买卖条，防对新周期下单。与上面的执行时守卫(onPick)双保险。
-        .onChange(of: engine.upperPanel.period) { _, _ in tradeStrip = nil; lifecycle.autosave(immediate: false) }
-        .onChange(of: engine.lowerPanel.period) { _, _ in tradeStrip = nil; lifecycle.autosave(immediate: false) }
-        .onChange(of: engine.tick.globalTickIndex) { _, _ in
-            tradeStrip = nil                                    // codex R3-high：tick 推进(含持有/观察)即作废未确认买卖条，防按新 tick 价成交
-            lifecycle.autosave(immediate: false)                // §4.6：tick 推进按 N 节流
-            maybeAutoEnd()
-        }                                                       // D4/D5
-        .onChange(of: scenePhase) { _, newPhase in
-            switch newPhase {
-            case .active:
-                engine.onSceneActivated()                       // modules §U2 既有动画链（不替换）
-                // codex-13a-R2：回前台重放未确认的 autosave 失败。后台 flush 失败时 generation observer
-                // 在 app 不可见时已弹过 toast 并 2s 过期 → 用户回前台无感知「进度可能未落盘」。banner 仍置位
-                // （仅成功/endSession/reset 清），故此处重放使其在可见时呈现。非阻塞、不 teardown。
-                if let e = lifecycle.coordinator.autosaveBannerError, e.shouldShowToast {
-                    presentToast(e.userMessage)
-                }
-            case .inactive, .background:
-                Task { await lifecycle.flushForBackground() }   // §4.6 item4：失活/后台立即 flush（OS 可能随后杀进程）
-            @unknown default:
-                break
-            }
-        }
-        .onChange(of: engine.drawings.count) { _, _ in
-            lifecycle.autosave(immediate: true)                 // §4.6：画线即存（commit/delete 不推 tick，D9）
-        }
-        .onChange(of: lifecycle.coordinator.autosaveErrorGeneration) { _, _ in
-            // §B.2 + codex-13a-F1：观察失败**计数**（非错误值）——每次失败都递增 → 重复同一错误也 surface，
-            // 持久故障（如磁盘满每 tick 失败）保持可见，非首条 toast 过期即静默。非阻塞、不 teardown
-            // （与 finalize 失败 blocking alert 区分）。shouldShowToast 过滤 .internalError 等。
-            if let e = lifecycle.coordinator.autosaveBannerError, e.shouldShowToast {
-                presentToast(e.userMessage)
-            }
-        }
+        trainingContent
         .alert("结算入账失败", isPresented: $finalizeFailed) {
             Button("重试") { runFinalize() }
             // 放弃 = durable discard（fence→清 pending→关 reader→回首页，§4.7e）
@@ -207,32 +147,172 @@ public struct TrainingView: View {
             Button("是", role: .destructive) { endManually() }
             Button("否", role: .cancel) {}
         }
+        // review-redesign Task 13：复盘「结束」仅在有净改动时弹（ReviewEndPrompt.shouldPrompt 门控于 action 内）。
+        .confirmationDialog("结束复盘", isPresented: $confirmingEndReview, titleVisibility: .visible) {
+            Button("保存") { performReviewEnd(.save) }
+            Button("不保存", role: .destructive) { performReviewEnd(.discard) }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("是否保存本次复盘记录？")
+        }
+        // 专用 review 失败态（不复用 backFailed）：重试调**同一个**失败的动作，放弃=丢弃工作副本退出
+        // （已保存的复盘存档不受影响）。
+        .alert("复盘保存失败", isPresented: Binding(
+            get: { reviewFailedAction != nil },
+            set: { if !$0 { reviewFailedAction = nil } })) {
+            Button("重试") {
+                if let action = reviewFailedAction {
+                    reviewFailedAction = nil
+                    performReviewEnd(action)
+                }
+            }
+            // codex whole-branch R2（medium）：不用 `try? endReviewDiscard`——若其内部 clearWorking 抛错，
+            // endSession 从未执行，会话/reader 泄漏。改用 `abandonReview`：恒收尾会话，清档失败也不阻断退出。
+            Button("放弃", role: .destructive) {
+                reviewFailedAction = nil
+                guard !exitInFlight else { return }
+                exitInFlight = true
+                Task {
+                    defer { exitInFlight = false }
+                    await lifecycle.abandonReview(engine: engine)
+                    onExit()
+                }
+            }
+        } message: {
+            Text("复盘进度未能写入。可重试，或放弃本次复盘改动退出（已保存的复盘存档不受影响）。")
+        }
         .toastOverlay(toast.message)             // §B.1 复用呈现壳（消费 ToastState.message）
         .overlay(alignment: .topLeading) {
-            if showsTradeButtons {
+            if showsDrawingTools {
                 DrawingToolFloatingView(isDrawingActive: isDrawingActive, onToggleTool: toggleDrawing)
+            }
+        }
+    }
+
+    /// body 前半段（拆分见 body 顶部注释）：主内容 VStack + 全部 onAppear/onChange 中继。
+    private var trainingContent: some View {
+        VStack(spacing: 0) {
+            topBar
+            panel(.upper)
+            Divider()
+            panel(.lower)
+            if showsTradeButtons {
+                TradeActionBar(
+                    content: TradeActionBarContent(price: engine.currentPrice),
+                    upperPeriod: engine.upperPanel.period,
+                    lowerPeriod: engine.lowerPanel.period,
+                    activePanel: $activePanel,
+                    buyEnabled: engine.buyEnabled,
+                    sellEnabled: engine.sellEnabled,
+                    holdLabel: engine.position.shares > 0 ? "持有" : "观察",
+                    onBuy:  { tradeStrip = TradeStripRequest(panel: activePanel, action: .buy, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
+                    onSell: { tradeStrip = TradeStripRequest(panel: activePanel, action: .sell, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
+                    onHold: { engine.holdOrObserve(panel: activePanel) })
+            } else if showsReviewControls {
+                // B4：复盘控件条——仅 Review 可步进态显示（canAdvance && !canBuySell）。
+                // Task 8：训练底栏样式重设计——[上图|下图]分段器选中面板即「下一根」步进的目标面板。
+                ReviewControlBar(showsJumpToEnd: engine.flow.canJumpToEnd(),
+                                 price: engine.currentPrice,
+                                 upperPeriod: engine.upperPanel.period,
+                                 lowerPeriod: engine.lowerPanel.period,
+                                 activePanel: $activePanel) { action in
+                    switch action {
+                    case .step:      engine.stepReviewForward(panel: activePanel)   // 逐根步进（Task 4 panel 重载）
+                    case .jumpToEnd: engine.jumpToEnd()            // 快进到结尾（B2）
+                    }
+                }
+            }
+        }
+        .onAppear {
+            maybeAutoEnd()                                                       // M2：resume-at-maxTick
+            // review-redesign Task 13：进复盘时若 Task 6 已自动清掉损坏 saved 存档，一次性 toast 告知。
+            if engine.flow.mode == .review && lifecycle.coordinator.pendingReviewCorruptToast {
+                presentToast("复盘存档损坏已清除，可重新复盘保存")
+                lifecycle.coordinator.clearPendingReviewCorruptToast()
+            }
+        }
+        .onChange(of: activePanel) { _, _ in
+            // RFC-B(codex R1-medium 修)：切分段钮(下单目标 panel)即清掉打开的买卖档位条——
+            // 否则条内捕获的 strip.panel 会过期（条显示在旧 panel、成交也按旧 panel），
+            // 切目标后再选档会对错 panel 下单（autosave 后不可逆）。切目标=取消未确认下单。
+            tradeStrip = nil
+            // review-redesign Task 4：切分段钮同样退出画线态（双面板互斥，防旧面板 drawing 残留悬空）。
+            engine.cancelDrawingAllPanels()
+        }
+        // codex R2-high：周期也能被两指上下滑手势改（switchPeriodCombo 改 panel.period，activePanel 不变）→
+        // 同样清掉打开的买卖条，防对新周期下单。与上面的执行时守卫(onPick)双保险。
+        .onChange(of: engine.upperPanel.period) { _, _ in tradeStrip = nil; lifecycle.autosave(immediate: false) }
+        .onChange(of: engine.lowerPanel.period) { _, _ in tradeStrip = nil; lifecycle.autosave(immediate: false) }
+        .onChange(of: engine.tick.globalTickIndex) { _, _ in
+            tradeStrip = nil                                    // codex R3-high：tick 推进(含持有/观察)即作废未确认买卖条，防按新 tick 价成交
+            lifecycle.autosave(immediate: false)                // §4.6：tick 推进按 N 节流（review 恒 no-op，shouldPersistProgress==false）
+            if engine.flow.mode == .review { lifecycle.autosaveReview(engine: engine) }   // Task 13：复盘步进即存
+            maybeAutoEnd()
+        }                                                       // D4/D5
+        .onChange(of: scenePhase) { _, newPhase in
+            switch newPhase {
+            case .active:
+                engine.onSceneActivated()                       // modules §U2 既有动画链（不替换）
+                // codex-13a-R2：回前台重放未确认的 autosave 失败。后台 flush 失败时 generation observer
+                // 在 app 不可见时已弹过 toast 并 2s 过期 → 用户回前台无感知「进度可能未落盘」。banner 仍置位
+                // （仅成功/endSession/reset 清），故此处重放使其在可见时呈现。非阻塞、不 teardown。
+                if let e = lifecycle.coordinator.autosaveBannerError, e.shouldShowToast {
+                    presentToast(e.userMessage)
+                }
+            case .inactive, .background:
+                Task {
+                    await lifecycle.flushForBackground()        // §4.6 item4：失活/后台立即 flush（OS 可能随后杀进程）
+                    // codex whole-branch R1：review 的 autosave 只走排队 `autosaveReview`（上面这条对 review no-op），
+                    // 须单独 flush，否则未排空的画线/步进改动可能随进程被杀丢失。
+                    if engine.flow.mode == .review { await lifecycle.flushReviewForBackground(engine: engine) }
+                }
+            @unknown default:
+                break
+            }
+        }
+        .onChange(of: engine.drawings.count) { _, _ in
+            lifecycle.autosave(immediate: true)                 // §4.6：画线即存（commit/delete 不推 tick，D9）
+        }
+        .onChange(of: engine.reviewDrawings.count) { _, _ in
+            // review-redesign Task 10：复盘新画线走 reviewDrawings（非 drawings），故上面那条 onChange 不触发；
+            // 镜像同款「画线即存」语义，改调 autosaveReview（Task 7）。非 review 模式下 reviewDrawings 恒不变，no-op。
+            lifecycle.autosaveReview(engine: engine)
+        }
+        .onChange(of: lifecycle.coordinator.autosaveErrorGeneration) { _, _ in
+            // §B.2 + codex-13a-F1：观察失败**计数**（非错误值）——每次失败都递增 → 重复同一错误也 surface，
+            // 持久故障（如磁盘满每 tick 失败）保持可见，非首条 toast 过期即静默。非阻塞、不 teardown
+            // （与 finalize 失败 blocking alert 区分）。shouldShowToast 过滤 .internalError 等。
+            if let e = lifecycle.coordinator.autosaveBannerError, e.shouldShowToast {
+                presentToast(e.userMessage)
             }
         }
     }
 
     private var topBar: some View {
         let rec = lifecycle.activeRecord
-        // codex whole-branch R4-F1：review 步进时显起始本金+0%（防剧透最终成绩）；到结尾或非 review 模式显真实值。
+        // Task 9：review 顶栏读 ReviewLedger 截至当前 tick 的运行值（替换 #136 R4「隐藏最终成绩」行为——
+        // 复盘现在全程显示运行 P&L，非结局才揭示）。ops fold 已由 Task 6 入口校验保证干净，
+        // 逐帧 try? 仅保编译期非 throw，永不触发 nil 兜底。normal/replay 仍直接用 engine 派生值。
+        let isReview = engine.flow.mode == .review
+        let ledger: ReviewLedgerState? = isReview
+            ? (try? ReviewLedger.state(atTick: engine.tick.globalTickIndex, ops: engine.tradeOperations,
+                                       initialCapital: engine.initialCapital,
+                                       markPriceAtTick: { engine.markPrice(atTick: $0) }))
+            : nil
         let bar = TrainingTopBarContent(
-            totalCapital: TrainingTopBarContent.reviewAwareCapital(
-                mode: engine.flow.mode, isAtEnd: lifecycle.isAtEnd,
-                initialCapital: engine.initialCapital, currentTotalCapital: engine.currentTotalCapital),
+            totalCapital: ledger?.totalCapital ?? engine.currentTotalCapital,
             initialCapital: engine.initialCapital,
-            averageCost: engine.position.averageCost,
-            shares: engine.position.shares,
-            returnRate: TrainingTopBarContent.reviewAwareReturnRate(
-                mode: engine.flow.mode, isAtEnd: lifecycle.isAtEnd,
-                actualReturnRate: engine.returnRate),
-            positionTier: engine.currentPositionTier,
+            averageCost: ledger?.averageCost ?? engine.position.averageCost,
+            shares: ledger?.shares ?? engine.position.shares,
+            returnRate: ledger?.returnRate ?? engine.returnRate,
+            positionTier: ledger?.positionTier ?? engine.currentPositionTier,
             stockName: rec?.stockName, stockCode: rec?.stockCode)
         return VStack(spacing: 6) {
             HStack {
                 Button("返回") {
+                    // Task 13：review 走专用保存分支（失败进专用 alert，重试同动作——不误走 lifecycle.back()
+                    // 那是 review no-op saveProgress，会丢掉已 drain 的 saved）。
+                    if isReview { performReviewEnd(.back); return }
                     guard !exitInFlight else { return }
                     exitInFlight = true
                     Task {
@@ -248,8 +328,19 @@ public struct TrainingView: View {
                     Button("结束") { confirmingEnd = true }
                         .font(.callout).tint(.red)
                         .accessibilityLabel("结束本局")
+                } else if isReview {
+                    // Task 13：复盘「结束」——有净改动才弹保存确认，无改动直接丢弃退出。
+                    Button("结束") {
+                        if ReviewEndPrompt.shouldPrompt(netChanged: lifecycle.reviewNetChanged()) {
+                            confirmingEndReview = true
+                        } else {
+                            performReviewEnd(.discard)
+                        }
+                    }
+                    .font(.callout).tint(.red)
+                    .accessibilityLabel("结束复盘")
                 } else {
-                    // review 模式无结束：占位保持三段对称
+                    // 不可达：Normal/Replay 命中 showsTradeButtons 分支、Review 命中 isReview 分支；占位保三段对称
                     Color.clear.frame(width: 36, height: 1)
                 }
             }
@@ -329,8 +420,8 @@ public struct TrainingView: View {
                     .id(TradeBoxContent.boxIdentity(panel: strip.panel, action: strip.action, tick: strip.tick))
                 }
             }
-            .overlay {   // active panel 高亮（红描边 inset，RFC-B T2 D10）
-                if showsTradeButtons && id == activePanel {
+            .overlay {   // active panel 高亮（红描边 inset，RFC-B T2 D10；Task 13：门控解耦至 showsDrawingTools，复盘也高亮）
+                if showsDrawingTools && id == activePanel {
                     Rectangle().strokeBorder(Color.red.opacity(0.45), lineWidth: 2).allowsHitTesting(false)
                 }
             }
@@ -415,6 +506,26 @@ public struct TrainingView: View {
                 onReplaySettlement(record)
             } catch {
                 replaySettlementFailed = true
+            }
+        }
+    }
+
+    // review-redesign Task 13：复盘退出统一入口（返回/结束-保存/结束-不保存三个动作共用），捕获**具体
+    // 动作**供失败重试——绝不重试成 lifecycle.back()（那是 review no-op saveProgress，会丢已 drain 的 saved）。
+    private func performReviewEnd(_ action: ReviewEndAction) {
+        guard !exitInFlight else { return }
+        exitInFlight = true
+        Task {
+            defer { exitInFlight = false }
+            do {
+                switch action {
+                case .back:    try await lifecycle.backReview(engine: engine)
+                case .save:    try await lifecycle.endReviewSave(engine: engine)
+                case .discard: try await lifecycle.endReviewDiscard(engine: engine)
+                }
+                onExit()
+            } catch {
+                reviewFailedAction = action   // 记住失败的具体动作，供专用 alert 重试
             }
         }
     }

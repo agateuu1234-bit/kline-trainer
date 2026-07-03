@@ -4,8 +4,8 @@ import Foundation
 
 @Suite("Contract version")
 struct ContractVersionTests {
-    @Test func contractVersionIs1_7() {
-        #expect(CONTRACT_VERSION == "1.8")
+    @Test func contractVersionIs1_10() {
+        #expect(CONTRACT_VERSION == "1.10")
     }
 }
 
@@ -295,5 +295,28 @@ struct AdditionalCodableRoundTripTests {
         #expect(decoded.stampDuty == 0.5)
         #expect(decoded.totalCost == 2470.73)
         #expect(decoded.createdAt == 1_700_000_000)
+    }
+
+    @Test func drawingObject_revealTick_roundTrips() throws {
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 10)],
+                              isExtended: false, panelPosition: 1, revealTick: 12345)
+        let data = try JSONEncoder().encode(d)
+        let back = try JSONDecoder().decode(DrawingObject.self, from: data)
+        #expect(back == d)
+        #expect(back.revealTick == 12345)
+    }
+
+    @Test func drawingObject_legacyBlobWithoutRevealTick_decodesToZero() throws {
+        // 旧 blob 从真实编码删掉 revealTick 键构造（不硬编码 Period rawValue——Period.m3 rawValue 是 "3m" 非 "m3"，
+        // 硬编码会先在 period 解码失败，证不到 revealTick 兼容路径；codex plan R-med）：
+        let full = DrawingObject(toolType: .horizontal,
+                                 anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 10)],
+                                 isExtended: false, panelPosition: 0, revealTick: 999)
+        var dict = try JSONSerialization.jsonObject(with: JSONEncoder().encode(full)) as! [String: Any]
+        dict.removeValue(forKey: "revealTick")   // 模拟旧格式：无此键
+        let legacyData = try JSONSerialization.data(withJSONObject: dict)
+        let back = try JSONDecoder().decode(DrawingObject.self, from: legacyData)
+        #expect(back.revealTick == 0)
     }
 }

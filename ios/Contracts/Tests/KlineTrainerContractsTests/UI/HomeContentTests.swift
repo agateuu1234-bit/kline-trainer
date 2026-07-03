@@ -45,6 +45,7 @@ struct HomeContentTests {
             statistics: (totalCount: totalCount, winCount: winCount, currentCapital: currentCapital),
             configuredCapital: configuredCapital, records: records,
             hasPending: hasPending, hasCachedSets: hasCachedSets,
+            replaySlotRecordId: nil, reviewMarkers: [:],
             timeZone: timeZone ?? utc)
     }
 
@@ -85,7 +86,8 @@ struct HomeContentTests {
     func capitalUsesAuthoritative() {
         let c = HomeContent(statistics: (totalCount: 3, winCount: 1, currentCapital: 999_999),
                             configuredCapital: 100_000, records: [],
-                            hasPending: false, hasCachedSets: false)
+                            hasPending: false, hasCachedSets: false,
+                            replaySlotRecordId: nil, reviewMarkers: [:])
         #expect(c.totalCapital == "¥ 100,000.00")   // 权威 settings 值，非派生 999_999
     }
 

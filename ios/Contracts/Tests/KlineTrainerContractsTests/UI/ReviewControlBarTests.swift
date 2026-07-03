@@ -25,10 +25,25 @@ struct ReviewControlBarTests {
 
     @Test("ReviewControlBarContent buttons：showsJumpToEnd=false → 仅[下一根]")
     func reviewControlBarContent_buttons() {
-        #expect(ReviewControlBarContent(showsJumpToEnd: false).buttons
+        #expect(ReviewControlBarContent(showsJumpToEnd: false, price: 10).buttons
                 == [ReviewControlButton(action: .step, title: "下一根")])
-        #expect(ReviewControlBarContent(showsJumpToEnd: true).buttons
+        #expect(ReviewControlBarContent(showsJumpToEnd: true, price: 10).buttons
                 == [ReviewControlButton(action: .step, title: "下一根"),
                     ReviewControlButton(action: .jumpToEnd, title: "快进到结尾")])
+    }
+
+    // MARK: - Task 8：priceLabel（训练底栏样式重设计，复刻 TradeActionBarContent 格式）
+
+    @Test("priceLabel 格式与 TradeActionBarContent 一致：下单价 ¥ X,XXX.XX")
+    func priceLabelFormat() {
+        let c = ReviewControlBarContent(showsJumpToEnd: true, price: 1718.0)
+        #expect(c.priceLabel == "下单价 ¥ 1,718.00")
+        #expect(c.buttons.map(\.title) == ["下一根", "快进到结尾"])
+    }
+
+    @Test("singleButtonWhenNoJump：showsJumpToEnd=false → 仅[下一根]")
+    func singleButtonWhenNoJump() {
+        let c = ReviewControlBarContent(showsJumpToEnd: false, price: 10)
+        #expect(c.buttons.map(\.title) == ["下一根"])
     }
 }

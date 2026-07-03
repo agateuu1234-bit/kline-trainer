@@ -80,4 +80,45 @@ public struct TrainingSessionLifecycle {
     public func replaySettlementRecord() async throws -> TrainingRecord {
         try await coordinator.replaySettlementPayload(engine: engine)
     }
+
+    // MARK: - review-redesign Task 7：复盘 autosave/终态 fence 转发（§6.3）
+    // 显式 `engine:` 参数（非 self.engine 隐式）：镜像 plan §Task 9 UI 接线调用点
+    // （`lifecycle.backReview(engine: engine)` 等，plan L1290-1292/1307/1326），与 coordinator 侧签名一致。
+
+    /// 复盘中按需节流 autosave（画线/步进触发）。
+    public func autosaveReview(engine: TrainingEngine) {
+        coordinator.autosaveReview(engine: engine)
+    }
+
+    /// 复盘返回（drain → persistReviewWorkingIfChanged → endSession）。
+    public func backReview(engine: TrainingEngine) async throws {
+        try await coordinator.backReview(engine: engine)
+    }
+
+    /// 复盘保存结束（drain → commitReview → endSession）。
+    public func endReviewSave(engine: TrainingEngine) async throws {
+        try await coordinator.endReviewSave(engine: engine)
+    }
+
+    /// 复盘丢弃结束（drain → discardReviewWorking → endSession）。
+    public func endReviewDiscard(engine: TrainingEngine) async throws {
+        try await coordinator.endReviewDiscard(engine: engine)
+    }
+
+    /// codex whole-branch R2：稳健放弃（drain → best-effort 清 working → 恒 endSession，不因清档失败
+    /// 而泄漏会话）。供失败 alert 的「放弃」按钮使用。
+    public func abandonReview(engine: TrainingEngine) async {
+        await coordinator.abandonReview(engine: engine)
+    }
+
+    /// 当前复盘 session 是否有净改动（转发，供 UI 判断是否有未保存改动）。
+    public func reviewNetChanged() -> Bool {
+        coordinator.reviewNetChanged()
+    }
+
+    /// codex whole-branch R1：scenePhase 后台/失活 flush review working 态（镜像 `flushForBackground`，
+    /// 但仅对 review 模式生效，不 invalidate session token）。
+    public func flushReviewForBackground(engine: TrainingEngine) async {
+        await coordinator.flushReviewForBackground(engine: engine)
+    }
 }

@@ -124,4 +124,11 @@ public extension AppError {
         default: return true
         }
     }
+
+    /// review-redesign Task 6：`.persistence(.dbCorrupted)` 判据（coordinator saved/working 独立解码
+    /// 恢复路径 + 入口终局等式校验共用）。
+    var isDBCorrupted: Bool {
+        if case .persistence(.dbCorrupted) = self { return true }
+        return false
+    }
 }

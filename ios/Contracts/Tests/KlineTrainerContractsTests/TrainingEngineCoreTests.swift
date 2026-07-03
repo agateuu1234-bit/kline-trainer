@@ -190,6 +190,18 @@ import CoreGraphics
         #expect(e.currentTotalCapital == 100_500)     // 99_500 + 100×10(.m3)，非 +100×99(聚合)
     }
 
+    // Task 9：markPrice 收口——currentPrice/review/finalize 共用同一入口，不再各自实现。
+    @Test func markPriceIsCurrentPriceCanonicalEntry() {
+        let e = Self.normalEngine(closes: [10, 11, 12])
+        #expect(e.markPrice(atTick: e.tick.globalTickIndex) == e.currentPrice)
+    }
+
+    @Test func markPriceClampsOutOfRangeTicksToEndpointClosesWithoutCrashing() {
+        let e = Self.normalEngine(closes: [10, 11, 12])   // maxTick 2, close[0]=10, close[2]=12
+        #expect(e.markPrice(atTick: -1) == 10)                     // 越界前 clamp 到首根
+        #expect(e.markPrice(atTick: e.tick.maxTick + 9) == 12)     // 越界后 clamp 到末根
+    }
+
     @Test func resumeNormalModeUsesSavedTickForPrice() {
         // R6-F1：resume normal 局从保存 tick(2) 起、非 0；R6-F2：m3 覆盖到 maxTick。
         // 现价 = tick 2 的 .m3 close = 12；持仓 1000 股。

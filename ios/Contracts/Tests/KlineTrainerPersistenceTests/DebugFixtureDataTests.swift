@@ -195,5 +195,51 @@ struct DebugFixtureDataTests {
         let m3 = data.candles.first { $0.period == .m3 }!.rows
         #expect(data.meta.startDatetime == m3[0].datetime)
     }
+
+    // 整改①：pending/交易须落在复盘窗口内（(beforeM3Count, m3Count-1) 内），否则续训完打复盘报「训练组数据为空」。
+    @Test func fixtureRecords_tradesWithinReviewWindow_and_pendingWithin() {
+        let seed = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count,
+                                         beforeM3Count: DebugFixtureData.fullLoadBeforeM3Count)
+        let start = DebugFixtureData.fullLoadBeforeM3Count      // metaStartTick
+        let finalTick = DebugFixtureData.fullLoadM3Count - 1
+        for ops in seed.recordOps {
+            for op in ops { #expect(op.globalTick > start && op.globalTick < finalTick) }
+        }
+        #expect(seed.pending!.globalTickIndex > start && seed.pending!.globalTickIndex < DebugFixtureData.fullLoadM3Count)
+    }
+
+    @Test func fixtureRecords_foldEqualsStoredProfit() {
+        let seed = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count,
+                                         beforeM3Count: DebugFixtureData.fullLoadBeforeM3Count)
+        let m3 = seed.candles.first { $0.period == .m3 }!.rows
+        for (rec, ops) in zip(seed.records, seed.recordOps) {
+            let st = try! ReviewLedger.state(atTick: rec.finalTick, ops: ops,
+                                             initialCapital: rec.totalCapital,
+                                             markPriceAtTick: { t in m3[min(max(t,0), m3.count-1)].close })
+            #expect(abs((st.totalCapital - rec.totalCapital) - rec.profit) < 1e-4)
+        }
+    }
+
+    @Test func fixtureRecords_capitalChainsAcrossRecords() {
+        // 累计本金链：record[i+1] 起始本金 == record[i] 结束本金（totalCapital + profit）——codex plan R-med
+        let seed = DebugFixtureData.make(m3Count: DebugFixtureData.fullLoadM3Count,
+                                         beforeM3Count: DebugFixtureData.fullLoadBeforeM3Count)
+        for i in 0..<(seed.records.count - 1) {
+            #expect(abs(seed.records[i + 1].totalCapital
+                        - (seed.records[i].totalCapital + seed.records[i].profit)) < 1e-4)
+        }
+    }
+
+    @Test func fixture_narrowAndTailWindows_tradesAndPendingStrictlyInterior() {
+        // 边界：窄尾窗口 W=m3Count-before=6（before 靠近 m3Count），交易/pending 仍严格内部——codex plan R-med
+        for (m3, before) in [(100, 94), (240, 234), (50, 44)] {
+            let seed = DebugFixtureData.make(m3Count: m3, beforeM3Count: before)
+            let finalTick = m3 - 1
+            for ops in seed.recordOps { for op in ops {
+                #expect(op.globalTick > before && op.globalTick < finalTick)
+            }}
+            #expect(seed.pending!.globalTickIndex > before && seed.pending!.globalTickIndex < m3)
+        }
+    }
 }
 #endif

@@ -37,6 +37,10 @@ public enum DebugFixtureData {
         public let meta: TrainingSetMeta
         public let candles: [PeriodCandles]
         public let records: [TrainingRecord]
+        /// review-redesign Task 6：与 `records`（同下标）配对的交易流水。`review()` 新增的入口终局
+        /// 等式校验会重折叠 ops 到 `record.finalTick` 并与 `record.profit`/`returnRate` 比对——旧版本
+        /// `records` 声明 profit/returnRate 但配 `ops: []`（无交易），一致性不再成立，故须配真实 ops。
+        public let recordOps: [[TradeOperation]]
         public let pending: PendingTraining?
         public let settings: AppSettings
     }
@@ -116,20 +120,66 @@ public enum DebugFixtureData {
             startDatetime: m3Rows[beforeM3Count].datetime, endDatetime: m3Rows.last!.datetime)
 
         let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false)
+        // 整改①：pending/交易须落在复盘窗口内（(beforeM3Count, m3Count-1)），否则续训完打复盘报
+        // 「训练组数据为空」。复盘窗口须容纳 4 个内部交易 tick + pending（所有真实调用 W≥100；
+        // full-load 7200——不破坏任何调用；codex plan R-med）。
+        precondition(m3Count - beforeM3Count >= 6,
+                     "DebugFixtureData: 复盘窗口 m3Count-beforeM3Count 须 ≥6（容纳 fixture 4 内部交易 tick + pending）")
+        // 4 个严格内部 tick（beforeM3Count < t < m3Count-1）+ pending，均匀分布，稳健于任意 W≥6（含窄尾窗口）。
+        let interiorFirst = beforeM3Count + 1
+        let interiorLast  = m3Count - 2                 // = finalTick - 1，严格 < finalTick
+        let span = interiorLast - interiorFirst         // >= 3（precondition 保证）
+        let tB1 = interiorFirst
+        let tS1 = interiorFirst + span / 3
+        let tB2 = interiorFirst + span * 2 / 3
+        let tS2 = interiorLast                          // 严格 < finalTick
+        let pendingTick = interiorFirst + span / 2      // 严格内部 ∈ (beforeM3Count, m3Count-1)
+        func closeAt(_ t: Int) -> Double { m3Rows[min(max(t, 0), m3Count - 1)].close }
+        // 可负担整百手（占用 ~40% 本金；价必 > 0）
+        func lots(_ price: Double, capital: Double) -> Int { max(100, Int((capital * 0.4 / price) / 100) * 100) }
+
+        let pB1 = closeAt(tB1), pS1 = closeAt(tS1)
+        let sh1 = lots(pB1, capital: 100_000)
+        let record1Ops = [
+            TradeOperation(globalTick: tB1, period: .m3, direction: .buy,  price: pB1, shares: sh1,
+                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: Double(sh1) * pB1,
+                           createdAt: baseEpoch),
+            TradeOperation(globalTick: tS1, period: .m3, direction: .sell, price: pS1, shares: sh1,
+                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: Double(sh1) * pS1,
+                           createdAt: baseEpoch),
+        ]
+        let record1Profit = Double(sh1) * (pS1 - pB1)   // fold 同表达式（zero fee → 现金净变 = shares×(卖−买)）
+        // record2 起始本金 = record1 结束本金（累计本金链，与生产 RFC-A 累计模型一致；codex plan R-med）
+        let record2StartingCapital = 100_000.0 + record1Profit
+        let pB2 = closeAt(tB2), pS2 = closeAt(tS2)
+        let sh2 = lots(pB2, capital: record2StartingCapital)
+        let record2Ops = [
+            TradeOperation(globalTick: tB2, period: .m3, direction: .buy,  price: pB2, shares: sh2,
+                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: Double(sh2) * pB2,
+                           createdAt: baseEpoch + 86_400),
+            TradeOperation(globalTick: tS2, period: .m3, direction: .sell, price: pS2, shares: sh2,
+                           positionTier: .tier5, commission: 0, stampDuty: 0, totalCost: Double(sh2) * pS2,
+                           createdAt: baseEpoch + 86_400),
+        ]
+        let record2Profit = Double(sh2) * (pS2 - pB2)   // record1Profit 已上移（record2 起始本金依赖它）
         let records = [
             TrainingRecord(id: nil, trainingSetFilename: filename, createdAt: baseEpoch,
                            stockCode: "600001", stockName: "示例训练股", startYear: 2023, startMonth: 11,
-                           totalCapital: 100_000, profit: 8_900, returnRate: 0.089, maxDrawdown: -0.05,
-                           buyCount: 3, sellCount: 2, feeSnapshot: fees, finalTick: m3Count - 1),
+                           totalCapital: 100_000, profit: record1Profit, returnRate: record1Profit / 100_000,
+                           maxDrawdown: -0.05,
+                           buyCount: 1, sellCount: 1, feeSnapshot: fees, finalTick: m3Count - 1),
             TrainingRecord(id: nil, trainingSetFilename: filename, createdAt: baseEpoch + 86_400,
                            stockCode: "600001", stockName: "示例训练股", startYear: 2023, startMonth: 11,
-                           totalCapital: 108_900, profit: -2_100, returnRate: -0.019, maxDrawdown: -0.08,
+                           totalCapital: record2StartingCapital, profit: record2Profit,
+                           returnRate: record2Profit / record2StartingCapital,
+                           maxDrawdown: -0.08,
                            buyCount: 1, sellCount: 1, feeSnapshot: fees, finalTick: m3Count - 1),
         ]
+        let recordOps = [record1Ops, record2Ops]
 
         let emptyPosition = try! JSONEncoder().encode(PositionManager())
         let pending = PendingTraining(
-            trainingSetFilename: filename, globalTickIndex: m3Count / 2,
+            trainingSetFilename: filename, globalTickIndex: pendingTick,
             upperPeriod: .m60, lowerPeriod: .daily,   // 必须是 periodCombos 阶梯里相邻一档（(m3,daily) 非法→switchPeriodCombo no-op）；默认 60分/日线（路线图 P1）
             positionData: emptyPosition, cashBalance: 100_000, feeSnapshot: fees,
             tradeOperations: [], drawings: [], startedAt: baseEpoch + 172_800,
@@ -138,7 +188,7 @@ public enum DebugFixtureData {
             sessionKey: "debug-fixture-pending")
 
         return Seed(trainingSetFilename: filename, meta: meta, candles: candles,
-                    records: records, pending: pending, settings: .default)
+                    records: records, recordOps: recordOps, pending: pending, settings: .default)
     }
 }
 #endif

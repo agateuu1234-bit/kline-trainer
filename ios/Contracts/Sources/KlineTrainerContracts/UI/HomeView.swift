@@ -146,9 +146,13 @@ public struct HomeView: View {
                 Spacer()
                 Text(row.totalCapital).font(.caption)
             }
-            Text(row.profitAndRate)
-                .font(.subheadline)
-                .foregroundStyle(color(for: row.sign))   // A 股红涨绿跌 §6.1.3
+            HStack {
+                Text(row.profitAndRate)
+                    .font(.subheadline)
+                    .foregroundStyle(color(for: row.sign))   // A 股红涨绿跌 §6.1.3
+                Spacer()
+                markerChips(row)   // Task 11：右对齐角标，直接位于总资金正下方
+            }
         }
         .padding(.vertical, 4)
     }
@@ -159,6 +163,24 @@ public struct HomeView: View {
         case .negative: return .green
         case .zero: return .primary
         }
+    }
+
+    // Task 11：首页行标记角标（"再次训练中"/"复盘中"/"已复盘"）——正交并存：replay 与 review 各自独立。
+    private func markerChips(_ row: HomeHistoryRow) -> some View {
+        HStack(spacing: 5) {
+            if row.replayInProgress { chip("再次训练中", .blue) }
+            switch row.reviewMarker {
+            case .inProgress: chip("复盘中", .orange)
+            case .saved:      chip("已复盘", Color(red: 0.05, green: 0.62, blue: 0.56))   // teal
+            case .none:       EmptyView()
+            }
+        }
+    }
+
+    private func chip(_ text: String, _ tint: Color) -> some View {
+        Text(text).font(.system(size: 11)).fontWeight(.semibold)
+            .padding(.horizontal, 8).padding(.vertical, 1.5)
+            .background(tint.opacity(0.15), in: Capsule()).foregroundStyle(tint)
     }
 }
 
@@ -172,6 +194,7 @@ fileprivate extension HomeContent {
             statistics: (totalCount: records.count, winCount: 2, currentCapital: 108_900.00),
             configuredCapital: 100_000, records: records,
             hasPending: hasPending, hasCachedSets: hasCachedSets,
+            replaySlotRecordId: nil, reviewMarkers: [:],
             timeZone: TimeZone(identifier: "Asia/Shanghai") ?? .current)
     }
 }

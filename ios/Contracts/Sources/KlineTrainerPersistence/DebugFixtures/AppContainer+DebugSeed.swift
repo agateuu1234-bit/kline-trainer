@@ -35,8 +35,10 @@ extension AppContainer {
 
         // db 写在前（settings → records → pending）
         try db.saveSettings(seed.settings)
-        for rec in seed.records {
-            _ = try db.insertRecord(rec, ops: [], drawings: [])
+        // review-redesign Task 6：records 须配 seed.recordOps（同下标）而非空 ops——review() 新增的入口
+        // 终局等式校验会拒绝 profit/returnRate 与实际交易流水不符的记录。
+        for (rec, ops) in zip(seed.records, seed.recordOps) {
+            _ = try db.insertRecord(rec, ops: ops, drawings: [])
         }
         if let pending = seed.pending {
             try db.savePending(pending)

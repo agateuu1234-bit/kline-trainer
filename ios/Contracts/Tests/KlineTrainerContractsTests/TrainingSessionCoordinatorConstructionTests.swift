@@ -58,6 +58,7 @@ struct TrainingSessionCoordinatorConstructionTests {
             recordRepo: records,
             pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             // A4：settingsDAO 与 SettingsStore 同源（startingCapital 直读 DAO）。
             settingsDAO: CapitalDAO(capital: capital),
@@ -134,6 +135,7 @@ struct TrainingSessionCoordinatorConstructionTests {
             recordRepo: records,
             pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,
@@ -267,6 +269,7 @@ struct TrainingSessionCoordinatorConstructionTests {
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records2, pendingRepo: pendingRepo,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: InMemorySessionFinalizationPort(records: records2, pending: pendingRepo),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.persistence(.dbCorrupted)) {
@@ -297,6 +300,7 @@ struct TrainingSessionCoordinatorConstructionTests {
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records3, pendingRepo: pendingRepo,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: InMemorySessionFinalizationPort(records: records3, pending: pendingRepo),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.trainingSet(.emptyData)) {
@@ -334,9 +338,11 @@ struct TrainingSessionCoordinatorConstructionTests {
     @Test("review: 从训练起点开演 + 还原标记 + tick=派生 startTick + 收益率与 record 自洽（D5 / B3）")
     func review_happy_restoresEndState() async throws {
         let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles())
+        // Task 6 入口终局等式校验：ops 折叠须精确等于 record.profit(8_000)——
+        // 100_000 - 10.00*100(buy) + 90.01*100 - 1(sell commission) = 108_000 → profit 8_000。
         let id = try Self.seedRecord(records, totalCapital: 100_000, profit: 8_000, finalTick: 7,
-                                     ops: [Self.op(tick: 2, price: 10.2, dir: .buy),
-                                           Self.op(tick: 5, price: 10.5, dir: .sell)])
+                                     ops: [Self.op(tick: 2, price: 10.00, dir: .buy),
+                                           Self.op(tick: 5, price: 90.01, dir: .sell)])
         let engine = try await coord.review(recordId: id)
         #expect(engine.flow.mode == .review)
         #expect(engine.flow.canBuySell() == false)        // ReviewFlow 全能力关
@@ -353,7 +359,8 @@ struct TrainingSessionCoordinatorConstructionTests {
     @Test("review: 费率来自 record 非当前 settings（D5）")
     func review_usesRecordFees() async throws {
         let (coord, records, _) = Self.makeCoordinator(candles: Self.validCandles(), capital: 10_000)
-        let id = try Self.seedRecord(records, ops: [])
+        // profit: 0（非默认 8_000）：ops=[] 无交易，须与 Task 6 entry-validation 折叠终局一致。
+        let id = try Self.seedRecord(records, profit: 0, ops: [])
         let engine = try await coord.review(recordId: id)
         #expect(engine.fees.commissionRate == 0.0002)      // record.feeSnapshot，非 settings 的 0.0001
         #expect(engine.fees.minCommissionEnabled == true)
@@ -371,6 +378,7 @@ struct TrainingSessionCoordinatorConstructionTests {
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pendingR,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pendingR),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.persistence(.ioError("x"))) {
@@ -420,6 +428,7 @@ struct TrainingSessionCoordinatorConstructionTests {
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pendingP,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pendingP),
             settingsDAO: InMemorySettingsDAO(), cache: cache, settings: store)
         await #expect(throws: AppError.persistence(.diskFull)) {

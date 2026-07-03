@@ -77,6 +77,7 @@ struct TrainingSessionPersistenceTests {
             recordRepo: records,
             pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: port,
             // A4：settingsDAO 与 SettingsStore 同源（mirror 生产同一 DefaultAppDB）——startingCapital 直读 DAO。
             settingsDAO: CapitalDAO(capital: capital),
@@ -115,6 +116,7 @@ struct TrainingSessionPersistenceTests {
             recordRepo: records,
             pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,
@@ -321,6 +323,7 @@ struct TrainingSessionPersistenceTests {
             dbFactory: StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache, settings: SettingsStore(settingsDAO: CapitalDAO(capital: 10_000)))
@@ -379,6 +382,7 @@ struct TrainingSessionPersistenceTests {
             dbFactory: PreviewTrainingSetDBFactory(candles: Self.validCandles()),
             recordRepo: records, pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: StubFinalization(fixed: (1, 777_000)),   // 刻意 ≠ engine.currentTotalCapital
             settingsDAO: Self.CapitalDAO(capital: 50_000),
             cache: cache, settings: injectedStore)
@@ -457,6 +461,7 @@ struct TrainingSessionPersistenceTests {
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000)))
@@ -524,6 +529,7 @@ struct TrainingSessionPersistenceTests {
         let coord = TrainingSessionCoordinator(
             dbFactory: StubFactory(reader: spy), recordRepo: records, pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: port, settingsDAO: CapitalDAO(capital: 3),
             cache: cache, settings: SettingsStore(settingsDAO: CapitalDAO(capital: 3)))
         return (coord, records, pending)
@@ -597,6 +603,7 @@ struct TrainingSessionPersistenceTests {
             dbFactory: Self.StubFactory(reader: Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)),
             recordRepo: records, pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: InMemorySessionFinalizationPort(records: records, pending: pending),
             settingsDAO: InMemorySettingsDAO(),
             cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: capital)))
@@ -722,6 +729,7 @@ struct TrainingSessionPersistenceTests {
             dbFactory: Self.StubFactory(reader: spy),
             recordRepo: records, pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache, settings: SettingsStore(settingsDAO: CapitalDAO(capital: 10_000)))
@@ -757,6 +765,7 @@ struct TrainingSessionPersistenceTests {
             dbFactory: Self.StubFactory(reader: Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)),
             recordRepo: records, pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,
@@ -771,6 +780,7 @@ struct TrainingSessionPersistenceTests {
             dbFactory: Self.StubFactory(reader: Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)),
             recordRepo: records, pendingRepo: pending,
             pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
             finalization: port,
             settingsDAO: InMemorySettingsDAO(),
             cache: cache,

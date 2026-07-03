@@ -14,7 +14,8 @@ struct HomeViewSourceCompatTests {
     private func makeContent() -> HomeContent {
         HomeContent(statistics: (totalCount: 0, winCount: 0, currentCapital: 100_000),
                     configuredCapital: 100_000, records: [],
-                    hasPending: false, hasCachedSets: true, timeZone: .current)
+                    hasPending: false, hasCachedSets: true,
+                    replaySlotRecordId: nil, reviewMarkers: [:], timeZone: .current)
     }
 
     @Test("HomeView 为 bare concrete 类型 + 旧 5 参 init 可用无 deprecation（WB-R4 功能退路 / codex spec-R6-H1）")

@@ -67,4 +67,133 @@ struct TrainingEngineDrawingCommitTests {
         #expect(e.upperPanel.interactionMode == .autoTracking)
         #expect(e.drawings == [d])                                 // commit 不改 drawings
     }
+
+    // MARK: - review-redesign Task 10：routeDrawingCommit（review→reviewDrawings / else→drawings）
+
+    /// review 模式 engine（复用 TrainingEngineActionsTests.m3Candles，同其余 helper 风格）。
+    static func reviewEngine(closes: [Double] = Array(repeating: 10, count: 100)) -> TrainingEngine {
+        let maxTick = closes.count - 1
+        let fees = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+        let record = TrainingRecord(id: 1, trainingSetFilename: "t.sqlite", createdAt: 0,
+                                    stockCode: "000001", stockName: "测试", startYear: 2020, startMonth: 1,
+                                    totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: 0,
+                                    buyCount: 0, sellCount: 0, feeSnapshot: fees, finalTick: maxTick)
+        return TrainingEngine(
+            flow: ReviewFlow(record: record, startTick: 0),
+            allCandles: TrainingEngineActionsTests.m3Candles(closes),
+            maxTick: maxTick,
+            initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m3, initialLowerPeriod: .m3)
+    }
+
+    @Test("routeDrawingCommit: review 模式写 reviewDrawings，engine.drawings 不变（关键不变量：不污染原训练记录）")
+    func routeDrawingCommitReviewGoesToReviewDrawings() {
+        let e = Self.reviewEngine()
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 1, price: 10.4)],
+                              isExtended: true, panelPosition: 0)
+        let drawingsCountBefore = e.drawings.count
+        e.routeDrawingCommit(d)
+        #expect(e.drawings.count == drawingsCountBefore)   // 不得写入 engine.drawings（不污染原训练记录）
+        #expect(e.reviewDrawings == [d])
+    }
+
+    @Test("routeDrawingCommit: 非 review（normal）模式写 drawings，engine.reviewDrawings 不变")
+    func routeDrawingCommitNormalGoesToDrawings() {
+        let (e, _) = TrainingEngineInteractionTests.engine()
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 1, price: 10.4)],
+                              isExtended: true, panelPosition: 0)
+        let reviewCountBefore = e.reviewDrawings.count
+        e.routeDrawingCommit(d)
+        #expect(e.drawings == [d])
+        #expect(e.reviewDrawings.count == reviewCountBefore)
+    }
+
+    @Test("removeReviewDrawing: 按 index 从 engine.reviewDrawings 删除（deleteDrawing 的复盘对应版本）")
+    func removeReviewDrawingRemovesByIndex() {
+        let e = Self.reviewEngine()
+        let d0 = DrawingObject(toolType: .trend, anchors: [], isExtended: false, panelPosition: 0)
+        let d1 = DrawingObject(toolType: .ray, anchors: [], isExtended: false, panelPosition: 0)
+        e.appendReviewDrawing(d0)
+        e.appendReviewDrawing(d1)
+        e.removeReviewDrawing(at: 0)
+        #expect(e.reviewDrawings.count == 1)
+        #expect(e.reviewDrawings[0].toolType == .ray)
+        #expect(e.drawings.isEmpty)   // 全程未碰 engine.drawings
+    }
+
+    // MARK: - review-redesign Task 3：routeDrawingCommit 提交时盖戳 revealTick=当前全局 tick
+
+    /// normal engine 步进到指定 tick（复用 `TrainingEngineInteractionTests.engine()`）。
+    static func makeNormalEngineAtTick(_ target: Int) -> TrainingEngine {
+        let (e, _) = TrainingEngineInteractionTests.engine()
+        for _ in 0..<target { e.holdOrObserve(panel: .upper) }
+        return e
+    }
+
+    /// review engine 步进到指定 tick（复用本文件 `reviewEngine()`；ReviewFlow.canAdvance()==true 可步进）。
+    static func makeReviewEngineAtTick(_ target: Int) -> TrainingEngine {
+        let e = Self.reviewEngine()
+        for _ in 0..<target { e.holdOrObserve(panel: .upper) }
+        return e
+    }
+
+    @Test("routeDrawingCommit: normal 模式提交时盖戳 revealTick = 当前全局 tick")
+    func routeDrawingCommit_stampsRevealTick_normalMode() {
+        let engine = Self.makeNormalEngineAtTick(50)
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 3, price: 10)],
+                              isExtended: false, panelPosition: 0)   // revealTick 默认 0
+        engine.routeDrawingCommit(d)
+        #expect(engine.drawings.last?.revealTick == engine.tick.globalTickIndex)
+        #expect(engine.drawings.last?.revealTick == 50)
+    }
+
+    @Test("routeDrawingCommit: review 模式提交时盖戳 revealTick = 当前全局 tick，不污染 engine.drawings")
+    func routeDrawingCommit_stampsRevealTick_reviewMode() {
+        let engine = Self.makeReviewEngineAtTick(60)
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 3, price: 10)],
+                              isExtended: false, panelPosition: 0)
+        engine.routeDrawingCommit(d)
+        #expect(engine.reviewDrawings.last?.revealTick == 60)
+        #expect(engine.drawings.isEmpty)   // review commit 不污染训练层
+    }
+
+    // MARK: - review-redesign Task 4：双面板划线互斥（toggleDrawingExclusive/cancelDrawingAllPanels/isDrawingActive）
+
+    @Test("toggleDrawingExclusive: 激活选中面板（.lower），另一面板（.upper）不受影响")
+    func toggleDrawingExclusive_activatesSelectedPanelOnly() {
+        let engine = Self.makeNormalEngineAtTick(10)
+        engine.toggleDrawingExclusive(on: .lower)
+        #expect(engine.isDrawingActive(on: .lower))
+        #expect(!engine.isDrawingActive(on: .upper))
+    }
+
+    @Test("toggleDrawingExclusive: 切换面板时取消另一面板（互斥）")
+    func toggleDrawingExclusive_switchingPanels_cancelsOther() {
+        let engine = Self.makeNormalEngineAtTick(10)
+        engine.toggleDrawingExclusive(on: .upper)      // 上栏进画线
+        engine.toggleDrawingExclusive(on: .lower)      // 切下栏
+        #expect(!engine.isDrawingActive(on: .upper))   // 上栏被取消（互斥）
+        #expect(engine.isDrawingActive(on: .lower))
+    }
+
+    @Test("toggleDrawingExclusive: 同面板二次点击 → toggle off")
+    func toggleDrawingExclusive_secondTapSamePanel_togglesOff() {
+        let engine = Self.makeNormalEngineAtTick(10)
+        engine.toggleDrawingExclusive(on: .lower)
+        engine.toggleDrawingExclusive(on: .lower)
+        #expect(!engine.isDrawingActive(on: .lower))
+    }
+
+    @Test("cancelDrawingAllPanels: 清除两面板画线态")
+    func cancelDrawingAllPanels_clearsBoth() {
+        let engine = Self.makeNormalEngineAtTick(10)
+        engine.toggleDrawingExclusive(on: .upper)
+        engine.cancelDrawingAllPanels()
+        #expect(!engine.isDrawingActive(on: .upper))
+        #expect(!engine.isDrawingActive(on: .lower))
+    }
 }
