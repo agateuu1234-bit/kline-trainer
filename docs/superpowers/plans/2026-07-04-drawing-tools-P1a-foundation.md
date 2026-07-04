@@ -1439,7 +1439,7 @@ Expected: FAIL — INSERT 没写 draw_uuid/style_json；`drawingFromRow` 没读 
 - **签名改带 lossy**：`saveWorking(recordId:stepTick:lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID] = [])`、`commitSaved(recordId:lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID] = [])`——**接收完整 lossy（含 unknownRaw 有序），原样保真回写**，不从 `[DrawingObject]` 重建。
 - 写：`jsonEncode(drawings)` → `ReviewArchiveWrapper(lossy: lossy, hiddenIds: hiddenOriginalIds).encodedColumn()`（内含 `lossy.encoded()` 字节保真）。
 - 读：`loadWorking` → `ReviewWorking(stepTick:, lossy: ReviewArchiveWrapper.decodeColumn(col).lossy, hiddenOriginalIds: <wrapper.hiddenIds>)`；`loadSaved`/`loadArchive` 同理填 `savedLossy`/`workingLossy` + hiddenIds。
-- **coordinator 调用点（P1a 仅签名对齐，非行为）**：现 `saveWorking(drawings: engine.reviewDrawings)` → 改 `saveWorking(lossy: LossyDrawingArray(drawings: engine.reviewDrawings))`（P1a 传纯已知条）。**把加载 blob 带来的 unknownRaw 一路穿过 engine/coordinator 活编辑路径 = P5**（见文末阶段边界）；P1a 只保证 **repo 契约无损**（下方集成测试：给列种 unknown → load 再 save → 字节不变）。commitSaved 同理。
+- **coordinator 调用点（P1a 仅签名对齐，非行为）**：现 `saveWorking(drawings: engine.reviewDrawings)` → 改 `saveWorking(lossy: LossyDrawingArray(drawings: engine.reviewDrawings))`（P1a 传纯已知条）。**把加载 blob 带来的 unknownRaw 一路穿过 engine/coordinator 活编辑/autosave/commit 路径 = P1b**（引擎在 P1b 改新画线模型，**与 P1a 同版本发布关闭缺口**；**非 P5**——codex plan-R8 一致性）；P1a 只保证 **repo 契约无损**（下方集成测试：给列种 unknown → load 再 save → 字节不变）。commitSaved 同理。P1b 须加 coordinator 级 autosave/commit 保真测试（证 unknown 经 load→编辑/不编辑→autosave→resume-save 全存活）。
 
 > 说明：本 Task 只改**存取形状**（wrapper + draw_uuid/style_json 列）；hide/show 的**行为逻辑**在 P5。saveWorking 新增 hiddenIds 参默认 `[]`，coordinator 现有调用不破。
 
@@ -1596,7 +1596,7 @@ struct PendingLossyTests {
 ```
 （`PendingTrainingRepositoryImpl` 同款：`PendingTraining` 携带 `lossy`、load 填充、save 重发 `lossy.encoded()`。）
 
-> 说明：`PendingReplay`/`PendingTraining` 模型增 `var lossy: LossyDrawingArray`（`drawings` = 计算属性 `lossy.drawings`）。**P1a 只保 repo 边界的无损 + 保序**（未编辑的 load→save 逐字节 + 原序，含 `[knownA, unknown, knownB]` 保序）。coordinator 从 engine 构建 fresh pending（`lossy` = 当前 known 有序、无 unknown），以及 resume-后-编辑-再存时把编辑过的 known 与保留的 unknown **按位置/稳定 id 归并**——属 **P5**（[[project_app_public_release_intent]] 前向兼容全链在 P5 收口）。
+> 说明：`PendingReplay`/`PendingTraining` 模型增 `var lossy: LossyDrawingArray`（`drawings` = 计算属性 `lossy.drawings`）。**P1a 只保 repo 边界的无损 + 保序**（未编辑的 load→save 逐字节 + 原序，含 `[knownA, unknown, knownB]` 保序）。coordinator 从 engine 构建 fresh pending（`lossy` = 当前 known 有序、无 unknown），以及 resume-后-编辑-再存时把编辑过的 known 与保留的 unknown **按位置/稳定 id 归并**——属 **P1b**（引擎携带 lossy，与 P1a **同版本发布**；[[project_app_public_release_intent]] 前向兼容全链在 **P1b** 收口，**非 P5**——codex plan-R8 一致性）。
 
 - [ ] **Step 4: run PASS + 全量**：`cd ios/Contracts && swift test 2>&1 | tail -6`（两框架 0 fail）+ Catalyst build-for-testing SUCCEEDED。
 
