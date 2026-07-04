@@ -16,8 +16,7 @@
 - **迁移 `0009` 只走 migration**，`PRAGMA user_version = 7`；**绝不改 `AppDBMigrations.v1_4_baselineDDL` 或 `ios/sql/app_schema_v1.sql`**（v1.4 冻结基线，drift-checked——沿 0006/0007/0008 先例）。
 - **`draw_uuid`**：迁移回填所有旧行 `legacy-<record_id>-<id>`；**回填后校验无 NULL、无重复，否则迁移抛错**；建 `UNIQUE INDEX`（D20）。
 - **复盘 canonical 磁盘 JSON schema（全阶段唯一，禁改 key/形状）** = `{ "drawings": [DrawingObject], "hiddenIds": [DrawingID] }`；in-memory `reviewDrawings`/`hiddenOriginalIds` 经显式 `CodingKeys` 映射；解码容错裸 `[DrawingObject]` 数组（→ `hiddenIds=[]`）| wrapper（D14）。
-- **有损 ≠ 丢数据（D21，§Y 分层）**：所有画线数组边界（`pending_*.drawings` / review wrapper 的 `drawings`）解码时坏/未知条只跳过、不整组失败。**P1a 达成：① 解码永不崩 + ② repo `load→save` 往返无损**（携带有序 `lossy`、原样字节级重发；未编辑）。**⚠️ D21 的「所有 save 路径字节保真」P1a 未完全达成**——coordinator 从 engine 构建纯 known fresh-save 会覆盖旧 unknown（引擎携带 `lossy` 穿过活编辑/coordinator = **P1b**）。P1a 验收/自查只断言 repo 往返，**不**断言 autosave/coordinator-save 保真。
-- **⚠️ P1a 与 P1b 必须同一个 App 版本一起发布（不得单发 P1a 给用户）**：P1a bump 契约 1.11、但 D21 save-路径保真要 P1b 才完整；单发 P1a 版本在「未来版本写的未识别画线条」上做普通 autosave 会**不可逆丢线**（codex plan-R7-high；公开发布 [[project_app_public_release_intent]]）。P1a+P1b 同版本发布则用户永不经历此窗口。
+- **有损 ≠ 丢数据（D21，全达成于 P1a；Z1）**：所有画线数组边界（`pending_*.drawings` / review wrapper 的 `drawings`）解码时坏/未知条只跳过、不整组失败。**P1a 达成 D21 全部**：① 解码永不崩 + ② repo `load→save` 往返无损 + ③ **coordinator 所有 save 路径（autosave / resume-save / commit）字节保真**（Task 12 引擎携带 `lossy`、`reconciled` 保未识别条原位）。→ **P1a 自洽安全**（bump 1.11 站得住、单独发版也不丢「未来版本写的画线条」；公开发布 [[project_app_public_release_intent]]）。
 - **`DrawingID` 跨层防碰撞（D13/D16）**：新画线 = `UUID().uuidString`；原训练线 = `draw_uuid`（`legacy-<record_id>-<id>` 或后续新建时铸的 UUID）；旧 JSON blob 无 id 的元素在数组解码层回填 `legacy-idx-<index>`（命名空间唯一）。**禁进程内单调整数、禁裸数组下标整数**。
 - **两闸门**：平台无关值类型/Codable/几何/迁移逻辑走 host `swift test`（Swift Testing + XCTest 两框架都要全绿）；DB 迁移走 `KlineTrainerPersistenceTests`（XCTest + GRDB in-memory）。UIKit 层本阶段无。
 - **零 UI**：本阶段新字段无 UI 消费者，全靠 Codable round-trip + 迁移 + 持久化往返测覆盖（Wave-0 契约先行同款）。
@@ -39,6 +38,7 @@
 - `KlineTrainerPersistence/Internal/AppDBMigrations.swift:205-208 后`（加 `0009` migration）。
 - `KlineTrainerPersistence/Internal/RecordRepositoryImpl.swift:50-58`（drawings INSERT 加 draw_uuid+style_json）+ `:163-173`（`drawingFromRow` 读 draw_uuid+style_json）。
 - `KlineTrainerPersistence/Internal/ReviewArchiveRepositoryImpl.swift`（working/saved 存取改经 wrapper）。
+- `Persistence/LossyDrawingArray.swift`（Task 12 加 `reconciled(currentKnown:)` 合并器）+ `TrainingEngine/TrainingEngine.swift`（Task 12 加 `loadedDrawingsLossy`/`loadedReviewLossy` 携带 + `setReviewLossy`）+ `TrainingEngine/TrainingSessionCoordinator.swift`（Task 12 load 灌 lossy / save 用 `reconciled` 重发）。
 - `TrainingEngine/TrainingEngine.swift:996-1005`（`routeDrawingCommit` 全字段 copy-with-revealTick）。
 
 ---
@@ -1439,7 +1439,7 @@ Expected: FAIL — INSERT 没写 draw_uuid/style_json；`drawingFromRow` 没读 
 - **签名改带 lossy**：`saveWorking(recordId:stepTick:lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID] = [])`、`commitSaved(recordId:lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID] = [])`——**接收完整 lossy（含 unknownRaw 有序），原样保真回写**，不从 `[DrawingObject]` 重建。
 - 写：`jsonEncode(drawings)` → `ReviewArchiveWrapper(lossy: lossy, hiddenIds: hiddenOriginalIds).encodedColumn()`（内含 `lossy.encoded()` 字节保真）。
 - 读：`loadWorking` → `ReviewWorking(stepTick:, lossy: ReviewArchiveWrapper.decodeColumn(col).lossy, hiddenOriginalIds: <wrapper.hiddenIds>)`；`loadSaved`/`loadArchive` 同理填 `savedLossy`/`workingLossy` + hiddenIds。
-- **coordinator 调用点（P1a 仅签名对齐，非行为）**：现 `saveWorking(drawings: engine.reviewDrawings)` → 改 `saveWorking(lossy: LossyDrawingArray(drawings: engine.reviewDrawings))`（P1a 传纯已知条）。**把加载 blob 带来的 unknownRaw 一路穿过 engine/coordinator 活编辑/autosave/commit 路径 = P1b**（引擎在 P1b 改新画线模型，**与 P1a 同版本发布关闭缺口**；**非 P5**——codex plan-R8 一致性）；P1a 只保证 **repo 契约无损**（下方集成测试：给列种 unknown → load 再 save → 字节不变）。commitSaved 同理。P1b 须加 coordinator 级 autosave/commit 保真测试（证 unknown 经 load→编辑/不编辑→autosave→resume-save 全存活）。
+- **coordinator 调用点（P1a 仅签名对齐，非行为）**：现 `saveWorking(drawings: engine.reviewDrawings)` → 改 `saveWorking(lossy: LossyDrawingArray(drawings: engine.reviewDrawings))`（P1a 传纯已知条）。**把加载 blob 带来的 unknownRaw 一路穿过 engine/coordinator autosave/resume-save/commit 路径 = Task 12（P1a，Z1）**——引擎携带 `loadedReviewLossy`、save 用 `reconciled(currentKnown:)` 重发（未识别条原位保留）。本 Task 只改 repo 签名/形状（`saveWorking(lossy:)`/wrapper）；engine/coordinator 接线（`saveWorking(lossy: engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings))`、commitSaved 同理）在 Task 12。本 Task 集成测试证 **repo 契约无损**（给列种 unknown → load 再 save → 字节不变）；coordinator 级 autosave/commit 保真测试在 Task 12。
 
 > 说明：本 Task 只改**存取形状**（wrapper + draw_uuid/style_json 列）；hide/show 的**行为逻辑**在 P5。saveWorking 新增 hiddenIds 参默认 `[]`，coordinator 现有调用不破。
 
@@ -1596,7 +1596,7 @@ struct PendingLossyTests {
 ```
 （`PendingTrainingRepositoryImpl` 同款：`PendingTraining` 携带 `lossy`、load 填充、save 重发 `lossy.encoded()`。）
 
-> 说明：`PendingReplay`/`PendingTraining` 模型增 `var lossy: LossyDrawingArray`（`drawings` = 计算属性 `lossy.drawings`）。**P1a 只保 repo 边界的无损 + 保序**（未编辑的 load→save 逐字节 + 原序，含 `[knownA, unknown, knownB]` 保序）。coordinator 从 engine 构建 fresh pending（`lossy` = 当前 known 有序、无 unknown），以及 resume-后-编辑-再存时把编辑过的 known 与保留的 unknown **按位置/稳定 id 归并**——属 **P1b**（引擎携带 lossy，与 P1a **同版本发布**；[[project_app_public_release_intent]] 前向兼容全链在 **P1b** 收口，**非 P5**——codex plan-R8 一致性）。
+> 说明：`PendingReplay`/`PendingTraining` 模型增 `var lossy: LossyDrawingArray`（`drawings` = 计算属性 `lossy.drawings`）。**P1a 只保 repo 边界的无损 + 保序**（未编辑的 load→save 逐字节 + 原序，含 `[knownA, unknown, knownB]` 保序）。coordinator 从 engine 构建 fresh pending 时把 known 与加载携带的 unknown **按位置归并**——**由 Task 12（P1a）引擎携带 `loadedDrawingsLossy` + save 用 `reconciled(currentKnown:)` 完成**（未识别条原位、known 编辑/新增生效）；P1a 的 autosave/resume-save 全路径保真（Task 12 coordinator 级测试证）。P1b 的多点编辑/重排下按稳定 id 归并的完整鲁棒性再深化，但**不丢** unknown 的保证 P1a 已立。
 
 - [ ] **Step 4: run PASS + 全量**：`cd ios/Contracts && swift test 2>&1 | tail -6`（两框架 0 fail）+ Catalyst build-for-testing SUCCEEDED。
 
@@ -1608,6 +1608,98 @@ git add ios/Contracts/Sources/KlineTrainerPersistence/Internal/PendingReplayRepo
         ios/Contracts/Tests/KlineTrainerPersistenceTests/PendingLossyTests.swift
 git commit -m "feat(drawing-P1a): pending_training/replay 有损保真解码（load 跳未知条 + save 保留同记录 unknownRaw）"
 ```
+
+---
+
+## Task 12: 引擎/coordinator 携带 `lossy` 穿过所有 save 路径（Z1，codex plan-R9-high）
+
+**Files:**
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/Persistence/LossyDrawingArray.swift`（加 `reconciled(currentKnown:)` 合并器）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（`:25` drawings 旁加 `loadedDrawingsLossy`；`:31` reviewDrawings 旁加 `loadedReviewLossy`；`:144` init 灌入；`:274` `setReviewDrawings` 携带 lossy 变体）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift`（load 灌 lossy：`:288`/`:775` `initialDrawingsLossy: pending.lossy`、`:356`/`:464` 复盘 `w.lossy`；save 重建：`:548`/`:575`/`:621` `savePending/saveReplay`、`:879`/`:898` `saveWorking/commitSaved` 用 `reconciled`）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngine/CoordinatorLossyPreserveTests.swift`
+
+**Interfaces:**
+- Consumes: Task 5 `LossyDrawingArray`/`LossyDrawingElement`, Task 3 `DrawingObject`, Task 6 `ReviewArchiveWrapper`, Task 10/11 的 `saveWorking(lossy:)`/`saveReplay`/`savePending` 携带-lossy 签名。
+- Produces: coordinator 所有 save 路径（pending_training / pending_replay / review working / commit）**保住加载 blob 的未识别条**——`load→(编辑/不编辑)→autosave/resume-save` 未来条字节存活。**至此 P1a 自洽安全**（bump 1.11 站得住、单独发版也不丢线）。
+
+- [ ] **Step 1: 写 failing test（coordinator 级保真，release-blocking）**
+
+```swift
+@Suite("coordinator 携带 lossy 保真（Z1）")
+struct CoordinatorLossyPreserveTests {
+    // 直接给 pending/review 列种入含「未来版本画的线」的 blob，走真 coordinator load→save 路径
+    let unknown = #"{"toolType":"__future__","z":1.0}"#
+    func known(_ id: String) -> String { #"{"id":"\#(id)","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"m3","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}"# }
+
+    @Test("pending_replay: load(含未来条)→saveProgress(autosave) 后未来条仍在、且在原位")
+    func replayAutosavePreservesUnknown() async throws {
+        let (coord, db) = try makeCoordinator()
+        try seedPendingReplayRow(db, recordId: 42, drawingsJSON: "[\(known("g1")),\(unknown),\(known("g2"))]")
+        let engine = try await coord.resumePendingReplay()!            // load：engine 携带 loadedDrawingsLossy
+        try await coord.saveProgress(engine: engine)                   // autosave：reconciled 重发
+        let col: String = try Row.fetchOne(db, sql: "SELECT drawings FROM pending_replay WHERE id=1")!["drawings"]
+        #expect(col.contains(unknown))                                 // 未来条未被 known-only 覆盖
+        let iA = col.range(of: #""g1""#)!.lowerBound, iU = col.range(of: "__future__")!.lowerBound, iB = col.range(of: #""g2""#)!.lowerBound
+        #expect(iA < iU && iU < iB)                                    // 原位保序
+    }
+
+    @Test("复盘 working: load(含未来条)→净改动 autosave 后未来条仍在")
+    func reviewWorkingAutosavePreservesUnknown() async throws {
+        let (coord, db) = try makeCoordinator()
+        try seedReviewWorking(db, recordId: 7, drawingsJSON: "[\(known("g1")),\(unknown)]")
+        let engine = try await coord.resumePendingReview(recordId: 7)  // load：engine.loadedReviewLossy 携带
+        engine.appendDrawing(decodedKnown(known("g3")))                // 编辑：加一条已知（P1a 现有横线能力）
+        try coord.persistReviewWorkingIfChanged(engine: engine)        // autosave：reconciled(currentKnown) 重发
+        let col: String = try Row.fetchOne(db, sql: "SELECT working_drawings FROM review_archive WHERE record_id=7")!["working_drawings"]
+        #expect(col.contains(unknown))                                 // 未来条经「编辑+autosave」仍存活
+    }
+}
+```
+> `makeCoordinator`/`seedPendingReplayRow`/`seedReviewWorking`/`decodedKnown` = 测试工厂，实施时对齐 `CoordinatorReplayPersistenceTests` 既有 helper（真 coordinator + in-memory app.sqlite）。
+
+- [ ] **Step 2: run FAIL**（现 saveProgress 用 `drawings: engine.drawings` 纯 known，未来条被覆盖）
+
+- [ ] **Step 3: impl**
+
+① `LossyDrawingArray.swift` 加合并器（保未识别条原位 + 应用 known 编辑/追加）：
+
+```swift
+    /// 用当前已知条重建 lossy：按原序走 elements——`.known` 依次替换成 currentKnown、`.unknownRaw` 原位保留；
+    /// currentKnown 多出的（新增画线）追加为 `.known`。→ 未识别条位置不变、known 编辑/新增生效。
+    func reconciled(currentKnown: [DrawingObject]) -> LossyDrawingArray {
+        var q = currentKnown[...]
+        var out: [LossyDrawingElement] = []
+        for el in elements {
+            switch el {
+            case .known: if let k = q.first { q = q.dropFirst(); out.append(.known(k)) }   // 该 known 槽被删则跳过
+            case .unknownRaw(let r): out.append(.unknownRaw(r))
+            }
+        }
+        for k in q { out.append(.known(k)) }                                                // 新增的 known 追加末尾
+        return LossyDrawingArray(elements: out)
+    }
+```
+
+② `TrainingEngine.swift`：`drawings`(`:25`) 旁 `public private(set) var loadedDrawingsLossy = LossyDrawingArray(drawings: [])`；`reviewDrawings`(`:31`) 旁 `public private(set) var loadedReviewLossy = LossyDrawingArray(drawings: [])`。init(`:144`) 加 `initialDrawingsLossy: LossyDrawingArray? = nil` → `loadedDrawingsLossy = initialDrawingsLossy ?? LossyDrawingArray(drawings: initialDrawings)`（`drawings = loadedDrawingsLossy.drawings`）。`setReviewDrawings`(`:274`) 加携带变体 `setReviewLossy(_ l: LossyDrawingArray) { loadedReviewLossy = l; reviewDrawings = l.drawings }`（旧 `setReviewDrawings(_:)` 保留 = `setReviewLossy(LossyDrawingArray(drawings: ds))`）。
+
+③ `TrainingSessionCoordinator.swift`：
+- **load 灌入**：`resumePending`(`:288`)/`startReplay`(`:775`) 的 `initialDrawings: pending.drawings` 旁加 `initialDrawingsLossy: pending.lossy`；`buildReviewEngine`(`:464`) 的 `engine.setReviewDrawings(reviewDrawings)` 改 `engine.setReviewLossy(reviewLossy)`（`review()`/`resumePendingReview` 把 `w.lossy`/baseline lossy 传下来）。
+- **save 重建**：`saveProgress`(`:548`/`:575`/`:621`) 建 `PendingReplay`/`Pending` 时 `lossy: engine.loadedDrawingsLossy.reconciled(currentKnown: engine.drawings)`（非 `drawings: engine.drawings`）；`persistReviewWorkingIfChanged`(`:879`) `saveWorking(...lossy: engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings))`；`commitSaved`(`:898`) 同理。
+
+- [ ] **Step 4: run PASS + 全量**：`cd ios/Contracts && swift test 2>&1 | tail -6`（两框架 0 fail）+ Catalyst build-for-testing SUCCEEDED。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/Persistence/LossyDrawingArray.swift \
+        ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift \
+        ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngine/CoordinatorLossyPreserveTests.swift
+git commit -m "feat(drawing-P1a): 引擎/coordinator 携带 lossy，全 save 路径保住未识别画线条（Z1）"
+```
+
+> **§Z1**：本 Task 令 lossy 保真穿过 engine/coordinator 的 **autosave / resume-save / commit** 全路径——**P1a 自此自洽安全**，D21「所有 save 路径字节保真」在 P1a 完整达成，不再依赖「与 P1b 同版本发布」。`reconciled` 的 known 编辑归并对 P1a（现有横线 append）精确；P1b 的多点编辑/重排下按稳定 id 归并的完整鲁棒性在 P1b 深化（但**不丢** unknown 的保证 P1a 已立）。
 
 ---
 
@@ -1626,6 +1718,7 @@ git commit -m "feat(drawing-P1a): pending_training/replay 有损保真解码（l
 | 7 | 执行 `swift test --filter PendingLossyTests` | 待续训练/复盘草稿里含「未来版本画的线」时不再整体读失败、保存后那条线**逐字节不丢**、且不会串到别的记录 | 全用例绿 = 通过 |
 | 8 | 执行 `swift test --filter reviewRepoPreservesUnknownAcrossLoadSave` | 复盘存档里「未来版本画的线」经「读出→再存」后**逐字节保留** | 绿 = 通过 |
 | 9 | 执行 `xcodebuild -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' build-for-testing 2>&1 | tail -3` | 苹果编译器把改动全编过 | 出现 BUILD SUCCEEDED = 通过 |
+| 10 | 执行 `swift test --filter CoordinatorLossyPreserveTests` | 「未来版本画的线」经真 coordinator 的 载入→自动保存 / 载入→加线→自动保存 后仍**逐字节保留、且在原位** | 全绿 = 通过（证 P1a 所有保存路径都不丢未来版本的线，Z1） |
 
 ---
 
@@ -1635,8 +1728,9 @@ git commit -m "feat(drawing-P1a): pending_training/replay 有损保真解码（l
 - **占位扫描**：无 TBD/TODO；两处显式标注"占位名以实际 API 为准"（Task 8 `makeEngine()`、Task 10 `insertDrawings/loadDrawings`）——因这两个既有入口的确切签名需实施时对齐真身，非设计占位，已给出对齐指引（引用真实文件行）。
 - **类型一致**：`DrawingID=String`、`ReviewArchiveWrapper{drawings,hiddenIds}`、`DrawingObject` 18 字段跨 Task 一致；`ReviewNetChange.changed` 扩参与旧调用兼容。`LossyDrawingArray` 改为有序 `elements:[LossyDrawingElement]`（`.known`/`.unknownRaw` 保序，codex plan-R2），`drawings`/`unknownRaw` 降为计算属性——Task 6/7 消费 `.drawings` 名/类型不变；Task 10 用 `ReviewArchiveWrapper(drawings:hiddenIds:).encodedColumn()`/`.decodeColumn().drawings` 便捷入口不变。wrapper 用 `JSONObjectScan` 保留 drawings 原始字节切片（字节保真，codex plan-R2）。
 - **codex plan-R1 收口（2 high）**：① Task 5 有损解码改**真字节级保真**——新增 `JSONTopLevelArray` 顶层数组切分器捕获未识别条**原始字节文本**、回写原样重发（**不再经 `JSONSerialization` 反/重序列化**改 key 序/数字格式，防 load+autosave 静默改写未来客户端数据），加**字节全等**测试；② Task 9 迁移改**表重建**令 `draw_uuid NOT NULL CHECK(draw_uuid <> '') UNIQUE`（DB 边界强制、非仅一次回填校验），加 缺失/空/重复 三道 DB 拦截测试。
-- **codex plan-R2/R3/R4/R5/R6 收口**：R2 `LossyDrawingArray` 改**有序** `elements` 保未识别条原位 + wrapper 用 `JSONObjectScan` 保 `drawings` 原始字节（不重序列化整体）；R3 Task 10 finalized 行 NULL style_json **行感知兜底**（`is_extended`→lineSubType、锚点→period）+ 未知 tool_type **跳过**不伪装 `.horizontal`；**R4/R5/R6（公开发布标准，[[project_app_public_release_intent]]；分层决策 Y）**：`ReviewWorking/PendingReplay` 携带有序 `lossy`（`drawings` 计算属性），三处画线数组边界（record/review/pending）均 **① 有损解码永不崩 + ② repo load→save 往返无损（同内容逐字节+保序）**；R5 修 pending append 破坏顺序（改重发有序 `lossy`）+ 切分器拒尾部垃圾；R6 修 `ReviewWorking` 结构体片段补 `lossy`（与接口 + `w.lossy` 用法一致）。**§Y 分层边界**：「coordinator 从 engine 构建纯 known fresh-save 时保住旧 unknown（引擎携带 `lossy` 穿过活编辑）」= **P1b**（引擎本就在 P1b 改新画线模型）——**P1a 不做 repo 层合并**；P1a + P1b 同版本发布完整达成 A 字节保真。
-- **codex plan-R7 收口（2 high，§Y 内）**：① **契约诚实化**——Global Constraints 明确 D21 save-路径保真 P1a 未完全达成（只 repo 往返）、**P1a/P1b 必须同版本发布不单发**（防 P1a-only 版 autosave 丢线）；验收/自查不宣称 autosave 保真。② **切分器拒畸形 JSON**——`JSONTopLevelArray` 拒绝空槽（尾随逗号 `[x,]`/前导 `[,x]`/连续 `[x,,y]`/纯空白元素），空数组 `[]` 仍合法；**加回归测试**：尾/首/双逗号、纯空白元素、`[valid]]`、`[valid]{junk}` 全须 → nil（`.dbCorrupted`，不被静默"修好"）。
+- **codex plan-R2/R3/R4/R5/R6 收口**：R2 `LossyDrawingArray` 改**有序** `elements` 保未识别条原位 + wrapper 用 `JSONObjectScan` 保 `drawings` 原始字节（不重序列化整体）；R3 Task 10 finalized 行 NULL style_json **行感知兜底**（`is_extended`→lineSubType、锚点→period）+ 未知 tool_type **跳过**不伪装 `.horizontal`；**R4/R5/R6（公开发布标准，[[project_app_public_release_intent]]；分层决策 Y）**：`ReviewWorking/PendingReplay` 携带有序 `lossy`（`drawings` 计算属性），三处画线数组边界（record/review/pending）均 **① 有损解码永不崩 + ② repo load→save 往返无损（同内容逐字节+保序）**；R5 修 pending append 破坏顺序（改重发有序 `lossy`）+ 切分器拒尾部垃圾；R6 修 `ReviewWorking` 结构体片段补 `lossy`（与接口 + `w.lossy` 用法一致）。**（§Y 分层曾拟把 coordinator save 保真延后 P1b；codex R9 指出「版本化 PR 须自洽安全」→ user 选 Z1，见下条：该保真由 Task 12 挪回 P1a，P1a 自洽安全，A 字节保真在 P1a 即完整。）**
+- **codex plan-R7 收口**：**切分器拒畸形 JSON**——`JSONTopLevelArray` 拒绝空槽（尾随 `[x,]`/前导 `[,x]`/连续 `[x,,y]`/纯空白元素），空数组 `[]` 仍合法；回归测试：尾/首/双逗号、纯空白元素、`[valid]]`、`[valid]{junk}` 全 → nil（`.dbCorrupted`，不被静默"修好"）。
+- **codex plan-R8/R9 收口 → 决策 Z1（P1a 自洽安全）**：R8 统一「引擎携带 lossy」延后目标（消 P1b-vs-P5 矛盾）；R9 指出「P1a bump 1.11+迁移=版本化 PR 但 autosave 仍丢 unknown → 不自洽安全」。**user 选 Z1**：**新增 Task 12** 把 engine/coordinator 携带 `lossy`（`reconciled(currentKnown:)` 保未识别条原位）挪回 **P1a**——D21「全 save 路径（autosave/resume-save/commit）字节保真」在 P1a 完整达成、bump 1.11 站得住、单独发版也不丢「未来版本写的画线条」；不再需「与 P1b 同版本发布」发布流程兜底。画线编辑 UI + 多点归并按稳定 id 的鲁棒性仍 P1b。
 
 ## 留给 P1b / 后续的点（本 P1a 不做）
 1. **DrawingTool 协议具体工具实现 + 渲染/hitTest**（P1b：水平线升级/趋势线/通道线/箱体/折线）。
@@ -1644,4 +1738,4 @@ git commit -m "feat(drawing-P1a): pending_training/replay 有损保真解码（l
 3. **coordinator 把 saveWorking 的 hiddenIds 接真值 + hide/show 行为 + clear-saved 空判**（P5，§12）。
 4. **`ray`/`time` legacy case 的 UI 侧最终退役**（其解码兼容已在 P1a）。
 5. Task 8 `makeEngine()`、Task 10 `insertDrawings/loadDrawings` 的真实入口名对齐（实施时按引用行核对）。
-6. **引擎/coordinator 携带 `lossy` 穿过活编辑 + fresh-save**（使 save 时保住旧 unknown，闭合 codex plan-R6 的「coordinator 纯 known fresh-save 覆盖同记录 unknown」）= **P1b**（§Y 分层决策；P1a 只保 ①解码不崩 + ②repo load→save 往返无损）。P1a 的 pending/review save 测试只断言 repo 往返，不断言 coordinator fresh-save 保真。
+6. **P1b 深化 `reconciled` 归并到「按稳定 id」**：Task 12 已在 **P1a** 令 engine/coordinator 携带 `lossy`、**全 save 路径（autosave/resume-save/commit）不丢 unknown**（含现有横线 append 编辑，按位置归并精确）。P1b 引入多点画线编辑/删/重排后，把归并从「按位置」升级到「按稳定 id」的完整鲁棒性在 P1b 深化——但**不丢 unknown** 的核心保证 + P1a 自洽安全 P1a 已立（非缺口）。
