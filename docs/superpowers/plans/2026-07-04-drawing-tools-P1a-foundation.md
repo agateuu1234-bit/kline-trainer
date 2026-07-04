@@ -898,10 +898,15 @@ public struct ReviewArchiveWrapper: Equatable, Sendable {
             throw AppError.persistence(.dbCorrupted)
         }
         let lossy = try LossyDrawingArray.decode(Data(drawingsRaw.utf8))
+        // hiddenIds：缺失(旧 wrapper)→ []；**present 但 malformed（非 [String]）→ .dbCorrupted**（不静默当空，
+        // 否则损坏/schema 漂移会覆盖唯一隐藏态副本使已隐藏原训练线重现，codex R10-medium）。
         var hidden: [DrawingID] = []
-        if let obj = try? JSONSerialization.jsonObject(with: data),
-           let dict = obj as? [String: Any],
-           let h = dict["hiddenIds"] as? [String] { hidden = h }
+        if let hraw = JSONObjectScan.rawValueBytes(data, key: "hiddenIds") {   // 存在该键
+            guard let decoded = try? JSONDecoder().decode([DrawingID].self, from: Data(hraw.utf8)) else {
+                throw AppError.persistence(.dbCorrupted)                        // 存在但非 [String] → 损坏
+            }
+            hidden = decoded
+        }
         return ReviewArchiveWrapper(lossy: lossy, hiddenIds: hidden)
     }
 
@@ -938,23 +943,26 @@ public struct ReviewWorking: Equatable, Sendable {
 ```swift
 public struct ReviewArchive: Equatable, Sendable {
     public let recordId: Int64
-    public let savedDrawings: [DrawingObject]?
+    public let savedLossy: LossyDrawingArray?          // 携带有序 known+unknown（保 unknownRaw 跨 loadArchive→save，codex R10-high）
     public let savedHiddenIds: [DrawingID]?
     public let workingStepTick: Int?
-    public let workingDrawings: [DrawingObject]?
+    public let workingLossy: LossyDrawingArray?
     public let workingHiddenIds: [DrawingID]?
+    public var savedDrawings: [DrawingObject]? { savedLossy?.drawings }       // 计算属性（app 消费的已知条）
+    public var workingDrawings: [DrawingObject]? { workingLossy?.drawings }
 
-    public init(recordId: Int64, savedDrawings: [DrawingObject]?, savedHiddenIds: [DrawingID]? = nil,
-                workingStepTick: Int?, workingDrawings: [DrawingObject]?, workingHiddenIds: [DrawingID]? = nil) {
+    public init(recordId: Int64, savedLossy: LossyDrawingArray?, savedHiddenIds: [DrawingID]? = nil,
+                workingStepTick: Int?, workingLossy: LossyDrawingArray?, workingHiddenIds: [DrawingID]? = nil) {
         self.recordId = recordId
-        self.savedDrawings = savedDrawings
+        self.savedLossy = savedLossy
         self.savedHiddenIds = savedHiddenIds
         self.workingStepTick = workingStepTick
-        self.workingDrawings = workingDrawings
+        self.workingLossy = workingLossy
         self.workingHiddenIds = workingHiddenIds
     }
 }
 ```
+> `loadArchive`/`loadSaved` 构 `ReviewArchive` 时用 `savedLossy: try? ...decodeColumn(savedCol)?.lossy`（携带 unknownRaw）；`savedDrawings`/`workingDrawings` 由计算属性给旧读取方。加 loadArchive→save/commit 含未来画线条的字节保真 fixture。
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1731,6 +1739,7 @@ git commit -m "feat(drawing-P1a): 引擎/coordinator 携带 lossy，全 save 路
 - **codex plan-R2/R3/R4/R5/R6 收口**：R2 `LossyDrawingArray` 改**有序** `elements` 保未识别条原位 + wrapper 用 `JSONObjectScan` 保 `drawings` 原始字节（不重序列化整体）；R3 Task 10 finalized 行 NULL style_json **行感知兜底**（`is_extended`→lineSubType、锚点→period）+ 未知 tool_type **跳过**不伪装 `.horizontal`；**R4/R5/R6（公开发布标准，[[project_app_public_release_intent]]；分层决策 Y）**：`ReviewWorking/PendingReplay` 携带有序 `lossy`（`drawings` 计算属性），三处画线数组边界（record/review/pending）均 **① 有损解码永不崩 + ② repo load→save 往返无损（同内容逐字节+保序）**；R5 修 pending append 破坏顺序（改重发有序 `lossy`）+ 切分器拒尾部垃圾；R6 修 `ReviewWorking` 结构体片段补 `lossy`（与接口 + `w.lossy` 用法一致）。**（§Y 分层曾拟把 coordinator save 保真延后 P1b；codex R9 指出「版本化 PR 须自洽安全」→ user 选 Z1，见下条：该保真由 Task 12 挪回 P1a，P1a 自洽安全，A 字节保真在 P1a 即完整。）**
 - **codex plan-R7 收口**：**切分器拒畸形 JSON**——`JSONTopLevelArray` 拒绝空槽（尾随 `[x,]`/前导 `[,x]`/连续 `[x,,y]`/纯空白元素），空数组 `[]` 仍合法；回归测试：尾/首/双逗号、纯空白元素、`[valid]]`、`[valid]{junk}` 全 → nil（`.dbCorrupted`，不被静默"修好"）。
 - **codex plan-R8/R9 收口 → 决策 Z1（P1a 自洽安全）**：R8 统一「引擎携带 lossy」延后目标（消 P1b-vs-P5 矛盾）；R9 指出「P1a bump 1.11+迁移=版本化 PR 但 autosave 仍丢 unknown → 不自洽安全」。**user 选 Z1**：**新增 Task 12** 把 engine/coordinator 携带 `lossy`（`reconciled(currentKnown:)` 保未识别条原位）挪回 **P1a**——D21「全 save 路径（autosave/resume-save/commit）字节保真」在 P1a 完整达成、bump 1.11 站得住、单独发版也不丢「未来版本写的画线条」；不再需「与 P1b 同版本发布」发布流程兜底。画线编辑 UI + 多点归并按稳定 id 的鲁棒性仍 P1b。
+- **codex plan-R10 收口（1 high+1 med）**：① `ReviewArchive` 结构体片段补 `savedLossy/workingLossy`（`savedDrawings/workingDrawings` 降计算属性，同 R6 ReviewWorking 修法）——与「携带 lossy 保 unknownRaw 跨 loadArchive→save」接口一致，加 loadArchive→save 未来条字节保真 fixture；② `ReviewArchiveWrapper.decodeColumn` 的 `hiddenIds`：缺失→`[]`，**present 但 malformed（非 `[String]`）→ `.dbCorrupted` fail-closed**（不静默当空覆盖唯一隐藏态副本），加 缺失/合法/malformed 三 fixtures。
 
 ## 留给 P1b / 后续的点（本 P1a 不做）
 1. **DrawingTool 协议具体工具实现 + 渲染/hitTest**（P1b：水平线升级/趋势线/通道线/箱体/折线）。
