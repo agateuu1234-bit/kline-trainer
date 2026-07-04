@@ -602,7 +602,11 @@ enum JSONTopLevelArray {
             case UInt8(ascii: "}"): depth -= 1; i += 1
             case UInt8(ascii: "]"):
                 depth -= 1
-                if depth == 0 { push(start, i); return out }   // 数组闭合（空数组 → out=[]）
+                if depth == 0 {
+                    push(start, i); i += 1
+                    while i < n, isWS(b[i]) { i += 1 }
+                    return i == n ? out : nil   // 尾部非纯空白(如 `[valid]]`/`[valid]{junk}`) → nil=损坏，触发 .dbCorrupted（codex R5-medium）
+                }
                 i += 1
             case UInt8(ascii: ","):
                 if depth == 1 { push(start, i); i += 1; start = i } else { i += 1 }
@@ -1516,18 +1520,22 @@ git commit -m "feat(drawing-P1a): RecordRepository 读写 draw_uuid+style_json +
 ```swift
 @Suite("Pending 有损保真")
 struct PendingLossyTests {
-    @Test("pending_replay: 含未来 toolType 的 drawings 列 → loadReplay 不抛、得已知条；saveReplay 后未来条字节保留")
-    func replayLossyLoadAndPreserve() throws {
+    @Test("pending_replay: [knownA, 未来条, knownB] → loadReplay 不抛得 2 已知；saveReplay 后未来条字节保留【且仍在中间】")
+    func replayLossyLoadPreservesOrder() throws {
         let db = try makeMigratedDB()
         let unknown = #"{"toolType":"__future__","z":1.0}"#
-        let known = #"{"id":"g1","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"m3","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}"#
-        try seedPendingReplayRow(db, recordId: 42, drawingsJSON: "[\(known),\(unknown)]")   // 直接种列
+        func known(_ id: String) -> String { #"{"id":"\#(id)","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"m3","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}"# }
+        try seedPendingReplayRow(db, recordId: 42, drawingsJSON: "[\(known("g1")),\(unknown),\(known("g2"))]")
         let p = try PendingReplayRepositoryImpl.loadReplay(db)
         #expect(p != nil)                                  // 不再因一条未来条整体 .dbCorrupted
-        #expect(p?.drawings.count == 1)                    // 只 1 条已知
-        try PendingReplayRepositoryImpl.saveReplay(db, replay: p!)   // 同 record 保真回写
+        #expect(p?.drawings.count == 2)                    // 两条已知（未来条不解码）
+        try PendingReplayRepositoryImpl.saveReplay(db, replay: p!)   // 保真+保序回写（重发 p.lossy）
         let col: String = try Row.fetchOne(db, sql: "SELECT drawings FROM pending_replay WHERE id=1")!["drawings"]
         #expect(col.contains(unknown))                     // 未来条字节仍在
+        let iA = col.range(of: #""g1""#)!.lowerBound        // 顺序断言：knownA → 未来条 → knownB
+        let iU = col.range(of: "__future__")!.lowerBound
+        let iB = col.range(of: #""g2""#)!.lowerBound
+        #expect(iA < iU && iU < iB)                         // 未来条仍在中间（未被 append 到末尾）
     }
 
     @Test("saveReplay 换记录（record 变）→ 不把旧记录 unknownRaw 串进新记录")
@@ -1547,29 +1555,23 @@ struct PendingLossyTests {
 
 - [ ] **Step 3: impl**
 
-`loadReplay`（`PendingReplayRepositoryImpl.swift:57`）的 `drawings = try RecordRepositoryImpl.jsonDecode(drawingsJSON, as: [DrawingObject].self)` 改为有损解码（`JSONTopLevelArray` 整体解析失败仍→.dbCorrupted，保持已验证损坏语义）：
+`loadReplay`（`PendingReplayRepositoryImpl.swift:57`）改为有损解码 + 让 `PendingReplay` **携带有序 `lossy: LossyDrawingArray`**（`drawings` 派生自 `lossy.drawings`）；整体数组解析失败（`rawElementStrings` 返 nil）仍→.dbCorrupted，保持已验证损坏语义：
 
 ```swift
-            drawings = try LossyDrawingArray.decode(Data(drawingsJSON.utf8)).drawings
+            // PendingReplay 增 `var lossy: LossyDrawingArray`；`drawings` = 计算属性 `lossy.drawings`
+            replay.lossy = try LossyDrawingArray.decode(Data(drawingsJSON.utf8))
 ```
 
 `saveReplay`（`:13`）保真回写——INSERT OR REPLACE **前**读同记录现有列的 unknownRaw、拼在新已知条后：
 
 ```swift
-        // 保真：若单槽现属同一 record，保留其 unknownRaw（未来/未知条字节）；换记录则不串（新槽）。
-        let existingUnknown: [String] = (try? Row.fetchOne(db, sql:
-            "SELECT drawings FROM pending_replay WHERE id = 1 AND record_id = ?", arguments: [p.recordId]))
-            .flatMap { row -> [String]? in
-                let s: String = row["drawings"]
-                return (try? LossyDrawingArray.decode(Data(s.utf8)))?.unknownRaw
-            } ?? []
-        let mergedLossy = LossyDrawingArray(elements:
-            p.drawings.map { LossyDrawingElement.known($0) } + existingUnknown.map { .unknownRaw($0) })
-        let drawingsJSON = String(decoding: try mergedLossy.encoded(), as: UTF8.self)
+        // 保真+保序：直接重发 p.lossy（有序 known+unknown）——**不重排、不把 unknown append 到 known 后面**（codex R5-high）。
+        // load 得到的 p.lossy 已含原有序未识别条；未编辑的 load→save 逐字节 + 保序无损。
+        let drawingsJSON = String(decoding: try p.lossy.encoded(), as: UTF8.self)
 ```
-（`PendingTrainingRepositoryImpl` 同款：load 有损解码 + save 读同 session 现有 unknownRaw 保真拼回。）
+（`PendingTrainingRepositoryImpl` 同款：`PendingTraining` 携带 `lossy`、load 填充、save 重发 `lossy.encoded()`。）
 
-> 说明：pending 是单槽（`CHECK(id=1)`），save 按 `record_id` 匹配保留避免串记录（第二个测试）。unknownRaw 一路穿过 engine/coordinator 的**活编辑保序**属 P5（P1a 只保 repo 边界不丢未来条字节；append 在已知条后不影响本客户端——它不渲染未知条）。
+> 说明：`PendingReplay`/`PendingTraining` 模型增 `var lossy: LossyDrawingArray`（`drawings` = 计算属性 `lossy.drawings`）。**P1a 只保 repo 边界的无损 + 保序**（未编辑的 load→save 逐字节 + 原序，含 `[knownA, unknown, knownB]` 保序）。coordinator 从 engine 构建 fresh pending（`lossy` = 当前 known 有序、无 unknown），以及 resume-后-编辑-再存时把编辑过的 known 与保留的 unknown **按位置/稳定 id 归并**——属 **P5**（[[project_app_public_release_intent]] 前向兼容全链在 P5 收口）。
 
 - [ ] **Step 4: run PASS + 全量**：`cd ios/Contracts && swift test 2>&1 | tail -6`（两框架 0 fail）+ Catalyst build-for-testing SUCCEEDED。
 
