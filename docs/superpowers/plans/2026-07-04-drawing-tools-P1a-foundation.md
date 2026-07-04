@@ -16,7 +16,8 @@
 - **迁移 `0009` 只走 migration**，`PRAGMA user_version = 7`；**绝不改 `AppDBMigrations.v1_4_baselineDDL` 或 `ios/sql/app_schema_v1.sql`**（v1.4 冻结基线，drift-checked——沿 0006/0007/0008 先例）。
 - **`draw_uuid`**：迁移回填所有旧行 `legacy-<record_id>-<id>`；**回填后校验无 NULL、无重复，否则迁移抛错**；建 `UNIQUE INDEX`（D20）。
 - **复盘 canonical 磁盘 JSON schema（全阶段唯一，禁改 key/形状）** = `{ "drawings": [DrawingObject], "hiddenIds": [DrawingID] }`；in-memory `reviewDrawings`/`hiddenOriginalIds` 经显式 `CodingKeys` 映射；解码容错裸 `[DrawingObject]` 数组（→ `hiddenIds=[]`）| wrapper（D14）。
-- **有损 ≠ 丢数据（D21）**：所有画线数组边界（`pending_training.drawings` / `pending_replay.drawings` / review wrapper 的 `drawings`）解码时坏/未知条只跳过、不整组失败，**且保留其原始 JSON payload，写回时原样字节级重发**。
+- **有损 ≠ 丢数据（D21，§Y 分层）**：所有画线数组边界（`pending_*.drawings` / review wrapper 的 `drawings`）解码时坏/未知条只跳过、不整组失败。**P1a 达成：① 解码永不崩 + ② repo `load→save` 往返无损**（携带有序 `lossy`、原样字节级重发；未编辑）。**⚠️ D21 的「所有 save 路径字节保真」P1a 未完全达成**——coordinator 从 engine 构建纯 known fresh-save 会覆盖旧 unknown（引擎携带 `lossy` 穿过活编辑/coordinator = **P1b**）。P1a 验收/自查只断言 repo 往返，**不**断言 autosave/coordinator-save 保真。
+- **⚠️ P1a 与 P1b 必须同一个 App 版本一起发布（不得单发 P1a 给用户）**：P1a bump 契约 1.11、但 D21 save-路径保真要 P1b 才完整；单发 P1a 版本在「未来版本写的未识别画线条」上做普通 autosave 会**不可逆丢线**（codex plan-R7-high；公开发布 [[project_app_public_release_intent]]）。P1a+P1b 同版本发布则用户永不经历此窗口。
 - **`DrawingID` 跨层防碰撞（D13/D16）**：新画线 = `UUID().uuidString`；原训练线 = `draw_uuid`（`legacy-<record_id>-<id>` 或后续新建时铸的 UUID）；旧 JSON blob 无 id 的元素在数组解码层回填 `legacy-idx-<index>`（命名空间唯一）。**禁进程内单调整数、禁裸数组下标整数**。
 - **两闸门**：平台无关值类型/Codable/几何/迁移逻辑走 host `swift test`（Swift Testing + XCTest 两框架都要全绿）；DB 迁移走 `KlineTrainerPersistenceTests`（XCTest + GRDB in-memory）。UIKit 层本阶段无。
 - **零 UI**：本阶段新字段无 UI 消费者，全靠 Codable round-trip + 迁移 + 持久化往返测覆盖（Wave-0 契约先行同款）。
@@ -577,17 +578,24 @@ enum JSONTopLevelArray {
     static func rawElementStrings(_ data: Data) -> [String]? {
         let b = [UInt8](data); let n = b.count; var i = 0
         func isWS(_ c: UInt8) -> Bool { c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D }
-        while i < n, isWS(b[i]) { i += 1 }
-        guard i < n, b[i] == UInt8(ascii: "[") else { return nil }
-        i += 1
-        var out: [String] = []
-        var depth = 1, inString = false, escaped = false, start = i
-        func push(_ lo: Int, _ hi: Int) {
+        func trimmedEmpty(_ lo: Int, _ hi: Int) -> Bool {   // 槽去空白后是否为空
+            var a = lo; while a < hi, isWS(b[a]) { a += 1 }; return a >= hi
+        }
+        func slice(_ lo: Int, _ hi: Int) -> String {
             var a = lo, z = hi
             while a < z, isWS(b[a]) { a += 1 }
             while z > a, isWS(b[z - 1]) { z -= 1 }
-            if z > a { out.append(String(decoding: b[a..<z], as: UTF8.self)) }
+            return String(decoding: b[a..<z], as: UTF8.self)
         }
+        func tailAllWS(_ from: Int) -> Bool { var k = from; while k < n, isWS(b[k]) { k += 1 }; return k == n }
+        while i < n, isWS(b[i]) { i += 1 }
+        guard i < n, b[i] == UInt8(ascii: "[") else { return nil }
+        i += 1
+        // 空数组：`[` 后（跳空白）即 `]`（尾部须纯空白）
+        var j = i; while j < n, isWS(b[j]) { j += 1 }
+        if j < n, b[j] == UInt8(ascii: "]") { return tailAllWS(j + 1) ? [] : nil }
+        var out: [String] = []
+        var depth = 1, inString = false, escaped = false, start = i
         while i < n {
             let c = b[i]
             if inString {
@@ -603,13 +611,16 @@ enum JSONTopLevelArray {
             case UInt8(ascii: "]"):
                 depth -= 1
                 if depth == 0 {
-                    push(start, i); i += 1
-                    while i < n, isWS(b[i]) { i += 1 }
-                    return i == n ? out : nil   // 尾部非纯空白(如 `[valid]]`/`[valid]{junk}`) → nil=损坏，触发 .dbCorrupted（codex R5-medium）
+                    if trimmedEmpty(start, i) { return nil }        // 尾随逗号/空槽(如 `[x,]`) → 损坏
+                    out.append(slice(start, i)); i += 1
+                    return tailAllWS(i) ? out : nil                 // 尾部非纯空白(`[valid]]`/`[valid]{junk}`) → 损坏
                 }
                 i += 1
             case UInt8(ascii: ","):
-                if depth == 1 { push(start, i); i += 1; start = i } else { i += 1 }
+                if depth == 1 {
+                    if trimmedEmpty(start, i) { return nil }        // 前导/连续逗号/纯空白元素(`[,x]`/`[x,,y]`) → 损坏
+                    out.append(slice(start, i)); i += 1; start = i
+                } else { i += 1 }
             default: i += 1
             }
         }
@@ -1625,6 +1636,7 @@ git commit -m "feat(drawing-P1a): pending_training/replay 有损保真解码（l
 - **类型一致**：`DrawingID=String`、`ReviewArchiveWrapper{drawings,hiddenIds}`、`DrawingObject` 18 字段跨 Task 一致；`ReviewNetChange.changed` 扩参与旧调用兼容。`LossyDrawingArray` 改为有序 `elements:[LossyDrawingElement]`（`.known`/`.unknownRaw` 保序，codex plan-R2），`drawings`/`unknownRaw` 降为计算属性——Task 6/7 消费 `.drawings` 名/类型不变；Task 10 用 `ReviewArchiveWrapper(drawings:hiddenIds:).encodedColumn()`/`.decodeColumn().drawings` 便捷入口不变。wrapper 用 `JSONObjectScan` 保留 drawings 原始字节切片（字节保真，codex plan-R2）。
 - **codex plan-R1 收口（2 high）**：① Task 5 有损解码改**真字节级保真**——新增 `JSONTopLevelArray` 顶层数组切分器捕获未识别条**原始字节文本**、回写原样重发（**不再经 `JSONSerialization` 反/重序列化**改 key 序/数字格式，防 load+autosave 静默改写未来客户端数据），加**字节全等**测试；② Task 9 迁移改**表重建**令 `draw_uuid NOT NULL CHECK(draw_uuid <> '') UNIQUE`（DB 边界强制、非仅一次回填校验），加 缺失/空/重复 三道 DB 拦截测试。
 - **codex plan-R2/R3/R4/R5/R6 收口**：R2 `LossyDrawingArray` 改**有序** `elements` 保未识别条原位 + wrapper 用 `JSONObjectScan` 保 `drawings` 原始字节（不重序列化整体）；R3 Task 10 finalized 行 NULL style_json **行感知兜底**（`is_extended`→lineSubType、锚点→period）+ 未知 tool_type **跳过**不伪装 `.horizontal`；**R4/R5/R6（公开发布标准，[[project_app_public_release_intent]]；分层决策 Y）**：`ReviewWorking/PendingReplay` 携带有序 `lossy`（`drawings` 计算属性），三处画线数组边界（record/review/pending）均 **① 有损解码永不崩 + ② repo load→save 往返无损（同内容逐字节+保序）**；R5 修 pending append 破坏顺序（改重发有序 `lossy`）+ 切分器拒尾部垃圾；R6 修 `ReviewWorking` 结构体片段补 `lossy`（与接口 + `w.lossy` 用法一致）。**§Y 分层边界**：「coordinator 从 engine 构建纯 known fresh-save 时保住旧 unknown（引擎携带 `lossy` 穿过活编辑）」= **P1b**（引擎本就在 P1b 改新画线模型）——**P1a 不做 repo 层合并**；P1a + P1b 同版本发布完整达成 A 字节保真。
+- **codex plan-R7 收口（2 high，§Y 内）**：① **契约诚实化**——Global Constraints 明确 D21 save-路径保真 P1a 未完全达成（只 repo 往返）、**P1a/P1b 必须同版本发布不单发**（防 P1a-only 版 autosave 丢线）；验收/自查不宣称 autosave 保真。② **切分器拒畸形 JSON**——`JSONTopLevelArray` 拒绝空槽（尾随逗号 `[x,]`/前导 `[,x]`/连续 `[x,,y]`/纯空白元素），空数组 `[]` 仍合法；**加回归测试**：尾/首/双逗号、纯空白元素、`[valid]]`、`[valid]{junk}` 全须 → nil（`.dbCorrupted`，不被静默"修好"）。
 
 ## 留给 P1b / 后续的点（本 P1a 不做）
 1. **DrawingTool 协议具体工具实现 + 渲染/hitTest**（P1b：水平线升级/趋势线/通道线/箱体/折线）。
