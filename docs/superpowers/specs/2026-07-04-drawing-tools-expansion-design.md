@@ -113,7 +113,7 @@
 目标集：`horizontal, trend, channel, polyline, golden, wave, cycle, fib, timeRuler, text, rect`。
 - 现有 `horizontal/trend/golden/wave/cycle` 直接映射对应工具。
 - 新增 `channel(通道线)/polyline(折线)/fib(斐波那契)/timeRuler(时间尺)/text(标注)/rect(箱体)`。
-- **legacy 处理**：现有 `ray`、`time` 两个 case——`射线` 已下沉为线型子类（不再是工具），`time` 语义歧义。生产已落地数据仅 `.horizontal`。P1 决定：`ray`/`time` 作为**已废弃 case 保留以容忍历史解码**（映射为忽略/迁移），或以 `fib`/`timeRuler` 取代；`DrawingToolType` 解码需 tolerant（未知→跳过，不 crash）。**该细节 P1 定，spec 钉死"不得因未知/废弃 toolType 崩溃"**。
+- **legacy 处理**：现有 `ray`、`time` 两个 case——`射线` 已下沉为线型子类（不再是工具），`time` 语义歧义。生产已落地数据仅 `.horizontal`。P1 决定：`ray`/`time` 作为**已废弃 case 保留以容忍历史解码**（映射为忽略/迁移），或以 `fib`/`timeRuler` 取代；`DrawingToolType` 解码需 tolerant（未知→跳过，不 crash）。**spec 钉死"不得因未知/废弃 toolType 崩溃"——机制 = 所有画线数组持久化边界用 lossy 逐元素解码器只跳坏条（§11.2/D21）**；P1 定 `ray`/`time` 的具体退役映射。
 
 ### 4.2 `DrawingObject` 新增字段（附加式，Codable `decodeIfPresent` 兜底，沿 `revealTick` 先例）
 - **`id: DrawingID`——持久稳定、跨层防碰撞的身份（codex R2/R3-high）**。用于选中命中→定位、`hiddenOriginalIds`、net-change 保留重数（防两条重复几何——同价水平线/重复标注——歧义）。**`DrawingID` 必须在 原训练线 / pending / reviewDrawings 全层唯一、不碰撞**：复盘渲染/选中把 原训练线 + `reviewDrawings` **合并**，若新线用「进程内单调」或旧 blob「裸下标回填」，其小整数会与原训练线 `drawings` 表小整数 PK **撞号** → 选错/隐藏错/net-change 折叠（codex R3-high）。**方案**：`DrawingID = UUID 字符串`——新画线（normal/replay/review）提交时 `UUID()`；**原训练线**用持久化的 `draw_uuid`（0009 新列，legacy 行迁移期确定性回填 `legacy-<record_id>-<rowid>` 唯一串，§11.3）。**禁进程内单调、禁裸数组下标**。旧 JSON blob 无 `id` → 解码回填一确定性唯一 id 并于下次保存持久化。
@@ -266,11 +266,12 @@
 
 ### 11.2 pending / review JSON 持久形状（P1 定死，防版本错位，codex R2-high）
 - `pending_training.drawings`、`pending_replay.drawings`：整体 JSON blob 存 `[DrawingObject]`——经 Codable **自动携带新字段（含 `id`）**，无需改列。
+- **所有画线数组持久化边界（pending_training / pending_replay / review wrapper 的 `drawings`）必须用 lossy 逐元素解码器**：把每个 `DrawingObject` 包在 failable 解码里，**未知/废弃 `toolType` 或损坏的单条只跳过、不让整数组失败**（现 `JSONDecoder().decode([DrawingObject].self)` + raw `DrawingToolType` enum 会因一条未知值整组解码失败 → resume/复盘加载崩溃，codex R8-medium）。与 §4.1 tolerant toolType 契约配套。加 unknown-toolType fixtures（pending_training / pending_replay / review wrapper 三处各一）。
 - **`review_archive.working_drawings/saved_drawings`：形状在 P1 就固定为容错 wrapper**。**canonical 磁盘 JSON schema（P1 钉死、全阶段唯一）** = `{ "drawings": [DrawingObject], "hiddenIds": [DrawingID] }`——**on-disk key 就叫 `drawings` / `hiddenIds`**，对应 in-memory `ReviewWorking`/`ReviewArchive` 的 `reviewDrawings` / `hiddenOriginalIds`，用**显式 `CodingKeys` 映射**（禁任何阶段改 key 名/换形状）。**解码器容错**：既解旧的裸 `[DrawingObject]` 数组（→ `hiddenIds=[]`）、也解 wrapper 对象（`try 数组 else wrapper`）。随 P1 的 `1.11`/`user_version 7` ship；**hide/show UI 虽 P5 才落地，但形状 P1 定死，P5 不改形状/key、不迁移**（否则只认数组的 P1–P4 构建读 P5 wrapper 解不出、复盘存档不可读/autosave 失败）。**P1 加兼容 fixtures 往返测**：①裸数组 ②空 wrapper `{drawings:[],hiddenIds:[]}` ③drawings-only ④hidden-only 四态（codex R7-high）。
 
 ### 11.3 finalized `drawings` 关系表 + 迁移
 `drawings` 表现为分列（`tool_type/panel_position/is_extended/anchors(JSON)/reveal_tick`）。新样式/文本/period 字段需落库：
-- **方案（推荐）**：迁移 **`0009_v1.11_drawing_style`** 给 `drawings` 加**两列**——① **`style_json TEXT`**（可空，承载样式/文本/tailAnchor 等新字段束，`RecordRepository` 编解码进出；旧行 NULL→取默认）；② **`draw_uuid TEXT`**（原训练线的跨层防碰撞身份，§4.2/D16；legacy 行迁移期确定性回填 `legacy-<record_id>-<rowid>` 唯一串）。（备选：样式逐字段加列，沿 `reveal_tick` 先例；列数多，spec 倾向单 JSON 列，P1 定。）
+- **方案（推荐）**：迁移 **`0009_v1.11_drawing_style`** 给 `drawings` 加**两列**——① **`style_json TEXT`**（可空，承载样式/文本/tailAnchor 等新字段束，`RecordRepository` 编解码进出；旧行 NULL→取默认）；② **`draw_uuid TEXT`**（原训练线跨层防碰撞身份，§4.2/D16）——迁移须：加列 + **确定性回填所有旧行 `legacy-<record_id>-<rowid>`（唯一）** + **回填后校验无 NULL、无重复，否则迁移 fail** + **`draw_uuid` NOT NULL 语义 + 建 `UNIQUE INDEX`** + insert/load 测试证每条 finalized 画线都写读到**非空唯一** `draw_uuid`。**否则漏插/部分迁移/重复会产生 null/重复 id，review 按它当权威 → 选错/隐藏错/折叠，且无 DB 报错拦**（codex R8-high）。（备选样式逐字段加列，spec 倾向单 JSON 列，P1 定。）
 - `PRAGMA user_version = 7`；`CONTRACT_VERSION "1.10" → "1.11"`（m01 §A 类"改既有语义"；连带 CODEOWNERS approve 门）。
 - **只走 migration，不动 `v1_4_baselineDDL` / `app_schema_v1.sql`**（v1.4 冻结基线，drift-checked——沿 0006/0007/0008 先例）。
 - **原训练线身份 = `draw_uuid`（canonical 唯一字段，不用整数 PK）**：`RecordRepository` 读记录画线时把该行的 `draw_uuid`（0009 列、legacy 回填）带进 `DrawingObject.id`。`hiddenOriginalIds` / 选中命中 / `ReviewNetChange` **一律引用同一个 `draw_uuid` 串**，**绝不混用 `drawings` 表整数 PK**（否则 P1 写 UUID、P5 按 PK 命中会失配 → 隐藏/选中/净改动错，codex R4-high）。整数 PK 仅作表行主键、不进 `DrawingObject.id`。
@@ -360,6 +361,8 @@
 - **D17 `全部显示/全部隐藏` = 非持久 UI-only 视图覆盖**；唯一持久隐藏态 = `hiddenOriginalIds`（仅 per-line 隐藏/显示增删）。bulk 模式不进 wrapper/net-change/autosave、每次进复盘重置。**理由**：否则 bulk 与 per-line 语义纠缠、autosave/replay 恢复歧义（**codex R5-high**）。
 - **D18 复盘选中命中两层、操作按层门控（选中 ≠ 可变）**：hit-test 原训练线 `drawings` + `reviewDrawings` 两层，返回 (层, id)；原训练线只可隐藏/显示，review/own 画线可编辑/删除。**理由**：若命中只扫 `reviewDrawings`，原训练线永不可选 → §12 隐藏动作无对象、隐藏功能不可达（**codex R6-high**）。
 - **D19 复盘专属控件全属 P5，P1 不暴露**：P1 画线模式只面向训练/replay；复盘 6 键栏/隐藏/删除/隐藏持久化/clear-saved 全 P5，P1 前隐藏/禁用 + 测试证不暴露未接线动作。**理由**：否则 P1 独立 PR 会 ship 出死/无持久的复盘控件（**codex R7-medium**）。
+- **D20 `draw_uuid` 在 DB 边界强制非空+唯一**：迁移回填后校验无 NULL/无重复否则 fail + `UNIQUE INDEX` + insert/load 测试。**理由**：仅加 `TEXT` 列不约束 → null/重复 id 被 review 当权威 → 选错/隐藏错/折叠且无 DB 拦（**codex R8-high**）。
+- **D21 所有画线数组持久化边界用 lossy 逐元素解码**：未知/废弃 toolType 或坏条只跳过、不整组失败（配套 §4.1 tolerant + unknown-toolType fixtures）。**理由**：raw `[DrawingObject]` Codable 会因一条未知值整组解码失败 → resume/复盘加载崩（**codex R8-medium**）。
 
 ---
 
