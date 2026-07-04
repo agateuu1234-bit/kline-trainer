@@ -1364,23 +1364,31 @@ Expected: FAIL — INSERT 没写 draw_uuid/style_json；`drawingFromRow` 没读 
 `drawingFromRow`（`:163-173`）改为读回：
 
 ```swift
-    private static func drawingFromRow(_ row: Row) throws -> DrawingObject {
+    /// 返回 nil = 未知/未来 `tool_type` 的 finalized 行 → **lossy 跳过**（不静默伪装成 `.horizontal`，codex R3-medium）。
+    /// finalized 行只读、加载不重写，跳过非破坏性（DB 行保留、仅本次不呈现）。caller 用 compactMap 过滤 nil。
+    private static func drawingFromRow(_ row: Row) throws -> DrawingObject? {
         let toolRaw: String = row["tool_type"]
-        let tool = DrawingToolType(rawValue: toolRaw) ?? .horizontal
+        guard let tool = DrawingToolType(rawValue: toolRaw) else { return nil }   // 未知→跳过，不 coerce .horizontal
         let anchorsJSON: String = row["anchors"]
         let anchors: [DrawingAnchor] = try jsonDecode(anchorsJSON, as: [DrawingAnchor].self)
         let drawUuid: String = row["draw_uuid"]
+        let isExt = (row["is_extended"] as Int) != 0
+        // NULL style_json（旧行）→ **行感知兜底**：lineSubType 由 is_extended 派生（true→.ray/false→.straight）、
+        // period 由锚点派生——不能用扁平 defaults（会把 is_extended=1 的旧线错读成 .straight，codex R3-high）。
         let style: DrawingStyle = try (row["style_json"] as String?)
-            .map { try jsonDecode($0, as: DrawingStyle.self) } ?? DrawingStyle.defaults
+            .map { try jsonDecode($0, as: DrawingStyle.self) }
+            ?? DrawingStyle.legacyFallback(isExtended: isExt, period: anchors.first?.period ?? .m3)
         return DrawingObject(
             id: drawUuid, toolType: tool, anchors: anchors,
-            isExtended: (row["is_extended"] as Int) != 0, panelPosition: row["panel_position"],
+            isExtended: isExt, panelPosition: row["panel_position"],
             revealTick: row["reveal_tick"], period: style.period, lineSubType: style.lineSubType,
             lineStyle: style.lineStyle, thickness: style.thickness, colorToken: style.colorToken,
             labelMode: style.labelMode, locked: style.locked, text: style.text, fontSize: style.fontSize,
             textColorToken: style.textColorToken, textForm: style.textForm, tailAnchor: style.tailAnchor)
     }
 ```
+
+> caller（`loadDrawings` 组装 `[DrawingObject]` 处）改为 `rows.compactMap { try drawingFromRow($0) }` 过滤 nil（未知 tool_type 行跳过）。
 
 在 `RecordRepositoryImpl` 内新增私有 `DrawingStyle`（style_json 的 payload 结构 = 除 id/toolType/anchors/isExtended/panelPosition/reveal_tick 外的样式束；这些已是独立列不重复存）：
 
@@ -1399,12 +1407,51 @@ Expected: FAIL — INSERT 没写 draw_uuid/style_json；`drawingFromRow` 没读 
         static var defaults: DrawingStyle {
             DrawingStyle(from: DrawingObject(toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0))
         }
+        /// 旧行（NULL style_json）行感知兜底：lineSubType 由 is_extended 派生、period 由锚点派生（codex R3-high）。
+        static func legacyFallback(isExtended: Bool, period: Period) -> DrawingStyle {
+            var s = DrawingStyle.defaults
+            s.period = period
+            s.lineSubType = isExtended ? .ray : .straight   // spec §11.1/§4.2：旧 isExtended→lineSubType
+            return s
+        }
     }
 ```
 
 `ReviewArchiveRepositoryImpl.swift`：`saveWorking`/`commitSaved` 的 `jsonEncode(drawings)` 改为 `ReviewArchiveWrapper(drawings: drawings, hiddenIds: hiddenOriginalIds).encodedColumn()`；`loadWorking`/`loadSaved`/`loadArchive` 的 `jsonDecode(_, as: [DrawingObject].self)` 改为 `ReviewArchiveWrapper.decodeColumn(_).drawings`（并把 hiddenIds 透出到 `ReviewWorking.hiddenOriginalIds` / `ReviewArchive.workingHiddenIds`/`savedHiddenIds`）。`saveWorking` 增 `hiddenOriginalIds: [DrawingID] = []` 参、`commitSaved` 同理——P1a 恒传 `[]`（hide 行为 P5）。
 
 > 说明：本 Task 只改**存取形状**（wrapper + draw_uuid/style_json 列）；hide/show 的**行为逻辑**在 P5。saveWorking 新增 hiddenIds 参默认 `[]`，coordinator 现有调用不破。
+
+**补测（Step 1 一并写为 failing test；codex R3）**：直接向 `drawings` 表插旧格式行（`style_json` NULL）再 load，验证兼容：
+
+```swift
+    @Test("旧行 is_extended=1 + NULL style_json → 读回 lineSubType==.ray（不被错读成 .straight）")
+    func legacyExtendedRowLoadsAsRay() throws {
+        let db = try makeMigratedDB()   // 迁移到 0009 的库（同 Migration0009Tests 工厂）
+        let rid = try insertRecord(db)  // 一条 training_records
+        try db.execute(sql: """
+            INSERT INTO drawings (record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, draw_uuid, style_json)
+            VALUES (?, 'horizontal', 0, 1, ?, 0, 'legacy-1-1', NULL)
+            """, arguments: [rid, try jsonEncode([DrawingAnchor(period: .daily, candleIndex: 3, price: 10)])])
+        let loaded = try RecordRepositoryImpl.loadDrawings(db, recordId: rid)
+        #expect(loaded.count == 1)
+        #expect(loaded[0].lineSubType == .ray)         // 由 is_extended=1 派生，非扁平 .straight
+        #expect(loaded[0].period == .daily)            // 由锚点派生
+        #expect(loaded[0].id == "legacy-1-1")
+    }
+
+    @Test("未知 tool_type 的 finalized 行 → 跳过（不被伪装成 .horizontal）")
+    func unknownToolTypeRowSkipped() throws {
+        let db = try makeMigratedDB()
+        let rid = try insertRecord(db)
+        try db.execute(sql: """
+            INSERT INTO drawings (record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, draw_uuid, style_json)
+            VALUES (?, 'future_tool_xyz', 0, 0, ?, 0, 'legacy-1-2', NULL)
+            """, arguments: [rid, try jsonEncode([DrawingAnchor(period: .daily, candleIndex: 3, price: 10)])])
+        let loaded = try RecordRepositoryImpl.loadDrawings(db, recordId: rid)
+        #expect(loaded.isEmpty)                        // 跳过，绝不出现一条 .horizontal
+    }
+```
+> `makeMigratedDB`/`insertRecord` 为测试工厂——实施时对齐 `KlineTrainerPersistenceTests` 既有迁移测试的库构造 + records 插入 helper（同 Migration0009Tests）。
 
 - [ ] **Step 4: Run test to verify it passes**
 
