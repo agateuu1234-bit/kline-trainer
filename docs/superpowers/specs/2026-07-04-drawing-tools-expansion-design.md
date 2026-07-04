@@ -281,6 +281,7 @@
 - `ReviewArchiveRepository` 的 `ReviewWorking`/`ReviewArchive` 结构**扩承 `hiddenOriginalIds`**；`saveWorking`/`commitSaved` 在**同一 UPSERT 事务原子写**二者。
 - `ReviewNetChange.changed(working:committed:)` **同时按 id 比较 drawings（保留重数）+ `hiddenOriginalIds` 集**——仅隐藏/仅显示也判净改动（脏）→ 触发 autosave、参与「删空清已复盘」。
 - autosave 触发面：`engine` 暴露 `hiddenOriginalIds`（`@Observable`），`TrainingView` 除 `.onChange(reviewDrawings.count)` 外**也 onChange 隐藏集**（或统一一个 review revision）→ 隐藏/显示即时 autosave。
+- **唯一持久隐藏态 = `hiddenOriginalIds`**（仅 per-line「隐藏」/「显示」增删它）。**`全部显示/全部隐藏` 是非持久 UI-only 视图覆盖**——**不进 wrapper、不进 `ReviewNetChange`、不触发 autosave、每次进复盘重置为「按 `hiddenOriginalIds` 隐藏」**（codex R5-high，D17）。
 - **落库 = §11.2 的容错 wrapper**：`working_drawings`/`saved_drawings` 列存 `{drawings, hiddenIds}` JSON（解码容错裸数组），**该形状在 P1 就定死随 `1.11` ship，P5 不再改形状/不迁移**（消除版本错位，codex R2-high）。P5 只加写 `hiddenIds` 的 UI/逻辑。**契约由本 spec 钉死：隐藏态是复盘原子状态的一部分**。
 
 ---
@@ -289,7 +290,7 @@
 
 - **复盘中画线**：已有（`showsDrawingTools` 含 review、`routeDrawingCommit` 写 `reviewDrawings`）。本 RFC 令复盘也走同一画线模式外壳（底栏 6 键）。
 - **复盘画线删除（接线 `removeReviewDrawing`）**：选中一条**复盘新画线**（`reviewDrawings` 层）→ 🗑删除 → 调 `removeReviewDrawing(at:)` → 触发复盘 autosave 持久化。选中命中须**只在 `reviewDrawings` 层**解析索引（原训练线只读，不可删，仅可隐藏）。
-- **隐藏原训练线**：复盘底栏第 6 键「隐藏」——单击选中一条**原训练线**（只读）→ 点「隐藏」→ 该线转虚影/隐藏（存 `hiddenOriginalIds` 集，用该线 `draw_uuid` = 渲染 `DrawingObject.id` **同一字段**，唯一无歧义，§11.5）。**长按「隐藏」键**弹小菜单 `[全部显示] [全部隐藏]`（**只作用于被单独设隐藏的原训练线**：一次性显现/收起，便于操作；菜单贴近隐藏键、小巧）。全部显示态下选中一条已隐藏线 → 底栏该键显示为「显示」→ 点它 = 把该线**永久改回显示**（此后不受全部隐藏/显示影响）。
+- **隐藏原训练线**：复盘底栏第 6 键「隐藏」——单击选中一条**原训练线**（只读）→ 点「隐藏」→ 该线转虚影/隐藏（存 `hiddenOriginalIds` 集，用该线 `draw_uuid` = 渲染 `DrawingObject.id` **同一字段**，唯一无歧义，§11.5）。**长按「隐藏」键**弹小菜单 `[全部显示] [全部隐藏]`——这是**非持久的 UI 视图覆盖**（**不改 `hiddenOriginalIds`、不进 `ReviewNetChange`、不触发 autosave、每次进复盘重置**）：全部显示=临时把已隐藏线显出便于操作、全部隐藏=再临时收起；菜单贴近隐藏键、小巧。全部显示态下选中一条已隐藏线 → 底栏该键显示为「显示」→ 点它 = **从 `hiddenOriginalIds` 移除该 id**（**持久 un-hide**，此后不受全部显示/隐藏影响）。
 - **净改动 / 标记**（沿 #139）：复盘 autosave 经 `persistReviewWorkingIfChanged`（净改动 = **原子态** `{reviewDrawings, hiddenOriginalIds}` vs committed 基线，§11.5）；画线/删除/改样式/**隐藏/显示**都经 §11.4 的 **id 归组比对 + `hiddenOriginalIds` 集**参与净改动判定（隐藏/显示编辑亦判脏、亦 autosave）；**删+显示回到 committed 基线 → clearWorking → 清「复盘中」**（现有机制自动成立，前提是每类编辑都触发 autosave）。
 - **§12.4 「删空清已复盘」收口**：现 `commitSaved([])` 写 `"[]"`（非 NULL）→「已复盘」不清。**特判**：结束→保存时若工作集为空（或等于空基线），走 `clearSaved` 而非 `commitSaved([])`，使「已复盘」正确消失。（此即 #139 codex whole-branch 标过、override 延后至本 RFC 的那条。）
 
@@ -353,13 +354,14 @@
 - **D14 复盘 JSON 持久形状在 P1 就定死为容错 wrapper**（解裸数组 | wrapper 双形），随 `1.11` ship；P5 不改形状/不迁移。**理由**：形状延到 P5 改会造成 P1–P4 只认数组的构建读 P5 wrapper 解不出的版本错位（**codex R2-high**）。
 - **D15 `routeDrawingCommit` 改 copy-with-revealTick、保留全字段**：现只从 toolType/anchors/isExtended/panelPosition/revealTick 重建 → 每次落锚提交丢 id/样式/锁定/文本/tailAnchor，破坏 stable-id/文本/样式持久/net-change/按 id 选隐。P1 改为「盖 revealTick 但保留其余全字段」+ normal/review 提交测试证字段存活。**理由**：**codex R3-high**。
 - **D16 `DrawingID` 跨层防碰撞（非仅数组内稳定）**：原训练线（`draw_uuid`）+ pending + reviewDrawings 合并后须全局唯一——用 UUID/唯一串，**禁进程内单调、禁裸下标回填**（会与原 PK 小整数撞号 → 选错/隐藏错/net-change 折叠）。**理由**：**codex R3-high**。
+- **D17 `全部显示/全部隐藏` = 非持久 UI-only 视图覆盖**；唯一持久隐藏态 = `hiddenOriginalIds`（仅 per-line 隐藏/显示增删）。bulk 模式不进 wrapper/net-change/autosave、每次进复盘重置。**理由**：否则 bulk 与 per-line 语义纠缠、autosave/replay 恢复歧义（**codex R5-high**）。
 
 ---
 
 ## 17. 验收 / 契约指针
 
 - 每阶段 plan 各带 `docs/superpowers/acceptance/2026-…-<phase>.md`（中文非程序员动作/预期/通过标准清单，治理要求）。
-- 契约：`CONTRACT_VERSION 1.10→1.11`（P1）；迁移 `0009`（P1，`user_version 6→7`）、可能 `0010`（P5）；`ios/sql/app_schema_v1.sql` 冻结基线不动。
+- 契约：`CONTRACT_VERSION 1.10→1.11`（P1）；迁移 `0009`（P1，`user_version 6→7`，含 `style_json` + `draw_uuid` 两列）；**P5 无复盘 JSON/schema 迁移**（复盘 wrapper 的解码器/写入/兼容测试由 **P1** owns，§11.2/D14）；`ios/sql/app_schema_v1.sql` 冻结基线不动。
 - host 几何纯函数（各工具 lineY/points/hitTest/labels 对齐/根数天数换算）全 host `swift test` 断言；UIKit 薄层（render/放大镜/手势）走 Mac Catalyst build-for-testing 编译闸门。
 - 评审通道：真 Codex `.claude/scripts/codex-attest.sh --scope branch-diff`（每阶段各自跑）。
 
@@ -368,7 +370,7 @@
 ## 附：留待 codex / writing-plans 阶段细化的点
 1. `DrawingObject` 样式字段落库=单 `style_json` 列 vs 逐列（§11.3，倾向单列）；`draw_uuid` legacy 回填串确切格式（§4.2/§11.3/D16）。P1 定。
 2. `.ray`/`.time` 两个 legacy enum case 的确切退役/迁移方式（§4.1）。
-3. 命中定位已定按 `id`（§4.2/§7/D13）；剩 `id` 生成器（进程内单调 vs UUID）与 legacy blob 下标回填的确切实现，P1 定。
+3. 命中定位、id 方案已**在正文钉死**（§4.2/§7/D13/D16）：新画线 UUID、原训练线 `draw_uuid`、legacy JSON blob 用**命名空间确定性唯一串**回填——**禁进程内单调、禁裸下标**。P1 只定回填串的确切编码格式 + 跨层合并去碰撞测试（**非重开方案选择**）。
 4. 手势 arbiter 中"起手是否落在节点上"的判定阈值与纯函数 step 形态（§14）。
 5. 放大镜的具体缩放倍率、网格粒度、渲染复用 `RenderStateBuilder` 几何的方式（§9）。
 6. 各阶段是否续用同一分支顺序 PR vs 每阶段新 worktree（writing-plans/交付时定）。
