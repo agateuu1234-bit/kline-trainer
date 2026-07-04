@@ -215,7 +215,8 @@
 
 ## 7. 选中 / 删除 / 锁定 / 撤销·前进（§P1）
 
-- **选中**：画线模式内单击，遍历该面板当前周期的画线逐个 `hitTest` 命中，解析出**目标画线的 `id`**（`DrawingObject.id`，§4.2；**不用数组下标 / 字段派生 key**——渲染层多层拼接 `drawings + reviewDrawings` 且可能有重复几何，只有稳定 `id` 能无歧义定位一条）。命中只在**当前可编辑目标集**上做（复盘=`reviewDrawings` 可删、原训练线只可隐藏）。选中显节点，令设置面板/锁定/删除作用于该 `id` 对应的线。
+- **选中（命中两层、返回 (层, id)）**：画线模式内单击，遍历该面板当前周期**所有可见画线**逐个 `hitTest` 命中——**复盘下原训练线 `drawings` 层 + `reviewDrawings` 层都要 hit-test**（不能只扫 review，否则原训练线永不可选、§12 隐藏无对象）。命中解析出 **(层, `id`)**：层 ∈ {original, review/own}，`id` = `DrawingObject.id`（§4.2；不用数组下标/字段派生 key，只有稳定 `id` 能在多层拼接 + 重复几何下无歧义定位一条）。
+- **选中 ≠ 可变（按层门控操作）**：**复盘原训练线**（original 层）只可**隐藏/显示**、不可编辑/删除/拖节点；**复盘新画线 + 训练/replay 自有画线**（review/own 层）可**改样式/拖节点/锁定/删除**。选中后显节点（仅可编辑的线）、令设置面板/锁定/删除/隐藏按层作用于该 `id` 对应的线。
 - **删除**（底栏🗑）：选中线被锁 → 🗑灰。否则点🗑弹确认：
   - 多数工具：`确定删除划线？[删除][取消]`。
   - **折线**且选中了某节点：`[删除选中节点] [删除整条划线] [取消]`（删节点后折线自动重连；可用⑥前进撤销此步）。
@@ -289,10 +290,10 @@
 ## 12. 复盘集成（§P5，承接 #139 §8 延后项）
 
 - **复盘中画线**：已有（`showsDrawingTools` 含 review、`routeDrawingCommit` 写 `reviewDrawings`）。本 RFC 令复盘也走同一画线模式外壳（底栏 6 键）。
-- **复盘画线删除（接线 `removeReviewDrawing`）**：选中一条**复盘新画线**（`reviewDrawings` 层）→ 🗑删除 → 调 `removeReviewDrawing(at:)` → 触发复盘 autosave 持久化。选中命中须**只在 `reviewDrawings` 层**解析索引（原训练线只读，不可删，仅可隐藏）。
+- **复盘画线删除（接线 `removeReviewDrawing`）**：选中命中**层=review** 的一条画线（§7 返回 (层,id)）→ 🗑删除 → 按 `id` 解析 `reviewDrawings` 索引 → 调 `removeReviewDrawing(at:)` → 触发复盘 autosave。命中**层=original** 的原训练线时 🗑 不可用（只读、仅可隐藏，§7 层门控）。
 - **隐藏原训练线**：复盘底栏第 6 键「隐藏」——单击选中一条**原训练线**（只读）→ 点「隐藏」→ 该线转虚影/隐藏（存 `hiddenOriginalIds` 集，用该线 `draw_uuid` = 渲染 `DrawingObject.id` **同一字段**，唯一无歧义，§11.5）。**长按「隐藏」键**弹小菜单 `[全部显示] [全部隐藏]`——这是**非持久的 UI 视图覆盖**（**不改 `hiddenOriginalIds`、不进 `ReviewNetChange`、不触发 autosave、每次进复盘重置**）：全部显示=临时把已隐藏线显出便于操作、全部隐藏=再临时收起；菜单贴近隐藏键、小巧。全部显示态下选中一条已隐藏线 → 底栏该键显示为「显示」→ 点它 = **从 `hiddenOriginalIds` 移除该 id**（**持久 un-hide**，此后不受全部显示/隐藏影响）。
 - **净改动 / 标记**（沿 #139）：复盘 autosave 经 `persistReviewWorkingIfChanged`（净改动 = **原子态** `{reviewDrawings, hiddenOriginalIds}` vs committed 基线，§11.5）；画线/删除/改样式/**隐藏/显示**都经 §11.4 的 **id 归组比对 + `hiddenOriginalIds` 集**参与净改动判定（隐藏/显示编辑亦判脏、亦 autosave）；**删+显示回到 committed 基线 → clearWorking → 清「复盘中」**（现有机制自动成立，前提是每类编辑都触发 autosave）。
-- **§12.4 「删空清已复盘」收口**：现 `commitSaved([])` 写 `"[]"`（非 NULL）→「已复盘」不清。**特判**：结束→保存时若工作集为空（或等于空基线），走 `clearSaved` 而非 `commitSaved([])`，使「已复盘」正确消失。（此即 #139 codex whole-branch 标过、override 延后至本 RFC 的那条。）
+- **§12.4 「删空清已复盘」收口**：现 `commitSaved([])` 写 `"[]"`（非 NULL）→「已复盘」不清。**特判须对整个原子态判空**（codex R6-high）：仅当 **`reviewDrawings.isEmpty && hiddenOriginalIds.isEmpty`**（或整个 `{reviewDrawings, hiddenOriginalIds}` == 空 committed 基线）时走 `clearSaved`；**hide-only（`reviewDrawings==[]` 但 `hiddenOriginalIds` 非空）必须正常 `commitSaved` 保存**、不可当空存档清掉（否则丢隐藏态 + 错清标记）。加 hide-only saved / hide-only working 验收测试。（此即 #139 codex whole-branch 标过、override 延后至本 RFC 的那条。）
 
 ---
 
@@ -344,7 +345,7 @@
 - **D4 波浪尺竖线方向=第一浪方向、第三锚=0、连接线+第0根恒虚线**：用户逐字定义（§5.6）。**理由**：文华波浪尺=三点黄金测幅投射，非波浪计数。
 - **D5 复盘原训练线只读、可隐藏不可删；复盘新画线可删**：删走 `removeReviewDrawing`（只动 `reviewDrawings`），隐藏走 `hiddenOriginalIds` 集（不改 `engine.drawings`）。**隐藏集 = 复盘原子工作/存档态的一部分**（与 `reviewDrawings` 同存、同判净改动，§11.5），**非旁路独立列**——防 hide/show-only 编辑丢失或标记错乱（**codex R1-high**）。**理由**：不污染原训练记录（沿 #139 committed 不可变原则）+ 原子持久化。
 - **D6 `ReviewNetChange` 判定必补齐**：per-drawing key 补全部新字段（含 `tailAnchor`）；**review-state 层追加比较 `hiddenOriginalIds` 集**——否则改样式/文本/锁定/隐藏而几何不变 → 净改动漏判 → 复盘中/已复盘标记错。**理由**：#139 整改④补 revealTick 的同类教训。
-- **D7 「删空清已复盘」= `commitSaved([])`→`clearSaved` 特判**：现写 `"[]"` 非 NULL 致标记不清。**理由**：#139 whole-branch 标过、override 延后至本 RFC 的正是此条。
+- **D7 「删空清已复盘」= `clearSaved` 特判，判空须对整个原子态**：仅 `reviewDrawings.isEmpty && hiddenOriginalIds.isEmpty`（或 == 空 committed 基线）才 clearSaved；**hide-only（有隐藏无画线）须正常保存不可当空清**。**理由**：现写 `"[]"` 非 NULL 致标记不清（#139 whole-branch override 延后至本 RFC）；只按画线数组判空会误删 hide-only 存档（**codex R6-high**）。
 - **D8 一次性纳入全部模型字段（含 text）+ 单次 bump（1.10→1.11）**：P1 就把 `DrawingObject` 扩全，后续阶段零契约。**理由**：避免多次 bump + 多次 CODEOWNERS 门 + 多次迁移链风险。
 - **D9 DrawingToolType 解码 tolerant**：未知/废弃 toolType 不得 crash（跳过）。**理由**：跨版本 blob 前后兼容。
 - **D10 画线模式不得吞平移/切周期/缩放**：arbiter 消歧须保留图表操作（§14）。**理由**：用户明确要求画线时仍可拖动缩放切周期。
@@ -355,6 +356,7 @@
 - **D15 `routeDrawingCommit` 改 copy-with-revealTick、保留全字段**：现只从 toolType/anchors/isExtended/panelPosition/revealTick 重建 → 每次落锚提交丢 id/样式/锁定/文本/tailAnchor，破坏 stable-id/文本/样式持久/net-change/按 id 选隐。P1 改为「盖 revealTick 但保留其余全字段」+ normal/review 提交测试证字段存活。**理由**：**codex R3-high**。
 - **D16 `DrawingID` 跨层防碰撞（非仅数组内稳定）**：原训练线（`draw_uuid`）+ pending + reviewDrawings 合并后须全局唯一——用 UUID/唯一串，**禁进程内单调、禁裸下标回填**（会与原 PK 小整数撞号 → 选错/隐藏错/net-change 折叠）。**理由**：**codex R3-high**。
 - **D17 `全部显示/全部隐藏` = 非持久 UI-only 视图覆盖**；唯一持久隐藏态 = `hiddenOriginalIds`（仅 per-line 隐藏/显示增删）。bulk 模式不进 wrapper/net-change/autosave、每次进复盘重置。**理由**：否则 bulk 与 per-line 语义纠缠、autosave/replay 恢复歧义（**codex R5-high**）。
+- **D18 复盘选中命中两层、操作按层门控（选中 ≠ 可变）**：hit-test 原训练线 `drawings` + `reviewDrawings` 两层，返回 (层, id)；原训练线只可隐藏/显示，review/own 画线可编辑/删除。**理由**：若命中只扫 `reviewDrawings`，原训练线永不可选 → §12 隐藏动作无对象、隐藏功能不可达（**codex R6-high**）。
 
 ---
 
