@@ -122,7 +122,7 @@
 - `colorToken: DrawingColorToken`（9 色枚举，语义 token；实际渲染色 + 昼夜可读性由主题解析）。
 - `labelMode: LabelMode`——`.hidden/.show/.left/.right`。
 - `locked: Bool`。
-- **标注(text)专属**：`text: String`、`fontSize`、`textColorToken`、`textForm`（`.borderTransparent/.borderFilled/.plain`）；气泡尾巴尖 = `anchors[1]`（带框两形式可拖），气泡锚 = `anchors[0]`。
+- **标注(text)专属**：`text: String`、`fontSize`、`textColorToken`、`textForm`（`.borderTransparent/.borderFilled/.plain`）气泡锚 = `anchors[0]`（落点，唯一必有锚）；**尾巴尖 = 独立可空字段 `tailAnchor: DrawingAnchor?`**（仅带框两形式 ①② 有值、`.plain` 为 `nil`；创建时给确定性默认偏移、可拖 360° 调整）。**渲染 / hitTest / net-change 一律经 `tailAnchor` 判空，绝不索引 `anchors[1]`**（防形式切换 / 旧 blob / 新建时锚数歧义崩溃或丢尾巴）。`decodeIfPresent` 兜底。
 - `revealTick: Int`（现有，保留）。
 - `panelPosition: Int`（现有，保留但**退化为派生/兼容字段**；渲染不再用它绑定，见 §10）。
 
@@ -193,7 +193,7 @@
 ### 5.10 标注（text，文字，独立面板）
 - 选「标注」→ 在 K 线**点落点**（= 气泡位置）→ 输入流程见 §8。
 - 3 种文字形式（每种配所选颜色）：①同色字 + 同色边框 + 透明底 ②同色边框 + 同色填充 + 白字 ③无框纯色字。字号可调、字色 9 色（昼夜禁用同线色）。
-- **带框两形式（①②）有可拖小尾巴**（尖 = `anchors[1]`，360° 指向某 K 线/指标/线）；形式③无尾巴。
+- **带框两形式（①②）有可拖小尾巴**（尖 = 可空字段 `tailAnchor`；创建时默认落在气泡锚右下一确定性偏移处、可拖 360° 指向某 K 线/指标/线）；形式③（无框）`tailAnchor = nil`、无尾巴。**切换形式**：切到③保留数据但不渲染尾巴、切回 ①② 复用原 `tailAnchor`（无则重置默认）。渲染 / hitTest 判空、不索引 `anchors[1]`。
 - 节点 = 气泡尾巴尖（§6）。hitTest：命中气泡框/尾巴。
 
 ### 5.11 箱体（rect，2 锚）
@@ -258,7 +258,7 @@
 ## 11. 数据模型大改 + 契约（§P1 起，跨阶段）
 
 ### 11.1 `DrawingObject` 字段扩充
-见 §4.2。附加式、`decodeIfPresent` 兜底（旧 blob 无新字段→取语义默认：`isExtended`→`lineSubType`、其余取「实线/1 档/默认色/隐藏标注/未锁/period=anchors.first.period」）。
+见 §4.2。附加式、`decodeIfPresent` 兜底（旧 blob 无新字段→取语义默认：`isExtended`→`lineSubType`、其余取「实线/1 档/默认色/隐藏标注/未锁/period=anchors.first.period/`tailAnchor`=nil」）。
 
 ### 11.2 pending / review JSON 自动兼容
 `pending_training.drawings`、`pending_replay.drawings`、`review_archive.saved_drawings/working_drawings` 均整体 JSON blob 存 `[DrawingObject]`——经 Codable **自动携带新字段**，无需改列。
@@ -270,10 +270,14 @@
 - **只走 migration，不动 `v1_4_baselineDDL` / `app_schema_v1.sql`**（v1.4 冻结基线，drift-checked——沿 0006/0007/0008 先例）。
 
 ### 11.4 `ReviewNetChange.changed` key 补齐（关键，防漏判）
-现 key = `toolType|panelPosition|isExtended|revealTick|anchors`。**必须补入所有新字段**（`period/lineSubType/lineStyle/thickness/colorToken/labelMode/locked/text/fontSize/textColorToken/textForm/tail`），否则复盘中仅改样式/文本/锁定而几何不变时净改动**静默漏判**（沿 revealTick 补 key 的整改④先例）。
+现 per-drawing key = `toolType|panelPosition|isExtended|revealTick|anchors`。**必须补入所有新字段**（`period/lineSubType/lineStyle/thickness/colorToken/labelMode/locked/text/fontSize/textColorToken/textForm/tailAnchor`），否则复盘中仅改样式/文本/锁定而几何不变时净改动**静默漏判**（沿 revealTick 补 key 的整改④先例）。**此外，复盘净改动判定在 review-state 层还须追加比较 `hiddenOriginalKeys` 集（§11.5）**——仅隐藏 / 仅显示原训练线的编辑也须判脏，否则 hide/show-only 编辑不触发 autosave、标记错乱（codex R1-high）。
 
 ### 11.5 复盘「隐藏原训练线」存储（§P5）
-复盘中隐藏的**原训练线**集合（`engine.drawings` 的子集标记）需持久进复盘存档。方案：`review_archive` 加 `hidden_keys TEXT`（JSON，存被隐藏原训练线的稳定 key 集），或并入 working。属 P5 迁移（如 `0010`），P5 plan 定。
+**复盘工作态/存档态 = 一个原子整体** `{ reviewDrawings: [DrawingObject], hiddenOriginalKeys: [String]（被隐藏原训练线的稳定 key 排序集） }`。`hiddenOriginalKeys` **必须与 `reviewDrawings` 同存、同取、同判净改动与标记**（**不是**旁路独立列/独立写路径——否则 hide/show-only 编辑不脏、不 autosave、与 `working_step_tick`/`working_drawings` 失步，隐藏线返回后重现或标记错乱，codex R1-high）：
+- `ReviewArchiveRepository` 的 `ReviewWorking`/`ReviewArchive` 结构**扩承 `hiddenOriginalKeys`**；`saveWorking`/`commitSaved` 在**同一 UPSERT 事务原子写**二者。
+- `ReviewNetChange.changed(working:committed:)` **同时比较 drawings key 集 + `hiddenOriginalKeys` 集**——仅隐藏/仅显示也判净改动（脏）→ 触发 autosave、参与「删空清已复盘」。
+- autosave 触发面：`engine` 暴露 `hiddenOriginalKeys`（`@Observable`），`TrainingView` 除 `.onChange(reviewDrawings.count)` 外**也 onChange 隐藏集**（或统一一个 review revision）→ 隐藏/显示即时 autosave。
+- **落库（推荐无新列）**：把复盘态整体序列化——`working_drawings`/`saved_drawings` 列改存 `{drawings, hiddenKeys}` JSON 结构（Codable `decodeIfPresent` 兜底旧 blob = 空 hiddenKeys），**原子性天然、无新迁移**；备选并列 `hidden_keys` 列（同事务写）=P5 迁移 `0010`。落库形态 P5 plan 定，但**契约由本 spec 钉死：隐藏态是复盘原子状态的一部分**。属 P5。
 
 ---
 
@@ -282,7 +286,7 @@
 - **复盘中画线**：已有（`showsDrawingTools` 含 review、`routeDrawingCommit` 写 `reviewDrawings`）。本 RFC 令复盘也走同一画线模式外壳（底栏 6 键）。
 - **复盘画线删除（接线 `removeReviewDrawing`）**：选中一条**复盘新画线**（`reviewDrawings` 层）→ 🗑删除 → 调 `removeReviewDrawing(at:)` → 触发复盘 autosave 持久化。选中命中须**只在 `reviewDrawings` 层**解析索引（原训练线只读，不可删，仅可隐藏）。
 - **隐藏原训练线**：复盘底栏第 6 键「隐藏」——单击选中一条**原训练线**（只读）→ 点「隐藏」→ 该线转虚影/隐藏（存 hidden 集，§11.5）。**长按「隐藏」键**弹小菜单 `[全部显示] [全部隐藏]`（**只作用于被单独设隐藏的原训练线**：一次性显现/收起，便于操作；菜单贴近隐藏键、小巧）。全部显示态下选中一条已隐藏线 → 底栏该键显示为「显示」→ 点它 = 把该线**永久改回显示**（此后不受全部隐藏/显示影响）。
-- **净改动 / 标记**（沿 #139）：复盘 autosave 经 `persistReviewWorkingIfChanged`（净改动=working vs committed 基线）；删/改/隐藏都要经 §11.4 补齐的 key 参与净改动判定；**删回 committed 基线 → clearWorking → 清「复盘中」**（现有机制自动成立，前提是删除触发 autosave）。
+- **净改动 / 标记**（沿 #139）：复盘 autosave 经 `persistReviewWorkingIfChanged`（净改动 = **原子态** `{reviewDrawings, hiddenOriginalKeys}` vs committed 基线，§11.5）；画线/删除/改样式/**隐藏/显示**都经 §11.4 补齐的 key + `hiddenOriginalKeys` 集参与净改动判定（隐藏/显示编辑亦判脏、亦 autosave）；**删+显示回到 committed 基线 → clearWorking → 清「复盘中」**（现有机制自动成立，前提是每类编辑都触发 autosave）。
 - **§12.4 「删空清已复盘」收口**：现 `commitSaved([])` 写 `"[]"`（非 NULL）→「已复盘」不清。**特判**：结束→保存时若工作集为空（或等于空基线），走 `clearSaved` 而非 `commitSaved([])`，使「已复盘」正确消失。（此即 #139 codex whole-branch 标过、override 延后至本 RFC 的那条。）
 
 ---
@@ -319,7 +323,7 @@
 | **P2 比例/测量类工具** | 黄金率、波浪尺、周期线、斐波那契、时间尺（几何 + 计算标签 + 两列对齐 + K 线中心吸附） | 无（复用 P1 模型） | P1 |
 | **P3 文字标注** | 标注(text) 工具 + 字号/字色/3 形式 + 气泡尾巴 + 输入流程（§8）（文本字段在 P1 模型已就位） | 无（P1 已含 text 字段）* | P1 |
 | **P4 局部放大镜 + 吸附** | 放大镜 loupe（§9）+ 吸附 K 线高/低点 + 网格量化 + 吸附开关（局内 + 全局默认预留） | 无 | P1（工具越多越有用，故排 P2/P3 后） |
-| **P5 复盘集成** | 复盘画线删除（接 `removeReviewDrawing`）+ 隐藏原训练线（全部显示/隐藏 + 单条永久显示）+ 复盘存档持久化 + 「删空清已复盘」（§12） | 可能 **0010**（hidden 集，§11.5） | P1（+ 各工具 hitTest，故排后） |
+| **P5 复盘集成** | 复盘画线删除（接 `removeReviewDrawing`）+ 隐藏原训练线（全部显示/隐藏 + 单条永久显示）+ **复盘原子态 `{reviewDrawings, hiddenOriginalKeys}` 持久化**（§11.5）+ 「删空清已复盘」（§12） | **并入 working/saved JSON（推荐无新列）** 或 迁移 `0010`（§11.5，P5 定） | P1（+ 各工具 hitTest，故排后） |
 | **P6 主页画线默认设置（全局）** | 齿轮「画线设置」入口 + per 工具默认 + 全局吸附 + 每局初始化（§13） | 全局设置持久化（SettingsStore，非 DB schema 或轻迁移） | P1（消费各工具设置面板） |
 
 > *P3 注：文本字段建议在 P1 一次性纳入 `DrawingObject`/迁移（避免二次 bump），P3 只做 text 工具的 UI/渲染/输入流程。若 P1 不纳入 text 字段，则 P3 自带一次迁移+bump——**P1 一次纳入更优**，spec 采此。
@@ -333,12 +337,14 @@
 - **D2 射线/线段/直线 = 线型子类，非独立工具**：文华里这三是"每种线的画法"，不是并列工具。`.ray` enum case 退役为子类。**理由**：与文华一致 + 统一设置模板。
 - **D3 黄金率第一锚=0**：用户明确（离第一锚最近的内部线=0.191，第二锚=1）。**理由**：文华行为；不管方向第一锚恒 0。
 - **D4 波浪尺竖线方向=第一浪方向、第三锚=0、连接线+第0根恒虚线**：用户逐字定义（§5.6）。**理由**：文华波浪尺=三点黄金测幅投射，非波浪计数。
-- **D5 复盘原训练线只读、可隐藏不可删；复盘新画线可删**：删走 `removeReviewDrawing`（只动 `reviewDrawings`），隐藏走 hidden 集（不改 `engine.drawings`）。**理由**：不污染原训练记录（沿 #139 committed 不可变原则）。
-- **D6 `ReviewNetChange` key 必补新字段**：否则改样式/文本/锁定而几何不变 → 净改动漏判 → 复盘中/已复盘标记错。**理由**：#139 整改④补 revealTick 的同类教训。
+- **D5 复盘原训练线只读、可隐藏不可删；复盘新画线可删**：删走 `removeReviewDrawing`（只动 `reviewDrawings`），隐藏走 `hiddenOriginalKeys` 集（不改 `engine.drawings`）。**隐藏集 = 复盘原子工作/存档态的一部分**（与 `reviewDrawings` 同存、同判净改动，§11.5），**非旁路独立列**——防 hide/show-only 编辑丢失或标记错乱（**codex R1-high**）。**理由**：不污染原训练记录（沿 #139 committed 不可变原则）+ 原子持久化。
+- **D6 `ReviewNetChange` 判定必补齐**：per-drawing key 补全部新字段（含 `tailAnchor`）；**review-state 层追加比较 `hiddenOriginalKeys` 集**——否则改样式/文本/锁定/隐藏而几何不变 → 净改动漏判 → 复盘中/已复盘标记错。**理由**：#139 整改④补 revealTick 的同类教训。
 - **D7 「删空清已复盘」= `commitSaved([])`→`clearSaved` 特判**：现写 `"[]"` 非 NULL 致标记不清。**理由**：#139 whole-branch 标过、override 延后至本 RFC 的正是此条。
 - **D8 一次性纳入全部模型字段（含 text）+ 单次 bump（1.10→1.11）**：P1 就把 `DrawingObject` 扩全，后续阶段零契约。**理由**：避免多次 bump + 多次 CODEOWNERS 门 + 多次迁移链风险。
 - **D9 DrawingToolType 解码 tolerant**：未知/废弃 toolType 不得 crash（跳过）。**理由**：跨版本 blob 前后兼容。
 - **D10 画线模式不得吞平移/切周期/缩放**：arbiter 消歧须保留图表操作（§14）。**理由**：用户明确要求画线时仍可拖动缩放切周期。
+- **D11 标注尾巴 = 独立可空 `tailAnchor` 字段，非 `anchors[1]`**：创建只落 1 锚（气泡锚）；尾巴按形式给默认/可空（`.plain` 为 nil）；渲染/hitTest/net-change **判空、绝不索引 `anchors[1]`**；三形式 + 形式切换 + 旧 blob 均有容错。**理由**：单锚创建 + `.plain` 无尾 → `anchors[1]` 歧义会崩或切换形式时丢尾巴（**codex R1-medium**）。
+- **D12 复盘态是原子整体 `{reviewDrawings, hiddenOriginalKeys}`**：同存、同取、同判净改动、同参与标记（§11.5）；推荐并入 working/saved JSON 结构（无新列、原子天然）。**理由**：隐藏是复盘编辑的一等操作，旁路存储会与 working 失步（**codex R1-high**）。
 
 ---
 
