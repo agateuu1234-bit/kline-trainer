@@ -457,14 +457,16 @@ git commit -m "feat(drawing-P1a): CONTRACT_VERSION 1.10 -> 1.11"
 **Interfaces:**
 - Consumes: Task 3 `DrawingObject`。
 - Produces:
-  - `public struct LossyDrawingArray: Codable, Equatable, Sendable`
+  - `enum JSONTopLevelArray { static func rawElementStrings(_ data: Data) -> [String]? }`——**平台无关、host 可测的顶层 JSON 数组切分器**：把数组文本按顶层元素切成各元素的**原始字节文本**（正确处理字符串内转义与嵌套 `{}[]`），非顶层数组 → `nil`。
+  - `public struct LossyDrawingArray: Equatable, Sendable`（**不 Codable**——用下面显式 `decode`/`encoded`）
     - `public let drawings: [DrawingObject]`（成功解码的）
-    - `public let unknownRaw: [String]`（跳过条的原始 JSON 字符串，按原顺序）
+    - `public let unknownRaw: [String]`（跳过条的**原始元素文本**，逐字节保留、按原顺序）
     - `public init(drawings: [DrawingObject], unknownRaw: [String] = [])`
-  - `public static func decode(_ data: Data) throws -> LossyDrawingArray`（顶层数组，逐元素 failable，坏条进 `unknownRaw`；无 id 的成功条回填 `legacy-idx-<index>`）
-  - `public func encoded() throws -> Data`（成功条正常编码 + `unknownRaw` 原样字节级重发，合成一个 JSON 数组）
+  - `public static func decode(_ data: Data) throws -> LossyDrawingArray`（切分器取每元素**原始文本**→各自 failable 解码为 `DrawingObject`；坏/未知条把**原始文本**存进 `unknownRaw`（**不重序列化**）；无 id 的成功条回填 `legacy-idx-<index>`）
+  - `public func encoded() throws -> Data`（成功条 `JSONEncoder` 编码 + `unknownRaw` **原始文本原样重发**，以 `,` 拼接包 `[]`——未识别条**字节级保真**）
 
 **背景：** 现 `RecordRepositoryImpl.jsonDecode($0, as: [DrawingObject].self)` 是全量解码——一条坏/未知 toolType 整组失败（D21/codex R8-medium）。本类是所有画线数组持久化边界的容错入口。
+**保真关键（codex plan-R1-high）：** 未识别条**绝不经 `JSONSerialization` 反/重序列化**（那会改 key 顺序/数字格式 → 老客户端 load+autosave 静默改写未来客户端数据）；改为**切分器捕获原始元素字节文本 + 回写时原样拼接**。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -475,11 +477,7 @@ git commit -m "feat(drawing-P1a): CONTRACT_VERSION 1.10 -> 1.11"
 struct LossyDrawingArrayTests {
     @Test("未知 toolType 单条只跳过、不整组失败")
     func skipsUnknownOnly() throws {
-        let json = """
-        [{"toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],
-          "isExtended":false,"panelPosition":0,"revealTick":0},
-         {"toolType":"__future_tool__","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0}]
-        """.data(using: .utf8)!
+        let json = Data(#"[{"toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0},{"toolType":"__future_tool__","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0}]"#.utf8)
         let arr = try LossyDrawingArray.decode(json)
         #expect(arr.drawings.count == 1)            // 只保 horizontal
         #expect(arr.drawings[0].toolType == .horizontal)
@@ -487,25 +485,50 @@ struct LossyDrawingArrayTests {
         #expect(arr.unknownRaw[0].contains("__future_tool__"))
     }
 
-    @Test("保真回写：未识别条原样重发，不丢")
-    func roundTripPreservesUnknown() throws {
-        let json = """
-        [{"toolType":"__future__","anchors":[],"isExtended":false,"panelPosition":0}]
-        """.data(using: .utf8)!
+    @Test("保真回写：未识别条逐字节等于原始输入（不只子串）")
+    func roundTripBytePerfect() throws {
+        // 未来条：特意的 key 顺序（z 在前 a 在后）+ 数字格式 1.0 / 高精度尾数——只有原样保留才能全等。
+        let unknownElem = #"{"toolType":"__future__","z_last":1.0,"a_first":"x, ]}\"escaped","p":0.10000000000000001}"#
+        let json = Data("[\(unknownElem)]".utf8)
         let arr = try LossyDrawingArray.decode(json)
         #expect(arr.drawings.isEmpty)
+        #expect(arr.unknownRaw == [unknownElem])              // 原始文本逐字符保留（未重序列化）
         let out = try arr.encoded()
-        let reparsed = try LossyDrawingArray.decode(out)      // 二次解码仍见 future 条
-        #expect(reparsed.unknownRaw.count == 1)
-        #expect(reparsed.unknownRaw[0].contains("__future__"))
+        #expect(out == json)                                  // 单元素数组 → 逐字节等于原始
+        let reparsed = try LossyDrawingArray.decode(out)      // 幂等
+        #expect(reparsed.unknownRaw == [unknownElem])
+    }
+
+    @Test("已知条 + 未知条混排：已知存活、未知保真、幂等")
+    func mixedKnownUnknownIdempotent() throws {
+        let unknown = #"{"toolType":"__future__","weird":[1,2,{"x":"]"}]}"#
+        let known = #"{"id":"g1","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0}"#
+        let json = Data(("[" + known + "," + unknown + "]").utf8)
+        let arr = try LossyDrawingArray.decode(json)
+        #expect(arr.drawings.count == 1)
+        #expect(arr.drawings[0].id == "g1")
+        #expect(arr.unknownRaw.count == 1)
+        // 未识别条经切分器 trim 两侧空白后仍应保内部字节（含字符串里的 ']'）
+        #expect(arr.unknownRaw[0].contains(#"{"x":"]"}"#))
+        // encoded→decode 幂等：已知 1 条 + 未知 1 条
+        let r2 = try LossyDrawingArray.decode(try arr.encoded())
+        #expect(r2.drawings.count == 1 && r2.unknownRaw.count == 1)
+    }
+
+    @Test("切分器：正确按顶层元素切、忽略字符串内的括号逗号")
+    func splitterHandlesNestingAndStrings() throws {
+        let data = Data(#"[ {"a":"x,]y","b":[1,2]} , {"c":{"d":"}"}} ]"#.utf8)
+        let elems = JSONTopLevelArray.rawElementStrings(data)
+        #expect(elems?.count == 2)
+        #expect(elems?[0] == #"{"a":"x,]y","b":[1,2]}"#)      // 去两侧空白、内部原样
+        #expect(elems?[1] == #"{"c":{"d":"}"}}"#)
+        #expect(JSONTopLevelArray.rawElementStrings(Data("[]".utf8)) == [])   // 空数组
+        #expect(JSONTopLevelArray.rawElementStrings(Data("{}".utf8)) == nil)  // 非数组 → nil
     }
 
     @Test("无 id 成功条按下标回填 legacy-idx-<index>")
     func backfillsLegacyIndexId() throws {
-        let json = """
-        [{"toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],
-          "isExtended":false,"panelPosition":0}]
-        """.data(using: .utf8)!
+        let json = Data(#"[{"toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0}]"#.utf8)
         let arr = try LossyDrawingArray.decode(json)
         #expect(arr.drawings[0].id == "legacy-idx-0")
     }
@@ -523,12 +546,54 @@ Expected: FAIL — `cannot find 'LossyDrawingArray'`。
 
 ```swift
 // 所有画线数组持久化边界的容错编解码器（画线工具扩充 P1a，D21）。
-// 坏/未知 toolType 单条只跳过、不整组失败；未识别条原始 JSON 字节级保真回写，防「读时跳过+全量重写」丢线。
+// 坏/未知 toolType 单条只跳过、不整组失败；未识别条【原始字节级保真】回写，防「读时跳过+全量重写」丢线。
 import Foundation
 
-public struct LossyDrawingArray: Codable, Equatable, Sendable {
+/// 平台无关、host 可测的顶层 JSON 数组切分器：按顶层元素切出各元素【原始字节文本】（去两侧空白、内部原样）。
+/// 正确处理字符串内的转义与嵌套 {}[]。非顶层数组 → nil。空数组 → []。
+enum JSONTopLevelArray {
+    static func rawElementStrings(_ data: Data) -> [String]? {
+        let b = [UInt8](data); let n = b.count; var i = 0
+        func isWS(_ c: UInt8) -> Bool { c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D }
+        while i < n, isWS(b[i]) { i += 1 }
+        guard i < n, b[i] == UInt8(ascii: "[") else { return nil }
+        i += 1
+        var out: [String] = []
+        var depth = 1, inString = false, escaped = false, start = i
+        func push(_ lo: Int, _ hi: Int) {
+            var a = lo, z = hi
+            while a < z, isWS(b[a]) { a += 1 }
+            while z > a, isWS(b[z - 1]) { z -= 1 }
+            if z > a { out.append(String(decoding: b[a..<z], as: UTF8.self)) }
+        }
+        while i < n {
+            let c = b[i]
+            if inString {
+                if escaped { escaped = false }
+                else if c == UInt8(ascii: "\\") { escaped = true }
+                else if c == UInt8(ascii: "\"") { inString = false }
+                i += 1; continue
+            }
+            switch c {
+            case UInt8(ascii: "\""): inString = true; i += 1
+            case UInt8(ascii: "{"), UInt8(ascii: "["): depth += 1; i += 1
+            case UInt8(ascii: "}"): depth -= 1; i += 1
+            case UInt8(ascii: "]"):
+                depth -= 1
+                if depth == 0 { push(start, i); return out }   // 数组闭合（空数组 → out=[]）
+                i += 1
+            case UInt8(ascii: ","):
+                if depth == 1 { push(start, i); i += 1; start = i } else { i += 1 }
+            default: i += 1
+            }
+        }
+        return nil   // 未闭合数组
+    }
+}
+
+public struct LossyDrawingArray: Equatable, Sendable {
     public let drawings: [DrawingObject]
-    public let unknownRaw: [String]      // 跳过条的原始 JSON（按原顺序，回写时原样重发）
+    public let unknownRaw: [String]      // 跳过条的【原始元素文本】（逐字节保留，按原顺序）
 
     public init(drawings: [DrawingObject], unknownRaw: [String] = []) {
         self.drawings = drawings
@@ -536,17 +601,14 @@ public struct LossyDrawingArray: Codable, Equatable, Sendable {
     }
 
     public static func decode(_ data: Data) throws -> LossyDrawingArray {
-        // 顶层必须是数组；逐元素 = 未类型化 JSON，再各自 failable 解码为 DrawingObject。
-        let elements = try JSONSerialization.jsonObject(with: data)
-        guard let rawArray = elements as? [Any] else {
+        guard let rawElements = JSONTopLevelArray.rawElementStrings(data) else {
             throw AppError.persistence(.dbCorrupted)
         }
         var drawings: [DrawingObject] = []
         var unknown: [String] = []
         let decoder = JSONDecoder()
-        for (index, element) in rawArray.enumerated() {
-            let elementData = try JSONSerialization.data(withJSONObject: element)
-            if let d = try? decoder.decode(DrawingObject.self, from: elementData) {
+        for (index, raw) in rawElements.enumerated() {
+            if let d = try? decoder.decode(DrawingObject.self, from: Data(raw.utf8)) {
                 // 无 id 的成功条按下标回填命名空间唯一 id（D16）
                 let withId = d.id.isEmpty
                     ? DrawingObject(id: "legacy-idx-\(index)", toolType: d.toolType, anchors: d.anchors,
@@ -558,30 +620,19 @@ public struct LossyDrawingArray: Codable, Equatable, Sendable {
                     : d
                 drawings.append(withId)
             } else {
-                // 坏/未知条：保原始 JSON 字符串（紧凑、稳定 key 序）
-                let raw = String(data: try JSONSerialization.data(withJSONObject: element,
-                                                                  options: [.sortedKeys]), encoding: .utf8) ?? "{}"
-                unknown.append(raw)
+                unknown.append(raw)                 // 原始文本，字节级保留（【不】重序列化）
             }
         }
         return LossyDrawingArray(drawings: drawings, unknownRaw: unknown)
     }
 
     public func encoded() throws -> Data {
-        // 合成 JSON 数组：成功条正常编码 + 未识别条原样重发。
+        // 合成 JSON 数组：成功条 JSONEncoder 编码 + 未识别条【原始文本原样重发】，以 , 拼接包 []。
         let encoder = JSONEncoder()
-        var objects: [Any] = []
-        for d in drawings {
-            let data = try encoder.encode(d)
-            objects.append(try JSONSerialization.jsonObject(with: data))
-        }
-        for raw in unknownRaw {
-            if let data = raw.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) {
-                objects.append(obj)
-            }
-        }
-        return try JSONSerialization.data(withJSONObject: objects)
+        var elems: [String] = []
+        for d in drawings { elems.append(String(decoding: try encoder.encode(d), as: UTF8.self)) }
+        elems.append(contentsOf: unknownRaw)
+        return Data(("[" + elems.joined(separator: ",") + "]").utf8)
     }
 }
 ```
@@ -978,7 +1029,7 @@ git commit -m "feat(drawing-P1a): routeDrawingCommit copy-with-revealTick 保留
 - Test: `ios/Contracts/Tests/KlineTrainerPersistenceTests/Migration0009Tests.swift`（新建）
 
 **Interfaces:**
-- Produces: migration `"0009_v1.11_drawing_style"`——`drawings` 加 `style_json TEXT`（可空）+ `draw_uuid TEXT`；回填所有旧行 `draw_uuid = 'legacy-' || record_id || '-' || id`；校验无 NULL/无重复否则抛错；建 `UNIQUE INDEX idx_drawings_draw_uuid`；`PRAGMA user_version = 7`。
+- Produces: migration `"0009_v1.11_drawing_style"`（GRDB `registerMigrationWithDeferredForeignKeyCheck` 表重建）——新 `drawings` 加 `style_json TEXT`（可空）+ `draw_uuid TEXT NOT NULL CHECK(draw_uuid <> '') UNIQUE`（DB 边界强制非空唯一，D20）；拷贝旧行时确定性回填 `draw_uuid = 'legacy-' || record_id || '-' || id`；保留原列/PK/FK；`PRAGMA user_version = 7`。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1036,6 +1087,28 @@ final class Migration0009Tests: XCTestCase {
                 """)
         })
     }
+
+    func testNullDrawUuidRejected() throws {
+        let dbq = try migratedDB()
+        // 不给 draw_uuid → NOT NULL 违约（DB 边界拦，D20）
+        XCTAssertThrowsError(try dbq.write { db in
+            try db.execute(sql: """
+                INSERT INTO drawings (id, record_id, tool_type, panel_position, is_extended, anchors, reveal_tick)
+                VALUES (3, 7, 'horizontal', 0, 0, '[]', 0)
+                """)
+        })
+    }
+
+    func testEmptyDrawUuidRejected() throws {
+        let dbq = try migratedDB()
+        // draw_uuid = '' → CHECK(draw_uuid <> '') 违约（DB 边界拦，D20）
+        XCTAssertThrowsError(try dbq.write { db in
+            try db.execute(sql: """
+                INSERT INTO drawings (id, record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, draw_uuid)
+                VALUES (4, 7, 'horizontal', 0, 0, '[]', 0, '')
+                """)
+        })
+    }
 }
 ```
 
@@ -1049,30 +1122,46 @@ Expected: FAIL — 无 `draw_uuid` 列 / user_version 仍 6。
 `AppDBMigrations.swift` 在 `0008` migration 之后、`return migrator` 之前插入：
 
 ```swift
-        // 0009：画线样式/文本/身份持久化（画线工具扩充 P1a，v1.11）。additive：drawings 加
-        // style_json（样式束）+ draw_uuid（跨层防碰撞身份）。draw_uuid 回填所有旧行 + 校验 + UNIQUE。
+        // 0009：画线样式/文本/身份持久化（画线工具扩充 P1a，v1.11）。drawings 加 style_json（样式束）+
+        // draw_uuid（跨层防碰撞身份，D16/D20）。draw_uuid 须【DB 层强制非空唯一】——SQLite 无法 ALTER ADD
+        // 带 NOT NULL/CHECK/UNIQUE 到有数据的表，故【建新表 + 回填拷贝 + 换名】重建（保留原列/PK/FK）。
         // 只走 migration，不动 v1_4_baselineDDL/app_schema_v1.sql（v1.4 冻结基线，drift-checked）。
-        migrator.registerMigration("0009_v1.11_drawing_style") { db in
-            try db.execute(sql: "ALTER TABLE drawings ADD COLUMN style_json TEXT")
-            try db.execute(sql: "ALTER TABLE drawings ADD COLUMN draw_uuid TEXT")
-            // 确定性回填所有旧行（legacy-<record_id>-<id>，天然唯一）
-            try db.execute(sql: "UPDATE drawings SET draw_uuid = 'legacy-' || record_id || '-' || id WHERE draw_uuid IS NULL")
-            // 校验：无 NULL、无重复，否则迁移 fail（D20）
-            let nullCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM drawings WHERE draw_uuid IS NULL") ?? 0
-            guard nullCount == 0 else { throw AppError.persistence(.dbCorrupted) }
-            let dupCount = try Int.fetchOne(db, sql: """
-                SELECT COUNT(*) FROM (SELECT draw_uuid FROM drawings GROUP BY draw_uuid HAVING COUNT(*) > 1)
-                """) ?? 0
-            guard dupCount == 0 else { throw AppError.persistence(.dbCorrupted) }
-            // UNIQUE 索引（app 保证每插非空；SQLite UNIQUE 允许多 NULL，故配合上面的非空校验）
-            try db.execute(sql: "CREATE UNIQUE INDEX idx_drawings_draw_uuid ON drawings(draw_uuid)")
+        // FK：drawings 仅有【出边】(record_id→training_records)、无表引用 drawings，重建安全；用 GRDB 的
+        // registerMigrationWithDeferredForeignKeyCheck（表重建标准变体，GRDB 6.29；迁移末自动重检 FK 完整性）。
+        migrator.registerMigrationWithDeferredForeignKeyCheck("0009_v1.11_drawing_style") { db in
+            try db.execute(sql: """
+                CREATE TABLE drawings_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    record_id INTEGER NOT NULL REFERENCES training_records(id),
+                    tool_type TEXT NOT NULL,
+                    panel_position INTEGER NOT NULL,
+                    is_extended INTEGER NOT NULL DEFAULT 0,
+                    anchors TEXT NOT NULL,
+                    reveal_tick INTEGER NOT NULL DEFAULT 0,
+                    style_json TEXT,
+                    draw_uuid TEXT NOT NULL CHECK(draw_uuid <> '') UNIQUE
+                )
+                """)
+            // 拷贝旧行：style_json 置 NULL；draw_uuid 确定性回填 legacy-<record_id>-<id>（天然唯一非空）。
+            try db.execute(sql: """
+                INSERT INTO drawings_new
+                    (id, record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, style_json, draw_uuid)
+                SELECT id, record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, NULL,
+                       'legacy-' || record_id || '-' || id
+                FROM drawings
+                """)
+            // 防御性校验：回填后无空 draw_uuid（回填保证；异常则迁移 fail，D20）。
+            let bad = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM drawings_new WHERE draw_uuid IS NULL OR draw_uuid = ''") ?? 0
+            guard bad == 0 else { throw AppError.persistence(.dbCorrupted) }
+            try db.execute(sql: "DROP TABLE drawings")
+            try db.execute(sql: "ALTER TABLE drawings_new RENAME TO drawings")
             try db.execute(sql: "PRAGMA user_version = 7")
         }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd ios/Contracts && swift test --filter Migration0009Tests` → PASS（两测试）。
+Run: `cd ios/Contracts && swift test --filter Migration0009Tests` → PASS（4 测试：加列+回填、UNIQUE 拦重复、NOT NULL 拦缺失、CHECK 拦空串）。
 
 - [ ] **Step 5: Commit**
 
@@ -1218,9 +1307,9 @@ git commit -m "feat(drawing-P1a): RecordRepository 读写 draw_uuid+style_json +
 |---|---|---|---|
 | 1 | 执行 `swift test 2>&1 | tail -8` | 结尾出现 Swift Testing 与 XCTest 两个框架的汇总，均 0 failed | 两个"failed: 0"（或"All tests passed"）都出现 = 通过 |
 | 2 | 执行 `swift test --filter DrawingObjectCodableTests` | 全字段编码解码往返一致 + 旧格式补默认 | 结尾 0 failed = 通过 |
-| 3 | 执行 `swift test --filter LossyDrawingArrayTests` | 未知画线类型只跳过不整组失败、且原文不丢 | 3 个用例全绿 = 通过 |
+| 3 | 执行 `swift test --filter LossyDrawingArrayTests` | 未知画线类型只跳过不整组失败、原文**逐字节**不丢（含 key 顺序/数字格式） | 全用例绿 = 通过 |
 | 4 | 执行 `swift test --filter ReviewArchiveWrapperTests` | 复盘存档四种状态存取都往返一致 | 结尾 0 failed = 通过 |
-| 5 | 执行 `swift test --filter Migration0009Tests` | 数据库升级后新增两列、身份串按规则回填、重复身份被拦 | 全用例绿 = 通过 |
+| 5 | 执行 `swift test --filter Migration0009Tests` | 升级后新增两列、身份串按规则回填、**重复/缺失/空**身份都被数据库拦下 | 全 4 用例绿 = 通过 |
 | 6 | 执行 `swift test --filter ContractVersionTests` | 版本号变为 1.11 | 绿 = 通过 |
 | 7 | 执行 `xcodebuild -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' build-for-testing 2>&1 | tail -3` | 苹果编译器把改动全编过 | 出现 BUILD SUCCEEDED = 通过 |
 
@@ -1230,7 +1319,8 @@ git commit -m "feat(drawing-P1a): RecordRepository 读写 draw_uuid+style_json +
 
 - **spec 覆盖**：§4 数据模型（Task 1-3）、§11.1 兜底默认（Task 3）、§11.2 wrapper+lossy（Task 5/6）、§11.3 迁移 0009+draw_uuid 约束（Task 9）、§11.4 net-change（Task 7）、§5.0/D15 routeDrawingCommit（Task 8）、CONTRACT bump（Task 4）——均有对应 Task。§5-§10 的**几何/工具/UI/放大镜/手势/周期绑定渲染**属 P1b/后续阶段，本 P1a 只做契约地基，spec §15 P1 已注明分 P1a/P1b。
 - **占位扫描**：无 TBD/TODO；两处显式标注"占位名以实际 API 为准"（Task 8 `makeEngine()`、Task 10 `insertDrawings/loadDrawings`）——因这两个既有入口的确切签名需实施时对齐真身，非设计占位，已给出对齐指引（引用真实文件行）。
-- **类型一致**：`DrawingID=String`、`ReviewArchiveWrapper{drawings,hiddenIds}`、`DrawingObject` 18 字段跨 Task 一致；`ReviewNetChange.changed` 扩参与旧调用兼容。
+- **类型一致**：`DrawingID=String`、`ReviewArchiveWrapper{drawings,hiddenIds}`、`DrawingObject` 18 字段跨 Task 一致；`ReviewNetChange.changed` 扩参与旧调用兼容。`LossyDrawingArray.unknownRaw:[String]`（原始元素文本）在 Task 5/6 一致。
+- **codex plan-R1 收口（2 high）**：① Task 5 有损解码改**真字节级保真**——新增 `JSONTopLevelArray` 顶层数组切分器捕获未识别条**原始字节文本**、回写原样重发（**不再经 `JSONSerialization` 反/重序列化**改 key 序/数字格式，防 load+autosave 静默改写未来客户端数据），加**字节全等**测试；② Task 9 迁移改**表重建**令 `draw_uuid NOT NULL CHECK(draw_uuid <> '') UNIQUE`（DB 边界强制、非仅一次回填校验），加 缺失/空/重复 三道 DB 拦截测试。
 
 ## 留给 P1b / 后续的点（本 P1a 不做）
 1. **DrawingTool 协议具体工具实现 + 渲染/hitTest**（P1b：水平线升级/趋势线/通道线/箱体/折线）。
