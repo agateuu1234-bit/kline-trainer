@@ -908,13 +908,16 @@ public struct ReviewArchiveWrapper: Equatable, Sendable {
 ```swift
 public struct ReviewWorking: Equatable, Sendable {
     public let stepTick: Int
-    public let drawings: [DrawingObject]
-    public let hiddenOriginalIds: [DrawingID]     // 复盘隐藏原训练线 id 集（§11.5/D12）
+    public let lossy: LossyDrawingArray            // 携带有序 known+unknown → 支持 repo load→save 往返无损（codex R6-high①/Y）
+    public let hiddenOriginalIds: [DrawingID]      // 复盘隐藏原训练线 id 集（§11.5/D12）
+    public var drawings: [DrawingObject] { lossy.drawings }   // 计算属性：app 消费的已知条
 
+    public init(stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID] = []) {
+        self.stepTick = stepTick; self.lossy = lossy; self.hiddenOriginalIds = hiddenOriginalIds
+    }
+    /// 便捷：纯已知条（coordinator fresh save 用；活编辑保住 unknown = P1b 引擎携带 lossy，§Y 分层）。
     public init(stepTick: Int, drawings: [DrawingObject], hiddenOriginalIds: [DrawingID] = []) {
-        self.stepTick = stepTick
-        self.drawings = drawings
-        self.hiddenOriginalIds = hiddenOriginalIds
+        self.init(stepTick: stepTick, lossy: LossyDrawingArray(drawings: drawings), hiddenOriginalIds: hiddenOriginalIds)
     }
 }
 ```
@@ -1555,11 +1558,22 @@ struct PendingLossyTests {
 
 - [ ] **Step 3: impl**
 
-`loadReplay`（`PendingReplayRepositoryImpl.swift:57`）改为有损解码 + 让 `PendingReplay` **携带有序 `lossy: LossyDrawingArray`**（`drawings` 派生自 `lossy.drawings`）；整体数组解析失败（`rawElementStrings` 返 nil）仍→.dbCorrupted，保持已验证损坏语义：
+**先改模型**（对齐 ReviewWorking 那套，防结构体-用法不一致）：`PendingReplay` / `PendingTraining` 结构体（实施时对齐其真实定义文件）**加 `lossy` 字段、`drawings` 降计算属性、补便捷 init**：
 
 ```swift
-            // PendingReplay 增 `var lossy: LossyDrawingArray`；`drawings` = 计算属性 `lossy.drawings`
-            replay.lossy = try LossyDrawingArray.decode(Data(drawingsJSON.utf8))
+    // PendingReplay（PendingTraining 同款）：
+    public let lossy: LossyDrawingArray                        // 携带有序 known+unknown → repo 往返无损
+    public var drawings: [DrawingObject] { lossy.drawings }    // 计算属性（下游消费不变）
+    // 便捷 init：coordinator fresh save 用（纯已知；活编辑保住 unknown = P1b 引擎携带 lossy，§Y）
+    public init(recordId: Int64, /*…其余原字段…*/ drawings: [DrawingObject]) {
+        self.lossy = LossyDrawingArray(drawings: drawings); /*…原字段赋值…*/
+    }
+```
+
+`loadReplay`（`PendingReplayRepositoryImpl.swift:57`）改为有损解码、构 `PendingReplay(lossy:)`；整体数组解析失败（`rawElementStrings` 返 nil）仍→.dbCorrupted，保持已验证损坏语义：
+
+```swift
+            let lossy = try LossyDrawingArray.decode(Data(drawingsJSON.utf8))   // 构 PendingReplay(…, lossy: lossy)
 ```
 
 `saveReplay`（`:13`）保真回写——INSERT OR REPLACE **前**读同记录现有列的 unknownRaw、拼在新已知条后：
@@ -1610,7 +1624,7 @@ git commit -m "feat(drawing-P1a): pending_training/replay 有损保真解码（l
 - **占位扫描**：无 TBD/TODO；两处显式标注"占位名以实际 API 为准"（Task 8 `makeEngine()`、Task 10 `insertDrawings/loadDrawings`）——因这两个既有入口的确切签名需实施时对齐真身，非设计占位，已给出对齐指引（引用真实文件行）。
 - **类型一致**：`DrawingID=String`、`ReviewArchiveWrapper{drawings,hiddenIds}`、`DrawingObject` 18 字段跨 Task 一致；`ReviewNetChange.changed` 扩参与旧调用兼容。`LossyDrawingArray` 改为有序 `elements:[LossyDrawingElement]`（`.known`/`.unknownRaw` 保序，codex plan-R2），`drawings`/`unknownRaw` 降为计算属性——Task 6/7 消费 `.drawings` 名/类型不变；Task 10 用 `ReviewArchiveWrapper(drawings:hiddenIds:).encodedColumn()`/`.decodeColumn().drawings` 便捷入口不变。wrapper 用 `JSONObjectScan` 保留 drawings 原始字节切片（字节保真，codex plan-R2）。
 - **codex plan-R1 收口（2 high）**：① Task 5 有损解码改**真字节级保真**——新增 `JSONTopLevelArray` 顶层数组切分器捕获未识别条**原始字节文本**、回写原样重发（**不再经 `JSONSerialization` 反/重序列化**改 key 序/数字格式，防 load+autosave 静默改写未来客户端数据），加**字节全等**测试；② Task 9 迁移改**表重建**令 `draw_uuid NOT NULL CHECK(draw_uuid <> '') UNIQUE`（DB 边界强制、非仅一次回填校验），加 缺失/空/重复 三道 DB 拦截测试。
-- **codex plan-R2/R3/R4 收口**：R2 `LossyDrawingArray` 改**有序** `elements` 保未识别条原位 + wrapper 用 `JSONObjectScan` 保 `drawings` 原始字节（不重序列化整体）；R3 Task 10 finalized 行 NULL style_json **行感知兜底**（`is_extended`→lineSubType、锚点→period）+ 未知 tool_type **跳过**不伪装 `.horizontal`；**R4（公开发布标准，[[project_app_public_release_intent]]）**：repo 边界无损——`ReviewWorking/ReviewArchive` 携带完整 `lossy`、`saveWorking/commitSaved` 收 lossy 原样回写（Task 10 集成测试证），**新增 Task 11** 令 `pending_training/pending_replay` 也走有损解码 + 同记录 unknownRaw 保真回写。**至此三处画线数组持久化边界（record/review/pending）全部 repo-边界无损**。
+- **codex plan-R2/R3/R4/R5/R6 收口**：R2 `LossyDrawingArray` 改**有序** `elements` 保未识别条原位 + wrapper 用 `JSONObjectScan` 保 `drawings` 原始字节（不重序列化整体）；R3 Task 10 finalized 行 NULL style_json **行感知兜底**（`is_extended`→lineSubType、锚点→period）+ 未知 tool_type **跳过**不伪装 `.horizontal`；**R4/R5/R6（公开发布标准，[[project_app_public_release_intent]]；分层决策 Y）**：`ReviewWorking/PendingReplay` 携带有序 `lossy`（`drawings` 计算属性），三处画线数组边界（record/review/pending）均 **① 有损解码永不崩 + ② repo load→save 往返无损（同内容逐字节+保序）**；R5 修 pending append 破坏顺序（改重发有序 `lossy`）+ 切分器拒尾部垃圾；R6 修 `ReviewWorking` 结构体片段补 `lossy`（与接口 + `w.lossy` 用法一致）。**§Y 分层边界**：「coordinator 从 engine 构建纯 known fresh-save 时保住旧 unknown（引擎携带 `lossy` 穿过活编辑）」= **P1b**（引擎本就在 P1b 改新画线模型）——**P1a 不做 repo 层合并**；P1a + P1b 同版本发布完整达成 A 字节保真。
 
 ## 留给 P1b / 后续的点（本 P1a 不做）
 1. **DrawingTool 协议具体工具实现 + 渲染/hitTest**（P1b：水平线升级/趋势线/通道线/箱体/折线）。
@@ -1618,3 +1632,4 @@ git commit -m "feat(drawing-P1a): pending_training/replay 有损保真解码（l
 3. **coordinator 把 saveWorking 的 hiddenIds 接真值 + hide/show 行为 + clear-saved 空判**（P5，§12）。
 4. **`ray`/`time` legacy case 的 UI 侧最终退役**（其解码兼容已在 P1a）。
 5. Task 8 `makeEngine()`、Task 10 `insertDrawings/loadDrawings` 的真实入口名对齐（实施时按引用行核对）。
+6. **引擎/coordinator 携带 `lossy` 穿过活编辑 + fresh-save**（使 save 时保住旧 unknown，闭合 codex plan-R6 的「coordinator 纯 known fresh-save 覆盖同记录 unknown」）= **P1b**（§Y 分层决策；P1a 只保 ①解码不崩 + ②repo load→save 往返无损）。P1a 的 pending/review save 测试只断言 repo 往返，不断言 coordinator fresh-save 保真。
