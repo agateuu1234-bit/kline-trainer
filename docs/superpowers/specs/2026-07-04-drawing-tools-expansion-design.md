@@ -69,6 +69,7 @@
 - **退出画线模式**：点「退出」→ 两行落下、恢复训练/复盘底栏、「退出」→「结束」。**退出后所有画线惰性**（不可点选/拖动/删除）；仅画线模式内可选中编辑。
 - **画布约束**：画线只落在 **K 线主图区**（成交量/MACD 副图不可画）；**上下两面板都能画**（归属所画面板当前显示的周期，见 §10）。
 - **画线模式保留图表操作**：单指横滑=平移、单指竖滑=切周期（复用 RFC-C）、双指=缩放、单击=落锚/选中、拖节点=移节点（§14 手势消歧）。
+- **阶段边界（codex R7-medium，见 §15/D19）**：**P1 只交付训练/replay 的画线模式（5 键底栏、各控件全可用）**；**复盘 6 键栏（含隐藏）+ 复盘删除 + 隐藏 + 复盘持久化/clear-saved 全属 P5**。P5 落地前，**P1 在复盘模式下隐藏/禁用一切复盘专属控件**（不 ship 死控件/未接线动作），并加测试证之。
 
 ---
 
@@ -265,7 +266,7 @@
 
 ### 11.2 pending / review JSON 持久形状（P1 定死，防版本错位，codex R2-high）
 - `pending_training.drawings`、`pending_replay.drawings`：整体 JSON blob 存 `[DrawingObject]`——经 Codable **自动携带新字段（含 `id`）**，无需改列。
-- **`review_archive.working_drawings/saved_drawings`：形状在 P1 就固定为容错 wrapper**。因复盘态是原子整体 `{drawings:[DrawingObject], hiddenIds:[DrawingID]}`（§11.5），这两列改存该 wrapper JSON；**解码器容错**——既能解旧的裸 `[DrawingObject]` 数组、也能解 wrapper 对象（`try 数组 else wrapper`，或 enum 双形解码），随 P1 的 `1.11`/`user_version 7` 一起 ship。**hide/show UI 虽 P5 才落地，但存储形状 P1 就定死；P5 不再改形状、不再迁移**（否则只认数组的 P1–P4 构建读到 P5 wrapper 会解不出、复盘存档不可读/autosave 失败）。
+- **`review_archive.working_drawings/saved_drawings`：形状在 P1 就固定为容错 wrapper**。**canonical 磁盘 JSON schema（P1 钉死、全阶段唯一）** = `{ "drawings": [DrawingObject], "hiddenIds": [DrawingID] }`——**on-disk key 就叫 `drawings` / `hiddenIds`**，对应 in-memory `ReviewWorking`/`ReviewArchive` 的 `reviewDrawings` / `hiddenOriginalIds`，用**显式 `CodingKeys` 映射**（禁任何阶段改 key 名/换形状）。**解码器容错**：既解旧的裸 `[DrawingObject]` 数组（→ `hiddenIds=[]`）、也解 wrapper 对象（`try 数组 else wrapper`）。随 P1 的 `1.11`/`user_version 7` ship；**hide/show UI 虽 P5 才落地，但形状 P1 定死，P5 不改形状/key、不迁移**（否则只认数组的 P1–P4 构建读 P5 wrapper 解不出、复盘存档不可读/autosave 失败）。**P1 加兼容 fixtures 往返测**：①裸数组 ②空 wrapper `{drawings:[],hiddenIds:[]}` ③drawings-only ④hidden-only 四态（codex R7-high）。
 
 ### 11.3 finalized `drawings` 关系表 + 迁移
 `drawings` 表现为分列（`tool_type/panel_position/is_extended/anchors(JSON)/reveal_tick`）。新样式/文本/period 字段需落库：
@@ -283,7 +284,7 @@
 - `ReviewNetChange.changed(working:committed:)` **同时按 id 比较 drawings（保留重数）+ `hiddenOriginalIds` 集**——仅隐藏/仅显示也判净改动（脏）→ 触发 autosave、参与「删空清已复盘」。
 - autosave 触发面：`engine` 暴露 `hiddenOriginalIds`（`@Observable`），`TrainingView` 除 `.onChange(reviewDrawings.count)` 外**也 onChange 隐藏集**（或统一一个 review revision）→ 隐藏/显示即时 autosave。
 - **唯一持久隐藏态 = `hiddenOriginalIds`**（仅 per-line「隐藏」/「显示」增删它）。**`全部显示/全部隐藏` 是非持久 UI-only 视图覆盖**——**不进 wrapper、不进 `ReviewNetChange`、不触发 autosave、每次进复盘重置为「按 `hiddenOriginalIds` 隐藏」**（codex R5-high，D17）。
-- **落库 = §11.2 的容错 wrapper**：`working_drawings`/`saved_drawings` 列存 `{drawings, hiddenIds}` JSON（解码容错裸数组），**该形状在 P1 就定死随 `1.11` ship，P5 不再改形状/不迁移**（消除版本错位，codex R2-high）。P5 只加写 `hiddenIds` 的 UI/逻辑。**契约由本 spec 钉死：隐藏态是复盘原子状态的一部分**。
+- **落库 = §11.2 的 canonical 容错 wrapper**：on-disk key = `drawings`/`hiddenIds`（映射 in-memory `reviewDrawings`/`hiddenOriginalIds`，显式 CodingKeys），解码容错裸数组；**形状 P1 定死随 `1.11` ship，P5 不改形状/key、不迁移**（消除版本错位，codex R2/R7-high）。P5 只加写 `hiddenIds` 的 UI/逻辑。**契约由本 spec 钉死：隐藏态是复盘原子状态的一部分**。
 
 ---
 
@@ -334,6 +335,7 @@
 
 > *P3 注：文本字段建议在 P1 一次性纳入 `DrawingObject`/迁移（避免二次 bump），P3 只做 text 工具的 UI/渲染/输入流程。若 P1 不纳入 text 字段，则 P3 自带一次迁移+bump——**P1 一次纳入更优**，spec 采此。
 > 顺序可微调（用户已认可当前提案）：如需放大镜提前或主页设置延后皆可，由 writing-plans 定稿。
+> **P1/P5 边界（codex R7-medium，D19）**：P1 画线模式仅面向**训练/replay**；**复盘专属（6 键栏含隐藏、复盘删除、隐藏持久化、clear-saved）全在 P5**。**P1 在复盘模式下隐藏/禁用这些入口**并加测试证不暴露任何未接线的复盘动作——避免 P1 ship 出死/无持久的复盘控件。（复盘 JSON wrapper 形状虽 P1 定死随 1.11 ship，但**写 `hiddenIds` 的行为逻辑与 UI 全在 P5**。）
 
 ---
 
@@ -352,11 +354,12 @@
 - **D11 标注尾巴 = 独立可空 `tailAnchor` 字段，非 `anchors[1]`**：创建只落 1 锚（气泡锚）；尾巴按形式给默认/可空（`.plain` 为 nil）；渲染/hitTest/net-change **判空、绝不索引 `anchors[1]`**；三形式 + 形式切换 + 旧 blob 均有容错。**理由**：单锚创建 + `.plain` 无尾 → `anchors[1]` 歧义会崩或切换形式时丢尾巴（**codex R1-medium**）。
 - **D12 复盘态是原子整体 `{reviewDrawings, hiddenOriginalIds}`**：同存、同取、同判净改动、同参与标记（§11.5）；并入 working/saved JSON wrapper（无新列、原子天然）。**理由**：隐藏是复盘编辑的一等操作，旁路存储会与 working 失步（**codex R1-high**）。
 - **D13 每条画线有持久稳定 `id`；canonical = `draw_uuid`/UUID 串，全层同一字段**：原训练线用 `draw_uuid`、新线铸 UUID；选中命中 / `hiddenOriginalIds` / net-change / `RecordRepository` **全引用同一 `id` 字段**（保留重数），**不混用整数 PK**（PK 仅表行主键）。**理由**：无 id + 字段派生 key 会让重复几何隐藏错线、净改动折叠漏判（**codex R2-high**）；PK 与 UUID 混用会 P1/P5 命中失配（**codex R4-high**）。
-- **D14 复盘 JSON 持久形状在 P1 就定死为容错 wrapper**（解裸数组 | wrapper 双形），随 `1.11` ship；P5 不改形状/不迁移。**理由**：形状延到 P5 改会造成 P1–P4 只认数组的构建读 P5 wrapper 解不出的版本错位（**codex R2-high**）。
+- **D14 复盘 JSON 持久形状在 P1 就定死为 canonical 容错 wrapper**：on-disk key = `drawings`/`hiddenIds`（显式 CodingKeys 映射 in-memory `reviewDrawings`/`hiddenOriginalIds`，禁改 key/形状），解裸数组 | wrapper 双形，随 `1.11` ship；P5 不改形状/key/不迁移；P1 加 裸数组/空/drawings-only/hidden-only 四态 fixtures。**理由**：形状/key 延到 P5 改会造成 P1–P4 只认数组或另一 key 的构建读 P5 wrapper 解不出的版本错位（**codex R2/R7-high**）。
 - **D15 `routeDrawingCommit` 改 copy-with-revealTick、保留全字段**：现只从 toolType/anchors/isExtended/panelPosition/revealTick 重建 → 每次落锚提交丢 id/样式/锁定/文本/tailAnchor，破坏 stable-id/文本/样式持久/net-change/按 id 选隐。P1 改为「盖 revealTick 但保留其余全字段」+ normal/review 提交测试证字段存活。**理由**：**codex R3-high**。
 - **D16 `DrawingID` 跨层防碰撞（非仅数组内稳定）**：原训练线（`draw_uuid`）+ pending + reviewDrawings 合并后须全局唯一——用 UUID/唯一串，**禁进程内单调、禁裸下标回填**（会与原 PK 小整数撞号 → 选错/隐藏错/net-change 折叠）。**理由**：**codex R3-high**。
 - **D17 `全部显示/全部隐藏` = 非持久 UI-only 视图覆盖**；唯一持久隐藏态 = `hiddenOriginalIds`（仅 per-line 隐藏/显示增删）。bulk 模式不进 wrapper/net-change/autosave、每次进复盘重置。**理由**：否则 bulk 与 per-line 语义纠缠、autosave/replay 恢复歧义（**codex R5-high**）。
 - **D18 复盘选中命中两层、操作按层门控（选中 ≠ 可变）**：hit-test 原训练线 `drawings` + `reviewDrawings` 两层，返回 (层, id)；原训练线只可隐藏/显示，review/own 画线可编辑/删除。**理由**：若命中只扫 `reviewDrawings`，原训练线永不可选 → §12 隐藏动作无对象、隐藏功能不可达（**codex R6-high**）。
+- **D19 复盘专属控件全属 P5，P1 不暴露**：P1 画线模式只面向训练/replay；复盘 6 键栏/隐藏/删除/隐藏持久化/clear-saved 全 P5，P1 前隐藏/禁用 + 测试证不暴露未接线动作。**理由**：否则 P1 独立 PR 会 ship 出死/无持久的复盘控件（**codex R7-medium**）。
 
 ---
 
