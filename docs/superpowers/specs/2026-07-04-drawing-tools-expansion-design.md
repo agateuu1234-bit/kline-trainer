@@ -70,6 +70,7 @@
 - **画布约束**：画线只落在 **K 线主图区**（成交量/MACD 副图不可画）；**上下两面板都能画**（归属所画面板当前显示的周期，见 §10）。
 - **画线模式保留图表操作**：单指横滑=平移、单指竖滑=切周期（复用 RFC-C）、双指=缩放、单击=落锚/选中、拖节点=移节点（§14 手势消歧）。
 - **阶段边界（codex R7-medium，见 §15/D19）**：**P1 只交付训练/replay 的画线模式（5 键底栏、各控件全可用）**；**复盘 6 键栏（含隐藏）+ 复盘删除 + 隐藏 + 复盘持久化/clear-saved 全属 P5**。P5 落地前，**P1 在复盘模式下隐藏/禁用一切复盘专属控件**（不 ship 死控件/未接线动作），并加测试证之。
+- **类型行按阶段门控工具（codex R9-medium，D22）**：11 工具类型行**只显示/启用「当前阶段已落地的工具」**——**P1 只 5 个**（水平线/趋势线/通道线/箱体/折线）；`golden/wave/cycle/fib/timeRuler` 在 **P2**、`text` 在 **P3** 落地前**隐藏或禁用**，加测试证 P1 验收**不通过任何死/不可渲染的工具图标**。
 
 ---
 
@@ -266,7 +267,7 @@
 
 ### 11.2 pending / review JSON 持久形状（P1 定死，防版本错位，codex R2-high）
 - `pending_training.drawings`、`pending_replay.drawings`：整体 JSON blob 存 `[DrawingObject]`——经 Codable **自动携带新字段（含 `id`）**，无需改列。
-- **所有画线数组持久化边界（pending_training / pending_replay / review wrapper 的 `drawings`）必须用 lossy 逐元素解码器**：把每个 `DrawingObject` 包在 failable 解码里，**未知/废弃 `toolType` 或损坏的单条只跳过、不让整数组失败**（现 `JSONDecoder().decode([DrawingObject].self)` + raw `DrawingToolType` enum 会因一条未知值整组解码失败 → resume/复盘加载崩溃，codex R8-medium）。与 §4.1 tolerant toolType 契约配套。加 unknown-toolType fixtures（pending_training / pending_replay / review wrapper 三处各一）。
+- **所有画线数组持久化边界（pending_training / pending_replay / review wrapper 的 `drawings`）必须用 lossy 逐元素解码器**：每个 `DrawingObject` 包在 failable 解码里，**未知/废弃 `toolType` 或损坏的单条不让整数组失败**（现 `JSONDecoder().decode([DrawingObject].self)` + raw `DrawingToolType` enum 会因一条未知值整组解码失败 → resume/复盘加载崩溃，codex R8-medium）。**但 lossy ≠ 丢数据（codex R9-high）**：解码器须**保留跳过条的原始 JSON payload**，写回（`saveWorking`/`savePending`/`commitSaved`）时**把这些未识别条原样字节级重新发射**——否则「读时跳过 + 全量重写」= 静默不可逆丢线。与 §4.1 tolerant toolType 契约配套。加 fixtures：unknown-toolType（三处各一）+ **load+autosave 往返证不丢未识别条**。
 - **`review_archive.working_drawings/saved_drawings`：形状在 P1 就固定为容错 wrapper**。**canonical 磁盘 JSON schema（P1 钉死、全阶段唯一）** = `{ "drawings": [DrawingObject], "hiddenIds": [DrawingID] }`——**on-disk key 就叫 `drawings` / `hiddenIds`**，对应 in-memory `ReviewWorking`/`ReviewArchive` 的 `reviewDrawings` / `hiddenOriginalIds`，用**显式 `CodingKeys` 映射**（禁任何阶段改 key 名/换形状）。**解码器容错**：既解旧的裸 `[DrawingObject]` 数组（→ `hiddenIds=[]`）、也解 wrapper 对象（`try 数组 else wrapper`）。随 P1 的 `1.11`/`user_version 7` ship；**hide/show UI 虽 P5 才落地，但形状 P1 定死，P5 不改形状/key、不迁移**（否则只认数组的 P1–P4 构建读 P5 wrapper 解不出、复盘存档不可读/autosave 失败）。**P1 加兼容 fixtures 往返测**：①裸数组 ②空 wrapper `{drawings:[],hiddenIds:[]}` ③drawings-only ④hidden-only 四态（codex R7-high）。
 
 ### 11.3 finalized `drawings` 关系表 + 迁移
@@ -362,7 +363,8 @@
 - **D18 复盘选中命中两层、操作按层门控（选中 ≠ 可变）**：hit-test 原训练线 `drawings` + `reviewDrawings` 两层，返回 (层, id)；原训练线只可隐藏/显示，review/own 画线可编辑/删除。**理由**：若命中只扫 `reviewDrawings`，原训练线永不可选 → §12 隐藏动作无对象、隐藏功能不可达（**codex R6-high**）。
 - **D19 复盘专属控件全属 P5，P1 不暴露**：P1 画线模式只面向训练/replay；复盘 6 键栏/隐藏/删除/隐藏持久化/clear-saved 全 P5，P1 前隐藏/禁用 + 测试证不暴露未接线动作。**理由**：否则 P1 独立 PR 会 ship 出死/无持久的复盘控件（**codex R7-medium**）。
 - **D20 `draw_uuid` 在 DB 边界强制非空+唯一**：迁移回填后校验无 NULL/无重复否则 fail + `UNIQUE INDEX` + insert/load 测试。**理由**：仅加 `TEXT` 列不约束 → null/重复 id 被 review 当权威 → 选错/隐藏错/折叠且无 DB 拦（**codex R8-high**）。
-- **D21 所有画线数组持久化边界用 lossy 逐元素解码**：未知/废弃 toolType 或坏条只跳过、不整组失败（配套 §4.1 tolerant + unknown-toolType fixtures）。**理由**：raw `[DrawingObject]` Codable 会因一条未知值整组解码失败 → resume/复盘加载崩（**codex R8-medium**）。
+- **D21 所有画线数组持久化边界用 lossy 逐元素解码 + 未识别条 round-trip 保真**：坏/未知条解码只跳过不整组失败，**但保留其原始 payload、写回时原样字节级重发**（lossy ≠ 丢数据）；配套 §4.1 tolerant + unknown-toolType fixtures + load+autosave 不丢往返测。**理由**：raw `[DrawingObject]` Codable 一条坏整组崩（**codex R8-medium**）；纯跳过 + 全量重写 = 静默不可逆丢线（**codex R9-high**）。
+- **D22 类型行按阶段门控工具**：类型行只显示/启用当前阶段已实现的工具（P1=5，P2+5，P3+text）；未落地工具隐藏/禁用 + 测试。**理由**：否则 P1 独立 PR ship 出 6 个死/不可渲染的工具图标（**codex R9-medium**）。
 
 ---
 
