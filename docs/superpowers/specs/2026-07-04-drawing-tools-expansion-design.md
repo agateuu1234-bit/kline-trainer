@@ -44,7 +44,7 @@
 | 渲染过滤 | `RenderStateBuilder.swift:67-69` | `drawings(+review reviewDrawings).filter{ panelPosition==(panel==.upper ?0:1) && revealTick<=tick }` | **改按 period 绑定**（§10） |
 | 引擎画线态 | `TrainingEngine.swift:25,31` | `drawings`（记录真相）/ `reviewDrawings`（复盘工作层，`public private(set)`） | 复用 + 加删除/隐藏/样式编辑面 |
 | 复盘删除（未接线） | `TrainingEngine.swift:984-987 (removeReviewDrawing)` | 存在但**无生产 caller**（§8 延后至本 RFC） | 接线到选中删除（§12/P5） |
-| 复盘提交路由 | `TrainingEngine.swift:996-1005 (routeDrawingCommit)` | review→`reviewDrawings`，否则→`drawings`；提交盖 `revealTick=tick.globalTickIndex` | 复用 |
+| 复盘提交路由 | `TrainingEngine.swift:996-1005 (routeDrawingCommit)` | review→`reviewDrawings`，否则→`drawings`；提交盖 `revealTick`，但**现只从 toolType/anchors/isExtended/panelPosition/revealTick 重建**（会丢新字段） | **改 copy-with-revealTick、保留全字段**（§5.0、D15） |
 | 复盘净改动 | `ReviewArchiveRepository.swift:35-45 (ReviewNetChange.changed)` | 比较 key `toolType\|panelPosition\|isExtended\|revealTick\|anchors` 排序集 | **key 补新字段**（§11.4） |
 | 复盘 autosave | `TrainingSessionCoordinator`（`persistReviewWorkingIfChanged`/`autosaveReview`/单写者 fence）；`TrainingView` `.onChange(reviewDrawings.count)` | 已有单写者 fence + 后台 flush | 触发面扩到样式/隐藏变更（§12） |
 | 首页标记 | `ReviewArchiveRepositoryImpl.loadMarkers`；`saved_drawings IS NOT NULL→已复盘`；`working_step_tick IS NOT NULL→复盘中` | 已有 | 「删空清已复盘」特判（§12.4） |
@@ -115,7 +115,7 @@
 - **legacy 处理**：现有 `ray`、`time` 两个 case——`射线` 已下沉为线型子类（不再是工具），`time` 语义歧义。生产已落地数据仅 `.horizontal`。P1 决定：`ray`/`time` 作为**已废弃 case 保留以容忍历史解码**（映射为忽略/迁移），或以 `fib`/`timeRuler` 取代；`DrawingToolType` 解码需 tolerant（未知→跳过，不 crash）。**该细节 P1 定，spec 钉死"不得因未知/废弃 toolType 崩溃"**。
 
 ### 4.2 `DrawingObject` 新增字段（附加式，Codable `decodeIfPresent` 兜底，沿 `revealTick` 先例）
-- **`id: DrawingID`——持久稳定身份（codex R2-high）**。用于选中命中→定位、`hiddenOriginalIds`、net-change 保留重数（防两条重复几何——同价水平线/重复标注——歧义）。**来源**：原训练线 = `drawings` 表已有 PK `id`（天然唯一持久，§11.3）；新画线（normal/replay/review）= 提交时铸新 id（进程内单调计数或 UUID）。**持久**：`drawings` 表 PK 即是；JSON blob 加 `id` 字段（旧 blob 无 → 解码按数组下标确定性回填，稳定于该 blob）。
+- **`id: DrawingID`——持久稳定、跨层防碰撞的身份（codex R2/R3-high）**。用于选中命中→定位、`hiddenOriginalIds`、net-change 保留重数（防两条重复几何——同价水平线/重复标注——歧义）。**`DrawingID` 必须在 原训练线 / pending / reviewDrawings 全层唯一、不碰撞**：复盘渲染/选中把 原训练线 + `reviewDrawings` **合并**，若新线用「进程内单调」或旧 blob「裸下标回填」，其小整数会与原训练线 `drawings` 表小整数 PK **撞号** → 选错/隐藏错/net-change 折叠（codex R3-high）。**方案**：`DrawingID = UUID 字符串`——新画线（normal/replay/review）提交时 `UUID()`；**原训练线**用持久化的 `draw_uuid`（0009 新列，legacy 行迁移期确定性回填 `legacy-<record_id>-<rowid>` 唯一串，§11.3）。**禁进程内单调、禁裸数组下标**。旧 JSON blob 无 `id` → 解码回填一确定性唯一 id 并于下次保存持久化。
 - `period: Period`——**画线绑定的周期**（§10 渲染据此）。取 `anchors.first.period`；显式落一份增强健壮性。
 - `lineSubType: LineSubType`——`.straight/.ray/.segment`（**取代 `isExtended` 语义**；旧 `isExtended` 迁移：true→ray、false→straight）。
 - `lineStyle: LineStyle`——`.solid/.dash1..dash4`。
@@ -137,6 +137,7 @@
 
 ### 5.0 多锚落点泛化（§P1，先决）
 `ChartContainerView.handleDrawingTap` 现写死 `.horizontal` 单锚即提交。改为：用 `manager.activeTool`，每次单击 `addAnchor`，`shouldCommit(current:tool:)` 达到该工具 `requiredAnchors` 才 `commit + routeDrawingCommit + commitDrawing(退出)`；未达则留在 drawing 态继续收锚。折线特殊（不定锚数，§5.4）。
+- **`routeDrawingCommit` 必须改为 copy-with-revealTick、保留 `DrawingObject` 全部字段**（id / lineSubType / lineStyle / thickness / colorToken / labelMode / locked / text / fontSize / textColorToken / textForm / tailAnchor / period）——现版本只从 5 个字段重建、会在**每次落锚提交时丢掉全部新字段**（stable-id / 文本 / 样式 / net-change / 按 id 选隐立刻崩，codex R3-high）。P1 加 normal + review 提交测试证 id/样式/锁定/文本/tailAnchor 存活（§1、D15）。
 
 ### 5.1 水平线（horizontal，1 锚，升级）
 - 线型：直线（全宽横线）/ 射线（自落点向右到主图右缘）。**无线段**。
@@ -267,7 +268,7 @@
 
 ### 11.3 finalized `drawings` 关系表 + 迁移
 `drawings` 表现为分列（`tool_type/panel_position/is_extended/anchors(JSON)/reveal_tick`）。新样式/文本/period 字段需落库：
-- **方案（推荐）**：迁移 **`0009_v1.11_drawing_style`** 给 `drawings` 加**一个附加 `style_json TEXT`（可空，默认 NULL）列**，承载新字段束（`RecordRepository` 编解码进出）；旧行 NULL→取默认。（备选：逐字段加列，沿 `reveal_tick` 先例；列数多，spec 倾向单 JSON 列，P1 定。）
+- **方案（推荐）**：迁移 **`0009_v1.11_drawing_style`** 给 `drawings` 加**两列**——① **`style_json TEXT`**（可空，承载样式/文本/tailAnchor 等新字段束，`RecordRepository` 编解码进出；旧行 NULL→取默认）；② **`draw_uuid TEXT`**（原训练线的跨层防碰撞身份，§4.2/D16；legacy 行迁移期确定性回填 `legacy-<record_id>-<rowid>` 唯一串）。（备选：样式逐字段加列，沿 `reveal_tick` 先例；列数多，spec 倾向单 JSON 列，P1 定。）
 - `PRAGMA user_version = 7`；`CONTRACT_VERSION "1.10" → "1.11"`（m01 §A 类"改既有语义"；连带 CODEOWNERS approve 门）。
 - **只走 migration，不动 `v1_4_baselineDDL` / `app_schema_v1.sql`**（v1.4 冻结基线，drift-checked——沿 0006/0007/0008 先例）。
 - **原训练线身份（无需造 id）**：`drawings` 表**自 baseline 起就有 PK `id`**——`RecordRepository` 读记录画线时把该 `id` 带进 `DrawingObject.id`，即为复盘隐藏/选中的稳定唯一身份（§4.2、§11.5）。
@@ -350,6 +351,8 @@
 - **D12 复盘态是原子整体 `{reviewDrawings, hiddenOriginalIds}`**：同存、同取、同判净改动、同参与标记（§11.5）；并入 working/saved JSON wrapper（无新列、原子天然）。**理由**：隐藏是复盘编辑的一等操作，旁路存储会与 working 失步（**codex R1-high**）。
 - **D13 每条画线有持久稳定 `id`**：原训练线用 `drawings` 表 PK id、新线铸 id；选中命中 / `hiddenOriginalIds` / net-change 全按 id（保留重数）。**理由**：无 id + 字段派生 key 会让重复几何（同价水平线/重复标注）隐藏错线、净改动折叠漏判（**codex R2-high**）。
 - **D14 复盘 JSON 持久形状在 P1 就定死为容错 wrapper**（解裸数组 | wrapper 双形），随 `1.11` ship；P5 不改形状/不迁移。**理由**：形状延到 P5 改会造成 P1–P4 只认数组的构建读 P5 wrapper 解不出的版本错位（**codex R2-high**）。
+- **D15 `routeDrawingCommit` 改 copy-with-revealTick、保留全字段**：现只从 toolType/anchors/isExtended/panelPosition/revealTick 重建 → 每次落锚提交丢 id/样式/锁定/文本/tailAnchor，破坏 stable-id/文本/样式持久/net-change/按 id 选隐。P1 改为「盖 revealTick 但保留其余全字段」+ normal/review 提交测试证字段存活。**理由**：**codex R3-high**。
+- **D16 `DrawingID` 跨层防碰撞（非仅数组内稳定）**：原训练线（`draw_uuid`）+ pending + reviewDrawings 合并后须全局唯一——用 UUID/唯一串，**禁进程内单调、禁裸下标回填**（会与原 PK 小整数撞号 → 选错/隐藏错/net-change 折叠）。**理由**：**codex R3-high**。
 
 ---
 
@@ -363,7 +366,7 @@
 ---
 
 ## 附：留待 codex / writing-plans 阶段细化的点
-1. `DrawingObject` 新字段落库=单 `style_json` 列 vs 逐列（§11.3，倾向单列）。
+1. `DrawingObject` 样式字段落库=单 `style_json` 列 vs 逐列（§11.3，倾向单列）；`draw_uuid` legacy 回填串确切格式（§4.2/§11.3/D16）。P1 定。
 2. `.ray`/`.time` 两个 legacy enum case 的确切退役/迁移方式（§4.1）。
 3. 命中定位已定按 `id`（§4.2/§7/D13）；剩 `id` 生成器（进程内单调 vs UUID）与 legacy blob 下标回填的确切实现，P1 定。
 4. 手势 arbiter 中"起手是否落在节点上"的判定阈值与纯函数 step 形态（§14）。
