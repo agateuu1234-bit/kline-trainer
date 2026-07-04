@@ -1604,7 +1604,7 @@ struct PendingLossyTests {
 ```
 （`PendingTrainingRepositoryImpl` 同款：`PendingTraining` 携带 `lossy`、load 填充、save 重发 `lossy.encoded()`。）
 
-> 说明：`PendingReplay`/`PendingTraining` 模型增 `var lossy: LossyDrawingArray`（`drawings` = 计算属性 `lossy.drawings`）。**P1a 只保 repo 边界的无损 + 保序**（未编辑的 load→save 逐字节 + 原序，含 `[knownA, unknown, knownB]` 保序）。coordinator 从 engine 构建 fresh pending 时把 known 与加载携带的 unknown **按位置归并**——**由 Task 12（P1a）引擎携带 `loadedDrawingsLossy` + save 用 `reconciled(currentKnown:)` 完成**（未识别条原位、known 编辑/新增生效）；P1a 的 autosave/resume-save 全路径保真（Task 12 coordinator 级测试证）。P1b 的多点编辑/重排下按稳定 id 归并的完整鲁棒性再深化，但**不丢** unknown 的保证 P1a 已立。
+> 说明：`PendingReplay`/`PendingTraining` 模型增 `var lossy: LossyDrawingArray`（`drawings` = 计算属性 `lossy.drawings`）。**P1a 只保 repo 边界的无损 + 保序**（未编辑的 load→save 逐字节 + 原序，含 `[knownA, unknown, knownB]` 保序）。coordinator 从 engine 构建 fresh pending 时把 known 与加载携带的 unknown **按稳定 `DrawingObject.id` 归并**——**由 Task 12（P1a）引擎携带 `loadedDrawingsLossy` + save 用 `reconciled(currentKnown:)` 完成**（未识别条原位、known 编辑/新增/**删除**都正确保序）；P1a 的 autosave/resume-save 全路径保真（Task 12 coordinator 级测试证）。
 
 - [ ] **Step 4: run PASS + 全量**：`cd ios/Contracts && swift test 2>&1 | tail -6`（两框架 0 fail）+ Catalyst build-for-testing SUCCEEDED。
 
@@ -1662,6 +1662,29 @@ struct CoordinatorLossyPreserveTests {
         let col: String = try Row.fetchOne(db, sql: "SELECT working_drawings FROM review_archive WHERE record_id=7")!["working_drawings"]
         #expect(col.contains(unknown))                                 // 未来条经「编辑+autosave」仍存活
     }
+
+    @Test("reconciled 按 id：删 unknown 之前的 known → 未来条仍在原位（不被后续 known 挤到前面）")
+    func reconciledByIdPreservesOrderOnDelete() {
+        let a = decodedKnown(known("gA")); let bK = decodedKnown(known("gB"))
+        let lossy = LossyDrawingArray(elements: [.known(a), .unknownRaw(unknown), .known(bK)])
+        let out = String(decoding: try! lossy.reconciled(currentKnown: [bK]).encoded(), as: UTF8.self)  // 删了 A
+        let iU = out.range(of: "__future__")!.lowerBound
+        let iB = out.range(of: #""gB""#)!.lowerBound
+        #expect(iU < iB)                                               // 未来条仍在 B 之前（原位），非位置法的 [B, 未来]
+        #expect(!out.contains(#""gA""#))                              // A 已删
+    }
+
+    @Test("复盘 hiddenIds：load(wrapper 含 hiddenIds)→autosave/commit 后 hiddenIds 原样保留（不被覆盖成 []）")
+    func reviewHiddenIdsSurviveSave() async throws {
+        let (coord, db) = try makeCoordinator()
+        // wrapper 含 hiddenIds（模拟 P5/未来版本写的隐藏态）
+        try seedReviewWorking(db, recordId: 8, wrapperJSON: #"{"drawings":[\#(known("g1"))],"hiddenIds":["h-1","h-2"]}"#)
+        let engine = try await coord.resumePendingReview(recordId: 8)  // engine.loadedReviewHiddenIds 携带
+        engine.appendDrawing(decodedKnown(known("g9")))
+        try coord.persistReviewWorkingIfChanged(engine: engine)        // autosave 传回 loadedReviewHiddenIds
+        let col: String = try Row.fetchOne(db, sql: "SELECT working_drawings FROM review_archive WHERE record_id=8")!["working_drawings"]
+        #expect(col.contains("h-1") && col.contains("h-2"))           // 隐藏态未被覆盖成 []
+    }
 }
 ```
 > `makeCoordinator`/`seedPendingReplayRow`/`seedReviewWorking`/`decodedKnown` = 测试工厂，实施时对齐 `CoordinatorReplayPersistenceTests` 既有 helper（真 coordinator + in-memory app.sqlite）。
@@ -1673,27 +1696,32 @@ struct CoordinatorLossyPreserveTests {
 ① `LossyDrawingArray.swift` 加合并器（保未识别条原位 + 应用 known 编辑/追加）：
 
 ```swift
-    /// 用当前已知条重建 lossy：按原序走 elements——`.known` 依次替换成 currentKnown、`.unknownRaw` 原位保留；
-    /// currentKnown 多出的（新增画线）追加为 `.known`。→ 未识别条位置不变、known 编辑/新增生效。
+    /// 用当前已知条重建 lossy：**按稳定 `DrawingObject.id` 归并**（非位置——否则删除一条 known 会把后续 known 挪到
+    /// unknownRaw 前面破坏顺序，codex R11-medium；deleteDrawing/removeReviewDrawing 现已存在故 P1a 必须按 id）。
+    /// 规则：按原序走 elements——`.unknownRaw` 原位保留；`.known` 若其 id 仍在 currentKnown 则原位发射更新后的该条、
+    /// 否则（被删）跳过；currentKnown 里 id 不在原 elements 的（新增画线）按其在 currentKnown 的顺序追加末尾。
     func reconciled(currentKnown: [DrawingObject]) -> LossyDrawingArray {
-        var q = currentKnown[...]
+        let byId = Dictionary(currentKnown.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var emitted = Set<DrawingID>()
         var out: [LossyDrawingElement] = []
         for el in elements {
             switch el {
-            case .known: if let k = q.first { q = q.dropFirst(); out.append(.known(k)) }   // 该 known 槽被删则跳过
-            case .unknownRaw(let r): out.append(.unknownRaw(r))
+            case .known(let old):
+                if let cur = byId[old.id] { out.append(.known(cur)); emitted.insert(old.id) }   // id 仍在→原位更新；被删→跳过
+            case .unknownRaw(let r):
+                out.append(.unknownRaw(r))                                                       // 未识别条原位保留
             }
         }
-        for k in q { out.append(.known(k)) }                                                // 新增的 known 追加末尾
+        for k in currentKnown where !emitted.contains(k.id) { out.append(.known(k)) }             // 真新增（原不在）追加末尾
         return LossyDrawingArray(elements: out)
     }
 ```
 
-② `TrainingEngine.swift`：`drawings`(`:25`) 旁 `public private(set) var loadedDrawingsLossy = LossyDrawingArray(drawings: [])`；`reviewDrawings`(`:31`) 旁 `public private(set) var loadedReviewLossy = LossyDrawingArray(drawings: [])`。init(`:144`) 加 `initialDrawingsLossy: LossyDrawingArray? = nil` → `loadedDrawingsLossy = initialDrawingsLossy ?? LossyDrawingArray(drawings: initialDrawings)`（`drawings = loadedDrawingsLossy.drawings`）。`setReviewDrawings`(`:274`) 加携带变体 `setReviewLossy(_ l: LossyDrawingArray) { loadedReviewLossy = l; reviewDrawings = l.drawings }`（旧 `setReviewDrawings(_:)` 保留 = `setReviewLossy(LossyDrawingArray(drawings: ds))`）。
+② `TrainingEngine.swift`：`drawings`(`:25`) 旁 `public private(set) var loadedDrawingsLossy = LossyDrawingArray(drawings: [])`；`reviewDrawings`(`:31`) 旁 `public private(set) var loadedReviewLossy = LossyDrawingArray(drawings: [])` + **`public private(set) var loadedReviewHiddenIds: [DrawingID] = []`**（携带加载来的隐藏态，防 save 覆盖成 `[]`，codex R11-high）。init(`:144`) 加 `initialDrawingsLossy: LossyDrawingArray? = nil` → `loadedDrawingsLossy = initialDrawingsLossy ?? LossyDrawingArray(drawings: initialDrawings)`（`drawings = loadedDrawingsLossy.drawings`）。`setReviewDrawings`(`:274`) 加携带变体 `setReviewLossy(_ l: LossyDrawingArray, hiddenIds: [DrawingID] = []) { loadedReviewLossy = l; loadedReviewHiddenIds = hiddenIds; reviewDrawings = l.drawings }`（旧 `setReviewDrawings(_:)` 保留 = `setReviewLossy(LossyDrawingArray(drawings: ds))`）。
 
 ③ `TrainingSessionCoordinator.swift`：
-- **load 灌入**：`resumePending`(`:288`)/`startReplay`(`:775`) 的 `initialDrawings: pending.drawings` 旁加 `initialDrawingsLossy: pending.lossy`；`buildReviewEngine`(`:464`) 的 `engine.setReviewDrawings(reviewDrawings)` 改 `engine.setReviewLossy(reviewLossy)`（`review()`/`resumePendingReview` 把 `w.lossy`/baseline lossy 传下来）。
-- **save 重建**：`saveProgress`(`:548`/`:575`/`:621`) 建 `PendingReplay`/`Pending` 时 `lossy: engine.loadedDrawingsLossy.reconciled(currentKnown: engine.drawings)`（非 `drawings: engine.drawings`）；`persistReviewWorkingIfChanged`(`:879`) `saveWorking(...lossy: engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings))`；`commitSaved`(`:898`) 同理。
+- **load 灌入**：`resumePending`(`:288`)/`startReplay`(`:775`) 的 `initialDrawings: pending.drawings` 旁加 `initialDrawingsLossy: pending.lossy`；`buildReviewEngine`(`:464`) 的 `engine.setReviewDrawings(reviewDrawings)` 改 `engine.setReviewLossy(reviewLossy, hiddenIds: reviewHiddenIds)`（`review()`/`resumePendingReview` 把 `w.lossy` + `w.hiddenOriginalIds`/baseline 传下来）。
+- **save 重建**：`saveProgress`(`:548`/`:575`/`:621`) 建 `PendingReplay`/`Pending` 时 `lossy: engine.loadedDrawingsLossy.reconciled(currentKnown: engine.drawings)`（非 `drawings: engine.drawings`）；`persistReviewWorkingIfChanged`(`:879`) `saveWorking(...lossy: engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings), hiddenOriginalIds: engine.loadedReviewHiddenIds)`（**传回携带的 hiddenIds、不用默认 `[]`**，codex R11-high；P1a 无 hide 编辑故 = 加载值原样保存）；`commitSaved`(`:898`) 同理传 `engine.loadedReviewHiddenIds`。
 
 - [ ] **Step 4: run PASS + 全量**：`cd ios/Contracts && swift test 2>&1 | tail -6`（两框架 0 fail）+ Catalyst build-for-testing SUCCEEDED。
 
@@ -1707,7 +1735,7 @@ git add ios/Contracts/Sources/KlineTrainerContracts/Persistence/LossyDrawingArra
 git commit -m "feat(drawing-P1a): 引擎/coordinator 携带 lossy，全 save 路径保住未识别画线条（Z1）"
 ```
 
-> **§Z1**：本 Task 令 lossy 保真穿过 engine/coordinator 的 **autosave / resume-save / commit** 全路径——**P1a 自此自洽安全**，D21「所有 save 路径字节保真」在 P1a 完整达成，不再依赖「与 P1b 同版本发布」。`reconciled` 的 known 编辑归并对 P1a（现有横线 append）精确；P1b 的多点编辑/重排下按稳定 id 归并的完整鲁棒性在 P1b 深化（但**不丢** unknown 的保证 P1a 已立）。
+> **§Z1**：本 Task 令 lossy 保真穿过 engine/coordinator 的 **autosave / resume-save / commit** 全路径——**P1a 自此自洽安全**，D21「所有 save 路径字节保真」在 P1a 完整达成，不再依赖「与 P1b 同版本发布」。`reconciled` **按稳定 `DrawingObject.id` 归并**（新增/编辑/**删除** known 都保未识别条原位——`deleteDrawing/removeReviewDrawing` 现已存在故 P1a 即须按 id，非位置，codex R11-medium）+ 携带 `loadedReviewHiddenIds` 传回 save（不覆盖 P5 隐藏态，codex R11-high）。
 
 ---
 
@@ -1738,7 +1766,8 @@ git commit -m "feat(drawing-P1a): 引擎/coordinator 携带 lossy，全 save 路
 - **codex plan-R1 收口（2 high）**：① Task 5 有损解码改**真字节级保真**——新增 `JSONTopLevelArray` 顶层数组切分器捕获未识别条**原始字节文本**、回写原样重发（**不再经 `JSONSerialization` 反/重序列化**改 key 序/数字格式，防 load+autosave 静默改写未来客户端数据），加**字节全等**测试；② Task 9 迁移改**表重建**令 `draw_uuid NOT NULL CHECK(draw_uuid <> '') UNIQUE`（DB 边界强制、非仅一次回填校验），加 缺失/空/重复 三道 DB 拦截测试。
 - **codex plan-R2/R3/R4/R5/R6 收口**：R2 `LossyDrawingArray` 改**有序** `elements` 保未识别条原位 + wrapper 用 `JSONObjectScan` 保 `drawings` 原始字节（不重序列化整体）；R3 Task 10 finalized 行 NULL style_json **行感知兜底**（`is_extended`→lineSubType、锚点→period）+ 未知 tool_type **跳过**不伪装 `.horizontal`；**R4/R5/R6（公开发布标准，[[project_app_public_release_intent]]；分层决策 Y）**：`ReviewWorking/PendingReplay` 携带有序 `lossy`（`drawings` 计算属性），三处画线数组边界（record/review/pending）均 **① 有损解码永不崩 + ② repo load→save 往返无损（同内容逐字节+保序）**；R5 修 pending append 破坏顺序（改重发有序 `lossy`）+ 切分器拒尾部垃圾；R6 修 `ReviewWorking` 结构体片段补 `lossy`（与接口 + `w.lossy` 用法一致）。**（§Y 分层曾拟把 coordinator save 保真延后 P1b；codex R9 指出「版本化 PR 须自洽安全」→ user 选 Z1，见下条：该保真由 Task 12 挪回 P1a，P1a 自洽安全，A 字节保真在 P1a 即完整。）**
 - **codex plan-R7 收口**：**切分器拒畸形 JSON**——`JSONTopLevelArray` 拒绝空槽（尾随 `[x,]`/前导 `[,x]`/连续 `[x,,y]`/纯空白元素），空数组 `[]` 仍合法；回归测试：尾/首/双逗号、纯空白元素、`[valid]]`、`[valid]{junk}` 全 → nil（`.dbCorrupted`，不被静默"修好"）。
-- **codex plan-R8/R9 收口 → 决策 Z1（P1a 自洽安全）**：R8 统一「引擎携带 lossy」延后目标（消 P1b-vs-P5 矛盾）；R9 指出「P1a bump 1.11+迁移=版本化 PR 但 autosave 仍丢 unknown → 不自洽安全」。**user 选 Z1**：**新增 Task 12** 把 engine/coordinator 携带 `lossy`（`reconciled(currentKnown:)` 保未识别条原位）挪回 **P1a**——D21「全 save 路径（autosave/resume-save/commit）字节保真」在 P1a 完整达成、bump 1.11 站得住、单独发版也不丢「未来版本写的画线条」；不再需「与 P1b 同版本发布」发布流程兜底。画线编辑 UI + 多点归并按稳定 id 的鲁棒性仍 P1b。
+- **codex plan-R8/R9 收口 → 决策 Z1（P1a 自洽安全）**：R8 统一「引擎携带 lossy」延后目标（消 P1b-vs-P5 矛盾）；R9 指出「P1a bump 1.11+迁移=版本化 PR 但 autosave 仍丢 unknown → 不自洽安全」。**user 选 Z1**：**新增 Task 12** 把 engine/coordinator 携带 `lossy`（`reconciled(currentKnown:)` 保未识别条原位）挪回 **P1a**——D21「全 save 路径（autosave/resume-save/commit）字节保真」在 P1a 完整达成、bump 1.11 站得住、单独发版也不丢「未来版本写的画线条」；不再需「与 P1b 同版本发布」发布流程兜底。画线编辑 UI 仍 P1b。
+- **codex plan-R11 收口（1 high+1 med，Z1 精化）**：① 引擎/coordinator **也携带 `loadedReviewHiddenIds`**、autosave/commit 传回（不用默认 `[]` 覆盖 P5 写的隐藏态使已隐藏线重现，codex R11-high）+ hiddenIds load→save 不变 fixture；② `reconciled` **从「按位置」改「按稳定 `DrawingObject.id`」**——删一条 known 时未识别条仍原位（位置法会把后续 known 挤到 unknown 前破坏顺序；`deleteDrawing/removeReviewDrawing` 现已存在故 P1a 即须按 id，非 P1b）+ 删 known 绕 unknown 保序 fixture。
 - **codex plan-R10 收口（1 high+1 med）**：① `ReviewArchive` 结构体片段补 `savedLossy/workingLossy`（`savedDrawings/workingDrawings` 降计算属性，同 R6 ReviewWorking 修法）——与「携带 lossy 保 unknownRaw 跨 loadArchive→save」接口一致，加 loadArchive→save 未来条字节保真 fixture；② `ReviewArchiveWrapper.decodeColumn` 的 `hiddenIds`：缺失→`[]`，**present 但 malformed（非 `[String]`）→ `.dbCorrupted` fail-closed**（不静默当空覆盖唯一隐藏态副本），加 缺失/合法/malformed 三 fixtures。
 
 ## 留给 P1b / 后续的点（本 P1a 不做）
@@ -1747,4 +1776,4 @@ git commit -m "feat(drawing-P1a): 引擎/coordinator 携带 lossy，全 save 路
 3. **coordinator 把 saveWorking 的 hiddenIds 接真值 + hide/show 行为 + clear-saved 空判**（P5，§12）。
 4. **`ray`/`time` legacy case 的 UI 侧最终退役**（其解码兼容已在 P1a）。
 5. Task 8 `makeEngine()`、Task 10 `insertDrawings/loadDrawings` 的真实入口名对齐（实施时按引用行核对）。
-6. **P1b 深化 `reconciled` 归并到「按稳定 id」**：Task 12 已在 **P1a** 令 engine/coordinator 携带 `lossy`、**全 save 路径（autosave/resume-save/commit）不丢 unknown**（含现有横线 append 编辑，按位置归并精确）。P1b 引入多点画线编辑/删/重排后，把归并从「按位置」升级到「按稳定 id」的完整鲁棒性在 P1b 深化——但**不丢 unknown** 的核心保证 + P1a 自洽安全 P1a 已立（非缺口）。
+6. **hide/show 行为 + hiddenIds 编辑（写入非空隐藏态）= P5**：Task 12 已在 **P1a** 令 engine/coordinator 携带 `lossy` + `loadedReviewHiddenIds`、`reconciled` 按稳定 id 归并，**全 save 路径（autosave/resume-save/commit）不丢 unknown、不覆盖已加载 hiddenIds、删/增/改 known 都保序**（codex R11 全收）。P1a 只**透传**加载来的 hiddenIds（无 hide 编辑）；用户实际隐藏/显示原训练线的**写入行为**在 **P5**（§12）。P1a 自洽安全、A 字节保真在 P1a 即完整（非缺口）。
