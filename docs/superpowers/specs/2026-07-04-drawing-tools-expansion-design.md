@@ -271,13 +271,13 @@
 - **方案（推荐）**：迁移 **`0009_v1.11_drawing_style`** 给 `drawings` 加**两列**——① **`style_json TEXT`**（可空，承载样式/文本/tailAnchor 等新字段束，`RecordRepository` 编解码进出；旧行 NULL→取默认）；② **`draw_uuid TEXT`**（原训练线的跨层防碰撞身份，§4.2/D16；legacy 行迁移期确定性回填 `legacy-<record_id>-<rowid>` 唯一串）。（备选：样式逐字段加列，沿 `reveal_tick` 先例；列数多，spec 倾向单 JSON 列，P1 定。）
 - `PRAGMA user_version = 7`；`CONTRACT_VERSION "1.10" → "1.11"`（m01 §A 类"改既有语义"；连带 CODEOWNERS approve 门）。
 - **只走 migration，不动 `v1_4_baselineDDL` / `app_schema_v1.sql`**（v1.4 冻结基线，drift-checked——沿 0006/0007/0008 先例）。
-- **原训练线身份（无需造 id）**：`drawings` 表**自 baseline 起就有 PK `id`**——`RecordRepository` 读记录画线时把该 `id` 带进 `DrawingObject.id`，即为复盘隐藏/选中的稳定唯一身份（§4.2、§11.5）。
+- **原训练线身份 = `draw_uuid`（canonical 唯一字段，不用整数 PK）**：`RecordRepository` 读记录画线时把该行的 `draw_uuid`（0009 列、legacy 回填）带进 `DrawingObject.id`。`hiddenOriginalIds` / 选中命中 / `ReviewNetChange` **一律引用同一个 `draw_uuid` 串**，**绝不混用 `drawings` 表整数 PK**（否则 P1 写 UUID、P5 按 PK 命中会失配 → 隐藏/选中/净改动错，codex R4-high）。整数 PK 仅作表行主键、不进 `DrawingObject.id`。
 
 ### 11.4 `ReviewNetChange.changed` key 补齐（关键，防漏判）
 现 per-drawing key = `toolType|panelPosition|isExtended|revealTick|anchors`（**排序字段 key 集**——会把重复几何折叠，codex R2-high）。本 RFC 改为**按 `id` 归组、保留重数**比较：每条按其 `id` 比对全字段（补 `period/lineSubType/lineStyle/thickness/colorToken/labelMode/locked/text/fontSize/textColorToken/textForm/tailAnchor`），否则复盘中仅改样式/文本/锁定而几何不变时净改动**静默漏判**（沿 revealTick 整改④先例），且重复几何各自独立比对不折叠。**此外，复盘净改动在 review-state 层还须比较 `hiddenOriginalIds` 集（§11.5）**——仅隐藏 / 仅显示原训练线的编辑也须判脏，否则不触发 autosave、标记错乱（codex R1-high）。
 
 ### 11.5 复盘「隐藏原训练线」存储（形状 P1 定死 / hide-show UI §P5）
-**复盘工作态/存档态 = 一个原子整体** `{ reviewDrawings: [DrawingObject], hiddenOriginalIds: [DrawingID]（被隐藏原训练线的 id 集，按 `drawings` 表 PK id → 唯一无歧义，codex R2-high） }`。`hiddenOriginalIds` **必须与 `reviewDrawings` 同存、同取、同判净改动与标记**（**不是**旁路独立列/独立写路径——否则 hide/show-only 编辑不脏、不 autosave、与 `working_step_tick`/`working_drawings` 失步，隐藏线返回后重现或标记错乱，codex R1-high）：
+**复盘工作态/存档态 = 一个原子整体** `{ reviewDrawings: [DrawingObject], hiddenOriginalIds: [DrawingID]（被隐藏原训练线的 id 集，用其 `draw_uuid` = 与渲染 `DrawingObject.id` **同一字段**，唯一无歧义） }`。`hiddenOriginalIds` **必须与 `reviewDrawings` 同存、同取、同判净改动与标记**（**不是**旁路独立列/独立写路径——否则 hide/show-only 编辑不脏、不 autosave、与 `working_step_tick`/`working_drawings` 失步，隐藏线返回后重现或标记错乱，codex R1-high）：
 - `ReviewArchiveRepository` 的 `ReviewWorking`/`ReviewArchive` 结构**扩承 `hiddenOriginalIds`**；`saveWorking`/`commitSaved` 在**同一 UPSERT 事务原子写**二者。
 - `ReviewNetChange.changed(working:committed:)` **同时按 id 比较 drawings（保留重数）+ `hiddenOriginalIds` 集**——仅隐藏/仅显示也判净改动（脏）→ 触发 autosave、参与「删空清已复盘」。
 - autosave 触发面：`engine` 暴露 `hiddenOriginalIds`（`@Observable`），`TrainingView` 除 `.onChange(reviewDrawings.count)` 外**也 onChange 隐藏集**（或统一一个 review revision）→ 隐藏/显示即时 autosave。
@@ -289,7 +289,7 @@
 
 - **复盘中画线**：已有（`showsDrawingTools` 含 review、`routeDrawingCommit` 写 `reviewDrawings`）。本 RFC 令复盘也走同一画线模式外壳（底栏 6 键）。
 - **复盘画线删除（接线 `removeReviewDrawing`）**：选中一条**复盘新画线**（`reviewDrawings` 层）→ 🗑删除 → 调 `removeReviewDrawing(at:)` → 触发复盘 autosave 持久化。选中命中须**只在 `reviewDrawings` 层**解析索引（原训练线只读，不可删，仅可隐藏）。
-- **隐藏原训练线**：复盘底栏第 6 键「隐藏」——单击选中一条**原训练线**（只读）→ 点「隐藏」→ 该线转虚影/隐藏（存 `hiddenOriginalIds` 集，按该线 `drawings` 表 PK id、唯一无歧义，§11.5）。**长按「隐藏」键**弹小菜单 `[全部显示] [全部隐藏]`（**只作用于被单独设隐藏的原训练线**：一次性显现/收起，便于操作；菜单贴近隐藏键、小巧）。全部显示态下选中一条已隐藏线 → 底栏该键显示为「显示」→ 点它 = 把该线**永久改回显示**（此后不受全部隐藏/显示影响）。
+- **隐藏原训练线**：复盘底栏第 6 键「隐藏」——单击选中一条**原训练线**（只读）→ 点「隐藏」→ 该线转虚影/隐藏（存 `hiddenOriginalIds` 集，用该线 `draw_uuid` = 渲染 `DrawingObject.id` **同一字段**，唯一无歧义，§11.5）。**长按「隐藏」键**弹小菜单 `[全部显示] [全部隐藏]`（**只作用于被单独设隐藏的原训练线**：一次性显现/收起，便于操作；菜单贴近隐藏键、小巧）。全部显示态下选中一条已隐藏线 → 底栏该键显示为「显示」→ 点它 = 把该线**永久改回显示**（此后不受全部隐藏/显示影响）。
 - **净改动 / 标记**（沿 #139）：复盘 autosave 经 `persistReviewWorkingIfChanged`（净改动 = **原子态** `{reviewDrawings, hiddenOriginalIds}` vs committed 基线，§11.5）；画线/删除/改样式/**隐藏/显示**都经 §11.4 的 **id 归组比对 + `hiddenOriginalIds` 集**参与净改动判定（隐藏/显示编辑亦判脏、亦 autosave）；**删+显示回到 committed 基线 → clearWorking → 清「复盘中」**（现有机制自动成立，前提是每类编辑都触发 autosave）。
 - **§12.4 「删空清已复盘」收口**：现 `commitSaved([])` 写 `"[]"`（非 NULL）→「已复盘」不清。**特判**：结束→保存时若工作集为空（或等于空基线），走 `clearSaved` 而非 `commitSaved([])`，使「已复盘」正确消失。（此即 #139 codex whole-branch 标过、override 延后至本 RFC 的那条。）
 
@@ -349,7 +349,7 @@
 - **D10 画线模式不得吞平移/切周期/缩放**：arbiter 消歧须保留图表操作（§14）。**理由**：用户明确要求画线时仍可拖动缩放切周期。
 - **D11 标注尾巴 = 独立可空 `tailAnchor` 字段，非 `anchors[1]`**：创建只落 1 锚（气泡锚）；尾巴按形式给默认/可空（`.plain` 为 nil）；渲染/hitTest/net-change **判空、绝不索引 `anchors[1]`**；三形式 + 形式切换 + 旧 blob 均有容错。**理由**：单锚创建 + `.plain` 无尾 → `anchors[1]` 歧义会崩或切换形式时丢尾巴（**codex R1-medium**）。
 - **D12 复盘态是原子整体 `{reviewDrawings, hiddenOriginalIds}`**：同存、同取、同判净改动、同参与标记（§11.5）；并入 working/saved JSON wrapper（无新列、原子天然）。**理由**：隐藏是复盘编辑的一等操作，旁路存储会与 working 失步（**codex R1-high**）。
-- **D13 每条画线有持久稳定 `id`**：原训练线用 `drawings` 表 PK id、新线铸 id；选中命中 / `hiddenOriginalIds` / net-change 全按 id（保留重数）。**理由**：无 id + 字段派生 key 会让重复几何（同价水平线/重复标注）隐藏错线、净改动折叠漏判（**codex R2-high**）。
+- **D13 每条画线有持久稳定 `id`；canonical = `draw_uuid`/UUID 串，全层同一字段**：原训练线用 `draw_uuid`、新线铸 UUID；选中命中 / `hiddenOriginalIds` / net-change / `RecordRepository` **全引用同一 `id` 字段**（保留重数），**不混用整数 PK**（PK 仅表行主键）。**理由**：无 id + 字段派生 key 会让重复几何隐藏错线、净改动折叠漏判（**codex R2-high**）；PK 与 UUID 混用会 P1/P5 命中失配（**codex R4-high**）。
 - **D14 复盘 JSON 持久形状在 P1 就定死为容错 wrapper**（解裸数组 | wrapper 双形），随 `1.11` ship；P5 不改形状/不迁移。**理由**：形状延到 P5 改会造成 P1–P4 只认数组的构建读 P5 wrapper 解不出的版本错位（**codex R2-high**）。
 - **D15 `routeDrawingCommit` 改 copy-with-revealTick、保留全字段**：现只从 toolType/anchors/isExtended/panelPosition/revealTick 重建 → 每次落锚提交丢 id/样式/锁定/文本/tailAnchor，破坏 stable-id/文本/样式持久/net-change/按 id 选隐。P1 改为「盖 revealTick 但保留其余全字段」+ normal/review 提交测试证字段存活。**理由**：**codex R3-high**。
 - **D16 `DrawingID` 跨层防碰撞（非仅数组内稳定）**：原训练线（`draw_uuid`）+ pending + reviewDrawings 合并后须全局唯一——用 UUID/唯一串，**禁进程内单调、禁裸下标回填**（会与原 PK 小整数撞号 → 选错/隐藏错/net-change 折叠）。**理由**：**codex R3-high**。
