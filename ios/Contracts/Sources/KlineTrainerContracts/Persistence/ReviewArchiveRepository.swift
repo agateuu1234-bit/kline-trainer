@@ -8,26 +8,47 @@ public enum ReviewMarker: Equatable, Sendable {
 
 public struct ReviewArchive: Equatable, Sendable {
     public let recordId: Int64
-    public let savedDrawings: [DrawingObject]?
+    public let savedLossy: LossyDrawingArray?          // 携带有序 known+unknown（保 unknownRaw 跨 loadArchive→save，codex R10-high）
+    public let savedHiddenIds: [DrawingID]?
     public let workingStepTick: Int?
-    public let workingDrawings: [DrawingObject]?
+    public let workingLossy: LossyDrawingArray?
+    public let workingHiddenIds: [DrawingID]?
+    public var savedDrawings: [DrawingObject]? { savedLossy?.drawings }       // 计算属性（app 消费的已知条）
+    public var workingDrawings: [DrawingObject]? { workingLossy?.drawings }
 
+    public init(recordId: Int64, savedLossy: LossyDrawingArray?, savedHiddenIds: [DrawingID]? = nil,
+                workingStepTick: Int?, workingLossy: LossyDrawingArray?, workingHiddenIds: [DrawingID]? = nil) {
+        self.recordId = recordId
+        self.savedLossy = savedLossy
+        self.savedHiddenIds = savedHiddenIds
+        self.workingStepTick = workingStepTick
+        self.workingLossy = workingLossy
+        self.workingHiddenIds = workingHiddenIds
+    }
+
+    /// 兼容旧构造 API（Task 6 之前的 call-sites，Task 10 之前不改 repo load/save 逻辑）：
+    /// 纯 `[DrawingObject]` 包成 `LossyDrawingArray`，hiddenIds 未知（该形状不携带）→ nil。
     public init(recordId: Int64, savedDrawings: [DrawingObject]?,
                 workingStepTick: Int?, workingDrawings: [DrawingObject]?) {
-        self.recordId = recordId
-        self.savedDrawings = savedDrawings
-        self.workingStepTick = workingStepTick
-        self.workingDrawings = workingDrawings
+        self.init(recordId: recordId,
+                  savedLossy: savedDrawings.map { LossyDrawingArray(drawings: $0) }, savedHiddenIds: nil,
+                  workingStepTick: workingStepTick,
+                  workingLossy: workingDrawings.map { LossyDrawingArray(drawings: $0) }, workingHiddenIds: nil)
     }
 }
 
 public struct ReviewWorking: Equatable, Sendable {
     public let stepTick: Int
-    public let drawings: [DrawingObject]
+    public let lossy: LossyDrawingArray            // 携带有序 known+unknown → 支持 repo load→save 往返无损（codex R6-high①/Y）
+    public let hiddenOriginalIds: [DrawingID]      // 复盘隐藏原训练线 id 集（§11.5/D12）
+    public var drawings: [DrawingObject] { lossy.drawings }   // 计算属性：app 消费的已知条
 
-    public init(stepTick: Int, drawings: [DrawingObject]) {
-        self.stepTick = stepTick
-        self.drawings = drawings
+    public init(stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID] = []) {
+        self.stepTick = stepTick; self.lossy = lossy; self.hiddenOriginalIds = hiddenOriginalIds
+    }
+    /// 便捷：纯已知条（coordinator fresh save 用；活编辑保住 unknown = P1b 引擎携带 lossy，§Y 分层）。
+    public init(stepTick: Int, drawings: [DrawingObject], hiddenOriginalIds: [DrawingID] = []) {
+        self.init(stepTick: stepTick, lossy: LossyDrawingArray(drawings: drawings), hiddenOriginalIds: hiddenOriginalIds)
     }
 }
 

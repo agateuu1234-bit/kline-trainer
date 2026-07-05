@@ -260,3 +260,74 @@ struct LossyDrawingArrayTests {
         #expect(String(decoding: out, as: UTF8.self) == "[" + raw + "]")   // 逐字节等于原始 raw，未重序列化
     }
 }
+
+@Suite("Drawing P1a — 复盘 canonical wrapper")
+struct ReviewArchiveWrapperTests {
+    private func d(_ id: String) -> DrawingObject {
+        DrawingObject(id: id, toolType: .horizontal,
+                      anchors: [DrawingAnchor(period: .daily, candleIndex: 0, price: 1.0)],
+                      isExtended: false, panelPosition: 0)
+    }
+
+    @Test("canonical 磁盘 key = drawings/hiddenIds")
+    func canonicalKeys() throws {
+        let w = ReviewArchiveWrapper(drawings: [d("a")], hiddenIds: ["orig-1"])
+        let json = try w.encodedColumn()
+        #expect(json.contains("\"drawings\""))
+        #expect(json.contains("\"hiddenIds\""))
+    }
+
+    @Test("wrapper 字节保真：含未来画线条的 wrapper，load→autosave 后该条逐字节等于原始")
+    func wrapperBytePerfectForUnknown() throws {
+        // wrapper 里 drawings 数组含一条未来画线（敏感 key 顺序 + 1.0 + 转义），且 key 顺序 hiddenIds 在前。
+        let unknown = #"{"toolType":"__future__","z":1.0,"a":"x, ]}\"esc"}"#
+        let column = #"{"hiddenIds":["orig-2"],"drawings":[\#(unknown)]}"#
+        let w = try ReviewArchiveWrapper.decodeColumn(column)
+        #expect(w.drawings.isEmpty)                       // 未来条不解码
+        #expect(w.hiddenIds == ["orig-2"])
+        let out = try w.encodedColumn()
+        #expect(out.contains(unknown))                    // 未来条原文逐字节保留在输出里（未被重序列化）
+        // 幂等：再 decode→encode 仍含原文
+        #expect(try ReviewArchiveWrapper.decodeColumn(out).encodedColumn().contains(unknown))
+    }
+
+    @Test("容错：裸数组解码 → hiddenIds 为空")
+    func tolerantBareArray() throws {
+        let bare = """
+        [{"id":"x","toolType":"horizontal","anchors":[{"period":"daily","candleIndex":0,"price":1.0}],
+          "isExtended":false,"panelPosition":0,"revealTick":0,"period":"daily","lineSubType":"straight",
+          "lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,
+          "text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}]
+        """
+        let w = try ReviewArchiveWrapper.decodeColumn(bare)
+        #expect(w.drawings.count == 1)
+        #expect(w.hiddenIds.isEmpty)
+    }
+
+    @Test("fail-closed：valid-prefix + 尾部垃圾 → .dbCorrupted（不洗白成干净 wrapper，codex R15-medium）")
+    func rejectsTrailingGarbageWrapper() {
+        let bad = #"{"drawings":[],"hiddenIds":[]}{junk}"#
+        #expect(throws: AppError.self) { _ = try ReviewArchiveWrapper.decodeColumn(bad) }
+    }
+
+    @Test("fail-closed：顶层重复 key（两个 drawings）→ .dbCorrupted")
+    func rejectsDuplicateTopLevelKey() {
+        let bad = #"{"drawings":[],"drawings":[{"id":"z"}],"hiddenIds":[]}"#
+        #expect(throws: AppError.self) { _ = try ReviewArchiveWrapper.decodeColumn(bad) }
+    }
+
+    @Test("四态往返：空/drawings-only/hidden-only/都有")
+    func fourStateRoundTrip() throws {
+        let states: [ReviewArchiveWrapper] = [
+            ReviewArchiveWrapper(drawings: [], hiddenIds: []),
+            ReviewArchiveWrapper(drawings: [d("a")], hiddenIds: []),
+            ReviewArchiveWrapper(drawings: [], hiddenIds: ["orig-9"]),
+            ReviewArchiveWrapper(drawings: [d("a")], hiddenIds: ["orig-9"]),
+        ]
+        for s in states {
+            let back = try ReviewArchiveWrapper.decodeColumn(s.encodedColumn())
+            #expect(back.drawings.map(\.id) == s.drawings.map(\.id))
+            #expect(back.hiddenIds == s.hiddenIds)
+        }
+    }
+}
