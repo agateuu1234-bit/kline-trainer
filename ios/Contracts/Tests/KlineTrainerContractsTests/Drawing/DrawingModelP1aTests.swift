@@ -216,4 +216,47 @@ struct LossyDrawingArrayTests {
         #expect(!out.contains("tailAnchor"))                   // 已清空的可选已知字段不复活（codex R13-high）
         #expect(out.contains("\"futureX\":9"))                 // 未来未知 key 仍保留
     }
+
+    @Test("reconciled fail-closed：loaded 元素含重复 id → 抛 .dbCorrupted（不静默折叠）")
+    func reconciledRejectsDuplicateLoadedIds() {
+        let d = DrawingObject(id: "dup", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        let raw = LossyDrawingArray.encodeKnown(d)
+        let lossy = LossyDrawingArray(elements: [.known(d, raw: raw), .known(d, raw: raw)])
+        #expect(throws: AppError.self) { _ = try lossy.reconciled(currentKnown: [d]) }
+    }
+
+    @Test("reconciled fail-closed：currentKnown 含重复 id → 抛 .dbCorrupted")
+    func reconciledRejectsDuplicateCurrentIds() {
+        let d = DrawingObject(id: "dup", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        let raw = LossyDrawingArray.encodeKnown(d)
+        let lossy = LossyDrawingArray(elements: [.known(d, raw: raw)])
+        #expect(throws: AppError.self) { _ = try lossy.reconciled(currentKnown: [d, d]) }   // 两条同 id
+    }
+
+    @Test("reconciled 按 id：删 unknown 之前的 known → 未来条仍在原位（不被后续 known 挤到前面）")
+    func reconciledByIdPreservesOrderOnDelete() throws {
+        let a = DrawingObject(id: "gA", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        let bK = DrawingObject(id: "gB", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        let unknown = #"{"toolType":"__future__","weird":true}"#
+        let lossy = LossyDrawingArray(elements: [
+            .known(a, raw: LossyDrawingArray.encodeKnown(a)),
+            .unknownRaw(unknown),
+            .known(bK, raw: LossyDrawingArray.encodeKnown(bK))
+        ])
+        let out = String(decoding: try lossy.reconciled(currentKnown: [bK]).encoded(), as: UTF8.self)  // 删了 A
+        let iU = out.range(of: "__future__")!.lowerBound
+        let iB = out.range(of: #""gB""#)!.lowerBound
+        #expect(iU < iB)                                               // 未来条仍在 B 之前（原位），非位置法的 [B, 未来]
+        #expect(!out.contains(#""gA""#))                              // A 已删
+    }
+
+    @Test("reconciled 未编辑短路：cur == old → 原始 raw 逐字节保留（不重序列化，防 key 重排/数字重格式）")
+    func reconciledUneditedEmitsOriginalRawVerbatim() throws {
+        // 特意的异常 key 顺序（zzz 在最前、id 在最后）+ 数字用 1.0（JSONSerialization 重序列化后会变 1 或 key 重排）。
+        let raw = #"{"zzz_marker":true,"toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain","id":"K"}"#
+        let arr = try LossyDrawingArray.decode(Data(("[" + raw + "]").utf8))
+        let unedited = arr.drawings[0]
+        let out = try arr.reconciled(currentKnown: [unedited]).encoded()
+        #expect(String(decoding: out, as: UTF8.self) == "[" + raw + "]")   // 逐字节等于原始 raw，未重序列化
+    }
 }

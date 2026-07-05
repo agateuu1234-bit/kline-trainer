@@ -164,37 +164,45 @@ public struct LossyDrawingArray: Equatable, Sendable {
         return String(decoding: merged, as: UTF8.self)
     }
 
-    /// 用「当前已知集合」（编辑/新增/删除后的最新内存态）与本数组已有的已知条按 **id** 对账：
-    /// - 命中同 id 的原已知条 → `mergeKnownFields`（保原 raw 的未来未知 key，覆盖已知字段，位置不变）；
-    /// - `currentKnown` 里未匹配到原已知条的 id → 视为新增，追加（raw = 全新编码）；
-    /// - 原已知条的 id 不在 `currentKnown` 里 → 视为已删除，从结果移除；
-    /// - `.unknownRaw` 条原样保留、位置不变（不受已知集合变化影响）。
-    /// fail-closed（codex R14-high）：`currentKnown` 含重复 id 或空 id → `.dbCorrupted`（绝不静默去重/生成 id）。
+    /// 用当前已知条重建 lossy：**按稳定 `DrawingObject.id` 归并**（非位置——否则删除一条 known 会把后续 known 挪到
+    /// unknownRaw 前面破坏顺序，codex R11-medium；deleteDrawing/removeReviewDrawing 现已存在故 P1a 必须按 id）。
+    /// **每条保 raw（W1/codex R12）**：`.unknownRaw` 原位保留；`.known` 若 id 仍在 currentKnown——
+    /// **未编辑**（值相等）→ 原样 raw（保未来字段）、**已编辑** → `mergeKnownFields`（覆盖已知 key、保未知 key）；
+    /// id 不在（被删）跳过；currentKnown 里原 elements 没有的（新增）追加末尾（raw=编码）。
+    /// 编辑条若无法安全 merge（原 raw 非对象）→ throw fail-closed（不静默改写）。
     public func reconciled(currentKnown: [DrawingObject]) throws -> LossyDrawingArray {
-        var seenIds = Set<DrawingID>()
-        for d in currentKnown {
-            if d.id.isEmpty { throw AppError.persistence(.dbCorrupted) }
-            guard seenIds.insert(d.id).inserted else { throw AppError.persistence(.dbCorrupted) }
-        }
-        let currentById = Dictionary(uniqueKeysWithValues: currentKnown.map { ($0.id, $0) })
-        var matchedIds = Set<DrawingID>()
-        var out: [LossyDrawingElement] = []
-        for e in elements {
-            switch e {
-            case .unknownRaw:
-                out.append(e)
-            case .known(let old, let raw):
-                if let cur = currentById[old.id] {
-                    matchedIds.insert(old.id)
-                    let merged = try LossyDrawingArray.mergeKnownFields(into: raw, from: cur)
-                    out.append(.known(cur, raw: merged))
+        // fail-closed：id 必须唯一且非空——pending/review blob 无 DB 唯一约束，坏 blob 或旧 bug 的重复 id
+        // 会让归并把首条复制到多槽 / 丢后续同 id 条（codex R14-high）。不静默折叠，抛 .dbCorrupted。
+        func requireUniqueNonEmptyIds(_ ds: [DrawingObject]) throws {
+            var seen = Set<DrawingID>()
+            for d in ds {
+                guard !d.id.isEmpty, seen.insert(d.id).inserted else {
+                    throw AppError.persistence(.dbCorrupted)
                 }
-                // else: id 不在 currentKnown 里 → 已删除，丢弃
             }
         }
-        // currentKnown 里未匹配到任何原已知条的 → 新增，按 currentKnown 原顺序追加在末尾。
-        for d in currentKnown where !matchedIds.contains(d.id) {
-            out.append(.known(d, raw: LossyDrawingArray.encodeKnown(d)))
+        try requireUniqueNonEmptyIds(currentKnown)
+        try requireUniqueNonEmptyIds(elements.compactMap { if case .known(let d, _) = $0 { return d } else { return nil } })
+        let byId = Dictionary(uniqueKeysWithValues: currentKnown.map { ($0.id, $0) })   // 已验唯一 → uniqueKeys
+        var emitted = Set<DrawingID>()
+        var out: [LossyDrawingElement] = []
+        for el in elements {
+            switch el {
+            case .known(let old, let raw):
+                guard let cur = byId[old.id] else { continue }                 // 被删 → 跳过
+                if cur == old {
+                    out.append(.known(old, raw: raw))                         // 未编辑 → 原样 raw（保未来字段）
+                } else {
+                    let merged = try LossyDrawingArray.mergeKnownFields(into: raw, from: cur)
+                    out.append(.known(cur, raw: merged))                      // 已编辑 → merge 保未知 key
+                }
+                emitted.insert(old.id)
+            case .unknownRaw(let r):
+                out.append(.unknownRaw(r))                                    // 未识别条原位保留
+            }
+        }
+        for k in currentKnown where !emitted.contains(k.id) {
+            out.append(.known(k, raw: LossyDrawingArray.encodeKnown(k)))       // 真新增（原不在）追加末尾
         }
         return LossyDrawingArray(elements: out)
     }
