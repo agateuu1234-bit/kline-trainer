@@ -52,16 +52,23 @@ public struct ReviewWorking: Equatable, Sendable {
     }
 }
 
-/// 复盘 session 净改动判定（review-redesign Task 5）：工作画线集是否偏离 committed 基线。
+/// 复盘 session 净改动判定：工作态 {drawings, hiddenIds} 是否偏离 committed 基线。
 public enum ReviewNetChange {
-    /// 净改动 = 工作画线集与 committed 基线不等（顺序无关：按稳定序列化后排序比较）。
-    public static func changed(working: [DrawingObject], committed: [DrawingObject]) -> Bool {
-        func key(_ d: DrawingObject) -> String {
-            // 稳定序：toolType|panel|isExtended|revealTick|anchors(period,candleIndex,price)
+    /// 净改动 = 画线集（按 id 归组、保留重数、全字段比较）或隐藏 id 集 与基线不等。
+    public static func changed(working: [DrawingObject], committed: [DrawingObject],
+                               workingHiddenIds: [DrawingID] = [],
+                               committedHiddenIds: [DrawingID] = []) -> Bool {
+        // 全字段稳定序列化（含 id + 所有样式/文本/tailAnchor/period），按 id 排序保留重数。
+        func fullKey(_ d: DrawingObject) -> String {
             let a = d.anchors.map { "\($0.period.rawValue):\($0.candleIndex):\($0.price)" }.joined(separator: ";")
-            return "\(d.toolType.rawValue)|\(d.panelPosition)|\(d.isExtended)|\(d.revealTick)|\(a)"
+            let t = d.tailAnchor.map { "\($0.period.rawValue):\($0.candleIndex):\($0.price)" } ?? "-"
+            return [d.id, d.toolType.rawValue, "\(d.panelPosition)", "\(d.isExtended)", "\(d.revealTick)",
+                    d.period.rawValue, d.lineSubType.rawValue, d.lineStyle.rawValue, "\(d.thickness)",
+                    d.colorToken.rawValue, d.labelMode.rawValue, "\(d.locked)", d.text, "\(d.fontSize)",
+                    d.textColorToken.rawValue, d.textForm.rawValue, t, a].joined(separator: "|")
         }
-        return working.map(key).sorted() != committed.map(key).sorted()
+        if working.map(fullKey).sorted() != committed.map(fullKey).sorted() { return true }
+        return workingHiddenIds.sorted() != committedHiddenIds.sorted()
     }
 }
 

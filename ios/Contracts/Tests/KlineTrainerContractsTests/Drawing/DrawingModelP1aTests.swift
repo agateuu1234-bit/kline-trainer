@@ -331,3 +331,43 @@ struct ReviewArchiveWrapperTests {
         }
     }
 }
+
+// 注：类型名故意不叫 `ReviewNetChangeTests`——ReviewPersistenceTests.swift 已有同名非-private
+// @Suite struct（旧字段-key 语义），同模块内重名会撞编译期 redeclaration。
+@Suite("Drawing P1a — ReviewNetChange 按 id + hiddenIds")
+struct ReviewNetChangeIdTests {
+    private func d(_ id: String, price: Double = 1.0, locked: Bool = false) -> DrawingObject {
+        DrawingObject(id: id, toolType: .horizontal,
+                      anchors: [DrawingAnchor(period: .daily, candleIndex: 0, price: price)],
+                      isExtended: false, panelPosition: 0, locked: locked)
+    }
+
+    @Test("仅锁定变了（几何不变）→ 判净改动（脏）")
+    func styleOnlyIsDirty() {
+        let committed = [d("a")]
+        let working = [d("a", locked: true)]
+        #expect(ReviewNetChange.changed(working: working, committed: committed) == true)
+    }
+
+    @Test("重复几何按 id 保留重数、不折叠")
+    func duplicatesNotFolded() {
+        // 两条同价水平线，id 不同 → 删掉其一应判脏
+        let committed = [d("a"), d("b")]
+        let working = [d("a")]
+        #expect(ReviewNetChange.changed(working: working, committed: committed) == true)
+    }
+
+    @Test("仅隐藏集变了 → 判净改动（脏）")
+    func hiddenOnlyIsDirty() {
+        let same = [d("a")]
+        #expect(ReviewNetChange.changed(working: same, committed: same,
+                                        workingHiddenIds: ["orig-1"], committedHiddenIds: []) == true)
+    }
+
+    @Test("画线+隐藏都相等 → 不脏")
+    func equalIsClean() {
+        let same = [d("a")]
+        #expect(ReviewNetChange.changed(working: same, committed: same,
+                                        workingHiddenIds: ["orig-1"], committedHiddenIds: ["orig-1"]) == false)
+    }
+}

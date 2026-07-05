@@ -73,9 +73,12 @@ private struct ReviewTestHarness {
 }
 
 /// 简易水平线 fixture（唯一变量=价格，用以区分不同画线）。
+/// id 由 price 派生（非默认随机 UUID）：Task 7 起 `ReviewNetChange.changed` 按 id 归组比较，
+/// 同一 price 的两次独立调用须代表"同一条画线"（与真实 working/committed 场景一致——working 从
+/// committed 拷贝而来，保留 id），否则本文件内大量 `line(N) vs line(N)` 会被误判为不同 id → 误报改动。
 @MainActor
 private func line(_ price: Double) -> DrawingObject {
-    DrawingObject(toolType: .horizontal,
+    DrawingObject(id: "line-\(price)", toolType: .horizontal,
                   anchors: [DrawingAnchor(period: .m3, candleIndex: 0, price: price)],
                   isExtended: false, panelPosition: 0)
 }
@@ -156,15 +159,16 @@ struct ReviewNetChangeTests {
     // codex whole-branch review [medium]：key(_:) 曾遗漏 revealTick，致「同几何异渐显时机」被误判为无改动。
     @Test @MainActor func sameGeometryDifferentRevealTick_changed() {
         let anchors = [DrawingAnchor(period: .m3, candleIndex: 5, price: 10)]
-        let saved   = [DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
-        let working = [DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 200)]
+        // 同 id：模拟"同一条画线"revealTick 被编辑（Task 7 起按 id 归组比较，须显式共享 id）。
+        let saved   = [DrawingObject(id: "rt", toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
+        let working = [DrawingObject(id: "rt", toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 200)]
         #expect(ReviewNetChange.changed(working: working, committed: saved) == true)
     }
 
     @Test @MainActor func sameGeometrySameRevealTick_noChange() {
         let anchors = [DrawingAnchor(period: .m3, candleIndex: 5, price: 10)]
-        let saved   = [DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
-        let working = [DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
+        let saved   = [DrawingObject(id: "rt", toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
+        let working = [DrawingObject(id: "rt", toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
         #expect(ReviewNetChange.changed(working: working, committed: saved) == false)
     }
 }
