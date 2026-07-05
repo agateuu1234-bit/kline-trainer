@@ -17,6 +17,7 @@
 - **`draw_uuid`**：迁移回填所有旧行 `legacy-<record_id>-<id>`；**回填后校验无 NULL、无重复，否则迁移抛错**；建 `UNIQUE INDEX`（D20）。
 - **复盘 canonical 磁盘 JSON schema（全阶段唯一，禁改 key/形状）** = `{ "drawings": [DrawingObject], "hiddenIds": [DrawingID] }`；in-memory `reviewDrawings`/`hiddenOriginalIds` 经显式 `CodingKeys` 映射；解码容错裸 `[DrawingObject]` 数组（→ `hiddenIds=[]`）| wrapper（D14）。
 - **有损 ≠ 丢数据（D21，全达成于 P1a；Z1 + W1）**：所有画线数组边界（`pending_*.drawings` / review wrapper 的 `drawings`）解码时坏/未知条只跳过、不整组失败。**P1a 达成 D21 全部**：① 解码永不崩 + ② repo `load→save` 往返无损 + ③ **coordinator 所有 save 路径（autosave / resume-save / commit）字节保真**（Task 12 引擎携带 `lossy`、`reconciled` 保 raw）。**W1（codex R12）：保真粒度 = 每条画线的原始 JSON**——不仅未知 toolType，**现有 toolType 上未来客户端加的未知字段**也逐条保留（`LossyDrawingElement.known` 携带 `raw`，未编辑原样重发、编辑走 `mergeKnownFields` 保未知 key）。→ **P1a 自洽安全**（bump 1.11 站得住、单独发版也不丢「未来版本写的画线数据」；公开发布 [[project_app_public_release_intent]]）。
+- **⚠️ 已知限制（V1，codex R15-high 记录为残留，非缺口）**：**P1a 完全字节保真覆盖「未知 toolType 条」+「未编辑的已知条」**（这是最常见前向场景）。**唯一例外**：当用户**编辑**一条已知画线、而该条同时带有更新版本写入的未知字段时——`mergeKnownFields` 经 `JSONSerialization` 重建，未知字段的**值保留（不丢）**、但**字节格式**（高精度数字/大整数的表示、key 顺序）可能规范化。**只影响「多版本共存 × 编辑该条 × 未知字段字节格式」三重叠加的极窄角、且不丢值**。字节级 splice（保留每个未知 key 的原始字节切片、只替换已知 key）留待后续按需深化。
 - **`DrawingID` 跨层防碰撞（D13/D16）**：新画线 = `UUID().uuidString`；原训练线 = `draw_uuid`（`legacy-<record_id>-<id>` 或后续新建时铸的 UUID）；旧 JSON blob 无 id 的元素在数组解码层回填 `legacy-idx-<index>`（命名空间唯一）。**禁进程内单调整数、禁裸数组下标整数**。
 - **两闸门**：平台无关值类型/Codable/几何/迁移逻辑走 host `swift test`（Swift Testing + XCTest 两框架都要全绿）；DB 迁移走 `KlineTrainerPersistenceTests`（XCTest + GRDB in-memory）。UIKit 层本阶段无。
 - **零 UI**：本阶段新字段无 UI 消费者，全靠 Codable round-trip + 迁移 + 持久化往返测覆盖（Wave-0 契约先行同款）。
@@ -871,6 +872,18 @@ struct ReviewArchiveWrapperTests {
         #expect(w.hiddenIds.isEmpty)
     }
 
+    @Test("fail-closed：valid-prefix + 尾部垃圾 → .dbCorrupted（不洗白成干净 wrapper，codex R15-medium）")
+    func rejectsTrailingGarbageWrapper() {
+        let bad = #"{"drawings":[],"hiddenIds":[]}{junk}"#
+        #expect(throws: AppError.self) { _ = try ReviewArchiveWrapper.decodeColumn(bad) }
+    }
+
+    @Test("fail-closed：顶层重复 key（两个 drawings）→ .dbCorrupted")
+    func rejectsDuplicateTopLevelKey() {
+        let bad = #"{"drawings":[],"drawings":[{"id":"z"}],"hiddenIds":[]}"#
+        #expect(throws: AppError.self) { _ = try ReviewArchiveWrapper.decodeColumn(bad) }
+    }
+
     @Test("四态往返：空/drawings-only/hidden-only/都有")
     func fourStateRoundTrip() throws {
         let states: [ReviewArchiveWrapper] = [
@@ -962,6 +975,47 @@ enum JSONObjectScan {
         }
         return nil
     }
+
+    /// 顶层对象 key 去重校验（codex R15-medium）：重复的 `drawings`/`hiddenIds` 等顶层 key → `.dbCorrupted`。
+    /// （`JSONSerialization` 会静默取最后一个重复 key、而 `rawValueBytes` 取第一个，二者对损坏 blob 会分歧 → fail-closed。）
+    static func requireNoDuplicateTopLevelKeys(_ data: Data) throws {
+        let b = [UInt8](data); let n = b.count; var i = 0
+        func isWS(_ c: UInt8) -> Bool { c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D }
+        while i < n, isWS(b[i]) { i += 1 }
+        guard i < n, b[i] == UInt8(ascii: "{") else { return }   // 非对象由 caller 的整体校验拦
+        i += 1
+        var seen = Set<String>()
+        while i < n {
+            while i < n, isWS(b[i]) { i += 1 }
+            if i < n, b[i] == UInt8(ascii: "}") { return }
+            guard i < n, b[i] == UInt8(ascii: "\"") else { return }
+            // 复用 rawValueBytes 的字符串读法读 key
+            var j = i + 1; let ks = j; var esc = false
+            while j < n { let c = b[j]
+                if esc { esc = false } else if c == UInt8(ascii: "\\") { esc = true }
+                else if c == UInt8(ascii: "\"") { break }
+                j += 1 }
+            let key = String(decoding: b[ks..<j], as: UTF8.self)
+            guard seen.insert(key).inserted else { throw AppError.persistence(.dbCorrupted) }   // 重复顶层 key
+            // 跳到该键的值末尾：借 rawValueBytes 定位后从 `,` 继续（简化：整体已由 caller JSONSerialization 验良构，
+            // 这里只需数 key，用括号深度跳过值）
+            i = j + 1
+            while i < n, isWS(b[i]) { i += 1 }
+            guard i < n, b[i] == UInt8(ascii: ":") else { return }
+            i += 1
+            // 跳过值（括号/字符串深度）
+            while i < n, isWS(b[i]) { i += 1 }
+            var depth = 0, inStr = false, e2 = false
+            loop: while i < n { let ch = b[i]
+                if inStr { if e2 { e2 = false } else if ch == UInt8(ascii: "\\") { e2 = true } else if ch == UInt8(ascii: "\"") { inStr = false } }
+                else if ch == UInt8(ascii: "\"") { inStr = true }
+                else if ch == UInt8(ascii: "{") || ch == UInt8(ascii: "[") { depth += 1 }
+                else if ch == UInt8(ascii: "}") || ch == UInt8(ascii: "]") { if depth == 0 { break loop }; depth -= 1 }
+                else if ch == UInt8(ascii: ",") && depth == 0 { break loop }
+                i += 1 }
+            if i < n, b[i] == UInt8(ascii: ",") { i += 1 }
+        }
+    }
 }
 
 public struct ReviewArchiveWrapper: Equatable, Sendable {
@@ -984,7 +1038,14 @@ public struct ReviewArchiveWrapper: Equatable, Sendable {
         if JSONTopLevelArray.rawElementStrings(data) != nil {
             return ReviewArchiveWrapper(lossy: try LossyDrawingArray.decode(data), hiddenIds: [])
         }
-        // wrapper 对象：取 drawings 值【原始字节切片】喂 LossyDrawingArray（保真）；hiddenIds 无保真需求。
+        // wrapper 对象：**先整体校验良构再切片**（codex R15-medium）——`rawValueBytes` 找到 key 即返、不验
+        // 剩余字节，故 valid-prefix + 尾部垃圾/重复 key 会被误当合法后洗白。此处用 `JSONSerialization` 整体解析
+        // 做 fail-closed 门（覆盖到 EOF、拒尾部垃圾）+ 顶层重复 key 检测；解析仅验证、**保真提取仍走 rawValueBytes**。
+        guard let top = try? JSONSerialization.jsonObject(with: data, options: []),   // 整解成功=覆盖到 EOF、无尾部垃圾
+              top is [String: Any] else {
+            throw AppError.persistence(.dbCorrupted)
+        }
+        try JSONObjectScan.requireNoDuplicateTopLevelKeys(data)                        // 顶层 drawings/hiddenIds 重复 key → 损坏
         guard let drawingsRaw = JSONObjectScan.rawValueBytes(data, key: "drawings") else {
             throw AppError.persistence(.dbCorrupted)
         }
@@ -1908,6 +1969,7 @@ git commit -m "feat(drawing-P1a): 引擎/coordinator 携带 lossy，全 save 路
 - **codex plan-R7 收口**：**切分器拒畸形 JSON**——`JSONTopLevelArray` 拒绝空槽（尾随 `[x,]`/前导 `[,x]`/连续 `[x,,y]`/纯空白元素），空数组 `[]` 仍合法；回归测试：尾/首/双逗号、纯空白元素、`[valid]]`、`[valid]{junk}` 全 → nil（`.dbCorrupted`，不被静默"修好"）。
 - **codex plan-R8/R9 收口 → 决策 Z1（P1a 自洽安全）**：R8 统一「引擎携带 lossy」延后目标（消 P1b-vs-P5 矛盾）；R9 指出「P1a bump 1.11+迁移=版本化 PR 但 autosave 仍丢 unknown → 不自洽安全」。**user 选 Z1**：**新增 Task 12** 把 engine/coordinator 携带 `lossy`（`reconciled(currentKnown:)` 保未识别条原位）挪回 **P1a**——D21「全 save 路径（autosave/resume-save/commit）字节保真」在 P1a 完整达成、bump 1.11 站得住、单独发版也不丢「未来版本写的画线条」；不再需「与 P1b 同版本发布」发布流程兜底。画线编辑 UI 仍 P1b。
 - **codex plan-R12 收口（1 high，W1）**：lossy 保真粒度从「只保未知 toolType/坏条」升级为「**每条画线保原始 JSON**」——`LossyDrawingElement.known` 改带 `raw: String`；`encoded()` 对 `.known` 也发 `raw`（不重序列化）→ 现有 toolType（如 horizontal）上**未来客户端加的未知字段**在未编辑 load→autosave 后逐字节保留；编辑经 `reconciled`→`mergeKnownFields`（覆盖已知 key、保未知 key，不可安全 merge 则 throw fail-closed）。legacy（pre-id）blob 无未来字段故回填 id 时重编码安全。新增 fixtures：`LossyDrawingArrayTests` 已知工具+未来字段（未编辑/编辑）+ `CoordinatorLossyPreserveTests` pending load→autosave 保未来字段。`reconciled` 改 `throws`，coordinator save 调用点 `try`（save 已 throws 自然传播）。
+- **codex plan-R15 收口（V1；1 med 修 + 1 high 记为已知限制）**：**med**=`ReviewArchiveWrapper.decodeColumn` 切 `drawings` 前**先整体校验 wrapper 良构**（`JSONSerialization` 整解覆盖到 EOF、拒尾部垃圾）+ `requireNoDuplicateTopLevelKeys`（顶层 `drawings`/`hiddenIds` 重复 key → `.dbCorrupted`），保真提取仍走 `rawValueBytes`；加 valid-prefix+尾部垃圾 / 重复 key → 抛 fixture。**high**（编辑已知条时未来字段字节格式被 merge 规范化）**= 记为已知限制（V1，user 决策）**：值不丢、仅字节格式在「多版本共存 × 编辑该条 × 未知字段」极窄角可能规范化；字节级 splice 留后续深化（见 Global Constraints 已知限制条）。
 - **codex plan-R14 收口（2 high，fail-closed 纪律）**：① repo `loadArchive`/`loadSaved`/`loadWorking` 改 **`try`（非 `try?`）**——损坏（malformed hiddenIds/坏 wrapper）传播 `.dbCorrupted`、不吞成 nil（否则损坏存档与「无存档」不可分致隐藏态消失+覆盖唯一副本）+ malformed→抛 fixture；② `reconciled` 前**校验 currentKnown + loaded known 的 id 唯一非空、否则 `.dbCorrupted`**（pending/review blob 无 DB 唯一约束，重复 id 会被 `uniquingKeysWith` 静默折叠致复制首条/丢后续同 id 条）+ 重复 id 抛 fixture。
 - **codex plan-R13 收口（1 high，W1 精化）**：`mergeKnownFields` 加 `knownDiskKeys` 全集，编辑时**显式清除当前值为 nil 而被 `encodeIfPresent` 省略的可选已知字段**（如 `tailAnchor`）——否则旧 raw 里的该 key 被误当"未知 key"保留、save/load 后复活（清空的尾巴/删除的可选字段会回来，codex R13-high）。加「编辑清空 tailAnchor→输出不含 tailAnchor 但未来 key 仍在」回归测试。
 - **codex plan-R11 收口（1 high+1 med，Z1 精化）**：① 引擎/coordinator **也携带 `loadedReviewHiddenIds`**、autosave/commit 传回（不用默认 `[]` 覆盖 P5 写的隐藏态使已隐藏线重现，codex R11-high）+ hiddenIds load→save 不变 fixture；② `reconciled` **从「按位置」改「按稳定 `DrawingObject.id`」**——删一条 known 时未识别条仍原位（位置法会把后续 known 挤到 unknown 前破坏顺序；`deleteDrawing/removeReviewDrawing` 现已存在故 P1a 即须按 id，非 P1b）+ 删 known 绕 unknown 保序 fixture。
