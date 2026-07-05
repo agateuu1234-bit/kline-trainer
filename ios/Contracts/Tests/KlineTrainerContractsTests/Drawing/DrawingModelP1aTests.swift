@@ -19,3 +19,18 @@ struct DrawingEnumsTests {
         #expect(id == "gen-abc")
     }
 }
+
+@Suite("Drawing P1a — DrawingToolType 11 工具")
+struct DrawingToolTypeExpansionTests {
+    @Test("新增 6 工具 case + 保留 legacy ray/time 可解码")
+    func elevenPlusLegacy() throws {
+        // 11 目标工具都能从 rawValue 构造
+        for raw in ["horizontal", "trend", "channel", "polyline", "golden",
+                    "wave", "cycle", "fib", "timeRuler", "text", "rect"] {
+            #expect(DrawingToolType(rawValue: raw) != nil, "缺工具 \(raw)")
+        }
+        // legacy 两 case 仍可解码（历史 blob 兼容）
+        #expect(DrawingToolType(rawValue: "ray") == .ray)
+        #expect(DrawingToolType(rawValue: "time") == .time)
+    }
+}

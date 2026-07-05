@@ -35,7 +35,10 @@ public enum TrainingMode: Equatable, Sendable {
 }
 
 public enum DrawingToolType: String, Codable, Equatable, Sendable {
-    case ray, trend, horizontal, golden, wave, cycle, time
+    // 目标 11 工具
+    case horizontal, trend, channel, polyline, golden, wave, cycle, fib, timeRuler, rect, text
+    // legacy（历史 blob 容忍解码；ray 已下沉为线型子类、time 语义歧义——见 spec §4.1/D2）
+    case ray, time
 }
 
 public enum DisplayMode: String, Codable, Equatable, Sendable {
