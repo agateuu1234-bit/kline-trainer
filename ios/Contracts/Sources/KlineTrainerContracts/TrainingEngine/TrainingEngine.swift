@@ -994,9 +994,14 @@ extension TrainingEngine {
     /// review-redesign Task 3：路由前先盖戳 `revealTick = tick.globalTickIndex`（提交那一刻的全局
     /// tick），使 `RenderStateBuilder.make` 的渐显判据（`revealTick <= tick`）对这条画线生效。
     public func routeDrawingCommit(_ drawing: DrawingObject) {
-        let stamped = DrawingObject(toolType: drawing.toolType, anchors: drawing.anchors,
-                                    isExtended: drawing.isExtended, panelPosition: drawing.panelPosition,
-                                    revealTick: tick.globalTickIndex)
+        let stamped = DrawingObject(
+            id: drawing.id, toolType: drawing.toolType, anchors: drawing.anchors,
+            isExtended: drawing.isExtended, panelPosition: drawing.panelPosition,
+            revealTick: tick.globalTickIndex,               // 仅盖 revealTick
+            period: drawing.period, lineSubType: drawing.lineSubType, lineStyle: drawing.lineStyle,
+            thickness: drawing.thickness, colorToken: drawing.colorToken, labelMode: drawing.labelMode,
+            locked: drawing.locked, text: drawing.text, fontSize: drawing.fontSize,
+            textColorToken: drawing.textColorToken, textForm: drawing.textForm, tailAnchor: drawing.tailAnchor)
         if flow.mode == .review {
             appendReviewDrawing(stamped)
         } else {
