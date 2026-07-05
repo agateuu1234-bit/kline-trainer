@@ -77,10 +77,24 @@ public protocol ReviewArchiveRepository: Sendable {
     func loadWorking(recordId: Int64) throws -> ReviewWorking?            // 仅解码 working 两列（saved 不碰）；working 坏→.dbCorrupted
     func loadSaved(recordId: Int64) throws -> [DrawingObject]?           // 仅解码 saved 列（working 不碰）；saved 坏→.dbCorrupted
     func loadArchive(recordId: Int64) throws -> ReviewArchive?           // 全量（测试/一次性用）；coordinator 走上面两个独立解码
-    func saveWorking(recordId: Int64, stepTick: Int, drawings: [DrawingObject]) throws  // 原子：两 working 列同写，saved 不动
-    func commitSaved(recordId: Int64, drawings: [DrawingObject]) throws   // saved=drawings，清 working（原子）
+    // repo 边界无损（P1a Task 10，codex plan-R4-high①）：接收完整 lossy（含 unknownRaw 有序），原样保真回写，
+    // 不从 [DrawingObject] 重建（否则下次 save 会丢未识别条）。
+    func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws  // 原子：两 working 列同写，saved 不动
+    func commitSaved(recordId: Int64, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws   // saved=lossy，清 working（原子）
     func clearWorking(recordId: Int64) throws                            // 清 working；若 saved 亦 NULL → DELETE 行
     func clearSaved(recordId: Int64) throws                              // 仅清 saved（corrupt 恢复）；若 working 亦 NULL → DELETE 行
     func loadMarkers() throws -> [Int64: ReviewMarker]                   // 批量轻量（不解码 payload），供首页
     func reviewMarker(recordId: Int64) throws -> ReviewMarker            // 单条轻量，供 action sheet
+}
+
+// P1a Task 10：`hiddenOriginalIds` 默认 `[]`（Swift 协议方法本身不支持默认参数值，用 extension 兜底
+// 提供便捷重载）——coordinator 现有调用只需传 `lossy`，不需要跟着改传 `hiddenOriginalIds`
+// （hide/show 写入行为在 P5，本 task 只透传加载来的 hiddenIds，不新增编辑）。
+public extension ReviewArchiveRepository {
+    func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray) throws {
+        try saveWorking(recordId: recordId, stepTick: stepTick, lossy: lossy, hiddenOriginalIds: [])
+    }
+    func commitSaved(recordId: Int64, lossy: LossyDrawingArray) throws {
+        try commitSaved(recordId: recordId, lossy: lossy, hiddenOriginalIds: [])
+    }
 }

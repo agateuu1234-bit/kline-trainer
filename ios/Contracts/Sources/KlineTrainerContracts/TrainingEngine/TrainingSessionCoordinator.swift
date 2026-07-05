@@ -876,8 +876,10 @@ public final class TrainingSessionCoordinator {
         guard activeEngine === engine else { return }
         guard let id = reviewRecordId else { return }
         if ReviewNetChange.changed(working: engine.reviewDrawings, committed: reviewCommittedBaseline) {
+            // P1a Task 10（签名对齐，非行为）：纯已知条包成 lossy；加载 blob 带来的 unknownRaw 一路穿过
+            // autosave/resume-save/commit 路径 = Task 12（引擎携带 loadedReviewLossy + reconciled 重发）。
             try reviewArchiveRepo.saveWorking(recordId: id, stepTick: engine.tick.globalTickIndex,
-                                              drawings: engine.reviewDrawings)
+                                              lossy: LossyDrawingArray(drawings: engine.reviewDrawings))
         } else {
             try reviewArchiveRepo.clearWorking(recordId: id)
         }
@@ -895,7 +897,7 @@ public final class TrainingSessionCoordinator {
         guard activeEngine === engine, engine.flow.mode == .review else {
             throw AppError.internalError(module: "review", detail: "terminal review write on stale/mismatched session")
         }
-        try reviewArchiveRepo.commitSaved(recordId: id, drawings: engine.reviewDrawings)
+        try reviewArchiveRepo.commitSaved(recordId: id, lossy: LossyDrawingArray(drawings: engine.reviewDrawings))
         reviewCommittedBaseline = engine.reviewDrawings
     }
 

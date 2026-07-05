@@ -49,15 +49,17 @@ enum RecordRepositoryImpl {
 
         for dr in drawings {
             let anchorsJSON = try jsonEncode(dr.anchors)
+            let styleJSON = try jsonEncode(DrawingStyle(from: dr))
             // draw_uuid：迁移 0009 加的 NOT NULL/CHECK/UNIQUE 列（跨层身份，D16/D20）；dr.id 已是稳定 UUID
-            // （Models.swift DrawingObject.id 默认值）。style_json 读写留给 Task 10。
+            // （Models.swift DrawingObject.id 默认值，或 lossy 层 legacy-idx-N 回填——均非空，满足 CHECK<>''）。
+            // style_json：除 id/toolType/anchors/isExtended/panelPosition/reveal_tick 外的样式/文本字段束。
             try db.execute(sql: """
                 INSERT INTO drawings
-                  (record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, draw_uuid)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                  (record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, draw_uuid, style_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     recordId, dr.toolType.rawValue, dr.panelPosition,
-                    dr.isExtended ? 1 : 0, anchorsJSON, dr.revealTick, dr.id
+                    dr.isExtended ? 1 : 0, anchorsJSON, dr.revealTick, dr.id, styleJSON
                 ])
         }
 
@@ -91,7 +93,8 @@ enum RecordRepositoryImpl {
 
         let drRows = try Row.fetchAll(db, sql:
             "SELECT * FROM drawings WHERE record_id = ? ORDER BY id ASC", arguments: [id])
-        let drawings = try drRows.map { try drawingFromRow($0) }
+        // 未知/未来 tool_type 的 finalized 行 → drawingFromRow 返回 nil，compactMap 跳过（不伪装成 .horizontal）。
+        let drawings = try drRows.compactMap { try drawingFromRow($0) }
 
         return (record, ops, drawings)
     }
@@ -162,17 +165,52 @@ enum RecordRepositoryImpl {
         )
     }
 
-    private static func drawingFromRow(_ row: Row) throws -> DrawingObject {
+    /// 返回 nil = 未知/未来 `tool_type` 的 finalized 行 → **lossy 跳过**（不静默伪装成 `.horizontal`，codex R3-medium）。
+    /// finalized 行只读、加载不重写，跳过非破坏性（DB 行保留、仅本次不呈现）。caller 用 compactMap 过滤 nil。
+    private static func drawingFromRow(_ row: Row) throws -> DrawingObject? {
         let toolRaw: String = row["tool_type"]
-        guard let tool = DrawingToolType(rawValue: toolRaw) else {
-            throw AppError.persistence(.dbCorrupted)
-        }
+        guard let tool = DrawingToolType(rawValue: toolRaw) else { return nil }   // 未知→跳过，不 coerce .horizontal
         let anchorsJSON: String = row["anchors"]
         let anchors: [DrawingAnchor] = try jsonDecode(anchorsJSON, as: [DrawingAnchor].self)
-        let isExt: Int = row["is_extended"]
-        return DrawingObject(toolType: tool, anchors: anchors,
-                             isExtended: isExt != 0, panelPosition: row["panel_position"],
-                             revealTick: row["reveal_tick"])
+        let drawUuid: String = row["draw_uuid"]
+        let isExt = (row["is_extended"] as Int) != 0
+        // NULL style_json（旧行）→ **行感知兜底**：lineSubType 由 is_extended 派生（true→.ray/false→.straight）、
+        // period 由锚点派生——不能用扁平 defaults（会把 is_extended=1 的旧线错读成 .straight，codex R3-high）。
+        let style: DrawingStyle = try (row["style_json"] as String?)
+            .map { try jsonDecode($0, as: DrawingStyle.self) }
+            ?? DrawingStyle.legacyFallback(isExtended: isExt, period: anchors.first?.period ?? .m3)
+        return DrawingObject(
+            id: drawUuid, toolType: tool, anchors: anchors,
+            isExtended: isExt, panelPosition: row["panel_position"],
+            revealTick: row["reveal_tick"], period: style.period, lineSubType: style.lineSubType,
+            lineStyle: style.lineStyle, thickness: style.thickness, colorToken: style.colorToken,
+            labelMode: style.labelMode, locked: style.locked, text: style.text, fontSize: style.fontSize,
+            textColorToken: style.textColorToken, textForm: style.textForm, tailAnchor: style.tailAnchor)
+    }
+
+    /// style_json 列的 payload 结构 = 除 id/toolType/anchors/isExtended/panelPosition/reveal_tick 外的
+    /// 样式/文本字段束（这些已是独立列，不重复存）。
+    private struct DrawingStyle: Codable {
+        var period: Period; var lineSubType: LineSubType; var lineStyle: LineStyle
+        var thickness: Int; var colorToken: DrawingColorToken; var labelMode: LabelMode
+        var locked: Bool; var text: String; var fontSize: Int
+        var textColorToken: DrawingColorToken; var textForm: TextForm; var tailAnchor: DrawingAnchor?
+        init(from d: DrawingObject) {
+            period = d.period; lineSubType = d.lineSubType; lineStyle = d.lineStyle
+            thickness = d.thickness; colorToken = d.colorToken; labelMode = d.labelMode
+            locked = d.locked; text = d.text; fontSize = d.fontSize
+            textColorToken = d.textColorToken; textForm = d.textForm; tailAnchor = d.tailAnchor
+        }
+        static var defaults: DrawingStyle {
+            DrawingStyle(from: DrawingObject(toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0))
+        }
+        /// 旧行（NULL style_json）行感知兜底：lineSubType 由 is_extended 派生、period 由锚点派生（codex R3-high）。
+        static func legacyFallback(isExtended: Bool, period: Period) -> DrawingStyle {
+            var s = DrawingStyle.defaults
+            s.period = period
+            s.lineSubType = isExtended ? .ray : .straight   // spec §11.1/§4.2：旧 isExtended→lineSubType
+            return s
+        }
     }
 
     // MARK: - JSON helpers（共享给其它 *Impl.swift）

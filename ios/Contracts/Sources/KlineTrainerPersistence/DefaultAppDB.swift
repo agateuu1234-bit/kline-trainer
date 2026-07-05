@@ -240,18 +240,19 @@ public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayReposito
         catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
     }
 
-    public func saveWorking(recordId: Int64, stepTick: Int, drawings: [DrawingObject]) throws {
+    public func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
         do {
             try dbQueue.write { db in
-                try ReviewArchiveRepositoryImpl.saveWorking(db, recordId: recordId, stepTick: stepTick, drawings: drawings)
+                try ReviewArchiveRepositoryImpl.saveWorking(db, recordId: recordId, stepTick: stepTick,
+                                                            lossy: lossy, hiddenOriginalIds: hiddenOriginalIds)
             }
         } catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
     }
 
-    public func commitSaved(recordId: Int64, drawings: [DrawingObject]) throws {
+    public func commitSaved(recordId: Int64, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
         do {
             try dbQueue.write { db in
-                try ReviewArchiveRepositoryImpl.commitSaved(db, recordId: recordId, drawings: drawings)
+                try ReviewArchiveRepositoryImpl.commitSaved(db, recordId: recordId, lossy: lossy, hiddenOriginalIds: hiddenOriginalIds)
             }
         } catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
     }

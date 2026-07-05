@@ -236,7 +236,9 @@ public final class InMemoryPendingReplayRepository: PendingReplayRepository, @un
 public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @unchecked Sendable {
     private let lock = NSLock()
     private var saved: [Int64: [DrawingObject]] = [:]
+    private var savedHidden: [Int64: [DrawingID]] = [:]
     private var working: [Int64: (stepTick: Int, drawings: [DrawingObject])] = [:]
+    private var workingHidden: [Int64: [DrawingID]] = [:]
     /// review-redesign Task 6：一次性故障注入（mirror `InMemoryPendingReplayRepository` 的 `failNextLoadReplay`
     /// 范式），供 coordinator saved-corrupt 恢复路径测试模拟 `.dbCorrupted` / clearSaved 失败。
     private var _failNextLoadSaved: AppError?
@@ -282,15 +284,17 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
         let s = saved[recordId]
         let w = working[recordId]
         guard s != nil || w != nil else { return nil }
-        return ReviewArchive(recordId: recordId, savedDrawings: s,
-                             workingStepTick: w?.stepTick, workingDrawings: w?.drawings)
+        return ReviewArchive(recordId: recordId,
+                             savedLossy: s.map { LossyDrawingArray(drawings: $0) }, savedHiddenIds: savedHidden[recordId],
+                             workingStepTick: w?.stepTick,
+                             workingLossy: w.map { LossyDrawingArray(drawings: $0.drawings) }, workingHiddenIds: workingHidden[recordId])
     }
 
     public func loadWorking(recordId: Int64) throws -> ReviewWorking? {
         lock.lock(); defer { lock.unlock() }
         if let e = _failNextLoadWorking { _failNextLoadWorking = nil; throw e }
         guard let w = working[recordId] else { return nil }
-        return ReviewWorking(stepTick: w.stepTick, drawings: w.drawings)
+        return ReviewWorking(stepTick: w.stepTick, drawings: w.drawings, hiddenOriginalIds: workingHidden[recordId] ?? [])
     }
 
     public func loadSaved(recordId: Int64) throws -> [DrawingObject]? {
@@ -299,28 +303,33 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
         return saved[recordId]
     }
 
-    public func saveWorking(recordId: Int64, stepTick: Int, drawings: [DrawingObject]) throws {
+    public func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
         lock.lock(); defer { lock.unlock() }
         if let e = _failNextSaveWorking { _failNextSaveWorking = nil; throw e }
-        working[recordId] = (stepTick, drawings)
+        working[recordId] = (stepTick, lossy.drawings)
+        workingHidden[recordId] = hiddenOriginalIds
     }
 
-    public func commitSaved(recordId: Int64, drawings: [DrawingObject]) throws {
+    public func commitSaved(recordId: Int64, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
         lock.lock(); defer { lock.unlock() }
-        saved[recordId] = drawings
+        saved[recordId] = lossy.drawings
+        savedHidden[recordId] = hiddenOriginalIds
         working[recordId] = nil
+        workingHidden[recordId] = nil
     }
 
     public func clearWorking(recordId: Int64) throws {
         lock.lock(); defer { lock.unlock() }
         if let e = _failNextClearWorking { _failNextClearWorking = nil; throw e }
         working[recordId] = nil
+        workingHidden[recordId] = nil
     }
 
     public func clearSaved(recordId: Int64) throws {
         lock.lock(); defer { lock.unlock() }
         if let e = _failNextClearSaved { _failNextClearSaved = nil; throw e }
         saved[recordId] = nil
+        savedHidden[recordId] = nil
     }
 
     public func loadMarkers() throws -> [Int64: ReviewMarker] {

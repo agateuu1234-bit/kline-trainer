@@ -7,7 +7,8 @@ import KlineTrainerContracts
 /// 镜像 PendingReplayRepositoryImpl。
 enum ReviewArchiveRepositoryImpl {
 
-    // 全量：saved/working JSON 解码，失败 → .dbCorrupted（saved 损坏由 caller 走 clearSaved 恢复）
+    // 全量：saved/working 列改经 ReviewArchiveWrapper 解码（repo 边界无损），失败 → .dbCorrupted
+    // （saved 损坏由 caller 走 clearSaved 恢复）。
     static func loadArchive(_ db: Database, recordId: Int64) throws -> ReviewArchive? {
         guard let row = try Row.fetchOne(db, sql:
             "SELECT record_id, saved_drawings, working_step_tick, working_drawings FROM review_archive WHERE record_id = ?",
@@ -16,10 +17,12 @@ enum ReviewArchiveRepositoryImpl {
         let workJSON: String? = row["working_drawings"]
         let stepTick: Int? = row["working_step_tick"]
         do {
-            let saved = try savedJSON.map { try RecordRepositoryImpl.jsonDecode($0, as: [DrawingObject].self) }
-            let work = try workJSON.map { try RecordRepositoryImpl.jsonDecode($0, as: [DrawingObject].self) }
-            return ReviewArchive(recordId: recordId, savedDrawings: saved,
-                                 workingStepTick: stepTick, workingDrawings: work)
+            let savedWrap = try savedJSON.map { try ReviewArchiveWrapper.decodeColumn($0) }
+            let workWrap = try workJSON.map { try ReviewArchiveWrapper.decodeColumn($0) }
+            return ReviewArchive(recordId: recordId,
+                                 savedLossy: savedWrap?.lossy, savedHiddenIds: savedWrap?.hiddenIds,
+                                 workingStepTick: stepTick,
+                                 workingLossy: workWrap?.lossy, workingHiddenIds: workWrap?.hiddenIds)
         } catch let e as AppError { throw e } catch { throw AppError.persistence(.dbCorrupted) }
     }
 
@@ -30,9 +33,10 @@ enum ReviewArchiveRepositoryImpl {
             arguments: [recordId]) else { return nil }
         guard let stepTick = row["working_step_tick"] as Int?,
               let workJSON = row["working_drawings"] as String? else { return nil }   // 无 working
-        do { return ReviewWorking(stepTick: stepTick,
-                                  drawings: try RecordRepositoryImpl.jsonDecode(workJSON, as: [DrawingObject].self)) }
-        catch let e as AppError { throw e } catch { throw AppError.persistence(.dbCorrupted) }
+        do {
+            let wrap = try ReviewArchiveWrapper.decodeColumn(workJSON)
+            return ReviewWorking(stepTick: stepTick, lossy: wrap.lossy, hiddenOriginalIds: wrap.hiddenIds)
+        } catch let e as AppError { throw e } catch { throw AppError.persistence(.dbCorrupted) }
     }
 
     // 独立解码：只读 + 解码 saved 列（working 列不碰）→ working 损坏不影响本方法。
@@ -40,12 +44,15 @@ enum ReviewArchiveRepositoryImpl {
         guard let row = try Row.fetchOne(db, sql:
             "SELECT saved_drawings FROM review_archive WHERE record_id = ?", arguments: [recordId]),
               let savedJSON = row["saved_drawings"] as String? else { return nil }
-        do { return try RecordRepositoryImpl.jsonDecode(savedJSON, as: [DrawingObject].self) }
+        do { return try ReviewArchiveWrapper.decodeColumn(savedJSON).drawings }
         catch let e as AppError { throw e } catch { throw AppError.persistence(.dbCorrupted) }
     }
 
-    static func saveWorking(_ db: Database, recordId: Int64, stepTick: Int, drawings: [DrawingObject]) throws {
-        let json = try RecordRepositoryImpl.jsonEncode(drawings)
+    // repo 边界无损（codex plan-R4-high①）：接收完整 lossy（含 unknownRaw 有序），原样保真编码回写，
+    // 不从 [DrawingObject] 重建（否则会在下次 save 时丢掉未识别条）。
+    static func saveWorking(_ db: Database, recordId: Int64, stepTick: Int,
+                            lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID] = []) throws {
+        let json = try ReviewArchiveWrapper(lossy: lossy, hiddenIds: hiddenOriginalIds).encodedColumn()
         // 原子 UPSERT：两 working 列同写，saved 保留（INSERT 时 saved=NULL；已有行时用 ON CONFLICT 只改 working）
         try db.execute(sql: """
             INSERT INTO review_archive (record_id, saved_drawings, working_step_tick, working_drawings, updated_at)
@@ -57,8 +64,9 @@ enum ReviewArchiveRepositoryImpl {
             """, arguments: [recordId, stepTick, json, Self.now()])
     }
 
-    static func commitSaved(_ db: Database, recordId: Int64, drawings: [DrawingObject]) throws {
-        let json = try RecordRepositoryImpl.jsonEncode(drawings)
+    static func commitSaved(_ db: Database, recordId: Int64,
+                            lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID] = []) throws {
+        let json = try ReviewArchiveWrapper(lossy: lossy, hiddenIds: hiddenOriginalIds).encodedColumn()
         try db.execute(sql: """
             INSERT INTO review_archive (record_id, saved_drawings, working_step_tick, working_drawings, updated_at)
             VALUES (?, ?, NULL, NULL, ?)
