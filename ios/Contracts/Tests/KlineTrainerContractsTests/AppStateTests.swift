@@ -77,30 +77,41 @@ struct AppStateCodableTests {
         #expect(decoded.finalTick == 4242)
     }
 
-    // P1a Task 11：PendingTraining 不再 Codable（`lossy: LossyDrawingArray` 携带 unknownRaw，非 Codable，
-    // 见 AppState.swift 注释）——本测试改验 Equatable（同构造两次相等）+ 字段值，不再走 JSONEncoder/Decoder。
-    @Test func pendingTraining_hasCashBalanceAndDrawdown() throws {
-        func make() -> PendingTraining {
-            PendingTraining(
-                trainingSetFilename: "foo.zip",
-                globalTickIndex: 10,
-                upperPeriod: .daily,
-                lowerPeriod: .m60,
-                positionData: Data([1, 2, 3]),
-                cashBalance: 9000,
-                feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
-                tradeOperations: [],
-                drawings: [],
-                startedAt: 1_700_000_000,
-                accumulatedCapital: 10_000,
-                drawdown: DrawdownAccumulator(peakCapital: 10_000, maxDrawdown: 500),
-                sessionKey: "SK-test"
-            )
-        }
-        let pend = make()
-        #expect(make() == pend)
-        #expect(pend.cashBalance == 9000)
-        #expect(pend.drawdown.maxDrawdown == 500)
+    // codex whole-branch Finding 1 修复：PendingTraining 恢复 Codable（public 契约类型，Task 11 因加
+    // `lossy: LossyDrawingArray`（非 Codable）误丢——source-compat 破坏）。恢复走显式
+    // init(from:)/encode(to:)（非 synthesized），CodingKeys 对齐 Task 11 之前的旧字段集（旧快照仍可解
+    // 码），`drawings` 走计算属性投影往返、decode 侧用 `LossyDrawingArray(drawings:)` 重建已知条
+    // （纯已知——本路径只是 compat surface；真正字节级保真持久化走 repo 的 `p.lossy.encoded()` 列路径，不受影响）。
+    @Test func pendingTraining_codableRoundTrip() throws {
+        let pend = PendingTraining(
+            trainingSetFilename: "foo.zip",
+            globalTickIndex: 10,
+            upperPeriod: .daily,
+            lowerPeriod: .m60,
+            positionData: Data([1, 2, 3]),
+            cashBalance: 9000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+            tradeOperations: [],
+            drawings: [DrawingObject(id: "d1", toolType: .horizontal, anchors: [],
+                                     isExtended: false, panelPosition: 0)],
+            startedAt: 1_700_000_000,
+            accumulatedCapital: 10_000,
+            drawdown: DrawdownAccumulator(peakCapital: 10_000, maxDrawdown: 500),
+            sessionKey: "SK-test"
+        )
+        let data = try JSONEncoder().encode(pend)
+        let decoded = try JSONDecoder().decode(PendingTraining.self, from: data)
+        // 逐字段比对（不用整体 `==`：那会连带比较 `lossy` 内部 `raw` 原始字节，那是内部实现细节，
+        // JSONEncoder 对同结构体两次独立 encode 不保证 key 顺序一致，非本 compat surface 的契约）。
+        #expect(decoded.trainingSetFilename == pend.trainingSetFilename)
+        #expect(decoded.globalTickIndex == pend.globalTickIndex)
+        #expect(decoded.positionData == pend.positionData)
+        #expect(decoded.cashBalance == 9000)
+        #expect(decoded.tradeOperations == pend.tradeOperations)
+        #expect(decoded.sessionKey == pend.sessionKey)
+        #expect(decoded.drawdown.maxDrawdown == 500)
+        #expect(decoded.drawings == pend.drawings)          // 内容保留（DrawingObject 自定义 == 不比 id）
+        #expect(decoded.drawings.map(\.id) == ["d1"])       // id 也保留
     }
 
     @Test func appSettings_mutableRoundTrip() {

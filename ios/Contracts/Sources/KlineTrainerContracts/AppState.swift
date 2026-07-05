@@ -83,10 +83,13 @@ public struct DrawdownAccumulator: Codable, Equatable, Sendable {
 // MARK: - Pending Training（含 cashBalance + drawdown；v1.3 denormalize）
 // v1.6（Wave 3 10a）：+sessionKey（durable session key，RFC §4.7c）
 
-// P1a Task 11：不再 Codable（`lossy: LossyDrawingArray` 非 Codable，见 ReviewWorking 同款先例）；
-// 生产/测试均不依赖本结构体整体的 JSONEncoder/JSONDecoder 往返（repo 边界的 JSON 编解码走各字段独立
-// jsonEncode/jsonDecode + LossyDrawingArray，不经本结构体的 Codable）。
-public struct PendingTraining: Equatable, Sendable {
+// codex whole-branch Finding 1 修复：恢复 Codable（public 契约类型，source-compat 面）。
+// `lossy: LossyDrawingArray` 本身非 Codable，故不能 synthesize——显式 `init(from:)`/`encode(to:)`
+// 走 `CodingKeys` 对齐 Task 11 之前的旧字段集（`drawings` 而非 `lossy`），保证旧快照仍可解码；
+// `drawings` 用计算属性投影编码，解码侧用 `LossyDrawingArray(drawings:)` 重建（纯已知）。
+// 本 Codable 路径只是整体编解码的 compat surface；repo 边界字节级保真持久化走各字段独立
+// jsonEncode/jsonDecode + `p.lossy.encoded()`列路径，不受影响、不经本结构体的 Codable。
+public struct PendingTraining: Codable, Equatable, Sendable {
     public let trainingSetFilename: String
     public let globalTickIndex: Int
     public let upperPeriod: Period
@@ -165,12 +168,55 @@ public struct PendingTraining: Equatable, Sendable {
             sessionKey: sessionKey
         )
     }
+
+    // MARK: Codable（显式，非 synthesized——`lossy` 非 Codable；key 集对齐 Task 11 之前的旧字段名）
+
+    private enum CodingKeys: String, CodingKey {
+        case trainingSetFilename, globalTickIndex, upperPeriod, lowerPeriod, positionData
+        case cashBalance, feeSnapshot, tradeOperations, drawings, startedAt
+        case accumulatedCapital, drawdown, sessionKey
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        trainingSetFilename = try c.decode(String.self, forKey: .trainingSetFilename)
+        globalTickIndex = try c.decode(Int.self, forKey: .globalTickIndex)
+        upperPeriod = try c.decode(Period.self, forKey: .upperPeriod)
+        lowerPeriod = try c.decode(Period.self, forKey: .lowerPeriod)
+        positionData = try c.decode(Data.self, forKey: .positionData)
+        cashBalance = try c.decode(Double.self, forKey: .cashBalance)
+        feeSnapshot = try c.decode(FeeSnapshot.self, forKey: .feeSnapshot)
+        tradeOperations = try c.decode([TradeOperation].self, forKey: .tradeOperations)
+        // 纯已知重建（本 Codable 路径是 compat surface；字节级保真走 repo 的 p.lossy.encoded() 列路径）。
+        lossy = LossyDrawingArray(drawings: try c.decode([DrawingObject].self, forKey: .drawings))
+        startedAt = try c.decode(Int64.self, forKey: .startedAt)
+        accumulatedCapital = try c.decode(Double.self, forKey: .accumulatedCapital)
+        drawdown = try c.decode(DrawdownAccumulator.self, forKey: .drawdown)
+        sessionKey = try c.decode(String.self, forKey: .sessionKey)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(trainingSetFilename, forKey: .trainingSetFilename)
+        try c.encode(globalTickIndex, forKey: .globalTickIndex)
+        try c.encode(upperPeriod, forKey: .upperPeriod)
+        try c.encode(lowerPeriod, forKey: .lowerPeriod)
+        try c.encode(positionData, forKey: .positionData)
+        try c.encode(cashBalance, forKey: .cashBalance)
+        try c.encode(feeSnapshot, forKey: .feeSnapshot)
+        try c.encode(tradeOperations, forKey: .tradeOperations)
+        try c.encode(drawings, forKey: .drawings)   // 计算属性投影（已知条），非 lossy 原始字节
+        try c.encode(startedAt, forKey: .startedAt)
+        try c.encode(accumulatedCapital, forKey: .accumulatedCapital)
+        try c.encode(drawdown, forKey: .drawdown)
+        try c.encode(sessionKey, forKey: .sessionKey)
+    }
 }
 
 // MARK: - Pending Replay（新需求10 replay 续局；镜像 PendingTraining，去 sessionKey，加 recordId）
 
-// P1a Task 11：不再 Codable（同 PendingTraining 上方注释，`lossy: LossyDrawingArray` 非 Codable）。
-public struct PendingReplay: Equatable, Sendable {
+// codex whole-branch Finding 1 修复：恢复 Codable（同 PendingTraining 上方注释）。
+public struct PendingReplay: Codable, Equatable, Sendable {
     public let recordId: Int64
     public let trainingSetFilename: String
     public let globalTickIndex: Int
@@ -248,6 +294,49 @@ public struct PendingReplay: Equatable, Sendable {
             accumulatedCapital: accumulatedCapital,
             drawdown: drawdown
         )
+    }
+
+    // MARK: Codable（显式，非 synthesized——`lossy` 非 Codable；key 集对齐 Task 11 之前的旧字段名）
+
+    private enum CodingKeys: String, CodingKey {
+        case recordId, trainingSetFilename, globalTickIndex, upperPeriod, lowerPeriod, positionData
+        case cashBalance, feeSnapshot, tradeOperations, drawings, startedAt
+        case accumulatedCapital, drawdown
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        recordId = try c.decode(Int64.self, forKey: .recordId)
+        trainingSetFilename = try c.decode(String.self, forKey: .trainingSetFilename)
+        globalTickIndex = try c.decode(Int.self, forKey: .globalTickIndex)
+        upperPeriod = try c.decode(Period.self, forKey: .upperPeriod)
+        lowerPeriod = try c.decode(Period.self, forKey: .lowerPeriod)
+        positionData = try c.decode(Data.self, forKey: .positionData)
+        cashBalance = try c.decode(Double.self, forKey: .cashBalance)
+        feeSnapshot = try c.decode(FeeSnapshot.self, forKey: .feeSnapshot)
+        tradeOperations = try c.decode([TradeOperation].self, forKey: .tradeOperations)
+        // 纯已知重建（本 Codable 路径是 compat surface；字节级保真走 repo 的 p.lossy.encoded() 列路径）。
+        lossy = LossyDrawingArray(drawings: try c.decode([DrawingObject].self, forKey: .drawings))
+        startedAt = try c.decode(Int64.self, forKey: .startedAt)
+        accumulatedCapital = try c.decode(Double.self, forKey: .accumulatedCapital)
+        drawdown = try c.decode(DrawdownAccumulator.self, forKey: .drawdown)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(recordId, forKey: .recordId)
+        try c.encode(trainingSetFilename, forKey: .trainingSetFilename)
+        try c.encode(globalTickIndex, forKey: .globalTickIndex)
+        try c.encode(upperPeriod, forKey: .upperPeriod)
+        try c.encode(lowerPeriod, forKey: .lowerPeriod)
+        try c.encode(positionData, forKey: .positionData)
+        try c.encode(cashBalance, forKey: .cashBalance)
+        try c.encode(feeSnapshot, forKey: .feeSnapshot)
+        try c.encode(tradeOperations, forKey: .tradeOperations)
+        try c.encode(drawings, forKey: .drawings)   // 计算属性投影（已知条），非 lossy 原始字节
+        try c.encode(startedAt, forKey: .startedAt)
+        try c.encode(accumulatedCapital, forKey: .accumulatedCapital)
+        try c.encode(drawdown, forKey: .drawdown)
     }
 }
 

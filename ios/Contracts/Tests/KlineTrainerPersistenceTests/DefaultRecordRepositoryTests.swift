@@ -135,6 +135,28 @@ final class DefaultRecordRepositoryTests: XCTestCase {
         XCTAssertTrue(fk == 0 || fk == 1, "PRAGMA foreign_keys 必须可读（值 0 或 1）")
     }
 
+    // 用例 8（codex whole-branch Finding 2 修复）：drawings 里有重复非空 draw_uuid（如坏 pending/replay blob
+    // 结构可解码但含重复 id resume 进 engine.drawings，绕过唯一在 reconciled() 校验 id 唯一的 LossyDrawingArray）
+    // 原样直插 → 迁移 0009 UNIQUE 约束炸 SQLITE_CONSTRAINT，finalize 永久失败、用户卡死。
+    // insertRecord chokepoint 必须去重（保留首条 id，冲突条 re-uuid）：不抛错、两条线都保留、draw_uuid 落库各异。
+    func test_insertRecord_duplicateDrawingIds_reuuidsAndSucceeds() throws {
+        let dupId = "dup-fixed-id"
+        let dr1 = DrawingObject(id: dupId, toolType: .horizontal,
+                                anchors: [DrawingAnchor(period: .daily, candleIndex: 1, price: 10)],
+                                isExtended: false, panelPosition: 0)
+        let dr2 = DrawingObject(id: dupId, toolType: .trend,
+                                anchors: [DrawingAnchor(period: .daily, candleIndex: 2, price: 20)],
+                                isExtended: false, panelPosition: 0)
+
+        let id = try db.insertRecord(makeRecord(), ops: [], drawings: [dr1, dr2])
+
+        let bundle = try db.loadRecordBundle(id: id)
+        XCTAssertEqual(bundle.2.count, 2)                          // 两条画线都保留，没丢
+        XCTAssertEqual(Set(bundle.2.map(\.id)).count, 2)           // 落库 draw_uuid 互不相同
+        XCTAssertTrue(bundle.2.contains { $0.id == dupId })        // 首条保留原 id
+        XCTAssertEqual(Set(bundle.2.map { $0.toolType.rawValue }), ["horizontal", "trend"])  // 内容保留
+    }
+
     // MARK: - Helpers
 
     private func makeRecord(createdAt: Int64 = 1_700_000_000_000,

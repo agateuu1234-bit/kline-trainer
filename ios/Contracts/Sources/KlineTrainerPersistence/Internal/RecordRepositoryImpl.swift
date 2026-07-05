@@ -47,11 +47,25 @@ enum RecordRepositoryImpl {
                 ])
         }
 
+        // codex whole-branch Finding 2：drawings 在到达这里前只经过结构性解码（LossyDrawingArray.decode），
+        // 未必经过 reconciled()（唯一校验 id 的地方）——坏 pending/replay blob 可携带重复非空 id 直接 resume 进
+        // engine.drawings。draw_uuid 是迁移 0009 的 NOT NULL/CHECK/UNIQUE 列，原样直插会 SQLITE_CONSTRAINT，
+        // finalize 永久失败、用户卡死。此处（所有 finalize 唯一插入口）去重：空 id 或已见过的 id → 换新 UUID，
+        // 首次出现的 id 保留；内容一条不丢。
+        var seenDrawUuids = Set<String>()
         for dr in drawings {
             let anchorsJSON = try jsonEncode(dr.anchors)
             let styleJSON = try jsonEncode(DrawingStyle(from: dr))
-            // draw_uuid：迁移 0009 加的 NOT NULL/CHECK/UNIQUE 列（跨层身份，D16/D20）；dr.id 已是稳定 UUID
-            // （Models.swift DrawingObject.id 默认值，或 lossy 层 legacy-idx-N 回填——均非空，满足 CHECK<>''）。
+            // draw_uuid：迁移 0009 加的 NOT NULL/CHECK/UNIQUE 列（跨层身份，D16/D20）；dr.id 通常已是稳定 UUID
+            // （Models.swift DrawingObject.id 默认值，或 lossy 层 legacy-idx-N 回填），但不能假设上游已去重
+            // （见上方注释）——为空或已出现过 → 换新 UUID，保证本次插入满足 NOT NULL/CHECK/UNIQUE。
+            let drawUuid: String
+            if dr.id.isEmpty || !seenDrawUuids.insert(dr.id).inserted {
+                drawUuid = UUID().uuidString
+                seenDrawUuids.insert(drawUuid)
+            } else {
+                drawUuid = dr.id
+            }
             // style_json：除 id/toolType/anchors/isExtended/panelPosition/reveal_tick 外的样式/文本字段束。
             try db.execute(sql: """
                 INSERT INTO drawings
@@ -59,7 +73,7 @@ enum RecordRepositoryImpl {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     recordId, dr.toolType.rawValue, dr.panelPosition,
-                    dr.isExtended ? 1 : 0, anchorsJSON, dr.revealTick, dr.id, styleJSON
+                    dr.isExtended ? 1 : 0, anchorsJSON, dr.revealTick, drawUuid, styleJSON
                 ])
         }
 

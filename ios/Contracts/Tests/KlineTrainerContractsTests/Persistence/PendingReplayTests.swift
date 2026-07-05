@@ -2,22 +2,34 @@ import Testing
 import Foundation
 @testable import KlineTrainerContracts
 
-// P1a Task 11：PendingReplay 不再 Codable（`lossy: LossyDrawingArray` 携带 unknownRaw，非 Codable，
-// 见 AppState.swift 注释）——本测试改验 Equatable（同构造两次相等），不再走 JSONEncoder/Decoder。
-@Test func pendingReplay_equatableRoundTrip() throws {
-    func make() -> PendingReplay {
-        PendingReplay(
-            recordId: 42,
-            trainingSetFilename: "a.sqlite", globalTickIndex: 7,
-            upperPeriod: .m60, lowerPeriod: .daily,
-            positionData: Data([1, 2, 3]), cashBalance: 99_000,
-            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
-            tradeOperations: [], drawings: [],
-            startedAt: 1_700_000_000, accumulatedCapital: 100_000,
-            drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
-    }
-    let p = make()
-    #expect(make() == p)
+// codex whole-branch Finding 1 修复：PendingReplay 恢复 Codable（public 契约类型，Task 11 因加
+// `lossy: LossyDrawingArray`（非 Codable）误丢——source-compat 破坏）。恢复走显式
+// init(from:)/encode(to:)（非 synthesized），CodingKeys 对齐 Task 11 之前的旧字段集（旧快照仍可解
+// 码），`drawings` 走计算属性投影往返、decode 侧用 `LossyDrawingArray(drawings:)` 重建已知条
+// （纯已知——本路径只是 compat surface；真正字节级保真持久化走 repo 的 `p.lossy.encoded()` 列路径，不受影响）。
+@Test func pendingReplay_codableRoundTrip() throws {
+    let p = PendingReplay(
+        recordId: 42,
+        trainingSetFilename: "a.sqlite", globalTickIndex: 7,
+        upperPeriod: .m60, lowerPeriod: .daily,
+        positionData: Data([1, 2, 3]), cashBalance: 99_000,
+        feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+        tradeOperations: [], drawings: [DrawingObject(id: "d1", toolType: .horizontal, anchors: [],
+                                                       isExtended: false, panelPosition: 0)],
+        startedAt: 1_700_000_000, accumulatedCapital: 100_000,
+        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+    let data = try JSONEncoder().encode(p)
+    let back = try JSONDecoder().decode(PendingReplay.self, from: data)
+    // 逐字段比对（不用整体 `==`：那会连带比较 `lossy` 内部 `raw` 原始字节，那是内部实现细节，
+    // JSONEncoder 对同结构体两次独立 encode 不保证 key 顺序一致，非本 compat surface 的契约）。
+    #expect(back.recordId == p.recordId)
+    #expect(back.trainingSetFilename == p.trainingSetFilename)
+    #expect(back.globalTickIndex == p.globalTickIndex)
+    #expect(back.positionData == p.positionData)
+    #expect(back.cashBalance == p.cashBalance)
+    #expect(back.accumulatedCapital == p.accumulatedCapital)
+    #expect(back.drawings == p.drawings)                // 内容保留（DrawingObject 自定义 == 不比 id）
+    #expect(back.drawings.map(\.id) == ["d1"])           // id 也保留
 }
 
 @Test func inMemoryPendingReplay_saveLoadClear() throws {
