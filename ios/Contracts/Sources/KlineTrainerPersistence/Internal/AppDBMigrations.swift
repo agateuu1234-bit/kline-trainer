@@ -207,6 +207,43 @@ enum AppDBMigrations {
             try db.execute(sql: "PRAGMA user_version = 6")
         }
 
+        // 0009：画线样式/文本/身份持久化（画线工具扩充 P1a，v1.11）。drawings 加 style_json（样式束）+
+        // draw_uuid（跨层防碰撞身份，D16/D20）。draw_uuid 须【DB 层强制非空唯一】——SQLite 无法 ALTER ADD
+        // 带 NOT NULL/CHECK/UNIQUE 到有数据的表，故【建新表 + 回填拷贝 + 换名】重建（保留原列/PK/FK）。
+        // 只走 migration，不动 v1_4_baselineDDL/app_schema_v1.sql（v1.4 冻结基线，drift-checked）。
+        // FK：drawings 仅有【出边】(record_id→training_records)、无表引用 drawings，重建安全；GRDB
+        // registerMigration 默认 foreignKeyChecks 即 .deferred（此 GRDB 6.29.3 无
+        // registerMigrationWithDeferredForeignKeyCheck 方法，plain registerMigration 已是同效果）。
+        migrator.registerMigration("0009_v1.11_drawing_style") { db in
+            try db.execute(sql: """
+                CREATE TABLE drawings_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    record_id INTEGER NOT NULL REFERENCES training_records(id),
+                    tool_type TEXT NOT NULL,
+                    panel_position INTEGER NOT NULL,
+                    is_extended INTEGER NOT NULL DEFAULT 0,
+                    anchors TEXT NOT NULL,
+                    reveal_tick INTEGER NOT NULL DEFAULT 0,
+                    style_json TEXT,
+                    draw_uuid TEXT NOT NULL CHECK(draw_uuid <> '') UNIQUE
+                )
+                """)
+            // 拷贝旧行：style_json 置 NULL；draw_uuid 确定性回填 legacy-<record_id>-<id>（天然唯一非空）。
+            try db.execute(sql: """
+                INSERT INTO drawings_new
+                    (id, record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, style_json, draw_uuid)
+                SELECT id, record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, NULL,
+                       'legacy-' || record_id || '-' || id
+                FROM drawings
+                """)
+            // 防御性校验：回填后无空 draw_uuid（回填保证；异常则迁移 fail，D20）。
+            let bad = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM drawings_new WHERE draw_uuid IS NULL OR draw_uuid = ''") ?? 0
+            guard bad == 0 else { throw AppError.persistence(.dbCorrupted) }
+            try db.execute(sql: "DROP TABLE drawings")
+            try db.execute(sql: "ALTER TABLE drawings_new RENAME TO drawings")
+            try db.execute(sql: "PRAGMA user_version = 7")
+        }
+
         return migrator
     }
 }

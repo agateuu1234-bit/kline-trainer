@@ -49,13 +49,15 @@ enum RecordRepositoryImpl {
 
         for dr in drawings {
             let anchorsJSON = try jsonEncode(dr.anchors)
+            // draw_uuid：迁移 0009 加的 NOT NULL/CHECK/UNIQUE 列（跨层身份，D16/D20）；dr.id 已是稳定 UUID
+            // （Models.swift DrawingObject.id 默认值）。style_json 读写留给 Task 10。
             try db.execute(sql: """
                 INSERT INTO drawings
-                  (record_id, tool_type, panel_position, is_extended, anchors, reveal_tick)
-                VALUES (?, ?, ?, ?, ?, ?)
+                  (record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, draw_uuid)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     recordId, dr.toolType.rawValue, dr.panelPosition,
-                    dr.isExtended ? 1 : 0, anchorsJSON, dr.revealTick
+                    dr.isExtended ? 1 : 0, anchorsJSON, dr.revealTick, dr.id
                 ])
         }
 
