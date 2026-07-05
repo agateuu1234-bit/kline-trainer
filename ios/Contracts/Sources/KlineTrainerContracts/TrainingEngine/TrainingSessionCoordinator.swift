@@ -316,11 +316,16 @@ public final class TrainingSessionCoordinator {
     /// `engine.reviewDrawings` 与 committed 基线均种自该 baseline（fresh review：working==committed）。
     public func review(recordId: Int64) async throws -> TrainingEngine {
         let baseline = try loadCommittedBaselineRecovering(recordId: recordId)
-        // P1a Task 12（Z1）：`loadSaved` 仅返回已知投影（saved 列的 unknownRaw 未暴露）——fresh review 无
-        // working 行可携带的完整有损集，故按已知条包装（无 hiddenIds，`loadSaved` 同样不返回）；这与本方法
-        // 此前的行为一致（P1a 只透传"已加载值"，hide/show 编辑写入 = P5）。
+        // P1a Task 12（Z1 Critical fix，codex whole-branch）：上一行 `loadCommittedBaselineRecovering` 走
+        // `loadSaved` 只返回已知投影（saved 列的 unknownRaw/hiddenIds 未暴露）——若拿它重新包装成"全新" lossy
+        // 种给引擎，fresh review 无编辑直接 commit 会用这份已知投影覆盖 saved 列，永久抹掉未识别（未来版本）
+        // 画线条与非空 hiddenIds（数据丢失，零用户编辑）。改用 `loadSavedLossy` 单独再读一次 saved 列的
+        // 保真版本（含 unknownRaw + hiddenIds）种给引擎；上一行已处理 saved 损坏恢复（clearSaved 若坏），
+        // 此处读到的是已清理后的状态，坏 → 传播（不吞，corruption 已在上面收口，这里理应不会再坏）。
+        let savedLossy = try reviewArchiveRepo.loadSavedLossy(recordId: recordId)
         return try await buildReviewEngine(recordId: recordId, startTickOverride: nil,
-                                           reviewLossy: LossyDrawingArray(drawings: baseline),
+                                           reviewLossy: savedLossy?.lossy ?? LossyDrawingArray(drawings: baseline),
+                                           reviewHiddenIds: savedLossy?.hiddenIds ?? [],
                                            committedBaseline: baseline)
     }
 

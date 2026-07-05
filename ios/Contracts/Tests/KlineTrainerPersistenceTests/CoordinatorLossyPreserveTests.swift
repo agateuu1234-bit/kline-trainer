@@ -104,6 +104,17 @@ struct CoordinatorLossyPreserveTests {
         }
     }
 
+    /// 裸 SQL 种一行 review_archive **仅 saved**（working 两列留 NULL，CHECK 约束允许）——
+    /// 供「无 working 行」的 FRESH review() 入口路径测试（区别于上面 seedReviewWorking 的 resume 路径）。
+    private func seedReviewSaved(_ appDB: DefaultAppDB, recordId: Int64, wrapperJSON: String) throws {
+        try appDB.dbQueue.write { db in
+            try db.execute(sql: """
+                INSERT INTO review_archive (record_id, saved_drawings, updated_at)
+                VALUES (?, ?, 0)
+                """, arguments: [recordId, wrapperJSON])
+        }
+    }
+
     // MARK: - pending_replay：autosave（saveProgress）保真
 
     @Test("pending_replay: load(含未来条)→saveProgress(autosave) 后未来条仍在、且在原位")
@@ -194,6 +205,27 @@ struct CoordinatorLossyPreserveTests {
         }
         #expect(col.contains(unknown))
         #expect(col.contains("h-1"))
+    }
+
+    // MARK: - review FRESH 入口（无 working 行）：commit 不丢 saved 列未来条/hiddenIds（Critical）
+
+    @Test("复盘 FRESH 进入(无 working 行)：saved 列含未来条+hiddenIds → 无编辑 commit 后仍保留（曾被永久抹掉）")
+    func reviewFreshEntryPreservesUnknownAndHiddenIdsOnCommit() async throws {
+        let (url, appDB) = try makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let rid = try makeRecord(appDB)
+        // 仅 saved 列（working 两列 NULL）——模拟「已保存过复盘」的记录再次被打开（FRESH review() 入口，
+        // 非 resumePendingReview）。saved blob 含未来 toolType 条 + 非空 hiddenIds（P5/未来版本写的隐藏态）。
+        try seedReviewSaved(appDB, recordId: rid,
+                            wrapperJSON: #"{"drawings":[\#(known("g1")),\#(unknown)],"hiddenIds":["h-1"]}"#)
+        let coord = makeCoordinator(appDB)
+        let engine = try await coord.review(recordId: rid)   // FRESH 入口：无 working 行 → review()（非 resume）
+        try coord.commitReview(engine: engine)                // 零用户编辑，直接「结束复盘并保存」
+        let col: String = try await appDB.dbQueue.read {
+            try Row.fetchOne($0, sql: "SELECT saved_drawings FROM review_archive WHERE record_id=\(rid)")!["saved_drawings"]
+        }
+        #expect(col.contains(unknown))                        // 未来条未被已知投影覆盖抹掉
+        #expect(col.contains("h-1"))                          // hiddenIds 未被覆盖成 []
     }
 
     // MARK: - LossyDrawingArray.reconciled 单元测试（不需 coordinator）

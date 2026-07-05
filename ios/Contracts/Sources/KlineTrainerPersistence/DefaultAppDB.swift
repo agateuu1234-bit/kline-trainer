@@ -240,6 +240,11 @@ public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayReposito
         catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
     }
 
+    public func loadSavedLossy(recordId: Int64) throws -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID])? {
+        do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.loadSavedLossy($0, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
     public func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
         do {
             try dbQueue.write { db in

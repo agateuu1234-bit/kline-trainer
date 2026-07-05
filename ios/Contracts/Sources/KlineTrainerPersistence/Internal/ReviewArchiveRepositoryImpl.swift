@@ -48,6 +48,19 @@ enum ReviewArchiveRepositoryImpl {
         catch let e as AppError { throw e } catch { throw AppError.persistence(.dbCorrupted) }
     }
 
+    // P1a Task 12（Z1 Critical fix）：同上独立解码（working 列不碰），但保真返回完整 lossy（含 unknownRaw）
+    // + hiddenIds——mirror loadWorking 的保真路径，供 review() FRESH 入口种引擎（避免 loadSaved 已知投影
+    // 被重新包装丢弃 unknownRaw/hiddenIds）。
+    static func loadSavedLossy(_ db: Database, recordId: Int64) throws -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID])? {
+        guard let row = try Row.fetchOne(db, sql:
+            "SELECT saved_drawings FROM review_archive WHERE record_id = ?", arguments: [recordId]),
+              let savedJSON = row["saved_drawings"] as String? else { return nil }
+        do {
+            let wrap = try ReviewArchiveWrapper.decodeColumn(savedJSON)
+            return (wrap.lossy, wrap.hiddenIds)
+        } catch let e as AppError { throw e } catch { throw AppError.persistence(.dbCorrupted) }
+    }
+
     // repo 边界无损（codex plan-R4-high①）：接收完整 lossy（含 unknownRaw 有序），原样保真编码回写，
     // 不从 [DrawingObject] 重建（否则会在下次 save 时丢掉未识别条）。
     static func saveWorking(_ db: Database, recordId: Int64, stepTick: Int,

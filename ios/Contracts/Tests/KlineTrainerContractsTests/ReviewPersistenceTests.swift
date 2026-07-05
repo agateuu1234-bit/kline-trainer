@@ -105,6 +105,7 @@ private final class SlowReviewArchiveRepo: ReviewArchiveRepository, @unchecked S
 
     func loadWorking(recordId: Int64) throws -> ReviewWorking? { try inner.loadWorking(recordId: recordId) }
     func loadSaved(recordId: Int64) throws -> [DrawingObject]? { try inner.loadSaved(recordId: recordId) }
+    func loadSavedLossy(recordId: Int64) throws -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID])? { try inner.loadSavedLossy(recordId: recordId) }
     func loadArchive(recordId: Int64) throws -> ReviewArchive? { try inner.loadArchive(recordId: recordId) }
 
     func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {

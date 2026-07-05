@@ -76,6 +76,10 @@ public protocol ReviewArchiveRepository: Sendable {
     // **独立解码（codex plan-R1-high）**：saved 与 working 解码互不牵连——saved 坏不得害有效 working。
     func loadWorking(recordId: Int64) throws -> ReviewWorking?            // 仅解码 working 两列（saved 不碰）；working 坏→.dbCorrupted
     func loadSaved(recordId: Int64) throws -> [DrawingObject]?           // 仅解码 saved 列（working 不碰）；saved 坏→.dbCorrupted
+    // P1a Task 12（Z1 Critical fix）：saved 列的 lossy-carrying 版本——mirror `loadWorking` 保真路径
+    // （携带 unknownRaw + hiddenIds），供 `review()` FRESH 入口种引擎，避免 `loadSaved` 已知投影
+    // 被重新包装成"全新" lossy 而在无编辑 commit 时丢弃 saved blob 里未识别条/隐藏态。saved 坏→.dbCorrupted。
+    func loadSavedLossy(recordId: Int64) throws -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID])?
     func loadArchive(recordId: Int64) throws -> ReviewArchive?           // 全量（测试/一次性用）；coordinator 走上面两个独立解码
     // repo 边界无损（P1a Task 10，codex plan-R4-high①）：接收完整 lossy（含 unknownRaw 有序），原样保真回写，
     // 不从 [DrawingObject] 重建（否则下次 save 会丢未识别条）。

@@ -303,6 +303,15 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
         return saved[recordId]
     }
 
+    // P1a Task 12（Z1 Critical fix）：fake 无 JSON 序列化（同类注释见上），故无真 unknownRaw 可携带——
+    // 与 loadWorking 同款仅 wrap 已知条 + 附带独立存储的 hiddenIds（fake 层面已是该方法能提供的最大保真）。
+    public func loadSavedLossy(recordId: Int64) throws -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID])? {
+        lock.lock(); defer { lock.unlock() }
+        if let e = _failNextLoadSaved { _failNextLoadSaved = nil; throw e }
+        guard let s = saved[recordId] else { return nil }
+        return (LossyDrawingArray(drawings: s), savedHidden[recordId] ?? [])
+    }
+
     public func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
         lock.lock(); defer { lock.unlock() }
         if let e = _failNextSaveWorking { _failNextSaveWorking = nil; throw e }
