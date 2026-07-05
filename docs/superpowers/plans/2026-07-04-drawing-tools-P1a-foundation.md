@@ -1053,7 +1053,7 @@ public struct ReviewArchive: Equatable, Sendable {
     }
 }
 ```
-> `loadArchive`/`loadSaved` 构 `ReviewArchive` 时用 `savedLossy: try? ...decodeColumn(savedCol)?.lossy`（携带 unknownRaw）；`savedDrawings`/`workingDrawings` 由计算属性给旧读取方。加 loadArchive→save/commit 含未来画线条的字节保真 fixture。
+> `loadArchive`/`loadSaved`/`loadWorking` 构 `ReviewArchive`/`ReviewWorking` 时用 **`try ...decodeColumn(savedCol).lossy`（`try`，不用 `try?`）**——**损坏（malformed hiddenIds / 坏 wrapper）必须传播 `.dbCorrupted`，不得吞成 nil**（否则损坏存档与「无存档」不可分 → 隐藏态从 markers 消失、后续 save 覆盖唯一副本，codex R14-high）。`savedDrawings`/`workingDrawings` 由计算属性给旧读取方。加：①含未来画线条的字节保真 fixture；②malformed `saved_drawings`/`working_drawings`/`hiddenIds` → `loadArchive`/`loadSaved`/`loadWorking` **抛 `.dbCorrupted`（非 nil/空）** 的 fixture。
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1754,6 +1754,20 @@ struct CoordinatorLossyPreserveTests {
         #expect(col.contains(unknown))                                 // 未来条经「编辑+autosave」仍存活
     }
 
+    @Test("reconciled fail-closed：loaded 元素含重复 id → 抛 .dbCorrupted（不静默折叠）")
+    func reconciledRejectsDuplicateLoadedIds() {
+        let d = decodedKnown(known("dup"))
+        let lossy = LossyDrawingArray(elements: [.known(d, raw: known("dup")), .known(d, raw: known("dup"))])
+        #expect(throws: AppError.self) { _ = try lossy.reconciled(currentKnown: [d]) }
+    }
+
+    @Test("reconciled fail-closed：currentKnown 含重复 id → 抛 .dbCorrupted")
+    func reconciledRejectsDuplicateCurrentIds() {
+        let d = decodedKnown(known("dup"))
+        let lossy = LossyDrawingArray(elements: [.known(d, raw: known("dup"))])
+        #expect(throws: AppError.self) { _ = try lossy.reconciled(currentKnown: [d, d]) }   // 两条同 id
+    }
+
     @Test("reconciled 按 id：删 unknown 之前的 known → 未来条仍在原位（不被后续 known 挤到前面）")
     func reconciledByIdPreservesOrderOnDelete() throws {
         let a = decodedKnown(known("gA")); let bK = decodedKnown(known("gB"))
@@ -1806,7 +1820,19 @@ struct CoordinatorLossyPreserveTests {
     /// id 不在（被删）跳过；currentKnown 里原 elements 没有的（新增）追加末尾（raw=编码）。
     /// 编辑条若无法安全 merge（原 raw 非对象）→ throw fail-closed（不静默改写）。
     func reconciled(currentKnown: [DrawingObject]) throws -> LossyDrawingArray {
-        let byId = Dictionary(currentKnown.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        // fail-closed：id 必须唯一且非空——pending/review blob 无 DB 唯一约束，坏 blob 或旧 bug 的重复 id
+        // 会让归并把首条复制到多槽 / 丢后续同 id 条（codex R14-high）。不静默折叠，抛 .dbCorrupted。
+        func requireUniqueNonEmptyIds(_ ds: [DrawingObject]) throws {
+            var seen = Set<DrawingID>()
+            for d in ds {
+                guard !d.id.isEmpty, seen.insert(d.id).inserted else {
+                    throw AppError.persistence(.dbCorrupted)
+                }
+            }
+        }
+        try requireUniqueNonEmptyIds(currentKnown)
+        try requireUniqueNonEmptyIds(elements.compactMap { if case .known(let d, _) = $0 { return d } else { return nil } })
+        let byId = Dictionary(uniqueKeysWithValues: currentKnown.map { ($0.id, $0) })   // 已验唯一 → uniqueKeys
         var emitted = Set<DrawingID>()
         var out: [LossyDrawingElement] = []
         for el in elements {
@@ -1882,6 +1908,7 @@ git commit -m "feat(drawing-P1a): 引擎/coordinator 携带 lossy，全 save 路
 - **codex plan-R7 收口**：**切分器拒畸形 JSON**——`JSONTopLevelArray` 拒绝空槽（尾随 `[x,]`/前导 `[,x]`/连续 `[x,,y]`/纯空白元素），空数组 `[]` 仍合法；回归测试：尾/首/双逗号、纯空白元素、`[valid]]`、`[valid]{junk}` 全 → nil（`.dbCorrupted`，不被静默"修好"）。
 - **codex plan-R8/R9 收口 → 决策 Z1（P1a 自洽安全）**：R8 统一「引擎携带 lossy」延后目标（消 P1b-vs-P5 矛盾）；R9 指出「P1a bump 1.11+迁移=版本化 PR 但 autosave 仍丢 unknown → 不自洽安全」。**user 选 Z1**：**新增 Task 12** 把 engine/coordinator 携带 `lossy`（`reconciled(currentKnown:)` 保未识别条原位）挪回 **P1a**——D21「全 save 路径（autosave/resume-save/commit）字节保真」在 P1a 完整达成、bump 1.11 站得住、单独发版也不丢「未来版本写的画线条」；不再需「与 P1b 同版本发布」发布流程兜底。画线编辑 UI 仍 P1b。
 - **codex plan-R12 收口（1 high，W1）**：lossy 保真粒度从「只保未知 toolType/坏条」升级为「**每条画线保原始 JSON**」——`LossyDrawingElement.known` 改带 `raw: String`；`encoded()` 对 `.known` 也发 `raw`（不重序列化）→ 现有 toolType（如 horizontal）上**未来客户端加的未知字段**在未编辑 load→autosave 后逐字节保留；编辑经 `reconciled`→`mergeKnownFields`（覆盖已知 key、保未知 key，不可安全 merge 则 throw fail-closed）。legacy（pre-id）blob 无未来字段故回填 id 时重编码安全。新增 fixtures：`LossyDrawingArrayTests` 已知工具+未来字段（未编辑/编辑）+ `CoordinatorLossyPreserveTests` pending load→autosave 保未来字段。`reconciled` 改 `throws`，coordinator save 调用点 `try`（save 已 throws 自然传播）。
+- **codex plan-R14 收口（2 high，fail-closed 纪律）**：① repo `loadArchive`/`loadSaved`/`loadWorking` 改 **`try`（非 `try?`）**——损坏（malformed hiddenIds/坏 wrapper）传播 `.dbCorrupted`、不吞成 nil（否则损坏存档与「无存档」不可分致隐藏态消失+覆盖唯一副本）+ malformed→抛 fixture；② `reconciled` 前**校验 currentKnown + loaded known 的 id 唯一非空、否则 `.dbCorrupted`**（pending/review blob 无 DB 唯一约束，重复 id 会被 `uniquingKeysWith` 静默折叠致复制首条/丢后续同 id 条）+ 重复 id 抛 fixture。
 - **codex plan-R13 收口（1 high，W1 精化）**：`mergeKnownFields` 加 `knownDiskKeys` 全集，编辑时**显式清除当前值为 nil 而被 `encodeIfPresent` 省略的可选已知字段**（如 `tailAnchor`）——否则旧 raw 里的该 key 被误当"未知 key"保留、save/load 后复活（清空的尾巴/删除的可选字段会回来，codex R13-high）。加「编辑清空 tailAnchor→输出不含 tailAnchor 但未来 key 仍在」回归测试。
 - **codex plan-R11 收口（1 high+1 med，Z1 精化）**：① 引擎/coordinator **也携带 `loadedReviewHiddenIds`**、autosave/commit 传回（不用默认 `[]` 覆盖 P5 写的隐藏态使已隐藏线重现，codex R11-high）+ hiddenIds load→save 不变 fixture；② `reconciled` **从「按位置」改「按稳定 `DrawingObject.id`」**——删一条 known 时未识别条仍原位（位置法会把后续 known 挤到 unknown 前破坏顺序；`deleteDrawing/removeReviewDrawing` 现已存在故 P1a 即须按 id，非 P1b）+ 删 known 绕 unknown 保序 fixture。
 - **codex plan-R10 收口（1 high+1 med）**：① `ReviewArchive` 结构体片段补 `savedLossy/workingLossy`（`savedDrawings/workingDrawings` 降计算属性，同 R6 ReviewWorking 修法）——与「携带 lossy 保 unknownRaw 跨 loadArchive→save」接口一致，加 loadArchive→save 未来条字节保真 fixture；② `ReviewArchiveWrapper.decodeColumn` 的 `hiddenIds`：缺失→`[]`，**present 但 malformed（非 `[String]`）→ `.dbCorrupted` fail-closed**（不静默当空覆盖唯一隐藏态副本），加 缺失/合法/malformed 三 fixtures。
