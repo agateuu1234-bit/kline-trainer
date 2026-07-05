@@ -16,7 +16,7 @@
 - **迁移 `0009` 只走 migration**，`PRAGMA user_version = 7`；**绝不改 `AppDBMigrations.v1_4_baselineDDL` 或 `ios/sql/app_schema_v1.sql`**（v1.4 冻结基线，drift-checked——沿 0006/0007/0008 先例）。
 - **`draw_uuid`**：迁移回填所有旧行 `legacy-<record_id>-<id>`；**回填后校验无 NULL、无重复，否则迁移抛错**；建 `UNIQUE INDEX`（D20）。
 - **复盘 canonical 磁盘 JSON schema（全阶段唯一，禁改 key/形状）** = `{ "drawings": [DrawingObject], "hiddenIds": [DrawingID] }`；in-memory `reviewDrawings`/`hiddenOriginalIds` 经显式 `CodingKeys` 映射；解码容错裸 `[DrawingObject]` 数组（→ `hiddenIds=[]`）| wrapper（D14）。
-- **有损 ≠ 丢数据（D21，全达成于 P1a；Z1）**：所有画线数组边界（`pending_*.drawings` / review wrapper 的 `drawings`）解码时坏/未知条只跳过、不整组失败。**P1a 达成 D21 全部**：① 解码永不崩 + ② repo `load→save` 往返无损 + ③ **coordinator 所有 save 路径（autosave / resume-save / commit）字节保真**（Task 12 引擎携带 `lossy`、`reconciled` 保未识别条原位）。→ **P1a 自洽安全**（bump 1.11 站得住、单独发版也不丢「未来版本写的画线条」；公开发布 [[project_app_public_release_intent]]）。
+- **有损 ≠ 丢数据（D21，全达成于 P1a；Z1 + W1）**：所有画线数组边界（`pending_*.drawings` / review wrapper 的 `drawings`）解码时坏/未知条只跳过、不整组失败。**P1a 达成 D21 全部**：① 解码永不崩 + ② repo `load→save` 往返无损 + ③ **coordinator 所有 save 路径（autosave / resume-save / commit）字节保真**（Task 12 引擎携带 `lossy`、`reconciled` 保 raw）。**W1（codex R12）：保真粒度 = 每条画线的原始 JSON**——不仅未知 toolType，**现有 toolType 上未来客户端加的未知字段**也逐条保留（`LossyDrawingElement.known` 携带 `raw`，未编辑原样重发、编辑走 `mergeKnownFields` 保未知 key）。→ **P1a 自洽安全**（bump 1.11 站得住、单独发版也不丢「未来版本写的画线数据」；公开发布 [[project_app_public_release_intent]]）。
 - **`DrawingID` 跨层防碰撞（D13/D16）**：新画线 = `UUID().uuidString`；原训练线 = `draw_uuid`（`legacy-<record_id>-<id>` 或后续新建时铸的 UUID）；旧 JSON blob 无 id 的元素在数组解码层回填 `legacy-idx-<index>`（命名空间唯一）。**禁进程内单调整数、禁裸数组下标整数**。
 - **两闸门**：平台无关值类型/Codable/几何/迁移逻辑走 host `swift test`（Swift Testing + XCTest 两框架都要全绿）；DB 迁移走 `KlineTrainerPersistenceTests`（XCTest + GRDB in-memory）。UIKit 层本阶段无。
 - **零 UI**：本阶段新字段无 UI 消费者，全靠 Codable round-trip + 迁移 + 持久化往返测覆盖（Wave-0 契约先行同款）。
@@ -459,7 +459,7 @@ git commit -m "feat(drawing-P1a): CONTRACT_VERSION 1.10 -> 1.11"
 - Consumes: Task 3 `DrawingObject`。
 - Produces:
   - `enum JSONTopLevelArray { static func rawElementStrings(_ data: Data) -> [String]? }`——**平台无关、host 可测的顶层 JSON 数组切分器**：把数组文本按顶层元素切成各元素的**原始字节文本**（正确处理字符串内转义与嵌套 `{}[]`），非顶层数组 → `nil`。
-  - `public enum LossyDrawingElement: Equatable, Sendable { case known(DrawingObject); case unknownRaw(String) }`——**有序**元素（已知条 / 未识别条原始字节文本）。**保序是正确性要求**（codex plan-R2-high：分开存会把未识别条排到已知条之后、改变顺序/图层）。
+  - `public enum LossyDrawingElement: Equatable, Sendable { case known(DrawingObject, raw: String); case unknownRaw(String) }`——**有序**元素，**每条都携带原始 JSON 字节 `raw`**（W1/codex plan-R12：`.known` 也留 raw，`encoded()` 原样重发以保住现有 toolType 上的未来未知字段）。**保序是正确性要求**（codex plan-R2-high：分开存会把未识别条排到已知条之后、改变顺序/图层）。
   - `public struct LossyDrawingArray: Equatable, Sendable`（**不 Codable**——用下面显式 `decode`/`encoded`）
     - `public let elements: [LossyDrawingElement]`（已知/未识别**按原顺序**排列）
     - `public init(elements: [LossyDrawingElement])`
@@ -528,9 +528,9 @@ struct LossyDrawingArrayTests {
         let arr = try LossyDrawingArray.decode(json)
         // elements 有序：第 0=known A、第 1=unknownRaw future、第 2=known B
         guard arr.elements.count == 3,
-              case .known(let a) = arr.elements[0],
+              case .known(let a, _) = arr.elements[0],
               case .unknownRaw(let mid) = arr.elements[1],
-              case .known(let b) = arr.elements[2] else { Issue.record("顺序错"); return }
+              case .known(let b, _) = arr.elements[2] else { Issue.record("顺序错"); return }
         #expect(a.id == "A" && b.id == "B" && mid == uF)
         // 回写后未识别条仍在【中间】（不被排到末尾）
         let out = String(decoding: try arr.encoded(), as: UTF8.self)
@@ -554,6 +554,35 @@ struct LossyDrawingArrayTests {
         let json = Data(#"[{"toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0}]"#.utf8)
         let arr = try LossyDrawingArray.decode(json)
         #expect(arr.drawings[0].id == "legacy-idx-0")
+    }
+
+    // ── W1（codex plan-R12-high）：现有 toolType 上的【未来未知字段】也须保真 ──
+    @Test("已知工具 horizontal + 未来字段：decode 成 .known、未编辑 encoded() 逐字节保留未来字段")
+    func knownToolFutureFieldSurvivesUnedited() throws {
+        // 合法 horizontal（所有必填字段都在）+ 未来客户端加的 "futureX"/"futureObj"
+        let future = #"{"id":"K","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"m3","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain","futureX":9,"futureObj":{"k":1}}"#
+        let arr = try LossyDrawingArray.decode(Data(("[" + future + "]").utf8))
+        #expect(arr.drawings.count == 1)                       // 解码成功（未来字段被 JSONDecoder 忽略）
+        #expect(arr.drawings[0].id == "K")
+        let out = String(decoding: try arr.encoded(), as: UTF8.self)
+        #expect(out.contains("\"futureX\":9"))                 // 未编辑→原样字节，未来字段仍在
+        #expect(out.contains("\"futureObj\""))
+    }
+
+    @Test("已知工具 horizontal + 未来字段：编辑已知字段后 merge 仍保未来 key、且已知字段已更新")
+    func knownToolFutureFieldSurvivesEdit() throws {
+        let future = #"{"id":"K","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"m3","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain","futureX":9}"#
+        let arr = try LossyDrawingArray.decode(Data(("[" + future + "]").utf8))
+        var edited = arr.drawings[0]
+        edited = DrawingObject(id: edited.id, toolType: edited.toolType, anchors: edited.anchors,
+            isExtended: edited.isExtended, panelPosition: edited.panelPosition, revealTick: edited.revealTick,
+            period: edited.period, lineSubType: edited.lineSubType, lineStyle: edited.lineStyle,
+            thickness: 5, colorToken: edited.colorToken, labelMode: edited.labelMode, locked: edited.locked,
+            text: edited.text, fontSize: edited.fontSize, textColorToken: edited.textColorToken,
+            textForm: edited.textForm, tailAnchor: edited.tailAnchor)     // 改 thickness 1→5
+        let out = String(decoding: try arr.reconciled(currentKnown: [edited]).encoded(), as: UTF8.self)
+        #expect(out.contains("\"futureX\":9"))                 // merge 后未来 key 仍在
+        #expect(out.contains("\"thickness\":5"))               // 已知字段已更新
     }
 }
 ```
@@ -628,9 +657,14 @@ enum JSONTopLevelArray {
     }
 }
 
-/// 有损画线数组的【有序】元素：已知条 或 未识别条（原始字节文本）。保序是正确性要求（codex plan-R2-high）。
+/// 有损画线数组的【有序】元素。**每条都携带原始 JSON 字节文本 `raw`**（W1/codex plan-R12-high）：
+/// - `.known`：解码成功的条，**同时**保留其原始字节 → `encoded()` 原样重发，
+///   保住**未来客户端在现有 toolType（如 horizontal）上加的未知字段**（Swift `JSONDecoder` 会忽略多余 key，
+///   若重序列化会删掉它们）。
+/// - `.unknownRaw`：解码失败的条（未知 toolType / 损坏）——只有原始字节。
+/// 保序是正确性要求（codex plan-R2-high）；每条留 raw 是前向兼容要求（codex plan-R12-high）。
 public enum LossyDrawingElement: Equatable, Sendable {
-    case known(DrawingObject)
+    case known(DrawingObject, raw: String)
     case unknownRaw(String)
 }
 
@@ -638,16 +672,24 @@ public struct LossyDrawingArray: Equatable, Sendable {
     public let elements: [LossyDrawingElement]      // 已知/未识别按【原顺序】排列
 
     public init(elements: [LossyDrawingElement]) { self.elements = elements }
-    /// 便捷：纯已知条（新写入路径）。
-    public init(drawings: [DrawingObject]) { self.elements = drawings.map { .known($0) } }
+    /// 便捷：纯已知条（新写入路径）——raw = 该条编码（无未来字段，编码即权威）。
+    public init(drawings: [DrawingObject]) {
+        self.elements = drawings.map { .known($0, raw: LossyDrawingArray.encodeKnown($0)) }
+    }
 
     /// 按序过滤已知条（供 Task 6/7 消费，名/类型不变）。
     public var drawings: [DrawingObject] {
-        elements.compactMap { if case .known(let d) = $0 { return d } else { return nil } }
+        elements.compactMap { if case .known(let d, _) = $0 { return d } else { return nil } }
     }
     /// 按序取未识别条原文（诊断/测试用）。
     public var unknownRaw: [String] {
         elements.compactMap { if case .unknownRaw(let s) = $0 { return s } else { return nil } }
+    }
+
+    /// 良构 `DrawingObject` 的编码文本（DrawingObject 恒可编码；防御性 fallback）。
+    static func encodeKnown(_ d: DrawingObject) -> String {
+        guard let data = try? JSONEncoder().encode(d) else { return "{}" }
+        return String(decoding: data, as: UTF8.self)
     }
 
     public static func decode(_ data: Data) throws -> LossyDrawingArray {
@@ -658,17 +700,20 @@ public struct LossyDrawingArray: Equatable, Sendable {
         var elems: [LossyDrawingElement] = []
         for (index, raw) in rawElements.enumerated() {
             if let d = try? decoder.decode(DrawingObject.self, from: Data(raw.utf8)) {
-                // 无 id 的成功条按【原下标】回填命名空间唯一 id（D16）
                 if d.id.isEmpty {
-                    elems.append(.known(DrawingObject(
+                    // 无 id 的成功条 = 旧版本（pre-id）blob——按【原下标】回填命名空间唯一 id（D16）。
+                    // 旧 blob 无未来未知字段，重编码安全且把回填 id 写进 raw（保证 id 持久）。
+                    let withId = DrawingObject(
                         id: "legacy-idx-\(index)", toolType: d.toolType, anchors: d.anchors,
                         isExtended: d.isExtended, panelPosition: d.panelPosition, revealTick: d.revealTick,
                         period: d.period, lineSubType: d.lineSubType, lineStyle: d.lineStyle,
                         thickness: d.thickness, colorToken: d.colorToken, labelMode: d.labelMode,
                         locked: d.locked, text: d.text, fontSize: d.fontSize,
-                        textColorToken: d.textColorToken, textForm: d.textForm, tailAnchor: d.tailAnchor)))
+                        textColorToken: d.textColorToken, textForm: d.textForm, tailAnchor: d.tailAnchor)
+                    elems.append(.known(withId, raw: encodeKnown(withId)))
                 } else {
-                    elems.append(.known(d))
+                    // 成功解码且有 id → 保留【原始字节】raw（含未来客户端可能加的未知字段，codex R12-high）。
+                    elems.append(.known(d, raw: raw))
                 }
             } else {
                 elems.append(.unknownRaw(raw))      // 原始文本，字节级保留（【不】重序列化）、【保序】
@@ -678,21 +723,35 @@ public struct LossyDrawingArray: Equatable, Sendable {
     }
 
     public func encoded() throws -> Data {
-        // 按【原顺序】走 elements：.known JSONEncoder 编码、.unknownRaw 原样重发，, 拼接包 []。
-        let encoder = JSONEncoder()
+        // 按【原顺序】走 elements：**每条都用 raw 原样重发**（.known 也不重序列化 → 保未来字段），, 拼接包 []。
         var parts: [String] = []
         for e in elements {
             switch e {
-            case .known(let d): parts.append(String(decoding: try encoder.encode(d), as: UTF8.self))
-            case .unknownRaw(let s): parts.append(s)
+            case .known(_, let raw): parts.append(raw)
+            case .unknownRaw(let raw): parts.append(raw)
             }
         }
         return Data(("[" + parts.joined(separator: ",") + "]").utf8)
+    }
+
+    /// 把当前已知字段【覆盖进原始 JSON 对象、保留其未知 key】（编辑路径用；未知 key 必须存活，
+    /// 字节不必全等——codex plan-R12）。原 raw 非对象 → fail-closed（保守）。
+    static func mergeKnownFields(into rawJSON: String, from obj: DrawingObject) throws -> String {
+        guard var dict = (try? JSONSerialization.jsonObject(with: Data(rawJSON.utf8))) as? [String: Any] else {
+            throw AppError.persistence(.dbCorrupted)          // 原 raw 不是对象 → 无法安全 merge
+        }
+        guard let objDict = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(obj))) as? [String: Any] else {
+            throw AppError.persistence(.dbCorrupted)
+        }
+        for (k, v) in objDict { dict[k] = v }                 // 覆盖/新增已知 key；保留 dict 里 obj 没有的未知 key
+        let merged = try JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
+        return String(decoding: merged, as: UTF8.self)
     }
 }
 ```
 
 > 说明：`decode` 里 `d.id.isEmpty` 分支需要 Task 3 的 `init(from:)` 在无 id 时给空串——把 Task 3 的 `?? UUID().uuidString` 改为 `?? ""`，让「按下标回填」在数组层做（顶层单条 DrawingObject 解码时无 index 上下文）。**实施 Task 5 时回改 Task 3 的 `init(from:)`：`self.id = try c.decodeIfPresent(DrawingID.self, forKey: .id) ?? ""`，并把 Task 3 的 legacy 测试 `#expect(d.id.isEmpty == false)` 改为在数组层验证（本 Task 已覆盖）。**
+> **W1（codex R12）**：`encoded()` 对 `.known` 也发 `raw`（不重序列化）→ 未编辑的成功解码条**逐字节保留**，含未来客户端在现有 toolType 上加的未知字段。编辑经 `reconciled`（Task 12）走 `mergeKnownFields`：覆盖已知 key、保留未知 key。`raw` 恒为该条的权威磁盘字节（decode=原始 / 编辑=merge / 新增=encode）。
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1447,7 +1506,7 @@ Expected: FAIL — INSERT 没写 draw_uuid/style_json；`drawingFromRow` 没读 
 - **签名改带 lossy**：`saveWorking(recordId:stepTick:lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID] = [])`、`commitSaved(recordId:lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID] = [])`——**接收完整 lossy（含 unknownRaw 有序），原样保真回写**，不从 `[DrawingObject]` 重建。
 - 写：`jsonEncode(drawings)` → `ReviewArchiveWrapper(lossy: lossy, hiddenIds: hiddenOriginalIds).encodedColumn()`（内含 `lossy.encoded()` 字节保真）。
 - 读：`loadWorking` → `ReviewWorking(stepTick:, lossy: ReviewArchiveWrapper.decodeColumn(col).lossy, hiddenOriginalIds: <wrapper.hiddenIds>)`；`loadSaved`/`loadArchive` 同理填 `savedLossy`/`workingLossy` + hiddenIds。
-- **coordinator 调用点（P1a 仅签名对齐，非行为）**：现 `saveWorking(drawings: engine.reviewDrawings)` → 改 `saveWorking(lossy: LossyDrawingArray(drawings: engine.reviewDrawings))`（P1a 传纯已知条）。**把加载 blob 带来的 unknownRaw 一路穿过 engine/coordinator autosave/resume-save/commit 路径 = Task 12（P1a，Z1）**——引擎携带 `loadedReviewLossy`、save 用 `reconciled(currentKnown:)` 重发（未识别条原位保留）。本 Task 只改 repo 签名/形状（`saveWorking(lossy:)`/wrapper）；engine/coordinator 接线（`saveWorking(lossy: engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings))`、commitSaved 同理）在 Task 12。本 Task 集成测试证 **repo 契约无损**（给列种 unknown → load 再 save → 字节不变）；coordinator 级 autosave/commit 保真测试在 Task 12。
+- **coordinator 调用点（P1a 仅签名对齐，非行为）**：现 `saveWorking(drawings: engine.reviewDrawings)` → 改 `saveWorking(lossy: LossyDrawingArray(drawings: engine.reviewDrawings))`（P1a 传纯已知条）。**把加载 blob 带来的 unknownRaw 一路穿过 engine/coordinator autosave/resume-save/commit 路径 = Task 12（P1a，Z1）**——引擎携带 `loadedReviewLossy`、save 用 `reconciled(currentKnown:)` 重发（未识别条原位保留）。本 Task 只改 repo 签名/形状（`saveWorking(lossy:)`/wrapper）；engine/coordinator 接线（`saveWorking(lossy: try engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings))`、commitSaved 同理；`reconciled` 现 `throws`/W1）在 Task 12。本 Task 集成测试证 **repo 契约无损**（给列种 unknown → load 再 save → 字节不变）；coordinator 级 autosave/commit 保真测试在 Task 12。
 
 > 说明：本 Task 只改**存取形状**（wrapper + draw_uuid/style_json 列）；hide/show 的**行为逻辑**在 P5。saveWorking 新增 hiddenIds 参默认 `[]`，coordinator 现有调用不破。
 
@@ -1664,10 +1723,10 @@ struct CoordinatorLossyPreserveTests {
     }
 
     @Test("reconciled 按 id：删 unknown 之前的 known → 未来条仍在原位（不被后续 known 挤到前面）")
-    func reconciledByIdPreservesOrderOnDelete() {
+    func reconciledByIdPreservesOrderOnDelete() throws {
         let a = decodedKnown(known("gA")); let bK = decodedKnown(known("gB"))
-        let lossy = LossyDrawingArray(elements: [.known(a), .unknownRaw(unknown), .known(bK)])
-        let out = String(decoding: try! lossy.reconciled(currentKnown: [bK]).encoded(), as: UTF8.self)  // 删了 A
+        let lossy = LossyDrawingArray(elements: [.known(a, raw: known("gA")), .unknownRaw(unknown), .known(bK, raw: known("gB"))])
+        let out = String(decoding: try lossy.reconciled(currentKnown: [bK]).encoded(), as: UTF8.self)  // 删了 A
         let iU = out.range(of: "__future__")!.lowerBound
         let iB = out.range(of: #""gB""#)!.lowerBound
         #expect(iU < iB)                                               // 未来条仍在 B 之前（原位），非位置法的 [B, 未来]
@@ -1685,6 +1744,18 @@ struct CoordinatorLossyPreserveTests {
         let col: String = try Row.fetchOne(db, sql: "SELECT working_drawings FROM review_archive WHERE record_id=8")!["working_drawings"]
         #expect(col.contains("h-1") && col.contains("h-2"))           // 隐藏态未被覆盖成 []
     }
+
+    @Test("已知工具 horizontal + 未来字段：pending_replay load→saveProgress 后未来字段仍在（W1/R12）")
+    func replayAutosavePreservesKnownToolFutureField() async throws {
+        let (coord, db) = try makeCoordinator()
+        // 现有 toolType（horizontal，全必填字段）+ 未来客户端加的 "futureX"
+        let knownFuture = #"{"id":"g1","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"m3","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain","futureX":9}"#
+        try seedPendingReplayRow(db, recordId: 42, drawingsJSON: "[\(knownFuture)]")
+        let engine = try await coord.resumePendingReplay()!            // 解码成功、raw 携带 futureX
+        try await coord.saveProgress(engine: engine)                   // 未编辑 autosave → 原样 raw
+        let col: String = try Row.fetchOne(db, sql: "SELECT drawings FROM pending_replay WHERE id=1")!["drawings"]
+        #expect(col.contains("\"futureX\":9"))                        // 现有工具上的未来字段未被重序列化删掉
+    }
 }
 ```
 > `makeCoordinator`/`seedPendingReplayRow`/`seedReviewWorking`/`decodedKnown` = 测试工厂，实施时对齐 `CoordinatorReplayPersistenceTests` 既有 helper（真 coordinator + in-memory app.sqlite）。
@@ -1698,21 +1769,32 @@ struct CoordinatorLossyPreserveTests {
 ```swift
     /// 用当前已知条重建 lossy：**按稳定 `DrawingObject.id` 归并**（非位置——否则删除一条 known 会把后续 known 挪到
     /// unknownRaw 前面破坏顺序，codex R11-medium；deleteDrawing/removeReviewDrawing 现已存在故 P1a 必须按 id）。
-    /// 规则：按原序走 elements——`.unknownRaw` 原位保留；`.known` 若其 id 仍在 currentKnown 则原位发射更新后的该条、
-    /// 否则（被删）跳过；currentKnown 里 id 不在原 elements 的（新增画线）按其在 currentKnown 的顺序追加末尾。
-    func reconciled(currentKnown: [DrawingObject]) -> LossyDrawingArray {
+    /// **每条保 raw（W1/codex R12）**：`.unknownRaw` 原位保留；`.known` 若 id 仍在 currentKnown——
+    /// **未编辑**（值相等）→ 原样 raw（保未来字段）、**已编辑** → `mergeKnownFields`（覆盖已知 key、保未知 key）；
+    /// id 不在（被删）跳过；currentKnown 里原 elements 没有的（新增）追加末尾（raw=编码）。
+    /// 编辑条若无法安全 merge（原 raw 非对象）→ throw fail-closed（不静默改写）。
+    func reconciled(currentKnown: [DrawingObject]) throws -> LossyDrawingArray {
         let byId = Dictionary(currentKnown.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var emitted = Set<DrawingID>()
         var out: [LossyDrawingElement] = []
         for el in elements {
             switch el {
-            case .known(let old):
-                if let cur = byId[old.id] { out.append(.known(cur)); emitted.insert(old.id) }   // id 仍在→原位更新；被删→跳过
+            case .known(let old, let raw):
+                guard let cur = byId[old.id] else { continue }                 // 被删 → 跳过
+                if cur == old {
+                    out.append(.known(old, raw: raw))                         // 未编辑 → 原样 raw（保未来字段）
+                } else {
+                    let merged = try LossyDrawingArray.mergeKnownFields(into: raw, from: cur)
+                    out.append(.known(cur, raw: merged))                      // 已编辑 → merge 保未知 key
+                }
+                emitted.insert(old.id)
             case .unknownRaw(let r):
-                out.append(.unknownRaw(r))                                                       // 未识别条原位保留
+                out.append(.unknownRaw(r))                                    // 未识别条原位保留
             }
         }
-        for k in currentKnown where !emitted.contains(k.id) { out.append(.known(k)) }             // 真新增（原不在）追加末尾
+        for k in currentKnown where !emitted.contains(k.id) {
+            out.append(.known(k, raw: LossyDrawingArray.encodeKnown(k)))       // 真新增（原不在）追加末尾
+        }
         return LossyDrawingArray(elements: out)
     }
 ```
@@ -1721,7 +1803,7 @@ struct CoordinatorLossyPreserveTests {
 
 ③ `TrainingSessionCoordinator.swift`：
 - **load 灌入**：`resumePending`(`:288`)/`startReplay`(`:775`) 的 `initialDrawings: pending.drawings` 旁加 `initialDrawingsLossy: pending.lossy`；`buildReviewEngine`(`:464`) 的 `engine.setReviewDrawings(reviewDrawings)` 改 `engine.setReviewLossy(reviewLossy, hiddenIds: reviewHiddenIds)`（`review()`/`resumePendingReview` 把 `w.lossy` + `w.hiddenOriginalIds`/baseline 传下来）。
-- **save 重建**：`saveProgress`(`:548`/`:575`/`:621`) 建 `PendingReplay`/`Pending` 时 `lossy: engine.loadedDrawingsLossy.reconciled(currentKnown: engine.drawings)`（非 `drawings: engine.drawings`）；`persistReviewWorkingIfChanged`(`:879`) `saveWorking(...lossy: engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings), hiddenOriginalIds: engine.loadedReviewHiddenIds)`（**传回携带的 hiddenIds、不用默认 `[]`**，codex R11-high；P1a 无 hide 编辑故 = 加载值原样保存）；`commitSaved`(`:898`) 同理传 `engine.loadedReviewHiddenIds`。
+- **save 重建**：`saveProgress`(`:548`/`:575`/`:621`) 建 `PendingReplay`/`Pending` 时 `lossy: try engine.loadedDrawingsLossy.reconciled(currentKnown: engine.drawings)`（非 `drawings: engine.drawings`；`reconciled` 现 `throws`——编辑条无法安全 merge 则 fail-closed 中止 save，不静默改写，W1）；`persistReviewWorkingIfChanged`(`:879`) `saveWorking(...lossy: try engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings), hiddenOriginalIds: engine.loadedReviewHiddenIds)`（**传回携带的 hiddenIds、不用默认 `[]`**，codex R11-high；P1a 无 hide 编辑故 = 加载值原样保存）；`commitSaved`(`:898`) 同理传 `engine.loadedReviewHiddenIds`。这些 save 方法已 `throws`（GRDB 写），`try` 自然传播。
 
 - [ ] **Step 4: run PASS + 全量**：`cd ios/Contracts && swift test 2>&1 | tail -6`（两框架 0 fail）+ Catalyst build-for-testing SUCCEEDED。
 
@@ -1767,6 +1849,7 @@ git commit -m "feat(drawing-P1a): 引擎/coordinator 携带 lossy，全 save 路
 - **codex plan-R2/R3/R4/R5/R6 收口**：R2 `LossyDrawingArray` 改**有序** `elements` 保未识别条原位 + wrapper 用 `JSONObjectScan` 保 `drawings` 原始字节（不重序列化整体）；R3 Task 10 finalized 行 NULL style_json **行感知兜底**（`is_extended`→lineSubType、锚点→period）+ 未知 tool_type **跳过**不伪装 `.horizontal`；**R4/R5/R6（公开发布标准，[[project_app_public_release_intent]]；分层决策 Y）**：`ReviewWorking/PendingReplay` 携带有序 `lossy`（`drawings` 计算属性），三处画线数组边界（record/review/pending）均 **① 有损解码永不崩 + ② repo load→save 往返无损（同内容逐字节+保序）**；R5 修 pending append 破坏顺序（改重发有序 `lossy`）+ 切分器拒尾部垃圾；R6 修 `ReviewWorking` 结构体片段补 `lossy`（与接口 + `w.lossy` 用法一致）。**（§Y 分层曾拟把 coordinator save 保真延后 P1b；codex R9 指出「版本化 PR 须自洽安全」→ user 选 Z1，见下条：该保真由 Task 12 挪回 P1a，P1a 自洽安全，A 字节保真在 P1a 即完整。）**
 - **codex plan-R7 收口**：**切分器拒畸形 JSON**——`JSONTopLevelArray` 拒绝空槽（尾随 `[x,]`/前导 `[,x]`/连续 `[x,,y]`/纯空白元素），空数组 `[]` 仍合法；回归测试：尾/首/双逗号、纯空白元素、`[valid]]`、`[valid]{junk}` 全 → nil（`.dbCorrupted`，不被静默"修好"）。
 - **codex plan-R8/R9 收口 → 决策 Z1（P1a 自洽安全）**：R8 统一「引擎携带 lossy」延后目标（消 P1b-vs-P5 矛盾）；R9 指出「P1a bump 1.11+迁移=版本化 PR 但 autosave 仍丢 unknown → 不自洽安全」。**user 选 Z1**：**新增 Task 12** 把 engine/coordinator 携带 `lossy`（`reconciled(currentKnown:)` 保未识别条原位）挪回 **P1a**——D21「全 save 路径（autosave/resume-save/commit）字节保真」在 P1a 完整达成、bump 1.11 站得住、单独发版也不丢「未来版本写的画线条」；不再需「与 P1b 同版本发布」发布流程兜底。画线编辑 UI 仍 P1b。
+- **codex plan-R12 收口（1 high，W1）**：lossy 保真粒度从「只保未知 toolType/坏条」升级为「**每条画线保原始 JSON**」——`LossyDrawingElement.known` 改带 `raw: String`；`encoded()` 对 `.known` 也发 `raw`（不重序列化）→ 现有 toolType（如 horizontal）上**未来客户端加的未知字段**在未编辑 load→autosave 后逐字节保留；编辑经 `reconciled`→`mergeKnownFields`（覆盖已知 key、保未知 key，不可安全 merge 则 throw fail-closed）。legacy（pre-id）blob 无未来字段故回填 id 时重编码安全。新增 fixtures：`LossyDrawingArrayTests` 已知工具+未来字段（未编辑/编辑）+ `CoordinatorLossyPreserveTests` pending load→autosave 保未来字段。`reconciled` 改 `throws`，coordinator save 调用点 `try`（save 已 throws 自然传播）。
 - **codex plan-R11 收口（1 high+1 med，Z1 精化）**：① 引擎/coordinator **也携带 `loadedReviewHiddenIds`**、autosave/commit 传回（不用默认 `[]` 覆盖 P5 写的隐藏态使已隐藏线重现，codex R11-high）+ hiddenIds load→save 不变 fixture；② `reconciled` **从「按位置」改「按稳定 `DrawingObject.id`」**——删一条 known 时未识别条仍原位（位置法会把后续 known 挤到 unknown 前破坏顺序；`deleteDrawing/removeReviewDrawing` 现已存在故 P1a 即须按 id，非 P1b）+ 删 known 绕 unknown 保序 fixture。
 - **codex plan-R10 收口（1 high+1 med）**：① `ReviewArchive` 结构体片段补 `savedLossy/workingLossy`（`savedDrawings/workingDrawings` 降计算属性，同 R6 ReviewWorking 修法）——与「携带 lossy 保 unknownRaw 跨 loadArchive→save」接口一致，加 loadArchive→save 未来条字节保真 fixture；② `ReviewArchiveWrapper.decodeColumn` 的 `hiddenIds`：缺失→`[]`，**present 但 malformed（非 `[String]`）→ `.dbCorrupted` fail-closed**（不静默当空覆盖唯一隐藏态副本），加 缺失/合法/malformed 三 fixtures。
 
