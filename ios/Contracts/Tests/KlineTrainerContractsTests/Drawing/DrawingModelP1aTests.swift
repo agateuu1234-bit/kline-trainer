@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import KlineTrainerContracts
 
@@ -32,5 +33,46 @@ struct DrawingToolTypeExpansionTests {
         // legacy 两 case 仍可解码（历史 blob 兼容）
         #expect(DrawingToolType(rawValue: "ray") == .ray)
         #expect(DrawingToolType(rawValue: "time") == .time)
+    }
+}
+
+@Suite("Drawing P1a — DrawingObject 全字段 Codable")
+struct DrawingObjectCodableTests {
+    private func sampleAnchor() -> DrawingAnchor {
+        DrawingAnchor(period: .m60, candleIndex: 3, price: 1710.5)
+    }
+
+    @Test("全字段编码→解码往返一致")
+    func fullRoundTrip() throws {
+        let d = DrawingObject(
+            id: "gen-1", toolType: .trend, anchors: [sampleAnchor(), sampleAnchor()],
+            isExtended: true, panelPosition: 1, revealTick: 42,
+            period: .m60, lineSubType: .segment, lineStyle: .dash2, thickness: 4,
+            colorToken: .blue, labelMode: .right, locked: true,
+            text: "颈线", fontSize: 20, textColorToken: .red, textForm: .borderFilled,
+            tailAnchor: sampleAnchor())
+        let data = try JSONEncoder().encode(d)
+        let back = try JSONDecoder().decode(DrawingObject.self, from: data)
+        #expect(back == d)
+    }
+
+    @Test("旧 blob（仅 5 字段）解码 → 新字段取语义默认")
+    func legacyBlobDefaults() throws {
+        // 模拟 #139 时代的 DrawingObject JSON（无新字段）
+        let legacy = """
+        {"toolType":"horizontal","anchors":[{"period":"3m","candleIndex":2,"price":9.9}],
+         "isExtended":true,"panelPosition":0,"revealTick":7}
+        """.data(using: .utf8)!
+        let d = try JSONDecoder().decode(DrawingObject.self, from: legacy)
+        #expect(d.lineSubType == .ray)          // isExtended:true → .ray（迁移映射）
+        #expect(d.lineStyle == .solid)
+        #expect(d.thickness == 1)
+        #expect(d.colorToken == .orange)
+        #expect(d.labelMode == .hidden)
+        #expect(d.locked == false)
+        #expect(d.text == "")
+        #expect(d.tailAnchor == nil)
+        #expect(d.period == .m3)                // 取 anchors.first.period
+        #expect(d.id.isEmpty == true)            // 无 id → 解码为空串（Task 5 数组层按位回填 legacy-idx-<N>）
     }
 }
