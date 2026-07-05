@@ -584,6 +584,23 @@ struct LossyDrawingArrayTests {
         #expect(out.contains("\"futureX\":9"))                 // merge 后未来 key 仍在
         #expect(out.contains("\"thickness\":5"))               // 已知字段已更新
     }
+
+    @Test("编辑把可选已知字段 tailAnchor 清空 → 输出不再含 tailAnchor（不从旧 raw 复活）、未来 key 仍在")
+    func editClearingOptionalKnownFieldRemovesIt() throws {
+        // 原 raw 有 tailAnchor（带框标注）+ 未来 key
+        let raw = #"{"id":"K","toolType":"text","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"m3","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"hi","fontSize":14,"textColorToken":"orange","textForm":"borderFilled","tailAnchor":{"period":"m3","candleIndex":5,"price":10},"futureX":9}"#
+        let arr = try LossyDrawingArray.decode(Data(("[" + raw + "]").utf8))
+        let e = arr.drawings[0]
+        let cleared = DrawingObject(id: e.id, toolType: e.toolType, anchors: e.anchors,
+            isExtended: e.isExtended, panelPosition: e.panelPosition, revealTick: e.revealTick,
+            period: e.period, lineSubType: e.lineSubType, lineStyle: e.lineStyle, thickness: e.thickness,
+            colorToken: e.colorToken, labelMode: e.labelMode, locked: e.locked, text: e.text,
+            fontSize: e.fontSize, textColorToken: e.textColorToken, textForm: e.textForm,
+            tailAnchor: nil)                                    // 尾巴清空（切到无框形式/删尾巴）
+        let out = String(decoding: try arr.reconciled(currentKnown: [cleared]).encoded(), as: UTF8.self)
+        #expect(!out.contains("tailAnchor"))                   // 已清空的可选已知字段不复活（codex R13-high）
+        #expect(out.contains("\"futureX\":9"))                 // 未来未知 key 仍保留
+    }
 }
 ```
 
@@ -734,6 +751,17 @@ public struct LossyDrawingArray: Equatable, Sendable {
         return Data(("[" + parts.joined(separator: ",") + "]").utf8)
     }
 
+    /// 本模型【全部已知磁盘 key】集（= `DrawingObject` 的 JSON key 全集）。merge 时据此清除
+    /// 当前值为 nil 而被 `encodeIfPresent` 省略的可选已知字段（如 `tailAnchor`），防其从旧 raw 复活。
+    /// 实施：与 `DrawingObject.CodingKeys.allCases`（或 spec §4.2 字段清单）逐一对齐，含
+    /// id/toolType/anchors/isExtended/panelPosition/revealTick/period/lineSubType/lineStyle/thickness/
+    /// colorToken/labelMode/locked/text/fontSize/textColorToken/textForm/tailAnchor。
+    static let knownDiskKeys: Set<String> = [
+        "id","toolType","anchors","isExtended","panelPosition","revealTick","period","lineSubType",
+        "lineStyle","thickness","colorToken","labelMode","locked","text","fontSize",
+        "textColorToken","textForm","tailAnchor"
+    ]
+
     /// 把当前已知字段【覆盖进原始 JSON 对象、保留其未知 key】（编辑路径用；未知 key 必须存活，
     /// 字节不必全等——codex plan-R12）。原 raw 非对象 → fail-closed（保守）。
     static func mergeKnownFields(into rawJSON: String, from obj: DrawingObject) throws -> String {
@@ -743,7 +771,11 @@ public struct LossyDrawingArray: Equatable, Sendable {
         guard let objDict = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(obj))) as? [String: Any] else {
             throw AppError.persistence(.dbCorrupted)
         }
-        for (k, v) in objDict { dict[k] = v }                 // 覆盖/新增已知 key；保留 dict 里 obj 没有的未知 key
+        // ① 清除「已知 key 集里、但当前编码省略了的」可选已知字段（值改成 nil，如 tailAnchor）——
+        //    否则旧 raw 里的该 key 会被误当"未知 key"保留、save/load 后复活（codex plan-R13-high）。
+        for k in knownDiskKeys where objDict[k] == nil { dict.removeValue(forKey: k) }
+        // ② 覆盖/新增当前编码里的已知 key；dict 里【非已知 key 集】的（未来未知 key）原样保留。
+        for (k, v) in objDict { dict[k] = v }
         let merged = try JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
         return String(decoding: merged, as: UTF8.self)
     }
@@ -1850,6 +1882,7 @@ git commit -m "feat(drawing-P1a): 引擎/coordinator 携带 lossy，全 save 路
 - **codex plan-R7 收口**：**切分器拒畸形 JSON**——`JSONTopLevelArray` 拒绝空槽（尾随 `[x,]`/前导 `[,x]`/连续 `[x,,y]`/纯空白元素），空数组 `[]` 仍合法；回归测试：尾/首/双逗号、纯空白元素、`[valid]]`、`[valid]{junk}` 全 → nil（`.dbCorrupted`，不被静默"修好"）。
 - **codex plan-R8/R9 收口 → 决策 Z1（P1a 自洽安全）**：R8 统一「引擎携带 lossy」延后目标（消 P1b-vs-P5 矛盾）；R9 指出「P1a bump 1.11+迁移=版本化 PR 但 autosave 仍丢 unknown → 不自洽安全」。**user 选 Z1**：**新增 Task 12** 把 engine/coordinator 携带 `lossy`（`reconciled(currentKnown:)` 保未识别条原位）挪回 **P1a**——D21「全 save 路径（autosave/resume-save/commit）字节保真」在 P1a 完整达成、bump 1.11 站得住、单独发版也不丢「未来版本写的画线条」；不再需「与 P1b 同版本发布」发布流程兜底。画线编辑 UI 仍 P1b。
 - **codex plan-R12 收口（1 high，W1）**：lossy 保真粒度从「只保未知 toolType/坏条」升级为「**每条画线保原始 JSON**」——`LossyDrawingElement.known` 改带 `raw: String`；`encoded()` 对 `.known` 也发 `raw`（不重序列化）→ 现有 toolType（如 horizontal）上**未来客户端加的未知字段**在未编辑 load→autosave 后逐字节保留；编辑经 `reconciled`→`mergeKnownFields`（覆盖已知 key、保未知 key，不可安全 merge 则 throw fail-closed）。legacy（pre-id）blob 无未来字段故回填 id 时重编码安全。新增 fixtures：`LossyDrawingArrayTests` 已知工具+未来字段（未编辑/编辑）+ `CoordinatorLossyPreserveTests` pending load→autosave 保未来字段。`reconciled` 改 `throws`，coordinator save 调用点 `try`（save 已 throws 自然传播）。
+- **codex plan-R13 收口（1 high，W1 精化）**：`mergeKnownFields` 加 `knownDiskKeys` 全集，编辑时**显式清除当前值为 nil 而被 `encodeIfPresent` 省略的可选已知字段**（如 `tailAnchor`）——否则旧 raw 里的该 key 被误当"未知 key"保留、save/load 后复活（清空的尾巴/删除的可选字段会回来，codex R13-high）。加「编辑清空 tailAnchor→输出不含 tailAnchor 但未来 key 仍在」回归测试。
 - **codex plan-R11 收口（1 high+1 med，Z1 精化）**：① 引擎/coordinator **也携带 `loadedReviewHiddenIds`**、autosave/commit 传回（不用默认 `[]` 覆盖 P5 写的隐藏态使已隐藏线重现，codex R11-high）+ hiddenIds load→save 不变 fixture；② `reconciled` **从「按位置」改「按稳定 `DrawingObject.id`」**——删一条 known 时未识别条仍原位（位置法会把后续 known 挤到 unknown 前破坏顺序；`deleteDrawing/removeReviewDrawing` 现已存在故 P1a 即须按 id，非 P1b）+ 删 known 绕 unknown 保序 fixture。
 - **codex plan-R10 收口（1 high+1 med）**：① `ReviewArchive` 结构体片段补 `savedLossy/workingLossy`（`savedDrawings/workingDrawings` 降计算属性，同 R6 ReviewWorking 修法）——与「携带 lossy 保 unknownRaw 跨 loadArchive→save」接口一致，加 loadArchive→save 未来条字节保真 fixture；② `ReviewArchiveWrapper.decodeColumn` 的 `hiddenIds`：缺失→`[]`，**present 但 malformed（非 `[String]`）→ `.dbCorrupted` fail-closed**（不静默当空覆盖唯一隐藏态副本），加 缺失/合法/malformed 三 fixtures。
 
