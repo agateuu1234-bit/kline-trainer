@@ -286,6 +286,7 @@ public final class TrainingSessionCoordinator {
                 initialPosition: position,
                 initialMarkers: markers(from: pending.tradeOperations),
                 initialDrawings: pending.drawings,
+                initialDrawingsLossy: pending.lossy,   // P1a Task 12（Z1）：携带完整有损集（保未识别条穿过后续 save）
                 initialTradeOperations: pending.tradeOperations,
                 initialDrawdown: pending.drawdown,
                 initialUpperPeriod: pending.upperPeriod,
@@ -315,8 +316,12 @@ public final class TrainingSessionCoordinator {
     /// `engine.reviewDrawings` 与 committed 基线均种自该 baseline（fresh review：working==committed）。
     public func review(recordId: Int64) async throws -> TrainingEngine {
         let baseline = try loadCommittedBaselineRecovering(recordId: recordId)
+        // P1a Task 12（Z1）：`loadSaved` 仅返回已知投影（saved 列的 unknownRaw 未暴露）——fresh review 无
+        // working 行可携带的完整有损集，故按已知条包装（无 hiddenIds，`loadSaved` 同样不返回）；这与本方法
+        // 此前的行为一致（P1a 只透传"已加载值"，hide/show 编辑写入 = P5）。
         return try await buildReviewEngine(recordId: recordId, startTickOverride: nil,
-                                           reviewDrawings: baseline, committedBaseline: baseline)
+                                           reviewLossy: LossyDrawingArray(drawings: baseline),
+                                           committedBaseline: baseline)
     }
 
     /// review-redesign Task 6：resume-first 续复盘。命中 `.inProgress` → 从 `working.stepTick` 起、
@@ -352,8 +357,11 @@ public final class TrainingSessionCoordinator {
         }
         let baseline = try loadCommittedBaselineRecovering(recordId: recordId)   // saved 坏 → 仅清 saved + toast，保住有效 working
         do {
+            // P1a Task 12（Z1）：`w.lossy`/`w.hiddenOriginalIds` 携带 working 行完整有损集 + 隐藏态，
+            // 使引擎携带的 `loadedReviewLossy`/`loadedReviewHiddenIds` 能在后续 save 路径原样传回。
             return try await buildReviewEngine(recordId: recordId, startTickOverride: w.stepTick,
-                                               reviewDrawings: w.drawings, committedBaseline: baseline,
+                                               reviewLossy: w.lossy, reviewHiddenIds: w.hiddenOriginalIds,
+                                               committedBaseline: baseline,
                                                preloadedRecordBundle: bundle)
         } catch let e as AppError where e == Self.invalidResumeTickError {
             // codex whole-branch R6（high）：`w.stepTick` 落在 `[0, metaStartTick)`——`buildReviewEngine`
@@ -391,7 +399,8 @@ public final class TrainingSessionCoordinator {
     /// `preloadedRecordBundle`：codex whole-branch R5——`resumePendingReview` 校验 `w.stepTick` 时已加载过
     /// 一次 bundle，传入此处复用（避免同一 recordId 重复 `loadRecordBundle`）；nil（`review()` 路径）→ 自行加载。
     private func buildReviewEngine(recordId: Int64, startTickOverride: Int?,
-                                    reviewDrawings: [DrawingObject],
+                                    reviewLossy: LossyDrawingArray,
+                                    reviewHiddenIds: [DrawingID] = [],
                                     committedBaseline: [DrawingObject],
                                     preloadedRecordBundle: (TrainingRecord, [TradeOperation], [DrawingObject])? = nil
                                     ) async throws -> TrainingEngine {
@@ -461,7 +470,7 @@ public final class TrainingSessionCoordinator {
         activeStartedAt = nil                    // D4：review 只读，无进度保存
         activeSessionKey = nil                   // RFC §4.7c：review 无 session key
         activeRecord = record                    // RFC-B D5：复用已加载 record（零新 I/O）
-        engine.setReviewDrawings(reviewDrawings)
+        engine.setReviewLossy(reviewLossy, hiddenIds: reviewHiddenIds)
         reviewRecordId = recordId
         reviewCommittedBaseline = committedBaseline
         reviewSessionToken = UUID()     // Task 7：新复盘 session mint 新 token（陈旧排队 autosave 靠此失效）
@@ -545,7 +554,10 @@ public final class TrainingSessionCoordinator {
                 cashBalance: max(0, engine.cashBalance),
                 feeSnapshot: engine.fees,
                 tradeOperations: engine.tradeOperations,
-                drawings: engine.drawings,
+                // P1a Task 12（Z1）：重发 reconciled 后的完整有损集（非纯 known）——保住加载 blob 里
+                // 未识别（未来版本）的条穿过本次 autosave/resume-save；reconciled 按稳定 id 归并
+                // known 的增/删/改，fail-closed（重复/空 id）抛 .dbCorrupted，随 saveProgress 的 throws 传播。
+                lossy: try engine.loadedDrawingsLossy.reconciled(currentKnown: engine.drawings),
                 startedAt: started,
                 accumulatedCapital: engine.initialCapital,
                 drawdown: engine.drawdown)
@@ -572,7 +584,8 @@ public final class TrainingSessionCoordinator {
             cashBalance: max(0, engine.cashBalance),
             feeSnapshot: engine.fees,
             tradeOperations: engine.tradeOperations,
-            drawings: engine.drawings,
+            // P1a Task 12（Z1）：同上 replay 分支——重发 reconciled 后的完整有损集，保住未识别条穿过 autosave/resume-save。
+            lossy: try engine.loadedDrawingsLossy.reconciled(currentKnown: engine.drawings),
             startedAt: started,
             accumulatedCapital: engine.initialCapital,         // D4：本局起始资金
             drawdown: engine.drawdown,
@@ -773,6 +786,7 @@ public final class TrainingSessionCoordinator {
                 initialPosition: position,
                 initialMarkers: markers(from: pending.tradeOperations),
                 initialDrawings: pending.drawings,
+                initialDrawingsLossy: pending.lossy,   // P1a Task 12（Z1）：携带完整有损集（保未识别条穿过后续 save）
                 initialTradeOperations: pending.tradeOperations,
                 initialDrawdown: pending.drawdown,
                 initialUpperPeriod: pending.upperPeriod,
@@ -876,10 +890,11 @@ public final class TrainingSessionCoordinator {
         guard activeEngine === engine else { return }
         guard let id = reviewRecordId else { return }
         if ReviewNetChange.changed(working: engine.reviewDrawings, committed: reviewCommittedBaseline) {
-            // P1a Task 10（签名对齐，非行为）：纯已知条包成 lossy；加载 blob 带来的 unknownRaw 一路穿过
-            // autosave/resume-save/commit 路径 = Task 12（引擎携带 loadedReviewLossy + reconciled 重发）。
+            // P1a Task 12（Z1）：重发 reconciled 后的完整有损集（非纯 known）+ 原样传回加载来的 hiddenIds
+            // （不用默认 `[]` 覆盖 P5 写的隐藏态，codex R11-high）——保住加载 blob 里未识别的条穿过本次 autosave。
             try reviewArchiveRepo.saveWorking(recordId: id, stepTick: engine.tick.globalTickIndex,
-                                              lossy: LossyDrawingArray(drawings: engine.reviewDrawings))
+                                              lossy: try engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings),
+                                              hiddenOriginalIds: engine.loadedReviewHiddenIds)
         } else {
             try reviewArchiveRepo.clearWorking(recordId: id)
         }
@@ -897,7 +912,10 @@ public final class TrainingSessionCoordinator {
         guard activeEngine === engine, engine.flow.mode == .review else {
             throw AppError.internalError(module: "review", detail: "terminal review write on stale/mismatched session")
         }
-        try reviewArchiveRepo.commitSaved(recordId: id, lossy: LossyDrawingArray(drawings: engine.reviewDrawings))
+        // P1a Task 12（Z1）：同 `persistReviewWorkingIfChanged`——reconciled 重发完整有损集 + 传回加载来的 hiddenIds。
+        try reviewArchiveRepo.commitSaved(recordId: id,
+                                          lossy: try engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings),
+                                          hiddenOriginalIds: engine.loadedReviewHiddenIds)
         reviewCommittedBaseline = engine.reviewDrawings
     }
 

@@ -23,12 +23,22 @@ public final class TrainingEngine {
     public private(set) var drawdown: DrawdownAccumulator
     public private(set) var markers: [TradeMarker]
     public private(set) var drawings: [DrawingObject]
+    /// P1a Task 12（Z1）：加载来的完整有损画线集（含 unknownRaw 原始字节）。`drawings` 是其已知投影
+    /// （`loadedDrawingsLossy.drawings`）。coordinator save 路径经 `loadedDrawingsLossy.reconciled(currentKnown:)`
+    /// 重发，使加载 blob 里未识别（未来版本）的条穿过 autosave/resume-save/commit 全路径存活。
+    public private(set) var loadedDrawingsLossy = LossyDrawingArray(drawings: [])
     /// review-redesign Task 5 最小 shim + **Task 10 落地**：复盘 session 的工作画线集，供 coordinator
     /// 持久化净改动判定（`ReviewNetChange.changed(working: engine.reviewDrawings, committed:)`）读取，
     /// 也是复盘新画线的唯一写入面——`appendReviewDrawing`/`removeReviewDrawing`；`ChartContainerView`
     /// commit 路径经 `routeDrawingCommit` 按 `flow.mode == .review` 路由至此，不污染 committed `drawings`
     /// （committed `drawings` 在 review 中只读）。
     public private(set) var reviewDrawings: [DrawingObject] = []
+    /// P1a Task 12（Z1）：复盘加载来的完整有损画线集（同 `loadedDrawingsLossy`，复盘侧）；`reviewDrawings`
+    /// 是其已知投影。
+    public private(set) var loadedReviewLossy = LossyDrawingArray(drawings: [])
+    /// P1a Task 12（Z1）：复盘加载来的隐藏原训练线 id 集（§11.5/D12）。save 路径原样传回，
+    /// 不得被默认 `[]` 覆盖已加载的隐藏态（codex R11-high）。P1a 只透传，hide/show 写入行为 = P5。
+    public private(set) var loadedReviewHiddenIds: [DrawingID] = []
     public private(set) var upperPanel: PanelViewState
     public private(set) var lowerPanel: PanelViewState
     public private(set) var tradeOperations: [TradeOperation]
@@ -90,6 +100,7 @@ public final class TrainingEngine {
                 initialPosition: PositionManager = .init(),
                 initialMarkers: [TradeMarker] = [],
                 initialDrawings: [DrawingObject] = [],
+                initialDrawingsLossy: LossyDrawingArray? = nil,   // P1a Task 12（Z1）：加载来的完整有损集；nil=纯 initialDrawings 包装
                 initialTradeOperations: [TradeOperation] = [],
                 initialDrawdown: DrawdownAccumulator = .initial,
                 initialUpperPeriod: Period = .m60,             // 默认上区 60m（plan v1.5 L777）；resume 传 PendingTraining.upperPeriod
@@ -141,7 +152,11 @@ public final class TrainingEngine {
         seededDrawdown.update(currentCapital: startTotal)   // peak>startTotal 时把当前回撤并入 maxDrawdown
         self.drawdown = seededDrawdown
         self.markers = initialMarkers
-        self.drawings = initialDrawings
+        // P1a Task 12（Z1）：`loadedDrawingsLossy` = 携带的完整有损集（含 unknownRaw）；`drawings` 是其已知投影。
+        // 用局部变量而非读回 `self.loadedDrawingsLossy`（@Observable 宏访问器需 self 全初始化后才可读）。
+        let seededLossy = initialDrawingsLossy ?? LossyDrawingArray(drawings: initialDrawings)
+        self.loadedDrawingsLossy = seededLossy
+        self.drawings = seededLossy.drawings
         self.tradeOperations = initialTradeOperations
 
         // D7：初始周期组合默认 上区 60m / 下区 日线（plan v1.5 L777）；resume 传入保存的组合（R6）。
@@ -187,6 +202,7 @@ public final class TrainingEngine {
         initialPosition: PositionManager = .init(),
         initialMarkers: [TradeMarker] = [],
         initialDrawings: [DrawingObject] = [],
+        initialDrawingsLossy: LossyDrawingArray? = nil,   // P1a Task 12（Z1）：加载来的完整有损集
         initialTradeOperations: [TradeOperation] = [],
         initialDrawdown: DrawdownAccumulator = .initial,
         initialUpperPeriod: Period = .m60,
@@ -255,7 +271,8 @@ public final class TrainingEngine {
             flow: flow, allCandles: allCandles, maxTick: maxTick, initialTick: initialTick,
             initialCapital: initialCapital, initialCashBalance: initialCashBalance,
             initialPosition: initialPosition, initialMarkers: initialMarkers,
-            initialDrawings: initialDrawings, initialTradeOperations: initialTradeOperations,
+            initialDrawings: initialDrawings, initialDrawingsLossy: initialDrawingsLossy,
+            initialTradeOperations: initialTradeOperations,
             initialDrawdown: initialDrawdown,
             initialUpperPeriod: initialUpperPeriod, initialLowerPeriod: initialLowerPeriod)
     }
@@ -270,8 +287,16 @@ public final class TrainingEngine {
     /// review-redesign Task 6：复盘引擎播种 `reviewDrawings`（committed 基线 或 resume 的 working 画线集）
     /// 的生产入口（由 coordinator `buildReviewEngine` 调用）。Task 5 的 `setReviewDrawingsForTesting`
     /// 仅 DEBUG 测试专用，本方法是唯一生产路径。Task 10 补真实画线路由（appendReviewDrawing 等）后仍保留
-    /// 本 setter 作初始播种入口。
-    public func setReviewDrawings(_ ds: [DrawingObject]) { reviewDrawings = ds }
+    /// 本 setter 作初始播种入口。**P1a Task 12（Z1）**：携带完整有损集 + 加载来的隐藏 id 集（`hiddenIds`），
+    /// 使 save 路径（`persistReviewWorkingIfChanged`/`commitReview`）能经 `loadedReviewLossy.reconciled(currentKnown:)`
+    /// 重发，保住加载 blob 里未识别的条 + 原样传回 hiddenIds（不覆盖成 `[]`，codex R11-high）。
+    public func setReviewLossy(_ l: LossyDrawingArray, hiddenIds: [DrawingID] = []) {
+        loadedReviewLossy = l
+        loadedReviewHiddenIds = hiddenIds
+        reviewDrawings = l.drawings
+    }
+    /// 兼容旧调用（纯已知，无 unknownRaw/hiddenIds）：包成 lossy 走 `setReviewLossy` 唯一实现。
+    public func setReviewDrawings(_ ds: [DrawingObject]) { setReviewLossy(LossyDrawingArray(drawings: ds)) }
 
     /// 规范 mark price（Task 9 收口）：global tick `t` 处 `.m3` 收盘价，越界 clamp 到端根、非 nil。
     /// `currentPrice`／`ReviewLedger.state` 的 `markPriceAtTick`／finalize 三处共用同一入口，杜绝重复实现漂移。
