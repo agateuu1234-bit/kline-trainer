@@ -2,19 +2,22 @@ import Testing
 import Foundation
 @testable import KlineTrainerContracts
 
-@Test func pendingReplay_codableRoundTrip() throws {
-    let p = PendingReplay(
-        recordId: 42,
-        trainingSetFilename: "a.sqlite", globalTickIndex: 7,
-        upperPeriod: .m60, lowerPeriod: .daily,
-        positionData: Data([1, 2, 3]), cashBalance: 99_000,
-        feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
-        tradeOperations: [], drawings: [],
-        startedAt: 1_700_000_000, accumulatedCapital: 100_000,
-        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
-    let data = try JSONEncoder().encode(p)
-    let back = try JSONDecoder().decode(PendingReplay.self, from: data)
-    #expect(back == p)
+// P1a Task 11：PendingReplay 不再 Codable（`lossy: LossyDrawingArray` 携带 unknownRaw，非 Codable，
+// 见 AppState.swift 注释）——本测试改验 Equatable（同构造两次相等），不再走 JSONEncoder/Decoder。
+@Test func pendingReplay_equatableRoundTrip() throws {
+    func make() -> PendingReplay {
+        PendingReplay(
+            recordId: 42,
+            trainingSetFilename: "a.sqlite", globalTickIndex: 7,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: Data([1, 2, 3]), cashBalance: 99_000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+            tradeOperations: [], drawings: [],
+            startedAt: 1_700_000_000, accumulatedCapital: 100_000,
+            drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
+    }
+    let p = make()
+    #expect(make() == p)
 }
 
 @Test func inMemoryPendingReplay_saveLoadClear() throws {

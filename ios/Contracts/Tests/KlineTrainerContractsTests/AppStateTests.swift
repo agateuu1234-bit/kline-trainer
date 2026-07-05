@@ -77,27 +77,30 @@ struct AppStateCodableTests {
         #expect(decoded.finalTick == 4242)
     }
 
+    // P1a Task 11：PendingTraining 不再 Codable（`lossy: LossyDrawingArray` 携带 unknownRaw，非 Codable，
+    // 见 AppState.swift 注释）——本测试改验 Equatable（同构造两次相等）+ 字段值，不再走 JSONEncoder/Decoder。
     @Test func pendingTraining_hasCashBalanceAndDrawdown() throws {
-        let pend = PendingTraining(
-            trainingSetFilename: "foo.zip",
-            globalTickIndex: 10,
-            upperPeriod: .daily,
-            lowerPeriod: .m60,
-            positionData: Data([1, 2, 3]),
-            cashBalance: 9000,
-            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
-            tradeOperations: [],
-            drawings: [],
-            startedAt: 1_700_000_000,
-            accumulatedCapital: 10_000,
-            drawdown: DrawdownAccumulator(peakCapital: 10_000, maxDrawdown: 500),
-            sessionKey: "SK-test"
-        )
-        let data = try JSONEncoder().encode(pend)
-        let decoded = try JSONDecoder().decode(PendingTraining.self, from: data)
-        #expect(decoded == pend)
-        #expect(decoded.cashBalance == 9000)
-        #expect(decoded.drawdown.maxDrawdown == 500)
+        func make() -> PendingTraining {
+            PendingTraining(
+                trainingSetFilename: "foo.zip",
+                globalTickIndex: 10,
+                upperPeriod: .daily,
+                lowerPeriod: .m60,
+                positionData: Data([1, 2, 3]),
+                cashBalance: 9000,
+                feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+                tradeOperations: [],
+                drawings: [],
+                startedAt: 1_700_000_000,
+                accumulatedCapital: 10_000,
+                drawdown: DrawdownAccumulator(peakCapital: 10_000, maxDrawdown: 500),
+                sessionKey: "SK-test"
+            )
+        }
+        let pend = make()
+        #expect(make() == pend)
+        #expect(pend.cashBalance == 9000)
+        #expect(pend.drawdown.maxDrawdown == 500)
     }
 
     @Test func appSettings_mutableRoundTrip() {

@@ -10,7 +10,9 @@ enum PendingTrainingRepositoryImpl {
         let positionB64 = p.positionData.base64EncodedString()
         let feeJSON = try RecordRepositoryImpl.jsonEncode(p.feeSnapshot)
         let opsJSON = try RecordRepositoryImpl.jsonEncode(p.tradeOperations)
-        let drawingsJSON = try RecordRepositoryImpl.jsonEncode(p.drawings)
+        // 保真+保序：直接重发 p.lossy（有序 known+unknown）——**不重排、不把 unknown append 到 known 后面**
+        // （codex R5-high）。load 得到的 p.lossy 已含原有序未识别条；未编辑的 load→save 逐字节+保序无损。
+        let drawingsJSON = String(decoding: try p.lossy.encoded(), as: UTF8.self)
         let drawdownJSON = try RecordRepositoryImpl.jsonEncode(p.drawdown)
 
         try db.execute(sql: """
@@ -49,8 +51,9 @@ enum PendingTrainingRepositoryImpl {
             .sanitizedForLegacyCorruption()  // WB-1：清除 legacy 负/非有限 commissionRate
         let ops: [TradeOperation] = try RecordRepositoryImpl.jsonDecode(opsJSON,
                                                                        as: [TradeOperation].self)
-        let drawings: [DrawingObject] = try RecordRepositoryImpl.jsonDecode(drawingsJSON,
-                                                                            as: [DrawingObject].self)
+        // 有损解码（P1a Task 11）：单条未知/未来 toolType 只跳过、不整组失败；整体数组结构性损坏
+        // （非法 JSON/非顶层数组）仍 → .dbCorrupted（LossyDrawingArray.decode 内部保持该语义）。
+        let lossy = try LossyDrawingArray.decode(Data(drawingsJSON.utf8))
         let drawdown: DrawdownAccumulator = try RecordRepositoryImpl.jsonDecode(drawdownJSON,
                                                                                 as: DrawdownAccumulator.self)
         // 完整 migrator 路径下（0004 回填 + savePending 恒写）理论不可达；防御性守卫 raw-SQL/未来 fixture 漏写
@@ -63,7 +66,7 @@ enum PendingTrainingRepositoryImpl {
             positionData: positionData,
             cashBalance: row["cash_balance"],
             feeSnapshot: fee,
-            tradeOperations: ops, drawings: drawings,
+            tradeOperations: ops, lossy: lossy,
             startedAt: row["started_at"],
             accumulatedCapital: row["accumulated_capital"],
             drawdown: drawdown,

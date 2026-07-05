@@ -83,7 +83,10 @@ public struct DrawdownAccumulator: Codable, Equatable, Sendable {
 // MARK: - Pending Training（含 cashBalance + drawdown；v1.3 denormalize）
 // v1.6（Wave 3 10a）：+sessionKey（durable session key，RFC §4.7c）
 
-public struct PendingTraining: Codable, Equatable, Sendable {
+// P1a Task 11：不再 Codable（`lossy: LossyDrawingArray` 非 Codable，见 ReviewWorking 同款先例）；
+// 生产/测试均不依赖本结构体整体的 JSONEncoder/JSONDecoder 往返（repo 边界的 JSON 编解码走各字段独立
+// jsonEncode/jsonDecode + LossyDrawingArray，不经本结构体的 Codable）。
+public struct PendingTraining: Equatable, Sendable {
     public let trainingSetFilename: String
     public let globalTickIndex: Int
     public let upperPeriod: Period
@@ -92,12 +95,45 @@ public struct PendingTraining: Codable, Equatable, Sendable {
     public let cashBalance: Double
     public let feeSnapshot: FeeSnapshot
     public let tradeOperations: [TradeOperation]
-    public let drawings: [DrawingObject]
+    public let lossy: LossyDrawingArray                        // 携带有序 known+unknown → repo 往返无损（P1a Task 11）
     public let startedAt: Int64
     public let accumulatedCapital: Double
     public let drawdown: DrawdownAccumulator
     public let sessionKey: String
 
+    public var drawings: [DrawingObject] { lossy.drawings }    // 计算属性（下游消费不变）
+
+    public init(
+        trainingSetFilename: String,
+        globalTickIndex: Int,
+        upperPeriod: Period,
+        lowerPeriod: Period,
+        positionData: Data,
+        cashBalance: Double,
+        feeSnapshot: FeeSnapshot,
+        tradeOperations: [TradeOperation],
+        lossy: LossyDrawingArray,
+        startedAt: Int64,
+        accumulatedCapital: Double,
+        drawdown: DrawdownAccumulator,
+        sessionKey: String
+    ) {
+        self.trainingSetFilename = trainingSetFilename
+        self.globalTickIndex = globalTickIndex
+        self.upperPeriod = upperPeriod
+        self.lowerPeriod = lowerPeriod
+        self.positionData = positionData
+        self.cashBalance = cashBalance
+        self.feeSnapshot = feeSnapshot
+        self.tradeOperations = tradeOperations
+        self.lossy = lossy
+        self.startedAt = startedAt
+        self.accumulatedCapital = accumulatedCapital
+        self.drawdown = drawdown
+        self.sessionKey = sessionKey
+    }
+
+    /// 便捷 init：coordinator fresh save 用（纯已知；活编辑保住 unknown = P1b 引擎携带 lossy，§Y）。
     public init(
         trainingSetFilename: String,
         globalTickIndex: Int,
@@ -113,25 +149,28 @@ public struct PendingTraining: Codable, Equatable, Sendable {
         drawdown: DrawdownAccumulator,
         sessionKey: String
     ) {
-        self.trainingSetFilename = trainingSetFilename
-        self.globalTickIndex = globalTickIndex
-        self.upperPeriod = upperPeriod
-        self.lowerPeriod = lowerPeriod
-        self.positionData = positionData
-        self.cashBalance = cashBalance
-        self.feeSnapshot = feeSnapshot
-        self.tradeOperations = tradeOperations
-        self.drawings = drawings
-        self.startedAt = startedAt
-        self.accumulatedCapital = accumulatedCapital
-        self.drawdown = drawdown
-        self.sessionKey = sessionKey
+        self.init(
+            trainingSetFilename: trainingSetFilename,
+            globalTickIndex: globalTickIndex,
+            upperPeriod: upperPeriod,
+            lowerPeriod: lowerPeriod,
+            positionData: positionData,
+            cashBalance: cashBalance,
+            feeSnapshot: feeSnapshot,
+            tradeOperations: tradeOperations,
+            lossy: LossyDrawingArray(drawings: drawings),
+            startedAt: startedAt,
+            accumulatedCapital: accumulatedCapital,
+            drawdown: drawdown,
+            sessionKey: sessionKey
+        )
     }
 }
 
 // MARK: - Pending Replay（新需求10 replay 续局；镜像 PendingTraining，去 sessionKey，加 recordId）
 
-public struct PendingReplay: Codable, Equatable, Sendable {
+// P1a Task 11：不再 Codable（同 PendingTraining 上方注释，`lossy: LossyDrawingArray` 非 Codable）。
+public struct PendingReplay: Equatable, Sendable {
     public let recordId: Int64
     public let trainingSetFilename: String
     public let globalTickIndex: Int
@@ -141,11 +180,44 @@ public struct PendingReplay: Codable, Equatable, Sendable {
     public let cashBalance: Double
     public let feeSnapshot: FeeSnapshot
     public let tradeOperations: [TradeOperation]
-    public let drawings: [DrawingObject]
+    public let lossy: LossyDrawingArray                        // 携带有序 known+unknown → repo 往返无损（P1a Task 11）
     public let startedAt: Int64
     public let accumulatedCapital: Double
     public let drawdown: DrawdownAccumulator
 
+    public var drawings: [DrawingObject] { lossy.drawings }    // 计算属性（下游消费不变）
+
+    public init(
+        recordId: Int64,
+        trainingSetFilename: String,
+        globalTickIndex: Int,
+        upperPeriod: Period,
+        lowerPeriod: Period,
+        positionData: Data,
+        cashBalance: Double,
+        feeSnapshot: FeeSnapshot,
+        tradeOperations: [TradeOperation],
+        lossy: LossyDrawingArray,
+        startedAt: Int64,
+        accumulatedCapital: Double,
+        drawdown: DrawdownAccumulator
+    ) {
+        self.recordId = recordId
+        self.trainingSetFilename = trainingSetFilename
+        self.globalTickIndex = globalTickIndex
+        self.upperPeriod = upperPeriod
+        self.lowerPeriod = lowerPeriod
+        self.positionData = positionData
+        self.cashBalance = cashBalance
+        self.feeSnapshot = feeSnapshot
+        self.tradeOperations = tradeOperations
+        self.lossy = lossy
+        self.startedAt = startedAt
+        self.accumulatedCapital = accumulatedCapital
+        self.drawdown = drawdown
+    }
+
+    /// 便捷 init：coordinator fresh save 用（纯已知；活编辑保住 unknown = P1b 引擎携带 lossy，§Y）。
     public init(
         recordId: Int64,
         trainingSetFilename: String,
@@ -161,19 +233,21 @@ public struct PendingReplay: Codable, Equatable, Sendable {
         accumulatedCapital: Double,
         drawdown: DrawdownAccumulator
     ) {
-        self.recordId = recordId
-        self.trainingSetFilename = trainingSetFilename
-        self.globalTickIndex = globalTickIndex
-        self.upperPeriod = upperPeriod
-        self.lowerPeriod = lowerPeriod
-        self.positionData = positionData
-        self.cashBalance = cashBalance
-        self.feeSnapshot = feeSnapshot
-        self.tradeOperations = tradeOperations
-        self.drawings = drawings
-        self.startedAt = startedAt
-        self.accumulatedCapital = accumulatedCapital
-        self.drawdown = drawdown
+        self.init(
+            recordId: recordId,
+            trainingSetFilename: trainingSetFilename,
+            globalTickIndex: globalTickIndex,
+            upperPeriod: upperPeriod,
+            lowerPeriod: lowerPeriod,
+            positionData: positionData,
+            cashBalance: cashBalance,
+            feeSnapshot: feeSnapshot,
+            tradeOperations: tradeOperations,
+            lossy: LossyDrawingArray(drawings: drawings),
+            startedAt: startedAt,
+            accumulatedCapital: accumulatedCapital,
+            drawdown: drawdown
+        )
     }
 }
 
