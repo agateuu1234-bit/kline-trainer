@@ -56,6 +56,21 @@ struct DrawingObjectCodableTests {
         #expect(back == d)
     }
 
+    @Test("tailAnchor 为 nil 时全字段往返一致（encodeIfPresent 不写 key，decodeIfPresent 读回 nil）")
+    func roundTripTailAnchorNil() throws {
+        let d = DrawingObject(
+            id: "gen-2", toolType: .horizontal, anchors: [sampleAnchor()],
+            isExtended: false, panelPosition: 0, revealTick: 5,
+            period: .m60, lineSubType: .straight, lineStyle: .solid, thickness: 2,
+            colorToken: .green, labelMode: .show, locked: false,
+            text: "", fontSize: 14, textColorToken: .orange, textForm: .plain,
+            tailAnchor: nil)
+        let data = try JSONEncoder().encode(d)
+        let back = try JSONDecoder().decode(DrawingObject.self, from: data)
+        #expect(back == d)
+        #expect(back.tailAnchor == nil)
+    }
+
     @Test("旧 blob（仅 5 字段）解码 → 新字段取语义默认")
     func legacyBlobDefaults() throws {
         // 模拟 #139 时代的 DrawingObject JSON（无新字段）
