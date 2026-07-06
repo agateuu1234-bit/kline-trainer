@@ -84,7 +84,7 @@
 | **D3** | 合成层写成**周期无关通用**；本期只生成 `3m/15m/60m/daily/weekly/monthly`。**1m 不入主库**（仅作合成源），`3m` 为最细周期。**`ticket_index` 保留列、停止写入**（非删列——m01 禁不可逆迁移；R12-F1）。 | 通用代码 → 将来加周期=改配置（YAGNI）；1m 不入库省上亿行；留空 `ticket_index` 列合规无害（无消费者，§0）。 |
 | **D4** | `stocks.code` 保留交易所后缀（`000001.SZ`，9 字符 ≤ `VARCHAR(10)`）。 | 消歧（`000001.SZ` 平安银行 vs `000001.SH` 上证指数）、与 `stock_universe` 一致。 |
 | **D5**（codex R2-F2 修正） | pilot **保持 `training_sets.file_path` 绝对路径**（现状 B3 `routes.py` 下载、scheduler、`backfill` 均按绝对 `Path(file_path)` 读）。**不在 pilot 半途改相对**（只改 B2 写、不改 3 个读点 = 下载 404）。 | 相对化是**跨 B2 写 + B3/scheduler/backfill 读的横切改动 + 存量行迁移**，归入未来 NAS 搬迁的独立聚焦改动（§7），不塞 pilot（YAGNI + 防半成品）。搬迁易度仍由 config 驱动 DSN 保证（原 §0/移机答复不变）。 |
-| **D6** | pilot：本机 Docker Postgres（复用 `backend/docker-compose.yml`）；100 只从 universe **按市场分层随机抽**（seed 可复现），SH/SZ/BJ 都覆盖；经 SMB 挂载拉这 100 只的 1m+日线；**每股至多 1 组，验收按各市场 distinct 成功股数**（非 ZIP 总数，R10-F2）。 | 最省事、可复现；覆盖三市场以暴露格式差异；distinct 股数验收防凑数掩盖失败。 |
+| **D6** | pilot：本机 Docker Postgres（复用 `backend/docker-compose.yml`）；从 universe **按市场分层建 seeded 储备池**，**抽替补直到 100 distinct 成功股**（每股至多 1 组）；**各市场最低数写死本 spec（SH≥30/SZ≥40/BJ≥8）**，未达总数/地板 → 显式 FAIL（R10-F2/R14-F1）。 | 覆盖三市场暴露格式差异；储备池替补 + distinct 验收 + 显式失败，防凑数/静默低产/市场偏置。 |
 | **D7** | 规整层为**新增 QMT 专用层**，产出与现有 `clean` 入参兼容的 DataFrame（列 `datetime/open/high/low/close/volume/amount` + Unix 秒），接现有 `compute_indicators`。 | 隔离 QMT 特有的 BOM/时区/文件名/中文标签解析，不污染下游通用逻辑。 |
 | **D8**（codex R1-F1 / R2-F1） | (a) **写库前 schema fail-closed 断言**：import 任何 INSERT 前查 `information_schema.columns` 断言 `klines.open/high/low/close = double precision`（`ticket_index` 列**保留**、不作断言项，R13-F1），不符即中止（非静默插入）。(b) **destructive reset 防误删护栏**：pilot 只对**专用一次性库**（库名必须匹配前缀 `kline_pilot_`）操作；任何破坏性动作（`CREATE/DROP DATABASE`、重建）需**显式 `--reset`** 且目标库名匹配前缀，否则**拒绝**（**绝不 DROP 任意/共享库**）；smoke 断言非-pilot DSN/库名在任何 DDL 前被拒。 | 防 R1-F1 陈旧库静默截断；防 R2-F1：光靠"本地新库"叙述性意图不够，跑错 `DATABASE_URL`/共享卷会 `DROP` 掉 stocks/klines/training_sets（含 lease 状态与库存）。三重 fail-closed = 专用库前缀 + 显式 flag + 写前断言。 |
 | **D9**（codex R1-F2 / R3-F2 / R4-F1） | **两处强制、B2 可判**：(a) **分钟级 @ B1**（1m 在手）——每盘中桶实测 1m 成员数须 == §4.2 应有数；**某交易日任一桶不足 → 该日盘中不入库（drop+日志）**，DB 无半成品桶；dense 1m 覆盖带 = 逐日完整的连续日范围。(b) **B2 硬门**（无原始 1m）——以**日线（交易日真值）**逐日校验：落在**选中盘中全跨度 `[首个 3m 日, after_end]`（含 before-context）**内的每个交易日 DB 盘中桶数须**精确等于** `80/16/4`，任一日不足 → `GenerateSkipException`。`coverage_ratio`（报告）+ 缺日进输出。 | 防 R1-F2（缺整天）+ R3-F2（桶内缺分钟）+ **R4-F1（1m 出库后 B2 无从判分钟级）**+ **R6-F1（before-context 洞被静默回填）**：分钟级在 B1 判；B2 靠"盘中全跨度每交易日桶数精确=期望"的 provenance-free 硬门兜住。真停牌（无日线）不误伤。 |
@@ -178,10 +178,11 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - 其余（窗口切分、`assign_global_indices` 算法本体、zip、CRC32、`uq_stock_start` 预检）**不变**。
 
 ### 4.5 pilot 运行脚本（新写，薄壳，不单测）
-- 读 `stock_universe_with_name.csv` → 按 `exchange` 分层随机抽 100（`--seed` 可复现）。
-- 按文件名规则从 SMB 拉这 100 只的 1m+日线到本地临时目录（或直接读挂载点）。
-- 起本机 Docker Postgres（`docker-compose`）→ **schema 前置（D8）**：对专用一次性库 `kline_pilot_<seed>`（前缀护栏 + 显式 `--reset`）`CREATE DATABASE` 并应用 `schema.sql`，再由 import 写前 `information_schema` 断言双保险 → 逐股跑 规整→合成→算指标→写 klines → **每只 sampled 股至多生成 1 个训练组**（逐股调 `generate_one_training_set` 一次、catch skip；**不走 `generate_batch` 的多-start round-robin**，避免用存活股的额外 start 凑数掩盖失败股，codex R10-F2）。
-- 输出：`.zip` 到 `--output` 目录（绝对路径存入 `file_path`），`training_sets` 登记；打印每股 1m 覆盖带、各周期 `coverage_ratio`（D9）、生成/skip **原因**；**按市场(SH/SZ/BJ)汇总 distinct 成功股数**（= pilot 验收指标，非 ZIP 总数）。
+- 读 `stock_universe_with_name.csv` → 按 `exchange` 分层建 **seeded 随机顺序储备池（reserve pool = 全 universe 分层排序）**（`--seed` 可复现），**非只抽固定 100**（codex R14-F1）。
+- 按文件名规则从 SMB 拉候选股的 1m+日线到本地临时目录（或直接读挂载点），**按需拉替补**。
+- 起本机 Docker Postgres（`docker-compose`）→ **schema 前置（D8）**：对专用一次性库 `kline_pilot_<seed>`（前缀护栏 + 显式 `--reset`）`CREATE DATABASE` 并应用 `schema.sql`，再由 import 写前 `information_schema` 断言双保险 → 逐股跑 规整→合成→算指标→写 klines → **每股至多 1 组**（`generate_one_training_set` 一次、内含候选 bounded retry R12-F2；**不走 `generate_batch` 多-start**，防凑数掩盖失败，R10-F2）。
+- **储备池替补至达标或显式 FAIL（codex R14-F1）**：某股 skip（D2/D9/D10）→ 从**同市场储备池**抽替补继续，直到 **100 distinct 成功股且各市场达最低数**，或**池穷尽 → 显式 FAIL**（不静默低产/偏置）。
+- 输出：`.zip` 到 `--output`（绝对路径存 `file_path`），`training_sets` 登记；打印每股 1m 覆盖带 / `coverage_ratio`(D9) / **skip 原因分类**；**按市场(SH/SZ/BJ)汇总 distinct 成功股数 + 是否达各市场地板**；**未达总数或任一地板 = 显式失败报告**（非成功）。
 
 ## 5. 测试（host pytest，纯函数层全测）
 - **规整层**：BOM 剥离（表头 `datetime` 非 `﻿time`）；`YYYYMMDDHHMMSS`/`YYYYMMDD` @UTC+8 → Unix 秒精确值（含跨夏令时无关性、北京无 DST）；文件名正则（三市场 + 全角名 + `星`/`_` sanitize）；缺列抛 `CsvSchemaError`；**前复权 15 位小数原样保留**（`clean` 后 close 逐字等于输入）。
@@ -216,7 +217,7 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - P/F（R3-F1 对齐）：daily/weekly/monthly `end_global_index` = 期内末根 3m（无 lookahead）；聚合 bar 标签 = 组内首交易日午夜。
 - P/F（R5-F1 前向边界）：`after_end = monthly[start+8]−1`（第 8 月末）；第 8 月线 bar `egi` 命中第 8 月末 3m、非首日；跨月界 trailing 周 bar 被排除（回归绿）。
 - P/F（§4.2 bucket）：3m/15m/60m 边界桶成员逐值 = §4.2 golden member lists；完整日 80/16/4 + 上午 121/下午 120 恒等式。
-- P/F（R10-F2）：pilot **每股至多 1 组**；验收按**各市场 (SH/SZ/BJ) distinct 成功股数**（阈值 plan 定）+ 显式 skip 原因报告，**非 ZIP 总数**（防存活股多-start 凑数掩盖失败/市场偏置）；`training_sets` 登记 + `content_hash` 合法（`^[0-9a-f]{8}$`）。
+- P/F（R10-F2/R14-F1）：pilot **每股至多 1 组** + **储备池抽替补直到 100 distinct 成功股，或池穷尽显式 FAIL**（非 ZIP 总数、非静默低产）；**各市场最低数在本 spec 定：SH ≥ 30 / SZ ≥ 40 / BJ ≥ 8**（合计 78 地板 + 22 弹性 = 100；BJ 因新股短 1m/短史风险最高故最低，plan 可微调）；未达总数或任一市场地板 → **显式失败报告**；`training_sets` 登记 + `content_hash` 合法（`^[0-9a-f]{8}$`）。
 - P/F（R12-F2）：单个候选起点跨 drop 日被 D9 skip 后，`generate_one_training_set` 换候选重试成功（有效候选存在时不误杀该股）；候选穷尽才失败（回归绿）。
 - P/F（D5）：`training_sets.file_path` 绝对；B3 下载 / `backfill` 读取契约不变（回归绿）。
 
