@@ -24,7 +24,7 @@ final class DefaultPendingTrainingRepositoryTests: XCTestCase {
 
     // 用例 2：savePending → loadPending roundtrip 字段对等
     func test_savePending_then_loadPending_roundtrip() throws {
-        let pending = makePending(globalTickIndex: 100, cashBalance: 9_500, accumulatedCapital: 10_500)
+        let pending = try makePending(globalTickIndex: 100, cashBalance: 9_500, accumulatedCapital: 10_500)
         try db.savePending(pending)
         let loaded = try db.loadPending()
         XCTAssertEqual(loaded?.globalTickIndex, 100)
@@ -67,7 +67,7 @@ final class DefaultPendingTrainingRepositoryTests: XCTestCase {
 
     // 用例 6：sessionKey round-trip（session_key 列读写，RFC §4.7c）
     func test_savePending_roundTrips_sessionKey() throws {
-        let pending = makePending(globalTickIndex: 1, sessionKey: "SK-roundtrip-1")
+        let pending = try makePending(globalTickIndex: 1, sessionKey: "SK-roundtrip-1")
         try db.savePending(pending)
         let loaded = try db.loadPending()
         XCTAssertEqual(loaded?.sessionKey, "SK-roundtrip-1")
@@ -78,8 +78,8 @@ final class DefaultPendingTrainingRepositoryTests: XCTestCase {
     private func makePending(globalTickIndex: Int = 0,
                              cashBalance: Double = 10_000,
                              accumulatedCapital: Double = 10_000,
-                             sessionKey: String = "SK-default") -> PendingTraining {
-        PendingTraining(
+                             sessionKey: String = "SK-default") throws -> PendingTraining {
+        try PendingTraining(
             trainingSetFilename: "set-A.zip",
             globalTickIndex: globalTickIndex,
             upperPeriod: .daily, lowerPeriod: .m60,

@@ -82,7 +82,7 @@ struct CoordinatorLossyPreserveTests {
         // 空 Data() 解码失败 → .dbCorrupted → clearReplay + nil（同 PendingLossyTests 的裸 repo 级测试不同，
         // 那边直接调 repo 不经 decodePosition，故可用空 Data 占位；这里须真编码）。
         let positionData = try JSONEncoder().encode(PositionManager())
-        let base = PendingReplay(recordId: recordId, trainingSetFilename: "set.sqlite", globalTickIndex: 0,
+        let base = try PendingReplay(recordId: recordId, trainingSetFilename: "set.sqlite", globalTickIndex: 0,
                                   upperPeriod: .m60, lowerPeriod: .daily, positionData: positionData, cashBalance: 100_000,
                                   feeSnapshot: FeeSnapshot(commissionRate: 0.0002, minCommissionEnabled: false),
                                   tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,

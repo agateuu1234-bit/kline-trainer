@@ -21,7 +21,7 @@ final class AppDBHappyPathIntegrationTests: XCTestCase {
                                         totalCapital: 10_000, displayMode: .dark))
 
         // ③ 进入训练 → save pending
-        let pending = PendingTraining(
+        let pending = try PendingTraining(
             trainingSetFilename: "set-A.zip",
             globalTickIndex: 0,
             upperPeriod: .daily, lowerPeriod: .m60,

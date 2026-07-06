@@ -40,8 +40,8 @@ final class TrainingResetPortTests: XCTestCase {
         try db.dbQueue.write { try SettingsDAOImpl.setTotalCapital($0, 123_456) }
     }
 
-    private static func makePending() -> PendingTraining {
-        PendingTraining(
+    private static func makePending() throws -> PendingTraining {
+        try PendingTraining(
             trainingSetFilename: "t.sqlite", globalTickIndex: 12,
             upperPeriod: .daily, lowerPeriod: .m3, positionData: Data([0x00]),
             cashBalance: 50_000,

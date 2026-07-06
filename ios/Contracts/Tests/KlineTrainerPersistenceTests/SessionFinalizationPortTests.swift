@@ -23,8 +23,8 @@ struct SessionFinalizationPortTests {
                        stampDuty: 0, totalCost: 1001, createdAt: Int64(tick))
     }
 
-    static func pending(sessionKey: String) -> PendingTraining {
-        PendingTraining(trainingSetFilename: "s.sqlite", globalTickIndex: 7,
+    static func pending(sessionKey: String) throws -> PendingTraining {
+        try PendingTraining(trainingSetFilename: "s.sqlite", globalTickIndex: 7,
                         upperPeriod: .m60, lowerPeriod: .m3,
                         positionData: Data(), cashBalance: 50_000,
                         feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),

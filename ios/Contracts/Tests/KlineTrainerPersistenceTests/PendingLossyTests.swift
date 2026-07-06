@@ -24,16 +24,16 @@ struct PendingLossyTests {
         #"{"id":"\#(id)","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}"#
     }
 
-    private func makePendingReplay(recordId: Int64, drawings: [DrawingObject]) -> PendingReplay {
-        PendingReplay(recordId: recordId, trainingSetFilename: "seed.sqlite", globalTickIndex: 0,
+    private func makePendingReplay(recordId: Int64, drawings: [DrawingObject]) throws -> PendingReplay {
+        try PendingReplay(recordId: recordId, trainingSetFilename: "seed.sqlite", globalTickIndex: 0,
                       upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
                       feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
                       tradeOperations: [], drawings: drawings, startedAt: 0, accumulatedCapital: 100_000,
                       drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
     }
 
-    private func makePendingTraining(sessionKey: String, drawings: [DrawingObject]) -> PendingTraining {
-        PendingTraining(trainingSetFilename: "seed.sqlite", globalTickIndex: 0,
+    private func makePendingTraining(sessionKey: String, drawings: [DrawingObject]) throws -> PendingTraining {
+        try PendingTraining(trainingSetFilename: "seed.sqlite", globalTickIndex: 0,
                          upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
                          feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
                          tradeOperations: [], drawings: drawings, startedAt: 0, accumulatedCapital: 100_000,
@@ -43,7 +43,7 @@ struct PendingLossyTests {
     /// 先经真实 saveReplay 写一条合法行，再用裸 SQL 把 drawings 列换成任意（可含未知条）JSON——
     /// 避免手拼整条 INSERT 各列（易漏列/写错顺序），且不经过模型层（保证 drawingsJSON 就是磁盘字节）。
     private func seedPendingReplayRow(_ queue: DatabaseQueue, recordId: Int64, drawingsJSON: String) throws {
-        let base = makePendingReplay(recordId: recordId, drawings: [])
+        let base = try makePendingReplay(recordId: recordId, drawings: [])
         try queue.write { db in
             try PendingReplayRepositoryImpl.saveReplay(db, replay: base)
             try db.execute(sql: "UPDATE pending_replay SET drawings = ? WHERE id = 1", arguments: [drawingsJSON])
@@ -51,7 +51,7 @@ struct PendingLossyTests {
     }
 
     private func seedPendingTrainingRow(_ queue: DatabaseQueue, sessionKey: String, drawingsJSON: String) throws {
-        let base = makePendingTraining(sessionKey: sessionKey, drawings: [])
+        let base = try makePendingTraining(sessionKey: sessionKey, drawings: [])
         try queue.write { db in
             try PendingTrainingRepositoryImpl.savePending(db, pending: base)
             try db.execute(sql: "UPDATE pending_training SET drawings = ? WHERE id = 1", arguments: [drawingsJSON])
@@ -83,7 +83,7 @@ struct PendingLossyTests {
     func replayNoCrossRecordLeak() throws {
         let db = try makeMigratedDB()
         try seedPendingReplayRow(db, recordId: 42, drawingsJSON: #"[{"toolType":"__future__"}]"#)
-        let fresh = makePendingReplay(recordId: 99, drawings: [])   // 新记录、无画线
+        let fresh = try makePendingReplay(recordId: 99, drawings: [])   // 新记录、无画线
         try db.write { try PendingReplayRepositoryImpl.saveReplay($0, replay: fresh) }
         let col: String = try db.read {
             try Row.fetchOne($0, sql: "SELECT drawings FROM pending_replay WHERE id=1")!["drawings"]
@@ -116,7 +116,7 @@ struct PendingLossyTests {
     func trainingNoCrossRecordLeak() throws {
         let db = try makeMigratedDB()
         try seedPendingTrainingRow(db, sessionKey: "SK-old", drawingsJSON: #"[{"toolType":"__future__"}]"#)
-        let fresh = makePendingTraining(sessionKey: "SK-new", drawings: [])
+        let fresh = try makePendingTraining(sessionKey: "SK-new", drawings: [])
         try db.write { try PendingTrainingRepositoryImpl.savePending($0, pending: fresh) }
         let col: String = try db.read {
             try Row.fetchOne($0, sql: "SELECT drawings FROM pending_training WHERE id=1")!["drawings"]

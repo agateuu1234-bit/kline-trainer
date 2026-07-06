@@ -8,7 +8,7 @@ import Foundation
 // 码），`drawings` 走计算属性投影往返、decode 侧用 `LossyDrawingArray(drawings:)` 重建已知条
 // （纯已知——本路径只是 compat surface；真正字节级保真持久化走 repo 的 `p.lossy.encoded()` 列路径，不受影响）。
 @Test func pendingReplay_codableRoundTrip() throws {
-    let p = PendingReplay(
+    let p = try PendingReplay(
         recordId: 42,
         trainingSetFilename: "a.sqlite", globalTickIndex: 7,
         upperPeriod: .m60, lowerPeriod: .daily,
@@ -35,7 +35,7 @@ import Foundation
 @Test func inMemoryPendingReplay_saveLoadClear() throws {
     let repo = InMemoryPendingReplayRepository()
     #expect(try repo.loadReplay() == nil)
-    let p = PendingReplay(recordId: 5, trainingSetFilename: "b.sqlite", globalTickIndex: 1,
+    let p = try PendingReplay(recordId: 5, trainingSetFilename: "b.sqlite", globalTickIndex: 1,
         upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
         feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
@@ -51,7 +51,7 @@ import Foundation
 
 @Test func inMemoryPendingReplay_loadSlotInfo_doesNotConsumeFailNextLoadReplay() throws {
     let repo = InMemoryPendingReplayRepository()
-    let p = PendingReplay(recordId: 99, trainingSetFilename: "c.sqlite", globalTickIndex: 3,
+    let p = try PendingReplay(recordId: 99, trainingSetFilename: "c.sqlite", globalTickIndex: 3,
         upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
         feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
@@ -68,7 +68,7 @@ import Foundation
 
 @Test func inMemoryPendingReplay_clearReplayIfRecordId_matching_clears() throws {
     let repo = InMemoryPendingReplayRepository()
-    let p = PendingReplay(recordId: 7, trainingSetFilename: "d.sqlite", globalTickIndex: 0,
+    let p = try PendingReplay(recordId: 7, trainingSetFilename: "d.sqlite", globalTickIndex: 0,
         upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
         feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
@@ -80,7 +80,7 @@ import Foundation
 
 @Test func inMemoryPendingReplay_clearReplayIfRecordId_nonMatching_keeps() throws {
     let repo = InMemoryPendingReplayRepository()
-    let p = PendingReplay(recordId: 7, trainingSetFilename: "d.sqlite", globalTickIndex: 0,
+    let p = try PendingReplay(recordId: 7, trainingSetFilename: "d.sqlite", globalTickIndex: 0,
         upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
         feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,

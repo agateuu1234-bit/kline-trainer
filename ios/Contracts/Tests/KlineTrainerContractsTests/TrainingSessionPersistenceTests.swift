@@ -292,7 +292,7 @@ struct TrainingSessionPersistenceTests {
     /// seededDrawdown.update(91070) 因 peak(100000)-currentTotal(91070)=8930>5000 → maxDrawdown 提升到 8930。
     static func deterministicPending() throws -> PendingTraining {
         let pos = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000)
-        return PendingTraining(
+        return try PendingTraining(
             trainingSetFilename: "set.sqlite", globalTickIndex: 7,
             upperPeriod: .m60, lowerPeriod: .daily,
             positionData: try JSONEncoder().encode(pos), cashBalance: 90_000,

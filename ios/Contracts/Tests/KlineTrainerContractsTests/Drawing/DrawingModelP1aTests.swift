@@ -218,19 +218,41 @@ struct LossyDrawingArrayTests {
     }
 
     @Test("reconciled fail-closed：loaded 元素含重复 id → 抛 .dbCorrupted（不静默折叠）")
-    func reconciledRejectsDuplicateLoadedIds() {
+    func reconciledRejectsDuplicateLoadedIds() throws {
         let d = DrawingObject(id: "dup", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
-        let raw = LossyDrawingArray.encodeKnown(d)
+        let raw = try LossyDrawingArray.encodeKnown(d)
         let lossy = LossyDrawingArray(elements: [.known(d, raw: raw), .known(d, raw: raw)])
         #expect(throws: AppError.self) { _ = try lossy.reconciled(currentKnown: [d]) }
     }
 
     @Test("reconciled fail-closed：currentKnown 含重复 id → 抛 .dbCorrupted")
-    func reconciledRejectsDuplicateCurrentIds() {
+    func reconciledRejectsDuplicateCurrentIds() throws {
         let d = DrawingObject(id: "dup", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
-        let raw = LossyDrawingArray.encodeKnown(d)
+        let raw = try LossyDrawingArray.encodeKnown(d)
         let lossy = LossyDrawingArray(elements: [.known(d, raw: raw)])
         #expect(throws: AppError.self) { _ = try lossy.reconciled(currentKnown: [d, d]) }   // 两条同 id
+    }
+
+    // codex whole-branch High fix：`encodeKnown` 曾用 `try? ... else return "{}"` 吞掉非有限价
+    // （NaN/Infinity）的 JSONEncoder 失败，把该条静默伪造成 `"{}"` 持久化——下次加载 `"{}"` 解不出
+    // DrawingObject → 被归类 `.unknownRaw`，用户这条已知画线无声消失（durable data loss）。fail-closed
+    // 后必须抛错（不再吞、不再伪造 `{}`），让调用方（save 路径）失败并经既有 autosave 错误通路呈现给用户。
+    @Test("fail-closed：非有限价（NaN/Infinity）DrawingObject 编码抛错，不再伪造 {}（红→绿：修前会静默返回 {} 不抛）")
+    func nonFiniteAnchorPriceThrowsInsteadOfFabricatingEmptyObject() throws {
+        let nanDrawing = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 1, price: .nan)],
+            isExtended: false, panelPosition: 0)
+        let infDrawing = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 1, price: .infinity)],
+            isExtended: false, panelPosition: 0)
+        // 直接单元：encodeKnown 本身抛（不是 catch 后 fallback 成 "{}"）。
+        #expect(throws: EncodingError.self) { _ = try LossyDrawingArray.encodeKnown(nanDrawing) }
+        #expect(throws: EncodingError.self) { _ = try LossyDrawingArray.encodeKnown(infDrawing) }
+        // 级联 1：批量构造 init(drawings:) 传播（不吞、不让整批 fallback 成 "{}"）。
+        #expect(throws: EncodingError.self) { _ = try LossyDrawingArray(drawings: [nanDrawing]) }
+        // 级联 2：reconciled 真新增追加路径（末尾 `out.append(.known(k, raw: try encodeKnown(k)))`）同样传播。
+        let empty = LossyDrawingArray(elements: [])
+        #expect(throws: EncodingError.self) { _ = try empty.reconciled(currentKnown: [nanDrawing]) }
     }
 
     @Test("reconciled 按 id：删 unknown 之前的 known → 未来条仍在原位（不被后续 known 挤到前面）")
@@ -238,7 +260,7 @@ struct LossyDrawingArrayTests {
         let a = DrawingObject(id: "gA", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
         let bK = DrawingObject(id: "gB", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
         let unknown = #"{"toolType":"__future__","weird":true}"#
-        let lossy = LossyDrawingArray(elements: [
+        let lossy = try LossyDrawingArray(elements: [
             .known(a, raw: LossyDrawingArray.encodeKnown(a)),
             .unknownRaw(unknown),
             .known(bK, raw: LossyDrawingArray.encodeKnown(bK))
@@ -271,7 +293,7 @@ struct ReviewArchiveWrapperTests {
 
     @Test("canonical 磁盘 key = drawings/hiddenIds")
     func canonicalKeys() throws {
-        let w = ReviewArchiveWrapper(drawings: [d("a")], hiddenIds: ["orig-1"])
+        let w = try ReviewArchiveWrapper(drawings: [d("a")], hiddenIds: ["orig-1"])
         let json = try w.encodedColumn()
         #expect(json.contains("\"drawings\""))
         #expect(json.contains("\"hiddenIds\""))
@@ -318,7 +340,7 @@ struct ReviewArchiveWrapperTests {
 
     @Test("四态往返：空/drawings-only/hidden-only/都有")
     func fourStateRoundTrip() throws {
-        let states: [ReviewArchiveWrapper] = [
+        let states: [ReviewArchiveWrapper] = try [
             ReviewArchiveWrapper(drawings: [], hiddenIds: []),
             ReviewArchiveWrapper(drawings: [d("a")], hiddenIds: []),
             ReviewArchiveWrapper(drawings: [], hiddenIds: ["orig-9"]),
