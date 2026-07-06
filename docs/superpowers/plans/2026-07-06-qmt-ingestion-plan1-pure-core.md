@@ -894,15 +894,19 @@ def test_build_training_windows_end_to_end_retries_on_tail_d9_fail():
             rows += [{"datetime": base+i*180,"open":1.0,"high":1.0,"low":1.0,"close":1.0,
                       "volume":1,"amount":1.0} for i in range(n)]
         return pd.DataFrame(rows)
-    july_last = max(d for d in tdays if d.month == 7)
-    pb = {"3m": _bars([d for d in tdays if d != july_last], 2),   # July 末日缺 3m
+    july_early = min(d for d in tdays if d.month == 7)   # 早 July：在 idx30 forward 窗口内, 但不在 idx31 短 before-context 内
+    pb = {"3m": _bars([d for d in tdays if d != july_early], 2),   # 早 July 日缺 3m
           "15m": _bars(tdays, 2), "60m": _bars(tdays, 1), "daily": _bars(tdays, 1)}
-    caps = {"3m":150, "15m":150, "60m":150, "daily":150}
+    caps = {"3m":2, "15m":2, "60m":2, "daily":2}         # **短 before-context**（codex PF1-R7）→ Aug 候选 before 不含 july_early
     start, windows = build_training_windows(
         pb, bounds, random.Random(0), dense_dates=dense, trading_dates=trading, before_caps=caps,
         months=1, intraday_expected={"3m":2,"15m":2,"60m":1}, before_min=1, max_retries=8)
-    assert start == bounds[31]                       # idx30(July) 尾日缺 3m→D9失败重试→idx31(Aug)成功
+    assert start == bounds[31]                       # idx30(July) forward 含 july_early 缺 3m→D9失败→idx31(Aug)成功
     assert {"3m","15m","60m","daily"} <= set(windows)
+    # 双检（codex PF1-R7）：成功候选的盘中窗口确实过 per_day D9
+    ae31 = compute_after_end(bounds, bounds.index(bounds[31]), months=1)
+    assert per_day_intraday_complete({p: windows[p] for p in ("3m","15m","60m")}, trading, ae31,
+                                     {"3m":2,"15m":2,"60m":1}) is True
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
