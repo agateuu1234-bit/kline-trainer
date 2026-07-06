@@ -79,7 +79,7 @@
 | # | 决策 | 取舍 |
 |---|---|---|
 | **D1** | 只改 `klines.open/high/low/close`：`DECIMAL(10,2)` → `DOUBLE PRECISION`。`amount`（`DECIMAL(16,2)`，元/分 2 位为自然精度、尾噪是 artifact）与指标列（`ma66/boll_*/macd_*` `DECIMAL(10,4)/(10,6)` + `round(4)/round(6)`，既有契约）**保持不变**——仅在全精度 `close` 上重算，结果更准但仍存 4/6 位。 | 前复权 float64 价格无损；amount/指标不动 = 最小改面（surgical）。空库直建、无 migration。**不涉 iOS/契约**（§0）。 |
-| **D2** | `select_start_index` 加**每股 1m 覆盖带约束**：起点仅在「前向 8 完整月窗口 `[start, after_end]`（`after_end`=第 8 月末，§4.4）完整落在该股 1m 覆盖区 `[t0,t1]` 内」的月线里选。 | 消灭随机起点大量落空 + 杜绝盘中中途断货的次品训练组。约束下每股约 3–4 个可选起点，100 股够凑 100 组（`uq_stock_start` 保唯一）。 |
+| **D2** | `select_start_index` 加**每股 1m 覆盖带约束**：起点仅在「前向 8 完整月窗口 `[start, after_end]`（`after_end`=第 8 月末，§4.4）的**每个交易日期都在该股 dense 完整 1m 交易日期集内**」的月线里选。**按交易日期比对，非 raw 时间戳**（月/日标午夜 vs 3m 标盘中，raw 比会误杀全部候选，codex R7-F1）。 | 消灭随机起点大量落空 + 杜绝盘中中途断货的次品训练组。约束下每股约 3–4 个可选起点，100 股够凑 100 组（`uq_stock_start` 保唯一）。 |
 | **D3** | 合成层写成**周期无关通用**；本期只生成 `3m/15m/60m/daily/weekly/monthly`。**1m 不入主库**（仅作合成源），`3m` 为最细周期。**取消 `ticket_index`**（无消费者，§0 声明）。 | 通用代码 → 将来加 5m/30m/1m/年 = 改配置；不塞将来要重做的周期进 pilot 产物（YAGNI）。1m 不入库省全量上亿行。 |
 | **D4** | `stocks.code` 保留交易所后缀（`000001.SZ`，9 字符 ≤ `VARCHAR(10)`）。 | 消歧（`000001.SZ` 平安银行 vs `000001.SH` 上证指数）、与 `stock_universe` 一致。 |
 | **D5**（codex R2-F2 修正） | pilot **保持 `training_sets.file_path` 绝对路径**（现状 B3 `routes.py` 下载、scheduler、`backfill` 均按绝对 `Path(file_path)` 读）。**不在 pilot 半途改相对**（只改 B2 写、不改 3 个读点 = 下载 404）。 | 相对化是**跨 B2 写 + B3/scheduler/backfill 读的横切改动 + 存量行迁移**，归入未来 NAS 搬迁的独立聚焦改动（§7），不塞 pilot（YAGNI + 防半成品）。搬迁易度仍由 config 驱动 DSN 保证（原 §0/移机答复不变）。 |
@@ -162,7 +162,7 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 ### 4.4 B2 改动
 - **前向窗口边界 `after_end`（redefine，codex R5-F1）**：`after_end = monthly_datetimes[start_idx+8] − 1`（**第 9 根月线 open − 1 秒**；`select_start_index` 保证 `start_idx ≤ n−9` → 第 9 根必存在）= **第 8 个完整前向月的月末**。取代原 `monthly_after_end` 返回的第 8 月线 open。**所有周期窗口 forward 上界统一用它**。
 - **窗口纳入规则（R5-F1）**：`select_period_window` 每周期只纳入**整段 period-end ≤ `after_end`** 的 bar。月/日与 `after_end`=月界天然对齐（恰 8 完整月 + 日线到第 8 月末）；**周线额外排除跨 8→9 月界、周末 > `after_end` 的 trailing 周 bar**（周跨月边界会 straddle）。杜绝末根高周期 bar 的 `end_global_index` 早于其整段 3m 播完（否则第 8 月线含整月 OHLC 却在第 8 月首日 reveal = **lookahead**）。
-- `select_start_index(monthly_datetimes, rng, *, one_min_lo, one_min_hi)`（D2）：候选月线下标先按现规则 `[30, n-9]`，**再过滤**「起点 `start` 与 `after_end`（第 8 月末，见上）都落在 `[one_min_lo, one_min_hi]` 内」；候选为空 → `GenerateSkipException`（该股 1m 覆盖撑不下任何完整前向窗口）。`one_min_lo/hi` 由 `generate_one_training_set` 从该股 3m（最细）实际 datetime 范围推得。**端点必要非充分**（内部洞端点仍可能在范围里），完整性由 D9 兜底。
+- `select_start_index(monthly_datetimes, rng, *, dense_dates)`（D2，codex R7-F1）：候选月线下标先按现规则 `[30, n-9]`，**再过滤**「从 `start` 的**交易日期**到 `after_end` 的交易日期，其间（按日线日历）**每个交易日期都在该股 dense 完整 1m 交易日期集 `dense_dates` 内**」；候选为空 → `GenerateSkipException`。**按交易日期比对、非 raw 时间戳**——月/日 bar 标 `00:00`、3m 标盘中(`0933..1500`)，`start`(00:00) < 首根 3m(0933)、`after_end`(≈23:59) > 末根 3m(1500)，raw 时间戳比对会**误杀全部有效候选、产出 0 训练组**。`dense_dates` = B1 分钟级完整性判出的逐日完整交易日期集（`generate_one_training_set` 从该股盘中 klines 推得）。**端点必要非充分**（内部洞仍需 D9），完整性由 D9 per-day 桶数硬门兜底。
 - **窗口覆盖完整性校验（D9，两处强制；codex R4-F1）**：
   - (a) **分钟级 @ B1**（§4.2，1m 在手）：桶内缺分钟的日已被 drop 出库 → **DB 里不存在半成品盘中桶**。
   - (b) **B2 provenance-free 硬门**（无原始 1m）：`assemble_training_set` 登记前，以**日线（交易日真值）**逐日校验——落在**选中盘中日期全跨度** `[首个选中 3m 的日期, after_end]`（**含盘中 before-context ~2 日**，codex R6-F1）内的每个交易日，其 DB 盘中桶数须**精确等于** `80/16/4`；任一日不足（= B1 drop 的洞 / 整天缺）→ `GenerateSkipException`（重选起点）。**精确逐日硬门、非阈值 ratio**（单桶缺也抓）；因分钟级已在 B1 强制，B2 只需数每日桶数、无需原始 1m。
@@ -184,7 +184,7 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - **合成 golden 边界桶（§4.2）**：3m/15m/60m 边界桶成员 = §4.2 逐值 member lists（09:30/10:30/11:30/13:01/15:00 周边）；上午 121 / 下午 120 恒等式。
 - **B1 分钟级完整性（R4-F1）**：桶内缺单根/散布缺多根 1m → 该交易日**盘中不入库（drop）**、记日志；dense 覆盖带排除该日；完整日照常 80/16/4 入库。
 - **resample_calendar 完整性（R4-F2）**：export 当月/当周残缺周期**不 emit**（构造 export 日落月中 → 该月 monthly bar 不出现）；IPO 首周（有后续周）**保留**；含假期完整周仍一根。
-- **B2 D2**：构造「月线全历史但 1m 只覆盖近段」的 fixture → 起点必落在覆盖带内；覆盖带撑不下前向窗口的股 → skip。
+- **B2 D2（按交易日期，R7-F1）**：构造「月线全历史但 1m 只覆盖近段」→ 起点必落在 dense 日期集内；覆盖撑不下前向窗口 → skip；**边界同日期不误杀**：`start` 落 dense 首日（`start`=00:00 < 首根 3m 0933）仍**有效**、`after_end` 落 dense 末日（≈23:59 > 末根 3m 1500）仍有效；窗口跨度含任一非-dense 交易日 → skip。
 - **B2 D9 per-day 硬门（R3-F2/R4-F1/R6-F1）**：窗口含被 B1-drop 的日（DB 盘中桶数 <80/16/4）→ **per-day 硬门 skip**；窗口避开该日 → 正常生成；缺整天同理；**start 前一日（盘中 before-context 内）被 drop → 也 skip**（不静默从更早日回填，R6-F1）；盘中全跨度**外**的老 daily-only 日不检查；真停牌日（无日线）不误伤。
 - **B1 源一致性对账（D10，R6-F2）**：日线文件某日 close/volume 与 1m 聚合不一致（超容差）→ **skip 该股**；`export_log` 该股文件 `status=error/partial` → skip；重叠窗口全一致 → 放行（纯对账逻辑 host 单测）。
 - **B2 聚合对齐（R3-F1）**：daily/weekly/monthly bar 的 `end_global_index` == 该周期**最后一交易日的最后一根 3m** 的 `global_index`（断言非上一根、非次日）；跨月/跨周边界各一例；before-context（早于 3m 窗口）的 daily bar `egi==0`。
@@ -201,6 +201,7 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - P/F（D8b）：破坏性 reset 对**非 `kline_pilot_` 前缀**库/缺 `--reset` **拒绝**（任何 DDL 前），smoke 覆盖；pilot 对专用一次性库建 schema。
 - P/F（D9，R4-F1/R6-F1）：桶内缺分钟 → **B1 drop 该日**；**B2 per-day 硬门**覆盖**选中盘中全跨度（含 before-context）**、每交易日桶数精确=80/16/4，缺日（含 start 前一日）skip、单桶缺不被稀释；真停牌日不误伤；pilot 输出含 `coverage_ratio` + 缺日。
 - P/F（D10，R6-F2）：日线 vs 1m 聚合超容差不一致的股 **fail-closed skip**；`export_log` 非 `ok` 文件 skip；重叠窗口一致则放行。
+- P/F（D2，R7-F1）：覆盖判定按**交易日期**（非 raw 时间戳）；start/after_end 与 dense 边界**同日期**的候选不被误杀（同日期边界回归绿，证明不产 0 训练组）。
 - P/F（R4-F2）：resample_calendar **不 emit** export 当期 trailing 残缺周/月；训练组内无残缺日历 bar（export-月 partial monthly 回归测试绿）。
 - P/F（R3-F1 对齐）：daily/weekly/monthly `end_global_index` = 期内末根 3m（无 lookahead）；聚合 bar 标签 = 组内首交易日午夜。
 - P/F（R5-F1 前向边界）：`after_end = monthly[start+8]−1`（第 8 月末）；第 8 月线 bar `egi` 命中第 8 月末 3m、非首日；跨月界 trailing 周 bar 被排除（回归绿）。
