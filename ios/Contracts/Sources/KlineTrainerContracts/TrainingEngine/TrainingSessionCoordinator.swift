@@ -67,6 +67,11 @@ public final class TrainingSessionCoordinator {
     /// 复盘 committed 基线：进入时 = saved ?? []；`commitReview` 提交后前移 = 刚提交的工作画线集。
     /// 净改动判定 **恒对比 committed 基线**（非 resume 时加载的 working），见 `ReviewNetChange`。
     @ObservationIgnored private var reviewCommittedBaseline: [DrawingObject] = []
+    /// P1a codex whole-branch High fix：committed 基线的 hiddenIds 侧（与上面 `reviewCommittedBaseline`
+    /// 画线侧同源同步——恒来自 saved 列，见 `loadSavedLossy`）。净改动判定必须把它一并纳入比较，否则
+    /// 「working 画线集==saved 画线集但 hiddenIds 不同」会被误判为「无改动」→ `clearWorking` 抹掉这份
+    /// working 行，永久丢失其携带的隐藏态（forward-compat 数据丢失路径）。
+    @ObservationIgnored private var reviewCommittedHiddenIds: [DrawingID] = []
     /// Task 6：saved 存档解码损坏、已 `clearSaved` 恢复为空基线时置位（UI 读后清、经 toast 呈现
     /// 「复盘存档损坏已清除，可重新复盘保存」）。
     public private(set) var pendingReviewCorruptToast = false
@@ -166,9 +171,11 @@ public final class TrainingSessionCoordinator {
     /// review-redesign Task 5 测试专用：注入复盘 session 态（`reviewRecordId`/`reviewCommittedBaseline`）。
     /// 生产路径由 Task 6 的 `review()`/`resumePendingReview()` 设置；本 task 尚无产出这些字段的公开方法，
     /// 故测试直接注入（镜像 `setActiveRecordNilForTesting` 范式）。
-    func setReviewSessionForTesting(recordId: Int64?, committedBaseline: [DrawingObject]) {
+    func setReviewSessionForTesting(recordId: Int64?, committedBaseline: [DrawingObject],
+                                     committedHiddenIds: [DrawingID] = []) {
         reviewRecordId = recordId
         reviewCommittedBaseline = committedBaseline
+        reviewCommittedHiddenIds = committedHiddenIds
     }
     /// review-redesign Task 7 测试专用：等在飞 review autosave Task 完成（镜像 `drainAutosaveForTesting`）。
     func drainReviewAutosaveForTesting() async { await reviewAutosaveTask?.value }
@@ -326,7 +333,8 @@ public final class TrainingSessionCoordinator {
         return try await buildReviewEngine(recordId: recordId, startTickOverride: nil,
                                            reviewLossy: savedLossy?.lossy ?? LossyDrawingArray(drawings: baseline),
                                            reviewHiddenIds: savedLossy?.hiddenIds ?? [],
-                                           committedBaseline: baseline)
+                                           committedBaseline: baseline,
+                                           committedHiddenIds: savedLossy?.hiddenIds ?? [])
     }
 
     /// review-redesign Task 6：resume-first 续复盘。命中 `.inProgress` → 从 `working.stepTick` 起、
@@ -361,12 +369,18 @@ public final class TrainingSessionCoordinator {
             return nil
         }
         let baseline = try loadCommittedBaselineRecovering(recordId: recordId)   // saved 坏 → 仅清 saved + toast，保住有效 working
+        // codex whole-branch High fix：committed 基线的 hiddenIds 侧同样恒来自 saved 列（与上面 `baseline`
+        // 画线侧同源），供下方 `buildReviewEngine` 种给 `reviewCommittedHiddenIds`——净改动判定须能识别
+        // 「working 与 saved 画线集相同、仅 hiddenIds 不同」，否则会被误判为无改动而 `clearWorking` 抹掉
+        // working 行的隐藏态。上一行 `loadCommittedBaselineRecovering` 已处理 saved 损坏恢复，此处读到的
+        // 是已清理后的状态（坏 → 传播，不吞，同 `review()` 里 `loadSavedLossy` 调用点的处理）。
+        let committedHiddenIds = try reviewArchiveRepo.loadSavedLossy(recordId: recordId)?.hiddenIds ?? []
         do {
             // P1a Task 12（Z1）：`w.lossy`/`w.hiddenOriginalIds` 携带 working 行完整有损集 + 隐藏态，
             // 使引擎携带的 `loadedReviewLossy`/`loadedReviewHiddenIds` 能在后续 save 路径原样传回。
             return try await buildReviewEngine(recordId: recordId, startTickOverride: w.stepTick,
                                                reviewLossy: w.lossy, reviewHiddenIds: w.hiddenOriginalIds,
-                                               committedBaseline: baseline,
+                                               committedBaseline: baseline, committedHiddenIds: committedHiddenIds,
                                                preloadedRecordBundle: bundle)
         } catch let e as AppError where e == Self.invalidResumeTickError {
             // codex whole-branch R6（high）：`w.stepTick` 落在 `[0, metaStartTick)`——`buildReviewEngine`
@@ -407,6 +421,7 @@ public final class TrainingSessionCoordinator {
                                     reviewLossy: LossyDrawingArray,
                                     reviewHiddenIds: [DrawingID] = [],
                                     committedBaseline: [DrawingObject],
+                                    committedHiddenIds: [DrawingID] = [],
                                     preloadedRecordBundle: (TrainingRecord, [TradeOperation], [DrawingObject])? = nil
                                     ) async throws -> TrainingEngine {
         let (record, ops, drawings) = try preloadedRecordBundle ?? recordRepo.loadRecordBundle(id: recordId)
@@ -478,6 +493,7 @@ public final class TrainingSessionCoordinator {
         engine.setReviewLossy(reviewLossy, hiddenIds: reviewHiddenIds)
         reviewRecordId = recordId
         reviewCommittedBaseline = committedBaseline
+        reviewCommittedHiddenIds = committedHiddenIds
         reviewSessionToken = UUID()     // Task 7：新复盘 session mint 新 token（陈旧排队 autosave 靠此失效）
         reviewAutosaveTask = nil        // final-review T7：belt-and-suspenders——新 token 已够，随手清掉陈旧排队引用
         reviewRevision = 0
@@ -833,6 +849,7 @@ public final class TrainingSessionCoordinator {
         // 归位，使该陈旧 flush 命中下面的早退 guard（no-op）。
         reviewRecordId = nil
         reviewCommittedBaseline = []
+        reviewCommittedHiddenIds = []
         activeReader?.close()
         activeReader = nil
         activeEngine = nil
@@ -880,9 +897,13 @@ public final class TrainingSessionCoordinator {
         (try? reviewArchiveRepo.loadMarkers()) ?? [:]
     }
 
-    /// 当前复盘 session 是否有净改动：当前活跃引擎的 `reviewDrawings` vs committed 基线（顺序无关）。
+    /// 当前复盘 session 是否有净改动：当前活跃引擎的 `reviewDrawings`/`loadedReviewHiddenIds` vs committed
+    /// 基线（顺序无关）。codex whole-branch High fix：须纳入 hiddenIds——否则「画线集相同、仅 hiddenIds
+    /// 不同」被误判无改动。
     public func reviewNetChanged() -> Bool {
-        ReviewNetChange.changed(working: activeEngine?.reviewDrawings ?? [], committed: reviewCommittedBaseline)
+        ReviewNetChange.changed(working: activeEngine?.reviewDrawings ?? [], committed: reviewCommittedBaseline,
+                                workingHiddenIds: activeEngine?.loadedReviewHiddenIds ?? [],
+                                committedHiddenIds: reviewCommittedHiddenIds)
     }
 
     /// 复盘中按需持久化：有净改动（vs committed 基线）→ 写 working（`stepTick`=当前 tick）；
@@ -894,7 +915,12 @@ public final class TrainingSessionCoordinator {
         // 边界情况），身份不符也在此再拦一次，绝不用非当前活跃 engine 的数据落 review_archive。
         guard activeEngine === engine else { return }
         guard let id = reviewRecordId else { return }
-        if ReviewNetChange.changed(working: engine.reviewDrawings, committed: reviewCommittedBaseline) {
+        // codex whole-branch High fix：净改动判定须纳入 hiddenIds（4-arg 形式）——2-arg 形式只比较画线集，
+        // 「working 画线集==committed 基线但 hiddenIds 不同」会被误判无改动 → 走下方 `clearWorking` 分支，
+        // 抹掉这份 working 行携带的隐藏态（P1a 的 forward-compat 数据丢失路径）。
+        if ReviewNetChange.changed(working: engine.reviewDrawings, committed: reviewCommittedBaseline,
+                                    workingHiddenIds: engine.loadedReviewHiddenIds,
+                                    committedHiddenIds: reviewCommittedHiddenIds) {
             // P1a Task 12（Z1）：重发 reconciled 后的完整有损集（非纯 known）+ 原样传回加载来的 hiddenIds
             // （不用默认 `[]` 覆盖 P5 写的隐藏态，codex R11-high）——保住加载 blob 里未识别的条穿过本次 autosave。
             try reviewArchiveRepo.saveWorking(recordId: id, stepTick: engine.tick.globalTickIndex,
@@ -922,6 +948,7 @@ public final class TrainingSessionCoordinator {
                                           lossy: try engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings),
                                           hiddenOriginalIds: engine.loadedReviewHiddenIds)
         reviewCommittedBaseline = engine.reviewDrawings
+        reviewCommittedHiddenIds = engine.loadedReviewHiddenIds   // 两基线同步前移（codex whole-branch High fix）
     }
 
     /// 丢弃复盘工作态：清 working（回退到 committed：saved 或删行）。无复盘 session → no-op。

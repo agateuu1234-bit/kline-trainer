@@ -115,6 +115,18 @@ struct CoordinatorLossyPreserveTests {
         }
     }
 
+    /// 裸 SQL 种一行 review_archive **saved + working 均有**——供 hiddenIds-only 净改动测试：
+    /// 两列画线集相同、hiddenIds 不同，专测 `ReviewNetChange.changed` 的 4-arg（含 hiddenIds）threading。
+    private func seedReviewSavedAndWorking(_ appDB: DefaultAppDB, recordId: Int64,
+                                            savedWrapperJSON: String, stepTick: Int, workingWrapperJSON: String) throws {
+        try appDB.dbQueue.write { db in
+            try db.execute(sql: """
+                INSERT INTO review_archive (record_id, saved_drawings, working_step_tick, working_drawings, updated_at)
+                VALUES (?, ?, ?, ?, 0)
+                """, arguments: [recordId, savedWrapperJSON, stepTick, workingWrapperJSON])
+        }
+    }
+
     // MARK: - pending_replay：autosave（saveProgress）保真
 
     @Test("pending_replay: load(含未来条)→saveProgress(autosave) 后未来条仍在、且在原位")
@@ -205,6 +217,29 @@ struct CoordinatorLossyPreserveTests {
         }
         #expect(col.contains(unknown))
         #expect(col.contains("h-1"))
+    }
+
+    @Test("复盘净改动须纳入 hiddenIds：working 画线集==saved 画线集但 hiddenIds 不同 → 判「有改动」，working 行不被 clearWorking 抹掉（codex WB High）")
+    func reviewNetChangeHiddenIdsOnlyDiffPreventsClearWorking() async throws {
+        let (url, appDB) = try makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let rid = try makeRecord(appDB)
+        // saved 与 working 画线集完全相同（[g1]），仅 hiddenIds 不同：saved=[]（committed 基线），working=["h-1"]
+        // （模拟一个更新客户端写的 working 行只改了隐藏态，未动画线——P1a 的核心场景）。
+        try seedReviewSavedAndWorking(appDB, recordId: rid,
+                                       savedWrapperJSON: #"{"drawings":[\#(known("g1"))],"hiddenIds":[]}"#,
+                                       stepTick: 3,
+                                       workingWrapperJSON: #"{"drawings":[\#(known("g1"))],"hiddenIds":["h-1"]}"#)
+        let coord = makeCoordinator(appDB)
+        let engine = try #require(try await coord.resumePendingReview(recordId: rid))  // resume：working 画线==committed 基线，hiddenIds 不同
+        try coord.persistReviewWorkingIfChanged(engine: engine)   // 零画线编辑——净改动判定必须靠 hiddenIds 单独识别出「有改动」
+        let workingCol: String? = try await appDB.dbQueue.read {
+            try Row.fetchOne($0, sql: "SELECT working_drawings FROM review_archive WHERE record_id=\(rid)")?["working_drawings"]
+        }
+        // 2-arg 净改动判定会漏判「无改动」→ clearWorking 抹掉 working 行 → hiddenIds="h-1" 永久丢失，
+        // 隐藏的原训练线在下次进入复盘时重新显示。修复后须判「有改动」→ working 行原样保留（含 hiddenIds）。
+        #expect(workingCol != nil)                       // working 行未被 clearWorking 清空
+        #expect(workingCol?.contains("h-1") == true)      // hiddenIds 未丢失
     }
 
     // MARK: - review FRESH 入口（无 working 行）：commit 不丢 saved 列未来条/hiddenIds（Critical）
