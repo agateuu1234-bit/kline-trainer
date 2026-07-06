@@ -79,7 +79,7 @@
 | # | 决策 | 取舍 |
 |---|---|---|
 | **D1** | 只改 `klines.open/high/low/close`：`DECIMAL(10,2)` → `DOUBLE PRECISION`。`amount`（`DECIMAL(16,2)`，元/分 2 位为自然精度、尾噪是 artifact）与指标列（`ma66/boll_*/macd_*` `DECIMAL(10,4)/(10,6)` + `round(4)/round(6)`，既有契约）**保持不变**——仅在全精度 `close` 上重算，结果更准但仍存 4/6 位。 | 前复权 float64 价格无损；amount/指标不动 = 最小改面（surgical）。空库直建、无 migration。**不涉 iOS/契约**（§0）。 |
-| **D2** | `select_start_index` 加**每股 1m 覆盖带约束**：起点仅在「前向 8 根月 K 窗口 `[start, after_end]` 完整落在该股 1m 覆盖区 `[t0,t1]` 内」的月线里选。 | 消灭随机起点大量落空 + 杜绝盘中中途断货的次品训练组。约束下每股约 4–5 个可选起点，100 股够凑 100 组（`uq_stock_start` 保唯一）。 |
+| **D2** | `select_start_index` 加**每股 1m 覆盖带约束**：起点仅在「前向 8 完整月窗口 `[start, after_end]`（`after_end`=第 8 月末，§4.4）完整落在该股 1m 覆盖区 `[t0,t1]` 内」的月线里选。 | 消灭随机起点大量落空 + 杜绝盘中中途断货的次品训练组。约束下每股约 3–4 个可选起点，100 股够凑 100 组（`uq_stock_start` 保唯一）。 |
 | **D3** | 合成层写成**周期无关通用**；本期只生成 `3m/15m/60m/daily/weekly/monthly`。**1m 不入主库**（仅作合成源），`3m` 为最细周期。**取消 `ticket_index`**（无消费者，§0 声明）。 | 通用代码 → 将来加 5m/30m/1m/年 = 改配置；不塞将来要重做的周期进 pilot 产物（YAGNI）。1m 不入库省全量上亿行。 |
 | **D4** | `stocks.code` 保留交易所后缀（`000001.SZ`，9 字符 ≤ `VARCHAR(10)`）。 | 消歧（`000001.SZ` 平安银行 vs `000001.SH` 上证指数）、与 `stock_universe` 一致。 |
 | **D5**（codex R2-F2 修正） | pilot **保持 `training_sets.file_path` 绝对路径**（现状 B3 `routes.py` 下载、scheduler、`backfill` 均按绝对 `Path(file_path)` 读）。**不在 pilot 半途改相对**（只改 B2 写、不改 3 个读点 = 下载 404）。 | 相对化是**跨 B2 写 + B3/scheduler/backfill 读的横切改动 + 存量行迁移**，归入未来 NAS 搬迁的独立聚焦改动（§7），不塞 pilot（YAGNI + 防半成品）。搬迁易度仍由 config 驱动 DSN 保证（原 §0/移机答复不变）。 |
@@ -158,13 +158,15 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - **iOS 侧零改动**（§0 声明，已核实 `Double`/`REAL` 端到端）。
 
 ### 4.4 B2 改动
-- `select_start_index(monthly_datetimes, rng, *, one_min_lo, one_min_hi)`（D2）：候选月线下标先按现规则 `[30, n-9]`，**再过滤**「起点 `start` 与 `monthly_after_end(start)` 都落在 `[one_min_lo, one_min_hi]` 内」；候选为空 → `GenerateSkipException`（该股 1m 覆盖不足以承载任何完整前向窗口）。`one_min_lo/hi` 由 `generate_one_training_set` 从该股 3m（最细）实际 datetime 范围推得。**端点检查是必要非充分**（洞在窗口内部时端点仍可能落在范围里），完整性由下面覆盖校验兜底。
+- **前向窗口边界 `after_end`（redefine，codex R5-F1）**：`after_end = monthly_datetimes[start_idx+8] − 1`（**第 9 根月线 open − 1 秒**；`select_start_index` 保证 `start_idx ≤ n−9` → 第 9 根必存在）= **第 8 个完整前向月的月末**。取代原 `monthly_after_end` 返回的第 8 月线 open。**所有周期窗口 forward 上界统一用它**。
+- **窗口纳入规则（R5-F1）**：`select_period_window` 每周期只纳入**整段 period-end ≤ `after_end`** 的 bar。月/日与 `after_end`=月界天然对齐（恰 8 完整月 + 日线到第 8 月末）；**周线额外排除跨 8→9 月界、周末 > `after_end` 的 trailing 周 bar**（周跨月边界会 straddle）。杜绝末根高周期 bar 的 `end_global_index` 早于其整段 3m 播完（否则第 8 月线含整月 OHLC 却在第 8 月首日 reveal = **lookahead**）。
+- `select_start_index(monthly_datetimes, rng, *, one_min_lo, one_min_hi)`（D2）：候选月线下标先按现规则 `[30, n-9]`，**再过滤**「起点 `start` 与 `after_end`（第 8 月末，见上）都落在 `[one_min_lo, one_min_hi]` 内」；候选为空 → `GenerateSkipException`（该股 1m 覆盖撑不下任何完整前向窗口）。`one_min_lo/hi` 由 `generate_one_training_set` 从该股 3m（最细）实际 datetime 范围推得。**端点必要非充分**（内部洞端点仍可能在范围里），完整性由 D9 兜底。
 - **窗口覆盖完整性校验（D9，两处强制；codex R4-F1）**：
   - (a) **分钟级 @ B1**（§4.2，1m 在手）：桶内缺分钟的日已被 drop 出库 → **DB 里不存在半成品盘中桶**。
   - (b) **B2 provenance-free 硬门**（无原始 1m）：`assemble_training_set` 登记前，以**日线（交易日真值）**逐日校验——**落在盘中窗口日期跨度内**的每个交易日，其 DB 盘中桶数须**精确等于** `80/16/4`；任一日不足（= B1 drop 的洞 / 整天缺）→ `GenerateSkipException`（重选起点）。**是精确逐日硬门、非阈值 ratio**（单桶缺也抓，不被大窗口稀释）；因分钟级已在 B1 强制，B2 只需数每日桶数、无需原始 1m。
   - 盘中窗口跨度**外**的 daily-only before-context 日**不检查**（老日期本就无盘中，正确）；窗口边缘落入 dense 带外（如首日 10:12 起）→ 该起点 skip（D2 重试）。真停牌日（无日线）不进 expected、不误伤。
   - `coverage_ratio`（各周期，报告用）+ 每日桶数完整性随 `GeneratedTrainingSet` 上报，pilot 打印。
-- **聚合 bar 时间标签 = OPEN，端点对齐存证（codex R3-F1）**：daily/weekly/monthly 的 `datetime` 用**组内首交易日午夜**（§4.2）。`assign_global_indices` 把 `datetime` 当 **open**、覆盖区间 `[open, 下一根 open)` → `end_global_index(日D) = bisect_right(3m, 次日午夜−1)−1 =` **day D 最后一根 3m**（逐值验证：次日午夜 ≫ 当日 15:00 ≫ 当日首根 3m，故命中当日末根、非上一根、非次日），reveal 与该日 3m 播放完**精确对齐、无 lookahead**。**明确不采用 codex 建议的「标末根收盘 15:00」**：在 `[open,next_open)` 下末根标签使 `upper=次日15:00−1` → `end_global_index` 落到**次日**倒数第二根 3m → 日 K 滞后一整天 reveal（且偏离 pre-QMT 分周期 CSV 的午夜约定）。before-context 早于 3m 窗口的 daily bar → `egi` 钳到 0（开局即显，正确）。
+- **聚合 bar 时间标签 = OPEN，端点对齐存证（codex R3-F1）**：daily/weekly/monthly 的 `datetime` 用**组内首交易日午夜**（§4.2）。`assign_global_indices` 把 `datetime` 当 **open**、覆盖区间 `[open, 下一根 open)` → `end_global_index(日D) = bisect_right(3m, 次日午夜−1)−1 =` **day D 最后一根 3m**（逐值验证：次日午夜 ≫ 当日 15:00 ≫ 当日首根 3m，故命中当日末根、非上一根、非次日），reveal 与该日 3m 播放完**精确对齐、无 lookahead**。**明确不采用 codex 建议的「标末根收盘 15:00」**：在 `[open,next_open)` 下末根标签使 `upper=次日15:00−1` → `end_global_index` 落到**次日**倒数第二根 3m → 日 K 滞后一整天 reveal（且偏离 pre-QMT 分周期 CSV 的午夜约定）。before-context 早于 3m 窗口的 daily bar → `egi` 钳到 0（开局即显，正确）。**末根高周期 bar（第 8 月线 / 末周线）**：因 `after_end` 延伸到其整段末（R5-F1 窗口纳入规则），窗口内 3m 覆盖到该段末 → `egi` = 该段最后一根 3m、非窗口首日 → **无 lookahead**。
 - `file_path`（D5）：pilot **保持绝对路径写入**，不改现有 B3 `routes.py` 下载 / scheduler / `backfill_content_hash` 的 `Path(file_path)` 读取契约（相对化归 §7 未来搬迁）。
 - 其余（窗口切分、`assign_global_indices` 算法本体、zip、CRC32、`uq_stock_start` 预检）**不变**。
 
@@ -183,6 +185,7 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - **B2 D2**：构造「月线全历史但 1m 只覆盖近段」的 fixture → 起点必落在覆盖带内；覆盖带撑不下前向窗口的股 → skip。
 - **B2 D9 per-day 硬门（R3-F2/R4-F1）**：窗口含被 B1-drop 的日（DB 盘中桶数 <80/16/4）→ **per-day 硬门 skip**；窗口避开该日 → 正常生成；缺整天同理；真停牌日（无日线）不误伤；盘中窗口跨度外的 daily-only before-context 日**不检查**（`egi` 侧另测）。
 - **B2 聚合对齐（R3-F1）**：daily/weekly/monthly bar 的 `end_global_index` == 该周期**最后一交易日的最后一根 3m** 的 `global_index`（断言非上一根、非次日）；跨月/跨周边界各一例；before-context（早于 3m 窗口）的 daily bar `egi==0`。
+- **B2 前向边界无 lookahead（R5-F1）**：构造 8 完整月窗口 → **第 8 月线 bar 的 `egi` = 第 8 月末最后一根 3m**（非窗口首日/非第 8 月首日）；`after_end == monthly[start+8]−1`；构造**跨 8→9 月界的 trailing 周 bar → 被排除**（不出现在窗口，杜绝其整周 OHLC 早显）。
 - **D8a 前置断言**：mock `information_schema` 返回 `DECIMAL`/存在 `ticket_index` → import 写前**中止**（不 INSERT）；返回 `double precision`/无 `ticket_index` → 放行。
 - **D8b reset 护栏**：目标库名非 `kline_pilot_` 前缀 或 未带 `--reset` → 任何 `DROP/CREATE DATABASE` 前**拒绝**；匹配前缀 + `--reset` → 放行（纯逻辑守卫可 host 单测）。
 - **集成**（不 host 单测，D14/D13 scope）：SMB 拉取、Docker PG、`generate_batch` 端到端由 pilot 脚本人工跑一次核对。
@@ -196,6 +199,7 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - P/F（D9，R4-F1）：桶内缺分钟 → **B1 drop 该日**（1m 在手处判）；**B2 per-day 硬门**（每在窗交易日盘中桶数精确=80/16/4）对缺日 skip、单桶缺不被稀释；真停牌日不误伤；pilot 输出含 `coverage_ratio` + 缺日。
 - P/F（R4-F2）：resample_calendar **不 emit** export 当期 trailing 残缺周/月；训练组内无残缺日历 bar（export-月 partial monthly 回归测试绿）。
 - P/F（R3-F1 对齐）：daily/weekly/monthly `end_global_index` = 期内末根 3m（无 lookahead）；聚合 bar 标签 = 组内首交易日午夜。
+- P/F（R5-F1 前向边界）：`after_end = monthly[start+8]−1`（第 8 月末）；第 8 月线 bar `egi` 命中第 8 月末 3m、非首日；跨月界 trailing 周 bar 被排除（回归绿）。
 - P/F（§4.2 bucket）：3m/15m/60m 边界桶成员逐值 = §4.2 golden member lists；完整日 80/16/4 + 上午 121/下午 120 恒等式。
 - P/F：pilot 脚本对 100 只产出 `≥` 阈值个 `.zip`（阈值由实际覆盖带算，plan 定）+ `training_sets` 登记 + `content_hash` 合法（`^[0-9a-f]{8}$`）。
 - P/F（D5）：`training_sets.file_path` 绝对；B3 下载 / `backfill` 读取契约不变（回归绿）。
@@ -203,7 +207,8 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 ## 7. 风险 / 开放项
 - **合成桶成员**（codex R2-F3 已收敛）：精确区间规则（首桶 `[0930,0930+N]` 含集竞、其余 `(b−N,b]`）+ 边界桶 member lists + 80/16/4 + 121/120 恒等式，**已在 §4.2 定为验收契约**，不再延后 plan。
 - **path 相对化 / NAS 搬迁**（codex R2-F2 归入未来）：pilot 用绝对 `file_path`；真正搬 NAS/服务器时做**独立聚焦改动**——引入跨 B2 写 + B3/scheduler/backfill 读的中心化 `resolve_training_set_path(rel)→abs`（base dir 配置化）+ 存量 `file_path` 迁移 + reserve/download e2e 测；本期不做（[[project_app_public_release_intent]]）。
-- **可行起点带偏窄**：1m 仅约 1 年 + 前向 8 月 → 每股可行起点约 4–5 个。100 股足够；若某市场（如次新 BJ 股）1m 更短，该股可能 0 起点被 skip，属预期。
+- **可行起点带偏窄**：1m 仅约 1 年 + 前向覆盖到**第 8 完整月月末**（R5-F1，比原第 8 月 open 又晚 ~1 月）→ 每股可行起点约 3–4 个。100 股仍够；若某市场（如次新 BJ 股）1m 更短，该股可能 0 起点被 skip，属预期。
+- **前向窗口边界 lookahead**（R5-F1 已收敛）：`after_end` 与 bar 标签解耦——覆盖延到第 8 完整月月末，末根月/周高周期 bar 只在其整段 3m 播完才 reveal；跨月界 trailing 周 bar 排除。§4.4 定契约 + §5 回归锁定。
 - **窗口内部数据洞**（R3-F2/R4-F1）：分钟级在 **B1**（1m 在手）强制——缺分钟的日 drop 出库；**B2** 靠"每在窗交易日盘中桶数精确=期望(80/16/4)"的 **provenance-free 硬门**兜底（单桶缺也抓、非阈值 ratio）。缺整天与桶内缺分钟都被抓、skip；真停牌日不误伤。（`coverage_ratio` 仅作报告指标。）
 - **残缺日历 bar**（R4-F2 已收敛）：resample_calendar 只 emit 完整日历周期（存在后续周期 daily 才 emit），丢当前 export 期 trailing 残缺周/月，防"看似完整实则残缺"的日历 bar 污染训练快照。
 - **聚合 bar 时间标签**（R3-F1）：daily/weekly/monthly 用组内首交易日午夜（OPEN），与 `[open,next_open)` 语义对齐、无 lookahead；**未采纳 codex 的「标末根收盘」建议**（会滞后一格 + 偏离既有约定），已在 §4.4 逐值存证 + §5 回归测试锁定。
