@@ -85,6 +85,8 @@
 | **D5** | `training_sets.file_path` 存**相对路径**（相对可配置 `TRAINING_SET_BASE_DIR`），非绝对本地路径。 | 将来 PG 迁 NAS/服务器只换 base dir，B3 按路径找文件不断（搬家后路能轻）。 |
 | **D6** | pilot：本机 Docker Postgres（复用 `backend/docker-compose.yml`）；100 只从 universe **按市场分层随机抽**（seed 可复现），SH/SZ/BJ 都覆盖；经现在可用的 SMB 挂载拉这 100 只的 1m+日线文件。 | 最省事、可复现；覆盖三市场以暴露格式差异。 |
 | **D7** | 规整层为**新增 QMT 专用层**，产出与现有 `clean` 入参兼容的 DataFrame（列 `datetime/open/high/low/close/volume/amount` + Unix 秒），接现有 `compute_indicators`。 | 隔离 QMT 特有的 BOM/时区/文件名/中文标签解析，不污染下游通用逻辑。 |
+| **D8**（codex R1-F1） | **写库前 schema 前置校验（fail-closed）**：import 入口先查 `information_schema.columns` 断言 `klines.open/high/low/close` 均为 `double precision` 且 `ticket_index` 列不存在，否则**中止**（非静默插入）。pilot 另**显式对全新库**应用 `schema.sql`（先 `DROP TABLE IF EXISTS ... CASCADE` 或用一次性专用 DB 名），**绝不往陈旧 `pgdata` 卷插入**。 | 防 F1：docker-compose 持久 `pgdata` 卷 + 不自动灌 schema → 陈旧 `DECIMAL(10,2)` 表会接受插入并把前复权价截断成 2 位、产出损坏训练组而不报错，正好打脸 D1 耐久性目标。belt-and-suspenders：显式建库 + 写前断言（后者也护未来非-pilot 调用方）。 |
+| **D9**（codex R1-F2） | **窗口覆盖完整性校验**：以选中窗口 `[start, after_end]` 内**日线根数 × 每日应有桶数**为 `expected`（日线在=当天确有交易，**天然排除真停牌日**），对比实际生成桶数得每盘中周期 `coverage_ratio`；任一盘中周期 `ratio < 阈值`（默认 ~0.99，plan 定）→ **skip 该起点重选**；`coverage_ratio` 指标写进 pilot 输出（可见，不藏洞）。 | 防 F2：D2 端点检查是**必要非充分**——中段导出缺整天 / SMB 拷贝截断 / 缺整交易日会过端点检查却产出带隐藏洞的稀疏 3m/15m/60m。日线作「应有交易日」真值 → 真停牌（无日线）不误伤、数据洞被抓。 |
 
 ## 3. 架构（数据流）
 
@@ -144,39 +146,46 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - 只改 `klines.open/high/low/close`：`DECIMAL(10,2)` → `DOUBLE PRECISION`；**移除 `ticket_index` 列**。
 - `amount DECIMAL(16,2)`、指标列 `DECIMAL(10,4)/(10,6)` **不变**；Python `compute_indicators` 的 `round(4)/round(6)` **保留**（在全精度 `close` 上重算，结果更准但仍按既有契约存 4/6 位）；`UNIQUE(stock_code,period,datetime)` 保留。
 - `_INT_COLS` 去 `ticket_index`；`_KLINE_INSERT` 与 `schema.sql` 去 `ticket_index` 列/占位符；`compute_ticket_index` 及其单测删除（D3，无消费者）。
-- **无 PG 迁移 runner、无生产 PG 数据** → pilot 对**空库**应用更新后的 `schema.sql`（bump 头部版本标签）即可；已有数据的 forward migration 仅当将来存在需保留的生产 PG 时才写（当前无 → 本期不做）。
+- **写库前 fail-closed 断言（D8）**：import 写库壳在任何 INSERT 前查 `information_schema.columns`，断言 `klines.open/high/low/close = double precision` 且无 `ticket_index`，不符即 `raise`/`exit` 中止（护 pilot 与将来一切调用方，防陈旧库静默截断）。
+- **无 PG 迁移 runner、无生产 PG 数据** → pilot **显式对全新库**应用更新后的 `schema.sql`（`DROP TABLE IF EXISTS klines,stocks,training_sets CASCADE` 后重建，或用一次性 DB 名；bump 头部版本标签），**不复用陈旧 `pgdata` 卷**；已有数据的 forward migration 仅当将来存在需保留的生产 PG 时才写（当前无 → 本期不做）。
 - **iOS 侧零改动**（§0 声明，已核实 `Double`/`REAL` 端到端）。
 
 ### 4.4 B2 改动
-- `select_start_index(monthly_datetimes, rng, *, one_min_lo, one_min_hi)`（D2）：候选月线下标先按现规则 `[30, n-9]`，**再过滤**「起点 `start` 与 `monthly_after_end(start)` 都落在 `[one_min_lo, one_min_hi]` 内」；候选为空 → `GenerateSkipException`（该股 1m 覆盖不足以承载任何完整前向窗口）。`one_min_lo/hi` 由 `generate_one_training_set` 从该股 3m（最细）实际 datetime 范围推得。
+- `select_start_index(monthly_datetimes, rng, *, one_min_lo, one_min_hi)`（D2）：候选月线下标先按现规则 `[30, n-9]`，**再过滤**「起点 `start` 与 `monthly_after_end(start)` 都落在 `[one_min_lo, one_min_hi]` 内」；候选为空 → `GenerateSkipException`（该股 1m 覆盖不足以承载任何完整前向窗口）。`one_min_lo/hi` 由 `generate_one_training_set` 从该股 3m（最细）实际 datetime 范围推得。**端点检查是必要非充分**（洞在窗口内部时端点仍可能落在范围里），完整性由下面覆盖校验兜底。
+- **窗口覆盖完整性校验（D9）**：`assemble_training_set` 切完各周期窗口后、登记前，对每个盘中周期算 `coverage_ratio = 实际桶数 / expected`，其中 `expected = (窗口内该股日线根数) × 每日应有桶数`（`3m=80/15m=16/60m=4`；首/末残缺交易日按比例折算，细则 plan 定）。任一盘中周期 `ratio < COVERAGE_MIN`（默认 0.99，plan 可调）→ `GenerateSkipException`（重选起点）。用**该股日线**作交易日真值 → 真停牌日（无日线）不进 `expected`、不误伤；只有「有日线却缺盘中」（数据洞）会压低 ratio。`coverage_ratio`（各周期）随 `GeneratedTrainingSet` 上报，pilot 打印。
 - `file_path` 相对化（D5）：登记时存 `gts.path.relative_to(base_dir)`；新增 `TRAINING_SET_BASE_DIR`（env/CLI），B3 读取时 `base_dir / rel_path` 还原。
 - 其余（窗口切分、`assign_global_indices`、zip、CRC32、`uq_stock_start` 预检）**不变**。
 
 ### 4.5 pilot 运行脚本（新写，薄壳，不单测）
 - 读 `stock_universe_with_name.csv` → 按 `exchange` 分层随机抽 100（`--seed` 可复现）。
 - 按文件名规则从 SMB 拉这 100 只的 1m+日线到本地临时目录（或直接读挂载点）。
-- 起本机 Docker Postgres（`docker-compose`）→ 逐股跑 规整→合成→算指标→写 klines → B2 `generate_batch(target=100)`。
-- 输出：`.zip` 到 `TRAINING_SET_BASE_DIR`，`training_sets` 登记；打印每股覆盖带与生成结果。
+- 起本机 Docker Postgres（`docker-compose`）→ **schema 前置（D8）**：显式对全新库应用更新后的 `schema.sql`（`DROP ... CASCADE` 重建或一次性 DB），再由 import 写前 `information_schema` 断言双保险 → 逐股跑 规整→合成→算指标→写 klines → B2 `generate_batch(target=100)`。
+- 输出：`.zip` 到 `TRAINING_SET_BASE_DIR`，`training_sets` 登记；打印每股 1m 覆盖带、**各周期 `coverage_ratio`（D9）**、生成/skip 结果。
 
 ## 5. 测试（host pytest，纯函数层全测）
 - **规整层**：BOM 剥离（表头 `datetime` 非 `﻿time`）；`YYYYMMDDHHMMSS`/`YYYYMMDD` @UTC+8 → Unix 秒精确值（含跨夏令时无关性、北京无 DST）；文件名正则（三市场 + 全角名 + `星`/`_` sanitize）；缺列抛 `CsvSchemaError`；**前复权 15 位小数原样保留**（`clean` 后 close 逐字等于输入）。
 - **合成层**（golden fixture）：完整日 → `3m=80/15m=16/60m=4` 根；**禁跨午休**（11:30 桶不含 13:01 数据）；**禁跨日**；开盘集竞 09:30 并入首桶；OHLC=首/高/低/尾、vol/amount=Σ 逐值；周/月按日历分组（含假期周仍一根 + 边缘残缺周/月成一根）；停牌缺口不补零。
 - **B2 D2**：构造「月线全历史但 1m 只覆盖近段」的 fixture → 起点必落在覆盖带内；覆盖带撑不下前向窗口的股 → skip；`file_path` 相对化 round-trip（`base_dir/rel` 还原 = 原路径）。
+- **B2 D9 覆盖校验**：构造窗口内**缺一整个交易日**盘中数据（日线在、1m 缺）的 fixture → `coverage_ratio < 0.99` → skip；构造**真停牌日**（日线也无该日）的 fixture → 该日不进 `expected`、`ratio` 不被压低、**不** skip；`coverage_ratio` 值逐周期精确。
+- **D8 前置断言**：mock `information_schema` 返回 `DECIMAL`/存在 `ticket_index` → import 写前**中止**（不 INSERT）；返回 `double precision`/无 `ticket_index` → 放行。
 - **集成**（不 host 单测，D14/D13 scope）：SMB 拉取、Docker PG、`generate_batch` 端到端由 pilot 脚本人工跑一次核对。
 
 ## 6. 验收标准（spec 级；非-coder 验收清单在 plan 阶段出）
 - P/F：规整层 host pytest 全绿；BOM/时区/文件名/前复权精度四类各有专测。
 - P/F：合成层 golden 三周期总数 = 80/16/4，午休/跨日/日历分组专测全绿。
 - P/F：`schema.sql` `klines.open/high/low/close` 为 `DOUBLE PRECISION`、无 `ticket_index`（amount/指标列不变）；空库应用可建成。
+- P/F（D8）：import 写前对陈旧 `DECIMAL`/含 `ticket_index` 的库**中止**（fail-closed）、不静默插入；pilot 对全新库显式建 schema。
+- P/F（D9）：窗口内「有日线缺盘中」→ `coverage_ratio < COVERAGE_MIN` 被 skip；真停牌日不误伤；pilot 输出含各周期 `coverage_ratio`。
 - P/F：pilot 脚本对 100 只产出 `≥` 阈值个 `.zip`（阈值由实际覆盖带算，plan 定）+ `training_sets` 登记 + `content_hash` 合法（`^[0-9a-f]{8}$`）。
 - P/F：`training_sets.file_path` 为相对路径；`base_dir` 还原 round-trip 通过。
 
 ## 7. 风险 / 开放项
 - **合成桶成员的确切约定**：本 spec 定"按段对齐、label=桶收盘、禁跨午休/日"的规则与三周期总数（80/16/4）；**逐桶成员**（尤其 09:30 集竞与 13:01 起如何并桶）由 plan 阶段 golden fixture 逐值钉死，避免文华/通达信约定分歧。
 - **可行起点带偏窄**：1m 仅约 1 年 + 前向 8 月 → 每股可行起点约 4–5 个。100 股足够；若某市场（如次新 BJ 股）1m 更短，该股可能 0 起点被 skip，属预期。
+- **窗口内部数据洞**：由覆盖完整性校验（D9）兜底——有日线却缺盘中的洞会压低 `coverage_ratio` 被 skip 且指标可见，非静默出货；真停牌日不误伤。阈值 `COVERAGE_MIN` 默认 0.99，plan 阶段按实测数据稀疏度调。
 - **前复权基准 = 导出日快照**：本期按快照；将来上架的增量刷新/再复权是独立议题（[[project_app_public_release_intent]]）。
 - **volume 单位（手）**：本期原样入库（App 仅画量柱，单位为呈现层问题）；若将来需"股"需在呈现层 ×100，不在本期。
 - **本地 pytest 绿 ≠ CI 绿**：合并后 `gh run watch` 确认（[[feedback_swift_local_ci_toolchain_strictness]]）。
 
 ## 8. 流程
-brainstorming（本 spec）→ Codex spec review 收敛 → `writing-plans` → Codex plan review 收敛 → `subagent-driven-development` → host pytest 三绿 → `requesting-code-review` → whole-branch Codex → PR（价格/指标 schema 迁移触发 trust-boundary 审查）。
+brainstorming（本 spec）→ Codex spec review 收敛 → `writing-plans` → Codex plan review 收敛 → `subagent-driven-development` → host pytest 三绿 → `requesting-code-review` → whole-branch Codex → PR（`klines` 价格列 schema 变更触发 trust-boundary 审查）。
