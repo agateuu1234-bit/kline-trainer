@@ -414,6 +414,33 @@ struct CoordinatorLossyPreserveTests {
         #expect(priorUuids == ["collide-me"])
     }
 
+    @Test("复盘净改动须纳入 unknownTopLevel：working 与 saved 已知画线集+hiddenIds+unknownRaw 均相同，仅 wrapper 顶层未来 key(futureMeta) 值不同 → reviewNetChanged()/persistReviewWorkingIfChanged 均判「有改动」，working 行（含其 futureMeta）不被 clearWorking 抹掉（codex WB R8 finding 1）")
+    func reviewNetChangeUnknownTopLevelOnlyDiffPreventsClearWorking() async throws {
+        let (url, appDB) = try makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let rid = try makeRecord(appDB)
+        // saved 与 working 的已知画线集([g1])+hiddenIds([])+unknownRaw(均无) 完全相同，仅 wrapper 顶层
+        // futureMeta 的值不同（模拟一个更新客户端只改了 working 行携带的顶层 review-metadata，未动画线/
+        // 隐藏态/unknownRaw——这是此前 4 项里唯独漏比的第 4 项）。
+        try seedReviewSavedAndWorking(appDB, recordId: rid,
+                                       savedWrapperJSON: #"{"drawings":[\#(known("g1"))],"hiddenIds":[],"futureMeta":{"x":1}}"#,
+                                       stepTick: 3,
+                                       workingWrapperJSON: #"{"drawings":[\#(known("g1"))],"hiddenIds":[],"futureMeta":{"x":2}}"#)
+        let coord = makeCoordinator(appDB)
+        let engine = try #require(try await coord.resumePendingReview(recordId: rid))  // resume：known+hiddenIds+unknownRaw 均==committed，仅 unknownTopLevel 不同
+        // reviewNetChanged() 须靠 unknownTopLevel 比较单独识别出「有改动」（同 R5 修的 unknownRaw-only 场景，
+        // 但 unknownTopLevel 这第 4 项此前未纳入同一判定）。
+        #expect(coord.reviewNetChanged() == true)
+        // 零画线编辑——persistReviewWorkingIfChanged 同款须判「有改动」，working 行（含其 futureMeta）保留。
+        try coord.persistReviewWorkingIfChanged(engine: engine)
+        let workingCol: String? = try await appDB.dbQueue.read {
+            try Row.fetchOne($0, sql: "SELECT working_drawings FROM review_archive WHERE record_id=\(rid)")?["working_drawings"]
+        }
+        // 修复前：只比 3 项 → 误判「无改动」→ clearWorking 抹掉 working 行 → working 独有的 futureMeta:{"x":2} 永久丢失。
+        #expect(workingCol != nil)                                       // working 行未被 clearWorking 清空
+        #expect(workingCol?.contains(#""futureMeta":{"x":2}"#) == true) // working 侧 futureMeta 值未丢失
+    }
+
     // MARK: - load 时归一化重复已知 id（codex WB R8 finding 2）：resume 之后 autosave（saveProgress）不 brick
 
     @Test("pending_training: resume(pending 含重复非空已知 id)→saveProgress(autosave) 不抛，持久化 id 互不相同（codex WB R8 finding 2）")
