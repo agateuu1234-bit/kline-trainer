@@ -147,9 +147,11 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
     - **60m**：上午 `1030={0930..1030}`(61 根)、`1130={1031..1130}`(60)；下午 `1400={1301..1400}`(60)、`1500={1401..1500}`(60)。
     - **15m**：上午 8 桶（首 `0945={0930..0945}`=16 根、余 15/桶）、下午 8 桶（各 15 根）。
     - 校验恒等式：上午成员合计 **121**、下午 **120**（= 完整日 1m 241）。
-  - **分钟级完整性在此强制（B1，1m 在手；codex R4-F1）**：每桶实测 1m 成员数须 == 上面 golden 应有数。**某交易日任一桶不足 → 该日全部盘中周期不入库（drop + 日志），不写半成品桶**。该股 **dense 1m 覆盖带** = 盘中逐日完整的连续日范围（QMT 覆盖-截断的首/末残缺日自然落在带外）。因 QMT 用平盘 flat bar 填满无成交分钟、完整日恒 241 根 → 桶内缺分钟只来自拷贝截断/损坏，drop 该日、需重拉。**1m 出库后 B2 已无从判分钟级，故必须在此判**。
+  - **分钟级完整性在此强制（B1，1m 在手；codex R4-F1）**：每桶实测 1m 成员数须 == 上面 golden 应有数。**某交易日任一桶不足 → 该日全部盘中周期不入库（drop + 日志），不写半成品桶**。该股 **dense 1m 覆盖带** = 盘中逐日完整的连续日范围（QMT 覆盖-截断的首/末残缺日自然落在带外）。**1m 出库后 B2 已无从判分钟级，故必须在此判**。
+  - **不变量（实证 codex R9-F2）**：抽查 `000001.SZ`(活跃) + `000004.SZ`(退市/停牌股) 各 200+ 交易日 → **每个存在的交易日恒 241 根（QMT flat-fill 无成交分钟）**；**停牌 = 整日缺席**（1m 与日线都无该日 → 由"无日线=非交易日"排除、不误判为损坏）；**唯一 partial 日 = 1m 覆盖起点边界日**（如 199 根，dense 带排除）。故"日线在、1m<241"确为拷贝截断/损坏，drop 正确、**不误伤合法停牌**。**pilot 落地时 log 任何"日线在但 1m ∉ {241, 边界日}"的异常日供人工复核**（防抽样外角落；plan 再多抽几只覆盖市场）。
 - **`resample_calendar(df_daily, rule)`**：按每个交易日所属**日历周（周一起）/日历月**分组（分组键用 `trading_date`，R8-F1；含假期的周/月仍一根）；OHLC/Σ 同上。
   - **只 emit 完整日历周期（codex R4-F2）**：周期 P 仅当存在**属于 P 之后日历周期的 daily bar**（证明 P 已收尾、数据覆盖到 P 末）才 emit；**丢弃当前 export 期的 trailing 残缺周/月**（export 2026-07-03 → 2026-07 月 K、当周 K 不 emit，避免"看似完整实则残缺"污染快照）。IPO 首周属完整日历周期（该周已收尾、股票只是部分交易日有量）→ 保留。
+  - **发射 bar 与边界哨兵解耦（codex R9-F1）**：**丢弃的只是 partial 当期的 emitted bar**；其**周期 open 仍保留在月/周边界哨兵序列**里（供 §4.4 `after_end` 计算），否则丢了 partial July 的 open → 以最新完整月 June 结尾的 8 月窗口没哨兵、选不出来 → 浪费最新完整月、候选再缩。
   - **时间标签 = OPEN（codex R3-F1）**：该周期 bar 的 `datetime` = **组内第一根交易日的 datetime**（daily 沿用 QMT 原生午夜 `YYYYMMDD→D 00:00`；weekly/monthly 用组内首交易日的午夜）。与 `assign_global_indices` 的 `[open, 下一根 open)` 语义一致（见 §4.4）。
 - 停牌/稀疏容错：段内不足一桶/整段缺失 → 该桶不产出（不补零、不插值）；桶内缺分钟按上面 B1 分钟级完整性处理（drop 日）。
 
@@ -162,7 +164,7 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - **iOS 侧零改动**（§0 声明，已核实 `Double`/`REAL` 端到端）。
 
 ### 4.4 B2 改动
-- **前向窗口边界 `after_end`（redefine，codex R5-F1）**：`after_end = monthly_datetimes[start_idx+8] − 1`（**第 9 根月线 open − 1 秒**；`select_start_index` 保证 `start_idx ≤ n−9` → 第 9 根必存在）= **第 8 个完整前向月的月末**。取代原 `monthly_after_end` 返回的第 8 月线 open。**所有周期窗口 forward 上界统一用它**。
+- **前向窗口边界 `after_end`（redefine，codex R5-F1 / R9-F1）**：`after_end = monthly_datetimes[start_idx+8] − 1`（**第 9 根月边界 open − 1 秒**；`select_start_index` 保证 `start_idx ≤ n−9` → 第 9 根必存在）= **第 8 个完整前向月的月末**。取代原 `monthly_after_end` 返回的第 8 月线 open。**所有周期窗口 forward 上界统一用它**。**`monthly_datetimes` = 月边界哨兵序列**（日线日历每月首交易日 open，经 `trading_date` 求；**含当前 partial 月的 open 作哨兵**，R9-F1），**≠ 发射的月 bar**——故最新完整月（如 June）可当第 8 前向月、不浪费最新数据；`n = len(该边界序列)`（含哨兵）。
 - **窗口纳入规则（R5-F1）**：`select_period_window` 每周期只纳入**整段 period-end ≤ `after_end`** 的 bar。月/日与 `after_end`=月界天然对齐（恰 8 完整月 + 日线到第 8 月末）；**周线额外排除跨 8→9 月界、周末 > `after_end` 的 trailing 周 bar**（周跨月边界会 straddle）。杜绝末根高周期 bar 的 `end_global_index` 早于其整段 3m 播完（否则第 8 月线含整月 OHLC 却在第 8 月首日 reveal = **lookahead**）。
 - `select_start_index(monthly_datetimes, rng, *, dense_dates)`（D2，codex R7-F1）：候选月线下标先按现规则 `[30, n-9]`，**再过滤**「从 `start` 的**交易日期**到 `after_end` 的交易日期，其间（按日线日历）**每个交易日期都在该股 dense 完整 1m 交易日期集 `dense_dates` 内**」；候选为空 → `GenerateSkipException`。**按交易日期比对、非 raw 时间戳**——月/日 bar 标 `00:00`、3m 标盘中(`0933..1500`)，`start`(00:00) < 首根 3m(0933)、`after_end`(≈23:59) > 末根 3m(1500)，raw 时间戳比对会**误杀全部有效候选、产出 0 训练组**。`dense_dates` = B1 分钟级完整性判出的逐日完整交易日期集（`generate_one_training_set` 从该股盘中 klines 推得）。**端点必要非充分**（内部洞仍需 D9），完整性由 D9 per-day 桶数硬门兜底。
 - **窗口覆盖完整性校验（D9，两处强制；codex R4-F1）**：
@@ -184,8 +186,8 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - **规整层**：BOM 剥离（表头 `datetime` 非 `﻿time`）；`YYYYMMDDHHMMSS`/`YYYYMMDD` @UTC+8 → Unix 秒精确值（含跨夏令时无关性、北京无 DST）；文件名正则（三市场 + 全角名 + `星`/`_` sanitize）；缺列抛 `CsvSchemaError`；**前复权 15 位小数原样保留**（`clean` 后 close 逐字等于输入）。
 - **合成层**（golden fixture）：完整日 → `3m=80/15m=16/60m=4` 根；**禁跨午休**（11:30 桶不含 13:01 数据）；**禁跨日**；开盘集竞 09:30 并入首桶；OHLC=首/高/低/尾、vol/amount=Σ 逐值；周/月按日历分组（含假期周仍一根）；停牌缺口不补零。
 - **合成 golden 边界桶（§4.2）**：3m/15m/60m 边界桶成员 = §4.2 逐值 member lists（09:30/10:30/11:30/13:01/15:00 周边）；上午 121 / 下午 120 恒等式。
-- **B1 分钟级完整性（R4-F1）**：桶内缺单根/散布缺多根 1m → 该交易日**盘中不入库（drop）**、记日志；dense 覆盖带排除该日；完整日照常 80/16/4 入库。
-- **resample_calendar 完整性（R4-F2）**：export 当月/当周残缺周期**不 emit**（构造 export 日落月中 → 该月 monthly bar 不出现）；IPO 首周（有后续周）**保留**；含假期完整周仍一根。
+- **B1 分钟级完整性（R4-F1/R9-F2）**：桶内缺单根/散布缺多根 1m 的**在库交易日**（日线在）→ **drop + 记异常日志**；停牌**整日缺席**（1m+日线都无）→ 不计入、不误判；1m 覆盖边界 partial 日（199 根）→ dense 带排除；完整日（241）照常 80/16/4 入库。
+- **resample_calendar 完整性 + 哨兵（R4-F2/R9-F1）**：export 当月/当周残缺周期**不 emit**（构造 export 日落月中 → 该月 monthly bar 不出现）；**但其 open 保留在边界哨兵序列 → 以最新完整月结尾的 8 月窗口仍可选出**（不因丢 partial 少候选）；IPO 首周（有后续周）保留；含假期完整周仍一根。
 - **trading_date 时区安全（R8-F1）**：daily `20260703 00:00`(沪 epoch) 与 intraday `20260703 0933`(沪 epoch) → **同一** `trading_date`（尽管 UTC 日期差一天）；Monday/假期周边不错位；周/月分组键用沪日期。
 - **B2 D2（按交易日期，R7-F1）**：构造「月线全历史但 1m 只覆盖近段」→ 起点必落在 dense 日期集内；覆盖撑不下前向窗口 → skip；**边界同日期不误杀**：`start` 落 dense 首日（`start`=00:00 < 首根 3m 0933）仍**有效**、`after_end` 落 dense 末日（≈23:59 > 末根 3m 1500）仍有效；窗口跨度含任一非-dense 交易日 → skip。
 - **B2 D9 per-day 硬门（R3-F2/R4-F1/R6-F1）**：窗口含被 B1-drop 的日（DB 盘中桶数 <80/16/4）→ **per-day 硬门 skip**；窗口避开该日 → 正常生成；缺整天同理；**start 前一日（盘中 before-context 内）被 drop → 也 skip**（不静默从更早日回填，R6-F1）；盘中全跨度**外**的老 daily-only 日不检查；真停牌日（无日线）不误伤。
@@ -206,7 +208,8 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - P/F（D10，R6-F2）：日线 vs 1m 聚合超容差不一致的股 **fail-closed skip**；`export_log` 非 `ok` 文件 skip；重叠窗口一致则放行。
 - P/F（D2，R7-F1）：覆盖判定按**交易日期**（非 raw 时间戳）；start/after_end 与 dense 边界**同日期**的候选不被误杀（同日期边界回归绿，证明不产 0 训练组）。
 - P/F（R8-F1 时区）：`trading_date` 对沪-午夜 daily 与盘中 3m 归到**同一交易日**；D2/D9/D10/周月分组全经此单一 helper（无 UTC 日期错位回归绿）。
-- P/F（R4-F2）：resample_calendar **不 emit** export 当期 trailing 残缺周/月；训练组内无残缺日历 bar（export-月 partial monthly 回归测试绿）。
+- P/F（R4-F2/R9-F1）：resample_calendar **不 emit** export 当期 trailing 残缺周/月；训练组内无残缺日历 bar；**但 partial 当期 open 保留为边界哨兵 → 最新完整月可当第 8 前向月**（不浪费最新数据回归绿）。
+- P/F（R9-F2 不变量）：`000001.SZ`/`000004.SZ` 抽样每在库交易日=241（flat-fill）+停牌整日缺席+边界日 partial；日线在但 1m<241 → drop + 异常 log。
 - P/F（R3-F1 对齐）：daily/weekly/monthly `end_global_index` = 期内末根 3m（无 lookahead）；聚合 bar 标签 = 组内首交易日午夜。
 - P/F（R5-F1 前向边界）：`after_end = monthly[start+8]−1`（第 8 月末）；第 8 月线 bar `egi` 命中第 8 月末 3m、非首日；跨月界 trailing 周 bar 被排除（回归绿）。
 - P/F（§4.2 bucket）：3m/15m/60m 边界桶成员逐值 = §4.2 golden member lists；完整日 80/16/4 + 上午 121/下午 120 恒等式。
