@@ -213,4 +213,38 @@ public struct LossyDrawingArray: Equatable, Sendable {
         }
         return LossyDrawingArray(elements: out)
     }
+
+    /// codex WB R8 finding 2：load 时归一化——修复只应用一次（在 coordinator 把加载来的 lossy 种给 engine
+    /// 之前），此后 engine 携带的 `.known` id 恒唯一非空，`reconciled(currentKnown:)` 的 dup/empty 门在正常
+    /// 流程永不再 fail-close（那道门仍保留作 defense-in-depth，防运行期意外造出 dup id）。
+    /// 只修复【损坏的】那部分：`.known` 元素里 id 为空、或与之前【已出现过】的 id 重复的，各自换发一个新
+    /// `UUID().uuidString`（连带用新 id 重新 `encodeKnown` 该条 raw——仅这一条字节改变）。
+    /// `.unknownRaw` 元素与「id 唯一非空」的 `.known` 元素【原样字节不变】，元素【顺序不变】。
+    public func normalizedUniqueIds() throws -> LossyDrawingArray {
+        var seen = Set<DrawingID>()
+        var out: [LossyDrawingElement] = []
+        out.reserveCapacity(elements.count)
+        for el in elements {
+            switch el {
+            case .unknownRaw:
+                out.append(el)                                            // 原样不变
+            case .known(let d, let raw):
+                let isDuplicate = !d.id.isEmpty && !seen.insert(d.id).inserted
+                if d.id.isEmpty || isDuplicate {
+                    let renamed = DrawingObject(
+                        id: UUID().uuidString, toolType: d.toolType, anchors: d.anchors,
+                        isExtended: d.isExtended, panelPosition: d.panelPosition, revealTick: d.revealTick,
+                        period: d.period, lineSubType: d.lineSubType, lineStyle: d.lineStyle,
+                        thickness: d.thickness, colorToken: d.colorToken, labelMode: d.labelMode,
+                        locked: d.locked, text: d.text, fontSize: d.fontSize,
+                        textColorToken: d.textColorToken, textForm: d.textForm, tailAnchor: d.tailAnchor)
+                    seen.insert(renamed.id)
+                    out.append(.known(renamed, raw: try LossyDrawingArray.encodeKnown(renamed)))
+                } else {
+                    out.append(.known(d, raw: raw))                        // 唯一非空 id → 字节不变
+                }
+            }
+        }
+        return LossyDrawingArray(elements: out)
+    }
 }

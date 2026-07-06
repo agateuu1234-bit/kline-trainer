@@ -414,6 +414,31 @@ struct CoordinatorLossyPreserveTests {
         #expect(priorUuids == ["collide-me"])
     }
 
+    // MARK: - load 时归一化重复已知 id（codex WB R8 finding 2）：resume 之后 autosave（saveProgress）不 brick
+
+    @Test("pending_training: resume(pending 含重复非空已知 id)→saveProgress(autosave) 不抛，持久化 id 互不相同（codex WB R8 finding 2）")
+    func resumePendingAutosaveToleratesDuplicateKnownIds() async throws {
+        let (url, appDB) = try makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        // pending_training 含两条【同 id】已知画线（无 unknownRaw）——同 finalize dup-id 场景（两个真实客户端
+        // 各画一条线、id 生成器坏/旧 bug 撞车），但这里是【resume 之后未 finalize 就先触发一次 autosave】：
+        // 修复前 `saveProgress` 走 `engine.loadedDrawingsLossy.reconciled(currentKnown:)`，loaded 侧含重复 id
+        // → fail-closed 抛 `.dbCorrupted`（brick：每次 tick/画线后台 autosave 都抛，进度存不进去，直到用户
+        // 走到 finalize 才被 insert-time 去重救回——但崩溃在 finalize 之前就会丢光）。
+        try seedPendingTrainingRow(appDB, sessionKey: "SK-dup-autosave",
+                                   drawingsJSON: "[\(known("dup")),\(known("dup"))]")
+        let coord = makeCoordinator(appDB)
+        let engine = try #require(try await coord.resumePending())
+        try await coord.saveProgress(engine: engine)   // 不应抛（红→绿）
+        let col: String = try await appDB.dbQueue.read {
+            try Row.fetchOne($0, sql: "SELECT drawings FROM pending_training WHERE id = 1")!["drawings"]
+        }
+        let persisted = try LossyDrawingArray.decode(Data(col.utf8))
+        let ids = persisted.drawings.map(\.id)
+        #expect(ids.count == 2)                          // 两条画线均保留（未被丢弃）
+        #expect(Set(ids).count == 2)                     // load 时归一化后持久化 id 互不相同
+    }
+
     // MARK: - LossyDrawingArray.reconciled 单元测试（不需 coordinator）
 
     @Test("reconciled fail-closed：loaded 元素含重复 id → 抛 .dbCorrupted（不静默折叠）")

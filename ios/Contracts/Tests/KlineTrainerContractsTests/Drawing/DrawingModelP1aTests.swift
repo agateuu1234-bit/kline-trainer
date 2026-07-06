@@ -281,6 +281,45 @@ struct LossyDrawingArrayTests {
         let out = try arr.reconciled(currentKnown: [unedited]).encoded()
         #expect(String(decoding: out, as: UTF8.self) == "[" + raw + "]")   // 逐字节等于原始 raw，未重序列化
     }
+
+    // ── codex WB R8 finding 2：load 时归一化重复/空已知 id（防 autosave/finalize 的 reconciled fail-close brick）──
+
+    @Test("normalizedUniqueIds：重复 known id → 首个原样字节不变，后出现的换发新 UUID；unknownRaw 原样不变、顺序不变（codex WB R8 finding 2）")
+    func normalizedUniqueIdsReassignsDuplicateKnownIds() throws {
+        let d = DrawingObject(id: "dup", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        let raw = try LossyDrawingArray.encodeKnown(d)
+        let unknown = #"{"toolType":"__future__","z":1}"#
+        let lossy = LossyDrawingArray(elements: [.known(d, raw: raw), .unknownRaw(unknown), .known(d, raw: raw)])
+        let out = try lossy.normalizedUniqueIds()
+        guard out.elements.count == 3,
+              case .known(let first, let firstRaw) = out.elements[0],
+              case .unknownRaw(let mid) = out.elements[1],
+              case .known(let second, let secondRaw) = out.elements[2] else {
+            Issue.record("形状变了"); return
+        }
+        #expect(first.id == "dup" && firstRaw == raw)              // 首次出现（此时唯一）→ 原样不变
+        #expect(mid == unknown)                                    // 未识别条原样不变
+        #expect(second.id != "dup")                                // 后出现的重复 → 换发新 id
+        #expect(!secondRaw.contains(#""id":"dup""#))              // raw 已按新 id 重新 encode
+        // 归一化后对同批 currentKnown 可安全 reconciled（此前因 loaded 侧重复会 fail-closed）。
+        #expect(throws: Never.self) { _ = try out.reconciled(currentKnown: out.drawings) }
+    }
+
+    @Test("normalizedUniqueIds：空 id known → 换发新 UUID；唯一非空 id known 原样字节不变")
+    func normalizedUniqueIdsReassignsEmptyId() throws {
+        let empty = DrawingObject(id: "", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        let rawEmpty = try LossyDrawingArray.encodeKnown(empty)
+        let unique = DrawingObject(id: "u1", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        let rawUnique = try LossyDrawingArray.encodeKnown(unique)
+        let lossy = LossyDrawingArray(elements: [.known(empty, raw: rawEmpty), .known(unique, raw: rawUnique)])
+        let out = try lossy.normalizedUniqueIds()
+        guard case .known(let first, _) = out.elements[0],
+              case .known(let second, let secondRaw) = out.elements[1] else {
+            Issue.record("形状变了"); return
+        }
+        #expect(!first.id.isEmpty)                                 // 空 id 已换发
+        #expect(second.id == "u1" && secondRaw == rawUnique)       // 唯一非空 id → 原样不变
+    }
 }
 
 @Suite("Drawing P1a — 复盘 canonical wrapper")

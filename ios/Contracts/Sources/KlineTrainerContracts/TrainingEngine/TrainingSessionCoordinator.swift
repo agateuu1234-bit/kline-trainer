@@ -300,6 +300,10 @@ public final class TrainingSessionCoordinator {
             let allCandles = try reader.loadAllCandles()
             let mt = try maxTick(from: allCandles)
             let position = try decodePosition(pending.positionData)
+            // codex WB R8 finding 2：load 时归一化重复/空已知 id——单一 chokepoint，使 engine 携带的
+            // loadedDrawingsLossy/drawings 恒无 dup/empty id，autosave（saveProgress）的
+            // `reconciled(currentKnown:)` 不再因【加载来的】坏 id fail-close（防 brick）。
+            let normalizedLossy = try pending.lossy.normalizedUniqueIds()
             let engine = try TrainingEngine.make(
                 .normal(fees: pending.feeSnapshot, maxTick: mt),
                 allCandles: allCandles,
@@ -309,7 +313,7 @@ public final class TrainingSessionCoordinator {
                 initialPosition: position,
                 initialMarkers: markers(from: pending.tradeOperations),
                 initialDrawings: pending.drawings,
-                initialDrawingsLossy: pending.lossy,   // P1a Task 12（Z1）：携带完整有损集（保未识别条穿过后续 save）
+                initialDrawingsLossy: normalizedLossy,   // P1a Task 12（Z1）：携带完整有损集（保未识别条穿过后续 save）
                 initialTradeOperations: pending.tradeOperations,
                 initialDrawdown: pending.drawdown,
                 initialUpperPeriod: pending.upperPeriod,
@@ -460,6 +464,11 @@ public final class TrainingSessionCoordinator {
                                     committedUnknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry] = [],
                                     preloadedRecordBundle: (TrainingRecord, [TradeOperation], [DrawingObject])? = nil
                                     ) async throws -> TrainingEngine {
+        // codex WB R8 finding 2：load 时归一化 `reviewLossy` 里的重复/空已知 id——单一 chokepoint（`review()`/
+        // `resumePendingReview()` 均经此），放在任何 reader 打开之前（抛错不留半态）。之后
+        // `engine.loadedReviewLossy`/`reviewDrawings` 恒无 dup/empty id，`persistReviewWorkingIfChanged`/
+        // `commitReview` 的 `reconciled(currentKnown:)` 不再因【加载来的】坏 id fail-close。
+        let normalizedReviewLossy = try reviewLossy.normalizedUniqueIds()
         let (record, ops, drawings) = try preloadedRecordBundle ?? recordRepo.loadRecordBundle(id: recordId)
         // Note: loadRecordBundle() is app.sqlite source — its .dbCorrupted propagates ABOVE this catch (fail-closed).
         let file = try cachedFile(filename: record.trainingSetFilename)
@@ -526,7 +535,7 @@ public final class TrainingSessionCoordinator {
         activeStartedAt = nil                    // D4：review 只读，无进度保存
         activeSessionKey = nil                   // RFC §4.7c：review 无 session key
         activeRecord = record                    // RFC-B D5：复用已加载 record（零新 I/O）
-        engine.setReviewLossy(reviewLossy, hiddenIds: reviewHiddenIds, unknownTopLevel: reviewUnknownTopLevel)
+        engine.setReviewLossy(normalizedReviewLossy, hiddenIds: reviewHiddenIds, unknownTopLevel: reviewUnknownTopLevel)
         reviewRecordId = recordId
         reviewCommittedBaseline = committedBaseline
         reviewCommittedHiddenIds = committedHiddenIds
@@ -853,6 +862,9 @@ public final class TrainingSessionCoordinator {
         }
         do {
             // position 已在 step 2 解码（slot payload，.dbCorrupted 已处理）；此块仅训练集/transient 错误 → 传播
+            // codex WB R8 finding 2：同 resumePending——load 时归一化重复/空已知 id（单一 chokepoint），
+            // 使 engine 携带的 loadedDrawingsLossy/drawings 恒无 dup/empty id，autosave 不再 fail-close。
+            let normalizedLossy = try pending.lossy.normalizedUniqueIds()
             let engine = try TrainingEngine.make(
                 .replay(fees: pending.feeSnapshot, maxTick: mt),
                 allCandles: allCandles,
@@ -862,7 +874,7 @@ public final class TrainingSessionCoordinator {
                 initialPosition: position,
                 initialMarkers: markers(from: pending.tradeOperations),
                 initialDrawings: pending.drawings,
-                initialDrawingsLossy: pending.lossy,   // P1a Task 12（Z1）：携带完整有损集（保未识别条穿过后续 save）
+                initialDrawingsLossy: normalizedLossy,   // P1a Task 12（Z1）：携带完整有损集（保未识别条穿过后续 save）
                 initialTradeOperations: pending.tradeOperations,
                 initialDrawdown: pending.drawdown,
                 initialUpperPeriod: pending.upperPeriod,
