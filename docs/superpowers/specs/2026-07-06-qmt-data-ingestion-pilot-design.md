@@ -86,7 +86,7 @@
 | **D6** | pilot：本机 Docker Postgres（复用 `backend/docker-compose.yml`）；100 只从 universe **按市场分层随机抽**（seed 可复现），SH/SZ/BJ 都覆盖；经现在可用的 SMB 挂载拉这 100 只的 1m+日线文件。 | 最省事、可复现；覆盖三市场以暴露格式差异。 |
 | **D7** | 规整层为**新增 QMT 专用层**，产出与现有 `clean` 入参兼容的 DataFrame（列 `datetime/open/high/low/close/volume/amount` + Unix 秒），接现有 `compute_indicators`。 | 隔离 QMT 特有的 BOM/时区/文件名/中文标签解析，不污染下游通用逻辑。 |
 | **D8**（codex R1-F1 / R2-F1） | (a) **写库前 schema fail-closed 断言**：import 任何 INSERT 前查 `information_schema.columns` 断言 `klines.open/high/low/close = double precision` 且无 `ticket_index`，不符即中止（非静默插入）。(b) **destructive reset 防误删护栏**：pilot 只对**专用一次性库**（库名必须匹配前缀 `kline_pilot_`）操作；任何破坏性动作（`CREATE/DROP DATABASE`、重建）需**显式 `--reset`** 且目标库名匹配前缀，否则**拒绝**（**绝不 DROP 任意/共享库**）；smoke 断言非-pilot DSN/库名在任何 DDL 前被拒。 | 防 R1-F1 陈旧库静默截断；防 R2-F1：光靠"本地新库"叙述性意图不够，跑错 `DATABASE_URL`/共享卷会 `DROP` 掉 stocks/klines/training_sets（含 lease 状态与库存）。三重 fail-closed = 专用库前缀 + 显式 flag + 写前断言。 |
-| **D9**（codex R1-F2 / R3-F2） | **分钟级 + 桶级覆盖完整性校验**：(a) **桶级**——窗口 `[start, after_end]` 内**日线根数 × 每日应有桶数**为 `expected`（日线在=当天确有交易，**天然排除真停牌日**），对比实际桶数得每盘中周期 `coverage_ratio`；(b) **分钟级**——resample 前断言窗口内每个交易日的 1m 时间戳集合 == 期望 session 网格（QMT 用平盘 flat bar 填满无成交分钟 → 完整日恒 241 根精确时间戳），且每个 emitted 盘中桶含其 §4.2 规定的完整 1m 成员数。任一缺失（分钟级或桶级）或任一 `ratio < COVERAGE_MIN`（默认 0.99，plan 定）→ **skip 起点重选**；`coverage_ratio` + 分钟完整性写进 pilot 输出。 | 防 R1-F2（缺整天）+ R3-F2（桶内缺分钟）：桶数够但某桶少一根 1m → OHLC/vol/amount/指标静默错、`ratio=1.0` 仍出货。日线作「应有交易日」真值 → 真停牌（无日线）不误伤；分钟级抓桶内洞。 |
+| **D9**（codex R1-F2 / R3-F2 / R4-F1） | **两处强制、B2 可判**：(a) **分钟级 @ B1**（1m 在手）——每盘中桶实测 1m 成员数须 == §4.2 应有数；**某交易日任一桶不足 → 该日盘中不入库（drop+日志）**，DB 无半成品桶；dense 1m 覆盖带 = 逐日完整的连续日范围。(b) **B2 硬门**（无原始 1m）——以**日线（交易日真值）**逐日校验：落在盘中窗口跨度内的每个交易日 DB 盘中桶数须**精确等于** `80/16/4`，任一日不足 → `GenerateSkipException`。`coverage_ratio`（报告）+ 缺日进输出。 | 防 R1-F2（缺整天）+ R3-F2（桶内缺分钟）+ **R4-F1（1m 出库后 B2 无从判分钟级）**：分钟级必须在 B1 判；B2 靠"每在窗交易日盘中桶数精确=期望"的 **provenance-free 硬门**兜住（非阈值 ratio，单桶缺也抓）。真停牌（无日线）不误伤。 |
 
 ## 3. 架构（数据流）
 
@@ -143,9 +143,11 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
     - **60m**：上午 `1030={0930..1030}`(61 根)、`1130={1031..1130}`(60)；下午 `1400={1301..1400}`(60)、`1500={1401..1500}`(60)。
     - **15m**：上午 8 桶（首 `0945={0930..0945}`=16 根、余 15/桶）、下午 8 桶（各 15 根）。
     - 校验恒等式：上午成员合计 **121**、下午 **120**（= 完整日 1m 241）。
-- **`resample_calendar(df_daily, rule)`**：按每个交易日所属**日历周（周一起）/日历月**分组（含假期的周/月仍一根）；OHLC/Σ 同上；数据边缘的**残缺周/月**照常成一根（partial）。
+  - **分钟级完整性在此强制（B1，1m 在手；codex R4-F1）**：每桶实测 1m 成员数须 == 上面 golden 应有数。**某交易日任一桶不足 → 该日全部盘中周期不入库（drop + 日志），不写半成品桶**。该股 **dense 1m 覆盖带** = 盘中逐日完整的连续日范围（QMT 覆盖-截断的首/末残缺日自然落在带外）。因 QMT 用平盘 flat bar 填满无成交分钟、完整日恒 241 根 → 桶内缺分钟只来自拷贝截断/损坏，drop 该日、需重拉。**1m 出库后 B2 已无从判分钟级，故必须在此判**。
+- **`resample_calendar(df_daily, rule)`**：按每个交易日所属**日历周（周一起）/日历月**分组（含假期的周/月仍一根）；OHLC/Σ 同上。
+  - **只 emit 完整日历周期（codex R4-F2）**：周期 P 仅当存在**属于 P 之后日历周期的 daily bar**（证明 P 已收尾、数据覆盖到 P 末）才 emit；**丢弃当前 export 期的 trailing 残缺周/月**（export 2026-07-03 → 2026-07 月 K、当周 K 不 emit，避免"看似完整实则残缺"污染快照）。IPO 首周属完整日历周期（该周已收尾、股票只是部分交易日有量）→ 保留。
   - **时间标签 = OPEN（codex R3-F1）**：该周期 bar 的 `datetime` = **组内第一根交易日的 datetime**（daily 沿用 QMT 原生午夜 `YYYYMMDD→D 00:00`；weekly/monthly 用组内首交易日的午夜）。与 `assign_global_indices` 的 `[open, 下一根 open)` 语义一致（见 §4.4）。
-- 停牌/稀疏容错：段内不足一桶/整段缺失 → 该桶不产出（不补零、不插值）。
+- 停牌/稀疏容错：段内不足一桶/整段缺失 → 该桶不产出（不补零、不插值）；桶内缺分钟按上面 B1 分钟级完整性处理（drop 日）。
 
 ### 4.3 Schema 变更（D1，`backend/sql/schema.sql`）
 - 只改 `klines.open/high/low/close`：`DECIMAL(10,2)` → `DOUBLE PRECISION`；**移除 `ticket_index` 列**。
@@ -157,11 +159,11 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 
 ### 4.4 B2 改动
 - `select_start_index(monthly_datetimes, rng, *, one_min_lo, one_min_hi)`（D2）：候选月线下标先按现规则 `[30, n-9]`，**再过滤**「起点 `start` 与 `monthly_after_end(start)` 都落在 `[one_min_lo, one_min_hi]` 内」；候选为空 → `GenerateSkipException`（该股 1m 覆盖不足以承载任何完整前向窗口）。`one_min_lo/hi` 由 `generate_one_training_set` 从该股 3m（最细）实际 datetime 范围推得。**端点检查是必要非充分**（洞在窗口内部时端点仍可能落在范围里），完整性由下面覆盖校验兜底。
-- **窗口覆盖完整性校验（D9）**：`assemble_training_set` 切完窗口后、登记前：
-  - (a) **分钟级**——以该股**日线**为交易日真值，断言窗口内每个交易日的 1m 时间戳集合 == 期望 session 网格（完整日 241：`0930..1130` + `1301..1500`），且每个 emitted 盘中桶含其 §4.2 规定的完整 1m 成员数。
-  - (b) **桶级**——`coverage_ratio = 实际桶数 / (窗口内日线根数 × 每日应有桶数)`（`3m=80/15m=16/60m=4`；首/末残缺交易日按比例折算，细则 plan 定）。
-  - 任一分钟/桶缺失 或 任一盘中周期 `ratio < COVERAGE_MIN`（默认 0.99，plan 可调）→ `GenerateSkipException`（重选起点）。窗口边缘落入 QMT 覆盖-截断残缺日（如首日 10:12 起）→ 视作缺分钟 skip（D2 重试其他起点）。真停牌日（无日线）不进 `expected`、不误伤。
-  - `coverage_ratio`（各周期）+ 分钟完整性随 `GeneratedTrainingSet` 上报，pilot 打印。
+- **窗口覆盖完整性校验（D9，两处强制；codex R4-F1）**：
+  - (a) **分钟级 @ B1**（§4.2，1m 在手）：桶内缺分钟的日已被 drop 出库 → **DB 里不存在半成品盘中桶**。
+  - (b) **B2 provenance-free 硬门**（无原始 1m）：`assemble_training_set` 登记前，以**日线（交易日真值）**逐日校验——**落在盘中窗口日期跨度内**的每个交易日，其 DB 盘中桶数须**精确等于** `80/16/4`；任一日不足（= B1 drop 的洞 / 整天缺）→ `GenerateSkipException`（重选起点）。**是精确逐日硬门、非阈值 ratio**（单桶缺也抓，不被大窗口稀释）；因分钟级已在 B1 强制，B2 只需数每日桶数、无需原始 1m。
+  - 盘中窗口跨度**外**的 daily-only before-context 日**不检查**（老日期本就无盘中，正确）；窗口边缘落入 dense 带外（如首日 10:12 起）→ 该起点 skip（D2 重试）。真停牌日（无日线）不进 expected、不误伤。
+  - `coverage_ratio`（各周期，报告用）+ 每日桶数完整性随 `GeneratedTrainingSet` 上报，pilot 打印。
 - **聚合 bar 时间标签 = OPEN，端点对齐存证（codex R3-F1）**：daily/weekly/monthly 的 `datetime` 用**组内首交易日午夜**（§4.2）。`assign_global_indices` 把 `datetime` 当 **open**、覆盖区间 `[open, 下一根 open)` → `end_global_index(日D) = bisect_right(3m, 次日午夜−1)−1 =` **day D 最后一根 3m**（逐值验证：次日午夜 ≫ 当日 15:00 ≫ 当日首根 3m，故命中当日末根、非上一根、非次日），reveal 与该日 3m 播放完**精确对齐、无 lookahead**。**明确不采用 codex 建议的「标末根收盘 15:00」**：在 `[open,next_open)` 下末根标签使 `upper=次日15:00−1` → `end_global_index` 落到**次日**倒数第二根 3m → 日 K 滞后一整天 reveal（且偏离 pre-QMT 分周期 CSV 的午夜约定）。before-context 早于 3m 窗口的 daily bar → `egi` 钳到 0（开局即显，正确）。
 - `file_path`（D5）：pilot **保持绝对路径写入**，不改现有 B3 `routes.py` 下载 / scheduler / `backfill_content_hash` 的 `Path(file_path)` 读取契约（相对化归 §7 未来搬迁）。
 - 其余（窗口切分、`assign_global_indices` 算法本体、zip、CRC32、`uq_stock_start` 预检）**不变**。
@@ -174,10 +176,12 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 
 ## 5. 测试（host pytest，纯函数层全测）
 - **规整层**：BOM 剥离（表头 `datetime` 非 `﻿time`）；`YYYYMMDDHHMMSS`/`YYYYMMDD` @UTC+8 → Unix 秒精确值（含跨夏令时无关性、北京无 DST）；文件名正则（三市场 + 全角名 + `星`/`_` sanitize）；缺列抛 `CsvSchemaError`；**前复权 15 位小数原样保留**（`clean` 后 close 逐字等于输入）。
-- **合成层**（golden fixture）：完整日 → `3m=80/15m=16/60m=4` 根；**禁跨午休**（11:30 桶不含 13:01 数据）；**禁跨日**；开盘集竞 09:30 并入首桶；OHLC=首/高/低/尾、vol/amount=Σ 逐值；周/月按日历分组（含假期周仍一根 + 边缘残缺周/月成一根）；停牌缺口不补零。
-- **B2 D2**：构造「月线全历史但 1m 只覆盖近段」的 fixture → 起点必落在覆盖带内；覆盖带撑不下前向窗口的股 → skip。
+- **合成层**（golden fixture）：完整日 → `3m=80/15m=16/60m=4` 根；**禁跨午休**（11:30 桶不含 13:01 数据）；**禁跨日**；开盘集竞 09:30 并入首桶；OHLC=首/高/低/尾、vol/amount=Σ 逐值；周/月按日历分组（含假期周仍一根）；停牌缺口不补零。
 - **合成 golden 边界桶（§4.2）**：3m/15m/60m 边界桶成员 = §4.2 逐值 member lists（09:30/10:30/11:30/13:01/15:00 周边）；上午 121 / 下午 120 恒等式。
-- **B2 D9 覆盖校验**：缺一整个交易日（日线在、1m 缺）→ skip；真停牌日（日线也无）→ 不进 `expected`、不误伤不 skip；**桶内缺单根 1m**（桶数不变、某 3m 只 2 根成员）→ 分钟级校验捕获 → skip（R3-F2）；**散布缺多根 1m**（多桶各缺 1 根、桶数仍全）→ skip；`coverage_ratio` + 分钟完整性逐值精确。
+- **B1 分钟级完整性（R4-F1）**：桶内缺单根/散布缺多根 1m → 该交易日**盘中不入库（drop）**、记日志；dense 覆盖带排除该日；完整日照常 80/16/4 入库。
+- **resample_calendar 完整性（R4-F2）**：export 当月/当周残缺周期**不 emit**（构造 export 日落月中 → 该月 monthly bar 不出现）；IPO 首周（有后续周）**保留**；含假期完整周仍一根。
+- **B2 D2**：构造「月线全历史但 1m 只覆盖近段」的 fixture → 起点必落在覆盖带内；覆盖带撑不下前向窗口的股 → skip。
+- **B2 D9 per-day 硬门（R3-F2/R4-F1）**：窗口含被 B1-drop 的日（DB 盘中桶数 <80/16/4）→ **per-day 硬门 skip**；窗口避开该日 → 正常生成；缺整天同理；真停牌日（无日线）不误伤；盘中窗口跨度外的 daily-only before-context 日**不检查**（`egi` 侧另测）。
 - **B2 聚合对齐（R3-F1）**：daily/weekly/monthly bar 的 `end_global_index` == 该周期**最后一交易日的最后一根 3m** 的 `global_index`（断言非上一根、非次日）；跨月/跨周边界各一例；before-context（早于 3m 窗口）的 daily bar `egi==0`。
 - **D8a 前置断言**：mock `information_schema` 返回 `DECIMAL`/存在 `ticket_index` → import 写前**中止**（不 INSERT）；返回 `double precision`/无 `ticket_index` → 放行。
 - **D8b reset 护栏**：目标库名非 `kline_pilot_` 前缀 或 未带 `--reset` → 任何 `DROP/CREATE DATABASE` 前**拒绝**；匹配前缀 + `--reset` → 放行（纯逻辑守卫可 host 单测）。
@@ -189,7 +193,8 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - P/F：`schema.sql` `klines.open/high/low/close` 为 `DOUBLE PRECISION`、无 `ticket_index`（amount/指标列不变）；空库应用可建成。
 - P/F（D8a）：import 写前对陈旧 `DECIMAL`/含 `ticket_index` 的库**中止**（fail-closed）、不静默插入。
 - P/F（D8b）：破坏性 reset 对**非 `kline_pilot_` 前缀**库/缺 `--reset` **拒绝**（任何 DDL 前），smoke 覆盖；pilot 对专用一次性库建 schema。
-- P/F（D9）：缺整天 → skip；**桶内缺/散布缺单根 1m（桶数不变）→ 分钟级校验 skip**（R3-F2）；真停牌日不误伤；pilot 输出含各周期 `coverage_ratio` + 分钟完整性。
+- P/F（D9，R4-F1）：桶内缺分钟 → **B1 drop 该日**（1m 在手处判）；**B2 per-day 硬门**（每在窗交易日盘中桶数精确=80/16/4）对缺日 skip、单桶缺不被稀释；真停牌日不误伤；pilot 输出含 `coverage_ratio` + 缺日。
+- P/F（R4-F2）：resample_calendar **不 emit** export 当期 trailing 残缺周/月；训练组内无残缺日历 bar（export-月 partial monthly 回归测试绿）。
 - P/F（R3-F1 对齐）：daily/weekly/monthly `end_global_index` = 期内末根 3m（无 lookahead）；聚合 bar 标签 = 组内首交易日午夜。
 - P/F（§4.2 bucket）：3m/15m/60m 边界桶成员逐值 = §4.2 golden member lists；完整日 80/16/4 + 上午 121/下午 120 恒等式。
 - P/F：pilot 脚本对 100 只产出 `≥` 阈值个 `.zip`（阈值由实际覆盖带算，plan 定）+ `training_sets` 登记 + `content_hash` 合法（`^[0-9a-f]{8}$`）。
@@ -199,7 +204,8 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - **合成桶成员**（codex R2-F3 已收敛）：精确区间规则（首桶 `[0930,0930+N]` 含集竞、其余 `(b−N,b]`）+ 边界桶 member lists + 80/16/4 + 121/120 恒等式，**已在 §4.2 定为验收契约**，不再延后 plan。
 - **path 相对化 / NAS 搬迁**（codex R2-F2 归入未来）：pilot 用绝对 `file_path`；真正搬 NAS/服务器时做**独立聚焦改动**——引入跨 B2 写 + B3/scheduler/backfill 读的中心化 `resolve_training_set_path(rel)→abs`（base dir 配置化）+ 存量 `file_path` 迁移 + reserve/download e2e 测；本期不做（[[project_app_public_release_intent]]）。
 - **可行起点带偏窄**：1m 仅约 1 年 + 前向 8 月 → 每股可行起点约 4–5 个。100 股足够；若某市场（如次新 BJ 股）1m 更短，该股可能 0 起点被 skip，属预期。
-- **窗口内部数据洞**：由 D9 **桶级 + 分钟级**校验兜底——缺整天（桶级）与桶内缺分钟（分钟级，R3-F2）都会被抓、skip 且指标可见，非静默出货；真停牌日不误伤。阈值 `COVERAGE_MIN` 默认 0.99，plan 阶段按实测数据稀疏度调。
+- **窗口内部数据洞**（R3-F2/R4-F1）：分钟级在 **B1**（1m 在手）强制——缺分钟的日 drop 出库；**B2** 靠"每在窗交易日盘中桶数精确=期望(80/16/4)"的 **provenance-free 硬门**兜底（单桶缺也抓、非阈值 ratio）。缺整天与桶内缺分钟都被抓、skip；真停牌日不误伤。（`coverage_ratio` 仅作报告指标。）
+- **残缺日历 bar**（R4-F2 已收敛）：resample_calendar 只 emit 完整日历周期（存在后续周期 daily 才 emit），丢当前 export 期 trailing 残缺周/月，防"看似完整实则残缺"的日历 bar 污染训练快照。
 - **聚合 bar 时间标签**（R3-F1）：daily/weekly/monthly 用组内首交易日午夜（OPEN），与 `[open,next_open)` 语义对齐、无 lookahead；**未采纳 codex 的「标末根收盘」建议**（会滞后一格 + 偏离既有约定），已在 §4.4 逐值存证 + §5 回归测试锁定。
 - **前复权基准 = 导出日快照**：本期按快照；将来上架的增量刷新/再复权是独立议题（[[project_app_public_release_intent]]）。
 - **volume 单位（手）**：本期原样入库（App 仅画量柱，单位为呈现层问题）；若将来需"股"需在呈现层 ×100，不在本期。
