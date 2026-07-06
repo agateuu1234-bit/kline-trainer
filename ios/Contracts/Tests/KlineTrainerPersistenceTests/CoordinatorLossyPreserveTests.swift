@@ -242,6 +242,30 @@ struct CoordinatorLossyPreserveTests {
         #expect(workingCol?.contains("h-1") == true)      // hiddenIds 未丢失
     }
 
+    @Test("复盘净改动须纳入 unknownRaw：working 与 saved 已知画线集+hiddenIds 均相同，仅各自携带的 unknownRaw 不同 → 判「有改动」，working 行（含其 unknownRaw）不被 clearWorking 抹掉（codex WB R4 finding 1）")
+    func reviewNetChangeUnknownRawOnlyDiffPreventsClearWorking() async throws {
+        let (url, appDB) = try makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let rid = try makeRecord(appDB)
+        // saved 与 working 的已知画线集([g1])+hiddenIds([]) 完全相同，仅 working 额外携带一条 unknownRaw
+        // （模拟一个更新客户端在 working 上加了未来版本画的线，未动已知画线/隐藏态——只比 known+hiddenIds
+        // 的净改动判定对这种改动是盲区）。
+        try seedReviewSavedAndWorking(appDB, recordId: rid,
+                                       savedWrapperJSON: #"{"drawings":[\#(known("g1"))],"hiddenIds":[]}"#,
+                                       stepTick: 3,
+                                       workingWrapperJSON: #"{"drawings":[\#(known("g1")),\#(unknown)],"hiddenIds":[]}"#)
+        let coord = makeCoordinator(appDB)
+        let engine = try #require(try await coord.resumePendingReview(recordId: rid))  // resume：working 已知+hiddenIds==committed，仅 unknownRaw 不同
+        try coord.persistReviewWorkingIfChanged(engine: engine)   // 零画线编辑——净改动判定必须靠 unknownRaw 字节比较单独识别出「有改动」
+        let workingCol: String? = try await appDB.dbQueue.read {
+            try Row.fetchOne($0, sql: "SELECT working_drawings FROM review_archive WHERE record_id=\(rid)")?["working_drawings"]
+        }
+        // 只比 known+hiddenIds 的净改动判定会漏判「无改动」→ clearWorking 抹掉 working 行 → 这条 unknownRaw
+        // （未来版本画的线）永久丢失。修复后须判「有改动」→ working 行原样保留（含 unknownRaw）。
+        #expect(workingCol != nil)                            // working 行未被 clearWorking 清空
+        #expect(workingCol?.contains("__future__") == true)   // unknownRaw 未丢失
+    }
+
     // MARK: - review FRESH 入口（无 working 行）：commit 不丢 saved 列未来条/hiddenIds（Critical）
 
     @Test("复盘 FRESH 进入(无 working 行)：saved 列含未来条+hiddenIds → 无编辑 commit 后仍保留（曾被永久抹掉）")

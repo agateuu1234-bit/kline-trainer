@@ -477,6 +477,83 @@ struct TrainingSessionPersistenceTests {
         #expect(rec.finalTick == 7)
     }
 
+    // MARK: - codex whole-branch R4 finding 2：finalize 遇 resume 存活的 unknownRaw → fail-closed，不清 pending
+
+    /// resume 一条仍带 unknownRaw（未来客户端画的线）的 pending → finalize 须 fail-closed 拒绝：
+    /// 永久 `drawings` 表按行结构化，无法携带原始未识别字节，若照常 finalize 会把这些条随 pending
+    /// 一起永久丢弃且不可逆。抛可恢复错误 + pending 槽不被清空（数据仍在磁盘，未来版本 app 可续 finalize）。
+    @Test("finalize: resume 的 pending 仍带 unknownRaw → 抛 .persistence(.dbCorrupted)，pending 不被清空（codex WB R4 finding 2）")
+    func finalize_unknownRawStillPresent_throwsAndPreservesPending() async throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 1)
+        let spy = Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let knownDrawing = DrawingObject(toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        // 已知条 + 一条未来 toolType（未识别）——mirror CoordinatorLossyPreserveTests 的 `unknown` fixture。
+        let lossy = LossyDrawingArray(elements: try LossyDrawingArray(drawings: [knownDrawing]).elements
+                                      + [.unknownRaw(#"{"toolType":"__future__","z":1.0}"#)])
+        let pos = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000)
+        try pending.savePending(PendingTraining(
+            trainingSetFilename: "set.sqlite", globalTickIndex: 3,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: try JSONEncoder().encode(pos), cashBalance: 90_000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            tradeOperations: [], lossy: lossy, startedAt: 1,
+            accumulatedCapital: 100_000, drawdown: .initial,
+            sessionKey: "SK-unknown-raw"))
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
+            finalization: port,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000)))
+        let engine = try #require(try await coord.resumePending())
+        await #expect(throws: AppError.persistence(.dbCorrupted)) {
+            _ = try await coord.finalize(engine: engine)
+        }
+        #expect(try pending.loadPending() != nil)   // pending 未被清空（unknownRaw 数据仍在磁盘）
+        #expect(port.finalizeCallCount == 0)         // 从未到达 finalization port（未清 record/pending）
+    }
+
+    /// 对照组：resume 的 pending 仅含已知画线（无 unknownRaw）→ finalize 照常成功、pending 正常清空。
+    @Test("finalize: resume 的 pending 仅含已知画线 → 正常成功、pending 清空（control，codex WB R4 finding 2）")
+    func finalize_onlyKnownDrawings_succeedsNormally() async throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 1)
+        let spy = Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let knownDrawing = DrawingObject(toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        let pos = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000)
+        try pending.savePending(PendingTraining(
+            trainingSetFilename: "set.sqlite", globalTickIndex: 3,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: try JSONEncoder().encode(pos), cashBalance: 90_000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            tradeOperations: [], drawings: [knownDrawing], startedAt: 1,
+            accumulatedCapital: 100_000, drawdown: .initial,
+            sessionKey: "SK-known-only"))
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
+            finalization: port,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000)))
+        let engine = try #require(try await coord.resumePending())
+        let id = try #require(try await coord.finalize(engine: engine))
+        let (_, _, drawings) = try records.loadRecordBundle(id: id)
+        #expect(drawings == [knownDrawing])
+        #expect(try pending.loadPending() == nil)   // 正常清空
+        #expect(port.finalizeCallCount == 1)
+    }
+
     @Test("finalize/saveProgress: 传入非活跃 engine → .internalError（engine 身份守门，final-review L2 加固）")
     func finalizeSaveProgress_foreignEngine_throws() async throws {
         let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles())
