@@ -931,13 +931,34 @@ public final class TrainingSessionCoordinator {
         (try? reviewArchiveRepo.loadMarkers()) ?? [:]
     }
 
-    /// 当前复盘 session 是否有净改动：当前活跃引擎的 `reviewDrawings`/`loadedReviewHiddenIds` vs committed
-    /// 基线（顺序无关）。codex whole-branch High fix：须纳入 hiddenIds——否则「画线集相同、仅 hiddenIds
-    /// 不同」被误判无改动。
+    /// codex whole-branch R5（high）：复盘净改动统一判定——**唯一**脏判定入口，`reviewNetChanged()` 与
+    /// `persistReviewWorkingIfChanged()` 均须经此路径，防止二者再次分裂出新的数据丢失盲区（此前 R4 finding 1
+    /// 只把 unknownRaw 比较补进了 `persistReviewWorkingIfChanged`，`reviewNetChanged()` 是独立维护的第二份
+    /// 判定、未同步补，导致「已知画线集/hiddenIds 相同、仅 unknownRaw 不同」被 UI 误判「无改动」直接 discard，
+    /// 永久丢失未来客户端画的线）。比较两层：已知画线集+hiddenIds（`ReviewNetChange.changed`）、
+    /// lossy `unknownRaw` 内容数组（调用方各自 reconcile 后传入，字节级失真下唯一可靠的层，理由见调用点注释）。
+    private func reviewWorkingIsDirty(workingDrawings: [DrawingObject], workingHiddenIds: [DrawingID],
+                                      workingLossy: LossyDrawingArray) -> Bool {
+        let knownOrHiddenChanged = ReviewNetChange.changed(working: workingDrawings, committed: reviewCommittedBaseline,
+                                                            workingHiddenIds: workingHiddenIds,
+                                                            committedHiddenIds: reviewCommittedHiddenIds)
+        return knownOrHiddenChanged || workingLossy.unknownRaw != reviewCommittedLossy.unknownRaw
+    }
+
+    /// 当前复盘 session 是否有净改动：当前活跃引擎的 `reviewDrawings`/`loadedReviewHiddenIds`/lossy
+    /// `unknownRaw` vs committed 基线，统一经 `reviewWorkingIsDirty` 判定（codex whole-branch R5，见其注释）。
+    /// fail-closed：无活跃引擎 → 退化为纯 known+hiddenIds 判定（无 lossy 数据可比较，行为同修复前）；
+    /// `reconciled` 抛错（重复 id/不可编码等）→ 视为「有改动」，绝不静默判「无改动」而放行 UI 端自动 discard。
     public func reviewNetChanged() -> Bool {
-        ReviewNetChange.changed(working: activeEngine?.reviewDrawings ?? [], committed: reviewCommittedBaseline,
-                                workingHiddenIds: activeEngine?.loadedReviewHiddenIds ?? [],
-                                committedHiddenIds: reviewCommittedHiddenIds)
+        guard let engine = activeEngine else {
+            return ReviewNetChange.changed(working: [], committed: reviewCommittedBaseline,
+                                            workingHiddenIds: [], committedHiddenIds: reviewCommittedHiddenIds)
+        }
+        guard let workingLossy = try? engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings) else {
+            return true   // fail-closed：reconcile 出错 → 视为脏
+        }
+        return reviewWorkingIsDirty(workingDrawings: engine.reviewDrawings, workingHiddenIds: engine.loadedReviewHiddenIds,
+                                    workingLossy: workingLossy)
     }
 
     /// 复盘中按需持久化：有净改动（vs committed 基线）→ 写 working（`stepTick`=当前 tick）；
@@ -949,23 +970,17 @@ public final class TrainingSessionCoordinator {
         // 边界情况），身份不符也在此再拦一次，绝不用非当前活跃 engine 的数据落 review_archive。
         guard activeEngine === engine else { return }
         guard let id = reviewRecordId else { return }
-        // codex whole-branch High fix：净改动判定须纳入 hiddenIds（4-arg 形式）——2-arg 形式只比较画线集，
-        // 「working 画线集==committed 基线但 hiddenIds 不同」会被误判无改动 → 走下方 `clearWorking` 分支，
-        // 抹掉这份 working 行携带的隐藏态（P1a 的 forward-compat 数据丢失路径）。
-        let knownOrHiddenChanged = ReviewNetChange.changed(working: engine.reviewDrawings, committed: reviewCommittedBaseline,
-                                                            workingHiddenIds: engine.loadedReviewHiddenIds,
-                                                            committedHiddenIds: reviewCommittedHiddenIds)
-        // codex whole-branch R4 finding 1：上面的判定只看已知投影 + hiddenIds——working 行可能与 committed
-        // saved 的已知画线集/hiddenIds 完全相同、仅各自携带的 unknownRaw（未来客户端画的线）不同，这类改动
-        // 对上面的判定不可见。`workingLossy` = 本次若判定为脏就会实际写入 saved 的完整有损集（reconciled 后）；
-        // fail-closed：`reconciled` 的 throw 直接传播。
+        // codex whole-branch R4 finding 1：`workingLossy` = 本次若判定为脏就会实际写入 saved 的完整有损集
+        // （reconciled 后）；fail-closed：`reconciled` 的 throw 直接传播（不落任何一支，绝不自动 discard）。
         // 比较 `unknownRaw` 内容数组（非 `.encoded()` 整体字节）——`Foundation.JSONEncoder`（无 `.sortedKeys`）
         // 不保证同进程内多次独立 encode 调用的 key 顺序稳定（已用真机验证：同值两次 encode 可产生不同字节序），
         // 若比字节会在「working/committed 各自独立解码/重建」时对完全未变的已知条产生假阳性脏判定。
         // `unknownRaw` 是原样保留的原始文本（不重编码），按内容数组比较既精确捕获这一盲区、又不受该问题影响。
         let workingLossy = try engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings)
-        let lossyChanged = workingLossy.unknownRaw != reviewCommittedLossy.unknownRaw
-        if knownOrHiddenChanged || lossyChanged {
+        // codex whole-branch R5：脏判定统一经 `reviewWorkingIsDirty`（同 `reviewNetChanged()` 共用），
+        // 防止两处再次分裂出不一致的判定逻辑。
+        if reviewWorkingIsDirty(workingDrawings: engine.reviewDrawings, workingHiddenIds: engine.loadedReviewHiddenIds,
+                                workingLossy: workingLossy) {
             // P1a Task 12（Z1）：重发 reconciled 后的完整有损集（非纯 known）+ 原样传回加载来的 hiddenIds
             // （不用默认 `[]` 覆盖 P5 写的隐藏态，codex R11-high）——保住加载 blob 里未识别的条穿过本次 autosave。
             try reviewArchiveRepo.saveWorking(recordId: id, stepTick: engine.tick.globalTickIndex,

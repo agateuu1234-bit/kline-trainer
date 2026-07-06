@@ -266,6 +266,25 @@ struct CoordinatorLossyPreserveTests {
         #expect(workingCol?.contains("__future__") == true)   // unknownRaw 未丢失
     }
 
+    @Test("复盘净改动(reviewNetChanged)须纳入 unknownRaw：known+hiddenIds 均与 committed 基线相同，仅 unknownRaw 不同 → reviewNetChanged() 判「有改动」，不得被 UI 误判「无改动」直接 discard 丢弃这条未来数据（codex WB R5：reviewNetChanged 与 persistReviewWorkingIfChanged 的脏判定须合一，不得分裂出新盲区）")
+    func reviewNetChangedDetectsUnknownRawOnlyDiff() async throws {
+        let (url, appDB) = try makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let rid = try makeRecord(appDB)
+        // saved(committed 基线) 与 working 的已知画线集([g1])+hiddenIds([]) 完全相同，仅 working 额外携带
+        // 一条 unknownRaw——`reviewNetChanged()` 此前只比较 known+hiddenIds（`persistReviewWorkingIfChanged`
+        // 已在 R4 finding 1 修过，但 `reviewNetChanged()` 是独立维护的第二份判定，未同步补）。
+        try seedReviewSavedAndWorking(appDB, recordId: rid,
+                                       savedWrapperJSON: #"{"drawings":[\#(known("g1"))],"hiddenIds":[]}"#,
+                                       stepTick: 3,
+                                       workingWrapperJSON: #"{"drawings":[\#(known("g1")),\#(unknown)],"hiddenIds":[]}"#)
+        let coord = makeCoordinator(appDB)
+        _ = try #require(try await coord.resumePendingReview(recordId: rid))  // resume：known+hiddenIds==committed，仅 unknownRaw 不同
+        // 零画线编辑——`reviewNetChanged()` 必须靠 unknownRaw 字节比较单独识别出「有改动」。若误判「无改动」，
+        // UI 端「结束复盘」流程会跳过保存提示、直接调 discard，永久丢失这条 unknownRaw（未来版本画的线）。
+        #expect(coord.reviewNetChanged() == true)
+    }
+
     // MARK: - review FRESH 入口（无 working 行）：commit 不丢 saved 列未来条/hiddenIds（Critical）
 
     @Test("复盘 FRESH 进入(无 working 行)：saved 列含未来条+hiddenIds → 无编辑 commit 后仍保留（曾被永久抹掉）")
