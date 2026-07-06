@@ -554,6 +554,52 @@ struct TrainingSessionPersistenceTests {
         #expect(port.finalizeCallCount == 1)
     }
 
+    // MARK: - codex whole-branch R9 finding 1：finalize 遇 known drawing 未来字段 → fail-closed，不清 pending
+
+    /// resume 一条【已知 toolType，但携带未来客户端加的额外字段】的 pending（无 unknownRaw）→ finalize 须
+    /// fail-closed 拒绝：finalize 只把 `engine.drawings`（已知投影）交给 `finalizeSession` 的表结构持久化，
+    /// 这条未来字段（`futureField`）无法随之存活——若照常 finalize 会随 pending 一起永久丢弃且不可逆（同
+    /// unknownRaw 的道理，但此前的门只查 `unknownRaw`，漏了这类"已知条身上的未来字段"）。
+    @Test("finalize: resume 的 pending 已知条携带未来字段（无 unknownRaw）→ 抛 .persistence(.dbCorrupted)，pending 不被清空（codex WB R9 finding 1）")
+    func finalize_knownDrawingHasFutureField_throwsAndPreservesPending() async throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 1)
+        let spy = Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let knownDrawing = DrawingObject(toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        // 已知条的 raw 携带一个当前 schema 不认识的未来字段（mirror CoordinatorLossyPreserveTests 的
+        // `knownFuture` fixture手法）——DrawingObject 解码成功（`futureField` 被 JSONDecoder 忽略），
+        // 但字节仍在 raw 里。
+        let encoded = try LossyDrawingArray.encodeKnown(knownDrawing)
+        let futureRaw = String(encoded.dropLast()) + #","futureField":1}"#
+        let lossy = LossyDrawingArray(elements: [.known(knownDrawing, raw: futureRaw)])
+        let pos = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000)
+        try pending.savePending(PendingTraining(
+            trainingSetFilename: "set.sqlite", globalTickIndex: 3,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: try JSONEncoder().encode(pos), cashBalance: 90_000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            tradeOperations: [], lossy: lossy, startedAt: 1,
+            accumulatedCapital: 100_000, drawdown: .initial,
+            sessionKey: "SK-known-future"))
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
+            finalization: port,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000)))
+        let engine = try #require(try await coord.resumePending())
+        await #expect(throws: AppError.persistence(.dbCorrupted)) {
+            _ = try await coord.finalize(engine: engine)
+        }
+        #expect(try pending.loadPending() != nil)   // pending 未被清空（未来字段数据仍在磁盘）
+        #expect(port.finalizeCallCount == 0)         // 从未到达 finalization port（未清 record/pending）
+    }
+
     @Test("finalize/saveProgress: 传入非活跃 engine → .internalError（engine 身份守门，final-review L2 加固）")
     func finalizeSaveProgress_foreignEngine_throws() async throws {
         let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles())

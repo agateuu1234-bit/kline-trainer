@@ -153,6 +153,37 @@ public struct LossyDrawingArray: Equatable, Sendable {
         "textColorToken","textForm","tailAnchor"
     ]
 
+    /// codex whole-branch R9（两处 high 的共享根因）：「已知 drawing 未来字段」——`.known` 条 `raw` 除
+    /// `knownDiskKeys` 外，【未来客户端】可能已经写进现有 toolType（如 horizontal）的额外顶层字段。这些字段
+    /// 被 `JSONDecoder` 静默忽略（不会出现在解码出的 `DrawingObject` 里），只活在 `raw` 字节文本里——任何
+    /// 「只读解码后的已知字段再重建」的路径（finalize 的表结构持久化 / 复盘 dirty 判定比较解码字段）都看
+    /// 不见它们，若该路径清空/覆盖了原始 `raw`，这些字段就会不可逆丢失。本方法是这类数据的【唯一】读取
+    /// 入口（finalize fail-closed 门 + 复盘 dirty 判定共享），防止两处各自实现出不一致的行为。
+    ///
+    /// 用 `JSONObjectScan.allTopLevelPairs`（字节级顶层键值扫描，同 wrapper 未知顶层 key 手法）取 `raw`
+    /// 的全部顶层键值对，过滤出不在 `knownDiskKeys` 里的——值保持【原始字节文本】（未反转义/未重新格式化），
+    /// 保证跨 raw 逐字节比较不受数值/字符串格式差异影响。
+    ///
+    /// 每个 `.known` 元素恒返回一条 `(id, future)`（即便 `future` 为空字典）——与 `elements` 里的已知条
+    /// 一一对应、保持顺序/条数确定：调用方（dirty 判定）按【有序数组】逐条比较，"某条从有未来字段变没有"
+    /// 与"顺序/条数变化"都能被此形状如实表达，不因"只收非空条"被压扁成模糊的长度变化。
+    func knownFutureFieldPayloads() -> [(id: String, future: [String: String])] {
+        elements.compactMap { element -> (id: String, future: [String: String])? in
+            guard case .known(let d, let raw) = element else { return nil }
+            var future: [String: String] = [:]
+            for pair in JSONObjectScan.allTopLevelPairs(Data(raw.utf8))
+            where !LossyDrawingArray.knownDiskKeys.contains(pair.key) {
+                future[pair.key] = pair.rawValue
+            }
+            return (id: d.id, future: future)
+        }
+    }
+
+    /// 是否存在任意 `.known` 元素携带未来字段（见 `knownFutureFieldPayloads` 注释）。
+    var hasKnownFutureFields: Bool {
+        knownFutureFieldPayloads().contains { !$0.future.isEmpty }
+    }
+
     /// 把当前已知字段【覆盖进原始 JSON 对象、保留其未知 key】（编辑路径用；未知 key 必须存活，
     /// 字节不必全等——codex plan-R12）。原 raw 非对象 → fail-closed（保守）。
     static func mergeKnownFields(into rawJSON: String, from obj: DrawingObject) throws -> String {

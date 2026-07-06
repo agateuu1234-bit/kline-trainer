@@ -441,6 +441,35 @@ struct CoordinatorLossyPreserveTests {
         #expect(workingCol?.contains(#""futureMeta":{"x":2}"#) == true) // working 侧 futureMeta 值未丢失
     }
 
+    @Test("复盘净改动须纳入 known 未来字段：working 与 saved 已知画线集([g1])+hiddenIds+unknownRaw+unknownTopLevel 均相同，仅 g1 raw 携带的未来字段(futureField)值不同 → reviewNetChanged()/persistReviewWorkingIfChanged 均判「有改动」，working 行（含其未来字段）不被 clearWorking 抹掉（codex WB R9 finding 2）")
+    func reviewNetChangeKnownFutureFieldOnlyDiffPreventsClearWorking() async throws {
+        let (url, appDB) = try makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let rid = try makeRecord(appDB)
+        // saved 与 working 的 g1 解码已知字段完全相同（DrawingObject 解码时未来字段被忽略），仅各自 raw
+        // 携带的未来字段(futureField)值不同（1 vs 2）——已知字段/hiddenIds/unknownRaw/unknownTopLevel
+        // 全同，唯独「已知条自身的未来字段」不同，这是此前 5 项判定里唯独漏比的第 5 项。
+        func knownWithFuture(_ v: Int) -> String {
+            String(known("g1").dropLast()) + #","futureField":\#(v)}"#
+        }
+        try seedReviewSavedAndWorking(appDB, recordId: rid,
+                                       savedWrapperJSON: #"{"drawings":[\#(knownWithFuture(1))],"hiddenIds":[]}"#,
+                                       stepTick: 3,
+                                       workingWrapperJSON: #"{"drawings":[\#(knownWithFuture(2))],"hiddenIds":[]}"#)
+        let coord = makeCoordinator(appDB)
+        let engine = try #require(try await coord.resumePendingReview(recordId: rid))  // resume：known+hiddenIds+unknownRaw+unknownTopLevel 均==committed，仅 g1 未来字段不同
+        // reviewNetChanged() 须靠 known 未来字段比较单独识别出「有改动」（同 R4/R5/R8 修的其余 4 项盲区场景）。
+        #expect(coord.reviewNetChanged() == true)
+        // 零画线编辑——persistReviewWorkingIfChanged 同款须判「有改动」，working 行（含其未来字段）保留。
+        try coord.persistReviewWorkingIfChanged(engine: engine)
+        let workingCol: String? = try await appDB.dbQueue.read {
+            try Row.fetchOne($0, sql: "SELECT working_drawings FROM review_archive WHERE record_id=\(rid)")?["working_drawings"]
+        }
+        // 修复前：只比 4 项 → 误判「无改动」→ clearWorking 抹掉 working 行 → working 独有的 futureField:2 永久丢失。
+        #expect(workingCol != nil)                                  // working 行未被 clearWorking 清空
+        #expect(workingCol?.contains(#""futureField":2"#) == true)  // working 侧未来字段值未丢失
+    }
+
     // MARK: - load 时归一化重复已知 id（codex WB R8 finding 2）：resume 之后 autosave（saveProgress）不 brick
 
     @Test("pending_training: resume(pending 含重复非空已知 id)→saveProgress(autosave) 不抛，持久化 id 互不相同（codex WB R8 finding 2）")

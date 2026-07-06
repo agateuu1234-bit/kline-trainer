@@ -689,7 +689,12 @@ public final class TrainingSessionCoordinator {
         // 无 unknownRaw】的 pending（`RecordRepositoryImpl.insertRecord` 的去重修复本可安全接住）会被这道门
         // 提前拒绝、永久卡死——两个各自正确的修复互相冲突。改直接查 `unknownRaw`：既不吞未来数据（fail-closed
         // 语义不变），又不再对重复 id 误报，把去重工作留给 `insertRecord`。
-        if !engine.loadedDrawingsLossy.unknownRaw.isEmpty {
+        // codex whole-branch R9 finding 1：同一个「表结构存不了任意原始字节」的道理，也适用于【已知】
+        // toolType 身上未来客户端加的额外字段——`finalizeSession` 只收 `engine.drawings`（解码后的已知
+        // 投影），这些字段既不在其中、也不会被表结构记录，若照常 finalize 会随 pending 一起永久丢失。
+        // `hasKnownFutureFields`（`LossyDrawingArray` 共享判定，`unknownRaw` 探测用的同一门也用它）同样
+        // 只读「加载来的」`loadedDrawingsLossy`（不 reconciled），维持本门 dup-tolerant 的既有语义。
+        if !engine.loadedDrawingsLossy.unknownRaw.isEmpty || engine.loadedDrawingsLossy.hasKnownFutureFields {
             throw AppError.persistence(.dbCorrupted)
         }
         let meta = try reader.loadMeta()
@@ -966,22 +971,46 @@ public final class TrainingSessionCoordinator {
         (try? reviewArchiveRepo.loadMarkers()) ?? [:]
     }
 
-    /// codex whole-branch R5（high）+ codex WB R8 finding 1：复盘净改动统一判定——**唯一**脏判定入口，
-    /// `reviewNetChanged()` 与 `persistReviewWorkingIfChanged()` 均须经此路径，防止二者再次分裂出新的数据
-    /// 丢失盲区（R4 finding 1 把 unknownRaw 比较补进了两处，但 R8 finding 1 发现 wrapper 顶层未知 key
-    /// （`unknownTopLevel`，codex WB R7 finding 1 加的第 4 个 carried 字段）此前从未被这道判定比较过——working
-    /// 与 saved 的已知画线集/hiddenIds/unknownRaw 全同、仅 unknownTopLevel 不同时会被误判「无改动」，
-    /// `clearWorking` 抹掉 working 行独有的顶层 review-metadata）。现比较全部四层（已知画线集+hiddenIds
-    /// 经 `ReviewNetChange.changed`、lossy `unknownRaw` 内容数组、`unknownTopLevel` 有序 entry 数组——
-    /// 三者调用方各自 reconcile/传回后传入，字节级失真下唯一可靠的层，理由见调用点注释）。
+    /// codex whole-branch R5（high）+ codex WB R8 finding 1 + codex WB R9 finding 2：复盘净改动统一判定——
+    /// **唯一**脏判定入口，`reviewNetChanged()` 与 `persistReviewWorkingIfChanged()` 均须经此路径，防止
+    /// 二者再次分裂出新的数据丢失盲区（R4 finding 1 把 unknownRaw 比较补进了两处，但 R8 finding 1 发现
+    /// wrapper 顶层未知 key（`unknownTopLevel`，codex WB R7 finding 1 加的第 4 个 carried 字段）此前从未
+    /// 被这道判定比较过——working 与 saved 的已知画线集/hiddenIds/unknownRaw 全同、仅 unknownTopLevel 不同
+    /// 时会被误判「无改动」，`clearWorking` 抹掉 working 行独有的顶层 review-metadata）。R9 finding 2 又发现
+    /// 第 5 个盲区：`.known` 条 raw 自身携带的【未来字段】（`LossyDrawingArray.knownFutureFieldPayloads`，
+    /// 同 finalize fail-closed 门共享的判定）此前也从未比较过——working 与 saved 的已知字段/hiddenIds/
+    /// unknownRaw/unknownTopLevel 全同、仅某条已知画线 raw 里的未来字段值不同时同样会被误判「无改动」。
+    /// 现比较全部五层：已知画线集+hiddenIds 经 `ReviewNetChange.changed`、lossy `unknownRaw` 内容数组、
+    /// `unknownTopLevel` 有序 entry 数组、known 未来字段有序 payload 数组（四者调用方各自 reconcile/
+    /// 传回后传入，字节级失真下唯一可靠的层，理由见调用点注释）。
+    /// 未来字段比较用【已 reconciled 的】`workingLossy`（非 `engine.loadedReviewLossy` 原始快照）——
+    /// 原始快照只在 session 载入时种入、`commitReview` 前移 `reviewCommittedLossy` 后不会跟着前移，两者
+    /// 会永久失去同步，导致 commit 后即便 working==committed 也被误判「有改动」（已用回归验证：commit 后
+    /// 该组合会假阳性）。`reconciled(currentKnown:)` 对**未编辑**的已知条恒原样保留 raw（含未来字段字节
+    /// 不变），故对本 finding 要抓的场景（未编辑、仅未来字段随 working/committed 独立加载而不同）判定不受
+    /// 影响；**已编辑**的条会经 `mergeKnownFields` 重编码（可能改未来字段字节格式），但那类条已经会被上面
+    /// `knownOrHiddenChanged` 判「有改动」，此项重编码噪声不影响最终 OR 结果。
     private func reviewWorkingIsDirty(workingDrawings: [DrawingObject], workingHiddenIds: [DrawingID],
                                       workingLossy: LossyDrawingArray,
                                       workingUnknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry]) -> Bool {
         let knownOrHiddenChanged = ReviewNetChange.changed(working: workingDrawings, committed: reviewCommittedBaseline,
                                                             workingHiddenIds: workingHiddenIds,
                                                             committedHiddenIds: reviewCommittedHiddenIds)
+        let futureFieldsChanged = !Self.knownFutureFieldPayloadsEqual(
+            workingLossy.knownFutureFieldPayloads(), reviewCommittedLossy.knownFutureFieldPayloads())
         return knownOrHiddenChanged || workingLossy.unknownRaw != reviewCommittedLossy.unknownRaw
             || workingUnknownTopLevel != reviewCommittedUnknownTopLevel
+            || futureFieldsChanged
+    }
+
+    /// codex WB R9 finding 2：`knownFutureFieldPayloads()` 返回元组数组——元组不满足 `Equatable` 协议
+    /// （协议一致性仅限具名类型），故 `Array` 的 `!=`/`==` 对它不可用；按序逐条比较 id + future 字典。
+    private static func knownFutureFieldPayloadsEqual(
+        _ a: [(id: String, future: [String: String])],
+        _ b: [(id: String, future: [String: String])]) -> Bool {
+        guard a.count == b.count else { return false }
+        for i in a.indices where a[i].id != b[i].id || a[i].future != b[i].future { return false }
+        return true
     }
 
     /// 当前复盘 session 是否有净改动：当前活跃引擎的 `reviewDrawings`/`loadedReviewHiddenIds`/lossy
@@ -1017,8 +1046,9 @@ public final class TrainingSessionCoordinator {
         // 若比字节会在「working/committed 各自独立解码/重建」时对完全未变的已知条产生假阳性脏判定。
         // `unknownRaw` 是原样保留的原始文本（不重编码），按内容数组比较既精确捕获这一盲区、又不受该问题影响。
         let workingLossy = try engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings)
-        // codex whole-branch R5 + codex WB R8 finding 1：脏判定统一经 `reviewWorkingIsDirty`（同
-        // `reviewNetChanged()` 共用，含 unknownTopLevel 比较），防止两处再次分裂出不一致的判定逻辑。
+        // codex whole-branch R5 + codex WB R8 finding 1 + codex WB R9 finding 2：脏判定统一经
+        // `reviewWorkingIsDirty`（同 `reviewNetChanged()` 共用，含 unknownTopLevel + known 未来字段比较），
+        // 防止两处再次分裂出不一致的判定逻辑。
         if reviewWorkingIsDirty(workingDrawings: engine.reviewDrawings, workingHiddenIds: engine.loadedReviewHiddenIds,
                                 workingLossy: workingLossy, workingUnknownTopLevel: engine.loadedReviewUnknownTopLevel) {
             // P1a Task 12（Z1）：重发 reconciled 后的完整有损集（非纯 known）+ 原样传回加载来的 hiddenIds
