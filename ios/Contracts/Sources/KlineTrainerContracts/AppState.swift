@@ -137,6 +137,7 @@ public struct PendingTraining: Codable, Equatable, Sendable {
     }
 
     /// 便捷 init：coordinator fresh save 用（纯已知；活编辑保住 unknown = P1b 引擎携带 lossy，§Y）。
+    /// throws（codex whole-branch High fix）：`LossyDrawingArray(drawings:)` 现在 throws。
     public init(
         trainingSetFilename: String,
         globalTickIndex: Int,
@@ -151,7 +152,7 @@ public struct PendingTraining: Codable, Equatable, Sendable {
         accumulatedCapital: Double,
         drawdown: DrawdownAccumulator,
         sessionKey: String
-    ) {
+    ) throws {
         self.init(
             trainingSetFilename: trainingSetFilename,
             globalTickIndex: globalTickIndex,
@@ -161,7 +162,7 @@ public struct PendingTraining: Codable, Equatable, Sendable {
             cashBalance: cashBalance,
             feeSnapshot: feeSnapshot,
             tradeOperations: tradeOperations,
-            lossy: LossyDrawingArray(drawings: drawings),
+            lossy: try LossyDrawingArray(drawings: drawings),
             startedAt: startedAt,
             accumulatedCapital: accumulatedCapital,
             drawdown: drawdown,
@@ -188,7 +189,7 @@ public struct PendingTraining: Codable, Equatable, Sendable {
         feeSnapshot = try c.decode(FeeSnapshot.self, forKey: .feeSnapshot)
         tradeOperations = try c.decode([TradeOperation].self, forKey: .tradeOperations)
         // 纯已知重建（本 Codable 路径是 compat surface；字节级保真走 repo 的 p.lossy.encoded() 列路径）。
-        lossy = LossyDrawingArray(drawings: try c.decode([DrawingObject].self, forKey: .drawings))
+        lossy = try LossyDrawingArray(drawings: try c.decode([DrawingObject].self, forKey: .drawings))
         startedAt = try c.decode(Int64.self, forKey: .startedAt)
         accumulatedCapital = try c.decode(Double.self, forKey: .accumulatedCapital)
         drawdown = try c.decode(DrawdownAccumulator.self, forKey: .drawdown)
@@ -264,6 +265,7 @@ public struct PendingReplay: Codable, Equatable, Sendable {
     }
 
     /// 便捷 init：coordinator fresh save 用（纯已知；活编辑保住 unknown = P1b 引擎携带 lossy，§Y）。
+    /// throws（codex whole-branch High fix）：`LossyDrawingArray(drawings:)` 现在 throws。
     public init(
         recordId: Int64,
         trainingSetFilename: String,
@@ -278,7 +280,7 @@ public struct PendingReplay: Codable, Equatable, Sendable {
         startedAt: Int64,
         accumulatedCapital: Double,
         drawdown: DrawdownAccumulator
-    ) {
+    ) throws {
         self.init(
             recordId: recordId,
             trainingSetFilename: trainingSetFilename,
@@ -289,7 +291,7 @@ public struct PendingReplay: Codable, Equatable, Sendable {
             cashBalance: cashBalance,
             feeSnapshot: feeSnapshot,
             tradeOperations: tradeOperations,
-            lossy: LossyDrawingArray(drawings: drawings),
+            lossy: try LossyDrawingArray(drawings: drawings),
             startedAt: startedAt,
             accumulatedCapital: accumulatedCapital,
             drawdown: drawdown
@@ -316,7 +318,7 @@ public struct PendingReplay: Codable, Equatable, Sendable {
         feeSnapshot = try c.decode(FeeSnapshot.self, forKey: .feeSnapshot)
         tradeOperations = try c.decode([TradeOperation].self, forKey: .tradeOperations)
         // 纯已知重建（本 Codable 路径是 compat surface；字节级保真走 repo 的 p.lossy.encoded() 列路径）。
-        lossy = LossyDrawingArray(drawings: try c.decode([DrawingObject].self, forKey: .drawings))
+        lossy = try LossyDrawingArray(drawings: try c.decode([DrawingObject].self, forKey: .drawings))
         startedAt = try c.decode(Int64.self, forKey: .startedAt)
         accumulatedCapital = try c.decode(Double.self, forKey: .accumulatedCapital)
         drawdown = try c.decode(DrawdownAccumulator.self, forKey: .drawdown)

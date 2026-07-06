@@ -114,9 +114,9 @@ public struct ReviewArchiveWrapper: Equatable, Sendable {
     public init(lossy: LossyDrawingArray, hiddenIds: [DrawingID]) {
         self.lossy = lossy; self.hiddenIds = hiddenIds
     }
-    /// 便捷：纯已知条（新写入）。
-    public init(drawings: [DrawingObject], hiddenIds: [DrawingID]) {
-        self.init(lossy: LossyDrawingArray(drawings: drawings), hiddenIds: hiddenIds)
+    /// 便捷：纯已知条（新写入）。throws（codex whole-branch High fix）：`LossyDrawingArray(drawings:)` 现在 throws。
+    public init(drawings: [DrawingObject], hiddenIds: [DrawingID]) throws {
+        self.init(lossy: try LossyDrawingArray(drawings: drawings), hiddenIds: hiddenIds)
     }
 
     public static func decodeColumn(_ json: String) throws -> ReviewArchiveWrapper {

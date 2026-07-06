@@ -285,16 +285,16 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
         let w = working[recordId]
         guard s != nil || w != nil else { return nil }
         return ReviewArchive(recordId: recordId,
-                             savedLossy: s.map { LossyDrawingArray(drawings: $0) }, savedHiddenIds: savedHidden[recordId],
+                             savedLossy: try s.map { try LossyDrawingArray(drawings: $0) }, savedHiddenIds: savedHidden[recordId],
                              workingStepTick: w?.stepTick,
-                             workingLossy: w.map { LossyDrawingArray(drawings: $0.drawings) }, workingHiddenIds: workingHidden[recordId])
+                             workingLossy: try w.map { try LossyDrawingArray(drawings: $0.drawings) }, workingHiddenIds: workingHidden[recordId])
     }
 
     public func loadWorking(recordId: Int64) throws -> ReviewWorking? {
         lock.lock(); defer { lock.unlock() }
         if let e = _failNextLoadWorking { _failNextLoadWorking = nil; throw e }
         guard let w = working[recordId] else { return nil }
-        return ReviewWorking(stepTick: w.stepTick, drawings: w.drawings, hiddenOriginalIds: workingHidden[recordId] ?? [])
+        return try ReviewWorking(stepTick: w.stepTick, drawings: w.drawings, hiddenOriginalIds: workingHidden[recordId] ?? [])
     }
 
     public func loadSaved(recordId: Int64) throws -> [DrawingObject]? {
@@ -309,7 +309,7 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
         lock.lock(); defer { lock.unlock() }
         if let e = _failNextLoadSaved { _failNextLoadSaved = nil; throw e }
         guard let s = saved[recordId] else { return nil }
-        return (LossyDrawingArray(drawings: s), savedHidden[recordId] ?? [])
+        return (try LossyDrawingArray(drawings: s), savedHidden[recordId] ?? [])
     }
 
     public func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {

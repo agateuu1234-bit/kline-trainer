@@ -26,7 +26,7 @@ public final class TrainingEngine {
     /// P1a Task 12（Z1）：加载来的完整有损画线集（含 unknownRaw 原始字节）。`drawings` 是其已知投影
     /// （`loadedDrawingsLossy.drawings`）。coordinator save 路径经 `loadedDrawingsLossy.reconciled(currentKnown:)`
     /// 重发，使加载 blob 里未识别（未来版本）的条穿过 autosave/resume-save/commit 全路径存活。
-    public private(set) var loadedDrawingsLossy = LossyDrawingArray(drawings: [])
+    public private(set) var loadedDrawingsLossy = LossyDrawingArray(elements: [])
     /// review-redesign Task 5 最小 shim + **Task 10 落地**：复盘 session 的工作画线集，供 coordinator
     /// 持久化净改动判定（`ReviewNetChange.changed(working: engine.reviewDrawings, committed:)`）读取，
     /// 也是复盘新画线的唯一写入面——`appendReviewDrawing`/`removeReviewDrawing`；`ChartContainerView`
@@ -35,7 +35,7 @@ public final class TrainingEngine {
     public private(set) var reviewDrawings: [DrawingObject] = []
     /// P1a Task 12（Z1）：复盘加载来的完整有损画线集（同 `loadedDrawingsLossy`，复盘侧）；`reviewDrawings`
     /// 是其已知投影。
-    public private(set) var loadedReviewLossy = LossyDrawingArray(drawings: [])
+    public private(set) var loadedReviewLossy = LossyDrawingArray(elements: [])
     /// P1a Task 12（Z1）：复盘加载来的隐藏原训练线 id 集（§11.5/D12）。save 路径原样传回，
     /// 不得被默认 `[]` 覆盖已加载的隐藏态（codex R11-high）。P1a 只透传，hide/show 写入行为 = P5。
     public private(set) var loadedReviewHiddenIds: [DrawingID] = []
@@ -154,7 +154,12 @@ public final class TrainingEngine {
         self.markers = initialMarkers
         // P1a Task 12（Z1）：`loadedDrawingsLossy` = 携带的完整有损集（含 unknownRaw）；`drawings` 是其已知投影。
         // 用局部变量而非读回 `self.loadedDrawingsLossy`（@Observable 宏访问器需 self 全初始化后才可读）。
-        let seededLossy = initialDrawingsLossy ?? LossyDrawingArray(drawings: initialDrawings)
+        // `try!`（codex whole-branch High fix，`encodeKnown` 现在 throws）：本 init 是 spec 规定的
+        // trust-boundary（非 throwing，L88 上方注释——不可恢复的运行时数据错误不在此 throw，同风格
+        // trap）。`initialDrawings` 此处恒为 `make()` 默认空数组或已解码（finite 保证）数据；此分支只在
+        // `initialDrawingsLossy == nil` 时求值，生产 3 处调用点均传了非 nil `initialDrawingsLossy`
+        // （resume/review 均走 DB 解码后的 lossy），故此路径实际不可能非有限值触发。
+        let seededLossy = initialDrawingsLossy ?? (try! LossyDrawingArray(drawings: initialDrawings))
         self.loadedDrawingsLossy = seededLossy
         self.drawings = seededLossy.drawings
         self.tradeOperations = initialTradeOperations
@@ -296,7 +301,7 @@ public final class TrainingEngine {
         reviewDrawings = l.drawings
     }
     /// 兼容旧调用（纯已知，无 unknownRaw/hiddenIds）：包成 lossy 走 `setReviewLossy` 唯一实现。
-    public func setReviewDrawings(_ ds: [DrawingObject]) { setReviewLossy(LossyDrawingArray(drawings: ds)) }
+    public func setReviewDrawings(_ ds: [DrawingObject]) throws { setReviewLossy(try LossyDrawingArray(drawings: ds)) }
 
     /// 规范 mark price（Task 9 收口）：global tick `t` 处 `.m3` 收盘价，越界 clamp 到端根、非 nil。
     /// `currentPrice`／`ReviewLedger.state` 的 `markPriceAtTick`／finalize 三处共用同一入口，杜绝重复实现漂移。

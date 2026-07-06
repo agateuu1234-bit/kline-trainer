@@ -257,7 +257,7 @@ struct CoordinatorReplayPersistenceTests {
     @Test func resumePendingReplay_corruptSlot_nonMatchingRecord_notBlocked() async throws {
         // codex plan-R11-F1：record A 的损坏 payload 槽不得阻塞 record B 的 replay 入口
         let h = try CoordinatorTestHarness.make(seedRecordIds: [101, 202])
-        try h.pendingReplayRepo.saveReplay(makeSlot(recordId: 101))
+        try h.pendingReplayRepo.saveReplay(try makeSlot(recordId: 101))
         h.pendingReplayRepo.failNextLoadReplay = .persistence(.dbCorrupted)  // 全量解码会抛（slotInfo 不受影响）
         // 对 record 202 续局：slotInfo 返 101 ≠ 202 → 直接 nil，**不触发全量 loadReplay**（A 的损坏不阻塞 B）
         let e = try await h.coordinator.resumePendingReplay(recordId: 202)
@@ -268,7 +268,7 @@ struct CoordinatorReplayPersistenceTests {
     @Test func resumePendingReplay_corruptSlot_matchingRecord_clearsAndFallsBack() async throws {
         // codex plan-R11-F1：本记录损坏 payload 槽 → 清 + 返回 nil（router 回退从头 fresh）
         let h = try CoordinatorTestHarness.make()
-        try h.pendingReplayRepo.saveReplay(makeSlot(recordId: h.seededRecordId))
+        try h.pendingReplayRepo.saveReplay(try makeSlot(recordId: h.seededRecordId))
         h.pendingReplayRepo.failNextLoadReplay = .persistence(.dbCorrupted)  // 本记录槽全量解码损坏
         let e = try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId)
         #expect(e == nil)
@@ -279,8 +279,8 @@ struct CoordinatorReplayPersistenceTests {
         // codex plan-R18-F1：position_data 合法存在但非法 PositionManager JSON → decodePosition 抛 .dbCorrupted
         // → 与 loadReplay 损坏同路径：清槽 + nil（回退从头），不卡死
         let h = try CoordinatorTestHarness.make()
-        var slot = makeSlot(recordId: h.seededRecordId, filename: "set.sqlite")
-        slot = PendingReplay(recordId: slot.recordId, trainingSetFilename: slot.trainingSetFilename,
+        var slot = try makeSlot(recordId: h.seededRecordId, filename: "set.sqlite")
+        slot = try PendingReplay(recordId: slot.recordId, trainingSetFilename: slot.trainingSetFilename,
             globalTickIndex: slot.globalTickIndex, upperPeriod: slot.upperPeriod, lowerPeriod: slot.lowerPeriod,
             positionData: Data("{not-valid-position-json".utf8),   // 合法 Data、非法 PositionManager JSON
             cashBalance: slot.cashBalance, feeSnapshot: slot.feeSnapshot, tradeOperations: slot.tradeOperations,
@@ -295,7 +295,7 @@ struct CoordinatorReplayPersistenceTests {
     @Test func resumePendingReplay_corruptSlot_clearFails_propagatesKeepsSlot() async throws {
         // codex plan-R12-F1：本记录损坏槽 + 清档失败（瞬态 DB）→ 不吞、传播可重试错误、槽保留（不伪装"无暂存"开 fresh）
         let h = try CoordinatorTestHarness.make()
-        try h.pendingReplayRepo.saveReplay(makeSlot(recordId: h.seededRecordId))
+        try h.pendingReplayRepo.saveReplay(try makeSlot(recordId: h.seededRecordId))
         h.pendingReplayRepo.failNextLoadReplay = .persistence(.dbCorrupted)
         h.pendingReplayRepo.failNextClearReplay = .internalError(module: "test", detail: "transient clear")
         await #expect(throws: (any Error).self) {
@@ -307,7 +307,7 @@ struct CoordinatorReplayPersistenceTests {
     @Test func resumePendingReplay_filenameMismatch_clearsAndReturnsNil() async throws {
         // codex plan-R10-F1：pending.recordId 匹配但 trainingSetFilename 与记录不符（stale/corrupt 槽）→ 清 + nil（不拿错文件续局）
         let h = try CoordinatorTestHarness.make()
-        let bad = PendingReplay(
+        let bad = try PendingReplay(
             recordId: h.seededRecordId, trainingSetFilename: "WRONG-not-the-record-file.sqlite",
             globalTickIndex: 1, upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(),
             cashBalance: 100_000, feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
@@ -456,7 +456,7 @@ struct CoordinatorReplayPersistenceTests {
         // 槽 globalTickIndex=8 超出 (0...7) → scalar guard 检出 → clearReplay + nil（永不到 make）。
         let h = try CoordinatorTestHarness.make()
         let outOfRangeTick = h.seededRecordFinalTick + 1   // 8 > maxTick(7)
-        let badSlot = PendingReplay(
+        let badSlot = try PendingReplay(
             recordId: h.seededRecordId,
             trainingSetFilename: "set.sqlite",
             globalTickIndex: outOfRangeTick,
@@ -479,7 +479,7 @@ struct CoordinatorReplayPersistenceTests {
         // .monthly 是合法 Period case 但不在 candle map。
         // 槽 upperPeriod=.monthly → scalar guard（period 校验）检出 → clearReplay + nil（永不到 make）。
         let h = try CoordinatorTestHarness.make()
-        let badSlot = PendingReplay(
+        let badSlot = try PendingReplay(
             recordId: h.seededRecordId,
             trainingSetFilename: "set.sqlite",
             globalTickIndex: 1,           // valid tick（in range 0...7）
@@ -501,7 +501,7 @@ struct CoordinatorReplayPersistenceTests {
     @Test func resumePendingReplay_nonFiniteMoney_clearsAndReturnsNil() async throws {
         // 槽 cashBalance=.infinity → scalar guard 检出（isFinite=false）→ clearReplay + nil。
         let h = try CoordinatorTestHarness.make()
-        let badSlot = PendingReplay(
+        let badSlot = try PendingReplay(
             recordId: h.seededRecordId,
             trainingSetFilename: "set.sqlite",
             globalTickIndex: 1,
@@ -524,8 +524,8 @@ struct CoordinatorReplayPersistenceTests {
 
 /// 损坏槽测试用最小 PendingReplay 工厂（loadReplay 抛错先于文件名 guard，故 filename 无关）。
 @MainActor
-private func makeSlot(recordId: Int64, filename: String = "rec.sqlite") -> PendingReplay {
-    PendingReplay(recordId: recordId, trainingSetFilename: filename,
+private func makeSlot(recordId: Int64, filename: String = "rec.sqlite") throws -> PendingReplay {
+    try PendingReplay(recordId: recordId, trainingSetFilename: filename,
         globalTickIndex: 1, upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(),
         cashBalance: 100_000, feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,

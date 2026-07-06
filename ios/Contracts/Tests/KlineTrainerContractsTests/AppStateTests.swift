@@ -83,7 +83,7 @@ struct AppStateCodableTests {
     // 码），`drawings` 走计算属性投影往返、decode 侧用 `LossyDrawingArray(drawings:)` 重建已知条
     // （纯已知——本路径只是 compat surface；真正字节级保真持久化走 repo 的 `p.lossy.encoded()` 列路径，不受影响）。
     @Test func pendingTraining_codableRoundTrip() throws {
-        let pend = PendingTraining(
+        let pend = try PendingTraining(
             trainingSetFilename: "foo.zip",
             globalTickIndex: 10,
             upperPeriod: .daily,

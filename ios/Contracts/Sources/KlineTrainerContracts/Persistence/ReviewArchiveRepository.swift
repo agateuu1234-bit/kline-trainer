@@ -28,12 +28,13 @@ public struct ReviewArchive: Equatable, Sendable {
 
     /// 兼容旧构造 API（Task 6 之前的 call-sites，Task 10 之前不改 repo load/save 逻辑）：
     /// 纯 `[DrawingObject]` 包成 `LossyDrawingArray`，hiddenIds 未知（该形状不携带）→ nil。
+    /// throws（codex whole-branch High fix）：`LossyDrawingArray(drawings:)` 现在 throws。
     public init(recordId: Int64, savedDrawings: [DrawingObject]?,
-                workingStepTick: Int?, workingDrawings: [DrawingObject]?) {
+                workingStepTick: Int?, workingDrawings: [DrawingObject]?) throws {
         self.init(recordId: recordId,
-                  savedLossy: savedDrawings.map { LossyDrawingArray(drawings: $0) }, savedHiddenIds: nil,
+                  savedLossy: try savedDrawings.map { try LossyDrawingArray(drawings: $0) }, savedHiddenIds: nil,
                   workingStepTick: workingStepTick,
-                  workingLossy: workingDrawings.map { LossyDrawingArray(drawings: $0) }, workingHiddenIds: nil)
+                  workingLossy: try workingDrawings.map { try LossyDrawingArray(drawings: $0) }, workingHiddenIds: nil)
     }
 }
 
@@ -47,8 +48,9 @@ public struct ReviewWorking: Equatable, Sendable {
         self.stepTick = stepTick; self.lossy = lossy; self.hiddenOriginalIds = hiddenOriginalIds
     }
     /// 便捷：纯已知条（coordinator fresh save 用；活编辑保住 unknown = P1b 引擎携带 lossy，§Y 分层）。
-    public init(stepTick: Int, drawings: [DrawingObject], hiddenOriginalIds: [DrawingID] = []) {
-        self.init(stepTick: stepTick, lossy: LossyDrawingArray(drawings: drawings), hiddenOriginalIds: hiddenOriginalIds)
+    /// throws（codex whole-branch High fix）：`LossyDrawingArray(drawings:)` 现在 throws。
+    public init(stepTick: Int, drawings: [DrawingObject], hiddenOriginalIds: [DrawingID] = []) throws {
+        self.init(stepTick: stepTick, lossy: try LossyDrawingArray(drawings: drawings), hiddenOriginalIds: hiddenOriginalIds)
     }
 }
 

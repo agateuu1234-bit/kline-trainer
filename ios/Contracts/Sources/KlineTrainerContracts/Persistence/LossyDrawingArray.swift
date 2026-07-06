@@ -74,8 +74,11 @@ public struct LossyDrawingArray: Equatable, Sendable {
 
     public init(elements: [LossyDrawingElement]) { self.elements = elements }
     /// 便捷：纯已知条（新写入路径）——raw = 该条编码（无未来字段，编码即权威）。
-    public init(drawings: [DrawingObject]) {
-        self.elements = drawings.map { .known($0, raw: LossyDrawingArray.encodeKnown($0)) }
+    /// **throws（codex whole-branch High fix）**：`encodeKnown` 对非有限价（NaN/Infinity）DrawingObject
+    /// fail-closed 抛错，此 init 必须传播（不得吞掉），否则一条不可编码的画线会让整批 fallback 成 `{}`
+    /// （下次加载被当 unknownRaw，画线静默消失）。
+    public init(drawings: [DrawingObject]) throws {
+        self.elements = try drawings.map { .known($0, raw: try LossyDrawingArray.encodeKnown($0)) }
     }
 
     /// 按序过滤已知条（供 Task 6/7 消费，名/类型不变）。
@@ -87,9 +90,13 @@ public struct LossyDrawingArray: Equatable, Sendable {
         elements.compactMap { if case .unknownRaw(let s) = $0 { return s } else { return nil } }
     }
 
-    /// 良构 `DrawingObject` 的编码文本（DrawingObject 恒可编码；防御性 fallback）。
-    static func encodeKnown(_ d: DrawingObject) -> String {
-        guard let data = try? JSONEncoder().encode(d) else { return "{}" }
+    /// `DrawingObject` 的编码文本。**throws（codex whole-branch High fix）**：非有限价（NaN/Infinity，
+    /// 如 anchors[].price/tailAnchor.price）会让 `JSONEncoder` 抛错——此前 `try?` 吞掉后 fallback 成
+    /// 字符串 `"{}"` 会被当作该条的 `raw` 静默持久化，下次加载 `"{}"` 解不出 DrawingObject → 被归类
+    /// `.unknownRaw`，用户这条已知画线无声消失（durable data loss）。fail-closed：不再吞、不再伪造
+    /// `{}`，让调用方（save 路径）失败并经既有 autosave 错误通路呈现给用户。
+    static func encodeKnown(_ d: DrawingObject) throws -> String {
+        let data = try JSONEncoder().encode(d)
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -111,7 +118,7 @@ public struct LossyDrawingArray: Equatable, Sendable {
                         thickness: d.thickness, colorToken: d.colorToken, labelMode: d.labelMode,
                         locked: d.locked, text: d.text, fontSize: d.fontSize,
                         textColorToken: d.textColorToken, textForm: d.textForm, tailAnchor: d.tailAnchor)
-                    elems.append(.known(withId, raw: encodeKnown(withId)))
+                    elems.append(.known(withId, raw: try encodeKnown(withId)))
                 } else {
                     // 成功解码且有 id → 保留【原始字节】raw（含未来客户端可能加的未知字段，codex R12-high）。
                     elems.append(.known(d, raw: raw))
@@ -202,7 +209,7 @@ public struct LossyDrawingArray: Equatable, Sendable {
             }
         }
         for k in currentKnown where !emitted.contains(k.id) {
-            out.append(.known(k, raw: LossyDrawingArray.encodeKnown(k)))       // 真新增（原不在）追加末尾
+            out.append(.known(k, raw: try LossyDrawingArray.encodeKnown(k)))   // 真新增（原不在）追加末尾
         }
         return LossyDrawingArray(elements: out)
     }

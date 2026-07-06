@@ -331,7 +331,7 @@ public final class TrainingSessionCoordinator {
         // 此处读到的是已清理后的状态，坏 → 传播（不吞，corruption 已在上面收口，这里理应不会再坏）。
         let savedLossy = try reviewArchiveRepo.loadSavedLossy(recordId: recordId)
         return try await buildReviewEngine(recordId: recordId, startTickOverride: nil,
-                                           reviewLossy: savedLossy?.lossy ?? LossyDrawingArray(drawings: baseline),
+                                           reviewLossy: try savedLossy?.lossy ?? LossyDrawingArray(drawings: baseline),
                                            reviewHiddenIds: savedLossy?.hiddenIds ?? [],
                                            committedBaseline: baseline,
                                            committedHiddenIds: savedLossy?.hiddenIds ?? [])
