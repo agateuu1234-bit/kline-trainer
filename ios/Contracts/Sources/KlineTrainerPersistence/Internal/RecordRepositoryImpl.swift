@@ -52,15 +52,30 @@ enum RecordRepositoryImpl {
         // engine.drawings。draw_uuid 是迁移 0009 的 NOT NULL/CHECK/UNIQUE 列，原样直插会 SQLITE_CONSTRAINT，
         // finalize 永久失败、用户卡死。此处（所有 finalize 唯一插入口）去重：空 id 或已见过的 id → 换新 UUID，
         // 首次出现的 id 保留；内容一条不丢。
+        // codex whole-branch R7（medium）：上面这份去重此前只查【本批】的 `seenDrawUuids`——但 draw_uuid
+        // 是**全库**唯一（迁移 0009 UNIQUE，非仅本批）。一个 resumed/legacy/损坏的 pending blob 可携带一个
+        // 本批内不重复、但恰好与【之前某条已 finalize 记录】的 draw_uuid 相同的 id，仍会原样插入撞 UNIQUE、
+        // 回滚、用户卡死。故在换新 UUID 前，除了本批 Set，额外查一次 `drawings` 表（同一 db/事务句柄，见下方
+        // `dbCollision`）——碰撞（空/本批重复/库中已存在）→ 换新 UUID；否则保留原 id。
         var seenDrawUuids = Set<String>()
         for dr in drawings {
             let anchorsJSON = try jsonEncode(dr.anchors)
             let styleJSON = try jsonEncode(DrawingStyle(from: dr))
             // draw_uuid：迁移 0009 加的 NOT NULL/CHECK/UNIQUE 列（跨层身份，D16/D20）；dr.id 通常已是稳定 UUID
             // （Models.swift DrawingObject.id 默认值，或 lossy 层 legacy-idx-N 回填），但不能假设上游已去重
-            // （见上方注释）——为空或已出现过 → 换新 UUID，保证本次插入满足 NOT NULL/CHECK/UNIQUE。
+            // （见上方注释）——为空、本批已出现过、或已存在于 `drawings` 表（全局唯一约束）→ 换新 UUID，
+            // 保证本次插入满足 NOT NULL/CHECK/UNIQUE。
             let drawUuid: String
-            if dr.id.isEmpty || !seenDrawUuids.insert(dr.id).inserted {
+            let batchCollision = dr.id.isEmpty || !seenDrawUuids.insert(dr.id).inserted
+            // 本批未撞才需查库（省一次查询）；同一 db 句柄 = 同一写事务，能看见此前已 commit 的记录。
+            let dbCollision: Bool
+            if batchCollision {
+                dbCollision = false
+            } else {
+                dbCollision = try Bool.fetchOne(db, sql:
+                    "SELECT 1 FROM drawings WHERE draw_uuid = ? LIMIT 1", arguments: [dr.id]) ?? false
+            }
+            if batchCollision || dbCollision {
                 drawUuid = UUID().uuidString
                 seenDrawUuids.insert(drawUuid)
             } else {

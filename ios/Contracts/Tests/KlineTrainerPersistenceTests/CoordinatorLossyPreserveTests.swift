@@ -343,6 +343,43 @@ struct CoordinatorLossyPreserveTests {
         #expect(Set(uuids).count == 2)                                          // 持久化 draw_uuid 互不相同（insert 去重生效）
     }
 
+    @Test("finalize: pending 画线 id 与库中【另一条已 finalize record】的 draw_uuid 冲突（非本批重复）→ 全局去重成功、重新生成、原记录不受影响（codex WB R7）")
+    func finalizeGlobalDrawUuidCollisionAcrossRecordsDedupedSucceeds() async throws {
+        let (url, appDB) = try makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        // 先 finalize 一条已存在 record，其 drawings 表持久化 draw_uuid="collide-me"
+        // （迁移 0009 GLOBALLY UNIQUE 的 draw_uuid 列）。
+        let priorId = try appDB.insertRecord(TrainingRecord(
+            id: nil, trainingSetFilename: "set.sqlite", createdAt: 1,
+            stockCode: "000001", stockName: "股", startYear: 2020, startMonth: 1,
+            totalCapital: 100_000, profit: 0, returnRate: 0, maxDrawdown: -0.03,
+            buyCount: 0, sellCount: 0,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0002, minCommissionEnabled: false),
+            finalTick: 7), ops: [],
+            drawings: [DrawingObject(id: "collide-me", toolType: .horizontal,
+                                      anchors: [DrawingAnchor(period: .m3, candleIndex: 0, price: 10)],
+                                      isExtended: false, panelPosition: 0)])
+        // 一个全新（resumable）会话的 pending_training 携带一条【单独一条，本批内不重复】的 id，
+        // 恰好与上面已入库的 id 相同——修复前的 batch-local Set 只在本批内查重，查不出这个跨批冲突，
+        // 直接原样插 draw_uuid="collide-me" → 撞迁移 0009 的 UNIQUE 约束 → finalize 整体回滚、用户卡死。
+        try seedPendingTrainingRow(appDB, sessionKey: "SK-global-collide",
+                                   drawingsJSON: "[\(known("collide-me"))]")
+        let coord = makeCoordinator(appDB)
+        let engine = try #require(try await coord.resumePending())
+        let recordId = try #require(try await coord.finalize(engine: engine))   // 不应因 UNIQUE 冲突回滚
+        let (_, _, drawings) = try appDB.loadRecordBundle(id: recordId)
+        #expect(drawings.count == 1)                                            // 画线内容保留
+        let uuids: [String] = try await appDB.dbQueue.read { db in
+            try String.fetchAll(db, sql: "SELECT draw_uuid FROM drawings WHERE record_id = ?", arguments: [recordId])
+        }
+        #expect(uuids.first != "collide-me")                                    // 全局冲突 → 重新生成新 id
+        // 原记录的行完全不受影响（仍是它原来持久化的 draw_uuid）。
+        let priorUuids: [String] = try await appDB.dbQueue.read { db in
+            try String.fetchAll(db, sql: "SELECT draw_uuid FROM drawings WHERE record_id = ?", arguments: [priorId])
+        }
+        #expect(priorUuids == ["collide-me"])
+    }
+
     // MARK: - LossyDrawingArray.reconciled 单元测试（不需 coordinator）
 
     @Test("reconciled fail-closed：loaded 元素含重复 id → 抛 .dbCorrupted（不静默折叠）")
