@@ -93,6 +93,21 @@ struct CoordinatorLossyPreserveTests {
         }
     }
 
+    /// 先经真实 savePending 写一条合法行（drawings=[]），再裸 SQL 把 drawings 列换成任意（可含重复 id）
+    /// JSON——同上面 seedPendingReplayRow 手法（pending_training 侧，供 Normal/`resumePending` 场景）。
+    private func seedPendingTrainingRow(_ appDB: DefaultAppDB, sessionKey: String, drawingsJSON: String) throws {
+        let positionData = try JSONEncoder().encode(PositionManager())
+        let base = try PendingTraining(trainingSetFilename: "set.sqlite", globalTickIndex: 0,
+                                  upperPeriod: .m60, lowerPeriod: .daily, positionData: positionData, cashBalance: 100_000,
+                                  feeSnapshot: FeeSnapshot(commissionRate: 0.0002, minCommissionEnabled: false),
+                                  tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
+                                  drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0), sessionKey: sessionKey)
+        try appDB.dbQueue.write { db in
+            try PendingTrainingRepositoryImpl.savePending(db, pending: base)
+            try db.execute(sql: "UPDATE pending_training SET drawings = ? WHERE id = 1", arguments: [drawingsJSON])
+        }
+    }
+
     /// 裸 SQL 种一行 review_archive working（wrapper JSON `{"drawings":[...],"hiddenIds":[...]}`）——
     /// 同 ReviewArchiveRepositoryTests.reviewRepoPreservesUnknownAcrossLoadSave 手法。
     private func seedReviewWorking(_ appDB: DefaultAppDB, recordId: Int64, stepTick: Int, wrapperJSON: String) throws {
@@ -304,6 +319,28 @@ struct CoordinatorLossyPreserveTests {
         }
         #expect(col.contains(unknown))                        // 未来条未被已知投影覆盖抹掉
         #expect(col.contains("h-1"))                          // hiddenIds 未被覆盖成 []
+    }
+
+    // MARK: - finalize dup-id 门（codex whole-branch R6）：unknownRaw 门须 dup-tolerant，重复 id 走 insert 去重不 brick
+
+    @Test("finalize: pending 含重复非空 id（无 unknownRaw）→ 不被 unknownRaw 门误伤，走 insert 去重成功、持久化 draw_uuid 互不相同（codex WB R6）")
+    func finalizeDuplicateKnownIdsDedupedAtInsertSucceeds() async throws {
+        let (url, appDB) = try makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        // pending_training 含两条【同 id】已知画线（无 unknownRaw）——resumable Normal 会话（两个真实客户端各画
+        // 一条线、id 生成器坏/旧 bug 撞车等场景）。修复前：finalize 的 unknownRaw 门直接调用 `reconciled`，
+        // 该函数对重复非空 id fail-closed 抛 `.dbCorrupted`——用户被永久卡死，即便 insertRecord 早已备好去重。
+        try seedPendingTrainingRow(appDB, sessionKey: "SK-dup",
+                                   drawingsJSON: "[\(known("dup")),\(known("dup"))]")
+        let coord = makeCoordinator(appDB)
+        let engine = try #require(try await coord.resumePending())
+        let recordId = try #require(try await coord.finalize(engine: engine))   // 不应抛
+        let (_, _, drawings) = try appDB.loadRecordBundle(id: recordId)
+        #expect(drawings.count == 2)                                            // 两条画线均保留（未被丢弃）
+        let uuids: [String] = try await appDB.dbQueue.read { db in
+            try String.fetchAll(db, sql: "SELECT draw_uuid FROM drawings WHERE record_id = ?", arguments: [recordId])
+        }
+        #expect(Set(uuids).count == 2)                                          // 持久化 draw_uuid 互不相同（insert 去重生效）
     }
 
     // MARK: - LossyDrawingArray.reconciled 单元测试（不需 coordinator）
