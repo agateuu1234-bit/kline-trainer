@@ -14,12 +14,12 @@
 
 **范围**
 - 新写：QMT 规整层（parse/normalize）、通用合成层（resample，按交易时段/交易日历）、pilot 运行脚本。
-- 改：`backend/sql/schema.sql`（`klines.open/high/low/close` → `DOUBLE PRECISION`、去 `ticket_index`）、`backend/generate_training_sets.py`（`select_start_index` 加 1m 覆盖带约束、窗口覆盖完整性校验 D9）、`backend/import_csv.py`（接规整/合成层、取消 `ticket_index`、1m 不入库、写前 schema fail-closed 断言 D8a、源一致性对账 D10）。
+- 改：`backend/sql/schema.sql` + **新增 `backend/sql/migrations/000X_*/{forward,rollback}.sql`**（OHLC `DECIMAL→DOUBLE`，M0.1 A 类 → bump `CONTRACT_VERSION` 1.8→1.9）、`ios/.../Models.swift` + `ModelsTests`（**仅版本常量**）、`docs/governance/m01-schema-versioning-contract.md`（矩阵 + bump 记录，含校正 stale cell）、`backend/generate_training_sets.py`（`select_start_index` 覆盖带约束 + 候选 bounded retry、D9 完整性）、`backend/import_csv.py`（接规整/合成层、`ticket_index` 停写留列、1m 不入库、D8a 断言、D10 对账）。
 - 复用不动：`compute_indicators`、`clean`、B2 装配（窗口/`global_index`/`end_global_index`）、`zip_and_hash`、`training_sets` 登记逻辑主体。
 
 **公共契约变更声明（如实，非「无变更」）**
-- **价格精度变更仅限 `klines.open/high/low/close` 四列 `DECIMAL(10,2)` → `DOUBLE PRECISION`（D1）**，是 PostgreSQL 主库 schema 变更。本仓**无 PG 迁移 runner、无任何生产 PG 数据**（`backend/sql/` 只有 `schema.sql` fresh baseline，docker-compose 不自动灌 schema）→ **直接更新 `schema.sql`、pilot 对专用一次性库应用**（D8b），不需 forward migration。**不触发 iOS 契约 / `CONTRACT_VERSION` bump**——已核实 `KLineCandle.open/high/low/close` 本就是 `Double`（`ios/.../Models/Models.swift:62`）、训练组 SQLite 本就是 `REAL`（`training_set_schema_v1.sql`），端到端即浮点；DECIMAL→DOUBLE 只是**去掉主库这一处 2 位截断**，更高精度值顺 B2 流入训练组 REAL 列，**iOS 零改动、`CONTRACT_VERSION` 保持 `1.8`、训练组 `PRAGMA user_version` 保持 `1`**（列类型不变、REAL→REAL 读取方精度无关）。`amount`（DECIMAL(16,2)）与指标列（DECIMAL(10,4)/(10,6)）**不变**（见 D1）。
-- **取消 `ticket_index` 列（D3）**：已 grep 全仓核实无下游消费者（仅 B1 自身写它 + 其单测 + schema 列定义；B2 `_KLINE_SELECT_COLS` 不含它、iOS 零 `.swift` 引用）。移除是 PG 主库 schema 变更，同上不涉 iOS 契约。
+- **价格 `klines.open/high/low/close` `DECIMAL(10,2)` → `DOUBLE PRECISION`（D1）是 M0.1 A 类 DDL 变更（"改类型"），必须走治理路径（codex R12-F1，我原"无迁移/不 bump"违反 M0.1）**：(a) **bump 顶层 `CONTRACT_VERSION`**（权威当前值 = `Models.swift` `"1.8"` → `"1.9"`；同步更新 `Models.swift` 常量 + `ModelsTests` 期望 + `docs/governance/m01-schema-versioning-contract.md` 矩阵顶层 cell 与 PG schema migration id cell + 加 bump 记录——**注：m01 矩阵顶层 cell stale 为 `1.7`，一并校正**）；**仅版本常量变，reader 逻辑不变**（`KLineCandle` 本就 `Double`、训练组 SQLite 本就 `REAL`，端到端浮点、精度读取无关）。(b) **提供 PostgreSQL migration**：`backend/sql/migrations/000X_<name>/forward.sql`(ALTER COLUMN TYPE DOUBLE PRECISION) + `rollback.sql`(ALTER 回 DECIMAL(10,2)，显式标注 rollback 丢精度)，符合 m01 §Migration Rollback（B3 owner 格式）。(c) 同步更新 `schema.sql` fresh baseline。pilot 对专用一次性库应用更新后 `schema.sql`（D8b）；migration 供已部署库前向迁移。`amount`(DECIMAL(16,2))、指标列(DECIMAL(10,4)/(10,6))、训练组 `PRAGMA user_version`(`1`) **不变**（无额外 DDL 触发）。
+- **`ticket_index`（D3）改为"保留列、停止写入"（非删列，codex R12-F1）**：列删除是 m01 §Migration Rollback"**不可逆项，不允许放进 Wave 1+ migration**"→ **保留 `ticket_index INTEGER` 列不动**（对该列零 DDL），仅移除 Python 侧 `compute_ticket_index` + 从 `_KLINE_INSERT` 去掉该列（新行该列 NULL）。已 grep 核实无下游消费者（B2 `_KLINE_SELECT_COLS` 不含、iOS 零 `.swift` 引用），留空列无害且合规。
 
 **非目标 / Non-Goals**
 - **不生成也不存储** 1m / 5m / 30m / 年线到训练组——合成层写成周期无关的通用代码，但本期产物只含 `3m/15m/60m/daily/weekly/monthly` 六周期（[[project_app_public_release_intent]] 之后加周期 = 改配置 + 重新生成训练组，训练组是不可变快照）。
@@ -79,9 +79,9 @@
 
 | # | 决策 | 取舍 |
 |---|---|---|
-| **D1** | 只改 `klines.open/high/low/close`：`DECIMAL(10,2)` → `DOUBLE PRECISION`。`amount`（`DECIMAL(16,2)`，元/分 2 位为自然精度、尾噪是 artifact）与指标列（`ma66/boll_*/macd_*` `DECIMAL(10,4)/(10,6)` + `round(4)/round(6)`，既有契约）**保持不变**——仅在全精度 `close` 上重算，结果更准但仍存 4/6 位。 | 前复权 float64 价格无损；amount/指标不动 = 最小改面（surgical）。空库直建、无 migration。**不涉 iOS/契约**（§0）。 |
+| **D1** | `klines.open/high/low/close`：`DECIMAL(10,2)` → `DOUBLE PRECISION`（**M0.1 A 类 DDL，走治理路径：bump `CONTRACT_VERSION` 1.8→1.9 + PG migration forward/rollback + 更新 m01 矩阵，R12-F1**）。`amount`(`DECIMAL(16,2)`) 与指标列(`DECIMAL(10,4)/(10,6)`+`round(4/6)`)**不变**——仅在全精度 `close` 上重算。 | 前复权 float64 价格无损；amount/指标不动=最小改面。reader 逻辑不变（端到端本就 Double/REAL），仅版本常量 bump（§0）。 |
 | **D2** | `select_start_index` 加**每股 1m 覆盖带约束**：起点仅在「前向 8 完整月窗口 `[start, after_end]`（`after_end`=第 8 月末，§4.4）的**每个交易日期都在该股 dense 完整 1m 交易日期集内**」的月线里选。**按交易日期比对，非 raw 时间戳**（月/日标午夜 vs 3m 标盘中，raw 比会误杀全部候选，codex R7-F1）。 | 消灭随机起点大量落空 + 杜绝盘中中途断货的次品训练组。约束下每股约 3–4 个可选起点，100 股够凑 100 组（`uq_stock_start` 保唯一）。 |
-| **D3** | 合成层写成**周期无关通用**；本期只生成 `3m/15m/60m/daily/weekly/monthly`。**1m 不入主库**（仅作合成源），`3m` 为最细周期。**取消 `ticket_index`**（无消费者，§0 声明）。 | 通用代码 → 将来加 5m/30m/1m/年 = 改配置；不塞将来要重做的周期进 pilot 产物（YAGNI）。1m 不入库省全量上亿行。 |
+| **D3** | 合成层写成**周期无关通用**；本期只生成 `3m/15m/60m/daily/weekly/monthly`。**1m 不入主库**（仅作合成源），`3m` 为最细周期。**`ticket_index` 保留列、停止写入**（非删列——m01 禁不可逆迁移；R12-F1）。 | 通用代码 → 将来加周期=改配置（YAGNI）；1m 不入库省上亿行；留空 `ticket_index` 列合规无害（无消费者，§0）。 |
 | **D4** | `stocks.code` 保留交易所后缀（`000001.SZ`，9 字符 ≤ `VARCHAR(10)`）。 | 消歧（`000001.SZ` 平安银行 vs `000001.SH` 上证指数）、与 `stock_universe` 一致。 |
 | **D5**（codex R2-F2 修正） | pilot **保持 `training_sets.file_path` 绝对路径**（现状 B3 `routes.py` 下载、scheduler、`backfill` 均按绝对 `Path(file_path)` 读）。**不在 pilot 半途改相对**（只改 B2 写、不改 3 个读点 = 下载 404）。 | 相对化是**跨 B2 写 + B3/scheduler/backfill 读的横切改动 + 存量行迁移**，归入未来 NAS 搬迁的独立聚焦改动（§7），不塞 pilot（YAGNI + 防半成品）。搬迁易度仍由 config 驱动 DSN 保证（原 §0/移机答复不变）。 |
 | **D6** | pilot：本机 Docker Postgres（复用 `backend/docker-compose.yml`）；100 只从 universe **按市场分层随机抽**（seed 可复现），SH/SZ/BJ 都覆盖；经 SMB 挂载拉这 100 只的 1m+日线；**每股至多 1 组，验收按各市场 distinct 成功股数**（非 ZIP 总数，R10-F2）。 | 最省事、可复现；覆盖三市场以暴露格式差异；distinct 股数验收防凑数掩盖失败。 |
@@ -155,18 +155,19 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
   - **时间标签 = OPEN（codex R3-F1）**：该周期 bar 的 `datetime` = **组内第一根交易日的 datetime**（daily 沿用 QMT 原生午夜 `YYYYMMDD→D 00:00`；weekly/monthly 用组内首交易日的午夜）。与 `assign_global_indices` 的 `[open, 下一根 open)` 语义一致（见 §4.4）。
 - 停牌/稀疏容错：段内不足一桶/整段缺失 → 该桶不产出（不补零、不插值）；桶内缺分钟按上面 B1 分钟级完整性处理（drop 日）。
 
-### 4.3 Schema 变更（D1，`backend/sql/schema.sql`）
-- 只改 `klines.open/high/low/close`：`DECIMAL(10,2)` → `DOUBLE PRECISION`；**移除 `ticket_index` 列**。
-- `amount DECIMAL(16,2)`、指标列 `DECIMAL(10,4)/(10,6)` **不变**；Python `compute_indicators` 的 `round(4)/round(6)` **保留**（在全精度 `close` 上重算，结果更准但仍按既有契约存 4/6 位）；`UNIQUE(stock_code,period,datetime)` 保留。
-- `_INT_COLS` 去 `ticket_index`；`_KLINE_INSERT` 与 `schema.sql` 去 `ticket_index` 列/占位符；`compute_ticket_index` 及其单测删除（D3，无消费者）。
-- **写库前 fail-closed 断言（D8a）**：import 写库壳在任何 INSERT 前查 `information_schema.columns`，断言 `klines.open/high/low/close = double precision` 且无 `ticket_index`，不符即 `raise`/`exit` 中止（护 pilot 与将来一切调用方，防陈旧库静默截断）。
-- **专用一次性库 + 防误删护栏（D8b）**：无 PG 迁移 runner、无生产 PG 数据 → pilot 对**名前缀 `kline_pilot_` 的专用库** `CREATE DATABASE` 后应用更新后的 `schema.sql`（bump 头部版本标签），**绝不 DROP/改写任意或共享库**；破坏性 reset 需显式 `--reset` 且库名匹配前缀否则拒绝。已有数据的 forward migration 仅当将来存在需保留的生产 PG 时才写（当前无 → 本期不做）。
-- **iOS 侧零改动**（§0 声明，已核实 `Double`/`REAL` 端到端）。
+### 4.3 Schema 变更（D1，M0.1 A 类 DDL — 走治理路径，codex R12-F1）
+- **改 `klines.open/high/low/close`：`DECIMAL(10,2)` → `DOUBLE PRECISION`**——(1) 更新 `backend/sql/schema.sql` fresh baseline；(2) **新增 PG migration** `backend/sql/migrations/000X_<name>/forward.sql`(`ALTER TABLE klines ALTER COLUMN {open,high,low,close} TYPE DOUBLE PRECISION`) + `rollback.sql`(ALTER 回 `DECIMAL(10,2)`，**显式标注 rollback 丢精度**)，符合 `m01 §Migration Rollback`（forward+rollback 对，B3 owner 格式）；(3) **bump 顶层 `CONTRACT_VERSION` 1.8→1.9** + PG schema sub-version migration id + `Models.swift` 常量 + `ModelsTests` + m01 矩阵（含校正 stale `1.7` cell）+ bump 记录。
+- **`ticket_index` 保留列、停止写入**（**非删列**——m01 禁 Wave1+ 不可逆迁移，R12-F1）：`schema.sql` 保留 `ticket_index INTEGER` 列不动；仅 `_KLINE_INSERT` 去掉该列/占位符 + 删 `compute_ticket_index` 及其单测（新行该列 NULL，无消费者）。
+- `amount DECIMAL(16,2)`、指标列 `DECIMAL(10,4)/(10,6)` **不变**；`compute_indicators` 的 `round(4)/round(6)` **保留**（全精度 `close` 上重算）；`UNIQUE(stock_code,period,datetime)`、训练组 `PRAGMA user_version=1` 保留。
+- **写库前 fail-closed 断言（D8a）**：import 写库壳在任何 INSERT 前查 `information_schema.columns`，断言 `klines.open/high/low/close = double precision`，不符即 `raise`/`exit` 中止（护 pilot 与将来一切调用方，防陈旧库静默截断；不再断言 `ticket_index` 缺失——该列保留）。
+- **专用一次性库 + 防误删护栏（D8b）**：pilot 对**名前缀 `kline_pilot_` 的专用库** `CREATE DATABASE` 后应用更新后的 `schema.sql`，**绝不 DROP/改写任意或共享库**；破坏性 reset 需显式 `--reset` 且库名匹配前缀否则拒绝。（migration 供已部署库前向迁移；pilot 空库直建。）
+- **iOS reader 逻辑零改动**，**但 `CONTRACT_VERSION` 常量 + 其测试随顶层 bump 改**（§0；`Double`/`REAL` 端到端不变）。
 
 ### 4.4 B2 改动
 - **前向窗口边界 `after_end`（redefine，codex R5-F1 / R9-F1）**：`after_end = monthly_datetimes[start_idx+8] − 1`（**第 9 根月边界 open − 1 秒**；`select_start_index` 保证 `start_idx ≤ n−9` → 第 9 根必存在）= **第 8 个完整前向月的月末**。取代原 `monthly_after_end` 返回的第 8 月线 open。**所有周期窗口 forward 上界统一用它**。**`monthly_datetimes` = 月边界哨兵序列**（日线日历每月首交易日 open，经 `trading_date` 求；**含当前 partial 月的 open 作哨兵**，R9-F1），**≠ 发射的月 bar**——故最新完整月（如 June）可当第 8 前向月、不浪费最新数据；`n = len(该边界序列)`（含哨兵）。
 - **窗口纳入规则（R5-F1）**：`select_period_window` 每周期只纳入**整段 period-end ≤ `after_end`** 的 bar。月/日与 `after_end`=月界天然对齐（恰 8 完整月 + 日线到第 8 月末）；**周线额外排除跨 8→9 月界、周末 > `after_end` 的 trailing 周 bar**（周跨月边界会 straddle）。杜绝末根高周期 bar 的 `end_global_index` 早于其整段 3m 播完（否则第 8 月线含整月 OHLC 却在第 8 月首日 reveal = **lookahead**）。
 - `select_start_index(monthly_datetimes, rng, *, dense_dates)`（D2，codex R7-F1）：候选月线下标先按现规则 `[30, n-9]`，**再过滤**「从 `start` 的**交易日期**到 `after_end` 的交易日期，其间（按日线日历）**每个交易日期都在该股 dense 完整 1m 交易日期集 `dense_dates` 内**」；候选为空 → `GenerateSkipException`。**按交易日期比对、非 raw 时间戳**——月/日 bar 标 `00:00`、3m 标盘中(`0933..1500`)，`start`(00:00) < 首根 3m(0933)、`after_end`(≈23:59) > 末根 3m(1500)，raw 时间戳比对会**误杀全部有效候选、产出 0 训练组**。`dense_dates` = B1 分钟级完整性判出的逐日完整交易日期集（`generate_one_training_set` 从该股盘中 klines 推得）。**端点必要非充分**（内部洞仍需 D9），完整性由 D9 per-day 桶数硬门兜底。
+- **候选级 bounded retry（D2/D9，codex R12-F2）**：`generate_one_training_set` 把「选起点 → 装配」包进**有界重试循环**，**catch 装配抛出的 `GenerateSkipException`（D9 per-day / per-period before-after / 起点冲突）→ 换下一个候选起点重试**，直到成功或 `max_retries` 耗尽/`dense_dates` 候选穷尽才判该股失败。现有 retry 仅对"重复 start"重试、`assemble` 的 skip 会穿出循环 → **一个跨 drop 日的随机候选会误杀本可用的股**（pilot 每股仅 1 组，尤其致命）。`select_start_index` 从 `dense_dates`-覆盖的有效候选集抽，减少无效候选。
 - **窗口覆盖完整性校验（D9，两处强制；codex R4-F1）**：
   - (a) **分钟级 @ B1**（§4.2，1m 在手）：桶内缺分钟的日已被 drop 出库 → **DB 里不存在半成品盘中桶**。
   - (b) **B2 provenance-free 硬门**（无原始 1m）：`assemble_training_set` 登记前，以**日线（交易日真值）**逐日校验——落在**选中盘中日期全跨度** `[首个选中 3m 的日期, after_end]`（**含盘中 before-context ~2 日**，codex R6-F1）内的每个交易日，其 DB 盘中桶数须**精确等于** `80/16/4`；任一日不足（= B1 drop 的洞 / 整天缺）→ `GenerateSkipException`（重选起点）。**精确逐日硬门、非阈值 ratio**（单桶缺也抓）；因分钟级已在 B1 强制，B2 只需数每日桶数、无需原始 1m。
@@ -191,10 +192,11 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - **trading_date 时区安全（R8-F1）**：daily `20260703 00:00`(沪 epoch) 与 intraday `20260703 0933`(沪 epoch) → **同一** `trading_date`（尽管 UTC 日期差一天）；Monday/假期周边不错位；周/月分组键用沪日期。
 - **B2 D2（按交易日期，R7-F1）**：构造「月线全历史但 1m 只覆盖近段」→ 起点必落在 dense 日期集内；覆盖撑不下前向窗口 → skip；**边界同日期不误杀**：`start` 落 dense 首日（`start`=00:00 < 首根 3m 0933）仍**有效**、`after_end` 落 dense 末日（≈23:59 > 末根 3m 1500）仍有效；窗口跨度含任一非-dense 交易日 → skip。
 - **B2 D9 per-day 硬门（R3-F2/R4-F1/R6-F1）**：窗口含被 B1-drop 的日（DB 盘中桶数 <80/16/4）→ **per-day 硬门 skip**；窗口避开该日 → 正常生成；缺整天同理；**start 前一日（盘中 before-context 内）被 drop → 也 skip**（不静默从更早日回填，R6-F1）；盘中全跨度**外**的老 daily-only 日不检查；真停牌日（无日线）不误伤。
+- **候选级 bounded retry（R12-F2）**：某股一个候选起点跨 drop 日（D9 skip）、但另有有效候选 → `generate_one_training_set` 换候选重试后**成功**（该股不被单个坏候选误杀）；全候选穷尽/`max_retries` 耗尽 → 才判该股失败。
 - **B1 源一致性对账（D10，R6-F2/R10-F1/R11-F1）**：**端点覆盖**——日线止 < dense-1m 止（stale 尾部截断）→ **skip**；日线起 > dense-1m 起 → skip；**对称日期集**——dense-1m 跨度内 1m 有某日但日线缺 → skip；日线有某日但 1m<241 → skip；**值对账**——某日 close/volume 超容差 → skip；三门全过 → 放行；`export_log` `status=error/partial` → skip（纯对账逻辑 host 单测）。
 - **B2 聚合对齐（R3-F1）**：daily/weekly/monthly bar 的 `end_global_index` == 该周期**最后一交易日的最后一根 3m** 的 `global_index`（断言非上一根、非次日）；跨月/跨周边界各一例；before-context（早于 3m 窗口）的 daily bar `egi==0`。
 - **B2 前向边界无 lookahead（R5-F1）**：构造 8 完整月窗口 → **第 8 月线 bar 的 `egi` = 第 8 月末最后一根 3m**（非窗口首日/非第 8 月首日）；`after_end == monthly[start+8]−1`；构造**跨 8→9 月界的 trailing 周 bar → 被排除**（不出现在窗口，杜绝其整周 OHLC 早显）。
-- **D8a 前置断言**：mock `information_schema` 返回 `DECIMAL`/存在 `ticket_index` → import 写前**中止**（不 INSERT）；返回 `double precision`/无 `ticket_index` → 放行。
+- **D8a 前置断言**：mock `information_schema` 返回 `klines` OHLC=`DECIMAL` → import 写前**中止**（不 INSERT）；返回 `double precision` → 放行（`ticket_index` 列保留、不作断言项）。
 - **D8b reset 护栏**：目标库名非 `kline_pilot_` 前缀 或 未带 `--reset` → 任何 `DROP/CREATE DATABASE` 前**拒绝**；匹配前缀 + `--reset` → 放行（纯逻辑守卫可 host 单测）。
 - **集成**（不 host 单测，D14/D13 scope）：SMB 拉取、Docker PG、`generate_batch` 端到端由 pilot 脚本人工跑一次核对。
 
@@ -202,7 +204,8 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - P/F：规整层 host pytest 全绿；BOM/时区/文件名/前复权精度四类各有专测。
 - P/F：合成层 golden 三周期总数 = 80/16/4，午休/跨日/日历分组专测全绿。
 - P/F：`schema.sql` `klines.open/high/low/close` 为 `DOUBLE PRECISION`、无 `ticket_index`（amount/指标列不变）；空库应用可建成。
-- P/F（D8a）：import 写前对陈旧 `DECIMAL`/含 `ticket_index` 的库**中止**（fail-closed）、不静默插入。
+- P/F（D8a）：import 写前对陈旧 `DECIMAL` OHLC 的库**中止**（fail-closed）、不静默插入。
+- P/F（D1 治理，R12-F1）：`CONTRACT_VERSION` 1.8→1.9（`Models.swift`+`ModelsTests`+m01 矩阵同步）；`backend/sql/migrations/` 有 OHLC `DECIMAL→DOUBLE` 的 forward+rollback 对；`ticket_index` 列**保留**（未删）；PR 引用 m01 §Bump 策略 A。
 - P/F（D8b）：破坏性 reset 对**非 `kline_pilot_` 前缀**库/缺 `--reset` **拒绝**（任何 DDL 前），smoke 覆盖；pilot 对专用一次性库建 schema。
 - P/F（D9，R4-F1/R6-F1）：桶内缺分钟 → **B1 drop 该日**；**B2 per-day 硬门**覆盖**选中盘中全跨度（含 before-context）**、每交易日桶数精确=80/16/4，缺日（含 start 前一日）skip、单桶缺不被稀释；真停牌日不误伤；pilot 输出含 `coverage_ratio` + 缺日。
 - P/F（D10，R6-F2/R10-F1/R11-F1）：**日线止早于 dense-1m 止（stale 尾部）→ skip**；dense-1m 跨度内日期集不相等（任一方缺日）→ skip；OHLCV 超容差 → skip；`export_log` 非 `ok` → skip；三门全过放行。
@@ -214,6 +217,7 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - P/F（R5-F1 前向边界）：`after_end = monthly[start+8]−1`（第 8 月末）；第 8 月线 bar `egi` 命中第 8 月末 3m、非首日；跨月界 trailing 周 bar 被排除（回归绿）。
 - P/F（§4.2 bucket）：3m/15m/60m 边界桶成员逐值 = §4.2 golden member lists；完整日 80/16/4 + 上午 121/下午 120 恒等式。
 - P/F（R10-F2）：pilot **每股至多 1 组**；验收按**各市场 (SH/SZ/BJ) distinct 成功股数**（阈值 plan 定）+ 显式 skip 原因报告，**非 ZIP 总数**（防存活股多-start 凑数掩盖失败/市场偏置）；`training_sets` 登记 + `content_hash` 合法（`^[0-9a-f]{8}$`）。
+- P/F（R12-F2）：单个候选起点跨 drop 日被 D9 skip 后，`generate_one_training_set` 换候选重试成功（有效候选存在时不误杀该股）；候选穷尽才失败（回归绿）。
 - P/F（D5）：`training_sets.file_path` 绝对；B3 下载 / `backfill` 读取契约不变（回归绿）。
 
 ## 7. 风险 / 开放项
@@ -230,4 +234,4 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - **本地 pytest 绿 ≠ CI 绿**：合并后 `gh run watch` 确认（[[feedback_swift_local_ci_toolchain_strictness]]）。
 
 ## 8. 流程
-brainstorming（本 spec）→ Codex spec review 收敛 → `writing-plans` → Codex plan review 收敛 → `subagent-driven-development` → host pytest 三绿 → `requesting-code-review` → whole-branch Codex → PR（`klines` 价格列 schema 变更触发 trust-boundary 审查）。
+brainstorming（本 spec）→ Codex spec review 收敛 → `writing-plans` → Codex plan review 收敛 → `subagent-driven-development` → host pytest 三绿 → `requesting-code-review` → whole-branch Codex → PR（`klines` OHLC = **M0.1 A 类 DDL** + `CONTRACT_VERSION` bump + m01 矩阵/migration → 触发 trust-boundary 审查，**PR 引用 `docs/governance/m01-schema-versioning-contract.md` §Bump 策略 A + CODEOWNERS approve**）。
