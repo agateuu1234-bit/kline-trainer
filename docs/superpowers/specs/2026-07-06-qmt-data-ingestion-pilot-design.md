@@ -199,7 +199,8 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - **B2 前向边界无 lookahead（R5-F1）**：构造 8 完整月窗口 → **第 8 月线 bar 的 `egi` = 第 8 月末最后一根 3m**（非窗口首日/非第 8 月首日）；`after_end == monthly[start+8]−1`；构造**跨 8→9 月界的 trailing 周 bar → 被排除**（不出现在窗口，杜绝其整周 OHLC 早显）。
 - **D8a 前置断言**：mock `information_schema` 返回 `klines` OHLC=`DECIMAL` → import 写前**中止**（不 INSERT）；返回 `double precision` → 放行（`ticket_index` 列保留、不作断言项）。
 - **D8b reset 护栏**：目标库名非 `kline_pilot_` 前缀 或 未带 `--reset` → 任何 `DROP/CREATE DATABASE` 前**拒绝**；匹配前缀 + `--reset` → 放行（纯逻辑守卫可 host 单测）。
-- **集成**（不 host 单测，D14/D13 scope）：SMB 拉取、Docker PG、`generate_batch` 端到端由 pilot 脚本人工跑一次核对。
+- **集成/smoke 测试（自动化，容器化 Postgres + 小 QMT fixture；codex R15-F2，非仅人工 pilot）**——高风险 DB/pilot 路径必须自动验证（这些路径携带破坏性 reset、fail-closed、migration、绝对路径、地板语义，纯函数测试全绿也可能建错库/写陈旧 schema/登记坏路径/静默低产）：①**reset 护栏**在任何 DDL 前拒非-`kline_pilot_` 库/缺 `--reset`；②`schema.sql` apply + **migration forward/rollback** 可空库建成/回滚；③import 写前 **fail-closed**（对陈旧 `DECIMAL` OHLC 库中止、不 INSERT）；④**import→合成→写 klines→B2 生成→`training_sets` 登记** 端到端（微型 fixture）；⑤`file_path` **绝对可读**（模拟 B3 下载按路径打开 `.zip`）；⑥总数/市场地板未达 → **显式 FAIL**；⑦D10 端点/日期集/OHLCV 三门（fixture 造 stale 日线）。
+- **仅 SMB 真拉取仍人工**（LAN 挂载不可容器化）；其余 pilot 关键路径由上面容器化集成测试覆盖。
 
 ## 6. 验收标准（spec 级；非-coder 验收清单在 plan 阶段出）
 - P/F：规整层 host pytest 全绿；BOM/时区/文件名/前复权精度四类各有专测。
@@ -235,4 +236,6 @@ CALENDAR_RULE    = {"weekly":"W", "monthly":"M"}          # 将来加 "yearly":"
 - **本地 pytest 绿 ≠ CI 绿**：合并后 `gh run watch` 确认（[[feedback_swift_local_ci_toolchain_strictness]]）。
 
 ## 8. 流程
+> **本 commit/分支当前 = design-only spec（codex R15-F1）**：`feat/qmt-data-ingestion-pilot` 现仅含本设计文档；schema/migration/`CONTRACT_VERSION`/`import_csv.py`/`generate_training_sets.py`/新 QMT·resample·pilot 代码 + 上述单测/集成测试**在后续 `writing-plans`→`subagent-driven-development` 的独立 commit 落地**，**不在本 spec commit**。故对 spec-only diff 跑 code-review 会（正确地）报"未实现"——那是阶段信号、非 spec 缺陷；spec 设计层收敛后即转实现阶段，代码齐备后再由 whole-branch codex 当代码审。
+
 brainstorming（本 spec）→ Codex spec review 收敛 → `writing-plans` → Codex plan review 收敛 → `subagent-driven-development` → host pytest 三绿 → `requesting-code-review` → whole-branch Codex → PR（`klines` OHLC = **M0.1 A 类 DDL** + `CONTRACT_VERSION` bump + m01 矩阵/migration → 触发 trust-boundary 审查，**PR 引用 `docs/governance/m01-schema-versioning-contract.md` §Bump 策略 A + CODEOWNERS approve**）。
