@@ -78,6 +78,10 @@ public final class TrainingSessionCoordinator {
     /// 否则会误判为「无改动」→ `clearWorking` 抹掉 working 行独有的 unknownRaw（forward-compat 数据丢失）。
     /// 与上面两个基线同源同步：恒来自 saved 列，同一组 seed/advance/reset 点位。
     @ObservationIgnored private var reviewCommittedLossy = LossyDrawingArray(elements: [])
+    /// codex WB R7 finding 1：committed 基线的 wrapper 顶层未知 key 侧（同上三个基线同源同步，恒来自
+    /// saved 列）。save 路径（`persistReviewWorkingIfChanged`/`commitReview`）须原样传回 engine 侧携带的
+    /// 未知顶层 key（不得被默认 `[]` 覆盖已加载的未来数据）。
+    @ObservationIgnored private var reviewCommittedUnknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry] = []
     /// Task 6：saved 存档解码损坏、已 `clearSaved` 恢复为空基线时置位（UI 读后清、经 toast 呈现
     /// 「复盘存档损坏已清除，可重新复盘保存」）。
     public private(set) var pendingReviewCorruptToast = false
@@ -179,13 +183,15 @@ public final class TrainingSessionCoordinator {
     /// 故测试直接注入（镜像 `setActiveRecordNilForTesting` 范式）。
     func setReviewSessionForTesting(recordId: Int64?, committedBaseline: [DrawingObject],
                                      committedHiddenIds: [DrawingID] = [],
-                                     committedLossy: LossyDrawingArray? = nil) {
+                                     committedLossy: LossyDrawingArray? = nil,
+                                     committedUnknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry] = []) {
         reviewRecordId = recordId
         reviewCommittedBaseline = committedBaseline
         reviewCommittedHiddenIds = committedHiddenIds
         // codex whole-branch R4 finding 1：默认从 committedBaseline 派生（纯已知、无 unknownRaw）——
         // 镜像生产 seed 点（`buildReviewEngine`）三基线恒同步；测试需覆盖 unknownRaw-only 场景时显式传入。
         reviewCommittedLossy = committedLossy ?? ((try? LossyDrawingArray(drawings: committedBaseline)) ?? LossyDrawingArray(elements: []))
+        reviewCommittedUnknownTopLevel = committedUnknownTopLevel   // codex WB R7 finding 1：同上同步（镜像范式）
     }
     /// review-redesign Task 7 测试专用：等在飞 review autosave Task 完成（镜像 `drainAutosaveForTesting`）。
     func drainReviewAutosaveForTesting() async { await reviewAutosaveTask?.value }
@@ -346,9 +352,11 @@ public final class TrainingSessionCoordinator {
         return try await buildReviewEngine(recordId: recordId, startTickOverride: nil,
                                            reviewLossy: seedLossy,
                                            reviewHiddenIds: savedLossy?.hiddenIds ?? [],
+                                           reviewUnknownTopLevel: savedLossy?.unknownTopLevel ?? [],
                                            committedBaseline: baseline,
                                            committedHiddenIds: savedLossy?.hiddenIds ?? [],
-                                           committedLossy: seedLossy)
+                                           committedLossy: seedLossy,
+                                           committedUnknownTopLevel: savedLossy?.unknownTopLevel ?? [])
     }
 
     /// review-redesign Task 6：resume-first 续复盘。命中 `.inProgress` → 从 `working.stepTick` 起、
@@ -395,13 +403,17 @@ public final class TrainingSessionCoordinator {
         let savedLossy = try reviewArchiveRepo.loadSavedLossy(recordId: recordId)
         let committedHiddenIds = savedLossy?.hiddenIds ?? []
         let committedLossy = try savedLossy?.lossy ?? LossyDrawingArray(drawings: baseline)
+        let committedUnknownTopLevel = savedLossy?.unknownTopLevel ?? []
         do {
             // P1a Task 12（Z1）：`w.lossy`/`w.hiddenOriginalIds` 携带 working 行完整有损集 + 隐藏态，
             // 使引擎携带的 `loadedReviewLossy`/`loadedReviewHiddenIds` 能在后续 save 路径原样传回。
+            // codex WB R7 finding 1：`w.unknownTopLevel` 同款携带 working 行 wrapper 顶层未知 key。
             return try await buildReviewEngine(recordId: recordId, startTickOverride: w.stepTick,
                                                reviewLossy: w.lossy, reviewHiddenIds: w.hiddenOriginalIds,
+                                               reviewUnknownTopLevel: w.unknownTopLevel,
                                                committedBaseline: baseline, committedHiddenIds: committedHiddenIds,
                                                committedLossy: committedLossy,
+                                               committedUnknownTopLevel: committedUnknownTopLevel,
                                                preloadedRecordBundle: bundle)
         } catch let e as AppError where e == Self.invalidResumeTickError {
             // codex whole-branch R6（high）：`w.stepTick` 落在 `[0, metaStartTick)`——`buildReviewEngine`
@@ -441,9 +453,11 @@ public final class TrainingSessionCoordinator {
     private func buildReviewEngine(recordId: Int64, startTickOverride: Int?,
                                     reviewLossy: LossyDrawingArray,
                                     reviewHiddenIds: [DrawingID] = [],
+                                    reviewUnknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry] = [],
                                     committedBaseline: [DrawingObject],
                                     committedHiddenIds: [DrawingID] = [],
                                     committedLossy: LossyDrawingArray = LossyDrawingArray(elements: []),
+                                    committedUnknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry] = [],
                                     preloadedRecordBundle: (TrainingRecord, [TradeOperation], [DrawingObject])? = nil
                                     ) async throws -> TrainingEngine {
         let (record, ops, drawings) = try preloadedRecordBundle ?? recordRepo.loadRecordBundle(id: recordId)
@@ -512,11 +526,12 @@ public final class TrainingSessionCoordinator {
         activeStartedAt = nil                    // D4：review 只读，无进度保存
         activeSessionKey = nil                   // RFC §4.7c：review 无 session key
         activeRecord = record                    // RFC-B D5：复用已加载 record（零新 I/O）
-        engine.setReviewLossy(reviewLossy, hiddenIds: reviewHiddenIds)
+        engine.setReviewLossy(reviewLossy, hiddenIds: reviewHiddenIds, unknownTopLevel: reviewUnknownTopLevel)
         reviewRecordId = recordId
         reviewCommittedBaseline = committedBaseline
         reviewCommittedHiddenIds = committedHiddenIds
         reviewCommittedLossy = committedLossy   // codex whole-branch R4 finding 1：三基线同步种（见字段注释）
+        reviewCommittedUnknownTopLevel = committedUnknownTopLevel   // codex WB R7 finding 1：同上同步种
         reviewSessionToken = UUID()     // Task 7：新复盘 session mint 新 token（陈旧排队 autosave 靠此失效）
         reviewAutosaveTask = nil        // final-review T7：belt-and-suspenders——新 token 已够，随手清掉陈旧排队引用
         reviewRevision = 0
@@ -891,6 +906,7 @@ public final class TrainingSessionCoordinator {
         reviewCommittedBaseline = []
         reviewCommittedHiddenIds = []
         reviewCommittedLossy = LossyDrawingArray(elements: [])   // codex whole-branch R4 finding 1：三基线同步清
+        reviewCommittedUnknownTopLevel = []                      // codex WB R7 finding 1：同上同步清
         activeReader?.close()
         activeReader = nil
         activeEngine = nil
@@ -990,9 +1006,12 @@ public final class TrainingSessionCoordinator {
                                 workingLossy: workingLossy) {
             // P1a Task 12（Z1）：重发 reconciled 后的完整有损集（非纯 known）+ 原样传回加载来的 hiddenIds
             // （不用默认 `[]` 覆盖 P5 写的隐藏态，codex R11-high）——保住加载 blob 里未识别的条穿过本次 autosave。
+            // codex WB R7 finding 1：同款原样传回 `loadedReviewUnknownTopLevel`——不用默认 `[]` 覆盖 wrapper
+            // 顶层未知 key（否则首次 autosave 就会抹掉未来客户端加的顶层 review-metadata）。
             try reviewArchiveRepo.saveWorking(recordId: id, stepTick: engine.tick.globalTickIndex,
                                               lossy: workingLossy,
-                                              hiddenOriginalIds: engine.loadedReviewHiddenIds)
+                                              hiddenOriginalIds: engine.loadedReviewHiddenIds,
+                                              unknownTopLevel: engine.loadedReviewUnknownTopLevel)
         } else {
             try reviewArchiveRepo.clearWorking(recordId: id)
         }
@@ -1011,13 +1030,16 @@ public final class TrainingSessionCoordinator {
             throw AppError.internalError(module: "review", detail: "terminal review write on stale/mismatched session")
         }
         // P1a Task 12（Z1）：同 `persistReviewWorkingIfChanged`——reconciled 重发完整有损集 + 传回加载来的 hiddenIds。
+        // codex WB R7 finding 1：同款原样传回 `loadedReviewUnknownTopLevel`（commit 路径同 autosave 路径）。
         let committedLossy = try engine.loadedReviewLossy.reconciled(currentKnown: engine.reviewDrawings)
         try reviewArchiveRepo.commitSaved(recordId: id,
                                           lossy: committedLossy,
-                                          hiddenOriginalIds: engine.loadedReviewHiddenIds)
+                                          hiddenOriginalIds: engine.loadedReviewHiddenIds,
+                                          unknownTopLevel: engine.loadedReviewUnknownTopLevel)
         reviewCommittedBaseline = engine.reviewDrawings
         reviewCommittedHiddenIds = engine.loadedReviewHiddenIds   // 两基线同步前移（codex whole-branch High fix）
         reviewCommittedLossy = committedLossy   // codex whole-branch R4 finding 1：三基线同步前移（同上，见字段注释）
+        reviewCommittedUnknownTopLevel = engine.loadedReviewUnknownTopLevel   // codex WB R7 finding 1：同上同步前移
     }
 
     /// 丢弃复盘工作态：清 working（回退到 committed：saved 或删行）。无复盘 session → no-op。

@@ -105,15 +105,21 @@ private final class SlowReviewArchiveRepo: ReviewArchiveRepository, @unchecked S
 
     func loadWorking(recordId: Int64) throws -> ReviewWorking? { try inner.loadWorking(recordId: recordId) }
     func loadSaved(recordId: Int64) throws -> [DrawingObject]? { try inner.loadSaved(recordId: recordId) }
-    func loadSavedLossy(recordId: Int64) throws -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID])? { try inner.loadSavedLossy(recordId: recordId) }
+    func loadSavedLossy(recordId: Int64) throws
+        -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID], unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry])? {
+        try inner.loadSavedLossy(recordId: recordId)
+    }
     func loadArchive(recordId: Int64) throws -> ReviewArchive? { try inner.loadArchive(recordId: recordId) }
 
-    func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
+    func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID],
+                     unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry]) throws {
         Thread.sleep(forTimeInterval: delay)     // 模拟慢写：即便变慢，fence 仍须保证 last-wins
-        try inner.saveWorking(recordId: recordId, stepTick: stepTick, lossy: lossy, hiddenOriginalIds: hiddenOriginalIds)
+        try inner.saveWorking(recordId: recordId, stepTick: stepTick, lossy: lossy,
+                              hiddenOriginalIds: hiddenOriginalIds, unknownTopLevel: unknownTopLevel)
     }
-    func commitSaved(recordId: Int64, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
-        try inner.commitSaved(recordId: recordId, lossy: lossy, hiddenOriginalIds: hiddenOriginalIds)
+    func commitSaved(recordId: Int64, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID],
+                     unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry]) throws {
+        try inner.commitSaved(recordId: recordId, lossy: lossy, hiddenOriginalIds: hiddenOriginalIds, unknownTopLevel: unknownTopLevel)
     }
     func clearWorking(recordId: Int64) throws { try inner.clearWorking(recordId: recordId) }
     func clearSaved(recordId: Int64) throws { try inner.clearSaved(recordId: recordId) }

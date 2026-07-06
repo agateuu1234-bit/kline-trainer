@@ -240,24 +240,30 @@ public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayReposito
         catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
     }
 
-    public func loadSavedLossy(recordId: Int64) throws -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID])? {
+    public func loadSavedLossy(recordId: Int64) throws
+        -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID], unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry])? {
         do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.loadSavedLossy($0, recordId: recordId) } }
         catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
     }
 
-    public func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
+    public func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID],
+                            unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry]) throws {
         do {
             try dbQueue.write { db in
                 try ReviewArchiveRepositoryImpl.saveWorking(db, recordId: recordId, stepTick: stepTick,
-                                                            lossy: lossy, hiddenOriginalIds: hiddenOriginalIds)
+                                                            lossy: lossy, hiddenOriginalIds: hiddenOriginalIds,
+                                                            unknownTopLevel: unknownTopLevel)
             }
         } catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
     }
 
-    public func commitSaved(recordId: Int64, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
+    public func commitSaved(recordId: Int64, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID],
+                            unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry]) throws {
         do {
             try dbQueue.write { db in
-                try ReviewArchiveRepositoryImpl.commitSaved(db, recordId: recordId, lossy: lossy, hiddenOriginalIds: hiddenOriginalIds)
+                try ReviewArchiveRepositoryImpl.commitSaved(db, recordId: recordId, lossy: lossy,
+                                                            hiddenOriginalIds: hiddenOriginalIds,
+                                                            unknownTopLevel: unknownTopLevel)
             }
         } catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
     }

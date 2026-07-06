@@ -313,6 +313,33 @@ struct ReviewArchiveWrapperTests {
         #expect(try ReviewArchiveWrapper.decodeColumn(out).encodedColumn().contains(unknown))
     }
 
+    @Test("wrapper 保留未知顶层 key：decode→encode 后未来顶层 key（如 futureMeta）逐字节保留、不被抹掉（codex WB R7 finding 1）")
+    func preservesUnknownTopLevelKey() throws {
+        // 模拟未来版本客户端在 wrapper 顶层加的、本版本不认识的 key——只经过结构性解码/编码时不得丢失
+        // （否则下次 saveWorking/commitSaved 会用「只认识 drawings+hiddenIds」的新对象覆盖，永久抹掉）。
+        let column = #"{"drawings":[],"hiddenIds":["orig-3"],"futureMeta":{"x":1}}"#
+        let w = try ReviewArchiveWrapper.decodeColumn(column)
+        #expect(w.hiddenIds == ["orig-3"])
+        let out = try w.encodedColumn()
+        #expect(out.contains(#""futureMeta":{"x":1}"#))            // 未知顶层 key 逐字节保留
+        // 幂等：再 decode→encode 仍保留（非一次性侥幸）
+        #expect(try ReviewArchiveWrapper.decodeColumn(out).encodedColumn().contains(#""futureMeta":{"x":1}"#))
+    }
+
+    @Test("wrapper 保留多个未知顶层 key：按原出现顺序逐一保留")
+    func preservesMultipleUnknownTopLevelKeysInOrder() throws {
+        let column = #"{"drawings":[],"hiddenIds":[],"alpha":1,"beta":"two","gamma":[3,4]}"#
+        let w = try ReviewArchiveWrapper.decodeColumn(column)
+        let out = try w.encodedColumn()
+        #expect(out.contains("\"alpha\":1"))
+        #expect(out.contains("\"beta\":\"two\""))
+        #expect(out.contains("\"gamma\":[3,4]"))
+        let iAlpha = out.range(of: "\"alpha\"")!.lowerBound
+        let iBeta = out.range(of: "\"beta\"")!.lowerBound
+        let iGamma = out.range(of: "\"gamma\"")!.lowerBound
+        #expect(iAlpha < iBeta && iBeta < iGamma)                   // 出现顺序保留
+    }
+
     @Test("容错：裸数组解码 → hiddenIds 为空")
     func tolerantBareArray() throws {
         let bare = """

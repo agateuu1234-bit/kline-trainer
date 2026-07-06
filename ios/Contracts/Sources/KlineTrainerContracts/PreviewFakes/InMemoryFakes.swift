@@ -237,8 +237,12 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
     private let lock = NSLock()
     private var saved: [Int64: [DrawingObject]] = [:]
     private var savedHidden: [Int64: [DrawingID]] = [:]
+    /// codex WB R7 finding 1：mirror `savedHidden`——本 fake 无 JSON 序列化，用独立存储字段天然携带
+    /// wrapper 顶层未知 key（同 hiddenIds 范式）供 coordinator 保真回归测试用。
+    private var savedUnknownTopLevel: [Int64: [ReviewArchiveWrapper.UnknownTopLevelEntry]] = [:]
     private var working: [Int64: (stepTick: Int, drawings: [DrawingObject])] = [:]
     private var workingHidden: [Int64: [DrawingID]] = [:]
+    private var workingUnknownTopLevel: [Int64: [ReviewArchiveWrapper.UnknownTopLevelEntry]] = [:]
     /// review-redesign Task 6：一次性故障注入（mirror `InMemoryPendingReplayRepository` 的 `failNextLoadReplay`
     /// 范式），供 coordinator saved-corrupt 恢复路径测试模拟 `.dbCorrupted` / clearSaved 失败。
     private var _failNextLoadSaved: AppError?
@@ -286,15 +290,19 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
         guard s != nil || w != nil else { return nil }
         return ReviewArchive(recordId: recordId,
                              savedLossy: try s.map { try LossyDrawingArray(drawings: $0) }, savedHiddenIds: savedHidden[recordId],
+                             savedUnknownTopLevel: savedUnknownTopLevel[recordId],
                              workingStepTick: w?.stepTick,
-                             workingLossy: try w.map { try LossyDrawingArray(drawings: $0.drawings) }, workingHiddenIds: workingHidden[recordId])
+                             workingLossy: try w.map { try LossyDrawingArray(drawings: $0.drawings) }, workingHiddenIds: workingHidden[recordId],
+                             workingUnknownTopLevel: workingUnknownTopLevel[recordId])
     }
 
     public func loadWorking(recordId: Int64) throws -> ReviewWorking? {
         lock.lock(); defer { lock.unlock() }
         if let e = _failNextLoadWorking { _failNextLoadWorking = nil; throw e }
         guard let w = working[recordId] else { return nil }
-        return try ReviewWorking(stepTick: w.stepTick, drawings: w.drawings, hiddenOriginalIds: workingHidden[recordId] ?? [])
+        return ReviewWorking(stepTick: w.stepTick, lossy: try LossyDrawingArray(drawings: w.drawings),
+                             hiddenOriginalIds: workingHidden[recordId] ?? [],
+                             unknownTopLevel: workingUnknownTopLevel[recordId] ?? [])
     }
 
     public func loadSaved(recordId: Int64) throws -> [DrawingObject]? {
@@ -304,27 +312,34 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
     }
 
     // P1a Task 12（Z1 Critical fix）：fake 无 JSON 序列化（同类注释见上），故无真 unknownRaw 可携带——
-    // 与 loadWorking 同款仅 wrap 已知条 + 附带独立存储的 hiddenIds（fake 层面已是该方法能提供的最大保真）。
-    public func loadSavedLossy(recordId: Int64) throws -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID])? {
+    // 与 loadWorking 同款仅 wrap 已知条 + 附带独立存储的 hiddenIds/未知顶层 key（fake 层面已是该方法
+    // 能提供的最大保真；codex WB R7 finding 1：unknownTopLevel 同 hiddenIds 范式独立存储携带）。
+    public func loadSavedLossy(recordId: Int64) throws
+        -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID], unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry])? {
         lock.lock(); defer { lock.unlock() }
         if let e = _failNextLoadSaved { _failNextLoadSaved = nil; throw e }
         guard let s = saved[recordId] else { return nil }
-        return (try LossyDrawingArray(drawings: s), savedHidden[recordId] ?? [])
+        return (try LossyDrawingArray(drawings: s), savedHidden[recordId] ?? [], savedUnknownTopLevel[recordId] ?? [])
     }
 
-    public func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
+    public func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID],
+                            unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry]) throws {
         lock.lock(); defer { lock.unlock() }
         if let e = _failNextSaveWorking { _failNextSaveWorking = nil; throw e }
         working[recordId] = (stepTick, lossy.drawings)
         workingHidden[recordId] = hiddenOriginalIds
+        workingUnknownTopLevel[recordId] = unknownTopLevel
     }
 
-    public func commitSaved(recordId: Int64, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
+    public func commitSaved(recordId: Int64, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID],
+                            unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry]) throws {
         lock.lock(); defer { lock.unlock() }
         saved[recordId] = lossy.drawings
         savedHidden[recordId] = hiddenOriginalIds
+        savedUnknownTopLevel[recordId] = unknownTopLevel
         working[recordId] = nil
         workingHidden[recordId] = nil
+        workingUnknownTopLevel[recordId] = nil
     }
 
     public func clearWorking(recordId: Int64) throws {
@@ -332,6 +347,7 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
         if let e = _failNextClearWorking { _failNextClearWorking = nil; throw e }
         working[recordId] = nil
         workingHidden[recordId] = nil
+        workingUnknownTopLevel[recordId] = nil
     }
 
     public func clearSaved(recordId: Int64) throws {
@@ -339,6 +355,7 @@ public final class InMemoryReviewArchiveRepository: ReviewArchiveRepository, @un
         if let e = _failNextClearSaved { _failNextClearSaved = nil; throw e }
         saved[recordId] = nil
         savedHidden[recordId] = nil
+        savedUnknownTopLevel[recordId] = nil
     }
 
     public func loadMarkers() throws -> [Int64: ReviewMarker] {

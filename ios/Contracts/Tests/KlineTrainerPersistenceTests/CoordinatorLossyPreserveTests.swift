@@ -216,6 +216,40 @@ struct CoordinatorLossyPreserveTests {
         #expect(col.contains("h-1") && col.contains("h-2"))           // 隐藏态未被覆盖成 []
     }
 
+    @Test("复盘 wrapper 顶层未知 key：load(wrapper 顶层含 futureMeta)→resume-edit-autosave 后 futureMeta 原样保留（codex WB R7 finding 1）")
+    func reviewWrapperUnknownTopLevelSurvivesAutosave() async throws {
+        let (url, appDB) = try makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let rid = try makeRecord(appDB)
+        // wrapper 顶层含一个本版本不认识的 key（模拟未来客户端在 working 行加的顶层 review-metadata）。
+        try seedReviewWorking(appDB, recordId: rid, stepTick: 3,
+                              wrapperJSON: #"{"drawings":[\#(known("g1"))],"hiddenIds":[],"futureMeta":{"x":1}}"#)
+        let coord = makeCoordinator(appDB)
+        let engine = try #require(try await coord.resumePendingReview(recordId: rid))  // engine.loadedReviewUnknownTopLevel 携带
+        engine.appendReviewDrawing(decodedKnown(known("g9")))          // 编辑：加一条已知（触发脏 autosave）
+        try coord.persistReviewWorkingIfChanged(engine: engine)        // autosave 须原样传回 loadedReviewUnknownTopLevel
+        let col: String = try await appDB.dbQueue.read {
+            try Row.fetchOne($0, sql: "SELECT working_drawings FROM review_archive WHERE record_id=\(rid)")!["working_drawings"]
+        }
+        #expect(col.contains(#""futureMeta":{"x":1}"#))               // 未知顶层 key 未被「只认识 drawings/hiddenIds」的新对象覆盖抹掉
+    }
+
+    @Test("复盘 wrapper 顶层未知 key：load(saved 列含 futureMeta，无 working 行)→FRESH 零编辑 commitReview 后 saved 列 futureMeta 仍在（codex WB R7 finding 1）")
+    func reviewWrapperUnknownTopLevelSurvivesFreshCommit() async throws {
+        let (url, appDB) = try makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let rid = try makeRecord(appDB)
+        try seedReviewSaved(appDB, recordId: rid,
+                            wrapperJSON: #"{"drawings":[\#(known("g1"))],"hiddenIds":[],"futureMeta":{"x":1}}"#)
+        let coord = makeCoordinator(appDB)
+        let engine = try await coord.review(recordId: rid)   // FRESH 入口：无 working 行 → review()（非 resume）
+        try coord.commitReview(engine: engine)                // 零用户编辑，直接「结束复盘并保存」
+        let col: String = try await appDB.dbQueue.read {
+            try Row.fetchOne($0, sql: "SELECT saved_drawings FROM review_archive WHERE record_id=\(rid)")!["saved_drawings"]
+        }
+        #expect(col.contains(#""futureMeta":{"x":1}"#))               // 未来顶层 key 未被无编辑 commit 抹掉（首次落 saved 行的时刻）
+    }
+
     @Test("复盘 commit：load(含未来条+hiddenIds)→commitReview 后 saved 列未来条+hiddenIds 仍在（Global Constraints：commit 路径同款）")
     func reviewCommitPreservesUnknownAndHiddenIds() async throws {
         let (url, appDB) = try makeFreshDB()

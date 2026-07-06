@@ -39,6 +39,9 @@ public final class TrainingEngine {
     /// P1a Task 12（Z1）：复盘加载来的隐藏原训练线 id 集（§11.5/D12）。save 路径原样传回，
     /// 不得被默认 `[]` 覆盖已加载的隐藏态（codex R11-high）。P1a 只透传，hide/show 写入行为 = P5。
     public private(set) var loadedReviewHiddenIds: [DrawingID] = []
+    /// codex WB R7 finding 1：复盘加载来的 wrapper 顶层未知 key（原样字节，同 `loadedReviewHiddenIds`
+    /// 范式）。save 路径原样传回、原样拼回磁盘，不得被默认 `[]` 覆盖已加载的未来数据。
+    public private(set) var loadedReviewUnknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry] = []
     public private(set) var upperPanel: PanelViewState
     public private(set) var lowerPanel: PanelViewState
     public private(set) var tradeOperations: [TradeOperation]
@@ -295,9 +298,11 @@ public final class TrainingEngine {
     /// 本 setter 作初始播种入口。**P1a Task 12（Z1）**：携带完整有损集 + 加载来的隐藏 id 集（`hiddenIds`），
     /// 使 save 路径（`persistReviewWorkingIfChanged`/`commitReview`）能经 `loadedReviewLossy.reconciled(currentKnown:)`
     /// 重发，保住加载 blob 里未识别的条 + 原样传回 hiddenIds（不覆盖成 `[]`，codex R11-high）。
-    public func setReviewLossy(_ l: LossyDrawingArray, hiddenIds: [DrawingID] = []) {
+    public func setReviewLossy(_ l: LossyDrawingArray, hiddenIds: [DrawingID] = [],
+                               unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry] = []) {
         loadedReviewLossy = l
         loadedReviewHiddenIds = hiddenIds
+        loadedReviewUnknownTopLevel = unknownTopLevel
         reviewDrawings = l.drawings
     }
     /// 兼容旧调用（纯已知，无 unknownRaw/hiddenIds）：包成 lossy 走 `setReviewLossy` 唯一实现。

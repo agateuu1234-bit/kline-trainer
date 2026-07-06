@@ -63,6 +63,66 @@ enum JSONObjectScan {
         return nil
     }
 
+    /// 顶层 JSON 对象【全部 key→原始值字节文本】，按【原出现顺序】返回（codex WB R7 finding 1：wrapper
+    /// 保留未知顶层 key）。key/value 均为原始（未反转义）字节文本——与 `rawValueBytes` 的值语义一致，
+    /// 保证 `encodedColumn` 拼回时逐字节还原。非对象/找不到 → `[]`（重复 key 的 fail-closed 校验由
+    /// `requireNoDuplicateTopLevelKeys` 单独把关，此函数只负责枚举、不做校验）。
+    static func allTopLevelPairs(_ data: Data) -> [(key: String, rawValue: String)] {
+        let b = [UInt8](data); let n = b.count; var i = 0
+        func isWS(_ c: UInt8) -> Bool { c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D }
+        func readString(_ i0: Int) -> (Int, Int, Int) {   // (内容start, 内容end, 闭引号后)
+            var j = i0 + 1; let start = j; var esc = false
+            while j < n { let c = b[j]
+                if esc { esc = false } else if c == UInt8(ascii: "\\") { esc = true }
+                else if c == UInt8(ascii: "\"") { return (start, j, j + 1) }
+                j += 1 }
+            return (start, j, j)
+        }
+        func skipValue(_ i0: Int) -> Int {
+            var j = i0; guard j < n else { return j }
+            let c = b[j]
+            if c == UInt8(ascii: "\"") { return readString(j).2 }
+            if c == UInt8(ascii: "{") || c == UInt8(ascii: "[") {
+                var depth = 0, inStr = false, esc = false
+                while j < n { let ch = b[j]
+                    if inStr { if esc { esc = false } else if ch == UInt8(ascii: "\\") { esc = true } else if ch == UInt8(ascii: "\"") { inStr = false } }
+                    else if ch == UInt8(ascii: "\"") { inStr = true }
+                    else if ch == UInt8(ascii: "{") || ch == UInt8(ascii: "[") { depth += 1 }
+                    else if ch == UInt8(ascii: "}") || ch == UInt8(ascii: "]") { depth -= 1; if depth == 0 { return j + 1 } }
+                    j += 1 }
+                return j
+            }
+            while j < n { let ch = b[j]
+                if ch == UInt8(ascii: ",") || ch == UInt8(ascii: "}") || ch == UInt8(ascii: "]") || isWS(ch) { break }
+                j += 1 }
+            return j
+        }
+        while i < n, isWS(b[i]) { i += 1 }
+        guard i < n, b[i] == UInt8(ascii: "{") else { return [] }
+        i += 1
+        var out: [(key: String, rawValue: String)] = []
+        while i < n {
+            while i < n, isWS(b[i]) { i += 1 }
+            if i < n, b[i] == UInt8(ascii: "}") { return out }
+            guard i < n, b[i] == UInt8(ascii: "\"") else { return out }
+            let (ks, ke, afterKey) = readString(i); i = afterKey
+            let key = String(decoding: b[ks..<ke], as: UTF8.self)
+            while i < n, isWS(b[i]) { i += 1 }
+            guard i < n, b[i] == UInt8(ascii: ":") else { return out }
+            i += 1
+            while i < n, isWS(b[i]) { i += 1 }
+            let vs = i, ve = skipValue(i)
+            var a = vs, z = ve
+            while a < z, isWS(b[a]) { a += 1 }
+            while z > a, isWS(b[z - 1]) { z -= 1 }
+            out.append((key, String(decoding: b[a..<z], as: UTF8.self)))
+            i = ve
+            while i < n, isWS(b[i]) { i += 1 }
+            if i < n, b[i] == UInt8(ascii: ",") { i += 1 } else { break }
+        }
+        return out
+    }
+
     /// 顶层对象 key 去重校验（codex R15-medium）：重复的 `drawings`/`hiddenIds` 等顶层 key → `.dbCorrupted`。
     /// （`JSONSerialization` 会静默取最后一个重复 key、而 `rawValueBytes` 取第一个，二者对损坏 blob 会分歧 → fail-closed。）
     static func requireNoDuplicateTopLevelKeys(_ data: Data) throws {
@@ -106,22 +166,33 @@ enum JSONObjectScan {
 }
 
 public struct ReviewArchiveWrapper: Equatable, Sendable {
+    /// codex WB R7 finding 1：wrapper 对象顶层【本版本不认识】的 key（未来客户端加的顶层 review-metadata）
+    /// →键→原始值字节文本，按【原出现顺序】保留（tuple 数组非 Dictionary，保证序确定——见字段注释）。
+    /// `decodeColumn` 捕获、`encodedColumn` 原样拼回；不 fail-closed 拒绝（那会触发 coordinator 的破坏性
+    /// 损坏恢复 clearSaved/clearWorking，反而删掉这份要保留的未来数据）。
+    public struct UnknownTopLevelEntry: Equatable, Sendable {
+        public let key: String
+        public let rawValue: String
+        public init(key: String, rawValue: String) { self.key = key; self.rawValue = rawValue }
+    }
+
     public let lossy: LossyDrawingArray      // 有序 known/unknownRaw（保序 + 保真）
     public let hiddenIds: [DrawingID]
+    public let unknownTopLevel: [UnknownTopLevelEntry]   // 未知顶层 key（codex WB R7 finding 1），按序、默认 []
 
     public var drawings: [DrawingObject] { lossy.drawings }
 
-    public init(lossy: LossyDrawingArray, hiddenIds: [DrawingID]) {
-        self.lossy = lossy; self.hiddenIds = hiddenIds
+    public init(lossy: LossyDrawingArray, hiddenIds: [DrawingID], unknownTopLevel: [UnknownTopLevelEntry] = []) {
+        self.lossy = lossy; self.hiddenIds = hiddenIds; self.unknownTopLevel = unknownTopLevel
     }
     /// 便捷：纯已知条（新写入）。throws（codex whole-branch High fix）：`LossyDrawingArray(drawings:)` 现在 throws。
-    public init(drawings: [DrawingObject], hiddenIds: [DrawingID]) throws {
-        self.init(lossy: try LossyDrawingArray(drawings: drawings), hiddenIds: hiddenIds)
+    public init(drawings: [DrawingObject], hiddenIds: [DrawingID], unknownTopLevel: [UnknownTopLevelEntry] = []) throws {
+        self.init(lossy: try LossyDrawingArray(drawings: drawings), hiddenIds: hiddenIds, unknownTopLevel: unknownTopLevel)
     }
 
     public static func decodeColumn(_ json: String) throws -> ReviewArchiveWrapper {
         let data = Data(json.utf8)
-        // 裸数组（旧形状）→ 整列就是 drawings；hiddenIds 空。
+        // 裸数组（旧形状）→ 整列就是 drawings；hiddenIds 空；无顶层对象可言，unknownTopLevel 空。
         if JSONTopLevelArray.rawElementStrings(data) != nil {
             return ReviewArchiveWrapper(lossy: try LossyDrawingArray.decode(data), hiddenIds: [])
         }
@@ -146,13 +217,23 @@ public struct ReviewArchiveWrapper: Equatable, Sendable {
             }
             hidden = decoded
         }
-        return ReviewArchiveWrapper(lossy: lossy, hiddenIds: hidden)
+        // codex WB R7 finding 1：除 drawings/hiddenIds 外的顶层 key → PRESERVE（不解读，原样字节保留）。
+        let unknownTopLevel = JSONObjectScan.allTopLevelPairs(data)
+            .filter { $0.key != "drawings" && $0.key != "hiddenIds" }
+            .map { UnknownTopLevelEntry(key: $0.key, rawValue: $0.rawValue) }
+        return ReviewArchiveWrapper(lossy: lossy, hiddenIds: hidden, unknownTopLevel: unknownTopLevel)
     }
 
     public func encodedColumn() throws -> String {
-        // 直接拼接：drawings 用 lossy 保真字节、hiddenIds 正常编码；不重序列化整体。
+        // 直接拼接：drawings 用 lossy 保真字节、hiddenIds 正常编码、未知顶层 key 原样字节追加在后；
+        // 不重序列化整体（codex WB R7 finding 1：未知顶层 key 必须逐字节存活，不得被「只认识
+        // drawings/hiddenIds」的新对象覆盖抹掉）。
         let drawingsStr = String(decoding: try lossy.encoded(), as: UTF8.self)
         let hiddenStr = String(decoding: try JSONEncoder().encode(hiddenIds), as: UTF8.self)
-        return "{\"drawings\":\(drawingsStr),\"hiddenIds\":\(hiddenStr)}"
+        var parts = ["\"drawings\":\(drawingsStr)", "\"hiddenIds\":\(hiddenStr)"]
+        for entry in unknownTopLevel {
+            parts.append("\"\(entry.key)\":\(entry.rawValue)")
+        }
+        return "{" + parts.joined(separator: ",") + "}"
     }
 }
