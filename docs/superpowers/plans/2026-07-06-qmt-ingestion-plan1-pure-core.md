@@ -286,6 +286,14 @@ def test_intraday_no_cross_lunch():
     out = resample_intraday(df, 60).sort_values("datetime").reset_index(drop=True)
     labels = [dt.datetime.fromtimestamp(x, SH).strftime("%H%M") for x in out["datetime"]]
     assert labels == ["1030", "1130", "1400", "1500"]  # 4 桶、午休不并
+
+def test_intraday_out_of_session_only_returns_empty_no_crash():
+    # PF1-R9-F2：非空输入但全部盘外（午休 12:00）→ 空结果 + 正确 schema，不抛 KeyError
+    rows = [{"datetime": int(dt.datetime(2026, 7, 1, 12, 0, 0, tzinfo=SH).timestamp()),
+             "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1, "amount": 1.0}]
+    out = resample_intraday(pd.DataFrame(rows), 3)
+    assert out.empty
+    assert list(out.columns) == ["datetime", "open", "high", "low", "close", "volume", "amount"]
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -305,6 +313,8 @@ import pandas as pd
 from qmt_normalize import trading_date
 
 _SH = ZoneInfo("Asia/Shanghai")
+# 合成输出统一 OHLCV 列；空结果也带此 schema，避免 pd.DataFrame([]).sort_values 抛 KeyError（PF1-R9-F2/F3）
+_OHLCV_COLS = ["datetime", "open", "high", "low", "close", "volume", "amount"]
 # 段名义起点（分钟数，自 00:00 起算）与每段时长
 _MORNING_START = 9 * 60 + 30    # 09:30
 _AFTERNOON_START = 13 * 60      # 13:00
@@ -345,13 +355,14 @@ def resample_intraday(df_1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
         h, mnt = divmod(int(lm), 60)
         label_epoch = int(_dt.datetime(d.year, d.month, d.day, h, mnt, 0, tzinfo=_SH).timestamp())
         out_rows.append({"datetime": label_epoch, **_agg(grp)})
-    return pd.DataFrame(out_rows).sort_values("datetime").reset_index(drop=True)
+    # PF1-R9-F2：全盘外输入 → out_rows 空；带列构造避免 sort_values 抛 KeyError（空 resample，覆盖层负责 drop 该日）
+    return pd.DataFrame(out_rows, columns=_OHLCV_COLS).sort_values("datetime").reset_index(drop=True)
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && python -m pytest tests/test_qmt_resample.py -v`
-Expected: PASS（4 passed）
+Expected: PASS（5 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -406,6 +417,20 @@ def test_period_boundaries_include_partial_sentinel():
     bounds = period_boundaries(df, "monthly")
     labels = [dt.datetime.fromtimestamp(x, SH).strftime("%Y%m") for x in bounds]
     assert labels == ["202605", "202606", "202607"]   # 含 partial 当月哨兵
+
+def test_calendar_single_month_returns_empty_no_crash():
+    # PF1-R9-F3：仅一个月（当前 partial，无后续周期）→ 无完整周期 → 空结果，不抛 KeyError
+    df = _daily([(2026, 7, 1), (2026, 7, 2), (2026, 7, 3)])
+    out = resample_calendar(df, "monthly")
+    assert out.empty
+    assert list(out.columns) == ["datetime", "open", "high", "low", "close", "volume", "amount"]
+
+def test_calendar_single_week_returns_empty_no_crash():
+    # PF1-R9-F3：仅一个 ISO 周（当前 partial）→ 无完整周期 → 空结果，不抛 KeyError
+    df = _daily([(2026, 7, 6), (2026, 7, 7)])   # 2026-07-06 Mon / 07-07 Tue 同 ISO 周
+    out = resample_calendar(df, "weekly")
+    assert out.empty
+    assert list(out.columns) == ["datetime", "open", "high", "low", "close", "volume", "amount"]
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -450,13 +475,14 @@ def resample_calendar(df_daily: pd.DataFrame, rule: str) -> pd.DataFrame:
             continue
         first_d = min(grp["_d"])
         out_rows.append({"datetime": _first_day_midnight_epoch(first_d), **_agg(grp)})
-    return pd.DataFrame(out_rows).sort_values("datetime").reset_index(drop=True)
+    # PF1-R9-F3：仅一个周期（当前 partial）→ complete_keys 空 → out_rows 空；带列构造避免 sort_values 抛 KeyError
+    return pd.DataFrame(out_rows, columns=_OHLCV_COLS).sort_values("datetime").reset_index(drop=True)
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && python -m pytest tests/test_qmt_resample.py -v`
-Expected: PASS（7 passed）
+Expected: PASS（10 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -628,7 +654,7 @@ def build_intraday(df_1m: pd.DataFrame):
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && python -m pytest tests/test_qmt_resample.py -v`
-Expected: PASS（9 passed）
+Expected: PASS（12 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -752,7 +778,7 @@ def reconcile_sources(df_1m: pd.DataFrame, df_daily: pd.DataFrame, *,
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && python -m pytest tests/test_qmt_resample.py -v`
-Expected: PASS（12 passed）
+Expected: PASS（15 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -1079,27 +1105,22 @@ Expected: PASS（2 passed）
 - [ ] **Step 7: 全量回归 + 提交**
 
 Run: `cd backend && python -m pytest tests/test_generate_training_sets.py -v`
-Expected: PASS（现有测试 + 新增全绿）。**Task 8 会把公共装配入口 `assemble_training_set` 重接到 `build_training_windows` 并删旧选起点路径**（codex PF1-R8-F1：Plan 1 内即消除旧不安全路径，不推给 Plan 2）。
+Expected: PASS（现有测试 + 新增全绿）。**`build_training_windows` 是本 plan 交付的生产纯入口（已全 pytest 测）；把它接进生产装配 `assemble_training_set` + 删旧随机选起点路径推迟到 Plan 2**（见下方「Task 8 推迟到 Plan 2」块，codex PF1-R9-F1 覆盖 R8-F1）。
 
 ```bash
 git add backend/generate_training_sets.py backend/tests/test_generate_training_sets.py
 git commit -m "feat(b2): after_end 重定义 + 窗口纳入(周straddle) + eligible/select_valid_window(候选迭代+有界重试) + per-day硬门(3m/15m/60m)"
 ```
 
-### Task 8: `assemble_training_set` 重接 `build_training_windows`（删旧选起点路径，codex PF1-R8-F1）
+### Task 8（推迟到 Plan 2）：`assemble_training_set` 重接 `build_training_windows` + 删旧随机选起点路径
 
-**Files:** Modify `backend/generate_training_sets.py` + `backend/tests/test_generate_training_sets.py`。
+**为什么不在 Plan 1（codex PF1-R9-F1，覆盖 R8-F1「不推给 Plan 2」）**：安全重接把 `assemble_training_set` 改成走 `build_training_windows`，需要 `month_boundaries` / `dense_dates` / `trading_dates` 三个新入参；其中 **`dense_dates`（B1 完整-1m 日集）只能从持久化的 `stock_coverage` 表读到（D11），而该表的 DDL + 读取是 Plan 2 scope**（本 plan 纯函数层不碰 DB）。因此重接与其唯一调用链（`assemble_training_set` ← `generate_one_training_set` ← `generate_batch`）的迁移**必须与 `stock_coverage` 读取原子落地 = Plan 2**。
 
-**Interfaces:** `assemble_training_set(output_dir, *, stock_code, stock_name, period_bars, month_boundaries, dense_dates, trading_dates, rng, months=8, intraday_expected=None, before_min=30) -> GeneratedTrainingSet` —— 内部走 `build_training_windows` -> `assign_global_indices` -> `build_training_set_sqlite` -> `zip_and_hash`；不再用旧 `select_start_index`/`monthly_after_end`。
+若强行在 Plan 1 只改 `assemble_training_set` 签名，现有 `generate` CLI 调用链会因缺参 **`TypeError`**（R9-F1 实证：`generate_one_training_set` 仍按旧 5 参在 `generate_training_sets.py:279` 调用）——用**破坏树**换「Plan 1 内删旧路径」不划算。
 
-- [ ] **Step 1: 写失败测试**（证明公共装配入口走新 D9 门——旧随机选起点不会因盘中不完整 skip）：`test_assemble_training_set_routes_through_d9_gate(tmp_path)`：33 月边界 + June–Aug 2022 工作日 dense/trading，`period_bars` 各周期每日仅 1 根 3m（应 2），`months=1, intraday_expected={"3m":2,"15m":1,"60m":1}, before_min=1` -> 全候选 D9 失败 -> `assemble_training_set(...)` 抛 `GenerateSkipException`（旧随机选起点不会抛）。fixture 与 `test_build_training_windows_end_to_end_*` 同构 + `tmp_path`。
+**R8-F1 的原意（旧不安全随机选起点路径不得在真实数据上运行）仍被满足**：在 Plan 1 里该旧路径是**不可达死代码**——它只经异步 PG 壳 `generate_one_training_set` 触发，而后者需活的 PG 连接 + 已入库真实数据，二者都到 Plan 2 才存在，本 plan 无任何测试/数据能跑到它。Plan 2 接线 `stock_coverage` 读取时与旧路径删除**原子**完成，真实生成从第一天起就只走 D9 门控的 `build_training_windows`。
 
-- [ ] **Step 2: 跑测试确认失败** — `python -m pytest tests/test_generate_training_sets.py::test_assemble_training_set_routes_through_d9_gate -v` -> FAIL（旧签名无 `month_boundaries`/走旧路径不 raise）。
-
-- [ ] **Step 3: 重接线 + 删旧**：把 `assemble_training_set` 里「`select_start_index` -> `monthly_after_end` -> 各周期 `select_period_window` + per-period 校验」整段换成 `build_training_windows(period_bars, month_boundaries, rng, dense_dates=dense_dates, trading_dates=trading_dates, before_caps=PERIOD_BEFORE_CAP, months=months, intraday_expected=intraday_expected, before_min=before_min)`（返回 `(start_datetime, windows)`）-> `assign_global_indices(windows)` -> `end_datetime = compute_after_end(month_boundaries, month_boundaries.index(start_datetime), months)` -> `build_training_set_sqlite`/`zip_and_hash`（现有函数不变）-> `GeneratedTrainingSet(...)`。**删除** `select_start_index`(旧)、`monthly_after_end` 及其旧专测（grep 定位删；新增 `eligible_start_indices`/`select_valid_window`/`build_training_windows` 测保留）。
-
-- [ ] **Step 4: 跑测试确认通过** — `python -m pytest tests/test_generate_training_sets.py -v` -> PASS。
-- [ ] **Step 5: 提交** — `git commit -m "feat(b2): assemble_training_set 重接 build_training_windows, 删旧随机选起点(PF1-R8-F1)"`
+**Plan 2 首个 Task（落地清单）**：① `assemble_training_set` 改签名走 `build_training_windows`；② `generate_one_training_set`/`generate_batch` 读 `stock_coverage` 供 `dense_dates`/`trading_dates`、读 `period_boundaries` 供 `month_boundaries`；③ 删 `select_start_index`(旧)/`monthly_after_end` 及旧专测；④ 加「公共装配走 D9 门」契约测（即原 `test_assemble_training_set_routes_through_d9_gate`：全候选 D9 失败 → `assemble_training_set(...)` 抛 `GenerateSkipException`，旧随机选起点不会抛）。
 
 ---
 
@@ -1109,7 +1130,7 @@ git commit -m "feat(b2): after_end 重定义 + 窗口纳入(周straddle) + eligi
 - **合成层**（§4.2）：intraday golden 80/16/4 + 首桶含集竞 + 禁跨午休 ✅(Task3)；calendar 只发完整周期 + OPEN 标签 + 哨兵 ✅(Task4)；分钟级完整性(精确 epoch 含秒)drop 整日 + 覆盖 artifact + **安全入口 `build_intraday`（滤损坏日桶，PF1-R4-F1）** ✅(Task5)。
 - **D10 对账**（§4.1）：端点+日期集+OHLCV 三门 ✅(Task6)。
 - **B2 纯逻辑**（§4.4）：after_end=第8完整月末 ✅、窗口纳入**两侧**周边界校验(PF1-R5 无 lookahead) ✅、`eligible_start_indices` 按交易日历+dense ✅、`select_valid_window` 有界重试(R12-F2) ✅、per-day 硬门各周期自身跨度到 after_end(PF1-R6-F1) ✅、**`build_training_windows` 生产纯入口组合全部 gate + 端到端测(候选重试+尾日D9，PF1-R6-F2)** ✅(Task7)。
-- **不在本 plan（→ Plan 2）**：schema/migration/CONTRACT_VERSION（§4.3 D1/D11 表）、import/generate DB 壳接线（D8a/D8b/写 klines+stock_coverage/读 dense_dates/file_path TEXT+cleanup/候选 retry 集成）、pilot（储备池/SMB/reset 护栏/市场地板）、容器化集成测试（§5 R15-F2）。
+- **不在本 plan（→ Plan 2）**：schema/migration/CONTRACT_VERSION（§4.3 D1/D11 表）、import/generate DB 壳接线（D8a/D8b/写 klines+stock_coverage/读 dense_dates/file_path TEXT+cleanup/候选 retry 集成）、**`assemble_training_set` 重接 `build_training_windows` + 删旧 `select_start_index`/`monthly_after_end` 随机选起点路径（与 `stock_coverage` dense_dates 读取原子落地，codex PF1-R9-F1；见「Task 8 推迟到 Plan 2」块）**、pilot（储备池/SMB/reset 护栏/市场地板）、容器化集成测试（§5 R15-F2）。
 - **前复权精度**：本 plan 纯函数不 round OHLC ✅（`clean` 复用在 Plan 2 接线时验证）。
 - **占位符扫描**：无 TBD/TODO；每步含真实测试+实现代码。
 - **类型一致**：`DenseCoverage.complete_dates`(list[date]) → Plan 2 写 `stock_coverage.dropped_1m_dates`/`dense_1m_start/end_date`；`eligible_start_indices(...,dense_dates:set[date],trading_dates:set[date])->list[int]`、`select_valid_window(...,try_assemble)->(int, object)`、`per_day_intraday_complete(windows:dict[str,DataFrame],...)`；`compute_after_end(month_boundaries:list[int])` 与 `period_boundaries` 返回类型一致（list[int] Unix 秒）。
