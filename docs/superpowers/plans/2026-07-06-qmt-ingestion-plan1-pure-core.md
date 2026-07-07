@@ -645,7 +645,7 @@ git commit -m "feat(qmt): compute_dense_coverage(缺分钟→drop整日, 覆盖 
 
 **Interfaces:**
 - Consumes: `trading_date`, `compute_dense_coverage`。
-- Produces: `reconcile_sources(df_1m, df_daily, price_rtol=1e-6) -> ReconcileResult`：
+- Produces: `reconcile_sources(df_1m, df_daily, *, status_1m="ok", status_daily="ok", price_rtol=1e-6) -> ReconcileResult`（含 D10(a) export_log status 门）：
   ```python
   @dataclass
   class ReconcileResult:
@@ -688,6 +688,13 @@ def test_reconcile_fail_ohlcv_mismatch():
     daily = _daily_from_1m(r1); daily.loc[0, "close"] = daily.loc[0, "close"] + 5.0  # 篡改 close
     res = reconcile_sources(pd.DataFrame(r1), daily)
     assert not res.ok and res.reason == "ohlcv_mismatch"
+
+def test_reconcile_fail_when_export_log_not_ok():
+    # export_log status 非 'ok' → fail-closed（即使 df 内部自洽，codex PF1-R8-F2）
+    r1 = _day_1m((2026,7,1)); daily = _daily_from_1m(r1)
+    assert reconcile_sources(pd.DataFrame(r1), daily, status_1m="error").reason == "export_log_not_ok"
+    assert reconcile_sources(pd.DataFrame(r1), daily, status_daily="empty").reason == "export_log_not_ok"
+    assert reconcile_sources(pd.DataFrame(r1), daily, status_1m="ok", status_daily="ok").ok is True
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -706,8 +713,12 @@ class ReconcileResult:
     ok: bool
     reason: str = ""
 
-def reconcile_sources(df_1m: pd.DataFrame, df_daily: pd.DataFrame,
+def reconcile_sources(df_1m: pd.DataFrame, df_daily: pd.DataFrame, *,
+                      status_1m: str = "ok", status_daily: str = "ok",
                       price_rtol: float = 1e-6) -> ReconcileResult:
+    # D10 (a) export_log status 门（codex PF1-R8-F2）：任一文件非 'ok' → fail-closed
+    if status_1m != "ok" or status_daily != "ok":
+        return ReconcileResult(False, "export_log_not_ok")
     cov = compute_dense_coverage(df_1m)
     if not cov.complete_dates:
         return ReconcileResult(False, "no_dense_1m")
@@ -1068,12 +1079,27 @@ Expected: PASS（2 passed）
 - [ ] **Step 7: 全量回归 + 提交**
 
 Run: `cd backend && python -m pytest tests/test_generate_training_sets.py -v`
-Expected: PASS（现有测试 + 新增全绿）。**Plan 2 硬性要求（codex PF1-R6-F2）**：`generate_one_training_set` **必须重接线到 `build_training_windows`**（生产纯入口），弃用旧 `select_start_index`/`monthly_after_end` 随机选起点路径。本 plan 里旧 `select_start_index`/`monthly_after_end` 及其现有测试可临时保留不删（避免破坏），但 Plan 2 落地时删除/替换，且加「`generate_one_training_set` 走 build_training_windows」的集成测试。
+Expected: PASS（现有测试 + 新增全绿）。**Task 8 会把公共装配入口 `assemble_training_set` 重接到 `build_training_windows` 并删旧选起点路径**（codex PF1-R8-F1：Plan 1 内即消除旧不安全路径，不推给 Plan 2）。
 
 ```bash
 git add backend/generate_training_sets.py backend/tests/test_generate_training_sets.py
 git commit -m "feat(b2): after_end 重定义 + 窗口纳入(周straddle) + eligible/select_valid_window(候选迭代+有界重试) + per-day硬门(3m/15m/60m)"
 ```
+
+### Task 8: `assemble_training_set` 重接 `build_training_windows`（删旧选起点路径，codex PF1-R8-F1）
+
+**Files:** Modify `backend/generate_training_sets.py` + `backend/tests/test_generate_training_sets.py`。
+
+**Interfaces:** `assemble_training_set(output_dir, *, stock_code, stock_name, period_bars, month_boundaries, dense_dates, trading_dates, rng, months=8, intraday_expected=None, before_min=30) -> GeneratedTrainingSet` —— 内部走 `build_training_windows` -> `assign_global_indices` -> `build_training_set_sqlite` -> `zip_and_hash`；不再用旧 `select_start_index`/`monthly_after_end`。
+
+- [ ] **Step 1: 写失败测试**（证明公共装配入口走新 D9 门——旧随机选起点不会因盘中不完整 skip）：`test_assemble_training_set_routes_through_d9_gate(tmp_path)`：33 月边界 + June–Aug 2022 工作日 dense/trading，`period_bars` 各周期每日仅 1 根 3m（应 2），`months=1, intraday_expected={"3m":2,"15m":1,"60m":1}, before_min=1` -> 全候选 D9 失败 -> `assemble_training_set(...)` 抛 `GenerateSkipException`（旧随机选起点不会抛）。fixture 与 `test_build_training_windows_end_to_end_*` 同构 + `tmp_path`。
+
+- [ ] **Step 2: 跑测试确认失败** — `python -m pytest tests/test_generate_training_sets.py::test_assemble_training_set_routes_through_d9_gate -v` -> FAIL（旧签名无 `month_boundaries`/走旧路径不 raise）。
+
+- [ ] **Step 3: 重接线 + 删旧**：把 `assemble_training_set` 里「`select_start_index` -> `monthly_after_end` -> 各周期 `select_period_window` + per-period 校验」整段换成 `build_training_windows(period_bars, month_boundaries, rng, dense_dates=dense_dates, trading_dates=trading_dates, before_caps=PERIOD_BEFORE_CAP, months=months, intraday_expected=intraday_expected, before_min=before_min)`（返回 `(start_datetime, windows)`）-> `assign_global_indices(windows)` -> `end_datetime = compute_after_end(month_boundaries, month_boundaries.index(start_datetime), months)` -> `build_training_set_sqlite`/`zip_and_hash`（现有函数不变）-> `GeneratedTrainingSet(...)`。**删除** `select_start_index`(旧)、`monthly_after_end` 及其旧专测（grep 定位删；新增 `eligible_start_indices`/`select_valid_window`/`build_training_windows` 测保留）。
+
+- [ ] **Step 4: 跑测试确认通过** — `python -m pytest tests/test_generate_training_sets.py -v` -> PASS。
+- [ ] **Step 5: 提交** — `git commit -m "feat(b2): assemble_training_set 重接 build_training_windows, 删旧随机选起点(PF1-R8-F1)"`
 
 ---
 
