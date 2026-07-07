@@ -215,6 +215,65 @@ public struct LossyDrawingArray: Equatable, Sendable {
         knownFutureFieldPayloads().contains { liveIds.contains($0.id) && !$0.future.isEmpty }
     }
 
+    /// codex whole-branch R18（high）：「已知 key 携带的未来枚举值」——`knownFutureFieldPayloads` 只探测
+    /// `knownDiskKeys` 之外的 EXTRA 顶层 key；但 R16 让 `.known` 条对【已知 key 本身】的未来 raw 值
+    /// （如 colorToken:"futureNeon"）容错解码（fallback 默认值），这类值完全落在 `knownDiskKeys` 内，
+    /// 对上面那道「未来字段」探测完全不可见——解码出的 `DrawingObject` 已被 fallback 覆盖，任何「只读
+    /// 解码后字段」的路径（finalize 的表结构持久化 / 复盘 dirty 判定）都看不见它，若该路径清空/覆盖了
+    /// 原始 raw，这些未来枚举值会不可逆丢失。本方法检测每个 `.known` 条的已知枚举类型 key（顶层 +
+    /// `anchors[].period` + `tailAnchor.period`）是否携带一个当前枚举不认识的 raw 值——是 finalize
+    /// fail-closed 门 + 复盘 dirty 判定共享的第二道探测（与 `knownFutureFieldPayloads` 互补，各自覆盖
+    /// "EXTRA key" 与 "已知 key 的未来值" 两种不同的前向兼容缺口）。
+    ///
+    /// 每个 `.known` 元素恒返回一条 `(id, entries)`（即便 `entries` 为空）——同 `knownFutureFieldPayloads`
+    /// 的顺序/条数确定性理由。`entries` 按 key 排序（确定性比较，不受字典遍历顺序影响）。
+    func knownFutureEnumPayloads() -> [(id: String, entries: [(key: String, rawValue: String)])] {
+        elements.compactMap { element -> (id: String, entries: [(key: String, rawValue: String)])? in
+            guard case .known(let d, let raw) = element else { return nil }
+            guard let dict = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any] else {
+                return (id: d.id, entries: [])   // .known 已成功解码过一次，raw 理应总是对象——防御性空
+            }
+            var entries: [(key: String, rawValue: String)] = []
+            for (key, validValues) in LossyDrawingArray.enumKeyValidValues {
+                if let v = dict[key] as? String, !validValues.contains(v) {
+                    entries.append((key: key, rawValue: v))
+                }
+            }
+            if let anchors = dict["anchors"] as? [[String: Any]] {
+                for (i, anchor) in anchors.enumerated() {
+                    if let v = anchor["period"] as? String, !LossyDrawingArray.periodValidValues.contains(v) {
+                        entries.append((key: "anchors[\(i)].period", rawValue: v))
+                    }
+                }
+            }
+            if let tail = dict["tailAnchor"] as? [String: Any],
+               let v = tail["period"] as? String, !LossyDrawingArray.periodValidValues.contains(v) {
+                entries.append((key: "tailAnchor.period", rawValue: v))
+            }
+            entries.sort { $0.key < $1.key }
+            return (id: d.id, entries: entries)
+        }
+    }
+
+    /// `Period` 当前 rawValue 全集（顶层 `period` key + 嵌套 `anchors[].period`/`tailAnchor.period` 共用）。
+    private static let periodValidValues: Set<String> = Set(Period.allCases.map(\.rawValue))
+    /// 已知枚举类型顶层 key → 该类型当前 rawValue 全集（R18 检测用；对齐 `DrawingObject` 的枚举字段集）。
+    private static let enumKeyValidValues: [String: Set<String>] = [
+        "period": periodValidValues,
+        "lineSubType": Set(LineSubType.allCases.map(\.rawValue)),
+        "lineStyle": Set(LineStyle.allCases.map(\.rawValue)),
+        "colorToken": Set(DrawingColorToken.allCases.map(\.rawValue)),
+        "labelMode": Set(LabelMode.allCases.map(\.rawValue)),
+        "textForm": Set(TextForm.allCases.map(\.rawValue)),
+        "textColorToken": Set(DrawingColorToken.allCases.map(\.rawValue)),
+    ]
+
+    /// `hasKnownFutureFields(liveIds:)` 的姊妹门（R18）：仅统计 id 仍存活（未被删除）的已知条是否携带
+    /// 未来枚举值——同款「用户已删除该画线 → 不应再被拦」的语义（R10 finding 1 先例）。
+    func hasKnownFutureEnumValues(liveIds: Set<DrawingID>) -> Bool {
+        knownFutureEnumPayloads().contains { liveIds.contains($0.id) && !$0.entries.isEmpty }
+    }
+
     /// 两个 JSON 值（JSONSerialization 产物：NSNumber/String/[Any]/[String:Any]/NSNull）是否语义相等——
     /// 各自加 sortedKeys 重序列化后逐字节比较（嵌套 dict 的 key 序不受影响，标量/数组同样适用）。
     private static func jsonValueEqual(_ a: Any, _ b: Any) -> Bool {

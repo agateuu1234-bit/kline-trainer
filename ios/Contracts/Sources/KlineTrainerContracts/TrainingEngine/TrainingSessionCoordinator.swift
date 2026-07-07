@@ -699,9 +699,16 @@ public final class TrainingSessionCoordinator {
         // `loadedDrawingsLossy` 是从不更新的加载快照仍留着）——finalize 已经不会丢失任何东西（用户已表达
         // 删除意愿），却仍会被这道门永久卡死。改按【存活】画线 id（`engine.drawings` 的 id 集）过滤：
         // 只有仍活着的已知画线携带未来字段才拦；`unknownRaw`（未投影进 engine.drawings、不可删）不受影响。
+        // codex whole-branch R18（high）：同一「表结构存不了任意原始字节」的道理，也适用于【已知 key 本身】
+        // 携带的未来枚举值（如 colorToken:"futureNeon"，R16 让 `.known` 对它容错解码、fallback 成 `.orange`）
+        // ——finalize 只把 `engine.drawings`（fallback 后的已知投影）交给表结构持久化，原始未来值不在其中，
+        // 若照常 finalize 会随 pending 一起永久丢失。`hasKnownFutureFields` 只探测 `knownDiskKeys` 之外的
+        // EXTRA key，对「已知 key 自身的未来值」不可见，故需 `hasKnownFutureEnumValues` 单独把关；按存活 id
+        // 过滤（liveIds）——同 `hasKnownFutureFields(liveIds:)` 语义（用户删除该画线后不应再被拦，R10 finding 1 先例）。
         let liveIds = Set(engine.drawings.map { $0.id })
         if !engine.loadedDrawingsLossy.unknownRaw.isEmpty
-            || engine.loadedDrawingsLossy.hasKnownFutureFields(liveIds: liveIds) {
+            || engine.loadedDrawingsLossy.hasKnownFutureFields(liveIds: liveIds)
+            || engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: liveIds) {
             throw AppError.persistence(.dbCorrupted)
         }
         let meta = try reader.loadMeta()
@@ -987,9 +994,14 @@ public final class TrainingSessionCoordinator {
     /// 第 5 个盲区：`.known` 条 raw 自身携带的【未来字段】（`LossyDrawingArray.knownFutureFieldPayloads`，
     /// 同 finalize fail-closed 门共享的判定）此前也从未比较过——working 与 saved 的已知字段/hiddenIds/
     /// unknownRaw/unknownTopLevel 全同、仅某条已知画线 raw 里的未来字段值不同时同样会被误判「无改动」。
-    /// 现比较全部五层：已知画线集+hiddenIds 经 `ReviewNetChange.changed`、lossy `unknownRaw` 内容数组、
-    /// `unknownTopLevel` 有序 entry 数组、known 未来字段有序 payload 数组（四者调用方各自 reconcile/
-    /// 传回后传入，字节级失真下唯一可靠的层，理由见调用点注释）。
+    /// codex whole-branch R18（high）又发现第 6 个盲区：`.known` 条 raw 里【已知 key 自身】携带的未来
+    /// 枚举值（`LossyDrawingArray.knownFutureEnumPayloads`，如 colorToken:"futureNeon"，R16 容错解码
+    /// fallback 后不出现在解码后的 `DrawingObject` 里）——working 与 saved 的已知字段/hiddenIds/
+    /// unknownRaw/unknownTopLevel/未来 EXTRA 字段全同、仅某条已知画线 raw 里的未来枚举值不同时同样会
+    /// 被误判「无改动」。
+    /// 现比较全部六层：已知画线集+hiddenIds 经 `ReviewNetChange.changed`、lossy `unknownRaw` 内容数组、
+    /// `unknownTopLevel` 有序 entry 数组、known 未来字段有序 payload 数组、known 未来枚举值有序 payload
+    /// 数组（各调用方 reconcile/传回后传入，字节级失真下唯一可靠的层，理由见调用点注释）。
     /// 未来字段比较用【已 reconciled 的】`workingLossy`（非 `engine.loadedReviewLossy` 原始快照）——
     /// 原始快照只在 session 载入时种入、`commitReview` 前移 `reviewCommittedLossy` 后不会跟着前移，两者
     /// 会永久失去同步，导致 commit 后即便 working==committed 也被误判「有改动」（已用回归验证：commit 后
@@ -1005,9 +1017,13 @@ public final class TrainingSessionCoordinator {
                                                             committedHiddenIds: reviewCommittedHiddenIds)
         let futureFieldsChanged = !Self.knownFutureFieldPayloadsEqual(
             workingLossy.knownFutureFieldPayloads(), reviewCommittedLossy.knownFutureFieldPayloads())
+        // codex whole-branch R18（high）：第 6 层——已知 key 自身携带的未来枚举值（见函数注释）。
+        let futureEnumValuesChanged = !Self.knownFutureEnumPayloadsEqual(
+            workingLossy.knownFutureEnumPayloads(), reviewCommittedLossy.knownFutureEnumPayloads())
         return knownOrHiddenChanged || workingLossy.unknownRaw != reviewCommittedLossy.unknownRaw
             || workingUnknownTopLevel != reviewCommittedUnknownTopLevel
             || futureFieldsChanged
+            || futureEnumValuesChanged
     }
 
     /// codex WB R9 finding 2：`knownFutureFieldPayloads()` 返回元组数组——元组不满足 `Equatable` 协议
@@ -1017,6 +1033,22 @@ public final class TrainingSessionCoordinator {
         _ b: [(id: String, future: [String: String])]) -> Bool {
         guard a.count == b.count else { return false }
         for i in a.indices where a[i].id != b[i].id || a[i].future != b[i].future { return false }
+        return true
+    }
+
+    /// codex whole-branch R18（high）：`knownFutureEnumPayloads()` 同样返回元组数组（非 Equatable），
+    /// 按序逐条比较 id + entries（`entries` 已在 `knownFutureEnumPayloads` 内按 key 排序，可直接逐项比较）。
+    private static func knownFutureEnumPayloadsEqual(
+        _ a: [(id: String, entries: [(key: String, rawValue: String)])],
+        _ b: [(id: String, entries: [(key: String, rawValue: String)])]) -> Bool {
+        guard a.count == b.count else { return false }
+        for i in a.indices {
+            guard a[i].id == b[i].id, a[i].entries.count == b[i].entries.count else { return false }
+            for j in a[i].entries.indices
+            where a[i].entries[j].key != b[i].entries[j].key || a[i].entries[j].rawValue != b[i].entries[j].rawValue {
+                return false
+            }
+        }
         return true
     }
 

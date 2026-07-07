@@ -646,6 +646,95 @@ struct TrainingSessionPersistenceTests {
         #expect(port.finalizeCallCount == 1)
     }
 
+    // MARK: - codex whole-branch R18：finalize 遇 known drawing 未来枚举值（已知 key）→ fail-closed，不清 pending
+
+    /// resume 一条【已知 toolType，raw 里某已知枚举 key（colorToken）携带当前版本不认识的未来值】的 pending
+    /// （无 unknownRaw、也无未来 EXTRA key）→ finalize 须 fail-closed 拒绝：R16 让 `.known` 对这类值容错
+    /// 解码（colorToken fallback 成 `.orange`），但 finalize 只把 `engine.drawings`（fallback 后的已知
+    /// 投影）交给 `finalizeSession` 的表结构持久化——原始未来值（"futureNeon"）不在其中，若照常 finalize
+    /// 会随 pending 一起永久丢弃且不可逆。此前的门（`hasKnownFutureFields`/`unknownRaw`）都看不到这类
+    /// 「已知 key 自身的未来值」，故须新增 `hasKnownFutureEnumValues` 判定。
+    @Test("finalize: resume 的 pending 已知条携带未来枚举值（colorToken，无 unknownRaw/无未来 EXTRA key）→ 抛 .persistence(.dbCorrupted)，pending 不被清空（codex WB R18，红→绿）")
+    func finalize_knownDrawingHasFutureEnumValue_throwsAndPreservesPending() async throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 1)
+        let spy = Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let raw = #"{"id":"g1","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"colorToken":"futureNeon"}"#
+        let knownDrawing = try JSONDecoder().decode(DrawingObject.self, from: Data(raw.utf8))
+        #expect(knownDrawing.colorToken == .orange)   // 前置：确实 fallback（R16），非 unknownRaw/非未来 EXTRA key
+        let lossy = LossyDrawingArray(elements: [.known(knownDrawing, raw: raw)])
+        #expect(lossy.unknownRaw.isEmpty)
+        #expect(lossy.hasKnownFutureFields(liveIds: [knownDrawing.id]) == false)   // 旧门看不到（证明 R18 缺口）
+        let pos = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000)
+        try pending.savePending(PendingTraining(
+            trainingSetFilename: "set.sqlite", globalTickIndex: 3,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: try JSONEncoder().encode(pos), cashBalance: 90_000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            tradeOperations: [], lossy: lossy, startedAt: 1,
+            accumulatedCapital: 100_000, drawdown: .initial,
+            sessionKey: "SK-known-future-enum"))
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
+            finalization: port,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000)))
+        let engine = try #require(try await coord.resumePending())
+        await #expect(throws: AppError.persistence(.dbCorrupted)) {
+            _ = try await coord.finalize(engine: engine)
+        }
+        #expect(try pending.loadPending() != nil)   // pending 未被清空（未来枚举值数据仍在磁盘）
+        #expect(port.finalizeCallCount == 0)         // 从未到达 finalization port（未清 record/pending）
+    }
+
+    /// 对照组：用户把携带未来枚举值的已知 drawing 删除后（`engine.drawings` 不再含它，只有从不更新的
+    /// `loadedDrawingsLossy` 加载快照还留着）——finalize 此时已不会丢失任何数据（未来值随删除意愿一起
+    /// 不再需要保留），门须按存活画线 id 过滤，不应再 fail-closed 卡死用户（同 R10 finding 1 先例）。
+    @Test("对照：携带未来枚举值的已知 drawing 被用户删除后 → 门不再拦，finalize 成功且清空 pending（codex WB R18）")
+    func finalize_knownDrawingFutureEnumValueDeletedByUser_succeeds() async throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 1)
+        let spy = Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let raw = #"{"id":"g1","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"colorToken":"futureNeon"}"#
+        let knownDrawing = try JSONDecoder().decode(DrawingObject.self, from: Data(raw.utf8))
+        let lossy = LossyDrawingArray(elements: [.known(knownDrawing, raw: raw)])
+        let pos = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000)
+        try pending.savePending(PendingTraining(
+            trainingSetFilename: "set.sqlite", globalTickIndex: 3,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: try JSONEncoder().encode(pos), cashBalance: 90_000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            tradeOperations: [], lossy: lossy, startedAt: 1,
+            accumulatedCapital: 100_000, drawdown: .initial,
+            sessionKey: "SK-known-future-enum-deleted"))
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
+            finalization: port,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000)))
+        let engine = try #require(try await coord.resumePending())
+        #expect(engine.drawings.count == 1)
+        engine.deleteDrawing(at: 0)                       // 用户删除这条携带未来枚举值的画线
+        #expect(engine.drawings.isEmpty)
+        let id = try #require(try await coord.finalize(engine: engine))
+        let (_, _, drawings) = try records.loadRecordBundle(id: id)
+        #expect(drawings.isEmpty)                         // 删除后无 drawing 入账
+        #expect(try pending.loadPending() == nil)         // 正常清空
+        #expect(port.finalizeCallCount == 1)
+    }
+
     @Test("finalize/saveProgress: 传入非活跃 engine → .internalError（engine 身份守门，final-review L2 加固）")
     func finalizeSaveProgress_foreignEngine_throws() async throws {
         let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles())

@@ -337,6 +337,52 @@ struct LossyDrawingArrayTests {
         #expect(!out.contains("futureNeon"))      // 用户主动改的字段：future 值被正确替换（非误保留）
     }
 
+    // codex whole-branch R18（high）：R16 让 `.known` 条对【已知 key 本身】的未来枚举值（如
+    // colorToken:"futureNeon"）容错解码（fallback 默认值），但 R9 加的「未来字段」探测
+    // （`knownFutureFieldPayloads`/`hasKnownFutureFields`）只看 `knownDiskKeys` 之外的 EXTRA 顶层
+    // key——colorToken 本身就在 `knownDiskKeys` 里，未来枚举值对它完全不可见。finalize 门与复盘 dirty
+    // 判定都共享这道探测，导致未来枚举值既不拦 finalize（写入 fallback 默认值到结构化列，永久丢失原始
+    // 未来值）、也不让复盘 dirty 判定发现改动（`clearWorking` 抹掉独有的未来枚举值）。本节测试新增的
+    // `knownFutureEnumPayloads()` 检测入口（红→绿）。
+
+    @Test("R18 红→绿：已知 key 的未来枚举值（colorToken）→ knownFutureEnumPayloads 捕获，旧未来字段门看不到")
+    func knownFutureEnumValueDetectedUnderKnownKey() throws {
+        let raw = #"{"id":"g1","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"colorToken":"futureNeon"}"#
+        let arr = try LossyDrawingArray.decode(Data("[\(raw)]".utf8))
+        #expect(arr.unknownRaw.isEmpty)                    // 未来枚举值不会被洗成 unknownRaw（R16 先例）
+        #expect(arr.hasKnownFutureFields == false)         // 旧「未来 EXTRA key」门看不到它（colorToken 是已知 key）
+        let payloads = arr.knownFutureEnumPayloads()
+        #expect(payloads.count == 1)
+        #expect(payloads[0].id == "g1")
+        #expect(payloads[0].entries.contains { $0.key == "colorToken" && $0.rawValue == "futureNeon" })
+    }
+
+    @Test("R18：未来枚举值出现在嵌套 anchor.period / tailAnchor.period → 同样被检测")
+    func nestedAnchorAndTailAnchorFutureEnumValuesDetected() throws {
+        let raw = #"{"id":"g1","toolType":"text","anchors":[{"period":"futureP","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"tailAnchor":{"period":"futureQ","candleIndex":2,"price":10.0}}"#
+        let arr = try LossyDrawingArray.decode(Data("[\(raw)]".utf8))
+        let entries = arr.knownFutureEnumPayloads()[0].entries
+        #expect(entries.contains { $0.key == "anchors[0].period" && $0.rawValue == "futureP" })
+        #expect(entries.contains { $0.key == "tailAnchor.period" && $0.rawValue == "futureQ" })
+    }
+
+    @Test("R18 对照：所有已知枚举字段值均为当前 case → knownFutureEnumPayloads 该条 entries 为空")
+    func noFutureEnumValueYieldsEmptyEntries() throws {
+        let raw = #"{"id":"K","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}"#
+        let arr = try LossyDrawingArray.decode(Data(("[" + raw + "]").utf8))
+        let payloads = arr.knownFutureEnumPayloads()
+        #expect(payloads.count == 1)
+        #expect(payloads[0].entries.isEmpty)
+    }
+
+    @Test("R18：hasKnownFutureEnumValues(liveIds:) 按存活 id 过滤（镜像 hasKnownFutureFields(liveIds:) 语义，R10 finding 1 先例）")
+    func hasKnownFutureEnumValuesRespectsLiveIds() throws {
+        let raw = #"{"id":"g1","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"colorToken":"futureNeon"}"#
+        let arr = try LossyDrawingArray.decode(Data("[\(raw)]".utf8))
+        #expect(arr.hasKnownFutureEnumValues(liveIds: ["g1"]) == true)
+        #expect(arr.hasKnownFutureEnumValues(liveIds: []) == false)      // 被删（不在 liveIds）→ 不拦
+    }
+
     @Test("编辑把可选已知字段 tailAnchor 清空 → 输出不再含 tailAnchor（不从旧 raw 复活）、未来 key 仍在")
     func editClearingOptionalKnownFieldRemovesIt() throws {
         // 原 raw 有 tailAnchor（带框标注）+ 未来 key

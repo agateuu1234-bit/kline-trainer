@@ -470,6 +470,36 @@ struct CoordinatorLossyPreserveTests {
         #expect(workingCol?.contains(#""futureField":2"#) == true)  // working 侧未来字段值未丢失
     }
 
+    @Test("复盘净改动须纳入 known 未来枚举值：working 与 saved 已知字段([g1]解码全同，colorToken 各自 fallback 成 .orange)+hiddenIds+unknownRaw+unknownTopLevel+未来 EXTRA 字段 均相同，仅 g1 raw 携带的 colorToken 未来值(futureNeon vs futureCyan)不同 → reviewNetChanged()/persistReviewWorkingIfChanged 均判「有改动」，working 行不被 clearWorking 抹掉（codex WB R18，红→绿）")
+    func reviewNetChangeKnownFutureEnumValueOnlyDiffPreventsClearWorking() async throws {
+        let (url, appDB) = try makeFreshDB()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let rid = try makeRecord(appDB)
+        // g1 的已知字段两侧完全相同（colorToken 未来值 R16 均 fallback 成 .orange），hiddenIds/unknownRaw/
+        // unknownTopLevel/已知未来 EXTRA 字段全同——唯独「已知条自身 colorToken 的未来枚举值」不同
+        // （"futureNeon" vs "futureCyan"），这是此前 5 项判定里唯独漏比的第 6 项（R9 finding 2 只比了
+        // knownDiskKeys 之外的 EXTRA key，colorToken 本身在 knownDiskKeys 内，对那道判定不可见）。
+        func knownWithColorToken(_ id: String, _ token: String) -> String {
+            known(id).replacingOccurrences(of: #""colorToken":"orange""#, with: #""colorToken":"\#(token)""#)
+        }
+        try seedReviewSavedAndWorking(appDB, recordId: rid,
+                                       savedWrapperJSON: #"{"drawings":[\#(knownWithColorToken("g1", "futureNeon"))],"hiddenIds":[]}"#,
+                                       stepTick: 3,
+                                       workingWrapperJSON: #"{"drawings":[\#(knownWithColorToken("g1", "futureCyan"))],"hiddenIds":[]}"#)
+        let coord = makeCoordinator(appDB)
+        let engine = try #require(try await coord.resumePendingReview(recordId: rid))  // resume：known+hiddenIds+unknownRaw+unknownTopLevel+未来EXTRA字段 均==committed，仅 colorToken 未来值不同
+        // reviewNetChanged() 须靠 known 未来枚举值比较单独识别出「有改动」（同 R4/R5/R8/R9 finding2 修的其余 5 项盲区场景）。
+        #expect(coord.reviewNetChanged() == true)
+        // 零画线编辑——persistReviewWorkingIfChanged 同款须判「有改动」，working 行（含其未来枚举值）保留。
+        try coord.persistReviewWorkingIfChanged(engine: engine)
+        let workingCol: String? = try await appDB.dbQueue.read {
+            try Row.fetchOne($0, sql: "SELECT working_drawings FROM review_archive WHERE record_id=\(rid)")?["working_drawings"]
+        }
+        // 修复前：只比 5 项 → 误判「无改动」→ clearWorking 抹掉 working 行 → working 独有的 futureCyan 永久丢失。
+        #expect(workingCol != nil)                                          // working 行未被 clearWorking 清空
+        #expect(workingCol?.contains(#""colorToken":"futureCyan""#) == true)  // working 侧未来枚举值未丢失
+    }
+
     // MARK: - load 时归一化重复已知 id（codex WB R8 finding 2）：resume 之后 autosave（saveProgress）不 brick
 
     @Test("pending_training: resume(pending 含重复非空已知 id)→saveProgress(autosave) 不抛，持久化 id 互不相同（codex WB R8 finding 2）")
