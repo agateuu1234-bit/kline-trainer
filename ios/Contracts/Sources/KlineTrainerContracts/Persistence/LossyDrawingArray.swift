@@ -131,8 +131,18 @@ public struct LossyDrawingArray: Equatable, Sendable {
                 // 一个不可见、删不掉、永远无法 finalize 的会话里，反而绕开了 `.dbCorrupted` 本该触发的恢复路径。
                 // 只有"合法 JSON 对象 + 带非空字符串 toolType"才算「像未来画线」，才保 unknownRaw（前向兼容）；
                 // 其余（解析失败/标量/数组/无 toolType 的对象，含 `{}`）一律 fail-closed 抛 `.dbCorrupted`。
+                //
+                // codex whole-branch R12-high：上面这道门仍太松——一个 toolType 是【当前版本已认识】的合法
+                // 工具（如 "horizontal"）、但 `DrawingObject` 解码仍失败（缺必填字段，如仅 `{"toolType":
+                // "horizontal"}`；或字段类型错，如 `thickness` 是字符串），同样满足"合法 JSON 对象 + 非空
+                // 字符串 toolType"，会被上面这道门误判成"未来画线"洗白成 unknownRaw——但它根本不是本版本不
+                // 认识的未来工具，而是当前版本认识却损坏的数据，应 fail-closed 走 `.dbCorrupted` 恢复路径
+                // （否则这条损坏数据会 durable/invisible/删不掉，永久卡住 finalize）。真正的「未来画线」判据
+                // 是 toolType 不在当前 `DrawingToolType` 枚举里（`DrawingToolType(rawValue:) == nil`）——
+                // 只有这种才保 unknownRaw；已识别工具解码失败 → 损坏 → 抛错。
                 guard let obj = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
-                      let toolType = obj["toolType"] as? String, !toolType.isEmpty else {
+                      let toolType = obj["toolType"] as? String, !toolType.isEmpty,
+                      DrawingToolType(rawValue: toolType) == nil else {
                     throw AppError.persistence(.dbCorrupted)
                 }
                 elems.append(.unknownRaw(raw))      // 原始文本，字节级保留（【不】重序列化）、【保序】

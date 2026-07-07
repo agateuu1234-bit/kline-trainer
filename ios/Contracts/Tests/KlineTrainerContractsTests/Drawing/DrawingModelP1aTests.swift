@@ -169,6 +169,24 @@ struct LossyDrawingArrayTests {
         #expect(arr.unknownRaw[0].contains("futureTool"))
     }
 
+    // MARK: - codex WB R12 finding：已知 toolType 但 DrawingObject 解码失败 = 损坏，不得被 R11 的门洗白成 unknownRaw
+
+    @Test("已知 toolType（horizontal）但缺必填字段 → decode 抛 .dbCorrupted，不再洗白成 unknownRaw（codex WB R12-high 红→绿）")
+    func knownToolTypeMissingRequiredFieldsThrows() throws {
+        let json = Data(#"[{"toolType":"horizontal"}]"#.utf8)
+        #expect(throws: AppError.persistence(.dbCorrupted)) {
+            _ = try LossyDrawingArray.decode(json)
+        }
+    }
+
+    @Test("已知 toolType（horizontal）但字段类型错（thickness 是字符串）→ decode 抛 .dbCorrupted（codex WB R12-high 红→绿）")
+    func knownToolTypeWrongFieldTypeThrows() throws {
+        let json = Data(#"[{"toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"thickness":"not-a-number"}]"#.utf8)
+        #expect(throws: AppError.persistence(.dbCorrupted)) {
+            _ = try LossyDrawingArray.decode(json)
+        }
+    }
+
     @Test("保序：[known, unknownFuture, known] 往返后元素顺序逐一保持")
     func preservesElementOrder() throws {
         let kA = #"{"id":"A","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0}"#
