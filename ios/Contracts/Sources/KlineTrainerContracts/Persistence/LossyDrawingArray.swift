@@ -215,20 +215,46 @@ public struct LossyDrawingArray: Equatable, Sendable {
         knownFutureFieldPayloads().contains { liveIds.contains($0.id) && !$0.future.isEmpty }
     }
 
-    /// 把当前已知字段【覆盖进原始 JSON 对象、保留其未知 key】（编辑路径用；未知 key 必须存活，
+    /// 两个 JSON 值（JSONSerialization 产物：NSNumber/String/[Any]/[String:Any]/NSNull）是否语义相等——
+    /// 各自加 sortedKeys 重序列化后逐字节比较（嵌套 dict 的 key 序不受影响，标量/数组同样适用）。
+    private static func jsonValueEqual(_ a: Any, _ b: Any) -> Bool {
+        guard let da = try? JSONSerialization.data(withJSONObject: a, options: [.sortedKeys, .fragmentsAllowed]),
+              let db = try? JSONSerialization.data(withJSONObject: b, options: [.sortedKeys, .fragmentsAllowed])
+        else { return false }
+        return da == db
+    }
+
+    /// 把当前已知字段【字段级覆盖进原始 JSON 对象、保留其未知 key】（编辑路径用；未知 key 必须存活，
     /// 字节不必全等——codex plan-R12）。原 raw 非对象 → fail-closed（保守）。
-    static func mergeKnownFields(into rawJSON: String, from obj: DrawingObject) throws -> String {
+    ///
+    /// codex whole-branch R17（high）：R16 让 `.known` 容忍【未来枚举值】（如 colorToken:"futureNeon"
+    /// 回退 `.orange`）——但若此处对每个已知 key 无脑用 `cur`（fallback 解码后的对象）整体覆盖，与该 key
+    /// 是否真被编辑无关：用户只改了 thickness 这类无关字段，colorToken 也会被覆盖成 fallback 值 "orange"，
+    /// 原始未来值 "futureNeon" 随之【永久摧毁】（非格式差异，是数据丢失）。修复：额外传入 `old`（编辑前，
+    /// 同样 fallback 解码的对象），逐 key 比较 `cur`/`old` 的编码值——只有【真变化】的 key 才覆盖 `dict`；
+    /// 未变化的 key 保留 `dict` 里的原始字节（可能含未来枚举值）。
+    static func mergeKnownFields(into rawJSON: String, from cur: DrawingObject, old: DrawingObject) throws -> String {
         guard var dict = (try? JSONSerialization.jsonObject(with: Data(rawJSON.utf8))) as? [String: Any] else {
             throw AppError.persistence(.dbCorrupted)          // 原 raw 不是对象 → 无法安全 merge
         }
-        guard let objDict = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(obj))) as? [String: Any] else {
+        guard let curDict = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(cur))) as? [String: Any],
+              let oldDict = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(old))) as? [String: Any]
+        else {
             throw AppError.persistence(.dbCorrupted)
         }
-        // ① 清除「已知 key 集里、但当前编码省略了的」可选已知字段（值改成 nil，如 tailAnchor）——
-        //    否则旧 raw 里的该 key 会被误当"未知 key"保留、save/load 后复活（codex plan-R13-high）。
-        for k in knownDiskKeys where objDict[k] == nil { dict.removeValue(forKey: k) }
-        // ② 覆盖/新增当前编码里的已知 key；dict 里【非已知 key 集】的（未来未知 key）原样保留。
-        for (k, v) in objDict { dict[k] = v }
+        for k in knownDiskKeys {
+            switch (curDict[k], oldDict[k]) {
+            case (nil, nil):
+                continue                                          // 该 key 从未出现（如 tailAnchor 两侧都 nil）
+            case (nil, .some):
+                dict.removeValue(forKey: k)                        // 编辑清空（如 tailAnchor 被清）→ 不复活（R13）
+            case (.some(let cv), let ov):
+                if let ov, jsonValueEqual(cv, ov) {
+                    continue                                        // 未变化 → 保留 dict 原始字节（保未来枚举值，R17）
+                }
+                dict[k] = cv                                        // 真变化（含新出现）→ 覆盖成编辑后的值
+            }
+        }
         let merged = try JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
         return String(decoding: merged, as: UTF8.self)
     }
@@ -262,7 +288,7 @@ public struct LossyDrawingArray: Equatable, Sendable {
                 if cur == old {
                     out.append(.known(old, raw: raw))                         // 未编辑 → 原样 raw（保未来字段）
                 } else {
-                    let merged = try LossyDrawingArray.mergeKnownFields(into: raw, from: cur)
+                    let merged = try LossyDrawingArray.mergeKnownFields(into: raw, from: cur, old: old)
                     out.append(.known(cur, raw: merged))                      // 已编辑 → merge 保未知 key
                 }
                 emitted.insert(old.id)
@@ -302,7 +328,7 @@ public struct LossyDrawingArray: Equatable, Sendable {
                         locked: d.locked, text: d.text, fontSize: d.fontSize,
                         textColorToken: d.textColorToken, textForm: d.textForm, tailAnchor: d.tailAnchor)
                     seen.insert(renamed.id)
-                    let mergedRaw = try LossyDrawingArray.mergeKnownFields(into: raw, from: renamed)
+                    let mergedRaw = try LossyDrawingArray.mergeKnownFields(into: raw, from: renamed, old: d)
                     out.append(.known(renamed, raw: mergedRaw))
                 } else {
                     out.append(.known(d, raw: raw))                        // 唯一非空 id → 字节不变

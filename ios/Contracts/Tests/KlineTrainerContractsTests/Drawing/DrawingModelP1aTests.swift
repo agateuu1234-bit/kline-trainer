@@ -299,6 +299,44 @@ struct LossyDrawingArrayTests {
         #expect(out.contains("\"thickness\":5"))               // 已知字段已更新
     }
 
+    // codex whole-branch R17 finding（high）：R16 让 .known 条容忍【未来枚举值】（如 colorToken:"futureNeon"
+    // → 回退 .orange），但编辑路径的 `mergeKnownFields` 之前对每个已知 key 无脑用 cur（fallback 解码后的对象）
+    // 覆盖，与「是否真的被编辑」无关——用户只改了 thickness 这类无关字段，colorToken 也会被覆盖成 fallback
+    // 值 "orange"，原始的 "futureNeon" 未来值随之被【永久摧毁】（非仅格式变化，是数据丢失）。
+    // 修复：mergeKnownFields 须字段级比对 cur 与 old（编辑前，同样 fallback 解码），只有真变化的 key 才覆盖。
+    @Test("codex WB R17-high 红→绿：编辑不相关字段（thickness）不得摧毁未改动 key 的未来枚举值（colorToken futureNeon 幸存）")
+    func editingUnrelatedFieldPreservesFutureEnumValue() throws {
+        let raw = #"{"id":"K","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"futureNeon","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}"#
+        let arr = try LossyDrawingArray.decode(Data(("[" + raw + "]").utf8))
+        let old = arr.drawings[0]
+        #expect(old.colorToken == .orange)     // 未来值回退默认（R16）——用户未触碰这个字段
+        let edited = DrawingObject(id: old.id, toolType: old.toolType, anchors: old.anchors,
+            isExtended: old.isExtended, panelPosition: old.panelPosition, revealTick: old.revealTick,
+            period: old.period, lineSubType: old.lineSubType, lineStyle: old.lineStyle,
+            thickness: 5, colorToken: old.colorToken, labelMode: old.labelMode, locked: old.locked,
+            text: old.text, fontSize: old.fontSize, textColorToken: old.textColorToken,
+            textForm: old.textForm, tailAnchor: old.tailAnchor)     // 仅改 thickness 1→5
+        let out = String(decoding: try arr.reconciled(currentKnown: [edited]).encoded(), as: UTF8.self)
+        #expect(out.contains("\"futureNeon\""))   // 未改动的 colorToken 保原始未来值（不被 fallback 覆盖摧毁）
+        #expect(out.contains("\"thickness\":5"))  // 编辑的字段确实更新
+    }
+
+    @Test("codex WB R17 对照：编辑 colorToken 本身 → 用户意图覆盖生效（futureNeon 被正确替换，证明字段级粒度）")
+    func editingColorTokenItselfOverwritesFutureValue() throws {
+        let raw = #"{"id":"K","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"futureNeon","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}"#
+        let arr = try LossyDrawingArray.decode(Data(("[" + raw + "]").utf8))
+        let old = arr.drawings[0]
+        let edited = DrawingObject(id: old.id, toolType: old.toolType, anchors: old.anchors,
+            isExtended: old.isExtended, panelPosition: old.panelPosition, revealTick: old.revealTick,
+            period: old.period, lineSubType: old.lineSubType, lineStyle: old.lineStyle,
+            thickness: old.thickness, colorToken: .blue, labelMode: old.labelMode, locked: old.locked,
+            text: old.text, fontSize: old.fontSize, textColorToken: old.textColorToken,
+            textForm: old.textForm, tailAnchor: old.tailAnchor)    // 用户主动把 colorToken 改成 .blue
+        let out = String(decoding: try arr.reconciled(currentKnown: [edited]).encoded(), as: UTF8.self)
+        #expect(out.contains("\"colorToken\":\"blue\""))
+        #expect(!out.contains("futureNeon"))      // 用户主动改的字段：future 值被正确替换（非误保留）
+    }
+
     @Test("编辑把可选已知字段 tailAnchor 清空 → 输出不再含 tailAnchor（不从旧 raw 复活）、未来 key 仍在")
     func editClearingOptionalKnownFieldRemovesIt() throws {
         // 原 raw 有 tailAnchor（带框标注）+ 未来 key
