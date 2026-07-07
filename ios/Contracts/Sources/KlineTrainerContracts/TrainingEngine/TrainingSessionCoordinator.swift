@@ -668,13 +668,15 @@ public final class TrainingSessionCoordinator {
     /// 通过 SessionFinalizationPort 单事务执行（§4.7b）；同 sessionKey 重试幂等（§4.7c）。
     public func finalize(engine: TrainingEngine) async throws -> Int64? {
         guard engine.flow.shouldSaveRecord() else { return nil }   // D2：Review/Replay 不入账（fence 前 return）
-        await fenceAndDrainAutosaves()           // §4.7d：单事务入账前排空排队 autosave，防终态脏写复活 pending
-        // D4 加固（final-review L2）：engine 必须是当前活跃 session 的引擎，否则会把活跃 session 的
-        // 文件/股票元数据记到外来 engine 的交易数据上 → 写错历史记录。activeEngine 为 nil 时亦在此拒绝。
-        guard activeEngine === engine, let file = activeFile, let reader = activeReader,
-              let key = activeSessionKey else {
-            throw AppError.internalError(module: "E6b", detail: "finalize without active session context")
-        }
+        // codex whole-branch R21（high）：下面这道可恢复校验门（unknownRaw/未来字段/未来枚举值）纯读传入
+        // `engine` 参数的 `engine.drawings`/`engine.loadedDrawingsLossy`，不依赖 `fenceAndDrainAutosaves`
+        // 排空的在飞 autosave、也不依赖下面 D4 身份 guard 校验出的 activeFile/reader/key——故提到 fence 之前
+        // 执行。此前顺序是 fence 先行（置 `terminating=true`）、这道门后验：门 throw 时 `finalize` 提前
+        // 退出，但 `terminating` 已被置 true 且永不复位（唯一复位点是下个 session 的
+        // `resetAutosaveState`）——此后整个当前会话的 `requestAutosave` 都静默 no-op（guard
+        // `!terminating`）。用户按 R20 把未来值编辑成受支持值这类恢复性操作，若在成功重试 finalize 前
+        // 触发任何 autosave，会因此永远无法落盘，一旦崩溃/被杀进程即丢失——架空了本门 fail-closed 保留
+        // pending 意图保证的「可恢复」。门先验、fence 后置：门 throw 时尚未 fence，autosave 不受影响。
         // codex whole-branch R4 finding 2：永久记录表 `drawings` 按行结构化持久化（一行一个已知
         // `DrawingObject` 字段集），无法携带任意 `unknownRaw` 原始字节（扩表存原文超出 P1a scope）。
         // 一个被 resume 且历经 autosave 存活下来的 pending，若仍带着 unknownRaw（未来客户端画的、
@@ -724,6 +726,16 @@ public final class TrainingSessionCoordinator {
             || effectiveLossy.hasKnownFutureFields(liveIds: liveIds)
             || effectiveLossy.hasKnownFutureEnumValues(liveIds: liveIds) {
             throw AppError.persistence(.dbCorrupted)
+        }
+        // §4.7d：单事务入账前排空排队 autosave，防终态脏写复活 pending（codex WB R21：移到上面可恢复
+        // 校验门之后——门已通过，本次 finalize 大概率会成功提交，此后才 fence 是安全的；若门改为在此
+        // 之后仍会 throw 的新增校验，同理须在 fence 之前）。
+        await fenceAndDrainAutosaves()
+        // D4 加固（final-review L2）：engine 必须是当前活跃 session 的引擎，否则会把活跃 session 的
+        // 文件/股票元数据记到外来 engine 的交易数据上 → 写错历史记录。activeEngine 为 nil 时亦在此拒绝。
+        guard activeEngine === engine, let file = activeFile, let reader = activeReader,
+              let key = activeSessionKey else {
+            throw AppError.internalError(module: "E6b", detail: "finalize without active session context")
         }
         let meta = try reader.loadMeta()
         let starting = engine.initialCapital                       // D1：起始资金

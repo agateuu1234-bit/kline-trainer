@@ -799,6 +799,71 @@ struct TrainingSessionPersistenceTests {
         #expect(port.finalizeCallCount == 1)
     }
 
+    // MARK: - codex whole-branch R21：finalize 失败（可恢复门）不得永久栅栏 autosave
+
+    /// resume 一条携带未来枚举值（colorToken:"futureNeon"）的已知画线的 pending → finalize 按 R18 门
+    /// fail-closed 拒绝（未编辑）。此前实现顺序是 `fenceAndDrainAutosaves()`（置 `terminating=true`）先于
+    /// 这道可恢复校验门——门 throw 时 `finalize` 提前退出，`terminating` 永久卡 true，此后**整个会话**
+    /// 的 `requestAutosave` 都静默 no-op（guard `!terminating`）。用户按 R20 把未来值编辑成受支持值后，
+    /// 若在成功重试 finalize 之前触发任何 autosave（tick 推进/交易/后台 flush）——这些恢复性编辑（以及
+    /// 其后的任何操作）永远不会落盘，一旦崩溃/被杀进程即丢失，架空了 fail-closed 门本该保证的「可恢复」
+    /// 承诺。本测试证明修复后：失败 finalize 不再遗留栅栏，编辑后 `requestAutosave` 仍正常落盘。
+    @Test("finalize: 可恢复门（未来枚举值）失败后 autosave 未被永久栅栏——编辑修复后 requestAutosave 仍正常落盘（codex WB R21，红→绿）")
+    func finalize_recoverableGateFailure_doesNotPermanentlyFenceAutosave() async throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 1)
+        let spy = Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let raw = #"{"id":"g1","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"colorToken":"futureNeon"}"#
+        let knownDrawing = try JSONDecoder().decode(DrawingObject.self, from: Data(raw.utf8))
+        #expect(knownDrawing.colorToken == .orange)   // 前置：确实 fallback（R16），非 unknownRaw/非未来 EXTRA key
+        let lossy = LossyDrawingArray(elements: [.known(knownDrawing, raw: raw)])
+        let pos = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000)
+        try pending.savePending(PendingTraining(
+            trainingSetFilename: "set.sqlite", globalTickIndex: 3,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: try JSONEncoder().encode(pos), cashBalance: 90_000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            tradeOperations: [], lossy: lossy, startedAt: 1,
+            accumulatedCapital: 100_000, drawdown: .initial,
+            sessionKey: "SK-known-future-enum-fence-recovery"))
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
+            finalization: port,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000)))
+        let engine = try #require(try await coord.resumePending())
+        #expect(engine.drawings.count == 1)
+        // 第一次 finalize：未编辑，未来枚举值仍在 → 门 fail-closed 拒绝（同 R18，行为不变）。
+        await #expect(throws: AppError.persistence(.dbCorrupted)) {
+            _ = try await coord.finalize(engine: engine)
+        }
+        #expect(try pending.loadPending() != nil)   // pending 未被清空（R18 既有行为不变）
+        // 用户把 colorToken 编辑成受支持值（同 R20 手法：删+同 id 追加新值，reconciled 按 id 归并视为编辑）。
+        let edited = DrawingObject(
+            id: knownDrawing.id, toolType: knownDrawing.toolType, anchors: knownDrawing.anchors,
+            isExtended: knownDrawing.isExtended, panelPosition: knownDrawing.panelPosition,
+            revealTick: knownDrawing.revealTick, period: knownDrawing.period,
+            lineSubType: knownDrawing.lineSubType, lineStyle: knownDrawing.lineStyle,
+            thickness: knownDrawing.thickness, colorToken: .blue, labelMode: knownDrawing.labelMode,
+            locked: knownDrawing.locked, text: knownDrawing.text, fontSize: knownDrawing.fontSize,
+            textColorToken: knownDrawing.textColorToken, textForm: knownDrawing.textForm,
+            tailAnchor: knownDrawing.tailAnchor)
+        engine.deleteDrawing(at: 0)
+        engine.appendDrawing(edited)
+        // 失败 finalize 之后——但**成功重试之前**——触发一次 autosave（等价 tick 推进/交易的 dirty 动作）。
+        // 若 `terminating` 仍被永久卡 true（本 bug），本次 request 会静默 no-op，pending 不会反映编辑。
+        coord.requestAutosave(engine: engine, immediate: true)
+        await coord.drainAutosaveForTesting()
+        let afterAutosave = try pending.loadPending()
+        #expect(afterAutosave?.lossy.drawings.first?.colorToken == .blue)   // autosave 仍正常工作，未被永久栅栏
+    }
+
     @Test("finalize/saveProgress: 传入非活跃 engine → .internalError（engine 身份守门，final-review L2 加固）")
     func finalizeSaveProgress_foreignEngine_throws() async throws {
         let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles())
