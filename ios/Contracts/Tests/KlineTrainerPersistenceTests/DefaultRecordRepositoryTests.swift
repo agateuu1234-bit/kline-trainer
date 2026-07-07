@@ -157,6 +157,55 @@ final class DefaultRecordRepositoryTests: XCTestCase {
         XCTAssertEqual(Set(bundle.2.map { $0.toolType.rawValue }), ["horizontal", "trend"])  // 内容保留
     }
 
+    // 用例 9（codex whole-branch R15-high 修复）：finalized 行 KNOWN tool_type + style_json 含
+    // 未知 future 枚举值（版本偏斜：更新版本 app 写入的新 colorToken）→ loadRecordBundle 必须
+    // 成功加载（未知字段回退默认样式），不能因单个未来枚举值 throw .dbCorrupted 拖垮整条记录。
+    func test_loadRecordBundle_futureColorToken_fallsBackNotCorrupted() throws {
+        let recordId = try db.insertRecord(makeRecord(), ops: [], drawings: [])
+
+        let raw = try AppDBFixture.openRaw(at: dbURL)
+        let anchorsJSON = "[{\"period\":\"daily\",\"candleIndex\":1,\"price\":10.0}]"
+        let futureStyleJSON = """
+            {"period":"daily","lineSubType":"straight","lineStyle":"solid","thickness":1,\
+            "colorToken":"futureNeon","labelMode":"hidden","locked":false,"text":"",\
+            "fontSize":14,"textColorToken":"orange","textForm":"plain"}
+            """
+        try raw.write { txDb in
+            try txDb.execute(sql: """
+                INSERT INTO drawings
+                  (record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, draw_uuid, style_json)
+                VALUES (?, 'horizontal', 0, 0, ?, 0, 'future-style-uuid', ?)
+                """, arguments: [recordId, anchorsJSON, futureStyleJSON])
+        }
+
+        let bundle = try db.loadRecordBundle(id: recordId)
+        XCTAssertEqual(bundle.2.count, 1)
+        XCTAssertEqual(bundle.2[0].toolType, .horizontal)
+        XCTAssertEqual(bundle.2[0].colorToken, .orange)   // 未知 raw value 回退默认，不 throw
+    }
+
+    // 用例 10（同一 finding，anchors 列 Period 版本容错）：anchors JSON 内嵌未知 future Period
+    // raw value → 同样回退默认 period，不 throw .dbCorrupted。
+    func test_loadRecordBundle_futurePeriodInAnchors_fallsBackNotCorrupted() throws {
+        let recordId = try db.insertRecord(makeRecord(), ops: [], drawings: [])
+
+        let raw = try AppDBFixture.openRaw(at: dbURL)
+        let futureAnchorsJSON = "[{\"period\":\"quarterly\",\"candleIndex\":5,\"price\":20.0}]"
+        try raw.write { txDb in
+            try txDb.execute(sql: """
+                INSERT INTO drawings
+                  (record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, draw_uuid, style_json)
+                VALUES (?, 'trend', 0, 0, ?, 0, 'future-period-uuid', NULL)
+                """, arguments: [recordId, futureAnchorsJSON])
+        }
+
+        let bundle = try db.loadRecordBundle(id: recordId)
+        XCTAssertEqual(bundle.2.count, 1)
+        XCTAssertEqual(bundle.2[0].anchors.count, 1)
+        XCTAssertEqual(bundle.2[0].anchors[0].period, .daily)   // 未知 raw value 回退默认，不 throw
+        XCTAssertEqual(bundle.2[0].anchors[0].candleIndex, 5)
+    }
+
     // MARK: - Helpers
 
     private func makeRecord(createdAt: Int64 = 1_700_000_000_000,

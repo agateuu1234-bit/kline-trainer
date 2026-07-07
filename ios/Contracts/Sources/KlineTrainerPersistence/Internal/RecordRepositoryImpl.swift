@@ -200,7 +200,10 @@ enum RecordRepositoryImpl {
         let toolRaw: String = row["tool_type"]
         guard let tool = DrawingToolType(rawValue: toolRaw) else { return nil }   // 未知→跳过，不 coerce .horizontal
         let anchorsJSON: String = row["anchors"]
-        let anchors: [DrawingAnchor] = try jsonDecode(anchorsJSON, as: [DrawingAnchor].self)
+        // codex whole-branch R15（high）：版本容错解码 —— 未知 future Period raw value（如更新版本
+        // app 写入的新周期）用 LossyAnchor 兜底回退 .daily，不 throw（同下方 DrawingStyle 同一原则）。
+        let anchors: [DrawingAnchor] = try jsonDecode(anchorsJSON, as: [LossyAnchor].self)
+            .map { $0.toDrawingAnchor() }
         let drawUuid: String = row["draw_uuid"]
         let isExt = (row["is_extended"] as Int) != 0
         // NULL style_json（旧行）→ **行感知兜底**：lineSubType 由 is_extended 派生（true→.ray/false→.straight）、
@@ -217,8 +220,25 @@ enum RecordRepositoryImpl {
             textColorToken: style.textColorToken, textForm: style.textForm, tailAnchor: style.tailAnchor)
     }
 
+    /// anchors 列（及 DrawingStyle.tailAnchor）的版本容错解码载体：Period 先解出原始 rawValue 再映射，
+    /// 未知 future 值（如更新版本 app 写入的新周期）→ 回退 `.daily`，不 throw（codex whole-branch R15-high）。
+    private struct LossyAnchor: Decodable {
+        let period: String
+        let candleIndex: Int
+        let price: Double
+        func toDrawingAnchor() -> DrawingAnchor {
+            DrawingAnchor(period: Period(rawValue: period) ?? .daily, candleIndex: candleIndex, price: price)
+        }
+    }
+
     /// style_json 列的 payload 结构 = 除 id/toolType/anchors/isExtended/panelPosition/reveal_tick 外的
     /// 样式/文本字段束（这些已是独立列，不重复存）。
+    ///
+    /// codex whole-branch R15（high）：自定义 `init(from:)` 替换合成 Decodable —— finalized 行
+    /// 结构化列无法字节级保真未来值（不同于 pending blob 的 lossy 层），故版本容错的正确姿势是
+    /// **未知 raw-value 枚举字段回退默认值，绝不 throw**：否则单个未来颜色/线型/label/文本形态值
+    /// 会让 `loadRecordBundle` 整条记录 `.dbCorrupted`（连同其它本可正常显示的画线一起读不出来）。
+    /// 写路径（`encode(to:)`，仍合成）不变——只加宽读容忍度。
     private struct DrawingStyle: Codable {
         var period: Period; var lineSubType: LineSubType; var lineStyle: LineStyle
         var thickness: Int; var colorToken: DrawingColorToken; var labelMode: LabelMode
@@ -239,6 +259,35 @@ enum RecordRepositoryImpl {
             s.period = period
             s.lineSubType = isExtended ? .ray : .straight   // spec §11.1/§4.2：旧 isExtended→lineSubType
             return s
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case period, lineSubType, lineStyle, thickness, colorToken, labelMode
+            case locked, text, fontSize, textColorToken, textForm, tailAnchor
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            let d = DrawingStyle.defaults
+            period = try c.decodeIfPresent(String.self, forKey: .period)
+                .flatMap(Period.init(rawValue:)) ?? d.period
+            lineSubType = try c.decodeIfPresent(String.self, forKey: .lineSubType)
+                .flatMap(LineSubType.init(rawValue:)) ?? d.lineSubType
+            lineStyle = try c.decodeIfPresent(String.self, forKey: .lineStyle)
+                .flatMap(LineStyle.init(rawValue:)) ?? d.lineStyle
+            thickness = try c.decodeIfPresent(Int.self, forKey: .thickness) ?? d.thickness
+            colorToken = try c.decodeIfPresent(String.self, forKey: .colorToken)
+                .flatMap(DrawingColorToken.init(rawValue:)) ?? d.colorToken
+            labelMode = try c.decodeIfPresent(String.self, forKey: .labelMode)
+                .flatMap(LabelMode.init(rawValue:)) ?? d.labelMode
+            locked = try c.decodeIfPresent(Bool.self, forKey: .locked) ?? d.locked
+            text = try c.decodeIfPresent(String.self, forKey: .text) ?? d.text
+            fontSize = try c.decodeIfPresent(Int.self, forKey: .fontSize) ?? d.fontSize
+            textColorToken = try c.decodeIfPresent(String.self, forKey: .textColorToken)
+                .flatMap(DrawingColorToken.init(rawValue:)) ?? d.textColorToken
+            textForm = try c.decodeIfPresent(String.self, forKey: .textForm)
+                .flatMap(TextForm.init(rawValue:)) ?? d.textForm
+            tailAnchor = try c.decodeIfPresent(LossyAnchor.self, forKey: .tailAnchor)?.toDrawingAnchor()
         }
     }
 
