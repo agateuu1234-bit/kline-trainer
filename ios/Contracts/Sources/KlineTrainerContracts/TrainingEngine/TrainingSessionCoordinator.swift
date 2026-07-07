@@ -682,18 +682,13 @@ public final class TrainingSessionCoordinator {
         // 再清空 pending——这些未来条会随 pending 一起永久消失，且不可逆（表结构，非 blob，无法回滚）。
         // Fail-closed：在此检出并拒绝——不清 pending（保留在磁盘，用户须用支持这些工具的更新版本 app
         // 打开本条 pending 才能真正 finalize），比静默永久丢弃更诚实。
-        // codex whole-branch R6：本门只需回答「加载来的 lossy 是否携带 unknownRaw」——`loadedDrawingsLossy`
-        // 是 resume/load 时种入、从不被编辑的原始快照，直接读它的 `.unknownRaw` 即可，无需（也不应）像上面
-        // 注释描述的那样先 `reconciled(currentKnown:)`。`reconciled` 还会 fail-closed 拒绝重复/空 id（对
-        // autosave/save 路径是正确的保护），但拿来做这里的 unknownRaw 探测会误伤：一个仅含【重复非空已知 id、
-        // 无 unknownRaw】的 pending（`RecordRepositoryImpl.insertRecord` 的去重修复本可安全接住）会被这道门
-        // 提前拒绝、永久卡死——两个各自正确的修复互相冲突。改直接查 `unknownRaw`：既不吞未来数据（fail-closed
-        // 语义不变），又不再对重复 id 误报，把去重工作留给 `insertRecord`。
+        // codex whole-branch R6：早前版本本门只读「加载来的」`loadedDrawingsLossy.unknownRaw`（不
+        // reconcile）——理由是彼时 `reconciled(currentKnown:)` 对重复/空 id fail-closed 会误伤一个仅含
+        // 【重复非空已知 id、无 unknownRaw】的 pending（`RecordRepositoryImpl.insertRecord` 的去重修复
+        // 本可安全接住），提前拒绝、永久卡死——两个各自正确的修复互相冲突。
         // codex whole-branch R9 finding 1：同一个「表结构存不了任意原始字节」的道理，也适用于【已知】
         // toolType 身上未来客户端加的额外字段——`finalizeSession` 只收 `engine.drawings`（解码后的已知
         // 投影），这些字段既不在其中、也不会被表结构记录，若照常 finalize 会随 pending 一起永久丢失。
-        // `hasKnownFutureFields`（`LossyDrawingArray` 共享判定，`unknownRaw` 探测用的同一门也用它）同样
-        // 只读「加载来的」`loadedDrawingsLossy`（不 reconciled），维持本门 dup-tolerant 的既有语义。
         // codex whole-branch R10 finding 1：上面这道未来字段门若原样读【整份】`loadedDrawingsLossy` 快照，
         // 一旦用户在 resume 之后把这条携带未来字段的已知画线【删除】（`engine.drawings` 不再含它，
         // `loadedDrawingsLossy` 是从不更新的加载快照仍留着）——finalize 已经不会丢失任何东西（用户已表达
@@ -705,10 +700,29 @@ public final class TrainingSessionCoordinator {
         // 若照常 finalize 会随 pending 一起永久丢失。`hasKnownFutureFields` 只探测 `knownDiskKeys` 之外的
         // EXTRA key，对「已知 key 自身的未来值」不可见，故需 `hasKnownFutureEnumValues` 单独把关；按存活 id
         // 过滤（liveIds）——同 `hasKnownFutureFields(liveIds:)` 语义（用户删除该画线后不应再被拦，R10 finding 1 先例）。
+        // codex whole-branch R20（high）：以上各门此前统一读【未 reconcile 的原始 `loadedDrawingsLossy`】
+        // ——resume/load 时种入、从不随用户编辑更新的快照。用户若把一条携带未来字段/未来枚举值的已知画线
+        // 【编辑】成受支持值（同 id，其余字段可能不变）——`saveProgress` 实际落盘的是 `reconciled` 后的
+        // 结果（真变化的 key 才覆盖，见 `mergeKnownFields`），编辑掉的未来值已不在其中——但这些门仍读编辑
+        // 前的原始快照，看见的还是旧的未来值，会让 finalize 永久 fail-closed（即便用户已经修好，除非把
+        // 整条画线删除）。改按 `reconciled(currentKnown:)` 后的【当前有效】lossy（= autosave/saveProgress
+        // 实际会落盘的那份）判定：编辑掉的未来值不再出现在 reconciled 里 → 门放行；未编辑的仍在 → 门照常
+        // 拦（不变）；unknownRaw（不可编辑，仅可删除）reconciled 原位保留 → 门照常拦（不变）。
+        // R8 已在所有加载点 `normalizedUniqueIds()`，正常流程下 `loadedDrawingsLossy`/`engine.drawings`
+        // 恒无重复/空 id，`reconciled` 不会因此 throw（R6 的顾虑已由 R8 消解，dup-id finalize 场景见
+        // `finalizeDuplicateKnownIdsDedupedAtInsertSucceeds`/R6/R10 回归测试）；`reconciled` 仍保留
+        // dup/empty id 的 defense-in-depth fail-closed——万一非预期地 throw，同样按 fail-closed 处理
+        // （不清 pending），不让一个真正可疑的状态静默放行 finalize。
         let liveIds = Set(engine.drawings.map { $0.id })
-        if !engine.loadedDrawingsLossy.unknownRaw.isEmpty
-            || engine.loadedDrawingsLossy.hasKnownFutureFields(liveIds: liveIds)
-            || engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: liveIds) {
+        let effectiveLossy: LossyDrawingArray
+        do {
+            effectiveLossy = try engine.loadedDrawingsLossy.reconciled(currentKnown: engine.drawings)
+        } catch {
+            throw AppError.persistence(.dbCorrupted)
+        }
+        if !effectiveLossy.unknownRaw.isEmpty
+            || effectiveLossy.hasKnownFutureFields(liveIds: liveIds)
+            || effectiveLossy.hasKnownFutureEnumValues(liveIds: liveIds) {
             throw AppError.persistence(.dbCorrupted)
         }
         let meta = try reader.loadMeta()

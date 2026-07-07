@@ -735,6 +735,70 @@ struct TrainingSessionPersistenceTests {
         #expect(port.finalizeCallCount == 1)
     }
 
+    // MARK: - codex whole-branch R20：finalize 门须按【reconciled 现态】判定，非按【从不更新的加载快照】
+
+    /// resume 一条携带未来枚举值（colorToken:"futureNeon"）的已知画线后，用户把它**编辑**成受支持值
+    /// （同 id，其余字段不变）——`saveProgress`/pending 实际会落盘的是 `loadedDrawingsLossy.reconciled
+    /// (currentKnown:)`（真变化的 key 才覆盖，见 `mergeKnownFields`），编辑后 reconciled 里已不再有
+    /// "futureNeon"。但 R18 之前的 finalize 门直接读**未 reconcile 的原始 `loadedDrawingsLossy`**（从不
+    /// 随编辑更新），仍看见编辑前的未来值 → 即便用户已经修好，finalize 也会永久 fail-closed（除非把整条
+    /// 画线删除，参见上面 R18 对照组）。本测试证明修复后：按 reconciled 后的现态判定 → 门放行、finalize
+    /// 成功、编辑后的值（.blue）如实入账。
+    @Test("finalize: 携带未来枚举值(colorToken)的已知画线被用户【编辑】成受支持值后 → 门放行，finalize 成功且入账编辑后的值（codex WB R20，红→绿）")
+    func finalize_knownDrawingFutureEnumValueEditedToSupported_succeeds() async throws {
+        let meta = TrainingSetMeta(stockCode: "X", stockName: "X", startDatetime: 1, endDatetime: 1)
+        let spy = Self.MetaSpyReader(candles: Self.validCandles(), meta: meta)
+        let cache = InMemoryCacheManager(); cache._seedForTesting([Self.cachedFile()])
+        let records = InMemoryRecordRepository()
+        let pending = InMemoryPendingTrainingRepository()
+        let raw = #"{"id":"g1","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"colorToken":"futureNeon"}"#
+        let knownDrawing = try JSONDecoder().decode(DrawingObject.self, from: Data(raw.utf8))
+        #expect(knownDrawing.colorToken == .orange)   // 前置：确实 fallback（R16），非 unknownRaw/非未来 EXTRA key
+        let lossy = LossyDrawingArray(elements: [.known(knownDrawing, raw: raw)])
+        let pos = PositionManager(shares: 100, averageCost: 10, totalInvested: 1000)
+        try pending.savePending(PendingTraining(
+            trainingSetFilename: "set.sqlite", globalTickIndex: 3,
+            upperPeriod: .m60, lowerPeriod: .daily,
+            positionData: try JSONEncoder().encode(pos), cashBalance: 90_000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: false),
+            tradeOperations: [], lossy: lossy, startedAt: 1,
+            accumulatedCapital: 100_000, drawdown: .initial,
+            sessionKey: "SK-known-future-enum-edited"))
+        let port = InMemorySessionFinalizationPort(records: records, pending: pending)
+        let coord = TrainingSessionCoordinator(
+            dbFactory: Self.StubFactory(reader: spy),
+            recordRepo: records, pendingRepo: pending,
+            pendingReplayRepo: InMemoryPendingReplayRepository(),
+            reviewArchiveRepo: InMemoryReviewArchiveRepository(),
+            finalization: port,
+            settingsDAO: InMemorySettingsDAO(),
+            cache: cache, settings: SettingsStore(settingsDAO: Self.CapitalDAO(capital: 10_000)))
+        let engine = try #require(try await coord.resumePending())
+        #expect(engine.drawings.count == 1)
+        // 用户编辑 colorToken 为受支持值（同 id，其余字段不变）。engine 目前无专属"编辑单字段"方法
+        // （UI 编辑手势另开 task）——用删除+追加同 id 新值模拟等价效果：`reconciled` 按 id 归并、不看
+        // 位置，对它而言与"原位编辑"语义完全一致（同 `mergeKnownFields` 的比较逻辑）。
+        let edited = DrawingObject(
+            id: knownDrawing.id, toolType: knownDrawing.toolType, anchors: knownDrawing.anchors,
+            isExtended: knownDrawing.isExtended, panelPosition: knownDrawing.panelPosition,
+            revealTick: knownDrawing.revealTick, period: knownDrawing.period,
+            lineSubType: knownDrawing.lineSubType, lineStyle: knownDrawing.lineStyle,
+            thickness: knownDrawing.thickness, colorToken: .blue, labelMode: knownDrawing.labelMode,
+            locked: knownDrawing.locked, text: knownDrawing.text, fontSize: knownDrawing.fontSize,
+            textColorToken: knownDrawing.textColorToken, textForm: knownDrawing.textForm,
+            tailAnchor: knownDrawing.tailAnchor)
+        engine.deleteDrawing(at: 0)
+        engine.appendDrawing(edited)
+        #expect(engine.drawings.count == 1)
+        #expect(engine.drawings[0].colorToken == .blue)
+        let id = try #require(try await coord.finalize(engine: engine))
+        let (_, _, drawings) = try records.loadRecordBundle(id: id)
+        #expect(drawings.count == 1)
+        #expect(drawings[0].colorToken == .blue)          // 编辑后的值如实入账（未来值已被编辑掉）
+        #expect(try pending.loadPending() == nil)         // 正常清空（未来值已编辑掉，不再阻断）
+        #expect(port.finalizeCallCount == 1)
+    }
+
     @Test("finalize/saveProgress: 传入非活跃 engine → .internalError（engine 身份守门，final-review L2 加固）")
     func finalizeSaveProgress_foreignEngine_throws() async throws {
         let (coord, _, _, _) = Self.makeCoordinator(candles: Self.validCandles())
