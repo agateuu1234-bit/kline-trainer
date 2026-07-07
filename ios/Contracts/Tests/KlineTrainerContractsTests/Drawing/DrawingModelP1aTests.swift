@@ -134,6 +134,41 @@ struct LossyDrawingArrayTests {
         #expect(r2.drawings.count == 1 && r2.unknownRaw.count == 1)
     }
 
+    // MARK: - codex WB R11 finding：畸形元素不得被洗白成 durable unknownRaw（须 fail-closed → .dbCorrupted）
+
+    @Test("畸形元素（非 JSON）→ decode 抛 .dbCorrupted，不洗白成 unknownRaw（codex WB R11-high 红→绿）")
+    func malformedNonJsonElementThrows() throws {
+        let json = Data(#"[not-json]"#.utf8)
+        #expect(throws: AppError.persistence(.dbCorrupted)) {
+            _ = try LossyDrawingArray.decode(json)
+        }
+    }
+
+    @Test("畸形元素（标量 123）→ decode 抛 .dbCorrupted（codex WB R11-high 红→绿）")
+    func scalarElementThrows() throws {
+        let json = Data(#"[123]"#.utf8)
+        #expect(throws: AppError.persistence(.dbCorrupted)) {
+            _ = try LossyDrawingArray.decode(json)
+        }
+    }
+
+    @Test("畸形元素（空对象 {}，无 toolType）→ decode 抛 .dbCorrupted，不再洗白成 unknownRaw（codex WB R11-high 红→绿）")
+    func emptyObjectElementThrows() throws {
+        let json = Data(#"[{}]"#.utf8)
+        #expect(throws: AppError.persistence(.dbCorrupted)) {
+            _ = try LossyDrawingArray.decode(json)
+        }
+    }
+
+    @Test("对照组：合法未来对象（有非空字符串 toolType）→ 仍保留为 .unknownRaw（不因 R11 修复破坏前向兼容）")
+    func plausibleFutureDrawingStillPreserved() throws {
+        let json = Data(#"[{"id":"x","toolType":"futureTool","anchors":[]}]"#.utf8)
+        let arr = try LossyDrawingArray.decode(json)
+        #expect(arr.drawings.isEmpty)
+        #expect(arr.unknownRaw.count == 1)
+        #expect(arr.unknownRaw[0].contains("futureTool"))
+    }
+
     @Test("保序：[known, unknownFuture, known] 往返后元素顺序逐一保持")
     func preservesElementOrder() throws {
         let kA = #"{"id":"A","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0}"#

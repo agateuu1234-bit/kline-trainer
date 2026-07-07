@@ -124,6 +124,17 @@ public struct LossyDrawingArray: Equatable, Sendable {
                     elems.append(.known(d, raw: raw))
                 }
             } else {
+                // codex whole-branch R11-high：`DrawingObject` 解码失败不代表这条是"合法但本版本不认识的
+                // 未来画线"——`rawElementStrings` 只切分顶层元素，不证明元素本身是合法 JSON。若在此不加区分
+                // 一律存成 `.unknownRaw`，畸形/损坏字节（`[not-json]`/`[123]`/`[{}]`）会被洗白成"看似正常"的
+                // 持久数据：加载"成功"、`encoded()` 原样吐回、但 finalize 的 unknownRaw 门永久拒绝——用户卡在
+                // 一个不可见、删不掉、永远无法 finalize 的会话里，反而绕开了 `.dbCorrupted` 本该触发的恢复路径。
+                // 只有"合法 JSON 对象 + 带非空字符串 toolType"才算「像未来画线」，才保 unknownRaw（前向兼容）；
+                // 其余（解析失败/标量/数组/无 toolType 的对象，含 `{}`）一律 fail-closed 抛 `.dbCorrupted`。
+                guard let obj = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+                      let toolType = obj["toolType"] as? String, !toolType.isEmpty else {
+                    throw AppError.persistence(.dbCorrupted)
+                }
                 elems.append(.unknownRaw(raw))      // 原始文本，字节级保留（【不】重序列化）、【保序】
             }
         }
