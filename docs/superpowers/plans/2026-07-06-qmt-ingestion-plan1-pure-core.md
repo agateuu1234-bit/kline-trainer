@@ -27,7 +27,7 @@
 
 - Create: `backend/qmt_normalize.py` — 规整层纯函数（`trading_date` / `parse_qmt_datetime` / `parse_qmt_csv` / `parse_qmt_filename`）。
 - Create: `backend/qmt_resample.py` — 合成层纯函数（`resample_intraday` / `resample_calendar` / `compute_dense_coverage` / `build_intraday`（安全入口）/ `reconcile_sources`）。
-- Modify: `backend/generate_training_sets.py` — B2 纯逻辑（`compute_after_end` / `select_period_window`（改纳入规则）/ `eligible_start_indices` / `select_valid_window`（有界重试）/ `per_day_intraday_complete`（各周期自身跨度、到 after_end）/ **`build_training_windows`（生产纯入口，组合全部 gate + 重试）**）。
+- Modify: `backend/generate_training_sets.py` — B2 纯逻辑（`compute_after_end` / `select_period_window`（改纳入规则+签名）/ `eligible_start_indices` / `select_valid_window`（有界重试）/ `per_day_intraday_complete`（各周期自身跨度、到 after_end）/ **`build_training_windows`（生产纯入口，组合全部 gate + 重试）**）+ `assemble_training_set` fail-closed 停用旧路径、删 `select_start_index`/`monthly_after_end` 孤儿（Task8, PF1-R10-F1）。
 - Create: `backend/tests/test_qmt_normalize.py`
 - Create: `backend/tests/test_qmt_resample.py`
 - Modify: `backend/tests/test_generate_training_sets.py` — 加 B2 纯逻辑新测试。
@@ -1099,28 +1099,40 @@ if period == "weekly":
     before = before[before["datetime"].map(lambda e: _week_end_date(e) < st_date)] # PF1-R5: 跨 start 周不作 before-context
 ```
 
+**签名变更 + 同步迁移现有测试**（codex PF1-R10-F2）：`select_period_window` 签名由 `(bars, start_datetime, before_cap, after_end_time)` 改为 `(bars, start_datetime, before_cap, after_end, period, month_boundaries=None)`（`after_end_time`→`after_end` + 加必填 `period`）。同时把现有 3 个 `test_select_period_window_*`（`before_cap_respected` / `monthly_before_all` / `after_inclusive_bounds`）的 `after_end_time=`→`after_end=`、并补 `period=`（`daily` / `monthly`，非 weekly 直通不受 straddle 影响）。生产旧调用者 `assemble_training_set` 由 Task 8 fail-closed 停用、不再调本函数。
+
 Run: `cd backend && python -m pytest tests/test_generate_training_sets.py -k "period_window" -v`
-Expected: PASS（2 passed）
+Expected: PASS（5 passed：3 迁移 + 2 新增 straddle）
 
 - [ ] **Step 7: 全量回归 + 提交**
 
 Run: `cd backend && python -m pytest tests/test_generate_training_sets.py -v`
-Expected: PASS（现有测试 + 新增全绿）。**`build_training_windows` 是本 plan 交付的生产纯入口（已全 pytest 测）；把它接进生产装配 `assemble_training_set` + 删旧随机选起点路径推迟到 Plan 2**（见下方「Task 8 推迟到 Plan 2」块，codex PF1-R9-F1 覆盖 R8-F1）。
+Expected: PASS（现有测试迁移后 + 新增全绿）。**`build_training_windows` 是本 plan 交付的生产纯入口（已全 pytest 测）；Task 8 在 Plan 1 内把旧生产装配 `assemble_training_set` fail-closed 停用（防经现有 CLI 产出未门控窗口），「重接 build_training_windows + stock_coverage 读取」原子留 Plan 2**（见下方 Task 8，codex PF1-R10-F1）。
 
 ```bash
 git add backend/generate_training_sets.py backend/tests/test_generate_training_sets.py
 git commit -m "feat(b2): after_end 重定义 + 窗口纳入(周straddle) + eligible/select_valid_window(候选迭代+有界重试) + per-day硬门(3m/15m/60m)"
 ```
 
-### Task 8（推迟到 Plan 2）：`assemble_training_set` 重接 `build_training_windows` + 删旧随机选起点路径
+### Task 8: `assemble_training_set` fail-closed 停用旧未门控路径（codex PF1-R10-F1）
 
-**为什么不在 Plan 1（codex PF1-R9-F1，覆盖 R8-F1「不推给 Plan 2」）**：安全重接把 `assemble_training_set` 改成走 `build_training_windows`，需要 `month_boundaries` / `dense_dates` / `trading_dates` 三个新入参；其中 **`dense_dates`（B1 完整-1m 日集）只能从持久化的 `stock_coverage` 表读到（D11），而该表的 DDL + 读取是 Plan 2 scope**（本 plan 纯函数层不碰 DB）。因此重接与其唯一调用链（`assemble_training_set` ← `generate_one_training_set` ← `generate_batch`）的迁移**必须与 `stock_coverage` 读取原子落地 = Plan 2**。
+**Files:** Modify `backend/generate_training_sets.py` + `backend/tests/test_generate_training_sets.py`。
 
-若强行在 Plan 1 只改 `assemble_training_set` 签名，现有 `generate` CLI 调用链会因缺参 **`TypeError`**（R9-F1 实证：`generate_one_training_set` 仍按旧 5 参在 `generate_training_sets.py:279` 调用）——用**破坏树**换「Plan 1 内删旧路径」不划算。
+**为什么 fail-closed 而非重接（codex PF1-R10-F1，修正 R9 Option A）**：安全重接 `assemble_training_set` 走 `build_training_windows` 需 `dense_dates`（B1 完整-1m 日集，只能读 `stock_coverage` 表 D11 = Plan 2）；但**旧随机选起点路径经现有 CLI 链 `generate_batch`→`generate_one_training_set`→`assemble_training_set` 对任意 PG 数据可达**（R9「不可达死代码」判断错误），会绕过 D9/dense 门产出未门控窗口。且 Task 7 给共享 `select_period_window` 加了必填 `period`——旧 positional 调用会 `TypeError`。故 Plan 1 内**停用**该路径（显式 `raise`），「重接 + `stock_coverage` 读取」原子留 Plan 2。`build_training_windows`（Task7 已全测）是就绪的安全纯入口，Plan 2 只需接线。
 
-**R8-F1 的原意（旧不安全随机选起点路径不得在真实数据上运行）仍被满足**：在 Plan 1 里该旧路径是**不可达死代码**——它只经异步 PG 壳 `generate_one_training_set` 触发，而后者需活的 PG 连接 + 已入库真实数据，二者都到 Plan 2 才存在，本 plan 无任何测试/数据能跑到它。Plan 2 接线 `stock_coverage` 读取时与旧路径删除**原子**完成，真实生成从第一天起就只走 D9 门控的 `build_training_windows`。
+- [ ] **Step 1: 写失败测试** — `test_assemble_training_set_fails_closed(tmp_path)`：调 `assemble_training_set(tmp_path, stock_code="X", stock_name="X", period_bars={}, rng=random.Random(0))`（fail-closed 首行即 raise、不访问 `period_bars`，故传 `{}` 即可）-> `pytest.raises(NotImplementedError)`（消息含 `build_training_windows` 与 `Plan 2`）。
 
-**Plan 2 首个 Task（落地清单）**：① `assemble_training_set` 改签名走 `build_training_windows`；② `generate_one_training_set`/`generate_batch` 读 `stock_coverage` 供 `dense_dates`/`trading_dates`、读 `period_boundaries` 供 `month_boundaries`；③ 删 `select_start_index`(旧)/`monthly_after_end` 及旧专测；④ 加「公共装配走 D9 门」契约测（即原 `test_assemble_training_set_routes_through_d9_gate`：全候选 D9 失败 → `assemble_training_set(...)` 抛 `GenerateSkipException`，旧随机选起点不会抛）。
+- [ ] **Step 2: 跑测试确认失败** — `python -m pytest tests/test_generate_training_sets.py::test_assemble_training_set_fails_closed -v` -> FAIL（旧 assemble 仍走旧路径、不 raise `NotImplementedError`）。
+
+- [ ] **Step 3: fail-closed + 删旧孤儿**：
+  - 把 `assemble_training_set` **整个函数体**换成单行 `raise NotImplementedError("旧未门控随机选起点路径已停用（codex PF1-R10-F1）；安全纯入口 build_training_windows 已就绪(Task7)，生产装配重接 + stock_coverage 读取在 Plan 2 落地。")`。**保留现有签名** `(output_dir, *, stock_code, stock_name, period_bars, rng)`——使唯一调用者 `generate_one_training_set:279` 不 `TypeError` 而是运行期显式 fail-closed（`generate_batch` 只 catch `GenerateSkipException`，`NotImplementedError` 向上冒泡终止 CLI、不静默 skip）。异步壳 `generate_one_training_set`/`generate_batch`/`_amain` **一字不改**（守 Plan 1 不碰 DB 壳边界）。
+  - **删** `select_start_index` / `monthly_after_end`（唯一调用者 assemble 已停用 → 孤儿）及其 import 与模块 docstring（L6/L16）里对二者的引用；`compute_after_end`（Task7）是月末计算的接替者。
+  - **删旧专测**（grep 定位）：`test_select_start_index_*`（×2）、`test_monthly_after_end_*`（×2）、`test_assemble_training_set_end_to_end`、`test_assemble_skip_when_*`（×2）——均测旧退役路径，由 `test_assemble_training_set_fails_closed` 接替；移除对应死 import。装配机件 `build_training_set_sqlite`/`zip_and_hash`/`assign_global_indices` 各自专测保留（Plan 2 重接时补端到端）。
+
+- [ ] **Step 4: 跑测试确认通过** — `python -m pytest tests/test_generate_training_sets.py -v` -> PASS（旧路径专测已删、fail-closed 测 + Task7 新测全绿）。
+- [ ] **Step 5: 提交** — `git commit -m "feat(b2): assemble_training_set fail-closed 停用旧未门控路径 + 删 select_start_index/monthly_after_end 孤儿(PF1-R10-F1)"`
+
+**Plan 2 承接**：把 fail-closed 体换成 `build_training_windows` 接线——`generate_one_training_set`/`generate_batch` 读 `stock_coverage` 供 `dense_dates`/`trading_dates`、`period_boundaries` 供 `month_boundaries`，`assemble_training_set` 改签名走 `build_training_windows` -> `assign_global_indices` -> `build_training_set_sqlite`/`zip_and_hash`；加「公共装配走 D9 门」契约测（全候选 D9 失败 → 抛 `GenerateSkipException`）。
 
 ---
 
@@ -1129,8 +1141,9 @@ git commit -m "feat(b2): after_end 重定义 + 窗口纳入(周straddle) + eligi
 - **规整层**（§4.1）：BOM ✅(Task2) / 时区时间 ✅(Task1) / 文件名三市场+全角 ✅(Task2) / 缺列抛错 ✅(Task2)。`trading_date` 统一 ✅(Task1)。
 - **合成层**（§4.2）：intraday golden 80/16/4 + 首桶含集竞 + 禁跨午休 ✅(Task3)；calendar 只发完整周期 + OPEN 标签 + 哨兵 ✅(Task4)；分钟级完整性(精确 epoch 含秒)drop 整日 + 覆盖 artifact + **安全入口 `build_intraday`（滤损坏日桶，PF1-R4-F1）** ✅(Task5)。
 - **D10 对账**（§4.1）：端点+日期集+OHLCV 三门 ✅(Task6)。
-- **B2 纯逻辑**（§4.4）：after_end=第8完整月末 ✅、窗口纳入**两侧**周边界校验(PF1-R5 无 lookahead) ✅、`eligible_start_indices` 按交易日历+dense ✅、`select_valid_window` 有界重试(R12-F2) ✅、per-day 硬门各周期自身跨度到 after_end(PF1-R6-F1) ✅、**`build_training_windows` 生产纯入口组合全部 gate + 端到端测(候选重试+尾日D9，PF1-R6-F2)** ✅(Task7)。
-- **不在本 plan（→ Plan 2）**：schema/migration/CONTRACT_VERSION（§4.3 D1/D11 表）、import/generate DB 壳接线（D8a/D8b/写 klines+stock_coverage/读 dense_dates/file_path TEXT+cleanup/候选 retry 集成）、**`assemble_training_set` 重接 `build_training_windows` + 删旧 `select_start_index`/`monthly_after_end` 随机选起点路径（与 `stock_coverage` dense_dates 读取原子落地，codex PF1-R9-F1；见「Task 8 推迟到 Plan 2」块）**、pilot（储备池/SMB/reset 护栏/市场地板）、容器化集成测试（§5 R15-F2）。
+- **B2 纯逻辑**（§4.4）：after_end=第8完整月末 ✅、窗口纳入**两侧**周边界校验(PF1-R5 无 lookahead) ✅、`eligible_start_indices` 按交易日历+dense ✅、`select_valid_window` 有界重试(R12-F2) ✅、per-day 硬门各周期自身跨度到 after_end(PF1-R6-F1) ✅、**`build_training_windows` 生产纯入口组合全部 gate + 端到端测(候选重试+尾日D9，PF1-R6-F2)** ✅(Task7)、`select_period_window` 签名迁移(after_end_time→after_end+period)含 3 现有测迁移 ✅(Task7/PF1-R10-F2)。
+- **旧路径 fail-closed**（§4.4 / codex PF1-R10-F1）：`assemble_training_set` 显式 `raise NotImplementedError` 停用旧未门控随机选起点路径（经现有 CLI `generate_batch`→`generate_one_training_set` 可达、会绕 D9/dense 门产未门控窗口）+ 删 `select_start_index`/`monthly_after_end` 孤儿及旧专测 ✅(Task8)；异步壳不改、重接 `build_training_windows` 留 Plan 2。
+- **不在本 plan（→ Plan 2）**：schema/migration/CONTRACT_VERSION（§4.3 D1/D11 表）、import/generate DB 壳接线（D8a/D8b/写 klines+stock_coverage/读 dense_dates/file_path TEXT+cleanup/候选 retry 集成）、**`assemble_training_set` 重接 `build_training_windows` + `generate_one_training_set`/`generate_batch` 读 `stock_coverage` 供 dense_dates（Plan 1 内该函数已 fail-closed 停用旧路径见 Task8/codex PF1-R10-F1，重接留 Plan 2）**、pilot（储备池/SMB/reset 护栏/市场地板）、容器化集成测试（§5 R15-F2）。
 - **前复权精度**：本 plan 纯函数不 round OHLC ✅（`clean` 复用在 Plan 2 接线时验证）。
 - **占位符扫描**：无 TBD/TODO；每步含真实测试+实现代码。
 - **类型一致**：`DenseCoverage.complete_dates`(list[date]) → Plan 2 写 `stock_coverage.dropped_1m_dates`/`dense_1m_start/end_date`；`eligible_start_indices(...,dense_dates:set[date],trading_dates:set[date])->list[int]`、`select_valid_window(...,try_assemble)->(int, object)`、`per_day_intraday_complete(windows:dict[str,DataFrame],...)`；`compute_after_end(month_boundaries:list[int])` 与 `period_boundaries` 返回类型一致（list[int] Unix 秒）。
