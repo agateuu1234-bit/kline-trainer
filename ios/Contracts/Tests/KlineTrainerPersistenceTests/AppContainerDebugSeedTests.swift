@@ -102,7 +102,7 @@ struct AppContainerDebugSeedTests {
         let realSettings = AppSettings(commissionRate: 0.0009, minCommissionEnabled: true,
                                        totalCapital: 555_555, displayMode: .system)
         try c.db.saveSettings(realSettings)
-        let realPending = PendingTraining(
+        let realPending = try PendingTraining(
             trainingSetFilename: "real-user-set.sqlite", globalTickIndex: 7,
             upperPeriod: .m3, lowerPeriod: .daily,
             positionData: try JSONEncoder().encode(PositionManager()), cashBalance: 9_999,

@@ -178,7 +178,7 @@ public enum DebugFixtureData {
         let recordOps = [record1Ops, record2Ops]
 
         let emptyPosition = try! JSONEncoder().encode(PositionManager())
-        let pending = PendingTraining(
+        let pending = try! PendingTraining(
             trainingSetFilename: filename, globalTickIndex: pendingTick,
             upperPeriod: .m60, lowerPeriod: .daily,   // 必须是 periodCombos 阶梯里相邻一档（(m3,daily) 非法→switchPeriodCombo no-op）；默认 60分/日线（路线图 P1）
             positionData: emptyPosition, cashBalance: 100_000, feeSnapshot: fees,

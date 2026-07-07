@@ -499,8 +499,8 @@ final class InMemoryDBFakesTests: XCTestCase {
         DrawingObject(toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
     }
 
-    private func makePending(filename: String) -> PendingTraining {
-        PendingTraining(trainingSetFilename: filename, globalTickIndex: 0,
+    private func makePending(filename: String) throws -> PendingTraining {
+        try PendingTraining(trainingSetFilename: filename, globalTickIndex: 0,
                         upperPeriod: .daily, lowerPeriod: .m15,
                         positionData: Data(), cashBalance: 0,
                         feeSnapshot: FeeSnapshot(commissionRate: 0, minCommissionEnabled: false),

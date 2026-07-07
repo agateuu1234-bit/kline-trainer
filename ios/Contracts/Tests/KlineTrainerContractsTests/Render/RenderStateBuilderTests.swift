@@ -710,7 +710,7 @@ struct RenderStateBuilderTests {
 
     @Test("Task 10（迁移自 R4-F1 判据）：review 模式 drawings = engine.drawings(只读原训练) + engine.reviewDrawings，按 revealTick 各自渐显叠加")
     @MainActor
-    func reviewOverlayDrawingsRevealByTick() {
+    func reviewOverlayDrawingsRevealByTick() throws {
         // Review engine：50 根 m3（endGlobalIndex==i），起始 tick=5。
         let candles = Self.candles(period: .m3, count: 50)
         let maxTick = candles.count - 1
@@ -732,7 +732,7 @@ struct RenderStateBuilderTests {
                                       anchors: [DrawingAnchor(period: .m3, candleIndex: 8, price: 10)],
                                       isExtended: true, panelPosition: 0, revealTick: 2))
         // 复盘新画线（engine.reviewDrawings）revealTick=8（未来，8>5，tick=5 时不应显示）——锚点故意给「过去」candleIndex=2。
-        e.setReviewDrawings([DrawingObject(toolType: .horizontal,
+        try e.setReviewDrawings([DrawingObject(toolType: .horizontal,
                                            anchors: [DrawingAnchor(period: .m3, candleIndex: 2, price: 11)],
                                            isExtended: true, panelPosition: 0, revealTick: 8)])
 

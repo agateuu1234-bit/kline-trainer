@@ -77,7 +77,52 @@ struct AppStateCodableTests {
         #expect(decoded.finalTick == 4242)
     }
 
-    @Test func pendingTraining_hasCashBalanceAndDrawdown() throws {
+    // codex whole-branch Finding 1 修复：PendingTraining 恢复 Codable（public 契约类型，Task 11 因加
+    // `lossy: LossyDrawingArray`（非 Codable）误丢——source-compat 破坏）。恢复走显式
+    // init(from:)/encode(to:)（非 synthesized），CodingKeys 对齐 Task 11 之前的旧字段集（旧快照仍可解
+    // 码），`drawings` 走计算属性投影往返、decode 侧用 `LossyDrawingArray(drawings:)` 重建已知条
+    // （纯已知——本路径只是 compat surface；真正字节级保真持久化走 repo 的 `p.lossy.encoded()` 列路径，不受影响）。
+    @Test func pendingTraining_codableRoundTrip() throws {
+        let pend = try PendingTraining(
+            trainingSetFilename: "foo.zip",
+            globalTickIndex: 10,
+            upperPeriod: .daily,
+            lowerPeriod: .m60,
+            positionData: Data([1, 2, 3]),
+            cashBalance: 9000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+            tradeOperations: [],
+            drawings: [DrawingObject(id: "d1", toolType: .horizontal, anchors: [],
+                                     isExtended: false, panelPosition: 0)],
+            startedAt: 1_700_000_000,
+            accumulatedCapital: 10_000,
+            drawdown: DrawdownAccumulator(peakCapital: 10_000, maxDrawdown: 500),
+            sessionKey: "SK-test"
+        )
+        let data = try JSONEncoder().encode(pend)
+        let decoded = try JSONDecoder().decode(PendingTraining.self, from: data)
+        // 逐字段比对（不用整体 `==`：那会连带比较 `lossy` 内部 `raw` 原始字节，那是内部实现细节，
+        // JSONEncoder 对同结构体两次独立 encode 不保证 key 顺序一致，非本 compat surface 的契约）。
+        #expect(decoded.trainingSetFilename == pend.trainingSetFilename)
+        #expect(decoded.globalTickIndex == pend.globalTickIndex)
+        #expect(decoded.positionData == pend.positionData)
+        #expect(decoded.cashBalance == 9000)
+        #expect(decoded.tradeOperations == pend.tradeOperations)
+        #expect(decoded.sessionKey == pend.sessionKey)
+        #expect(decoded.drawdown.maxDrawdown == 500)
+        #expect(decoded.drawings == pend.drawings)          // 内容保留（DrawingObject 自定义 == 不比 id）
+        #expect(decoded.drawings.map(\.id) == ["d1"])       // id 也保留
+    }
+
+    // codex whole-branch R13-medium 修复：整体 `JSONEncoder`/`JSONDecoder` 往返（快照/IPC/preview 等消费方）
+    // 此前只编码计算属性 `drawings`（已知投影），`.unknownRaw` 未来画线会被静默丢弃。新增 `lossyRaw`
+    // 顶层 key（`lossy.encoded()` 的完整字节文本，含 known+unknownRaw、保序）使该往返无损。
+    @Test func pendingTraining_codableRoundTrip_preservesUnknownRawDrawings() throws {
+        let json = Data(#"[{"id":"d1","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0},{"toolType":"__future_tool__","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0}]"#.utf8)
+        let lossy = try LossyDrawingArray.decode(json)
+        #expect(lossy.drawings.count == 1)
+        #expect(lossy.unknownRaw.count == 1)
+
         let pend = PendingTraining(
             trainingSetFilename: "foo.zip",
             globalTickIndex: 10,
@@ -87,7 +132,7 @@ struct AppStateCodableTests {
             cashBalance: 9000,
             feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
             tradeOperations: [],
-            drawings: [],
+            lossy: lossy,
             startedAt: 1_700_000_000,
             accumulatedCapital: 10_000,
             drawdown: DrawdownAccumulator(peakCapital: 10_000, maxDrawdown: 500),
@@ -95,9 +140,39 @@ struct AppStateCodableTests {
         )
         let data = try JSONEncoder().encode(pend)
         let decoded = try JSONDecoder().decode(PendingTraining.self, from: data)
-        #expect(decoded == pend)
-        #expect(decoded.cashBalance == 9000)
-        #expect(decoded.drawdown.maxDrawdown == 500)
+        #expect(decoded.drawings.count == 1)                      // 已知条仍在（legacy 投影仍可用）
+        #expect(decoded.drawings[0].id == "d1")
+        #expect(decoded.lossy.unknownRaw.count == 1)              // 未来条无损存活（此前会被丢弃）
+        #expect(decoded.lossy.unknownRaw[0].contains("__future_tool__"))
+    }
+
+    // 旧快照（Task 11 之前 / 本 fix 之前）只有 `drawings`、无 `lossyRaw` key → 仍可解码，
+    // 退化为纯已知重建（不 crash，不丢已知条）。
+    @Test func pendingTraining_codableDecode_oldSnapshotWithoutLossyRaw_fallsBackToKnownOnly() throws {
+        let pend = try PendingTraining(
+            trainingSetFilename: "foo.zip",
+            globalTickIndex: 10,
+            upperPeriod: .daily,
+            lowerPeriod: .m60,
+            positionData: Data([1, 2, 3]),
+            cashBalance: 9000,
+            feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
+            tradeOperations: [],
+            drawings: [DrawingObject(id: "d1", toolType: .horizontal, anchors: [],
+                                     isExtended: false, panelPosition: 0)],
+            startedAt: 1_700_000_000,
+            accumulatedCapital: 10_000,
+            drawdown: DrawdownAccumulator(peakCapital: 10_000, maxDrawdown: 500),
+            sessionKey: "SK-test"
+        )
+        let data = try JSONEncoder().encode(pend)
+        var obj = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        obj.removeValue(forKey: "lossyRaw")                       // 模拟旧快照：无此 key
+        let oldJSON = try JSONSerialization.data(withJSONObject: obj)
+        let decoded = try JSONDecoder().decode(PendingTraining.self, from: oldJSON)
+        #expect(decoded.drawings.count == 1)
+        #expect(decoded.drawings[0].id == "d1")
+        #expect(decoded.lossy.unknownRaw.isEmpty)
     }
 
     @Test func appSettings_mutableRoundTrip() {

@@ -240,18 +240,30 @@ public final class DefaultAppDB: AppDB, TrainingResetPort, PendingReplayReposito
         catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
     }
 
-    public func saveWorking(recordId: Int64, stepTick: Int, drawings: [DrawingObject]) throws {
+    public func loadSavedLossy(recordId: Int64) throws
+        -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID], unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry])? {
+        do { return try dbQueue.read { try ReviewArchiveRepositoryImpl.loadSavedLossy($0, recordId: recordId) } }
+        catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
+    }
+
+    public func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID],
+                            unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry]) throws {
         do {
             try dbQueue.write { db in
-                try ReviewArchiveRepositoryImpl.saveWorking(db, recordId: recordId, stepTick: stepTick, drawings: drawings)
+                try ReviewArchiveRepositoryImpl.saveWorking(db, recordId: recordId, stepTick: stepTick,
+                                                            lossy: lossy, hiddenOriginalIds: hiddenOriginalIds,
+                                                            unknownTopLevel: unknownTopLevel)
             }
         } catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
     }
 
-    public func commitSaved(recordId: Int64, drawings: [DrawingObject]) throws {
+    public func commitSaved(recordId: Int64, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID],
+                            unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry]) throws {
         do {
             try dbQueue.write { db in
-                try ReviewArchiveRepositoryImpl.commitSaved(db, recordId: recordId, drawings: drawings)
+                try ReviewArchiveRepositoryImpl.commitSaved(db, recordId: recordId, lossy: lossy,
+                                                            hiddenOriginalIds: hiddenOriginalIds,
+                                                            unknownTopLevel: unknownTopLevel)
             }
         } catch let e as AppError { throw e } catch { throw PersistenceErrorMapping.translate(error) }
     }

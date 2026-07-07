@@ -4,7 +4,7 @@
 import Foundation
 
 /// 顶层契约版本号。bump 策略见 docs/contracts/contract-version-matrix.md（Plan 1f 落地）。
-public let CONTRACT_VERSION = "1.10"
+public let CONTRACT_VERSION = "1.11"
 
 // MARK: - Enums
 
@@ -35,7 +35,10 @@ public enum TrainingMode: Equatable, Sendable {
 }
 
 public enum DrawingToolType: String, Codable, Equatable, Sendable {
-    case ray, trend, horizontal, golden, wave, cycle, time
+    // 目标 11 工具
+    case horizontal, trend, channel, polyline, golden, wave, cycle, fib, timeRuler, rect, text
+    // legacy（历史 blob 容忍解码；ray 已下沉为线型子类、time 语义歧义——见 spec §4.1/D2）
+    case ray, time
 }
 
 public enum DisplayMode: String, Codable, Equatable, Sendable {
@@ -204,27 +207,86 @@ public struct DrawingAnchor: Codable, Equatable, Sendable {
         self.candleIndex = candleIndex
         self.price = price
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case period, candleIndex, price
+    }
+
+    // codex whole-branch R16（high）：版本容错解码——`period` 仍是【必填】key（缺失/类型错 → 仍 throw，
+    // 真损坏 fail-closed 不变），但一个【存在】、当前枚举不认识的 future raw value（更新版本 app 写入的新
+    // 周期）不应让整条 DrawingObject 解码失败被上层误判成 .dbCorrupted——回退 .daily（同 R15 对
+    // RecordRepositoryImpl.LossyAnchor 的先例）。
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.candleIndex = try c.decode(Int.self, forKey: .candleIndex)
+        self.price = try c.decode(Double.self, forKey: .price)
+        let periodRaw = try c.decode(String.self, forKey: .period)
+        self.period = Period(rawValue: periodRaw) ?? .daily
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(period, forKey: .period)
+        try c.encode(candleIndex, forKey: .candleIndex)
+        try c.encode(price, forKey: .price)
+    }
 }
 
 public struct DrawingObject: Codable, Equatable, Sendable {
+    public let id: DrawingID                 // 跨层防碰撞身份（§4.2/D13/D16）
     public let toolType: DrawingToolType
     public let anchors: [DrawingAnchor]
-    public let isExtended: Bool
-    public let panelPosition: Int
+    public let period: Period                // 渲染绑定周期（§10）
+    public let lineSubType: LineSubType
+    public let lineStyle: LineStyle
+    public let thickness: Int                // 1…5
+    public let colorToken: DrawingColorToken
+    public let labelMode: LabelMode
+    public let locked: Bool
+    public let text: String
+    public let fontSize: Int
+    public let textColorToken: DrawingColorToken
+    public let textForm: TextForm
+    public let tailAnchor: DrawingAnchor?    // 标注气泡尾巴尖；仅带框两形式有值（§5.10/D11）
+    public let isExtended: Bool              // 保留（兼容/派生）
+    public let panelPosition: Int            // 保留但不再作渲染绑定（§10）
     /// review-redesign 整改④：提交这条画线时会话所处的全局 tick（= 渐显时机；锚点仅定位几何，不再决定渐显）。
     public let revealTick: Int
 
-    public init(toolType: DrawingToolType, anchors: [DrawingAnchor],
-                isExtended: Bool, panelPosition: Int, revealTick: Int = 0) {
+    public init(id: DrawingID = UUID().uuidString,
+                toolType: DrawingToolType, anchors: [DrawingAnchor],
+                isExtended: Bool, panelPosition: Int, revealTick: Int = 0,
+                period: Period? = nil,
+                lineSubType: LineSubType = .straight, lineStyle: LineStyle = .solid,
+                thickness: Int = 1, colorToken: DrawingColorToken = .orange,
+                labelMode: LabelMode = .hidden, locked: Bool = false,
+                text: String = "", fontSize: Int = 14,
+                textColorToken: DrawingColorToken = .orange, textForm: TextForm = .plain,
+                tailAnchor: DrawingAnchor? = nil) {
+        self.id = id
         self.toolType = toolType
         self.anchors = anchors
+        self.period = period ?? anchors.first?.period ?? .daily
+        self.lineSubType = lineSubType
+        self.lineStyle = lineStyle
+        self.thickness = thickness
+        self.colorToken = colorToken
+        self.labelMode = labelMode
+        self.locked = locked
+        self.text = text
+        self.fontSize = fontSize
+        self.textColorToken = textColorToken
+        self.textForm = textForm
+        self.tailAnchor = tailAnchor
         self.isExtended = isExtended
         self.panelPosition = panelPosition
         self.revealTick = revealTick
     }
 
     private enum CodingKeys: String, CodingKey {
-        case toolType, anchors, isExtended, panelPosition, revealTick
+        case id, toolType, anchors, period, lineSubType, lineStyle, thickness
+        case colorToken, labelMode, locked, text, fontSize, textColorToken, textForm, tailAnchor
+        case isExtended, panelPosition, revealTick
     }
 
     public init(from decoder: Decoder) throws {
@@ -235,15 +297,72 @@ public struct DrawingObject: Codable, Equatable, Sendable {
         self.panelPosition = try c.decode(Int.self, forKey: .panelPosition)
         // 向后兼容：旧 blob 无 revealTick → 0（从起点起可见）。
         self.revealTick = try c.decodeIfPresent(Int.self, forKey: .revealTick) ?? 0
+        // 新字段：旧 blob 无 → 语义默认（沿 revealTick 先例）
+        // 无 id → 解码为空串（非随机 UUID）：数组层（Task 5）按位回填 legacy-idx-<N>，
+        // 若这里生成随机 UUID 会让"无 id"不可侦测。
+        self.id = try c.decodeIfPresent(DrawingID.self, forKey: .id) ?? ""
+        // codex whole-branch R16（high）：版本容错解码——以下枚举字段先解【原始 rawValue 字符串】再映射，
+        // 未知 future 值（更新版本 app 写入，如新增 colorToken/period）回退各自现有默认值，不 throw。
+        // 键【缺失】（decodeIfPresent 返 nil）与【类型错】（如数字代替字符串，decodeIfPresent(String...) 会
+        // throw）两种真损坏场景不受影响——只加宽"key 存在但 raw value 未知"这一种情况的容忍度
+        // （同 R15 对 RecordRepositoryImpl.DrawingStyle 的先例）。
+        self.period = try c.decodeIfPresent(String.self, forKey: .period)
+            .flatMap(Period.init(rawValue:)) ?? (self.anchors.first?.period ?? .daily)
+        // isExtended:true → .ray；false → .straight（旧语义迁移，§4.2）
+        self.lineSubType = try c.decodeIfPresent(String.self, forKey: .lineSubType)
+            .flatMap(LineSubType.init(rawValue:)) ?? (self.isExtended ? .ray : .straight)
+        self.lineStyle = try c.decodeIfPresent(String.self, forKey: .lineStyle)
+            .flatMap(LineStyle.init(rawValue:)) ?? .solid
+        self.thickness = try c.decodeIfPresent(Int.self, forKey: .thickness) ?? 1
+        self.colorToken = try c.decodeIfPresent(String.self, forKey: .colorToken)
+            .flatMap(DrawingColorToken.init(rawValue:)) ?? .orange
+        self.labelMode = try c.decodeIfPresent(String.self, forKey: .labelMode)
+            .flatMap(LabelMode.init(rawValue:)) ?? .hidden
+        self.locked = try c.decodeIfPresent(Bool.self, forKey: .locked) ?? false
+        self.text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        self.fontSize = try c.decodeIfPresent(Int.self, forKey: .fontSize) ?? 14
+        self.textColorToken = try c.decodeIfPresent(String.self, forKey: .textColorToken)
+            .flatMap(DrawingColorToken.init(rawValue:)) ?? .orange
+        self.textForm = try c.decodeIfPresent(String.self, forKey: .textForm)
+            .flatMap(TextForm.init(rawValue:)) ?? .plain
+        self.tailAnchor = try c.decodeIfPresent(DrawingAnchor.self, forKey: .tailAnchor)
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
         try c.encode(toolType, forKey: .toolType)
         try c.encode(anchors, forKey: .anchors)
+        try c.encode(period, forKey: .period)
+        try c.encode(lineSubType, forKey: .lineSubType)
+        try c.encode(lineStyle, forKey: .lineStyle)
+        try c.encode(thickness, forKey: .thickness)
+        try c.encode(colorToken, forKey: .colorToken)
+        try c.encode(labelMode, forKey: .labelMode)
+        try c.encode(locked, forKey: .locked)
+        try c.encode(text, forKey: .text)
+        try c.encode(fontSize, forKey: .fontSize)
+        try c.encode(textColorToken, forKey: .textColorToken)
+        try c.encode(textForm, forKey: .textForm)
+        try c.encodeIfPresent(tailAnchor, forKey: .tailAnchor)
         try c.encode(isExtended, forKey: .isExtended)
         try c.encode(panelPosition, forKey: .panelPosition)
         try c.encode(revealTick, forKey: .revealTick)
+    }
+
+    // 自定义 `==`：故意不比较 `id`。`id` 是跨层身份/去重键（供 Task 5+ 按 id 精确匹配），
+    // 默认 init 每次生成新随机 UUID——若纳入 Equatable，既有测试里两次独立调用同一
+    // 5 参 helper（内容相同、id 各自随机）构造的"预期值"与"实际值"会被判不等，
+    // 误伤 27 个既有测试（内容语义相同，只是 id 巧合不同）。
+    public static func == (lhs: DrawingObject, rhs: DrawingObject) -> Bool {
+        lhs.toolType == rhs.toolType && lhs.anchors == rhs.anchors && lhs.period == rhs.period
+            && lhs.lineSubType == rhs.lineSubType && lhs.lineStyle == rhs.lineStyle
+            && lhs.thickness == rhs.thickness && lhs.colorToken == rhs.colorToken
+            && lhs.labelMode == rhs.labelMode && lhs.locked == rhs.locked
+            && lhs.text == rhs.text && lhs.fontSize == rhs.fontSize
+            && lhs.textColorToken == rhs.textColorToken && lhs.textForm == rhs.textForm
+            && lhs.tailAnchor == rhs.tailAnchor && lhs.isExtended == rhs.isExtended
+            && lhs.panelPosition == rhs.panelPosition && lhs.revealTick == rhs.revealTick
     }
 }
 

@@ -21,8 +21,10 @@ public final class DefaultDrawingInputController: DrawingInputController {
     private func minAnchors(for tool: DrawingToolType) -> Int {
         switch tool {
         case .horizontal: return 1
-        // 其余 6 工具属 Phase 4（enabledTools 仅 .horizontal，不会到达）。
-        case .ray, .trend, .golden, .wave, .cycle, .time: return Int.max
+        // 其余工具属 Phase 4（enabledTools 仅 .horizontal，不会到达）；drawing-P1a 新增 6 工具
+        // （channel/polyline/fib/timeRuler/rect/text）暂沿用同一未决锚数占位，真实值待专属 task 定义。
+        case .ray, .trend, .golden, .wave, .cycle, .time,
+             .channel, .polyline, .fib, .timeRuler, .rect, .text: return Int.max
         }
     }
 

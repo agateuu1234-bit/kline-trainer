@@ -161,6 +161,63 @@ struct TrainingEngineDrawingCommitTests {
         #expect(engine.drawings.isEmpty)   // review commit 不污染训练层
     }
 
+    // MARK: - 画线工具扩充 P1a Task 8：routeDrawingCommit 全字段 copy-with-revealTick（D15）
+
+    @Test("routeDrawingCommit 保留 id/样式/锁定/文本/tailAnchor，仅盖 revealTick（normal 模式）")
+    func routePreservesAllFields() {
+        let e = Self.makeNormalEngineAtTick(50)   // normal flow，tick 在窗口内
+        let anchor = DrawingAnchor(period: .m60, candleIndex: 3, price: 1710.0)
+        let d = DrawingObject(
+            id: "gen-keep", toolType: .trend, anchors: [anchor, anchor],
+            isExtended: true, panelPosition: 1, revealTick: 0,
+            period: .m60, lineSubType: .segment, lineStyle: .dash3, thickness: 5,
+            colorToken: .purple, labelMode: .right, locked: true,
+            text: "标注文本", fontSize: 22, textColorToken: .green, textForm: .borderFilled,
+            tailAnchor: anchor)
+        e.routeDrawingCommit(d)
+        let stored = e.drawings.last!
+        #expect(stored.id == "gen-keep")
+        #expect(stored.toolType == .trend)
+        #expect(stored.lineSubType == .segment)
+        #expect(stored.lineStyle == .dash3)
+        #expect(stored.thickness == 5)
+        #expect(stored.colorToken == .purple)
+        #expect(stored.labelMode == .right)
+        #expect(stored.locked == true)
+        #expect(stored.text == "标注文本")
+        #expect(stored.textForm == .borderFilled)
+        #expect(stored.tailAnchor == anchor)
+        #expect(stored.revealTick == e.tick.globalTickIndex)   // revealTick 被盖成当前 tick
+    }
+
+    @Test("routeDrawingCommit 保留全字段（review 模式，写入 reviewDrawings 不污染 drawings）")
+    func routePreservesAllFieldsReviewMode() {
+        let e = Self.makeReviewEngineAtTick(60)
+        let anchor = DrawingAnchor(period: .m60, candleIndex: 3, price: 1710.0)
+        let d = DrawingObject(
+            id: "gen-keep-review", toolType: .channel, anchors: [anchor, anchor],
+            isExtended: false, panelPosition: 0, revealTick: 0,
+            period: .m60, lineSubType: .ray, lineStyle: .dash2, thickness: 3,
+            colorToken: .cyan, labelMode: .left, locked: true,
+            text: "复盘标注", fontSize: 18, textColorToken: .red, textForm: .borderTransparent,
+            tailAnchor: anchor)
+        e.routeDrawingCommit(d)
+        let stored = e.reviewDrawings.last!
+        #expect(stored.id == "gen-keep-review")
+        #expect(stored.toolType == .channel)
+        #expect(stored.lineSubType == .ray)
+        #expect(stored.lineStyle == .dash2)
+        #expect(stored.thickness == 3)
+        #expect(stored.colorToken == .cyan)
+        #expect(stored.labelMode == .left)
+        #expect(stored.locked == true)
+        #expect(stored.text == "复盘标注")
+        #expect(stored.textForm == .borderTransparent)
+        #expect(stored.tailAnchor == anchor)
+        #expect(stored.revealTick == e.tick.globalTickIndex)
+        #expect(e.drawings.isEmpty)   // 不污染原训练记录
+    }
+
     // MARK: - review-redesign Task 4：双面板划线互斥（toggleDrawingExclusive/cancelDrawingAllPanels/isDrawingActive）
 
     @Test("toggleDrawingExclusive: 激活选中面板（.lower），另一面板（.upper）不受影响")

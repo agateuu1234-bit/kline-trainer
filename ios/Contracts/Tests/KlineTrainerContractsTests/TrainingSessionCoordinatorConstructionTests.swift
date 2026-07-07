@@ -225,7 +225,7 @@ struct TrainingSessionCoordinatorConstructionTests {
         ops: [TradeOperation] = []
     ) throws -> PendingTraining {
         let posData = try positionDataOverride ?? JSONEncoder().encode(position)
-        return PendingTraining(
+        return try PendingTraining(
             trainingSetFilename: filename, globalTickIndex: tick,
             upperPeriod: .m60, lowerPeriod: .daily,
             positionData: posData, cashBalance: cash,

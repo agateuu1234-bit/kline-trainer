@@ -40,8 +40,8 @@ final class TrainingResetPortTests: XCTestCase {
         try db.dbQueue.write { try SettingsDAOImpl.setTotalCapital($0, 123_456) }
     }
 
-    private static func makePending() -> PendingTraining {
-        PendingTraining(
+    private static func makePending() throws -> PendingTraining {
+        try PendingTraining(
             trainingSetFilename: "t.sqlite", globalTickIndex: 12,
             upperPeriod: .daily, lowerPeriod: .m3, positionData: Data([0x00]),
             cashBalance: 50_000,
@@ -74,7 +74,7 @@ final class TrainingResetPortTests: XCTestCase {
         XCTAssertEqual(counts.1, 1)
         XCTAssertEqual(counts.2, 1)
         let uv: Int = try queue.read { d in try Int.fetchOne(d, sql: "PRAGMA user_version") ?? -1 }
-        XCTAssertEqual(uv, 6)   // 0008 后完整 migrator 终态 = 6（纯数据操作，无额外迁移）
+        XCTAssertEqual(uv, 7)   // 0009 后完整 migrator 终态 = 7（纯数据操作，无额外迁移）
     }
 
     // 幂等：空库重置也合法，只确保 capital。

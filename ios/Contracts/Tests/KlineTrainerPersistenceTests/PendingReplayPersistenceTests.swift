@@ -5,11 +5,11 @@ import Foundation
 @testable import KlineTrainerPersistence
 
 @MainActor
-@Test func migration0006_createsTable_userVersion6() throws {
+@Test func migration0006_createsTable_userVersion7() throws {
     let queue = try DatabaseQueue()        // in-memory
     try AppDBMigrations.makeMigrator().migrate(queue)
     let uv = try queue.read { try Int.fetchOne($0, sql: "PRAGMA user_version") }
-    #expect(uv == 6)   // 完整 migrator 现终态 = 6（0008 drawing reveal_tick 新增）
+    #expect(uv == 7)   // 完整 migrator 现终态 = 7（0009 drawing style/draw_uuid 新增）
     let exists = try queue.read {
         try Int.fetchOne($0, sql:
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pending_replay'")
@@ -21,7 +21,7 @@ import Foundation
 @Test func pendingReplayImpl_roundTripAndClear() throws {
     let queue = try DatabaseQueue()
     try AppDBMigrations.makeMigrator().migrate(queue)
-    let p = PendingReplay(recordId: 9, trainingSetFilename: "z.sqlite", globalTickIndex: 3,
+    let p = try PendingReplay(recordId: 9, trainingSetFilename: "z.sqlite", globalTickIndex: 3,
         upperPeriod: .m60, lowerPeriod: .daily, positionData: Data([7]), cashBalance: 88_000,
         feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [], startedAt: 123, accumulatedCapital: 100_000,
@@ -38,7 +38,7 @@ import Foundation
 @Test func pendingReplayImpl_conditionalClear_onlyMatchingRecordId() throws {
     let queue = try DatabaseQueue()
     try AppDBMigrations.makeMigrator().migrate(queue)
-    let slotA = PendingReplay(recordId: 101, trainingSetFilename: "a.sqlite", globalTickIndex: 1,
+    let slotA = try PendingReplay(recordId: 101, trainingSetFilename: "a.sqlite", globalTickIndex: 1,
         upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(), cashBalance: 100_000,
         feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [], startedAt: 1, accumulatedCapital: 100_000,
@@ -56,7 +56,7 @@ import Foundation
     let dbPath = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("test_reset_\(UUID().uuidString).sqlite")
     let db = try DefaultAppDB(dbPath: dbPath)
     // 写一条 pending_training（使两个断言都有意义）
-    let pendingTraining = PendingTraining(
+    let pendingTraining = try PendingTraining(
         trainingSetFilename: "t.sqlite", globalTickIndex: 5,
         upperPeriod: .m60, lowerPeriod: .daily, positionData: Data(),
         cashBalance: 100_000,
@@ -67,7 +67,7 @@ import Foundation
     try db.savePending(pendingTraining)
     #expect(try db.loadPending() != nil)
     // 写一条 pending_replay
-    let slot = PendingReplay(recordId: 9, trainingSetFilename: "z.sqlite", globalTickIndex: 3,
+    let slot = try PendingReplay(recordId: 9, trainingSetFilename: "z.sqlite", globalTickIndex: 3,
         upperPeriod: .m60, lowerPeriod: .daily, positionData: Data([7]), cashBalance: 88_000,
         feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
         tradeOperations: [], drawings: [], startedAt: 123, accumulatedCapital: 100_000,

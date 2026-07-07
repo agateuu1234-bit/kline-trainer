@@ -47,15 +47,48 @@ enum RecordRepositoryImpl {
                 ])
         }
 
+        // codex whole-branch Finding 2：drawings 在到达这里前只经过结构性解码（LossyDrawingArray.decode），
+        // 未必经过 reconciled()（唯一校验 id 的地方）——坏 pending/replay blob 可携带重复非空 id 直接 resume 进
+        // engine.drawings。draw_uuid 是迁移 0009 的 NOT NULL/CHECK/UNIQUE 列，原样直插会 SQLITE_CONSTRAINT，
+        // finalize 永久失败、用户卡死。此处（所有 finalize 唯一插入口）去重：空 id 或已见过的 id → 换新 UUID，
+        // 首次出现的 id 保留；内容一条不丢。
+        // codex whole-branch R7（medium）：上面这份去重此前只查【本批】的 `seenDrawUuids`——但 draw_uuid
+        // 是**全库**唯一（迁移 0009 UNIQUE，非仅本批）。一个 resumed/legacy/损坏的 pending blob 可携带一个
+        // 本批内不重复、但恰好与【之前某条已 finalize 记录】的 draw_uuid 相同的 id，仍会原样插入撞 UNIQUE、
+        // 回滚、用户卡死。故在换新 UUID 前，除了本批 Set，额外查一次 `drawings` 表（同一 db/事务句柄，见下方
+        // `dbCollision`）——碰撞（空/本批重复/库中已存在）→ 换新 UUID；否则保留原 id。
+        var seenDrawUuids = Set<String>()
         for dr in drawings {
             let anchorsJSON = try jsonEncode(dr.anchors)
+            let styleJSON = try jsonEncode(DrawingStyle(from: dr))
+            // draw_uuid：迁移 0009 加的 NOT NULL/CHECK/UNIQUE 列（跨层身份，D16/D20）；dr.id 通常已是稳定 UUID
+            // （Models.swift DrawingObject.id 默认值，或 lossy 层 legacy-idx-N 回填），但不能假设上游已去重
+            // （见上方注释）——为空、本批已出现过、或已存在于 `drawings` 表（全局唯一约束）→ 换新 UUID，
+            // 保证本次插入满足 NOT NULL/CHECK/UNIQUE。
+            let drawUuid: String
+            let batchCollision = dr.id.isEmpty || !seenDrawUuids.insert(dr.id).inserted
+            // 本批未撞才需查库（省一次查询）；同一 db 句柄 = 同一写事务，能看见此前已 commit 的记录。
+            let dbCollision: Bool
+            if batchCollision {
+                dbCollision = false
+            } else {
+                dbCollision = try Bool.fetchOne(db, sql:
+                    "SELECT 1 FROM drawings WHERE draw_uuid = ? LIMIT 1", arguments: [dr.id]) ?? false
+            }
+            if batchCollision || dbCollision {
+                drawUuid = UUID().uuidString
+                seenDrawUuids.insert(drawUuid)
+            } else {
+                drawUuid = dr.id
+            }
+            // style_json：除 id/toolType/anchors/isExtended/panelPosition/reveal_tick 外的样式/文本字段束。
             try db.execute(sql: """
                 INSERT INTO drawings
-                  (record_id, tool_type, panel_position, is_extended, anchors, reveal_tick)
-                VALUES (?, ?, ?, ?, ?, ?)
+                  (record_id, tool_type, panel_position, is_extended, anchors, reveal_tick, draw_uuid, style_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     recordId, dr.toolType.rawValue, dr.panelPosition,
-                    dr.isExtended ? 1 : 0, anchorsJSON, dr.revealTick
+                    dr.isExtended ? 1 : 0, anchorsJSON, dr.revealTick, drawUuid, styleJSON
                 ])
         }
 
@@ -89,7 +122,8 @@ enum RecordRepositoryImpl {
 
         let drRows = try Row.fetchAll(db, sql:
             "SELECT * FROM drawings WHERE record_id = ? ORDER BY id ASC", arguments: [id])
-        let drawings = try drRows.map { try drawingFromRow($0) }
+        // 未知/未来 tool_type 的 finalized 行 → drawingFromRow 返回 nil，compactMap 跳过（不伪装成 .horizontal）。
+        let drawings = try drRows.compactMap { try drawingFromRow($0) }
 
         return (record, ops, drawings)
     }
@@ -160,17 +194,101 @@ enum RecordRepositoryImpl {
         )
     }
 
-    private static func drawingFromRow(_ row: Row) throws -> DrawingObject {
+    /// 返回 nil = 未知/未来 `tool_type` 的 finalized 行 → **lossy 跳过**（不静默伪装成 `.horizontal`，codex R3-medium）。
+    /// finalized 行只读、加载不重写，跳过非破坏性（DB 行保留、仅本次不呈现）。caller 用 compactMap 过滤 nil。
+    private static func drawingFromRow(_ row: Row) throws -> DrawingObject? {
         let toolRaw: String = row["tool_type"]
-        guard let tool = DrawingToolType(rawValue: toolRaw) else {
-            throw AppError.persistence(.dbCorrupted)
-        }
+        guard let tool = DrawingToolType(rawValue: toolRaw) else { return nil }   // 未知→跳过，不 coerce .horizontal
         let anchorsJSON: String = row["anchors"]
-        let anchors: [DrawingAnchor] = try jsonDecode(anchorsJSON, as: [DrawingAnchor].self)
-        let isExt: Int = row["is_extended"]
-        return DrawingObject(toolType: tool, anchors: anchors,
-                             isExtended: isExt != 0, panelPosition: row["panel_position"],
-                             revealTick: row["reveal_tick"])
+        // codex whole-branch R15（high）：版本容错解码 —— 未知 future Period raw value（如更新版本
+        // app 写入的新周期）用 LossyAnchor 兜底回退 .daily，不 throw（同下方 DrawingStyle 同一原则）。
+        let anchors: [DrawingAnchor] = try jsonDecode(anchorsJSON, as: [LossyAnchor].self)
+            .map { $0.toDrawingAnchor() }
+        let drawUuid: String = row["draw_uuid"]
+        let isExt = (row["is_extended"] as Int) != 0
+        // NULL style_json（旧行）→ **行感知兜底**：lineSubType 由 is_extended 派生（true→.ray/false→.straight）、
+        // period 由锚点派生——不能用扁平 defaults（会把 is_extended=1 的旧线错读成 .straight，codex R3-high）。
+        let style: DrawingStyle = try (row["style_json"] as String?)
+            .map { try jsonDecode($0, as: DrawingStyle.self) }
+            ?? DrawingStyle.legacyFallback(isExtended: isExt, period: anchors.first?.period ?? .m3)
+        return DrawingObject(
+            id: drawUuid, toolType: tool, anchors: anchors,
+            isExtended: isExt, panelPosition: row["panel_position"],
+            revealTick: row["reveal_tick"], period: style.period, lineSubType: style.lineSubType,
+            lineStyle: style.lineStyle, thickness: style.thickness, colorToken: style.colorToken,
+            labelMode: style.labelMode, locked: style.locked, text: style.text, fontSize: style.fontSize,
+            textColorToken: style.textColorToken, textForm: style.textForm, tailAnchor: style.tailAnchor)
+    }
+
+    /// anchors 列（及 DrawingStyle.tailAnchor）的版本容错解码载体：Period 先解出原始 rawValue 再映射，
+    /// 未知 future 值（如更新版本 app 写入的新周期）→ 回退 `.daily`，不 throw（codex whole-branch R15-high）。
+    private struct LossyAnchor: Decodable {
+        let period: String
+        let candleIndex: Int
+        let price: Double
+        func toDrawingAnchor() -> DrawingAnchor {
+            DrawingAnchor(period: Period(rawValue: period) ?? .daily, candleIndex: candleIndex, price: price)
+        }
+    }
+
+    /// style_json 列的 payload 结构 = 除 id/toolType/anchors/isExtended/panelPosition/reveal_tick 外的
+    /// 样式/文本字段束（这些已是独立列，不重复存）。
+    ///
+    /// codex whole-branch R15（high）：自定义 `init(from:)` 替换合成 Decodable —— finalized 行
+    /// 结构化列无法字节级保真未来值（不同于 pending blob 的 lossy 层），故版本容错的正确姿势是
+    /// **未知 raw-value 枚举字段回退默认值，绝不 throw**：否则单个未来颜色/线型/label/文本形态值
+    /// 会让 `loadRecordBundle` 整条记录 `.dbCorrupted`（连同其它本可正常显示的画线一起读不出来）。
+    /// 写路径（`encode(to:)`，仍合成）不变——只加宽读容忍度。
+    private struct DrawingStyle: Codable {
+        var period: Period; var lineSubType: LineSubType; var lineStyle: LineStyle
+        var thickness: Int; var colorToken: DrawingColorToken; var labelMode: LabelMode
+        var locked: Bool; var text: String; var fontSize: Int
+        var textColorToken: DrawingColorToken; var textForm: TextForm; var tailAnchor: DrawingAnchor?
+        init(from d: DrawingObject) {
+            period = d.period; lineSubType = d.lineSubType; lineStyle = d.lineStyle
+            thickness = d.thickness; colorToken = d.colorToken; labelMode = d.labelMode
+            locked = d.locked; text = d.text; fontSize = d.fontSize
+            textColorToken = d.textColorToken; textForm = d.textForm; tailAnchor = d.tailAnchor
+        }
+        static var defaults: DrawingStyle {
+            DrawingStyle(from: DrawingObject(toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0))
+        }
+        /// 旧行（NULL style_json）行感知兜底：lineSubType 由 is_extended 派生、period 由锚点派生（codex R3-high）。
+        static func legacyFallback(isExtended: Bool, period: Period) -> DrawingStyle {
+            var s = DrawingStyle.defaults
+            s.period = period
+            s.lineSubType = isExtended ? .ray : .straight   // spec §11.1/§4.2：旧 isExtended→lineSubType
+            return s
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case period, lineSubType, lineStyle, thickness, colorToken, labelMode
+            case locked, text, fontSize, textColorToken, textForm, tailAnchor
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            let d = DrawingStyle.defaults
+            period = try c.decodeIfPresent(String.self, forKey: .period)
+                .flatMap(Period.init(rawValue:)) ?? d.period
+            lineSubType = try c.decodeIfPresent(String.self, forKey: .lineSubType)
+                .flatMap(LineSubType.init(rawValue:)) ?? d.lineSubType
+            lineStyle = try c.decodeIfPresent(String.self, forKey: .lineStyle)
+                .flatMap(LineStyle.init(rawValue:)) ?? d.lineStyle
+            thickness = try c.decodeIfPresent(Int.self, forKey: .thickness) ?? d.thickness
+            colorToken = try c.decodeIfPresent(String.self, forKey: .colorToken)
+                .flatMap(DrawingColorToken.init(rawValue:)) ?? d.colorToken
+            labelMode = try c.decodeIfPresent(String.self, forKey: .labelMode)
+                .flatMap(LabelMode.init(rawValue:)) ?? d.labelMode
+            locked = try c.decodeIfPresent(Bool.self, forKey: .locked) ?? d.locked
+            text = try c.decodeIfPresent(String.self, forKey: .text) ?? d.text
+            fontSize = try c.decodeIfPresent(Int.self, forKey: .fontSize) ?? d.fontSize
+            textColorToken = try c.decodeIfPresent(String.self, forKey: .textColorToken)
+                .flatMap(DrawingColorToken.init(rawValue:)) ?? d.textColorToken
+            textForm = try c.decodeIfPresent(String.self, forKey: .textForm)
+                .flatMap(TextForm.init(rawValue:)) ?? d.textForm
+            tailAnchor = try c.decodeIfPresent(LossyAnchor.self, forKey: .tailAnchor)?.toDrawingAnchor()
+        }
     }
 
     // MARK: - JSON helpers（共享给其它 *Impl.swift）

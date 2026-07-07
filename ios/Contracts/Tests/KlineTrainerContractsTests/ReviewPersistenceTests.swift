@@ -73,9 +73,12 @@ private struct ReviewTestHarness {
 }
 
 /// 简易水平线 fixture（唯一变量=价格，用以区分不同画线）。
+/// id 由 price 派生（非默认随机 UUID）：Task 7 起 `ReviewNetChange.changed` 按 id 归组比较，
+/// 同一 price 的两次独立调用须代表"同一条画线"（与真实 working/committed 场景一致——working 从
+/// committed 拷贝而来，保留 id），否则本文件内大量 `line(N) vs line(N)` 会被误判为不同 id → 误报改动。
 @MainActor
 private func line(_ price: Double) -> DrawingObject {
-    DrawingObject(toolType: .horizontal,
+    DrawingObject(id: "line-\(price)", toolType: .horizontal,
                   anchors: [DrawingAnchor(period: .m3, candleIndex: 0, price: price)],
                   isExtended: false, panelPosition: 0)
 }
@@ -102,14 +105,21 @@ private final class SlowReviewArchiveRepo: ReviewArchiveRepository, @unchecked S
 
     func loadWorking(recordId: Int64) throws -> ReviewWorking? { try inner.loadWorking(recordId: recordId) }
     func loadSaved(recordId: Int64) throws -> [DrawingObject]? { try inner.loadSaved(recordId: recordId) }
+    func loadSavedLossy(recordId: Int64) throws
+        -> (lossy: LossyDrawingArray, hiddenIds: [DrawingID], unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry])? {
+        try inner.loadSavedLossy(recordId: recordId)
+    }
     func loadArchive(recordId: Int64) throws -> ReviewArchive? { try inner.loadArchive(recordId: recordId) }
 
-    func saveWorking(recordId: Int64, stepTick: Int, drawings: [DrawingObject]) throws {
+    func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID],
+                     unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry]) throws {
         Thread.sleep(forTimeInterval: delay)     // 模拟慢写：即便变慢，fence 仍须保证 last-wins
-        try inner.saveWorking(recordId: recordId, stepTick: stepTick, drawings: drawings)
+        try inner.saveWorking(recordId: recordId, stepTick: stepTick, lossy: lossy,
+                              hiddenOriginalIds: hiddenOriginalIds, unknownTopLevel: unknownTopLevel)
     }
-    func commitSaved(recordId: Int64, drawings: [DrawingObject]) throws {
-        try inner.commitSaved(recordId: recordId, drawings: drawings)
+    func commitSaved(recordId: Int64, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID],
+                     unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry]) throws {
+        try inner.commitSaved(recordId: recordId, lossy: lossy, hiddenOriginalIds: hiddenOriginalIds, unknownTopLevel: unknownTopLevel)
     }
     func clearWorking(recordId: Int64) throws { try inner.clearWorking(recordId: recordId) }
     func clearSaved(recordId: Int64) throws { try inner.clearSaved(recordId: recordId) }
@@ -156,15 +166,16 @@ struct ReviewNetChangeTests {
     // codex whole-branch review [medium]：key(_:) 曾遗漏 revealTick，致「同几何异渐显时机」被误判为无改动。
     @Test @MainActor func sameGeometryDifferentRevealTick_changed() {
         let anchors = [DrawingAnchor(period: .m3, candleIndex: 5, price: 10)]
-        let saved   = [DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
-        let working = [DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 200)]
+        // 同 id：模拟"同一条画线"revealTick 被编辑（Task 7 起按 id 归组比较，须显式共享 id）。
+        let saved   = [DrawingObject(id: "rt", toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
+        let working = [DrawingObject(id: "rt", toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 200)]
         #expect(ReviewNetChange.changed(working: working, committed: saved) == true)
     }
 
     @Test @MainActor func sameGeometrySameRevealTick_noChange() {
         let anchors = [DrawingAnchor(period: .m3, candleIndex: 5, price: 10)]
-        let saved   = [DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
-        let working = [DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
+        let saved   = [DrawingObject(id: "rt", toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
+        let working = [DrawingObject(id: "rt", toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0, revealTick: 100)]
         #expect(ReviewNetChange.changed(working: working, committed: saved) == false)
     }
 }
@@ -191,7 +202,7 @@ struct ReviewPersistenceTests {
     // 2) 进入 saved 记录（committed=saved）→ 不动 → persist → clearWorking → reviewMarker==.saved
     @Test func enterSavedRecord_noChange_persist_revertsToSaved() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])   // 既有 saved 基线
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))   // 既有 saved 基线
         let e = try await h.coordinator.review(recordId: h.seededRecordId)
         h.coordinator.setReviewSessionForTesting(recordId: h.seededRecordId, committedBaseline: [line(10)])
         e.setReviewDrawingsForTesting([line(10)])   // 未动，working == committed
@@ -205,7 +216,7 @@ struct ReviewPersistenceTests {
     // 3) 进入 saved → 画一条(≠saved) → persist → .inProgress；再删回=saved → persist → .saved（committed 基线回退）
     @Test func drawThenRevertToSavedBaseline_marksSaved_notStuckInProgress() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))
         let e = try await h.coordinator.review(recordId: h.seededRecordId)
         h.coordinator.setReviewSessionForTesting(recordId: h.seededRecordId, committedBaseline: [line(10)])
 
@@ -277,7 +288,7 @@ struct ReviewPersistenceTests {
 
     @Test func review_onSavedRecord_seedsDrawingsAndCommittedBaselineFromSaved() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))
 
         let e = try await h.coordinator.review(recordId: h.seededRecordId)
         #expect(e.reviewDrawings == [line(10)])
@@ -300,7 +311,7 @@ struct ReviewPersistenceTests {
 
     @Test func review_savedCorrupt_recoversToEmptyBaseline_marksNone() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))
         h.reviewRepo.failNextLoadSaved = .persistence(.dbCorrupted)
 
         let e = try await h.coordinator.review(recordId: h.seededRecordId)
@@ -311,7 +322,7 @@ struct ReviewPersistenceTests {
 
     @Test func review_savedCorruptAndClearSavedFails_throwsRetryable_keepsSavedRow() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))
         h.reviewRepo.failNextLoadSaved = .persistence(.dbCorrupted)
         h.reviewRepo.failNextClearSaved = .internalError(module: "test", detail: "transient clear")
 
@@ -327,7 +338,7 @@ struct ReviewPersistenceTests {
 
     @Test func resumePendingReview_hitInProgress_restoresStepTickAndDrawings() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, drawings: [line(20)])
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, lossy: LossyDrawingArray(drawings: [line(20)]))
 
         let e = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
         #expect(e != nil)
@@ -343,7 +354,7 @@ struct ReviewPersistenceTests {
         #expect(e1 == nil)
 
         // 仅 saved（marker == .saved，非 .inProgress）
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))
         let e2 = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
         #expect(e2 == nil)
     }
@@ -352,8 +363,8 @@ struct ReviewPersistenceTests {
     // 既有 saved 未被误清（marker 回退 .saved 非 .none）、且未留下悬空活跃 session 状态。
     @Test func resumePendingReview_workingCorrupt_clearsWorking_returnsNil() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])       // 既有 saved
-        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, drawings: [line(20)])
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))       // 既有 saved
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, lossy: LossyDrawingArray(drawings: [line(20)]))
         h.reviewRepo.failNextLoadWorking = .persistence(.dbCorrupted)
 
         let e = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
@@ -372,8 +383,8 @@ struct ReviewPersistenceTests {
     // 修复后须先校验、越界 → clearWorking + nil（router 回退 fresh review，saved/record 不受影响）。
     @Test func resumePendingReview_workingStepTickNegative_clearsWorking_returnsNil() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])   // 既有 saved，须保留
-        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: -1, drawings: [line(20)])   // 越界：负数
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))   // 既有 saved，须保留
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: -1, lossy: LossyDrawingArray(drawings: [line(20)]))   // 越界：负数
 
         let e = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
 
@@ -387,8 +398,8 @@ struct ReviewPersistenceTests {
 
     @Test func resumePendingReview_workingStepTickBeyondFinal_clearsWorking_returnsNil() async throws {
         let h = try ReviewTestHarness.make()   // seededFinalTick == 7
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])   // 既有 saved，须保留
-        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 8, drawings: [line(20)])   // 越界：超过 finalTick=7
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))   // 既有 saved，须保留
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 8, lossy: LossyDrawingArray(drawings: [line(20)]))   // 越界：超过 finalTick=7
 
         let e = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
 
@@ -408,8 +419,8 @@ struct ReviewPersistenceTests {
     // 修复后须 clearWorking + 返回 nil，且随后一次 fresh `review()` 必须能成功打开（无 brick）。
     @Test func resumePendingReview_workingStepTickBelowMetaStartTick_clearsWorking_returnsNil_noBrick() async throws {
         let h = try ReviewTestHarness.make(metaStartDatetime: 541)   // datetime=1+gi*180 → gi=3 时 541 → metaStartTick==3
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])   // 既有 saved，须保留
-        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 2, drawings: [line(20)])   // 越界：< metaStartTick(3)，但在 0...7 内
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))   // 既有 saved，须保留
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 2, lossy: LossyDrawingArray(drawings: [line(20)]))   // 越界：< metaStartTick(3)，但在 0...7 内
 
         let e = try await h.coordinator.resumePendingReview(recordId: h.seededRecordId)
 
@@ -431,7 +442,7 @@ struct ReviewPersistenceTests {
     // 清掉，丢失一份仍在进行的复盘。修复后瞬态错误须 PROPAGATE（不得静默回退 nil），working 行原样保留。
     @Test func resumePendingReview_reviewMarkerTransientError_propagatesAndPreservesWorking() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, drawings: [line(20)])
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, lossy: LossyDrawingArray(drawings: [line(20)]))
         h.reviewRepo.failNextReviewMarker = .internalError(module: "test", detail: "transient marker read")
 
         await #expect(throws: (any Error).self) {
@@ -534,10 +545,10 @@ struct ReviewPersistenceTests {
     @Test func discardReviewWorking_staleEngine_throwsInternalError_doesNotMutateArchive() async throws {
         let h = try ReviewTestHarness.make()
         let idB = try h.recordRepo.insertRecord(secondFixtureRecord(), ops: [], drawings: [])
-        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, drawings: [line(20)])   // A 有 working
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, lossy: LossyDrawingArray(drawings: [line(20)]))   // A 有 working
         let eA = try #require(try await h.coordinator.resumePendingReview(recordId: h.seededRecordId))
 
-        try h.reviewRepo.saveWorking(recordId: idB, stepTick: 1, drawings: [line(50)])   // B 自己的合法 working
+        try h.reviewRepo.saveWorking(recordId: idB, stepTick: 1, lossy: LossyDrawingArray(drawings: [line(50)]))   // B 自己的合法 working
         _ = try await h.coordinator.review(recordId: idB)   // activeEngine → B 的引擎；reviewRecordId → idB
 
         do {
@@ -553,6 +564,41 @@ struct ReviewPersistenceTests {
         // A、B 的 working 行均未被这次陈旧写触碰（尤其 B 的合法 working 不能被误清）。
         #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings == [line(20)])
         #expect(try h.reviewRepo.loadWorking(recordId: idB)?.drawings == [line(50)])
+    }
+
+    // MARK: - codex whole-branch R14 finding 2：lossy-only 便捷重载丢 hiddenIds/unknownTopLevel 的 footgun
+    //
+    // 已加载完整 ReviewWorking / saved 态（含 hiddenIds + 未来顶层 key）后，用【安全全状态重载】原样转发
+    // save 回去——不得只传 lossy 而漏传已加载的元数据（那样会静默丢失，见旧 lossy-only 重载）。
+
+    @Test func saveWorkingFullStateOverload_preservesHiddenIdsAndUnknownTopLevel() async throws {
+        let repo = InMemoryReviewArchiveRepository()
+        let future = ReviewArchiveWrapper.UnknownTopLevelEntry(key: "futureMeta", rawValue: #"{"x":1}"#)
+        try repo.saveWorking(recordId: 1, stepTick: 3, lossy: LossyDrawingArray(drawings: [line(10)]),
+                              hiddenOriginalIds: ["orig-1"], unknownTopLevel: [future])
+        let loaded = try #require(try repo.loadWorking(recordId: 1))
+
+        try repo.saveWorking(recordId: 2, working: loaded)   // 安全重载：整份已加载 ReviewWorking 原样转发
+
+        let reloaded = try #require(try repo.loadWorking(recordId: 2))
+        #expect(reloaded.hiddenOriginalIds == ["orig-1"])
+        #expect(reloaded.unknownTopLevel == [future])
+        #expect(reloaded.drawings == [line(10)])
+    }
+
+    @Test func commitSavedFullStateOverload_preservesHiddenIdsAndUnknownTopLevel() async throws {
+        let repo = InMemoryReviewArchiveRepository()
+        let future = ReviewArchiveWrapper.UnknownTopLevelEntry(key: "futureMeta", rawValue: #"{"x":1}"#)
+        try repo.commitSaved(recordId: 1, lossy: LossyDrawingArray(drawings: [line(10)]),
+                              hiddenOriginalIds: ["orig-1"], unknownTopLevel: [future])
+        let loaded = try #require(try repo.loadSavedLossy(recordId: 1))
+
+        try repo.commitSaved(recordId: 2, savedLossy: loaded)   // 安全重载：整份已加载 saved 态原样转发
+
+        let reloaded = try #require(try repo.loadSavedLossy(recordId: 2))
+        #expect(reloaded.hiddenIds == ["orig-1"])
+        #expect(reloaded.unknownTopLevel == [future])
+        #expect(reloaded.lossy.drawings == [line(10)])
     }
 }
 
@@ -619,7 +665,7 @@ struct ReviewAutosaveFenceTests {
     // 也照常 endSession（working 行原样保留，`复盘中` marker 不变——可恢复，用户可重新进入再结束一次）。
     @Test func abandonReview_clearWorkingThrows_stillEndsSessionAndPreservesWorkingRow() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, drawings: [line(20)])
+        try h.reviewRepo.saveWorking(recordId: h.seededRecordId, stepTick: 4, lossy: LossyDrawingArray(drawings: [line(20)]))
         let e = try #require(try await h.coordinator.resumePendingReview(recordId: h.seededRecordId))
         h.reviewRepo.failNextClearWorking = .internalError(module: "test", detail: "transient clear failure")
 
@@ -791,7 +837,7 @@ struct ReviewAutosaveFenceTests {
     //    reviewDrawings 未变的 e）执行——必须 no-op，不得把 marker 从 `.saved` 又翻回 `.inProgress`。
     @Test func staleFlushReviewForBackground_afterEndReviewDiscard_doesNotResurrectDiscardedWorking() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])   // 既有 saved 基线
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))   // 既有 saved 基线
         let e = try await h.coordinator.review(recordId: h.seededRecordId)
 
         e.setReviewDrawingsForTesting([line(10), line(20)])            // 偏离 committed 基线
@@ -819,7 +865,7 @@ struct ReviewAutosaveFenceTests {
     // `activeEngine === engine` 身份闸（那两处不覆盖 `reviewNetChanged()` 这条只读路径）。
     @Test func endSession_clearsCommittedBaseline_reviewNetChangedFalseAfterTerminalTeardown() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])   // 非空 committed 基线
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))   // 非空 committed 基线
         let e = try await h.coordinator.review(recordId: h.seededRecordId)
         #expect(h.coordinator.reviewNetChanged() == false)   // fresh：working==committed==[line(10)]
 
@@ -832,7 +878,7 @@ struct ReviewAutosaveFenceTests {
     // 同上，但 terminal 动作走 `abandonReview`（同类稳健放弃路径）。
     @Test func staleFlushReviewForBackground_afterAbandonReview_doesNotResurrectDiscardedWorking() async throws {
         let h = try ReviewTestHarness.make()
-        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, drawings: [line(10)])
+        try h.reviewRepo.commitSaved(recordId: h.seededRecordId, lossy: LossyDrawingArray(drawings: [line(10)]))
         let e = try await h.coordinator.review(recordId: h.seededRecordId)
 
         e.setReviewDrawingsForTesting([line(10), line(30)])
