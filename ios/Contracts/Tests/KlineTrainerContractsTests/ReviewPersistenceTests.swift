@@ -565,6 +565,41 @@ struct ReviewPersistenceTests {
         #expect(try h.reviewRepo.loadWorking(recordId: h.seededRecordId)?.drawings == [line(20)])
         #expect(try h.reviewRepo.loadWorking(recordId: idB)?.drawings == [line(50)])
     }
+
+    // MARK: - codex whole-branch R14 finding 2：lossy-only 便捷重载丢 hiddenIds/unknownTopLevel 的 footgun
+    //
+    // 已加载完整 ReviewWorking / saved 态（含 hiddenIds + 未来顶层 key）后，用【安全全状态重载】原样转发
+    // save 回去——不得只传 lossy 而漏传已加载的元数据（那样会静默丢失，见旧 lossy-only 重载）。
+
+    @Test func saveWorkingFullStateOverload_preservesHiddenIdsAndUnknownTopLevel() async throws {
+        let repo = InMemoryReviewArchiveRepository()
+        let future = ReviewArchiveWrapper.UnknownTopLevelEntry(key: "futureMeta", rawValue: #"{"x":1}"#)
+        try repo.saveWorking(recordId: 1, stepTick: 3, lossy: LossyDrawingArray(drawings: [line(10)]),
+                              hiddenOriginalIds: ["orig-1"], unknownTopLevel: [future])
+        let loaded = try #require(try repo.loadWorking(recordId: 1))
+
+        try repo.saveWorking(recordId: 2, working: loaded)   // 安全重载：整份已加载 ReviewWorking 原样转发
+
+        let reloaded = try #require(try repo.loadWorking(recordId: 2))
+        #expect(reloaded.hiddenOriginalIds == ["orig-1"])
+        #expect(reloaded.unknownTopLevel == [future])
+        #expect(reloaded.drawings == [line(10)])
+    }
+
+    @Test func commitSavedFullStateOverload_preservesHiddenIdsAndUnknownTopLevel() async throws {
+        let repo = InMemoryReviewArchiveRepository()
+        let future = ReviewArchiveWrapper.UnknownTopLevelEntry(key: "futureMeta", rawValue: #"{"x":1}"#)
+        try repo.commitSaved(recordId: 1, lossy: LossyDrawingArray(drawings: [line(10)]),
+                              hiddenOriginalIds: ["orig-1"], unknownTopLevel: [future])
+        let loaded = try #require(try repo.loadSavedLossy(recordId: 1))
+
+        try repo.commitSaved(recordId: 2, savedLossy: loaded)   // 安全重载：整份已加载 saved 态原样转发
+
+        let reloaded = try #require(try repo.loadSavedLossy(recordId: 2))
+        #expect(reloaded.hiddenIds == ["orig-1"])
+        #expect(reloaded.unknownTopLevel == [future])
+        #expect(reloaded.lossy.drawings == [line(10)])
+    }
 }
 
 // MARK: - Task 7: review autosave 单写者 fence（token/revision/drain，终态 last-wins）

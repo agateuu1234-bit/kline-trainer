@@ -115,17 +115,44 @@ public protocol ReviewArchiveRepository: Sendable {
 // （hide/show 写入行为在 P5，本 task 只透传加载来的 hiddenIds，不新增编辑）。
 // codex WB R7 finding 1：同款兜底补 `unknownTopLevel` 默认 `[]`——保住既有（此前只传 lossy/hiddenOriginalIds
 // 的）call-site 不必跟着改。
+// codex WB R14 finding 2（medium）：这些 lossy-only 便捷重载会用空数组默认填 hiddenOriginalIds/
+// unknownTopLevel——若调用方先 `loadWorking`/`loadSavedLossy` 拿到非空的已加载元数据、又手滑用这些
+// 重载存回去，会静默丢掉隐藏态/未来顶层 key（footgun）。现有生产调用点（`TrainingSessionCoordinator`）
+// 均已直接调用下方 4 参/3 参【完整】协议方法（不经过这些重载），故标记 `deprecated` 只警示、不影响现有
+// 行为；下方另加两个安全重载（`saveWorking(recordId:working:)` / `commitSaved(recordId:savedLossy:)`）
+// 接收完整已加载状态，供未来"读回来再存回去"的调用点一次性正确转发全部三项。
 public extension ReviewArchiveRepository {
+    @available(*, deprecated, message: "默认写空 hiddenOriginalIds/unknownTopLevel——若已加载过 working 元数据，改用 saveWorking(recordId:working:) 以免静默丢失（codex WB R14 finding 2）")
     func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray) throws {
         try saveWorking(recordId: recordId, stepTick: stepTick, lossy: lossy, hiddenOriginalIds: [], unknownTopLevel: [])
     }
+    @available(*, deprecated, message: "默认写空 unknownTopLevel——若已加载过 working 元数据里的未知顶层 key，改用 saveWorking(recordId:working:) 以免静默丢失（codex WB R14 finding 2）")
     func saveWorking(recordId: Int64, stepTick: Int, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
         try saveWorking(recordId: recordId, stepTick: stepTick, lossy: lossy, hiddenOriginalIds: hiddenOriginalIds, unknownTopLevel: [])
     }
+    @available(*, deprecated, message: "默认写空 hiddenOriginalIds/unknownTopLevel——若已加载过 saved 元数据，改用 commitSaved(recordId:savedLossy:) 以免静默丢失（codex WB R14 finding 2）")
     func commitSaved(recordId: Int64, lossy: LossyDrawingArray) throws {
         try commitSaved(recordId: recordId, lossy: lossy, hiddenOriginalIds: [], unknownTopLevel: [])
     }
+    @available(*, deprecated, message: "默认写空 unknownTopLevel——若已加载过 saved 元数据里的未知顶层 key，改用 commitSaved(recordId:savedLossy:) 以免静默丢失（codex WB R14 finding 2）")
     func commitSaved(recordId: Int64, lossy: LossyDrawingArray, hiddenOriginalIds: [DrawingID]) throws {
         try commitSaved(recordId: recordId, lossy: lossy, hiddenOriginalIds: hiddenOriginalIds, unknownTopLevel: [])
+    }
+
+    /// 安全重载（codex WB R14 finding 2）：接收完整 `ReviewWorking`（`loadWorking` 的返回形状，
+    /// 含 hiddenOriginalIds + unknownTopLevel），一次性转发全部三项——调用方不可能只传 lossy 却漏传
+    /// 已加载的隐藏态/未知顶层 key。
+    func saveWorking(recordId: Int64, working: ReviewWorking) throws {
+        try saveWorking(recordId: recordId, stepTick: working.stepTick, lossy: working.lossy,
+                         hiddenOriginalIds: working.hiddenOriginalIds, unknownTopLevel: working.unknownTopLevel)
+    }
+
+    /// 安全重载（codex WB R14 finding 2）：接收 `loadSavedLossy` 返回的完整已保存态（tuple 形状一致），
+    /// 一次性转发 lossy + hiddenIds + unknownTopLevel——同上，避免误用 lossy-only 重载丢已加载的元数据。
+    func commitSaved(recordId: Int64,
+                     savedLossy loaded: (lossy: LossyDrawingArray, hiddenIds: [DrawingID],
+                                          unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry])) throws {
+        try commitSaved(recordId: recordId, lossy: loaded.lossy, hiddenOriginalIds: loaded.hiddenIds,
+                         unknownTopLevel: loaded.unknownTopLevel)
     }
 }
