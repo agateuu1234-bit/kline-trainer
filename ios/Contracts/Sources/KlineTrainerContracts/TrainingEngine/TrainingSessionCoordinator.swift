@@ -312,7 +312,7 @@ public final class TrainingSessionCoordinator {
                 initialCashBalance: pending.cashBalance,
                 initialPosition: position,
                 initialMarkers: markers(from: pending.tradeOperations),
-                initialDrawings: pending.drawings,
+                initialDrawings: normalizedLossy.drawings,   // 与 normalizedLossy 一致（去 dup/empty id）；engine init 恒以 initialDrawingsLossy 为准，此参防未来 refactor 误用未归一化副本（codex WB R17）
                 initialDrawingsLossy: normalizedLossy,   // P1a Task 12（Z1）：携带完整有损集（保未识别条穿过后续 save）
                 initialTradeOperations: pending.tradeOperations,
                 initialDrawdown: pending.drawdown,
@@ -885,7 +885,7 @@ public final class TrainingSessionCoordinator {
                 initialCashBalance: pending.cashBalance,
                 initialPosition: position,
                 initialMarkers: markers(from: pending.tradeOperations),
-                initialDrawings: pending.drawings,
+                initialDrawings: normalizedLossy.drawings,   // 与 normalizedLossy 一致（去 dup/empty id）；engine init 恒以 initialDrawingsLossy 为准，此参防未来 refactor 误用未归一化副本（codex WB R17）
                 initialDrawingsLossy: normalizedLossy,   // P1a Task 12（Z1）：携带完整有损集（保未识别条穿过后续 save）
                 initialTradeOperations: pending.tradeOperations,
                 initialDrawdown: pending.drawdown,
