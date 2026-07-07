@@ -257,7 +257,8 @@ public struct LossyDrawingArray: Equatable, Sendable {
     /// 之前），此后 engine 携带的 `.known` id 恒唯一非空，`reconciled(currentKnown:)` 的 dup/empty 门在正常
     /// 流程永不再 fail-close（那道门仍保留作 defense-in-depth，防运行期意外造出 dup id）。
     /// 只修复【损坏的】那部分：`.known` 元素里 id 为空、或与之前【已出现过】的 id 重复的，各自换发一个新
-    /// `UUID().uuidString`（连带用新 id 重新 `encodeKnown` 该条 raw——仅这一条字节改变）。
+    /// `UUID().uuidString`（连带用 `mergeKnownFields` 把新 id 覆盖进该条【原始 raw】——保留原 raw 里任何
+    /// 未来客户端字段，codex WB R10 finding 2；此前用 `encodeKnown` 重编码会丢掉它们）。
     /// `.unknownRaw` 元素与「id 唯一非空」的 `.known` 元素【原样字节不变】，元素【顺序不变】。
     public func normalizedUniqueIds() throws -> LossyDrawingArray {
         var seen = Set<DrawingID>()
@@ -278,7 +279,8 @@ public struct LossyDrawingArray: Equatable, Sendable {
                         locked: d.locked, text: d.text, fontSize: d.fontSize,
                         textColorToken: d.textColorToken, textForm: d.textForm, tailAnchor: d.tailAnchor)
                     seen.insert(renamed.id)
-                    out.append(.known(renamed, raw: try LossyDrawingArray.encodeKnown(renamed)))
+                    let mergedRaw = try LossyDrawingArray.mergeKnownFields(into: raw, from: renamed)
+                    out.append(.known(renamed, raw: mergedRaw))
                 } else {
                     out.append(.known(d, raw: raw))                        // 唯一非空 id → 字节不变
                 }

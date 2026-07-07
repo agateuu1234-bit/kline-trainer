@@ -320,6 +320,23 @@ struct LossyDrawingArrayTests {
         #expect(!first.id.isEmpty)                                 // 空 id 已换发
         #expect(second.id == "u1" && secondRaw == rawUnique)       // 唯一非空 id → 原样不变
     }
+
+    @Test("normalizedUniqueIds：重复 known id 且后出现那条携带未来字段 → 换发新 id 后未来字段仍保留在新 raw 里（不再用 encodeKnown 丢未来字段）（codex WB R10 finding 2）")
+    func normalizedUniqueIdsPreservesFutureFieldOnRename() throws {
+        let d = DrawingObject(id: "dup", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        let plainRaw = try LossyDrawingArray.encodeKnown(d)
+        let futureRaw = String(plainRaw.dropLast()) + #","futureField":1}"#
+        let lossy = LossyDrawingArray(elements: [.known(d, raw: plainRaw), .known(d, raw: futureRaw)])
+        let out = try lossy.normalizedUniqueIds()
+        guard out.elements.count == 2,
+              case .known(let first, let firstRaw) = out.elements[0],
+              case .known(let second, let secondRaw) = out.elements[1] else {
+            Issue.record("形状变了"); return
+        }
+        #expect(first.id == "dup" && firstRaw == plainRaw)          // 首次出现（此时唯一）→ 原样不变
+        #expect(second.id != "dup" && second.id != first.id)        // 后出现的重复 → 换发新 id，与首条不同
+        #expect(secondRaw.contains(#""futureField":1"#))            // 未来字段在换发新 id 后的 raw 里仍存活
+    }
 }
 
 @Suite("Drawing P1a — 复盘 canonical wrapper")
