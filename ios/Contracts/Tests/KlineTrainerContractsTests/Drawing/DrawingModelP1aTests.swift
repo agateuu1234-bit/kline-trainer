@@ -270,6 +270,21 @@ struct LossyDrawingArrayTests {
         #expect(out.contains("\"futureX\":9"))                 // 未来未知 key 仍保留
     }
 
+    // codex whole-branch R14 finding 1（high）：`knownFutureFieldPayloads` 用 raw 顶层 key 直接比对
+    // `knownDiskKeys`，转义过的已知 key（语义相同、字节不同）会被误判成「未来字段」→ finalize 门/复盘
+    // dirty 判定误报。修复=比对前语义反转义。
+    @Test("codex WB R14 finding 1：已知条 raw 里转义的已知 key（\\u006f 转义 toolType 的 o）不误判为未来字段")
+    func escapedKnownKeyNotMisclassifiedAsFuture() throws {
+        let obj = DrawingObject(id: "a", toolType: .horizontal,
+                                anchors: [DrawingAnchor(period: .daily, candleIndex: 0, price: 1.0)],
+                                isExtended: false, panelPosition: 0)
+        let raw = try LossyDrawingArray.encodeKnown(obj)
+        let escapedRaw = raw.replacingOccurrences(of: "\"toolType\"", with: "\"to\\u006flType\"")
+        #expect(escapedRaw.contains("\\u006f"))       // 前置断言：确实换成了转义形式（非误改）
+        let lossy = LossyDrawingArray(elements: [.known(obj, raw: escapedRaw)])
+        #expect(lossy.hasKnownFutureFields == false)            // 修前：raw 键比对未反转义 → 误判成未来字段
+    }
+
     @Test("reconciled fail-closed：loaded 元素含重复 id → 抛 .dbCorrupted（不静默折叠）")
     func reconciledRejectsDuplicateLoadedIds() throws {
         let d = DrawingObject(id: "dup", toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
@@ -471,6 +486,24 @@ struct ReviewArchiveWrapperTests {
     @Test("fail-closed：顶层重复 key（两个 drawings）→ .dbCorrupted")
     func rejectsDuplicateTopLevelKey() {
         let bad = #"{"drawings":[],"drawings":[{"id":"z"}],"hiddenIds":[]}"#
+        #expect(throws: AppError.self) { _ = try ReviewArchiveWrapper.decodeColumn(bad) }
+    }
+
+    // codex whole-branch R14 finding 1（high）：JSONObjectScan 曾按【原始字节】比对顶层 key，把转义过的
+    // 语义同名 key（如 `w` 转义 "drawings" 的 'w'）当成「找不到」→ 误判 .dbCorrupted，可能清掉一份
+    // 有效存档。修复=比对前语义反转义。
+
+    @Test("codex WB R14 finding 1：顶层 key 转义（\\u0077 转义 drawings 的 w）语义等价 → 仍能找到，非 dbCorrupted")
+    func escapedTopLevelKeyStillFound() throws {
+        let validDrawing = try LossyDrawingArray.encodeKnown(d("a"))
+        let column = "{\"dra\\u0077ings\":[\(validDrawing)],\"hiddenIds\":[]}"
+        let w = try ReviewArchiveWrapper.decodeColumn(column)
+        #expect(w.drawings.map(\.id) == ["a"])
+    }
+
+    @Test("codex WB R14 finding 1：转义与非转义的同语义顶层 key（drawings vs dra\\u0077ings）视为重复 → dbCorrupted")
+    func escapedDuplicateTopLevelKeyDetected() {
+        let bad = "{\"drawings\":[],\"dra\\u0077ings\":[],\"hiddenIds\":[]}"
         #expect(throws: AppError.self) { _ = try ReviewArchiveWrapper.decodeColumn(bad) }
     }
 

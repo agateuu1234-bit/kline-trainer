@@ -5,6 +5,21 @@ import Foundation
 /// 顶层 JSON 对象按 key 取【原始值字节文本】（去两侧空白、内部字节原样）；非对象/找不到 → nil。
 /// 让 wrapper 把 drawings 数组值的原始字节喂给 LossyDrawingArray（保真），不经 JSONSerialization 重序列化（codex plan-R2-high）。
 enum JSONObjectScan {
+    /// JSON 字符串【内容】（不含首尾引号）语义反转义（codex WB R14 finding 1）——JSON object key 是【语义】
+    /// 字符串：`"drawings"` 与转义写法 `"drawings"` 语义相同但原始字节不同，若比对时不反转义，转义过的
+    /// canonical key（如损坏恢复/未来客户端重写）会被误判成「找不到」→ 误报 .dbCorrupted / 误判成未来字段。
+    /// 仅供【KEY 的语义比较】使用；VALUE 恒保持原始字节不反转义（不影响 encodedColumn 的逐字节保真）。
+    /// 借道 Foundation `JSONDecoder` 正确处理 `\uXXXX`（含代理对）/`\n`/`\t`/`\"`/`\\`/`\/`/`\b`/`\f`/`\r`；
+    /// 反转义失败（非法转义）→ 回退用原始文本（调用方均在整体 JSONSerialization 校验通过后才会走到这里，
+    /// 正常路径不会触发回退，此处仅作防御、不新增 fail-closed 面）。
+    static func unescapeKey(_ raw: String) -> String {
+        guard let data = "\"\(raw)\"".data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(String.self, from: data) else {
+            return raw
+        }
+        return decoded
+    }
+
     static func rawValueBytes(_ data: Data, key: String) -> String? {
         let b = [UInt8](data); let n = b.count; var i = 0
         func isWS(_ c: UInt8) -> Bool { c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D }
@@ -38,19 +53,18 @@ enum JSONObjectScan {
         while i < n, isWS(b[i]) { i += 1 }
         guard i < n, b[i] == UInt8(ascii: "{") else { return nil }
         i += 1
-        let keyBytes = [UInt8](key.utf8)
         while i < n {
             while i < n, isWS(b[i]) { i += 1 }
             if i < n, b[i] == UInt8(ascii: "}") { return nil }
             guard i < n, b[i] == UInt8(ascii: "\"") else { return nil }
             let (ks, ke, afterKey) = readString(i); i = afterKey
-            let thisKey = Array(b[ks..<ke])
+            let thisKey = String(decoding: b[ks..<ke], as: UTF8.self)
             while i < n, isWS(b[i]) { i += 1 }
             guard i < n, b[i] == UInt8(ascii: ":") else { return nil }
             i += 1
             while i < n, isWS(b[i]) { i += 1 }
             let vs = i, ve = skipValue(i)
-            if thisKey == keyBytes {
+            if unescapeKey(thisKey) == key {
                 var a = vs, z = ve
                 while a < z, isWS(b[a]) { a += 1 }
                 while z > a, isWS(b[z - 1]) { z -= 1 }
@@ -142,7 +156,8 @@ enum JSONObjectScan {
                 if esc { esc = false } else if c == UInt8(ascii: "\\") { esc = true }
                 else if c == UInt8(ascii: "\"") { break }
                 j += 1 }
-            let key = String(decoding: b[ks..<j], as: UTF8.self)
+            // codex WB R14 finding 1：语义反转义后再判重——转义写法与非转义写法语义同名也算重复。
+            let key = unescapeKey(String(decoding: b[ks..<j], as: UTF8.self))
             guard seen.insert(key).inserted else { throw AppError.persistence(.dbCorrupted) }   // 重复顶层 key
             // 跳到该键的值末尾：借 rawValueBytes 定位后从 `,` 继续（简化：整体已由 caller JSONSerialization 验良构，
             // 这里只需数 key，用括号深度跳过值）
@@ -218,8 +233,10 @@ public struct ReviewArchiveWrapper: Equatable, Sendable {
             hidden = decoded
         }
         // codex WB R7 finding 1：除 drawings/hiddenIds 外的顶层 key → PRESERVE（不解读，原样字节保留）。
+        // codex WB R14 finding 1：判断「是不是 drawings/hiddenIds」须用语义反转义后的 key 比较（`$0.key`
+        // 本身仍是原始未反转义字节，供下面 `UnknownTopLevelEntry` 逐字节保真回写用，不能改）。
         let unknownTopLevel = JSONObjectScan.allTopLevelPairs(data)
-            .filter { $0.key != "drawings" && $0.key != "hiddenIds" }
+            .filter { JSONObjectScan.unescapeKey($0.key) != "drawings" && JSONObjectScan.unescapeKey($0.key) != "hiddenIds" }
             .map { UnknownTopLevelEntry(key: $0.key, rawValue: $0.rawValue) }
         return ReviewArchiveWrapper(lossy: lossy, hiddenIds: hidden, unknownTopLevel: unknownTopLevel)
     }

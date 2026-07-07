@@ -192,8 +192,10 @@ public struct LossyDrawingArray: Equatable, Sendable {
         elements.compactMap { element -> (id: String, future: [String: String])? in
             guard case .known(let d, let raw) = element else { return nil }
             var future: [String: String] = [:]
+            // codex WB R14 finding 1：`knownDiskKeys` membership 须用语义反转义后的 key 判——转义过的已知
+            // key（字节不同、语义相同，如 `toolType`）否则会被误判成「未来字段」。
             for pair in JSONObjectScan.allTopLevelPairs(Data(raw.utf8))
-            where !LossyDrawingArray.knownDiskKeys.contains(pair.key) {
+            where !LossyDrawingArray.knownDiskKeys.contains(JSONObjectScan.unescapeKey(pair.key)) {
                 future[pair.key] = pair.rawValue
             }
             return (id: d.id, future: future)
