@@ -184,6 +184,14 @@ public struct LossyDrawingArray: Equatable, Sendable {
         knownFutureFieldPayloads().contains { !$0.future.isEmpty }
     }
 
+    /// `hasKnownFutureFields` 的【存活】变体（codex WB R10 finding 1）：finalize 门本意是"这些未来字段
+    /// 会不会随 finalize 永久丢失"——若用户已把携带未来字段的那条已知画线删除（`engine.drawings` 不再
+    /// 含它），它已不会随 finalize 丢失，不应再计入。只统计 id 仍在 `liveIds`（调用方传 `engine.drawings`
+    /// 的 id 集）里的已知条。
+    func hasKnownFutureFields(liveIds: Set<DrawingID>) -> Bool {
+        knownFutureFieldPayloads().contains { liveIds.contains($0.id) && !$0.future.isEmpty }
+    }
+
     /// 把当前已知字段【覆盖进原始 JSON 对象、保留其未知 key】（编辑路径用；未知 key 必须存活，
     /// 字节不必全等——codex plan-R12）。原 raw 非对象 → fail-closed（保守）。
     static func mergeKnownFields(into rawJSON: String, from obj: DrawingObject) throws -> String {

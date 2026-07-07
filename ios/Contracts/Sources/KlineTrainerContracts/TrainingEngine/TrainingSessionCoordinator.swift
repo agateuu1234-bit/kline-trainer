@@ -694,7 +694,14 @@ public final class TrainingSessionCoordinator {
         // 投影），这些字段既不在其中、也不会被表结构记录，若照常 finalize 会随 pending 一起永久丢失。
         // `hasKnownFutureFields`（`LossyDrawingArray` 共享判定，`unknownRaw` 探测用的同一门也用它）同样
         // 只读「加载来的」`loadedDrawingsLossy`（不 reconciled），维持本门 dup-tolerant 的既有语义。
-        if !engine.loadedDrawingsLossy.unknownRaw.isEmpty || engine.loadedDrawingsLossy.hasKnownFutureFields {
+        // codex whole-branch R10 finding 1：上面这道未来字段门若原样读【整份】`loadedDrawingsLossy` 快照，
+        // 一旦用户在 resume 之后把这条携带未来字段的已知画线【删除】（`engine.drawings` 不再含它，
+        // `loadedDrawingsLossy` 是从不更新的加载快照仍留着）——finalize 已经不会丢失任何东西（用户已表达
+        // 删除意愿），却仍会被这道门永久卡死。改按【存活】画线 id（`engine.drawings` 的 id 集）过滤：
+        // 只有仍活着的已知画线携带未来字段才拦；`unknownRaw`（未投影进 engine.drawings、不可删）不受影响。
+        let liveIds = Set(engine.drawings.map { $0.id })
+        if !engine.loadedDrawingsLossy.unknownRaw.isEmpty
+            || engine.loadedDrawingsLossy.hasKnownFutureFields(liveIds: liveIds) {
             throw AppError.persistence(.dbCorrupted)
         }
         let meta = try reader.loadMeta()
