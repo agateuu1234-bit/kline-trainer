@@ -187,6 +187,52 @@ struct LossyDrawingArrayTests {
         }
     }
 
+    // MARK: - codex WB R16 finding：已知 toolType + 未来枚举值（版本偏斜）→ 版本容错，非损坏
+    // 未来客户端在现有 toolType（如 horizontal）上写入本版本不认识的枚举 raw value（如更新版本新增的
+    // colorToken/period）时，严格 Codable 会 throw；R11/R12 的判据（toolType 是否已知）据此把它误判成
+    // "已知 toolType 但解码失败=损坏" → .dbCorrupted，触发 resume/复盘恢复清空整个槽/记录，用户丢画线。
+    // 正确行为：未知枚举值应回退默认样式（同 R15 对 finalized 行 DrawingStyle 的修复），保持 .known，
+    // 原始字节（含未来值）经 W1 保真回写不丢。
+
+    @Test("已知 toolType + 未来枚举值（colorToken/anchor.period）→ .known 保 raw、解码用默认样式，非 .dbCorrupted（codex WB R16-high 红→绿）")
+    func knownToolFutureEnumValueFallsBackNotCorrupted() throws {
+        let raw = #"{"id":"g1","toolType":"horizontal","anchors":[{"period":"futureP","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"colorToken":"futureNeon"}"#
+        let json = Data("[\(raw)]".utf8)
+        let arr = try LossyDrawingArray.decode(json)             // 此前：throws .dbCorrupted（红）
+        #expect(arr.drawings.count == 1)
+        #expect(arr.drawings[0].toolType == .horizontal)
+        #expect(arr.drawings[0].colorToken == .orange)           // 未知值回退默认样式
+        #expect(arr.drawings[0].anchors[0].period == .daily)     // 未知值回退默认周期
+        guard case .known(_, let storedRaw) = arr.elements[0] else {
+            Issue.record("元素应为 .known（未来枚举值容错，非 unknownRaw/dbCorrupted）")
+            return
+        }
+        #expect(storedRaw == raw)                                // raw 原样保留（未来值字面幸存）
+        let out = try arr.encoded()
+        #expect(out == json)                                     // 单元素数组 → 重编码逐字节等于原始输入
+        let outStr = String(decoding: out, as: UTF8.self)
+        #expect(outStr.contains("futureNeon") && outStr.contains("futureP"))   // 未来值 byte-preserved
+    }
+
+    @Test("对照：已知 toolType + 真损坏（panelPosition 类型错）→ 仍 .dbCorrupted（不被 R16 修复放宽，codex WB R16-high）")
+    func knownToolTypeGenuinelyMalformedStillCorrupted() throws {
+        let json = Data(#"[{"toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":"not-a-number","revealTick":0}]"#.utf8)
+        #expect(throws: AppError.persistence(.dbCorrupted)) {
+            _ = try LossyDrawingArray.decode(json)
+        }
+    }
+
+    @Test("review wrapper 列：已知 toolType + 未来枚举值 → decodeColumn 成功、非 .dbCorrupted（codex WB R16-high）")
+    func reviewWrapperFutureEnumValueFallsBackNotCorrupted() throws {
+        let raw = #"{"id":"g1","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"textForm":"futureForm"}"#
+        let column = #"{"drawings":[\#(raw)],"hiddenIds":[]}"#
+        let wrapper = try ReviewArchiveWrapper.decodeColumn(column)   // 此前：throws .dbCorrupted（红）
+        #expect(wrapper.drawings.count == 1)
+        #expect(wrapper.drawings[0].textForm == .plain)               // 未知值回退默认
+        let reEncodedDrawingsRaw = try wrapper.lossy.encoded()
+        #expect(String(decoding: reEncodedDrawingsRaw, as: UTF8.self).contains("futureForm"))  // 字节保真
+    }
+
     @Test("保序：[known, unknownFuture, known] 往返后元素顺序逐一保持")
     func preservesElementOrder() throws {
         let kA = #"{"id":"A","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0}"#

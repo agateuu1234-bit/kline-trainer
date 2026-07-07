@@ -207,6 +207,29 @@ public struct DrawingAnchor: Codable, Equatable, Sendable {
         self.candleIndex = candleIndex
         self.price = price
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case period, candleIndex, price
+    }
+
+    // codex whole-branch R16（high）：版本容错解码——`period` 仍是【必填】key（缺失/类型错 → 仍 throw，
+    // 真损坏 fail-closed 不变），但一个【存在】、当前枚举不认识的 future raw value（更新版本 app 写入的新
+    // 周期）不应让整条 DrawingObject 解码失败被上层误判成 .dbCorrupted——回退 .daily（同 R15 对
+    // RecordRepositoryImpl.LossyAnchor 的先例）。
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.candleIndex = try c.decode(Int.self, forKey: .candleIndex)
+        self.price = try c.decode(Double.self, forKey: .price)
+        let periodRaw = try c.decode(String.self, forKey: .period)
+        self.period = Period(rawValue: periodRaw) ?? .daily
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(period, forKey: .period)
+        try c.encode(candleIndex, forKey: .candleIndex)
+        try c.encode(price, forKey: .price)
+    }
 }
 
 public struct DrawingObject: Codable, Equatable, Sendable {
@@ -278,20 +301,30 @@ public struct DrawingObject: Codable, Equatable, Sendable {
         // 无 id → 解码为空串（非随机 UUID）：数组层（Task 5）按位回填 legacy-idx-<N>，
         // 若这里生成随机 UUID 会让"无 id"不可侦测。
         self.id = try c.decodeIfPresent(DrawingID.self, forKey: .id) ?? ""
-        self.period = try c.decodeIfPresent(Period.self, forKey: .period)
-            ?? self.anchors.first?.period ?? .daily
+        // codex whole-branch R16（high）：版本容错解码——以下枚举字段先解【原始 rawValue 字符串】再映射，
+        // 未知 future 值（更新版本 app 写入，如新增 colorToken/period）回退各自现有默认值，不 throw。
+        // 键【缺失】（decodeIfPresent 返 nil）与【类型错】（如数字代替字符串，decodeIfPresent(String...) 会
+        // throw）两种真损坏场景不受影响——只加宽"key 存在但 raw value 未知"这一种情况的容忍度
+        // （同 R15 对 RecordRepositoryImpl.DrawingStyle 的先例）。
+        self.period = try c.decodeIfPresent(String.self, forKey: .period)
+            .flatMap(Period.init(rawValue:)) ?? (self.anchors.first?.period ?? .daily)
         // isExtended:true → .ray；false → .straight（旧语义迁移，§4.2）
-        self.lineSubType = try c.decodeIfPresent(LineSubType.self, forKey: .lineSubType)
-            ?? (self.isExtended ? .ray : .straight)
-        self.lineStyle = try c.decodeIfPresent(LineStyle.self, forKey: .lineStyle) ?? .solid
+        self.lineSubType = try c.decodeIfPresent(String.self, forKey: .lineSubType)
+            .flatMap(LineSubType.init(rawValue:)) ?? (self.isExtended ? .ray : .straight)
+        self.lineStyle = try c.decodeIfPresent(String.self, forKey: .lineStyle)
+            .flatMap(LineStyle.init(rawValue:)) ?? .solid
         self.thickness = try c.decodeIfPresent(Int.self, forKey: .thickness) ?? 1
-        self.colorToken = try c.decodeIfPresent(DrawingColorToken.self, forKey: .colorToken) ?? .orange
-        self.labelMode = try c.decodeIfPresent(LabelMode.self, forKey: .labelMode) ?? .hidden
+        self.colorToken = try c.decodeIfPresent(String.self, forKey: .colorToken)
+            .flatMap(DrawingColorToken.init(rawValue:)) ?? .orange
+        self.labelMode = try c.decodeIfPresent(String.self, forKey: .labelMode)
+            .flatMap(LabelMode.init(rawValue:)) ?? .hidden
         self.locked = try c.decodeIfPresent(Bool.self, forKey: .locked) ?? false
         self.text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
         self.fontSize = try c.decodeIfPresent(Int.self, forKey: .fontSize) ?? 14
-        self.textColorToken = try c.decodeIfPresent(DrawingColorToken.self, forKey: .textColorToken) ?? .orange
-        self.textForm = try c.decodeIfPresent(TextForm.self, forKey: .textForm) ?? .plain
+        self.textColorToken = try c.decodeIfPresent(String.self, forKey: .textColorToken)
+            .flatMap(DrawingColorToken.init(rawValue:)) ?? .orange
+        self.textForm = try c.decodeIfPresent(String.self, forKey: .textForm)
+            .flatMap(TextForm.init(rawValue:)) ?? .plain
         self.tailAnchor = try c.decodeIfPresent(DrawingAnchor.self, forKey: .tailAnchor)
     }
 

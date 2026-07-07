@@ -79,6 +79,25 @@ struct PendingLossyTests {
         #expect(iA < iU && iU < iB)                         // 未来条仍在中间（未被 append 到末尾）
     }
 
+    // codex WB R16-high：已知 toolType（horizontal）+ 未来枚举值（版本偏斜）此前会让 DrawingObject 严格
+    // 解码 throw，被误判"已知 toolType 但解码失败=损坏" → loadReplay 整体 .dbCorrupted，触发 resume 清空
+    // pending_replay 槽、用户丢画线。修复后应版本容错：loadReplay 成功、画线用默认样式，槽不被清。
+    @Test("pending_replay: 已知 toolType + 未来 colorToken → loadReplay 成功（不再 .dbCorrupted），槽不被清")
+    func replayFutureColorTokenLoadsNotCorrupted() throws {
+        let db = try makeMigratedDB()
+        let futureKnown = #"{"id":"g1","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"colorToken":"futureNeon"}"#
+        try seedPendingReplayRow(db, recordId: 42, drawingsJSON: "[\(futureKnown)]")
+        let p = try db.read { try PendingReplayRepositoryImpl.loadReplay($0) }   // 此前：throws .dbCorrupted（红）
+        #expect(p != nil)
+        #expect(p?.drawings.count == 1)
+        #expect(p?.drawings[0].colorToken == .orange)     // 未知值回退默认样式
+        try db.write { try PendingReplayRepositoryImpl.saveReplay($0, replay: p!) }
+        let col: String = try db.read {
+            try Row.fetchOne($0, sql: "SELECT drawings FROM pending_replay WHERE id=1")!["drawings"]
+        }
+        #expect(col.contains("futureNeon"))               // 未来值字节保真回写
+    }
+
     @Test("saveReplay 换记录（record 变）→ 不把旧记录 unknownRaw 串进新记录")
     func replayNoCrossRecordLeak() throws {
         let db = try makeMigratedDB()
