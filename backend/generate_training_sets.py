@@ -38,6 +38,8 @@ MIN_PERIOD = "3m"
 # 训练组包含的周期（plan §8.3 period_configs；最细=3m）
 PERIODS = ("monthly", "weekly", "daily", "60m", "15m", "3m")
 # 各周期"起始前"取根数上限；None = 全取（monthly）
+# 本模块暂无引用（旧 assemble_training_set 已 fail-closed 停用）：Plan 2 重接生产装配时
+# 作 build_training_windows(..., before_caps=PERIOD_BEFORE_CAP) 传入。
 PERIOD_BEFORE_CAP = {"monthly": None, "weekly": 120, "daily": 150,
                      "60m": 150, "15m": 150, "3m": 150}
 
