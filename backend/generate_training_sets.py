@@ -3,9 +3,11 @@
 #       + kline_trainer_plan_v1.5.md §8.3 (L1097-1144) + 训练组 SQLite DDL §3.2
 #       + backend/sql/training_set_schema_v1.sql（本 PR 只读不改）
 #
-# 双层（D1）：纯装配层（crc32_hex / select_start_index / monthly_after_end /
-#   select_period_window / assign_global_indices / build_training_set_sqlite /
-#   zip_and_hash / assemble_training_set）host pytest 全测、不碰 PostgreSQL；
+# 双层（D1）：纯装配层（crc32_hex / compute_after_end / select_period_window /
+#   eligible_start_indices / select_valid_window / per_day_intraday_complete /
+#   build_training_windows / assign_global_indices / build_training_set_sqlite /
+#   zip_and_hash）host pytest 全测、不碰 PostgreSQL；旧未门控 assemble_training_set 已
+#   fail-closed 停用（codex PF1-R10-F1，重接 build_training_windows 留 Plan 2）；
 #   薄 asyncpg PG 壳 + CLI 在同文件下半（Task 2，D13，CI 不单测，B3/NAS scope）。
 #
 # 决议：
@@ -17,6 +19,7 @@
 # - D8 SQLite 逐字 training_set_schema_v1.sql；numpy→python int/float，NaN→None
 from __future__ import annotations
 
+import datetime as _dt
 import random
 import sqlite3
 import zipfile
@@ -27,6 +30,8 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import pandas as pd
+
+from qmt_normalize import trading_date
 
 SCHEMA_VERSION = 1
 MIN_PERIOD = "3m"
@@ -57,34 +62,121 @@ def crc32_hex(data: bytes) -> str:
     return format(zlib.crc32(data) & 0xFFFFFFFF, "08x")
 
 
-def select_start_index(monthly_datetimes: Sequence[int], rng: random.Random) -> int:
-    """D5：随机选起始月线下标 ∈ [30, len-9]（前 ≥30、含起始之后 ≥8）。
-    月线 <39 根 → GenerateSkipException。"""
-    n = len(monthly_datetimes)
-    if n < 39:                          # 需 [30, n-9] 非空 → n-9 >= 30 → n >= 39
-        raise GenerateSkipException(f"月线仅 {n} 根，不足 39 根无法选起始点")
-    return rng.randint(30, n - 9)
-
-
-def monthly_after_end(monthly_datetimes: Sequence[int], start_datetime: int) -> int:
-    """D6："之后"时间窗口 = 起始起 8 根月 K（含起始）的最后一根 datetime。"""
-    after = [d for d in monthly_datetimes if d >= start_datetime][:8]
-    if not after:
-        raise GenerateSkipException("起始点之后无月线")
-    return int(after[-1])
-
-
-def select_period_window(bars: pd.DataFrame, start_datetime: int,
-                         before_cap: Optional[int], after_end_time: int) -> pd.DataFrame:
+def select_period_window(bars: pd.DataFrame, start_datetime: int, before_cap: Optional[int],
+                         after_end: int, period: str, month_boundaries=None) -> pd.DataFrame:
     """D6：单周期窗口 = 起始前 min(pivot, cap) 根 + datetime∈[start, after_end] 的所有根。
-    bars 须按 datetime 升序。"""
+    bars 须按 datetime 升序。**两侧周期边界校验**（codex PF1-R5）：weekly 额外——
+    after 排除周末 > after_end 的 trailing 跨月周；before 排除周末 >= start 的跨 start 周
+    （其含 post-start 数据，作 before-context 会 lookahead）。月/日与边界天然对齐无 straddle。"""
     b = bars.sort_values("datetime").reset_index(drop=True)
     dts = b["datetime"].tolist()
     pivot = bisect_left(dts, start_datetime)               # 第一根 datetime >= start 的下标
     before_count = pivot if before_cap is None else min(pivot, before_cap)
     before = b.iloc[pivot - before_count: pivot]
-    after = b[(b["datetime"] >= start_datetime) & (b["datetime"] <= after_end_time)]
+    after = b[(b["datetime"] >= start_datetime) & (b["datetime"] <= after_end)]
+
+    def _week_end_date(open_epoch):
+        d = trading_date(open_epoch)
+        return d + _dt.timedelta(days=(6 - d.weekday()))   # 该周周日
+
+    if period == "weekly":
+        ae_date = trading_date(after_end)
+        st_date = trading_date(start_datetime)
+        after = after[after["datetime"].map(lambda e: _week_end_date(e) <= ae_date)]   # trailing 跨月周
+        before = before[before["datetime"].map(lambda e: _week_end_date(e) < st_date)] # PF1-R5: 跨 start 周不作 before-context
+
     return pd.concat([before, after]).reset_index(drop=True)
+
+
+def compute_after_end(month_boundaries: list[int], start_idx: int, months: int = 8) -> int:
+    """第 (start_idx+months) 月边界 open − 1 秒 = 第 `months` 个完整前向月月末（调用方保证
+    start_idx+months < len）。`months` 默认 8（生产）；单测可传小值缩小 fixture。"""
+    return int(month_boundaries[start_idx + months]) - 1
+
+
+def eligible_start_indices(month_boundaries, rng, *, dense_dates, trading_dates, months: int = 8) -> list:
+    """全部 dense 覆盖的候选起点下标（随机序），供 bounded retry（codex PF1-F2/PF1-R3-F2）：
+    按**交易日历**遍历——[start..after_end] 内该股每个交易日（∈ trading_dates）都 ∈ dense_dates；
+    周末/假期不在 trading_dates、不误拒。"""
+    n = len(month_boundaries)
+    if n < 31 + months:
+        raise GenerateSkipException(f"月边界仅 {n}，不足 {31 + months}")
+    lo, hi = 30, n - 1 - months
+    candidates = list(range(lo, hi + 1))
+    rng.shuffle(candidates)                       # random.Random.shuffle
+    out = []
+    for idx in candidates:
+        d0 = trading_date(int(month_boundaries[idx]))
+        d1 = trading_date(compute_after_end(month_boundaries, idx, months))
+        window_trading = [d for d in trading_dates if d0 <= d <= d1]   # 按交易日历、非日历日
+        if window_trading and all(d in dense_dates for d in window_trading):
+            out.append(idx)
+    return out
+
+
+def select_valid_window(month_boundaries, rng, *, dense_dates, trading_dates,
+                        try_assemble, max_retries: int = 8, months: int = 8):
+    """bounded candidate retry（codex R12-F2/PF1-R3-F2）：逐 eligible 候选调 try_assemble(start)；
+    首个不抛的返回 (start, 其返回值)；抛 GenerateSkipException → 试下一个；穷尽 → skip。"""
+    cands = eligible_start_indices(month_boundaries, rng, dense_dates=dense_dates,
+                                   trading_dates=trading_dates, months=months)
+    for idx in cands[:max_retries]:
+        start = int(month_boundaries[idx])
+        try:
+            return start, try_assemble(start)
+        except GenerateSkipException:
+            continue
+    raise GenerateSkipException("bounded retry 穷尽：无通过的候选起点")
+
+
+_INTRADAY_EXPECTED = {"3m": 80, "15m": 16, "60m": 4}
+
+
+def build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, trading_dates,
+                           before_caps, months: int = 8, intraday_expected=None,
+                           before_min: int = 30, max_retries: int = 8):
+    """**生产纯入口（codex PF1-R6-F2）**：组合 compute_after_end / select_period_window(两侧周边界) /
+    D6 per-period before-after / D9 per_day 硬门 + bounded retry。返回 `(start_datetime, windows)`。
+    **Plan 2 的 `generate_one_training_set` 必须调本入口**（而非旧 select_start_index/monthly_after_end），
+    再做 SQLite/zip/register/起点唯一性。gate 参数（`months`/`intraday_expected`/`before_min`）可调以便端到端单测。"""
+    idx_of = {int(b): i for i, b in enumerate(month_boundaries)}
+
+    def _try(start):
+        idx = idx_of[int(start)]
+        after_end = compute_after_end(month_boundaries, idx, months)
+        windows = {p: select_period_window(bars, start, before_caps[p], after_end, p)
+                   for p, bars in period_bars.items()}
+        for p, w in windows.items():                       # D6 per-period before>=before_min & after>=1
+            before_n = int((w["datetime"] < start).sum()); after_n = int((w["datetime"] >= start).sum())
+            if before_n < before_min or after_n < 1:
+                raise GenerateSkipException(f"{p} before {before_n}(<{before_min}) / after {after_n}(<1)")
+        intraday = {p: windows[p] for p in ("3m", "15m", "60m") if p in windows}
+        if not per_day_intraday_complete(intraday, trading_dates, after_end, intraday_expected):
+            raise GenerateSkipException("D9 per-day 硬门失败")
+        return windows
+
+    return select_valid_window(month_boundaries, rng, dense_dates=dense_dates, trading_dates=trading_dates,
+                               try_assemble=_try, max_retries=max_retries, months=months)
+
+
+def per_day_intraday_complete(windows, trading_dates, after_end, expected=None) -> bool:
+    """D9 per-day 硬门（codex PF1-R2/PF1-R4-F2/PF1-R6-F1）：**每个盘中周期**在
+    `[该周期首选中日, trading_date(after_end)]` 内、每个交易日（∈ trading_dates）桶数精确 == 应有数
+    （3m=80/15m=16/60m=4）。**跨度终点用 `after_end`、非 `dates.max()`**——否则 after_end 附近盘中全缺的
+    尾日会落在 max 之外、漏检（高周期 bar 覆盖了无盘中回放的日期）。任一周期任一日不符 → False。"""
+    expected = expected or _INTRADAY_EXPECTED
+    ae_date = trading_date(after_end)
+    for period, need in expected.items():
+        win = windows.get(period)
+        if win is None or win.empty:
+            return False
+        dates = pd.Series([trading_date(e) for e in win["datetime"]])
+        d0 = dates.min()
+        span = [d for d in trading_dates if d0 <= d <= ae_date]     # 到 after_end（含尾日）、非 dates.max()
+        counts = dates.value_counts().to_dict()
+        if not all(counts.get(d, 0) == need for d in span):
+            return False
+    return True
 
 
 def assign_global_indices(windows: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
@@ -192,39 +284,13 @@ def zip_and_hash(db_path: Path, zip_path: Path) -> str:
 def assemble_training_set(output_dir: Path, *, stock_code: str, stock_name: str,
                           period_bars: dict[str, pd.DataFrame],
                           rng: random.Random) -> GeneratedTrainingSet:
-    """纯装配（D1，不碰 PG）：已取到内存的各周期 bars → 选起始 → 窗口 → 赋 index →
-    建 SQLite → zip → CRC32 → GeneratedTrainingSet。"""
-    monthly = period_bars["monthly"].sort_values("datetime").reset_index(drop=True)
-    monthly_dts = [int(x) for x in monthly["datetime"]]
-    start_idx = select_start_index(monthly_dts, rng)
-    start_datetime = monthly_dts[start_idx]
-    after_end = monthly_after_end(monthly_dts, start_datetime)
-
-    windows: dict[str, pd.DataFrame] = {}
-    for period in PERIODS:
-        win = select_period_window(period_bars[period], start_datetime,
-                                   PERIOD_BEFORE_CAP[period], after_end)
-        # D6 per-period 硬校验（spec §8.3 assert before_count>=30 + len(after_bars)>=1）：
-        # 晚上市/稀疏数据 → 跳过该股票重选（L1144）。空窗口是 before<30 的子集。
-        before_n = int((win["datetime"] < start_datetime).sum())
-        after_n = int((win["datetime"] >= start_datetime).sum())
-        if before_n < 30 or after_n < 1:
-            raise GenerateSkipException(
-                f"{period} 起始前 {before_n}(<30) 或 起始后 {after_n}(<1) 不足")
-        windows[period] = win
-    windows = assign_global_indices(windows)
-
-    fname = f"{stock_code}_{start_datetime}"
-    db_path = output_dir / f"{fname}.db"
-    zip_path = output_dir / f"{fname}.zip"
-    build_training_set_sqlite(db_path, stock_code=stock_code, stock_name=stock_name,
-                              start_datetime=start_datetime, end_datetime=after_end,
-                              windows=windows)
-    content_hash = zip_and_hash(db_path, zip_path)
-    return GeneratedTrainingSet(path=zip_path, content_hash=content_hash,
-                                stock_code=stock_code, stock_name=stock_name,
-                                start_datetime=start_datetime, end_datetime=after_end,
-                                schema_version=SCHEMA_VERSION)
+    """FAIL-CLOSED（codex PF1-R10-F1）：旧「随机选起点」路径经现有 CLI 链
+    generate_batch→generate_one_training_set→本函数对任意 PG 数据可达，会绕过 D9/dense 门产未门控
+    窗口，故 Plan 1 内显式停用（保留签名 → 唯一调用者运行期显式 fail-closed 而非 TypeError）。
+    安全纯入口 build_training_windows（Task7 已全测）已就绪；生产装配重接 + stock_coverage 读取留 Plan 2。"""
+    raise NotImplementedError(
+        "旧未门控随机选起点路径已停用（codex PF1-R10-F1）；安全纯入口 build_training_windows "
+        "已就绪(Task7)，生产装配重接 + stock_coverage 读取在 Plan 2 落地。")
 
 
 # ===== 薄 asyncpg PG 壳 + CLI（D1/D13：不单测，B3/NAS 集成 scope）=====
