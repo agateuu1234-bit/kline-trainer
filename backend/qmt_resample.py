@@ -51,3 +51,39 @@ def resample_intraday(df_1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
         out_rows.append({"datetime": label_epoch, **_agg(grp)})
     # PF1-R9-F2：全盘外输入 → out_rows 空；带列构造避免 sort_values 抛 KeyError（空 resample，覆盖层负责 drop 该日）
     return pd.DataFrame(out_rows, columns=_OHLCV_COLS).sort_values("datetime").reset_index(drop=True)
+
+def _period_key(d, rule: str):
+    if rule == "weekly":
+        iso = d.isocalendar()
+        return (iso[0], iso[1])
+    return (d.year, d.month)      # monthly
+
+def _first_day_midnight_epoch(d) -> int:
+    return int(_dt.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=_SH).timestamp())
+
+def period_boundaries(df_daily: pd.DataFrame, rule: str) -> list[int]:
+    """每周期首交易日午夜 Unix 秒（含当前 partial 周期哨兵；≠ emit 的 bar）。"""
+    dates = sorted({trading_date(e) for e in df_daily["datetime"]})
+    bounds, seen = [], set()
+    for d in dates:
+        k = _period_key(d, rule)
+        if k not in seen:
+            seen.add(k); bounds.append(_first_day_midnight_epoch(d))
+    return bounds
+
+def resample_calendar(df_daily: pd.DataFrame, rule: str) -> pd.DataFrame:
+    if df_daily.empty:
+        return df_daily.copy()
+    df = df_daily.copy()
+    df["_d"] = df["datetime"].map(trading_date)
+    df["_k"] = df["_d"].map(lambda d: _period_key(d, rule))
+    all_keys = sorted(set(df["_k"]))
+    complete_keys = set(all_keys[:-1])   # 除最后一个周期（当前 partial，无后续周期）外都完整
+    out_rows = []
+    for k, grp in df.groupby("_k"):
+        if k not in complete_keys:
+            continue
+        first_d = min(grp["_d"])
+        out_rows.append({"datetime": _first_day_midnight_epoch(first_d), **_agg(grp)})
+    # PF1-R9-F3：仅一个周期（当前 partial）→ complete_keys 空 → out_rows 空；带列构造避免 sort_values 抛 KeyError
+    return pd.DataFrame(out_rows, columns=_OHLCV_COLS).sort_values("datetime").reset_index(drop=True)

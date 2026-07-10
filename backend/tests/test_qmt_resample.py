@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import pandas as pd
 from zoneinfo import ZoneInfo
-from qmt_resample import resample_intraday
+from qmt_resample import resample_intraday, resample_calendar, period_boundaries
 
 SH = ZoneInfo("Asia/Shanghai")
 
@@ -52,5 +52,46 @@ def test_intraday_out_of_session_only_returns_empty_no_crash():
     rows = [{"datetime": int(dt.datetime(2026, 7, 1, 12, 0, 0, tzinfo=SH).timestamp()),
              "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1, "amount": 1.0}]
     out = resample_intraday(pd.DataFrame(rows), 3)
+    assert out.empty
+    assert list(out.columns) == ["datetime", "open", "high", "low", "close", "volume", "amount"]
+
+def _daily(dates: list[tuple[int,int,int]]) -> pd.DataFrame:
+    rows = [{"datetime": int(dt.datetime(y,mo,d,0,0,0,tzinfo=SH).timestamp()),
+             "open": float(i), "high": float(i)+1, "low": float(i)-1, "close": float(i)+0.5,
+             "volume": 10, "amount": 100.0} for i,(y,mo,d) in enumerate(dates)]
+    return pd.DataFrame(rows)
+
+def test_monthly_only_complete_periods_drops_export_month():
+    # 2026-05, 2026-06 完整（有后续月），2026-07 是 export 当月 partial（无后续月）→ 不 emit
+    df = _daily([(2026,5,4),(2026,5,29),(2026,6,1),(2026,6,30),(2026,7,1),(2026,7,3)])
+    out = resample_calendar(df, "monthly").sort_values("datetime").reset_index(drop=True)
+    months = [dt.datetime.fromtimestamp(x, SH).strftime("%Y%m") for x in out["datetime"]]
+    assert months == ["202605", "202606"]     # 202607 partial 不发
+
+def test_monthly_open_label_is_first_trading_day_midnight():
+    df = _daily([(2026,5,4),(2026,5,29),(2026,6,1),(2026,6,30)])
+    out = resample_calendar(df, "monthly").sort_values("datetime").reset_index(drop=True)
+    first = out.iloc[0]
+    assert first["datetime"] == int(dt.datetime(2026,5,4,0,0,0,tzinfo=SH).timestamp())  # 5月首交易日午夜
+    assert first["open"] == 0.0   # 组内首日 open
+
+def test_period_boundaries_include_partial_sentinel():
+    # 边界序列含 202607 哨兵（即使其 bar 不 emit），供 after_end 用
+    df = _daily([(2026,5,4),(2026,6,1),(2026,7,1)])
+    bounds = period_boundaries(df, "monthly")
+    labels = [dt.datetime.fromtimestamp(x, SH).strftime("%Y%m") for x in bounds]
+    assert labels == ["202605", "202606", "202607"]   # 含 partial 当月哨兵
+
+def test_calendar_single_month_returns_empty_no_crash():
+    # PF1-R9-F3：仅一个月（当前 partial，无后续周期）→ 无完整周期 → 空结果，不抛 KeyError
+    df = _daily([(2026, 7, 1), (2026, 7, 2), (2026, 7, 3)])
+    out = resample_calendar(df, "monthly")
+    assert out.empty
+    assert list(out.columns) == ["datetime", "open", "high", "low", "close", "volume", "amount"]
+
+def test_calendar_single_week_returns_empty_no_crash():
+    # PF1-R9-F3：仅一个 ISO 周（当前 partial）→ 无完整周期 → 空结果，不抛 KeyError
+    df = _daily([(2026, 7, 6), (2026, 7, 7)])   # 2026-07-06 Mon / 07-07 Tue 同 ISO 周
+    out = resample_calendar(df, "weekly")
     assert out.empty
     assert list(out.columns) == ["datetime", "open", "high", "low", "close", "volume", "amount"]
