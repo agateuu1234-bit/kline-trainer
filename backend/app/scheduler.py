@@ -153,7 +153,19 @@ def build_generate_batch(
     async def _gen(n: int) -> int:
         from generate_training_sets import generate_batch
         async with pool.acquire() as conn:
-            produced = await generate_batch(conn, n, out, rng)
+            try:
+                produced = await generate_batch(conn, n, out, rng)
+            except NotImplementedError as exc:
+                # codex whole-branch review high：assemble_training_set 已 fail-closed
+                # 停用（build_training_windows + stock_coverage 重接留 Plan 2），异常会
+                # 一路冒泡到本 B4 常驻调度进程。这里显式接住、记 ERROR、返回 0——
+                # 让 sweep 记录"本次生成 0"后继续存活，等下次 sweep/Plan 2 落地，
+                # 不可让常驻进程崩溃。
+                logger.error(
+                    "B4 补货调用 B2 generate_batch 失败：B2 装配路径 fail-closed 停用中"
+                    "（build_training_windows + stock_coverage 重接留 Plan 2）；本次生成 0，"
+                    "调度进程继续存活。原因：%s", exc)
+                return 0
             return len(produced)
 
     return _gen
