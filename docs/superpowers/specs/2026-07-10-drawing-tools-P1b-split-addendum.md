@@ -25,7 +25,9 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 | **D23 切分线** | P1b-1 = 外壳 §2 + 设置面板/样式系统 §3 + 选中·删除·锁定·撤销 §7（**不含节点**）+ 水平线升级 §5.1 + 周期绑定渲染 §10。<br>P1b-2 = 多锚泛化 §5.0 + 节点模型与拖节点 §6 + 手势消歧 §14 + 趋势线 §5.2 / 通道线 §5.3 / 箱体 §5.11 / 折线 §5.4。 | 节点必须与「拖节点」同期落地，否则 P1b-1 会 ship 出**拖不动的死节点**（母 spec D19 明令禁止 ship 未接线控件）。周期绑定 §10 与工具无关（只改渲染过滤判据），单靠水平线即可完整演示与测试，放前面可减轻 P1b-2 体量。 |
 | **D24 底栏一次到位** | P1b-1 即按母 spec §2 建**两行常驻栏**：上行类型行、下行 5 键。类型行**当期只渲染水平线 1 个图标**。P1b-2 只往类型行里填图标，底栏骨架不再改。 | 母 spec D22：类型行只显示/启用已落地工具，不得 ship 死图标。底栏布局一次定型 = 一次验收。长按设置面板的触发点就是类型行里的工具图标，没有类型行则面板需要临时入口，P1b-2 还得拆掉。 |
 | **D25 撤销语义** | 撤销栈**深度 1**（母 spec §7 已定「各仅一步」）。**入栈动作 = 画线 / 删线 / 改样式 / 锁定·解锁**。做了新动作 → 前进（↪）置灰。**进画线模式时建栈，退出画线模式时清空**。 | 画线模式是一个有界的编辑会话，退出即提交。跨模式保留会让用户在交易了几十个 tick 之后意外撤销掉一条线；且跨模式保留会立刻牵出「撤销栈要不要随 autosave 落盘 / 断点续局后 ↩ 是否还灵」的新决策面，与本阶段无关。 |
-| **D26 复盘过渡** | P1b-1 的新两行底栏**只在训练 / 再次训练（replay）出现**。**复盘模式完全不动**，继续使用现有 `DrawingToolFloatingView` 浮动铅笔钮，行为一字不改。P5 时复盘切到 6 键新底栏，届时删除 `DrawingToolFloatingView`。 | 母 spec D19：复盘专属控件（隐藏键、复盘删除、hiddenIds 持久化、clear-saved）全在 P5。若 P1b-1 让浮动钮退役而复盘又不上新底栏 → 复盘失去画线入口 = **功能回归**。若复盘上 5 键新底栏 → 其中 🔒/🗑 在复盘必须置灰（复盘删除属 P5、原训练线按 §7 只可隐藏/显示）= **死控件**，两者都不可接受。 |
+| **D26 复盘过渡（限定于 UI 外壳）** | P1b-1 的新两行底栏**只在训练 / 再次训练（replay）出现**。**复盘模式的画线「入口与控件」完全不动**，继续使用现有 `DrawingToolFloatingView` 浮动铅笔钮，交互一字不改。P5 时复盘切到 6 键新底栏，届时删除 `DrawingToolFloatingView`。<br>**边界澄清（codex spec-R2-medium）**：D26 只管**画线模式外壳与控件**，**不管渲染**。周期绑定（D29）是全局渲染规则，**在复盘同样生效**。 | 母 spec D19：复盘专属控件（隐藏键、复盘删除、hiddenIds 持久化、clear-saved）全在 P5。若 P1b-1 让浮动钮退役而复盘又不上新底栏 → 复盘失去画线入口 = **功能回归**。若复盘上 5 键新底栏 → 其中 🔒/🗑 在复盘必须置灰（复盘删除属 P5、原训练线按 §7 只可隐藏/显示）= **死控件**，两者都不可接受。 |
+| **D29 周期绑定全局生效（含复盘）** | `RenderStateBuilder` 的过滤判据改为 `drawing.period == 该面板当前显示的周期`，**对训练 / replay / 复盘三种模式一视同仁**，复盘的两层（只读原训练线 `engine.drawings` + 复盘新画线 `engine.reviewDrawings`）都按新判据过滤。**不做模式门控、不保留 `panelPosition` 老路径。** 必须补复盘渲染回归测试。 | codex spec-R2-medium 指出 `RenderStateBuilder.swift:67` 是三模式共用的**单条过滤**。备选「复盘继续走 `panelPosition` 直到 P5」会造成：同一条线在训练里跟周期走、进复盘又跳回按面板位置 = 用户可见的错位，且需要一条模式条件渲染分支（更多代码、更多 bug 面）。母 spec **D1** 已定「画线绑定 period 非 panelPosition」——这是画线的**渲染属性**，不是模式特性。<br>**老数据安全性举证**：finalized 记录里的 legacy 行（0009 回填、`style_json IS NULL`）走 `DrawingStyle.legacyFallback(isExtended:period: anchors.first?.period ?? .m3)`（`RecordRepositoryImpl.swift:213`）；`DrawingObject.init` 的 `period` 默认取 `anchors.first?.period ?? .daily`（`Models.swift:269`）。故**历史画线一律带正确 period**，周期绑定对老记录成立。 |
+| **D30 内容级 autosave 触发（改样式 / 锁定 / 撤销必须落盘）** | P1b-1 必须把 `TrainingView` 的存盘触发从 `.onChange(of: engine.drawings.count)` 改为**内容级 dirty 信号**：`TrainingEngine` 新增单调计数器 `drawingsRevision: Int`，**任何**改动 `drawings` 的引擎 API（append / delete / **原地替换（改样式、锁定）** / undo / redo）都 `+1`；`TrainingView` 改为 `.onChange(of: engine.drawingsRevision)`。 | codex spec-R2-high（**已核实为真**）：现触发是 `TrainingView.swift:273` 的 `.onChange(of: engine.drawings.count)`。P1a 之前画线只有增 / 删两种操作，按 count 触发正确；P1b-1 首次引入**原地改一条线**（改样式 / 锁定 / 撤销一次改样式），**数组长度不变 → 不触发 autosave → 杀进程或续局后改动丢失**。<br>**不得**改用 `.onChange(of: engine.drawings)`（数组值比较）：`DrawingObject.==` 刻意**排除 `id`**（P1a 决策，id 是身份非内容），值比较在某些替换下会漏判。单调计数器是唯一无歧义的信号。<br>`reviewDrawings` 的 `.count` 触发**本期保持不变**（P1b-1 不引入复盘内的原地编辑；P5 引入隐藏/删除时同法处理）。 |
 | **D27 选中态视觉** | P1b-1 的选中态 = **线渲染为选中蓝 + 底栏 🗑/🔒 由灰变亮**，**不显节点圆**。P1b-2 补上两端/各转折点的实心圆节点。 | mockup「选中态」屏（`2026-07-03-drawing-tools-expansion.html`）画的是「线变蓝 + 带蓝外圈实心圆节点 + 🗑高亮」。D23 把节点推后，故 P1b-1 = 该视觉去掉圆点。选中反馈仍然完整可见（线变色 + 底栏键活化）。 |
 | **D28 契约不动** | **P1b-1 与 P1b-2 均为纯 UI / 渲染层 PR：零迁移、不 bump `CONTRACT_VERSION`（保持 `1.11`）。** | 见下方 §1.1 逐形状持久化映射。核心：**`DrawingObject.anchors` 是变长数组 `[DrawingAnchor]`**，`drawings` 表以单列 `anchors TEXT NOT NULL` 存整个锚数组的 JSON，任意锚数都能无损往返；其余 18 字段（`id` / `period` / `lineSubType` / `lineStyle` / `thickness` / `colorToken` / `labelMode` / `locked` / `text` / `fontSize` / `textColorToken` / `textForm` / `tailAnchor`）已由 P1a 全部落地，迁移 0009 已随 1.11 ship。 |
 
@@ -100,13 +102,21 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
      - 注：`hitTest` 在 P1a 之后仍是**从未被生产代码调用**的协议方法（仅测试用）。本期是它第一次接线。
    - **删除**：点 🗑 → 弹确认 `确定删除划线？[删除][取消]`。选中线被锁 → 🗑 灰。
    - **锁定 / 解锁**：短按 🔒 锁定选中线（🔓→🔒 图标态）。**锁定线仍可被选中**（否则无法解锁），但 🗑 灰、设置面板全灰、不可改样式。**不在线旁画小锁图标**。`locked` 随画线一起落盘。
-   - **撤销 / 前进**：见 D25。撤销直接改引擎里的画线数组，因此照常走现有 autosave 落盘路径。
+   - **撤销 / 前进**：见 D25。撤销直接改引擎里的画线数组。
 
-7. **周期绑定渲染（母 spec §10）**
+6b. **内容级 autosave 触发（D30，本期新增，不可省）**
+   - `TrainingEngine` 新增 `public private(set) var drawingsRevision: Int`（单调递增，初值 0）。
+   - **每一个**改动 `drawings` 的引擎 API 都必须 `drawingsRevision += 1`：`appendDrawing` / `deleteDrawing(at:)` / 新增的原地替换 API（改样式、锁定 / 解锁）/ 撤销 / 前进。
+   - `TrainingView.swift:273` 的 `.onChange(of: engine.drawings.count)` → 改为 `.onChange(of: engine.drawingsRevision)`，动作仍是 `lifecycle.autosave(immediate: true)`。
+   - **禁止**改用 `.onChange(of: engine.drawings)`：`DrawingObject.==` 排除 `id`。
+   - `reviewDrawings` 的 `.count` 触发本期不动。
+
+7. **周期绑定渲染（母 spec §10 + D29，三模式一视同仁）**
    - `RenderStateBuilder.swift:65-68` 现按 `drawing.panelPosition == (panel == .upper ? 0 : 1)` 过滤 → **改为按 `drawing.period == 该面板当前显示的周期` 过滤**。
+   - **该过滤是训练 / replay / 复盘共用的同一行**（`engine.drawings + (mode == .review ? engine.reviewDrawings : [])`）。**新判据在复盘同样生效，不做模式门控**（D29）。
    - 叠加现有 `drawing.revealTick <= tick` 渐显规则**不变**。
    - 某周期不在上下任一面板显示 → 其画线暂不渲染，切回再现。
-   - 提交新画线时 `DrawingObject.period` 取 `anchors.first.period`。`panelPosition` 仍记当时面板，但**不再参与渲染判据**。
+   - 提交新画线时 `DrawingObject.period` 由 `init` 自动取 `anchors.first?.period`（`Models.swift:269`），无需 UI 显式传。`panelPosition` 仍记当时面板，但**不再参与渲染判据**。
 
 8. **设置面板的作用对象（消歧，母 spec §7 隐含）**
    - **有选中线** → 面板改的是那条线（按 `id` 定位）。
@@ -129,12 +139,13 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 
 ### 2.3 必须存在的负向测试（防 ship 死控件 / 防回归）
 
+0. **内容级 autosave（D30，最高优先）**：改样式 / 锁定 / 解锁 / 撤销一次改样式 → `drawingsRevision` 递增 → 触发 `autosave(immediate:)` → **重新加载后样式与锁定态仍在**。必须有一条「不经过数组增删、只改内容」的落盘往返测试。
 1. **复盘模式下新两行底栏不存在**；`DrawingToolFloatingView` 仍存在且行为不变（D26 / 母 spec D19）。
 2. **类型行本期只含 1 个图标**（水平线）；不渲染任何其它 `DrawingToolType` 图标（母 spec D22）。
 3. **退出画线模式后**，单击图表不选中任何画线、`hitTest` 不被调用、🗑 / 🔒 / ↩ / ↪ 全部不可达。
 4. **画线模式内**：单指横滑仍平移、单指竖滑仍切周期、双指仍缩放（不被画线吞掉）。
 5. **锁定线**：🗑 灰、设置面板全灰；但仍可被选中并解锁。
-6. **周期绑定**：某周期不在任一面板显示时，其画线不进 `RenderStateBuilder` 输出；切回后出现；`revealTick > tick` 的线仍不渲染。
+6. **周期绑定（含复盘，D29）**：某周期不在任一面板显示时，其画线不进 `RenderStateBuilder` 输出；切回后出现；`revealTick > tick` 的线仍不渲染。**必须同时覆盖复盘模式的两层**（原训练线 `engine.drawings` + 复盘新画线 `engine.reviewDrawings`），并覆盖 `style_json IS NULL` 的 legacy 行（period 由 `anchors.first.period` 兜底）。
 7. **`routeDrawingCommit` 全字段存活**：提交后 `id` / `period` / 五个样式字段 / `locked` 不丢（P1a 已加，本期回归保护）。
 
 ---
@@ -179,8 +190,12 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 | 26 | 退出画线模式后单击一条线 | **没有任何反应**（不变蓝、不出现删除按钮） | |
 | 27 | 结束这一局，进入复盘 | 复盘里还是原来那个**可拖动的浮动铅笔钮**，**没有**两行底栏 | |
 | 28 | 在复盘里用浮动钮画线 | 行为跟改造前一模一样 | |
-| 29 | 退出 App 重进、续上这一局 | 之前画的线（颜色 / 线型 / 粗细 / 标注 / 锁定状态）全部还在，且 ↩ / ↪ 是灰的 | |
-| 30 | 再次训练（replay）模式 | 同样有「画图」钮和两行底栏，行为与训练一致 | |
+| 29 | 在复盘里单指竖滑切周期（D29） | 训练时画的线**也跟着周期走**（跟第 20–22 条同样的规律）；某周期不显示时它暂时消失，切回来再出现 | |
+| 30 | 找一局**改造前就存在的老记录**，进它的复盘 | 老画线正常显示，位置不错乱（老数据的周期由锚点兜底） | |
+| 31 | **改样式后立刻杀掉 App**（不点退出、直接从后台划掉），重开续这一局 | 改过的颜色 / 线型 / 粗细 / 标注**全部还在** | |
+| 32 | **锁定一条线后立刻杀掉 App**，重开续这一局 | 那条线仍是锁定态（🗑 灰） | |
+| 33 | 退出 App 重进、续上这一局 | 之前画的线全部还在，且 ↩ / ↪ 是灰的（撤销栈不跨会话） | |
+| 34 | 再次训练（replay）模式 | 同样有「画图」钮和两行底栏，行为与训练一致 | |
 
 ---
 
