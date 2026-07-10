@@ -27,7 +27,36 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 | **D25 撤销语义** | 撤销栈**深度 1**（母 spec §7 已定「各仅一步」）。**入栈动作 = 画线 / 删线 / 改样式 / 锁定·解锁**。做了新动作 → 前进（↪）置灰。**进画线模式时建栈，退出画线模式时清空**。 | 画线模式是一个有界的编辑会话，退出即提交。跨模式保留会让用户在交易了几十个 tick 之后意外撤销掉一条线；且跨模式保留会立刻牵出「撤销栈要不要随 autosave 落盘 / 断点续局后 ↩ 是否还灵」的新决策面，与本阶段无关。 |
 | **D26 复盘过渡** | P1b-1 的新两行底栏**只在训练 / 再次训练（replay）出现**。**复盘模式完全不动**，继续使用现有 `DrawingToolFloatingView` 浮动铅笔钮，行为一字不改。P5 时复盘切到 6 键新底栏，届时删除 `DrawingToolFloatingView`。 | 母 spec D19：复盘专属控件（隐藏键、复盘删除、hiddenIds 持久化、clear-saved）全在 P5。若 P1b-1 让浮动钮退役而复盘又不上新底栏 → 复盘失去画线入口 = **功能回归**。若复盘上 5 键新底栏 → 其中 🔒/🗑 在复盘必须置灰（复盘删除属 P5、原训练线按 §7 只可隐藏/显示）= **死控件**，两者都不可接受。 |
 | **D27 选中态视觉** | P1b-1 的选中态 = **线渲染为选中蓝 + 底栏 🗑/🔒 由灰变亮**，**不显节点圆**。P1b-2 补上两端/各转折点的实心圆节点。 | mockup「选中态」屏（`2026-07-03-drawing-tools-expansion.html`）画的是「线变蓝 + 带蓝外圈实心圆节点 + 🗑高亮」。D23 把节点推后，故 P1b-1 = 该视觉去掉圆点。选中反馈仍然完整可见（线变色 + 底栏键活化）。 |
-| **D28 契约不动** | **P1b-1 与 P1b-2 均为纯 UI / 渲染层 PR：零迁移、不 bump `CONTRACT_VERSION`（保持 `1.11`）。** | `DrawingObject` 的 18 字段（含 `id` / `period` / `lineSubType` / `lineStyle` / `thickness` / `colorToken` / `labelMode` / `locked` / `text` / `fontSize` / `textColorToken` / `textForm` / `tailAnchor`）已由 P1a 全部落地（`Models/Models.swift:236-254`），迁移 0009 已随 1.11 ship。 |
+| **D28 契约不动** | **P1b-1 与 P1b-2 均为纯 UI / 渲染层 PR：零迁移、不 bump `CONTRACT_VERSION`（保持 `1.11`）。** | 见下方 §1.1 逐形状持久化映射。核心：**`DrawingObject.anchors` 是变长数组 `[DrawingAnchor]`**，`drawings` 表以单列 `anchors TEXT NOT NULL` 存整个锚数组的 JSON，任意锚数都能无损往返；其余 18 字段（`id` / `period` / `lineSubType` / `lineStyle` / `thickness` / `colorToken` / `labelMode` / `locked` / `text` / `fontSize` / `textColorToken` / `textForm` / `tailAnchor`）已由 P1a 全部落地，迁移 0009 已随 1.11 ship。 |
+
+### 1.1 D28 举证：P1b-2 每个形状如何落进现有 1.11 契约
+
+> **codex spec-review R1-high 专门质疑此点**（「通道线第三锚 / 折线任意顶点在 1.11 里没有对应的持久字段，P1b-2 声称零迁移站不住」）。以下为实证反驳，**任何后续 review 请先读此表再判**。
+
+**契约事实（`96d2ac4` 树上可核）：**
+
+| 事实 | 位置 |
+|---|---|
+| `public let anchors: [DrawingAnchor]` —— **变长数组**，非定长元组、非 `(a1, a2)` 两字段 | `ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift:238` |
+| `DrawingAnchor = { period, candleIndex, price }` | `Models/Models.swift:201-203` |
+| `drawings` 表列 `anchors TEXT NOT NULL` = 锚数组整体 JSON | `Persistence/Internal/AppDBMigrations.swift:54`（0009 重建后 `:225`） |
+| 写：`let anchorsJSON = try jsonEncode(dr.anchors)` → 存入 `anchors` 列 | `Persistence/Internal/RecordRepositoryImpl.swift:62, 87-91` |
+| 读：`try jsonDecode(anchorsJSON, as: [LossyAnchor].self)` → 还原任意长度 | `Persistence/Internal/RecordRepositoryImpl.swift:205` |
+| `tailAnchor: DrawingAnchor?` 是**标注(text)气泡尾巴尖专用的额外字段**，与几何锚数**无关**，其它工具恒为 `nil` | `Models/Models.swift:250`；母 spec §4.2 / D11 |
+
+**逐形状映射（P1b-2 的四个工具 + 已落地的水平线）：**
+
+| 工具 | 几何锚数 | 存进 `anchors` 数组 | 需要新字段？ |
+|---|---|---|---|
+| 水平线 horizontal | 1 | `[a0]` | 否 |
+| 趋势线 trend | 2 | `[a0, a1]` | 否 |
+| 通道线 channel | 3 | `[a0, a1, a2]`（a0/a1 定主线，a2 定平行线） | **否**——第三锚就是 `anchors[2]` |
+| 箱体 rect | 2 | `[a0, a1]`（矩形对角） | 否 |
+| 折线 polyline | N（不定） | `[a0, a1, …, a_{N-1}]` | **否**——数组本就不定长 |
+
+**结论**：P1b-2 不需要任何新列、新字段、新迁移；`anchors` 数组 + `toolType` 已足以无歧义地表达全部五个形状。`lineSubType / lineStyle / thickness / colorToken / labelMode / locked` 已在 `style_json` 列（0009 新增）里往返。**D28 成立。**
+
+**P1b-2 必须携带的举证测试**（写进 P1b-2 的 plan）：对 channel(3 锚) / rect(2 锚) / polyline(N=2,3,7 锚) 各写一条 `drawings` 表 + pending JSON blob 的**存→读→深度相等**往返测试，锚数与每个锚的 `period/candleIndex/price` 逐一断言，证明零迁移下形状不丢。
 
 ---
 
