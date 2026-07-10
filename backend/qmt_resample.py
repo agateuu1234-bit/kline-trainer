@@ -2,6 +2,7 @@
 """QMT 合成层（纯函数）。Spec: 2026-07-06-qmt-data-ingestion-pilot-design.md §4.2。"""
 from __future__ import annotations
 import datetime as _dt
+from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 import pandas as pd
 from qmt_normalize import trading_date
@@ -87,3 +88,55 @@ def resample_calendar(df_daily: pd.DataFrame, rule: str) -> pd.DataFrame:
         out_rows.append({"datetime": _first_day_midnight_epoch(first_d), **_agg(grp)})
     # PF1-R9-F3：仅一个周期（当前 partial）→ complete_keys 空 → out_rows 空；带列构造避免 sort_values 抛 KeyError
     return pd.DataFrame(out_rows, columns=_OHLCV_COLS).sort_values("datetime").reset_index(drop=True)
+
+def _expected_session_minutes() -> list[int]:
+    """完整日精确 session 分钟集（自 00:00 起算）：0930..1130(121) + 1301..1500(120)=241。"""
+    mins = list(range(9*60+30, 11*60+30 + 1)) + list(range(13*60+1, 15*60+0 + 1))
+    return sorted(mins)
+
+_EXPECTED_SORTED = _expected_session_minutes()   # 241 个唯一分钟值（升序）
+
+def _expected_day_epochs(d) -> list[int]:
+    """某交易日的精确 241 个 canonical epoch（session 分钟 + SS=00，Asia/Shanghai）。"""
+    out = []
+    for m in _EXPECTED_SORTED:
+        h, mi = divmod(m, 60)
+        out.append(int(_dt.datetime(d.year, d.month, d.day, h, mi, 0, tzinfo=_SH).timestamp()))
+    return sorted(out)
+
+@dataclass
+class DenseCoverage:
+    complete_dates: list
+    dropped_dates: list
+    start_date: object = None
+    end_date: object = None
+
+def compute_dense_coverage(df_1m: pd.DataFrame) -> DenseCoverage:
+    """dense = 某交易日 1m **精确 epoch 集**（含秒）== canonical 241 epoch（codex PF1-F1/PF1-R3）——
+    比对 epoch（非分钟）：`09:30:30` 替 `09:30:00` 分钟同但 epoch 不同 → drop；重复/缺失/盘外同样抓。"""
+    if df_1m.empty:
+        return DenseCoverage([], [], None, None)
+    df = df_1m.copy()
+    df["_d"] = df["datetime"].map(trading_date)
+    complete, dropped = [], []
+    for d, g in df.groupby("_d"):
+        actual = sorted(int(e) for e in g["datetime"])
+        (complete if actual == _expected_day_epochs(d) else dropped).append(d)
+    complete.sort(); dropped.sort()
+    return DenseCoverage(complete, dropped,
+                         complete[0] if complete else None,
+                         complete[-1] if complete else None)
+
+def build_intraday(df_1m: pd.DataFrame):
+    """**安全入口（codex PF1-R4-F1）**：resample 3m/15m/60m 并**只保留 dense 完整日的桶**
+    （非 dense 日整日 drop，含损坏/边界 partial），返回 `(windows: dict[str,DataFrame], DenseCoverage)`。
+    **写库调用方必须用本入口**（而非直接 resample_intraday），杜绝半日 partial 桶入 PG。"""
+    cov = compute_dense_coverage(df_1m)
+    dense = set(cov.complete_dates)
+    windows = {}
+    for period, minutes in (("3m", 3), ("15m", 15), ("60m", 60)):
+        df = resample_intraday(df_1m, minutes)
+        if not df.empty:
+            df = df[df["datetime"].map(lambda e: trading_date(e) in dense)].reset_index(drop=True)
+        windows[period] = df
+    return windows, cov

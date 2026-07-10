@@ -3,7 +3,8 @@ from __future__ import annotations
 import datetime as dt
 import pandas as pd
 from zoneinfo import ZoneInfo
-from qmt_resample import resample_intraday, resample_calendar, period_boundaries
+from qmt_resample import resample_intraday, resample_calendar, period_boundaries, compute_dense_coverage
+from qmt_normalize import trading_date
 
 SH = ZoneInfo("Asia/Shanghai")
 
@@ -95,3 +96,67 @@ def test_calendar_single_week_returns_empty_no_crash():
     out = resample_calendar(df, "weekly")
     assert out.empty
     assert list(out.columns) == ["datetime", "open", "high", "low", "close", "volume", "amount"]
+
+def _day_1m(day, n=241) -> list[dict]:
+    """某日前 n 根 1m（n=241 完整；<241 模拟缺分钟）。close=1 占位。"""
+    times = []
+    t = 930
+    while t <= 1130:
+        times.append(t); m = t%100; t = t + (1 if m<59 else 41)
+    t = 1301
+    while t <= 1500:
+        times.append(t); m = t%100; t = t + (1 if m<59 else 41)
+    times = times[:n]
+    return [{"datetime": _ep(hh, day), "open":1.0,"high":1.0,"low":1.0,"close":1.0,
+             "volume":1,"amount":1.0} for hh in times]
+
+def test_dense_coverage_complete_days_only():
+    rows = _day_1m((2026,7,1)) + _day_1m((2026,7,2)) + _day_1m((2026,7,3))
+    cov = compute_dense_coverage(pd.DataFrame(rows))
+    assert cov.complete_dates == [dt.date(2026,7,1), dt.date(2026,7,2), dt.date(2026,7,3)]
+    assert cov.dropped_dates == []
+    assert (cov.start_date, cov.end_date) == (dt.date(2026,7,1), dt.date(2026,7,3))
+
+def test_dense_coverage_drops_partial_day_whole():
+    # 7-2 缺 1 根(240) → 整日 dropped、不进 complete
+    rows = _day_1m((2026,7,1)) + _day_1m((2026,7,2), n=240) + _day_1m((2026,7,3))
+    cov = compute_dense_coverage(pd.DataFrame(rows))
+    assert dt.date(2026,7,2) not in cov.complete_dates
+    assert dt.date(2026,7,2) in cov.dropped_dates
+    assert cov.complete_dates == [dt.date(2026,7,1), dt.date(2026,7,3)]
+
+def test_dense_coverage_rejects_dup_plus_missing_still_241():
+    # 行数仍=241 但 11:30 缺失、09:31 重复 → 时间戳集≠期望 → 不 dense（codex PF1-F1）
+    df = pd.DataFrame(_day_1m((2026,7,1)))
+    df = df[df["datetime"] != _ep(1130, (2026,7,1))]                       # 去 11:30 → 240
+    df = pd.concat([df, df[df["datetime"] == _ep(931, (2026,7,1))]], ignore_index=True)  # 复制 09:31 → 241
+    assert len(df) == 241
+    cov = compute_dense_coverage(df)
+    assert dt.date(2026,7,1) in cov.dropped_dates and dt.date(2026,7,1) not in cov.complete_dates
+
+def test_dense_coverage_rejects_out_of_session_row_still_241():
+    # 241 根但一根落盘外(11:31)替掉盘内 11:30 → 不 dense
+    df = pd.DataFrame(_day_1m((2026,7,1)))
+    df.loc[df["datetime"] == _ep(1130, (2026,7,1)), "datetime"] = _ep(1131, (2026,7,1))   # 11:30 → 11:31(盘外)
+    assert len(df) == 241
+    cov = compute_dense_coverage(df)
+    assert dt.date(2026,7,1) in cov.dropped_dates
+
+def test_dense_coverage_rejects_nonzero_seconds_still_241():
+    # 241 根但 09:30:00 → 09:30:30（分钟相同、epoch 不同）→ 不 dense（codex PF1-R3-F1）
+    df = pd.DataFrame(_day_1m((2026,7,1)))
+    df.loc[df["datetime"] == _ep(930, (2026,7,1)), "datetime"] = _ep(930, (2026,7,1)) + 30
+    assert len(df) == 241
+    cov = compute_dense_coverage(df)
+    assert dt.date(2026,7,1) in cov.dropped_dates
+
+def test_build_intraday_drops_partial_day_from_all_periods():
+    # 安全入口：240 根的 7-2 → 三周期该日均 0 桶（codex PF1-R4-F1）
+    from qmt_resample import build_intraday
+    rows = _day_1m((2026,7,1)) + _day_1m((2026,7,2), n=240) + _day_1m((2026,7,3))
+    windows, cov = build_intraday(pd.DataFrame(rows))
+    assert dt.date(2026,7,2) not in cov.complete_dates
+    for p in ("3m", "15m", "60m"):
+        got = {trading_date(e) for e in windows[p]["datetime"]}
+        assert dt.date(2026,7,2) not in got            # 损坏日 → 0 桶
+        assert {dt.date(2026,7,1), dt.date(2026,7,3)} <= got
