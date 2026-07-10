@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import pandas as pd
 from zoneinfo import ZoneInfo
-from qmt_resample import resample_intraday, resample_calendar, period_boundaries, compute_dense_coverage
+from qmt_resample import resample_intraday, resample_calendar, period_boundaries, compute_dense_coverage, reconcile_sources
 from qmt_normalize import trading_date
 
 SH = ZoneInfo("Asia/Shanghai")
@@ -160,3 +160,39 @@ def test_build_intraday_drops_partial_day_from_all_periods():
         got = {trading_date(e) for e in windows[p]["datetime"]}
         assert dt.date(2026,7,2) not in got            # 损坏日 → 0 桶
         assert {dt.date(2026,7,1), dt.date(2026,7,3)} <= got
+
+def _daily_from_1m(rows_1m: list[dict]) -> pd.DataFrame:
+    """由 1m 聚合出一致的日线（open=首/close=尾/high=max/low=min/vol,amt=Σ）。"""
+    df = pd.DataFrame(rows_1m); df["_d"] = df["datetime"].map(trading_date)
+    out = []
+    for d, g in df.groupby("_d"):
+        g = g.sort_values("datetime")
+        out.append({"datetime": int(dt.datetime(d.year,d.month,d.day,0,0,0,tzinfo=SH).timestamp()),
+                    "open": g.iloc[0]["open"], "high": g["high"].max(), "low": g["low"].min(),
+                    "close": g.iloc[-1]["close"], "volume": int(g["volume"].sum()),
+                    "amount": float(g["amount"].sum())})
+    return pd.DataFrame(out)
+
+def test_reconcile_ok_when_consistent():
+    r1 = _day_1m((2026,7,1)) + _day_1m((2026,7,2))
+    res = reconcile_sources(pd.DataFrame(r1), _daily_from_1m(r1))
+    assert res.ok and res.reason == ""
+
+def test_reconcile_fail_stale_daily_tail():
+    r1 = _day_1m((2026,7,1)) + _day_1m((2026,7,2))
+    daily = _daily_from_1m(_day_1m((2026,7,1)))   # 日线只到 7-1，尾部截断（比 1m 旧）
+    res = reconcile_sources(pd.DataFrame(r1), daily)
+    assert not res.ok and res.reason == "daily_not_cover_dense"
+
+def test_reconcile_fail_ohlcv_mismatch():
+    r1 = _day_1m((2026,7,1))
+    daily = _daily_from_1m(r1); daily.loc[0, "close"] = daily.loc[0, "close"] + 5.0  # 篡改 close
+    res = reconcile_sources(pd.DataFrame(r1), daily)
+    assert not res.ok and res.reason == "ohlcv_mismatch"
+
+def test_reconcile_fail_when_export_log_not_ok():
+    # export_log status 非 'ok' → fail-closed（即使 df 内部自洽，codex PF1-R8-F2）
+    r1 = _day_1m((2026,7,1)); daily = _daily_from_1m(r1)
+    assert reconcile_sources(pd.DataFrame(r1), daily, status_1m="error").reason == "export_log_not_ok"
+    assert reconcile_sources(pd.DataFrame(r1), daily, status_daily="empty").reason == "export_log_not_ok"
+    assert reconcile_sources(pd.DataFrame(r1), daily, status_1m="ok", status_daily="ok").ok is True

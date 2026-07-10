@@ -2,6 +2,7 @@
 """QMT 合成层（纯函数）。Spec: 2026-07-06-qmt-data-ingestion-pilot-design.md §4.2。"""
 from __future__ import annotations
 import datetime as _dt
+import math
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -140,3 +141,44 @@ def build_intraday(df_1m: pd.DataFrame):
             df = df[df["datetime"].map(lambda e: trading_date(e) in dense)].reset_index(drop=True)
         windows[period] = df
     return windows, cov
+
+@dataclass
+class ReconcileResult:
+    ok: bool
+    reason: str = ""
+
+def reconcile_sources(df_1m: pd.DataFrame, df_daily: pd.DataFrame, *,
+                      status_1m: str = "ok", status_daily: str = "ok",
+                      price_rtol: float = 1e-6) -> ReconcileResult:
+    """D10 双源对账：export_log status 门 + 端点覆盖 + 对称日期集 + OHLCV 容差（spec §4.1 D10 / codex PF1-R8-F2/R6-F2/R10-F1/R11-F1）。"""
+    # (a) export_log status 门：任一文件非 'ok' → fail-closed，即使 df 内部自洽
+    if status_1m != "ok" or status_daily != "ok":
+        return ReconcileResult(False, "export_log_not_ok")
+    cov = compute_dense_coverage(df_1m)
+    if not cov.complete_dates:
+        return ReconcileResult(False, "no_dense_1m")
+    daily_dates = sorted({trading_date(e) for e in df_daily["datetime"]})
+    if not daily_dates or daily_dates[0] > cov.start_date or daily_dates[-1] < cov.end_date:
+        return ReconcileResult(False, "daily_not_cover_dense")          # 端点覆盖
+    dense = set(cov.complete_dates)
+    daily_in_span = {d for d in daily_dates if cov.start_date <= d <= cov.end_date}
+    if dense != daily_in_span:
+        return ReconcileResult(False, "date_set_mismatch")              # 对称日期集
+    # OHLCV 对账
+    d1 = df_1m.copy(); d1["_d"] = d1["datetime"].map(trading_date)
+    dly = df_daily.copy(); dly["_d"] = dly["datetime"].map(trading_date)
+    dly_by = {r["_d"]: r for _, r in dly.iterrows()}
+    for d, g in d1.groupby("_d"):
+        if d not in dense:
+            continue
+        g = g.sort_values("datetime"); b = dly_by[d]
+        agg = {"open": g.iloc[0]["open"], "close": g.iloc[-1]["close"],
+               "high": g["high"].max(), "low": g["low"].min(),
+               "volume": int(g["volume"].sum()), "amount": float(g["amount"].sum())}
+        for k in ("open", "high", "low", "close"):
+            if not math.isclose(float(agg[k]), float(b[k]), rel_tol=price_rtol):
+                return ReconcileResult(False, "ohlcv_mismatch")
+        if int(agg["volume"]) != int(b["volume"]) or not math.isclose(
+                float(agg["amount"]), float(b["amount"]), rel_tol=1e-6):
+            return ReconcileResult(False, "ohlcv_mismatch")
+    return ReconcileResult(True, "")
