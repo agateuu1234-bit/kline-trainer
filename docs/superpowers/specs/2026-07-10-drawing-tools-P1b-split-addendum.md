@@ -38,8 +38,10 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 | **D32 画线模式手势最小改动落 P1b-1a** | 母 spec §14 中，**除"起手落在选中线节点上 → 节点拖动"这一分支外**的全部内容落 **P1b-1a**：画线模式下 ①单指横滑=平移、②单指竖滑=切周期、③双指=缩放、④单击=落锚，四者共存不互吞。`panPolicyInDrawingMode` / `singlePanStep` 的 `drawingTakesOver` 早退路径必须改写。<br>**节点拖动分支**（起手命中节点 → 进入节点拖动）留 **P1b-2**，与节点模型同期。<br>**边界澄清**：D26 只管**画线模式的入口与控件**；手势编排（D32）与渲染（D29）一样是**全局引擎行为**，在复盘的浮动钮画线模式下同样生效。 | codex spec-R4-high（**已核实为真**）：`GestureClassifiers.swift:62` 的 `panPolicyInDrawingMode(drawingMode:)` 恒返回 `.drawingTakesOver`；`:113-122` 的早退分支直接 `return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0, periodSwipe: nil)`——**平移与竖滑切周期一并被吞掉**。<br>故「P1b-1a 保证画线模式内平移 / 切周期可用」与「§14 全部推给 P1b-2」**自相矛盾**：实现者照 spec 推迟 §14，必然过不了 P1b-1a 的负向测试 5 与验收第 15 / 16 条，最终 ship 出一个**画线时无法平移图表**的模式。<br>**连锁结论**：今天画线模式根本切不了周期，故 **D31 的取消钩子在 arbiter 改动落地前无从触发**——D31 与 D32 必须同期落 P1b-1a。<br>备选「从 1a 移除该 UX 保证、记为临时回归」被否：画线模式下不能平移图表，用户无法把线画到屏幕外的位置，是不可接受的可用性缺陷。 |
 | **D31 单条画线的所有锚必须同 period**（钩子落 P1b-1a，测试到 P1b-2） | **不变量**：一条 `DrawingObject` 的 `anchors` 数组里，**每个 `DrawingAnchor.period` 必须相同**，且等于 `DrawingObject.period`。<br>**执行（只在真的变了之后取消，codex R7-medium）**：`manager.pendingAnchors` 非空时，**仅当上 / 下面板周期组合发生了实际变化，或落锚面板发生了实际变化**，才 `manager.cancel()` 丢弃 pending 锚。<br>**判据必须是"变化后 ≠ 变化前"，而不是"用户做了切周期手势"**：`switchPeriodCombo` 在边界（已是最高 / 最低周期）、当前组合非法、目标周期无数据时都会 **no-op 且不返回是否成功**。实现方式二选一：① 让 `switchPeriodCombo` 返回 `Bool`（是否真的换了）；② 调用方在调用前后比较 `(upperPeriod, lowerPeriod)`。**禁止在手势回调处无条件 cancel。**<br>**兜底**：`commit` 前断言全锚同 period，不同则拒绝提交并 `cancel()`。<br>**P1b-1a 即落地**该取消钩子与断言（水平线单锚触发不到，但钩子与测试先就位，**含 no-op 边界不误杀 pending 的测试**）；**P1b-2 的 trend / channel / polyline 必须带混周期尝试的测试**。 | codex spec-R3-high（**已核实为真**）。母 spec §2 要求画线模式内保留单指竖滑切周期；P1b-2 的多锚工具要点好几下才成一条。若第 1 锚落在 60 分、竖滑后第 2 锚落在 15 分，两锚的 `candleIndex` 属于**不同坐标系**，而 `DrawingObject.period` 只取 `anchors.first?.period`（`Models.swift:269`）→ 存下来的线几何上是错的，且经 autosave / finalize 固化后不可修复。<br>取消（而非"把后续锚换算到首锚周期"）的理由：换算需要跨周期 K 线索引映射，是 P4 吸附级别的复杂度，且用户意图本就不明；丢弃 pending 锚是唯一 fail-closed 且可解释的行为。 |
 
-| **D33 命中平局规则：最上层优先（逆序遍历）**（P1b-1b） | **适用范围**：选中**只在训练 / replay 的画线模式内启用**；**复盘模式下 tap 恒不做 hitTest**（复盘仍是旧浮动钮模式，无选中 UI，D26）。故 1b 的命中集合 = `engine.drawings`（此时 `engine.reviewDrawings` 恒为空）。<br>**规则**：按渲染数组**逆序遍历**，**第一个 `hitTest` 命中的即为选中项**，立即返回其 `id`，不再继续遍历。<br>**语义**：数组靠后 = 后绘制 = 盖在上面 = 用户看见的那一条 = 被选中的那一条。**新画的线恒在最上层**（append 到尾部）。<br>**不做**选中循环（连点同一处轮换命中项）——母 spec 未要求，YAGNI。<br>**P5 必须扩展为 `(层, id)`**：见 D34。 | codex spec-R5-high（**已核实为真**）。原文只写「遍历所有可见画线逐个 `hitTest` 命中」而未定遍历方向与平局规则，却在验收里要求「两条价格完全一样的水平线，选中其中一条改颜色 → 只有被点中的那一条变色」——**这是一道无解题**：几何完全重合时 `hitTest` 无法区分意图，正序遍历会命中数组里靠前那条，而用户看见的是靠后那条盖在上面。改样式 / 锁定 / 删除会作用到**错误的线**，而 UI 只显示一条被选中。<br>逆序遍历使「选中 = 视觉上最上面那条」成为可判定且与渲染一致的规则。`KLineView+Drawing.swift:16-26` 按数组顺序绘制，后绘制者覆盖先绘制者，故逆序 = 自顶向下。 |
+| **D33 命中平局规则：最上层优先（逆序遍历）**（P1b-1b） | **适用范围**：选中**只在训练 / replay 的画线模式内启用**；**复盘模式下 tap 恒不做 hitTest**（复盘仍是旧浮动钮模式，无选中 UI，D26）。故 1b 的命中集合 = `engine.drawings`（此时 `engine.reviewDrawings` 恒为空）。<br>**规则**：按渲染数组**逆序遍历**，**第一个 `hitTest` 命中的即为选中项**，立即返回其 `id`，不再继续遍历。<br>**语义**：数组靠后 = 后绘制 = 盖在上面 = 用户看见的那一条 = 被选中的那一条。**新画的线恒在最上层**（append 到尾部）。<br>**1b 不做**选中循环（连点同一处轮换命中项）：1b 只有单层同类线，被完全覆盖的线在视觉上本就不可见；删掉上层那条后下层即可命中。**记为 1b 的已知限制**（几何在容差内但视觉上可区分的两条线，只能选中上面那条）。<br>**P5 必须做选中循环 + `(层, id)`**：见 D34 / §4.1。 | codex spec-R5-high（**已核实为真**）。原文只写「遍历所有可见画线逐个 `hitTest` 命中」而未定遍历方向与平局规则，却在验收里要求「两条价格完全一样的水平线，选中其中一条改颜色 → 只有被点中的那一条变色」——**这是一道无解题**：几何完全重合时 `hitTest` 无法区分意图，正序遍历会命中数组里靠前那条，而用户看见的是靠后那条盖在上面。改样式 / 锁定 / 删除会作用到**错误的线**，而 UI 只显示一条被选中。<br>逆序遍历使「选中 = 视觉上最上面那条」成为可判定且与渲染一致的规则。`KLineView+Drawing.swift:16-26` 按数组顺序绘制，后绘制者覆盖先绘制者，故逆序 = 自顶向下。 |
 | **D34 复盘选中留 P5，且 1b 必须显式门控**（P1b-1b 负向要求） | **1b 不得让复盘获得选中能力。** `ChartContainerView` 的 tap 处理是三模式共用的；1b 在其中加入「命中优先于落锚」时，**必须以 `engine.flow.mode != .review` 门控 hitTest 分支**，并加负向测试断言：复盘模式下单击一条原训练线**不产生选中、不改样式、不删除**。<br>**P5 落地复盘选中时，选中态必须扩展为 `(layer, id)` 二元组**（`layer ∈ {original, review}`），并按层门控操作：`original` 层只可隐藏 / 显示，`review` 层才可改样式 / 锁定 / 删除（母 spec §7 逐字）。届时 D33 的逆序遍历作用在 `engine.drawings + engine.reviewDrawings` 拼接数组上，天然使复盘新线优先于原训练线。 | codex spec-R7-high（**已核实为真**，且比其描述更根本）。母 spec §7 明写命中「返回 (层, id)」，因为复盘下原训练线与 `reviewDrawings` **权限不同**：原训练线只读 / 可隐藏，复盘新线可编辑 / 可删。<br>但 1b 的复盘**根本没有选中 UI**（D26：复盘仍是浮动钮）。真正的风险是：`ChartContainerView` 的 tap 路径三模式共用，若 1b 在此加 hitTest 而不门控，**复盘会意外获得选中能力且无层门控** → 用户可能改样式 / 删除掉**已归档记录里的原训练线**。这是 trust-boundary 级别的缺陷（写入 committed record）。<br>故：1b 用 id-only 选中是安全的**当且仅当**复盘被显式门控在外；`(layer, id)` 与层权限门控随复盘选中一并落 P5。 |
+
+| **D35 `DrawingTool` 渲染 / 命中 API 迁移**（P1b-1a，先决） | 现协议只传锚点：<br>`func render(ctx: CGContext, mapper: CoordinateMapper, anchors: [DrawingAnchor])`<br>`func hitTest(point: CGPoint, mapper: CoordinateMapper, anchors: [DrawingAnchor]) -> Bool`<br>（`Drawing/DrawingTool.swift:18-19`）<br>**P1b-1a 必须迁移为传入整个 `DrawingObject` + 主题**，例如：<br>`func render(ctx:mapper:drawing:theme:)` / `func hitTest(point:mapper:drawing:) -> Bool`<br>并同步改 `KLineView+Drawing.swift:16-26` 的 dispatch 循环、`KLineView.drawingTools` 工具表、以及全部 mock / 测试替身。<br>**必须有一条 dispatch 测试**：两条样式不同的画线经 dispatch 后，renderer 收到的样式入参**各不相同**（证明样式真的抵达渲染层，而不是被 dispatch 丢弃）。 | codex spec-R8-high（**已核实为真**）。P1b-1a 要求 `HorizontalLineTool.render` 消费 `colorToken / lineStyle / thickness / labelMode / lineSubType`，但生产 dispatch 只把 `anchors` 递进去。不改协议的话，实现者可以把样式**成功持久化**、渲染却依然是写死的橙色 1.5pt，或被迫用全局可变状态传样式（更糟）。<br>**连带缺陷（本轮自查发现，codex 未提）**：`hitTest` 同样只收 `anchors`。**射线**只从落点向右延伸，而 `|point.y - lineY| ≤ 容差` 的判据会让**落点左侧的整条横线也命中**。故 `hitTest` 必须一并迁移为接收 `DrawingObject`（至少要读 `lineSubType` 与 `anchors[0].candleIndex`），否则 P1b-1b 的选中在射线上就是错的。<br>这是 P1b-1a 的**先决改动**：样式渲染（第 4 项）与水平线射线（第 5 项）都依赖它。 |
 
 ### 1.1 D28 举证：P1b 每个形状如何落进现有 1.11 契约
 
@@ -97,23 +99,28 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
    - **水平线的可选矩阵**（母 spec §3.1）：直线 ✅ / 射线 ✅ / **线段 灰**；标注 隐藏 / 左 / 右可选，**「显示」灰**，**选射线时「左」再灰**。
    - **本期面板的唯一作用对象** = 「该工具下一条要画的线」的默认值（本期无选中，故无歧义）。该默认值存在**内存、整局有效、不落盘**（持久化的全局默认属 P6 §13）。
 
-4. **样式系统真正接入渲染**
+4. **`DrawingTool` 渲染 / 命中 API 迁移（D35，先决，必须先做）**
+   - 现协议 `render(ctx:mapper:anchors:)` / `hitTest(point:mapper:anchors:)`（`Drawing/DrawingTool.swift:18-19`）**只传锚点**，样式根本到不了渲染层。
+   - 迁移为传入整个 `DrawingObject` + 主题（如 `render(ctx:mapper:drawing:theme:)` / `hitTest(point:mapper:drawing:)`），同步改 `KLineView+Drawing.swift:16-26` 的 dispatch、`KLineView.drawingTools` 工具表、全部 mock 与测试替身。
+   - `hitTest` 也必须迁移：**射线**只向右延伸，而现判据 `|point.y - lineY| ≤ 容差` 会让落点左侧也命中；不读 `lineSubType` 与 `anchors[0].candleIndex` 就无法正确命中。
+
+5. **样式系统真正接入渲染**
    - `HorizontalLineTool.render` 现写死 `strokeRGBA = (0.82, 0.40, 0.0)` + `ctx.setLineWidth(1.5)`（`Drawing/HorizontalLineTool.swift:31-42`），**改为消费 `DrawingObject` 的 `colorToken` / `lineStyle` / `thickness` / `labelMode` / `lineSubType`**。
    - `colorToken` → 实际 RGBA 由**主题解析**（昼 / 夜两套），保证可读性。
    - 渲染 helper 必须是 **host 可测的纯函数**（非 `View`、非 `@MainActor` 隔离），沿现有 `CoordinateMapper` 风格。
 
-5. **水平线升级（母 spec §5.1）**
+6. **水平线升级（母 spec §5.1）**
    - 线型：**直线**（全宽横线）/ **射线**（自落点向右到主图右缘）。**无线段**。
    - 标注：隐藏 / 左 / 右（价格）。价格标签**紧贴线上方、不压线**；射线时靠右缘，**防贵股 4 位整数价溢出**（须裁剪或右对齐至主图右缘内）。
 
-6. **画线模式手势最小改动（D32，§14 除节点拖动分支外的全部）**
+7. **画线模式手势最小改动（D32，§14 除节点拖动分支外的全部）**
    - 现状：`GestureClassifiers.swift:62` 的 `panPolicyInDrawingMode(drawingMode:)` 恒返回 `.drawingTakesOver`；`singlePanStep` 的 `drawingTakesOver` 早退分支（`:113-122`）直接返回空 emissions 且 `periodSwipe: nil` → **画线模式下平移与竖滑切周期一起被吞掉**。
    - 本期改写：画线模式下**单指 pan 不再被无条件截获**——水平分量走平移、竖直甩动走 `switchPeriodCombo`、双指缩放不受影响、单击落锚。
    - 沿 C7 的**纯函数 step + host 测**风格：判据全部落在 `GestureClassifiers` 的纯函数里，`ChartGestureArbiter` 只做分发。
    - **节点拖动分支**（起手命中节点 → 节点拖动）**不做**，留 P1b-2。
    - 该改动是**全局引擎行为**，在复盘的浮动钮画线模式下同样生效（D26 边界澄清）。
 
-7. **D29 周期绑定渲染（三模式一视同仁，必须与 D32 同期）**
+8. **D29 周期绑定渲染（三模式一视同仁，必须与 D32 同期）**
    - `RenderStateBuilder.swift:65-68` 现按 `drawing.panelPosition == (panel == .upper ? 0 : 1)` 过滤 → **改为按 `drawing.period == 该面板当前显示的周期` 过滤**。
    - 该过滤是训练 / replay / 复盘**共用的同一行**（`engine.drawings + (mode == .review ? engine.reviewDrawings : [])`）。**新判据在复盘同样生效，不做模式门控**。
    - 叠加现有 `drawing.revealTick <= tick` 渐显规则**不变**。
@@ -121,7 +128,7 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
    - `panelPosition` 仍记当时面板，但**不再参与渲染判据**。
    - **为何必须与 D32 同期**：D32 让画线模式首次能切周期；若渲染仍按 `panelPosition` 过滤，用户在 60 分画的线会在竖滑到 15 分后继续显示在该面板上，而坐标系已换 = 线的位置是错的。
 
-8. **D31 同 period 钩子**
+9. **D31 同 period 钩子**
    - `pendingAnchors` 非空时，**仅当周期组合或落锚面板发生了实际变化**才 `manager.cancel()`。判据是「变化后 ≠ 变化前」，**不是**「用户做了切周期手势」——`switchPeriodCombo` 在边界 / 非法组合 / 目标无数据时会 no-op。
    - `commit` 前断言全锚同 period，不同则拒绝提交并 `cancel()`。
    - 本期水平线单锚、落锚即提交，实际触发不到；**钩子与断言仍须落地并可测**，供 P1b-2 复用。
@@ -141,6 +148,8 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 4. **退出画线模式后**，单击图表不落锚、不选中任何画线。
 5. **画线模式手势（D32，纯函数 host 测）**：`drawingMode == true` 时 —— 水平 pan 产生位移 emissions（不再是空数组）；竖直甩动产生非 `nil` 的 `periodSwipe`；双指缩放不受影响；单击落锚。**必须有一条直接断言 `panPolicyInDrawingMode` / `singlePanStep` 新行为的测试**（旧行为 `.drawingTakesOver` 早退返回空 emissions + `periodSwipe: nil`，是本期要推翻的对象）。
 6. **样式往返**：设了红色 / 虚线2 / 3 档粗细 / 标注靠右后画的线，`autosave` 后重新加载，五个样式字段逐一相等。
+6b. **D35 dispatch 举证**：两条**样式不同**的画线经 `KLineView+Drawing` dispatch 后，renderer 收到的样式入参**各不相同**（证明样式真的抵达渲染层，而不是在 dispatch 被丢弃 / 被写死值覆盖）。
+6c. **射线 hitTest 方向性（D35 连带）**：一条 `.ray` 水平线，落点右侧同一 y 上的点**命中**，落点**左侧**同一 y 上的点**不命中**；同样几何的 `.straight` 线则两侧都命中。
 7. **`routeDrawingCommit` 全字段存活**：提交后 `id` / `period` / 五个样式字段 / `locked` 不丢（P1a 已加，本期回归保护）。
 8. **D31 钩子（两面都要测）**：
    - **真变化 → 取消**：`pendingAnchors` 非空时周期组合**实际改变** → pending 被清空、不产生画线。
@@ -223,6 +232,10 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
    - **禁止**改用 `.onChange(of: engine.drawings)` 或任何数组值比较：`DrawingObject.==` 排除 `id`。
    - `reviewDrawings` 的 `.count` 触发本期不动。
 
+### 3.1b P1b-1b 已知限制（明写，非缺陷）
+
+- **不做选中循环**：两条几何落在同一命中容差内的线，单击恒选中**最上层**那条（D33）。若用户想操作下层那条，只能先删掉上层。完全重合时下层本就不可见，无实际影响；容差内但视觉可区分时，这是一个可接受的取舍。**P5 引入跨层选中时必须补上循环**（见 §4.1），因为那时"选不中下层"会直接导致原训练线无法隐藏。
+
 ### 3.2 P1b-1b 不做
 
 节点 / 拖节点 / 手势消歧 / 多锚 / 四个新工具（P1b-2）；复盘专属一切（P5）；主页全局默认设置（P6）。
@@ -284,7 +297,8 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 ## 4.1 P5 必做项（本轮 review 沉淀，勿丢）
 
 - **复盘选中必须是 `(layer, id)` 二元组**（`layer ∈ {original, review}`），按层门控：`original` 层只可隐藏 / 显示，`review` 层才可改样式 / 锁定 / 删除（母 spec §7 逐字）。P1b-1b 的 id-only 选中之所以安全，**仅仅因为复盘被 D34 显式门控在选中之外**；P5 解除门控的同时必须补上层身份，否则会改写已归档记录里的原训练线（trust-boundary）。
-- **P5 解除 D34 门控时**，D33 的逆序遍历作用在 `engine.drawings + engine.reviewDrawings` 拼接数组上，天然使复盘新线优先于原训练线——但**层权限门控不可省**（重合时用户可能确实想选原训练线来隐藏它）。
+- **P5 必须引入「选中循环」，否则被复盘新线覆盖的原训练线永远选不中、也就永远无法隐藏**（codex spec-R8-medium，**已核实为真**）。母 spec §12 规定隐藏流程是「单击选中一条**原训练线** → 点隐藏」，依赖选中；而 D33 的逆序遍历恒让 `reviewDrawings` 里的线先命中。**P5 规则定为**：同一位置（落点位移 ≤ 命中容差）的**连续单击在命中集合内循环**，顺序即逆序遍历序（最上层 → 最下层 → 回到最上层）；落点移出容差、或选中被清空 → 循环重置。P5 必须加「原训练线与复盘新线重合 → 第二次单击选中原训练线 → 可隐藏」的回归测试。
+- **P5 解除 D34 门控时**，层权限门控不可省：`original` 层只可隐藏 / 显示，`review` 层才可改样式 / 锁定 / 删除。
 - **`reviewDrawings` 的 dirty 信号**：P5 引入复盘内的隐藏 / 删除（原地改内容）时，`reviewDrawings` 的 `.count` 触发同样会漏判，须比照 **D30** 加内容级 revision。
 - 母 spec 既有 P5 项：复盘 6 键栏（含隐藏）、复盘删除、`hiddenIds` 写入行为与 committed baseline、「删空清已复盘」。
 - P1a 沉淀：`ReviewNetChange.fullKey` 的分隔符 `|` `:` `;` 需在 P3（文本标注）前转义。
