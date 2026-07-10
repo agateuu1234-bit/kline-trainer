@@ -347,3 +347,60 @@ def test_build_training_windows_end_to_end_retries_on_tail_d9_fail():
     ae31 = compute_after_end(bounds, bounds.index(bounds[31]), months=1)
     assert per_day_intraday_complete({p: windows[p] for p in ("3m","15m","60m")}, trading, ae31,
                                      {"3m":2,"15m":2,"60m":1}) is True
+
+
+# ===== final whole-branch review Finding 1：D6 per-period before/after 硬门补测（Task8 删旧测试造成的
+#   覆盖回归——旧 assemble_training_set 路径的等价测试未在新生产入口 build_training_windows 上重建）=====
+
+def _intraday_bars_per_day(days, n):
+    """每交易日固定 n 根盘中 bar（3m/15m/60m 占位）；供 D9 per_day 硬门"真正过关"用，
+    避免该周期缺席时 per_day_intraday_complete 因 windows.get(period) is None 而"意外"失败，
+    掩盖 D6 门本身是否被触发（vacuous-test 陷阱）。"""
+    rows = []
+    for d in days:
+        base = int(dt.datetime(d.year, d.month, d.day, 9, 33, 0, tzinfo=SH).timestamp())
+        rows += [{"datetime": base + i * 180, "open": 1.0, "high": 1.0, "low": 1.0,
+                 "close": 1.0, "volume": 1, "amount": 1.0} for i in range(n)]
+    return pd.DataFrame(rows)
+
+def _d6_isolated_fixture(daily_rows):
+    """n=32+months=1 → 唯一候选 idx=30；3m/15m/60m 铺满 forward span 且 before_caps=0（D9 必过，
+    与 daily 隔离），daily 周期由调用方注入待测的 before/after 行。返回 (bounds, pb, kwargs)。"""
+    bounds = _n_month_boundaries(32)
+    trading = _weekday_trading_dates(dt.date(2022, 7, 1), dt.date(2022, 7, 31))
+    dense = set(trading)
+    forward_days = sorted(trading)                      # d0..ae_date 全交易日、D9 span 与之精确重合
+    pb = {"daily": pd.DataFrame(daily_rows),
+         "3m": _intraday_bars_per_day(forward_days, 2),
+         "15m": _intraday_bars_per_day(forward_days, 2),
+         "60m": _intraday_bars_per_day(forward_days, 1)}
+    caps = {"daily": 150, "3m": 0, "15m": 0, "60m": 0}   # 3m/15m/60m before-context=0 → 窗口=严格 forward span
+    kwargs = dict(dense_dates=dense, trading_dates=trading, before_caps=caps, months=1,
+                 intraday_expected={"3m": 2, "15m": 2, "60m": 1}, before_min=30, max_retries=8)
+    return bounds, pb, kwargs
+
+def test_build_training_windows_raises_when_before_context_too_thin():
+    # daily 周期只给 5 根 before-context(<before_min=30 默认) → 唯一候选在 D6 gate 失败
+    # → bounded retry 穷尽 → GenerateSkipException（选项 a：全部候选都不过此门，直接钉死该 gate；
+    # retry 行为已由 test_select_valid_window_retries_past_bad_candidate /
+    # test_build_training_windows_end_to_end_* 另行覆盖）。3m/15m/60m 铺满、D9 必过，隔离出 D6 本身。
+    bounds0 = _n_month_boundaries(32)
+    start = bounds0[30]
+    before_dt = [start - (i + 1) * 86400 for i in range(5)]
+    daily_rows = [{"datetime": d, "open": 1.0, "high": 1.0, "low": 1.0,
+                  "close": 1.0, "volume": 1, "amount": 1.0} for d in before_dt + [start]]
+    bounds, pb, kwargs = _d6_isolated_fixture(daily_rows)
+    with pytest.raises(GenerateSkipException):
+        build_training_windows(pb, bounds, random.Random(0), **kwargs)
+
+def test_build_training_windows_raises_when_after_window_empty():
+    # 同一 D6 gate 的另一分支：before-context 充足(35>=30)，但 [start, after_end] 内 daily 无一根
+    # → after_n=0<1 → 唯一候选失败 → GenerateSkipException。3m/15m/60m 同上铺满、D9 必过。
+    bounds0 = _n_month_boundaries(32)
+    start = bounds0[30]
+    before_dt = [start - (i + 1) * 86400 for i in range(35)]
+    daily_rows = [{"datetime": d, "open": 1.0, "high": 1.0, "low": 1.0,
+                  "close": 1.0, "volume": 1, "amount": 1.0} for d in before_dt]
+    bounds, pb, kwargs = _d6_isolated_fixture(daily_rows)
+    with pytest.raises(GenerateSkipException):
+        build_training_windows(pb, bounds, random.Random(0), **kwargs)

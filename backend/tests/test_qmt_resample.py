@@ -198,6 +198,39 @@ def test_reconcile_fail_ohlcv_mismatch():
     res = reconcile_sources(pd.DataFrame(r1), daily)
     assert not res.ok and res.reason == "ohlcv_mismatch"
 
+def test_reconcile_fail_ohlcv_mismatch_open():
+    # final review 补测：only "close" 篡改无法压 open/high/low 分支（mutation `("close",)` 会存活）
+    r1 = _day_1m((2026,7,1))
+    daily = _daily_from_1m(r1); daily.loc[0, "open"] = daily.loc[0, "open"] + 5.0
+    res = reconcile_sources(pd.DataFrame(r1), daily)
+    assert not res.ok and res.reason == "ohlcv_mismatch"
+
+def test_reconcile_fail_ohlcv_mismatch_high():
+    r1 = _day_1m((2026,7,1))
+    daily = _daily_from_1m(r1); daily.loc[0, "high"] = daily.loc[0, "high"] + 5.0
+    res = reconcile_sources(pd.DataFrame(r1), daily)
+    assert not res.ok and res.reason == "ohlcv_mismatch"
+
+def test_reconcile_fail_ohlcv_mismatch_low():
+    r1 = _day_1m((2026,7,1))
+    daily = _daily_from_1m(r1); daily.loc[0, "low"] = daily.loc[0, "low"] + 5.0
+    res = reconcile_sources(pd.DataFrame(r1), daily)
+    assert not res.ok and res.reason == "ohlcv_mismatch"
+
+def test_reconcile_fail_ohlcv_mismatch_volume():
+    # volume 是精确 int 比较（非 rel_tol）；篡改需足够大避免与其它分支混淆
+    r1 = _day_1m((2026,7,1))
+    daily = _daily_from_1m(r1); daily.loc[0, "volume"] = daily.loc[0, "volume"] + 1000
+    res = reconcile_sources(pd.DataFrame(r1), daily)
+    assert not res.ok and res.reason == "ohlcv_mismatch"
+
+def test_reconcile_fail_ohlcv_mismatch_amount():
+    # amount 用 rel_tol=1e-6；篡改幅度须远超该容差
+    r1 = _day_1m((2026,7,1))
+    daily = _daily_from_1m(r1); daily.loc[0, "amount"] = daily.loc[0, "amount"] + 1000.0
+    res = reconcile_sources(pd.DataFrame(r1), daily)
+    assert not res.ok and res.reason == "ohlcv_mismatch"
+
 def test_reconcile_fail_when_export_log_not_ok():
     # export_log status 非 'ok' → fail-closed（即使 df 内部自洽，codex PF1-R8-F2）
     r1 = _day_1m((2026,7,1)); daily = _daily_from_1m(r1)
