@@ -1247,6 +1247,21 @@ git commit -m "feat(b2): after_end 重定义 + 窗口纳入(周straddle) + eligi
 
 ---
 
+## ⚠️ 已知受控残留：B4 补货能力停用至 Plan 2（真 Codex whole-branch R1/R2 high，user 接受 + override 收口）
+
+**现象**：`assemble_training_set` fail-closed（Task 8）后，生产链 `scheduler_main`（B4 常驻单例进程）→ `build_generate_batch` → `generate_batch` → `generate_one_training_set` → `assemble_training_set` 抛 `NotImplementedError`。R1 时该异常会**崩溃常驻进程**；已修（`df6efb0`）为适配器捕获→记 ERROR→返回 0，进程存活。
+
+**R2 残留（Codex 仍判 needs-attention，非新 bug 而是设计意图本身）**：B4 sweep 从此**永远生不出 unsent 库存**，直到 Plan 2 重接。Codex 自述为 "inferred production outage"。
+
+**为何接受（user 拍板，数据安全 > 可用性）**：
+- `scheduler_main` **无任何部署配置引用**（无 docker-compose / systemd / CI / Makefile 启动它），无生产调用者 → 当前零环境受影响。
+- 替代方案是让旧**未门控**随机选起点路径继续对真实数据运行（绕过 D9/dense 门），正是 codex PF1-R10-F1 判定必须停用的东西。
+- 降级是**可见可控**的：ERROR 日志 + 契约测（`test_build_generate_batch_real_b2_fail_closed_logs_error_returns_zero`，不打桩、双向 mutation 验证）钉死该链。
+
+**Plan 2 首个 Task 必须解除本残留**：`generate_one_training_set` 重接 `build_training_windows`（读 `stock_coverage` 供 `dense_dates`/`trading_dates`、`period_boundaries` 供 `month_boundaries`、`PERIOD_BEFORE_CAP` 作 `before_caps`），并补「真实 sweep 能从合规覆盖数据产出 ≥1 个 registered training set」的集成测试（Codex R2 next-step 明确要求）。**部署前若要启用 B4，须先完成此项。**
+
+---
+
 ## Execution Handoff
 
 见 skill 末尾选项（subagent-driven 推荐）。**Plan 2**（schema+DB壳+pilot+集成测试）在 Plan 1 落地 + codex review 后写。
