@@ -404,7 +404,13 @@ async def _amain(args) -> int:
         if args.backfill:
             await backfill_content_hash(conn)
             return 0
-        sets = await generate_batch(conn, args.count, out_dir, random.Random(args.seed))
+        try:
+            sets = await generate_batch(conn, args.count, out_dir, random.Random(args.seed))
+        except NotImplementedError as exc:
+            # codex whole-branch review high：assemble_training_set 已 fail-closed 停用；
+            # CLI 人工调用，比裸 traceback 更清楚地报错并非零退出（而非静默/丢生成结果）。
+            print(f"[B2] 错误：{exc}")
+            return 1
         for g in sets:
             print(f"[B2] {g.path.name} crc32={g.content_hash} start={g.start_datetime}")
         print(f"[B2] 完成：生成 {len(sets)} 个训练组")

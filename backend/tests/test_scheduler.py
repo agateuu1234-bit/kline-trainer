@@ -255,6 +255,41 @@ def test_build_generate_batch_creates_output_dir(monkeypatch, tmp_path):
     assert asyncio.run(gen(3)) == 3
 
 
+def test_build_generate_batch_real_b2_fail_closed_logs_error_returns_zero(caplog, tmp_path):
+    # codex whole-branch review high：真 B2 链路（不 monkeypatch generate_batch）——
+    # build_generate_batch→generate_batch→generate_one_training_set→
+    # assemble_training_set(NotImplementedError)。断言适配器接住、记 ERROR、返回 0，
+    # 不让 B4 常驻调度进程崩溃。
+    import logging
+
+    class _FakeConn:
+        async def fetch(self, query, *args):
+            if "FROM stocks" in query:
+                return [{"code": "600519"}]        # 驱动 generate_batch 走到 assemble_training_set
+            return []                                # klines 查询：assemble_training_set 在读取
+            # period_bars 内容之前就已 fail-closed 抛出，空表不影响链路是否被真正触达
+
+    class _FakeAcq:
+        async def __aenter__(self):
+            return _FakeConn()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakePool:
+        def acquire(self):
+            return _FakeAcq()
+
+    from app.scheduler import build_generate_batch
+    gen = build_generate_batch(_FakePool(), str(tmp_path / "ts_out"))
+    with caplog.at_level(logging.ERROR, logger="app.scheduler"):
+        result = asyncio.run(gen(5))
+    assert result == 0
+    assert "B4 补货调用 B2 generate_batch 失败" in caplog.text
+    assert "fail-closed" in caplog.text
+    assert "旧未门控随机选起点路径已停用" in caplog.text   # 断言底层确实是 assemble_training_set 的 NotImplementedError
+
+
 def test_start_b4_scheduler_starts_running():
     pytest.importorskip("apscheduler")
     from app.scheduler import start_b4_scheduler
