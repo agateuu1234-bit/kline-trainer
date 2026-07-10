@@ -709,6 +709,14 @@ def test_reconcile_fail_stale_daily_tail():
     res = reconcile_sources(pd.DataFrame(r1), daily)
     assert not res.ok and res.reason == "daily_not_cover_dense"
 
+def test_reconcile_fail_date_set_mismatch():
+    # 7-2 在 1m 侧因 partial(n=240) 被 dense 剔除，但日线仍聚合出 7-2 一行 →
+    # 端点覆盖(7-1..7-3)仍通过 gate3，但 dense={7-1,7-3} != daily_in_span={7-1,7-2,7-3} → gate4
+    r1 = _day_1m((2026,7,1)) + _day_1m((2026,7,2), n=240) + _day_1m((2026,7,3))
+    daily = _daily_from_1m(r1)   # 日线含 7-1/7-2/7-3（7-2 由不完整 240 根聚合，但仍记一行）
+    res = reconcile_sources(pd.DataFrame(r1), daily)
+    assert not res.ok and res.reason == "date_set_mismatch"
+
 def test_reconcile_fail_ohlcv_mismatch():
     r1 = _day_1m((2026,7,1))
     daily = _daily_from_1m(r1); daily.loc[0, "close"] = daily.loc[0, "close"] + 5.0  # 篡改 close
@@ -778,7 +786,7 @@ def reconcile_sources(df_1m: pd.DataFrame, df_daily: pd.DataFrame, *,
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && python -m pytest tests/test_qmt_resample.py -v`
-Expected: PASS（15 passed）
+Expected: PASS（16 passed）
 
 - [ ] **Step 5: 提交**
 
