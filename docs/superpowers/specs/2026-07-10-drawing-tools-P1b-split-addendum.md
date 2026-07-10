@@ -198,7 +198,7 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 
 1. **D39 状态单一真相**：连续触发多次 `updateUIView` / `sync()` 后，`activeDrawingTool` **不被自动改写**；`ChartContainerView` 里**不存在** `manager.toggle(.horizontal)` 这类 re-arm 调用。
 2. **D42 双面板可画**：进入画线模式后，**在上面板画一条、在下面板画一条**，两条都成功提交，且各自的 `DrawingObject.period` 等于**所在面板当时显示的周期**。
-3. **D42 跨面板 pending 取消**：上面板落一个 pending 锚（人造多锚工具场景）后点到下面板 → pending 被 `cancel()`。
+3. **D42 跨面板 pending 取消**：上面板落一个 pending 锚（人造多锚工具场景）后点到下面板 → **pending 被清空，而 `activeDrawingTool` / `drawingModeActive` 存活**（走 `discardPendingAnchors()`，不是 `cancel()`）。
 4. **D42 互斥模型已退役**：激活画线模式**不再**调用 `cancelDrawingAllPanels()`；两面板可同时接受落锚。
 4b. **切 activePanel 不拆会话（codex R18-high 专项，两个方向都要测）**：
    - **无 pending 锚时**切 activePanel → `drawingModeActive` 与 `activeDrawingTool` **仍然存活**（会话不倒）。
@@ -324,9 +324,10 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
    - 该改动是**全局引擎行为**，在复盘的浮动钮画线模式下同样生效（D26 边界澄清）。
 
 2. **D31 同 period 钩子**
-   - `pendingAnchors` 非空时，**仅当周期组合或落锚面板发生了实际变化**才 `manager.cancel()`。判据是「变化后 ≠ 变化前」，**不是**「用户做了切周期手势」——`switchPeriodCombo` 在边界 / 非法组合 / 目标无数据时会 no-op。
+   - `pendingAnchors` 非空时，**仅当周期组合或落锚面板发生了实际变化**才 **只丢弃 pending 锚**：调 `discardPendingAnchors()`（保留 `activeDrawingTool`），**绝不调 `manager.cancel()`**——后者会连 `activeTool` 一起清掉（`DrawingToolManager.swift:77-80`），而 1a-ii 已删除自动 re-arm，工具会一直停在 nil，连续画线断掉、1b-i 的 tap 会误入选择态。
+   - 判据是「变化后 ≠ 变化前」，**不是**「用户做了切周期手势」——`switchPeriodCombo` 在边界 / 非法组合 / 目标无数据时会 no-op。
    - 实现二选一：① 让 `switchPeriodCombo` 返回 `Bool`（是否真的换了）；② 调用方在调用前后比较 `(upperPeriod, lowerPeriod)`。**禁止在手势回调处无条件 cancel。**
-   - `commit` 前断言全锚同 period，不同则拒绝提交并 `cancel()`。
+   - `commit` 前断言全锚同 period，不同则**拒绝提交并 `discardPendingAnchors()`**（同样不得清 `activeDrawingTool`）。
    - 本期水平线单锚、落锚即提交，实际触发不到；**钩子与断言仍须落地并可测**，供 P1c 复用。
 
 ### 5.2 P1b-1a-iv 不做
@@ -340,9 +341,10 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 1. **D32 手势（纯函数 host 测）**：`drawingMode == true` 时 —— 水平 pan 产生位移 emissions（**不再是空数组**）；竖直甩动产生非 `nil` 的 `periodSwipe`；双指缩放不受影响；单击落锚。**必须有一条直接断言 `panPolicyInDrawingMode` / `singlePanStep` 新行为的测试**（旧行为 `.drawingTakesOver` 早退返回空 emissions + `periodSwipe: nil`，是本期要推翻的对象）。
 2. **D32 与 D29 的联合不变量**：**画线模式内**竖滑切周期后，原周期的线**不再渲染在该面板**（D29 在 1a-i 已测非画线模式路径；本条测新开的画线模式路径）。
 3. **D31 钩子，两面都要测**：
-   - **真变化 → 取消**：`pendingAnchors` 非空时周期组合**实际改变** → pending 被清空、不产生画线。
+   - **真变化 → 只丢 pending**：`pendingAnchors` 非空时周期组合**实际改变** → pending 被清空、不产生画线，**且 `activeDrawingTool` 仍非 nil、`drawingModeActive` 仍为 true**（codex R21-high）。
    - **no-op → 不取消**：`pendingAnchors` 非空时在**边界**（已是最高 / 最低周期）或**目标周期无数据**处触发切周期手势，周期未变 → **pending 锚原样保留**（不得误杀）。
-   - `commit` 前的全锚同 period 断言存在且被测试覆盖（可用人造多锚输入直接测 manager 层）。
+   - `commit` 前的全锚同 period 断言存在且被测试覆盖（可用人造多锚输入直接测 manager 层），**且拒绝提交后 `activeDrawingTool` 仍非 nil**。
+   - **断言这些路径调的是 `discardPendingAnchors()` 而非 `DrawingToolManager.cancel()`**。
 4. **复盘手势同步改善不算回归**：复盘浮动钮画线模式下，pan / 竖滑 / 缩放同样可用（D32 全局生效）；复盘的**入口与控件**仍是浮动钮（D26）。
 
 ### 5.4 P1b-1a-iv 非程序员验收清单
