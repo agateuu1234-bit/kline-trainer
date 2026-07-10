@@ -55,6 +55,8 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 | **D37 选中态的转移与生命期**（1b-i） | **画线态**（`activeTool != nil`）：单击恒落锚，**不产生也不清除选中**（画线态下选中恒为空）。<br>**选择态**（`activeTool == nil`）：单击命中 → 选中它（替换原选中）；单击**未命中 → 清空选中**。<br>**新提交的线不自动选中**。<br>其余清空时机：退出画线模式、从选择态切回画线态、选中线因切周期 / 切面板而不可见、选中线被删除。每次清空后 🗑 回灰。 | codex spec-R10-medium（**已核实为真**）。原文只列了「退出 / 不可见 / 删除」三种清空时机，又规定「未命中 → 落锚」且「有选中时设置面板作用于选中线」。于是：选中 A → 点空白处画出 B → **A 仍处于选中态** → 用户接着改样式 / 删除，作用的是 **A 而不是刚画的 B**，且屏幕上 A 仍是蓝的，极易误操作。<br>D38 引入画线态 / 选择态之后本条进一步简化：两态互斥，画线态下根本不存在选中。 |
 | **D39 画线 / 选择状态的单一真相，且退役 Coordinator 的自动 re-arm**（1a-ii 起，1b-i 强制） | **`activeDrawingTool: DrawingToolType?` 必须是底栏与 `ChartContainerView.Coordinator` **共同消费**的单一真相**（落在 `TrainingEngine` 或一个共享的画线 view-model 上），**不得**继续留在 Coordinator 私有的 `DrawingToolManager` 里。<br>**必须删除** `ChartContainerView.swift:107` 的自动 re-arm：`if manager.activeTool == nil { manager.toggle(.horizontal) }`。`sync()` 改为**单向从真相同步到 manager**（manager 退化为纯 pending-anchor 暂存）。<br>**测试要求**：`activeTool == nil`（选择态）必须**熬过一次完整的 SwiftUI render / update pass** 后仍为 nil，然后那一次 tap 才做 hitTest。**不得**只在测试里直接给 manager 赋值——那样测不出 update-cycle 回归。 | codex spec-R15-high（**已核实为真，且后果严重**）。`ChartContainerView.swift:59` 的 `private let manager = DrawingToolManager(enabledTools: [.horizontal])` 是 **Coordinator 私有**的；`:98-109` 的 `sync()`（每次 `updateUIView` 都会调）写着 `if manager.activeTool == nil { manager.toggle(.horizontal) }`——只要引擎面板处于 drawing 模式，`activeTool` 就会被**重新点亮**。<br>于是 D38 的「点熄类型行图标 → 进选择态」在**下一次 SwiftUI 刷新时被自动撤销**：用户想选中的那一下 tap 变成「又画一条重合的线」。这是用户可见的严重错误（选中 / 删除 / 改样式全部失效），且**在测试里直接给 manager 赋状态根本复现不出来**——必须有一条跨 update pass 的端到端测试。<br>底栏在 `TrainingView` 里，`manager` 在 Coordinator 里，两者之间今天没有任何通路：底栏既观察不到也设置不了 `activeTool`。故 D38 若不改状态归属就无法实现。 |
 | **D40 命中集合 ≡ 渲染可见集合（含 D29 fail-safe）**（1b-i） | 选中的 `hitTest` **必须消费与 `RenderStateBuilder` 完全相同的「该面板可见画线集合」**——同一个判据、同一个 fail-safe、同一个 `revealTick` 过滤、同一个逆序顺序（D33）。**必须抽成一个共享的纯函数**（如 `visibleDrawings(for:panel:engine:tick:)`），渲染与命中**都调用它**，不得各写一遍。<br>**测试要求**：在 `upperPanel.period == lowerPanel.period` 的损坏态下，`panelPosition == 0` 与 `== 1` 各测一次——**点击某个面板只能选中 / 删除渲染在该面板上的那条线**，绝不能命中另一面板的同周期线。 | codex spec-R15-medium（**已核实为真**）。D29 为 `upper.period == lower.period` 的损坏 / 版本错位态加了 `panelPosition` fail-safe，保证一条线只**渲染**在一个面板；但 1b-i 原文只说「对该面板当前周期所有可见画线做 hitTest」，**没有要求复用同一判据**。<br>后果：在同周期双面板态下，纯 `period` 的命中判据会让用户点击上面板时**选中并删除一条只渲染在下面板的线**——一条他在这个面板上根本看不见的线。fail-safe 就退化成「只糊在渲染层的补丁」，而编辑操作仍作用在隐藏的重影上。<br>把可见性判据抽成单一纯函数，是让「所见 == 可选」这条不变量**在结构上成立**而非靠两处代码巧合一致。 |
+| **D41 画线共享状态容器（`activeDrawingTool` + `selectedDrawingID` 同源）**（`activeDrawingTool` 落 1a-ii；`selectedDrawingID` 落 1b-i） | D39 引入的单一真相**扩为一个容器**（落 `TrainingEngine` 或共享画线 view-model），至少含：<br>• `drawingModeActive: Bool`（D42）<br>• `activeDrawingTool: DrawingToolType?`（D38 / D39，1a-ii）<br>• `selectedDrawingID: DrawingID?` + `selectedPanel: PanelId?`（1b-i）<br>**`selectedDrawingID` 必须流进渲染**：`RenderStateBuilder` 把它带进 `KLineRenderState`，`KLineView+Drawing` 的 dispatch 据此对那一条走**选中蓝**覆盖色（`DrawingTool.render` 的 D35 入参里加一个 `isSelected: Bool`，或渲染上下文携带 selected id）。<br>底栏（`TrainingView`）与 tap 处理（`ChartContainerView.Coordinator`）**读写同一个容器**，任何一方都不得私存一份。<br>**测试要求**：选中一条线 → **强制走一次 `updateUIView`** → 断言渲染出的仍是同一个 id 的选中态，且 🗑 / 设置面板作用的**也是同一个 id**。 | codex spec-R16-high（**已核实为真**）。`KLineRenderState`（`Render/KLineRenderState.swift`）里**根本没有 selected 概念**；而 1b-i 要求「命中后线渲染为选中蓝 + 🗑 变亮 + 设置面板 / 删除作用于选中线」。<br>tap 处理在 `ChartContainerView.Coordinator`，底栏与设置面板在 `TrainingView` —— 这正是 D39 里让 `activeDrawingTool` 被 `updateUIView` 冲掉的同一条裂缝。选中态若只存在其中一侧，就会出现「图表高亮着 A、底栏 🗑 删掉 B」或「刷新一次选中就没了」。<br>故 `selectedDrawingID` 必须与 `activeDrawingTool` 同源、且**必须进渲染状态**（否则渲染层无从知道哪条要画成蓝色）。 |
+| **D42 画线会话是全局的，锚点归属由「被点击的面板」决定**（1a-ii） | 顶栏「画图」钮切换的是**全局** `drawingModeActive`，**不属于任何单一面板**。<br>**落锚时**由**被点击的那个面板**提供 `panel` 与 `period`（母 spec §2「上下两面板都能画」、§10「归属所画面板当前显示的周期」）。<br>**pending 锚归属首个落锚的面板**；在 pending 非空时点到另一个面板 → 按 **D31** `cancel()` 丢弃 pending（面板实际改变）。<br>**必须退役 `TrainingEngine.toggleDrawingExclusive(on:)` 的按面板互斥模型**（`:1078`：激活一个面板会 `cancelDrawingAllPanels()`）——它与「一个顶栏钮 + 两面板都能画」不相容。<br>**测试要求**：从新顶栏钮进入画线模式后，**在上面板画一条、在下面板画一条**，两条都成功提交且各自带**所在面板当时的 period**；底栏全程保持展开。 | codex spec-R16-medium（**已核实为真**）。`toggleDrawingExclusive(on: panel)` 今天是**按面板互斥**的：激活一个面板会取消另一个。它服务的是旧的浮动钮模型（钮属于 activePanel）。<br>1a-ii 只有**一个**顶栏「画图」钮，而母 spec §2 明确「上下两面板都能画」。二者今天对不上：实现者要么只激活 `activePanel`（点另一面板毫无反应），要么两个面板都激活（pending 锚该归谁、pan 手势该听谁的，全是含糊的）。<br>「全局会话 + 落锚时取被点击面板的 panel/period」是唯一与 §2 / §10 / D31 同时自洽的模型：D31 已经规定「pending 非空时落锚面板实际改变 → cancel」，正好覆盖跨面板落锚的歧义。 |
 
 ### 1.1 D28 举证：P1b 每个形状如何落进现有 1.11 契约
 
@@ -182,10 +184,16 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
    - 训练 / replay 从此**只有**新的「画图」钮 + 两行底栏这一个画线入口；复盘仍是浮动钮（P5 再换）。
    - 不这样做会 ship 出两个入口，老入口绕过设置面板语义、并保留「画一条就退出」的旧行为。
 
-2c. **画线状态单一真相（D39，先决）**
-   - `activeDrawingTool: DrawingToolType?` 移到 **`TrainingEngine` 或共享画线 view-model**，底栏与 `ChartContainerView.Coordinator` **共同消费**。
+2c. **画线共享状态容器（D39 / D41，先决）**
+   - 建立底栏与 `ChartContainerView.Coordinator` **共同消费**的共享容器（落 `TrainingEngine` 或共享画线 view-model），本期含 `drawingModeActive: Bool` + `activeDrawingTool: DrawingToolType?`；`selectedDrawingID` 在 1b-i 加入同一容器。
    - **删除** `ChartContainerView.swift:107` 的自动 re-arm（`if manager.activeTool == nil { manager.toggle(.horizontal) }`）；`sync()` 改为**单向从真相同步到 manager**，`DrawingToolManager` 退化为纯 pending-anchor 暂存。
    - 本期虽然还没有选择态（图标恒亮），但**状态归属必须先搬家**——否则 1b-i 的 toggle 会被每一次 `updateUIView` 撤销。
+
+2e. **画线会话是全局的（D42）**
+   - 顶栏「画图」钮切换**全局** `drawingModeActive`，不属于任何单一面板。
+   - **落锚时由被点击的那个面板**提供 `panel` 与 `period`；上下两面板都能画（母 spec §2 / §10）。
+   - pending 锚归属首个落锚的面板；pending 非空时点到另一面板 → 按 D31 `cancel()`（面板实际改变）。
+   - **退役 `TrainingEngine.toggleDrawingExclusive(on:)` 的按面板互斥模型**（`:1078` 会 `cancelDrawingAllPanels()`）——它服务的是旧浮动钮（钮属于 activePanel），与「一个顶栏钮 + 两面板都能画」不相容。
 
 2d. **连续画线（D38 连带修正，现存代码必须改）**
    - `DrawingToolManager.commit()` 现会把 `activeTool` 置 nil；`ChartContainerView` 随后调 `engine.commitDrawing(panel:)` **退出画线模式** —— 即今天「画一条就退出」。
@@ -212,6 +220,8 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 1. **复盘模式下新两行底栏不存在**；`DrawingToolFloatingView` 仍存在且行为不变（D26 / 母 spec D19）。
 1b. **训练 / replay 不再有浮动钮（D26，防双入口）**：`engine.flow.mode` 为 normal / replay 时，视图树里**不含 `DrawingToolFloatingView`**，且其 legacy 提交路径不可达。
 1c. **D39 状态单一真相**：连续触发多次 `updateUIView` / `sync()` 后，`activeDrawingTool` **不被自动改写**（本期恒亮，故断言它不被置 nil 也不被重复 toggle）；`ChartContainerView` 里**不存在** `manager.toggle(.horizontal)` 这类 re-arm 调用。
+1d. **D42 双面板可画**：从顶栏「画图」钮进入画线模式后，**在上面板画一条、在下面板画一条**，两条都成功提交，且各自的 `DrawingObject.period` 等于**所在面板当时显示的周期**；底栏全程保持展开。
+1e. **D42 跨面板 pending 取消**：上面板落一个 pending 锚（人造多锚工具场景）后点到下面板 → pending 被 `cancel()`（D31 面板实际改变）。
 2. **类型行只含 1 个图标**（水平线）；不渲染任何其它 `DrawingToolType` 图标（母 spec D22）。
 3. **下行只含 ①类型键**；②锁定 / ③删除 / ④撤销 / ⑤前进 **不在视图树里**（D24 / D19，不 ship 未接线控件）。
 4. **退出画线模式后**，单击图表不落锚。
@@ -233,6 +243,7 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 | 3 | 看下行 | **只有「类型」一个键**，没有别的灰按钮 | |
 | 4 | 在 K 线主图区点一下 | 落下一条水平线 | |
 | 4b | 接着再点两下不同位置 | **又落下两条线**（连续画，不用每次重新点工具） | |
+| 4c | **在下半面板**点一下 | 下半面板也落下一条线（两个面板都能画），底栏没有收起 | |
 | 5 | 在成交量 / MACD 副图区点一下 | **不落线** | |
 | 6 | 长按类型行的水平线图标 | 类型行上方弹出设置卡片，含 线型子类 / 线样式 / 粗细 / 颜色 / 标注 五组 | |
 | 7 | 看卡片里的「线段」和「标注-显示」 | 两者是灰的、点不动，且**卡片上没有任何解释文字** | |
@@ -317,7 +328,12 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
    - 没有这一分态，「命中优先于落锚」会让用户**永远画不出重合的第二条线**（codex R13-medium）。
    - **前置（D39，1a-ii 已搬家）**：`activeDrawingTool` 是底栏与 Coordinator 共享的单一真相，`ChartContainerView.swift:107` 的自动 re-arm 已删除。**若这条没做，toggle 会被每一次 `updateUIView` 撤销**，用户想选中的那一下会变成又画一条线（codex R15-high）。本期必须有**跨 render / update pass** 的端到端测试。
 
-3. **选中（母 spec §7，去节点；仅选择态）**
+3. **选中状态进共享容器并流进渲染（D41，先决）**
+   - `selectedDrawingID: DrawingID?` + `selectedPanel: PanelId?` 加入 1a-ii 建立的**同一个共享容器**（与 `activeDrawingTool` 同源）。底栏、设置面板、tap 处理**读写同一份**。
+   - `RenderStateBuilder` 把 `selectedDrawingID` 带进 `KLineRenderState`（现在**没有** selected 概念）；`KLineView+Drawing` 的 dispatch 据此对该条走**选中蓝**（`DrawingTool.render` 的 D35 入参加 `isSelected: Bool`，或渲染上下文携带 selected id）。
+   - **端到端测试**：选中一条线 → 强制走一次 `updateUIView` → 渲染出的仍是同一 id 的选中态，且 🗑 / 设置面板作用的**也是同一 id**。
+
+4. **选中（母 spec §7，去节点；仅选择态）**
    - 选择态下单击 → 对**该面板的「可见画线集合」**做 `hitTest`，**逆序遍历、第一个命中即选中**（D33：最上层优先），返回其 `DrawingObject.id`（**不用数组下标**）。
    - **可见集合必须与 `RenderStateBuilder` 完全一致（D40）**：同一判据、同一 `revealTick` 过滤、同一 D29 fail-safe、同一逆序顺序。**抽成共享纯函数**（如 `visibleDrawings(for:panel:engine:tick:)`），渲染与命中都调它，不得各写一遍。否则在 `upper.period == lower.period` 的损坏态下，点击一个面板会选中 / 删除**渲染在另一个面板上**的线。
    - 命中后线渲染为**选中蓝**，底栏 🗑 由灰变亮（D27；🔒 本期不存在）。
@@ -325,21 +341,21 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
    - 选择态下单击**未命中** → **清空选中**（D37）。
    - **复盘门控（D34，不可省）**：`ChartContainerView` 的 tap 路径三模式共用。加入「命中优先于落锚」时**必须以 `engine.flow.mode != .review` 门控 hitTest 分支**，否则复盘会意外获得无层门控的选中能力，可改写已归档记录里的原训练线。复盘的选中 + `(layer, id)` 层权限门控留 P5。
 
-4. **设置面板作用对象消歧**
+5. **设置面板作用对象消歧**
    - **有选中线**（只可能在选择态） → 面板改的是那条线（按 `id` 定位，**原地替换**）。
    - **无选中线** → 改的是「该工具下一条要画的线」的默认值（1a-ii 的行为）。
 
-5. **删除**：点 🗑 → 弹确认 `确定删除划线？[删除][取消]`。（本期没有锁定，故 🗑 只在「无选中」时灰。）
+6. **删除**：点 🗑 → 弹确认 `确定删除划线？[删除][取消]`。（本期没有锁定，故 🗑 只在「无选中」时灰。）
 
-6. **选中态的转移与生命期（D37）**
+7. **选中态的转移与生命期（D37）**
    - **画线态**：单击恒落锚，选中恒为空。
    - **选择态**：命中 → 选中它（替换原选中）；未命中 → 清空选中。
    - **新提交的线不自动选中。**
    - 退出画线模式、从选择态切回画线态、选中线因切周期 / 切面板不可见、选中线被删除 → 均清空选中。
    - 每次清空后 🗑 回到灰态。
 
-7. **D30 内容级 dirty 信号（两处，缺一不可）**
-   > 本期首次引入**原地改线**（第 4 条：改选中线的样式），故 D30 必须与它同期。删除会改数组长度，现有 count 触发本就够用；**改样式不会**。
+8. **D30 内容级 dirty 信号（两处，缺一不可）**
+   > 本期首次引入**原地改线**（第 5 条：改选中线的样式），故 D30 必须与它同期。删除会改数组长度，现有 count 触发本就够用；**改样式不会**。
    - **引擎**：`TrainingEngine` 新增 `public private(set) var drawingsRevision: Int`（单调递增，初值 0）。**每一个**改动 `drawings` 的引擎 API 都必须 `drawingsRevision += 1`：`appendDrawing` / `deleteDrawing(at:)` / 新增的原地替换 API（改样式）。
    - **① 视图触发**：`TrainingView.swift:273` 的 `.onChange(of: engine.drawings.count)` → `.onChange(of: engine.drawingsRevision)`，动作仍是 `lifecycle.autosave(immediate: true)`。
    - **② replay clean-skip 判据**：`TrainingSessionCoordinator.replayBaseline`（`:56`，现为 `(tick, ops, drawings: Int, upper, lower)`）**追加 `drawingsRevision: Int`**；在 `:581`（fresh 会话建基线）与 `:934`（续局建基线）快照 count 的**同一处、同一时刻**一并快照（必须在画线种子注入之后）；`saveProgress` 的 clean-skip 判据（`:607-610`）**追加 `base.drawingsRevision == engine.drawingsRevision`**。
@@ -363,6 +379,7 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 1. **退出画线模式后**单击不选中任何画线、🗑 不可达。
 1b. **D38 分态**：`activeDrawingTool != nil` 时单击 → **落锚、不调用 `hitTest`**（即使点在已有线上）；`== nil` 时单击 → **调用 `hitTest`、不落锚**。
 1b2. **D39 选择态熬过刷新（端到端，不得直接给 manager 赋值）**：熄灭图标进入选择态 → **触发一次完整的 SwiftUI render / update pass**（`updateUIView` → `sync()`）→ `activeDrawingTool` **仍为 nil** → 此时 tap 走 hitTest 而非落锚。
+1b4. **D41 选中态熬过刷新且渲染一致（端到端）**：选中一条线 → 强制走一次 `updateUIView` → 渲染状态里**仍是同一个 `selectedDrawingID`**、该条渲染为选中蓝；随后 🗑 / 设置面板作用的**也是同一 id**。
 1b3. **D40 命中集合 ≡ 渲染集合**：在 `upperPanel.period == lowerPanel.period` 的损坏态下，`panelPosition == 0` 与 `== 1` 各测一次——点击某面板**只能选中 / 删除渲染在该面板上的那条线**，绝不命中另一面板的同周期线。
 1c. **重合线可画（D38，走真实 UI 路径）**：画线态下在**同一价位**连续单击两次 → `engine.drawings` **有两条**几何重合、id 不同的线（**不得靠测试 fixture 直接塞两条**，必须走 tap → commit 路径）。
 2. **选中按 id + 平局规则（D33）**：接 1c 的两条重合线，**切到选择态**后单击该价位，断言选中的是**数组靠后（最上层、后画）那条**的 `id`；随后的改样式 / 删除均作用于该 id，靠前那条**逐字段不变**。
