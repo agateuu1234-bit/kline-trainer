@@ -86,6 +86,31 @@ struct DrawDrawingsDispatchTests {
         #expect(spy.received[0].drawing.id != spy.received[1].drawing.id)   // 顺序/身份不被混淆
         #expect(spy.received.allSatisfy { $0.scheme == .dark })
     }
+
+    @MainActor
+    @Test("标注 render 路径：.left/.right 画出文字像素；.hidden/.segment 无标注泄漏（codex plan-R5）")
+    func labelsRenderOnlyWhenVisible() {
+        func labelPixels(_ mode: LabelMode, sub: LineSubType = .straight) -> Int {
+            let w = 320, h = 200   // 必须匹配 makeMapperFixture 的 mainChartFrame（320×200），否则线/标注落到画布外（codex plan-R6）
+            var data = [UInt8](repeating: 0, count: w * h * 4)
+            let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            let d = DrawingObject(toolType: .horizontal,
+                anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 150)],   // price 落在 fixture priceRange 100…200 内
+                isExtended: false, panelPosition: 0, lineSubType: sub, labelMode: mode)
+            makeViewFixture().drawDrawings(ctx: ctx, mapper: makeMapperFixture(),
+                drawings: [d], period: .m3, scheme: .light, tools: [.horizontal: HorizontalLineTool()])
+            // 每行非透明像素数；最多的行 = 线行（贯穿全宽）。数「距线行 >4」各行的像素 = 标注文字。
+            let rowCounts = (0..<h).map { yy in (0..<w).reduce(0) { $0 + (data[(yy*w + $1)*4 + 3] > 60 ? 1 : 0) } }
+            let lineRow = rowCounts.firstIndex(of: rowCounts.max() ?? 0) ?? 0
+            return rowCounts.enumerated().filter { abs($0.offset - lineRow) > 4 }.map(\.element).reduce(0, +)
+        }
+        #expect(labelPixels(.left) > 0)                    // 左标注真画出
+        #expect(labelPixels(.right) > 0)                   // 右标注真画出
+        #expect(labelPixels(.hidden) == 0)                 // 隐藏无泄漏
+        #expect(labelPixels(.left, sub: .segment) == 0)    // .segment fail-closed → 连线带标注都不画
+    }
 }
 
 // MARK: - Spies / fixtures
