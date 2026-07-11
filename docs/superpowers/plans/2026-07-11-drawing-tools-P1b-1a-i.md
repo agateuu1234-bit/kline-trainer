@@ -287,6 +287,86 @@ func dashPatternsDistinct() {
 }
 ```
 
+**render 输出边界测试（codex plan-R3-medium：纯 helper 不证明 `render` 真的用了它们——实现可能留着 legacy `strokeRGBA`、漏掉 `setLineWidth`/`setLineDash` 仍全绿）。** 画到 bitmap、采样像素，验证 color/thickness/lineStyle 真经 `HorizontalLineTool.render` 生效。加进同一测试文件（`@MainActor @Suite`，`render` 是 @MainActor）：
+
+```swift
+import CoreGraphics
+// 采样 helper：render 到 sRGB premultiplied bitmap，返回展开后的像素（不假设坐标方向——扫列/行找线像素）。
+@MainActor
+static func renderPixels(_ drawing: DrawingObject, scheme: AppColorScheme)
+    -> (data: [UInt8], w: Int, h: Int) {
+    let w = 800, h = 360
+    var data = [UInt8](repeating: 0, count: w * h * 4)
+    let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+        space: CGColorSpace(name: CGColorSpace.sRGB)!,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    HorizontalLineTool().render(ctx: ctx, mapper: Self.mapper(), drawing: drawing, scheme: scheme)
+    return (data, w, h)
+}
+// x=400 列上（线贯穿全宽，此列必有线像素），反 premultiplied 还原颜色；只取 alpha 明显的像素。
+static func litColumn(_ data: [UInt8], w: Int, h: Int, x: Int = 400)
+    -> [(r: CGFloat, g: CGFloat, b: CGFloat)] {
+    var out: [(CGFloat, CGFloat, CGFloat)] = []
+    for yy in 0..<h {
+        let i = (yy * w + x) * 4
+        let a = CGFloat(data[i+3]) / 255
+        guard a > 0.3 else { continue }
+        out.append((CGFloat(data[i])/255/a, CGFloat(data[i+1])/255/a, CGFloat(data[i+2])/255/a))
+    }
+    return out
+}
+
+@Test("render 输出：默认样式画出 legacy 橙（走真实 render，非纯 helper）")
+func renderDefaultIsLegacyOrange() {
+    let def = DrawingObject(toolType: .horizontal,
+        anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)], isExtended: false, panelPosition: 0)
+    let (data, w, h) = Self.renderPixels(def, scheme: .light)
+    let lit = Self.litColumn(data, w: w, h: h)
+    #expect(!lit.isEmpty)   // 线真的画出来了
+    #expect(lit.contains { abs($0.r-0.82)<0.15 && abs($0.g-0.40)<0.15 && $0.b<0.15 })   // 橙
+}
+@Test("render 输出：colorToken=.blue 画蓝（证明 render 消费了 colorToken，没留 legacy strokeRGBA）")
+func renderConsumesColorToken() {
+    let blue = DrawingObject(toolType: .horizontal,
+        anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+        isExtended: false, panelPosition: 0, colorToken: .blue)
+    let (data, w, h) = Self.renderPixels(blue, scheme: .light)
+    #expect(Self.litColumn(data, w: w, h: h).contains { $0.b > $0.r && $0.b > 0.5 })   // 蓝占主导、非橙
+}
+@Test("render 输出：thickness=5 覆盖行数 > thickness=1（证明 render 消费 thickness）")
+func renderConsumesThickness() {
+    func litRows(_ t: Int) -> Int {
+        let d = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+            isExtended: false, panelPosition: 0, thickness: t)
+        let (data, w, h) = Self.renderPixels(d, scheme: .light)
+        return Self.litColumn(data, w: w, h: h).count
+    }
+    #expect(litRows(5) > litRows(1))
+}
+@Test("render 输出：solid 沿线连续、dash1 有间断（证明 render 消费 lineStyle）")
+func renderConsumesLineStyle() {
+    func gaps(_ style: LineStyle) -> Int {
+        let d = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+            isExtended: false, panelPosition: 0, lineStyle: style)
+        let (data, w, h) = Self.renderPixels(d, scheme: .light)
+        // 找线所在行（x=400 列 alpha 最大的行），再沿该行 x∈[100,700] 数「亮→暗」跳变
+        let lineY = (0..<h).max(by: { data[($0*w+400)*4+3] < data[($1*w+400)*4+3] })!
+        var g = 0, prevLit = false
+        for x in 100..<700 {
+            let lit = data[(lineY*w + x)*4 + 3] > 60
+            if prevLit && !lit { g += 1 }
+            prevLit = lit
+        }
+        return g
+    }
+    #expect(gaps(.solid) == 0)     // 实线：中段无间断
+    #expect(gaps(.dash1) >= 1)     // 虚线：有间断
+}
+```
+（**注**：bitmap 坐标方向不影响这些断言——采样一律「扫列/行找线像素」，不假设行号；颜色断言留 0.15 容差吸收抗锯齿边缘混合。）
+
 - [ ] **Step 2: 跑测试确认失败** — Run: `swift test --filter HorizontalLineTool`；Expected: 编译失败（`lineWidth`/`dashPattern` 未定义）。
 
 - [ ] **Step 3: 实现映射 + 让 render 消费**
@@ -510,6 +590,15 @@ struct DrawingLabelLayoutTests {
             lineXRange: (0, 800), textSize: Self.sz, mainChartFrame: Self.frame)!
         #expect(r.maxY <= 100)   // 底边不低于线
     }
+    @Test("射线锚近右缘 + .left/.show：x 被裁不溢出右边界（codex plan-R3）")
+    func leftShowNearRightEdgeClamped() {
+        for mode in [LabelMode.left, .show] {
+            let r = DrawingLabelLayout.labelRect(mode: mode, lineY: 100,
+                lineXRange: (790, 800), textSize: Self.sz, mainChartFrame: Self.frame)!   // 锚 x=790，textW=60
+            #expect(r.maxX <= 800)   // 不越右缘
+            #expect(r.minX >= 0)     // 不越左缘
+        }
+    }
 }
 ```
 
@@ -528,22 +617,23 @@ public enum DrawingLabelLayout {
     public static func labelRect(mode: LabelMode, lineY: CGFloat,
                                  lineXRange: (minX: CGFloat, maxX: CGFloat),
                                  textSize: CGSize, mainChartFrame: CGRect) -> CGRect? {
+        let x: CGFloat
         switch mode {
-        case .hidden:
-            return nil
-        case .show, .left:   // 水平线只支持 隐藏/左/右；.show 无独立语义，归左
-            return placed(x: lineXRange.minX, lineY: lineY, textSize: textSize, mainChartFrame: mainChartFrame)
-        case .right:
-            let x = min(lineXRange.maxX - textSize.width, mainChartFrame.maxX - textSize.width)  // 右缘不溢出
-            return placed(x: x, lineY: lineY, textSize: textSize, mainChartFrame: mainChartFrame)
+        case .hidden:       return nil
+        case .show, .left:  x = lineXRange.minX                    // 锚线左端（水平线只 隐藏/左/右，.show 归左）
+        case .right:        x = lineXRange.maxX - textSize.width   // 锚线右端
         }
+        return placed(x: x, lineY: lineY, textSize: textSize, mainChartFrame: mainChartFrame)
     }
 
-    // 垂直放置：优先线【上方】（不压线）；上方顶到主图上缘放不下时改放线【下方】（仍不压线）。codex plan-medium。
+    // 统一裁剪（codex plan-R3）：x 收进 [minX, maxX-textWidth]——左右都不溢出，含射线锚近右缘时的 .left/.show；
+    // y 优先线【上方】（不压线），上方顶到主图上缘放不下时改放线【下方】（仍不压线）。
     private static func placed(x: CGFloat, lineY: CGFloat, textSize: CGSize, mainChartFrame: CGRect) -> CGRect {
+        let maxX = max(mainChartFrame.minX, mainChartFrame.maxX - textSize.width)
+        let clampedX = min(max(x, mainChartFrame.minX), maxX)
         let above = lineY - gap - textSize.height
         let y = above >= mainChartFrame.minY ? above : lineY + gap   // 上方无空间 → 线下方
-        return CGRect(x: x, y: y, width: textSize.width, height: textSize.height)
+        return CGRect(x: clampedX, y: y, width: textSize.width, height: textSize.height)
     }
 }
 ```
