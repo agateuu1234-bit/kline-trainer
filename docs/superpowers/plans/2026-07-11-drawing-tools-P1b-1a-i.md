@@ -413,7 +413,7 @@ if dash.isEmpty { ctx.setLineDash(phase: 0, lengths: []) } else { ctx.setLineDas
 
 **Interfaces:**
 - Produces：`nonisolated static func lineXRange(for drawing: DrawingObject, mapper: CoordinateMapper) -> (minX: CGFloat, maxX: CGFloat)?`
-  （`.straight` → `(frame.minX, frame.maxX)`；`.ray` → clamp 后 `(max(minX, anchorX), maxX)`，anchorX 在右缘外 → nil；**`.segment` → nil（水平线无线段语义，fail-closed，codex plan-R4-high）**；空锚 → nil。纯函数，host 可测；**`nonisolated`** 理由同 Task 3 Interfaces。）
+  （`.straight` → `(frame.minX, frame.maxX)`；`.ray` → clamp 后 `(max(minX, anchorX), maxX)`，anchorX **≥ 右缘 → nil**（零长度段 fail-closed，codex plan-R7）；**`.segment` → nil（水平线无线段语义，fail-closed，codex plan-R4-high）**；空锚 → nil。纯函数，host 可测；**`nonisolated`** 理由同 Task 3 Interfaces。）
 - Consumes：`mapper.indexToX`（`Geometry.swift:138`）、`mapper.viewport.mainChartFrame`。
 
 - [ ] **Step 1: 写失败测试**（几何 straight/ray + hitTest 方向性 + D43 解码派生）
@@ -447,6 +447,12 @@ func rayOffscreenAnchorNormalized() {
     #expect(HorizontalLineTool.lineXRange(for: offRight, mapper: m) == nil)
     let y = m.priceToY(15)
     #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 400, y: y), mapper: m, drawing: offRight) == false)
+    // 恰在右缘：candleIndex=80 → indexToX=800==maxX → 零长度段，render/hitTest 都 fail-closed（codex plan-R7）
+    let atEdge = DrawingObject(toolType: .horizontal,
+        anchors: [DrawingAnchor(period: .m3, candleIndex: 80, price: 15)],
+        isExtended: false, panelPosition: 0, lineSubType: .ray)
+    #expect(HorizontalLineTool.lineXRange(for: atEdge, mapper: m) == nil)
+    #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 800, y: y), mapper: m, drawing: atEdge) == false)
     // 左缘外：candleIndex=-5 → indexToX=-50 < 0 → clamp minX=0，右缘外点仍在 [0,800] 内可命中
     let offLeft = DrawingObject(toolType: .horizontal,
         anchors: [DrawingAnchor(period: .m3, candleIndex: -5, price: 15)],
@@ -504,7 +510,7 @@ nonisolated static func lineXRange(for drawing: DrawingObject, mapper: Coordinat
         return (frame.minX, frame.maxX)
     case .ray:
         let anchorX = mapper.indexToX(anchor.candleIndex)
-        if anchorX > frame.maxX { return nil }              // 落点已在右缘外 → 射线整段不可见（codex plan-R3-medium）
+        if anchorX >= frame.maxX { return nil }             // 落点在右缘【上或外】→ 零长度/不可见段：画不出却可命中，fail-closed（codex plan-R3+R7）
         return (max(frame.minX, anchorX), frame.maxX)       // 落点在左缘外 → clamp 到 minX，保 render/hitTest 区间一致
     case .segment:
         // 水平线无线段语义（母 spec §5.1）。.segment 是已持久化枚举值，损坏/未来版本数据可解码出它——
