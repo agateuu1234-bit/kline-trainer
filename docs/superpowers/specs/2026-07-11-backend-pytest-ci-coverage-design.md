@@ -28,7 +28,7 @@
 
 ## 关键事实（均实测）
 
-1. **套件不需要重依赖**：`asyncpg` / `apscheduler` **无任何被测模块顶层 import**；`uvicorn` 只出现在一句注释；`pandas_ta` **后端代码零引用**。只装 8 个直接依赖的 venv，`pytest --collect-only` 收齐 **170 tests collected**、`pytest -q` 得 **170 passed**。
+1. **套件依赖面（已实测厘清）**：`asyncpg` **无任何被测模块顶层 import**、`uvicorn` 只出现在一句注释、`pandas_ta` **后端代码零引用** → 三者排除。但 `apscheduler` **被 `test_scheduler.py` 4 处 `importorskip`**，缺它这 4 个用例静默 skip（`166 passed + 4 skipped`）→ **必须纳入**。装 9 个直接依赖的全新 venv：`170 passed, 0 skipped`（`--collect-only` 恒收 170，skip 只在运行期发生，故验证口径必须含「0 skipped」而非只看 passed 数）。
 2. **`pandas-ta` 是安装陷阱**：`requirements.txt` 里的 `pandas-ta==0.3.14b1` 用了已被删除的 `numpy.NaN`，在现代 numpy 上安装/导入即失败——且它对测试毫无用处。故 CI 依赖清单**刻意排除**它。
 3. **`sys.path` 机制（已实测厘清）**：测试靠 `from app.main import app` / `from qmt_normalize import ...` 这类顶层导入（模块住在 `backend/`）。存在 `backend/tests/__init__.py`（tests 是包），pytest 的 `prepend` 导入模式向上找到最顶层非包目录 = `backend/`，将其注入 `sys.path`。**该机制与 CWD、与裸 `pytest`/`python -m pytest` 均无关**——实测四种组合（仓库根 / `backend/` × 裸 / `python -m`）都 `170 passed`。故 `working-directory: backend` **非** import 硬性所需，仅为本地开发习惯 + 让 `requirements-test.txt` 路径就近；CI 采用 **`python -m pytest`** 是取其「保证 CWD 入 `sys.path`」的稳健标准形，非因裸 `pytest` 会失败。
 4. **根 `pytest.ini`**：仓库根有被 git 跟踪的 `pytest.ini`（`testpaths=tests` + `python_files/classes/functions` 收集规则），pytest 认它为 `configfile`、rootdir=仓库根。改动它可影响后端测试的收集/执行，故必须纳入 workflow 的 `paths:` 触发集（否则改 `pytest.ini` 的 PR 不会触发后端测试 = 静默覆盖缺口。codex plan review R1 medium finding）。
@@ -46,6 +46,7 @@ pglast==7.13
 openapi-spec-validator==0.7.2
 pyyaml==6.0.3
 fastapi==0.115.12
+apscheduler==3.10.4
 pandas==2.2.3
 numpy==2.4.6
 ```
@@ -53,10 +54,11 @@ numpy==2.4.6
 - `httpx`：`fastapi.testclient.TestClient` 需要（`test_health` / `test_routes`）。
 - `fastapi`：拉起 `starlette` + `anyio`（传递依赖，pip 自动解析）。
 - `pglast` / `openapi-spec-validator` / `pyyaml`：来自 `requirements-dev.txt` 的既有测试依赖。
-- `fastapi` / `pandas` / `numpy`：来自 `requirements.txt` 的生产依赖里测试真正 import 的三个。
-- **排除**：`pandas-ta`（陷阱，零引用）、`uvicorn`（仅注释）、`asyncpg` / `apscheduler`（测试不 import）。
+- `fastapi` / `pandas` / `numpy`：来自 `requirements.txt` 的生产依赖里测试真正 import 的。
+- **`apscheduler`（实测必需）**：`test_scheduler.py` 有 4 处 `pytest.importorskip("apscheduler")`，缺它这 4 个用例静默 skip → `166 passed + 4 skipped` 而非 `170 passed`。缺它 = 覆盖缺口，故纳入。
+- **排除**：`pandas-ta`（陷阱，零引用）、`uvicorn`（仅注释）、`asyncpg`（无测试顶层或 importorskip 依赖它；补 apscheduler 后 `from app.scheduler import build_scheduler` 无需 asyncpg 即成功）。
 
-**已知取舍**：这是独立于 `requirements.txt` 的第三个依赖文件，存在漂移风险——未来若某个测试真的 import 了 `asyncpg`，CI 会报 `ImportError` 当场变红（**可见失败，非静默失效**），届时补进本文件即可。选它是因为装 `requirements.txt` 会撞上 `pandas-ta` 陷阱。
+**已知取舍**：这是独立于 `requirements.txt` 的第三个依赖文件，存在漂移风险——未来若某个测试真的 import 了 `asyncpg`，CI 会报 `ImportError` 当场变红（**可见失败，非静默失效**），届时补进本文件即可。选它是因为装 `requirements.txt` 会撞上 `pandas-ta` 陷阱。**验证口径升级**：不止「170 passed」，还须 **0 skipped**（否则可能又漏了某个 importorskip 依赖）。
 
 ### 文件 2：`.github/workflows/backend-tests.yml`（新增）
 

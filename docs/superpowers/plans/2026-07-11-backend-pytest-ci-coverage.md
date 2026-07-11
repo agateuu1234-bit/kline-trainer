@@ -13,7 +13,7 @@
 - **Python 版本 = 3.11**（对齐现有 `openapi-smoke.yml` / CI；宿主 `python3.11` = `/opt/homebrew/bin/python3.11` = 3.11.15）。
 - **`sys.path` 机制（已实测）**：`backend/tests/__init__.py` 使 tests 成包，pytest `prepend` 导入模式向上找到最顶层非包目录 `backend/` 并注入 `sys.path`，故 `from app.main import app` / `from qmt_normalize import ...` 可解析——**与 CWD、与裸/`python -m` 无关**（四组合均 170 passed）。CI 用 `working-directory: backend` + `python -m pytest` 是习惯 + 稳健标准形，非 import 硬性所需；勿在文档或注释中声称「裸 pytest 会 collection error」（假论断，codex R1 排查时厘清）。
 - **根 `pytest.ini` 纳入 paths**：仓库根有跟踪的 `pytest.ini`（pytest 认它为 configfile），改它可影响后端测试收集 → workflow `paths:` 必须含 `pytest.ini`（codex plan R1 medium finding）。
-- **依赖清单刻意排除** `pandas-ta`（后端零引用，`0.3.14b1` 用了已删除的 `numpy.NaN`，新 numpy 上装/导入即失败）、`uvicorn`（仅注释）、`asyncpg`/`apscheduler`（测试不 import）。
+- **依赖清单排除/纳入（已实测）**：排除 `pandas-ta`（后端零引用，`0.3.14b1` 用了已删除的 `numpy.NaN`，新 numpy 上装/导入即失败）、`uvicorn`（仅注释）、`asyncpg`（无测试顶层或 importorskip 依赖它；`app.scheduler` 不顶层 import 它）。**纳入 `apscheduler==3.10.4`**：`test_scheduler.py` 有 4 处 `pytest.importorskip("apscheduler")`，缺它会静默 skip（166 passed + 4 skipped，非 170）——这正是本工作要消灭的覆盖缺口。
 - **trust-boundary 硬化约定**：`permissions: contents: read`；action 钉完整 SHA — checkout=`11bd71901bbe5b1630ceea73d27597364c9af683`、setup-python=`0b93645e9fea7318ecaed2b359559ac225c90a2b`（复制自现有 workflow，勿改）。
 - **不设必需检查**：本 PR 只新增 workflow，不动 GitHub ruleset。
 - **提交纪律**：只 `git add` 本任务明确列出的文件，绝不 `git add -A`（未跟踪的 `docs/superpowers/mockups/2026-06-29-topbar-distribution.html` 必须保持未跟踪）。
@@ -53,6 +53,7 @@ pglast==7.13
 openapi-spec-validator==0.7.2
 pyyaml==6.0.3
 fastapi==0.115.12
+apscheduler==3.10.4
 pandas==2.2.3
 numpy==2.4.6
 ```
@@ -63,9 +64,9 @@ Run:
 ```bash
 SP=/private/tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/80380c0f-edac-4f2a-885d-6487d15b36a8/scratchpad
 "$SP/rt-venv/bin/pip" install -r "/Users/maziming/Coding/Prj_Kline trainer/backend/requirements-test.txt" 2>&1 | tail -3
-cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && "$SP/rt-venv/bin/python" -m pytest tests/ -q 2>&1 | tail -5
+cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && "$SP/rt-venv/bin/python" -m pytest tests/ -rs -q 2>&1 | tail -6
 ```
-Expected: `170 passed`（无 error、无 skip 掩盖的 collection 失败）。若任何测试因缺依赖 `ImportError`，把缺的包按精确版本补进清单并重跑，直至 170 passed。
+Expected: **`170 passed`，且 `0 skipped`**（`-rs` 会列出任何 skip）。若出现 `N skipped`，说明清单漏了某个 `importorskip` 依赖（如 apscheduler），按 skip 原因把缺的包按精确版本补进清单并重建 venv 重跑，直至 `170 passed, 0 skipped`；若 `ImportError` 同理补齐。
 
 - [ ] **Step 4: 提交**
 
