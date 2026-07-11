@@ -70,6 +70,7 @@ on:
     paths:
       - 'backend/**'
       - 'pytest.ini'
+      - 'tests/contract-fixtures/**'
       - '.github/workflows/backend-tests.yml'
   push:
     branches: [main]
@@ -96,7 +97,7 @@ jobs:
           python -m pytest tests/ -q -rs --junitxml="${RUNNER_TEMP:-/tmp}/pytest-report.xml"
           python - <<'PY'
           import os, sys, xml.etree.ElementTree as ET
-          path = os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "pytest-report.xml")
+          path = os.path.join(os.environ.get("RUNNER_TEMP") or "/tmp", "pytest-report.xml")
           root = ET.parse(path).getroot()
           skipped = sum(int(s.get("skipped", 0)) for s in root.iter("testsuite"))
           if skipped:
@@ -109,9 +110,9 @@ jobs:
 对齐仓库 trust-boundary 硬化约定：
 - `permissions: contents: read`（最小权限，无写作用域）。
 - 所有 action 钉到**完整 SHA**（与 `schema-smoke.yml` / `openapi-smoke.yml` 一致；实施时复制它们已用的 SHA）。
-- `paths:` 只触发后端相关改动——因为**不设必需检查**，路径过滤是纯收益（省 iOS-only PR 的 CI 时间），恰好避开「路径过滤 + 被设必需 = 永久阻塞」那个既有坑。
-- `push: branches: [main]` 无路径过滤，保证 main 每次推都全量跑。
-- **skip 守卫（codex branch review medium finding）**：裸 `pytest -q` 对 skip 仍返回 0 → 若 `requirements-test.txt` 漂移丢了 `apscheduler` 之类 `importorskip` 依赖，CI 会绿着 skip 掉正是本工作要保护的 scheduler 覆盖。故解析 junit XML，`skipped>0` 即 fail。双向 mutation 实证：全依赖→`OK: 0 skipped (passed=170)` 退 0；卸 apscheduler→`FAIL: 4 skipped` 退 1。
+- `paths:` 只触发后端相关改动——因为**不设必需检查**，路径过滤是纯收益（省 iOS-only PR 的 CI 时间），恰好避开「路径过滤 + 被设必需 = 永久阻塞」那个既有坑。**paths 完整性**：须含所有能影响后端测试的路径——`backend/**` + 根 `pytest.ini`（configfile）+ **`tests/contract-fixtures/**`**（repo-root，`test_openapi.py` 经 `Path(__file__).parent.parent.parent/"tests"/"contract-fixtures"` 读它做契约校验；opus branch review medium finding）。
+- `push: branches: [main]` 无路径过滤，保证 main 每次推都全量跑（也是 paths 漏项的 post-merge 兜底）。
+- **skip 守卫（codex branch review medium finding）**：裸 `pytest -q` 对 skip 仍返回 0 → 若 `requirements-test.txt` 漂移丢了 `apscheduler` 之类 `importorskip` 依赖，CI 会绿着 skip 掉正是本工作要保护的 scheduler 覆盖。故解析 junit XML，`skipped>0` 即 fail。双向 mutation 实证：全依赖→`OK: 0 skipped (passed=170)` 退 0；卸 apscheduler→`FAIL: 4 skipped` 退 1。**已知取舍**：此守卫把「任何 skip」都当失败（今仅 4 处 importorskip、无无条件 skip）；将来若引入合法 `@pytest.mark.skip`/`xfail`，须在守卫里对其 allowlist（opus review low finding，非当前 bug）。`RUNNER_TEMP` fallback 用 `os.environ.get("RUNNER_TEMP") or "/tmp"` 与 shell `${RUNNER_TEMP:-/tmp}` 同语义（空串也回落 /tmp）。
 
 ## 验证
 

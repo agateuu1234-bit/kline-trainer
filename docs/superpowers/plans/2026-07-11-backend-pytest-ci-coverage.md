@@ -12,7 +12,7 @@
 
 - **Python 版本 = 3.11**（对齐现有 `openapi-smoke.yml` / CI；宿主 `python3.11` = `/opt/homebrew/bin/python3.11` = 3.11.15）。
 - **`sys.path` 机制（已实测）**：`backend/tests/__init__.py` 使 tests 成包，pytest `prepend` 导入模式向上找到最顶层非包目录 `backend/` 并注入 `sys.path`，故 `from app.main import app` / `from qmt_normalize import ...` 可解析——**与 CWD、与裸/`python -m` 无关**（四组合均 170 passed）。CI 用 `working-directory: backend` + `python -m pytest` 是习惯 + 稳健标准形，非 import 硬性所需；勿在文档或注释中声称「裸 pytest 会 collection error」（假论断，codex R1 排查时厘清）。
-- **根 `pytest.ini` 纳入 paths**：仓库根有跟踪的 `pytest.ini`（pytest 认它为 configfile），改它可影响后端测试收集 → workflow `paths:` 必须含 `pytest.ini`（codex plan R1 medium finding）。
+- **paths 完整性**：workflow `paths:` 须含所有能影响后端测试的路径 = `backend/**` + 根 `pytest.ini`（configfile，codex plan R1 medium）+ `tests/contract-fixtures/**`（repo-root，`test_openapi.py` 读它做契约校验，opus branch review medium）。漏任一路径 = 改它的 PR 不触发后端测试 = 静默覆盖缺口。
 - **依赖清单排除/纳入（已实测）**：排除 `pandas-ta`（后端零引用，`0.3.14b1` 用了已删除的 `numpy.NaN`，新 numpy 上装/导入即失败）、`uvicorn`（仅注释）、`asyncpg`（无测试顶层或 importorskip 依赖它；`app.scheduler` 不顶层 import 它）。**纳入 `apscheduler==3.10.4`**：`test_scheduler.py` 有 4 处 `pytest.importorskip("apscheduler")`，缺它会静默 skip（166 passed + 4 skipped，非 170）——这正是本工作要消灭的覆盖缺口。
 - **trust-boundary 硬化约定**：`permissions: contents: read`；action 钉完整 SHA — checkout=`11bd71901bbe5b1630ceea73d27597364c9af683`、setup-python=`0b93645e9fea7318ecaed2b359559ac225c90a2b`（复制自现有 workflow，勿改）。
 - **不设必需检查**：本 PR 只新增 workflow，不动 GitHub ruleset。
@@ -103,6 +103,7 @@ on:
     paths:
       - 'backend/**'
       - 'pytest.ini'
+      - 'tests/contract-fixtures/**'
       - '.github/workflows/backend-tests.yml'
   push:
     branches: [main]
@@ -136,7 +137,7 @@ jobs:
           python -m pytest tests/ -q -rs --junitxml="${RUNNER_TEMP:-/tmp}/pytest-report.xml"
           python - <<'PY'
           import os, sys, xml.etree.ElementTree as ET
-          path = os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "pytest-report.xml")
+          path = os.path.join(os.environ.get("RUNNER_TEMP") or "/tmp", "pytest-report.xml")
           root = ET.parse(path).getroot()
           skipped = sum(int(s.get("skipped", 0)) for s in root.iter("testsuite"))
           if skipped:
