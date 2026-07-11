@@ -1,0 +1,35 @@
+name: Backend Tests
+
+on:
+  pull_request:
+    paths:
+      - 'backend/**'
+      - 'pytest.ini'
+      - '.github/workflows/backend-tests.yml'
+  push:
+    branches: [main]
+
+# Trust-boundary 硬化（对齐 schema-smoke.yml / openapi-smoke.yml 约定）:
+# - 最小权限：只读仓库内容，无写作用域
+# - actions 钉完整 SHA
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: backend pytest (full suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Setup Python 3.11
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+        with:
+          python-version: '3.11'
+      - name: Install test deps
+        working-directory: backend
+        run: python -m pip install -r requirements-test.txt
+      # backend/tests/__init__.py 使 pytest 把 backend/ 注入 sys.path（与 CWD 无关）；
+      # working-directory: backend + python -m pytest 为习惯与稳健标准形
+      - name: Run full backend suite
+        working-directory: backend
+        run: python -m pytest tests/ -q
