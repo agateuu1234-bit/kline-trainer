@@ -6,7 +6,7 @@
 
 **Architecture:** 三步——① 把 `DrawingTool.render/hitTest` 的签名从「只收 anchors」迁移到「收整个 `DrawingObject` + 主题」（D35），让样式能进渲染层；② 让 `HorizontalLineTool` 消费这些样式（颜色解析纯函数 + 线宽 / 线型 / 几何子类）；③ 把 `RenderStateBuilder` 的面板过滤判据改为按 `period`，并加 `upper==lower` fail-safe（D29）。价格标注文字由 dispatch 层（`KLineView+Drawing.swift`，已在 UIKit guard 内）绘制，`DrawingTool` 保持纯 CoreGraphics 跨平台；标注位置计算是 host 可测纯函数。
 
-**Tech Stack:** Swift 6 / CoreGraphics / SwiftUI（`KlineTrainerContracts` SPM 模块）；Swift Testing（`@Test`/`#expect`）；Mac Catalyst `build-for-testing` 门。
+**Tech Stack:** Swift 6 / CoreGraphics / SwiftUI（`KlineTrainerContracts` SPM 模块）；Swift Testing（`@Test`/`#expect`）；本 PR 含 UIKit-guarded 测试，故 Catalyst 门是 **`xcodebuild test`（真执行）** 而非 build-for-testing（见 Global Constraints）。
 
 ## Global Constraints
 

@@ -599,5 +599,5 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 
 - **仅就本 spec 授权的六个 PR（1a-i / 1a-ii / 1a-iii / 1a-iv / 1b-i / 1b-ii）而言**：`CONTRACT_VERSION` 保持 `"1.11"`、无 schema 迁移、`user_version` 保持 `7`（依据：这六个 PR 只写入 `.horizontal`）。
 - **P1c 不在本清单覆盖范围内**。P1c 的 `CONTRACT_VERSION` / 能力位 / 未支持数据策略**尚未决定**，唯一权威出处是 **§8「P1c 的契约地位（未决）」**。本文件任何其他段落都不得被援引为 P1c「不用 bump / 不用迁移」的依据。
-- 每个 PR 的三绿门（作者亲核，clean build）：host `swift test` 全绿 + Mac Catalyst `build-for-testing` SUCCEEDED + iOS build。
+- 每个 PR 的三绿门（作者亲核，clean build）：host `swift test` 全绿 + Mac Catalyst 门 + iOS build 编译通过。**Catalyst 门的强度按该 PR 是否含 `#if canImport(UIKit)` 测试而定（codex plan-R9-high，唯一权威）**：<br>　• PR **含** UIKit-guarded 测试（如 `DrawDrawingsDispatchTests` 那类经 `drawDrawings`/`render` 的渲染断言）→ Catalyst 必须 **`xcodebuild test`（真执行）**——因为 host `swift test` 在 macOS 上 `canImport(UIKit)==false` 会整份跳过，`build-for-testing` 只编译不跑，二者都无法验证 UIKit 渲染路径；<br>　• PR **纯 host 测试**（无 UIKit-guarded）→ Catalyst `build-for-testing`（只需证 macos-15 严格隔离下可编译）即可。<br>　凡渲染路径断言，其**决策逻辑仍必须另有 host 可测纯函数覆盖**（不把 UIKit gate 当唯一防线）。
 - 每个 PR 的流程：plan → codex 对抗 review 收敛 → `superpowers:subagent-driven-development` → 三绿 → `superpowers:requesting-code-review` + whole-branch codex → PR。
