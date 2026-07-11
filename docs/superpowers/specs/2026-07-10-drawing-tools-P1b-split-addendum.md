@@ -32,7 +32,7 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 >
 > - **R12-high**：1b（~600 行）与 P1c（~1400 行）仍超「≤3 子项 / ≤500 行」。1b 沿「有没有**原地改线**」的缝再切：删除会改数组长度（现有 count 触发够用），改样式 / 锁定 / 撤销都是原地改线（必须带 D30）→ **1b-i**（选中 + 删除 + 改选中线样式 + D30）/ **1b-ii**（锁定 + 撤销 / 前进）。**P1c 不在本 spec 拆**（见 §8）。
 >
-> **1a-i 在模拟器里几乎没有可见变化**：默认色映射到现有橙色、线宽不变；**唯一可见的行为改变是修好了「线留在错周期面板」这个既有 bug**。「能设样式」与「能画出样式」是一对，拆开必有一半不可见——这是切分的必然代价，已向用户说明并获决断。
+> **1a-i 在模拟器里几乎没有可见变化**：默认色映射到现有橙色、线宽不变；**唯一为「修 bug」而生的可见变化是修好了「线留在错周期面板」这个既有 bug**；此外老 `isExtended=true` 水平线会按母 spec §4.2 正确显示为射线（D43，有意的语义落地、非回归——App 未上架，无需保护开发期老数据外观）。「能设样式」与「能画出样式」是一对，拆开必有一半不可见——这是切分的必然代价，已向用户说明并获决断。
 
 ---
 
@@ -60,6 +60,7 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 | **D40 命中集合 ≡ 渲染可见集合（含 D29 fail-safe）**（1b-i） | 选中的 `hitTest` **必须消费与 `RenderStateBuilder` 完全相同的「该面板可见画线集合」**——同一个判据、同一个 fail-safe、同一个 `revealTick` 过滤。**必须抽成一个共享的纯函数**（如 `visibleDrawings(for:panel:engine:tick:)`），渲染与命中**都调用它**，不得各写一遍。<br>**顺序契约（codex R20-medium）**：该函数**返回渲染序**（数组靠后 = 后绘制 = 盖在上面）。**渲染原样消费**；**命中方自己 `.reversed()` 遍历**（D33 最上层优先）。**函数本身绝不返回逆序**——否则渲染会把老线画在上面，或让 D33 的「同一逆序顺序」变成假命题。<br>**测试要求**：① 在 `upperPanel.period == lowerPanel.period` 的损坏态下，`panelPosition == 0` 与 `== 1` 各测一次——**点击某个面板只能选中 / 删除渲染在该面板上的那条线**，绝不能命中另一面板的同周期线。② **z-order 一致性**：两条重合线，断言**后画的那条渲染在上面**（dispatch 顺序靠后）**且**正是被选中 / 被编辑的那一条。 | codex spec-R15-medium（**已核实为真**）。D29 为 `upper.period == lower.period` 的损坏 / 版本错位态加了 `panelPosition` fail-safe，保证一条线只**渲染**在一个面板；但 1b-i 原文只说「对该面板当前周期所有可见画线做 hitTest」，**没有要求复用同一判据**。<br>后果：在同周期双面板态下，纯 `period` 的命中判据会让用户点击上面板时**选中并删除一条只渲染在下面板的线**——一条他在这个面板上根本看不见的线。fail-safe 就退化成「只糊在渲染层的补丁」，而编辑操作仍作用在隐藏的重影上。<br>把可见性判据抽成单一纯函数，是让「所见 == 可选」这条不变量**在结构上成立**而非靠两处代码巧合一致。 |
 | **D41 画线共享状态容器（`activeDrawingTool` + `selectedDrawingID` 同源）**（容器落 1a-ii；`selectedDrawingID` 落 1b-i） | D39 引入的单一真相**扩为一个容器**（落 `TrainingEngine` 或共享画线 view-model），至少含：<br>• `drawingModeActive: Bool`（D42）<br>• `activeDrawingTool: DrawingToolType?`（D38 / D39，1a-ii）<br>• `selectedDrawingID: DrawingID?` + `selectedPanel: PanelId?`（1b-i）<br>**选中态是 `(selectedPanel, selectedDrawingID)` 二元组，且二元组整体流进渲染与操作（codex R31-medium）**：`RenderStateBuilder` 只在**渲染 `selectedPanel` 的那个面板**时把 `selectedDrawingID` 带进 `KLineRenderState`；`KLineView+Drawing` 的 dispatch 据此对那一条走**选中蓝**（`DrawingTool.render` 的 D35 入参加 `isSelected: Bool`，或渲染上下文携带 selected id）。**只带 id 不带 panel 会出错**：D29 周期绑定下，一条线会随周期切换从 `selectedPanel` 迁到**另一个面板**——它全局仍可见，id-only 判据会让它在用户没选的那个面板里还是蓝的、还能删 / 改。<br>**清除规则**：只要 `visibleDrawings(for: selectedPanel)` 不再含 `selectedDrawingID` 就**清空选中**——**哪怕同一个 id 此刻正显示在另一个面板**。<br>底栏（`TrainingView`）与 tap 处理（`ChartContainerView.Coordinator`）**读写同一个容器**，任何一方都不得私存一份。<br>**测试要求**：① 选中一条线 → 强制走一次 `updateUIView` → 渲染出的仍是同一 `(panel,id)` 的选中态，🗑 / 设置面板作用的也是同一条；② **迁移清除**：选中一条上面板显示的 60 分线 → 竖滑切周期让 60 分改由**下面板**显示（线从上迁到下、全局仍可见）→ 断言选中被**清空**（不得在下面板续着蓝、不得可删）。 | codex spec-R16-high（**已核实为真**）。`KLineRenderState`（`Render/KLineRenderState.swift`）里**根本没有 selected 概念**；而 1b-i 要求「命中后线渲染为选中蓝 + 🗑 变亮 + 设置面板 / 删除作用于选中线」。<br>tap 处理在 `ChartContainerView.Coordinator`，底栏与设置面板在 `TrainingView` —— 这正是 D39 里让 `activeDrawingTool` 被 `updateUIView` 冲掉的同一条裂缝。选中态若只存在其中一侧，就会出现「图表高亮着 A、底栏 🗑 删掉 B」或「刷新一次选中就没了」。<br>故 `selectedDrawingID` 必须与 `activeDrawingTool` 同源、且**必须进渲染状态**（否则渲染层无从知道哪条要画成蓝色）。 |
 | **D42 画线会话是全局的，锚点归属由「被点击的面板」决定**（1a-ii） | 顶栏「画图」钮切换的是**全局** `drawingModeActive`，**不属于任何单一面板**。<br>**落锚时**由**被点击的那个面板**提供 `panel` 与 `period`（母 spec §2「上下两面板都能画」、§10「归属所画面板当前显示的周期」）。<br>**pending 锚归属首个落锚的面板**；在 pending 非空时点到另一个面板（面板实际改变）→ 按 **D31** **只丢弃 pending 锚**：调 `discardPendingAnchors()`，保留 `activeDrawingTool`。**任何路径都不得调 `DrawingToolManager.cancel()`**（`:76-80` 会连 `activeTool` 一起清掉）。<br>**必须退役 / 重写「每一条」按 activePanel 作用域的画线取消路径**（codex R18-high）：<br>　• `TrainingEngine.toggleDrawingExclusive(on:)`（`:1078`：激活一个面板会 `cancelDrawingAllPanels()`）——它与「一个全局会话 + 两面板都能画」不相容。<br>　• **`TrainingView.swift:234-240` 的 `.onChange(of: activePanel) { … engine.cancelDrawingAllPanels() }`**——用户切一下**下单目标面板**就会把整个画线会话拆掉。<br>**`pendingAnchorPanel` 必须独立于 activePanel（codex R30-medium）**：pending 锚归属的面板在**首个落锚时**记进一个独立字段 `pendingAnchorPanel`，**与 `activePanel`（下单目标面板）无关**。丢弃 pending 锚的唯一触发（本期内）= **下一次落锚 tap 落在 ≠ `pendingAnchorPanel` 的面板**；周期变化触发在 1a-iv。<br>**切 activePanel 时的正确语义**：`drawingModeActive` / `activeDrawingTool` / **pending 锚全部保持不变**——切 activePanel 没有产生新落锚，落锚面板不会因此改变，**绝不能借此丢 pending**。本期对 activePanel observer 的唯一改动就是**退役它顺手调的 `cancelDrawingAllPanels()`**。<br>**测试要求**：① 进入画线模式后在上面板画一条、在下面板画一条，两条都成功提交且各自带**所在面板当时的 period**；② **无 pending 锚时切 activePanel** → 画线模式与 `activeDrawingTool` **仍然存活**；③ **有 pending 锚时切 activePanel（不落新锚）** → pending 锚 **原封保留**、会话不倒（**不得**因切下单目标就丢线）；④ **有 pending 锚时下一次落锚 tap 落在 ≠ `pendingAnchorPanel` 的面板** → 只丢 pending 锚（D31），`activeDrawingTool` 存活。 | codex spec-R16-medium（**已核实为真**）。`toggleDrawingExclusive(on: panel)` 今天是**按面板互斥**的：激活一个面板会取消另一个。它服务的是旧的浮动钮模型（钮属于 activePanel）。<br>新外壳（1a-iii）只有**一个**顶栏「画图」钮，而母 spec §2 明确「上下两面板都能画」。二者今天对不上：实现者要么只激活 `activePanel`（点另一面板毫无反应），要么两个面板都激活（pending 锚该归谁、pan 手势该听谁的，全是含糊的）。<br>「全局会话 + 落锚时取被点击面板的 panel/period」是唯一与 §2 / §10 / D31 同时自洽的模型：D31 已经规定「pending 非空时落锚面板实际改变 → 只丢弃 pending 锚（`discardPendingAnchors()`）」，正好覆盖跨面板落锚的歧义。<br>**codex R18-high 补充（已核实为真）**：只退役 `toggleDrawingExclusive` 不够。`TrainingView.swift:234-240` 的 `.onChange(of: activePanel)` 也会 `cancelDrawingAllPanels()`——该 observer 原本服务的是「切下单目标面板 → 取消未确认下单」（RFC-B），顺手把画线也取消了。全局会话下这会让用户**切一下下单目标就丢掉整个画线会话 / 正在收的锚**。而原测试只要求「在两个面板各画一条」，**不强制发生 activePanel 迁移**，故该回归能过测。 |
+| **D43 老 `isExtended=true` 水平线按母 spec §4.2 显示为射线，不做外观兼容（user 决策 2026-07-11）**（1a-i） | codex spec-R33-high（**已核实为真**）：`style_json IS NULL` 的老行经 `legacyFallback` 派生 `lineSubType = isExtended ? .ray : .straight`（`Models.swift:313`），而今天渲染器（`HorizontalLineTool.render`）一律画**全宽**、忽略 `lineSubType`；历史上每条水平线都 `commit(isExtended: true)`（`ChartContainerView.swift:271`）。1a-i 首次落地 §5.1 射线分支后，这些老横线会从全宽变**向右射线**——与「本 PR 视觉零变化」的断言冲突。<br>**决策**：按母 spec §4.2 新方案执行——**老横线变射线就变，不为开发期老数据做外观兼容、不改 `legacyFallback`**。1a-i 的「视觉零变化」安全网**收窄**为「**用默认样式构造的线**渲染 == 迁移前常量」；legacy `isExtended=true → 射线` 是**有意的语义落地**，不是回归。<br>**回归测试（行为锁定）**：构造 `style_json IS NULL` + `is_extended=1` 的 legacy 行，断言其 `lineSubType` 派生为 `.ray` 且渲染几何为**射线**（自落点向右到主图右缘），而非全宽。 | **user 2026-07-11**：「全部按新方案来，老的不用管——App 还没上架、还在制作中。」所谓「老横线」只是开发期自造的测试数据，无真实用户历史数据要保外观。<br>**范围限定**：本决策只否定「为**开发期老数据**做**外观**兼容」；面向未来上架真实用户的**前向兼容机制**（lossy 字节保真、迁移不丢数据）不受影响，仍保留。 |
 
 ### 1.1 存储形状举证：五个形状都能无损存进现有 1.11 的 `anchors` 列（**仅存储形状，不决定 P1c 渲染兼容 / 版本门**）
 
@@ -127,17 +128,18 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
    - 某周期不在上下任一面板显示 → 其画线暂不渲染，切回再现。
    - **fail-safe（D29，不可省）**：当 `upperPanel.period == lowerPanel.period` 且二者都等于 `drawing.period` 时，**退回用 `panelPosition` 定归属**（0 → 上，1 → 下），保证**一条画线在任何状态下都只渲染在一个面板**。正常状态下两面板周期必不相同（`periodCombos` 五个组合上下皆异），该分支不触发；但 `switchPeriodCombo` 自己的注释已承认「损坏 resume 数据」可让当前组合落在表外，构造器也不拒绝相等周期。
    - 除该 fail-safe 外，`panelPosition` **不参与渲染判据**（仍记当时面板，作兼容 / 派生）。
-   - **这是本 PR 唯一可见的行为改变，且是修复既有缺陷**：今天退出画线模式后即可竖滑切周期，而渲染仍按 `panelPosition` 过滤 → 60 分画的线会留在已切成 15 分的面板上，坐标系已换、位置是错的。D32（1a-iii）依赖本条，反之不然。
+   - **这是本 PR 唯一「为修复缺陷」的可见变化**（另有 legacy `isExtended → 射线` 的有意语义落地，见 D43）：今天退出画线模式后即可竖滑切周期，而渲染仍按 `panelPosition` 过滤 → 60 分画的线会留在已切成 15 分的面板上，坐标系已换、位置是错的。D32（1a-iii）依赖本条，反之不然。
 
 ### 2.2 P1b-1a-i 不做
 
-画线状态搬家 / 全局会话 / 连续画线（1a-ii）；任何 UI（顶栏「画图」钮 / 两行底栏 / 设置面板、退役浮动钮，全在 1a-iii）；手势改动 / 同 period 钩子（1a-iv）；选中 / 编辑（1b-i / 1b-ii）。**除 D29 修复的错周期渲染外，本 PR 不改变任何用户可见行为。**
+画线状态搬家 / 全局会话 / 连续画线（1a-ii）；任何 UI（顶栏「画图」钮 / 两行底栏 / 设置面板、退役浮动钮，全在 1a-iii）；手势改动 / 同 period 钩子（1a-iv）；选中 / 编辑（1b-i / 1b-ii）。**除 D29 修复的错周期渲染、以及老 `isExtended=true` 水平线按母 spec §4.2 显示为射线（D43，有意）外，本 PR 不改变任何用户可见行为。**
 
 ### 2.3 P1b-1a-i 必须存在的负向测试
 
 1. **视觉零变化（昼夜两套主题都要跑，D36）**：用**默认样式**构造的 `DrawingObject`，在**白天主题**与**夜间主题**下渲染出的描边色与线宽**都等于迁移前的常量**（橙色 `(0.82, 0.40, 0.0)`、1.5pt）。
 2. **D35 dispatch 举证**：两条**样式不同**的画线经 dispatch 后，renderer 收到的样式入参**各不相同**（证明样式真的抵达渲染层，未被 dispatch 丢弃或被写死值覆盖）。
 3. **射线 hitTest 方向性**：一条 `.ray` 水平线，落点**右侧**同一 y 上的点**命中**，落点**左侧**同一 y 上的点**不命中**；同几何的 `.straight` 线两侧都命中。
+3b. **legacy `isExtended=true` 渲染为射线（D43 行为锁定，codex R33-high）**：构造一条 `style_json IS NULL` + `is_extended=1` 的 legacy 行 → 断言 `lineSubType` 派生为 `.ray`、渲染几何为**射线**（自落点向右到主图右缘），**不是全宽**。这条把「按母 spec §4.2 新方案、不做外观兼容」这一 user 决策**锁死为可回归的断言**。
 4. **线宽 / 线型映射**：`thickness` 五档各自产出不同 `lineWidth`；`lineStyle` 的 `.solid` 无虚线 pattern、`.dash1…dash4` 四种 pattern 互不相同。
 5. **昼夜色解析（D36，分工明确）**：`.black` / `.white` 在昼 / 夜下解析出**不同** RGBA，且白天的 `.white`、夜间的 `.black` 解析结果**可读**（不等于背景色）；**7 个彩色 token 在昼 / 夜下解析出相同 RGBA**。
 6. **标注位置**：`.left` / `.right` 标签矩形不与线段矩形相交（不压线）；`.right` + 四位整数价时标签右边界 **≤ 主图右缘**。
@@ -147,7 +149,7 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 
 ### 2.4 P1b-1a-i 非程序员验收清单
 
-> 本 PR 的设计目标是**除了修好一个既有 bug 之外看不出变化**。验收方式是"确认什么都没坏 + 那个 bug 修好了"。
+> 本 PR 的设计目标是**除了修好一个既有 bug、以及老横线改按母 spec 显示为射线（D43）之外看不出变化**。验收方式是"确认什么都没坏 + 那个 bug 修好了 + 老横线按新方案显示"。
 
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
@@ -162,6 +164,7 @@ P1a（纯契约 + 持久层，零 UI）已作为 PR #140 独立 merge。**剩余
 | 9 | 在复盘里用浮动钮画线 | 行为跟改造前一样 | |
 | 10 | 顶栏、底栏、图表 | **没有任何新按钮出现** | |
 | 11 | 正常玩几局，反复切周期 | **上下两个面板永远不会同时显示同一条线** | |
+| 12 | 找一条**改造前画的老水平线**（当年画出来是铺满全宽的），进它的记录看 | 现在显示成**向右的射线**（自落点向右到右缘）——这是**有意的**（按母 spec 新方案，老数据不做兼容，D43）；不是 bug | |
 
 ---
 
