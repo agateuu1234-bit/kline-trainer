@@ -18,6 +18,10 @@
 - **D43（user 决策）**：legacy `style_json IS NULL` + `is_extended=1` 的行经 `lineSubType = isExtended ? .ray : .straight` 派生为 `.ray`，渲染为**射线**——**不做外观兼容、不改 `legacyFallback`**。
 - **UIKit-guarded 测试只由 Catalyst `test` 执行（codex plan-R8-high）**：`DrawDrawingsDispatchTests.swift`（Task 1 的样式抵达、Task 5 的标注 bitmap 全在此）包在 `#if canImport(UIKit)` 里——**host `swift test` 在 macOS 上 `canImport(UIKit)` 为 false → 整份跳过**。故凡「经 `drawDrawings`/`render` 的渲染路径」断言，**决策逻辑必须另有 host 可测纯函数覆盖**（`belongsToPanel`/`lineXRange`/`labelRect`/`labelContent` 等），且 Catalyst 那道门必须是 **`xcodebuild test`（真跑）而非 `build-for-testing`（只编译）**。
 - **三绿门（作者亲核，clean build）**：① host `swift test` 全绿（纯函数决策全覆盖）+ ② Mac Catalyst **`xcodebuild test`** 全绿（真执行 UIKit-guarded 的 dispatch/bitmap 测试）+ ③ iOS build 编译通过。**不得**把 build-only 当作渲染验证。
+- **两条验证命令（本 PR 所有 task-level Run 都从这里取，别用 `swift test` 跑 UIKit 测试）**：
+  - host（非 UIKit）：`swift test --filter <Suite>`——只覆盖 `DrawingColorResolver` / `HorizontalLineTool` / `DrawingLabelLayout` / `RenderStateBuilder` 这些 host 可跑的纯函数/几何测试。
+  - Catalyst（UIKit）：`xcodebuild test -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' -only-testing:KlineTrainerContractsTests/DrawDrawingsDispatchTests`——**唯一**能真跑 `DrawDrawingsDispatchTests`（Task 1 样式抵达 + Task 5 标注 bitmap）的命令。
+  - **注**：CI 的 `catalyst-build.yml` 现为 `build-for-testing`（只编译）。把它升级为 `test`（真跑）是独立 infra 工作，不在本 PR 范围；本 PR 的 Catalyst `test` 由**作者亲核本地执行**。
 
 ---
 
@@ -82,7 +86,7 @@ func drawDrawingsPassesEachDrawingDistinctly() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败** — Run: `swift test --filter DrawDrawingsDispatch`；Expected: 编译失败（旧签名/新参数不匹配）。
+- [ ] **Step 2: 跑测试确认失败** — `DrawDrawingsDispatchTests` 在 `#if canImport(UIKit)` 内，host `swift test` **不编译它**（macOS `canImport(UIKit)==false`），故用 Catalyst：`xcodebuild test -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' -only-testing:KlineTrainerContractsTests/DrawDrawingsDispatchTests`；Expected: 编译失败（旧签名/新参数不匹配）。**不要**用 `swift test --filter DrawDrawingsDispatch`——它会跑 0 个测试、假绿。
 
 - [ ] **Step 3: 改 protocol 签名**
 
@@ -145,7 +149,7 @@ public func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingOb
 
 - [ ] **Step 7: 改其余 3 个测试替身 + 直调点** — `FakeDrawingTool`（`DrawingProtocolTests.swift`）、`SignatureGuardTool`（`SpecLiteralGuardTests.swift`）改签名；`HorizontalLineToolTests.swift` 的 `.render(...)`/`.hitTest(...)` 直调改为传 `drawing:` + `scheme:`（构造 `DrawingObject(toolType:.horizontal, anchors:[...], isExtended:false, panelPosition:0)` 传入）。
 
-- [ ] **Step 8: 跑测试确认通过** — Run: `swift test --filter Drawing`；Expected: 全绿（含 Step 1 的样式抵达断言）。
+- [ ] **Step 8: 跑测试确认通过** — 两条都要（host 不覆盖 UIKit 测试）：① host `swift test --filter "DrawingProtocol|SpecLiteralGuard|HorizontalLineTool"`（非 UIKit：签名迁移编译 + 协议/守卫断言）；② Catalyst `xcodebuild test -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' -only-testing:KlineTrainerContractsTests/DrawDrawingsDispatchTests`（样式抵达断言真跑）；Expected: 两条都全绿。
 
 - [ ] **Step 9: Commit**
 ```bash
@@ -749,7 +753,7 @@ func labelsRenderOnlyWhenVisible() {
 }
 ```
 
-- [ ] **Step 6: 跑测试确认通过** — Run: `swift test --filter "DrawingLabelLayout|Drawing"`；Expected: PASS（含 Step 5 的 render 路径断言）。iOS build 验证文字真的画出。
+- [ ] **Step 6: 跑测试确认通过** — 两条都要：① host `swift test --filter DrawingLabelLayout`（`labelRect` 几何 + `labelContent` 决策全覆盖）；② Catalyst `xcodebuild test -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' -only-testing:KlineTrainerContractsTests/DrawDrawingsDispatchTests`（真跑 Step 5 的标注 bitmap 断言）；Expected: 两条都 PASS。
 - [ ] **Step 7: Commit** — `feat(drawing): 价格标注 labelMode 隐藏/左/右 + 防溢出/不压线 + render 路径测试（1a-i Task5，标注在 dispatch 层）`
 
 ---
