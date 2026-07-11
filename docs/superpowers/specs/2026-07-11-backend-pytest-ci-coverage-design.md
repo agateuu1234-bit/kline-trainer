@@ -90,9 +90,20 @@ jobs:
       - name: Install test deps
         working-directory: backend
         run: python -m pip install -r requirements-test.txt
-      - name: Run full backend suite
+      - name: Run full backend suite (fail on any skip)
         working-directory: backend
-        run: python -m pytest tests/ -q
+        run: |
+          python -m pytest tests/ -q -rs --junitxml="${RUNNER_TEMP:-/tmp}/pytest-report.xml"
+          python - <<'PY'
+          import os, sys, xml.etree.ElementTree as ET
+          path = os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "pytest-report.xml")
+          root = ET.parse(path).getroot()
+          skipped = sum(int(s.get("skipped", 0)) for s in root.iter("testsuite"))
+          if skipped:
+              print(f"FAIL: {skipped} skipped test(s) — requirements-test.txt 漂移/覆盖缺口，CI 拒绝静默 skip")
+              sys.exit(1)
+          print("OK: 0 skipped")
+          PY
 ```
 
 对齐仓库 trust-boundary 硬化约定：
@@ -100,6 +111,7 @@ jobs:
 - 所有 action 钉到**完整 SHA**（与 `schema-smoke.yml` / `openapi-smoke.yml` 一致；实施时复制它们已用的 SHA）。
 - `paths:` 只触发后端相关改动——因为**不设必需检查**，路径过滤是纯收益（省 iOS-only PR 的 CI 时间），恰好避开「路径过滤 + 被设必需 = 永久阻塞」那个既有坑。
 - `push: branches: [main]` 无路径过滤，保证 main 每次推都全量跑。
+- **skip 守卫（codex branch review medium finding）**：裸 `pytest -q` 对 skip 仍返回 0 → 若 `requirements-test.txt` 漂移丢了 `apscheduler` 之类 `importorskip` 依赖，CI 会绿着 skip 掉正是本工作要保护的 scheduler 覆盖。故解析 junit XML，`skipped>0` 即 fail。双向 mutation 实证：全依赖→`OK: 0 skipped (passed=170)` 退 0；卸 apscheduler→`FAIL: 4 skipped` 退 1。
 
 ## 验证
 

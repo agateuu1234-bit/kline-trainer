@@ -127,34 +127,57 @@ jobs:
         working-directory: backend
         run: python -m pip install -r requirements-test.txt
       # backend/tests/__init__.py 使 pytest 把 backend/ 注入 sys.path（与 CWD 无关）；
-      # working-directory: backend + python -m pytest 为习惯与稳健标准形
-      - name: Run full backend suite
+      # working-directory: backend + python -m pytest 为习惯与稳健标准形。
+      # skip 守卫（codex branch review medium）：本仓有 importorskip("apscheduler")，
+      # 依赖漂移时裸 pytest 会绿着 skip = 静默覆盖缺口，故 skipped>0 即 fail。
+      - name: Run full backend suite (fail on any skip)
         working-directory: backend
-        run: python -m pytest tests/ -q
+        run: |
+          python -m pytest tests/ -q -rs --junitxml="${RUNNER_TEMP:-/tmp}/pytest-report.xml"
+          python - <<'PY'
+          import os, sys, xml.etree.ElementTree as ET
+          path = os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "pytest-report.xml")
+          root = ET.parse(path).getroot()
+          skipped = sum(int(s.get("skipped", 0)) for s in root.iter("testsuite"))
+          if skipped:
+              print(f"FAIL: {skipped} skipped test(s) — requirements-test.txt 漂移/覆盖缺口，CI 拒绝静默 skip")
+              sys.exit(1)
+          print("OK: 0 skipped")
+          PY
 ```
 
 - [ ] **Step 2: 校验 YAML 语法正确、结构符合预期**
 
-Run:
-```bash
-cd "/Users/maziming/Coding/Prj_Kline trainer"
-/opt/homebrew/bin/python3.11 -c "import yaml,sys; d=yaml.safe_load(open('.github/workflows/backend-tests.yml')); \
-assert d['jobs']['pytest']['steps'][2]['working-directory']=='backend'; \
-assert d['jobs']['pytest']['steps'][3]['working-directory']=='backend'; \
-assert 'python -m pytest' in d['jobs']['pytest']['steps'][3]['run']; \
-assert d['permissions']['contents']=='read'; \
-print('YAML OK: working-directory + python -m pytest + least-privilege 均就位')"
-```
-Expected: `YAML OK: ...`（任何 assert 失败即 workflow 写错，修正后重跑）。
+> `.github/workflows/**` 对 Claude/subagent 的 Write/Edit 被 deny 硬拦（trust-boundary）。落地走 ceremony：内容写 `/tmp`（scratchpad），user 在输入框 `!cp <scratchpad>/backend-tests.yml .github/workflows/backend-tests.yml`。
 
-- [ ] **Step 3: 本地模拟 CI 的确切命令，确认可跑绿**
-
-复用 Task 1 已装好的 `rt-venv` 模拟 CI 的 install+run 两步（这两步与 workflow 的 `run:` 逐字一致）：
+Run（用装了 pyyaml 的 rt-venv 跑断言，宿主 python3.11 无 yaml）：
 ```bash
 SP=/private/tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/80380c0f-edac-4f2a-885d-6487d15b36a8/scratchpad
-cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && "$SP/rt-venv/bin/python" -m pytest tests/ -q 2>&1 | tail -3
+cd "/Users/maziming/Coding/Prj_Kline trainer" && "$SP/rt-venv/bin/python" -c "
+import yaml
+d=yaml.safe_load(open('.github/workflows/backend-tests.yml'))
+s=d['jobs']['pytest']['steps']
+assert s[2]['working-directory']=='backend'
+assert s[3]['working-directory']=='backend'
+assert 'python -m pytest' in s[3]['run']
+assert 'skipped' in s[3]['run']  # skip 守卫在
+assert d['permissions']['contents']=='read'
+assert 'pytest.ini' in d[True]['pull_request']['paths']  # 'on'→True
+print('YAML OK')"
 ```
-Expected: `170 passed`。
+Expected: `YAML OK`（任何 assert 失败即 workflow 写错，修正后重跑）。
+
+- [ ] **Step 3: 本地模拟 CI 的确切命令 + skip 守卫双向 mutation**
+
+全新 venv 逐字复刻 CI 两步（install + run+skip 守卫）：
+```bash
+SP=/private/tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/80380c0f-edac-4f2a-885d-6487d15b36a8/scratchpad
+rm -rf "$SP/rt-venv2"; /opt/homebrew/bin/python3.11 -m venv "$SP/rt-venv2"
+cd "/Users/maziming/Coding/Prj_Kline trainer/backend"
+"$SP/rt-venv2/bin/python" -m pip install -r requirements-test.txt 2>&1 | tail -1
+"$SP/rt-venv2/bin/python" -m pytest tests/ -rs -q 2>&1 | tail -3
+```
+Expected: `170 passed`，`0 skipped`。**skip 守卫 mutation**（可选，实施时已验证）：卸掉 apscheduler 的 venv 跑守卫应 `FAIL: 4 skipped` 退 1。
 
 - [ ] **Step 4: 提交**
 
