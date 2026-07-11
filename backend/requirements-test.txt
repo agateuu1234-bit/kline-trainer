@@ -1,0 +1,10 @@
+# 后端测试专用依赖（仅跑 pytest 所需；与 requirements.txt 解耦以排除 pandas-ta 安装陷阱）
+pytest==8.4.2
+httpx==0.28.1
+pglast==7.13
+openapi-spec-validator==0.7.2
+pyyaml==6.0.3
+fastapi==0.115.12
+apscheduler==3.10.4
+pandas==2.2.3
+numpy==2.4.6
