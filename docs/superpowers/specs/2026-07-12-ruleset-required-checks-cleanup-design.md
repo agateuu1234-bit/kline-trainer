@@ -23,6 +23,8 @@ main 的合并闸门在 **ruleset `15660830`**（`gh api repos/agateuu1234-bit/k
 
 依据（`branch-protection-config-self-check.yml` 自证）：该自检的期望必需名硬编码为 **`codex-verify-pass`**（非 `codex-review-verify`）——佐证 codex 闸门的必需名从一开始就写错。且该自检读**古典** branch protection API（本仓用 ruleset，古典返 404）→ 恒 `exit 0`、**不校验 ruleset**，故改 ruleset 不会弄坏它，也无「提交在仓库的 ruleset 配置源」需同步。
 
+**⚠️ 关于 `branch-protection-config-self-check` 的诚实定性（codex spec R2 #3）**：它虽在目标必需集里，但**当前是个恒绿 no-op**——读古典 protection、404、`exit 0`，**并不校验活动 ruleset**。留它当必需是因为它每 PR 都 post SUCCESS、无害、不阻塞；但别把它当作能挡住「未来 ruleset 漂移或手误编辑」的真门（它挡不住）。**把它升级为查 rulesets API、不匹配即 fail** 是一项独立改进，列入下一轮治理（与 smoke 重构 + codex-verify 修复同批）。本轮不改它、仅如实记录其 no-op 性质。
+
 ## 目标必需集（6 个）
 
 改 ruleset `15660830` 的 `required_status_checks` 为：
@@ -82,7 +84,24 @@ gh api --method PUT "repos/$REPO/rulesets/$RS" --input /tmp/rs-put.json
 | `openapi-smoke` / `schema-smoke` / `swift-contracts-smoke` | 碰 `backend/openapi.yaml`/`backend/sql/**`/`ios/Contracts/**`/`ios/KlineTrainer/**` 的 PR 不再被 smoke pre-merge 门拦 | **3 个 workflow 的 `push: branches:[main]` 无 paths 过滤 → 合并后在 main 上必跑**，回归会红 main（检测从 pre-merge 移到 post-merge，非「无检测」） | **紧邻下一轮治理**：仿 `hardening_6_gate` 把 3 个 workflow 改 always-post + short-circuit（无关时快速 SUCCESS、碰路径时跑真 smoke）+ 按 job **显示名**（`OpenAPI 3.0 spec + contract invariants` / `PostgreSQL 15 ephemeral deploy` / `SQLite training-set + app schemas` / `swift test on macos-15`）加回必需集。**须逐个验证 short-circuit 不静默放行**（否则比移除更糟）。swift-contracts 在 macos-15，always-run 有成本，单独评估。 |
 | `codex-review-verify` | codex CI 判决门被禁用（但**本就 0 次真评审、零实际强制**——merge-base bug 致从未产 verdict，见上） | **本地 `codex-attest.sh` 仍在每次评审跑并写 ledger**（不可自证的那层在本地保留）；治理条款#1 的 CI 强制本就已失效，本轮不使其更坏 | **同下一轮**：修 `codex-review-verify.yml` line 132 去 `--depth=1`（拉全 base 祖先，`merge-base` 才算得出）+ ruleset 必需名改 `codex-verify-pass`（workflow 实际 post 的名，且 `branch-protection-config-self-check` 已硬编码期望此名）+ 决定 codex CI 判决是否硬阻断（配额脆弱性）。 |
 
-**回滚**：若本轮 ruleset 编辑出问题，`gh api PUT` 用 GET 存下的原 `/tmp/rs.json`（含全 11 context）即可还原。
+**回滚（sanitized，已实测）**：**不能**直接 PUT 原始 `/tmp/rs.json`——它是 GET 原件、含 `id/_links/created_at` 等只读字段，PUT 可能被拒（codex spec R2 #2）。用与 applier 同骨架、contexts 换回原 11 个的 payload（已实测：输出仅 6 个 PUT 字段、11 context 与原始集合逐一相符）：
+
+```bash
+jq '{
+  name, target, enforcement, conditions, bypass_actors,
+  rules: (.rules | map(
+    if .type == "required_status_checks"
+    then .parameters.required_status_checks = ([
+      "branch-protection-config-self-check","codeowners-config-check","codex-review-collect",
+      "codex-review-rerun","codex-review-verify","openapi-smoke","schema-smoke",
+      "swift-contracts-smoke","check-bootstrap-used-once","hardening_6_gate",
+      "Mac Catalyst build-for-testing on macos-15"
+    ] | map({context: ., integration_id: 15368}))
+    else . end
+  ))
+}' /tmp/rs.json > /tmp/rs-rollback.json
+gh api --method PUT "repos/$REPO/rulesets/$RS" --input /tmp/rs-rollback.json
+```
 
 ## 其它非本轮目标
 
