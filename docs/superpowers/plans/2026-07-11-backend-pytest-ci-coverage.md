@@ -11,7 +11,8 @@
 ## Global Constraints
 
 - **Python 版本 = 3.11**（对齐现有 `openapi-smoke.yml` / CI；宿主 `python3.11` = `/opt/homebrew/bin/python3.11` = 3.11.15）。
-- **`sys.path` 命门**：`backend/` 下无 `conftest.py`/`pytest.ini`，测试靠 `from app.main import app` 等顶层导入 → 必须 `working-directory: backend` + **`python -m pytest`**（非裸 `pytest`），否则 collection error。
+- **`sys.path` 机制（已实测）**：`backend/tests/__init__.py` 使 tests 成包，pytest `prepend` 导入模式向上找到最顶层非包目录 `backend/` 并注入 `sys.path`，故 `from app.main import app` / `from qmt_normalize import ...` 可解析——**与 CWD、与裸/`python -m` 无关**（四组合均 170 passed）。CI 用 `working-directory: backend` + `python -m pytest` 是习惯 + 稳健标准形，非 import 硬性所需；勿在文档或注释中声称「裸 pytest 会 collection error」（假论断，codex R1 排查时厘清）。
+- **根 `pytest.ini` 纳入 paths**：仓库根有跟踪的 `pytest.ini`（pytest 认它为 configfile），改它可影响后端测试收集 → workflow `paths:` 必须含 `pytest.ini`（codex plan R1 medium finding）。
 - **依赖清单刻意排除** `pandas-ta`（后端零引用，`0.3.14b1` 用了已删除的 `numpy.NaN`，新 numpy 上装/导入即失败）、`uvicorn`（仅注释）、`asyncpg`/`apscheduler`（测试不 import）。
 - **trust-boundary 硬化约定**：`permissions: contents: read`；action 钉完整 SHA — checkout=`11bd71901bbe5b1630ceea73d27597364c9af683`、setup-python=`0b93645e9fea7318ecaed2b359559ac225c90a2b`（复制自现有 workflow，勿改）。
 - **不设必需检查**：本 PR 只新增 workflow，不动 GitHub ruleset。
@@ -100,6 +101,7 @@ on:
   pull_request:
     paths:
       - 'backend/**'
+      - 'pytest.ini'
       - '.github/workflows/backend-tests.yml'
   push:
     branches: [main]
@@ -123,8 +125,8 @@ jobs:
       - name: Install test deps
         working-directory: backend
         run: python -m pip install -r requirements-test.txt
-      # sys.path 命门：backend/ 无 conftest.py/pytest.ini，
-      # 必须 working-directory: backend + python -m pytest（非裸 pytest）
+      # backend/tests/__init__.py 使 pytest 把 backend/ 注入 sys.path（与 CWD 无关）；
+      # working-directory: backend + python -m pytest 为习惯与稳健标准形
       - name: Run full backend suite
         working-directory: backend
         run: python -m pytest tests/ -q

@@ -30,7 +30,8 @@
 
 1. **套件不需要重依赖**：`asyncpg` / `apscheduler` **无任何被测模块顶层 import**；`uvicorn` 只出现在一句注释；`pandas_ta` **后端代码零引用**。只装 8 个直接依赖的 venv，`pytest --collect-only` 收齐 **170 tests collected**、`pytest -q` 得 **170 passed**。
 2. **`pandas-ta` 是安装陷阱**：`requirements.txt` 里的 `pandas-ta==0.3.14b1` 用了已被删除的 `numpy.NaN`，在现代 numpy 上安装/导入即失败——且它对测试毫无用处。故 CI 依赖清单**刻意排除**它。
-3. **`sys.path` 命门**：`backend/` 下无 `conftest.py`、无 `pytest.ini`。测试靠 `from app.main import app` / `from qmt_normalize import ...` 这类顶层导入，只有在 `backend/` 目录内用 **`python -m pytest`**（而非裸 `pytest`）才会把 `backend/` 注入 `sys.path`。CI 步骤必须 `working-directory: backend` + `python -m pytest`，否则 collection error。
+3. **`sys.path` 机制（已实测厘清）**：测试靠 `from app.main import app` / `from qmt_normalize import ...` 这类顶层导入（模块住在 `backend/`）。存在 `backend/tests/__init__.py`（tests 是包），pytest 的 `prepend` 导入模式向上找到最顶层非包目录 = `backend/`，将其注入 `sys.path`。**该机制与 CWD、与裸 `pytest`/`python -m pytest` 均无关**——实测四种组合（仓库根 / `backend/` × 裸 / `python -m`）都 `170 passed`。故 `working-directory: backend` **非** import 硬性所需，仅为本地开发习惯 + 让 `requirements-test.txt` 路径就近；CI 采用 **`python -m pytest`** 是取其「保证 CWD 入 `sys.path`」的稳健标准形，非因裸 `pytest` 会失败。
+4. **根 `pytest.ini`**：仓库根有被 git 跟踪的 `pytest.ini`（`testpaths=tests` + `python_files/classes/functions` 收集规则），pytest 认它为 `configfile`、rootdir=仓库根。改动它可影响后端测试的收集/执行，故必须纳入 workflow 的 `paths:` 触发集（否则改 `pytest.ini` 的 PR 不会触发后端测试 = 静默覆盖缺口。codex plan review R1 medium finding）。
 
 ## 设计
 
@@ -66,6 +67,7 @@ on:
   pull_request:
     paths:
       - 'backend/**'
+      - 'pytest.ini'
       - '.github/workflows/backend-tests.yml'
   push:
     branches: [main]
@@ -100,8 +102,8 @@ jobs:
 ## 验证
 
 1. **实施前置门**：在 scratchpad 建**全新** 3.11 venv，只 `pip install -r requirements-test.txt`，跑 `python -m pytest tests/ -q` 必须 `170 passed`——证明依赖清单自足（不靠我现有 venv 里多装的包）。
-2. **CI 验证**：PR 上 `Backend Tests` job 绿、报 `170 passed`。
-3. **负向确认**：确认 job 在裸 `pytest`（非 `python -m`）下会 collection error——证明 `working-directory` + `python -m` 这两点确实必要（仅本地演示，不写进 CI）。
+2. **空环境负向基线**：同一全新 venv 在**未装依赖**前跑测试必须失败（`ModuleNotFoundError`），证明 170 passed 是依赖清单的功劳、非宿主残留。
+3. **CI 验证**：PR 上 `Backend Tests` job 绿、报 `170 passed`。
 
 ## 流程
 
