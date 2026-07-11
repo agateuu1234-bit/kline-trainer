@@ -413,7 +413,7 @@ if dash.isEmpty { ctx.setLineDash(phase: 0, lengths: []) } else { ctx.setLineDas
 
 **Interfaces:**
 - Produces：`nonisolated static func lineXRange(for drawing: DrawingObject, mapper: CoordinateMapper) -> (minX: CGFloat, maxX: CGFloat)?`
-  （`.straight` → `(frame.minX, frame.maxX)`；`.ray` → clamp 后 `(max(minX, anchorX), maxX)`，anchorX 在右缘外 → nil；空锚 → nil。纯函数，host 可测；**`nonisolated`** 理由同 Task 3 Interfaces。）
+  （`.straight` → `(frame.minX, frame.maxX)`；`.ray` → clamp 后 `(max(minX, anchorX), maxX)`，anchorX 在右缘外 → nil；**`.segment` → nil（水平线无线段语义，fail-closed，codex plan-R4-high）**；空锚 → nil。纯函数，host 可测；**`nonisolated`** 理由同 Task 3 Interfaces。）
 - Consumes：`mapper.indexToX`（`Geometry.swift:138`）、`mapper.viewport.mainChartFrame`。
 
 - [ ] **Step 1: 写失败测试**（几何 straight/ray + hitTest 方向性 + D43 解码派生）
@@ -479,8 +479,17 @@ func legacyIsExtendedRendersAsRay() {
     let r = HorizontalLineTool.lineXRange(for: decoded, mapper: Self.mapper())!
     #expect(r.minX == Self.mapper().indexToX(5))   // 射线起点，不是全宽 minX=0
 }
+@Test("水平线 .segment fail-closed：不渲染、不命中（codex plan-R4-high）")
+func horizontalSegmentFailsClosed() {
+    let m = Self.mapper()
+    let seg = DrawingObject(toolType: .horizontal,
+        anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+        isExtended: false, panelPosition: 0, lineSubType: .segment)   // 水平线不支持的持久化值
+    #expect(HorizontalLineTool.lineXRange(for: seg, mapper: m) == nil)   // 不渲染
+    #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 400, y: m.priceToY(15)), mapper: m, drawing: seg) == false)  // 不命中
+}
 ```
-（**关键**：D43 锁定的是**解码派生**，测试必须走 JSON 解码路径，不能用 `init`。）
+（**关键**：D43 锁定的是**解码派生**，测试必须走 JSON 解码路径，不能用 `init`。`.segment` fail-closed 防止未来/损坏数据被当全宽假线渲染。）
 
 - [ ] **Step 2: 跑测试确认失败** — Run: `swift test --filter HorizontalLineTool`；Expected: 编译失败（`lineXRange` 未定义）。
 
@@ -491,12 +500,17 @@ nonisolated static func lineXRange(for drawing: DrawingObject, mapper: Coordinat
     guard let anchor = drawing.anchors.first else { return nil }
     let frame = mapper.viewport.mainChartFrame
     switch drawing.lineSubType {
-    case .straight, .segment:   // 水平线无线段语义，.segment 兜底当全宽（母 spec §5.1：水平线只 直线/射线）
+    case .straight:
         return (frame.minX, frame.maxX)
     case .ray:
         let anchorX = mapper.indexToX(anchor.candleIndex)
-        if anchorX > frame.maxX { return nil }              // 落点已在右缘外 → 射线整段不可见（codex plan-medium）
+        if anchorX > frame.maxX { return nil }              // 落点已在右缘外 → 射线整段不可见（codex plan-R3-medium）
         return (max(frame.minX, anchorX), frame.maxX)       // 落点在左缘外 → clamp 到 minX，保 render/hitTest 区间一致
+    case .segment:
+        // 水平线无线段语义（母 spec §5.1）。.segment 是已持久化枚举值，损坏/未来版本数据可解码出它——
+        // fail-closed（codex plan-R4-high）：返回 nil → 不渲染、不命中、不标注（dispatch 层的 guard 会一并跳过）。
+        // UI 禁选 .segment 是后续期（线型子类选择器，1a-ii/iii）的事；本期渲染层不 fail-open 成全宽假线。
+        return nil
     }
 }
 
