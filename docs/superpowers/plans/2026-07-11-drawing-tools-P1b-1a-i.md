@@ -48,32 +48,36 @@
 - [ ] **Step 1: 改 dispatch 举证测试（先失败）** —— 把 `DrawDrawingsDispatchTests.swift` 的 `SpyDrawingTool` 与调用点改成新签名，并新增一条「样式抵达」断言：
 
 ```swift
-// DrawDrawingsDispatchTests.swift —— SpyDrawingTool 改签名 + 记录收到的 drawing
+// DrawDrawingsDispatchTests.swift —— SpyDrawingTool 改签名 + 记录【每一次】render 调用（codex plan-medium：
+// 只记 lastDrawing 会让「所有 dispatch 复用第一条」的错误实现蒙混过关）
 final class SpyDrawingTool: DrawingTool {
     static var type: DrawingToolType { .horizontal }
     var requiredAnchors: ClosedRange<Int> { 1...1 }
-    private(set) var renderCallCount = 0
-    private(set) var lastDrawing: DrawingObject?
-    private(set) var lastScheme: AppColorScheme?
+    private(set) var received: [(drawing: DrawingObject, scheme: AppColorScheme)] = []
     func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme) {
-        renderCallCount += 1; lastDrawing = drawing; lastScheme = scheme
+        received.append((drawing, scheme))
     }
     func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool { false }
 }
 
-@Test("D35：dispatch 把整个 drawing + scheme 透传给 tool（样式抵达渲染层）")
-func drawDrawingsPassesWholeDrawingAndScheme() {
+@Test("D35：两条不同样式的 drawing 各自带自己的样式 + scheme 按顺序抵达渲染层")
+func drawDrawingsPassesEachDrawingDistinctly() {
     let view = makeViewFixture()
     let spy = SpyDrawingTool()
-    let drawing = DrawingObject(toolType: .horizontal,
+    let d1 = DrawingObject(toolType: .horizontal,
         anchors: [DrawingAnchor(period: .m60, candleIndex: 5, price: 120)],
         isExtended: false, panelPosition: 0, colorToken: .blue, thickness: 4)
+    let d2 = DrawingObject(toolType: .horizontal,
+        anchors: [DrawingAnchor(period: .m60, candleIndex: 9, price: 130)],
+        isExtended: false, panelPosition: 0, colorToken: .red, thickness: 2)
     view.drawDrawings(ctx: makeCtxFixture(), mapper: makeMapperFixture(),
-        drawings: [drawing], period: .m60, scheme: .dark, tools: [.horizontal: spy])
-    #expect(spy.renderCallCount == 1)
-    #expect(spy.lastDrawing?.colorToken == .blue)   // 样式没被 dispatch 丢弃
-    #expect(spy.lastDrawing?.thickness == 4)
-    #expect(spy.lastScheme == .dark)
+        drawings: [d1, d2], period: .m60, scheme: .dark, tools: [.horizontal: spy])
+    #expect(spy.received.count == 2)
+    // 逐条样式各不相同（防「复用第一条 / 样式串味」）
+    #expect(spy.received[0].drawing.colorToken == .blue && spy.received[0].drawing.thickness == 4)
+    #expect(spy.received[1].drawing.colorToken == .red && spy.received[1].drawing.thickness == 2)
+    #expect(spy.received[0].drawing.id != spy.received[1].drawing.id)   // 顺序/身份不被混淆
+    #expect(spy.received.allSatisfy { $0.scheme == .dark })
 }
 ```
 
@@ -244,10 +248,10 @@ git add -A && git commit -m "feat(drawing): DrawingColorToken 主题解析纯函
 - Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/HorizontalLineToolTests.swift`（新增映射测试）
 
 **Interfaces:**
-- Produces（Task 4 复用）：两个 host 可测静态纯函数
+- Produces（Task 4 复用）：两个 host 可测静态纯函数。**必须 `nonisolated`**（codex plan-high）：`HorizontalLineTool` conform `@MainActor DrawingTool`，其 static 成员默认继承 main-actor 隔离 → host 非隔离测试在 Swift 6 strict concurrency / Mac Catalyst 会编译失败（本地 Mac-mini 常漏报，见 memory `feedback_swift_local_toolchain_blindspot`）。
   ```swift
-  static func lineWidth(forThickness t: Int) -> CGFloat        // 1→1.5, 2→2.0, 3→2.5, 4→3.0, 5→3.5（clamp 1...5）
-  static func dashPattern(for style: LineStyle) -> [CGFloat]   // .solid→[]；dash1…dash4 四种互不相同
+  nonisolated static func lineWidth(forThickness t: Int) -> CGFloat   // 1→1.5, 2→2.0, 3→2.5, 4→3.0, 5→3.5（clamp 1...5）
+  nonisolated static func dashPattern(for style: LineStyle) -> [CGFloat]  // .solid→[]；dash1…dash4 四种互不相同
   ```
 - Consumes：`DrawingColorResolver.resolve`（Task 2）。
 
@@ -288,12 +292,12 @@ func dashPatternsDistinct() {
 - [ ] **Step 3: 实现映射 + 让 render 消费**
 
 ```swift
-// HorizontalLineTool.swift —— 新增静态纯函数
-static func lineWidth(forThickness t: Int) -> CGFloat {
+// HorizontalLineTool.swift —— 新增静态纯函数（nonisolated：见 Interfaces，host 可测且不吃 main-actor 隔离）
+nonisolated static func lineWidth(forThickness t: Int) -> CGFloat {
     let clamped = min(max(t, 1), 5)
     return 1.0 + 0.5 * CGFloat(clamped)   // 1→1.5, 2→2.0, 3→2.5, 4→3.0, 5→3.5
 }
-static func dashPattern(for style: LineStyle) -> [CGFloat] {
+nonisolated static func dashPattern(for style: LineStyle) -> [CGFloat] {
     switch style {
     case .solid: return []
     case .dash1: return [6, 3]
@@ -328,8 +332,8 @@ if dash.isEmpty { ctx.setLineDash(phase: 0, lengths: []) } else { ctx.setLineDas
 - Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/HorizontalLineToolTests.swift`
 
 **Interfaces:**
-- Produces：`static func lineXRange(for drawing: DrawingObject, mapper: CoordinateMapper) -> (minX: CGFloat, maxX: CGFloat)?`
-  （`.straight` → `(frame.minX, frame.maxX)`；`.ray` → `(indexToX(anchor.candleIndex), frame.maxX)`；空锚 → nil。纯函数，host 可测。）
+- Produces：`nonisolated static func lineXRange(for drawing: DrawingObject, mapper: CoordinateMapper) -> (minX: CGFloat, maxX: CGFloat)?`
+  （`.straight` → `(frame.minX, frame.maxX)`；`.ray` → clamp 后 `(max(minX, anchorX), maxX)`，anchorX 在右缘外 → nil；空锚 → nil。纯函数，host 可测；**`nonisolated`** 理由同 Task 3 Interfaces。）
 - Consumes：`mapper.indexToX`（`Geometry.swift:138`）、`mapper.viewport.mainChartFrame`。
 
 - [ ] **Step 1: 写失败测试**（几何 straight/ray + hitTest 方向性 + D43 解码派生）
@@ -403,7 +407,7 @@ func legacyIsExtendedRendersAsRay() {
 - [ ] **Step 3: 实现几何分支**
 
 ```swift
-static func lineXRange(for drawing: DrawingObject, mapper: CoordinateMapper) -> (minX: CGFloat, maxX: CGFloat)? {
+nonisolated static func lineXRange(for drawing: DrawingObject, mapper: CoordinateMapper) -> (minX: CGFloat, maxX: CGFloat)? {
     guard let anchor = drawing.anchors.first else { return nil }
     let frame = mapper.viewport.mainChartFrame
     switch drawing.lineSubType {
@@ -492,6 +496,20 @@ struct DrawingLabelLayoutTests {
         #expect(right.maxX <= 800)
         #expect(right.minX > left.minX)
     }
+    @Test("顶边溢出：线贴主图上缘时标签改放线下方，仍在 frame 内且不压线（codex plan-medium）")
+    func topEdgeFallsBelow() {
+        // lineY=5, textHeight=16, frame.minY=0 → 上方 above=5-2-16=-13 < 0 → 改放线下方
+        let r = DrawingLabelLayout.labelRect(mode: .left, lineY: 5,
+            lineXRange: (0, 800), textSize: Self.sz, mainChartFrame: Self.frame)!
+        #expect(r.minY >= Self.frame.minY)   // 不跑出主图上缘
+        #expect(r.minY >= 5)                 // 放在线下方 → 顶边不高于线 → 不压线
+    }
+    @Test("上方有空间时仍放线上方（不压线）")
+    func aboveWhenRoom() {
+        let r = DrawingLabelLayout.labelRect(mode: .left, lineY: 100,
+            lineXRange: (0, 800), textSize: Self.sz, mainChartFrame: Self.frame)!
+        #expect(r.maxY <= 100)   // 底边不低于线
+    }
 }
 ```
 
@@ -505,21 +523,27 @@ struct DrawingLabelLayoutTests {
 import CoreGraphics
 
 public enum DrawingLabelLayout {
-    private static let gap: CGFloat = 2   // 标签底边与线的间隙
+    private static let gap: CGFloat = 2   // 标签与线的间隙
 
     public static func labelRect(mode: LabelMode, lineY: CGFloat,
                                  lineXRange: (minX: CGFloat, maxX: CGFloat),
                                  textSize: CGSize, mainChartFrame: CGRect) -> CGRect? {
-        let top = lineY - gap - textSize.height   // 不压线：底边在 lineY - gap
         switch mode {
         case .hidden:
             return nil
         case .show, .left:   // 水平线只支持 隐藏/左/右；.show 无独立语义，归左
-            return CGRect(x: lineXRange.minX, y: top, width: textSize.width, height: textSize.height)
+            return placed(x: lineXRange.minX, lineY: lineY, textSize: textSize, mainChartFrame: mainChartFrame)
         case .right:
-            let x = min(lineXRange.maxX - textSize.width, mainChartFrame.maxX - textSize.width)  // 防溢出
-            return CGRect(x: x, y: top, width: textSize.width, height: textSize.height)
+            let x = min(lineXRange.maxX - textSize.width, mainChartFrame.maxX - textSize.width)  // 右缘不溢出
+            return placed(x: x, lineY: lineY, textSize: textSize, mainChartFrame: mainChartFrame)
         }
+    }
+
+    // 垂直放置：优先线【上方】（不压线）；上方顶到主图上缘放不下时改放线【下方】（仍不压线）。codex plan-medium。
+    private static func placed(x: CGFloat, lineY: CGFloat, textSize: CGSize, mainChartFrame: CGRect) -> CGRect {
+        let above = lineY - gap - textSize.height
+        let y = above >= mainChartFrame.minY ? above : lineY + gap   // 上方无空间 → 线下方
+        return CGRect(x: x, y: y, width: textSize.width, height: textSize.height)
     }
 }
 ```
