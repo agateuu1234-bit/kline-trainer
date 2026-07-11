@@ -163,4 +163,80 @@ struct HorizontalLineToolTests {
         #expect(gaps(.solid) == 0)     // 实线：中段无间断
         #expect(gaps(.dash1) >= 1)     // 虚线：有间断
     }
+
+    @Test("几何：straight 全宽（minX…maxX）")
+    func straightSpansFullWidth() {
+        let m = Self.mapper()   // mainChartFrame x∈[0,800]
+        let d = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+            isExtended: false, panelPosition: 0, lineSubType: .straight)
+        let r = HorizontalLineTool.lineXRange(for: d, mapper: m)!
+        #expect(r.minX == 0 && r.maxX == 800)
+    }
+    @Test("几何：ray 自落点向右到右缘")
+    func raySpansAnchorToRight() {
+        let m = Self.mapper()
+        let d = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+            isExtended: false, panelPosition: 0, lineSubType: .ray)
+        let r = HorizontalLineTool.lineXRange(for: d, mapper: m)!
+        #expect(r.minX == m.indexToX(5) && r.maxX == 800)
+    }
+    @Test("射线屏幕外锚点：右缘外→nil；左缘外→clamp 到 minX，render/hitTest 区间一致（codex plan-medium）")
+    func rayOffscreenAnchorNormalized() {
+        let m = Self.mapper()   // indexToX(i)=i*10，mainChartFrame x∈[0,800]
+        // 右缘外：candleIndex=100 → indexToX=1000 > 800 → 整段不可见
+        let offRight = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 100, price: 15)],
+            isExtended: false, panelPosition: 0, lineSubType: .ray)
+        #expect(HorizontalLineTool.lineXRange(for: offRight, mapper: m) == nil)
+        let y = m.priceToY(15)
+        #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 400, y: y), mapper: m, drawing: offRight) == false)
+        // 恰在右缘：candleIndex=80 → indexToX=800==maxX → 零长度段，render/hitTest 都 fail-closed（codex plan-R7）
+        let atEdge = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 80, price: 15)],
+            isExtended: false, panelPosition: 0, lineSubType: .ray)
+        #expect(HorizontalLineTool.lineXRange(for: atEdge, mapper: m) == nil)
+        #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 800, y: y), mapper: m, drawing: atEdge) == false)
+        // 左缘外：candleIndex=-5 → indexToX=-50 < 0 → clamp minX=0，右缘外点仍在 [0,800] 内可命中
+        let offLeft = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: -5, price: 15)],
+            isExtended: false, panelPosition: 0, lineSubType: .ray)
+        let rl = HorizontalLineTool.lineXRange(for: offLeft, mapper: m)!
+        #expect(rl.minX == 0 && rl.maxX == 800)
+        #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 400, y: y), mapper: m, drawing: offLeft) == true)
+    }
+    @Test("射线 hitTest 方向性：右侧命中、左侧不命中；直线两侧都命中")
+    func rayHitTestDirectional() {
+        let m = Self.mapper()
+        let y = m.priceToY(15)
+        let anchorX = m.indexToX(5)
+        func mk(_ sub: LineSubType) -> DrawingObject {
+            DrawingObject(toolType: .horizontal,
+                anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+                isExtended: false, panelPosition: 0, lineSubType: sub)
+        }
+        let tool = HorizontalLineTool()
+        #expect(tool.hitTest(point: CGPoint(x: anchorX + 50, y: y), mapper: m, drawing: mk(.ray)) == true)
+        #expect(tool.hitTest(point: CGPoint(x: anchorX - 50, y: y), mapper: m, drawing: mk(.ray)) == false)
+        #expect(tool.hitTest(point: CGPoint(x: anchorX - 50, y: y), mapper: m, drawing: mk(.straight)) == true)
+    }
+    @Test("D43：legacy blob（无 lineSubType 键 + isExtended=true）解码派生 .ray 并渲染为射线")
+    func legacyIsExtendedRendersAsRay() {
+        // 走【解码路径】而非 init 默认——init 默认 lineSubType=.straight；只有解码 legacy blob 才派生 .ray（Models.swift:311-313）
+        let json = #"{"toolType":"horizontal","anchors":[{"period":"3m","candleIndex":5,"price":15}],"isExtended":true,"panelPosition":0}"#
+        let decoded = try! JSONDecoder().decode(DrawingObject.self, from: Data(json.utf8))
+        #expect(decoded.lineSubType == .ray)
+        let r = HorizontalLineTool.lineXRange(for: decoded, mapper: Self.mapper())!
+        #expect(r.minX == Self.mapper().indexToX(5))   // 射线起点，不是全宽 minX=0
+    }
+    @Test("水平线 .segment fail-closed：不渲染、不命中（codex plan-R4-high）")
+    func horizontalSegmentFailsClosed() {
+        let m = Self.mapper()
+        let seg = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+            isExtended: false, panelPosition: 0, lineSubType: .segment)   // 水平线不支持的持久化值
+        #expect(HorizontalLineTool.lineXRange(for: seg, mapper: m) == nil)   // 不渲染
+        #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 400, y: m.priceToY(15)), mapper: m, drawing: seg) == false)  // 不命中
+    }
 }

@@ -44,9 +44,30 @@ public struct HorizontalLineTool: DrawingTool {
         }
     }
 
-    public func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme) {
-        guard let y = lineY(anchors: drawing.anchors, mapper: mapper) else { return }
+    /// 横线几何 x 区间（host 可测，纯函数）：`.straight` 全宽；`.ray` 自落点向右到主图右缘
+    /// （落点在右缘上/外 → 零长度/不可见段，fail-closed 返回 nil；落点在左缘外 → clamp 到 minX）；
+    /// `.segment` 水平线无线段语义，fail-closed 返回 nil（codex plan-R4-high）。空锚 → nil。
+    nonisolated static func lineXRange(for drawing: DrawingObject, mapper: CoordinateMapper) -> (minX: CGFloat, maxX: CGFloat)? {
+        guard let anchor = drawing.anchors.first else { return nil }
         let frame = mapper.viewport.mainChartFrame
+        switch drawing.lineSubType {
+        case .straight:
+            return (frame.minX, frame.maxX)
+        case .ray:
+            let anchorX = mapper.indexToX(anchor.candleIndex)
+            if anchorX >= frame.maxX { return nil }             // 落点在右缘【上或外】→ 零长度/不可见段：画不出却可命中，fail-closed（codex plan-R3+R7）
+            return (max(frame.minX, anchorX), frame.maxX)       // 落点在左缘外 → clamp 到 minX，保 render/hitTest 区间一致
+        case .segment:
+            // 水平线无线段语义（母 spec §5.1）。.segment 是已持久化枚举值，损坏/未来版本数据可解码出它——
+            // fail-closed（codex plan-R4-high）：返回 nil → 不渲染、不命中、不标注（dispatch 层的 guard 会一并跳过）。
+            // UI 禁选 .segment 是后续期（线型子类选择器，1a-ii/iii）的事；本期渲染层不 fail-open 成全宽假线。
+            return nil
+        }
+    }
+
+    public func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme) {
+        guard let y = lineY(anchors: drawing.anchors, mapper: mapper),
+              let xr = Self.lineXRange(for: drawing, mapper: mapper) else { return }
         ctx.saveGState()
         let rgba = DrawingColorResolver.resolve(drawing.colorToken, scheme: scheme)
         ctx.setStrokeColor(CGColor(srgbRed: CGFloat(rgba.red), green: CGFloat(rgba.green),
@@ -54,14 +75,15 @@ public struct HorizontalLineTool: DrawingTool {
         ctx.setLineWidth(Self.lineWidth(forThickness: drawing.thickness))
         let dash = Self.dashPattern(for: drawing.lineStyle)
         if dash.isEmpty { ctx.setLineDash(phase: 0, lengths: []) } else { ctx.setLineDash(phase: 0, lengths: dash) }
-        ctx.move(to: CGPoint(x: frame.minX, y: y))
-        ctx.addLine(to: CGPoint(x: frame.maxX, y: y))
+        ctx.move(to: CGPoint(x: xr.minX, y: y))
+        ctx.addLine(to: CGPoint(x: xr.maxX, y: y))
         ctx.strokePath()
         ctx.restoreGState()
     }
 
     public func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool {
-        guard let y = lineY(anchors: drawing.anchors, mapper: mapper) else { return false }
-        return abs(point.y - y) <= Self.hitTolerance
+        guard let y = lineY(anchors: drawing.anchors, mapper: mapper),
+              let xr = Self.lineXRange(for: drawing, mapper: mapper) else { return false }
+        return abs(point.y - y) <= Self.hitTolerance && point.x >= xr.minX && point.x <= xr.maxX
     }
 }
