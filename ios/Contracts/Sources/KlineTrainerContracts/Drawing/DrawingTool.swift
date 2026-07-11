@@ -15,6 +15,6 @@ import CoreGraphics
 public protocol DrawingTool {
     static var type: DrawingToolType { get }
     var requiredAnchors: ClosedRange<Int> { get }
-    func render(ctx: CGContext, mapper: CoordinateMapper, anchors: [DrawingAnchor])
-    func hitTest(point: CGPoint, mapper: CoordinateMapper, anchors: [DrawingAnchor]) -> Bool
+    func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme)
+    func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool
 }

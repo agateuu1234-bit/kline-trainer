@@ -21,8 +21,9 @@ struct DrawingProtocolTests {
         // render / hitTest reachable through dynamic dispatch
         let mapper = makeMapperFixture()
         let ctx = makeCtxFixture()
-        tool.render(ctx: ctx, mapper: mapper, anchors: [])
-        let hit = tool.hitTest(point: .zero, mapper: mapper, anchors: [])
+        let drawing = DrawingObject(toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        tool.render(ctx: ctx, mapper: mapper, drawing: drawing, scheme: .light)
+        let hit = tool.hitTest(point: .zero, mapper: mapper, drawing: drawing)
         #expect(hit == false)
     }
 
@@ -56,8 +57,8 @@ struct DrawingProtocolTests {
 private final class FakeDrawingTool: DrawingTool {
     static var type: DrawingToolType { .horizontal }
     var requiredAnchors: ClosedRange<Int> { 1...1 }
-    func render(ctx: CGContext, mapper: CoordinateMapper, anchors: [DrawingAnchor]) {}
-    func hitTest(point: CGPoint, mapper: CoordinateMapper, anchors: [DrawingAnchor]) -> Bool { false }
+    func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme) {}
+    func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool { false }
 }
 
 @MainActor

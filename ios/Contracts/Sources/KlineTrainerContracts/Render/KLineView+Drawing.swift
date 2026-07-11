@@ -17,11 +17,12 @@ extension KLineView {
                       mapper: CoordinateMapper,
                       drawings: [DrawingObject],
                       period: Period,
+                      scheme: AppColorScheme,
                       tools: [DrawingToolType: any DrawingTool]) {
-        _ = period  // reserved for Wave 3 cross-period price mapping
+        _ = period  // reserved（周期过滤在 RenderStateBuilder，见 Task 6；此处仍不消费）
         for drawing in drawings {
             guard let tool = tools[drawing.toolType] else { continue }
-            tool.render(ctx: ctx, mapper: mapper, anchors: drawing.anchors)
+            tool.render(ctx: ctx, mapper: mapper, drawing: drawing, scheme: scheme)
         }
     }
 }

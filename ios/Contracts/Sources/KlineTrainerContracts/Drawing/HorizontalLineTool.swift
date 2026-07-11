@@ -28,8 +28,8 @@ public struct HorizontalLineTool: DrawingTool {
     /// 完整 scheme-aware 画线 token 化仍属后续（Phase 4）；此处为满足双 scheme 可读的最小修正。
     nonisolated public static let strokeRGBA = AppColorRGBA(red: 0.82, green: 0.40, blue: 0.0)
 
-    public func render(ctx: CGContext, mapper: CoordinateMapper, anchors: [DrawingAnchor]) {
-        guard let y = lineY(anchors: anchors, mapper: mapper) else { return }
+    public func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme) {
+        guard let y = lineY(anchors: drawing.anchors, mapper: mapper) else { return }
         let frame = mapper.viewport.mainChartFrame
         ctx.saveGState()
         ctx.setStrokeColor(CGColor(srgbRed: CGFloat(Self.strokeRGBA.red), green: CGFloat(Self.strokeRGBA.green),
@@ -41,8 +41,8 @@ public struct HorizontalLineTool: DrawingTool {
         ctx.restoreGState()
     }
 
-    public func hitTest(point: CGPoint, mapper: CoordinateMapper, anchors: [DrawingAnchor]) -> Bool {
-        guard let y = lineY(anchors: anchors, mapper: mapper) else { return false }
+    public func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool {
+        guard let y = lineY(anchors: drawing.anchors, mapper: mapper) else { return false }
         return abs(point.y - y) <= Self.hitTolerance
     }
 }

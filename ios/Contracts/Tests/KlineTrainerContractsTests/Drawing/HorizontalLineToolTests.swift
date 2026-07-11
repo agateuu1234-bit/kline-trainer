@@ -40,22 +40,25 @@ struct HorizontalLineToolTests {
     func hitTestHit() {
         let m = Self.mapper()
         let anchors = [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)]
+        let drawing = DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0)
         let y = m.priceToY(15)
         #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 400, y: y + 2),
-                                             mapper: m, anchors: anchors) == true)
+                                             mapper: m, drawing: drawing) == true)
     }
 
     @Test("hitTest: 未命中（远离横线 y，超容差）")
     func hitTestMiss() {
         let m = Self.mapper()
         let anchors = [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)]
+        let drawing = DrawingObject(toolType: .horizontal, anchors: anchors, isExtended: false, panelPosition: 0)
         let y = m.priceToY(15)
         #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 400, y: y + 50),
-                                             mapper: m, anchors: anchors) == false)
+                                             mapper: m, drawing: drawing) == false)
     }
 
     @Test("hitTest: 空 anchors → false")
     func hitTestEmptyFalse() {
-        #expect(HorizontalLineTool().hitTest(point: .zero, mapper: Self.mapper(), anchors: []) == false)
+        let drawing = DrawingObject(toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
+        #expect(HorizontalLineTool().hitTest(point: .zero, mapper: Self.mapper(), drawing: drawing) == false)
     }
 }
