@@ -16,7 +16,8 @@
 - **纯函数 host 可测**：颜色解析、几何 helper、标注位置计算必须是**非 `View`、非 `@MainActor` 隔离**的纯函数（可在 host `swift test` 里跑，不依赖 UIKit 渲染上下文）。
 - **契约不 bump**：`CONTRACT_VERSION` 保持 `1.11`、`user_version` 保持 `7`、零迁移（本 PR 只写入 `.horizontal`，不碰持久层）。
 - **D43（user 决策）**：legacy `style_json IS NULL` + `is_extended=1` 的行经 `lineSubType = isExtended ? .ray : .straight` 派生为 `.ray`，渲染为**射线**——**不做外观兼容、不改 `legacyFallback`**。
-- **三绿门（作者亲核，clean build）**：host `swift test` 全绿 + Mac Catalyst `build-for-testing` SUCCEEDED + iOS build。
+- **UIKit-guarded 测试只由 Catalyst `test` 执行（codex plan-R8-high）**：`DrawDrawingsDispatchTests.swift`（Task 1 的样式抵达、Task 5 的标注 bitmap 全在此）包在 `#if canImport(UIKit)` 里——**host `swift test` 在 macOS 上 `canImport(UIKit)` 为 false → 整份跳过**。故凡「经 `drawDrawings`/`render` 的渲染路径」断言，**决策逻辑必须另有 host 可测纯函数覆盖**（`belongsToPanel`/`lineXRange`/`labelRect`/`labelContent` 等），且 Catalyst 那道门必须是 **`xcodebuild test`（真跑）而非 `build-for-testing`（只编译）**。
+- **三绿门（作者亲核，clean build）**：① host `swift test` 全绿（纯函数决策全覆盖）+ ② Mac Catalyst **`xcodebuild test`** 全绿（真执行 UIKit-guarded 的 dispatch/bitmap 测试）+ ③ iOS build 编译通过。**不得**把 build-only 当作渲染验证。
 
 ---
 
@@ -619,6 +620,21 @@ struct DrawingLabelLayoutTests {
             #expect(r.minX >= 0)     // 不越左缘
         }
     }
+    // labelContent 决策（host 可测，覆盖「画不画/画什么/什么色/对齐」——codex plan-R8：这些逻辑不能只活在 UIKit 层）
+    @Test("labelContent：hidden / 非水平线 / 线不可见 → nil；left/right → 文字+色+对齐")
+    func labelContentDecision() {
+        func d(_ mode: LabelMode, tool: DrawingToolType = .horizontal) -> DrawingObject {
+            DrawingObject(toolType: tool, anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+                          isExtended: false, panelPosition: 0, labelMode: mode, textColorToken: .green)
+        }
+        #expect(DrawingLabelLayout.labelContent(for: d(.hidden), lineVisible: true) == nil)   // 隐藏不画
+        #expect(DrawingLabelLayout.labelContent(for: d(.left), lineVisible: false) == nil)    // 线不可见（segment/超界射线）→ 标注也不画
+        #expect(DrawingLabelLayout.labelContent(for: d(.left, tool: .trend), lineVisible: true) == nil)  // 本期只水平线接线
+        let left = DrawingLabelLayout.labelContent(for: d(.left), lineVisible: true)!
+        #expect(left.text == "15.00" && left.colorToken == .green && left.mode == .left)
+        #expect(DrawingLabelLayout.labelContent(for: d(.show), lineVisible: true)!.mode == .left)   // .show 归左
+        #expect(DrawingLabelLayout.labelContent(for: d(.right), lineVisible: true)!.mode == .right)
+    }
 }
 ```
 
@@ -656,24 +672,48 @@ public enum DrawingLabelLayout {
         return CGRect(x: clampedX, y: y, width: textSize.width, height: textSize.height)
     }
 }
+
+// labelContent：决定「画不画标注 + 画什么文字 + 什么色 + 哪种对齐」。全部决策在此 host 可测纯函数里，
+// UIKit dispatch 层只机械绘制（codex plan-R8：决策逻辑不能只活在 #if canImport(UIKit) 的绘制块里）。
+public struct DrawingLabelContent: Equatable {
+    public let text: String
+    public let colorToken: DrawingColorToken
+    public let mode: LabelMode          // 只会是 .left / .right（对齐用；.show 归 .left）
+}
+extension DrawingLabelLayout {
+    // lineVisible = 该线是否有可见几何（HorizontalLineTool.lineXRange != nil）——segment / 超界射线为 false。
+    public static func labelContent(for drawing: DrawingObject, lineVisible: Bool) -> DrawingLabelContent? {
+        guard drawing.toolType == .horizontal else { return nil }   // 本期只水平线接线
+        guard lineVisible else { return nil }                       // 线不可见 → 标注也不画（fail-closed 一致）
+        let mode: LabelMode
+        switch drawing.labelMode {
+        case .hidden:       return nil
+        case .show, .left:  mode = .left
+        case .right:        mode = .right
+        }
+        let text = String(format: "%.2f", drawing.anchors.first?.price ?? 0)
+        return DrawingLabelContent(text: text, colorToken: drawing.textColorToken, mode: mode)
+    }
+}
 ```
 
 - [ ] **Step 4: dispatch 层按 labelMode 绘制**
 
 ```swift
-// KLineView+Drawing.swift —— 在 tool.render 之后，按 labelMode 画价格标签（仅 .horizontal 本期接线）
-// 文字绘制范式同 KLineView+Markers.swift:46-51 / KLineView+Crosshair.swift:112-123
-if drawing.labelMode != .hidden, drawing.toolType == .horizontal,
-   let y = HorizontalLineTool().lineY(anchors: drawing.anchors, mapper: mapper),
-   let xr = HorizontalLineTool.lineXRange(for: drawing, mapper: mapper) {
-    let text = String(format: "%.2f", drawing.anchors.first?.price ?? 0)
-    let rgba = DrawingColorResolver.resolve(drawing.textColorToken, scheme: scheme)
-    let color = UIColor(red: CGFloat(rgba.red), green: CGFloat(rgba.green), blue: CGFloat(rgba.blue), alpha: CGFloat(rgba.alpha))
-    let attrs: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: CGFloat(drawing.fontSize)), .foregroundColor: color]
-    let textSize = (text as NSString).size(withAttributes: attrs)
-    if let rect = DrawingLabelLayout.labelRect(mode: drawing.labelMode, lineY: y, lineXRange: xr,
-                                               textSize: textSize, mainChartFrame: mapper.viewport.mainChartFrame) {
-        (text as NSString).draw(at: rect.origin, withAttributes: attrs)
+// KLineView+Drawing.swift —— tool.render 之后画价格标签。UIKit 层【零决策】：画不画/文字/色/对齐全在 labelContent，
+// 位置全在 labelRect，本块只负责机械绘制（文字绘制范式同 KLineView+Markers.swift:46-51 / KLineView+Crosshair.swift:112-123）。
+if drawing.toolType == .horizontal,
+   let y = HorizontalLineTool().lineY(anchors: drawing.anchors, mapper: mapper) {
+    let xr = HorizontalLineTool.lineXRange(for: drawing, mapper: mapper)   // nil = segment/超界射线（fail-closed）
+    if let content = DrawingLabelLayout.labelContent(for: drawing, lineVisible: xr != nil), let xr {
+        let rgba = DrawingColorResolver.resolve(content.colorToken, scheme: scheme)
+        let color = UIColor(red: CGFloat(rgba.red), green: CGFloat(rgba.green), blue: CGFloat(rgba.blue), alpha: CGFloat(rgba.alpha))
+        let attrs: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: CGFloat(drawing.fontSize)), .foregroundColor: color]
+        let textSize = (content.text as NSString).size(withAttributes: attrs)
+        if let rect = DrawingLabelLayout.labelRect(mode: content.mode, lineY: y, lineXRange: xr,
+                                                   textSize: textSize, mainChartFrame: mapper.viewport.mainChartFrame) {
+            (content.text as NSString).draw(at: rect.origin, withAttributes: attrs)
+        }
     }
 }
 ```
@@ -801,9 +841,9 @@ drawings: (engine.drawings + (engine.flow.mode == .review ? engine.reviewDrawing
 
 ## 收尾（三绿门 + 验收）
 
-- [ ] **全量测试**：`swift test`（host 全绿）
-- [ ] **Mac Catalyst 门**：`xcodebuild build-for-testing`（macos-15 严格 Sendable/@MainActor 隔离，本地 Mac-mini 可能漏报，见 memory）
-- [ ] **iOS build**：确认 UIKit 路径（标注绘制）真的编译
+- [ ] **全量 host 测试**：`swift test`（host 全绿——纯函数决策全覆盖；注意 UIKit-guarded 测试在此被 `#if` 跳过，不算数）
+- [ ] **Mac Catalyst 测试门（真执行，不是 build-only）**：`xcodebuild test -scheme <…> -destination 'platform=macOS,variant=Mac Catalyst'`——**真跑** `DrawDrawingsDispatchTests`（Task 1 样式抵达 + Task 5 标注 bitmap）；macos-15 严格 Sendable/@MainActor 隔离，本地 Mac-mini 可能漏报隔离错，见 memory `feedback_swift_local_toolchain_blindspot`
+- [ ] **iOS build**：确认 UIKit 路径（标注绘制）真的编译（build-only，仅证编译，不算渲染验证）
 - [ ] **非程序员验收清单**：spec §2.4（11 条），交付时附上
 - [ ] **whole-branch codex** → approve → PR（user 真 TTY 跑 `attest-override.sh` + admin merge）
 
