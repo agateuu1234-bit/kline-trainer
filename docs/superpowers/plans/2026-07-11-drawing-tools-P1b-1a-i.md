@@ -856,3 +856,10 @@ drawings: (engine.drawings + (engine.flow.mode == .review ? engine.reviewDrawing
 - **Spec 覆盖**：§2.1 五工作项 → Task 1(D35) / Task 2+3(样式+D36) / Task 4(几何+D43) / Task 5(标注) / Task 6(D29)。§2.3 八条负向测试全部有对应 Step（视觉零变化=T3；dispatch 举证=T1；射线方向性=T4；D43=T4；线宽/线型=T3；昼夜色=T2；标注位置/隐藏=T5；周期绑定/fail-safe=T6）。
 - **类型一致**：`render(ctx:mapper:drawing:scheme:)` / `hitTest(point:mapper:drawing:)` / `lineWidth(forThickness:)` / `dashPattern(for:)` / `lineXRange(for:mapper:)` / `labelRect(...)` / `belongsToPanel(...)` 在各 task 间签名一致。
 - **待实施者注意**：① `AppColorRGBA` 若非 `Equatable`，Task 2 顺带加（其测试用 `==`）；② Task 3 删 `strokeRGBA` 前 grep 确认无其它 caller；③ Task 5 `AppColorRGBA → UIColor` 若有既有转换 helper 优先复用，无则内联。
+
+## 已接受残留（accepted residual，user 决策 2026-07-12）
+
+- **UIKit render 门当前靠作者亲核本地 Catalyst `xcodebuild test`**（codex plan-R8→R11 逐层下钻至此）。CI 的 `catalyst-build.yml` 仍是 `build-for-testing`（只编译不跑）。把它升级为 `test`（真执行 `DrawDrawingsDispatchTests`）是**独立 infra 任务**，单独走治理流程，**不在本 1a-i PR 范围**——此残留归入既有的「CI 必需检查结构性损坏」问题（memory `project_ci_required_checks_broken`：本仓库 5 个必需检查永不上报、每 PR 只能 admin bypass，加/改强制检查这条路本身已坏）。
+- **缓解**：本 PR 已把所有渲染决策逻辑（`belongsToPanel`/`lineXRange`/`labelRect`/`labelContent`/`lineWidth`/`dashPattern` + Task 3 的 bitmap 采样）做成 **host `swift test` 可跑的纯函数/CoreGraphics 测试**；真正只能在 Catalyst 跑的仅剩 `DrawDrawingsDispatchTests`（dispatch 透传 + 标注 bitmap）。故「UIKit 门不进 CI」的暴露面被压到最小。
+- **交付要求**：1a-i 交付时作者**必须亲核本地 Catalyst `xcodebuild test` 全绿并如实报告**（不得以「host swift test 全绿」冒充）。
+- codex plan review R1–R10 的 plan 内问题**已全部修复**；R11 唯一剩项即上述 CI 强制门，属 accepted residual。
