@@ -28,13 +28,32 @@ public struct HorizontalLineTool: DrawingTool {
     /// 完整 scheme-aware 画线 token 化仍属后续（Phase 4）；此处为满足双 scheme 可读的最小修正。
     nonisolated public static let strokeRGBA = AppColorRGBA(red: 0.82, green: 0.40, blue: 0.0)
 
+    /// thickness (1...5, clamp) → 线宽（pt）。档 1 = 1.5pt，等于今天线宽（视觉零变化）。
+    nonisolated static func lineWidth(forThickness t: Int) -> CGFloat {
+        let clamped = min(max(t, 1), 5)
+        return 1.0 + 0.5 * CGFloat(clamped)   // 1→1.5, 2→2.0, 3→2.5, 4→3.0, 5→3.5
+    }
+    /// lineStyle → CGContext setLineDash 的 lengths；.solid 返回空数组（无 dash）。
+    nonisolated static func dashPattern(for style: LineStyle) -> [CGFloat] {
+        switch style {
+        case .solid: return []
+        case .dash1: return [6, 3]
+        case .dash2: return [2, 3]
+        case .dash3: return [10, 4]
+        case .dash4: return [10, 3, 2, 3]
+        }
+    }
+
     public func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme) {
         guard let y = lineY(anchors: drawing.anchors, mapper: mapper) else { return }
         let frame = mapper.viewport.mainChartFrame
         ctx.saveGState()
-        ctx.setStrokeColor(CGColor(srgbRed: CGFloat(Self.strokeRGBA.red), green: CGFloat(Self.strokeRGBA.green),
-                                   blue: CGFloat(Self.strokeRGBA.blue), alpha: CGFloat(Self.strokeRGBA.alpha)))
-        ctx.setLineWidth(1.5)
+        let rgba = DrawingColorResolver.resolve(drawing.colorToken, scheme: scheme)
+        ctx.setStrokeColor(CGColor(srgbRed: CGFloat(rgba.red), green: CGFloat(rgba.green),
+                                   blue: CGFloat(rgba.blue), alpha: CGFloat(rgba.alpha)))
+        ctx.setLineWidth(Self.lineWidth(forThickness: drawing.thickness))
+        let dash = Self.dashPattern(for: drawing.lineStyle)
+        if dash.isEmpty { ctx.setLineDash(phase: 0, lengths: []) } else { ctx.setLineDash(phase: 0, lengths: dash) }
         ctx.move(to: CGPoint(x: frame.minX, y: y))
         ctx.addLine(to: CGPoint(x: frame.maxX, y: y))
         ctx.strokePath()
