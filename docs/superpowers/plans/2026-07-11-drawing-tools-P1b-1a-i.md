@@ -353,6 +353,24 @@ func raySpansAnchorToRight() {
     let r = HorizontalLineTool.lineXRange(for: d, mapper: m)!
     #expect(r.minX == m.indexToX(5) && r.maxX == 800)
 }
+@Test("射线屏幕外锚点：右缘外→nil；左缘外→clamp 到 minX，render/hitTest 区间一致（codex plan-medium）")
+func rayOffscreenAnchorNormalized() {
+    let m = Self.mapper()   // indexToX(i)=i*10，mainChartFrame x∈[0,800]
+    // 右缘外：candleIndex=100 → indexToX=1000 > 800 → 整段不可见
+    let offRight = DrawingObject(toolType: .horizontal,
+        anchors: [DrawingAnchor(period: .m3, candleIndex: 100, price: 15)],
+        isExtended: false, panelPosition: 0, lineSubType: .ray)
+    #expect(HorizontalLineTool.lineXRange(for: offRight, mapper: m) == nil)
+    let y = m.priceToY(15)
+    #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 400, y: y), mapper: m, drawing: offRight) == false)
+    // 左缘外：candleIndex=-5 → indexToX=-50 < 0 → clamp minX=0，右缘外点仍在 [0,800] 内可命中
+    let offLeft = DrawingObject(toolType: .horizontal,
+        anchors: [DrawingAnchor(period: .m3, candleIndex: -5, price: 15)],
+        isExtended: false, panelPosition: 0, lineSubType: .ray)
+    let rl = HorizontalLineTool.lineXRange(for: offLeft, mapper: m)!
+    #expect(rl.minX == 0 && rl.maxX == 800)
+    #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 400, y: y), mapper: m, drawing: offLeft) == true)
+}
 @Test("射线 hitTest 方向性：右侧命中、左侧不命中；直线两侧都命中")
 func rayHitTestDirectional() {
     let m = Self.mapper()
@@ -392,7 +410,9 @@ static func lineXRange(for drawing: DrawingObject, mapper: CoordinateMapper) -> 
     case .straight, .segment:   // 水平线无线段语义，.segment 兜底当全宽（母 spec §5.1：水平线只 直线/射线）
         return (frame.minX, frame.maxX)
     case .ray:
-        return (mapper.indexToX(anchor.candleIndex), frame.maxX)
+        let anchorX = mapper.indexToX(anchor.candleIndex)
+        if anchorX > frame.maxX { return nil }              // 落点已在右缘外 → 射线整段不可见（codex plan-medium）
+        return (max(frame.minX, anchorX), frame.maxX)       // 落点在左缘外 → clamp 到 minX，保 render/hitTest 区间一致
     }
 }
 
@@ -571,6 +591,14 @@ func failSafeSamePeriodSinglePanel() {
     #expect(RenderStateBuilder.belongsToPanel(low1, panel: .upper, upperPeriod: .m60, lowerPeriod: .m60) == false)
     #expect(RenderStateBuilder.belongsToPanel(low1, panel: .lower, upperPeriod: .m60, lowerPeriod: .m60) == true)
 }
+@Test("D29 fail-safe：upper==lower 但 ≠ 线period → 两面板都 false（period 先于 panelPosition，codex plan-high）")
+func failSafeWrongPeriodExcludedBoth() {
+    // 两面板都 .m60，一条 .weekly 线 panelPosition=0：period 不符，绝不能被 panelPosition 硬塞进 .m60 面板
+    let wk = DrawingObject(toolType: .horizontal, anchors: [DrawingAnchor(period: .weekly, candleIndex: 0, price: 1)],
+                           isExtended: false, panelPosition: 0, period: .weekly)
+    #expect(RenderStateBuilder.belongsToPanel(wk, panel: .upper, upperPeriod: .m60, lowerPeriod: .m60) == false)
+    #expect(RenderStateBuilder.belongsToPanel(wk, panel: .lower, upperPeriod: .m60, lowerPeriod: .m60) == false)
+}
 ```
 （复盘两层 + legacy period 兜底 + revealTick 过滤不变，另在 `make(engine:panel:...)` 层测：用 `TrainingEngine.preview(mode:.review)`，`engine.drawings` 与 `engine.reviewDrawings` 各放一条不同 period 的线，断言只有匹配当前面板 period 的进 `rs.drawings`。参照 `RenderStateBuilderTests.swift:162` 的 `preview()` 范式。）
 
@@ -582,12 +610,15 @@ func failSafeSamePeriodSinglePanel() {
 // RenderStateBuilder.swift —— 新增静态纯函数
 static func belongsToPanel(_ drawing: DrawingObject, panel: PanelId,
                            upperPeriod: Period, lowerPeriod: Period) -> Bool {
+    // 先 period 匹配（codex plan-high）：period 不符一律不属于本面板——即使在同周期 fail-safe 下也不例外，
+    // 否则一条 .weekly 线会在两面板都 .m60 的损坏态下被 panelPosition 硬塞进 .m60 面板，坐标系错。
+    let panelPeriod = (panel == .upper) ? upperPeriod : lowerPeriod
+    guard drawing.period == panelPeriod else { return false }
+    // fail-safe（D29）：period 已匹配，且两面板同周期（损坏/版本错位 resume）→ 再用 panelPosition 破平局，只渲染在一个面板
     if upperPeriod == lowerPeriod {
-        // fail-safe（D29）：两面板同周期（损坏/版本错位 resume）→ 退回 panelPosition 定归属，保证只渲染在一个面板
         return drawing.panelPosition == (panel == .upper ? 0 : 1)
     }
-    let panelPeriod = (panel == .upper) ? upperPeriod : lowerPeriod
-    return drawing.period == panelPeriod
+    return true
 }
 
 // 过滤行（:67-69）改为：
