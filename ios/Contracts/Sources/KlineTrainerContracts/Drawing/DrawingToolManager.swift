@@ -53,10 +53,13 @@ public final class DrawingToolManager {
     /// Spec §3.1 commit: move pending → completedDrawings + reset.
     /// - invariant: activeTool != nil && !pendingAnchors.isEmpty
     /// - anchor 数量上下界由 caller (DrawingInputController.shouldCommit) gate, NOT manager.
-    /// - isExtended / panelPosition 默认 false / 0（向后兼容 spec §3.1 字面 `commit()` 无参调用）；
-    ///   caller (Wave 3 UI 层) 通过 panel + tool 类型决定真值，传入此方法持久化到 DrawingObject。
-    ///   字段对齐 `DrawingObject.isExtended` + `panelPosition` (0=上栏, 1=下栏；schema 持久化) per codex R2 H1。
-    public func commit(isExtended: Bool = false, panelPosition: Int = 0) {
+    /// - panelPosition 默认 0 (0=上栏, 1=下栏；schema 持久化) per codex R2 H1。
+    /// - **isExtended 不再由 caller 传入，而是从 lineSubType 派生**（codex branch-R5 high）：
+    ///   旧签名收 `isExtended: Bool` 却从不传 `lineSubType`（init 默认 `.straight`），于是 UI tap 路径
+    ///   传 `isExtended: true` 会存出「isExtended=true + lineSubType=.straight」的**矛盾数据**——
+    ///   而 legacy 解码派生是 `lineSubType = isExtended ? .ray : .straight`，二者语义必须一致。
+    ///   在**唯一写入点**派生，使矛盾**不可表达**。渲染只看 lineSubType；isExtended 仅供 legacy 派生。
+    public func commit(lineSubType: LineSubType = .straight, panelPosition: Int = 0) {
         // invariant: activeTool != nil
         precondition(activeTool != nil, "commit requires activeTool != nil")
         // invariant: !pendingAnchors.isEmpty
@@ -64,9 +67,10 @@ public final class DrawingToolManager {
         let drawing = DrawingObject(
             toolType: activeTool!,
             anchors: pendingAnchors,
-            isExtended: isExtended,
+            isExtended: lineSubType == .ray,   // 不变量：isExtended == (lineSubType == .ray)
             panelPosition: panelPosition,
-            revealTick: 0
+            revealTick: 0,
+            lineSubType: lineSubType
         )
         completedDrawings.append(drawing)
         activeTool = nil

@@ -268,7 +268,10 @@ public struct ChartContainerView: UIViewRepresentable {
             guard let anchor = inputController.tapToAnchor(at: point, panel: ps, mapper: mapper) else { return }
             manager.addAnchor(anchor)
             guard inputController.shouldCommit(current: manager.pendingAnchors, tool: .horizontal) else { return }
-            manager.commit(isExtended: true, panelPosition: panel == .upper ? 0 : 1)
+            // 本期无线型选择器（→1a-iii），新线一律 .straight（全宽，视觉零变化）；
+            // isExtended 由 commit 从 lineSubType 派生（codex branch-R5 high：旧代码传 isExtended:true
+            // 却存成 .straight，是自相矛盾的持久化数据）。
+            manager.commit(panelPosition: panel == .upper ? 0 : 1)
             if let committed = manager.completedDrawings.last {
                 engine.routeDrawingCommit(committed)          // review→reviewDrawings；否则→drawings（Task 10）
             }

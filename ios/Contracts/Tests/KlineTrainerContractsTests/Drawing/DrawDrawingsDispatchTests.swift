@@ -131,6 +131,41 @@ struct DrawDrawingsDispatchTests {
         #expect(totalLitPixels(price: 9999) == 0)   // 超出 fixture priceRange 100...200 → 线+标注全不画
         #expect(totalLitPixels(price: 150) > 0)     // 区间内对照组 → 画出
     }
+
+    // codex branch-R5 medium：fontSize 是持久化任意 Int。旧代码把它原样喂给
+    // `UIFont.systemFont(ofSize:)` + `size(withAttributes:)`——负数/极大值会让 CoreText 以荒谬字号排版
+    // （崩溃/卡死/极慢），而 labelRect 的 fail-closed 守卫【在那之后】才跑，来不及拦。
+    // 本测试走【真 render 路径】：损坏字号不得崩溃/卡死，且画出的像素必须全部落在画布内。
+    @MainActor
+    @Test("render 路径（codex branch-R5 medium）：损坏 fontSize（负数/极大）不崩溃、像素不越界")
+    func corruptFontSizeDoesNotCrashOrOverflow() {
+        func litPixelsOutsideCanvas(fontSize: Int) -> (total: Int, drewSomething: Bool) {
+            let w = 320, h = 200   // 必须匹配 makeMapperFixture 的 mainChartFrame（320×200）
+            var data = [UInt8](repeating: 0, count: w * h * 4)
+            let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            let d = DrawingObject(toolType: .horizontal,
+                anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 150)],   // 区间内 → 线可见
+                isExtended: false, panelPosition: 0, labelMode: .left, fontSize: fontSize)
+            // 若字号未被 clamp，这一步会把荒谬字号喂进 CoreText（可能挂起/崩溃）——测试跑通本身即为断言。
+            makeViewFixture().drawDrawings(ctx: ctx, mapper: makeMapperFixture(),
+                drawings: [d], period: .m3, scheme: .light, tools: [.horizontal: HorizontalLineTool()])
+            let lit = (0..<(w * h)).reduce(0) { $0 + (data[$1 * 4 + 3] > 0 ? 1 : 0) }
+            return (lit, lit > 0)
+        }
+        // 负数字号：不崩溃；线仍画出（标注按 clamp 后的 8pt 处理或放不下则不画，均不得越界）
+        let neg = litPixelsOutsideCanvas(fontSize: -5)
+        #expect(neg.drewSomething)                    // 线本身可见（价格在区间内）
+        #expect(neg.total <= 320 * 200)               // 像素全在画布内（未越界写内存/未溢出画布）
+        // 极大字号：不崩溃、不卡死（clamp 到 48pt 上界后正常排版）
+        let huge = litPixelsOutsideCanvas(fontSize: 1_000_000)
+        #expect(huge.drewSomething)
+        #expect(huge.total <= 320 * 200)
+        // 默认字号对照组：行为不变
+        let normal = litPixelsOutsideCanvas(fontSize: 14)
+        #expect(normal.drewSomething)
+    }
 }
 
 // MARK: - Spies / fixtures

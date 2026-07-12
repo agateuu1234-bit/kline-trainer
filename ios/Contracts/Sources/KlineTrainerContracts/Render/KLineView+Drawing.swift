@@ -31,7 +31,13 @@ extension KLineView {
                 if let content = DrawingLabelLayout.labelContent(for: drawing, lineVisible: true) {
                     let rgba = DrawingColorResolver.resolve(content.colorToken, scheme: scheme)
                     let color = UIColor(red: CGFloat(rgba.red), green: CGFloat(rgba.green), blue: CGFloat(rgba.blue), alpha: CGFloat(rgba.alpha))
-                    let attrs: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: CGFloat(drawing.fontSize)), .foregroundColor: color]
+                    // fontSize 先 clamp 再进 UIKit（codex branch-R5 medium）：持久化的 fontSize 是任意 Int，
+                    // 负数 / 极大值原样喂给 UIFont + size(withAttributes:) 会让 CoreText 崩溃/卡死/极慢——
+                    // 而 labelRect 的 fail-closed 守卫在【测量之后】才跑。故 sanitize 必须是本块第一次碰 fontSize。
+                    let attrs: [NSAttributedString.Key: Any] = [
+                        .font: UIFont.systemFont(ofSize: DrawingLabelLayout.sanitizedFontSize(drawing.fontSize)),
+                        .foregroundColor: color,
+                    ]
                     let textSize = (content.text as NSString).size(withAttributes: attrs)
                     if let rect = DrawingLabelLayout.labelRect(mode: content.mode, lineY: g.y, lineXRange: (g.minX, g.maxX),
                                                                textSize: textSize, mainChartFrame: mapper.viewport.mainChartFrame) {

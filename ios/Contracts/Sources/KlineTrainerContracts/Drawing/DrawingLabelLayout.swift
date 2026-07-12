@@ -8,6 +8,15 @@ import CoreGraphics
 public enum DrawingLabelLayout {
     private static let gap: CGFloat = 2   // 标签与线的间隙
 
+    /// 标注支持的字号范围（pt）。`DrawingObject.fontSize` 是**持久化的任意 Int**——损坏 / 未来版本的 blob
+    /// 可能写入负数或极大值。必须在创建 UIFont / 测量文字【之前】clamp（codex branch-R5 medium）：
+    /// 否则 CoreText 会以荒谬字号排版，可能崩溃 / 卡死 / 极慢，而 `labelRect` 的 fail-closed 守卫
+    /// 在测量【之后】才跑，来不及拦。默认 14 落在范围内 → 视觉零变化。
+    public static let supportedFontSizes: ClosedRange<Int> = 8...48
+    nonisolated public static func sanitizedFontSize(_ raw: Int) -> CGFloat {
+        CGFloat(min(max(raw, supportedFontSizes.lowerBound), supportedFontSizes.upperBound))
+    }
+
     public static func labelRect(mode: LabelMode, lineY: CGFloat,
                                  lineXRange: (minX: CGFloat, maxX: CGFloat),
                                  textSize: CGSize, mainChartFrame: CGRect) -> CGRect? {

@@ -150,4 +150,21 @@ struct DrawingLabelLayoutTests {
             #expect(r.minY >= Self.frame.minY && r.maxY <= Self.frame.maxY)
         }
     }
+
+    // codex branch-R5 medium：fontSize 是持久化的任意 Int，损坏/未来版本 blob 可写入负数或极大值。
+    // 必须在创建 UIFont / 测量文字【之前】就 clamp——否则 CoreText 以荒谬字号排版会崩溃/卡死/极慢。
+    @Test("sanitizedFontSize：负数与 0 → 下界 8；极大值 → 上界 48")
+    func sanitizedFontSizeClampsCorruptValues() {
+        #expect(DrawingLabelLayout.sanitizedFontSize(-5) == 8)
+        #expect(DrawingLabelLayout.sanitizedFontSize(0) == 8)
+        #expect(DrawingLabelLayout.sanitizedFontSize(Int.min) == 8)
+        #expect(DrawingLabelLayout.sanitizedFontSize(1_000_000) == 48)
+        #expect(DrawingLabelLayout.sanitizedFontSize(Int.max) == 48)
+    }
+    @Test("sanitizedFontSize：默认 14 与边界值原样返回（视觉零变化）")
+    func sanitizedFontSizeIdentityInRange() {
+        #expect(DrawingLabelLayout.sanitizedFontSize(14) == 14)   // DrawingObject.fontSize 默认值 → 不得漂移
+        #expect(DrawingLabelLayout.sanitizedFontSize(8) == 8)
+        #expect(DrawingLabelLayout.sanitizedFontSize(48) == 48)
+    }
 }
