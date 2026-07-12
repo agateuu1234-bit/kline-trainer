@@ -27,14 +27,13 @@ extension KLineView {
             // KLineView+Drawing.swift —— tool.render 之后画价格标签。UIKit 层【零决策】：画不画/文字/色/对齐全在 labelContent，
             // 位置全在 labelRect，本块只负责机械绘制（文字绘制范式同 KLineView+Markers.swift:46-51 / KLineView+Crosshair.swift:112-123）。
             if drawing.toolType == .horizontal,
-               let y = HorizontalLineTool().lineY(anchors: drawing.anchors, mapper: mapper) {
-                let xr = HorizontalLineTool.lineXRange(for: drawing, mapper: mapper)   // nil = segment/超界射线（fail-closed）
-                if let content = DrawingLabelLayout.labelContent(for: drawing, lineVisible: xr != nil), let xr {
+               let g = HorizontalLineTool.visibleGeometry(for: drawing, mapper: mapper) {   // nil = segment/超界射线/价格超出可见区间（fail-closed，codex branch-R3）
+                if let content = DrawingLabelLayout.labelContent(for: drawing, lineVisible: true) {
                     let rgba = DrawingColorResolver.resolve(content.colorToken, scheme: scheme)
                     let color = UIColor(red: CGFloat(rgba.red), green: CGFloat(rgba.green), blue: CGFloat(rgba.blue), alpha: CGFloat(rgba.alpha))
                     let attrs: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: CGFloat(drawing.fontSize)), .foregroundColor: color]
                     let textSize = (content.text as NSString).size(withAttributes: attrs)
-                    if let rect = DrawingLabelLayout.labelRect(mode: content.mode, lineY: y, lineXRange: xr,
+                    if let rect = DrawingLabelLayout.labelRect(mode: content.mode, lineY: g.y, lineXRange: (g.minX, g.maxX),
                                                                textSize: textSize, mainChartFrame: mapper.viewport.mainChartFrame) {
                         UIGraphicsPushContext(ctx)
                         (content.text as NSString).draw(at: rect.origin, withAttributes: attrs)

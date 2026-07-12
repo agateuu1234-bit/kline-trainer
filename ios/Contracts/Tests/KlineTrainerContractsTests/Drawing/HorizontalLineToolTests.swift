@@ -239,4 +239,48 @@ struct HorizontalLineToolTests {
         #expect(HorizontalLineTool.lineXRange(for: seg, mapper: m) == nil)   // 不渲染
         #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 400, y: m.priceToY(15)), mapper: m, drawing: seg) == false)  // 不命中
     }
+
+    // MARK: - visibleGeometry（codex branch-R3 medium：y 可见性须与 x 可见性同判据，render/hitTest/标注三者共用）
+
+    @Test("visibleGeometry：价格超出可见区间（上方，> priceRange.max）→ nil；hitTest 亦 false")
+    func visibleGeometryAbovePriceRangeNil() {
+        let m = Self.mapper()   // priceRange 10...20
+        let d = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 999)],
+            isExtended: false, panelPosition: 0)
+        #expect(HorizontalLineTool.visibleGeometry(for: d, mapper: m) == nil)
+        #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 400, y: 180), mapper: m, drawing: d) == false)
+    }
+    @Test("visibleGeometry：价格超出可见区间（下方，< priceRange.min）→ nil；hitTest 亦 false")
+    func visibleGeometryBelowPriceRangeNil() {
+        let m = Self.mapper()   // priceRange 10...20
+        let d = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: -999)],
+            isExtended: false, panelPosition: 0)
+        #expect(HorizontalLineTool.visibleGeometry(for: d, mapper: m) == nil)
+        #expect(HorizontalLineTool().hitTest(point: CGPoint(x: 400, y: 180), mapper: m, drawing: d) == false)
+    }
+    @Test("visibleGeometry：价格在可见区间内 → 非 nil，y/minX/maxX 与既有 helper 一致（不回归）")
+    func visibleGeometryInRangeMatchesExisting() {
+        let m = Self.mapper()
+        let d = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+            isExtended: false, panelPosition: 0)
+        let g = HorizontalLineTool.visibleGeometry(for: d, mapper: m)!
+        let xr = HorizontalLineTool.lineXRange(for: d, mapper: m)!
+        #expect(g.y == m.priceToY(15))
+        #expect(g.minX == xr.minX && g.maxX == xr.maxX)
+    }
+    @Test("visibleGeometry：.segment / 超右缘射线 仍 nil（沿用既有 fail-closed）")
+    func visibleGeometrySegmentAndOffscreenRayNil() {
+        let m = Self.mapper()
+        let seg = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+            isExtended: false, panelPosition: 0, lineSubType: .segment)
+        #expect(HorizontalLineTool.visibleGeometry(for: seg, mapper: m) == nil)
+        let offRight = DrawingObject(toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m3, candleIndex: 100, price: 15)],
+            isExtended: false, panelPosition: 0, lineSubType: .ray)
+        #expect(HorizontalLineTool.visibleGeometry(for: offRight, mapper: m) == nil)
+    }
 }

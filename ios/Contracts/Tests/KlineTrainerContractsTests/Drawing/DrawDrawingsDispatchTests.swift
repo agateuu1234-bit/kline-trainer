@@ -111,6 +111,26 @@ struct DrawDrawingsDispatchTests {
         #expect(labelPixels(.hidden) == 0)                 // 隐藏无泄漏
         #expect(labelPixels(.left, sub: .segment) == 0)    // .segment fail-closed → 连线带标注都不画
     }
+
+    @MainActor
+    @Test("render 路径回归（codex branch-R3 medium）：价格超出 viewport 区间的线，线与标注均不画；区间内对照组画出")
+    func offRangePriceLineAndLabelBothInvisible() {
+        func totalLitPixels(price: Double) -> Int {
+            let w = 320, h = 200   // 必须匹配 makeMapperFixture 的 mainChartFrame（320×200）
+            var data = [UInt8](repeating: 0, count: w * h * 4)
+            let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            let d = DrawingObject(toolType: .horizontal,
+                anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: price)],
+                isExtended: false, panelPosition: 0, labelMode: .left)
+            makeViewFixture().drawDrawings(ctx: ctx, mapper: makeMapperFixture(),
+                drawings: [d], period: .m3, scheme: .light, tools: [.horizontal: HorizontalLineTool()])
+            return (0..<(w * h)).reduce(0) { $0 + (data[$1 * 4 + 3] > 0 ? 1 : 0) }
+        }
+        #expect(totalLitPixels(price: 9999) == 0)   // 超出 fixture priceRange 100...200 → 线+标注全不画
+        #expect(totalLitPixels(price: 150) > 0)     // 区间内对照组 → 画出
+    }
 }
 
 // MARK: - Spies / fixtures

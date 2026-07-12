@@ -65,9 +65,22 @@ public struct HorizontalLineTool: DrawingTool {
         }
     }
 
+    /// 线的完整可见几何：x 区间存在（lineXRange != nil）**且** y 落在主图纵向范围内。
+    /// render / hitTest / 标注三者共用同一判据（codex branch-R3：避免分叉——价格超出可见价格区间的线
+    /// 本就不该显示，标注更不该被 clamp 回图内冒充有效价位；且 draw(rect:) 无 clip，超范围的线会画到
+    /// 成交量/MACD 面板上去）。
+    nonisolated static func visibleGeometry(for drawing: DrawingObject, mapper: CoordinateMapper)
+        -> (y: CGFloat, minX: CGFloat, maxX: CGFloat)? {
+        guard let anchor = drawing.anchors.first else { return nil }
+        guard let xr = lineXRange(for: drawing, mapper: mapper) else { return nil }   // segment / 超右缘射线 → nil
+        let y = mapper.priceToY(anchor.price)
+        let frame = mapper.viewport.mainChartFrame
+        guard y >= frame.minY, y <= frame.maxY else { return nil }                    // 价格超出可见区间 → 不可见
+        return (y: y, minX: xr.minX, maxX: xr.maxX)
+    }
+
     public func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme) {
-        guard let y = lineY(anchors: drawing.anchors, mapper: mapper),
-              let xr = Self.lineXRange(for: drawing, mapper: mapper) else { return }
+        guard let g = Self.visibleGeometry(for: drawing, mapper: mapper) else { return }
         ctx.saveGState()
         let rgba = DrawingColorResolver.resolve(drawing.colorToken, scheme: scheme)
         ctx.setStrokeColor(CGColor(srgbRed: CGFloat(rgba.red), green: CGFloat(rgba.green),
@@ -75,15 +88,14 @@ public struct HorizontalLineTool: DrawingTool {
         ctx.setLineWidth(Self.lineWidth(forThickness: drawing.thickness))
         let dash = Self.dashPattern(for: drawing.lineStyle)
         if dash.isEmpty { ctx.setLineDash(phase: 0, lengths: []) } else { ctx.setLineDash(phase: 0, lengths: dash) }
-        ctx.move(to: CGPoint(x: xr.minX, y: y))
-        ctx.addLine(to: CGPoint(x: xr.maxX, y: y))
+        ctx.move(to: CGPoint(x: g.minX, y: g.y))
+        ctx.addLine(to: CGPoint(x: g.maxX, y: g.y))
         ctx.strokePath()
         ctx.restoreGState()
     }
 
     public func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool {
-        guard let y = lineY(anchors: drawing.anchors, mapper: mapper),
-              let xr = Self.lineXRange(for: drawing, mapper: mapper) else { return false }
-        return abs(point.y - y) <= Self.hitTolerance && point.x >= xr.minX && point.x <= xr.maxX
+        guard let g = Self.visibleGeometry(for: drawing, mapper: mapper) else { return false }
+        return abs(point.y - g.y) <= Self.hitTolerance && point.x >= g.minX && point.x <= g.maxX
     }
 }
