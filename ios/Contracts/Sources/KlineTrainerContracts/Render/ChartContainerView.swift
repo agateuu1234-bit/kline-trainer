@@ -265,7 +265,7 @@ public struct ChartContainerView: UIViewRepresentable {
             guard viewport.geometry.candleStep > 0 else { return }
             let mapper = CoordinateMapper(viewport: viewport, displayScale: view.traitCollection.displayScale)
             let ps = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
-            let anchor = inputController.tapToAnchor(at: point, panel: ps, mapper: mapper)
+            guard let anchor = inputController.tapToAnchor(at: point, panel: ps, mapper: mapper) else { return }
             manager.addAnchor(anchor)
             guard inputController.shouldCommit(current: manager.pendingAnchors, tool: .horizontal) else { return }
             manager.commit(isExtended: true, panelPosition: panel == .upper ? 0 : 1)

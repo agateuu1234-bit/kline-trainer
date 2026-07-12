@@ -38,11 +38,11 @@ struct DrawingProtocolTests {
     }
 
     @Test("§5.2 #13 FakeInputController conforms to DrawingInputController (2 methods callable)")
-    func fakeInputControllerConforms() {
+    func fakeInputControllerConforms() throws {
         let ctrl: any DrawingInputController = FakeInputController()
         let mapper = makeMapperFixture()
         let panel = makePanelFixture()
-        let anchor = ctrl.tapToAnchor(at: .zero, panel: panel, mapper: mapper)
+        let anchor = try #require(ctrl.tapToAnchor(at: .zero, panel: panel, mapper: mapper))
         #expect(anchor.candleIndex == 0)
         #expect(anchor.price == 0)
         let shouldCommit = ctrl.shouldCommit(current: [anchor], tool: .horizontal)
@@ -63,7 +63,7 @@ private final class FakeDrawingTool: DrawingTool {
 
 @MainActor
 private final class FakeInputController: DrawingInputController {
-    func tapToAnchor(at point: CGPoint, panel: PanelViewState, mapper: CoordinateMapper) -> DrawingAnchor {
+    func tapToAnchor(at point: CGPoint, panel: PanelViewState, mapper: CoordinateMapper) -> DrawingAnchor? {
         DrawingAnchor(period: .m60, candleIndex: 0, price: 0)
     }
     func shouldCommit(current: [DrawingAnchor], tool: DrawingToolType) -> Bool {

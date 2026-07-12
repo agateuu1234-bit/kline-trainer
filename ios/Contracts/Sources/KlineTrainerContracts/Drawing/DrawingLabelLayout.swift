@@ -20,18 +20,27 @@ public enum DrawingLabelLayout {
         return placed(x: x, lineY: lineY, textSize: textSize, mainChartFrame: mainChartFrame)
     }
 
-    // 统一裁剪（codex plan-R3, branch-R2）：标签整个放不进主图（坏数据，如持久化超大 fontSize）→ fail-closed 不画；
-    // 否则 x/y 都收进 [min, max-size]——左右不溢出（含射线锚近右缘时的 .left/.show），
-    // y 优先线【上方】（不压线），上方放不下时改放线【下方】，再 clamp 回主图内（含下方 fallback 撞下边缘的场景）。
+    // 严格双侧 fit 检查（codex branch-R4 medium）：x 方向溢出仍按原逻辑 clamp/fail-closed；
+    // y 方向不再 clamp——上方放不下就试下方，上下都放不下（保 gap 前提下）→ fail-closed 不画，
+    // 绝不能把标签压在用户的画线上（损坏的 fontSize 不得遮蔽画线）。
     private static func placed(x: CGFloat, lineY: CGFloat, textSize: CGSize, mainChartFrame: CGRect) -> CGRect? {
-        guard textSize.width <= mainChartFrame.width, textSize.height <= mainChartFrame.height else { return nil }
-        let maxX = mainChartFrame.maxX - textSize.width
-        let clampedX = min(max(x, mainChartFrame.minX), maxX)
-        let above = lineY - gap - textSize.height
-        let y = above >= mainChartFrame.minY ? above : lineY + gap   // 上方无空间 → 线下方
-        let maxY = mainChartFrame.maxY - textSize.height
-        let clampedY = min(max(y, mainChartFrame.minY), maxY)
-        return CGRect(x: clampedX, y: clampedY, width: textSize.width, height: textSize.height)
+        // 宽度放不下 → fail-closed（x clamp 区间会反转）
+        guard textSize.width <= mainChartFrame.width else { return nil }
+        let clampedX = min(max(x, mainChartFrame.minX), mainChartFrame.maxX - textSize.width)
+
+        // 上方：底边贴在线上方 gap 处（不压线）
+        let aboveY = lineY - gap - textSize.height
+        if aboveY >= mainChartFrame.minY {
+            return CGRect(x: clampedX, y: aboveY, width: textSize.width, height: textSize.height)
+        }
+        // 下方：顶边贴在线下方 gap 处（不压线）
+        let belowY = lineY + gap
+        if belowY + textSize.height <= mainChartFrame.maxY {
+            return CGRect(x: clampedX, y: belowY, width: textSize.width, height: textSize.height)
+        }
+        // 上下都放不下（保 gap 不压线的前提下）→ fail-closed 不画（codex branch-R4-medium：
+        // 宁可不画标注，也不能把标签盖在用户的画线上——损坏的 fontSize 不得遮蔽画线）。
+        return nil
     }
 }
 

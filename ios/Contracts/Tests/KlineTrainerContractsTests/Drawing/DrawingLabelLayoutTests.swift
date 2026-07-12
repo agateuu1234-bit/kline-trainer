@@ -87,23 +87,53 @@ struct DrawingLabelLayoutTests {
         #expect(DrawingLabelLayout.labelRect(mode: .left, lineY: 100,
             lineXRange: (0, 800), textSize: oversized, mainChartFrame: Self.frame) == nil)
     }
-    @Test("下方 fallback 撞下边缘：clamp 回框内不溢出（codex branch-R2 medium）")
-    func belowFallbackClampsToBottom() {
-        // frame 很矮（20pt）：above=lineY-gap-textH=10-2-16=-8<0 → 走下方分支；
-        // 下方 y=lineY+gap=12，12+16=28 超出 frame.maxY(20) → 须 clamp 回框内
+    // codex branch-R4 medium：上下都放不下（保 gap 前提下）时，旧实现会把 y clamp 回框内，
+    // 使返回的 rect 压住线——这违反「不压线」不变量。新实现应 fail-closed 返回 nil，不再 clamp。
+    @Test("下方 fallback 也放不下（保 gap 前提下）：fail-closed 不画，不压线（codex branch-R4 medium）")
+    func belowFallbackNoRoomFailsClosed() {
+        // frame 很矮（20pt）：above=lineY-gap-textH=10-2-16=-8<0 → 上方放不下；
+        // 下方 y=lineY+gap=12，12+16=28 超出 frame.maxY(20) → 下方也放不下 → fail-closed
         let shortFrame = CGRect(x: 0, y: 0, width: 800, height: 20)
         let r = DrawingLabelLayout.labelRect(mode: .left, lineY: 10,
-            lineXRange: (0, 800), textSize: Self.sz, mainChartFrame: shortFrame)!
-        #expect(r.maxY <= shortFrame.maxY)
-        #expect(r.minY >= shortFrame.minY)
+            lineXRange: (0, 800), textSize: Self.sz, mainChartFrame: shortFrame)
+        #expect(r == nil)
     }
-    @Test("文字尺寸恰好等于 frame 尺寸：仍返回非 nil，贴边界不溢出（codex branch-R2 medium）")
-    func exactFrameSizeFits() {
+    @Test("文字尺寸恰好等于 frame 尺寸：上下都保不住 gap → fail-closed（codex branch-R4 medium）")
+    func exactFrameSizeBothSidesNoRoomFailsClosed() {
         let exact = CGSize(width: Self.frame.width, height: Self.frame.height)
         let r = DrawingLabelLayout.labelRect(mode: .left, lineY: 100,
-            lineXRange: (0, 800), textSize: exact, mainChartFrame: Self.frame)!
-        #expect(r.minX >= Self.frame.minX && r.maxX <= Self.frame.maxX)
-        #expect(r.minY >= Self.frame.minY && r.maxY <= Self.frame.maxY)
+            lineXRange: (0, 800), textSize: exact, mainChartFrame: Self.frame)
+        #expect(r == nil)
+    }
+    // codex 点名场景：frame.height=20, lineY=10, textSize.height=16 → 旧实现 clamp 出 y=4 的 rect（跨 4…20），
+    // 盖住了 lineY=10 处的线。新实现须 fail-closed 返回 nil，绝不能盖线。
+    @Test("codex 点名压线场景：frame.height=20 lineY=10 textSize.height=16 → nil（codex branch-R4 medium）")
+    func codexPinpointedOverlapScenarioFailsClosed() {
+        let shortFrame = CGRect(x: 0, y: 0, width: 800, height: 20)
+        let r = DrawingLabelLayout.labelRect(mode: .left, lineY: 10,
+            lineXRange: (0, 800), textSize: CGSize(width: 10, height: 16), mainChartFrame: shortFrame)
+        #expect(r == nil)
+    }
+    // 核心不变量（codex branch-R4 medium）：凡返回非 nil 的 rect，必须完全落在 mainChartFrame 内，
+    // 且不能包含 lineY（rect 与线之间必须保留 gap）——即便上下都放不下的场景（跳过，返回 nil）。
+    @Test("不变量：非 nil 的 rect 必须完全落在 mainChartFrame 内，且不压线（codex branch-R4 medium）")
+    func neverOverlapsLineWhenNonNil() {
+        let gap: CGFloat = 2   // 与 DrawingLabelLayout 内部 gap 常量保持一致（生产值）
+        let cases: [(LabelMode, CGFloat, (CGFloat, CGFloat), CGSize, CGRect)] = [
+            (.left, 100, (0, 800), Self.sz, Self.frame),
+            (.right, 100, (0, 800), Self.sz, Self.frame),
+            (.left, 5, (0, 800), Self.sz, Self.frame),                 // 顶边溢出 → 改放下方
+            (.left, 100, (790, 800), Self.sz, Self.frame),             // 射线锚近右缘
+            (.left, 10, (0, 800), CGSize(width: 10, height: 16),
+             CGRect(x: 0, y: 0, width: 800, height: 20)),              // 上下都放不下 → nil，跳过
+        ]
+        for (mode, lineY, xRange, sz, frame) in cases {
+            guard let r = DrawingLabelLayout.labelRect(mode: mode, lineY: lineY,
+                lineXRange: xRange, textSize: sz, mainChartFrame: frame) else { continue }
+            #expect(r.minX >= frame.minX && r.maxX <= frame.maxX)
+            #expect(r.minY >= frame.minY && r.maxY <= frame.maxY)
+            #expect(r.maxY <= lineY - gap || r.minY >= lineY + gap)   // 不压线
+        }
     }
     @Test("通用不变量：凡返回非 nil 的 rect 必须完全落在 mainChartFrame 内")
     func alwaysFullyContainedWhenNonNil() {

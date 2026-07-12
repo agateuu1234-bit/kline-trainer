@@ -11,8 +11,11 @@ import CoreGraphics
 public final class DefaultDrawingInputController: DrawingInputController {
     public init() {}
 
-    public func tapToAnchor(at point: CGPoint, panel: PanelViewState, mapper: CoordinateMapper) -> DrawingAnchor {
-        DrawingAnchor(period: panel.period,
+    public func tapToAnchor(at point: CGPoint, panel: PanelViewState, mapper: CoordinateMapper) -> DrawingAnchor? {
+        // codex branch-R4-high：落锚必须落在主图内。成交量/MACD 区的 tap 换算出的价格在可见价格区间之外，
+        // 提交后既不渲染也不可命中（visibleGeometry fail-closed）→ 会在持久化数据里留下看不见的幽灵线。
+        guard mapper.viewport.mainChartFrame.contains(point) else { return nil }
+        return DrawingAnchor(period: panel.period,
                       candleIndex: mapper.xToIndex(point.x),
                       price: mapper.yToPrice(point.y))
     }
