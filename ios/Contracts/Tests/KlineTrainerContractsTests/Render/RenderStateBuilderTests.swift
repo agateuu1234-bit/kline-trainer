@@ -1036,6 +1036,59 @@ struct RenderStateBuilderTests {
         #expect(vp.startIndex == 0)
         #expect(vp.pixelShift == 4290)   // 5000 − 710
     }
+
+    // MARK: - D29：周期绑定渲染过滤 + upper==lower fail-safe（1a-i Task 6）
+
+    @Test("D29：按 period 落面板，panelPosition 不再影响")
+    func filtersByPeriodNotPanelPosition() {
+        let d = DrawingObject(toolType: .horizontal, anchors: [DrawingAnchor(period: .m60, candleIndex: 0, price: 1)],
+                              isExtended: false, panelPosition: 1, period: .m60)   // period=.m60 但 panelPosition=1（冲突）
+        #expect(RenderStateBuilder.belongsToPanel(d, panel: .upper, upperPeriod: .m60, lowerPeriod: .m15) == true)
+        #expect(RenderStateBuilder.belongsToPanel(d, panel: .lower, upperPeriod: .m60, lowerPeriod: .m15) == false)
+    }
+    @Test("D29：某 period 不在任一面板 → 两面板都不含")
+    func periodNotShownHiddenBoth() {
+        let d = DrawingObject(toolType: .horizontal, anchors: [DrawingAnchor(period: .weekly, candleIndex: 0, price: 1)],
+                              isExtended: false, panelPosition: 0, period: .weekly)
+        for p in [PanelId.upper, .lower] {
+            #expect(RenderStateBuilder.belongsToPanel(d, panel: p, upperPeriod: .m60, lowerPeriod: .m15) == false)
+        }
+    }
+    @Test("D29 fail-safe：upper==lower==线period → 只落 panelPosition 指定的那个面板")
+    func failSafeSamePeriodSinglePanel() {
+        let up0 = DrawingObject(toolType: .horizontal, anchors: [DrawingAnchor(period: .m60, candleIndex: 0, price: 1)],
+                                isExtended: false, panelPosition: 0, period: .m60)
+        let low1 = DrawingObject(toolType: .horizontal, anchors: [DrawingAnchor(period: .m60, candleIndex: 0, price: 1)],
+                                 isExtended: false, panelPosition: 1, period: .m60)
+        #expect(RenderStateBuilder.belongsToPanel(up0, panel: .upper, upperPeriod: .m60, lowerPeriod: .m60) == true)
+        #expect(RenderStateBuilder.belongsToPanel(up0, panel: .lower, upperPeriod: .m60, lowerPeriod: .m60) == false)
+        #expect(RenderStateBuilder.belongsToPanel(low1, panel: .upper, upperPeriod: .m60, lowerPeriod: .m60) == false)
+        #expect(RenderStateBuilder.belongsToPanel(low1, panel: .lower, upperPeriod: .m60, lowerPeriod: .m60) == true)
+    }
+    @Test("D29 fail-safe：upper==lower 但 ≠ 线period → 两面板都 false（period 先于 panelPosition，codex plan-high）")
+    func failSafeWrongPeriodExcludedBoth() {
+        // 两面板都 .m60，一条 .weekly 线 panelPosition=0：period 不符，绝不能被 panelPosition 硬塞进 .m60 面板
+        let wk = DrawingObject(toolType: .horizontal, anchors: [DrawingAnchor(period: .weekly, candleIndex: 0, price: 1)],
+                               isExtended: false, panelPosition: 0, period: .weekly)
+        #expect(RenderStateBuilder.belongsToPanel(wk, panel: .upper, upperPeriod: .m60, lowerPeriod: .m60) == false)
+        #expect(RenderStateBuilder.belongsToPanel(wk, panel: .lower, upperPeriod: .m60, lowerPeriod: .m60) == false)
+    }
+
+    @MainActor
+    @Test("D29 集成：make 两层（drawings/reviewDrawings）都按面板 period 路由——preview(.review) upper=.m60/lower=.daily 不同周期，非 fail-safe")
+    func makeRoutesBothLayersByPanelPeriod() {
+        let engine = TrainingEngine.preview(mode: .review)
+        // engine.upperPanel.period == .m60、engine.lowerPanel.period == .daily（真实 period 路由，非 upper==lower fail-safe）
+        engine.appendDrawing(DrawingObject(toolType: .horizontal,
+                                           anchors: [DrawingAnchor(period: .m60, candleIndex: 0, price: 10)],
+                                           isExtended: false, panelPosition: 0, period: .m60))
+        engine.appendReviewDrawing(DrawingObject(toolType: .horizontal,
+                                                 anchors: [DrawingAnchor(period: .daily, candleIndex: 0, price: 11)],
+                                                 isExtended: false, panelPosition: 0, period: .daily))
+        let rs = RenderStateBuilder.make(engine: engine, panel: .upper, bounds: Self.bounds)
+        #expect(rs.drawings.count == 1)
+        #expect(rs.drawings.allSatisfy { $0.period == .m60 })
+    }
 }
 
 // MARK: - RFC-C Task 6: previousCloseBeforeVisible helper

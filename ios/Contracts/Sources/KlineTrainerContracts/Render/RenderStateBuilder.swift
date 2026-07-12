@@ -65,10 +65,27 @@ public enum RenderStateBuilder {
             // review-redesign Task 10：review 模式叠加两层——只读原训练线 `engine.drawings` +
             // 复盘新画线 `engine.reviewDrawings`，两层共用同一渐显规则；非 review 模式仍只含 `drawings`。
             drawings: (engine.drawings + (engine.flow.mode == .review ? engine.reviewDrawings : [])).filter { drawing in
-                drawing.panelPosition == (panel == .upper ? 0 : 1) && drawing.revealTick <= tick
+                RenderStateBuilder.belongsToPanel(drawing, panel: panel,
+                    upperPeriod: engine.upperPanel.period, lowerPeriod: engine.lowerPanel.period)
+                    && drawing.revealTick <= tick
             },
             crosshairPoint: crosshair,   // C8b：长按十字光标由 ChartContainerView.Coordinator 视图层透传（D3）
             previousCloseBeforeVisible: previousCloseBeforeVisible(candles: candles, startIndex: viewport.startIndex))
+    }
+
+    /// D29（1a-i Task 6）：画线归属哪个面板——按 `drawing.period` 落该 period 当前所在的面板，
+    /// 不再看 `panelPosition`（1b-i 的命中集合 `visibleDrawings` 将复用本函数）。
+    static func belongsToPanel(_ drawing: DrawingObject, panel: PanelId,
+                               upperPeriod: Period, lowerPeriod: Period) -> Bool {
+        // 先 period 匹配（codex plan-high）：period 不符一律不属于本面板——即使在同周期 fail-safe 下也不例外，
+        // 否则一条 .weekly 线会在两面板都 .m60 的损坏态下被 panelPosition 硬塞进 .m60 面板，坐标系错。
+        let panelPeriod = (panel == .upper) ? upperPeriod : lowerPeriod
+        guard drawing.period == panelPeriod else { return false }
+        // fail-safe（D29）：period 已匹配，且两面板同周期（损坏/版本错位 resume）→ 再用 panelPosition 破平局，只渲染在一个面板
+        if upperPeriod == lowerPeriod {
+            return drawing.panelPosition == (panel == .upper ? 0 : 1)
+        }
+        return true
     }
 
     /// C8b H1 handler 复用：当前可见 candle 索引半开区间。委托 makeViewport 单一真相。

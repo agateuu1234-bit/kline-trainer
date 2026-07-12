@@ -125,25 +125,51 @@ struct DrawingToolManagerTests {
         #expect(m2.enabledTools.count == 7)
     }
 
-    @Test("§5.1 #11 commit with isExtended=true carries metadata (codex R2 H1)")
-    func commitWithIsExtendedCarriesMetadata() {
+    // codex branch-R5 high：commit 旧签名收 `isExtended: Bool`，却从不传 lineSubType（init 默认 .straight）
+    // → caller 传 isExtended:true 会存出「isExtended=true + lineSubType=.straight」的矛盾数据
+    // （legacy 派生是 `lineSubType = isExtended ? .ray : .straight`，二者语义必须一致）。
+    // 新签名改收 lineSubType 并【派生】isExtended，使矛盾在唯一写入点【不可表达】。
+    @Test("§5.1 #11 commit(lineSubType: .ray) 派生 isExtended=true（codex branch-R5：二者不得矛盾）")
+    func commitWithRayDerivesIsExtended() {
         let m = DrawingToolManager(enabledTools: [.horizontal])
         m.toggle(.horizontal)
         m.addAnchor(makeAnchor())
-        m.commit(isExtended: true, panelPosition: 0)
+        m.commit(lineSubType: .ray, panelPosition: 0)
         #expect(m.completedDrawings.count == 1)
+        #expect(m.completedDrawings[0].lineSubType == .ray)
         #expect(m.completedDrawings[0].isExtended == true)
         #expect(m.completedDrawings[0].panelPosition == 0)
     }
 
-    @Test("§5.1 #12 commit with panelPosition=1 (lower panel) carries metadata (codex R2 H1)")
+    @Test("§5.1 #12 commit(lineSubType: .straight, panelPosition: 1) 派生 isExtended=false")
     func commitWithLowerPanelCarriesMetadata() {
         let m = DrawingToolManager(enabledTools: [.horizontal])
         m.toggle(.horizontal)
         m.addAnchor(makeAnchor())
-        m.commit(isExtended: false, panelPosition: 1)
+        m.commit(lineSubType: .straight, panelPosition: 1)
         #expect(m.completedDrawings.count == 1)
         #expect(m.completedDrawings[0].panelPosition == 1)
+        #expect(m.completedDrawings[0].lineSubType == .straight)
+        #expect(m.completedDrawings[0].isExtended == false)
+    }
+
+    @Test("不变量（codex branch-R5 high）：任何 commit 产出的对象都满足 isExtended == (lineSubType == .ray)")
+    func commitAlwaysKeepsIsExtendedConsistentWithSubType() {
+        for sub in LineSubType.allCases {
+            let m = DrawingToolManager(enabledTools: [.horizontal])
+            m.toggle(.horizontal)
+            m.addAnchor(makeAnchor())
+            m.commit(lineSubType: sub, panelPosition: 0)
+            let d = m.completedDrawings[0]
+            #expect(d.lineSubType == sub)
+            #expect(d.isExtended == (sub == .ray))
+        }
+        // 默认（本期 tap 路径走的就是默认）→ .straight + isExtended=false，自洽
+        let m = DrawingToolManager(enabledTools: [.horizontal])
+        m.toggle(.horizontal)
+        m.addAnchor(makeAnchor())
+        m.commit()
+        #expect(m.completedDrawings[0].lineSubType == .straight)
         #expect(m.completedDrawings[0].isExtended == false)
     }
 }

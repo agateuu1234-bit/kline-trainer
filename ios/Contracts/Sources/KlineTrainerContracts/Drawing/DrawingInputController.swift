@@ -10,6 +10,6 @@ import CoreGraphics
 
 @MainActor
 public protocol DrawingInputController: AnyObject {
-    func tapToAnchor(at point: CGPoint, panel: PanelViewState, mapper: CoordinateMapper) -> DrawingAnchor
+    func tapToAnchor(at point: CGPoint, panel: PanelViewState, mapper: CoordinateMapper) -> DrawingAnchor?
     func shouldCommit(current: [DrawingAnchor], tool: DrawingToolType) -> Bool
 }

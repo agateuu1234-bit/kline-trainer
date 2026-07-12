@@ -40,6 +40,6 @@ struct SpecLiteralGuardTests {
 private final class SignatureGuardTool: DrawingTool {
     static var type: DrawingToolType { .horizontal }
     var requiredAnchors: ClosedRange<Int> { 1...2 }
-    func render(ctx: CGContext, mapper: CoordinateMapper, anchors: [DrawingAnchor]) {}
-    func hitTest(point: CGPoint, mapper: CoordinateMapper, anchors: [DrawingAnchor]) -> Bool { false }
+    func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme) {}
+    func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool { false }
 }
