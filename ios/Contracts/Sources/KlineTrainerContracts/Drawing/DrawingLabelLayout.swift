@@ -1,5 +1,8 @@
 // DrawingLabelLayout.swift —— 价格标签矩形（纯函数，host 可测）。
 // 「不压线」= 标签底边贴在线上方 gap 处；「右缘不溢出」= 右对齐时右边界裁到主图右缘内。
+// Foundation 显式导入：`labelContent` 用 `String(format:)`（Foundation API），不依赖 CoreGraphics 的传递导入
+// （Swift import file-scoped；同 target 内 CrosshairLayout.swift / AxisGridLayout.swift 同款写法）。
+import Foundation
 import CoreGraphics
 
 public enum DrawingLabelLayout {
