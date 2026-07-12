@@ -20,14 +20,18 @@ public enum DrawingLabelLayout {
         return placed(x: x, lineY: lineY, textSize: textSize, mainChartFrame: mainChartFrame)
     }
 
-    // 统一裁剪（codex plan-R3）：x 收进 [minX, maxX-textWidth]——左右都不溢出，含射线锚近右缘时的 .left/.show；
-    // y 优先线【上方】（不压线），上方顶到主图上缘放不下时改放线【下方】（仍不压线）。
-    private static func placed(x: CGFloat, lineY: CGFloat, textSize: CGSize, mainChartFrame: CGRect) -> CGRect {
-        let maxX = max(mainChartFrame.minX, mainChartFrame.maxX - textSize.width)
+    // 统一裁剪（codex plan-R3, branch-R2）：标签整个放不进主图（坏数据，如持久化超大 fontSize）→ fail-closed 不画；
+    // 否则 x/y 都收进 [min, max-size]——左右不溢出（含射线锚近右缘时的 .left/.show），
+    // y 优先线【上方】（不压线），上方放不下时改放线【下方】，再 clamp 回主图内（含下方 fallback 撞下边缘的场景）。
+    private static func placed(x: CGFloat, lineY: CGFloat, textSize: CGSize, mainChartFrame: CGRect) -> CGRect? {
+        guard textSize.width <= mainChartFrame.width, textSize.height <= mainChartFrame.height else { return nil }
+        let maxX = mainChartFrame.maxX - textSize.width
         let clampedX = min(max(x, mainChartFrame.minX), maxX)
         let above = lineY - gap - textSize.height
         let y = above >= mainChartFrame.minY ? above : lineY + gap   // 上方无空间 → 线下方
-        return CGRect(x: clampedX, y: y, width: textSize.width, height: textSize.height)
+        let maxY = mainChartFrame.maxY - textSize.height
+        let clampedY = min(max(y, mainChartFrame.minY), maxY)
+        return CGRect(x: clampedX, y: clampedY, width: textSize.width, height: textSize.height)
     }
 }
 

@@ -73,4 +73,51 @@ struct DrawingLabelLayoutTests {
         #expect(DrawingLabelLayout.labelContent(for: d(.show), lineVisible: true)!.mode == .left)   // .show 归左
         #expect(DrawingLabelLayout.labelContent(for: d(.right), lineVisible: true)!.mode == .right)
     }
+
+    // codex branch-R2 medium：坏数据（持久化 fontSize 超大）导致 textSize 比主图还宽/高 → fail-closed 不画，不溢出
+    @Test("文字宽度超过主图宽度 → nil（fail-closed）")
+    func widthOverflowNil() {
+        let oversized = CGSize(width: Self.frame.width + 1, height: 16)
+        #expect(DrawingLabelLayout.labelRect(mode: .left, lineY: 100,
+            lineXRange: (0, 800), textSize: oversized, mainChartFrame: Self.frame) == nil)
+    }
+    @Test("文字高度超过主图高度 → nil（fail-closed）")
+    func heightOverflowNil() {
+        let oversized = CGSize(width: 60, height: Self.frame.height + 1)
+        #expect(DrawingLabelLayout.labelRect(mode: .left, lineY: 100,
+            lineXRange: (0, 800), textSize: oversized, mainChartFrame: Self.frame) == nil)
+    }
+    @Test("下方 fallback 撞下边缘：clamp 回框内不溢出（codex branch-R2 medium）")
+    func belowFallbackClampsToBottom() {
+        // frame 很矮（20pt）：above=lineY-gap-textH=10-2-16=-8<0 → 走下方分支；
+        // 下方 y=lineY+gap=12，12+16=28 超出 frame.maxY(20) → 须 clamp 回框内
+        let shortFrame = CGRect(x: 0, y: 0, width: 800, height: 20)
+        let r = DrawingLabelLayout.labelRect(mode: .left, lineY: 10,
+            lineXRange: (0, 800), textSize: Self.sz, mainChartFrame: shortFrame)!
+        #expect(r.maxY <= shortFrame.maxY)
+        #expect(r.minY >= shortFrame.minY)
+    }
+    @Test("文字尺寸恰好等于 frame 尺寸：仍返回非 nil，贴边界不溢出（codex branch-R2 medium）")
+    func exactFrameSizeFits() {
+        let exact = CGSize(width: Self.frame.width, height: Self.frame.height)
+        let r = DrawingLabelLayout.labelRect(mode: .left, lineY: 100,
+            lineXRange: (0, 800), textSize: exact, mainChartFrame: Self.frame)!
+        #expect(r.minX >= Self.frame.minX && r.maxX <= Self.frame.maxX)
+        #expect(r.minY >= Self.frame.minY && r.maxY <= Self.frame.maxY)
+    }
+    @Test("通用不变量：凡返回非 nil 的 rect 必须完全落在 mainChartFrame 内")
+    func alwaysFullyContainedWhenNonNil() {
+        let cases: [(LabelMode, CGFloat, (CGFloat, CGFloat), CGSize)] = [
+            (.left, 100, (0, 800), Self.sz),
+            (.right, 100, (0, 800), Self.sz),
+            (.left, 5, (0, 800), Self.sz),                 // 顶边溢出场景
+            (.left, 100, (790, 800), Self.sz),             // 射线锚近右缘
+        ]
+        for (mode, lineY, xRange, sz) in cases {
+            guard let r = DrawingLabelLayout.labelRect(mode: mode, lineY: lineY,
+                lineXRange: xRange, textSize: sz, mainChartFrame: Self.frame) else { continue }
+            #expect(r.minX >= Self.frame.minX && r.maxX <= Self.frame.maxX)
+            #expect(r.minY >= Self.frame.minY && r.maxY <= Self.frame.maxY)
+        }
+    }
 }
