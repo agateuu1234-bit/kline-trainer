@@ -52,7 +52,8 @@ spec §3.1.1 的字面是「`DrawingToolManager` 退化为纯 pending-anchor 暂
 | `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingSession.swift` | **新建** | D39 共享状态容器 = 画线的**唯一真相**（模式 / 工具 / pending 锚 / pending 归属面板）+ D31 `discardPendingAnchors()` + D38 提交后保留工具 |
 | `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift` | 改 | 持有 `drawingSession`；新增全局 `toggleDrawingMode()` / `beginDrawingSession()` / `endDrawingSessionIfActive()`；删 `toggleDrawingExclusive`；在 3 处 mode-clobbering 派发点收口会话（D45） |
 | `ios/Contracts/Sources/KlineTrainerContracts/Render/ChartContainerView.swift` | 改 | Coordinator 删私有 `manager` + 删 `:107` 自动 re-arm；`sync()` 单向只读；`handleDrawingTap` 走 session；提交后**不再** `commitDrawing`（连续画线） |
-| `ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift` | 改 | 铅笔钮读全局 `drawingModeActive` / 调 `toggleDrawingMode()`；删 `.onChange(of: activePanel)` 里的 `cancelDrawingAllPanels()` |
+| `ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift` | 改 | 铅笔钮读全局 `drawingModeActive` / 调 `toggleDrawingMode()`（Task 2 · 3d 提前接线）；删 `.onChange(of: activePanel)` 里的 `cancelDrawingAllPanels()`（Task 4），随后把该 API 降为 private |
+| `ios/Contracts/Tests/.../TrainingEngineDrawingCommitTests.swift` | 改 | 删旧「按 activePanel 互斥」测试（Task 2 删 3 个 `toggleDrawingExclusive_*`；Task 4 删 `cancelDrawingAllPanels_clearsBoth`）——**必须与删 API 同步**，否则整包编译不过（codex plan-R1）|
 | `ios/Contracts/Tests/.../Drawing/DrawingSessionTests.swift` | **新建** | 容器语义（host） |
 | `ios/Contracts/Tests/.../TrainingEngineDrawingSessionTests.swift` | **新建** | 引擎接线 + 不变量（host） |
 | `ios/Contracts/Tests/.../Render/ChartContainerViewDrawingSessionTests.swift` | **新建** | **两个真 Coordinator** 跨面板行为（UIKit-guarded，Catalyst 才跑） |
@@ -372,9 +373,14 @@ git commit -m "feat(drawing): DrawingSession 共享状态容器（D39/D42/D31/D3
 - Produces（Task 3 / Task 4 消费）:
   - `public let drawingSession = DrawingSession()`
   - `public func toggleDrawingMode()` — 全局开/关（浮动钮唯一入口）
-  - `public func endDrawingSessionIfActive()` — 结束会话 + 两面板 `cancelDrawing`（幂等）
+  - `public func beginDrawingSession(tool:)` / `public func endDrawingSessionIfActive()`（幂等）
   - **不变量**：`drawingSession.drawingModeActive == true` ⇔ 两面板 `interactionMode` 均为 `.drawing`
-  - 既有保留：`cancelDrawingAllPanels()` / `isDrawingActive(on:)` / `activateDrawingTool(_:panel:)` / `routeDrawingCommit(_:)`
+  - 既有保留（**public 不变**）：`isDrawingActive(on:)` / `activateDrawingTool(_:panel:)` / `routeDrawingCommit(_:)`
+    —— `activateDrawingTool` 是**面板级 FSM 原语**，`TrainingEngineDrawingHandlerH1Tests` /
+    `TrainingEngineInteractionTests` / `TrainingEnginePanLinkageTests` 共 10+ 处直接用它测 FSM，**必须留 public**。
+  - **降为 private**：`cancelDrawingAllPanels()` —— 本期后它在 App 里的**唯一**调用者就是
+    `endDrawingSessionIfActive()`（`TrainingView` 那处已退役）。留 public = 一个能单方面把两面板打回
+    `.autoTracking` 却不关会话的口子（**正是本期要消灭的漂移**）→ 让它不可从外部调用，不变量在类型层面就破不了。
   - **删除**：`toggleDrawingExclusive(on:)`（按 activePanel 作用域的互斥模型已退役）
 
 - [ ] **Step 1: 写失败测试**
@@ -520,6 +526,8 @@ Expected: 编译失败 — `value of type 'TrainingEngine' has no member 'drawin
     }
 
     /// 取消两面板画线态（`cancelDrawing` 对非 drawing 态 no-op，故两次调用安全）。
+    /// **Task 2 先保持 public**（`TrainingView:240` 还在调，删不得，否则编译断）；
+    /// **Task 4 删掉那处调用后立刻降为 `private`** —— 届时唯一调用者是 `endDrawingSessionIfActive()`。
     public func cancelDrawingAllPanels() {
         cancelDrawing(panel: .upper)   // 非 .drawing 态 no-op
         cancelDrawing(panel: .lower)
@@ -588,12 +596,50 @@ Expected: 编译失败 — `value of type 'TrainingEngine' has no member 'drawin
         forceCloseIfEnded()
 ```
 
+**3d. 同步迁移所有会被「删 API」打断编译的调用点（codex plan-R1-medium：SwiftPM 会先编译**全部**测试文件再套 `--filter`，任何一处残留引用都会让下面的 checkpoint 编译失败）。**
+
+必须在**本步之内**一起改完，否则 Step 4 跑不起来：
+
+（i）`ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingCommitTests.swift:221-255` —— 删掉**三个** `toggleDrawingExclusive_*` 测试（`activatesSelectedPanelOnly` / `switchingPanels_cancelsOther` / `secondTapSamePanel_togglesOff`），把整段替换为：
+
+```swift
+    // MARK: - P1b-1a-ii D42：「按 activePanel 双面板互斥」模型已退役
+    // 旧的 toggleDrawingExclusive 三连测试（激活选中面板 / 切面板取消另一面板 / 同面板二次点击 toggle off）
+    // 随该模型一并删除 —— 画线会话现在是**全局**的：开 = **两面板一起**进 .drawing，
+    // 不存在「另一面板被取消」这回事。等价且更强的覆盖（含不变量断言）见 TrainingEngineDrawingSessionTests。
+
+    @Test("cancelDrawingAllPanels: 清除两面板画线态")
+    func cancelDrawingAllPanels_clearsBoth() {
+        let engine = Self.makeNormalEngineAtTick(10)
+        engine.beginDrawingSession(tool: .horizontal)   // D42：两面板一起进 .drawing
+        engine.cancelDrawingAllPanels()
+        #expect(!engine.isDrawingActive(on: .upper))
+        #expect(!engine.isDrawingActive(on: .lower))
+    }
+```
+
+> `cancelDrawingAllPanels_clearsBoth` **本 task 先留着**（API 仍 public）；Task 4 把它降为 private 时**连这个测试一起删**（届时 `endSessionIsIdempotent` / `toggleOffEndsSession` 已完全覆盖该行为）。
+
+（ii）`ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift:78-83` —— 现在就接到全局会话（Task 4 只负责 observer 与守卫测试，接线提前到这里是为了让包能编译）：
+
+```swift
+    private var isDrawingActive: Bool {
+        engine.drawingSession.drawingModeActive
+    }
+    private func toggleDrawing() {
+        engine.toggleDrawingMode()
+    }
+```
+
+（iii）改完后跑 `grep -rn "toggleDrawingExclusive" ios/Contracts/Sources ios/Contracts/Tests` → **必须零命中**（该 API 已彻底退役）。`cancelDrawingAllPanels` 此刻仍应命中 3 处：`TrainingEngine.swift` 定义 + `endDrawingSessionIfActive` 调用 + `TrainingView.swift:240`（Task 4 删）+ 上面那个测试。
+
+> 注：`activateDrawingTool(_:panel:)` **保持 public**——`TrainingEngineDrawingHandlerH1Tests` /
+> `TrainingEngineInteractionTests` / `TrainingEnginePanLinkageTests` 用它测面板级 FSM，与会话无关，不要动。
+
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd ios/Contracts && swift test --filter TrainingEngineDrawingSessionTests`
-Expected: PASS（7 个）
-
-编译若报「找不到 `toggleDrawingExclusive`」→ 是 `TrainingView.swift:82` 还在调（Task 4 才改）。**本 task 允许临时把 `TrainingView.swift:82` 改成 `engine.toggleDrawingMode()`、`:79` 改成 `engine.drawingSession.drawingModeActive` 让它编译过**（Task 4 会补齐 observer 与守卫测试）。
+Expected: PASS（7 个）。**整包必须先编译通过**——若报 `toggleDrawingExclusive` / `cancelDrawingAllPanels` 找不到，说明 3d 有遗漏调用点。
 
 - [ ] **Step 5: 全量回归 + 提交**
 
@@ -938,7 +984,7 @@ Expected: `activePanelObserverNoLongerCancelsDrawing` FAIL（`cancelDrawingAllPa
 
 - [ ] **Step 3: 写实现**
 
-`TrainingView.swift` `:76-83` 改为：
+**3a.** `TrainingView.swift` `:76-83` 的谓词与 toggle（Task 2 · 3d(ii) 已提前接线，此处只补注释；若已一致则跳过）：
 
 ```swift
     // P1b-1a-ii D42：画线会话是**全局**的（不属于任何面板）——按钮选中态与 toggle 都读/写唯一真相
@@ -951,7 +997,7 @@ Expected: `activePanelObserverNoLongerCancelsDrawing` FAIL（`cancelDrawingAllPa
     }
 ```
 
-`:234-241` 的 observer 改为（**只删画线那一句**，买卖条那句必须留）：
+**3b.** `:234-241` 的 observer 改为（**只删画线那一句**，买卖条那句必须留）：
 
 ```swift
         .onChange(of: activePanel) { _, _ in
@@ -965,10 +1011,24 @@ Expected: `activePanelObserverNoLongerCancelsDrawing` FAIL（`cancelDrawingAllPa
         }
 ```
 
+**3c.** 上面那处调用一删，`cancelDrawingAllPanels()` 在 App 里就只剩 `endDrawingSessionIfActive()` 一个调用者 → **立刻降为 `private`**（`TrainingEngine.swift`）：
+
+```swift
+    /// 取消两面板画线态（`cancelDrawing` 对非 drawing 态 no-op，故两次调用安全）。
+    /// **private**：唯一调用者是 `endDrawingSessionIfActive()`。若留 public，外部就能把两面板打回
+    /// `.autoTracking` 却不关会话 → 单方面破坏不变量（本期要消灭的正是这类漂移）。
+    private func cancelDrawingAllPanels() {
+```
+
+同步**删掉** Task 2 · 3d(i) 暂留的 `TrainingEngineDrawingCommitTests.cancelDrawingAllPanels_clearsBoth`（private 后不可从测试调用；其行为已被 `toggleOffEndsSession` / `endSessionIsIdempotent` 覆盖，且那两个还多断言了会话真相，更强）。
+
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd ios/Contracts && swift test --filter DrawingSessionSourceGuardTests`
 Expected: PASS（5 个）
+
+Run: `cd ios/Contracts && swift test`
+Expected: 全绿（`cancelDrawingAllPanels` 私有化后**不得**有任何测试仍引用它）
 
 - [ ] **Step 5: 三绿门全量 + 提交**
 
