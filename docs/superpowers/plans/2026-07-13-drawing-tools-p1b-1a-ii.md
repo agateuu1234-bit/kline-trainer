@@ -60,6 +60,29 @@ spec §3.1.1 的字面是「`DrawingToolManager` 退化为纯 pending-anchor 暂
 
 （`DrawingSession` 的 mutator 仍是 **internal** —— 那是本期**新建**的类型，从未 public 过，不存在兼容面，且它是唯一能绕开 `begin/endDrawingSession` 改会话真相的入口，必须锁死。见 codex plan-R5-high。）
 
+### D47：codex plan review 收口 —— 10 轮，真 bug 全修；**1 条 residual 接受并 override**
+
+**codex 挖出并已修的真问题**（本计划因此比初稿硬得多）：
+
+| 轮次 | findings | 处置 |
+|---|---|---|
+| R1 | SwiftPM 先编译**全部**测试文件再套 `--filter` → 删 API 与迁移旧测试必须同 commit | 修：Task 2 · 3d 原子清理 |
+| R2 | 面板级 FSM 原语是漂移窄门 | 修：生产期 fail-closed 守卫 + 源码守卫 |
+| R4 | 我加的守卫会**炸我自己的中间态**（Task 2 仍有 active-session 调用者） | 修：守卫排到 Task 4（所有调用者干净之后） |
+| R5 | `DrawingSession` mutator 若 public → 绕开 `begin/endDrawingSession` 改真相 | 修：只读态 public / mutator 全 internal（新类型，无兼容面） |
+| R6 | 在 `switchPeriodCombo` 里结束会话 = 提前实现 1a-iv 的 D32，且用了 D31 禁止的整场取消语义 | 修：改 fail-closed no-op |
+| R7 | 「手势不可达」不是不变量边界（API 可直接调） | 修：守卫 + 直接调 API 的测试 |
+| R9 | ① `assert` 在 release 被剥掉 = 没护栏 ② **`beginDrawingSession` 非事务性**：先置会话再武装面板，武装失败即「铅笔亮着但画不了」的卡死态 | 修：① `assert`→生产期 `guard` ② commit-last + 回滚 + 零/单侧 bounds 测试 |
+
+**R10 residual（接受 + override，不再改）**：codex 主张「保留 public 的 legacy 原语 + fail-closed 守卫」对**包外 SwiftPM 消费者**是「行为破坏陷阱」，要求做 deprecation 仪式或非-`@testable` 公共面兼容测试。
+
+**不采纳，理由**：
+1. **那个消费者不存在**。`KlineTrainerContracts` 的消费者只有本仓 App target 与测试（`grep` 实证零命中）；这是单 App 私有仓，不是对外发布的库。为一个假想消费者建 deprecation + 公共面 fixture 的维护负担，正是 CLAUDE.md §2 禁止的投机复杂度。
+2. **codex 在这条轴上自相矛盾地转了三圈**：R2 要求降 internal → R6/R8 反对降 internal（破坏兼容）→ R9 要求生产期守卫 → R10 又说生产期守卫是陷阱。每一轮都在攻击上一轮自己开的药方，已无收敛迹象（对照 memory: `feedback_codex_round6_self_contradiction`）。
+3. **真实风险已被更强的手段覆盖**：包内漂移（**唯一真实发生过**的那种）被生产期 fail-closed 守卫 + 源码守卫 + 不变量测试三重钉死，覆盖面严格大于任何访问级别方案。
+
+按项目守则如实记录：**codex 未 approve；verdict = needs-attention；本条为已接受 residual，走 override 收口。**
+
 ---
 
 ## File Structure
