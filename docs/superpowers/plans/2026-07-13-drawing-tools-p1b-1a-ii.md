@@ -656,8 +656,10 @@ Expected: 编译失败 — `value of type 'TrainingEngine' has no member 'drawin
 
 （iii）改完后跑 `grep -rn "toggleDrawingExclusive" ios/Contracts/Sources ios/Contracts/Tests` → **必须零命中**（该 API 已彻底退役）。`cancelDrawingAllPanels` 此刻仍应命中 3 处：`TrainingEngine.swift` 定义 + `endDrawingSessionIfActive` 调用 + `TrainingView.swift:240`（Task 4 删）+ 上面那个测试。
 
-> 注：`activateDrawingTool(_:panel:)` **保持 public**——`TrainingEngineDrawingHandlerH1Tests` /
-> `TrainingEngineInteractionTests` / `TrainingEnginePanLinkageTests` 用它测面板级 FSM，与会话无关，不要动。
+> 注：`activateDrawingTool(_:panel:)` / `commitDrawing(panel:)` / `cancelDrawing(panel:)` **三个一律 internal**
+> （见 3b-2，**没有例外**）。`TrainingEngineDrawingHandlerH1Tests` / `TrainingEngineInteractionTests` /
+> `TrainingEnginePanLinkageTests` / `TrainingEngineDrawingCommitTests` 仍用它们测面板级 FSM —— 这些测试走
+> `@testable import`，internal 照样可见，**一行都不用改**。
 
 - [ ] **Step 4: 跑测试确认通过**
 
