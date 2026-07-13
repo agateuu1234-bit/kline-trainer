@@ -375,12 +375,13 @@ git commit -m "feat(drawing): DrawingSession 共享状态容器（D39/D42/D31/D3
   - `public func toggleDrawingMode()` — 全局开/关（浮动钮唯一入口）
   - `public func beginDrawingSession(tool:)` / `public func endDrawingSessionIfActive()`（幂等）
   - **不变量**：`drawingSession.drawingModeActive == true` ⇔ 两面板 `interactionMode` 均为 `.drawing`
-  - 既有保留（**public 不变**）：`isDrawingActive(on:)` / `activateDrawingTool(_:panel:)` / `routeDrawingCommit(_:)`
-    —— `activateDrawingTool` 是**面板级 FSM 原语**，`TrainingEngineDrawingHandlerH1Tests` /
-    `TrainingEngineInteractionTests` / `TrainingEnginePanLinkageTests` 共 10+ 处直接用它测 FSM，**必须留 public**。
-  - **降为 private**：`cancelDrawingAllPanels()` —— 本期后它在 App 里的**唯一**调用者就是
-    `endDrawingSessionIfActive()`（`TrainingView` 那处已退役）。留 public = 一个能单方面把两面板打回
-    `.autoTracking` 却不关会话的口子（**正是本期要消灭的漂移**）→ 让它不可从外部调用，不变量在类型层面就破不了。
+  - 既有保留（**public 不变**）：`isDrawingActive(on:)`（只读查询）/ `routeDrawingCommit(_:)`
+  - **public → internal**（codex plan-R2-high；已核实包外零调用者，测试经 `@testable` 照常可用、**一行不用改**）：
+    `activateDrawingTool(_:panel:)` / `commitDrawing(panel:)` / `cancelDrawing(panel:)` —— 这三个是**面板级
+    FSM 原语**，能单方面把面板推入/推出 `.drawing`；留 public 就是留着「会话开着、面板已 autoTracking」的
+    同款漂移窄门。另加 DEBUG 断言 + 源码守卫（Task 2 · 3b-2 / Task 4 守卫测试）。
+  - **降为 private**（Task 4，删掉 `TrainingView:240` 那处调用之后）：`cancelDrawingAllPanels()` ——
+    届时唯一调用者是 `endDrawingSessionIfActive()`。
   - **删除**：`toggleDrawingExclusive(on:)`（按 activePanel 作用域的互斥模型已退役）
 
 - [ ] **Step 1: 写失败测试**
@@ -391,6 +392,7 @@ git commit -m "feat(drawing): DrawingSession 共享状态容器（D39/D42/D31/D3
 // ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift
 // Spec: 2026-07-10-drawing-tools-P1b-split-addendum.md §3.1.2 / §3.3（#2 #4 #4b）+ plan D45。
 // D42 全局会话（两面板同时可画、互斥模型退役）+ 不变量「drawingModeActive ⇔ 两面板 .drawing」。
+import CoreGraphics        // CGRect（本包不 re-export CoreGraphics；漏了整包编译不过，codex plan-R2-medium）
 import Testing
 @testable import KlineTrainerContracts
 
@@ -564,6 +566,27 @@ Expected: 编译失败 — `value of type 'TrainingEngine' has no member 'drawin
 ```
 
 （即：**删除** `toggleDrawingExclusive(on:)`，其余原样保留。）
+
+**3b-2. 关掉面板级 FSM 原语这个「窄门」（codex plan-R2-high）。**
+
+`activateDrawingTool(_:panel:)` / `commitDrawing(panel:)` / `cancelDrawing(panel:)` 都能**单方面**把面板推入/推出 `.drawing`。只privatize `cancelDrawingAllPanels` 等于只堵了一扇门——这三个还是 public，外部调一下就能造出「会话开着、面板已 autoTracking」的同款漂移。
+
+处置（**已核实**：`ios/KlineTrainer` App target 与 Persistence 模块**零调用**；无 public-surface 测试锁定它们；modules v1.4 §C1b 只约定 handler 语义，未约定访问级别）：
+
+1. **`public` → 无修饰（internal）**：这三个函数的 `public` 去掉。测试经 `@testable import` 仍可调用（`TrainingEngineDrawingHandlerH1Tests` / `TrainingEngineInteractionTests` / `TrainingEnginePanLinkageTests` / `TrainingEngineDrawingCommitTests` 全部照常编译，**不需要改一行**），但**包外**再也拿不到这三个漂移杠杆。
+2. **DEBUG 不变量断言**：在 `commitDrawing(panel:)` 与 `cancelDrawing(panel:)` 的**函数体第一行**加：
+
+```swift
+        // P1b-1a-ii 不变量守卫：面板级 FSM 原语，**绝不能在全局画线会话开着时被单独调用** ——
+        // 那会把面板打回 .autoTracking 却留下 drawingModeActive==true（正是本期要消灭的漂移）。
+        // 正常收束路径 endDrawingSessionIfActive() 先 deactivate() 再 cancel，故此断言恒成立。
+        assert(!drawingSession.drawingModeActive,
+               "面板级 commitDrawing/cancelDrawing 不得在全局画线会话开启时调用（用 endDrawingSessionIfActive）")
+```
+
+（用 `assert` 不用 `precondition`：release 不带崩溃风险，DEBUG/测试期照样炸出误用。现有测试全部在「会话未开」下调这两个 API，故不会误伤——若实现后有测试被这条断言打红，**先查是不是真漂移，不要直接删断言**。）
+
+3. **源码守卫**（Task 4 的守卫测试里加，见该 task）：`Sources/` 下**除 `TrainingEngine.swift` 自己**外，任何文件都不得出现 `activateDrawingTool(` / `commitDrawing(` / `cancelDrawing(` 调用——把「未来有人从 view 层再接一条面板级退出路径」这个回归钉死在 CI 上。
 
 **3c.** 三处 mode-clobbering 派发点末尾收口（**全部 3 处，一处不能漏**）：
 
@@ -916,22 +939,29 @@ import Testing
 @Suite("1a-ii 结构守卫：re-arm 已删 / 切面板不取消画线 / 无新 UI")
 struct DrawingSessionSourceGuardTests {
 
-    /// 由本测试文件路径回推仓库根 → 读产品源码。
-    /// Tests/KlineTrainerContractsTests/Drawing/<本文件> → 上溯 4 层 = ios/Contracts。
-    private func source(_ relativeToContracts: String) throws -> [String] {
-        let contractsDir = URL(fileURLWithPath: #filePath)
+    /// ios/Contracts 目录（由本测试文件路径回推：Tests/KlineTrainerContractsTests/Drawing/<本文件> → 上溯 4 层）。
+    private var contractsDir: URL {
+        URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()    // Drawing
             .deletingLastPathComponent()    // KlineTrainerContractsTests
             .deletingLastPathComponent()    // Tests
             .deletingLastPathComponent()    // ios/Contracts
-        let url = contractsDir.appendingPathComponent(relativeToContracts)
+    }
+
+    /// 读源码并**剥掉注释**后返回。
+    /// 反踩坑（memory: acceptance grep 两坑）：不剥注释的话，「解释这行为什么删掉」的注释本身
+    /// 会命中断言字样 → 假红/假绿。整行注释丢弃；行尾 `//` 之后截断。
+    private func source(relativeURL url: URL) throws -> String {
         let text = try String(contentsOf: url, encoding: .utf8)
-        // 剥注释：整行注释直接丢；行尾注释切掉（够用——本仓无「代码里带 // 的字符串字面量」在这些行上）。
         return text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
             let s = String(line)
             guard let r = s.range(of: "//") else { return s }
             return String(s[s.startIndex..<r.lowerBound])
-        }.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        }.joined(separator: "\n")
+    }
+
+    private func source(_ relativeToContracts: String) throws -> String {
+        try source(relativeURL: contractsDir.appendingPathComponent(relativeToContracts))
     }
 
     private let chartContainer = "Sources/KlineTrainerContracts/Render/ChartContainerView.swift"
@@ -940,20 +970,20 @@ struct DrawingSessionSourceGuardTests {
 
     @Test("#1：ChartContainerView 里**不存在** manager.toggle 自动 re-arm，也不再持有 DrawingToolManager")
     func noRearmInChartContainer() throws {
-        let code = try source(chartContainer).joined(separator: "\n")
+        let code = try source(chartContainer)
         #expect(!code.contains("manager.toggle("))
         #expect(!code.contains("DrawingToolManager("))     // Coordinator 不再私有持有暂存器
     }
 
     @Test("#5/D38：提交后**不再**调 engine.commitDrawing（那是「画一条就退出」）")
     func noCommitDrawingAfterTap() throws {
-        let code = try source(chartContainer).joined(separator: "\n")
+        let code = try source(chartContainer)
         #expect(!code.contains("engine.commitDrawing("))
     }
 
     @Test("#4b：TrainingView 的 activePanel observer **不再**取消画线；toggleDrawingExclusive 已退役")
     func activePanelObserverNoLongerCancelsDrawing() throws {
-        let code = try source(trainingView).joined(separator: "\n")
+        let code = try source(trainingView)
         #expect(!code.contains("cancelDrawingAllPanels"))      // 切下单目标面板绝不丢线（R30-medium）
         #expect(!code.contains("toggleDrawingExclusive"))      // 按 activePanel 作用域的互斥模型已退役
         #expect(code.contains("engine.toggleDrawingMode()"))   // 改走全局会话
@@ -961,13 +991,28 @@ struct DrawingSessionSourceGuardTests {
 
     @Test("#4：TrainingEngine 里 toggleDrawingExclusive 已删除（互斥模型退役）")
     func engineExclusiveToggleRemoved() throws {
-        let code = try source(engine).joined(separator: "\n")
+        let code = try source(engine)
         #expect(!code.contains("func toggleDrawingExclusive"))
+    }
+
+    @Test("codex plan-R2-high：面板级 FSM 原语只许 TrainingEngine 自己调（防再接一条漂移路径）")
+    func panelLevelDrawingPrimitivesAreEngineOnly() throws {
+        let sourcesRoot = contractsDir.appendingPathComponent("Sources/KlineTrainerContracts")
+        let files = FileManager.default.enumerator(at: sourcesRoot, includingPropertiesForKeys: nil)!
+            .compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" && $0.lastPathComponent != "TrainingEngine.swift" }
+        #expect(!files.isEmpty)                       // 路径写错会静默通过 → 先证明真的扫到文件了
+        for f in files {
+            let code = try source(relativeURL: f)     // 同样剥注释
+            #expect(!code.contains("activateDrawingTool("), "\(f.lastPathComponent) 不得直接调面板级画线原语")
+            #expect(!code.contains("commitDrawing("),       "\(f.lastPathComponent) 不得直接调面板级画线原语")
+            #expect(!code.contains("cancelDrawing("),       "\(f.lastPathComponent) 不得直接调面板级画线原语")
+        }
     }
 
     @Test("#4c/#6：本期不引入任何新 UI —— 浮动钮仍在，且无顶栏「画图」钮 / 底栏工具栏 / 设置面板")
     func noNewDrawingUI() throws {
-        let code = try source(trainingView).joined(separator: "\n")
+        let code = try source(trainingView)
         #expect(code.contains("DrawingToolFloatingView("))     // 入口未变（退役在 1a-iii）
         #expect(!code.contains("画图"))                        // 顶栏「画图」钮（1a-iii）
         #expect(!code.contains("DrawingToolbar"))              // 两行底栏（1a-iii）
