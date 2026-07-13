@@ -1,8 +1,8 @@
 # Catalyst 必需门修复：scheme 用错 + 闸门 grep 逻辑坏
 
 - 日期：2026-07-13
-- 类别：治理 / CI（trust-boundary：`.github/workflows/**`）
-- 影响文件：`.github/workflows/catalyst-build.yml`（单文件）
+- 类别：治理 / CI（trust-boundary：`.github/**`）
+- 影响文件：`.github/workflows/catalyst-build.yml` + 新增 `.github/scripts/catalyst-gate.sh`（闸门判据）、`.github/scripts/catalyst-gate.test.sh`（闸门自测）、`.github/scripts/fixtures/*.log`（真实日志 fixture）
 - 相关：`project_ci_required_checks_broken`（memory）、`docs/superpowers/specs/2026-07-12-ruleset-required-checks-cleanup-design.md`（PR #143）
 
 ## 1. 问题陈述
@@ -82,7 +82,15 @@ xcodebuild test -scheme KlineTrainerContracts-Package \
 
 ## 3. 设计
 
-单文件改动：`.github/workflows/catalyst-build.yml`。
+### 3.0 闸门判据抽成可测脚本（对"门是空的"这一事故的直接回应）
+
+**这次事故的根因不只是 scheme 写错，而是"一个没人能测的闸门，可以报绿半年而什么都不验证"。** 因此本设计不把闸门继续留在 workflow 里当内联 shell（内联 shell 无法在本地跑、无法回归），而是抽成：
+
+- `.github/scripts/catalyst-gate.sh` —— 唯一的判据实现，入参=构建日志路径，exit 0=通过。
+- `.github/scripts/catalyst-gate.test.sh` —— 用**真实抓取的构建日志**做 fixture 对它断言；**在 CI 里于真构建之前先跑一遍**（<1 秒），闸门自己被改坏就当场红。
+- `.github/scripts/fixtures/*.log` —— fixture 里最关键的一份是 **`hollow-old-scheme.log`：本机用旧 scheme 真实抓到的空壳日志**（报 `** TEST BUILD SUCCEEDED **`，但 `KlineTrainerContractsTests` 命中 **0** 次、零测试执行）。新闸门**必须拒绝**它——这条就是"能不能抓住当初那个 bug"的回归测试。
+
+**治理保护不降级**：`.claude/workflow-rules.json` 里 `.github/**` 同时属于 `trust_boundary_globs` 与 `codeowners_required_globs` → 新增的 `.github/scripts/**` 与 workflow 受**同等**的 CODEOWNERS + codex 闸门保护。（Claude 的 deny 规则只禁 `.github/workflows/**` 与 `.github/CODEOWNERS` 的写入，不禁 `.github/scripts/**`。）
 
 ### 3.1 构建命令
 
@@ -114,6 +122,8 @@ xcodebuild test -scheme KlineTrainerContracts-Package \
 ### 3.3 超时
 
 `timeout-minutes: 15` → **25**。本地冷构建约 3 分 40 秒，CI macos-15 更慢，且现在要多编译两个 test target + GRDB + ZIPFoundation。**必需门超时 = PR 死锁**，这个余量是廉价保险。
+
+**判据实现位置**：G2-G8 全部实现在 `.github/scripts/catalyst-gate.sh` 里（见 §3.0），workflow 只调用它。这样每一条判据都有 fixture 测试兜底。
 
 ### 3.4 显式不改的东西
 
