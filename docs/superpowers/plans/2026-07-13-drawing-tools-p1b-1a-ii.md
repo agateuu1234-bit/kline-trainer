@@ -528,9 +528,10 @@ Expected: 编译失败 — `value of type 'TrainingEngine' has no member 'drawin
     }
 
     /// 取消两面板画线态（`cancelDrawing` 对非 drawing 态 no-op，故两次调用安全）。
-    /// **Task 2 先保持 public**（`TrainingView:240` 还在调，删不得，否则编译断）；
-    /// **Task 4 删掉那处调用后立刻降为 `private`** —— 届时唯一调用者是 `endDrawingSessionIfActive()`。
-    public func cancelDrawingAllPanels() {
+    /// **private**：唯一调用者是 `endDrawingSessionIfActive()`（`TrainingView` 那处已在 3d 同步删除）。
+    /// 若留 public，外部就能把两面板打回 `.autoTracking` 却不关会话 —— 单方面破坏不变量，
+    /// 正是本期要消灭的漂移。
+    private func cancelDrawingAllPanels() {
         cancelDrawing(panel: .upper)   // 非 .drawing 态 no-op
         cancelDrawing(panel: .lower)
     }
@@ -574,19 +575,7 @@ Expected: 编译失败 — `value of type 'TrainingEngine' has no member 'drawin
 处置（**已核实**：`ios/KlineTrainer` App target 与 Persistence 模块**零调用**；无 public-surface 测试锁定它们；modules v1.4 §C1b 只约定 handler 语义，未约定访问级别）：
 
 1. **`public` → 无修饰（internal）**：这三个函数的 `public` 去掉。测试经 `@testable import` 仍可调用（`TrainingEngineDrawingHandlerH1Tests` / `TrainingEngineInteractionTests` / `TrainingEnginePanLinkageTests` / `TrainingEngineDrawingCommitTests` 全部照常编译，**不需要改一行**），但**包外**再也拿不到这三个漂移杠杆。
-2. **DEBUG 不变量断言**：在 `commitDrawing(panel:)` 与 `cancelDrawing(panel:)` 的**函数体第一行**加：
-
-```swift
-        // P1b-1a-ii 不变量守卫：面板级 FSM 原语，**绝不能在全局画线会话开着时被单独调用** ——
-        // 那会把面板打回 .autoTracking 却留下 drawingModeActive==true（正是本期要消灭的漂移）。
-        // 正常收束路径 endDrawingSessionIfActive() 先 deactivate() 再 cancel，故此断言恒成立。
-        assert(!drawingSession.drawingModeActive,
-               "面板级 commitDrawing/cancelDrawing 不得在全局画线会话开启时调用（用 endDrawingSessionIfActive）")
-```
-
-（用 `assert` 不用 `precondition`：release 不带崩溃风险，DEBUG/测试期照样炸出误用。现有测试全部在「会话未开」下调这两个 API，故不会误伤——若实现后有测试被这条断言打红，**先查是不是真漂移，不要直接删断言**。）
-
-3. **源码守卫**（Task 4 的守卫测试里加，见该 task）：`Sources/` 下**除 `TrainingEngine.swift` 自己**外，任何文件都不得出现 `activateDrawingTool(` / `commitDrawing(` / `cancelDrawing(` 调用——把「未来有人从 view 层再接一条面板级退出路径」这个回归钉死在 CI 上。
+2. **DEBUG 不变量断言 + 源码守卫排到 Task 4**（codex plan-R4-high）：断言「会话开着时不得调面板级原语」在本 task 加会**当场自炸** —— 此刻 `ChartContainerView` 仍在提交后调 `engine.commitDrawing(panel:)`（Task 3 才删），且 `TrainingView` 的 observer 仍在调 `cancelDrawingAllPanels()`（本 task 3d 才删）。**必须等所有调用者都干净了再上守卫**，否则中间那个 commit 是个 DEBUG 必崩的坏状态。见 Task 4 · 3d。
 
 **3c.** 三处 mode-clobbering 派发点末尾收口（**全部 3 处，一处不能漏**）：
 
@@ -623,28 +612,22 @@ Expected: 编译失败 — `value of type 'TrainingEngine' has no member 'drawin
 
 必须在**本步之内**一起改完，否则 Step 4 跑不起来：
 
-（i）`ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingCommitTests.swift:221-255` —— 删掉**三个** `toggleDrawingExclusive_*` 测试（`activatesSelectedPanelOnly` / `switchingPanels_cancelsOther` / `secondTapSamePanel_togglesOff`），把整段替换为：
+**本步是原子的**：`cancelDrawingAllPanels` 的所有外部调用者必须与「删 API / 降 private」在**同一个 commit**内一起清掉，中间不留任何「会话开着却能把面板打回 autoTracking」的坏状态（codex plan-R4-high）。
+
+（i）`ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingCommitTests.swift:221-255` —— 删掉**整段 4 个** `@Test`（`toggleDrawingExclusive_activatesSelectedPanelOnly` / `toggleDrawingExclusive_switchingPanels_cancelsOther` / `toggleDrawingExclusive_secondTapSamePanel_togglesOff` / `cancelDrawingAllPanels_clearsBoth`），替换为一段交代去向的注释：
 
 ```swift
     // MARK: - P1b-1a-ii D42：「按 activePanel 双面板互斥」模型已退役
     // 旧的 toggleDrawingExclusive 三连测试（激活选中面板 / 切面板取消另一面板 / 同面板二次点击 toggle off）
-    // 随该模型一并删除 —— 画线会话现在是**全局**的：开 = **两面板一起**进 .drawing，
-    // 不存在「另一面板被取消」这回事。等价且更强的覆盖（含不变量断言）见 TrainingEngineDrawingSessionTests。
-
-    @Test("cancelDrawingAllPanels: 清除两面板画线态")
-    func cancelDrawingAllPanels_clearsBoth() {
-        let engine = Self.makeNormalEngineAtTick(10)
-        engine.beginDrawingSession(tool: .horizontal)   // D42：两面板一起进 .drawing
-        engine.cancelDrawingAllPanels()
-        #expect(!engine.isDrawingActive(on: .upper))
-        #expect(!engine.isDrawingActive(on: .lower))
-    }
+    // 与 cancelDrawingAllPanels_clearsBoth 随该模型一并删除：
+    //   · 画线会话现在是**全局**的 —— 开 = **两面板一起**进 .drawing，不存在「另一面板被取消」这回事；
+    //   · cancelDrawingAllPanels 已降为 private（唯一调用者 endDrawingSessionIfActive），测试不再直呼。
+    // 等价且更强的覆盖（含「会话 ⇔ 两面板 mode」不变量断言）见 TrainingEngineDrawingSessionTests。
 ```
 
-> `cancelDrawingAllPanels_clearsBoth` **本 task 先留着**（API 仍 public）；Task 4 把它降为 private 时**连这个测试一起删**（届时 `endSessionIsIdempotent` / `toggleOffEndsSession` 已完全覆盖该行为）。
+（ii）`ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift` —— **两处一起改**：
 
-（ii）`ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift:78-83` —— 现在就接到全局会话（Task 4 只负责 observer 与守卫测试，接线提前到这里是为了让包能编译）：
-
+`:78-83` 铅笔钮接全局会话：
 ```swift
     private var isDrawingActive: Bool {
         engine.drawingSession.drawingModeActive
@@ -654,7 +637,15 @@ Expected: 编译失败 — `value of type 'TrainingEngine' has no member 'drawin
     }
 ```
 
-（iii）改完后跑 `grep -rn "toggleDrawingExclusive" ios/Contracts/Sources ios/Contracts/Tests` → **必须零命中**（该 API 已彻底退役）。`cancelDrawingAllPanels` 此刻仍应命中 3 处：`TrainingEngine.swift` 定义 + `endDrawingSessionIfActive` 调用 + `TrainingView.swift:240`（Task 4 删）+ 上面那个测试。
+`:234-241` observer **删掉 `engine.cancelDrawingAllPanels()` 那一句**（买卖条那句必须留；完整替换代码见 Task 4 · Step 3b，此处按同样内容改）。
+
+（iii）`TrainingEngine.swift`：`cancelDrawingAllPanels()` 由 `public` 降为 **`private`**（此刻唯一调用者已是 `endDrawingSessionIfActive()`）。
+
+（iv）自检：
+```bash
+grep -rn "toggleDrawingExclusive" ios/Contracts/Sources ios/Contracts/Tests   # → 必须零命中
+grep -rn "cancelDrawingAllPanels" ios/Contracts/Sources ios/Contracts/Tests   # → 只剩 TrainingEngine.swift 内 2 处（private 定义 + endDrawingSessionIfActive 调用）
+```
 
 > 注：`activateDrawingTool(_:panel:)` / `commitDrawing(panel:)` / `cancelDrawing(panel:)` **三个一律 internal**
 > （见 3b-2，**没有例外**）。`TrainingEngineDrawingHandlerH1Tests` / `TrainingEngineInteractionTests` /
@@ -991,6 +982,24 @@ struct DrawingSessionSourceGuardTests {
         #expect(code.contains("engine.toggleDrawingMode()"))   // 改走全局会话
     }
 
+    @Test("#4b 强化：切 activePanel 的 observer 里**一个 engine 调用都不许有**（codex plan-R4）")
+    func activePanelObserverTouchesNoEngineState() throws {
+        let code = try source(trainingView)
+        // 取 `.onChange(of: activePanel)` 到该闭包结束（首个「8 空格 + }」）之间的块。
+        guard let start = code.range(of: ".onChange(of: activePanel)") else {
+            Issue.record("找不到 activePanel observer —— 它被改名/删了？"); return
+        }
+        let rest = code[start.upperBound...]
+        guard let end = rest.range(of: "\n        }") else {
+            Issue.record("activePanel observer 闭包边界解析失败（缩进变了？）"); return
+        }
+        let block = String(rest[..<end.lowerBound])
+        // 切「下单目标面板」纯属 View 侧状态：只许清买卖条（tradeStrip = nil），
+        // 不许碰引擎任何状态 —— 画线会话/工具/pending 一律原封（D42 / R30-medium）。
+        #expect(!block.contains("engine."), "activePanel observer 不得触碰引擎状态，实际内容：\(block)")
+        #expect(block.contains("tradeStrip = nil"))            // 买卖条那条必须留（RFC-B）
+    }
+
     @Test("#4：TrainingEngine 里 toggleDrawingExclusive 已删除（互斥模型退役）")
     func engineExclusiveToggleRemoved() throws {
         let code = try source(engine)
@@ -1023,11 +1032,24 @@ struct DrawingSessionSourceGuardTests {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [ ] **Step 2: 跑测试 + **mutation 验证守卫真的会咬**
 
-Run: `cd ios/Contracts && swift test --filter DrawingSessionSourceGuardTests`
-Expected: `activePanelObserverNoLongerCancelsDrawing` FAIL（`cancelDrawingAllPanels` 仍在 `TrainingView.swift:240`）。
-其余若已在 Task 2/3 顺带满足则 PASS——**不要**因此跳过本 task。
+本 task 是**锁死回归**的：Task 2/3 已经把代码改干净了，所以这些守卫**一上来就会绿**——而「一上来就绿的守卫」最容易是**假守卫**（路径写错→读不到文件→静默通过；正则写错→永不命中）。**必须逐条 mutation 验证**（memory: FP demonstrator 须 mutation-verify）：
+
+```bash
+cd ios/Contracts && swift test --filter DrawingSessionSourceGuardTests   # 先确认全绿
+```
+
+然后**逐个**临时注入坏味道，确认对应测试**变红**，再 `git checkout --` 还原：
+
+| 临时注入 | 必须变红的测试 |
+|---|---|
+| 在 `TrainingView` 的 activePanel observer 里加回 `engine.cancelDrawingAllPanels()`（先把它改回 public） | `activePanelObserverNoLongerCancelsDrawing` + `activePanelObserverTouchesNoEngineState` |
+| 在 `ChartContainerView.sync()` 里加回一行 `manager.toggle(.horizontal)`（连同一个假 manager） | `noRearmInChartContainer` |
+| 在 `ChartContainerView.handleDrawingTap` 末尾加回 `engine.commitDrawing(panel: panel)` | `noCommitDrawingAfterTap` + `panelLevelDrawingPrimitivesAreEngineOnly` |
+| 在 `TrainingView` 里加一个 `Text("画图")` | `noNewDrawingUI` |
+
+**任何一条注入后测试仍然绿 = 那个守卫是假的**（多半是路径回推写错），修好再往下走。
 
 - [ ] **Step 3: 写实现**
 
@@ -1058,16 +1080,24 @@ Expected: `activePanelObserverNoLongerCancelsDrawing` FAIL（`cancelDrawingAllPa
         }
 ```
 
-**3c.** 上面那处调用一删，`cancelDrawingAllPanels()` 在 App 里就只剩 `endDrawingSessionIfActive()` 一个调用者 → **立刻降为 `private`**（`TrainingEngine.swift`）：
+**3c.**（observer 与铅笔钮接线、`cancelDrawingAllPanels` 私有化、旧测试删除**均已在 Task 2 · 3d 原子完成**——若此刻 `TrainingView` 里还留着 `engine.cancelDrawingAllPanels()`，说明 Task 2 没做完，回去补。）
+
+**3d. 现在（且只有现在）才能上 DEBUG 不变量断言**（codex plan-R2-high 的运行时那一半；R4-high：必须等**所有**调用者干净）。
+
+此刻 `commitDrawing` / `cancelDrawing` 的调用者已全部清零：`ChartContainerView` 的 `engine.commitDrawing(panel:)` 在 Task 3 删掉，`TrainingView` 的 `cancelDrawingAllPanels()` 在 Task 2 · 3d 删掉，`cancelDrawingAllPanels` 私有且只被 `endDrawingSessionIfActive()`（先 `deactivate()` 再 cancel）调用。给 `TrainingEngine.commitDrawing(panel:)` 与 `cancelDrawing(panel:)` 的**函数体第一行**各加：
 
 ```swift
-    /// 取消两面板画线态（`cancelDrawing` 对非 drawing 态 no-op，故两次调用安全）。
-    /// **private**：唯一调用者是 `endDrawingSessionIfActive()`。若留 public，外部就能把两面板打回
-    /// `.autoTracking` 却不关会话 → 单方面破坏不变量（本期要消灭的正是这类漂移）。
-    private func cancelDrawingAllPanels() {
+        // P1b-1a-ii 不变量守卫：面板级 FSM 原语，**绝不能在全局画线会话开着时被单独调用** ——
+        // 那会把面板打回 .autoTracking 却留下 drawingModeActive==true（正是本期要消灭的漂移）。
+        // 正常收束路径 endDrawingSessionIfActive() 先 deactivate() 再 cancel，故此断言恒成立。
+        assert(!drawingSession.drawingModeActive,
+               "面板级 commitDrawing/cancelDrawing 不得在全局画线会话开启时调用（用 endDrawingSessionIfActive）")
 ```
 
-同步**删掉** Task 2 · 3d(i) 暂留的 `TrainingEngineDrawingCommitTests.cancelDrawingAllPanels_clearsBoth`（private 后不可从测试调用；其行为已被 `toggleOffEndsSession` / `endSessionIsIdempotent` 覆盖，且那两个还多断言了会话真相，更强）。
+用 `assert` 而非 `precondition`：release 无崩溃风险，DEBUG / `swift test` / Catalyst 期照样炸出误用。
+现有 FSM 测试（`TrainingEngineDrawingHandlerH1Tests` 等）全部在「会话未开」下调这两个 API（它们用
+`activateDrawingTool` 直接推面板，不碰 `beginDrawingSession`）→ 断言恒真，不会误伤。
+**若实现后有测试被这条断言打红：先查是不是真漂移，不要直接删断言。**
 
 - [ ] **Step 4: 跑测试确认通过**
 
