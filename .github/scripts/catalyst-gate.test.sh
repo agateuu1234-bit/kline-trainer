@@ -64,5 +64,12 @@ expect 1 zero-tests.log                 "执行了 0 个用例" \
 expect 1 missing-summary-line.log       "找不到 swift-testing 汇总行" \
     "swift-testing 汇总行整体缺失（非 0 个用例，而是行都没有）→ 拦截（G7·缺失分支）"
 
+# C1 回归：xcodebuild 命令行回显本身就带 -only-testing:KlineTrainerContractsTests + 金丝雀文件名
+# 也出现在 SwiftDriverJobDiscovery（任务规划，非真编译）行里——但整份日志没有一行 SwiftCompile、
+# 没有一处 Tests/KlineTrainerContractsTests/ 源码路径。旧的裸字符串锚点会被这份日志骗过
+# （GATE PASS），只有锚在源码路径上的 G6 才拦得住。
+expect 1 echo-only-no-compile.log       "测试 target 根本没被编译" \
+    "C1 回归：仅命令行回显 + 任务规划行，零 SwiftCompile 证据 → 必须由 G6 拦截"
+
 echo "结果：$PASSED 通过，$FAILED 失败"
 [ "$FAILED" -eq 0 ]
