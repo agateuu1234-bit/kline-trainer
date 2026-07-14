@@ -1101,8 +1101,10 @@ extension TrainingEngine {
 
     /// 取消两面板画线态（`cancelDrawing` 对非 drawing 态 no-op，故两次调用安全）。
     /// 唯一调用者是 `endDrawingSessionIfActive()`（`TrainingView` 那处已在 3d 删除）。
-    /// **保持 public（D46：不做 API 破坏）**；「不得在会话开着时单独调它」由 `cancelDrawing` 里的
-    /// DEBUG 断言 + Task 4 源码守卫保证，而不是靠访问级别（internal 在包内照样可见，挡不住真正的漂移源）。
+    /// **保持 public（D46：不做 API 破坏）**；「不得在会话开着时单独调它」的保护来自
+    /// `commitDrawing`/`cancelDrawing` 里的**生产期 fail-closed `guard`**（release 也生效，
+    /// `assert` 会被剥掉所以没用）+ 源码守卫测试，而不是靠访问级别（internal 在包内照样可见，
+    /// 挡不住真正的漂移源）。
     public func cancelDrawingAllPanels() {
         cancelDrawing(panel: .upper)   // 非 .drawing 态 no-op
         cancelDrawing(panel: .lower)

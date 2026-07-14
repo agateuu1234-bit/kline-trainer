@@ -41,6 +41,7 @@ struct DrawingSessionSourceGuardTests {
     @Test("#1：ChartContainerView 里**不存在** manager.toggle 自动 re-arm，也不再持有 DrawingToolManager")
     func noRearmInChartContainer() throws {
         let code = try source(chartContainer)
+        #expect(code.contains("func handleDrawingTap"))    // 先证明真读到了文件内容（防路径写错→空内容→负向断言假绿）
         #expect(!code.contains("manager.toggle("))
         #expect(!code.contains("DrawingToolManager("))     // Coordinator 不再私有持有暂存器
     }
@@ -48,6 +49,7 @@ struct DrawingSessionSourceGuardTests {
     @Test("#5/D38：提交后**不再**调 engine.commitDrawing（那是「画一条就退出」）")
     func noCommitDrawingAfterTap() throws {
         let code = try source(chartContainer)
+        #expect(code.contains("session.addAnchor("))       // 先证明真读到了文件内容（防路径写错→空内容→负向断言假绿）
         #expect(!code.contains("engine.commitDrawing("))
     }
 
