@@ -54,9 +54,8 @@ public struct ChartContainerView: UIViewRepresentable {
         private weak var engine: TrainingEngine?
         private weak var view: KLineView?
         private let arbiter = ChartGestureArbiter()
-        /// Wave 3 顺位 4：画线输入暂存（仅 .horizontal）+ 逆映射 controller。manager 是输入暂存，
-        /// engine.drawings 才是单一真相（spec §D-MANAGER）。
-        private let manager = DrawingToolManager(enabledTools: [.horizontal])
+        /// P1b-1a-ii D39：画线状态**不再**由 Coordinator 私有持有 —— 真相在 `engine.drawingSession`
+        /// （共享容器）。Coordinator 只做「tap → 锚点」的逆映射与投影，不存任何画线状态。
         private let inputController: DrawingInputController = DefaultDrawingInputController()
         /// 视图层瞬态十字光标（D3，不进 engine）。RFC-C：黏滞——长按进入、点击才清。
         public private(set) var crosshairPoint: CGPoint?
@@ -95,19 +94,17 @@ public struct ChartContainerView: UIViewRepresentable {
                 break
             }
             lastSyncedOwner = crosshairOwner             // 末尾刷新：下次 sync 的 previousOwner
-            // drawing 模式下 arbiter 截获单指 pan（spec §C7）+ 对齐 manager.activeTool（顺位 4）。
-            let drawing = isDrawing(engine: engine, panel: panel)
+            // drawing 模式下 arbiter 截获单指 pan（spec §C7）。
+            // P1b-1a-ii D39：**单向**从真相读 —— sync 绝不回写画线状态。
+            // 原 `if manager.activeTool == nil { manager.toggle(.horizontal) }` 自动 re-arm 已删除：
+            // 它会在**每一次** updateUIView 撤销底栏的工具选择（codex R15-high）。
+            let drawing = isDrawing(engine: engine)
             if drawing && crosshairActive {                       // RFC-C：进画线模式先退黏滞光标（双向互斥，codex R5-M2）
                 exitCrosshair(releaseOwnership: false)            // 本地清（view-update 期安全）
                 let release = setCrosshairOwner
                 DispatchQueue.main.async { release?(nil) }        // 释放共享 owner 延后到 update 后（不在 view-update 期改 @State）
             }
             arbiter.drawingMode = drawing
-            if drawing {
-                if manager.activeTool == nil { manager.toggle(.horizontal) }     // 进入：对齐（条件 toggle，非每帧盲翻）
-            } else if manager.activeTool != nil {
-                manager.cancel()                                                  // 退出：复位暂存
-            }
         }
 
         /// attach-once（C7 R6 幂等）：makeUIView 调一次；路由 5 类回调进 engine。
@@ -140,7 +137,7 @@ public struct ChartContainerView: UIViewRepresentable {
                 guard let self else { return }
                 switch phase {
                 case .began:
-                    guard let engine = self.engine, !self.isDrawing(engine: engine, panel: self.panel) else { return }
+                    guard let engine = self.engine, !self.isDrawing(engine: engine) else { return }
                     self.enterCrosshair(at: location)            // drawing 优先：drawing 时不进光标
                 case .changed:
                     if self.crosshairActive { self.moveCrosshair(to: location) }
@@ -191,10 +188,11 @@ public struct ChartContainerView: UIViewRepresentable {
             view.renderState = newState
         }
 
-        private func isDrawing(engine: TrainingEngine, panel: PanelId) -> Bool {
-            let mode = (panel == .upper) ? engine.upperPanel.interactionMode : engine.lowerPanel.interactionMode
-            if case .drawing = mode { return true }
-            return false
+        /// P1b-1a-ii D42：「现在能不能画」的**唯一判据** = 全局会话开关。
+        /// **不得**再读面板 `interactionMode` 作第二判据（两个判据必然漂移；引擎侧不变量
+        /// 「drawingModeActive ⇔ 两面板 .drawing」由 begin/endDrawingSessionIfActive 维持）。
+        private func isDrawing(engine: TrainingEngine) -> Bool {
+            engine.drawingSession.drawingModeActive
         }
 
         /// 设置/清空十字光标并即时重渲染（视图层瞬态，不经 SwiftUI observation）。
@@ -253,29 +251,29 @@ public struct ChartContainerView: UIViewRepresentable {
             if releaseOwnership { setCrosshairOwner?(nil) }
         }
 
-        /// 顺位 4：drawing 模式单指点击落锚 → 投影 engine.drawings/reviewDrawings → 退出 .drawing。
-        /// 全链路：tapToAnchor（逆映射）→ manager.addAnchor/commit → engine.routeDrawingCommit → engine.commitDrawing。
-        /// review-redesign Task 10：投影目标改经 `routeDrawingCommit`——review 模式写 `reviewDrawings`，
-        /// 其余（normal/replay）写 `drawings`，防止复盘新画线污染原训练记录。
+        /// P1b-1a-ii：drawing 模式单指点击落锚 → 投影 engine.drawings/reviewDrawings。
+        /// 全链路：tapToAnchor（逆映射）→ drawingSession.addAnchor（归属=**被点的这个面板**，D42）
+        ///        → shouldCommit → drawingSession.commitPending → engine.routeDrawingCommit。
+        /// **不再调 engine.commitDrawing(panel:)** —— 那会退出 `.drawing`，即旧的「画一条就退出」（D38）。
+        /// 测试入口：`handleDrawingTapForTesting`（internal；生产路径仍只经 arbiter.onTap）。
+        func handleDrawingTapForTesting(at point: CGPoint) { handleDrawingTap(at: point) }
+
         private func handleDrawingTap(at point: CGPoint) {
             guard let engine, let view else { return }
-            guard isDrawing(engine: engine, panel: panel), manager.activeTool != nil else { return }
+            let session = engine.drawingSession
+            guard session.drawingModeActive, let tool = session.activeDrawingTool else { return }
             // 空图表（candleStep==0）→ xToIndex 会 Int(NaN) 崩溃 → 守卫（spec §四 load-bearing）。
             let viewport = view.renderState.viewport
             guard viewport.geometry.candleStep > 0 else { return }
             let mapper = CoordinateMapper(viewport: viewport, displayScale: view.traitCollection.displayScale)
             let ps = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
             guard let anchor = inputController.tapToAnchor(at: point, panel: ps, mapper: mapper) else { return }
-            manager.addAnchor(anchor)
-            guard inputController.shouldCommit(current: manager.pendingAnchors, tool: .horizontal) else { return }
-            // 本期无线型选择器（→1a-iii），新线一律 .straight（全宽，视觉零变化）；
-            // isExtended 由 commit 从 lineSubType 派生（codex branch-R5 high：旧代码传 isExtended:true
-            // 却存成 .straight，是自相矛盾的持久化数据）。
-            manager.commit(panelPosition: panel == .upper ? 0 : 1)
-            if let committed = manager.completedDrawings.last {
-                engine.routeDrawingCommit(committed)          // review→reviewDrawings；否则→drawings（Task 10）
-            }
-            engine.commitDrawing(panel: panel)               // 退出 reducer .drawing
+            session.addAnchor(anchor, panel: panel)          // D31：落在 ≠ pendingAnchorPanel 的面板 → 容器内部只丢 pending
+            guard inputController.shouldCommit(current: session.pendingAnchors, tool: tool) else { return }
+            // 本期无线型选择器（→1a-iii），新线一律 .straight。
+            guard let committed = session.commitPending(panelPosition: panel == .upper ? 0 : 1) else { return }
+            engine.routeDrawingCommit(committed)             // review→reviewDrawings；否则→drawings（Task 10）
+            // ← 此处**故意没有** engine.commitDrawing(panel:)：连续画线（D38），会话与工具保持不变。
         }
     }
 }
