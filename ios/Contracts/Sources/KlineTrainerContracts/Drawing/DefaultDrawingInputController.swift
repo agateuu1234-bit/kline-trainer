@@ -21,13 +21,14 @@ public final class DefaultDrawingInputController: DrawingInputController {
     }
 
     /// MVP 显式映射 enum→最小锚数（requiredAnchors 是 tool 实例属性、非 enum 可达）。
+    /// **单一真相派生（codex whole-branch R2-high）**：非 `.implemented` 的工具恒 `Int.max`
+    /// （永不提交）——不得在此处另写一份工具清单，否则会和 `TrainingEngine.beginDrawingSession`
+    /// 的入口守卫各自维护、必然漂移。真实最小锚数待各工具专属 task 定义（1a-iii/1a-iv）。
     private func minAnchors(for tool: DrawingToolType) -> Int {
+        guard DrawingToolType.implemented.contains(tool) else { return Int.max }
         switch tool {
         case .horizontal: return 1
-        // 其余工具属 Phase 4（enabledTools 仅 .horizontal，不会到达）；drawing-P1a 新增 6 工具
-        // （channel/polyline/fib/timeRuler/rect/text）暂沿用同一未决锚数占位，真实值待专属 task 定义。
-        case .ray, .trend, .golden, .wave, .cycle, .time,
-             .channel, .polyline, .fib, .timeRuler, .rect, .text: return Int.max
+        default: return Int.max   // 结构上不可达（implemented 目前只含 .horizontal），留作未来扩容占位
         }
     }
 

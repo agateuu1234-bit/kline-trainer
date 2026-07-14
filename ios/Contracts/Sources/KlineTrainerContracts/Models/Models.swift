@@ -41,6 +41,15 @@ public enum DrawingToolType: String, Codable, Equatable, Sendable {
     case ray, time
 }
 
+public extension DrawingToolType {
+    /// 当前真正实现了「落锚 → 提交」闭环的工具。其余工具的最小锚数尚未定义
+    /// （母 spec：类型行 / 各工具提交阈值在 1a-iii / 1a-iv 才落地）。
+    /// **单一真相**：`DefaultDrawingInputController` 的锚数表与引擎的会话入口守卫都读它 ——
+    /// 两处各写一份清单必然漂移，而漂移的后果是「进得去、画不出、只能取消」的卡死会话
+    /// （codex whole-branch R2-high）。
+    static let implemented: Set<DrawingToolType> = [.horizontal]
+}
+
 public enum DisplayMode: String, Codable, Equatable, Sendable {
     case light, dark, system
 }

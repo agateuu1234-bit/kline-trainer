@@ -80,7 +80,11 @@ struct TrainingEngineDrawingSessionTests {
         e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
         let upBefore = e.upperPanel.period            // .m60
         let lowBefore = e.lowerPanel.period           // .daily
-        e.beginDrawingSession(tool: .trend)
+        // 公共入口对未实现工具 fail-closed（whole-branch R2-high）；本测试要的是「多锚工具 pending
+        // 跨面板存活」这个 1a-iii 才会真实可达的场景 —— 借内部 API 手动维持不变量（两面板都武装）。
+        e.drawingSession.activate(tool: .trend)       // 容器可持有任何工具（1a-iii 才开放公共入口）
+        e.armPanelForDrawing(.trend, panel: .upper)    // 手动维持不变量：两面板都武装
+        e.armPanelForDrawing(.trend, panel: .lower)
         e.drawingSession.addAnchor(DrawingAnchor(period: upBefore, candleIndex: 1, price: 10), panel: .upper)
 
         e.switchPeriodCombo(direction: .toSmaller)    // 直接调（不经手势）；无守卫时这里会真切成 (.m15,.m60)
@@ -199,12 +203,63 @@ struct TrainingEngineDrawingSessionTests {
         e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
         e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
 
-        e.activateDrawingTool(.trend, panel: .upper)          // 曾经只武装 upper（finding-2 裂脑：panel 侧 true，会话侧 false）
+        // .trend 尚未实现（公共入口 fail-closed，whole-branch R2-high）；本测试测的是「公共入口不造裂脑」，
+        // 与具体工具无关，改用已实现的 .horizontal 即可复现同一回归场景。
+        e.activateDrawingTool(.horizontal, panel: .upper)     // 曾经只武装 upper（finding-2 裂脑：panel 侧 true，会话侧 false）
 
         #expect(e.drawingSession.drawingModeActive == true)   // 会话真相同步跟上，不是「面板亮了会话没开」
         #expect(e.isDrawingActive(on: .upper) == true)
         #expect(e.isDrawingActive(on: .lower) == true)        // lower 没被落下
-        #expect(e.drawingSession.activeDrawingTool == .trend)
+        #expect(e.drawingSession.activeDrawingTool == .horizontal)
+        assertInvariant(e)
+    }
+
+    // MARK: whole-branch R2-high 回归锁：公共入口对「未实现工具」fail-closed（不再卡死画不出线的会话）
+
+    @Test("whole-branch R2-high 回归：beginDrawingSession(未实现工具) fail-closed —— 不开会话、不留半武装残留")
+    func beginDrawingSessionRejectsUnimplementedTool() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+
+        e.beginDrawingSession(tool: .trend)   // .trend 的 shouldCommit 恒 false（DefaultDrawingInputController）
+
+        #expect(e.drawingSession.drawingModeActive == false)
+        #expect(e.drawingSession.activeDrawingTool == nil)
+        #expect(e.drawingSession.pendingAnchors.isEmpty)
+        #expect(e.isDrawingActive(on: .upper) == false)   // 两面板都没被半武装
+        #expect(e.isDrawingActive(on: .lower) == false)
+        assertInvariant(e)
+    }
+
+    @Test("whole-branch R2-high 回归：公共 activateDrawingTool(未实现工具) 同样 fail-closed（继承 beginDrawingSession 的守卫）")
+    func activateDrawingToolRejectsUnimplementedTool() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+
+        e.activateDrawingTool(.trend, panel: .upper)
+
+        #expect(e.drawingSession.drawingModeActive == false)
+        #expect(e.drawingSession.activeDrawingTool == nil)
+        #expect(e.drawingSession.pendingAnchors.isEmpty)
+        #expect(e.isDrawingActive(on: .upper) == false)
+        #expect(e.isDrawingActive(on: .lower) == false)
+        assertInvariant(e)
+    }
+
+    @Test("对照（防假绿）：beginDrawingSession(.horizontal) 仍能正常开会话 —— 守卫只挡未实现工具，不是焊死整条路径")
+    func beginDrawingSessionStillAcceptsImplementedTool() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+
+        e.beginDrawingSession(tool: .horizontal)
+
+        #expect(e.drawingSession.drawingModeActive == true)
+        #expect(e.drawingSession.activeDrawingTool == .horizontal)
+        #expect(e.isDrawingActive(on: .upper) == true)
+        #expect(e.isDrawingActive(on: .lower) == true)
         assertInvariant(e)
     }
 }

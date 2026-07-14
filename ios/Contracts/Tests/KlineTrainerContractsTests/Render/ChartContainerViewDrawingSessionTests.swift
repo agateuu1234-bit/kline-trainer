@@ -73,9 +73,13 @@ struct ChartContainerViewDrawingSessionTests {
     @Test("#3 D31 跨 Coordinator：上面板 pending + 下面板落锚 → 只丢 pending，工具/会话存活")
     func crossCoordinatorPendingDiscard() {
         let (engine, upperC, lowerC, upperV, lowerV) = makeRig()
-        // 人造多锚工具场景：.trend 需 ≥2 锚（DefaultDrawingInputController.minAnchors 非 .horizontal
-        // 恒 Int.max）→ 落一锚不会提交，pending 留得住。
-        engine.beginDrawingSession(tool: .trend)
+        // 人造多锚工具场景：.trend 需 ≥2 锚（DefaultDrawingInputController.minAnchors 非 .implemented
+        // 恒 Int.max）→ 落一锚不会提交，pending 留得住。公共入口对未实现工具 fail-closed
+        // （whole-branch R2-high），故绕开 beginDrawingSession、直接用内部 API 复现「多锚工具 pending
+        // 跨面板存活」这个 1a-iii 才会真实可达的场景，并手动维持不变量（两面板都武装）。
+        engine.drawingSession.activate(tool: .trend)
+        engine.armPanelForDrawing(.trend, panel: .upper)
+        engine.armPanelForDrawing(.trend, panel: .lower)
         upperC.handleDrawingTapForTesting(at: mainChartPoint(upperV))
         #expect(engine.drawingSession.pendingAnchors.count == 1)
         #expect(engine.drawingSession.pendingAnchorPanel == .upper)
@@ -92,7 +96,12 @@ struct ChartContainerViewDrawingSessionTests {
     @Test("#1 D39：反复 sync/updateUIView **不改写**工具（1b-i 的类型行 toggle 不会被撤销）")
     func repeatedSyncNeverRewritesTool() {
         let (engine, upperC, _, upperV, _) = makeRig()
-        engine.beginDrawingSession(tool: .trend)          // 模拟「未来底栏选了别的工具」
+        // 模拟「未来底栏选了别的工具」：.trend 尚未实现，公共入口 fail-closed（whole-branch R2-high），
+        // 且本测试恰好需要一个 ≠ .horizontal 的工具才能证明 sync 没有把它 re-arm 回 .horizontal ——
+        // 借内部 API 直接置容器状态，并手动维持不变量（两面板都武装）。
+        engine.drawingSession.activate(tool: .trend)
+        engine.armPanelForDrawing(.trend, panel: .upper)
+        engine.armPanelForDrawing(.trend, panel: .lower)
         for _ in 0..<5 {
             upperC.sync(panel: .upper, engine: engine, view: upperV)   // = updateUIView 反复触发
         }

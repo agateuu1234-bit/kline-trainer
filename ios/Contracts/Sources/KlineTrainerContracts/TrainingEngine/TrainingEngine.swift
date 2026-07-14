@@ -1137,6 +1137,9 @@ extension TrainingEngine {
     /// 理论上可能不生效）→ **回滚**，绝不留下「铅笔钮亮着、点图却没反应」的卡死态。
     /// 顺序不能反：先置真相再武装，中间一旦失败就是坏状态；先武装再置真相，失败时干净回滚。
     public func beginDrawingSession(tool: DrawingToolType) {
+        // fail-closed：只放行「真的能提交」的工具。放进来一个 shouldCommit 永远为 false 的工具 =
+        // 用户进了画线模式、点了半天、一条线也画不出来、只能取消（codex whole-branch R2-high）。
+        guard DrawingToolType.implemented.contains(tool) else { return }
         armPanelForDrawing(tool, panel: .upper)
         armPanelForDrawing(tool, panel: .lower)
         guard isDrawingActive(on: .upper), isDrawingActive(on: .lower) else {
