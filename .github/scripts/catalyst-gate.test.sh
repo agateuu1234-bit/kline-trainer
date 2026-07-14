@@ -49,7 +49,17 @@ else
 fi
 echo
 
-echo "catalyst-gate.sh 判据测试："
+# F2（codex R5 finding，2026-07-14）：以下 fixture 用例测的是「G8 判据逻辑本身对不对」，
+# 不是「当前源码长什么样」。若让它们像生产环境一样从当前源码实时推导期望清单，任何 PR
+# 只要新增/改名一个 UIKit-gated @Test，推导清单就会比 fixture 静态日志里的多一条，本文件
+# 就会在 xcodebuild 真跑之前先崩——复现见下方 "F2 验收" 注。改用一份跟 fixture 日志配套、
+# 冻结在提交历史里的期望清单（fixtures/uikit-expected-tests.frozen.txt），通过
+# catalyst-gate.sh 已有的 UIKIT_EXPECTED_TESTS_SCRIPT 注入点喂给下面所有 `expect` 调用。
+# 真实 xcodebuild 日志（workflow 里的真跑）不设这个环境变量，仍走 catalyst-gate.sh 的
+# 默认值——对当前源码做实时推导，源码推导的保护完全没丢（见本文件末尾的独立验证）。
+export UIKIT_EXPECTED_TESTS_SCRIPT="$FIX/uikit-expected-tests-frozen.py"
+
+echo "catalyst-gate.sh 判据测试（fixture 用例，期望清单已冻结，不随当前源码漂移）："
 expect 0 pass-new-scheme.log            "GATE PASS" \
     "新 scheme 的真实成功日志（本地 Xcode 格式）→ 通过（且不被 CoreData 运行期噪声误伤）"
 
@@ -161,6 +171,51 @@ else
     FAILED=$((FAILED + 1))
 fi
 rm -f "$FAKE_EMPTY_SCRIPT" "$FAKE_CRASH_SCRIPT"
+
+# F1（high，2026-07-14，codex R5 finding）：旧实现用 here-string（`<<<`）把 G8 逐测试判据
+# 的期望清单喂给循环——bash 用 here-string 会在 TMPDIR 下建临时文件，若 TMPDIR 不可写/满，
+# 建临时文件失败，循环体一次都不执行，脚本却会不动声色地往下走完剩余判据、报 GATE PASS
+# （fail-open，codex 在只读沙箱里用这个手法实测复现："cannot create temp file for here
+# document" 后 exit 0）。根治后改用显式临时文件 + mktemp/写入失败立刻 fail-closed，外加
+# 一道独立计数断言（实际执行次数 != 期望条数就拦）。下面把 TMPDIR 指到一个不存在的目录，
+# 逼显式 mktemp 失败，验证新实现会在"建清单临时文件"这一步就 fail-closed，而不是像旧版
+# 一样悄悄放行（注意：裸 `mktemp` 在本机 macOS/BSD 上会无视 TMPDIR，所以 catalyst-gate.sh
+# 改成了显式模板 `mktemp "${TMPDIR:-/tmp}/....XXXXXX"`——这道回归同时验证了这一点）。
+echo
+echo "F1（codex R5）：TMPDIR 不可写 → G8 逐测试判据必须 fail-closed，不能 fail-open："
+BROKEN_TMPDIR="$FIX/../.nonexistent-tmpdir-for-f1-regression-$$"
+rm -rf "$BROKEN_TMPDIR" 2>/dev/null || true
+out=$(TMPDIR="$BROKEN_TMPDIR" bash "$GATE" "$FIX/pass-ci-format.log" 2>&1)
+got=$?
+if [ "$got" -eq 1 ] && grep -qF "无法创建临时文件写入 UIKit-gated 期望测试清单" <<<"$out"; then
+    echo "  ok   — TMPDIR 指向不存在目录（模拟 TMPDIR 不可写）→ 必须 FAIL，不能 fail-open (exit=$got)"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — TMPDIR 不可写本该 FAIL 且报'无法创建临时文件'，实得 exit=$got, out=$out"
+    FAILED=$((FAILED + 1))
+fi
+rm -rf "$BROKEN_TMPDIR" 2>/dev/null || true
+
+# F1 结构性回归：防止未来有人把实现改回有 fail-open 隐患的 here-string 写法而没人发现。
+if grep -qE '<<<[[:space:]]*"\$UIKIT_EXPECTED_TESTS"' "$GATE"; then
+    echo "  FAIL — 结构性回归：catalyst-gate.sh 又出现了 here-string 喂 UIKIT_EXPECTED_TESTS 的写法"
+    FAILED=$((FAILED + 1))
+else
+    echo "  ok   — 结构性回归：catalyst-gate.sh 不再用 here-string 喂 G8 逐测试循环"
+    PASSED=$((PASSED + 1))
+fi
+
+# F1 计数回归：正常路径下"实际执行次数 == 期望条数（冻结清单 28 条）"必须放行——
+# 防止计数断言本身有 off-by-one 之类的 bug 而把正常路径也拦掉。
+out=$(bash "$GATE" "$FIX/pass-ci-format.log" 2>&1)
+got=$?
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out"; then
+    echo "  ok   — 正常路径计数 == 28（冻结清单条数）→ PASS，不被新增的计数断言误伤 (exit=$got)"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — 正常路径本该 PASS，实得 exit=$got, out=$out"
+    FAILED=$((FAILED + 1))
+fi
 
 echo "结果：$PASSED 通过，$FAILED 失败"
 [ "$FAILED" -eq 0 ]

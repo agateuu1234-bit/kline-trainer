@@ -73,7 +73,8 @@ fi
 #     根治：不再手工维护「应该测什么」的列表——CI 上跑闸门时源码已经 checkout 到位，
 #     源码本身就是唯一真相。改由 uikit-expected-tests.py 在运行时扫描源码，推导出
 #     「本应执行的 UIKit-gated 测试全集」，下面逐个断言日志里有对应的
-#     `Test "<名>" passed` 行——新增/改名/删除的测试自动被下一次运行覆盖，不会再有
+#     `Test "<显示名>" passed` 或 `Test <函数名>() passed` 行（两种 @Test 写法格式不同，
+#     见下方 F3 匹配分支）——新增/改名/删除的测试自动被下一次运行覆盖，不会再有
 #     N-of-M 的哨兵缺口。
 #     锚点 A —— macabi：Catalyst 的编译 target triple 形如 `arm64-apple-iosNN.N-macabi`，
 #     只出现在真实编译产物路径/编译器调用里；不出现在 xcodebuild 的命令行回显里
@@ -98,12 +99,47 @@ fi
 if [ -z "$UIKIT_EXPECTED_TESTS" ]; then
     fail "UIKit-gated 测试清单推导为空——找不到任何期望测试，拒绝放行（fail-closed）"
 fi
+# F1（codex R5 finding，2026-07-14）：此前用 here-string（`<<<`）把清单喂给循环——
+# bash 用 here-string 时会在 TMPDIR 下建临时文件；若 TMPDIR 不可写/满，建临时文件失败，
+# 循环体一次都不执行，但脚本会不动声色地往下走完剩余判据、报 GATE PASS（fail-open，
+# codex 在只读沙箱里实测复现：`cannot create temp file for here document` 后 exit 0）。
+# 根治：① 改用显式临时文件 + 检查写入是否成功（mktemp/写入失败立刻 fail-closed，
+# 不再依赖 here-string 的隐式临时文件机制）；② 无论循环因为什么原因没跑满，都用一个
+# 独立计数器核对「实际执行次数 == 期望条数」，跑少了也必须 fail-closed——这样即使
+# 未来出现别的、还没被发现的「循环静默不执行」路径，也会被这道计数闸门挡住。
+UIKIT_EXPECTED_COUNT=$(printf '%s\n' "$UIKIT_EXPECTED_TESTS" | grep -c '.' || true)
+# 显式模板、显式引用 ${TMPDIR:-/tmp}——裸 `mktemp`（无模板）在 macOS/BSD 上会直接走
+# Darwin 每用户临时目录、完全无视 TMPDIR 环境变量，那样这道 fail-closed 检测在本机
+# 永远测不出来；显式模板在 macOS 和 Linux（GNU mktemp）上都会老实遵守 TMPDIR。
+UIKIT_LIST_FILE="$(mktemp "${TMPDIR:-/tmp}/catalyst-gate-uikit-expected.XXXXXX" 2>&1)" || fail "无法创建临时文件写入 UIKit-gated 期望测试清单（TMPDIR 不可写/已满？):${UIKIT_LIST_FILE}"
+printf '%s\n' "$UIKIT_EXPECTED_TESTS" >"$UIKIT_LIST_FILE" || fail "写入 UIKit-gated 期望测试清单临时文件失败：$UIKIT_LIST_FILE"
+
+UIKIT_CHECKED_COUNT=0
 while IFS= read -r uikit_test; do
     [ -z "$uikit_test" ] && continue
-    if ! grep -qF "Test \"${uikit_test}\" passed" "$LOG"; then
+    UIKIT_CHECKED_COUNT=$((UIKIT_CHECKED_COUNT + 1))
+    # F3（codex R5 finding）：swift-testing 对两种 @Test 写法打印格式不同——
+    # `@Test("显示名")` 收尾行带字面引号（`Test "显示名" passed`），而 `@Test func 名字()`
+    # （无显示名）直接印函数签名、不带引号（`Test 名字() passed`，已用真实 CI 日志核实）。
+    # uikit-expected-tests.py 用「名字末尾是不是 "()"」来标记是哪种形式，这里据此决定
+    # 要不要在匹配串两侧补引号。
+    case "$uikit_test" in
+        *'()')
+            match_str="Test ${uikit_test} passed"
+            ;;
+        *)
+            match_str="Test \"${uikit_test}\" passed"
+            ;;
+    esac
+    if ! grep -qF "$match_str" "$LOG"; then
         fail "UIKit-gated 测试未执行：${uikit_test} —— 找不到 'passed' 收尾行（UIKit 代码体没有真的跑完，源码推导清单见 uikit-expected-tests.py）"
     fi
-done <<<"$UIKIT_EXPECTED_TESTS"
+done <"$UIKIT_LIST_FILE"
+rm -f "$UIKIT_LIST_FILE"
+
+if [ "$UIKIT_CHECKED_COUNT" -ne "$UIKIT_EXPECTED_COUNT" ]; then
+    fail "UIKit-gated 逐测试判据没有跑满：期望校验 ${UIKIT_EXPECTED_COUNT} 条，实际只执行了 ${UIKIT_CHECKED_COUNT} 条循环体——判据没有真正执行完（fail-closed，不放行）"
+fi
 
 # --- G7: 自证——测试真的被执行了，且不是 0 个（防 -only-testing 把用例全过滤光）
 #     "in M suites" 这段是可选的：本地 Xcode 输出 'Test run with N tests in M suites passed'，
