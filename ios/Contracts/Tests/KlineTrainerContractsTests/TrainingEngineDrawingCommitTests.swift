@@ -218,39 +218,10 @@ struct TrainingEngineDrawingCommitTests {
         #expect(e.drawings.isEmpty)   // 不污染原训练记录
     }
 
-    // MARK: - review-redesign Task 4：双面板划线互斥（toggleDrawingExclusive/cancelDrawingAllPanels/isDrawingActive）
-
-    @Test("toggleDrawingExclusive: 激活选中面板（.lower），另一面板（.upper）不受影响")
-    func toggleDrawingExclusive_activatesSelectedPanelOnly() {
-        let engine = Self.makeNormalEngineAtTick(10)
-        engine.toggleDrawingExclusive(on: .lower)
-        #expect(engine.isDrawingActive(on: .lower))
-        #expect(!engine.isDrawingActive(on: .upper))
-    }
-
-    @Test("toggleDrawingExclusive: 切换面板时取消另一面板（互斥）")
-    func toggleDrawingExclusive_switchingPanels_cancelsOther() {
-        let engine = Self.makeNormalEngineAtTick(10)
-        engine.toggleDrawingExclusive(on: .upper)      // 上栏进画线
-        engine.toggleDrawingExclusive(on: .lower)      // 切下栏
-        #expect(!engine.isDrawingActive(on: .upper))   // 上栏被取消（互斥）
-        #expect(engine.isDrawingActive(on: .lower))
-    }
-
-    @Test("toggleDrawingExclusive: 同面板二次点击 → toggle off")
-    func toggleDrawingExclusive_secondTapSamePanel_togglesOff() {
-        let engine = Self.makeNormalEngineAtTick(10)
-        engine.toggleDrawingExclusive(on: .lower)
-        engine.toggleDrawingExclusive(on: .lower)
-        #expect(!engine.isDrawingActive(on: .lower))
-    }
-
-    @Test("cancelDrawingAllPanels: 清除两面板画线态")
-    func cancelDrawingAllPanels_clearsBoth() {
-        let engine = Self.makeNormalEngineAtTick(10)
-        engine.toggleDrawingExclusive(on: .upper)
-        engine.cancelDrawingAllPanels()
-        #expect(!engine.isDrawingActive(on: .upper))
-        #expect(!engine.isDrawingActive(on: .lower))
-    }
+    // MARK: - P1b-1a-ii D42：「按 activePanel 双面板互斥」模型已退役
+    // 旧的 toggleDrawingExclusive 三连测试（激活选中面板 / 切面板取消另一面板 / 同面板二次点击 toggle off）
+    // 与 cancelDrawingAllPanels_clearsBoth 随该模型一并删除：
+    //   · 画线会话现在是**全局**的 —— 开 = **两面板一起**进 .drawing，不存在「另一面板被取消」这回事；
+    //   · cancelDrawingAllPanels 的唯一调用者已是 endDrawingSessionIfActive（会话收口点），不再单独直呼。
+    // 等价且更强的覆盖（含「会话 ⇔ 两面板 mode」不变量断言）见 TrainingEngineDrawingSessionTests。
 }
