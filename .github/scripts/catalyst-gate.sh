@@ -66,11 +66,16 @@ if ! grep -q 'DrawDrawingsDispatchTests\.swift' "$LOG"; then
 fi
 
 # --- G7: 自证——测试真的被执行了，且不是 0 个（防 -only-testing 把用例全过滤光）
-SUMMARY=$(grep -oE 'Test run with [0-9]+ tests? in [0-9]+ suites? passed' "$LOG" | head -1 || true)
+#     "in M suites" 这段是可选的：本地 Xcode 输出 'Test run with N tests in M suites passed'，
+#     而 CI 的 macos-15 输出 'Test run with N tests passed'（没有 "in M suites"）。
+#     两种格式都要接受，否则 CI 上永远匹配不到（真实咬过一次，见 fixtures/pass-ci-format.log）。
+SUMMARY=$(grep -oE 'Test run with [0-9]+ tests?( in [0-9]+ suites?)? passed' "$LOG" | head -1 || true)
 if [ -z "$SUMMARY" ]; then
-    fail "找不到 swift-testing 汇总行 'Test run with N tests in M suites passed' —— 测试没被执行"
+    fail "找不到 swift-testing 汇总行 'Test run with N tests [in M suites] passed' —— 测试没被执行"
 fi
-N_TESTS=$(echo "$SUMMARY" | grep -oE '[0-9]+' | head -1)
+# 提取用例数：必须锚在 "Test run with " 后紧跟的数字上，不能用"匹配到的第一个数字"——
+# 本地格式的 SUMMARY 里还有 "in M suites" 的 M，位置在 tests 数之后，裸序号提取法可能误取它。
+N_TESTS=$(echo "$SUMMARY" | grep -oE '^Test run with [0-9]+' | grep -oE '[0-9]+')
 if [ "$N_TESTS" -eq 0 ]; then
     fail "swift-testing 执行了 0 个用例（${SUMMARY}）—— 门是空的"
 fi

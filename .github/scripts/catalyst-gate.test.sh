@@ -33,7 +33,15 @@ expect() {  # expect <期望退出码> <fixture> <期望输出中必须出现的
 
 echo "catalyst-gate.sh 判据测试："
 expect 0 pass-new-scheme.log            "GATE PASS" \
-    "新 scheme 的真实成功日志 → 通过（且不被 CoreData 运行期噪声误伤）"
+    "新 scheme 的真实成功日志（本地 Xcode 格式）→ 通过（且不被 CoreData 运行期噪声误伤）"
+
+# G7 环境保真度回归（2026-07-13，PR #145 真 CI 首跑现场）：本地 Xcode 与 CI 的 macos-15
+# 输出的 swift-testing 汇总行格式不一样——本地是 'Test run with N tests in M suites passed'，
+# CI 是 'Test run with N tests passed'（没有 "in M suites"）。fixture 集合必须同时覆盖两种格式，
+# 否则闸门只在本地测过、从未见过真 CI 的输出长什么样，会在 CI 上误判 FAIL（测试其实全过了）。
+# pass-ci-format.log 是从真实 CI 日志裁剪的（未手打），专门锁住这个格式分支。
+expect 0 pass-ci-format.log             "GATE PASS" \
+    "真 CI（macos-15）格式的成功日志，无 'in M suites' 分段 → 通过，且用例数取到 1407 而非 0"
 
 # hollow-old-scheme.log 是真实抓取的旧 scheme 空壳日志（历史回归现场），故意保留、不删。
 # 它同时踩中 G2（无 TEST SUCCEEDED）和 G6（无 KlineTrainerContractsTests）——过度判定，
