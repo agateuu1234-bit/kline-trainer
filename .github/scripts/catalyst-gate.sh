@@ -57,13 +57,33 @@ if ! grep -q 'Tests/KlineTrainerContractsTests/' "$LOG"; then
     fail "日志里找不到 Tests/KlineTrainerContractsTests/ —— 测试 target 根本没被编译（scheme 用错了？）"
 fi
 
-# --- G8: 自证——UIKit-gated 测试真的进了编译。
-#         金丝雀文件：DrawDrawingsDispatchTests.swift（#if canImport(UIKit) 包裹）。
-#         若该文件被改名/删除，本判据会红——这是**有意**的：改名者必须在这里换一个
-#         新的 UIKit-gated 金丝雀，而不是让"UIKit 代码已被编译"这条不变量悄悄消失。
-if ! grep -q 'DrawDrawingsDispatchTests\.swift' "$LOG"; then
-    fail "日志里找不到 DrawDrawingsDispatchTests.swift —— UIKit-gated 测试没进编译（若该文件已改名，请在本脚本里更新金丝雀）"
+# --- G8: 自证——UIKit-gated 代码真的被编译进了 Catalyst 构建，且里面的测试真的跑完了。
+#     （2026-07-14 实测发现的漏洞）旧判据只 grep 金丝雀文件名 DrawDrawingsDispatchTests.swift。
+#     但该文件的测试体裹在 #if canImport(UIKit) 里——在**非 Catalyst**（如 `platform=macOS`）
+#     destination 上，这个文件依然会被编译（只是宏剔除了测试体），文件名照样进日志。
+#     实测：用 -destination 'platform=macOS' 跑同一套测试，UIKit-only 套件执行 0 次，
+#     但金丝雀文件名仍出现 3 次 —— 旧判据在这种情况下会放行，而这正是它声称要堵的盲区。
+#     换成两条只有真·Mac Catalyst 编译+执行才会产生的证据：
+#     锚点 A —— macabi：Catalyst 的编译 target triple 形如 `arm64-apple-iosNN.N-macabi`，
+#     只出现在真实编译产物路径/编译器调用里；不出现在 xcodebuild 的命令行回显里
+#     （回显里的 destination 是 "platform=macOS,variant=Mac Catalyst" 字面量，不含 "macabi"）。
+#     锚点 B —— UIKit-only 测试套件真的跑完了：三个 UIKit-gated 套件必须都出现
+#     "passed after" 收尾行，证明它们不仅编译了，还真的执行到底（不是编译了但被跳过）。
+if ! grep -q 'macabi' "$LOG"; then
+    fail "日志里找不到 macabi（Mac Catalyst 编译 target triple）—— 这份日志不是真 Mac Catalyst 编译产物，UIKit-gated 代码没有被编译（destination 是不是退化成了普通 macOS？）"
 fi
+
+# 若这三个套件改名/拆分/新增，请同步更新下面的列表——否则本判据会失去意义地长期沉默。
+UIKIT_SUITES=(
+    'UIChartPalette（UIKit 桥；scheme 选取）'
+    'KLineView 编译反射（§15.1 #3 compile gate）'
+    'ChartContainerView 布局重算（修 #2 复盘静态界面空白）'
+)
+for suite in "${UIKIT_SUITES[@]}"; do
+    if ! grep -qF "Suite \"${suite}\" passed after" "$LOG"; then
+        fail "UIKit-gated 套件未执行完毕：${suite} —— 找不到 'passed after' 收尾行（UIKit 代码体没有真的跑完）"
+    fi
+done
 
 # --- G7: 自证——测试真的被执行了，且不是 0 个（防 -only-testing 把用例全过滤光）
 #     "in M suites" 这段是可选的：本地 Xcode 输出 'Test run with N tests in M suites passed'，
@@ -78,6 +98,16 @@ fi
 N_TESTS=$(echo "$SUMMARY" | grep -oE '^Test run with [0-9]+' | grep -oE '[0-9]+')
 if [ "$N_TESTS" -eq 0 ]; then
     fail "swift-testing 执行了 0 个用例（${SUMMARY}）—— 门是空的"
+fi
+# 可维护下限：防 -only-testing 被收窄/大批用例被跳过时仍能跑出个位数用例就过（"0 个"
+# 只是这类覆盖塌方的极端情形，中间地带——比如收窄到只剩一个 suite——0 检查抓不住）。
+# 这不是精确判据：Catalyst 全量当前是 1407 个（见 fixtures/pass-new-scheme.log），
+# 阈值留了约 200 条余量给正常的测试增删，不要把它设成等于当前真实值。
+# 调整时机：真实用例数长期低于这个数（比如新增测试后稳定在 1250+），把 MIN_TESTS 一起抬高；
+# 反之若测试被大量删除是有意为之，也要把它一起调低，否则会误拦正常 PR。
+MIN_TESTS=1200
+if [ "$N_TESTS" -lt "$MIN_TESTS" ]; then
+    fail "swift-testing 只执行了 ${N_TESTS} 个用例，低于下限 ${MIN_TESTS}（${SUMMARY}）—— 可能是 -only-testing 被收窄或用例被大批跳过"
 fi
 
 # --- G5: 测试代码警告：只统计、不拦（48 条既有技术债，见 spec §4）
