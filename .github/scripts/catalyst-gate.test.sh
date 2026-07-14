@@ -172,6 +172,59 @@ else
 fi
 rm -f "$FAKE_EMPTY_SCRIPT" "$FAKE_CRASH_SCRIPT"
 
+# 未归属 @Test 检测（2026-07-14，解析器盲区 finding 的自动化回归）：uikit-expected-tests.py
+# 此前只能解析它「认识」的两种 @Test 写法——任何不认识的形式（如带 arguments 的参数化
+# @Test(arguments:)）会被两个解析正则都跳过，测试悄悄从期望清单里消失，脚本仍退出 0、
+# 闸门看起来在守门实则漏判。根治：脚本新增「@Test 属性出现次数」与「实际解析出名字数」
+# 的核对，两个数字对不上就非零退出并点名文件/行。
+#
+# 本回归不能只测一个手搓的 stub 消息字符串（那样只验证 catalyst-gate.sh 认字符串，
+# 不验证 uikit-expected-tests.py 真的检测到了）——必须让*真实脚本*对着一份*真实*、独立于
+# 当前源码的 fixture 源码树跑一遍。做法：把 uikit-expected-tests.py 复制到一棵临时目录树
+# 的 `.github/scripts/` 下（脚本用 `pathlib(__file__).parents[2]` 定位仓库根，跟着复制体
+# 一起走，天然指向临时树而不是真仓库），临时树里放一个 UIKit-gated 区块内含一个
+# `@Test(arguments:)` 参数化写法的最小 fixture 文件，验证：
+#   (a) 脚本自身对这份 fixture 非零退出，且 stderr 点名 fixture 文件路径与行号；
+#   (b) 把这个「会失败」的脚本通过 UIKIT_EXPECTED_TESTS_SCRIPT 接到 catalyst-gate.sh 上，
+#       对一份本该 GATE PASS 的真实成功日志（pass-ci-format.log）重跑一遍，必须 GATE FAIL。
+echo
+echo "未归属 @Test 检测（解析器盲区 fail-closed 防线）："
+UNATTR_ROOT="$FIX/../.unattributed-test-fixture-$$"
+rm -rf "$UNATTR_ROOT" 2>/dev/null || true
+mkdir -p "$UNATTR_ROOT/.github/scripts" "$UNATTR_ROOT/ios/Contracts/Tests/KlineTrainerContractsTests"
+cp "$DIR/uikit-expected-tests.py" "$UNATTR_ROOT/.github/scripts/uikit-expected-tests.py"
+cat > "$UNATTR_ROOT/ios/Contracts/Tests/KlineTrainerContractsTests/UnattributedFixtureTests.swift" <<'SWIFTEOF'
+#if canImport(UIKit)
+import Testing
+
+struct UnattributedFixtureTests {
+    @Test(arguments: [1, 2]) func paramTest(x: Int) {}
+}
+#endif
+SWIFTEOF
+
+out=$(python3 "$UNATTR_ROOT/.github/scripts/uikit-expected-tests.py" 2>&1)
+got=$?
+if [ "$got" -eq 1 ] && grep -qF "检测到无法解析出测试名的 @Test 属性" <<<"$out" \
+    && grep -qF "UnattributedFixtureTests.swift:5" <<<"$out"; then
+    echo "  ok   — (a) uikit-expected-tests.py 对参数化 @Test(arguments:) 非零退出，且点名 fixture 文件:行 (exit=$got)"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — (a) 未归属 @Test 检测本该非零退出且点名文件:行，实得 exit=$got, out=$out"
+    FAILED=$((FAILED + 1))
+fi
+
+out=$(UIKIT_EXPECTED_TESTS_SCRIPT="$UNATTR_ROOT/.github/scripts/uikit-expected-tests.py" bash "$GATE" "$FIX/pass-ci-format.log" 2>&1)
+got=$?
+if [ "$got" -eq 1 ] && grep -qF "检测到无法解析出测试名的 @Test 属性" <<<"$out"; then
+    echo "  ok   — (b) 未归属 @Test 推导失败经 UIKIT_EXPECTED_TESTS_SCRIPT 接入 catalyst-gate.sh → 本该 GATE PASS 的日志也必须 GATE FAIL (exit=$got)"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — (b) 未归属 @Test 推导失败本该让闸门 GATE FAIL，实得 exit=$got, out=$out"
+    FAILED=$((FAILED + 1))
+fi
+rm -rf "$UNATTR_ROOT" 2>/dev/null || true
+
 # F1（high，2026-07-14，codex R5 finding）：旧实现用 here-string（`<<<`）把 G8 逐测试判据
 # 的期望清单喂给循环——bash 用 here-string 会在 TMPDIR 下建临时文件，若 TMPDIR 不可写/满，
 # 建临时文件失败，循环体一次都不执行，脚本却会不动声色地往下走完剩余判据、报 GATE PASS
