@@ -982,12 +982,27 @@ extension TrainingEngine {
             animator(for: panel).stop()
             setActiveBounds(nil, panel: panel)
         }
-        let fresh = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: bounds)
+        normalizeOffsetForCurrentBounds(panel: panel)
+        // R1b-drag E5：resize 中途 active drag → 重同步 dragRaw 到归一后 offset（防下一帧 delta 基于 stale raw 跳变）。
+        if dragRawFor(panel) != nil { setDragRaw(panelState(panel).offset, panel: panel) }
+    }
+
+    /// 按**当前** bounds 把 offset 夹回合法区间（resize/旋转后的 stale offset 归一）。
+    /// 抽出来是因为它有**两个**触发点：① `recordRenderBounds`（bounds 真的变了）；
+    /// ② 画线会话结束（`endDrawingSessionIfActive` / `cancelDrawingAllPanels`）。
+    ///
+    /// **为什么②是必须的（codex whole-branch R4-medium）**：reducer 在 `.drawing` 态**吞掉** `.offsetApplied`
+    /// （画线时不许平移），于是画线期间发生的 resize/旋转，其归一动作被静默吞掉 → offset 停在越界值。
+    /// 从前画线只活一次 tap，这窗口小到几乎不可达；**本期画线会话变成持续的**（画完一条不退出），
+    /// 用户完全可能「滚动 → 进画线 → 画几条 → 转屏」。而退出画线时 bounds 并没有再变一次，
+    /// `recordRenderBounds` 的 `previous != bounds` 守卫会直接早返 → 归一**永远不补跑** → 图表持续挂着
+    /// overscroll 间隙，直到用户碰巧再拖一次才自愈。故会话一结束（两面板已回 `.autoTracking`、
+    /// `.offsetApplied` 重新被接受）立刻补一次归一。
+    private func normalizeOffsetForCurrentBounds(panel: PanelId) {
+        let fresh = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds(panel))
         let cur = panelState(panel).offset
         let clamped = min(max(cur, fresh.minOffset), fresh.maxOffset)
         if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }
-        // R1b-drag E5：resize 中途 active drag → 重同步 dragRaw 到归一后 offset（防下一帧 delta 基于 stale raw 跳变）。
-        if dragRawFor(panel) != nil { setDragRaw(panelState(panel).offset, panel: panel) }
     }
 
     // MARK: 画线激活 H1 production handler（spec §C1b 闸门 #4 F3 + effect 合约 L1026-1032）
@@ -1116,6 +1131,8 @@ extension TrainingEngine {
         drawingSession.deactivate()                 // 幂等：先落会话真相
         cancelDrawingUnchecked(panel: .upper)       // 再收面板（走 unchecked，不会被 fail-closed 守卫挡住）
         cancelDrawingUnchecked(panel: .lower)
+        normalizeOffsetForCurrentBounds(panel: .upper)   // R4-medium：补跑画线期间被 .drawing 吞掉的 resize 归一
+        normalizeOffsetForCurrentBounds(panel: .lower)
     }
 
     /// D42 浮动钮唯一入口：全局开/关画线会话（**不属于任何面板**，与 activePanel 无关）。
@@ -1165,6 +1182,10 @@ extension TrainingEngine {
         drawingSession.deactivate()
         cancelDrawingUnchecked(panel: .upper)
         cancelDrawingUnchecked(panel: .lower)
+        // R4-medium：画线期间（`.drawing` 吞 `.offsetApplied`）发生的 resize/旋转，其 offset 归一被静默吞掉；
+        // 此刻两面板已回 `.autoTracking`，补跑一次归一，杜绝「退出画线后仍挂着越界 offset / overscroll 间隙」。
+        normalizeOffsetForCurrentBounds(panel: .upper)
+        normalizeOffsetForCurrentBounds(panel: .lower)
     }
 }
 

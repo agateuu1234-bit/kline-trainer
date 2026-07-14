@@ -248,6 +248,44 @@ struct TrainingEngineDrawingSessionTests {
         assertInvariant(e)
     }
 
+    // MARK: whole-branch R4-medium 回归锁：画线期间 resize/旋转 → 退出画线后 offset 必须被归一
+
+    @Test("whole-branch R4-medium 回归：连续画线中途转屏/resize → 退出画线后 offset 被夹回合法区间（不留 overscroll 间隙）")
+    func resizeDuringContinuousDrawingIsNormalizedOnExit() {
+        // fixture 必须**真的滚得动**：200 根 m3、起始 tick=150 → 左侧有历史，maxOffset>0。
+        // （`preview()` / `engineMultiPeriod()` 只有 8 根、且 tick 在起点，maxOffset≈0 → 滚不动，测了等于没测。）
+        let (e, _) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let wide = TrainingEnginePanLinkageTests.bounds        // 800×600，makeEngine 已 recordRenderBounds
+
+        // ① 先滚动出一个非零 offset（freeScrolling）
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 300, renderBounds: wide, panel: .upper)
+        e.endPan(velocity: 0, renderBounds: wide, panel: .upper)
+        let scrolled = e.upperPanel.offset
+        #expect(scrolled > 0)                                  // 防假绿：确实滚出了 offset
+
+        // ② 进画线模式（本期：会话持续，画完一条也不退出）
+        e.toggleDrawingMode()
+        #expect(e.isDrawingActive(on: .upper))
+
+        // ③ 画线期间转屏/resize：变窄后 maxOffset 变小，原 offset 越界。
+        //    reducer 在 .drawing 态**吞掉** .offsetApplied → 这次归一被静默吞了。
+        let narrow = CGRect(x: 0, y: 0, width: 200, height: 480)
+        e.recordRenderBounds(narrow, panel: .upper)
+        e.recordRenderBounds(narrow, panel: .lower)
+        let bounds = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: narrow)
+        #expect(e.upperPanel.offset > bounds.maxOffset)        // 防假绿：此刻确实是越界的（bug 的现场）
+
+        // ④ 退出画线 —— 修复前：bounds 没再变，recordRenderBounds 的 previous!=bounds 守卫早返，
+        //    归一永远不补跑 → 图表挂着 overscroll 间隙直到用户碰巧再拖一次。
+        e.toggleDrawingMode()
+
+        let after = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: narrow)
+        #expect(e.upperPanel.offset <= after.maxOffset)        // 已夹回
+        #expect(e.upperPanel.offset >= after.minOffset)
+        assertInvariant(e)
+    }
+
     // MARK: whole-branch R3-high 回归锁：公共「进画线 → 退画线」序列必须真的能退出来（不许卡死）
 
     @Test("whole-branch R3-high 回归：activateDrawingTool 之后 commitDrawing —— 必须真的退出画线（不是 no-op 卡死）")
