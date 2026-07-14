@@ -1069,6 +1069,11 @@ extension TrainingEngine {
     /// 封装 snapshot.frozen.baseRevision 细节（caller 不碰 revision）。非 drawing 态 no-op（幂等）。
     /// 不改 `drawings`（数据投影是 `appendDrawing` 的职责）；不 bump revision（reducer 契约）。
     public func commitDrawing(panel: PanelId) {
+        // P1b-1a-ii 不变量守卫（fail-closed，生产期生效）：面板级 FSM 原语**不得**在全局画线会话开着时
+        // 被单独调用 —— 那会把面板打回 .autoTracking 却留下 drawingModeActive==true（本期要消灭的漂移）。
+        // 会话的正当收束路径是 endDrawingSessionIfActive()：它先 deactivate() 再 cancel，故此守卫恒放行。
+        // 语义 = no-op（不是崩溃）：即便包外消费者误调，也只是什么都不发生，绝不会造出坏状态。
+        guard !drawingSession.drawingModeActive else { return }
         guard case .drawing(let snap) = panelState(panel).interactionMode else { return }
         _ = reduce(.drawingCommitted(baseRevision: snap.frozen.baseRevision), on: panel)
     }
@@ -1076,6 +1081,11 @@ extension TrainingEngine {
     /// 取消当前 drawing：dispatch reducer `.drawingCancelled` 退出 `.drawing` → `.autoTracking`。
     /// 非 drawing 态 no-op。无数据投影。
     public func cancelDrawing(panel: PanelId) {
+        // P1b-1a-ii 不变量守卫（fail-closed，生产期生效）：面板级 FSM 原语**不得**在全局画线会话开着时
+        // 被单独调用 —— 那会把面板打回 .autoTracking 却留下 drawingModeActive==true（本期要消灭的漂移）。
+        // 会话的正当收束路径是 endDrawingSessionIfActive()：它先 deactivate() 再 cancel，故此守卫恒放行。
+        // 语义 = no-op（不是崩溃）：即便包外消费者误调，也只是什么都不发生，绝不会造出坏状态。
+        guard !drawingSession.drawingModeActive else { return }
         guard case .drawing(let snap) = panelState(panel).interactionMode else { return }
         _ = reduce(.drawingCancelled(baseRevision: snap.frozen.baseRevision), on: panel)
     }
