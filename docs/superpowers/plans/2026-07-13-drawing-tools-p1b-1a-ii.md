@@ -83,6 +83,24 @@ spec §3.1.1 的字面是「`DrawingToolManager` 退化为纯 pending-anchor 暂
 
 按项目守则如实记录：**codex 未 approve；verdict = needs-attention；本条为已接受 residual，走 override 收口。**
 
+### D48：whole-branch codex 收口（5 轮）—— 4 个真 bug 全修；**R5 legacy 公共 API 兼容性 residual 接受 + override**
+
+| 轮次 | finding | 处置 |
+|---|---|---|
+| R1 | ① `cancelDrawingAllPanels()` 在会话真开着时**静默 no-op**（名不副实的公共 API）② `activateDrawingTool` 能把面板武装成 `.drawing` 却不开会话 → **裂脑**（点了没反应、该面板还平移不了） | **修**：面板级原语收进 `armPanelForDrawing`（internal）；公共 `activateDrawingTool` 委托全局会话；`cancelDrawingAllPanels` 改为「整场收干净」，永不 no-op |
+| R2 | **本分支自己弄丢的闸门**：旧 `DrawingToolManager(enabledTools:[.horizontal])` 被新容器丢掉 → 可用**未实现工具**（`.trend` 等，`shouldCommit` 恒 `Int.max` 锚）开会话 → **点一辈子画不出线、只能取消** | **修**：`DrawingToolType.implemented` 单一清单（`minAnchors` 与入口守卫都读它，杜绝两处漂移）+ 入口 **fail-closed** |
+| R3 | 上一轮的守卫**把失败面挪了位**：既有公共序列 `activateDrawingTool → commitDrawing/cancelDrawing` 撞守卫 no-op → **永久卡死在画线模式出不来** | **修**：会话开着时，面板级「退出画线」**语义上就等于结束整场会话** → 路由到 `endDrawingSessionIfActive()`；会话没开则保持原面板级 FSM 语义 |
+| R4 | **连续画线**把一条老路径变成真实可达：`.drawing` 吞 `.offsetApplied` → 画线期间转屏/resize 的 offset 归一被吞 → 退出后 bounds 没再变、归一永不补跑 → 图表持续挂 **overscroll 间隙** | **修**：归一抽成 `normalizeOffsetForCurrentBounds`，会话结束时补跑（已 mutation 验证：去掉即红，offset=300 vs maxOffset=177.5） |
+
+**R5 residual（接受 + override，不再改）**：codex 主张「公共 `activateDrawingTool` 对未实现工具 fail-closed = 静默 no-op = 对包外 SwiftPM 消费者的兼容性陷阱」，建议改为「legacy-arm 未实现工具」或做 deprecation/契约版本迁移。
+
+**不采纳，理由（三条，逐条可证伪）**：
+1. **它与自己 R2 的要求直接矛盾，且新方案更差**：R2 明确要求「fail closed at the public session entry points: only allow `.horizontal`」，我照做；R5 又说这个 fail-closed 是陷阱，建议 legacy-arm 未实现工具 —— 那**正好把 R2 判定为 high 的 bug 原样装回去**（进得去、画不出、只能取消）。**静默 no-op 严格优于卡死会话**。
+2. **那个消费者不存在**：`grep` 实证包外零调用（App target 与 Persistence 模块均无）；本仓是单 App 私有仓，不是对外发布的库。为不存在的消费者做 deprecation + 非-`@testable` 公共面 fixture，是 CLAUDE.md §2 禁止的投机复杂度。
+3. **App 内不可达**：唯一的画线入口是浮动铅笔钮 → `toggleDrawingMode()` → `beginDrawingSession(.horizontal)`。**没有任何 UI 能选中未实现工具**；1a-iii 引入类型行时，工具会连同真实提交阈值一起落地（届时 `implemented` 扩容，这条守卫自然放行）。
+
+按项目守则如实记录：**codex 未 approve；verdict = needs-attention；本条为已接受 residual，走 override 收口。**（同 plan 阶段 D47 的 R10 —— 是同一条轴上的第 2 次复述。）
+
 ---
 
 ## File Structure
