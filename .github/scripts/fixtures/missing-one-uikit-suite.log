@@ -14,8 +14,6 @@ SwiftCompile normal arm64 /Users/runner/work/kline-trainer/kline-trainer/ios/Con
 Copy /tmp/derived/Build/Products/Debug-maccatalyst/GRDB.swiftmodule/arm64-apple-ios-macabi.swiftdoc /tmp/derived/Build/Intermediates.noindex/GRDB.build/Debug-maccatalyst/GRDB.build/Objects-normal/arm64/GRDB.swiftdoc (in target 'GRDB' from project 'GRDB')
 ◇ Suite "UIColor(rgba:) bridge + AppColor 13 const" started.
 ✔ Suite "UIColor(rgba:) bridge + AppColor 13 const" passed after 0.938 seconds.
-◇ Suite "ThemeController" started.
-✔ Suite "ThemeController" passed after 2.206 seconds.
 ◇ Suite "ChartContainerView 编译反射（Catalyst compile gate）" started.
 ✔ Suite "ChartContainerView 编译反射（Catalyst compile gate）" passed after 1.760 seconds.
 ◇ Test "§5.3 #14 drawDrawings with empty list calls no render" started.

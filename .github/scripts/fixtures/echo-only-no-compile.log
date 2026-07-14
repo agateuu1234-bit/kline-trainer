@@ -10,3 +10,11 @@ SwiftDriverJobDiscovery normal arm64 Compiling DecelerationAnimatorBounceTests.s
 ◇ Suite "ChartContainerView 布局重算（修 #2 复盘静态界面空白）" started.
 ✔ Suite "ChartContainerView 布局重算（修 #2 复盘静态界面空白）" passed after 5.070 seconds.
 Copy /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-cat2/Build/Products/Debug-maccatalyst/GRDB.swiftmodule/arm64-apple-ios-macabi.swiftdoc /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-cat2/Build/Intermediates.noindex/GRDB.build/Debug-maccatalyst/GRDB.build/Objects-normal/arm64/GRDB.swiftdoc (in target 'GRDB' from project 'GRDB')
+◇ Suite "UIColor(rgba:) bridge + AppColor 13 const" started.
+✔ Suite "UIColor(rgba:) bridge + AppColor 13 const" passed after 2.900 seconds.
+◇ Suite "ThemeController" started.
+✔ Suite "ThemeController" passed after 5.616 seconds.
+◇ Suite "ChartContainerView 编译反射（Catalyst compile gate）" started.
+✔ Suite "ChartContainerView 编译反射（Catalyst compile gate）" passed after 5.001 seconds.
+◇ Test "§5.3 #14 drawDrawings with empty list calls no render" started.
+✔ Test "§5.3 #14 drawDrawings with empty list calls no render" passed after 5.327 seconds.

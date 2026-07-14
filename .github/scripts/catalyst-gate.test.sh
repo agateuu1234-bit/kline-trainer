@@ -31,6 +31,20 @@ expect() {  # expect <期望退出码> <fixture> <期望输出中必须出现的
     PASSED=$((PASSED + 1))
 }
 
+# 漂移检测（codex R3 finding，2026-07-14）：UIKIT_SUITES 曾只列 3 个套件，仓库里实际有 7 个
+# UIKit-gated 测试单元——漏掉的里面就包括当初 bug 的藏身处 DrawDrawingsDispatchTests。
+# MIN_TESTS 留了余量，漏掉的套件被禁用/跳过时闸门毫无信号照样能过。这条检测扫描源码里
+# 全部 `#if canImport(UIKit)` 块，与 catalyst-gate.sh 的 UIKIT_SUITES/UIKIT_TESTS 双向核对
+# （新增/改名会报「发现新的/改名的套件」；哨兵列表里的项在源码里消失也会报），
+# 让哨兵列表不可能再静默漏项——它在真构建之前就跑，漏项在这里就会红。
+echo "UIKit-gated 哨兵漂移检测："
+if python3 "$DIR/uikit-suite-drift-check.py"; then
+    PASSED=$((PASSED + 1))
+else
+    FAILED=$((FAILED + 1))
+fi
+echo
+
 echo "catalyst-gate.sh 判据测试："
 expect 0 pass-new-scheme.log            "GATE PASS" \
     "新 scheme 的真实成功日志（本地 Xcode 格式）→ 通过（且不被 CoreData 运行期噪声误伤）"
@@ -84,6 +98,15 @@ expect 1 missing-macabi-marker.log      "macabi" \
 
 expect 1 missing-uikit-suite-marker.log "UIKit-gated 套件未执行完毕" \
     "G8 隔离 B：macabi 证据仍在，UIKit 套件收尾行缺失，其余判据全过 → 必须且只能由 G8·套件分支拦截"
+
+# codex R3 finding 回归（2026-07-14）：UIKIT_SUITES 曾只列 3 个套件，漏了 ThemeController /
+# UIColor(rgba:) bridge / ChartContainerView 编译反射 3 个，以及裸 struct
+# DrawDrawingsDispatchTests（金丝雀 bug 藏身处）。missing-one-uikit-suite.log 是从真实 CI 日志
+# （pass-ci-format.log 的裁剪基底，本身逐行摘自 ci-catalyst-real.log）删掉唯独一个哨兵套件
+# ThemeController 的 "passed after" 收尾行（模拟该套件被禁用/跳过），其余 6 个哨兵、macabi、
+# 全部其它判据均满足——专门证明新补的哨兵是承重的：删了它 GATE 必须 FAIL。
+expect 1 missing-one-uikit-suite.log    "UIKit-gated 套件未执行完毕：ThemeController" \
+    "G8 隔离 C（codex R3 回归）：新补的 ThemeController 哨兵单独缺失，其余 6 个哨兵+macabi+全部判据全过 → 必须且只能由 G8·ThemeController 哨兵拦截"
 
 expect 1 zero-tests.log                 "门是空的" \
     "swift-testing 执行 0 个用例 → 拦截（G7·零计数分支）（match 用 G7·零计数分支专属尾句，'执行了 0 个用例' 会被 MIN_TESTS 分支的消息文字包含，不够专属）"

@@ -67,21 +67,41 @@ fi
 #     锚点 A —— macabi：Catalyst 的编译 target triple 形如 `arm64-apple-iosNN.N-macabi`，
 #     只出现在真实编译产物路径/编译器调用里；不出现在 xcodebuild 的命令行回显里
 #     （回显里的 destination 是 "platform=macOS,variant=Mac Catalyst" 字面量，不含 "macabi"）。
-#     锚点 B —— UIKit-only 测试套件真的跑完了：三个 UIKit-gated 套件必须都出现
+#     锚点 B —— UIKit-only 测试套件真的跑完了：全部 UIKit-gated 套件必须都出现
 #     "passed after" 收尾行，证明它们不仅编译了，还真的执行到底（不是编译了但被跳过）。
 if ! grep -q 'macabi' "$LOG"; then
     fail "日志里找不到 macabi（Mac Catalyst 编译 target triple）—— 这份日志不是真 Mac Catalyst 编译产物，UIKit-gated 代码没有被编译（destination 是不是退化成了普通 macOS？）"
 fi
 
-# 若这三个套件改名/拆分/新增，请同步更新下面的列表——否则本判据会失去意义地长期沉默。
+# 2026-07-14 codex R3 finding：本列表曾只列 3 个套件，但仓库里实际有 6 个 UIKit-gated
+# @Suite（+ 1 个无 @Suite 的裸 struct，见下面的 UIKIT_TESTS）——漏掉的里面就包括当初
+# bug 的藏身处 DrawDrawingsDispatchTests。MIN_TESTS 留了余量，漏掉的套件被禁用/跳过时
+# 闸门毫无信号照样能过。若这些套件改名/拆分/新增，请同步更新下面的列表——否则本判据
+# 会失去意义地长期沉默。完整性由 catalyst-gate.test.sh 里的漂移检测
+# （uikit-suite-drift-check.py）兜底：它会扫描源码里全部 UIKit-gated @Suite/@Test，
+# 一旦与下面两个列表不一致就会在真构建之前让测试变红。
 UIKIT_SUITES=(
     'UIChartPalette（UIKit 桥；scheme 选取）'
-    'KLineView 编译反射（§15.1 #3 compile gate）'
+    'ThemeController'
+    'UIColor(rgba:) bridge + AppColor 13 const'
+    'ChartContainerView 编译反射（Catalyst compile gate）'
     'ChartContainerView 布局重算（修 #2 复盘静态界面空白）'
+    'KLineView 编译反射（§15.1 #3 compile gate）'
 )
 for suite in "${UIKIT_SUITES[@]}"; do
     if ! grep -qF "Suite \"${suite}\" passed after" "$LOG"; then
         fail "UIKit-gated 套件未执行完毕：${suite} —— 找不到 'passed after' 收尾行（UIKit 代码体没有真的跑完）"
+    fi
+done
+
+# 第 7 个 UIKit-gated 单元 DrawDrawingsDispatchTests.swift 是裸 struct、无 @Suite 显示名，
+# 不会产生 "Suite ... passed after" 行——只能用测试级哨兵（"Test ... passed"）钉住它。
+UIKIT_TESTS=(
+    '§5.3 #14 drawDrawings with empty list calls no render'
+)
+for t in "${UIKIT_TESTS[@]}"; do
+    if ! grep -qF "Test \"${t}\" passed" "$LOG"; then
+        fail "UIKit-gated 测试未执行：${t} —— 找不到 'passed' 收尾行（UIKit 代码体没有真的跑完）"
     fi
 done
 
