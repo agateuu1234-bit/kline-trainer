@@ -1068,25 +1068,30 @@ extension TrainingEngine {
     /// （RFC §4.4 总纲注记：画线激活-FSM handler 家族，user 2026-06-13 裁决 supersede neck）。
     /// 封装 snapshot.frozen.baseRevision 细节（caller 不碰 revision）。非 drawing 态 no-op（幂等）。
     /// 不改 `drawings`（数据投影是 `appendDrawing` 的职责）；不 bump revision（reducer 契约）。
+    /// **全局会话开着时 = 结束整场会话**（codex whole-branch R3-high）：画线在本期起是全局的，
+    /// 「让某个面板退出画线 FSM」这件事在新模型里**就等于**「结束这场画线会话」——不存在只让一个面板
+    /// 退出、另一个还留在 .drawing 的合法状态。
+    /// 这里**绝不能 no-op**：`activateDrawingTool(...)` 之后跟一句 `commitDrawing(panel:)` 是本包既有的
+    /// 公共用法，若静默什么都不做，调用者就被永久卡在画线模式里出不去（比漂移更糟）。
+    /// 会话没开时：保持原有的面板级 FSM 语义（reducer handler 家族的既有契约，FSM 测试覆盖）。
     public func commitDrawing(panel: PanelId) {
-        // P1b-1a-ii 不变量守卫（fail-closed，生产期生效）：面板级 FSM 原语**不得**在全局画线会话开着时
-        // 被单独调用 —— 那会把面板打回 .autoTracking 却留下 drawingModeActive==true（本期要消灭的漂移）。
-        // 会话的正当收束路径是 endDrawingSessionIfActive()：它先 deactivate() 再 cancel，故此守卫恒放行。
-        // 语义 = no-op（不是崩溃）：即便包外消费者误调，也只是什么都不发生，绝不会造出坏状态。
-        guard !drawingSession.drawingModeActive else { return }
-        guard case .drawing(let snap) = panelState(panel).interactionMode else { return }
-        _ = reduce(.drawingCommitted(baseRevision: snap.frozen.baseRevision), on: panel)
+        if drawingSession.drawingModeActive { endDrawingSessionIfActive(); return }
+        commitDrawingUnchecked(panel: panel)
     }
 
     /// 取消当前 drawing：dispatch reducer `.drawingCancelled` 退出 `.drawing` → `.autoTracking`。
     /// 非 drawing 态 no-op。无数据投影。
+    /// 会话开着时同 `commitDrawing`：等于结束整场会话（绝不 no-op，否则调用者卡死在画线模式）。
     public func cancelDrawing(panel: PanelId) {
-        // P1b-1a-ii 不变量守卫（fail-closed，生产期生效）：面板级 FSM 原语**不得**在全局画线会话开着时
-        // 被单独调用 —— 那会把面板打回 .autoTracking 却留下 drawingModeActive==true（本期要消灭的漂移）。
-        // 会话的正当收束路径是 endDrawingSessionIfActive()：它先 deactivate() 再 cancel，故此守卫恒放行。
-        // 语义 = no-op（不是崩溃）：即便包外消费者误调，也只是什么都不发生，绝不会造出坏状态。
-        guard !drawingSession.drawingModeActive else { return }
+        if drawingSession.drawingModeActive { endDrawingSessionIfActive(); return }
         cancelDrawingUnchecked(panel: panel)
+    }
+
+    /// 面板级提交的**原始实现**（不看会话，直接退 reducer 的 .drawing）。
+    /// 仅供会话收口路径与「会话未开」的面板级 FSM 语义使用。
+    private func commitDrawingUnchecked(panel: PanelId) {
+        guard case .drawing(let snap) = panelState(panel).interactionMode else { return }
+        _ = reduce(.drawingCommitted(baseRevision: snap.frozen.baseRevision), on: panel)
     }
 
     /// 面板级取消的**原始实现**（不看会话，直接退 reducer 的 .drawing）。

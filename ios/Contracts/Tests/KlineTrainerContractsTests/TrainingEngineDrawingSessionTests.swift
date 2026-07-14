@@ -248,6 +248,60 @@ struct TrainingEngineDrawingSessionTests {
         assertInvariant(e)
     }
 
+    // MARK: whole-branch R3-high 回归锁：公共「进画线 → 退画线」序列必须真的能退出来（不许卡死）
+
+    @Test("whole-branch R3-high 回归：activateDrawingTool 之后 commitDrawing —— 必须真的退出画线（不是 no-op 卡死）")
+    func publicActivateThenCommitActuallyExitsDrawing() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+
+        e.activateDrawingTool(.horizontal, panel: .upper)   // 公共入口：开全局会话（两面板武装）
+        #expect(e.drawingSession.drawingModeActive == true)
+
+        e.commitDrawing(panel: .upper)                      // 公共既有用法：提交并退出画线 FSM
+
+        // 修复前：fail-closed 守卫让它静默 no-op → 会话还开着、两面板还在 .drawing → 调用者永久卡死。
+        #expect(e.drawingSession.drawingModeActive == false)
+        #expect(e.drawingSession.activeDrawingTool == nil)
+        #expect(e.isDrawingActive(on: .upper) == false)
+        #expect(e.isDrawingActive(on: .lower) == false)     // 全局会话：两个面板一起退出
+        assertInvariant(e)
+    }
+
+    @Test("whole-branch R3-high 回归：activateDrawingTool 之后 cancelDrawing —— 同样必须真的退出画线")
+    func publicActivateThenCancelActuallyExitsDrawing() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+
+        e.activateDrawingTool(.horizontal, panel: .upper)
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+
+        e.cancelDrawing(panel: .lower)                      // 注意：连「另一个面板」调都得能收干净
+
+        #expect(e.drawingSession.drawingModeActive == false)
+        #expect(e.drawingSession.pendingAnchors.isEmpty)    // pending 也收干净，不留残渣
+        #expect(e.isDrawingActive(on: .upper) == false)
+        #expect(e.isDrawingActive(on: .lower) == false)
+        assertInvariant(e)
+    }
+
+    @Test("对照（防假绿）：会话未开时 commitDrawing/cancelDrawing 保持原有面板级 FSM 语义（只动被点名的那个面板）")
+    func panelLevelFSMSemanticsPreservedWhenNoSession() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+
+        e.armPanelForDrawing(.horizontal, panel: .upper)    // 只武装上面板（会话未开）
+        #expect(e.drawingSession.drawingModeActive == false)
+        #expect(e.isDrawingActive(on: .upper) == true)
+
+        e.commitDrawing(panel: .upper)                      // 会话没开 → 走原面板级语义
+        #expect(e.isDrawingActive(on: .upper) == false)
+        #expect(e.drawingSession.drawingModeActive == false)
+    }
+
     @Test("对照（防假绿）：beginDrawingSession(.horizontal) 仍能正常开会话 —— 守卫只挡未实现工具，不是焊死整条路径")
     func beginDrawingSessionStillAcceptsImplementedTool() {
         let e = TrainingEngine.preview()
