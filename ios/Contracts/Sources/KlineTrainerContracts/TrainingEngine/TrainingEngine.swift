@@ -997,7 +997,7 @@ extension TrainingEngine {
     ///   ① `animator.stop()`（防 stale 漂移；必须在算 range 之前——停后无新帧可改 offset）
     ///   ② 基于当前（已冻结）面板状态算 candleRange（复用 C8a `visibleCandleRange`）
     ///   ③ 派 `setDrawingSnapshot`（同步无漂移 → 进 drawing；理论 stale → 留 autoTracking）
-    public func activateDrawingTool(_ tool: DrawingToolType, panel: PanelId) {
+    internal func armPanelForDrawing(_ tool: DrawingToolType, panel: PanelId) {
         // R1b-wire R2-C1：interrupt 提顶（在捕获 baseRev 前）。其归一 `offsetApplied` 会 bump revision；若放在
         // `reduce(.activateDrawing)` 之后则 baseRev 失配 setDrawingSnapshot 的 staleness 闸门 → 永不进 drawing。
         // 提顶使 baseRev 捕获归一后 revision；含 stop（防 stale 漂移，原 ① 裸 stop 删除）+ 归一 overscroll（M3）。
@@ -1086,6 +1086,12 @@ extension TrainingEngine {
         // 会话的正当收束路径是 endDrawingSessionIfActive()：它先 deactivate() 再 cancel，故此守卫恒放行。
         // 语义 = no-op（不是崩溃）：即便包外消费者误调，也只是什么都不发生，绝不会造出坏状态。
         guard !drawingSession.drawingModeActive else { return }
+        cancelDrawingUnchecked(panel: panel)
+    }
+
+    /// 面板级取消的**原始实现**（不看会话，直接退 reducer 的 .drawing）。
+    /// 仅供会话收口路径使用：调用者必须自己保证会话真相已经处理好。
+    private func cancelDrawingUnchecked(panel: PanelId) {
         guard case .drawing(let snap) = panelState(panel).interactionMode else { return }
         _ = reduce(.drawingCancelled(baseRevision: snap.frozen.baseRevision), on: panel)
     }
@@ -1099,15 +1105,12 @@ extension TrainingEngine {
         return false
     }
 
-    /// 取消两面板画线态（`cancelDrawing` 对非 drawing 态 no-op，故两次调用安全）。
-    /// 唯一调用者是 `endDrawingSessionIfActive()`（`TrainingView` 那处已在 3d 删除）。
-    /// **保持 public（D46：不做 API 破坏）**；「不得在会话开着时单独调它」的保护来自
-    /// `commitDrawing`/`cancelDrawing` 里的**生产期 fail-closed `guard`**（release 也生效，
-    /// `assert` 会被剥掉所以没用）+ 源码守卫测试，而不是靠访问级别（internal 在包内照样可见，
-    /// 挡不住真正的漂移源）。
+    /// 取消画线：**整场收干净**（全局会话 + 两个面板），任何情况下都不会静默 no-op。
+    /// 画线会话是全局的，故「取消所有面板的画线」在语义上就等于「结束这场画线会话」。
     public func cancelDrawingAllPanels() {
-        cancelDrawing(panel: .upper)   // 非 .drawing 态 no-op
-        cancelDrawing(panel: .lower)
+        drawingSession.deactivate()                 // 幂等：先落会话真相
+        cancelDrawingUnchecked(panel: .upper)       // 再收面板（走 unchecked，不会被 fail-closed 守卫挡住）
+        cancelDrawingUnchecked(panel: .lower)
     }
 
     /// D42 浮动钮唯一入口：全局开/关画线会话（**不属于任何面板**，与 activePanel 无关）。
@@ -1119,14 +1122,23 @@ extension TrainingEngine {
         }
     }
 
+    /// 画线激活（兼容面）。**本期起画线是全局会话**：不再存在「只在某一个面板画线」这回事，
+    /// 故本方法等价于开启全局画线会话（两个面板一起进 .drawing + 置会话真相）。
+    /// `panel` 参数保留仅为源码兼容（全局会话覆盖两个面板），语义上被忽略。
+    /// 直接武装单个面板的原始能力保留在 internal 的 `armPanelForDrawing`（仅会话收口路径与 FSM 测试使用）——
+    /// 公共面不再能造出「面板在 .drawing 但会话没开」的裂脑状态。
+    public func activateDrawingTool(_ tool: DrawingToolType, panel: PanelId) {
+        beginDrawingSession(tool: tool)
+    }
+
     /// 开会话：**两个面板**一起进 `.drawing`（D42：上下都能画）+ 置真相。
     /// **事务性（commit-last，codex plan-R9-high）**：先武装两个面板，**两个都真的进了 `.drawing` 才**置
-    /// `drawingModeActive`；有任何一个没进（`activateDrawingTool` 依赖 `renderBounds`/reducer 态，
+    /// `drawingModeActive`；有任何一个没进（`armPanelForDrawing` 依赖 `renderBounds`/reducer 态，
     /// 理论上可能不生效）→ **回滚**，绝不留下「铅笔钮亮着、点图却没反应」的卡死态。
     /// 顺序不能反：先置真相再武装，中间一旦失败就是坏状态；先武装再置真相，失败时干净回滚。
     public func beginDrawingSession(tool: DrawingToolType) {
-        activateDrawingTool(tool, panel: .upper)
-        activateDrawingTool(tool, panel: .lower)
+        armPanelForDrawing(tool, panel: .upper)
+        armPanelForDrawing(tool, panel: .lower)
         guard isDrawingActive(on: .upper), isDrawingActive(on: .lower) else {
             cancelDrawingAllPanels()          // 回滚（此刻会话仍未开 → fail-closed 守卫放行）
             drawingSession.deactivate()       // 幂等；确保工具/pending 不残留
@@ -1143,7 +1155,8 @@ extension TrainingEngine {
     public func endDrawingSessionIfActive() {
         guard drawingSession.drawingModeActive else { return }
         drawingSession.deactivate()
-        cancelDrawingAllPanels()
+        cancelDrawingUnchecked(panel: .upper)
+        cancelDrawingUnchecked(panel: .lower)
     }
 }
 

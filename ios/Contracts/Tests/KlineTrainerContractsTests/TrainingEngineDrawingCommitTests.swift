@@ -11,11 +11,14 @@ struct TrainingEngineDrawingCommitTests {
 
     static let bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
 
-    /// 进入 .drawing 的 engine（activateDrawingTool 已验证进 drawing）。
+    /// 进入 .drawing 的 engine（armPanelForDrawing 已验证进 drawing）。
+    /// 用 armPanelForDrawing（原始单面板原语）而非公共 activateDrawingTool：后者本期起等价于
+    /// beginDrawingSession（会置 drawingSession.drawingModeActive == true），会让下面测的
+    /// commitDrawing/cancelDrawing 撞上其生产期 fail-closed 守卫直接 no-op，测不到 FSM 本体。
     static func drawingEngine() -> TrainingEngine {
         let (e, _) = TrainingEngineInteractionTests.engine()
         e.recordRenderBounds(Self.bounds, panel: .upper)
-        e.activateDrawingTool(.horizontal, panel: .upper)
+        e.armPanelForDrawing(.horizontal, panel: .upper)
         return e
     }
 

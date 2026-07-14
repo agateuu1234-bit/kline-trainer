@@ -117,6 +117,7 @@ struct DrawingSessionSourceGuardTests {
         for f in files {
             let code = try source(relativeURL: f)     // 同样剥注释
             #expect(!code.contains("activateDrawingTool("), "\(f.lastPathComponent) 不得直接调面板级画线原语")
+            #expect(!code.contains("armPanelForDrawing("),  "\(f.lastPathComponent) 不得直接调面板级画线原语")
             #expect(!code.contains("commitDrawing("),       "\(f.lastPathComponent) 不得直接调面板级画线原语")
             #expect(!code.contains("cancelDrawing("),       "\(f.lastPathComponent) 不得直接调面板级画线原语")
         }

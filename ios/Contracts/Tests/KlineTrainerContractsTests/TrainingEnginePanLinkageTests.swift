@@ -79,7 +79,7 @@ struct TrainingEnginePanLinkageTests {
     @Test("D10：follower drawing 态不被驱动，interactionMode 仍 drawing")
     func followerInDrawingNotDriven() {
         let (e, _) = Self.makeEngine(count: 200, tick: 150)
-        e.activateDrawingTool(.trend, panel: .lower)                     // lower 进 drawing
+        e.armPanelForDrawing(.trend, panel: .lower)                      // lower 进 drawing（仅武装 lower，不动 upper）
         let before = e.lowerPanel.offset
         e.beginPan(panel: .upper)
         e.applyPanOffset(deltaPixels: 300, renderBounds: Self.bounds, panel: .upper)

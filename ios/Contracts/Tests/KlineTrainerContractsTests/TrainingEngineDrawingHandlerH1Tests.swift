@@ -32,7 +32,7 @@ struct TrainingEngineDrawingHandlerH1Tests {
         let expected = RenderStateBuilder.visibleCandleRange(
             panelState: psAtActivation, candles: e.allCandles[.m3]!,
             tick: e.tick.globalTickIndex, bounds: Self.bounds)
-        e.activateDrawingTool(.trend, panel: .upper)
+        e.armPanelForDrawing(.trend, panel: .upper)
         #expect(upperFake.isInvalidated == true)             // ① stop 已调（驱动失活）
         guard case .drawing(let snap) = e.upperPanel.interactionMode else {
             Issue.record("应进入 drawing"); return
@@ -52,7 +52,7 @@ struct TrainingEngineDrawingHandlerH1Tests {
         e.endPan(velocity: 1000, panel: .upper)
         let upperFake = fakes()[0]
         _ = upperFake.fire(Self.ref)
-        e.activateDrawingTool(.trend, panel: .upper)
+        e.armPanelForDrawing(.trend, panel: .upper)
         let offsetFrozen = e.upperPanel.offset
         let revFrozen = e.upperPanel.revision
         let fired = upperFake.fire(Self.ref)                 // 延迟帧（stop 后）
@@ -67,7 +67,7 @@ struct TrainingEngineDrawingHandlerH1Tests {
     func drawingModeSwallowsOffsetApplied() {
         let (e, _) = TrainingEngineInteractionTests.engine()
         e.recordRenderBounds(Self.bounds, panel: .upper)
-        e.activateDrawingTool(.trend, panel: .upper)
+        e.armPanelForDrawing(.trend, panel: .upper)
         guard case .drawing(let snap0) = e.upperPanel.interactionMode else {
             Issue.record("应进入 drawing"); return
         }
@@ -95,7 +95,7 @@ struct TrainingEngineDrawingHandlerH1Tests {
         e.endPan(velocity: 1000, panel: .upper)            // 启动减速
         let upperFake = fakes()[0]
         _ = upperFake.fire(Self.ref)
-        e.activateDrawingTool(.trend, panel: .upper)        // 进 drawing（① stop 动画 → 驱动失活）
+        e.armPanelForDrawing(.trend, panel: .upper)        // 进 drawing（① stop 动画 → 驱动失活）
         #expect({ if case .drawing = e.upperPanel.interactionMode { return true }; return false }())
         e.holdOrObserve(panel: .upper)                      // 退出：tradeTriggered → autoTracking（生产路径）
         #expect(e.upperPanel.interactionMode == .autoTracking)

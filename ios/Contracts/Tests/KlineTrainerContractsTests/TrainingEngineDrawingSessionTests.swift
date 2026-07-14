@@ -171,4 +171,40 @@ struct TrainingEngineDrawingSessionTests {
         #expect(e.drawingSession.pendingAnchorPanel == .upper)
         assertInvariant(e)
     }
+
+    // MARK: 两个 HIGH finding 的回归锁：cancelDrawingAllPanels 不再是 no-op / activateDrawingTool 不再造裂脑
+
+    @Test("finding-1 回归：cancelDrawingAllPanels 在会话 ACTIVE 时**不是** no-op —— 整场收干净")
+    func cancelAllPanelsEndsActiveSession() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()                                // 会话 ACTIVE，两面板 .drawing
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m3, candleIndex: 1, price: 10), panel: .upper)
+        #expect(e.drawingSession.drawingModeActive == true)  // 前置：确实开着（不是测了个已关的假绿）
+
+        e.cancelDrawingAllPanels()                            // 本方法曾在会话 ACTIVE 时静默 no-op（finding-1）
+
+        #expect(e.drawingSession.drawingModeActive == false)  // 会话真被关了
+        #expect(e.drawingSession.activeDrawingTool == nil)
+        #expect(e.drawingSession.pendingAnchors.isEmpty)
+        #expect(e.isDrawingActive(on: .upper) == false)       // 两面板都退出 .drawing
+        #expect(e.isDrawingActive(on: .lower) == false)
+        assertInvariant(e)
+    }
+
+    @Test("finding-2 回归：公共 activateDrawingTool(panel:) 不再造裂脑 —— 两面板同进 .drawing + 会话同步为真")
+    func publicActivateDrawingToolArmsBothPanelsNoSplitBrain() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+
+        e.activateDrawingTool(.trend, panel: .upper)          // 曾经只武装 upper（finding-2 裂脑：panel 侧 true，会话侧 false）
+
+        #expect(e.drawingSession.drawingModeActive == true)   // 会话真相同步跟上，不是「面板亮了会话没开」
+        #expect(e.isDrawingActive(on: .upper) == true)
+        #expect(e.isDrawingActive(on: .lower) == true)        // lower 没被落下
+        #expect(e.drawingSession.activeDrawingTool == .trend)
+        assertInvariant(e)
+    }
 }
