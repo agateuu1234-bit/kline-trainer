@@ -26,8 +26,6 @@ Copy /tmp/derived/Build/Products/Debug-maccatalyst/GRDB.swiftmodule/arm64-apple-
 ✔ Test "标注 render 路径：.left/.right 画出文字像素；.hidden/.segment 无标注泄漏（codex plan-R5）" passed after 0.876 seconds.
 ◇ Test "render 路径（codex branch-R5 medium）：损坏 fontSize（负数/极大）不崩溃、像素不越界" started.
 ✔ Test "render 路径（codex branch-R5 medium）：损坏 fontSize（负数/极大）不崩溃、像素不越界" passed after 0.899 seconds.
-◇ Test "§5.3 #15 registered tool render called once with passed-through drawing" started.
-✔ Test "§5.3 #15 registered tool render called once with passed-through drawing" passed after 1.695 seconds.
 ◇ Test "D35：两条不同样式的 drawing 各自带自己的样式 + scheme 按顺序抵达渲染层" started.
 ✔ Test "D35：两条不同样式的 drawing 各自带自己的样式 + scheme 按顺序抵达渲染层" passed after 1.714 seconds.
 ◇ Test "§5.3 #14 drawDrawings with empty list calls no render" started.

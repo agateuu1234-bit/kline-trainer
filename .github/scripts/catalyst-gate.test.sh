@@ -31,16 +31,20 @@ expect() {  # expect <期望退出码> <fixture> <期望输出中必须出现的
     PASSED=$((PASSED + 1))
 }
 
-# 漂移检测（codex R3 finding，2026-07-14）：UIKIT_SUITES 曾只列 3 个套件，仓库里实际有 7 个
-# UIKit-gated 测试单元——漏掉的里面就包括当初 bug 的藏身处 DrawDrawingsDispatchTests。
-# MIN_TESTS 留了余量，漏掉的套件被禁用/跳过时闸门毫无信号照样能过。这条检测扫描源码里
-# 全部 `#if canImport(UIKit)` 块，与 catalyst-gate.sh 的 UIKIT_SUITES/UIKIT_TESTS 双向核对
-# （新增/改名会报「发现新的/改名的套件」；哨兵列表里的项在源码里消失也会报），
-# 让哨兵列表不可能再静默漏项——它在真构建之前就跑，漏项在这里就会红。
-echo "UIKit-gated 哨兵漂移检测："
-if python3 "$DIR/uikit-suite-drift-check.py"; then
+# fail-closed 下限哨兵（codex R4 finding，2026-07-14）：catalyst-gate.sh 不再手工维护
+# UIKIT_SUITES/UIKIT_TESTS 硬编码列表，改成运行时调用 uikit-expected-tests.py 从源码
+# 推导「应当执行的 UIKit-gated 测试全集」。这条检测不是精确判据——它只是防止解析器
+# 坏掉/测试被大批误删后闸门空转变绿的最后防线：当前源码真实产出 28 个（见 codex 复核
+# 结论），阈值 20 留了余量给正常的测试增删，不要把它设成等于当前真实值。
+# 若推导脚本本身返回空清单/非零退出，本检测同样必须失败（fail-closed）。
+echo "UIKit-gated 期望测试清单 fail-closed 下限检测："
+UIKIT_EXPECTED_COUNT=$(python3 "$DIR/uikit-expected-tests.py" 2>/dev/null | grep -c '.' || true)
+UIKIT_EXPECTED_RC=$?
+if [ "$UIKIT_EXPECTED_RC" -eq 0 ] 2>/dev/null && [ "${UIKIT_EXPECTED_COUNT:-0}" -ge 20 ]; then
+    echo "  ok   — uikit-expected-tests.py 推导出 ${UIKIT_EXPECTED_COUNT} 个测试名（>= 20 下限）"
     PASSED=$((PASSED + 1))
 else
+    echo "  FAIL — uikit-expected-tests.py 推导出 ${UIKIT_EXPECTED_COUNT:-0} 个测试名，低于下限 20（或脚本执行失败）"
     FAILED=$((FAILED + 1))
 fi
 echo
@@ -96,17 +100,17 @@ expect 1 no-catalyst-no-uikit.log       "macabi" \
 expect 1 missing-macabi-marker.log      "macabi" \
     "G8 隔离 A：macabi 证据缺失，UIKit 套件收尾行仍在，其余判据全过 → 必须且只能由 G8·macabi 分支拦截"
 
-expect 1 missing-uikit-suite-marker.log "UIKit-gated 套件未执行完毕" \
-    "G8 隔离 B：macabi 证据仍在，UIKit 套件收尾行缺失，其余判据全过 → 必须且只能由 G8·套件分支拦截"
-
-# codex R3 finding 回归（2026-07-14）：UIKIT_SUITES 曾只列 3 个套件，漏了 ThemeController /
-# UIColor(rgba:) bridge / ChartContainerView 编译反射 3 个，以及裸 struct
-# DrawDrawingsDispatchTests（金丝雀 bug 藏身处）。missing-one-uikit-suite.log 是从真实 CI 日志
-# （pass-ci-format.log 的裁剪基底，本身逐行摘自 ci-catalyst-real.log）删掉唯独一个哨兵套件
-# ThemeController 的 "passed after" 收尾行（模拟该套件被禁用/跳过），其余 6 个哨兵、macabi、
-# 全部其它判据均满足——专门证明新补的哨兵是承重的：删了它 GATE 必须 FAIL。
-expect 1 missing-one-uikit-suite.log    "UIKit-gated 套件未执行完毕：ThemeController" \
-    "G8 隔离 C（codex R3 回归）：新补的 ThemeController 哨兵单独缺失，其余 6 个哨兵+macabi+全部判据全过 → 必须且只能由 G8·ThemeController 哨兵拦截"
+# codex R4 finding 回归（2026-07-14）：UIKIT_SUITES/UIKIT_TESTS 硬编码哨兵列表只钉「套件/
+# 单个测试跑完了」，从不逐个检查套件里的每个测试——DrawDrawingsDispatchTests 7 个测试只钉了
+# 1 个，另外 6 个被删/跳过闸门无感；同样的缺陷在其余 6 个套件里也成立。根治后 catalyst-gate.sh
+# 改成运行时从源码推导「全部 28 个 UIKit-gated 测试」，逐个断言 "Test ... passed"。
+# missing-one-uikit-test.log 是从真实 CI 日志（pass-ci-format.log 的裁剪基底，逐行摘自
+# ci-catalyst-real.log）删掉唯独一个**非哨兵**测试 —— DrawDrawingsDispatchTests 的第 2 个
+# 测试「§5.3 #15 registered tool render called once with passed-through drawing」的
+# started/passed 两行（模拟它被删/跳过），其余 27 个测试、macabi、全部其它判据均满足——
+# 专门证明新的逐测试判据是承重的：删掉任何一个（哪怕不是旧哨兵列表里的那个）GATE 都必须 FAIL。
+expect 1 missing-one-uikit-test.log     "UIKit-gated 测试未执行：§5.3 #15 registered tool render called once with passed-through drawing" \
+    "G8 隔离 C（codex R4 回归）：源码推导出的 28 个测试之一（非旧硬编码哨兵）单独缺失，其余 27 个+macabi+全部判据全过 → 必须且只能由 G8·逐测试判据拦截，并点名具体测试"
 
 expect 1 zero-tests.log                 "门是空的" \
     "swift-testing 执行 0 个用例 → 拦截（G7·零计数分支）（match 用 G7·零计数分支专属尾句，'执行了 0 个用例' 会被 MIN_TESTS 分支的消息文字包含，不够专属）"
@@ -127,6 +131,36 @@ expect 1 too-few-tests.log              "低于下限" \
 # （GATE PASS），只有锚在源码路径上的 G6 才拦得住。
 expect 1 echo-only-no-compile.log       "测试 target 根本没被编译" \
     "C1 回归：仅命令行回显 + 任务规划行，零 SwiftCompile 证据 → 必须由 G6 拦截"
+
+# fail-closed 自动化回归（codex R4 finding 交付物 #3）：uikit-expected-tests.py 如果坏掉
+# （空清单/非零退出），闸门绝不能把「没有期望项」误判成「全部通过」。用 UIKIT_EXPECTED_TESTS_SCRIPT
+# 注入一个假的推导脚本，对 pass-ci-format.log（本该 GATE PASS 的真实成功日志）重跑一遍，
+# 断言两种坏情况都必须 FAIL。
+FAKE_EMPTY_SCRIPT="$FIX/../.fake-uikit-expected-empty.py"
+FAKE_CRASH_SCRIPT="$FIX/../.fake-uikit-expected-crash.py"
+printf '#!/usr/bin/env python3\n# 测试用：模拟推导脚本返回空清单但退出码 0\n' > "$FAKE_EMPTY_SCRIPT"
+printf '#!/usr/bin/env python3\nimport sys\nprint("boom", file=sys.stderr)\nsys.exit(1)\n' > "$FAKE_CRASH_SCRIPT"
+
+out=$(UIKIT_EXPECTED_TESTS_SCRIPT="$FAKE_EMPTY_SCRIPT" bash "$GATE" "$FIX/pass-ci-format.log" 2>&1)
+got=$?
+if [ "$got" -eq 1 ] && grep -qF "UIKit-gated 测试清单推导为空" <<<"$out"; then
+    echo "  ok   — fail-closed A：推导脚本空清单（退出码 0）→ 必须 FAIL，不能因'没有期望项'放行 (exit=$got)"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — fail-closed A：推导脚本空清单本该 FAIL 且报'推导为空'，实得 exit=$got, out=$out"
+    FAILED=$((FAILED + 1))
+fi
+
+out=$(UIKIT_EXPECTED_TESTS_SCRIPT="$FAKE_CRASH_SCRIPT" bash "$GATE" "$FIX/pass-ci-format.log" 2>&1)
+got=$?
+if [ "$got" -eq 1 ] && grep -qF "UIKit-gated 测试清单推导失败" <<<"$out"; then
+    echo "  ok   — fail-closed B：推导脚本异常退出（exit=1）→ 必须 FAIL (exit=$got)"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — fail-closed B：推导脚本异常退出本该 FAIL 且报'推导失败'，实得 exit=$got, out=$out"
+    FAILED=$((FAILED + 1))
+fi
+rm -f "$FAKE_EMPTY_SCRIPT" "$FAKE_CRASH_SCRIPT"
 
 echo "结果：$PASSED 通过，$FAILED 失败"
 [ "$FAILED" -eq 0 ]

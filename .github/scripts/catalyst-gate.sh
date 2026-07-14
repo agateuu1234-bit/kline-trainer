@@ -27,6 +27,8 @@ if [ ! -f "$LOG" ]; then
     exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 fail() { echo "GATE FAIL: $*" >&2; exit 1; }
 
 # --- G2: 测试真跑完且成功（test 动作的标记是 TEST SUCCEEDED，不是 TEST BUILD SUCCEEDED）
@@ -57,53 +59,51 @@ if ! grep -q 'Tests/KlineTrainerContractsTests/' "$LOG"; then
     fail "日志里找不到 Tests/KlineTrainerContractsTests/ —— 测试 target 根本没被编译（scheme 用错了？）"
 fi
 
-# --- G8: 自证——UIKit-gated 代码真的被编译进了 Catalyst 构建，且里面的测试真的跑完了。
-#     （2026-07-14 实测发现的漏洞）旧判据只 grep 金丝雀文件名 DrawDrawingsDispatchTests.swift。
-#     但该文件的测试体裹在 #if canImport(UIKit) 里——在**非 Catalyst**（如 `platform=macOS`）
-#     destination 上，这个文件依然会被编译（只是宏剔除了测试体），文件名照样进日志。
-#     实测：用 -destination 'platform=macOS' 跑同一套测试，UIKit-only 套件执行 0 次，
-#     但金丝雀文件名仍出现 3 次 —— 旧判据在这种情况下会放行，而这正是它声称要堵的盲区。
-#     换成两条只有真·Mac Catalyst 编译+执行才会产生的证据：
+# --- G8: 自证——UIKit-gated 代码真的被编译进了 Catalyst 构建，且里面**每一个**测试
+#     真的跑完了。
+#     （2026-07-14 实测发现的漏洞，历经 R3/R4 两轮 codex finding）旧判据先后踩过两个坑：
+#     1) 只 grep 金丝雀文件名 DrawDrawingsDispatchTests.swift——但该文件的测试体裹在
+#        #if canImport(UIKit) 里，在**非 Catalyst**（如 `platform=macOS`）destination 上
+#        这个文件依然会被编译（只是宏剔除了测试体），文件名照样进日志，旧判据放行。
+#     2) 改成硬编码 UIKIT_SUITES/UIKIT_TESTS 列表后，只钉「套件跑完了」（Suite "X" passed
+#        after）——但这只证明套件**整体**跑完，不证明套件**里的每个测试**都跑了；删掉
+#        套件内的某个测试，套件照样 passed，闸门照样绿（DrawDrawingsDispatchTests 是裸
+#        struct 无 @Suite，UIKIT_TESTS 更只钉了它 7 个测试里的 1 个，另外 6 个被删/跳过
+#        闸门毫无信号）。
+#     根治：不再手工维护「应该测什么」的列表——CI 上跑闸门时源码已经 checkout 到位，
+#     源码本身就是唯一真相。改由 uikit-expected-tests.py 在运行时扫描源码，推导出
+#     「本应执行的 UIKit-gated 测试全集」，下面逐个断言日志里有对应的
+#     `Test "<名>" passed` 行——新增/改名/删除的测试自动被下一次运行覆盖，不会再有
+#     N-of-M 的哨兵缺口。
 #     锚点 A —— macabi：Catalyst 的编译 target triple 形如 `arm64-apple-iosNN.N-macabi`，
 #     只出现在真实编译产物路径/编译器调用里；不出现在 xcodebuild 的命令行回显里
 #     （回显里的 destination 是 "platform=macOS,variant=Mac Catalyst" 字面量，不含 "macabi"）。
-#     锚点 B —— UIKit-only 测试套件真的跑完了：全部 UIKit-gated 套件必须都出现
-#     "passed after" 收尾行，证明它们不仅编译了，还真的执行到底（不是编译了但被跳过）。
+#     锚点 B —— 源码推导出的每一个 UIKit-gated 测试都真的执行到底（不是编译了但被跳过）。
 if ! grep -q 'macabi' "$LOG"; then
     fail "日志里找不到 macabi（Mac Catalyst 编译 target triple）—— 这份日志不是真 Mac Catalyst 编译产物，UIKit-gated 代码没有被编译（destination 是不是退化成了普通 macOS？）"
 fi
 
-# 2026-07-14 codex R3 finding：本列表曾只列 3 个套件，但仓库里实际有 6 个 UIKit-gated
-# @Suite（+ 1 个无 @Suite 的裸 struct，见下面的 UIKIT_TESTS）——漏掉的里面就包括当初
-# bug 的藏身处 DrawDrawingsDispatchTests。MIN_TESTS 留了余量，漏掉的套件被禁用/跳过时
-# 闸门毫无信号照样能过。若这些套件改名/拆分/新增，请同步更新下面的列表——否则本判据
-# 会失去意义地长期沉默。完整性由 catalyst-gate.test.sh 里的漂移检测
-# （uikit-suite-drift-check.py）兜底：它会扫描源码里全部 UIKit-gated @Suite/@Test，
-# 一旦与下面两个列表不一致就会在真构建之前让测试变红。
-UIKIT_SUITES=(
-    'UIChartPalette（UIKit 桥；scheme 选取）'
-    'ThemeController'
-    'UIColor(rgba:) bridge + AppColor 13 const'
-    'ChartContainerView 编译反射（Catalyst compile gate）'
-    'ChartContainerView 布局重算（修 #2 复盘静态界面空白）'
-    'KLineView 编译反射（§15.1 #3 compile gate）'
-)
-for suite in "${UIKIT_SUITES[@]}"; do
-    if ! grep -qF "Suite \"${suite}\" passed after" "$LOG"; then
-        fail "UIKit-gated 套件未执行完毕：${suite} —— 找不到 'passed after' 收尾行（UIKit 代码体没有真的跑完）"
+# fail-closed：推导脚本非零退出，或输出为空（没有任何期望测试名），都必须让闸门 FAIL——
+# 绝不能把「没有期望项」误判成「全部通过」（否则解析器坏掉/源码目录被误删时，本判据
+# 会无声无息地空转变绿，重蹈 UIKIT_SUITES/UIKIT_TESTS 硬编码列表的覆辙）。
+# UIKIT_EXPECTED_TESTS_SCRIPT 只允许 catalyst-gate.test.sh 用来在测试里注入一个假的
+# 空清单/异常退出脚本，从而对 fail-closed 分支做可重复的自动化回归；生产环境永远走
+# 默认值（真实的 uikit-expected-tests.py）。
+UIKIT_EXPECTED_TESTS_SCRIPT="${UIKIT_EXPECTED_TESTS_SCRIPT:-$SCRIPT_DIR/uikit-expected-tests.py}"
+UIKIT_EXPECTED_TESTS="$(python3 "$UIKIT_EXPECTED_TESTS_SCRIPT" 2>&1)"
+UIKIT_EXPECTED_STATUS=$?
+if [ "$UIKIT_EXPECTED_STATUS" -ne 0 ]; then
+    fail "UIKit-gated 测试清单推导失败（uikit-expected-tests.py exit=${UIKIT_EXPECTED_STATUS}）：${UIKIT_EXPECTED_TESTS}"
+fi
+if [ -z "$UIKIT_EXPECTED_TESTS" ]; then
+    fail "UIKit-gated 测试清单推导为空——找不到任何期望测试，拒绝放行（fail-closed）"
+fi
+while IFS= read -r uikit_test; do
+    [ -z "$uikit_test" ] && continue
+    if ! grep -qF "Test \"${uikit_test}\" passed" "$LOG"; then
+        fail "UIKit-gated 测试未执行：${uikit_test} —— 找不到 'passed' 收尾行（UIKit 代码体没有真的跑完，源码推导清单见 uikit-expected-tests.py）"
     fi
-done
-
-# 第 7 个 UIKit-gated 单元 DrawDrawingsDispatchTests.swift 是裸 struct、无 @Suite 显示名，
-# 不会产生 "Suite ... passed after" 行——只能用测试级哨兵（"Test ... passed"）钉住它。
-UIKIT_TESTS=(
-    '§5.3 #14 drawDrawings with empty list calls no render'
-)
-for t in "${UIKIT_TESTS[@]}"; do
-    if ! grep -qF "Test \"${t}\" passed" "$LOG"; then
-        fail "UIKit-gated 测试未执行：${t} —— 找不到 'passed' 收尾行（UIKit 代码体没有真的跑完）"
-    fi
-done
+done <<<"$UIKIT_EXPECTED_TESTS"
 
 # --- G7: 自证——测试真的被执行了，且不是 0 个（防 -only-testing 把用例全过滤光）
 #     "in M suites" 这段是可选的：本地 Xcode 输出 'Test run with N tests in M suites passed'，
