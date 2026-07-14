@@ -89,8 +89,17 @@ fi
 # 会无声无息地空转变绿，重蹈 UIKIT_SUITES/UIKIT_TESTS 硬编码列表的覆辙）。
 # UIKIT_EXPECTED_TESTS_SCRIPT 只允许 catalyst-gate.test.sh 用来在测试里注入一个假的
 # 空清单/异常退出脚本，从而对 fail-closed 分支做可重复的自动化回归；生产环境永远走
-# 默认值（真实的 uikit-expected-tests.py）。
-UIKIT_EXPECTED_TESTS_SCRIPT="${UIKIT_EXPECTED_TESTS_SCRIPT:-$SCRIPT_DIR/uikit-expected-tests.py}"
+# 默认值。
+#
+# F1（codex R6 finding，2026-07-15）：默认值曾经是 uikit-expected-tests.py——对当前
+# checkout 的源码活推导。但那样"期望清单"和"被检查对象"是同一份源码：一个删掉
+# UIKit 测试的 PR 会让期望清单跟着缩水，闸门不再要求那些 passed 行，必需门照样绿
+# （循环论证）。根治：生产默认值改成 catalyst-uikit-baseline-reader.py，读取签入仓库、
+# 跟当前源码解耦的基线文件 catalyst-uikit-baseline.txt（由 uikit-expected-tests.py
+# 生成，不手打）。删测试不改基线 → 基线仍列着它 → 日志里找不到 passed 行 → FAIL。
+# uikit-expected-tests.py 本身没有被废弃，角色变成给 catalyst-gate.test.sh 的自测断言
+# 用——在 xcodebuild 真跑之前，守护「基线是否与当前源码一致」，一旦漂移就让自测先红。
+UIKIT_EXPECTED_TESTS_SCRIPT="${UIKIT_EXPECTED_TESTS_SCRIPT:-$SCRIPT_DIR/catalyst-uikit-baseline-reader.py}"
 UIKIT_EXPECTED_TESTS="$(python3 "$UIKIT_EXPECTED_TESTS_SCRIPT" 2>&1)"
 UIKIT_EXPECTED_STATUS=$?
 if [ "$UIKIT_EXPECTED_STATUS" -ne 0 ]; then
@@ -155,15 +164,31 @@ N_TESTS=$(echo "$SUMMARY" | grep -oE '^Test run with [0-9]+' | grep -oE '[0-9]+'
 if [ "$N_TESTS" -eq 0 ]; then
     fail "swift-testing 执行了 0 个用例（${SUMMARY}）—— 门是空的"
 fi
-# 可维护下限：防 -only-testing 被收窄/大批用例被跳过时仍能跑出个位数用例就过（"0 个"
-# 只是这类覆盖塌方的极端情形，中间地带——比如收窄到只剩一个 suite——0 检查抓不住）。
-# 这不是精确判据：Catalyst 全量当前是 1407 个（见 fixtures/pass-new-scheme.log），
-# 阈值留了约 200 条余量给正常的测试增删，不要把它设成等于当前真实值。
-# 调整时机：真实用例数长期低于这个数（比如新增测试后稳定在 1250+），把 MIN_TESTS 一起抬高；
-# 反之若测试被大量删除是有意为之，也要把它一起调低，否则会误拦正常 PR。
-MIN_TESTS=1200
+# F3（codex R6 finding，2026-07-15）：原来的 MIN_TESTS=1200 是手写的绝对下限，跟当时
+# 真实用例数 1407 之间留了约 200 条余量——余量太宽：一次悄悄砍掉 200 个非 UIKit 测试的
+# `-only-testing`/scheme 回归，只要 UIKit 那批还在，G7 依然会放行，抓不住这种"覆盖大幅
+# 塌方但还没塌到个位数"的中间地带。
+# 根治：改成相对签入仓库的总用例数基线（catalyst-total-baseline.txt）算一个窄 delta，
+# 而不是一个孤立写死的绝对下限——正常的测试小幅增减（新增/删除个别测试）容许在 delta
+# 内波动，一旦掉出 delta 就必须 FAIL，逼着大幅增减用例的 PR 显式同步基线文件
+# （留在 diff 里被评审看见）。基线文件缺失/内容非法整数都必须 fail-closed。
+TOTAL_BASELINE_FILE="${CATALYST_TOTAL_BASELINE_FILE:-$SCRIPT_DIR/catalyst-total-baseline.txt}"
+if [ ! -f "$TOTAL_BASELINE_FILE" ]; then
+    fail "总用例数基线文件不存在: ${TOTAL_BASELINE_FILE}（fail-closed）"
+fi
+TOTAL_BASELINE="$(tr -d '[:space:]' <"$TOTAL_BASELINE_FILE")"
+case "$TOTAL_BASELINE" in
+    ''|*[!0-9]*)
+        fail "总用例数基线文件内容不是合法整数: '${TOTAL_BASELINE}'（${TOTAL_BASELINE_FILE}，fail-closed）"
+        ;;
+esac
+# delta=30：覆盖正常的测试小幅增减波动，不是精确判据，不要把它设成 0。
+# 调整时机：有意大幅增减测试（比如新增一批测试后稳定在基线+50）时，重新生成
+# catalyst-total-baseline.txt（记录新的真实总数）并在 PR 里说明，而不是放宽 delta。
+DELTA=30
+MIN_TESTS=$((TOTAL_BASELINE - DELTA))
 if [ "$N_TESTS" -lt "$MIN_TESTS" ]; then
-    fail "swift-testing 只执行了 ${N_TESTS} 个用例，低于下限 ${MIN_TESTS}（${SUMMARY}）—— 可能是 -only-testing 被收窄或用例被大批跳过"
+    fail "swift-testing 只执行了 ${N_TESTS} 个用例，低于下限 ${MIN_TESTS}（基线 ${TOTAL_BASELINE}，见 ${TOTAL_BASELINE_FILE}，delta=${DELTA}，${SUMMARY}）—— 可能是 -only-testing 被收窄或用例被大批跳过；若为有意的大幅增减测试，请同步更新 catalyst-total-baseline.txt 并在 PR 说明"
 fi
 
 # --- G5: 测试代码警告：只统计、不拦（48 条既有技术债，见 spec §4）

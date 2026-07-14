@@ -76,21 +76,27 @@ def strip_line_comments(text):
 def find_uikit_gated_blocks(src):
     """返回文件里所有 `#if canImport(UIKit)` ... 对应 `#endif` 之间的 (起始行号, 文本片段)
     列表（起始行号 1-indexed，指向片段第一行在源文件里的行号，供未归属 @Test 检测报错时
-    定位用；只匹配裸的 canImport(UIKit)，不匹配 `#if !canImport(UIKit)` 这种反向门）。"""
+    定位用；只匹配裸的 canImport(UIKit)，不匹配 `#if !canImport(UIKit)` 这种反向门）。
+
+    F2（codex R6 finding，2026-07-15）：块识别与 depth 计数此前都用列首锚定的正则
+    （`^#if...`/`^#endif`），缩进写法的 `#if canImport(UIKit)`（Swift 合法写法，嵌套在
+    struct/extension 内很常见）整个块都不会被发现——块内的 @Test 既不会进期望清单，
+    也不会被「未归属 @Test」检测兜住（因为块本身就没被识别，从未进入扫描范围）。
+    根治：块首/depth 计数正则前面都允许任意前导空白（`^\\s*#if`/`^\\s*#endif`）。"""
     blocks = []
     lines = src.splitlines()
     i = 0
     while i < len(lines):
-        if re.match(r'#if\s+canImport\(UIKit\)\s*$', lines[i]):
+        if re.match(r'\s*#if\s+canImport\(UIKit\)\s*$', lines[i]):
             depth = 1
             j = i + 1
             block_start_line = j + 1  # 1-indexed：lines[j] 是文件第 j+1 行
             block_lines = []
             while j < len(lines) and depth > 0:
                 l = lines[j]
-                if re.match(r'#if\b', l):
+                if re.match(r'\s*#if\b', l):
                     depth += 1
-                elif re.match(r'#endif\b', l):
+                elif re.match(r'\s*#endif\b', l):
                     depth -= 1
                     if depth == 0:
                         break
