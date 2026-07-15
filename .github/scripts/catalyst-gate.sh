@@ -187,8 +187,16 @@ esac
 # catalyst-total-baseline.txt（记录新的真实总数）并在 PR 里说明，而不是放宽 delta。
 DELTA=30
 MIN_TESTS=$((TOTAL_BASELINE - DELTA))
+MAX_TESTS=$((TOTAL_BASELINE + DELTA))
+# 对称区间（codex R8 finding，2026-07-15）：只卡下限不够——若 -only-testing 被放大、
+# 测试被重复执行、或 scheme 选择意外变宽，总数可以停在下限之上、同时跳过一大批本该跑的
+# 目标测试，门却仍绿。G8 只证明 28 个 UIKit 测试跑了，这个总数判据是其余 ~1379 个测试的
+# 唯一 backstop，所以必须双向卡。下限/上限分成两个分支，各带专属失败信息（便于测试绑定）。
 if [ "$N_TESTS" -lt "$MIN_TESTS" ]; then
     fail "swift-testing 只执行了 ${N_TESTS} 个用例，低于下限 ${MIN_TESTS}（基线 ${TOTAL_BASELINE}，见 ${TOTAL_BASELINE_FILE}，delta=${DELTA}，${SUMMARY}）—— 可能是 -only-testing 被收窄或用例被大批跳过；若为有意的大幅增减测试，请同步更新 catalyst-total-baseline.txt 并在 PR 说明"
+fi
+if [ "$N_TESTS" -gt "$MAX_TESTS" ]; then
+    fail "swift-testing 执行了 ${N_TESTS} 个用例，高于上限 ${MAX_TESTS}（基线 ${TOTAL_BASELINE}，见 ${TOTAL_BASELINE_FILE}，delta=${DELTA}，${SUMMARY}）—— 可能是测试选择被放大或重复执行（这可掩盖同时跳过一批目标测试）；若为有意的大幅增测，请同步更新 catalyst-total-baseline.txt 并在 PR 说明"
 fi
 
 # --- G5: 测试代码警告：只统计、不拦（48 条既有技术债，见 spec §4）

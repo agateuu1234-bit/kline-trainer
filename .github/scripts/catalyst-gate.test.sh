@@ -318,6 +318,12 @@ expect 1 total-baseline-below-delta.log "低于下限" \
 expect 0 total-baseline-within-delta.log "GATE PASS" \
     "F3 隔离：用例数 1390（基线 1407 - delta 30 = 下限 1377，1390 在 delta 内）→ 必须 PASS，不被基线 delta 判据误伤"
 
+# R8（codex finding，2026-07-15）：原来的总数判据只卡下限，1500（远超基线+delta 上限 1437）
+# 也会 GATE PASS——测试选择被放大/重复执行可掩盖同时跳过一大批目标测试。改成对称区间后，
+# 超上限也必须拦。total-baseline-above-delta.log 是 below-delta fixture 基底上把用例数改成 1500。
+expect 1 total-baseline-above-delta.log  "高于上限" \
+    "R8 隔离：用例数 1500（基线 1407 + delta 30 = 上限 1437，1500 超出）→ 必须由 G7·基线上限分支拦截"
+
 # C1 回归：xcodebuild 命令行回显本身就带 -only-testing:KlineTrainerContractsTests + 金丝雀文件名
 # 也出现在 SwiftDriverJobDiscovery（任务规划，非真编译）行里——但整份日志没有一行 SwiftCompile、
 # 没有一处 Tests/KlineTrainerContractsTests/ 源码路径。旧的裸字符串锚点会被这份日志骗过
