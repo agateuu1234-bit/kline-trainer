@@ -65,6 +65,19 @@ else
     echo "  ok   — 当前源码推导出的 ${UIKIT_LIVE_COUNT} 个测试名与基线 catalyst-uikit-baseline.txt 完全一致"
     PASSED=$((PASSED + 1))
 fi
+
+# F5（codex R9 finding，2026-07-15）：基线文件内部不能有重复名——同名会让 G8 的一份
+# 'passed' 结果顶替多个断言（见 catalyst-gate.sh 里 UIKIT_DUP_NAMES 检测）。这里只是
+# 静态核对签入仓库的基线文件本身干不干净；catalyst-gate.sh 运行时会对任何来源的期望
+# 清单（含基线文件）做同样检测，自动化回归见下方 fail-closed 区块。
+UIKIT_BASELINE_DUPS="$(sort "$UIKIT_BASELINE_FILE" | uniq -d)"
+if [ -n "$UIKIT_BASELINE_DUPS" ]; then
+    echo "  FAIL — 基线文件 catalyst-uikit-baseline.txt 内部有重复名：$UIKIT_BASELINE_DUPS"
+    FAILED=$((FAILED + 1))
+else
+    echo "  ok   — 基线文件内部无重复名"
+    PASSED=$((PASSED + 1))
+fi
 echo
 
 # F1 漂移双向检测自动化回归（codex R6 finding「关键不变量」，2026-07-15）：上面那条断言
@@ -292,11 +305,33 @@ expect 1 missing-macabi-marker.log      "macabi" \
 expect 1 missing-one-uikit-test.log     "UIKit-gated 测试未执行：§5.3 #15 registered tool render called once with passed-through drawing" \
     "G8 隔离 C（codex R4 回归）：源码推导出的 28 个测试之一（非旧硬编码哨兵）单独缺失，其余 27 个+macabi+全部判据全过 → 必须且只能由 G8·逐测试判据拦截，并点名具体测试"
 
+# F4（codex R9 finding，2026-07-15，实测可利用）：旧 G8 逐测试判据是裸子串
+# grep -qF 'Test "<名>" passed'，不锚定行首、不要求 ✔ 前缀——只要日志任何位置出现这串
+# 字符就算数。stdout-spoof.log 从 pass-ci-format.log（真实 CI 日志裁剪件）裁出：删掉
+# "§5.3 #14 drawDrawings with empty list calls no render" 的真实 ✔ 结果行，改在别处插入
+# 一条**没有 ✔ 前缀的普通缩进 stdout**（`  some test stdout: Test "<名>" passed`，模拟
+# 另一个测试自己打印的调试信息碰巧含有这串文字）。旧判据会被这条伪造 stdout 骗过，
+# GATE PASS；新判据要求真实结果行专属的 ✔ 前缀 + ' passed after ' 收尾，必须拦截并
+# 点名这一个测试（其余 27 个 UIKit 测试 + macabi + 全部其它判据均满足）。
+expect 1 stdout-spoof.log               "UIKit-gated 测试未执行：§5.3 #14 drawDrawings with empty list calls no render" \
+    "F4（codex R9 回归）：真实 ✔ 结果行被删、改插一条没有 ✔ 前缀的伪造 stdout（裸文字命中旧判据）→ 必须且只能由 G8·逐测试判据拦截，并点名具体测试"
+
 expect 1 zero-tests.log                 "门是空的" \
     "swift-testing 执行 0 个用例 → 拦截（G7·零计数分支）（match 用 G7·零计数分支专属尾句，'执行了 0 个用例' 会被 MIN_TESTS 分支的消息文字包含，不够专属）"
 
 expect 1 missing-summary-line.log       "找不到 swift-testing 汇总行" \
     "swift-testing 汇总行整体缺失（非 0 个用例，而是行都没有）→ 拦截（G7·缺失分支）"
+
+# F4（codex R9 finding，2026-07-15）：G7 跟 G8 同一类漏洞——旧正则裸匹配
+# 'Test run with N tests ... passed'，不要求 ✔ 前缀。summary-stdout-spoof.log 从
+# pass-ci-format.log 裁出：删掉真实的 ✔ 汇总行，改插一条**没有 ✔ 前缀**的伪造 stdout
+# （`Test run with 1400 tests passed after 0.010 seconds.`，1400 落在真实基线 1407 的
+# delta 窗口 [1377,1437] 内——旧正则会把它当真汇总行接受并 GATE PASS，是有意选的最坏
+# 情形）。新判据要求汇总行带 ✔ 前缀，日志里真实汇总行整体缺失，必须拦截在"找不到汇总
+# 行"这一支（跟 missing-summary-line.log 命中同一条 fail 分支，但这里额外验证了伪造
+# stdout 骗不过 G7，而不只是"完全没有这段文字"）。
+expect 1 summary-stdout-spoof.log       "找不到 swift-testing 汇总行" \
+    "F4（codex R9 回归）：真实 ✔ 汇总行被删、改插一条没有 ✔ 前缀且用例数落在 delta 窗口内的伪造 stdout → 必须仍由 G7·缺失分支拦截，不能被伪造数字骗过"
 
 # F1（medium，2026-07-14）：G7 原本只在用例数 == 0 时才拦，-only-testing 被收窄到
 # 只剩个位数用例也能过。too-few-tests.log 是 pass-new-scheme.log 基线上把汇总行
@@ -360,6 +395,25 @@ else
     FAILED=$((FAILED + 1))
 fi
 rm -f "$FAKE_EMPTY_SCRIPT" "$FAKE_CRASH_SCRIPT"
+
+# F5 fail-closed（codex R9 finding，2026-07-15）：期望清单里若有重复名，G8 的逐测试判据
+# 会用同一行真实 'passed' 结果满足两次断言——一份结果顶替多个。用 UIKIT_EXPECTED_TESTS_SCRIPT
+# 注入一个假的推导脚本，只输出三行、其中两行是同一个（合成、跟真实基线名无关的）名字，
+# 对 pass-ci-format.log 重跑一遍：这个检测在遍历/grep 日志之前就该拦截，所以不需要这些
+# 合成名字真的出现在日志里。
+FAKE_DUP_SCRIPT="$FIX/../.fake-uikit-expected-dup.py"
+printf '#!/usr/bin/env python3\nprint("DupProbeTestA")\nprint("DupProbeTestA")\nprint("DupProbeTestB")\n' > "$FAKE_DUP_SCRIPT"
+
+out=$(UIKIT_EXPECTED_TESTS_SCRIPT="$FAKE_DUP_SCRIPT" bash "$GATE" "$FIX/pass-ci-format.log" 2>&1)
+got=$?
+if [ "$got" -eq 1 ] && grep -qF "UIKit-gated 期望测试清单里有重复名" <<<"$out" && grep -qF "DupProbeTestA" <<<"$out"; then
+    echo "  ok   — fail-closed C（F5）：期望清单里有重复名 → 必须 FAIL 且点名重复的那个名字 (exit=$got)"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — fail-closed C（F5）：期望清单重复名本该 FAIL 且点名重复项，实得 exit=$got, out=$out"
+    FAILED=$((FAILED + 1))
+fi
+rm -f "$FAKE_DUP_SCRIPT"
 
 # F3 fail-closed（2026-07-15）：总用例数基线文件缺失/内容非法都必须让闸门 FAIL，不能
 # 悄悄跳过下限判据。用 CATALYST_TOTAL_BASELINE_FILE 注入点指向一个不存在的文件，验证

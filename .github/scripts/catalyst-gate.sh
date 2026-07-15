@@ -108,6 +108,20 @@ fi
 if [ -z "$UIKIT_EXPECTED_TESTS" ]; then
     fail "UIKit-gated 测试清单推导为空——找不到任何期望测试，拒绝放行（fail-closed）"
 fi
+
+# F5（codex R9 finding，2026-07-15）：拒绝期望清单里的重复名。若同一个测试名在清单里
+# 出现两次（基线文件手误/生成脚本 bug），下面的逐测试判据会用同一行真实 'passed' 结果
+# 满足两次断言——两次循环都会 grep 到、UIKIT_CHECKED_COUNT 依然等于 UIKIT_EXPECTED_COUNT，
+# 末尾的"跑满"计数闸门也发现不了任何异常。真正的风险：如果这个重复名原本应该是两个
+# 不同的测试（其中一个因为 bug 被错误地重复成了另一个的名字），那个真正该被验证的测试
+# 可能从未真的跑过，也不会有任何信号——一份结果"顶替"了多个断言。根治：清单一旦有
+# 重复名就直接 fail-closed，逼着上游（uikit-expected-tests.py 的推导 / 手工维护的
+# 基线文件）修掉重复，而不是让 G8 假装验证了两个不同的东西。
+UIKIT_DUP_NAMES="$(printf '%s\n' "$UIKIT_EXPECTED_TESTS" | sort | uniq -d)"
+if [ -n "$UIKIT_DUP_NAMES" ]; then
+    fail "UIKit-gated 期望测试清单里有重复名（一份 'passed' 结果会顶替多个断言，拒绝放行 fail-closed）：$(printf '%s' "$UIKIT_DUP_NAMES" | tr '\n' '|')"
+fi
+
 # F1（codex R5 finding，2026-07-14）：此前用 here-string（`<<<`）把清单喂给循环——
 # bash 用 here-string 时会在 TMPDIR 下建临时文件；若 TMPDIR 不可写/满，建临时文件失败，
 # 循环体一次都不执行，但脚本会不动声色地往下走完剩余判据、报 GATE PASS（fail-open，
@@ -132,16 +146,33 @@ while IFS= read -r uikit_test; do
     # （无显示名）直接印函数签名、不带引号（`Test 名字() passed`，已用真实 CI 日志核实）。
     # uikit-expected-tests.py 用「名字末尾是不是 "()"」来标记是哪种形式，这里据此决定
     # 要不要在匹配串两侧补引号。
+    #
+    # F4（codex R9 finding，2026-07-15，实测可利用）：match_str 此前是裸子串
+    # `Test "<名>" passed`——grep -qF 不锚定行首、不看前缀，只要日志任何位置出现这串字符
+    # 就算数。实测复现：删掉某 UIKit 测试的真实 ✔ 结果行，改在日志别处插一条**普通缩进
+    # stdout**（如 `  some test stdout: Test "<名>" passed`，模拟另一个测试自己打印的调试
+    # 信息碰巧含有这串文字）——闸门照样 GATE PASS，该测试根本没跑却被判"跑过"。
+    # 根治：把 swift-testing 真实结果行的专属前缀 `✔ Test ` 和收尾 ` passed after ` 都纳入
+    # 匹配串——真结果行固定长这样（`✔ Test "显示名" passed after 1.714 seconds.`），
+    # 普通 stdout 不会同时带这两处标记。
+    # 不锚定行首（不要求 `^✔`）是刻意的：真实 CI 日志里 XCTest 自身的 XCTestOutputBarrier
+    # 诊断文本有时会跟 swift-testing 的 ✔ 结果行粘连在同一物理行（两个并发进程写同一 fd
+    # 时的输出交织，✔ 结果行本身没被截断，只是前面偶尔粘着上一条尚未换行的残留文本，
+    # 例如 `XCT✔ Test contractVersionIs1_11() passed after …`，已在 ci-catalyst-real.log
+    # 抓到 7 次真实样本）——若严格要求 ✔ 必须是该行第 1 个字符，会把这些真实通过的测试
+    # 误判成未执行（fail-open 换了个方向变成误伤真实通过）。只要求 `✔ Test ` 这段连续
+    # 子串存在，既挡住了本 finding 的伪造 stdout（没有 ✔ 字符），又不受这种真实交织
+    # 噪声影响。
     case "$uikit_test" in
         *'()')
-            match_str="Test ${uikit_test} passed"
+            match_str="✔ Test ${uikit_test} passed after "
             ;;
         *)
-            match_str="Test \"${uikit_test}\" passed"
+            match_str="✔ Test \"${uikit_test}\" passed after "
             ;;
     esac
     if ! grep -qF "$match_str" "$LOG"; then
-        fail "UIKit-gated 测试未执行：${uikit_test} —— 找不到 'passed' 收尾行（UIKit 代码体没有真的跑完，源码推导清单见 uikit-expected-tests.py）"
+        fail "UIKit-gated 测试未执行：${uikit_test} —— 找不到真实结果行 '✔ Test ... passed after ...'（不锚定行首但必须带 ✔ 前缀；伪造/普通 stdout 里出现同样文字不算数；UIKit 代码体没有真的跑完，源码推导清单见 uikit-expected-tests.py）"
     fi
 done <"$UIKIT_LIST_FILE"
 rm -f "$UIKIT_LIST_FILE"
@@ -154,10 +185,18 @@ fi
 #     "in M suites" 这段是可选的：本地 Xcode 输出 'Test run with N tests in M suites passed'，
 #     而 CI 的 macos-15 输出 'Test run with N tests passed'（没有 "in M suites"）。
 #     两种格式都要接受，否则 CI 上永远匹配不到（真实咬过一次，见 fixtures/pass-ci-format.log）。
-SUMMARY=$(grep -oE 'Test run with [0-9]+ tests?( in [0-9]+ suites?)? passed' "$LOG" | head -1 || true)
-if [ -z "$SUMMARY" ]; then
-    fail "找不到 swift-testing 汇总行 'Test run with N tests [in M suites] passed' —— 测试没被执行"
+# F4（codex R9 finding，2026-07-15）：跟 G8 同一类漏洞——旧正则裸匹配 'Test run with N
+# tests ... passed'，不要求前面有 swift-testing 真实汇总行专属的 ✔ 前缀。任何普通 stdout
+# （比如别的测试自己打印的调试信息）只要凑巧含有这串文字、且数字落在 G7 下面的 delta
+# 区间内，旧正则一样认，且会被 head -1 取到（如果它出现得比真实汇总行更早）。根治：连
+# ✔ 前缀一起匹配，再从匹配结果里把 ✔ 剥掉——不锚定行首的理由同 G8 的 F4 注：真实 CI
+# 日志里 ✔ 结果行偶尔会跟 XCTestOutputBarrier 的残留文本粘连在同一物理行，严格要求 ✔
+# 是行首第 1 个字符会把真实通过误判成未执行。
+SUMMARY_RAW=$(grep -oE '✔ Test run with [0-9]+ tests?( in [0-9]+ suites?)? passed' "$LOG" | head -1 || true)
+if [ -z "$SUMMARY_RAW" ]; then
+    fail "找不到 swift-testing 汇总行 'Test run with N tests [in M suites] passed'（真实汇总行必须带 ✔ 前缀，普通 stdout 里出现同样文字不算数）—— 测试没被执行"
 fi
+SUMMARY="${SUMMARY_RAW#"✔ "}"
 # 提取用例数：必须锚在 "Test run with " 后紧跟的数字上，不能用"匹配到的第一个数字"——
 # 本地格式的 SUMMARY 里还有 "in M suites" 的 M，位置在 tests 数之后，裸序号提取法可能误取它。
 N_TESTS=$(echo "$SUMMARY" | grep -oE '^Test run with [0-9]+' | grep -oE '[0-9]+')
