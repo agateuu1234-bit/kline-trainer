@@ -28,6 +28,17 @@
 # 统计「源码里出现了多少个 @Test 属性」，两个数字对不上就是解析器有盲区，必须 fail-closed
 # 而不是放行（见 TEST_ATTR_RE / main() 里的未归属检测）。
 #
+# fail-closed 第三道防线（2026-07-15，codex R7 finding）：块识别此前要求整行精确等于
+# `#if canImport(UIKit)`（允许前导/尾随空白），任何合法但不精确匹配的写法——
+# `#if canImport(UIKit) && targetEnvironment(macCatalyst)`（复合条件）、
+# `#if canImport(UIKit) // 注释`（尾注释）——整个块都不被发现，块内 @Test 连未归属
+# 检测都兜不住（块本身没进扫描范围）。根治：块识别改成对 `#if`/`#elseif` 条件表达式
+# 做语义分类（正向依赖 canImport(UIKit) / 反向门 !canImport(UIKit) / 无关 / 无法分类），
+# 而不是字面正则精确匹配；分类不出来的一律 fail-closed（见 classify_uikit_condition /
+# find_ambiguous_uikit_conditions）。反向陷阱：不能简单放宽成「行内含 canImport(UIKit)」，
+# 否则 `#if !canImport(UIKit)`（DecelerationAnimatorTests.swift:205，非 UIKit 环境专属块）
+# 会被误当成 UIKit 块纳入。
+#
 # 用法: uikit-expected-tests.py（无参数，路径相对本文件自动定位仓库根）
 # 输出: 每行一个测试匹配串，无参数无额外文字。两种 @Test 写法都支持：
 #   - @Test("显示名")        → 输出 `"显示名"`（带字面引号，日志里对应 `Test "显示名" passed`）
@@ -37,8 +48,10 @@
 #   无显示名形式同时支持同一行写法（@Test func 名字()）和换行写法（@Test 单独一行，
 #   func 名字() 在下一行，中间可能夹 @MainActor 等属性）——两者输出格式一致。
 #   调用方 catalyst-gate.sh 靠输出末尾是否为 "()" 决定用哪种模式去匹配日志，不额外加引号。
-# 退出: 0 = 成功推导出 >=1 个测试名，且每个 @Test 属性都被成功解析；
-#      1 = 失败（源码目录缺失/扫描到 0 个/存在解析器不认识的 @Test 写法，见 stderr 说明）
+# 退出: 0 = 成功推导出 >=1 个测试名，且每个 @Test 属性都被成功解析，且每个含
+#          canImport(UIKit) 字样的 #if/#elseif 条件都被明确分类为正向/反向门；
+#      1 = 失败（源码目录缺失/扫描到 0 个/存在解析器不认识的 @Test 写法/存在无法
+#          分类极性的 UIKit 条件门，见 stderr 说明）
 import re
 import sys
 import pathlib
@@ -68,26 +81,85 @@ TEST_ATTR_RE = re.compile(r'@Test\b')
 # "@Test"，见 catalyst-task-1-report.md 自验记录；真出现再补，不在此提前实现)。
 LINE_COMMENT_RE = re.compile(r'//[^\n]*')
 
+# `#if`/`#elseif` 指令行：捕获条件表达式（组 2），前导空白任意（缩进写法，见 R6 F2）。
+# 不匹配裸 `#else`（没有条件可分类，也不可能是 UIKit 触发点）。
+DIRECTIVE_RE = re.compile(r'^\s*#(?:if|elseif)\s+(.*)$')
+# 单独条 term 判据：块识别到 `!canImport(UIKit)` / `!(canImport(UIKit))`（可带内部空白）
+# 精确整条即算反向门；不是这两种精确形态、又含 `!` 的写法一律走「无法分类」分支。
+NEGATIVE_UIKIT_RE = re.compile(
+    r'^!\s*canImport\(UIKit\)$|^!\s*\(\s*canImport\(UIKit\)\s*\)$'
+)
+
 
 def strip_line_comments(text):
     return LINE_COMMENT_RE.sub(lambda m: " " * len(m.group(0)), text)
 
 
-def find_uikit_gated_blocks(src):
-    """返回文件里所有 `#if canImport(UIKit)` ... 对应 `#endif` 之间的 (起始行号, 文本片段)
-    列表（起始行号 1-indexed，指向片段第一行在源文件里的行号，供未归属 @Test 检测报错时
-    定位用；只匹配裸的 canImport(UIKit)，不匹配 `#if !canImport(UIKit)` 这种反向门）。
+def classify_uikit_condition(cond):
+    """判定单行 `#if`/`#elseif` 条件表达式（含条件文本，可能带尾注释）对 canImport(UIKit)
+    的极性（codex R7 finding，2026-07-15）。返回四态之一：
+      - 'unrelated'：条件里根本没提 canImport(UIKit) 字样，跟本脚本无关。
+      - 'positive'：条件正向依赖 canImport(UIKit)——裸 `canImport(UIKit)`，或与其它
+        `&&` 项并列（任意顺序），或跟着 `//` 尾注释。这是 UIKit-gated 块的判据。
+      - 'negative'：`!canImport(UIKit)` / `!(canImport(UIKit))`——反向门，明确排除
+        （DecelerationAnimatorTests.swift:205 是本仓实证：那是「非 UIKit 环境」专属块，
+        块内测试在 Catalyst 上不编译，绝不能纳入期望清单）。
+      - 'unknown'：含 canImport(UIKit) 字样但无法可靠判断极性（`||` 混合、`&&` 项本身
+        又是取反/嵌套等本函数不认识的形态）——调用方必须 fail-closed，不能猜。
+    """
+    cond = re.sub(r'//.*$', '', cond).strip()
+    if 'canImport(UIKit)' not in cond:
+        return 'unrelated'
+    if NEGATIVE_UIKIT_RE.match(cond):
+        return 'negative'
+    if cond == 'canImport(UIKit)':
+        return 'positive'
+    if '||' in cond:
+        return 'unknown'
+    terms = [t.strip() for t in cond.split('&&')]
+    if any(t == '' for t in terms):
+        return 'unknown'
+    uikit_terms = [t for t in terms if 'canImport(UIKit)' in t]
+    if len(uikit_terms) == 1 and uikit_terms[0] == 'canImport(UIKit)':
+        return 'positive'
+    return 'unknown'
 
-    F2（codex R6 finding，2026-07-15）：块识别与 depth 计数此前都用列首锚定的正则
-    （`^#if...`/`^#endif`），缩进写法的 `#if canImport(UIKit)`（Swift 合法写法，嵌套在
-    struct/extension 内很常见）整个块都不会被发现——块内的 @Test 既不会进期望清单，
-    也不会被「未归属 @Test」检测兜住（因为块本身就没被识别，从未进入扫描范围）。
-    根治：块首/depth 计数正则前面都允许任意前导空白（`^\\s*#if`/`^\\s*#endif`）。"""
+
+def find_ambiguous_uikit_conditions(src):
+    """扫描全文所有 `#if`/`#elseif` 指令行，返回条件里含 canImport(UIKit) 字样、但
+    classify_uikit_condition 判不出正/反极性的行号列表（1-indexed）——fail-closed
+    第三道防线，独立于块识别/块内容扫描，覆盖所有嵌套层级，不只是顶层触发点。"""
+    ambiguous = []
+    for line_no, line in enumerate(src.splitlines(), start=1):
+        m = DIRECTIVE_RE.match(line)
+        if m and classify_uikit_condition(m.group(1)) == 'unknown':
+            ambiguous.append(line_no)
+    return ambiguous
+
+
+def find_uikit_gated_blocks(src):
+    """返回文件里所有正向依赖 canImport(UIKit) 的 `#if`/`#elseif` 分支内容的
+    (起始行号, 文本片段) 列表（起始行号 1-indexed，指向片段第一行在源文件里的行号，
+    供未归属 @Test 检测报错时定位用）。
+
+    F2（codex R6 finding，2026-07-15）：块首/depth 计数正则前面都允许任意前导空白
+    （缩进写法，嵌套在 struct/extension 内很常见）。
+
+    R7（codex R7 finding，2026-07-15）：触发判据从「整行精确等于 #if canImport(UIKit)」
+    改成 classify_uikit_condition() == 'positive'——复合条件（`&& targetEnvironment(...)`）
+    与尾注释（`// ...`）都能正确触发；`!canImport(UIKit)` 反向门被 classify 判为
+    'negative'，明确不触发。同时支持 `#elseif` 作为触发点（分支内容只延伸到同级的下一个
+    `#elseif`/`#else` 或匹配的 `#endif` 为止，不会把同一条 `#if` 链里的兄弟分支——包括
+    UIKit 不可用时的 `#else` 分支——错误地并入 UIKit 分支内容）。嵌套在已捕获分支内部的
+    `#if`（无论条件是什么）仍按原逻辑整体收纳，不递归判定极性——跟改动前对已捕获块内嵌套
+    `#if/#else` 的处理方式一致，本仓现有 8 个 UIKit 块全是顶格单条件、无嵌套，实证结果不变。
+    """
     blocks = []
     lines = src.splitlines()
     i = 0
     while i < len(lines):
-        if re.match(r'\s*#if\s+canImport\(UIKit\)\s*$', lines[i]):
+        m = DIRECTIVE_RE.match(lines[i])
+        if m and classify_uikit_condition(m.group(1)) == 'positive':
             depth = 1
             j = i + 1
             block_start_line = j + 1  # 1-indexed：lines[j] 是文件第 j+1 行
@@ -100,6 +172,10 @@ def find_uikit_gated_blocks(src):
                     depth -= 1
                     if depth == 0:
                         break
+                elif depth == 1 and re.match(r'\s*#(?:elseif|else)\b', l):
+                    # 同级的兄弟分支（#elseif/#else）——当前 UIKit 分支到此为止，
+                    # 不消费这一行，留给外层循环重新判定（可能是另一个正向 #elseif）。
+                    break
                 block_lines.append(l)
                 j += 1
             blocks.append((block_start_line, "\n".join(block_lines)))
@@ -115,7 +191,27 @@ def main():
         return 1
 
     names = []
+    ambiguous = []  # (相对路径, 行号) —— #if/#elseif 条件含 canImport(UIKit) 但极性无法分类
     unattributed = []  # (相对路径, 行号) —— 解析器不认识的 @Test 写法
+    for f in sorted(TESTS_DIR.rglob("*.swift")):
+        src = f.read_text()
+        if "canImport(UIKit)" not in src:
+            continue
+        for line_no in find_ambiguous_uikit_conditions(src):
+            ambiguous.append((f.relative_to(REPO_ROOT), line_no))
+
+    if ambiguous:
+        print(
+            "uikit-expected-tests.py: 检测到无法可靠判断极性的 UIKit 条件门"
+            "（条件里含 canImport(UIKit) 字样，但正向/反向无法明确分类，"
+            "例如混入括号嵌套、|| 混合、宏变量等本脚本没法可靠判断的形态）——"
+            "请扩展 uikit-expected-tests.py 或简化该 #if，否则测试可能逃出 Catalyst 闸门的保护：",
+            file=sys.stderr,
+        )
+        for path, line_no in ambiguous:
+            print(f"  {path}:{line_no}", file=sys.stderr)
+        return 1
+
     for f in sorted(TESTS_DIR.rglob("*.swift")):
         src = f.read_text()
         if "canImport(UIKit)" not in src:

@@ -164,6 +164,61 @@ else
 fi
 rm -rf "$INDENT_ROOT" 2>/dev/null || true
 
+# R7（codex R7 finding，2026-07-15）：块识别此前要求整行精确等于 `#if canImport(UIKit)`
+# （允许前导/尾随空白），复合条件（`&& targetEnvironment(macCatalyst)`，任意顺序）与尾注释
+# （`#if canImport(UIKit) // 注释`）都不精确匹配，整个块连同块内 @Test 都不进期望清单、
+# 也不被未归属检测兜住。同一份 fixture 还核对反向陷阱：不能简单放宽成「行内含
+# canImport(UIKit)」，否则 `#if !canImport(UIKit)`（本仓 DecelerationAnimatorTests.swift:205
+# 的真实写法，非 UIKit 环境专属块）会被误纳入。用隔离 fixture 树一次验证「复合条件+尾注释
+# 都被纳入」和「反向门被排除」两件事：正向的 3 个测试必须齐全出现，反向门里的测试必须
+# 不出现，且推导总数精确等于 3（不多不少，防止反向门被误纳后靠其它判据碰巧掩盖）。
+echo
+echo "R7：复合条件 / 尾注释块被纳入 + 反向门 !canImport(UIKit) 被排除（隔离 fixture 树）："
+R7_ROOT="$FIX/../.uikit-r7-polarity-fixture-$$"
+rm -rf "$R7_ROOT" 2>/dev/null || true
+mkdir -p "$R7_ROOT/.github/scripts" "$R7_ROOT/ios/Contracts/Tests/KlineTrainerContractsTests"
+cp "$DIR/uikit-expected-tests.py" "$R7_ROOT/.github/scripts/uikit-expected-tests.py"
+cat > "$R7_ROOT/ios/Contracts/Tests/KlineTrainerContractsTests/R7PolarityFixtureTests.swift" <<'SWIFTEOF4'
+#if canImport(UIKit) && targetEnvironment(macCatalyst)
+struct R7CompoundUIKitFirstTests {
+    @Test("R7 compound AND UIKit-first") func compoundFirst() {}
+}
+#endif
+
+#if targetEnvironment(macCatalyst) && canImport(UIKit)
+struct R7CompoundUIKitLastTests {
+    @Test("R7 compound AND UIKit-last") func compoundLast() {}
+}
+#endif
+
+#if canImport(UIKit) // trailing comment probe
+struct R7TrailingCommentTests {
+    @Test("R7 trailing comment") func trailingComment() {}
+}
+#endif
+
+#if !canImport(UIKit)
+struct R7NegativeGateTests {
+    @Test("R7 negative gate must not appear") func negativeGate() {}
+}
+#endif
+SWIFTEOF4
+out=$(python3 "$R7_ROOT/.github/scripts/uikit-expected-tests.py" 2>&1)
+got=$?
+out_count=$(printf '%s\n' "$out" | grep -c '.')
+if [ "$got" -eq 0 ] && [ "$out_count" -eq 3 ] \
+    && grep -qF "R7 compound AND UIKit-first" <<<"$out" \
+    && grep -qF "R7 compound AND UIKit-last" <<<"$out" \
+    && grep -qF "R7 trailing comment" <<<"$out" \
+    && ! grep -qF "R7 negative gate must not appear" <<<"$out"; then
+    echo "  ok   — 复合条件（两种顺序）+ 尾注释块的 3 个测试全部纳入，反向门 !canImport(UIKit) 里的测试被排除，总数精确=3 (exit=$got)"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — R7 极性判定回归，实得 exit=$got, count=$out_count, out=$out"
+    FAILED=$((FAILED + 1))
+fi
+rm -rf "$R7_ROOT" 2>/dev/null || true
+
 # F2（codex R5 finding，2026-07-14）：以下 fixture 用例测的是「G8 判据逻辑本身对不对」，
 # 不是「当前源码长什么样」。若让它们像生产环境一样从当前源码实时推导期望清单，任何 PR
 # 只要新增/改名一个 UIKit-gated @Test，推导清单就会比 fixture 静态日志里的多一条，本文件
