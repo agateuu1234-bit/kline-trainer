@@ -851,12 +851,14 @@ struct TrainingViewShellSourceGuardTests {
     func tradeBoundary() throws {
         let code = try source(tv)
         #expect(code.contains("onChange(of: engine.drawingSession.drawingModeActive)"))
-        // onChange 的 active 分支必须**真清 tradeStrip**（codex plan-R6-high）——不能只有 hook 空壳，
-        // 否则陈旧 tradeStrip 会在退出画线后 remount，同 tick/period 下 drawingModeActive==false 放行旧请求成交。
+        // onChange 必须**无条件清 tradeStrip**（codex plan-R6/R9-high）——两个方向都清，不能只 `if active`，
+        // 否则陈旧 tradeStrip 跨 round-trip 幸存 → 退出后 remount，同 tick/period 下放行旧请求成交。
         let ocStart = try #require(code.range(of: "onChange(of: engine.drawingSession.drawingModeActive)"),
                                    "找不到 drawingModeActive onChange")
         let ocBody = String(code[ocStart.upperBound...].prefix(200))
-        #expect(ocBody.contains("if active") && ocBody.contains("tradeStrip = nil"))
+        #expect(ocBody.contains("{ _, _ in"))            // 无条件闭包（非 `_, active in` + `if active`）
+        #expect(ocBody.contains("tradeStrip = nil"))
+        #expect(!ocBody.contains("if active"))           // 拒绝退回「只进画线清」的回归
         // TradeBox overlay 挂载条件带 !drawingModeActive 纵深门控——**锚定到真实挂载条件**
         // （紧跟 showsTradeButtons，即 TradeBoxView 分支），不是文件里某处出现（codex plan-R5-high）。
         #expect(code.contains("showsTradeButtons, !engine.drawingSession.drawingModeActive,"))
@@ -994,10 +996,11 @@ Expected: FAIL —— 新谓词/字样尚不存在。
 在现有 `.onChange(of: engine.upperPanel.period)` 那批旁边加：
 
 ```swift
-        // codex branch-R3-high（交易安全）：进画线是交易边界转换——作废任何未确认买卖框，
-        // 防「开着买/卖框 → 点画图 → 确认 → engine.buy/sell 不可逆入账」。
-        .onChange(of: engine.drawingSession.drawingModeActive) { _, active in
-            if active { tradeStrip = nil }
+        // codex branch-R3-high / plan-R9-high（交易安全）：画线模式**任一方向切换**都作废未确认买卖框。
+        // 不只清「进画线」——退出也清：否则一个跨 round-trip 幸存的陈旧 tradeStrip 会在退出后（!drawingModeActive）
+        // remount，同 tick/period 下被 TradeConfirmGuard 放行成交。清 nil 恒安全（本就不该跨画线切换留着买卖框）。
+        .onChange(of: engine.drawingSession.drawingModeActive) { _, _ in
+            tradeStrip = nil
         }
 ```
 
