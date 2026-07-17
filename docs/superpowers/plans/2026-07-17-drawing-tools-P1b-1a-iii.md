@@ -58,8 +58,8 @@
 
 ```swift
     // ── Task 1（1a-iii）：默认样式原子流进提交 ──
-    @Test("默认样式全 5 字段原子流进提交的线")
-    func defaultStyleFlowsIntoCommit() {
+    @Test("默认样式全 5 字段原子流进提交的线 + 标签色=线色")
+    func defaultStyleFlowsIntoCommit() throws {
         let s = DrawingSession()
         s.activate(tool: .horizontal)
         var style = DrawingDefaultStyle()
@@ -67,13 +67,17 @@
         style.thickness = 3; style.colorToken = .red; style.labelMode = .right
         s.setDefaultStyle(style)
         s.addAnchor(anchor(10), panel: .upper)
-        let obj = s.commitPending(panelPosition: 0)
-        #expect(obj?.lineSubType == .ray)
-        #expect(obj?.lineStyle == .dash2)
-        #expect(obj?.thickness == 3)
-        #expect(obj?.colorToken == .red)
-        #expect(obj?.labelMode == .right)
-        #expect(obj?.isExtended == true)          // isExtended 由 lineSubType==.ray 派生（不变量保留）
+        let obj = try #require(s.commitPending(panelPosition: 0))
+        #expect(obj.lineSubType == .ray)
+        #expect(obj.lineStyle == .dash2)
+        #expect(obj.thickness == 3)
+        #expect(obj.colorToken == .red)
+        #expect(obj.labelMode == .right)
+        #expect(obj.textColorToken == .red)       // codex plan-R7：标签色跟线色（否则标签渲染成默认橙）
+        #expect(obj.isExtended == true)           // isExtended 由 lineSubType==.ray 派生（不变量保留）
+        // 标签**渲染路径**真拿到线色（labelContent.colorToken 来自 textColorToken，codex plan-R7）
+        let label = try #require(DrawingLabelLayout.labelContent(for: obj, lineVisible: true))
+        #expect(label.colorToken == .red)
     }
 
     @Test("改默认只影响下一条：先画一条、改默认、再画一条 —— 第一条不变")
@@ -173,7 +177,11 @@ public struct DrawingDefaultStyle: Equatable, Sendable {
             lineStyle: s.lineStyle,
             thickness: s.thickness,
             colorToken: s.colorToken,
-            labelMode: s.labelMode)
+            labelMode: s.labelMode,
+            // codex plan-R7-medium：价格标签渲染用 textColorToken（DrawingLabelLayout.labelContent:75），
+            // 本期卡片只有一个「颜色」控件（线色）→ 标签跟线同色，否则蓝线配橙标签。
+            // （独立「字色」是 P3 的标注文字工具，本期不引入。）
+            textColorToken: s.colorToken)
         discardPendingAnchors()
         return drawing
     }
@@ -220,6 +228,7 @@ Expected: PASS（含新 3 条 + 改写的 2 条）。
         // （正是 crash/切后台在 count 触发点会存到的不完整值）。故断言 append 时即完整 = 断言无「后补样式」。
         #expect(appended.lineSubType == .ray && appended.lineStyle == .dash3 && appended.thickness == 4)
         #expect(appended.colorToken == .blue && appended.labelMode == .right)
+        #expect(appended.textColorToken == .blue)          // codex plan-R7：标签色=线色，落盘也须保真
         // 落盘 + 读回：证明整条链（含 count 触发的真实 autosave 载荷）保真
         try await coord.saveProgress(engine: engine)
         let p = try #require(try pending.loadPending())
@@ -229,6 +238,7 @@ Expected: PASS（含新 3 条 + 改写的 2 条）。
         #expect(d.thickness == 4)
         #expect(d.colorToken == .blue)
         #expect(d.labelMode == .right)
+        #expect(d.textColorToken == .blue)                 // codex plan-R7：标签色=线色，往返保真
         #expect(d.revealTick == appended.revealTick)       // routeDrawingCommit 盖的 revealTick 也保真
         #expect(d.colorToken == appended.colorToken && d.labelMode == appended.labelMode)  // 落盘值 == append 时值
     }
