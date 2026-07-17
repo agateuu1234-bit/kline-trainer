@@ -40,6 +40,12 @@ public final class DrawingSession {
     /// D31/D42：pending 锚的**归属面板** = 落锚时被点击的面板。**与 activePanel 无关**。
     public private(set) var pendingAnchorPanel: PanelId?
 
+    /// 1a-iii：设置卡片写入的「下一条线」默认样式（单一真相，提交路径读它）。
+    public private(set) var defaultStyle = DrawingDefaultStyle()
+
+    /// 1a-iii：设置卡片（DrawingStyleCard，同包 UI 层）经此写默认样式。internal——包外不得直改。
+    func setDefaultStyle(_ style: DrawingDefaultStyle) { defaultStyle = style }
+
     public init() {}
 
     /// 进入/保持画线会话并选定工具。同工具重复调用**幂等且不丢 pending**；
@@ -79,21 +85,31 @@ public final class DrawingSession {
     }
 
     /// pending → DrawingObject。**DrawingObject 的唯一写入点**：isExtended 从 lineSubType 派生
-    /// （不变量 isExtended == (lineSubType == .ray)；矛盾数据不可表达，codex branch-R5-high）。
-    /// period 不传 → 由 DrawingObject.init 取 anchors.first.period（D29 周期绑定，1a-i 落地，不得回退）。
+    /// （不变量 isExtended == (lineSubType == .ray)；矛盾数据不可表达）。
+    /// **1a-iii：5 样式字段全部从 defaultStyle 原子读取**——在 append 之前就灌满，
+    /// 让 routeDrawingCommit 的 append 成为 drawings 的唯一改动（count 触发一次即完整落盘，
+    /// 杜绝「先 append 默认样式、再原地改样式」的提交后套用不落盘缺陷，codex branch-R1/R2）。
+    /// period 不传 → 由 DrawingObject.init 取 anchors.first.period（D29 周期绑定，不得回退）。
     /// revealTick 由 engine.routeDrawingCommit 盖真值。
     /// **D38：提交后只清 pending —— 工具与会话保持不变（连续画线）**。
-    /// 无工具 / 无 pending → nil（caller 不得据此改会话状态）。
-    func commitPending(lineSubType: LineSubType = .straight,
-                              panelPosition: Int) -> DrawingObject? {
+    func commitPending(panelPosition: Int) -> DrawingObject? {
         guard let tool = activeDrawingTool, !pendingAnchors.isEmpty else { return nil }
+        let s = defaultStyle
         let drawing = DrawingObject(
             toolType: tool,
             anchors: pendingAnchors,
-            isExtended: lineSubType == .ray,
+            isExtended: s.lineSubType == .ray,
             panelPosition: panelPosition,
             revealTick: 0,
-            lineSubType: lineSubType)
+            lineSubType: s.lineSubType,
+            lineStyle: s.lineStyle,
+            thickness: s.thickness,
+            colorToken: s.colorToken,
+            labelMode: s.labelMode,
+            // codex plan-R7-medium：价格标签渲染用 textColorToken（DrawingLabelLayout.labelContent:75），
+            // 本期卡片只有一个「颜色」控件（线色）→ 标签跟线同色，否则蓝线配橙标签。
+            // （独立「字色」是 P3 的标注文字工具，本期不引入。）
+            textColorToken: s.colorToken)
         discardPendingAnchors()
         return drawing
     }

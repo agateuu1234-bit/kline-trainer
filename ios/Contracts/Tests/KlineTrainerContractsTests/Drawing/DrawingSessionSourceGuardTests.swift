@@ -38,6 +38,7 @@ struct DrawingSessionSourceGuardTests {
     private let trainingView   = "Sources/KlineTrainerContracts/UI/TrainingView.swift"
     private let floatingView   = "Sources/KlineTrainerContracts/UI/DrawingToolFloatingView.swift"
     private let engine         = "Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift"
+    private let drawingSession = "Sources/KlineTrainerContracts/Drawing/DrawingSession.swift"
 
     @Test("#1：ChartContainerView 里**不存在** manager.toggle 自动 re-arm，也不再持有 DrawingToolManager")
     func noRearmInChartContainer() throws {
@@ -151,5 +152,32 @@ struct DrawingSessionSourceGuardTests {
         let code = try source(floatingView)
         #expect(code.contains("if isDrawingActive { onToggleTool() }"))  // 画线模式开：点圆圈=直接退出（不是展开）
         #expect(code.contains(".tint(isDrawingActive ? .orange"))        // 画线模式开：圆圈变橙色（一眼看出在画线）
+    }
+
+    @Test("原子性：commitPending 5 字段从 defaultStyle 原子构造 + routeDrawingCommit 整体透传（codex plan-R5）")
+    func atomicStyleConstruction() throws {
+        let s = try source(drawingSession)
+        #expect(s.contains("func commitPending("))       // 先证真读到文件（防路径错→空→假绿）
+        for f in ["lineSubType: s.lineSubType", "lineStyle: s.lineStyle", "thickness: s.thickness",
+                  "colorToken: s.colorToken", "labelMode: s.labelMode"] {
+            #expect(s.contains(f))                        // commitPending 单初始化原子灌满
+        }
+        let e = try source(engine)
+        for f in ["lineSubType: drawing.lineSubType", "lineStyle: drawing.lineStyle",
+                  "thickness: drawing.thickness", "colorToken: drawing.colorToken", "labelMode: drawing.labelMode"] {
+            #expect(e.contains(f))                        // routeDrawingCommit 整体透传 5 字段，无逐字段丢弃/默认化
+        }
+        // 提取 routeDrawingCommit 函数体，钉死「无 append-then-replace」（codex plan-R6-high）：
+        // let 字段防不了「append(默认) 后 drawings[last] = 完整」的整元素替换 → 直接禁下标写、且只消费 stamped。
+        let rcStart = try #require(e.range(of: "public func routeDrawingCommit"), "找不到 routeDrawingCommit（结构漂移）")
+        let afterRC = String(e[rcStart.upperBound...])
+        let rcEnd = try #require(afterRC.range(of: "\n    public func"), "找不到 routeDrawingCommit 结尾")
+        let rc = String(afterRC[..<rcEnd.lowerBound])
+        // 两个都要显式断言（codex plan-R10-medium）：Swift 大小写敏感，"reviewDrawings[" 不含 "drawings["
+        // （前者是大写 D）→ 只查小写会漏掉 review 分支的 append-then-replace。
+        #expect(!rc.contains("drawings["))               // normal/replay 分支无元素替换
+        #expect(!rc.contains("reviewDrawings["))         // review 分支无元素替换（大写 D，须单独查）
+        #expect(rc.contains("appendDrawing(stamped)"))   // 消费的是 stamped（全 5 样式字段，只盖 revealTick）
+        #expect(rc.contains("appendReviewDrawing(stamped)"))
     }
 }

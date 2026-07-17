@@ -280,7 +280,7 @@ public struct ChartContainerView: UIViewRepresentable {
             guard let anchor = inputController.tapToAnchor(at: point, panel: ps, mapper: mapper) else { return }
             session.addAnchor(anchor, panel: panel)          // D31：落在 ≠ pendingAnchorPanel 的面板 → 容器内部只丢 pending
             guard inputController.shouldCommit(current: session.pendingAnchors, tool: tool) else { return }
-            // 本期无线型选择器（→1a-iii），新线一律 .straight。
+            // 1a-iii：样式（含 lineSubType）由 session.defaultStyle 单一真相决定，commitPending 原子读取。
             guard let committed = session.commitPending(panelPosition: panel == .upper ? 0 : 1) else { return }
             engine.routeDrawingCommit(committed)             // review→reviewDrawings；否则→drawings（Task 10）
             // ← 此处**故意没有** engine.commitDrawing(panel:)：连续画线（D38），会话与工具保持不变。

@@ -1196,4 +1196,40 @@ struct TrainingSessionPersistenceTests {
         _ = try await coord.finalize(engine: replayEngine)    // 早返 nil（replay）
         #expect(port.finalizeCallCount == 0)                   // port 从未被触发
     }
+
+    @Test("1a-iii：带样式的画线 commit→saveProgress→读回 pending —— 5 样式字段 + revealTick 保真")
+    func styledDrawingSurvivesSaveProgress() async throws {
+        let (coord, _, pending, _) = Self.makeCoordinator(candles: Self.validCandles())
+        let engine = try await coord.startNewNormalSession()
+        // 走真实提交链：defaultStyle → commitPending（原子灌满）→ routeDrawingCommit（盖 revealTick + append）
+        let s = engine.drawingSession
+        s.activate(tool: .horizontal)
+        var style = DrawingDefaultStyle()
+        style.lineSubType = .ray; style.lineStyle = .dash3; style.thickness = 4
+        style.colorToken = .blue; style.labelMode = .right
+        s.setDefaultStyle(style)
+        s.addAnchor(DrawingAnchor(period: engine.upperPanel.period, candleIndex: 0, price: 100), panel: .upper)
+        let committed = try #require(s.commitPending(panelPosition: 0))
+        engine.routeDrawingCommit(committed)
+        let appended = try #require(engine.drawings.first)
+        // 原子性核心（codex plan-R4-high）：**append 那一刻**对象就已带全部 5 样式。
+        // count 触发的 autosave 恰在 drawings.count 变化（=append）时读 engine.drawings —— 即读到此刻的 appended。
+        // 若实现是「先 append 默认橙/隐藏、再原地改样式」，此刻 appended 会是默认值 → 本断言当场红
+        // （正是 crash/切后台在 count 触发点会存到的不完整值）。故断言 append 时即完整 = 断言无「后补样式」。
+        #expect(appended.lineSubType == .ray && appended.lineStyle == .dash3 && appended.thickness == 4)
+        #expect(appended.colorToken == .blue && appended.labelMode == .right)
+        #expect(appended.textColorToken == .blue)          // codex plan-R7：标签色=线色，落盘也须保真
+        // 落盘 + 读回：证明整条链（含 count 触发的真实 autosave 载荷）保真
+        try await coord.saveProgress(engine: engine)
+        let p = try #require(try pending.loadPending())
+        let d = try #require(p.drawings.first)
+        #expect(d.lineSubType == .ray)
+        #expect(d.lineStyle == .dash3)
+        #expect(d.thickness == 4)
+        #expect(d.colorToken == .blue)
+        #expect(d.labelMode == .right)
+        #expect(d.textColorToken == .blue)                 // codex plan-R7：标签色=线色，往返保真
+        #expect(d.revealTick == appended.revealTick)       // routeDrawingCommit 盖的 revealTick 也保真
+        #expect(d.colorToken == appended.colorToken && d.labelMode == appended.labelMode)  // 落盘值 == append 时值
+    }
 }

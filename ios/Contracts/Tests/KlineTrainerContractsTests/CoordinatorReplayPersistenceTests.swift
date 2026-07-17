@@ -518,6 +518,28 @@ struct CoordinatorReplayPersistenceTests {
         #expect(engine == nil)
         #expect(try h.pendingReplayRepo.loadReplaySlotInfo() == nil)   // 槽已被 durable 清
     }
+
+    @Test func replayStyledDrawing_survivesSaveAndResume() async throws {
+        let h = try CoordinatorTestHarness.make()
+        let engine = try await h.coordinator.replay(recordId: h.seededRecordId)
+        // 真实提交链：replay 模式 routeDrawingCommit 写 engine.drawings（脏 → 不被 clean-skip 跳过）
+        let s = engine.drawingSession
+        s.activate(tool: .horizontal)
+        var style = DrawingDefaultStyle()
+        style.lineSubType = .ray; style.lineStyle = .dash3; style.thickness = 4
+        style.colorToken = .blue; style.labelMode = .right
+        s.setDefaultStyle(style)
+        s.addAnchor(DrawingAnchor(period: engine.upperPanel.period, candleIndex: 0, price: 100), panel: .upper)
+        let committed = try #require(s.commitPending(panelPosition: 0))
+        engine.routeDrawingCommit(committed)
+        let inMem = try #require(engine.drawings.first)
+        try await h.coordinator.saveProgress(engine: engine)          // 真写 PendingReplay（clean-skip + lossy 调和）
+        let saved = try #require(try h.pendingReplayRepo.loadReplay())
+        let d = try #require(saved.drawings.first)
+        #expect(d.lineSubType == .ray && d.lineStyle == .dash3 && d.thickness == 4)
+        #expect(d.colorToken == .blue && d.labelMode == .right && d.textColorToken == .blue)   // 标签色也保真
+        #expect(d.revealTick == inMem.revealTick)
+    }
 }
 
 // MARK: - A5 helper（损坏槽测试用最小 PendingReplay 工厂）
