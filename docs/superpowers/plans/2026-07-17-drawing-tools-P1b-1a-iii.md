@@ -43,7 +43,7 @@
 - Test: `Tests/KlineTrainerContractsTests/Drawing/DrawingSessionTests.swift`（改 `:115/:122` 两处旧调用 + 新增默认样式测试）
 - Test: `Tests/KlineTrainerContractsTests/TrainingSessionPersistenceTests.swift`（追加带样式画线 commit→saveProgress→读回往返集成测试）
 - Test: `Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift`（追加原子构造结构守卫）
-- Test: `Tests/KlineTrainerContractsTests/Persistence/PendingReplayTests.swift`（追加 replay 带样式画线序列化往返）
+- Test: `Tests/KlineTrainerContractsTests/CoordinatorReplayPersistenceTests.swift`（追加 replay 带样式画线**端到端** save→读回）
 
 **Interfaces:**
 - Produces:
@@ -247,33 +247,33 @@ Expected: PASS（含新 3 条 + 改写的 2 条）。
 
 Run: `cd ios/Contracts && swift test --filter TrainingSessionPersistenceTests` → PASS。
 
-**再补 replay 侧序列化覆盖（codex plan-R10-medium）**：replay 的画线走 `PendingReplay`（`saveProgress` 在 replay 是 no-op，独立路径）。`commitPending`/`routeDrawingCommit` 是 mode-agnostic（normal 端到端已证），故 replay 侧只需补证 **`PendingReplay` 序列化保全样式**。加进 `Tests/.../Persistence/PendingReplayTests.swift`（复用其既有 `pendingReplay_codableRoundTrip` 构造范式）：
+**再补 replay 侧端到端覆盖（codex plan-R14-high 纠正）**：replay 的 `saveProgress` **并非 no-op**——它写 `PendingReplay`、含 **clean-skip 判脏 + `loadedDrawingsLossy` 与 `drawings` 调和**。只做 `PendingReplay` 序列化往返会**绕过**这条真实路径（clean-skip 吞掉首条 / lossy 调和丢样式都测不到）。故必须**端到端**：起 replay → 设 defaultStyle → `commitPending`/`routeDrawingCommit`（replay 非 review，写 `drawings`、变脏）→ `coordinator.saveProgress` → 从 `pendingReplayRepo` 读回。加进 `Tests/.../CoordinatorReplayPersistenceTests.swift`（复用 `CoordinatorTestHarness`）：
 
 ```swift
-@Test func pendingReplay_styledDrawing_survivesRoundTrip() throws {
-    let styled = DrawingObject(
-        id: "s1", toolType: .horizontal,
-        anchors: [DrawingAnchor(period: .m60, candleIndex: 0, price: 100)],
-        isExtended: true, panelPosition: 0, revealTick: 5,
-        lineSubType: .ray, lineStyle: .dash3, thickness: 4,
-        colorToken: .blue, labelMode: .right, textColorToken: .blue)
-    let p = try PendingReplay(
-        recordId: 42, trainingSetFilename: "a.sqlite", globalTickIndex: 5,
-        upperPeriod: .m60, lowerPeriod: .daily,
-        positionData: Data([1]), cashBalance: 99_000,
-        feeSnapshot: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true),
-        tradeOperations: [], drawings: [styled],
-        startedAt: 1_700_000_000, accumulatedCapital: 100_000,
-        drawdown: DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0))
-    let back = try JSONDecoder().decode(PendingReplay.self, from: try JSONEncoder().encode(p))
-    let d = try #require(back.drawings.first)
+@Test func replayStyledDrawing_survivesSaveAndResume() async throws {
+    let h = try CoordinatorTestHarness.make()
+    let engine = try await h.coordinator.replay(recordId: h.seededRecordId)
+    // 真实提交链：replay 模式 routeDrawingCommit 写 engine.drawings（脏 → 不被 clean-skip 跳过）
+    let s = engine.drawingSession
+    s.activate(tool: .horizontal)
+    var style = DrawingDefaultStyle()
+    style.lineSubType = .ray; style.lineStyle = .dash3; style.thickness = 4
+    style.colorToken = .blue; style.labelMode = .right
+    s.setDefaultStyle(style)
+    s.addAnchor(DrawingAnchor(period: engine.upperPanel.period, candleIndex: 0, price: 100), panel: .upper)
+    let committed = try #require(s.commitPending(panelPosition: 0))
+    engine.routeDrawingCommit(committed)
+    let inMem = try #require(engine.drawings.first)
+    try await h.coordinator.saveProgress(engine: engine)          // 真写 PendingReplay（clean-skip + lossy 调和）
+    let saved = try #require(try h.pendingReplayRepo.loadReplay())
+    let d = try #require(saved.drawings.first)
     #expect(d.lineSubType == .ray && d.lineStyle == .dash3 && d.thickness == 4)
     #expect(d.colorToken == .blue && d.labelMode == .right && d.textColorToken == .blue)   // 标签色也保真
-    #expect(d.revealTick == 5)
+    #expect(d.revealTick == inMem.revealTick)
 }
 ```
 
-Run: `cd ios/Contracts && swift test --filter pendingReplay_styledDrawing` → PASS。
+Run: `cd ios/Contracts && swift test --filter replayStyledDrawing` → PASS。
 
 - [ ] **Step 5c: 原子性结构守卫（「append 默认再补丁」结构上不可能，codex plan-R5-high）**
 
@@ -327,8 +327,8 @@ git add ios/Contracts/Sources/KlineTrainerContracts/Models/DrawingEnums.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionTests.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/TrainingSessionPersistenceTests.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift \
-        ios/Contracts/Tests/KlineTrainerContractsTests/Persistence/PendingReplayTests.swift
-git commit -m "1a-iii Task1：DrawingSession.defaultStyle 单一真相 + commitPending 原子构造完整线 + 持久化往返(normal+replay)集成测试 + 原子性结构守卫"
+        ios/Contracts/Tests/KlineTrainerContractsTests/CoordinatorReplayPersistenceTests.swift
+git commit -m "1a-iii Task1：DrawingSession.defaultStyle 单一真相 + commitPending 原子构造完整线 + 持久化往返(normal pending + replay 端到端)集成测试 + 原子性结构守卫"
 ```
 
 ---
@@ -1278,7 +1278,7 @@ git commit -m "1a-iii Task5：TrainingView 集成——画图入口+底栏切换
 | 6 | 副图不可画 | 🔁 **既有** `DefaultDrawingInputControllerTests:50`（点 mainChartFrame 下方→nil）——不重复造 |
 | 7 | 面板灰态矩阵 | ✅ Task2 `DrawingStyleAvailabilityTests`（判据逐格）+ Task4 `.disabled`（灰掉无副作用） |
 | 8 | 面板文案洁净（无「不适用」） | ✅ Task4 `noNotApplicableCopy` |
-| 9 | 样式往返（autosave 重载五字段相等，训练+replay） | ✅ Task1 `styledDrawingSurvivesSaveProgress`（训练**端到端**：defaultStyle→commitPending→routeDrawingCommit→saveProgress→读回 pending，5+textColorToken+revealTick 保真+原子性）+ `pendingReplay_styledDrawing_survivesRoundTrip`（replay 序列化往返）+ `defaultStyleFlowsIntoCommit` + 🔁 `DrawingModelP1aTests:45` |
+| 9 | 样式往返（autosave 重载五字段相等，训练+replay） | ✅ Task1 `styledDrawingSurvivesSaveProgress`（训练**端到端**：defaultStyle→commitPending→routeDrawingCommit→saveProgress→读回 pending）+ `replayStyledDrawing_survivesSaveAndResume`（replay **端到端**：replay→提交→saveProgress→读回 PendingReplay，含 clean-skip+lossy 调和）+ `defaultStyleFlowsIntoCommit` + 🔁 `DrawingModelP1aTests:45` |
 | 10 | `routeDrawingCommit` 全字段存活 | 🔁 既有 P1a + `TrainingEngineDrawingCommitTests`（回归保护） |
 | 11 | 默认值只作用新线 | ✅ Task1 `defaultChangeAffectsOnlyNextLine` |
 | 12 | 前作回归（1a-i/1a-ii 全绿） | 🔁 Task5 后 `swift test` 全绿 + 三绿门 |
