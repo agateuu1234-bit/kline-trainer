@@ -31,10 +31,15 @@ struct ChartContainerViewDrawingSessionTests {
         return (engine, upperC, lowerC, upperV, lowerV)
     }
 
-    /// 主图区内一个可落锚的点（tapToAnchor 要求落在 mainChartFrame 内）。
+    /// 主图区内一个**真实可见 candle 上**的可落锚点 = 首根可见 candle 的中心。
+    /// ⚠️ 不可用 `mainChartFrame.midX`：preview rig 的可见 slice 只有 1 根（panel 周期是 m60/daily，
+    /// 各 2/1 根，且 reveal 钳 sliceEnd 到 currentIdx+1=1；candleStep=320/80=4pt）→ midX=160 落在
+    /// 右侧 overscroll 空白区，xToIndex=40 越界，被 R7 fail-closed 校验拒掉（这本就是坏数据路径）。
     private func mainChartPoint(_ view: KLineView) -> CGPoint {
-        let f = view.renderState.viewport.mainChartFrame
-        return CGPoint(x: f.midX, y: f.midY)
+        let vp = view.renderState.viewport
+        let mapper = CoordinateMapper(viewport: vp, displayScale: view.traitCollection.displayScale)
+        return CGPoint(x: mapper.indexToX(vp.startIndex) + vp.geometry.candleStep / 2,
+                       y: vp.mainChartFrame.midY)
     }
 
     @Test("#2 D42：上面板画一条、下面板画一条 —— 两条都提交，period 各自绑所在面板当时的周期")
@@ -117,6 +122,22 @@ struct ChartContainerViewDrawingSessionTests {
         }
         #expect(engine.drawingSession.drawingModeActive == false)
         #expect(engine.drawingSession.activeDrawingTool == nil)
+    }
+
+    @Test("codex R7 fail-closed：主图内 overscroll 空白区的 tap（越界 candleIndex）→ 不落锚不落库，会话存活")
+    func outOfRangeTapIsDiscardedFailClosed() {
+        let (engine, upperC, _, upperV, _) = makeRig()
+        engine.toggleDrawingMode()
+        // preview rig 实证：可见 slice 只有 index 0 一根；midX=160 在主图内但 xToIndex=40（不存在的 candle）
+        let f = upperV.renderState.viewport.mainChartFrame
+        upperC.handleDrawingTapForTesting(at: CGPoint(x: f.midX, y: f.midY))
+        #expect(engine.drawings.isEmpty)                                 // 越界 tap 不落库（改造前会存 candleIndex=40 坏数据）
+        #expect(engine.drawingSession.pendingAnchors.isEmpty)            // 也不留 pending
+        #expect(engine.drawingSession.drawingModeActive == true)         // fail-closed 只丢这次 tap，不砸会话
+        #expect(engine.drawingSession.activeDrawingTool == .horizontal)
+        // 随后点真实可见 candle 仍能画（校验不误伤正常路径）
+        upperC.handleDrawingTapForTesting(at: mainChartPoint(upperV))
+        #expect(engine.drawings.count == 1)
     }
 
     @Test("未开会话时点图 = 不画线")

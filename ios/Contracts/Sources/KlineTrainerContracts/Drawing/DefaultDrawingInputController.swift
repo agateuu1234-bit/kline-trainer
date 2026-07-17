@@ -15,8 +15,19 @@ public final class DefaultDrawingInputController: DrawingInputController {
         // codex branch-R4-high：落锚必须落在主图内。成交量/MACD 区的 tap 换算出的价格在可见价格区间之外，
         // 提交后既不渲染也不可命中（visibleGeometry fail-closed）→ 会在持久化数据里留下看不见的幽灵线。
         guard mapper.viewport.mainChartFrame.contains(point) else { return nil }
+        // codex R7-medium：持续画线模式下 `.drawing` reducer 吞 `.offsetApplied`（转屏/resize 成正常路径），
+        // 主图内可出现 overscroll 空白区（无 candle）；点空白区 xToIndex 映射出**越界** candleIndex
+        // （指向不存在的 candle），落锚提交即持久化坏数据（复盘 diff / hitTest / 跨版本迁移都踩）。
+        // fail-closed：candleIndex 必须落在可见 slice 的 base 索引区间 `[startIndex, startIndex+visibleCount)`
+        // （≡ renderState.visibleCandles.indices；**不可**改用 candle.globalIndex —— 进行中聚合根被
+        // PartialAggregateCandle.synthesize 替换后 globalIndex 为 nil），否则不产锚（在源头拒坏数据，非 call-site 补丁）。
+        let candleIndex = mapper.xToIndex(point.x)
+        let vp = mapper.viewport
+        guard vp.visibleCount > 0,
+              candleIndex >= vp.startIndex,
+              candleIndex < vp.startIndex + vp.visibleCount else { return nil }
         return DrawingAnchor(period: panel.period,
-                      candleIndex: mapper.xToIndex(point.x),
+                      candleIndex: candleIndex,
                       price: mapper.yToPrice(point.y))
     }
 
