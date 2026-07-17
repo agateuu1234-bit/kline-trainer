@@ -212,8 +212,14 @@ Expected: PASS（含新 3 条 + 改写的 2 条）。
         s.addAnchor(DrawingAnchor(period: engine.upperPanel.period, candleIndex: 0, price: 100), panel: .upper)
         let committed = try #require(s.commitPending(panelPosition: 0))
         engine.routeDrawingCommit(committed)
-        let inMem = try #require(engine.drawings.first)
-        // 落盘 + 读回
+        let appended = try #require(engine.drawings.first)
+        // 原子性核心（codex plan-R4-high）：**append 那一刻**对象就已带全部 5 样式。
+        // count 触发的 autosave 恰在 drawings.count 变化（=append）时读 engine.drawings —— 即读到此刻的 appended。
+        // 若实现是「先 append 默认橙/隐藏、再原地改样式」，此刻 appended 会是默认值 → 本断言当场红
+        // （正是 crash/切后台在 count 触发点会存到的不完整值）。故断言 append 时即完整 = 断言无「后补样式」。
+        #expect(appended.lineSubType == .ray && appended.lineStyle == .dash3 && appended.thickness == 4)
+        #expect(appended.colorToken == .blue && appended.labelMode == .right)
+        // 落盘 + 读回：证明整条链（含 count 触发的真实 autosave 载荷）保真
         try await coord.saveProgress(engine: engine)
         let p = try #require(try pending.loadPending())
         let d = try #require(p.drawings.first)
@@ -222,9 +228,8 @@ Expected: PASS（含新 3 条 + 改写的 2 条）。
         #expect(d.thickness == 4)
         #expect(d.colorToken == .blue)
         #expect(d.labelMode == .right)
-        #expect(d.revealTick == inMem.revealTick)          // routeDrawingCommit 盖的 revealTick 也保真
-        // 原子性：append 后无二次改样式（count 触发一次即完整）——落盘值 == append 时的 in-memory 值
-        #expect(d.colorToken == inMem.colorToken && d.labelMode == inMem.labelMode)
+        #expect(d.revealTick == appended.revealTick)       // routeDrawingCommit 盖的 revealTick 也保真
+        #expect(d.colorToken == appended.colorToken && d.labelMode == appended.labelMode)  // 落盘值 == append 时值
     }
 ```
 
@@ -792,12 +797,16 @@ struct TrainingViewShellSourceGuardTests {
         // 窄锚定（codex plan-R3-high）：performTrade 必须包在 apply 的 onProceed 闭包里，
         // 不是「文件里某处出现 apply」——取 onConfirm 起到 performTrade 的片段，断言 apply 在其中且
         // performTrade 出现在 onProceed: 之后（真挂在转换的成交分支上，unused helper 满足不了）。
-        let confirmSlice = code.range(of: "onConfirm:").flatMap { start in
-            code.range(of: "performTrade(strip.action").map { end in String(code[start.lowerBound..<end.upperBound]) }
-        }
-        let slice = try #require(confirmSlice, "找不到 onConfirm…performTrade 片段（结构漂移）")
-        #expect(slice.contains("TradeConfirmGuard.apply("))
-        #expect(slice.contains("onProceed:"))
+        // 取 onConfirm 闭包整体（onConfirm: 到它的闭合 `},`），在这个片段里做强断言。
+        let confirmStart = try #require(code.range(of: "onConfirm: { shares in"), "找不到 onConfirm 闭包（结构漂移）")
+        let after = String(code[confirmStart.upperBound...])
+        let confirmEnd = try #require(after.range(of: "},"), "找不到 onConfirm 闭包结尾")
+        let body = String(after[..<confirmEnd.lowerBound])
+        #expect(body.contains("TradeConfirmGuard.apply("))
+        // 唯一性 + 位置（codex plan-R4-high）：performTrade 在 onConfirm 里**恰出现一次**，且**就在 onProceed 闭包内**——
+        // 杜绝「apply(onProceed:{}) 空转后又无条件 performTrade」的绕过。
+        #expect(body.components(separatedBy: "performTrade(").count - 1 == 1)   // 恰一次
+        #expect(body.contains("onProceed: { performTrade(strip.action"))       // 那一次就在 onProceed 内
     }
 }
 ```
