@@ -79,15 +79,42 @@
 
 ## 5. 三绿门 + 验收（作者亲核）
 
-- 三绿门（缺一不可，**下列命令逐字可跑、非省略**；Catalyst 门必须带 `catalyst-gate.sh` 证明，否则就是 #145 修掉的假绿类，codex branch-R4-medium）：
-  1. **host swift test**：`cd ios/Contracts && swift test`
-  2. **Catalyst 门自检**（判据先过测再上岗）：`bash .github/scripts/catalyst-gate.test.sh`
-  3. **Catalyst 编译+执行**（`-Package` scheme + tee 日志，缺一即两头落空）：
-     `xcodebuild test -scheme KlineTrainerContracts-Package -destination 'platform=macOS,variant=Mac Catalyst' -only-testing:KlineTrainerContractsTests -derivedDataPath /tmp/derived 2>&1 | tee /tmp/catalyst-build.log`
-  4. **Catalyst 门证明**（证 tests 真编译真跑、`macabi`、UIKit-gated 测试真执行、计数在范围）：`bash .github/scripts/catalyst-gate.sh /tmp/catalyst-build.log`
-  5. **iOS Simulator 编译**（免签名）：
-     `xcodebuild build -project ios/KlineTrainer/KlineTrainer.xcodeproj -scheme KlineTrainer -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/app-derived CODE_SIGNING_ALLOWED=NO 2>&1 | tee /tmp/app-build.log`
-  - 命令与 CI 对齐：3-4 出自 `.github/workflows/catalyst-build.yml:65-76`，5 出自 `.github/workflows/app-build.yml:41-46`。**「作者亲核」= 步 4 的 gate 脚本对本地日志真绿**，不是肉眼看 `BUILD SUCCEEDED`。
+- 三绿门（缺一不可，**CI 等价、逐字可跑**；cwd 与 `set -o pipefail` 一处不能少，否则失败的 build 会被 `tee` 的 0 退出码假绿——codex branch-R4/R5-high）。以下均从**仓库根**起跑：
+
+  ```bash
+  # 1) host swift test（cwd=ios/Contracts）
+  ( cd ios/Contracts && swift test )
+
+  # 2) Catalyst 门自检（判据先过测再上岗，仓库根）
+  bash .github/scripts/catalyst-gate.test.sh
+
+  # 3) Catalyst 编译+执行（cwd=ios/Contracts + pipefail；-Package scheme 缺一即两头落空）
+  ( cd ios/Contracts && set -o pipefail && \
+    xcodebuild test \
+      -scheme KlineTrainerContracts-Package \
+      -destination 'platform=macOS,variant=Mac Catalyst' \
+      -only-testing:KlineTrainerContractsTests \
+      -derivedDataPath /tmp/derived 2>&1 | tee /tmp/catalyst-build.log )
+
+  # 4) Catalyst 门证明（证 tests 真编译真跑、macabi、UIKit-gated 真执行、计数在范围）
+  bash .github/scripts/catalyst-gate.sh /tmp/catalyst-build.log
+
+  # 5) iOS Simulator 编译（免签名 + pipefail）
+  set -o pipefail && \
+  xcodebuild build \
+    -project ios/KlineTrainer/KlineTrainer.xcodeproj \
+    -scheme KlineTrainer \
+    -destination 'generic/platform=iOS Simulator' \
+    -derivedDataPath /tmp/app-derived \
+    CODE_SIGNING_ALLOWED=NO 2>&1 | tee /tmp/app-build.log
+
+  # 6) app-build 日志门（缺它则失败 build 会被 tee 0 退出码假绿）
+  grep -F "** BUILD SUCCEEDED **" /tmp/app-build.log || { echo "BUILD SUCCEEDED 缺失"; exit 1; }
+  if grep -F "** BUILD FAILED **" /tmp/app-build.log; then echo "BUILD FAILED"; exit 1; fi
+  if grep -E "(^|[[:space:]])error:" /tmp/app-build.log; then echo "编译/链接 error:"; exit 1; fi
+  ```
+
+  - 命令与 CI 逐行对齐：步 2-4 = `.github/workflows/catalyst-build.yml:51/62-69/76`（含 `working-directory: ios/Contracts` + `set -o pipefail`）；步 5-6 = `.github/workflows/app-build.yml:41-46/48-53`。**「作者亲核」= 步 4 与步 6 的门脚本/grep 对本地日志真绿**，不是肉眼看 `BUILD SUCCEEDED`。
 - spec §4.3 的 12 条负向测试全部落地；§4.4 的 25 条非程序员验收清单随 PR 交付。
 - **本 design 新增的负向测试（本轮 codex 逼出，超出 §4.3 原 12 条，必须一并落地）**：
   - **原子样式落盘**（R1）：设样式画线 → autosave 重载五字段相等 + 落锚到 append 间 `drawings` 只写一次。
