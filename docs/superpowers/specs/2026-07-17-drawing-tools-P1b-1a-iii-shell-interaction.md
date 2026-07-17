@@ -115,8 +115,9 @@
   ```
 
   - 命令与 CI 逐行对齐：步 2-4 = `.github/workflows/catalyst-build.yml:51/62-69/76`（含 `working-directory: ios/Contracts` + `set -o pipefail`）；步 5-6 = `.github/workflows/app-build.yml:41-46/48-53`。**「作者亲核」= 步 4 与步 6 的门脚本/grep 对本地日志真绿**，不是肉眼看 `BUILD SUCCEEDED`。
-- spec §4.3 的 12 条负向测试全部落地；§4.4 的 25 条非程序员验收清单随 PR 交付。
-- **本 design 新增的负向测试（本轮 codex 逼出，超出 §4.3 原 12 条，必须一并落地）**：
-  - **原子样式落盘**（R1）：设样式画线 → autosave 重载五字段相等 + 落锚到 append 间 `drawings` 只写一次。
-  - **交易边界**（R3-high）：开着买/卖框点「画图」→ 框消失/不可提交、`engine.buy/sell` 零调用。
+- **退出准则（future exit criteria，非「已完成」，codex branch-R6-medium）**：本分支当前只含本设计文档、**零测试零代码**；下列全部是**实现 PR 必须满足**的准入条件，评审时须见真实测试 + 三绿门日志，方可视为满足——不得据本文档判定覆盖已就绪：
+  - 实现 PR 须落地 spec §4.3 的 12 条负向测试；§4.4 的 25 条非程序员验收清单随实现 PR 交付。
+  - 实现 PR 须**新增**下列负向测试（本轮 codex 逼出，超出 §4.3 原 12 条）：
+    - **原子样式落盘**（R1）：设样式画线 → autosave 重载五字段相等 + 落锚到 append 间 `drawings` 只写一次。
+    - **交易边界**（R3-high）：开着买/卖框点「画图」→ 框消失/不可提交、`engine.buy/sell` 零调用。
 - **模拟器验收不可跳过**（1a-ii 血泪：CI 8/8 + 三绿门 + codex 5 轮全漏掉 3 个交互层回归）。SwiftUI @Observable 订阅 / 底栏切换 / 长按手势 / 遮罩点击这类只有真机/模拟器手点能发现。给这些行为加**源码守卫**（读源码文本断言 + mutation 验证）。
