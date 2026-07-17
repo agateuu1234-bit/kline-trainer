@@ -173,6 +173,16 @@ public struct ChartContainerView: UIViewRepresentable {
         /// 覆盖静态界面（Review）无 observation 触发 updateUIView 的路径 + observation/layout 瞬态零尺寸的 offset 保护。
         func rebuildRenderState(bounds: CGRect) {
             guard let view, let engine else { return }
+            // ⚠️ P1b-1a-ii 回归修复（真机/模拟器实证：拖动后 offset 变了、K 线图却冻结不重画）：
+            // SwiftUI 用 withObservationTracking 包裹 updateUIView，**只订阅其执行时实际读取的 @Observable**。
+            // 首帧 view.bounds 常为 0 → 下面的 make 被 `bounds > 0` 守卫跳过 → 未读任何面板渲染状态 → 未建立订阅
+            // → 之后 pan / 切周期 / 买入改变的 upper/lowerPanel（offset/period/interactionMode，均 bump revision）
+            // 都不再触发 updateUIView → 图永久冻结（直到某次 bounds 恰变化、走 layout 路径才偶然重画）。
+            // 改造前 sync 读 `panelState.interactionMode` **隐式**承担了这个订阅；本期把 sync 判据改成读
+            // `drawingSession.drawingModeActive` 后订阅丢失。故在 bounds 守卫**之前**无条件读一次面板 revision
+            // + tick 显式重建订阅（值类型 PanelViewState 任一字段变即整体替换 → 通知；layout 路径读了无副作用）。
+            _ = (panel == .upper) ? engine.upperPanel.revision : engine.lowerPanel.revision
+            _ = engine.tick.globalTickIndex
             // codex R2-F1：瞬态零尺寸 layout（导航/分屏/旋转过渡）不得改 engine 状态。recordRenderBounds(.zero)
             // 会被当 resize → 零宽 offsetBounds → 把 panel offset clamp 到 0（吞掉用户滚动位置，不可逆）；
             // make(.zero) 也只返 .empty。故无效 bounds 直接早返——零→有效的后续 layout 仍会重建（lastLaidOutBounds 已记 .zero）。

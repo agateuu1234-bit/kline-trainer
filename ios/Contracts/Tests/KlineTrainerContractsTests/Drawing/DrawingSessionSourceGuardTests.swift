@@ -36,6 +36,7 @@ struct DrawingSessionSourceGuardTests {
 
     private let chartContainer = "Sources/KlineTrainerContracts/Render/ChartContainerView.swift"
     private let trainingView   = "Sources/KlineTrainerContracts/UI/TrainingView.swift"
+    private let floatingView   = "Sources/KlineTrainerContracts/UI/DrawingToolFloatingView.swift"
     private let engine         = "Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift"
 
     @Test("#1：ChartContainerView 里**不存在** manager.toggle 自动 re-arm，也不再持有 DrawingToolManager")
@@ -130,5 +131,25 @@ struct DrawingSessionSourceGuardTests {
         #expect(!code.contains("画图"))                        // 顶栏「画图」钮（1a-iii）
         #expect(!code.contains("DrawingToolbar"))              // 两行底栏（1a-iii）
         #expect(!code.contains("DrawingSettingsPanel"))        // 设置面板（1a-iii）
+    }
+
+    // MARK: 真机验收回归守卫（模拟器实证修复；SwiftUI observation/view 行为单测测不到，只能源码钉死防误删）
+
+    @Test("回归守卫（现象②：图表冻结）：rebuildRenderState 必须显式读面板 revision + tick 建立 observation 订阅")
+    func rebuildRenderStateSubscribesToPanelState() throws {
+        let code = try source(chartContainer)
+        #expect(code.contains("rebuildRenderState"))                   // 先证明扫到了正确文件/函数
+        // 这两行是 P1b-1a-ii 回归修复的订阅锚点：删掉任一行 → 首帧 bounds=0 后 updateUIView 不再订阅面板状态
+        // → pan/切周期/买入改的 offset/period/tick 不触发重画 → K 线图永久冻结（真机/模拟器实证）。
+        #expect(code.contains("upperPanel.revision"))
+        #expect(code.contains("lowerPanel.revision"))
+        #expect(code.contains("engine.tick.globalTickIndex"))
+    }
+
+    @Test("回归守卫（现象①：隐形卡死）：折叠态浮动钮必须随画线模式变外观 + 点它直接退出画线")
+    func collapsedFloatingButtonReactsToDrawingActive() throws {
+        let code = try source(floatingView)
+        #expect(code.contains("if isDrawingActive { onToggleTool() }"))  // 画线模式开：点圆圈=直接退出（不是展开）
+        #expect(code.contains(".tint(isDrawingActive ? .orange"))        // 画线模式开：圆圈变橙色（一眼看出在画线）
     }
 }
