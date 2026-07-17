@@ -712,8 +712,10 @@ struct DrawingStyleCard: View {
 
     // 通用「一排分段选项」：横向 ScrollView 兜底，窄屏（375pt）任何一档都不会被裁掉/够不到（codex plan-R3-medium）。
     // 灰态由 enabled 决定；灰掉的点击无副作用（.disabled）。
-    private func seg<T: Hashable>(_ items: [T], current: T, enabled: (T) -> Bool,
-                                  title: (T) -> String, pick: @escaping (T) -> Void) -> some View {
+    // enabled/title **必须 @escaping**（codex plan-R8-high）：它们被 ForEach 的**逃逸** ViewBuilder 闭包捕获，
+    // 非逃逸参数在此会让 Catalyst/iOS 编译报错（host swift test 不编 #if canImport(UIKit) 体，只有真机门才炸）。
+    private func seg<T: Hashable>(_ items: [T], current: T, enabled: @escaping (T) -> Bool,
+                                  title: @escaping (T) -> String, pick: @escaping (T) -> Void) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(items, id: \.self) { item in
@@ -823,21 +825,26 @@ struct TrainingViewShellSourceGuardTests {
     }
     private let tv = "Sources/KlineTrainerContracts/UI/TrainingView.swift"
 
-    @Test("谓词拆成两个：floating=review-only，activePanel 高亮保原语义")
+    @Test("谓词拆成两个：floating=review-only（锚定 body），activePanel 高亮保原语义")
     func predicateSplit() throws {
         let code = try source(tv)
-        #expect(code.contains("showsFloatingDrawingTool"))
-        #expect(code.contains("showsActivePanelHighlight"))
+        // 必须锚定 **body 就是 review-only**（codex plan-R8-medium）——否则实现留个 showsTradeButtons||review
+        // 的 floating 谓词也能过「名字存在」，训练/replay 浮动钮仍可达 = D26 双入口回归。
+        #expect(code.contains("showsFloatingDrawingTool: Bool { engine.flow.mode == .review }"))
         // activePanel 高亮谓词保留 showsTradeButtons（否则训练下丢下单目标高亮）
-        #expect(code.contains("showsActivePanelHighlight") && code.contains("showsTradeButtons || engine.flow.mode == .review"))
+        #expect(code.contains("showsActivePanelHighlight: Bool { showsTradeButtons || engine.flow.mode == .review }"))
     }
 
-    @Test("浮动钮只受 showsFloatingDrawingTool 门控；DrawingModeBar 进树")
+    @Test("浮动钮只受 showsFloatingDrawingTool 门控；DrawingModeBar 只在训练/replay 底栏")
     func floatingRetiredBarWired() throws {
         let code = try source(tv)
         #expect(code.contains("if showsFloatingDrawingTool"))     // 浮动钮 gated review-only
-        #expect(code.contains("DrawingModeBar("))                 // 新底栏接入
         #expect(code.contains("画图"))                            // 入口钮 label
+        // DrawingModeBar 必须挂在「showsTradeButtons → isDrawingActive」分支内（复盘 showsTradeButtons==false
+        // → 天然无两行栏，D26/§4.3-1）。锚定其紧邻上文是 isDrawingActive 分支，而非文件任意处（codex plan-R8-medium）。
+        let dmb = try #require(code.range(of: "DrawingModeBar("), "DrawingModeBar 未接入")
+        let before = String(code[..<dmb.lowerBound].suffix(120))
+        #expect(before.contains("if isDrawingActive {"))
     }
 
     @Test("交易边界：清 tradeStrip + overlay 门控 + onConfirm 经 TradeConfirmGuard.apply（窄锚定）")
