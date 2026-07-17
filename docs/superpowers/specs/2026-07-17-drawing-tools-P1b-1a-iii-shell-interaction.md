@@ -64,7 +64,10 @@
 - **画图入口钮（改）**：`TrainingView` 顶栏 `:328` 分支左侧插入 SF 铅笔图标钮（`showsTradeButtons` 时显示），点它 `engine.toggleDrawingMode()`；进画线态时「结束」文案切「退出」。
 - **底栏切换（改）**：`trainingContent` 的 `if showsTradeButtons` 分支——`drawingModeActive` 时渲染 `DrawingModeBar`，否则 `TradeActionBar`。
 - **浮动钮谓词拆分（改）**：`TrainingView.swift:69` + `:186` + `:425`（见 §3）。
-- **内存默认样式（新，不落盘）**：本期新增「下一条要画的线」的默认样式（线型子类/线样式/粗细/颜色/标注）容器，整局有效。放 `DrawingSession` 或一个平行的 view-scope 容器（plan 阶段定归属；持久化的全局默认属 P6 §13，本期**只内存**）。落锚提交时这些默认值须写进新 `DrawingObject`——**注入点由 plan 定**（扩 `commitPending` 入参 / 提交后套用二选一，`lineSubType` 现已是 `commitPending` 入参）。
+- **内存默认样式（新，不落盘）**：本期新增「下一条要画的线」的默认样式（线型子类/线样式/粗细/颜色/标注）容器，整局有效。放 `DrawingSession` 或一个平行的 view-scope 容器（plan 阶段定归属；持久化的全局默认属 P6 §13，本期**只内存**）。
+  - **原子构造不变量（codex branch-R1-medium，硬约束，不留选项）**：五个样式字段必须在 `routeDrawingCommit` **append 之前**就全部灌进 `DrawingObject`，让 append 成为 `drawings` 的**唯一**改动。**禁止**「先 append 默认样式的线、再原地改样式字段」的提交后套用路径——那是一次原地改线：`.onChange(of: engine.drawings.count)`（`TrainingView.swift:274`）append 时已触发一次、count 不再变，样式改动**不会**二次落盘，crash/切后台会存下**没样式**的线。此路径正是 spec §4.2「本期不存在原地改线 → 不需 D30」的前提所排除的；留着它就等于本期偷偷需要 D30。
+  - **落地方式**（plan 定具体签名，但都必须满足上面的原子不变量）：把内存默认样式作为入参喂给 `commitPending`（现已收 `lineSubType`），或在 append 前的 builder 里一次性组装完整 `DrawingObject`。
+  - **回归测试（§4.3-9 已覆盖 + 收紧）**：设了红/虚线2/3档粗细/标注靠右后画的线，`autosave` 重载后五字段逐一相等；并加一条**原子性锁**——断言从落锚到 append 之间 `drawings` 只被写一次（构造即完整），杜绝后人重新引入提交后套用。
 
 ---
 
