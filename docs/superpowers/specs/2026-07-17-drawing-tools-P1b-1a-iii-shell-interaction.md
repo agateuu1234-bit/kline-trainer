@@ -63,6 +63,10 @@
 - **`DrawingStyleCard`（新）**：长按弹出的设置卡片。4 组控件（线型子类/线样式/粗细/颜色/标注）+ 遮罩。灰态矩阵按母 spec §3.1 水平线行 + 昼夜禁色。写入本期新增的**内存默认样式**（见下）。
 - **画图入口钮（改）**：`TrainingView` 顶栏 `:328` 分支左侧插入 SF 铅笔图标钮（`showsTradeButtons` 时显示），点它 `engine.toggleDrawingMode()`；进画线态时「结束」文案切「退出」。
 - **底栏切换（改）**：`trainingContent` 的 `if showsTradeButtons` 分支——`drawingModeActive` 时渲染 `DrawingModeBar`，否则 `TradeActionBar`。
+- **进画线 = 交易边界转换（codex branch-R3-high，交易安全，不可省）**：只换底栏**不够**。已弹开的**买卖档位框** `TradeBoxView`（`TrainingView.swift:401` 的 `.overlay`）**只受 `showsTradeButtons` 门控、不受 `drawingModeActive` 影响**，且它贴底悬浮、**不遮顶栏**——用户可「点买(置 `tradeStrip`) → 点顶栏画图(进画线) → 框还挂着 → 点确认 → `performTrade` → `engine.buy/sell` 不可逆入账+autosave」。`tradeStripStillValid` 只校验 period，进画线不改 period，校验会放行。故进画线必须像既有的 activePanel/period/tick 变化一样（`:238/245/248` 已 `tradeStrip = nil`）作废未确认买卖框：
+  - **主**：`.onChange(of: engine.drawingSession.drawingModeActive)`——翻到 `true` 时 `tradeStrip = nil`（覆盖一切进画线路径，不止画图钮）。
+  - **纵深**：`TradeBoxView` overlay 的挂载条件（`:401`）与 `onPick` 提交路径（`:407-413`）加 `!engine.drawingSession.drawingModeActive`——即使 `tradeStrip` 残留也不挂载/不成交。
+  - **负向测试**：开着买/卖框点「画图」→ 框消失且**不可提交**，`engine.buy/sell` **零调用**（trade-safety 回归）。
 - **浮动钮谓词拆分（改）**：`TrainingView.swift:69` + `:186` + `:425`（见 §3）。
 - **内存默认样式（新，不落盘）**：本期新增「下一条要画的线」的默认样式（线型子类/线样式/粗细/颜色/标注），整局有效；持久化的全局默认属 P6 §13，本期**只内存**。
   - **必须落 `DrawingSession`（engine/session 单一 `@Observable` 真相，codex branch-R2-medium，不留 view-scope 选项）**：真正的提交路径是 `ChartContainerView.Coordinator → engine.drawingSession → commitPending → routeDrawingCommit`，它**读不到任何 `TrainingView` 的 view-scope 状态**。若默认样式放 view-scope 容器，`DrawingStyleCard` 改的是提交路径根本不读的 state → 用户设了样式、画线、append 触发 autosave，落盘的线仍是默认/错样式，且本期无后续 revision 纠正。上下两面板各自的 Coordinator 也会观察到分叉/陈旧默认。这与 1a-ii 的 **D39/R15-high** 完全同源：底栏（`DrawingStyleCard`，在 `TrainingView`）**写**、提交路径（Coordinator）**读**的状态，必须是 `DrawingSession` 上的同一份可观察真相，不得 view-私存。
@@ -77,4 +81,7 @@
 
 - 三绿门（缺一不可）：`ios/Contracts` 下 `swift test` → `xcodebuild test -scheme KlineTrainerContracts-Package -destination 'platform=macOS,variant=Mac Catalyst'` → `xcodebuild build ... -destination 'generic/platform=iOS Simulator'`。
 - spec §4.3 的 12 条负向测试全部落地；§4.4 的 25 条非程序员验收清单随 PR 交付。
+- **本 design 新增的负向测试（本轮 codex 逼出，超出 §4.3 原 12 条，必须一并落地）**：
+  - **原子样式落盘**（R1）：设样式画线 → autosave 重载五字段相等 + 落锚到 append 间 `drawings` 只写一次。
+  - **交易边界**（R3-high）：开着买/卖框点「画图」→ 框消失/不可提交、`engine.buy/sell` 零调用。
 - **模拟器验收不可跳过**（1a-ii 血泪：CI 8/8 + 三绿门 + codex 5 轮全漏掉 3 个交互层回归）。SwiftUI @Observable 订阅 / 底栏切换 / 长按手势 / 遮罩点击这类只有真机/模拟器手点能发现。给这些行为加**源码守卫**（读源码文本断言 + mutation 验证）。
