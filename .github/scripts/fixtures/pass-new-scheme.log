@@ -1,0 +1,72 @@
+** TEST SUCCEEDED **
+✔ Test run with 1407 tests in 184 suites passed after 1.396 seconds.
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -scheme KlineTrainerContracts-Package -destination "platform=macOS,variant=Mac Catalyst" "-only-testing:KlineTrainerContractsTests" -derivedDataPath /private/tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived2
+SwiftCompile normal arm64 Compiling\ DecelerationAnimatorBounceTests.swift,\ DecelerationAnimatorTests.swift,\ DecelerationModelBoundaryTests.swift,\ DecelerationModelTests.swift,\ DownloadAcceptanceContractTests.swift,\ DownloadAcceptanceRunnerTests.swift,\ DefaultDrawingInputControllerTests.swift,\ DrawDrawingsDispatchTests.swift,\ DrawingColorResolverTests.swift,\ DrawingLabelLayoutTests.swift,\ DrawingModelP1aTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/ios/Contracts/Tests/KlineTrainerContractsTests/DecelerationAnimatorBounceTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/ios/Contracts/Tests/KlineTrainerContractsTests/DecelerationAnimatorTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/ios/Contracts/Tests/KlineTrainerContractsTests/DecelerationModelBoundaryTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/ios/Contracts/Tests/KlineTrainerContractsTests/DecelerationModelTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/ios/Contracts/Tests/KlineTrainerContractsTests/DownloadAcceptanceContractTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/ios/Contracts/Tests/KlineTrainerContractsTests/DownloadAcceptanceRunnerTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DefaultDrawingInputControllerTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawDrawingsDispatchTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingColorResolverTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingLabelLayoutTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingModelP1aTests.swift (in target 'KlineTrainerContractsTests' from project 'KlineTrainerContracts')
+2026-07-13 23:12:41.728348+0800 xctest[4556:49466358] [error] CoreData: error: Failed to create NSXPCConnection
+CoreData: error: Failed to create NSXPCConnection
+2026-07-13 23:12:41.740862+0800 xctest[4556:49466358] [error] CoreData: error: Failed to create NSXPCConnection
+CoreData: error: Failed to create NSXPCConnection
+2026-07-13 23:12:41.755777+0800 xctest[4556:49466358] [error] CoreData: error: Failed to create NSXPCConnection
+CoreData: error: Failed to create NSXPCConnection
+2026-07-13 23:12:41.769951+0800 xctest[4556:49466358] [error] CoreData: error: Failed to create NSXPCConnection
+CoreData: error: Failed to create NSXPCConnection
+/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineInteractionTests.swift:121:9: warning: using '_' to ignore the result of a Void-returning function is redundant
+/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineInteractionTests.swift:121:9: warning: using '_' to ignore the result of a Void-returning function is redundant
+/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineInteractionTests.swift:121:9: warning: using '_' to ignore the result of a Void-returning function is redundant
+Copy /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-cat2/Build/Products/Debug-maccatalyst/GRDB.swiftmodule/arm64-apple-ios-macabi.swiftdoc /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-cat2/Build/Intermediates.noindex/GRDB.build/Debug-maccatalyst/GRDB.build/Objects-normal/arm64/GRDB.swiftdoc (in target 'GRDB' from project 'GRDB')
+◇ Test "UIColor(rgba:) 桥接保持通道值 + 13 const 全 = token 桥接（D-11）" started.
+✔ Test "UIColor(rgba:) 桥接保持通道值 + 13 const 全 = token 桥接（D-11）" passed after 2.162 seconds.
+◇ Test "KLineView 可实例化（spec L1179 final class）" started.
+✔ Test "KLineView 可实例化（spec L1179 final class）" passed after 2.679 seconds.
+◇ Test "renderState 可读写（compile-check：let 字段 + init 重建模式）" started.
+✔ Test "renderState 可读写（compile-check：let 字段 + init 重建模式）" passed after 2.675 seconds.
+◇ Test "默认 displayMode == .system" started.
+✔ Test "默认 displayMode == .system" passed after 5.032 seconds.
+◇ Test "resolve(trait:) .system + .unspecified → .light（D-7：UIKit 未传播状态默认）" started.
+✔ Test "resolve(trait:) .system + .unspecified → .light（D-7：UIKit 未传播状态默认）" passed after 5.032 seconds.
+◇ Test "resolve(trait:) .system + dark trait → .dark" started.
+✔ Test "resolve(trait:) .system + dark trait → .dark" passed after 5.032 seconds.
+◇ Test "resolve(trait:) .light forced 忽略 dark trait" started.
+✔ Test "resolve(trait:) .light forced 忽略 dark trait" passed after 5.031 seconds.
+◇ Test "resolve(trait:) .dark forced 忽略 light trait" started.
+✔ Test "resolve(trait:) .dark forced 忽略 light trait" passed after 5.088 seconds.
+◇ Test "ChartContainerView 可构造 + 符合 UIViewRepresentable" started.
+✔ Test "ChartContainerView 可构造 + 符合 UIViewRepresentable" passed after 2.674 seconds.
+◇ Test "Coordinator 可构造 + attach 装 5 个识别器（C7 接线编译反射）" started.
+✔ Test "Coordinator 可构造 + attach 装 5 个识别器（C7 接线编译反射）" passed after 2.643 seconds.
+◇ Test "Coordinator crosshairPoint 默认 nil（视图层瞬态）" started.
+✔ Test "Coordinator crosshairPoint 默认 nil（视图层瞬态）" passed after 4.618 seconds.
+◇ Test "render 路径回归（codex branch-R3 medium）：价格超出 viewport 区间的线，线与标注均不画；区间内对照组画出" started.
+✔ Test "render 路径回归（codex branch-R3 medium）：价格超出 viewport 区间的线，线与标注均不画；区间内对照组画出" passed after 4.562 seconds.
+◇ Test "render 路径（codex branch-R5 medium）：损坏 fontSize（负数/极大）不崩溃、像素不越界" started.
+✔ Test "render 路径（codex branch-R5 medium）：损坏 fontSize（负数/极大）不崩溃、像素不越界" passed after 4.604 seconds.
+◇ Test "§5.3 #15 registered tool render called once with passed-through drawing" started.
+✔ Test "§5.3 #15 registered tool render called once with passed-through drawing" passed after 5.127 seconds.
+◇ Test "§5.3 #16 missing tool in dictionary skips silently (Wave 1 default path)" started.
+✔ Test "§5.3 #16 missing tool in dictionary skips silently (Wave 1 default path)" passed after 5.127 seconds.
+◇ Test "标注 render 路径：.left/.right 画出文字像素；.hidden/.segment 无标注泄漏（codex plan-R5）" started.
+✔ Test "标注 render 路径：.left/.right 画出文字像素；.hidden/.segment 无标注泄漏（codex plan-R5）" passed after 4.723 seconds.
+◇ Test "D35：两条不同样式的 drawing 各自带自己的样式 + scheme 按顺序抵达渲染层" started.
+✔ Test "D35：两条不同样式的 drawing 各自带自己的样式 + scheme 按顺序抵达渲染层" passed after 1.714 seconds.
+◇ Test "§5.3 #14 drawDrawings with empty list calls no render" started.
+✔ Test "§5.3 #14 drawDrawings with empty list calls no render" passed after 5.327 seconds.
+◇ Test "布局到有效尺寸后 renderState 重算非空（静态 engine 不依赖 observation 再触发）" started.
+✔ Test "布局到有效尺寸后 renderState 重算非空（静态 engine 不依赖 observation 再触发）" passed after 4.702 seconds.
+◇ Test "瞬态零尺寸 layout 不 clamp panel offset（codex R2-F1：滚动位置不被吞）" started.
+✔ Test "瞬态零尺寸 layout 不 clamp panel offset（codex R2-F1：滚动位置不被吞）" passed after 4.694 seconds.
+◇ Test "布局重算同步 engine bounds → 静态界面后续 pinch 生效（codex R1-F1：不被 stale .zero bounds no-op）" started.
+✔ Test "布局重算同步 engine bounds → 静态界面后续 pinch 生效（codex R1-F1：不被 stale .zero bounds no-op）" passed after 4.693 seconds.
+◇ Test "零尺寸 rebuild（updateUIView 路径）不 clamp offset（codex R3-F1：observation 路径同护）" started.
+✔ Test "零尺寸 rebuild（updateUIView 路径）不 clamp offset（codex R3-F1：observation 路径同护）" passed after 4.693 seconds.
+◇ Test "layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复 make）" started.
+✔ Test "layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复 make）" passed after 4.694 seconds.
+◇ Test "light/dark UIColor 真不同（防退化为单集）" started.
+✔ Test "light/dark UIColor 真不同（防退化为单集）" passed after 1.635 seconds.
+◇ Test "KLineView 非 opaque（codex R4-F1：透明画布须 isOpaque=false，防 scheme 切换残留伪影）" started.
+✔ Test "KLineView 非 opaque（codex R4-F1：透明画布须 isOpaque=false，防 scheme 切换残留伪影）" passed after 3.917 seconds.
+◇ Test "forScheme(.dark) 13 字段桥 = AppPalette.dark" started.
+✔ Test "forScheme(.dark) 13 字段桥 = AppPalette.dark" passed after 1.636 seconds.
+◇ Test "trait dark → 选 dark 集 / trait light → 选 light 集（currentPalette 选取链）" started.
+✔ Test "trait dark → 选 dark 集 / trait light → 选 light 集（currentPalette 选取链）" passed after 3.917 seconds.
+◇ Test "forScheme(.light) 13 字段桥 = AppPalette.light" started.
+✔ Test "forScheme(.light) 13 字段桥 = AppPalette.light" passed after 1.167 seconds.

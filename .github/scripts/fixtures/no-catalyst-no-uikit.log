@@ -1,0 +1,7 @@
+** TEST SUCCEEDED **
+✔ Test run with 1380 tests in 177 suites passed after 6.574 seconds.
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -scheme KlineTrainerContracts-Package -destination platform=macOS "-only-testing:KlineTrainerContractsTests" -derivedDataPath /private/tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-hostmac
+SwiftCompile normal arm64 /Users/maziming/Coding/Prj_Kline\ trainer/ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawDrawingsDispatchTests.swift (in target 'KlineTrainerContractsTests' from project 'KlineTrainerContracts')
+/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineInteractionTests.swift:121:9: warning: using '_' to ignore the result of a Void-returning function is redundant
+/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineInteractionTests.swift:121:9: warning: using '_' to ignore the result of a Void-returning function is redundant
+/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineInteractionTests.swift:121:9: warning: using '_' to ignore the result of a Void-returning function is redundant

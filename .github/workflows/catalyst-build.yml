@@ -18,9 +18,14 @@ permissions:
 
 jobs:
   catalyst-build:
+    # ⚠️ job 显示名冻结：它是 ruleset 15660830 的必需检查 context，GitHub 按显示名**精确匹配**。
+    # 改名 = 必需检查失配 = 所有 PR 死锁（PR #143 已被这点咬过一次）。
+    # 名字里的 "build-for-testing" 是历史遗留：本 job 现在**真跑 test**（见下）。
     name: Mac Catalyst build-for-testing on macos-15
     runs-on: macos-15
-    timeout-minutes: 15
+    # 2026-07-13：15 → 25。现在要编译两个 test target + GRDB + ZIPFoundation 并真跑用例；
+    # 本地冷构建约 3 分 40 秒，CI 更慢。必需门超时 = PR 死锁，故留足余量。
+    timeout-minutes: 25
     # 依赖 runner 默认 Xcode（macos-15 image 预装 Xcode 16）提供 xcodebuild。
     # 不硬编码 /Applications/Xcode_16.app 路径（镜像 swift-test job 已有的 codex Plan 1c R2
     # finding 修订 pattern；GHA image 刷新时路径可能变 → fail-fast 给清晰诊断）。
@@ -38,16 +43,34 @@ jobs:
             exit 1
           fi
           echo "Xcode $XCODE_VER OK"
-      - name: Mac Catalyst build-for-testing
+
+      # 闸门判据本身先过测试再上岗：若有人把 catalyst-gate.sh 的某条判据改坏/删掉，
+      # 这一步当场红，而不是等某个 PR 悄悄溜过去。fixture 含真实抓取的"旧 scheme 空壳日志"，
+      # 新闸门必须拒绝它。成本 < 1 秒。
+      - name: Gate self-test（闸门判据本身必须先过测试）
+        run: bash .github/scripts/catalyst-gate.test.sh
+
+      # 2026-07-13 修复：原先用 `-scheme KlineTrainerContracts`（SwiftPM 的 **library** scheme），
+      # 其 build-for-testing 动作**根本不编译 testTarget** → 本必需门半年来报绿但从未验证过任何测试
+      # 代码（旧日志里 grep KlineTrainerContractsTests 一条都没有）。UIKit-gated 的测试在 host
+      # `swift test` 被 #if canImport(UIKit) 跳过、在这里又没被编译 → 两头落空。
+      # 正解：用 SwiftPM 自动生成的 **package** scheme `KlineTrainerContracts-Package`，并把
+      # build-for-testing 升级为 test（真编译 + 真执行）。
+      # -only-testing 只限制**执行**范围；KlineTrainerPersistenceTests 仍会被**编译**（覆盖白送），
+      # 但不在本门跑它的 GRDB/SQLite 运行时（那由 host swift test 承担）。
+      - name: Mac Catalyst test（真编译 + 真执行 KlineTrainerContractsTests）
         working-directory: ios/Contracts
         run: |
           set -o pipefail
-          xcodebuild build-for-testing \
-            -scheme KlineTrainerContracts \
+          xcodebuild test \
+            -scheme KlineTrainerContracts-Package \
             -destination 'platform=macOS,variant=Mac Catalyst' \
+            -only-testing:KlineTrainerContractsTests \
             -derivedDataPath /tmp/derived 2>&1 | tee /tmp/catalyst-build.log
-      - name: Gate — TEST BUILD SUCCEEDED + no error/warning
-        run: |
-          grep -F "** TEST BUILD SUCCEEDED **" /tmp/catalyst-build.log || { echo "BUILD SUCCEEDED 缺失"; exit 1; }
-          ! grep -E "(^|[[:space:]])(error|warning):" /tmp/catalyst-build.log || { echo "error/warning 触发 gate"; exit 1; }
-          echo "GATE PASS: §15.1 #3 闸门关闭（Catalyst CI 持续守护）"
+
+      # 闸门判据实现在 .github/scripts/catalyst-gate.sh（含 fixture 单元测试，见上一步）。
+      # 判据摘要：TEST SUCCEEDED 标记 / 编译器 error（锚定 .swift:行:列 格式，免疫 xctest 运行期
+      # 的 CoreData NSXPCConnection 噪声）/ Sources/ 零警告 / **自证**：测试 target 真被编译、
+      # UIKit-gated 金丝雀真被编译、swift-testing 真跑了非 0 个用例。
+      - name: Gate — 闸门判据
+        run: bash .github/scripts/catalyst-gate.sh /tmp/catalyst-build.log

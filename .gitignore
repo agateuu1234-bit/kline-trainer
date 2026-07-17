@@ -33,6 +33,7 @@ out/
 
 # Logs
 *.log
+!.github/scripts/fixtures/*.log
 
 # Secrets
 *.pem
