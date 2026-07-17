@@ -64,7 +64,9 @@
 - **画图入口钮（改）**：`TrainingView` 顶栏 `:328` 分支左侧插入 SF 铅笔图标钮（`showsTradeButtons` 时显示），点它 `engine.toggleDrawingMode()`；进画线态时「结束」文案切「退出」。
 - **底栏切换（改）**：`trainingContent` 的 `if showsTradeButtons` 分支——`drawingModeActive` 时渲染 `DrawingModeBar`，否则 `TradeActionBar`。
 - **浮动钮谓词拆分（改）**：`TrainingView.swift:69` + `:186` + `:425`（见 §3）。
-- **内存默认样式（新，不落盘）**：本期新增「下一条要画的线」的默认样式（线型子类/线样式/粗细/颜色/标注）容器，整局有效。放 `DrawingSession` 或一个平行的 view-scope 容器（plan 阶段定归属；持久化的全局默认属 P6 §13，本期**只内存**）。
+- **内存默认样式（新，不落盘）**：本期新增「下一条要画的线」的默认样式（线型子类/线样式/粗细/颜色/标注），整局有效；持久化的全局默认属 P6 §13，本期**只内存**。
+  - **必须落 `DrawingSession`（engine/session 单一 `@Observable` 真相，codex branch-R2-medium，不留 view-scope 选项）**：真正的提交路径是 `ChartContainerView.Coordinator → engine.drawingSession → commitPending → routeDrawingCommit`，它**读不到任何 `TrainingView` 的 view-scope 状态**。若默认样式放 view-scope 容器，`DrawingStyleCard` 改的是提交路径根本不读的 state → 用户设了样式、画线、append 触发 autosave，落盘的线仍是默认/错样式，且本期无后续 revision 纠正。上下两面板各自的 Coordinator 也会观察到分叉/陈旧默认。这与 1a-ii 的 **D39/R15-high** 完全同源：底栏（`DrawingStyleCard`，在 `TrainingView`）**写**、提交路径（Coordinator）**读**的状态，必须是 `DrawingSession` 上的同一份可观察真相，不得 view-私存。
+  - **写入遵守 `DrawingSession` 访问级**（1a-ii plan-R5-high）：状态 `public private(set)`、setter `internal`；`DrawingStyleCard` 与引擎同属 `KlineTrainerContracts` 包，经 internal setter（直接在 session 上，或经 engine 转发）写入，包外无法绕过。
   - **原子构造不变量（codex branch-R1-medium，硬约束，不留选项）**：五个样式字段必须在 `routeDrawingCommit` **append 之前**就全部灌进 `DrawingObject`，让 append 成为 `drawings` 的**唯一**改动。**禁止**「先 append 默认样式的线、再原地改样式字段」的提交后套用路径——那是一次原地改线：`.onChange(of: engine.drawings.count)`（`TrainingView.swift:274`）append 时已触发一次、count 不再变，样式改动**不会**二次落盘，crash/切后台会存下**没样式**的线。此路径正是 spec §4.2「本期不存在原地改线 → 不需 D30」的前提所排除的；留着它就等于本期偷偷需要 D30。
   - **落地方式**（plan 定具体签名，但都必须满足上面的原子不变量）：把内存默认样式作为入参喂给 `commitPending`（现已收 `lineSubType`），或在 append 前的 builder 里一次性组装完整 `DrawingObject`。
   - **回归测试（§4.3-9 已覆盖 + 收紧）**：设了红/虚线2/3档粗细/标注靠右后画的线，`autosave` 重载后五字段逐一相等；并加一条**原子性锁**——断言从落锚到 append 之间 `drawings` 只被写一次（构造即完整），杜绝后人重新引入提交后套用。
