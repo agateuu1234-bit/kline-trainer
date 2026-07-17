@@ -66,6 +66,7 @@
 - **进画线 = 交易边界转换（codex branch-R3-high，交易安全，不可省）**：只换底栏**不够**。已弹开的**买卖档位框** `TradeBoxView`（`TrainingView.swift:401` 的 `.overlay`）**只受 `showsTradeButtons` 门控、不受 `drawingModeActive` 影响**，且它贴底悬浮、**不遮顶栏**——用户可「点买(置 `tradeStrip`) → 点顶栏画图(进画线) → 框还挂着 → 点确认 → `performTrade` → `engine.buy/sell` 不可逆入账+autosave」。`tradeStripStillValid` 只校验 period，进画线不改 period，校验会放行。故进画线必须像既有的 activePanel/period/tick 变化一样（`:238/245/248` 已 `tradeStrip = nil`）作废未确认买卖框：
   - **主（无条件，两个方向都清，codex plan-R9/R12-high）**：`.onChange(of: engine.drawingSession.drawingModeActive) { _, _ in tradeStrip = nil }`——**进画线与退出画线都清**。只清「进画线」不够：一个跨 round-trip 幸存的陈旧 `tradeStrip` 会在退出后（`!drawingModeActive`）remount，同 tick/period 下被放行成交。清 nil 恒安全（本就不该跨画线切换留买卖框）。覆盖一切切换路径（不止画图钮）。
   - **纵深**：`TradeBoxView` overlay 的挂载条件（`:401`）与 `onConfirm` 提交路径（`:406-415`，经 `TradeConfirmGuard.apply`）加 `!engine.drawingSession.drawingModeActive`——即使 `tradeStrip` 残留也不挂载/不成交。
+  - **root（引擎层，codex plan-R13-high）**：`TrainingEngine.buy/sell`（`:521/:550`）顶部加 `guard !drawingSession.drawingModeActive else { return .failure(.trade(.disabled)) }`——把「画线期间不下单」钉在**变更点本身**，任何直接引擎调用 / 未来 UI 路径 / 竞态都拦得住（UI 门控是外层纵深）。`holdOrObserve` 非「下单」、无路径，不加。
   - **负向验收**：开着买/卖框 → 进画线 → **不动 tick/周期直接退出** → 旧框不得重现、不得成交（证明是「清掉」而非「隐藏」）。
   - **负向测试**：开着买/卖框点「画图」→ 框消失且**不可提交**，`engine.buy/sell` **零调用**（trade-safety 回归）。
 - **浮动钮谓词拆分（改）**：`TrainingView.swift:69` + `:186` + `:425`（见 §3）。
