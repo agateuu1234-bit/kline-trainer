@@ -1,0 +1,100 @@
+// ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingSession.swift
+// Spec: docs/superpowers/specs/2026-07-10-drawing-tools-P1b-split-addendum.md §3.1（P1b-1a-ii）
+// 母 spec: docs/superpowers/specs/2026-07-04-drawing-tools-expansion-design.md §2 / §3 / §10
+//
+// D39 共享状态容器：底栏（1a-iii）与 ChartContainerView.Coordinator **共同消费**的单一真相。
+//   —— 状态**不得**再留在各面板 Coordinator 私有（否则 updateUIView 会撤销工具选择，codex R15-high；
+//      且下面板清不掉上面板的 pending，codex R31-high）。1b-i 的 selectedDrawingID / selectedPanel 进**同一容器**。
+// D42 全局画线会话：drawingModeActive **不属于任何单一面板**；上下两面板都能落锚，
+//   归属由**被点击的那个面板**决定（与 activePanel＝下单目标面板**无关**）。
+// D31（前半）：discardPendingAnchors() —— **只丢 pending 锚**，保留 activeDrawingTool / drawingModeActive。
+// D38：commit 后**不退出**画线模式、**不清**工具 → 支持连续画。
+//
+// 跨平台：@MainActor + @Observable，仅依赖 Models 值类型；无 UIKit → host swift test 全覆盖。
+// D44（见 plan）：pending 锚由本容器直接持有，**不再**经 DrawingToolManager（toggle 非 set / enabledTools
+//   闸门会让 addAnchor 撞 precondition / completedDrawings 重复增长三处硬伤）。DrawingObject 的
+//   **唯一写入点**语义（isExtended 由 lineSubType 派生）在 commitPending 内原样保留。
+
+import Observation
+
+/// **访问级别是 load-bearing 的（codex plan-R5-high）**：类与**状态**是 `public`（只读，`private(set)`），
+/// 但**所有 mutator 一律 internal**（`activate` / `deactivate` / `addAnchor` / `discardPendingAnchors` /
+/// `commitPending` 前面**没有** `public`，别手贱加上）。理由：`TrainingEngine.drawingSession` 是 `public let`，
+/// 若 mutator 也 public，包外任何 client 都能 `engine.drawingSession.deactivate()` —— 绕过
+/// `beginDrawingSession` / `endDrawingSessionIfActive` 这两个**唯一会同时更新两个面板 reducer** 的入口，
+/// 于是「会话关了但面板还在 .drawing」/「会话开着但面板是 autoTracking」**又回来了**，正是本期要消灭的漂移。
+/// 包内调用者只有两个：`TrainingEngine`（会话开关）与 `ChartContainerView.Coordinator`（落锚/提交），
+/// 均由 Task 4 的源码守卫钉死；测试经 `@testable import` 照常可调。
+@MainActor
+@Observable
+public final class DrawingSession {
+    /// D42：全局画线会话开关。浮动钮（本期）/ 底栏「画图」钮（1a-iii）切换它。
+    public private(set) var drawingModeActive: Bool = false
+
+    /// D39：当前工具。**提交一条线后保持不变**（D38 连续画线）。
+    public private(set) var activeDrawingTool: DrawingToolType?
+
+    /// 未成形画线的锚点暂存（多锚工具用；.horizontal 落一锚即提交）。
+    public private(set) var pendingAnchors: [DrawingAnchor] = []
+
+    /// D31/D42：pending 锚的**归属面板** = 落锚时被点击的面板。**与 activePanel 无关**。
+    public private(set) var pendingAnchorPanel: PanelId?
+
+    public init() {}
+
+    /// 进入/保持画线会话并选定工具。同工具重复调用**幂等且不丢 pending**；
+    /// 换工具则丢弃旧工具的半成品锚（否则会把上一个工具的锚混进新工具）。
+    func activate(tool: DrawingToolType) {
+        drawingModeActive = true
+        guard activeDrawingTool != tool else { return }
+        activeDrawingTool = tool
+        discardPendingAnchors()
+    }
+
+    /// 结束整场画线会话：关模式 + 清工具 + 丢 pending。幂等。
+    /// **唯一**「整场结束」入口（旧 DrawingToolManager.cancel() 的角色）。
+    func deactivate() {
+        drawingModeActive = false
+        activeDrawingTool = nil
+        discardPendingAnchors()
+    }
+
+    /// D31：**只丢 pending 锚** —— activeDrawingTool 与 drawingModeActive 必须存活。
+    /// 1a-iv 的「周期组合改变 → 丢 pending」复用本 API，**不得**另写一份取消语义。
+    func discardPendingAnchors() {
+        pendingAnchors = []
+        pendingAnchorPanel = nil
+    }
+
+    /// 落锚。D42：归属 = 被点击的面板。D31：落在 ≠ pendingAnchorPanel 的面板 →
+    /// 先只丢 pending（**保工具**），再在新面板起新锚。
+    /// 非画线模式 / 无工具 → no-op（fail-closed：「没有工具却攒着 pending」不可表达）。
+    func addAnchor(_ anchor: DrawingAnchor, panel: PanelId) {
+        guard drawingModeActive, activeDrawingTool != nil else { return }
+        if let owner = pendingAnchorPanel, owner != panel {
+            discardPendingAnchors()
+        }
+        pendingAnchors.append(anchor)
+        pendingAnchorPanel = panel
+    }
+
+    /// pending → DrawingObject。**DrawingObject 的唯一写入点**：isExtended 从 lineSubType 派生
+    /// （不变量 isExtended == (lineSubType == .ray)；矛盾数据不可表达，codex branch-R5-high）。
+    /// period 不传 → 由 DrawingObject.init 取 anchors.first.period（D29 周期绑定，1a-i 落地，不得回退）。
+    /// revealTick 由 engine.routeDrawingCommit 盖真值。
+    /// **D38：提交后只清 pending —— 工具与会话保持不变（连续画线）**。
+    /// 无工具 / 无 pending → nil（caller 不得据此改会话状态）。
+    func commitPending(lineSubType: LineSubType = .straight,
+                              panelPosition: Int) -> DrawingObject? {
+        guard let tool = activeDrawingTool, !pendingAnchors.isEmpty else { return nil }
+        let drawing = DrawingObject(
+            toolType: tool,
+            anchors: pendingAnchors,
+            isExtended: lineSubType == .ray,
+            panelPosition: panelPosition,
+            revealTick: 0,
+            lineSubType: lineSubType)
+        discardPendingAnchors()
+        return drawing
+    }
+}

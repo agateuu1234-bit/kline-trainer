@@ -11,11 +11,14 @@ struct TrainingEngineDrawingCommitTests {
 
     static let bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
 
-    /// 进入 .drawing 的 engine（activateDrawingTool 已验证进 drawing）。
+    /// 进入 .drawing 的 engine（armPanelForDrawing 已验证进 drawing）。
+    /// 用 armPanelForDrawing（原始单面板原语）而非公共 activateDrawingTool：后者本期起等价于
+    /// beginDrawingSession（会置 drawingSession.drawingModeActive == true），会让下面测的
+    /// commitDrawing/cancelDrawing 撞上其生产期 fail-closed 守卫直接 no-op，测不到 FSM 本体。
     static func drawingEngine() -> TrainingEngine {
         let (e, _) = TrainingEngineInteractionTests.engine()
         e.recordRenderBounds(Self.bounds, panel: .upper)
-        e.activateDrawingTool(.horizontal, panel: .upper)
+        e.armPanelForDrawing(.horizontal, panel: .upper)
         return e
     }
 
@@ -218,39 +221,10 @@ struct TrainingEngineDrawingCommitTests {
         #expect(e.drawings.isEmpty)   // 不污染原训练记录
     }
 
-    // MARK: - review-redesign Task 4：双面板划线互斥（toggleDrawingExclusive/cancelDrawingAllPanels/isDrawingActive）
-
-    @Test("toggleDrawingExclusive: 激活选中面板（.lower），另一面板（.upper）不受影响")
-    func toggleDrawingExclusive_activatesSelectedPanelOnly() {
-        let engine = Self.makeNormalEngineAtTick(10)
-        engine.toggleDrawingExclusive(on: .lower)
-        #expect(engine.isDrawingActive(on: .lower))
-        #expect(!engine.isDrawingActive(on: .upper))
-    }
-
-    @Test("toggleDrawingExclusive: 切换面板时取消另一面板（互斥）")
-    func toggleDrawingExclusive_switchingPanels_cancelsOther() {
-        let engine = Self.makeNormalEngineAtTick(10)
-        engine.toggleDrawingExclusive(on: .upper)      // 上栏进画线
-        engine.toggleDrawingExclusive(on: .lower)      // 切下栏
-        #expect(!engine.isDrawingActive(on: .upper))   // 上栏被取消（互斥）
-        #expect(engine.isDrawingActive(on: .lower))
-    }
-
-    @Test("toggleDrawingExclusive: 同面板二次点击 → toggle off")
-    func toggleDrawingExclusive_secondTapSamePanel_togglesOff() {
-        let engine = Self.makeNormalEngineAtTick(10)
-        engine.toggleDrawingExclusive(on: .lower)
-        engine.toggleDrawingExclusive(on: .lower)
-        #expect(!engine.isDrawingActive(on: .lower))
-    }
-
-    @Test("cancelDrawingAllPanels: 清除两面板画线态")
-    func cancelDrawingAllPanels_clearsBoth() {
-        let engine = Self.makeNormalEngineAtTick(10)
-        engine.toggleDrawingExclusive(on: .upper)
-        engine.cancelDrawingAllPanels()
-        #expect(!engine.isDrawingActive(on: .upper))
-        #expect(!engine.isDrawingActive(on: .lower))
-    }
+    // MARK: - P1b-1a-ii D42：「按 activePanel 双面板互斥」模型已退役
+    // 旧的 toggleDrawingExclusive 三连测试（激活选中面板 / 切面板取消另一面板 / 同面板二次点击 toggle off）
+    // 与 cancelDrawingAllPanels_clearsBoth 随该模型一并删除：
+    //   · 画线会话现在是**全局**的 —— 开 = **两面板一起**进 .drawing，不存在「另一面板被取消」这回事；
+    //   · cancelDrawingAllPanels 的唯一调用者已是 endDrawingSessionIfActive（会话收口点），不再单独直呼。
+    // 等价且更强的覆盖（含「会话 ⇔ 两面板 mode」不变量断言）见 TrainingEngineDrawingSessionTests。
 }

@@ -56,10 +56,18 @@ struct DrawingToolFloatingView: View {
             .padding(6)
             .background(.thinMaterial, in: Capsule())
         } else {
-            Button { expanded = true } label: { Image(systemName: "pencil.tip.crop.circle") }
-                .buttonStyle(.bordered)
-                .clipShape(Circle())
-                .accessibilityLabel("画线工具")
+            // P1b-1a-ii 回归修复（现象①：连续画线让画线模式持续，收起工具条后小圆圈看不出还在画线 → 隐形卡死）：
+            // 画线模式开时，折叠圆圈钮变**橙色实心**（一眼看出在画线），且点它**直接退出画线**（而非展开工具条）——
+            // 给用户「随手收起也能一键退出」的可靠出口。画线模式关时保持原行为（点=展开工具条）。
+            Button {
+                if isDrawingActive { onToggleTool() } else { expanded = true }
+            } label: {
+                Image(systemName: isDrawingActive ? "pencil.tip.crop.circle.fill" : "pencil.tip.crop.circle")
+            }
+            .buttonStyle(.bordered)
+            .tint(isDrawingActive ? .orange : nil)
+            .clipShape(Circle())
+            .accessibilityLabel(isDrawingActive ? "结束画线" : "画线工具")
         }
     }
 }

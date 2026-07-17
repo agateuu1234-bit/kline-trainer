@@ -139,7 +139,7 @@ struct TrainingEngineBounceWiringTests {
         var overscrolled = false
         for _ in 0..<30 { _ = fakes().last?.fire(1.0 / 60.0); if e.upperPanel.offset > ob.maxOffset + 5 { overscrolled = true; break } }
         #expect(overscrolled)                               // 确处于 overscroll（offset>maxOffset）
-        e.activateDrawingTool(.trend, panel: .upper)        // 中断 + 归一须在算 range（捕获 baseRev）前
+        e.armPanelForDrawing(.trend, panel: .upper)         // 中断 + 归一须在算 range（捕获 baseRev）前
         guard case .drawing(let snap) = e.upperPanel.interactionMode else { Issue.record("应进入 drawing"); return }
         #expect(abs(snap.frozen.offset - ob.maxOffset) < 1e-6)   // 归一后 offset（无归一则 frozen.offset>maxOffset）
         #expect(snap.frozen.offset <= ob.maxOffset + 1e-6)       // 绝非 overscrolled

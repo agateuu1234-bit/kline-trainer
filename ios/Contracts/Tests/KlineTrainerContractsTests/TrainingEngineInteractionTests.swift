@@ -137,27 +137,27 @@ import CoreGraphics
         #expect(e.upperPanel.interactionMode == .autoTracking)
     }
 
-    @Test("activateDrawingTool: autoTracking → drawing，snapshot 含 viewport candleRange")
+    @Test("armPanelForDrawing: autoTracking → drawing，snapshot 含 viewport candleRange")
     func activateDrawingEntersDrawingMode() {
         let (e, _) = Self.engine()
         e.recordRenderBounds(Self.bounds, panel: .upper)
         let expected = RenderStateBuilder.visibleCandleRange(
             panelState: e.upperPanel, candles: e.allCandles[.m3]!,
             tick: e.tick.globalTickIndex, bounds: Self.bounds)
-        e.activateDrawingTool(.trend, panel: .upper)
+        e.armPanelForDrawing(.trend, panel: .upper)
         guard case .drawing(let snap) = e.upperPanel.interactionMode else {
             Issue.record("应进入 drawing 模式"); return
         }
         #expect(snap.frozen.candleRange == expected)
     }
 
-    @Test("activateDrawingTool: drawing 模式下再激活 → no-op（工具切换归 DrawingToolManager/Wave 3）")
+    @Test("armPanelForDrawing: drawing 模式下再激活 → no-op（工具切换归 DrawingToolManager/Wave 3）")
     func activateDrawingWhileDrawingNoOp() {
         let (e, _) = Self.engine()
         e.recordRenderBounds(Self.bounds, panel: .upper)
-        e.activateDrawingTool(.trend, panel: .upper)
+        e.armPanelForDrawing(.trend, panel: .upper)
         let modeBefore = e.upperPanel.interactionMode
-        e.activateDrawingTool(.ray, panel: .upper)
+        e.armPanelForDrawing(.ray, panel: .upper)
         #expect(e.upperPanel.interactionMode == modeBefore)   // 仍 drawing(同 snapshot)
     }
 

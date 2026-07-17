@@ -73,13 +73,13 @@ public struct TrainingView: View {
         id == .upper ? engine.upperPanel.period : engine.lowerPanel.period
     }
 
-    // review-redesign Task 4：选中面板（activePanel）是否在画线模式（按钮选中态 + toggle 语义）；
-    // 双面板互斥核心逻辑落在 host 可测的 engine.toggleDrawingExclusive（薄壳仅转调）。
+    // P1b-1a-ii D42：画线会话是**全局**的（不属于任何面板）——按钮选中态与 toggle 都读/写唯一真相
+    // `engine.drawingSession`。旧的「按 activePanel 互斥」模型（toggleDrawingExclusive）已退役。
     private var isDrawingActive: Bool {
-        engine.isDrawingActive(on: activePanel)
+        engine.drawingSession.drawingModeActive
     }
     private func toggleDrawing() {
-        engine.toggleDrawingExclusive(on: activePanel)
+        engine.toggleDrawingMode()
     }
 
     // codex/W3-review-redesign-Task10：body 原是单个巨型 modifier 链——加一条 `.onChange` 后编译器
@@ -236,8 +236,9 @@ public struct TrainingView: View {
             // 否则条内捕获的 strip.panel 会过期（条显示在旧 panel、成交也按旧 panel），
             // 切目标后再选档会对错 panel 下单（autosave 后不可逆）。切目标=取消未确认下单。
             tradeStrip = nil
-            // review-redesign Task 4：切分段钮同样退出画线态（双面板互斥，防旧面板 drawing 残留悬空）。
-            engine.cancelDrawingAllPanels()
+            // P1b-1a-ii D42/R30-medium：**不再**取消画线。activePanel 是「下单目标面板」，
+            // 与画线会话无关；切它不产生新落锚，故 drawingModeActive / activeDrawingTool /
+            // pending 锚**全部原封保留**（丢 pending 只发生在「下一次落锚 tap 落在别的面板」时）。
         }
         // codex R2-high：周期也能被两指上下滑手势改（switchPeriodCombo 改 panel.period，activePanel 不变）→
         // 同样清掉打开的买卖条，防对新周期下单。与上面的执行时守卫(onPick)双保险。

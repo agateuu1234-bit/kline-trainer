@@ -42,6 +42,12 @@ public final class TrainingEngine {
     /// codex WB R7 finding 1：复盘加载来的 wrapper 顶层未知 key（原样字节，同 `loadedReviewHiddenIds`
     /// 范式）。save 路径原样传回、原样拼回磁盘，不得被默认 `[]` 覆盖已加载的未来数据。
     public private(set) var loadedReviewUnknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry] = []
+    /// P1b-1a-ii D39：画线共享状态容器 —— 画线模式 / 工具 / pending 锚的**唯一真相**。
+    /// 浮动钮（本期）与底栏画线工具栏（1a-iii）**共同消费**同一个实例；Coordinator 只读不存。
+    /// **不变量**：`drawingSession.drawingModeActive == true` ⇔ 上下两面板 `interactionMode` 均为 `.drawing`
+    /// （由 `beginDrawingSession` / `endDrawingSessionIfActive` 两个收口点维持，见 D45）。
+    /// 会话是**局内瞬态**，不持久化；每局 `TrainingEngine.make` 新建 → 不会跨局泄漏。
+    public let drawingSession = DrawingSession()
     public private(set) var upperPanel: PanelViewState
     public private(set) var lowerPanel: PanelViewState
     public private(set) var tradeOperations: [TradeOperation]
@@ -376,6 +382,18 @@ public final class TrainingEngine {
     /// - 命中 → 改双面板 period + 对两面板派发 `.periodComboSwitched`（硬切 autoTracking + clearPendingDrawing；
     ///   后者 effect 在 E5b 无消费者，画线延后顺位 7，故无 pending 可清，忽略安全）。
     public func switchPeriodCombo(direction: PeriodDirection) {
+        // P1b-1a-ii：画线会话开着时切周期 = **no-op**（fail-closed，codex plan-R7-high）。
+        // 为什么不是「结束会话」也不是「丢 pending」：
+        //   · `.periodComboSwitched` 会把两面板硬切 `.autoTracking`（Reducer:152-155）→ 若放行，会话还开着
+        //     而面板已 autoTracking = 本期要消灭的漂移；且 pending 锚会绑在一个刚变过的周期组合上。
+        //   · 但「周期改变 → 丢 pending」是 spec §3.2 **明确划给 1a-iv（D32）** 的语义，且必须用
+        //     `discardPendingAnchors()`（保工具）而非整场取消 —— 本期不得提前实现。
+        //   · 故本期取**最小且不可漂移**的一档：画线时干脆不换周期。这与手势层现状**完全一致**——
+        //     `singlePanStep(drawingTakesOver:)` 的每个 return 都 `periodSwipe: nil`
+        //     （GestureClassifiers.swift:113-121），两指切周期未接线 → 真实用户本来就切不动。
+        //     守卫只是把「碰巧不可达」升级成「**结构上不可能**」（直接调也漂不了）。
+        // 1a-iv 落 D32 时**删掉这条守卫**，改按 D31 用 discardPendingAnchors() + 维护会话不变量。
+        guard !drawingSession.drawingModeActive else { return }
         let combos = TrainingEngine.periodCombos
         guard let cur = combos.firstIndex(where: {
             $0.upper == upperPanel.period && $0.lower == lowerPanel.period
@@ -417,6 +435,7 @@ public final class TrainingEngine {
         _ = lowerPanel.reduce(.tradeTriggered)
         resetOffsetAfterAutoTracking(.upper)
         resetOffsetAfterAutoTracking(.lower)
+        endDrawingSessionIfActive()      // D45
         drawdown.update(currentCapital: currentTotalCapital)
     }
 
@@ -480,6 +499,7 @@ public final class TrainingEngine {
         _ = lowerPanel.reduce(.tradeTriggered)
         resetOffsetAfterAutoTracking(.upper)        // D8：autoTracking ⇒ offset==0
         resetOffsetAfterAutoTracking(.lower)
+        endDrawingSessionIfActive()                 // D45
         _ = tick.advance(steps: stepsForPeriod(period(of: panel)))
         drawdown.update(currentCapital: currentTotalCapital)
         forceCloseIfEnded()
@@ -962,12 +982,27 @@ extension TrainingEngine {
             animator(for: panel).stop()
             setActiveBounds(nil, panel: panel)
         }
-        let fresh = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: bounds)
+        normalizeOffsetForCurrentBounds(panel: panel)
+        // R1b-drag E5：resize 中途 active drag → 重同步 dragRaw 到归一后 offset（防下一帧 delta 基于 stale raw 跳变）。
+        if dragRawFor(panel) != nil { setDragRaw(panelState(panel).offset, panel: panel) }
+    }
+
+    /// 按**当前** bounds 把 offset 夹回合法区间（resize/旋转后的 stale offset 归一）。
+    /// 抽出来是因为它有**两个**触发点：① `recordRenderBounds`（bounds 真的变了）；
+    /// ② 画线会话结束（`endDrawingSessionIfActive` / `cancelDrawingAllPanels`）。
+    ///
+    /// **为什么②是必须的（codex whole-branch R4-medium）**：reducer 在 `.drawing` 态**吞掉** `.offsetApplied`
+    /// （画线时不许平移），于是画线期间发生的 resize/旋转，其归一动作被静默吞掉 → offset 停在越界值。
+    /// 从前画线只活一次 tap，这窗口小到几乎不可达；**本期画线会话变成持续的**（画完一条不退出），
+    /// 用户完全可能「滚动 → 进画线 → 画几条 → 转屏」。而退出画线时 bounds 并没有再变一次，
+    /// `recordRenderBounds` 的 `previous != bounds` 守卫会直接早返 → 归一**永远不补跑** → 图表持续挂着
+    /// overscroll 间隙，直到用户碰巧再拖一次才自愈。故会话一结束（两面板已回 `.autoTracking`、
+    /// `.offsetApplied` 重新被接受）立刻补一次归一。
+    private func normalizeOffsetForCurrentBounds(panel: PanelId) {
+        let fresh = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds(panel))
         let cur = panelState(panel).offset
         let clamped = min(max(cur, fresh.minOffset), fresh.maxOffset)
         if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }
-        // R1b-drag E5：resize 中途 active drag → 重同步 dragRaw 到归一后 offset（防下一帧 delta 基于 stale raw 跳变）。
-        if dragRawFor(panel) != nil { setDragRaw(panelState(panel).offset, panel: panel) }
     }
 
     // MARK: 画线激活 H1 production handler（spec §C1b 闸门 #4 F3 + effect 合约 L1026-1032）
@@ -977,7 +1012,7 @@ extension TrainingEngine {
     ///   ① `animator.stop()`（防 stale 漂移；必须在算 range 之前——停后无新帧可改 offset）
     ///   ② 基于当前（已冻结）面板状态算 candleRange（复用 C8a `visibleCandleRange`）
     ///   ③ 派 `setDrawingSnapshot`（同步无漂移 → 进 drawing；理论 stale → 留 autoTracking）
-    public func activateDrawingTool(_ tool: DrawingToolType, panel: PanelId) {
+    internal func armPanelForDrawing(_ tool: DrawingToolType, panel: PanelId) {
         // R1b-wire R2-C1：interrupt 提顶（在捕获 baseRev 前）。其归一 `offsetApplied` 会 bump revision；若放在
         // `reduce(.activateDrawing)` 之后则 baseRev 失配 setDrawingSnapshot 的 staleness 闸门 → 永不进 drawing。
         // 提顶使 baseRev 捕获归一后 revision；含 stop（防 stale 漂移，原 ① 裸 stop 删除）+ 归一 overscroll（M3）。
@@ -1048,40 +1083,109 @@ extension TrainingEngine {
     /// （RFC §4.4 总纲注记：画线激活-FSM handler 家族，user 2026-06-13 裁决 supersede neck）。
     /// 封装 snapshot.frozen.baseRevision 细节（caller 不碰 revision）。非 drawing 态 no-op（幂等）。
     /// 不改 `drawings`（数据投影是 `appendDrawing` 的职责）；不 bump revision（reducer 契约）。
+    /// **全局会话开着时 = 结束整场会话**（codex whole-branch R3-high）：画线在本期起是全局的，
+    /// 「让某个面板退出画线 FSM」这件事在新模型里**就等于**「结束这场画线会话」——不存在只让一个面板
+    /// 退出、另一个还留在 .drawing 的合法状态。
+    /// 这里**绝不能 no-op**：`activateDrawingTool(...)` 之后跟一句 `commitDrawing(panel:)` 是本包既有的
+    /// 公共用法，若静默什么都不做，调用者就被永久卡在画线模式里出不去（比漂移更糟）。
+    /// 会话没开时：保持原有的面板级 FSM 语义（reducer handler 家族的既有契约，FSM 测试覆盖）。
     public func commitDrawing(panel: PanelId) {
-        guard case .drawing(let snap) = panelState(panel).interactionMode else { return }
-        _ = reduce(.drawingCommitted(baseRevision: snap.frozen.baseRevision), on: panel)
+        if drawingSession.drawingModeActive { endDrawingSessionIfActive(); return }
+        commitDrawingUnchecked(panel: panel)
     }
 
     /// 取消当前 drawing：dispatch reducer `.drawingCancelled` 退出 `.drawing` → `.autoTracking`。
     /// 非 drawing 态 no-op。无数据投影。
+    /// 会话开着时同 `commitDrawing`：等于结束整场会话（绝不 no-op，否则调用者卡死在画线模式）。
     public func cancelDrawing(panel: PanelId) {
+        if drawingSession.drawingModeActive { endDrawingSessionIfActive(); return }
+        cancelDrawingUnchecked(panel: panel)
+    }
+
+    /// 面板级提交的**原始实现**（不看会话，直接退 reducer 的 .drawing）。
+    /// 仅供会话收口路径与「会话未开」的面板级 FSM 语义使用。
+    private func commitDrawingUnchecked(panel: PanelId) {
+        guard case .drawing(let snap) = panelState(panel).interactionMode else { return }
+        _ = reduce(.drawingCommitted(baseRevision: snap.frozen.baseRevision), on: panel)
+    }
+
+    /// 面板级取消的**原始实现**（不看会话，直接退 reducer 的 .drawing）。
+    /// 仅供会话收口路径使用：调用者必须自己保证会话真相已经处理好。
+    private func cancelDrawingUnchecked(panel: PanelId) {
         guard case .drawing(let snap) = panelState(panel).interactionMode else { return }
         _ = reduce(.drawingCancelled(baseRevision: snap.frozen.baseRevision), on: panel)
     }
 
-    // MARK: review-redesign Task 4：双面板划线互斥（host 可测核心，薄壳 TrainingView 转调）
+    // MARK: P1b-1a-ii：全局画线会话（D42；review-redesign Task 4 的「按 activePanel 互斥」模型已退役）
 
-    /// 指定面板当前是否处于画线态。
+    /// 指定面板当前是否处于画线态（面板级 FSM 查询；**不是**「能不能画」的判据——
+    /// 那个判据是唯一的 `drawingSession.drawingModeActive`）。
     public func isDrawingActive(on panel: PanelId) -> Bool {
         if case .drawing = panelState(panel).interactionMode { return true }
         return false
     }
 
-    /// 取消两面板画线态（`cancelDrawing` 对非 drawing 态 no-op，故两次调用安全）。
+    /// 取消画线：**整场收干净**（全局会话 + 两个面板），任何情况下都不会静默 no-op。
+    /// 画线会话是全局的，故「取消所有面板的画线」在语义上就等于「结束这场画线会话」。
     public func cancelDrawingAllPanels() {
-        cancelDrawing(panel: .upper)   // 非 .drawing 态 no-op
-        cancelDrawing(panel: .lower)
+        drawingSession.deactivate()                 // 幂等：先落会话真相
+        cancelDrawingUnchecked(panel: .upper)       // 再收面板（走 unchecked，不会被 fail-closed 守卫挡住）
+        cancelDrawingUnchecked(panel: .lower)
+        normalizeOffsetForCurrentBounds(panel: .upper)   // R4-medium：补跑画线期间被 .drawing 吞掉的 resize 归一
+        normalizeOffsetForCurrentBounds(panel: .lower)
     }
 
-    /// 选中面板画线互斥：该面板已在画线→取消（toggle off）；否则取消两面板残留后激活选中面板。
-    public func toggleDrawingExclusive(on panel: PanelId) {
-        if isDrawingActive(on: panel) {
-            cancelDrawing(panel: panel)
+    /// D42 浮动钮唯一入口：全局开/关画线会话（**不属于任何面板**，与 activePanel 无关）。
+    public func toggleDrawingMode() {
+        if drawingSession.drawingModeActive {
+            endDrawingSessionIfActive()
         } else {
-            cancelDrawingAllPanels()
-            activateDrawingTool(.horizontal, panel: panel)
+            beginDrawingSession(tool: .horizontal)   // 本期只有水平线（工具选择在 1a-iii）
         }
+    }
+
+    /// 画线激活（兼容面）。**本期起画线是全局会话**：不再存在「只在某一个面板画线」这回事，
+    /// 故本方法等价于开启全局画线会话（两个面板一起进 .drawing + 置会话真相）。
+    /// `panel` 参数保留仅为源码兼容（全局会话覆盖两个面板），语义上被忽略。
+    /// 直接武装单个面板的原始能力保留在 internal 的 `armPanelForDrawing`（仅会话收口路径与 FSM 测试使用）——
+    /// 公共面不再能造出「面板在 .drawing 但会话没开」的裂脑状态。
+    public func activateDrawingTool(_ tool: DrawingToolType, panel: PanelId) {
+        beginDrawingSession(tool: tool)
+    }
+
+    /// 开会话：**两个面板**一起进 `.drawing`（D42：上下都能画）+ 置真相。
+    /// **事务性（commit-last，codex plan-R9-high）**：先武装两个面板，**两个都真的进了 `.drawing` 才**置
+    /// `drawingModeActive`；有任何一个没进（`armPanelForDrawing` 依赖 `renderBounds`/reducer 态，
+    /// 理论上可能不生效）→ **回滚**，绝不留下「铅笔钮亮着、点图却没反应」的卡死态。
+    /// 顺序不能反：先置真相再武装，中间一旦失败就是坏状态；先武装再置真相，失败时干净回滚。
+    public func beginDrawingSession(tool: DrawingToolType) {
+        // fail-closed：只放行「真的能提交」的工具。放进来一个 shouldCommit 永远为 false 的工具 =
+        // 用户进了画线模式、点了半天、一条线也画不出来、只能取消（codex whole-branch R2-high）。
+        guard DrawingToolType.implemented.contains(tool) else { return }
+        armPanelForDrawing(tool, panel: .upper)
+        armPanelForDrawing(tool, panel: .lower)
+        guard isDrawingActive(on: .upper), isDrawingActive(on: .lower) else {
+            cancelDrawingAllPanels()          // 回滚（此刻会话仍未开 → fail-closed 守卫放行）
+            drawingSession.deactivate()       // 幂等；确保工具/pending 不残留
+            return
+        }
+        drawingSession.activate(tool: tool)   // 两面板都武装好了，才认会话开启
+    }
+
+    /// 结束会话：清真相 + 两面板退出 `.drawing`。幂等（未开会话时全 no-op）。
+    /// **D45 单一收口点**：所有会把面板硬切回 `.autoTracking` 的动作（`.tradeTriggered` /
+    /// `.periodComboSwitched`）末尾都调它 —— 否则「全局开关还 true、面板已被打回 autoTracking」
+    /// 就是一条静默漂移（铅笔钮亮着但点图没反应）。母 spec 终局是画线模式下底栏换成画线工具栏
+    /// （1a-iii）→ 那时买卖钮不存在，本路径自然不可达；本期以「下单即隐式退出画线」收敛。
+    public func endDrawingSessionIfActive() {
+        guard drawingSession.drawingModeActive else { return }
+        drawingSession.deactivate()
+        cancelDrawingUnchecked(panel: .upper)
+        cancelDrawingUnchecked(panel: .lower)
+        // R4-medium：画线期间（`.drawing` 吞 `.offsetApplied`）发生的 resize/旋转，其 offset 归一被静默吞掉；
+        // 此刻两面板已回 `.autoTracking`，补跑一次归一，杜绝「退出画线后仍挂着越界 offset / overscroll 间隙」。
+        normalizeOffsetForCurrentBounds(panel: .upper)
+        normalizeOffsetForCurrentBounds(panel: .lower)
     }
 }
 
