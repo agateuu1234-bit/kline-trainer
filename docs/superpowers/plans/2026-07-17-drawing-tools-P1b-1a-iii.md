@@ -42,6 +42,7 @@
 - Modify: `Sources/KlineTrainerContracts/Drawing/DrawingSession.swift:87-99`（`commitPending` 改签名 + 读 `defaultStyle`；加 `defaultStyle` 存储 + setter）
 - Test: `Tests/KlineTrainerContractsTests/Drawing/DrawingSessionTests.swift`（改 `:115/:122` 两处旧调用 + 新增默认样式测试）
 - Test: `Tests/KlineTrainerContractsTests/TrainingSessionPersistenceTests.swift`（追加带样式画线 commit→saveProgress→读回往返集成测试）
+- Test: `Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift`（追加原子构造结构守卫）
 
 **Interfaces:**
 - Produces:
@@ -235,6 +236,37 @@ Expected: PASS（含新 3 条 + 改写的 2 条）。
 
 Run: `cd ios/Contracts && swift test --filter TrainingSessionPersistenceTests` → PASS。
 
+- [ ] **Step 5c: 原子性结构守卫（「append 默认再补丁」结构上不可能，codex plan-R5-high）**
+
+> R5 的关切是 behavior 测试看不到「同一次调用里 append 默认、再改 `drawings[last]`」的中间态。终极答复是**结构性**的、不靠 behavior 断言：
+> ① **`DrawingObject` 全部字段是 `let`**（`public let colorToken` 等，见 `Models.swift`）→ `drawings[i].colorToken = x` **编译不过**，字段级「后补丁」在类型层就不可表达。
+> ② `commitPending` 在**单个** `DrawingObject(...)` 初始化里从 `defaultStyle` 灌满 5 字段（唯一构造点）。
+> ③ `routeDrawingCommit`（`TrainingEngine.swift:1066`）把 5 字段**整体透传**进 `stamped`（只覆盖 `revealTick`）再 `append` 一次。
+> 唯一残余的「整元素替换」`drawings[i] = DrawingObject(...)` 仍须先构造一个**完整**对象——无处产生「不完整线」。加结构守卫钉死 ②③（① 由编译器保证）：
+
+加进 `DrawingSessionSourceGuardTests.swift`（已有 `source(_:)`/`engine` helper；补 `drawingSession` 路径）：
+
+```swift
+    private let drawingSession = "Sources/KlineTrainerContracts/Drawing/DrawingSession.swift"
+
+    @Test("原子性：commitPending 5 字段从 defaultStyle 原子构造 + routeDrawingCommit 整体透传（codex plan-R5）")
+    func atomicStyleConstruction() throws {
+        let s = try source(drawingSession)
+        #expect(s.contains("func commitPending("))       // 先证真读到文件（防路径错→空→假绿）
+        for f in ["lineSubType: s.lineSubType", "lineStyle: s.lineStyle", "thickness: s.thickness",
+                  "colorToken: s.colorToken", "labelMode: s.labelMode"] {
+            #expect(s.contains(f))                        // commitPending 单初始化原子灌满
+        }
+        let e = try source(engine)
+        for f in ["lineSubType: drawing.lineSubType", "lineStyle: drawing.lineStyle",
+                  "thickness: drawing.thickness", "colorToken: drawing.colorToken", "labelMode: drawing.labelMode"] {
+            #expect(e.contains(f))                        // routeDrawingCommit 整体透传 5 字段，无逐字段丢弃/默认化
+        }
+    }
+```
+
+Run: `cd ios/Contracts && swift test --filter DrawingSessionSourceGuardTests` → PASS。
+
 - [ ] **Step 6: 提交**
 
 ```bash
@@ -242,8 +274,9 @@ git add ios/Contracts/Sources/KlineTrainerContracts/Models/DrawingEnums.swift \
         ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingSession.swift \
         ios/Contracts/Sources/KlineTrainerContracts/Render/ChartContainerView.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionTests.swift \
-        ios/Contracts/Tests/KlineTrainerContractsTests/TrainingSessionPersistenceTests.swift
-git commit -m "1a-iii Task1：DrawingSession.defaultStyle 单一真相 + commitPending 原子构造完整线 + 持久化往返集成测试"
+        ios/Contracts/Tests/KlineTrainerContractsTests/TrainingSessionPersistenceTests.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift
+git commit -m "1a-iii Task1：DrawingSession.defaultStyle 单一真相 + commitPending 原子构造完整线 + 持久化往返集成测试 + 原子性结构守卫"
 ```
 
 ---
@@ -792,8 +825,9 @@ struct TrainingViewShellSourceGuardTests {
     func tradeBoundary() throws {
         let code = try source(tv)
         #expect(code.contains("onChange(of: engine.drawingSession.drawingModeActive)"))
-        // TradeBox overlay 挂载条件带 !drawingModeActive 纵深门控
-        #expect(code.contains("!engine.drawingSession.drawingModeActive"))
+        // TradeBox overlay 挂载条件带 !drawingModeActive 纵深门控——**锚定到真实挂载条件**
+        // （紧跟 showsTradeButtons，即 TradeBoxView 分支），不是文件里某处出现（codex plan-R5-high）。
+        #expect(code.contains("showsTradeButtons, !engine.drawingSession.drawingModeActive,"))
         // 窄锚定（codex plan-R3-high）：performTrade 必须包在 apply 的 onProceed 闭包里，
         // 不是「文件里某处出现 apply」——取 onConfirm 起到 performTrade 的片段，断言 apply 在其中且
         // performTrade 出现在 onProceed: 之后（真挂在转换的成交分支上，unused helper 满足不了）。
@@ -803,6 +837,9 @@ struct TrainingViewShellSourceGuardTests {
         let confirmEnd = try #require(after.range(of: "},"), "找不到 onConfirm 闭包结尾")
         let body = String(after[..<confirmEnd.lowerBound])
         #expect(body.contains("TradeConfirmGuard.apply("))
+        // apply 必须收**真实**的 drawingModeActive（codex plan-R5-high）——防 `drawingModeActive: false`
+        // 硬编码/陈旧值绕过：pure 测试与「恰一次」都拦不住这种，唯有断言实参本身。
+        #expect(body.contains("drawingModeActive: engine.drawingSession.drawingModeActive"))
         // 唯一性 + 位置（codex plan-R4-high）：performTrade 在 onConfirm 里**恰出现一次**，且**就在 onProceed 闭包内**——
         // 杜绝「apply(onProceed:{}) 空转后又无条件 performTrade」的绕过。
         #expect(body.components(separatedBy: "performTrade(").count - 1 == 1)   // 恰一次
