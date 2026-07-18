@@ -242,6 +242,16 @@ rm -rf "$R7_ROOT" 2>/dev/null || true
 # 默认值——对当前源码做实时推导，源码推导的保护完全没丢（见本文件末尾的独立验证）。
 export UIKIT_EXPECTED_TESTS_SCRIPT="$FIX/uikit-expected-tests-frozen.py"
 
+# total 基线同理解耦（2026-07-18）：下面的 fixture 用例测的是「G7 total 判据逻辑」，
+# 不是「main 当前真实总数」。若让它们读活 catalyst-total-baseline.txt，任何大幅增减
+# 测试的 PR（如 #146 加 50 个）把活基线一挪，这些围绕 1407 构造的 fixture 就整片掉出
+# delta 窗口、自测在真跑之前先崩（复现：main 6068522 F1 变红事故）。改用一份跟 fixture
+# 日志配套、冻结在提交历史里的 total 基线（fixtures/total-baseline-frozen.txt=1407），
+# 通过 catalyst-gate.sh 已有的 CATALYST_TOTAL_BASELINE_FILE 注入点喂给下面所有 expect。
+# 真实 xcodebuild 日志（workflow 真跑）不设这个环境变量，仍走默认的活 catalyst-total-
+# baseline.txt——活基线的保护完全没丢（见下方「活基线覆盖」用例）。
+export CATALYST_TOTAL_BASELINE_FILE="$FIX/total-baseline-frozen.txt"
+
 echo "catalyst-gate.sh 判据测试（fixture 用例，期望清单已冻结，不随当前源码漂移）："
 expect 0 pass-new-scheme.log            "GATE PASS" \
     "新 scheme 的真实成功日志（本地 Xcode 格式）→ 通过（且不被 CoreData 运行期噪声误伤）"
@@ -359,6 +369,25 @@ expect 0 total-baseline-within-delta.log "GATE PASS" \
 expect 1 total-baseline-above-delta.log  "高于上限" \
     "R8 隔离：用例数 1500（基线 1407 + delta 30 = 上限 1437，1500 超出）→ 必须由 G7·基线上限分支拦截"
 
+# 活基线覆盖（codex plan R1 [high]，2026-07-18）：上面所有 fixture 用例都走冻结基线
+# （UIKIT_EXPECTED_TESTS_SCRIPT + CATALYST_TOTAL_BASELINE_FILE 两个 export），因此活
+# catalyst-total-baseline.txt / catalyst-uikit-baseline.txt 不被它们覆盖——误设/漂移只会
+# 在真 CI 的真构建步暴露、reviewer 无法从仓库状态复现。这条**显式 unset 两个冻结覆盖**、
+# 走 catalyst-gate.sh 默认的活基线，对一份代表当前 main 的裁剪真日志（pass-main-current.log：
+# 1457 tests / 35 UIKit / macabi）断言 GATE PASS 且回显 1457。活基线一旦被误改（漂出 ±30），
+# 这条会在 Gate self-test 步就红，早于真构建步。
+# 维护：任何改动 catalyst-uikit-baseline.txt、或让真实总用例数漂出 1457±30 的 PR，必须同时
+# 用一次真 Catalyst 构建日志重裁 pass-main-current.log（禁手打伪造行，见 R9）。
+out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
+got=$?
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1457" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 35 / total 1457）→ GATE PASS 且回显 1457 (exit=$got)"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1457，实得 exit=$got, out=$out"
+    FAILED=$((FAILED + 1))
+fi
+
 # C1 回归：xcodebuild 命令行回显本身就带 -only-testing:KlineTrainerContractsTests + 金丝雀文件名
 # 也出现在 SwiftDriverJobDiscovery（任务规划，非真编译）行里——但整份日志没有一行 SwiftCompile、
 # 没有一处 Tests/KlineTrainerContractsTests/ 源码路径。旧的裸字符串锚点会被这份日志骗过
@@ -427,6 +456,22 @@ else
     echo "  FAIL — 总用例数基线文件缺失本该 FAIL 且报'基线文件不存在'，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
+
+# F6 fail-closed（2026-07-18）：活 total 基线文件存在但内容非整数（如被误写成空/文字/负号）
+# 也必须 fail-closed，不能在算术比较那步崩溃或放行。现有 :421 只测了「文件缺失」，这里补
+# 「内容非整数」这条既有 fail-closed 路径（catalyst-gate.sh:219-221）的回归。
+NONINT_BASELINE="$FIX/../.noninteger-total-baseline-$$.txt"
+printf 'abc\n' > "$NONINT_BASELINE"
+out=$(CATALYST_TOTAL_BASELINE_FILE="$NONINT_BASELINE" bash "$GATE" "$FIX/pass-new-scheme.log" 2>&1)
+got=$?
+if [ "$got" -eq 1 ] && grep -qF "不是合法整数" <<<"$out"; then
+    echo "  ok   — 活 total 基线内容非整数 → 必须 fail-closed，不能放行 (exit=$got)"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — 活 total 基线非整数本该 FAIL 且报'不是合法整数'，实得 exit=$got, out=$out"
+    FAILED=$((FAILED + 1))
+fi
+rm -f "$NONINT_BASELINE"
 
 # 未归属 @Test 检测（2026-07-14，解析器盲区 finding 的自动化回归）：uikit-expected-tests.py
 # 此前只能解析它「认识」的两种 @Test 写法——任何不认识的形式（如带 arguments 的参数化
