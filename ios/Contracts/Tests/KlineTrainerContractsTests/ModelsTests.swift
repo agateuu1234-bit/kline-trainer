@@ -4,8 +4,8 @@ import Foundation
 
 @Suite("Contract version")
 struct ContractVersionTests {
-    @Test func contractVersionIs1_11() {
-        #expect(CONTRACT_VERSION == "1.11")
+    @Test func contractVersionIs1_12() {
+        #expect(CONTRACT_VERSION == "1.12")
     }
 }
 

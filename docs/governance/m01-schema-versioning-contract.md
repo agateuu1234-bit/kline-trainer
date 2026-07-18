@@ -26,8 +26,8 @@
 
 | 维度 | 当前版本 | 变更触发 bump 的条件 |
 |---|---|---|
-| `CONTRACT_VERSION`（顶层标识） | `"1.7"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
-| PostgreSQL schema（`schema.sql` migration id） | `0003_v1.3` | 任何 PostgreSQL DDL 变更（含加列）；联动顶层 |
+| `CONTRACT_VERSION`（顶层标识） | `"1.12"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
+| PostgreSQL schema（`schema.sql` migration id） | `0004_qmt_price_double_and_coverage` | 任何 PostgreSQL DDL 变更（含加列）；联动顶层 |
 | 训练组 SQLite `PRAGMA user_version` | `1` | 训练组 schema 结构变更；联动顶层 |
 | app.sqlite GRDB migration | `0003_v1.4_purge_leased` | app.sqlite DDL / 新表 / **DML 数据清理 migration**（v1.4 新增：删除 v1.3 残留 `state='leased'` journal 行）；联动顶层 |
 | Swift 模型版本（`M0.3`） | `1.3` | Codable 字段 / 枚举 case 变更；联动顶层 |
@@ -36,6 +36,10 @@
 > **bump 记录（2026-05-25，Wave 1 顺位 8 E2）**：顶层 `CONTRACT_VERSION` `"1.4"` → `"1.5"`。触发 = E2 PositionManager typed throwing `init(from:)` 把 `position_data` 列从"任何字节"收紧为"合法否则拒收"，命中 §Bump 策略 **A 类"改既有语义"**。**无 DDL 变更**（`position_data` 仍 `TEXT NOT NULL`，收紧属 reader 侧语义），故仅 bump 顶层标识，三套存储 sub-version（PostgreSQL/训练组/app.sqlite）不变、不新增 migration 文件。详见 `kline_trainer_plan_v1.5.md` §4.2.7。
 
 > **bump 记录（2026-06-22，RFC-A 顺位 3）**：顶层 `CONTRACT_VERSION` `"1.6"` → `"1.7"`。触发 = A 类「改既有语义」：`settings.total_capital` 语义从「配置起始本金」改为「权威滚动当前资金」+ reset 改为保留记录 + migration `0005`（app.sqlite DML 数据 migration，user_version 2→3）。无表结构变更（settings KV 键已存在）。同 E2 1.4→1.5「reader 侧改既有语义」先例。注：`"1.5"` → `"1.6"` 的 bump 由前序 RFC-A Task 8（TradeEngine 股数化语义变更）落地，矩阵 cell 此前 stale 为 `"1.5"`，本次同步校正至 `"1.7"`。详见 `docs/superpowers/specs/2026-06-22-trade-position-capital-design.md` §11。
+
+> **bump 记录（2026-07-18，QMT 数据接入 Plan 2a）**：顶层 `CONTRACT_VERSION` `"1.11"` → `"1.12"`。触发 = A 类「影响 DDL / 改类型」：PostgreSQL migration `0004_qmt_price_double_and_coverage` —— (1) `klines.open/high/low/close` `DECIMAL(10,2)` → `DOUBLE PRECISION`（QMT 前复权为 float64，2 位截断会压塌老 K 线并丢复权精度）；(2) `training_sets.file_path` `VARCHAR(255)` → `TEXT`（绝对路径任意长）；(3) 新增 `stock_coverage` 表（D11 B1→B2 覆盖契约）。PG schema sub-version 同步 `0003_v1.3` → `0004_qmt_price_double_and_coverage`。**iOS reader 逻辑零改动**（`KLineCandle` 本就 `Double`、训练组 SQLite 本就 `REAL`，端到端浮点），仅版本常量 + 其测试随顶层 bump 改。`ticket_index` 列**保留、仅停止写入**（非删列——m01 禁 Wave 1+ 不可逆迁移）。详见 `docs/superpowers/specs/2026-07-06-qmt-data-ingestion-pilot-design.md` §4.3。
+>
+> **矩阵 stale 校正（同次）**：顶层 cell 此前 stale 为 `"1.7"`，实际代码已在本次之前被四个 PR 连续 bump 至 `"1.11"` 而未同步本矩阵——#132 RFC-A 交易/仓位/资金（`1.7`→`1.8`）、#136 replay 续局 + 复盘步进（`1.8`→`1.9`）、#139 复盘完整重设计（`1.9`→`1.10`）、#140 划线工具 P1a 契约地基（`1.10`→`1.11`）。本次一并校正到 `"1.12"`（含本 plan 的 bump）。同 2026-06-22 记录里「cell 此前 stale 为 `1.5`」的先例处理方式。
 
 **存储表位 速查**（spec L129-131）：
 
