@@ -91,7 +91,7 @@ struct DrawingSessionSourceGuardTests {
     func drawingSessionMutatorsAreNotPublic() throws {
         let code = try source("Sources/KlineTrainerContracts/Drawing/DrawingSession.swift")
         for m in ["func activate(", "func deactivate(", "func discardPendingAnchors(",
-                  "func addAnchor(", "func commitPending("] {
+                  "func addAnchor(", "func commitPending(", "func setDefaultStyle("] {
             #expect(code.contains(m), "mutator \(m) 不见了？")                 // 先证明确实扫到了这些方法
             #expect(!code.contains("public " + m),
                     "\(m) 不得为 public —— 包外能直接改会话就绕开了 begin/endDrawingSession，漂移会回来")

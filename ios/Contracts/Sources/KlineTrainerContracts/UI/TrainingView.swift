@@ -459,7 +459,7 @@ public struct TrainingView: View {
                     .id(TradeBoxContent.boxIdentity(panel: strip.panel, action: strip.action, tick: strip.tick))
                 }
             }
-            .overlay {   // active panel 高亮（红描边 inset，RFC-B T2 D10；Task 13：门控解耦至 showsDrawingTools，复盘也高亮）
+            .overlay {   // active panel 高亮（红描边 inset，RFC-B T2 D10；1a-iii：门控 showsActivePanelHighlight=showsTradeButtons||review，复盘也高亮）
                 if showsActivePanelHighlight && id == activePanel {
                     Rectangle().strokeBorder(Color.red.opacity(0.45), lineWidth: 2).allowsHitTesting(false)
                 }
