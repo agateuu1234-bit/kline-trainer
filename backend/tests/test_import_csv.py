@@ -13,7 +13,6 @@ from import_csv import (
     CsvSchemaError,
     clean,
     compute_indicators,
-    compute_ticket_index,
     parse_csv,
     to_kline_records,
 )
@@ -124,55 +123,61 @@ def test_macd_columns_present_from_first_row():
     df = compute_indicators(clean(_synthetic(30)))
     assert not df["macd_diff"].isna().any()   # ewm adjust=False 从首行起有值
 
-# ---- D6 ticket_index ----
-
-def test_ticket_index_1m_strictly_increasing_from_zero():
-    df = clean(_synthetic(10))
-    idx = compute_ticket_index(df, period="1m", baseline_1m_datetimes=None)
-    assert list(idx) == list(range(10))
-    assert all(b > a for a, b in zip(idx, idx[1:]))  # 严格递增
-
-def test_ticket_index_3m_maps_to_1m_baseline():
-    one_min = clean(_synthetic(12))                       # datetimes base+0..base+660
-    baseline = list(one_min["datetime"])
-    # 构造 3m bar：取 1m 的第 0/3/6/9 个 datetime
-    three = one_min.iloc[[0, 3, 6, 9]].reset_index(drop=True)
-    idx = compute_ticket_index(three, period="3m", baseline_1m_datetimes=baseline)
-    assert list(idx) == [0, 3, 6, 9]                     # "能被 3 整除的点"
-
-def test_ticket_index_60m_divisible_by_60_point():
-    one_min = clean(_synthetic(121))
-    baseline = list(one_min["datetime"])
-    hour = one_min.iloc[[0, 60, 120]].reset_index(drop=True)
-    idx = compute_ticket_index(hour, period="60m", baseline_1m_datetimes=baseline)
-    assert list(idx) == [0, 60, 120]
-
 # ---- to_records + 精度 ----
 
 def test_to_kline_records_shape_and_period_stock():
     df = compute_indicators(clean(_synthetic(70)))
-    df["ticket_index"] = compute_ticket_index(df, period="1m", baseline_1m_datetimes=None)
     records = to_kline_records(df, stock_code="600519", period="1m")
     assert len(records) == 70
     r = records[-1]
     assert r["stock_code"] == "600519" and r["period"] == "1m"
     assert set(r) >= {"datetime", "open", "high", "low", "close", "volume",
-                      "amount", "ticket_index", "ma66",
+                      "amount", "ma66",
                       "boll_upper", "boll_mid", "boll_lower",
                       "macd_diff", "macd_dea", "macd_bar"}
 
 def test_to_kline_records_nan_becomes_none():
     df = compute_indicators(clean(_synthetic(10)))  # MA66 全 NaN（<66 行）
-    df["ticket_index"] = compute_ticket_index(df, period="1m", baseline_1m_datetimes=None)
     records = to_kline_records(df, stock_code="X", period="1m")
     assert records[0]["ma66"] is None  # NaN → None（asyncpg 写 NULL）
 
 def test_to_kline_records_integer_columns_are_python_int():
     # R1-H2：BIGINT/INTEGER 列必须是 Python int（非 numpy.float64/int64），否则 asyncpg codec 拒收
     df = compute_indicators(clean(_synthetic(70)))
-    df["ticket_index"] = compute_ticket_index(df, period="1m", baseline_1m_datetimes=None)
     rec = to_kline_records(df, stock_code="X", period="1m")[-1]
-    for col in ("datetime", "volume", "ticket_index"):
+    for col in ("datetime", "volume"):
         assert type(rec[col]) is int, f"{col} 应是 Python int，实得 {type(rec[col])}"
     for col in ("close", "ma66"):  # ma66 在第 70 行有值（≥66）
         assert type(rec[col]) is float, f"{col} 应是 Python float，实得 {type(rec[col])}"
+
+
+# ---- D3/R12-F1：ticket_index 停止写入（列保留、新行 NULL）----
+
+def test_to_kline_records_omits_ticket_index():
+    """D3：Python 侧不再产出 ticket_index；PG 列保留、新行为 NULL。"""
+    df = compute_indicators(clean(_synthetic(70)))
+    records = to_kline_records(df, stock_code="600519", period="1m")
+    assert records, "fixture 应产出记录"
+    assert "ticket_index" not in records[0], "ticket_index 应已停写"
+
+
+def test_kline_insert_sql_has_no_ticket_index():
+    """INSERT 语句不得再含该列——留着会让 executemany 元组数与占位符错位。"""
+    from import_csv import _KLINE_INSERT
+    assert "ticket_index" not in _KLINE_INSERT
+
+
+def test_kline_insert_placeholder_count_matches_columns():
+    """防"删列名忘删占位符"：列数必须与 $N 最大编号一致。"""
+    import re
+    from import_csv import _KLINE_INSERT
+    cols = _KLINE_INSERT.split("INSERT INTO klines (")[1].split(")")[0]
+    n_cols = len([c for c in cols.split(",") if c.strip()])
+    n_ph = max(int(m) for m in re.findall(r"\$(\d+)", _KLINE_INSERT))
+    assert n_cols == n_ph == 16, f"列 {n_cols} vs 占位符 {n_ph}，期望均为 16"
+
+
+def test_compute_ticket_index_symbol_removed():
+    """函数已删除；残留即说明停写没做干净。"""
+    import import_csv
+    assert not hasattr(import_csv, "compute_ticket_index")
