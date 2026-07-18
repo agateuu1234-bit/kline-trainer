@@ -22,7 +22,7 @@
 
 ### Task 1: 解耦自测 total 基线（行为保持）
 
-把自测 fixture 的 total 基线从"读活 `catalyst-total-baseline.txt`"改成"读冻结的 `fixtures/total-baseline-frozen.txt`"。本 task **不改活基线值**（仍 1407），故自测结果必须**保持 36/36 不变**——这证明解耦本身是行为保持的、没引入回归。
+把自测 fixture 的 total 基线从"读活 `catalyst-total-baseline.txt`"改成"读冻结的 `fixtures/total-baseline-frozen.txt`"。本 task **不改活基线值**（仍 1407），故自测**逐条 verdict 保持不变**。**注意本分支起点状态**：分支基于 main（活 uikit 基线 28 vs 源码 35），Task 1 前自测已是 **35 通过 / 1 失败**——唯一失败是 F1「UIKit-gated 期望清单一致性」，那是 **Task 2 才修**的、与本 task 无关。故 Task 1 后必须**仍是 35/1**，且所有 total 基线相关断言逐条 verdict 不变（这才证明冻结 1407==活 1407 的解耦行为保持、没引入回归）。
 
 **Files:**
 - Create: `.github/scripts/fixtures/total-baseline-frozen.txt`
@@ -54,10 +54,10 @@ printf '1407\n' > .github/scripts/fixtures/total-baseline-frozen.txt
 export CATALYST_TOTAL_BASELINE_FILE="$FIX/total-baseline-frozen.txt"
 ```
 
-- [ ] **Step 3: 跑自测，必须仍 36/36（行为保持）**
+- [ ] **Step 3: 跑自测，必须仍 35/1（行为保持；F1 是 Task 2 才修的 pre-existing 失败）**
 
 Run: `bash .github/scripts/catalyst-gate.test.sh`
-Expected: 末行 `结果：36 通过，0 失败`，退出码 0。（活基线仍 1407 == 冻结 1407，所有 fixture 判据语义不变。）
+Expected: 末行 `结果：35 通过，1 失败`。唯一失败是 F1「UIKit-gated 期望测试清单基线一致性检测」（活 uikit 基线 28 vs 源码 35，Task 2 修）；所有 **total 基线相关断言**（pass-new-scheme / pass-ci-format / total-baseline-within/below/above-delta / too-few-tests）逐条与改动前 verdict 一致（都 ok）。这证明冻结 1407==活 1407 的解耦行为保持。
 
 - [ ] **Step 4: Commit**
 
