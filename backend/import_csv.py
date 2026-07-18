@@ -59,6 +59,11 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     out = out.dropna(subset=list(REQUIRED_COLUMNS))
     for c in _PRICE_COLS:
         out = out[out[c] > 0]
+    # codex 对抗评审 high：DOUBLE PRECISION 放宽后 inf 能穿过上面的 >0 校验
+    # （inf > 0 为真），也能穿过下面的 high>=low / high>=max(open,close) 校验
+    # （inf >= inf 为真），进而落库、污染训练组生成与读取（下游拒非有限蜡烛）。
+    # 以前价格列是 DECIMAL 时数据库层会挡；现在必须在这里显式丢非有限行。
+    out = out[np.isfinite(out[list(_PRICE_COLS)]).all(axis=1)]
     out = out[out["high"] >= out["low"]]
     out = out[out["high"] >= out[["open", "close"]].max(axis=1)]
     out = out[out["low"] <= out[["open", "close"]].min(axis=1)]
@@ -152,12 +157,42 @@ ON CONFLICT (stock_code, period, datetime) DO UPDATE SET
 """
 
 
+class SchemaDriftError(ValueError):
+    """D8a：写库前置断言失败——目标库 klines 价格列类型与预期（double precision）不符。"""
+
+
+_SCHEMA_CHECK_SQL = """
+SELECT column_name, data_type FROM information_schema.columns
+WHERE table_name = 'klines' AND column_name = ANY($1::text[])
+"""
+
+
+async def _assert_klines_price_columns_double(conn) -> None:
+    """D8a（spec §4.3，codex 对抗评审 high 提前落地）：写库前 fail-closed 断言——
+    klines.open/high/low/close 必须已是 double precision。防目标库尚未跑 migration
+    0004（仍是 DECIMAL(10,2)）时 PostgreSQL 静默四舍五入到 2 位，摧毁 QMT 前复权价
+    的 float64 精度。刻意不断言 ticket_index（该列保留、非本次范围）。"""
+    rows = await conn.fetch(_SCHEMA_CHECK_SQL, list(_PRICE_COLS))
+    found = {r["column_name"]: r["data_type"] for r in rows}
+    bad = {c: found.get(c, "<列缺失>") for c in _PRICE_COLS
+           if found.get(c) != "double precision"}
+    if bad:
+        detail = "、".join(f"{c}={t}" for c, t in bad.items())
+        raise SchemaDriftError(
+            f"klines 价格列类型与预期不符：{detail}（期望均为 double precision）。"
+            "请先跑 migration 0004_qmt_price_double_and_coverage 再导入。"
+        )
+
+
 async def write_to_postgres(dsn: str, stock_code: str, stock_name: str,
                             records: list[dict]) -> int:
-    """D11：stocks + klines 幂等 UPSERT。返回写入 kline 行数。"""
+    """D11：stocks + klines 幂等 UPSERT。返回写入 kline 行数。
+    D8a：写前 fail-closed 断言 klines 价格列已是 double precision（防陈旧 DECIMAL
+    库静默截断精度）——断言必须早于事务与任何 INSERT。"""
     import asyncpg  # 局部 import：纯函数层不依赖 asyncpg（单测不装也能跑）
     conn = await asyncpg.connect(dsn)
     try:
+        await _assert_klines_price_columns_double(conn)
         async with conn.transaction():
             await conn.execute(
                 "INSERT INTO stocks(code, name) VALUES($1,$2) "

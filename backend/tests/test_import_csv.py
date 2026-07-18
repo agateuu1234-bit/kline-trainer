@@ -3,9 +3,11 @@
 # 纯函数层：全部 in-memory DataFrame，不连 PostgreSQL（写库壳由 B3/NAS 集成测试覆盖，D14）。
 from __future__ import annotations
 
+import asyncio
 import math
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -82,6 +84,20 @@ def test_clean_sorts_ascending_by_datetime():
     df = _synthetic(3).iloc[::-1].reset_index(drop=True)  # 倒序
     out = clean(df)
     assert list(out["datetime"]) == sorted(out["datetime"])
+
+def test_clean_drops_nonfinite_price_rows():
+    # codex 对抗评审 high：klines 价格列放宽到 DOUBLE PRECISION 后，inf 能穿过既有
+    # 正数校验（inf > 0 为真）与 high>=low / high>=max(open,close) 校验（inf>=inf 为真），
+    # 直接落库并污染下游（reader 拒非有限蜡烛）。
+    df = _synthetic(3)
+    df.loc[0, "open"] = float("inf")
+    df.loc[0, "high"] = float("inf")   # 复现 codex 给出的最小复现：open/high 均为 inf
+    df.loc[1, "close"] = float("-inf")
+    out = clean(df)
+    assert len(out) == 1
+    assert out["datetime"].iloc[0] == df["datetime"].iloc[2]  # 唯一合法行仍在
+    for c in ("open", "high", "low", "close"):
+        assert bool(np.isfinite(out[c]).all()), f"{c} 列仍含非有限值"
 
 # ---- D3 MA66 ----
 
@@ -181,3 +197,85 @@ def test_compute_ticket_index_symbol_removed():
     """函数已删除；残留即说明停写没做干净。"""
     import import_csv
     assert not hasattr(import_csv, "compute_ticket_index")
+
+
+# ---- D8a：写库前 schema fail-closed 断言（codex 对抗评审 high，spec §4.3 提前落地）----
+
+def _dummy_kline_record() -> dict:
+    return {
+        "stock_code": "600519", "period": "1m", "datetime": 1,
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+        "volume": 10, "amount": None, "ma66": None,
+        "boll_upper": None, "boll_mid": None, "boll_lower": None,
+        "macd_diff": None, "macd_dea": None, "macd_bar": None,
+    }
+
+
+def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls: dict):
+    """假 asyncpg 模块：information_schema.columns 查询返回 data_type 可控，
+    execute/executemany/transaction 各自计数——用于断言 fail-closed 时一次写入都没发生。"""
+    import sys
+    import types
+
+    class _FakeTx:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakeConn:
+        async def fetch(self, query, *args):
+            calls["fetch"] = calls.get("fetch", 0) + 1
+            return [{"column_name": c, "data_type": data_type}
+                    for c in ("open", "high", "low", "close")]
+
+        async def execute(self, query, *args):
+            calls["execute"] = calls.get("execute", 0) + 1
+            return "ok"
+
+        async def executemany(self, query, args_list):
+            calls["executemany"] = calls.get("executemany", 0) + 1
+
+        def transaction(self):
+            calls["transaction"] = calls.get("transaction", 0) + 1
+            return _FakeTx()
+
+        async def close(self):
+            calls["closed"] = True
+
+    fake = types.ModuleType("asyncpg")
+
+    async def connect(dsn):
+        return _FakeConn()
+
+    fake.connect = connect
+    monkeypatch.setitem(sys.modules, "asyncpg", fake)
+
+
+def test_write_to_postgres_rejects_stale_decimal_schema_before_any_write(monkeypatch):
+    # 目标库仍是旧 DECIMAL(10,2)（未跑 migration 0004）→ 必须 fail-closed 中止，
+    # 且 execute/executemany/transaction 一次都不能被调用（否则 PG 会静默四舍五入丢精度）。
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="numeric", calls=calls)
+    from import_csv import SchemaDriftError, write_to_postgres
+
+    with pytest.raises(SchemaDriftError):
+        asyncio.run(write_to_postgres("postgres://x", "600519", "贵州茅台",
+                                       [_dummy_kline_record()]))
+    assert calls.get("execute", 0) == 0
+    assert calls.get("executemany", 0) == 0
+    assert calls.get("transaction", 0) == 0
+
+
+def test_write_to_postgres_allows_double_precision_schema(monkeypatch):
+    # 目标库已跑 migration 0004（double precision）→ 正常放行、照常写入。
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls)
+    from import_csv import write_to_postgres
+
+    n = asyncio.run(write_to_postgres("postgres://x", "600519", "贵州茅台",
+                                       [_dummy_kline_record()]))
+    assert n == 1
+    assert calls.get("execute", 0) == 1
+    assert calls.get("executemany", 0) == 1
