@@ -903,7 +903,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift build 2>&1 
 cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test 2>&1 | tail -10
 ```
 
-期望：pytest `186 passed / 0 failed / 0 skipped`；swift build 无 error；swift test 全绿。
+期望：pytest `187 passed / 0 failed / 0 skipped`（Task 1 后 186、Task 3 净 +1）；swift build 无 error；swift test 全绿。
 
 - [ ] **Step 2: 出非-coder 验收清单**
 
