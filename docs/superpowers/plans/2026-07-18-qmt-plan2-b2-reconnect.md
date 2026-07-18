@@ -619,7 +619,9 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test --filt
 ```markdown
 > **bump 记录（2026-07-18，QMT 数据接入 Plan 2a）**：顶层 `CONTRACT_VERSION` `"1.11"` → `"1.12"`。触发 = A 类「影响 DDL / 改类型」：PostgreSQL migration `0004_qmt_price_double_and_coverage` —— (1) `klines.open/high/low/close` `DECIMAL(10,2)` → `DOUBLE PRECISION`（QMT 前复权为 float64，2 位截断会压塌老 K 线并丢复权精度）；(2) `training_sets.file_path` `VARCHAR(255)` → `TEXT`（绝对路径任意长）；(3) 新增 `stock_coverage` 表（D11 B1→B2 覆盖契约）。PG schema sub-version 同步 `0003_v1.3` → `0004_qmt_price_double_and_coverage`。**iOS reader 逻辑零改动**（`KLineCandle` 本就 `Double`、训练组 SQLite 本就 `REAL`，端到端浮点），仅版本常量 + 其测试随顶层 bump 改。`ticket_index` 列**保留、仅停止写入**（非删列——m01 禁 Wave 1+ 不可逆迁移）。详见 `docs/superpowers/specs/2026-07-06-qmt-data-ingestion-pilot-design.md` §4.3。
 >
-> **矩阵 stale 校正（同次）**：顶层 cell 此前 stale 为 `"1.7"`，实际代码已在本次之前被四个 PR 连续 bump 至 `"1.11"` 而未同步本矩阵——#132 RFC-A 交易/仓位/资金（`1.7`→`1.8`）、#136 replay 续局 + 复盘步进（`1.8`→`1.9`）、#139 复盘完整重设计（`1.9`→`1.10`）、#140 划线工具 P1a 契约地基（`1.10`→`1.11`）。本次一并校正到 `"1.12"`（含本 plan 的 bump）。同 2026-06-22 记录里「cell 此前 stale 为 `1.5`」的先例处理方式。
+> **矩阵 stale 校正（同次）**：顶层 cell 此前 stale 为 `"1.7"`，实际代码已在本次之前被**三个** PR 连续 bump 至 `"1.11"` 而未同步本矩阵——#136 replay 续局 + 复盘可步进重演（`1.7`→`1.8`，commit `be737d0`）、#139 复盘完整重设计（`1.8`→`1.10`，**同一 squash PR 内两步**，commit `b016bac`）、#140 划线工具 P1a 契约地基（`1.10`→`1.11`，commit `96d2ac4`）。本次一并校正到 `"1.12"`（含本次 bump）。同 2026-06-22 记录里「cell 此前 stale 为 `1.5`」的先例处理方式。
+>
+> 注：#132 RFC-A（`1.6`→`1.7`，commit `8b7a6c2`）**不属于**本段 catch-up 区间——它即上一条 2026-06-22 记录所记的那次 bump，此处不重复计入。
 ```
 
 - [ ] **Step 7: 验证矩阵无残留 stale 值**
