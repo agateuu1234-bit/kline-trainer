@@ -4,6 +4,24 @@
 
 **Goal:** 解除 Plan 1 遗留的 `assemble_training_set` fail-closed 停用——让 `generate_one_training_set` 走安全纯入口 `build_training_windows`（dense_dates 读持久化 `stock_coverage` 表），并落地 D1 的 A 类 DDL 治理三件套（migration / `CONTRACT_VERSION` bump / m01 矩阵）。
 
+> ## ⚠️ 本 plan **不会**让 B4 补货真的出货
+>
+> （codex PF2-R1-F1，high；user 2026-07-18 裁决 = 保持范围、如实改口径）
+>
+> Plan 2 交付的是**「代码通路打通且被测试证明可用」**，**不是**「生产真出训练组」。原因：
+>
+> - PR 2a 建 `stock_coverage` **表**，但本 plan **没有任何代码往里写行**；
+> - `import_csv.py`（B1）至今只写 `stocks`/`klines`，且**根本不认 QMT 格式**——Plan 1 只做了纯函数 `qmt_normalize`/`qmt_resample`，从未接进 B1；
+> - `generate_one_training_set` 读不到覆盖行时 fail-closed 跳过；
+> - Task 6 集成测是用**假 conn 注入**覆盖行的。
+>
+> **所以真库跑起来：每只股票都跳过，`generate_batch` 依然产 0。** 相对今天只是把「代码抛 `NotImplementedError`」换成「前置数据缺失」——**库存产出没有变化**。真正解锁出货的是 **Plan 3（B1 接 QMT 规整/合成层 + 写 `stock_coverage`）**。
+>
+> **本 plan 因此承担三项诚实义务（均已写进对应 Task，不得省略）：**
+> 1. `generate_batch` 必须**打印首条 skip 原因**（Task 5 Step 11a）——否则运维只看到「仅生成 0/100」而不知为何，正是 codex 指的"测试全绿、生产静默跳过"陷阱；
+> 2. PR 2b 的 body 与非-coder 验收清单必须写明「B4 仍产 0，直到 Plan 3」（PR 2b 收尾 Step 2/5）；
+> 3. **禁止**在任何 commit message / PR / 验收项里写「B4 补货已恢复」「库存已可生成」之类表述。
+
 **Architecture:** 拆两个顺序 PR。**PR 2a**（DDL/契约地基）建 `backend/sql/migrations/0004_*/{forward,rollback}.sql`——同一 migration 内 OHLC `DECIMAL(10,2)→DOUBLE PRECISION` + `training_sets.file_path VARCHAR(255)→TEXT` + `CREATE TABLE stock_coverage`——并同步 `schema.sql` fresh baseline、bump `CONTRACT_VERSION`、更新 m01 矩阵、停写 `ticket_index`（保留列）。**PR 2b**（B2 重接）在 2a 建好的表上，把 `generate_one_training_set` 从已停用的 `assemble_training_set` 切到 `build_training_windows`，新增纯装配函数 `assemble_from_windows`，并补一条走真实生产函数链的集成测。
 
 **Tech Stack:** Python 3.11（pandas 2.2.3 / pytest 8.4.2 / pglast 7.13）、PostgreSQL 15 DDL、Swift（仅版本常量 + 其测试）。
@@ -1049,7 +1067,7 @@ EOF
 
 **Interfaces:**
 - Consumes: Task 1 的 `stock_coverage` 表五列；Plan 1 已有的 `build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, trading_dates, before_caps, months, intraday_expected, before_min, max_retries) -> (start_datetime, windows)`；`compute_after_end(month_boundaries, start_idx, months) -> int`；`qmt_resample.period_boundaries(df_daily, rule) -> list[int]`；`qmt_normalize.trading_date(epoch) -> date`
-- Produces: `assemble_from_windows(output_dir, *, stock_code, stock_name, start_datetime, end_datetime, windows) -> GeneratedTrainingSet`（纯函数）；`build_training_windows` 新增 keyword-only 参数 `exclude_starts: frozenset[int] = frozenset()`；`_fetch_dense_coverage(conn, stock_code) -> tuple[date|None, date|None, set[date]]`；`_fetch_existing_starts(conn, stock_code) -> set[int]`。Task 6 的集成测依赖这四个符号。
+- Produces: `assemble_from_windows(output_dir, *, stock_code, stock_name, start_datetime, end_datetime, windows) -> GeneratedTrainingSet`（纯函数）；`build_training_windows` **与** `select_valid_window` 各新增 keyword-only 参数 `exclude_starts: frozenset[int] = frozenset()`（前者透传给后者，后者在切 `max_retries` **之前**过滤）；`_fetch_dense_coverage(conn, stock_code) -> tuple[date|None, date|None, set[date]]`；`_fetch_existing_starts(conn, stock_code) -> set[int]`。Task 6 的集成测依赖这四个符号。
 
 - [ ] **Step 1: 写 `assemble_from_windows` 的失败测试**
 
@@ -1205,7 +1223,33 @@ def test_build_training_windows_all_candidates_excluded_raises():
                                exclude_starts=frozenset(int(b) for b in mb))
 ```
 
-`_weekday_range` / `_golden_intraday` / `_GOLDEN_PER_DAY` / `_mid` 均来自 Task 4 与本文件既有 helper 区，不要重复定义。
+再追加 codex 点名要求的重试预算回归测（**这条是 finding 的靶心**，与重 DataFrame 解耦、直接测 `select_valid_window`）：
+
+```python
+def test_select_valid_window_excludes_before_retry_budget():
+    """codex PF2-R1-F2：前 max_retries(8) 个候选全已登记 → 仍须选中之后的有效候选。
+
+    排除必须发生在 `cands[:max_retries]` 切片**之前**。若让被排除者进循环再拒（我最初的
+    设计），每个都会吃掉一个重试名额 → 股票累积训练组后、shuffle 恰好把已登记的排前面，
+    就会**明明还有可用起点却整股被跳过**，且非确定性（B4 库存会莫名欠产）。
+    直接注入 try_assemble，不建重 fixture。"""
+    bounds = _n_month_boundaries(60)                    # n=60 → 候选 idx 30..51 共 22 个
+    days = _weekday_range(dt.date(2020, 1, 1), dt.date(2025, 12, 31))
+    dense, trading = set(days), days
+    # 用同一 seed 先取 shuffle 顺序，令断言确定（eligible_start_indices 内部 rng.shuffle）
+    order = eligible_start_indices(bounds, random.Random(1), dense_dates=dense,
+                                   trading_dates=trading)
+    assert len(order) > 9, "fixture 须提供多于 max_retries 的候选，否则本测 vacuous"
+    excluded = frozenset(int(bounds[i]) for i in order[:9])   # 排除前 9 个（> max_retries=8）
+    survivor = int(bounds[order[9]])
+    start, _ = select_valid_window(bounds, random.Random(1), dense_dates=dense,
+                                   trading_dates=trading,
+                                   try_assemble=lambda s: {"ok": True},
+                                   exclude_starts=excluded)
+    assert start == survivor, "被排除的候选吃掉了重试名额（修复前必挂）"
+```
+
+`_weekday_range` / `_golden_intraday` / `_GOLDEN_PER_DAY` / `_mid` / `_n_month_boundaries` 均来自 Task 4 与本文件既有 helper 区，不要重复定义。
 
 - [ ] **Step 6: 跑测试确认失败**
 
@@ -1213,11 +1257,38 @@ def test_build_training_windows_all_candidates_excluded_raises():
 cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && ../.venv/bin/python -m pytest tests/test_generate_training_sets.py -q -k exclude
 ```
 
-期望：FAIL，`TypeError: build_training_windows() got an unexpected keyword argument 'exclude_starts'`。
+期望：3 条全 FAIL，报 `TypeError: ... got an unexpected keyword argument 'exclude_starts'`（`select_valid_window` 与 `build_training_windows` 各命中）。
 
-- [ ] **Step 7: 给 `build_training_windows` 加 `exclude_starts`**
+- [ ] **Step 7: 加 `exclude_starts`——在切 `max_retries` 之前过滤**
 
-`backend/generate_training_sets.py` 第 137-161 行。签名行改为：
+改**两个**函数。先是 `select_valid_window`（第 119-131 行），签名加 keyword-only 参数：
+
+```python
+def select_valid_window(month_boundaries, rng, *, dense_dates, trading_dates,
+                        try_assemble, max_retries: int = 8, months: int = 8,
+                        exclude_starts=frozenset()):
+```
+
+docstring 末尾追加：
+
+```python
+    `exclude_starts`（Plan 2b）：已登记的 start_datetime（uq_stock_start）。**必须在切
+    `cands[:max_retries]` 之前过滤**——若放进循环再拒，每个被排除者会吃掉一个重试名额，
+    股票累积训练组后 shuffle 把已登记的排前面，就会明明还有可用起点却整股被跳过、
+    且非确定性（B4 库存莫名欠产）。codex PF2-R1-F2。
+```
+
+函数体在取到 `cands` 之后、进循环之前插入过滤：
+
+```python
+    cands = eligible_start_indices(month_boundaries, rng, dense_dates=dense_dates,
+                                   trading_dates=trading_dates, months=months)
+    if exclude_starts:
+        cands = [i for i in cands if int(month_boundaries[i]) not in exclude_starts]
+    for idx in cands[:max_retries]:
+```
+
+然后是 `build_training_windows`（第 137-161 行），签名加同名参数：
 
 ```python
 def build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, trading_dates,
@@ -1229,21 +1300,19 @@ def build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, t
 docstring 末尾追加一句：
 
 ```python
-    `exclude_starts`（Plan 2b）：已登记过的 start_datetime 集合（uq_stock_start）。
-    在 `_try` 首行拒掉 → 复用既有 bounded retry 换下一个候选，把唯一性约束变成
-    **候选资格**而非事后撞库重来（后者可能反复选回同一个冲突起点、非确定性）。
+    `exclude_starts` 透传给 `select_valid_window`（uq_stock_start → **候选资格**，
+    在重试预算之前过滤；**不要**改成在 `_try` 里拒，那会吃掉重试名额，见该函数 docstring）。
 ```
 
-在 `_try` 函数体首行插入排除判断：
+并在末尾的 `return select_valid_window(...)` 调用里透传：
 
 ```python
-    def _try(start):
-        if int(start) in exclude_starts:
-            raise GenerateSkipException(f"start {start} 已登记（uq_stock_start），换候选")
-        idx = idx_of[int(start)]
+    return select_valid_window(month_boundaries, rng, dense_dates=dense_dates, trading_dates=trading_dates,
+                               try_assemble=_try, max_retries=max_retries, months=months,
+                               exclude_starts=exclude_starts)
 ```
 
-其余不变。
+**`_try` 函数体不动**——排除逻辑不放这里（这正是 codex PF2-R1-F2 否掉的写法）。
 
 - [ ] **Step 8: 跑测试确认通过**
 
@@ -1260,6 +1329,9 @@ cd "/Users/maziming/Coding/Prj_Kline trainer"
 git add backend/generate_training_sets.py backend/tests/test_generate_training_sets.py
 git commit -m "$(cat <<'EOF'
 Plan2b Task5a: 删 assemble_training_set，加 assemble_from_windows + exclude_starts
+
+exclude_starts 在切 max_retries **之前**过滤（codex PF2-R1-F2）——放进循环再拒会吃掉
+重试名额，股票累积训练组后会明明有可用起点却整股被跳过、且非确定性。
 
 旧"随机选起点"路径整体移除（非改造）——它绕过 D2 dense 门与 D9 per-day 硬门。
 新纯装配函数只序列化已门控的 windows，不选起点。
@@ -1371,6 +1443,56 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
     gts.path.with_suffix(".db").unlink(missing_ok=True)   # 仅保留 .zip（登记的产物）
     return gts
 ```
+
+- [ ] **Step 11a: `generate_batch` 打印首条 skip 原因（诚实义务 1）**
+
+本 plan 合并后 `stock_coverage` 仍是空表 → 每股都 skip → 运维只会看到「仅生成 0/100（skip 400 次）」，**看不出是"缺前置数据"还是"代码坏了"**。这正是 codex PF2-R1-F1 指的"测试全绿、生产静默跳过"陷阱。加一条首因输出（只记**第一条**，避免 400 行刷屏）。
+
+`backend/generate_training_sets.py` 的 `generate_batch`（第 360-380 行），把：
+
+```python
+    out: list = []
+    skips = 0
+    max_skips = max(target_count * 4, 4)
+    i = 0
+    while len(out) < target_count and skips < max_skips:
+        code = codes[i % len(codes)]
+        i += 1
+        try:
+            out.append(await generate_one_training_set(conn, code, output_dir, rng))
+        except GenerateSkipException:
+            skips += 1
+    if len(out) < target_count:
+        print(f"[B2] 警告：仅生成 {len(out)}/{target_count}（skip {skips} 次）")
+    return out
+```
+
+改为：
+
+```python
+    out: list = []
+    skips = 0
+    first_skip: Optional[str] = None       # 首条 skip 原因（诊断用；不逐条刷屏）
+    max_skips = max(target_count * 4, 4)
+    i = 0
+    while len(out) < target_count and skips < max_skips:
+        code = codes[i % len(codes)]
+        i += 1
+        try:
+            out.append(await generate_one_training_set(conn, code, output_dir, rng))
+        except GenerateSkipException as exc:
+            skips += 1
+            if first_skip is None:
+                first_skip = f"{code}: {exc}"
+    if len(out) < target_count:
+        # 欠产必须可诊断：只报数字会让"stock_coverage 空表"（Plan 3 前的预期状态）
+        # 与"真回归"长得一模一样。
+        print(f"[B2] 警告：仅生成 {len(out)}/{target_count}（skip {skips} 次）"
+              f"；首条 skip 原因 = {first_skip}")
+    return out
+```
+
+对应回归测追加到 `backend/tests/test_b2_reconnect_integration.py`（Task 6 建的文件，本 Step 先只改生产代码，测试在 Task 6 一并写）。
 
 - [ ] **Step 11: 删 CLI 与 scheduler 里已成孤儿的 NotImplementedError 捕获**
 
@@ -1606,8 +1728,11 @@ def _coverage_row(days: list, dropped: list | None = None) -> dict:
             "dropped_1m_dates": json.dumps([d.isoformat() for d in (dropped or [])])}
 
 
-def _fixture_conn(dropped: list | None = None, n_days: int = 500):
-    days = _trading_days(dt.date(2023, 1, 2), n_days)
+def _fixture_conn(dropped: list | None = None, n_days: int = 1000):
+    # n_days 必须 ≥ ~820 个工作日：eligible_start_indices 要求月边界数 ≥ 31+months(8)=39，
+    # 1000 个工作日 ≈ 46 个月边界 → 8 个候选。500 个工作日只有 ~23 个月边界，
+    # 会直接抛「月边界仅 23，不足 39」，全部集成测 FAIL。
+    days = _trading_days(dt.date(2022, 1, 3), n_days)
     return _FakeConn("000001.SZ", _build_pg_fixture(days),
                      _coverage_row(days, dropped)), days
 
@@ -1680,7 +1805,7 @@ def test_training_set_sqlite_has_all_six_periods(tmp_path):
 def test_missing_coverage_artifact_skips_fail_closed(tmp_path):
     """D11：无 stock_coverage 行 → 无权威 dense 判定 → 必须 skip，
     **不得**退化成"从 klines 反推"或"不门控直接产"。"""
-    days = _trading_days(dt.date(2023, 1, 2), 500)
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
     conn = _FakeConn("000001.SZ", _build_pg_fixture(days), None)
     with pytest.raises(GenerateSkipException, match="stock_coverage"):
         asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
@@ -1696,6 +1821,18 @@ def test_uq_stock_start_not_reused(tmp_path):
     b = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path, random.Random(7)))
     assert a.start_datetime != b.start_datetime
     assert len(conn.registered) == 2
+
+
+def test_generate_batch_surfaces_first_skip_reason(tmp_path, capsys):
+    """诚实义务 1（codex PF2-R1-F1）：`stock_coverage` 空表时欠产输出必须带原因。
+    否则「Plan 3 落地前的预期状态」与「真回归」在日志里长得一模一样，
+    运维只看到「仅生成 0/2」无从判断。"""
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
+    conn = _FakeConn("000001.SZ", _build_pg_fixture(days), None)   # 无覆盖行
+    out = asyncio.run(generate_batch(conn, 2, tmp_path, random.Random(3)))
+    assert out == []
+    printed = capsys.readouterr().out
+    assert "stock_coverage" in printed, f"欠产输出未带首条 skip 原因：{printed!r}"
 
 
 def test_generate_batch_produces_requested_count(tmp_path):
@@ -1760,7 +1897,7 @@ EOF
 
 ## PR 2b 收尾
 
-- [ ] **Step 1: 三绿 + B4 停用解除的证据**
+- [ ] **Step 1: 三绿 + 旧停用路径已彻底移除的证据**
 
 ```bash
 cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && ../.venv/bin/python -m pytest tests/ -q
@@ -1778,7 +1915,23 @@ fi
 
 - [ ] **Step 2: 出非-coder 验收清单**
 
-写 `docs/acceptance/2026-07-18-qmt-plan2b-b2-reconnect.md`，动作/预期/通过-不通过三列中文。至少覆盖：跑 `pytest tests/test_b2_reconnect_integration.py` 全绿、`grep NotImplementedError` 无输出、`assemble_training_set` 已不存在、`generate_batch` 能出 2 组。
+写 `docs/acceptance/2026-07-18-qmt-plan2b-b2-reconnect.md`，动作/预期/通过-不通过三列中文。至少覆盖：跑 `pytest tests/test_b2_reconnect_integration.py` 全绿、`grep NotImplementedError` 无输出、`assemble_training_set` 已不存在、`generate_batch` 在**注入覆盖行的 fixture 上**能出 2 组。
+
+**诚实义务 2（codex PF2-R1-F1，强制）**：清单必须含这么一条，且写在显眼位置——
+
+| 动作 | 预期 | 通过/不通过 |
+|---|---|---|
+| 阅读本 PR 说明中「当前局限」一节 | 明确写着：本 PR **不会**让 B4 补货真的产出训练组；真库 `stock_coverage` 仍是空表，每股都会 skip、`generate_batch` 仍返回 0；解锁出货的是 Plan 3（B1 写覆盖表） | ☐ |
+
+**诚实义务 3（强制）**：验收清单、commit message、PR body 内**禁止**出现「B4 补货已恢复」「库存已可生成」「训练组已能产出」等表述。收尾前自查（负向断言用 if/exit）：
+
+```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer"
+if grep -rnE "B4 ?补货已(恢复|打通)|库存已可生成|训练组已能产出|已恢复出货" \
+     docs/acceptance/2026-07-18-qmt-plan2b-b2-reconnect.md; then
+  echo "FAIL: 出现被禁止的过度宣称表述"; exit 1
+fi
+```
 
 - [ ] **Step 3: requesting-code-review**
 
@@ -1786,11 +1939,18 @@ fi
 
 - [ ] **Step 4: codex 整体评审（branch-diff）**
 
-`codex:adversarial-review`，`--scope branch-diff --base main`。**预期 codex 会重点打的方向**（提前想好答案，别临场编）：坏数据下 `stock_coverage` 的 `dropped_1m_dates` 非法 JSON / 日期越界会怎样；`month_boundaries.index(start)` 找不到时的行为；并发 sweep 的 TOCTOU；`exclude_starts` 吃掉 retry 配额后的误杀率。
+用 `.claude/scripts/codex-attest.sh --scope branch-diff --head <分支> --base main`（`codex:adversarial-review` 是斜杠命令、带 `disable-model-invocation: true`，Claude 无法自行调用）。
+
+**预期 codex 会重点打的方向**（提前想好答案，别临场编）：坏数据下 `stock_coverage` 的 `dropped_1m_dates` 非法 JSON / 日期越界 / `dense_1m_start_date > end_date` 会怎样；`month_boundaries.index(start)` 找不到时的行为；并发 sweep 的 TOCTOU；D9 首日豁免会不会放过"窗口最早那天被 B1 drop"的情形（答：会，但**修复前也一样**——`span` 起点本就是 `dates.min()`，该情形不属本次回归）。
 
 - [ ] **Step 5: 开 PR**
 
 中文标题/正文，说明依赖 PR 2a（`stock_coverage` 表）。由用户 merge。
+
+**PR body 必须含「当前局限」一节**（诚实义务 2），逐字表达以下三点：
+1. 本 PR 打通的是**代码通路**，不是生产出货；
+2. 真库 `stock_coverage` 仍无写入方 → 每股 skip → `generate_batch` 返回 0（与合并前的库存产出**没有变化**）；
+3. 解锁出货 = **Plan 3**（B1 接 QMT 规整/合成层 + 写 `stock_coverage`）。
 
 ---
 
@@ -1814,3 +1974,20 @@ fi
 **类型一致性核对**：`assemble_from_windows` 的参数名（`start_datetime`/`end_datetime`/`windows`）在 Task 5 定义、Task 6 不直接调用（走 `generate_one_training_set`）；`_fetch_dense_coverage` 返回三元组与 Task 5 Step 10 的解包一致；`stock_coverage` 五个列名在 Task 1 建表、Task 5 查询、Task 6 假件三处一致（`dense_1m_start_date`/`dense_1m_end_date`/`dropped_1m_dates`）；`per_day_intraday_complete` 在 Task 4 改语义后，Task 5/6 均依赖其在生产 `PERIOD_BEFORE_CAP` 下可通过。
 
 **helper 核实（已完成，无需实施者再猜）**：`test_generate_training_sets.py` 既有 helper 实际为 `_bars(period, n, *, base=_BASE, step=0)`（L31）、`_mid(y, mo, d)`（L215）、`_weekday_trading_dates(d0, d1) -> set`（L223）、`_n_month_boundaries(n) -> list`（L232）、`_intraday_bars_per_day(days, n)`（L355）。本 plan 新增的 `_weekday_range` / `_golden_intraday` / `_GOLDEN_PER_DAY` / `_production_fixture` 在 Task 4-5 内定义，不与既有名冲突（已 grep 核实）。**注意** `_bars` 在 `test_build_training_windows_end_to_end_retries_on_tail_d9_fail` 内被同名局部函数遮蔽，那是函数作用域内的既有写法，不要顺手「统一」掉。
+
+---
+
+## Codex 评审记录
+
+### PF2-R1（2026-07-18，`--scope branch-diff --base main`，verdict = needs-attention）
+
+- **F1 [high] B2 依赖一个本 plan 从不产生的 artifact**（`stock_coverage` 有表无写入方）。
+  **核实 = 属实。** `import_csv.py` 只写 `stocks`/`klines` 且不认 QMT 格式；Task 6 集成测靠假 conn 注入覆盖行；真库跑起来每股都 skip、`generate_batch` 仍产 0。
+  **处置 = user 2026-07-18 裁决「保持范围、如实改口径」**（不把 B1 接入吹进 Plan 2，避免破 ≤3 子项守则 / codex 不收敛）。落地为文首「⚠️ 本 plan 不会让 B4 补货真的出货」告警 + 三项诚实义务（Task 5 Step 11a 首因输出；PR 2b 收尾 Step 2/5 的验收条目、PR body「当前局限」节、过度宣称 grep 自查）。
+  **未采纳 codex 的第一条建议**（把 B1 覆盖写入拉进本 plan）——理由已记录：需先接入整条 QMT B1 链，等于吞掉 Plan 3 大半。
+
+- **F2 [medium] 被排除的起点会吃掉 bounded retry 预算**。
+  **核实 = 属实，且是我的设计错误。** `select_valid_window` 只遍历 `cands[:max_retries]`（源码第 125 行），我原打算在 `_try` 里抛异常来复用重试机制 → 每个被排除者占一个名额 → 股票累积训练组后可能明明有可用起点却整股被跳过、非确定性。
+  **处置 = 全盘采纳。** 改为在切 `max_retries` **之前**过滤（`select_valid_window` 加 `exclude_starts`，`build_training_windows` 透传），并按 codex 要求补 `test_select_valid_window_excludes_before_retry_budget`（前 9 个候选全排除、第 10 个必须被选中）。
+
+**本轮另行自查修掉的 plan 自身缺陷**（非 codex 指出）：Task 6 的 `_fixture_conn` 原设 `n_days=500` ≈ 23 个月边界，低于 `eligible_start_indices` 要求的 39 → 全部集成测会直接抛「月边界不足」。已改 1000 并写明下限理由。
