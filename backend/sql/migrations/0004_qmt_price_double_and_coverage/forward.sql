@@ -18,6 +18,36 @@ ALTER TABLE klines ALTER COLUMN high  TYPE DOUBLE PRECISION;
 ALTER TABLE klines ALTER COLUMN low   TYPE DOUBLE PRECISION;
 ALTER TABLE klines ALTER COLUMN close TYPE DOUBLE PRECISION;
 
+-- 1b. 价格不变量下沉到 DB 层（codex R3-F1）
+-- 改 DOUBLE PRECISION 后 PostgreSQL 会接受 NaN / ±Infinity，而下游把非有限蜡烛当损坏
+-- 数据。仅靠 import_csv.clean() 过滤只保护 CSV 导入一条路径（直接 SQL 写入 / 将来的
+-- QMT writer / 人工修数据都能绕过），等于把关键不变量从 DB 契约降格成应用约定。
+-- 这两条 CHECK 与 clean() 逐行执行的判据一致，构成两层纵深。
+-- 写法：显式 `<> 'NaN'` / `<> 'Infinity'`，不依赖 PG 的 NaN 排序语义（PG 视 NaN 大于
+-- 一切非-NaN 值，故 `NaN > 0` 为真、`> 0` 挡不住 NaN）；`> 0` 负责挡 -Infinity。
+--
+-- ⚠️ 存量数据：`ADD CONSTRAINT ... CHECK` 会**全表扫描**校验既有行并持有
+-- ACCESS EXCLUSIVE 锁；若存在违规行，整个 migration 失败并回滚（fail-closed，
+-- 不留半吊子状态）。本仓 PostgreSQL 至今未部署、klines 无存量数据，故此处直接 ADD。
+-- **若将来对已有数据的库执行本 migration，请改用在线路径**，避免长锁与个别脏行导致整迁失败：
+--   1) ALTER TABLE klines ADD CONSTRAINT <name> CHECK (...) NOT VALID;  -- 只约束新行、不扫表
+--   2) 查并清洗违规存量行，例如：
+--        SELECT id FROM klines
+--        WHERE NOT (open > 0 AND open <> 'NaN'::double precision
+--                   AND open <> 'Infinity'::double precision /* …其余三列同理… */);
+--   3) ALTER TABLE klines VALIDATE CONSTRAINT <name>;  -- 仅取 SHARE UPDATE EXCLUSIVE，不阻塞读写
+ALTER TABLE klines ADD CONSTRAINT ck_klines_price_finite_positive CHECK (
+    open  > 0 AND open  <> 'NaN'::double precision AND open  <> 'Infinity'::double precision AND
+    high  > 0 AND high  <> 'NaN'::double precision AND high  <> 'Infinity'::double precision AND
+    low   > 0 AND low   <> 'NaN'::double precision AND low   <> 'Infinity'::double precision AND
+    close > 0 AND close <> 'NaN'::double precision AND close <> 'Infinity'::double precision
+);
+ALTER TABLE klines ADD CONSTRAINT ck_klines_price_ordering CHECK (
+    high >= low
+    AND high >= greatest(open, close)
+    AND low  <= least(open, close)
+);
+
 -- 2. file_path 去长度限（VARCHAR(255)→TEXT 是扩容，存量值无损）
 ALTER TABLE training_sets ALTER COLUMN file_path TYPE TEXT;
 

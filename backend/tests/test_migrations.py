@@ -73,6 +73,46 @@ def test_migration_0004_stock_coverage_carries_integrity_checks():
     assert "dense_1m_start_date <= dense_1m_end_date" in sql
 
 
+def test_migration_0004_forward_adds_price_integrity_checks():
+    """codex R3-F1：OHLC 放宽到 DOUBLE 后 PG 会接受 NaN/±Infinity，而下游把非有限
+    蜡烛当损坏数据。仅靠 import_csv.clean() 只护住 CSV 一条路径 → 不变量必须下沉到
+    DB 契约。这两条 CHECK 与 clean() 逐行判据一致。"""
+    sql = _sql_normalized(MIG_0004 / "forward.sql")
+    assert "add constraint ck_klines_price_finite_positive" in sql
+    assert "add constraint ck_klines_price_ordering" in sql
+    # 非有限值必须显式排除（不依赖 PG 的 NaN 排序语义：PG 视 NaN > 一切非-NaN，
+    # 故 `> 0` 挡不住 NaN）。
+    # **逐列断言**：只查"子串出现过"的写法挡不住"四列里漏一列"——mutation 实测：
+    # 删掉 open 的 NaN 排除后，high/low/close 仍带该子串，弱断言照样绿。
+    for col in ("open", "high", "low", "close"):
+        assert f"{col} > 0" in sql, f"{col} 缺正数约束"
+        assert f"{col} <> 'nan'::double precision" in sql, f"{col} 缺 NaN 排除"
+        assert f"{col} <> 'infinity'::double precision" in sql, f"{col} 缺 Infinity 排除"
+    # 顺序不变量三条齐全
+    assert "high >= low" in sql
+    assert "greatest(open, close)" in sql
+    assert "least(open, close)" in sql
+
+
+def test_migration_0004_forward_documents_existing_data_path():
+    """ADD CONSTRAINT 会全表扫描 + 持 ACCESS EXCLUSIVE 锁，存量库上可能整迁失败。
+    forward.sql 必须写明在线路径（NOT VALID → 清洗 → VALIDATE），不得默默假设无存量。"""
+    text = (MIG_0004 / "forward.sql").read_text(encoding="utf-8")
+    assert "NOT VALID" in text, "未给出 NOT VALID 在线路径"
+    assert "VALIDATE CONSTRAINT" in text, "未给出 VALIDATE 步骤"
+
+
+def test_migration_0004_rollback_drops_price_checks_before_narrowing():
+    """回滚必须**先删 CHECK 再收窄列类型**：约束表达式含 'NaN'::double precision
+    字面量，列类型变回 numeric 后该表达式不再成立。"""
+    sql = _sql_normalized(MIG_0004 / "rollback.sql")
+    drop_i = sql.find("drop constraint if exists ck_klines_price_finite_positive")
+    narrow_i = sql.find("alter column open  type decimal(10,2)".replace("  ", " "))
+    assert drop_i != -1, "rollback 未删价格 CHECK"
+    assert narrow_i != -1, "rollback 未收窄 open 列"
+    assert drop_i < narrow_i, "必须先删 CHECK 再收窄列类型"
+
+
 def test_migration_0004_forward_widens_file_path_to_text():
     """R16-F2：绝对路径可任意长，VARCHAR(255) 会让登记 INSERT 失败留 orphan。"""
     sql = _sql_normalized(MIG_0004 / "forward.sql")

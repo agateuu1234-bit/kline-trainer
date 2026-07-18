@@ -18,6 +18,11 @@ DROP TABLE IF EXISTS stock_coverage;
 ALTER TABLE training_sets ALTER COLUMN file_path TYPE VARCHAR(255);
 
 -- 1. 价格列降精度 —— 丢精度，见顶部警告
+-- 1b. 先删价格 CHECK（codex R3-F1 加的）——必须早于收窄列类型：
+-- 约束表达式里有 `'NaN'::double precision` 字面量，列类型变回 numeric 后该表达式不再成立。
+ALTER TABLE klines DROP CONSTRAINT IF EXISTS ck_klines_price_ordering;
+ALTER TABLE klines DROP CONSTRAINT IF EXISTS ck_klines_price_finite_positive;
+
 ALTER TABLE klines ALTER COLUMN open  TYPE DECIMAL(10,2);
 ALTER TABLE klines ALTER COLUMN high  TYPE DECIMAL(10,2);
 ALTER TABLE klines ALTER COLUMN low   TYPE DECIMAL(10,2);

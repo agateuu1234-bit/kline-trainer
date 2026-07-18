@@ -233,3 +233,20 @@ def test_stock_coverage_has_integrity_checks():
     for col in ("dense_1m_start_date", "dense_1m_end_date", "dense_day_count"):
         assert f"{col} date not null" in seg or f"{col} integer not null" in seg, \
             f"{col} 应为 NOT NULL"
+
+
+def test_klines_has_price_integrity_checks():
+    """codex R3-F1：fresh baseline 与 migration 后的形状必须一致——
+    新建库同样要带价格有限性/正数/顺序约束，否则两条路径建出的库形状会漂移。"""
+    sql = re.sub(r"\s+", " ", re.sub(r"--[^\n]*", " ",
+                 SCHEMA_PATH.read_text(encoding="utf-8"))).lower()
+    seg = sql.split("create table if not exists klines")[1].split("create table")[0]
+    assert "ck_klines_price_finite_positive" in seg
+    assert "ck_klines_price_ordering" in seg
+    # 逐列断言，理由同 test_migrations 内同名检查（弱子串断言挡不住漏列）
+    for col in ("open", "high", "low", "close"):
+        assert f"{col} > 0" in seg, f"{col} 缺正数约束"
+        assert f"{col} <> 'nan'::double precision" in seg, f"{col} 缺 NaN 排除"
+        assert f"{col} <> 'infinity'::double precision" in seg, f"{col} 缺 Infinity 排除"
+    assert "greatest(open, close)" in seg
+    assert "least(open, close)" in seg

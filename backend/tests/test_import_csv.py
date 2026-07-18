@@ -230,15 +230,18 @@ def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls
         async def fetch(self, query, *args):
             calls["fetch"] = calls.get("fetch", 0) + 1
             calls["query"] = query
+            calls.setdefault("order", []).append(("fetch", query))
             return [{"column_name": c, "data_type": data_type}
                     for c in ("open", "high", "low", "close")]
 
         async def execute(self, query, *args):
             calls["execute"] = calls.get("execute", 0) + 1
+            calls.setdefault("order", []).append(("execute", query))
             return "ok"
 
         async def executemany(self, query, args_list):
             calls["executemany"] = calls.get("executemany", 0) + 1
+            calls.setdefault("order", []).append(("executemany", query))
 
         def transaction(self):
             calls["transaction"] = calls.get("transaction", 0) + 1
@@ -268,9 +271,22 @@ def test_write_to_postgres_rejects_stale_decimal_schema_before_any_write(monkeyp
     with pytest.raises(SchemaDriftError):
         asyncio.run(write_to_postgres("postgres://x", "600519", "贵州茅台",
                                        [_dummy_kline_record()]))
-    assert calls.get("execute", 0) == 0
-    assert calls.get("executemany", 0) == 0
-    assert calls.get("transaction", 0) == 0
+    # codex R3-F2 后断言已移进事务、且先取 ROW EXCLUSIVE 锁 → 事务与 LOCK 会发生，
+    # 但**任何写入语句都不许发生**（这才是"零写入"的真正含义；只数 execute 次数
+    # 会把 LOCK 误算成写入）。
+    order = calls.get("order", [])
+    kinds = [k for k, _ in order]
+    assert "fetch" in kinds, "断言查询未发生"
+    writes = [q for k, q in order
+              if k == "executemany" or (k == "execute" and "LOCK TABLE" not in q)]
+    assert writes == [], f"旧库情形下发生了写入: {writes}"
+    # 顺序：先锁、再断言 —— 锁必须早于检查，否则检查与使用之间仍可被 ALTER 插入
+    lock_i = next(i for i, (k, q) in enumerate(order)
+                  if k == "execute" and "LOCK TABLE" in q)
+    fetch_i = next(i for i, (k, _) in enumerate(order) if k == "fetch")
+    assert lock_i < fetch_i, f"LOCK 必须早于断言查询，实际 order={kinds}"
+    assert "ROW EXCLUSIVE" in order[lock_i][1], "锁级别应为 ROW EXCLUSIVE"
+    assert calls.get("transaction", 0) == 1, "断言应发生在写事务内部" 
     # 断言查询锁定的是 to_regclass 精确解析出的关系，而非按表名裸过滤的
     # information_schema.columns（后者跨 schema 会取到无关 klines 表，按列名收敛
     # 时后取到的行覆盖先前的，可能让本该 fail-closed 的旧 DECIMAL 库被掩盖放行）。
@@ -288,6 +304,14 @@ def test_write_to_postgres_allows_double_precision_schema(monkeypatch):
     n = asyncio.run(write_to_postgres("postgres://x", "600519", "贵州茅台",
                                        [_dummy_kline_record()]))
     assert n == 1
-    assert calls.get("execute", 0) == 1
+    # 顺序契约（codex R3-F2）：LOCK TABLE → catalog 断言 → 写入。
+    order = calls.get("order", [])
+    lock_i = next(i for i, (k, q) in enumerate(order)
+                  if k == "execute" and "LOCK TABLE" in q)
+    fetch_i = next(i for i, (k, _) in enumerate(order) if k == "fetch")
+    write_i = next(i for i, (k, q) in enumerate(order)
+                   if k == "executemany" or (k == "execute" and "LOCK TABLE" not in q))
+    assert lock_i < fetch_i < write_i, f"顺序应为 LOCK→断言→写入，实际 {[k for k, _ in order]}"
+    assert "ROW EXCLUSIVE" in order[lock_i][1]
     assert calls.get("executemany", 0) == 1
     assert "to_regclass" in calls.get("query", "")

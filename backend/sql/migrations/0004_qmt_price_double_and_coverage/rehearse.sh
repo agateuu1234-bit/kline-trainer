@@ -116,6 +116,20 @@ fail_msg() {
 
 # 断言字符串相等；不等则打印 FAIL 并立刻非零退出（本仓 set -e 下 "! cmd" 会静默失效的坑，
 # 一律用 if/then/exit1 显式写）
+assert_rejects() {
+  # $1=描述  $2=db  $3=应当被拒绝的 SQL
+  # 用于证明约束**真的会拒**坏数据，而不只是"建出来了"。
+  # 负向判定用 if/else 显式分支，不用 `! cmd`——本仓踩过 `set -e` 下 `! grep`
+  # 让闸门静默失效的坑。
+  local desc="$1" db="$2" sql="$3"
+  if docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+       psql -U postgres -h 127.0.0.1 -d "$db" -v ON_ERROR_STOP=1 -tA -c "$sql" >/dev/null 2>&1; then
+    fail_msg "$desc —— 该语句本应被数据库拒绝，却执行成功了"
+    exit 1
+  fi
+  pass_msg "$desc"
+}
+
 assert_eq() {
   local desc="$1" actual="$2" expected="$3"
   if [ "$actual" != "$expected" ]; then
@@ -257,6 +271,23 @@ assert_eq "stock_coverage 表已存在" \
 assert_eq "stock_coverage 三条 CHECK 约束都在" \
   "$(pg_query main_db "SELECT string_agg(conname, ',' ORDER BY conname) FROM pg_constraint WHERE conrelid='stock_coverage'::regclass AND contype='c';")" \
   "ck_stock_coverage_day_count,ck_stock_coverage_dropped_is_array,ck_stock_coverage_range"
+
+assert_eq "klines 价格完整性 CHECK 已建（codex R3-F1：DB 层挡 NaN/Infinity 与顺序违规）" \
+  "$(pg_query main_db "SELECT string_agg(conname, ',' ORDER BY conname) FROM pg_constraint WHERE conrelid='klines'::regclass AND contype='c' AND conname LIKE 'ck_klines_price%';")" \
+  "ck_klines_price_finite_positive,ck_klines_price_ordering"
+
+# 这两条是本轮最有价值的断言：证明约束**真的会拒**坏数据，而不只是"建出来了"。
+assert_rejects "非有限价格（Infinity）被 DB 拒绝" main_db \
+  "INSERT INTO klines (stock_code, period, datetime, open, high, low, close, volume)
+   VALUES ('000001.SZ','1m',9000000001,'Infinity'::double precision,'Infinity'::double precision,1,1,1);"
+
+assert_rejects "NaN 价格被 DB 拒绝" main_db \
+  "INSERT INTO klines (stock_code, period, datetime, open, high, low, close, volume)
+   VALUES ('000001.SZ','1m',9000000002,'NaN'::double precision,'NaN'::double precision,1,1,1);"
+
+assert_rejects "顺序违规（high < low）被 DB 拒绝" main_db \
+  "INSERT INTO klines (stock_code, period, datetime, open, high, low, close, volume)
+   VALUES ('000001.SZ','1m',9000000003,1.0,0.5,2.0,1.0,1);"
 
 assert_eq "ticket_index 列仍在（停写不删列不变量，本 migration 对该列零 DDL）" \
   "$(pg_query main_db "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='klines' AND column_name='ticket_index';")" \

@@ -206,12 +206,25 @@ async def write_to_postgres(dsn: str, stock_code: str, stock_name: str,
                             records: list[dict]) -> int:
     """D11：stocks + klines 幂等 UPSERT。返回写入 kline 行数。
     D8a：写前 fail-closed 断言 klines 价格列已是 double precision（防陈旧 DECIMAL
-    库静默截断精度）——断言必须早于事务与任何 INSERT。"""
+    库静默截断精度）。
+
+    **断言与写入必须原子**（codex R3-F2）：断言原先在事务之外，且那条 catalog 查询
+    不锁 klines —— 检查通过之后、INSERT 取到表锁之前，若有人跑 rollback.sql 或手工
+    ALTER TABLE 把价格列改回 numeric，守卫就被绕过、精度静默丢失。故改为在同一事务内
+    先取一把与 ALTER TABLE 冲突的锁、再断言、再写。
+
+    锁级别选 ROW EXCLUSIVE：这正是 INSERT 自身会取的级别，与 ALTER TABLE 的
+    ACCESS EXCLUSIVE 冲突（堵住并发改表），但不与其它 ROW EXCLUSIVE 冲突
+    （不会把并发导入白白串行化）。刻意不升到 SHARE 或更高。
+
+    注：这与前一轮拒绝的「为不可能场景加机器」不是同一件事——那是给单写入者架构补并发
+    防护；这里是把检查移进它所保护的事务、使检查-使用原子化，属于移除结构缺陷。"""
     import asyncpg  # 局部 import：纯函数层不依赖 asyncpg（单测不装也能跑）
     conn = await asyncpg.connect(dsn)
     try:
-        await _assert_klines_price_columns_double(conn)
         async with conn.transaction():
+            await conn.execute("LOCK TABLE klines IN ROW EXCLUSIVE MODE")
+            await _assert_klines_price_columns_double(conn)
             await conn.execute(
                 "INSERT INTO stocks(code, name) VALUES($1,$2) "
                 "ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name",

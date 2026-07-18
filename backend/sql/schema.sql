@@ -29,7 +29,25 @@ CREATE TABLE IF NOT EXISTS klines (
     macd_diff DECIMAL(10,6),
     macd_dea DECIMAL(10,6),
     macd_bar DECIMAL(10,6),
-    UNIQUE(stock_code, period, datetime)
+    UNIQUE(stock_code, period, datetime),
+    -- 价格不变量下沉到 DB 层（codex R3-F1）：OHLC 改 DOUBLE PRECISION 后，PostgreSQL
+    -- 会接受 NaN / ±Infinity，而下游把非有限蜡烛当损坏数据。仅靠 import_csv.clean()
+    -- 过滤只保护 CSV 导入这一条路径——直接 SQL 写入 / 将来的 QMT writer / 人工修数据
+    -- 都能绕过。故把 clean() 逐行执行的判据固化为 DB 契约，两层纵深。
+    -- 写法说明：显式 `<> 'NaN'` / `<> 'Infinity'` 而不依赖 PostgreSQL 的 NaN 排序语义
+    -- （PG 把 NaN 视为大于一切非-NaN 值，故 `NaN > 0` 为真、`> 0` 挡不住 NaN）。
+    -- `> 0` 负责挡掉 -Infinity。
+    CONSTRAINT ck_klines_price_finite_positive CHECK (
+        open  > 0 AND open  <> 'NaN'::double precision AND open  <> 'Infinity'::double precision AND
+        high  > 0 AND high  <> 'NaN'::double precision AND high  <> 'Infinity'::double precision AND
+        low   > 0 AND low   <> 'NaN'::double precision AND low   <> 'Infinity'::double precision AND
+        close > 0 AND close <> 'NaN'::double precision AND close <> 'Infinity'::double precision
+    ),
+    CONSTRAINT ck_klines_price_ordering CHECK (
+        high >= low
+        AND high >= greatest(open, close)
+        AND low  <= least(open, close)
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_klines_lookup ON klines(stock_code, period, datetime);
