@@ -55,6 +55,19 @@ struct DrawingSessionSourceGuardTests {
         #expect(!code.contains("engine.commitDrawing("))
     }
 
+    @Test("codex rebased-R2：不可见画线（右缘 ray 等 visibleGeometry==nil）不落库——commitPending 与 routeDrawingCommit 之间有 fail-closed 守卫")
+    func rejectsInvisibleDrawingBeforePersist() throws {
+        let code = try source(chartContainer)
+        // 取 commitPending 到 routeDrawingCommit 的片段，断言中间夹了 visibleGeometry != nil 的守卫
+        // （否则落在右缘的射线会 append+autosave 成一条画不出/命不中/1b-i 前删不掉的幽灵线）。
+        let s = try #require(code.range(of: "session.commitPending("), "找不到 commitPending 调用")
+        let tail = String(code[s.upperBound...])
+        let e = try #require(tail.range(of: "engine.routeDrawingCommit("), "找不到 routeDrawingCommit")
+        let between = String(tail[..<e.lowerBound])
+        #expect(between.contains("HorizontalLineTool.visibleGeometry("))
+        #expect(between.contains("!= nil"))
+    }
+
     @Test("#4b：TrainingView 的 activePanel observer **不再**取消画线；toggleDrawingExclusive 已退役")
     func activePanelObserverNoLongerCancelsDrawing() throws {
         let code = try source(trainingView)
