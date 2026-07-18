@@ -54,7 +54,7 @@ UIKit-gated 期望测试清单基线一致性检测（F1）：
 
 - **零 fixture 重裁**：所有 total 相关 fixture 保持原样。
 - **活基线只服务真 CI**：真构建报 1457 vs 活基线 1457 → PASS；自测 fixture 走冻结 1407 → 判据逻辑照测。
-- **未来韧性**：谁再增删 >30 测试，只改 `catalyst-total-baseline.txt` 一个文件，自测 fixture 一律不动（这正是 #146 场景该有的维护成本——1 个文件，不是连锁破裂）。
+- **未来韧性**：谁再增删 >30 测试，只改 `catalyst-total-baseline.txt` 一个文件，冻结 delta 判据 fixture（1407 一族）一律不动（这正是 #146 场景该有的维护成本——1 个文件，不是连锁破裂）。**例外**：`fixtures/pass-main-current.log`（Task 3 新增的活基线覆盖 fixture，见 §4 验收）是有意跟活 `catalyst-uikit-baseline.txt`/`catalyst-total-baseline.txt` 耦合的——它测的就是「活基线本身没被误改」，所以活 uikit 基线一变、或真实总数漂出 1457±30，就必须用一次真 Catalyst 构建日志重裁这份 fixture，不能当成冻结 fixture 免维护。
 - **UIKit F1 仍活**：`catalyst-uikit-baseline.txt` 保持活比对（增删 UIKit 测试仍须重生成它，这是 F1 的设计意图，不解耦）。
 
 ## 4. 验收（全部实跑，不推断）

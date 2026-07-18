@@ -249,7 +249,7 @@ export UIKIT_EXPECTED_TESTS_SCRIPT="$FIX/uikit-expected-tests-frozen.py"
 # 日志配套、冻结在提交历史里的 total 基线（fixtures/total-baseline-frozen.txt=1407），
 # 通过 catalyst-gate.sh 已有的 CATALYST_TOTAL_BASELINE_FILE 注入点喂给下面所有 expect。
 # 真实 xcodebuild 日志（workflow 真跑）不设这个环境变量，仍走默认的活 catalyst-total-
-# baseline.txt——活基线的保护完全没丢（见文件末尾独立说明 + 本 PR Verification 段）。
+# baseline.txt——活基线的保护完全没丢（见下方「活基线覆盖」用例）。
 export CATALYST_TOTAL_BASELINE_FILE="$FIX/total-baseline-frozen.txt"
 
 echo "catalyst-gate.sh 判据测试（fixture 用例，期望清单已冻结，不随当前源码漂移）："
@@ -376,6 +376,8 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 # 走 catalyst-gate.sh 默认的活基线，对一份代表当前 main 的裁剪真日志（pass-main-current.log：
 # 1457 tests / 35 UIKit / macabi）断言 GATE PASS 且回显 1457。活基线一旦被误改（漂出 ±30），
 # 这条会在 Gate self-test 步就红，早于真构建步。
+# 维护：任何改动 catalyst-uikit-baseline.txt、或让真实总用例数漂出 1457±30 的 PR，必须同时
+# 用一次真 Catalyst 构建日志重裁 pass-main-current.log（禁手打伪造行，见 R9）。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
 if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1457" <<<"$out"; then
