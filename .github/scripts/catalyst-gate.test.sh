@@ -369,6 +369,23 @@ expect 0 total-baseline-within-delta.log "GATE PASS" \
 expect 1 total-baseline-above-delta.log  "高于上限" \
     "R8 隔离：用例数 1500（基线 1407 + delta 30 = 上限 1437，1500 超出）→ 必须由 G7·基线上限分支拦截"
 
+# 活基线覆盖（codex plan R1 [high]，2026-07-18）：上面所有 fixture 用例都走冻结基线
+# （UIKIT_EXPECTED_TESTS_SCRIPT + CATALYST_TOTAL_BASELINE_FILE 两个 export），因此活
+# catalyst-total-baseline.txt / catalyst-uikit-baseline.txt 不被它们覆盖——误设/漂移只会
+# 在真 CI 的真构建步暴露、reviewer 无法从仓库状态复现。这条**显式 unset 两个冻结覆盖**、
+# 走 catalyst-gate.sh 默认的活基线，对一份代表当前 main 的裁剪真日志（pass-main-current.log：
+# 1457 tests / 35 UIKit / macabi）断言 GATE PASS 且回显 1457。活基线一旦被误改（漂出 ±30），
+# 这条会在 Gate self-test 步就红，早于真构建步。
+out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
+got=$?
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1457" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 35 / total 1457）→ GATE PASS 且回显 1457 (exit=$got)"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1457，实得 exit=$got, out=$out"
+    FAILED=$((FAILED + 1))
+fi
+
 # C1 回归：xcodebuild 命令行回显本身就带 -only-testing:KlineTrainerContractsTests + 金丝雀文件名
 # 也出现在 SwiftDriverJobDiscovery（任务规划，非真编译）行里——但整份日志没有一行 SwiftCompile、
 # 没有一处 Tests/KlineTrainerContractsTests/ 源码路径。旧的裸字符串锚点会被这份日志骗过
