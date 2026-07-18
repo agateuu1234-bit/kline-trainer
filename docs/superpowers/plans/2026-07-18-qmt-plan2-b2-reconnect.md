@@ -132,12 +132,25 @@ test_schema.py 同约定；真库前向迁移验证属 B3/NAS owner scope。
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pglast
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "sql" / "migrations"
 MIG_0004 = MIGRATIONS_DIR / "0004_qmt_price_double_and_coverage"
+
+
+def _sql_normalized(path: Path) -> str:
+    """去 `--` 行注释 + 压平空白 + 转小写，供子串断言用。
+
+    codex PF2-R3-F2：直接对原文做子串断言必挂——(a) 本仓 SQL 用多空格对齐
+    （`ALTER COLUMN open  TYPE ...`），单空格 pattern 匹配不上；(b) 注释里出现的
+    `ticket_index` 会让「不得含该词」的断言误判。正是
+    feedback_acceptance_grep_anchoring 记的「注释子串误判」坑。
+    （本仓 migration SQL 不含带 `--` 的字符串字面量，去注释安全。）"""
+    text = re.sub(r"--[^\n]*", " ", path.read_text(encoding="utf-8"))
+    return re.sub(r"\s+", " ", text).strip().lower()
 
 
 def test_migration_0004_has_forward_and_rollback():
@@ -158,21 +171,21 @@ def test_migration_0004_rollback_is_valid_postgres():
 
 def test_migration_0004_forward_converts_ohlc_to_double():
     """D1：四个价格列都必须被转成 double precision（少一列 = 静默截断残留）。"""
-    sql = (MIG_0004 / "forward.sql").read_text(encoding="utf-8").lower()
+    sql = _sql_normalized(MIG_0004 / "forward.sql")
     for col in ("open", "high", "low", "close"):
         assert f"alter column {col} type double precision" in sql, f"{col} 未转 DOUBLE"
 
 
 def test_migration_0004_forward_creates_stock_coverage():
     """D11：B2 读 dense_dates 的权威 artifact 表。"""
-    sql = (MIG_0004 / "forward.sql").read_text(encoding="utf-8").lower()
+    sql = _sql_normalized(MIG_0004 / "forward.sql")
     assert "create table" in sql and "stock_coverage" in sql
 
 
 def test_migration_0004_stock_coverage_carries_integrity_checks():
     """codex PF2-R2-F1：migration 建的表必须与 schema.sql 一样带约束，
     否则已部署库前向迁移后仍是无约束的坏行温床。"""
-    sql = (MIG_0004 / "forward.sql").read_text(encoding="utf-8").lower()
+    sql = _sql_normalized(MIG_0004 / "forward.sql")
     assert "jsonb" in sql
     assert "jsonb_typeof(dropped_1m_dates) = 'array'" in sql
     assert "dense_1m_start_date <= dense_1m_end_date" in sql
@@ -180,13 +193,13 @@ def test_migration_0004_stock_coverage_carries_integrity_checks():
 
 def test_migration_0004_forward_widens_file_path_to_text():
     """R16-F2：绝对路径可任意长，VARCHAR(255) 会让登记 INSERT 失败留 orphan。"""
-    sql = (MIG_0004 / "forward.sql").read_text(encoding="utf-8").lower()
+    sql = _sql_normalized(MIG_0004 / "forward.sql")
     assert "alter column file_path type text" in sql
 
 
 def test_migration_0004_rollback_reverses_all_three_changes():
     """回滚必须覆盖三项：OHLC 回 DECIMAL、file_path 回 VARCHAR(255)、drop 新表。"""
-    sql = (MIG_0004 / "rollback.sql").read_text(encoding="utf-8").lower()
+    sql = _sql_normalized(MIG_0004 / "rollback.sql")
     for col in ("open", "high", "low", "close"):
         assert f"alter column {col} type decimal(10,2)" in sql, f"{col} 未回滚"
     assert "alter column file_path type varchar(255)" in sql
@@ -202,8 +215,9 @@ def test_migration_0004_rollback_documents_precision_loss():
 def test_migration_0004_does_not_touch_ticket_index():
     """D3/R12-F1：ticket_index 保留列、只停写。任何对该列的 DDL 都是不可逆迁移违规。"""
     for name in ("forward.sql", "rollback.sql"):
-        sql = (MIG_0004 / name).read_text(encoding="utf-8").lower()
-        assert "ticket_index" not in sql, f"{name} 不得对 ticket_index 做任何 DDL"
+        # 用**去注释后的正文**断言：forward.sql 的说明注释里合法地提到了 ticket_index
+        sql = _sql_normalized(MIG_0004 / name)
+        assert "ticket_index" not in sql, f"{name} 正文不得对 ticket_index 做任何 DDL"
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -310,7 +324,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && ../.venv/bin/python -m 
 
 - [ ] **Step 6: 写 schema.sql fresh baseline 的失败测试**
 
-在 `backend/tests/test_schema.py` 末尾追加：
+在 `backend/tests/test_schema.py` 顶部 import 区加一行 `import re`（下面的 `test_stock_coverage_has_integrity_checks` 要用），然后在文件末尾追加：
 
 ```python
 # ---- Plan 2a：D1 DDL（OHLC DOUBLE / file_path TEXT / stock_coverage）----
@@ -370,7 +384,10 @@ def test_stock_coverage_table_columns():
 def test_stock_coverage_has_integrity_checks():
     """codex PF2-R2-F1：坏覆盖行会让 B2 reader 抛非-Skip 异常、中止整轮 sweep。
     约束必须在 DB 层可执行，不能只靠 reader 兜底。"""
-    sql = SCHEMA_PATH.read_text(encoding="utf-8").lower()
+    # 同 PF2-R3-F2：schema.sql 也用多空格对齐（`dense_1m_end_date   DATE NOT NULL`），
+    # 必须先压平空白再子串断言，否则本测必挂。需在本文件顶部加 `import re`。
+    sql = re.sub(r"\s+", " ", re.sub(r"--[^\n]*", " ",
+                 SCHEMA_PATH.read_text(encoding="utf-8"))).lower()
     seg = sql.split("create table if not exists stock_coverage")[1].split(");")[0]
     assert "jsonb_typeof(dropped_1m_dates) = 'array'" in seg, "缺 dropped 数组类型检查"
     assert "dense_1m_start_date <= dense_1m_end_date" in seg, "缺覆盖带非反向检查"
@@ -1102,7 +1119,7 @@ EOF
 
 **Interfaces:**
 - Consumes: Task 1 的 `stock_coverage` 表五列；Plan 1 已有的 `build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, trading_dates, before_caps, months, intraday_expected, before_min, max_retries) -> (start_datetime, windows)`；`compute_after_end(month_boundaries, start_idx, months) -> int`；`qmt_resample.period_boundaries(df_daily, rule) -> list[int]`；`qmt_normalize.trading_date(epoch) -> date`
-- Produces: `assemble_from_windows(output_dir, *, stock_code, stock_name, start_datetime, end_datetime, windows) -> GeneratedTrainingSet`（纯函数）；`build_training_windows` **与** `select_valid_window` 各新增 keyword-only 参数 `exclude_starts: frozenset[int] = frozenset()`（前者透传给后者，后者在切 `max_retries` **之前**过滤）；`_fetch_dense_coverage(conn, stock_code) -> tuple[date|None, date|None, set[date]]`（坏行抛 `GenerateSkipException`）；`_fetch_existing_starts(conn, stock_code) -> set[int]`；`_register_training_set(conn, gts) -> Optional[int]`（唯一冲突返回 `None`，**非**抛异常）。Task 6 的集成测依赖这四个符号。
+- Produces: `assemble_from_windows(output_dir, *, stock_code, stock_name, start_datetime, end_datetime, windows) -> GeneratedTrainingSet`（纯函数）；`build_training_windows` **与** `select_valid_window` 各新增 keyword-only 参数 `exclude_starts: frozenset[int] = frozenset()`（前者透传给后者，后者在切 `max_retries` **之前**过滤）；`_fetch_dense_coverage(conn, stock_code) -> tuple[date|None, date|None, set[date]]`（坏行抛 `GenerateSkipException`）；`_fetch_existing_starts(conn, stock_code) -> set[int]`；`_register_training_set(conn, gts) -> Optional[int]`（唯一冲突返回 `None`，**非**抛异常）。`generate_one_training_set` 在 `output_dir` 内的暂存目录装配、**登记成功后才 `os.replace` 发布**到 `{code}_{start}.zip`（codex PF2-R3-F1：并发输家绝不能碰赢家已登记的最终路径）。Task 6 的集成测依赖这四个符号。
 
 - [ ] **Step 1: 写 `assemble_from_windows` 的失败测试**
 
@@ -1447,11 +1464,17 @@ async def _fetch_existing_starts(conn, stock_code: str) -> set:
     return {int(r["start_datetime"]) for r in rows}
 ```
 
-文件顶部 import 区（第 22-30 行附近）补两个 import：
+文件顶部 import 区（第 22-30 行附近）补这些 import：
 
 ```python
 import json
+import os
+import tempfile
+from dataclasses import replace
 ```
+
+（`dataclass` 已 import 过 `dataclass`，这里加的是 `replace`；`os` 在文件下半部 CLI 段
+已有 `import os`，重复 import 无害但建议统一提到顶部。）
 
 以及从 `qmt_resample` 引入月边界哨兵：
 
@@ -1502,34 +1525,37 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
     idx = month_boundaries.index(int(start_datetime))
     after_end = compute_after_end(month_boundaries, idx)
 
-    gts = assemble_from_windows(output_dir, stock_code=stock_code,
-                                stock_name=_stock_name_of(stock_code),
-                                start_datetime=int(start_datetime),
-                                end_datetime=int(after_end), windows=windows)
-    def _discard():
-        """R16-F2：任何不登记的出口都要删已建产物，否则留 orphan .zip 且重试不幂等。"""
-        gts.path.unlink(missing_ok=True)
-        gts.path.with_suffix(".db").unlink(missing_ok=True)
+    # **暂存区产出 → 登记成功后才发布**（codex PF2-R3-F1）。
+    # 产物名是确定性的 `{code}_{start}.zip`：若直接产在 output_dir，并发下**输家会
+    # 覆写/删掉赢家已登记的那个 zip**，让 training_sets.file_path 指向缺失或损坏的文件
+    # （数据丢失，比不处理并发还糟）。故：先写进 output_dir 内的唯一暂存目录，
+    # 只有 INSERT 真的拿到行之后，才 os.replace 原子发布到最终路径。
+    # 输家**永不触碰最终路径**——它只清自己的暂存目录（with 块自动清）。
+    with tempfile.TemporaryDirectory(dir=str(output_dir), prefix=".staging-") as staging:
+        staged = assemble_from_windows(Path(staging), stock_code=stock_code,
+                                       stock_name=_stock_name_of(stock_code),
+                                       start_datetime=int(start_datetime),
+                                       end_datetime=int(after_end), windows=windows)
+        final_zip = output_dir / staged.path.name          # 同名，只换目录
+        published = replace(staged, path=final_zip)        # 登记写最终路径
 
-    # 纯优化：候选已按 exclude_starts 过滤，这条预检只为在常见情形下省掉一次白建 zip。
-    # **真正的原子保证在 _register_training_set 的 ON CONFLICT**（TOCTOU 由它兜）。
-    if await _exists_start(conn, stock_code, gts.start_datetime):
-        _discard()
-        raise GenerateSkipException(
-            f"{stock_code}: start {gts.start_datetime} 已登记，跳过")
-    try:
-        row_id = await _register_training_set(conn, gts)
-    except Exception:
-        _discard()
-        raise
-    if row_id is None:
-        # 并发 sweep 在预检之后抢先登记了同一起点 → 干净跳过（codex PF2-R2-F2）。
-        # 走 GenerateSkipException 而非让 UniqueViolationError 冒泡中止整轮 sweep。
-        _discard()
-        raise GenerateSkipException(
-            f"{stock_code}: start {gts.start_datetime} 被并发 sweep 抢先登记，跳过")
-    gts.path.with_suffix(".db").unlink(missing_ok=True)   # 仅保留 .zip（登记的产物）
-    return gts
+        # 纯优化：候选已按 exclude_starts 过滤，这条预检只为常见情形省掉一次白建 zip。
+        # **真正的原子保证在 _register_training_set 的 ON CONFLICT**。
+        if await _exists_start(conn, stock_code, published.start_datetime):
+            raise GenerateSkipException(
+                f"{stock_code}: start {published.start_datetime} 已登记，跳过")
+
+        row_id = await _register_training_set(conn, published)
+        if row_id is None:
+            # 并发 sweep 抢先登记了同一起点（codex PF2-R2-F2）→ 干净跳过。
+            # 注意：这里**只**让暂存目录被清掉，赢家在最终路径上的 zip 分毫不动。
+            raise GenerateSkipException(
+                f"{stock_code}: start {published.start_datetime} 被并发 sweep 抢先登记，跳过")
+
+        # 拿到行了 = 本 worker 独占该 (stock_code, start_datetime) → 发布。
+        # os.replace 在同一文件系统内原子（staging 就在 output_dir 下，必同盘）。
+        os.replace(staged.path, final_zip)
+        return published
 ```
 
 - [ ] **Step 11a: `generate_batch` 打印首条 skip 原因（诚实义务 1）**
@@ -1912,7 +1938,7 @@ def test_missing_coverage_artifact_skips_fail_closed(tmp_path):
         asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
                                               random.Random(7)))
     assert conn.registered == []
-    assert list(tmp_path.iterdir()) == [], "fail-closed 路径不得留下任何产物"
+    assert list(tmp_path.iterdir()) == [], "fail-closed 路径不得留下任何产物（含暂存目录）"
 
 
 def test_uq_stock_start_not_reused(tmp_path):
@@ -1971,16 +1997,41 @@ def test_malformed_coverage_does_not_abort_batch(tmp_path, capsys):
 
 # ===== uq_stock_start TOCTOU 原子处理（codex PF2-R2-F2）=====
 
-def test_concurrent_duplicate_registration_skips_cleanly(tmp_path):
-    """并发 sweep 在预检之后抢先登记同一起点 → ON CONFLICT 返回 None →
-    必须干净 skip + 清产物，而不是让 UniqueViolationError 中止整轮 sweep。"""
+def test_concurrent_loser_does_not_touch_winner_artifact(tmp_path):
+    """codex PF2-R3-F1（数据丢失面）：产物名是确定性的 `{code}_{start}.zip`，
+    并发时输家**绝不能**覆写或删掉赢家已登记的那个 zip——否则
+    training_sets.file_path 指向缺失/损坏文件。
+
+    建模真实竞态：先在最终路径放一个「赢家的 zip」（已登记），再让本 worker 的
+    INSERT 撞 ON CONFLICT。断言赢家的文件**逐字节不变**。"""
     conn, _ = _fixture_conn()
-    conn.steal_first_insert = True
+    # 先跑一次拿到确定性的最终文件名与真实起点
+    probe = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                                  random.Random(7)))
+    winner_path, winner_bytes = probe.path, probe.path.read_bytes()
+    winner_start = probe.start_datetime
+
+    # 重置成「该起点已被别的 worker 登记」，但让本 worker 的预检看不到它
+    # （模拟预检之后、INSERT 之前被抢先）
+    conn2 = _FakeConn("000001.SZ", conn.bars, conn.coverage, steal_first_insert=True)
     with pytest.raises(GenerateSkipException, match="抢先登记"):
-        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+        asyncio.run(generate_one_training_set(conn2, "000001.SZ", tmp_path,
                                               random.Random(7)))
-    assert conn.registered == []
-    assert list(tmp_path.iterdir()) == [], "冲突路径留下了 orphan 产物"
+
+    assert winner_path.exists(), "输家删掉了赢家已登记的 zip（数据丢失）"
+    assert winner_path.read_bytes() == winner_bytes, "输家覆写了赢家的 zip（内容损坏）"
+    assert conn2.registered == []
+    # 输家不得留下任何暂存残渣
+    leftovers = [x for x in tmp_path.iterdir() if x != winner_path]
+    assert leftovers == [], f"暂存目录未清理：{leftovers}"
+
+
+def test_no_staging_dir_left_behind_on_success(tmp_path):
+    """成功路径也不得留暂存目录：output_dir 里只应有已登记的 .zip。"""
+    conn, _ = _fixture_conn()
+    gts = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                                random.Random(7)))
+    assert [x.name for x in tmp_path.iterdir()] == [gts.path.name]
 
 
 def test_batch_survives_concurrent_duplicate(tmp_path):
@@ -2173,3 +2224,15 @@ fi
   **处置 = 全盘采纳。** `INSERT ... ON CONFLICT (stock_code, start_datetime) DO NOTHING RETURNING id` 原子化；返回 `None` = 被并发抢先 → 清产物 + `GenerateSkipException`。`_exists_start` 预检降级为纯优化（省一次白建 zip），并在注释里如实标注。补假件冲突注入测（单股级 + sweep 级各一）。
 
 **本轮教训**：两条都不是"不合 spec"，而是"坏数据/并发下会怎样"——正是 [[feedback_internal_review_misses_bad_data]] 记的那条：内部 review 只问合不合 spec，从不问坏数据。且 F2 证明**注释写了「兜底」不等于真兜底**，需按控制流实际走向验证。
+
+### PF2-R3（2026-07-18，verdict = needs-attention；两条全新 finding）
+
+- **F1 [high] 并发输家会删掉/覆写赢家已登记的产物**。
+  **核实 = 属实，且比"不处理并发"更糟。** `assemble_from_windows` 写的是确定性最终路径 `{code}_{start}.zip`。两个 sweep 选中同一 `(stock_code, start_datetime)` 时：赢家登记成功，输家把**同名文件**写下去（覆写赢家）、`ON CONFLICT` 返回 `None` 后又 `unlink` 掉它 → `training_sets.file_path` 指向缺失/损坏文件 = **数据丢失**。我 R2 加的假件冲突测把冲突建模成"没有竞争行"，结构上抓不到这条。
+  **处置 = 全盘采纳。** 改「暂存 → 登记 → 发布」：在 `output_dir` 内开唯一暂存目录装配，**只有 INSERT 真拿到行**才 `os.replace` 原子发布到最终路径；输家只清自己的暂存目录、**永不触碰最终路径**。测试按 codex 要求重写为"先造赢家的已登记 zip → 制造冲突 → 断言赢家文件逐字节不变"，另加成功路径无暂存残渣测。
+
+- **F2 [medium] Task 1 的 migration 测试对着 plan 自己给的 SQL 必挂**。
+  **核实 = 属实。** (a) 我给的 forward/rollback 用多空格对齐（`ALTER COLUMN open  TYPE ...`），而断言写的是单空格 `alter column open type double precision`；(b) `test_migration_0004_does_not_touch_ticket_index` 断言全文不含 `ticket_index`，但同一份 forward.sql 的说明注释里就有这个词。Step 5「期望 10 passed」按原样不可达。
+  **处置 = 全盘采纳。** 加 `_sql_normalized()`（去 `--` 行注释 + 压平空白 + 小写）供所有子串断言使用；`丢精度` 标注测仍读原文（它本就是在验注释存在）。
+  **自查连带修**：我 R2 自己新增的 `test_stock_coverage_has_integrity_checks` 有同一毛病（`dense_1m_end_date   DATE NOT NULL` 三空格），codex 未点名，一并按同样方式修掉。
+  **这是重犯**：[[feedback_acceptance_grep_anchoring]] 明确记过「human-grep 命中注释子串误判」，我又踩了一次。教训 = 凡对 SQL/源码做子串断言，**先规范化再断言**，不要对齐美观的原文直接 grep。
