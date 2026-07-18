@@ -32,6 +32,8 @@ public struct TrainingView: View {
     @State private var finalizing = false      // R1-H2：in-flight 门，阻重试双击/并发 finalize Task
     @State private var replaySettlementFailed = false  // 新需求10(A6)：replay 结算失败 → 可重试 alert
     @State private var tradeStrip: TradeStripRequest?
+    @State private var typeRowExpanded = true      // 画线类型行收/展
+    @State private var showingStyleCard = false    // 长按设置卡片
     @State private var toast = ToastState()      // §B.1：latest-wins 调度核（host-tested）
     @State private var confirmingEnd = false
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
@@ -66,7 +68,12 @@ public struct TrainingView: View {
     // review-redesign Task 13：画线门控与交易门控解耦——复盘不可交易(showsTradeButtons==false)但仍可画线
     // （routeDrawingCommit/appendReviewDrawing 写 reviewDrawings 层，Task 10 已接线）。买卖条仍严格仅
     // showsTradeButtons（不受本谓词影响）。
-    private var showsDrawingTools: Bool { showsTradeButtons || engine.flow.mode == .review }
+    // D26/codex R22-high：原 showsDrawingTools 同时门控浮动钮与 activePanel 高亮 → 拆成两个谓词。
+    // 浮动钮只在复盘（训练/replay 改用「画图」钮 + 两行底栏）。
+    private var showsFloatingDrawingTool: Bool { engine.flow.mode == .review }
+    // activePanel 红框**保留原语义**（showsTradeButtons || review）——绝不可改 review-only，
+    // 否则训练/replay 丢掉「当前对哪个面板下单」的唯一提示（下错面板 autosave 不可逆）。
+    private var showsActivePanelHighlight: Bool { showsTradeButtons || engine.flow.mode == .review }
 
     /// 某 panel 当前下单周期（codex R2-high：买卖条捕获/比对用）。
     private func currentPeriod(of id: PanelId) -> Period {
@@ -183,8 +190,15 @@ public struct TrainingView: View {
         }
         .toastOverlay(toast.message)             // §B.1 复用呈现壳（消费 ToastState.message）
         .overlay(alignment: .topLeading) {
-            if showsDrawingTools {
+            if showsFloatingDrawingTool {          // 只复盘（训练/replay 用「画图」钮）
                 DrawingToolFloatingView(isDrawingActive: isDrawingActive, onToggleTool: toggleDrawing)
+            }
+        }
+        .overlay {
+            if showingStyleCard {
+                DrawingStyleCard(session: engine.drawingSession,
+                                 scheme: colorScheme == .dark ? .dark : .light,
+                                 onDismiss: { showingStyleCard = false })
             }
         }
     }
@@ -197,17 +211,22 @@ public struct TrainingView: View {
             Divider()
             panel(.lower)
             if showsTradeButtons {
-                TradeActionBar(
-                    content: TradeActionBarContent(price: engine.currentPrice),
-                    upperPeriod: engine.upperPanel.period,
-                    lowerPeriod: engine.lowerPanel.period,
-                    activePanel: $activePanel,
-                    buyEnabled: engine.buyEnabled,
-                    sellEnabled: engine.sellEnabled,
-                    holdLabel: engine.position.shares > 0 ? "持有" : "观察",
-                    onBuy:  { tradeStrip = TradeStripRequest(panel: activePanel, action: .buy, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
-                    onSell: { tradeStrip = TradeStripRequest(panel: activePanel, action: .sell, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
-                    onHold: { engine.holdOrObserve(panel: activePanel) })
+                if isDrawingActive {
+                    DrawingModeBar(typeRowExpanded: $typeRowExpanded,
+                                   onLongPressType: { showingStyleCard = true })
+                } else {
+                    TradeActionBar(
+                        content: TradeActionBarContent(price: engine.currentPrice),
+                        upperPeriod: engine.upperPanel.period,
+                        lowerPeriod: engine.lowerPanel.period,
+                        activePanel: $activePanel,
+                        buyEnabled: engine.buyEnabled,
+                        sellEnabled: engine.sellEnabled,
+                        holdLabel: engine.position.shares > 0 ? "持有" : "观察",
+                        onBuy:  { tradeStrip = TradeStripRequest(panel: activePanel, action: .buy, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
+                        onSell: { tradeStrip = TradeStripRequest(panel: activePanel, action: .sell, period: currentPeriod(of: activePanel), tick: engine.tick.globalTickIndex) },
+                        onHold: { engine.holdOrObserve(panel: activePanel) })
+                }
             } else if showsReviewControls {
                 // B4：复盘控件条——仅 Review 可步进态显示（canAdvance && !canBuySell）。
                 // Task 8：训练底栏样式重设计——[上图|下图]分段器选中面板即「下一根」步进的目标面板。
@@ -244,6 +263,12 @@ public struct TrainingView: View {
         // 同样清掉打开的买卖条，防对新周期下单。与上面的执行时守卫(onPick)双保险。
         .onChange(of: engine.upperPanel.period) { _, _ in tradeStrip = nil; lifecycle.autosave(immediate: false) }
         .onChange(of: engine.lowerPanel.period) { _, _ in tradeStrip = nil; lifecycle.autosave(immediate: false) }
+        // codex branch-R3-high / plan-R9-high（交易安全）：画线模式**任一方向切换**都作废未确认买卖框。
+        // 不只清「进画线」——退出也清：否则一个跨 round-trip 幸存的陈旧 tradeStrip 会在退出后（!drawingModeActive）
+        // remount，同 tick/period 下被 TradeConfirmGuard 放行成交。清 nil 恒安全（本就不该跨画线切换留着买卖框）。
+        .onChange(of: engine.drawingSession.drawingModeActive) { _, _ in
+            tradeStrip = nil
+        }
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
             tradeStrip = nil                                    // codex R3-high：tick 推进(含持有/观察)即作废未确认买卖条，防按新 tick 价成交
             lifecycle.autosave(immediate: false)                // §4.6：tick 推进按 N 节流（review 恒 no-op，shouldPersistProgress==false）
@@ -325,10 +350,21 @@ public struct TrainingView: View {
                 Spacer()
                 Text(bar.stockNameDisplay).font(.callout).foregroundStyle(.secondary)
                 Spacer()
+                if showsTradeButtons && !isDrawingActive {
+                    Button { toggleDrawing() } label: { Image(systemName: "pencil.tip.crop.circle") }
+                        .accessibilityLabel("画图")
+                    Spacer().frame(width: 28)          // 与「结束」留明显间距，防误点
+                }
                 if showsTradeButtons {
-                    Button("结束") { confirmingEnd = true }
-                        .font(.callout).tint(.red)
-                        .accessibilityLabel("结束本局")
+                    if isDrawingActive {
+                        Button("退出") { toggleDrawing() }      // 退出画线（非结束本局）
+                            .font(.callout)
+                            .accessibilityLabel("退出画线")
+                    } else {
+                        Button("结束") { confirmingEnd = true }
+                            .font(.callout).tint(.red)
+                            .accessibilityLabel("结束本局")
+                    }
                 } else if isReview {
                     // Task 13：复盘「结束」——有净改动才弹保存确认，无改动直接丢弃退出。
                     Button("结束") {
@@ -398,20 +434,22 @@ public struct TrainingView: View {
             // 内联买卖小条：仅当该面板被点开时悬浮贴底（conjoint guard 含 showsTradeButtons，
             // 防 Normal 置位的 tradeStrip 在模式翻转至 Review/会话结束后悬空，spec §5.3 L3）。
             .overlay(alignment: .bottom) {
-                if showsTradeButtons, let strip = tradeStrip, strip.panel == id {
+                if showsTradeButtons, !engine.drawingSession.drawingModeActive,
+                   let strip = tradeStrip, strip.panel == id {
                     TradeBoxView(
                         action: strip.action, price: engine.currentPrice,
                         cash: engine.cashBalance, holding: engine.position.shares,
                         fees: engine.fees, initialQty: 0,
                         onConfirm: { shares in
-                            guard tradeStripStillValid(capturedPeriod: strip.period,
-                                                       currentPeriod: currentPeriod(of: id),
-                                                       capturedTick: strip.tick,
-                                                       currentTick: engine.tick.globalTickIndex) else {
-                                tradeStrip = nil; return
-                            }
-                            performTrade(strip.action, panel: id, shares: shares)
-                            tradeStrip = nil
+                            // codex plan-R1/R3-high：confirm transition 走可测 apply——画线中 onProceed(performTrade) 绝不触发。
+                            TradeConfirmGuard.apply(
+                                drawingModeActive: engine.drawingSession.drawingModeActive,
+                                periodTickStillValid: tradeStripStillValid(capturedPeriod: strip.period,
+                                                                           currentPeriod: currentPeriod(of: id),
+                                                                           capturedTick: strip.tick,
+                                                                           currentTick: engine.tick.globalTickIndex),
+                                onProceed: { performTrade(strip.action, panel: id, shares: shares) })
+                            tradeStrip = nil   // 两条路径都收起买卖框（成交与否都关框）
                         },
                         onCancel: { tradeStrip = nil })
                     // codex R-plan-21-1：SwiftUI @State 由视图身份保持，不因 action/panel 变化重置。
@@ -422,7 +460,7 @@ public struct TrainingView: View {
                 }
             }
             .overlay {   // active panel 高亮（红描边 inset，RFC-B T2 D10；Task 13：门控解耦至 showsDrawingTools，复盘也高亮）
-                if showsDrawingTools && id == activePanel {
+                if showsActivePanelHighlight && id == activePanel {
                     Rectangle().strokeBorder(Color.red.opacity(0.45), lineWidth: 2).allowsHitTesting(false)
                 }
             }

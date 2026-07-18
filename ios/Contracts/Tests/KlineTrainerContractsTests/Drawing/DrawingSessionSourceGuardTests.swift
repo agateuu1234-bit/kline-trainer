@@ -125,15 +125,6 @@ struct DrawingSessionSourceGuardTests {
         }
     }
 
-    @Test("#4c/#6：本期不引入任何新 UI —— 浮动钮仍在，且无顶栏「画图」钮 / 底栏工具栏 / 设置面板")
-    func noNewDrawingUI() throws {
-        let code = try source(trainingView)
-        #expect(code.contains("DrawingToolFloatingView("))     // 入口未变（退役在 1a-iii）
-        #expect(!code.contains("画图"))                        // 顶栏「画图」钮（1a-iii）
-        #expect(!code.contains("DrawingToolbar"))              // 两行底栏（1a-iii）
-        #expect(!code.contains("DrawingSettingsPanel"))        // 设置面板（1a-iii）
-    }
-
     // MARK: 真机验收回归守卫（模拟器实证修复；SwiftUI observation/view 行为单测测不到，只能源码钉死防误删）
 
     @Test("回归守卫（现象②：图表冻结）：rebuildRenderState 必须显式读面板 revision + tick 建立 observation 订阅")
