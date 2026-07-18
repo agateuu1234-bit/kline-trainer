@@ -242,6 +242,16 @@ rm -rf "$R7_ROOT" 2>/dev/null || true
 # 默认值——对当前源码做实时推导，源码推导的保护完全没丢（见本文件末尾的独立验证）。
 export UIKIT_EXPECTED_TESTS_SCRIPT="$FIX/uikit-expected-tests-frozen.py"
 
+# total 基线同理解耦（2026-07-18）：下面的 fixture 用例测的是「G7 total 判据逻辑」，
+# 不是「main 当前真实总数」。若让它们读活 catalyst-total-baseline.txt，任何大幅增减
+# 测试的 PR（如 #146 加 50 个）把活基线一挪，这些围绕 1407 构造的 fixture 就整片掉出
+# delta 窗口、自测在真跑之前先崩（复现：main 6068522 F1 变红事故）。改用一份跟 fixture
+# 日志配套、冻结在提交历史里的 total 基线（fixtures/total-baseline-frozen.txt=1407），
+# 通过 catalyst-gate.sh 已有的 CATALYST_TOTAL_BASELINE_FILE 注入点喂给下面所有 expect。
+# 真实 xcodebuild 日志（workflow 真跑）不设这个环境变量，仍走默认的活 catalyst-total-
+# baseline.txt——活基线的保护完全没丢（见文件末尾独立说明 + 本 PR Verification 段）。
+export CATALYST_TOTAL_BASELINE_FILE="$FIX/total-baseline-frozen.txt"
+
 echo "catalyst-gate.sh 判据测试（fixture 用例，期望清单已冻结，不随当前源码漂移）："
 expect 0 pass-new-scheme.log            "GATE PASS" \
     "新 scheme 的真实成功日志（本地 Xcode 格式）→ 通过（且不被 CoreData 运行期噪声误伤）"
