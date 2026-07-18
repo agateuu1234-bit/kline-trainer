@@ -455,6 +455,22 @@ else
     FAILED=$((FAILED + 1))
 fi
 
+# F6 fail-closed（2026-07-18）：活 total 基线文件存在但内容非整数（如被误写成空/文字/负号）
+# 也必须 fail-closed，不能在算术比较那步崩溃或放行。现有 :421 只测了「文件缺失」，这里补
+# 「内容非整数」这条既有 fail-closed 路径（catalyst-gate.sh:219-221）的回归。
+NONINT_BASELINE="$FIX/../.noninteger-total-baseline-$$.txt"
+printf 'abc\n' > "$NONINT_BASELINE"
+out=$(CATALYST_TOTAL_BASELINE_FILE="$NONINT_BASELINE" bash "$GATE" "$FIX/pass-new-scheme.log" 2>&1)
+got=$?
+if [ "$got" -eq 1 ] && grep -qF "不是合法整数" <<<"$out"; then
+    echo "  ok   — 活 total 基线内容非整数 → 必须 fail-closed，不能放行 (exit=$got)"
+    PASSED=$((PASSED + 1))
+else
+    echo "  FAIL — 活 total 基线非整数本该 FAIL 且报'不是合法整数'，实得 exit=$got, out=$out"
+    FAILED=$((FAILED + 1))
+fi
+rm -f "$NONINT_BASELINE"
+
 # 未归属 @Test 检测（2026-07-14，解析器盲区 finding 的自动化回归）：uikit-expected-tests.py
 # 此前只能解析它「认识」的两种 @Test 写法——任何不认识的形式（如带 arguments 的参数化
 # @Test(arguments:)）会被两个解析正则都跳过，测试悄悄从期望清单里消失，脚本仍退出 0、
