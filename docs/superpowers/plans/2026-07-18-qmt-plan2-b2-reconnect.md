@@ -1770,6 +1770,39 @@ scheduler 侧（`backend/app/scheduler.py` 的 `_gen`）同样加锁——注意
 （本 Step 同时完成 Step 11 要做的"删 scheduler 里孤儿 `NotImplementedError` 捕获"——
 上面的新 `_gen` 已不含该捕获。）
 
+**⚠️ 必须同步改既有测试，否则 3 个测试立刻挂**（dry-run 实测发现，8 轮评审均未指出）：
+`_gen` 现在会先调 `conn.fetchval(...)`，而 `tests/test_scheduler.py` 的 `_fake_pool()`
+里 `class _FakeConn: pass` **没有 `fetchval`** → `AttributeError`。把它改成：
+
+```python
+def _fake_pool(lock_ok: bool = True):
+    class _FakeConn:
+        # Plan 2b：_gen 现在先抢 B2_GENERATION_LOCK_KEY（codex PF2-R5-F2）
+        async def fetchval(self, q, *a):
+            assert "pg_try_advisory_lock" in q
+            return lock_ok
+
+        async def execute(self, q, *a):
+            return "ok"
+```
+
+**并删除 `test_build_generate_batch_real_b2_fail_closed_logs_error_returns_zero`**——
+它断言的是本 plan 已移除的 `NotImplementedError` 路径，还逐字断言了
+"旧未门控随机选起点路径已停用" 这条被删掉的错误文案，**不可能再通过**。用等价的
+锁行为测试取代（放同一位置）：
+
+```python
+def test_build_generate_batch_returns_zero_when_b2_lock_held(caplog, tmp_path):
+    # Plan 2b（codex PF2-R5-F2）：取代原 fail-closed 测（NotImplementedError 捕获已随重接移除）。
+    import logging
+
+    from app.scheduler import build_generate_batch
+    gen = build_generate_batch(_fake_pool(lock_ok=False), str(tmp_path / "ts_out"))
+    with caplog.at_level(logging.WARNING, logger="app.scheduler"):
+        assert asyncio.run(gen(5)) == 0
+    assert "B2 生成锁" in caplog.text
+```
+
 - [ ] **Step 10c: 锁的测试——不在本步写**
 
 codex PF2-R8-F1：锁的测试要落在 `backend/tests/test_b2_reconnect_integration.py`，
@@ -1799,7 +1832,9 @@ codex PF2-R8-F1：锁的测试要落在 `backend/tests/test_b2_reconnect_integra
 cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && ../.venv/bin/python -m pytest tests/ -q
 ```
 
-期望：全 passed、0 skipped。若 `test_scheduler.py` 有针对该捕获块的测试挂了，**读它再决定**：断言"B4 遇 NotImplementedError 返 0"的测试已随停用解除而失效，应删除；其余不得改。
+期望：全 passed、0 skipped。`test_scheduler.py` 需要的两处改动（`_fake_pool` 加
+`fetchval`/`execute`、删掉 fail-closed 测并用锁测试取代）**已在 Step 10b 明确给出**，
+照做即可；除此之外 `test_scheduler.py` 不得再改。
 
 - [ ] **Step 13: Commit**
 
@@ -1849,6 +1884,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import functools
 import json
 import random
 import sqlite3
@@ -1908,6 +1944,18 @@ def _ohlcv(dts: list) -> pd.DataFrame:
 _INTRADAY_N = {"3m": 80, "15m": 16, "60m": 4}
 
 
+@functools.lru_cache(maxsize=4)
+def _cached_fixture(start: dt.date, n_days: int):
+    """**性能**（dry-run 实测）：fixture 每周期约 8 万行，逐测重建会让本文件跑 ~59s、
+    整个后端套件从 3.5s 涨到 63s。输入确定 → 缓存。返回**浅拷贝**：个别测试会
+    `bars["daily"] = ...` 重绑定某周期（不原地改 DataFrame），浅拷贝即可隔离缓存。"""
+    return _build_pg_fixture(_trading_days(start, n_days))
+
+
+def _pg_fixture(start: dt.date, n_days: int) -> dict:
+    return dict(_cached_fixture(start, n_days))
+
+
 def _build_pg_fixture(days: list) -> dict:
     """造一份"PG 里该股全部 klines"：日/周/月标组内首交易日午夜（OPEN 语义，R3-F1），
     盘中每交易日精确 80/16/4 根（满足 D9 per-day 硬门）。"""
@@ -1945,6 +1993,7 @@ class _FakeConn:
         self._next_id = 1
         # 模拟"并发 sweep 在预检之后抢先登记同一起点"：首次 INSERT 撞 ON CONFLICT
         self.steal_first_insert = steal_first_insert
+        self._rows_cache: dict = {}     # 见 fetch()：8 万行 to_dict 的结果缓存
 
     async def fetch(self, query: str, *args):
         if "FROM klines" in query:
@@ -1952,7 +2001,13 @@ class _FakeConn:
             df = self.bars.get(period)
             if df is None or df.empty:
                 return []
-            return [dict(r) for r in df.to_dict("records")]
+            # **性能**（dry-run 实测）：每周期 8 万行，逐次 to_dict 是主要耗时来源 → 按 id 缓存
+            key = id(df)
+            hit = self._rows_cache.get(key)
+            if hit is None:
+                hit = df.to_dict("records")
+                self._rows_cache[key] = hit
+            return hit
         if "SELECT start_datetime FROM training_sets" in query:
             return [{"start_datetime": r["start_datetime"]} for r in self.registered]
         if "SELECT code FROM stocks" in query:
@@ -2004,7 +2059,7 @@ def _fixture_conn(dropped: list | None = None, n_days: int = 1000):
     # 1000 个工作日 ≈ 46 个月边界 → 8 个候选。500 个工作日只有 ~23 个月边界，
     # 会直接抛「月边界仅 23，不足 39」，全部集成测 FAIL。
     days = _trading_days(dt.date(2022, 1, 3), n_days)
-    return _FakeConn("000001.SZ", _build_pg_fixture(days),
+    return _FakeConn("000001.SZ", _pg_fixture(dt.date(2022, 1, 3), n_days),
                      _coverage_row(days, dropped)), days
 
 
@@ -2078,7 +2133,7 @@ def test_missing_coverage_artifact_skips_fail_closed(tmp_path):
     """D11：无 stock_coverage 行 → 无权威 dense 判定 → 必须 skip，
     **不得**退化成"从 klines 反推"或"不门控直接产"。"""
     days = _trading_days(dt.date(2022, 1, 3), 1000)
-    conn = _FakeConn("000001.SZ", _build_pg_fixture(days), None)
+    conn = _FakeConn("000001.SZ", _pg_fixture(dt.date(2022, 1, 3), 1000), None)
     with pytest.raises(GenerateSkipException, match="stock_coverage"):
         asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
                                               random.Random(7)))
@@ -2110,7 +2165,7 @@ def test_malformed_coverage_row_skips_not_crashes(tmp_path, bad_dropped, label):
     days = _trading_days(dt.date(2022, 1, 3), 1000)
     cov = {"dense_1m_start_date": days[0], "dense_1m_end_date": days[-1],
            "dropped_1m_dates": bad_dropped, "dense_day_count": len(days)}
-    conn = _FakeConn("000001.SZ", _build_pg_fixture(days), cov)
+    conn = _FakeConn("000001.SZ", _pg_fixture(dt.date(2022, 1, 3), 1000), cov)
     with pytest.raises(GenerateSkipException, match="dropped_1m_dates"):
         asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
                                               random.Random(7)))
@@ -2122,7 +2177,7 @@ def test_dense_day_count_mismatch_skips(tmp_path):
     """codex PF2-R6-F1：带内某交易日的 daily 行缺失时，那天会同时从 dense_dates 与
     D9 span 里消失——两道门都瞎。dense_day_count 交叉校验是唯一能抓到它的东西。"""
     days = _trading_days(dt.date(2022, 1, 3), 1000)
-    bars = _build_pg_fixture(days)
+    bars = _pg_fixture(dt.date(2022, 1, 3), 1000)
     missing = days[len(days) // 2]
     # 从 daily 里抠掉带内一个交易日（模拟 B1 半途导入 / 行丢失）
     bars["daily"] = bars["daily"][
@@ -2142,7 +2197,7 @@ def test_reversed_coverage_band_skips(tmp_path):
     days = _trading_days(dt.date(2022, 1, 3), 1000)
     cov = {"dense_1m_start_date": days[-1], "dense_1m_end_date": days[0],
            "dropped_1m_dates": "[]", "dense_day_count": len(days)}
-    conn = _FakeConn("000001.SZ", _build_pg_fixture(days), cov)
+    conn = _FakeConn("000001.SZ", _pg_fixture(dt.date(2022, 1, 3), 1000), cov)
     with pytest.raises(GenerateSkipException, match="反向"):
         asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
                                               random.Random(7)))
@@ -2153,7 +2208,7 @@ def test_malformed_coverage_does_not_abort_batch(tmp_path, capsys):
     days = _trading_days(dt.date(2022, 1, 3), 1000)
     cov = {"dense_1m_start_date": days[0], "dense_1m_end_date": days[-1],
            "dropped_1m_dates": "{not json", "dense_day_count": len(days)}
-    conn = _FakeConn("000001.SZ", _build_pg_fixture(days), cov)
+    conn = _FakeConn("000001.SZ", _pg_fixture(dt.date(2022, 1, 3), 1000), cov)
     out = asyncio.run(generate_batch(conn, 2, tmp_path, random.Random(3)))
     assert out == []
     assert "dropped_1m_dates" in capsys.readouterr().out
@@ -2222,7 +2277,7 @@ def test_generate_batch_surfaces_first_skip_reason(tmp_path, capsys):
     否则「Plan 3 落地前的预期状态」与「真回归」在日志里长得一模一样，
     运维只看到「仅生成 0/2」无从判断。"""
     days = _trading_days(dt.date(2022, 1, 3), 1000)
-    conn = _FakeConn("000001.SZ", _build_pg_fixture(days), None)   # 无覆盖行
+    conn = _FakeConn("000001.SZ", _pg_fixture(dt.date(2022, 1, 3), 1000), None)   # 无覆盖行
     out = asyncio.run(generate_batch(conn, 2, tmp_path, random.Random(3)))
     assert out == []
     printed = capsys.readouterr().out
@@ -2568,3 +2623,47 @@ fi
 1. **判据类改动必须构造正反例实跑**——D9 改三次才对，前两次都"看着对"（粗豁免 → 自指公式 → 全量对照），probe 一跑才现原形。
 2. **改 plan 只看新增段会漏**——R3-F2 与 R6-F2 两次栽在同一坑：同一函数在文档里出现多处，只改一处。
 3. **写防护前先查架构不变量**——R2/R3/R4 三轮都在防一个被 D14 advisory lock 排除的并发场景，查一次只要两分钟。
+
+---
+
+## Dry-run 实证（2026-07-18，取代第 9 轮计划评审）
+
+user 裁决：与其再跑一轮推理型评审，不如**把计划里的代码真跑一遍**。在 scratchpad 建了两个一次性工作区，逐字照本 plan 施工并运行。
+
+### PR 2a — 全绿（19/19）
+
+把 plan 给的 `forward.sql`/`rollback.sql`/`schema.sql` 三处改动落盘，再把 plan 里写的**每一条测试逐字**跑一遍。
+
+**验证了我凭空写、从未执行过的东西**：
+- `_column_type_names` 的 pglast AST 遍历（`typeName.names[-1].sval`）**可用**；
+- 断言值全部正确：`DOUBLE PRECISION`→`float8`、`DECIMAL`→`numeric`、`TEXT`→`text`、`JSONB`→`jsonb`（这些我是**猜**的，猜对了）；
+- `_sql_normalized` 去注释压空白后，所有子串断言真命中（PF2-R3-F2 的修复有效）；
+- 两个 migration 文件都通过 libpg_query 真解析。
+
+### PR 2b — 全绿（200 passed），但**dry-run 抓到 3 个 8 轮评审都没发现的问题**
+
+复制 `backend/` 到 scratch（基线 170 passed，需一并复制 repo 根的 `tests/contract-fixtures/`，否则 12 个 `test_routes` 因路径失败），逐字应用 Task 4/5 的代码改动与全部新测试。
+
+1. **[plan gap] `_gen` 加锁会打挂 3 个既有 scheduler 测试**。`tests/test_scheduler.py` 的 `_fake_pool()` 里 `class _FakeConn: pass` 没有 `fetchval` → `AttributeError`。plan 原本**只字未提**要改它，Step 12「期望全 passed」不可达。→ 已把确切改法写进 Step 10b。
+2. **[plan gap] `test_build_generate_batch_real_b2_fail_closed_logs_error_returns_zero` 必须删**。它断言的是被移除的 `NotImplementedError` 路径，还逐字断言了被删掉的错误文案。plan 原本只含糊写「若挂了读它再决定」——不是可执行指令。→ 已改为明确删除 + 给出取代它的锁行为测试。
+3. **[perf] 集成测把后端套件从 3.5s 拖到 63s**。plan 完全没提。→ 加两处缓存（fixture `lru_cache` + fake conn 的 `to_dict` 结果缓存）降到 **42s**，两处都已写进 Task 6，并在 Step 4 写明预期耗时与自查点。
+
+### 同时被实证确认成立的关键设计
+
+| 断言 | 结果 |
+|---|---|
+| 核心验收：真实 sweep 产出 ≥1 registered training set | ✅ |
+| D9 边界日「对照全量 bars」判据（PF2-R7-F2 换的新判据） | ✅ 6 情形全对 |
+| `exclude_starts` 在切 `max_retries` 之前过滤 | ✅ 前 9 候选全排除仍选中第 10 个 |
+| `eligible_start_indices` 同 seed 两次调用顺序可复现 | ✅（该测依赖此假设） |
+| 4 类坏覆盖行 + 反向区间 + `dense_day_count` 不符 → 全部干净 skip 不崩 | ✅ |
+| 孤儿 zip / 陈旧 `.db` 自愈 | ✅ |
+| CLI 与 `_gen` 两条路径的锁拒绝行为 | ✅ |
+| `_FakeConn` 的 SQL 分派与生产代码实际查询匹配（未触发「未预期 SQL」断言） | ✅ |
+
+### 结论
+
+**PR 2a 与 PR 2b 的计划代码均可执行、全绿**（2a 19/19；2b 200 passed / 0 failed / 0 skipped）。
+三个 dry-run 发现已回写。实施阶段应当接近机械照做。
+
+**这轮验证的价值明显高于第 9 轮推理评审**：8 轮 codex 评审没能发现「加锁会打挂既有测试」这类问题——**因为那要真跑才知道**。
