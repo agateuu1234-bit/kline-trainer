@@ -1269,7 +1269,15 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && ../.venv/bin/python -m 
 
 - [ ] **Step 3: 删 `assemble_training_set`，加 `assemble_from_windows`**
 
-`backend/generate_training_sets.py` 第 286-295 行（整个 `assemble_training_set` 函数及其 docstring）替换为：
+**先在文件顶部 import 区加一行**（codex PF2-R8-F2：下面的实现要用 `tempfile`，
+若等到 Step 10 再加，Step 4 的第一个绿色检查点会直接 `NameError`）：
+
+```python
+import tempfile
+```
+
+然后把 `backend/generate_training_sets.py` 第 286-295 行（整个 `assemble_training_set`
+函数及其 docstring）替换为：
 
 ```python
 def assemble_from_windows(output_dir: Path, *, stock_code: str, stock_name: str,
@@ -1555,11 +1563,10 @@ async def _fetch_existing_starts(conn, stock_code: str) -> set:
     return {int(r["start_datetime"]) for r in rows}
 ```
 
-文件顶部 import 区（第 22-30 行附近）补一个 import：
+文件顶部 import 区（第 22-30 行附近）补一个 import（`tempfile` 已在 Task 5 Step 3 加过）：
 
 ```python
 import json
-import tempfile
 ```
 
 以及从 `qmt_resample` 引入月边界哨兵：
@@ -1763,68 +1770,19 @@ scheduler 侧（`backend/app/scheduler.py` 的 `_gen`）同样加锁——注意
 （本 Step 同时完成 Step 11 要做的"删 scheduler 里孤儿 `NotImplementedError` 捕获"——
 上面的新 `_gen` 已不含该捕获。）
 
-- [ ] **Step 10c: 为锁补测**
+- [ ] **Step 10c: 锁的测试——不在本步写**
 
-`backend/tests/test_scheduler.py` 已有 `_install_fake_asyncpg(..., lock_result=...)` 模式可参考。
-在 `backend/tests/test_b2_reconnect_integration.py` 追加：
+codex PF2-R8-F1：锁的测试要落在 `backend/tests/test_b2_reconnect_integration.py`，
+而**那个文件由 Task 6 创建**；若在本步先追加，会造出一个缺 import 的半截文件，
+或者被 Task 6 的整file写入覆盖掉 —— 两种结果都会让「CLI/B4 并发生成」这条新防线
+**根本没被验证**，而它正是能损坏已登记 zip / `content_hash` 的那条路径。
 
-```python
-def test_cli_refuses_when_b2_lock_held(tmp_path, monkeypatch, capsys):
-    """codex PF2-R6-F2：CLI 侧的锁必须真存在（原 Step 11 会把它删掉）。
-    拿不到锁 → 非零退出 + 明确报错，**不得**继续生成。"""
-    import generate_training_sets as G
+**故本步不写测试**：锁的两条测试（`test_cli_refuses_when_b2_lock_held` 与
+`test_gen_adapter_returns_zero_when_b2_lock_held`）**已包含在 Task 6 的建file内容里**，
+连同它们需要的 `sys` / `types` import。本步只改生产代码。
 
-    class _LockedConn:
-        async def fetchval(self, q, *a):
-            assert "pg_try_advisory_lock" in q
-            return False
-        async def execute(self, q, *a):
-            raise AssertionError("拿不到锁时不应 unlock")
-        async def close(self):
-            return None
-
-    async def _connect(dsn):
-        return _LockedConn()
-
-    fake = types.ModuleType("asyncpg")
-    fake.connect = _connect
-    monkeypatch.setitem(sys.modules, "asyncpg", fake)
-    monkeypatch.setattr(G, "generate_batch", _must_not_run)
-
-    rc = G.main(["--dsn", "postgres://x", "--output", str(tmp_path)])
-    assert rc != 0, "拿不到 B2 锁时 CLI 必须非零退出"
-    assert "锁" in capsys.readouterr().out
-
-
-async def _must_not_run(*a, **k):
-    raise AssertionError("拿不到锁时不得调用 generate_batch")
-
-
-def test_gen_adapter_returns_zero_when_b2_lock_held(tmp_path, caplog):
-    """codex PF2-R5-F2：拿不到 B2 生成锁 → 本次 sweep 生成 0 + 告警，
-    **不**与手工 CLI 竞争同一产物路径（那会让已登记 zip 的 content_hash 失配）。"""
-    import logging
-    from app.scheduler import build_generate_batch
-
-    class _LockedConn:
-        async def fetchval(self, q, *a):
-            assert "pg_try_advisory_lock" in q
-            return False                      # 锁被占
-        async def execute(self, q, *a):
-            raise AssertionError("拿不到锁时不应 unlock")
-
-    class _Acq:
-        async def __aenter__(self): return _LockedConn()
-        async def __aexit__(self, *a): return False
-
-    class _Pool:
-        def acquire(self): return _Acq()
-
-    gen = build_generate_batch(_Pool(), str(tmp_path))
-    with caplog.at_level(logging.WARNING):
-        assert asyncio.run(gen(5)) == 0
-    assert "B2 生成锁" in caplog.text
-```
+> **实施者注意**：因此 Task 5 结束时（Step 12 全套件）锁的行为**尚无测试覆盖**，
+> 这是刻意的排序取舍。**Task 6 跑完前不得声称「并发防线已验证」**。
 
 > **Step 11 已删除**（codex PF2-R6-F2）。原 Step 11 让实施者把 `_amain` 里那段
 > 替换成**没有锁的** `sets = await generate_batch(...)`，会**撤销 Step 10b 刚加的 CLI
@@ -2277,6 +2235,66 @@ def test_generate_batch_produces_requested_count(tmp_path):
     out = asyncio.run(generate_batch(conn, 2, tmp_path, random.Random(3)))
     assert len(out) == 2
     assert len(conn.registered) == 2
+
+
+# ===== B2 生成互斥锁（Task 5 Step 10b 的防线；测试按 PF2-R8-F1 放在本文件）=====
+
+async def _must_not_run(*a, **k):
+    raise AssertionError("拿不到 B2 生成锁时不得调用 generate_batch")
+
+
+def test_cli_refuses_when_b2_lock_held(tmp_path, monkeypatch, capsys):
+    """codex PF2-R5-F2 + R6-F2：CLI 侧的锁必须真存在且真拦住。
+    拿不到锁 → 非零退出 + 明确报错，**不得**继续生成（继续会覆盖已登记的 zip、
+    让 content_hash 失配）。"""
+    import generate_training_sets as G
+
+    class _LockedConn:
+        async def fetchval(self, q, *a):
+            assert "pg_try_advisory_lock" in q
+            return False
+        async def execute(self, q, *a):
+            raise AssertionError("拿不到锁时不应 unlock")
+        async def close(self):
+            return None
+
+    async def _connect(dsn):
+        return _LockedConn()
+
+    fake = types.ModuleType("asyncpg")
+    fake.connect = _connect
+    monkeypatch.setitem(sys.modules, "asyncpg", fake)
+    monkeypatch.setattr(G, "generate_batch", _must_not_run)
+
+    rc = G.main(["--dsn", "postgres://x", "--output", str(tmp_path)])
+    assert rc != 0, "拿不到 B2 锁时 CLI 必须非零退出"
+    assert "锁" in capsys.readouterr().out
+
+
+def test_gen_adapter_returns_zero_when_b2_lock_held(tmp_path, caplog):
+    """B4 侧：拿不到 B2 生成锁 → 本次 sweep 生成 0 + 告警，**不**与手工 CLI
+    竞争同一产物路径。"""
+    import logging
+    from app.scheduler import build_generate_batch
+
+    class _LockedConn:
+        async def fetchval(self, q, *a):
+            assert "pg_try_advisory_lock" in q
+            return False
+        async def execute(self, q, *a):
+            raise AssertionError("拿不到锁时不应 unlock")
+
+    class _Acq:
+        async def __aenter__(self): return _LockedConn()
+        async def __aexit__(self, *a): return False
+
+    class _Pool:
+        def acquire(self): return _Acq()
+
+    gen = build_generate_batch(_Pool(), str(tmp_path))
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(gen(5)) == 0
+    assert "B2 生成锁" in caplog.text
 ```
 
 - [ ] **Step 2: 跑集成测**
@@ -2516,3 +2534,37 @@ fi
   **处置 = 采纳**，补 `from qmt_normalize import trading_date`。
 
 **本轮教训（重要）**：D9 这道门我改了三次才对（R1 粗豁免 → R7 自指公式 → R7 全量对照）。**前两次都是"看着对"**——直到写 probe 跑真数据才暴露。凡是"判据"类改动（尤其带取模/边界算术的），**必须构造正反例实跑**，不能靠读代码自评。
+
+### PF2-R8（2026-07-18，verdict = needs-attention；**2 条均 [doc] 类 → 触发停止规则**）
+
+- **F1 [doc·high] 锁的测试被排在其测试模块创建之前**：Step 10c 要求把 advisory-lock 测试追加进 `test_b2_reconnect_integration.py`，但该文件由 **Task 6** 才创建；照字面执行会造出缺 import 的半截文件、或被 Task 6 整file写入覆盖 → 「CLI/B4 并发生成」这条新防线**根本没被验证**。
+  **处置 = 采纳。** Step 10c 改为「本步不写测试」，两条锁测试（含 `_must_not_run` helper）**移入 Task 6 的建file内容**（`sys`/`types` import 本就在那里），并显式标注「Task 6 跑完前不得声称并发防线已验证」。
+  *（修完自检又发现：删掉 Step 10c 时把测试定义一并删了，已补回 Task 6 并用脚本验证定义位置。）*
+
+- **F2 [doc·medium] `tempfile` 在被 import 之前就使用**：`assemble_from_windows` 用了 `tempfile.TemporaryDirectory()`，但 `import tempfile` 排在 Step 10；照字面执行，Task 5a 的第一个绿色检查点（Step 4）直接 `NameError`。
+  **处置 = 采纳**，`import tempfile` 移到引入 `assemble_from_windows` 的同一步（Step 3）之首。
+
+---
+
+## 计划评审收口（8 轮，**codex 从未 approve**）
+
+**如实记录**：`codex-attest.sh` 8 轮全部返回 `verdict=needs-attention`，**ledger 未更新**（无 attest 记录）。不写"已收敛"。
+
+**转入实施的依据 = 本轮触发了预设的停止规则**（user 2026-07-18 批准）：R7 尚有 2 条 `[design]` 故继续；**R8 两条均为 `[doc]` 类（计划文档执行次序缺陷），无 `[design]` 类** → 按规则停止计划层评审，转入实施，由**实施后的 whole-branch codex 评审真代码**接手（那一道能真跑测试，不靠推理）。
+
+**16 条 finding 全部处置完毕，零误报，无一条被驳回**：
+| 轮 | finding | 类别 | 处置 |
+|---|---|---|---|
+| R1 | stock_coverage 无写入方 / 重试预算 | design | user 裁决改口径 / 全采纳 |
+| R2 | 坏覆盖行中止 sweep / TOCTOU 未处理 | design | 全采纳 |
+| R3 | 输家删赢家产物 / migration 测必挂 | design+doc | 全采纳（前者后被 R5 撤回） |
+| R4 | 行先于产物可见 | design | → 触发 R5 架构核实 |
+| R5 | 陈旧 .db 破坏自愈 / 残留非强制 | design | 全采纳，撤回已批残留 |
+| R6 | dense 日历双盲 / Step 自相矛盾 | design+doc | 全采纳 |
+| R7 | migration IF NOT EXISTS / D9 边界豁免 / 测试 NameError | design×2+doc | 全采纳（F2 换判据，codex 建议的公式经 probe 证伪） |
+| R8 | 锁测试次序 / tempfile 次序 | doc×2 | 全采纳 → **停止规则触发** |
+
+**实施阶段务必带上的三条教训**：
+1. **判据类改动必须构造正反例实跑**——D9 改三次才对，前两次都"看着对"（粗豁免 → 自指公式 → 全量对照），probe 一跑才现原形。
+2. **改 plan 只看新增段会漏**——R3-F2 与 R6-F2 两次栽在同一坑：同一函数在文档里出现多处，只改一处。
+3. **写防护前先查架构不变量**——R2/R3/R4 三轮都在防一个被 D14 advisory lock 排除的并发场景，查一次只要两分钟。
