@@ -86,6 +86,10 @@ public struct TrainingView: View {
         engine.drawingSession.drawingModeActive
     }
     private func toggleDrawing() {
+        // 交易边界（codex rebased-R1-high）：进/出画线**同步**作废未确认买卖框——不依赖会被 SwiftUI
+        // coalesce 掉的 .onChange（drawingModeActive 若在一次 update 内 false→true→false，onChange 看不到净变化）。
+        // 这是画线模式唯一的 UI 开/关入口（画图钮/退出钮/复盘浮动钮都走它）。下方 .onChange 保留作纵深。
+        tradeStrip = nil
         engine.toggleDrawingMode()
     }
 

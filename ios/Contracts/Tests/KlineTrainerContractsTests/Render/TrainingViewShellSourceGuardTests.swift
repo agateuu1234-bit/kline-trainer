@@ -58,6 +58,13 @@ struct TrainingViewShellSourceGuardTests {
         let ocBody = String(ocTail[..<ocEnd.lowerBound])
         #expect(ocBody.contains("tradeStrip = nil"))
         #expect(!ocBody.contains("if "))                 // 闭包体无任何条件 → 两个方向都清（不止某个 if 分支）
+        // 同步纵深（codex rebased-R1-high）：唯一 UI 开/关入口 toggleDrawing() 必须**同步**清 tradeStrip，
+        // 不能只靠会被 SwiftUI coalesce 的 onChange（drawingModeActive 一次 update 内 false→true→false 时 onChange 不触发）。
+        let tdStart = try #require(code.range(of: "func toggleDrawing() {"), "找不到 toggleDrawing()")
+        let tdTail = String(code[tdStart.upperBound...])
+        let tdEnd = try #require(tdTail.range(of: "engine.toggleDrawingMode()"), "toggleDrawing 应调 toggleDrawingMode")
+        let tdBody = String(tdTail[..<tdEnd.lowerBound])
+        #expect(tdBody.contains("tradeStrip = nil"))     // 在调 engine.toggleDrawingMode() **之前**同步清
         // TradeBox overlay 挂载条件带 !drawingModeActive 纵深门控——**锚定到真实挂载条件**
         // （紧跟 showsTradeButtons，即 TradeBoxView 分支），不是文件里某处出现（codex plan-R5-high）。
         #expect(code.contains("showsTradeButtons, !engine.drawingSession.drawingModeActive,"))
