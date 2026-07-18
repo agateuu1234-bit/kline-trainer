@@ -91,7 +91,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # R1-H2：BIGINT/INTEGER 列必须是 Python int，其余 DECIMAL 列是 Python float。
-# df.iterrows() 会把整行升格成单一 float64 dtype → datetime/volume/ticket_index 变 numpy.float64
+# df.iterrows() 会把整行升格成单一 float64 dtype → datetime/volume 变 numpy.float64
 # → asyncpg int8/int4 codec 拒收。故按列显式 cast，不用 iterrows()。
 _INT_COLS = ("datetime", "volume")
 _FLOAT_COLS = ("open", "high", "low", "close", "amount", "ma66",
@@ -215,7 +215,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     csv_dir = Path(args.input)
     all_files = sorted(csv_dir.glob("*.csv"))
 
-    # 要写库的文件：--period 过滤；1m 先写（保证基准来源行也入库）。
+    # 要写库的文件：--period 过滤。（原「1m 先写」优先级随 ticket_index 停写一并移除）
     write_files = all_files
     if args.period:
         write_files = [f for f in all_files if _discover_period(f) == args.period]
