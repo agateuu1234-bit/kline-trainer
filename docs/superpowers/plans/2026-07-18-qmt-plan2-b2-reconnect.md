@@ -334,7 +334,7 @@ COMMIT;
 cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && ../.venv/bin/python -m pytest tests/test_migrations.py -q
 ```
 
-期望：`10 passed`。
+期望：`11 passed`。
 
 - [ ] **Step 6: 写 schema.sql fresh baseline 的失败测试**
 
@@ -514,7 +514,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && ../.venv/bin/python -m 
 cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && ../.venv/bin/python -m pytest tests/ -q
 ```
 
-期望：`186 passed`（170 基线 + 10 migration + 6 新 schema 测；`test_expected_tables_present` 是**改**既有测、不计新增）。**0 failed / 0 skipped**。
+期望：`187 passed`（170 基线 + 11 migration + 6 新 schema 测；`test_expected_tables_present` 是**改**既有测、不计新增）。**0 failed / 0 skipped**。
 
 > 数字来自 dry-run 实测推导。若与实际差 1-2，**先核对是不是漏写/多写了某条测试**再改这里；硬性要求是 **0 failed / 0 skipped** 且新测试全部出现。
 
@@ -874,7 +874,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer"
 grep -rn "ticket_index" --include='*.py' --include='*.sql' backend/ | grep -v "^backend/tests/"
 ```
 
-期望：pytest `187 passed`（186 − 3 删除的 ticket_index 测 + 4 新增）。grep 输出**只有** `backend/sql/schema.sql` 的列定义行 + `backend/import_csv.py` 的两行注释；**不得**出现任何 `INSERT`/`compute_`/`_INT_COLS` 行。
+期望：pytest `188 passed`（187 − 3 删除的 ticket_index 测 + 4 新增）。grep 输出**只有** `backend/sql/schema.sql` 的列定义行 + `backend/import_csv.py` 的两行注释；**不得**出现任何 `INSERT`/`compute_`/`_INT_COLS` 行。
 
 - [ ] **Step 7: Commit**
 
@@ -903,7 +903,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift build 2>&1 
 cd "/Users/maziming/Coding/Prj_Kline trainer/ios/Contracts" && swift test 2>&1 | tail -10
 ```
 
-期望：pytest `187 passed / 0 failed / 0 skipped`（Task 1 后 186、Task 3 净 +1）；swift build 无 error；swift test 全绿。
+期望：pytest `188 passed / 0 failed / 0 skipped`（Task 1 后 187、Task 3 净 +1）；swift build 无 error；swift test 全绿。
 
 - [ ] **Step 2: 出非-coder 验收清单**
 
@@ -2386,7 +2386,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && ../.venv/bin/python -m 
 cd "/Users/maziming/Coding/Prj_Kline trainer" && git status --short
 ```
 
-期望：pytest **`217 passed`**（187 + Task4/5 净 +9 + 本文件 21）、**0 failed / 0 skipped**；`git status` 无 Step 3 变异残留（所有变异都已还原）。
+期望：pytest **`218 passed`**（188 + Task4/5 净 +9 + 本文件 21）、**0 failed / 0 skipped**；`git status` 无 Step 3 变异残留（所有变异都已还原）。
 
 > **耗时提醒**（dry-run 实测）：本文件 21 条测试跑真实生产链 + 8 万行 fixture，加两处缓存优化后整套后端约 **42s**（基线 3.5s）。这是刻意取舍——集成测跑真函数链而非 mock。若明显超过 1 分钟，检查两处缓存（`_cached_fixture` / `_rows_cache`）是否落实。
 
