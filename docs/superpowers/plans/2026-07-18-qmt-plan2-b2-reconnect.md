@@ -1119,7 +1119,7 @@ EOF
 
 **Interfaces:**
 - Consumes: Task 1 的 `stock_coverage` 表五列；Plan 1 已有的 `build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, trading_dates, before_caps, months, intraday_expected, before_min, max_retries) -> (start_datetime, windows)`；`compute_after_end(month_boundaries, start_idx, months) -> int`；`qmt_resample.period_boundaries(df_daily, rule) -> list[int]`；`qmt_normalize.trading_date(epoch) -> date`
-- Produces: `assemble_from_windows(output_dir, *, stock_code, stock_name, start_datetime, end_datetime, windows) -> GeneratedTrainingSet`（纯函数）；`build_training_windows` **与** `select_valid_window` 各新增 keyword-only 参数 `exclude_starts: frozenset[int] = frozenset()`（前者透传给后者，后者在切 `max_retries` **之前**过滤）；`_fetch_dense_coverage(conn, stock_code) -> tuple[date|None, date|None, set[date]]`（坏行抛 `GenerateSkipException`）；`_fetch_existing_starts(conn, stock_code) -> set[int]`；`_register_training_set(conn, gts) -> Optional[int]`（唯一冲突返回 `None`，**非**抛异常）。`generate_one_training_set` 直接产在 `output_dir`、**先写文件后登记**（崩溃窗口 = 自愈的孤儿 zip；并发已由 D14 advisory lock 单例排除，见文末 PF2-R5 决议）。Task 6 的集成测依赖这四个符号。
+- Produces: `assemble_from_windows(output_dir, *, stock_code, stock_name, start_datetime, end_datetime, windows) -> GeneratedTrainingSet`（纯函数）；`build_training_windows` **与** `select_valid_window` 各新增 keyword-only 参数 `exclude_starts: frozenset[int] = frozenset()`（前者透传给后者，后者在切 `max_retries` **之前**过滤）；`_fetch_dense_coverage(conn, stock_code) -> tuple[date|None, date|None, set[date], int|None]`（四元组，末位 `dense_day_count`；坏行抛 `GenerateSkipException`）；`_fetch_existing_starts(conn, stock_code) -> set[int]`；`_register_training_set(conn, gts) -> Optional[int]`（唯一冲突返回 `None`，**非**抛异常）。`generate_one_training_set` 直接产在 `output_dir`、**先写文件后登记**（崩溃窗口 = 自愈的孤儿 zip；并发已由 D14 advisory lock 单例排除，见文末 PF2-R5 决议）。Task 6 的集成测依赖这四个符号。
 
 - [ ] **Step 1: 写 `assemble_from_windows` 的失败测试**
 
@@ -1437,10 +1437,10 @@ async def _fetch_dense_coverage(conn, stock_code: str):
     GenerateSkipException）→ **中止整轮 sweep** 而非跳过一只股，且在 B4 常驻进程里
     会一路冒泡。故在此转成带原因的 skip。"""
     row = await conn.fetchrow(
-        "SELECT dense_1m_start_date, dense_1m_end_date, dropped_1m_dates "
+        "SELECT dense_1m_start_date, dense_1m_end_date, dropped_1m_dates, dense_day_count "
         "FROM stock_coverage WHERE stock_code=$1", stock_code)
     if row is None:
-        return None, None, set()
+        return None, None, set(), None
     start_date, end_date = row["dense_1m_start_date"], row["dense_1m_end_date"]
     if start_date is None or end_date is None:
         raise GenerateSkipException(
@@ -1460,7 +1460,7 @@ async def _fetch_dense_coverage(conn, stock_code: str):
     except (ValueError, TypeError) as exc:      # JSONDecodeError ⊂ ValueError
         raise GenerateSkipException(
             f"{stock_code}: stock_coverage.dropped_1m_dates 非法（{exc}）") from exc
-    return start_date, end_date, dropped
+    return start_date, end_date, dropped, row["dense_day_count"]
 
 
 async def _fetch_existing_starts(conn, stock_code: str) -> set:
@@ -1504,7 +1504,8 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
         if bars.empty:
             raise GenerateSkipException(f"{stock_code}: {p} 无 bars")
 
-    start_date, end_date, dropped = await _fetch_dense_coverage(conn, stock_code)
+    start_date, end_date, dropped, dense_day_count = await _fetch_dense_coverage(
+        conn, stock_code)
     if start_date is None or end_date is None:
         raise GenerateSkipException(
             f"{stock_code}: stock_coverage 无覆盖 artifact（B1 未写入）→ 无法门控，跳过")
@@ -1514,6 +1515,19 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
     dense_dates = {d for d in trading_dates if start_date <= d <= end_date} - dropped
     if not dense_dates:
         raise GenerateSkipException(f"{stock_code}: dense 覆盖为空")
+
+    # **交叉校验重建出的日历 vs 权威计数**（codex PF2-R6-F1）。
+    # 上面的 trading_dates 是从**现存的 daily klines** 反推的：若带内某个交易日的
+    # daily 行本身缺失（B1 半途导入 / 行丢失），那天就同时从 dense_dates 与 D9 的
+    # span 里**一起消失** —— 两道门都看不见它，窗口能带着整日空洞过关。
+    # dense_day_count 是 B1 写下的权威天数，对不上即 fail-closed。
+    if dense_day_count is None:
+        raise GenerateSkipException(
+            f"{stock_code}: stock_coverage.dense_day_count 为 NULL，无法交叉校验")
+    if len(dense_dates) != int(dense_day_count):
+        raise GenerateSkipException(
+            f"{stock_code}: dense 日历不一致——artifact 记 {dense_day_count} 天，"
+            f"由 daily klines 重建出 {len(dense_dates)} 天（带内有 daily 行缺失？）")
 
     month_boundaries = period_boundaries(daily, "monthly")
     exclude = await _fetch_existing_starts(conn, stock_code)
@@ -1671,6 +1685,37 @@ scheduler 侧（`backend/app/scheduler.py` 的 `_gen`）同样加锁——注意
 在 `backend/tests/test_b2_reconnect_integration.py` 追加：
 
 ```python
+def test_cli_refuses_when_b2_lock_held(tmp_path, monkeypatch, capsys):
+    """codex PF2-R6-F2：CLI 侧的锁必须真存在（原 Step 11 会把它删掉）。
+    拿不到锁 → 非零退出 + 明确报错，**不得**继续生成。"""
+    import generate_training_sets as G
+
+    class _LockedConn:
+        async def fetchval(self, q, *a):
+            assert "pg_try_advisory_lock" in q
+            return False
+        async def execute(self, q, *a):
+            raise AssertionError("拿不到锁时不应 unlock")
+        async def close(self):
+            return None
+
+    async def _connect(dsn):
+        return _LockedConn()
+
+    fake = types.ModuleType("asyncpg")
+    fake.connect = _connect
+    monkeypatch.setitem(sys.modules, "asyncpg", fake)
+    monkeypatch.setattr(G, "generate_batch", _must_not_run)
+
+    rc = G.main(["--dsn", "postgres://x", "--output", str(tmp_path)])
+    assert rc != 0, "拿不到 B2 锁时 CLI 必须非零退出"
+    assert "锁" in capsys.readouterr().out
+
+
+async def _must_not_run(*a, **k):
+    raise AssertionError("拿不到锁时不得调用 generate_batch")
+
+
 def test_gen_adapter_returns_zero_when_b2_lock_held(tmp_path, caplog):
     """codex PF2-R5-F2：拿不到 B2 生成锁 → 本次 sweep 生成 0 + 告警，
     **不**与手工 CLI 竞争同一产物路径（那会让已登记 zip 的 content_hash 失配）。"""
@@ -1697,27 +1742,14 @@ def test_gen_adapter_returns_zero_when_b2_lock_held(tmp_path, caplog):
     assert "B2 生成锁" in caplog.text
 ```
 
-- [ ] **Step 11: 删 CLI 里已成孤儿的 NotImplementedError 捕获**
-
-`backend/generate_training_sets.py` 第 407-413 行：
-
-```python
-        try:
-            sets = await generate_batch(conn, args.count, out_dir, random.Random(args.seed))
-        except NotImplementedError as exc:
-            # codex whole-branch review high：assemble_training_set 已 fail-closed 停用；
-            # CLI 人工调用，比裸 traceback 更清楚地报错并非零退出（而非静默/丢生成结果）。
-            print(f"[B2] 错误：{exc}")
-            return 1
-```
-
-改为：
-
-```python
-        sets = await generate_batch(conn, args.count, out_dir, random.Random(args.seed))
-```
-
-（scheduler 侧的同名清理已在 Step 10b 随新 `_gen` 一并完成。）
+> **Step 11 已删除**（codex PF2-R6-F2）。原 Step 11 让实施者把 `_amain` 里那段
+> 替换成**没有锁的** `sets = await generate_batch(...)`，会**撤销 Step 10b 刚加的 CLI
+> advisory lock**，重新打开"手工 CLI 撞 B4 → 覆盖已登记 zip → content_hash 失配"的洞。
+> Step 10b 给出的 `_amain` 片段**已经**是最终形态（既含锁、也已不含孤儿的
+> `NotImplementedError` 捕获），无需后续步骤再动它。
+>
+> **实施者注意**：`_amain` 与 `_gen` 的最终代码以 **Step 10b** 为准，本 plan 其它任何
+> 位置若出现不带锁的 `generate_batch(...)` 调用形态，一律以 Step 10b 覆盖。
 
 - [ ] **Step 12: 全套件确认零回归**
 
@@ -1778,6 +1810,8 @@ import datetime as dt
 import json
 import random
 import sqlite3
+import sys
+import types
 import zipfile
 from zoneinfo import ZoneInfo
 
@@ -1915,8 +1949,11 @@ class _FakeConn:
 
 
 def _coverage_row(days: list, dropped: list | None = None) -> dict:
+    dropped = dropped or []
     return {"dense_1m_start_date": days[0], "dense_1m_end_date": days[-1],
-            "dropped_1m_dates": json.dumps([d.isoformat() for d in (dropped or [])])}
+            "dropped_1m_dates": json.dumps([d.isoformat() for d in dropped]),
+            # 权威天数必须与 B2 重建出的 dense_dates 一致（PF2-R6-F1 交叉校验）
+            "dense_day_count": len([d for d in days if d not in set(dropped)])}
 
 
 def _fixture_conn(dropped: list | None = None, n_days: int = 1000):
@@ -2029,7 +2066,7 @@ def test_malformed_coverage_row_skips_not_crashes(tmp_path, bad_dropped, label):
     在 B4 常驻进程里一路冒泡。"""
     days = _trading_days(dt.date(2022, 1, 3), 1000)
     cov = {"dense_1m_start_date": days[0], "dense_1m_end_date": days[-1],
-           "dropped_1m_dates": bad_dropped}
+           "dropped_1m_dates": bad_dropped, "dense_day_count": len(days)}
     conn = _FakeConn("000001.SZ", _build_pg_fixture(days), cov)
     with pytest.raises(GenerateSkipException, match="dropped_1m_dates"):
         asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
@@ -2038,11 +2075,30 @@ def test_malformed_coverage_row_skips_not_crashes(tmp_path, bad_dropped, label):
     assert list(tmp_path.iterdir()) == [], "坏行路径不得留下产物"
 
 
+def test_dense_day_count_mismatch_skips(tmp_path):
+    """codex PF2-R6-F1：带内某交易日的 daily 行缺失时，那天会同时从 dense_dates 与
+    D9 span 里消失——两道门都瞎。dense_day_count 交叉校验是唯一能抓到它的东西。"""
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
+    bars = _build_pg_fixture(days)
+    missing = days[len(days) // 2]
+    # 从 daily 里抠掉带内一个交易日（模拟 B1 半途导入 / 行丢失）
+    bars["daily"] = bars["daily"][
+        bars["daily"]["datetime"].map(lambda e: trading_date(int(e))) != missing
+    ].reset_index(drop=True)
+    cov = {"dense_1m_start_date": days[0], "dense_1m_end_date": days[-1],
+           "dropped_1m_dates": "[]", "dense_day_count": len(days)}   # 权威计数仍是全量
+    conn = _FakeConn("000001.SZ", bars, cov)
+    with pytest.raises(GenerateSkipException, match="dense 日历不一致"):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                              random.Random(7)))
+    assert conn.registered == []
+
+
 def test_reversed_coverage_band_skips(tmp_path):
     """覆盖带反向（start > end）→ 可诊断 skip（DB 有 CHECK，但历史行/别的库可能没有）。"""
     days = _trading_days(dt.date(2022, 1, 3), 1000)
     cov = {"dense_1m_start_date": days[-1], "dense_1m_end_date": days[0],
-           "dropped_1m_dates": "[]"}
+           "dropped_1m_dates": "[]", "dense_day_count": len(days)}
     conn = _FakeConn("000001.SZ", _build_pg_fixture(days), cov)
     with pytest.raises(GenerateSkipException, match="反向"):
         asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
@@ -2053,7 +2109,7 @@ def test_malformed_coverage_does_not_abort_batch(tmp_path, capsys):
     """整轮 sweep 级证据：坏行只让该股 skip，generate_batch 正常返回（非抛异常）。"""
     days = _trading_days(dt.date(2022, 1, 3), 1000)
     cov = {"dense_1m_start_date": days[0], "dense_1m_end_date": days[-1],
-           "dropped_1m_dates": "{not json"}
+           "dropped_1m_dates": "{not json", "dense_day_count": len(days)}
     conn = _FakeConn("000001.SZ", _build_pg_fixture(days), cov)
     out = asyncio.run(generate_batch(conn, 2, tmp_path, random.Random(3)))
     assert out == []
@@ -2345,3 +2401,14 @@ fi
   依据 [[project_app_public_release_intent]]：耐久性取舍默认选做，codex 坚持数据耐久性时照做。
 
 > **R5 接受残留（CLI/B4 并跑）已作废** —— F2 的锁把它变成了强制不变量，**不再需要 `attest-override.sh` 收口**。
+
+### PF2-R6（2026-07-18，verdict = needs-attention；两条 high，**均采纳**）
+
+- **F1 [high] B2 用"可能不全的 daily 行"反推 dense 日历，两道门一起瞎**。
+  **核实 = 属实，是一直存在的坏数据面。** `trading_dates` 从现存 daily klines 反推，`dense_dates` 又基于它。若带内某交易日的 **daily 行本身缺失**（B1 半途导入 / 行丢失），那天就同时从 `dense_dates`（D2 门）与 `per_day_intraday_complete` 的 `span`（D9 门）里消失——**两道门都看不见它**，窗口能带着整日空洞过关。我建了 `dense_day_count` 列、也在 Task 5 Interfaces 里声称读取表契约，却**从没真读过、更没校验**，等于让这列当摆设。
+  **处置 = 采纳。** `_fetch_dense_coverage` 改返四元组（带 `dense_day_count`）；`generate_one_training_set` 交叉校验 `len(dense_dates) == dense_day_count`，不等 → fail-closed 且报出两个数字。补集成测（artifact 声称全量天数，但 daily 抠掉带内一天 → 必 skip）。所有 fixture 的 coverage 行同步补该字段。
+
+- **F2 [high] 后面的 Step 会把前面刚加的 CLI 锁删掉**。
+  **核实 = 属实，是我上一轮引入的 plan 自相矛盾。** Step 10b 给 `_amain` 加了 advisory lock，紧接着的 Step 11 又让实施者把同一段替换成**不带锁的** `sets = await generate_batch(...)`。照字面执行 = CLI 失去锁、scheduler 保留锁 → 重新打开 R5-F2 刚堵上的洞（手工 CLI 撞 B4 → 覆盖已登记 zip → `content_hash` 失配）。
+  **处置 = 采纳。** 整个删除 Step 11（Step 10b 的片段本就已是最终形态：既含锁、也已不含孤儿 `NotImplementedError` 捕获），并留下醒目提示"`_amain`/`_gen` 最终代码一律以 Step 10b 为准"。另补 codex 要求的 **CLI 级**锁测试（原先只测了 scheduler 侧）。
+  **同类重犯**：R3-F2 也是"plan 给的指令自相矛盾/不可执行"。教训 = 每轮改完 plan，必须把**同一个函数的所有出现处**一起看，不能只改新增段。
