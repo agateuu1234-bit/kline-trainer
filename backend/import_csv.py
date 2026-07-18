@@ -202,7 +202,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="导入 CSV 行情到 PostgreSQL (B1)")
     ap.add_argument("--input", required=True, help="CSV 目录")
     ap.add_argument("--stock", required=True, help="股票代码")
-    ap.add_argument("--period", default=None, help="只导该周期；省略=导全部，1m 先建基准")
+    ap.add_argument("--period", default=None, help="只导该周期；省略=导全部")
     ap.add_argument("--name", default=None, help="股票名（缺省取 CSV name 列或代码）")
     ap.add_argument("--dsn", default=os.environ.get("DATABASE_URL"), help="PostgreSQL DSN")
     args = ap.parse_args(argv)
