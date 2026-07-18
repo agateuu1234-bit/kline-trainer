@@ -1199,12 +1199,19 @@ def assemble_from_windows(output_dir: Path, *, stock_code: str, stock_name: str,
     本函数只负责序列化。文件名/end_datetime 语义沿用 PR #74 既有契约（B3 按路径下载）。"""
     windows = assign_global_indices(windows)
     fname = f"{stock_code}_{start_datetime}"
-    db_path = output_dir / f"{fname}.db"
     zip_path = output_dir / f"{fname}.zip"
-    build_training_set_sqlite(db_path, stock_code=stock_code, stock_name=stock_name,
-                              start_datetime=start_datetime, end_datetime=end_datetime,
-                              windows=windows)
-    content_hash = zip_and_hash(db_path, zip_path)
+    # 中间 .db 建在**临时目录**（codex PF2-R5-F1）：它是纯构建中间产物——从不登记、
+    # 无人引用。放最终目录会留崩溃残渣，而 `_TRAINING_SET_DDL` 是裸 `CREATE TABLE`
+    # （无 IF NOT EXISTS）→ 下次同起点重试撞 `table meta already exists`
+    # （`sqlite3.OperationalError`，**不是** GenerateSkipException）→ 中止整轮 sweep。
+    # 文件名仍用 `{code}_{start}.db` 以保持 zip 内 arcname 契约不变。
+    # 注：zip 直接写最终路径不受此影响——`ZipFile(path, "w")` 会截断重写，天然自愈。
+    with tempfile.TemporaryDirectory() as _tmp:
+        db_path = Path(_tmp) / f"{fname}.db"
+        build_training_set_sqlite(db_path, stock_code=stock_code, stock_name=stock_name,
+                                  start_datetime=start_datetime, end_datetime=end_datetime,
+                                  windows=windows)
+        content_hash = zip_and_hash(db_path, zip_path)
     return GeneratedTrainingSet(path=zip_path, content_hash=content_hash,
                                 stock_code=stock_code, stock_name=stock_name,
                                 start_datetime=start_datetime, end_datetime=end_datetime,
@@ -1468,6 +1475,7 @@ async def _fetch_existing_starts(conn, stock_code: str) -> set:
 
 ```python
 import json
+import tempfile
 ```
 
 以及从 `qmt_resample` 引入月边界哨兵：
@@ -1536,8 +1544,7 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
 
     # 预检：候选已按 exclude_starts 过滤，这条只是省掉常见情形下的一次白建 zip
     if await _exists_start(conn, stock_code, gts.start_datetime):
-        gts.path.unlink(missing_ok=True)
-        gts.path.with_suffix(".db").unlink(missing_ok=True)
+        gts.path.unlink(missing_ok=True)     # 中间 .db 在临时目录、已自动清
         raise GenerateSkipException(
             f"{stock_code}: start {gts.start_datetime} 已登记，跳过")
 
@@ -1549,8 +1556,7 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
     if row_id is None:
         raise GenerateSkipException(
             f"{stock_code}: start {gts.start_datetime} 已登记（并发 CLI？），跳过")
-    gts.path.with_suffix(".db").unlink(missing_ok=True)   # 仅保留 .zip（登记的产物）
-    return gts
+    return gts                       # 中间 .db 从不落在 output_dir，无需清理
 ```
 
 - [ ] **Step 11a: `generate_batch` 打印首条 skip 原因（诚实义务 1）**
@@ -1603,7 +1609,95 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
 
 对应回归测追加到 `backend/tests/test_b2_reconnect_integration.py`（Task 6 建的文件，本 Step 先只改生产代码，测试在 Task 6 一并写）。
 
-- [ ] **Step 11: 删 CLI 与 scheduler 里已成孤儿的 NotImplementedError 捕获**
+- [ ] **Step 10b: 给 B2 生成加互斥 advisory lock（CLI + scheduler 两条路径）**
+
+codex PF2-R5-F2：把「CLI 与调度器并跑」写成"不受支持"**不是强制手段**——CLI 依然可调用，
+真发生时会覆盖已登记 `file_path` 背后的 zip，让 `content_hash` 对不上 → B3 下载校验失败
+或静默坏产物（用户可见）。改为**真正互斥**，复用本仓 D14 已验证的模式（`scheduler_main.py:37`）。
+
+用**新 key**（不复用 `SCHEDULER_LOCK_KEY`）：若复用，跑着的 CLI 会让 B4 守护进程启动即退出，
+是更糟的运维事故。新 key 只互斥"B2 生成"这件事本身。
+
+在 `backend/generate_training_sets.py` 顶部常量区（`SCHEMA_VERSION` 附近）加：
+
+```python
+# B2 生成互斥锁 key（codex PF2-R5-F2；与 scheduler_main.SCHEDULER_LOCK_KEY 刻意不同——
+# 复用那把会让运行中的 CLI 把 B4 守护进程挡在启动之外）。CLI 与 B4 sweep 两条
+# 调用 B2 的路径都必须先拿到它，杜绝同一 (stock_code,start) 被两个 writer 同时产出。
+B2_GENERATION_LOCK_KEY = 0x42345CEE
+```
+
+CLI 侧（`_amain`，第 398-419 行）把 `generate_batch` 调用包进锁：
+
+```python
+        if not await conn.fetchval("SELECT pg_try_advisory_lock($1)",
+                                   B2_GENERATION_LOCK_KEY):
+            print("[B2] 错误：B2 生成锁被占（B4 调度器正在 sweep，或另一个 B2 CLI 在跑）。"
+                  "并发生成会覆盖已登记的 .zip 并让 content_hash 失配，故拒绝启动。")
+            return 1
+        try:
+            sets = await generate_batch(conn, args.count, out_dir, random.Random(args.seed))
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock($1)", B2_GENERATION_LOCK_KEY)
+```
+
+scheduler 侧（`backend/app/scheduler.py` 的 `_gen`）同样加锁——注意 advisory lock 是
+**按连接**持有的，必须在同一个 `conn` 上取/放：
+
+```python
+    async def _gen(n: int) -> int:
+        from generate_training_sets import B2_GENERATION_LOCK_KEY, generate_batch
+        async with pool.acquire() as conn:
+            # codex PF2-R5-F2：与 B2 CLI 互斥。拿不到锁 = 有人手工在跑 B2 →
+            # 本次 sweep 生成 0 并告警，等下次 cron，不与之竞争同一产物路径。
+            if not await conn.fetchval("SELECT pg_try_advisory_lock($1)",
+                                       B2_GENERATION_LOCK_KEY):
+                logger.warning("B2 生成锁被占（有人手工在跑 B2 CLI？）；本次 sweep 生成 0，"
+                               "等下次 cron 重试")
+                return 0
+            try:
+                produced = await generate_batch(conn, n, out, rng)
+            finally:
+                await conn.execute("SELECT pg_advisory_unlock($1)", B2_GENERATION_LOCK_KEY)
+            return len(produced)
+```
+
+（本 Step 同时完成 Step 11 要做的"删 scheduler 里孤儿 `NotImplementedError` 捕获"——
+上面的新 `_gen` 已不含该捕获。）
+
+- [ ] **Step 10c: 为锁补测**
+
+`backend/tests/test_scheduler.py` 已有 `_install_fake_asyncpg(..., lock_result=...)` 模式可参考。
+在 `backend/tests/test_b2_reconnect_integration.py` 追加：
+
+```python
+def test_gen_adapter_returns_zero_when_b2_lock_held(tmp_path, caplog):
+    """codex PF2-R5-F2：拿不到 B2 生成锁 → 本次 sweep 生成 0 + 告警，
+    **不**与手工 CLI 竞争同一产物路径（那会让已登记 zip 的 content_hash 失配）。"""
+    import logging
+    from app.scheduler import build_generate_batch
+
+    class _LockedConn:
+        async def fetchval(self, q, *a):
+            assert "pg_try_advisory_lock" in q
+            return False                      # 锁被占
+        async def execute(self, q, *a):
+            raise AssertionError("拿不到锁时不应 unlock")
+
+    class _Acq:
+        async def __aenter__(self): return _LockedConn()
+        async def __aexit__(self, *a): return False
+
+    class _Pool:
+        def acquire(self): return _Acq()
+
+    gen = build_generate_batch(_Pool(), str(tmp_path))
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(gen(5)) == 0
+    assert "B2 生成锁" in caplog.text
+```
+
+- [ ] **Step 11: 删 CLI 里已成孤儿的 NotImplementedError 捕获**
 
 `backend/generate_training_sets.py` 第 407-413 行：
 
@@ -1623,32 +1717,7 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
         sets = await generate_batch(conn, args.count, out_dir, random.Random(args.seed))
 ```
 
-`backend/app/scheduler.py` 第 153-169 行：
-
-```python
-    async def _gen(n: int) -> int:
-        from generate_training_sets import generate_batch
-        async with pool.acquire() as conn:
-            try:
-                produced = await generate_batch(conn, n, out, rng)
-            except NotImplementedError as exc:
-                # ...（整段注释）
-                logger.error(...)
-                return 0
-            return len(produced)
-```
-
-改为：
-
-```python
-    async def _gen(n: int) -> int:
-        from generate_training_sets import generate_batch
-        async with pool.acquire() as conn:
-            # Plan 2b：B2 装配路径已重接 build_training_windows（stock_coverage 门控），
-            # 原 NotImplementedError 捕获已成孤儿，随重接一并移除。
-            produced = await generate_batch(conn, n, out, rng)
-            return len(produced)
-```
+（scheduler 侧的同名清理已在 Step 10b 随新 `_gen` 一并完成。）
 
 - [ ] **Step 12: 全套件确认零回归**
 
@@ -1900,6 +1969,7 @@ def test_intermediate_db_removed_only_zip_kept(tmp_path):
     gts = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
                                                 random.Random(7)))
     assert gts.path.exists()
+    # 中间 .db 建在临时目录、随 with 块清掉，最终目录从来不该出现它
     assert not gts.path.with_suffix(".db").exists()
 
 
@@ -2005,6 +2075,25 @@ def test_registration_conflict_skips_without_crashing(tmp_path):
         asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
                                               random.Random(7)))
     assert conn.registered == []
+
+
+def test_stale_db_from_crash_does_not_block_regeneration(tmp_path):
+    """codex PF2-R5-F1：崩溃可能在最终目录留下 `{code}_{start}.db`。
+    `_TRAINING_SET_DDL` 是裸 `CREATE TABLE`，若装配仍往那个路径写，就会撞
+    `table meta already exists`（sqlite3.OperationalError，**不是**
+    GenerateSkipException）→ 中止整轮 sweep。中间 .db 改建在临时目录后，
+    最终目录里的陈旧 .db 只是无害垃圾，不得影响生成。"""
+    conn, _ = _fixture_conn()
+    probe = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                                  random.Random(7)))
+    stale_db = tmp_path / f"000001.SZ_{probe.start_datetime}.db"
+    stale_db.write_bytes(b"not a sqlite file at all")     # 陈旧残渣
+    conn.registered.clear()
+
+    gts = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                                random.Random(7)))
+    assert gts.start_datetime == probe.start_datetime
+    assert len(conn.registered) == 1
 
 
 def test_orphan_zip_from_crash_is_self_healing(tmp_path):
@@ -2242,3 +2331,17 @@ fi
 
 **接受残留（user 2026-07-18 裁决）**：运维**手工跑 B2 CLI 的同时 B4 调度器在跑** = 不受支持的操作。此时 `ON CONFLICT` 保证不崩、干净跳过，但最终路径上的 zip 可能被覆盖成与已登记 `content_hash` 不符的内容。**不为此加机器**；如将来真要支持并发生成，正解是给 B2 也加 advisory lock（与 D14 同一模式），而非两阶段发布。
 → 收口方式 = `attest-override.sh`（user 真终端），reason 记本节。
+
+### PF2-R5（2026-07-18，verdict = needs-attention；两条 high，**均采纳**）
+
+- **F1 [high] 陈旧 `.db` 会让"自愈"失效**。
+  **核实 = 属实，我 R5 决议里的自愈论证是半对的。** 我只推了 `.zip`（`ZipFile(path,"w")` 截断重写 → 确实自愈），漏了中间 `.db`：`assemble_from_windows` 把它写在最终目录、登记成功后才删。崩溃留下的 `{code}_{start}.db` 遇上裸 `CREATE TABLE meta`（`generate_training_sets.py:228`，无 `IF NOT EXISTS`）→ 下次同起点重试抛 `sqlite3.OperationalError: table meta already exists`，**不是** `GenerateSkipException` → 中止整轮 sweep。
+  **处置 = 采纳。** 中间 `.db` 改建在 `tempfile.TemporaryDirectory()`——它本就是纯构建中间产物（从不登记、无人引用），**没有理由出现在输出目录**。顺带消掉两处 `.db` 清理代码。补 codex 要求的回归测（预置坏的陈旧 `.db` → 下次生成仍成功）。
+
+- **F2 [high] "不受支持"不是强制手段**。
+  **核实 = 属实。** 我 R5 把 CLI/B4 并跑列为接受残留，但 CLI 依然可调用、没有任何机制拦它；真发生时覆盖已登记 `file_path` 背后的 zip → `content_hash` 失配 → B3 下载校验失败或静默坏产物（**用户可见**）。
+  **处置 = 采纳，撤回 R5 的接受残留。** codex 给的补救比我 R4 拒掉的 `building` 状态便宜得多，且复用本仓已验证的 D14 模式：新增 `B2_GENERATION_LOCK_KEY`，**CLI 与 B4 `_gen` 两条调用 B2 的路径都先 `pg_try_advisory_lock`**，拿不到就拒绝/本轮生成 0。零 schema 改动、零状态机改动、约 15 行。
+  **刻意用新 key 而非复用 `SCHEDULER_LOCK_KEY`**：复用的话，一个跑着的 CLI 会让 B4 守护进程启动即退出（`scheduler_main` 拿不到锁就 `return`），那是更糟的运维事故。
+  依据 [[project_app_public_release_intent]]：耐久性取舍默认选做，codex 坚持数据耐久性时照做。
+
+> **R5 接受残留（CLI/B4 并跑）已作废** —— F2 的锁把它变成了强制不变量，**不再需要 `attest-override.sh` 收口**。
