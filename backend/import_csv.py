@@ -162,16 +162,34 @@ class SchemaDriftError(ValueError):
 
 
 _SCHEMA_CHECK_SQL = """
-SELECT column_name, data_type FROM information_schema.columns
-WHERE table_name = 'klines' AND column_name = ANY($1::text[])
+SELECT a.attname AS column_name,
+       format_type(a.atttypid, a.atttypmod) AS data_type
+FROM pg_attribute a
+WHERE a.attrelid = to_regclass('klines')
+  AND a.attname = ANY($1::text[])
+  AND a.attnum > 0
+  AND NOT a.attisdropped
 """
 
 
 async def _assert_klines_price_columns_double(conn) -> None:
-    """D8a（spec §4.3，codex 对抗评审 high 提前落地）：写库前 fail-closed 断言——
-    klines.open/high/low/close 必须已是 double precision。防目标库尚未跑 migration
-    0004（仍是 DECIMAL(10,2)）时 PostgreSQL 静默四舍五入到 2 位，摧毁 QMT 前复权价
-    的 float64 精度。刻意不断言 ticket_index（该列保留、非本次范围）。"""
+    """D8a（spec §4.3，codex 对抗评审 high 提前落地；R2 再收紧）：写库前 fail-closed
+    断言——klines.open/high/low/close 必须已是 double precision。防目标库尚未跑
+    migration 0004（仍是 DECIMAL(10,2)）时 PostgreSQL 静默四舍五入到 2 位，摧毁 QMT
+    前复权价的 float64 精度。刻意不断言 ticket_index（该列保留、非本次范围）。
+
+    R2（codex 对抗评审 high #2）：查询必须用 pg_catalog + to_regclass('klines')
+    精确定位关系，不能用 information_schema.columns 按裸表名过滤。后者不限 schema——
+    若库里多个 schema 各有一张 klines，会把多张表的行一起取回，调用处
+    `{r["column_name"]: r["data_type"] for r in rows}` 按列名收敛时后取到的行覆盖
+    先前的，另一 schema 里 double precision 的 klines 可能掩盖真正写入目标（由
+    search_path 解析、INSERT 不带 schema 限定）里的 numeric，让本该 fail-closed 的
+    旧库被静默放行。to_regclass('klines') 的解析规则与不带限定的裸表引用完全一致，
+    保证这里检查的就是 INSERT 实际会命中的那一张表。
+    format_type 对 float8 返回 "double precision"、对 DECIMAL(10,2) 返回
+    "numeric(10,2)"——下面 `!= "double precision"` 判据不变，DECIMAL 仍会被正确
+    判为漂移。表不存在时 to_regclass 返回 NULL，查不到任何行，四列全部落入
+    「列缺失」分支，同样 fail-closed。"""
     rows = await conn.fetch(_SCHEMA_CHECK_SQL, list(_PRICE_COLS))
     found = {r["column_name"]: r["data_type"] for r in rows}
     bad = {c: found.get(c, "<列缺失>") for c in _PRICE_COLS

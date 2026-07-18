@@ -212,8 +212,10 @@ def _dummy_kline_record() -> dict:
 
 
 def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls: dict):
-    """假 asyncpg 模块：information_schema.columns 查询返回 data_type 可控，
-    execute/executemany/transaction 各自计数——用于断言 fail-closed 时一次写入都没发生。"""
+    """假 asyncpg 模块：pg_catalog（经 to_regclass 精确定位关系）查询返回 data_type 可控，
+    execute/executemany/transaction 各自计数——用于断言 fail-closed 时一次写入都没发生。
+    记录实际 query 文本到 calls["query"]，供调用方断言用的是 to_regclass 精确查询
+    （而非按表名裸过滤、跨 schema 会取到无关表的 information_schema.columns）。"""
     import sys
     import types
 
@@ -227,6 +229,7 @@ def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls
     class _FakeConn:
         async def fetch(self, query, *args):
             calls["fetch"] = calls.get("fetch", 0) + 1
+            calls["query"] = query
             return [{"column_name": c, "data_type": data_type}
                     for c in ("open", "high", "low", "close")]
 
@@ -256,8 +259,10 @@ def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls
 def test_write_to_postgres_rejects_stale_decimal_schema_before_any_write(monkeypatch):
     # 目标库仍是旧 DECIMAL(10,2)（未跑 migration 0004）→ 必须 fail-closed 中止，
     # 且 execute/executemany/transaction 一次都不能被调用（否则 PG 会静默四舍五入丢精度）。
+    # data_type 用 format_type(DECIMAL(10,2)) 的真实输出（"numeric(10,2)"），
+    # 而非 information_schema.columns 的裸 "numeric"。
     calls: dict = {}
-    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="numeric", calls=calls)
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="numeric(10,2)", calls=calls)
     from import_csv import SchemaDriftError, write_to_postgres
 
     with pytest.raises(SchemaDriftError):
@@ -266,10 +271,16 @@ def test_write_to_postgres_rejects_stale_decimal_schema_before_any_write(monkeyp
     assert calls.get("execute", 0) == 0
     assert calls.get("executemany", 0) == 0
     assert calls.get("transaction", 0) == 0
+    # 断言查询锁定的是 to_regclass 精确解析出的关系，而非按表名裸过滤的
+    # information_schema.columns（后者跨 schema 会取到无关 klines 表，按列名收敛
+    # 时后取到的行覆盖先前的，可能让本该 fail-closed 的旧 DECIMAL 库被掩盖放行）。
+    assert "to_regclass" in calls.get("query", "")
+    assert "information_schema" not in calls.get("query", "")
 
 
 def test_write_to_postgres_allows_double_precision_schema(monkeypatch):
     # 目标库已跑 migration 0004（double precision）→ 正常放行、照常写入。
+    # format_type(float8) 的真实输出就是 "double precision"，与 information_schema 一致。
     calls: dict = {}
     _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls)
     from import_csv import write_to_postgres
@@ -279,3 +290,4 @@ def test_write_to_postgres_allows_double_precision_schema(monkeypatch):
     assert n == 1
     assert calls.get("execute", 0) == 1
     assert calls.get("executemany", 0) == 1
+    assert "to_regclass" in calls.get("query", "")
