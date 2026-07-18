@@ -182,6 +182,15 @@ def test_migration_0004_forward_creates_stock_coverage():
     assert "create table" in sql and "stock_coverage" in sql
 
 
+def test_migration_0004_stock_coverage_is_not_if_not_exists():
+    """codex PF2-R7-F1：版本化 migration 里 `CREATE TABLE IF NOT EXISTS` 会让
+    "已存在一张旧形状表"静默通过，库低于所声明契约，故障挪到 B4 运行期才炸。
+    （schema.sql 那份 fresh baseline 用 IF NOT EXISTS 是对的，migration 不行。）"""
+    sql = _sql_normalized(MIG_0004 / "forward.sql")
+    assert "create table stock_coverage" in sql
+    assert "create table if not exists stock_coverage" not in sql
+
+
 def test_migration_0004_stock_coverage_carries_integrity_checks():
     """codex PF2-R2-F1：migration 建的表必须与 schema.sql 一样带约束，
     否则已部署库前向迁移后仍是无约束的坏行温床。"""
@@ -261,7 +270,12 @@ ALTER TABLE training_sets ALTER COLUMN file_path TYPE TEXT;
 -- 坏行（非 JSON / 非数组 / 反向区间）会让 B2 reader 抛 ValueError 穿出 generate_batch
 -- （它只捕 GenerateSkipException）→ **中止整轮 sweep** 而非跳过一只股。故收紧为
 -- JSONB NOT NULL + 数组类型检查 + 区间/计数合法性检查。reader 侧另有降级兜底（防历史行）。
-CREATE TABLE IF NOT EXISTS stock_coverage (
+-- **刻意不用 IF NOT EXISTS**（codex PF2-R7-F1）：版本化 migration 必须对结果形状确定。
+-- 若目标库已存在一张手工/试跑建出的旧形状 stock_coverage（TEXT、缺 dense_day_count、
+-- 缺 CHECK），IF NOT EXISTS 会让 migration **静默成功**、库却低于所声明的 1.12 契约；
+-- 故障随后从"迁移期"挪到"B4 运行期"（PR 2b 会 SELECT dense_day_count → UndefinedColumn）。
+-- 裸 CREATE TABLE 在这种情况下直接报错中止 = 正确的 fail-closed。
+CREATE TABLE stock_coverage (
     stock_code          TEXT PRIMARY KEY,
     dense_1m_start_date DATE NOT NULL,
     dense_1m_end_date   DATE NOT NULL,
@@ -930,7 +944,8 @@ PR 标题/正文中文。**正文必须点名引用** `docs/governance/m01-schem
 在 `backend/tests/test_generate_training_sets.py` 末尾追加。注意本文件已有 `_mid` / `_weekday_trading_dates` / `_n_month_boundaries` / `_intraday_bars_per_day` 等 helper（第 206 行起），下面复用它们，只新增一个"按真实每日根数铺盘中"的 helper：
 
 ```python
-# ===== Plan 2b Task 4：D9 门首日边界修复（Plan 1 遗留 bug 的回归锁）=====
+# ===== Plan 2b Task 4：D9 门边界日修复（Plan 1 遗留 bug 的回归锁）=====
+# 本段用到 trading_date，若本文件尚未 import 需补：`from qmt_normalize import trading_date`
 #
 # 实测过的失败现象（修复前）：46 个月历史 + 每交易日精确 80/16/4 根 + 零 drop 的
 # **完美** fixture 下，8 个 dense 候选全被 D9 拒 → build_training_windows 抛
@@ -956,34 +971,37 @@ def _golden_intraday(days, per_day: int, *, skip=None, short=None) -> pd.DataFra
     return pd.DataFrame(rows)
 
 
-def _production_cap_windows(days, *, skip=None, short=None):
-    """用**生产** PERIOD_BEFORE_CAP 切出的盘中窗口（首日必然是部分根——正是本 Task 的靶心）。"""
+def _production_cap_windows(days, *, skip=None, short=None, caps=None):
+    """用**生产** PERIOD_BEFORE_CAP 切出的盘中窗口（首日必然是部分根——正是本 Task 的靶心）。
+    返回 `(wins, after_end, full_bars)`：`full_bars` 必须传给
+    per_day_intraday_complete，边界日要对照它判完整性（PF2-R7-F2）。"""
     from generate_training_sets import PERIOD_BEFORE_CAP
+    caps = caps or PERIOD_BEFORE_CAP
     start = _mid(days[len(days) // 2].year, days[len(days) // 2].month,
                  days[len(days) // 2].day)
     after_end = int(dt.datetime(days[-1].year, days[-1].month, days[-1].day,
                                 23, 59, 59, tzinfo=SH).timestamp())
-    wins = {}
+    wins, full = {}, {}
     for p, n in _GOLDEN_PER_DAY.items():
-        bars = _golden_intraday(days, n, skip=skip, short=short)
-        wins[p] = select_period_window(bars, start, PERIOD_BEFORE_CAP[p], after_end, p)
-    return wins, after_end
+        full[p] = _golden_intraday(days, n, skip=skip, short=short)
+        wins[p] = select_period_window(full[p], start, caps[p], after_end, p)
+    return wins, after_end, full
 
 
 def test_per_day_gate_passes_under_production_before_caps():
     """靶心：生产 cap(150) + 完美数据（每日精确 80/16/4、零 drop）必须过门。
     修复前此测必挂（首日 3m 只有 70 根被判洞）。"""
     days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
-    wins, ae = _production_cap_windows(days)
-    assert per_day_intraday_complete(wins, days, ae) is True
+    wins, ae, full = _production_cap_windows(days)
+    assert per_day_intraday_complete(wins, days, ae, full_bars=full) is True
 
 
 def test_per_day_gate_still_catches_interior_missing_day():
     """不得放松真洞：窗口内某交易日**整日缺席**（B1 drop 的表现）仍必须被拒。"""
     days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
     hole = days[len(days) // 2 + 5]        # 落在 forward 窗口内部
-    wins, ae = _production_cap_windows(days, skip={hole})
-    assert per_day_intraday_complete(wins, days, ae) is False
+    wins, ae, full = _production_cap_windows(days, skip={hole})
+    assert per_day_intraday_complete(wins, days, ae, full_bars=full) is False
 
 
 def test_per_day_gate_still_catches_interior_short_day():
@@ -991,8 +1009,37 @@ def test_per_day_gate_still_catches_interior_short_day():
     证明修复没有把「部分日一律放行」。"""
     days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
     bad = days[len(days) // 2 + 5]
-    wins, ae = _production_cap_windows(days, short={bad: 79})
-    assert per_day_intraday_complete(wins, days, ae) is False
+    wins, ae, full = _production_cap_windows(days, short={bad: 79})
+    assert per_day_intraday_complete(wins, days, ae, full_bars=full) is False
+
+
+def test_per_day_gate_catches_corrupt_boundary_day():
+    """codex PF2-R7-F2：边界日在**库里**残缺必须被抓。
+
+    生产 cap 下窗口只切到该日 70/80 根（正常）；但把它在**全量 bars** 里改成 60 根
+    （真损坏）→ 必须判失败。这条同时钉死一种已被实测否掉的错误写法：
+    用「从窗口反推的余数」`(before_n % need) or need` 判边界日是**自指**的——
+    损坏边界日会让 before_n 同步变小、期望值跟着变小、恰好匹配 → 漏检（实测返回 True）。"""
+    days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
+    probe, _, _ = _production_cap_windows(days)
+    d0 = min(trading_date(e) for e in probe["3m"]["datetime"])
+    wins, ae, full = _production_cap_windows(days, short={d0: 60})   # 全量里该日只剩 60
+    assert per_day_intraday_complete(wins, days, ae, full_bars=full) is False
+
+
+def test_per_day_gate_passes_when_cap_is_exact_multiple():
+    """cap 恰为每日根数整数倍（边界日被完整切入窗口）→ 仍应通过。"""
+    days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
+    caps = {p: n * 2 for p, n in _GOLDEN_PER_DAY.items()}
+    wins, ae, full = _production_cap_windows(days, caps=caps)
+    assert per_day_intraday_complete(wins, days, ae, full_bars=full) is True
+
+
+def test_per_day_gate_passes_with_zero_before_cap():
+    """cap=0（纯 forward 窗口，无 before-context）→ 边界日就是首个前向交易日，应通过。"""
+    days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
+    wins, ae, full = _production_cap_windows(days, caps={p: 0 for p in _GOLDEN_PER_DAY})
+    assert per_day_intraday_complete(wins, days, ae, full_bars=full) is True
 
 
 def test_build_training_windows_succeeds_under_production_config():
@@ -1043,7 +1090,16 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && ../.venv/bin/python -m 
 
 - [ ] **Step 3: 改 `per_day_intraday_complete`**
 
-`backend/generate_training_sets.py` 第 178-180 行：
+改**三处**。
+
+其一，签名（第 164 行）加 keyword-only 参数：
+
+```python
+def per_day_intraday_complete(windows, trading_dates, after_end, expected=None,
+                              *, full_bars=None) -> bool:
+```
+
+其二，第 178-180 行的判定：
 
 ```python
         counts = dates.value_counts().to_dict()
@@ -1055,26 +1111,54 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && ../.venv/bin/python -m 
 
 ```python
         counts = dates.value_counts().to_dict()
-        # d0 = before_cap 切片的边界日。`select_period_window` 取「起点前 min(pivot, cap) 根」，
-        # 生产 cap(150) 不是每日根数(80/16/4)的整数倍 → 首日必然只切到部分根（3m 70/80）。
-        # 这是**切片产物、不是数据洞**：B1 保证 PG 永无 partial 盘中日（D9(a)/R13-F2「全或无」），
-        # 真洞在 PG 里恒表现为整日缺席（count==0）→ 仍会被下面的精确门抓住。
-        # 故首日只验存在性（d0 由 dates.min() 得出，必然存在），其余日仍精确验根数。
-        # 不豁免的话：生产 cap 下**完美数据也 0 候选通过**（Plan 1 的 D9 测全用 cap=2/cap=0
-        # 等对齐值，生产 cap 从未被测过 → 该 bug 未被任何测试覆盖）。
+        # **边界日 d0 对照全量 bars 校验，内部日对照窗口校验**（codex PF2-R7-F2）。
+        #
+        # 为什么 d0 不能用窗口里的根数判：`select_period_window` 取「起点前
+        # min(pivot, cap) 根」，生产 cap(150) 不是每日根数(80/16/4)的整数倍 → d0 必然
+        # 只被切到部分根（3m 70/80）。要求它 == need 的话，**完美数据也 0 候选通过**
+        # （Plan 1 的 D9 测全用 cap=2/cap=0 等对齐值，生产 cap 从未被测过）。
+        #
+        # 为什么也不能用「从窗口反推的余数」判（本轮实测否掉的写法）：
+        # `boundary_need = (before_n % need) or need` 里的 before_n 若从**窗口自身**算，
+        # 该公式是**自指**的——边界日被损坏 → before_n 同步变小 → 期望值跟着变小 →
+        # 恰好匹配损坏值 → 漏检。（实测：边界日 80→60 时该写法返回 True。）
+        #
+        # 正解：d0 只是被切片的那天，但**它在库里必须是完整的**。故对照 full_bars
+        # 数该日在 PG 里的实际根数，要求 == need。非自指、且直接命中要防的坏数据。
+        # 注：若某 before-context 日被整日 drop，切片会往更早取够根数 → d0 前移、
+        # 空洞落进 [d0, ae] → 由下面的内部精确门抓住。
+        if full_bars is None:
+            boundary_ok = counts.get(d0, 0) == need      # 向后兼容既有调用：严格全量
+        else:
+            fb = full_bars.get(period)
+            d0_full = 0 if fb is None or fb.empty else int(
+                sum(1 for e in fb["datetime"] if trading_date(e) == d0))
+            boundary_ok = d0_full == need
+        if not boundary_ok:
+            return False
         if not all(counts.get(d, 0) == need for d in span if d != d0):
             return False
 ```
 
-并同步更新该函数 docstring，把"每个交易日桶数精确 == 应有数"改为：
+其三，同步 docstring：
 
 ```python
-    """D9 per-day 硬门（codex PF1-R2/PF1-R4-F2/PF1-R6-F1 + Plan 2b 首日边界修正）：
+    """D9 per-day 硬门（codex PF1-R2/PF1-R4-F2/PF1-R6-F1 + Plan 2b 边界日修正）：
     **每个盘中周期**在 `[该周期首选中日, trading_date(after_end)]` 内、每个交易日
-    （∈ trading_dates）桶数精确 == 应有数（3m=80/15m=16/60m=4）；**唯独首日 d0 豁免**
-    ——它是 before_cap 切片边界、非数据洞（依据 B1「全或无」不变量，见函数体注释）。
+    （∈ trading_dates）桶数精确 == 应有数（3m=80/15m=16/60m=4）；**首日 d0 同样精确验**，
+    只是判据换成「**该日在 `full_bars` 里是完整的**」（d0 只是被 before_cap 切片的那天，
+    窗口内不足是切片产物；但它在库里必须有满 need 根）。不传 `full_bars` 则退回严格
+    全量，向后兼容既有调用。
     **跨度终点用 `after_end`、非 `dates.max()`**——否则 after_end 附近盘中全缺的
     尾日会落在 max 之外、漏检（高周期 bar 覆盖了无盘中回放的日期）。任一周期任一日不符 → False。"""
+```
+
+其四，`build_training_windows._try` 里的调用要把 `period_bars` 传进去（第 156 行）：
+
+```python
+        if not per_day_intraday_complete(intraday, trading_dates, after_end, intraday_expected,
+                                         full_bars=period_bars):     # PF2-R7-F2 边界日对照全量
+            raise GenerateSkipException("D9 per-day 硬门失败")
 ```
 
 - [ ] **Step 4: 跑测试确认四条全通过**
@@ -1824,6 +1908,7 @@ from generate_training_sets import (
     generate_batch,
     generate_one_training_set,
 )
+from qmt_normalize import trading_date        # PF2-R7-F3：dense_day_count 测的过滤要用
 
 SH = ZoneInfo("Asia/Shanghai")
 
@@ -2412,3 +2497,22 @@ fi
   **核实 = 属实，是我上一轮引入的 plan 自相矛盾。** Step 10b 给 `_amain` 加了 advisory lock，紧接着的 Step 11 又让实施者把同一段替换成**不带锁的** `sets = await generate_batch(...)`。照字面执行 = CLI 失去锁、scheduler 保留锁 → 重新打开 R5-F2 刚堵上的洞（手工 CLI 撞 B4 → 覆盖已登记 zip → `content_hash` 失配）。
   **处置 = 采纳。** 整个删除 Step 11（Step 10b 的片段本就已是最终形态：既含锁、也已不含孤儿 `NotImplementedError` 捕获），并留下醒目提示"`_amain`/`_gen` 最终代码一律以 Step 10b 为准"。另补 codex 要求的 **CLI 级**锁测试（原先只测了 scheduler 侧）。
   **同类重犯**：R3-F2 也是"plan 给的指令自相矛盾/不可执行"。教训 = 每轮改完 plan，必须把**同一个函数的所有出现处**一起看，不能只改新增段。
+
+### PF2-R7（2026-07-18，verdict = needs-attention；2 条 [design] + 1 条 [doc]，**均采纳**）
+
+按本轮设的停止规则：**出现 [design] 类 → 继续**（未触发"只剩 [doc] 即收工"）。
+
+- **F1 [design·high] 版本化 migration 用了 `CREATE TABLE IF NOT EXISTS`**。
+  **核实 = 属实。** 若目标库已存在一张旧形状 `stock_coverage`（TEXT、缺 `dense_day_count`、缺 CHECK），migration **静默成功**、库却低于所声明的 1.12 契约；故障从"迁移期"挪到"B4 运行期"（PR 2b `SELECT dense_day_count` → UndefinedColumn）。静态 schema 测只解析预期 SQL，抓不到这种漂移。
+  **处置 = 采纳。** forward.sql 改裸 `CREATE TABLE`（已存在即报错中止 = 正确 fail-closed），补 `test_migration_0004_stock_coverage_is_not_if_not_exists`。注：`schema.sql` 那份 fresh baseline 保留 `IF NOT EXISTS` 是对的，两者语义不同。
+
+- **F2 [design·high] D9 边界日豁免会放过真实空洞** —— 打的是我自己 PF2-R1 的修法。
+  **核实 = 属实。** 我 R1 把 d0 无条件豁免（只验存在性），一个**真的**只剩几根的残缺边界日照样过关；且我拿"B1 保证全或无"当免检理由，而 PF2-R6-F1 刚证明上游承诺不能当免检理由。
+  **处置 = 采纳，但 codex 建议的公式我实测否掉了、换了个正确的。** codex 建议"从 before_cap/pivot 算允许的边界余数"。我先按 `(before_n % need) or need` 写，**跑 probe 发现它是自指的**：before_n 从窗口算 → 边界日被损坏 → before_n 同步变小 → 期望值跟着变小 → 恰好匹配损坏值 → **漏检**（实测边界日 80→60 时返回 True，本该 False）。
+  **最终判据 = 边界日对照全量 bars**：d0 只是被切片的那天，但**它在库里必须完整**（PG 里该交易日应有 need 根）。内部日仍按窗口精确验。非自指，直接命中要防的坏数据。
+  **6 情形 probe 全部符合预期**：生产 cap+完美数据 PASS／边界日全量 80→60 FAIL／内部整日缺席 FAIL／内部日 80→79 FAIL／cap=整数倍 PASS／cap=0 PASS。测试改写为对照 `full_bars`，并在 docstring 里钉死"自指写法已被实测否掉"。
+
+- **F3 [doc·medium] `dense_day_count` 回归测有 NameError**：测里用了 `trading_date`，但该文件只从 `generate_training_sets` import 了四个符号 → 测试在验到守卫前就 NameError，"全绿"是假的。
+  **处置 = 采纳**，补 `from qmt_normalize import trading_date`。
+
+**本轮教训（重要）**：D9 这道门我改了三次才对（R1 粗豁免 → R7 自指公式 → R7 全量对照）。**前两次都是"看着对"**——直到写 probe 跑真数据才暴露。凡是"判据"类改动（尤其带取模/边界算术的），**必须构造正反例实跑**，不能靠读代码自评。
