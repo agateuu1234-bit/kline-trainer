@@ -23,12 +23,26 @@
 
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
-| 1 | `cd backend && ../.venv/bin/python -m pytest tests/ -q` | 末行显示 `188 passed`，且**不含** `failed`、**不含** `skipped` 字样 | ☐ 通过 ☐ 不通过 |
+| 1 | `cd backend && ../.venv/bin/python -m pytest tests/ -q` | 末行显示 `191 passed`，且**不含** `failed`、**不含** `skipped` 字样 | ☐ 通过 ☐ 不通过 |
 | 2 | `cd ios/Contracts && swift build` | 末行显示 `Build complete!`，无 `error:` | ☐ 通过 ☐ 不通过 |
 | 3 | `cd ios/Contracts && swift test` | 显示 `Test run with 1581 tests in 201 suites passed` | ☐ 通过 ☐ 不通过 |
 
 > **第 3 条若崩在 `signal 11`**：这是陈旧增量构建导致的已知现象，**不是代码问题**。
 > 先执行 `cd ios/Contracts && rm -rf .build/arm64-apple-macosx`，再重跑第 3 条。
+
+---
+
+## 一之二、两道防坏数据的守卫（codex 评审加的）
+
+价格列放宽成小数精度更高的类型后，多了两条数据损坏路径，本 PR 一并堵上。这两条验的是**守卫真的会拦**，不是"代码写了"。
+
+| # | 动作 | 预期 | 通过 / 不通过 |
+|---|---|---|---|
+| 1b | 整段复制粘贴：<br>`cd backend && ../.venv/bin/python -c "import pandas as pd; from import_csv import clean; df=pd.DataFrame([{'datetime':1,'open':float('inf'),'high':float('inf'),'low':1.0,'close':1.0,'volume':10},{'datetime':2,'open':1.0,'high':2.0,'low':0.5,'close':1.5,'volume':10}]); print('剩余行:', list(clean(df)['datetime']))"` | 打印 **`剩余行: [2]`**（含无穷大价格的第 1 行被丢弃，正常的第 2 行保留） | ☐ 通过 ☐ 不通过 |
+| 1c | `cd backend && ../.venv/bin/python -m pytest tests/test_import_csv.py -q` | 显示 `20 passed`，无 failed / skipped | ☐ 通过 ☐ 不通过 |
+
+> 1b 说明：如果打印的是 `剩余行: [1, 2]`，说明无穷大价格没被拦住，**请直接退回**——
+> 那意味着坏数据能写进数据库并污染后续训练组。
 
 ---
 

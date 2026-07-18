@@ -2485,7 +2485,13 @@ fi
 | R12-F2 候选 bounded retry | 复用 Plan 1 已实现的 `select_valid_window`；Task 5 的 `exclude_starts` 接入同一循环 |
 | **（非 spec）D9 门首日边界 bug** | **Task 4**——spec §4.4 D9(b) 字面写"每个交易日桶数精确等于"，未区分「before_cap 切片边界日」与「真数据洞」，生产 cap 下自相矛盾。本 plan 实测复现后修正；**spec §4.4/§6 对应表述应在本 plan 合并后回写更新**（否则下一个读 spec 的人会照着写回同一个 bug） |
 
-**明确不在本 plan（留 Plan 3 pilot）**：D8a 写库前 `information_schema` 断言、D8b `kline_pilot_` reset 护栏、D9(a)/D10 在 **B1** 的强制与 `stock_coverage` **写入**、pilot 运行脚本与 100 股储备池地板、SMB 真拉取、spec §5 的容器化 PG smoke（①②③⑤⑥⑦）。**这些都依赖 `import_csv.py` 接规整/合成层，属 B1 侧改动，与本 plan 的 B2 侧解耦。**
+**明确不在本 plan（留 Plan 3 pilot）**：D8b `kline_pilot_` reset 护栏、D9(a)/D10 在 **B1** 的强制与 `stock_coverage` **写入**、pilot 运行脚本与 100 股储备池地板、SMB 真拉取、spec §5 的容器化 PG smoke（①②③⑤⑥⑦）。**这些都依赖 `import_csv.py` 接规整/合成层，属 B1 侧改动，与本 plan 的 B2 侧解耦。**
+
+> **⚠️ D8a 已提前到 PR 2a 落地**（codex 整体评审 2026-07-18 两条 high）：原排期给 Plan 3，
+> 但**制造 schema 漂移风险的正是 PR 2a 的 DDL 本身**——放宽后若对未迁移的旧库写入，
+> PostgreSQL 会静默四舍五入到 2 位，抹掉本 PR 存在的全部意义。守卫必须与制造风险的改动同批交付。
+> 同批还补了 `clean()` 的非有限值（`inf`/`-inf`）过滤：价格列改 `DOUBLE PRECISION` 后
+> 数据库层不再挡非有限值，而 `inf > 0` 与 `inf >= low` 都为真、既有校验全部穿透（已实证复现）。
 
 **类型一致性核对**：`assemble_from_windows` 的参数名（`start_datetime`/`end_datetime`/`windows`）在 Task 5 定义、Task 6 不直接调用（走 `generate_one_training_set`）；`_fetch_dense_coverage` 返回三元组与 Task 5 Step 10 的解包一致；`stock_coverage` 五个列名在 Task 1 建表、Task 5 查询、Task 6 假件三处一致（`dense_1m_start_date`/`dense_1m_end_date`/`dropped_1m_dates`）；`per_day_intraday_complete` 在 Task 4 改语义后，Task 5/6 均依赖其在生产 `PERIOD_BEFORE_CAP` 下可通过。
 
