@@ -1119,7 +1119,7 @@ EOF
 
 **Interfaces:**
 - Consumes: Task 1 的 `stock_coverage` 表五列；Plan 1 已有的 `build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, trading_dates, before_caps, months, intraday_expected, before_min, max_retries) -> (start_datetime, windows)`；`compute_after_end(month_boundaries, start_idx, months) -> int`；`qmt_resample.period_boundaries(df_daily, rule) -> list[int]`；`qmt_normalize.trading_date(epoch) -> date`
-- Produces: `assemble_from_windows(output_dir, *, stock_code, stock_name, start_datetime, end_datetime, windows) -> GeneratedTrainingSet`（纯函数）；`build_training_windows` **与** `select_valid_window` 各新增 keyword-only 参数 `exclude_starts: frozenset[int] = frozenset()`（前者透传给后者，后者在切 `max_retries` **之前**过滤）；`_fetch_dense_coverage(conn, stock_code) -> tuple[date|None, date|None, set[date]]`（坏行抛 `GenerateSkipException`）；`_fetch_existing_starts(conn, stock_code) -> set[int]`；`_register_training_set(conn, gts) -> Optional[int]`（唯一冲突返回 `None`，**非**抛异常）。`generate_one_training_set` 在 `output_dir` 内的暂存目录装配、**登记成功后才 `os.replace` 发布**到 `{code}_{start}.zip`（codex PF2-R3-F1：并发输家绝不能碰赢家已登记的最终路径）。Task 6 的集成测依赖这四个符号。
+- Produces: `assemble_from_windows(output_dir, *, stock_code, stock_name, start_datetime, end_datetime, windows) -> GeneratedTrainingSet`（纯函数）；`build_training_windows` **与** `select_valid_window` 各新增 keyword-only 参数 `exclude_starts: frozenset[int] = frozenset()`（前者透传给后者，后者在切 `max_retries` **之前**过滤）；`_fetch_dense_coverage(conn, stock_code) -> tuple[date|None, date|None, set[date]]`（坏行抛 `GenerateSkipException`）；`_fetch_existing_starts(conn, stock_code) -> set[int]`；`_register_training_set(conn, gts) -> Optional[int]`（唯一冲突返回 `None`，**非**抛异常）。`generate_one_training_set` 直接产在 `output_dir`、**先写文件后登记**（崩溃窗口 = 自愈的孤儿 zip；并发已由 D14 advisory lock 单例排除，见文末 PF2-R5 决议）。Task 6 的集成测依赖这四个符号。
 
 - [ ] **Step 1: 写 `assemble_from_windows` 的失败测试**
 
@@ -1464,17 +1464,11 @@ async def _fetch_existing_starts(conn, stock_code: str) -> set:
     return {int(r["start_datetime"]) for r in rows}
 ```
 
-文件顶部 import 区（第 22-30 行附近）补这些 import：
+文件顶部 import 区（第 22-30 行附近）补一个 import：
 
 ```python
 import json
-import os
-import tempfile
-from dataclasses import replace
 ```
-
-（`dataclass` 已 import 过 `dataclass`，这里加的是 `replace`；`os` 在文件下半部 CLI 段
-已有 `import os`，重复 import 无害但建议统一提到顶部。）
 
 以及从 `qmt_resample` 引入月边界哨兵：
 
@@ -1525,37 +1519,38 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
     idx = month_boundaries.index(int(start_datetime))
     after_end = compute_after_end(month_boundaries, idx)
 
-    # **暂存区产出 → 登记成功后才发布**（codex PF2-R3-F1）。
-    # 产物名是确定性的 `{code}_{start}.zip`：若直接产在 output_dir，并发下**输家会
-    # 覆写/删掉赢家已登记的那个 zip**，让 training_sets.file_path 指向缺失或损坏的文件
-    # （数据丢失，比不处理并发还糟）。故：先写进 output_dir 内的唯一暂存目录，
-    # 只有 INSERT 真的拿到行之后，才 os.replace 原子发布到最终路径。
-    # 输家**永不触碰最终路径**——它只清自己的暂存目录（with 块自动清）。
-    with tempfile.TemporaryDirectory(dir=str(output_dir), prefix=".staging-") as staging:
-        staged = assemble_from_windows(Path(staging), stock_code=stock_code,
-                                       stock_name=_stock_name_of(stock_code),
-                                       start_datetime=int(start_datetime),
-                                       end_datetime=int(after_end), windows=windows)
-        final_zip = output_dir / staged.path.name          # 同名，只换目录
-        published = replace(staged, path=final_zip)        # 登记写最终路径
+    # 顺序 = **先写文件、后登记**（codex PF2-R4 后简化；见文末 PF2-R5 决议）。
+    # 生产上并发生成不可能：B2 只在 B4 sweep 内跑，而 scheduler_main D14 用
+    # `pg_try_advisory_lock` 强制**集群级单例**（第二个进程直接退出）+ APScheduler
+    # `max_instances=1`/`coalesce=True` 防同进程重入。故不做暂存/两阶段发布——
+    # 那套机器是给架构上不发生的场景加的，且每加一层都引入新失败面（R2→R3→R4）。
+    #
+    # 本顺序下的崩溃窗口 = 写完 zip、登记前进程死 → **孤儿 zip + 无数据库行**。
+    # 它是**自愈**的：没有行引用它、exclude_starts 也不含该起点 → 下次 sweep 可重选
+    # 同一起点、覆盖它并登记成功。（反之「先登记后发布」留下的是 uq_stock_start 被占、
+    # B3 反复预定却 404 的**永久卡死行**，严格更糟。）
+    gts = assemble_from_windows(output_dir, stock_code=stock_code,
+                                stock_name=_stock_name_of(stock_code),
+                                start_datetime=int(start_datetime),
+                                end_datetime=int(after_end), windows=windows)
 
-        # 纯优化：候选已按 exclude_starts 过滤，这条预检只为常见情形省掉一次白建 zip。
-        # **真正的原子保证在 _register_training_set 的 ON CONFLICT**。
-        if await _exists_start(conn, stock_code, published.start_datetime):
-            raise GenerateSkipException(
-                f"{stock_code}: start {published.start_datetime} 已登记，跳过")
+    # 预检：候选已按 exclude_starts 过滤，这条只是省掉常见情形下的一次白建 zip
+    if await _exists_start(conn, stock_code, gts.start_datetime):
+        gts.path.unlink(missing_ok=True)
+        gts.path.with_suffix(".db").unlink(missing_ok=True)
+        raise GenerateSkipException(
+            f"{stock_code}: start {gts.start_datetime} 已登记，跳过")
 
-        row_id = await _register_training_set(conn, published)
-        if row_id is None:
-            # 并发 sweep 抢先登记了同一起点（codex PF2-R2-F2）→ 干净跳过。
-            # 注意：这里**只**让暂存目录被清掉，赢家在最终路径上的 zip 分毫不动。
-            raise GenerateSkipException(
-                f"{stock_code}: start {published.start_datetime} 被并发 sweep 抢先登记，跳过")
-
-        # 拿到行了 = 本 worker 独占该 (stock_code, start_datetime) → 发布。
-        # os.replace 在同一文件系统内原子（staging 就在 output_dir 下，必同盘）。
-        os.replace(staged.path, final_zip)
-        return published
+    # ON CONFLICT DO NOTHING = 廉价保险：唯一冲突返回 None 而非抛
+    # UniqueViolationError（后者不被 generate_batch 捕获 → 中止整轮 sweep）。
+    # 只覆盖「运维手工跑 CLI 时调度器也在跑」这个**不受支持**的操作场景；
+    # 此时不删最终路径的文件（可能是对方的产物），只干净跳过。
+    row_id = await _register_training_set(conn, gts)
+    if row_id is None:
+        raise GenerateSkipException(
+            f"{stock_code}: start {gts.start_datetime} 已登记（并发 CLI？），跳过")
+    gts.path.with_suffix(".db").unlink(missing_ok=True)   # 仅保留 .zip（登记的产物）
+    return gts
 ```
 
 - [ ] **Step 11a: `generate_batch` 打印首条 skip 原因（诚实义务 1）**
@@ -1997,49 +1992,40 @@ def test_malformed_coverage_does_not_abort_batch(tmp_path, capsys):
 
 # ===== uq_stock_start TOCTOU 原子处理（codex PF2-R2-F2）=====
 
-def test_concurrent_loser_does_not_touch_winner_artifact(tmp_path):
-    """codex PF2-R3-F1（数据丢失面）：产物名是确定性的 `{code}_{start}.zip`，
-    并发时输家**绝不能**覆写或删掉赢家已登记的那个 zip——否则
-    training_sets.file_path 指向缺失/损坏文件。
+def test_registration_conflict_skips_without_crashing(tmp_path):
+    """`ON CONFLICT DO NOTHING` 作廉价保险：唯一冲突返回 None → 干净 skip，
+    而不是 UniqueViolationError 穿出 generate_batch 中止整轮 sweep。
 
-    建模真实竞态：先在最终路径放一个「赢家的 zip」（已登记），再让本 worker 的
-    INSERT 撞 ON CONFLICT。断言赢家的文件**逐字节不变**。"""
-    conn, _ = _fixture_conn()
-    # 先跑一次拿到确定性的最终文件名与真实起点
-    probe = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
-                                                  random.Random(7)))
-    winner_path, winner_bytes = probe.path, probe.path.read_bytes()
-    winner_start = probe.start_datetime
-
-    # 重置成「该起点已被别的 worker 登记」，但让本 worker 的预检看不到它
-    # （模拟预检之后、INSERT 之前被抢先）
-    conn2 = _FakeConn("000001.SZ", conn.bars, conn.coverage, steal_first_insert=True)
-    with pytest.raises(GenerateSkipException, match="抢先登记"):
-        asyncio.run(generate_one_training_set(conn2, "000001.SZ", tmp_path,
-                                              random.Random(7)))
-
-    assert winner_path.exists(), "输家删掉了赢家已登记的 zip（数据丢失）"
-    assert winner_path.read_bytes() == winner_bytes, "输家覆写了赢家的 zip（内容损坏）"
-    assert conn2.registered == []
-    # 输家不得留下任何暂存残渣
-    leftovers = [x for x in tmp_path.iterdir() if x != winner_path]
-    assert leftovers == [], f"暂存目录未清理：{leftovers}"
-
-
-def test_no_staging_dir_left_behind_on_success(tmp_path):
-    """成功路径也不得留暂存目录：output_dir 里只应有已登记的 .zip。"""
-    conn, _ = _fixture_conn()
-    gts = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
-                                                random.Random(7)))
-    assert [x.name for x in tmp_path.iterdir()] == [gts.path.name]
-
-
-def test_batch_survives_concurrent_duplicate(tmp_path):
-    """sweep 级：一次抢先登记不该毁掉整轮——后续股票仍能成功产出。"""
+    注：**生产上并发不可能**（scheduler_main D14 `pg_try_advisory_lock` 集群级单例
+    + APScheduler max_instances=1）。本保险只覆盖「运维手工跑 B2 CLI 时调度器也在跑」
+    这个**不受支持**的操作场景（见文末 PF2-R5 接受残留）。"""
     conn, _ = _fixture_conn()
     conn.steal_first_insert = True
-    out = asyncio.run(generate_batch(conn, 1, tmp_path, random.Random(3)))
-    assert len(out) == 1, "首次冲突后 sweep 应继续并最终产出"
+    with pytest.raises(GenerateSkipException, match="已登记"):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                              random.Random(7)))
+    assert conn.registered == []
+
+
+def test_orphan_zip_from_crash_is_self_healing(tmp_path):
+    """崩溃窗口（zip 已落盘、登记前进程死）= 孤儿 zip + 无数据库行 → **自愈**。
+
+    没有行引用它、`exclude_starts` 也不含该起点 → 下次 sweep 可重选同一起点、
+    覆盖孤儿并登记成功。这正是「先写文件后登记」优于「先登记后发布」的地方：
+    后者会留下 uq_stock_start 被占、B3 反复预定却 404 的**永久卡死行**。"""
+    from generate_training_sets import crc32_hex
+    conn, _ = _fixture_conn()
+    probe = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                                  random.Random(7)))
+    orphan = probe.path
+    conn.registered.clear()                        # 模拟：文件落盘了，登记那步没发生
+    orphan.write_bytes(b"stale partial content")   # 且内容是坏的/半截的
+
+    gts = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                                random.Random(7)))
+    assert gts.start_datetime == probe.start_datetime, "该起点被永久占用了（未自愈）"
+    assert gts.path.read_bytes() != b"stale partial content", "坏孤儿未被覆盖"
+    assert crc32_hex(gts.path.read_bytes()) == gts.content_hash
     assert len(conn.registered) == 1
 
 
@@ -2236,3 +2222,22 @@ fi
   **处置 = 全盘采纳。** 加 `_sql_normalized()`（去 `--` 行注释 + 压平空白 + 小写）供所有子串断言使用；`丢精度` 标注测仍读原文（它本就是在验注释存在）。
   **自查连带修**：我 R2 自己新增的 `test_stock_coverage_has_integrity_checks` 有同一毛病（`dense_1m_end_date   DATE NOT NULL` 三空格），codex 未点名，一并按同样方式修掉。
   **这是重犯**：[[feedback_acceptance_grep_anchoring]] 明确记过「human-grep 命中注释子串误判」，我又踩了一次。教训 = 凡对 SQL/源码做子串断言，**先规范化再断言**，不要对齐美观的原文直接 grep。
+
+### PF2-R4（2026-07-18，verdict = needs-attention）+ PF2-R5 决议（架构 escalate + 接受残留）
+
+- **R4-F1 [high] 数据库行先于产物可见**：`_register_training_set` 在 `os.replace` 之前提交，`status` 默认 `unsent` → INSERT 后、发布前崩溃 = 一条**持久的 unsent 行指向不存在的 zip**；B3 会预定它并 404，且 `uq_stock_start` 被占死、该起点无法重新生成。
+  **核实 = 属实**（这正是我 R3 设计时自评"可接受"的崩溃窗口，我低估了它——关键在**不可回收**，不是窗口大小）。
+
+**但 R5 决议 = 不按 R4 建议加 `building` 状态，而是把 R2~R4 的并发机器整体拆掉。**
+
+**架构事实（前四轮 codex 与我都没核实过，我的责任）**：`backend/app/scheduler_main.py:37` 用 `pg_try_advisory_lock(0x42345CED)` 强制 **B4 调度器集群级单例**（第二个进程 log error 后直接退出，`test_scheduler_main_exits_when_lock_held` 有覆盖）；`scheduler.py:132` 另有 `max_instances=1` + `coalesce=True` 防同进程重入。B2 生成只在 B4 sweep 内发生 → **生产上并发生成同一 `(stock_code, start_datetime)` 在架构上不可能**。
+
+**因果链证明这是下钻而非收敛**：R2-F2 的 `ON CONFLICT` 修复 → 造出 R3-F1（输家删赢家产物）→ R3 的暂存/发布修复 → 造出 R4-F1（行先于产物）。每层修复都在架构上不发生的场景里新增失败面。对应 [[feedback_codex_distributed_reliability_drilldown]]（codex 在分布式可靠性上无限下钻）与 CLAUDE.md §2（不为不可能场景写错误处理）。
+
+**最终设计 = 先写文件、后登记**（回到 PR #74 的顺序，保留 `ON CONFLICT DO NOTHING`）：
+- 崩溃窗口 = 孤儿 zip + 无数据库行 → **自愈**（无行引用、起点未被占 → 下次 sweep 覆盖重登记成功）。**严格优于 R2/R3/R4 任一设计**，尤其优于 R4 的永久卡死行。
+- `ON CONFLICT DO NOTHING` 保留为廉价保险：把唯一冲突从 `UniqueViolationError`（中止整轮 sweep）降级为干净 skip。
+- 不引入 `building` 状态——那要改 `ck_status_enum` 与 `ck_lease_state_invariant` 两条 CHECK，**动的是 M0.1 文档化的 `unsent→reserved→sent` 状态机**（trust-boundary 面远大于改列类型），还要同步 m01 状态机文档 + 写 building 行回收逻辑，为一个架构上不发生的场景付这个代价不划算。
+
+**接受残留（user 2026-07-18 裁决）**：运维**手工跑 B2 CLI 的同时 B4 调度器在跑** = 不受支持的操作。此时 `ON CONFLICT` 保证不崩、干净跳过，但最终路径上的 zip 可能被覆盖成与已登记 `content_hash` 不符的内容。**不为此加机器**；如将来真要支持并发生成，正解是给 B2 也加 advisory lock（与 D14 同一模式），而非两阶段发布。
+→ 收口方式 = `attest-override.sh`（user 真终端），reason 记本节。
