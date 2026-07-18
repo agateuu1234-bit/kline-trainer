@@ -118,7 +118,7 @@ D1 的 A 类 DDL 落地。三项变更打进**同一个** migration（同一次 
 
 **Interfaces:**
 - Consumes: 无（本 plan 首个 Task）
-- Produces: PG 表 `stock_coverage(stock_code TEXT PRIMARY KEY, dense_1m_start_date DATE, dense_1m_end_date DATE, dropped_1m_dates TEXT DEFAULT '[]', dense_day_count INTEGER)`——Task 5 的 `_fetch_dense_coverage` 按这五列名读取。`klines.open/high/low/close` 类型 `double precision`。`training_sets.file_path` 类型 `text`。
+- Produces: PG 表 `stock_coverage(stock_code TEXT PK, dense_1m_start_date DATE NOT NULL, dense_1m_end_date DATE NOT NULL, dropped_1m_dates JSONB NOT NULL DEFAULT '[]'::jsonb, dense_day_count INTEGER NOT NULL)` + 三条 CHECK（区间非反向 / dropped 为 JSON 数组 / 计数非负）——Task 5 的 `_fetch_dense_coverage` 按这五列名读取。`klines.open/high/low/close` 类型 `double precision`。`training_sets.file_path` 类型 `text`。
 
 - [ ] **Step 1: 写失败测试（migration 文件存在性 + 语法 + 对称性）**
 
@@ -167,6 +167,15 @@ def test_migration_0004_forward_creates_stock_coverage():
     """D11：B2 读 dense_dates 的权威 artifact 表。"""
     sql = (MIG_0004 / "forward.sql").read_text(encoding="utf-8").lower()
     assert "create table" in sql and "stock_coverage" in sql
+
+
+def test_migration_0004_stock_coverage_carries_integrity_checks():
+    """codex PF2-R2-F1：migration 建的表必须与 schema.sql 一样带约束，
+    否则已部署库前向迁移后仍是无约束的坏行温床。"""
+    sql = (MIG_0004 / "forward.sql").read_text(encoding="utf-8").lower()
+    assert "jsonb" in sql
+    assert "jsonb_typeof(dropped_1m_dates) = 'array'" in sql
+    assert "dense_1m_start_date <= dense_1m_end_date" in sql
 
 
 def test_migration_0004_forward_widens_file_path_to_text():
@@ -234,12 +243,20 @@ ALTER TABLE klines ALTER COLUMN close TYPE DOUBLE PRECISION;
 ALTER TABLE training_sets ALTER COLUMN file_path TYPE TEXT;
 
 -- 3. B1→B2 覆盖契约表（D11）
+-- 约束在 DB 层可执行（codex PF2-R2-F1）：spec §4.3 原写 `TEXT DEFAULT '[]'` 无任何约束，
+-- 坏行（非 JSON / 非数组 / 反向区间）会让 B2 reader 抛 ValueError 穿出 generate_batch
+-- （它只捕 GenerateSkipException）→ **中止整轮 sweep** 而非跳过一只股。故收紧为
+-- JSONB NOT NULL + 数组类型检查 + 区间/计数合法性检查。reader 侧另有降级兜底（防历史行）。
 CREATE TABLE IF NOT EXISTS stock_coverage (
     stock_code          TEXT PRIMARY KEY,
-    dense_1m_start_date DATE,
-    dense_1m_end_date   DATE,
-    dropped_1m_dates    TEXT DEFAULT '[]',
-    dense_day_count     INTEGER
+    dense_1m_start_date DATE NOT NULL,
+    dense_1m_end_date   DATE NOT NULL,
+    dropped_1m_dates    JSONB NOT NULL DEFAULT '[]'::jsonb,
+    dense_day_count     INTEGER NOT NULL,
+    CONSTRAINT ck_stock_coverage_range CHECK (dense_1m_start_date <= dense_1m_end_date),
+    CONSTRAINT ck_stock_coverage_dropped_is_array
+        CHECK (jsonb_typeof(dropped_1m_dates) = 'array'),
+    CONSTRAINT ck_stock_coverage_day_count CHECK (dense_day_count >= 0)
 );
 
 COMMENT ON TABLE stock_coverage
@@ -347,6 +364,20 @@ def test_stock_coverage_table_columns():
     cols = _column_type_names("stock_coverage")
     assert set(cols) == {"stock_code", "dense_1m_start_date", "dense_1m_end_date",
                          "dropped_1m_dates", "dense_day_count"}
+    assert cols["dropped_1m_dates"] == "jsonb", "须为 JSONB 以便 DB 层校验数组类型"
+
+
+def test_stock_coverage_has_integrity_checks():
+    """codex PF2-R2-F1：坏覆盖行会让 B2 reader 抛非-Skip 异常、中止整轮 sweep。
+    约束必须在 DB 层可执行，不能只靠 reader 兜底。"""
+    sql = SCHEMA_PATH.read_text(encoding="utf-8").lower()
+    seg = sql.split("create table if not exists stock_coverage")[1].split(");")[0]
+    assert "jsonb_typeof(dropped_1m_dates) = 'array'" in seg, "缺 dropped 数组类型检查"
+    assert "dense_1m_start_date <= dense_1m_end_date" in seg, "缺覆盖带非反向检查"
+    assert "dense_day_count >= 0" in seg, "缺计数非负检查"
+    for col in ("dense_1m_start_date", "dense_1m_end_date", "dense_day_count"):
+        assert f"{col} date not null" in seg or f"{col} integer not null" in seg, \
+            f"{col} 应为 NOT NULL"
 ```
 
 同时把 `backend/tests/test_schema.py:39` 的表集合断言从：
@@ -414,10 +445,14 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && ../.venv/bin/python -m 
 -- B2 D2 从此表读 dense_dates（= [start,end] 交易日 − dropped_1m_dates），不从 klines 反推。
 CREATE TABLE IF NOT EXISTS stock_coverage (
     stock_code          TEXT PRIMARY KEY,
-    dense_1m_start_date DATE,
-    dense_1m_end_date   DATE,
-    dropped_1m_dates    TEXT DEFAULT '[]',
-    dense_day_count     INTEGER
+    dense_1m_start_date DATE NOT NULL,
+    dense_1m_end_date   DATE NOT NULL,
+    dropped_1m_dates    JSONB NOT NULL DEFAULT '[]'::jsonb,
+    dense_day_count     INTEGER NOT NULL,
+    CONSTRAINT ck_stock_coverage_range CHECK (dense_1m_start_date <= dense_1m_end_date),
+    CONSTRAINT ck_stock_coverage_dropped_is_array
+        CHECK (jsonb_typeof(dropped_1m_dates) = 'array'),
+    CONSTRAINT ck_stock_coverage_day_count CHECK (dense_day_count >= 0)
 );
 
 ```
@@ -1067,7 +1102,7 @@ EOF
 
 **Interfaces:**
 - Consumes: Task 1 的 `stock_coverage` 表五列；Plan 1 已有的 `build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, trading_dates, before_caps, months, intraday_expected, before_min, max_retries) -> (start_datetime, windows)`；`compute_after_end(month_boundaries, start_idx, months) -> int`；`qmt_resample.period_boundaries(df_daily, rule) -> list[int]`；`qmt_normalize.trading_date(epoch) -> date`
-- Produces: `assemble_from_windows(output_dir, *, stock_code, stock_name, start_datetime, end_datetime, windows) -> GeneratedTrainingSet`（纯函数）；`build_training_windows` **与** `select_valid_window` 各新增 keyword-only 参数 `exclude_starts: frozenset[int] = frozenset()`（前者透传给后者，后者在切 `max_retries` **之前**过滤）；`_fetch_dense_coverage(conn, stock_code) -> tuple[date|None, date|None, set[date]]`；`_fetch_existing_starts(conn, stock_code) -> set[int]`。Task 6 的集成测依赖这四个符号。
+- Produces: `assemble_from_windows(output_dir, *, stock_code, stock_name, start_datetime, end_datetime, windows) -> GeneratedTrainingSet`（纯函数）；`build_training_windows` **与** `select_valid_window` 各新增 keyword-only 参数 `exclude_starts: frozenset[int] = frozenset()`（前者透传给后者，后者在切 `max_retries` **之前**过滤）；`_fetch_dense_coverage(conn, stock_code) -> tuple[date|None, date|None, set[date]]`（坏行抛 `GenerateSkipException`）；`_fetch_existing_starts(conn, stock_code) -> set[int]`；`_register_training_set(conn, gts) -> Optional[int]`（唯一冲突返回 `None`，**非**抛异常）。Task 6 的集成测依赖这四个符号。
 
 - [ ] **Step 1: 写 `assemble_from_windows` 的失败测试**
 
@@ -1340,6 +1375,27 @@ EOF
 )"
 ```
 
+- [ ] **Step 9a: 把 `_register_training_set` 改成原子处理唯一冲突**
+
+`backend/generate_training_sets.py` 第 325-331 行整个函数替换为：
+
+```python
+async def _register_training_set(conn, gts: GeneratedTrainingSet) -> Optional[int]:
+    """登记 training_sets 行（status 默认 'unsent'）。返回新行 id；
+    **起点已被并发 sweep 抢先登记 → 返回 None**（codex PF2-R2-F2）。
+
+    用 `ON CONFLICT (stock_code, start_datetime) DO NOTHING RETURNING id` 原子处理
+    `uq_stock_start` 的 TOCTOU：否则并发 sweep 在预检与 INSERT 之间插入同一起点时，
+    asyncpg 抛 UniqueViolationError → **穿出 generate_batch**（它只捕
+    GenerateSkipException）→ 中止整轮 sweep，而不是干净跳过这一只股。"""
+    return await conn.fetchval(
+        "INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, "
+        "schema_version, file_path, content_hash) VALUES ($1,$2,$3,$4,$5,$6,$7) "
+        "ON CONFLICT (stock_code, start_datetime) DO NOTHING RETURNING id",
+        gts.stock_code, gts.stock_name, gts.start_datetime, gts.end_datetime,
+        gts.schema_version, str(gts.path), gts.content_hash)
+```
+
 - [ ] **Step 10: 重接 PG 壳——加两个读取函数 + 改写 generate_one_training_set**
 
 `backend/generate_training_sets.py`，在 `_exists_start`（第 316 行）之前插入两个新读取函数：
@@ -1348,15 +1404,39 @@ EOF
 async def _fetch_dense_coverage(conn, stock_code: str):
     """D11：读 stock_coverage 权威 dense 1m 覆盖（**不从 klines 反推**——反推会在
     边角/retry/周期变更下与 B1 的决定漂移、且失败难诊断，codex R17-F1）。
-    返回 (start_date, end_date, dropped_dates_set)；无该股行 → (None, None, set())。"""
+    返回 (start_date, end_date, dropped_dates_set)；无该股行 → (None, None, set())。
+
+    **坏行一律降级成 GenerateSkipException**（codex PF2-R2-F1）：schema 有 CHECK 兜底，
+    但历史行 / 手工修补 / Plan 3 writer 半成品仍可能带非法内容（如 `["nope"]` 能过
+    `jsonb_typeof` 数组检查却不是 ISO 日期）。裸 `json.loads` / `date.fromisoformat`
+    抛的 JSONDecodeError·ValueError·TypeError **不被 generate_batch 捕获**（它只捕
+    GenerateSkipException）→ **中止整轮 sweep** 而非跳过一只股，且在 B4 常驻进程里
+    会一路冒泡。故在此转成带原因的 skip。"""
     row = await conn.fetchrow(
         "SELECT dense_1m_start_date, dense_1m_end_date, dropped_1m_dates "
         "FROM stock_coverage WHERE stock_code=$1", stock_code)
     if row is None:
         return None, None, set()
-    dropped_raw = row["dropped_1m_dates"] or "[]"
-    dropped = {_dt.date.fromisoformat(s) for s in json.loads(dropped_raw)}
-    return row["dense_1m_start_date"], row["dense_1m_end_date"], dropped
+    start_date, end_date = row["dense_1m_start_date"], row["dense_1m_end_date"]
+    if start_date is None or end_date is None:
+        raise GenerateSkipException(
+            f"{stock_code}: stock_coverage 覆盖带端点为 NULL（坏行）")
+    if start_date > end_date:
+        raise GenerateSkipException(
+            f"{stock_code}: stock_coverage 覆盖带反向（{start_date} > {end_date}）")
+    raw = row["dropped_1m_dates"]
+    if raw is None:
+        raw = "[]"
+    try:
+        # asyncpg 默认把 jsonb 当 str 返回；若调用方装了 json codec 则已是 list，两者都接
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(parsed, list):
+            raise ValueError(f"非数组（{type(parsed).__name__}）")
+        dropped = {_dt.date.fromisoformat(s) for s in parsed}
+    except (ValueError, TypeError) as exc:      # JSONDecodeError ⊂ ValueError
+        raise GenerateSkipException(
+            f"{stock_code}: stock_coverage.dropped_1m_dates 非法（{exc}）") from exc
+    return start_date, end_date, dropped
 
 
 async def _fetch_existing_starts(conn, stock_code: str) -> set:
@@ -1426,20 +1506,28 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
                                 stock_name=_stock_name_of(stock_code),
                                 start_datetime=int(start_datetime),
                                 end_datetime=int(after_end), windows=windows)
-    # TOCTOU 兜底：候选已按 exclude 过滤，但并发 sweep 之间仍可能插入同一起点。
-    # 硬底线是 uq_stock_start；这里显式检出并清理产物，不留 orphan .zip/.db。
+    def _discard():
+        """R16-F2：任何不登记的出口都要删已建产物，否则留 orphan .zip 且重试不幂等。"""
+        gts.path.unlink(missing_ok=True)
+        gts.path.with_suffix(".db").unlink(missing_ok=True)
+
+    # 纯优化：候选已按 exclude_starts 过滤，这条预检只为在常见情形下省掉一次白建 zip。
+    # **真正的原子保证在 _register_training_set 的 ON CONFLICT**（TOCTOU 由它兜）。
     if await _exists_start(conn, stock_code, gts.start_datetime):
-        gts.path.unlink(missing_ok=True)
-        gts.path.with_suffix(".db").unlink(missing_ok=True)
+        _discard()
         raise GenerateSkipException(
-            f"{stock_code}: start {gts.start_datetime} 并发登记冲突，跳过")
+            f"{stock_code}: start {gts.start_datetime} 已登记，跳过")
     try:
-        await _register_training_set(conn, gts)
+        row_id = await _register_training_set(conn, gts)
     except Exception:
-        # R16-F2：登记失败必须删已建产物，否则留 orphan .zip 且重试不幂等
-        gts.path.unlink(missing_ok=True)
-        gts.path.with_suffix(".db").unlink(missing_ok=True)
+        _discard()
         raise
+    if row_id is None:
+        # 并发 sweep 在预检之后抢先登记了同一起点 → 干净跳过（codex PF2-R2-F2）。
+        # 走 GenerateSkipException 而非让 UniqueViolationError 冒泡中止整轮 sweep。
+        _discard()
+        raise GenerateSkipException(
+            f"{stock_code}: start {gts.start_datetime} 被并发 sweep 抢先登记，跳过")
     gts.path.with_suffix(".db").unlink(missing_ok=True)   # 仅保留 .zip（登记的产物）
     return gts
 ```
@@ -1681,12 +1769,15 @@ class _FakeConn:
     **主动抛错**（而不是返回空），否则生产代码改了查询、测试会静默变成 vacuous。
     """
 
-    def __init__(self, stock_code: str, bars: dict, coverage: dict | None):
+    def __init__(self, stock_code: str, bars: dict, coverage: dict | None,
+                 *, steal_first_insert: bool = False):
         self.stock_code = stock_code
         self.bars = bars
         self.coverage = coverage
         self.registered: list = []      # 模拟 training_sets 表
         self._next_id = 1
+        # 模拟"并发 sweep 在预检之后抢先登记同一起点"：首次 INSERT 撞 ON CONFLICT
+        self.steal_first_insert = steal_first_insert
 
     async def fetch(self, query: str, *args):
         if "FROM klines" in query:
@@ -1713,8 +1804,18 @@ class _FakeConn:
 
     async def fetchval(self, query: str, *args):
         if "INSERT INTO training_sets" in query:
-            row = {"id": self._next_id, "stock_code": args[0], "stock_name": args[1],
-                   "start_datetime": args[2], "end_datetime": args[3],
+            assert "ON CONFLICT" in query, (
+                "登记 SQL 必须用 ON CONFLICT DO NOTHING 原子处理 uq_stock_start"
+                "（codex PF2-R2-F2）")
+            code, start = args[0], args[2]
+            if self.steal_first_insert:
+                self.steal_first_insert = False
+                return None                      # 模拟 ON CONFLICT DO NOTHING
+            if any(r["stock_code"] == code and r["start_datetime"] == start
+                   for r in self.registered):
+                return None                      # 真冲突
+            row = {"id": self._next_id, "stock_code": code, "stock_name": args[1],
+                   "start_datetime": start, "end_datetime": args[3],
                    "schema_version": args[4], "file_path": args[5],
                    "content_hash": args[6]}
             self.registered.append(row)
@@ -1821,6 +1922,74 @@ def test_uq_stock_start_not_reused(tmp_path):
     b = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path, random.Random(7)))
     assert a.start_datetime != b.start_datetime
     assert len(conn.registered) == 2
+
+
+# ===== 坏覆盖行必须降级成 skip、不得中止整轮 sweep（codex PF2-R2-F1）=====
+
+@pytest.mark.parametrize("bad_dropped, label", [
+    ("{not json", "非法 JSON"),
+    ('{"a": 1}', "JSON 对象而非数组"),
+    ('["2024-13-99"]', "非法日期"),
+    ("[123]", "数组元素非字符串"),
+])
+def test_malformed_coverage_row_skips_not_crashes(tmp_path, bad_dropped, label):
+    """坏行必须抛 GenerateSkipException（可被 generate_batch 捕获），
+    **不得**抛 JSONDecodeError/ValueError/TypeError——后者会穿出 sweep 循环、
+    在 B4 常驻进程里一路冒泡。"""
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
+    cov = {"dense_1m_start_date": days[0], "dense_1m_end_date": days[-1],
+           "dropped_1m_dates": bad_dropped}
+    conn = _FakeConn("000001.SZ", _build_pg_fixture(days), cov)
+    with pytest.raises(GenerateSkipException, match="dropped_1m_dates"):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                              random.Random(7)))
+    assert conn.registered == []
+    assert list(tmp_path.iterdir()) == [], "坏行路径不得留下产物"
+
+
+def test_reversed_coverage_band_skips(tmp_path):
+    """覆盖带反向（start > end）→ 可诊断 skip（DB 有 CHECK，但历史行/别的库可能没有）。"""
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
+    cov = {"dense_1m_start_date": days[-1], "dense_1m_end_date": days[0],
+           "dropped_1m_dates": "[]"}
+    conn = _FakeConn("000001.SZ", _build_pg_fixture(days), cov)
+    with pytest.raises(GenerateSkipException, match="反向"):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                              random.Random(7)))
+
+
+def test_malformed_coverage_does_not_abort_batch(tmp_path, capsys):
+    """整轮 sweep 级证据：坏行只让该股 skip，generate_batch 正常返回（非抛异常）。"""
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
+    cov = {"dense_1m_start_date": days[0], "dense_1m_end_date": days[-1],
+           "dropped_1m_dates": "{not json"}
+    conn = _FakeConn("000001.SZ", _build_pg_fixture(days), cov)
+    out = asyncio.run(generate_batch(conn, 2, tmp_path, random.Random(3)))
+    assert out == []
+    assert "dropped_1m_dates" in capsys.readouterr().out
+
+
+# ===== uq_stock_start TOCTOU 原子处理（codex PF2-R2-F2）=====
+
+def test_concurrent_duplicate_registration_skips_cleanly(tmp_path):
+    """并发 sweep 在预检之后抢先登记同一起点 → ON CONFLICT 返回 None →
+    必须干净 skip + 清产物，而不是让 UniqueViolationError 中止整轮 sweep。"""
+    conn, _ = _fixture_conn()
+    conn.steal_first_insert = True
+    with pytest.raises(GenerateSkipException, match="抢先登记"):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                              random.Random(7)))
+    assert conn.registered == []
+    assert list(tmp_path.iterdir()) == [], "冲突路径留下了 orphan 产物"
+
+
+def test_batch_survives_concurrent_duplicate(tmp_path):
+    """sweep 级：一次抢先登记不该毁掉整轮——后续股票仍能成功产出。"""
+    conn, _ = _fixture_conn()
+    conn.steal_first_insert = True
+    out = asyncio.run(generate_batch(conn, 1, tmp_path, random.Random(3)))
+    assert len(out) == 1, "首次冲突后 sweep 应继续并最终产出"
+    assert len(conn.registered) == 1
 
 
 def test_generate_batch_surfaces_first_skip_reason(tmp_path, capsys):
@@ -1991,3 +2160,16 @@ fi
   **处置 = 全盘采纳。** 改为在切 `max_retries` **之前**过滤（`select_valid_window` 加 `exclude_starts`，`build_training_windows` 透传），并按 codex 要求补 `test_select_valid_window_excludes_before_retry_budget`（前 9 个候选全排除、第 10 个必须被选中）。
 
 **本轮另行自查修掉的 plan 自身缺陷**（非 codex 指出）：Task 6 的 `_fixture_conn` 原设 `n_days=500` ≈ 23 个月边界，低于 `eligible_start_indices` 要求的 39 → 全部集成测会直接抛「月边界不足」。已改 1000 并写明下限理由。
+
+### PF2-R2（2026-07-18，verdict = needs-attention；两条**全新** finding，均 high、均属"坏数据"面）
+
+- **F1 [high] 坏覆盖行会中止整轮 sweep**。
+  **核实 = 属实。** `dropped_1m_dates` 原为无约束 `TEXT`（spec §4.3 D11 字面），reader 裸跑 `json.loads` + `date.fromisoformat`。抛出的 `JSONDecodeError`/`ValueError`/`TypeError` **不是** `GenerateSkipException`，而 `generate_batch` 只捕后者 → 一条坏行让整轮 sweep 中止，在 B4 常驻进程里还会一路冒泡。
+  **处置 = 全盘采纳，双层设防。** ① DB 层可执行约束：`dropped_1m_dates JSONB NOT NULL DEFAULT '[]'::jsonb` + `jsonb_typeof(...)='array'` + `start<=end` + `count>=0` + 三列 NOT NULL（migration 与 `schema.sql` 同步，各配断言测）；② reader 层降级：端点 NULL / 区间反向 / 非数组 / 非 ISO 日期 一律转 `GenerateSkipException` 并带原因（防历史行、手工修补、Plan 3 writer 半成品——如 `["nope"]` 能过 `jsonb_typeof` 却不是日期）。补 4 参数化坏值测 + 反向区间测 + sweep 级"不中止"测。
+  **偏离 spec 已知且刻意**：spec §4.3 写的是 `TEXT DEFAULT '[]'`，本 plan 收紧为带约束的 `JSONB NOT NULL`。理由 = [[project_app_public_release_intent]] 的耐久性标准；**spec 应在本 plan 合并后回写**。
+
+- **F2 [high] TOCTOU 重复起点其实没被处理**。
+  **核实 = 属实，且我的注释在撒谎。** 我写了「TOCTOU 兜底」，但 `_register_training_set` 是裸 INSERT，异常处理只删文件后 `raise` → asyncpg `UniqueViolationError` 穿出 `generate_batch` → 中止整轮 sweep，而非跳过该股。
+  **处置 = 全盘采纳。** `INSERT ... ON CONFLICT (stock_code, start_datetime) DO NOTHING RETURNING id` 原子化；返回 `None` = 被并发抢先 → 清产物 + `GenerateSkipException`。`_exists_start` 预检降级为纯优化（省一次白建 zip），并在注释里如实标注。补假件冲突注入测（单股级 + sweep 级各一）。
+
+**本轮教训**：两条都不是"不合 spec"，而是"坏数据/并发下会怎样"——正是 [[feedback_internal_review_misses_bad_data]] 记的那条：内部 review 只问合不合 spec，从不问坏数据。且 F2 证明**注释写了「兜底」不等于真兜底**，需按控制流实际走向验证。
