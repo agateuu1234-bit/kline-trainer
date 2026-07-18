@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>顶栏横向分布对比</title>
+<style>
+  :root{--up:#e23030;--dn:#1fb866;--bg:#0c0c10;--panel:#15151b;--line:#262630;--txt:#e8e8f0;--mut:#86868f;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:#08080b;color:var(--txt);font:14px/1.5 -apple-system,"PingFang SC",system-ui;padding:22px;}
+  h1{font-size:18px;margin:0 0 4px;} .sub{color:var(--mut);font-size:13px;margin:0 0 18px;max-width:760px;}
+  .row{display:flex;gap:26px;flex-wrap:wrap;align-items:flex-start;}
+  .col{display:flex;flex-direction:column;gap:6px;}
+  .tag{font-size:13px;font-weight:600;} .tag small{color:var(--mut);font-weight:400;font-size:11.5px;}
+  /* 真机内容宽：device 392 − header padding 11×2 = 370，再留 device 边框观感，用 370 容器 */
+  .bar{width:370px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 11px 7px;}
+  .hd-top{display:flex;justify-content:space-between;align-items:center;height:20px;}
+  .hd-top .bk{font-size:12px;color:#aab0bc;} .hd-top .nm{font-size:12px;color:#d2d2db;font-weight:600;}
+  .endbtn{font-size:11px;color:#e07a7a;border:1px solid #6a2626;border-radius:11px;padding:2px 9px;}
+  .hd-m{display:flex;margin-top:7px;align-items:stretch;}
+  .mc{display:flex;flex-direction:column;align-items:center;text-align:center;min-width:0;padding:0 5px;border-left:1px solid #21212a;}
+  .mc:first-child{padding-left:0;border-left:none;}
+  .ml{font-size:8.5px;color:#7a7a86;line-height:1.25;white-space:nowrap;}
+  .mvw{flex:1 1 auto;width:100%;display:flex;align-items:center;justify-content:center;margin-top:2px;}
+  .mv{font-size:12px;color:#ececf4;font-weight:600;white-space:nowrap;letter-spacing:-.2px;}
+  .pnl2{display:flex;flex-direction:column;align-items:center;line-height:1.14;}
+  .pnl2 .amt{font-size:12px;font-weight:600;letter-spacing:-.2px;} .pnl2 .pct{font-size:10.5px;font-weight:600;}
+  .pnl2.up{color:var(--up);}
+  /* 每格右侧浅色衬底，看清各格实际占宽 */
+  .mc{background:linear-gradient(0deg,#1c1c2400,#1c1c2400);}
+  .mc:nth-child(odd){background:#1a1a22;}
+
+  /* ===== 现状：4 固定 + PnL 吃光剩余 ===== */
+  .now .cap{flex:0 0 84px;} .now .cost{flex:0 0 56px;} .now .sh{flex:0 0 62px;} .now .pos{flex:0 0 30px;} .now .pl{flex:1 1 auto;}
+  /* ===== 方案A 均匀(推荐)：每格 worst-case 基宽 + 全格平分剩余(grow=1) → PnL 不再独吞 ===== */
+  .even .cap{flex:1 1 80px;} .even .cost{flex:1 1 56px;} .even .sh{flex:1 1 64px;} .even .pos{flex:1 1 28px;} .even .pl{flex:1 1 90px;}
+  /* ===== 方案B 等宽列：5 格完全等宽 ===== */
+  .eq .mc{flex:1 1 0;}
+</style></head>
+<body>
+<h1>训练顶栏 — 横向分布对比</h1>
+<p class="sub">device 内容宽 370px（≈ iPhone 15 Pro Max 真机）。奇数格加浅底看清各格实际占宽。最坏值压测：总资金 1000万 / 股数千万 / 浮动盈亏千万级+几十倍%。盈=红（红涨绿跌）。
+<b>仅顶栏第二行分布变化，其余 RFC-B 定稿不动。</b></p>
+
+<div class="row">
+
+  <div class="col">
+    <div class="tag">① 现状 <small>cap84/cost56/sh62/pos30 固定 + PnL 吃光剩余</small></div>
+    <div class="bar now">
+      <div class="hd-top"><span class="bk">‹ 返回</span><span class="nm">训练标的 · 盲测</span><span class="endbtn">结束</span></div>
+      <div class="hd-m">
+        <div class="mc cap"><span class="ml">总资金</span><div class="mvw"><span class="mv">¥10,000,000</span></div></div>
+        <div class="mc cost"><span class="ml">成本/股</span><div class="mvw"><span class="mv">1,683.50</span></div></div>
+        <div class="mc sh"><span class="ml">股数</span><div class="mvw"><span class="mv">9,999,999</span></div></div>
+        <div class="mc pos"><span class="ml">仓位</span><div class="mvw"><span class="mv">5/5</span></div></div>
+        <div class="mc pl"><span class="ml">浮动盈亏</span><div class="mvw"><span class="pnl2 up"><span class="amt">+¥12,345,678</span><span class="pct">+4,900.00%</span></span></div></div>
+      </div>
+    </div>
+    <div class="tag"><small>↑ PnL 格偏宽显空、左侧偏挤（你反馈的问题）</small></div>
+  </div>
+
+  <div class="col">
+    <div class="tag">② 方案A 均匀（推荐）<small>每格按 worst-case 给基宽 + 剩余全格平分</small></div>
+    <div class="bar even">
+      <div class="hd-top"><span class="bk">‹ 返回</span><span class="nm">训练标的 · 盲测</span><span class="endbtn">结束</span></div>
+      <div class="hd-m">
+        <div class="mc cap"><span class="ml">总资金</span><div class="mvw"><span class="mv">¥10,000,000</span></div></div>
+        <div class="mc cost"><span class="ml">成本/股</span><div class="mvw"><span class="mv">1,683.50</span></div></div>
+        <div class="mc sh"><span class="ml">股数</span><div class="mvw"><span class="mv">9,999,999</span></div></div>
+        <div class="mc pos"><span class="ml">仓位</span><div class="mvw"><span class="mv">5/5</span></div></div>
+        <div class="mc pl"><span class="ml">浮动盈亏</span><div class="mvw"><span class="pnl2 up"><span class="amt">+¥12,345,678</span><span class="pct">+4,900.00%</span></span></div></div>
+      </div>
+    </div>
+    <div class="tag"><small>↑ 每格大小≈各自 worst-case 需要，剩余均摊；PnL 不再独宽</small></div>
+  </div>
+
+  <div class="col">
+    <div class="tag">③ 方案B 等宽列 <small>5 格完全等宽</small></div>
+    <div class="bar eq">
+      <div class="hd-top"><span class="bk">‹ 返回</span><span class="nm">训练标的 · 盲测</span><span class="endbtn">结束</span></div>
+      <div class="hd-m">
+        <div class="mc cap"><span class="ml">总资金</span><div class="mvw"><span class="mv">¥10,000,000</span></div></div>
+        <div class="mc cost"><span class="ml">成本/股</span><div class="mvw"><span class="mv">1,683.50</span></div></div>
+        <div class="mc sh"><span class="ml">股数</span><div class="mvw"><span class="mv">9,999,999</span></div></div>
+        <div class="mc pos"><span class="ml">仓位</span><div class="mvw"><span class="mv">5/5</span></div></div>
+        <div class="mc pl"><span class="ml">浮动盈亏</span><div class="mvw"><span class="pnl2 up"><span class="amt">+¥12,345,678</span><span class="pct">+4,900.00%</span></span></div></div>
+      </div>
+    </div>
+    <div class="tag"><small>↑ 最均匀，但 仓位"5/5" 浪费、PnL 最坏值偏挤需缩放</small></div>
+  </div>
+
+</div>
+</body></html>

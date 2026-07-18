@@ -2216,6 +2216,7 @@ fi
 - **F1 [high] 并发输家会删掉/覆写赢家已登记的产物**。
   **核实 = 属实，且比"不处理并发"更糟。** `assemble_from_windows` 写的是确定性最终路径 `{code}_{start}.zip`。两个 sweep 选中同一 `(stock_code, start_datetime)` 时：赢家登记成功，输家把**同名文件**写下去（覆写赢家）、`ON CONFLICT` 返回 `None` 后又 `unlink` 掉它 → `training_sets.file_path` 指向缺失/损坏文件 = **数据丢失**。我 R2 加的假件冲突测把冲突建模成"没有竞争行"，结构上抓不到这条。
   **处置 = 全盘采纳。** 改「暂存 → 登记 → 发布」：在 `output_dir` 内开唯一暂存目录装配，**只有 INSERT 真拿到行**才 `os.replace` 原子发布到最终路径；输家只清自己的暂存目录、**永不触碰最终路径**。测试按 codex 要求重写为"先造赢家的已登记 zip → 制造冲突 → 断言赢家文件逐字节不变"，另加成功路径无暂存残渣测。
+  > **⚠️ 本条处置已被 PF2-R5 决议整体撤回**（见下）——暂存/两阶段发布是为架构上不发生的并发场景加的机器，且它本身又引出 R4-F1。最终设计 = 先写文件后登记。本条保留仅作决策留痕。
 
 - **F2 [medium] Task 1 的 migration 测试对着 plan 自己给的 SQL 必挂**。
   **核实 = 属实。** (a) 我给的 forward/rollback 用多空格对齐（`ALTER COLUMN open  TYPE ...`），而断言写的是单空格 `alter column open type double precision`；(b) `test_migration_0004_does_not_touch_ticket_index` 断言全文不含 `ticket_index`，但同一份 forward.sql 的说明注释里就有这个词。Step 5「期望 10 passed」按原样不可达。
