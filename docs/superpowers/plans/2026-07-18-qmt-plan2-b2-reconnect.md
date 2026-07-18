@@ -33,7 +33,7 @@
 - **Python 解释器**：必须用仓库根 `.venv`（Python 3.11.15）。host `python3` 是 3.14.6，**跑 pandas 会段错误**。所有 pytest 命令一律 `cd backend && ../.venv/bin/python -m pytest ...`。venv 已建好；若缺失，重建命令见 Task 0。
 - **基线**：`main` `7037934`，`cd backend && ../.venv/bin/python -m pytest tests/ -q` = **170 passed**。任何 Task 结束时测试数只增不减，且 **0 failed / 0 skipped**。
 - **CI 禁 skip**：`.github/workflows/backend-tests.yml` 解析 junit XML，**任何 `skipped>0` 即 fail**。因此**禁止**新增任何 `pytest.mark.skip` / `xfail` / 条件 skip 的测试（含"没有 Docker 就 skip"）。本 plan 的集成测用假 asyncpg conn，不依赖真 PG。
-- **`CONTRACT_VERSION` 权威当前值 = `"1.11"`**（`ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift:7`），**不是 spec/memory 里写的 `"1.8"`**——spec（2026-07-06）之后 PR #132/#136/#139/#140 连续 bump 到 1.11。本 plan 的 bump 是 **1.11 → 1.12**。
+- **`CONTRACT_VERSION` 权威当前值 = `"1.11"`**（`ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift:7`），**不是 spec/memory 里写的 `"1.8"`**——spec 写于 2026-07-06 时代码实际已是 `1.10`（#136 于 07-01 → `1.8`、#139 于 07-03 → `1.10`，两者都早于 spec 定稿；即 spec 里那个 `1.8` 当天就已过时），其后 #140（07-07）再 bump 到 `1.11`。本 plan 的 bump 是 **1.11 → 1.12**。
 - **`ticket_index` 只停写、不删列**（m01 禁 Wave 1+ 不可逆迁移）：`schema.sql` 保留 `ticket_index INTEGER`，migration 对该列**零 DDL**。
 - **价格列禁 round**：OHLC 走 `DOUBLE PRECISION` 全精度；`amount DECIMAL(16,2)` 与指标列 `DECIMAL(10,4)/(10,6)` + `round(4/6)` **不变**。
 - **负向断言禁 `! grep`**：验收脚本里用 `if grep -q ...; then exit 1; fi`（`set -e` 下 `! grep` 会死闸门）。
@@ -649,7 +649,8 @@ Plan2a Task2: CONTRACT_VERSION 1.11→1.12 + m01 矩阵（含校正 stale 1.7 ce
 
 migration 0004 是 A 类 DDL「改类型」→ 必须 bump 顶层。
 iOS reader 逻辑零改动，仅常量 + 其测试。
-矩阵顶层 cell 此前 stale 为 1.7（#132/#136/#139/#140 四次 bump 未同步），一并校正。
+矩阵顶层 cell 此前 stale 为 1.7（#136/#139/#140 三个 PR 的 bump 未同步；#132 属更早、
+已由 2026-06-22 既有记录涵盖），一并校正。
 EOF
 )"
 ```

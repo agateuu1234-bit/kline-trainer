@@ -37,7 +37,7 @@
 | # | 动作 | 预期 | 通过 / 不通过 |
 |---|---|---|---|
 | 4 | `grep -n 'CONTRACT_VERSION = ' ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift` | 输出含 `"1.12"`（不是 `"1.11"` 或更早） | ☐ 通过 ☐ 不通过 |
-| 5 | `grep -n 'CONTRACT_VERSION`（顶层标识）' docs/governance/m01-schema-versioning-contract.md` | 该行的版本格显示 `"1.12"` | ☐ 通过 ☐ 不通过 |
+| 5 | `grep -n '（顶层标识） |' docs/governance/m01-schema-versioning-contract.md` | **只输出 1 行**，且该行里显示 `"1.12"` | ☐ 通过 ☐ 不通过 |
 | 6 | `grep -n 'PostgreSQL schema' docs/governance/m01-schema-versioning-contract.md` | 该行显示 `0004_qmt_price_double_and_coverage` | ☐ 通过 ☐ 不通过 |
 
 ---
