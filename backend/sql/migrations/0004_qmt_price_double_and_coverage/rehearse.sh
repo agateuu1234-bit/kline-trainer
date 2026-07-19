@@ -386,7 +386,7 @@ SQL
 # 不保证复现录入时敲的字符串），改为比较"是否仍带 2 位小数以外的精度"这一更稳的断言。
 assert_eq "forward 后高精度价格未被 double precision 列截断（仍带 2 位小数以外的精度）" \
   "$(pg_query precision_db "SELECT (open <> 11.79::double precision)::text FROM klines WHERE stock_code='000001' AND datetime=20260110000000;")" \
-  "t"
+  "true"
 
 # 破坏性守卫（codex R5-F1）：本库存在高精度价格 → 未确认时必须被拒。
 # 这条同时证明守卫**真的会拦**，而不只是写在 SQL 里。
