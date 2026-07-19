@@ -48,6 +48,10 @@ Docker；user 裁决按此处理）。它不是"测过一次就够了"——sche
 1. **OHLC 精度丢失，不可恢复**：`DOUBLE PRECISION → DECIMAL(10,2)` 是收窄，会把高精度价格
    截断到 2 位小数（如 `11.790828206557329` → `11.79`）。执行 rollback 前必须先备份
    `klines`，或确认该库里没有 QMT 前复权数据。
+2. **`file_path` 超过 255 字符时，rollback 会报错中止**：`TEXT → VARCHAR(255)` 收窄，若存量
+   有超长绝对路径，PostgreSQL 会拒绝截断、整个 rollback 事务失败回滚（fail-closed，不会留下
+   半吊子状态）。回滚前需要先人工清理超长路径。
+
 > **⚠️ rollback 现在会 fail-closed 拒绝执行**（若真有数据会丢）：
 > 它会统计 `stock_coverage` 待删行数 + `klines` 中精度超 2 位小数的行数，
 > 只要任一 > 0 就报错中止，并在错误信息里给出具体行数。
@@ -60,10 +64,6 @@ Docker；user 裁决按此处理）。它不是"测过一次就够了"——sche
 >
 > 这道守卫是可执行的拦截，不是注释——因为回滚是「出事才跑」的路径，
 > 恰恰是最不会细读警告的时刻。
-
-2. **`file_path` 超过 255 字符时，rollback 会报错中止**：`TEXT → VARCHAR(255)` 收窄，若存量
-   有超长绝对路径，PostgreSQL 会拒绝截断、整个 rollback 事务失败回滚（fail-closed，不会留下
-   半吊子状态）。回滚前需要先人工清理超长路径。
 
 ## 当前状态
 
