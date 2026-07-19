@@ -128,6 +128,25 @@ def test_migration_0004_rollback_reverses_all_three_changes():
     assert "drop table" in sql and "stock_coverage" in sql
 
 
+def test_migration_0004_rollback_has_destructive_guard():
+    """codex R5-F1：rollback 是「出事才跑」的应急路径，而它会 DROP stock_coverage
+    并把 OHLC 截断到 2 位小数——两者都不可恢复。只有顶部文字警告不够，
+    必须有**可执行**的 fail-closed 守卫：真有东西会丢时拒绝执行，除非操作者显式确认。"""
+    sql = _sql_normalized(MIG_0004 / "rollback.sql")
+    assert "raise exception" in sql, "缺可执行守卫（仅有注释警告不算）"
+    assert "kline.rollback_confirm" in sql, "缺操作者显式确认机制"
+    # 两类可丢数据都要检
+    assert "from stock_coverage" in sql, "未检查 stock_coverage 是否有数据将被删"
+    assert "round(open::numeric, 2)" in sql, "未检查价格精度是否会被截断"
+    # 守卫必须早于破坏性语句
+    guard_i = sql.find("raise exception")
+    drop_i = sql.find("drop table if exists stock_coverage")
+    narrow_i = sql.find("alter column open type decimal(10,2)")
+    assert guard_i != -1 and drop_i != -1 and narrow_i != -1
+    assert guard_i < drop_i, "守卫必须早于 DROP TABLE"
+    assert guard_i < narrow_i, "守卫必须早于收窄列类型"
+
+
 def test_migration_0004_rollback_documents_precision_loss():
     """m01 要求：有损回滚必须在文件里显式标注（人工执行前要看得见）。"""
     text = (MIG_0004 / "rollback.sql").read_text(encoding="utf-8")

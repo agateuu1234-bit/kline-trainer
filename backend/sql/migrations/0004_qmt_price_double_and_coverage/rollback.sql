@@ -11,7 +11,43 @@
 
 BEGIN;
 
--- 3. 删覆盖契约表（新表，回滚不丢既有业务数据）
+-- 0. 破坏性保护：有数据可丢时 fail-closed（codex R5-F1）
+--
+-- 回滚是「出事时才跑」的应急路径——恰恰是操作者最紧张、最不会细读注释的时刻。
+-- 光靠顶部的文字警告不够：本脚本会 DROP 掉 stock_coverage（B2 赖以门控的权威
+-- 覆盖 artifact），并把 OHLC 收窄到 2 位小数（QMT 前复权价不可恢复地被截断）。
+-- 故改为：**只要真有东西会丢，就拒绝执行**，除非操作者显式声明已备份。
+--
+-- 注：顶部注释原写「stock_coverage 是新表，回滚不丢既有业务数据」——那句话只在
+-- B1 尚未写入覆盖数据时成立；Plan 3 落地后即不再成立。这里按最坏情况保护。
+DO $$
+DECLARE
+  cov_rows  bigint := 0;
+  lossy     bigint := 0;
+  confirmed text   := coalesce(current_setting('kline.rollback_confirm', true), '');
+BEGIN
+  IF to_regclass('stock_coverage') IS NOT NULL THEN
+    EXECUTE 'SELECT count(*) FROM stock_coverage' INTO cov_rows;
+  END IF;
+
+  -- 精度超过 2 位小数的价格，收窄后不可恢复
+  SELECT count(*) INTO lossy FROM klines
+   WHERE open::numeric  <> round(open::numeric,  2)
+      OR high::numeric  <> round(high::numeric,  2)
+      OR low::numeric   <> round(low::numeric,   2)
+      OR close::numeric <> round(close::numeric, 2);
+
+  IF (cov_rows > 0 OR lossy > 0) AND confirmed <> 'I_HAVE_A_BACKUP' THEN
+    RAISE EXCEPTION
+      'rollback 会造成不可恢复的数据损失：stock_coverage 将被删除的行数=%；klines 中精度超 2 位小数、收窄后不可恢复的行数=%',
+      cov_rows, lossy
+      USING HINT =
+        '确认已备份后，在**同一会话**内先执行 SET kline.rollback_confirm = ''I_HAVE_A_BACKUP''; 再跑本脚本。'
+        || ' 例如：psql -d <db> -v ON_ERROR_STOP=1 -c "SET kline.rollback_confirm=''I_HAVE_A_BACKUP''" -f rollback.sql';
+  END IF;
+END $$;
+
+-- 3. 删覆盖契约表（**注意：B1 写入覆盖数据后，这一步会丢数据**，已由上面的守卫拦截）
 DROP TABLE IF EXISTS stock_coverage;
 
 -- 2. file_path 收窄（存量值须 ≤255，否则本语句报错中止）

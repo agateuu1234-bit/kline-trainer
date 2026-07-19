@@ -176,6 +176,14 @@ pg_run_file() {
     psql -U postgres -h 127.0.0.1 -d "$1" -v ON_ERROR_STOP=1 < "$2"
 }
 
+pg_run_file_confirmed() {
+  # $1=db  $2=sql 文件路径 —— 在**同一会话**内先 SET 破坏性确认 GUC 再执行。
+  # psql 会按给出顺序在同一会话里依次处理 -c 与 -f（rollback.sql 的守卫据此放行）。
+  docker exec -i -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+    psql -U postgres -h 127.0.0.1 -d "$1" -v ON_ERROR_STOP=1 \
+      -c "SET kline.rollback_confirm='I_HAVE_A_BACKUP'" -f - < "$2"
+}
+
 load_pre_migration_schema() {
   # $1=db —— 从 git 历史取"迁移前"schema.sql，不手抄
   git -C "$REPO_ROOT" show "${PRE_MIGRATION_SHA}:backend/sql/schema.sql" | \
@@ -380,10 +388,26 @@ assert_eq "forward 后高精度价格未被 double precision 列截断（仍带 
   "$(pg_query precision_db "SELECT (open <> 11.79::double precision)::text FROM klines WHERE stock_code='000001' AND datetime=20260110000000;")" \
   "t"
 
+# 破坏性守卫（codex R5-F1）：本库存在高精度价格 → 未确认时必须被拒。
+# 这条同时证明守卫**真的会拦**，而不只是写在 SQL 里。
 if pg_run_file precision_db "$ROLLBACK_SQL" > "$TMP_LOG" 2>&1; then
-  pass_msg "rollback.sql 在 precision_db 上执行成功（file_path 本批数据不超长，不触发另一条警告）"
+  fail_msg "破坏性守卫失效：precision_db 有不可恢复的高精度价格，未确认就让 rollback 跑成功了"
+  exit 1
+fi
+# 同 R4 教训：不能把"失败了"当成"被守卫拦的"。必须钉到守卫自己的错误文本。
+if grep -q "不可恢复的数据损失" "$TMP_LOG"; then
+  pass_msg "破坏性守卫生效：未确认时 rollback 被拒（且确由该守卫拒绝）"
 else
-  fail_msg "rollback.sql 在 precision_db 上意外失败（本场景不该触发 file_path 那条警告）："
+  fail_msg "rollback 失败了，但**不是**破坏性守卫拦的 —— 该守卫未被真正验证。实际错误："
+  cat "$TMP_LOG"
+  exit 1
+fi
+
+# 操作者显式确认已备份后，应当放行
+if pg_run_file_confirmed precision_db "$ROLLBACK_SQL" > "$TMP_LOG" 2>&1; then
+  pass_msg "显式确认（SET kline.rollback_confirm）后 rollback 放行"
+else
+  fail_msg "已显式确认，rollback 仍失败（守卫过严或 GUC 传递方式不对）："
   cat "$TMP_LOG"
   exit 1
 fi
