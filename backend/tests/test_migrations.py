@@ -128,6 +128,25 @@ def test_migration_0004_rollback_reverses_all_three_changes():
     assert "drop table" in sql and "stock_coverage" in sql
 
 
+def test_rehearse_script_braces_vars_before_cjk():
+    """演练脚本里 `$VAR` 紧跟全角字符（中文括号/逗号等）会让 bash 把多字节字符的字节
+    吞进变量名 → `set -u` 报「未绑定的变量」。
+
+    这是**真跑才会暴露**的一类 bug：`bash -n` 与 `shellcheck` 都查不出来（语法完全合法）。
+    实测中它让脚本在加载迁移前 schema 那一步直接崩掉。修法是一律写成 `${VAR}`。
+    本测试把这个运行期陷阱变成静态可检，防止以后写中文提示时复发。"""
+    import re
+    script = (MIG_0004 / "rehearse.sh").read_text(encoding="utf-8")
+    bad = [
+        (i, line) for i, line in enumerate(script.splitlines(), 1)
+        if re.search(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]", line)
+    ]
+    assert not bad, (
+        "以下位置 `$VAR` 紧跟全角字符，bash 会把它当成变量名的一部分，请改用 ${VAR}：\n"
+        + "\n".join(f"  第 {i} 行: {line.strip()}" for i, line in bad)
+    )
+
+
 def test_migration_0004_rollback_has_destructive_guard():
     """codex R5-F1：rollback 是「出事才跑」的应急路径，而它会 DROP stock_coverage
     并把 OHLC 截断到 2 位小数——两者都不可恢复。只有顶部文字警告不够，

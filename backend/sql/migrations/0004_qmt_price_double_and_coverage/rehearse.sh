@@ -77,7 +77,7 @@ fi
 if git -C "$REPO_ROOT" cat-file -e "${PRE_MIGRATION_SHA}^{commit}" 2>/dev/null; then
   :
 else
-  echo "[FAIL] 仓库中找不到提交 $PRE_MIGRATION_SHA（迁移前 schema 快照的来源）"
+  echo "[FAIL] 仓库中找不到提交 ${PRE_MIGRATION_SHA}（迁移前 schema 快照的来源）"
   echo "可能是浅克隆缺历史，请先 git fetch --unshallow 再重跑"
   exit 1
 fi
@@ -95,7 +95,7 @@ cleanup() {
   if [ "$exit_code" -eq 0 ]; then
     echo "容器 $CONTAINER_NAME 已清理，演练脚本正常结束。"
   else
-    echo "容器 $CONTAINER_NAME 已清理（脚本以失败退出，exit=$exit_code）。"
+    echo "容器 $CONTAINER_NAME 已清理（脚本以失败退出，exit=${exit_code}）。"
   fi
   exit "$exit_code"
 }
@@ -142,7 +142,7 @@ assert_rejects() {
     exit 1
   fi
   if printf '%s' "$out" | grep -q "$expect"; then
-    pass_msg "$desc（确由 $expect 拒绝）"
+    pass_msg "${desc}（确由 $expect 拒绝）"
   else
     fail_msg "$desc —— 被拒了，但不是期望的原因。期望错误信息含 [$expect]，实际：$out"
     exit 1
@@ -261,7 +261,7 @@ for db in main_db precision_db overlong_db; do
   load_pre_migration_schema "$db" >/dev/null
   seed_baseline "$db" >/dev/null
 done
-pass_msg "3 个库均已加载迁移前 schema（取自 git $PRE_MIGRATION_SHA）+ 样本数据"
+pass_msg "3 个库均已加载迁移前 schema（取自 git ${PRE_MIGRATION_SHA}）+ 样本数据"
 
 # ==========================================================================
 # Part 1：main_db —— forward → 断言形状+数据完整性 → rollback → 断言形状回退
@@ -434,7 +434,7 @@ fi
 LONG_PATH="/mnt/nas/kline_trainer/datasets/000001/$(printf 'a%.0s' $(seq 1 250))/dataset.zip"
 LONG_PATH_LEN=${#LONG_PATH}
 if [ "$LONG_PATH_LEN" -le 255 ]; then
-  fail_msg "测试数据本身长度不足 255（当前 $LONG_PATH_LEN），无法验证该场景，脚本需要修"
+  fail_msg "测试数据本身长度不足 255（当前 ${LONG_PATH_LEN}），无法验证该场景，脚本需要修"
   exit 1
 fi
 echo "  （构造 file_path 长度 = $LONG_PATH_LEN 字符，超出 VARCHAR(255) 上限）"
