@@ -42,16 +42,26 @@ struct TrainingViewShellSourceGuardTests {
         #expect(before.contains("if isDrawingActive {"))
     }
 
-    @Test("画线底栏改用单行 DrawingBottomBar、与训练底栏等高常量，不再在 VStack 直接塞两行 DrawingModeBar")
-    func drawingBottomBarIsHeightNeutralSingleRow() throws {
+    @Test("画线底栏改用单行 DrawingBottomBar，不再在 VStack 直接塞两行 DrawingModeBar")
+    func drawingBottomBarWiredSingleRow() throws {
         let code = try source(tv)
         // 底栏 swap 分支用 DrawingBottomBar（单行）
         #expect(code.contains("DrawingBottomBar("))
         // 不再把两行 DrawingModeBar 作为 VStack 成员塞进 trainingContent（改 overlay，见 Task 2）
         #expect(!code.contains("DrawingModeBar(typeRowExpanded"))
-        let bar = try source("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
-        // 与训练底栏共享等高常量（防更高顶起图表）
-        #expect(bar.contains("DrawingBarMetrics.barHeight") || bar.contains(".frame(height:"))
+    }
+
+    @Test("三个互斥 swap 底栏（TradeActionBar/DrawingBottomBar/ReviewControlBar）都显式钉同一个 BottomBarMetrics.height——防漂移回归（1a-iii 切片1 Task1 fix）")
+    func threeBottomBarsShareFixedHeightConstant() throws {
+        // 曾经指望「三者共享同一套 intrinsic 配方（buttonStyle/controlSize/padding 逐项照抄）天然等高」，
+        // 但 Catalyst 真机测量证伪：内容量不同（图标 vs 图标+多文案按钮），配方相同不保证测出来的高度相同。
+        // 现改为三者都显式钉同一个 BottomBarMetrics.height 常量；任一侧以后被改动/漏钉，本测试即失败。
+        let trade = try source("Sources/KlineTrainerContracts/UI/TradeActionBar.swift")
+        let drawing = try source("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
+        let review = try source("Sources/KlineTrainerContracts/UI/ReviewControlBar.swift")
+        #expect(trade.contains(".frame(height: BottomBarMetrics.height)"), "TradeActionBar 未钉 BottomBarMetrics.height")
+        #expect(drawing.contains(".frame(height: BottomBarMetrics.height)"), "DrawingBottomBar 未钉 BottomBarMetrics.height")
+        #expect(review.contains(".frame(height: BottomBarMetrics.height)"), "ReviewControlBar 未钉 BottomBarMetrics.height")
     }
 
     @Test("交易边界：清 tradeStrip + overlay 门控 + onConfirm 经 TradeConfirmGuard.apply（窄锚定）")

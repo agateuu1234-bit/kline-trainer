@@ -49,13 +49,11 @@ struct DrawingModeBar: View {
     }
 }
 
-/// 训练/画线底栏共享高度基线（1a-iii 切片 1）。与 TradeActionBar 用相同的按钮规格构造
-/// （buttonStyle/controlSize/font/padding 全部照抄 TradeActionBar/ReviewControlBar 既有配方）
-/// → 天然等高；barHeight 显式钉住这一行高，防止未来任一侧改内容后静默漂移。
-enum DrawingBarMetrics { static let barHeight: CGFloat = 60 }
-
 /// 画线底栏（单行，1a-iii 切片 1）：只①类型键（收/展类型行，Task 2 接 overlay）。②–⑤ 本期不渲染（D19/D24）。
-/// 与 TradeActionBar 等高——不再让「进画线」把两行 DrawingModeBar 塞进 VStack 顶起图表。
+/// 与 TradeActionBar/ReviewControlBar 沿用同一套按钮构造配方（buttonStyle/controlSize/font/padding），
+/// 但配方相同不保证测出来的高度相同（Catalyst 真机测量证伪：内容量不同，headless sizeThatFits 还会随
+/// 宽度改变、不可靠）——三者改为显式共享同一个 `BottomBarMetrics.height` 固定高度（1a-iii 切片1 Task1
+/// fix），保证训练/画线/复盘切换零跳动，且钉一个数字比钉一套配方更能被测试直接锚定、防未来漂移。
 struct DrawingBottomBar: View {
     @Binding var typeRowExpanded: Bool
 
@@ -72,8 +70,9 @@ struct DrawingBottomBar: View {
         .font(.system(size: 14).weight(.semibold))
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
-        .frame(height: DrawingBarMetrics.barHeight)
         .frame(maxWidth: .infinity)
+        // 与 TradeActionBar/ReviewControlBar 共享同一固定高度（1a-iii 切片1 Task1 fix）→ 三者切换零跳动。
+        .frame(height: BottomBarMetrics.height)
         .background(.bar, ignoresSafeAreaEdges: .bottom)
     }
 }
