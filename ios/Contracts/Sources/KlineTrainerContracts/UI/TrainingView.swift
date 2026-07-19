@@ -29,6 +29,17 @@ struct DrawingPanelFrameKey: PreferenceKey {
     static let defaultValue: CGRect? = nil
     static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) { value = nextValue() ?? value }
 }
+// Task3：hosted 布局不变量测试测量 chartPanels 容器本体 frame 用的 PreferenceKey（见
+// DrawingLayoutInvariantTests.swift）。测试把**真** ChartPanelsContainer 外包一层
+// `.coordinateSpace(name:) + .overlay { GeometryReader 上报本 key }`（与同容器 DrawingShieldFrameKey 同款
+// 「coordinateSpace 在前、overlay 内容在命名空间内」结构——实测这是 headless ImageRenderer 下唯一稳定
+// flush 出真实几何的路子：`.local` 及容器自身层的 `.background` 都回落 .zero，overlay 内容才解析得到命名空间）。
+// 证伪的其它读法：`accessibilityIdentifier` + UIView 树遍历拿不到（纯 SwiftUI 原生内容不产生可发现
+// UIView）；真实 UIWindow 在 headless Catalyst xctest 创建会直接崩（NSApplication 尚未创建）。
+struct ChartPanelsFrameKey: PreferenceKey {
+    static let defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
 
 public struct TrainingView: View {
     private let lifecycle: TrainingSessionLifecycle
@@ -456,35 +467,12 @@ public struct TrainingView: View {
     /// 1a-iii 切片1 Task2：上下两个图表面板容器 + 类型行 overlay（不占 VStack 高度）。
     /// codex 计划-R2-high：overlay 必须挂在「仅上下 K 线面板」的容器、**不是**整个 `trainingContent`
     /// （否则 `.bottom` 对齐到含底栏的整栈底、盖住 DrawingBottomBar、遮住①类型键）。
+    /// Task3：正文抽成 `ChartPanelsContainer`——hosted 布局不变量测试直接渲染这个**同一份**容器测本体
+    /// frame 三态不变（抽共享、不复制，见 Render/DrawingLayoutInvariantTests.swift）。
     private var chartPanels: some View {
-        VStack(spacing: 0) {
-            panel(.upper)
-            Divider()
-            panel(.lower)
-                .background(GeometryReader { p in Color.clear
-                    .preference(key: DrawingPanelFrameKey.self, value: p.frame(in: .named("chart"))) })
-        }
-        .coordinateSpace(name: "chart")
-        .overlay(alignment: .bottom) {
-            // codex 计划-R4-medium：必带 showsTradeButtons 门——排除复盘（复盘用浮动铅笔钮，本切片不改其行为）。
-            // 否则复盘经浮动钮 drawingModeActive 时也会挂 overlay+装下面板盾、吞复盘图表点。
-            if showsTradeButtons, isDrawingActive, typeRowExpanded {
-                DrawingTypeOverlay(expanded: typeRowExpanded, onLongPressType: { showingStyleCard = true })
-                    .background(GeometryReader { g in Color.clear
-                        .preference(key: DrawingShieldFrameKey.self, value: g.frame(in: .named("chart"))) })
-            }
-        }
-        .accessibilityIdentifier("chartPanels")
-        .onPreferenceChange(DrawingPanelFrameKey.self) { lowerPanelChartFrame = $0 }
-        .onPreferenceChange(DrawingShieldFrameKey.self) { overlayChartFrame in
-            // codex 计划-R3-high：chart 空间 → 下面板局部空间转换（**不可**直接存 chart 空间，否则含
-            // 上面板偏移、下面板漏挡）。canonical 空间 = 下面板局部（与 handleDrawingTap 的 tap point 同）。
-            guard let overlay = overlayChartFrame, let lp = lowerPanelChartFrame else {
-                engine.drawingSession.setShieldRect(nil, panel: .lower); return   // 隐藏/无帧 → 清盾
-            }
-            let local = overlay.offsetBy(dx: -lp.minX, dy: -lp.minY)
-            engine.drawingSession.setShieldRect(local, panel: .lower)
-        }
+        ChartPanelsContainer(engine: engine, showsTradeButtons: showsTradeButtons, isDrawingActive: isDrawingActive,
+                             typeRowExpanded: typeRowExpanded, onLongPressType: { showingStyleCard = true },
+                             upperPanel: { panel(.upper) }, lowerPanel: { panel(.lower) })
     }
 
     private func panel(_ id: PanelId) -> some View {
@@ -634,6 +622,99 @@ public struct TrainingView: View {
         let period: Period          // codex R2-high：捕获开条时下单周期
         let tick: Int               // codex R3-high：捕获开条时 globalTickIndex（防 tick 推进后按新价成交）
         var id: String { "\(panel)-\(action)" }
+    }
+}
+
+/// 上下面板容器 + 类型行 overlay + 命中屏蔽的共享实现（1a-iii 切片1 Task3 抽出）：生产 `TrainingView.chartPanels`
+/// 与 hosted 布局不变量测试（Render/DrawingLayoutInvariantTests.swift 直接渲染本容器测 frame 三态不变）、以及
+/// 参照壳 `TrainingShellLayout` 共用同一份 VStack/overlay/PreferenceKey 接线，防止几何断言测的是一份复制品、
+/// 悄悄跟生产接线漂移（抽共享、不复制）。上下面板内容由调用方注入（生产传真 K 线面板，hosted 测试传等尺寸占位）。
+struct ChartPanelsContainer<Upper: View, Lower: View>: View {
+    let engine: TrainingEngine
+    let showsTradeButtons: Bool
+    let isDrawingActive: Bool
+    let typeRowExpanded: Bool
+    let onLongPressType: () -> Void
+    @ViewBuilder let upperPanel: () -> Upper
+    @ViewBuilder let lowerPanel: () -> Lower
+    @State private var lowerPanelChartFrame: CGRect?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            upperPanel()
+            Divider()
+            lowerPanel()
+                .background(GeometryReader { p in Color.clear
+                    .preference(key: DrawingPanelFrameKey.self, value: p.frame(in: .named("chart"))) })
+        }
+        .coordinateSpace(name: "chart")
+        .overlay(alignment: .bottom) {
+            // codex 计划-R4-medium：必带 showsTradeButtons 门——排除复盘（复盘用浮动铅笔钮，本切片不改其行为）。
+            // 否则复盘经浮动钮 drawingModeActive 时也会挂 overlay+装下面板盾、吞复盘图表点。
+            if showsTradeButtons, isDrawingActive, typeRowExpanded {
+                DrawingTypeOverlay(expanded: typeRowExpanded, onLongPressType: onLongPressType)
+                    .background(GeometryReader { g in Color.clear
+                        .preference(key: DrawingShieldFrameKey.self, value: g.frame(in: .named("chart"))) })
+            }
+        }
+        .accessibilityIdentifier("chartPanels")
+        .onPreferenceChange(DrawingPanelFrameKey.self) { lowerPanelChartFrame = $0 }
+        .onPreferenceChange(DrawingShieldFrameKey.self) { overlayChartFrame in
+            // codex 计划-R3-high：chart 空间 → 下面板局部空间转换（**不可**直接存 chart 空间，否则含
+            // 上面板偏移、下面板漏挡）。canonical 空间 = 下面板局部（与 handleDrawingTap 的 tap point 同）。
+            guard let overlay = overlayChartFrame, let lp = lowerPanelChartFrame else {
+                engine.drawingSession.setShieldRect(nil, panel: .lower); return   // 隐藏/无帧 → 清盾
+            }
+            let local = overlay.offsetBy(dx: -lp.minX, dy: -lp.minY)
+            engine.drawingSession.setShieldRect(local, panel: .lower)
+        }
+    }
+}
+
+/// 训练态整壳的参照装配（1a-iii 切片1 Task3）：与生产 `trainingContent` 共用同一 `ChartPanelsContainer`
+/// + 真 `TradeActionBar`/`DrawingBottomBar` 底栏 swap 逻辑（codex 计划-R2-medium：stub 掉底栏会放过
+/// 真实 intrinsic 高度不等引起的图表跳）；只把 K 线渲染（`ChartContainerView`，需真机 engine 渲染管线）
+/// 换成等尺寸占位。**不含 topBar**（其高度在三态间恒定，不影响本不变量；复盘 `ReviewControlBar` 分支
+/// 同理不在本切片范围）。此壳作为「完整训练态装配」的可读参照 + `DrawingTapHitShieldTests` 源码守卫的
+/// ChartPanelsContainer 正文边界锚点。
+/// **⭐布局不变量本身不经此壳测量**：`ImageRenderer` 无法 flatten 底栏内 segmented `Picker` 的
+/// `PlatformViewRepresentableAdaptor<SystemSegmentedControl>`（实测整棵渲染塌成 .zero），而无 window 的
+/// headless `UIHostingController` 上 `onPreferenceChange` 又不 flush（实测捕获盒恒 nil）——两条 hosted 读法
+/// 都被底栏的 UIKit 控件卡死。故 chartPanels 本体 frame 三态不变的阻塞判据改为对**纯 SwiftUI 的
+/// `ChartPanelsContainer`（不含底栏）直接** `ImageRenderer` 测量（见 Render/DrawingLayoutInvariantTests.swift）；
+/// 底栏三者等高这半条证据链由 DrawingBottomBarHeightTests（Task1）对真底栏单测证。
+struct TrainingShellLayout: View {
+    let engine: TrainingEngine
+    var isDrawingActive: Bool
+    var typeRowExpanded: Bool
+
+    private var showsTradeButtons: Bool { engine.flow.canBuySell() }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ChartPanelsContainer(engine: engine, showsTradeButtons: showsTradeButtons, isDrawingActive: isDrawingActive,
+                                 typeRowExpanded: typeRowExpanded, onLongPressType: {},
+                                 upperPanel: { chartPlaceholder }, lowerPanel: { chartPlaceholder })
+            if showsTradeButtons {
+                if isDrawingActive {
+                    DrawingBottomBar(typeRowExpanded: .constant(typeRowExpanded))
+                } else {
+                    TradeActionBar(
+                        content: TradeActionBarContent(price: engine.currentPrice),
+                        upperPeriod: engine.upperPanel.period,
+                        lowerPeriod: engine.lowerPanel.period,
+                        activePanel: .constant(.upper),
+                        buyEnabled: engine.buyEnabled,
+                        sellEnabled: engine.sellEnabled,
+                        holdLabel: engine.position.shares > 0 ? "持有" : "观察",
+                        onBuy: {}, onSell: {}, onHold: {})
+                }
+            }
+        }
+    }
+
+    private var chartPlaceholder: some View {
+        Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

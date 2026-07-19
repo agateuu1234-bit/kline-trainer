@@ -22,6 +22,8 @@ layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复
 零尺寸 rebuild（updateUIView 路径）不 clamp offset（codex R3-F1：observation 路径同护）
 宽度 390pt：三个底栏等高（≤0.5pt 容差）
 宽度 430pt：三个底栏等高（≤0.5pt 容差）
+进画线 / 展开 / 收起——chartPanels 容器 frame 逐像素不变（布局不变量，阻塞）
+补充快检：类型行只经 overlay、图表面板不在 typeRowExpanded 分支内
 点落在样式面板 shield 内 → 不落锚、不 commit（drawings.count 不变）——面板吃触摸不穿透
 点落在面板 shield 外的 K 线区 → 正常落线（屏蔽只挡面板内）
 真路径差分（codex 计划-R6-high）：面板 shield 覆盖的、**本可落线**的点——装盾时被拒、清盾时落线；count 与 pendingAnchors 都验
