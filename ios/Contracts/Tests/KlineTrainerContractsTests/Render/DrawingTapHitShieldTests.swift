@@ -63,7 +63,7 @@ struct DrawingTapHitShieldTests {
         let trainingContentBody = try extractBody(tv, from: "private var trainingContent: some View {", to: "private var topBar: some View {")
         #expect(trainingContentBody.contains("chartPanels"))
 
-        // 1a-iii 切片1 Task3：chartPanels 正文抽成共享 ChartPanelsContainer（供 TrainingShellLayout
+        // 1a-iii 切片1 Task3：chartPanels 正文抽成共享 ChartPanelsContainer（供
         // hosted 布局不变量测试复用，抽共享、不复制）——chartPanels 自身现在只是薄委托，真断言挪到
         // ChartPanelsContainer 的正文上；先确认薄委托真调用了共享容器（未被内联/复制回来）。
         let chartPanelsBody = try extractBody(tv, from: "private var chartPanels: some View {", to: "private func panel(_ id: PanelId)")
@@ -72,7 +72,7 @@ struct DrawingTapHitShieldTests {
         // ChartPanelsContainer 正文内，唯一锚定类型行 overlay 接线：DrawingTypeOverlay( + 两个
         // PreferenceKey 上报/转换必须同挂在同一个 .overlay(alignment: .bottom) 块里，而不是随便一处
         // 泛 `.overlay(alignment: .bottom)`（panel(_:) 里同名但不带这些）。
-        let containerBody = try extractBody(tv, from: "struct ChartPanelsContainer<Upper: View, Lower: View>: View {", to: "struct TrainingShellLayout: View {")
+        let containerBody = try extractBody(tv, from: "struct ChartPanelsContainer<Upper: View, Lower: View>: View {", to: "#if DEBUG")
         for marker in [".overlay(alignment: .bottom)", "DrawingTypeOverlay(", "DrawingShieldFrameKey", "DrawingPanelFrameKey", "offsetBy"] {
             #expect(containerBody.contains(marker))
         }

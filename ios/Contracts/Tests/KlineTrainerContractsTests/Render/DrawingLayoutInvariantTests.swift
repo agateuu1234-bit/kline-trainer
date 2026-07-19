@@ -34,6 +34,14 @@ import SwiftUI
 import UIKit
 @testable import KlineTrainerContracts
 
+// 1a-iii 切片1 whole-branch fix（M3）：ChartPanelsFrameKey 原声明在 TrainingView.swift，但生产
+// ChartPanelsContainer 正文从不引用它——唯一消费者就是本文件的 hosted 几何测量，故挪进来（测试专用
+// PreferenceKey，不留在生产模块）。用途见下方 chartFrame(isDrawing:expanded:) 与本文件头部测量技术选型记录。
+struct ChartPanelsFrameKey: PreferenceKey {
+    static let defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
 /// `onPreferenceChange` 闭包写入的引用型接收盒（测试 helper，仅本文件用；ImageRenderer 同步渲染期间
 /// 回调在此落值，渲染返回后读取）。
 @MainActor
