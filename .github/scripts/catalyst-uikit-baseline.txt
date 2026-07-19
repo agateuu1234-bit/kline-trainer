@@ -20,6 +20,12 @@ layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复
 布局重算同步 engine bounds → 静态界面后续 pinch 生效（codex R1-F1：不被 stale .zero bounds no-op）
 瞬态零尺寸 layout 不 clamp panel offset（codex R2-F1：滚动位置不被吞）
 零尺寸 rebuild（updateUIView 路径）不 clamp offset（codex R3-F1：observation 路径同护）
+宽度 390pt：三个底栏等高（≤0.5pt 容差）
+宽度 430pt：三个底栏等高（≤0.5pt 容差）
+点落在样式面板 shield 内 → 不落锚、不 commit（drawings.count 不变）——面板吃触摸不穿透
+点落在面板 shield 外的 K 线区 → 正常落线（屏蔽只挡面板内）
+真路径差分（codex 计划-R6-high）：面板 shield 覆盖的、**本可落线**的点——装盾时被拒、清盾时落线；count 与 pendingAnchors 都验
+复盘负向（codex 计划-R4-medium）：复盘态（showsTradeButtons==false）即便 drawingModeActive，也**不装 overlay、不装盾**——复盘图表点不被吞
 KLineView 可实例化（spec L1179 final class）
 renderState 可读写（compile-check：let 字段 + init 重建模式）
 forScheme(.dark) 13 字段桥 = AppPalette.dark

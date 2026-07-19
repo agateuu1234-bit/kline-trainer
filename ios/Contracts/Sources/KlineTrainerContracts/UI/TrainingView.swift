@@ -19,6 +19,17 @@
 #if canImport(UIKit)
 import SwiftUI
 
+// 1a-iii 切片1 Task2：类型行 overlay 命中屏蔽——两个 PreferenceKey，值均 CGRect?、defaultValue = nil
+// （overlay 隐藏时无 descendant 设置 preference → 值回落 nil → 自动清盾，codex 计划-R3-medium）。
+struct DrawingShieldFrameKey: PreferenceKey {
+    static let defaultValue: CGRect? = nil
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) { value = nextValue() ?? value }
+}
+struct DrawingPanelFrameKey: PreferenceKey {
+    static let defaultValue: CGRect? = nil
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) { value = nextValue() ?? value }
+}
+
 public struct TrainingView: View {
     private let lifecycle: TrainingSessionLifecycle
     private let onExit: () -> Void
@@ -40,6 +51,8 @@ public struct TrainingView: View {
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
     @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
     @State private var crosshairOwner: PanelId? = nil  // RFC-C：当前持十字光标的面板（跨面板互斥，同时只一个图有光标）
+    // 1a-iii 切片1 Task2：DrawingPanelFrameKey 上报的下面板「chart」坐标系 frame（供 shield 坐标转换）。
+    @State private var lowerPanelChartFrame: CGRect?
     // review-redesign Task 13：复盘「结束」保存弹窗 + 专用失败态（不复用 backFailed——那会误走
     // lifecycle.back()=review no-op saveProgress，丢已 drain 的 saved）。
     @State private var confirmingEndReview = false
@@ -211,9 +224,7 @@ public struct TrainingView: View {
     private var trainingContent: some View {
         VStack(spacing: 0) {
             topBar
-            panel(.upper)
-            Divider()
-            panel(.lower)
+            chartPanels
             if showsTradeButtons {
                 if isDrawingActive {
                     DrawingBottomBar(typeRowExpanded: $typeRowExpanded)
@@ -271,6 +282,12 @@ public struct TrainingView: View {
         // remount，同 tick/period 下被 TradeConfirmGuard 放行成交。清 nil 恒安全（本就不该跨画线切换留着买卖框）。
         .onChange(of: engine.drawingSession.drawingModeActive) { _, _ in
             tradeStrip = nil
+            // 1a-iii 切片1 Task2：进/出画线都显式清盾（防御 + 明确生命周期；与 nil-preference 自动清双保险）。
+            engine.drawingSession.setShieldRect(nil, panel: .lower)
+        }
+        // 1a-iii 切片1 Task2：收起类型行也显式清盾（同上防御，overlay 隐藏时 nil-preference 本也会自动清）。
+        .onChange(of: typeRowExpanded) { _, _ in
+            engine.drawingSession.setShieldRect(nil, panel: .lower)
         }
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
             tradeStrip = nil                                    // codex R3-high：tick 推进(含持有/观察)即作废未确认买卖条，防按新 tick 价成交
@@ -314,6 +331,11 @@ public struct TrainingView: View {
             if let e = lifecycle.coordinator.autosaveBannerError, e.shouldShowToast {
                 presentToast(e.userMessage)
             }
+        }
+        // 1a-iii 切片1 Task2：view 消失（导航退出）也显式清盾——三重防御的第三处（nil-preference 自动清 +
+        // 两个 onChange + 本处），生命周期上不留残留 shield 死区。
+        .onDisappear {
+            engine.drawingSession.setShieldRect(nil, panel: .lower)
         }
     }
 
@@ -429,6 +451,40 @@ public struct TrainingView: View {
             Spacer(minLength: 0)
         }
         .frame(width: 92, height: Self.metricRowH, alignment: .top)
+    }
+
+    /// 1a-iii 切片1 Task2：上下两个图表面板容器 + 类型行 overlay（不占 VStack 高度）。
+    /// codex 计划-R2-high：overlay 必须挂在「仅上下 K 线面板」的容器、**不是**整个 `trainingContent`
+    /// （否则 `.bottom` 对齐到含底栏的整栈底、盖住 DrawingBottomBar、遮住①类型键）。
+    private var chartPanels: some View {
+        VStack(spacing: 0) {
+            panel(.upper)
+            Divider()
+            panel(.lower)
+                .background(GeometryReader { p in Color.clear
+                    .preference(key: DrawingPanelFrameKey.self, value: p.frame(in: .named("chart"))) })
+        }
+        .coordinateSpace(name: "chart")
+        .overlay(alignment: .bottom) {
+            // codex 计划-R4-medium：必带 showsTradeButtons 门——排除复盘（复盘用浮动铅笔钮，本切片不改其行为）。
+            // 否则复盘经浮动钮 drawingModeActive 时也会挂 overlay+装下面板盾、吞复盘图表点。
+            if showsTradeButtons, isDrawingActive, typeRowExpanded {
+                DrawingTypeOverlay(expanded: typeRowExpanded, onLongPressType: { showingStyleCard = true })
+                    .background(GeometryReader { g in Color.clear
+                        .preference(key: DrawingShieldFrameKey.self, value: g.frame(in: .named("chart"))) })
+            }
+        }
+        .accessibilityIdentifier("chartPanels")
+        .onPreferenceChange(DrawingPanelFrameKey.self) { lowerPanelChartFrame = $0 }
+        .onPreferenceChange(DrawingShieldFrameKey.self) { overlayChartFrame in
+            // codex 计划-R3-high：chart 空间 → 下面板局部空间转换（**不可**直接存 chart 空间，否则含
+            // 上面板偏移、下面板漏挡）。canonical 空间 = 下面板局部（与 handleDrawingTap 的 tap point 同）。
+            guard let overlay = overlayChartFrame, let lp = lowerPanelChartFrame else {
+                engine.drawingSession.setShieldRect(nil, panel: .lower); return   // 隐藏/无帧 → 清盾
+            }
+            let local = overlay.offsetBy(dx: -lp.minX, dy: -lp.minY)
+            engine.drawingSession.setShieldRect(local, panel: .lower)
+        }
     }
 
     private func panel(_ id: PanelId) -> some View {

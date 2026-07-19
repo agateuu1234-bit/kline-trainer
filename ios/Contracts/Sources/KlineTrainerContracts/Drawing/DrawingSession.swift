@@ -16,6 +16,7 @@
 //   **唯一写入点**语义（isExtended 由 lineSubType 派生）在 commitPending 内原样保留。
 
 import Observation
+import CoreGraphics   // ← 1a-iii Task2：shieldRect（CGRect）
 
 /// **访问级别是 load-bearing 的（codex plan-R5-high）**：类与**状态**是 `public`（只读，`private(set)`），
 /// 但**所有 mutator 一律 internal**（`activate` / `deactivate` / `addAnchor` / `discardPendingAnchors` /
@@ -46,6 +47,16 @@ public final class DrawingSession {
     /// 1a-iii：设置卡片（DrawingStyleCard，同包 UI 层）经此写默认样式。internal——包外不得直改。
     func setDefaultStyle(_ style: DrawingDefaultStyle) { defaultStyle = style }
 
+    /// 1a-iii Task2：类型行 overlay 的命中屏蔽 rect（**面板局部坐标**，key 0=upper/1=lower）。
+    /// `ChartContainerView.handleDrawingTap` 读它拒绝落在面板内 overlay 之下的点（防误画+autosave 幽灵线）。
+    public private(set) var shieldRect: [Int: CGRect] = [:]
+
+    /// overlay 隐藏（收起/退出画线/view 消失）→ 传 nil 清盾；装盾传实际 rect。internal（同 setDefaultStyle 先例）。
+    func setShieldRect(_ rect: CGRect?, panel: PanelId) {
+        let key = panel == .upper ? 0 : 1
+        shieldRect[key] = rect
+    }
+
     public init() {}
 
     /// 进入/保持画线会话并选定工具。同工具重复调用**幂等且不丢 pending**；
@@ -63,6 +74,7 @@ public final class DrawingSession {
         drawingModeActive = false
         activeDrawingTool = nil
         discardPendingAnchors()
+        shieldRect.removeAll()   // 1a-iii Task2 模型不变量：退画线无残留盾（防死区拒收后续正常 tap）
     }
 
     /// D31：**只丢 pending 锚** —— activeDrawingTool 与 drawingModeActive 必须存活。
