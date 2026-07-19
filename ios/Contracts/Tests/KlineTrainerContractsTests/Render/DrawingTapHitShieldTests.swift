@@ -44,11 +44,33 @@ struct DrawingTapHitShieldTests {
         }.joined(separator: "\n")
     }
 
+    // review finding（Important，覆盖缺口）：`.overlay(alignment: .bottom)` 在 TrainingView.swift 里出现两次
+    // （chartPanels 的类型行 overlay + panel(_:) 的 tradeStrip overlay），单靠 `tv.contains(...)` 认不出接错
+    // 容器。用起止标记切出指定计算属性的正文，把断言锁死在正确的代码块内。
+    private func extractBody(_ text: String, from startMarker: String, to endMarker: String) throws -> String {
+        let start = try #require(text.range(of: startMarker)?.upperBound)
+        let end = try #require(text.range(of: endMarker, range: start..<text.endIndex)?.lowerBound)
+        return String(text[start..<end])
+    }
+
     @Test("类型行改 overlay 挂载、命中屏蔽、且 overlay 带 showsTradeButtons 门（排除复盘）")
     func typeRowIsShieldedOverlayNotVStackMember() throws {
         let tv = try readSource("UI/TrainingView.swift")
-        #expect(tv.contains("DrawingTypeOverlay("))
-        #expect(tv.contains(".overlay(alignment: .bottom)"))
+        #expect(tv.contains("var chartPanels"))   // chartPanels 计算属性确实定义（未被改名/内联/删除）
+
+        // trainingContent 主体须真引用 chartPanels——防止未来把上下面板内联回 trainingContent 或整段
+        // 删掉 chartPanels 时，「.overlay 挂在正确容器」的断言仍对着一个已不被渲染的容器空转。
+        let trainingContentBody = try extractBody(tv, from: "private var trainingContent: some View {", to: "private var topBar: some View {")
+        #expect(trainingContentBody.contains("chartPanels"))
+
+        // chartPanels 正文（不含其后 panel(_:) 的 tradeStrip overlay）内，唯一锚定类型行 overlay 接线：
+        // DrawingTypeOverlay( + 两个 PreferenceKey 上报/转换必须同挂在同一个 .overlay(alignment: .bottom)
+        // 块里，而不是随便一处泛 `.overlay(alignment: .bottom)`（panel(_:) 里同名但不带这些）。
+        let chartPanelsBody = try extractBody(tv, from: "private var chartPanels: some View {", to: "private func panel(_ id: PanelId)")
+        for marker in [".overlay(alignment: .bottom)", "DrawingTypeOverlay(", "DrawingShieldFrameKey", "DrawingPanelFrameKey", "offsetBy"] {
+            #expect(chartPanelsBody.contains(marker))
+        }
+
         #expect(tv.contains("setShieldRect"))
         #expect(tv.contains("showsTradeButtons, isDrawingActive, typeRowExpanded"))   // 复盘门（codex 计划-R4）
         let ov = try readSource("UI/DrawingTypeOverlay.swift")
