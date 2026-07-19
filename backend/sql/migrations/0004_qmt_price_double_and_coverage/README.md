@@ -42,8 +42,8 @@ Docker；user 裁决按此处理）。它不是"测过一次就够了"——sche
 
 ## rollback 的两个已知风险
 
-`rollback.sql` 顶部注释已写明，`rehearse.sh` **写了**针对这两条的真实场景断言——
-但注意该脚本**至今从未真正执行过**（见文末），所以这两条目前仍是"设计意图"而非"已验证事实"：
+`rollback.sql` 顶部注释已写明，且**已由 `rehearse.sh` 在真实 PostgreSQL 15.12 上验证属实**
+（2026-07-19，32/32 全绿）：
 
 1. **OHLC 精度丢失，不可恢复**：`DOUBLE PRECISION → DECIMAL(10,2)` 是收窄，会把高精度价格
    截断到 2 位小数（如 `11.790828206557329` → `11.79`）。执行 rollback 前必须先备份
@@ -67,23 +67,36 @@ Docker；user 裁决按此处理）。它不是"测过一次就够了"——sche
 
 ## 当前状态
 
-本仓 PostgreSQL **至今未部署**（`kline-trainer.local` 尚不可用），这个 migration 至今
-**从未在真实数据库上执行过**——`rehearse.sh` 是为部署那天准备的演练路径，不是"已验证过"的
-声明。部署真库前，除了跑通 `rehearse.sh`，仍需在目标库的真实数据规模/形状上做一次针对性检查
-（尤其是超长 `file_path` 是否已存在于存量数据）。
+**`rehearse.sh` 已在真实 PostgreSQL 15.12 上跑通（2026-07-19，32/32 全部通过）**，
+这是本 migration 首次获得真实执行证据。验证覆盖：
 
-### ⚠️ `rehearse.sh` 本身也从未被执行过
+- forward 后形状正确（四价格列 `double precision` / `file_path` `text` / `stock_coverage` 三约束齐全）
+- **`ticket_index` 列仍在**（停写不删列这条核心不变量，由真库确认）
+- **既有数据零丢失**（行数与抽查价格值迁移前后一致）
+- **坏数据确由对应 CHECK 拒绝**：Infinity 与 NaN 由 `ck_klines_price_finite_positive`、
+  `high < low` 由 `ck_klines_price_ordering`（断言钉到具体约束名，不接受"随便失败一下"）
+- rollback 形状正确回退；破坏性守卫**未确认时真的拦、显式确认后真的放行**
+- 两条已知风险均验证属实：高精度价格回滚后确被截断为 `11.79`；超长 `file_path`
+  确让 rollback 中止（`22001`），且失败后 schema 停在迁移后形状、无半吊子状态
 
-撰写它的机器上没有 Docker（`docker`/`podman`/`colima`/`nerdctl` 均未安装，已实测确认），
-所以这个脚本**只经过静态检查**：`bash -n` 语法、`shellcheck -x`（0 警告）、以及用 pglast
-把内嵌的 20 条 SQL 全部单独解析通过。**它从未真正跑起来过。**
+### 首次真跑暴露了两个静态检查查不出的 bug（已修）
 
-静态走查期间已经揪出并修掉一个真 bug（原先用一条 `psql -c` 里串三个 `CREATE DATABASE`，
-而 PostgreSQL 会把同一查询字符串隐式包进事务、`CREATE DATABASE` 不能在事务块内执行，
-必然报错）。**一个静态检查全过的脚本里能藏这种 bug，说明还可能藏别的。**
+演练脚本此前只过了 `bash -n` + `shellcheck`（0 警告）+ pglast 解析内嵌 SQL，
+**首次真跑仍连炸两次**：
 
-因此，**第一次在有 Docker 的机器上运行时，请把它当作"待调试的脚本"而不是"可信的闸门"**：
+1. `$VAR` 紧跟全角字符（如 `$PRE_MIGRATION_SHA）`）→ bash 把多字节字符的字节吞进
+   变量名 → `set -u` 报「未绑定的变量」。全脚本 5 处，已一律改 `${VAR}`，
+   并加了 `test_rehearse_script_braces_vars_before_cjk` 把该运行期陷阱变成静态可检。
+2. 布尔断言期望值写成 `t`，而 `bool::text` 实际产出 `true`。
 
-- 若它报错 → **先怀疑脚本自己**，不要立刻断定 migration 有问题
-- 若它全绿 → 这才是 `forward.sql`/`rollback.sql` 第一次获得真实执行证据
-- 首次跑通后，请把这一节删掉或改写为"已于 YYYY-MM-DD 在 <环境> 跑通"
+**教训留档**：静态检查全绿的脚本里确实藏得住必崩的 bug。任何新增/修改本脚本后，
+都应重新真跑一次，而不是靠静态检查放行。
+
+### 仍需注意（真库上线前）
+
+本机演练全绿**不代表目标真库一定顺利**——真库的既有数据分布未知。上线前仍需：
+
+- 确认存量 `klines` 中是否已有精度超 2 位小数的价格（决定 rollback 是否会触发守卫）
+- 确认存量 `training_sets.file_path` 是否已有超 255 字符的路径（决定 rollback 能否执行）
+- 若 `klines` 数据量大，`ADD CONSTRAINT` 的全表扫描与 ACCESS EXCLUSIVE 锁时长需评估，
+  必要时改走 `forward.sql` 注释里给出的在线路径（`NOT VALID` → 清洗 → `VALIDATE`）
