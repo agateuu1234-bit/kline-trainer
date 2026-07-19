@@ -117,17 +117,29 @@ fail_msg() {
 # 断言字符串相等；不等则打印 FAIL 并立刻非零退出（本仓 set -e 下 "! cmd" 会静默失效的坑，
 # 一律用 if/then/exit1 显式写）
 assert_rejects() {
-  # $1=描述  $2=db  $3=应当被拒绝的 SQL
-  # 用于证明约束**真的会拒**坏数据，而不只是"建出来了"。
+  # $1=描述  $2=db  $3=期望出现在错误信息里的约束名或 SQLSTATE  $4=应当被拒绝的 SQL
+  #
+  # ⚠️ 必须校验**被谁拒的**，不能接受任意失败（codex R4-F1）。
+  # 初版只判"是否失败"，而三条坏价格探针误用了未播种的股票代码 →
+  # 实际被**外键**拦下、根本没走到 CHECK；那样即便两条价格 CHECK 完全不存在，
+  # 探针也照样"通过"，等于伪证。判据必须钉到具体约束。
+  #
   # 负向判定用 if/else 显式分支，不用 `! cmd`——本仓踩过 `set -e` 下 `! grep`
   # 让闸门静默失效的坑。
-  local desc="$1" db="$2" sql="$3"
-  if docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-       psql -U postgres -h 127.0.0.1 -d "$db" -v ON_ERROR_STOP=1 -tA -c "$sql" >/dev/null 2>&1; then
+  local desc="$1" db="$2" expect="$3" sql="$4"
+  local out rc
+  out=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+          psql -U postgres -h 127.0.0.1 -d "$db" -v ON_ERROR_STOP=1 -tA -c "$sql" 2>&1) && rc=0 || rc=$?
+  if [ "${rc:-0}" -eq 0 ]; then
     fail_msg "$desc —— 该语句本应被数据库拒绝，却执行成功了"
     exit 1
   fi
-  pass_msg "$desc"
+  if printf '%s' "$out" | grep -q "$expect"; then
+    pass_msg "$desc（确由 $expect 拒绝）"
+  else
+    fail_msg "$desc —— 被拒了，但不是期望的原因。期望错误信息含 [$expect]，实际：$out"
+    exit 1
+  fi
 }
 
 assert_eq() {
@@ -277,17 +289,17 @@ assert_eq "klines 价格完整性 CHECK 已建（codex R3-F1：DB 层挡 NaN/Inf
   "ck_klines_price_finite_positive,ck_klines_price_ordering"
 
 # 这两条是本轮最有价值的断言：证明约束**真的会拒**坏数据，而不只是"建出来了"。
-assert_rejects "非有限价格（Infinity）被 DB 拒绝" main_db \
+assert_rejects "非有限价格（Infinity）被 DB 拒绝" main_db "ck_klines_price_finite_positive" \
   "INSERT INTO klines (stock_code, period, datetime, open, high, low, close, volume)
-   VALUES ('000001.SZ','1m',9000000001,'Infinity'::double precision,'Infinity'::double precision,1,1,1);"
+   VALUES ('000001','1m',9000000001,'Infinity'::double precision,'Infinity'::double precision,1,1,1);"
 
-assert_rejects "NaN 价格被 DB 拒绝" main_db \
+assert_rejects "NaN 价格被 DB 拒绝" main_db "ck_klines_price_finite_positive" \
   "INSERT INTO klines (stock_code, period, datetime, open, high, low, close, volume)
-   VALUES ('000001.SZ','1m',9000000002,'NaN'::double precision,'NaN'::double precision,1,1,1);"
+   VALUES ('000001','1m',9000000002,'NaN'::double precision,'NaN'::double precision,1,1,1);"
 
-assert_rejects "顺序违规（high < low）被 DB 拒绝" main_db \
+assert_rejects "顺序违规（high < low）被 DB 拒绝" main_db "ck_klines_price_ordering" \
   "INSERT INTO klines (stock_code, period, datetime, open, high, low, close, volume)
-   VALUES ('000001.SZ','1m',9000000003,1.0,0.5,2.0,1.0,1);"
+   VALUES ('000001','1m',9000000003,1.0,0.5,2.0,1.0,1);"
 
 assert_eq "ticket_index 列仍在（停写不删列不变量，本 migration 对该列零 DDL）" \
   "$(pg_query main_db "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='klines' AND column_name='ticket_index';")" \
@@ -406,8 +418,16 @@ SQL
 if pg_run_file overlong_db "$ROLLBACK_SQL" > "$TMP_LOG" 2>&1; then
   fail_msg "警告不实：rollback 在超长 file_path 场景下本应报错中止，却执行成功了 —— 需要重新评审 rollback.sql 或更新文档"
   exit 1
-else
+fi
+# ⚠️ 同 assert_rejects 的教训（codex R4-F1）：不能把"失败了"直接当成"因这个原因失败的"。
+# 若 rollback 因别的缘故挂掉（语法错、DROP CONSTRAINT 出问题…），只判失败会误报"警告属实"。
+# 故必须钉到具体错误：PostgreSQL 对超长值收窄报 22001 / "value too long"。
+if grep -qE 'value too long|22001' "$TMP_LOG"; then
   pass_msg "警告属实：rollback 因超长 file_path 报错中止（PostgreSQL 拒绝截断，fail-closed 生效）"
+else
+  fail_msg "rollback 确实失败了，但**不是**因为超长 file_path —— 该场景未被真正验证。实际错误："
+  cat "$TMP_LOG"
+  exit 1
 fi
 
 # 失败的 rollback 应整笔回滚（BEGIN...COMMIT 中途出错，事务全体失效）——
