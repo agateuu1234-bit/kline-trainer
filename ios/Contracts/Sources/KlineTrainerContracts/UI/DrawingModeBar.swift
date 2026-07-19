@@ -48,4 +48,33 @@ struct DrawingModeBar: View {
         .padding(.horizontal, 12)
     }
 }
+
+/// 训练/画线底栏共享高度基线（1a-iii 切片 1）。与 TradeActionBar 用相同的按钮规格构造
+/// （buttonStyle/controlSize/font/padding 全部照抄 TradeActionBar/ReviewControlBar 既有配方）
+/// → 天然等高；barHeight 显式钉住这一行高，防止未来任一侧改内容后静默漂移。
+enum DrawingBarMetrics { static let barHeight: CGFloat = 60 }
+
+/// 画线底栏（单行，1a-iii 切片 1）：只①类型键（收/展类型行，Task 2 接 overlay）。②–⑤ 本期不渲染（D19/D24）。
+/// 与 TradeActionBar 等高——不再让「进画线」把两行 DrawingModeBar 塞进 VStack 顶起图表。
+struct DrawingBottomBar: View {
+    @Binding var typeRowExpanded: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button { typeRowExpanded.toggle() } label: {
+                Image(systemName: "list.bullet").frame(maxWidth: .infinity)
+            }
+            .accessibilityLabel("类型")
+            Spacer()
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .font(.system(size: 14).weight(.semibold))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .frame(height: DrawingBarMetrics.barHeight)
+        .frame(maxWidth: .infinity)
+        .background(.bar, ignoresSafeAreaEdges: .bottom)
+    }
+}
 #endif

@@ -216,8 +216,7 @@ public struct TrainingView: View {
             panel(.lower)
             if showsTradeButtons {
                 if isDrawingActive {
-                    DrawingModeBar(typeRowExpanded: $typeRowExpanded,
-                                   onLongPressType: { showingStyleCard = true })
+                    DrawingBottomBar(typeRowExpanded: $typeRowExpanded)
                 } else {
                     TradeActionBar(
                         content: TradeActionBarContent(price: engine.currentPrice),

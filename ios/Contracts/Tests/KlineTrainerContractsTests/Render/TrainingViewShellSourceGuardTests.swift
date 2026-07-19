@@ -30,16 +30,28 @@ struct TrainingViewShellSourceGuardTests {
         #expect(code.contains("showsActivePanelHighlight: Bool { showsTradeButtons || engine.flow.mode == .review }"))
     }
 
-    @Test("浮动钮只受 showsFloatingDrawingTool 门控；DrawingModeBar 只在训练/replay 底栏")
+    @Test("浮动钮只受 showsFloatingDrawingTool 门控；DrawingBottomBar 只在训练/replay 底栏")
     func floatingRetiredBarWired() throws {
         let code = try source(tv)
         #expect(code.contains("if showsFloatingDrawingTool"))     // 浮动钮 gated review-only
         #expect(code.contains("画图"))                            // 入口钮 label
-        // DrawingModeBar 必须挂在「showsTradeButtons → isDrawingActive」分支内（复盘 showsTradeButtons==false
-        // → 天然无两行栏，D26/§4.3-1）。锚定其紧邻上文是 isDrawingActive 分支，而非文件任意处（codex plan-R8-medium）。
-        let dmb = try #require(code.range(of: "DrawingModeBar("), "DrawingModeBar 未接入")
+        // DrawingBottomBar 必须挂在「showsTradeButtons → isDrawingActive」分支内（复盘 showsTradeButtons==false
+        // → 天然无底栏，D26/§4.3-1）。锚定其紧邻上文是 isDrawingActive 分支，而非文件任意处（codex plan-R8-medium）。
+        let dmb = try #require(code.range(of: "DrawingBottomBar("), "DrawingBottomBar 未接入")
         let before = String(code[..<dmb.lowerBound].suffix(120))
         #expect(before.contains("if isDrawingActive {"))
+    }
+
+    @Test("画线底栏改用单行 DrawingBottomBar、与训练底栏等高常量，不再在 VStack 直接塞两行 DrawingModeBar")
+    func drawingBottomBarIsHeightNeutralSingleRow() throws {
+        let code = try source(tv)
+        // 底栏 swap 分支用 DrawingBottomBar（单行）
+        #expect(code.contains("DrawingBottomBar("))
+        // 不再把两行 DrawingModeBar 作为 VStack 成员塞进 trainingContent（改 overlay，见 Task 2）
+        #expect(!code.contains("DrawingModeBar(typeRowExpanded"))
+        let bar = try source("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
+        // 与训练底栏共享等高常量（防更高顶起图表）
+        #expect(bar.contains("DrawingBarMetrics.barHeight") || bar.contains(".frame(height:"))
     }
 
     @Test("交易边界：清 tradeStrip + overlay 门控 + onConfirm 经 TradeConfirmGuard.apply（窄锚定）")
