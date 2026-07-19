@@ -127,6 +127,13 @@ assert_rejects() {
   # 负向判定用 if/else 显式分支，不用 `! cmd`——本仓踩过 `set -e` 下 `! grep`
   # 让闸门静默失效的坑。
   local desc="$1" db="$2" expect="$3" sql="$4"
+  # 防呆：本函数签名从 3 参数改为 4 参数（R4 修复），漏传/错位极易发生。
+  # 若 expect 为空，下面的 `grep -q ""` 会匹配一切 → 静默退化回"任何失败即通过"，
+  # 正是 R4 那个伪证。故空期望串直接判脚本自身有 bug。（实测确认该退化路径存在。）
+  if [ -z "$expect" ]; then
+    fail_msg "$desc —— 脚本 bug：assert_rejects 未收到期望的约束名/SQLSTATE（第 3 参数为空）"
+    exit 1
+  fi
   local out rc
   out=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
           psql -U postgres -h 127.0.0.1 -d "$db" -v ON_ERROR_STOP=1 -tA -c "$sql" 2>&1) && rc=0 || rc=$?
