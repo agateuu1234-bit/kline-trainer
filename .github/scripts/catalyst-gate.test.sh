@@ -374,9 +374,9 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 # catalyst-total-baseline.txt / catalyst-uikit-baseline.txt 不被它们覆盖——误设/漂移只会
 # 在真 CI 的真构建步暴露、reviewer 无法从仓库状态复现。这条**显式 unset 两个冻结覆盖**、
 # 走 catalyst-gate.sh 默认的活基线，对一份代表当前 main 的裁剪真日志（pass-main-current.log：
-# 1527 tests / 56 UIKit / macabi）断言 GATE PASS 且回显 1527。活基线一旦被误改（漂出 ±30），
+# 1528 tests / 57 UIKit / macabi）断言 GATE PASS 且回显 1528。活基线一旦被误改（漂出 ±30），
 # 这条会在 Gate self-test 步就红，早于真构建步。
-# 维护：任何改动 catalyst-uikit-baseline.txt、或让真实总用例数漂出 1527±30 的 PR，必须同时
+# 维护：任何改动 catalyst-uikit-baseline.txt、或让真实总用例数漂出 1528±30 的 PR，必须同时
 # 用一次真 Catalyst 构建日志重裁 pass-main-current.log（禁手打伪造行，见 R9）。
 # （1a-iii 切片1 Task2：uikit 35→41 / total 1457→1486，随 DrawingBottomBarHeightTests 2 条 +
 # DrawingTapHitShieldTests 4 条 UIKit-gated 测试新增同步重裁。
@@ -409,14 +409,21 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   从不挂载却仍被强推 .pending、无人再触发 refreshShields()，复盘画线永久失效。修复收敛判据为
 #   TrainingView.stylePanelWillBeVisible + syncPanelShields()（唯一实现），新增 1 条 UIKit-gated
 #   模型级回归复现测试 DrawingTapHitShieldTests.reviewModePendingShieldsBlockTapUntilCleared：
-#   +1（uikit），1526→1527；uikit 55+1=56。）
+#   +1（uikit），1526→1527；uikit 55+1=56。
+#   codex R2-medium 回归修复（2026-07-20）：uikit 56→57 / total 1527→1528。ChartPanelsContainer
+#   新增两条 `.task(id:)`（keyed on stylePanelPosition / stylePanelVisible）——切位置若测出与旧值
+#   数值相同的样式面板几何（面板高+16pt padding==容器高时可复现），三条 onPreferenceChange 一条都
+#   不触发，refreshShields() 永不重跑，两面板永久卡在 .pending。新增 1 条 UIKit-gated 端到端回归
+#   DrawingTapHitShieldTests.toggleWithIdenticalGeometryEventuallySettles（同一个 ImageRenderer 实例
+#   reassign .content，实测验证 view 身份/@State 跨 reassign 存活 + .task(id:) 单次 .uiImage() 内
+#   同步跑完）：+1（uikit），1527→1528；uikit 56+1=57。）
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1527" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 56 / total 1527）→ GATE PASS 且回显 1527 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1528" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 57 / total 1528）→ GATE PASS 且回显 1528 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1527，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1528，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 

@@ -389,6 +389,32 @@ private struct ShortUpperShellLayout: View {
     }
 }
 
+/// codex R2-medium 回归复现专用外壳：上下面板高度**各自独立可配**（既有外壳都把两者锁死相等或共用同一
+/// 常量），用于精确构造「样式面板高 + 16pt 竖直 padding == 容器总高」这一退化条件——此时 `.top`/`.bottom`
+/// 两种 alignment 会把（未加 padding 的）样式面板 frame 摆到**同一个** CGRect（对齐边界退化成同一位置），
+/// 三个 `DrawingUpperPanelFrameKey`/`DrawingLowerPanelFrameKey`/`DrawingShieldFrameKey` preference 值在
+/// 切位置前后**恒不变**，三条 `onPreferenceChange` 一条都不会触发，`refreshShields()` 从此再也不会重跑（见
+/// `toggleWithIdenticalGeometryEventuallySettles` 的详细复现/验证手法说明）。
+@MainActor
+private struct AsymmetricPanelsShellLayout: View {
+    let engine: TrainingEngine
+    var stylePanelPosition: DrawingStylePanelPosition = .bottom
+    let upperHeight: CGFloat
+    let lowerHeight: CGFloat
+
+    var body: some View {
+        ChartPanelsContainer(
+            engine: engine,
+            stylePanelVisible: engine.flow.canBuySell() && engine.drawingSession.drawingModeActive,
+            scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
+            stylePanelPosition: stylePanelPosition,
+            onTogglePosition: {},           // 测试不驱动 ⇅（位置切换靠重新构造外壳值渲染，非回调）
+            upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: upperHeight) },
+            lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: lowerHeight) })
+            .frame(width: shieldTestPanelWidth)
+    }
+}
+
 /// `ImageRenderer`（iOS 16+/Catalyst）强制**同步**跑完整棵 SwiftUI 树的布局——官方 headless 渲染入口，
 /// 明确为离屏导出（PDF/图片）场景设计，不依赖 UIWindow/Scene，读取 `.uiImage` 即触发同步渲染并等待完成。
 /// 比 `UIHostingController` + `layoutIfNeeded()`/RunLoop spin 更可靠（后者在无窗口场景下多轮实测不稳，
@@ -667,6 +693,83 @@ extension DrawingTapHitShieldTests {
         #expect(engine.drawingSession.shield[1] == .unshielded, "切到上半区后下面板未回到 .unshielded = stale shield 死区")
         lowerHandle.handleDrawingTapForTesting(at: pInOldShield)
         #expect(engine.drawings.count == c0 + 1, "旧盾位置仍落不了线 —— 残留屏蔽（下半 K 线死区）")
+    }
+
+    /// codex R2-medium：`.pending` 唯一的解锁路径是三条 `onPreferenceChange`，而 SwiftUI 只在**新值≠旧值**
+    /// 时才回调它们。切 `stylePanelPosition`（.top⇄.bottom）在「样式面板高 + 16pt 竖直 padding == 容器总高」
+    /// 时（大字号 / iPad / 横屏可达）——未加 padding 的样式面板 frame 在两种 alignment 下算出**同一个**
+    /// CGRect（贴顶 8pt 与贴底 8pt 的对齐边界退化成同一位置），而 `upperPanelChartFrame`/`lowerPanelChartFrame`
+    /// 本就与 `stylePanelPosition` 无关、恒不变——三个 preference 值切位置前后**全都不变**，三条
+    /// `onPreferenceChange` 一条都不会触发，`refreshShields()` 从此再也不会重跑；`TrainingView.syncPanelShields()`
+    /// 在切位置的同一次状态转换里已把两面板摁进 `.pending`，于是永久卡住（`ChartContainerView.handleDrawingTap`
+    /// 对 `.pending` 恒拒收，画线永久失效，直到某个无关的布局事件恰好再触发一次收敛）。
+    ///
+    /// **复现/验证手法**（与本文件其余测试的关键差异）：既有 `renderAndConverge` 每次都构造全新
+    /// `ImageRenderer`（全新 view graph），`ChartPanelsContainer` 的 `@State`
+    /// （`upperPanelChartFrame`/`lowerPanelChartFrame`/`stylePanelChartFrame`）**不会**跨调用存活——每次都是
+    /// 「从 nil 变成非 nil」，onPreferenceChange 必然触发，天然测不出这条 bug（`.pending` 的死锁恰恰依赖同一个
+    /// 容器实例的旧值与新值数值相同）。改用**同一个** `ImageRenderer` 实例、只重新赋值 `.content`——独立实测
+    /// 验证过三件事（细节见 task report「codex R2 fix」小节）：①`.content` 重新赋值确实保留 view 身份/`@State`
+    /// （`onAppear` 不会重复触发，与 `renderAndConverge` 每次触发一次形成对照）；②`onPreferenceChange` 确实只在
+    /// 数值真变化时才回调（数值相同则不回调，与生产行为一致，这才是本 bug 能被复现的前提）；③`.task(id:)` 在
+    /// 单次 `.uiImage()` 调用内**同步**跑完、无需额外 `await`/`Task.yield()`，可在同一个 hosted 测试方法里
+    /// 直接断言其效果（不必依赖不确定的异步收敛窗口）。
+    ///
+    /// fixture 高度（**实测打印，非猜测**）：`DrawingStylePanel` 在 `shieldTestPanelWidth=390` 下的未加 padding
+    /// 内容高度实测 = 209pt（与既有 `togglingPositionClearsStaleShieldExactly` 等测试独立测得的同一份几何一致）；
+    /// 容器 divider 实测高度 = 1pt。退化条件要求容器总高 == 209+16(2×8pt 竖直 padding) == 225pt——本测试选
+    /// `upperHeight=30 / lowerHeight=194`（30+1(divider)+194=225），使样式面板整块横跨两面板（上面板只留顶部
+    /// 8pt 未被盖到、下面板只留底部 8pt 未被盖到），上面板那 8pt 缝隙落在其 mainChart（顶部60%）区内、可用来做
+    /// 「面板外仍能落线」的真差分。
+    @Test("codex R2-medium 回归：⇅ 切位置若测出**相同**样式面板几何，两面板必须仍能从 .pending 收敛，面板外的点仍可落线")
+    func toggleWithIdenticalGeometryEventuallySettles() throws {
+        let upperHeight: CGFloat = 30
+        let lowerHeight: CGFloat = 194   // 30 + 1(divider) + 194 = 225 = 209(面板内容实测高) + 16(2×8pt padding)
+        let (engine, _) = TrainingEngineBounceWiringTests.makeEngine(count: 200, tick: 150)
+        engine.toggleDrawingMode()
+
+        // ① 首次渲染（.bottom）：正常收敛，样式面板整块横跨两面板 → 两面板均非 .pending。
+        let renderer = ImageRenderer(content: AsymmetricPanelsShellLayout(
+            engine: engine, stylePanelPosition: .bottom, upperHeight: upperHeight, lowerHeight: lowerHeight))
+        renderer.scale = 1
+        _ = renderer.uiImage
+        try #require(shieldRectOf(engine, 0) != nil, "上面板必须有盾 —— fixture 未达到跨面板退化条件，需重新实测 DrawingStylePanel 内容高度")
+        try #require(shieldRectOf(engine, 1) != nil, "下面板必须有盾 —— 同上")
+
+        // 上面板未被盖到的顶部 8pt 缝隙（局部坐标，见 shieldRectOf(engine,0) 的 minY≈8）落在其 mainChart 内——
+        // 用它证明「样式面板外的点仍可落线」（不是死区、也不是穿透幽灵线）。
+        let upperHandle = makeChartHandle(
+            engine: engine, panel: .upper, bounds: CGRect(x: 0, y: 0, width: shieldTestPanelWidth, height: upperHeight))
+        let vp = upperHandle.renderState.viewport
+        let mapper = CoordinateMapper(viewport: vp, displayScale: upperHandle.kLineView.traitCollection.displayScale)
+        let gapPoint = CGPoint(x: mapper.indexToX(vp.startIndex) + vp.geometry.candleStep / 2, y: 2)
+        try #require(vp.mainChartFrame.contains(gapPoint), "采样点须落在可落线区，否则本测试证明不了任何事（假绿）")
+
+        let c0 = engine.drawings.count
+        upperHandle.handleDrawingTapForTesting(at: gapPoint)
+        #expect(engine.drawings.count == c0 + 1, "首次渲染后、面板缝隙的点竟落不了线 —— fixture 未达预期，后续差分无意义")
+
+        // ② 模拟 TrainingView.syncPanelShields() 在「切 stylePanelPosition」这同一次状态转换里已做的事——
+        // 把两面板摁进 .pending（这正是生产代码在 .onChange(of: stylePanelPosition) 里无条件触发的效果）。
+        engine.drawingSession.setStylePanelVisible(true)
+        #expect(engine.drawingSession.shield[0] == .pending && engine.drawingSession.shield[1] == .pending)
+        let c1 = engine.drawings.count
+        upperHandle.handleDrawingTapForTesting(at: gapPoint)
+        #expect(engine.drawings.count == c1, ".pending 窗口内竟落了线 —— fail-closed 前提都不成立，后续差分无意义")
+
+        // ③ 切到 .top——**同一个** ImageRenderer 实例、只重新赋值 .content（保留 view 身份/@State）。
+        //    退化条件下，样式面板的未加 padding frame 与①渲染时数值完全相同 → 三条 onPreferenceChange
+        //    一条都不会触发。没有本次 fix（ChartPanelsContainer 的两条 .task(id:)）会让两面板永久卡在 .pending
+        //    （已实测验证：见 task report「codex R2 fix」小节的 RED 步骤）。
+        renderer.content = AsymmetricPanelsShellLayout(
+            engine: engine, stylePanelPosition: .top, upperHeight: upperHeight, lowerHeight: lowerHeight)
+        _ = renderer.uiImage
+
+        #expect(engine.drawingSession.shield[0] != .pending, "上面板切位置后仍卡在 .pending —— .task(id:) 未能收敛")
+        #expect(engine.drawingSession.shield[1] != .pending, "下面板切位置后仍卡在 .pending —— .task(id:) 未能收敛")
+        let c2 = engine.drawings.count
+        upperHandle.handleDrawingTapForTesting(at: gapPoint)
+        #expect(engine.drawings.count == c2 + 1, "切位置收敛后，面板缝隙的点仍落不了线 —— 画线在这一退化几何下永久失效")
     }
 }
 #endif

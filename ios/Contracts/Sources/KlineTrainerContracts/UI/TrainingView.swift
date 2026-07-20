@@ -717,6 +717,18 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
         .onPreferenceChange(DrawingUpperPanelFrameKey.self) { upperPanelChartFrame = $0; refreshShields() }
         .onPreferenceChange(DrawingLowerPanelFrameKey.self) { lowerPanelChartFrame = $0; refreshShields() }
         .onPreferenceChange(DrawingShieldFrameKey.self) { stylePanelChartFrame = $0; refreshShields() }
+        // codex R2-medium：`.pending` 的唯一退出路径是上面三条 onPreferenceChange——但 SwiftUI 只在**新值
+        // 与旧值不相等**时才回调它们。切 stylePanelPosition（.top⇄.bottom）在容器高度恰等于「样式面板高 +
+        // 16pt 竖直 padding」时（大字号/iPad/横屏可达），overlay 未加 padding 的 frame 在两态下算出**同一个**
+        // CGRect（上/下贴边对齐退化成同一位置）——三个 preference 值全都不变，三条 onPreferenceChange 一条都
+        // 不触发，refreshShields() 从此再也不会重跑；而 TrainingView.syncPanelShields() 在此之前已把两面板摁
+        // 进 `.pending`，于是永远卡住（见 DrawingSession.setStylePanelVisible 文档注释）。`.task(id:)` 在
+        // id **变化后**独立重跑，不依赖三个 preference 是否真的变了——几何真变时 preference 那条已经跑过
+        // 一次，这里只是无害的幂等重算；几何未变时（本 bug 场景）@State 里缓存的三帧仍是正确值，正是这条
+        // 负责用它们把 .pending 收敛掉。两个 id 各自独立触发，覆盖「位置切换」与「面板可见性切换」两类
+        // 可能不改几何却需要重新收敛的转场。
+        .task(id: stylePanelPosition) { refreshShields() }
+        .task(id: stylePanelVisible) { refreshShields() }
     }
 
     /// codex 计划-R15-F1/R17-F2 唯一权威实现：判据是「计算所需的几何全部到齐」——不齐时**什么都不写**
