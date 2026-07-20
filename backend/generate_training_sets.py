@@ -527,9 +527,13 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
                                 start_datetime=int(start_datetime),
                                 end_datetime=int(after_end), windows=windows)
 
-    # 预检：候选已按 exclude_starts 过滤，这条只是省掉常见情形下的一次白建 zip
+    # 预检：候选已按 exclude_starts 过滤，这条只是省掉常见情形下的一次白建 zip。
+    # **不删最终路径文件**（codex Task 5 review-Important：与下面第二道检查同语义）——
+    # `gts.path` 是 `{code}_{start}` 确定性最终路径，若并发写者已经用同一
+    # (stock_code, start_datetime) 抢先注册，这里命中的正是**对方已登记的那个文件**
+    # （上面 `assemble_from_windows` 早已把它覆盖重写）；unlink 会把 training_sets 里
+    # 那一行的 file_path 变成指向不存在的文件（数据丢失，实测复现）。只跳过，不删。
     if await _exists_start(conn, stock_code, gts.start_datetime):
-        gts.path.unlink(missing_ok=True)     # 中间 .db 在临时目录、已自动清
         raise GenerateSkipException(
             f"{stock_code}: start {gts.start_datetime} 已登记，跳过")
 
@@ -564,7 +568,12 @@ async def generate_batch(conn, target_count: int, output_dir: Path,
         except GenerateSkipException as exc:
             skips += 1
             if first_skip is None:
-                first_skip = f"{code}: {exc}"
+                # 多数 GenerateSkipException 消息（generate_one_training_set 内部各处）
+                # 已自带 "{code}: " 前缀；直接拼会重复（"600519: 600519: ..."）。少数
+                # 来自更深处（eligible_start_indices 等）的消息不带前缀，仍需补上，
+                # 否则运维看不出是哪只股。
+                msg = str(exc)
+                first_skip = msg if msg.startswith(f"{code}: ") else f"{code}: {msg}"
     if len(out) < target_count:
         # 欠产必须可诊断：只报数字会让"stock_coverage 空表"（Plan 3 前的预期状态）
         # 与"真回归"长得一模一样。
