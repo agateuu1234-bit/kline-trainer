@@ -255,6 +255,50 @@ def test_training_set_sqlite_has_all_six_periods(tmp_path):
     assert n_gi > 0, "3m 应有 global_index"
 
 
+# ===== end_datetime 正确性（codex whole-branch I2）=====
+
+def test_end_datetime_matches_eight_month_boundary(tmp_path):
+    """`generate_one_training_set` 里 `compute_after_end(month_boundaries, idx)` 依赖
+    **两个各自独立的 `months=8` 默认值**保持一致——`build_training_windows` 的默认
+    （决定窗口范围）与 `compute_after_end` 自己的默认（决定 meta.end_datetime 标注）。
+    没有任何东西把它俩钉在一起：任何人给 build_training_windows 传 months= 就会
+    静默产出一个「声明的结束时间与实际数据不符」的训练组。
+
+    直接用裸下标运算算期望值（不经过 compute_after_end 本身，避免测试只是在
+    验证 compute_after_end 内部自洽），才能抓住"生产调用点传的 months 与窗口
+    选择用的 months 不一致"这类回归。"""
+    from qmt_resample import period_boundaries
+    conn, _ = _fixture_conn()
+    gts = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                                random.Random(7)))
+    month_boundaries = period_boundaries(conn.bars["daily"], "monthly")
+    idx = month_boundaries.index(gts.start_datetime)
+    expected_end = int(month_boundaries[idx + 8]) - 1
+    assert gts.end_datetime == expected_end
+
+
+# ===== dropped_1m_dates 排除生效（codex whole-branch I3；D2 dense 门存在的全部意义）=====
+
+def test_dropped_1m_date_never_spanned_by_selected_window(tmp_path):
+    """`_fetch_dense_coverage` 返回的 `dropped_1m_dates` 必须真的把该日从 dense_dates
+    里减掉——此前 `_fixture_conn(dropped=...)` / `_coverage_row(days, dropped)` 虽然
+    都收 dropped 参数，但全仓 13 个调用点无一传值，死参数伪装成覆盖。
+
+    这里显式传一个落在候选窗口范围中段的 dropped 日：fixture 照常给它生成满根数
+    （D9 per-day 硬门 / dense_day_count 交叉校验都不会因这天"缺数据"而拦截），
+    唯一能把它挡在被选中窗口范围之外的只有 dense_dates 里的 `- dropped`。"""
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
+    dropped_date = days[500]
+    conn, _ = _fixture_conn(dropped=[dropped_date])
+    gts = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                                random.Random(7)))
+    dropped_epoch = _midnight(dropped_date)
+    assert not (gts.start_datetime <= dropped_epoch <= gts.end_datetime), (
+        f"选中窗口 [{gts.start_datetime}, {gts.end_datetime}] 跨越了被 drop 的日期 "
+        f"{dropped_date}（dense_dates 未真正排除 dropped 日）"
+    )
+
+
 # ===== fail-closed：门控真的在守 =====
 
 def test_missing_coverage_artifact_skips_fail_closed(tmp_path):
@@ -478,6 +522,49 @@ def test_gen_adapter_returns_zero_when_b2_lock_held(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         assert asyncio.run(gen(5)) == 0
     assert "B2 生成锁" in caplog.text
+
+
+def test_gen_adapter_releases_b2_lock_even_if_generate_batch_raises(tmp_path, monkeypatch):
+    """codex whole-branch I4：`_gen`（`build_generate_batch` 内部闭包，B4 常驻调度器的
+    生产主路径）拿到锁后若 `generate_batch` 抛异常，锁也必须被释放——否则 session 级
+    advisory lock 泄漏在池化连接上会**永久把 CLI 挡在外面**。CLI 侧 `_amain` 已有
+    `test_amain_releases_b2_lock_even_if_generate_batch_raises` 覆盖同一性质的顺序断言，
+    B4 侧此前只测了「拿不到锁」那一支（`test_gen_adapter_returns_zero_when_b2_lock_held`），
+    缺这一支——对齐补齐。"""
+    import generate_training_sets as G
+    from app.scheduler import build_generate_batch
+
+    calls: list = []
+
+    class _Conn:
+        async def fetchval(self, q, *a):
+            if "pg_try_advisory_lock" in q:
+                calls.append("lock")
+                return True
+            raise AssertionError(f"未预期 fetchval: {q}")
+        async def execute(self, q, *a):
+            if "pg_advisory_unlock" in q:
+                calls.append("unlock")
+                return None
+            raise AssertionError(f"未预期 execute: {q}")
+
+    class _Acq:
+        async def __aenter__(self): return _Conn()
+        async def __aexit__(self, *a): return False
+
+    class _Pool:
+        def acquire(self): return _Acq()
+
+    async def _boom(conn, count, out_dir, rng):
+        calls.append("batch")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(G, "generate_batch", _boom)
+
+    gen = build_generate_batch(_Pool(), str(tmp_path))
+    with pytest.raises(RuntimeError):
+        asyncio.run(gen(5))
+    assert calls == ["lock", "batch", "unlock"], calls
 
 
 # ===== Task 6 补充（brief 之外，Task 5 遗留必补覆盖，详见 task-6-report.md 对照表）=====

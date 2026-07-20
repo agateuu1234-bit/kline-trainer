@@ -385,7 +385,8 @@ async def _fetch_period_bars(conn, stock_code: str, period: str) -> pd.DataFrame
 async def _fetch_dense_coverage(conn, stock_code: str):
     """D11：读 stock_coverage 权威 dense 1m 覆盖（**不从 klines 反推**——反推会在
     边角/retry/周期变更下与 B1 的决定漂移、且失败难诊断，codex R17-F1）。
-    返回 (start_date, end_date, dropped_dates_set)；无该股行 → (None, None, set())。
+    返回 (start_date, end_date, dropped_dates_set, dense_day_count)；无该股行 →
+    (None, None, set(), None)。
 
     **坏行一律降级成 GenerateSkipException**（codex PF2-R2-F1）：schema 有 CHECK 兜底，
     但历史行 / 手工修补 / Plan 3 writer 半成品仍可能带非法内容（如 `["nope"]` 能过
@@ -470,16 +471,21 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
     partial 月的 open，会让最新完整月当不成第 8 前向月、白白少候选（codex R9-F1）。
     任一前置缺失（周期数据空 / 无覆盖 artifact）→ GenerateSkipException，fail-closed。"""
     rng = rng or random.Random()
-    period_bars = {p: await _fetch_period_bars(conn, stock_code, p) for p in PERIODS}
-    for p, bars in period_bars.items():
-        if bars.empty:
-            raise GenerateSkipException(f"{stock_code}: {p} 无 bars")
 
+    # **早退检查排在六周期全量历史加载之前**（codex whole-branch I1）：
+    # stock_coverage 空表（本 PR 上线首日的真实状态，见验收清单 L1）时，无需先把
+    # 每只股票的六个周期全历史 `SELECT ... FROM klines` 读进 pandas 再扔掉——
+    # 这条检查只需要 stock_coverage 那一行是否存在，不依赖 period_bars 里的任何东西。
     start_date, end_date, dropped, dense_day_count = await _fetch_dense_coverage(
         conn, stock_code)
     if start_date is None or end_date is None:
         raise GenerateSkipException(
             f"{stock_code}: stock_coverage 无覆盖 artifact（B1 未写入）→ 无法门控，跳过")
+
+    period_bars = {p: await _fetch_period_bars(conn, stock_code, p) for p in PERIODS}
+    for p, bars in period_bars.items():
+        if bars.empty:
+            raise GenerateSkipException(f"{stock_code}: {p} 无 bars")
 
     daily = period_bars["daily"]
     trading_dates = sorted({trading_date(int(e)) for e in daily["datetime"]})
@@ -554,6 +560,7 @@ async def generate_batch(conn, target_count: int, output_dir: Path,
     rng = rng or random.Random()
     codes = [r["code"] for r in await conn.fetch("SELECT code FROM stocks ORDER BY code")]
     if not codes:
+        print(f"[B2] 警告：仅生成 0/{target_count}（stocks 表为空，无股票可生成）")
         return []
     out: list = []
     skips = 0
