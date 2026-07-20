@@ -16,7 +16,7 @@
 //   **唯一写入点**语义（isExtended 由 lineSubType 派生）在 commitPending 内原样保留。
 
 import Observation
-import CoreGraphics   // ← 1a-iii Task2：shieldRect（CGRect）
+import CoreGraphics   // ← 1a-iii Task2：PanelShield.rect(CGRect)
 
 /// **访问级别是 load-bearing 的（codex plan-R5-high）**：类与**状态**是 `public`（只读，`private(set)`），
 /// 但**所有 mutator 一律 internal**（`activate` / `deactivate` / `addAnchor` / `discardPendingAnchors` /
@@ -47,15 +47,33 @@ public final class DrawingSession {
     /// 1a-iii：设置卡片（DrawingStyleCard，同包 UI 层）经此写默认样式。internal——包外不得直改。
     func setDefaultStyle(_ style: DrawingDefaultStyle) { defaultStyle = style }
 
-    /// 1a-iii Task2：类型行 overlay 的命中屏蔽 rect（**面板局部坐标**，key 0=upper/1=lower）。
-    /// `ChartContainerView.handleDrawingTap` 读它拒绝落在面板内 overlay 之下的点（防误画+autosave 幽灵线）。
-    public private(set) var shieldRect: [Int: CGRect] = [:]
-
-    /// overlay 隐藏（收起/退出画线/view 消失）→ 传 nil 清盾；装盾传实际 rect。internal（同 setDefaultStyle 先例）。
-    func setShieldRect(_ rect: CGRect?, panel: PanelId) {
-        let key = panel == .upper ? 0 : 1
-        shieldRect[key] = rect
+    /// 1a-iii 切片2 Task2：某个面板当前的命中屏蔽状态。三态互斥 —— 「面板可见却没有任何屏蔽」这一危险状态
+    /// **无法被表达**（它就是 `.pending`，而 `.pending` 一律拒收），故不需要额外的布尔量与守卫（codex 计划-R17-F2）。
+    public enum PanelShield: Equatable, Sendable {
+        // ⚠️刻意不叫 `.none`：`shield` 是 `[Int: PanelShield]`，取值是 `PanelShield?`，
+        //   `shield[0] == .none` 会被 Swift 解析成 `Optional.none`（「字典里没这个 key」），
+        //   与「该面板无屏蔽」混为一谈 —— 撞名陷阱，改名规避。
+        case unshielded        // 无面板覆盖本面板 → 正常落线
+        case pending           // 面板已挂载、真实几何尚未收敛 → **拒收一切 tap**（fail-closed）
+        case rect(CGRect)      // 已知覆盖区（**面板局部坐标**）→ 只挡区内，区外正常落线
     }
+
+    /// key 0=upper / 1=lower。缺省（无 key）等价 `.none`（这里指 Optional，非上面枚举的 case）。
+    /// `ChartContainerView.handleDrawingTap` 读它决定是否拒绝落锚（防误画+autosave 幽灵线）。
+    public private(set) var shield: [Int: PanelShield] = [:]
+
+    /// 面板挂载/卸载：挂载即把**两个**面板置 `.pending`（同步、不经 preference），
+    /// 卸载即全清。这是「窗口期」的唯一来源，也是它唯一的表达方式。
+    func setStylePanelVisible(_ visible: Bool) {
+        if visible { shield[0] = .pending; shield[1] = .pending } else { shield.removeAll() }
+    }
+
+    /// 几何收敛后由 `refreshShields()` 写入某面板的最终状态（`.rect` 或 `.unshielded`）。
+    func setShield(_ s: PanelShield, panel: PanelId) { shield[panel == .upper ? 0 : 1] = s }
+
+    /// 一次清掉**所有**面板的屏蔽（退画线 / view 消失 / 切位置）。切位置后由 `setStylePanelVisible(true)`
+    /// 重新置 `.pending`，或由下一轮 `refreshShields()` 写入实值——**不存在「清掉后裸奔」的中间态**。
+    func clearAllShields() { shield.removeAll() }
 
     public init() {}
 
@@ -74,7 +92,7 @@ public final class DrawingSession {
         drawingModeActive = false
         activeDrawingTool = nil
         discardPendingAnchors()
-        shieldRect.removeAll()   // 1a-iii Task2 模型不变量：退画线无残留盾（防死区拒收后续正常 tap）
+        clearAllShields()   // 1a-iii Task2 模型不变量：退画线无残留盾（防死区拒收后续正常 tap）
     }
 
     /// D31：**只丢 pending 锚** —— activeDrawingTool 与 drawingModeActive 必须存活。

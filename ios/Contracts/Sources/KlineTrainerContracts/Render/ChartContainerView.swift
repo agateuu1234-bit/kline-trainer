@@ -275,10 +275,14 @@ public struct ChartContainerView: UIViewRepresentable {
             // 空图表（candleStep==0）→ xToIndex 会 Int(NaN) 崩溃 → 守卫（spec §四 load-bearing）。
             let viewport = view.renderState.viewport
             guard viewport.geometry.candleStep > 0 else { return }
-            // 1a-iii Task2（codex 计划-R4/R5）：类型行 overlay 命中屏蔽——落在面板 frame 内的点不落锚
-            // （防误画+autosave 幽灵线）。shieldRect 是面板局部坐标，与 point 同一空间。
-            let shieldKey = panel == .upper ? 0 : 1
-            if let shield = session.shieldRect[shieldKey], shield.contains(point) { return }
+            // 1a-iii 切片2 Task2（codex 计划-R14-F1/R17-F2）：三态互斥，无需再判布尔量。
+            // `.pending` = 面板已挂载但几何未收敛 → 拒收一切（代价：刚展开面板的极短瞬间少响应一次点击；
+            // 收益：**永远不会**因盾未就位而落出幽灵线并 autosave，不可逆）。`.rect` 是面板局部坐标，与 point 同一空间。
+            switch session.shield[panel == .upper ? 0 : 1] ?? .unshielded {
+            case .unshielded:      break
+            case .pending:         return
+            case .rect(let shield): if shield.contains(point) { return }
+            }
             let mapper = CoordinateMapper(viewport: viewport, displayScale: view.traitCollection.displayScale)
             let ps = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
             guard let anchor = inputController.tapToAnchor(at: point, panel: ps, mapper: mapper) else { return }

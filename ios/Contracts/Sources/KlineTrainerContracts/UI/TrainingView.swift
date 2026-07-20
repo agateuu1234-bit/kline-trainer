@@ -19,13 +19,19 @@
 #if canImport(UIKit)
 import SwiftUI
 
-// 1a-iii 切片1 Task2：类型行 overlay 命中屏蔽——两个 PreferenceKey，值均 CGRect?、defaultValue = nil
-// （overlay 隐藏时无 descendant 设置 preference → 值回落 nil → 自动清盾，codex 计划-R3-medium）。
+// 1a-iii 切片1/2 Task2：类型行 overlay 命中屏蔽——三个 PreferenceKey，值均 CGRect?、defaultValue = nil
+// （overlay 隐藏时无 descendant 设置 preference → 值回落 nil，codex 计划-R3-medium）。切片2 起：
+// 上下两个面板都上报 frame（DrawingUpperPanelFrameKey/DrawingLowerPanelFrameKey），供 refreshShields()
+// 与 overlay frame 求交、装两个面板的盾（旧 DrawingPanelFrameKey 改名为 DrawingLowerPanelFrameKey）。
 struct DrawingShieldFrameKey: PreferenceKey {
     static let defaultValue: CGRect? = nil
     static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) { value = nextValue() ?? value }
 }
-struct DrawingPanelFrameKey: PreferenceKey {
+struct DrawingUpperPanelFrameKey: PreferenceKey {
+    static let defaultValue: CGRect? = nil
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) { value = nextValue() ?? value }
+}
+struct DrawingLowerPanelFrameKey: PreferenceKey {
     static let defaultValue: CGRect? = nil
     static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) { value = nextValue() ?? value }
 }
@@ -101,6 +107,10 @@ public struct TrainingView: View {
         // coalesce 掉的 .onChange（drawingModeActive 若在一次 update 内 false→true→false，onChange 看不到净变化）。
         // 这是画线模式唯一的 UI 开/关入口（画图钮/退出钮/复盘浮动钮都走它）。下方 .onChange 保留作纵深。
         tradeStrip = nil
+        // 1a-iii 切片2 Task2 Step5a（codex 计划-R9-F3/R10-F1）：每次**进入**画线，面板默认展开
+        // （spec §2.1）。drawingModeActive 此刻仍是**切换前**的值，故 `!active` == 「即将进入」。
+        // 退出方向不动展开态（避免与退出动画/清理抢状态）——「记住工具与样式」是另一回事（session.defaultStyle）。
+        if !engine.drawingSession.drawingModeActive { typeRowExpanded = true }
         engine.toggleDrawingMode()
     }
 
@@ -280,12 +290,12 @@ public struct TrainingView: View {
         // remount，同 tick/period 下被 TradeConfirmGuard 放行成交。清 nil 恒安全（本就不该跨画线切换留着买卖框）。
         .onChange(of: engine.drawingSession.drawingModeActive) { _, _ in
             tradeStrip = nil
-            // 1a-iii 切片1 Task2：进/出画线都显式清盾（防御 + 明确生命周期；与 nil-preference 自动清双保险）。
-            engine.drawingSession.setShieldRect(nil, panel: .lower)
+            // 1a-iii 切片2 Task2：进/出画线都显式清**两个面板**的盾（clearAllShields，防漏清某个面板留死区）。
+            engine.drawingSession.clearAllShields()
         }
-        // 1a-iii 切片1 Task2：收起类型行也显式清盾（同上防御，overlay 隐藏时 nil-preference 本也会自动清）。
+        // 1a-iii 切片2 Task2：收起类型行也显式清盾（同上防御，overlay 隐藏时几何不齐也不会误开闸）。
         .onChange(of: typeRowExpanded) { _, _ in
-            engine.drawingSession.setShieldRect(nil, panel: .lower)
+            engine.drawingSession.clearAllShields()
         }
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
             tradeStrip = nil                                    // codex R3-high：tick 推进(含持有/观察)即作废未确认买卖条，防按新 tick 价成交
@@ -330,10 +340,10 @@ public struct TrainingView: View {
                 presentToast(e.userMessage)
             }
         }
-        // 1a-iii 切片1 Task2：view 消失（导航退出）也显式清盾——三重防御的第三处（nil-preference 自动清 +
+        // 1a-iii 切片2 Task2：view 消失（导航退出）也显式清盾——三重防御的第三处（几何未齐 fail-closed +
         // 两个 onChange + 本处），生命周期上不留残留 shield 死区。
         .onDisappear {
-            engine.drawingSession.setShieldRect(nil, panel: .lower)
+            engine.drawingSession.clearAllShields()
         }
     }
 
@@ -624,20 +634,37 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
     let onLongPressType: () -> Void
     @ViewBuilder let upperPanel: () -> Upper
     @ViewBuilder let lowerPanel: () -> Lower
+    @State private var upperPanelChartFrame: CGRect?
     @State private var lowerPanelChartFrame: CGRect?
+    @State private var stylePanelChartFrame: CGRect?
+
+    // 1a-iii 切片2 Task2（实测发现，见 Task2 report）：样式面板「是否应当可见」用**纯计算属性**（与 body
+    // 内 `if showsTradeButtons, isDrawingActive, typeRowExpanded` 门同一表达式），**不经** `.onAppear`/
+    // `.onDisappear` 侧写。原稿用 onAppear/onDisappear 置位 `.pending`/清空——host-真机上可行，但
+    // hosted 测试用的 `ImageRenderer.uiImage` 在完成一次离屏渲染、内部两轮布局收敛 GeometryReader 后，
+    // 会把临时渲染上下文整体拆除，**这次拆除本身也会触发 `.onDisappear`**（即便 typeRowExpanded 仍是
+    // true、overlay 逻辑上从未真正"消失"）——把刚算好的 `.rect` 覆写回空字典，四个新测试全部假红
+    // （shieldRectOf 恒 nil）。改用纯计算属性可完全绕开这个 SwiftUI 生命周期事件与 ImageRenderer 离屏
+    // 渲染拆除时机的耦合：可见性判据始终从 `showsTradeButtons`/`isDrawingActive`/`typeRowExpanded`
+    // 现读现算，不依赖任何异步/一次性事件的到达时机或先后顺序——production 下语义等价（isDrawingActive/
+    // typeRowExpanded 变化都会重建 ChartPanelsContainer 触发 body 重新求值），但不再对 onAppear/onDisappear
+    // 的相对时序或"是否真的只在挂载/卸载各触发一次"做任何假设。
+    private var stylePanelVisible: Bool { showsTradeButtons && isDrawingActive && typeRowExpanded }
 
     var body: some View {
         VStack(spacing: 0) {
             upperPanel()
+                .background(GeometryReader { p in Color.clear
+                    .preference(key: DrawingUpperPanelFrameKey.self, value: p.frame(in: .named("chart"))) })
             Divider()
             lowerPanel()
                 .background(GeometryReader { p in Color.clear
-                    .preference(key: DrawingPanelFrameKey.self, value: p.frame(in: .named("chart"))) })
+                    .preference(key: DrawingLowerPanelFrameKey.self, value: p.frame(in: .named("chart"))) })
         }
         .coordinateSpace(name: "chart")
         .overlay(alignment: .bottom) {
             // codex 计划-R4-medium：必带 showsTradeButtons 门——排除复盘（复盘用浮动铅笔钮，本切片不改其行为）。
-            // 否则复盘经浮动钮 drawingModeActive 时也会挂 overlay+装下面板盾、吞复盘图表点。
+            // 否则复盘经浮动钮 drawingModeActive 时也会挂 overlay+装两面板盾、吞复盘图表点。
             if showsTradeButtons, isDrawingActive, typeRowExpanded {
                 DrawingTypeOverlay(expanded: typeRowExpanded, onLongPressType: onLongPressType)
                     .background(GeometryReader { g in Color.clear
@@ -645,15 +672,34 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
             }
         }
         .accessibilityIdentifier("chartPanels")
-        .onPreferenceChange(DrawingPanelFrameKey.self) { lowerPanelChartFrame = $0 }
-        .onPreferenceChange(DrawingShieldFrameKey.self) { overlayChartFrame in
-            // codex 计划-R3-high：chart 空间 → 下面板局部空间转换（**不可**直接存 chart 空间，否则含
-            // 上面板偏移、下面板漏挡）。canonical 空间 = 下面板局部（与 handleDrawingTap 的 tap point 同）。
-            guard let overlay = overlayChartFrame, let lp = lowerPanelChartFrame else {
-                engine.drawingSession.setShieldRect(nil, panel: .lower); return   // 隐藏/无帧 → 清盾
+        // 三个 frame **任一**变化都重算盾：不假设 preference 的到达顺序（切片1 只在 shield frame 变化时算、
+        // 把 panel frame 当已知值读——若 panel frame 后到，盾会被算成 nil 并永远停在那，是一条靠收敛顺序侥幸的隐患）。
+        .onPreferenceChange(DrawingUpperPanelFrameKey.self) { upperPanelChartFrame = $0; refreshShields() }
+        .onPreferenceChange(DrawingLowerPanelFrameKey.self) { lowerPanelChartFrame = $0; refreshShields() }
+        .onPreferenceChange(DrawingShieldFrameKey.self) { stylePanelChartFrame = $0; refreshShields() }
+    }
+
+    /// codex 计划-R15-F1/R17-F2 唯一权威实现：判据是「计算所需的几何全部到齐」——不齐时**什么都不写**
+    /// （两面板保持 `.pending`，fail-closed），不得在缺帧时写 `.unshielded`（那正是裸奔窗口）。
+    /// 判据是**几何相交**，不是「面板停在上/下半区就挡对应面板」——面板变高/上下切/跨越两面板时全自动正确。
+    /// `stylePanelVisible == false` → 一次清掉两面板（对齐 `setStylePanelVisible(false)`/`clearAllShields()`
+    /// 语义）；`true` 但几何未到齐 → `setStylePanelVisible(true)` 置两面板 `.pending`（fail-closed 窗口）。
+    @MainActor
+    private func refreshShields() {
+        guard stylePanelVisible else { engine.drawingSession.clearAllShields(); return }
+        guard stylePanelChartFrame != nil, upperPanelChartFrame != nil, lowerPanelChartFrame != nil else {
+            engine.drawingSession.setStylePanelVisible(true)
+            return
+        }
+        let overlay = stylePanelChartFrame!, upper = upperPanelChartFrame!, lower = lowerPanelChartFrame!
+        for (panel, pf) in [(PanelId.upper, upper), (PanelId.lower, lower)] {
+            let hit = overlay.intersection(pf)
+            if hit.isNull || hit.isEmpty {
+                engine.drawingSession.setShield(.unshielded, panel: panel)          // 面板没盖到这半 → 正常落线
+            } else {
+                // canonical 空间 = 目标面板局部（与 handleDrawingTap 的 tap point 同一空间）
+                engine.drawingSession.setShield(.rect(hit.offsetBy(dx: -pf.minX, dy: -pf.minY)), panel: panel)
             }
-            let local = overlay.offsetBy(dx: -lp.minX, dy: -lp.minY)
-            engine.drawingSession.setShieldRect(local, panel: .lower)
         }
     }
 }

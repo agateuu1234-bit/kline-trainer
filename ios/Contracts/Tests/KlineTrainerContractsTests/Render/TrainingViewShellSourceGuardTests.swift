@@ -110,4 +110,36 @@ struct TrainingViewShellSourceGuardTests {
         #expect(body.components(separatedBy: "performTrade(").count - 1 == 1)   // 恰一次
         #expect(body.contains("onProceed: { performTrade(strip.action"))       // 那一次就在 onProceed 内
     }
+
+    /// 起止标记切出指定片段的正文（同 DrawingTapHitShieldTests.extractBody 的窄锚定手法，
+    /// 1a-iii 切片2 Task2 Step5b 新增，与 tradeBoundary 守卫同一片段口径）。
+    private func slice(_ text: String, from startMarker: String, to endMarker: String) throws -> String {
+        let start = try #require(text.range(of: startMarker)?.upperBound)
+        let end = try #require(text.range(of: endMarker, range: start..<text.endIndex)?.lowerBound)
+        return String(text[start..<end])
+    }
+
+    @Test("进画线默认展开（codex 计划-R9-F3 / R10-F1）：重置放在 toggleDrawing 的『即将进入』分支")
+    func drawingEntryResetsExpandedInToggle() throws {
+        let tv = try source(tv)
+        // 只取 toggleDrawing 到 engine.toggleDrawingMode() 之间——与既有 tradeBoundary 守卫同一片段口径。
+        let body = try slice(tv, from: "private func toggleDrawing() {", to: "engine.toggleDrawingMode()")
+        #expect(body.contains("tradeStrip = nil"), "既有交易安全：同步清 tradeStrip 不得丢")
+        #expect(body.contains("if !engine.drawingSession.drawingModeActive { typeRowExpanded = true }"),
+                "进画线未重置展开态 —— 收起后退出再进会停在收起态（spec §2.1 / §4.4 违规）")
+    }
+
+    @Test("交易安全不回退（codex 计划-R10-F1）：drawingModeActive 的 onChange 仍是无条件 { _, _ in }、体内无 if")
+    func drawingModeOnChangeStaysUnconditional() throws {
+        let code = try source(tv)
+        // 与既有 TrainingViewShellSourceGuardTests.tradeBoundary 同向的**冗余**断言：本切片新增 UI 状态时
+        // 极易顺手把这个闭包改成 `{ _, isActive in ... if isActive ... }`，那会让陈旧 tradeStrip 只在单方向被清。
+        #expect(code.contains("onChange(of: engine.drawingSession.drawingModeActive) { _, _ in"),
+                "闭包签名被改动 —— tradeBoundary 守卫会红，且交易边界被削弱")
+        let chain = try slice(code, from: "onChange(of: engine.drawingSession.drawingModeActive) { _, _ in",
+                              to: ".onChange(of: typeRowExpanded)")
+        #expect(chain.contains("tradeStrip = nil"))
+        #expect(chain.contains("clearAllShields()"))
+        #expect(!chain.contains("if "), "闭包体出现 if —— 清理变成条件性，退出方向可能漏清")
+    }
 }

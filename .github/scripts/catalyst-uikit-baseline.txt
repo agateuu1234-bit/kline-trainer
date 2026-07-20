@@ -32,6 +32,11 @@ layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复
 点落在面板 shield 外的 K 线区 → 正常落线（屏蔽只挡面板内）
 真路径差分（codex 计划-R6-high）：面板 shield 覆盖的、**本可落线**的点——装盾时被拒、清盾时落线；count 与 pendingAnchors 都验
 复盘负向（codex 计划-R4-medium）：复盘态（showsTradeButtons==false）即便 drawingModeActive，也**不装 overlay、不装盾**——复盘图表点不被吞
+盾泛化真路径（trade-safety）：overlay 高到跨越上下两面板 → **两个**面板各自装盾，上面板不再裸奔
+收起态：无 overlay → 两面板都无盾（基础清盾，**不算**不过度屏蔽的证据）
+不过度屏蔽（codex 计划-R1-F1）：面板**可见且完全落在下面板内**时，上面板必须无盾、且上半 K 线照常落线
+上面板差分（trade-safety）：上面板被盾覆盖的、**本可落线**的点——装盾时被拒、清盾时落线
+窗口期差分（codex 计划-R14-F1）：stylePanelVisible 且盾未收敛 → 本可落线的点被拒；收敛后同点落线
 KLineView 可实例化（spec L1179 final class）
 renderState 可读写（compile-check：let 字段 + init 重建模式）
 forScheme(.dark) 13 字段桥 = AppPalette.dark

@@ -1,12 +1,17 @@
 // ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingTapHitShieldTests.swift
-// Spec: docs/superpowers/specs/2026-07-17-drawing-tools-p1b-1a-iii-redesign.md（切片1 Task2）
-// 类型行改 overlay（不占 VStack 高度）+ 命中屏蔽：DrawingSession.shieldRect（面板局部坐标） +
-// ChartContainerView.handleDrawingTap 拒收盾内点 + TrainingView 两 PreferenceKey 上报/转换/清盾。
+// Spec: docs/superpowers/specs/2026-07-17-drawing-tools-P1b-1a-iii-shell-interaction.md（切片1 Task2）
+//     + docs/superpowers/specs/2026-07-18-drawing-tools-P1b-1a-iii-panel-redesign-design.md（切片2 Task2）
+// 类型行改 overlay（不占 VStack 高度）+ 命中屏蔽：DrawingSession.shield（PanelShield 三态，面板局部坐标） +
+// ChartContainerView.handleDrawingTap 拒收盾内点/pending 窗口 + TrainingView 三 PreferenceKey 上报/求交/清盾。
+// 切片2 Task2：屏蔽泛化到**两个面板**（overlay ∩ 每个面板 frame），并把切片1 的 shieldRect/setShieldRect
+// 整体替换为 PanelShield 三态 API（.unshielded/.pending/.rect）——「面板可见却没有屏蔽」这一危险状态
+// 从类型上不可表达，取代切片1 靠 nil-preference 侥幸清盾的设计。
 //
-// 平台门：deactivateClearsShields / typeRowIsShieldedOverlayNotVStackMember / splitBarsCarryD19D24
-// 是 host-pure（直构 DrawingSession、无 UIKit 类型 / 纯源码字符串守卫）→ host `swift test` 覆盖。
-// 其余触 ChartContainerView.Coordinator / UIHostingController 的测试 `#if canImport(UIKit)` 门
-// 仅 Catalyst/iOS 跑（codex 计划-R6-medium：host swift test 不编译这些）。
+// 平台门：deactivateClearsShields / typeRowIsShieldedOverlayNotVStackMember / splitBarsCarryD19D24 /
+// clearAllShieldsClearsBothPanels / shieldWindowIsFailClosed / partialGeometryNeverSettles /
+// shieldInstallIsGeometricNotPositionHardcoded 是 host-pure（直构 DrawingSession、无 UIKit 类型 /
+// 纯源码字符串守卫）→ host `swift test` 覆盖。其余触 ChartContainerView.Coordinator / ImageRenderer 的
+// 测试 `#if canImport(UIKit)` 门仅 Catalyst/iOS 跑（codex 计划-R6-medium：host swift test 不编译这些）。
 import Foundation
 import CoreGraphics
 import Testing
@@ -17,15 +22,41 @@ import Testing
 // UIHostingController 方案抖动时怀疑过并发跨测试共享渲染上下文，改用 ImageRenderer 后未再复现，
 // 但仍保留 .serialized 作为安全网（同既有先例，不给并发渲染管线留隐患）。
 @MainActor
-@Suite("类型行 overlay 命中屏蔽（1a-iii 切片1 Task2）", .serialized)
+@Suite("类型行 overlay 命中屏蔽（1a-iii 切片1/2 Task2）", .serialized)
 struct DrawingTapHitShieldTests {
 
-    @Test("模型不变量（codex 计划-R3）：DrawingSession.deactivate() 清空所有 shieldRect（退画线无残留盾）")
+    @Test("模型不变量（codex 计划-R3）：DrawingSession.deactivate() 清空所有面板屏蔽（退画线无残留盾）")
     func deactivateClearsShields() throws {
         let session = DrawingSession()
-        session.setShieldRect(CGRect(x: 0, y: 40, width: 390, height: 120), panel: .lower)
+        session.setShield(.rect(CGRect(x: 0, y: 40, width: 390, height: 120)), panel: .lower)
         session.deactivate()
-        #expect(session.shieldRect.isEmpty)
+        #expect(session.shield.isEmpty)
+    }
+
+    @Test("模型不变量：clearAllShields() 清空所有面板的盾（防显式清盾时漏清某个面板留下死区）")
+    func clearAllShieldsClearsBothPanels() throws {
+        let session = DrawingSession()
+        session.setShield(.rect(CGRect(x: 0, y: 0, width: 390, height: 80)), panel: .upper)
+        session.setShield(.rect(CGRect(x: 0, y: 0, width: 390, height: 80)), panel: .lower)
+        session.clearAllShields()
+        #expect(session.shield.isEmpty)
+    }
+
+    @Test("盾未就位窗口 fail-closed（codex 计划-R14-F1）：面板可见但盾没算过 → 状态可表达且默认拒收")
+    func shieldWindowIsFailClosed() throws {
+        let s = DrawingSession()
+        #expect(s.shield.isEmpty, "初始无任何面板屏蔽")
+        s.setStylePanelVisible(true)
+        #expect(s.shield[0] == .pending && s.shield[1] == .pending,
+                "面板挂载即应把**两个**面板置 .pending（拒收窗口的唯一表达）")
+        s.setShield(.unshielded, panel: .upper)
+        s.setShield(.rect(CGRect(x: 0, y: 0, width: 10, height: 10)), panel: .lower)
+        #expect(s.shield[0] == .unshielded)
+        s.setStylePanelVisible(false)
+        #expect(s.shield.isEmpty, "面板卸载即全清")
+        s.setStylePanelVisible(true)
+        s.clearAllShields()
+        #expect(s.shield.isEmpty, "clearAllShields 全清；后续由 setStylePanelVisible/refreshShields 重新置位")
     }
 
     // ── 源码守卫（host-pure，纯字符串读取，无 UIKit 依赖）──
@@ -73,16 +104,51 @@ struct DrawingTapHitShieldTests {
         // PreferenceKey 上报/转换必须同挂在同一个 .overlay(alignment: .bottom) 块里，而不是随便一处
         // 泛 `.overlay(alignment: .bottom)`（panel(_:) 里同名但不带这些）。
         let containerBody = try extractBody(tv, from: "struct ChartPanelsContainer<Upper: View, Lower: View>: View {", to: "#if DEBUG")
-        for marker in [".overlay(alignment: .bottom)", "DrawingTypeOverlay(", "DrawingShieldFrameKey", "DrawingPanelFrameKey", "offsetBy"] {
+        // 切片2 Task2：DrawingPanelFrameKey 改名 DrawingLowerPanelFrameKey + 新增 DrawingUpperPanelFrameKey
+        // （两个面板都上报 frame，求交装两个面板的盾）。
+        for marker in [".overlay(alignment: .bottom)", "DrawingTypeOverlay(", "DrawingShieldFrameKey",
+                       "DrawingUpperPanelFrameKey", "DrawingLowerPanelFrameKey", "offsetBy"] {
             #expect(containerBody.contains(marker))
         }
 
-        #expect(tv.contains("setShieldRect"))
+        // 切片2 Task2：setShieldRect 已被 PanelShield 三态 API 取代，接线断言改锚 refreshShields。
+        #expect(tv.contains("refreshShields"))
         #expect(tv.contains("showsTradeButtons, isDrawingActive, typeRowExpanded"))   // 复盘门（codex 计划-R4）
         let ov = try readSource("UI/DrawingTypeOverlay.swift")
         #expect(ov.contains(".contentShape(Rectangle())"))
         let cc = try readSource("Render/ChartContainerView.swift")
-        #expect(cc.contains("shieldRect") && cc.contains("shield.contains(point)"))
+        // 切片2 Task2：ChartContainerView 侧断言也改锚新 API——session.shield[...] 三态 switch，
+        // 本地绑定改名 shield（同旧变量名，保持 `shield.contains(point)` 字面锚不变）。
+        #expect(cc.contains("session.shield[") && cc.contains("shield.contains(point)"))
+    }
+
+    @Test("到达顺序置换（codex 计划-R15-F1）：任何『几何未到齐』的中间态都不得标记收敛（fail-closed）")
+    func partialGeometryNeverSettles() throws {
+        // 纯状态推演：模拟 refreshShields 的开闸判据，穷举三个 frame 的到达顺序。
+        func settles(overlay: Bool, upper: Bool, lower: Bool) -> Bool { overlay && upper && lower }
+        let flags = [false, true]
+        for o in flags { for u in flags { for l in flags {
+            let complete = o && u && l
+            #expect(settles(overlay: o, upper: u, lower: l) == complete,
+                    "几何(overlay:\(o) upper:\(u) lower:\(l)) 的开闸判据错误 —— 部分几何开闸=裸奔窗口")
+        } } }
+        // 并断言判据真的写在生产代码里（防等价逻辑与生产漂移）。
+        let tv = try readSource("UI/TrainingView.swift")
+        #expect(tv.contains("stylePanelChartFrame != nil, upperPanelChartFrame != nil, lowerPanelChartFrame != nil"),
+                "refreshShields 未按『几何到齐』开闸 —— 部分几何会打开 fail-closed 窗口")
+    }
+
+    @Test("源码快检：盾用『overlay ∩ 每个面板 frame』求交装盾，且显式清盾走 clearAllShields（非逐面板漏清）")
+    func shieldInstallIsGeometricNotPositionHardcoded() throws {
+        let tv = try readSource("UI/TrainingView.swift")
+        #expect(tv.contains("refreshShields"))
+        #expect(tv.contains(".intersection("))                       // 求交，而非按位置选面板
+        #expect(tv.contains("DrawingUpperPanelFrameKey"))            // 上面板也上报 frame
+        #expect(tv.contains("clearAllShields"))                      // 显式清盾一次清两面板
+        #expect(!tv.contains("setShieldRect"))       // 切片1 的旧 API 必须整体绝迹（已被 PanelShield 三态取代）
+        let cc = try readSource("Render/ChartContainerView.swift")
+        #expect(cc.contains("session.shield[") && cc.contains("shield.contains(point)"))   // 输入层守卫仍在，新 API
+        #expect(!cc.contains("shieldRect"))                          // 旧 API 在输入层也整体绝迹
     }
 
     @Test("D19/D24：拆分后控件齐、无未接线键（迁自 DrawingModeBarSourceGuardTests）")
@@ -123,17 +189,59 @@ private let shieldTestUpperPanelHeight: CGFloat = 60     // 非零：证明 char
 private let shieldTestLowerPanelHeight: CGFloat = 40     // 刻意矮：type row overlay(~44pt) 才会探进 mainChart(60%) 区
 private let shieldTestLowerPanelBounds = CGRect(x: 0, y: 0, width: shieldTestPanelWidth, height: shieldTestLowerPanelHeight)
 
-/// 造一个「已开全局画线会话」的下面板 rig（宽 reveal 窗口：count=200/tick=150/.m3 周期，
-/// 避免 TrainingEngine.preview() 默认小 fixture 的 reveal 窄切片把 mid-panel 的 x 坐标判成越界，codex 计划-R6 附带教训）。
+/// 双高面板 fixture：上下面板都足够高，使展开的样式面板**整块**落在其中一个面板内
+/// （下半区 ⇒ 只碰下面板；上半区 ⇒ 只碰上面板）。与既有 60/40 矮 fixture 分工：
+///   - 矮 fixture（shieldTestUpperPanelHeight/LowerPanelHeight）：测「面板跨越两面板 ⇒ 两个盾都装」。
+///   - 本 fixture：测「面板只碰一个面板 ⇒ 另一个面板必须无盾」+「切位置后旧盾必须清空（== nil，非『矮一点』）」。
+/// 400 是起始值——若实测样式面板高于它，测试里的 #require 会明确报错要求调大。
+private let shieldTestTallPanelHeight: CGFloat = 400
+
+/// codex 计划-R5-F1 / R6-F1：让 Task2 阶段那个 ~44pt 的**贴底**类型行 overlay 能真正盖到
+/// **上面板的可落线区**（mainChart = 面板顶部 60%）。关键几何：overlay 贴的是**整个容器**底部，所以
+/// 往上探进上面板的量 = overlay高 − 下面板高——杠杆是下面板高度，不是上面板高度。
+/// 正确判据：两个面板高度之和 < overlay 高度，贴底 overlay 就把上下面板整个盖满（实测校准，见 Task2 report）。
+private let shieldTestShortUpperPanelHeight: CGFloat = 24
+private let shieldTestShortLowerPanelHeight: CGFloat = 8
+
+/// 一个真 Coordinator + 真 KLineView 的最小手柄，挂在**已存在的** engine 上（codex 计划-R11-F1，防跨 engine 假绿）。
+/// 凡是「一个测试里同时驱动上下两个面板」的场景**必须**用它——`makeDrawingActiveChart` 每次新建 engine，
+/// 二次调用会让两个 handle 绑到不同 engine。
 @MainActor
-private func makeDrawingActiveChart(bounds: CGRect = shieldTestLowerPanelBounds) -> (DrawingChartHandle, TrainingEngine) {
-    let (engine, _) = TrainingEngineBounceWiringTests.makeEngine(count: 200, tick: 150)
-    engine.toggleDrawingMode()   // D42 全局会话：两面板一起武装 .horizontal（画图钮/浮动钮同一入口）
-    let coordinator = ChartContainerView(panel: .lower, engine: engine).makeCoordinator()
+private func makeChartHandle(engine: TrainingEngine, panel: PanelId, bounds: CGRect) -> DrawingChartHandle {
+    let coordinator = ChartContainerView(panel: panel, engine: engine).makeCoordinator()
     let view = KLineView(frame: bounds)
     coordinator.attach(to: view)
     coordinator.rebuildRenderState(bounds: bounds)
-    return (DrawingChartHandle(coordinator: coordinator, kLineView: view), engine)
+    return DrawingChartHandle(coordinator: coordinator, kLineView: view)
+}
+
+/// 造一个「已开全局画线会话」的面板 rig（宽 reveal 窗口：count=200/tick=150/.m3 周期，
+/// 避免 TrainingEngine.preview() 默认小 fixture 的 reveal 窄切片把 mid-panel 的 x 坐标判成越界，codex 计划-R6 附带教训）。
+/// 切片2 Task2：加 `panel:` 参数（默认 `.lower`，保既有调用点源兼容），各 rig 工厂共用同一份接线（不复制）。
+@MainActor
+private func makeDrawingActiveChart(panel: PanelId = .lower, bounds: CGRect = shieldTestLowerPanelBounds) -> (DrawingChartHandle, TrainingEngine) {
+    let (engine, _) = TrainingEngineBounceWiringTests.makeEngine(count: 200, tick: 150)
+    engine.toggleDrawingMode()   // D42 全局会话：两面板一起武装 .horizontal（画图钮/浮动钮同一入口）
+    return (makeChartHandle(engine: engine, panel: panel, bounds: bounds), engine)
+}
+
+/// 取某面板当前的**屏蔽矩形**；`.unshielded` / `.pending` 都返回 nil。
+/// ⚠️断言「该面板不被屏蔽」时**不要**用 `shieldRectOf(...) == nil`——那把 `.pending`（正在 fail-closed
+/// 拒收）也算成「不屏蔽」，会放过「几何未收敛却以为没事」的假绿。要证明真的开放，断言 `session.shield[k] == .unshielded`。
+@MainActor
+private func shieldRectOf(_ engine: TrainingEngine, _ key: Int) -> CGRect? {
+    if case .rect(let r) = engine.drawingSession.shield[key] { return r }
+    return nil
+}
+
+/// 差分测试第二阶段用：清掉所有盾，**并**显式标记两个面板为「几何已收敛、且确实不被覆盖」。
+/// 不能用 `clearAllShields()` 代替——那会回到「无 key」，而面板此刻仍 `stylePanelVisible`，
+/// 下一次 `setStylePanelVisible(true)` 或残留 `.pending` 会让 `handleDrawingTap` 继续拒收，
+/// **正确实现反而让测试红**，进而诱导实施者去削弱 fail-closed。
+@MainActor
+private func settleWithNoShields(_ session: DrawingSession) {
+    session.setShield(.unshielded, panel: .upper)
+    session.setShield(.unshielded, panel: .lower)
 }
 
 /// 复盘版：ReviewFlow + 同一宽 reveal 窗口。复盘画线走浮动钮同一 toggleDrawingMode() 入口。
@@ -166,13 +274,14 @@ private func leftmostMainChartPoint(_ handle: DrawingChartHandle) -> CGPoint {
     return CGPoint(x: mapper.indexToX(vp.startIndex) + vp.geometry.candleStep / 2, y: vp.mainChartFrame.midY)
 }
 
-/// TrainingView.chartPanels 的测试用镜像（Swift 访问控制：TrainingView 的 chartPanels/panel(_:) 是 private，
-/// 测试无法直接持有真 TrainingView 实例去驱动其私有 @State typeRowExpanded/lowerPanelChartFrame）。
-/// 复用**真**组件：DrawingTypeOverlay（生产组件）+ DrawingShieldFrameKey/DrawingPanelFrameKey（生产
-/// PreferenceKey 类型，TrainingView.swift 顶层声明，@testable 可见）+ engine.drawingSession.setShieldRect
-/// （生产 API）；偏移公式与 TrainingView.chartPanels 的 onPreferenceChange 逐字一致。
+/// 1a-iii 切片2 Task2：不再手抄一份 chartPanels 接线（切片1 遗留的镜像风险，reviewer 记为 Minor）。
+/// 直接渲染**生产** `ChartPanelsContainer`，只把上下面板换成等尺寸占位——盾的整条链
+/// （GeometryReader → PreferenceKey → refreshShields → setShield）测的就是生产那一份。
 /// showsTradeButtons/isDrawingActive 直接读 engine（与生产 TrainingView 同源计算属性），不额外接参数，
 /// 防「测试自己传的 mode 参数」与「engine 真实状态」两者漂移不一致的假象。
+///
+/// ⚠️本 task 里 `ChartPanelsContainer` 还没有 `stylePanelPosition` 参数（Task 3 才加），也还没去掉
+/// `onLongPressType`（Task 3 才去）——本结构按**当前**签名接线。
 ///
 /// **真实踩坑实证（多轮排查）**：最初想用 `UIHostingController` + `layoutIfNeeded()`（同
 /// DrawingBottomBarHeightTests.measuredHeight 的既有手法）驱动这棵树的 typeRowExpanded true→false 转场，
@@ -183,47 +292,67 @@ private func leftmostMainChartPoint(_ handle: DrawingChartHandle) -> CGPoint {
 /// 这条更新管线在 headless Catalyst xctest 进程里不保证同步/确定性完成，无论怎么摆 layoutIfNeeded/RunLoop
 /// spin 都可能撞上竞态。改用 `ImageRenderer`（iOS 16+ 官方 headless 渲染 API，读取 `.uiImage` 即强制
 /// 同步跑完整棵树的布局，明确为「离屏渲染」场景设计、不依赖 UIWindow/Scene）——每次转场都构造一个全新
-/// `TrainingShellLayout` 值 + 全新 `ImageRenderer` 强制同步渲染，不依赖任何「同一活体树背后再收敛一次」
-/// 的隐含时序假设，实测稳定可重复。
+/// 值 + 全新 `ImageRenderer` 强制同步渲染，不依赖任何「同一活体树背后再收敛一次」的隐含时序假设，实测稳定可重复。
+/// **实测发现（Task2）**：这条「不依赖同一活体树」的性质意味着 `.onDisappear` **不会**跨两次独立渲染触发
+/// （每次都是全新 view graph，从未见过上一次的树，无「消失」可言）——故差分测试的第二阶段一律用
+/// `settleWithNoShields`（直接置位，不靠再渲一次 `typeRowExpanded:false` 来触发生产的 onDisappear 清盾）。
 @MainActor
 private struct TrainingShellLayout: View {
     let engine: TrainingEngine
     var typeRowExpanded: Bool = true
-    @State private var lowerPanelChartFrame: CGRect?
 
     private var showsTradeButtons: Bool { engine.flow.canBuySell() }
     private var isDrawingActive: Bool { engine.drawingSession.drawingModeActive }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Color.clear.frame(height: shieldTestUpperPanelHeight)
-            Divider()
-            Color.clear.frame(height: shieldTestLowerPanelHeight)
-                .background(GeometryReader { p in Color.clear
-                    .preference(key: DrawingPanelFrameKey.self, value: p.frame(in: .named("chart"))) })
-        }
-        .frame(width: shieldTestPanelWidth)
-        .coordinateSpace(name: "chart")
-        .overlay(alignment: .bottom) {
-            if showsTradeButtons, isDrawingActive, typeRowExpanded {
-                DrawingTypeOverlay(expanded: typeRowExpanded, onLongPressType: {})
-                    .background(GeometryReader { g in Color.clear
-                        .preference(key: DrawingShieldFrameKey.self, value: g.frame(in: .named("chart"))) })
-            }
-        }
-        .onPreferenceChange(DrawingPanelFrameKey.self) { lowerPanelChartFrame = $0 }
-        .onPreferenceChange(DrawingShieldFrameKey.self) { overlayChartFrame in
-            guard let overlay = overlayChartFrame, let lp = lowerPanelChartFrame else {
-                engine.drawingSession.setShieldRect(nil, panel: .lower); return
-            }
-            let local = overlay.offsetBy(dx: -lp.minX, dy: -lp.minY)
-            engine.drawingSession.setShieldRect(local, panel: .lower)
-        }
-        // 镜像 TrainingView 的显式清盾防御——生产里这行是「防御 + 明确生命周期」的第二层保险
-        // （nil-preference 自动清是第一层）。测试镜像原样带上，保证与生产行为一致。
-        .onChange(of: typeRowExpanded) { _, _ in
-            engine.drawingSession.setShieldRect(nil, panel: .lower)
-        }
+        ChartPanelsContainer(
+            engine: engine,
+            showsTradeButtons: showsTradeButtons,
+            isDrawingActive: isDrawingActive,
+            typeRowExpanded: typeRowExpanded,
+            onLongPressType: {},
+            upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestUpperPanelHeight) },
+            lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestLowerPanelHeight) })
+            .frame(width: shieldTestPanelWidth)
+    }
+}
+
+/// 双高面板 fixture 外壳：上下面板都 `shieldTestTallPanelHeight` 高，供「面板整块落在单个面板内」的
+/// 精确判据测试（不过度屏蔽 + 切位置后旧盾清空）用，见 fixture 常量注释。
+@MainActor
+private struct TallPanelsShellLayout: View {
+    let engine: TrainingEngine
+    var typeRowExpanded: Bool = true
+
+    var body: some View {
+        ChartPanelsContainer(
+            engine: engine,
+            showsTradeButtons: engine.flow.canBuySell(),
+            isDrawingActive: engine.drawingSession.drawingModeActive,
+            typeRowExpanded: typeRowExpanded,
+            onLongPressType: {},
+            upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestTallPanelHeight) },
+            lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestTallPanelHeight) })
+            .frame(width: shieldTestPanelWidth)
+    }
+}
+
+/// 矮上/极矮下面板外壳：让 Task2 阶段那个贴底类型行 overlay 把上下面板**整个盖满**（见
+/// shieldTestShortUpperPanelHeight/shieldTestShortLowerPanelHeight 注释的几何推导）。
+@MainActor
+private struct ShortUpperShellLayout: View {
+    let engine: TrainingEngine
+    var typeRowExpanded: Bool = true
+    var body: some View {
+        ChartPanelsContainer(
+            engine: engine,
+            showsTradeButtons: engine.flow.canBuySell(),
+            isDrawingActive: engine.drawingSession.drawingModeActive,
+            typeRowExpanded: typeRowExpanded,
+            onLongPressType: {},
+            upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestShortUpperPanelHeight) },
+            lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestShortLowerPanelHeight) })
+            .frame(width: shieldTestPanelWidth)
     }
 }
 
@@ -231,7 +360,10 @@ private struct TrainingShellLayout: View {
 /// 明确为离屏导出（PDF/图片）场景设计，不依赖 UIWindow/Scene，读取 `.uiImage` 即触发同步渲染并等待完成。
 /// 比 `UIHostingController` + `layoutIfNeeded()`/RunLoop spin 更可靠（后者在无窗口场景下多轮实测不稳，
 /// 见 TrainingShellLayout 头部大注释）。每次调用都是一次独立、确定性的完整渲染——不依赖「同一活体树背后
-/// 再收敛一次」的隐含时序假设，故 collapse 断言直接构造一个新的 `typeRowExpanded: false` 值重渲染即可。
+/// 再收敛一次」的隐含时序假设。**Task2 实测澄清**：正因为每次都是全新 view graph，`.onAppear` 会按当次
+/// 参数如实触发，但 `.onDisappear` **不会**跨两次独立渲染触发（没有「上一次」可供对比出「消失」）——
+/// 故第二阶段若要模拟「面板已收起、盾已清」，用 `settleWithNoShields` 直接置位，不要指望再渲一次
+/// `typeRowExpanded:false` 就能让生产 `.onDisappear` 帮忙清盾。
 /// **不额外包一层 `.frame(height:)`**（真实踩坑：曾包了个 300pt 高的外框，SwiftUI 把只有 ~100pt 高的
 /// 真实内容**垂直居中**塞进那个更高的画布，shield 的 y 坐标因此被系统性下移——`TrainingShellLayout`
 /// 自己已经 `.frame(width:)` 钉了宽，高度交给 VStack 的固定高度子项自然撑出，不需要、也不能外部乱套尺寸。
@@ -248,7 +380,7 @@ extension DrawingTapHitShieldTests {
     func tapInsidePanelShieldDoesNotCommit() throws {
         let bounds = CGRect(x: 0, y: 0, width: 390, height: 480)
         let (handle, engine) = makeDrawingActiveChart(bounds: bounds)
-        engine.drawingSession.setShieldRect(CGRect(x: 0, y: 400, width: 390, height: 80), panel: .lower)
+        engine.drawingSession.setShield(.rect(CGRect(x: 0, y: 400, width: 390, height: 80)), panel: .lower)
         let before = engine.drawings.count
         handle.handleDrawingTapForTesting(at: CGPoint(x: 100, y: 440))   // 面板 shield 内一点
         #expect(engine.drawings.count == before)
@@ -258,7 +390,7 @@ extension DrawingTapHitShieldTests {
     func tapOutsidePanelStillCommits() throws {
         let bounds = CGRect(x: 0, y: 0, width: 390, height: 480)
         let (handle, engine) = makeDrawingActiveChart(bounds: bounds)
-        engine.drawingSession.setShieldRect(CGRect(x: 0, y: 400, width: 390, height: 80), panel: .lower)
+        engine.drawingSession.setShield(.rect(CGRect(x: 0, y: 400, width: 390, height: 80)), panel: .lower)
         let before = engine.drawings.count
         handle.handleDrawingTapForTesting(at: leftmostMainChartPoint(handle))   // shield 外、可见几何内一点
         #expect(engine.drawings.count == before + 1)
@@ -267,9 +399,9 @@ extension DrawingTapHitShieldTests {
     @Test("真路径差分（codex 计划-R6-high）：面板 shield 覆盖的、**本可落线**的点——装盾时被拒、清盾时落线；count 与 pendingAnchors 都验")
     func shieldBlocksOtherwiseCommittingTap() throws {
         let (handle, engine) = makeDrawingActiveChart()
-        // 展开真 overlay → 真 shield 装入（GeometryReader→onPreferenceChange→转换→setShieldRect 整链）。
+        // 展开真 overlay → 真 shield 装入（GeometryReader→onPreferenceChange→refreshShields→setShield 整链）。
         renderAndConverge(TrainingShellLayout(engine: engine, typeRowExpanded: true))
-        let shield = try #require(engine.drawingSession.shieldRect[1])
+        let shield = try #require(shieldRectOf(engine, 1))
         let mainChart = handle.renderState.viewport.mainChartFrame   // 下面板**可落线**区（成交量/MACD 区已被既有守卫拒）
         let p = CGPoint(x: shield.midX, y: shield.midY)
         try #require(mainChart.contains(p))   // ⭐关键：采样点须落在「可落线区 ∩ shield」——否则 count 不变可能与 shield 无关（假绿）
@@ -280,10 +412,13 @@ extension DrawingTapHitShieldTests {
         #expect(engine.drawings.count == c0)
         #expect(engine.drawingSession.pendingAnchors.count == pend0)
 
-        // ② 收起清盾 → 同一点落线：证明①的差别确由 shield 造成（非该点本就不可落 / 非死区）。
-        // 全新一次独立、确定性的 ImageRenderer 渲染（不依赖「同一活体树背后再收敛一次」的隐含时序假设）。
-        renderAndConverge(TrainingShellLayout(engine: engine, typeRowExpanded: false))
-        #expect(engine.drawingSession.shieldRect[1] == nil)
+        // ② 清盾 → 同一点落线：证明①的差别确由 shield 造成（非该点本就不可落 / 非死区）。
+        // Task2 实测发现（migration-matrix 缺口）：原稿这里再渲一次 `typeRowExpanded:false` 期望
+        // 生产 `.onDisappear` 帮忙清盾——但 `renderAndConverge` 每次都是全新 view graph，`.onDisappear`
+        // 跨两次独立渲染不会触发（见 TrainingShellLayout / renderAndConverge 头部大注释），盾会停在
+        // `.rect` 原值上，`#expect(... == nil)` 会假红。改用 `settleWithNoShields`（同新增
+        // upperPanelShieldBlocksOtherwiseCommittingTap 的第二阶段手法）。
+        settleWithNoShields(engine.drawingSession)
         handle.handleDrawingTapForTesting(at: p)
         #expect(engine.drawings.count == c0 + 1)
     }
@@ -292,10 +427,100 @@ extension DrawingTapHitShieldTests {
     func reviewModeInstallsNoOverlayNoShield() throws {
         let (handle, engine) = makeReviewDrawingActiveChart()
         renderAndConverge(TrainingShellLayout(engine: engine, typeRowExpanded: true))
-        #expect(engine.drawingSession.shieldRect.isEmpty)            // 复盘不装盾
+        #expect(engine.drawingSession.shield.isEmpty)                // 复盘不装盾
         let before = engine.reviewDrawings.count                     // 复盘提交路径 = reviewDrawings（routeDrawingCommit）
         handle.handleDrawingTapForTesting(at: leftmostMainChartPoint(handle))   // 复盘图表点正常（不被吞）
         #expect(engine.reviewDrawings.count == before + 1)
+    }
+
+    @Test("盾泛化真路径（trade-safety）：overlay 高到跨越上下两面板 → **两个**面板各自装盾，上面板不再裸奔")
+    func tallOverlayShieldsBothPanels() throws {
+        let (_, engine) = makeDrawingActiveChart()
+        // 下面板仅 40pt 高、上面板 60pt；样式面板（类型行 + 5 组参数）必然高于 40pt → 必跨进上面板。
+        renderAndConverge(TrainingShellLayout(engine: engine, typeRowExpanded: true))
+        let lower = try #require(shieldRectOf(engine, 1), "下面板盾缺失")
+        let upper = try #require(shieldRectOf(engine, 0),
+                                 "上面板盾缺失 —— overlay 已探进上面板却无盾 = 点面板会在上半 K 线误落线")
+        #expect(!lower.isEmpty && !upper.isEmpty)
+        // 盾是**该面板局部**坐标：上面板盾必须贴着上面板底边（overlay 从下往上探进来的那一截），
+        // 而不是原封不动的 chart 空间坐标（后者会把偏移一起带进来、挡错地方）。
+        #expect(upper.maxY <= shieldTestUpperPanelHeight + 0.5)
+    }
+
+    @Test("收起态：无 overlay → 两面板都无盾（基础清盾，**不算**不过度屏蔽的证据）")
+    func collapsedOverlayInstallsNoShield() throws {
+        let (_, engine) = makeDrawingActiveChart()
+        renderAndConverge(TrainingShellLayout(engine: engine, typeRowExpanded: false))
+        #expect(shieldRectOf(engine, 0) == nil)
+        #expect(shieldRectOf(engine, 1) == nil)
+    }
+
+    @Test("不过度屏蔽（codex 计划-R1-F1）：面板**可见且完全落在下面板内**时，上面板必须无盾、且上半 K 线照常落线")
+    func visibleLowerOnlyOverlayLeavesUpperUnshielded() throws {
+        // ⭐codex 计划-R1-F1：原稿这条用 typeRowExpanded:false（根本没 overlay）→ **空测试**：
+        //   一个「只要有可见 overlay 就连上面板一起装盾」的错误实现照样能过，上半 K 线死区测不出来。
+        //   必须让 overlay **真的可见**、且**整块落在下面板内**，才能证明「交到谁才挡谁」。
+        // 故用双高面板 fixture（上下都 tallPanelHeight），下半区面板整块装得下。
+        let (upperHandle, engine) = makeDrawingActiveChart(
+            panel: .upper, bounds: CGRect(x: 0, y: 0, width: shieldTestPanelWidth, height: shieldTestTallPanelHeight))
+        renderAndConverge(TallPanelsShellLayout(engine: engine, typeRowExpanded: true))
+
+        let lower = try #require(shieldRectOf(engine, 1), "下半区时下面板必须有盾")
+        // 前提自检：面板必须**真的装得下**在下面板内——否则本测试退化成「跨面板」场景、又变空测。
+        try #require(lower.height < shieldTestTallPanelHeight,
+                     "样式面板高于 fixture 面板高度 → 请调大 shieldTestTallPanelHeight（先打印实测高度，别猜）")
+        #expect(engine.drawingSession.shield[0] == .unshielded,
+                "上面板未处于 .unshielded（可能是 .pending 或被装了盾） —— overlay 明明没碰到上面板，属过度屏蔽（上半 K 线会出现死区）")
+        // 差分正向：上半 K 线真能落线（光断言 shield==nil 不够，要证明「点得下去」）。
+        let c0 = engine.drawings.count
+        upperHandle.handleDrawingTapForTesting(at: leftmostMainChartPoint(upperHandle))
+        #expect(engine.drawings.count == c0 + 1, "上半 K 线落不了线 —— 存在看不见的屏蔽")
+    }
+
+    @Test("上面板差分（trade-safety）：上面板被盾覆盖的、**本可落线**的点——装盾时被拒、清盾时落线")
+    func upperPanelShieldBlocksOtherwiseCommittingTap() throws {
+        // ⭐codex 计划-R5-F1/R6-F1：本 task 的 overlay 还是切片1 那个**矮**类型行（~44pt，Task3 才长高），
+        //   且贴底对齐。往上探进上面板的量 = overlay高 − 下面板高——用极矮的上/下面板 fixture，
+        //   使两者高度之和 < overlay 高度，贴底 overlay 就把上下面板整个盖满。
+        let (handle, engine) = makeDrawingActiveChart(panel: .upper,
+                                                      bounds: CGRect(x: 0, y: 0,
+                                                                     width: shieldTestPanelWidth,
+                                                                     height: shieldTestShortUpperPanelHeight))
+        renderAndConverge(ShortUpperShellLayout(engine: engine, typeRowExpanded: true))
+        let shield = try #require(shieldRectOf(engine, 0), "上面板必须有盾")
+        // 采样点取「盾 ∩ 可落线区」的真实交集中点——不盲取 shield.midY。
+        let hit = shield.intersection(handle.renderState.viewport.mainChartFrame)
+        try #require(!hit.isNull && !hit.isEmpty,
+                     """
+                     盾与上面板可落线区无交集 → fixture 几何不成立（非产品缺陷，别去改产品或放松断言）。
+                     几何：贴底 overlay 往上探进上面板的量 = overlay高 − 下面板高；上面板可落线区是其顶部 60%。
+                     修法：继续调小 shieldTestShortLowerPanelHeight（首选）与 shieldTestShortUpperPanelHeight，
+                     直到两者之和 < 实测 overlay 高度。绝不是调大。
+                     排查先打印：shield=\(shield) mainChart=\(handle.renderState.viewport.mainChartFrame)
+                     """)
+        let p = CGPoint(x: hit.midX, y: hit.midY)
+        let c0 = engine.drawings.count
+        let pend0 = engine.drawingSession.pendingAnchors.count
+        handle.handleDrawingTapForTesting(at: p)
+        #expect(engine.drawings.count == c0)
+        #expect(engine.drawingSession.pendingAnchors.count == pend0)
+        // 清盾 → **同一点**落线：证明上面那次被拒确由盾造成（非该点本就不可落）。
+        settleWithNoShields(engine.drawingSession)
+        handle.handleDrawingTapForTesting(at: p)
+        #expect(engine.drawings.count == c0 + 1)
+    }
+
+    @Test("窗口期差分（codex 计划-R14-F1）：stylePanelVisible 且盾未收敛 → 本可落线的点被拒；收敛后同点落线")
+    func tapRefusedWhileShieldsUnsettled() throws {
+        let (handle, engine) = makeDrawingActiveChart()
+        let p = leftmostMainChartPoint(handle)
+        engine.drawingSession.setStylePanelVisible(true)      // 面板刚挂载 → 两面板 .pending
+        let c0 = engine.drawings.count
+        handle.handleDrawingTapForTesting(at: p)
+        #expect(engine.drawings.count == c0, ".pending 窗口内竟落了线 —— fail-closed 未生效")
+        settleWithNoShields(engine.drawingSession)            // 几何收敛且该面板不被覆盖
+        handle.handleDrawingTapForTesting(at: p)
+        #expect(engine.drawings.count == c0 + 1, "收敛后同点仍落不了线 → 拒收范围过大（面板外也被吞）")
     }
 }
 #endif
