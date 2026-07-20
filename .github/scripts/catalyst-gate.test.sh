@@ -374,9 +374,9 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 # catalyst-total-baseline.txt / catalyst-uikit-baseline.txt 不被它们覆盖——误设/漂移只会
 # 在真 CI 的真构建步暴露、reviewer 无法从仓库状态复现。这条**显式 unset 两个冻结覆盖**、
 # 走 catalyst-gate.sh 默认的活基线，对一份代表当前 main 的裁剪真日志（pass-main-current.log：
-# 1525 tests / 56 UIKit / macabi）断言 GATE PASS 且回显 1525。活基线一旦被误改（漂出 ±30），
+# 1526 tests / 55 UIKit / macabi）断言 GATE PASS 且回显 1526。活基线一旦被误改（漂出 ±30），
 # 这条会在 Gate self-test 步就红，早于真构建步。
-# 维护：任何改动 catalyst-uikit-baseline.txt、或让真实总用例数漂出 1525±30 的 PR，必须同时
+# 维护：任何改动 catalyst-uikit-baseline.txt、或让真实总用例数漂出 1526±30 的 PR，必须同时
 # 用一次真 Catalyst 构建日志重裁 pass-main-current.log（禁手打伪造行，见 R9）。
 # （1a-iii 切片1 Task2：uikit 35→41 / total 1457→1486，随 DrawingBottomBarHeightTests 2 条 +
 # DrawingTapHitShieldTests 4 条 UIKit-gated 测试新增同步重裁。
@@ -397,14 +397,20 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   UIKit-gated 四态几何测试（chartFrameIdenticalAcrossFourStates）+ DrawingTapHitShieldTests 新增
 #   2 条 UIKit-gated 上半区盾差分测试（topPositionShieldsUpperPanelOnly/togglingPositionClearsStaleShieldExactly）
 #   同步重裁；DrawingStylePanelSourceGuardTests 新增 2 条 host-pure 守卫（mirrorFlipsOnlyTwoBlocks/
-#   productionNeverUsesTestOnlySettleHelper）不计入 uikit 基线但计入 total：+3（uikit）+2（host-pure）=+5，1520→1525。）
+#   productionNeverUsesTestOnlySettleHelper）不计入 uikit 基线但计入 total：+3（uikit）+2（host-pure）=+5，1520→1525。
+#   whole-branch fix wave（2026-07-20）：uikit 56→55 / total 1525→1526。删 DrawingLayoutInvariantTests
+#   的 UIKit-gated 冗余测试 chartFrameIdenticalAcrossDrawingStates（严格子集于四态版本，−1 uikit/−1 total）；
+#   新增 2 条 host-pure（不计入 uikit 基线）：DrawingTapHitShieldTests.setStylePanelVisibleRestoresPendingAfterSettledShields
+#   （item4 模型不变量测试）+ DrawingStylePanelSourceGuardTests.lifecycleOnChangeHandlersUseFailClosedPendingNotClear
+#   （从 productionNeverUsesTestOnlySettleHelper 拆出，覆盖 fail-open→fail-closed 关键修复）：
+#   −1（uikit 冗余测试）+2（host-pure 新增）=+1，1525→1526；uikit 56−1=55。）
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1525" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 56 / total 1525）→ GATE PASS 且回显 1525 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1526" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 55 / total 1526）→ GATE PASS 且回显 1526 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1525，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1526，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 

@@ -139,7 +139,12 @@ struct TrainingViewShellSourceGuardTests {
         let chain = try slice(code, from: "onChange(of: engine.drawingSession.drawingModeActive) { _, _ in",
                               to: ".onChange(of: typeRowExpanded)")
         #expect(chain.contains("tradeStrip = nil"))
-        #expect(chain.contains("clearAllShields()"))
+        // whole-branch fix（critical）：改调 setStylePanelVisible(true)（两面板 .pending，fail-closed），
+        // 不再是 clearAllShields()——后者先清空、absent 等价放行，若恰逢 refreshShields() 因两面板 frame
+        // 不变而不再重新触发，窗口会一直开着（详见 DrawingSession.setStylePanelVisible 文档）。
+        #expect(chain.contains("setStylePanelVisible(true)"))
+        #expect(!chain.contains("clearAllShields()"),
+                "fail-open 回归：闭包体不得再调 clearAllShields()，只允许 .onDisappear 调用")
         #expect(!chain.contains("if "), "闭包体出现 if —— 清理变成条件性，退出方向可能漏清")
     }
 }

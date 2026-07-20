@@ -59,6 +59,24 @@ struct DrawingTapHitShieldTests {
         #expect(s.shield.isEmpty, "clearAllShields 全清；后续由 setStylePanelVisible/refreshShields 重新置位")
     }
 
+    @Test("模型不变量（whole-branch fix，item4）：生命周期 onChange 现在调 setStylePanelVisible(true) 而非 clearAllShields()——即便两面板已收敛出真实值，再次调用也能把它们拉回 .pending（fail-closed 方向）")
+    func setStylePanelVisibleRestoresPendingAfterSettledShields() throws {
+        let s = DrawingSession()
+        s.setStylePanelVisible(true)
+        #expect(s.shield[0] == .pending && s.shield[1] == .pending, "面板挂载即两面板 .pending")
+
+        // 模拟一次成功收敛的 refreshShields()：两面板都写入真实值（非 .pending）。
+        s.setShield(.rect(CGRect(x: 0, y: 0, width: 10, height: 10)), panel: .upper)
+        s.setShield(.unshielded, panel: .lower)
+        #expect(s.shield[0] != .pending && s.shield[1] != .pending, "前置条件：确已收敛出真实值，而非仍是 .pending")
+
+        // 生命周期事件（如 drawingModeActive/typeRowExpanded/stylePanelPosition 的 onChange）再次触发
+        // setStylePanelVisible(true)——必须把两面板拉回 .pending，不是保留旧真实值，更不是变成 absent。
+        s.setStylePanelVisible(true)
+        #expect(s.shield[0] == .pending && s.shield[1] == .pending,
+                "whole-branch fix：生命周期事件必须能把已收敛的盾拉回 .pending（fail-closed），不能是 no-op")
+    }
+
     // ── 源码守卫（host-pure，纯字符串读取，无 UIKit 依赖）──
 
     private var srcDir: URL {
@@ -467,8 +485,10 @@ extension DrawingTapHitShieldTests {
     func collapsedOverlayInstallsNoShield() throws {
         let (_, engine) = makeDrawingActiveChart()
         renderAndConverge(TrainingShellLayout(engine: engine, typeRowExpanded: false))
-        #expect(shieldRectOf(engine, 0) == nil)
-        #expect(shieldRectOf(engine, 1) == nil)
+        // whole-branch fix（item9）：不用 shieldRectOf(...) == nil —— 那正是本文件 :237-238 自己禁止的
+        // 反模式，`.pending`（正在 fail-closed 拒收）也会让 shieldRectOf 返回 nil，与「真的没有屏蔽」混为一谈。
+        // 断言 shield.isEmpty 才证明真的没有任何 key（同 reviewModeInstallsNoOverlayNoShield 的做法）。
+        #expect(engine.drawingSession.shield.isEmpty)
     }
 
     @Test("不过度屏蔽（codex 计划-R1-F1）：面板**可见且完全落在下面板内**时，上面板必须无盾、且上半 K 线照常落线")
@@ -495,9 +515,10 @@ extension DrawingTapHitShieldTests {
 
     @Test("上面板差分（trade-safety）：上面板被盾覆盖的、**本可落线**的点——装盾时被拒、清盾时落线")
     func upperPanelShieldBlocksOtherwiseCommittingTap() throws {
-        // ⭐codex 计划-R5-F1/R6-F1：本 task 的 overlay 还是切片1 那个**矮**类型行（~44pt，Task3 才长高），
-        //   且贴底对齐。往上探进上面板的量 = overlay高 − 下面板高——用极矮的上/下面板 fixture，
-        //   使两者高度之和 < overlay 高度，贴底 overlay 就把上下面板整个盖满。
+        // ⭐codex 计划-R5-F1/R6-F1（whole-branch fix：几何说明改述现状）：overlay 现在是常驻样式面板
+        //   DrawingStylePanel（类型行 + 5 组参数整体），远高于早期仅类型行的 ~44pt，且贴底对齐。
+        //   往上探进上面板的量 = overlay高 − 下面板高——用极矮的上/下面板 fixture，使两者高度之和
+        //   < overlay 高度，贴底 overlay 就把上下面板整个盖满。fixture 数值（24/8）仍成立，几何原理不变。
         let (handle, engine) = makeDrawingActiveChart(panel: .upper,
                                                       bounds: CGRect(x: 0, y: 0,
                                                                      width: shieldTestPanelWidth,

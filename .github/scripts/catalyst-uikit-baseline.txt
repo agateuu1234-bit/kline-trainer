@@ -26,7 +26,6 @@ layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复
 零尺寸 rebuild（updateUIView 路径）不 clamp offset（codex R3-F1：observation 路径同护）
 宽度 390pt：三个底栏等高（≤0.5pt 容差）
 宽度 430pt：三个底栏等高（≤0.5pt 容差）
-进画线 / 展开 / 收起——chartPanels 容器 frame 逐像素不变（布局不变量，阻塞）
 四态布局不变量：训练 / 画线-收起 / 画线-展开(下半区) / 画线-展开(上半区)——chartPanels 容器 frame 逐像素相等
 补充快检：类型行只经 overlay、图表面板不在 typeRowExpanded 分支内
 点落在样式面板 shield 内 → 不落锚、不 commit（drawings.count 不变）——面板吃触摸不穿透

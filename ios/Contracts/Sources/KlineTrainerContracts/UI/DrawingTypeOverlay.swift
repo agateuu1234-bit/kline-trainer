@@ -5,7 +5,7 @@
 // 1a-iii 切片2 Task3：本视图现是 `DrawingStylePanel`（常驻面板，替代长按卡片）的类型行子块——展开与否
 // 已由 `ChartPanelsContainer` 的挂载条件单独决定（面板存在即展开），本视图不再自判 expanded、也不再持有
 // 长按手势（长按弹卡片的设置入口已被常驻面板取代）；第一道命中盾整体上移到 `DrawingStylePanel` 根
-// （整块面板统一吞点，留在这里只护住类型行那一条会漏掉参数区）。右端新增 ⇅ 切上/下半区（Task4 接真行为）。
+// （整块面板统一吞点，留在这里只护住类型行那一条会漏掉参数区）。右端新增 ⇅ 切上/下半区（Task4 已接真行为）。
 //
 // 双层命中屏蔽（trade-safety-critical：防误画+autosave 幽灵线）：
 //   第一道盾 = `DrawingStylePanel` 根 `.contentShape(Rectangle())` + 吞点 `.onTapGesture {}`——挡住直接落在
@@ -17,7 +17,7 @@
 import SwiftUI
 
 struct DrawingTypeOverlay: View {
-    let onTogglePosition: () -> Void          // 1a-iii 切片2 Task3：⇅ 切换面板上/下半区（Task4 接真行为）
+    let onTogglePosition: () -> Void          // 1a-iii 切片2 Task3：⇅ 切换面板上/下半区（Task4 已接真行为）
 
     // 类型行：本期只 1 个水平线图标，恒亮浅蓝框（D38：本期无选中、不做 toggle）。
     var body: some View {

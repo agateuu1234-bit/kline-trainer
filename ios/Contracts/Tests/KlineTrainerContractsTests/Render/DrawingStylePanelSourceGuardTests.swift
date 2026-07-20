@@ -220,9 +220,33 @@ struct DrawingStylePanelSourceGuardTests {
         let tv = try source("Sources/KlineTrainerContracts/UI/TrainingView.swift")
         #expect(!tv.contains("settleWithNoShields"),
                 "生产代码引用了测试逃生舱 —— 会在几何未收敛时开闸，重开幽灵线窗口")
-        let chain = try slice(tv, from: ".onChange(of: stylePanelPosition)",
-                              to: ".onChange(of: engine.tick.globalTickIndex)")
-        #expect(chain.contains("clearAllShields()"), "切位置未清盾 → 旧位置盾残留成死区")
+    }
+
+    // whole-branch fix（critical）：本守卫曾要求 `.onChange(of: stylePanelPosition)` 调 `clearAllShields()`——
+    // 那正是钉死了 fail-open bug 的守卫（absent 在 `handleDrawingTap` 里读作 `.unshielded` = 放行；
+    // 若切位置前后两面板 frame 恰好逐像素不变——面板高度 + 16pt padding == 容器高时可复现——
+    // `refreshShields()` 不会因 `DrawingUpperPanelFrameKey`/`DrawingLowerPanelFrameKey` 而重新触发，
+    // shield 会一直空着，面板全程可见期间的每次 tap 都穿透并 autosave 幽灵线）。改为要求三个仍可能在
+    // 面板可见期间触发的生命周期 `onChange`（`drawingModeActive`/`typeRowExpanded`/`stylePanelPosition`）
+    // 都调 `setStylePanelVisible(true)`（两面板 `.pending`，fail-closed）且**不得**再出现 `clearAllShields()`——
+    // 后者只留给 `.onDisappear`（真正的卸载语义，本守卫不覆盖，卸载语义仍是 clearAllShields 的唯一合法调用点）。
+    @Test("fail-closed 生命周期清盾（whole-branch fix）：三个仍面板可见期间可能触发的 onChange 一律调 setStylePanelVisible(true)，clearAllShields() 不得出现在其中")
+    func lifecycleOnChangeHandlersUseFailClosedPendingNotClear() throws {
+        let tv = try source("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        let drawingModeChain = try slice(tv, from: ".onChange(of: engine.drawingSession.drawingModeActive) { _, _ in",
+                                         to: ".onChange(of: typeRowExpanded)")
+        let typeRowChain = try slice(tv, from: ".onChange(of: typeRowExpanded) { _, _ in",
+                                     to: ".onChange(of: stylePanelPosition)")
+        let positionChain = try slice(tv, from: ".onChange(of: stylePanelPosition)",
+                                      to: ".onChange(of: engine.tick.globalTickIndex)")
+        for (name, chain) in [("drawingModeActive", drawingModeChain),
+                               ("typeRowExpanded", typeRowChain),
+                               ("stylePanelPosition", positionChain)] {
+            #expect(chain.contains("setStylePanelVisible(true)"),
+                    "\(name) 的 onChange 未调 setStylePanelVisible(true) —— 面板可见期间可能出现无 key 的裸奔态")
+            #expect(!chain.contains("clearAllShields()"),
+                    "\(name) 的 onChange 仍调 clearAllShields() —— fail-open：清空后若 refreshShields 因两面板 frame 不变而不再触发，shield 会一直空着")
+        }
     }
 
     @Test("旧长按卡片已删除、长按钩子已摘除（不留两套设置入口）")

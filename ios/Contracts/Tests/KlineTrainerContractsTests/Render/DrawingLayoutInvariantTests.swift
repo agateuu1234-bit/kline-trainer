@@ -98,18 +98,6 @@ struct DrawingLayoutInvariantTests {
         return f
     }
 
-    @Test("进画线 / 展开 / 收起——chartPanels 容器 frame 逐像素不变（布局不变量，阻塞）")
-    @MainActor
-    func chartFrameIdenticalAcrossDrawingStates() throws {
-        let training  = try chartFrame(isDrawing: false, expanded: false)
-        let collapsed = try chartFrame(isDrawing: true,  expanded: false)
-        let expanded  = try chartFrame(isDrawing: true,  expanded: true)
-        #expect(collapsed == training,
-                "进画线不改图表尺寸：training=\(training) collapsed=\(collapsed)")
-        #expect(expanded == training,
-                "展开类型行不改图表尺寸（overlay 不 reflow）：training=\(training) expanded=\(expanded)")
-    }
-
     @Test("四态布局不变量：训练 / 画线-收起 / 画线-展开(下半区) / 画线-展开(上半区)——chartPanels 容器 frame 逐像素相等")
     @MainActor
     func chartFrameIdenticalAcrossFourStates() throws {

@@ -50,7 +50,8 @@ public struct TrainingView: View {
     @State private var replaySettlementFailed = false  // 新需求10(A6)：replay 结算失败 → 可重试 alert
     @State private var tradeStrip: TradeStripRequest?
     @State private var typeRowExpanded = true      // 画线类型行收/展
-    // 1a-iii 切片2 Task3：常驻样式面板替代长按卡片；面板上/下半区位置（Task4 接 ⇅ 真行为，本 task 固定 .bottom）。
+    // 1a-iii 切片2 Task3：常驻样式面板替代长按卡片；面板上/下半区位置（Task4 已接 ⇅ 真行为——onTogglePosition
+    // 在 .top/.bottom 间切换，DrawingStylePanel 据此镜像「参数/类型行」两大块顺序）。
     @State private var stylePanelPosition: DrawingStylePanelPosition = .bottom
     @State private var toast = ToastState()      // §B.1：latest-wins 调度核（host-tested）
     @State private var confirmingEnd = false
@@ -284,21 +285,33 @@ public struct TrainingView: View {
         // remount，同 tick/period 下被 TradeConfirmGuard 放行成交。清 nil 恒安全（本就不该跨画线切换留着买卖框）。
         .onChange(of: engine.drawingSession.drawingModeActive) { _, _ in
             tradeStrip = nil
-            // 1a-iii 切片2 Task2：进/出画线都显式清**两个面板**的盾（clearAllShields，防漏清某个面板留死区）。
-            engine.drawingSession.clearAllShields()
+            // whole-branch fix（critical）：改用 setStylePanelVisible(true) 把**两个**面板置 .pending
+            // （fail-closed），不再用 clearAllShields()。absent 等价放行（handleDrawingTap 读
+            // shield[k] ?? .unshielded）——先清空会打开一个只靠 refreshShields() 才能关上的窗口，
+            // 而上/下面板 frame 在切位置前后可能逐像素不变（四态布局不变量本身就断言这点），此时
+            // DrawingShieldFrameKey 若也恰好不变，refreshShields() 永不重新触发，shield 就会一直
+            // 空着——面板全程可见期间的每一次 tap 都会穿透并 autosave 幽灵线。refreshShields() 每次
+            // 调用都无条件覆盖两个 key（见其实现），stale 的 .pending 撑不过下一轮收敛，故这里即便
+            // 方向「反了」（.pending 而非真实值）也会自纠正——是可接受的 fail-closed 瞬态。
+            // clearAllShields() 只保留给 .onDisappear（真正的卸载语义，见下方）。
+            engine.drawingSession.setStylePanelVisible(true)
         }
-        // 1a-iii 切片2 Task2：收起类型行也显式清盾（同上防御，overlay 隐藏时几何不齐也不会误开闸）。
+        // 收起类型行也显式置盾为 .pending（同上一条 onChange 的理由；overlay 隐藏时几何不齐也不会误开闸）。
         .onChange(of: typeRowExpanded) { _, _ in
-            engine.drawingSession.clearAllShields()
+            engine.drawingSession.setStylePanelVisible(true)
         }
-        // 1a-iii 切片2 Task4：切面板上/下半区即清所有盾——旧位置的盾若残留，那半边 K 线会变成
+        // 1a-iii 切片2 Task4：切面板上/下半区即重置所有盾——旧位置的盾若残留，那半边 K 线会变成
         // 「怎么点都画不了线」的死区（nil-preference 自动重算是第一层，本行是明确的生命周期第二层）。
-        // ⭐codex 计划-R16-F1：这里只能 clearAllShields()，绝不能用 settleWithNoShields()。
-        //   切位置正是几何尚未重新收敛的时刻——清盾后立刻标记「已收敛」等于在最需要保护的瞬间
+        // ⭐codex 计划-R16-F1：这里绝不能用 settleWithNoShields()（测试逃生舱）。
+        //   切位置正是几何尚未重新收敛的时刻——把两面板标记「已收敛」等于在最需要保护的瞬间
         //   关掉 fail-closed：新位置的面板已可见、盾还没算出来，此时的 tap 会穿透并 autosave 幽灵线。
-        //   正确语义 = 清盾并保持未收敛，直到 refreshShields() 见到 overlay + 两个面板 frame 齐备才开闸。
+        //   正确语义 = 置两面板 .pending 并保持未收敛，直到 refreshShields() 见到 overlay + 两个面板 frame
+        //   齐备才开闸。whole-branch fix（critical）：改用 setStylePanelVisible(true)——absent（clearAllShields()
+        //   会先产生的状态）等价放行，若此刻上/下面板 frame 恰好与切位置前逐像素相同（可复现：面板高度 + 16pt
+        //   padding == 容器高），refreshShields() 不会因 DrawingUpperPanelFrameKey/DrawingLowerPanelFrameKey
+        //   而重新触发，absent 状态会一直留到面板消失为止——那正是「清掉后裸奔」的中间态。
         .onChange(of: stylePanelPosition) { _, _ in
-            engine.drawingSession.clearAllShields()      // 全清；随后由 refreshShields 按新几何重置（Step 3 唯一定义）
+            engine.drawingSession.setStylePanelVisible(true)   // 两面板置 .pending；随后由 refreshShields 按新几何重置（Step 3 唯一定义）
         }
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
             tradeStrip = nil                                    // codex R3-high：tick 推进(含持有/观察)即作废未确认买卖条，防按新 tick 价成交
@@ -637,7 +650,7 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
     let isDrawingActive: Bool
     let typeRowExpanded: Bool
     let scheme: AppColorScheme                    // 1a-iii 切片2 Task3：样式面板色板取色（DrawingColorResolver）
-    let stylePanelPosition: DrawingStylePanelPosition   // 上/下半区（Task4 接 ⇅ 真行为，本 task 固定 .bottom）
+    let stylePanelPosition: DrawingStylePanelPosition   // 上/下半区（Task4 已接 ⇅ 真行为：refreshShields() 按当前位置求交两面板）
     let onTogglePosition: () -> Void               // ⇅ 回调（替代已删的 onLongPressType）
     @ViewBuilder let upperPanel: () -> Upper
     @ViewBuilder let lowerPanel: () -> Lower
@@ -676,7 +689,7 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
                 DrawingStylePanel(session: engine.drawingSession, scheme: scheme,
                                   position: stylePanelPosition, onTogglePosition: onTogglePosition)
                     // ⭐codex 计划-R1-F2：GeometryReader 必须量**未加 padding 的可见面板本体**——
-                    //   量到的 frame 就是写进 shieldRect 的盾。先量、后 padding：
+                    //   量到的 frame 就是写进 shield（经 refreshShields() 的 .rect case）的盾。先量、后 padding：
                     .background(GeometryReader { g in Color.clear
                         .preference(key: DrawingShieldFrameKey.self, value: g.frame(in: .named("chart"))) })
                     // 离屏边距加在测量之后 → 只影响面板摆放位置，不进盾（无看不见的死条）。

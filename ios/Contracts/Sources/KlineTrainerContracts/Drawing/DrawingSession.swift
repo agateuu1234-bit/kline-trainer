@@ -63,8 +63,15 @@ public final class DrawingSession {
     /// `ChartContainerView.handleDrawingTap` 读它决定是否拒绝落锚（防误画+autosave 幽灵线）。
     public private(set) var shield: [Int: PanelShield] = [:]
 
-    /// 面板挂载/卸载：挂载即把**两个**面板置 `.pending`（同步、不经 preference），
-    /// 卸载即全清。这是「窗口期」的唯一来源，也是它唯一的表达方式。
+    /// `visible == true`：把**两个**面板置 `.pending`（同步、不经 preference）——`ChartPanelsContainer
+    /// .refreshShields()` 在几何尚未到齐（`stylePanelChartFrame`/两个面板 frame 三者任一为 nil）时调用它，
+    /// 是 fail-closed 窗口的唯一表达方式。`visible == false`：全清（面板真正不可见时的语义，`refreshShields()`
+    /// 判定 `stylePanelVisible == false` 时调用）。**whole-branch fix（critical）**：`TrainingView` 的三个
+    /// 生命周期 `onChange`（`drawingModeActive` / `typeRowExpanded` / `stylePanelPosition`）现在也调用
+    /// `setStylePanelVisible(true)`（而非 `clearAllShields()`）——绝不能让面板可见期间出现「无 key」的
+    /// 中间态：absent 在 `ChartContainerView.handleDrawingTap` 里读作 `.unshielded`（放行），若此刻
+    /// `refreshShields()` 恰好因三个 frame 均未变化而不再重新触发（面板高度 + 16pt padding == 容器高时
+    /// 可复现），absent 状态会一直留到面板消失为止。
     func setStylePanelVisible(_ visible: Bool) {
         if visible { shield[0] = .pending; shield[1] = .pending } else { shield.removeAll() }
     }
@@ -72,8 +79,10 @@ public final class DrawingSession {
     /// 几何收敛后由 `refreshShields()` 写入某面板的最终状态（`.rect` 或 `.unshielded`）。
     func setShield(_ s: PanelShield, panel: PanelId) { shield[panel == .upper ? 0 : 1] = s }
 
-    /// 一次清掉**所有**面板的屏蔽（退画线 / view 消失 / 切位置）。切位置后由 `setStylePanelVisible(true)`
-    /// 重新置 `.pending`，或由下一轮 `refreshShields()` 写入实值——**不存在「清掉后裸奔」的中间态**。
+    /// 一次清掉**所有**面板的屏蔽。**唯一**调用点是「面板真正卸载」的语义——`deactivate()`（退画线）与
+    /// `TrainingView` 的 `.onDisappear`（view 消失/导航退出）。面板仍可见期间的生命周期事件（进/出画线、
+    /// 收起/展开类型行、切上下半区）改调 `setStylePanelVisible(true)`（见上）而**不是**本方法——
+    /// 清空会产生「面板可见却无 key」的裸奔窗口，只有面板真的不在了才允许清空。
     func clearAllShields() { shield.removeAll() }
 
     public init() {}
