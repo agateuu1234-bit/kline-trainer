@@ -602,6 +602,19 @@ def test_assemble_from_windows_writes_all_periods_into_sqlite(tmp_path):
     assert got == set(PERIODS)
 
 
+def test_assemble_from_windows_leaves_only_zip_in_output_dir(tmp_path):
+    """中间 .db 建在临时目录（codex PF2-R5-F1），不落在 output_dir：留渣会让下次同起点重试
+    撞 `table meta already exists`（DDL 裸 CREATE TABLE 无 IF NOT EXISTS）。
+    非 brief 逐字给出的测试——补充覆盖此守卫（实施者自查发现无测试覆盖）。"""
+    from generate_training_sets import assemble_from_windows
+    windows = {p: _bars(p, 40) for p in PERIODS}
+    start = int(windows["monthly"]["datetime"].iloc[10])
+    gts = assemble_from_windows(tmp_path, stock_code="Y", stock_name="Y",
+                                start_datetime=start, end_datetime=start + 100,
+                                windows=windows)
+    assert {p.name for p in tmp_path.iterdir()} == {gts.path.name}
+
+
 # ===== Plan 2b Task 5：exclude_starts（uq_stock_start 变成候选资格）=====
 
 def _production_fixture():

@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import random
 import sqlite3
 import tempfile
@@ -33,16 +34,21 @@ from typing import Any, Optional, Sequence
 import pandas as pd
 
 from qmt_normalize import trading_date
+from qmt_resample import period_boundaries
 
 SCHEMA_VERSION = 1
 MIN_PERIOD = "3m"
 # 训练组包含的周期（plan §8.3 period_configs；最细=3m）
 PERIODS = ("monthly", "weekly", "daily", "60m", "15m", "3m")
 # 各周期"起始前"取根数上限；None = 全取（monthly）
-# 本模块暂无引用（旧 assemble_training_set 已 fail-closed 停用）：Plan 2 重接生产装配时
-# 作 build_training_windows(..., before_caps=PERIOD_BEFORE_CAP) 传入。
+# Plan 2b：generate_one_training_set 作 build_training_windows(..., before_caps=PERIOD_BEFORE_CAP) 传入。
 PERIOD_BEFORE_CAP = {"monthly": None, "weekly": 120, "daily": 150,
                      "60m": 150, "15m": 150, "3m": 150}
+
+# B2 生成互斥锁 key（codex PF2-R5-F2；与 scheduler_main.SCHEDULER_LOCK_KEY 刻意不同——
+# 复用那把会让运行中的 CLI 把 B4 守护进程挡在启动之外）。CLI 与 B4 sweep 两条
+# 调用 B2 的路径都必须先拿到它，杜绝同一 (stock_code,start) 被两个 writer 同时产出。
+B2_GENERATION_LOCK_KEY = 0x42345CEE
 
 
 class GenerateSkipException(Exception):
@@ -376,6 +382,52 @@ async def _fetch_period_bars(conn, stock_code: str, period: str) -> pd.DataFrame
     return pd.DataFrame([dict(r) for r in rows])
 
 
+async def _fetch_dense_coverage(conn, stock_code: str):
+    """D11：读 stock_coverage 权威 dense 1m 覆盖（**不从 klines 反推**——反推会在
+    边角/retry/周期变更下与 B1 的决定漂移、且失败难诊断，codex R17-F1）。
+    返回 (start_date, end_date, dropped_dates_set)；无该股行 → (None, None, set())。
+
+    **坏行一律降级成 GenerateSkipException**（codex PF2-R2-F1）：schema 有 CHECK 兜底，
+    但历史行 / 手工修补 / Plan 3 writer 半成品仍可能带非法内容（如 `["nope"]` 能过
+    `jsonb_typeof` 数组检查却不是 ISO 日期）。裸 `json.loads` / `date.fromisoformat`
+    抛的 JSONDecodeError·ValueError·TypeError **不被 generate_batch 捕获**（它只捕
+    GenerateSkipException）→ **中止整轮 sweep** 而非跳过一只股，且在 B4 常驻进程里
+    会一路冒泡。故在此转成带原因的 skip。"""
+    row = await conn.fetchrow(
+        "SELECT dense_1m_start_date, dense_1m_end_date, dropped_1m_dates, dense_day_count "
+        "FROM stock_coverage WHERE stock_code=$1", stock_code)
+    if row is None:
+        return None, None, set(), None
+    start_date, end_date = row["dense_1m_start_date"], row["dense_1m_end_date"]
+    if start_date is None or end_date is None:
+        raise GenerateSkipException(
+            f"{stock_code}: stock_coverage 覆盖带端点为 NULL（坏行）")
+    if start_date > end_date:
+        raise GenerateSkipException(
+            f"{stock_code}: stock_coverage 覆盖带反向（{start_date} > {end_date}）")
+    raw = row["dropped_1m_dates"]
+    if raw is None:
+        raw = "[]"
+    try:
+        # asyncpg 默认把 jsonb 当 str 返回；若调用方装了 json codec 则已是 list，两者都接
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(parsed, list):
+            raise ValueError(f"非数组（{type(parsed).__name__}）")
+        dropped = {_dt.date.fromisoformat(s) for s in parsed}
+    except (ValueError, TypeError) as exc:      # JSONDecodeError ⊂ ValueError
+        raise GenerateSkipException(
+            f"{stock_code}: stock_coverage.dropped_1m_dates 非法（{exc}）") from exc
+    return start_date, end_date, dropped, row["dense_day_count"]
+
+
+async def _fetch_existing_starts(conn, stock_code: str) -> set:
+    """uq_stock_start：该股已登记的所有 start_datetime，作 build_training_windows
+    的 exclude_starts（把唯一性变成候选资格，而非事后撞库重来）。"""
+    rows = await conn.fetch(
+        "SELECT start_datetime FROM training_sets WHERE stock_code=$1", stock_code)
+    return {int(r["start_datetime"]) for r in rows}
+
+
 async def _exists_start(conn, stock_code: str, start_datetime: int) -> bool:
     """D7：幂等预检——schema.sql 有 uq_stock_start UNIQUE(stock_code,start_datetime) 作硬底线；
     本 SELECT 预检让冲突走"重选起始点"的干净 UX（而非撞 UNIQUE 抛 UniqueViolationError）。"""
@@ -385,11 +437,18 @@ async def _exists_start(conn, stock_code: str, start_datetime: int) -> bool:
     return row is not None
 
 
-async def _register_training_set(conn, gts: GeneratedTrainingSet) -> int:
-    """登记 training_sets 行（status 默认 'unsent'）。返回新行 id。"""
+async def _register_training_set(conn, gts: GeneratedTrainingSet) -> Optional[int]:
+    """登记 training_sets 行（status 默认 'unsent'）。返回新行 id；
+    **起点已被并发 sweep 抢先登记 → 返回 None**（codex PF2-R2-F2）。
+
+    用 `ON CONFLICT (stock_code, start_datetime) DO NOTHING RETURNING id` 原子处理
+    `uq_stock_start` 的 TOCTOU：否则并发 sweep 在预检与 INSERT 之间插入同一起点时，
+    asyncpg 抛 UniqueViolationError → **穿出 generate_batch**（它只捕
+    GenerateSkipException）→ 中止整轮 sweep，而不是干净跳过这一只股。"""
     return await conn.fetchval(
         "INSERT INTO training_sets (stock_code, stock_name, start_datetime, end_datetime, "
-        "schema_version, file_path, content_hash) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
+        "schema_version, file_path, content_hash) VALUES ($1,$2,$3,$4,$5,$6,$7) "
+        "ON CONFLICT (stock_code, start_datetime) DO NOTHING RETURNING id",
         gts.stock_code, gts.stock_name, gts.start_datetime, gts.end_datetime,
         gts.schema_version, str(gts.path), gts.content_hash)
 
@@ -402,22 +461,87 @@ def _stock_name_of(stock_code: str) -> str:
 async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
                                     rng: Optional[random.Random] = None,
                                     max_retries: int = 8) -> GeneratedTrainingSet:
-    """D7：取各周期 bars → 装配 → 幂等预检（冲突重选）→ 登记。
-    重试耗尽 / 月线不足 / 周期数据不足 → GenerateSkipException。"""
+    """D7 + Plan 2b 重接：取各周期 bars → 读 stock_coverage 权威 dense 覆盖 →
+    走安全纯入口 build_training_windows（D2 dense 门 + D6 before/after + D9 per-day
+    硬门 + bounded retry）→ 纯装配 → 登记。
+
+    **不再经旧 assemble_training_set**（已删；它自带随机选起点、绕过全部门控）。
+    月边界哨兵从**日线**求（period_boundaries），非从已发射的月 bar——后者不含当前
+    partial 月的 open，会让最新完整月当不成第 8 前向月、白白少候选（codex R9-F1）。
+    任一前置缺失（周期数据空 / 无覆盖 artifact）→ GenerateSkipException，fail-closed。"""
     rng = rng or random.Random()
     period_bars = {p: await _fetch_period_bars(conn, stock_code, p) for p in PERIODS}
-    for _ in range(max_retries):
-        gts = assemble_training_set(output_dir, stock_code=stock_code,
-                                    stock_name=_stock_name_of(stock_code),
-                                    period_bars=period_bars, rng=rng)
-        if await _exists_start(conn, stock_code, gts.start_datetime):
-            gts.path.unlink(missing_ok=True)                     # 重选：删掉冲突产物
-            gts.path.with_suffix(".db").unlink(missing_ok=True)
-            continue
-        await _register_training_set(conn, gts)
-        gts.path.with_suffix(".db").unlink(missing_ok=True)      # 仅保留 .zip（库登记的产物），删中间 .db
-        return gts
-    raise GenerateSkipException(f"{stock_code}: {max_retries} 次起始点全冲突，跳过")
+    for p, bars in period_bars.items():
+        if bars.empty:
+            raise GenerateSkipException(f"{stock_code}: {p} 无 bars")
+
+    start_date, end_date, dropped, dense_day_count = await _fetch_dense_coverage(
+        conn, stock_code)
+    if start_date is None or end_date is None:
+        raise GenerateSkipException(
+            f"{stock_code}: stock_coverage 无覆盖 artifact（B1 未写入）→ 无法门控，跳过")
+
+    daily = period_bars["daily"]
+    trading_dates = sorted({trading_date(int(e)) for e in daily["datetime"]})
+    dense_dates = {d for d in trading_dates if start_date <= d <= end_date} - dropped
+    if not dense_dates:
+        raise GenerateSkipException(f"{stock_code}: dense 覆盖为空")
+
+    # **交叉校验重建出的日历 vs 权威计数**（codex PF2-R6-F1）。
+    # 上面的 trading_dates 是从**现存的 daily klines** 反推的：若带内某个交易日的
+    # daily 行本身缺失（B1 半途导入 / 行丢失），那天就同时从 dense_dates 与 D9 的
+    # span 里**一起消失** —— 两道门都看不见它，窗口能带着整日空洞过关。
+    # dense_day_count 是 B1 写下的权威天数，对不上即 fail-closed。
+    if dense_day_count is None:
+        raise GenerateSkipException(
+            f"{stock_code}: stock_coverage.dense_day_count 为 NULL，无法交叉校验")
+    if len(dense_dates) != int(dense_day_count):
+        raise GenerateSkipException(
+            f"{stock_code}: dense 日历不一致——artifact 记 {dense_day_count} 天，"
+            f"由 daily klines 重建出 {len(dense_dates)} 天（带内有 daily 行缺失？）")
+
+    month_boundaries = period_boundaries(daily, "monthly")
+    exclude = await _fetch_existing_starts(conn, stock_code)
+
+    start_datetime, windows = build_training_windows(
+        period_bars, month_boundaries, rng,
+        dense_dates=dense_dates, trading_dates=trading_dates,
+        before_caps=PERIOD_BEFORE_CAP, max_retries=max_retries,
+        exclude_starts=frozenset(exclude))
+
+    idx = month_boundaries.index(int(start_datetime))
+    after_end = compute_after_end(month_boundaries, idx)
+
+    # 顺序 = **先写文件、后登记**（codex PF2-R4 后简化；见文末 PF2-R5 决议）。
+    # 生产上并发生成不可能：B2 只在 B4 sweep 内跑，而 scheduler_main D14 用
+    # `pg_try_advisory_lock` 强制**集群级单例**（第二个进程直接退出）+ APScheduler
+    # `max_instances=1`/`coalesce=True` 防同进程重入。故不做暂存/两阶段发布——
+    # 那套机器是给架构上不发生的场景加的，且每加一层都引入新失败面（R2→R3→R4）。
+    #
+    # 本顺序下的崩溃窗口 = 写完 zip、登记前进程死 → **孤儿 zip + 无数据库行**。
+    # 它是**自愈**的：没有行引用它、exclude_starts 也不含该起点 → 下次 sweep 可重选
+    # 同一起点、覆盖它并登记成功。（反之「先登记后发布」留下的是 uq_stock_start 被占、
+    # B3 反复预定却 404 的**永久卡死行**，严格更糟。）
+    gts = assemble_from_windows(output_dir, stock_code=stock_code,
+                                stock_name=_stock_name_of(stock_code),
+                                start_datetime=int(start_datetime),
+                                end_datetime=int(after_end), windows=windows)
+
+    # 预检：候选已按 exclude_starts 过滤，这条只是省掉常见情形下的一次白建 zip
+    if await _exists_start(conn, stock_code, gts.start_datetime):
+        gts.path.unlink(missing_ok=True)     # 中间 .db 在临时目录、已自动清
+        raise GenerateSkipException(
+            f"{stock_code}: start {gts.start_datetime} 已登记，跳过")
+
+    # ON CONFLICT DO NOTHING = 廉价保险：唯一冲突返回 None 而非抛
+    # UniqueViolationError（后者不被 generate_batch 捕获 → 中止整轮 sweep）。
+    # 只覆盖「运维手工跑 CLI 时调度器也在跑」这个**不受支持**的操作场景；
+    # 此时不删最终路径的文件（可能是对方的产物），只干净跳过。
+    row_id = await _register_training_set(conn, gts)
+    if row_id is None:
+        raise GenerateSkipException(
+            f"{stock_code}: start {gts.start_datetime} 已登记（并发 CLI？），跳过")
+    return gts                       # 中间 .db 从不落在 output_dir，无需清理
 
 
 async def generate_batch(conn, target_count: int, output_dir: Path,
@@ -429,6 +553,7 @@ async def generate_batch(conn, target_count: int, output_dir: Path,
         return []
     out: list = []
     skips = 0
+    first_skip: Optional[str] = None       # 首条 skip 原因（诊断用；不逐条刷屏）
     max_skips = max(target_count * 4, 4)
     i = 0
     while len(out) < target_count and skips < max_skips:
@@ -436,10 +561,15 @@ async def generate_batch(conn, target_count: int, output_dir: Path,
         i += 1
         try:
             out.append(await generate_one_training_set(conn, code, output_dir, rng))
-        except GenerateSkipException:
+        except GenerateSkipException as exc:
             skips += 1
+            if first_skip is None:
+                first_skip = f"{code}: {exc}"
     if len(out) < target_count:
-        print(f"[B2] 警告：仅生成 {len(out)}/{target_count}（skip {skips} 次）")
+        # 欠产必须可诊断：只报数字会让"stock_coverage 空表"（Plan 3 前的预期状态）
+        # 与"真回归"长得一模一样。
+        print(f"[B2] 警告：仅生成 {len(out)}/{target_count}（skip {skips} 次）"
+              f"；首条 skip 原因 = {first_skip}")
     return out
 
 
@@ -467,13 +597,15 @@ async def _amain(args) -> int:
         if args.backfill:
             await backfill_content_hash(conn)
             return 0
+        if not await conn.fetchval("SELECT pg_try_advisory_lock($1)",
+                                   B2_GENERATION_LOCK_KEY):
+            print("[B2] 错误：B2 生成锁被占（B4 调度器正在 sweep，或另一个 B2 CLI 在跑）。"
+                  "并发生成会覆盖已登记的 .zip 并让 content_hash 失配，故拒绝启动。")
+            return 1
         try:
             sets = await generate_batch(conn, args.count, out_dir, random.Random(args.seed))
-        except NotImplementedError as exc:
-            # codex whole-branch review high：assemble_training_set 已 fail-closed 停用；
-            # CLI 人工调用，比裸 traceback 更清楚地报错并非零退出（而非静默/丢生成结果）。
-            print(f"[B2] 错误：{exc}")
-            return 1
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock($1)", B2_GENERATION_LOCK_KEY)
         for g in sets:
             print(f"[B2] {g.path.name} crc32={g.content_hash} start={g.start_datetime}")
         print(f"[B2] 完成：生成 {len(sets)} 个训练组")
