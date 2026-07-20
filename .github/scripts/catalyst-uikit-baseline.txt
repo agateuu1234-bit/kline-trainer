@@ -27,6 +27,7 @@ layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复
 宽度 390pt：三个底栏等高（≤0.5pt 容差）
 宽度 430pt：三个底栏等高（≤0.5pt 容差）
 进画线 / 展开 / 收起——chartPanels 容器 frame 逐像素不变（布局不变量，阻塞）
+四态布局不变量：训练 / 画线-收起 / 画线-展开(下半区) / 画线-展开(上半区)——chartPanels 容器 frame 逐像素相等
 补充快检：类型行只经 overlay、图表面板不在 typeRowExpanded 分支内
 点落在样式面板 shield 内 → 不落锚、不 commit（drawings.count 不变）——面板吃触摸不穿透
 点落在面板 shield 外的 K 线区 → 正常落线（屏蔽只挡面板内）
@@ -38,6 +39,8 @@ layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复
 上面板差分（trade-safety）：上面板被盾覆盖的、**本可落线**的点——装盾时被拒、清盾时落线
 窗口期差分（codex 计划-R14-F1）：stylePanelVisible 且盾未收敛 → 本可落线的点被拒；收敛后同点落线
 透明外边距不进**输入层**盾（codex 计划-R1-F2）：面板可见外接矩形**之外**的 8pt 空隙里点一下 → 正常落线，不是死条
+上半区（镜像）盾（精确判据）：面板整块落在上面板内 → 上面板有盾贴顶边、下面板盾 == nil
+⇅ 切位置后旧盾精确清零：下半区 → 上半区，下面板盾必须 == nil，且旧盾位置能重新落线
 KLineView 可实例化（spec L1179 final class）
 renderState 可读写（compile-check：let 字段 + init 重建模式）
 forScheme(.dark) 13 字段桥 = AppPalette.dark

@@ -101,13 +101,14 @@ struct DrawingTapHitShieldTests {
         #expect(chartPanelsBody.contains("ChartPanelsContainer("))
 
         // ChartPanelsContainer 正文内，唯一锚定类型行 overlay 接线：DrawingStylePanel( + 两个
-        // PreferenceKey 上报/转换必须同挂在同一个 .overlay(alignment: .bottom) 块里，而不是随便一处
+        // PreferenceKey 上报/转换必须同挂在同一个 .overlay(alignment:) 块里，而不是随便一处
         // 泛 `.overlay(alignment: .bottom)`（panel(_:) 里同名但不带这些）。
         let containerBody = try extractBody(tv, from: "struct ChartPanelsContainer<Upper: View, Lower: View>: View {", to: "#if DEBUG")
         // 切片2 Task2：DrawingPanelFrameKey 改名 DrawingLowerPanelFrameKey + 新增 DrawingUpperPanelFrameKey
         // （两个面板都上报 frame，求交装两个面板的盾）。
         // 切片2 Task3：挂载点内容从 DrawingTypeOverlay( 换成 DrawingStylePanel(（常驻面板替代类型行 overlay）。
-        for marker in [".overlay(alignment: .bottom)", "DrawingStylePanel(", "DrawingShieldFrameKey",
+        // 切片2 Task4：alignment 随 stylePanelPosition 切（.top/.bottom），旧的固定 ".bottom" 字面量已消失。
+        for marker in [".overlay(alignment: stylePanelPosition == .top ? .top : .bottom)", "DrawingStylePanel(", "DrawingShieldFrameKey",
                        "DrawingUpperPanelFrameKey", "DrawingLowerPanelFrameKey", "offsetBy"] {
             #expect(containerBody.contains(marker))
         }
@@ -333,6 +334,7 @@ private struct TrainingShellLayout: View {
 private struct TallPanelsShellLayout: View {
     let engine: TrainingEngine
     var typeRowExpanded: Bool = true
+    var stylePanelPosition: DrawingStylePanelPosition = .bottom   // Task4：位置切换靠重新构造外壳值渲染，非回调
 
     var body: some View {
         ChartPanelsContainer(
@@ -341,7 +343,7 @@ private struct TallPanelsShellLayout: View {
             isDrawingActive: engine.drawingSession.drawingModeActive,
             typeRowExpanded: typeRowExpanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
-            stylePanelPosition: .bottom,    // 本 task 三个外壳都不带自己的 stylePanelPosition 状态，固定传 .bottom
+            stylePanelPosition: stylePanelPosition,
             onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
             upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestTallPanelHeight) },
             lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestTallPanelHeight) })
@@ -553,6 +555,70 @@ extension DrawingTapHitShieldTests {
         handle.handleDrawingTapForTesting(at: p)
         #expect(engine.drawings.count == c0 + 1,
                 "面板可见边缘外的透明边距被算进了盾 → 图表上有看不见的死条")
+    }
+
+    @Test("上半区（镜像）盾（精确判据）：面板整块落在上面板内 → 上面板有盾贴顶边、下面板盾 == nil")
+    func topPositionShieldsUpperPanelOnly() throws {
+        let (lowerHandle, engine) = makeDrawingActiveChart(
+            panel: .lower, bounds: CGRect(x: 0, y: 0, width: shieldTestPanelWidth, height: shieldTestTallPanelHeight))
+        renderAndConverge(TallPanelsShellLayout(engine: engine, typeRowExpanded: true, stylePanelPosition: .top))
+
+        let upper = try #require(shieldRectOf(engine, 0), "上半区时上面板必须有盾")
+        // 前提自检：面板必须真的装得下在上面板内，否则退化成跨面板场景、本测试失去意义。
+        try #require(upper.height < shieldTestTallPanelHeight,
+                     "样式面板高于 fixture 面板高度 → 调大 shieldTestTallPanelHeight（先打印实测，别猜）")
+        // 顶边对齐：盾顶边 == 上面板顶边 + 8pt 离屏边距（spec §2.3「类型行顶边贴上半 K 线顶边」）。
+        #expect(abs(upper.minY - 8) <= 0.5, "盾未贴上面板顶边（期望 8pt 边距，实测 \(upper.minY)）")
+        // ⭐精确判据：下面板完全没有盾（不是「矮一点」）。
+        #expect(engine.drawingSession.shield[1] == .unshielded, "下面板未处于 .unshielded = 过度屏蔽或未收敛")
+        let c0 = engine.drawings.count
+        lowerHandle.handleDrawingTapForTesting(at: leftmostMainChartPoint(lowerHandle))
+        #expect(engine.drawings.count == c0 + 1, "下半 K 线落不了线 —— 面板在上半区却挡住了下面板")
+
+        // ⭐codex 计划-R10-F2：光断言「上面板有盾 + minY≈8」证明不了 §4.4 的「点面板空隙不落线」——
+        //   一个尺寸过小/错位的上面板盾照样满足这两条，而可见面板下方大片区域仍会穿透并 autosave 幽灵线。
+        //   必须补上面板的真差分：盾内可落线点 → 装盾时被拒、清盾后落线。
+        // ⭐codex 计划-R11-F1：必须挂在同一个 engine 上，用 makeChartHandle 复用已渲染、已被断言的那个 engine。
+        let upperHandle = makeChartHandle(
+            engine: engine, panel: .upper,
+            bounds: CGRect(x: 0, y: 0, width: shieldTestPanelWidth, height: shieldTestTallPanelHeight))
+        let upperHit = upper.intersection(upperHandle.renderState.viewport.mainChartFrame)
+        try #require(!upperHit.isNull && !upperHit.isEmpty,
+                     "上面板盾与其可落线区无交集 → 盾尺寸/位置不对，点面板会在上半 K 线误落线")
+        let p = CGPoint(x: upperHit.midX, y: upperHit.midY)
+        let c1 = engine.drawings.count
+        let pend1 = engine.drawingSession.pendingAnchors.count
+        upperHandle.handleDrawingTapForTesting(at: p)
+        #expect(engine.drawings.count == c1, "上半区面板内的点竟落了线 = 幽灵线（§4.4「点面板空隙不落线」违规）")
+        #expect(engine.drawingSession.pendingAnchors.count == pend1)
+        settleWithNoShields(engine.drawingSession)   // 清盾并回到已收敛态
+        upperHandle.handleDrawingTapForTesting(at: p)
+        #expect(engine.drawings.count == c1 + 1, "清盾后同一点仍落不了线 → 上面那次被拒与盾无关（假绿）")
+    }
+
+    @Test("⇅ 切位置后旧盾精确清零：下半区 → 上半区，下面板盾必须 == nil，且旧盾位置能重新落线")
+    func togglingPositionClearsStaleShieldExactly() throws {
+        let (lowerHandle, engine) = makeDrawingActiveChart(
+            panel: .lower, bounds: CGRect(x: 0, y: 0, width: shieldTestPanelWidth, height: shieldTestTallPanelHeight))
+        // ① 下半区：下面板有盾、上面板无盾。记下旧盾中点，稍后拿它做差分。
+        renderAndConverge(TallPanelsShellLayout(engine: engine, typeRowExpanded: true, stylePanelPosition: .bottom))
+        let oldShield = try #require(shieldRectOf(engine, 1), "下半区时下面板必须有盾")
+        // 实测发现（同 upperPanelShieldBlocksOtherwiseCommittingTap 的既有教训）：本 fixture 下盾是
+        // 贴底 400pt 面板的下半段，raw shield.mid 落在 mainChart(60%) 之外——采样点须取「盾 ∩ 可落线区」
+        // 的真实交集中点，不盲取 shield.midY，否则前置 #require 天然假红/假绿。
+        let oldHit = oldShield.intersection(lowerHandle.renderState.viewport.mainChartFrame)
+        try #require(!oldHit.isNull && !oldHit.isEmpty,
+                     "下面板盾与其可落线区无交集 → fixture 几何不成立，本测试证明不了任何事（假绿）")
+        let pInOldShield = CGPoint(x: oldHit.midX, y: oldHit.midY)
+        let c0 = engine.drawings.count
+        lowerHandle.handleDrawingTapForTesting(at: pInOldShield)
+        #expect(engine.drawings.count == c0, "装盾时该点竟然落了线 —— 盾没生效，后续差分无意义")
+
+        // ② 切到上半区：下面板盾必须精确清零，且同一个点现在能落线（证明旧盾真没了）。
+        renderAndConverge(TallPanelsShellLayout(engine: engine, typeRowExpanded: true, stylePanelPosition: .top))
+        #expect(engine.drawingSession.shield[1] == .unshielded, "切到上半区后下面板未回到 .unshielded = stale shield 死区")
+        lowerHandle.handleDrawingTapForTesting(at: pInOldShield)
+        #expect(engine.drawings.count == c0 + 1, "旧盾位置仍落不了线 —— 残留屏蔽（下半 K 线死区）")
     }
 }
 #endif

@@ -291,6 +291,15 @@ public struct TrainingView: View {
         .onChange(of: typeRowExpanded) { _, _ in
             engine.drawingSession.clearAllShields()
         }
+        // 1a-iii 切片2 Task4：切面板上/下半区即清所有盾——旧位置的盾若残留，那半边 K 线会变成
+        // 「怎么点都画不了线」的死区（nil-preference 自动重算是第一层，本行是明确的生命周期第二层）。
+        // ⭐codex 计划-R16-F1：这里只能 clearAllShields()，绝不能用 settleWithNoShields()。
+        //   切位置正是几何尚未重新收敛的时刻——清盾后立刻标记「已收敛」等于在最需要保护的瞬间
+        //   关掉 fail-closed：新位置的面板已可见、盾还没算出来，此时的 tap 会穿透并 autosave 幽灵线。
+        //   正确语义 = 清盾并保持未收敛，直到 refreshShields() 见到 overlay + 两个面板 frame 齐备才开闸。
+        .onChange(of: stylePanelPosition) { _, _ in
+            engine.drawingSession.clearAllShields()      // 全清；随后由 refreshShields 按新几何重置（Step 3 唯一定义）
+        }
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
             tradeStrip = nil                                    // codex R3-high：tick 推进(含持有/观察)即作废未确认买卖条，防按新 tick 价成交
             lifecycle.autosave(immediate: false)                // §4.6：tick 推进按 N 节流（review 恒 no-op，shouldPersistProgress==false）
@@ -464,7 +473,7 @@ public struct TrainingView: View {
         ChartPanelsContainer(engine: engine, showsTradeButtons: showsTradeButtons, isDrawingActive: isDrawingActive,
                              typeRowExpanded: typeRowExpanded, scheme: colorScheme == .dark ? .dark : .light,
                              stylePanelPosition: stylePanelPosition,
-                             onTogglePosition: { /* Task4 接真行为：切 stylePanelPosition + 镜像 */ },
+                             onTogglePosition: { stylePanelPosition = (stylePanelPosition == .bottom ? .top : .bottom) },
                              upperPanel: { panel(.upper) }, lowerPanel: { panel(.lower) })
     }
 
@@ -660,7 +669,7 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
                     .preference(key: DrawingLowerPanelFrameKey.self, value: p.frame(in: .named("chart"))) })
         }
         .coordinateSpace(name: "chart")
-        .overlay(alignment: .bottom) {
+        .overlay(alignment: stylePanelPosition == .top ? .top : .bottom) {
             // codex 计划-R4-medium：必带 showsTradeButtons 门——排除复盘（复盘用浮动铅笔钮，本切片不改其行为）。
             // 否则复盘经浮动钮 drawingModeActive 时也会挂 overlay+装两面板盾、吞复盘图表点。
             if showsTradeButtons, isDrawingActive, typeRowExpanded {

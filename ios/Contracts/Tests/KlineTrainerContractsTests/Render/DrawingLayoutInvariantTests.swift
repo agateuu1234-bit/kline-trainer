@@ -70,7 +70,7 @@ struct DrawingLayoutInvariantTests {
     /// (isDrawingActive, typeRowExpanded) 驱动：训练/收起态 overlay 门不成立（无类型行），展开态真渲染
     /// 类型行 overlay——证明它不改容器尺寸。
     @MainActor
-    private func chartFrame(isDrawing: Bool, expanded: Bool) throws -> CGRect {
+    private func chartFrame(isDrawing: Bool, expanded: Bool, position: DrawingStylePanelPosition = .bottom) throws -> CGRect {
         let engine = TrainingEngine.preview()
         let box = FrameBox()
         let measured = ChartPanelsContainer(
@@ -79,7 +79,7 @@ struct DrawingLayoutInvariantTests {
             isDrawingActive: isDrawing,
             typeRowExpanded: expanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
-            stylePanelPosition: .bottom,    // 本文件三态断言不测位置切换，固定 .bottom
+            stylePanelPosition: position,   // Task4：四态断言需要覆盖 .top（参数化，默认 .bottom 保三态断言不变）
             onTogglePosition: {},           // 测试不驱动 ⇅
             upperPanel: { Color.clear.frame(width: invariantPanelWidth, height: invariantPanelHeight) },
             lowerPanel: { Color.clear.frame(width: invariantPanelWidth, height: invariantPanelHeight) })
@@ -108,6 +108,18 @@ struct DrawingLayoutInvariantTests {
                 "进画线不改图表尺寸：training=\(training) collapsed=\(collapsed)")
         #expect(expanded == training,
                 "展开类型行不改图表尺寸（overlay 不 reflow）：training=\(training) expanded=\(expanded)")
+    }
+
+    @Test("四态布局不变量：训练 / 画线-收起 / 画线-展开(下半区) / 画线-展开(上半区)——chartPanels 容器 frame 逐像素相等")
+    @MainActor
+    func chartFrameIdenticalAcrossFourStates() throws {
+        let training  = try chartFrame(isDrawing: false, expanded: false)
+        let collapsed = try chartFrame(isDrawing: true,  expanded: false)
+        let bottom    = try chartFrame(isDrawing: true,  expanded: true, position: .bottom)
+        let top       = try chartFrame(isDrawing: true,  expanded: true, position: .top)
+        #expect(collapsed == training)
+        #expect(bottom == training,  "展开(下半区)改变了图表容器尺寸 → 面板在挤压 K 线，不是 overlay")
+        #expect(top == training,     "切到上半区改变了图表容器尺寸 → 面板在挤压 K 线，不是 overlay")
     }
 
     // ── 补充源码快检（快检，非达标判据——阻塞判据是上面的 hosted 几何测试）──

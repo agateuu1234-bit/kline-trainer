@@ -194,6 +194,37 @@ struct DrawingStylePanelSourceGuardTests {
         #expect(!overlay.contains("let expanded"), "DrawingTypeOverlay 的 expanded 参数应随 Step 5 删除")
     }
 
+    @Test("镜像只翻两大块、参数内部 5 组顺序两态相同（user 确认）+ ⇅ 在类型行右端")
+    func mirrorFlipsOnlyTwoBlocks() throws {
+        let panel = try source(self.panel)
+        #expect(panel.contains("position == .top"))                 // 两态分支存在
+        // 参数区在两个分支里都是**同一个** DrawingStyleParams 调用 → 组内顺序结构上不可能被翻。
+        #expect(panel.contains("DrawingStyleParams(session: session, scheme: scheme)"))
+        let overlay = try source("Sources/KlineTrainerContracts/UI/DrawingTypeOverlay.swift")
+        #expect(overlay.contains("onTogglePosition"))
+        #expect(overlay.contains("Spacer()"))                       // ⇅ 被 Spacer 推到右端
+        let tv = try source("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        #expect(tv.contains("stylePanelPosition == .top ? .top : .bottom"))   // alignment 随位置切
+        #expect(tv.contains("onChange(of: stylePanelPosition)"))             // 位置变化清盾
+    }
+
+    // codex 计划-R16-F1：`settleWithNoShields(_:)` 是测试专用逃生舱，生产代码一律不得引用——切位置
+    // 正是几何尚未重新收敛的时刻，若生产在此标记「已收敛」会在最需要保护的瞬间关掉 fail-closed。
+    // ⚠️与 brief 字面稿的刻意分歧：brief 里 `slice(tv, from: ".onChange(of: stylePanelPosition)", to: "}")`
+    //   的结束锚 `"}"` 在 700+ 行的 TrainingView.swift 里绝非唯一出现，会让 `slice()` 内部「结束锚必须
+    //   唯一」的自检恒假、测试恒败。改用下一条 `.onChange` 的字面量（`.onChange(of: engine.tick.globalTickIndex)`，
+    //   本 task 实现里把 stylePanelPosition 那条紧接着插在它前面）作结束锚——两个锚都唯一，且切出来的
+    //   恰好就是 `.onChange(of: stylePanelPosition)` 那条闭包的完整正文。
+    @Test("生产不得使用测试逃生舱（codex 计划-R16-F1）：TrainingView 不引用 settleWithNoShields")
+    func productionNeverUsesTestOnlySettleHelper() throws {
+        let tv = try source("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        #expect(!tv.contains("settleWithNoShields"),
+                "生产代码引用了测试逃生舱 —— 会在几何未收敛时开闸，重开幽灵线窗口")
+        let chain = try slice(tv, from: ".onChange(of: stylePanelPosition)",
+                              to: ".onChange(of: engine.tick.globalTickIndex)")
+        #expect(chain.contains("clearAllShields()"), "切位置未清盾 → 旧位置盾残留成死区")
+    }
+
     @Test("旧长按卡片已删除、长按钩子已摘除（不留两套设置入口）")
     func longPressCardRetired() throws {
         let cardPath = srcDir.appendingPathComponent("Sources/KlineTrainerContracts/UI/DrawingStyleCard.swift")
