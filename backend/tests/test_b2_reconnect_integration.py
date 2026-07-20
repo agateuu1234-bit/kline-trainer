@@ -797,3 +797,56 @@ def test_amain_releases_b2_lock_even_if_generate_batch_raises(tmp_path, monkeypa
     with pytest.raises(RuntimeError):
         G.main(["--dsn", "postgres://x", "--output", str(tmp_path)])
     assert calls == ["unlock", "close"], calls
+
+
+# ===== B2 生成锁下沉到写入临界区（codex R1-F2 收敛；spec 2026-07-20）=====
+# 不变量：任一时刻最多一个 DB session 处于「向确定性最终路径写入并登记」的临界区。
+# 此前该不变量靠**调用方纪律**维持（CLI _amain / 调度器 _gen 各自在外层取锁），
+# 直调 generate_one_training_set / generate_batch 的路径零防御。
+
+def test_write_critical_section_acquires_and_releases_lock(tmp_path):
+    """成功产出时，临界区必须恰好取一次锁、放一次锁（配对，无泄漏）。"""
+    conn, _ = _fixture_conn()
+    gts = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                                random.Random(7)))
+    assert gts is not None
+    assert conn.lock_calls == ["lock", "unlock"], (
+        f"临界区锁取放不配对：{conn.lock_calls}")
+
+
+def test_write_blocked_when_another_session_holds_lock(tmp_path):
+    """另一 session 持锁 → 干净跳过，且**不产出任何文件、不登记任何行**。
+    必须是 GenerateSkipException（generate_batch 只捕这个；抛别的会中止整轮 sweep
+    并在 B4 常驻进程里一路冒泡）。"""
+    conn, _ = _fixture_conn()
+    conn.lock_held_by_other = True
+    with pytest.raises(GenerateSkipException, match="B2 生成锁"):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                              random.Random(7)))
+    assert conn.registered == [], "被锁拒绝时不得登记任何行"
+    assert list(tmp_path.iterdir()) == [], "被锁拒绝时不得留下任何产物"
+
+
+def test_lock_released_even_when_registration_conflicts(tmp_path):
+    """临界区内走异常分支（登记撞 ON CONFLICT）后，锁仍须被释放——
+    否则 session 级 advisory lock 泄漏会永久挡住后续所有生成。"""
+    conn, _ = _fixture_conn()
+    conn.steal_first_insert = True          # 模拟并发赢家抢先登记
+    with pytest.raises(GenerateSkipException):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                              random.Random(7)))
+    assert conn.lock_calls == ["lock", "unlock"], (
+        f"异常路径未释放锁（泄漏）：{conn.lock_calls}")
+
+
+def test_early_skip_path_does_not_touch_lock(tmp_path):
+    """早退路径（无 stock_coverage 覆盖行）在临界区之前就返回，**不得取锁**。
+    这是 spec §2.5 的零开销主张：真库当前每只股票都走这条路，
+    若这里取锁 = 每轮 sweep 白白多上千次 advisory lock 往返。"""
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
+    conn = _FakeConn("000001.SZ", _pg_fixture(dt.date(2022, 1, 3), 1000), None)
+    with pytest.raises(GenerateSkipException, match="stock_coverage"):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                              random.Random(7)))
+    assert conn.lock_calls == [], (
+        f"早退路径不应触碰锁，实际：{conn.lock_calls}")

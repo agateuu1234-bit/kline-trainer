@@ -518,40 +518,53 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
     idx = month_boundaries.index(int(start_datetime))
     after_end = compute_after_end(month_boundaries, idx)
 
-    # 顺序 = **先写文件、后登记**（codex PF2-R4 后简化；见文末 PF2-R5 决议）。
-    # 生产上并发生成不可能：B2 只在 B4 sweep 内跑，而 scheduler_main D14 用
-    # `pg_try_advisory_lock` 强制**集群级单例**（第二个进程直接退出）+ APScheduler
-    # `max_instances=1`/`coalesce=True` 防同进程重入。故不做暂存/两阶段发布——
-    # 那套机器是给架构上不发生的场景加的，且每加一层都引入新失败面（R2→R3→R4）。
+    # **写入临界区加锁**（codex R1-F2 收敛；spec 2026-07-20）。
+    # 不变量 = 任一时刻最多一个 session 处于「写确定性最终路径 + 登记」的临界区。
+    # 此前该不变量只靠调用方纪律（_amain / _gen 各自在外层取锁），直调本函数
+    # 或 generate_batch 的路径零防御 → 输家会覆写赢家已登记的 zip、content_hash 失配。
     #
-    # 本顺序下的崩溃窗口 = 写完 zip、登记前进程死 → **孤儿 zip + 无数据库行**。
-    # 它是**自愈**的：没有行引用它、exclude_starts 也不含该起点 → 下次 sweep 可重选
-    # 同一起点、覆盖它并登记成功。（反之「先登记后发布」留下的是 uq_stock_start 被占、
-    # B3 反复预定却 404 的**永久卡死行**，严格更糟。）
-    gts = assemble_from_windows(output_dir, stock_code=stock_code,
-                                stock_name=_stock_name_of(stock_code),
-                                start_datetime=int(start_datetime),
-                                end_datetime=int(after_end), windows=windows)
-
-    # 预检：候选已按 exclude_starts 过滤，这条只是省掉常见情形下的一次白建 zip。
-    # **不删最终路径文件**（codex Task 5 review-Important：与下面第二道检查同语义）——
-    # `gts.path` 是 `{code}_{start}` 确定性最终路径，若并发写者已经用同一
-    # (stock_code, start_datetime) 抢先注册，这里命中的正是**对方已登记的那个文件**
-    # （上面 `assemble_from_windows` 早已把它覆盖重写）；unlink 会把 training_sets 里
-    # 那一行的 file_path 变成指向不存在的文件（数据丢失，实测复现）。只跳过，不删。
-    if await _exists_start(conn, stock_code, gts.start_datetime):
+    # PG session 级 advisory lock 是**可重入计数**的：已持锁的 CLI / 调度器
+    # 在此再取同一把锁必然成功（计数 +1），配对释放，故既有两条路径行为零变化。
+    # 外层两处锁保留——它们提供整轮 sweep 独占 + 用户可见的拒绝语义（CLI 退出码 1 /
+    # 调度器 warning 本轮产 0），这两样内层给不了。
+    #
+    # 早退检查（覆盖行 / bars / 交叉校验 / 选窗口）全部在此**之前**完成，故真库
+    # 当前"每股都跳过"的状态下这段根本不执行，零额外往返（spec §2.5）。
+    if not await conn.fetchval("SELECT pg_try_advisory_lock($1)",
+                               B2_GENERATION_LOCK_KEY):
         raise GenerateSkipException(
-            f"{stock_code}: start {gts.start_datetime} 已登记，跳过")
+            f"{stock_code}: B2 生成锁被占（另一个 B2 正在写入），跳过")
+    try:
+        # 顺序 = **先写文件、后登记**（codex PF2-R4 后简化；见计划文末 PF2-R5 决议）。
+        # 崩溃窗口 = 写完 zip、登记前进程死 → **孤儿 zip + 无数据库行**，它是**自愈**的：
+        # 没有行引用它、exclude_starts 也不含该起点 → 下次 sweep 可重选同一起点、
+        # 覆盖它并登记成功。（反之「先登记后发布」留下的是 uq_stock_start 被占、
+        # B3 反复预定却 404 的**永久卡死行**，严格更糟。）
+        gts = assemble_from_windows(output_dir, stock_code=stock_code,
+                                    stock_name=_stock_name_of(stock_code),
+                                    start_datetime=int(start_datetime),
+                                    end_datetime=int(after_end), windows=windows)
 
-    # ON CONFLICT DO NOTHING = 廉价保险：唯一冲突返回 None 而非抛
-    # UniqueViolationError（后者不被 generate_batch 捕获 → 中止整轮 sweep）。
-    # 只覆盖「运维手工跑 CLI 时调度器也在跑」这个**不受支持**的操作场景；
-    # 此时不删最终路径的文件（可能是对方的产物），只干净跳过。
-    row_id = await _register_training_set(conn, gts)
-    if row_id is None:
-        raise GenerateSkipException(
-            f"{stock_code}: start {gts.start_datetime} 已登记（并发 CLI？），跳过")
-    return gts                       # 中间 .db 从不落在 output_dir，无需清理
+        # 预检：候选已按 exclude_starts 过滤，这条只是省掉常见情形下的一次白建 zip。
+        # **不删最终路径文件**（codex Task 5 review-Important：与下面第二道检查同语义）——
+        # `gts.path` 是 `{code}_{start}` 确定性最终路径，若并发写者已经用同一
+        # (stock_code, start_datetime) 抢先注册，这里命中的正是**对方已登记的那个文件**；
+        # unlink 会把 training_sets 里那一行的 file_path 变成指向不存在的文件
+        # （数据丢失，实测复现）。只跳过，不删。
+        if await _exists_start(conn, stock_code, gts.start_datetime):
+            raise GenerateSkipException(
+                f"{stock_code}: start {gts.start_datetime} 已登记，跳过")
+
+        # ON CONFLICT DO NOTHING = 廉价保险：唯一冲突返回 None 而非抛
+        # UniqueViolationError（后者不被 generate_batch 捕获 → 中止整轮 sweep）。
+        # 此时不删最终路径的文件（可能是对方的产物），只干净跳过。
+        row_id = await _register_training_set(conn, gts)
+        if row_id is None:
+            raise GenerateSkipException(
+                f"{stock_code}: start {gts.start_datetime} 已登记（并发 CLI？），跳过")
+        return gts                   # 中间 .db 从不落在 output_dir，无需清理
+    finally:
+        await conn.fetchval("SELECT pg_advisory_unlock($1)", B2_GENERATION_LOCK_KEY)
 
 
 async def generate_batch(conn, target_count: int, output_dir: Path,
