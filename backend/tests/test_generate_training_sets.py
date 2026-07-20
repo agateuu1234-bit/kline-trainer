@@ -211,6 +211,7 @@ from generate_training_sets import (
     GenerateSkipException, compute_after_end, eligible_start_indices, select_valid_window,
     per_day_intraday_complete, build_training_windows,
 )
+from qmt_normalize import trading_date
 SH = ZoneInfo("Asia/Shanghai")
 def _mid(y,mo,d): return int(dt.datetime(y,mo,d,0,0,0,tzinfo=SH).timestamp())
 
@@ -228,6 +229,10 @@ def _weekday_trading_dates(d0: dt.date, d1: dt.date) -> set:
             out.add(cur)
         cur += dt.timedelta(days=1)
     return out
+
+def _weekday_range(d0: dt.date, d1: dt.date) -> list:
+    """[d0,d1] 内工作日升序 list（既有 _weekday_trading_dates 返回 set，取不了第 k 天）。"""
+    return sorted(_weekday_trading_dates(d0, d1))
 
 def _n_month_boundaries(n: int) -> list:
     bounds, y, mo = [], 2020, 1
@@ -404,3 +409,129 @@ def test_build_training_windows_raises_when_after_window_empty():
     bounds, pb, kwargs = _d6_isolated_fixture(daily_rows)
     with pytest.raises(GenerateSkipException):
         build_training_windows(pb, bounds, random.Random(0), **kwargs)
+
+
+# ===== Plan 2b Task 4：D9 门边界日修复（Plan 1 遗留 bug 的回归锁）=====
+# 本段用到 trading_date，若本文件尚未 import 需补：`from qmt_normalize import trading_date`
+#
+# 实测过的失败现象（修复前）：46 个月历史 + 每交易日精确 80/16/4 根 + 零 drop 的
+# **完美** fixture 下，8 个 dense 候选全被 D9 拒 → build_training_windows 抛
+# GenerateSkipException → 产 0 训练组。根因 = 生产 before_cap(150) 不是每日根数
+# (80/16/4) 的整数倍 → 窗口首日被切成部分根 → 门把「切片边界」当「数据洞」。
+
+_GOLDEN_PER_DAY = {"3m": 80, "15m": 16, "60m": 4}
+
+
+def _golden_intraday(days, per_day: int, *, skip=None, short=None) -> pd.DataFrame:
+    """按 golden 每日根数铺盘中 bar（09:33 起每 3 分钟一根，仅作刻度）。
+    skip=某日整日缺席（模拟 B1 drop）；short={日: n} 令某日只有 n 根（模拟 PG 里的
+    partial 日——B1 不变量下不该存在，用来证明门仍会抓）。"""
+    rows = []
+    for d in days:
+        if skip and d in skip:
+            continue
+        n = (short or {}).get(d, per_day)
+        base = dt.datetime(d.year, d.month, d.day, 9, 33, 0, tzinfo=SH)
+        rows += [{"datetime": int((base + dt.timedelta(minutes=3 * i)).timestamp()),
+                  "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+                  "volume": 1, "amount": 1.0} for i in range(n)]
+    return pd.DataFrame(rows)
+
+
+def _production_cap_windows(days, *, skip=None, short=None, caps=None):
+    """用**生产** PERIOD_BEFORE_CAP 切出的盘中窗口（首日必然是部分根——正是本 Task 的靶心）。
+    返回 `(wins, after_end, full_bars)`：`full_bars` 必须传给
+    per_day_intraday_complete，边界日要对照它判完整性（PF2-R7-F2）。"""
+    from generate_training_sets import PERIOD_BEFORE_CAP
+    caps = caps or PERIOD_BEFORE_CAP
+    start = _mid(days[len(days) // 2].year, days[len(days) // 2].month,
+                 days[len(days) // 2].day)
+    after_end = int(dt.datetime(days[-1].year, days[-1].month, days[-1].day,
+                                23, 59, 59, tzinfo=SH).timestamp())
+    wins, full = {}, {}
+    for p, n in _GOLDEN_PER_DAY.items():
+        full[p] = _golden_intraday(days, n, skip=skip, short=short)
+        wins[p] = select_period_window(full[p], start, caps[p], after_end, p)
+    return wins, after_end, full
+
+
+def test_per_day_gate_passes_under_production_before_caps():
+    """靶心：生产 cap(150) + 完美数据（每日精确 80/16/4、零 drop）必须过门。
+    修复前此测必挂（首日 3m 只有 70 根被判洞）。"""
+    days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
+    wins, ae, full = _production_cap_windows(days)
+    assert per_day_intraday_complete(wins, days, ae, full_bars=full) is True
+
+
+def test_per_day_gate_still_catches_interior_missing_day():
+    """不得放松真洞：窗口内某交易日**整日缺席**（B1 drop 的表现）仍必须被拒。"""
+    days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
+    hole = days[len(days) // 2 + 5]        # 落在 forward 窗口内部
+    wins, ae, full = _production_cap_windows(days, skip={hole})
+    assert per_day_intraday_complete(wins, days, ae, full_bars=full) is False
+
+
+def test_per_day_gate_still_catches_interior_short_day():
+    """只豁免首日：窗口**内部**某日根数不足（非首日）仍必须被拒——
+    证明修复没有把「部分日一律放行」。"""
+    days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
+    bad = days[len(days) // 2 + 5]
+    wins, ae, full = _production_cap_windows(days, short={bad: 79})
+    assert per_day_intraday_complete(wins, days, ae, full_bars=full) is False
+
+
+def test_per_day_gate_catches_corrupt_boundary_day():
+    """codex PF2-R7-F2：边界日在**库里**残缺必须被抓。
+
+    生产 cap 下窗口只切到该日 70/80 根（正常）；但把它在**全量 bars** 里改成 60 根
+    （真损坏）→ 必须判失败。这条同时钉死一种已被实测否掉的错误写法：
+    用「从窗口反推的余数」`(before_n % need) or need` 判边界日是**自指**的——
+    损坏边界日会让 before_n 同步变小、期望值跟着变小、恰好匹配 → 漏检（实测返回 True）。"""
+    days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
+    probe, _, _ = _production_cap_windows(days)
+    d0 = min(trading_date(e) for e in probe["3m"]["datetime"])
+    wins, ae, full = _production_cap_windows(days, short={d0: 60})   # 全量里该日只剩 60
+    assert per_day_intraday_complete(wins, days, ae, full_bars=full) is False
+
+
+def test_per_day_gate_passes_when_cap_is_exact_multiple():
+    """cap 恰为每日根数整数倍（边界日被完整切入窗口）→ 仍应通过。"""
+    days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
+    caps = {p: n * 2 for p, n in _GOLDEN_PER_DAY.items()}
+    wins, ae, full = _production_cap_windows(days, caps=caps)
+    assert per_day_intraday_complete(wins, days, ae, full_bars=full) is True
+
+
+def test_per_day_gate_passes_with_zero_before_cap():
+    """cap=0（纯 forward 窗口，无 before-context）→ 边界日就是首个前向交易日，应通过。"""
+    days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
+    wins, ae, full = _production_cap_windows(days, caps={p: 0 for p in _GOLDEN_PER_DAY})
+    assert per_day_intraday_complete(wins, days, ae, full_bars=full) is True
+
+
+def test_build_training_windows_succeeds_under_production_config():
+    """端到端：生产 PERIOD_BEFORE_CAP + 完美数据 → 生产入口必须**选得出**起点。
+    这条就是「Plan 2 能不能出货」的最小可执行证据。"""
+    from generate_training_sets import PERIOD_BEFORE_CAP
+    from qmt_resample import period_boundaries
+    days = _weekday_range(dt.date(2022, 1, 3), dt.date(2025, 12, 31))
+    daily = pd.DataFrame([{"datetime": _mid(d.year, d.month, d.day), "open": 1.0,
+                           "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1,
+                           "amount": 1.0} for d in days])
+    first_m, first_w = {}, {}
+    for d in days:
+        first_m.setdefault((d.year, d.month), d)
+        first_w.setdefault(d.isocalendar()[:2], d)
+    def _cal(sel):
+        return pd.DataFrame([{"datetime": _mid(d.year, d.month, d.day), "open": 1.0,
+                              "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1,
+                              "amount": 1.0} for d in sorted(sel)])
+    pb = {"daily": daily, "monthly": _cal(first_m.values()), "weekly": _cal(first_w.values())}
+    for p, n in _GOLDEN_PER_DAY.items():
+        pb[p] = _golden_intraday(days, n)
+    mb = period_boundaries(daily, "monthly")
+    start, windows = build_training_windows(
+        pb, mb, random.Random(0), dense_dates=set(days), trading_dates=days,
+        before_caps=PERIOD_BEFORE_CAP)
+    assert start in [int(b) for b in mb]
+    assert not windows["3m"].empty

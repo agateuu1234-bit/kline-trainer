@@ -153,7 +153,8 @@ def build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, t
             if before_n < before_min or after_n < 1:
                 raise GenerateSkipException(f"{p} before {before_n}(<{before_min}) / after {after_n}(<1)")
         intraday = {p: windows[p] for p in ("3m", "15m", "60m") if p in windows}
-        if not per_day_intraday_complete(intraday, trading_dates, after_end, intraday_expected):
+        if not per_day_intraday_complete(intraday, trading_dates, after_end, intraday_expected,
+                                         full_bars=period_bars):     # PF2-R7-F2 边界日对照全量
             raise GenerateSkipException("D9 per-day 硬门失败")
         return windows
 
@@ -161,10 +162,15 @@ def build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, t
                                try_assemble=_try, max_retries=max_retries, months=months)
 
 
-def per_day_intraday_complete(windows, trading_dates, after_end, expected=None) -> bool:
-    """D9 per-day 硬门（codex PF1-R2/PF1-R4-F2/PF1-R6-F1）：**每个盘中周期**在
-    `[该周期首选中日, trading_date(after_end)]` 内、每个交易日（∈ trading_dates）桶数精确 == 应有数
-    （3m=80/15m=16/60m=4）。**跨度终点用 `after_end`、非 `dates.max()`**——否则 after_end 附近盘中全缺的
+def per_day_intraday_complete(windows, trading_dates, after_end, expected=None,
+                              *, full_bars=None) -> bool:
+    """D9 per-day 硬门（codex PF1-R2/PF1-R4-F2/PF1-R6-F1 + Plan 2b 边界日修正）：
+    **每个盘中周期**在 `[该周期首选中日, trading_date(after_end)]` 内、每个交易日
+    （∈ trading_dates）桶数精确 == 应有数（3m=80/15m=16/60m=4）；**首日 d0 同样精确验**，
+    只是判据换成「**该日在 `full_bars` 里是完整的**」（d0 只是被 before_cap 切片的那天，
+    窗口内不足是切片产物；但它在库里必须有满 need 根）。不传 `full_bars` 则退回严格
+    全量，向后兼容既有调用。
+    **跨度终点用 `after_end`、非 `dates.max()`**——否则 after_end 附近盘中全缺的
     尾日会落在 max 之外、漏检（高周期 bar 覆盖了无盘中回放的日期）。任一周期任一日不符 → False。"""
     expected = expected or _INTRADAY_EXPECTED
     ae_date = trading_date(after_end)
@@ -176,7 +182,32 @@ def per_day_intraday_complete(windows, trading_dates, after_end, expected=None) 
         d0 = dates.min()
         span = [d for d in trading_dates if d0 <= d <= ae_date]     # 到 after_end（含尾日）、非 dates.max()
         counts = dates.value_counts().to_dict()
-        if not all(counts.get(d, 0) == need for d in span):
+        # **边界日 d0 对照全量 bars 校验，内部日对照窗口校验**（codex PF2-R7-F2）。
+        #
+        # 为什么 d0 不能用窗口里的根数判：`select_period_window` 取「起点前
+        # min(pivot, cap) 根」，生产 cap(150) 不是每日根数(80/16/4)的整数倍 → d0 必然
+        # 只被切到部分根（3m 70/80）。要求它 == need 的话，**完美数据也 0 候选通过**
+        # （Plan 1 的 D9 测全用 cap=2/cap=0 等对齐值，生产 cap 从未被测过）。
+        #
+        # 为什么也不能用「从窗口反推的余数」判（本轮实测否掉的写法）：
+        # `boundary_need = (before_n % need) or need` 里的 before_n 若从**窗口自身**算，
+        # 该公式是**自指**的——边界日被损坏 → before_n 同步变小 → 期望值跟着变小 →
+        # 恰好匹配损坏值 → 漏检。（实测：边界日 80→60 时该写法返回 True。）
+        #
+        # 正解：d0 只是被切片的那天，但**它在库里必须是完整的**。故对照 full_bars
+        # 数该日在 PG 里的实际根数，要求 == need。非自指、且直接命中要防的坏数据。
+        # 注：若某 before-context 日被整日 drop，切片会往更早取够根数 → d0 前移、
+        # 空洞落进 [d0, ae] → 由下面的内部精确门抓住。
+        if full_bars is None:
+            boundary_ok = counts.get(d0, 0) == need      # 向后兼容既有调用：严格全量
+        else:
+            fb = full_bars.get(period)
+            d0_full = 0 if fb is None or fb.empty else int(
+                sum(1 for e in fb["datetime"] if trading_date(e) == d0))
+            boundary_ok = d0_full == need
+        if not boundary_ok:
+            return False
+        if not all(counts.get(d, 0) == need for d in span if d != d0):
             return False
     return True
 
