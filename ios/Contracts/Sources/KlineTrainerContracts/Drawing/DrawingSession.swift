@@ -44,7 +44,8 @@ public final class DrawingSession {
     /// 1a-iii：设置卡片写入的「下一条线」默认样式（单一真相，提交路径读它）。
     public private(set) var defaultStyle = DrawingDefaultStyle()
 
-    /// 1a-iii：设置卡片（DrawingStyleCard，同包 UI 层）经此写默认样式。internal——包外不得直改。
+    /// 1a-iii：常驻样式面板（DrawingStyleParams，同包 UI 层；切片2 Task3 替代长按卡片）经此写默认样式。
+    /// internal——包外不得直改。
     func setDefaultStyle(_ style: DrawingDefaultStyle) { defaultStyle = style }
 
     /// 1a-iii 切片2 Task2：某个面板当前的命中屏蔽状态。三态互斥 —— 「面板可见却没有任何屏蔽」这一危险状态

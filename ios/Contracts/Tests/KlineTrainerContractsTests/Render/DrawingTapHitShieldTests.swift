@@ -100,13 +100,14 @@ struct DrawingTapHitShieldTests {
         let chartPanelsBody = try extractBody(tv, from: "private var chartPanels: some View {", to: "private func panel(_ id: PanelId)")
         #expect(chartPanelsBody.contains("ChartPanelsContainer("))
 
-        // ChartPanelsContainer 正文内，唯一锚定类型行 overlay 接线：DrawingTypeOverlay( + 两个
+        // ChartPanelsContainer 正文内，唯一锚定类型行 overlay 接线：DrawingStylePanel( + 两个
         // PreferenceKey 上报/转换必须同挂在同一个 .overlay(alignment: .bottom) 块里，而不是随便一处
         // 泛 `.overlay(alignment: .bottom)`（panel(_:) 里同名但不带这些）。
         let containerBody = try extractBody(tv, from: "struct ChartPanelsContainer<Upper: View, Lower: View>: View {", to: "#if DEBUG")
         // 切片2 Task2：DrawingPanelFrameKey 改名 DrawingLowerPanelFrameKey + 新增 DrawingUpperPanelFrameKey
         // （两个面板都上报 frame，求交装两个面板的盾）。
-        for marker in [".overlay(alignment: .bottom)", "DrawingTypeOverlay(", "DrawingShieldFrameKey",
+        // 切片2 Task3：挂载点内容从 DrawingTypeOverlay( 换成 DrawingStylePanel(（常驻面板替代类型行 overlay）。
+        for marker in [".overlay(alignment: .bottom)", "DrawingStylePanel(", "DrawingShieldFrameKey",
                        "DrawingUpperPanelFrameKey", "DrawingLowerPanelFrameKey", "offsetBy"] {
             #expect(containerBody.contains(marker))
         }
@@ -114,8 +115,9 @@ struct DrawingTapHitShieldTests {
         // 切片2 Task2：setShieldRect 已被 PanelShield 三态 API 取代，接线断言改锚 refreshShields。
         #expect(tv.contains("refreshShields"))
         #expect(tv.contains("showsTradeButtons, isDrawingActive, typeRowExpanded"))   // 复盘门（codex 计划-R4）
-        let ov = try readSource("UI/DrawingTypeOverlay.swift")
-        #expect(ov.contains(".contentShape(Rectangle())"))
+        // 切片2 Task3：第一道盾上移到 DrawingStylePanel 根（DrawingTypeOverlay 不再自带 contentShape）。
+        let dsp = try readSource("UI/DrawingStylePanel.swift")
+        #expect(dsp.contains(".contentShape(Rectangle())"))
         let cc = try readSource("Render/ChartContainerView.swift")
         // 切片2 Task2：ChartContainerView 侧断言也改锚新 API——session.shield[...] 三态 switch，
         // 本地绑定改名 shield（同旧变量名，保持 `shield.contains(point)` 字面锚不变）。
@@ -151,15 +153,20 @@ struct DrawingTapHitShieldTests {
         #expect(!cc.contains("shieldRect"))                          // 旧 API 在输入层也整体绝迹
     }
 
-    @Test("D19/D24：拆分后控件齐、无未接线键（迁自 DrawingModeBarSourceGuardTests）")
+    @Test("D19/D24：拆分后控件齐、无未接线键（迁自 DrawingModeBarSourceGuardTests；切片2 去长按钩子）")
     func splitBarsCarryD19D24() throws {
         let overlay = try readSource("UI/DrawingTypeOverlay.swift")
         let bottom  = try readSource("UI/DrawingModeBar.swift")   // DrawingBottomBar 与 DrawingModeBar 同文件
-        #expect(overlay.contains("accessibilityLabel(\"水平线\")"))   // 类型行水平线图标恒亮
-        #expect(overlay.contains("onLongPressType"))                  // 长按接线（弹设置卡，Task5/切片2）
-        #expect(bottom.contains("accessibilityLabel(\"类型\")"))       // ①类型键
+        #expect(overlay.contains("accessibilityLabel(\"水平线\")"))   // 类型行水平线图标恒亮（不变）
+        // ⭐切片2：长按卡片已被常驻面板取代 → 钩子必须消失（与 DrawingStylePanelSourceGuardTests
+        //   .longPressCardRetired 同向，不再自相矛盾）。
+        #expect(!overlay.contains("onLongPressType"))
+        #expect(!overlay.contains("LongPressGesture"))
+        // ⭐切片2 新增接线：⇅ 切上下半区（Task4 接真行为，Task3 已把按钮与回调放上）。
+        #expect(overlay.contains("onTogglePosition"))
+        #expect(bottom.contains("accessibilityLabel(\"类型\")"))       // ①类型键（不变）
         for banned in ["accessibilityLabel(\"锁定\")", "accessibilityLabel(\"删除\")",
-                       "accessibilityLabel(\"撤销\")", "accessibilityLabel(\"前进\")"] {   // ②–⑤ 不渲染
+                       "accessibilityLabel(\"撤销\")", "accessibilityLabel(\"前进\")"] {   // ②–⑤ 仍不渲染
             #expect(!overlay.contains(banned)); #expect(!bottom.contains(banned))
         }
     }
@@ -280,8 +287,9 @@ private func leftmostMainChartPoint(_ handle: DrawingChartHandle) -> CGPoint {
 /// showsTradeButtons/isDrawingActive 直接读 engine（与生产 TrainingView 同源计算属性），不额外接参数，
 /// 防「测试自己传的 mode 参数」与「engine 真实状态」两者漂移不一致的假象。
 ///
-/// ⚠️本 task 里 `ChartPanelsContainer` 还没有 `stylePanelPosition` 参数（Task 3 才加），也还没去掉
-/// `onLongPressType`（Task 3 才去）——本结构按**当前**签名接线。
+/// 切片2 Task3：`ChartPanelsContainer` 签名已改（去 `onLongPressType`，加 `scheme`/`stylePanelPosition`/
+/// `onTogglePosition`）——本结构固定传 `stylePanelPosition: .bottom`（本 task 三个外壳都无自己的位置状态，
+/// Task4 才让位置态可变）。
 ///
 /// **真实踩坑实证（多轮排查）**：最初想用 `UIHostingController` + `layoutIfNeeded()`（同
 /// DrawingBottomBarHeightTests.measuredHeight 的既有手法）驱动这棵树的 typeRowExpanded true→false 转场，
@@ -310,7 +318,9 @@ private struct TrainingShellLayout: View {
             showsTradeButtons: showsTradeButtons,
             isDrawingActive: isDrawingActive,
             typeRowExpanded: typeRowExpanded,
-            onLongPressType: {},
+            scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
+            stylePanelPosition: .bottom,    // 本 task 三个外壳都不带自己的 stylePanelPosition 状态，固定传 .bottom
+            onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
             upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestUpperPanelHeight) },
             lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestLowerPanelHeight) })
             .frame(width: shieldTestPanelWidth)
@@ -330,7 +340,9 @@ private struct TallPanelsShellLayout: View {
             showsTradeButtons: engine.flow.canBuySell(),
             isDrawingActive: engine.drawingSession.drawingModeActive,
             typeRowExpanded: typeRowExpanded,
-            onLongPressType: {},
+            scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
+            stylePanelPosition: .bottom,    // 本 task 三个外壳都不带自己的 stylePanelPosition 状态，固定传 .bottom
+            onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
             upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestTallPanelHeight) },
             lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestTallPanelHeight) })
             .frame(width: shieldTestPanelWidth)
@@ -349,7 +361,9 @@ private struct ShortUpperShellLayout: View {
             showsTradeButtons: engine.flow.canBuySell(),
             isDrawingActive: engine.drawingSession.drawingModeActive,
             typeRowExpanded: typeRowExpanded,
-            onLongPressType: {},
+            scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
+            stylePanelPosition: .bottom,    // 本 task 三个外壳都不带自己的 stylePanelPosition 状态，固定传 .bottom
+            onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
             upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestShortUpperPanelHeight) },
             lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestShortLowerPanelHeight) })
             .frame(width: shieldTestPanelWidth)
@@ -521,6 +535,24 @@ extension DrawingTapHitShieldTests {
         settleWithNoShields(engine.drawingSession)            // 几何收敛且该面板不被覆盖
         handle.handleDrawingTapForTesting(at: p)
         #expect(engine.drawings.count == c0 + 1, "收敛后同点仍落不了线 → 拒收范围过大（面板外也被吞）")
+    }
+
+    // ⚠️命名与范围（codex 计划-R2-F2）：本测试验的是**第二道盾（输入层）**的边界——
+    //   `handleDrawingTapForTesting` 绕过 SwiftUI 命中测试，**证明不了** contentShape 那道盾。
+    //   故函数名带 `InputLayer`，别让后来人把它读成「第一道盾已覆盖」。
+    @Test("透明外边距不进**输入层**盾（codex 计划-R1-F2）：面板可见外接矩形**之外**的 8pt 空隙里点一下 → 正常落线，不是死条")
+    func transparentGutterOutsideVisiblePanelStillCommits_inputLayer() throws {
+        let (handle, engine) = makeDrawingActiveChart()
+        renderAndConverge(TrainingShellLayout(engine: engine, typeRowExpanded: true))
+        let shield = try #require(shieldRectOf(engine, 1))
+        // 盾右缘之外 4pt（落在 8pt 透明边距带内）——用户看到的是「图表」，就该能画线。
+        let p = CGPoint(x: shield.maxX + 4, y: shield.midY)
+        try #require(handle.renderState.viewport.mainChartFrame.contains(p),
+                     "采样点必须落在可落线区，否则本测试无意义（假绿）")
+        let c0 = engine.drawings.count
+        handle.handleDrawingTapForTesting(at: p)
+        #expect(engine.drawings.count == c0 + 1,
+                "面板可见边缘外的透明边距被算进了盾 → 图表上有看不见的死条")
     }
 }
 #endif

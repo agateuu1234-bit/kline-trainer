@@ -78,7 +78,9 @@ struct DrawingLayoutInvariantTests {
             showsTradeButtons: true,
             isDrawingActive: isDrawing,
             typeRowExpanded: expanded,
-            onLongPressType: {},
+            scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
+            stylePanelPosition: .bottom,    // 本文件三态断言不测位置切换，固定 .bottom
+            onTogglePosition: {},           // 测试不驱动 ⇅
             upperPanel: { Color.clear.frame(width: invariantPanelWidth, height: invariantPanelHeight) },
             lowerPanel: { Color.clear.frame(width: invariantPanelWidth, height: invariantPanelHeight) })
             .coordinateSpace(name: measureRoot)
@@ -122,7 +124,8 @@ struct DrawingLayoutInvariantTests {
     @Test("补充快检：类型行只经 overlay、图表面板不在 typeRowExpanded 分支内")
     func chartNotInExpandedBranch_sourceGuard() throws {
         let tv = try readSource("UI/TrainingView.swift")
-        #expect(tv.contains("DrawingTypeOverlay(") && tv.contains(".accessibilityIdentifier(\"chartPanels\")"))
+        // 切片2 Task3：挂载点内容从 DrawingTypeOverlay( 换成常驻面板 DrawingStylePanel(。
+        #expect(tv.contains("DrawingStylePanel(") && tv.contains(".accessibilityIdentifier(\"chartPanels\")"))
     }
 }
 #endif

@@ -50,7 +50,8 @@ public struct TrainingView: View {
     @State private var replaySettlementFailed = false  // 新需求10(A6)：replay 结算失败 → 可重试 alert
     @State private var tradeStrip: TradeStripRequest?
     @State private var typeRowExpanded = true      // 画线类型行收/展
-    @State private var showingStyleCard = false    // 长按设置卡片
+    // 1a-iii 切片2 Task3：常驻样式面板替代长按卡片；面板上/下半区位置（Task4 接 ⇅ 真行为，本 task 固定 .bottom）。
+    @State private var stylePanelPosition: DrawingStylePanelPosition = .bottom
     @State private var toast = ToastState()      // §B.1：latest-wins 调度核（host-tested）
     @State private var confirmingEnd = false
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
@@ -217,13 +218,6 @@ public struct TrainingView: View {
         .overlay(alignment: .topLeading) {
             if showsFloatingDrawingTool {          // 只复盘（训练/replay 用「画图」钮）
                 DrawingToolFloatingView(isDrawingActive: isDrawingActive, onToggleTool: toggleDrawing)
-            }
-        }
-        .overlay {
-            if showingStyleCard {
-                DrawingStyleCard(session: engine.drawingSession,
-                                 scheme: colorScheme == .dark ? .dark : .light,
-                                 onDismiss: { showingStyleCard = false })
             }
         }
     }
@@ -468,7 +462,9 @@ public struct TrainingView: View {
     /// frame 三态不变（抽共享、不复制，见 Render/DrawingLayoutInvariantTests.swift）。
     private var chartPanels: some View {
         ChartPanelsContainer(engine: engine, showsTradeButtons: showsTradeButtons, isDrawingActive: isDrawingActive,
-                             typeRowExpanded: typeRowExpanded, onLongPressType: { showingStyleCard = true },
+                             typeRowExpanded: typeRowExpanded, scheme: colorScheme == .dark ? .dark : .light,
+                             stylePanelPosition: stylePanelPosition,
+                             onTogglePosition: { /* Task4 接真行为：切 stylePanelPosition + 镜像 */ },
                              upperPanel: { panel(.upper) }, lowerPanel: { panel(.lower) })
     }
 
@@ -631,7 +627,9 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
     let showsTradeButtons: Bool
     let isDrawingActive: Bool
     let typeRowExpanded: Bool
-    let onLongPressType: () -> Void
+    let scheme: AppColorScheme                    // 1a-iii 切片2 Task3：样式面板色板取色（DrawingColorResolver）
+    let stylePanelPosition: DrawingStylePanelPosition   // 上/下半区（Task4 接 ⇅ 真行为，本 task 固定 .bottom）
+    let onTogglePosition: () -> Void               // ⇅ 回调（替代已删的 onLongPressType）
     @ViewBuilder let upperPanel: () -> Upper
     @ViewBuilder let lowerPanel: () -> Lower
     @State private var upperPanelChartFrame: CGRect?
@@ -666,9 +664,15 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
             // codex 计划-R4-medium：必带 showsTradeButtons 门——排除复盘（复盘用浮动铅笔钮，本切片不改其行为）。
             // 否则复盘经浮动钮 drawingModeActive 时也会挂 overlay+装两面板盾、吞复盘图表点。
             if showsTradeButtons, isDrawingActive, typeRowExpanded {
-                DrawingTypeOverlay(expanded: typeRowExpanded, onLongPressType: onLongPressType)
+                DrawingStylePanel(session: engine.drawingSession, scheme: scheme,
+                                  position: stylePanelPosition, onTogglePosition: onTogglePosition)
+                    // ⭐codex 计划-R1-F2：GeometryReader 必须量**未加 padding 的可见面板本体**——
+                    //   量到的 frame 就是写进 shieldRect 的盾。先量、后 padding：
                     .background(GeometryReader { g in Color.clear
                         .preference(key: DrawingShieldFrameKey.self, value: g.frame(in: .named("chart"))) })
+                    // 离屏边距加在测量之后 → 只影响面板摆放位置，不进盾（无看不见的死条）。
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 8)
             }
         }
         .accessibilityIdentifier("chartPanels")
