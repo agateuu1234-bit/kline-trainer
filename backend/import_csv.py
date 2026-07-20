@@ -1,7 +1,7 @@
 # backend/import_csv.py
 # Spec: kline_trainer_modules_v1.4.md §四 B1 (L718-723) + plan v1.5 §6.4.1 + klines DDL L325-363
 #
-# 双层（D1）：纯函数层（parse/clean/compute_indicators/compute_ticket_index/to_kline_records）
+# 双层（D1）：纯函数层（parse/clean/compute_indicators/to_kline_records）
 # host pytest 全测、不碰 DB；薄 asyncpg 写库壳 + CLI 在同文件下半（D14，CI 不单测，B3/NAS scope）。
 #
 # 决议：
@@ -9,7 +9,8 @@
 # - D3 MA66 = SMA(close,66)，前 65 行 NULL，round(4)
 # - D4 BOLL = SMA(close,20) ± 2*std(ddof=0 总体)，前 19 行 NULL，round(4)
 # - D5 MACD: DIF=EMA12-EMA26 / DEA=EMA(DIF,9) / BAR=(DIF-DEA)*2；ewm(adjust=False)；round(6)
-# - D6 ticket_index：1m 升序 0,1,2…；其它周期 searchsorted 到 1m 基准
+# - D6 ticket_index：已停止写入（QMT spec D3/R12-F1）。PG 列保留（m01 禁不可逆迁移），
+#   新行该列 NULL；无下游消费者（B2 _KLINE_SELECT_COLS 不含、iOS 零引用）。
 # - D7 必需列 datetime/open/high/low/close/volume；datetime→Unix 秒 Int64；缺列抛 CsvSchemaError
 # - D9 清洗丢 NaN/非正价/high<low/越界 + 去重(keep last) + 升序
 from __future__ import annotations
@@ -58,6 +59,11 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     out = out.dropna(subset=list(REQUIRED_COLUMNS))
     for c in _PRICE_COLS:
         out = out[out[c] > 0]
+    # codex 对抗评审 high：DOUBLE PRECISION 放宽后 inf 能穿过上面的 >0 校验
+    # （inf > 0 为真），也能穿过下面的 high>=low / high>=max(open,close) 校验
+    # （inf >= inf 为真），进而落库、污染训练组生成与读取（下游拒非有限蜡烛）。
+    # 以前价格列是 DECIMAL 时数据库层会挡；现在必须在这里显式丢非有限行。
+    out = out[np.isfinite(out[list(_PRICE_COLS)]).all(axis=1)]
     out = out[out["high"] >= out["low"]]
     out = out[out["high"] >= out[["open", "close"]].max(axis=1)]
     out = out[out["low"] <= out[["open", "close"]].min(axis=1)]
@@ -89,24 +95,10 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def compute_ticket_index(
-    df: pd.DataFrame,
-    period: str,
-    baseline_1m_datetimes: Optional[Sequence[int]],
-) -> list[int]:
-    """D6：1m → 升序 0,1,2…；其它周期 → searchsorted 到 1m 基准 datetime 数组。"""
-    if period == "1m":
-        return list(range(len(df)))
-    if baseline_1m_datetimes is None:
-        raise ValueError(f"period={period} 需要 1m 基准 datetimes 才能映射 ticket_index")
-    base = np.asarray(sorted(baseline_1m_datetimes), dtype="int64")
-    return [int(np.searchsorted(base, int(dt))) for dt in df["datetime"]]
-
-
 # R1-H2：BIGINT/INTEGER 列必须是 Python int，其余 DECIMAL 列是 Python float。
-# df.iterrows() 会把整行升格成单一 float64 dtype → datetime/volume/ticket_index 变 numpy.float64
+# df.iterrows() 会把整行升格成单一 float64 dtype → datetime/volume 变 numpy.float64
 # → asyncpg int8/int4 codec 拒收。故按列显式 cast，不用 iterrows()。
-_INT_COLS = ("datetime", "volume", "ticket_index")
+_INT_COLS = ("datetime", "volume")
 _FLOAT_COLS = ("open", "high", "low", "close", "amount", "ma66",
                "boll_upper", "boll_mid", "boll_lower",
                "macd_diff", "macd_dea", "macd_bar")
@@ -130,7 +122,7 @@ def _float_or_none(v: Any) -> Optional[float]:
 
 
 def to_kline_records(df: pd.DataFrame, stock_code: str, period: str) -> list[dict]:
-    """把带指标 + ticket_index 的 df 转成入库 record dict 列表。
+    """把带指标的 df 转成入库 record dict 列表。
     R1-H2：整数列 → Python int，浮点列 → Python float（非 numpy 标量），NaN → None。
     用 to_dict('records') 保留各列原 dtype，再逐列 cast（避免 iterrows() float64 升格）。"""
     rows = df.to_dict("records")
@@ -152,26 +144,87 @@ import os
 
 _KLINE_INSERT = """
 INSERT INTO klines (stock_code, period, datetime, open, high, low, close,
-                    volume, amount, ticket_index, ma66,
+                    volume, amount, ma66,
                     boll_upper, boll_mid, boll_lower,
                     macd_diff, macd_dea, macd_bar)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 ON CONFLICT (stock_code, period, datetime) DO UPDATE SET
     open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, close=EXCLUDED.close,
-    volume=EXCLUDED.volume, amount=EXCLUDED.amount, ticket_index=EXCLUDED.ticket_index,
+    volume=EXCLUDED.volume, amount=EXCLUDED.amount,
     ma66=EXCLUDED.ma66, boll_upper=EXCLUDED.boll_upper, boll_mid=EXCLUDED.boll_mid,
     boll_lower=EXCLUDED.boll_lower, macd_diff=EXCLUDED.macd_diff,
     macd_dea=EXCLUDED.macd_dea, macd_bar=EXCLUDED.macd_bar
 """
 
 
+class SchemaDriftError(ValueError):
+    """D8a：写库前置断言失败——目标库 klines 价格列类型与预期（double precision）不符。"""
+
+
+_SCHEMA_CHECK_SQL = """
+SELECT a.attname AS column_name,
+       format_type(a.atttypid, a.atttypmod) AS data_type
+FROM pg_attribute a
+WHERE a.attrelid = to_regclass('klines')
+  AND a.attname = ANY($1::text[])
+  AND a.attnum > 0
+  AND NOT a.attisdropped
+"""
+
+
+async def _assert_klines_price_columns_double(conn) -> None:
+    """D8a（spec §4.3，codex 对抗评审 high 提前落地；R2 再收紧）：写库前 fail-closed
+    断言——klines.open/high/low/close 必须已是 double precision。防目标库尚未跑
+    migration 0004（仍是 DECIMAL(10,2)）时 PostgreSQL 静默四舍五入到 2 位，摧毁 QMT
+    前复权价的 float64 精度。刻意不断言 ticket_index（该列保留、非本次范围）。
+
+    R2（codex 对抗评审 high #2）：查询必须用 pg_catalog + to_regclass('klines')
+    精确定位关系，不能用 information_schema.columns 按裸表名过滤。后者不限 schema——
+    若库里多个 schema 各有一张 klines，会把多张表的行一起取回，调用处
+    `{r["column_name"]: r["data_type"] for r in rows}` 按列名收敛时后取到的行覆盖
+    先前的，另一 schema 里 double precision 的 klines 可能掩盖真正写入目标（由
+    search_path 解析、INSERT 不带 schema 限定）里的 numeric，让本该 fail-closed 的
+    旧库被静默放行。to_regclass('klines') 的解析规则与不带限定的裸表引用完全一致，
+    保证这里检查的就是 INSERT 实际会命中的那一张表。
+    format_type 对 float8 返回 "double precision"、对 DECIMAL(10,2) 返回
+    "numeric(10,2)"——下面 `!= "double precision"` 判据不变，DECIMAL 仍会被正确
+    判为漂移。表不存在时 to_regclass 返回 NULL，查不到任何行，四列全部落入
+    「列缺失」分支，同样 fail-closed。"""
+    rows = await conn.fetch(_SCHEMA_CHECK_SQL, list(_PRICE_COLS))
+    found = {r["column_name"]: r["data_type"] for r in rows}
+    bad = {c: found.get(c, "<列缺失>") for c in _PRICE_COLS
+           if found.get(c) != "double precision"}
+    if bad:
+        detail = "、".join(f"{c}={t}" for c, t in bad.items())
+        raise SchemaDriftError(
+            f"klines 价格列类型与预期不符：{detail}（期望均为 double precision）。"
+            "请先跑 migration 0004_qmt_price_double_and_coverage 再导入。"
+        )
+
+
 async def write_to_postgres(dsn: str, stock_code: str, stock_name: str,
                             records: list[dict]) -> int:
-    """D11：stocks + klines 幂等 UPSERT。返回写入 kline 行数。"""
+    """D11：stocks + klines 幂等 UPSERT。返回写入 kline 行数。
+    D8a：写前 fail-closed 断言 klines 价格列已是 double precision（防陈旧 DECIMAL
+    库静默截断精度）。
+
+    **断言与写入必须原子**（codex R3-F2）：断言原先在事务之外，且那条 catalog 查询
+    不锁 klines —— 检查通过之后、INSERT 取到表锁之前，若有人跑 rollback.sql 或手工
+    ALTER TABLE 把价格列改回 numeric，守卫就被绕过、精度静默丢失。故改为在同一事务内
+    先取一把与 ALTER TABLE 冲突的锁、再断言、再写。
+
+    锁级别选 ROW EXCLUSIVE：这正是 INSERT 自身会取的级别，与 ALTER TABLE 的
+    ACCESS EXCLUSIVE 冲突（堵住并发改表），但不与其它 ROW EXCLUSIVE 冲突
+    （不会把并发导入白白串行化）。刻意不升到 SHARE 或更高。
+
+    注：这与前一轮拒绝的「为不可能场景加机器」不是同一件事——那是给单写入者架构补并发
+    防护；这里是把检查移进它所保护的事务、使检查-使用原子化，属于移除结构缺陷。"""
     import asyncpg  # 局部 import：纯函数层不依赖 asyncpg（单测不装也能跑）
     conn = await asyncpg.connect(dsn)
     try:
         async with conn.transaction():
+            await conn.execute("LOCK TABLE klines IN ROW EXCLUSIVE MODE")
+            await _assert_klines_price_columns_double(conn)
             await conn.execute(
                 "INSERT INTO stocks(code, name) VALUES($1,$2) "
                 "ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name",
@@ -179,7 +232,7 @@ async def write_to_postgres(dsn: str, stock_code: str, stock_name: str,
             )
             await conn.executemany(_KLINE_INSERT, [
                 (r["stock_code"], r["period"], r["datetime"], r["open"], r["high"],
-                 r["low"], r["close"], r["volume"], r["amount"], r["ticket_index"],
+                 r["low"], r["close"], r["volume"], r["amount"],
                  r["ma66"], r["boll_upper"], r["boll_mid"], r["boll_lower"],
                  r["macd_diff"], r["macd_dea"], r["macd_bar"])
                 for r in records
@@ -215,7 +268,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="导入 CSV 行情到 PostgreSQL (B1)")
     ap.add_argument("--input", required=True, help="CSV 目录")
     ap.add_argument("--stock", required=True, help="股票代码")
-    ap.add_argument("--period", default=None, help="只导该周期；省略=导全部，1m 先建基准")
+    ap.add_argument("--period", default=None, help="只导该周期；省略=导全部")
     ap.add_argument("--name", default=None, help="股票名（缺省取 CSV name 列或代码）")
     ap.add_argument("--dsn", default=os.environ.get("DATABASE_URL"), help="PostgreSQL DSN")
     args = ap.parse_args(argv)
@@ -228,27 +281,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     csv_dir = Path(args.input)
     all_files = sorted(csv_dir.glob("*.csv"))
 
-    # R1-M2：总是先从 dir 里建 1m 基准（不依赖 DB），与 --period 过滤解耦。
-    baseline: Optional[list[int]] = None
-    one_min_files = [f for f in all_files if _discover_period(f) == "1m"]
-    if one_min_files:
-        base_df = compute_indicators(clean(parse_csv(one_min_files[0])))
-        baseline = list(base_df["datetime"])
-
-    # 要写库的文件：--period 过滤；1m 先写（保证基准来源行也入库）。
+    # 要写库的文件：--period 过滤。（原「1m 先写」优先级随 ticket_index 停写一并移除）
     write_files = all_files
     if args.period:
         write_files = [f for f in all_files if _discover_period(f) == args.period]
-        if args.period != "1m" and baseline is None:
-            ap.error(f"--period {args.period} 需要同目录存在 1m CSV 以建 ticket_index 基准")
-    write_files = sorted(write_files,
-                         key=lambda f: 0 if _discover_period(f) == "1m" else 1)
+    write_files = sorted(write_files)
 
     total = 0
     for f in write_files:
         period = args.period or _discover_period(f)
         df2 = compute_indicators(clean(parse_csv(f)))
-        df2["ticket_index"] = compute_ticket_index(df2, period, baseline)
         name = _resolve_stock_name(df2, args.name, args.stock)
         records = to_kline_records(df2, stock_code=args.stock, period=period)
         n = asyncio.run(write_to_postgres(args.dsn, args.stock, name, records))

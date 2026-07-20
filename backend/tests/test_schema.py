@@ -5,6 +5,7 @@ Production deployment validation (on NAS PostgreSQL) is Wave 1 B3 owner scope.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pglast
@@ -36,8 +37,8 @@ def test_three_tables_created():
         for s in stmts
         if isinstance(s.stmt, CreateStmt)
     }
-    assert table_names == {"stocks", "klines", "training_sets"}, (
-        f"expected {{stocks,klines,training_sets}}, got {table_names}"
+    assert table_names == {"stocks", "klines", "training_sets", "stock_coverage"}, (
+        f"expected {{stocks,klines,training_sets,stock_coverage}}, got {table_names}"
     )
 
 
@@ -162,3 +163,90 @@ def test_training_sets_has_required_check_constraints():
     }
     missing = required - names
     assert not missing, f"missing CHECK constraints: {missing}; got {names}"
+
+
+# ---- Plan 2a：D1 DDL（OHLC DOUBLE / file_path TEXT / stock_coverage）----
+
+def _column_type_names(table: str) -> dict:
+    """表名 → {列名: 小写类型名}（pglast AST，TypeName.names 末段即类型名）。"""
+    stmts = _parse_schema()
+    create = next(
+        s.stmt for s in stmts
+        if isinstance(s.stmt, CreateStmt) and s.stmt.relation.relname == table
+    )
+    out = {}
+    for elt in create.tableElts:
+        colname = getattr(elt, "colname", None)
+        typename = getattr(elt, "typeName", None)
+        if colname and typename is not None:
+            out[colname] = typename.names[-1].sval.lower()
+    return out
+
+
+def test_klines_ohlc_are_double_precision():
+    """D1：前复权 float64 全精度入库；DECIMAL(10,2) 会压塌老 K 线。"""
+    cols = _column_type_names("klines")
+    for c in ("open", "high", "low", "close"):
+        assert cols[c] == "float8", f"klines.{c} 期望 double precision，实为 {cols[c]}"
+
+
+def test_klines_amount_and_indicators_stay_decimal():
+    """D1 明确只改价格列；amount/指标列不变（改了就是超范围 DDL）。"""
+    cols = _column_type_names("klines")
+    assert cols["amount"] == "numeric"
+    for c in ("ma66", "boll_upper", "boll_mid", "boll_lower",
+              "macd_diff", "macd_dea", "macd_bar"):
+        assert cols[c] == "numeric", f"klines.{c} 不应被改动"
+
+
+def test_klines_ticket_index_column_retained():
+    """D3/R12-F1：ticket_index 只停写、列必须保留（删列 = 不可逆迁移违规）。"""
+    cols = _column_type_names("klines")
+    assert "ticket_index" in cols, "ticket_index 列被删了——违反 m01 不可逆迁移禁令"
+
+
+def test_training_sets_file_path_is_text():
+    """R16-F2：绝对路径任意长，VARCHAR(255) 会让登记 INSERT 失败留 orphan。"""
+    cols = _column_type_names("training_sets")
+    assert cols["file_path"] == "text", f"file_path 期望 text，实为 {cols['file_path']}"
+
+
+def test_stock_coverage_table_columns():
+    """D11：B1 写 / B2 读的覆盖契约表五列。"""
+    cols = _column_type_names("stock_coverage")
+    assert set(cols) == {"stock_code", "dense_1m_start_date", "dense_1m_end_date",
+                         "dropped_1m_dates", "dense_day_count"}
+    assert cols["dropped_1m_dates"] == "jsonb", "须为 JSONB 以便 DB 层校验数组类型"
+
+
+def test_stock_coverage_has_integrity_checks():
+    """codex PF2-R2-F1：坏覆盖行会让 B2 reader 抛非-Skip 异常、中止整轮 sweep。
+    约束必须在 DB 层可执行，不能只靠 reader 兜底。"""
+    # 同 PF2-R3-F2：schema.sql 也用多空格对齐（`dense_1m_end_date   DATE NOT NULL`），
+    # 必须先压平空白再子串断言，否则本测必挂。需在本文件顶部加 `import re`。
+    sql = re.sub(r"\s+", " ", re.sub(r"--[^\n]*", " ",
+                 SCHEMA_PATH.read_text(encoding="utf-8"))).lower()
+    seg = sql.split("create table if not exists stock_coverage")[1].split(");")[0]
+    assert "jsonb_typeof(dropped_1m_dates) = 'array'" in seg, "缺 dropped 数组类型检查"
+    assert "dense_1m_start_date <= dense_1m_end_date" in seg, "缺覆盖带非反向检查"
+    assert "dense_day_count >= 0" in seg, "缺计数非负检查"
+    for col in ("dense_1m_start_date", "dense_1m_end_date", "dense_day_count"):
+        assert f"{col} date not null" in seg or f"{col} integer not null" in seg, \
+            f"{col} 应为 NOT NULL"
+
+
+def test_klines_has_price_integrity_checks():
+    """codex R3-F1：fresh baseline 与 migration 后的形状必须一致——
+    新建库同样要带价格有限性/正数/顺序约束，否则两条路径建出的库形状会漂移。"""
+    sql = re.sub(r"\s+", " ", re.sub(r"--[^\n]*", " ",
+                 SCHEMA_PATH.read_text(encoding="utf-8"))).lower()
+    seg = sql.split("create table if not exists klines")[1].split("create table")[0]
+    assert "ck_klines_price_finite_positive" in seg
+    assert "ck_klines_price_ordering" in seg
+    # 逐列断言，理由同 test_migrations 内同名检查（弱子串断言挡不住漏列）
+    for col in ("open", "high", "low", "close"):
+        assert f"{col} > 0" in seg, f"{col} 缺正数约束"
+        assert f"{col} <> 'nan'::double precision" in seg, f"{col} 缺 NaN 排除"
+        assert f"{col} <> 'infinity'::double precision" in seg, f"{col} 缺 Infinity 排除"
+    assert "greatest(open, close)" in seg
+    assert "least(open, close)" in seg
