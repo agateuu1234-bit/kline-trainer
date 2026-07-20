@@ -284,15 +284,64 @@ def test_dropped_1m_date_never_spanned_by_selected_window(tmp_path):
     里减掉——此前 `_fixture_conn(dropped=...)` / `_coverage_row(days, dropped)` 虽然
     都收 dropped 参数，但全仓 13 个调用点无一传值，死参数伪装成覆盖。
 
-    这里显式传一个落在候选窗口范围中段的 dropped 日：fixture 照常给它生成满根数
-    （D9 per-day 硬门 / dense_day_count 交叉校验都不会因这天"缺数据"而拦截），
-    唯一能把它挡在被选中窗口范围之外的只有 dense_dates 里的 `- dropped`。"""
+    此前版本用固定下标 `days[500]` 作 dropped 日，声称它"落在候选窗口范围中段"——
+    但这句话与 seed(7) 实际选中的窗口对不上（早一年多），断言 `assert not (...)`
+    从未有机会失败（复审实测证实：即使 D2 门成员检查被禁用、或排除逻辑保基数
+    换错日期，测试依旧全绿）。
+
+    这里改为**动态推导** dropped 日，而非硬编码下标：先直接调纯函数
+    `build_training_windows`（dense_dates 传全量交易日）算出"dense_dates 的
+    `- dropped` 排除逻辑是空操作"时 seed(7) 会自然选中的窗口（baseline）。
+    刻意**不**经 `generate_one_training_set`，只为算这条前提——它自带
+    `dense_day_count` 交叉校验（codex PF2-R6-F1，守另一条不相关的不变量），
+    若拿它来跑 baseline，baseline 用的是"未传 dropped"的覆盖行、交叉校验按
+    "无 drop"算权威天数，一旦生产 dense_dates 计算本身被改坏（如本测试要抓的
+    M-b 那类"基数不变但减错日期"的坏改法），baseline 这条腿会先撞交叉校验掉进
+    错误分支，而不是让下面真正要守的核心断言去接住它。
+
+    取 baseline 窗口中段一个交易日作 dropped 日：它必然落在"若不排除会被跨越"
+    的窗口内，且今后 fixture / seed / 候选逻辑变化时会跟着 baseline 一起重新
+    对齐，不会像旧写法那样静默退化成死断言。随后**显式断言这个重叠前提本身
+    成立**（若不成立，直接报错而不是继续绿着），再验证真正传入 dropped 后
+    （这次真的经 `generate_one_training_set` 全链路，含 `_fetch_dense_coverage`
+    + dense_dates 计算 + `eligible_start_indices` 成员检查），被选中的窗口确实
+    不再跨越它。"""
+    from generate_training_sets import build_training_windows, compute_after_end, PERIOD_BEFORE_CAP
+    from qmt_resample import period_boundaries
+
     days = _trading_days(dt.date(2022, 1, 3), 1000)
-    dropped_date = days[500]
+    bars = _pg_fixture(dt.date(2022, 1, 3), 1000)
+    daily = bars["daily"]
+    trading_dates = sorted({trading_date(int(e)) for e in daily["datetime"]})
+    month_boundaries = period_boundaries(daily, "monthly")
+
+    # 前提构造：dense_dates 传全量交易日 = 排除逻辑形同虚设时会选中的窗口。
+    baseline_start, _ = build_training_windows(
+        bars, month_boundaries, random.Random(7),
+        dense_dates=set(trading_dates), trading_dates=trading_dates,
+        before_caps=PERIOD_BEFORE_CAP)
+    baseline_idx = month_boundaries.index(baseline_start)
+    baseline_end = compute_after_end(month_boundaries, baseline_idx)
+
+    window_days = [d for d in days if baseline_start <= _midnight(d) <= baseline_end]
+    assert len(window_days) >= 10, (
+        f"baseline 窗口只覆盖 {len(window_days)} 个交易日，中段取点不再具代表性——"
+        "fixture / gate 参数可能发生了大改动，请重新评估本测试的构造前提")
+    dropped_date = window_days[len(window_days) // 2]
+    dropped_epoch = _midnight(dropped_date)
+
+    # 显式前提：若不排除该日，seed(7) 会选中一个跨越它的窗口——下面的核心断言
+    # 由此才真的有机会失败。这条前提不成立时必须报错，而不是让测试继续静默绿着。
+    assert baseline_start <= dropped_epoch <= baseline_end, (
+        f"前提不成立：dropped 日 {dropped_date} 未落在 baseline 窗口 "
+        f"[{baseline_start}, {baseline_end}] 内——本测试对 D2 "
+        "dense 门排除逻辑已失去鉴别力（vacuous），需要重新选点，而不是让下面的核心"
+        "断言继续静默通过"
+    )
+
     conn, _ = _fixture_conn(dropped=[dropped_date])
     gts = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
                                                 random.Random(7)))
-    dropped_epoch = _midnight(dropped_date)
     assert not (gts.start_datetime <= dropped_epoch <= gts.end_datetime), (
         f"选中窗口 [{gts.start_datetime}, {gts.end_datetime}] 跨越了被 drop 的日期 "
         f"{dropped_date}（dense_dates 未真正排除 dropped 日）"
