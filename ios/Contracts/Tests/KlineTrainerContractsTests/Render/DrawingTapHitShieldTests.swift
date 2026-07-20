@@ -133,7 +133,10 @@ struct DrawingTapHitShieldTests {
 
         // 切片2 Task2：setShieldRect 已被 PanelShield 三态 API 取代，接线断言改锚 refreshShields。
         #expect(tv.contains("refreshShields"))
-        #expect(tv.contains("showsTradeButtons, isDrawingActive, typeRowExpanded"))   // 复盘门（codex 计划-R4）
+        // P1b-1a-iii 回归修复：旧三 bool 逗号门 `showsTradeButtons, isDrawingActive, typeRowExpanded` 已
+        // 收敛成单一预测谓词 `stylePanelWillBeVisible`（TrainingView 唯一权威定义），本容器改读传入参数
+        // `stylePanelVisible`。断言新形式仍锚定 showsTradeButtons（== 复盘门，天然排除复盘）。
+        #expect(tv.contains("stylePanelWillBeVisible: Bool { showsTradeButtons && isDrawingActive && typeRowExpanded }"))
         // 切片2 Task3：第一道盾上移到 DrawingStylePanel 根（DrawingTypeOverlay 不再自带 contentShape）。
         let dsp = try readSource("UI/DrawingStylePanel.swift")
         #expect(dsp.contains(".contentShape(Rectangle())"))
@@ -332,11 +335,11 @@ private struct TrainingShellLayout: View {
     private var isDrawingActive: Bool { engine.drawingSession.drawingModeActive }
 
     var body: some View {
+        // P1b-1a-iii 回归修复：ChartPanelsContainer 现只收一个收敛后的 stylePanelVisible 参数——
+        // 本壳在调用处自己算好三 bool 合取（与 TrainingView.stylePanelWillBeVisible 同一表达式）。
         ChartPanelsContainer(
             engine: engine,
-            showsTradeButtons: showsTradeButtons,
-            isDrawingActive: isDrawingActive,
-            typeRowExpanded: typeRowExpanded,
+            stylePanelVisible: showsTradeButtons && isDrawingActive && typeRowExpanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: .bottom,    // 本 task 三个外壳都不带自己的 stylePanelPosition 状态，固定传 .bottom
             onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
@@ -357,9 +360,7 @@ private struct TallPanelsShellLayout: View {
     var body: some View {
         ChartPanelsContainer(
             engine: engine,
-            showsTradeButtons: engine.flow.canBuySell(),
-            isDrawingActive: engine.drawingSession.drawingModeActive,
-            typeRowExpanded: typeRowExpanded,
+            stylePanelVisible: engine.flow.canBuySell() && engine.drawingSession.drawingModeActive && typeRowExpanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: stylePanelPosition,
             onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
@@ -378,9 +379,7 @@ private struct ShortUpperShellLayout: View {
     var body: some View {
         ChartPanelsContainer(
             engine: engine,
-            showsTradeButtons: engine.flow.canBuySell(),
-            isDrawingActive: engine.drawingSession.drawingModeActive,
-            typeRowExpanded: typeRowExpanded,
+            stylePanelVisible: engine.flow.canBuySell() && engine.drawingSession.drawingModeActive && typeRowExpanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: .bottom,    // 本 task 三个外壳都不带自己的 stylePanelPosition 状态，固定传 .bottom
             onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
@@ -465,6 +464,34 @@ extension DrawingTapHitShieldTests {
         let before = engine.reviewDrawings.count                     // 复盘提交路径 = reviewDrawings（routeDrawingCommit）
         handle.handleDrawingTapForTesting(at: leftmostMainChartPoint(handle))   // 复盘图表点正常（不被吞）
         #expect(engine.reviewDrawings.count == before + 1)
+    }
+
+    // P1b-1a-iii 回归修复（HIGH，codex adversarial review，6a84fa5 引入）：TrainingView 不可渲染
+    // （无 renderable 宿主），故本测试不驱动真实 TrainingView 生命周期 onChange，而是直接模拟旧 bug
+    // 制造出的模型态——三个生命周期 onChange 曾无条件调用 `setStylePanelVisible(true)`，即便样式面板
+    // 在复盘态根本不会挂载（showsTradeButtons==false，overlay 从不出现）。一旦两面板卡在 `.pending`，
+    // 复盘态没有任何 onPreferenceChange 会再触发 `ChartPanelsContainer.refreshShields()` 来解开它
+    // （面板从未挂载，没有 GeometryReader 上报新 frame）——`ChartContainerView.handleDrawingTap` 读到
+    // `.pending` 恒拒收，reviewDrawings 永久停止增长。本测试证明：①危害是真实的（两面板 `.pending` 时
+    // 复盘 tap 被拒收，与 reviewModeInstallsNoOverlayNoShield 的「无 key 时正常放行」形成对照）；
+    // ②`clearAllShields()`（即 TrainingView.syncPanelShields() 在 `stylePanelWillBeVisible == false`
+    // 分支所做的事）确实是解除死锁的闸门——同一点在清盾后能落线。
+    @Test("回归复现（P1b-1a-iii HIGH，6a84fa5）：复盘态两面板若卡在 .pending，tap 被永久拒收；clearAllShields() 后同点能落线")
+    func reviewModePendingShieldsBlockTapUntilCleared() throws {
+        let (handle, engine) = makeReviewDrawingActiveChart()
+        let p = leftmostMainChartPoint(handle)
+        // 复现旧 bug：模拟三个生命周期 onChange 曾经无条件调用的 setStylePanelVisible(true)——复盘态
+        // 样式面板从不挂载，没有任何后续 onPreferenceChange 能重新触发 refreshShields() 来解开它。
+        engine.drawingSession.setStylePanelVisible(true)
+        #expect(engine.drawingSession.shield[0] == .pending && engine.drawingSession.shield[1] == .pending)
+        let before = engine.reviewDrawings.count
+        handle.handleDrawingTapForTesting(at: p)
+        #expect(engine.reviewDrawings.count == before, ".pending 窗口内竟落了线 —— 未复现出回归本应有的拒收")
+        // 修复后 syncPanelShields() 在 stylePanelWillBeVisible == false 时改调 clearAllShields()——
+        // 同一点应恢复可落线，证明危害确由残留 .pending 造成、且清盾正是解除它的闸门。
+        engine.drawingSession.clearAllShields()
+        handle.handleDrawingTapForTesting(at: p)
+        #expect(engine.reviewDrawings.count == before + 1, "clearAllShields() 后同一点仍落不了线 —— 拒收未被正确解除")
     }
 
     @Test("盾泛化真路径（trade-safety）：overlay 高到跨越上下两面板 → **两个**面板各自装盾，上面板不再裸奔")

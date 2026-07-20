@@ -104,6 +104,15 @@ public struct TrainingView: View {
     private var isDrawingActive: Bool {
         engine.drawingSession.drawingModeActive
     }
+    // P1b-1a-iii 回归修复（HIGH，codex adversarial review，6a84fa5 引入）：样式面板「是否会出现」的判据
+    // 唯一权威定义——此前同一表达式在 ChartPanelsContainer（计算属性）与本文件三个生命周期 onChange
+    // （各自硬编码调用 setStylePanelVisible(true)）里存在两份互不联动的拷贝：复盘态本该算出 false
+    // （showsTradeButtons==false，overlay 从不挂载），但三个 onChange 从不知道这件事，仍无条件把两面板
+    // 摁进 .pending——此后没有任何 onPreferenceChange 会再触发 refreshShields() 来解开它，复盘每一次
+    // tap 都被 ChartContainerView.handleDrawingTap 拒收（session.shield[k] ?? .unshielded 读到的是
+    // .pending），复盘画线永久失效。收敛为单一定义：ChartPanelsContainer 与三个 onChange（见
+    // syncPanelShields()）都读这一处。
+    private var stylePanelWillBeVisible: Bool { showsTradeButtons && isDrawingActive && typeRowExpanded }
     private func toggleDrawing() {
         // 交易边界（codex rebased-R1-high）：进/出画线**同步**作废未确认买卖框——不依赖会被 SwiftUI
         // coalesce 掉的 .onChange（drawingModeActive 若在一次 update 内 false→true→false，onChange 看不到净变化）。
@@ -114,6 +123,18 @@ public struct TrainingView: View {
         // 退出方向不动展开态（避免与退出动画/清理抢状态）——「记住工具与样式」是另一回事（session.defaultStyle）。
         if !engine.drawingSession.drawingModeActive { typeRowExpanded = true }
         engine.toggleDrawingMode()
+    }
+
+    // P1b-1a-iii 回归修复：三个仍可能在样式面板可见期间触发的生命周期 onChange
+    // （drawingModeActive/typeRowExpanded/stylePanelPosition）唯一共用的盾更新实现——按
+    // stylePanelWillBeVisible 分流：面板确实会出现 → setStylePanelVisible(true)（两面板 .pending，
+    // 交给 ChartPanelsContainer.refreshShields() 按几何收敛，fail-closed）；面板根本不会出现（如复盘）
+    // → clearAllShields()（absent 等价放行是正确语义——没有面板可能挡住 tap，继续摁着 .pending 只会
+    // 堵死后续画线，且没有任何 onPreferenceChange 会来解开它）。真正的卸载语义（.onDisappear）不经此
+    // 方法，仍无条件调 clearAllShields()。
+    private func syncPanelShields() {
+        if stylePanelWillBeVisible { engine.drawingSession.setStylePanelVisible(true) }
+        else { engine.drawingSession.clearAllShields() }
     }
 
     // codex/W3-review-redesign-Task10：body 原是单个巨型 modifier 链——加一条 `.onChange` 后编译器
@@ -285,33 +306,24 @@ public struct TrainingView: View {
         // remount，同 tick/period 下被 TradeConfirmGuard 放行成交。清 nil 恒安全（本就不该跨画线切换留着买卖框）。
         .onChange(of: engine.drawingSession.drawingModeActive) { _, _ in
             tradeStrip = nil
-            // whole-branch fix（critical）：改用 setStylePanelVisible(true) 把**两个**面板置 .pending
-            // （fail-closed），不再用 clearAllShields()。absent 等价放行（handleDrawingTap 读
-            // shield[k] ?? .unshielded）——先清空会打开一个只靠 refreshShields() 才能关上的窗口，
-            // 而上/下面板 frame 在切位置前后可能逐像素不变（四态布局不变量本身就断言这点），此时
-            // DrawingShieldFrameKey 若也恰好不变，refreshShields() 永不重新触发，shield 就会一直
-            // 空着——面板全程可见期间的每一次 tap 都会穿透并 autosave 幽灵线。refreshShields() 每次
-            // 调用都无条件覆盖两个 key（见其实现），stale 的 .pending 撑不过下一轮收敛，故这里即便
-            // 方向「反了」（.pending 而非真实值）也会自纠正——是可接受的 fail-closed 瞬态。
-            // clearAllShields() 只保留给 .onDisappear（真正的卸载语义，见下方）。
-            engine.drawingSession.setStylePanelVisible(true)
+            // P1b-1a-iii 回归修复：盾的收敛/清空判据统一交给 syncPanelShields()（唯一权威实现，定义处
+            // 大注释详述复盘死锁的根因）——tradeStrip 清空仍保持无条件（两个方向都清，见
+            // TrainingViewShellSourceGuardTests.tradeBoundary/drawingModeOnChangeStaysUnconditional）。
+            syncPanelShields()
         }
-        // 收起类型行也显式置盾为 .pending（同上一条 onChange 的理由；overlay 隐藏时几何不齐也不会误开闸）。
+        // 收起/展开类型行同样可能改变样式面板是否出现的判据，统一走 syncPanelShields()。
         .onChange(of: typeRowExpanded) { _, _ in
-            engine.drawingSession.setStylePanelVisible(true)
+            syncPanelShields()
         }
         // 1a-iii 切片2 Task4：切面板上/下半区即重置所有盾——旧位置的盾若残留，那半边 K 线会变成
         // 「怎么点都画不了线」的死区（nil-preference 自动重算是第一层，本行是明确的生命周期第二层）。
         // ⭐codex 计划-R16-F1：这里绝不能用 settleWithNoShields()（测试逃生舱）。
         //   切位置正是几何尚未重新收敛的时刻——把两面板标记「已收敛」等于在最需要保护的瞬间
         //   关掉 fail-closed：新位置的面板已可见、盾还没算出来，此时的 tap 会穿透并 autosave 幽灵线。
-        //   正确语义 = 置两面板 .pending 并保持未收敛，直到 refreshShields() 见到 overlay + 两个面板 frame
-        //   齐备才开闸。whole-branch fix（critical）：改用 setStylePanelVisible(true)——absent（clearAllShields()
-        //   会先产生的状态）等价放行，若此刻上/下面板 frame 恰好与切位置前逐像素相同（可复现：面板高度 + 16pt
-        //   padding == 容器高），refreshShields() 不会因 DrawingUpperPanelFrameKey/DrawingLowerPanelFrameKey
-        //   而重新触发，absent 状态会一直留到面板消失为止——那正是「清掉后裸奔」的中间态。
+        //   syncPanelShields() 在面板确实会出现时置两面板 .pending 并保持未收敛，直到 refreshShields()
+        //   见到 overlay + 两个面板 frame 齐备才开闸；面板根本不会出现（如复盘）则直接清空，不留裸奔窗口。
         .onChange(of: stylePanelPosition) { _, _ in
-            engine.drawingSession.setStylePanelVisible(true)   // 两面板置 .pending；随后由 refreshShields 按新几何重置（Step 3 唯一定义）
+            syncPanelShields()
         }
         .onChange(of: engine.tick.globalTickIndex) { _, _ in
             tradeStrip = nil                                    // codex R3-high：tick 推进(含持有/观察)即作废未确认买卖条，防按新 tick 价成交
@@ -483,8 +495,8 @@ public struct TrainingView: View {
     /// Task3：正文抽成 `ChartPanelsContainer`——hosted 布局不变量测试直接渲染这个**同一份**容器测本体
     /// frame 三态不变（抽共享、不复制，见 Render/DrawingLayoutInvariantTests.swift）。
     private var chartPanels: some View {
-        ChartPanelsContainer(engine: engine, showsTradeButtons: showsTradeButtons, isDrawingActive: isDrawingActive,
-                             typeRowExpanded: typeRowExpanded, scheme: colorScheme == .dark ? .dark : .light,
+        ChartPanelsContainer(engine: engine, stylePanelVisible: stylePanelWillBeVisible,
+                             scheme: colorScheme == .dark ? .dark : .light,
                              stylePanelPosition: stylePanelPosition,
                              onTogglePosition: { stylePanelPosition = (stylePanelPosition == .bottom ? .top : .bottom) },
                              upperPanel: { panel(.upper) }, lowerPanel: { panel(.lower) })
@@ -646,9 +658,22 @@ public struct TrainingView: View {
 /// 悄悄跟生产接线漂移（抽共享、不复制）。上下面板内容由调用方注入（生产传真 K 线面板，hosted 测试传等尺寸占位）。
 struct ChartPanelsContainer<Upper: View, Lower: View>: View {
     let engine: TrainingEngine
-    let showsTradeButtons: Bool
-    let isDrawingActive: Bool
-    let typeRowExpanded: Bool
+    // 1a-iii 切片2 Task2（实测发现，见 Task2 report）：样式面板「是否应当可见」不经 `.onAppear`/
+    // `.onDisappear` 侧写——原稿用 onAppear/onDisappear 置位 `.pending`/清空——host-真机上可行，但
+    // hosted 测试用的 `ImageRenderer.uiImage` 在完成一次离屏渲染、内部两轮布局收敛 GeometryReader 后，
+    // 会把临时渲染上下文整体拆除，**这次拆除本身也会触发 `.onDisappear`**（即便 typeRowExpanded 仍是
+    // true、overlay 逻辑上从未真正"消失"）——把刚算好的 `.rect` 覆写回空字典，四个新测试全部假红
+    // （shieldRectOf 恒 nil）。
+    // P1b-1a-iii 回归修复（HIGH，6a84fa5 引入）：本参数原是容器自己的纯计算属性
+    // `showsTradeButtons && isDrawingActive && typeRowExpanded`；TrainingView 的三个生命周期 onChange
+    // 却各自硬编码调用 setStylePanelVisible(true)，从不读这条判据——复盘态（showsTradeButtons==false）
+    // 本容器算出 false（overlay 从不挂载），但三个 onChange 不知道这件事仍无条件把两面板摁进 .pending，
+    // 此后再没有任何 onPreferenceChange 触发 refreshShields() 来解开它，复盘画线永久失效（codex
+    // adversarial review HIGH）。收敛为单一定义：`TrainingView.stylePanelWillBeVisible` 是唯一权威计算处，
+    // call site（`TrainingView.chartPanels` + 本文件下方三个测试外壳）各自算好结果后作为本参数传入——
+    // 本容器与 TrainingView 三个生命周期 onChange（经 `syncPanelShields()`）读的是同一个值，不再各自维护
+    // 第二份「样式面板会不会出现」的猜测。
+    let stylePanelVisible: Bool
     let scheme: AppColorScheme                    // 1a-iii 切片2 Task3：样式面板色板取色（DrawingColorResolver）
     let stylePanelPosition: DrawingStylePanelPosition   // 上/下半区（Task4 已接 ⇅ 真行为：refreshShields() 按当前位置求交两面板）
     let onTogglePosition: () -> Void               // ⇅ 回调（替代已删的 onLongPressType）
@@ -657,19 +682,6 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
     @State private var upperPanelChartFrame: CGRect?
     @State private var lowerPanelChartFrame: CGRect?
     @State private var stylePanelChartFrame: CGRect?
-
-    // 1a-iii 切片2 Task2（实测发现，见 Task2 report）：样式面板「是否应当可见」用**纯计算属性**（与 body
-    // 内 `if showsTradeButtons, isDrawingActive, typeRowExpanded` 门同一表达式），**不经** `.onAppear`/
-    // `.onDisappear` 侧写。原稿用 onAppear/onDisappear 置位 `.pending`/清空——host-真机上可行，但
-    // hosted 测试用的 `ImageRenderer.uiImage` 在完成一次离屏渲染、内部两轮布局收敛 GeometryReader 后，
-    // 会把临时渲染上下文整体拆除，**这次拆除本身也会触发 `.onDisappear`**（即便 typeRowExpanded 仍是
-    // true、overlay 逻辑上从未真正"消失"）——把刚算好的 `.rect` 覆写回空字典，四个新测试全部假红
-    // （shieldRectOf 恒 nil）。改用纯计算属性可完全绕开这个 SwiftUI 生命周期事件与 ImageRenderer 离屏
-    // 渲染拆除时机的耦合：可见性判据始终从 `showsTradeButtons`/`isDrawingActive`/`typeRowExpanded`
-    // 现读现算，不依赖任何异步/一次性事件的到达时机或先后顺序——production 下语义等价（isDrawingActive/
-    // typeRowExpanded 变化都会重建 ChartPanelsContainer 触发 body 重新求值），但不再对 onAppear/onDisappear
-    // 的相对时序或"是否真的只在挂载/卸载各触发一次"做任何假设。
-    private var stylePanelVisible: Bool { showsTradeButtons && isDrawingActive && typeRowExpanded }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -683,9 +695,11 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
         }
         .coordinateSpace(name: "chart")
         .overlay(alignment: stylePanelPosition == .top ? .top : .bottom) {
-            // codex 计划-R4-medium：必带 showsTradeButtons 门——排除复盘（复盘用浮动铅笔钮，本切片不改其行为）。
-            // 否则复盘经浮动钮 drawingModeActive 时也会挂 overlay+装两面板盾、吞复盘图表点。
-            if showsTradeButtons, isDrawingActive, typeRowExpanded {
+            // codex 计划-R4-medium：挂载条件必须排除复盘（复盘用浮动铅笔钮，本切片不改其行为）——否则复盘
+            // 经浮动钮 drawingModeActive 时也会挂 overlay+装两面板盾、吞复盘图表点。P1b-1a-iii 回归修复后，
+            // call site 传入的 stylePanelVisible 唯一定义在 TrainingView.stylePanelWillBeVisible
+            // （= showsTradeButtons && isDrawingActive && typeRowExpanded，天然排除复盘），本容器不再自算。
+            if stylePanelVisible {
                 DrawingStylePanel(session: engine.drawingSession, scheme: scheme,
                                   position: stylePanelPosition, onTogglePosition: onTogglePosition)
                     // ⭐codex 计划-R1-F2：GeometryReader 必须量**未加 padding 的可见面板本体**——

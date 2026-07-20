@@ -73,11 +73,12 @@ struct DrawingLayoutInvariantTests {
     private func chartFrame(isDrawing: Bool, expanded: Bool, position: DrawingStylePanelPosition = .bottom) throws -> CGRect {
         let engine = TrainingEngine.preview()
         let box = FrameBox()
+        // P1b-1a-iii 回归修复：ChartPanelsContainer 现只收一个收敛后的 stylePanelVisible 参数——
+        // showsTradeButtons 恒 true（这是交易态类型行能出现的前提，正是要测的场景），三态由
+        // (isDrawing, expanded) 驱动，调用处自己算好三 bool 合取传入。
         let measured = ChartPanelsContainer(
             engine: engine,
-            showsTradeButtons: true,
-            isDrawingActive: isDrawing,
-            typeRowExpanded: expanded,
+            stylePanelVisible: isDrawing && expanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: position,   // Task4：四态断言需要覆盖 .top（参数化，默认 .bottom 保三态断言不变）
             onTogglePosition: {},           // 测试不驱动 ⇅

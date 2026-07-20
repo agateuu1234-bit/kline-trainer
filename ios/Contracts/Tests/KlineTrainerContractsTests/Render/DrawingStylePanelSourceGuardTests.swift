@@ -173,16 +173,19 @@ struct DrawingStylePanelSourceGuardTests {
     //   建立的单一真相冲突（两处都能写 shield，谁后写谁赢）。故本条守卫改为**锁定 Task 2 修正后的
     //   不变量**——面板自身不得再持有可见性钩子；可见性判据的唯一权威仍是
     //   `ChartPanelsContainer.stylePanelVisible`。
-    @Test("fail-closed 接线（Task2 a1e420c 修正）：面板自身不持有可见性钩子——可见性由 ChartPanelsContainer 的计算属性 + refreshShields 统一维护，不靠 onAppear/onDisappear")
+    @Test("fail-closed 接线（Task2 a1e420c 修正 + P1b-1a-iii 回归修复）：面板自身不持有可见性钩子——可见性由 TrainingView 唯一计算属性 stylePanelWillBeVisible 统一维护，不靠 onAppear/onDisappear")
     func panelDoesNotOwnVisibilityHooks() throws {
         let code = try source(panel)
         #expect(!code.contains(".onAppear { session.setStylePanelVisible(true) }"),
                 "面板根不得自带 onAppear 置位 —— ImageRenderer 离屏拆除的假 onDisappear 会清空刚算好的盾（Task2 实证）")
         #expect(!code.contains(".onDisappear { session.setStylePanelVisible(false) }"),
-                "面板根不得自带 onDisappear 清位 —— 同上，可见性单一真相已挪到 ChartPanelsContainer.stylePanelVisible")
+                "面板根不得自带 onDisappear 清位 —— 同上，可见性单一真相已挪到 TrainingView.stylePanelWillBeVisible")
         let tv = try source("Sources/KlineTrainerContracts/UI/TrainingView.swift")
-        #expect(tv.contains("private var stylePanelVisible: Bool"),
-                "ChartPanelsContainer 必须仍持有 stylePanelVisible 计算属性（唯一权威可见性判据）")
+        // P1b-1a-iii 回归修复：唯一权威可见性判据从 ChartPanelsContainer 自己的计算属性挪到
+        // TrainingView.stylePanelWillBeVisible——ChartPanelsContainer 改收调用方算好的 `stylePanelVisible`
+        // 参数（见 shieldInstallIsGeometricNotPositionHardcoded 等其它源码守卫锁定的容器接线）。
+        #expect(tv.contains("private var stylePanelWillBeVisible: Bool"),
+                "TrainingView 必须持有 stylePanelWillBeVisible 计算属性（唯一权威可见性判据）")
     }
 
     @Test("单一真相（codex 计划-R10-F3）：DrawingStylePanel 无 expanded 参数/存储属性（展开态只由挂载条件决定）")
@@ -222,15 +225,17 @@ struct DrawingStylePanelSourceGuardTests {
                 "生产代码引用了测试逃生舱 —— 会在几何未收敛时开闸，重开幽灵线窗口")
     }
 
-    // whole-branch fix（critical）：本守卫曾要求 `.onChange(of: stylePanelPosition)` 调 `clearAllShields()`——
-    // 那正是钉死了 fail-open bug 的守卫（absent 在 `handleDrawingTap` 里读作 `.unshielded` = 放行；
-    // 若切位置前后两面板 frame 恰好逐像素不变——面板高度 + 16pt padding == 容器高时可复现——
-    // `refreshShields()` 不会因 `DrawingUpperPanelFrameKey`/`DrawingLowerPanelFrameKey` 而重新触发，
-    // shield 会一直空着，面板全程可见期间的每次 tap 都穿透并 autosave 幽灵线）。改为要求三个仍可能在
-    // 面板可见期间触发的生命周期 `onChange`（`drawingModeActive`/`typeRowExpanded`/`stylePanelPosition`）
-    // 都调 `setStylePanelVisible(true)`（两面板 `.pending`，fail-closed）且**不得**再出现 `clearAllShields()`——
-    // 后者只留给 `.onDisappear`（真正的卸载语义，本守卫不覆盖，卸载语义仍是 clearAllShields 的唯一合法调用点）。
-    @Test("fail-closed 生命周期清盾（whole-branch fix）：三个仍面板可见期间可能触发的 onChange 一律调 setStylePanelVisible(true)，clearAllShields() 不得出现在其中")
+    // P1b-1a-iii 回归修复（HIGH，codex adversarial review，6a84fa5 引入）：本守卫曾要求三个生命周期
+    // onChange 一律**无条件**调 `setStylePanelVisible(true)`、绝不出现 `clearAllShields()`——那正是
+    // HIGH 回归本身：复盘态（showsTradeButtons==false）样式面板从不挂载，overlay 从不出现，三个 onChange
+    // 却仍把两面板摁进 `.pending`，此后没有任何 `onPreferenceChange` 会再触发 `refreshShields()` 来解开
+    // 它——`ChartContainerView.handleDrawingTap` 读到 `.pending` 恒拒收，复盘画线永久失效（reviewDrawings
+    // 永不增长，见 DrawingTapHitShieldTests.reviewModePendingShieldsBlockTapUntilCleared 的模型级复现）。
+    // 修复：三处一律改调 `syncPanelShields()`——按 `stylePanelWillBeVisible` 分流：面板确实会出现才
+    // `setStylePanelVisible(true)`（fail-closed，交 refreshShields() 收敛）；面板根本不会出现（如复盘）
+    // 就 `clearAllShields()`（absent 等价放行才是正确语义，没有面板可能挡住 tap）。真正的卸载语义
+    // （`.onDisappear`）不经 syncPanelShields，仍无条件调 `clearAllShields()`——本守卫不覆盖 .onDisappear。
+    @Test("fail-closed 生命周期清盾（P1b-1a-iii 回归修复）：三个仍面板可见期间可能触发的 onChange 一律调 syncPanelShields()，其唯一实现按 stylePanelWillBeVisible 在 setStylePanelVisible(true)/clearAllShields() 间分流")
     func lifecycleOnChangeHandlersUseFailClosedPendingNotClear() throws {
         let tv = try source("Sources/KlineTrainerContracts/UI/TrainingView.swift")
         let drawingModeChain = try slice(tv, from: ".onChange(of: engine.drawingSession.drawingModeActive) { _, _ in",
@@ -242,11 +247,21 @@ struct DrawingStylePanelSourceGuardTests {
         for (name, chain) in [("drawingModeActive", drawingModeChain),
                                ("typeRowExpanded", typeRowChain),
                                ("stylePanelPosition", positionChain)] {
-            #expect(chain.contains("setStylePanelVisible(true)"),
-                    "\(name) 的 onChange 未调 setStylePanelVisible(true) —— 面板可见期间可能出现无 key 的裸奔态")
-            #expect(!chain.contains("clearAllShields()"),
-                    "\(name) 的 onChange 仍调 clearAllShields() —— fail-open：清空后若 refreshShields 因两面板 frame 不变而不再触发，shield 会一直空着")
+            #expect(chain.contains("syncPanelShields()"),
+                    "\(name) 的 onChange 未调 syncPanelShields() —— 样式面板不会出现时（如复盘）仍可能被强行置 .pending，堵死后续 tap")
+            #expect(!chain.contains("engine.drawingSession.setStylePanelVisible(true)"),
+                    "\(name) 的 onChange 直接硬编码调用 setStylePanelVisible(true) —— 绕开了 syncPanelShields() 的分流判据，复盘态会重蹈 6a84fa5 回归")
         }
+        // syncPanelShields() 是三处共用的**唯一**实现——按 stylePanelWillBeVisible 分流，两个分支缺一不可，
+        // 否则回归会以「某一处漏改」的方式局部复活。
+        let syncBody = try slice(tv, from: "private func syncPanelShields() {", to: "public var body: some View {")
+        #expect(syncBody.contains("stylePanelWillBeVisible"))
+        #expect(syncBody.contains("setStylePanelVisible(true)"))
+        #expect(syncBody.contains("clearAllShields()"))
+        // .onDisappear 仍是真正卸载语义的唯一无条件 clearAllShields() 调用点，不受本次收敛影响
+        // （不经 syncPanelShields，不受 stylePanelWillBeVisible 分流）。
+        let disappearChain = try slice(tv, from: ".onDisappear {", to: "private var topBar: some View {")
+        #expect(disappearChain.contains("engine.drawingSession.clearAllShields()"))
     }
 
     @Test("旧长按卡片已删除、长按钩子已摘除（不留两套设置入口）")
