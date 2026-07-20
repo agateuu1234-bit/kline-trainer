@@ -481,17 +481,46 @@ def test_per_day_gate_still_catches_interior_short_day():
 
 
 def test_per_day_gate_catches_corrupt_boundary_day():
-    """codex PF2-R7-F2：边界日在**库里**残缺必须被抓。
+    """codex PF2-R7-F2：边界日在**库里**残缺时，D9 门整体仍必须拒绝。
 
     生产 cap 下窗口只切到该日 70/80 根（正常）；但把它在**全量 bars** 里改成 60 根
-    （真损坏）→ 必须判失败。这条同时钉死一种已被实测否掉的错误写法：
-    用「从窗口反推的余数」`(before_n % need) or need` 判边界日是**自指**的——
-    损坏边界日会让 before_n 同步变小、期望值跟着变小、恰好匹配 → 漏检（实测返回 True）。"""
+    （真损坏）→ 必须判失败。**注意**：这里的损坏日不是全量历史最早一天，短根后
+    `select_period_window` 会往更早多回填一天补足 150 根，把损坏日从窗口自身的
+    d0 位置"挤"成内部日——实际抓住它的是内部日的窗口自身精确校验
+    （`counts.get(d,0)==need`），**不是** `full_bars` 的 d0 边界判据本身（codex 评审
+    mutation 实测复核：把 `boundary_ok` 恒设 `True` 此测试仍绿，证明它未孤立该判据）。
+    真正孤立 `full_bars`/d0 判据（损坏日钉死在全量历史第一天、reach-back 无处可回）
+    见 `test_per_day_gate_catches_corrupt_boundary_day_when_pinned_at_history_start`。"""
     days = _weekday_range(dt.date(2024, 1, 1), dt.date(2024, 6, 28))
     probe, _, _ = _production_cap_windows(days)
     d0 = min(trading_date(e) for e in probe["3m"]["datetime"])
     wins, ae, full = _production_cap_windows(days, short={d0: 60})   # 全量里该日只剩 60
     assert per_day_intraday_complete(wins, days, ae, full_bars=full) is False
+
+
+def test_per_day_gate_catches_corrupt_boundary_day_when_pinned_at_history_start():
+    """codex 评审补测：真正孤立 `full_bars` 的 d0 边界判据本身（而非靠内部日精确校验
+    间接兜底——上一条 `test_per_day_gate_catches_corrupt_boundary_day` 的 fixture 做不到
+    这点，见其 docstring）。
+
+    构造：损坏日 D1 = 全量历史里最早的一天（没有更早的日子可回填，`select_period_window`
+    的"按根数往前补"逃不开它）；D1 只有 75/80 根（真损坏），紧跟 1 个完整日 D2（80 根）。
+    cap=150：切片取「起点前最后 150 根」= D2 全部 80 根 + D1 最后 70 根 → 窗口自身的
+    d0 恰好落在 D1 上、窗口自身计数 70（长得像正常的切片边界，不像坏数据——只有对照
+    `full_bars` 里 D1 的真实根数 75 != 80 才能识破）。
+
+    codex 评审 mutation 实测验证：未 mutate 时门正确返回 `False`；把 `boundary_ok`
+    强制恒 `True` 后门翻转为 `True`（本测试应变红）——证明这条 fixture 真正孤立了
+    `full_bars` 判据本身，不像上一条那样被内部日精确校验兜底。"""
+    D1, D2 = (2024, 1, 2), (2024, 1, 3)
+    need = _GOLDEN_PER_DAY["3m"]
+    full_3m = pd.DataFrame(_mk_bars(D1, 75) + _mk_bars(D2, 80))   # D1 损坏：75/80，且是全量最早一天
+    start = _mid(2024, 1, 4)                                      # 越过 D1+D2 全部 155 根，pivot=155
+    ae = _ae(2024, 1, 3)                                          # span 止于 D2
+    win_3m = select_period_window(full_3m, start, 150, ae, "3m")  # 切最后 150 根：丢 D1 前 5 根 → D1 剩 70
+    trading = {dt.date(*D1), dt.date(*D2)}
+    assert per_day_intraday_complete({"3m": win_3m}, trading, ae, {"3m": need},
+                                     full_bars={"3m": full_3m}) is False
 
 
 def test_per_day_gate_passes_when_cap_is_exact_multiple():
