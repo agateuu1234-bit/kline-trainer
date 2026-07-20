@@ -122,6 +122,8 @@ class _FakeConn:
         # 模拟"并发 sweep 在预检之后抢先登记同一起点"：首次 INSERT 撞 ON CONFLICT
         self.steal_first_insert = steal_first_insert
         self._rows_cache: dict = {}     # 见 fetch()：8 万行 to_dict 的结果缓存
+        self.lock_calls: list[str] = []      # 按序记录 "lock" / "unlock"
+        self.lock_held_by_other = False      # True = 模拟另一 session 持锁
 
     async def fetch(self, query: str, *args):
         if "FROM klines" in query:
@@ -153,6 +155,14 @@ class _FakeConn:
         raise AssertionError(f"_FakeConn 收到未预期的 fetchrow: {query}")
 
     async def fetchval(self, query: str, *args):
+        if "pg_try_advisory_lock" in query:
+            if self.lock_held_by_other:
+                return False
+            self.lock_calls.append("lock")
+            return True
+        if "pg_advisory_unlock" in query:
+            self.lock_calls.append("unlock")
+            return True
         if "INSERT INTO training_sets" in query:
             assert "ON CONFLICT" in query, (
                 "登记 SQL 必须用 ON CONFLICT DO NOTHING 原子处理 uq_stock_start"
