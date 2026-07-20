@@ -22,6 +22,7 @@ from __future__ import annotations
 import datetime as _dt
 import random
 import sqlite3
+import tempfile
 import zipfile
 import zlib
 from bisect import bisect_left, bisect_right
@@ -117,11 +118,19 @@ def eligible_start_indices(month_boundaries, rng, *, dense_dates, trading_dates,
 
 
 def select_valid_window(month_boundaries, rng, *, dense_dates, trading_dates,
-                        try_assemble, max_retries: int = 8, months: int = 8):
+                        try_assemble, max_retries: int = 8, months: int = 8,
+                        exclude_starts=frozenset()):
     """bounded candidate retry（codex R12-F2/PF1-R3-F2）：逐 eligible 候选调 try_assemble(start)；
-    首个不抛的返回 (start, 其返回值)；抛 GenerateSkipException → 试下一个；穷尽 → skip。"""
+    首个不抛的返回 (start, 其返回值)；抛 GenerateSkipException → 试下一个；穷尽 → skip。
+
+    `exclude_starts`（Plan 2b）：已登记的 start_datetime（uq_stock_start）。**必须在切
+    `cands[:max_retries]` 之前过滤**——若放进循环再拒，每个被排除者会吃掉一个重试名额，
+    股票累积训练组后 shuffle 把已登记的排前面，就会明明还有可用起点却整股被跳过、
+    且非确定性（B4 库存莫名欠产）。codex PF2-R1-F2。"""
     cands = eligible_start_indices(month_boundaries, rng, dense_dates=dense_dates,
                                    trading_dates=trading_dates, months=months)
+    if exclude_starts:
+        cands = [i for i in cands if int(month_boundaries[i]) not in exclude_starts]
     for idx in cands[:max_retries]:
         start = int(month_boundaries[idx])
         try:
@@ -136,11 +145,15 @@ _INTRADAY_EXPECTED = {"3m": 80, "15m": 16, "60m": 4}
 
 def build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, trading_dates,
                            before_caps, months: int = 8, intraday_expected=None,
-                           before_min: int = 30, max_retries: int = 8):
+                           before_min: int = 30, max_retries: int = 8,
+                           exclude_starts=frozenset()):
     """**生产纯入口（codex PF1-R6-F2）**：组合 compute_after_end / select_period_window(两侧周边界) /
     D6 per-period before-after / D9 per_day 硬门 + bounded retry。返回 `(start_datetime, windows)`。
     **Plan 2 的 `generate_one_training_set` 必须调本入口**（而非旧 select_start_index/monthly_after_end），
-    再做 SQLite/zip/register/起点唯一性。gate 参数（`months`/`intraday_expected`/`before_min`）可调以便端到端单测。"""
+    再做 SQLite/zip/register/起点唯一性。gate 参数（`months`/`intraday_expected`/`before_min`）可调以便端到端单测。
+
+    `exclude_starts` 透传给 `select_valid_window`（uq_stock_start → **候选资格**，
+    在重试预算之前过滤；**不要**改成在 `_try` 里拒，那会吃掉重试名额，见该函数 docstring）。"""
     idx_of = {int(b): i for i, b in enumerate(month_boundaries)}
 
     def _try(start):
@@ -159,7 +172,8 @@ def build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, t
         return windows
 
     return select_valid_window(month_boundaries, rng, dense_dates=dense_dates, trading_dates=trading_dates,
-                               try_assemble=_try, max_retries=max_retries, months=months)
+                               try_assemble=_try, max_retries=max_retries, months=months,
+                               exclude_starts=exclude_starts)
 
 
 def per_day_intraday_complete(windows, trading_dates, after_end, expected=None,
@@ -314,16 +328,34 @@ def zip_and_hash(db_path: Path, zip_path: Path) -> str:
     return crc32_hex(zip_path.read_bytes())
 
 
-def assemble_training_set(output_dir: Path, *, stock_code: str, stock_name: str,
-                          period_bars: dict[str, pd.DataFrame],
-                          rng: random.Random) -> GeneratedTrainingSet:
-    """FAIL-CLOSED（codex PF1-R10-F1）：旧「随机选起点」路径经现有 CLI 链
-    generate_batch→generate_one_training_set→本函数对任意 PG 数据可达，会绕过 D9/dense 门产未门控
-    窗口，故 Plan 1 内显式停用（保留签名 → 唯一调用者运行期显式 fail-closed 而非 TypeError）。
-    安全纯入口 build_training_windows（Task7 已全测）已就绪；生产装配重接 + stock_coverage 读取留 Plan 2。"""
-    raise NotImplementedError(
-        "旧未门控随机选起点路径已停用（codex PF1-R10-F1）；安全纯入口 build_training_windows "
-        "已就绪(Task7)，生产装配重接 + stock_coverage 读取在 Plan 2 落地。")
+def assemble_from_windows(output_dir: Path, *, stock_code: str, stock_name: str,
+                          start_datetime: int, end_datetime: int,
+                          windows: dict[str, pd.DataFrame]) -> GeneratedTrainingSet:
+    """纯装配（不碰 PG）：已门控的 windows → 赋 index → 建 SQLite → zip → CRC32。
+
+    **取代 Plan 1 里 fail-closed 停用的 assemble_training_set**（codex PF1-R10-F1）：
+    旧函数自带"月线里随机选起点"，绕过 D2 dense 覆盖门与 D9 per-day 硬门；本函数
+    **不选起点**——起点/窗口由安全纯入口 build_training_windows 门控后传入，
+    本函数只负责序列化。文件名/end_datetime 语义沿用 PR #74 既有契约（B3 按路径下载）。"""
+    windows = assign_global_indices(windows)
+    fname = f"{stock_code}_{start_datetime}"
+    zip_path = output_dir / f"{fname}.zip"
+    # 中间 .db 建在**临时目录**（codex PF2-R5-F1）：它是纯构建中间产物——从不登记、
+    # 无人引用。放最终目录会留崩溃残渣，而 `_TRAINING_SET_DDL` 是裸 `CREATE TABLE`
+    # （无 IF NOT EXISTS）→ 下次同起点重试撞 `table meta already exists`
+    # （`sqlite3.OperationalError`，**不是** GenerateSkipException）→ 中止整轮 sweep。
+    # 文件名仍用 `{code}_{start}.db` 以保持 zip 内 arcname 契约不变。
+    # 注：zip 直接写最终路径不受此影响——`ZipFile(path, "w")` 会截断重写，天然自愈。
+    with tempfile.TemporaryDirectory() as _tmp:
+        db_path = Path(_tmp) / f"{fname}.db"
+        build_training_set_sqlite(db_path, stock_code=stock_code, stock_name=stock_name,
+                                  start_datetime=start_datetime, end_datetime=end_datetime,
+                                  windows=windows)
+        content_hash = zip_and_hash(db_path, zip_path)
+    return GeneratedTrainingSet(path=zip_path, content_hash=content_hash,
+                                stock_code=stock_code, stock_name=stock_name,
+                                start_datetime=start_datetime, end_datetime=end_datetime,
+                                schema_version=SCHEMA_VERSION)
 
 
 # ===== 薄 asyncpg PG 壳 + CLI（D1/D13：不单测，B3/NAS 集成 scope）=====

@@ -15,7 +15,6 @@ from generate_training_sets import (
     GenerateSkipException,
     PERIODS,
     SCHEMA_VERSION,
-    assemble_training_set,
     assign_global_indices,
     build_training_set_sqlite,
     crc32_hex,
@@ -192,16 +191,6 @@ def test_zip_and_hash_content_hash_matches_zip_bytes(tmp_path):
     assert h == format(zlib.crc32(zp.read_bytes()) & 0xFFFFFFFF, "08x")
     with zipfile.ZipFile(zp) as zf:
         assert db.name in zf.namelist()
-
-def test_assemble_training_set_fails_closed(tmp_path):
-    # Task 8 (codex PF1-R10-F1)：旧未门控随机选起点路径已停用 → 显式 fail-closed。
-    # period_bars={} 即可（fail-closed 首行即 raise、不访问 period_bars）。
-    with pytest.raises(NotImplementedError) as ei:
-        assemble_training_set(tmp_path, stock_code="X", stock_name="X",
-                              period_bars={}, rng=random.Random(0))
-    msg = str(ei.value)
-    assert "build_training_windows" in msg and "Plan 2" in msg
-
 
 # ===== Task 7: B2 pure selection logic (compute_after_end / eligible_start_indices /
 #   select_valid_window / per_day_intraday_complete / build_training_windows) =====
@@ -564,3 +553,122 @@ def test_build_training_windows_succeeds_under_production_config():
         before_caps=PERIOD_BEFORE_CAP)
     assert start in [int(b) for b in mb]
     assert not windows["3m"].empty
+
+
+# ===== Plan 2b Task 5：assemble_from_windows（取代已删的 assemble_training_set）=====
+
+def test_assemble_from_windows_produces_zip_and_matching_hash(tmp_path):
+    """纯装配：windows → assign_global_indices → SQLite → zip → CRC32。
+    content_hash 必须等于 zip 文件字节的 CRC32（D3）。"""
+    from generate_training_sets import assemble_from_windows
+    windows = {p: _bars(p, 40) for p in PERIODS}
+    start = int(windows["monthly"]["datetime"].iloc[10])
+    end = int(windows["monthly"]["datetime"].iloc[-1])
+    gts = assemble_from_windows(tmp_path, stock_code="000001.SZ", stock_name="平安银行",
+                                start_datetime=start, end_datetime=end, windows=windows)
+    assert gts.path.exists() and gts.path.suffix == ".zip"
+    assert gts.content_hash == crc32_hex(gts.path.read_bytes())
+    assert gts.stock_code == "000001.SZ" and gts.start_datetime == start
+    assert gts.end_datetime == end and gts.schema_version == SCHEMA_VERSION
+
+
+def test_assemble_from_windows_filename_is_code_underscore_start(tmp_path):
+    """文件名契约 {stock_code}_{start_datetime}（沿用 PR #74 既有约定，B3 下载按此路径）。"""
+    from generate_training_sets import assemble_from_windows
+    windows = {p: _bars(p, 40) for p in PERIODS}
+    start = int(windows["monthly"]["datetime"].iloc[10])
+    gts = assemble_from_windows(tmp_path, stock_code="600519", stock_name="X",
+                                start_datetime=start, end_datetime=start + 100,
+                                windows=windows)
+    assert gts.path.name == f"600519_{start}.zip"
+
+
+def test_assemble_from_windows_writes_all_periods_into_sqlite(tmp_path):
+    """六周期都要进训练组 SQLite；漏一个 = App 少一个周期可看。"""
+    from generate_training_sets import assemble_from_windows
+    import zipfile as _zf
+    windows = {p: _bars(p, 40) for p in PERIODS}
+    start = int(windows["monthly"]["datetime"].iloc[10])
+    gts = assemble_from_windows(tmp_path, stock_code="X", stock_name="X",
+                                start_datetime=start, end_datetime=start + 100,
+                                windows=windows)
+    with _zf.ZipFile(gts.path) as z:
+        z.extractall(tmp_path / "x")
+    conn = sqlite3.connect(str(tmp_path / "x" / f"X_{start}.db"))
+    try:
+        got = {r[0] for r in conn.execute("SELECT DISTINCT period FROM klines")}
+    finally:
+        conn.close()
+    assert got == set(PERIODS)
+
+
+# ===== Plan 2b Task 5：exclude_starts（uq_stock_start 变成候选资格）=====
+
+def _production_fixture():
+    """生产配置下可用的完整 fixture（复用 Task 4 的 _weekday_range / _golden_intraday）：
+    4 年工作日、每交易日精确 80/16/4 根盘中、日/周/月标组内首交易日午夜、全程 dense。
+    返回 (period_bars, month_boundaries, days)。"""
+    from qmt_resample import period_boundaries
+    days = _weekday_range(dt.date(2022, 1, 3), dt.date(2025, 12, 31))
+
+    def _cal(sel):
+        return pd.DataFrame([{"datetime": _mid(d.year, d.month, d.day), "open": 1.0,
+                              "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1,
+                              "amount": 1.0} for d in sorted(sel)])
+
+    first_m, first_w = {}, {}
+    for d in days:
+        first_m.setdefault((d.year, d.month), d)
+        first_w.setdefault(d.isocalendar()[:2], d)
+    pb = {"daily": _cal(days), "monthly": _cal(first_m.values()),
+          "weekly": _cal(first_w.values())}
+    for p, n in _GOLDEN_PER_DAY.items():
+        pb[p] = _golden_intraday(days, n)
+    return pb, period_boundaries(pb["daily"], "monthly"), days
+
+
+def test_build_training_windows_skips_excluded_start():
+    """uq_stock_start：已登记的起点不得再被选中，且不能因此误杀该股——
+    应换下一个候选并成功（而非整股失败）。"""
+    from generate_training_sets import PERIOD_BEFORE_CAP
+    pb, mb, days = _production_fixture()
+    kw = dict(dense_dates=set(days), trading_dates=days, before_caps=PERIOD_BEFORE_CAP)
+    s1, _ = build_training_windows(pb, mb, random.Random(0), **kw)
+    s2, w2 = build_training_windows(pb, mb, random.Random(0),
+                                    exclude_starts=frozenset({s1}), **kw)
+    assert s2 != s1
+    assert not w2["3m"].empty
+
+
+def test_build_training_windows_all_candidates_excluded_raises():
+    """全部候选都已登记 → 该股确实无可用起点 → GenerateSkipException（非静默产坏组）。
+    注意 max_retries 默认 8，故排除集须覆盖所有月边界才能确保穷尽。"""
+    from generate_training_sets import PERIOD_BEFORE_CAP
+    pb, mb, days = _production_fixture()
+    with pytest.raises(GenerateSkipException):
+        build_training_windows(pb, mb, random.Random(0), dense_dates=set(days),
+                               trading_dates=days, before_caps=PERIOD_BEFORE_CAP,
+                               exclude_starts=frozenset(int(b) for b in mb))
+
+
+def test_select_valid_window_excludes_before_retry_budget():
+    """codex PF2-R1-F2：前 max_retries(8) 个候选全已登记 → 仍须选中之后的有效候选。
+
+    排除必须发生在 `cands[:max_retries]` 切片**之前**。若让被排除者进循环再拒（我最初的
+    设计），每个都会吃掉一个重试名额 → 股票累积训练组后、shuffle 恰好把已登记的排前面，
+    就会**明明还有可用起点却整股被跳过**，且非确定性（B4 库存会莫名欠产）。
+    直接注入 try_assemble，不建重 fixture。"""
+    bounds = _n_month_boundaries(60)                    # n=60 → 候选 idx 30..51 共 22 个
+    days = _weekday_range(dt.date(2020, 1, 1), dt.date(2025, 12, 31))
+    dense, trading = set(days), days
+    # 用同一 seed 先取 shuffle 顺序，令断言确定（eligible_start_indices 内部 rng.shuffle）
+    order = eligible_start_indices(bounds, random.Random(1), dense_dates=dense,
+                                   trading_dates=trading)
+    assert len(order) > 9, "fixture 须提供多于 max_retries 的候选，否则本测 vacuous"
+    excluded = frozenset(int(bounds[i]) for i in order[:9])   # 排除前 9 个（> max_retries=8）
+    survivor = int(bounds[order[9]])
+    start, _ = select_valid_window(bounds, random.Random(1), dense_dates=dense,
+                                   trading_dates=trading,
+                                   try_assemble=lambda s: {"ok": True},
+                                   exclude_starts=excluded)
+    assert start == survivor, "被排除的候选吃掉了重试名额（修复前必挂）"
