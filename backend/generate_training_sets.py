@@ -535,29 +535,44 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
         raise GenerateSkipException(
             f"{stock_code}: B2 生成锁被占（另一个 B2 正在写入），跳过")
     try:
-        # 顺序 = **先写文件、后登记**（codex PF2-R4 后简化；见计划文末 PF2-R5 决议）。
+        # 顺序 = **锁内先查、后写文件、再登记**（codex R2-high 收敛：原先检查排在
+        # assemble_from_windows 之后——`exclude_starts` 快照取自锁**之前**
+        # （_fetch_existing_starts，见上方注释），两个调用者的快照都可能不含某
+        # 起点 S；输家 B 拿锁时 A 已登记 S，但 B 的快照仍是 stale 的、照样选中 S。
+        # 若检查排在写之后，B 会先用 assemble_from_windows 把 A 已登记的 S.zip
+        # 整个覆写一遍（新建临时 .db → 新 zip，内嵌 mtime 变了，字节必然不同），
+        # 检查才发现已登记——覆写已经发生，A 那行 content_hash 与磁盘字节从此失配。
+        #
+        # 为什么「锁内先检查、再写」堵住了这个洞：本 session 从取锁到放锁全程持有
+        # B2_GENERATION_LOCK_KEY，是所有 B2 写者的互斥点。若 A 抢先登记了 S，
+        # 那个登记必然发生在本 session 拿到锁**之前**（要么 A 早已放锁、要么本
+        # session 在等锁）——`_exists_start` 在锁内查到的是已提交的最新状态，
+        # 不会是 stale 的。命中即在动笔写之前跳过，assemble_from_windows 根本
+        # 不会被调用，也就没有「覆写已登记文件」这回事。
+        #
+        # 跳过时压根没写过文件，故不存在「命中的是对方文件、删不删」的问题
+        # （区别于下面 ON CONFLICT 分支——那里 gts.path 已经写好，是否为对方
+        # 产物才需要考虑）。
+        if await _exists_start(conn, stock_code, int(start_datetime)):
+            raise GenerateSkipException(
+                f"{stock_code}: start {int(start_datetime)} 已登记，跳过")
+
         # 崩溃窗口 = 写完 zip、登记前进程死 → **孤儿 zip + 无数据库行**，它是**自愈**的：
         # 没有行引用它、exclude_starts 也不含该起点 → 下次 sweep 可重选同一起点、
         # 覆盖它并登记成功。（反之「先登记后发布」留下的是 uq_stock_start 被占、
-        # B3 反复预定却 404 的**永久卡死行**，严格更糟。）
+        # B3 反复预定却 404 的**永久卡死行**，严格更糟。）上面的写前检查不改变这条
+        # 论证——孤儿场景里从未有过登记行，`_exists_start` 恒为 False，直通写入。
         gts = assemble_from_windows(output_dir, stock_code=stock_code,
                                     stock_name=_stock_name_of(stock_code),
                                     start_datetime=int(start_datetime),
                                     end_datetime=int(after_end), windows=windows)
 
-        # 预检：候选已按 exclude_starts 过滤，这条只是省掉常见情形下的一次白建 zip。
-        # **不删最终路径文件**（codex Task 5 review-Important：与下面第二道检查同语义）——
-        # `gts.path` 是 `{code}_{start}` 确定性最终路径，若并发写者已经用同一
-        # (stock_code, start_datetime) 抢先注册，这里命中的正是**对方已登记的那个文件**；
-        # unlink 会把 training_sets 里那一行的 file_path 变成指向不存在的文件
-        # （数据丢失，实测复现）。只跳过，不删。
-        if await _exists_start(conn, stock_code, gts.start_datetime):
-            raise GenerateSkipException(
-                f"{stock_code}: start {gts.start_datetime} 已登记，跳过")
-
-        # ON CONFLICT DO NOTHING = 廉价保险：唯一冲突返回 None 而非抛
-        # UniqueViolationError（后者不被 generate_batch 捕获 → 中止整轮 sweep）。
-        # 此时不删最终路径的文件（可能是对方的产物），只干净跳过。
+        # ON CONFLICT DO NOTHING = **最终兜底**（codex 明确要求保留）：上面的写前
+        # 检查已覆盖「另一个持有本锁的 B2 session 抢先登记同一起点」这条主路径；
+        # 这里覆盖的是更窄的残留——不受本锁保护的外部插入（如运维手工往
+        # training_sets 插行）。唯一冲突返回 None 而非抛 UniqueViolationError
+        # （后者不被 generate_batch 捕获 → 中止整轮 sweep）。此时 gts.path 已经
+        # 写好，可能是对方的产物，不删，只干净跳过。
         row_id = await _register_training_set(conn, gts)
         if row_id is None:
             raise GenerateSkipException(

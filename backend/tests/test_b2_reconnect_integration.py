@@ -664,6 +664,58 @@ def test_predecheck_does_not_delete_concurrent_winners_file(tmp_path, monkeypatc
     assert len(conn.registered) == 1, "B 的登记必须被跳过（只 A 那一行）"
 
 
+def test_stale_exclude_snapshot_does_not_overwrite_registered_winner(tmp_path, monkeypatch):
+    """codex R2-high 回归锁：`_fetch_existing_starts` 快照在锁**之前**取，两个调用者
+    的快照都可能不含起点 S；输家 B 拿锁时 A 已登记 S，但 B 的快照仍是 stale 的、
+    照样选中 S。写前检查若排在 assemble_from_windows **之后**，B 会先把 A 已登记
+    的 zip 整个覆写一遍（内嵌 mtime 变了，字节必然不同）、检查才发现已登记——
+    覆写已经发生，A 那行 content_hash 与磁盘字节从此失配。
+
+    复现手法：与既有 `test_predecheck_does_not_delete_concurrent_winners_file`
+    同一套双写者手法（monkeypatch `_fetch_existing_starts` 令 B 看不到 A 刚登记
+    的起点），但这里断言的是**覆写本身没发生**（更强）：不仅文件未被 unlink，
+    字节/mtime/content_hash 与 A 登记时完全一致，且 `assemble_from_windows`
+    在 B 的这次调用里**从未被执行**——这才是把「写前检查」与「写后检查」
+    区分开的关键信号，防止未来有人把检查挪回写之后却仍侥幸通过较弱的断言。
+    """
+    import generate_training_sets as G
+
+    conn, _ = _fixture_conn()
+
+    gts_a = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                                  random.Random(7)))
+    assert len(conn.registered) == 1
+    winner_bytes_before = gts_a.path.read_bytes()
+    winner_mtime_before = gts_a.path.stat().st_mtime_ns
+    winner_hash_before = conn.registered[0]["content_hash"]
+
+    async def _stale_existing_starts(c, code):
+        return set()          # TOCTOU：B 看不到 A 刚登记的起点
+
+    monkeypatch.setattr(G, "_fetch_existing_starts", _stale_existing_starts)
+
+    assemble_calls: list = []
+    orig_assemble = G.assemble_from_windows
+
+    def _tracking_assemble(*a, **k):
+        assemble_calls.append((a, k))
+        return orig_assemble(*a, **k)
+
+    monkeypatch.setattr(G, "assemble_from_windows", _tracking_assemble)
+
+    with pytest.raises(GenerateSkipException, match="已登记"):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                              random.Random(7)))
+
+    assert assemble_calls == [], (
+        "写前检查命中已登记起点时，assemble_from_windows 不得被调用——"
+        "调用了就意味着赢家的 zip 已经被覆写")
+    assert gts_a.path.read_bytes() == winner_bytes_before, "赢家 zip 字节被覆写"
+    assert gts_a.path.stat().st_mtime_ns == winner_mtime_before, "赢家 zip 被重新写入过（mtime 变了）"
+    assert conn.registered[0]["content_hash"] == winner_hash_before
+    assert len(conn.registered) == 1, "B 的登记必须被跳过（只 A 那一行）"
+
+
 @pytest.mark.parametrize("null_field", ["start", "end"])
 def test_coverage_row_null_endpoint_skips_fail_closed(tmp_path, null_field):
     """`_fetch_dense_coverage` 坏行降级分支之一：stock_coverage **行存在**但端点
