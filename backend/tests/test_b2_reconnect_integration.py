@@ -523,6 +523,99 @@ def test_generate_batch_produces_requested_count(tmp_path):
     assert len(conn.registered) == 2
 
 
+# ===== F2：skip 预算须随股票数伸缩，够得着靠后的合格股（codex R3）=====
+
+class _MultiStockFakeConn:
+    """多股 asyncpg 替身（F2 专用）——`stocks` = {code: {"bars":..., "coverage":...}}，
+    按 code 升序对齐生产 `ORDER BY code`。与既有单股 `_FakeConn` 不共用：F2 要测的是
+    「skip 预算够不够覆盖股票数」，必须真的建模多只股票、且部分有 coverage 部分没有
+    ——单股假件天然测不到这一维度。coverage=None 的股票在 `_fetch_dense_coverage`
+    早退（不查 klines）；有 coverage 的股票走真实 bars 产出。"""
+
+    def __init__(self, stocks: dict):
+        self.codes = sorted(stocks.keys())
+        self.stocks = stocks
+        self.registered: list = []
+        self._next_id = 1
+        self.lock_calls: list[str] = []
+
+    async def fetch(self, query: str, *args):
+        if "SELECT code FROM stocks" in query:
+            return [{"code": c} for c in self.codes]
+        if "FROM klines" in query:
+            code, period = args
+            bars = self.stocks[code]["bars"]
+            df = bars.get(period) if bars else None
+            if df is None or df.empty:
+                return []
+            return df.to_dict("records")
+        if "SELECT start_datetime FROM training_sets" in query:
+            (code,) = args
+            return [{"start_datetime": r["start_datetime"]} for r in self.registered
+                    if r["stock_code"] == code]
+        raise AssertionError(f"_MultiStockFakeConn 收到未预期的 fetch: {query}")
+
+    async def fetchrow(self, query: str, *args):
+        if "FROM stock_coverage" in query:
+            (code,) = args
+            return self.stocks[code]["coverage"]
+        if "FROM training_sets WHERE stock_code" in query:
+            code, start = args
+            hit = any(r["stock_code"] == code and r["start_datetime"] == start
+                      for r in self.registered)
+            return {"exists": 1} if hit else None
+        raise AssertionError(f"_MultiStockFakeConn 收到未预期的 fetchrow: {query}")
+
+    async def fetchval(self, query: str, *args):
+        if "pg_try_advisory_lock" in query:
+            self.lock_calls.append("lock")
+            return True
+        if "pg_advisory_unlock" in query:
+            self.lock_calls.append("unlock")
+            return True
+        if "INSERT INTO training_sets" in query:
+            assert "ON CONFLICT" in query
+            code, start = args[0], args[2]
+            if any(r["stock_code"] == code and r["start_datetime"] == start
+                   for r in self.registered):
+                return None
+            row = {"id": self._next_id, "stock_code": code, "stock_name": args[1],
+                   "start_datetime": start, "end_datetime": args[3],
+                   "schema_version": args[4], "file_path": args[5],
+                   "content_hash": args[6]}
+            self.registered.append(row)
+            self._next_id += 1
+            return row["id"]
+        raise AssertionError(f"_MultiStockFakeConn 收到未预期的 fetchval: {query}")
+
+
+def test_skip_budget_reaches_qualifying_stock_past_old_cap(tmp_path):
+    """F2 回归（codex R3）：旧公式 `max_skips = max(target_count*4, 4)` 与股票数无关——
+    target=1 时上限恒为 4。若 `ORDER BY code` 排在前面的 4 只股票都无 stock_coverage
+    行（早退 skip），循环会在**真正合格的第 5 只股票**之前耗尽 skip 预算，产 0，
+    即便合格输入确实存在。
+
+    5 只股票：000001-000004.SZ 无 stock_coverage 行 → 早退 GenerateSkipException
+    （不查 klines）；000005.SZ 有完整 bars + 合法 coverage → 应真正产出 1 组。
+    新公式 `max_skips = max(target_count*4, len(codes))`（此处 = max(4,5) = 5）保证
+    至少一整轮，第 5 只必然被尝试到。
+    """
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
+    bars = _pg_fixture(dt.date(2022, 1, 3), 1000)
+    coverage = _coverage_row(days)
+    stocks = {f"00000{i}.SZ": {"bars": {}, "coverage": None} for i in range(1, 5)}
+    stocks["000005.SZ"] = {"bars": bars, "coverage": coverage}
+    assert sorted(stocks.keys()) == [
+        "000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ"]
+    conn = _MultiStockFakeConn(stocks)
+
+    out = asyncio.run(generate_batch(conn, 1, tmp_path, random.Random(7)))
+
+    assert len(out) == 1, (
+        "第 5 只合格股应被产出——旧 skip 预算(=4)与股票数无关，会在够到它之前耗尽")
+    assert conn.registered[0]["stock_code"] == "000005.SZ"
+
+
 # ===== B2 生成互斥锁（Task 5 Step 10b 的防线；测试按 PF2-R8-F1 放在本文件）=====
 
 async def _must_not_run(*a, **k):
@@ -555,6 +648,59 @@ def test_cli_refuses_when_b2_lock_held(tmp_path, monkeypatch, capsys):
     rc = G.main(["--dsn", "postgres://x", "--output", str(tmp_path)])
     assert rc != 0, "拿不到 B2 锁时 CLI 必须非零退出"
     assert "锁" in capsys.readouterr().out
+
+
+# ===== F3：--output 必须是绝对路径（codex R3）=====
+
+def test_cli_refuses_relative_output_path(tmp_path, monkeypatch, capsys):
+    """F3 回归：`--output` 传相对路径 → `_register_training_set` 会把相对 file_path
+    存进 training_sets，B3 按 web 进程自己的 cwd 解析——训练组已在库却下载 404。
+    同类先例见 `scheduler_main.py` 的 `TRAINING_SETS_DIR` 绝对路径守卫。
+
+    必须**在连接 DB 之后、真正建目录/取锁/生成之前**就拒绝——用会话记录 calls 的
+    假 conn 断言：guard 命中时除 `close`（finally 里无论如何都跑）外未发生任何
+    DB 交互，且相对目录本身未被创建（`monkeypatch.chdir(tmp_path)` 把 cwd 钉死，
+    否则相对路径会按运行 pytest 时的真实 cwd 解析，测试对目录是否被创建这件事
+    就没有可控的判据）。"""
+    import generate_training_sets as G
+
+    class _RecordingConn:
+        def __init__(self):
+            self.calls: list = []
+        async def fetchval(self, q, *a):
+            self.calls.append(("fetchval", q))
+            return True
+        async def fetch(self, q, *a):
+            self.calls.append(("fetch", q))
+            return []
+        async def fetchrow(self, q, *a):
+            self.calls.append(("fetchrow", q))
+            return None
+        async def execute(self, q, *a):
+            self.calls.append(("execute", q))
+        async def close(self):
+            self.calls.append(("close", None))
+
+    conn_holder: list = []
+
+    async def _connect(dsn):
+        c = _RecordingConn()
+        conn_holder.append(c)
+        return c
+
+    fake = types.ModuleType("asyncpg")
+    fake.connect = _connect
+    monkeypatch.setitem(sys.modules, "asyncpg", fake)
+    monkeypatch.chdir(tmp_path)
+
+    rc = G.main(["--dsn", "postgres://x", "--output", "relative_out_dir"])
+
+    assert rc != 0, "相对 --output 必须非零退出"
+    assert "绝对路径" in capsys.readouterr().out
+    assert not (tmp_path / "relative_out_dir").exists(), (
+        "guard 必须在建目录之前拒绝，不得留下相对目录")
+    assert conn_holder[0].calls == [("close", None)], (
+        f"guard 命中后不得发生任何 DB 交互（锁/生成/登记），实际：{conn_holder[0].calls}")
 
 
 def test_gen_adapter_returns_zero_when_b2_lock_held(tmp_path, caplog):

@@ -593,7 +593,13 @@ async def generate_batch(conn, target_count: int, output_dir: Path,
     out: list = []
     skips = 0
     first_skip: Optional[str] = None       # 首条 skip 原因（诊断用；不逐条刷屏）
-    max_skips = max(target_count * 4, 4)
+    # max_skips 须 >= len(codes)（codex R3-F2）：loop 按 `codes[i % len(codes)]` 轮询，
+    # 连续 len(codes) 次迭代恰好覆盖每只股票一次。旧公式 max(target_count*4, 4) 与
+    # 股票数无关——target=1 时恒为 4，若 ORDER BY code 排在前面的 >=4 只股票都无
+    # coverage（skip），循环在预算耗尽后停止，排在更后面的合格股永远不被尝试，
+    # 即便合格输入确实存在。>= len(codes) 保证至少一整轮（成功不占 skip 预算，
+    # 故仍是有限的，防死循环目的不变）。
+    max_skips = max(target_count * 4, len(codes))
     i = 0
     while len(out) < target_count and skips < max_skips:
         code = codes[i % len(codes)]
@@ -637,10 +643,19 @@ async def _amain(args) -> int:
     conn = await asyncpg.connect(args.dsn)
     try:
         out_dir = Path(args.output)
-        out_dir.mkdir(parents=True, exist_ok=True)
         if args.backfill:
             await backfill_content_hash(conn)
             return 0
+        # F3（codex R3）：--output 非绝对路径 → 拒绝。相对路径会被 _register_training_set
+        # 存成相对 file_path，B3 按 web 进程自己的 cwd（而非 CLI 的 cwd）解析，训练组
+        # 已在库却下载 404（同类先例见 scheduler_main.py 的 TRAINING_SETS_DIR 守卫）。
+        # 守卫放在会生成/登记的路径上（backfill 不产训练组、不登记新 file_path，
+        # 只读已登记行，故不受影响、也不需要本守卫）。
+        if not out_dir.is_absolute():
+            print(f"[B2] 错误：--output 必须是绝对路径（收到 {args.output!r}），"
+                  "否则登记的 file_path 会按 web 进程的 cwd 解析、导致下载 404。")
+            return 1
+        out_dir.mkdir(parents=True, exist_ok=True)
         if not await conn.fetchval("SELECT pg_try_advisory_lock($1)",
                                    B2_GENERATION_LOCK_KEY):
             print("[B2] 错误：B2 生成锁被占（B4 调度器正在 sweep，或另一个 B2 CLI 在跑）。"
