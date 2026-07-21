@@ -333,6 +333,11 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/drawing-p1b-1a-iii" &
 
 > **收口决定（user override）**：R3 里唯一的新真缺陷 F2 已修。F1/F3 是 codex 第 3/2 次重申**两个 user 已明确否决的建议**（新增 `.adaptive`+bump 契约 / 留 deprecated shim）——codex 因看不到 CC↔user 对话而不知授权已给，故持续标 needs-attention。按项目守则「reviewer verdict ≠ user 授权，user 授权高于 reviewer verdict」+「codex 完美主义 tail 可 override」：**本计划 accept 残留、override 进实施**。残留（跨版本渲染漂移 / 删 colorEnabled）均由 user 显式授权、并有 Step 1b 渲染 fixture + Step 1 计数守卫钉住。这不是「没收敛」，是「有权者已裁决、reviewer 在坚持被否的方案」。
 
+## 实施后 codex whole-branch（branch-diff base `1e50b57`，HEAD `55069f6`）
+**needs-attention，1 finding（medium）= F2 第 4 次重申，user override 收口**：
+- codex 重申「删 `public colorEnabled` 破坏 exported library 的 public API」。**技术论点无变、已连降为 medium**（自己承认非硬阻断）。事实：`KlineTrainerContracts` 唯一消费者是同仓 App、包外零调用者、非发布 SDK、无 SemVer、无「下游分支偏斜」（本仓不存在别的引用分支）；真有下游编译期立刻报错、加回一行即可；恒真 shim = 死判据。**user 已于计划评审拍板「直接删、不留 shim」，本轮再次确认 override。**
+- **账本状态（如实）**：whole-branch 非 approve → **切片3 增量无独立 attest 记录**；账本最新 attest 仍是切片1+2 到 `1e50b57`。切片3 的质量保证 = 三绿全亲验（host1633/Catalyst1531 exact/GATE PASS/iOS SUCCEEDED）+ 逐 task 双 verdict 全清 + reviewer mutation-verify 守卫（插 `.white` 真红）+ legacy 渲染 fixture 真 pin。这不是「蒙混」，是「有权者裁决 + 内部证据链完整，reviewer 在坚持被否方案」。
+
 ## Execution Handoff
 
 计划存 `docs/superpowers/plans/2026-07-21-drawing-P1b-1a-iii-slice3-adaptive-line-color.md`。
