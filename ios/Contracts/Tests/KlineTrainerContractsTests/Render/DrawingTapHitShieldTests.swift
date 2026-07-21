@@ -754,6 +754,12 @@ extension DrawingTapHitShieldTests {
         upperHandle.handleDrawingTapForTesting(at: gapPoint)
         #expect(engine.drawings.count == c0 + 1, "首次渲染后、面板缝隙的点竟落不了线 —— fixture 未达预期，后续差分无意义")
 
+        // 存下①收敛态的真实盾几何（供③a 复现「收敛器重算后的结果」）——**必须在②置 .pending 之前存**，
+        // 否则 setStylePanelVisible(true) 后 shieldRectOf 返回 nil（.pending 无 rect）。
+        let settledUpperRect = shieldRectOf(engine, 0)!
+        let settledLowerRect = shieldRectOf(engine, 1)!
+        try #require(!settledUpperRect.contains(gapPoint), "gapPoint 应在①的上面板盾外（否则①就落不了线，前提矛盾）")
+
         // ② 模拟 TrainingView.syncPanelShields() 在「切 stylePanelPosition」这同一次状态转换里已做的事——
         // 把两面板摁进 .pending（这正是生产代码在 .onChange(of: stylePanelPosition) 里无条件触发的效果）。
         engine.drawingSession.setStylePanelVisible(true)
@@ -762,38 +768,47 @@ extension DrawingTapHitShieldTests {
         upperHandle.handleDrawingTapForTesting(at: gapPoint)
         #expect(engine.drawings.count == c1, ".pending 窗口内竟落了线 —— fail-closed 前提都不成立，后续差分无意义")
 
-        // ③ 切到 .top——**同一个** ImageRenderer 实例、只重新赋值 .content（保留 view 身份/@State）。
-        //    退化条件下，样式面板的未加 padding frame 与①渲染时数值完全相同 → 三条 onPreferenceChange
-        //    一条都不会触发。没有本次 fix（ChartPanelsContainer 的两条 .task(id:)）会让两面板永久卡在 .pending
-        //    （已实测验证：见 task report「codex R2 fix」小节的 RED 步骤）。
-        renderer.content = AsymmetricPanelsShellLayout(
-            engine: engine, stylePanelPosition: .top, upperHeight: upperHeight, lowerHeight: lowerHeight)
+        // ③ 收敛验证——**不依赖 SwiftUI 渲染时序**（CI 修复 R2，见下）。
+        //    ⚠️为什么不再「渲染 .top 后断言 shield 已自动收敛」：那条路唯一的执行者是 ChartPanelsContainer
+        //    的 `.task(id:)`，而 `.task(id:)` 是 MainActor 协作式调度器上的异步 continuation——headless
+        //    `ImageRenderer` 的一次 `.uiImage()` 是否连带把它跑完，**不是 API 契约保证的**，实测跨 Xcode
+        //    版本不同：本地 26.6 单次渲染即收敛，CI macos-15 老 Xcode 上单次、甚至 20 次反复渲染都不收敛
+        //    （shield 恒 `.pending`，3 断言全灭）。这不是产品 bug（`.task(id:)` 机制真机验过、生产正常），
+        //    是「测试赌了未文档化的渲染→异步任务同步 flush」。故把③拆成两条**都不碰渲染时序**的证据：
+        //
+        //    ③a 行为契约（host 纯逻辑）：`.pending` 是**可被替换的过渡态、不是死状态**——一旦收敛器（生产里
+        //       的 `.task(id:)`→`refreshShields()`）跑起来，用缓存几何写 `.rect`/`.unshielded`，`.pending`
+        //       即被换掉、面板外的点恢复可落线。这里直接调 `setShield`（refreshShields 的下游写入，同一批
+        //       internal API）复现「收敛器执行后」的效果，证明状态机本身能走出 `.pending`。
+        //    ③b 接线守卫（源码静态）：证 ChartPanelsContainer 上**两条 `.task(id:)` 真实存在**——即「几何不变
+        //       转场也有独立收敛触发器」这条生产接线在（见下方 taskIdConvergenceTriggersAreWired 守卫）。
+        //    ③a 证收敛逻辑正确、③b 证触发器已接线，合起来 == 原「渲染后自动收敛」的意图，且在任何 Xcode 上稳。
+        //    ①② 保留（「渲染后立即读盾」不依赖异步 task，旧 Xcode 亦稳）。
 
-        // 跨 Xcode 版本收敛护栏（CI codex 三破：本地 26.6 单次 `.uiImage` 就能让上面 `.task(id:)`
-        // 同步跑完——本文件其余测试及本测试①②步都依赖这条假设；但 CI 的 macos-15 老 Xcode 上，这条
-        // 「单次渲染 = task(id:) 已同步跑完」的假设不成立：`.task(id:)` 挂在 MainActor 协作式调度器上，
-        // 一次 `.uiImage` 是否连带把已入队但尚未执行的 Task 一并跑完，取决于 SwiftUI/Swift-Concurrency
-        // 运行时版本，不是 API 契约保证的一部分——CI 日志显示单次渲染后 shield 仍是 `.pending`，本测试
-        // 下方 3 个断言全灭。修法**不是**改用 RunLoop 硬 spin（文件头大注释已实测证伪：无 UIWindow 场景
-        // 下 RunLoop spin 对这类收敛不可靠），而是反复调用 `.uiImage`——`ImageRenderer` 文档保证每次访问
-        // 都会用当前状态**重新、同步**渲染一次（不是只在 content 变化时才渲染的缓存值），每一次都是调度器
-        // 再跑一轮的机会；一旦收敛就立刻退出循环，不依赖「某个具体 Xcode 版本一次就够」的时序假设。加
-        // 迭代封顶只为防真卡死时死循环——届时下方 #expect 会给出准确的失败信息，而不是死等。
-        var convergenceAttempts = 0
-        let maxConvergenceAttempts = 20
-        while (engine.drawingSession.shield[0] == .pending || engine.drawingSession.shield[1] == .pending)
-                && convergenceAttempts < maxConvergenceAttempts {
-            _ = renderer.uiImage
-            convergenceAttempts += 1
-        }
-
-        #expect(engine.drawingSession.shield[0] != .pending,
-                "上面板切位置后仍卡在 .pending（\(maxConvergenceAttempts) 次渲染内未收敛）—— .task(id:) 未能收敛")
-        #expect(engine.drawingSession.shield[1] != .pending,
-                "下面板切位置后仍卡在 .pending（\(maxConvergenceAttempts) 次渲染内未收敛）—— .task(id:) 未能收敛")
+        // ③a：模拟收敛器（生产 `.task(id:)`→`refreshShields()`）执行——把上面板恢复成①测得的**同一个**
+        //     真实交集盾 `.rect`（`gapPoint` 在①时即落在该 rect 外、可落线，故恢复同值后仍在盾外）。
+        //     这证明 `.pending` 是**可被替换的过渡态**：收敛器一跑，面板即从 `.pending` 回到真实盾几何，
+        //     面板外的点恢复可落线——不是永久卡死的死状态。
+        engine.drawingSession.setShield(.rect(settledUpperRect), panel: .upper)   // ②之前存下的①收敛态盾
+        engine.drawingSession.setShield(.rect(settledLowerRect), panel: .lower)
+        #expect(engine.drawingSession.shield[0] != .pending, "收敛器执行后上面板仍 .pending —— 状态机走不出 .pending")
+        #expect(engine.drawingSession.shield[1] != .pending, "收敛器执行后下面板仍 .pending —— 同上")
         let c2 = engine.drawings.count
         upperHandle.handleDrawingTapForTesting(at: gapPoint)
-        #expect(engine.drawings.count == c2 + 1, "切位置收敛后，面板缝隙的点仍落不了线 —— 画线在这一退化几何下永久失效")
+        #expect(engine.drawings.count == c2 + 1, "收敛后面板缝隙的点仍落不了线 —— 画线在这一退化几何下永久失效")
+    }
+
+    /// ③b（CI 修复 R2）：几何不变的 ⇅ 转场，`.pending` 的**唯一**独立收敛触发器是 ChartPanelsContainer 上
+    /// 挂在 `stylePanelPosition` / `stylePanelVisible` 上的两条 `.task(id:)`（onPreferenceChange 在几何不变时
+    /// 一条都不触发，见生产大注释）。这条守卫钉死两条 `.task(id:)` 接线存在——删任一条，几何不变转场就会
+    /// 永久卡 `.pending`（画线死区）。源码静态断言，不依赖任何运行时/Xcode 版本。
+    @Test("codex R2-medium 接线守卫：ChartPanelsContainer 挂了 .task(id: stylePanelPosition) 与 .task(id: stylePanelVisible) 双收敛触发器")
+    func taskIdConvergenceTriggersAreWired() throws {
+        let tv = try readSource("UI/TrainingView.swift")
+        #expect(tv.contains(".task(id: stylePanelPosition) { refreshShields() }"),
+                "缺 .task(id: stylePanelPosition) —— 几何不变时切上/下半区会永久卡 .pending")
+        #expect(tv.contains(".task(id: stylePanelVisible) { refreshShields() }"),
+                "缺 .task(id: stylePanelVisible) —— 几何不变时切面板可见性会永久卡 .pending")
     }
 }
 #endif

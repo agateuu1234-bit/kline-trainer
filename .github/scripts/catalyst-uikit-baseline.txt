@@ -42,6 +42,7 @@ layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复
 上半区（镜像）盾（精确判据）：面板整块落在上面板内 → 上面板有盾贴顶边、下面板盾 == nil
 ⇅ 切位置后旧盾精确清零：下半区 → 上半区，下面板盾必须 == nil，且旧盾位置能重新落线
 codex R2-medium 回归：⇅ 切位置若测出**相同**样式面板几何，两面板必须仍能从 .pending 收敛，面板外的点仍可落线
+codex R2-medium 接线守卫：ChartPanelsContainer 挂了 .task(id: stylePanelPosition) 与 .task(id: stylePanelVisible) 双收敛触发器
 KLineView 可实例化（spec L1179 final class）
 renderState 可读写（compile-check：let 字段 + init 重建模式）
 forScheme(.dark) 13 字段桥 = AppPalette.dark
