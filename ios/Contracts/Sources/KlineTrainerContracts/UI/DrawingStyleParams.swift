@@ -2,7 +2,8 @@
 // 1a-iii 切片2 Task3：常驻样式面板的 5 组参数控件（由 DrawingStyleCard 平移改造）。
 // 与旧卡片的三点差异：①线型/线样式/粗细改「画出来」的图标（spec §3）；②不再持有本地 @State 镜像，
 // 直接读 session.defaultStyle 单一真相（常驻面板长期存活，两份状态必然漂移）；③无「完成」/遮罩关闭语义。
-// 颜色组本切片**原样保留** 9 色 + colorEnabled 昼夜禁色灰态（收成「7 彩 + 线色」是切片 3 的事）。
+// 颜色组（切片3）收成「7 彩 + 1 线色」：无独立黑/白格、无禁色灰态；「线色」落 .black canonical，
+// 经 DrawingColorResolver 自适应渲染（日纯黑/夜纯白），删 DrawingStyleAvailability.colorEnabled。
 // 灰掉的项只降饱和 + .disabled，绝不写任何解释文案（母 spec §3 逐字）。
 #if canImport(UIKit)
 import SwiftUI
@@ -93,24 +94,31 @@ struct DrawingStyleParams: View {
         }
     }
 
-    // 颜色行：本切片**不动语义**——仍 9 色、仍昼夜禁色灰态（切片 3 收成「7 彩 + 线色」并删 colorEnabled）。
+    // 颜色行（切片3）：7 彩 + 1「线色」。「线色」= .black canonical，随昼夜自动反色（日纯黑/夜纯白，
+    // 经 DrawingColorResolver 自适应渲染）。无独立黑/白格、无禁色灰态——.black/.white 现恒可读。
+    private static let chromaticColors: [DrawingColorToken] = [.red, .orange, .yellow, .green, .cyan, .blue, .purple]
+
     private var colorRow: some View {
         HStack(spacing: 6) {
-            ForEach(DrawingColorToken.allCases, id: \.self) { token in
-                let on = DrawingStyleAvailability.colorEnabled(token, scheme: scheme)
-                Button { commit { $0.colorToken = token } } label: {
-                    Circle().fill(swatchColor(token))
-                        .frame(width: 22, height: 22)
-                        .overlay(Circle().stroke(Color.accentColor,
-                                                 lineWidth: token == style.colorToken ? 2.5 : 0))
-                        .overlay(Circle().stroke(Color.primary.opacity(0.15), lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                .disabled(!on)
-                .opacity(on ? 1 : 0.3)
-                .accessibilityLabel(colorAccessibilityLabel(token))
+            ForEach(Self.chromaticColors, id: \.self) { token in
+                colorSwatch(token, label: colorAccessibilityLabel(token))
             }
+            // 「线色」格：canonical .black，圈内颜色 = resolver 自适应结果（日黑夜白），
+            // 即「选它画出来是什么色，格子就显什么色」，所见即所得。
+            colorSwatch(.black, label: "线色")
         }
+    }
+
+    private func colorSwatch(_ token: DrawingColorToken, label: String) -> some View {
+        Button { commit { $0.colorToken = token } } label: {
+            Circle().fill(swatchColor(token))
+                .frame(width: 22, height: 22)
+                .overlay(Circle().stroke(Color.accentColor,
+                                         lineWidth: token == style.colorToken ? 2.5 : 0))
+                .overlay(Circle().stroke(Color.primary.opacity(0.15), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 
     // 标注组：spec §3 表格明确「维持现状」——本组是面板里唯一保留文字的组。

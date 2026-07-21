@@ -89,11 +89,38 @@ struct DrawingStylePanelSourceGuardTests {
         #expect(!code.contains("@State private var style"))
     }
 
-    @Test("颜色语义本切片不动（切片3 才改）：仍全 9 色 + 仍消费 colorEnabled 昼夜禁色")
-    func colorSemanticsUnchangedInThisSlice() throws {
+    @Test("颜色行收成 7 彩 + 1 线色（切片3，codex 计划-R2-F3 精确判据）：无 allCases/colorEnabled、恰好 1 个 .black、0 个 .white")
+    func colorRowIsSevenChromaticPlusLineColor() throws {
         let code = try source(params)
-        #expect(code.contains("DrawingColorToken.allCases"))
-        #expect(code.contains("colorEnabled"))
+        // ① 不再全量渲染 9 色、不再消费禁色判据
+        #expect(!code.contains("DrawingColorToken.allCases"), "颜色行仍在全量渲染 9 色")
+        #expect(!code.contains("colorEnabled"), "颜色行仍在消费已删的 colorEnabled")
+        // ② 七彩清单逐字（顺序与 chromaticColors 定义一致，防漏色/加色）
+        #expect(code.contains("[.red, .orange, .yellow, .green, .cyan, .blue, .purple]"),
+                "chromaticColors 不是精确的 7 彩清单")
+        // ③ 切出 colorRow 片段，在片段内计数 swatch（防把整文件其它地方的 .black/.white 算进来）
+        let row = try slice(code, from: "private var colorRow: some View {", to: "private func colorSwatch")
+        // 线色格恰好一个 .black；片段内不得出现任何独立 .white swatch/token
+        #expect(row.components(separatedBy: "colorSwatch(.black").count == 2, "colorRow 里 .black 线色格不是恰好 1 个")
+        #expect(!row.contains(".white"), "colorRow 仍出现 .white —— 独立白格未删除（正是本切片要消灭的回归）")
+        #expect(row.contains("colorSwatch(.black, label: \"线色\")"), "缺「线色」格或 label 不对")
+    }
+
+    @Test("颜色行 swatch 计数（codex 计划-R3-F2 真判据）：colorRow 恰好 8 个 swatch = 七彩各1 + 线色1，无白格")
+    func colorRowHasExactlyEightSwatches() throws {
+        let code = try source(params)
+        let row = try slice(code, from: "private var colorRow: some View {", to: "private func colorSwatch")
+        // 七彩各恰好出现一次（在 ForEach(Self.chromaticColors) 里，故 colorRow 片段内不逐色写——
+        // 改为断言 chromaticColors 定义 + 计 colorSwatch( 调用点）：ForEach 1 处 + 线色 1 处 = 2 个 colorSwatch(
+        #expect(row.components(separatedBy: "colorSwatch(").count - 1 == 2,
+                "colorRow 的 colorSwatch( 调用点不是 2（ForEach 七彩 + 线色各一）")
+        // 七彩清单逐字 7 个、无 black/white 混入
+        #expect(code.contains("[.red, .orange, .yellow, .green, .cyan, .blue, .purple]"))
+        #expect(!code.contains("[.red, .orange, .yellow, .green, .cyan, .blue, .purple, .black")
+                && !code.contains(".white]"), "chromaticColors 混入了 black/white")
+        // 线色格恰好 .black、零 .white
+        #expect(row.components(separatedBy: "colorSwatch(.black").count == 2, "线色 .black 格不是恰好 1")
+        #expect(!row.contains(".white"), "colorRow 出现 .white —— 独立白格未删（本切片要消灭的回归）")
     }
 
     // ⭐codex 计划-R3-F1：R2 里我声称「第一道盾由源码守卫覆盖」，却**没真去加这条断言**——

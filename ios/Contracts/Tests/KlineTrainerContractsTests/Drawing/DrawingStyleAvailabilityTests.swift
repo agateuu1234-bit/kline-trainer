@@ -1,5 +1,5 @@
 // Tests/KlineTrainerContractsTests/Drawing/DrawingStyleAvailabilityTests.swift
-// Spec: 母 spec §3.1 水平线可选矩阵 + §4.1.4 昼夜禁色。
+// Spec: 母 spec §3.1 水平线可选矩阵。（昼夜禁色 colorEnabled 已随切片3「7 彩+线色」删除）
 import Testing
 @testable import KlineTrainerContracts
 
@@ -25,18 +25,6 @@ struct DrawingStyleAvailabilityTests {
         #expect(!A.horizontalLabelModeEnabled(.left,  lineSubType: .ray))
         #expect(A.horizontalLabelModeEnabled(.right,  lineSubType: .ray))
         #expect(A.horizontalLabelModeEnabled(.hidden, lineSubType: .ray))
-    }
-
-    @Test("颜色：白天禁白、夜间禁黑，7 彩色恒可选")
-    func color() {
-        #expect(!A.colorEnabled(.white, scheme: .light))
-        #expect(A.colorEnabled(.white, scheme: .dark))
-        #expect(!A.colorEnabled(.black, scheme: .dark))
-        #expect(A.colorEnabled(.black, scheme: .light))
-        for c in [DrawingColorToken.red, .orange, .yellow, .green, .cyan, .blue, .purple] {
-            #expect(A.colorEnabled(c, scheme: .light))
-            #expect(A.colorEnabled(c, scheme: .dark))
-        }
     }
 
     @Test("依赖字段规整：选『左』后切『射线』→ labelMode 回落 hidden（不留矛盾组合，codex plan-R1）")

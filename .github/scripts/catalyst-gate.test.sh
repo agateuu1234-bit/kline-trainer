@@ -374,9 +374,9 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 # catalyst-total-baseline.txt / catalyst-uikit-baseline.txt 不被它们覆盖——误设/漂移只会
 # 在真 CI 的真构建步暴露、reviewer 无法从仓库状态复现。这条**显式 unset 两个冻结覆盖**、
 # 走 catalyst-gate.sh 默认的活基线，对一份代表当前 main 的裁剪真日志（pass-main-current.log：
-# 1528 tests / 57 UIKit / macabi）断言 GATE PASS 且回显 1528。活基线一旦被误改（漂出 ±30），
+# 1531 tests / 57 UIKit / macabi）断言 GATE PASS 且回显 1531。活基线一旦被误改（漂出 ±30），
 # 这条会在 Gate self-test 步就红，早于真构建步。
-# 维护：任何改动 catalyst-uikit-baseline.txt、或让真实总用例数漂出 1528±30 的 PR，必须同时
+# 维护：任何改动 catalyst-uikit-baseline.txt、或让真实总用例数漂出 1531±30 的 PR，必须同时
 # 用一次真 Catalyst 构建日志重裁 pass-main-current.log（禁手打伪造行，见 R9）。
 # （1a-iii 切片1 Task2：uikit 35→41 / total 1457→1486，随 DrawingBottomBarHeightTests 2 条 +
 # DrawingTapHitShieldTests 4 条 UIKit-gated 测试新增同步重裁。
@@ -416,14 +416,24 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   不触发，refreshShields() 永不重跑，两面板永久卡在 .pending。新增 1 条 UIKit-gated 端到端回归
 #   DrawingTapHitShieldTests.toggleWithIdenticalGeometryEventuallySettles（同一个 ImageRenderer 实例
 #   reassign .content，实测验证 view 身份/@State 跨 reassign 存活 + .task(id:) 单次 .uiImage() 内
-#   同步跑完）：+1（uikit），1527→1528；uikit 56+1=57。）
+#   同步跑完）：+1（uikit），1527→1528；uikit 56+1=57。
+#   1a-iii 切片3 Task1（a4ac76a）：total 1528→1531（uikit 57 不变）。DrawingColorResolverTests 新增
+#   3 条 host-pure 测试（adaptiveInkNoMuddyFallback/adaptiveInkAlwaysReadable/legacyTokensRenderAdaptiveInkBothSchemes）
+#   钉住「.black/.white 改自适应纯 ink」，但当时 Task1 commit 未同步 catalyst-total-baseline.txt——
+#   1528 已漂出真值 3 条（本 fixture 在 Task2 才用真 fresh 日志核实并补上，见下）。
+#   1a-iii 切片3 Task2（本次）：total 净变化 0（uikit 57 不变，未新增/删除任何 UIKit-gated 测试）——
+#   DrawingStyleAvailabilityTests 删 1 条 host-pure（`color`，随 colorEnabled 一起删）；
+#   DrawingStylePanelSourceGuardTests 的 `colorSemanticsUnchangedInThisSlice` 1 条替换成 2 条新
+#   host-pure 守卫（colorRowIsSevenChromaticPlusLineColor/colorRowHasExactlyEightSwatches），净 +1；
+#   两者相抵 −1+1=0。本次改动的真实数字来自 Task1 遗留的基线纠偏：1528（已知漂移，见上）→
+#   1531（fresh 日志实测真值，Task1 的 +3 与 Task2 的 ±0 相加）。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1528" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 57 / total 1528）→ GATE PASS 且回显 1528 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1531" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 57 / total 1531）→ GATE PASS 且回显 1531 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1528，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1531，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 

@@ -19,15 +19,6 @@ public enum DrawingStyleAvailability {
         }
     }
 
-    /// 颜色：白天禁白、夜间禁黑（与背景同色不可读）；7 彩色恒可选（§4.1.4）。
-    public static func colorEnabled(_ token: DrawingColorToken, scheme: AppColorScheme) -> Bool {
-        switch token {
-        case .white: return scheme != .light
-        case .black: return scheme != .dark
-        default:     return true
-        }
-    }
-
     /// 依赖字段规整：切线型子类后，若旧 labelMode 在新子类下不可用（如直线选『左』后切射线），
     /// 回落 .hidden；否则原样。**复用 horizontalLabelModeEnabled，规则单一真相不重复。**
     /// 设置卡片切线型时调它 → 矛盾组合（灰项却被当默认提交）从结构上进不来（codex plan-R1-medium）。
