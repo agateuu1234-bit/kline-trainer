@@ -711,9 +711,14 @@ extension DrawingTapHitShieldTests {
     /// 容器实例的旧值与新值数值相同）。改用**同一个** `ImageRenderer` 实例、只重新赋值 `.content`——独立实测
     /// 验证过三件事（细节见 task report「codex R2 fix」小节）：①`.content` 重新赋值确实保留 view 身份/`@State`
     /// （`onAppear` 不会重复触发，与 `renderAndConverge` 每次触发一次形成对照）；②`onPreferenceChange` 确实只在
-    /// 数值真变化时才回调（数值相同则不回调，与生产行为一致，这才是本 bug 能被复现的前提）；③`.task(id:)` 在
-    /// 单次 `.uiImage()` 调用内**同步**跑完、无需额外 `await`/`Task.yield()`，可在同一个 hosted 测试方法里
-    /// 直接断言其效果（不必依赖不确定的异步收敛窗口）。
+    /// 数值真变化时才回调（数值相同则不回调，与生产行为一致，这才是本 bug 能被复现的前提）；③`.task(id:)`
+    /// **在本地 Xcode 26.6 上**单次 `.uiImage()` 调用内就能同步跑完，可在同一个 hosted 测试方法里直接
+    /// 断言其效果。⚠️CI 修复（跨 Xcode 版本收敛护栏）：CI 的 macos-15 老 Xcode 上这条「单次渲染=task(id:)
+    /// 已跑完」的假设不成立（真实 CI 报错：切 `.top` 后三个断言全灭，shield 仍 `.pending`）——`.task(id:)`
+    /// 挂在 MainActor 协作式调度器上，一次 `.uiImage` 是否连带把已入队但尚未执行的 Task 一并跑完，取决于
+    /// SwiftUI/Swift-Concurrency 运行时版本，不是 API 契约保证的一部分。步骤③改成有界循环反复读
+    /// `.uiImage` 直至收敛（每次访问都是 `ImageRenderer` 官方保证的一次全新同步渲染，给调度器再一次机会），
+    /// 不改用 RunLoop 硬 spin（本文件头大注释已实测证伪：无 UIWindow 场景下对这类收敛不可靠）。见步骤③内联注释。
     ///
     /// fixture 高度（**实测打印，非猜测**）：`DrawingStylePanel` 在 `shieldTestPanelWidth=390` 下的未加 padding
     /// 内容高度实测 = 209pt（与既有 `togglingPositionClearsStaleShieldExactly` 等测试独立测得的同一份几何一致）；
@@ -763,10 +768,29 @@ extension DrawingTapHitShieldTests {
         //    （已实测验证：见 task report「codex R2 fix」小节的 RED 步骤）。
         renderer.content = AsymmetricPanelsShellLayout(
             engine: engine, stylePanelPosition: .top, upperHeight: upperHeight, lowerHeight: lowerHeight)
-        _ = renderer.uiImage
 
-        #expect(engine.drawingSession.shield[0] != .pending, "上面板切位置后仍卡在 .pending —— .task(id:) 未能收敛")
-        #expect(engine.drawingSession.shield[1] != .pending, "下面板切位置后仍卡在 .pending —— .task(id:) 未能收敛")
+        // 跨 Xcode 版本收敛护栏（CI codex 三破：本地 26.6 单次 `.uiImage` 就能让上面 `.task(id:)`
+        // 同步跑完——本文件其余测试及本测试①②步都依赖这条假设；但 CI 的 macos-15 老 Xcode 上，这条
+        // 「单次渲染 = task(id:) 已同步跑完」的假设不成立：`.task(id:)` 挂在 MainActor 协作式调度器上，
+        // 一次 `.uiImage` 是否连带把已入队但尚未执行的 Task 一并跑完，取决于 SwiftUI/Swift-Concurrency
+        // 运行时版本，不是 API 契约保证的一部分——CI 日志显示单次渲染后 shield 仍是 `.pending`，本测试
+        // 下方 3 个断言全灭。修法**不是**改用 RunLoop 硬 spin（文件头大注释已实测证伪：无 UIWindow 场景
+        // 下 RunLoop spin 对这类收敛不可靠），而是反复调用 `.uiImage`——`ImageRenderer` 文档保证每次访问
+        // 都会用当前状态**重新、同步**渲染一次（不是只在 content 变化时才渲染的缓存值），每一次都是调度器
+        // 再跑一轮的机会；一旦收敛就立刻退出循环，不依赖「某个具体 Xcode 版本一次就够」的时序假设。加
+        // 迭代封顶只为防真卡死时死循环——届时下方 #expect 会给出准确的失败信息，而不是死等。
+        var convergenceAttempts = 0
+        let maxConvergenceAttempts = 20
+        while (engine.drawingSession.shield[0] == .pending || engine.drawingSession.shield[1] == .pending)
+                && convergenceAttempts < maxConvergenceAttempts {
+            _ = renderer.uiImage
+            convergenceAttempts += 1
+        }
+
+        #expect(engine.drawingSession.shield[0] != .pending,
+                "上面板切位置后仍卡在 .pending（\(maxConvergenceAttempts) 次渲染内未收敛）—— .task(id:) 未能收敛")
+        #expect(engine.drawingSession.shield[1] != .pending,
+                "下面板切位置后仍卡在 .pending（\(maxConvergenceAttempts) 次渲染内未收敛）—— .task(id:) 未能收敛")
         let c2 = engine.drawings.count
         upperHandle.handleDrawingTapForTesting(at: gapPoint)
         #expect(engine.drawings.count == c2 + 1, "切位置收敛后，面板缝隙的点仍落不了线 —— 画线在这一退化几何下永久失效")
