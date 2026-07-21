@@ -14,6 +14,10 @@ _FILENAME_RE = re.compile(
     r"^(?P<code>\d+\.(?:SH|SZ|BJ))_(?P<name>.+)_(?P<label>1分钟K线|日K线)_前复权\.csv$"
 )
 _LABEL_TO_PERIOD = {"1分钟K线": "1m", "日K线": "daily"}
+# 裸股票代码（非文件名）规范格式：数字 + 市场后缀。信任边界校验用——
+# `../x`、`/tmp/x`、`a/b` 等一律不匹配（codex R4-F1：generate_training_sets 把
+# DB 派生的 stock_code 直接拼进文件路径，坏码会致目录穿越/绝对路径逃逸）。
+_STOCK_CODE_RE = re.compile(r"^\d+\.(?:SH|SZ|BJ)$")
 
 class QmtSchemaError(ValueError):
     """QMT CSV 缺列 / 文件名不合规。"""
@@ -30,6 +34,11 @@ def parse_qmt_datetime(series: pd.Series, src_period: str) -> pd.Series:
         naive = _dt.datetime.strptime(str(int(v)), fmt)
         return int(naive.replace(tzinfo=_SH).timestamp())
     return series.map(_one).astype("int64")
+
+def is_valid_stock_code(code: str) -> bool:
+    """裸股票代码是否符合规范格式（数字+`.`+SH/SZ/BJ）。信任边界校验入口
+    ——调用方应在把任何 DB 派生的 stock_code 用于路径拼接前先过这一关。"""
+    return bool(_STOCK_CODE_RE.match(code))
 
 def parse_qmt_filename(name: str) -> tuple[str, str, str]:
     m = _FILENAME_RE.match(name)

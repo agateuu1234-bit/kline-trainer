@@ -33,7 +33,7 @@ from typing import Any, Optional, Sequence
 
 import pandas as pd
 
-from qmt_normalize import trading_date
+from qmt_normalize import is_valid_stock_code, trading_date
 from qmt_resample import period_boundaries
 
 SCHEMA_VERSION = 1
@@ -346,6 +346,15 @@ def assemble_from_windows(output_dir: Path, *, stock_code: str, stock_name: str,
     windows = assign_global_indices(windows)
     fname = f"{stock_code}_{start_datetime}"
     zip_path = output_dir / f"{fname}.zip"
+    # 纵深防御（codex R4-F1）：调用方（generate_one_training_set）已校验 stock_code
+    # 规范格式，但本函数本身也被 host pytest 直接以任意 stock_code 调用（纯装配层
+    # 契约）——万一未来有别的调用点跳过了那道校验，这里再断言最终路径确实落在
+    # output_dir 之下。含 `/`、`..` 的坏 stock_code 会让 `output_dir / f"{fname}.zip"`
+    # 目录穿越，甚至（stock_code 本身是绝对路径时）让 `/` 运算符整体丢弃 output_dir，
+    # 都会被这里挡住，而不是真的写到 output_dir 之外。
+    if output_dir.resolve() not in zip_path.resolve().parents:
+        raise GenerateSkipException(
+            f"{stock_code}: 装配路径逃出 output_dir（拒绝写入，信任边界校验）")
     # 中间 .db 建在**临时目录**（codex PF2-R5-F1）：它是纯构建中间产物——从不登记、
     # 无人引用。放最终目录会留崩溃残渣，而 `_TRAINING_SET_DDL` 是裸 `CREATE TABLE`
     # （无 IF NOT EXISTS）→ 下次同起点重试撞 `table meta already exists`
@@ -471,6 +480,18 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
     partial 月的 open，会让最新完整月当不成第 8 前向月、白白少候选（codex R9-F1）。
     任一前置缺失（周期数据空 / 无覆盖 artifact）→ GenerateSkipException，fail-closed。"""
     rng = rng or random.Random()
+
+    # 信任边界（codex R4-F1）：stock_code 来自 generate_batch 的
+    # `SELECT code FROM stocks`（数据库派生输入，非硬编码常量）。它最终被直接拼进
+    # assemble_from_windows 的 zip 路径与临时 SQLite 路径——若某行 `stocks.code`
+    # 含 `/`、`..`，或本身就是绝对路径，会致目录穿越 / 写到 output_dir 外
+    # （绝对路径整体替换 `Path.__truediv__` 的 RHS）；坏码致父目录缺失时抛的
+    # `FileNotFoundError` 也不被 generate_batch 捕获（它只捕 GenerateSkipException）
+    # → 中止整轮 sweep，而不是跳过这一只股。此检查排在最前——比 stock_coverage
+    # 早退检查更早、比六周期全历史加载更早——坏码零额外开销即被拒。
+    if not is_valid_stock_code(stock_code):
+        raise GenerateSkipException(
+            f"{stock_code}: 非法 stock_code，拒绝写入（信任边界校验）")
 
     # **早退检查排在六周期全量历史加载之前**（codex whole-branch I1）：
     # stock_coverage 空表（本 PR 上线首日的真实状态，见验收清单 L1）时，无需先把

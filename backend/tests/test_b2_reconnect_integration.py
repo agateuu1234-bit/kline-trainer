@@ -19,6 +19,7 @@ import sqlite3
 import sys
 import types
 import zipfile
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -1048,3 +1049,63 @@ def test_early_skip_path_does_not_touch_lock(tmp_path):
                                               random.Random(7)))
     assert conn.lock_calls == [], (
         f"早退路径不应触碰锁，实际：{conn.lock_calls}")
+
+
+# ===== stock_code 路径逃逸（信任边界，codex R4-F1）=====
+# stock_code 来自 `SELECT code FROM stocks`（数据库派生输入，非硬编码常量）。它被
+# 直接拼进 assemble_from_windows 的 zip 路径与临时 SQLite 路径；坏值（`../`、
+# 绝对路径）可致目录穿越 / 写到 output_dir 之外（`Path.__truediv__` 遇 RHS 为
+# 绝对路径会整体丢弃 LHS），且触发的 FileNotFoundError 等异常不被 generate_batch
+# 捕获（它只捕 GenerateSkipException）→ 中止整轮 sweep，而非跳过这一只股。
+
+def test_path_traversal_stock_code_rejected_no_files_outside_output_dir(tmp_path):
+    """`../evil`：必须被拒（GenerateSkipException），output_dir 内外都不得出现
+    任何产物——尤其是 output_dir 的父目录（`../` 穿越理应落到那里）。"""
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
+    conn = _FakeConn("../evil", _pg_fixture(dt.date(2022, 1, 3), 1000),
+                     _coverage_row(days))
+    with pytest.raises(GenerateSkipException, match="非法 stock_code"):
+        asyncio.run(generate_one_training_set(conn, "../evil", tmp_path,
+                                              random.Random(7)))
+    assert conn.registered == []
+    assert list(tmp_path.iterdir()) == [], "output_dir 内不得出现任何产物"
+    assert conn.lock_calls == [], "校验早于取锁，不应触碰 B2 生成锁"
+    escaped = [p for p in tmp_path.parent.iterdir() if "evil" in p.name]
+    assert escaped == [], f"output_dir 父目录出现越界产物：{escaped}"
+
+
+def test_absolute_path_stock_code_rejected_target_never_created(tmp_path):
+    """`/tmp/evil_kline_test`：绝对路径会让 `output_dir / f'{code}_{start}.zip'`
+    的 RHS 整体替换 LHS（Path 语义），必须被拒，且该绝对路径从未被创建。
+
+    真实产物文件名是 `{stock_code}_{start_datetime}.zip`（start_datetime 由
+    rng 选出、测试前不可预知），故不能断言一个写死的文件名——改为在 `/tmp` 下
+    glob 前缀，断言逃逸期间没有任何匹配文件出现（且测试结束时清理干净，
+    不污染 `/tmp`，即便断言失败也清理）。"""
+    pattern = "evil_kline_test*"
+    before = set(Path("/tmp").glob(pattern))
+    assert not before, f"测试前置：/tmp 下已有匹配残留（另一测试遗留？）：{before}"
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
+    conn = _FakeConn("/tmp/evil_kline_test", _pg_fixture(dt.date(2022, 1, 3), 1000),
+                     _coverage_row(days))
+    try:
+        with pytest.raises(GenerateSkipException, match="非法 stock_code"):
+            asyncio.run(generate_one_training_set(conn, "/tmp/evil_kline_test", tmp_path,
+                                                  random.Random(7)))
+        assert conn.registered == []
+        assert list(tmp_path.iterdir()) == [], "output_dir 内不得出现任何产物"
+        after = set(Path("/tmp").glob(pattern))
+        assert after == before, f"绝对路径逃逸目标不得被创建，实际出现：{after - before}"
+    finally:
+        for p in Path("/tmp").glob(pattern):   # 防污染：即便断言失败也清理掉误建的文件
+            p.unlink()
+
+
+def test_canonical_stock_code_still_produces_normally(tmp_path):
+    """校验不得误杀合法码：规范格式 `000001.SZ` 仍正常产出并登记
+    （R4-F1 修复不应引入假阳性）。"""
+    conn, _ = _fixture_conn()
+    gts = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
+                                                random.Random(7)))
+    assert gts.path.exists()
+    assert len(conn.registered) == 1
