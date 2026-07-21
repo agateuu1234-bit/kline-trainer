@@ -13,7 +13,12 @@ struct DrawingBottomBar: View {
     var body: some View {
         HStack(spacing: 8) {
             Button { typeRowExpanded.toggle() } label: {
-                Image(systemName: "list.bullet").frame(maxWidth: .infinity)
+                HStack(spacing: 4) {
+                    Image(systemName: "minus")   // 与类型行水平线图标一致（DrawingTypeOverlay）
+                    Text("类型")
+                    Image(systemName: "chevron.down")
+                        .rotationEffect(.degrees(typeRowExpanded ? 0 : 180))   // 收起态朝上，展开态朝下
+                }
             }
             .accessibilityLabel("类型")
             Spacer()
