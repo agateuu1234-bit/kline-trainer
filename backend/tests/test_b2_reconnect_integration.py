@@ -359,6 +359,61 @@ def test_dropped_1m_date_never_spanned_by_selected_window(tmp_path):
     )
 
 
+def test_dropped_day_missing_from_daily_forces_skip_not_silent_hole(tmp_path):
+    """F2（codex R5）：`trading_dates` 是从**现存 daily klines** 反推的——若某 dropped 日
+    D 的 daily 行也缺失（B1 半途导入 / 行丢失），D 就同时从 trading_dates 与
+    `eligible_start_indices` 的 `window_trading` 遍历里消失，D2 dense 门对它完全失明；
+    `dense_day_count` 交叉校验（PF2-R6-F1）在这个场景里也测不出来——两边都从现存 daily
+    反推，D 在两个算式里同步消失，天数照样对得上、交叉校验照样通过（**不是它代劳拦下
+    这个洞**）。`dropped_1m_dates` 必须是独立于 daily/trading_dates 的权威阻断器。
+
+    构造：D 取候选 idx=30 窗口起点后第 5 个交易日（同月内、非该月首个交易日——抠掉它
+    不会移动月边界，否则窗口起点本身会漂移、测试失去可预测性）；从 daily+3m+15m+60m
+    里一起抠掉 D；coverage 行 dropped=[D]、dense_day_count 按"排除 D 后仍匹配"设置。
+    再用 exclude_starts 把候选 31..hi 全标记"已登记"，只留 idx=30 唯一候选——不靠
+    rng shuffle 运气，确定性地逼真实代码去评估这一个跨越 D 的候选：
+    旧代码：候选 30 被误判合格（两道门都对 D 失明）→ 照样登记（带洞）。
+    新代码：dropped 独立阻断命中 → 候选 30 被拒 → 唯一候选也没了 → bounded retry
+    穷尽 → GenerateSkipException，且不留任何登记行。"""
+    from qmt_resample import period_boundaries
+
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
+    bars = _pg_fixture(dt.date(2022, 1, 3), 1000)
+    daily = bars["daily"]
+    month_boundaries = period_boundaries(daily, "monthly")
+    n = len(month_boundaries)
+    hi = n - 1 - 8
+    assert hi >= 31, f"候选池太窄（hi={hi}），本测试的 exclude 构造需要 idx 31..hi 非空"
+
+    all_daily_dates = sorted({trading_date(int(e)) for e in daily["datetime"]})
+    d30 = trading_date(int(month_boundaries[30]))
+    idx_d30 = all_daily_dates.index(d30)
+    missing_date = all_daily_dates[idx_d30 + 5]     # 候选30窗口内、非该月首个交易日
+    assert missing_date.year == d30.year and missing_date.month == d30.month, (
+        "构造前提：missing_date 须与 d30 同月，否则可能落到候选30窗口之外")
+
+    bars2 = dict(bars)
+    for p in ("daily", "3m", "15m", "60m"):
+        df = bars2[p]
+        bars2[p] = df[df["datetime"].map(
+            lambda e: trading_date(int(e)) != missing_date)].reset_index(drop=True)
+
+    mb2 = period_boundaries(bars2["daily"], "monthly")
+    assert mb2 == month_boundaries, (
+        f"{missing_date} 改变了月边界——请换一个测试日期（不应是月首交易日）")
+
+    cov = _coverage_row(days, dropped=[missing_date])
+    conn = _FakeConn("000001.SZ", bars2, cov)
+    conn.registered = [{"stock_code": "000001.SZ", "start_datetime": int(month_boundaries[i])}
+                       for i in range(31, hi + 1)]   # 强制只留 idx=30 一个候选
+
+    with pytest.raises(GenerateSkipException, match="bounded retry 穷尽"):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path, random.Random(7)))
+    assert not any(r["start_datetime"] == int(month_boundaries[30]) for r in conn.registered), (
+        "候选 30 不得被登记——F2 洞：跨越 daily 行也缺失的 dropped 日仍被放行"
+    )
+
+
 # ===== fail-closed：门控真的在守 =====
 
 def test_missing_coverage_artifact_skips_fail_closed(tmp_path):
@@ -615,6 +670,33 @@ def test_skip_budget_reaches_qualifying_stock_past_old_cap(tmp_path):
     assert len(out) == 1, (
         "第 5 只合格股应被产出——旧 skip 预算(=4)与股票数无关，会在够到它之前耗尽")
     assert conn.registered[0]["stock_code"] == "000005.SZ"
+
+
+def test_skip_budget_does_not_stop_early_when_eligible_stock_keeps_producing(tmp_path):
+    """F3 回归（codex R5）：旧公式是**累积** skip 上限——多股无 coverage（每轮都 skip）+
+    少数 eligible 股时，累积 skip 约一轮多就撞顶提前停，即便 eligible 股本可在后续轮
+    换不同 start（exclude_starts 排已登记）继续产出，B4 因此欠产。
+
+    5 只股：000001-4 无 coverage（每轮必 skip）；000005 有完整 bars+coverage，可连续
+    产出不同 start（exclude_starts 生效）。target=3 需要 000005 跨 3 轮各成功一次：
+    旧累积上限 `max(3*4,5)=12` 会在 000005 刚产出第 2 组、第 3 轮 000004 的第 3 次 skip
+    处（累积 skips 恰好撞到 12）提前撞顶，欠产为 2（手工推演已验证）；新的"连续 skip"
+    判据（成功即清零，只有整轮 len(codes) 次连续全 skip 才停）能撑到 000005 产出第 3 组。
+    """
+    days = _trading_days(dt.date(2022, 1, 3), 1000)
+    bars = _pg_fixture(dt.date(2022, 1, 3), 1000)
+    coverage = _coverage_row(days)
+    stocks = {f"00000{i}.SZ": {"bars": {}, "coverage": None} for i in range(1, 5)}
+    stocks["000005.SZ"] = {"bars": bars, "coverage": coverage}
+    conn = _MultiStockFakeConn(stocks)
+
+    out = asyncio.run(generate_batch(conn, 3, tmp_path, random.Random(7)))
+
+    assert len(out) == 3, (
+        "旧累积 skip 上限会在 000005 第 3 次成功前提前撞顶，欠产（修复前必挂）")
+    assert all(gts.stock_code == "000005.SZ" for gts in out)
+    starts = {gts.start_datetime for gts in out}
+    assert len(starts) == 3, "3 组必须是不同起点（exclude_starts 生效）"
 
 
 # ===== B2 生成互斥锁（Task 5 Step 10b 的防线；测试按 PF2-R8-F1 放在本文件）=====

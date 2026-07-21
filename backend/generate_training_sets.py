@@ -103,10 +103,19 @@ def compute_after_end(month_boundaries: list[int], start_idx: int, months: int =
     return int(month_boundaries[start_idx + months]) - 1
 
 
-def eligible_start_indices(month_boundaries, rng, *, dense_dates, trading_dates, months: int = 8) -> list:
+def eligible_start_indices(month_boundaries, rng, *, dense_dates, trading_dates,
+                           months: int = 8, dropped=frozenset()) -> list:
     """全部 dense 覆盖的候选起点下标（随机序），供 bounded retry（codex PF1-F2/PF1-R3-F2）：
     按**交易日历**遍历——[start..after_end] 内该股每个交易日（∈ trading_dates）都 ∈ dense_dates；
-    周末/假期不在 trading_dates、不误拒。"""
+    周末/假期不在 trading_dates、不误拒。
+
+    `dropped`（codex R5-F2）：coverage 权威的 dropped_1m_dates，须作**独立于 trading_dates**
+    的阻断器。`trading_dates` 是从现存 daily klines 反推的——若某 dropped 日的 daily 行也
+    缺失（B1 半途导入 / 行丢失），它就不在 trading_dates，也就不在下面 `window_trading` 的
+    遍历里，上面按交易日历逐日核对 dense 的检查对它完全失明；`dense_day_count` 交叉校验
+    （PF2-R6-F1）在这个场景里同样测不出来——两边都从现存 daily 反推，缺失的那天在两个算式
+    里同步消失，天数照样对得上。故这里直接用候选窗口的日历区间 `[d0,d1]` 与 dropped 集合
+    求交，不依赖该日是否还在 trading_dates 里。"""
     n = len(month_boundaries)
     if n < 31 + months:
         raise GenerateSkipException(f"月边界仅 {n}，不足 {31 + months}")
@@ -117,6 +126,8 @@ def eligible_start_indices(month_boundaries, rng, *, dense_dates, trading_dates,
     for idx in candidates:
         d0 = trading_date(int(month_boundaries[idx]))
         d1 = trading_date(compute_after_end(month_boundaries, idx, months))
+        if any(d0 <= dd <= d1 for dd in dropped):     # 独立阻断：不靠 trading_dates 代劳
+            continue
         window_trading = [d for d in trading_dates if d0 <= d <= d1]   # 按交易日历、非日历日
         if window_trading and all(d in dense_dates for d in window_trading):
             out.append(idx)
@@ -125,16 +136,18 @@ def eligible_start_indices(month_boundaries, rng, *, dense_dates, trading_dates,
 
 def select_valid_window(month_boundaries, rng, *, dense_dates, trading_dates,
                         try_assemble, max_retries: int = 8, months: int = 8,
-                        exclude_starts=frozenset()):
+                        exclude_starts=frozenset(), dropped=frozenset()):
     """bounded candidate retry（codex R12-F2/PF1-R3-F2）：逐 eligible 候选调 try_assemble(start)；
     首个不抛的返回 (start, 其返回值)；抛 GenerateSkipException → 试下一个；穷尽 → skip。
 
     `exclude_starts`（Plan 2b）：已登记的 start_datetime（uq_stock_start）。**必须在切
     `cands[:max_retries]` 之前过滤**——若放进循环再拒，每个被排除者会吃掉一个重试名额，
     股票累积训练组后 shuffle 把已登记的排前面，就会明明还有可用起点却整股被跳过、
-    且非确定性（B4 库存莫名欠产）。codex PF2-R1-F2。"""
+    且非确定性（B4 库存莫名欠产）。codex PF2-R1-F2。
+
+    `dropped`（codex R5-F2）：透传给 `eligible_start_indices` 作独立阻断器，见其 docstring。"""
     cands = eligible_start_indices(month_boundaries, rng, dense_dates=dense_dates,
-                                   trading_dates=trading_dates, months=months)
+                                   trading_dates=trading_dates, months=months, dropped=dropped)
     if exclude_starts:
         cands = [i for i in cands if int(month_boundaries[i]) not in exclude_starts]
     for idx in cands[:max_retries]:
@@ -152,14 +165,17 @@ _INTRADAY_EXPECTED = {"3m": 80, "15m": 16, "60m": 4}
 def build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, trading_dates,
                            before_caps, months: int = 8, intraday_expected=None,
                            before_min: int = 30, max_retries: int = 8,
-                           exclude_starts=frozenset()):
+                           exclude_starts=frozenset(), dropped=frozenset()):
     """**生产纯入口（codex PF1-R6-F2）**：组合 compute_after_end / select_period_window(两侧周边界) /
     D6 per-period before-after / D9 per_day 硬门 + bounded retry。返回 `(start_datetime, windows)`。
     **Plan 2 的 `generate_one_training_set` 必须调本入口**（而非旧 select_start_index/monthly_after_end），
     再做 SQLite/zip/register/起点唯一性。gate 参数（`months`/`intraday_expected`/`before_min`）可调以便端到端单测。
 
     `exclude_starts` 透传给 `select_valid_window`（uq_stock_start → **候选资格**，
-    在重试预算之前过滤；**不要**改成在 `_try` 里拒，那会吃掉重试名额，见该函数 docstring）。"""
+    在重试预算之前过滤；**不要**改成在 `_try` 里拒，那会吃掉重试名额，见该函数 docstring）。
+
+    `dropped`（codex R5-F2）：透传给 `select_valid_window` → `eligible_start_indices`
+    作独立阻断器，见其 docstring。"""
     idx_of = {int(b): i for i, b in enumerate(month_boundaries)}
 
     def _try(start):
@@ -179,7 +195,7 @@ def build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, t
 
     return select_valid_window(month_boundaries, rng, dense_dates=dense_dates, trading_dates=trading_dates,
                                try_assemble=_try, max_retries=max_retries, months=months,
-                               exclude_starts=exclude_starts)
+                               exclude_starts=exclude_starts, dropped=dropped)
 
 
 def per_day_intraday_complete(windows, trading_dates, after_end, expected=None,
@@ -534,7 +550,7 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
         period_bars, month_boundaries, rng,
         dense_dates=dense_dates, trading_dates=trading_dates,
         before_caps=PERIOD_BEFORE_CAP, max_retries=max_retries,
-        exclude_starts=frozenset(exclude))
+        exclude_starts=frozenset(exclude), dropped=dropped)
 
     idx = month_boundaries.index(int(start_datetime))
     after_end = compute_after_end(month_boundaries, idx)
@@ -605,30 +621,34 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
 
 async def generate_batch(conn, target_count: int, output_dir: Path,
                          rng: Optional[random.Random] = None) -> list:
-    """D10：B4 调度器直接调用。循环生成直到 target_count 个或连续 skip 超限（防死循环）。"""
+    """D10：B4 调度器直接调用。循环生成直到 target_count 个，或**连续一整轮**（len(codes)
+    次连续 skip、一次成功都没有）判定确实无进展为止（防死循环）。
+
+    停止判据是**连续** skip 计数、非累积（codex R5-F3）：旧公式 `max_skips =
+    max(target_count*4, len(codes))` 是**累积**上限——多股无 coverage（每轮都 skip）+
+    少数 eligible 股时，累积 skip 约一轮多就撞顶提前停，即便 eligible 股本可在后续轮
+    换不同 start（exclude_starts 排除已登记）继续产出，会致 B4 欠产。改成连续 skip、
+    成功即清零后：只要还有股在产出，连续计数就不断被打断，不会攒到 len(codes)；
+    只有整整一轮（len(codes) 次连续尝试）全部 skip、真无进展时才停，仍是有限的。"""
     rng = rng or random.Random()
     codes = [r["code"] for r in await conn.fetch("SELECT code FROM stocks ORDER BY code")]
     if not codes:
         print(f"[B2] 警告：仅生成 0/{target_count}（stocks 表为空，无股票可生成）")
         return []
     out: list = []
-    skips = 0
+    consecutive_skips = 0
+    total_skips = 0                        # 仅用于诊断打印，不参与停止判据
     first_skip: Optional[str] = None       # 首条 skip 原因（诊断用；不逐条刷屏）
-    # max_skips 须 >= len(codes)（codex R3-F2）：loop 按 `codes[i % len(codes)]` 轮询，
-    # 连续 len(codes) 次迭代恰好覆盖每只股票一次。旧公式 max(target_count*4, 4) 与
-    # 股票数无关——target=1 时恒为 4，若 ORDER BY code 排在前面的 >=4 只股票都无
-    # coverage（skip），循环在预算耗尽后停止，排在更后面的合格股永远不被尝试，
-    # 即便合格输入确实存在。>= len(codes) 保证至少一整轮（成功不占 skip 预算，
-    # 故仍是有限的，防死循环目的不变）。
-    max_skips = max(target_count * 4, len(codes))
     i = 0
-    while len(out) < target_count and skips < max_skips:
+    while len(out) < target_count and consecutive_skips < len(codes):
         code = codes[i % len(codes)]
         i += 1
         try:
             out.append(await generate_one_training_set(conn, code, output_dir, rng))
+            consecutive_skips = 0
         except GenerateSkipException as exc:
-            skips += 1
+            consecutive_skips += 1
+            total_skips += 1
             if first_skip is None:
                 # 多数 GenerateSkipException 消息（generate_one_training_set 内部各处）
                 # 已自带 "{code}: " 前缀；直接拼会重复（"600519: 600519: ..."）。少数
@@ -639,7 +659,7 @@ async def generate_batch(conn, target_count: int, output_dir: Path,
     if len(out) < target_count:
         # 欠产必须可诊断：只报数字会让"stock_coverage 空表"（Plan 3 前的预期状态）
         # 与"真回归"长得一模一样。
-        print(f"[B2] 警告：仅生成 {len(out)}/{target_count}（skip {skips} 次）"
+        print(f"[B2] 警告：仅生成 {len(out)}/{target_count}（skip {total_skips} 次）"
               f"；首条 skip 原因 = {first_skip}")
     return out
 
