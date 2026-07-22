@@ -248,12 +248,11 @@ struct TrainingEngineDrawingSessionTests {
         assertInvariant(e)
     }
 
-    // MARK: whole-branch R4-medium 回归锁：画线期间 resize/旋转 → 退出画线后 offset 必须被归一
+    // MARK: whole-branch R4-medium 回归锁（1a-iv 升级）：画线期间 resize/旋转 → offset 必须**当场**被归一
 
-    @Test("whole-branch R4-medium 回归：连续画线中途转屏/resize → 退出画线后 offset 被夹回合法区间（不留 overscroll 间隙）")
-    func resizeDuringContinuousDrawingIsNormalizedOnExit() {
+    @Test("whole-branch R4-medium 回归（1a-iv 升级）：画线中途转屏/resize → offset **当场**被归一（视口解冻后不再等退出画线才补）")
+    func resizeDuringContinuousDrawingIsNormalized() {
         // fixture 必须**真的滚得动**：200 根 m3、起始 tick=150 → 左侧有历史，maxOffset>0。
-        // （`preview()` / `engineMultiPeriod()` 只有 8 根、且 tick 在起点，maxOffset≈0 → 滚不动，测了等于没测。）
         let (e, _) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
         let wide = TrainingEnginePanLinkageTests.bounds        // 800×600，makeEngine 已 recordRenderBounds
 
@@ -261,27 +260,26 @@ struct TrainingEngineDrawingSessionTests {
         e.beginPan(panel: .upper)
         e.applyPanOffset(deltaPixels: 300, renderBounds: wide, panel: .upper)
         e.endPan(velocity: 0, renderBounds: wide, panel: .upper)
-        let scrolled = e.upperPanel.offset
-        #expect(scrolled > 0)                                  // 防假绿：确实滚出了 offset
+        #expect(e.upperPanel.offset > 0)                       // 防假绿：确实滚出了 offset
 
-        // ② 进画线模式（本期：会话持续，画完一条也不退出）
+        // ② 进画线模式（会话持续，画完一条也不退出）
         e.toggleDrawingMode()
         #expect(e.isDrawingActive(on: .upper))
 
         // ③ 画线期间转屏/resize：变窄后 maxOffset 变小，原 offset 越界。
-        //    reducer 在 .drawing 态**吞掉** .offsetApplied → 这次归一被静默吞了。
+        //    1a-iv 起 `.drawing` 接受 `.offsetApplied` → recordRenderBounds 的归一**当场**生效。
         let narrow = CGRect(x: 0, y: 0, width: 200, height: 480)
         e.recordRenderBounds(narrow, panel: .upper)
         e.recordRenderBounds(narrow, panel: .lower)
-        let bounds = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: narrow)
-        #expect(e.upperPanel.offset > bounds.maxOffset)        // 防假绿：此刻确实是越界的（bug 的现场）
+        let during = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: narrow)
+        #expect(e.upperPanel.offset <= during.maxOffset)       // 改造前：> maxOffset，要等退出画线才补
+        #expect(e.upperPanel.offset >= during.minOffset)
+        assertInvariant(e)                                     // 归一不得把面板踢出 .drawing
 
-        // ④ 退出画线 —— 修复前：bounds 没再变，recordRenderBounds 的 previous!=bounds 守卫早返，
-        //    归一永远不补跑 → 图表挂着 overscroll 间隙直到用户碰巧再拖一次。
+        // ④ 退出画线后依然合法（会话结束的补跑归一是幂等防御）
         e.toggleDrawingMode()
-
         let after = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: narrow)
-        #expect(e.upperPanel.offset <= after.maxOffset)        // 已夹回
+        #expect(e.upperPanel.offset <= after.maxOffset)
         #expect(e.upperPanel.offset >= after.minOffset)
         assertInvariant(e)
     }
@@ -352,6 +350,47 @@ struct TrainingEngineDrawingSessionTests {
         #expect(e.drawingSession.activeDrawingTool == .horizontal)
         #expect(e.isDrawingActive(on: .upper) == true)
         #expect(e.isDrawingActive(on: .lower) == true)
+        assertInvariant(e)
+    }
+
+    // MARK: 1a-iv 视口解冻：画线会话开着时，平移 / 缩放必须真的作用到视口
+
+    @Test("1a-iv：画线会话开着时单指平移真的移动图表（1a-iii 及以前 offset 恒不动）")
+    func panMovesChartWhileDrawing() {
+        // fixture 必须**真的滚得动**：200 根 m3、起始 tick=150 → 左侧有历史，maxOffset>0。
+        let (e, _) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let wide = TrainingEnginePanLinkageTests.bounds        // 800×600，makeEngine 已 recordRenderBounds
+        e.toggleDrawingMode()
+        #expect(e.isDrawingActive(on: .upper))                 // 防假绿：确实在画线态，不是普通滚动
+        let before = e.upperPanel.offset
+
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 120, renderBounds: wide, panel: .upper)
+
+        #expect(e.upperPanel.offset > before)                  // 改造前：恒 == before（reducer 吞）
+        e.endPan(velocity: 0, renderBounds: wide, panel: .upper)
+        assertInvariant(e)                                     // 平移不得把面板踢出 .drawing
+        #expect(e.drawingSession.drawingModeActive == true)
+    }
+
+    @Test("1a-iv：画线会话开着时双指缩放真的改变 visibleCount，且走 focus 路径（不右锚跳回最新）")
+    func pinchZoomsWhileDrawing() {
+        let (e, _) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let wide = TrainingEnginePanLinkageTests.bounds
+        // 先滚出非零 offset —— 只有此时「右锚(offset=0)」与「focus 保持」才可区分
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 300, renderBounds: wide, panel: .upper)
+        e.endPan(velocity: 0, renderBounds: wide, panel: .upper)
+        #expect(e.upperPanel.offset > 0)                       // 防假绿
+
+        e.toggleDrawingMode()
+        let countBefore = e.upperPanel.visibleCount
+        e.applyPinch(scale: 1.0, focusX: wide.midX, phase: .began, panel: .upper)
+        e.applyPinch(scale: 2.0, focusX: wide.midX, phase: .changed, panel: .upper)
+        e.applyPinch(scale: 2.0, focusX: wide.midX, phase: .ended, panel: .upper)
+
+        #expect(e.upperPanel.visibleCount != countBefore)      // 改造前：恒不变（reducer 吞）
+        #expect(e.upperPanel.offset != 0)                      // 走 focus 路径，不是右锚置 0 跳回最新
         assertInvariant(e)
     }
 }

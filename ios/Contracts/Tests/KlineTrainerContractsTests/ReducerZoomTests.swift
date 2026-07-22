@@ -35,14 +35,19 @@ struct ReducerZoomTests {
         #expect(p.interactionMode == .freeScrolling)
     }
 
-    @Test("drawing：吞没——状态零改动（含 revision 不 bump），同 offsetApplied 先例")
-    func drawingSwallows() {
+    @Test("drawing：与 freeScrolling 同 —— visibleCount + offset 双应用 + bump（1a-iv 视口解冻）")
+    func drawingAppliesLikeFreeScrolling() {
         let snapshot = DrawingSnapshot(frozen: FrozenPanelState(
             period: .m3, visibleCount: 80, offset: 0, candleRange: 0..<80, baseRevision: 7))
         var p = Self.panel(.drawing(snapshot: snapshot))
-        let before = p
         let effect = p.reduce(.zoomApplied(visibleCount: 40, offset: 99))
-        #expect(p == before)
+        #expect(p.visibleCount == 40)
+        #expect(abs(p.offset - 99) < 1e-9)
+        #expect(p.revision == 8)
         #expect(effect == .none)
+        guard case .drawing = p.interactionMode else {
+            Issue.record("zoomApplied 不得改变 mode（画线会话仍在）")
+            return
+        }
     }
 }

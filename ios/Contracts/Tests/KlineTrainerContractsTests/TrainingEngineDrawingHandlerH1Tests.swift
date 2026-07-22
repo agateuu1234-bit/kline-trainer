@@ -61,10 +61,10 @@ struct TrainingEngineDrawingHandlerH1Tests {
         #expect(e.upperPanel.revision == revFrozen)          // 无额外 bump
     }
 
-    // MARK: H1-3 drawing 模式 reducer 兜底吞 offsetApplied（即便有杂散回调到达）
+    // MARK: H1-3（1a-iv 视口解冻改写）drawing 模式直派 offsetApplied 真的应用（不再吞）
 
-    @Test("drawing 模式直派 offsetApplied 被吞（reducer 兜底，spec L1123）")
-    func drawingModeSwallowsOffsetApplied() {
+    @Test("drawing 模式直派 offsetApplied 真的应用（1a-iv 视口解冻；spec L1123 的『reducer 兜底吞』规则已废止）")
+    func drawingModeAppliesOffsetApplied() {
         let (e, _) = TrainingEngineInteractionTests.engine()
         e.recordRenderBounds(Self.bounds, panel: .upper)
         e.armPanelForDrawing(.trend, panel: .upper)
@@ -72,12 +72,14 @@ struct TrainingEngineDrawingHandlerH1Tests {
             Issue.record("应进入 drawing"); return
         }
         let offsetBefore = e.upperPanel.offset
+        let revBefore = e.upperPanel.revision
         e.applyPanOffset(deltaPixels: 99, panel: .upper)     // 模拟杂散 offsetApplied
-        #expect(e.upperPanel.offset == offsetBefore)         // 被吞，offset 不变
+        #expect(e.upperPanel.offset == offsetBefore + 99)    // 改造前：被吞、offset 不变；1a-iv 起真的应用
+        #expect(e.upperPanel.revision == revBefore + 1)      // bump
         guard case .drawing(let snap1) = e.upperPanel.interactionMode else {
-            Issue.record("仍应 drawing"); return
+            Issue.record("仍应 drawing（offsetApplied 不切 mode）"); return
         }
-        #expect(snap1.frozen.baseRevision == snap0.frozen.baseRevision)
+        #expect(snap1.frozen.baseRevision == snap0.frozen.baseRevision)   // baseRevision 是会话起点闸门，视口平移不改它
     }
 
     // MARK: H1-4 drawing 退出后无 offsetApplied 漂移（spec L1182 字面「drawing 退出后」）

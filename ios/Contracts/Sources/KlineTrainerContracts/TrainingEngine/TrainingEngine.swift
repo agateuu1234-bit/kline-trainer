@@ -740,7 +740,7 @@ extension TrainingEngine {
 
     /// leader 帧后：把 follower 右缘对齐到 leader 右缘的同一 global tick（单向，经现有 .offsetApplied）。
     /// 只由三个具名 gesture 函数（beginPan/applyPanOffset/floorOrFull）调；不挂通用 applyOffsetDelta（防与
-    /// lockstep reset 双驱，D5/R7）。drawing 态 follower 被 reducer 吞（D10）。无 bounds/空 candle → no-op。
+    /// lockstep reset 双驱，D5/R7）。drawing 态 follower 照常被驱动（D10，1a-iv 改写）。无 bounds/空 candle → no-op。
     private func propagateLinkage(fromLeader leader: PanelId) {
         let f = follower(of: leader)
         let lBounds = renderBounds(leader), fBounds = renderBounds(f)
@@ -752,7 +752,7 @@ extension TrainingEngine {
         let fTarget = PanLinkage.followerOffset(targetTick: leaderTick, candles: fCandles,
                             rawVisible: panelState(f).visibleCount, bounds: fBounds, tick: tick.globalTickIndex)
         let fCur = panelState(f).offset
-        if fTarget != fCur { applyOffsetDelta(fTarget - fCur, panel: f) }   // D6（drawing 态吞 D10）
+        if fTarget != fCur { applyOffsetDelta(fTarget - fCur, panel: f) }   // D6（drawing 态照常驱动，D10 1a-iv 改写）
     }
 
     // MARK: R1b-wire offset clamp（D9：drag full / decel·bounce floor-or-full / reducer 无界 D2）
@@ -870,7 +870,7 @@ extension TrainingEngine {
         let offset = panelState(panel).offset
         // R1b-drag D3：drag-overscroll（offset>maxOffset）松手**不论速度方向**都弹簧回 maxOffset（防慢松手 no-op strand）；
         //   否则 R1b-wire 机制 A 既有分派。L1 不变量：post-drag 面板恒 .freeScrolling → .panEnded 返 .startDeceleration（含 v=0）
-        //   → 本分支可达；**勿把 overscroll 检查移出本 guard / 勿放松 guard**（autoTracking/drawing 不经此路且已 offset=0）。
+        //   → 本分支可达；**勿把 overscroll 检查移出本 guard / 勿放松 guard**（autoTracking 不经此路且已 offset=0）。
         if offset > ob.maxOffset || (v > 0 && ob.bounceEdges.contains(.max)) {
             setActiveBounds(ActiveDecel(bounds: ob, allowOverscroll: true), panel: panel)
             animator(for: panel).start(initialVelocity: v, fromOffset: offset,
@@ -899,7 +899,7 @@ extension TrainingEngine {
 
     /// onPinch 全相位入口。autoTracking = 右锚缩放（offset 置 0，user 2026-06-13 裁决 A）；
     /// freeScrolling = focus 不变量（pinch 中点 candle x 不动，PinchZoomModel.rezoomOffset）；
-    /// drawing 由 reducer 吞没（engine 不预判，统一派发）。
+    /// drawing = freeScrolling 同路径（1a-iv 视口解冻；画线时捏合不得右锚跳回最新）。
     /// scale 为识别器 per-gesture 累积值，按 `.began` 时刻 scaleAtBegan 归一（D4）。
     public func applyPinch(scale: CGFloat, focusX: CGFloat, phase: GesturePhase, panel: PanelId) {
         switch phase {
@@ -923,7 +923,9 @@ extension TrainingEngine {
             let ps = panelState(panel)
             guard target != effectiveVisibleCount(ps) else { return }   // N 不变 → 跳过（不 bump）
             switch ps.interactionMode {
-            case .freeScrolling:
+            // 1a-iv：.drawing 与 .freeScrolling 同走 focus 不变量（捏合中点的 candle x 不动）。
+            // 画线模式下用户很可能已经平移到历史区间，右锚缩放会把视口跳回最新、把刚画的线甩出屏幕。
+            case .freeScrolling, .drawing:
                 assert(bounds.origin == .zero, "focus 数学假设 view-local bounds 原点 .zero（R1-L6）")
                 let candles = allCandles[ps.period] ?? []
                 guard !candles.isEmpty else { return }
@@ -935,9 +937,8 @@ extension TrainingEngine {
                                                          focusX: focusX, newCount: target,
                                                          mainWidth: vp.mainChartFrame.width)
                 _ = reduce(.zoomApplied(visibleCount: target, offset: offset), on: panel)
-            case .autoTracking, .drawing:
-                // autoTracking：reducer 右锚显式置 0；drawing：reducer 吞没（入参不被读取）
-                _ = reduce(.zoomApplied(visibleCount: target, offset: 0), on: panel)
+            case .autoTracking:
+                _ = reduce(.zoomApplied(visibleCount: target, offset: 0), on: panel)   // reducer 右锚显式置 0
             }
         case .ended, .cancelled:
             setPinchBase(nil, panel: panel)
@@ -991,13 +992,11 @@ extension TrainingEngine {
     /// 抽出来是因为它有**两个**触发点：① `recordRenderBounds`（bounds 真的变了）；
     /// ② 画线会话结束（`endDrawingSessionIfActive` / `cancelDrawingAllPanels`）。
     ///
-    /// **为什么②是必须的（codex whole-branch R4-medium）**：reducer 在 `.drawing` 态**吞掉** `.offsetApplied`
-    /// （画线时不许平移），于是画线期间发生的 resize/旋转，其归一动作被静默吞掉 → offset 停在越界值。
-    /// 从前画线只活一次 tap，这窗口小到几乎不可达；**本期画线会话变成持续的**（画完一条不退出），
-    /// 用户完全可能「滚动 → 进画线 → 画几条 → 转屏」。而退出画线时 bounds 并没有再变一次，
-    /// `recordRenderBounds` 的 `previous != bounds` 守卫会直接早返 → 归一**永远不补跑** → 图表持续挂着
-    /// overscroll 间隙，直到用户碰巧再拖一次才自愈。故会话一结束（两面板已回 `.autoTracking`、
-    /// `.offsetApplied` 重新被接受）立刻补一次归一。
+    /// **②的历史与现状（codex whole-branch R4-medium → 1a-iv）**：1a-iv 之前 reducer 在 `.drawing` 态**吞掉**
+    /// `.offsetApplied`，画线期间的 resize/旋转归一被静默吞掉 → offset 停在越界值直到退出画线才补跑。
+    /// 1a-iv 视口解冻后 `.drawing` 已接受 `.offsetApplied`，`recordRenderBounds` 那一路当场就归一了，
+    /// 会话结束时的这次补跑退化为**幂等的防御**（clamped == cur → 不 reduce、不 bump）。保留它：
+    /// 它同时兜住「会话结束时 bounds 恰好已变但尚未 record」的窗口，成本为零。
     private func normalizeOffsetForCurrentBounds(panel: PanelId) {
         let fresh = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds(panel))
         let cur = panelState(panel).offset
@@ -1182,8 +1181,7 @@ extension TrainingEngine {
         drawingSession.deactivate()
         cancelDrawingUnchecked(panel: .upper)
         cancelDrawingUnchecked(panel: .lower)
-        // R4-medium：画线期间（`.drawing` 吞 `.offsetApplied`）发生的 resize/旋转，其 offset 归一被静默吞掉；
-        // 此刻两面板已回 `.autoTracking`，补跑一次归一，杜绝「退出画线后仍挂着越界 offset / overscroll 间隙」。
+        // R4-medium（1a-iv 后退化为幂等防御，见 normalizeOffsetForCurrentBounds 文档）：补跑一次归一。
         normalizeOffsetForCurrentBounds(panel: .upper)
         normalizeOffsetForCurrentBounds(panel: .lower)
     }

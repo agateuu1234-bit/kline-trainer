@@ -136,9 +136,11 @@ extension PanelViewState {
             return .none
 
         // —— panEnded ——
-        case (.autoTracking, .panEnded), (.drawing, .panEnded):
+        case (.autoTracking, .panEnded):
             return .none
-        case (.freeScrolling, .panEnded(let v)):
+        // 1a-iv：.drawing 与 .freeScrolling 同 —— 画线时松手同样要走减速/回弹结算，
+        // 否则 applyPanOffset 允许的 damped overscroll 松手后弹不回来，图表永久挂着越界间隙。
+        case (.freeScrolling, .panEnded(let v)), (.drawing, .panEnded(let v)):
             revision &+= 1
             return .startDeceleration(velocity: v)
 
@@ -154,24 +156,24 @@ extension PanelViewState {
             revision &+= 1
             return .clearPendingDrawing
 
-        // —— offsetApplied（drawing 吞；其它 += delta + bump）——
-        case (.drawing, .offsetApplied):
-            return .none
+        // —— offsetApplied（三态均 += delta + bump）——
+        // 1a-iv 视口解冻：.drawing 不再吞没。`.drawing` 仍是独立 mode（tap 落锚语义 / baseRevision 跨会话闸门
+        // 不变），但**不再冻结视口** —— 画线模式下平移、切周期归一、resize 归一都必须真的作用到 offset。
         case (.autoTracking, .offsetApplied(let d)),
-             (.freeScrolling, .offsetApplied(let d)):
+             (.freeScrolling, .offsetApplied(let d)),
+             (.drawing, .offsetApplied(let d)):
             offset += d
             revision &+= 1
             return .none
 
-        // —— zoomApplied（顺位 3 §4.4d：drawing 吞；autoTracking 右锚置 0；freeScrolling focus offset）——
-        case (.drawing, .zoomApplied):
-            return .none
+        // —— zoomApplied（顺位 3 §4.4d：autoTracking 右锚置 0；freeScrolling/drawing focus offset）——
         case (.autoTracking, .zoomApplied(let v, _)):
             visibleCount = v
             offset = 0      // user 2026-06-13 裁决 A 右锚：显式置 0（防未来 drawingCommitted 残留 offset，R1-M3/L5）
             revision &+= 1
             return .none
-        case (.freeScrolling, .zoomApplied(let v, let o)):
+        // 1a-iv：.drawing 与 .freeScrolling 同 —— 画线时捏合若走右锚会把视口跳回最新、抹掉用户刚平移到的历史位置。
+        case (.freeScrolling, .zoomApplied(let v, let o)), (.drawing, .zoomApplied(let v, let o)):
             visibleCount = v
             offset = o
             revision &+= 1

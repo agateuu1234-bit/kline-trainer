@@ -269,16 +269,16 @@ struct ReducePanEndedTests {
         #expect(eff == .startDeceleration(velocity: 3.0))
     }
 
-    @Test("drawing → 无 bump, 无 effect, mode 不变")
-    func drawingNoBump() {
+    @Test("drawing → bump + .startDeceleration(v)（1a-iv 视口解冻：画线时松手也要有惯性/回弹，否则橡皮筋越界回不来）")
+    func drawingBumpAndEffect() {
         var s = makePanel(makeDrawingMode(baseRev: 5), rev: 5)
         let eff = s.reduce(.panEnded(velocity: 3.0))
         guard case .drawing = s.interactionMode else {
-            Issue.record("expected drawing mode unchanged after panEnded")
+            Issue.record("panEnded 不得把面板踢出 .drawing（会话仍开着）")
             return
         }
-        #expect(s.revision == 5)
-        #expect(eff == .none)
+        #expect(s.revision == 6)
+        #expect(eff == .startDeceleration(velocity: 3.0))
     }
 }
 
@@ -348,7 +348,7 @@ struct ReducePeriodComboTests {
     }
 }
 
-// MARK: - reduce: offsetApplied (autoTracking/freeScrolling bump + drawing 吞)
+// MARK: - reduce: offsetApplied (autoTracking/freeScrolling/drawing 三态均 += delta + bump)
 
 @Suite("reduce offsetApplied")
 struct ReduceOffsetAppliedTests {
@@ -371,16 +371,16 @@ struct ReduceOffsetAppliedTests {
         #expect(eff == .none)
     }
 
-    @Test("drawing → 全部忽略，offset / revision / mode 不变")
-    func drawingSwallows() {
+    @Test("drawing → offset += delta + bump（1a-iv 视口解冻；1a-iii 及以前恒被吞）")
+    func drawingApplies() {
         var s = makePanel(makeDrawingMode(baseRev: 5), rev: 5, offset: 10)
         let eff = s.reduce(.offsetApplied(deltaPixels: 100))
         guard case .drawing = s.interactionMode else {
-            Issue.record("expected drawing mode unchanged after offsetApplied")
+            Issue.record("offsetApplied 不得把面板踢出 .drawing（会话仍开着）")
             return
         }
-        #expect(s.offset == 10)
-        #expect(s.revision == 5)
+        #expect(s.offset == 110)
+        #expect(s.revision == 6)
         #expect(eff == .none)
     }
 }
