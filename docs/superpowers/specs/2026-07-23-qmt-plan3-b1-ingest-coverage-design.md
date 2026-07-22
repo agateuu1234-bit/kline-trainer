@@ -386,18 +386,23 @@ QMT 导出目录
 
 codex R1-F3（medium，**核实为真**）：§5.5 那条 CI 集成测的存储层是假 conn，`write_qmt_stock` 的真 SQL / 参数绑定 / JSONB 编解码 / 事务行为一行都没跑过；只有它绿就宣称链路可用属过度宣称。故新增这条脚本，跑**真**代码路径：
 
+**顺序严格按生产真实时序排**（codex R6-F1，high，**核实为真**：我上一版把「generate 登记」排在「重导入证替换」之前，可 P3-D10 互锁一旦有训练组行就在 DELETE 之前抛 `ReimportBlockedError` → 替换路径永远到不了，L2 声称验替换却验不到。这是我加互锁时自己引入的排序回归）。正确时序 = **导入 → 未生成时重导入证替换 → 生成 → 已生成后重导入证互锁**：
+
 ```
 docker postgres:15.12 → 应用 schema.sql
-  → 真 build_stock_import(fixture)
-  → 真 write_qmt_stock(dsn, ...)                  ← 真 SQL / 真 asyncpg / 真事务
-  → 真 generate_one_training_set(真 conn, ...)     ← 真 RR 事务 / 真两把锁
-  → 断言：磁盘上真出现 zip、training_sets 真有登记行、content_hash 与 zip 字节相符
-  → 断言：stock_coverage 行内容 == build_stock_import 的 CoverageArtifact
-  → 断言：stock_coverage 行内容 == build_stock_import 的 CoverageArtifact
-  → 断言：**在尚无训练组的窗口内**把同一只股用「窗口前滑的第二份 bundle」重导一次 → 旧窗口盘中行真的从库里消失（P3-D4）
-  → 断言：generate 出一个训练组后**再**重导入同一只股 → 真抛 ReimportBlockedError、klines/coverage/training_sets 零变化（P3-D10 互锁）
-  → 断言：对同一只股跑通用 CSV 路径 → 真抛 LegacyImportBlockedError、库里零变化（P3-D11）
+  ① 真 build_stock_import(fixture A) → 真 write_qmt_stock   ← 首次导入（此刻该股尚无训练组）
+  ② 真 build_stock_import(窗口前滑的 fixture B) → 真 write_qmt_stock  ← 仍无训练组，互锁放行
+       断言：DELETE+INSERT 替换生效——旧窗口盘中行从库里消失（P3-D4，可达因为还没 generate）
+  ③ 真 generate_one_training_set(真 conn, ...)              ← 真 RR 事务 / 真两把锁；登记 training_sets 行
+       断言：磁盘真出现 zip、training_sets 真有登记行、content_hash 与 zip 字节相符
+       断言：stock_coverage 行内容 == 最后一次 build_stock_import 的 CoverageArtifact
+  ④ 真 write_qmt_stock(同一只股)                            ← 此刻已有训练组
+       断言：真抛 ReimportBlockedError、klines/coverage/training_sets 零变化（P3-D10 互锁）
+  ⑤ 真 write_to_postgres(同一只股，通用 CSV 路径)
+       断言：真抛 LegacyImportBlockedError、库里零变化（P3-D11）
 ```
+
+替换（②）与互锁（④）落在**同一只股的两个不同时点**，天然不冲突、都真跑到；核心出货（③）也在其间被证。
 
 **这条 L2 脚本是 `write_qmt_stock` 真 SQL 唯一被真跑的地方，重要性最高——但它不是自动化门（见下）。合并前由控制者本人真跑一次，完整输出贴进 PR body。**
 
@@ -434,7 +439,7 @@ docker postgres:15.12 → 应用 schema.sql
 3. **L2（流程纪律，非 CI 门）**：真 PG 上跑**真** `write_qmt_stock` + **真** `generate_one_training_set` → 真出 zip（`verify_qmt_pg_chain.py`，控制者真跑、输出贴 PR body）。**L1 CI 绿 + L2 输出贴出，两者齐备才算「出货能力被证明」**——CI 绿本身不等于链路已证（§0.2 F2 口径）。这是 Plan 3 的核心验收项，也是 Plan 2 无法做到的那一条。
 4. D10 四门、D9(a)、P3-D9 日线历史门各有一条拒绝路径被测试覆盖，拒绝时数据库零写入。
 5. B2 的 coverage + 六周期读在同一个 RR 只读事务内（假件测参数 + 真 PG 脚本测语义，两者都绿）。
-6. B1 导入是**替换**而非叠加：重导一份窗口前滑的 bundle 后，旧窗口盘中行从库里消失（假件回归测 + 真 PG 脚本各一条）。
+6. B1 导入是**替换**而非叠加：在**尚无训练组的窗口内**重导一份窗口前滑的 bundle 后，旧窗口盘中行从库里消失（假件回归测 + 真 PG 脚本 ② 各一条）。**真 PG 脚本的时序 = 导入 → 未生成时重导入证替换 → 生成 → 已生成后重导入证互锁**，替换与互锁不互相遮蔽（§5.4）。
 7. 按股锁真的按股：同股互斥、异股不互斥、B1 事务级锁随提交释放（真 PG 脚本第 5、6 条）。
 8. **两道 fail-closed**：① 通用 CSV 路径对已被 QMT 管理的股拒写（P3-D11）；② QMT 重导入对已出过货的股拒写（P3-D10 互锁）。对未被管理/未出货的股行为逐字不变。
 9. 日线：**只宣称**「月边界 ≥ 39 + 拷贝完整性（export_log 端点/行数）已强制」，**不宣称**「已验证全历史」。
