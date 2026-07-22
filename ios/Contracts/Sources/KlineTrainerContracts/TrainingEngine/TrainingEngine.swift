@@ -728,7 +728,7 @@ extension TrainingEngine {
     }
 
     /// 减速 onUpdate + 单指 pan `.changed` 共用：每帧 delta 经 reducer offsetApplied
-    /// （drawing 吞 / autoTracking·freeScrolling 累加 + bump，spec L1123-1129）。
+    /// （三态均 += delta + bump，spec L1123-1129）。
     private func applyOffsetDelta(_ delta: CGFloat, panel: PanelId) {
         _ = reduce(.offsetApplied(deltaPixels: delta), on: panel)
     }
@@ -1130,7 +1130,7 @@ extension TrainingEngine {
         drawingSession.deactivate()                 // 幂等：先落会话真相
         cancelDrawingUnchecked(panel: .upper)       // 再收面板（走 unchecked，不会被 fail-closed 守卫挡住）
         cancelDrawingUnchecked(panel: .lower)
-        normalizeOffsetForCurrentBounds(panel: .upper)   // R4-medium：补跑画线期间被 .drawing 吞掉的 resize 归一
+        normalizeOffsetForCurrentBounds(panel: .upper)   // R4-medium（1a-iv 后退化为幂等防御，见 normalizeOffsetForCurrentBounds 文档）：补跑一次归一。
         normalizeOffsetForCurrentBounds(panel: .lower)
     }
 

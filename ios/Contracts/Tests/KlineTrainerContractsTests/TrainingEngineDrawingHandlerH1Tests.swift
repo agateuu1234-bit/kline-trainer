@@ -84,9 +84,10 @@ struct TrainingEngineDrawingHandlerH1Tests {
 
     // MARK: H1-4 drawing 退出后无 offsetApplied 漂移（spec L1182 字面「drawing 退出后」）
     // 退出 drawing 的**生产路径** = 交易硬切（tradeTriggered：drawing→autoTracking，C8b 已实现）。
-    // 关键：退出到 autoTracking 后 offsetApplied **不再被吞**（reducer 只在 drawing 吞，L1123），故唯一保护是
-    // 「进入 drawing 时 stop 动画 + 交易再 stopAllDeceleration（D7）使其后无减速帧」。本测试正向覆盖 spec 字面
-    // 「退出 (exit)」路径（补 F1；drawingCommitted/onTap 提交触发归 Wave 3，此处用已实现的交易退出路径）。
+    // 关键：1a-iv 后 reducer 三态都 += delta + bump（不再有任何状态吞 offsetApplied），故本测试要保护的是
+    // handler 层「退出画线后不再发出 offsetApplied」——唯一保护是「进入 drawing 时 stop 动画 + 交易再
+    // stopAllDeceleration（D7）使其后无减速帧」。本测试正向覆盖 spec 字面「退出 (exit)」路径（补 F1；
+    // drawingCommitted/onTap 提交触发归 Wave 3，此处用已实现的交易退出路径）。
 
     @Test("drawing 退出（交易→autoTracking）后延迟减速帧不漂移 offset（spec L1182 退出路径）")
     func noOffsetAppliedAfterDrawingExit() {
