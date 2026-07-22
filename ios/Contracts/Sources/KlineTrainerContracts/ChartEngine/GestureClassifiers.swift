@@ -52,17 +52,6 @@ public func classifySingleFingerPan(translation: CGPoint,
     return .ambiguous
 }
 
-/// Drawing 模式 Pan 截获策略（spec §C7 v1.2）。
-public enum DrawingModePanPolicy: Equatable, Sendable {
-    case drawingTakesOver    // Pan 被绘线工具吃掉
-    case normalPass          // 普通透传
-}
-
-/// Drawing 模式下 Pan 归属（spec L1393-1395 逐字）。
-public func panPolicyInDrawingMode(drawingMode: Bool) -> DrawingModePanPolicy {
-    drawingMode ? .drawingTakesOver : .normalPass
-}
-
 /// 累积平移 → 帧间增量。`UIPanGestureRecognizer.translation(in:)` 是整手势累积值，
 /// 而下游 `Reducer.offsetApplied(deltaPixels:)` 按增量累加，故 arbiter 必须发增量。
 /// 逐帧调用：`delta = panIncrement(current: 当前累积.x, last: 上一帧累积.x)`，调用后更新 last。
@@ -100,26 +89,15 @@ struct SinglePanStep: Equatable, Sendable {
 /// - **垂直一旦判定即 latch 为 `verticalRejected`**，后续即便累积满足水平分类器也不再发回调（R9 finding-1）；
 /// - `.began` **复位并立即按当前累积分类**（R14 finding：UIKit `.began` 可能已过阈值带 translation，防 `.began→.ended` 漏 flick）；`idle .changed` 同样分类；水平锁定时发 `.began`（消费者 panStarted）、基线设当前累积（deadzone 不计入 offset）；
 /// - 终止（R7 finding-2）：`horizontalActive` 时若末段有残量，**先发 `.changed`(残量) 再发终止相位**，残量精确应用一次不丢。
+/// - **1a-iv D32：本函数与画线状态完全无关** —— 画线模式下单指横滑照常平移、竖直甩动照常出 `periodSwipe`。
+///   旧的 `drawingTakesOver` 截获参数已连同 `DrawingModePanPolicy` / `panPolicyInDrawingMode` 原子删除，
+///   使「画线吞掉平移」这一状态**不可表达**（结构守卫 `DrawingGestureSourceGuardTests` 钉死）。
 func singlePanStep(phase: GesturePhase,
                    cumulative: CGPoint,
                    velocityX: CGFloat,
                    lifecycle: SinglePanLifecycle,
                    lastTranslationX: CGFloat,
-                   minThreshold: CGFloat = 8,
-                   drawingTakesOver: Bool = false) -> SinglePanStep {
-    // Drawing 模式截获（修正 R4 + R5 finding-1 + R13 finding-2）：清空 per-gesture 状态防残留；
-    // 若**已激活**水平 pan，先补末段残量 `.changed`(若非零) 再发 `.cancelled` 关闭生命周期——
-    // 不丢截获前最后一段拖动位移（R13 finding-2），且避免下游 panStarted 悬空无终止（R5 finding-1）。
-    if drawingTakesOver {
-        if lifecycle == .horizontalActive {
-            let residual = panIncrement(current: cumulative.x, last: lastTranslationX)
-            var emissions: [SinglePanEmission] = []
-            if residual != 0 { emissions.append(SinglePanEmission(deltaX: residual, velocityX: 0, phase: .changed)) }
-            emissions.append(SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled))
-            return SinglePanStep(emissions: emissions, lifecycle: .idle, lastTranslationX: 0, periodSwipe: nil)
-        }
-        return SinglePanStep(emissions: [], lifecycle: .idle, lastTranslationX: 0, periodSwipe: nil)
-    }
+                   minThreshold: CGFloat = 8) -> SinglePanStep {
     // 空闲态按当前累积分类（`.began` 与 idle `.changed` 共用）：水平→锁定+发 `.began`(panStarted)、基线设当前累积（deadzone 不计入）；
     // 垂直→latch verticalRejected；ambiguous→保持 idle 等待。
     func classifyFromIdle() -> SinglePanStep {

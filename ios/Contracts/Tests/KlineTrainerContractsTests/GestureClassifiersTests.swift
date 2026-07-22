@@ -79,14 +79,6 @@ struct ClassifySingleFingerPanTests {
     }
 }
 
-@Suite("panPolicyInDrawingMode")
-struct PanPolicyInDrawingModeTests {
-    @Test("drawing 模式 → drawingTakesOver")
-    func drawingOn() { #expect(panPolicyInDrawingMode(drawingMode: true) == .drawingTakesOver) }
-    @Test("非 drawing 模式 → normalPass")
-    func drawingOff() { #expect(panPolicyInDrawingMode(drawingMode: false) == .normalPass) }
-}
-
 @Suite("panIncrement")
 struct PanIncrementTests {
     // 核心契约（修正 R1 finding 1）：累积 [10,20,30] 的逐帧增量为 [10,10,10]，和 == 末帧累积 30
@@ -206,34 +198,6 @@ struct SinglePanStepTests {
         #expect(end.emissions == [SinglePanEmission(deltaX: 10, velocityX: 0, phase: .changed),
                                   SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)])
         #expect(end.lifecycle == .idle)
-    }
-    // R4 + R5 finding-1 + R13 finding-2：drawing 中途截获活跃水平 pan → 先补末段残量 .changed 再 .cancelled，关闭生命周期 + reset
-    @Test("drawing 截获活跃 pan → 残量 + cancelled + reset")
-    func drawingTakeoverCancelsActive() {
-        // 截获时累积 80、基线 40 → 残量 40 先补，再 .cancelled（R13 finding-2 不丢接管前位移）
-        let intercepted = singlePanStep(phase: .changed, cumulative: CGPoint(x: 80, y: 4), velocityX: 700,
-                                        lifecycle: .horizontalActive, lastTranslationX: 40, drawingTakesOver: true)
-        #expect(intercepted.emissions == [SinglePanEmission(deltaX: 40, velocityX: 0, phase: .changed),
-                                          SinglePanEmission(deltaX: 0, velocityX: 0, phase: .cancelled)])
-        #expect(intercepted.lifecycle == .idle); #expect(intercepted.lastTranslationX == 0)
-        // 截获再来一帧（仍 drawing、已 idle）→ 不再发回调
-        let stillDrawing = singlePanStep(phase: .changed, cumulative: CGPoint(x: 85, y: 4), velocityX: 700,
-                                         lifecycle: intercepted.lifecycle, lastTranslationX: intercepted.lastTranslationX,
-                                         drawingTakesOver: true)
-        #expect(stillDrawing.emissions.isEmpty)
-        // drawing 关闭后下一个 .changed：从干净态重新分类，累积 90 水平 → 锁定发 .began delta 0（不灌 stale delta）
-        let resumed = singlePanStep(phase: .changed, cumulative: CGPoint(x: 90, y: 4), velocityX: 700,
-                                    lifecycle: stillDrawing.lifecycle, lastTranslationX: stillDrawing.lastTranslationX,
-                                    drawingTakesOver: false)
-        #expect(resumed.emissions == [SinglePanEmission(deltaX: 0, velocityX: 700, phase: .began)])
-        #expect(resumed.lastTranslationX == 90)
-    }
-    // drawing 截获时本就未激活（idle）→ 纯 reset 无回调
-    @Test("drawing 截获非活跃 pan → 无回调")
-    func drawingTakeoverInactiveNoEmit() {
-        let s = singlePanStep(phase: .changed, cumulative: CGPoint(x: 80, y: 4), velocityX: 700,
-                              lifecycle: .idle, lastTranslationX: 0, drawingTakesOver: true)
-        #expect(s.emissions.isEmpty); #expect(s.lifecycle == .idle)
     }
     // R11 finding：多指接管同步关闭——horizontalActive 无残量（current==last）→ 恰发一个 .cancelled + 复位，不依赖回调投递
     @Test("supersede horizontalActive 无残量 → 恰一个 cancelled")
@@ -445,12 +409,45 @@ struct SingleFingerVerticalSwipeTests {
         #expect(began.emissions.contains { $0.phase == .began })
     }
 
-    // drawingTakesOver：竖直被绘线吃掉，不切周期
-    @Test("drawing 模式竖直 → 不切周期")
-    func drawingModeNoSwitch() {
-        let r = singlePanStep(phase: .ended, cumulative: CGPoint(x: 0, y: -80), velocityX: 0,
-                              lifecycle: .verticalRejected, lastTranslationX: 0, drawingTakesOver: true)
-        #expect(r.periodSwipe == nil)
+}
+
+@Suite("1a-iv D32：画线模式与非画线模式走同一条单指 pan 路径")
+struct DrawingModePanReleaseTests {
+    // 旧行为（1a-iii 及以前）：`singlePanStep(drawingTakesOver: true)` 早退 → emissions == []、periodSwipe == nil。
+    // 本期该参数已随 `DrawingModePanPolicy` / `panPolicyInDrawingMode` 原子删除：纯函数**再也无法**表达
+    // 「画线时吞掉平移」。行为侧由本 suite 钉死「同一输入照常出位移/切周期」，
+    // 结构侧由 `DrawingGestureSourceGuardTests` 钉死「截获通路的代码真的没了」。
+
+    @Test("水平 pan：锁定 horizontalActive 并发 .began（不再是空 emissions）")
+    func horizontalPanEmits() {
+        let s = singlePanStep(phase: .began, cumulative: CGPoint(x: 30, y: 2), velocityX: 500,
+                              lifecycle: .idle, lastTranslationX: 0)
+        #expect(s.lifecycle == .horizontalActive)
+        #expect(s.emissions == [SinglePanEmission(deltaX: 0, velocityX: 500, phase: .began)])
+        #expect(s.lastTranslationX == 30)
+    }
+
+    @Test("水平 pan 续帧：照常发增量 .changed（截获分支不再存在，不会被清成 0）")
+    func horizontalPanKeepsEmittingDeltas() {
+        let s = singlePanStep(phase: .changed, cumulative: CGPoint(x: 80, y: 4), velocityX: 700,
+                              lifecycle: .horizontalActive, lastTranslationX: 40)
+        #expect(s.emissions == [SinglePanEmission(deltaX: 40, velocityX: 700, phase: .changed)])
+        #expect(s.lifecycle == .horizontalActive)
+    }
+
+    @Test("竖直甩动：periodSwipe 非 nil —— 画线模式内也能切周期")
+    func verticalFlickProducesSwipe() {
+        let s = singlePanStep(phase: .ended, cumulative: CGPoint(x: 0, y: -80), velocityX: 0,
+                              lifecycle: .verticalRejected, lastTranslationX: 0)
+        #expect(s.periodSwipe == .up)
+        #expect(s.emissions.isEmpty)      // 切周期是离散动作，不发 pan 位移
+    }
+
+    @Test("阈值以下的竖直甩动仍不切周期（放开截获 ≠ 放宽防误触阈值）")
+    func shortVerticalFlickStillNoSwipe() {
+        let s = singlePanStep(phase: .ended, cumulative: CGPoint(x: 0, y: -20), velocityX: 0,
+                              lifecycle: .verticalRejected, lastTranslationX: 0)
+        #expect(s.periodSwipe == nil)
     }
 }
 

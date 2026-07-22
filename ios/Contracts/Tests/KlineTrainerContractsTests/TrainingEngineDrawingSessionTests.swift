@@ -110,26 +110,6 @@ struct TrainingEngineDrawingSessionTests {
         assertInvariant(e)
     }
 
-    @Test("codex plan-R6：手势层同样切不了周期（画线吞竖滑）；1a-iv 放开 D32 时本测试变红")
-    func periodSwitchUnreachableWhileDrawing() {
-        // 切周期的**唯一**产生条件（见 GestureClassifiersTests:407-420）：phase == .ended
-        // + lifecycle == .verticalRejected + 净竖移 >= 40。用这个精确形状造，否则测的是空气。
-        let swipeUp = CGPoint(x: 0, y: -50)
-
-        // 画线模式：drawingTakesOver 分支的每个 return 都 periodSwipe == nil（GestureClassifiers.swift:113-121）
-        let drawing = singlePanStep(phase: .ended, cumulative: swipeUp, velocityX: 0,
-                                    lifecycle: .verticalRejected, lastTranslationX: 0,
-                                    drawingTakesOver: true)
-        #expect(drawing.periodSwipe == nil,
-                "画线模式下竖滑不得切周期。若本条变红 = 1a-iv 的 D32 放开了竖滑 → 必须按 D31 用 discardPendingAnchors() 处理 pending，并同步维护「会话 ⇔ 两面板 .drawing」不变量，不许静默漂移")
-
-        // 对照（防假绿）：非画线模式下**同样**的手势确实会切周期 —— 证明上面的 nil 不是参数造错造出来的
-        let normal = singlePanStep(phase: .ended, cumulative: swipeUp, velocityX: 0,
-                                   lifecycle: .verticalRejected, lastTranslationX: 0,
-                                   drawingTakesOver: false)
-        #expect(normal.periodSwipe == .up)
-    }
-
     @Test("codex plan-R9：零 render bounds（首帧未布局）下开会话 —— 不变量仍成立，绝不出现「钮亮着但画不了」")
     func beginSessionWithZeroBoundsKeepsInvariant() {
         let e = TrainingEngine.preview()          // 故意**不**调 recordRenderBounds → bounds 全是 .zero
