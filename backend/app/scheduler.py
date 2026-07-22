@@ -151,21 +151,19 @@ def build_generate_batch(
     out.mkdir(parents=True, exist_ok=True)   # F1：确保输出目录存在；不可写则抛 → lifespan startup 失败
 
     async def _gen(n: int) -> int:
-        from generate_training_sets import generate_batch
+        from generate_training_sets import B2_GENERATION_LOCK_KEY, generate_batch
         async with pool.acquire() as conn:
+            # codex PF2-R5-F2：与 B2 CLI 互斥。拿不到锁 = 有人手工在跑 B2 →
+            # 本次 sweep 生成 0 并告警，等下次 cron，不与之竞争同一产物路径。
+            if not await conn.fetchval("SELECT pg_try_advisory_lock($1)",
+                                       B2_GENERATION_LOCK_KEY):
+                logger.warning("B2 生成锁被占（有人手工在跑 B2 CLI？）；本次 sweep 生成 0，"
+                               "等下次 cron 重试")
+                return 0
             try:
                 produced = await generate_batch(conn, n, out, rng)
-            except NotImplementedError as exc:
-                # codex whole-branch review high：assemble_training_set 已 fail-closed
-                # 停用（build_training_windows + stock_coverage 重接留 Plan 2），异常会
-                # 一路冒泡到本 B4 常驻调度进程。这里显式接住、记 ERROR、返回 0——
-                # 让 sweep 记录"本次生成 0"后继续存活，等下次 sweep/Plan 2 落地，
-                # 不可让常驻进程崩溃。
-                logger.error(
-                    "B4 补货调用 B2 generate_batch 失败：B2 装配路径 fail-closed 停用中"
-                    "（build_training_windows + stock_coverage 重接留 Plan 2）；本次生成 0，"
-                    "调度进程继续存活。原因：%s", exc)
-                return 0
+            finally:
+                await conn.execute("SELECT pg_advisory_unlock($1)", B2_GENERATION_LOCK_KEY)
             return len(produced)
 
     return _gen

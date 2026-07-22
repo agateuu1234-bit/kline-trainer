@@ -207,9 +207,15 @@ def test_sweep_is_degraded_flags_partial():
     assert sweep_is_degraded(SweepResult([], 0, 0)) is False     # 未触发补足 → 达标
 
 
-def _fake_pool():
+def _fake_pool(lock_ok: bool = True):
     class _FakeConn:
-        pass
+        # Plan 2b：_gen 现在先抢 B2_GENERATION_LOCK_KEY（codex PF2-R5-F2）
+        async def fetchval(self, q, *a):
+            assert "pg_try_advisory_lock" in q
+            return lock_ok
+
+        async def execute(self, q, *a):
+            return "ok"
 
     class _FakeAcq:
         async def __aenter__(self):
@@ -255,39 +261,15 @@ def test_build_generate_batch_creates_output_dir(monkeypatch, tmp_path):
     assert asyncio.run(gen(3)) == 3
 
 
-def test_build_generate_batch_real_b2_fail_closed_logs_error_returns_zero(caplog, tmp_path):
-    # codex whole-branch review high：真 B2 链路（不 monkeypatch generate_batch）——
-    # build_generate_batch→generate_batch→generate_one_training_set→
-    # assemble_training_set(NotImplementedError)。断言适配器接住、记 ERROR、返回 0，
-    # 不让 B4 常驻调度进程崩溃。
+def test_build_generate_batch_returns_zero_when_b2_lock_held(caplog, tmp_path):
+    # Plan 2b（codex PF2-R5-F2）：取代原 fail-closed 测（NotImplementedError 捕获已随重接移除）。
     import logging
 
-    class _FakeConn:
-        async def fetch(self, query, *args):
-            if "FROM stocks" in query:
-                return [{"code": "600519"}]        # 驱动 generate_batch 走到 assemble_training_set
-            return []                                # klines 查询：assemble_training_set 在读取
-            # period_bars 内容之前就已 fail-closed 抛出，空表不影响链路是否被真正触达
-
-    class _FakeAcq:
-        async def __aenter__(self):
-            return _FakeConn()
-
-        async def __aexit__(self, *a):
-            return False
-
-    class _FakePool:
-        def acquire(self):
-            return _FakeAcq()
-
     from app.scheduler import build_generate_batch
-    gen = build_generate_batch(_FakePool(), str(tmp_path / "ts_out"))
-    with caplog.at_level(logging.ERROR, logger="app.scheduler"):
-        result = asyncio.run(gen(5))
-    assert result == 0
-    assert "B4 补货调用 B2 generate_batch 失败" in caplog.text
-    assert "fail-closed" in caplog.text
-    assert "旧未门控随机选起点路径已停用" in caplog.text   # 断言底层确实是 assemble_training_set 的 NotImplementedError
+    gen = build_generate_batch(_fake_pool(lock_ok=False), str(tmp_path / "ts_out"))
+    with caplog.at_level(logging.WARNING, logger="app.scheduler"):
+        assert asyncio.run(gen(5)) == 0
+    assert "B2 生成锁" in caplog.text
 
 
 def test_start_b4_scheduler_starts_running():
