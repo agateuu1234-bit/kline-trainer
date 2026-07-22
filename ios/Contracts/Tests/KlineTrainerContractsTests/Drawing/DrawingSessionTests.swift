@@ -112,14 +112,17 @@ struct DrawingSessionTests {
         let s = DrawingSession()
         s.activate(tool: .horizontal)
         s.addAnchor(anchor(10, period: .m15), panel: .lower)
-        let straight = s.commitPending(lineSubType: .straight, panelPosition: 1)
+        // 1a-iii：lineSubType 不再是 commitPending 入参，改经 defaultStyle 单一真相
+        s.setDefaultStyle({ var st = DrawingDefaultStyle(); st.lineSubType = .straight; return st }())
+        let straight = s.commitPending(panelPosition: 1)
         #expect(straight?.period == .m15)                   // D29：跟首锚周期，不跟面板位置
         #expect(straight?.panelPosition == 1)
         #expect(straight?.isExtended == false)
         #expect(straight?.lineSubType == .straight)
 
         s.addAnchor(anchor(11, period: .m15), panel: .lower)
-        let ray = s.commitPending(lineSubType: .ray, panelPosition: 1)
+        s.setDefaultStyle({ var st = DrawingDefaultStyle(); st.lineSubType = .ray; return st }())
+        let ray = s.commitPending(panelPosition: 1)
         #expect(ray?.isExtended == true)                    // 不变量：isExtended == (lineSubType == .ray)
         #expect(ray?.lineSubType == .ray)
     }
@@ -145,5 +148,49 @@ struct DrawingSessionTests {
         #expect(s.activeDrawingTool == nil)
         #expect(s.pendingAnchors.isEmpty)
         #expect(s.pendingAnchorPanel == nil)
+    }
+
+    // ── Task 1（1a-iii）：默认样式原子流进提交 ──
+    @Test("默认样式全 5 字段原子流进提交的线 + 标签色=线色")
+    func defaultStyleFlowsIntoCommit() throws {
+        let s = DrawingSession()
+        s.activate(tool: .horizontal)
+        var style = DrawingDefaultStyle()
+        style.lineSubType = .ray; style.lineStyle = .dash2
+        style.thickness = 3; style.colorToken = .red; style.labelMode = .right
+        s.setDefaultStyle(style)
+        s.addAnchor(anchor(10), panel: .upper)
+        let obj = try #require(s.commitPending(panelPosition: 0))
+        #expect(obj.lineSubType == .ray)
+        #expect(obj.lineStyle == .dash2)
+        #expect(obj.thickness == 3)
+        #expect(obj.colorToken == .red)
+        #expect(obj.labelMode == .right)
+        #expect(obj.textColorToken == .red)       // codex plan-R7：标签色跟线色（否则标签渲染成默认橙）
+        #expect(obj.isExtended == true)           // isExtended 由 lineSubType==.ray 派生（不变量保留）
+        // 标签**渲染路径**真拿到线色（labelContent.colorToken 来自 textColorToken，codex plan-R7）
+        let label = try #require(DrawingLabelLayout.labelContent(for: obj, lineVisible: true))
+        #expect(label.colorToken == .red)
+    }
+
+    @Test("改默认只影响下一条：先画一条、改默认、再画一条 —— 第一条不变")
+    func defaultChangeAffectsOnlyNextLine() {
+        let s = DrawingSession()
+        s.activate(tool: .horizontal)
+        s.addAnchor(anchor(10), panel: .upper)
+        let first = s.commitPending(panelPosition: 0)          // 默认橙/实线/1/直线/隐藏
+        var style = DrawingDefaultStyle(); style.colorToken = .green
+        s.setDefaultStyle(style)
+        s.addAnchor(anchor(20), panel: .upper)
+        let second = s.commitPending(panelPosition: 0)
+        #expect(first?.colorToken == .orange)                  // 第一条不被回改
+        #expect(second?.colorToken == .green)
+    }
+
+    @Test("straight 默认 → isExtended==false（派生不变量）")
+    func straightDerivesNotExtended() {
+        let s = DrawingSession(); s.activate(tool: .horizontal)
+        s.addAnchor(anchor(10), panel: .upper)
+        #expect(s.commitPending(panelPosition: 1)?.isExtended == false)
     }
 }

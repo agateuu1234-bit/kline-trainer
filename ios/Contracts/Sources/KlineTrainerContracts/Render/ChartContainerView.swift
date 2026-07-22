@@ -275,13 +275,26 @@ public struct ChartContainerView: UIViewRepresentable {
             // 空图表（candleStep==0）→ xToIndex 会 Int(NaN) 崩溃 → 守卫（spec §四 load-bearing）。
             let viewport = view.renderState.viewport
             guard viewport.geometry.candleStep > 0 else { return }
+            // 1a-iii 切片2 Task2（codex 计划-R14-F1/R17-F2）：三态互斥，无需再判布尔量。
+            // `.pending` = 面板已挂载但几何未收敛 → 拒收一切（代价：刚展开面板的极短瞬间少响应一次点击；
+            // 收益：**永远不会**因盾未就位而落出幽灵线并 autosave，不可逆）。`.rect` 是面板局部坐标，与 point 同一空间。
+            switch session.shield[panel == .upper ? 0 : 1] ?? .unshielded {
+            case .unshielded:      break
+            case .pending:         return
+            case .rect(let shield): if shield.contains(point) { return }
+            }
             let mapper = CoordinateMapper(viewport: viewport, displayScale: view.traitCollection.displayScale)
             let ps = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
             guard let anchor = inputController.tapToAnchor(at: point, panel: ps, mapper: mapper) else { return }
             session.addAnchor(anchor, panel: panel)          // D31：落在 ≠ pendingAnchorPanel 的面板 → 容器内部只丢 pending
             guard inputController.shouldCommit(current: session.pendingAnchors, tool: tool) else { return }
-            // 本期无线型选择器（→1a-iii），新线一律 .straight。
+            // 1a-iii：样式（含 lineSubType）由 session.defaultStyle 单一真相决定，commitPending 原子读取。
             guard let committed = session.commitPending(panelPosition: panel == .upper ? 0 : 1) else { return }
+            // codex rebased-R2：拒绝**不可见**画线再落库（1a-iii 起 ray 可被用户选中）。落在右缘的射线
+            // lineXRange==nil → 既画不出（HorizontalLineTool.render 跳过）、又命不中（hitTest fail-closed），
+            // 但仍会 append+autosave 一条 1b-i 前无从选中/删除的幽灵线。与 tapToAnchor 的源头 fail-closed 同理，
+            // 扩到 ray 右缘几何：可见几何为 nil 就不落库。本期只 .horizontal。
+            guard HorizontalLineTool.visibleGeometry(for: committed, mapper: mapper) != nil else { return }
             engine.routeDrawingCommit(committed)             // review→reviewDrawings；否则→drawings（Task 10）
             // ← 此处**故意没有** engine.commitDrawing(panel:)：连续画线（D38），会话与工具保持不变。
         }

@@ -38,6 +38,7 @@ struct DrawingSessionSourceGuardTests {
     private let trainingView   = "Sources/KlineTrainerContracts/UI/TrainingView.swift"
     private let floatingView   = "Sources/KlineTrainerContracts/UI/DrawingToolFloatingView.swift"
     private let engine         = "Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift"
+    private let drawingSession = "Sources/KlineTrainerContracts/Drawing/DrawingSession.swift"
 
     @Test("#1：ChartContainerView 里**不存在** manager.toggle 自动 re-arm，也不再持有 DrawingToolManager")
     func noRearmInChartContainer() throws {
@@ -52,6 +53,19 @@ struct DrawingSessionSourceGuardTests {
         let code = try source(chartContainer)
         #expect(code.contains("session.addAnchor("))       // 先证明真读到了文件内容（防路径写错→空内容→负向断言假绿）
         #expect(!code.contains("engine.commitDrawing("))
+    }
+
+    @Test("codex rebased-R2：不可见画线（右缘 ray 等 visibleGeometry==nil）不落库——commitPending 与 routeDrawingCommit 之间有 fail-closed 守卫")
+    func rejectsInvisibleDrawingBeforePersist() throws {
+        let code = try source(chartContainer)
+        // 取 commitPending 到 routeDrawingCommit 的片段，断言中间夹了 visibleGeometry != nil 的守卫
+        // （否则落在右缘的射线会 append+autosave 成一条画不出/命不中/1b-i 前删不掉的幽灵线）。
+        let s = try #require(code.range(of: "session.commitPending("), "找不到 commitPending 调用")
+        let tail = String(code[s.upperBound...])
+        let e = try #require(tail.range(of: "engine.routeDrawingCommit("), "找不到 routeDrawingCommit")
+        let between = String(tail[..<e.lowerBound])
+        #expect(between.contains("HorizontalLineTool.visibleGeometry("))
+        #expect(between.contains("!= nil"))
     }
 
     @Test("#4b：TrainingView 的 activePanel observer **不再**取消画线；toggleDrawingExclusive 已退役")
@@ -90,7 +104,7 @@ struct DrawingSessionSourceGuardTests {
     func drawingSessionMutatorsAreNotPublic() throws {
         let code = try source("Sources/KlineTrainerContracts/Drawing/DrawingSession.swift")
         for m in ["func activate(", "func deactivate(", "func discardPendingAnchors(",
-                  "func addAnchor(", "func commitPending("] {
+                  "func addAnchor(", "func commitPending(", "func setDefaultStyle("] {
             #expect(code.contains(m), "mutator \(m) 不见了？")                 // 先证明确实扫到了这些方法
             #expect(!code.contains("public " + m),
                     "\(m) 不得为 public —— 包外能直接改会话就绕开了 begin/endDrawingSession，漂移会回来")
@@ -124,15 +138,6 @@ struct DrawingSessionSourceGuardTests {
         }
     }
 
-    @Test("#4c/#6：本期不引入任何新 UI —— 浮动钮仍在，且无顶栏「画图」钮 / 底栏工具栏 / 设置面板")
-    func noNewDrawingUI() throws {
-        let code = try source(trainingView)
-        #expect(code.contains("DrawingToolFloatingView("))     // 入口未变（退役在 1a-iii）
-        #expect(!code.contains("画图"))                        // 顶栏「画图」钮（1a-iii）
-        #expect(!code.contains("DrawingToolbar"))              // 两行底栏（1a-iii）
-        #expect(!code.contains("DrawingSettingsPanel"))        // 设置面板（1a-iii）
-    }
-
     // MARK: 真机验收回归守卫（模拟器实证修复；SwiftUI observation/view 行为单测测不到，只能源码钉死防误删）
 
     @Test("回归守卫（现象②：图表冻结）：rebuildRenderState 必须显式读面板 revision + tick 建立 observation 订阅")
@@ -151,5 +156,32 @@ struct DrawingSessionSourceGuardTests {
         let code = try source(floatingView)
         #expect(code.contains("if isDrawingActive { onToggleTool() }"))  // 画线模式开：点圆圈=直接退出（不是展开）
         #expect(code.contains(".tint(isDrawingActive ? .orange"))        // 画线模式开：圆圈变橙色（一眼看出在画线）
+    }
+
+    @Test("原子性：commitPending 5 字段从 defaultStyle 原子构造 + routeDrawingCommit 整体透传（codex plan-R5）")
+    func atomicStyleConstruction() throws {
+        let s = try source(drawingSession)
+        #expect(s.contains("func commitPending("))       // 先证真读到文件（防路径错→空→假绿）
+        for f in ["lineSubType: s.lineSubType", "lineStyle: s.lineStyle", "thickness: s.thickness",
+                  "colorToken: s.colorToken", "labelMode: s.labelMode"] {
+            #expect(s.contains(f))                        // commitPending 单初始化原子灌满
+        }
+        let e = try source(engine)
+        for f in ["lineSubType: drawing.lineSubType", "lineStyle: drawing.lineStyle",
+                  "thickness: drawing.thickness", "colorToken: drawing.colorToken", "labelMode: drawing.labelMode"] {
+            #expect(e.contains(f))                        // routeDrawingCommit 整体透传 5 字段，无逐字段丢弃/默认化
+        }
+        // 提取 routeDrawingCommit 函数体，钉死「无 append-then-replace」（codex plan-R6-high）：
+        // let 字段防不了「append(默认) 后 drawings[last] = 完整」的整元素替换 → 直接禁下标写、且只消费 stamped。
+        let rcStart = try #require(e.range(of: "public func routeDrawingCommit"), "找不到 routeDrawingCommit（结构漂移）")
+        let afterRC = String(e[rcStart.upperBound...])
+        let rcEnd = try #require(afterRC.range(of: "\n    public func"), "找不到 routeDrawingCommit 结尾")
+        let rc = String(afterRC[..<rcEnd.lowerBound])
+        // 两个都要显式断言（codex plan-R10-medium）：Swift 大小写敏感，"reviewDrawings[" 不含 "drawings["
+        // （前者是大写 D）→ 只查小写会漏掉 review 分支的 append-then-replace。
+        #expect(!rc.contains("drawings["))               // normal/replay 分支无元素替换
+        #expect(!rc.contains("reviewDrawings["))         // review 分支无元素替换（大写 D，须单独查）
+        #expect(rc.contains("appendDrawing(stamped)"))   // 消费的是 stamped（全 5 样式字段，只盖 revealTick）
+        #expect(rc.contains("appendReviewDrawing(stamped)"))
     }
 }

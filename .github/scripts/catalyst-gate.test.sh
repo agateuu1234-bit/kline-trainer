@@ -374,17 +374,66 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 # catalyst-total-baseline.txt / catalyst-uikit-baseline.txt 不被它们覆盖——误设/漂移只会
 # 在真 CI 的真构建步暴露、reviewer 无法从仓库状态复现。这条**显式 unset 两个冻结覆盖**、
 # 走 catalyst-gate.sh 默认的活基线，对一份代表当前 main 的裁剪真日志（pass-main-current.log：
-# 1457 tests / 35 UIKit / macabi）断言 GATE PASS 且回显 1457。活基线一旦被误改（漂出 ±30），
+# 1532 tests / 58 UIKit / macabi）断言 GATE PASS 且回显 1532。活基线一旦被误改（漂出 ±30），
 # 这条会在 Gate self-test 步就红，早于真构建步。
-# 维护：任何改动 catalyst-uikit-baseline.txt、或让真实总用例数漂出 1457±30 的 PR，必须同时
+# 维护：任何改动 catalyst-uikit-baseline.txt、或让真实总用例数漂出 1532±30 的 PR，必须同时
 # 用一次真 Catalyst 构建日志重裁 pass-main-current.log（禁手打伪造行，见 R9）。
+# （1a-iii 切片1 Task2：uikit 35→41 / total 1457→1486，随 DrawingBottomBarHeightTests 2 条 +
+# DrawingTapHitShieldTests 4 条 UIKit-gated 测试新增同步重裁。
+#   1a-iii 切片1 Task3：uikit 41→43 / total 1486→1488，随 DrawingLayoutInvariantTests 2 条
+#   UIKit-gated 测试新增同步重裁。
+#   1a-iii 切片2 Task1：uikit 43→47 / total 1488→1498，随 DrawingStyleIconRenderTests 4 条
+#   UIKit-gated 测试新增同步重裁。
+#   1a-iii 切片2 Task2：uikit 47→52 / total 1498→1509，随 DrawingTapHitShieldTests 5 条
+#   UIKit-gated 测试新增（两面板盾泛化 tallOverlayShieldsBothPanels/collapsedOverlayInstallsNoShield/
+#   visibleLowerOnlyOverlayLeavesUpperUnshielded/upperPanelShieldBlocksOtherwiseCommittingTap/
+#   tapRefusedWhileShieldsUnsettled）同步重裁。
+#   1a-iii 切片2 Task3：uikit 52→53 / total 1509→1520，随 DrawingTapHitShieldTests 新增 1 条
+#   UIKit-gated 差分测试（transparentGutterOutsideVisiblePanelStillCommits_inputLayer）同步重裁；
+#   常驻样式面板守卫套件 DrawingStylePanelSourceGuardTests（迁自 DrawingStyleCardSourceGuardTests，
+#   2 条→12 条，净 +10）是 host-pure（无 UIKit 依赖，纯源码字符串读取），不计入 uikit 基线，
+#   但计入 total 基线：+10（守卫套件） +1（差分测试）= +11，1509→1520。）
+#   1a-iii 切片2 Task4：uikit 53→56 / total 1520→1525，随 DrawingLayoutInvariantTests 新增 1 条
+#   UIKit-gated 四态几何测试（chartFrameIdenticalAcrossFourStates）+ DrawingTapHitShieldTests 新增
+#   2 条 UIKit-gated 上半区盾差分测试（topPositionShieldsUpperPanelOnly/togglingPositionClearsStaleShieldExactly）
+#   同步重裁；DrawingStylePanelSourceGuardTests 新增 2 条 host-pure 守卫（mirrorFlipsOnlyTwoBlocks/
+#   productionNeverUsesTestOnlySettleHelper）不计入 uikit 基线但计入 total：+3（uikit）+2（host-pure）=+5，1520→1525。
+#   whole-branch fix wave（2026-07-20）：uikit 56→55 / total 1525→1526。删 DrawingLayoutInvariantTests
+#   的 UIKit-gated 冗余测试 chartFrameIdenticalAcrossDrawingStates（严格子集于四态版本，−1 uikit/−1 total）；
+#   新增 2 条 host-pure（不计入 uikit 基线）：DrawingTapHitShieldTests.setStylePanelVisibleRestoresPendingAfterSettledShields
+#   （item4 模型不变量测试）+ DrawingStylePanelSourceGuardTests.lifecycleOnChangeHandlersUseFailClosedPendingNotClear
+#   （从 productionNeverUsesTestOnlySettleHelper 拆出，覆盖 fail-open→fail-closed 关键修复）：
+#   −1（uikit 冗余测试）+2（host-pure 新增）=+1，1525→1526；uikit 56−1=55。
+#   P1b-1a-iii 回归修复（HIGH，codex adversarial review，6a84fa5 引入）：uikit 55→56 / total 1526→1527。
+#   6a84fa5 那一波把三个生命周期 onChange 改成无条件 setStylePanelVisible(true)，复盘态样式面板
+#   从不挂载却仍被强推 .pending、无人再触发 refreshShields()，复盘画线永久失效。修复收敛判据为
+#   TrainingView.stylePanelWillBeVisible + syncPanelShields()（唯一实现），新增 1 条 UIKit-gated
+#   模型级回归复现测试 DrawingTapHitShieldTests.reviewModePendingShieldsBlockTapUntilCleared：
+#   +1（uikit），1526→1527；uikit 55+1=56。
+#   codex R2-medium 回归修复（2026-07-20）：uikit 56→57 / total 1527→1528。ChartPanelsContainer
+#   新增两条 `.task(id:)`（keyed on stylePanelPosition / stylePanelVisible）——切位置若测出与旧值
+#   数值相同的样式面板几何（面板高+16pt padding==容器高时可复现），三条 onPreferenceChange 一条都
+#   不触发，refreshShields() 永不重跑，两面板永久卡在 .pending。新增 1 条 UIKit-gated 端到端回归
+#   DrawingTapHitShieldTests.toggleWithIdenticalGeometryEventuallySettles（同一个 ImageRenderer 实例
+#   reassign .content，实测验证 view 身份/@State 跨 reassign 存活 + .task(id:) 单次 .uiImage() 内
+#   同步跑完）：+1（uikit），1527→1528；uikit 56+1=57。
+#   1a-iii 切片3 Task1（a4ac76a）：total 1528→1531（uikit 57 不变）。DrawingColorResolverTests 新增
+#   3 条 host-pure 测试（adaptiveInkNoMuddyFallback/adaptiveInkAlwaysReadable/legacyTokensRenderAdaptiveInkBothSchemes）
+#   钉住「.black/.white 改自适应纯 ink」，但当时 Task1 commit 未同步 catalyst-total-baseline.txt——
+#   1528 已漂出真值 3 条（本 fixture 在 Task2 才用真 fresh 日志核实并补上，见下）。
+#   1a-iii 切片3 Task2（本次）：total 净变化 0（uikit 57 不变，未新增/删除任何 UIKit-gated 测试）——
+#   DrawingStyleAvailabilityTests 删 1 条 host-pure（`color`，随 colorEnabled 一起删）；
+#   DrawingStylePanelSourceGuardTests 的 `colorSemanticsUnchangedInThisSlice` 1 条替换成 2 条新
+#   host-pure 守卫（colorRowIsSevenChromaticPlusLineColor/colorRowHasExactlyEightSwatches），净 +1；
+#   两者相抵 −1+1=0。本次改动的真实数字来自 Task1 遗留的基线纠偏：1528（已知漂移，见上）→
+#   1531（fresh 日志实测真值，Task1 的 +3 与 Task2 的 ±0 相加）。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1457" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 35 / total 1457）→ GATE PASS 且回显 1457 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1532" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 58 / total 1532）→ GATE PASS 且回显 1532 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1457，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1532，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 

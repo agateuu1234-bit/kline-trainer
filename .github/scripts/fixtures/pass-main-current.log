@@ -1,39 +1,62 @@
 ** TEST SUCCEEDED **
-✔ Test run with 1457 tests in 188 suites passed after 0.969 seconds.
-    builtin-SwiftDriver -- /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name ZIPFoundation -Onone @/tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Intermediates.noindex/ZIPFoundation.build/Debug-maccatalyst/ZIPFoundation.build/Objects-normal/arm64/ZIPFoundation.SwiftFileList -DSWIFT_PACKAGE -DDEBUG -DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE -DXcode -plugin-path /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk -target arm64-apple-ios13.1-macabi -g -module-cache-path /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/ModuleCache.noindex -Xfrontend -serialize-debugging-options -profile-coverage-mapping -profile-generate -enable-testing -suppress-warnings -index-store-path /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Index.noindex/DataStore -Xcc -D_LIBCPP_HARDENING_MODE\=_LIBCPP_HARDENING_MODE_DEBUG -swift-version 5 -I /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Products/Debug-maccatalyst -Isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib -F /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Products/Debug-maccatalyst -Fsystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk/System/iOSSupport/System/Library/Frameworks -Fsystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk/System/iOSSupport/System/Library/SubFrameworks -F /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks -c -j10 -enable-batch-mode -incremental -Xcc -ivfsstatcache -Xcc /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/SDKStatCaches.noindex/macosx26.5-25F70-e082c4a02f00227109f4ed75e425c832.sdkstatcache -output-file-map /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Intermediates.noindex/ZIPFoundation.build/Debug-maccatalyst/ZIPFoundation.build/Objects-normal/arm64/ZIPFoundation-OutputFileMap.json -use-frontend-parseable-output -save-temps -no-color-diagnostics -explicit-module-build -module-cache-path /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules -clang-scanner-module-cache-path /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/ModuleCache.noindex -sdk-module-cache-path /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/ModuleCache.noindex -serialize-diagnostics -emit-dependencies -emit-module -emit-module-path /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Intermediates.noindex/ZIPFoundation.build/Debug-maccatalyst/ZIPFoundation.build/Objects-normal/arm64/ZIPFoundation.swiftmodule -validate-clang-modules-once -clang-build-session-file /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/ModuleCache.noindex/Session.modulevalidation -package-name zipfoundation -Xcc -I/tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Intermediates.noindex/ZIPFoundation.build/Debug-maccatalyst/ZIPFoundation.build/swift-overrides.hmap -emit-const-values -Xfrontend -const-gather-protocols-file -Xfrontend /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Intermediates.noindex/ZIPFoundation.build/Debug-maccatalyst/ZIPFoundation.build/Objects-normal/arm64/ZIPFoundation_const_extract_protocols.json -Xcc -I/tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Products/Debug-maccatalyst/include -Xcc -isystem -Xcc /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk/System/iOSSupport/usr/include -Xcc -I/tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Intermediates.noindex/ZIPFoundation.build/Debug-maccatalyst/ZIPFoundation.build/DerivedSources-normal/arm64 -Xcc -I/tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Intermediates.noindex/ZIPFoundation.build/Debug-maccatalyst/ZIPFoundation.build/DerivedSources/arm64 -Xcc -I/tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Intermediates.noindex/ZIPFoundation.build/Debug-maccatalyst/ZIPFoundation.build/DerivedSources -Xcc -DSWIFT_PACKAGE -Xcc -DDEBUG\=1 -emit-objc-header -emit-objc-header-path /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Intermediates.noindex/ZIPFoundation.build/Debug-maccatalyst/ZIPFoundation.build/Objects-normal/arm64/ZIPFoundation-Swift.h -working-directory /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/main-wt/ios/Contracts/.swiftpm/xcode -experimental-emit-module-separately -disable-cmo
-CpResource /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/derived-mainfix/Build/Products/Debug-maccatalyst/KlineTrainerContracts_KlineTrainerContractsTests.bundle/Contents/Resources/fixtures /tmp/claude-501/-Users-maziming-Coding-Prj-Kline-trainer/91a5fe88-cfbc-4614-b185-219e46db6e60/scratchpad/main-wt/ios/Contracts/Tests/KlineTrainerContractsTests/fixtures (in target 'KlineTrainerContracts_KlineTrainerContractsTests' from project 'KlineTrainerContracts')
-✔ Test "§5.3 #14 drawDrawings with empty list calls no render" passed after 0.761 seconds.
-✔ Test "§5.3 #15 registered tool render called once with passed-through drawing" passed after 0.761 seconds.
-✔ Test "§5.3 #16 missing tool in dictionary skips silently (Wave 1 default path)" passed after 0.761 seconds.
-✔ Test "D35：两条不同样式的 drawing 各自带自己的样式 + scheme 按顺序抵达渲染层" passed after 0.761 seconds.
-✔ Test "标注 render 路径：.left/.right 画出文字像素；.hidden/.segment 无标注泄漏（codex plan-R5）" passed after 0.351 seconds.
-✔ Test "render 路径回归（codex branch-R3 medium）：价格超出 viewport 区间的线，线与标注均不画；区间内对照组画出" passed after 0.682 seconds.
-✔ Test "render 路径（codex branch-R5 medium）：损坏 fontSize（负数/极大）不崩溃、像素不越界" passed after 0.677 seconds.
-✔ Test "ChartContainerView 可构造 + 符合 UIViewRepresentable" passed after 0.692 seconds.
-✔ Test "Coordinator 可构造 + attach 装 5 个识别器（C7 接线编译反射）" passed after 0.692 seconds.
-✔ Test "Coordinator crosshairPoint 默认 nil（视图层瞬态）" passed after 0.692 seconds.
-✔ Test "#2 D42：上面板画一条、下面板画一条 —— 两条都提交，period 各自绑所在面板当时的周期" passed after 0.773 seconds.
-✔ Test "#5 连续画线：同一面板连点三次 → 三条线；每次提交后会话与工具仍在" passed after 0.774 seconds.
-✔ Test "#3 D31 跨 Coordinator：上面板 pending + 下面板落锚 → 只丢 pending，工具/会话存活" passed after 0.759 seconds.
-✔ Test "#1 D39：反复 sync/updateUIView **不改写**工具（1b-i 的类型行 toggle 不会被撤销）" passed after 0.759 seconds.
-✔ Test "#1 D39：未开会话时 sync **不会**自动武装任何工具（re-arm 已删除）" passed after 0.774 seconds.
-✔ Test "codex R7 fail-closed：主图内 overscroll 空白区的 tap（越界 candleIndex）→ 不落锚不落库，会话存活" passed after 0.759 seconds.
-✔ Test "未开会话时点图 = 不画线" passed after 0.774 seconds.
-✔ Test "布局到有效尺寸后 renderState 重算非空（静态 engine 不依赖 observation 再触发）" passed after 0.697 seconds.
-✔ Test "layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复 make）" passed after 0.697 seconds.
-✔ Test "布局重算同步 engine bounds → 静态界面后续 pinch 生效（codex R1-F1：不被 stale .zero bounds no-op）" passed after 0.697 seconds.
-✔ Test "瞬态零尺寸 layout 不 clamp panel offset（codex R2-F1：滚动位置不被吞）" passed after 0.697 seconds.
-✔ Test "零尺寸 rebuild（updateUIView 路径）不 clamp offset（codex R3-F1：observation 路径同护）" passed after 0.697 seconds.
-✔ Test "KLineView 可实例化（spec L1179 final class）" passed after 0.695 seconds.
-✔ Test "renderState 可读写（compile-check：let 字段 + init 重建模式）" passed after 0.695 seconds.
-✔ Test "forScheme(.dark) 13 字段桥 = AppPalette.dark" passed after 0.325 seconds.
-✔ Test "forScheme(.light) 13 字段桥 = AppPalette.light" passed after 0.317 seconds.
-✔ Test "light/dark UIColor 真不同（防退化为单集）" passed after 0.325 seconds.
-✔ Test "KLineView 非 opaque（codex R4-F1：透明画布须 isOpaque=false，防 scheme 切换残留伪影）" passed after 0.695 seconds.
-✔ Test "trait dark → 选 dark 集 / trait light → 选 light 集（currentPalette 选取链）" passed after 0.694 seconds.
-✔ Test "默认 displayMode == .system" passed after 0.800 seconds.
-✔ Test "resolve(trait:) .system + dark trait → .dark" passed after 0.800 seconds.
-✔ Test "resolve(trait:) .light forced 忽略 dark trait" passed after 0.800 seconds.
-✔ Test "resolve(trait:) .dark forced 忽略 light trait" passed after 0.800 seconds.
-✔ Test "resolve(trait:) .system + .unspecified → .light（D-7：UIKit 未传播状态默认）" passed after 0.800 seconds.
-✔ Test "UIColor(rgba:) 桥接保持通道值 + 13 const 全 = token 桥接（D-11）" passed after 0.334 seconds.
+✔ Test run with 1532 tests in 197 suites passed after 6.354 seconds.
+SwiftCompile normal arm64 Compiling\ ModelsTests.swift,\ P2FakesTests.swift,\ PanLinkageTests.swift,\ PendingReplayTests.swift,\ PersistenceIntegrationFixtures.swift,\ PositionManagerTests.swift,\ PreviewTrainingSetReaderTests.swift,\ PublicGestureSurfaceTests.swift,\ RESTDTOsTests.swift,\ RecoverySettingsDAO.swift,\ ReducerEffectIntegrationTests.swift,\ ReducerTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-p1b-1a-iii/ios/Contracts/Tests/KlineTrainerContractsTests/ModelsTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-p1b-1a-iii/ios/Contracts/Tests/KlineTrainerContractsTests/P2FakesTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-p1b-1a-iii/ios/Contracts/Tests/KlineTrainerContractsTests/PanLinkageTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-p1b-1a-iii/ios/Contracts/Tests/KlineTrainerContractsTests/Persistence/PendingReplayTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-p1b-1a-iii/ios/Contracts/Tests/KlineTrainerContractsTests/PersistenceIntegrationFixtures.swift /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-p1b-1a-iii/ios/Contracts/Tests/KlineTrainerContractsTests/PositionManagerTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-p1b-1a-iii/ios/Contracts/Tests/KlineTrainerContractsTests/PreviewTrainingSetReaderTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-p1b-1a-iii/ios/Contracts/Tests/KlineTrainerContractsTests/PublicGestureSurfaceTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-p1b-1a-iii/ios/Contracts/Tests/KlineTrainerContractsTests/RESTDTOsTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-p1b-1a-iii/ios/Contracts/Tests/KlineTrainerContractsTests/RecoverySettingsDAO.swift /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-p1b-1a-iii/ios/Contracts/Tests/KlineTrainerContractsTests/ReducerEffectIntegrationTests.swift /Users/maziming/Coding/Prj_Kline\ trainer/.dev/worktree/drawing-p1b-1a-iii/ios/Contracts/Tests/KlineTrainerContractsTests/ReducerTests.swift (in target 'KlineTrainerContractsTests' from project 'KlineTrainerContracts')
+Copy /Users/maziming/Library/Developer/Xcode/DerivedData/Contracts-dwalddgywxignyfuumrjfqcjkqzp/Build/Products/Debug-maccatalyst/ZIPFoundation.swiftmodule/arm64-apple-ios-macabi.swiftmodule /Users/maziming/Library/Developer/Xcode/DerivedData/Contracts-dwalddgywxignyfuumrjfqcjkqzp/Build/Intermediates.noindex/ZIPFoundation.build/Debug-maccatalyst/ZIPFoundation.build/Objects-normal/arm64/ZIPFoundation.swiftmodule (in target 'ZIPFoundation' from project 'ZIPFoundation')
+✔ Test "§5.3 #14 drawDrawings with empty list calls no render" passed after 4.636 seconds.
+✔ Test "§5.3 #15 registered tool render called once with passed-through drawing" passed after 4.636 seconds.
+✔ Test "§5.3 #16 missing tool in dictionary skips silently (Wave 1 default path)" passed after 4.923 seconds.
+✔ Test "D35：两条不同样式的 drawing 各自带自己的样式 + scheme 按顺序抵达渲染层" passed after 4.637 seconds.
+✔ Test "标注 render 路径：.left/.right 画出文字像素；.hidden/.segment 无标注泄漏（codex plan-R5）" passed after 2.157 seconds.
+✔ Test "render 路径回归（codex branch-R3 medium）：价格超出 viewport 区间的线，线与标注均不画；区间内对照组画出" passed after 2.158 seconds.
+✔ Test "render 路径（codex branch-R5 medium）：损坏 fontSize（负数/极大）不崩溃、像素不越界" passed after 2.157 seconds.
+✔ Test "前置实测：ImageRenderer 能 flatten Canvas 图标（子树不塌成零尺寸）——Task4 几何断言的前提" passed after 4.612 seconds.
+✔ Test "像素级：三种线型图标都**真的画出了东西**，且两两可分辨（防 ship 空白方块）" passed after 4.567 seconds.
+✔ Test "像素级：5 种线样式都画出东西，且两两可分辨（dash 真的落到像素上）" passed after 4.612 seconds.
+✔ Test "像素级：粗细 1…5 的墨量**严格递增**（图标真的越来越粗，不是 5 根同宽线）" passed after 4.614 seconds.
+✔ Test "ChartContainerView 可构造 + 符合 UIViewRepresentable" passed after 2.051 seconds.
+✔ Test "Coordinator 可构造 + attach 装 5 个识别器（C7 接线编译反射）" passed after 2.052 seconds.
+✔ Test "Coordinator crosshairPoint 默认 nil（视图层瞬态）" passed after 2.047 seconds.
+✔ Test "#2 D42：上面板画一条、下面板画一条 —— 两条都提交，period 各自绑所在面板当时的周期" passed after 4.641 seconds.
+✔ Test "#5 连续画线：同一面板连点三次 → 三条线；每次提交后会话与工具仍在" passed after 4.643 seconds.
+✔ Test "#3 D31 跨 Coordinator：上面板 pending + 下面板落锚 → 只丢 pending，工具/会话存活" passed after 4.643 seconds.
+✔ Test "#1 D39：反复 sync/updateUIView **不改写**工具（1b-i 的类型行 toggle 不会被撤销）" passed after 4.702 seconds.
+✔ Test "#1 D39：未开会话时 sync **不会**自动武装任何工具（re-arm 已删除）" passed after 4.642 seconds.
+✔ Test "codex R7 fail-closed：主图内 overscroll 空白区的 tap（越界 candleIndex）→ 不落锚不落库，会话存活" passed after 4.642 seconds.
+✔ Test "未开会话时点图 = 不画线" passed after 4.642 seconds.
+✔ Test "布局到有效尺寸后 renderState 重算非空（静态 engine 不依赖 observation 再触发）" passed after 3.619 seconds.
+✔ Test "layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复 make）" passed after 3.620 seconds.
+✔ Test "布局重算同步 engine bounds → 静态界面后续 pinch 生效（codex R1-F1：不被 stale .zero bounds no-op）" passed after 3.620 seconds.
+✔ Test "瞬态零尺寸 layout 不 clamp panel offset（codex R2-F1：滚动位置不被吞）" passed after 3.621 seconds.
+✔ Test "零尺寸 rebuild（updateUIView 路径）不 clamp offset（codex R3-F1：observation 路径同护）" passed after 3.622 seconds.
+✔ Test "宽度 390pt：三个底栏等高（≤0.5pt 容差）" passed after 2.165 seconds.
+✔ Test "宽度 430pt：三个底栏等高（≤0.5pt 容差）" passed after 2.042 seconds.
+✔ Test "四态布局不变量：训练 / 画线-收起 / 画线-展开(下半区) / 画线-展开(上半区)——chartPanels 容器 frame 逐像素相等" passed after 2.143 seconds.
+✔ Test "补充快检：类型行只经 overlay、图表面板不在 typeRowExpanded 分支内" passed after 1.972 seconds.
+✔ Test "点落在样式面板 shield 内 → 不落锚、不 commit（drawings.count 不变）——面板吃触摸不穿透" passed after 0.006 seconds.
+✔ Test "点落在面板 shield 外的 K 线区 → 正常落线（屏蔽只挡面板内）" passed after 0.002 seconds.
+✔ Test "真路径差分（codex 计划-R6-high）：面板 shield 覆盖的、**本可落线**的点——装盾时被拒、清盾时落线；count 与 pendingAnchors 都验" passed after 0.038 seconds.
+✔ Test "复盘负向（codex 计划-R4-medium）：复盘态（showsTradeButtons==false）即便 drawingModeActive，也**不装 overlay、不装盾**——复盘图表点不被吞" passed after 0.004 seconds.
+✔ Test "回归复现（P1b-1a-iii HIGH，6a84fa5）：复盘态两面板若卡在 .pending，tap 被永久拒收；clearAllShields() 后同点能落线" passed after 0.012 seconds.
+✔ Test "盾泛化真路径（trade-safety）：overlay 高到跨越上下两面板 → **两个**面板各自装盾，上面板不再裸奔" passed after 0.034 seconds.
+✔ Test "收起态：无 overlay → 两面板都无盾（基础清盾，**不算**不过度屏蔽的证据）" passed after 0.003 seconds.
+✔ Test "不过度屏蔽（codex 计划-R1-F1）：面板**可见且完全落在下面板内**时，上面板必须无盾、且上半 K 线照常落线" passed after 0.033 seconds.
+✔ Test "上面板差分（trade-safety）：上面板被盾覆盖的、**本可落线**的点——装盾时被拒、清盾时落线" passed after 0.030 seconds.
+✔ Test "窗口期差分（codex 计划-R14-F1）：stylePanelVisible 且盾未收敛 → 本可落线的点被拒；收敛后同点落线" passed after 0.001 seconds.
+✔ Test "透明外边距不进**输入层**盾（codex 计划-R1-F2）：面板可见外接矩形**之外**的 8pt 空隙里点一下 → 正常落线，不是死条" passed after 0.032 seconds.
+✔ Test "上半区（镜像）盾（精确判据）：面板整块落在上面板内 → 上面板有盾贴顶边、下面板盾 == nil" passed after 0.033 seconds.
+✔ Test "⇅ 切位置后旧盾精确清零：下半区 → 上半区，下面板盾必须 == nil，且旧盾位置能重新落线" passed after 0.064 seconds.
+✔ Test "codex R2-medium 回归：⇅ 切位置若测出**相同**样式面板几何，两面板必须仍能从 .pending 收敛，面板外的点仍可落线" passed after 0.033 seconds.
+✔ Test "codex R2-medium 接线守卫：ChartPanelsContainer 挂了 .task(id: stylePanelPosition) 与 .task(id: stylePanelVisible) 双收敛触发器" passed after 0.013 seconds.
+✔ Test "KLineView 可实例化（spec L1179 final class）" passed after 2.153 seconds.
+✔ Test "renderState 可读写（compile-check：let 字段 + init 重建模式）" passed after 2.153 seconds.
+✔ Test "forScheme(.dark) 13 字段桥 = AppPalette.dark" passed after 1.119 seconds.
+✔ Test "forScheme(.light) 13 字段桥 = AppPalette.light" passed after 1.120 seconds.
+✔ Test "light/dark UIColor 真不同（防退化为单集）" passed after 1.120 seconds.
+✔ Test "KLineView 非 opaque（codex R4-F1：透明画布须 isOpaque=false，防 scheme 切换残留伪影）" passed after 2.047 seconds.
+✔ Test "trait dark → 选 dark 集 / trait light → 选 light 集（currentPalette 选取链）" passed after 2.048 seconds.
+✔ Test "默认 displayMode == .system" passed after 4.716 seconds.
+✔ Test "resolve(trait:) .system + dark trait → .dark" passed after 4.715 seconds.
+✔ Test "resolve(trait:) .light forced 忽略 dark trait" passed after 4.882 seconds.
+✔ Test "resolve(trait:) .dark forced 忽略 light trait" passed after 4.713 seconds.
+✔ Test "resolve(trait:) .system + .unspecified → .light（D-7：UIKit 未传播状态默认）" passed after 4.678 seconds.
+✔ Test "UIColor(rgba:) 桥接保持通道值 + 13 const 全 = token 桥接（D-11）" passed after 1.962 seconds.

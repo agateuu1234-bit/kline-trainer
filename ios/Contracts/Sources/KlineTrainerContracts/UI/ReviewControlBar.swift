@@ -84,6 +84,8 @@ public struct ReviewControlBar: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity)
+        // 与 TradeActionBar/DrawingBottomBar 共享同一固定高度（1a-iii 切片1 Task1 fix）→ 三者切换零跳动。
+        .frame(height: BottomBarMetrics.height)
         .background(.bar, ignoresSafeAreaEdges: .bottom)
     }
 }

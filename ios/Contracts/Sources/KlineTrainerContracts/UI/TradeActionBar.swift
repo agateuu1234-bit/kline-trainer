@@ -87,6 +87,8 @@ struct TradeActionBar: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 6)        // ≈ 原始高度 → 图区不压缩、不盖 MACD
         .frame(maxWidth: .infinity)
+        // 与 DrawingBottomBar/ReviewControlBar 共享同一固定高度（1a-iii 切片1 Task1 fix）→ 三者切换零跳动。
+        .frame(height: BottomBarMetrics.height)
         // 仅**背景**下探到屏幕底（吃 home-indicator 空白的视觉），按钮内容留在安全区内 → 不进 home-indicator、不盖图
         .background(.bar, ignoresSafeAreaEdges: .bottom)
     }
