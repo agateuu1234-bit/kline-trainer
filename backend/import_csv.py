@@ -15,11 +15,15 @@
 # - D9 清洗丢 NaN/非正价/high<low/越界 + 去重(keep last) + 升序
 from __future__ import annotations
 
+import datetime as _dt
+import math
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+
+from qmt_normalize import trading_date
 
 REQUIRED_COLUMNS = ("datetime", "open", "high", "low", "close", "volume")
 _PRICE_COLS = ("open", "high", "low", "close")
@@ -238,6 +242,139 @@ async def write_to_postgres(dsn: str, stock_code: str, stock_name: str,
                 for r in records
             ])
         return len(records)
+    finally:
+        await conn.close()
+
+
+# ===== QMT Plan 3 B1：write_qmt_stock（替换语义 + 按股 xact 锁 + 重导入互锁）=====
+
+_QMT_PERIODS = ("monthly", "weekly", "daily", "60m", "15m", "3m")
+
+
+class InvalidImportBundleError(ValueError):
+    """P3-D12：ImportBundle 结构/自洽性校验失败——write_qmt_stock 销毁性 DELETE 前
+    的最后一道门，全部 if/raise（禁 assert：python -O 会 strip assert，那样这道
+    fail-closed 守卫会被静默剥离，销毁性写入将在坏数据上照跑不误）。"""
+
+
+class ImportBusyError(RuntimeError):
+    """按股互斥锁（IMPORT_GEN_LOCK_KEY, stock_lock_key）被 B2 训练组生成占用。"""
+
+
+class ReimportBlockedError(RuntimeError):
+    """该股已有 training_sets 行——重导入的作废/版本化尚未落地，暂不支持覆盖导入。"""
+
+
+def validate_import_bundle(bundle, stock_code: str) -> None:
+    """P3-D12：write_qmt_stock 销毁性 DELETE 前的结构校验——ImportBundle 必须六周期
+    齐全、每条记录字段完整合法、coverage 与 daily 记录自洽。全部 if/raise，禁 assert。"""
+    recs = bundle.records
+    if set(recs.keys()) != set(_QMT_PERIODS):
+        raise InvalidImportBundleError("period 集合 ≠ 六周期")
+    seen_codes = set()
+    for per, rows in recs.items():
+        if per not in _QMT_PERIODS:
+            raise InvalidImportBundleError(f"未知 period {per}")
+        if not rows:
+            raise InvalidImportBundleError(f"{per} 空列表")
+        dts = set()
+        for r in rows:
+            if r.get("period") != per:
+                raise InvalidImportBundleError("record period 与 key 不符")
+            seen_codes.add(r.get("stock_code"))
+            for c in ("datetime", "open", "high", "low", "close", "volume"):
+                if r.get(c) is None:
+                    raise InvalidImportBundleError(f"{per} 记录缺 {c}")
+            amt, vol = r.get("amount"), r.get("volume")
+            if amt is None or not math.isfinite(float(amt)):
+                raise InvalidImportBundleError("amount 非有限")
+            if not math.isfinite(float(vol)) or float(vol) < 0 or float(vol) != int(vol):
+                raise InvalidImportBundleError("volume 非法")
+            if r["datetime"] in dts:
+                raise InvalidImportBundleError(f"{per} 重复 datetime")
+            dts.add(r["datetime"])
+    if seen_codes != {stock_code}:
+        raise InvalidImportBundleError("记录 stock_code 与参数不一致")
+    cov = bundle.coverage
+    daily_dates = {trading_date(r["datetime"]) for r in recs["daily"]}
+    in_span = {d for d in daily_dates if cov.start_date <= d <= cov.end_date}
+    dropped = set(cov.dropped_dates)
+    bad = (
+        not (cov.start_date <= cov.end_date) or cov.dense_day_count < 1
+        or cov.start_date not in daily_dates or cov.end_date not in daily_dates
+        or not all(isinstance(d, _dt.date) for d in dropped)
+        or not dropped.isdisjoint(in_span)
+        or cov.dense_day_count != len(in_span - dropped)
+    )
+    if bad:
+        raise InvalidImportBundleError("coverage 与 daily 记录不自洽")
+
+
+async def _assert_stock_coverage_exists(conn) -> None:
+    """写 stock_coverage 前置断言：目标库须已跑 migration 0004（表存在）。用
+    to_regclass 探测而非直接把该表名交给 LOCK TABLE——若表不存在，PG 会在 LOCK
+    处直接抛裸 UndefinedTable、绕过这里的 SchemaDriftError，故必须先于 LOCK 调用
+    （见 write_qmt_stock 内注释）。"""
+    if await conn.fetchval("SELECT to_regclass('stock_coverage')") is None:
+        raise SchemaDriftError("stock_coverage 表不存在，请先跑 migration 0004")
+
+
+_COVERAGE_UPSERT = """
+INSERT INTO stock_coverage(stock_code, dense_1m_start_date, dense_1m_end_date,
+                           dropped_1m_dates, dense_day_count)
+VALUES($1,$2,$3,$4::jsonb,$5)
+ON CONFLICT(stock_code) DO UPDATE SET
+    dense_1m_start_date=EXCLUDED.dense_1m_start_date,
+    dense_1m_end_date=EXCLUDED.dense_1m_end_date,
+    dropped_1m_dates=EXCLUDED.dropped_1m_dates,
+    dense_day_count=EXCLUDED.dense_day_count
+"""
+
+
+async def write_qmt_stock(dsn, stock_code, stock_name, bundle) -> dict:
+    """QMT B1 写入（替换语义）：validate（零 DB 往返）→ 按股 xact 锁 → stock_coverage
+    存在性（早于 LOCK，见下方注释）→ LOCK TABLE → klines 价格列 double 断言 →
+    training_sets 重导入互锁 → stocks UPSERT → DELETE 六周期旧行 → INSERT 六周期
+    新行 → stock_coverage UPSERT。全在同一事务内，任一步失败整体回滚、零写入。"""
+    from generate_training_sets import IMPORT_GEN_LOCK_KEY, stock_lock_key
+    import json, asyncpg
+    validate_import_bundle(bundle, stock_code)          # 取连接前，零 DB 往返
+    sk = stock_lock_key(stock_code)
+    conn = await asyncpg.connect(dsn)
+    try:
+        async with conn.transaction():
+            if not await conn.fetchval("SELECT pg_try_advisory_xact_lock($1,$2)",
+                                       IMPORT_GEN_LOCK_KEY, sk):
+                raise ImportBusyError(f"{stock_code}: 正被 B2 生成，稍后重试")
+            # 存在性检查（to_regclass，不需锁）**必须在 LOCK 之前**（codex plan-R2）：
+            # 若把 stock_coverage 写进 LOCK TABLE 而它不存在，PG 会在 LOCK 处抛
+            # UndefinedTable、绕过下面的 SchemaDriftError → fail-closed 守卫失效。
+            await _assert_stock_coverage_exists(conn)
+            await conn.execute("LOCK TABLE klines, stock_coverage IN ROW EXCLUSIVE MODE")
+            await _assert_klines_price_columns_double(conn)
+            if await conn.fetchval("SELECT 1 FROM training_sets WHERE stock_code=$1 LIMIT 1",
+                                   stock_code):
+                raise ReimportBlockedError(
+                    f"{stock_code}: 已有训练组，重导入的作废/版本化尚未落地，暂不支持覆盖导入")
+            await conn.execute("INSERT INTO stocks(code,name) VALUES($1,$2) "
+                               "ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name",
+                               stock_code, stock_name)
+            await conn.execute("DELETE FROM klines WHERE stock_code=$1 AND period = ANY($2::text[])",
+                               stock_code, list(_QMT_PERIODS))
+            counts = {}
+            for per in _QMT_PERIODS:
+                recs = bundle.records[per]
+                await conn.executemany(_KLINE_INSERT, [
+                    (r["stock_code"], r["period"], r["datetime"], r["open"], r["high"],
+                     r["low"], r["close"], r["volume"], r["amount"], r["ma66"],
+                     r["boll_upper"], r["boll_mid"], r["boll_lower"],
+                     r["macd_diff"], r["macd_dea"], r["macd_bar"]) for r in recs])
+                counts[per] = len(recs)
+            cov = bundle.coverage
+            await conn.execute(_COVERAGE_UPSERT, stock_code, cov.start_date, cov.end_date,
+                               json.dumps([d.isoformat() for d in cov.dropped_dates]),
+                               cov.dense_day_count)
+        return counts
     finally:
         await conn.close()
 

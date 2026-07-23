@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import math
 from pathlib import Path
 
@@ -11,12 +12,19 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import import_csv
 from import_csv import (
     CsvSchemaError,
+    ImportBusyError,
+    InvalidImportBundleError,
+    ReimportBlockedError,
+    SchemaDriftError,
     clean,
     compute_indicators,
     parse_csv,
     to_kline_records,
+    validate_import_bundle,
+    write_qmt_stock,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_1m.csv"
@@ -211,11 +219,19 @@ def _dummy_kline_record() -> dict:
     }
 
 
-def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls: dict):
+def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls: dict,
+                                           lock_ok: bool = True,
+                                           coverage_table_exists: bool = True,
+                                           has_training_set: bool = False):
     """假 asyncpg 模块：pg_catalog（经 to_regclass 精确定位关系）查询返回 data_type 可控，
     execute/executemany/transaction 各自计数——用于断言 fail-closed 时一次写入都没发生。
     记录实际 query 文本到 calls["query"]，供调用方断言用的是 to_regclass 精确查询
-    （而非按表名裸过滤、跨 schema 会取到无关表的 information_schema.columns）。"""
+    （而非按表名裸过滤、跨 schema 会取到无关表的 information_schema.columns）。
+
+    task-6 扩展（write_qmt_stock 需要）：新增 fetchval（按 query 文本内容分派到
+    按股 xact 锁 / stock_coverage 存在性 / training_sets 互锁三条查询，返回值受
+    lock_ok/coverage_table_exists/has_training_set 三个开关控制），三个开关默认值
+    维持 write_to_postgres 既有两个测试的原有行为（它们从不调用 fetchval）。"""
     import sys
     import types
 
@@ -233,6 +249,17 @@ def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls
             calls.setdefault("order", []).append(("fetch", query))
             return [{"column_name": c, "data_type": data_type}
                     for c in ("open", "high", "low", "close")]
+
+        async def fetchval(self, query, *args):
+            calls["fetchval"] = calls.get("fetchval", 0) + 1
+            calls.setdefault("order", []).append(("fetchval", query))
+            if "pg_try_advisory_xact_lock" in query:
+                return lock_ok
+            if "to_regclass('stock_coverage')" in query:
+                return "stock_coverage" if coverage_table_exists else None
+            if "training_sets" in query:
+                return 1 if has_training_set else None
+            raise AssertionError(f"未预期的 fetchval 查询: {query}")
 
         async def execute(self, query, *args):
             calls["execute"] = calls.get("execute", 0) + 1
@@ -315,3 +342,263 @@ def test_write_to_postgres_allows_double_precision_schema(monkeypatch):
     assert "ROW EXCLUSIVE" in order[lock_i][1]
     assert calls.get("executemany", 0) == 1
     assert "to_regclass" in calls.get("query", "")
+
+
+# ===== QMT Plan 3 Task6：validate_import_bundle（P3-D12，全 if/raise）=====
+
+from qmt_ingest import ExportLogEntry, build_stock_import  # noqa: E402
+from qmt_normalize import QmtSource  # noqa: E402
+from qmt_normalize import trading_date as _qmt_trading_date  # noqa: E402
+from tests._qmt_fixtures import gen_valid_sources  # noqa: E402
+
+
+def _qmt_entry(code, period, df):
+    return ExportLogEntry(code=code, period=period, status="ok", rows=len(df),
+                          first_time=int(df.iloc[0]["datetime"]),
+                          last_time=int(df.iloc[-1]["datetime"]), source=code)
+
+
+@pytest.fixture
+def valid_bundle():
+    s1, sd, e1, ed = gen_valid_sources("000001.SZ")
+    return build_stock_import(s1, sd, stock_code="000001.SZ", stock_name="平安",
+                              entry_1m=e1, entry_daily=ed)
+
+
+@pytest.fixture
+def valid_bundle_with_boundary_drop():
+    """首个 1m dense 交易日残缺（100/241 根）→ 落 dropped_dates；因它是窗口最早一日，
+    complete[0] 顺延到下一天 → 该 dropped 日期落在 [start_date,end_date] 之外——
+    覆盖率"端点分区外部分残缺"合法场景，validate_import_bundle 必须放行（不拒）。"""
+    s1, sd, e1, ed = gen_valid_sources("000001.SZ")
+    first_date = min(_qmt_trading_date(e) for e in s1.df["datetime"])
+    is_first = s1.df["datetime"].map(lambda e: _qmt_trading_date(e) == first_date)
+    truncated = s1.df[is_first].iloc[:100]
+    m1 = pd.concat([truncated, s1.df[~is_first]]).sort_values("datetime").reset_index(drop=True)
+    s1b = QmtSource(s1.code, s1.period, m1)
+    e1b = _qmt_entry("000001.SZ", "1m", m1)
+    return build_stock_import(s1b, sd, stock_code="000001.SZ", stock_name="平安",
+                              entry_1m=e1b, entry_daily=ed)
+
+
+def test_bundle_valid_passes(valid_bundle):
+    validate_import_bundle(valid_bundle, "000001.SZ")  # 不抛
+
+
+def test_bundle_missing_period_rejects(valid_bundle):
+    recs = dict(valid_bundle.records)
+    del recs["3m"]
+    bad = dataclasses.replace(valid_bundle, records=recs)
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(bad, "000001.SZ")
+
+
+def test_bundle_extra_period_rejects(valid_bundle):
+    recs = dict(valid_bundle.records)
+    recs["1m"] = recs["3m"]   # 六周期之外多出一个
+    bad = dataclasses.replace(valid_bundle, records=recs)
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(bad, "000001.SZ")
+
+
+def test_bundle_unknown_period_key_rejects(valid_bundle):
+    """键集合含一个非 QMT 六周期名——同一条门（period 集合 ≠ 六周期）拦住。"""
+    recs = dict(valid_bundle.records)
+    del recs["3m"]
+    recs["yearly"] = valid_bundle.records["3m"]
+    bad = dataclasses.replace(valid_bundle, records=recs)
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(bad, "000001.SZ")
+
+
+def test_bundle_empty_period_list_rejects(valid_bundle):
+    recs = dict(valid_bundle.records)
+    recs["3m"] = []
+    bad = dataclasses.replace(valid_bundle, records=recs)
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(bad, "000001.SZ")
+
+
+def test_bundle_period_mismatch_rejects(valid_bundle):
+    valid_bundle.records["3m"][0]["period"] = "1m"
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(valid_bundle, "000001.SZ")
+
+
+def test_bundle_cross_stock_rejects(valid_bundle):
+    valid_bundle.records["3m"][0]["stock_code"] = "000002.SZ"
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(valid_bundle, "000001.SZ")
+
+
+def test_bundle_missing_field_rejects(valid_bundle):
+    valid_bundle.records["daily"][0]["close"] = None
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(valid_bundle, "000001.SZ")
+
+
+def test_bundle_amount_inf_rejects(valid_bundle):
+    valid_bundle.records["3m"][0]["amount"] = float("inf")
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(valid_bundle, "000001.SZ")
+
+
+def test_bundle_volume_negative_rejects(valid_bundle):
+    valid_bundle.records["3m"][0]["volume"] = -5
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(valid_bundle, "000001.SZ")
+
+
+def test_bundle_volume_fractional_rejects(valid_bundle):
+    valid_bundle.records["3m"][0]["volume"] = 10.5
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(valid_bundle, "000001.SZ")
+
+
+def test_bundle_duplicate_datetime_rejects(valid_bundle):
+    valid_bundle.records["3m"][1]["datetime"] = valid_bundle.records["3m"][0]["datetime"]
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(valid_bundle, "000001.SZ")
+
+
+def test_bundle_coverage_start_after_end_rejects(valid_bundle):
+    bad_cov = dataclasses.replace(valid_bundle.coverage,
+                                  start_date=valid_bundle.coverage.end_date,
+                                  end_date=valid_bundle.coverage.start_date)
+    bad = dataclasses.replace(valid_bundle, coverage=bad_cov)
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(bad, "000001.SZ")
+
+
+def test_bundle_dense_day_count_mismatch_rejects(valid_bundle):
+    bad_cov = dataclasses.replace(valid_bundle.coverage,
+                                  dense_day_count=valid_bundle.coverage.dense_day_count + 1)
+    bad = dataclasses.replace(valid_bundle, coverage=bad_cov)
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(bad, "000001.SZ")
+
+
+def test_bundle_endpoint_not_in_daily_set_rejects(valid_bundle):
+    import datetime as _dtm
+    bad_cov = dataclasses.replace(
+        valid_bundle.coverage,
+        end_date=valid_bundle.coverage.end_date + _dtm.timedelta(days=3650))
+    bad = dataclasses.replace(valid_bundle, coverage=bad_cov)
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(bad, "000001.SZ")
+
+
+def test_bundle_dropped_non_date_rejects(valid_bundle):
+    bad_cov = dataclasses.replace(
+        valid_bundle.coverage,
+        dropped_dates=list(valid_bundle.coverage.dropped_dates) + ["not-a-date"])
+    bad = dataclasses.replace(valid_bundle, coverage=bad_cov)
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(bad, "000001.SZ")
+
+
+def test_bundle_dropped_outside_span_allowed(valid_bundle_with_boundary_drop):
+    b = valid_bundle_with_boundary_drop
+    assert len(b.coverage.dropped_dates) == 1
+    assert b.coverage.dropped_dates[0] < b.coverage.start_date   # 确认真落在区间外
+    validate_import_bundle(b, "000001.SZ")   # 不抛——合法的端点分区外部分残缺
+
+
+# ===== QMT Plan 3 Task6：write_qmt_stock（替换语义 + 按股 xact 锁 + 重导入互锁）=====
+
+@pytest.fixture
+def fake_conn(monkeypatch):
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls)
+    return calls
+
+
+@pytest.fixture
+def fake_conn_has_training_set(monkeypatch):
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls,
+                                           has_training_set=True)
+    return calls
+
+
+@pytest.fixture
+def fake_conn_lock_busy(monkeypatch):
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls,
+                                           lock_ok=False)
+    return calls
+
+
+@pytest.fixture
+def fake_conn_no_coverage_table(monkeypatch):
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls,
+                                           coverage_table_exists=False)
+    return calls
+
+
+def _order_index(order, pred):
+    return next(i for i, (k, q) in enumerate(order) if pred(k, q))
+
+
+def test_write_qmt_stock_order_and_atomicity(monkeypatch, fake_conn, valid_bundle):
+    calls = fake_conn
+    real_validate = import_csv.validate_import_bundle
+
+    def _validate_and_record(bundle, stock_code):
+        calls.setdefault("order", []).append(("validate", "validate_import_bundle"))
+        return real_validate(bundle, stock_code)
+
+    monkeypatch.setattr(import_csv, "validate_import_bundle", _validate_and_record)
+
+    counts = asyncio.run(write_qmt_stock("postgres://x", "000001.SZ", "平安", valid_bundle))
+
+    assert counts == {p: len(valid_bundle.records[p]) for p in valid_bundle.records}
+    order = calls["order"]
+    assert order[0][0] == "validate"   # 取连接前先校验，零 DB 往返
+    i_validate = _order_index(order, lambda k, q: k == "validate")
+    i_lock = _order_index(order, lambda k, q: k == "fetchval" and "pg_try_advisory_xact_lock" in q)
+    i_cov_exists = _order_index(order, lambda k, q: k == "fetchval" and "to_regclass('stock_coverage')" in q)
+    i_lock_table = _order_index(order, lambda k, q: k == "execute" and "LOCK TABLE" in q)
+    i_assert_double = _order_index(order, lambda k, q: k == "fetch")
+    i_interlock = _order_index(order, lambda k, q: k == "fetchval" and "training_sets" in q)
+    i_stocks = _order_index(order, lambda k, q: k == "execute" and "INSERT INTO stocks" in q)
+    i_delete = _order_index(order, lambda k, q: k == "execute" and "DELETE FROM klines" in q)
+    i_first_insert = _order_index(order, lambda k, q: k == "executemany")
+    i_last_insert = max(i for i, (k, q) in enumerate(order) if k == "executemany")
+    i_coverage_upsert = _order_index(order, lambda k, q: k == "execute" and "INSERT INTO stock_coverage" in q)
+
+    assert (i_validate < i_lock < i_cov_exists < i_lock_table < i_assert_double
+            < i_interlock < i_stocks < i_delete < i_first_insert)
+    assert i_last_insert < i_coverage_upsert
+    assert calls.get("executemany", 0) == 6
+    assert calls.get("transaction", 0) == 1   # 所有写在同一 transaction 内
+
+
+def test_write_qmt_stock_reimport_blocked(fake_conn_has_training_set, valid_bundle):
+    calls = fake_conn_has_training_set
+    with pytest.raises(ReimportBlockedError):
+        asyncio.run(write_qmt_stock("postgres://x", "000001.SZ", "平安", valid_bundle))
+    order = calls.get("order", [])
+    assert any(k == "fetchval" and "training_sets" in q for k, q in order), "互锁查询应已发生"
+    assert not any(k == "execute" and "DELETE FROM klines" in q for k, q in order), "零写入：DELETE 不应发生"
+    assert calls.get("executemany", 0) == 0, "零写入：INSERT 不应发生"
+
+
+def test_write_qmt_stock_lock_busy(fake_conn_lock_busy, valid_bundle):
+    calls = fake_conn_lock_busy
+    with pytest.raises(ImportBusyError):
+        asyncio.run(write_qmt_stock("postgres://x", "000001.SZ", "平安", valid_bundle))
+    order = calls.get("order", [])
+    assert not any(k == "execute" for k, q in order), "锁忙时不该到达任何 execute（含 LOCK TABLE）"
+    assert calls.get("executemany", 0) == 0
+
+
+def test_write_qmt_stock_missing_coverage_table_raises_schema_drift(fake_conn_no_coverage_table, valid_bundle):
+    calls = fake_conn_no_coverage_table
+    with pytest.raises(SchemaDriftError):
+        asyncio.run(write_qmt_stock("postgres://x", "000001.SZ", "平安", valid_bundle))
+    order = calls.get("order", [])
+    assert not any(k == "execute" and "LOCK TABLE" in q for k, q in order), "stock_coverage 缺表须早于 LOCK TABLE 拦下"
+    assert not any(k == "execute" and "DELETE FROM klines" in q for k, q in order)
+    assert calls.get("executemany", 0) == 0
