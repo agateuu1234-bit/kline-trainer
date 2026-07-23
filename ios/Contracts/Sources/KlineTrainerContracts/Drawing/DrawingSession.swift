@@ -134,6 +134,15 @@ public final class DrawingSession {
     /// **D38：提交后只清 pending —— 工具与会话保持不变（连续画线）**。
     func commitPending(panelPosition: Int) -> DrawingObject? {
         guard let tool = activeDrawingTool, !pendingAnchors.isEmpty else { return nil }
+        // D31（1a-iv）：全锚必须同 period。`DrawingObject.init` 只取 `anchors.first.period`（D29 周期绑定），
+        // 混 period 的锚集合存下去 = 后续所有锚的 candleIndex 被按错误周期解释的坏数据。
+        // 拒交 + **只丢 pending**（保 activeDrawingTool / drawingModeActive，绝不整场取消）。
+        // 本期水平线单锚、落锚即提交，实际触发不到；钩子供 P1c 的多锚工具复用（spec §5.1 #2）。
+        guard let anchorPeriod = pendingAnchors.first?.period,
+              pendingAnchors.allSatisfy({ $0.period == anchorPeriod }) else {
+            discardPendingAnchors()
+            return nil
+        }
         let s = defaultStyle
         let drawing = DrawingObject(
             toolType: tool,

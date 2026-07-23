@@ -227,4 +227,64 @@ struct TrainingEngineDrawingCommitTests {
     //   · 画线会话现在是**全局**的 —— 开 = **两面板一起**进 .drawing，不存在「另一面板被取消」这回事；
     //   · cancelDrawingAllPanels 的唯一调用者已是 endDrawingSessionIfActive（会话收口点），不再单独直呼。
     // 等价且更强的覆盖（含「会话 ⇔ 两面板 mode」不变量断言）见 TrainingEngineDrawingSessionTests。
+
+    // MARK: - 1a-iv（codex plan-R4/R5-high）：锚跨周期 / 显式 period 与锚不符 = 坐标系错乱的坏数据
+    // （`belongsToPanel` 按 `drawing.period` 归属面板，锚却按各自 period 的 candleIndex 解释）。
+    // 新增写入的**两个**真实入口都必须拒收，路由层 routeDrawingCommit 自然继承。
+
+    private func mixedPeriodDrawing() -> DrawingObject {
+        DrawingObject(toolType: .trend,
+                      anchors: [DrawingAnchor(period: .m60, candleIndex: 1, price: 10),
+                                DrawingAnchor(period: .daily, candleIndex: 2, price: 11)],
+                      isExtended: false, panelPosition: 0, revealTick: 0,
+                      lineSubType: .straight)
+    }
+
+    private func periodMismatchDrawing() -> DrawingObject {
+        DrawingObject(toolType: .horizontal,
+                      anchors: [DrawingAnchor(period: .m60, candleIndex: 1, price: 10)],
+                      isExtended: false, panelPosition: 0, revealTick: 0,
+                      period: .daily,                       // ← 与锚不符
+                      lineSubType: .straight)
+    }
+
+    private func consistentDrawing() -> DrawingObject {
+        DrawingObject(toolType: .horizontal,
+                      anchors: [DrawingAnchor(period: .m60, candleIndex: 1, price: 10)],
+                      isExtended: false, panelPosition: 0, revealTick: 0,
+                      lineSubType: .straight)
+    }
+
+    @Test("入口①：appendDrawing 直接调用也拒收坏数据（不能只挡路由层）")
+    func appendDrawingRejectsInconsistentPeriod() {
+        let e = TrainingEngine.preview()
+        e.appendDrawing(mixedPeriodDrawing())
+        e.appendDrawing(periodMismatchDrawing())
+        #expect(e.drawings.isEmpty)
+    }
+
+    @Test("入口②：appendReviewDrawing 直接调用同样拒收")
+    func appendReviewDrawingRejectsInconsistentPeriod() {
+        let e = TrainingEngine.preview()
+        e.appendReviewDrawing(mixedPeriodDrawing())
+        e.appendReviewDrawing(periodMismatchDrawing())
+        #expect(e.reviewDrawings.isEmpty)
+    }
+
+    @Test("路由层继承：routeDrawingCommit 传坏数据 → 两个数组都不增长")
+    func routeDrawingCommitInheritsTheGuard() {
+        let e = TrainingEngine.preview()
+        e.routeDrawingCommit(mixedPeriodDrawing())
+        #expect(e.drawings.isEmpty)
+        #expect(e.reviewDrawings.isEmpty)
+    }
+
+    @Test("对照（防假绿）：一致的 DrawingObject 照常入库 —— 守卫不是把提交路径焊死")
+    func consistentDrawingStillAppends() {
+        let e = TrainingEngine.preview()
+        e.appendDrawing(consistentDrawing())
+        #expect(e.drawings.count == 1)
+        e.routeDrawingCommit(consistentDrawing())
+        #expect(e.drawings.count == 2)                      // 路由层也照常放行
+    }
 }

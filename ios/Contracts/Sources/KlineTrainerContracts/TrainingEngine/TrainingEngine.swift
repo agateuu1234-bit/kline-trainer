@@ -1083,13 +1083,29 @@ extension TrainingEngine {
     /// **review-redesign Task 10**：本方法保持不变（normal/replay 仍走它）——review 模式改经
     /// `routeDrawingCommit`/`appendReviewDrawing` 写 `reviewDrawings`，不再直接调本方法。
     public func appendDrawing(_ drawing: DrawingObject) {
+        guard isPeriodConsistent(drawing) else { return }        // 1a-iv fail-closed：坏数据不入库
         drawings.append(drawing)
     }
 
     /// review-redesign Task 10：复盘新画线唯一写入面——追加进 `reviewDrawings`（不触碰 `drawings`，
     /// 不污染原训练记录）。`RenderStateBuilder.make` review 模式据此叠加 `drawings + reviewDrawings`。
     public func appendReviewDrawing(_ drawing: DrawingObject) {
+        guard isPeriodConsistent(drawing) else { return }        // 1a-iv fail-closed：坏数据不入库
         reviewDrawings.append(drawing)
+    }
+
+    /// 1a-iv（codex plan-R4/R5-high）：新画线入库的**单一校验点**。锚必须全部同 period，且 `period` 字段
+    /// 与锚一致 —— 否则就是坐标系错乱的坏数据（`belongsToPanel` 按 `drawing.period` 归属面板，
+    /// 锚却按各自 period 的 candleIndex 解释）。
+    /// **空锚故意放行（codex plan-R8-medium）**：空锚对象既画不出也命不中（渲染侧 `visibleGeometry`
+    /// 已 fail-closed），它**不属于**本期要防的那类坏数据；而 append 是 public 面，把「空锚」也拒掉等于给
+    /// 「已解码 / 已编辑的既有对象经 append 回写时被静默丢弃」开了口子 —— 数据丢失比一条画不出的空线严重得多。
+    /// 本判据因此只回答一个问题：**锚之间、以及锚与 `period` 字段，是否自洽**。
+    /// **只管新增写入**：resume（init 的 `self.drawings = …`）与复盘装载（`reviewDrawings = l.drawings`）
+    /// 是整体赋值、不经这里 —— 在历史数据装载路径上 fail-closed 会静默吞掉用户已画好的线（见「已知残留 3」）。
+    private func isPeriodConsistent(_ d: DrawingObject) -> Bool {
+        guard let p = d.anchors.first?.period else { return true }   // 空锚：行为与 1a-iv 之前逐字一致
+        return d.anchors.allSatisfy { $0.period == p } && d.period == p
     }
 
     /// `deleteDrawing(at:)` 的 `reviewDrawings` 对应版本（复盘侧删除）。越界 trap，同风格。
