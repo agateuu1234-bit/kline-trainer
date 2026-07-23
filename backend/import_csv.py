@@ -237,7 +237,7 @@ async def write_to_postgres(dsn: str, stock_code: str, stock_name: str,
        （纯 pre-QMT 测试数据）行为不变。
     三条全在写事务内、任何 INSERT 之前。"""
     record_codes = {r["stock_code"] for r in records}
-    if record_codes != {stock_code}:
+    if record_codes and record_codes != {stock_code}:   # 空 records → 沿用旧「0 行」行为，不误报
         raise ValueError(
             f"records stock_code 与参数不一致：records={record_codes}, 参数={stock_code!r}"
         )
@@ -306,8 +306,7 @@ def validate_import_bundle(bundle, stock_code: str) -> None:
         raise InvalidImportBundleError("period 集合 ≠ 六周期")
     seen_codes = set()
     for per, rows in recs.items():
-        if per not in _QMT_PERIODS:
-            raise InvalidImportBundleError(f"未知 period {per}")
+        # per 一定 ∈ _QMT_PERIODS（上面已断言 key 集合恰好相等），无需再查。
         if not rows:
             raise InvalidImportBundleError(f"{per} 空列表")
         dts = set()
@@ -505,8 +504,9 @@ async def _amain_qmt(args) -> int:
                                     entry_1m=entries[(args.stock, "1m")],
                                     entry_daily=entries[(args.stock, "daily")])
         counts = await write_qmt_stock(args.dsn, args.stock, stock_name, bundle)
-    except (QmtIngestRejected, ImportBusyError, ReimportBlockedError,
-            LegacyImportBlockedError, QmtSchemaError, SchemaDriftError) as e:
+    except (QmtIngestRejected, InvalidImportBundleError, ImportBusyError,
+            ReimportBlockedError, LegacyImportBlockedError, QmtSchemaError,
+            SchemaDriftError) as e:
         print(f"[B1] 拒绝导入：{e}", file=sys.stderr)
         return 2
 

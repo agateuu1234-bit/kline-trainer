@@ -10,10 +10,10 @@ import pandas as pd
 
 from generate_training_sets import (GenerateSkipException, PERIOD_BEFORE_CAP, PERIODS,
                                     build_training_windows)
-from import_csv import _INT_COLS, clean, compute_indicators, to_kline_records
+from import_csv import clean, compute_indicators, to_kline_records
 from qmt_normalize import (QmtSchemaError, parse_qmt_datetime, parse_qmt_filename,
                            trading_date)
-from qmt_resample import (build_intraday, compute_dense_coverage, period_boundaries,
+from qmt_resample import (build_intraday, period_boundaries,
                           reconcile_sources, resample_calendar)
 
 _STOCK_COL_CANDIDATES = ("stock", "code", "stock_code", "file", "filename")
@@ -89,7 +89,7 @@ def _reject(reason: str):
     raise QmtIngestRejected(reason)
 
 
-def _assert_values_ok(df, label: str):
+def _assert_values_ok(df):
     """1m/daily 每行 amount 有限非空 + volume 有限整数 >= 0（P3-D9(c)/R15-F2/R16-F2）。"""
     amt = df["amount"].to_numpy(dtype="float64")
     if not np.all(np.isfinite(amt)):
@@ -121,8 +121,8 @@ def build_stock_import(src_1m, src_daily, *, stock_code, stock_name, entry_1m, e
     cln_1m, cln_daily = clean(raw_1m), clean(raw_daily)
 
     # 门3：原始值门（1m+daily amount/volume；daily 另加 clean-len 无损，P3-D9(c)）
-    _assert_values_ok(cln_1m, "1m")
-    _assert_values_ok(cln_daily, "daily")
+    _assert_values_ok(cln_1m)
+    _assert_values_ok(cln_daily)
     if len(cln_daily) != len(raw_daily) or raw_daily["datetime"].duplicated().any():
         _reject("daily_clean_dropped_rows")
 
