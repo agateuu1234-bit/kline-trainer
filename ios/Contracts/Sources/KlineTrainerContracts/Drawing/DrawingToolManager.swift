@@ -64,6 +64,16 @@ public final class DrawingToolManager {
         precondition(activeTool != nil, "commit requires activeTool != nil")
         // invariant: !pendingAnchors.isEmpty
         precondition(!pendingAnchors.isEmpty, "commit requires non-empty pendingAnchors (shouldCommit gate)")
+        // 1a-iv（codex plan-R1-high）：与 `DrawingSession.commitPending` 同一把锁 —— 全锚必须同 period。
+        // `DrawingObject.init` 只取 `anchors.first.period`（D29 周期绑定），混 period 的锚集合写出去 =
+        // 后续锚的 candleIndex 被按错误周期解释的坏数据。本类在 `Sources/` 已无生产调用点（1a-ii D44 把
+        // pending 锚搬进 `DrawingSession`），但它仍是 `public` 的 —— 不能留着一条谁都能调的坏数据写入口。
+        // 拒交语义与 `commitPending` 一致：**只丢 pending**，不动 `activeTool`。
+        guard let anchorPeriod = pendingAnchors.first?.period,
+              pendingAnchors.allSatisfy({ $0.period == anchorPeriod }) else {
+            pendingAnchors = []
+            return
+        }
         let drawing = DrawingObject(
             toolType: activeTool!,
             anchors: pendingAnchors,

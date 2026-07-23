@@ -272,6 +272,12 @@ public struct ChartContainerView: UIViewRepresentable {
             guard let engine, let view else { return }
             let session = engine.drawingSession
             guard session.drawingModeActive, let tool = session.activeDrawingTool else { return }
+            // 1a-iv（codex plan-R2-high）：画线模式现在可以有惯性。**顺序 load-bearing**：
+            //   ① 停两面板减速 + 归一 → ② 重建 renderState（让 viewport 与已 settle 的 offset 一致）
+            //   → ③ 才能拿 viewport 做映射。漏掉②等于没修：viewport 仍是停之前那一帧的。
+            // 语义选「点一下先截住惯性」而非「惯性期间拒收 tap」：后者会让用户在图还在滑时点了没反应。
+            engine.settleDeceleration(initiatedBy: panel)
+            rebuildRenderState(bounds: view.bounds)
             // 空图表（candleStep==0）→ xToIndex 会 Int(NaN) 崩溃 → 守卫（spec §四 load-bearing）。
             let viewport = view.renderState.viewport
             guard viewport.geometry.candleStep > 0 else { return }

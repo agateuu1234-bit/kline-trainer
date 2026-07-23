@@ -193,4 +193,39 @@ struct DrawingSessionTests {
         s.addAnchor(anchor(10), panel: .upper)
         #expect(s.commitPending(panelPosition: 1)?.isExtended == false)
     }
+
+    // MARK: 1a-iv D31：commit 前全锚同 period（本期单锚工具触发不到；供 P1c 多锚工具复用）
+
+    @Test("D31：混 period 的锚集合**拒绝提交** —— 返回 nil、只丢 pending、工具与会话存活")
+    func commitRejectsMixedPeriodAnchors() {
+        let s = DrawingSession()
+        s.activate(tool: .trend)                                  // 多锚工具（本期未开放公共入口，容器层可持有）
+        s.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+        s.addAnchor(DrawingAnchor(period: .daily, candleIndex: 2, price: 11), panel: .upper)   // ← 混了 period
+        #expect(s.pendingAnchors.count == 2)                      // 前置：确实攒了两个
+
+        let drawing = s.commitPending(panelPosition: 0)
+
+        #expect(drawing == nil)                                   // ⭐拒交，不产出坏数据
+        #expect(s.pendingAnchors.isEmpty)                         // ⭐只丢 pending
+        #expect(s.pendingAnchorPanel == nil)
+        #expect(s.activeDrawingTool == .trend)                    // ⭐工具存活（不是整场取消）
+        #expect(s.drawingModeActive == true)                      // ⭐会话存活
+    }
+
+    @Test("对照（防假绿）：同 period 的多锚集合正常提交 —— 断言不是把多锚工具焊死")
+    func commitAcceptsSamePeriodMultiAnchors() {
+        let s = DrawingSession()
+        s.activate(tool: .trend)
+        s.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+        s.addAnchor(DrawingAnchor(period: .m60, candleIndex: 5, price: 12), panel: .upper)
+
+        let drawing = s.commitPending(panelPosition: 0)
+
+        #expect(drawing != nil)
+        #expect(drawing?.anchors.count == 2)
+        #expect(drawing?.period == .m60)                          // D29：period 由 anchors.first 派生
+        #expect(s.pendingAnchors.isEmpty)                         // 提交后清 pending
+        #expect(s.activeDrawingTool == .trend)                    // D38：提交后工具保持（连续画线）
+    }
 }

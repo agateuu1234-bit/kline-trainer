@@ -73,61 +73,105 @@ struct TrainingEngineDrawingSessionTests {
     // 守卫 → **加不加画线守卫都 no-op**，测试恒绿 = 假守卫，什么也没测到。
     // engineMultiPeriod() 备了 .m15/.m60/.daily，(.m60,.daily) --toSmaller--> (.m15,.m60) 是能真切成功的。
 
-    @Test("codex plan-R7：**直接调** switchPeriodCombo（绕过手势）在画线时是 no-op —— 不变量结构上破不了")
-    func periodSwitchIsNoOpWhileDrawing() {
+    @Test("D31 真变化：画线时切周期 → **只丢 pending**（工具/会话/两面板 .drawing 全部存活）")
+    func realPeriodChangeDiscardsOnlyPendingAnchors() {
         let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()
         e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
         e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
-        let upBefore = e.upperPanel.period            // .m60
-        let lowBefore = e.lowerPanel.period           // .daily
-        // 公共入口对未实现工具 fail-closed（whole-branch R2-high）；本测试要的是「多锚工具 pending
-        // 跨面板存活」这个 1a-iii 才会真实可达的场景 —— 借内部 API 手动维持不变量（两面板都武装）。
-        e.drawingSession.activate(tool: .trend)       // 容器可持有任何工具（1a-iii 才开放公共入口）
-        e.armPanelForDrawing(.trend, panel: .upper)    // 手动维持不变量：两面板都武装
-        e.armPanelForDrawing(.trend, panel: .lower)
-        e.drawingSession.addAnchor(DrawingAnchor(period: upBefore, candleIndex: 1, price: 10), panel: .upper)
+        e.toggleDrawingMode()                                    // 会话开：两面板 .drawing，工具 .horizontal
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+        #expect(e.drawingSession.pendingAnchors.count == 1)      // 前置：确实攒着 pending
 
-        e.switchPeriodCombo(direction: .toSmaller)    // 直接调（不经手势）；无守卫时这里会真切成 (.m15,.m60)
+        e.switchPeriodCombo(direction: .toSmaller)               // (.m60,.daily) → (.m15,.m60) 真的能切成功
 
-        #expect(e.upperPanel.period == upBefore)      // 周期没变（fail-closed no-op）
-        #expect(e.lowerPanel.period == lowBefore)
-        #expect(e.drawingSession.drawingModeActive == true)      // 会话没被取消（不是 cancel 语义，D31）
-        #expect(e.drawingSession.activeDrawingTool == .trend)    // 工具还在
-        #expect(e.drawingSession.pendingAnchors.count == 1)      // pending 没丢（丢 pending 是 1a-iv 的 D32）
-        assertInvariant(e)                                       // 两面板仍 .drawing —— 没被 .periodComboSwitched 打回
+        #expect(e.upperPanel.period == .m15)                     // 周期真的变了（防假绿：不是撞 no-op 守卫）
+        #expect(e.lowerPanel.period == .m60)
+        #expect(e.drawingSession.pendingAnchors.isEmpty)         // pending 被丢
+        #expect(e.drawingSession.pendingAnchorPanel == nil)
+        #expect(e.drawingSession.activeDrawingTool == .horizontal)   // ⭐工具存活（不是 cancel/deactivate 语义）
+        #expect(e.drawingSession.drawingModeActive == true)          // ⭐会话存活
+        #expect(e.drawings.isEmpty)                              // 丢 pending 不产生画线
+        assertInvariant(e)                                       // ⭐两面板重新回到 .drawing
     }
 
-    @Test("对照（防假绿）：**退出**画线后切周期恢复正常 —— 守卫不是把功能焊死")
-    func periodSwitchWorksAfterLeavingDrawing() {
-        let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()
+    @Test("D31 no-op（目标周期无数据）：pending 锚**原样保留** —— 判据是「周期变没变」不是「做没做手势」")
+    func noOpPeriodSwitchKeepsPendingAnchors() {
+        let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()   // 只有 m3/m15/m60/daily，无 weekly
         e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
         e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
-        e.toggleDrawingMode()          // 开
-        e.toggleDrawingMode()          // 关
-        e.switchPeriodCombo(direction: .toSmaller)
-        #expect(e.upperPanel.period == .m15)          // 真的切了（证明上一个测试的 no-op 是守卫造成的）
-        #expect(e.lowerPanel.period == .m60)
+        e.toggleDrawingMode()
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+
+        e.switchPeriodCombo(direction: .toLarger)   // 目标 (.daily,.weekly)：weekly 无数据 → no-op
+
+        #expect(e.upperPanel.period == .m60)                     // 前置：确实没变
+        #expect(e.lowerPanel.period == .daily)
+        #expect(e.drawingSession.pendingAnchors.count == 1)      // ⭐锚没被误杀
+        #expect(e.drawingSession.pendingAnchorPanel == .upper)
+        #expect(e.drawingSession.activeDrawingTool == .horizontal)
+        #expect(e.drawingSession.drawingModeActive == true)
         assertInvariant(e)
     }
 
-    @Test("codex plan-R6：手势层同样切不了周期（画线吞竖滑）；1a-iv 放开 D32 时本测试变红")
-    func periodSwitchUnreachableWhileDrawing() {
-        // 切周期的**唯一**产生条件（见 GestureClassifiersTests:407-420）：phase == .ended
-        // + lifecycle == .verticalRejected + 净竖移 >= 40。用这个精确形状造，否则测的是空气。
-        let swipeUp = CGPoint(x: 0, y: -50)
+    @Test("D31 no-op（周期阶梯边界）：已是最粗组合再往粗切 → 周期不变、pending 不丢")
+    func boundaryPeriodSwitchKeepsPendingAnchors() {
+        // 全 6 周期 fixture：(.weekly,.monthly) 是阶梯最后一档，再 toLarger 越界 → no-op。
+        let e = TrainingEngineActionsTests.comboEngine(upper: .weekly, lower: .monthly)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        e.drawingSession.addAnchor(DrawingAnchor(period: .weekly, candleIndex: 0, price: 10), panel: .upper)
 
-        // 画线模式：drawingTakesOver 分支的每个 return 都 periodSwipe == nil（GestureClassifiers.swift:113-121）
-        let drawing = singlePanStep(phase: .ended, cumulative: swipeUp, velocityX: 0,
-                                    lifecycle: .verticalRejected, lastTranslationX: 0,
-                                    drawingTakesOver: true)
-        #expect(drawing.periodSwipe == nil,
-                "画线模式下竖滑不得切周期。若本条变红 = 1a-iv 的 D32 放开了竖滑 → 必须按 D31 用 discardPendingAnchors() 处理 pending，并同步维护「会话 ⇔ 两面板 .drawing」不变量，不许静默漂移")
+        e.switchPeriodCombo(direction: .toLarger)   // 越界 → no-op
 
-        // 对照（防假绿）：非画线模式下**同样**的手势确实会切周期 —— 证明上面的 nil 不是参数造错造出来的
-        let normal = singlePanStep(phase: .ended, cumulative: swipeUp, velocityX: 0,
-                                   lifecycle: .verticalRejected, lastTranslationX: 0,
-                                   drawingTakesOver: false)
-        #expect(normal.periodSwipe == .up)
+        #expect(e.upperPanel.period == .weekly)
+        #expect(e.lowerPanel.period == .monthly)
+        #expect(e.drawingSession.pendingAnchors.count == 1)      // ⭐边界 no-op 不误杀
+        #expect(e.drawingSession.activeDrawingTool == .horizontal)
+        #expect(e.drawingSession.drawingModeActive == true)
+        assertInvariant(e)
+    }
+
+    @Test("D31 no-op（阶梯表出现重复档位）：目标档与当前档相同 → 一切副作用都不许发生、不许裂脑")
+    func duplicateComboEntryIsFullyNoOp() {
+        // 造不出重复档位的真 fixture（periodCombos 是 private static let）→ 用**等价的可观测判据**：
+        // 「目标档 == 当前档」在语义上就是「周期没变」，与边界 no-op 同类。这里锁的是**顺序契约**：
+        // no-op 判据必须在 `.periodComboSwitched` 之前，否则面板已被打回 .autoTracking 而会话还开着。
+        // 结构侧由下面的源码守卫钉死；行为侧由既有的两条 no-op 测试（边界 / 目标无数据）覆盖同一条早返路径。
+        let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        e.switchPeriodCombo(direction: .toLarger)     // 目标 (.daily,.weekly)：weekly 无数据 → 早返
+        assertInvariant(e)                            // ⭐早返路径不得留下裂脑（会话开着但面板 autoTracking）
+        #expect(e.drawingSession.drawingModeActive == true)
+    }
+
+    @Test("D32 × D29 联合：画线模式内切周期后，原周期的线不再属于原面板（跟着它的 period 跑）")
+    func drawingFollowsItsPeriodAcrossInDrawingPeriodSwitch() {
+        let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        // 一条画在上面板（当时 .m60）的线。直接构造 DrawingObject：本条测的是 D29 归属判据，
+        // 与提交路径无关（提交路径由 ChartContainerViewDrawingSessionTests 覆盖）。
+        let line = DrawingObject(toolType: .horizontal,
+                                 anchors: [DrawingAnchor(period: .m60, candleIndex: 1, price: 10)],
+                                 isExtended: false, panelPosition: 0, revealTick: 0,
+                                 lineSubType: .straight)
+        #expect(RenderStateBuilder.belongsToPanel(line, panel: .upper,
+                                                  upperPeriod: e.upperPanel.period,
+                                                  lowerPeriod: e.lowerPanel.period))   // 前置：切之前在上面板
+
+        e.switchPeriodCombo(direction: .toSmaller)     // (.m60,.daily) → (.m15,.m60)：.m60 挪到下面板
+
+        #expect(!RenderStateBuilder.belongsToPanel(line, panel: .upper,
+                                                   upperPeriod: e.upperPanel.period,
+                                                   lowerPeriod: e.lowerPanel.period))  // ⭐不再渲染在上面板
+        #expect(RenderStateBuilder.belongsToPanel(line, panel: .lower,
+                                                  upperPeriod: e.upperPanel.period,
+                                                  lowerPeriod: e.lowerPanel.period))   // ⭐跟着 .m60 跑到下面板
+        assertInvariant(e)
     }
 
     @Test("codex plan-R9：零 render bounds（首帧未布局）下开会话 —— 不变量仍成立，绝不出现「钮亮着但画不了」")
@@ -248,12 +292,11 @@ struct TrainingEngineDrawingSessionTests {
         assertInvariant(e)
     }
 
-    // MARK: whole-branch R4-medium 回归锁：画线期间 resize/旋转 → 退出画线后 offset 必须被归一
+    // MARK: whole-branch R4-medium 回归锁（1a-iv 升级）：画线期间 resize/旋转 → offset 必须**当场**被归一
 
-    @Test("whole-branch R4-medium 回归：连续画线中途转屏/resize → 退出画线后 offset 被夹回合法区间（不留 overscroll 间隙）")
-    func resizeDuringContinuousDrawingIsNormalizedOnExit() {
+    @Test("whole-branch R4-medium 回归（1a-iv 升级）：画线中途转屏/resize → offset **当场**被归一（视口解冻后不再等退出画线才补）")
+    func resizeDuringContinuousDrawingIsNormalized() {
         // fixture 必须**真的滚得动**：200 根 m3、起始 tick=150 → 左侧有历史，maxOffset>0。
-        // （`preview()` / `engineMultiPeriod()` 只有 8 根、且 tick 在起点，maxOffset≈0 → 滚不动，测了等于没测。）
         let (e, _) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
         let wide = TrainingEnginePanLinkageTests.bounds        // 800×600，makeEngine 已 recordRenderBounds
 
@@ -261,27 +304,26 @@ struct TrainingEngineDrawingSessionTests {
         e.beginPan(panel: .upper)
         e.applyPanOffset(deltaPixels: 300, renderBounds: wide, panel: .upper)
         e.endPan(velocity: 0, renderBounds: wide, panel: .upper)
-        let scrolled = e.upperPanel.offset
-        #expect(scrolled > 0)                                  // 防假绿：确实滚出了 offset
+        #expect(e.upperPanel.offset > 0)                       // 防假绿：确实滚出了 offset
 
-        // ② 进画线模式（本期：会话持续，画完一条也不退出）
+        // ② 进画线模式（会话持续，画完一条也不退出）
         e.toggleDrawingMode()
         #expect(e.isDrawingActive(on: .upper))
 
         // ③ 画线期间转屏/resize：变窄后 maxOffset 变小，原 offset 越界。
-        //    reducer 在 .drawing 态**吞掉** .offsetApplied → 这次归一被静默吞了。
+        //    1a-iv 起 `.drawing` 接受 `.offsetApplied` → recordRenderBounds 的归一**当场**生效。
         let narrow = CGRect(x: 0, y: 0, width: 200, height: 480)
         e.recordRenderBounds(narrow, panel: .upper)
         e.recordRenderBounds(narrow, panel: .lower)
-        let bounds = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: narrow)
-        #expect(e.upperPanel.offset > bounds.maxOffset)        // 防假绿：此刻确实是越界的（bug 的现场）
+        let during = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: narrow)
+        #expect(e.upperPanel.offset <= during.maxOffset)       // 改造前：> maxOffset，要等退出画线才补
+        #expect(e.upperPanel.offset >= during.minOffset)
+        assertInvariant(e)                                     // 归一不得把面板踢出 .drawing
 
-        // ④ 退出画线 —— 修复前：bounds 没再变，recordRenderBounds 的 previous!=bounds 守卫早返，
-        //    归一永远不补跑 → 图表挂着 overscroll 间隙直到用户碰巧再拖一次。
+        // ④ 退出画线后依然合法（会话结束的补跑归一是幂等防御）
         e.toggleDrawingMode()
-
         let after = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: narrow)
-        #expect(e.upperPanel.offset <= after.maxOffset)        // 已夹回
+        #expect(e.upperPanel.offset <= after.maxOffset)
         #expect(e.upperPanel.offset >= after.minOffset)
         assertInvariant(e)
     }
@@ -354,4 +396,216 @@ struct TrainingEngineDrawingSessionTests {
         #expect(e.isDrawingActive(on: .lower) == true)
         assertInvariant(e)
     }
+
+    // MARK: 1a-iv 视口解冻：画线会话开着时，平移 / 缩放必须真的作用到视口
+
+    @Test("1a-iv：画线会话开着时单指平移真的移动图表（1a-iii 及以前 offset 恒不动）")
+    func panMovesChartWhileDrawing() {
+        // fixture 必须**真的滚得动**：200 根 m3、起始 tick=150 → 左侧有历史，maxOffset>0。
+        let (e, _) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let wide = TrainingEnginePanLinkageTests.bounds        // 800×600，makeEngine 已 recordRenderBounds
+        e.toggleDrawingMode()
+        #expect(e.isDrawingActive(on: .upper))                 // 防假绿：确实在画线态，不是普通滚动
+        let before = e.upperPanel.offset
+
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 120, renderBounds: wide, panel: .upper)
+
+        #expect(e.upperPanel.offset > before)                  // 改造前：恒 == before（reducer 吞）
+        e.endPan(velocity: 0, renderBounds: wide, panel: .upper)
+        assertInvariant(e)                                     // 平移不得把面板踢出 .drawing
+        #expect(e.drawingSession.drawingModeActive == true)
+    }
+
+    @Test("1a-iv：画线会话开着时双指缩放真的改变 visibleCount，且走 focus 路径（不右锚跳回最新）")
+    func pinchZoomsWhileDrawing() {
+        let (e, _) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let wide = TrainingEnginePanLinkageTests.bounds
+        // 先滚出非零 offset —— 只有此时「右锚(offset=0)」与「focus 保持」才可区分
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 300, renderBounds: wide, panel: .upper)
+        e.endPan(velocity: 0, renderBounds: wide, panel: .upper)
+        #expect(e.upperPanel.offset > 0)                       // 防假绿
+
+        e.toggleDrawingMode()
+        let countBefore = e.upperPanel.visibleCount
+        e.applyPinch(scale: 1.0, focusX: wide.midX, phase: .began, panel: .upper)
+        e.applyPinch(scale: 2.0, focusX: wide.midX, phase: .changed, panel: .upper)
+        e.applyPinch(scale: 2.0, focusX: wide.midX, phase: .ended, panel: .upper)
+
+        #expect(e.upperPanel.visibleCount != countBefore)      // 改造前：恒不变（reducer 吞）
+        #expect(e.upperPanel.offset != 0)                      // 走 focus 路径，不是右锚置 0 跳回最新
+        assertInvariant(e)
+    }
+
+    @Test("1a-iv：画线模式甩动起惯性后，settleDeceleration(initiatedBy:) 必须把两面板都定住（落锚不得对着移动中的视口）")
+    func settleDecelerationStopsInertiaOnBothPanels() {
+        // ⚠️ fixture 必须**真的滚得动**（codex plan-R6-high）：`engineMultiPeriod()` 只有 2 根 m60 / 1 根 daily，
+        // maxOffset≈0 → 惯性根本跑不起来，「惯性在跑」的前置断言会红或被人调松，整条测试变空气。
+        let (e, fakes) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let bounds = TrainingEnginePanLinkageTests.bounds       // 800×600，makeEngine 已 recordRenderBounds
+        #expect(RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: bounds).maxOffset > 0)   // 前置：真有滚动空间
+        e.toggleDrawingMode()
+        #expect(e.isDrawingActive(on: .upper))                 // 前置：真在画线态
+
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 200, renderBounds: bounds, panel: .upper)
+        e.endPan(velocity: 3000, renderBounds: bounds, panel: .upper)   // 大速度 → 起惯性
+        _ = fakes().last?.fire(1.0 / 60.0)
+        let mid = e.upperPanel.offset
+        _ = fakes().last?.fire(1.0 / 60.0)
+        #expect(e.upperPanel.offset != mid)                    // 防假绿：惯性确实在跑（否则本测试测的是空气）
+
+        e.settleDeceleration(initiatedBy: .upper)
+
+        let settledUpper = e.upperPanel.offset
+        let settledLower = e.lowerPanel.offset
+        for _ in 0..<10 { _ = fakes().last?.fire(1.0 / 60.0) }
+        #expect(e.upperPanel.offset == settledUpper)           // ⭐已定住，后续帧不再改 offset
+        #expect(e.lowerPanel.offset == settledLower)           // ⭐follower 也不再被联动驱动
+        assertInvariant(e)                                     // 定住不得把面板踢出 .drawing
+    }
+
+    @Test("1a-iv：甩上面板起惯性后立刻捏合**下**面板 —— 上面板的减速不得再经联动改下面板 offset")
+    func pinchOnOnePanelSettlesTheOtherPanelsInertia() {
+        // fixture 同上：必须真的滚得动（codex plan-R6-high）
+        let (e, fakes) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let bounds = TrainingEnginePanLinkageTests.bounds
+        #expect(RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: bounds).maxOffset > 0)
+        e.toggleDrawingMode()
+
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 200, renderBounds: bounds, panel: .upper)
+        e.endPan(velocity: 3000, renderBounds: bounds, panel: .upper)   // 上面板起惯性
+        _ = fakes().last?.fire(1.0 / 60.0)
+        let lowerMid = e.lowerPanel.offset
+        _ = fakes().last?.fire(1.0 / 60.0)
+        #expect(e.lowerPanel.offset != lowerMid)                        // 防假绿：上面板减速确实在经联动驱动下面板
+
+        e.applyPinch(scale: 1.0, focusX: bounds.midX, phase: .began, panel: .lower)   // 捏合**下**面板
+
+        let lowerAtPinchStart = e.lowerPanel.offset
+        for _ in 0..<10 { _ = fakes().last?.fire(1.0 / 60.0) }
+        #expect(e.lowerPanel.offset == lowerAtPinchStart)               // ⭐上面板的 stale 减速不再动下面板
+        assertInvariant(e)
+    }
+
+    @Test("1a-iv：在 overscroll 回弹中途定住 —— 夹回界内后两面板右缘仍对齐同一 tick（不留错位）")
+    func settleDuringBounceKeepsPanelsTimeAligned() {
+        let (e, fakes) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let bounds = TrainingEnginePanLinkageTests.bounds
+        e.toggleDrawingMode()
+
+        // 拖到**超过 maxOffset**（最老边橡皮筋）再松手 → 走 bounce 分支（allowOverscroll）
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: bounds)
+        #expect(ob.maxOffset > 0)                                    // 前置：真有滚动空间
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset + 400, renderBounds: bounds, panel: .upper)
+        e.endPan(velocity: 0, renderBounds: bounds, panel: .upper)
+        _ = fakes().last?.fire(1.0 / 60.0)
+        #expect(e.upperPanel.offset > ob.maxOffset)                  // 前置：确实还在越界区（否则测不到 clamp）
+
+        e.settleDeceleration(initiatedBy: .upper)
+
+        // ⭐夹回界内 + 两面板右缘仍指向同一个 global tick
+        #expect(e.upperPanel.offset <= ob.maxOffset)
+        let upperTick = PanLinkage.rightEdgeTick(offset: e.upperPanel.offset,
+                                                 candles: e.allCandles[e.upperPanel.period] ?? [],
+                                                 rawVisible: e.upperPanel.visibleCount,
+                                                 bounds: bounds, tick: e.tick.globalTickIndex)
+        let lowerTick = PanLinkage.rightEdgeTick(offset: e.lowerPanel.offset,
+                                                 candles: e.allCandles[e.lowerPanel.period] ?? [],
+                                                 rawVisible: e.lowerPanel.visibleCount,
+                                                 bounds: bounds, tick: e.tick.globalTickIndex)
+        #expect(upperTick == lowerTick)                              // ⭐无错位（补 propagate 之前这里会不等）
+    }
+
+    @Test("1a-iv：拖到越界时两指接管（先 cancelPan 再 pinch.began）—— 夹回后两面板右缘仍对齐同一 tick")
+    func twoFingerTakeoverDuringOverscrollKeepsPanelsTimeAligned() {
+        let (e, _) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let bounds = TrainingEnginePanLinkageTests.bounds
+        e.toggleDrawingMode()
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: bounds)
+        #expect(ob.maxOffset > 0)                                    // 前置：真有滚动空间
+
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset + 400, renderBounds: bounds, panel: .upper)
+        #expect(e.upperPanel.offset > ob.maxOffset)                  // 前置：确实拖进了越界区
+
+        // 真实 UIKit 时序：两指落下 → arbiter supersede 单指 → onPan(.cancelled) → cancelPan → 然后 pinch.began
+        e.cancelPan(panel: .upper)
+        e.applyPinch(scale: 1.0, focusX: bounds.midX, phase: .began, panel: .upper)
+
+        #expect(e.upperPanel.offset <= ob.maxOffset)                 // 夹回界内
+        let upperTick = PanLinkage.rightEdgeTick(offset: e.upperPanel.offset,
+                                                 candles: e.allCandles[e.upperPanel.period] ?? [],
+                                                 rawVisible: e.upperPanel.visibleCount,
+                                                 bounds: bounds, tick: e.tick.globalTickIndex)
+        let lowerTick = PanLinkage.rightEdgeTick(offset: e.lowerPanel.offset,
+                                                 candles: e.allCandles[e.lowerPanel.period] ?? [],
+                                                 rawVisible: e.lowerPanel.visibleCount,
+                                                 bounds: bounds, tick: e.tick.globalTickIndex)
+        #expect(upperTick == lowerTick)                              // ⭐无错位（补 propagate 之前这里会不等）
+    }
+
+    // MARK: whole-branch codex R1-high 回归：退出画线会话必须停两面板惯性
+    // Task 1 让 `.drawing` 的 `panEnded` 会起减速动画（改造前 `.drawing` 吞 panEnded、不起减速，这条路不存在）。
+    // 但 `endDrawingSessionIfActive` / `cancelDrawingAllPanels` 两个 teardown 只 deactivate + cancelUnchecked +
+    // 补跑一次性 normalize——不停 animator。于是：画线中甩一下起惯性 → 退出画线（回 autoTracking）→ animator
+    // 仍在跑 → 后续减速帧继续 `.offsetApplied` 且被 autoTracking 接受、经 propagateLinkage 连带另一面板一起漂。
+
+    @Test("whole-branch codex R1-high 回归：toggleDrawingMode 关闭画线会话必须停两面板惯性（否则退出后画面继续漂）")
+    func toggleDrawingModeOffStopsInertiaOnBothPanels() {
+        let (e, fakes) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let bounds = TrainingEnginePanLinkageTests.bounds       // 800×600，makeEngine 已 recordRenderBounds
+        e.toggleDrawingMode()
+        #expect(e.isDrawingActive(on: .upper))                 // 前置：真在画线态
+
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 200, renderBounds: bounds, panel: .upper)
+        e.endPan(velocity: 3000, renderBounds: bounds, panel: .upper)   // 大速度 → 起惯性
+        _ = fakes().last?.fire(1.0 / 60.0)
+        let mid = e.upperPanel.offset
+        _ = fakes().last?.fire(1.0 / 60.0)
+        #expect(e.upperPanel.offset != mid)                    // 防假绿：惯性确实在跑（否则本测试测的是空气）
+
+        e.toggleDrawingMode()                                  // 退出画线（关闭会话）
+
+        let after = e.upperPanel.offset
+        let afterLower = e.lowerPanel.offset
+        for _ in 0..<10 { _ = fakes().last?.fire(1.0 / 60.0) }
+        #expect(e.upperPanel.offset == after)                  // ⭐核心：退出画线后惯性已停，offset 不再变
+        #expect(e.lowerPanel.offset == afterLower)             // ⭐follower 也不再被残留惯性经联动带着漂
+    }
+
+    @Test("whole-branch codex R1-high 回归：cancelDrawingAllPanels 必须停两面板惯性（否则退出后画面继续漂）")
+    func cancelDrawingAllPanelsStopsInertiaOnBothPanels() {
+        let (e, fakes) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let bounds = TrainingEnginePanLinkageTests.bounds
+        e.toggleDrawingMode()
+        #expect(e.isDrawingActive(on: .upper))                 // 前置：真在画线态
+
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 200, renderBounds: bounds, panel: .upper)
+        e.endPan(velocity: 3000, renderBounds: bounds, panel: .upper)   // 大速度 → 起惯性
+        _ = fakes().last?.fire(1.0 / 60.0)
+        let mid = e.upperPanel.offset
+        _ = fakes().last?.fire(1.0 / 60.0)
+        #expect(e.upperPanel.offset != mid)                    // 防假绿：惯性确实在跑
+
+        e.cancelDrawingAllPanels()                             // 退出画线（取消整场会话）
+
+        let after = e.upperPanel.offset
+        let afterLower = e.lowerPanel.offset
+        for _ in 0..<10 { _ = fakes().last?.fire(1.0 / 60.0) }
+        #expect(e.upperPanel.offset == after)                  // ⭐核心：退出画线后惯性已停，offset 不再变
+        #expect(e.lowerPanel.offset == afterLower)             // ⭐follower 也不再被残留惯性经联动带着漂
+    }
+
+    // 注：本 bug 的第三条退出路径 `holdOrObserve` 未加回归测试——它经 `advanceAndAccount` 调用，
+    // 而 `advanceAndAccount` 自己在最开头就调了 `stopAllDeceleration()`（D7：立即中断 free-scrolling 惯性），
+    // **早于**其内部对 `endDrawingSessionIfActive()` 的调用。故 animator 在 teardown 方法运行前已被这条
+    // 独立的既有路径停掉，无法在这条路径上复现本 bug（已用同形状探针实测确认：修复前即为绿，不是有效回归锁）。
+    // `buy`/`sell` 同样经 `advanceAndAccount`，同一原因不受本 bug 影响。真正受影响的只有 teardown 被
+    // **直接**调用、不经 `advanceAndAccount` 的路径——即上面两条：`toggleDrawingMode`(关) 与 `cancelDrawingAllPanels`。
 }

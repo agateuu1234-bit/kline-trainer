@@ -427,13 +427,20 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   host-pure 守卫（colorRowIsSevenChromaticPlusLineColor/colorRowHasExactlyEightSwatches），净 +1；
 #   两者相抵 −1+1=0。本次改动的真实数字来自 Task1 遗留的基线纠偏：1528（已知漂移，见上）→
 #   1531（fresh 日志实测真值，Task1 的 +3 与 Task2 的 ±0 相加）。
+#   1a-iv Task1b（本次）：uikit 58→59（本 worktree 内 catalyst-total-baseline.txt/uikit 基线在
+#   1a-iv Task1/Task2 期间已停在「58 / 1532」，本 task 是本分支首次改动它们）。新增 1 条 UIKit-gated
+#   行为测试 ChartContainerViewDrawingSessionTests.tapDuringInertiaUsesSettledViewport（真调
+#   handleDrawingTapForTesting + 假帧驱动，证「锚落在 settleDeceleration 之后的视口」）。total
+#   基线文件本身仍是 1532（真实漂移 +9 在 ±30 容差内，未改 catalyst-total-baseline.txt）；但本条
+#   自测的 fixture 必须用一次**真** fresh Catalyst 构建日志重裁（禁手打伪造行，见 R9）——本次
+#   实测 fresh 总用例数 = 1541，故 pass-main-current.log 与下方回显数字同步改为 1541。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1532" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 58 / total 1532）→ GATE PASS 且回显 1532 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1541" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 59 / total 1541）→ GATE PASS 且回显 1541 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1532，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1541，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 

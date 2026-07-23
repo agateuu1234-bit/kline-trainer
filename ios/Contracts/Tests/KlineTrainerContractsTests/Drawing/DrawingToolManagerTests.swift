@@ -172,4 +172,34 @@ struct DrawingToolManagerTests {
         #expect(m.completedDrawings[0].lineSubType == .straight)
         #expect(m.completedDrawings[0].isExtended == false)
     }
+
+    // MARK: 1a-iv：第二条 DrawingObject 写入口同样必须拒绝混 period 的锚集合（codex plan-R1-high）
+
+    @Test("混 period 的锚集合**不得**被写成 DrawingObject —— completedDrawings 不增长，只丢 pending")
+    func commitRejectsMixedPeriodAnchors() {
+        let m = DrawingToolManager(enabledTools: [.trend])
+        m.toggle(.trend)
+        m.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10))
+        m.addAnchor(DrawingAnchor(period: .daily, candleIndex: 2, price: 11))   // ← 混了 period
+        #expect(m.pendingAnchors.count == 2)                  // 前置：确实攒了两个
+
+        m.commit()
+
+        #expect(m.completedDrawings.isEmpty)                  // ⭐坏数据没被写出来
+        #expect(m.pendingAnchors.isEmpty)                     // 只丢 pending
+    }
+
+    @Test("对照（防假绿）：同 period 的多锚集合正常提交 —— 守卫不是把 commit 焊死")
+    func commitAcceptsSamePeriodAnchors() {
+        let m = DrawingToolManager(enabledTools: [.trend])
+        m.toggle(.trend)
+        m.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10))
+        m.addAnchor(DrawingAnchor(period: .m60, candleIndex: 5, price: 12))
+
+        m.commit()
+
+        #expect(m.completedDrawings.count == 1)
+        #expect(m.completedDrawings.first?.period == .m60)
+        #expect(m.pendingAnchors.isEmpty)
+    }
 }

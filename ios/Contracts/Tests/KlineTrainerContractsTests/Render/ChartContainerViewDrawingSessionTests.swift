@@ -146,5 +146,45 @@ struct ChartContainerViewDrawingSessionTests {
         upperC.handleDrawingTapForTesting(at: mainChartPoint(upperV))
         #expect(engine.drawings.isEmpty)
     }
+
+    @Test("1a-iv：惯性未停时点击 —— 锚落在**定住后**视口映射的那根 K 线上，且提交后图不再滑")
+    func tapDuringInertiaUsesSettledViewport() {
+        // 需要「真滚得动 + 可控帧驱动」的 engine：makeRig 的 preview fixture 只有 1 根可见 candle、滚不动。
+        let (engine, fakes) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let panelBounds = TrainingEnginePanLinkageTests.bounds       // 800×600，makeEngine 已 recordRenderBounds
+        let c = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
+        let v = KLineView(frame: panelBounds)
+        c.attach(to: v)
+        c.rebuildRenderState(bounds: panelBounds)
+        engine.toggleDrawingMode()
+        #expect(engine.isDrawingActive(on: .upper))                  // 前置：真在画线态
+
+        // 甩出惯性 → 记下「滑动中」这一帧的 renderState → 再让 engine 多跑 6 帧但**不重建** → view 里的 viewport 变 stale
+        engine.beginPan(panel: .upper)
+        engine.applyPanOffset(deltaPixels: 200, renderBounds: panelBounds, panel: .upper)
+        engine.endPan(velocity: 3000, renderBounds: panelBounds, panel: .upper)
+        c.rebuildRenderState(bounds: panelBounds)
+        let staleVP = v.renderState.viewport
+        for _ in 0..<6 { _ = fakes().last?.fire(1.0 / 60.0) }
+
+        // 取可见 slice **中部**的点：定住后索引会平移几根，取首根会掉出 slice 被 tapToAnchor fail-closed 拒掉。
+        let staleMapper = CoordinateMapper(viewport: staleVP, displayScale: v.traitCollection.displayScale)
+        let midIdx = staleVP.startIndex + staleVP.visibleCount / 2
+        let point = CGPoint(x: staleMapper.indexToX(midIdx) + staleVP.geometry.candleStep / 2,
+                            y: staleVP.mainChartFrame.midY)
+
+        c.handleDrawingTapForTesting(at: point)
+
+        let settledMapper = CoordinateMapper(viewport: v.renderState.viewport,
+                                             displayScale: v.traitCollection.displayScale)
+        let settledIdx = settledMapper.xToIndex(point.x)
+        #expect(settledIdx != staleMapper.xToIndex(point.x))         // 防假绿：stale 与 settled 真的映射到不同 candle
+        #expect(engine.drawings.count == 1)                          // 线真的落了（没被 fail-closed 守卫吞掉）
+        #expect(engine.drawings.first?.anchors.first?.candleIndex == settledIdx)   // ⭐用的是定住后的映射
+
+        let afterTap = engine.upperPanel.offset
+        for _ in 0..<10 { _ = fakes().last?.fire(1.0 / 60.0) }
+        #expect(engine.upperPanel.offset == afterTap)                // ⭐惯性已被 tap 截住，提交后图不再滑
+    }
 }
 #endif

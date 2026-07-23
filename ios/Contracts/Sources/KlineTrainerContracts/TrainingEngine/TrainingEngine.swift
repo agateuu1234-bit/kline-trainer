@@ -377,23 +377,13 @@ public final class TrainingEngine {
         (.m3, .m15), (.m15, .m60), (.m60, .daily), (.daily, .weekly), (.weekly, .monthly)
     ]
 
-    /// 两指上下滑切换周期组合（plan v1.5 §4.4）。
-    /// - 边界 / 当前组合不在序列(损坏 resume) / target 周期无数据 → no-op（不 advance、不 bump）。
-    /// - 命中 → 改双面板 period + 对两面板派发 `.periodComboSwitched`（硬切 autoTracking + clearPendingDrawing；
-    ///   后者 effect 在 E5b 无消费者，画线延后顺位 7，故无 pending 可清，忽略安全）。
+    /// 单指竖滑 / 两指上下滑切换周期组合（plan v1.5 §4.4）。
+    /// - 边界 / 当前组合不在序列(损坏 resume) / target 周期无数据 → no-op（不 advance、不 bump、**不碰 pending 锚**）。
+    /// - 命中 → 改双面板 period + 对两面板派发 `.periodComboSwitched`（硬切 autoTracking）+ offset 归零。
+    /// - **P1b-1a-iv D31**：命中且**周期组合真的变了**才做画线会话善后（见
+    ///   `restoreDrawingSessionAfterPeriodChange`）。1a-ii 的「画线时切周期一律 no-op」守卫本期删除 —— 那是
+    ///   为了在手势层还吞着竖滑时把「碰巧不可达」升级成「结构上不可能」的临时措施，D32 放开后它变成功能焊死。
     public func switchPeriodCombo(direction: PeriodDirection) {
-        // P1b-1a-ii：画线会话开着时切周期 = **no-op**（fail-closed，codex plan-R7-high）。
-        // 为什么不是「结束会话」也不是「丢 pending」：
-        //   · `.periodComboSwitched` 会把两面板硬切 `.autoTracking`（Reducer:152-155）→ 若放行，会话还开着
-        //     而面板已 autoTracking = 本期要消灭的漂移；且 pending 锚会绑在一个刚变过的周期组合上。
-        //   · 但「周期改变 → 丢 pending」是 spec §3.2 **明确划给 1a-iv（D32）** 的语义，且必须用
-        //     `discardPendingAnchors()`（保工具）而非整场取消 —— 本期不得提前实现。
-        //   · 故本期取**最小且不可漂移**的一档：画线时干脆不换周期。这与手势层现状**完全一致**——
-        //     `singlePanStep(drawingTakesOver:)` 的每个 return 都 `periodSwipe: nil`
-        //     （GestureClassifiers.swift:113-121），两指切周期未接线 → 真实用户本来就切不动。
-        //     守卫只是把「碰巧不可达」升级成「**结构上不可能**」（直接调也漂不了）。
-        // 1a-iv 落 D32 时**删掉这条守卫**，改按 D31 用 discardPendingAnchors() + 维护会话不变量。
-        guard !drawingSession.drawingModeActive else { return }
         let combos = TrainingEngine.periodCombos
         guard let cur = combos.firstIndex(where: {
             $0.upper == upperPanel.period && $0.lower == lowerPanel.period
@@ -404,6 +394,13 @@ public final class TrainingEngine {
         // D8 数据完整性守卫：避免后续 stepsForPeriod/渲染落在无数据周期
         guard let u = allCandles[next.upper], !u.isEmpty,
               let l = allCandles[next.lower], !l.isEmpty else { return }
+        // D31：判据是「周期组合真的会变吗」，**不是**「用户做了切周期手势」。上面每一道守卫都可能 no-op，
+        // no-op 时绝不能碰 pending 锚。
+        // ⭐**必须在任何副作用之前判**（codex plan-R6-medium）：若把比较放在 `.periodComboSwitched` 之后，
+        // 遇到「目标档与当前档相同」（阶梯表被改/损坏 resume 造成的重复项）时，两面板已被硬切回
+        // `.autoTracking`，而 guard 又提前 return 跳过了重新武装 → `drawingModeActive` 还是 true、
+        // 面板却已不在 `.drawing` = 正是本期要消灭的裂脑态。
+        guard next.upper != upperPanel.period || next.lower != lowerPanel.period else { return }
         stopAllDeceleration()                       // D7
         upperPanel.period = next.upper
         lowerPanel.period = next.lower
@@ -411,6 +408,24 @@ public final class TrainingEngine {
         _ = lowerPanel.reduce(.periodComboSwitched)
         resetOffsetAfterAutoTracking(.upper)        // D8
         resetOffsetAfterAutoTracking(.lower)
+        restoreDrawingSessionAfterPeriodChange()    // 到这儿周期一定真变了
+    }
+
+    /// D31（P1b-1a-iv）：周期组合**真的变了**之后的画线会话善后。周期没变时**不会**被调用。
+    /// ① **只丢 pending 锚**（`discardPendingAnchors()`）：锚绑在旧周期的 candleIndex 上，换了周期坐标系就错了。
+    ///    保留 `activeDrawingTool` 与 `drawingModeActive` —— **绝不**调 `deactivate()`：那会连工具一起清掉，
+    ///    连续画线断掉，且 1b-i 的 tap 会误入选择态（spec §5.1 #2 逐字）。
+    /// ② `.periodComboSwitched` 把两面板硬切回 `.autoTracking`，直接破坏不变量「会话开 ⇔ 两面板 .drawing」
+    ///    → 重新武装两个面板。武装依赖 `renderBounds`/reducer 态，理论上可能不生效 → **fail-closed 整场收口**
+    ///    （同 `beginDrawingSession` 的事务性先例），绝不留「铅笔钮亮着、点图没反应」的裂脑态。
+    private func restoreDrawingSessionAfterPeriodChange() {
+        guard drawingSession.drawingModeActive, let tool = drawingSession.activeDrawingTool else { return }
+        if !drawingSession.pendingAnchors.isEmpty { drawingSession.discardPendingAnchors() }
+        armPanelForDrawing(tool, panel: .upper)
+        armPanelForDrawing(tool, panel: .lower)
+        if !(isDrawingActive(on: .upper) && isDrawingActive(on: .lower)) {
+            endDrawingSessionIfActive()   // fail-closed：宁可退出画线，也不留半武装
+        }
     }
 
     // MARK: - 持有 / 观察（E5b）
@@ -728,7 +743,7 @@ extension TrainingEngine {
     }
 
     /// 减速 onUpdate + 单指 pan `.changed` 共用：每帧 delta 经 reducer offsetApplied
-    /// （drawing 吞 / autoTracking·freeScrolling 累加 + bump，spec L1123-1129）。
+    /// （三态均 += delta + bump，spec L1123-1129）。
     private func applyOffsetDelta(_ delta: CGFloat, panel: PanelId) {
         _ = reduce(.offsetApplied(deltaPixels: delta), on: panel)
     }
@@ -740,7 +755,7 @@ extension TrainingEngine {
 
     /// leader 帧后：把 follower 右缘对齐到 leader 右缘的同一 global tick（单向，经现有 .offsetApplied）。
     /// 只由三个具名 gesture 函数（beginPan/applyPanOffset/floorOrFull）调；不挂通用 applyOffsetDelta（防与
-    /// lockstep reset 双驱，D5/R7）。drawing 态 follower 被 reducer 吞（D10）。无 bounds/空 candle → no-op。
+    /// lockstep reset 双驱，D5/R7）。drawing 态 follower 照常被驱动（D10，1a-iv 改写）。无 bounds/空 candle → no-op。
     private func propagateLinkage(fromLeader leader: PanelId) {
         let f = follower(of: leader)
         let lBounds = renderBounds(leader), fBounds = renderBounds(f)
@@ -752,7 +767,7 @@ extension TrainingEngine {
         let fTarget = PanLinkage.followerOffset(targetTick: leaderTick, candles: fCandles,
                             rawVisible: panelState(f).visibleCount, bounds: fBounds, tick: tick.globalTickIndex)
         let fCur = panelState(f).offset
-        if fTarget != fCur { applyOffsetDelta(fTarget - fCur, panel: f) }   // D6（drawing 态吞 D10）
+        if fTarget != fCur { applyOffsetDelta(fTarget - fCur, panel: f) }   // D6（drawing 态照常驱动，D10 1a-iv 改写）
     }
 
     // MARK: R1b-wire offset clamp（D9：drag full / decel·bounce floor-or-full / reducer 无界 D2）
@@ -784,21 +799,44 @@ extension TrainingEngine {
 
     /// 中断进行中减速/bounce（新交互起手：beginPan/activateDrawingTool/pinch.began，D10）：停 + 仅当**活跃** run 时
     /// 把 overscroll 归界内。`isDecelerating`-guard：动画已 settle/cancel（activeBounds 残留旧几何）时不 clamp，防 stale 误钳。
-    private func interruptDeceleration(panel: PanelId) {
+    @discardableResult
+    private func interruptDeceleration(panel: PanelId) -> Bool {
         let a = animator(for: panel)
         let wasRunning = a.isDecelerating
         a.stop()
-        if wasRunning, let act = activeBoundsFor(panel) {
-            let cur = panelState(panel).offset
-            let clamped = min(max(cur, act.bounds.minOffset), act.bounds.maxOffset)
-            if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }   // overscroll(>max) 归 maxOffset
-        }
+        guard wasRunning, let act = activeBoundsFor(panel) else { return false }
+        let cur = panelState(panel).offset
+        let clamped = min(max(cur, act.bounds.minOffset), act.bounds.maxOffset)
+        guard clamped != cur else { return false }
+        _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel)   // overscroll(>max) 归 maxOffset
+        return true
     }
 
     /// 停两面板减速（D7：硬切 autoTracking / 画线激活前调）。
     private func stopAllDeceleration() {
         animators.upper.stop()
         animators.lower.stop()
+    }
+
+    /// 新交互起手时把**两个面板**的减速一并定住（停 + 归一中途 overscroll）。
+    /// **为什么必须是两个而不是「自己那一个」（codex plan-R3-medium，实测确认）**：
+    ///   · 减速每帧 `floorOrFullClampedOffsetDelta` 末尾会 `propagateLinkage` —— 正在减速的面板每帧都在改**另一个**面板的 offset；
+    ///   · 两个 animator 可以同时在跑（`endPan` 只给被拖的面板 start，但用户可以先甩上、再甩下）。
+    /// 于是「甩上面板 → 立刻捏合/拖动/点按下面板」时，只停下面板等于没停：上面板的 animator 继续经联动改它。
+    /// 对**没在跑**的面板，`interruptDeceleration` 是纯 no-op（`wasRunning == false` → 不 clamp、不 reduce），
+    /// 所以「多停一个」不引入任何额外状态改动。
+    /// **停完必须补一次联动（codex plan-R6-medium）**：`interruptDeceleration` 在 bounce/overscroll 中途停时会
+    /// 把 leader 的 offset 夹回界内，但它**不 propagate** —— 于是 follower 还停在夹回**之前**那个右缘对应的 tick 上，
+    /// 两面板时间轴错位（正常减速帧每帧都会 propagate，唯独这个「最后一次修正」不会）。
+    /// **leader 必须显式指定（codex plan-R8-high）**：两个 animator 可以同时在跑、于是可能两个面板都夹过。
+    /// 若「谁夹过就从谁 propagate」，遍历顺序就成了隐式 leader（lower 后处理 → lower 赢），会在用户
+    /// 明明在**上**面板起手时把上面板的 offset 改掉 —— 图当场跳一下，或者锚落错 candle。
+    /// 正确顺序：**先把两个都停+夹完，再从「本次交互的发起面板」propagate 一次**。
+    /// `initiatedBy` = 谁被拖 / 被捏 / 被点。都没夹过则不 propagate（整个函数 no-op）。
+    func settleDeceleration(initiatedBy panel: PanelId) {
+        let upperClamped = interruptDeceleration(panel: .upper)
+        let lowerClamped = interruptDeceleration(panel: .lower)
+        if upperClamped || lowerClamped { propagateLinkage(fromLeader: panel) }
     }
 
     /// D8：硬切 autoTracking 后经 reducer 把 offset 归零（spec L1153「offset 只经 reducer」）。
@@ -816,7 +854,7 @@ extension TrainingEngine {
     /// 新一次抓取必须**先停**本面板进行中的减速（标准惯性滚动语义：手指落下即截住惯性）——否则 re-grab 期间
     /// 残余减速 onUpdate 与手指 `applyPanOffset` 同时喂 `offsetApplied` 致跳动（final-review F1，与 D7 硬切同精神）。
     public func beginPan(panel: PanelId) {
-        interruptDeceleration(panel: panel)                  // R1b-wire D10：停 + 归一中途 overscroll（H3），再 seed/.panStarted
+        settleDeceleration(initiatedBy: panel)                // R1b-wire D10：停 + 归一中途 overscroll（H3），再 seed/.panStarted
         setDragRaw(panelState(panel).offset, panel: panel)   // R1b-drag D1：raw 基线=归一后 offset∈[0,maxOffset]（E1）
         _ = reduce(.panStarted, on: panel)
         _ = reduce(.panStarted, on: follower(of: panel))     // RFC #4 D7：follower 转 freeScrolling（drawing 态 .none 自然不动）
@@ -870,7 +908,7 @@ extension TrainingEngine {
         let offset = panelState(panel).offset
         // R1b-drag D3：drag-overscroll（offset>maxOffset）松手**不论速度方向**都弹簧回 maxOffset（防慢松手 no-op strand）；
         //   否则 R1b-wire 机制 A 既有分派。L1 不变量：post-drag 面板恒 .freeScrolling → .panEnded 返 .startDeceleration（含 v=0）
-        //   → 本分支可达；**勿把 overscroll 检查移出本 guard / 勿放松 guard**（autoTracking/drawing 不经此路且已 offset=0）。
+        //   → 本分支可达；**勿把 overscroll 检查移出本 guard / 勿放松 guard**（autoTracking 不经此路且已 offset=0）。
         if offset > ob.maxOffset || (v > 0 && ob.bounceEdges.contains(.max)) {
             setActiveBounds(ActiveDecel(bounds: ob, allowOverscroll: true), panel: panel)
             animator(for: panel).start(initialVelocity: v, fromOffset: offset,
@@ -887,24 +925,29 @@ extension TrainingEngine {
     public func cancelPan(panel: PanelId) {
         setDragRaw(nil, panel: panel)
         _ = reduce(.panEnded(velocity: 0), on: panel)
-        // R1b-drag E4：cancel-于-overscroll（两指接管/drawing 截获于越界）→ 归一 maxOffset 防残留间隙。
-        //   复用 lastRenderedBounds（每帧 render 前 recordRenderBounds 已 seed；不改 public 签名）。
+        // R1b-drag E4：cancel-于-overscroll（两指接管/画线截获于越界）→ 归一 maxOffset 防残留间隙。
+        // 1a-iv（codex plan-R7-high）：夹回后**必须补一次联动** —— 与 settleDeceleration(initiatedBy:) 同理，
+        // 正常拖动每帧都会 propagate，唯独这次「取消时的最后修正」不会；画线态 follower 会跟随 leader
+        // （Task 1 视口解冻）后，不补就是两面板时间轴错位、而画线会话仍开着。
         let ob = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds(panel))
         let cur = panelState(panel).offset
         let clamped = min(max(cur, ob.minOffset), ob.maxOffset)
-        if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }
+        if clamped != cur {
+            _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel)
+            propagateLinkage(fromLeader: panel)
+        }
     }
 
     // MARK: pinch 缩放手势派发（C7 arbiter onPinch 回调下游；RFC §4.4d + 设计 D6）
 
     /// onPinch 全相位入口。autoTracking = 右锚缩放（offset 置 0，user 2026-06-13 裁决 A）；
     /// freeScrolling = focus 不变量（pinch 中点 candle x 不动，PinchZoomModel.rezoomOffset）；
-    /// drawing 由 reducer 吞没（engine 不预判，统一派发）。
+    /// drawing = freeScrolling 同路径（1a-iv 视口解冻；画线时捏合不得右锚跳回最新）。
     /// scale 为识别器 per-gesture 累积值，按 `.began` 时刻 scaleAtBegan 归一（D4）。
     public func applyPinch(scale: CGFloat, focusX: CGFloat, phase: GesturePhase, panel: PanelId) {
         switch phase {
         case .began:
-            interruptDeceleration(panel: panel)   // R1b-wire D10：同 beginPan 先例，停 + 归一中途 overscroll
+            settleDeceleration(initiatedBy: panel)   // R1b-wire D10：同 beginPan 先例，停 + 归一中途 overscroll
             setPinchBase(seedPinchBase(scale: scale, panel: panel), panel: panel)
         case .changed:
             // R2-L1：非有限/非正 scale → 真无操作（不派发、状态零改动；防御在 engine 不在模型）
@@ -923,7 +966,9 @@ extension TrainingEngine {
             let ps = panelState(panel)
             guard target != effectiveVisibleCount(ps) else { return }   // N 不变 → 跳过（不 bump）
             switch ps.interactionMode {
-            case .freeScrolling:
+            // 1a-iv：.drawing 与 .freeScrolling 同走 focus 不变量（捏合中点的 candle x 不动）。
+            // 画线模式下用户很可能已经平移到历史区间，右锚缩放会把视口跳回最新、把刚画的线甩出屏幕。
+            case .freeScrolling, .drawing:
                 assert(bounds.origin == .zero, "focus 数学假设 view-local bounds 原点 .zero（R1-L6）")
                 let candles = allCandles[ps.period] ?? []
                 guard !candles.isEmpty else { return }
@@ -935,9 +980,8 @@ extension TrainingEngine {
                                                          focusX: focusX, newCount: target,
                                                          mainWidth: vp.mainChartFrame.width)
                 _ = reduce(.zoomApplied(visibleCount: target, offset: offset), on: panel)
-            case .autoTracking, .drawing:
-                // autoTracking：reducer 右锚显式置 0；drawing：reducer 吞没（入参不被读取）
-                _ = reduce(.zoomApplied(visibleCount: target, offset: 0), on: panel)
+            case .autoTracking:
+                _ = reduce(.zoomApplied(visibleCount: target, offset: 0), on: panel)   // reducer 右锚显式置 0
             }
         case .ended, .cancelled:
             setPinchBase(nil, panel: panel)
@@ -991,13 +1035,11 @@ extension TrainingEngine {
     /// 抽出来是因为它有**两个**触发点：① `recordRenderBounds`（bounds 真的变了）；
     /// ② 画线会话结束（`endDrawingSessionIfActive` / `cancelDrawingAllPanels`）。
     ///
-    /// **为什么②是必须的（codex whole-branch R4-medium）**：reducer 在 `.drawing` 态**吞掉** `.offsetApplied`
-    /// （画线时不许平移），于是画线期间发生的 resize/旋转，其归一动作被静默吞掉 → offset 停在越界值。
-    /// 从前画线只活一次 tap，这窗口小到几乎不可达；**本期画线会话变成持续的**（画完一条不退出），
-    /// 用户完全可能「滚动 → 进画线 → 画几条 → 转屏」。而退出画线时 bounds 并没有再变一次，
-    /// `recordRenderBounds` 的 `previous != bounds` 守卫会直接早返 → 归一**永远不补跑** → 图表持续挂着
-    /// overscroll 间隙，直到用户碰巧再拖一次才自愈。故会话一结束（两面板已回 `.autoTracking`、
-    /// `.offsetApplied` 重新被接受）立刻补一次归一。
+    /// **②的历史与现状（codex whole-branch R4-medium → 1a-iv）**：1a-iv 之前 reducer 在 `.drawing` 态**吞掉**
+    /// `.offsetApplied`，画线期间的 resize/旋转归一被静默吞掉 → offset 停在越界值直到退出画线才补跑。
+    /// 1a-iv 视口解冻后 `.drawing` 已接受 `.offsetApplied`，`recordRenderBounds` 那一路当场就归一了，
+    /// 会话结束时的这次补跑退化为**幂等的防御**（clamped == cur → 不 reduce、不 bump）。保留它：
+    /// 它同时兜住「会话结束时 bounds 恰好已变但尚未 record」的窗口，成本为零。
     private func normalizeOffsetForCurrentBounds(panel: PanelId) {
         let fresh = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds(panel))
         let cur = panelState(panel).offset
@@ -1040,14 +1082,38 @@ extension TrainingEngine {
     /// `manager.completedDrawings → engine.drawings` 单一真相（manager 仅作输入暂存）。
     /// **review-redesign Task 10**：本方法保持不变（normal/replay 仍走它）——review 模式改经
     /// `routeDrawingCommit`/`appendReviewDrawing` 写 `reviewDrawings`，不再直接调本方法。
-    public func appendDrawing(_ drawing: DrawingObject) {
+    /// **whole-branch codex R2-high：返回值 load-bearing** —— 未来做「删旧线 + append 新线」式编辑
+    /// （1b-i）的调用者必须先看返回值：返 `false`（被拒）时绝不能已经把旧线删了，否则静默丢线。
+    @discardableResult
+    public func appendDrawing(_ drawing: DrawingObject) -> Bool {
+        guard isPeriodConsistent(drawing) else { return false }  // 1a-iv fail-closed：坏数据不入库
         drawings.append(drawing)
+        return true
     }
 
     /// review-redesign Task 10：复盘新画线唯一写入面——追加进 `reviewDrawings`（不触碰 `drawings`，
     /// 不污染原训练记录）。`RenderStateBuilder.make` review 模式据此叠加 `drawings + reviewDrawings`。
-    public func appendReviewDrawing(_ drawing: DrawingObject) {
+    /// **whole-branch codex R2-high：返回值 load-bearing** —— 未来做「删旧线 + append 新线」式编辑
+    /// （1b-i）的调用者必须先看返回值：返 `false`（被拒）时绝不能已经把旧线删了，否则静默丢线。
+    @discardableResult
+    public func appendReviewDrawing(_ drawing: DrawingObject) -> Bool {
+        guard isPeriodConsistent(drawing) else { return false }  // 1a-iv fail-closed：坏数据不入库
         reviewDrawings.append(drawing)
+        return true
+    }
+
+    /// 1a-iv（codex plan-R4/R5-high）：新画线入库的**单一校验点**。锚必须全部同 period，且 `period` 字段
+    /// 与锚一致 —— 否则就是坐标系错乱的坏数据（`belongsToPanel` 按 `drawing.period` 归属面板，
+    /// 锚却按各自 period 的 candleIndex 解释）。
+    /// **空锚故意放行（codex plan-R8-medium）**：空锚对象既画不出也命不中（渲染侧 `visibleGeometry`
+    /// 已 fail-closed），它**不属于**本期要防的那类坏数据；而 append 是 public 面，把「空锚」也拒掉等于给
+    /// 「已解码 / 已编辑的既有对象经 append 回写时被静默丢弃」开了口子 —— 数据丢失比一条画不出的空线严重得多。
+    /// 本判据因此只回答一个问题：**锚之间、以及锚与 `period` 字段，是否自洽**。
+    /// **只管新增写入**：resume（init 的 `self.drawings = …`）与复盘装载（`reviewDrawings = l.drawings`）
+    /// 是整体赋值、不经这里 —— 在历史数据装载路径上 fail-closed 会静默吞掉用户已画好的线（见「已知残留 3」）。
+    private func isPeriodConsistent(_ d: DrawingObject) -> Bool {
+        guard let p = d.anchors.first?.period else { return true }   // 空锚：行为与 1a-iv 之前逐字一致
+        return d.anchors.allSatisfy { $0.period == p } && d.period == p
     }
 
     /// `deleteDrawing(at:)` 的 `reviewDrawings` 对应版本（复盘侧删除）。越界 trap，同风格。
@@ -1128,10 +1194,17 @@ extension TrainingEngine {
     /// 取消画线：**整场收干净**（全局会话 + 两个面板），任何情况下都不会静默 no-op。
     /// 画线会话是全局的，故「取消所有面板的画线」在语义上就等于「结束这场画线会话」。
     public func cancelDrawingAllPanels() {
+        // whole-branch codex R1-high：Task 1 起 `.drawing` 的 `panEnded` 会真起惯性（改造前 `.drawing`
+        // 吞 panEnded、这条路不存在）。必须在 deactivate 之前先停两面板 animator，否则退出画线后
+        // 残留减速帧继续 `.offsetApplied`——面板已是 autoTracking，照单全收，经 propagateLinkage 连带
+        // 另一面板一起漂。清 activeBounds 是为了不留 stale ActiveDecel（mirror recordRenderBounds 先例）。
+        stopAllDeceleration()
+        setActiveBounds(nil, panel: .upper)
+        setActiveBounds(nil, panel: .lower)
         drawingSession.deactivate()                 // 幂等：先落会话真相
         cancelDrawingUnchecked(panel: .upper)       // 再收面板（走 unchecked，不会被 fail-closed 守卫挡住）
         cancelDrawingUnchecked(panel: .lower)
-        normalizeOffsetForCurrentBounds(panel: .upper)   // R4-medium：补跑画线期间被 .drawing 吞掉的 resize 归一
+        normalizeOffsetForCurrentBounds(panel: .upper)   // R4-medium（1a-iv 后退化为幂等防御，见 normalizeOffsetForCurrentBounds 文档）：补跑一次归一。
         normalizeOffsetForCurrentBounds(panel: .lower)
     }
 
@@ -1179,11 +1252,16 @@ extension TrainingEngine {
     /// （1a-iii）→ 那时买卖钮不存在，本路径自然不可达；本期以「下单即隐式退出画线」收敛。
     public func endDrawingSessionIfActive() {
         guard drawingSession.drawingModeActive else { return }
+        // whole-branch codex R1-high：同 cancelDrawingAllPanels——Task 1 起 `.drawing` 的 `panEnded`
+        // 会真起惯性，退出会话前必须先停两面板 animator，否则残留减速帧在退出后继续经 propagateLinkage
+        // 漂移两个面板。清 activeBounds 防 stale ActiveDecel（mirror recordRenderBounds 先例）。
+        stopAllDeceleration()
+        setActiveBounds(nil, panel: .upper)
+        setActiveBounds(nil, panel: .lower)
         drawingSession.deactivate()
         cancelDrawingUnchecked(panel: .upper)
         cancelDrawingUnchecked(panel: .lower)
-        // R4-medium：画线期间（`.drawing` 吞 `.offsetApplied`）发生的 resize/旋转，其 offset 归一被静默吞掉；
-        // 此刻两面板已回 `.autoTracking`，补跑一次归一，杜绝「退出画线后仍挂着越界 offset / overscroll 间隙」。
+        // R4-medium（1a-iv 后退化为幂等防御，见 normalizeOffsetForCurrentBounds 文档）：补跑一次归一。
         normalizeOffsetForCurrentBounds(panel: .upper)
         normalizeOffsetForCurrentBounds(panel: .lower)
     }

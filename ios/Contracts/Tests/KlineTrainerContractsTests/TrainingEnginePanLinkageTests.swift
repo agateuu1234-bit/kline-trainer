@@ -75,16 +75,29 @@ struct TrainingEnginePanLinkageTests {
         #expect(e.lowerPanel.offset == 0)                                // 两图都归 0（reset 路径未被联动破坏）
     }
 
-    // H1：D10 — follower 在 drawing 态时不跟（reducer 吞 .offsetApplied + .panStarted）。
-    @Test("D10：follower drawing 态不被驱动，interactionMode 仍 drawing")
-    func followerInDrawingNotDriven() {
+    // H1：D10（1a-iv 改写）—— 视口解冻后 follower 在 drawing 态**照常被驱动**。
+    // 旧规则「drawing 态 follower 不跟」的依据是「reducer 吞 .offsetApplied、跟不跟都看不出来」；
+    // 1a-iv 起两面板在画线会话里同时是 .drawing 且视口可动，follower 不跟 = 两面板时间轴错位。
+    @Test("D10（1a-iv）：follower 处于 drawing 态**也**被联动驱动，且 interactionMode 仍是 drawing")
+    func followerInDrawingIsDrivenAfterThaw() {
         let (e, _) = Self.makeEngine(count: 200, tick: 150)
         e.armPanelForDrawing(.trend, panel: .lower)                      // lower 进 drawing（仅武装 lower，不动 upper）
         let before = e.lowerPanel.offset
         e.beginPan(panel: .upper)
         e.applyPanOffset(deltaPixels: 300, renderBounds: Self.bounds, panel: .upper)
-        #expect(e.lowerPanel.offset == before)                           // follower 不被驱动（drawing 吞 .offsetApplied）
+        #expect(e.lowerPanel.offset != before)                           // ⭐改造前：== before（drawing 吞 .offsetApplied）
         if case .drawing = e.lowerPanel.interactionMode {} else { Issue.record("follower 应仍 drawing") }
+    }
+
+    @Test("D10（1a-iv）：全局画线会话里（**两面板都 .drawing**）平移 leader → 两面板保持对齐")
+    func bothPanelsInDrawingStayAlignedWhilePanning() {
+        let (e, _) = Self.makeEngine(count: 200, tick: 150)
+        e.toggleDrawingMode()                                            // 全局会话：两面板同时 .drawing
+        #expect(e.isDrawingActive(on: .upper) && e.isDrawingActive(on: .lower))   // 前置
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 300, renderBounds: Self.bounds, panel: .upper)
+        #expect(e.upperPanel.offset > 0)                                 // leader 真的动了
+        #expect(e.lowerPanel.offset > 0)                                 // ⭐follower 跟上（不跟 = 两面板时间轴错位）
     }
 
     // M2：跨周期引擎集成 —— upper=.m3 / lower=.m15，证 propagateLinkage 用对各自 period（同周期 1:1 抓不到 period-swap）。

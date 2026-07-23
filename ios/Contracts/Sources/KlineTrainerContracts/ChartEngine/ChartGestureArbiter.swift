@@ -13,7 +13,7 @@ import CoreGraphics
 /// K 线图手势仲裁器（spec §C7）。在 KLineView 上挂 5 个识别器，把原始手势归类为业务回调。
 ///
 /// 仲裁规则（spec plan v1.5 §手势仲裁规则 L90-100）：
-/// - 单指左右滑动 = 平移（累积判方向、增量出 offset；Drawing 模式被绘线截获不 fire onPan）
+/// - 单指左右滑动 = 平移（累积判方向、增量出 offset；1a-iv 起 Drawing 模式同样透传）
 /// - 两指上下滑动 = 切周期；两指捏合 = 缩放（二者放行同时识别，由 classifyTwoFingerGesture 喂双实时值确定性仲裁）
 /// - 长按 = 十字光标（与 Pan 共存）
 /// - 单指点击 = 仅 Drawing 模式确定锚点
@@ -41,7 +41,7 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
     /// Coordinator 注入（读共享 crosshairOwner）。未注入（直接消费者）→ 视为 false → 退化旧 tap 行为（源/行为兼容）。
     public var onShouldExitRemoteCrosshair: (() -> Bool)?
 
-    /// Drawing 模式开关。true 时单指 Pan 被绘线截获、单指点击 fire onTap。
+    /// Drawing 模式开关。true 时单指点击 fire onTap（落锚）。**不影响**单指 Pan / 两指缩放（1a-iv D32）。
     public var drawingMode: Bool = false
     /// RFC-C 十字光标模式开关（Coordinator 长按进入时设 true、点击退出时设 false）。
     /// true 时：单指拖动 → onCrosshairMove（不平移）；两指/捏合抑制（整图冻结）；单指点击 → onCrosshairExit。
@@ -161,14 +161,13 @@ public final class ChartGestureArbiter: NSObject, UIGestureRecognizerDelegate {
             if ph == .began || ph == .changed { onCrosshairMove?(g.location(in: g.view)) }
             return
         }
-        // 生命周期决策全在纯函数 singlePanStep：垂直/ambiguous → emission==nil 不触碰 reducer；
-        // drawing 截获 → 始终 reset state 不发回调（R4 finding：防 mid-flight 切入残留）。
+        // 生命周期决策全在纯函数 singlePanStep：垂直/ambiguous → emission==nil 不触碰 reducer。
+        // 1a-iv D32：画线模式**不再**截获单指 pan —— 水平走平移、竖直甩动走切周期，与非画线态同一条路径。
         let step = singlePanStep(phase: ph,
                                  cumulative: g.translation(in: g.view),
                                  velocityX: g.velocity(in: g.view).x,
                                  lifecycle: singlePanLifecycle,
-                                 lastTranslationX: lastSinglePanTranslationX,
-                                 drawingTakesOver: panPolicyInDrawingMode(drawingMode: drawingMode) == .drawingTakesOver)
+                                 lastTranslationX: lastSinglePanTranslationX)
         singlePanLifecycle = step.lifecycle
         lastSinglePanTranslationX = step.lastTranslationX
         for e in step.emissions { onPan?(e.deltaX, e.velocityX, e.phase) }

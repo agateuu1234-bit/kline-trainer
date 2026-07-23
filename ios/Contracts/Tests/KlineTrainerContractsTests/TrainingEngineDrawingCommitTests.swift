@@ -227,4 +227,112 @@ struct TrainingEngineDrawingCommitTests {
     //   · 画线会话现在是**全局**的 —— 开 = **两面板一起**进 .drawing，不存在「另一面板被取消」这回事；
     //   · cancelDrawingAllPanels 的唯一调用者已是 endDrawingSessionIfActive（会话收口点），不再单独直呼。
     // 等价且更强的覆盖（含「会话 ⇔ 两面板 mode」不变量断言）见 TrainingEngineDrawingSessionTests。
+
+    // MARK: - 1a-iv（codex plan-R4/R5-high）：锚跨周期 / 显式 period 与锚不符 = 坐标系错乱的坏数据
+    // （`belongsToPanel` 按 `drawing.period` 归属面板，锚却按各自 period 的 candleIndex 解释）。
+    // 新增写入的**两个**真实入口都必须拒收，路由层 routeDrawingCommit 自然继承。
+
+    private func mixedPeriodDrawing() -> DrawingObject {
+        DrawingObject(toolType: .trend,
+                      anchors: [DrawingAnchor(period: .m60, candleIndex: 1, price: 10),
+                                DrawingAnchor(period: .daily, candleIndex: 2, price: 11)],
+                      isExtended: false, panelPosition: 0, revealTick: 0,
+                      lineSubType: .straight)
+    }
+
+    private func periodMismatchDrawing() -> DrawingObject {
+        DrawingObject(toolType: .horizontal,
+                      anchors: [DrawingAnchor(period: .m60, candleIndex: 1, price: 10)],
+                      isExtended: false, panelPosition: 0, revealTick: 0,
+                      period: .daily,                       // ← 与锚不符
+                      lineSubType: .straight)
+    }
+
+    private func consistentDrawing() -> DrawingObject {
+        DrawingObject(toolType: .horizontal,
+                      anchors: [DrawingAnchor(period: .m60, candleIndex: 1, price: 10)],
+                      isExtended: false, panelPosition: 0, revealTick: 0,
+                      lineSubType: .straight)
+    }
+
+    @Test("入口①：appendDrawing 直接调用也拒收坏数据（不能只挡路由层）")
+    func appendDrawingRejectsInconsistentPeriod() {
+        let e = TrainingEngine.preview()
+        e.appendDrawing(mixedPeriodDrawing())
+        e.appendDrawing(periodMismatchDrawing())
+        #expect(e.drawings.isEmpty)
+    }
+
+    @Test("入口②：appendReviewDrawing 直接调用同样拒收")
+    func appendReviewDrawingRejectsInconsistentPeriod() {
+        let e = TrainingEngine.preview()
+        e.appendReviewDrawing(mixedPeriodDrawing())
+        e.appendReviewDrawing(periodMismatchDrawing())
+        #expect(e.reviewDrawings.isEmpty)
+    }
+
+    @Test("路由层继承：routeDrawingCommit 传坏数据 → 两个数组都不增长")
+    func routeDrawingCommitInheritsTheGuard() {
+        let e = TrainingEngine.preview()
+        e.routeDrawingCommit(mixedPeriodDrawing())
+        #expect(e.drawings.isEmpty)
+        #expect(e.reviewDrawings.isEmpty)
+    }
+
+    @Test("对照（防假绿）：一致的 DrawingObject 照常入库 —— 守卫不是把提交路径焊死")
+    func consistentDrawingStillAppends() {
+        let e = TrainingEngine.preview()
+        e.appendDrawing(consistentDrawing())
+        #expect(e.drawings.count == 1)
+        e.routeDrawingCommit(consistentDrawing())
+        #expect(e.drawings.count == 2)                      // 路由层也照常放行
+    }
+
+    // MARK: - whole-branch codex R2-high：append 返回值可观测（消除未来「删旧线+append新线」式编辑
+    // 静默丢线的隐患——1b-i 编辑路径尚未建，此处以返回值可观测性代验，见方法文档警告）。
+
+    @Test("appendDrawing 拒收坏数据时返回 false，且 drawings 不增长")
+    func appendDrawingReturnsFalseOnReject() {
+        let e = TrainingEngine.preview()
+        let ok = e.appendDrawing(mixedPeriodDrawing())
+        #expect(ok == false)
+        #expect(e.drawings.isEmpty)
+    }
+
+    @Test("appendDrawing 放行一致数据时返回 true，且 drawings 增长 1")
+    func appendDrawingReturnsTrueOnAccept() {
+        let e = TrainingEngine.preview()
+        let ok = e.appendDrawing(consistentDrawing())
+        #expect(ok == true)
+        #expect(e.drawings.count == 1)
+    }
+
+    @Test("appendReviewDrawing 拒收坏数据时返回 false，且 reviewDrawings 不增长")
+    func appendReviewDrawingReturnsFalseOnReject() {
+        let e = TrainingEngine.preview()
+        let ok = e.appendReviewDrawing(mixedPeriodDrawing())
+        #expect(ok == false)
+        #expect(e.reviewDrawings.isEmpty)
+    }
+
+    @Test("appendReviewDrawing 放行一致数据时返回 true，且 reviewDrawings 增长 1")
+    func appendReviewDrawingReturnsTrueOnAccept() {
+        let e = TrainingEngine.preview()
+        let ok = e.appendReviewDrawing(consistentDrawing())
+        #expect(ok == true)
+        #expect(e.reviewDrawings.count == 1)
+    }
+
+    @Test("返回值可观测性代验「delete-then-append 不会静默消失」：调用者能在删旧线前先探知拒绝")
+    func returnValueLetsCallerDetectRejectionBeforeDeletingOldLine() {
+        // 真实编辑路径（删旧线 + append 新线）是 1b-i 尚未建的功能；这里以最小可表达形式验证
+        // codex R2-high 要保护的性质：调用者必须能在“删旧线”之前，通过返回值知道新线会不会被拒收，
+        // 从而避免「旧线已删、新线被静默拒收」导致的丢线。
+        let e = TrainingEngine.preview()
+        e.appendDrawing(consistentDrawing())          // 模拟已存在的“旧线”
+        #expect(e.drawings.count == 1)
+        let wouldAccept = e.appendDrawing(mixedPeriodDrawing())   // 探知：新线是否会被接受
+        #expect(wouldAccept == false)                 // 被拒——调用者据此绝不能先删旧线
+        #expect(e.drawings.count == 1)                // 旧线仍在，未被静默丢弃
+    }
 }

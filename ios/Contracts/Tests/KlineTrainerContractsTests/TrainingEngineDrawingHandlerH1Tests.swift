@@ -61,10 +61,10 @@ struct TrainingEngineDrawingHandlerH1Tests {
         #expect(e.upperPanel.revision == revFrozen)          // 无额外 bump
     }
 
-    // MARK: H1-3 drawing 模式 reducer 兜底吞 offsetApplied（即便有杂散回调到达）
+    // MARK: H1-3（1a-iv 视口解冻改写）drawing 模式直派 offsetApplied 真的应用（不再吞）
 
-    @Test("drawing 模式直派 offsetApplied 被吞（reducer 兜底，spec L1123）")
-    func drawingModeSwallowsOffsetApplied() {
+    @Test("drawing 模式直派 offsetApplied 真的应用（1a-iv 视口解冻；spec L1123 的『reducer 兜底吞』规则已废止）")
+    func drawingModeAppliesOffsetApplied() {
         let (e, _) = TrainingEngineInteractionTests.engine()
         e.recordRenderBounds(Self.bounds, panel: .upper)
         e.armPanelForDrawing(.trend, panel: .upper)
@@ -72,19 +72,22 @@ struct TrainingEngineDrawingHandlerH1Tests {
             Issue.record("应进入 drawing"); return
         }
         let offsetBefore = e.upperPanel.offset
+        let revBefore = e.upperPanel.revision
         e.applyPanOffset(deltaPixels: 99, panel: .upper)     // 模拟杂散 offsetApplied
-        #expect(e.upperPanel.offset == offsetBefore)         // 被吞，offset 不变
+        #expect(e.upperPanel.offset == offsetBefore + 99)    // 改造前：被吞、offset 不变；1a-iv 起真的应用
+        #expect(e.upperPanel.revision == revBefore + 1)      // bump
         guard case .drawing(let snap1) = e.upperPanel.interactionMode else {
-            Issue.record("仍应 drawing"); return
+            Issue.record("仍应 drawing（offsetApplied 不切 mode）"); return
         }
-        #expect(snap1.frozen.baseRevision == snap0.frozen.baseRevision)
+        #expect(snap1.frozen.baseRevision == snap0.frozen.baseRevision)   // baseRevision 是会话起点闸门，视口平移不改它
     }
 
     // MARK: H1-4 drawing 退出后无 offsetApplied 漂移（spec L1182 字面「drawing 退出后」）
     // 退出 drawing 的**生产路径** = 交易硬切（tradeTriggered：drawing→autoTracking，C8b 已实现）。
-    // 关键：退出到 autoTracking 后 offsetApplied **不再被吞**（reducer 只在 drawing 吞，L1123），故唯一保护是
-    // 「进入 drawing 时 stop 动画 + 交易再 stopAllDeceleration（D7）使其后无减速帧」。本测试正向覆盖 spec 字面
-    // 「退出 (exit)」路径（补 F1；drawingCommitted/onTap 提交触发归 Wave 3，此处用已实现的交易退出路径）。
+    // 关键：1a-iv 后 reducer 三态都 += delta + bump（不再有任何状态吞 offsetApplied），故本测试要保护的是
+    // handler 层「退出画线后不再发出 offsetApplied」——唯一保护是「进入 drawing 时 stop 动画 + 交易再
+    // stopAllDeceleration（D7）使其后无减速帧」。本测试正向覆盖 spec 字面「退出 (exit)」路径（补 F1；
+    // drawingCommitted/onTap 提交触发归 Wave 3，此处用已实现的交易退出路径）。
 
     @Test("drawing 退出（交易→autoTracking）后延迟减速帧不漂移 offset（spec L1182 退出路径）")
     func noOffsetAppliedAfterDrawingExit() {

@@ -19,6 +19,7 @@ Coordinator crosshairPoint 默认 nil（视图层瞬态）
 #1 D39：未开会话时 sync **不会**自动武装任何工具（re-arm 已删除）
 codex R7 fail-closed：主图内 overscroll 空白区的 tap（越界 candleIndex）→ 不落锚不落库，会话存活
 未开会话时点图 = 不画线
+1a-iv：惯性未停时点击 —— 锚落在**定住后**视口映射的那根 K 线上，且提交后图不再滑
 布局到有效尺寸后 renderState 重算非空（静态 engine 不依赖 observation 再触发）
 layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复 make）
 布局重算同步 engine bounds → 静态界面后续 pinch 生效（codex R1-F1：不被 stale .zero bounds no-op）

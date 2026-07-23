@@ -15,9 +15,13 @@ public final class DefaultDrawingInputController: DrawingInputController {
         // codex branch-R4-high：落锚必须落在主图内。成交量/MACD 区的 tap 换算出的价格在可见价格区间之外，
         // 提交后既不渲染也不可命中（visibleGeometry fail-closed）→ 会在持久化数据里留下看不见的幽灵线。
         guard mapper.viewport.mainChartFrame.contains(point) else { return nil }
-        // codex R7-medium：持续画线模式下 `.drawing` reducer 吞 `.offsetApplied`（转屏/resize 成正常路径），
-        // 主图内可出现 overscroll 空白区（无 candle）；点空白区 xToIndex 映射出**越界** candleIndex
-        // （指向不存在的 candle），落锚提交即持久化坏数据（复盘 diff / hitTest / 跨版本迁移都踩）。
+        // codex R7-medium 的历史与现状（1a-iv）：R7-medium 提出时 `.drawing` reducer 吞掉 `.offsetApplied`
+        // （转屏/resize 成了产生 overscroll 空白区的正常路径）。1a-iv 视口解冻后该前提已不成立——`.drawing`
+        // 现在跟另外两态一样 += delta + bump，转屏/resize 当场归一。但这条守卫仍要留着：拖拽/减速中
+        // offsetApplied 对 reducer 本身无界（D2），真正夹回合法区间靠 R1b-wire 层的 drag full /
+        // decel·bounce floor-or-full 事后收口（D9）——这段瞬时窗口内主图仍可出现 overscroll 空白区
+        // （无 candle）；点空白区 xToIndex 映射出**越界** candleIndex（指向不存在的 candle），落锚提交即
+        // 持久化坏数据（复盘 diff / hitTest / 跨版本迁移都踩）。
         // fail-closed：candleIndex 必须落在可见 slice 的 base 索引区间 `[startIndex, startIndex+visibleCount)`
         // （≡ renderState.visibleCandles.indices；**不可**改用 candle.globalIndex —— 进行中聚合根被
         // PartialAggregateCandle.synthesize 替换后 globalIndex 为 nil），否则不产锚（在源头拒坏数据，非 call-site 补丁）。
