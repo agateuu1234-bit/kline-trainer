@@ -66,6 +66,15 @@ def parse_qmt_csv(path: Path, src_period: str) -> "QmtSource":
         df["datetime"] = parse_qmt_datetime(df["datetime"], src_period)
     except (ValueError, TypeError) as e:
         raise QmtSchemaError(f"QMT CSV time 列解析失败: {e}") from e
-    df = df[["datetime", "open", "high", "low", "close", "volume", "amount"]]
+    df = df[["datetime", "open", "high", "low", "close", "volume", "amount"]].copy()
+    # 数值列坏值门（R4-F2）：非数值文本（如 open=bad）会让列停在 object dtype，
+    # 下游 clean 的 `out[c] > 0` 抛 pandas TypeError → 裸 traceback 绕过 CLI 的
+    # 域异常捕获。在解析边界一次性把六列强转为数值，非数值 → QmtSchemaError（CLI
+    # rc=2）。空单元格已是 NaN（float），由下游值门/clean 判非有限拦下，不在此拒。
+    for col in ("open", "high", "low", "close", "volume", "amount"):
+        try:
+            df[col] = pd.to_numeric(df[col])
+        except (ValueError, TypeError) as e:
+            raise QmtSchemaError(f"QMT CSV {col} 列含非数值: {e}") from e
     code, _name, period = parse_qmt_filename(Path(path).name)
     return QmtSource(code=code, period=period, df=df)

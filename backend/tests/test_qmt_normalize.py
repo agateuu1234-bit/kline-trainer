@@ -64,6 +64,30 @@ def test_parse_qmt_csv_malformed_time_raises_schema_error(tmp_path: Path):
     with pytest.raises(QmtSchemaError):
         parse_qmt_csv(p, "1m")
 
+@pytest.mark.parametrize("bad_col", ["open", "high", "low", "close", "volume", "amount"])
+def test_parse_qmt_csv_nonnumeric_value_raises_schema_error(tmp_path: Path, bad_col: str):
+    """R4-F2：任一数值列含非数值文本须在解析边界归一化为 QmtSchemaError，
+    否则该列停在 object dtype → 下游 clean 的 `out[c] > 0` 抛 TypeError 裸 traceback。"""
+    cols = ["open", "high", "low", "close", "volume", "amount"]
+    vals = {"open": "10.29", "high": "10.29", "low": "10.29", "close": "10.29",
+            "volume": "10899", "amount": "11215071.0"}
+    vals[bad_col] = "bad"
+    row = ",".join(vals[c] for c in cols)
+    p = tmp_path / "000001.SZ_平安银行_1分钟K线_前复权.csv"
+    p.write_text("time,open,high,low,close,volume,amount\n"
+                 f"20260703093000,{row}\n", encoding="utf-8-sig")
+    with pytest.raises(QmtSchemaError):
+        parse_qmt_csv(p, "1m")
+
+def test_parse_qmt_csv_empty_cell_not_rejected_at_parse(tmp_path: Path):
+    """R4-F2 边界：空单元格 → NaN（float dtype），解析边界放行（由下游值门/clean
+    判非有限拦下），不在解析层误当坏值拒——只拒非数值文本。"""
+    p = tmp_path / "000001.SZ_平安银行_1分钟K线_前复权.csv"
+    p.write_text("time,open,high,low,close,volume,amount\n"
+                 "20260703093000,10.29,10.29,10.29,10.29,10899,\n", encoding="utf-8-sig")
+    src = parse_qmt_csv(p, "1m")  # 不抛
+    assert pd.isna(src.df.loc[0, "amount"])
+
 def test_parse_qmt_csv_empty_raises_schema_error(tmp_path: Path):
     """FIX2：空/只有表头的 QMT CSV（零数据行）须干净拒绝，不是下游裸 IndexError。"""
     p = tmp_path / "000001.SZ_平安银行_1分钟K线_前复权.csv"
