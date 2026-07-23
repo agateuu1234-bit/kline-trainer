@@ -18,6 +18,7 @@ from import_csv import (
     CsvSchemaError,
     ImportBusyError,
     InvalidImportBundleError,
+    LegacyImportBlockedError,
     ReimportBlockedError,
     SchemaDriftError,
     clean,
@@ -223,7 +224,8 @@ def _dummy_kline_record() -> dict:
 def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls: dict,
                                            lock_ok: bool = True,
                                            coverage_table_exists: bool = True,
-                                           has_training_set: bool = False):
+                                           has_training_set: bool = False,
+                                           coverage_row_exists: bool = False):
     """假 asyncpg 模块：pg_catalog（经 to_regclass 精确定位关系）查询返回 data_type 可控，
     execute/executemany/transaction 各自计数——用于断言 fail-closed 时一次写入都没发生。
     记录实际 query 文本到 calls["query"]，供调用方断言用的是 to_regclass 精确查询
@@ -232,7 +234,13 @@ def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls
     task-6 扩展（write_qmt_stock 需要）：新增 fetchval（按 query 文本内容分派到
     按股 xact 锁 / stock_coverage 存在性 / training_sets 互锁三条查询，返回值受
     lock_ok/coverage_table_exists/has_training_set 三个开关控制），三个开关默认值
-    维持 write_to_postgres 既有两个测试的原有行为（它们从不调用 fetchval）。"""
+    维持 write_to_postgres 既有两个测试的原有行为（它们从不调用 fetchval）。
+
+    task-7 扩展（write_to_postgres 通用路径 fail-closed 护栏需要）：新增
+    coverage_row_exists 开关，控制 `SELECT 1 FROM stock_coverage WHERE stock_code=$1`
+    （行存在性——与 write_qmt_stock 的 `to_regclass('stock_coverage')` 表存在性是
+    两条不同查询，分开判据）。默认 False，维持既有两个 write_to_postgres 测试的
+    原有行为（无 coverage 行）。"""
     import sys
     import types
 
@@ -258,6 +266,8 @@ def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls
                 return lock_ok
             if "to_regclass('stock_coverage')" in query:
                 return "stock_coverage" if coverage_table_exists else None
+            if "SELECT 1 FROM stock_coverage" in query:
+                return 1 if coverage_row_exists else None
             if "training_sets" in query:
                 return 1 if has_training_set else None
             raise AssertionError(f"未预期的 fetchval 查询: {query}")
@@ -343,6 +353,64 @@ def test_write_to_postgres_allows_double_precision_schema(monkeypatch):
     assert "ROW EXCLUSIVE" in order[lock_i][1]
     assert calls.get("executemany", 0) == 1
     assert "to_regclass" in calls.get("query", "")
+
+
+# ===== QMT Plan 3 Task7：write_to_postgres 通用路径 fail-closed 护栏 =====
+
+def test_write_to_postgres_rejects_records_stock_code_mismatch(monkeypatch):
+    """records 里的 stock_code 与 stock_code 参数不一致 → ValueError，取锁前拒绝
+    （纯内存校验，asyncpg.connect 都不该被调用——用一个 connect 即报错的假 asyncpg
+    module 证明真的没有发生任何 DB 往返）。"""
+    import sys
+    import types
+
+    from import_csv import write_to_postgres
+
+    fake = types.ModuleType("asyncpg")
+
+    async def _connect_should_not_be_called(dsn):
+        raise AssertionError("身份校验应在 asyncpg.connect 之前就拒绝")
+
+    fake.connect = _connect_should_not_be_called
+    monkeypatch.setitem(sys.modules, "asyncpg", fake)
+
+    bad_record = dict(_dummy_kline_record())
+    bad_record["stock_code"] = "600519"
+    with pytest.raises(ValueError):
+        asyncio.run(write_to_postgres("postgres://x", "000001", "平安", [bad_record]))
+
+
+def test_write_to_postgres_rejects_qmt_managed_stock(monkeypatch):
+    """该股已有 stock_coverage 行（已被 QMT 接管）→ LegacyImportBlockedError，
+    零 INSERT（连 LOCK TABLE 都不该发生——coverage 门在 LOCK TABLE 之前）。"""
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision",
+                                           calls=calls, coverage_row_exists=True)
+    from import_csv import write_to_postgres
+
+    with pytest.raises(LegacyImportBlockedError):
+        asyncio.run(write_to_postgres("postgres://x", "600519", "贵州茅台",
+                                       [_dummy_kline_record()]))
+    order = calls.get("order", [])
+    assert any(k == "fetchval" and "SELECT 1 FROM stock_coverage" in q for k, q in order), \
+        "coverage 行存在性查询应已发生"
+    assert not any(k == "execute" for k, q in order), "coverage 已占用时不该到达任何 execute（含 LOCK TABLE）"
+    assert calls.get("executemany", 0) == 0
+
+
+def test_write_to_postgres_lock_busy(monkeypatch):
+    """按股 xact 锁被 B2 占用 → ImportBusyError，零 INSERT。"""
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision",
+                                           calls=calls, lock_ok=False)
+    from import_csv import write_to_postgres
+
+    with pytest.raises(ImportBusyError):
+        asyncio.run(write_to_postgres("postgres://x", "600519", "贵州茅台",
+                                       [_dummy_kline_record()]))
+    order = calls.get("order", [])
+    assert not any(k == "execute" for k, q in order), "锁忙时不该到达任何 execute（含 LOCK TABLE）"
+    assert calls.get("executemany", 0) == 0
 
 
 # ===== QMT Plan 3 Task6：validate_import_bundle（P3-D12，全 if/raise）=====

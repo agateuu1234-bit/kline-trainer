@@ -222,11 +222,37 @@ async def write_to_postgres(dsn: str, stock_code: str, stock_name: str,
     （不会把并发导入白白串行化）。刻意不升到 SHARE 或更高。
 
     注：这与前一轮拒绝的「为不可能场景加机器」不是同一件事——那是给单写入者架构补并发
-    防护；这里是把检查移进它所保护的事务、使检查-使用原子化，属于移除结构缺陷。"""
+    防护；这里是把检查移进它所保护的事务、使检查-使用原子化，属于移除结构缺陷。
+
+    P3-D11（Task7）：通用 CSV 路径不知道某支股票是否已被 QMT 接管（write_qmt_stock
+    的替换语义），必须 fail-closed 而非静默共存/覆盖：
+    1) records 与 stock_code 参数身份一致性——纯内存校验，取连接前拒绝，防调用方
+       传一个未接管的 stock_code 参数、但 records 实际来自另一支已接管股票，绕过
+       下面的 coverage 门（先取锁再校验就晚了）。
+    2) 与 write_qmt_stock 共用同一把 (IMPORT_GEN_LOCK_KEY, stock_lock_key) 按股
+       xact 锁——防与 B2 训练组生成并发写同一支股票。
+    3) 若该股已有 stock_coverage 行（即已被 QMT 接管），直接拒绝——通用路径不是
+       替换语义，继续写会与 QMT 的 dense/dropped 语义冲突。无 coverage 行的股票
+       （纯 pre-QMT 测试数据）行为不变。
+    三条全在写事务内、任何 INSERT 之前。"""
+    record_codes = {r["stock_code"] for r in records}
+    if record_codes != {stock_code}:
+        raise ValueError(
+            f"records stock_code 与参数不一致：records={record_codes}, 参数={stock_code!r}"
+        )
     import asyncpg  # 局部 import：纯函数层不依赖 asyncpg（单测不装也能跑）
+    # 局部 import：import_csv 不能顶层依赖 generate_training_sets（循环 import 风险）。
+    from generate_training_sets import IMPORT_GEN_LOCK_KEY, stock_lock_key
     conn = await asyncpg.connect(dsn)
     try:
         async with conn.transaction():
+            if not await conn.fetchval("SELECT pg_try_advisory_xact_lock($1,$2)",
+                                       IMPORT_GEN_LOCK_KEY, stock_lock_key(stock_code)):
+                raise ImportBusyError(f"{stock_code}: 正被 B2 生成，稍后重试")
+            if await conn.fetchval("SELECT 1 FROM stock_coverage WHERE stock_code=$1",
+                                   stock_code):
+                raise LegacyImportBlockedError(
+                    f"{stock_code}: 已被 QMT 管理，请用 --qmt 模式导入")
             await conn.execute("LOCK TABLE klines IN ROW EXCLUSIVE MODE")
             await _assert_klines_price_columns_double(conn)
             await conn.execute(
@@ -263,6 +289,12 @@ class ImportBusyError(RuntimeError):
 
 class ReimportBlockedError(RuntimeError):
     """该股已有 training_sets 行——重导入的作废/版本化尚未落地，暂不支持覆盖导入。"""
+
+
+class LegacyImportBlockedError(RuntimeError):
+    """P3-D11：write_to_postgres（通用 CSV 路径）发现该股已有 stock_coverage 行
+    （即已被 QMT 接管，走 write_qmt_stock 替换语义）——通用路径 fail-closed 拒绝，
+    不与 QMT 的 dense/dropped 语义静默共存/覆盖。"""
 
 
 def validate_import_bundle(bundle, stock_code: str) -> None:
