@@ -54,6 +54,23 @@ def test_parse_qmt_csv_missing_col_raises(tmp_path: Path):
     with pytest.raises(QmtSchemaError):
         parse_qmt_csv(p, "1m")
 
+def test_parse_qmt_csv_malformed_time_raises_schema_error(tmp_path: Path):
+    """FIX2：time 列坏值——parse_qmt_datetime 裸抛 ValueError，须归一化为
+    QmtSchemaError（CLI --qmt 的 except 只认域异常，不然裸 traceback）。"""
+    p = tmp_path / "000001.SZ_平安银行_1分钟K线_前复权.csv"
+    p.write_text("time,open,high,low,close,volume,amount\n"
+                 "notadate,10.29,10.29,10.29,10.29,10899,11215071.0\n",
+                 encoding="utf-8-sig")
+    with pytest.raises(QmtSchemaError):
+        parse_qmt_csv(p, "1m")
+
+def test_parse_qmt_csv_empty_raises_schema_error(tmp_path: Path):
+    """FIX2：空/只有表头的 QMT CSV（零数据行）须干净拒绝，不是下游裸 IndexError。"""
+    p = tmp_path / "000001.SZ_平安银行_1分钟K线_前复权.csv"
+    p.write_text("time,open,high,low,close,volume,amount\n", encoding="utf-8-sig")
+    with pytest.raises(QmtSchemaError):
+        parse_qmt_csv(p, "1m")
+
 def test_parse_qmt_csv_returns_source_with_filename_identity(tmp_path):
     p = tmp_path / "000001.SZ_平安银行_日K线_前复权.csv"
     p.write_text("time,open,high,low,close,volume,amount\n"

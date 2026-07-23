@@ -95,10 +95,16 @@ def _reject(reason: str):
 
 def _assert_values_ok(df):
     """1m/daily 每行 amount 有限非空且 >= 0 + volume 有限整数 >= 0（P3-D9(c)/R15-F2/R16-F2）。"""
-    amt = df["amount"].to_numpy(dtype="float64")
+    try:
+        amt = df["amount"].to_numpy(dtype="float64")
+    except (ValueError, TypeError):
+        _reject("bad_amount_or_volume")
     if not np.all(np.isfinite(amt)) or np.any(amt < 0):
         _reject("bad_amount_or_volume")
-    vol = df["volume"].to_numpy(dtype="float64")
+    try:
+        vol = df["volume"].to_numpy(dtype="float64")
+    except (ValueError, TypeError):
+        _reject("bad_amount_or_volume")
     if not np.all(np.isfinite(vol)) or np.any(vol < 0) or np.any(vol != np.floor(vol)):
         _reject("bad_amount_or_volume")
 
@@ -124,9 +130,11 @@ def build_stock_import(src_1m, src_daily, *, stock_code, stock_name, entry_1m, e
     # clean
     cln_1m, cln_daily = clean(raw_1m), clean(raw_daily)
 
-    # 门3：原始值门（1m+daily amount/volume；daily 另加 clean-len 无损，P3-D9(c)）
+    # 门3：原始值门（1m+daily amount/volume；1m/daily 各加 clean-len 无损，P3-D9(c)）
     _assert_values_ok(cln_1m)
     _assert_values_ok(cln_daily)
+    if len(cln_1m) != len(raw_1m) or raw_1m["datetime"].duplicated().any():
+        _reject("clean_dropped_rows_1m")
     if len(cln_daily) != len(raw_daily) or raw_daily["datetime"].duplicated().any():
         _reject("daily_clean_dropped_rows")
 

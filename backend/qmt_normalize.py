@@ -59,8 +59,13 @@ def parse_qmt_csv(path: Path, src_period: str) -> "QmtSource":
     missing = [c for c in _QMT_COLUMNS if c not in df.columns]
     if missing:
         raise QmtSchemaError(f"QMT CSV 缺必需列: {missing}")
+    if len(df) == 0:
+        raise QmtSchemaError("QMT CSV 无数据行")
     df = df.rename(columns={"time": "datetime"})
-    df["datetime"] = parse_qmt_datetime(df["datetime"], src_period)
+    try:
+        df["datetime"] = parse_qmt_datetime(df["datetime"], src_period)
+    except (ValueError, TypeError) as e:
+        raise QmtSchemaError(f"QMT CSV time 列解析失败: {e}") from e
     df = df[["datetime", "open", "high", "low", "close", "volume", "amount"]]
     code, _name, period = parse_qmt_filename(Path(path).name)
     return QmtSource(code=code, period=period, df=df)

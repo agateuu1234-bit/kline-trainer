@@ -125,6 +125,49 @@ def test_1m_negative_amount_rejects(gen):
     assert "bad_amount_or_volume" in str(ei.value)
 
 
+def test_1m_non_numeric_amount_rejects(gen):
+    """FIX2：amount 列里混进非数字字符串——`to_numpy(dtype=float64)` 今裸抛
+    ValueError；须归一化为域异常 QmtIngestRejected(bad_amount_or_volume)。"""
+    s1, sd, e1, ed = gen("000001.SZ")
+    s1.df["amount"] = s1.df["amount"].astype(object)
+    s1.df.iloc[0, s1.df.columns.get_loc("amount")] = "bad"
+    e1 = _entry("000001.SZ", "1m", s1.df)
+    with pytest.raises(QmtIngestRejected) as ei:
+        build_stock_import(s1, sd, stock_code="000001.SZ", stock_name="x",
+                           entry_1m=e1, entry_daily=ed)
+    assert "bad_amount_or_volume" in str(ei.value)
+
+
+def test_1m_duplicate_datetime_rejects(gen):
+    """FIX1：1m 源含重复 datetime 行——clean 去重(keep last)使 cln 变短，daily 已有的
+    「clean 无损」门须在 1m 上同款生效（daily_clean_dropped_rows 的姊妹门）。"""
+    from qmt_normalize import QmtSource
+    s1, sd, e1, ed = gen("000001.SZ")
+    dup_row = s1.df.iloc[5:6]
+    m1 = pd.concat([s1.df, dup_row]).sort_values("datetime").reset_index(drop=True)
+    s1 = QmtSource(s1.code, s1.period, m1)
+    e1 = _entry("000001.SZ", "1m", m1)
+    with pytest.raises(QmtIngestRejected) as ei:
+        build_stock_import(s1, sd, stock_code="000001.SZ", stock_name="x",
+                           entry_1m=e1, entry_daily=ed)
+    assert "clean_dropped_rows_1m" in str(ei.value)
+
+
+def test_1m_bad_ohlc_row_clean_dropped_rejects(gen):
+    """FIX1：1m 源含 clean 会丢的坏 OHLC 行（high<low）——静默丢一行也须挡，不能让
+    export_log 的原始行数与实际处理的行数悄悄对不上。"""
+    from qmt_normalize import QmtSource
+    s1, sd, e1, ed = gen("000001.SZ")
+    m1 = s1.df.copy()
+    m1.loc[5, "high"] = m1.loc[5, "low"] - 1.0   # high < low → clean 丢这一行
+    s1 = QmtSource(s1.code, s1.period, m1)
+    e1 = _entry("000001.SZ", "1m", m1)
+    with pytest.raises(QmtIngestRejected) as ei:
+        build_stock_import(s1, sd, stock_code="000001.SZ", stock_name="x",
+                           entry_1m=e1, entry_daily=ed)
+    assert "clean_dropped_rows_1m" in str(ei.value)
+
+
 def test_valid_returns_bundle(gen):
     s1, sd, e1, ed = gen("000001.SZ")
     b = build_stock_import(s1, sd, stock_code="000001.SZ", stock_name="平安",
