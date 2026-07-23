@@ -225,7 +225,8 @@ def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls
                                            lock_ok: bool = True,
                                            coverage_table_exists: bool = True,
                                            has_training_set: bool = False,
-                                           coverage_row_exists: bool = False):
+                                           coverage_row_exists: bool = False,
+                                           global_lock_ok: bool = True):
     """假 asyncpg 模块：pg_catalog（经 to_regclass 精确定位关系）查询返回 data_type 可控，
     execute/executemany/transaction 各自计数——用于断言 fail-closed 时一次写入都没发生。
     记录实际 query 文本到 calls["query"]，供调用方断言用的是 to_regclass 精确查询
@@ -240,7 +241,14 @@ def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls
     coverage_row_exists 开关，控制 `SELECT 1 FROM stock_coverage WHERE stock_code=$1`
     （行存在性——与 write_qmt_stock 的 `to_regclass('stock_coverage')` 表存在性是
     两条不同查询，分开判据）。默认 False，维持既有两个 write_to_postgres 测试的
-    原有行为（无 coverage 行）。"""
+    原有行为（无 coverage 行）。
+
+    task-8 扩展（`_amain_qmt` rollout-drain 全局锁探测需要）：新增 global_lock_ok
+    开关，控制 `SELECT pg_try_advisory_lock($1)`（session 级、单参数——与按股
+    xact 锁 `pg_try_advisory_xact_lock($1,$2)` 是两条不同查询，query 文本互不为
+    子串，分开判据）；`SELECT pg_advisory_unlock($1)`（探测通过后的释放）恒定
+    返回 True，不受任何开关控制。默认 True，维持既有测试原有行为（它们从不触发
+    这两条查询）。"""
     import sys
     import types
 
@@ -264,6 +272,10 @@ def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls
             calls.setdefault("order", []).append(("fetchval", query))
             if "pg_try_advisory_xact_lock" in query:
                 return lock_ok
+            if "pg_try_advisory_lock" in query:  # task-8：rollout-drain 全局锁探测（非 xact，session 级）
+                return global_lock_ok
+            if "pg_advisory_unlock" in query:  # task-8：探测通过后立即释放
+                return True
             if "to_regclass('stock_coverage')" in query:
                 return "stock_coverage" if coverage_table_exists else None
             if "SELECT 1 FROM stock_coverage" in query:
@@ -684,3 +696,162 @@ def test_write_qmt_stock_missing_coverage_table_raises_schema_drift(fake_conn_no
     assert not any(k == "execute" and "LOCK TABLE" in q for k, q in order), "stock_coverage 缺表须早于 LOCK TABLE 拦下"
     assert not any(k == "execute" and "DELETE FROM klines" in q for k, q in order)
     assert calls.get("executemany", 0) == 0
+
+
+# ===== QMT Plan 3 Task8：CLI `--qmt` 模式 =====
+
+_QMT_ARGV = ["--input", None, "--stock", "000001.SZ", "--dsn", "postgres://x", "--qmt"]
+
+
+def _qmt_argv(input_dir) -> list:
+    argv = list(_QMT_ARGV)
+    argv[1] = str(input_dir)
+    return argv
+
+
+def _write_qmt_csv_stub(dirpath, stock="000001.SZ", name="平安", label="1分钟K线") -> Path:
+    p = Path(dirpath) / f"{stock}_{name}_{label}_前复权.csv"
+    p.write_text("time,open,high,low,close,volume,amount\n")
+    return p
+
+
+def test_qmt_and_period_mutually_exclusive(tmp_path):
+    """--qmt 与 --period 同给 → argparse error（SystemExit），互斥不可绕过。"""
+    with pytest.raises(SystemExit):
+        import_csv.main(["--input", str(tmp_path), "--stock", "000001.SZ",
+                         "--dsn", "postgres://x", "--qmt", "--period", "1m"])
+
+
+def test_qmt_glob_zero_matches_returns_nonzero(tmp_path, monkeypatch):
+    """--input 目录下一个 QMT CSV 都没有 → 探测通过后 glob 命中 0 个 → 干净非零退出。"""
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls)
+    rc = import_csv.main(_qmt_argv(tmp_path))
+    assert rc != 0
+    assert calls.get("executemany", 0) == 0
+
+
+def test_qmt_glob_two_matches_returns_nonzero(tmp_path, monkeypatch):
+    """同一支股票的 1m 文件在两个子目录下各命中一个（递归 glob）→ 命中数 2 → 干净非零退出。"""
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls)
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    _write_qmt_csv_stub(tmp_path / "a")
+    _write_qmt_csv_stub(tmp_path / "b")
+    _write_qmt_csv_stub(tmp_path, label="日K线")
+    rc = import_csv.main(_qmt_argv(tmp_path))
+    assert rc != 0
+    assert calls.get("executemany", 0) == 0
+
+
+def test_qmt_refuses_when_scheduler_lock_held(tmp_path, monkeypatch, capsys):
+    """rollout-drain 探测：pg_try_advisory_lock(B2_GENERATION_LOCK_KEY) 返回 False
+    （有活动 B2/B4 调度器持锁）→ _amain_qmt 干净返回 2，且探测是流程中第一件事——
+    在它之前 glob/parse/write 一概不发生（零写入，零解锁）。"""
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls,
+                                           global_lock_ok=False)
+    rc = import_csv.main(_qmt_argv(tmp_path))  # tmp_path 空目录：若探测被跳过会在别处失败，但探测必须先短路
+    assert rc == 2
+    order = calls.get("order", [])
+    assert len(order) == 1, f"探测失败应立即短路，不该发生任何其它 DB 往返：{order}"
+    kind, query = order[0]
+    assert kind == "fetchval" and "pg_try_advisory_lock" in query and "xact" not in query
+    assert calls.get("executemany", 0) == 0
+    assert calls.get("closed") is True  # 探测连接仍须 close（finally）
+    err = capsys.readouterr().err
+    assert "调度器" in err or "drain" in err.lower()
+
+
+def test_qmt_import_probe_released_before_write(tmp_path, monkeypatch):
+    """探测锁通过后立即释放，再继续导入——顺序须为
+    advisory_lock 探测 < advisory_unlock 释放 < write_qmt_stock 写入。
+    parse_qmt_csv/parse_export_log/build_stock_import/write_qmt_stock 全部打桩，
+    只验证 `_amain_qmt` 自身的控制流与顺序（CLI 层 D14，不做全量端到端）。"""
+    import types
+
+    import qmt_ingest
+    import qmt_normalize
+
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls)
+    _write_qmt_csv_stub(tmp_path, label="1分钟K线")
+    _write_qmt_csv_stub(tmp_path, label="日K线")
+
+    fake_source = object()
+
+    def fake_parse_qmt_csv(path, period):
+        calls.setdefault("order", []).append(("parse_qmt_csv", period))
+        return fake_source
+
+    def fake_parse_export_log(path):
+        calls.setdefault("order", []).append(("parse_export_log", str(path)))
+        return {("000001.SZ", "1m"): object(), ("000001.SZ", "daily"): object()}
+
+    fake_bundle = types.SimpleNamespace(
+        coverage=types.SimpleNamespace(start_date="2020-01-01", end_date="2020-12-31",
+                                       dense_day_count=250),
+        records={"daily": [{"datetime": 1577934600}, {"datetime": 1609470600}],
+                "monthly": [{}] * 12, "weekly": [{}], "60m": [{}], "15m": [{}], "3m": [{}]},
+    )
+
+    def fake_build_stock_import(*a, **kw):
+        calls.setdefault("order", []).append(("build_stock_import", None))
+        return fake_bundle
+
+    async def fake_write_qmt_stock(dsn, stock, name, bundle):
+        calls.setdefault("order", []).append(("write_qmt_stock", None))
+        assert bundle is fake_bundle
+        return {"monthly": 1, "weekly": 1, "daily": 1, "60m": 1, "15m": 1, "3m": 1}
+
+    monkeypatch.setattr(qmt_normalize, "parse_qmt_csv", fake_parse_qmt_csv)
+    monkeypatch.setattr(qmt_ingest, "parse_export_log", fake_parse_export_log)
+    monkeypatch.setattr(qmt_ingest, "build_stock_import", fake_build_stock_import)
+    monkeypatch.setattr(import_csv, "write_qmt_stock", fake_write_qmt_stock)
+
+    rc = import_csv.main(_qmt_argv(tmp_path))
+    assert rc == 0
+
+    order = calls["order"]
+    kinds = [k for k, _ in order]
+    i_lock = next(i for i, (k, q) in enumerate(order)
+                  if k == "fetchval" and "pg_try_advisory_lock" in q and "xact" not in q)
+    i_unlock = next(i for i, (k, q) in enumerate(order) if k == "fetchval" and "pg_advisory_unlock" in q)
+    i_write = kinds.index("write_qmt_stock")
+    assert i_lock < i_unlock < i_write, f"顺序应为 探测锁→释放→写入，实际 {kinds}"
+
+
+def test_qmt_missing_export_log_entry_clean_failure(tmp_path, monkeypatch, capsys):
+    """export_log 缺该股条目 → 必须是干净的非零返回 + 可读 reason，不是裸 KeyError/traceback
+    （Task1 review 遗留的已知缺口）。build_stock_import 从未被调用——在装配前就被拦下。"""
+    import qmt_ingest
+    import qmt_normalize
+
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls)
+    _write_qmt_csv_stub(tmp_path, label="1分钟K线")
+    _write_qmt_csv_stub(tmp_path, label="日K线")
+
+    monkeypatch.setattr(qmt_normalize, "parse_qmt_csv", lambda path, period: object())
+    monkeypatch.setattr(qmt_ingest, "parse_export_log", lambda path: {})  # 空——两条都缺
+
+    build_called = []
+    monkeypatch.setattr(qmt_ingest, "build_stock_import",
+                        lambda *a, **kw: build_called.append(1))
+
+    rc = import_csv.main(_qmt_argv(tmp_path))  # 不应抛出——必须干净返回
+    assert rc == 2
+    assert build_called == [], "缺 export_log 条目应在装配前就被拦下"
+    err = capsys.readouterr().err
+    assert "000001.SZ" in err and "export_log" in err
+
+
+def test_no_import_cycle():
+    """`import_csv` 绝不能顶层 import `qmt_ingest`（后者顶层反向 import 了前者的
+    clean/compute_indicators/to_kline_records）——一旦引入会在此处循环崩溃
+    （codex plan-R2 钉住的防回归 smoke 测）。"""
+    import importlib
+    importlib.import_module("import_csv")
+    importlib.import_module("qmt_ingest")
+    importlib.import_module("generate_training_sets")

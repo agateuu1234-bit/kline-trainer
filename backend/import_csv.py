@@ -145,6 +145,7 @@ def to_kline_records(df: pd.DataFrame, stock_code: str, period: str) -> list[dic
 import argparse
 import asyncio
 import os
+import sys
 
 _KLINE_INSERT = """
 INSERT INTO klines (stock_code, period, datetime, open, high, low, close,
@@ -433,19 +434,117 @@ def _discover_period(csv_path: Path) -> str:
     return "1m"
 
 
+async def _amain_qmt(args) -> int:
+    """`--qmt` 分支异步实现（P3-D6/P3-D8/R17-F1）：
+    1) rollout-drain 全局锁探测（先于任何解析/写入）
+    2) 递归定位该股的两个 QMT CSV（1m + daily，各恰好命中 1 个）
+    3) parse → 查 export_log → build_stock_import → write_qmt_stock（替换语义写入）
+    任一步失败：把 reason 打到 stderr、返回 2（非零）——不是裸 traceback。
+
+    诚实标注（P3-D8）：下面探测 B2_GENERATION_LOCK_KEY 只能证明"探测这一刻没有
+    B2/B4 调度器持锁"；它挡不住一个已经在探测之前无锁读完自己快照、正等着登记
+    训练组的旧 B2 session——那个窗口机器检查不出来，完全封死靠部署 drain（首次
+    QMT 导入前先停/重启调度器再开始导入）。
+    """
+    import asyncpg  # 局部 import：纯函数层不依赖 asyncpg（单测不装也能跑）
+    # 局部 import：import_csv 不能顶层依赖 generate_training_sets（循环 import 风险，
+    # 与 write_to_postgres/write_qmt_stock 同理）。
+    from generate_training_sets import B2_GENERATION_LOCK_KEY
+
+    conn = await asyncpg.connect(args.dsn)
+    try:
+        got = await conn.fetchval("SELECT pg_try_advisory_lock($1)", B2_GENERATION_LOCK_KEY)
+        if not got:
+            print("[B1] 拒绝导入：检测到活动的 B2/B4 调度器（全局锁被占）。"
+                  "首次 QMT 导入前请先 drain（停止/重启）调度器再重试。"
+                  "（本探测只能证明此刻没有调度器持锁，无法 fence 一个已无锁读完快照、"
+                  "正等登记的旧 B2——完全封死靠部署 drain，见 spec P3-D8）",
+                  file=sys.stderr)
+            return 2
+        await conn.fetchval("SELECT pg_advisory_unlock($1)", B2_GENERATION_LOCK_KEY)  # 仅探测，立即释放
+    finally:
+        await conn.close()
+
+    # ---- 探测通过后再进主流程：递归定位该股的两个 QMT CSV ----
+    input_dir = Path(args.input)
+    f_1m_matches = sorted(input_dir.rglob(f"{args.stock}_*_1分钟K线_前复权.csv"))
+    f_daily_matches = sorted(input_dir.rglob(f"{args.stock}_*_日K线_前复权.csv"))
+    if len(f_1m_matches) != 1:
+        print(f"[B1] 拒绝导入：{args.stock} 的 1 分钟K线 CSV 在 {input_dir} 下命中 "
+              f"{len(f_1m_matches)} 个（期望恰好 1 个）", file=sys.stderr)
+        return 2
+    if len(f_daily_matches) != 1:
+        print(f"[B1] 拒绝导入：{args.stock} 的日K线 CSV 在 {input_dir} 下命中 "
+              f"{len(f_daily_matches)} 个（期望恰好 1 个）", file=sys.stderr)
+        return 2
+    f_1m, f_daily = f_1m_matches[0], f_daily_matches[0]
+
+    # qmt_ingest 符号一律局部 import（防环——qmt_ingest 顶层 import 了 import_csv 的
+    # clean/compute_indicators/to_kline_records；import_csv 若顶层 import qmt_ingest，
+    # 会在 import_csv 自身加载期间去加载半初始化的 qmt_ingest，循环崩溃）。
+    # parse_qmt_csv/parse_qmt_filename 来自 qmt_normalize，无环，一并局部 import。
+    from qmt_ingest import QmtIngestRejected, build_stock_import, parse_export_log
+    from qmt_normalize import QmtSchemaError, parse_qmt_csv, parse_qmt_filename
+
+    export_log_path = Path(args.export_log) if args.export_log else input_dir / "export_log.csv"
+
+    try:
+        s1 = parse_qmt_csv(f_1m, "1m")
+        sd = parse_qmt_csv(f_daily, "daily")
+        _code, stock_name, _period = parse_qmt_filename(f_1m.name)
+        entries = parse_export_log(export_log_path)
+        # 缺 export_log 条目须是干净拒绝，不是裸 KeyError/traceback（Task1 review 遗留缺口）。
+        missing = [f"{args.stock}/{p}" for p in ("1m", "daily") if (args.stock, p) not in entries]
+        if missing:
+            raise QmtIngestRejected(f"export_log 缺条目: {', '.join(missing)}")
+        bundle = build_stock_import(s1, sd, stock_code=args.stock, stock_name=stock_name,
+                                    entry_1m=entries[(args.stock, "1m")],
+                                    entry_daily=entries[(args.stock, "daily")])
+        counts = await write_qmt_stock(args.dsn, args.stock, stock_name, bundle)
+    except (QmtIngestRejected, ImportBusyError, ReimportBlockedError,
+            LegacyImportBlockedError, QmtSchemaError) as e:
+        print(f"[B1] 拒绝导入：{e}", file=sys.stderr)
+        return 2
+
+    for per, rows in counts.items():
+        print(f"[B1] period={per} rows={rows}")
+    cov = bundle.coverage
+    print(f"[B1] dense 1m 覆盖：{cov.start_date} ~ {cov.end_date}"
+          f"（dense_day_count={cov.dense_day_count}）")
+    daily_recs = bundle.records["daily"]
+    first_date = trading_date(daily_recs[0]["datetime"])
+    last_date = trading_date(daily_recs[-1]["datetime"])
+    month_count = len(bundle.records["monthly"])
+    print(f"[B1] 日线：{first_date} ~ {last_date}，月边界数={month_count}")
+    print(f"[B1] {args.stock} QMT 导入完成")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="导入 CSV 行情到 PostgreSQL (B1)")
     ap.add_argument("--input", required=True, help="CSV 目录")
     ap.add_argument("--stock", required=True, help="股票代码")
-    ap.add_argument("--period", default=None, help="只导该周期；省略=导全部")
+    ap.add_argument("--period", default=None, help="只导该周期；省略=导全部（与 --qmt 互斥）")
     ap.add_argument("--name", default=None, help="股票名（缺省取 CSV name 列或代码）")
     ap.add_argument("--dsn", default=os.environ.get("DATABASE_URL"), help="PostgreSQL DSN")
+    ap.add_argument("--qmt", action="store_true",
+                     help="QMT 六周期端到端导入模式（替换语义，spec P3-D6）；与 --period 互斥。"
+                          "导入前探测全局 B2/B4 调度器锁作 rollout drain 闸（P3-D8/R17-F1）——"
+                          "只挡得住探测那一刻有调度器持锁，挡不住已无锁读完快照、正等登记的旧 "
+                          "B2，完全封死靠部署 drain。")
+    ap.add_argument("--export-log", default=None,
+                     help="export_log.csv 路径；省略=<input>/export_log.csv（仅 --qmt 生效）")
     args = ap.parse_args(argv)
     if not args.dsn:
         ap.error("需要 --dsn 或环境变量 DATABASE_URL")
+    if args.qmt and args.period:
+        ap.error("--qmt 与 --period 互斥")
     # R4-1（Task2 code-quality）：拒绝 typo/未知 --period，避免静默 0 行"成功"导入。
     if args.period and args.period not in KNOWN_PERIODS:
         ap.error(f"未知 --period {args.period!r}（合法值：{', '.join(KNOWN_PERIODS)}）")
+
+    if args.qmt:
+        return asyncio.run(_amain_qmt(args))
 
     csv_dir = Path(args.input)
     all_files = sorted(csv_dir.glob("*.csv"))
