@@ -287,4 +287,52 @@ struct TrainingEngineDrawingCommitTests {
         e.routeDrawingCommit(consistentDrawing())
         #expect(e.drawings.count == 2)                      // 路由层也照常放行
     }
+
+    // MARK: - whole-branch codex R2-high：append 返回值可观测（消除未来「删旧线+append新线」式编辑
+    // 静默丢线的隐患——1b-i 编辑路径尚未建，此处以返回值可观测性代验，见方法文档警告）。
+
+    @Test("appendDrawing 拒收坏数据时返回 false，且 drawings 不增长")
+    func appendDrawingReturnsFalseOnReject() {
+        let e = TrainingEngine.preview()
+        let ok = e.appendDrawing(mixedPeriodDrawing())
+        #expect(ok == false)
+        #expect(e.drawings.isEmpty)
+    }
+
+    @Test("appendDrawing 放行一致数据时返回 true，且 drawings 增长 1")
+    func appendDrawingReturnsTrueOnAccept() {
+        let e = TrainingEngine.preview()
+        let ok = e.appendDrawing(consistentDrawing())
+        #expect(ok == true)
+        #expect(e.drawings.count == 1)
+    }
+
+    @Test("appendReviewDrawing 拒收坏数据时返回 false，且 reviewDrawings 不增长")
+    func appendReviewDrawingReturnsFalseOnReject() {
+        let e = TrainingEngine.preview()
+        let ok = e.appendReviewDrawing(mixedPeriodDrawing())
+        #expect(ok == false)
+        #expect(e.reviewDrawings.isEmpty)
+    }
+
+    @Test("appendReviewDrawing 放行一致数据时返回 true，且 reviewDrawings 增长 1")
+    func appendReviewDrawingReturnsTrueOnAccept() {
+        let e = TrainingEngine.preview()
+        let ok = e.appendReviewDrawing(consistentDrawing())
+        #expect(ok == true)
+        #expect(e.reviewDrawings.count == 1)
+    }
+
+    @Test("返回值可观测性代验「delete-then-append 不会静默消失」：调用者能在删旧线前先探知拒绝")
+    func returnValueLetsCallerDetectRejectionBeforeDeletingOldLine() {
+        // 真实编辑路径（删旧线 + append 新线）是 1b-i 尚未建的功能；这里以最小可表达形式验证
+        // codex R2-high 要保护的性质：调用者必须能在“删旧线”之前，通过返回值知道新线会不会被拒收，
+        // 从而避免「旧线已删、新线被静默拒收」导致的丢线。
+        let e = TrainingEngine.preview()
+        e.appendDrawing(consistentDrawing())          // 模拟已存在的“旧线”
+        #expect(e.drawings.count == 1)
+        let wouldAccept = e.appendDrawing(mixedPeriodDrawing())   // 探知：新线是否会被接受
+        #expect(wouldAccept == false)                 // 被拒——调用者据此绝不能先删旧线
+        #expect(e.drawings.count == 1)                // 旧线仍在，未被静默丢弃
+    }
 }

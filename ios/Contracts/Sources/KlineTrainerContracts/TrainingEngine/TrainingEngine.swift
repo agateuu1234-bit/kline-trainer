@@ -1082,16 +1082,24 @@ extension TrainingEngine {
     /// `manager.completedDrawings → engine.drawings` 单一真相（manager 仅作输入暂存）。
     /// **review-redesign Task 10**：本方法保持不变（normal/replay 仍走它）——review 模式改经
     /// `routeDrawingCommit`/`appendReviewDrawing` 写 `reviewDrawings`，不再直接调本方法。
-    public func appendDrawing(_ drawing: DrawingObject) {
-        guard isPeriodConsistent(drawing) else { return }        // 1a-iv fail-closed：坏数据不入库
+    /// **whole-branch codex R2-high：返回值 load-bearing** —— 未来做「删旧线 + append 新线」式编辑
+    /// （1b-i）的调用者必须先看返回值：返 `false`（被拒）时绝不能已经把旧线删了，否则静默丢线。
+    @discardableResult
+    public func appendDrawing(_ drawing: DrawingObject) -> Bool {
+        guard isPeriodConsistent(drawing) else { return false }  // 1a-iv fail-closed：坏数据不入库
         drawings.append(drawing)
+        return true
     }
 
     /// review-redesign Task 10：复盘新画线唯一写入面——追加进 `reviewDrawings`（不触碰 `drawings`，
     /// 不污染原训练记录）。`RenderStateBuilder.make` review 模式据此叠加 `drawings + reviewDrawings`。
-    public func appendReviewDrawing(_ drawing: DrawingObject) {
-        guard isPeriodConsistent(drawing) else { return }        // 1a-iv fail-closed：坏数据不入库
+    /// **whole-branch codex R2-high：返回值 load-bearing** —— 未来做「删旧线 + append 新线」式编辑
+    /// （1b-i）的调用者必须先看返回值：返 `false`（被拒）时绝不能已经把旧线删了，否则静默丢线。
+    @discardableResult
+    public func appendReviewDrawing(_ drawing: DrawingObject) -> Bool {
+        guard isPeriodConsistent(drawing) else { return false }  // 1a-iv fail-closed：坏数据不入库
         reviewDrawings.append(drawing)
+        return true
     }
 
     /// 1a-iv（codex plan-R4/R5-high）：新画线入库的**单一校验点**。锚必须全部同 period，且 `period` 字段
