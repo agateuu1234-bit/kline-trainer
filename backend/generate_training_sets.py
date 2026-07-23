@@ -198,7 +198,7 @@ def build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, t
                 raise GenerateSkipException(f"{p} before {before_n}(<{before_min}) / after {after_n}(<1)")
         intraday = {p: windows[p] for p in ("3m", "15m", "60m") if p in windows}
         if not per_day_intraday_complete(intraday, trading_dates, after_end, intraday_expected,
-                                         full_bars=period_bars):     # PF2-R7-F2 边界日对照全量
+                                         full_bars=period_bars, dropped=dropped):  # PF2-R7-F2 边界日对照全量 + R6-F1 before-context dropped 门
             raise GenerateSkipException("D9 per-day 硬门失败")
         return windows
 
@@ -208,7 +208,7 @@ def build_training_windows(period_bars, month_boundaries, rng, *, dense_dates, t
 
 
 def per_day_intraday_complete(windows, trading_dates, after_end, expected=None,
-                              *, full_bars=None) -> bool:
+                              *, full_bars=None, dropped=frozenset()) -> bool:
     """D9 per-day 硬门（codex PF1-R2/PF1-R4-F2/PF1-R6-F1 + Plan 2b 边界日修正）：
     **每个盘中周期**在 `[该周期首选中日, trading_date(after_end)]` 内、每个交易日
     （∈ trading_dates）桶数精确 == 应有数（3m=80/15m=16/60m=4）；**首日 d0 同样精确验**，
@@ -216,7 +216,11 @@ def per_day_intraday_complete(windows, trading_dates, after_end, expected=None,
     窗口内不足是切片产物；但它在库里必须有满 need 根）。不传 `full_bars` 则退回严格
     全量，向后兼容既有调用。
     **跨度终点用 `after_end`、非 `dates.max()`**——否则 after_end 附近盘中全缺的
-    尾日会落在 max 之外、漏检（高周期 bar 覆盖了无盘中回放的日期）。任一周期任一日不符 → False。"""
+    尾日会落在 max 之外、漏检（高周期 bar 覆盖了无盘中回放的日期）。任一周期任一日不符 → False。
+
+    `dropped`（codex R6-F1）：coverage 权威 dropped_1m_dates；任一 dropped 日落在某周期
+    窗口实际跨度 `[d0, ae_date]`（d0=dates.min()、含 before-context）→ False，独立于
+    trading_dates（补住 both-missing 日在 before-context 的静默空洞）。"""
     expected = expected or _INTRADAY_EXPECTED
     ae_date = trading_date(after_end)
     for period, need in expected.items():
@@ -226,6 +230,13 @@ def per_day_intraday_complete(windows, trading_dates, after_end, expected=None,
         dates = pd.Series([trading_date(e) for e in win["datetime"]])
         d0 = dates.min()
         span = [d for d in trading_dates if d0 <= d <= ae_date]     # 到 after_end（含尾日）、非 dates.max()
+        # R6-F1：dropped_1m 日若落在本周期窗口实际跨度 [d0, ae_date]（d0=dates.min() 含
+        # before-context、可早于 start）→ 静默盘中空洞。dropped 是 coverage 权威集，须
+        # **独立于 trading_dates** 判：某 dropped 日的 daily 行也缺时它不在 trading_dates、
+        # 也就不在上面 span 里，仅靠下方内部逐日 counts 门漏检（eligible_start_indices 的
+        # dropped 门只覆盖 [start, after_end] 前向、够不到 before-context）。
+        if any(d0 <= dd <= ae_date for dd in dropped):
+            return False
         counts = dates.value_counts().to_dict()
         # **边界日 d0 对照全量 bars 校验，内部日对照窗口校验**（codex PF2-R7-F2）。
         #
@@ -242,7 +253,9 @@ def per_day_intraday_complete(windows, trading_dates, after_end, expected=None,
         # 正解：d0 只是被切片的那天，但**它在库里必须是完整的**。故对照 full_bars
         # 数该日在 PG 里的实际根数，要求 == need。非自指、且直接命中要防的坏数据。
         # 注：若某 before-context 日被整日 drop，切片会往更早取够根数 → d0 前移、
-        # 空洞落进 [d0, ae] → 由下面的内部精确门抓住。
+        # 空洞落进 [d0, ae]。该日 daily 在库时它 ∈ trading_dates ∈ span → 下面内部精确门
+        # （counts）抓住；daily 也缺时它不在 trading_dates/span → 由上方 R6-F1 的 dropped
+        # 独立门抓住（codex R6-F1：both-missing 场景仅靠内部门会漏检，故加 dropped 门）。
         if full_bars is None:
             boundary_ok = counts.get(d0, 0) == need      # 向后兼容既有调用：严格全量
         else:

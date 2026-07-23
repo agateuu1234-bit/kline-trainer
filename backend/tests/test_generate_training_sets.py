@@ -313,6 +313,21 @@ def test_per_day_intraday_complete_catches_missing_tail_day():
     ae2 = _ae(2026,7,2)                                                # after_end 只到 D2 → 通过
     assert per_day_intraday_complete(windows, trading, ae2) is True
 
+def test_per_day_intraday_complete_catches_dropped_day_in_before_context():
+    """R6-F1：某 dropped 1m 日落在 before-context、且 daily 也缺（∉ trading_dates）→ 内部逐日
+    counts 门看不见它（不在 span）、eligible 的 dropped 门只覆盖 [start,after_end] 前向也够不到
+    → 静默盘中空洞。前后交易日都有满根 bar、唯独 dropped 日无 bar（d0<D_drop<尾日）。
+    不传 dropped（默认空）→ 旧的静默 True（正是 bug）；传 dropped={D_drop} → False（修）。"""
+    D_before, D_drop, D1, D2 = (2026,6,29), (2026,6,30), (2026,7,1), (2026,7,2)
+    trading = {dt.date(*D_before), dt.date(*D1), dt.date(*D2)}   # daily 缺 D_drop → 不在 trading_dates
+    ae = _ae(2026,7,2)
+    windows = {"3m": pd.DataFrame(_mk_bars(D_before,80)+_mk_bars(D1,80)+_mk_bars(D2,80)),
+               "15m": pd.DataFrame(_mk_bars(D_before,16)+_mk_bars(D1,16)+_mk_bars(D2,16)),
+               "60m": pd.DataFrame(_mk_bars(D_before,4)+_mk_bars(D1,4)+_mk_bars(D2,4))}
+    assert per_day_intraday_complete(windows, trading, ae) is True                 # bug：内部门漏检 → 静默通过
+    assert per_day_intraday_complete(windows, trading, ae,
+                                     dropped={dt.date(*D_drop)}) is False           # 修：dropped 独立门抓住
+
 def test_build_training_windows_end_to_end_retries_on_tail_d9_fail():
     # 端到端生产入口（codex PF1-R6-F2）：months=1, 候选 {30(2022-07),31(2022-08)};
     # July 末交易日缺 3m → idx30 D9(尾日)失败 → 重试 idx31(Aug 完整)成功
@@ -341,6 +356,37 @@ def test_build_training_windows_end_to_end_retries_on_tail_d9_fail():
     ae31 = compute_after_end(bounds, bounds.index(bounds[31]), months=1)
     assert per_day_intraday_complete({p: windows[p] for p in ("3m","15m","60m")}, trading, ae31,
                                      {"3m":2,"15m":2,"60m":1}) is True
+
+
+def test_build_training_windows_rejects_dropped_day_in_before_context():
+    """R6-F1 端到端（codex R6 next-step）：唯一候选的 before-context 跨过一个 dropped-both-missing
+    日 D（daily+盘中都缺、d0<D<start）。前向 [start,after_end] 干净 → eligible 通过、其 dropped 门
+    只覆盖前向也够不到 D。不传 dropped → 静默注册（bug）；传 dropped={D} → per_day 的 dropped 独立门
+    抓住 → 唯一候选穷尽 → GenerateSkipException（而非登记带空洞的训练组）。"""
+    from generate_training_sets import build_training_windows
+    bounds = _n_month_boundaries(32)                       # months=1 → 唯一候选 idx=30(start=2022-07)
+    D_drop = dt.date(2022, 6, 30)
+    all_days = _weekday_range(dt.date(2022, 6, 1), dt.date(2022, 7, 31))
+    days = [d for d in all_days if d != D_drop]            # daily+dense+盘中都缺 D_drop
+    trading = set(days); dense = set(days)
+    def _bars(dlist, n):
+        rows = []
+        for d in dlist:
+            base = int(dt.datetime(d.year, d.month, d.day, 9, 33, 0, tzinfo=SH).timestamp())
+            rows += [{"datetime": base + i*180, "open": 1.0, "high": 1.0, "low": 1.0,
+                      "close": 1.0, "volume": 1, "amount": 1.0} for i in range(n)]
+        return pd.DataFrame(rows)
+    pb = {"3m": _bars(days, 2), "15m": _bars(days, 2), "60m": _bars(days, 1), "daily": _bars(days, 1)}
+    caps = {"3m": 2, "15m": 2, "60m": 2, "daily": 2}       # 短 before-context：跨过 D_drop 取到更早交易日
+    kw = dict(months=1, intraday_expected={"3m": 2, "15m": 2, "60m": 1}, before_min=1, max_retries=8)
+    # 不传 dropped：before-context 空洞漏检 → 成功注册（正是 bug）
+    start, _w = build_training_windows(pb, bounds, random.Random(0), dense_dates=dense,
+                                       trading_dates=trading, before_caps=caps, **kw)
+    assert start == bounds[30]
+    # 传 dropped={D_drop}：唯一候选 before-context 含 D → per_day dropped 门拒 → 穷尽 → skip
+    with pytest.raises(GenerateSkipException):
+        build_training_windows(pb, bounds, random.Random(0), dense_dates=dense,
+                               trading_dates=trading, before_caps=caps, dropped={D_drop}, **kw)
 
 
 # ===== final whole-branch review Finding 1：D6 per-period before/after 硬门补测（Task8 删旧测试造成的
