@@ -531,8 +531,8 @@ from generate_training_sets import stock_lock_key, IMPORT_GEN_LOCK_KEY, B2_GENER
 
 def test_stock_lock_key_deterministic_and_int4():
     a = stock_lock_key("000001.SZ"); b = stock_lock_key("000001.SZ")
-    assert a == b and 0 <= a <= 0x7FFFFFFF
-    assert stock_lock_key("000002.SZ") != a or True   # 允许碰撞、不允许非确定
+    assert a == b and 0 <= a <= 0x7FFFFFFF          # 同 code 恒定、落 int4 正区间
+    assert isinstance(stock_lock_key("000002.SZ"), int)  # 别股也返 int（碰撞允许，故不断言不等）
     assert IMPORT_GEN_LOCK_KEY != B2_GENERATION_LOCK_KEY
 ```
 
