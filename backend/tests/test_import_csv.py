@@ -410,6 +410,28 @@ def test_write_to_postgres_rejects_qmt_managed_stock(monkeypatch):
     assert calls.get("executemany", 0) == 0
 
 
+def test_write_to_postgres_rejects_pre_migration_no_coverage_table(monkeypatch):
+    """R7-F1：目标库未跑 migration 0004（无 stock_coverage 表）→ 通用 CSV 写路径必须抛
+    受控 SchemaDriftError（「请先跑迁移」），而不是让 `SELECT 1 FROM stock_coverage` 抛裸
+    asyncpg UndefinedTable 冒穿（滚动/部分部署、陈旧本地库）。to_regclass 存在性门须在
+    coverage 行查询与任何 execute 之前，零写入。"""
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision",
+                                           calls=calls, coverage_table_exists=False)
+    from import_csv import SchemaDriftError, write_to_postgres
+
+    with pytest.raises(SchemaDriftError):
+        asyncio.run(write_to_postgres("postgres://x", "600519", "贵州茅台",
+                                       [_dummy_kline_record()]))
+    order = calls.get("order", [])
+    assert any(k == "fetchval" and "to_regclass('stock_coverage')" in q for k, q in order), \
+        "应先做 stock_coverage 表存在性探测（to_regclass）"
+    assert not any(k == "fetchval" and "SELECT 1 FROM stock_coverage" in q for k, q in order), \
+        "表不存在时不该到达 coverage 行查询（存在性门在它之前）"
+    assert not any(k == "execute" for k, q in order), "表缺失时零 execute（含 LOCK TABLE）"
+    assert calls.get("executemany", 0) == 0
+
+
 def test_write_to_postgres_lock_busy(monkeypatch):
     """按股 xact 锁被 B2 占用 → ImportBusyError，零 INSERT。"""
     calls: dict = {}

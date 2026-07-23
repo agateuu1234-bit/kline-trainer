@@ -250,6 +250,11 @@ async def write_to_postgres(dsn: str, stock_code: str, stock_name: str,
             if not await conn.fetchval("SELECT pg_try_advisory_xact_lock($1,$2)",
                                        IMPORT_GEN_LOCK_KEY, stock_lock_key(stock_code)):
                 raise ImportBusyError(f"{stock_code}: 正被 B2 生成，稍后重试")
+            # R7-F1：下面 `SELECT 1 FROM stock_coverage` 在未跑 migration 0004 的库上会抛裸
+            # asyncpg UndefinedTable、绕过本模块受控的 SchemaDriftError「请先跑迁移」路径
+            # （滚动/部分部署、陈旧本地库）。先 to_regclass 存在性探测（同 QMT 写路径），
+            # 表缺 → SchemaDriftError，不是裸崩。
+            await _assert_stock_coverage_exists(conn)
             if await conn.fetchval("SELECT 1 FROM stock_coverage WHERE stock_code=$1",
                                    stock_code):
                 raise LegacyImportBlockedError(
