@@ -685,3 +685,12 @@ def test_select_valid_window_excludes_before_retry_budget():
                                    try_assemble=lambda s: {"ok": True},
                                    exclude_starts=excluded)
     assert start == survivor, "被排除的候选吃掉了重试名额（修复前必挂）"
+
+
+from generate_training_sets import stock_lock_key, IMPORT_GEN_LOCK_KEY, B2_GENERATION_LOCK_KEY
+
+def test_stock_lock_key_deterministic_and_int4():
+    a = stock_lock_key("000001.SZ"); b = stock_lock_key("000001.SZ")
+    assert a == b and 0 <= a <= 0x7FFFFFFF          # 同 code 恒定、落 int4 正区间
+    assert isinstance(stock_lock_key("000002.SZ"), int)  # 别股也返 int（碰撞允许，故不断言不等）
+    assert IMPORT_GEN_LOCK_KEY != B2_GENERATION_LOCK_KEY

@@ -50,6 +50,15 @@ PERIOD_BEFORE_CAP = {"monthly": None, "weekly": 120, "daily": 150,
 # 调用 B2 的路径都必须先拿到它，杜绝同一 (stock_code,start) 被两个 writer 同时产出。
 B2_GENERATION_LOCK_KEY = 0x42345CEE
 
+# 与 B2_GENERATION_LOCK_KEY 刻意不同（同用会让 B1 导入把 B2 挡在启动外）。
+IMPORT_GEN_LOCK_KEY = 0x42345CF0
+
+
+def stock_lock_key(stock_code: str) -> int:
+    """按股 advisory lock 的第二参数：crc32 落 int4 正区间。
+    碰撞只影响并发度、不影响正确性（B1 import 侧也 import 本函数，保证两端同一把 key）。"""
+    return zlib.crc32(stock_code.encode("utf-8")) & 0x7FFFFFFF
+
 
 class GenerateSkipException(Exception):
     """月线不足 / "之后" 窗口为空 / 起始点冲突 → 跳过重选（modules L737）。"""
