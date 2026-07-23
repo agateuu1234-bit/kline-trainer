@@ -73,6 +73,7 @@
 > | R4 | medium | **D63** | 选中在「几何不可见」后仍存活 → 🗑 可删一个用户看不见的对象 | **部分采纳**：问题成立、危害照堵；但**不采纳它「清空选中」的处方**（与 1a-iv 的平移惯性冲突，会抖掉选中）→ 改为结构性/几何性分流 |
 > | R5 | high | **D64** | **我跨轮累积出的真矛盾**：D54「返 false 就清空选中」与 D60/D59/D63 三处「失败但必须保留选中」冲突 | **部分采纳**：矛盾成立照修；但**不用它的 result-enum 处方**→ 清空判据改为状态谓词（id 还在不在），没有映射表可写错 |
 > | R5 | medium | **D65** | **我在 D63 里给自己开的特例**：「样式编辑不禁」——那仍是不可逆内容变更，且正是 D59 教我别做的个案裁量 | 全采纳（🗑 与样式控件同进同退，共用一个可用性谓词） |
+> | R6 | high | **D51 修订** | **我在 D62（R4）写的 delete「保持 public、不依赖 viewport」在 D65（R5）之后过时**：删除已受几何门约束，但 public/无 mapper 的引擎 API enforce 不了 → 离屏线可被绕过删除 | 全采纳（delete 降 internal + UI 删除路由几何门，与 `updateDrawingStyle` 对称） |
 >
 > 共同形状：**我写的东西"符合上游 spec"，但没人问过"坏数据会怎样 / 直接调用者会怎样 / 高版本写的数据会怎样"**（[[feedback_internal_review_misses_bad_data]]）。
 > 收敛方向也一致：**把不变量钉在写入边界上，让坏状态不可表达**，而不是逐个补调用点或依赖 UI 自觉。
@@ -242,7 +243,7 @@ D58 把 `lineSubType` 的 viewport 预检放在 UI 层——这是**原理性**�
 - **加源码守卫测试**钉死 `Sources/` 中只有那一个调用点（新增调用点必须同时补 viewport 预检，测试会当场红）；
 - **这不是新发明**：`DrawingSession` 的全部 mutator 早就是 internal + 源码守卫（`Drawing/DrawingSession.swift:21-28` 大注释写明理由——public mutator 会让包外绕过唯一正确入口）。本条只是把同一条纪律套到新开的写入面上。
 - 测试经 `@testable import` 照常可调，N12 / N13 不受影响。
-- **`deleteDrawing(id:)` 保持 `public`**：删除不产生坏数据，其唯一不变量（`locked`）已由 D60 在引擎层 fail-closed，不依赖 viewport。
+- ⚠️ **`deleteDrawing(id:)` 的边界见 D51（R6 修订）**：本决策原稿曾写「delete 保持 public、不依赖 viewport」，那句在 D65 之后已过时（删除现在也受几何门约束）→ delete 与本 API **对称收紧**，理由与形状统一写在 D51。
 
 ### D63 「结构性不可见」清空选中，「几何性不可见」只禁用破坏性操作
 
@@ -322,21 +323,35 @@ D63 里我写了「样式编辑**不禁**（改一条当前看不见的线的颜
 - 谓词为真时全部恢复可用。**滑回来 / 解锁后自动恢复**，无需重选。
 - **面板仍然回显**选中线的样式（D49 不变）——**看得见、改不动**。用户始终知道自己选中的是什么，只是当下不能改。
 - `locked` 一并纳入本谓词，顺带消掉一个 wart：否则本构建里一条解码来的锁定线会显示**可操作**的控件却静默无效果（上游 §7.2 本来就要求「🗑 灰、设置面板全灰」，本条只是把**已持久化状态的显示**做对，**不是**引入锁定动作——那仍属 1b-ii）。
-- **判据必须单点**：🗑 置灰、样式控件置灰、D58 的 subtype 预检**三处复用同一个求值**，源码守卫钉死不得各写一份。
+- **判据必须单点（四处同源）**：🗑 置灰、样式控件置灰、D58 的 subtype 预检、**D51 的 UI 删除路由几何门**——**四处复用同一个** `visibleGeometry` 求值，源码守卫钉死不得各写一份。
 
 > D58 的 subtype 预检在本决策下退化为一个更窄、更清晰的职责：**防止一条当前可见的线被改成不可见**（谓词为真时才可能发起这次改动）。
 
-### D51 删除 API = `deleteDrawing(id:) -> Bool`（id 寻址，不用下标）
+### D51 删除边界：引擎 `deleteDrawing(id:)` 降 **internal** + 唯一经 UI 删除路由（几何门与 `updateDrawingStyle` 对称）
 
-```swift
-@discardableResult
-public func deleteDrawing(id: DrawingID) -> Bool
-```
+> **R6 修订（codex R6 high）**：本决策原稿把 `deleteDrawing(id:)` 定为 `public`，理由「删除不产生坏数据、不依赖 viewport」。**该理由在 D63/D65 之后过时了**——删除现在确实依赖 viewport（几何不可见的选中线**不许删**，D63 / N16b / D65）。`public` + 无 mapper 的引擎 API **无法** enforce 这道门：包外调用、或 🗑 置灰前一帧的 stale 点击，都能删掉一条离屏线，绕过 spec 声明为强制的可见性谓词。这与 R2 / R4 是同一个信任边界模式（viewport 门只能在 UI 层 → 破坏性 API 若 public/无 mapper 就能被绕过）。
 
-- 选中态存的是 `id`，而数组下标会因任何增删而漂移；用下标删 = 竞态下删错线。
-- 成功 → 移除该条 + `drawingsRevision += 1` + 返 `true`。
-- 返 `false` 的**两种**原因，零改动、`drawingsRevision` 不递增：① `id` 不存在；② 目标 `locked == true`（D60）。**两者的选中处置不同**（① 清空、② 保留），故同 D50：**选中生命期一律走 D64 的状态谓词，不看返回值**。
-- **现有 `deleteDrawing(at index:)` 保留不动**：已实测其在 `Sources/` 中**零生产调用点**（只有定义与注释），且有测试钉着；删它属于「清理无关代码」，不在本期范围（CLAUDE.md §3）。
+**引擎层 `deleteDrawing(id:) -> Bool`（viewport 无关 = 数据完整性边界）**：
+- 访问级别 **`internal`**，不是 `public`——与 `updateDrawingStyle`（D62）**完全对称**。删除比改样式**更**危险（不可逆、本期无 undo），边界只能更严、不能更松。
+- id 寻址，不用下标（下标会因任何增删漂移，竞态下删错线；而选中态存的正是 id）。
+- 只 enforce **viewport 无关**的不变量：`id` 存在 + `locked == false`（D60）。返 `false` 两种原因、零改动、`drawingsRevision` 不递增：① id 不存在；② `locked`。**不判 geometry**（引擎没 mapper，判不了）。
+- 成功 → 移除 + `drawingsRevision += 1` + `true`。
+- 选中处置：① 清空、② 保留 —— 一律走 **D64 的状态谓词，不看返回值**。
+
+**UI 层删除路由（🗑 的 action，viewport 相关 = 交互安全边界）**：
+- 先验 `selectedPanel` 当前 mapper 下 `visibleGeometry != nil`（几何门）→ 才调引擎 `deleteDrawing(id:)`。几何不可见 → **拒绝、不调引擎、选中保留**（D63 / D65）。
+- 判据**复用 D65 的同一个** `visibleGeometry` 求值（见 D65「四处同源」）。
+
+**危害消除的完整论证**（这是本条要达到的性质，不是流程描述）：
+| 攻击面 | 为何不可达 |
+|---|---|
+| 包外直接删离屏线 | `internal` 挡住 |
+| 包内直接调 `deleteDrawing(id:)` 绕过几何门 | 源码守卫钉死 `Sources/` **唯一**调用点 = 已先验 geometry 的 UI 删除路由（与 D62 对称）；新增调用点漏补几何门 → 测试当场红 |
+| 删 `locked` 线 | 引擎层 fail-closed（N13b，`@testable` 直调可测） |
+| 删几何不可见的选中线 | UI 路由拒绝（N16b，走路由测） |
+
+- **现有 `deleteDrawing(at index:)` 保留不动**：零生产调用点（只有定义与注释）、遗留、不产生坏数据（CLAUDE.md §3 不删无关代码）；无调用点故其访问级别不影响本期安全属性。
+- 测试经 `@testable import` 仍可直调 internal 的 `deleteDrawing(id:)`，N13 不受影响。
 
 ### D52 1a-iv 交接②（`init` / `decode` 层 period 校验）重估结论 = **仍不加闸**
 
@@ -527,7 +542,7 @@ public private(set) var mode: DrawingSessionMode = .draw
 
 - **N16 结构性 / 几何性不可见的差别处置（D63，codex R4-F3 专项）**：
   - **a 结构性 → 清空**：选中一条线 → 切周期使其改由另一面板显示（或不再显示）→ 选中**被清空**、🗑 灰（= D54 clause 3，与 N11 断言一致）。
-  - **b 几何性 → 保留选中但 🗑 灰**：选中一条线 → 平移使其价格滑出主图纵向范围（`visibleGeometry == nil`，但仍属该面板、`revealTick` 已到）→ 断言：**选中仍在**（`selectedDrawingID` 不变）、**🗑 变灰**、**调用删除被拒**（返 `false`、`drawings` 逐字段不变、`drawingsRevision` 不递增）。
+  - **b 几何性 → 保留选中但 🗑 灰**：选中一条线 → 平移使其价格滑出主图纵向范围（`visibleGeometry == nil`，但仍属该面板、`revealTick` 已到）→ 断言：**选中仍在**（`selectedDrawingID` 不变）、**🗑 变灰**、**经 UI 删除路由删除被拒**（`drawings` 逐字段不变、`drawingsRevision` 不递增）。**必须走 UI 删除路由**（D51：几何门在路由层，引擎 `deleteDrawing(id:)` 判不了 geometry）——直接调引擎证明不了这一条。
   - **c 滑回来自动恢复**：接 b，平移回去使其重新可见 → 🗑 **自动变亮**、删除可执行。这条钉住「保留选中」的价值，也防实现把 b 做成"永久禁用"。
   - **d 判据同源**：源码守卫断言 🗑 置灰判据与 D58 的 subtype 预检**复用同一个** `visibleGeometry` 求值，不得各写一份。
 
@@ -547,6 +562,11 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **b `locked`**：选中一条 `locked == true` 的线（几何可见）→ 断言同样全部置灰、写入被拒。
   - **c 恢复（防做成永久禁用）**：a 平移回来 / b 的线改为未锁定 → 断言控件与 🗑 **全部自动恢复可用**，且此时改样式**成功**、`drawingsRevision` **+1**。
   - **d 回显不受影响**：a / b 两种置灰态下，面板**仍然显示**该线的真实样式（D49）——**看得见、改不动**，不得因置灰而退回显示默认样式。
+
+- **N19 `deleteDrawing(id:)` 破坏性边界收紧（D51 R6 修订，codex R6-F1 专项，不可省）**：
+  - **a 源码守卫**：`Sources/` 中 `deleteDrawing(id:` 的调用点**恰好 1 处**（= UI 删除路由），且访问级别**不是** `public`（同 N15 的锚定纪律）。
+  - **b 引擎层 locked 仍拒**：`@testable` 直调 internal `deleteDrawing(id:)` 删一条 `locked == true` 线 → 返 `false`（= N13b，确认降 internal 后引擎门仍在）。
+  - **c 几何门在路由**：几何不可见的选中线，**经 UI 删除路由**删除被拒（= N16b）；这条与 b 分层——b 证「引擎判 locked」、c 证「路由判 geometry」，两道门在不同层各测一次。
 
 ---
 
