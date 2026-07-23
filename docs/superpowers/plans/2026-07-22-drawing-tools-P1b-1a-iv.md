@@ -1618,6 +1618,11 @@ git commit -m "1a-iv Task4：三道闸拦住锚跨周期的坏画线（提交路
    - **本期实际不可达**：唯一开放的工具 `.horizontal` 是**单锚**、落锚即提交，`pendingAnchors` 结构上不可能超过 1 个锚，跨周期锚集合造不出来。真正会用到多锚的是 P1c。
    **交接要求**：P1c 开放第一个多锚工具时**必须重估这条**，把「锚集合同 period」提升为模型级不变量（连同 decode 策略一起定），不能只靠三道 commit/漏斗闸。
 4. **复盘的手势改善（验收 #11 #13）无自动化覆盖**：D32 是全局引擎行为、复盘走同一条路径，无独立分支可测；靠真机验收把关。
+5. **画线提交被拒的信号只传到 `appendDrawing`/`appendReviewDrawing`，未再上溯到 `routeDrawingCommit` / `handleDrawingTap`**（whole-branch codex R2-high→R3-medium，**本期到此为止、override 收口**）：
+   - 本期已做的两层改善：append 从**静默** fail-closed drop → 改为 `@discardableResult -> Bool`（拒绝可观测，`5446e3b`）。
+   - **1a-iv 里这条拒绝分支结构上不可达**：唯一开放的 `.horizontal` 是单锚 → `commitPending` 只产单锚对象 → 单锚永远 period 自洽 → `isPeriodConsistent` 恒 true → `routeDrawingCommit` 走不到 append 返回 false 的分支（只有测试手造坏对象才进得去）。
+   - codex 要的「`routeDrawingCommit` 返回 Bool + `handleDrawingTap` 在拒绝时 preserve/retry/report 那条 pending」是**编辑 UX**：它只有在①有能产出不一致数据的**多锚工具**（P1c）②有**删旧线+append 新线**的编辑路径（1b-i）③有报告拒绝的 UI 位 三者同时存在时才有意义。1a-iv 这三样都没有，强行往上传 Bool 只是把死分支的忽略信号挪高一层。
+   - **交接要求**：**1b-i** 实现「选中/编辑/删除」时**必须**：让 `routeDrawingCommit` 透传 append 的 Bool，且编辑路径在 append 返回 false 时**绝不能已经删掉原线**（先探知拒绝、再决定删不删），并给用户一个可见的拒绝反馈。与残留 3（init/decode 层校验）合并重估。
 
 ---
 
