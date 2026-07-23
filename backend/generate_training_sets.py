@@ -518,114 +518,129 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
         raise GenerateSkipException(
             f"{stock_code}: 非法 stock_code，拒绝写入（信任边界校验）")
 
-    # **早退检查排在六周期全量历史加载之前**（codex whole-branch I1）：
-    # stock_coverage 空表（本 PR 上线首日的真实状态，见验收清单 L1）时，无需先把
-    # 每只股票的六个周期全历史 `SELECT ... FROM klines` 读进 pandas 再扔掉——
-    # 这条检查只需要 stock_coverage 那一行是否存在，不依赖 period_bars 里的任何东西。
-    start_date, end_date, dropped, dense_day_count = await _fetch_dense_coverage(
-        conn, stock_code)
-    if start_date is None or end_date is None:
+    # Plan 3 Task4：按股 session 级 advisory lock，最外层——早于 coverage/RR 快照。
+    # 与 B1 导入共用同一把 (IMPORT_GEN_LOCK_KEY, stock_lock_key(code))：某股正被
+    # B1 导入时，B2 对同一股的生成必须让路，非阻塞跳过。
+    sk = stock_lock_key(stock_code)
+    if not await conn.fetchval("SELECT pg_try_advisory_lock($1,$2)",
+                               IMPORT_GEN_LOCK_KEY, sk):
         raise GenerateSkipException(
-            f"{stock_code}: stock_coverage 无覆盖 artifact（B1 未写入）→ 无法门控，跳过")
-
-    period_bars = {p: await _fetch_period_bars(conn, stock_code, p) for p in PERIODS}
-    for p, bars in period_bars.items():
-        if bars.empty:
-            raise GenerateSkipException(f"{stock_code}: {p} 无 bars")
-
-    daily = period_bars["daily"]
-    trading_dates = sorted({trading_date(int(e)) for e in daily["datetime"]})
-    dense_dates = {d for d in trading_dates if start_date <= d <= end_date} - dropped
-    if not dense_dates:
-        raise GenerateSkipException(f"{stock_code}: dense 覆盖为空")
-
-    # **交叉校验重建出的日历 vs 权威计数**（codex PF2-R6-F1）。
-    # 上面的 trading_dates 是从**现存的 daily klines** 反推的：若带内某个交易日的
-    # daily 行本身缺失（B1 半途导入 / 行丢失），那天就同时从 dense_dates 与 D9 的
-    # span 里**一起消失** —— 两道门都看不见它，窗口能带着整日空洞过关。
-    # dense_day_count 是 B1 写下的权威天数，对不上即 fail-closed。
-    if dense_day_count is None:
-        raise GenerateSkipException(
-            f"{stock_code}: stock_coverage.dense_day_count 为 NULL，无法交叉校验")
-    if len(dense_dates) != int(dense_day_count):
-        raise GenerateSkipException(
-            f"{stock_code}: dense 日历不一致——artifact 记 {dense_day_count} 天，"
-            f"由 daily klines 重建出 {len(dense_dates)} 天（带内有 daily 行缺失？）")
-
-    month_boundaries = period_boundaries(daily, "monthly")
-    exclude = await _fetch_existing_starts(conn, stock_code)
-
-    start_datetime, windows = build_training_windows(
-        period_bars, month_boundaries, rng,
-        dense_dates=dense_dates, trading_dates=trading_dates,
-        before_caps=PERIOD_BEFORE_CAP, max_retries=max_retries,
-        exclude_starts=frozenset(exclude), dropped=dropped)
-
-    idx = month_boundaries.index(int(start_datetime))
-    after_end = compute_after_end(month_boundaries, idx)
-
-    # **写入临界区加锁**（codex R1-F2 收敛；spec 2026-07-20）。
-    # 不变量 = 任一时刻最多一个 session 处于「写确定性最终路径 + 登记」的临界区。
-    # 此前该不变量只靠调用方纪律（_amain / _gen 各自在外层取锁），直调本函数
-    # 或 generate_batch 的路径零防御 → 输家会覆写赢家已登记的 zip、content_hash 失配。
-    #
-    # PG session 级 advisory lock 是**可重入计数**的：已持锁的 CLI / 调度器
-    # 在此再取同一把锁必然成功（计数 +1），配对释放，故既有两条路径行为零变化。
-    # 外层两处锁保留——它们提供整轮 sweep 独占 + 用户可见的拒绝语义（CLI 退出码 1 /
-    # 调度器 warning 本轮产 0），这两样内层给不了。
-    #
-    # 早退检查（覆盖行 / bars / 交叉校验 / 选窗口）全部在此**之前**完成，故真库
-    # 当前"每股都跳过"的状态下这段根本不执行，零额外往返（spec §2.5）。
-    if not await conn.fetchval("SELECT pg_try_advisory_lock($1)",
-                               B2_GENERATION_LOCK_KEY):
-        raise GenerateSkipException(
-            f"{stock_code}: B2 生成锁被占（另一个 B2 正在写入），跳过")
+            f"{stock_code}: 正被导入（按股锁被占），跳过")
     try:
-        # 顺序 = **锁内先查、后写文件、再登记**（codex R2-high 收敛：原先检查排在
-        # assemble_from_windows 之后——`exclude_starts` 快照取自锁**之前**
-        # （_fetch_existing_starts，见上方注释），两个调用者的快照都可能不含某
-        # 起点 S；输家 B 拿锁时 A 已登记 S，但 B 的快照仍是 stale 的、照样选中 S。
-        # 若检查排在写之后，B 会先用 assemble_from_windows 把 A 已登记的 S.zip
-        # 整个覆写一遍（新建临时 .db → 新 zip，内嵌 mtime 变了，字节必然不同），
-        # 检查才发现已登记——覆写已经发生，A 那行 content_hash 与磁盘字节从此失配。
+        # **早退检查排在六周期全量历史加载之前**（codex whole-branch I1）：
+        # stock_coverage 空表（本 PR 上线首日的真实状态，见验收清单 L1）时，无需先把
+        # 每只股票的六个周期全历史 `SELECT ... FROM klines` 读进 pandas 再扔掉——
+        # 这条检查只需要 stock_coverage 那一行是否存在，不依赖 period_bars 里的任何东西。
         #
-        # 为什么「锁内先检查、再写」堵住了这个洞：本 session 从取锁到放锁全程持有
-        # B2_GENERATION_LOCK_KEY，是所有 B2 写者的互斥点。若 A 抢先登记了 S，
-        # 那个登记必然发生在本 session 拿到锁**之前**（要么 A 早已放锁、要么本
-        # session 在等锁）——`_exists_start` 在锁内查到的是已提交的最新状态，
-        # 不会是 stale 的。命中即在动笔写之前跳过，assemble_from_windows 根本
-        # 不会被调用，也就没有「覆写已登记文件」这回事。
+        # Plan 3 Task4：coverage + 六周期读包进 RR 只读快照事务——两次读看到同一
+        # 提交时点，不被并发写者撕成两半。
+        async with conn.transaction(isolation="repeatable_read", readonly=True):
+            start_date, end_date, dropped, dense_day_count = await _fetch_dense_coverage(
+                conn, stock_code)
+            if start_date is None or end_date is None:
+                raise GenerateSkipException(
+                    f"{stock_code}: stock_coverage 无覆盖 artifact（B1 未写入）→ 无法门控，跳过")
+
+            period_bars = {p: await _fetch_period_bars(conn, stock_code, p) for p in PERIODS}
+            for p, bars in period_bars.items():
+                if bars.empty:
+                    raise GenerateSkipException(f"{stock_code}: {p} 无 bars")
+
+        daily = period_bars["daily"]
+        trading_dates = sorted({trading_date(int(e)) for e in daily["datetime"]})
+        dense_dates = {d for d in trading_dates if start_date <= d <= end_date} - dropped
+        if not dense_dates:
+            raise GenerateSkipException(f"{stock_code}: dense 覆盖为空")
+
+        # **交叉校验重建出的日历 vs 权威计数**（codex PF2-R6-F1）。
+        # 上面的 trading_dates 是从**现存的 daily klines** 反推的：若带内某个交易日的
+        # daily 行本身缺失（B1 半途导入 / 行丢失），那天就同时从 dense_dates 与 D9 的
+        # span 里**一起消失** —— 两道门都看不见它，窗口能带着整日空洞过关。
+        # dense_day_count 是 B1 写下的权威天数，对不上即 fail-closed。
+        if dense_day_count is None:
+            raise GenerateSkipException(
+                f"{stock_code}: stock_coverage.dense_day_count 为 NULL，无法交叉校验")
+        if len(dense_dates) != int(dense_day_count):
+            raise GenerateSkipException(
+                f"{stock_code}: dense 日历不一致——artifact 记 {dense_day_count} 天，"
+                f"由 daily klines 重建出 {len(dense_dates)} 天（带内有 daily 行缺失？）")
+
+        month_boundaries = period_boundaries(daily, "monthly")
+        exclude = await _fetch_existing_starts(conn, stock_code)
+
+        start_datetime, windows = build_training_windows(
+            period_bars, month_boundaries, rng,
+            dense_dates=dense_dates, trading_dates=trading_dates,
+            before_caps=PERIOD_BEFORE_CAP, max_retries=max_retries,
+            exclude_starts=frozenset(exclude), dropped=dropped)
+
+        idx = month_boundaries.index(int(start_datetime))
+        after_end = compute_after_end(month_boundaries, idx)
+
+        # **写入临界区加锁**（codex R1-F2 收敛；spec 2026-07-20）。
+        # 不变量 = 任一时刻最多一个 session 处于「写确定性最终路径 + 登记」的临界区。
+        # 此前该不变量只靠调用方纪律（_amain / _gen 各自在外层取锁），直调本函数
+        # 或 generate_batch 的路径零防御 → 输家会覆写赢家已登记的 zip、content_hash 失配。
         #
-        # 跳过时压根没写过文件，故不存在「命中的是对方文件、删不删」的问题
-        # （区别于下面 ON CONFLICT 分支——那里 gts.path 已经写好，是否为对方
-        # 产物才需要考虑）。
-        if await _exists_start(conn, stock_code, int(start_datetime)):
+        # PG session 级 advisory lock 是**可重入计数**的：已持锁的 CLI / 调度器
+        # 在此再取同一把锁必然成功（计数 +1），配对释放，故既有两条路径行为零变化。
+        # 外层两处锁保留——它们提供整轮 sweep 独占 + 用户可见的拒绝语义（CLI 退出码 1 /
+        # 调度器 warning 本轮产 0），这两样内层给不了。
+        #
+        # 早退检查（覆盖行 / bars / 交叉校验 / 选窗口）全部在此**之前**完成，故真库
+        # 当前"每股都跳过"的状态下这段根本不执行，零额外往返（spec §2.5）。
+        if not await conn.fetchval("SELECT pg_try_advisory_lock($1)",
+                                   B2_GENERATION_LOCK_KEY):
             raise GenerateSkipException(
-                f"{stock_code}: start {int(start_datetime)} 已登记，跳过")
+                f"{stock_code}: B2 生成锁被占（另一个 B2 正在写入），跳过")
+        try:
+            # 顺序 = **锁内先查、后写文件、再登记**（codex R2-high 收敛：原先检查排在
+            # assemble_from_windows 之后——`exclude_starts` 快照取自锁**之前**
+            # （_fetch_existing_starts，见上方注释），两个调用者的快照都可能不含某
+            # 起点 S；输家 B 拿锁时 A 已登记 S，但 B 的快照仍是 stale 的、照样选中 S。
+            # 若检查排在写之后，B 会先用 assemble_from_windows 把 A 已登记的 S.zip
+            # 整个覆写一遍（新建临时 .db → 新 zip，内嵌 mtime 变了，字节必然不同），
+            # 检查才发现已登记——覆写已经发生，A 那行 content_hash 与磁盘字节从此失配。
+            #
+            # 为什么「锁内先检查、再写」堵住了这个洞：本 session 从取锁到放锁全程持有
+            # B2_GENERATION_LOCK_KEY，是所有 B2 写者的互斥点。若 A 抢先登记了 S，
+            # 那个登记必然发生在本 session 拿到锁**之前**（要么 A 早已放锁、要么本
+            # session 在等锁）——`_exists_start` 在锁内查到的是已提交的最新状态，
+            # 不会是 stale 的。命中即在动笔写之前跳过，assemble_from_windows 根本
+            # 不会被调用，也就没有「覆写已登记文件」这回事。
+            #
+            # 跳过时压根没写过文件，故不存在「命中的是对方文件、删不删」的问题
+            # （区别于下面 ON CONFLICT 分支——那里 gts.path 已经写好，是否为对方
+            # 产物才需要考虑）。
+            if await _exists_start(conn, stock_code, int(start_datetime)):
+                raise GenerateSkipException(
+                    f"{stock_code}: start {int(start_datetime)} 已登记，跳过")
 
-        # 崩溃窗口 = 写完 zip、登记前进程死 → **孤儿 zip + 无数据库行**，它是**自愈**的：
-        # 没有行引用它、exclude_starts 也不含该起点 → 下次 sweep 可重选同一起点、
-        # 覆盖它并登记成功。（反之「先登记后发布」留下的是 uq_stock_start 被占、
-        # B3 反复预定却 404 的**永久卡死行**，严格更糟。）上面的写前检查不改变这条
-        # 论证——孤儿场景里从未有过登记行，`_exists_start` 恒为 False，直通写入。
-        gts = assemble_from_windows(output_dir, stock_code=stock_code,
-                                    stock_name=_stock_name_of(stock_code),
-                                    start_datetime=int(start_datetime),
-                                    end_datetime=int(after_end), windows=windows)
+            # 崩溃窗口 = 写完 zip、登记前进程死 → **孤儿 zip + 无数据库行**，它是**自愈**的：
+            # 没有行引用它、exclude_starts 也不含该起点 → 下次 sweep 可重选同一起点、
+            # 覆盖它并登记成功。（反之「先登记后发布」留下的是 uq_stock_start 被占、
+            # B3 反复预定却 404 的**永久卡死行**，严格更糟。）上面的写前检查不改变这条
+            # 论证——孤儿场景里从未有过登记行，`_exists_start` 恒为 False，直通写入。
+            gts = assemble_from_windows(output_dir, stock_code=stock_code,
+                                        stock_name=_stock_name_of(stock_code),
+                                        start_datetime=int(start_datetime),
+                                        end_datetime=int(after_end), windows=windows)
 
-        # ON CONFLICT DO NOTHING = **最终兜底**（codex 明确要求保留）：上面的写前
-        # 检查已覆盖「另一个持有本锁的 B2 session 抢先登记同一起点」这条主路径；
-        # 这里覆盖的是更窄的残留——不受本锁保护的外部插入（如运维手工往
-        # training_sets 插行）。唯一冲突返回 None 而非抛 UniqueViolationError
-        # （后者不被 generate_batch 捕获 → 中止整轮 sweep）。此时 gts.path 已经
-        # 写好，可能是对方的产物，不删，只干净跳过。
-        row_id = await _register_training_set(conn, gts)
-        if row_id is None:
-            raise GenerateSkipException(
-                f"{stock_code}: start {gts.start_datetime} 已登记（并发 CLI？），跳过")
-        return gts                   # 中间 .db 从不落在 output_dir，无需清理
+            # ON CONFLICT DO NOTHING = **最终兜底**（codex 明确要求保留）：上面的写前
+            # 检查已覆盖「另一个持有本锁的 B2 session 抢先登记同一起点」这条主路径；
+            # 这里覆盖的是更窄的残留——不受本锁保护的外部插入（如运维手工往
+            # training_sets 插行）。唯一冲突返回 None 而非抛 UniqueViolationError
+            # （后者不被 generate_batch 捕获 → 中止整轮 sweep）。此时 gts.path 已经
+            # 写好，可能是对方的产物，不删，只干净跳过。
+            row_id = await _register_training_set(conn, gts)
+            if row_id is None:
+                raise GenerateSkipException(
+                    f"{stock_code}: start {gts.start_datetime} 已登记（并发 CLI？），跳过")
+            return gts                   # 中间 .db 从不落在 output_dir，无需清理
+        finally:
+            await conn.fetchval("SELECT pg_advisory_unlock($1)", B2_GENERATION_LOCK_KEY)
     finally:
-        await conn.fetchval("SELECT pg_advisory_unlock($1)", B2_GENERATION_LOCK_KEY)
+        await conn.fetchval("SELECT pg_advisory_unlock($1,$2)", IMPORT_GEN_LOCK_KEY, sk)
 
 
 async def generate_batch(conn, target_count: int, output_dir: Path,
