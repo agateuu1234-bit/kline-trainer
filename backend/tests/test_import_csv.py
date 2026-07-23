@@ -918,6 +918,23 @@ def test_qmt_write_schema_drift_clean_failure(tmp_path, monkeypatch, capsys):
     assert "拒绝导入" in err and "klines 价格列类型" in err
 
 
+def test_qmt_zero_byte_csv_clean_failure(tmp_path, monkeypatch, capsys):
+    """R5-F1（CLI 端到端）：零字节 1m QMT CSV（中断的导出/拷贝）→ 真 parse_qmt_csv 在
+    pd.read_csv 处抛 pandas EmptyDataError、已归一化为 QmtSchemaError → `_amain_qmt`
+    干净返回 2、绝不裸 traceback 冒穿。parse_qmt_csv 不打桩（真跑）；write 绝不触及。"""
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls)
+    (tmp_path / "000001.SZ_平安_1分钟K线_前复权.csv").write_bytes(b"")   # 零字节：中断的导出
+    _write_qmt_csv_stub(tmp_path, label="日K线")   # daily 须存在（glob 需恰好 1 个；1m 先失败故不解析到它）
+    (tmp_path / "export_log.csv").write_text("code,period\n")   # 须存在以过存在性检查
+
+    rc = import_csv.main(_qmt_argv(tmp_path))   # 不应抛出——裸 traceback 会让此调用抛异常
+    assert rc == 2
+    assert calls.get("executemany", 0) == 0
+    err = capsys.readouterr().err
+    assert "拒绝导入" in err
+
+
 def test_no_import_cycle():
     """`import_csv` 绝不能顶层 import `qmt_ingest`（后者顶层反向 import 了前者的
     clean/compute_indicators/to_kline_records）——一旦引入会在此处循环崩溃

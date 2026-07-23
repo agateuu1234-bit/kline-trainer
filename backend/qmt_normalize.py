@@ -55,7 +55,13 @@ class QmtSource:
     df: pd.DataFrame
 
 def parse_qmt_csv(path: Path, src_period: str) -> "QmtSource":
-    df = pd.read_csv(path, encoding="utf-8-sig")   # utf-8-sig 剥 BOM
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig")   # utf-8-sig 剥 BOM
+    except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+        # R5-F1：零字节/截断/不可解析 CSV（中断的导出或拷贝）在读取处即抛 pandas
+        # 非域异常，会绕过 CLI 的 QMT 域异常捕获 → 裸 traceback。归一化为
+        # QmtSchemaError（CLI rc=2）。文件读是解析路径最外层，堵这里 = 读→列→值→时间三层全封。
+        raise QmtSchemaError(f"QMT CSV 读取失败（空/截断/不可解析）: {e}") from e
     missing = [c for c in _QMT_COLUMNS if c not in df.columns]
     if missing:
         raise QmtSchemaError(f"QMT CSV 缺必需列: {missing}")

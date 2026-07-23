@@ -52,6 +52,15 @@ def test_parse_export_log_malformed_first_time_raises_schema_error(tmp_path):
     assert "export_log 行解析失败" in str(ei.value)
 
 
+def test_parse_export_log_zero_byte_file_raises_schema_error(tmp_path):
+    """R5-F1：零字节 export_log（中断的拷贝）在 pd.read_csv 处抛 pandas EmptyDataError，
+    须在解析边界归一化为 QmtSchemaError，不裸 traceback。"""
+    p = tmp_path / "export_log.csv"
+    p.write_bytes(b"")
+    with pytest.raises(QmtSchemaError):
+        parse_export_log(p)
+
+
 # ===== build_stock_import：全部导入期门 =====
 
 def _entry(code, period, df):

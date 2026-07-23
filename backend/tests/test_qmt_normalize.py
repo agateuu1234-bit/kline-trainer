@@ -95,6 +95,14 @@ def test_parse_qmt_csv_empty_raises_schema_error(tmp_path: Path):
     with pytest.raises(QmtSchemaError):
         parse_qmt_csv(p, "1m")
 
+def test_parse_qmt_csv_zero_byte_file_raises_schema_error(tmp_path: Path):
+    """R5-F1：零字节 CSV（中断的导出/拷贝）在 pd.read_csv 处抛 pandas EmptyDataError，
+    须在解析边界归一化为 QmtSchemaError（否则逃 CLI 域异常捕获 → 裸 traceback、破坏 rc=2）。"""
+    p = tmp_path / "000001.SZ_平安银行_1分钟K线_前复权.csv"
+    p.write_bytes(b"")   # 零字节
+    with pytest.raises(QmtSchemaError):
+        parse_qmt_csv(p, "1m")
+
 def test_parse_qmt_csv_returns_source_with_filename_identity(tmp_path):
     p = tmp_path / "000001.SZ_平安银行_日K线_前复权.csv"
     p.write_text("time,open,high,low,close,volume,amount\n"

@@ -46,7 +46,12 @@ def _norm_code(raw: str) -> str:
 
 
 def parse_export_log(path) -> dict[tuple[str, str], ExportLogEntry]:
-    df = pd.read_csv(path, encoding="utf-8-sig", dtype=str)
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig", dtype=str)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+        # R5-F1：同 parse_qmt_csv——零字节/截断 export_log 在读取处抛 pandas 非域异常，
+        # 归一化为 QmtSchemaError（CLI rc=2），不裸 traceback。
+        raise QmtSchemaError(f"export_log 读取失败（空/截断/不可解析）: {e}") from e
     missing = [c for c in _REQUIRED_LOG_COLS if c not in df.columns]
     if missing:
         raise QmtSchemaError(f"export_log 缺列: {missing}")
