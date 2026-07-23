@@ -778,6 +778,7 @@ def test_qmt_import_probe_released_before_write(tmp_path, monkeypatch):
     _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls)
     _write_qmt_csv_stub(tmp_path, label="1分钟K线")
     _write_qmt_csv_stub(tmp_path, label="日K线")
+    (tmp_path / "export_log.csv").write_text("code,period\n")  # review-fix：文件须存在才能过新增的存在性检查
 
     fake_source = object()
 
@@ -832,6 +833,7 @@ def test_qmt_missing_export_log_entry_clean_failure(tmp_path, monkeypatch, capsy
     _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls)
     _write_qmt_csv_stub(tmp_path, label="1分钟K线")
     _write_qmt_csv_stub(tmp_path, label="日K线")
+    (tmp_path / "export_log.csv").write_text("code,period\n")  # review-fix：文件须存在才能过新增的存在性检查
 
     monkeypatch.setattr(qmt_normalize, "parse_qmt_csv", lambda path, period: object())
     monkeypatch.setattr(qmt_ingest, "parse_export_log", lambda path: {})  # 空——两条都缺
@@ -845,6 +847,69 @@ def test_qmt_missing_export_log_entry_clean_failure(tmp_path, monkeypatch, capsy
     assert build_called == [], "缺 export_log 条目应在装配前就被拦下"
     err = capsys.readouterr().err
     assert "000001.SZ" in err and "export_log" in err
+
+
+def test_qmt_missing_export_log_file_clean_failure(tmp_path, monkeypatch, capsys):
+    """export_log.csv 文件本身不存在（P3-D3「文件不存在 → 报错退出」）→ `_amain_qmt`
+    须在调用 parse_export_log 之前就干净拒绝（rc=2 + stderr reason），而不是让
+    pd.read_csv 抛裸 FileNotFoundError 冒穿。write_qmt_stock 绝不该被触及。"""
+    import qmt_ingest
+    import qmt_normalize
+
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls)
+    _write_qmt_csv_stub(tmp_path, label="1分钟K线")
+    _write_qmt_csv_stub(tmp_path, label="日K线")
+    assert not (tmp_path / "export_log.csv").exists()
+
+    monkeypatch.setattr(qmt_normalize, "parse_qmt_csv", lambda path, period: object())
+    parse_export_log_called = []
+    monkeypatch.setattr(qmt_ingest, "parse_export_log",
+                        lambda path: parse_export_log_called.append(1))
+    write_qmt_stock_called = []
+
+    async def fake_write_qmt_stock(*a, **kw):
+        write_qmt_stock_called.append(1)
+
+    monkeypatch.setattr(import_csv, "write_qmt_stock", fake_write_qmt_stock)
+
+    rc = import_csv.main(_qmt_argv(tmp_path))  # 不应抛出——必须干净返回
+    assert rc == 2
+    assert parse_export_log_called == [], "文件不存在应在调用 parse_export_log 之前就被拦下"
+    assert write_qmt_stock_called == []
+    err = capsys.readouterr().err
+    assert "export_log" in err and "不存在" in err
+
+
+def test_qmt_write_schema_drift_clean_failure(tmp_path, monkeypatch, capsys):
+    """write_qmt_stock 抛 SchemaDriftError（目标库未跑 migration 0004：klines 价格列
+    仍 DECIMAL 或 stock_coverage 表缺失）→ `--qmt` 分支须打印 reason 并干净返回 2，
+    不是裸 traceback 冒穿。"""
+    import qmt_ingest
+    import qmt_normalize
+
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls)
+    _write_qmt_csv_stub(tmp_path, label="1分钟K线")
+    _write_qmt_csv_stub(tmp_path, label="日K线")
+    (tmp_path / "export_log.csv").write_text("code,period,x\n")
+
+    monkeypatch.setattr(qmt_normalize, "parse_qmt_csv", lambda path, period: object())
+    monkeypatch.setattr(qmt_ingest, "parse_export_log",
+                        lambda path: {("000001.SZ", "1m"): object(),
+                                      ("000001.SZ", "daily"): object()})
+    monkeypatch.setattr(qmt_ingest, "build_stock_import",
+                        lambda *a, **kw: object())
+
+    async def fake_write_qmt_stock(*a, **kw):
+        raise SchemaDriftError("klines 价格列类型与预期不符：open=numeric(10,2)")
+
+    monkeypatch.setattr(import_csv, "write_qmt_stock", fake_write_qmt_stock)
+
+    rc = import_csv.main(_qmt_argv(tmp_path))  # 不应抛出——必须干净返回
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "拒绝导入" in err and "klines 价格列类型" in err
 
 
 def test_no_import_cycle():

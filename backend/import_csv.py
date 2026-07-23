@@ -487,6 +487,10 @@ async def _amain_qmt(args) -> int:
     from qmt_normalize import QmtSchemaError, parse_qmt_csv, parse_qmt_filename
 
     export_log_path = Path(args.export_log) if args.export_log else input_dir / "export_log.csv"
+    if not export_log_path.exists():
+        print(f"[B1] 拒绝导入：export_log 文件不存在：{export_log_path}"
+              "（--export-log 或默认 <input>/export_log.csv）", file=sys.stderr)
+        return 2
 
     try:
         s1 = parse_qmt_csv(f_1m, "1m")
@@ -502,7 +506,7 @@ async def _amain_qmt(args) -> int:
                                     entry_daily=entries[(args.stock, "daily")])
         counts = await write_qmt_stock(args.dsn, args.stock, stock_name, bundle)
     except (QmtIngestRejected, ImportBusyError, ReimportBlockedError,
-            LegacyImportBlockedError, QmtSchemaError) as e:
+            LegacyImportBlockedError, QmtSchemaError, SchemaDriftError) as e:
         print(f"[B1] 拒绝导入：{e}", file=sys.stderr)
         return 2
 
