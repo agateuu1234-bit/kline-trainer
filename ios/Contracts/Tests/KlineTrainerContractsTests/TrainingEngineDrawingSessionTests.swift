@@ -373,4 +373,114 @@ struct TrainingEngineDrawingSessionTests {
         #expect(e.upperPanel.offset != 0)                      // 走 focus 路径，不是右锚置 0 跳回最新
         assertInvariant(e)
     }
+
+    @Test("1a-iv：画线模式甩动起惯性后，settleDeceleration(initiatedBy:) 必须把两面板都定住（落锚不得对着移动中的视口）")
+    func settleDecelerationStopsInertiaOnBothPanels() {
+        // ⚠️ fixture 必须**真的滚得动**（codex plan-R6-high）：`engineMultiPeriod()` 只有 2 根 m60 / 1 根 daily，
+        // maxOffset≈0 → 惯性根本跑不起来，「惯性在跑」的前置断言会红或被人调松，整条测试变空气。
+        let (e, fakes) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let bounds = TrainingEnginePanLinkageTests.bounds       // 800×600，makeEngine 已 recordRenderBounds
+        #expect(RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: bounds).maxOffset > 0)   // 前置：真有滚动空间
+        e.toggleDrawingMode()
+        #expect(e.isDrawingActive(on: .upper))                 // 前置：真在画线态
+
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 200, renderBounds: bounds, panel: .upper)
+        e.endPan(velocity: 3000, renderBounds: bounds, panel: .upper)   // 大速度 → 起惯性
+        _ = fakes().last?.fire(1.0 / 60.0)
+        let mid = e.upperPanel.offset
+        _ = fakes().last?.fire(1.0 / 60.0)
+        #expect(e.upperPanel.offset != mid)                    // 防假绿：惯性确实在跑（否则本测试测的是空气）
+
+        e.settleDeceleration(initiatedBy: .upper)
+
+        let settledUpper = e.upperPanel.offset
+        let settledLower = e.lowerPanel.offset
+        for _ in 0..<10 { _ = fakes().last?.fire(1.0 / 60.0) }
+        #expect(e.upperPanel.offset == settledUpper)           // ⭐已定住，后续帧不再改 offset
+        #expect(e.lowerPanel.offset == settledLower)           // ⭐follower 也不再被联动驱动
+        assertInvariant(e)                                     // 定住不得把面板踢出 .drawing
+    }
+
+    @Test("1a-iv：甩上面板起惯性后立刻捏合**下**面板 —— 上面板的减速不得再经联动改下面板 offset")
+    func pinchOnOnePanelSettlesTheOtherPanelsInertia() {
+        // fixture 同上：必须真的滚得动（codex plan-R6-high）
+        let (e, fakes) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let bounds = TrainingEnginePanLinkageTests.bounds
+        #expect(RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: bounds).maxOffset > 0)
+        e.toggleDrawingMode()
+
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 200, renderBounds: bounds, panel: .upper)
+        e.endPan(velocity: 3000, renderBounds: bounds, panel: .upper)   // 上面板起惯性
+        _ = fakes().last?.fire(1.0 / 60.0)
+        let lowerMid = e.lowerPanel.offset
+        _ = fakes().last?.fire(1.0 / 60.0)
+        #expect(e.lowerPanel.offset != lowerMid)                        // 防假绿：上面板减速确实在经联动驱动下面板
+
+        e.applyPinch(scale: 1.0, focusX: bounds.midX, phase: .began, panel: .lower)   // 捏合**下**面板
+
+        let lowerAtPinchStart = e.lowerPanel.offset
+        for _ in 0..<10 { _ = fakes().last?.fire(1.0 / 60.0) }
+        #expect(e.lowerPanel.offset == lowerAtPinchStart)               // ⭐上面板的 stale 减速不再动下面板
+        assertInvariant(e)
+    }
+
+    @Test("1a-iv：在 overscroll 回弹中途定住 —— 夹回界内后两面板右缘仍对齐同一 tick（不留错位）")
+    func settleDuringBounceKeepsPanelsTimeAligned() {
+        let (e, fakes) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let bounds = TrainingEnginePanLinkageTests.bounds
+        e.toggleDrawingMode()
+
+        // 拖到**超过 maxOffset**（最老边橡皮筋）再松手 → 走 bounce 分支（allowOverscroll）
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: bounds)
+        #expect(ob.maxOffset > 0)                                    // 前置：真有滚动空间
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset + 400, renderBounds: bounds, panel: .upper)
+        e.endPan(velocity: 0, renderBounds: bounds, panel: .upper)
+        _ = fakes().last?.fire(1.0 / 60.0)
+        #expect(e.upperPanel.offset > ob.maxOffset)                  // 前置：确实还在越界区（否则测不到 clamp）
+
+        e.settleDeceleration(initiatedBy: .upper)
+
+        // ⭐夹回界内 + 两面板右缘仍指向同一个 global tick
+        #expect(e.upperPanel.offset <= ob.maxOffset)
+        let upperTick = PanLinkage.rightEdgeTick(offset: e.upperPanel.offset,
+                                                 candles: e.allCandles[e.upperPanel.period] ?? [],
+                                                 rawVisible: e.upperPanel.visibleCount,
+                                                 bounds: bounds, tick: e.tick.globalTickIndex)
+        let lowerTick = PanLinkage.rightEdgeTick(offset: e.lowerPanel.offset,
+                                                 candles: e.allCandles[e.lowerPanel.period] ?? [],
+                                                 rawVisible: e.lowerPanel.visibleCount,
+                                                 bounds: bounds, tick: e.tick.globalTickIndex)
+        #expect(upperTick == lowerTick)                              // ⭐无错位（补 propagate 之前这里会不等）
+    }
+
+    @Test("1a-iv：拖到越界时两指接管（先 cancelPan 再 pinch.began）—— 夹回后两面板右缘仍对齐同一 tick")
+    func twoFingerTakeoverDuringOverscrollKeepsPanelsTimeAligned() {
+        let (e, _) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let bounds = TrainingEnginePanLinkageTests.bounds
+        e.toggleDrawingMode()
+        let ob = RenderStateBuilder.offsetBounds(engine: e, panel: .upper, bounds: bounds)
+        #expect(ob.maxOffset > 0)                                    // 前置：真有滚动空间
+
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: ob.maxOffset + 400, renderBounds: bounds, panel: .upper)
+        #expect(e.upperPanel.offset > ob.maxOffset)                  // 前置：确实拖进了越界区
+
+        // 真实 UIKit 时序：两指落下 → arbiter supersede 单指 → onPan(.cancelled) → cancelPan → 然后 pinch.began
+        e.cancelPan(panel: .upper)
+        e.applyPinch(scale: 1.0, focusX: bounds.midX, phase: .began, panel: .upper)
+
+        #expect(e.upperPanel.offset <= ob.maxOffset)                 // 夹回界内
+        let upperTick = PanLinkage.rightEdgeTick(offset: e.upperPanel.offset,
+                                                 candles: e.allCandles[e.upperPanel.period] ?? [],
+                                                 rawVisible: e.upperPanel.visibleCount,
+                                                 bounds: bounds, tick: e.tick.globalTickIndex)
+        let lowerTick = PanLinkage.rightEdgeTick(offset: e.lowerPanel.offset,
+                                                 candles: e.allCandles[e.lowerPanel.period] ?? [],
+                                                 rawVisible: e.lowerPanel.visibleCount,
+                                                 bounds: bounds, tick: e.tick.globalTickIndex)
+        #expect(upperTick == lowerTick)                              // ⭐无错位（补 propagate 之前这里会不等）
+    }
 }

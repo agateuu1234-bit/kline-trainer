@@ -32,6 +32,7 @@ struct DrawingGestureSourceGuardTests {
 
     private let classifiers = "Sources/KlineTrainerContracts/ChartEngine/GestureClassifiers.swift"
     private let arbiter     = "Sources/KlineTrainerContracts/ChartEngine/ChartGestureArbiter.swift"
+    private let chartContainer = "Sources/KlineTrainerContracts/Render/ChartContainerView.swift"
 
     @Test("GestureClassifiers 里不再有任何画线截获通路（类型 / 函数 / 参数全删）")
     func noTakeoverPathInClassifiers() throws {
@@ -56,5 +57,25 @@ struct DrawingGestureSourceGuardTests {
         #expect(!body.contains("panPolicyInDrawingMode"))
         // 对照：drawingMode 本身没被删（tap 落锚仍要用它），否则这条守卫等于测了个空气
         #expect(code.contains("drawingMode"))
+    }
+
+    @Test("1a-iv：handleDrawingTap 必须先 settle + 重建 renderState，**再**建 CoordinateMapper（顺序 load-bearing）")
+    func drawingTapSettlesBeforeMapping() throws {
+        let code = try source(chartContainer)
+        guard let start = code.range(of: "private func handleDrawingTap(at point: CGPoint)") else {
+            Issue.record("切片锚点找不到 —— handleDrawingTap 被改名？守卫失效，必须修")
+            return
+        }
+        let body = String(code[start.lowerBound...])
+        guard let settle = body.range(of: "settleDeceleration(initiatedBy:"),
+              let rebuild = body.range(of: "rebuildRenderState("),
+              let vpRead = body.range(of: "let viewport = view.renderState.viewport"),
+              let mapper = body.range(of: "CoordinateMapper(") else {
+            Issue.record("handleDrawingTap 里缺 settleDeceleration / rebuildRenderState / viewport 读取 / CoordinateMapper 之一")
+            return
+        }
+        #expect(settle.lowerBound < rebuild.lowerBound)    // ⭐先停再重建（反了则重建的是停之前的状态）
+        #expect(rebuild.lowerBound < vpRead.lowerBound)    // ⭐viewport 必须在重建**之后**才读
+        #expect(vpRead.lowerBound < mapper.lowerBound)     // ⭐读到的那个 viewport 才拿去建 mapper
     }
 }

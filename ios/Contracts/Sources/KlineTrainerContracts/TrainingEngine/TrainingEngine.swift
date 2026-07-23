@@ -784,21 +784,44 @@ extension TrainingEngine {
 
     /// 中断进行中减速/bounce（新交互起手：beginPan/activateDrawingTool/pinch.began，D10）：停 + 仅当**活跃** run 时
     /// 把 overscroll 归界内。`isDecelerating`-guard：动画已 settle/cancel（activeBounds 残留旧几何）时不 clamp，防 stale 误钳。
-    private func interruptDeceleration(panel: PanelId) {
+    @discardableResult
+    private func interruptDeceleration(panel: PanelId) -> Bool {
         let a = animator(for: panel)
         let wasRunning = a.isDecelerating
         a.stop()
-        if wasRunning, let act = activeBoundsFor(panel) {
-            let cur = panelState(panel).offset
-            let clamped = min(max(cur, act.bounds.minOffset), act.bounds.maxOffset)
-            if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }   // overscroll(>max) 归 maxOffset
-        }
+        guard wasRunning, let act = activeBoundsFor(panel) else { return false }
+        let cur = panelState(panel).offset
+        let clamped = min(max(cur, act.bounds.minOffset), act.bounds.maxOffset)
+        guard clamped != cur else { return false }
+        _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel)   // overscroll(>max) 归 maxOffset
+        return true
     }
 
     /// 停两面板减速（D7：硬切 autoTracking / 画线激活前调）。
     private func stopAllDeceleration() {
         animators.upper.stop()
         animators.lower.stop()
+    }
+
+    /// 新交互起手时把**两个面板**的减速一并定住（停 + 归一中途 overscroll）。
+    /// **为什么必须是两个而不是「自己那一个」（codex plan-R3-medium，实测确认）**：
+    ///   · 减速每帧 `floorOrFullClampedOffsetDelta` 末尾会 `propagateLinkage` —— 正在减速的面板每帧都在改**另一个**面板的 offset；
+    ///   · 两个 animator 可以同时在跑（`endPan` 只给被拖的面板 start，但用户可以先甩上、再甩下）。
+    /// 于是「甩上面板 → 立刻捏合/拖动/点按下面板」时，只停下面板等于没停：上面板的 animator 继续经联动改它。
+    /// 对**没在跑**的面板，`interruptDeceleration` 是纯 no-op（`wasRunning == false` → 不 clamp、不 reduce），
+    /// 所以「多停一个」不引入任何额外状态改动。
+    /// **停完必须补一次联动（codex plan-R6-medium）**：`interruptDeceleration` 在 bounce/overscroll 中途停时会
+    /// 把 leader 的 offset 夹回界内，但它**不 propagate** —— 于是 follower 还停在夹回**之前**那个右缘对应的 tick 上，
+    /// 两面板时间轴错位（正常减速帧每帧都会 propagate，唯独这个「最后一次修正」不会）。
+    /// **leader 必须显式指定（codex plan-R8-high）**：两个 animator 可以同时在跑、于是可能两个面板都夹过。
+    /// 若「谁夹过就从谁 propagate」，遍历顺序就成了隐式 leader（lower 后处理 → lower 赢），会在用户
+    /// 明明在**上**面板起手时把上面板的 offset 改掉 —— 图当场跳一下，或者锚落错 candle。
+    /// 正确顺序：**先把两个都停+夹完，再从「本次交互的发起面板」propagate 一次**。
+    /// `initiatedBy` = 谁被拖 / 被捏 / 被点。都没夹过则不 propagate（整个函数 no-op）。
+    func settleDeceleration(initiatedBy panel: PanelId) {
+        let upperClamped = interruptDeceleration(panel: .upper)
+        let lowerClamped = interruptDeceleration(panel: .lower)
+        if upperClamped || lowerClamped { propagateLinkage(fromLeader: panel) }
     }
 
     /// D8：硬切 autoTracking 后经 reducer 把 offset 归零（spec L1153「offset 只经 reducer」）。
@@ -816,7 +839,7 @@ extension TrainingEngine {
     /// 新一次抓取必须**先停**本面板进行中的减速（标准惯性滚动语义：手指落下即截住惯性）——否则 re-grab 期间
     /// 残余减速 onUpdate 与手指 `applyPanOffset` 同时喂 `offsetApplied` 致跳动（final-review F1，与 D7 硬切同精神）。
     public func beginPan(panel: PanelId) {
-        interruptDeceleration(panel: panel)                  // R1b-wire D10：停 + 归一中途 overscroll（H3），再 seed/.panStarted
+        settleDeceleration(initiatedBy: panel)                // R1b-wire D10：停 + 归一中途 overscroll（H3），再 seed/.panStarted
         setDragRaw(panelState(panel).offset, panel: panel)   // R1b-drag D1：raw 基线=归一后 offset∈[0,maxOffset]（E1）
         _ = reduce(.panStarted, on: panel)
         _ = reduce(.panStarted, on: follower(of: panel))     // RFC #4 D7：follower 转 freeScrolling（drawing 态 .none 自然不动）
@@ -887,12 +910,17 @@ extension TrainingEngine {
     public func cancelPan(panel: PanelId) {
         setDragRaw(nil, panel: panel)
         _ = reduce(.panEnded(velocity: 0), on: panel)
-        // R1b-drag E4：cancel-于-overscroll（两指接管/drawing 截获于越界）→ 归一 maxOffset 防残留间隙。
-        //   复用 lastRenderedBounds（每帧 render 前 recordRenderBounds 已 seed；不改 public 签名）。
+        // R1b-drag E4：cancel-于-overscroll（两指接管/画线截获于越界）→ 归一 maxOffset 防残留间隙。
+        // 1a-iv（codex plan-R7-high）：夹回后**必须补一次联动** —— 与 settleDeceleration(initiatedBy:) 同理，
+        // 正常拖动每帧都会 propagate，唯独这次「取消时的最后修正」不会；画线态 follower 会跟随 leader
+        // （Task 1 视口解冻）后，不补就是两面板时间轴错位、而画线会话仍开着。
         let ob = RenderStateBuilder.offsetBounds(engine: self, panel: panel, bounds: renderBounds(panel))
         let cur = panelState(panel).offset
         let clamped = min(max(cur, ob.minOffset), ob.maxOffset)
-        if clamped != cur { _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel) }
+        if clamped != cur {
+            _ = reduce(.offsetApplied(deltaPixels: clamped - cur), on: panel)
+            propagateLinkage(fromLeader: panel)
+        }
     }
 
     // MARK: pinch 缩放手势派发（C7 arbiter onPinch 回调下游；RFC §4.4d + 设计 D6）
@@ -904,7 +932,7 @@ extension TrainingEngine {
     public func applyPinch(scale: CGFloat, focusX: CGFloat, phase: GesturePhase, panel: PanelId) {
         switch phase {
         case .began:
-            interruptDeceleration(panel: panel)   // R1b-wire D10：同 beginPan 先例，停 + 归一中途 overscroll
+            settleDeceleration(initiatedBy: panel)   // R1b-wire D10：同 beginPan 先例，停 + 归一中途 overscroll
             setPinchBase(seedPinchBase(scale: scale, panel: panel), panel: panel)
         case .changed:
             // R2-L1：非有限/非正 scale → 真无操作（不派发、状态零改动；防御在 engine 不在模型）
