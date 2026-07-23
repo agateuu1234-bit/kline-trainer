@@ -547,4 +547,65 @@ struct TrainingEngineDrawingSessionTests {
                                                  bounds: bounds, tick: e.tick.globalTickIndex)
         #expect(upperTick == lowerTick)                              // ⭐无错位（补 propagate 之前这里会不等）
     }
+
+    // MARK: whole-branch codex R1-high 回归：退出画线会话必须停两面板惯性
+    // Task 1 让 `.drawing` 的 `panEnded` 会起减速动画（改造前 `.drawing` 吞 panEnded、不起减速，这条路不存在）。
+    // 但 `endDrawingSessionIfActive` / `cancelDrawingAllPanels` 两个 teardown 只 deactivate + cancelUnchecked +
+    // 补跑一次性 normalize——不停 animator。于是：画线中甩一下起惯性 → 退出画线（回 autoTracking）→ animator
+    // 仍在跑 → 后续减速帧继续 `.offsetApplied` 且被 autoTracking 接受、经 propagateLinkage 连带另一面板一起漂。
+
+    @Test("whole-branch codex R1-high 回归：toggleDrawingMode 关闭画线会话必须停两面板惯性（否则退出后画面继续漂）")
+    func toggleDrawingModeOffStopsInertiaOnBothPanels() {
+        let (e, fakes) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let bounds = TrainingEnginePanLinkageTests.bounds       // 800×600，makeEngine 已 recordRenderBounds
+        e.toggleDrawingMode()
+        #expect(e.isDrawingActive(on: .upper))                 // 前置：真在画线态
+
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 200, renderBounds: bounds, panel: .upper)
+        e.endPan(velocity: 3000, renderBounds: bounds, panel: .upper)   // 大速度 → 起惯性
+        _ = fakes().last?.fire(1.0 / 60.0)
+        let mid = e.upperPanel.offset
+        _ = fakes().last?.fire(1.0 / 60.0)
+        #expect(e.upperPanel.offset != mid)                    // 防假绿：惯性确实在跑（否则本测试测的是空气）
+
+        e.toggleDrawingMode()                                  // 退出画线（关闭会话）
+
+        let after = e.upperPanel.offset
+        let afterLower = e.lowerPanel.offset
+        for _ in 0..<10 { _ = fakes().last?.fire(1.0 / 60.0) }
+        #expect(e.upperPanel.offset == after)                  // ⭐核心：退出画线后惯性已停，offset 不再变
+        #expect(e.lowerPanel.offset == afterLower)             // ⭐follower 也不再被残留惯性经联动带着漂
+    }
+
+    @Test("whole-branch codex R1-high 回归：cancelDrawingAllPanels 必须停两面板惯性（否则退出后画面继续漂）")
+    func cancelDrawingAllPanelsStopsInertiaOnBothPanels() {
+        let (e, fakes) = TrainingEnginePanLinkageTests.makeEngine(count: 200, tick: 150)
+        let bounds = TrainingEnginePanLinkageTests.bounds
+        e.toggleDrawingMode()
+        #expect(e.isDrawingActive(on: .upper))                 // 前置：真在画线态
+
+        e.beginPan(panel: .upper)
+        e.applyPanOffset(deltaPixels: 200, renderBounds: bounds, panel: .upper)
+        e.endPan(velocity: 3000, renderBounds: bounds, panel: .upper)   // 大速度 → 起惯性
+        _ = fakes().last?.fire(1.0 / 60.0)
+        let mid = e.upperPanel.offset
+        _ = fakes().last?.fire(1.0 / 60.0)
+        #expect(e.upperPanel.offset != mid)                    // 防假绿：惯性确实在跑
+
+        e.cancelDrawingAllPanels()                             // 退出画线（取消整场会话）
+
+        let after = e.upperPanel.offset
+        let afterLower = e.lowerPanel.offset
+        for _ in 0..<10 { _ = fakes().last?.fire(1.0 / 60.0) }
+        #expect(e.upperPanel.offset == after)                  // ⭐核心：退出画线后惯性已停，offset 不再变
+        #expect(e.lowerPanel.offset == afterLower)             // ⭐follower 也不再被残留惯性经联动带着漂
+    }
+
+    // 注：本 bug 的第三条退出路径 `holdOrObserve` 未加回归测试——它经 `advanceAndAccount` 调用，
+    // 而 `advanceAndAccount` 自己在最开头就调了 `stopAllDeceleration()`（D7：立即中断 free-scrolling 惯性），
+    // **早于**其内部对 `endDrawingSessionIfActive()` 的调用。故 animator 在 teardown 方法运行前已被这条
+    // 独立的既有路径停掉，无法在这条路径上复现本 bug（已用同形状探针实测确认：修复前即为绿，不是有效回归锁）。
+    // `buy`/`sell` 同样经 `advanceAndAccount`，同一原因不受本 bug 影响。真正受影响的只有 teardown 被
+    // **直接**调用、不经 `advanceAndAccount` 的路径——即上面两条：`toggleDrawingMode`(关) 与 `cancelDrawingAllPanels`。
 }

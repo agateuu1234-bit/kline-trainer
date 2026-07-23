@@ -1186,6 +1186,13 @@ extension TrainingEngine {
     /// 取消画线：**整场收干净**（全局会话 + 两个面板），任何情况下都不会静默 no-op。
     /// 画线会话是全局的，故「取消所有面板的画线」在语义上就等于「结束这场画线会话」。
     public func cancelDrawingAllPanels() {
+        // whole-branch codex R1-high：Task 1 起 `.drawing` 的 `panEnded` 会真起惯性（改造前 `.drawing`
+        // 吞 panEnded、这条路不存在）。必须在 deactivate 之前先停两面板 animator，否则退出画线后
+        // 残留减速帧继续 `.offsetApplied`——面板已是 autoTracking，照单全收，经 propagateLinkage 连带
+        // 另一面板一起漂。清 activeBounds 是为了不留 stale ActiveDecel（mirror recordRenderBounds 先例）。
+        stopAllDeceleration()
+        setActiveBounds(nil, panel: .upper)
+        setActiveBounds(nil, panel: .lower)
         drawingSession.deactivate()                 // 幂等：先落会话真相
         cancelDrawingUnchecked(panel: .upper)       // 再收面板（走 unchecked，不会被 fail-closed 守卫挡住）
         cancelDrawingUnchecked(panel: .lower)
@@ -1237,6 +1244,12 @@ extension TrainingEngine {
     /// （1a-iii）→ 那时买卖钮不存在，本路径自然不可达；本期以「下单即隐式退出画线」收敛。
     public func endDrawingSessionIfActive() {
         guard drawingSession.drawingModeActive else { return }
+        // whole-branch codex R1-high：同 cancelDrawingAllPanels——Task 1 起 `.drawing` 的 `panEnded`
+        // 会真起惯性，退出会话前必须先停两面板 animator，否则残留减速帧在退出后继续经 propagateLinkage
+        // 漂移两个面板。清 activeBounds 防 stale ActiveDecel（mirror recordRenderBounds 先例）。
+        stopAllDeceleration()
+        setActiveBounds(nil, panel: .upper)
+        setActiveBounds(nil, panel: .lower)
         drawingSession.deactivate()
         cancelDrawingUnchecked(panel: .upper)
         cancelDrawingUnchecked(panel: .lower)
