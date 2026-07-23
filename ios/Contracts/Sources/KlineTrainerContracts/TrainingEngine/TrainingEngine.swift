@@ -377,23 +377,13 @@ public final class TrainingEngine {
         (.m3, .m15), (.m15, .m60), (.m60, .daily), (.daily, .weekly), (.weekly, .monthly)
     ]
 
-    /// 两指上下滑切换周期组合（plan v1.5 §4.4）。
-    /// - 边界 / 当前组合不在序列(损坏 resume) / target 周期无数据 → no-op（不 advance、不 bump）。
-    /// - 命中 → 改双面板 period + 对两面板派发 `.periodComboSwitched`（硬切 autoTracking + clearPendingDrawing；
-    ///   后者 effect 在 E5b 无消费者，画线延后顺位 7，故无 pending 可清，忽略安全）。
+    /// 单指竖滑 / 两指上下滑切换周期组合（plan v1.5 §4.4）。
+    /// - 边界 / 当前组合不在序列(损坏 resume) / target 周期无数据 → no-op（不 advance、不 bump、**不碰 pending 锚**）。
+    /// - 命中 → 改双面板 period + 对两面板派发 `.periodComboSwitched`（硬切 autoTracking）+ offset 归零。
+    /// - **P1b-1a-iv D31**：命中且**周期组合真的变了**才做画线会话善后（见
+    ///   `restoreDrawingSessionAfterPeriodChange`）。1a-ii 的「画线时切周期一律 no-op」守卫本期删除 —— 那是
+    ///   为了在手势层还吞着竖滑时把「碰巧不可达」升级成「结构上不可能」的临时措施，D32 放开后它变成功能焊死。
     public func switchPeriodCombo(direction: PeriodDirection) {
-        // P1b-1a-ii：画线会话开着时切周期 = **no-op**（fail-closed，codex plan-R7-high）。
-        // 为什么不是「结束会话」也不是「丢 pending」：
-        //   · `.periodComboSwitched` 会把两面板硬切 `.autoTracking`（Reducer:152-155）→ 若放行，会话还开着
-        //     而面板已 autoTracking = 本期要消灭的漂移；且 pending 锚会绑在一个刚变过的周期组合上。
-        //   · 但「周期改变 → 丢 pending」是 spec §3.2 **明确划给 1a-iv（D32）** 的语义，且必须用
-        //     `discardPendingAnchors()`（保工具）而非整场取消 —— 本期不得提前实现。
-        //   · 故本期取**最小且不可漂移**的一档：画线时干脆不换周期。这与手势层现状**完全一致**——
-        //     `singlePanStep(drawingTakesOver:)` 的每个 return 都 `periodSwipe: nil`
-        //     （GestureClassifiers.swift:113-121），两指切周期未接线 → 真实用户本来就切不动。
-        //     守卫只是把「碰巧不可达」升级成「**结构上不可能**」（直接调也漂不了）。
-        // 1a-iv 落 D32 时**删掉这条守卫**，改按 D31 用 discardPendingAnchors() + 维护会话不变量。
-        guard !drawingSession.drawingModeActive else { return }
         let combos = TrainingEngine.periodCombos
         guard let cur = combos.firstIndex(where: {
             $0.upper == upperPanel.period && $0.lower == lowerPanel.period
@@ -404,6 +394,13 @@ public final class TrainingEngine {
         // D8 数据完整性守卫：避免后续 stepsForPeriod/渲染落在无数据周期
         guard let u = allCandles[next.upper], !u.isEmpty,
               let l = allCandles[next.lower], !l.isEmpty else { return }
+        // D31：判据是「周期组合真的会变吗」，**不是**「用户做了切周期手势」。上面每一道守卫都可能 no-op，
+        // no-op 时绝不能碰 pending 锚。
+        // ⭐**必须在任何副作用之前判**（codex plan-R6-medium）：若把比较放在 `.periodComboSwitched` 之后，
+        // 遇到「目标档与当前档相同」（阶梯表被改/损坏 resume 造成的重复项）时，两面板已被硬切回
+        // `.autoTracking`，而 guard 又提前 return 跳过了重新武装 → `drawingModeActive` 还是 true、
+        // 面板却已不在 `.drawing` = 正是本期要消灭的裂脑态。
+        guard next.upper != upperPanel.period || next.lower != lowerPanel.period else { return }
         stopAllDeceleration()                       // D7
         upperPanel.period = next.upper
         lowerPanel.period = next.lower
@@ -411,6 +408,24 @@ public final class TrainingEngine {
         _ = lowerPanel.reduce(.periodComboSwitched)
         resetOffsetAfterAutoTracking(.upper)        // D8
         resetOffsetAfterAutoTracking(.lower)
+        restoreDrawingSessionAfterPeriodChange()    // 到这儿周期一定真变了
+    }
+
+    /// D31（P1b-1a-iv）：周期组合**真的变了**之后的画线会话善后。周期没变时**不会**被调用。
+    /// ① **只丢 pending 锚**（`discardPendingAnchors()`）：锚绑在旧周期的 candleIndex 上，换了周期坐标系就错了。
+    ///    保留 `activeDrawingTool` 与 `drawingModeActive` —— **绝不**调 `deactivate()`：那会连工具一起清掉，
+    ///    连续画线断掉，且 1b-i 的 tap 会误入选择态（spec §5.1 #2 逐字）。
+    /// ② `.periodComboSwitched` 把两面板硬切回 `.autoTracking`，直接破坏不变量「会话开 ⇔ 两面板 .drawing」
+    ///    → 重新武装两个面板。武装依赖 `renderBounds`/reducer 态，理论上可能不生效 → **fail-closed 整场收口**
+    ///    （同 `beginDrawingSession` 的事务性先例），绝不留「铅笔钮亮着、点图没反应」的裂脑态。
+    private func restoreDrawingSessionAfterPeriodChange() {
+        guard drawingSession.drawingModeActive, let tool = drawingSession.activeDrawingTool else { return }
+        if !drawingSession.pendingAnchors.isEmpty { drawingSession.discardPendingAnchors() }
+        armPanelForDrawing(tool, panel: .upper)
+        armPanelForDrawing(tool, panel: .lower)
+        if !(isDrawingActive(on: .upper) && isDrawingActive(on: .lower)) {
+            endDrawingSessionIfActive()   // fail-closed：宁可退出画线，也不留半武装
+        }
     }
 
     // MARK: - 持有 / 观察（E5b）

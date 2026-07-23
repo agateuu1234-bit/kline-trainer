@@ -78,4 +78,41 @@ struct DrawingGestureSourceGuardTests {
         #expect(rebuild.lowerBound < vpRead.lowerBound)    // ⭐viewport 必须在重建**之后**才读
         #expect(vpRead.lowerBound < mapper.lowerBound)     // ⭐读到的那个 viewport 才拿去建 mapper
     }
+
+    private let engine = "Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift"
+
+    @Test("D31：周期切换的会话善后只用 discardPendingAnchors —— 不得出现 deactivate() / cancel()")
+    func periodChangeUsesDiscardNotCancel() throws {
+        let code = try source(engine)
+        // 切片：从方法签名到其后第一个「行首 4 空格 + }」——该方法体内没有任何嵌套的 4 空格缩进 `}`，
+        // 故这就是它的结束括号。切片锚点失配时必须 Issue.record（守卫失效要当场红，不许静默放过）。
+        guard let start = code.range(of: "private func restoreDrawingSessionAfterPeriodChange()"),
+              let end = code.range(of: "\n    }", range: start.upperBound..<code.endIndex) else {
+            Issue.record("切片锚点找不到 —— restoreDrawingSessionAfterPeriodChange 被改名/改写？守卫失效，必须修")
+            return
+        }
+        let body = String(code[start.lowerBound..<end.upperBound])
+        #expect(body.contains("discardPendingAnchors()"))        // 防切片为空 → 负向断言假绿
+        #expect(!body.contains("deactivate()"))
+        #expect(!body.contains("cancelDrawingAllPanels()"))
+        #expect(!body.contains(".cancel()"))
+    }
+
+    @Test("D31 顺序契约：no-op 判据必须在 .periodComboSwitched **之前**（否则重复档位会留下裂脑）")
+    func periodNoOpGuardPrecedesSideEffects() throws {
+        let code = try source(engine)
+        guard let start = code.range(of: "public func switchPeriodCombo(direction: PeriodDirection)"),
+              let end = code.range(of: "restoreDrawingSessionAfterPeriodChange()",
+                                   range: start.upperBound..<code.endIndex) else {
+            Issue.record("切片锚点找不到 —— switchPeriodCombo 被改名/改写？守卫失效，必须修")
+            return
+        }
+        let body = String(code[start.lowerBound..<end.upperBound])
+        guard let noOpGuard = body.range(of: "next.upper != upperPanel.period"),
+              let switched = body.range(of: ".periodComboSwitched") else {
+            Issue.record("switchPeriodCombo 里缺 no-op 判据或 .periodComboSwitched 派发")
+            return
+        }
+        #expect(noOpGuard.lowerBound < switched.lowerBound)   // ⭐判据在副作用之前
+    }
 }

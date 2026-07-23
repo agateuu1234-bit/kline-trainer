@@ -73,40 +73,104 @@ struct TrainingEngineDrawingSessionTests {
     // 守卫 → **加不加画线守卫都 no-op**，测试恒绿 = 假守卫，什么也没测到。
     // engineMultiPeriod() 备了 .m15/.m60/.daily，(.m60,.daily) --toSmaller--> (.m15,.m60) 是能真切成功的。
 
-    @Test("codex plan-R7：**直接调** switchPeriodCombo（绕过手势）在画线时是 no-op —— 不变量结构上破不了")
-    func periodSwitchIsNoOpWhileDrawing() {
+    @Test("D31 真变化：画线时切周期 → **只丢 pending**（工具/会话/两面板 .drawing 全部存活）")
+    func realPeriodChangeDiscardsOnlyPendingAnchors() {
         let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()
         e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
         e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
-        let upBefore = e.upperPanel.period            // .m60
-        let lowBefore = e.lowerPanel.period           // .daily
-        // 公共入口对未实现工具 fail-closed（whole-branch R2-high）；本测试要的是「多锚工具 pending
-        // 跨面板存活」这个 1a-iii 才会真实可达的场景 —— 借内部 API 手动维持不变量（两面板都武装）。
-        e.drawingSession.activate(tool: .trend)       // 容器可持有任何工具（1a-iii 才开放公共入口）
-        e.armPanelForDrawing(.trend, panel: .upper)    // 手动维持不变量：两面板都武装
-        e.armPanelForDrawing(.trend, panel: .lower)
-        e.drawingSession.addAnchor(DrawingAnchor(period: upBefore, candleIndex: 1, price: 10), panel: .upper)
+        e.toggleDrawingMode()                                    // 会话开：两面板 .drawing，工具 .horizontal
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+        #expect(e.drawingSession.pendingAnchors.count == 1)      // 前置：确实攒着 pending
 
-        e.switchPeriodCombo(direction: .toSmaller)    // 直接调（不经手势）；无守卫时这里会真切成 (.m15,.m60)
+        e.switchPeriodCombo(direction: .toSmaller)               // (.m60,.daily) → (.m15,.m60) 真的能切成功
 
-        #expect(e.upperPanel.period == upBefore)      // 周期没变（fail-closed no-op）
-        #expect(e.lowerPanel.period == lowBefore)
-        #expect(e.drawingSession.drawingModeActive == true)      // 会话没被取消（不是 cancel 语义，D31）
-        #expect(e.drawingSession.activeDrawingTool == .trend)    // 工具还在
-        #expect(e.drawingSession.pendingAnchors.count == 1)      // pending 没丢（丢 pending 是 1a-iv 的 D32）
-        assertInvariant(e)                                       // 两面板仍 .drawing —— 没被 .periodComboSwitched 打回
+        #expect(e.upperPanel.period == .m15)                     // 周期真的变了（防假绿：不是撞 no-op 守卫）
+        #expect(e.lowerPanel.period == .m60)
+        #expect(e.drawingSession.pendingAnchors.isEmpty)         // pending 被丢
+        #expect(e.drawingSession.pendingAnchorPanel == nil)
+        #expect(e.drawingSession.activeDrawingTool == .horizontal)   // ⭐工具存活（不是 cancel/deactivate 语义）
+        #expect(e.drawingSession.drawingModeActive == true)          // ⭐会话存活
+        #expect(e.drawings.isEmpty)                              // 丢 pending 不产生画线
+        assertInvariant(e)                                       // ⭐两面板重新回到 .drawing
     }
 
-    @Test("对照（防假绿）：**退出**画线后切周期恢复正常 —— 守卫不是把功能焊死")
-    func periodSwitchWorksAfterLeavingDrawing() {
+    @Test("D31 no-op（目标周期无数据）：pending 锚**原样保留** —— 判据是「周期变没变」不是「做没做手势」")
+    func noOpPeriodSwitchKeepsPendingAnchors() {
+        let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()   // 只有 m3/m15/m60/daily，无 weekly
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+
+        e.switchPeriodCombo(direction: .toLarger)   // 目标 (.daily,.weekly)：weekly 无数据 → no-op
+
+        #expect(e.upperPanel.period == .m60)                     // 前置：确实没变
+        #expect(e.lowerPanel.period == .daily)
+        #expect(e.drawingSession.pendingAnchors.count == 1)      // ⭐锚没被误杀
+        #expect(e.drawingSession.pendingAnchorPanel == .upper)
+        #expect(e.drawingSession.activeDrawingTool == .horizontal)
+        #expect(e.drawingSession.drawingModeActive == true)
+        assertInvariant(e)
+    }
+
+    @Test("D31 no-op（周期阶梯边界）：已是最粗组合再往粗切 → 周期不变、pending 不丢")
+    func boundaryPeriodSwitchKeepsPendingAnchors() {
+        // 全 6 周期 fixture：(.weekly,.monthly) 是阶梯最后一档，再 toLarger 越界 → no-op。
+        let e = TrainingEngineActionsTests.comboEngine(upper: .weekly, lower: .monthly)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        e.drawingSession.addAnchor(DrawingAnchor(period: .weekly, candleIndex: 0, price: 10), panel: .upper)
+
+        e.switchPeriodCombo(direction: .toLarger)   // 越界 → no-op
+
+        #expect(e.upperPanel.period == .weekly)
+        #expect(e.lowerPanel.period == .monthly)
+        #expect(e.drawingSession.pendingAnchors.count == 1)      // ⭐边界 no-op 不误杀
+        #expect(e.drawingSession.activeDrawingTool == .horizontal)
+        #expect(e.drawingSession.drawingModeActive == true)
+        assertInvariant(e)
+    }
+
+    @Test("D31 no-op（阶梯表出现重复档位）：目标档与当前档相同 → 一切副作用都不许发生、不许裂脑")
+    func duplicateComboEntryIsFullyNoOp() {
+        // 造不出重复档位的真 fixture（periodCombos 是 private static let）→ 用**等价的可观测判据**：
+        // 「目标档 == 当前档」在语义上就是「周期没变」，与边界 no-op 同类。这里锁的是**顺序契约**：
+        // no-op 判据必须在 `.periodComboSwitched` 之前，否则面板已被打回 .autoTracking 而会话还开着。
+        // 结构侧由下面的源码守卫钉死；行为侧由既有的两条 no-op 测试（边界 / 目标无数据）覆盖同一条早返路径。
         let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()
         e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
         e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
-        e.toggleDrawingMode()          // 开
-        e.toggleDrawingMode()          // 关
-        e.switchPeriodCombo(direction: .toSmaller)
-        #expect(e.upperPanel.period == .m15)          // 真的切了（证明上一个测试的 no-op 是守卫造成的）
-        #expect(e.lowerPanel.period == .m60)
+        e.toggleDrawingMode()
+        e.switchPeriodCombo(direction: .toLarger)     // 目标 (.daily,.weekly)：weekly 无数据 → 早返
+        assertInvariant(e)                            // ⭐早返路径不得留下裂脑（会话开着但面板 autoTracking）
+        #expect(e.drawingSession.drawingModeActive == true)
+    }
+
+    @Test("D32 × D29 联合：画线模式内切周期后，原周期的线不再属于原面板（跟着它的 period 跑）")
+    func drawingFollowsItsPeriodAcrossInDrawingPeriodSwitch() {
+        let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        // 一条画在上面板（当时 .m60）的线。直接构造 DrawingObject：本条测的是 D29 归属判据，
+        // 与提交路径无关（提交路径由 ChartContainerViewDrawingSessionTests 覆盖）。
+        let line = DrawingObject(toolType: .horizontal,
+                                 anchors: [DrawingAnchor(period: .m60, candleIndex: 1, price: 10)],
+                                 isExtended: false, panelPosition: 0, revealTick: 0,
+                                 lineSubType: .straight)
+        #expect(RenderStateBuilder.belongsToPanel(line, panel: .upper,
+                                                  upperPeriod: e.upperPanel.period,
+                                                  lowerPeriod: e.lowerPanel.period))   // 前置：切之前在上面板
+
+        e.switchPeriodCombo(direction: .toSmaller)     // (.m60,.daily) → (.m15,.m60)：.m60 挪到下面板
+
+        #expect(!RenderStateBuilder.belongsToPanel(line, panel: .upper,
+                                                   upperPeriod: e.upperPanel.period,
+                                                   lowerPeriod: e.lowerPanel.period))  // ⭐不再渲染在上面板
+        #expect(RenderStateBuilder.belongsToPanel(line, panel: .lower,
+                                                  upperPeriod: e.upperPanel.period,
+                                                  lowerPeriod: e.lowerPanel.period))   // ⭐跟着 .m60 跑到下面板
         assertInvariant(e)
     }
 
