@@ -57,9 +57,13 @@
 
 ---
 
-## 2. 决策 D49–D57
+## 2. 决策 D49–D58
 
-> **D57 是 codex 对抗性评审 R1 的产物**（唯一 high，已对源码实测证实）。它推翻了本 spec 上一稿沿用母 spec D38 的「用 `activeDrawingTool == nil` 表示选择态」编码。
+> **D57 / D58 都是 codex 对抗性评审的产物**（各一条 high，均已对源码实测证实）：
+> - **D57（R1）** 推翻了本 spec 上一稿沿用母 spec D38 的「用 `activeDrawingTool == nil` 表示选择态」编码；
+> - **D58（R2）** 补上了编辑路径缺失的几何门——新建路径有、编辑路径没有，同一不变量两条写入路径强制程度不一致。
+>
+> 两条的共同形状：**我按 spec 写的东西"合规"，但没人问过"坏数据会怎样"**（[[feedback_internal_review_misses_bad_data]]）。
 
 ### D49 选中即回显；面板显示的样式是**派生值**，不存第二份状态
 
@@ -106,6 +110,36 @@ public func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Boo
 - `textColorToken == colorToken`（1a-iii 决策：本期只有一个「线色」控件，标签跟线同色）
 
 本期之前，唯一维护点是 `DrawingSession.commitPending`（`Drawing/DrawingSession.swift:147-161`）。`updateDrawingStyle` 是**第二个**写入点，若各写一遍，两处迟早分叉。故：抽一个纯函数（如 `DrawingObject.withStyle(_:) -> DrawingObject`），`commitPending` 与 `updateDrawingStyle` **共用**它；并加**源码守卫测试**钉死这两条派生表达式在 `Sources/` 中各只出现一次。具体抽法由实施计划定，**约束是"只出现一次"这个结果**。
+
+### D58 编辑路径必须与提交路径**同门**：不得靠改样式造出「渲染不出」的线
+
+> **来源：codex 对抗性评审 R2 唯一 high finding，已对源码实测证实。**
+
+**实测事实**（`Drawing/HorizontalLineTool.swift:50-75`）：
+
+- `lineXRange` 对两种情形返回 nil → `visibleGeometry` 随之 nil → 该线**既画不出、也命不中**（render / hitTest / 标注三者共用同一判据，D40）：
+  1. **`.segment`**：水平线无线段语义，**恒 nil**、**与 viewport 无关**；
+  2. **`.ray` 且 `anchorX >= mainChartFrame.maxX`**（锚点位于/越过右缘）：**与 viewport 相关**。
+- **新建路径已有这道门**：`ChartContainerView.handleDrawingTap:303`
+  `guard HorizontalLineTool.visibleGeometry(for: committed, mapper: mapper) != nil else { return }`，注释原文写明目的是「拒绝**不可见**画线再落库……幽灵线」。
+- **而 D50 的 `updateDrawingStyle` 会改 `lineSubType`，走的是另一扇门、没有这道闸** → 同一类坏对象换个入口照样造得出来，并且按 D56 立刻 autosave。
+
+**严重性如实校准（不过度宣称，codex 的表述在这一点上偏重）**：
+
+- `.segment` 那一支**面板走不到**——它在设置面板里是**灰的**（`Drawing/DrawingStyleAvailability.swift:6-11`：`.straight`/`.ray` 可选，`.segment` 返 false）。
+- 可达的是 **`.straight → .ray` 且锚点在右缘之外**。而 `.ray` 的不可见是 **viewport 相关**的：推进 K 线或平移让锚点重新落回图内后，该线会**恢复可见、可选、可删**。因此**不是**「永久不可恢复的数据丢失」，codex 原文的 `cannot be recovered` 说过头了。
+- 但它仍然是「用户按一下线就没了、且当下选不中删不掉」的坏交互；更要命的是**两条写入路径对同一不变量强制程度不一致**——这本身就是缺陷，与触发频率无关。
+
+**修法 = 两层同门，均 fail-closed**：
+
+| 层 | 判据 | 为什么放这一层 |
+|---|---|---|
+| **引擎**（viewport 无关，恒开） | `updateDrawingStyle` 拒绝把 `lineSubType` 改成「该 `toolType` **恒**不可渲染」的值（水平线的 `.segment`）→ 返 `false`、**零改动**、`drawingsRevision` **不递增** | 引擎层没有 mapper，只判得了 viewport 无关那一支；而那一支恰是**恒 nil**，也是「解码坏数据 / 将来 UI 放开 `.segment`」的兜底。**判据必须复用 `DrawingStyleAvailability`**（与面板灰态同一真相，**禁止另写一份**） |
+| **UI**（viewport 相关） | 应用 `lineSubType` 改动**之前**，用 **`selectedPanel` 的 mapper** 对**候选对象**跑 `HorizontalLineTool.visibleGeometry`；为 nil → **不应用、不写库**、给反馈（选中**保留**，🗑 仍亮） | 与新建路径的门**同一个函数、同一层**（`handleDrawingTap:303` 也在 UI 层）→ 两条写入路径对称。路由细节由实施计划定，**约束是判据必须复用 `visibleGeometry` 且取 `selectedPanel` 的 mapper**，不得另写一份几何判断 |
+
+**只有 `lineSubType` 需要 viewport 预检**：`lineStyle` / `thickness` / `colorToken` / `labelMode` 都不参与 `lineXRange` / `visibleGeometry` 的判据，改它们**不可能**把可见变不可见。实施时**不得**给这 4 项加预检（无谓地引入 viewport 依赖，还会让常见路径变脆）。
+
+**`labelMode` 归一化必须同样对称**：面板在用户改 `lineSubType` 时会跑 `DrawingStyleAvailability.normalizedLabelMode`（`UI/DrawingStyleParams.swift:33-35`），使 `(ray, .left)` 这类无效组合不可表达。D49 已规定面板经**单一路由**写出一个完整的 `DrawingDefaultStyle`，故编辑路径天然继承这条归一化——**实施时不得绕过面板另开一条编辑入口**，否则 `(ray, .left)` 会变成只在编辑路径上可达的坏组合。
 
 ### D51 删除 API = `deleteDrawing(id:) -> Bool`（id 寻址，不用下标）
 
@@ -285,6 +319,12 @@ public private(set) var mode: DrawingSessionMode = .draw
 
   > 这条测试存在的意义：本 finding 是 codex 挖出来的，而它**在 nil 编码下不可能被 §6.3 既有任何一条测试抓到**（那些测试都不跨"选择态 + 切周期"这个组合）。
 
+- **N12 编辑不得造出渲染不出的线（D58，codex R2-F1 专项，不可省）**：四条，缺一即漏——
+  - **a 引擎层恒开门**：对一条 `.horizontal` 线调 `updateDrawingStyle` 把 `lineSubType` 改成 `.segment` → 返 `false`、该线**逐字段不变**、`drawingsRevision` **不递增**。（判据须来自 `DrawingStyleAvailability`，另加源码守卫断言没有第二份等价判断。）
+  - **b UI 层 viewport 预检**：造一条锚点**位于右缘之外**的 `.straight` 线并选中 → 改成 `.ray`（候选对象 `visibleGeometry == nil`）→ 断言：该线**仍是 `.straight`** 且逐字段不变、`drawingsRevision` **不递增**、**选中仍在**（🗑 仍亮，用户没有因此失去对它的控制）。
+  - **c 反向对照（防过度 fail-closed）**：**同一条线**在锚点**位于图内**时改成 `.ray` → **成功**、`isExtended == true`、`drawingsRevision` **+1**。没有这条，实现完全可以用「一律拒绝改 `lineSubType`」骗过 b。
+  - **d 归一化对称**：编辑成 `.ray` 时若原 `labelMode == .left` → 结果为 `.hidden`，与新建路径逐字一致（`(ray, .left)` 不得成为只在编辑路径上可达的组合）。
+
 ---
 
 ## 7. 非程序员验收清单
@@ -327,7 +367,9 @@ public private(set) var mode: DrawingSessionMode = .draw
 ## 8. 已知限制（明写，非缺陷）
 
 1. **不做选中循环**：两条几何落在同一命中容差内的线，单击**恒选中最上层**那条（D33）。想操作下层只能先删上层。完全重合时下层本就不可见；容差内但视觉可区分时，这是可接受的取舍。**P5 引入跨层选中时必须补上循环**（那时「选不中下层」会直接导致原训练线无法隐藏）。
-2. **渲染不出的线同样选不中、删不掉**（D52）：`hitTest` 与渲染同源（D40），故 `visibleGeometry == nil` 的线既画不出也命不中。本期**不改善也不宣称改善**，可达性与 1a-iv 之前逐字一致。
+2. **渲染不出的线同样选不中、删不掉**（D52）：`hitTest` 与渲染同源（D40），故 `visibleGeometry == nil` 的线既画不出也命不中。对**历史既有**的这类线，本期**不改善也不宣称改善**，可达性与 1a-iv 之前逐字一致。
+   **但本期不得新造这类线**（D58）：编辑路径已补上与新建路径同一道 `visibleGeometry` 门（两层 fail-closed）。「历史遗留的不去动」与「新入口不许再造」是两回事，不可混为一谈。
+   另注：`.ray` 的不可见是 **viewport 相关**的（锚点越过右缘），平移 / 推进 K 线后会恢复可见可删，**不是永久数据丢失**；恒不可见的只有 `.segment`，而它在面板里是灰的。
 3. **面板收起期间无法切回画线态**（D54）：工具图标随面板一起隐藏。要画线需先展开面板。
 4. **面板 `.pending` 瞬间少响应一次点击**（D53）：与 1a-iii 已接受的代价一致。
 5. **`DrawingToolManager` 仍是死代码**（1a-iv 残留①）：本期不删、不改注释；建议独立清理 PR 处置。
