@@ -3,6 +3,7 @@
 from __future__ import annotations
 import datetime as _dt
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -46,11 +47,20 @@ def parse_qmt_filename(name: str) -> tuple[str, str, str]:
         raise QmtSchemaError(f"文件名不符合 QMT 规则: {name!r}")
     return m["code"], m["name"], _LABEL_TO_PERIOD[m["label"]]
 
-def parse_qmt_csv(path: Path, src_period: str) -> pd.DataFrame:
+@dataclass(frozen=True)
+class QmtSource:
+    """携带来源身份的 QMT 数据（P3-D1/R14-F1：身份随数据端到端，不作为独立参数漂）。"""
+    code: str
+    period: str
+    df: pd.DataFrame
+
+def parse_qmt_csv(path: Path, src_period: str) -> "QmtSource":
     df = pd.read_csv(path, encoding="utf-8-sig")   # utf-8-sig 剥 BOM
     missing = [c for c in _QMT_COLUMNS if c not in df.columns]
     if missing:
         raise QmtSchemaError(f"QMT CSV 缺必需列: {missing}")
     df = df.rename(columns={"time": "datetime"})
     df["datetime"] = parse_qmt_datetime(df["datetime"], src_period)
-    return df[["datetime", "open", "high", "low", "close", "volume", "amount"]]
+    df = df[["datetime", "open", "high", "low", "close", "volume", "amount"]]
+    code, _name, period = parse_qmt_filename(Path(path).name)
+    return QmtSource(code=code, period=period, df=df)

@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from zoneinfo import ZoneInfo
 from pathlib import Path
-from qmt_normalize import trading_date, parse_qmt_datetime, parse_qmt_csv, parse_qmt_filename, QmtSchemaError
+from qmt_normalize import trading_date, parse_qmt_datetime, parse_qmt_csv, parse_qmt_filename, QmtSchemaError, QmtSource
 
 SH = ZoneInfo("Asia/Shanghai")
 
@@ -38,12 +38,12 @@ def test_parse_qmt_filename_fullwidth_name():
     assert parse_qmt_filename("000002.SZ_万科Ａ_日K线_前复权.csv") == ("000002.SZ", "万科Ａ", "daily")
 
 def test_parse_qmt_csv_strips_bom_and_parses(tmp_path: Path):
-    p = tmp_path / "x.csv"
+    p = tmp_path / "000001.SZ_平安银行_1分钟K线_前复权.csv"
     # utf-8-sig 写入 → 首字节 BOM；表头列名须为 datetime 不含 BOM
     p.write_text("time,open,high,low,close,volume,amount\n"
                  "20260703093000,10.29,10.29,10.29,10.29,10899,11215071.0\n",
                  encoding="utf-8-sig")
-    df = parse_qmt_csv(p, "1m")
+    df = parse_qmt_csv(p, "1m").df
     assert list(df.columns) == ["datetime", "open", "high", "low", "close", "volume", "amount"]
     assert df.loc[0, "datetime"] == int(df.loc[0, "datetime"])  # Unix 秒 Int64
     assert df.loc[0, "open"] == 10.29
@@ -53,3 +53,13 @@ def test_parse_qmt_csv_missing_col_raises(tmp_path: Path):
     p.write_text("time,open,high,low,close\n20260703093000,1,1,1,1\n", encoding="utf-8-sig")
     with pytest.raises(QmtSchemaError):
         parse_qmt_csv(p, "1m")
+
+def test_parse_qmt_csv_returns_source_with_filename_identity(tmp_path):
+    p = tmp_path / "000001.SZ_平安银行_日K线_前复权.csv"
+    p.write_text("time,open,high,low,close,volume,amount\n"
+                 "20200102,1.0,1.1,0.9,1.05,100,1050.0\n", encoding="utf-8-sig")
+    src = parse_qmt_csv(p, "daily")
+    assert isinstance(src, QmtSource)
+    assert src.code == "000001.SZ"
+    assert src.period == "daily"
+    assert list(src.df.columns) == ["datetime", "open", "high", "low", "close", "volume", "amount"]
