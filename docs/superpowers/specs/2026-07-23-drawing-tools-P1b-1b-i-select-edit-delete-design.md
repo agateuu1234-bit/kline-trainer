@@ -58,9 +58,9 @@
 
 ---
 
-## 2. 决策 D49–D63
+## 2. 决策 D49–D65
 
-> **D57–D63 全部是 codex 对抗性评审的产物**（均已对源码 / 上游 spec 原文实测证实，未采信转述）：
+> **D57–D65 全部是 codex 对抗性评审的产物**（均已对源码 / 上游 spec 原文实测证实，未采信转述）：
 >
 > | 轮 | 级别 | 决策 | 它推翻了什么 | 我的处置 |
 > |---|---|---|---|---|
@@ -282,22 +282,24 @@ D58 把 `lineSubType` 的 viewport 预检放在 UI 层——这是**原理性**�
 
 一个 Bool + 一条「false 就清空」的粗判据**无法同时满足**这些路径。真矛盾。
 
-**修法（比 result enum 更省，且不可写错）**：清空判据改为一个**状态谓词**——
+**本决策的作用域 = 把「写入失败后要不要清空选中」这一维，从"看 API 返回值"改成"看状态"。** 它**不是**全部清空条件——完整清空条件是 D54 的**并集**（退画线 / 切回画线态 / 结构性 `visibleDrawings` 不含 / 存在性），本决策只替换其中与写入失败相关的那一维。
+
+**替代判据（存在性维度）**：
 
 ```
-选中失效 ⟺ selectedDrawingID 不在 engine.drawings 中
+「写入失败 → 是否清空选中」由此决定：
+    selectedDrawingID ∉ engine.drawings  →  清空（线真没了）
+    selectedDrawingID ∈ engine.drawings  →  保留（locked / 语义不成立 / UI 预检未调引擎，线都还在）
 ```
 
 - 与**为什么失败**完全解耦，因此没有「失败码 → 选中动作」的映射表可以写错、可以漏更新；
 - 逐条自动正确：id 不存在 → 清空 ✓；`locked` / 语义不成立 / UI 预检未调引擎 → id 还在 → 保留 ✓；删除成功 → id 没了 → 清空 ✓；
-- **顺带吞掉 D54 clause 4**（「选中线被删除 → 清空」是本谓词的一个 case，不再单列）；
 - 也天然抗 codex 提到的 missing-id 竞态：不管是谁在什么时候删掉了那条线，谓词都为真；
 - 与 D49「面板显示的样式是派生值，不存副本」是**同一条纪律**：**能从状态算出来的，就不要另存一份、也不要靠事件传递**。
 
-**D54 clause 5 据此改写**（clause 1/2/3 不变）：
+⚠️ **存在性维度 ≠ 结构归属维度，两者正交、取并集**：一条线**切周期迁到另一面板**时，它的 id **仍在 `engine.drawings`**（`drawings` 是全局数组、不分面板）→ 存在性谓词判「保留」，但 **D54 clause 3 的结构性判据（`visibleDrawings(for: selectedPanel)` 不含）判「清空」**。**结构性清空照常生效**，本决策**不覆盖、不削弱**它。换言之：清空 ⟺（结构性不含 **或** 存在性缺失），本决策只规定后一个析取项**不看返回值、看状态**。
 
-> ~~5. `updateDrawingStyle` / `deleteDrawing(id:)` 返 `false`~~
-> 4′+5′. **`selectedDrawingID` 不在 `engine.drawings` 中**（涵盖「被删除」与「被其它路径移除」）。
+**D54 clause 4/5 据此已改写**（见 D54，clause 1/2/3 不变）：原「返 `false` → 清空」两条合并为一条**存在性谓词** clause 4，涵盖「被删除」与「被其它路径移除」。
 
 **`Bool` 返回值保留**（用于测试断言与调用方即时判断），但**不再**是选中生命期的判据。
 
@@ -477,7 +479,7 @@ public private(set) var mode: DrawingSessionMode = .draw
 - **N2 `updateDrawingStyle` 只动样式（D50）**：改样式后断言 `id` / `anchors` / `period` / `panelPosition` / `revealTick` / `locked` / `text` / `fontSize` / `textForm` / `tailAnchor` **逐字段不变**。
 - **N3 `updateDrawingStyle` 对不存在 id（D50）**：返 `false`、`drawings` 逐字段不变、`drawingsRevision` **不递增**、UI 侧选中被清空且 🗑 回灰。
 - **N4 `deleteDrawing(id:)` 对不存在 id（D51）**：返 `false`、同 N3 的三条断言。
-- **N5 派生规则单点（D50）**：源码守卫断言 `isExtended == (lineSubType == .ray)` 与 `textColorToken = colorToken` 这两条派生表达式在 `Sources/` 中**各只出现一次**；并加一条行为测试：经 `updateDrawingStyle` 把 `lineSubType` 改成 `.ray` → 该线 `isExtended == true`；改回 `.straight` → `false`。
+- **N5 派生规则单点（D59 / D61）**：源码守卫断言 D59 四条语义的表达式在 `Sources/` 中**各只出现一次**——`isExtended == (lineSubType == .ray)`（派生①）、`textColorToken` 的**条件派生**（派生②，D61：`old.textColorToken == old.colorToken ? style.colorToken : old.textColorToken`，**不是**无条件 `= colorToken`）、`labelMode` 归一化、`lineSubType` 可用性判据。并加一条行为测试：经 `updateDrawingStyle` 把 `lineSubType` 改成 `.ray` → 该线 `isExtended == true`；改回 `.straight` → `false`。
 - **N6 盾对选择态生效（D53）**：`.rect` 内的 tap → **既不选中也不落锚**；`.pending` → 拒收一切。两种盾态 × 画线态 / 选择态共 4 组。
 - **N7 选中态绝不落盘（D55）**：选中一条线 → 走完整持久化往返 → 重载后**无任何选中**，且 `DrawingObject` 逐字段与选中前一致；契约版本仍 1.12。
 - **N8 面板收起不清选中（D54）**：选中一条线 → 收起面板 → 选中仍在、🗑 仍亮、可删；展开面板 → 面板派生值仍是那条线的样式。
