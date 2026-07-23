@@ -477,12 +477,17 @@ async def _amain_qmt(args) -> int:
                   "正等登记的旧 B2——完全封死靠部署 drain，见 spec P3-D8）",
                   file=sys.stderr)
             return 2
-        await conn.fetchval("SELECT pg_advisory_unlock($1)", B2_GENERATION_LOCK_KEY)  # 仅探测，立即释放
-
-        # R9-F1：按股 session 锁在 parse/装配/write **之前**就拿、持到 write 完成（同一 conn）。
+        # R9-F1 + R10-F1：按股 session 锁在 parse/装配/write **之前**就拿、持到 write 完成
+        # （同一 conn）；且**在释放全局探测锁之前**就取按股锁（hand-over-hand），取到后才放
+        # 全局——消除 unlock-to-stock-lock 的 TOCTOU 窗口。sweep 靠全局锁启动（scheduler /
+        # generate CLI 在整批前取 B2_GENERATION_LOCK_KEY），B1 持全局期间 sweep 无法启动、
+        # 够不到按股锁；B1 先握按股再放全局，放全局后即便新 sweep 抢到全局，也会被按股锁挡在
+        # 读数据之前（generate_one_training_set 先取同一把按股锁才读）。
         sk = stock_lock_key(args.stock)
-        if not await conn.fetchval("SELECT pg_try_advisory_lock($1,$2)",
-                                   IMPORT_GEN_LOCK_KEY, sk):
+        got_stock = await conn.fetchval("SELECT pg_try_advisory_lock($1,$2)",
+                                        IMPORT_GEN_LOCK_KEY, sk)
+        await conn.fetchval("SELECT pg_advisory_unlock($1)", B2_GENERATION_LOCK_KEY)  # 按股锁取到后才放全局探测锁
+        if not got_stock:
             print(f"[B1] 拒绝导入：{args.stock} 正被 B2 生成（按股锁被占），请稍后重试",
                   file=sys.stderr)
             return 2

@@ -848,20 +848,19 @@ def test_qmt_import_probe_released_before_write(tmp_path, monkeypatch):
 
     order = calls["order"]
     kinds = [k for k, _ in order]
-    i_lock = next(i for i, (k, q) in enumerate(order)
-                  if k == "fetchval" and "pg_try_advisory_lock" in q and "xact" not in q)
-    i_unlock = next(i for i, (k, q) in enumerate(order) if k == "fetchval" and "pg_advisory_unlock" in q)
+    def _idx(pred):
+        return next(i for i, (k, q) in enumerate(order) if pred(k, q))
+    i_global_lock = _idx(lambda k, q: k == "fetchval" and "pg_try_advisory_lock($1)" in q)
+    i_stock_lock = _idx(lambda k, q: k == "fetchval" and "pg_try_advisory_lock($1,$2)" in q)
+    i_global_unlock = _idx(lambda k, q: k == "fetchval" and "pg_advisory_unlock($1)" in q)
+    i_stock_unlock = _idx(lambda k, q: k == "fetchval" and "pg_advisory_unlock($1,$2)" in q)
+    i_parse = _idx(lambda k, q: k == "parse_qmt_csv")
     i_write = kinds.index("write_qmt_stock")
-    assert i_lock < i_unlock < i_write, f"顺序应为 探测锁→释放→写入，实际 {kinds}"
-    # R9-F1：按股 session 锁（双参）在 parse **之前**取、write **之后**才释放——整个
-    # 解析/装配/写窗口都在锁内，封住 fresh-sweep race。
-    i_stock_lock = next(i for i, (k, q) in enumerate(order)
-                        if k == "fetchval" and "pg_try_advisory_lock($1,$2)" in q)
-    i_stock_unlock = next(i for i, (k, q) in enumerate(order)
-                          if k == "fetchval" and "pg_advisory_unlock($1,$2)" in q)
-    i_parse = next(i for i, (k, q) in enumerate(order) if k == "parse_qmt_csv")
-    assert i_stock_lock < i_parse < i_write < i_stock_unlock, \
-        f"按股锁须在 parse 前取、write 后释放，实际 {kinds}"
+    # R10-F1：按股锁在**释放全局探测锁之前**就取到（hand-over-hand）→ i_stock_lock < i_global_unlock，
+    # 消除 unlock-to-stock-lock 的 TOCTOU 窗口（sweep 靠全局锁启动）。R9-F1：按股锁持到
+    # write 之后才放，整个 parse/装配/写窗口在锁内。
+    assert i_global_lock < i_stock_lock < i_global_unlock < i_parse < i_write < i_stock_unlock, \
+        f"顺序应为 全局探测锁→按股锁→放全局→parse→write→放按股，实际 {kinds}"
 
 
 def test_qmt_rejects_when_per_stock_lock_held(tmp_path, monkeypatch, capsys):
