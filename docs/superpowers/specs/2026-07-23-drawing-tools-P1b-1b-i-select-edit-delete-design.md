@@ -1,0 +1,289 @@
+# 划线工具扩充 · P1b-1b-i 设计 spec：「能选中、能改、能删」
+
+- **日期**：2026-07-23
+- **分支**：`drawing-tools-p1b-1b-i`（worktree `.claude/worktrees/drawing-tools-p1b-1b-i`）
+- **base**：`d2754df`（= main，含 1a-iv PR #151）
+- **host 基线（本机亲跑）**：`swift test` **1661 passed / exit 0**
+- **母 spec**：`2026-07-04-drawing-tools-expansion-design.md`（D1–D22 继续生效）
+- **拆分 spec**：`2026-07-10-drawing-tools-P1b-split-addendum.md` §6（本 spec 的**上游范围定义**；下面 §0 逐条声明哪些被取代）
+- **前作 spec**：`2026-07-18-drawing-tools-P1b-1a-iii-panel-redesign-design.md`（常驻面板重设计）
+- **决策编号**：本 spec 从 **D49** 起（D1–D48 已被前作占用）
+
+---
+
+## 0. 本 spec 的地位：§6 有一部分已被 1a-iii 作废
+
+拆分 spec §6 写于 **2026-07-10**，那时 1a-ii / 1a-iii / 1a-iv 都尚未落地。1a-iii 把「长按工具图标弹设置卡片」整个换成了**常驻样式面板**，因此 §6 中若干条款的**前提已不成立**。
+
+本 spec 的第一职责是**逐条声明取代关系**，避免实施时照抄一份已过时的文档（[[feedback_plan_embedded_facts_unreliable]]：计划内嵌的"事实"必须逐条实测）。
+
+下表每一行的「现状」列都是对 `d2754df` **源码实测**的结论，不是从 spec 推断的。
+
+| §6 条款 | §6 原文前提 | `d2754df` 实测现状 | 本 spec 处置 |
+|---|---|---|---|
+| §6.1 #1 底栏 🗑 | 「与 1a-ii 的①类型键并列」 | `DrawingBottomBar` 是**单行**，只有「类型」键 + `Spacer`（`UI/DrawingModeBar.swift:14-25`） | **继续有效**，🗑 与「类型」键并列（D24 五键骨架不变，②🔒④↩⑤↪ 仍留 1b-ii） |
+| §6.1 #2 工具图标 toggle | 「类型行的工具图标改为 toggle」 | 图标**恒亮、短按 no-op**，注释写死「本期无选中、不做 toggle」（`UI/DrawingTypeOverlay.swift:22-31`） | **继续有效**，本期就是接它 |
+| §6.1 #5 设置面板消歧 | 「**长按**工具图标弹面板」 | ❌ **前提已废**：面板是常驻的（`UI/DrawingStylePanel.swift`），长按手势已删（`DrawingTypeOverlay.swift:5-8` 注释明载） | **由 D49 取代**（见 §2） |
+| §6.4 验收 #9 | 「长按工具图标弹面板，改成绿色」 | ❌ 同上，做不出这个动作 | **由 §7 重写的验收清单取代** |
+| §6 全文 | （未考虑命中盾） | 1a-iii 引入 `DrawingSession.PanelShield` 三态双层盾（`Drawing/DrawingSession.swift:51-86`） | **由 D53 补齐**（§6 对选择态只字未提） |
+| §6 全文 | （未考虑 1a-iv 交接） | 1a-iv 交接两条硬要求（append 拒绝信号上溯 / init-decode 校验重估） | **由 D50 / D52 处置** |
+
+**§6 中继续原样生效、本 spec 不重复展开的部分**：D30 / D33 / D34 / D37 / D38 / D39 / D40 / D41 全部决策语义，以及 §6.3 的负向测试 0 / 0b / 0c / 1 / 1b / 1b2 / 1b3 / 1b4 / 1b5 / 1c / 2 / 3 / 4 / 5 / 5b / 6 / 7 / 8 / 9（§6 中一条都不删；本 spec §6 只**追加**）。
+
+---
+
+## 1. 交付范围
+
+### 1.1 做
+
+1. **底栏补 🗑 删除键**，与「类型」键并列。无选中时灰、有选中时亮。
+2. **画线态 / 选择态分态**（D38）：类型行的水平线图标改为 toggle。
+3. **选中**：选择态下单击 → 对该面板的可见画线集合做 `hitTest`，逆序取第一个命中（D33）；命中者渲染为选中高亮，🗑 转亮。
+4. **改**：常驻面板的 5 组样式控件，有选中时作用于选中线（**选中即回显**，D49），无选中时改「下一条线的默认」。
+5. **删**：点 🗑 → 确认框「确定删除划线？[删除][取消]」→ 确认才删。
+6. **内容级 dirty 信号**（D30）：新增 `drawingsRevision`，autosave 触发器从 `drawings.count` 换成它。
+7. **命中集合 ≡ 渲染集合**（D40）：抽共享纯函数，两边同源。
+8. **复盘门控**（D34）：`flow.mode == .review` 时不给选中能力。
+
+### 1.2 不做
+
+- 锁定 / 解锁、撤销 / 前进、底栏 ②🔒④↩⑤↪ → **1b-ii**
+- 节点 / 多锚 / 四个新工具 → **P1c**
+- 复盘的选中与复盘专属一切 → **P5**
+- 主页全局默认设置 → **P6**
+- **不删** `DrawingToolManager` 死代码（1a-iv 残留①）：本期新增 id 寻址的删除 API，但不动它的 index 版本（CLAUDE.md §3：无关死代码提出来、不删）。
+- **不动** `reviewDrawings` 的 `.count` 触发器（D56）。
+
+---
+
+## 2. 决策 D49–D56
+
+### D49 选中即回显；面板显示的样式是**派生值**，不存第二份状态
+
+**用户裁决（2026-07-23）**：选中一条线时，常驻面板的控件立刻显示**那条线的当前样式**；改动只作用于那条线；取消选中后面板恢复显示默认样式。改选中线的样式**不回写**「下一条线的默认」。
+
+**形状（load-bearing）**：面板显示的样式是**每次求值现算的派生值**，不是拷贝进某个 `@State` 的副本。
+
+```
+面板显示的 style =
+    有选中 → engine.drawings.first { $0.id == selectedID } 的 5 个样式字段
+    无选中 → session.defaultStyle
+
+面板控件写入 =
+    有选中 → engine.updateDrawingStyle(id: selectedID, style: 新值)
+    无选中 → session.setDefaultStyle(新值)
+```
+
+**为什么必须派生、不许拷贝**：常驻面板长期存活（不像旧的长按卡片改完即关），任何拷贝出来的第二份样式状态都会与 `engine.drawings` 里的真值漂移——这正是 1a-iii 当初把 `DrawingStyleParams` 改成直读 `session.defaultStyle` 的理由（`UI/DrawingStyleParams.swift:4` 注释：「两份状态必然漂移」）。本期把同一条纪律扩到选中线上。
+
+**依赖方向约束**：`DrawingSession` **不得**反向依赖 `TrainingEngine`（今天 `engine.drawingSession` 是 `public let`，反向依赖即循环）。因此上面的「派生 + 路由」两段逻辑**放在 UI 调用方**（同时持有 engine 与 session 的那一层），`DrawingStyleParams` 改为接收
+- `style: DrawingDefaultStyle`（调用方算好的派生值）
+- `onChange: (DrawingDefaultStyle) -> Void`（调用方路由）
+
+**这不新增任何状态**：传的是派生值而非拷贝的状态，故不重新引入 1a-iii 消灭掉的漂移。
+
+### D50 编辑 API = `updateDrawingStyle(id:style:) -> Bool`，**不是**通用替换，更不是「先删后加」
+
+```swift
+@discardableResult
+public func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Bool
+```
+
+- **只改 5 个样式字段** + 派生的 `isExtended` 与 `textColorToken`；`id` / `anchors` / `period` / `panelPosition` / `revealTick` / `locked` / `text` / `fontSize` / `textForm` / `tailAnchor` **一律逐字段不动**。
+- 成功 → `drawingsRevision += 1`，返 `true`。
+- `id` 不在 `drawings` 里 → **零改动**、`drawingsRevision` **不递增**、返 `false`。
+
+**这条如何收口 1a-iv 交接①**（原文：「编辑路径 append 返 false 时绝不能已删原线 + 给 UI 反馈」）：
+
+1. **「已删原线」不可表达**——本 API 是原地替换单个数组元素，流程里**根本没有"删"那一步**，也不经过 `appendDrawing`。这是「让矛盾状态不可表达」而非「小心翼翼地按正确顺序操作」（[[feedback_internal_review_misses_bad_data]]：修 root cause 不修 symptom）。
+2. **UI 反馈路径可达且必须接**：返 `false` 的唯一情形 = 选中的线已不在 `drawings` 中。UI 消费方式 = **清空选中 + 🗑 回灰**（与 D54 的四种清空情形合流，不是新语义）。
+
+**派生规则单点约束（防第二个不变量维护点）**：`DrawingObject` 有两个不变量必须在**源码中只出现一次**：
+- `isExtended == (lineSubType == .ray)`
+- `textColorToken == colorToken`（1a-iii 决策：本期只有一个「线色」控件，标签跟线同色）
+
+本期之前，唯一维护点是 `DrawingSession.commitPending`（`Drawing/DrawingSession.swift:147-161`）。`updateDrawingStyle` 是**第二个**写入点，若各写一遍，两处迟早分叉。故：抽一个纯函数（如 `DrawingObject.withStyle(_:) -> DrawingObject`），`commitPending` 与 `updateDrawingStyle` **共用**它；并加**源码守卫测试**钉死这两条派生表达式在 `Sources/` 中各只出现一次。具体抽法由实施计划定，**约束是"只出现一次"这个结果**。
+
+### D51 删除 API = `deleteDrawing(id:) -> Bool`（id 寻址，不用下标）
+
+```swift
+@discardableResult
+public func deleteDrawing(id: DrawingID) -> Bool
+```
+
+- 选中态存的是 `id`，而数组下标会因任何增删而漂移；用下标删 = 竞态下删错线。
+- 成功 → 移除该条 + `drawingsRevision += 1` + 返 `true`；`id` 不存在 → 零改动、不递增、返 `false`（UI 同 D50 清空选中）。
+- **现有 `deleteDrawing(at index:)` 保留不动**：已实测其在 `Sources/` 中**零生产调用点**（只有定义与注释），且有测试钉着；删它属于「清理无关代码」，不在本期范围（CLAUDE.md §3）。
+
+### D52 1a-iv 交接②（`init` / `decode` 层 period 校验）重估结论 = **仍不加闸**
+
+1a-iv 把 period 自洽校验加在了新增写入面（`appendDrawing` / `appendReviewDrawing` / `commitPending`），**刻意不加**在 `init` 的 `self.drawings = …` 与复盘装载的整体赋值上，理由是「resume 路径 fail-closed 会静默吞掉用户已画的线」。1a-iv 要求 1b-i 重估。
+
+**重估结论：维持不加闸。** 理由：
+
+1. 加闸的代价是**静默丢弃用户画过的线**——装载期拒绝一条线，用户没有任何补救手段，且不可逆。这类数据丢失比「留一条渲染不出的坏线」严重得多（[[project_app_public_release_intent]]：按公开发布标准，跨版本数据保真优先）。
+2. 1b-i 之后，`drawings` 里的线**多了一条用户侧处置通道**（选中 → 删除），处置权交给用户优于程序静默吞。
+
+**但不得过度宣称**（这是本条最容易写错的地方）：并非所有 period 不自洽的历史线都变得「用户可删」。一条线若因几何原因**渲染不出**（`visibleGeometry == nil`），它同样**命不中**（`hitTest` 与渲染同源，D40），因此**选不中、也就删不掉**——这类线本期的可达性与 1a-iv 之前**逐字一致**，本 spec 不改善也不宣称改善。列入 §8 已知限制。
+
+### D53 常驻面板的命中盾对**选择态同样生效**，盾语义一字不改
+
+`ChartContainerView.handleDrawingTap`（`Render/ChartContainerView.swift:287-291`）现有三态盾判定：
+
+| 盾态 | 含义 | 本期行为 |
+|---|---|---|
+| `.unshielded` | 无面板覆盖 | 正常（画线态落锚 / 选择态 hitTest） |
+| `.pending` | 面板已挂载、几何未收敛 | **拒收一切 tap**（fail-closed） |
+| `.rect(r)` | 已知覆盖区 | 区内拒收、区外正常 |
+
+**约束：盾判定必须位于「画线态 / 选择态」分叉之前**。落在面板上的点击**既不落锚、也不选中**。
+
+代价与 1a-iii 已接受的一致：面板刚展开的 `.pending` 极短瞬间少响应一次点击。收益不变：永远不会因盾未就位而落出幽灵线并 autosave（不可逆）。
+
+### D54 选中态的生命期与清空判据
+
+- **画线态**：单击**恒落锚**、**不调用 `hitTest`**；选中恒为空。
+- **选择态**：单击调用 `hitTest`、**不落锚**；命中 → 选中它（替换原选中）；未命中 → 清空选中（D37）。
+- **新提交的线不自动选中。**
+- **选中 = `(selectedPanel, selectedDrawingID)` 二元组**，存进 1a-ii 建立的共享容器 `DrawingSession`（与 `activeDrawingTool` 同源）。渲染与操作**都按二元组**，不是 id-only。
+- **清空选中的全部情形**（每次清空后 🗑 回灰）：
+  1. 退出画线模式；
+  2. 从选择态切回画线态（点亮工具图标）；
+  3. `visibleDrawings(for: selectedPanel)` 不再含 `selectedDrawingID`（切周期、或该线改由另一面板显示）——判据**按 `selectedPanel`**，哪怕同 id 在**另一个**面板可见也照样清空；
+  4. 选中线被删除；
+  5. `updateDrawingStyle` / `deleteDrawing(id:)` 返 `false`（D50 / D51）。
+- **面板收起（`typeRowExpanded == false`）不改变画线 / 选择态，也不清空选中**：收起期间选择态仍可选中 / 取消，🗑 仍可删。但工具图标随面板一起不可见，故**收起期间无法切回画线态**——要画线需再点一次底栏「类型」键展开面板。这是交互约束，**不是缺陷**，列入 §8。
+
+#### D54 附：两处**必须改动的现有守卫**（对 `d2754df` 实测，非推断）
+
+选择态的定义是「`drawingModeActive == true` 且 `activeDrawingTool == nil`」。这个组合在今天的代码里**两处被当成"没在画线"直接短路**，不改就等于选择态永远收不到 tap：
+
+1. **`ChartContainerView.handleDrawingTap`（`Render/ChartContainerView.swift:274`）**
+   ```swift
+   guard session.drawingModeActive, let tool = session.activeDrawingTool else { return }
+   ```
+   `activeDrawingTool == nil` 时**整个函数早退**。必须拆成「先判 `drawingModeActive` → 走盾（D53）→ 再按 `activeDrawingTool` 是否为 nil 分派到落锚 / hitTest」。**盾判定必须在分派之前**（D53），不得只保护落锚分支。
+
+2. **`DrawingSession` 没有"只卸下工具、保留会话"的 mutator**
+   今天唯一能把 `activeDrawingTool` 置 nil 的是 `deactivate()`（`Drawing/DrawingSession.swift:101-106`），而它**同时**关掉 `drawingModeActive`、丢 pending、清盾——那是「整场结束」语义。故本期需新增一个 internal mutator（如 `disarmTool()`）：**只清 `activeDrawingTool` 与 pending 锚，保留 `drawingModeActive` 与盾**。
+   - 访问级别沿用容器既有纪律：**mutator 一律 internal，不加 `public`**（`DrawingSession` 顶部大注释写明理由：public mutator 会让包外绕过 `beginDrawingSession` / `endDrawingSessionIfActive` 这两个唯一同时更新两个面板 reducer 的入口）。
+   - **不得**复用 `discardPendingAnchors()`（它刻意保留工具）或 `deactivate()`（它退整场）——三者语义互不相同，混用即回归。
+
+### D55 选中高亮是**瞬时 UI 状态**，绝不落盘
+
+- 选中线渲染为系统 `accentColor`（与类型行图标高亮框同源），**不占用** `DrawingColorToken` 值域。
+- `RenderStateBuilder` **只在渲染 `selectedPanel` 那个面板时**把 `selectedDrawingID` 带进 `KLineRenderState`（该类型今天**没有** selected 概念）；`KLineView+Drawing` 的 dispatch 据此对该条走高亮。
+- `DrawingTool.render` 增 `isSelected: Bool` 入参。这是**源码 API 面**的破坏，按 D28：`CONTRACT_VERSION` 只覆盖持久化契约、不覆盖 Swift API 面 → **不 bump、不留 shim**（`KlineTrainerContracts` 是仓内模块，无外部 conformer，同 PR 内迁完）。
+- **持久化零改动**：`DrawingObject` 不新增字段，选中态不进任何存储路径。
+
+### D56 `drawingsRevision` 只覆盖 `drawings`，不覆盖 `reviewDrawings`
+
+- `TrainingEngine` 新增 `public private(set) var drawingsRevision: Int = 0`（单调递增）。**每一个**改动 `drawings` 的引擎 API 都必须 `+= 1`：本期为 `appendDrawing` / `deleteDrawing(at:)` / `deleteDrawing(id:)` / `updateDrawingStyle`。
+- `TrainingView.swift:355` 的 `.onChange(of: engine.drawings.count)` → `.onChange(of: engine.drawingsRevision)`，动作仍是 `lifecycle.autosave(immediate: true)`。
+- **`reviewDrawings` 的 `.count` 触发器（`TrainingView.swift:358`）一字不动**：复盘本期不获得改样式能力（D34），故 `reviewDrawings` 不存在「不改数组长度的内容变更」。
+- **交接**：将来复盘获得改样式能力（P5）时，**必须同期**给 `reviewDrawings` 补等价的 revision 触发器，否则复盘改样式同样永不落盘。
+- **禁止**改用 `.onChange(of: engine.drawings)` 或任何数组值比较：`DrawingObject.==` 排除 `id`。
+
+---
+
+## 3. 命中集合 ≡ 渲染集合（D40，实施约束）
+
+抽一个共享纯函数（如 `visibleDrawings(engine:panel:tick:)`），**返回渲染序**：
+
+- 渲染方（`RenderStateBuilder`）**原样消费**；
+- 命中方自己 `.reversed()` 后取第一个命中（D33 最上层优先）。
+
+同一判据、同一 `revealTick` 过滤、同一 D29 fail-safe（`upper.period == lower.period` 损坏态下退回 `panelPosition`）。**不得各写一遍**——否则在该损坏态下，点击一个面板会选中甚至删除**渲染在另一个面板上**的线。
+
+---
+
+## 4. 复盘门控（D34，trust-boundary）
+
+`ChartContainerView` 的 tap 路径三模式共用。加入 hitTest 分支时**必须以 `engine.flow.mode != .review` 门控**，否则复盘会获得无层权限门控的选中能力，可改写**已归档 record 里的原训练线**。
+
+复盘的选中 + `(layer, id)` 层权限门控留 **P5**。
+
+---
+
+## 5. 契约影响
+
+- `CONTRACT_VERSION` 保持 **1.12**，`user_version` 保持 **7**，**零迁移**（依据：`DrawingObject` 不新增 / 不改任何持久化字段；选中态与 `drawingsRevision` 都是运行时状态）。
+- `drawingsRevision` 是 `TrainingEngine` 的运行时计数器，**不进任何存储**（初值 0，每次装载从 0 起算——它只用于驱动 autosave 触发器，绝对值无语义）。
+
+---
+
+## 6. 必须存在的负向测试
+
+**§6.3 的 0 / 0b / 0c / 1 / 1b / 1b2 / 1b3 / 1b4 / 1b5 / 1c / 2 / 3 / 4 / 5 / 5b / 6 / 7 / 8 / 9 全部原样保留**（一条不删）。以下是本 spec **追加**的：
+
+- **N1 回显是派生的（D49）**：默认样式为 A、造一条样式为 B（逐字段不同）的线 → 选择态选中它 → 面板派生值 == B；改成 C → **那条线 == C**、`session.defaultStyle` **仍 == A（逐字段断言）**；取消选中 → 面板派生值回到 A。
+- **N2 `updateDrawingStyle` 只动样式（D50）**：改样式后断言 `id` / `anchors` / `period` / `panelPosition` / `revealTick` / `locked` / `text` / `fontSize` / `textForm` / `tailAnchor` **逐字段不变**。
+- **N3 `updateDrawingStyle` 对不存在 id（D50）**：返 `false`、`drawings` 逐字段不变、`drawingsRevision` **不递增**、UI 侧选中被清空且 🗑 回灰。
+- **N4 `deleteDrawing(id:)` 对不存在 id（D51）**：返 `false`、同 N3 的三条断言。
+- **N5 派生规则单点（D50）**：源码守卫断言 `isExtended == (lineSubType == .ray)` 与 `textColorToken = colorToken` 这两条派生表达式在 `Sources/` 中**各只出现一次**；并加一条行为测试：经 `updateDrawingStyle` 把 `lineSubType` 改成 `.ray` → 该线 `isExtended == true`；改回 `.straight` → `false`。
+- **N6 盾对选择态生效（D53）**：`.rect` 内的 tap → **既不选中也不落锚**；`.pending` → 拒收一切。两种盾态 × 画线态 / 选择态共 4 组。
+- **N7 选中态绝不落盘（D55）**：选中一条线 → 走完整持久化往返 → 重载后**无任何选中**，且 `DrawingObject` 逐字段与选中前一致；契约版本仍 1.12。
+- **N8 面板收起不清选中（D54）**：选中一条线 → 收起面板 → 选中仍在、🗑 仍亮、可删；展开面板 → 面板派生值仍是那条线的样式。
+- **N9 `drawingsRevision` 不覆盖 `reviewDrawings`（D56）**：`appendReviewDrawing` 后 `drawingsRevision` **不变**；`reviewDrawings.count` 触发器仍在（源码守卫）。
+- **N10 三个"清"语义互不混用（D54 附 #2）**：`disarmTool()` / `discardPendingAnchors()` / `deactivate()` 各调一次，**逐字段差分断言** `drawingModeActive` / `activeDrawingTool` / `pendingAnchors` / `pendingAnchorPanel` / `shield` 五项——
+  | | `drawingModeActive` | `activeDrawingTool` | pending | `shield` |
+  |---|---|---|---|---|
+  | `disarmTool()` | **不变（true）** | → nil | 清 | **不变** |
+  | `discardPendingAnchors()` | 不变 | **不变** | 清 | 不变 |
+  | `deactivate()` | → false | → nil | 清 | **清空** |
+
+  这张表就是测试断言本身：任何一格被实现写成另一列的行为，本测试立刻红。
+
+---
+
+## 7. 非程序员验收清单
+
+> ⚠️ **本清单按 `d2754df` 的真实 UI 重新推导，不是从 §6.4 抄的**。§6.4 里「长按工具图标弹面板」等条目的前提已被 1a-iii 作废（[[feedback_plan_embedded_facts_unreliable]]；1a-iv 曾因照抄母 spec 写出一条做不出来的验收项）。
+>
+> 前置：训练模式；点顶栏「画图」进画线模式。此时**底栏没有买卖钮**（1a-iii 起画线模式整个隐藏它们），常驻样式面板默认是**展开**的。
+
+| # | 动作 | 预期 | 通过 / 不通过 |
+|---|---|---|---|
+| 1 | 进画线模式，看底栏 | 是 **2 个键：「类型」和 🗑**（**没有** 🔒 / ↩ / ↪） | |
+| 2 | 看 🗑 | 是**灰**的（还没选中任何线） | |
+| 3 | 看常驻面板的水平线图标 | **亮着**（浅蓝框）= 画线态 | |
+| 4 | 在主图 K 线区连点三下 | 画出**三条**线 | |
+| 5 | 在**已有一条线的同一价位**再点一下 | **又叠画一条重合的线**（不是选中原来那条）——这是画线态 | |
+| 6 | 点一下水平线图标（熄灭它） | 图标变暗 = 进入**选择态**，并且**一直保持暗着**（不会自己亮回来） | |
+| 7 | 选择态下等几秒、或推进一根 K 线让图表刷新，再看图标 | **仍然是暗的**（选择态没被刷新冲掉） | |
+| 8 | 选择态下单击主图**空白处** | **什么都不画**，🗑 保持灰 | |
+| 9 | 选择态下单击一条已有的线 | 线变成**高亮色**；🗑 从灰变亮 | |
+| 10 | 接第 5 条：在那两条重合线的位置单击 | 选中的是**后画的那条**（最上面那条）；先画的那条**不受影响** | |
+| 11 | **选中一条与默认样式不同的线**（比如先把默认改成橙实线粗1，画一条；再改默认为蓝虚线粗3，画第二条；然后选中**第一条**） | 面板的颜色 / 线型 / 粗细控件**立刻跳成第一条线的样子**（橙 / 实线 / 1） | |
+| 12 | 接上：把颜色改成绿 | **那条选中的线变绿**；线型、粗细**没被顺手改掉** | |
+| 13 | 接上：点空白处取消选中，再看面板 | 面板恢复显示**默认样式**（蓝 / 虚线 / 3）；然后点亮图标画一条新线 → 新线是**蓝虚线粗3**（改选中线**没有**污染默认） | |
+| 14 | 选中一条线，点 🗑 | 弹出「确定删除划线？[删除][取消]」 | |
+| 15 | 点「取消」（另测：点框外关掉） | 线**还在**、仍是高亮选中态、🗑 仍亮 | |
+| 16 | 再点 🗑 → 点「删除」 | 线消失，🗑 回灰 | |
+| 17 | 选中一条线，然后点亮工具图标切回画线态 | **选中被取消**（线不再高亮），🗑 回灰 | |
+| 18 | 选中一条 60 分的线（🗑 亮），竖滑切周期让 60 分不再显示 | 线消失，**选中自动取消**，🗑 变回灰 | |
+| 19 | 选中一条线，点底栏「类型」键**收起面板** | 线**仍然是选中的**、🗑 **仍然亮**、点 🗑 仍能删；但**图标看不见了、这时切不回画线态**（要画线得再点「类型」键展开面板）——这是设计如此 | |
+| 20 | 画线模式下点击**常驻面板本身**（面板盖住 K 线的那块） | **什么都不发生**：不画线、也不选中（面板挡住了） | |
+| 21 | **改样式后立刻杀掉 App**（不点退出、直接从后台划掉），重开续这一局 | 改过的颜色 / 线型 / 粗细 / 标注**全部还在** | |
+| 22 | 点「退出」离开画线模式，再单击一条线 | **没有任何反应**（不高亮、🗑 不出现、也不画线） | |
+| 23 | 进「再次训练」画**一条线**，退出；从历史弹窗**续这一局 replay**，什么都不做（不下单、不推进、不加线、不切周期），只把那条线改成紫色，**立刻杀掉 App**，再续这一局 | 那条线是紫色的（验续局 replay 里「只改样式」也会触发存盘）<br>注：全新一局 replay 里**本来就没有任何已有线**，只能先画一条、退出、续局才改得到 | |
+| 24 | 进复盘，用**浮动铅笔钮**进画线模式，单击一条训练时画的线 | **不选中**（线不高亮、什么也没发生），只会落一条新线；原训练线的颜色 / 粗细一点没变 | |
+| 25 | 进复盘看画线入口和底栏 | 还是浮动铅笔钮，**没有**画线底栏、**没有** 🗑 | |
+
+---
+
+## 8. 已知限制（明写，非缺陷）
+
+1. **不做选中循环**：两条几何落在同一命中容差内的线，单击**恒选中最上层**那条（D33）。想操作下层只能先删上层。完全重合时下层本就不可见；容差内但视觉可区分时，这是可接受的取舍。**P5 引入跨层选中时必须补上循环**（那时「选不中下层」会直接导致原训练线无法隐藏）。
+2. **渲染不出的线同样选不中、删不掉**（D52）：`hitTest` 与渲染同源（D40），故 `visibleGeometry == nil` 的线既画不出也命不中。本期**不改善也不宣称改善**，可达性与 1a-iv 之前逐字一致。
+3. **面板收起期间无法切回画线态**（D54）：工具图标随面板一起隐藏。要画线需先展开面板。
+4. **面板 `.pending` 瞬间少响应一次点击**（D53）：与 1a-iii 已接受的代价一致。
+5. **`DrawingToolManager` 仍是死代码**（1a-iv 残留①）：本期不删、不改注释；建议独立清理 PR 处置。
+
+---
+
+## 9. 交接（下一切片必须接手的）
+
+- **1b-ii**：落地 undo / redo / 锁定时，必须把它们的引擎 API **补进 `drawingsRevision` 的「每 API 各一条回归测试」那一组**（D56）；撤销删除必须 `insert(at:)` 还原原下标，禁 `append`（D25）。
+- **P5**：复盘获得改样式能力时，必须**同期**给 `reviewDrawings` 补等价 revision 触发器（D56），并补跨层选中循环（§8 #1）。
+- **P1c**：多锚工具落地时，`commitPending` 的全锚同 period 闸门（1a-iv 已建）才第一次真正可达。
