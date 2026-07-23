@@ -27,8 +27,9 @@
 | §6.4 验收 #9 | 「长按工具图标弹面板，改成绿色」 | ❌ 同上，做不出这个动作 | **由 §7 重写的验收清单取代** |
 | §6 全文 | （未考虑命中盾） | 1a-iii 引入 `DrawingSession.PanelShield` 三态双层盾（`Drawing/DrawingSession.swift:51-86`） | **由 D53 补齐**（§6 对选择态只字未提） |
 | §6 全文 | （未考虑 1a-iv 交接） | 1a-iv 交接两条硬要求（append 拒绝信号上溯 / init-decode 校验重估） | **由 D50 / D52 处置** |
+| D38 的**编码方式** | 「工具非 nil = 画线态 / 工具 nil = 选择态」 | ❌ **实测有坏状态**：`restoreDrawingSessionAfterPeriodChange`（`TrainingEngine.swift:422`）在工具为 nil 时早退，而此前两面板已被切回 `.autoTracking` → 裂脑 | **由 D57 取代编码方式**；D38 的**语义**全部保留 |
 
-**§6 中继续原样生效、本 spec 不重复展开的部分**：D30 / D33 / D34 / D37 / D38 / D39 / D40 / D41 全部决策语义，以及 §6.3 的负向测试 0 / 0b / 0c / 1 / 1b / 1b2 / 1b3 / 1b4 / 1b5 / 1c / 2 / 3 / 4 / 5 / 5b / 6 / 7 / 8 / 9（§6 中一条都不删；本 spec §6 只**追加**）。
+**§6 中继续原样生效、本 spec 不重复展开的部分**：D30 / D33 / D34 / D37 / D39 / D40 / D41 全部决策语义 + **D38 的语义（编码方式除外，见 D57）**，以及 §6.3 的负向测试 0 / 0b / 0c / 1 / 1b（按 `mode` 重述，断言内容不变）/ 1b2 / 1b3 / 1b4 / 1b5 / 1c / 2 / 3 / 4 / 5 / 5b / 6 / 7 / 8 / 9（§6 中一条都不删；本 spec §6 只**追加**）。
 
 ---
 
@@ -56,7 +57,9 @@
 
 ---
 
-## 2. 决策 D49–D56
+## 2. 决策 D49–D57
+
+> **D57 是 codex 对抗性评审 R1 的产物**（唯一 high，已对源码实测证实）。它推翻了本 spec 上一稿沿用母 spec D38 的「用 `activeDrawingTool == nil` 表示选择态」编码。
 
 ### D49 选中即回显；面板显示的样式是**派生值**，不存第二份状态
 
@@ -154,20 +157,56 @@ public func deleteDrawing(id: DrawingID) -> Bool
   5. `updateDrawingStyle` / `deleteDrawing(id:)` 返 `false`（D50 / D51）。
 - **面板收起（`typeRowExpanded == false`）不改变画线 / 选择态，也不清空选中**：收起期间选择态仍可选中 / 取消，🗑 仍可删。但工具图标随面板一起不可见，故**收起期间无法切回画线态**——要画线需再点一次底栏「类型」键展开面板。这是交互约束，**不是缺陷**，列入 §8。
 
-#### D54 附：两处**必须改动的现有守卫**（对 `d2754df` 实测，非推断）
+### D57 选择态是**显式状态**，不用 `activeDrawingTool == nil` 编码（取代 D38 的编码方式，保留 D38 的语义）
 
-选择态的定义是「`drawingModeActive == true` 且 `activeDrawingTool == nil`」。这个组合在今天的代码里**两处被当成"没在画线"直接短路**，不改就等于选择态永远收不到 tap：
+> **来源：codex 对抗性评审 R1 唯一 high finding，已对源码实测证实。** 母 spec D38 把两个态编码成「工具非 nil = 画线态 / 工具 nil = 选择态」。这个编码是**错的**，理由不是风格问题而是一个可复现的坏状态：
 
-1. **`ChartContainerView.handleDrawingTap`（`Render/ChartContainerView.swift:274`）**
-   ```swift
-   guard session.drawingModeActive, let tool = session.activeDrawingTool else { return }
-   ```
-   `activeDrawingTool == nil` 时**整个函数早退**。必须拆成「先判 `drawingModeActive` → 走盾（D53）→ 再按 `activeDrawingTool` 是否为 nil 分派到落锚 / hitTest」。**盾判定必须在分派之前**（D53），不得只保护落锚分支。
+**实测的裂脑路径**（`TrainingEngine.swift:386-428`）：
 
-2. **`DrawingSession` 没有"只卸下工具、保留会话"的 mutator**
-   今天唯一能把 `activeDrawingTool` 置 nil 的是 `deactivate()`（`Drawing/DrawingSession.swift:101-106`），而它**同时**关掉 `drawingModeActive`、丢 pending、清盾——那是「整场结束」语义。故本期需新增一个 internal mutator（如 `disarmTool()`）：**只清 `activeDrawingTool` 与 pending 锚，保留 `drawingModeActive` 与盾**。
-   - 访问级别沿用容器既有纪律：**mutator 一律 internal，不加 `public`**（`DrawingSession` 顶部大注释写明理由：public mutator 会让包外绕过 `beginDrawingSession` / `endDrawingSessionIfActive` 这两个唯一同时更新两个面板 reducer 的入口）。
-   - **不得**复用 `discardPendingAnchors()`（它刻意保留工具）或 `deactivate()`（它退整场）——三者语义互不相同，混用即回归。
+```
+用户在选择态（按 D38 编码：activeDrawingTool == nil）竖滑切周期
+  → switchPeriodCombo 走到 :407-408
+      _ = upperPanel.reduce(.periodComboSwitched)   // 两面板被硬切回 .autoTracking
+      _ = lowerPanel.reduce(.periodComboSwitched)
+  → :411 restoreDrawingSessionAfterPeriodChange()
+  → :422 guard drawingModeActive, let tool = activeDrawingTool else { return }
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^ nil → 整个善后早退
+  ⇒ drawingModeActive == true，但两面板都不在 .drawing
+  ⇒ 正是 1a-iv 花力气消灭的不变量「会话开 ⇔ 两面板 .drawing」被破坏
+```
+
+后果：切周期后选择态的点击不再进 `handleDrawingTap`（面板已回 `.autoTracking`，tap 被路由去十字光标），**验收 #18 走的正是这条路**。
+（1a-iv 的作者在 `:416-417` 注释里已经预判到 1b-i 会有选择态，但只防了「别误入选择态」，没防「选择态使这个 guard 失效」。）
+
+**根因**：`activeDrawingTool == nil` 同时承载了两个互不相同的含义——「没有会话 / 没在画线」与「有会话、只是这一刻不落锚」。现有代码有 **6 处** `activeDrawingTool` 消费点（已逐一实测），其中 3 处 `guard let tool = …` 按前一个含义早退。用 nil 编码，就是让这两个含义**不可区分**。
+
+**修法（让裂脑态不可表达，而不是逐个补调用点）**：
+
+```swift
+// DrawingSession 新增
+public enum DrawingSessionMode: Equatable, Sendable { case draw, select }
+public private(set) var mode: DrawingSessionMode = .draw
+```
+
+- **会话存活期间 `activeDrawingTool` 恒非 nil**（选择态"记住"当前工具，与 1a-iii「记住工具」一致）；nil 重新回到唯一含义 =「没有会话」。
+- 于是 `restoreDrawingSessionAfterPeriodChange` 的 guard **在两个态下都成立**，善后照常跑、两面板照常重新武装 —— **上面那条裂脑路径结构上不存在**，不需要在它里面加任何分支。
+
+**随之而来的必须改动（缺一即回归）**：
+
+| 位置 | 现状 | 改成 |
+|---|---|---|
+| `DrawingSession.activate(tool:)` `:92-97` | `drawingModeActive = true` → `guard activeDrawingTool != tool else { return }` | **`mode = .draw` 必须写在幂等 guard 之前**。否则「选择态下再点亮同一个工具」会被幂等 guard 吞掉、态切不回去（本条极易漏，是本次修法自带的新陷阱） |
+| `DrawingSession.addAnchor` `:118-119` | `guard drawingModeActive, activeDrawingTool != nil` | 追加 `mode == .draw`（选择态恒不落锚，fail-closed） |
+| `DrawingSession.commitPending` `:136` | `guard let tool = activeDrawingTool, …` | 追加 `mode == .draw` |
+| `DrawingSession.deactivate()` `:101-106` | 清工具 | 追加 `mode = .draw`（复位，防下次开会话继承旧态） |
+| `ChartContainerView.handleDrawingTap` `:274` | `guard drawingModeActive, let tool = …` | guard **原样保留**；其后先走盾（D53），**再** `switch session.mode` 分派落锚 / hitTest |
+| `TrainingEngine.restoreDrawingSessionAfterPeriodChange` `:421` | guard 会在选择态早退 | **guard 一字不改**（现在恒成立）；但**必须追加清空选中**——锚绑旧周期坐标系，选中的线换周期后不该继续被选中。fail-closed 分支 `endDrawingSessionIfActive()` 同样要清空选中并复位 `mode` |
+
+**新增 mutator**：`setMode(_:)`，internal（沿用容器纪律：mutator 一律 internal，不加 `public`——`DrawingSession` 顶部大注释写明理由）。切到 `.select` 时**保留 `activeDrawingTool`、丢 pending 锚**（半成品多锚线不得跨态存活）；切回 `.draw` 时沿用记住的工具。
+
+**不再需要 `disarmTool()`**（本 spec 上一稿的设计）——它的存在本身就是 nil 编码的产物。
+
+**与母 spec D38 的关系**：D38 的**语义**（两个态、切换入口是类型行工具图标 toggle、画线态恒落锚不 hitTest、选择态恒 hitTest 不落锚）**全部保留**；只有「用 `activeDrawingTool` 是否为 nil 来表示」这一条**编码方式**被本决策取代。§6.3 的负向测试 1b 相应改为按 `mode` 断言（断言内容不变）。
 
 ### D55 选中高亮是**瞬时 UI 状态**，绝不落盘
 
@@ -225,14 +264,26 @@ public func deleteDrawing(id: DrawingID) -> Bool
 - **N7 选中态绝不落盘（D55）**：选中一条线 → 走完整持久化往返 → 重载后**无任何选中**，且 `DrawingObject` 逐字段与选中前一致；契约版本仍 1.12。
 - **N8 面板收起不清选中（D54）**：选中一条线 → 收起面板 → 选中仍在、🗑 仍亮、可删；展开面板 → 面板派生值仍是那条线的样式。
 - **N9 `drawingsRevision` 不覆盖 `reviewDrawings`（D56）**：`appendReviewDrawing` 后 `drawingsRevision` **不变**；`reviewDrawings.count` 触发器仍在（源码守卫）。
-- **N10 三个"清"语义互不混用（D54 附 #2）**：`disarmTool()` / `discardPendingAnchors()` / `deactivate()` 各调一次，**逐字段差分断言** `drawingModeActive` / `activeDrawingTool` / `pendingAnchors` / `pendingAnchorPanel` / `shield` 五项——
-  | | `drawingModeActive` | `activeDrawingTool` | pending | `shield` |
-  |---|---|---|---|---|
-  | `disarmTool()` | **不变（true）** | → nil | 清 | **不变** |
-  | `discardPendingAnchors()` | 不变 | **不变** | 清 | 不变 |
-  | `deactivate()` | → false | → nil | 清 | **清空** |
+- **N10 三个"清"语义互不混用（D57）**：`setMode(.select)` / `discardPendingAnchors()` / `deactivate()` 各调一次，**逐字段差分断言** `mode` / `drawingModeActive` / `activeDrawingTool` / `pendingAnchors` / `pendingAnchorPanel` / `shield` 六项——
+
+  | | `mode` | `drawingModeActive` | `activeDrawingTool` | pending | `shield` |
+  |---|---|---|---|---|---|
+  | `setMode(.select)` | → `.select` | **不变（true）** | **不变（非 nil）** | 清 | **不变** |
+  | `discardPendingAnchors()` | **不变** | 不变 | **不变** | 清 | 不变 |
+  | `deactivate()` | → `.draw`（复位） | → false | → nil | 清 | **清空** |
 
   这张表就是测试断言本身：任何一格被实现写成另一列的行为，本测试立刻红。
+
+- **N11 切周期不得在选择态下裂脑（D57，codex R1-F1 专项回归，不可省）**：置 `mode == .select`（`drawingModeActive == true`、`activeDrawingTool` 非 nil）并选中一条线 → 调 `switchPeriodCombo` 走一次**周期真的改变**的切换 → 断言：
+  1. `drawingModeActive` **仍为 true**；
+  2. **两个面板都仍在 `.drawing`**（`isDrawingActive(on: .upper) && isDrawingActive(on: .lower)`）——这一条直接钉住 1a-iv 的核心不变量；
+  3. `mode` **仍为 `.select`**（切周期不改变用户所处的态）；
+  4. 选中被**清空**、🗑 回灰；
+  5. 紧接着在选择态单击一条线 → **仍能选中**（证明 tap 仍进 `handleDrawingTap`，没有被路由去十字光标）。
+
+  **并加一条 fail-closed 对照**：构造重新武装失败的情形 → 断言整场退出（`drawingModeActive == false`）、`mode` 复位 `.draw`、选中清空，**绝不留半武装**。
+
+  > 这条测试存在的意义：本 finding 是 codex 挖出来的，而它**在 nil 编码下不可能被 §6.3 既有任何一条测试抓到**（那些测试都不跨"选择态 + 切周期"这个组合）。
 
 ---
 
@@ -262,6 +313,7 @@ public func deleteDrawing(id: DrawingID) -> Bool
 | 16 | 再点 🗑 → 点「删除」 | 线消失，🗑 回灰 | |
 | 17 | 选中一条线，然后点亮工具图标切回画线态 | **选中被取消**（线不再高亮），🗑 回灰 | |
 | 18 | 选中一条 60 分的线（🗑 亮），竖滑切周期让 60 分不再显示 | 线消失，**选中自动取消**，🗑 变回灰 | |
+| 18b | **接上**：切完周期后，直接再单击另一条还看得见的线 | **仍然能选中**（线高亮、🗑 变亮）——切周期没把选择态弄坏（D57 专项，codex R1 挖出的裂脑路径） | |
 | 19 | 选中一条线，点底栏「类型」键**收起面板** | 线**仍然是选中的**、🗑 **仍然亮**、点 🗑 仍能删；但**图标看不见了、这时切不回画线态**（要画线得再点「类型」键展开面板）——这是设计如此 | |
 | 20 | 画线模式下点击**常驻面板本身**（面板盖住 K 线的那块） | **什么都不发生**：不画线、也不选中（面板挡住了） | |
 | 21 | **改样式后立刻杀掉 App**（不点退出、直接从后台划掉），重开续这一局 | 改过的颜色 / 线型 / 粗细 / 标注**全部还在** | |
