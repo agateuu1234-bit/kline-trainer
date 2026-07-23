@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import math
 from pathlib import Path
@@ -358,15 +359,23 @@ def _qmt_entry(code, period, df):
                           last_time=int(df.iloc[-1]["datetime"]), source=code)
 
 
-@pytest.fixture
-def valid_bundle():
+# build_stock_import 走全套门 + 出货预检，构造一个 ~6万行 bundle 约数秒。
+# module-scope 只 build 一次；各测试拿 deepcopy（独立可变、mutation 不跨测泄漏），
+# 把该文件从 >2min 降回秒级（原 function-scope 每测重建 ~21 次是唯一慢源）。
+@pytest.fixture(scope="module")
+def _valid_bundle_master():
     s1, sd, e1, ed = gen_valid_sources("000001.SZ")
     return build_stock_import(s1, sd, stock_code="000001.SZ", stock_name="平安",
                               entry_1m=e1, entry_daily=ed)
 
 
 @pytest.fixture
-def valid_bundle_with_boundary_drop():
+def valid_bundle(_valid_bundle_master):
+    return copy.deepcopy(_valid_bundle_master)
+
+
+@pytest.fixture(scope="module")
+def _valid_bundle_with_boundary_drop_master():
     """首个 1m dense 交易日残缺（100/241 根）→ 落 dropped_dates；因它是窗口最早一日，
     complete[0] 顺延到下一天 → 该 dropped 日期落在 [start_date,end_date] 之外——
     覆盖率"端点分区外部分残缺"合法场景，validate_import_bundle 必须放行（不拒）。"""
@@ -379,6 +388,11 @@ def valid_bundle_with_boundary_drop():
     e1b = _qmt_entry("000001.SZ", "1m", m1)
     return build_stock_import(s1b, sd, stock_code="000001.SZ", stock_name="平安",
                               entry_1m=e1b, entry_daily=ed)
+
+
+@pytest.fixture
+def valid_bundle_with_boundary_drop(_valid_bundle_with_boundary_drop_master):
+    return copy.deepcopy(_valid_bundle_with_boundary_drop_master)
 
 
 def test_bundle_valid_passes(valid_bundle):
