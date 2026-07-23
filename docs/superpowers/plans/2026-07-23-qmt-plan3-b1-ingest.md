@@ -746,6 +746,11 @@ async def test_write_qmt_stock_reimport_blocked(fake_conn_has_training_set, vali
 async def test_write_qmt_stock_lock_busy(fake_conn_lock_busy, valid_bundle):
     with pytest.raises(ImportBusyError):
         await write_qmt_stock("dsn", "000001.SZ", "平安", valid_bundle)
+async def test_write_qmt_stock_missing_coverage_table_raises_schema_drift(fake_conn_no_coverage_table, valid_bundle):
+    # to_regclass('stock_coverage') 返 None → SchemaDriftError（不是裸 UndefinedTable）、零写入
+    with pytest.raises(SchemaDriftError):
+        await write_qmt_stock("dsn", "000001.SZ", "平安", valid_bundle)
+    assert "LOCK" not in fake_conn_no_coverage_table.calls and "DELETE" not in fake_conn_no_coverage_table.calls
 ```
 
 - [ ] **Step 6: 实现 `write_qmt_stock`**（import_csv.py；替换语义 + 按股 xact 锁 + 互锁）：
@@ -776,9 +781,12 @@ async def write_qmt_stock(dsn, stock_code, stock_name, bundle) -> dict:
             if not await conn.fetchval("SELECT pg_try_advisory_xact_lock($1,$2)",
                                        IMPORT_GEN_LOCK_KEY, sk):
                 raise ImportBusyError(f"{stock_code}: 正被 B2 生成，稍后重试")
+            # 存在性检查（to_regclass，不需锁）**必须在 LOCK 之前**（codex plan-R2）：
+            # 若把 stock_coverage 写进 LOCK TABLE 而它不存在，PG 会在 LOCK 处抛
+            # UndefinedTable、绕过下面的 SchemaDriftError → fail-closed 守卫失效。
+            await _assert_stock_coverage_exists(conn)
             await conn.execute("LOCK TABLE klines, stock_coverage IN ROW EXCLUSIVE MODE")
             await _assert_klines_price_columns_double(conn)
-            await _assert_stock_coverage_exists(conn)
             if await conn.fetchval("SELECT 1 FROM training_sets WHERE stock_code=$1 LIMIT 1",
                                    stock_code):
                 raise ReimportBlockedError(
@@ -846,9 +854,13 @@ async def test_qmt_import_probe_released_on_success(fake_conn_global_lock_free):
 ```
 
 - [ ] **Step 3: 加 `--qmt` 分支 + 全局锁探测**（`import_csv.py`）：
+
+> **⚠️ 防循环导入**（codex plan-R2）：`qmt_ingest` 在**模块顶层** import 了 `import_csv` 的 `clean`/`compute_indicators`/`to_kline_records`。因此 `import_csv` **绝不能在顶层 import `qmt_ingest`**——否则 `import import_csv` 时会加载半初始化的 `qmt_ingest`、循环崩溃、整套测试在 import 期挂。`qmt_ingest` 的符号（`parse_export_log`/`build_stock_import`/`QmtIngestRejected`）一律在 `--qmt` **执行路径内局部 import**。`parse_qmt_csv` 来自 `qmt_normalize`（无环，可顶层或局部）。
 ```python
 # --qmt 分支，连库后、任何解析/写入之前，探测全局 B2 锁作 rollout drain 闸（spec §P3-D8/R17-F1）
 from generate_training_sets import B2_GENERATION_LOCK_KEY
+from qmt_ingest import parse_export_log, build_stock_import, QmtIngestRejected  # 局部 import，防环
+from qmt_normalize import parse_qmt_csv
 conn = await asyncpg.connect(args.dsn)
 try:
     got = await conn.fetchval("SELECT pg_try_advisory_lock($1)", B2_GENERATION_LOCK_KEY)
@@ -869,8 +881,17 @@ counts = await write_qmt_stock(args.dsn, args.stock, s1_name, bundle)
 ```
 > **诚实标注**（写进代码注释 + 帮助文本）：全局锁探测 catch「导入时刻有 B2 在写」，但**无法** fence「旧 B2 已无锁读完、正等登记」那一瞬——完全封死靠部署 drain（spec §P3-D8）。成功打印每周期行数 / dense 带 / 日线首末 + 月边界数；`ImportBusyError`/`ReimportBlockedError`/`LegacyImportBlockedError`/`QmtIngestRejected` → 打印 reason 退非零。
 
-- [ ] **Step 4: 跑测通过。**
-- [ ] **Step 5: Commit** — `git commit -m "QMT Plan 3 Task8：CLI --qmt 模式 + rollout drain 全局锁探测（有活动 scheduler 即拒）"`
+- [ ] **Step 4: 加 import smoke 测**（codex plan-R2，钉住无循环导入）：
+```python
+def test_no_import_cycle():
+    import importlib
+    importlib.import_module("import_csv")   # 顶层 import qmt_ingest 会在此崩
+    importlib.import_module("qmt_ingest")
+    importlib.import_module("generate_training_sets")
+```
+
+- [ ] **Step 5: 跑测通过。**
+- [ ] **Step 6: Commit** — `git commit -m "QMT Plan 3 Task8：CLI --qmt 模式 + rollout drain 全局锁探测（有活动 scheduler 即拒）+ 防循环导入 smoke 测"`
 
 **PR 3c 收尾**：`pytest tests/ -q` 全绿 + 验收清单 + requesting-code-review + whole-branch codex。
 
