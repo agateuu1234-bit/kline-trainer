@@ -272,6 +272,32 @@ def test_select_valid_window_retries_past_bad_candidate():
     assert len(calls) == 2                 # 第一个失败、自动重试第二个
     assert result == {"ok": start}         # 返回第二个候选的组装结果（不因单坏候选放弃该股）
 
+def test_select_valid_window_budget_must_match_import_gate():
+    """R8-F1：前 8 个洗牌候选全失败、第 9 个成功。max_retries=8（旧 B2 默认预算）→ bounded
+    retry 穷尽 → GenerateSkipException＝B2 静默产 0；穷尽预算 len(bounds)（= build_stock_import
+    出货可行性预检的 n_cand，也是修后 generate_one_training_set 的预算）→ 命中第 9 个成功。
+    证明：导入门穷尽放行的股，B2 预算不足就会静默产 0，两侧候选预算必须对齐。"""
+    # 候选数 = n - months(8) - 30；需 ≥9 个候选（前 8 失败 + 第 9 成功），故 n=54 → 16 个。
+    # trading 须覆盖到最晚候选的 after_end（≈2024-12），否则末尾候选非 dense、被 eligible 排除。
+    bounds = _n_month_boundaries(54)
+    trading = _weekday_trading_dates(dt.date(2020,1,1), dt.date(2025,12,31))
+    dense = set(trading)
+    calls: list = []
+    def try_assemble(start):
+        calls.append(start)
+        if len(calls) <= 8:
+            raise GenerateSkipException("前 8 个候选全落坏窗口")
+        return {"ok": start}
+    # 旧 B2 预算 8：前 8 个失败 → 穷尽 → GenerateSkipException（导入放行却 B2 产 0 = bug）
+    with pytest.raises(GenerateSkipException):
+        select_valid_window(bounds, random.Random(0), dense_dates=dense, trading_dates=trading,
+                            try_assemble=try_assemble, max_retries=8)
+    # 穷尽预算（对齐导入门 n_cand=len(bounds)）：第 9 个成功
+    calls.clear()
+    start, res = select_valid_window(bounds, random.Random(0), dense_dates=dense, trading_dates=trading,
+                                     try_assemble=try_assemble, max_retries=len(bounds))
+    assert res == {"ok": start} and len(calls) == 9
+
 def _mk_bars(day, n):
     base = int(dt.datetime(*day, 9, 33, 0, tzinfo=SH).timestamp())
     return [{"datetime": base + i*180} for i in range(n)]   # 同日内、不跨日

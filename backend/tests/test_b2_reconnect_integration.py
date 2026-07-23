@@ -257,6 +257,27 @@ def test_real_sweep_registers_at_least_one_training_set(tmp_path):
     assert row["content_hash"] == gts.content_hash
 
 
+def test_generate_one_training_set_passes_exhaustive_retries(monkeypatch, tmp_path):
+    """R8-F1 wiring：generate_one_training_set 传给 build_training_windows 的 max_retries 必须
+    是**穷尽**（== len(month_boundaries)、与 build_stock_import 出货可行性预检的 n_cand 对齐），
+    不是默认 8——否则导入门穷尽放行的股、B2 前 8 个候选恰好全落坏窗口时会静默产 0。拦截
+    build_training_windows 记下真实 max_retries 后抛 skip（不需真造窗口）。"""
+    import generate_training_sets as gts_mod
+    conn, _days = _fixture_conn()
+    captured: dict = {}
+
+    def fake_btw(period_bars, month_boundaries, rng, *, max_retries, **kw):
+        captured["max_retries"] = max_retries
+        captured["n_bounds"] = len(month_boundaries)
+        raise gts_mod.GenerateSkipException("intercept")
+
+    monkeypatch.setattr(gts_mod, "build_training_windows", fake_btw)
+    with pytest.raises(gts_mod.GenerateSkipException):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path, random.Random(7)))
+    assert captured["max_retries"] == captured["n_bounds"], "B2 预算须穷尽 == 月边界数（对齐导入门）"
+    assert captured["max_retries"] > 8, "必须超过旧默认 8（否则 R8-F1 未修）"
+
+
 def test_registered_zip_exists_and_hash_matches(tmp_path):
     """登记的 file_path 必须真能打开（模拟 B3 按路径下载），hash 对得上。"""
     from generate_training_sets import crc32_hex

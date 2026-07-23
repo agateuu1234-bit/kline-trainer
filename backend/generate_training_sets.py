@@ -581,10 +581,19 @@ async def generate_one_training_set(conn, stock_code: str, output_dir: Path,
         month_boundaries = period_boundaries(daily, "monthly")
         exclude = await _fetch_existing_starts(conn, stock_code)
 
+        # R8-F1：候选预算必须 ≥ 导入门，否则 fail-closed 保证是假的。build_stock_import 的
+        # 出货可行性预检用 n_cand=max(1,len(month_boundaries)) **穷尽**证「某候选可出」才写
+        # coverage；若 B2 这里只试 max_retries(默认 8) 个、且运行时 rng 与导入的固定 Random(0)
+        # 种子不同（洗牌序完全不同）→「导入门放行、写了 coverage，但 B2 前 8 个候选恰好全落在
+        # 坏窗口 → GenerateSkipException 静默产 0」，正是本 plan 要消灭的失败面（R6-F1 加的
+        # before-context 门更放大了坏窗口面）。到此的股必有 coverage（553 已挡无覆盖）＝恒 QMT
+        # 管理 → B2 恒穷尽、与导入门同预算：数据同一份时，穷尽与洗牌序无关（有解必中），
+        # 导入门放行 ⟺ B2 必能出货。exclude_starts 仍在切片前过滤，重复起点照常收敛。
+        retries = max(max_retries, len(month_boundaries))
         start_datetime, windows = build_training_windows(
             period_bars, month_boundaries, rng,
             dense_dates=dense_dates, trading_dates=trading_dates,
-            before_caps=PERIOD_BEFORE_CAP, max_retries=max_retries,
+            before_caps=PERIOD_BEFORE_CAP, max_retries=retries,
             exclude_starts=frozenset(exclude), dropped=dropped)
 
         idx = month_boundaries.index(int(start_datetime))
