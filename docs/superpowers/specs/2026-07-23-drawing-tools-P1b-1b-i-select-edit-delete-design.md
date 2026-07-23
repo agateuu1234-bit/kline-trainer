@@ -48,7 +48,8 @@
 
 ### 1.2 不做
 
-- 锁定 / 解锁、撤销 / 前进、底栏 ②🔒④↩⑤↪ → **1b-ii**
+- 锁定 / 解锁**动作与 UI**（🔒 键、面板灰态）、撤销 / 前进、底栏 ②🔒④↩⑤↪ → **1b-ii**
+  ⚠️ **但 `locked` 的写入边界闸门属于本期**（D60）：本期新建的 `updateDrawingStyle` / `deleteDrawing(id:)` 必须拒动 `locked == true` 的对象。「**能锁定**」（1b-ii）与「**不许改已锁定的**」（本期）不是同一件事——后者是本期正在开的那两个写入面自己该带的闸。
 - 节点 / 多锚 / 四个新工具 → **P1c**
 - 复盘的选中与复盘专属一切 → **P5**
 - 主页全局默认设置 → **P6**
@@ -57,13 +58,18 @@
 
 ---
 
-## 2. 决策 D49–D58
+## 2. 决策 D49–D60
 
-> **D57 / D58 都是 codex 对抗性评审的产物**（各一条 high，均已对源码实测证实）：
-> - **D57（R1）** 推翻了本 spec 上一稿沿用母 spec D38 的「用 `activeDrawingTool == nil` 表示选择态」编码；
-> - **D58（R2）** 补上了编辑路径缺失的几何门——新建路径有、编辑路径没有，同一不变量两条写入路径强制程度不一致。
+> **D57–D60 全部是 codex 对抗性评审的产物**（均已对源码 / 上游 spec 原文实测证实，未采信转述）：
 >
-> 两条的共同形状：**我按 spec 写的东西"合规"，但没人问过"坏数据会怎样"**（[[feedback_internal_review_misses_bad_data]]）。
+> | 轮 | 级别 | 决策 | 它推翻了什么 |
+> |---|---|---|---|
+> | R1 | high | **D57** | 母 spec D38 的「用 `activeDrawingTool == nil` 表示选择态」编码——切周期善后函数会在 nil 时早退 → 裂脑 |
+> | R2 | high | **D58** | 编辑路径缺了新建路径已有的 `visibleGeometry` 门——同一不变量两条写入路径强制程度不一致 |
+> | R3 | medium | **D59** | **本 spec 上一稿 D58 内部的自相矛盾**：subtype 可用性下沉引擎，labelMode 归一化却「信任面板」 |
+> | R3 | high | **D60** | 编辑 / 删除无视已持久化的 `locked` → 可静默摧毁一个跨版本的耐久性保护 |
+>
+> 四条的共同形状：**我写的东西"符合上游 spec"，但没人问过"坏数据会怎样 / 直接调用者会怎样"**（[[feedback_internal_review_misses_bad_data]]）。收敛方向也一致：**把不变量钉在写入边界上，让坏状态不可表达**，而不是逐个补调用点或依赖 UI 自觉。
 
 ### D49 选中即回显；面板显示的样式是**派生值**，不存第二份状态
 
@@ -105,11 +111,7 @@ public func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Boo
 1. **「已删原线」不可表达**——本 API 是原地替换单个数组元素，流程里**根本没有"删"那一步**，也不经过 `appendDrawing`。这是「让矛盾状态不可表达」而非「小心翼翼地按正确顺序操作」（[[feedback_internal_review_misses_bad_data]]：修 root cause 不修 symptom）。
 2. **UI 反馈路径可达且必须接**：返 `false` 的唯一情形 = 选中的线已不在 `drawings` 中。UI 消费方式 = **清空选中 + 🗑 回灰**（与 D54 的四种清空情形合流，不是新语义）。
 
-**派生规则单点约束（防第二个不变量维护点）**：`DrawingObject` 有两个不变量必须在**源码中只出现一次**：
-- `isExtended == (lineSubType == .ray)`
-- `textColorToken == colorToken`（1a-iii 决策：本期只有一个「线色」控件，标签跟线同色）
-
-本期之前，唯一维护点是 `DrawingSession.commitPending`（`Drawing/DrawingSession.swift:147-161`）。`updateDrawingStyle` 是**第二个**写入点，若各写一遍，两处迟早分叉。故：抽一个纯函数（如 `DrawingObject.withStyle(_:) -> DrawingObject`），`commitPending` 与 `updateDrawingStyle` **共用**它；并加**源码守卫测试**钉死这两条派生表达式在 `Sources/` 中各只出现一次。具体抽法由实施计划定，**约束是"只出现一次"这个结果**。
+**派生 / 语义闸的单点约束 → 见 D59**（共享的 failable `withStyle`）。**locked 保护 → 见 D60**。
 
 ### D58 编辑路径必须与提交路径**同门**：不得靠改样式造出「渲染不出」的线
 
@@ -134,12 +136,63 @@ public func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Boo
 
 | 层 | 判据 | 为什么放这一层 |
 |---|---|---|
-| **引擎**（viewport 无关，恒开） | `updateDrawingStyle` 拒绝把 `lineSubType` 改成「该 `toolType` **恒**不可渲染」的值（水平线的 `.segment`）→ 返 `false`、**零改动**、`drawingsRevision` **不递增** | 引擎层没有 mapper，只判得了 viewport 无关那一支；而那一支恰是**恒 nil**，也是「解码坏数据 / 将来 UI 放开 `.segment`」的兜底。**判据必须复用 `DrawingStyleAvailability`**（与面板灰态同一真相，**禁止另写一份**） |
+| **引擎**（viewport 无关，恒开） | 拒绝把 `lineSubType` 改成「该 `toolType` **恒**不可渲染」的值（水平线的 `.segment`）→ 返 `false`、**零改动**、`drawingsRevision` **不递增**。**具体由 D59 的 failable `withStyle` 统一承担**（本条只是它的一个 case，不另写实现） | 引擎层没有 mapper，只判得了 viewport 无关那一支；而那一支恰是**恒 nil**，也是「解码坏数据 / 将来 UI 放开 `.segment`」的兜底。判据复用 `DrawingStyleAvailability`（与面板灰态同一真相，**禁止另写一份**） |
 | **UI**（viewport 相关） | 应用 `lineSubType` 改动**之前**，用 **`selectedPanel` 的 mapper** 对**候选对象**跑 `HorizontalLineTool.visibleGeometry`；为 nil → **不应用、不写库**、给反馈（选中**保留**，🗑 仍亮） | 与新建路径的门**同一个函数、同一层**（`handleDrawingTap:303` 也在 UI 层）→ 两条写入路径对称。路由细节由实施计划定，**约束是判据必须复用 `visibleGeometry` 且取 `selectedPanel` 的 mapper**，不得另写一份几何判断 |
 
 **只有 `lineSubType` 需要 viewport 预检**：`lineStyle` / `thickness` / `colorToken` / `labelMode` 都不参与 `lineXRange` / `visibleGeometry` 的判据，改它们**不可能**把可见变不可见。实施时**不得**给这 4 项加预检（无谓地引入 viewport 依赖，还会让常见路径变脆）。
 
 **`labelMode` 归一化必须同样对称**：面板在用户改 `lineSubType` 时会跑 `DrawingStyleAvailability.normalizedLabelMode`（`UI/DrawingStyleParams.swift:33-35`），使 `(ray, .left)` 这类无效组合不可表达。D49 已规定面板经**单一路由**写出一个完整的 `DrawingDefaultStyle`，故编辑路径天然继承这条归一化——**实施时不得绕过面板另开一条编辑入口**，否则 `(ray, .left)` 会变成只在编辑路径上可达的坏组合。
+
+### D59 语义闸下沉到**写入边界**：共享的 **failable** `withStyle`（不是"信任面板会归一化"）
+
+> **来源：codex 对抗性评审 R3 medium finding。它抓到的是本 spec 上一稿 D58 内部的自相矛盾**——同一个决策里，`lineSubType` 可用性我下沉到了引擎，`labelMode` 归一化却写成「编辑路径天然继承面板的归一化」。同一条推理线两个待遇：前者认「公共写入面必须自己把关」，后者认「信任唯一的 UI 路由」。**后者是错的**，理由与 D58 逐字相同：`updateDrawingStyle` 是 `public` 的，任何直接调用者（或将来一个非面板的编辑入口）都能落一个 `(ray, .left)` 这种面板永远产不出的组合。
+
+`DrawingObject` 有四条语义必须在**源码中只出现一次**，且必须在**写入边界**上强制，不能靠调用方自觉：
+
+| 语义 | 内容 |
+|---|---|
+| 派生 ① | `isExtended == (lineSubType == .ray)` |
+| 派生 ② | `textColorToken == colorToken`（1a-iii：本期只有一个「线色」控件，标签跟线同色） |
+| 归一化 | `labelMode` 必须经 `DrawingStyleAvailability.normalizedLabelMode(current:lineSubType:)`（挡 `(ray, .left)`） |
+| 可用性 | `lineSubType` 必须是该 `toolType` **可渲染**的值（水平线的 `.segment` 恒不可渲染 → 拒） |
+
+**形状**：抽一个**failable** 纯函数
+
+```swift
+extension DrawingObject {
+    /// nil = 该样式对本对象的 toolType 语义上不成立（当前唯一情形：水平线的 .segment）
+    func withStyle(_ s: DrawingDefaultStyle) -> DrawingObject?
+}
+```
+
+- 返 nil 的判据**必须复用 `DrawingStyleAvailability`**（与设置面板灰态**同一真相**，禁止另写一份）。
+- 非 nil 时：归一化 `labelMode` + 派生 ①② + 其余字段**逐字段原样拷贝**。
+- **两个写入点共用它，各自传播失败**：
+  - `DrawingSession.commitPending`（已经是 `-> DrawingObject?`）→ nil 即不提交；
+  - `TrainingEngine.updateDrawingStyle` → nil 即返 `false`、零改动、`drawingsRevision` 不递增。
+- **源码守卫测试**钉死：上表四条语义的表达式在 `Sources/` 中**各只出现一次**。
+
+**与 D58 的分工（codex 的建议我照采）**：语义闸（viewport 无关）**全部**在引擎/共享层；UI 层**只**保留 viewport 相关的那一项（`visibleGeometry` 预检）。这样「哪层管什么」有一条干净的判据，不再是个案裁量。
+
+### D60 `locked` 在编辑 / 删除的写入边界上 fail-closed（现在就设闸，不等 1b-ii）
+
+> **来源：codex 对抗性评审 R3 high finding。已核实上游 spec 的原文（未采信 codex 转述）：**
+> - 母 spec `2026-07-04-drawing-tools-expansion-design.md:225`：「短按锁定选中线（🔓→🔒图标态），**锁定后该线不可改**；……锁定状态**持久化**（存记录 / 复盘存档）。」
+> - 拆分 spec §7.2：「**锁定线仍可被选中**（否则无法解锁），但 🗑 灰、设置面板全灰、**不可改样式**。」
+
+**实测的可达性**：`locked` 是**已持久化字段**（`Models/Models.swift:254`，`init` 默认 `false` `:271`），`routeDrawingCommit` 一直原样保留它（`TrainingEngine.swift:1139`）；但**本构建没有任何代码把它写成 true**（`GestureClassifiers` 里那个 `locked` 是手势仲裁的同名局部变量，无关）。因此 `locked == true` 的对象只能**从解码进来**——而这恰恰是 P1a 建立 lossy 字节保真前向兼容所针对的场景，且 [[project_app_public_release_intent]] 把「版本错位真会发生」定为全项目约束。
+
+**风险**：1b-ii（或更高版本）锁上的线，在本构建里能被改样式、能被删除，然后 autosave 落盘 → **一个耐久性保护被静默摧毁，且不可逆**（本期无 undo，那是 1b-ii）。
+
+**决策**：`updateDrawingStyle` 与 `deleteDrawing(id:)` 都**先判 `locked`**——目标 `locked == true` → 返 `false`、**零改动**、`drawingsRevision` **不递增**。
+
+**为什么这不算侵入 1b-ii 的范围**：1b-ii 交付的是「**能锁定**」（🔒 键、锁定 / 解锁动作、UI 灰态）。本条只是在 1b-i **正在新建的那两个写入面**上，拒绝改动一个已经标记为锁定的对象。二者不是同一件事。而且：
+
+- **今天零行为变化**：本构建产不出 `locked == true` 的对象 → 这道闸在所有现有路径上**永不触发**；
+- **成本极低**（两个 guard + 两条测试），**收益是不可逆数据保护**；
+- 与 D58 / D59 同一条纪律：**不变量在写入边界强制，UI 灰态是纵深防御而非唯一防线**。1b-ii 的面板灰态照做，但那时它是第二道，不是第一道。
+
+**交接 1b-ii（必须，否则解锁功能会被本闸卡死）**：解锁动作**不得**走 `updateDrawingStyle`（它改的是 5 个样式字段，`locked` 不在其中，且被本闸拒绝）。1b-ii 必须新增一个**独立**的 `setDrawingLocked(id:locked:) -> Bool`，该 API **豁免**本闸（它就是唯一被允许改 `locked` 的入口），并同样 `drawingsRevision += 1`。已写入 §9。
 
 ### D51 删除 API = `deleteDrawing(id:) -> Bool`（id 寻址，不用下标）
 
@@ -323,7 +376,13 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **a 引擎层恒开门**：对一条 `.horizontal` 线调 `updateDrawingStyle` 把 `lineSubType` 改成 `.segment` → 返 `false`、该线**逐字段不变**、`drawingsRevision` **不递增**。（判据须来自 `DrawingStyleAvailability`，另加源码守卫断言没有第二份等价判断。）
   - **b UI 层 viewport 预检**：造一条锚点**位于右缘之外**的 `.straight` 线并选中 → 改成 `.ray`（候选对象 `visibleGeometry == nil`）→ 断言：该线**仍是 `.straight`** 且逐字段不变、`drawingsRevision` **不递增**、**选中仍在**（🗑 仍亮，用户没有因此失去对它的控制）。
   - **c 反向对照（防过度 fail-closed）**：**同一条线**在锚点**位于图内**时改成 `.ray` → **成功**、`isExtended == true`、`drawingsRevision` **+1**。没有这条，实现完全可以用「一律拒绝改 `lineSubType`」骗过 b。
-  - **d 归一化对称**：编辑成 `.ray` 时若原 `labelMode == .left` → 结果为 `.hidden`，与新建路径逐字一致（`(ray, .left)` 不得成为只在编辑路径上可达的组合）。
+  - **d 归一化对称**：编辑成 `.ray` 时若原 `labelMode == .left` → 结果为 `.hidden`，与新建路径逐字一致（`(ray, .left)` 不得成为只在编辑路径上可达的组合）。**必须绕开面板、直接调 `updateDrawingStyle` 传一个未归一化的 `DrawingDefaultStyle`**（D59：写入边界自己把关，不许靠面板）——从面板走的测试证明不了这一条。
+
+- **N13 `locked` 写入边界 fail-closed（D60，codex R3-F1 专项，不可省）**：
+  - **a 改样式被拒**：造一条 `locked == true` 的线（构造 / 解码，本构建无 UI 可锁）→ 选中 → `updateDrawingStyle` → 返 `false`、该线**逐字段不变**、`drawingsRevision` **不递增**、**无任何写盘**。
+  - **b 删除被拒**：同一条线 → `deleteDrawing(id:)` → 返 `false`、仍在 `drawings` 里、`drawingsRevision` 不递增。
+  - **c 反向对照（防过度 fail-closed）**：同一条线 `locked == false` 时，两个 API **都成功**、`drawingsRevision` 各 +1。没有这条，实现可以用「一律拒绝」骗过 a / b。
+  - **d 选中不受影响**：`locked == true` 的线**仍可被选中**（上游 spec §7.2 明载：不能选就没法解锁）——断言 hitTest 照常命中、选中态照常建立，**只是**两个写入 API 拒动它。
 
 ---
 
@@ -378,6 +437,9 @@ public private(set) var mode: DrawingSessionMode = .draw
 
 ## 9. 交接（下一切片必须接手的）
 
-- **1b-ii**：落地 undo / redo / 锁定时，必须把它们的引擎 API **补进 `drawingsRevision` 的「每 API 各一条回归测试」那一组**（D56）；撤销删除必须 `insert(at:)` 还原原下标，禁 `append`（D25）。
+- **1b-ii（三条，缺一即卡死或回归）**：
+  1. **解锁必须走独立 API**：`setDrawingLocked(id:locked:) -> Bool`，**豁免** D60 的 locked 闸（它是唯一被允许改 `locked` 的入口），同样 `drawingsRevision += 1`。**不得**试图用 `updateDrawingStyle` 解锁——`locked` 不在它管的 5 个样式字段里，且会被 D60 直接拒绝。
+  2. 落地 undo / redo / 锁定时，必须把它们的引擎 API **补进 `drawingsRevision` 的「每 API 各一条回归测试」那一组**（D56）。
+  3. 撤销删除必须 `insert(at:)` 还原原下标，禁 `append`（D25）。
 - **P5**：复盘获得改样式能力时，必须**同期**给 `reviewDrawings` 补等价 revision 触发器（D56），并补跨层选中循环（§8 #1）。
 - **P1c**：多锚工具落地时，`commitPending` 的全锚同 period 闸门（1a-iv 已建）才第一次真正可达。
