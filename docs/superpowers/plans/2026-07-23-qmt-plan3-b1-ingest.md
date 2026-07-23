@@ -383,12 +383,13 @@ Expected: FAIL（`cannot import name 'build_stock_import'`）。
 - [ ] **Step 3: 实现 `build_stock_import`（qmt_ingest.py 追加）**
 
 ```python
+import numpy as np                      # PF3：_assert_values_ok 用 np.isfinite/np.floor，必须 import
+import random as _random
 from qmt_resample import (build_intraday, compute_dense_coverage, period_boundaries,
                           reconcile_sources, resample_calendar)
 from import_csv import clean, compute_indicators, to_kline_records, _INT_COLS
 from generate_training_sets import (PERIODS, PERIOD_BEFORE_CAP, build_training_windows,
                                     GenerateSkipException)
-import random as _random
 
 
 @dataclass(frozen=True)
@@ -830,9 +831,46 @@ async def write_qmt_stock(dsn, stock_code, stock_name, bundle) -> dict:
 **Interfaces:** `--qmt` 与 `--period` 互斥；`--export-log` 默认 `<input>/export_log.csv`；递归 glob `{code}_*_1分钟K线_前复权.csv` / `{code}_*_日K线_前复权.csv` 命中数 ≠1 报错。
 
 - [ ] **Step 1: 写参数解析测**（`--qmt`+`--period` 同给 → argparse error；glob 命中 0/2 → 报错退出码 2）。
-- [ ] **Step 2-3: 加 `--qmt` 分支**：`parse_qmt_csv` 两文件 → `parse_export_log` → `build_stock_import` → `write_qmt_stock`；成功打印每周期行数 / dense 带 / 日线首末 + 月边界数；被互锁/busy/rejected → 打印 reason 退非零。
+
+- [ ] **Step 2: 写「scheduler 活动 → 拒绝导入」测**（PF1/spec §P3-D8 R17-F1，rollout drain 机器可检）：
+```python
+async def test_qmt_import_refuses_when_scheduler_active(fake_conn_global_lock_held):
+    # fake_conn 让 pg_try_advisory_lock(B2_GENERATION_LOCK_KEY) 返回 False
+    rc = await _amain_qmt(args_with_qmt, conn=fake_conn_global_lock_held)
+    assert rc != 0   # 退非零 + 打印 drain 提示
+    assert "DELETE" not in fake_conn_global_lock_held.calls   # 零写入
+async def test_qmt_import_probe_released_on_success(fake_conn_global_lock_free):
+    # 探测拿到后立即 unlock，再继续导入
+    await _amain_qmt(...); ops = fake_conn_global_lock_free.calls
+    assert ops.index("advisory_lock(B2_GEN)") < ops.index("advisory_unlock(B2_GEN)") < ops.index("write_qmt_stock")
+```
+
+- [ ] **Step 3: 加 `--qmt` 分支 + 全局锁探测**（`import_csv.py`）：
+```python
+# --qmt 分支，连库后、任何解析/写入之前，探测全局 B2 锁作 rollout drain 闸（spec §P3-D8/R17-F1）
+from generate_training_sets import B2_GENERATION_LOCK_KEY
+conn = await asyncpg.connect(args.dsn)
+try:
+    got = await conn.fetchval("SELECT pg_try_advisory_lock($1)", B2_GENERATION_LOCK_KEY)
+    if not got:
+        print("[B1] 拒绝导入：检测到活动的 B2/B4 调度器（全局锁被占）。"
+              "首次 QMT 导入前请先重启/drain 调度器。", file=sys.stderr)
+        return 2
+    await conn.fetchval("SELECT pg_advisory_unlock($1)", B2_GENERATION_LOCK_KEY)  # 立即释放，只做探测
+finally:
+    await conn.close()
+# —— 探测通过后再进主流程 ——
+s1 = parse_qmt_csv(f_1m, "1m"); sd = parse_qmt_csv(f_daily, "daily")
+entries = parse_export_log(args.export_log or Path(args.input) / "export_log.csv")
+bundle = build_stock_import(s1, sd, stock_code=args.stock, stock_name=s1_name,
+                            entry_1m=entries[(args.stock, "1m")],
+                            entry_daily=entries[(args.stock, "daily")])
+counts = await write_qmt_stock(args.dsn, args.stock, s1_name, bundle)
+```
+> **诚实标注**（写进代码注释 + 帮助文本）：全局锁探测 catch「导入时刻有 B2 在写」，但**无法** fence「旧 B2 已无锁读完、正等登记」那一瞬——完全封死靠部署 drain（spec §P3-D8）。成功打印每周期行数 / dense 带 / 日线首末 + 月边界数；`ImportBusyError`/`ReimportBlockedError`/`LegacyImportBlockedError`/`QmtIngestRejected` → 打印 reason 退非零。
+
 - [ ] **Step 4: 跑测通过。**
-- [ ] **Step 5: Commit** — `git commit -m "QMT Plan 3 Task8：CLI --qmt 模式（单股导入端到端 CLI）"`
+- [ ] **Step 5: Commit** — `git commit -m "QMT Plan 3 Task8：CLI --qmt 模式 + rollout drain 全局锁探测（有活动 scheduler 即拒）"`
 
 **PR 3c 收尾**：`pytest tests/ -q` 全绿 + 验收清单 + requesting-code-review + whole-branch codex。
 
@@ -887,9 +925,13 @@ def gen_valid_sources(code="000001.SZ", n_years_daily=4, n_days_1m=250):
     while len(days) < n_years_daily * 250:
         if d.weekday() < 5: days.append(d)
         d += dt.timedelta(days=1)
-    # daily
+    # daily：volume/amount 必须 == 1m 日聚合（否则 reconcile_sources 的 D10 值对账 ohlcv_mismatch，PF2）。
+    # 每日 241 根 1m，各 volume=10/amount=102 → 日聚合 volume=2410, amount=24582。
+    # OHLC：1m open=首=10.0 / close=尾=10.2 / high=max=10.5 / low=min=9.5 → 日 bar 同值。
+    # dense span 外的深历史日无 1m、D10 不对账 → 用同值即可（不影响对账）。
+    DAILY_VOL, DAILY_AMT = 241 * 10, round(241 * 102.0, 2)
     drows = [{"datetime": _epoch(x, 0), "open": 10.0, "high": 10.5, "low": 9.5,
-              "close": 10.2, "volume": 1000, "amount": 10200.0} for x in days]
+              "close": 10.2, "volume": DAILY_VOL, "amount": DAILY_AMT} for x in days]
     df_daily = pd.DataFrame(drows)
     # 1m：最后 n_days_1m 个交易日，每日 241 根
     m1 = []
