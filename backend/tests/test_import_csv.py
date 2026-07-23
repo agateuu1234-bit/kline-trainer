@@ -226,7 +226,8 @@ def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls
                                            coverage_table_exists: bool = True,
                                            has_training_set: bool = False,
                                            coverage_row_exists: bool = False,
-                                           global_lock_ok: bool = True):
+                                           global_lock_ok: bool = True,
+                                           stock_session_lock_ok: bool = True):
     """假 asyncpg 模块：pg_catalog（经 to_regclass 精确定位关系）查询返回 data_type 可控，
     execute/executemany/transaction 各自计数——用于断言 fail-closed 时一次写入都没发生。
     记录实际 query 文本到 calls["query"]，供调用方断言用的是 to_regclass 精确查询
@@ -272,8 +273,10 @@ def _install_fake_asyncpg_for_schema_check(monkeypatch, *, data_type: str, calls
             calls.setdefault("order", []).append(("fetchval", query))
             if "pg_try_advisory_xact_lock" in query:
                 return lock_ok
-            if "pg_try_advisory_lock" in query:  # task-8：rollout-drain 全局锁探测（非 xact，session 级）
-                return global_lock_ok
+            if "pg_try_advisory_lock" in query:
+                if len(args) == 2:  # R9-F1：_amain_qmt 的按股 session 锁（双参、非 xact），封 fresh-sweep race
+                    return stock_session_lock_ok
+                return global_lock_ok  # task-8：rollout-drain 全局锁探测（单参、session 级）
             if "pg_advisory_unlock" in query:  # task-8：探测通过后立即释放
                 return True
             if "to_regclass('stock_coverage')" in query:
@@ -829,9 +832,10 @@ def test_qmt_import_probe_released_before_write(tmp_path, monkeypatch):
         calls.setdefault("order", []).append(("build_stock_import", None))
         return fake_bundle
 
-    async def fake_write_qmt_stock(dsn, stock, name, bundle):
+    async def fake_write_qmt_stock(dsn, stock, name, bundle, *, conn=None):
         calls.setdefault("order", []).append(("write_qmt_stock", None))
         assert bundle is fake_bundle
+        assert conn is not None, "R9-F1：_amain_qmt 须把持锁的 conn 传给 write_qmt_stock"
         return {"monthly": 1, "weekly": 1, "daily": 1, "60m": 1, "15m": 1, "3m": 1}
 
     monkeypatch.setattr(qmt_normalize, "parse_qmt_csv", fake_parse_qmt_csv)
@@ -849,6 +853,38 @@ def test_qmt_import_probe_released_before_write(tmp_path, monkeypatch):
     i_unlock = next(i for i, (k, q) in enumerate(order) if k == "fetchval" and "pg_advisory_unlock" in q)
     i_write = kinds.index("write_qmt_stock")
     assert i_lock < i_unlock < i_write, f"顺序应为 探测锁→释放→写入，实际 {kinds}"
+    # R9-F1：按股 session 锁（双参）在 parse **之前**取、write **之后**才释放——整个
+    # 解析/装配/写窗口都在锁内，封住 fresh-sweep race。
+    i_stock_lock = next(i for i, (k, q) in enumerate(order)
+                        if k == "fetchval" and "pg_try_advisory_lock($1,$2)" in q)
+    i_stock_unlock = next(i for i, (k, q) in enumerate(order)
+                          if k == "fetchval" and "pg_advisory_unlock($1,$2)" in q)
+    i_parse = next(i for i, (k, q) in enumerate(order) if k == "parse_qmt_csv")
+    assert i_stock_lock < i_parse < i_write < i_stock_unlock, \
+        f"按股锁须在 parse 前取、write 后释放，实际 {kinds}"
+
+
+def test_qmt_rejects_when_per_stock_lock_held(tmp_path, monkeypatch, capsys):
+    """R9-F1：全局 drain 探测通过、但该股按股锁已被 B2 占用（stock_session_lock_ok=False）→
+    _amain_qmt 在 parse **之前**就干净返回 2、零解析/装配/写入。按股锁在 parse 前取，故一个
+    在探测释放后才启动的 fresh sweep 抢到该股锁时，B1 让路而非用旧数据竞态写入。"""
+    calls: dict = {}
+    _install_fake_asyncpg_for_schema_check(monkeypatch, data_type="double precision", calls=calls,
+                                           global_lock_ok=True, stock_session_lock_ok=False)
+    _write_qmt_csv_stub(tmp_path, label="1分钟K线")
+    _write_qmt_csv_stub(tmp_path, label="日K线")
+    (tmp_path / "export_log.csv").write_text("code,period\n")
+
+    rc = import_csv.main(_qmt_argv(tmp_path))
+    assert rc == 2
+    order = calls.get("order", [])
+    assert any(k == "fetchval" and "pg_try_advisory_lock($1,$2)" in q for k, q in order), \
+        "应已尝试按股锁"
+    assert not any(k == "fetchval" and "pg_advisory_unlock($1,$2)" in q for k, q in order), \
+        "按股锁没拿到就不该有对应 unlock"
+    assert calls.get("executemany", 0) == 0
+    err = capsys.readouterr().err
+    assert "000001.SZ" in err and ("B2" in err or "按股锁" in err)
 
 
 def test_qmt_missing_export_log_entry_clean_failure(tmp_path, monkeypatch, capsys):

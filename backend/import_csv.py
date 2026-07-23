@@ -368,16 +368,23 @@ ON CONFLICT(stock_code) DO UPDATE SET
 """
 
 
-async def write_qmt_stock(dsn, stock_code, stock_name, bundle) -> dict:
+async def write_qmt_stock(dsn, stock_code, stock_name, bundle, *, conn=None) -> dict:
     """QMT B1 写入（替换语义）：validate（零 DB 往返）→ 按股 xact 锁 → stock_coverage
     存在性（早于 LOCK，见下方注释）→ LOCK TABLE → klines 价格列 double 断言 →
     training_sets 重导入互锁 → stocks UPSERT → DELETE 六周期旧行 → INSERT 六周期
-    新行 → stock_coverage UPSERT。全在同一事务内，任一步失败整体回滚、零写入。"""
+    新行 → stock_coverage UPSERT。全在同一事务内，任一步失败整体回滚、零写入。
+
+    `conn`（R9-F1）：调用方（_amain_qmt）已在 parse 前就在这条连接上拿了按股 session 锁、
+    要持到本次写入完成以封住 fresh-sweep race；传入即复用它、由调用方负责开/关。下面的
+    xact 级同键锁在同一 session 上**可重入**、照常拿到。conn=None（独立调用 / L2 脚本）时
+    自开自关、行为不变。"""
     from generate_training_sets import IMPORT_GEN_LOCK_KEY, stock_lock_key
     import json, asyncpg
     validate_import_bundle(bundle, stock_code)          # 取连接前，零 DB 往返
     sk = stock_lock_key(stock_code)
-    conn = await asyncpg.connect(dsn)
+    owns_conn = conn is None
+    if owns_conn:
+        conn = await asyncpg.connect(dsn)
     try:
         async with conn.transaction():
             if not await conn.fetchval("SELECT pg_try_advisory_xact_lock($1,$2)",
@@ -413,7 +420,8 @@ async def write_qmt_stock(dsn, stock_code, stock_name, bundle) -> dict:
                                cov.dense_day_count)
         return counts
     finally:
-        await conn.close()
+        if owns_conn:
+            await conn.close()
 
 
 def _resolve_stock_name(df: pd.DataFrame, cli_name: Optional[str], code: str) -> str:
@@ -439,21 +447,25 @@ def _discover_period(csv_path: Path) -> str:
 
 
 async def _amain_qmt(args) -> int:
-    """`--qmt` 分支异步实现（P3-D6/P3-D8/R17-F1）：
-    1) rollout-drain 全局锁探测（先于任何解析/写入）
-    2) 递归定位该股的两个 QMT CSV（1m + daily，各恰好命中 1 个）
-    3) parse → 查 export_log → build_stock_import → write_qmt_stock（替换语义写入）
+    """`--qmt` 分支异步实现（P3-D6/P3-D8/R9-F1）：
+    1) rollout-drain 全局锁探测（best-effort，非 fence）
+    2) **按股 session 锁在 parse 前就拿、持到 write 完成**（R9-F1）
+    3) 递归定位该股的两个 QMT CSV → parse → 查 export_log → build_stock_import →
+       write_qmt_stock（替换语义，复用同一 conn）
     任一步失败：把 reason 打到 stderr、返回 2（非零）——不是裸 traceback。
 
-    诚实标注（P3-D8）：下面探测 B2_GENERATION_LOCK_KEY 只能证明"探测这一刻没有
-    B2/B4 调度器持锁"；它挡不住一个已经在探测之前无锁读完自己快照、正等着登记
-    训练组的旧 B2 session——那个窗口机器检查不出来，完全封死靠部署 drain（首次
-    QMT 导入前先停/重启调度器再开始导入）。
+    诚实标注（P3-D8）：全局探测 B2_GENERATION_LOCK_KEY 只能证"探测这一刻没有 B2/B4
+    调度器持锁"；它挡不住一个已经在探测**之前**无锁读完自己快照、正等着登记训练组的旧
+    B2——那个更早的窗口机器检查不出来，靠部署 drain 兜底（首次导入前先停/重启调度器）。
+    R9-F1 补的是**探测之后**才启动的 fresh sweep 这个可机修的具体子情形：按股 session 锁
+    从 parse 前持到 write 完成，B2 对同一股先取同一把锁才读数据，锁被占即 skip、连旧数据
+    都读不到 → 不会用旧数据登记 training_set 把该股卡进重导互锁。
     """
     import asyncpg  # 局部 import：纯函数层不依赖 asyncpg（单测不装也能跑）
     # 局部 import：import_csv 不能顶层依赖 generate_training_sets（循环 import 风险，
     # 与 write_to_postgres/write_qmt_stock 同理）。
-    from generate_training_sets import B2_GENERATION_LOCK_KEY
+    from generate_training_sets import (B2_GENERATION_LOCK_KEY, IMPORT_GEN_LOCK_KEY,
+                                        stock_lock_key)
 
     conn = await asyncpg.connect(args.dsn)
     try:
@@ -466,10 +478,26 @@ async def _amain_qmt(args) -> int:
                   file=sys.stderr)
             return 2
         await conn.fetchval("SELECT pg_advisory_unlock($1)", B2_GENERATION_LOCK_KEY)  # 仅探测，立即释放
+
+        # R9-F1：按股 session 锁在 parse/装配/write **之前**就拿、持到 write 完成（同一 conn）。
+        sk = stock_lock_key(args.stock)
+        if not await conn.fetchval("SELECT pg_try_advisory_lock($1,$2)",
+                                   IMPORT_GEN_LOCK_KEY, sk):
+            print(f"[B1] 拒绝导入：{args.stock} 正被 B2 生成（按股锁被占），请稍后重试",
+                  file=sys.stderr)
+            return 2
+        try:
+            return await _amain_qmt_import(args, conn)
+        finally:
+            await conn.fetchval("SELECT pg_advisory_unlock($1,$2)", IMPORT_GEN_LOCK_KEY, sk)
     finally:
         await conn.close()
 
-    # ---- 探测通过后再进主流程：递归定位该股的两个 QMT CSV ----
+
+async def _amain_qmt_import(args, conn) -> int:
+    """R9-F1：在调用方（_amain_qmt）已持有该股 session 锁的连接上跑 glob→parse→build→
+    write_qmt_stock。锁在本函数返回后才由 _amain_qmt 释放，故整个解析/装配/写窗口都在锁内。"""
+    # ---- 递归定位该股的两个 QMT CSV ----
     input_dir = Path(args.input)
     f_1m_matches = sorted(input_dir.rglob(f"{args.stock}_*_1分钟K线_前复权.csv"))
     f_daily_matches = sorted(input_dir.rglob(f"{args.stock}_*_日K线_前复权.csv"))
@@ -508,7 +536,7 @@ async def _amain_qmt(args) -> int:
         bundle = build_stock_import(s1, sd, stock_code=args.stock, stock_name=stock_name,
                                     entry_1m=entries[(args.stock, "1m")],
                                     entry_daily=entries[(args.stock, "daily")])
-        counts = await write_qmt_stock(args.dsn, args.stock, stock_name, bundle)
+        counts = await write_qmt_stock(args.dsn, args.stock, stock_name, bundle, conn=conn)
     except (QmtIngestRejected, InvalidImportBundleError, ImportBusyError,
             ReimportBlockedError, LegacyImportBlockedError, QmtSchemaError,
             SchemaDriftError) as e:
