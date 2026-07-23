@@ -63,10 +63,14 @@ def parse_export_log(path) -> dict[tuple[str, str], ExportLogEntry]:
         if key in out:
             raise QmtSchemaError(f"export_log_duplicate: {key} 出现多行")
         # first_time/last_time 用同一套 QMT 打包整数解析（解析不出 → 报错停下）
-        ft = int(parse_qmt_datetime(pd.Series([row["first_time"]]), period).iloc[0])
-        lt = int(parse_qmt_datetime(pd.Series([row["last_time"]]), period).iloc[0])
+        try:
+            ft = int(parse_qmt_datetime(pd.Series([row["first_time"]]), period).iloc[0])
+            lt = int(parse_qmt_datetime(pd.Series([row["last_time"]]), period).iloc[0])
+            rows_n = int(row["rows"])
+        except (ValueError, TypeError) as e:
+            raise QmtSchemaError(f"export_log 行解析失败 {key}（{e}），源={row[id_col]!r}") from e
         out[key] = ExportLogEntry(code=code, period=period, status=str(row["status"]).strip(),
-                                  rows=int(row["rows"]), first_time=ft, last_time=lt,
+                                  rows=rows_n, first_time=ft, last_time=lt,
                                   source=str(row[id_col]))
     return out
 

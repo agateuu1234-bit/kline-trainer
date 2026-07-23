@@ -54,6 +54,7 @@ import random
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 # backend/ 目录本身要在 sys.path 上，才能 `from qmt_ingest import ...` /
 # `from tests._qmt_fixtures import ...`（与 backend/tests/ 下测试文件的隐式
@@ -94,6 +95,15 @@ async def main() -> int:
               "DSN='postgresql://postgres:postgres@localhost:5432/postgres'",
               file=sys.stderr)
         return 2
+
+    # 隔离护栏：本脚本会 DELETE/建表，只允许对本地隔离测试库跑，防止误指向
+    # 共享/prod 库时真的把数据删了（先于任何 connect/schema/DELETE 检查）。
+    host = urlparse(dsn).hostname
+    if host not in ("localhost", "127.0.0.1", "::1") and os.environ.get(
+            "QMT_VERIFY_ALLOW_DESTRUCTIVE") != "1":
+        print(f"拒绝运行：DSN 指向非本地库 {host}，本脚本会 DELETE/建表。仅对隔离测试库运行；"
+              "确需对非本地库运行请设 QMT_VERIFY_ALLOW_DESTRUCTIVE=1", file=sys.stderr)
+        return 3
 
     try:
         import asyncpg

@@ -38,6 +38,20 @@ def test_parse_export_log_duplicate_key_raises(tmp_path):
     assert "export_log_duplicate" in str(ei.value)
 
 
+def test_parse_export_log_bad_rows_raises_schema_error(tmp_path):
+    p = _write_log(tmp_path, [["000001.SZ", "1m", "ok", "abc", "20200102093000", "20200102150000"]])
+    with pytest.raises(QmtSchemaError) as ei:
+        parse_export_log(p)
+    assert "export_log 行解析失败" in str(ei.value)
+
+
+def test_parse_export_log_malformed_first_time_raises_schema_error(tmp_path):
+    p = _write_log(tmp_path, [["000001.SZ", "1m", "ok", "241", "not-a-timestamp", "20200102150000"]])
+    with pytest.raises(QmtSchemaError) as ei:
+        parse_export_log(p)
+    assert "export_log 行解析失败" in str(ei.value)
+
+
 # ===== build_stock_import：全部导入期门 =====
 
 def _entry(code, period, df):
