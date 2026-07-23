@@ -58,18 +58,23 @@
 
 ---
 
-## 2. 决策 D49–D60
+## 2. 决策 D49–D63
 
-> **D57–D60 全部是 codex 对抗性评审的产物**（均已对源码 / 上游 spec 原文实测证实，未采信转述）：
+> **D57–D63 全部是 codex 对抗性评审的产物**（均已对源码 / 上游 spec 原文实测证实，未采信转述）：
 >
-> | 轮 | 级别 | 决策 | 它推翻了什么 |
-> |---|---|---|---|
-> | R1 | high | **D57** | 母 spec D38 的「用 `activeDrawingTool == nil` 表示选择态」编码——切周期善后函数会在 nil 时早退 → 裂脑 |
-> | R2 | high | **D58** | 编辑路径缺了新建路径已有的 `visibleGeometry` 门——同一不变量两条写入路径强制程度不一致 |
-> | R3 | medium | **D59** | **本 spec 上一稿 D58 内部的自相矛盾**：subtype 可用性下沉引擎，labelMode 归一化却「信任面板」 |
-> | R3 | high | **D60** | 编辑 / 删除无视已持久化的 `locked` → 可静默摧毁一个跨版本的耐久性保护 |
+> | 轮 | 级别 | 决策 | 它推翻了什么 | 我的处置 |
+> |---|---|---|---|---|
+> | R1 | high | **D57** | 母 spec D38 的「用 `activeDrawingTool == nil` 表示选择态」编码——切周期善后函数会在 nil 时早退 → 裂脑 | 全采纳 |
+> | R2 | high | **D58** | 编辑路径缺了新建路径已有的 `visibleGeometry` 门——同一不变量两条写入路径强制程度不一致 | 采纳；**严重性下修一档**（`.segment` 面板走不到；`.ray` 不可见是 viewport 相关、可恢复，非永久丢失） |
+> | R3 | medium | **D59** | **本 spec 上一稿 D58 内部的自相矛盾**：subtype 可用性下沉引擎，labelMode 归一化却「信任面板」 | 全采纳 |
+> | R3 | high | **D60** | 编辑 / 删除无视已持久化的 `locked` → 可静默摧毁一个跨版本的耐久性保护 | 全采纳 |
+> | R4 | high | **D61** | **本 spec 上一稿 D59 自身的破坏性**：`textColorToken` 无条件派生会抹掉高版本导入的独立字色 | 全采纳 |
+> | R4 | high | **D62** | `updateDrawingStyle` 是 `public` → 包外可绕过 D58 那道只能放在 UI 层的 viewport 门 | 全采纳（降 internal + 源码守卫） |
+> | R4 | medium | **D63** | 选中在「几何不可见」后仍存活 → 🗑 可删一个用户看不见的对象 | **部分采纳**：问题成立、危害照堵；但**不采纳它「清空选中」的处方**（与 1a-iv 的平移惯性冲突，会抖掉选中）→ 改为结构性/几何性分流 |
 >
-> 四条的共同形状：**我写的东西"符合上游 spec"，但没人问过"坏数据会怎样 / 直接调用者会怎样"**（[[feedback_internal_review_misses_bad_data]]）。收敛方向也一致：**把不变量钉在写入边界上，让坏状态不可表达**，而不是逐个补调用点或依赖 UI 自觉。
+> 共同形状：**我写的东西"符合上游 spec"，但没人问过"坏数据会怎样 / 直接调用者会怎样 / 高版本写的数据会怎样"**（[[feedback_internal_review_misses_bad_data]]）。
+> 收敛方向也一致：**把不变量钉在写入边界上，让坏状态不可表达**，而不是逐个补调用点或依赖 UI 自觉。
+> **其中 D59 与 D61 是我修上一轮 finding 时自己引入的新问题**——印证 [[feedback_internal_review_misses_bad_data]]「修 symptom 会挪动失败面」。
 
 ### D49 选中即回显；面板显示的样式是**派生值**，不存第二份状态
 
@@ -98,8 +103,9 @@
 ### D50 编辑 API = `updateDrawingStyle(id:style:) -> Bool`，**不是**通用替换，更不是「先删后加」
 
 ```swift
+// ⚠️ internal，不是 public —— 见 D62（viewport 门只能在 UI 层，就不给包外绕过它的口子）
 @discardableResult
-public func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Bool
+func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Bool
 ```
 
 - **只改 5 个样式字段** + 派生的 `isExtended` 与 `textColorToken`；`id` / `anchors` / `period` / `panelPosition` / `revealTick` / `locked` / `text` / `fontSize` / `textForm` / `tailAnchor` **一律逐字段不动**。
@@ -152,7 +158,7 @@ public func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Boo
 | 语义 | 内容 |
 |---|---|
 | 派生 ① | `isExtended == (lineSubType == .ray)` |
-| 派生 ② | `textColorToken == colorToken`（1a-iii：本期只有一个「线色」控件，标签跟线同色） |
+| 派生 ② | `textColorToken` **仅当它本来就等于 `colorToken` 时**才跟随线色；已是独立字色则原样保留 —— **完整规则见 D61**（codex R4 修正了本条的原始写法，原写法会抹掉高版本导入的独立字色） |
 | 归一化 | `labelMode` 必须经 `DrawingStyleAvailability.normalizedLabelMode(current:lineSubType:)`（挡 `(ray, .left)`） |
 | 可用性 | `lineSubType` 必须是该 `toolType` **可渲染**的值（水平线的 `.segment` 恒不可渲染 → 拒） |
 
@@ -193,6 +199,65 @@ extension DrawingObject {
 - 与 D58 / D59 同一条纪律：**不变量在写入边界强制，UI 灰态是纵深防御而非唯一防线**。1b-ii 的面板灰态照做，但那时它是第二道，不是第一道。
 
 **交接 1b-ii（必须，否则解锁功能会被本闸卡死）**：解锁动作**不得**走 `updateDrawingStyle`（它改的是 5 个样式字段，`locked` 不在其中，且被本闸拒绝）。1b-ii 必须新增一个**独立**的 `setDrawingLocked(id:locked:) -> Bool`，该 API **豁免**本闸（它就是唯一被允许改 `locked` 的入口），并同样 `drawingsRevision += 1`。已写入 §9。
+
+### D61 跨版本字段保真：派生**只作用于"本来就是派生的"对象**（`textColorToken`）
+
+> **来源：codex 对抗性评审 R4 high finding。采纳。**
+
+D59 把 `textColorToken == colorToken` 列为写入边界不变量。**但它对"从高版本解码进来的对象"是破坏性的**：`textColorToken` 是**已持久化字段**（`Models/Models.swift:257`），而独立字色是 **P3 标注文字工具**的范围（`Drawing/DrawingSession.swift:158-160` 注释明载「独立『字色』是 P3 的标注文字工具，本期不引入」）。于是：
+
+> 一条从高版本导入、`textColorToken != colorToken`（用户特意设过独立字色）的线，在本构建里**只要改一下粗细或线型**，`withStyle` 就会把字色静默抹成线色，并按 D56 立刻 autosave → **不可逆的跨版本数据丢失，而且触发动作与字色毫无关系**。
+
+**这条与 D60 是同一条推理**（解码自高版本的数据真实存在，见 [[project_app_public_release_intent]]）。既然对 `locked` 认这套推理，就不能对 `textColorToken` 不认。
+
+**修正后的派生规则**（写进 D59 的四条语义里，取代原派生 ②）：
+
+```
+新 textColorToken =
+    old.textColorToken == old.colorToken  →  style.colorToken   // 本来就是派生的：继续跟随线色
+    否则                                   →  old.textColorToken // 已是独立字色：原样保留，绝不覆盖
+```
+
+- 本构建**新建**的线恒满足 `textColorToken == colorToken`（`commitPending` 就是这么造的）→ 对本版本产生的所有线，行为与修正前**逐字一致**。
+- 只有「本构建管不了、但确实存在」的独立字色会被保住。**本期不提供任何设置独立字色的入口**（那是 P3），我们只是不去破坏它。
+
+### D62 `updateDrawingStyle` 降为 **internal** + 源码守卫（viewport 门无法下沉，就不给绕过它的口子）
+
+> **来源：codex 对抗性评审 R4 high finding。采纳，采用它给的第一个方案。**
+
+D58 把 `lineSubType` 的 viewport 预检放在 UI 层——这是**原理性**的：引擎层没有、也不该有 mapper。但若 `updateDrawingStyle` 是 `public`，任何包外调用者都能绕开那道门、落一条 `visibleGeometry == nil` 的射线并被 autosave。**这与 R3-F2 是同一个信任边界问题**（codex 原话：`This repeats the same trust-boundary problem D59 fixes`）。
+
+**决策**：`updateDrawingStyle(id:style:)` 的访问级别是 **`internal`**，不是 `public`。
+
+- 唯一合法调用者 = 包内那条持有 `selectedPanel` mapper 的 UI 路由；
+- **加源码守卫测试**钉死 `Sources/` 中只有那一个调用点（新增调用点必须同时补 viewport 预检，测试会当场红）；
+- **这不是新发明**：`DrawingSession` 的全部 mutator 早就是 internal + 源码守卫（`Drawing/DrawingSession.swift:21-28` 大注释写明理由——public mutator 会让包外绕过唯一正确入口）。本条只是把同一条纪律套到新开的写入面上。
+- 测试经 `@testable import` 照常可调，N12 / N13 不受影响。
+- **`deleteDrawing(id:)` 保持 `public`**：删除不产生坏数据，其唯一不变量（`locked`）已由 D60 在引擎层 fail-closed，不依赖 viewport。
+
+### D63 「结构性不可见」清空选中，「几何性不可见」只禁用破坏性操作
+
+> **来源：codex 对抗性评审 R4 medium finding。问题成立，但**⚠️**本决策刻意偏离 codex 给的处方，理由如下。**
+
+**codex 指出的真问题**：D54 清空选中的判据是 `visibleDrawings(for: selectedPanel)`，而 §3 定义的这个共享函数只管**面板归属 + `revealTick`**（无 mapper 入参）；真实渲染 / 命中路径**还有第二道** `visibleGeometry`（价格越出主图纵向范围、射线锚点越过右缘 → nil）。于是选中可以在线已经看不见之后继续存活，🗑 仍亮 → **用户可以删掉一个自己看不见的东西**。这个危害是真的。
+
+**codex 的处方（clear selection when visibleGeometry fails）我不采纳**，因为它与 1a-iv 已交付的行为冲突：
+
+- 1a-iv 放开了画线模式内的**平移与惯性减速**；
+- `.straight` 线的几何可见性**随平移连续变化**（价格是否落在当前纵向范围内）；
+- 于是「一次滑动的余速把选中悄悄抖掉、滑回来发现选中没了」会成为常态。**这比留一个陈旧选中更糟**，且不可预测。
+
+**本决策：按"不可见的性质"分流，而不是一刀切**——
+
+| 性质 | 判据 | 例子 | 处置 |
+|---|---|---|---|
+| **结构性**：线根本不属于这个面板 / 还没出现 | `visibleDrawings(for: selectedPanel)` 不含该 id（§3，无 mapper） | 切周期、线迁到另一面板、`revealTick` 未到 | **清空选中**（D54 clause 3 原样保留）。这些都是**离散的、用户主动触发的**变化，不会抖 |
+| **几何性**：线在这个面板上，只是此刻滑出可视区 | 该对象在 `selectedPanel` 当前 mapper 下 `visibleGeometry == nil` | 价格滑出纵向范围、射线锚点越过右缘 | **保留选中**，但**🗑 置灰、删除动作拒绝执行**（fail-closed）。滑回来即自动恢复可用 |
+
+**为什么这样就够**：codex 指名的危害是「🗑 对一个用户看不见的对象仍可点」。把 **🗑 的可用性**绑到几何可见性上，这个危害被直接消掉；而选中态本身不抖，用户也不会因为一次惯性丢掉操作对象。**看不见的东西不许删**，但**看不见不等于失去它**。
+
+- 样式编辑**不禁**（改一条当前看不见的线的颜色是无害且非破坏性的；且 D58 的 subtype 预检本就在同一处求值，天然拒绝把它变得更不可见）。
+- 🗑 置灰的判据与 D58 的预检**必须复用同一个** `visibleGeometry` 求值（同一函数、同一 mapper、同一 `selectedPanel`），不得另写一份。
 
 ### D51 删除 API = `deleteDrawing(id:) -> Bool`（id 寻址，不用下标）
 
@@ -384,6 +449,20 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **c 反向对照（防过度 fail-closed）**：同一条线 `locked == false` 时，两个 API **都成功**、`drawingsRevision` 各 +1。没有这条，实现可以用「一律拒绝」骗过 a / b。
   - **d 选中不受影响**：`locked == true` 的线**仍可被选中**（上游 spec §7.2 明载：不能选就没法解锁）——断言 hitTest 照常命中、选中态照常建立，**只是**两个写入 API 拒动它。
 
+- **N14 高版本独立字色不得被抹（D61，codex R4-F1 专项，不可省）**：
+  - **a 保留**：造 / 解码一条 `textColorToken != colorToken` 的线（模拟高版本写入）→ 选中 → **只改 `thickness`**（与颜色无关）→ 断言 `textColorToken` **逐字节不变**、`colorToken` 也不变、只有 `thickness` 变了。另测只改 `lineStyle` 一遍。
+  - **b 改线色也不夺**：同一条线 → 改 `colorToken` → 断言 `colorToken` 变了、`textColorToken` **仍是原来那个独立值**（本构建无权代用户决定字色）。
+  - **c 本版本线不受影响（反向对照）**：一条本构建新建的线（`textColorToken == colorToken`）→ 改 `colorToken` → 断言 `textColorToken` **跟随变化**，与 D61 之前逐字一致。
+  - **d 落盘往返**：a 的线走完整持久化往返 → 重载后 `textColorToken` 仍是那个独立值（证明没有在写盘环节被抹）。
+
+- **N15 `updateDrawingStyle` 不得有第二个调用点（D62）**：**源码守卫**断言 `Sources/` 中 `updateDrawingStyle(` 的调用点**恰好 1 处**，且访问级别**不是** `public`（`grep` 断言按 [[feedback_acceptance_grep_anchoring]] 用 `^…$` / 前缀锚，不得被注释里的同名字符串命中）。
+
+- **N16 结构性 / 几何性不可见的差别处置（D63，codex R4-F3 专项）**：
+  - **a 结构性 → 清空**：选中一条线 → 切周期使其改由另一面板显示（或不再显示）→ 选中**被清空**、🗑 灰（= D54 clause 3，与 N11 断言一致）。
+  - **b 几何性 → 保留选中但 🗑 灰**：选中一条线 → 平移使其价格滑出主图纵向范围（`visibleGeometry == nil`，但仍属该面板、`revealTick` 已到）→ 断言：**选中仍在**（`selectedDrawingID` 不变）、**🗑 变灰**、**调用删除被拒**（返 `false`、`drawings` 逐字段不变、`drawingsRevision` 不递增）。
+  - **c 滑回来自动恢复**：接 b，平移回去使其重新可见 → 🗑 **自动变亮**、删除可执行。这条钉住「保留选中」的价值，也防实现把 b 做成"永久禁用"。
+  - **d 判据同源**：源码守卫断言 🗑 置灰判据与 D58 的 subtype 预检**复用同一个** `visibleGeometry` 求值，不得各写一份。
+
 ---
 
 ## 7. 非程序员验收清单
@@ -413,6 +492,7 @@ public private(set) var mode: DrawingSessionMode = .draw
 | 17 | 选中一条线，然后点亮工具图标切回画线态 | **选中被取消**（线不再高亮），🗑 回灰 | |
 | 18 | 选中一条 60 分的线（🗑 亮），竖滑切周期让 60 分不再显示 | 线消失，**选中自动取消**，🗑 变回灰 | |
 | 18b | **接上**：切完周期后，直接再单击另一条还看得见的线 | **仍然能选中**（线高亮、🗑 变亮）——切周期没把选择态弄坏（D57 专项，codex R1 挖出的裂脑路径） | |
+| 18c | 选中一条线（🗑 亮），然后**左右平移图表**，直到那条线的价位滑出可见范围（线看不见了） | 线看不见时 **🗑 变灰、点不动**（看不见的东西不许删）；但**选中没丢**——把图**平移回来**，线重新出现且**仍是高亮选中**的，🗑 **自动变亮**又能删了（D63） | |
 | 19 | 选中一条线，点底栏「类型」键**收起面板** | 线**仍然是选中的**、🗑 **仍然亮**、点 🗑 仍能删；但**图标看不见了、这时切不回画线态**（要画线得再点「类型」键展开面板）——这是设计如此 | |
 | 20 | 画线模式下点击**常驻面板本身**（面板盖住 K 线的那块） | **什么都不发生**：不画线、也不选中（面板挡住了） | |
 | 21 | **改样式后立刻杀掉 App**（不点退出、直接从后台划掉），重开续这一局 | 改过的颜色 / 线型 / 粗细 / 标注**全部还在** | |
