@@ -318,7 +318,7 @@ def validate_import_bundle(bundle, stock_code: str) -> None:
                 if r.get(c) is None:
                     raise InvalidImportBundleError(f"{per} 记录缺 {c}")
             amt, vol = r.get("amount"), r.get("volume")
-            if amt is None or not math.isfinite(float(amt)):
+            if amt is None or not math.isfinite(float(amt)) or float(amt) < 0:
                 raise InvalidImportBundleError("amount 非有限")
             if not math.isfinite(float(vol)) or float(vol) < 0 or float(vol) != int(vol):
                 raise InvalidImportBundleError("volume 非法")

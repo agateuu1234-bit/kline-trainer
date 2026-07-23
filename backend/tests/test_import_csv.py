@@ -537,6 +537,12 @@ def test_bundle_amount_inf_rejects(valid_bundle):
         validate_import_bundle(valid_bundle, "000001.SZ")
 
 
+def test_bundle_amount_negative_rejects(valid_bundle):
+    valid_bundle.records["3m"][0]["amount"] = -0.01
+    with pytest.raises(InvalidImportBundleError):
+        validate_import_bundle(valid_bundle, "000001.SZ")
+
+
 def test_bundle_volume_negative_rejects(valid_bundle):
     valid_bundle.records["3m"][0]["volume"] = -5
     with pytest.raises(InvalidImportBundleError):

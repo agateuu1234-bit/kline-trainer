@@ -105,6 +105,26 @@ def test_1m_bad_amount_rejects(gen):
     assert "bad_amount_or_volume" in str(ei.value)
 
 
+def test_daily_negative_amount_rejects(gen):
+    s1, sd, e1, ed = gen("000001.SZ")
+    sd.df.iloc[0, sd.df.columns.get_loc("amount")] = -0.01   # 深历史坏 amount（负数）
+    ed = _entry("000001.SZ", "daily", sd.df)
+    with pytest.raises(QmtIngestRejected) as ei:
+        build_stock_import(s1, sd, stock_code="000001.SZ", stock_name="x",
+                           entry_1m=e1, entry_daily=ed)
+    assert "bad_amount_or_volume" in str(ei.value)
+
+
+def test_1m_negative_amount_rejects(gen):
+    s1, sd, e1, ed = gen("000001.SZ")
+    s1.df.iloc[0, s1.df.columns.get_loc("amount")] = -0.01   # 241 齐全但坏值（负数）
+    e1 = _entry("000001.SZ", "1m", s1.df)
+    with pytest.raises(QmtIngestRejected) as ei:
+        build_stock_import(s1, sd, stock_code="000001.SZ", stock_name="x",
+                           entry_1m=e1, entry_daily=ed)
+    assert "bad_amount_or_volume" in str(ei.value)
+
+
 def test_valid_returns_bundle(gen):
     s1, sd, e1, ed = gen("000001.SZ")
     b = build_stock_import(s1, sd, stock_code="000001.SZ", stock_name="平安",

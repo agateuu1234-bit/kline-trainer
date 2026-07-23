@@ -94,9 +94,9 @@ def _reject(reason: str):
 
 
 def _assert_values_ok(df):
-    """1m/daily 每行 amount 有限非空 + volume 有限整数 >= 0（P3-D9(c)/R15-F2/R16-F2）。"""
+    """1m/daily 每行 amount 有限非空且 >= 0 + volume 有限整数 >= 0（P3-D9(c)/R15-F2/R16-F2）。"""
     amt = df["amount"].to_numpy(dtype="float64")
-    if not np.all(np.isfinite(amt)):
+    if not np.all(np.isfinite(amt)) or np.any(amt < 0):
         _reject("bad_amount_or_volume")
     vol = df["volume"].to_numpy(dtype="float64")
     if not np.all(np.isfinite(vol)) or np.any(vol < 0) or np.any(vol != np.floor(vol)):
