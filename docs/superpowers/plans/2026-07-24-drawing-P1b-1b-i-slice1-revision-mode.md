@@ -18,6 +18,24 @@
 
 ---
 
+## 测试 fixture（本切片各测试共用，codex plan-R2-F2）
+
+`DrawingObject.init` **要求** `isExtended: Bool` 与 `panelPosition: Int`（`Models/Models.swift:265-274`，**无默认值**）。为免每处测试重复这两个参数、也免片段编译失败，本切片所有测试用统一 fixture 造水平线。**在每个用到它的测试文件顶部各放一份**（或抽到共享 `Tests/.../DrawingTestFixtures.swift` 由各文件 import）：
+
+```swift
+// 造一条水平线 DrawingObject，只传关心的字段，其余取默认/固定（isExtended:false, panelPosition:0）。
+func makeHLine(id: String = "hl", candleIndex: Int = 3, price: Double = 10,
+               period: Period = .daily, thickness: Int = 1, text: String = "") -> DrawingObject {
+    DrawingObject(id: id, toolType: .horizontal,
+                  anchors: [DrawingAnchor(candleIndex: candleIndex, price: price, period: period)],
+                  isExtended: false, panelPosition: 0, period: period, thickness: thickness, text: text)
+}
+```
+
+> `DrawingAnchor` 的初值参数（`candleIndex`/`price`/`period`）以本仓既有测试对它的构造方式为准（同文件 grep 一处 `DrawingAnchor(` 用法对齐）。所有下文测试片段里的 `makeHLine(...)` 都指本 fixture；**不再出现裸 `DrawingObject(...)`**（避免漏 `isExtended`/`panelPosition` 编译失败）。
+
+---
+
 ### Task 1: `drawingsRevision` 计数器 + 现有改-drawings API 各 `+= 1`
 
 **Files:**
@@ -37,33 +55,24 @@
 @MainActor func drawingsRevisionCoversDrawingsNotReview() throws {
     let engine = TrainingEngine.makeForTesting()          // 既有测试工厂（同文件其它测试在用）
     #expect(engine.drawingsRevision == 0)
-    let d = DrawingObject(toolType: .horizontal,
-                          anchors: [DrawingAnchor(candleIndex: 3, price: 10, period: .daily)],
-                          period: .daily)
-    #expect(engine.appendDrawing(d) == true)
+    #expect(engine.appendDrawing(makeHLine(candleIndex: 3, price: 10)) == true)
     #expect(engine.drawingsRevision == 1)                 // 严格 +1
     // review 侧不动 drawingsRevision（D56）
-    let r = DrawingObject(toolType: .horizontal,
-                          anchors: [DrawingAnchor(candleIndex: 4, price: 11, period: .daily)],
-                          period: .daily)
-    #expect(engine.appendReviewDrawing(r) == true)
+    #expect(engine.appendReviewDrawing(makeHLine(candleIndex: 4, price: 11)) == true)
     #expect(engine.drawingsRevision == 1)                 // 仍是 1
 }
 
 @Test("drawingsRevision: deleteDrawing(at:) 严格 +1")
 @MainActor func drawingsRevisionOnDelete() throws {
     let engine = TrainingEngine.makeForTesting()
-    let d = DrawingObject(toolType: .horizontal,
-                          anchors: [DrawingAnchor(candleIndex: 3, price: 10, period: .daily)],
-                          period: .daily)
-    _ = engine.appendDrawing(d)
+    _ = engine.appendDrawing(makeHLine(candleIndex: 3, price: 10))
     let before = engine.drawingsRevision
     engine.deleteDrawing(at: 0)
     #expect(engine.drawingsRevision == before + 1)
 }
 ```
 
-> 若 `TrainingEngine.makeForTesting()` / `DrawingAnchor` 初值签名与本文件其它测试不符，以本文件既有用法为准（同文件 grep 一条现存 `appendDrawing` 测试对齐参数）。
+> 若 `TrainingEngine.makeForTesting()` 签名与本文件其它测试不符，以本文件既有用法为准（同文件 grep 一条现存测试对齐）。`makeHLine` 见「测试 fixture」节。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -191,20 +200,26 @@ git commit -m "划线 1b-i 切片1 Task2：autosave 触发器 drawings.count→d
 - [ ] **Step 1: 写失败测试**
 
 ```swift
-@Test("canonicalDrawingsSignature: 语义相等 → 签名相等，字段变 → 签名变，与 id 有关")
-@MainActor func canonicalSignatureSemantics() throws {
-    let a = DrawingObject(id: "x", toolType: .horizontal,
-                          anchors: [DrawingAnchor(candleIndex: 3, price: 10, period: .daily)],
-                          period: .daily, thickness: 1)
-    let aSame = DrawingObject(id: "x", toolType: .horizontal,
-                              anchors: [DrawingAnchor(candleIndex: 3, price: 10, period: .daily)],
-                              period: .daily, thickness: 1)
-    let aThick = DrawingObject(id: "x", toolType: .horizontal,
-                               anchors: [DrawingAnchor(candleIndex: 3, price: 10, period: .daily)],
-                               period: .daily, thickness: 3)
+@Test("canonicalDrawingsSignature: 语义相等→签名相等，字段变→签名变")
+func canonicalSignatureSemantics() throws {
+    let a     = makeHLine(id: "x", candleIndex: 3, price: 10, thickness: 1)   // fixture 见「测试 fixture」节
+    let aSame = makeHLine(id: "x", candleIndex: 3, price: 10, thickness: 1)
+    let aThick = makeHLine(id: "x", candleIndex: 3, price: 10, thickness: 3)
     #expect(canonicalDrawingsSignature([a]) == canonicalDrawingsSignature([aSame]))  // 语义相等→签名相等
     #expect(canonicalDrawingsSignature([a]) != canonicalDrawingsSignature([aThick])) // 改 thickness→签名变
     #expect(canonicalDrawingsSignature([]) != canonicalDrawingsSignature([a]))       // 空 vs 一条
+}
+
+@Test("canonicalDrawingsSignature: id/text 含分隔符也不碰撞（codex plan-R2-F1，单射）")
+func canonicalSignatureInjectiveWithSeparators() throws {
+    // 裸分隔符 join 会让这两个语义不同的数组产出相同签名；长度前缀编码不会。
+    let x = makeHLine(id: "a\u{1F}b", text: "c")      // id 里塞了旧设计的字段分隔符 0x1F
+    let y = makeHLine(id: "a", text: "b\u{1F}c")      // 挪到 text 里——裸 join 下与 x 拼出同串
+    #expect(canonicalDrawingsSignature([x]) != canonicalDrawingsSignature([y]))
+    // 条分隔符同理：两条 vs 一条含 0x1E 的 text
+    let p = [makeHLine(id: "p"), makeHLine(id: "q")]
+    let r = [makeHLine(id: "p", text: "\u{1E}q")]
+    #expect(canonicalDrawingsSignature(p) != canonicalDrawingsSignature(r))
 }
 ```
 
@@ -228,18 +243,29 @@ import Foundation
 
 /// drawings 的规范语义签名：语义相等 ⟺ 签名相等，与磁盘 raw 的 key 顺序/格式无关。
 /// 含 `id` + 全部已知字段（`DrawingObject.==` 排除 id，故不能直接用它）。顺序敏感（数组序 = z-order）。
+/// ⚠️ **必须单射（codex plan-R2-F1）**：`id`/`text` 是普通 `String`，导入/损坏/未来数据可含任意字节
+///   （含分隔符/控制字符）。用**长度前缀**编码每个字段（`"<utf8字节数>:<内容>"`），长度让边界无歧义 →
+///   任意内容都不会碰撞；**不得**用裸分隔符 join（那样 `text` 里塞个分隔符就能伪造出等签名的不同 drawings，
+///   导致 clean-skip 误判相等、丢编辑）。
 public func canonicalDrawingsSignature(_ drawings: [DrawingObject]) -> String {
-    drawings.map { d in
-        let anchors = d.anchors.map { "\($0.candleIndex):\($0.price):\($0.period.rawValue)" }.joined(separator: ",")
-        let tail = d.tailAnchor.map { "\($0.candleIndex):\($0.price):\($0.period.rawValue)" } ?? "-"
-        return [
-            d.id, d.toolType.rawValue, anchors, d.period.rawValue,
-            d.lineSubType.rawValue, d.lineStyle.rawValue, String(d.thickness),
+    // 长度前缀编码：任意 String s → "<s 的 utf8 字节数>:s"。拼接后按长度切回，无歧义（单射）。
+    func lp(_ s: String) -> String { "\(s.utf8.count):\(s)" }
+    return drawings.map { d -> String in
+        // 每条：把所有字段都转成 String 后逐个 lp() 拼接。变长的 anchors 先放个数再逐字段。
+        var fields: [String] = [d.id, d.toolType.rawValue, String(d.anchors.count)]
+        for a in d.anchors {
+            fields.append(String(a.candleIndex)); fields.append(String(a.price)); fields.append(a.period.rawValue)
+        }
+        fields.append(contentsOf: [
+            d.period.rawValue, d.lineSubType.rawValue, d.lineStyle.rawValue, String(d.thickness),
             d.colorToken.rawValue, d.labelMode.rawValue, String(d.locked),
             d.text, String(d.fontSize), d.textColorToken.rawValue, d.textForm.rawValue,
-            tail, String(d.isExtended), String(d.panelPosition), String(d.revealTick),
-        ].joined(separator: "\u{1F}")   // 字段分隔用 US(0x1F)，避免与字段内容碰撞
-    }.joined(separator: "\u{1E}")       // 条间分隔用 RS(0x1E)
+            String(d.tailAnchor != nil),                       // 区分 tailAnchor==nil 与「有但字段恰好空」
+            d.tailAnchor.map { "\($0.candleIndex),\($0.price),\($0.period.rawValue)" } ?? "",
+            String(d.isExtended), String(d.panelPosition), String(d.revealTick),
+        ])
+        return fields.map(lp).joined()
+    }.map(lp).joined()                                          // 每条再 lp()：条边界也无歧义
 }
 ```
 
@@ -263,8 +289,7 @@ Expected: PASS。
 @Test("replay clean-skip ①: 同count内容变(A→B)→签名变→写盘（钉死 count 漏改内容）")
 @MainActor func replayCleanSkip_sameCountContentChangeWrites() async throws {
     let (coord, engine) = try makeReplaySessionWithBaselineA()   // !replayHasPersisted，drawings=[A]，baseline 快照=当前
-    let B = DrawingObject(toolType: .horizontal,
-                          anchors: [DrawingAnchor(candleIndex: 9, price: 8, period: .daily)], period: .daily)
+    let B = makeHLine(id: "B", candleIndex: 9, price: 8)
     _ = engine.appendDrawing(B)                                  // [A,B]
     engine.deleteDrawing(at: 0)                                  // [B]：count 回 1==baseline，但内容 A→B
     try await coord.saveProgress(engine: engine)
@@ -275,8 +300,7 @@ Expected: PASS。
 @Test("replay clean-skip ②: append+delete 同一条回 baseline→签名==baseline→skip（钉死 revision 单调）")
 @MainActor func replayCleanSkip_appendDeleteSameSkips() async throws {
     let (coord, engine) = try makeReplaySessionWithBaselineA()   // drawings=[A]
-    let B = DrawingObject(toolType: .horizontal,
-                          anchors: [DrawingAnchor(candleIndex: 9, price: 8, period: .daily)], period: .daily)
+    let B = makeHLine(id: "B", candleIndex: 9, price: 8)
     _ = engine.appendDrawing(B)                                  // [A,B]
     engine.deleteDrawing(at: engine.drawings.count - 1)          // 删掉刚 append 的 B → 回 [A]==baseline，但 revision+2
     try await coord.saveProgress(engine: engine)
