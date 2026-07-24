@@ -79,6 +79,7 @@
 > | R8 | high | **D58/D65 澄清** | **我 R6 写的「四处同源」把两个不同的 geometry 检查混成一个**：D58 候选预检（改完还可见吗）vs D65 当前门（现在可见吗），入参不同 | 全采纳（精确区分候选/当前两门，同一函数实现、不同入参、执行有序；不改机制） |
 > | R8 | high | **N20 补** | **`drawingsRevision` 是本期新机制，测试列表缺 `appendDrawing` 正向 revision 覆盖** → 漏一个 `+=1` 会让新画线不再 autosave | 全采纳（显式重钉 append/routeDrawingCommit 正向 + review 不动 + 端到端） |
 > | R8 | medium | **D66** | **本期第一次用 id select/update/delete，但没强制 id 唯一非空**：重复/空 id 会让 UI 选一条打另一条 | 全采纳（唯一非空提升为写入边界不变量 + 匹配非唯一即 fail） |
+> | R9 | high | **D61/D65 判据修正** | **我 D65 谓词把判据简写成 `knownFutureEnumPayloads()` 的 id-membership**，漏 `!entries.isEmpty`——而该函数对每条 known 线恒返回一行 → 存盘重载后**所有已有线**被误判、编辑全 fail-closed | 全采纳（改用现成 helper `hasKnownFutureEnumValues(liveIds:)` + N14f 钉死"重载普通线仍可编辑"回归） |
 >
 > 共同形状：**我写的东西"符合上游 spec"，但没人问过"坏数据会怎样 / 直接调用者会怎样 / 高版本写的数据会怎样"**（[[feedback_internal_review_misses_bad_data]]）。
 > **R3/R4/R5/R6/R7 至少 6 条 finding 是我修上一轮时自己引入的**——[[feedback_internal_review_misses_bad_data]]「修 symptom 挪动失败面」的连续实证；每轮都在把不变量往写入边界收，是收敛而非发散。
@@ -244,7 +245,8 @@ extension DrawingObject {
 
 `updateDrawingStyle` 对「携带未来未知枚举值」的线 **fail-closed 拒绝** —— 返 `false`、零改动、`drawingsRevision` 不递增（与 D60 `locked` 完全同构）。
 
-- **判据 = `engine.loadedDrawingsLossy.knownFutureEnumPayloads()`** 是否命中该 id（`LossyDrawingArray.swift:230`；`:274` 已有等价 helper：`contains { liveIds.contains($0.id) && !$0.entries.isEmpty }`；coordinator `:1047` 已在用它算净改动）。这是**唯一** raw-aware 的判据——它看的是磁盘原始字节，不是 fallback 后的解码值。
+- **判据 = `engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id])`**（`LossyDrawingArray.swift:273`，coordinator `:1047` 已在用它算净改动）。这是**唯一** raw-aware 的判据——它看磁盘原始字节，不是 fallback 后的解码值。
+  - ⚠️ **绝不可写成「该 id 是否出现在 `knownFutureEnumPayloads()` 里」的 membership（codex R9-F1）**：那个函数**对每一条 `.known` 线都恒返回一行**（`:228` 注释明载「即便 `entries` 为空」）→ id-membership 会把**所有** loaded 线误判成「携带未来枚举值」→ **存盘重载后所有已有线样式控件全灰、`updateDrawingStyle` 全 fail-closed**，只有内存里刚画的线还能改。**命中的正确条件是 `id 匹配 且 entries 非空`** —— `hasKnownFutureEnumValues` 已经是这个语义（`:274` `contains { liveIds.contains($0.id) && !$0.entries.isEmpty }`），直接用它、不要自己写 membership。
 - **引擎层可达**：`updateDrawingStyle` 在 `TrainingEngine`，能读 `self.loadedDrawingsLossy`。不需要把 raw 塞进 `DrawingObject`（那会污染值类型），只在写入边界查一次。
 - **`textColorToken` 派生回归无条件**：能被编辑的线保证**不带**任何 unknown 枚举值 → 解码 `==` 判据重新可靠 → D59 的派生②恢复为简单的「`textColorToken` 跟随 `colorToken`」。R4 的条件派生连同它失效的判据一起撤销。
 
@@ -339,7 +341,8 @@ D63 里我写了「样式编辑**不禁**（改一条当前看不见的线的颜
 ```
 改样式可用 ⟺ locked == false
             且 在 selectedPanel 当前 mapper 下 visibleGeometry != nil
-            且 该 id 不在 loadedDrawingsLossy.knownFutureEnumPayloads()（无未来未知枚举值，D61）
+            且 !loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id])   ← 见 D61，带 entries 非空；
+                                                                                 绝不写成 knownFutureEnumPayloads() 的 id-membership
 
 删除可用   ⟺ locked == false
             且 在 selectedPanel 当前 mapper 下 visibleGeometry != nil
@@ -583,6 +586,7 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **c 删除仍允许（防过度 fail-closed）**：同一条未来枚举值线 → 经 UI 删除路由删除（几何可见、未锁定）→ **成功**移除、`drawingsRevision` +1。删整条不产生"部分抹除"，D61 允许。
   - **d UI 灰置分岔**：选中该线 → 断言**样式控件全灰**（改样式谓词假）、**🗑 亮**（删除谓词真）——D65 的分岔在此可见。
   - **e 本版本线不受影响（反向对照）**：一条本构建新建的线（无 unknown 枚举值，`textColorToken == colorToken`）→ 改 `colorToken` → **成功**、`textColorToken` **跟随变化**（D59 派生②无条件），与本期之前逐字一致。没有这条，实现可以用「一律拒绝改色」骗过 a。
+  - **f 加载的当前版本普通线仍可编辑（D61 判据陷阱专项，codex R9-F1，不可省）**：造一条**普通**当前版本线（所有枚举字段都是已知值，`knownFutureEnumPayloads()` 对它返回的 `entries` 为**空**）→ **存盘 → 重载** → 选中 → 断言样式控件**亮**、`updateDrawingStyle` **成功**、`drawingsRevision` +1。**这条直接钉死 R9-F1 的实现陷阱**：若判据被写成 `knownFutureEnumPayloads()` 的 id-membership（漏 `!entries.isEmpty`），该函数对每条 known 线恒返回一行 → 这条重载的普通线会被误判成"携带未来枚举值"→ 控件全灰、编辑 fail-closed，本测试当场红。**必须走"存盘→重载"往返**（`d` 的 in-memory 新建线走不到这个陷阱——陷阱只在 `loadedDrawingsLossy` 有条目时触发）。
 
 - **N15 `updateDrawingStyle` 不得有第二个调用点（D62）**：**源码守卫**断言 `Sources/` 中 `updateDrawingStyle(` 的调用点**恰好 1 处**，且访问级别**不是** `public`（`grep` 断言按 [[feedback_acceptance_grep_anchoring]] 用 `^…$` / 前缀锚，不得被注释里的同名字符串命中）。
 
