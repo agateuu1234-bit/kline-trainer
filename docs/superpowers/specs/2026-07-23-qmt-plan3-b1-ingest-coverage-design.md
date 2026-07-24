@@ -1,0 +1,595 @@
+# QMT 数据接入 Plan 3：B1 接规整/合成层 + 写 `stock_coverage` 设计（2026-07-23）
+
+> 上游 spec：`docs/superpowers/specs/2026-07-06-qmt-data-ingestion-pilot-design.md`（D1-D11 决策的权威出处，本文只在**它未定或需收窄**处新增决策，不复述）。
+> 上游 plan：`docs/superpowers/plans/2026-07-18-qmt-plan2-b2-reconnect.md`（§Self-Review「明确不在本 plan、留 Plan 3」清单）。
+
+---
+
+## 0. 目标 / 范围 / 非范围
+
+### 0.1 目标（一句话）
+
+让 **B1（`import_csv.py` 侧）真正接上 Plan 1 已 merge 但零调用方的 QMT 规整/合成层**，导入时把权威 dense 覆盖写进 `stock_coverage`，从而**解除 B2/B4 恒产 0 的根因**；同时消除 Plan 2b 遗留的「coverage 与六周期 klines 无统一快照」残留。
+
+### 0.2 交付口径（诚实义务，沿用 Plan 2 的做法）
+
+Plan 3 交付的是「出货能力被证明」，**但证明分两层、口径必须分开写**（codex R1-F3：原口径说「CI 里有一条真链路」是**过度宣称**——CI 里那条链的存储层是假 conn，`write_qmt_stock` 的真 SQL / asyncpg 参数绑定 / JSONB 编解码 / 事务行为**一行都没跑过**）：
+
+| 层 | 证明什么 | 在哪跑 | 强制力 |
+|---|---|---|---|
+| **L1 逻辑链** | `QMT fixture → build_stock_import → 假 conn 存储 → 真 generate_batch → ≥1 个 zip` | CI（host pytest） | **机器强制**（CI 必绿） |
+| **L2 真写入器** | 真 PG 上跑**真** `write_qmt_stock` + **真** `generate_one_training_set` → 真出 zip；并验事务/隔离/原子性语义 | `backend/scripts/verify_qmt_pg_chain.py`（一次性脚本，需 Docker PG） | **流程纪律**（合并前控制者真跑、输出贴 PR body；**非** CI 自动门——见 §5.4 F2 收口） |
+
+**关键诚实口径（codex R5-F2 收敛）**：**CI 绿 ≠ 链路已证**。L1 的假 conn 存储证明不了 `write_qmt_stock` 的真 SQL / asyncpg 绑定 / JSONB / 事务行为——那些**只在 L2 被真跑**。所以「B1→B2 通了」的证据 = 「L1 CI 绿 **且** PR body 里贴出的 L2 真跑输出」；**L2 是流程纪律、不是机器强制的门**（把它做成带 postgres 的 CI job 是独立的 CI 治理改动，见 §5.4）。只有 L1 绿就写「链路可用」，视同过度宣称。
+
+Plan 3 **不**交付「已经用真 QMT 数据产出 100 个训练组」。真跑属 Plan 4。
+
+**禁止**在任何 commit message / PR body / 验收项里写「pilot 已完成」「100 股已出货」之类表述。
+
+### 0.3 范围（in scope）
+
+1. B1 侧 **D9(a) 分钟级完整性** 与 **D10 双源对账** 的强制（调用已 merge 的 `build_intraday` / `reconcile_sources`，不重写算法）。
+2. B1 写 6 周期 `klines` + `stock_coverage`，**单事务原子**，且是**整体替换**而非 UPSERT 叠加（P3-D4）。
+3. B1 QMT 模式 CLI（单只股）。
+4. B2 侧 **快照一致性**：coverage + 六周期 klines 在同一个 `REPEATABLE READ READ ONLY` 事务内读取（P3-D5）。
+5. **按股导入/生成互斥锁**（P3-D8）——补齐 RR 事务不覆盖的「新鲜度」那一半。
+6. **出货可行性预检（复用 B2 `build_training_windows` 全门）+ 拷贝完整性门**（P3-D9）——把「导入看似成功、B2 静默不出货」和「拷贝被截断」的失败面提前到导入期。
+7. **通用 CSV 路径对已被 QMT 管理的股 fail-closed**（P3-D11）——堵住绕过上述不变量的写路径。
+8. 上述各项的 host pytest 覆盖 + 两条一次性**真 PG** 脚本（语义验证 + 真链路端到端）+ CI 内的逻辑链集成测。
+
+### 0.4 非范围（明确留 Plan 4）
+
+SMB 真拉取、100 股储备池与各市场地板（SH≥30/SZ≥40/BJ≥8）、D8b `kline_pilot_` 库 reset 护栏、容器化 PG smoke（上游 spec §5 的 ①②③⑤⑥⑦）、批量导入 CLI、`stock_universe_with_name.csv` 消费。
+
+**另拆独立 plan（非本 plan、非 Plan 4）**：**重导入后旧训练组的作废/版本化**（P3-D10 ①）。需 import 版本号或 `retired` 状态 + B3 `/download`+`/confirm` 语义变更，是产物生命周期的独立改动。**本 plan 只做一件相关的事**：加 fail-closed 互锁**禁止**已出货股的重导入（P3-D10 ②），把「作废能力没落地」这个空档挡在门外，作废本身不设计。
+
+---
+
+## 1. 现状（基线 `main` `08d70d2`，本设计逐条核实过，非从计划/记忆推断）
+
+| 事实 | 核实方式 |
+|---|---|
+| `qmt_normalize.py`(56 行) / `qmt_resample.py`(184 行) 纯函数齐备：`parse_qmt_csv` / `parse_qmt_filename` / `trading_date` / `compute_dense_coverage` / `build_intraday` / `resample_calendar` / `period_boundaries` / `reconcile_sources` | 读源码 |
+| `import_csv.py` **零 import** 这两个模块；只有「通用 CSV → 单周期 klines」一条路 | 读源码全文 |
+| `write_to_postgres` 已有 D8a 守卫（`pg_catalog` + `to_regclass('klines')` 断言 OHLC = `double precision`）且与 `LOCK TABLE klines IN ROW EXCLUSIVE MODE` 同事务原子 | 读源码 |
+| `stock_coverage` 5 列 3 CHECK 已在 `schema.sql` 与 migration 0004；**无任何写入方** | grep `stock_coverage` 全仓 |
+| `generate_one_training_set` 顺序 = 读 coverage（早退）→ 6 次 `_fetch_period_bars` → `dense_day_count` 交叉校验 → `build_training_windows` → advisory lock → 锁内 `_exists_start` → 写 zip → 登记 | 读源码 |
+| `PERIODS = ("monthly","weekly","daily","60m","15m","3m")`；`PERIOD_BEFORE_CAP = {monthly: None(全取), weekly:120, daily:150, 60m:150, 15m:150, 3m:150}` | 读源码 |
+
+**由 `monthly: None`（before-context 全取）推出的约束，措辞必须精确**（codex R2-F3）：
+
+- **能强制的**：存在一个能通过 B2 **全部**出货门（候选 dense 覆盖 + per-period before/after + per-day 盘中桶数）的窗口 —— 用 B2 出货逻辑本体 `build_training_windows` 在导入期穷尽预检（P3-D9(a)）+ 日线内容必须与 export_log 记录的端点/行数一致（P3-D9(b) 拷贝完整性）。
+- **不能强制的**：「这份日线就是该股全部历史」。本地没有上市日期的独立真值源，一份「四年、但覆盖住 dense 1m」的日线与「一只只上市四年的股票」在数据上无法区分。
+- 因此本 spec **不宣称**能保证全历史。宣称的是：**给多少日线就用多少**（monthly before-context 全取），**导入期已用 B2 的合格性判据预检过「这只股真能出至少一个训练组」**，**且拷贝完整性有门**。§6 验收标准按这个口径写，不写「已验证全历史」。
+
+---
+
+## 2. 决策（本 plan 新增，编号 P3-D*）
+
+> **编号按引入轮次分配、不按文档顺序**（D1-D7 = 初稿；D8-D9 = codex R1 后；D10-D11 = codex R2 后）。索引：
+>
+> | 编号 | 主题 | 引入 |
+> |---|---|---|
+> | P3-D1 | 新建 `qmt_ingest.py` 纯装配层 | 初稿 |
+> | P3-D2 | 周期来源分工 + 清洗顺序 | 初稿 |
+> | P3-D3 | `export_log` status 门必填（+ 重复行拒） | 初稿 / R8-F3 |
+> | P3-D1+ | 身份绑定在解析边界（`parse_qmt_csv` 从文件名派生 code）+ 入口 `if/raise` 纵深防御——收口身份家族 | R9-F2 / R11-F2 / R12-F1 / R14-F1 / R15-F1 |
+> | P3-D4 | B1 写入 = 单事务**整体替换** | R1-F2 后改写 |
+> | P3-D5 | B2 RR 只读快照读 | 初稿 |
+> | P3-D6 | CLI 形态 | 初稿 |
+> | P3-D7 | `volume` 不换算 | 初稿 |
+> | P3-D8 | 按股导入/生成互斥锁（+ rollout drain 部署要求） | R1-F1 / R8-F2 / R13-F1 |
+> | P3-D9 | (a) 出货可行性预检（复用 B2 `build_training_windows` 全门 + 传 `dropped`）+ (b) 拷贝完整性门 + (c) 原始值校验（daily 无损 + 1m/daily amount/volume） | R1-F4 / R2-F3 / R8-F1 / R9-F1 / R13-F2 / R15-F2 / R16-F1 / R16-F2 |
+> | P3-D10 | ① 作废/版本化 → 拆独立 plan；② 已出货股重导入 fail-closed 互锁（留本 plan） | R2-F2→R5-F1 连提 5 轮；user 两次裁决 |
+> | P3-D11 | 通用 CSV 路径 fail-closed（+ 记录-参数身份一致 + 非阻塞锁） | R2-F1 / R8-F2 / R11-F2 |
+> | P3-D12 | 写入器**威胁模型 = 单一生产者**，`validate_import_bundle` 为结构性纵深防御（非独立全门） | R7-F3 / R9-F2 / R10-F1 / R11-F1；user 裁决威胁模型 |
+
+### P3-D1：新建 `backend/qmt_ingest.py` 作为 B1 的 QMT 装配层（纯函数）
+
+不把逻辑塞进 `import_csv.py`。理由：`import_csv.py` 已同时承担「通用 CSV 纯函数层 + 写库壳 + CLI」；再塞进 D10 对账 + 六周期合成会让单文件超 500 行且职责混杂。`qmt_ingest.py` 只依赖 `qmt_normalize` / `qmt_resample` / `import_csv`（复用 `clean` / `compute_indicators` / `to_kline_records`），**不依赖 asyncpg**，host pytest 全测。
+
+入口——**数据必须携带来源身份，不能用剥了身份的裸 DataFrame**（codex R14-F1，high，**核实为真**；这是身份家族 R9-F2/R11-F2/R12-F1 的根因收口，见下）：
+
+```python
+@dataclass(frozen=True)
+class QmtSource:
+    code: str            # 从文件名 parse_qmt_filename 取，随数据端到端携带
+    period: str          # "1m" / "daily"
+    df: pd.DataFrame     # parse_qmt_csv 产出
+
+build_stock_import(src_1m: QmtSource, src_daily: QmtSource, *, stock_code, stock_name,
+                   entry_1m: ExportLogEntry, entry_daily: ExportLogEntry) -> ImportBundle
+```
+
+`ImportBundle` = `{records: dict[period, list[dict]], coverage: CoverageArtifact}`；
+`CoverageArtifact` = `(start_date, end_date, dropped_dates: list[date], dense_day_count: int)`。
+
+**身份家族收口（R14-F1 提出、R15-F1 纠正过度宣称）**：连续 5 轮 high（R9-F2 记录 stock_code、R11-F2 通用路径记录 code、R12-F1 export_log 条目、R14-F1 DataFrame、R15-F1 权威性）全是同一病——**身份作为独立参数漂在数据旁边**。我 R14 说「`QmtSource` 携带身份就一次挡死」是**过度宣称**（codex R15-F1，high，核实为真）：`QmtSource` 是公开 dataclass，`code`/`period`/`df` **全由调用方给**，一个**纯函数无法对调用方递进来的身份做权威校验**——`QmtSource(code=B, df=df_A)` 照样过四方检查。**权威绑定只能在 IO/解析边界发生**，不能在纯函数入口。
+
+**正解 = 权威身份在解析边界绑定 + 入口做非-security 的一致性防御 + 威胁模型兜底**（与 P3-D12 写入器威胁模型同构、user 已裁决的立场）：
+
+1. **权威绑定在解析边界**：`parse_qmt_csv(path) -> QmtSource`，其 `code`/`period` **从文件名经 `parse_qmt_filename` 派生**（文件名是文件系统给的、非调用方随口填）。**`QmtSource` 的唯一被支持产地是 `parse_qmt_csv`**；手工 `QmtSource(...)` 构造带错配 df 属**不受支持用法**（与「手工构造 raw bundle 绕过 `build_stock_import`」同类，威胁模型不承诺对其提供 fail-closed）。
+2. **入口一致性防御用显式 `if/raise`、不用 `assert`**（codex R15-F1：`assert` 在 `python -O` 下被剥）：
+
+   ```python
+   for src, per in ((src_1m, "1m"), (src_daily, "daily")):
+       if src.code != stock_code or src.period != per:
+           raise QmtIngestRejected("source_identity_mismatch")
+   for ent, per in ((entry_1m, "1m"), (entry_daily, "daily")):
+       if ent.code != stock_code or ent.period != per:
+           raise QmtIngestRejected("source_identity_mismatch")
+   ```
+
+   这道检查是**纵深防御**（挡住 CLI/工厂的意外错配、传反 1m/daily），**不是**对「调用方蓄意手工造假 QmtSource」的安全边界——后者由威胁模型划为不受支持。CLI 路径（`parse_qmt_csv` 从真文件名派生 code + glob 只取本股文件）本就权威，是被支持的主路径。
+
+拒绝路径：抛 `QmtIngestRejected(reason)`，`reason` 用 `reconcile_sources` 已有的机器可读串（`export_log_not_ok` / `no_dense_1m` / `daily_not_cover_dense` / `date_set_mismatch` / `ohlcv_mismatch`）+ 本层新增（`no_intraday_after_dense_filter` 等）。**一只股要么全部六周期 + coverage 一起写，要么一行都不写。**
+
+### P3-D2：周期来源分工
+
+| 周期 | 来源 | 备注 |
+|---|---|---|
+| `3m` / `15m` / `60m` | `build_intraday(df_1m)` | 只保留 dense 完整日（D9(a)），非 dense 日整日 drop |
+| `daily` | 日线 CSV 全历史，经 `clean` | 不裁剪（P3-D1 上方硬约束） |
+| `weekly` / `monthly` | `resample_calendar(df_daily, rule)` | 只发完整周期，partial 当期不 emit |
+| `1m` | **不入库**（上游 D3） | 只作合成与覆盖判据的源 |
+
+清洗顺序固定为 **`clean` 先于 `compute_dense_coverage`**：被 `clean` 丢掉的坏行会让那一天的 1m 根数 ≠ 241 → 该日落入 `dropped` → fail-closed。反过来（先算覆盖再清洗）会让坏行伪装成完整日。
+
+指标（MA66/BOLL/MACD）**逐周期**在该周期自己的序列上算，复用 `import_csv.compute_indicators`，`round(4)/round(6)` 不变。
+
+### P3-D3：`export_log.csv` 的 status 门（D10-(a)）——必填、fail-closed
+
+`reconcile_sources` 的 `status_1m` / `status_daily` 参数当前默认 `"ok"`，若调用方不传即等于**默认放行**，会把 codex 加的这道门变成摆设。故：
+
+- B1 QMT 模式 **必须**拿到 export_log（CLI `--export-log`，默认 `<输入目录>/export_log.csv`）；文件不存在 → 报错退出，**不默认 ok**。
+- 解析器 `parse_export_log(path) -> dict[(code, period), ExportLogEntry]`，其中
+
+  ```python
+  @dataclass(frozen=True)
+  class ExportLogEntry:
+      code: str            # 规范化后的股票代码（R12-F1：身份必须随条目走）
+      period: str          # "1m" / "daily"
+      status: str
+      rows: int
+      first_time: int      # QMT 打包整数，经 parse_qmt_datetime 同一套规则解析
+      last_time: int
+      source: str          # 该行的原始标识值，报错时回显用
+  ```
+
+  **返回结构体而非裸 status**（codex R3-F3，high，**核实为真**：我上一版把 `parse_export_log` 定义成只返回 status、`build_stock_import` 也只收 `status_1m/status_daily`，于是 P3-D9 的拷贝完整性门**在纯函数 API 里根本拿不到 `rows`/`first_time`/`last_time`** —— 门只能靠 CLI 侧另做一遍，非 CLI 调用方直接绕过。这是 spec 自相矛盾，不是实现细节）。
+- 要求存在 `status` / `period` / `rows` / `first_time` / `last_time` 五列，缺任一 → `QmtSchemaError`；股票标识列从候选集 `stock` / `code` / `stock_code` / `file` / `filename` 取**第一个存在的**，值若形如 QMT 文件名则经 `parse_qmt_filename` 取 code，否则按裸 code 比对。
+- 候选集全不命中 → 抛 `QmtSchemaError`（**停下并报错**，不静默放行）。
+- `period` 值同时接受 `1分钟K线`/`日K线` 与 `1m`/`daily`。
+- 查不到该股某个周期的条目 → 拒绝该股（缺条目 ≠ ok）。
+- **重复行 fail-closed**（codex R8-F3，medium，**核实为真**）：`dict[(code,period)]` 会把同 `(code,period)` 的多行**塌成最后一行** —— 一条 `status=error` 行可能被后面的 `ok` 行悄悄覆盖，status 门在信任边界上被削弱。故解析时**检测重复 key**：同 `(code,period)` 出现 >1 行 → 抛 `QmtSchemaError("export_log_duplicate")`，**不按行序取任意一条**。（真列里若 `file`/`filename` 能把两行唯一区分开，那是 Plan 4 挂 SMB 逐字核对后的收窄；本 plan 无法核对真格式，一律 fail-closed 拒绝重复。）
+- `build_stock_import` 的入参相应从 `status_1m, status_daily` 改成 **`entry_1m: ExportLogEntry, entry_daily: ExportLogEntry`**（必填，无默认值——有默认值就等于又留了默认放行的后门）；它自己把 `entry.status` 传给 `reconcile_sources`，`reconcile_sources` 的既有签名不动。
+- **entry 身份绑定**（codex R12-F1，high）：已并入 P3-D1 的**四方一致断言**（`src_1m`/`src_daily`/`entry_1m`/`entry_daily` 的 code+period 全 == `(stock_code, 周期)`，否则 `QmtIngestRejected("source_identity_mismatch")`）。`ExportLogEntry` 带 `code`/`period`（解析器本就按 `(code,period)` 分组）。R12-F1 单绑 entry 只堵了一处，R14-F1 补上 DataFrame 侧后整族才封死。
+
+> **⚠️ 已知不确定项**：`export_log.csv` 的真实列名来自上游 spec §1.4 的记录（`first_time/last_time/rows/status/period`），本会话**无法挂 SMB 逐字核对**。上面的候选集设计保证：真列名若不在候选集内，Plan 4 挂载时会**明确报错**，而不是静默跳过这道门。
+
+### P3-D4：B1 写入 = **一只股一个事务的整体替换**（不是 UPSERT 叠加）
+
+```
+validate_import_bundle(bundle, stock_code)   ← P3-D12，纯函数，DELETE 之前、连接之前就能拦
+BEGIN
+  IF NOT pg_try_advisory_xact_lock(IMPORT_GEN_LOCK_KEY, stock_key)  ← P3-D8，非阻塞
+       → raise ImportBusyError（该股正被 B2 生成，可重试；零写入）
+  LOCK TABLE klines, stock_coverage IN ROW EXCLUSIVE MODE
+  → D8a schema 守卫（沿用现有）+ stock_coverage 存在断言
+  → SELECT 1 FROM training_sets WHERE stock_code=$1 LIMIT 1   ← P3-D10 互锁
+       命中 → raise ReimportBlockedError（零写入，整只股回滚）
+  → stocks UPSERT
+  → DELETE FROM klines WHERE stock_code=$1 AND period = ANY(六周期)    ← 替换语义
+  → 6 × klines executemany INSERT（沿用现有 _KLINE_INSERT 的 UPSERT 形式，兜底幂等）
+  → stock_coverage UPSERT（ON CONFLICT (stock_code) DO UPDATE）
+COMMIT（xact 锁自动释放）
+```
+
+**本事务只读 `training_sets`（一条 `SELECT 1` 作互锁）、不删不改不 unlink**（P3-D10：作废/版本化拆独立 plan）。
+
+**破坏性 DELETE 之前先 fail-closed 校验 bundle 形状**（codex R7-F3，medium，**核实为真**）：`write_qmt_stock` 会先删该股六周期再 INSERT，若上游 `build_stock_import` 回归、或某个非-CLI 调用方传进半份 bundle，就会**提交一次部分替换**——B2 之后读到缺周期 klines 或与 klines 不符的陈旧 coverage，而这一切不会让任何测试变红。故见 **P3-D12**。
+
+**为什么必须 DELETE 而不是纯 UPSERT**（codex R1-F2，high，**核实为真且机制比 codex 的论证更具体**）：
+
+QMT 的 **1m 导出只保留约一年**，服务端截断。第二次导出时这个窗口**整体向前滑动**——旧窗口起始那几个月的日期**不再出现在新 bundle 里**。纯 UPSERT 只覆盖新旧 datetime 交集，滑出去的那批 `3m/15m/60m` 行会**永久留在 klines 里**。
+
+真正致命的是：**这些是前复权价**。发生分红/送转后，同一历史 datetime 的前复权价会被**整体重算成新基准**。于是库里出现「新基准的近一年盘中 + 旧基准的更早盘中」混杂，而 `stock_coverage` 声称的 dense 带只覆盖新的那段。B2 的 `select_period_window` 取 before-context 时**不受 dense 约束**（`PERIOD_BEFORE_CAP` 各周期 150 根），一旦回溯到旧基准区间，训练组里就会出现**同一张图上两套复权基准的蜡烛**——价格在拼接处凭空跳空。这类坏数据不会让任何测试变红。
+
+日线/周线/月线本身是全历史、每次导出都全覆盖，纯 UPSERT 就已一致；但**六周期一律走 DELETE + INSERT**，理由是判据统一（不需要维护「哪些周期会滑窗」这张易腐清单），且成本相同（同事务内一只股约数万行，本就要写）。
+
+`klines` 无任何外键指向它，已生成的 zip 是自包含产物，DELETE 不影响 `training_sets`（旧训练组作废见 P3-D10——已拆出 Plan 3）。
+
+`dropped_1m_dates` 写 ISO 日期字符串 JSON 数组（`json.dumps([d.isoformat() ...])`），与 `_fetch_dense_coverage` 的解析对称。
+
+> **观察（不改变设计）**：D10-(c) 对称日期集门要求 dense 跨度内 1m 日期集 == 日线日期集，所以**跨度内部**不可能存在 dropped 日——真出现即整只股被拒。`dropped_1m_dates` 因此在被接受的股上实际恒为 `[]`。仍**如实写入** `compute_dense_coverage` 的结果，不硬编码空数组：门的语义与存储的语义解耦，将来放宽门时存储不需要跟着改。
+
+### P3-D5：B2 快照一致性 = 单个 `REPEATABLE READ READ ONLY` 事务包住 7 次读
+
+`generate_one_training_set` 里 `_fetch_dense_coverage` + 6 次 `_fetch_period_bars` 移入同一个只读可重复读事务；事务提交后再做 `_fetch_existing_starts`、取 advisory lock、锁内 `_exists_start`、写 zip、登记。
+
+- **为什么 `_fetch_existing_starts` / `_exists_start` 必须在快照外**：它们要的是「此刻最新已提交」的登记状态。若被冻在旧快照里，Plan 2b R2 刚修好的「锁内先查、后写」会重新变成 stale 检查。
+- **早退不受影响**：coverage 行不存在时仍在读第一条语句后就抛 `GenerateSkipException`，六周期全量读不会发生。
+
+**RR 事务只解决「一致性」，不解决「新鲜度」**（codex R1-F1，high，**核实为真**）：B2 可以在快照里读到旧数据，此后 B1 重导入并提交，B2 才写 zip 并登记——登记下来的训练组是从**已被取代的导入**建出来的，且事后无从分辨。这条由 **P3-D8** 补齐，不由 RR 事务负责。
+
+**否掉的替代方案**：
+
+| 方案 | 否掉理由 |
+|---|---|
+| B：给 `stock_coverage` 加 import 版本号，B2 在快照里读、登记前复查 | 能解决新鲜度，但要动 migration（0005）+ `schema.sql` + m01 走一遍 A 类 DDL 治理，而它给出的语义**弱于** P3-D8：版本复查只能在登记前**发现**数据已过期然后丢弃（zip 已经白写了），P3-D8 直接让「快照期间该股被重导入」**不可能发生**。同等目标下取代价低、语义强的那个 |
+| C：B1 导入与 B2 读取共用**全局** `B2_GENERATION_LOCK_KEY` | 会把 B2 的锁重新提到六周期全量读之前，抹掉 Plan 2b R1 刚做的「锁下沉」；且让整轮 sweep 与**任意**股票的导入完全串行。P3-D8 的**按股**锁拿到同样的互斥而不付这两笔代价 |
+
+### P3-D8：按股导入/生成互斥锁
+
+**锁**：新增 `IMPORT_GEN_LOCK_KEY`（与 `B2_GENERATION_LOCK_KEY` 不同的常量），用 PostgreSQL **双参** advisory lock 的第二个参数区分股票：`stock_key = zlib.crc32(stock_code.encode()) & 0x7FFFFFFF`（落在 int4 正区间；不同股票碰撞只会造成不必要的串行，不会造成错误——**碰撞不影响正确性，只影响并发度**）。
+
+| 角色 | 取法 | 范围 |
+|---|---|---|
+| B1 `write_qmt_stock` | `pg_try_advisory_xact_lock(IMPORT_GEN_LOCK_KEY, stock_key)`（**非阻塞、事务级**），拿不到 → `ImportBusyError`（该股正被 B2 生成，可重试） | 事务开头取，COMMIT/ROLLBACK 自动释放，不泄漏。**事务级足够**：B1 没有任何「提交后的文件操作」需要锁去覆盖，锁只需活到写入提交为止 |
+| B2 `generate_one_training_set` | `pg_try_advisory_lock(IMPORT_GEN_LOCK_KEY, stock_key)`（**try、session 级**），拿不到 → `GenerateSkipException`（该股正在被导入，跳过） | **在打开 RR 快照之前**取，**直到登记完成**才在 `finally` 里释放。B2 的锁必须是 session 级——它要跨越 RR 快照事务的提交，一直活到快照外的写 zip + 登记做完 |
+
+**两端都用 `try`、非阻塞**（codex R7-F2，medium 收敛）：先前 B1 用**阻塞**式 `pg_advisory_xact_lock`，若 B2 因 NAS 慢 / zip 大 / 进程卡住而长时间持有该股 session 锁，B1 导入会**无限期挂起、无超时、无可重试反馈**。改成 `pg_try_advisory_xact_lock`：拿不到即刻抛 `ImportBusyError`（CLI 退非零、文案「该股正被 B2 生成，稍后重试」），运维重跑即可。**非阻塞不损新鲜度不变量**：B1 要么拿到锁并导入、要么直接失败**不导入**——它绝不会在 B2 持锁期间提交一个竞态导入。于是「B2 的快照 → 建 zip → 登记」整段期间该股仍**不可能**有导入提交；RR 保一致、这把锁保新鲜，合起来才是完整不变量。B1 的锁只需活到它自己的写入提交（作用 = 「B2 快照时看不到写到一半的导入」），事务级恰好覆盖这段。
+
+**锁序（防死锁）**：B2 的取锁顺序恒为 `IMPORT_GEN_LOCK_KEY(按股)` → `B2_GENERATION_LOCK_KEY(全局)`，B1 只取前者。不存在反序路径，故无环、无死锁。事务级与 session 级 advisory lock 共用同一锁空间，两者互相冲突判定正常。
+
+**部署要求（rollout drain，codex R13-F1，high，核实为真）**：新鲜度不变量依赖 **B1 与 B2 都取 `IMPORT_GEN_LOCK_KEY`**。这把锁是 Plan 3 新引入的——**Plan 3 之前的 B2/B4 代码只认 `B2_GENERATION_LOCK_KEY`、不认这把新锁**。若部署 Plan 3 的 B1 时有一个**旧 B2 进程仍在跑**（持着 Plan-3-前的 klines 快照），它不会与新 B1 互斥：旧 B2 读旧快照 → 新 B1 拿新锁提交替换 → 旧 B2 登记基于旧快照的 zip（P3-D10 的 `training_sets` 互锁若在 B1 检查时该股尚无行则也拦不住）。
+
+- **为什么不能用「机器 fence」替代 drain**（codex R17-F1 要求机器 fence，**经核实其推荐对本威胁技术不成立**）：一个**未升级的旧 B2** 按定义不跑任何 Plan 3 新代码——它读 klines 是在写锁**之外**（Plan 2b「锁下沉」后读不持锁，见 [[project_qmt_plan2_status]] R4-F2 残留）。序列：旧 B2 **无锁读旧数据** → 新 B1 拿锁提交替换 → 旧 B2 拿锁**登记陈旧 zip**。B1 再加任何锁/版本标记都拦不住一个「已读完旧数据、只等登记」的旧进程。**你无法用新代码 fence 一个不跑新代码的进程**——drain 是这个威胁的**根本正解**，不是可被代码替代的权宜。同理，让 B1 常取全局锁（codex 建议 b）既封不死（旧 B2 读无锁）、又把 B1 与整个 sweep 永久串行（P3-D8 否掉方案 C 的代价），双输。
+- **处置 = drain（根本）+ 机器可检的部署闸（尽力）**：① **根本要求**：Plan 3 的 B1+B2 同批部署、**首次 QMT 导入前重启/drain 调度器**（写进 PR body + 非-coder 验收清单）。② **机器可检强化**（把「PR 文字」升级为「导入器自拒」）：QMT 导入 CLI 启动时 `pg_try_advisory_lock(B2_GENERATION_LOCK_KEY)` 探测——**拿不到 = 有 scheduler 正活动 → 拒绝导入并提示 drain**（探测后立即释放，不持有）。这 catch 住「导入时刻有 B2 在写」，但**诚实标注**：仍 catch 不住「旧 B2 已无锁读完、正等登记」那一瞬——那一段只有 drain 能保证。不假装机器闸等于封死。
+- **当前实际风险 = 零**：本系统单用户内网、**调度器/NAS 后端至今未部署**（无任何在跑的 B2/B4 守护进程），偏斜窗口现在就是空的。稳态（Plan 3 全部署后）两端都取新锁，不变量成立。
+
+### P3-D10：重导入 fail-closed 互锁——**作废/版本化本身拆独立 plan**（user 2026-07-23 两次裁决）
+
+**问题是真的**（codex R1-F2 后半 → R2-F2 → R3-F2 → R4-F3 → R5-F1，连提 5 轮，每轮都核实为真）：一次**修正性**重导入之后，用旧（错误）数据生成的 zip 仍会被 B3 发给用户，且库里没有字段能区分「当前版本」与「被取代」的产物。R4-F3 经核实成立：B3 的 `/download`（`routes.py:56`）**按 id 发文件、不做 status 迁移**，`/confirm`（`routes.py:71`）才迁 `sent`——所以「`reserved` = 未交付」这个前提**是错的**，客户端可能已把旧 zip 下到手。
+
+**分两层处置（user 两次裁决）**：
+
+**① 作废/版本化（重活）拆独立 plan。** 可靠闭合需要给 `stock_coverage`/`training_sets` 引入 **import 版本号（或 `retired` 状态）** 并改 **B3 的 `/download`+`/confirm` 语义只发当前版本**——A 类 DDL（migration 0005 + `CONTRACT_VERSION` 再 bump + openapi/iOS 波及）+ B3 发放契约变更，等于把 Plan 3 从「接通 B1」撑成「接通 B1 + 重做产物生命周期」。**不在本 plan 做。** 之前尝试的「同事务删 unsent/reserved 行 + 提交后 unlink」是半吊子，引入的新问题（R3-F1 竞态删新 zip、R4-F2 unlink 信任任意 `file_path`、R4-F3 已下载未 confirm）比它解决的还多，一并撤掉。
+
+**② 但本 plan 必须加一道 fail-closed 互锁**（codex R5-F1 收敛，user 采纳）——否则 spec 就是「**明知重导入会让用户练到旧/错数据，还照样放行**」，与全项目 fail-closed 数据耐久性取向冲突：
+
+> `write_qmt_stock` 在**已持有该股按股锁的事务内**先查 `SELECT 1 FROM training_sets WHERE stock_code=$1 LIMIT 1`；**若已存在任何该股的训练组行 → 抛 `ReimportBlockedError`，整只股零写入**，报错文案明确指向「该股已有训练组，重导入的作废/版本化能力尚未落地（独立 plan），暂不支持覆盖导入」。
+
+这把互锁的**边界**必须说清，才不与 user「不碰 training_sets 生命周期」的裁决矛盾：
+
+- 它**只读** `training_sets`（一条 `SELECT 1`），**不删、不改、不加版本列**——生命周期那套重活仍在独立 plan。
+- 它把「坏状态明知放行」变成「**坏状态进不来**」：一只股要么还没出过货（首次导入，放行），要么已出货（重导入，拒绝并报错），**不存在**「klines 换了、旧 zip 还在流通」这个中间态被静默制造出来。
+- 检查在按股锁内 → check-and-write 原子，不存在「查时没行、写时 B2 刚登记」的缝。
+
+**对 P3-D4 替换语义可达性的影响（如实标注）**：加互锁后，`write_qmt_stock` 的 klines DELETE+INSERT 替换路径**只在「已导入但 B2 尚未生成任何训练组」的窗口内可达**（第二次导入若已出过货就被互锁拦下）。替换语义仍需保留且仍有意义——它保证那个窗口内 klines 当前状态自洽；只是它的可达面被互锁收窄了。端到端测里「窗口前滑重导入」的断言要落在这个窗口内（重导入前不 generate）。
+
+**连带效果**：因为不再有「提交后 unlink」，codex R3-F1 与 R4-F2 **消失**；R4-F1（B1 锁范围矛盾）消解——B1 回到事务级锁（见 P3-D8）。**诚实义务**：PR body 与验收清单写明「本 plan 不作废旧训练组，改以 fail-closed 互锁禁止已出货股的重导入；作废/版本化留独立 plan」——不写成已闭合。
+
+### P3-D6：CLI 形态
+
+`import_csv.py` 现有 CLI 保留不动（通用 CSV 路径仍有测试与调用者），新增互斥的 QMT 模式：
+
+```
+python import_csv.py --qmt --input <QMT 导出根目录> --stock 000001.SZ \
+                     [--export-log <path>] --dsn <DSN>
+```
+
+- 在 `--input` 下**递归 glob** `{code}_*_1分钟K线_前复权.csv` 与 `{code}_*_日K线_前复权.csv`（对导出目录层级不敏感）；命中数 ≠ 1 → 报错退出。
+- `stock_name` 从文件名解析（`parse_qmt_filename`），不需要 `--name`。
+- `--qmt` 与 `--period` 互斥（QMT 模式的周期集由合成层决定）。
+- 被 D9/D10 拒绝 → 打印 `reason` 并以**退出码 2** 结束，**一行都不写**；成功 → 打印每周期行数 + 覆盖带 + 退出码 0。
+
+### P3-D7：`volume` 单位不做换算
+
+QMT 源 `volume` 单位是「手」。本 plan **原样入库**，不乘 100。理由：(1) D10 值对账是 1m 聚合 vs 日线，两边同源同单位，换算不影响门；(2) 换算属于展示层口径变更，会影响 iOS 已有显示与既有 CSV 导入路径的一致性，**不属于 Plan 3 的问题**。如需统一单位，另开聚焦改动。
+
+### P3-D11：通用 CSV 路径必须堵住，否则新不变量是假的
+
+codex R2-F1（high，**核实为真**）：`write_to_postgres`（既有通用 CSV 路径）直接改 `stocks`/`klines`，**既不取按股锁、也不更新 `stock_coverage`**。对一只已被 QMT 管理的股跑一次通用导入，就能让 klines 变了而 coverage 没变——P3-D5/D8 建立的不变量当场失效，B2 会拿「旧 coverage + 新 klines」建训练组。
+
+我上一轮写的「`write_to_postgres` 原样保留、只加不改」在这条面前站不住：**保留一个能绕过不变量的写路径，等于没有不变量。**
+
+**处置**（都在任何 INSERT 之前）：
+
+0. **记录-参数身份一致**（codex R11-F2，high，**核实为真**）：`write_to_postgres` 用**参数** `stock_code` 取锁、查 `stock_coverage`，但 INSERT 用的是**每条记录**的 `r["stock_code"]`。直接调用方传「未被管理的参数 code + 一只已被 QMT 管理的股的记录」，就能用错的 code 过掉 coverage 护栏、却把被管理股的 klines 改脏。故**取锁之前**先断言 `{r["stock_code"] for r in records} == {stock_code}`，否则抛 `ValueError`，零写入。身份唯一由参数决定、与护栏检查的对象一致。
+1. 取同一把按股锁——**非阻塞** `pg_try_advisory_xact_lock(IMPORT_GEN_LOCK_KEY, stock_lock_key(stock_code))`（codex R8-F2，medium，**核实为真**：我上一轮把 QMT 写入器改成非阻塞正是为了避免「B2 卡住 → 导入无限期挂起」，却把通用路径这把新锁留成**阻塞**的）。拿不到 → `ImportBusyError`（可重试、退非零），**不阻塞等待**。事务级即可；
+2. **fail-closed 拒写**：该股在 `stock_coverage` 有行 → 抛 `LegacyImportBlockedError`，零写入。提示语指向 `--qmt` 模式。
+
+第 0 步先于取锁（纯参数比对，不需 DB），第 1/2 步在锁内 → check-and-write 原子。没有 coverage 行的股（pre-QMT 测试数据）行为完全不变，既有测试不受影响。
+
+### P3-D9：出货可行性预检 + 拷贝完整性门——把「B2 静默不出货」真的挪到导入期
+
+**（a）出货可行性预检**（codex R1-F4 提出、R8-F1 收紧为真正完整的检查）：
+
+§1 把「日线必须全历史」写成硬约束，但一份**被截断/dense 1m 过短**的输入能过 D10 四门、写下 coverage，然后 B2 静默产 0——症状与"coverage 空表"一模一样。我上一版只查 `月边界 >= 39`，codex R8-F1（high，**核实为真**）指出这**不完整**：B2 出货还要求存在一个「8 个月前向窗口、其间每个交易日都落在 dense 1m 覆盖内」的合格起点。一只「日线 ≥ 39 个月、但 dense 1m 只有短短几个月」的股照样过 `>= 39`、写 coverage、B2 仍产 0。
+
+**修法（codex R9-F1 收敛到终点）= 预检直接跑 B2 出货逻辑本体 `build_training_windows`，不是它的某个子步骤**。
+
+我此前三版预检一次比一次深、但每版都只取了 B2 的一个**子步骤**：`>= 39`（月边界数）→ `eligible_start_indices`（候选过滤）。codex R9-F1（high，**核实为真**）指出后者仍不完整：`eligible_start_indices` 只做「候选起点的 dense 覆盖过滤」，而 B2 真正出货的 `build_training_windows` 在选完候选后**还有**——per-period `before_min>=30`/after 检查、`per_day_intraday_complete` 逐日盘中桶数硬门。一只过了候选过滤、却在这些后续门上被 8 个候选全部 skip 的股，照样静默产 0。
+
+**唯一不漏的预检 = 跑那个函数本身**：
+
+```python
+# build_stock_import 内，六周期 DataFrame + month_boundaries/dense_dates/trading_dates 都算好之后：
+try:
+    build_training_windows(
+        period_bars, month_boundaries, rng,
+        dense_dates=dense_dates, trading_dates=trading_dates,
+        before_caps=PERIOD_BEFORE_CAP,          # 生产参数，与 B2 逐字一致
+        dropped=frozenset(cov.dropped_dates),   # ← R16-F1：dropped 是 B2 的独立阻断器，必须传
+        max_retries=len(候选) 或足够大)          # 穷尽候选：证「存在一个可行窗口」，不是「随机 8 个里有」
+except GenerateSkipException:
+    raise QmtIngestRejected("no_eligible_training_window")
+```
+
+> **`dropped` 必须传**（codex R16-F1，high，**核实为真**）：B2 的 `eligible_start_indices` 把 `dropped_1m_dates` 当**独立于 `trading_dates` 的阻断器**（`generate_training_sets.py:106-134`）——某 dropped 日的 daily 行也缺失时它不在 `trading_dates`、逐日 dense 检查对它失明，全靠 `dropped` 集合兜。预检若不传 `dropped`，就与 B2 运行时不一致：预检放行、B2 却拒掉每个跨该 dropped 日的候选 → 又是「导入过、B2 产 0」。传 `dropped=frozenset(cov.dropped_dates)` 后预检与 B2 判据逐字一致。
+
+`build_training_windows`（`backend/generate_training_sets.py:165`）**就是 B2 `generate_one_training_set` 调的同一个纯函数**——B1 拿它当预检，判据（候选过滤 + per-period + per-day 硬门）与 B2 运行时**逐字一致、且是全部门而非子集**，不会再漏下一层。`before_caps` 用生产 `PERIOD_BEFORE_CAP`。**这道预检天然包含旧的 `>= 39`**（函数内 `n < 31+months → raise`），故 `_MIN_MONTH_BOUNDARIES` 常量与其一致性测**一并删除**。
+
+> **穷尽 vs B2 的 bounded retry（如实标注）**：B2 生产时 `max_retries=8` + 随机起点，可能 8 个随机候选恰好都撞 per-day 洞而 skip、即便存在第 9 个可行候选。预检用**穷尽**候选（`max_retries` 设到候选数）——它保证的是「**存在**至少一个可行窗口」。这比 B2 强：预检放行 ⟺ 数据形状上真能出货。B2 某一轮因随机 retry 没撞上而 skip，是 B2 既有的 bounded-retry 行为（本 plan 不改），sweep 下一轮换 rng 会再试——那是**产能**问题、非**数据形状**问题，不在 P3-D9 范围。P3-D9 只负责「数据形状上根本出不了货」这一类，且现在真的堵死了。
+
+> **依赖方向**：`qmt_ingest` → `generate_training_sets`（取 `eligible_start_indices`）。`generate_training_sets` 只 import `qmt_normalize`/`qmt_resample`，不 import `qmt_ingest`，无循环。
+
+**（b）拷贝完整性门**（codex R2-F3）：预检管「数据够不够 B2 出货」，但不证「本地拷贝是否被截断」（SMB 传输中断、部分复制）。这个 `export_log.csv` 的 `first_time`/`last_time`/`rows` 可验，故独立增加（1m 与日线各查一次）：
+
+```
+export_log[file].rows       == len(原始 df)（clean 之前）
+export_log[file].first_time == df 首行 time
+export_log[file].last_time  == df 末行 time
+```
+
+任一不符 → `QmtIngestRejected("export_log_mismatch")`。
+
+与 P3-D3 同一立场：`first_time`/`last_time` 的真实格式本会话无法逐字核对，**解析不出来就报错停下**，不静默跳过这道门。
+
+**（c）原始值严格校验门**（codex R13-F2 high + R15-F2 medium + R16-F2 high，均**核实为真**）：拷贝完整性门比对的是 `clean` **之前**的 raw 行数、D10 只对账 dense 1m 跨度、`compute_dense_coverage` 只比时间戳集——**深历史坏 daily 行**与 **值坏但时间戳好的 1m 行**这些门都够不到，而 `resample_calendar`/`build_intraday` 会拿它们合成周/月/盘中线 → 导入报成功却发出损坏训练组。两类坏行都要在导入期拒：
+
+- **被 `clean` 会丢弃/去重的行**（R13-F2）：NaN/非正价/`high<low`/非有限/重复 datetime。QMT 前复权数据本应已 clean，任何丢弃=损坏 → 断言 `len(clean(df_daily)) == len(df_daily)` 且 `df_daily["datetime"]` 无重复，否则 `QmtIngestRejected("daily_clean_dropped_rows")`。
+- **`clean` 不查、却仍污染聚合的列**（R15-F2 daily + R16-F2 1m）：现有 `clean` **不校验 `amount`、不管 `volume` 正负**（`volume` 在 required 列里、NaN 会被丢，但**负 volume / 分数 volume / inf amount 不丢**）。一行 `amount=inf` 或 `volume=-5` 能过 `clean`（len 不变）却让聚合的 Σamount/Σvolume 变垃圾。故对 **1m 与 daily 两者**、**每一行**断言：`amount` 有限非空、`volume` 有限整数且 `>= 0`，否则 `QmtIngestRejected("bad_amount_or_volume")`。**1m 侧尤其不能省**（codex R16-F2，high，**核实为真**——推翻我 R15「仅 daily 需要」的说法）：一行 OHLC 有效、时间戳有效、只是 `volume`/`amount` 坏的 1m 行**保住当日 241 时间戳集** → 过 `compute_dense_coverage`（它只比对**时间戳集** == canonical 241，不看值）→ 被 `build_intraday` 聚合进 3m/15m/60m 写入训练组；D10 值对账若聚合总额碰巧相符也拦不住。故 1m 的 amount/volume 校验**必须在 `compute_dense_coverage`/`build_intraday` 之前**跑。
+
+下游 `resample_calendar`/`build_intraday` 用的就是这份已验的数据。**daily 独有的是上一条 len-无损门**（1m 坏 OHLC 行走非-dense 整日 drop、已覆盖）；**amount/volume 值校验两者都要**。
+
+另外，导入成功时**打印**日线首末日期 + 月边界数 + dense 带 —— 可观测性用来补「强制不了全历史」这块（运维一眼能看出这只股的日线是不是短得离谱）。
+
+> **清洗顺序内的位置**：拷贝完整性门 (b) 要 raw 行数、在 `clean` **之前**；daily 无损门 (c) 在 `clean(df_daily)` **之后**紧接（比对 clean 前后 len）。出货可行性预检 (a) 要**六周期 bar DataFrame** + `month_boundaries`/`dense_dates`/`trading_dates`，排在 `build_intraday`+`resample_calendar`+`daily` **之后**、`to_kline_records` 之前；`build_training_windows` 只按 `datetime` 切窗口、不读指标列，故可在 `compute_indicators` 之前跑。
+
+### P3-D12：写入器的威胁模型 = 单一生产者 + 结构性纵深防御（不是独立全门）
+
+**这一节经 codex R7-F3→R9-F2→R10-F1→R11-F1 连挖 4 轮 high 后，user 2026-07-23 裁决了威胁模型**，从根上收掉「写入器要不要独立重跑装配层每道门」这个地鼠家族：
+
+**威胁模型（写进 spec 与 PR body，不含糊）**：破坏性写入器 `write_qmt_stock` 的**唯一被支持入口是 `build_stock_import`**——CLI、pilot 脚本、测试夹具**一律**先经 `build_stock_import`（它已跑完 D10 四门 + D9(a) `build_training_windows` 全门 + D9(b) 拷贝完整性）再把产出的 bundle 交给写入器。**「绕过 `build_stock_import`、手工构造 raw bundle 直接喂 `write_qmt_stock`」不是受支持的用法**，spec 不承诺对其提供完整 fail-closed 语义。理由：让写入器独立重跑装配层每一道门 = **维护两套判据的副本**（正是四轮 high 的病灶——第二套永远比第一套少一道、且会漂移），既浪费（每次导入双跑 `build_training_windows`）又收不干净。
+
+**但写入器仍保留一层轻量结构性防御 `validate_import_bundle`**（防 `build_stock_import` 自身回归产出畸形 bundle、防显然的调用错误；**不是**独立全门）。在 `write_qmt_stock` 取连接前调用，断言：
+
+- `bundle.records` 的 key 集合**恰好** == `PERIODS` 六周期；每周期记录列表**非空**；
+- **每条记录 `period` == 所在 key 且 ∈ `PERIODS`**（R9-F2：`klines` 无 period CHECK，错 period 会 DELETE 六周期后按错周期 INSERT）；
+- **全体记录的 `stock_code` 去重后 == `{传入的 stock_code}`**（R9-F2 + R11-F2 统一：身份唯一由参数决定，任一记录串股即拒——这条同时封住「记录与被锁/被查的股不一致」）；
+- 每条记录含必需字段（`_INT_COLS` + 价格四列非空）；每周期内 `datetime` **无重复**（R10-F1：`ON CONFLICT` 会 last-wins 静默塌库、行数与 count 失配）；
+- **每条记录 `amount` 有限非空、`volume` 有限整数且 `>= 0`**（codex R17 writer-side：与 ingest 侧 P3-D9(c) 同判据，但守的是**破坏性写入器**——这是 validate_import_bundle 已有的逐记录结构检查的自然延伸、几乎零成本，防坏值经 raw-bundle 路径 DELETE 六周期后写垃圾聚合源）；
+- **`coverage` 与 `daily` 记录自洽**（R10-F1，从 bundle 自身重建、破坏性 DELETE 前查；F1b 修正见下）：
+
+  ```python
+  # 全部用显式 if/raise，禁 assert（codex R16-F3：python -O 会剥 assert，破坏性写入器前置守卫失效）
+  daily_dates = { trading_date(r["datetime"]) for r in bundle.records["daily"] }
+  in_span     = { d for d in daily_dates if start_date <= d <= end_date }
+  bad = (
+      not (start_date <= end_date) or dense_day_count < 1
+      or start_date not in daily_dates or end_date not in daily_dates   # 端点必须真有 daily 行
+      or not all(isinstance(d, date) for d in dropped_dates)
+      or not set(dropped_dates).isdisjoint(in_span)                     # F1b：dropped 在区间外、不相交
+      or dense_day_count != len(in_span - set(dropped_dates))           # count 就是这么来的
+  )
+  if bad:
+      raise InvalidImportBundleError(...)
+  ```
+
+  > **F1b 修正**（codex R11-F1，high，**核实为真**：我 R11 写的 `all(start<=d<=end for d in dropped)` **方向反了**）：`compute_dense_coverage` 的 `dropped_dates` 是**被丢弃的边界 partial 日**，按持久化-as-is 语义它们**本就落在 complete 跨度 `[start,end]` 之外**（前导/末尾残缺日）。要求 dropped 落在区间内会**误拒合法 bundle**。正确不变量 = dropped 与 in-span dense 日**不相交**（真是被丢的、不算数），不要求它们在区间内。count 公式 `count == len(in_span − dropped)` 本身不变、仍对（dropped 在区间外时相减为 no-op）。
+
+**关于 F1a（盘中周期完整性）——刻意不在写入器重验**：codex R11-F1 还要求写入器验「3m/15m/60m 精确覆盖 dense 日、每日桶数对」。按上面的威胁模型，这道**归 `build_stock_import` 的 D9(a) 预检**（`build_training_windows` 全门已含 per-day 桶数硬门），写入器不重复。raw-bundle 注入畸形盘中数据 → 属「不受支持的用法」，且**下游仍有兜底**：B2 `generate_one_training_set` 读时的 per-day 硬门 + `dense_day_count` 交叉校验会 skip 它（坏数据不出货，只是不像 CLI 路径那样在导入期就 fail）。
+
+任一 `validate_import_bundle` 检查不满足 → `InvalidImportBundleError`，**零 DELETE / 零 INSERT**。**全部检查用显式 `if/raise`、不用 `assert`**（R16-F3：与 R15-F1 身份检查同一理由——`python -O` 剥 assert 会让破坏性写入器的前置守卫整个失效、坏 bundle 部分替换掉真数据）。纯函数、host 单测、先于取锁与 DELETE；加一条 `python -O` 下守卫仍生效的测。
+
+---
+
+## 3. 架构（数据流）
+
+```
+QMT 导出目录
+  ├─ {code}_{name}_1分钟K线_前复权.csv  ┐
+  ├─ {code}_{name}_日K线_前复权.csv     ├─ parse_qmt_csv（剥 BOM / 打包整数 → Unix 秒；产 QmtSource，code 从文件名派生）
+  └─ export_log.csv                     ┘   + parse_export_log（status 门）
+        │
+        ├─ clean(df_1m) / clean(df_daily)          ← 丢 NaN/非正价/非有限/high<low + 去重 + 升序
+        │
+        ├─ reconcile_sources(...)                  ← D10 四门，任一不过 → 整只股拒绝
+        │
+        ├─ build_intraday(df_1m)  → 3m/15m/60m（只保留 dense 完整日，D9(a)）+ DenseCoverage
+        ├─ resample_calendar(df_daily, weekly/monthly)
+        └─ df_daily 本体 → daily
+                │
+                └─ compute_indicators 逐周期 → to_kline_records → ImportBundle
+                        │
+                        └─ validate_import_bundle（六周期齐/非空/同股/coverage 自洽 → 否则拒，连接前）
+                        └─【单事务】try 按股锁(拿不到→ImportBusyError) → 守卫 → 互锁(该股已有训练组→拒)
+                                    → stocks → DELETE 该股六周期 klines → INSERT 6×klines
+                                    → stock_coverage UPSERT ── COMMIT（锁自动释放）
+                                    （只读 training_sets 作互锁、不删不改、不删 zip）
+                                        │
+                                        ▼
+        B2 generate_one_training_set：
+          ① try 按股锁(IMPORT_GEN_LOCK_KEY, stock_key)  ← 拿不到 = 该股正在导入，skip
+          ② 【REPEATABLE READ READ ONLY 事务】coverage + 6×klines 一次快照读 → COMMIT
+          ③ existing_starts → 全局 B2 锁 → 锁内 _exists_start → 写 zip → 登记
+          ④ finally 释放全局锁、再释放按股锁
+```
+
+锁序恒为 **按股锁 → 全局锁**，B1 只取按股锁 → 无环、无死锁（P3-D8）。
+
+---
+
+## 4. 组件设计
+
+### 4.1 `backend/qmt_ingest.py`（新，纯函数，无 asyncpg）
+
+- `QmtSource(code, period, df)`（P3-D1/R14-F1）；`parse_qmt_csv` 产 `QmtSource`（身份随数据端到端携带）
+- `parse_export_log(path) -> dict[(code, period), ExportLogEntry]` + `@dataclass ExportLogEntry`（P3-D3；entry 带 code/period；重复 key fail-closed）
+- `build_stock_import(src_1m: QmtSource, src_daily: QmtSource, *, stock_code, stock_name, entry_1m, entry_daily) -> ImportBundle`（P3-D1/D2；entry **必填无默认**）
+- `class QmtIngestRejected(Exception)`：携带机器可读 `reason`
+- 出货可行性预检**复用** `generate_training_sets.build_training_windows`（P3-D9(a)，B2 出货逻辑本体、全门；不再自持 `_MIN_MONTH_BOUNDARIES` 代理，也不止步于 `eligible_start_indices` 子步骤）
+- 内部顺序：**四方身份一致（R14-F1/R15-F1，`if/raise`，`source_identity_mismatch`）** → **拷贝完整性门（P3-D9(b) `export_log_mismatch`，clean 前，比对 raw 行数）** → `clean(src_1m.df)` / `clean(src_daily.df)` → **原始值校验门（P3-D9(c)：daily len-无损 `daily_clean_dropped_rows` + 1m&daily 的 amount/volume `bad_amount_or_volume`，都在 `compute_dense_coverage`/`resample` 之前）** → `reconcile_sources`（含 status 门）→ `build_intraday` → `resample_calendar` ×2 → **出货可行性预检（P3-D9(a) `no_eligible_training_window`，传 `dropped`）** → 逐周期 `compute_indicators` → `to_kline_records`
+
+拒绝时**不做任何部分产出**（不返回「已经算好的那几个周期」）。
+
+### 4.2 `backend/import_csv.py`（改，薄壳）
+
+- `_assert_klines_price_columns_double` **签名与语义原样保留**；QMT 路径**另加**一条 `_assert_stock_coverage_exists`（`to_regclass('stock_coverage') IS NOT NULL`），同事务内紧随其后调用。防目标库未跑 migration 0004 时 klines 写成功、coverage 写失败 → 事务回滚但报错信息晦涩。
+- `write_to_postgres`（通用 CSV 路径）**必须改**（P3-D11，非「只加不改」——见该决策）：取锁前断言 `{r["stock_code"]} == {参数}`（R11-F2）+ 事务内加按股**非阻塞** `pg_try_advisory_xact_lock`（拿不到→`ImportBusyError`）+ `stock_coverage` 有行即 `LegacyImportBlockedError` fail-closed。
+- 新 `write_qmt_stock(dsn, stock_code, stock_name, bundle) -> WriteResult`（P3-D4 替换语义 + P3-D8 按股 **非阻塞** xact 锁 + P3-D10 重导入互锁 + P3-D12 `validate_import_bundle`）；返回每周期写入行数。**威胁模型（P3-D12）**：唯一被支持入口是 `build_stock_import`（它已跑完全部装配层门）；`validate_import_bundle` 是**结构性纵深防御 + 身份一致**，非独立全门。取连接前先 `validate_import_bundle`；**只读 `training_sets` 一条 `SELECT 1` 作互锁、不删不改、不 unlink zip**。四种 fail-closed 各自独立异常：坏 bundle → `InvalidImportBundleError`；锁被占 → `ImportBusyError`（可重试）；已出货 → `ReimportBlockedError`；schema 漂移 → `SchemaDriftError`。全部零写入。
+- `validate_import_bundle(bundle, stock_code)`（P3-D12，纯函数，无 asyncpg，host 单测）。
+- CLI 新增 `--qmt` 分支（P3-D6），成功时打印：每周期行数 / dense 带 / 日线首末日期 + 月边界数（P3-D9 可观测性）；被互锁拒绝时打印 `ReimportBlockedError` 原因并退非零码。
+
+### 4.3 `backend/generate_training_sets.py`（改，读路径 + 一把新锁）
+
+- 新常量 `IMPORT_GEN_LOCK_KEY` + `stock_lock_key(stock_code) -> int`（P3-D8；纯函数，可 host 单测，B1 侧 import 它，保证两端用同一把 key —— **不允许两边各写一份 crc32**）。
+- `generate_one_training_set`：最外层 try **session 级**按股锁（`pg_try_advisory_lock`）→ 把 coverage + 六周期读包进 `conn.transaction(isolation="repeatable_read", readonly=True)`（P3-D5）→ 其余流程不变 → `finally` 里在释放全局锁之后释放按股锁。
+- **其它逻辑（交叉校验、窗口选择、全局锁的位置、写入、登记）一字不动。**
+
+---
+
+## 5. 测试与验证
+
+### 5.1 host pytest（纯函数层，`backend/tests/test_qmt_ingest.py` 新建）
+
+- **D10 四门各一条拒绝测**：export_log 非 ok / 日线尾部截断（`daily_not_cover_dense`）/ 跨度内日期集不等（`date_set_mismatch`）/ OHLCV 超容差（`ohlcv_mismatch`）→ 均抛 `QmtIngestRejected` 且 `reason` 精确匹配，**且断言零产出**。
+- **D9(a)**：某日缺 1 根 1m → 该日**全部**盘中周期零行（不是只丢缺的那一桶），且该日不在 `dense_dates`。
+- **清洗顺序**：某日一行价格为 0（被 `clean` 丢）→ 该日落入非 dense，而非伪装成完整日。
+- **export_log 解析**：候选标识列各命中一例；候选全不命中 → 抛 `QmtSchemaError`；查不到条目 → 拒绝该股。
+- **export_log 重复行（P3-D9/R8-F3）**：同 `(code,period)` 有 `error` + `ok` 两行 → 抛 `QmtSchemaError("export_log_duplicate")`，**不按行序取 ok**（mutation：把去重检测去掉、退回 dict 覆盖 → 此测必挂）。
+- **四方身份一致（R12-F1 + R14-F1 + R15-F1）**：`parse_qmt_csv(path)` 产出的 `QmtSource.code` **== 文件名派生 code**（权威绑定在解析边界，非调用方随口填）；`build_stock_import` 传 **A 的 `src`（code=A）+ B 的 `stock_code` + B 的 `entry`** 且行数/端点碰巧全等 → 抛 `source_identity_mismatch`；单把 entry 换别股 `ok` → 抛；1m/daily 传反 → 抛。**用显式 `if/raise` 实现、非 `assert`**（`python -O` 会剥 assert）——加一条测：`python -O` 下该拒绝仍生效（或直接断言实现里无 `assert` 于信任检查）。mutation：去四方检查任一 → 对应张冠李戴/错文件溜过、必挂。
+- **coverage artifact 值**：`dense_day_count == len(dense_dates)`，端点 == 首/末 dense 日。
+- **周期分工**：`daily` 行数 == 日线 CSV 清洗后行数（证明未按 1m 跨度裁剪）；`monthly`/`weekly` 不含 partial 当期。
+- **P3-D9(a) 出货可行性预检**：构造多类都能过 D10 四门、都写得成 coverage 的输入 → ① 月边界只有 38 → 抛 `no_eligible_training_window`；② 日线 ≥ 39 月**但 dense 1m 只覆盖短短几个月** → 抛（R8-F1）；③ **候选够、但选中窗口有一天盘中桶数不足** → 抛（R9-F1，跑 `build_training_windows` 全门才抓得到）；④ **一个 dropped 日的 daily 行也缺失（不在 trading_dates）、每个候选窗口都跨它** → 抛（R16-F1：只有把 `dropped` 传进预检才与 B2 一致、否则预检放行 B2 产 0）；⑤ 全部够 → 放行。**断言 B1 预检调的就是 `generate_training_sets.build_training_windows` 本身、且四个 kwarg（`dense_dates`/`trading_dates`/`before_caps`/`dropped`）全传**（mutation：把该函数的 per-day 门改严 或 **预检漏传 `dropped`** → B1 预检行为与 B2 分叉、对应测必挂）。
+- **`stock_lock_key` 纯函数**：同一 code 恒定、落在 int4 正区间。
+- **P3-D9(b) 拷贝完整性门**：`rows` 少一行 / `first_time` 对不上 / `last_time` 对不上 → 各一条 `export_log_mismatch`；`first_time` 格式解析不出 → 报错而非放行。
+- **P3-D9(c) 原始值校验门（R13-F2 + R15-F2 + R16-F2）**：构造行都落在 **dense 1m 跨度之外** / 或保住 241 时间戳集、且 raw 行数/端点与 export_log 相符（拷贝完整性门 + D10 + dense 检查都看不见）→ ① 深历史一行 daily OHLC 为 0/NaN → `daily_clean_dropped_rows`；② daily 重复 datetime → 拒；③ daily 一行 `amount=inf` / ④ `volume=-5` / ⑤ `volume=NaN` → `bad_amount_or_volume`；**⑥ 一只股某日 241 时间戳齐全、但其中一根 1m `volume=-5`** / **⑦ 一根 1m `amount=inf`** → **`bad_amount_or_volume`**（关键 R16-F2 回归：该日仍是 dense、坏值会被聚合进 3m/15m/60m；若无 1m 值校验此测放行=坏数据进训练组）；全净 → 放行。mutation：分别去掉 daily len 断言 / amount-volume 断言（尤其 **1m 侧**）→ 对应测各自必挂。**这三条必须直接调纯函数 `build_stock_import` 来测**（codex R3-F3：门若只存在于 CLI 里，非 CLI 调用方就绕过去了）；另加一条「不传 entry 就 `TypeError`」的签名测，钉住「没有默认放行的后门」。
+
+### 5.2 host pytest（写库壳 / 读路径，假 asyncpg conn）
+
+- `write_qmt_stock`：断言**所有写语句都发生在同一个 transaction 上下文内**；断言顺序 = bundle 校验 → try 按股锁 → schema 守卫 → **互锁 `SELECT 1`** → `DELETE` → `INSERT`；守卫失败 → 零 DELETE 零 INSERT（**尤其要证明守卫失败时不会先把旧数据删掉**）。
+- **P3-D12 bundle 校验**（纯函数直测）：缺一个周期 / 多一个周期 / 某周期空列表 / **某记录 `period` 与 key 不符** / **某记录 `period` 不在 `PERIODS`** / **某记录 `stock_code` ≠ 参数（去重集 ≠ `{arg}`）** / 某记录缺必需字段 / **某记录 `amount=inf` 或 `volume=-5`（R17 writer-side）** / **某周期有重复 datetime** / coverage `start>end` / **`dense_day_count` 与从 daily 记录重建的 dense 天数不符** / **端点不在 daily 日期集内** / `dropped_dates` 非日期列表 → 各一条 `InvalidImportBundleError`；六周期齐全且 coverage 与 daily 记录自洽 → 通过。**F1b 正向测**：`dropped` 落在 `[start,end]` **之外**（合法边界 partial 日，`compute_dense_coverage` 真会产出）→ **必须放行**（防 R11 那条反向断言复活误拒）。**两条重点断言**：① `period` 不符 → 若无此校验，DELETE 六周期后会按错 period INSERT；② `dense_day_count` 不符 → 坏 coverage 提交后才被 B2 发现、旧数据已毁（mutation：分别去掉 → 对应测各自必挂）。另测 `write_qmt_stock` 收到任一坏 bundle → **连 DB 都没连**、零写入。
+- **P3-D8 非阻塞锁**（假件）：`pg_try_advisory_xact_lock` 返回 False → `write_qmt_stock` 抛 `ImportBusyError` 且**零 DELETE 零 INSERT**、**不阻塞等待**（断言调用的是 `try` 变体、不是阻塞 `pg_advisory_xact_lock`）。
+- **P3-D10 重导入互锁**：假存储里该股已有一行 `training_sets` → `write_qmt_stock` 抛 `ReimportBlockedError` 且**零 DELETE 零 INSERT**（旧 klines/coverage 一字不动）；该股无训练组 → 放行。**断言互锁 `SELECT 1` 排在 DELETE 之前**（否则先删了才发现该拒、旧数据已毁）。
+- **替换语义**（P3-D4）：断言 `DELETE ... WHERE stock_code=$1 AND period = ANY(...)` 在任何 INSERT 之前、且六周期全覆盖。回归测：先写一份含旧日期的 bundle、**在尚无训练组的窗口内**再写一份窗口前滑的 bundle → 假存储里**不残留**旧窗口的盘中行（重导入前不 generate，绕开互锁；正是 P3-D10 说的可达窗口）。
+- `stock_coverage` UPSERT 参数逐值断言（含 `dropped_1m_dates` 的 JSON 字符串形状与 `_fetch_dense_coverage` 解析对称——**同一条数据走一遍写再走一遍读**，而不是各测各的）。
+- B2 读路径：断言 `conn.transaction` 以 `isolation="repeatable_read", readonly=True` 打开，且 coverage + 6 次 klines 读全部落在该事务内、`_fetch_existing_starts` 落在事务外。
+- B2 按股锁（P3-D8）：断言取锁**发生在打开 RR 事务之前**、释放**发生在登记之后**、且释放顺序是先全局后按股；`pg_try_advisory_lock` 返回 False → `GenerateSkipException` 且**零 zip 写入**。
+- **P3-D11 通用路径护栏**：目标股在 `stock_coverage` 有行 → `write_to_postgres` 抛 `LegacyImportBlockedError` 且**零 INSERT**；无行 → 行为与改动前逐字一致（既有测试全绿即为证）；断言锁与检查都在 INSERT 之前。
+- **P3-D11 记录-参数身份（R11-F2）**：records 的 `stock_code` 与参数 `stock_code` 不一致（尤其「参数=未管理股、记录=已管理股」）→ `write_to_postgres` 抛 `ValueError` 且**零写入**、**在取锁/查 coverage 之前**就拒（mutation：去掉这条一致性断言 → 错 code 能改脏被管理股的 klines、此测必挂）。
+
+> 假件的界限：假 conn **不可能**证明 PG 的 RR 快照语义或 advisory lock 的跨连接互斥（这正是 `feedback_verify_foundational_infra_assumption_real_not_fake` 的坑：自写 double 会静默建模**错误**语义）。假件测的是「我们确实按预期参数、按预期顺序调了这些」；语义本身由 §5.3 证明，真写入器由 §5.4 证明。
+
+### 5.3 真 PG 语义验证脚本（`backend/scripts/verify_repeatable_read_snapshot.py`）
+
+参照现有 `backend/scripts/verify_advisory_lock_reentrancy.py` 的形态（docker `postgres:15.12` + asyncpg，一次性、不进 CI 套件）。此脚本用**手写 SQL 扮演 B1**，只验基础设施语义：
+
+1. RR 只读事务内第一次读之后，另一连接 INSERT klines + UPDATE stock_coverage 并 **COMMIT**；同事务内第二次读**仍看到旧值**（coverage 与 klines 都验）。
+2. 同一时刻，**事务外**的第三个连接**看得见**新值 —— 证明写方真的提交了（防「写方其实没写成，快照测试空转全绿」）。
+3. `SHOW transaction_isolation` 在该事务内 == `repeatable read`；事务内尝试写 → 被 PG 拒（证明 `readonly=True` 真生效）。
+4. 导入事务**未提交**时，外部连接**既看不到 coverage 行也看不到 klines 行**；提交后**同时**看到（P3-D4 原子性）。
+5. **按股锁（P3-D8）**：连接 A 持 `pg_advisory_lock(K, s1)` → 连接 B 对同一 `s1` 的 `pg_try_advisory_lock` 返回 **False**、对不同股 `s2` 返回 **True**（证明按股隔离真的按股，而不是退化成全局或形同虚设）。
+6. **B1 事务级锁足够 + 非阻塞不挂起（P3-D8 / R7-F2）**：连接 A 持 session 锁 `pg_advisory_lock(K, s1)`（模拟 B2 正生成、且卡住不放）→ 连接 B 用 **`pg_try_advisory_xact_lock(K, s1)`** 立刻返回 **False**（**不阻塞**，证明 B1 导入不会无限期挂在卡住的 B2 后面）；A 释放后 B 的 try 返回 **True** 并随其事务提交自动释放（证明 B1 锁如期释放、不多占）。**反向对照**：若 B 改用阻塞 `pg_advisory_xact_lock`，A 持锁期间该调用会**卡住**（脚本用短超时探测到「阻塞发生了」）——证明 try 与阻塞语义的差别真实存在，B1 选 try 确实避免了挂起。B2 的 session 级锁另由 §5.2 假件测顺序 + 第 5 条互斥语义共同覆盖。
+
+脚本输出逐条 PASS/FAIL，任何一条 FAIL 即非零退出。
+
+### 5.4 真 PG 端到端链路脚本（`backend/scripts/verify_qmt_pg_chain.py`）——L2，**合并前必跑**
+
+codex R1-F3（medium，**核实为真**）：§5.5 那条 CI 集成测的存储层是假 conn，`write_qmt_stock` 的真 SQL / 参数绑定 / JSONB 编解码 / 事务行为一行都没跑过；只有它绿就宣称链路可用属过度宣称。故新增这条脚本，跑**真**代码路径：
+
+**顺序严格按生产真实时序排**（codex R6-F1，high，**核实为真**：我上一版把「generate 登记」排在「重导入证替换」之前，可 P3-D10 互锁一旦有训练组行就在 DELETE 之前抛 `ReimportBlockedError` → 替换路径永远到不了，L2 声称验替换却验不到。这是我加互锁时自己引入的排序回归）。正确时序 = **导入 → 未生成时重导入证替换 → 生成 → 已生成后重导入证互锁**：
+
+```
+docker postgres:15.12 → 应用 schema.sql
+  ① 真 build_stock_import(fixture A) → 真 write_qmt_stock   ← 首次导入（此刻该股尚无训练组）
+  ② 真 build_stock_import(窗口前滑的 fixture B) → 真 write_qmt_stock  ← 仍无训练组，互锁放行
+       断言：DELETE+INSERT 替换生效——旧窗口盘中行从库里消失（P3-D4，可达因为还没 generate）
+  ③ 真 generate_one_training_set(真 conn, ...)              ← 真 RR 事务 / 真两把锁；登记 training_sets 行
+       断言：磁盘真出现 zip、training_sets 真有登记行、content_hash 与 zip 字节相符
+       断言：stock_coverage 行内容 == 最后一次 build_stock_import 的 CoverageArtifact
+  ④ 真 write_qmt_stock(同一只股)                            ← 此刻已有训练组
+       断言：真抛 ReimportBlockedError、klines/coverage/training_sets 零变化（P3-D10 互锁）
+  ⑤ 真 write_to_postgres(同一只股，通用 CSV 路径)
+       断言：真抛 LegacyImportBlockedError、库里零变化（P3-D11）
+```
+
+替换（②）与互锁（④）落在**同一只股的两个不同时点**，天然不冲突、都真跑到；核心出货（③）也在其间被证。
+
+**这条 L2 脚本是 `write_qmt_stock` 真 SQL 唯一被真跑的地方，重要性最高——但它不是自动化门（见下）。合并前由控制者本人真跑一次，完整输出贴进 PR body。**
+
+> **F2 收口（codex R5-F2，medium，核实为真；user 2026-07-23 裁决＝降级措辞、不进 CI）**：我上一版把 L2 写成「阻断门」，但它只靠人肉贴输出、CI 不强制 —— 这是**名不副实的门**（CI 可以全绿而 L2 从未跑）。诚实的收口是**降级它的宣称**，而不是假装它是自动门：
+> - L2 的定位改为「**合并前必须由控制者真跑并贴输出的流程步骤**」，**不是** CI 自动门。
+> - 因此 §0.2 的口径同步修正：**CI 绿 ≠ 链路已证**；「B1→B2 通了」这个结论的证据是「L1 CI 绿 **且** 控制者贴出的 L2 真跑输出」，后者是流程纪律、非机器强制。
+> - **不进 CI 的取舍**：把 `verify_qmt_pg_chain.py` 做成带 postgres service 的必需 CI job 是更强的保证，但那是 `.github/workflows` 改动＝信任边界 + CI 治理，需单独过 codex 审 workflow，且扩这批 PR 的范围。user 裁决先降级措辞、把「真-PG 进 CI」留作独立的 CI 治理改动（与 Plan 4 容器化 smoke 合并考虑）。**这条取舍如实写进 PR body，不含糊。**
+
+### 5.5 端到端逻辑链集成测（`backend/tests/test_qmt_e2e_generation.py` 新建）——L1，进 CI
+
+`QMT fixture CSV → build_stock_import → 假 conn 充当存储 → 真 generate_batch → 断言 ≥1 个 zip 产出且 training_sets 有登记行`。
+
+- fixture **不进仓**：dense 1m 一年 ≈ 242 交易日 × 241 根 ≈ 5.8 万行（**估算**，实施时以实际生成为准），落盘约数 MB。用测试内**生成器函数**造 DataFrame / 临时 CSV，仓里只保留现有小样本 `backend/tests/fixtures/sample_1m.csv` 供解析级测试。
+- fixture 跨度须同时喂饱：B2 的 8 个前向月 + 盘中 before-context（3m/15m/60m 各 150 根 → 最长 60m 需 ~38 个交易日）+ 日线/月线 before-context（monthly 全取 → 日线需数年历史）。**日线造多年、1m 只造近一年**，正是真实 QMT 的形状。
+- 断言产出 zip 的 `content_hash` 与磁盘字节一致（沿用现有 helper），并断言 `generate_batch` 返回的成功计数 ≥1。
+
+### 5.6 mutation 验证（强制）
+
+每一条新增的门测试必须做 mutation：把被测的门改坏 → 对应测试**必须挂**。至少覆盖这几处：`date_set_mismatch` 判据改成恒 True、事务隔离级别改回默认、`readonly` 去掉、coverage 写入注释掉、**`DELETE` 去掉（替换退化成 UPSERT）**、**按股锁改成恒返回 True**、**出货可行性预检去掉（`no_eligible_training_window` 不再拦）**、**预检从 `build_training_windows` 退回 `eligible_start_indices`（per-day 门失败的股能过导入 → R9-F1 测必挂）**、**`export_log_mismatch` 门改成恒放行**、**export_log 去重检测去掉（重复行退回 dict 覆盖）**、**通用路径护栏去掉**、**`entry_1m/entry_daily` 给上默认值**、**P3-D10 互锁 `SELECT 1` 去掉**、**互锁排到 DELETE 之后**、**`validate_import_bundle` 去掉 period-match 断言（错 period 能溜进 DELETE+INSERT → R9-F2 测必挂）**、**去掉 coverage-count 重建断言（坏 count bundle 能删旧数据+提交 → R10-F1 测必挂）**、**去掉每周期 datetime 去重断言（重复 datetime 静默塌库）**、**去掉 records-stock_code=={arg} 断言（串股/错 code 溜进 DELETE → R11-F2/R9-F2 测必挂）**、**`write_to_postgres` 去掉 records-参数身份断言（错 code 改脏被管理股 → R11-F2 测必挂）**、**`build_stock_import` 去掉四方身份一致断言任一（张冠李戴/别股 ok 条目/period 错位溜过 → R12-F1/R14-F1 测必挂）**、**去掉 daily 无损门（深历史坏行被 clean 静默丢弃 → R13-F2 测必挂）**、**去掉 daily amount/volume 校验（深历史 inf-amount / 负-volume 污染聚合 → R15-F2 测必挂）**、**去掉 1m amount/volume 校验（241 齐全但坏值的 1m 行污染盘中聚合 → R16-F2 测必挂）**、**`validate_import_bundle` 去掉 amount/volume 检查（坏值经 raw-bundle DELETE 后写垃圾聚合源 → R17 writer-side 测必挂）**、**预检漏传 `dropped`（预检与 B2 分叉、dropped 日股导入过却 B2 产 0 → R16-F1 测必挂）**、**四方身份检查或 `validate_import_bundle` 从 `if/raise` 改回 `assert`（`python -O` 下失效 → R15-F1/R16-F3 测必挂）**、**两条写入路径的锁从 `try` 改回阻塞 `pg_advisory_xact_lock`（不挂起测必挂）**。由控制者本人复验，不采信 subagent 自证。
+
+### 5.7 闸门纪律
+
+- 所有 pytest 用仓库根 `.venv`（Python 3.11）：`cd backend && ../.venv/bin/python -m pytest tests/ -q`。host `python3` 是 3.14，跑 pandas 会段错误。
+- 任何 `cmd | tail/grep` 都加 `set -o pipefail` 或改 `cmd; echo EXIT=$?`；判绿读输出内容，不看 exit code。
+- 每条闸门/git 命令同时打印 `branch` + `HEAD`。
+- 基线：`main` `08d70d2` = **`255 passed`（本文写作时已实测确认，非从记忆推断）**。任何 Task 结束时测试数只增不减，且 0 failed / 0 skipped。CI 禁 skip，不得新增任何 `skip`/`xfail`。
+
+---
+
+## 6. 验收标准（spec 级；非-coder 验收清单在 plan 阶段出）
+
+1. 用 fixture QMT CSV 跑 B1 QMT 模式 → `stock_coverage` 有该股一行，端点/`dense_day_count`/`dropped` 与 `compute_dense_coverage` 一致。
+2. **L1（CI 机器强制）**：假 conn 存储上跑 `generate_batch` → 真产出 ≥1 个训练组 zip + `training_sets` 有登记行。
+3. **L2（流程纪律，非 CI 门）**：真 PG 上跑**真** `write_qmt_stock` + **真** `generate_one_training_set` → 真出 zip（`verify_qmt_pg_chain.py`，控制者真跑、输出贴 PR body）。**L1 CI 绿 + L2 输出贴出，两者齐备才算「出货能力被证明」**——CI 绿本身不等于链路已证（§0.2 F2 口径）。这是 Plan 3 的核心验收项，也是 Plan 2 无法做到的那一条。
+4. D10 四门、D9(a)、P3-D9 日线历史门各有一条拒绝路径被测试覆盖，拒绝时数据库零写入。
+5. B2 的 coverage + 六周期读在同一个 RR 只读事务内（假件测参数 + 真 PG 脚本测语义，两者都绿）。
+6. B1 导入是**替换**而非叠加：在**尚无训练组的窗口内**重导一份窗口前滑的 bundle 后，旧窗口盘中行从库里消失（假件回归测 + 真 PG 脚本 ② 各一条）。**真 PG 脚本的时序 = 导入 → 未生成时重导入证替换 → 生成 → 已生成后重导入证互锁**，替换与互锁不互相遮蔽（§5.4）。
+7. 按股锁真的按股：同股互斥、异股不互斥、B1 事务级锁随提交释放（真 PG 脚本第 5、6 条）。
+8. **写入器 fail-closed**（各零写入）：① 结构性坏 bundle / 记录串股 → `InvalidImportBundleError`（P3-D12 结构性纵深防御，破坏性 DELETE 之前）；② 通用 CSV 路径对已被 QMT 管理的股拒写、且记录-参数身份必须一致（P3-D11 + R11-F2）；③ QMT 重导入对已出过货的股拒写（P3-D10 互锁）；④ 该股正被 B2 生成 → `ImportBusyError` 可重试、**不挂起**（P3-D8 非阻塞）。**威胁模型**（P3-D12）：写入器唯一被支持入口 = `build_stock_import`（已跑全部装配层门）；raw-bundle 绕过它属不受支持用法，畸形盘中数据由下游 B2 per-day 硬门兜底 skip（不出货），不在导入期 fail —— 这条口径写进 PR body。
+9. 日线：**只宣称**「导入期已用 B2 合格性判据预检过可出货（`no_eligible_training_window` 拦掉 dense-1m-过短的股）+ 拷贝完整性（export_log 端点/行数）+ daily `clean` 无损（深历史坏行拒）已强制」，**不宣称**「已验证全历史」。
+10. **明确不做**：重导入不**作废**已存在的 `training_sets`（P3-D10 只加 fail-closed 互锁禁止已出货股的重导入；作废/版本化拆独立 plan）。PR body 写明这条口径，不假装闭合。
+11. **部署纪律（P3-D8 / R13-F1 / R17-F1）**：Plan 3 的 B1+B2 同批部署；**首次 QMT 导入前重启/drain 调度器**（根本正解——未升级旧 B2 无法被新代码 fence）；QMT 导入 CLI 机器可检地拒绝在有活动 scheduler 时运行（探测全局 B2 锁）。写进 PR body 与非-coder 验收清单。当前无在跑守护进程、实际偏斜窗口为零。
+12. 后端 pytest 全绿、零 skip；PR CI 全绿。
+
+---
+
+## 7. 风险 / 开放项
+
+| 风险 | 处置 |
+|---|---|
+| `export_log.csv` 真实列名未逐字核对 | P3-D3 候选集 + fail-closed 报错；Plan 4 挂 SMB 时逐字核对并收窄 |
+| 端到端 fixture 体量大、测试变慢 | 生成器造数据、不落仓；若单测超时明显，可把 1m 跨度收到刚好喂饱 B2 的最小天数（实施期实测决定，不预先猜） |
+| `PERIOD_BEFORE_CAP` 与真实 1m 只有一年 → 真数据可能候选稀疏 | 属 Plan 4 真跑时的产能问题；Plan 3 只需证明通路，产能低会在 Plan 4 的储备池替补机制里显性化 |
+| RR 事务拉长了 B2 单股读的事务时长 | B2 是单用户内网批处理，长只读事务不冲突；且早退路径仍在第一条语句后返回 |
+| B1 导入与 B2 生成同股冲突 | B1 用**非阻塞** `pg_try_advisory_xact_lock`（P3-D8 / R7-F2）：拿不到即 `ImportBusyError`、CLI 退非零、运维重试，**不无限期挂起**。不损新鲜度不变量（B1 失败即不导入、不会竞态提交） |
+| **已出货股无法用 Plan 3 重导入**（被 P3-D10 互锁拦下） | 有意的 fail-closed：在作废/版本化能力落地前，宁可拒绝重导入也不让旧 zip 与新 klines 并存。真需要重导入某只已出货股时，触发那个独立 plan。CLI 报错明确指向此 |
+| **重导入后旧训练组的作废/版本化**（让 B3 只发当前版本） | **拆独立 plan**（P3-D10 ①）：需 import 版本号/`retired` 状态 + B3 `/download`+`/confirm` 语义变更。互锁已挡住「已出货股产生新旧并存」的路径，故本 plan 无此紧迫性。PR body 如实写明 |
+| **L2 真-PG 非 CI 自动门**，靠控制者真跑 + 贴输出（codex R5-F2 提、R7-F1 再提） | **user 已裁决接受**（2026-07-23：降级措辞、不进 CI）：把真-PG 进 CI（带 postgres service）是独立 CI 治理改动、需单独审 workflow。诚实收口＝§0.2「CI 绿 ≠ 链路已证」+ PR body 贴 L2 输出。**codex R7 再提此条，属已裁决残留，override 收口——非新问题** |
+| **一个交易日同时缺失于 1m + daily 两源 → 侦不到，可能静默发出缺真交易日的训练组**（codex WB R4-F1 high） | **已知局限，user 已裁决（2026-07-23）不建交易日历**。本 plan 数据模型＝「导入的数据本身定义交易日」，本地无独立交易日历/上市日真值源（与 §0.2 已接受的「日线就是该股全部历史、验不了全历史」同类、同理由）。要侦「两源都无」的日历洞须引入权威交易日历——是独立组件、与本模型相左，留 **Plan 4 真数据阶段**或独立 plan。**本 plan 已挡住的**：`reconcile_sources`(D10) 的对称日期集接住「一源有、另一源无」的不一致；`export_log` 行数/端点门接住「CSV 与 manifest 不符」。**只漏**「1m 与 daily 同时都缺某交易日、且 manifest 也不含它」这一窄洞。3a PR body 须如实写明此局限（禁写「dense coverage 已保证无日历洞」类措辞） |
+
+---
+
+## 8. 流程
+
+brainstorming（本文）→ codex spec review → writing-plans → codex plan review → subagent-driven 实施（Sonnet high）→ host pytest 三绿 → requesting-code-review → whole-branch codex（`--scope branch-diff`）→ PR（user push/merge）。
+
+**PR 切分（每 PR ≤3 子项 ≤500 行）：**
+
+| PR | 内容 | 子项 |
+|---|---|---|
+| **3a** | `qmt_ingest.py` 纯装配层（含 P3-D9 两道门）+ `test_qmt_ingest.py` | 2 |
+| **3b** | B2：RR 只读事务 + 按股锁（`stock_lock_key`/`IMPORT_GEN_LOCK_KEY`）+ 假 conn 断言测 + `verify_repeatable_read_snapshot.py`（6 条语义断言） | 3 |
+| **3c** | B1 写库壳（替换语义 + 按股**非阻塞**锁 + coverage UPSERT + 存在断言 + P3-D10 互锁 + P3-D12 `validate_import_bundle`）+ P3-D11 通用路径护栏 + 假 conn 单测 + CLI `--qmt` | 3 |
+| **3d** | L1 端到端集成测（fixture 生成器）+ L2 `verify_qmt_pg_chain.py` 真链路脚本 | 2 |
+
+**顺序理由**：3b 先于 3c，让后面的端到端跑在最终读路径上，不必写完再改。四道写入器 fail-closed（P3-D12 bundle 校验 + P3-D8 非阻塞 + P3-D10 互锁 + P3-D11 护栏）都贴着 `write_qmt_stock`、天然同批进 3c；`validate_import_bundle` 是纯函数，与写库壳同 PR 而非拆去 3a（它的存在意义就是护住这个破坏性写入器）。若 3c 实测超 500 行，把 CLI `--qmt` 拆成独立 3e。**3d 的 PR body 必须**：① 贴 L2 脚本完整输出；② 写明「CI 绿 ≠ 链路已证，凭 L2 输出」（F2 口径）；③ 写明「重导入不作废旧训练组、改以互锁禁止已出货股重导入，作废/版本化拆独立 plan」（P3-D10 口径）。

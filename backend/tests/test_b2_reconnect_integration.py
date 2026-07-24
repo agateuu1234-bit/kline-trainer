@@ -106,6 +106,25 @@ def _build_pg_fixture(days: list) -> dict:
     return bars
 
 
+class _FakeTransaction:
+    """`conn.transaction(isolation=..., readonly=...)` 的假件替身（Plan 3 Task4）：
+    只记录进/出事件 + 调用参数，不建模真实快照隔离语义（那是 Task5 真 PG 脚本的活，
+    见 spec §5.2 界限说明）。异常必须原样透传（`__aexit__` 恒返回 False），
+    对齐真 asyncpg：事务块内抛异常 = 回滚 + 重新抛出，不得被吞。"""
+
+    def __init__(self, conn: "_FakeConn | _MultiStockFakeConn"):
+        self._conn = conn
+
+    async def __aenter__(self):
+        self._conn.calls.append("transaction_open")
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self._conn.calls.append(
+            "transaction_commit" if exc_type is None else "transaction_rollback")
+        return False
+
+
 class _FakeConn:
     """最小 asyncpg conn 替身：按 SQL 子串分派。沿用 test_scheduler.py 的假件约定。
 
@@ -123,12 +142,22 @@ class _FakeConn:
         # 模拟"并发 sweep 在预检之后抢先登记同一起点"：首次 INSERT 撞 ON CONFLICT
         self.steal_first_insert = steal_first_insert
         self._rows_cache: dict = {}     # 见 fetch()：8 万行 to_dict 的结果缓存
-        self.lock_calls: list[str] = []      # 按序记录 "lock" / "unlock"
-        self.lock_held_by_other = False      # True = 模拟另一 session 持锁
+        self.lock_calls: list[str] = []      # 按序记录 "lock" / "unlock"（两把锁共用）
+        self.lock_held_by_other = False      # True = 模拟另一 session 持有 B2 全局生成锁
+        # Plan 3 Task4：True = 模拟另一 session（如 B1 导入）持有该股的按股锁
+        self.import_gen_lock_held_by_other = False
+        # Plan 3 Task4：全操作有序日志（锁/事务/关键读），供顺序断言用；
+        # 精确到 "advisory_lock(IMPORT_GEN)" / "transaction_open" / "fetch:_fetch_dense_coverage" 等 tag。
+        self.calls: list[str] = []
+
+    def transaction(self, *, isolation=None, readonly=False):
+        self.calls.append(f"transaction(isolation={isolation!r},readonly={readonly!r})")
+        return _FakeTransaction(self)
 
     async def fetch(self, query: str, *args):
         if "FROM klines" in query:
             _, period = args
+            self.calls.append(f"fetch:_fetch_period_bars:{period}")
             df = self.bars.get(period)
             if df is None or df.empty:
                 return []
@@ -140,6 +169,7 @@ class _FakeConn:
                 self._rows_cache[key] = hit
             return hit
         if "SELECT start_datetime FROM training_sets" in query:
+            self.calls.append("fetch:_fetch_existing_starts")
             return [{"start_datetime": r["start_datetime"]} for r in self.registered]
         if "SELECT code FROM stocks" in query:
             return [{"code": self.stock_code}]
@@ -147,6 +177,7 @@ class _FakeConn:
 
     async def fetchrow(self, query: str, *args):
         if "FROM stock_coverage" in query:
+            self.calls.append("fetch:_fetch_dense_coverage")
             return self.coverage
         if "FROM training_sets WHERE stock_code" in query:
             code, start = args
@@ -157,11 +188,21 @@ class _FakeConn:
 
     async def fetchval(self, query: str, *args):
         if "pg_try_advisory_lock" in query:
+            if len(args) == 2:      # (IMPORT_GEN_LOCK_KEY, stock_lock_key) —— 按股锁
+                self.calls.append("advisory_lock(IMPORT_GEN)")
+                if self.import_gen_lock_held_by_other:
+                    return False
+                self.lock_calls.append("lock")
+                return True
+            # (B2_GENERATION_LOCK_KEY,) —— 写入临界区全局锁
+            self.calls.append("advisory_lock(B2_GEN)")
             if self.lock_held_by_other:
                 return False
             self.lock_calls.append("lock")
             return True
         if "pg_advisory_unlock" in query:
+            self.calls.append(
+                "advisory_unlock(IMPORT_GEN)" if len(args) == 2 else "advisory_unlock(B2_GEN)")
             self.lock_calls.append("unlock")
             return True
         if "INSERT INTO training_sets" in query:
@@ -214,6 +255,27 @@ def test_real_sweep_registers_at_least_one_training_set(tmp_path):
     assert row["stock_code"] == "000001.SZ"
     assert row["file_path"] == str(gts.path)
     assert row["content_hash"] == gts.content_hash
+
+
+def test_generate_one_training_set_passes_exhaustive_retries(monkeypatch, tmp_path):
+    """R8-F1 wiring：generate_one_training_set 传给 build_training_windows 的 max_retries 必须
+    是**穷尽**（== len(month_boundaries)、与 build_stock_import 出货可行性预检的 n_cand 对齐），
+    不是默认 8——否则导入门穷尽放行的股、B2 前 8 个候选恰好全落坏窗口时会静默产 0。拦截
+    build_training_windows 记下真实 max_retries 后抛 skip（不需真造窗口）。"""
+    import generate_training_sets as gts_mod
+    conn, _days = _fixture_conn()
+    captured: dict = {}
+
+    def fake_btw(period_bars, month_boundaries, rng, *, max_retries, **kw):
+        captured["max_retries"] = max_retries
+        captured["n_bounds"] = len(month_boundaries)
+        raise gts_mod.GenerateSkipException("intercept")
+
+    monkeypatch.setattr(gts_mod, "build_training_windows", fake_btw)
+    with pytest.raises(gts_mod.GenerateSkipException):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path, random.Random(7)))
+    assert captured["max_retries"] == captured["n_bounds"], "B2 预算须穷尽 == 月边界数（对齐导入门）"
+    assert captured["max_retries"] > 8, "必须超过旧默认 8（否则 R8-F1 未修）"
 
 
 def test_registered_zip_exists_and_hash_matches(tmp_path):
@@ -594,6 +656,11 @@ class _MultiStockFakeConn:
         self.registered: list = []
         self._next_id = 1
         self.lock_calls: list[str] = []
+        self.calls: list[str] = []      # Plan 3 Task4：仅供 _FakeTransaction 记事件用
+
+    def transaction(self, *, isolation=None, readonly=False):
+        self.calls.append(f"transaction(isolation={isolation!r},readonly={readonly!r})")
+        return _FakeTransaction(self)
 
     async def fetch(self, query: str, *args):
         if "SELECT code FROM stocks" in query:
@@ -1086,13 +1153,15 @@ def test_amain_releases_b2_lock_even_if_generate_batch_raises(tmp_path, monkeypa
 # 直调 generate_one_training_set / generate_batch 的路径零防御。
 
 def test_write_critical_section_acquires_and_releases_lock(tmp_path):
-    """成功产出时，临界区必须恰好取一次锁、放一次锁（配对，无泄漏）。"""
+    """成功产出时，两把锁（Plan 3 Task4 加的按股锁 + 既有 B2 写入临界区全局锁）
+    各自必须恰好取一次、放一次（配对，无泄漏）：先取按股锁、再取全局锁，
+    放锁顺序相反（全局锁先放、按股锁后放，见 generate_one_training_set 注释）。"""
     conn, _ = _fixture_conn()
     gts = asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
                                                 random.Random(7)))
     assert gts is not None
-    assert conn.lock_calls == ["lock", "unlock"], (
-        f"临界区锁取放不配对：{conn.lock_calls}")
+    assert conn.lock_calls == ["lock", "lock", "unlock", "unlock"], (
+        f"两把锁取放不配对：{conn.lock_calls}")
 
 
 def test_write_blocked_when_another_session_holds_lock(tmp_path):
@@ -1109,28 +1178,74 @@ def test_write_blocked_when_another_session_holds_lock(tmp_path):
 
 
 def test_lock_released_even_when_registration_conflicts(tmp_path):
-    """临界区内走异常分支（登记撞 ON CONFLICT）后，锁仍须被释放——
-    否则 session 级 advisory lock 泄漏会永久挡住后续所有生成。"""
+    """临界区内走异常分支（登记撞 ON CONFLICT）后，两把锁仍须都被释放——
+    否则 session 级 advisory lock 泄漏会永久挡住后续所有生成（含同股按股锁，
+    会连带把该股的 B1 导入也永久挡住）。"""
     conn, _ = _fixture_conn()
     conn.steal_first_insert = True          # 模拟并发赢家抢先登记
     with pytest.raises(GenerateSkipException):
         asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
                                               random.Random(7)))
-    assert conn.lock_calls == ["lock", "unlock"], (
+    assert conn.lock_calls == ["lock", "lock", "unlock", "unlock"], (
         f"异常路径未释放锁（泄漏）：{conn.lock_calls}")
 
 
-def test_early_skip_path_does_not_touch_lock(tmp_path):
-    """早退路径（无 stock_coverage 覆盖行）在临界区之前就返回，**不得取锁**。
-    这是 spec §2.5 的零开销主张：真库当前每只股票都走这条路，
-    若这里取锁 = 每轮 sweep 白白多上千次 advisory lock 往返。"""
+def test_early_skip_path_does_not_touch_write_critical_section_lock(tmp_path):
+    """早退路径（无 stock_coverage 覆盖行）在**写入临界区**（B2_GENERATION_LOCK_KEY
+    全局锁）之前就返回，那把锁不得被取——这是 spec §2.5 的零开销主张：真库当前
+    每只股票都走这条路，若这里取全局锁 = 每轮 sweep 白白多上千次 advisory lock 往返。
+
+    Plan 3 Task4 起，**按股锁**（IMPORT_GEN_LOCK_KEY）改在此早退检查之前的最外层
+    取（RR 快照覆盖 coverage 读），故这条早退路径会取放一次按股锁——这是设计内的
+    新行为，不违反上面的零开销主张（按股锁开销 O(1)，不随 sweep 规模放大；
+    全局锁若在此处取才会是 O(股票数) 的浪费）。"""
     days = _trading_days(dt.date(2022, 1, 3), 1000)
     conn = _FakeConn("000001.SZ", _pg_fixture(dt.date(2022, 1, 3), 1000), None)
     with pytest.raises(GenerateSkipException, match="stock_coverage"):
         asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path,
                                               random.Random(7)))
-    assert conn.lock_calls == [], (
-        f"早退路径不应触碰锁，实际：{conn.lock_calls}")
+    assert conn.lock_calls == ["lock", "unlock"], (
+        f"早退路径应只取放一次按股锁、不得触碰 B2 写入临界区全局锁，实际：{conn.lock_calls}")
+
+
+# ===== Plan 3 Task4：按股非阻塞锁 + coverage/6周期读入 RR 只读快照事务 =====
+# 假件只能证「按预期参数/顺序调用」——RR 快照真实隔离语义由 Task5 真 PG 脚本证
+# （spec §5.2 界限说明，见 scripts/verify_advisory_lock_reentrancy.py 相邻工作）。
+
+def test_gen_takes_stock_lock_before_rr_snapshot(tmp_path):
+    """顺序断言（非仅存在性）：
+    1) 按股锁（IMPORT_GEN_LOCK_KEY）先于 RR 事务被打开取得；
+    2) `conn.transaction(...)` 以 `isolation="repeatable_read", readonly=True` 调用；
+    3) 事务一开门，coverage + 六周期读立刻发生在其内；
+    4) `_fetch_existing_starts`（选窗口用的排除集）发生在事务提交**之后**——
+       它需要最新已提交状态，不能读 RR 快照冻住的旧视图（brief D5/D8）。"""
+    conn, _ = _fixture_conn()
+    asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path, random.Random(7)))
+    ops = conn.calls
+    assert "advisory_lock(IMPORT_GEN)" in ops and "transaction_open" in ops
+    assert ops.index("advisory_lock(IMPORT_GEN)") < ops.index("transaction_open"), ops
+    assert "transaction(isolation='repeatable_read',readonly=True)" in ops, ops
+    assert (ops.index("transaction(isolation='repeatable_read',readonly=True)")
+            < ops.index("transaction_open")), ops
+    assert ops.index("transaction_open") < ops.index("fetch:_fetch_dense_coverage"), ops
+    for p in PERIODS:
+        assert ops.index("transaction_open") < ops.index(f"fetch:_fetch_period_bars:{p}"), ops
+        assert ops.index(f"fetch:_fetch_period_bars:{p}") < ops.index("transaction_commit"), ops
+    assert ops.index("fetch:_fetch_existing_starts") > ops.index("transaction_commit"), ops
+
+
+def test_gen_stock_lock_busy_skips(tmp_path):
+    """按股锁被占（模拟另一 session——如 B1 导入同一股——持有 IMPORT_GEN_LOCK_KEY）
+    → 非阻塞 GenerateSkipException，且不产出任何文件、不登记任何行、不触碰
+    RR 事务或 B2 全局锁（拿不到最外层锁应在 coverage 读之前就短路）。"""
+    conn, _ = _fixture_conn()
+    conn.import_gen_lock_held_by_other = True
+    with pytest.raises(GenerateSkipException, match="正被导入"):
+        asyncio.run(generate_one_training_set(conn, "000001.SZ", tmp_path, random.Random(7)))
+    assert conn.registered == [], "按股锁被占时不得登记任何行"
+    assert list(tmp_path.iterdir()) == [], "按股锁被占时不得留下任何产物"
+    assert "transaction_open" not in conn.calls, "拿不到按股锁应在 RR 事务之前短路"
+    assert conn.lock_calls == [], "按股锁本身拿失败，不计入取放（无对应 unlock）"
 
 
 # ===== stock_code 路径逃逸（信任边界，codex R4-F1）=====

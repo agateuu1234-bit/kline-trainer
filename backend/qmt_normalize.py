@@ -3,6 +3,7 @@
 from __future__ import annotations
 import datetime as _dt
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -46,11 +47,40 @@ def parse_qmt_filename(name: str) -> tuple[str, str, str]:
         raise QmtSchemaError(f"文件名不符合 QMT 规则: {name!r}")
     return m["code"], m["name"], _LABEL_TO_PERIOD[m["label"]]
 
-def parse_qmt_csv(path: Path, src_period: str) -> pd.DataFrame:
-    df = pd.read_csv(path, encoding="utf-8-sig")   # utf-8-sig 剥 BOM
+@dataclass(frozen=True)
+class QmtSource:
+    """携带来源身份的 QMT 数据（P3-D1/R14-F1：身份随数据端到端，不作为独立参数漂）。"""
+    code: str
+    period: str
+    df: pd.DataFrame
+
+def parse_qmt_csv(path: Path, src_period: str) -> "QmtSource":
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig")   # utf-8-sig 剥 BOM
+    except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+        # R5-F1：零字节/截断/不可解析 CSV（中断的导出或拷贝）在读取处即抛 pandas
+        # 非域异常，会绕过 CLI 的 QMT 域异常捕获 → 裸 traceback。归一化为
+        # QmtSchemaError（CLI rc=2）。文件读是解析路径最外层，堵这里 = 读→列→值→时间三层全封。
+        raise QmtSchemaError(f"QMT CSV 读取失败（空/截断/不可解析）: {e}") from e
     missing = [c for c in _QMT_COLUMNS if c not in df.columns]
     if missing:
         raise QmtSchemaError(f"QMT CSV 缺必需列: {missing}")
+    if len(df) == 0:
+        raise QmtSchemaError("QMT CSV 无数据行")
     df = df.rename(columns={"time": "datetime"})
-    df["datetime"] = parse_qmt_datetime(df["datetime"], src_period)
-    return df[["datetime", "open", "high", "low", "close", "volume", "amount"]]
+    try:
+        df["datetime"] = parse_qmt_datetime(df["datetime"], src_period)
+    except (ValueError, TypeError) as e:
+        raise QmtSchemaError(f"QMT CSV time 列解析失败: {e}") from e
+    df = df[["datetime", "open", "high", "low", "close", "volume", "amount"]].copy()
+    # 数值列坏值门（R4-F2）：非数值文本（如 open=bad）会让列停在 object dtype，
+    # 下游 clean 的 `out[c] > 0` 抛 pandas TypeError → 裸 traceback 绕过 CLI 的
+    # 域异常捕获。在解析边界一次性把六列强转为数值，非数值 → QmtSchemaError（CLI
+    # rc=2）。空单元格已是 NaN（float），由下游值门/clean 判非有限拦下，不在此拒。
+    for col in ("open", "high", "low", "close", "volume", "amount"):
+        try:
+            df[col] = pd.to_numeric(df[col])
+        except (ValueError, TypeError) as e:
+            raise QmtSchemaError(f"QMT CSV {col} 列含非数值: {e}") from e
+    code, _name, period = parse_qmt_filename(Path(path).name)
+    return QmtSource(code=code, period=period, df=df)
