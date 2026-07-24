@@ -85,6 +85,7 @@
 > | R11 | high | **D56 判据再纠正** | **我 R10 提的「clean-skip 换 `drawingsRevision`」错**：revision 单调，`append+delete`/`edit+revert` 回 baseline 时 revision≠baseline → 误写净空槽覆盖别的记录 | 全采纳（改用 drawing **内容快照相等**：改样式→内容变→不 skip；回 baseline→内容==baseline→skip） |
 > | R12 | high | **D67**（信任边界收尾） | **信任边界模式（D51/D62）漏了最后一处**：`append` 家族仍 public 无 geometry 门 → 直接调可塞 `.segment`/视口外 ray 幽灵线 | 全采纳（append/appendReview/routeDrawingCommit 降 internal + 源码守卫 + 引擎层 `.segment` 门；三类写入面统一） |
 > | R12 | high | **D56 快照纠正** | **我 R11 提的「用 `encoded()` 字节做快照」错**：lossy 对编辑行重序列化成 sorted-key，`edit+revert` 后语义==baseline 但字节≠原始 raw → 误判脏覆盖 | 全采纳（改用**规范语义签名**，禁字节相等；N22b2 用非规范 raw fixture 钉死） |
+> | R13 | high | **D65 措辞纠正** | **我 R11 把几何门错误说成「引擎 fail-closed」**：引擎无 mapper 判不了几何，它只能是 route-level；且确认框时间窗内线可能滑走 | 全采纳（几何=route-level，UI 路由在写入瞬刻/确认后重算；引擎只 fail-closed viewport 无关项 + N19e stale-action 测试） |
 >
 > 共同形状：**我写的东西"符合上游 spec"，但没人问过"坏数据会怎样 / 直接调用者会怎样 / 高版本写的数据会怎样"**（[[feedback_internal_review_misses_bad_data]]）。
 > **约一半 finding（R3-F2/D59、R7/D61、R8-F1、R9、以及若干测试/判据滞后）是我修上一轮时自己引入的表述或覆盖不一致**——[[feedback_internal_review_misses_bad_data]]「修 symptom 挪动失败面」的连续实证。
@@ -365,7 +366,10 @@ D63 里我写了「样式编辑**不禁**（改一条当前看不见的线的颜
 ```
 
 - **样式控件**按「改样式可用」置灰；**🗑** 按「删除可用」置灰。二者共享 `locked` 与 `visibleGeometry` 分量（这两种情形下**同进同退**），只在「未来枚举值」线上分岔：**样式控件灰、🗑 亮**（这条高版本线看不懂、改不得，但可以整条删掉）。
-- 谓词为假时对应的引擎写入即使被调用也 fail-closed（D60 `locked` / D61 未来枚举 / D51 几何——三道门已就位）。
+- ⚠️ **两类门的层级不同，别把几何说成引擎 fail-closed（codex R13-F1 纠正我 R11 的过度宣称）**：
+  - **viewport 无关的三项**（`locked` D60 / 未来枚举 D61 / id 唯一 D66 + `withStyle` 语义 D59）**在引擎层 fail-closed**——即使有人直接调 `updateDrawingStyle` / `deleteDrawing(id:)`，引擎自己拒。
+  - **几何（`visibleGeometry`）是 route-level 信任边界，不是 engine-level 防御**：引擎**没有 mapper、判不了几何**（D51/D58/D67 一贯如此）。它**只由单一 UI 路由 enforce**。因此 UI 路由**必须在真正写入的那一刻重算 current `visibleGeometry`**——**改样式写入前**、以及**删除确认框点「删除」之后、调引擎之前**（确认框有时间窗：弹框期间线可能因惯性/自动推进滑出屏，若只在点 🗑 那一刻判、不在确认那一刻重算，会删掉一条现在看不见的线）。
+  - 换言之：`updateDrawingStyle` / `deleteDrawing(id:)` 的引擎签名**不含** geometry 参数、也不声称挡 geometry；几何完整性靠「唯一调用点在 UI 路由、且该路由在写入瞬刻重算」这条源码守卫 + 时序保证（与 D51/D67 的论证结构一致）。
 - 谓词为真时恢复可用。**滑回来 / 解锁后自动恢复**，无需重选。
 - **面板仍然回显**选中线的样式（D49 不变）——**看得见、改不动**。用户始终知道自己选中的是什么，只是当下不能改。
 - `locked` 纳入两个谓词，顺带消掉一个 wart：否则本构建里一条解码来的锁定线会显示**可操作**的控件却静默无效果（上游 §7.2 本来就要求「🗑 灰、设置面板全灰」，本条只是把**已持久化状态的显示**做对，**不是**引入锁定动作——那仍属 1b-ii）。
@@ -665,6 +669,7 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **b 引擎层 locked 仍拒**：`@testable` 直调 internal `deleteDrawing(id:)` 删一条 `locked == true` 线 → 返 `false`（= N13b，确认降 internal 后引擎门仍在）。
   - **c 几何门在路由**：几何不可见的选中线，**经 UI 删除路由**删除被拒（= N16b）；这条与 b 分层——b 证「引擎判 locked」、c 证「路由判 geometry」，两道门在不同层各测一次。
   - **d 源码守卫（index 版本，R7-F1）**：`Sources/` 中 `deleteDrawing(at:` 的调用点**恰好 0 处**（连 UI 路由都不经过——路由用 id 版本），且 `TrainingEngine.deleteDrawing(at:` 访问级别**不是** `public`。这条钉死 R7-F1 的 public 破坏性入口已关闭。
+  - **e 确认框时间窗内线滑走 → 确认删除被拒（D65 route-level 几何，codex R13-F1 专项，不可省）**：选中一条可见线 → 点 🗑 弹确认框 → **在确认框期间平移使该线 `visibleGeometry == nil`** → 点「删除」→ 断言 UI 路由**在确认那一刻重算几何**、判 nil → **不调引擎、不删**、`drawings` 逐字段不变、`drawingsRevision` 不递增、选中保留、🗑 回灰。**这条钉死「只在点 🗑 那一刻判几何」的时序 bug**：若几何只在弹框前判，确认时线已看不见却仍被删。
 
 - **N20 新增/提交路径的 revision 正向覆盖（D56，codex R8-F2 专项，不可省）**：§6.3 的 0c 在拆分 spec 里要求过，但 `drawingsRevision` 是本期 D56 才落地的**新机制**，故在本期测试列表**显式重钉**（不靠引用）——
   - **a `appendDrawing` 成功**：调用 → `drawingsRevision` **严格 +1**、TrainingView 的 revision autosave 路径被触发、重载后新线在。
