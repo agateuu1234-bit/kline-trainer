@@ -75,12 +75,14 @@
 > | R5 | medium | **D65** | **我在 D63 里给自己开的特例**：「样式编辑不禁」——那仍是不可逆内容变更，且正是 D59 教我别做的个案裁量 | 全采纳（🗑 与样式控件同进同退，共用一个可用性谓词） |
 > | R6 | high | **D51 修订** | **我在 D62（R4）写的 delete「保持 public、不依赖 viewport」在 D65（R5）之后过时**：删除已受几何门约束，但 public/无 mapper 的引擎 API enforce 不了 → 离屏线可被绕过删除 | 全采纳（delete 降 internal + UI 删除路由几何门，与 `updateDrawingStyle` 对称） |
 > | R7 | high | **D51 再修订** | **我在 D51（R6）写的「`deleteDrawing(at:)` 零调用点故不影响安全」错了**：public + index 删、无任何门 = 绕过全部三道门的破坏性入口 | 全采纳（`deleteDrawing(at:)` 也降 internal + 源码守卫零调用点） |
-> | R7 | high | **D61 重做** | **我在 D61（R4）的条件派生在解码值上比较**，而 unknown 枚举双双 fallback 成 `.orange` → `==` 失效 → 仍抹高版本独立字色（且波及所有 unknown 枚举字段） | 全采纳，但**换机制**：改样式对「携带未来未知枚举值」的线 fail-closed（raw-aware 判据 `knownFutureEnumPayloads`），textColorToken 派生回归无条件 |
+> | R7 | high | **D61 重做** | **我在 D61（R4）的条件派生在解码值上比较**，而 unknown 枚举双双 fallback 成 `.orange` → `==` 失效 → 仍抹高版本独立字色（且波及所有 unknown 枚举字段） | 全采纳，**加**机制：改样式对「携带未来未知枚举值」的线 fail-closed（raw-aware `knownFutureEnumPayloads`）。⚠️ R7 一度误把条件派生「换成」无条件，R11-F1 纠正为**叠加**（unknown 靠拒绝、known 靠条件派生） |
 > | R8 | high | **D58/D65 澄清** | **我 R6 写的「四处同源」把两个不同的 geometry 检查混成一个**：D58 候选预检（改完还可见吗）vs D65 当前门（现在可见吗），入参不同 | 全采纳（精确区分候选/当前两门，同一函数实现、不同入参、执行有序；不改机制） |
 > | R8 | high | **N20 补** | **`drawingsRevision` 是本期新机制，测试列表缺 `appendDrawing` 正向 revision 覆盖** → 漏一个 `+=1` 会让新画线不再 autosave | 全采纳（显式重钉 append/routeDrawingCommit 正向 + review 不动 + 端到端） |
 > | R8 | medium | **D66** | **本期第一次用 id select/update/delete，但没强制 id 唯一非空**：重复/空 id 会让 UI 选一条打另一条 | 全采纳（唯一非空提升为写入边界不变量 + 匹配非唯一即 fail） |
 > | R9 | high | **D61/D65 判据修正** | **我 D65 谓词把判据简写成 `knownFutureEnumPayloads()` 的 id-membership**，漏 `!entries.isEmpty`——而该函数对每条 known 线恒返回一行 → 存盘重载后**所有已有线**被误判、编辑全 fail-closed | 全采纳（改用现成 helper `hasKnownFutureEnumValues(liveIds:)` + N14f 钉死"重载普通线仍可编辑"回归） |
-> | R10 | high | **D56 补全** | codex 的具体论断（验收 #23 会丢改样式）**有误**（resume 路径 `replayHasPersisted==true` 兜底 + fresh replay 不种画线），**但揭示的 gap 真**：D56 只改了 `TrainingView.onChange`、漏了 `saveProgress` 的 replay clean-skip 仍按 `count` 判 → 与 revision 判据不一致 | **部分采纳**：记录技术反驳 + 采纳判据统一（clean-skip 也用 `drawingsRevision`）+ N22 |
+> | R10 | high | **D56 补全** | codex 的具体论断（验收 #23 会丢改样式）**有误**（resume 路径 `replayHasPersisted==true` 兜底 + fresh replay 不种画线），**但揭示的 gap 真**：D56 只改了 `TrainingView.onChange`、漏了 `saveProgress` 的 replay clean-skip 仍按 `count` 判 | **部分采纳**：记录技术反驳 + 采纳补 `saveProgress`（⚠️ 我提的「换 revision」方向被 R11-F2 纠正） |
+> | R11 | high | **D59 派生② 纠正** | **我 R7 把条件派生误换成无条件**：known 值的独立字色（`.orange` 线 + `.blue` 标签，无 future payload → 可编辑）改样式时被无条件派生抹掉 | 全采纳（恢复条件派生；与 D61 raw-aware 拒绝**叠加**：known 靠条件派生、unknown 靠拒绝） |
+> | R11 | high | **D56 判据再纠正** | **我 R10 提的「clean-skip 换 `drawingsRevision`」错**：revision 单调，`append+delete`/`edit+revert` 回 baseline 时 revision≠baseline → 误写净空槽覆盖别的记录 | 全采纳（改用 drawing **内容快照相等**：改样式→内容变→不 skip；回 baseline→内容==baseline→skip） |
 >
 > 共同形状：**我写的东西"符合上游 spec"，但没人问过"坏数据会怎样 / 直接调用者会怎样 / 高版本写的数据会怎样"**（[[feedback_internal_review_misses_bad_data]]）。
 > **约一半 finding（R3-F2/D59、R7/D61、R8-F1、R9、以及若干测试/判据滞后）是我修上一轮时自己引入的表述或覆盖不一致**——[[feedback_internal_review_misses_bad_data]]「修 symptom 挪动失败面」的连续实证。
@@ -187,7 +189,7 @@ func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Bool
 | 语义 | 内容 |
 |---|---|
 | 派生 ① | `isExtended == (lineSubType == .ray)` |
-| 派生 ② | `textColorToken` 跟随 `colorToken`（无条件；1a-iii「标签跟线同色」）。**这条只对可编辑的线求值，而可编辑 ⟹ 无 unknown 枚举值（D61），故解码 `==` 不再是判据、也不会抹高版本独立字色** —— 跨版本保真改由 D61 在写入边界整条拦截，不在这里逐字段比较 |
+| 派生 ② | `textColorToken` **条件派生**：`old.textColorToken == old.colorToken ? style.colorToken : old.textColorToken`（本来跟线同色的才继续跟随；已是独立字色则**保留**）。见下方「为什么是条件、不是无条件」 |
 | 归一化 | `labelMode` 必须经 `DrawingStyleAvailability.normalizedLabelMode(current:lineSubType:)`（挡 `(ray, .left)`） |
 | 可用性 | `lineSubType` 必须是该 `toolType` **可渲染**的值（水平线的 `.segment` 恒不可渲染 → 拒） |
 
@@ -202,6 +204,15 @@ extension DrawingObject {
 
 - 返 nil 的判据**必须复用 `DrawingStyleAvailability`**（与设置面板灰态**同一真相**，禁止另写一份）。
 - 非 nil 时：归一化 `labelMode` + 派生 ①② + 其余字段**逐字段原样拷贝**。
+
+> **派生② 为什么是条件、不是无条件（codex R11-F1，纠正我 R7 的过度简化）**：`textColorToken` 有**两类**独立字色要防被抹，它们判据不同、互补，缺一不可——
+> | 独立字色的来源 | 例子 | 保护机制 |
+> |---|---|---|
+> | **未来未知枚举值** | `colorToken:"futureNeon"` / `textColorToken:"futureCyan"`（都 fallback 成 `.orange`） | 该线**整条不可编辑**（D61 raw-aware，`hasKnownFutureEnumValues` 命中）→ 根本改不到它，字节保真 |
+> | **当前已知枚举值** | `colorToken:.orange` / `textColorToken:.blue`（P3 独立字色控件写的，都是现有 case） | 该线**可编辑**（无 unknown 枚举、`hasKnownFutureEnumValues` 不命中）→ 靠**条件派生**：`old.textColorToken(.blue) != old.colorToken(.orange)` → 改 thickness 时**保留 `.blue`** |
+>
+> 我 R7 把派生② 改成「无条件」时的推理错在：**「解码 `==` 判据对 known 值可靠」不等于「不需要判据」**。对 known 独立字色（orange≠blue），解码 `==` 恰恰**可靠**——所以正好用它做条件派生，而不是丢掉它无条件覆盖。R7 的 raw-aware 拒绝（D61）只挡住 unknown 那一类，known 独立字色必须靠这里的条件派生兜住。两个机制**叠加**，不是二选一。
+> 本版本新建线恒 `textColorToken == colorToken`（`commitPending`）→ 条件派生对它就是「跟随」，行为与「无条件」在本版本线上**逐字一致**。
 - **两个写入点共用它，各自传播失败**：
   - `DrawingSession.commitPending`（已经是 `-> DrawingObject?`）→ nil 即不提交；
   - `TrainingEngine.updateDrawingStyle` → nil 即返 `false`、零改动、`drawingsRevision` 不递增。
@@ -250,7 +261,7 @@ extension DrawingObject {
 - **判据 = `engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id])`**（`LossyDrawingArray.swift:273`，coordinator `:1047` 已在用它算净改动）。这是**唯一** raw-aware 的判据——它看磁盘原始字节，不是 fallback 后的解码值。
   - ⚠️ **绝不可写成「该 id 是否出现在 `knownFutureEnumPayloads()` 里」的 membership（codex R9-F1）**：那个函数**对每一条 `.known` 线都恒返回一行**（`:228` 注释明载「即便 `entries` 为空」）→ id-membership 会把**所有** loaded 线误判成「携带未来枚举值」→ **存盘重载后所有已有线样式控件全灰、`updateDrawingStyle` 全 fail-closed**，只有内存里刚画的线还能改。**命中的正确条件是 `id 匹配 且 entries 非空`** —— `hasKnownFutureEnumValues` 已经是这个语义（`:274` `contains { liveIds.contains($0.id) && !$0.entries.isEmpty }`），直接用它、不要自己写 membership。
 - **引擎层可达**：`updateDrawingStyle` 在 `TrainingEngine`，能读 `self.loadedDrawingsLossy`。不需要把 raw 塞进 `DrawingObject`（那会污染值类型），只在写入边界查一次。
-- **`textColorToken` 派生回归无条件**：能被编辑的线保证**不带**任何 unknown 枚举值 → 解码 `==` 判据重新可靠 → D59 的派生②恢复为简单的「`textColorToken` 跟随 `colorToken`」。R4 的条件派生连同它失效的判据一起撤销。
+- **`textColorToken` 保护分两类、两个机制叠加（codex R11-F1 纠正）**：本决策的 raw-aware 拒绝只挡住**未来未知枚举值**那一类独立字色（整条不可编辑）；**当前已知枚举值**的独立字色（如 `.orange` 线 + `.blue` 标签，P3 控件可能写）在本构建里**可编辑**，靠 D59 派生② 的**条件派生**（解码 `==` 对 known 值可靠）保留。**R7 一度把派生② 改成无条件是错的**（会抹 known 独立字色），已恢复条件派生；两个机制互补、缺一不可，详见 D59 派生② 下的对照表。
 
 **为什么"拒绝编辑"优于"raw 比较后派生"**：后者要把 raw 逐字段读进 `withStyle`（分层脏、且要对每个枚举字段各写一遍 raw 比较）；前者一个统一判据挡住**整条**高版本线的编辑，保护所有字段，且复用已存在的 `knownFutureEnumPayloads`。
 
@@ -512,7 +523,9 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **codex 的具体失败论断有误、但揭示的 gap 是真的**（已对源码实测两面核清）：
     - **失败论断（验收 #23 会丢改样式）不成立**：验收 #23 走 `resumePendingReplay`（"续这一局 replay"），它 `:936` 置 `replayHasPersisted = true` → clean-skip 守卫 `if !replayHasPersisted`（`TrainingSessionCoordinator.swift:606`）为 false → **根本不进 clean-skip → 改样式照写盘**。而 `replay(recordId:)`（fresh，`:552`）构造段**不种画线**（无 `initialDrawings`，drawings 空）→ 没有已有线可改。codex 设想的「fresh replay + 已有线 + 只改样式 + `replayHasPersisted==false`」当前**不可达**。
     - **但 gap 是真的**：D56 只把 `TrainingView.onChange` 从 `count` 换成 `drawingsRevision`，**漏了 `saveProgress:606-614` 那个独立的 replay clean-skip gate 仍用 `base.drawings == engine.drawings.count`**。改样式 `count` 不变 → 两个判据现在**不一致**：`TrainingView` 说「revision 变了要存」，`saveProgress` 说「count 没变可 skip」。当前靠 `replayHasPersisted` 兜底才没出事，但**判据不一致本身就是 D56 没做完**——一旦将来 fresh replay 种了画线（或新增任何 `!replayHasPersisted` 期的编辑入口），改样式即被 count-based clean-skip 静默吞。
-  - **决策（判据统一，纵深防御）**：`replayBaseline` 元组以 **`drawingsRevision`** 取代（或并入）`drawings.count` 分量；`saveProgress` 的 clean-skip 比较相应改用 `drawingsRevision`。这样 replay 侧与 `TrainingView` 侧**同一个 drawings-脏判据**，改样式在任何 `replayHasPersisted` 状态下都不会被 clean-skip 吞。改 `replayBaseline` 元组形状会动几个钉它的既有测试，属预期、同步更新。
+  - **决策（内容快照相等，不是 revision，codex R11-F2 纠正我 R10 的方向）**：clean-skip 是一个**净状态守卫**——「当前态**仍等于** baseline 就不写槽」（防 `back()`/后台 flush 用 fresh B 初态覆盖记录 A 的槽）。
+    - ⚠️ **`drawingsRevision` 不能表达这个**（它单调递增，只表达「改过没」，不表达「现在等不等于 baseline」）：`append+delete` 回到 baseline（净状态 == baseline）、或 `style-edit+revert`，都会让持久化 drawing 状态 == baseline 而 `drawingsRevision` ≠ baseline → clean-skip 失灵 → 写一个本该跳过的净空 replay 槽 → **覆盖别的记录的 pending**。我 R10 提的「换 revision」方向**错了**。
+    - ✅ **正解 = drawing 内容快照 / 签名**：`replayBaseline` 存 baseline 的 **drawing 内容快照**（如 `loadedDrawingsLossy.encoded()` 的字节，或 drawings 的全字段签名——与母 spec §6.3 D6 `ReviewNetChange` 的 per-drawing 全字段 key 同精神）；clean-skip 比较**当前 drawing 内容是否等于 baseline 内容**。这样：改样式 → 内容变 → 不 skip（**修好 count 漏改样式**）；`append+delete` / `edit+revert` 回 baseline → 内容 == baseline → skip（**不覆盖别的记录**）。tick/交易/周期分量不变（仍按值比较）。改 `replayBaseline` 形状会动几个钉它的既有测试，属预期、同步更新。
 
 ---
 
@@ -550,7 +563,7 @@ public private(set) var mode: DrawingSessionMode = .draw
 - **N2 `updateDrawingStyle` 只动样式（D50）**：改样式后断言 `id` / `anchors` / `period` / `panelPosition` / `revealTick` / `locked` / `text` / `fontSize` / `textForm` / `tailAnchor` **逐字段不变**。
 - **N3 `updateDrawingStyle` 对不存在 id（D50）**：返 `false`、`drawings` 逐字段不变、`drawingsRevision` **不递增**、UI 侧选中被清空且 🗑 回灰。
 - **N4 `deleteDrawing(id:)` 对不存在 id（D51）**：返 `false`、同 N3 的三条断言。
-- **N5 派生规则单点（D59）**：源码守卫断言 D59 四条语义的表达式在 `Sources/` 中**各只出现一次**——`isExtended == (lineSubType == .ray)`（派生①）、`textColorToken = colorToken`（派生②，**无条件**；R4 的条件派生已被 D61 重做撤销，跨版本保真改由 D61 在写入边界整条拦截、不在 `withStyle` 逐字段比较）、`labelMode` 归一化、`lineSubType` 可用性判据。并加一条行为测试：经 `updateDrawingStyle` 把 `lineSubType` 改成 `.ray` → 该线 `isExtended == true`；改回 `.straight` → `false`。
+- **N5 派生规则单点（D59）**：源码守卫断言 D59 四条语义的表达式在 `Sources/` 中**各只出现一次**——`isExtended == (lineSubType == .ray)`（派生①）、`textColorToken` 的**条件派生** `old.textColorToken == old.colorToken ? style.colorToken : old.textColorToken`（派生②，**不是**无条件 `= colorToken`；R11-F1 恢复，保护 known 独立字色）、`labelMode` 归一化、`lineSubType` 可用性判据。并加一条行为测试：经 `updateDrawingStyle` 把 `lineSubType` 改成 `.ray` → 该线 `isExtended == true`；改回 `.straight` → `false`。
 - **N6 盾对选择态生效（D53）**：`.rect` 内的 tap → **既不选中也不落锚**；`.pending` → 拒收一切。两种盾态 × 画线态 / 选择态共 4 组。
 - **N7 选中态绝不落盘（D55）**：选中一条线 → 走完整持久化往返 → 重载后**无任何选中**，且 `DrawingObject` 逐字段与选中前一致；契约版本仍 1.12。
 - **N8 面板收起不清选中（D54）**：选中一条线 → 收起面板 → 选中仍在、🗑 仍亮、可删；展开面板 → 面板派生值仍是那条线的样式。
@@ -595,6 +608,7 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **d UI 灰置分岔**：选中该线 → 断言**样式控件全灰**（改样式谓词假）、**🗑 亮**（删除谓词真）——D65 的分岔在此可见。
   - **e 本版本线不受影响（反向对照）**：一条本构建新建的线（无 unknown 枚举值，`textColorToken == colorToken`）→ 改 `colorToken` → **成功**、`textColorToken` **跟随变化**（D59 派生②无条件），与本期之前逐字一致。没有这条，实现可以用「一律拒绝改色」骗过 a。
   - **f 加载的当前版本普通线仍可编辑（D61 判据陷阱专项，codex R9-F1，不可省）**：造一条**普通**当前版本线（所有枚举字段都是已知值，`knownFutureEnumPayloads()` 对它返回的 `entries` 为**空**）→ **存盘 → 重载** → 选中 → 断言样式控件**亮**、`updateDrawingStyle` **成功**、`drawingsRevision` +1。**这条直接钉死 R9-F1 的实现陷阱**：若判据被写成 `knownFutureEnumPayloads()` 的 id-membership（漏 `!entries.isEmpty`），该函数对每条 known 线恒返回一行 → 这条重载的普通线会被误判成"携带未来枚举值"→ 控件全灰、编辑 fail-closed，本测试当场红。**必须走"存盘→重载"往返**（`d` 的 in-memory 新建线走不到这个陷阱——陷阱只在 `loadedDrawingsLossy` 有条目时触发）。
+  - **g known 值的独立字色不得被无条件派生抹（D59 派生② 条件派生，codex R11-F1，不可省）**：造一条 `colorToken == .orange` 且 `textColorToken == .blue` 的线（**两个都是当前已知枚举值** → `knownFutureEnumPayloads` **不命中** → 该线**可编辑**）→ 选中 → **只改 `thickness`** → 断言 `textColorToken` **仍是 `.blue`**（条件派生：`old.textColorToken(.blue) != old.colorToken(.orange)` → 保留）、`colorToken` 不变、只 `thickness` 变。另测：改 `colorToken` 成 `.green` → `textColorToken` **仍 `.blue`**（改线色也不夺 known 独立字色）。**这条钉死 R11-F1**：若派生② 是无条件 `= colorToken`，`.blue` 会被抹成线色，本测试当场红。与 `a`（unknown 整条拒绝）分层——`a` 测 unknown、`g` 测 known，两类独立字色各一条。
 
 - **N15 `updateDrawingStyle` 不得有第二个调用点（D62）**：**源码守卫**断言 `Sources/` 中 `updateDrawingStyle(` 的调用点**恰好 1 处**，且访问级别**不是** `public`（`grep` 断言按 [[feedback_acceptance_grep_anchoring]] 用 `^…$` / 前缀锚，不得被注释里的同名字符串命中）。
 
@@ -643,10 +657,11 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **c update/delete 匹配非唯一即 fail**：人为构造两条同 id 的 live 状态（绕过 append 门，直接注入 `drawings`）→ `updateDrawingStyle` / `deleteDrawing(id:)` 该 id → **fail**（不改任何一条、不递增），绝不"打第一条"。
   - **d 选中歧义不发生（正向）**：本版本正常路径（`commitPending` UUID）连画三条 → 三个 id 互不相同 → 选中/改/删各自命中唯一目标。
 
-- **N22 replay clean-skip 判据纳入 `drawingsRevision`（D56 补，codex R10-F1 专项，不可省）**：
-  - **a 判据统一（源码守卫 / 单元）**：`replayBaseline` 与 `saveProgress` 的 clean-skip 比较**不再**用 `engine.drawings.count`，改用 `drawingsRevision`。断言方式=构造一个 `!replayHasPersisted` 的 replay 会话，只改一条已有线的样式（`drawingsRevision` +1、`drawings.count` 不变）→ `saveProgress` **不 clean-skip、真的写盘**（重读槽后样式在）。**这条直接钉死「count 判据漏改样式」**：若 clean-skip 仍按 count，本测试当场红。
-  - **b 验收 #23 现状回归（resume 路径）**：`resumePendingReplay` 续局（`replayHasPersisted == true`）→ 只改一条已有线样式 → 立刻 `saveProgress` → 重读槽样式在（= 母 spec §6.3 的 0b 第二条断言，本期靠 D56 的 revision 触发器 + 本条判据统一**双保险**）。
-  - **c fresh replay 不种画线的不变量锁**（承接 §6.3 0b 第一条）：`replay(recordId:)` 对一条画线非空的记录返回的引擎 `engine.drawings.isEmpty == true`——这条**保持**（codex R10 设想的 fresh-replay-有线场景由它挡在门外；将来谁给 fresh replay 种了画线，本测试立刻红，届时 N22a 的判据统一正好兜住改样式丢失）。
+- **N22 replay clean-skip 用 drawing 内容快照相等（D56 补，codex R10-F1 + R11-F2 专项，不可省）**：
+  - **a 改样式 → 内容变 → 不 skip（修 count 漏改样式）**：构造一个 `!replayHasPersisted` 的 replay 会话，只改一条已有线的样式（内容变、`drawings.count` 不变）→ `saveProgress` **不 clean-skip、真的写盘**（重读槽样式在）。若 clean-skip 仍按 `count`，本测试红。
+  - **b `append+delete` 回 baseline → 内容 == baseline → 仍 skip（防覆盖，R11-F2 核心）**：`!replayHasPersisted` 会话里 `append` 一条再 `delete` 它（净状态回 baseline、但 `drawingsRevision` +2）→ `saveProgress` **必须 clean-skip、不写槽**（否则覆盖记录 A 的 pending replay）。**这条直接钉死「revision 单调不能表达净状态相等」**：若 clean-skip 按 `drawingsRevision`，revision ≠ baseline → 误写槽，本测试红。另测 `edit+revert`（改样式再改回原样）同理必 skip。
+  - **c 验收 #23 现状回归（resume 路径）**：`resumePendingReplay` 续局（`replayHasPersisted == true`）→ 只改一条已有线样式 → 立刻 `saveProgress` → 重读槽样式在（= 母 spec §6.3 0b 第二条断言；resume 路径 `replayHasPersisted` 兜底 + D56 revision 触发器 **双保险**）。
+  - **d fresh replay 不种画线的不变量锁**（承接 §6.3 0b 第一条）：`replay(recordId:)` 对一条画线非空的记录返回的引擎 `engine.drawings.isEmpty == true`——这条**保持**（codex R10 设想的 fresh-replay-有线场景由它挡在门外；将来谁给 fresh replay 种了画线，本测试立刻红，届时 a/b 的内容快照判据正好兜住）。
 
 ---
 
