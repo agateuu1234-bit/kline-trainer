@@ -58,9 +58,9 @@
 
 ---
 
-## 2. 决策 D49–D65
+## 2. 决策 D49–D66
 
-> **D57–D65 全部是 codex 对抗性评审的产物**（均已对源码 / 上游 spec 原文实测证实，未采信转述）：
+> **D57–D66 全部是 codex 对抗性评审的产物**（均已对源码 / 上游 spec 原文实测证实，未采信转述）：
 >
 > | 轮 | 级别 | 决策 | 它推翻了什么 | 我的处置 |
 > |---|---|---|---|---|
@@ -76,6 +76,9 @@
 > | R6 | high | **D51 修订** | **我在 D62（R4）写的 delete「保持 public、不依赖 viewport」在 D65（R5）之后过时**：删除已受几何门约束，但 public/无 mapper 的引擎 API enforce 不了 → 离屏线可被绕过删除 | 全采纳（delete 降 internal + UI 删除路由几何门，与 `updateDrawingStyle` 对称） |
 > | R7 | high | **D51 再修订** | **我在 D51（R6）写的「`deleteDrawing(at:)` 零调用点故不影响安全」错了**：public + index 删、无任何门 = 绕过全部三道门的破坏性入口 | 全采纳（`deleteDrawing(at:)` 也降 internal + 源码守卫零调用点） |
 > | R7 | high | **D61 重做** | **我在 D61（R4）的条件派生在解码值上比较**，而 unknown 枚举双双 fallback 成 `.orange` → `==` 失效 → 仍抹高版本独立字色（且波及所有 unknown 枚举字段） | 全采纳，但**换机制**：改样式对「携带未来未知枚举值」的线 fail-closed（raw-aware 判据 `knownFutureEnumPayloads`），textColorToken 派生回归无条件 |
+> | R8 | high | **D58/D65 澄清** | **我 R6 写的「四处同源」把两个不同的 geometry 检查混成一个**：D58 候选预检（改完还可见吗）vs D65 当前门（现在可见吗），入参不同 | 全采纳（精确区分候选/当前两门，同一函数实现、不同入参、执行有序；不改机制） |
+> | R8 | high | **N20 补** | **`drawingsRevision` 是本期新机制，测试列表缺 `appendDrawing` 正向 revision 覆盖** → 漏一个 `+=1` 会让新画线不再 autosave | 全采纳（显式重钉 append/routeDrawingCommit 正向 + review 不动 + 端到端） |
+> | R8 | medium | **D66** | **本期第一次用 id select/update/delete，但没强制 id 唯一非空**：重复/空 id 会让 UI 选一条打另一条 | 全采纳（唯一非空提升为写入边界不变量 + 匹配非唯一即 fail） |
 >
 > 共同形状：**我写的东西"符合上游 spec"，但没人问过"坏数据会怎样 / 直接调用者会怎样 / 高版本写的数据会怎样"**（[[feedback_internal_review_misses_bad_data]]）。
 > **R3/R4/R5/R6/R7 至少 6 条 finding 是我修上一轮时自己引入的**——[[feedback_internal_review_misses_bad_data]]「修 symptom 挪动失败面」的连续实证；每轮都在把不变量往写入边界收，是收敛而非发散。
@@ -158,7 +161,17 @@ func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Bool
 | **引擎**（viewport 无关，恒开） | 拒绝把 `lineSubType` 改成「该 `toolType` **恒**不可渲染」的值（水平线的 `.segment`）→ 返 `false`、**零改动**、`drawingsRevision` **不递增**。**具体由 D59 的 failable `withStyle` 统一承担**（本条只是它的一个 case，不另写实现） | 引擎层没有 mapper，只判得了 viewport 无关那一支；而那一支恰是**恒 nil**，也是「解码坏数据 / 将来 UI 放开 `.segment`」的兜底。判据复用 `DrawingStyleAvailability`（与面板灰态同一真相，**禁止另写一份**） |
 | **UI**（viewport 相关） | 应用 `lineSubType` 改动**之前**，用 **`selectedPanel` 的 mapper** 对**候选对象**跑 `HorizontalLineTool.visibleGeometry`；为 nil → **不应用、不写库**、给反馈（选中**保留**，🗑 仍亮） | 与新建路径的门**同一个函数、同一层**（`handleDrawingTap:303` 也在 UI 层）→ 两条写入路径对称。路由细节由实施计划定，**约束是判据必须复用 `visibleGeometry` 且取 `selectedPanel` 的 mapper**，不得另写一份几何判断 |
 
-**只有 `lineSubType` 需要 viewport 预检**：`lineStyle` / `thickness` / `colorToken` / `labelMode` 都不参与 `lineXRange` / `visibleGeometry` 的判据，改它们**不可能**把可见变不可见。实施时**不得**给这 4 项加预检（无谓地引入 viewport 依赖，还会让常见路径变脆）。
+**⚠️ 这里说的是「候选几何预检」，与 D65 的「当前几何门」是两个不同的检查，别混（codex R8-F1）**：
+
+| | 检查对象 | 问的问题 | 适用字段 | 出处 |
+|---|---|---|---|---|
+| **候选几何预检** | **改动后**的候选对象 | 「这次改动会不会**把线变得不可见**？」 | **仅 `lineSubType`**（只有它能把可见变不可见） | 本决策 D58 |
+| **当前几何门** | **当前**选中对象 | 「这条线**现在看不看得见**？看不见就不许改。」 | **所有**样式写入 | D65 |
+
+- **候选预检只对 `lineSubType`**：`lineStyle` / `thickness` / `colorToken` / `labelMode` 不参与 `lineXRange` / `visibleGeometry` 判据，改它们**不可能**把可见变不可见 → **不得**给这 4 项加**候选**预检（无谓引入 viewport 依赖、让常见路径变脆）。
+- **但当前几何门对这 4 项照样生效**（D65）：改 `thickness` 前，若当前线已滑出屏（`visibleGeometry == nil`），UI 路由**先被 D65 当前门挡下**，根本走不到 `updateDrawingStyle`。这不是"给 thickness 加候选预检"，是"看不见的东西一律不许改"。
+- 两个门都是**同一个 `visibleGeometry` 函数**，但**入参不同**（候选对象 vs 当前对象）——是两次不同的调用，不是"同一个求值"。D65 的「判据单点」指的是**函数实现**单点，不是调用点单点。
+- **两者都在 UI 单一路由内、在调 `updateDrawingStyle` 之前**（引擎无 mapper，判不了任何 geometry）。所有样式写入**必先过 D65 当前门**；`lineSubType` 改动**再加**一道候选预检。
 
 **`labelMode` 归一化必须同样对称**：面板在用户改 `lineSubType` 时会跑 `DrawingStyleAvailability.normalizedLabelMode`（`UI/DrawingStyleParams.swift:33-35`），使 `(ray, .left)` 这类无效组合不可表达。D49 已规定面板经**单一路由**写出一个完整的 `DrawingDefaultStyle`，故编辑路径天然继承这条归一化——**实施时不得绕过面板另开一条编辑入口**，否则 `(ray, .left)` 会变成只在编辑路径上可达的坏组合。
 
@@ -338,7 +351,11 @@ D63 里我写了「样式编辑**不禁**（改一条当前看不见的线的颜
 - 谓词为真时恢复可用。**滑回来 / 解锁后自动恢复**，无需重选。
 - **面板仍然回显**选中线的样式（D49 不变）——**看得见、改不动**。用户始终知道自己选中的是什么，只是当下不能改。
 - `locked` 纳入两个谓词，顺带消掉一个 wart：否则本构建里一条解码来的锁定线会显示**可操作**的控件却静默无效果（上游 §7.2 本来就要求「🗑 灰、设置面板全灰」，本条只是把**已持久化状态的显示**做对，**不是**引入锁定动作——那仍属 1b-ii）。
-- **`visibleGeometry` 判据必须单点（四处同源）**：🗑 置灰、样式控件置灰、D58 的 subtype 预检、D51 的 UI 删除路由几何门——**四处复用同一个** `visibleGeometry` 求值，源码守卫钉死不得各写一份。（`knownFutureEnumPayloads` 判据同理单点，见 D61。）
+- **`visibleGeometry` 是同一个函数实现（四处调用），但入参分两类**（codex R8-F1）：
+  - **当前几何门**（入参 = **当前**选中对象）：🗑 置灰、样式控件置灰、D51 的 UI 删除路由——问「现在看得见吗」。
+  - **候选几何预检**（入参 = **改动后**候选对象）：D58 的 subtype 预检——问「改完还看得见吗」，**仅 `lineSubType`**。
+  - **单点约束指 `visibleGeometry` 函数实现只有一份**（源码守卫钉死不得各写一份几何判断），**不是**说四处传同样的入参。所有样式写入的**执行顺序**：先过当前门（看得见才继续）→ 若改 `lineSubType` 再过候选预检 → 才调 `updateDrawingStyle`。
+- （`knownFutureEnumPayloads` 判据同理单点，见 D61。）
 
 > D58 的 subtype 预检在本决策下退化为一个更窄、更清晰的职责：**防止一条当前可见的线被改成不可见**（谓词为真时才可能发起这次改动）。
 
@@ -367,6 +384,19 @@ D63 里我写了「样式编辑**不禁**（改一条当前看不见的线的颜
 
 - **现有 `deleteDrawing(at index:)` 也降 `internal`（R7 修订，codex R7-F1）**：本决策原稿曾写它「零调用点故访问级别不影响安全」——**这句错了**。`public` + 按 index 删、不判 `locked`/geometry/未来枚举，它就是一个**绕过本决策全部三道门的 public 破坏性入口**（包外调用者能直接删掉一条 `locked` 高版本线或离屏线，D56 让它持久化）。零当前调用点**不等于**零风险面（public = 包外可达）。故：降 `internal` + **源码守卫钉死 `Sources/` 零调用点**（它连 UI 删除路由都不该经过——路由用 id 版本）。不删类、不改其它（CLAUDE.md §3），只关掉 public 破坏性入口。`DrawingToolManager.deleteDrawing(at:)` 属死代码整体（§8 #5），本期同样不动。
 - 测试经 `@testable import` 仍可直调 internal 的 `deleteDrawing(id:)` / `deleteDrawing(at:)`，N13 不受影响。
+
+### D66 `DrawingID` 唯一非空是引擎写入边界不变量（本期第一次真正依赖它）
+
+> **来源：codex 对抗性评审 R8 medium finding。采纳。**
+
+本期第一次用 `id` 来 select / update / delete，还用 `first { $0.id == selectedID }` 派生样式（D49）——**就第一次依赖「id 唯一且非空」**。但 `appendDrawing` 是 `public` 且当前只查 period（1a-iv），运行时混入一条重复 / 空 id 的对象 → UI 选中一条、`update` / `delete` 却打到另一条；或 `drawingsRevision` 已标脏、lossy reconciliation 却对不齐。
+
+**决策：把「唯一非空 id」提升为引擎写入边界不变量。**
+
+- **`appendDrawing` / `appendReviewDrawing`**：拒绝空 id、拒绝与目标数组中任一现有条**重复**的 id → 返 `false`（与既有 period 检查**同处**，不扩 API、不新增返回类型）。
+- **`updateDrawingStyle` / `deleteDrawing(id:)`**：按 id 匹配，若匹配到的**不是恰好一条**（0 条或 ≥2 条）→ fail（`false` / no-op），**绝不**"改 / 删第一条碰到的"。
+- **装载路径**（`LossyDrawingArray.decode`）**已** normalize 空 id（`:111-121` 回填 `legacy-idx-N`）；本决策补的是**运行时新增**入口，两者合起来堵死空/重复 id 的全部来源。
+- **本版本正常路径行为不变**：`commitPending` 用 `UUID().uuidString` 默认（`Models.swift:265`）→ 新线恒唯一非空。
 
 ### D52 1a-iv 交接②（`init` / `decode` 层 period 校验）重估结论 = **仍不加闸**
 
@@ -584,6 +614,20 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **b 引擎层 locked 仍拒**：`@testable` 直调 internal `deleteDrawing(id:)` 删一条 `locked == true` 线 → 返 `false`（= N13b，确认降 internal 后引擎门仍在）。
   - **c 几何门在路由**：几何不可见的选中线，**经 UI 删除路由**删除被拒（= N16b）；这条与 b 分层——b 证「引擎判 locked」、c 证「路由判 geometry」，两道门在不同层各测一次。
   - **d 源码守卫（index 版本，R7-F1）**：`Sources/` 中 `deleteDrawing(at:` 的调用点**恰好 0 处**（连 UI 路由都不经过——路由用 id 版本），且 `TrainingEngine.deleteDrawing(at:` 访问级别**不是** `public`。这条钉死 R7-F1 的 public 破坏性入口已关闭。
+
+- **N20 新增/提交路径的 revision 正向覆盖（D56，codex R8-F2 专项，不可省）**：§6.3 的 0c 在拆分 spec 里要求过，但 `drawingsRevision` 是本期 D56 才落地的**新机制**，故在本期测试列表**显式重钉**（不靠引用）——
+  - **a `appendDrawing` 成功**：调用 → `drawingsRevision` **严格 +1**、TrainingView 的 revision autosave 路径被触发、重载后新线在。
+  - **b `appendDrawing` 被拒不动 revision**：period 不符 / 空 id / 重复 id（D66）→ 返 `false`、`drawingsRevision` **不变**。
+  - **c `routeDrawingCommit` normal/replay → 经 append 递增**：非 review 模式提交一条 → `drawingsRevision` +1、autosave 落盘。
+  - **d review commit 不动 `drawingsRevision`**：review 模式 `routeDrawingCommit` 走 `appendReviewDrawing` → `drawingsRevision` **不变**（D56：只覆盖 `drawings`），走 `reviewDrawings.count` 触发器。
+  - **e 端到端**：新画一条线 → 杀进程 → 重载后线在（证明 revision autosave 路径真的把新线存住了，不只是计数器动）。
+  > 没有这组，一个漏掉的 `appendDrawing` 里 `drawingsRevision += 1` 会让**新画的线不再 autosave**、杀进程即丢，且无编译期保护（base source 里 `appendDrawing` 只 append 返 true）。
+
+- **N21 `DrawingID` 唯一非空写入边界（D66，codex R8-F3 专项）**：
+  - **a append 拒空 id**：`appendDrawing` 一条 id 为 `""` 的对象 → 返 `false`、`drawings` 不变、`drawingsRevision` 不递增。
+  - **b append 拒重复 id**：`appendDrawing` 一条 id 与现有某条相同的对象 → 返 `false`、不变、不递增。
+  - **c update/delete 匹配非唯一即 fail**：人为构造两条同 id 的 live 状态（绕过 append 门，直接注入 `drawings`）→ `updateDrawingStyle` / `deleteDrawing(id:)` 该 id → **fail**（不改任何一条、不递增），绝不"打第一条"。
+  - **d 选中歧义不发生（正向）**：本版本正常路径（`commitPending` UUID）连画三条 → 三个 id 互不相同 → 选中/改/删各自命中唯一目标。
 
 ---
 
