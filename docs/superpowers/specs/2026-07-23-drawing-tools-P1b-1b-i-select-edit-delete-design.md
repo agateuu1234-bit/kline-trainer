@@ -80,6 +80,7 @@
 > | R8 | high | **N20 补** | **`drawingsRevision` 是本期新机制，测试列表缺 `appendDrawing` 正向 revision 覆盖** → 漏一个 `+=1` 会让新画线不再 autosave | 全采纳（显式重钉 append/routeDrawingCommit 正向 + review 不动 + 端到端） |
 > | R8 | medium | **D66** | **本期第一次用 id select/update/delete，但没强制 id 唯一非空**：重复/空 id 会让 UI 选一条打另一条 | 全采纳（唯一非空提升为写入边界不变量 + 匹配非唯一即 fail） |
 > | R9 | high | **D61/D65 判据修正** | **我 D65 谓词把判据简写成 `knownFutureEnumPayloads()` 的 id-membership**，漏 `!entries.isEmpty`——而该函数对每条 known 线恒返回一行 → 存盘重载后**所有已有线**被误判、编辑全 fail-closed | 全采纳（改用现成 helper `hasKnownFutureEnumValues(liveIds:)` + N14f 钉死"重载普通线仍可编辑"回归） |
+> | R10 | high | **D56 补全** | codex 的具体论断（验收 #23 会丢改样式）**有误**（resume 路径 `replayHasPersisted==true` 兜底 + fresh replay 不种画线），**但揭示的 gap 真**：D56 只改了 `TrainingView.onChange`、漏了 `saveProgress` 的 replay clean-skip 仍按 `count` 判 → 与 revision 判据不一致 | **部分采纳**：记录技术反驳 + 采纳判据统一（clean-skip 也用 `drawingsRevision`）+ N22 |
 >
 > 共同形状：**我写的东西"符合上游 spec"，但没人问过"坏数据会怎样 / 直接调用者会怎样 / 高版本写的数据会怎样"**（[[feedback_internal_review_misses_bad_data]]）。
 > **R3/R4/R5/R6/R7 至少 6 条 finding 是我修上一轮时自己引入的**——[[feedback_internal_review_misses_bad_data]]「修 symptom 挪动失败面」的连续实证；每轮都在把不变量往写入边界收，是收敛而非发散。
@@ -506,6 +507,12 @@ public private(set) var mode: DrawingSessionMode = .draw
 - **交接**：将来复盘获得改样式能力（P5）时，**必须同期**给 `reviewDrawings` 补等价的 revision 触发器，否则复盘改样式同样永不落盘。
 - **禁止**改用 `.onChange(of: engine.drawings)` 或任何数组值比较：`DrawingObject.==` 排除 `id`。
 
+- **⚠️ D56 还要覆盖 `saveProgress` 的 replay clean-skip gate，不止 `TrainingView.onChange`（codex R10-F1）**：
+  - **codex 的具体失败论断有误、但揭示的 gap 是真的**（已对源码实测两面核清）：
+    - **失败论断（验收 #23 会丢改样式）不成立**：验收 #23 走 `resumePendingReplay`（"续这一局 replay"），它 `:936` 置 `replayHasPersisted = true` → clean-skip 守卫 `if !replayHasPersisted`（`TrainingSessionCoordinator.swift:606`）为 false → **根本不进 clean-skip → 改样式照写盘**。而 `replay(recordId:)`（fresh，`:552`）构造段**不种画线**（无 `initialDrawings`，drawings 空）→ 没有已有线可改。codex 设想的「fresh replay + 已有线 + 只改样式 + `replayHasPersisted==false`」当前**不可达**。
+    - **但 gap 是真的**：D56 只把 `TrainingView.onChange` 从 `count` 换成 `drawingsRevision`，**漏了 `saveProgress:606-614` 那个独立的 replay clean-skip gate 仍用 `base.drawings == engine.drawings.count`**。改样式 `count` 不变 → 两个判据现在**不一致**：`TrainingView` 说「revision 变了要存」，`saveProgress` 说「count 没变可 skip」。当前靠 `replayHasPersisted` 兜底才没出事，但**判据不一致本身就是 D56 没做完**——一旦将来 fresh replay 种了画线（或新增任何 `!replayHasPersisted` 期的编辑入口），改样式即被 count-based clean-skip 静默吞。
+  - **决策（判据统一，纵深防御）**：`replayBaseline` 元组以 **`drawingsRevision`** 取代（或并入）`drawings.count` 分量；`saveProgress` 的 clean-skip 比较相应改用 `drawingsRevision`。这样 replay 侧与 `TrainingView` 侧**同一个 drawings-脏判据**，改样式在任何 `replayHasPersisted` 状态下都不会被 clean-skip 吞。改 `replayBaseline` 元组形状会动几个钉它的既有测试，属预期、同步更新。
+
 ---
 
 ## 3. 命中集合 ≡ 渲染集合（D40，实施约束）
@@ -632,6 +639,11 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **b append 拒重复 id**：`appendDrawing` 一条 id 与现有某条相同的对象 → 返 `false`、不变、不递增。
   - **c update/delete 匹配非唯一即 fail**：人为构造两条同 id 的 live 状态（绕过 append 门，直接注入 `drawings`）→ `updateDrawingStyle` / `deleteDrawing(id:)` 该 id → **fail**（不改任何一条、不递增），绝不"打第一条"。
   - **d 选中歧义不发生（正向）**：本版本正常路径（`commitPending` UUID）连画三条 → 三个 id 互不相同 → 选中/改/删各自命中唯一目标。
+
+- **N22 replay clean-skip 判据纳入 `drawingsRevision`（D56 补，codex R10-F1 专项，不可省）**：
+  - **a 判据统一（源码守卫 / 单元）**：`replayBaseline` 与 `saveProgress` 的 clean-skip 比较**不再**用 `engine.drawings.count`，改用 `drawingsRevision`。断言方式=构造一个 `!replayHasPersisted` 的 replay 会话，只改一条已有线的样式（`drawingsRevision` +1、`drawings.count` 不变）→ `saveProgress` **不 clean-skip、真的写盘**（重读槽后样式在）。**这条直接钉死「count 判据漏改样式」**：若 clean-skip 仍按 count，本测试当场红。
+  - **b 验收 #23 现状回归（resume 路径）**：`resumePendingReplay` 续局（`replayHasPersisted == true`）→ 只改一条已有线样式 → 立刻 `saveProgress` → 重读槽样式在（= 母 spec §6.3 的 0b 第二条断言，本期靠 D56 的 revision 触发器 + 本条判据统一**双保险**）。
+  - **c fresh replay 不种画线的不变量锁**（承接 §6.3 0b 第一条）：`replay(recordId:)` 对一条画线非空的记录返回的引擎 `engine.drawings.isEmpty == true`——这条**保持**（codex R10 设想的 fresh-replay-有线场景由它挡在门外；将来谁给 fresh replay 种了画线，本测试立刻红，届时 N22a 的判据统一正好兜住改样式丢失）。
 
 ---
 
