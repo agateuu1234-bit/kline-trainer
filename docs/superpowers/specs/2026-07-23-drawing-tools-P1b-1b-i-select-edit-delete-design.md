@@ -74,8 +74,11 @@
 > | R5 | high | **D64** | **我跨轮累积出的真矛盾**：D54「返 false 就清空选中」与 D60/D59/D63 三处「失败但必须保留选中」冲突 | **部分采纳**：矛盾成立照修；但**不用它的 result-enum 处方**→ 清空判据改为状态谓词（id 还在不在），没有映射表可写错 |
 > | R5 | medium | **D65** | **我在 D63 里给自己开的特例**：「样式编辑不禁」——那仍是不可逆内容变更，且正是 D59 教我别做的个案裁量 | 全采纳（🗑 与样式控件同进同退，共用一个可用性谓词） |
 > | R6 | high | **D51 修订** | **我在 D62（R4）写的 delete「保持 public、不依赖 viewport」在 D65（R5）之后过时**：删除已受几何门约束，但 public/无 mapper 的引擎 API enforce 不了 → 离屏线可被绕过删除 | 全采纳（delete 降 internal + UI 删除路由几何门，与 `updateDrawingStyle` 对称） |
+> | R7 | high | **D51 再修订** | **我在 D51（R6）写的「`deleteDrawing(at:)` 零调用点故不影响安全」错了**：public + index 删、无任何门 = 绕过全部三道门的破坏性入口 | 全采纳（`deleteDrawing(at:)` 也降 internal + 源码守卫零调用点） |
+> | R7 | high | **D61 重做** | **我在 D61（R4）的条件派生在解码值上比较**，而 unknown 枚举双双 fallback 成 `.orange` → `==` 失效 → 仍抹高版本独立字色（且波及所有 unknown 枚举字段） | 全采纳，但**换机制**：改样式对「携带未来未知枚举值」的线 fail-closed（raw-aware 判据 `knownFutureEnumPayloads`），textColorToken 派生回归无条件 |
 >
 > 共同形状：**我写的东西"符合上游 spec"，但没人问过"坏数据会怎样 / 直接调用者会怎样 / 高版本写的数据会怎样"**（[[feedback_internal_review_misses_bad_data]]）。
+> **R3/R4/R5/R6/R7 至少 6 条 finding 是我修上一轮时自己引入的**——[[feedback_internal_review_misses_bad_data]]「修 symptom 挪动失败面」的连续实证；每轮都在把不变量往写入边界收，是收敛而非发散。
 > 收敛方向也一致：**把不变量钉在写入边界上，让坏状态不可表达**，而不是逐个补调用点或依赖 UI 自觉。
 > **其中 D59 与 D61 是我修上一轮 finding 时自己引入的新问题**——印证 [[feedback_internal_review_misses_bad_data]]「修 symptom 会挪动失败面」。
 
@@ -168,7 +171,7 @@ func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Bool
 | 语义 | 内容 |
 |---|---|
 | 派生 ① | `isExtended == (lineSubType == .ray)` |
-| 派生 ② | `textColorToken` **仅当它本来就等于 `colorToken` 时**才跟随线色；已是独立字色则原样保留 —— **完整规则见 D61**（codex R4 修正了本条的原始写法，原写法会抹掉高版本导入的独立字色） |
+| 派生 ② | `textColorToken` 跟随 `colorToken`（无条件；1a-iii「标签跟线同色」）。**这条只对可编辑的线求值，而可编辑 ⟹ 无 unknown 枚举值（D61），故解码 `==` 不再是判据、也不会抹高版本独立字色** —— 跨版本保真改由 D61 在写入边界整条拦截，不在这里逐字段比较 |
 | 归一化 | `labelMode` 必须经 `DrawingStyleAvailability.normalizedLabelMode(current:lineSubType:)`（挡 `(ray, .left)`） |
 | 可用性 | `lineSubType` 必须是该 `toolType` **可渲染**的值（水平线的 `.segment` 恒不可渲染 → 拒） |
 
@@ -210,26 +213,32 @@ extension DrawingObject {
 
 **交接 1b-ii（必须，否则解锁功能会被本闸卡死）**：解锁动作**不得**走 `updateDrawingStyle`（它改的是 5 个样式字段，`locked` 不在其中，且被本闸拒绝）。1b-ii 必须新增一个**独立**的 `setDrawingLocked(id:locked:) -> Bool`，该 API **豁免**本闸（它就是唯一被允许改 `locked` 的入口），并同样 `drawingsRevision += 1`。已写入 §9。
 
-### D61 跨版本字段保真：派生**只作用于"本来就是派生的"对象**（`textColorToken`）
+### D61 跨版本保真：编辑对「携带未来未知枚举值」的线 fail-closed（**不是**在解码值上比较）
 
-> **来源：codex 对抗性评审 R4 high finding。采纳。**
+> **来源：codex R4 high（原始）+ R7 high（推翻我 R4 的机制）。最终形态如下。**
 
-D59 把 `textColorToken == colorToken` 列为写入边界不变量。**但它对"从高版本解码进来的对象"是破坏性的**：`textColorToken` 是**已持久化字段**（`Models/Models.swift:257`），而独立字色是 **P3 标注文字工具**的范围（`Drawing/DrawingSession.swift:158-160` 注释明载「独立『字色』是 P3 的标注文字工具，本期不引入」）。于是：
+**R4 首次提出的问题**：`textColorToken` 是已持久化字段（`Models/Models.swift:257`），独立字色是 P3 范围（`Drawing/DrawingSession.swift:158-160`）。一条高版本线带独立字色，用户在本构建里只改粗细，字色就被 `withStyle` 静默抹成线色并 autosave → 不可逆跨版本数据丢失。与 D60 同一条推理（[[project_app_public_release_intent]]）。
 
-> 一条从高版本导入、`textColorToken != colorToken`（用户特意设过独立字色）的线，在本构建里**只要改一下粗细或线型**，`withStyle` 就会把字色静默抹成线色，并按 D56 立刻 autosave → **不可逆的跨版本数据丢失，而且触发动作与字色毫无关系**。
+**我 R4 的修法（条件派生 `old.textColorToken == old.colorToken ? style.colorToken : old.textColorToken`）被 R7 推翻**——它在**解码后的枚举值**上比较，而**这个比较对 unknown 枚举值失效**：
 
-**这条与 D60 是同一条推理**（解码自高版本的数据真实存在，见 [[project_app_public_release_intent]]）。既然对 `locked` 认这套推理，就不能对 `textColorToken` 不认。
+- **实测**（`Models/Models.swift:327/334`）：`colorToken`/`textColorToken` 解码是 `.flatMap(DrawingColorToken.init(rawValue:)) ?? .orange` → 两个**不同**的 future raw 值（`colorToken:"futureNeon"` / `textColorToken:"futureCyan"`）**双双 fallback 成 `.orange`**，解码后 `==` 成立。
+- 于是我的条件派生判「本来就是派生的」→ 覆盖字色 → 丢失。`LossyDrawingArray.swift:220-221` 的注释早已点破：这类值「完全落在 `knownDiskKeys` 内，对未来字段探测不可见——解码出的 `DrawingObject` 已被 fallback 覆盖，任何只读 `DrawingObject` 的逻辑对它不可见」。
+- **在 `DrawingObject`（解码值）层，"orange 是本来的值"与"orange 是 futureCyan 的 fallback"根本无法区分。** 判据必须 raw-aware。
 
-**修正后的派生规则**（写进 D59 的四条语义里，取代原派生 ②）：
+**这个问题比字色更大**（实测确认）：持久化走 `loadedDrawingsLossy.encoded()`（每条 `.known` 用原始 `raw` 重发，`LossyDrawingArray.swift:154-164`）。P1a 从不被咬，是因为**它只有 append、从不编辑已有线**；**1b-i 第一次引入"编辑已有线"** → 第一次会 re-merge 一条可能是高版本的线，用 fallback 值覆盖 raw 里**所有** unknown 枚举字节（`colorToken` / `textColorToken` / `lineStyle` / `period` …），不止字色。
 
-```
-新 textColorToken =
-    old.textColorToken == old.colorToken  →  style.colorToken   // 本来就是派生的：继续跟随线色
-    否则                                   →  old.textColorToken // 已是独立字色：原样保留，绝不覆盖
-```
+**最终修法（raw-aware，复用已有基础设施，保护所有 unknown 枚举字段）**：
 
-- 本构建**新建**的线恒满足 `textColorToken == colorToken`（`commitPending` 就是这么造的）→ 对本版本产生的所有线，行为与修正前**逐字一致**。
-- 只有「本构建管不了、但确实存在」的独立字色会被保住。**本期不提供任何设置独立字色的入口**（那是 P3），我们只是不去破坏它。
+`updateDrawingStyle` 对「携带未来未知枚举值」的线 **fail-closed 拒绝** —— 返 `false`、零改动、`drawingsRevision` 不递增（与 D60 `locked` 完全同构）。
+
+- **判据 = `engine.loadedDrawingsLossy.knownFutureEnumPayloads()`** 是否命中该 id（`LossyDrawingArray.swift:230`；`:274` 已有等价 helper：`contains { liveIds.contains($0.id) && !$0.entries.isEmpty }`；coordinator `:1047` 已在用它算净改动）。这是**唯一** raw-aware 的判据——它看的是磁盘原始字节，不是 fallback 后的解码值。
+- **引擎层可达**：`updateDrawingStyle` 在 `TrainingEngine`，能读 `self.loadedDrawingsLossy`。不需要把 raw 塞进 `DrawingObject`（那会污染值类型），只在写入边界查一次。
+- **`textColorToken` 派生回归无条件**：能被编辑的线保证**不带**任何 unknown 枚举值 → 解码 `==` 判据重新可靠 → D59 的派生②恢复为简单的「`textColorToken` 跟随 `colorToken`」。R4 的条件派生连同它失效的判据一起撤销。
+
+**为什么"拒绝编辑"优于"raw 比较后派生"**：后者要把 raw 逐字段读进 `withStyle`（分层脏、且要对每个枚举字段各写一遍 raw 比较）；前者一个统一判据挡住**整条**高版本线的编辑，保护所有字段，且复用已存在的 `knownFutureEnumPayloads`。
+
+- 本构建**新建**的线永远不带 unknown 枚举值 → 永远可编辑，行为与本期之前一致。
+- 高版本带未来枚举值的线：**选得中、但改不动样式**（灰置，与 `locked` / 几何不可见同一 UX，纳入 D65 谓词）。**删除仍允许**——删除移除整条（raw 一起走），不产生"部分抹除"，是用户主动处置，与"顺手抹字节"性质不同。
 
 ### D62 `updateDrawingStyle` 降为 **internal** + 源码守卫（viewport 门无法下沉，就不给绕过它的口子）
 
@@ -312,18 +321,24 @@ D63 里我写了「样式编辑**不禁**（改一条当前看不见的线的颜
 
 更要命的是**这正是 D59 教我别做的那种个案裁量**：同一条「看不见的东西不许动」原则，我对 🗑 认、对样式控件不认。
 
-**决策：选中对象的一切写入共用同一个可用性谓词。**
+**决策：改样式的可用性由一个谓词决定；删除的可用性由一个相关但更宽的谓词决定**（两者共享几何/locked 分量，只在「未来枚举值」上分岔——因为它挡改样式、不挡删整条，D61）。
 
 ```
-选中对象可写 ⟺ locked == false
-              且 在 selectedPanel 当前 mapper 下 visibleGeometry != nil
+改样式可用 ⟺ locked == false
+            且 在 selectedPanel 当前 mapper 下 visibleGeometry != nil
+            且 该 id 不在 loadedDrawingsLossy.knownFutureEnumPayloads()（无未来未知枚举值，D61）
+
+删除可用   ⟺ locked == false
+            且 在 selectedPanel 当前 mapper 下 visibleGeometry != nil
+            （**不含**未来枚举值分量：删整条不产生"部分抹除"，D61 允许删）
 ```
 
-- 谓词为假时：**🗑 置灰 + 样式控件一并置灰**，两者同进同退；对应的引擎写入即使被调用也 fail-closed（D60 / D63 已就位）。
-- 谓词为真时全部恢复可用。**滑回来 / 解锁后自动恢复**，无需重选。
+- **样式控件**按「改样式可用」置灰；**🗑** 按「删除可用」置灰。二者共享 `locked` 与 `visibleGeometry` 分量（这两种情形下**同进同退**），只在「未来枚举值」线上分岔：**样式控件灰、🗑 亮**（这条高版本线看不懂、改不得，但可以整条删掉）。
+- 谓词为假时对应的引擎写入即使被调用也 fail-closed（D60 `locked` / D61 未来枚举 / D51 几何——三道门已就位）。
+- 谓词为真时恢复可用。**滑回来 / 解锁后自动恢复**，无需重选。
 - **面板仍然回显**选中线的样式（D49 不变）——**看得见、改不动**。用户始终知道自己选中的是什么，只是当下不能改。
-- `locked` 一并纳入本谓词，顺带消掉一个 wart：否则本构建里一条解码来的锁定线会显示**可操作**的控件却静默无效果（上游 §7.2 本来就要求「🗑 灰、设置面板全灰」，本条只是把**已持久化状态的显示**做对，**不是**引入锁定动作——那仍属 1b-ii）。
-- **判据必须单点（四处同源）**：🗑 置灰、样式控件置灰、D58 的 subtype 预检、**D51 的 UI 删除路由几何门**——**四处复用同一个** `visibleGeometry` 求值，源码守卫钉死不得各写一份。
+- `locked` 纳入两个谓词，顺带消掉一个 wart：否则本构建里一条解码来的锁定线会显示**可操作**的控件却静默无效果（上游 §7.2 本来就要求「🗑 灰、设置面板全灰」，本条只是把**已持久化状态的显示**做对，**不是**引入锁定动作——那仍属 1b-ii）。
+- **`visibleGeometry` 判据必须单点（四处同源）**：🗑 置灰、样式控件置灰、D58 的 subtype 预检、D51 的 UI 删除路由几何门——**四处复用同一个** `visibleGeometry` 求值，源码守卫钉死不得各写一份。（`knownFutureEnumPayloads` 判据同理单点，见 D61。）
 
 > D58 的 subtype 预检在本决策下退化为一个更窄、更清晰的职责：**防止一条当前可见的线被改成不可见**（谓词为真时才可能发起这次改动）。
 
@@ -350,8 +365,8 @@ D63 里我写了「样式编辑**不禁**（改一条当前看不见的线的颜
 | 删 `locked` 线 | 引擎层 fail-closed（N13b，`@testable` 直调可测） |
 | 删几何不可见的选中线 | UI 路由拒绝（N16b，走路由测） |
 
-- **现有 `deleteDrawing(at index:)` 保留不动**：零生产调用点（只有定义与注释）、遗留、不产生坏数据（CLAUDE.md §3 不删无关代码）；无调用点故其访问级别不影响本期安全属性。
-- 测试经 `@testable import` 仍可直调 internal 的 `deleteDrawing(id:)`，N13 不受影响。
+- **现有 `deleteDrawing(at index:)` 也降 `internal`（R7 修订，codex R7-F1）**：本决策原稿曾写它「零调用点故访问级别不影响安全」——**这句错了**。`public` + 按 index 删、不判 `locked`/geometry/未来枚举，它就是一个**绕过本决策全部三道门的 public 破坏性入口**（包外调用者能直接删掉一条 `locked` 高版本线或离屏线，D56 让它持久化）。零当前调用点**不等于**零风险面（public = 包外可达）。故：降 `internal` + **源码守卫钉死 `Sources/` 零调用点**（它连 UI 删除路由都不该经过——路由用 id 版本）。不删类、不改其它（CLAUDE.md §3），只关掉 public 破坏性入口。`DrawingToolManager.deleteDrawing(at:)` 属死代码整体（§8 #5），本期同样不动。
+- 测试经 `@testable import` 仍可直调 internal 的 `deleteDrawing(id:)` / `deleteDrawing(at:)`，N13 不受影响。
 
 ### D52 1a-iv 交接②（`init` / `decode` 层 period 校验）重估结论 = **仍不加闸**
 
@@ -494,7 +509,7 @@ public private(set) var mode: DrawingSessionMode = .draw
 - **N2 `updateDrawingStyle` 只动样式（D50）**：改样式后断言 `id` / `anchors` / `period` / `panelPosition` / `revealTick` / `locked` / `text` / `fontSize` / `textForm` / `tailAnchor` **逐字段不变**。
 - **N3 `updateDrawingStyle` 对不存在 id（D50）**：返 `false`、`drawings` 逐字段不变、`drawingsRevision` **不递增**、UI 侧选中被清空且 🗑 回灰。
 - **N4 `deleteDrawing(id:)` 对不存在 id（D51）**：返 `false`、同 N3 的三条断言。
-- **N5 派生规则单点（D59 / D61）**：源码守卫断言 D59 四条语义的表达式在 `Sources/` 中**各只出现一次**——`isExtended == (lineSubType == .ray)`（派生①）、`textColorToken` 的**条件派生**（派生②，D61：`old.textColorToken == old.colorToken ? style.colorToken : old.textColorToken`，**不是**无条件 `= colorToken`）、`labelMode` 归一化、`lineSubType` 可用性判据。并加一条行为测试：经 `updateDrawingStyle` 把 `lineSubType` 改成 `.ray` → 该线 `isExtended == true`；改回 `.straight` → `false`。
+- **N5 派生规则单点（D59）**：源码守卫断言 D59 四条语义的表达式在 `Sources/` 中**各只出现一次**——`isExtended == (lineSubType == .ray)`（派生①）、`textColorToken = colorToken`（派生②，**无条件**；R4 的条件派生已被 D61 重做撤销，跨版本保真改由 D61 在写入边界整条拦截、不在 `withStyle` 逐字段比较）、`labelMode` 归一化、`lineSubType` 可用性判据。并加一条行为测试：经 `updateDrawingStyle` 把 `lineSubType` 改成 `.ray` → 该线 `isExtended == true`；改回 `.straight` → `false`。
 - **N6 盾对选择态生效（D53）**：`.rect` 内的 tap → **既不选中也不落锚**；`.pending` → 拒收一切。两种盾态 × 画线态 / 选择态共 4 组。
 - **N7 选中态绝不落盘（D55）**：选中一条线 → 走完整持久化往返 → 重载后**无任何选中**，且 `DrawingObject` 逐字段与选中前一致；契约版本仍 1.12。
 - **N8 面板收起不清选中（D54）**：选中一条线 → 收起面板 → 选中仍在、🗑 仍亮、可删；展开面板 → 面板派生值仍是那条线的样式。
@@ -532,11 +547,12 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **c 反向对照（防过度 fail-closed）**：同一条线 `locked == false` 时，两个 API **都成功**、`drawingsRevision` 各 +1。没有这条，实现可以用「一律拒绝」骗过 a / b。
   - **d 选中不受影响**：`locked == true` 的线**仍可被选中**（上游 spec §7.2 明载：不能选就没法解锁）——断言 hitTest 照常命中、选中态照常建立，**只是**两个写入 API 拒动它。
 
-- **N14 高版本独立字色不得被抹（D61，codex R4-F1 专项，不可省）**：
-  - **a 保留**：造 / 解码一条 `textColorToken != colorToken` 的线（模拟高版本写入）→ 选中 → **只改 `thickness`**（与颜色无关）→ 断言 `textColorToken` **逐字节不变**、`colorToken` 也不变、只有 `thickness` 变了。另测只改 `lineStyle` 一遍。
-  - **b 改线色也不夺**：同一条线 → 改 `colorToken` → 断言 `colorToken` 变了、`textColorToken` **仍是原来那个独立值**（本构建无权代用户决定字色）。
-  - **c 本版本线不受影响（反向对照）**：一条本构建新建的线（`textColorToken == colorToken`）→ 改 `colorToken` → 断言 `textColorToken` **跟随变化**，与 D61 之前逐字一致。
-  - **d 落盘往返**：a 的线走完整持久化往返 → 重载后 `textColorToken` 仍是那个独立值（证明没有在写盘环节被抹）。
+- **N14 携带未来未知枚举值的线：改样式 fail-closed、删除仍允许、原始字节保真（D61，codex R4-F1 + R7-F2 专项，不可省）**：
+  - **a 改样式被拒**：解码一条 lossy blob，其某条含 known-key-unknown-enum，如 `{colorToken:"futureNeon", textColorToken:"futureCyan"}`（`knownFutureEnumPayloads()` 命中）→ 选中 → 发起**任一**样式改动（改 `thickness` / 改线色 / 改线型）→ 断言 `updateDrawingStyle` 返 `false`、`drawings` 逐字段不变、`drawingsRevision` **不递增**。
+  - **b 原始字节保真（核心）**：接 a，走完整持久化往返（`loadedDrawingsLossy.encoded()`）→ 重载后该条 raw 里 `colorToken:"futureNeon"` 与 `textColorToken:"futureCyan"` **逐字节仍在**（证明编辑被拒后没有任何 re-merge 覆盖 raw）。**这条是 R7-F2 的直接反例**：`colorToken:"futureNeon"` 与 `textColorToken:"futureCyan"` 是两个**不同**的 future 值，均 fallback 成 `.orange`——旧的「解码 `==` 后派生」会把它俩抹平，本测试钉死不会。
+  - **c 删除仍允许（防过度 fail-closed）**：同一条未来枚举值线 → 经 UI 删除路由删除（几何可见、未锁定）→ **成功**移除、`drawingsRevision` +1。删整条不产生"部分抹除"，D61 允许。
+  - **d UI 灰置分岔**：选中该线 → 断言**样式控件全灰**（改样式谓词假）、**🗑 亮**（删除谓词真）——D65 的分岔在此可见。
+  - **e 本版本线不受影响（反向对照）**：一条本构建新建的线（无 unknown 枚举值，`textColorToken == colorToken`）→ 改 `colorToken` → **成功**、`textColorToken` **跟随变化**（D59 派生②无条件），与本期之前逐字一致。没有这条，实现可以用「一律拒绝改色」骗过 a。
 
 - **N15 `updateDrawingStyle` 不得有第二个调用点（D62）**：**源码守卫**断言 `Sources/` 中 `updateDrawingStyle(` 的调用点**恰好 1 处**，且访问级别**不是** `public`（`grep` 断言按 [[feedback_acceptance_grep_anchoring]] 用 `^…$` / 前缀锚，不得被注释里的同名字符串命中）。
 
@@ -563,10 +579,11 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **c 恢复（防做成永久禁用）**：a 平移回来 / b 的线改为未锁定 → 断言控件与 🗑 **全部自动恢复可用**，且此时改样式**成功**、`drawingsRevision` **+1**。
   - **d 回显不受影响**：a / b 两种置灰态下，面板**仍然显示**该线的真实样式（D49）——**看得见、改不动**，不得因置灰而退回显示默认样式。
 
-- **N19 `deleteDrawing(id:)` 破坏性边界收紧（D51 R6 修订，codex R6-F1 专项，不可省）**：
-  - **a 源码守卫**：`Sources/` 中 `deleteDrawing(id:` 的调用点**恰好 1 处**（= UI 删除路由），且访问级别**不是** `public`（同 N15 的锚定纪律）。
+- **N19 删除边界两个 API 都收紧（D51 R6+R7 修订，codex R6-F1 + R7-F1 专项，不可省）**：
+  - **a 源码守卫（id 版本）**：`Sources/` 中 `deleteDrawing(id:` 的调用点**恰好 1 处**（= UI 删除路由），且访问级别**不是** `public`（同 N15 的锚定纪律）。
   - **b 引擎层 locked 仍拒**：`@testable` 直调 internal `deleteDrawing(id:)` 删一条 `locked == true` 线 → 返 `false`（= N13b，确认降 internal 后引擎门仍在）。
   - **c 几何门在路由**：几何不可见的选中线，**经 UI 删除路由**删除被拒（= N16b）；这条与 b 分层——b 证「引擎判 locked」、c 证「路由判 geometry」，两道门在不同层各测一次。
+  - **d 源码守卫（index 版本，R7-F1）**：`Sources/` 中 `deleteDrawing(at:` 的调用点**恰好 0 处**（连 UI 路由都不经过——路由用 id 版本），且 `TrainingEngine.deleteDrawing(at:` 访问级别**不是** `public`。这条钉死 R7-F1 的 public 破坏性入口已关闭。
 
 ---
 
@@ -617,6 +634,7 @@ public private(set) var mode: DrawingSessionMode = .draw
 3. **面板收起期间无法切回画线态**（D54）：工具图标随面板一起隐藏。要画线需先展开面板。
 4. **面板 `.pending` 瞬间少响应一次点击**（D53）：与 1a-iii 已接受的代价一致。
 5. **`DrawingToolManager` 仍是死代码**（1a-iv 残留①）：本期不删、不改注释；建议独立清理 PR 处置。
+6. **携带未来未知枚举值的高版本线：本期改不动样式**（D61）：本构建不认识那些枚举值（解码 fallback 成默认值），编辑它必然在 re-merge 时抹掉原始字节，故 fail-closed 拒绝改样式（选得中、可整条删除、但样式控件灰）。这是**保护**而非缺陷——本构建无权代高版本决定那些字段的值。P3/未来版本认识这些值后自然解禁。
 
 ---
 
@@ -624,6 +642,7 @@ public private(set) var mode: DrawingSessionMode = .draw
 
 - **1b-ii（三条，缺一即卡死或回归）**：
   1. **解锁必须走独立 API**：`setDrawingLocked(id:locked:) -> Bool`，**豁免** D60 的 locked 闸（它是唯一被允许改 `locked` 的入口），同样 `drawingsRevision += 1`。**不得**试图用 `updateDrawingStyle` 解锁——`locked` 不在它管的 5 个样式字段里，且会被 D60 直接拒绝。
+     ⚠️ **且 `setDrawingLocked` 会遇到 D61 的同一个坑**：锁定/解锁一条**未来枚举值**线也要 re-merge、也会抹原始字节。1b-ii 必须让它 raw-preserving（只改 `locked` 这一个 key、其余从旧 raw 保留），或对未来枚举值线也 fail-closed。本期 `updateDrawingStyle` 用「整条拒绝」绕过了这个坑，但锁定必须能作用于任意线（否则高版本线永远锁不上/解不开），所以 1b-ii 不能照抄"整条拒绝"，得真正做 raw-preserving 的单字段 merge。
   2. 落地 undo / redo / 锁定时，必须把它们的引擎 API **补进 `drawingsRevision` 的「每 API 各一条回归测试」那一组**（D56）。
   3. 撤销删除必须 `insert(at:)` 还原原下标，禁 `append`（D25）。
 - **P5**：复盘获得改样式能力时，必须**同期**给 `reviewDrawings` 补等价 revision 触发器（D56），并补跨层选中循环（§8 #1）。
