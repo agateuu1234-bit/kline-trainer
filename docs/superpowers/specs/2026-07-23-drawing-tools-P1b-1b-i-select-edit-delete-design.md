@@ -58,7 +58,7 @@
 
 ---
 
-## 2. 决策 D49–D66
+## 2. 决策 D49–D67
 
 > **下表全部是 codex 对抗性评审 R1–R10 的产物**（新增 D57–D66，以及对本期原创 D51/D56/D58/D59/D61/D65 的修订；均已对源码 / 上游 spec 原文实测证实，未采信转述）：
 >
@@ -83,6 +83,8 @@
 > | R10 | high | **D56 补全** | codex 的具体论断（验收 #23 会丢改样式）**有误**（resume 路径 `replayHasPersisted==true` 兜底 + fresh replay 不种画线），**但揭示的 gap 真**：D56 只改了 `TrainingView.onChange`、漏了 `saveProgress` 的 replay clean-skip 仍按 `count` 判 | **部分采纳**：记录技术反驳 + 采纳补 `saveProgress`（⚠️ 我提的「换 revision」方向被 R11-F2 纠正） |
 > | R11 | high | **D59 派生② 纠正** | **我 R7 把条件派生误换成无条件**：known 值的独立字色（`.orange` 线 + `.blue` 标签，无 future payload → 可编辑）改样式时被无条件派生抹掉 | 全采纳（恢复条件派生；与 D61 raw-aware 拒绝**叠加**：known 靠条件派生、unknown 靠拒绝） |
 > | R11 | high | **D56 判据再纠正** | **我 R10 提的「clean-skip 换 `drawingsRevision`」错**：revision 单调，`append+delete`/`edit+revert` 回 baseline 时 revision≠baseline → 误写净空槽覆盖别的记录 | 全采纳（改用 drawing **内容快照相等**：改样式→内容变→不 skip；回 baseline→内容==baseline→skip） |
+> | R12 | high | **D67**（信任边界收尾） | **信任边界模式（D51/D62）漏了最后一处**：`append` 家族仍 public 无 geometry 门 → 直接调可塞 `.segment`/视口外 ray 幽灵线 | 全采纳（append/appendReview/routeDrawingCommit 降 internal + 源码守卫 + 引擎层 `.segment` 门；三类写入面统一） |
+> | R12 | high | **D56 快照纠正** | **我 R11 提的「用 `encoded()` 字节做快照」错**：lossy 对编辑行重序列化成 sorted-key，`edit+revert` 后语义==baseline 但字节≠原始 raw → 误判脏覆盖 | 全采纳（改用**规范语义签名**，禁字节相等；N22b2 用非规范 raw fixture 钉死） |
 >
 > 共同形状：**我写的东西"符合上游 spec"，但没人问过"坏数据会怎样 / 直接调用者会怎样 / 高版本写的数据会怎样"**（[[feedback_internal_review_misses_bad_data]]）。
 > **约一半 finding（R3-F2/D59、R7/D61、R8-F1、R9、以及若干测试/判据滞后）是我修上一轮时自己引入的表述或覆盖不一致**——[[feedback_internal_review_misses_bad_data]]「修 symptom 挪动失败面」的连续实证。
@@ -414,6 +416,25 @@ D63 里我写了「样式编辑**不禁**（改一条当前看不见的线的颜
 - **装载路径**（`LossyDrawingArray.decode`）**已** normalize 空 id（`:111-121` 回填 `legacy-idx-N`）；本决策补的是**运行时新增**入口，两者合起来堵死空/重复 id 的全部来源。
 - **本版本正常路径行为不变**：`commitPending` 用 `UUID().uuidString` 默认（`Models.swift:265`）→ 新线恒唯一非空。
 
+### D67 append 家族纳入信任边界：三类写入面统一（信任边界模式收尾）
+
+> **来源：codex 对抗性评审 R12 high finding。它揭示信任边界模式（D51 delete / D62 update）还差最后一处未覆盖：`append` 家族仍 `public`、没有 geometry 门。**
+
+**实测的生产链唯一**：`handleDrawingTap`（`:303` 已有 `visibleGeometry` 门）→ `routeDrawingCommit`（`:304`）→ `appendDrawing` / `appendReviewDrawing`（`TrainingEngine.swift:1144` / `:1142`）。`commitPending` 已用 `withStyle` 拒 `.segment`（D59）。**但这三个 API 都 `public`** → 包内/包外**直接调**可塞一条 `.segment` / 视口外 `ray` / 任何 `visibleGeometry == nil` 的对象，**绕过 `:303` 门 + `commitPending`**，D56 autosave 一条渲染不出（D40/D52 选不中、删不掉）的幽灵线。与 D51/D62 关闭的是同一个 public 信任边界问题。
+
+**决策：三类 drawings 写入面统一信任边界**——
+
+| 写入面 | 引擎层门（viewport 无关，恒开） | UI 路由门（viewport 相关，持 mapper） | 访问级别 |
+|---|---|---|---|
+| `updateDrawingStyle`（D62） | `withStyle` 语义（`.segment` 拒 / `labelMode` 归一化 / 派生①②）+ `locked`（D60）+ 未来枚举（D61）+ id 唯一（D66） | D65 当前几何 + D58 subtype 候选预检 | `internal` + 源码守卫 |
+| `deleteDrawing(id:)`（D51） | `locked`（D60）+ id 匹配唯一（D66） | D51 UI 删除路由几何门 | `internal` + 源码守卫 |
+| `appendDrawing` / `appendReviewDrawing`（**D67**） | `period`（1a-iv）+ id 唯一非空（D66）+ **`.segment` 等 viewport 无关不可渲染值拒**（复用 `DrawingStyleAvailability`，与 `withStyle` 同判据） | `handleDrawingTap:303` `visibleGeometry` 门（视口外 `ray`） | `internal` + 源码守卫 |
+| `routeDrawingCommit`（**D67**） | 转发（盖 `revealTick` + 按 `mode` 路由，不新增门） | 同上（其唯一调用点 `handleDrawingTap` 持门） | `internal` + 源码守卫 |
+
+- 三个 API 降 `internal`，**源码守卫钉死唯一调用点**（`appendDrawing`/`appendReviewDrawing` ← `routeDrawingCommit`；`routeDrawingCommit` ← `handleDrawingTap`）。`@testable` 仍可测。
+- **降 internal 零影响**：`appendDrawing` 的 P1a `public` 地位（RFC §4.4c）+ 1a-iv 给它的返 Bool「编辑路径预期用途」**从未实现**（1b-i 编辑走 `updateDrawingStyle` 原地替换、不用 append）；`setReviewDrawings` / `init`（复盘装载 / resume）是**整体赋值**、不经 append 家族。
+- **引擎层 `.segment` 门是纵深防御**（防直接调 `routeDrawingCommit` 绕过 `commitPending` 的 `withStyle`）；**视口外 `ray` 只有 UI 路由能判**，故 append 家族的 geometry 完整性靠「唯一调用点在 `handleDrawingTap` 的 `:303` 门之后」这条源码守卫保证——与 D51 删除路由、D62 update 的论证结构完全一致。
+
 ### D52 1a-iv 交接②（`init` / `decode` 层 period 校验）重估结论 = **仍不加闸**
 
 1a-iv 把 period 自洽校验加在了新增写入面（`appendDrawing` / `appendReviewDrawing` / `commitPending`），**刻意不加**在 `init` 的 `self.drawings = …` 与复盘装载的整体赋值上，理由是「resume 路径 fail-closed 会静默吞掉用户已画的线」。1a-iv 要求 1b-i 重估。
@@ -525,7 +546,9 @@ public private(set) var mode: DrawingSessionMode = .draw
     - **但 gap 是真的**：D56 只把 `TrainingView.onChange` 从 `count` 换成 `drawingsRevision`，**漏了 `saveProgress:606-614` 那个独立的 replay clean-skip gate 仍用 `base.drawings == engine.drawings.count`**。改样式 `count` 不变 → 两个判据现在**不一致**：`TrainingView` 说「revision 变了要存」，`saveProgress` 说「count 没变可 skip」。当前靠 `replayHasPersisted` 兜底才没出事，但**判据不一致本身就是 D56 没做完**——一旦将来 fresh replay 种了画线（或新增任何 `!replayHasPersisted` 期的编辑入口），改样式即被 count-based clean-skip 静默吞。
   - **决策（内容快照相等，不是 revision，codex R11-F2 纠正我 R10 的方向）**：clean-skip 是一个**净状态守卫**——「当前态**仍等于** baseline 就不写槽」（防 `back()`/后台 flush 用 fresh B 初态覆盖记录 A 的槽）。
     - ⚠️ **`drawingsRevision` 不能表达这个**（它单调递增，只表达「改过没」，不表达「现在等不等于 baseline」）：`append+delete` 回到 baseline（净状态 == baseline）、或 `style-edit+revert`，都会让持久化 drawing 状态 == baseline 而 `drawingsRevision` ≠ baseline → clean-skip 失灵 → 写一个本该跳过的净空 replay 槽 → **覆盖别的记录的 pending**。我 R10 提的「换 revision」方向**错了**。
-    - ✅ **正解 = drawing 内容快照 / 签名**：`replayBaseline` 存 baseline 的 **drawing 内容快照**（如 `loadedDrawingsLossy.encoded()` 的字节，或 drawings 的全字段签名——与母 spec §6.3 D6 `ReviewNetChange` 的 per-drawing 全字段 key 同精神）；clean-skip 比较**当前 drawing 内容是否等于 baseline 内容**。这样：改样式 → 内容变 → 不 skip（**修好 count 漏改样式**）；`append+delete` / `edit+revert` 回 baseline → 内容 == baseline → skip（**不覆盖别的记录**）。tick/交易/周期分量不变（仍按值比较）。改 `replayBaseline` 形状会动几个钉它的既有测试，属预期、同步更新。
+    - ✅ **正解 = 规范语义签名，不是原始字节（codex R12-F2 纠正）**：`replayBaseline` 存 baseline 的 **drawing 规范语义签名** = 每条按 id + **全部 known 字段的规范化表示** + unknown 元素的身份（顺序/id），与母 spec §6.3 D6 `ReviewNetChange` 的 per-drawing 全字段 key **同一套**。clean-skip 比较**当前 drawing 语义签名是否等于 baseline 签名**。
+    - ⚠️ **禁止用 `loadedDrawingsLossy.encoded()` 原始字节做相等**（我 R11 提这个选项是错的）：lossy merge 把**编辑过的 known 行重序列化成 sorted-key JSON**（`encodeKnown`），`edit+revert` 后语义 == baseline 但**字节 ≠ 原始 raw**（原始 raw 可能是高版本写的非规范 key 顺序/格式）→ 字节相等判它「脏」→ 误写净空槽覆盖别的记录，正是本节要防的。**必须先规范化再比较**（解码到字段值比、或 canonical JSON），字节差异不得影响。
+    - 这样：改样式 → 签名变 → 不 skip（**修好 count 漏改样式**）；`append+delete` / `edit+revert` 回 baseline → 签名 == baseline → skip（**不覆盖别的记录，且不受重序列化字节漂移影响**）。tick/交易/周期分量不变（仍按值比较）。改 `replayBaseline` 形状会动几个钉它的既有测试，属预期、同步更新。
 
 ---
 
@@ -659,9 +682,16 @@ public private(set) var mode: DrawingSessionMode = .draw
 
 - **N22 replay clean-skip 用 drawing 内容快照相等（D56 补，codex R10-F1 + R11-F2 专项，不可省）**：
   - **a 改样式 → 内容变 → 不 skip（修 count 漏改样式）**：构造一个 `!replayHasPersisted` 的 replay 会话，只改一条已有线的样式（内容变、`drawings.count` 不变）→ `saveProgress` **不 clean-skip、真的写盘**（重读槽样式在）。若 clean-skip 仍按 `count`，本测试红。
-  - **b `append+delete` 回 baseline → 内容 == baseline → 仍 skip（防覆盖，R11-F2 核心）**：`!replayHasPersisted` 会话里 `append` 一条再 `delete` 它（净状态回 baseline、但 `drawingsRevision` +2）→ `saveProgress` **必须 clean-skip、不写槽**（否则覆盖记录 A 的 pending replay）。**这条直接钉死「revision 单调不能表达净状态相等」**：若 clean-skip 按 `drawingsRevision`，revision ≠ baseline → 误写槽，本测试红。另测 `edit+revert`（改样式再改回原样）同理必 skip。
+  - **b `append+delete` 回 baseline → 签名 == baseline → 仍 skip（防覆盖，R11-F2 核心）**：`!replayHasPersisted` 会话里 `append` 一条再 `delete` 它（净状态回 baseline、但 `drawingsRevision` +2）→ `saveProgress` **必须 clean-skip、不写槽**（否则覆盖记录 A 的 pending replay）。**这条直接钉死「revision 单调不能表达净状态相等」**：若 clean-skip 按 `drawingsRevision`，revision ≠ baseline → 误写槽，本测试红。
+  - **b2 `edit+revert` 且 raw 非规范 → 签名 == baseline → 仍 skip（codex R12-F2 专项，不可省）**：baseline 那条线的原始 raw 用**非规范 key 顺序 / 格式**（模拟高版本写入）→ `!replayHasPersisted` 会话里改它样式再改回原样（`edit+revert`）→ 编辑那次把该行 raw 重序列化成 sorted-key（字节 ≠ 原始 raw，但语义 == baseline）→ `saveProgress` **必须 clean-skip、不写槽**。**这条直接钉死「用 `encoded()` 原始字节做相等」的陷阱**：若 clean-skip 比字节，重序列化后字节 ≠ baseline → 误判脏 → 写槽覆盖，本测试红。fixture **必须**用非规范 raw（规范 raw 测不出这个陷阱）。
   - **c 验收 #23 现状回归（resume 路径）**：`resumePendingReplay` 续局（`replayHasPersisted == true`）→ 只改一条已有线样式 → 立刻 `saveProgress` → 重读槽样式在（= 母 spec §6.3 0b 第二条断言；resume 路径 `replayHasPersisted` 兜底 + D56 revision 触发器 **双保险**）。
   - **d fresh replay 不种画线的不变量锁**（承接 §6.3 0b 第一条）：`replay(recordId:)` 对一条画线非空的记录返回的引擎 `engine.drawings.isEmpty == true`——这条**保持**（codex R10 设想的 fresh-replay-有线场景由它挡在门外；将来谁给 fresh replay 种了画线，本测试立刻红，届时 a/b 的内容快照判据正好兜住）。
+
+- **N23 append 家族信任边界（D67，codex R12-F1 专项，不可省）**：
+  - **a 源码守卫**：`Sources/` 中 `appendDrawing(` / `appendReviewDrawing(` 的调用点各**恰好 1 处**（= `routeDrawingCommit`），`routeDrawingCommit(` 的调用点**恰好 1 处**（= `handleDrawingTap`），三者访问级别均**不是** `public`（同 N15/N19 锚定纪律）。
+  - **b 引擎层 `.segment` 拒（direct-call）**：`@testable` 直调 `appendDrawing` 一条 `.horizontal` `.segment` 线 → 返 `false`、`drawings` 不变、`drawingsRevision` 不递增（判据复用 `DrawingStyleAvailability`，与 `withStyle` 同真相）。`appendReviewDrawing` 同测。
+  - **c 生产链 geometry 完整性**：视口外 `ray`（`visibleGeometry == nil`）经**真实** `handleDrawingTap` 路径 → 被 `:303` 门挡下、不落库（= 1a-iii rebased-R2 已有回归，本期确认降 internal 后仍在）。
+  - **d 拒绝的 append 不动状态**：任一被拒的 append（`.segment` / period 不符 / 空 id / 重复 id）→ `drawings`/`reviewDrawings` 逐字段不变、`drawingsRevision` 不递增。
 
 ---
 
