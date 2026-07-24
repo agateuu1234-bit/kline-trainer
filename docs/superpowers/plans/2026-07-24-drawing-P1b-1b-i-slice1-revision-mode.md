@@ -250,30 +250,46 @@ public func canonicalDrawingsSignature(_ drawings: [DrawingObject]) -> String {
 Run: `cd ios/Contracts && swift test --filter canonicalSignatureSemantics 2>&1 | tail -20`
 Expected: PASS。
 
-- [ ] **Step 5: 写 clean-skip 净状态失败测试**
+- [ ] **Step 5: 写 clean-skip 失败测试（两条本切片 + 一条交接 PR-2，codex plan-R1-F1）**
+
+> ⚠️ **codex plan-R1-F1 抓到我上一版的两处实问题**：(1) 只写了 append+delete 一条，漏了主 bug（count 漏改样式）的反例；(2) 用了不存在的测试 helper（`replaceDrawingsForTesting`/`withThicknessForTesting`）。修正：**用现有 API 制造判别力**，本切片落**两条**（①钉 count、②钉 revision），第三条（非规范 raw edit+revert 钉字节）**依赖 PR-2 的 lossy merge 路径**（本切片没有原地编辑→loadedDrawingsLossy 重序列化的通道，制造不出「字节≠但语义==」的状态），**交接 PR-2**（见 Task 5 交接注记）。
+
+**关键技巧（用现有 API 制造「同 count 但内容变」）**：`baseline = [A]` → `appendDrawing(B)` → `[A,B]` → `deleteDrawing(at: 0)` → **`[B]`**。count 从 1 回到 1（==baseline count），但**内容从 [A] 变成 [B]**（签名变）。这对 count-only 实现「先红」，无需任何测试专用 helper。
+
+前提搭建：两条都需要 `!replayHasPersisted` 的 replay 会话、`engine.drawings` **有一条已有线** `A` 作 baseline。fresh `replay(recordId:)` 不种画线（母 spec §6.3 0b），故 baseline-有线态**须注入构造**——按本文件既有 replay 持久化测试的搭建方式：构造 coord + fake 存储，用 `appendDrawing` 把 `A` 放进去后**重置 baseline 快照**（模拟「加载时 A 已在、且 A 即 baseline」），再置 `replayHasPersisted = false`。`debugReplaySlotWritten` 若无现成探针，用 fake 存储的写入计数等价断言（`saveProgress` 后 fake 的 replay-slot 写入次数）。
 
 ```swift
-@Test("replay clean-skip: 改样式→签名变→写盘；append+delete 回 baseline→签名==baseline→仍 skip")
-@MainActor func replayCleanSkipUsesSignature() async throws {
-    // 复用本文件既有的 replay 会话搭建 helper（构造 !replayHasPersisted 的 fresh/注入态）。
-    let (coord, engine) = try await makeReplaySessionForTesting()   // 既有或按本文件既存模式搭建
-    // 前提：engine.drawings 非空（注入一条，模拟 baseline 有线）——见本文件既有注入方式
-    // a) append 一条再 delete（净状态回 baseline） → clean-skip 必须跳过（不写槽）
-    let d = DrawingObject(toolType: .horizontal,
-                          anchors: [DrawingAnchor(candleIndex: 5, price: 9, period: .daily)], period: .daily)
-    _ = engine.appendDrawing(d)
-    engine.deleteDrawing(at: engine.drawings.count - 1)             // 回 baseline
+// ① 同 count 但内容变 → 必须写盘。★对当前 count 实现「先红」——count 回 baseline→skip→没写盘→本断言失败。
+@Test("replay clean-skip ①: 同count内容变(A→B)→签名变→写盘（钉死 count 漏改内容）")
+@MainActor func replayCleanSkip_sameCountContentChangeWrites() async throws {
+    let (coord, engine) = try makeReplaySessionWithBaselineA()   // !replayHasPersisted，drawings=[A]，baseline 快照=当前
+    let B = DrawingObject(toolType: .horizontal,
+                          anchors: [DrawingAnchor(candleIndex: 9, price: 8, period: .daily)], period: .daily)
+    _ = engine.appendDrawing(B)                                  // [A,B]
+    engine.deleteDrawing(at: 0)                                  // [B]：count 回 1==baseline，但内容 A→B
     try await coord.saveProgress(engine: engine)
-    #expect(coord.debugReplaySlotWritten == false)                 // 净状态==baseline → skip（不覆盖别的记录）
+    #expect(coord.debugReplaySlotWritten == true)               // 签名变→不 skip→写盘
+}
+
+// ② append+delete 回 baseline（净状态==baseline）→ 必须 skip。对 revision 实现红（revision+2≠baseline 误写）。
+@Test("replay clean-skip ②: append+delete 同一条回 baseline→签名==baseline→skip（钉死 revision 单调）")
+@MainActor func replayCleanSkip_appendDeleteSameSkips() async throws {
+    let (coord, engine) = try makeReplaySessionWithBaselineA()   // drawings=[A]
+    let B = DrawingObject(toolType: .horizontal,
+                          anchors: [DrawingAnchor(candleIndex: 9, price: 8, period: .daily)], period: .daily)
+    _ = engine.appendDrawing(B)                                  // [A,B]
+    engine.deleteDrawing(at: engine.drawings.count - 1)          // 删掉刚 append 的 B → 回 [A]==baseline，但 revision+2
+    try await coord.saveProgress(engine: engine)
+    #expect(coord.debugReplaySlotWritten == false)              // 签名==baseline→skip（不覆盖别的记录）
 }
 ```
 
-> `makeReplaySessionForTesting` / `debugReplaySlotWritten` 若本文件无对应 helper/探针，按本文件既有 replay 持久化测试的搭建与断言方式实现等价断言（断言「未写槽」可用 fake 存储的写入计数）。fresh replay 不种画线（母 spec §6.3 0b），本测试的 baseline-有线态须经注入构造，见 spec N22 说明。
+> `makeReplaySessionWithBaselineA` / `debugReplaySlotWritten`：本文件若无对应 helper，按既有 replay 持久化测试的搭建 + fake 存储写入计数实现等价物。**只用生产 API**（`appendDrawing`/`deleteDrawing(at:)`），不引入测试专用 mutator。
 
-- [ ] **Step 6: 运行确认失败**
+- [ ] **Step 6: 运行确认①先红**
 
-Run: `cd ios/Contracts && swift test --filter replayCleanSkipUsesSignature 2>&1 | tail -30`
-Expected: FAIL（当前 clean-skip 按 count；append+delete 后 count 回 baseline **恰好也 skip**，但若实现里已被 Task1 的 revision 干扰或 count 语义变化则暴露——本测试主要在 Step 8 换签名后仍绿，锁死「不退回 revision/count-only」）。
+Run: `cd ios/Contracts && swift test --filter "replayCleanSkip_sameCountContentChangeWrites" 2>&1 | tail -30`
+Expected: **FAIL**（当前 clean-skip 按 count：`[A]`→`[B]` 后 count 仍 1==baseline → clean-skip 跳过 → 未写盘 → `debugReplaySlotWritten == true` 断言失败）。**这一条先红证明测试真能抓 count 漏改内容的 bug**。② 此刻已绿（count 实现对 append+delete 恰好也 skip），其判别力在换签名后对 revision 实现才显现——两条都保留，Step 8 后全绿锁死正解。
 
 - [ ] **Step 7: 换 `replayBaseline` 类型 + clean-skip 判据**
 
@@ -299,10 +315,10 @@ clean-skip 判据（`:606-614`）第三行 `base.drawings == engine.drawings.cou
 
 （`:974` 的 `replayBaseline = nil` reset 不变。）
 
-- [ ] **Step 8: 运行全部相关测试确认通过**
+- [ ] **Step 8: 运行全部相关测试确认通过（①②换签名后都绿）**
 
-Run: `cd ios/Contracts && swift test --filter "Replay|replay|canonicalSignature" 2>&1 | tail -30`
-Expected: 全 PASS（含既有 replay 持久化测试——若某条钉了 `replayBaseline` 元组形状/count 语义，同步更新为签名语义）。
+Run: `cd ios/Contracts && swift test --filter "replayCleanSkip|canonicalSignature|Replay|replay" 2>&1 | tail -30`
+Expected: 全 PASS——①（同 count 内容变→写盘）与②（append+delete 回 baseline→skip）**都绿**，且既有 replay 持久化测试全绿（若某条钉了 `replayBaseline` 元组形状/count 语义，同步更新为签名语义）。
 
 - [ ] **Step 9: 提交**
 
@@ -452,6 +468,7 @@ Expected: `Test run with <N> tests ... passed`，N ≥ 1661 + 本切片新增测
 在 `.superpowers/sdd/PR-body-1b-i-slice1.md` 记本切片交付 + 交接 PR-2 的三条：
 1. **`drawingsRevision` 的「每 API +=1」还差 update/delete(id:)**（PR-2 建它们时同步 +=1，并补 N20b/N21 的 revision 断言）。
 2. **replay 签名的 unknown 元素身份**：本切片未纳入（replay 会话内 unknown 条不可动）；PR-2 若引入能动 unknown 条的路径须回补。
+2b. **replay clean-skip 测试③（非规范 raw edit+revert → skip，spec N22b2）留 PR-2**：本切片没有「原地编辑→`loadedDrawingsLossy` 重序列化」的通道，制造不出「字节≠但语义==」的状态；PR-2 建 `updateDrawingStyle` + lossy merge 后补这条，钉死「clean-skip 别退回用 `encoded()` 字节」（codex plan-R1-F1 明列）。
 3. **选中清空**（D57 附「切周期善后追加清空选中」）留 PR-3（本切片无 selectedDrawingID）。
 
 - [ ] **Step 3: 提交**
