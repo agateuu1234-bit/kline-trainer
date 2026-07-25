@@ -4,7 +4,7 @@
 
 **Goal:** 为 1b-i「选中/编辑/删除」铺四块引擎/会话状态地基——内容级 dirty 计数器 `drawingsRevision`、replay clean-skip 改用净状态语义签名、选择态显式 `mode`、append 家族信任边界（关 public bypass）——全部零 UI、host `swift test` 全覆盖。
 
-**Architecture:** 四块都落在既有 `TrainingEngine` / `TrainingSessionCoordinator` / `DrawingSession` 上。`drawingsRevision` 是单调计数器驱动 autosave；replay clean-skip 从「drawing 计数相等」升级为「drawing 规范语义签名相等」；`DrawingSession.mode` 用 `.draw|.select` 显式区分两态，取代母 spec 用 `activeDrawingTool == nil` 的编码；append 家族（`appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)`）降 `internal` + 源码守卫 + 引擎层 `.segment` 门，与后续 PR 的 `updateDrawingStyle`/`deleteDrawing(id:)` 同属信任边界模式——**本切片就关闭 public bypass，不留中间态暴露窗口**（codex plan-R3-F1）。后续切片（PR-2 写入边界 API / PR-3 命中渲染 / PR-4 交互 UI）都建在这四块之上。
+**Architecture:** 四块都落在既有 `TrainingEngine` / `TrainingSessionCoordinator` / `DrawingSession` 上。`drawingsRevision` 是单调计数器驱动 autosave；replay clean-skip 从「drawing 计数相等」升级为「drawing 规范语义签名相等」；`DrawingSession.mode` 用 `.draw|.select` 显式区分两态，取代母 spec 用 `activeDrawingTool == nil` 的编码；append 家族（`appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)`/`removeReviewDrawing(at:)`）降 `internal` + 源码守卫 + 引擎层 `.segment` 门，与后续 PR 的 `updateDrawingStyle`/`deleteDrawing(id:)` 同属信任边界模式——**本切片就关闭 public bypass，不留中间态暴露窗口**（codex plan-R3-F1）。后续切片（PR-2 写入边界 API / PR-3 命中渲染 / PR-4 交互 UI）都建在这四块之上。
 
 **Tech Stack:** Swift 5.9 / `@Observable` / SwiftPM（`ios/Contracts`）；测试 `swift test`（host，macOS）；跨平台纯逻辑（无 UIKit）。
 
@@ -309,32 +309,35 @@ Expected: PASS。
 // ① 同 count 但内容变 → 必须写盘。★对当前 count 实现「先红」——count 回 baseline→skip→没写盘→本断言失败。
 @Test("replay clean-skip ①: 同count内容变(A→B)→签名变→写盘（钉死 count 漏改内容）")
 @MainActor func replayCleanSkip_sameCountContentChangeWrites() async throws {
-    let (coord, engine) = try makeReplaySessionWithBaselineA()   // !replayHasPersisted，drawings=[A]，baseline 快照=当前
+    let (coord, engine, replayRepo) = try await makeReplaySessionWithBaselineA()   // !replayHasPersisted，drawings=[A]
+    let c0 = replayRepo.saveCount
     let B = makeHLine(id: "B", candleIndex: 9, price: 8)
     _ = engine.appendDrawing(B)                                  // [A,B]
     engine.deleteDrawing(at: 0)                                  // [B]：count 回 1==baseline，但内容 A→B
     try await coord.saveProgress(engine: engine)
-    #expect(coord.debugReplaySlotWritten == true)               // 签名变→不 skip→写盘
+    #expect(replayRepo.saveCount == c0 + 1)                      // 签名变→不 skip→真的 saveReplay 一次
 }
 
 // ② append+delete 回 baseline（净状态==baseline）→ 必须 skip。对 revision 实现红（revision+2≠baseline 误写）。
 @Test("replay clean-skip ②: append+delete 同一条回 baseline→签名==baseline→skip（钉死 revision 单调）")
 @MainActor func replayCleanSkip_appendDeleteSameSkips() async throws {
-    let (coord, engine) = try makeReplaySessionWithBaselineA()   // drawings=[A]
+    let (coord, engine, replayRepo) = try await makeReplaySessionWithBaselineA()   // drawings=[A]
+    let c0 = replayRepo.saveCount
     let B = makeHLine(id: "B", candleIndex: 9, price: 8)
     _ = engine.appendDrawing(B)                                  // [A,B]
     engine.deleteDrawing(at: engine.drawings.count - 1)          // 删掉刚 append 的 B → 回 [A]==baseline，但 revision+2
     try await coord.saveProgress(engine: engine)
-    #expect(coord.debugReplaySlotWritten == false)              // 签名==baseline→skip（不覆盖别的记录）
+    #expect(replayRepo.saveCount == c0)                         // 签名==baseline→skip→无 saveReplay（不覆盖别的记录）
 }
 ```
 
-> `makeReplaySessionWithBaselineA`：见上方前提搭建（`replay(recordId:)` + `appendDrawing(A)` + `recaptureReplayBaselineForTesting`）。动作步骤本身（append B / delete）用生产 API；**baseline 的构造须用 DEBUG hook**——这是 fresh replay 不种画线的必然结果，不是可省的纪律（我上一版「只用生产 API」构造不出目标态，codex plan-R4-F2）。
+> **写入探针用既有 fake 的 `saveCount`，不编造 `debugReplaySlotWritten`（codex plan-R7-F2）**：`InMemoryPendingReplayRepository`（`Sources/.../PreviewFakes/InMemoryFakes.swift:180`）已有 `public var saveCount`（`:200`），`saveReplay(_:)`（`:204`）每次 `_saveCount += 1`；既有测试 `CoordinatorReplayPersistenceTests.saveProgress_replay_writesPendingReplay` 已在用这套。故 `makeReplaySessionWithBaselineA()` **返回三元组 `(coord, engine, replayRepo: InMemoryPendingReplayRepository)`**（该 repo 就是搭 coord 时注入的那个 fake），测试比较 `saveProgress` 前后的 `saveCount` delta（+1=写盘，不变=skip）。
+> `makeReplaySessionWithBaselineA`：`replay(recordId:)` 建完整会话（active 上下文齐、`replayHasPersisted=false`）→ `appendDrawing(A)` 使 `drawings=[A]` → `recaptureReplayBaselineForTesting(engine)` 使 baseline=`sig([A])` → 返回 `(coord, engine, replayRepo)`。动作步骤（append B / delete）用生产 API；**baseline 构造须用 DEBUG hook**——fresh replay 不种画线的必然，不是可省纪律（codex plan-R4-F2）。
 
 - [ ] **Step 6: 运行确认①先红**
 
 Run: `cd ios/Contracts && swift test --filter "replayCleanSkip_sameCountContentChangeWrites" 2>&1 | tail -30`
-Expected: **FAIL**（当前 clean-skip 按 count：`[A]`→`[B]` 后 count 仍 1==baseline → clean-skip 跳过 → 未写盘 → `debugReplaySlotWritten == true` 断言失败）。**这一条先红证明测试真能抓 count 漏改内容的 bug**。② 此刻已绿（count 实现对 append+delete 恰好也 skip），其判别力在换签名后对 revision 实现才显现——两条都保留，Step 8 后全绿锁死正解。
+Expected: **FAIL**（当前 clean-skip 按 count：`[A]`→`[B]` 后 count 仍 1==baseline → clean-skip 跳过 → 未 `saveReplay` → `saveCount` 不增 → `saveCount == c0 + 1` 断言失败）。**这一条先红证明测试真能抓 count 漏改内容的 bug**。② 此刻已绿（count 实现对 append+delete 恰好也 skip），其判别力在换签名后对 revision 实现才显现——两条都保留，Step 8 后全绿锁死正解。
 
 - [ ] **Step 7: 换 `replayBaseline` 类型 + clean-skip 判据**
 
@@ -506,12 +509,13 @@ git commit -m "划线 1b-i 切片1 Task4：DrawingSession 选择态显式 mode +
 > **codex plan-R3-F1**：Task 1 让 `appendDrawing`/`deleteDrawing(at:)` 成为新 revision/autosave 路径，但它们仍 `public`。若本切片单独 merge，就 ship 了 spec D67 要关闭的 public 破坏性入口（包外可绕过 geometry/locked/id/future-enum 门落幽灵线）。D67 是「引擎写入边界地基」，与 revision 同属本切片，**在此关闭**（不留到 PR-2 的中间态暴露窗口）。
 
 **Files:**
-- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（`appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)` 降 `internal` + `appendDrawing`/`appendReviewDrawing` 加 `.segment` + id 门）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（`appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)`/`removeReviewDrawing(at:)` 降 `internal` + `appendDrawing`/`appendReviewDrawing` 加 `.segment` + id 门）
 - **Modify（既有测试，降 internal 会破坏它，codex plan-R6-F2）**：`ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift`（`atomicStyleConstruction` 的锚 `public func routeDrawingCommit` → `func routeDrawingCommit`）
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（N23a/b/d）
 
 **Interfaces:**
-- 实测生产链唯一（本切片开工前已核）：`ChartContainerView.handleDrawingTap:303`（有 `visibleGeometry` 门）→ `routeDrawingCommit:304` → `appendDrawing:1144`/`appendReviewDrawing:1142`；`deleteDrawing(at:)` 零生产调用点。故四者降 `internal` **零生产影响**；测试经 `@testable import` 照常可调。
+- 实测生产链唯一（本切片开工前已核）：`ChartContainerView.handleDrawingTap:303`（有 `visibleGeometry` 门）→ `routeDrawingCommit:304` → `appendDrawing:1144`/`appendReviewDrawing:1142`；`deleteDrawing(at:)` 与 **`removeReviewDrawing(at:)`（`:1120`）均零生产调用点**。故这**五者**降 `internal` **零生产影响**；测试经 `@testable import` 照常可调。
+- ⚠️ **`removeReviewDrawing(at:)` 也必须纳入（codex plan-R7-F1）**：它是对 `reviewDrawings` 的 index 破坏性删除，且 `TrainingView` autosave 盯 `reviewDrawings.count`——若留 `public`，包外可按 index 删复盘工作画线、绕过任何 id/geometry/ownership 门，造成不可逆复盘数据丢失。与 `drawings` 侧的 `deleteDrawing(at:)` 完全对称。（id-based 的复盘删除守卫 API 是 P5 复盘编辑的事，本切片只关这个 public 破坏性入口。）
 - ⚠️ **既有源码守卫会因降 internal 而红**（codex plan-R6-F2）：`DrawingSessionSourceGuardTests.atomicStyleConstruction`（`:176`/`:178`）用 `public func routeDrawingCommit` 定位函数体做「无 append-then-replace」断言；降 internal 后 `:176` 的 `#require` 找不到 → 测试红（即使生产代码对）。**Step 3 必须同步更新这个锚**，否则 Step 6 全绿门挂在既有测试上。
 - 引擎层 `.segment` 门：`appendDrawing`/`appendReviewDrawing` 拒「该 `toolType` 恒不可渲染」的 `lineSubType`（水平线的 `.segment`），判据**复用 `DrawingStyleAvailability.horizontalLineSubTypeEnabled`**（与面板灰态同一真相，禁另写）。viewport 相关的越界 ray 只有 UI 路由能判，由「唯一调用点在 `:303` 门之后」源码守卫保证。
 
@@ -556,9 +560,9 @@ git commit -m "划线 1b-i 切片1 Task4：DrawingSession 选择态显式 mode +
 
 @Test("N23a: append 家族非 public + 唯一调用点（源码守卫，调用图 D67，codex plan-R5-F2）")
 func appendFamilyTrustBoundary() throws {
-    // (1) 访问级别：四者非 public
+    // (1) 访问级别：五者非 public
     let engineSrc = try String(contentsOfFile: trainingEnginePath, encoding: .utf8)
-    for decl in ["appendDrawing(", "appendReviewDrawing(", "routeDrawingCommit(", "deleteDrawing(at "] {
+    for decl in ["appendDrawing(", "appendReviewDrawing(", "routeDrawingCommit(", "deleteDrawing(at ", "removeReviewDrawing(at "] {
         #expect(!engineSrc.contains("public func " + decl))
         #expect(engineSrc.contains("func " + decl))                       // 仍存在（internal）
     }
@@ -585,9 +589,10 @@ func appendFamilyTrustBoundary() throws {
     let route = try callSites(callPattern: "routeDrawingCommit(", defExclude: "func routeDrawingCommit(")
     #expect(route.count == 1)
     #expect(route.allSatisfy { $0.file.contains("ChartContainerView") })
-    // deleteDrawing(at:) 零生产调用点（D51/D67）——调用语法带标签冒号 `deleteDrawing(at: 0)`；
-    //   定义是 `func deleteDrawing(at index:`（`at ` 后无冒号），故 pattern `deleteDrawing(at:` 只命中调用、不命中定义。
+    // deleteDrawing(at:) / removeReviewDrawing(at:) 零生产调用点（D51/D67）——调用语法带标签冒号 `xxx(at: 0)`；
+    //   定义是 `func xxx(at index:`（`at ` 后无冒号），故 pattern `xxx(at:` 只命中调用、不命中定义。
     #expect(try callSites(callPattern: "deleteDrawing(at:", defExclude: "func deleteDrawing(at").isEmpty)
+    #expect(try callSites(callPattern: "removeReviewDrawing(at:", defExclude: "func removeReviewDrawing(at").isEmpty)
 }
 ```
 
@@ -602,7 +607,7 @@ Expected: `appendRejectsSegment` FAIL（当前 appendDrawing 只查 period、不
 
 - [ ] **Step 3: 降 internal + 加 `.segment` 门**
 
-`TrainingEngine.swift`：把 `appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)` 四个声明的 `public` 去掉（改 `internal`，即删 `public` 关键字）。
+`TrainingEngine.swift`：把 `appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)`/`removeReviewDrawing(at:)` **五个**声明的 `public` 去掉（改 `internal`）。
 
 **同步更新既有源码守卫（codex plan-R6-F2，缺此 Step 6 全绿门会挂）**：`DrawingSessionSourceGuardTests.swift` 的 `atomicStyleConstruction`——
 - `:176` `e.range(of: "public func routeDrawingCommit")` → `e.range(of: "func routeDrawingCommit")`（定位函数体独立于访问级别）；
@@ -678,9 +683,9 @@ git commit -m "划线 1b-i 切片1 收尾：全绿 + PR-2/3 交接注记"
 **1. Spec coverage（本切片范围 = D56 + D57 + D67）：**
 - D56 `drawingsRevision` 字段 → Task 1 ✓；autosave 触发器 → Task 2 ✓；replay clean-skip 净状态签名（非 count/revision/raw 字节；签名单射长度前缀 + 碰撞回归）→ Task 3 ✓；「只覆盖 drawings 不覆盖 reviewDrawings」→ Task 1 测试 ✓。
 - D57 显式 mode + 四 mutator 守卫 + `activate` 的 mode 赋值在幂等 guard 前 → Task 4 ✓；N10 三清语义 → Task 4 测试 ✓。
-- D67 append 家族降 internal + 源码守卫**调用图**（N23a：非 public + 唯一调用点，非仅访问级别）+ 引擎层 `.segment` 门（N23b）→ Task 5 ✓；**D66 append 部分**（id 唯一非空门，N23d）→ Task 5 ✓；N23c（视口外 ray）交接 Catalyst 层（本切片 host 测不到 UI 路由）。
+- D67 append 家族（含 removeReviewDrawing(at:)）降 internal + 源码守卫**调用图**（N23a：五者非 public + 唯一/零调用点，非仅访问级别）+ 引擎层 `.segment` 门（N23b）→ Task 5 ✓；**D66 append 部分**（id 唯一非空门，N23d）→ Task 5 ✓；N23c（视口外 ray）交接 Catalyst 层（本切片 host 测不到 UI 路由）。
 - **本切片不做**（留后续，已在交接注记）：update/delete(id:) 的 +=1 与信任边界（PR-2）；selectedDrawingID/选中清空（PR-3）；handleDrawingTap 分态派发（PR-3/4）；`restoreDrawingSessionAfterPeriodChange` 追加清空选中（PR-3）；replay 测试③非规范 raw（PR-2）。
 
-**2. Placeholder scan：** 无 TBD/TODO。测试里对「既有 helper（`makeForTesting`/`makeReplaySessionWithBaselineA`/`trainingViewPath`/`debugReplaySlotWritten`）签名不确定」处，已显式标注「以本文件既有用法为准」并给对齐方式——非占位，是对既有测试设施的显式对接约束（`makeReplaySessionWithBaselineA` 只用生产 API 搭建，不引入测试专用 mutator）。
+**2. Placeholder scan：** 无 TBD/TODO。测试里对「既有 helper（`makeForTesting`/`trainingViewPath`/`allSwiftFilesUnderSources`）签名不确定」处，已显式标注「以本文件既有用法为准」并给对齐方式——非占位，是对既有测试设施的显式对接约束。replay 写入探针用既有 fake 的 `saveCount`（非编造探针，codex plan-R7-F2）；`makeReplaySessionWithBaselineA` 返回 `(coord, engine, replayRepo)`，baseline 构造用 DEBUG hook `recaptureReplayBaselineForTesting`（fresh replay 不种画线的必然，非可省纪律）。
 
 **3. Type consistency：** `drawingsRevision: Int`（Task1 定义→Task3 replay 测试引用一致）；`DrawingSessionMode`/`mode`/`setMode`（Task4 定义，PR-3/4 消费）；`canonicalDrawingsSignature(_:) -> String`（Task3 定义→replayBaseline 第三分量 `drawingsSig: String` 一致）；`replayBaseline` 元组三分量由 `Int` 改 `String` 三处赋值 + 一处比较全部同步（Task3 Step7）。
