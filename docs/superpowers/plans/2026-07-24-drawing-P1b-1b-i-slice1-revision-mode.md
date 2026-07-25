@@ -25,6 +25,10 @@
 ⚠️ **放在单一共享文件 `ios/Contracts/Tests/KlineTrainerContractsTests/DrawingTestFixtures.swift`，只声明一次**（codex plan-R4-F1）——**不得**在每个测试文件顶部各放一份：`makeHLine` 是 non-private 顶层函数，同一 test module（`KlineTrainerContractsTests`）内多文件重复声明同名符号会**重复定义编译失败**。该文件与其它测试同属一个 target、自动编译进 `swift test`，各测试文件直接调 `makeHLine(...)` 即可（同 module 无需 import）。
 
 ```swift
+// ios/Contracts/Tests/KlineTrainerContractsTests/DrawingTestFixtures.swift
+// ⚠️ Swift import 是文件级的（codex plan-R6-F1）：别的测试文件的 import 不让符号在这里可见，本文件必须自带。
+@testable import KlineTrainerContracts
+
 // 造一条水平线 DrawingObject，只传关心的字段，其余取默认/固定（isExtended:false, panelPosition:0）。
 func makeHLine(id: String = "hl", candleIndex: Int = 3, price: Double = 10,
                period: Period = .daily, thickness: Int = 1, text: String = "") -> DrawingObject {
@@ -502,11 +506,13 @@ git commit -m "划线 1b-i 切片1 Task4：DrawingSession 选择态显式 mode +
 > **codex plan-R3-F1**：Task 1 让 `appendDrawing`/`deleteDrawing(at:)` 成为新 revision/autosave 路径，但它们仍 `public`。若本切片单独 merge，就 ship 了 spec D67 要关闭的 public 破坏性入口（包外可绕过 geometry/locked/id/future-enum 门落幽灵线）。D67 是「引擎写入边界地基」，与 revision 同属本切片，**在此关闭**（不留到 PR-2 的中间态暴露窗口）。
 
 **Files:**
-- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（`appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)` 降 `internal` + `appendDrawing`/`appendReviewDrawing` 加 `.segment` 门）
-- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（N23）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（`appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)` 降 `internal` + `appendDrawing`/`appendReviewDrawing` 加 `.segment` + id 门）
+- **Modify（既有测试，降 internal 会破坏它，codex plan-R6-F2）**：`ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift`（`atomicStyleConstruction` 的锚 `public func routeDrawingCommit` → `func routeDrawingCommit`）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（N23a/b/d）
 
 **Interfaces:**
 - 实测生产链唯一（本切片开工前已核）：`ChartContainerView.handleDrawingTap:303`（有 `visibleGeometry` 门）→ `routeDrawingCommit:304` → `appendDrawing:1144`/`appendReviewDrawing:1142`；`deleteDrawing(at:)` 零生产调用点。故四者降 `internal` **零生产影响**；测试经 `@testable import` 照常可调。
+- ⚠️ **既有源码守卫会因降 internal 而红**（codex plan-R6-F2）：`DrawingSessionSourceGuardTests.atomicStyleConstruction`（`:176`/`:178`）用 `public func routeDrawingCommit` 定位函数体做「无 append-then-replace」断言；降 internal 后 `:176` 的 `#require` 找不到 → 测试红（即使生产代码对）。**Step 3 必须同步更新这个锚**，否则 Step 6 全绿门挂在既有测试上。
 - 引擎层 `.segment` 门：`appendDrawing`/`appendReviewDrawing` 拒「该 `toolType` 恒不可渲染」的 `lineSubType`（水平线的 `.segment`），判据**复用 `DrawingStyleAvailability.horizontalLineSubTypeEnabled`**（与面板灰态同一真相，禁另写）。viewport 相关的越界 ray 只有 UI 路由能判，由「唯一调用点在 `:303` 门之后」源码守卫保证。
 
 - [ ] **Step 1: 写失败测试（N23）**
@@ -557,27 +563,31 @@ func appendFamilyTrustBoundary() throws {
         #expect(engineSrc.contains("func " + decl))                       // 仍存在（internal）
     }
     // (2) 唯一调用点（**核心**：仅非 public 不够——包内新调用者仍能绕过 handleDrawingTap 的 geometry 门）。
-    //     扫整个 Sources/，统计「调用」出现（排除 `func <name>` 定义行与注释行）。
-    func callSites(of name: String) throws -> [(file: String, line: String)] {
+    //     扫整个 Sources/，统计匹配 callPattern 的「调用」行（排除 defExclude 定义行与注释行）。
+    //     ⚠️ callPattern 必须匹配【真实调用语法】（codex plan-R6-F3）：
+    //        无标签调用 `xxx(...)` 用 "xxx("；带标签调用 `deleteDrawing(at: 0)` 用 "deleteDrawing(at:"（冒号），
+    //        不能用 "deleteDrawing(at(" —— 那样永远匹配不到、守卫恒空恒过（假绿）。
+    func callSites(callPattern: String, defExclude: String) throws -> [(file: String, line: String)] {
         try allSwiftFilesUnderSources().flatMap { path -> [(String, String)] in
             try String(contentsOfFile: path, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: false)
                 .map(String.init)
                 .filter { line in
                     let t = line.trimmingCharacters(in: .whitespaces)
-                    return t.contains(name + "(") && !t.contains("func " + name + "(") && !t.hasPrefix("//") && !t.hasPrefix("///")
+                    return t.contains(callPattern) && !t.contains(defExclude) && !t.hasPrefix("//") && !t.hasPrefix("///")
                 }
                 .map { (path, $0) }
         }
     }
-    // appendDrawing/appendReviewDrawing 各恰好 1 处调用，都在 routeDrawingCommit（同在 TrainingEngine.swift）
-    #expect(try callSites(of: "appendDrawing").count == 1)
-    #expect(try callSites(of: "appendReviewDrawing").count == 1)
-    // routeDrawingCommit 恰好 1 处调用，在 ChartContainerView.handleDrawingTap（geometry 门所在）
-    let route = try callSites(of: "routeDrawingCommit")
+    // appendDrawing/appendReviewDrawing 各恰好 1 处调用（`appendDrawing(stamped)`），都在 routeDrawingCommit
+    #expect(try callSites(callPattern: "appendDrawing(", defExclude: "func appendDrawing(").count == 1)
+    #expect(try callSites(callPattern: "appendReviewDrawing(", defExclude: "func appendReviewDrawing(").count == 1)
+    // routeDrawingCommit 恰好 1 处调用（`engine.routeDrawingCommit(committed)`），在 ChartContainerView.handleDrawingTap
+    let route = try callSites(callPattern: "routeDrawingCommit(", defExclude: "func routeDrawingCommit(")
     #expect(route.count == 1)
     #expect(route.allSatisfy { $0.file.contains("ChartContainerView") })
-    // deleteDrawing(at:) 零生产调用点（D51/D67）
-    #expect(try callSites(of: "deleteDrawing(at").isEmpty)
+    // deleteDrawing(at:) 零生产调用点（D51/D67）——调用语法带标签冒号 `deleteDrawing(at: 0)`；
+    //   定义是 `func deleteDrawing(at index:`（`at ` 后无冒号），故 pattern `deleteDrawing(at:` 只命中调用、不命中定义。
+    #expect(try callSites(callPattern: "deleteDrawing(at:", defExclude: "func deleteDrawing(at").isEmpty)
 }
 ```
 
@@ -593,6 +603,11 @@ Expected: `appendRejectsSegment` FAIL（当前 appendDrawing 只查 period、不
 - [ ] **Step 3: 降 internal + 加 `.segment` 门**
 
 `TrainingEngine.swift`：把 `appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)` 四个声明的 `public` 去掉（改 `internal`，即删 `public` 关键字）。
+
+**同步更新既有源码守卫（codex plan-R6-F2，缺此 Step 6 全绿门会挂）**：`DrawingSessionSourceGuardTests.swift` 的 `atomicStyleConstruction`——
+- `:176` `e.range(of: "public func routeDrawingCommit")` → `e.range(of: "func routeDrawingCommit")`（定位函数体独立于访问级别）；
+- `:178` 结尾锚若是 `"\n    public func"`：确认 `routeDrawingCommit` 之后紧邻的下一个函数仍 `public`（`commitDrawing` 等在降级列表**之外**，仍 public）→ 锚可保留；**若实测该锚也漂**（下一个函数恰好也非 public），改成 `"\n    func "`（匹配任意访问级别的下一个函数）。
+- 该测试的「非 public」保证已由 N23a 的 `!engineSrc.contains("public func routeDrawingCommit(")` 覆盖，故此处只需让函数体定位不依赖访问级别，不必在本测试里再断言非 public。
 
 `appendDrawing`（`:1088`）在 period 门后加 **`.segment` 门（D67）+ id 唯一非空门（D66）**：
 
@@ -625,8 +640,8 @@ Expected: build 无 error（`handleDrawingTap`/`routeDrawingCommit` 等包内调
 - [ ] **Step 5: 提交**
 
 ```bash
-git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift
-git commit -m "划线 1b-i 切片1 Task5：append 家族降 internal + 源码守卫 + .segment 门（D67，关 public bypass）"
+git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift
+git commit -m "划线 1b-i 切片1 Task5：append 家族降 internal + 源码守卫(调用图) + .segment/id 门（D67+D66 append），同步既有守卫锚"
 ```
 
 ---
