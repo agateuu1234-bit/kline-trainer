@@ -146,4 +146,12 @@ struct TrainingViewShellSourceGuardTests {
         #expect(chain.contains("syncPanelShields()"))
         #expect(!chain.contains("if "), "闭包体出现 if —— tradeStrip 清理变成条件性，退出方向可能漏清")
     }
+
+    @Test("autosave 触发器盯 drawingsRevision，不再盯 drawings.count（D56）")
+    func autosaveTriggerUsesRevision() throws {
+        let code = try source(tv)
+        #expect(code.contains(".onChange(of: engine.drawingsRevision)"))
+        #expect(!code.contains(".onChange(of: engine.drawings.count)"))            // 旧触发器必须消失（防两个并存）
+        #expect(code.contains(".onChange(of: engine.reviewDrawings.count)"))      // review 侧不动
+    }
 }
