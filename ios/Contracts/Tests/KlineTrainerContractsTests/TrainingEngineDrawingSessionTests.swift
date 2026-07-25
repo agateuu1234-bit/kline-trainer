@@ -608,4 +608,24 @@ struct TrainingEngineDrawingSessionTests {
     // 独立的既有路径停掉，无法在这条路径上复现本 bug（已用同形状探针实测确认：修复前即为绿，不是有效回归锁）。
     // `buy`/`sell` 同样经 `advanceAndAccount`，同一原因不受本 bug 影响。真正受影响的只有 teardown 被
     // **直接**调用、不经 `advanceAndAccount` 的路径——即上面两条：`toggleDrawingMode`(关) 与 `cancelDrawingAllPanels`。
+
+    @Test("drawingsRevision: appendDrawing 成功严格 +1，appendReviewDrawing 不动它")
+    @MainActor func drawingsRevisionCoversDrawingsNotReview() throws {
+        let engine = TrainingEngine.preview()          // 既有测试工厂（同文件其它测试在用）
+        #expect(engine.drawingsRevision == 0)
+        #expect(engine.appendDrawing(makeHLine(candleIndex: 3, price: 10)) == true)
+        #expect(engine.drawingsRevision == 1)                 // 严格 +1
+        // review 侧不动 drawingsRevision（D56）
+        #expect(engine.appendReviewDrawing(makeHLine(candleIndex: 4, price: 11)) == true)
+        #expect(engine.drawingsRevision == 1)                 // 仍是 1
+    }
+
+    @Test("drawingsRevision: deleteDrawing(at:) 严格 +1")
+    @MainActor func drawingsRevisionOnDelete() throws {
+        let engine = TrainingEngine.preview()
+        _ = engine.appendDrawing(makeHLine(candleIndex: 3, price: 10))
+        let before = engine.drawingsRevision
+        engine.deleteDrawing(at: 0)
+        #expect(engine.drawingsRevision == before + 1)
+    }
 }

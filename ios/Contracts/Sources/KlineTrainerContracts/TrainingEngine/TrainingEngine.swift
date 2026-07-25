@@ -23,6 +23,11 @@ public final class TrainingEngine {
     public private(set) var drawdown: DrawdownAccumulator
     public private(set) var markers: [TradeMarker]
     public private(set) var drawings: [DrawingObject]
+    /// D56（1b-i）：内容级 dirty 计数器。**每一个**改动 `drawings` 的引擎 API 都 `+= 1`（append/delete(at:)/
+    /// 后续 update/delete(id:)）。TrainingView 的 autosave 触发器盯它（换掉 `drawings.count`，
+    /// 否则原地改样式不改长度→永不落盘）。**只覆盖 `drawings`，不覆盖 `reviewDrawings`**（复盘本期不改样式）。
+    /// 运行时计数器，不进存储（初值 0，每次装载从 0 起算，绝对值无语义）。
+    public private(set) var drawingsRevision: Int = 0
     /// P1a Task 12（Z1）：加载来的完整有损画线集（含 unknownRaw 原始字节）。`drawings` 是其已知投影
     /// （`loadedDrawingsLossy.drawings`）。coordinator save 路径经 `loadedDrawingsLossy.reconciled(currentKnown:)`
     /// 重发，使加载 blob 里未识别（未来版本）的条穿过 autosave/resume-save/commit 全路径存活。
@@ -1074,6 +1079,7 @@ extension TrainingEngine {
     public func deleteDrawing(at index: Int) {
         precondition(drawings.indices.contains(index), "deleteDrawing index out of bounds")
         drawings.remove(at: index)
+        drawingsRevision += 1
     }
 
     /// 追加一条 committed 画线进 `engine.drawings`（RFC §4.4c）。`engine.drawings` 是唯一渲染 +
@@ -1088,6 +1094,7 @@ extension TrainingEngine {
     public func appendDrawing(_ drawing: DrawingObject) -> Bool {
         guard isPeriodConsistent(drawing) else { return false }  // 1a-iv fail-closed：坏数据不入库
         drawings.append(drawing)
+        drawingsRevision += 1
         return true
     }
 
