@@ -53,7 +53,7 @@ public final class TrainingSessionCoordinator {
     // 新需求10：当前 replay 会话创建时的状态基线（tick/交易数/画线数/上下周期）。
     // 含周期（codex plan-R14-F1）：单指竖滑切周期组合改 upper/lowerPanel.period 而不动 tick/ops/drawings，
     // 须纳入 clean-skip 比较，否则切周期后 Back/flush 被当 clean 跳过 → 丢 PendingReplay 序列化的 upper/lowerPeriod。
-    @ObservationIgnored private var replayBaseline: (tick: Int, ops: Int, drawings: Int, upper: Period, lower: Period)?
+    @ObservationIgnored private var replayBaseline: (tick: Int, ops: Int, drawingsSig: String, upper: Period, lower: Period)?
     // 新需求10（codex plan-R6-F1）：本 replay 会话是否已成功写过槽（拥有槽）。
     // fresh=false、任一次成功 saveReplay 后=true。
     // clean-skip **仅在 !replayHasPersisted 时**生效——首写后永不跳过，否则"加画线→写→删画线(count 回基线)
@@ -201,6 +201,13 @@ public final class TrainingSessionCoordinator {
     /// codex whole-branch R6 回归测试专用：`reviewAutosaveTask` 是否已占用（供断言陈旧 `autosaveReview`
     /// 调用是否误占排队槽位）。
     var hasQueuedReviewAutosaveForTesting: Bool { reviewAutosaveTask != nil }
+    /// 测试专用：把 replay baseline 重新捕获为 engine 当前净状态（供「baseline 含 A」的 clean-skip 回归；
+    /// fresh replay 不种画线，生产路径构造不出 baseline-有线态）。镜像既有 xxxForTesting 范式。
+    func recaptureReplayBaselineForTesting(_ engine: TrainingEngine) {
+        replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count,
+                          canonicalDrawingsSignature(engine.drawings),
+                          engine.upperPanel.period, engine.lowerPanel.period)
+    }
     #endif
 
     /// §4.7d 终态栅栏：置 terminating（拒新 autosave）+ 排空在飞写（排空时见 terminating 即退出不落盘）。
@@ -578,7 +585,8 @@ public final class TrainingSessionCoordinator {
             activeStartedAt = now()                  // 新需求10：replay 会话起始，供 PendingReplay.started_at
             activeSessionKey = nil                   // RFC §4.7c：replay 无 session key
             activeRecord = record                    // RFC-B D5：复用已加载 record（原本被丢弃，零新 I/O）
-            replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count,
+            replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count,
+                              canonicalDrawingsSignature(engine.drawings),
                               engine.upperPanel.period, engine.lowerPanel.period)  // fresh 基线（含周期，codex plan-R14-F1）
             replayHasPersisted = false              // fresh：尚未拥有槽（codex plan-R6-F1）
             resetAutosaveState()                    // 新需求10（codex plan-R7-F1）：重开 autosave 栅栏（terminating=false 等）
@@ -607,7 +615,7 @@ public final class TrainingSessionCoordinator {
                let base = replayBaseline,
                base.tick == engine.tick.globalTickIndex,
                base.ops == engine.tradeOperations.count,
-               base.drawings == engine.drawings.count,
+               base.drawingsSig == canonicalDrawingsSignature(engine.drawings),
                base.upper == engine.upperPanel.period,      // codex plan-R14-F1：切周期也算脏
                base.lower == engine.lowerPanel.period {
                 return
@@ -931,7 +939,8 @@ public final class TrainingSessionCoordinator {
             activeRecord = record                    // replay 续局需 record（fees/标的名 + 终局 payload）
             activeStartedAt = pending.startedAt
             activeSessionKey = nil                    // replay 无 sessionKey
-            replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, engine.drawings.count,
+            replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count,
+                              canonicalDrawingsSignature(engine.drawings),
                               engine.upperPanel.period, engine.lowerPanel.period)  // 续局基线=resumed 态（含周期，codex plan-R4/R14-F1）
             replayHasPersisted = true                 // 续局本就拥有该记录的槽 → 永不 clean-skip（codex plan-R6-F1）
             resetAutosaveState()                      // 新 session：清栅栏/脏/cadence/错误

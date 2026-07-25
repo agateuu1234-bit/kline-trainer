@@ -540,6 +540,45 @@ struct CoordinatorReplayPersistenceTests {
         #expect(d.colorToken == .blue && d.labelMode == .right && d.textColorToken == .blue)   // 标签色也保真
         #expect(d.revealTick == inMem.revealTick)
     }
+
+    // MARK: - D56: replay clean-skip 净状态语义签名（非 count/非 revision）
+
+    /// 建一个 `!replayHasPersisted` 的 replay 会话，baseline 已含一条画线 A（`recaptureReplayBaselineForTesting`
+    /// DEBUG hook——fresh `replay(recordId:)` 不种画线，生产路径构造不出「baseline 已有线」态，见 brief）。
+    func makeReplaySessionWithBaselineA() async throws
+        -> (coord: TrainingSessionCoordinator, engine: TrainingEngine, replayRepo: InMemoryPendingReplayRepository) {
+        let h = try CoordinatorTestHarness.make()
+        let engine = try await h.coordinator.replay(recordId: h.seededRecordId)
+        let A = makeHLine(id: "A", candleIndex: 3, price: 10)
+        _ = engine.appendDrawing(A)
+        h.coordinator.recaptureReplayBaselineForTesting(engine)
+        #expect(engine.drawings.map(\.id) == ["A"])   // setup 自检：baseline 已含 A
+        return (h.coordinator, engine, h.pendingReplayRepo)
+    }
+
+    // ① 同 count 但内容变 → 必须写盘。★对当前 count 实现「先红」——count 回 baseline→skip→没写盘→本断言失败。
+    @Test("replay clean-skip ①: 同count内容变(A→B)→签名变→写盘（钉死 count 漏改内容）")
+    func replayCleanSkip_sameCountContentChangeWrites() async throws {
+        let (coord, engine, replayRepo) = try await makeReplaySessionWithBaselineA()   // !replayHasPersisted，drawings=[A]
+        let c0 = replayRepo.saveCount
+        let B = makeHLine(id: "B", candleIndex: 9, price: 8)
+        _ = engine.appendDrawing(B)                                  // [A,B]
+        engine.deleteDrawing(at: 0)                                  // [B]：count 回 1==baseline，但内容 A→B
+        try await coord.saveProgress(engine: engine)
+        #expect(replayRepo.saveCount == c0 + 1)                      // 签名变→不 skip→真的 saveReplay 一次
+    }
+
+    // ② append+delete 回 baseline（净状态==baseline）→ 必须 skip。对 revision 实现红（revision+2≠baseline 误写）。
+    @Test("replay clean-skip ②: append+delete 同一条回 baseline→签名==baseline→skip（钉死 revision 单调）")
+    func replayCleanSkip_appendDeleteSameSkips() async throws {
+        let (coord, engine, replayRepo) = try await makeReplaySessionWithBaselineA()   // drawings=[A]
+        let c0 = replayRepo.saveCount
+        let B = makeHLine(id: "B", candleIndex: 9, price: 8)
+        _ = engine.appendDrawing(B)                                  // [A,B]
+        engine.deleteDrawing(at: engine.drawings.count - 1)          // 删掉刚 append 的 B → 回 [A]==baseline，但 revision+2
+        try await coord.saveProgress(engine: engine)
+        #expect(replayRepo.saveCount == c0)                         // 签名==baseline→skip→无 saveReplay（不覆盖别的记录）
+    }
 }
 
 // MARK: - A5 helper（损坏槽测试用最小 PendingReplay 工厂）
