@@ -508,8 +508,27 @@ git commit -m "划线 1b-i 切片1 Task4：DrawingSession 选择态显式 mode +
 
 > **codex plan-R3-F1**：Task 1 让 `appendDrawing`/`deleteDrawing(at:)` 成为新 revision/autosave 路径，但它们仍 `public`。若本切片单独 merge，就 ship 了 spec D67 要关闭的 public 破坏性入口（包外可绕过 geometry/locked/id/future-enum 门落幽灵线）。D67 是「引擎写入边界地基」，与 revision 同属本切片，**在此关闭**（不留到 PR-2 的中间态暴露窗口）。
 
+#### 完整 mutation-surface 审计（codex plan-R5→R8 逐个补了我漏的成员，这里一次列全，防再漏）
+
+对 `TrainingEngine` **全部会写 `drawings`/`reviewDrawings` 的 `public` 方法**做过 `grep public func`（本切片开工亲核），共 **7 个** public 写入面，按「编辑单条」vs「整体装载」分类——两类处置不同：
+
+| public 写入面 | 写什么 | 类别 | 处置 | 生产调用点 |
+|---|---|---|---|---|
+| `appendDrawing` | `drawings` 追加 | 编辑 | internal + `.segment` + id 门 | `routeDrawingCommit`（`:1144`） |
+| `deleteDrawing(at:)` | `drawings` index 删 | 编辑 | internal | **零** |
+| `appendReviewDrawing` | `reviewDrawings` 追加 | 编辑 | internal + `.segment` + id 门 | `routeDrawingCommit`（`:1142`） |
+| `removeReviewDrawing(at:)` | `reviewDrawings` index 删 | 编辑 | internal | **零** |
+| `routeDrawingCommit` | 路由 → append | 提交路由 | internal | `ChartContainerView.handleDrawingTap`（`:304`，geometry 门所在） |
+| `setReviewLossy` | `reviewDrawings` **整体替换** | **装载** | internal，**不加门** | `TrainingSessionCoordinator`（`:538`，复盘装载） |
+| `setReviewDrawings` | 调 `setReviewLossy` | **装载** | internal，**不加门** | **零**（Sources/ 内；测试经 `@testable` 调） |
+
+- **编辑入口**（前 4 + 路由）：受数据门（`.segment`/id）+ 唯一调用点守卫。
+- **装载入口**（`setReviewLossy`/`setReviewDrawings`）：**只降访问级别、不加门**——它们从存储整体装载复盘工作态，加 `.segment`/id 门会**拒掉合法历史数据**（同 D52/D61「装载 fail-closed 会静默吞用户画的线」）；codex R8 的点是**访问级别**（`public` → 包外可整体注入/擦除 `reviewDrawings`），降 internal 即封住，**app target 实测无调用**（`ios/KlineTrainer/` grep 零命中）。
+- `self.drawings = …`（`:173` init 内部）不是 `public` 方法、不算 surface；`setReviewDrawingsForTesting`（`:1330`）已是 internal 测试专用。
+- **N23a 覆盖全 7 个**（非 public + 各自的调用点约束），谁将来加个旁路调用点立即红——**这条调用图守卫是完备性的真正防线，不靠我手工列全**。
+
 **Files:**
-- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（`appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)`/`removeReviewDrawing(at:)` 降 `internal` + `appendDrawing`/`appendReviewDrawing` 加 `.segment` + id 门）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（**7 个 public 写入面全降 `internal`**：编辑入口 `appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)`/`removeReviewDrawing(at:)` + 装载入口 `setReviewLossy`/`setReviewDrawings`；其中 `appendDrawing`/`appendReviewDrawing` 加 `.segment` + id 门，装载入口**不加门**）
 - **Modify（既有测试，降 internal 会破坏它，codex plan-R6-F2）**：`ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift`（`atomicStyleConstruction` 的锚 `public func routeDrawingCommit` → `func routeDrawingCommit`）
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（N23a/b/d）
 
@@ -560,9 +579,10 @@ git commit -m "划线 1b-i 切片1 Task4：DrawingSession 选择态显式 mode +
 
 @Test("N23a: append 家族非 public + 唯一调用点（源码守卫，调用图 D67，codex plan-R5-F2）")
 func appendFamilyTrustBoundary() throws {
-    // (1) 访问级别：五者非 public
+    // (1) 访问级别：7 个 public 写入面全非 public（编辑 5 + 装载 2）
     let engineSrc = try String(contentsOfFile: trainingEnginePath, encoding: .utf8)
-    for decl in ["appendDrawing(", "appendReviewDrawing(", "routeDrawingCommit(", "deleteDrawing(at ", "removeReviewDrawing(at "] {
+    for decl in ["appendDrawing(", "appendReviewDrawing(", "routeDrawingCommit(", "deleteDrawing(at ",
+                 "removeReviewDrawing(at ", "setReviewLossy(", "setReviewDrawings("] {
         #expect(!engineSrc.contains("public func " + decl))
         #expect(engineSrc.contains("func " + decl))                       // 仍存在（internal）
     }
@@ -593,6 +613,13 @@ func appendFamilyTrustBoundary() throws {
     //   定义是 `func xxx(at index:`（`at ` 后无冒号），故 pattern `xxx(at:` 只命中调用、不命中定义。
     #expect(try callSites(callPattern: "deleteDrawing(at:", defExclude: "func deleteDrawing(at").isEmpty)
     #expect(try callSites(callPattern: "removeReviewDrawing(at:", defExclude: "func removeReviewDrawing(at").isEmpty)
+    // 装载入口：setReviewLossy 只在 TrainingSessionCoordinator（复盘装载 :538）与 TrainingEngine
+    //   （setReviewDrawings :315 委托调它）——不强求 count（委托是合法内部调用），只断言不在别处新增旁路。
+    let reviewLossy = try callSites(callPattern: "setReviewLossy(", defExclude: "func setReviewLossy(")
+    #expect(!reviewLossy.isEmpty)
+    #expect(reviewLossy.allSatisfy { $0.file.contains("TrainingSessionCoordinator") || $0.file.contains("TrainingEngine") })
+    // setReviewDrawings 零 Sources/ 调用点（其定义 :315 委托 setReviewLossy，被 defExclude 排除；测试经 @testable 调、不在 Sources/）
+    #expect(try callSites(callPattern: "setReviewDrawings(", defExclude: "func setReviewDrawings(").isEmpty)
 }
 ```
 
@@ -607,7 +634,7 @@ Expected: `appendRejectsSegment` FAIL（当前 appendDrawing 只查 period、不
 
 - [ ] **Step 3: 降 internal + 加 `.segment` 门**
 
-`TrainingEngine.swift`：把 `appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)`/`removeReviewDrawing(at:)` **五个**声明的 `public` 去掉（改 `internal`）。
+`TrainingEngine.swift`：把 **7 个**声明的 `public` 去掉（改 `internal`）——编辑入口 `appendDrawing`/`appendReviewDrawing`/`routeDrawingCommit`/`deleteDrawing(at:)`/`removeReviewDrawing(at:)` + 装载入口 `setReviewLossy`/`setReviewDrawings`（后两者**只降级、不加任何门**，见审计表）。
 
 **同步更新既有源码守卫（codex plan-R6-F2，缺此 Step 6 全绿门会挂）**：`DrawingSessionSourceGuardTests.swift` 的 `atomicStyleConstruction`——
 - `:176` `e.range(of: "public func routeDrawingCommit")` → `e.range(of: "func routeDrawingCommit")`（定位函数体独立于访问级别）；
@@ -683,7 +710,7 @@ git commit -m "划线 1b-i 切片1 收尾：全绿 + PR-2/3 交接注记"
 **1. Spec coverage（本切片范围 = D56 + D57 + D67）：**
 - D56 `drawingsRevision` 字段 → Task 1 ✓；autosave 触发器 → Task 2 ✓；replay clean-skip 净状态签名（非 count/revision/raw 字节；签名单射长度前缀 + 碰撞回归）→ Task 3 ✓；「只覆盖 drawings 不覆盖 reviewDrawings」→ Task 1 测试 ✓。
 - D57 显式 mode + 四 mutator 守卫 + `activate` 的 mode 赋值在幂等 guard 前 → Task 4 ✓；N10 三清语义 → Task 4 测试 ✓。
-- D67 append 家族（含 removeReviewDrawing(at:)）降 internal + 源码守卫**调用图**（N23a：五者非 public + 唯一/零调用点，非仅访问级别）+ 引擎层 `.segment` 门（N23b）→ Task 5 ✓；**D66 append 部分**（id 唯一非空门，N23d）→ Task 5 ✓；N23c（视口外 ray）交接 Catalyst 层（本切片 host 测不到 UI 路由）。
+- D67 append 家族（含 removeReviewDrawing(at:)）降 internal + 源码守卫**调用图**（N23a：7 个 public 写入面全非 public + 唯一/零调用点，非仅访问级别）+ 引擎层 `.segment` 门（N23b）→ Task 5 ✓；**D66 append 部分**（id 唯一非空门，N23d）→ Task 5 ✓；N23c（视口外 ray）交接 Catalyst 层（本切片 host 测不到 UI 路由）。
 - **本切片不做**（留后续，已在交接注记）：update/delete(id:) 的 +=1 与信任边界（PR-2）；selectedDrawingID/选中清空（PR-3）；handleDrawingTap 分态派发（PR-3/4）；`restoreDrawingSessionAfterPeriodChange` 追加清空选中（PR-3）；replay 测试③非规范 raw（PR-2）。
 
 **2. Placeholder scan：** 无 TBD/TODO。测试里对「既有 helper（`makeForTesting`/`trainingViewPath`/`allSwiftFilesUnderSources`）签名不确定」处，已显式标注「以本文件既有用法为准」并给对齐方式——非占位，是对既有测试设施的显式对接约束。replay 写入探针用既有 fake 的 `saveCount`（非编造探针，codex plan-R7-F2）；`makeReplaySessionWithBaselineA` 返回 `(coord, engine, replayRepo)`，baseline 构造用 DEBUG hook `recaptureReplayBaselineForTesting`（fresh replay 不种画线的必然，非可省纪律）。
