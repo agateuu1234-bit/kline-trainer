@@ -214,6 +214,8 @@ extension DrawingObject {
 > | **未来未知枚举值** | `colorToken:"futureNeon"` / `textColorToken:"futureCyan"`（都 fallback 成 `.orange`） | 🔄**2026-07-26 修订**：**按结果**判——改完仍带未来值 → 拒（字节保真）；用户显式换成本版本认识的值 → 放行（该值被其覆盖）。见 D61 修订注记 |
 > | **当前已知枚举值** | `colorToken:.orange` / `textColorToken:.blue`（P3 独立字色控件写的，都是现有 case） | 该线**可编辑**（无 unknown 枚举、`hasKnownFutureEnumValues` 不命中）→ 靠**条件派生**：`old.textColorToken(.blue) != old.colorToken(.orange)` → 改 thickness 时**保留 `.blue`** |
 >
+> ⚠️ **条件派生的判据必须 raw-aware（🔄2026-07-26 修订，codex R20-F1）**：对**加载来的**线，"字色本来跟不跟随线色"要比 **raw 字符串**，不能比解码值 —— `colorToken:"futureNeon"` + `textColorToken:"orange"` 解码后**双双是 `.orange`**（前者是未知值 fallback），解码比较会误判成"跟随"，于是用户换线色时把一个**独立的**字色一并改写（不可逆，且本构建没有字色控件、用户看不见也碰不到）。判据下沉为 `LossyDrawingArray.textColorFollowsLineColorInRaw(id:)`，`nil`（内存新画的线 / raw 缺键）才回退解码比较；新建路径恒"跟随"。
+>
 > 我 R7 把派生② 改成「无条件」时的推理错在：**「解码 `==` 判据对 known 值可靠」不等于「不需要判据」**。对 known 独立字色（orange≠blue），解码 `==` 恰恰**可靠**——所以正好用它做条件派生，而不是丢掉它无条件覆盖。R7 的 raw-aware 拒绝（D61）只挡住 unknown 那一类，known 独立字色必须靠这里的条件派生兜住。两个机制**叠加**，不是二选一。
 > 本版本新建线恒 `textColorToken == colorToken`（`commitPending`）→ 条件派生对它就是「跟随」，行为与「无条件」在本版本线上**逐字一致**。
 - **两个写入点共用它，各自传播失败**：

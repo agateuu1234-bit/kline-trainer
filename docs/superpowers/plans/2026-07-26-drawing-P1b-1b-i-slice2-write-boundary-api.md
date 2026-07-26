@@ -151,7 +151,7 @@ func expectDrawingsUnchanged(_ e: TrainingEngine, _ before: [DrawingObject], rev
 - Produces:
   - `DrawingStyleAvailability.isRenderableSubType(_ sub: LineSubType, toolType: DrawingToolType) -> Bool`（`public static`，与既有两个 helper 同级）
   - `DrawingStyleAvailability.normalizedLabelMode(current: LabelMode, lineSubType: LineSubType, toolType: DrawingToolType) -> LabelMode`（`public static`，**tool-aware 重载**；非水平工具原样返回，横线委托既有二参版本）
-  - `DrawingObject.withStyle(_ s: DrawingDefaultStyle) -> DrawingObject?`（**internal**；`nil` 有两种原因：① 该样式的 `lineSubType` 对本对象 `toolType` 恒不可渲染；② `thickness` 越出 1…5 **且**不等于本对象当前值）
+  - `DrawingObject.withStyle(_ s: DrawingDefaultStyle, textColorFollowsLine: Bool) -> DrawingObject?`（**internal**；`nil` 有两种原因：① 该样式的 `lineSubType` 对本对象 `toolType` 恒不可渲染；② `thickness` 越出 1…5 **且**不等于本对象当前值）
 - Consumes: 既有 `DrawingStyleAvailability.horizontalLineSubTypeEnabled` / `normalizedLabelMode`、`DrawingDefaultStyle`（5 字段：`lineSubType`/`lineStyle`/`thickness`/`colorToken`/`labelMode`，`Models/DrawingEnums.swift:28-35`）。
 
 - [ ] **Step 1: 写失败测试**
@@ -399,7 +399,7 @@ extension DrawingObject {
     /// nil = 该样式对本对象语义上不成立（① 该 `toolType` 下 `lineSubType` 恒不可渲染，如水平线的 `.segment`；
     /// ② `thickness` 越出本构建的 1…5 值域**且**与本对象当前值不同，见下）。
     /// 非 nil 时：只换 5 个样式字段 + 两个派生字段，其余字段逐字段原样拷贝。
-    func withStyle(_ s: DrawingDefaultStyle) -> DrawingObject? {
+    func withStyle(_ s: DrawingDefaultStyle, textColorFollowsLine: Bool) -> DrawingObject? {
         // ⚠️ **工具门不在这里**（codex plan-R15-F2）：`withStyle` 同时服务**新建**（`commitPending`）与
         //   **编辑**（`updateDrawingStyle`）。把「只有已写出样式矩阵的工具才准动」塞进这里，会让 P1c
         //   新工具「能激活却提交失败、静默丢锚不出线」。编辑门属于编辑面 → 放在 `updateDrawingStyle`。
@@ -428,13 +428,38 @@ extension DrawingObject {
                                                                     toolType: toolType),
             locked: locked,                                        // 本函数不碰 locked（能不能改由引擎门 D60 判）
             text: text, fontSize: fontSize,
-            // 派生②（条件，codex R11-F1）：known 独立字色（如 orange 线 + blue 标签）必须保住；
-            // 无条件 `= s.colorToken` 会把它抹成线色。unknown 枚举那一类由 D61 整条拒编辑兜住。
-            textColorToken: textColorToken == colorToken ? s.colorToken : textColorToken,
+            // 派生②（条件派生，codex R11-F1；判据由 R20-F1 改为**调用方传入**）：
+            // "字色本来是不是跟着线色"在**加载来的线**上不能用解码值判 ——
+            // `colorToken:"futureNeon"` + `textColorToken:"orange"` 解码后**双双是 `.orange`**（前者是
+            // fallback），一比就误判成"跟随"，换线色时把一个**独立的**字色一并改掉（不可逆、用户看不见）。
+            // 故由调用方给出：新建路径恒 true（新线本就同色）；编辑路径按 **raw 字符串**判（见引擎）。
+            textColorToken: textColorFollowsLine ? s.colorToken : textColorToken,
             textForm: textForm, tailAnchor: tailAnchor)
     }
 }
 ```
+
+**①b 追加**到 `ios/Contracts/Sources/KlineTrainerContracts/Persistence/LossyDrawingArray.swift`（raw-aware 判据，codex plan-R20-F1）：
+
+```swift
+    /// 该 id 的**原始 raw** 里，`textColorToken` 是否与 `colorToken` 相等（= 字色本来就跟着线色）。
+    /// `nil` = 该 id 不在本集合里（内存新画的线），或 raw 缺这两个键之一 → 调用方回退用解码值比较。
+    /// ⚠️ **为什么必须看 raw**：`colorToken:"futureNeon"` 与 `textColorToken:"orange"` 解码后**双双是
+    ///   `.orange`**（前者是未知值 fallback）→ 解码比较误判成"跟随" → 用户换线色时，一个**独立的**字色
+    ///   被一并改写且不可逆（本构建没有字色控件，用户看不见也碰不到）。raw 字符串比不会误判。
+    func textColorFollowsLineColorInRaw(id: DrawingID) -> Bool? {
+        guard case .some(.known(_, let raw)) = elements.first(where: {
+            if case .known(let o, _) = $0 { return o.id == id } else { return false }
+        }) else { return nil }
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+              let line = obj["colorToken"] as? String,
+              let text = obj["textColorToken"] as? String else { return nil }
+        return line == text
+    }
+```
+
+> 实施时先 `grep -n "case known" Sources/KlineTrainerContracts/Persistence/LossyDrawingArray.swift` 核对
+> `LossyDrawingElement` 的真实形状（`.known(DrawingObject, raw: String)`，`:67-69` 实测），模式匹配按实际写法对齐。
 
 **② 追加**到 `DrawingStyleAvailability.swift`（放在 `horizontalLineSubTypeEnabled` 之后）：
 
@@ -644,7 +669,8 @@ Expected: FAIL —— 现状 `commitPending` 直接取 `s.labelMode`（不归一
             panelPosition: panelPosition,
             revealTick: 0)              // 真值由 engine.routeDrawingCommit 盖
         discardPendingAnchors()
-        return base.withStyle(s)        // nil = 该样式语义不成立（水平线 .segment）→ 不提交
+        // 新建路径：`base` 的线色/字色同为 init 默认 → 恒"跟随"（与切片2 之前行为逐字一致）
+        return base.withStyle(s, textColorFollowsLine: true)   // nil = 该样式语义不成立（.segment）→ 不提交
 ```
 
 > ⚠️ `discardPendingAnchors()` 必须在 `return` 之前（保持既有语义：**提交或拒交都只丢 pending**，工具与会话存活）。`base` 的 `colorToken`/`textColorToken` 取 `DrawingObject.init` 默认（都是 `.orange`）→ 相等 → 派生② 走「跟随」分支 → `textColorToken == s.colorToken`，与切片2 之前逐字一致。
@@ -1241,7 +1267,12 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDraw
         //     矩阵的工具，我们不懂它的样式语义 → **只挡编辑，不挡新建/提交**。`.trend`/`.text` 是**已知**
         //     枚举 case，高版本写的这类线解码后一切"正常"、raw-aware 门看不见 → 没这道门就会被按横线假设改写。
         guard DrawingStyleAvailability.isEditableToolType(old.toolType) else { return false }
-        guard let updated = old.withStyle(style) else { return false }             // ④（D59/D58 引擎支）
+        // ④（D59/D58 引擎支）+ 派生② 的 raw-aware 判据（codex plan-R20-F1）：
+        //   加载来的线按 **raw 字符串**判"字色是否跟随线色"（解码值对 unknown 枚举不可靠）；
+        //   raw 里缺这两个键之一、或该 id 不在加载集里（内存新画的线）→ 回退解码比较。
+        let follows = loadedDrawingsLossy.textColorFollowsLineColorInRaw(id: id)
+            ?? (old.textColorToken == old.colorToken)
+        guard let updated = old.withStyle(style, textColorFollowsLine: follows) else { return false }
         // ③（D61，**user 2026-07-26 裁决改为"看结果"**——对 spec 原文的显式修订，见下方 ⚠️）**两道**：
         //
         // ③a **可覆盖性预检**（raw-aware，按 key 判；codex plan-R19-F2）：该线携带的未来枚举值，其 key 必须
@@ -1389,6 +1420,9 @@ struct DrawingEditDurabilityGateTests {
         #expect(e.drawingsRevision == rev + 1)
         #expect(e.drawings.first { $0.id == "R" }?.colorToken == .green)
         #expect(e.drawings.first { $0.id == "R" }?.text == "hi")                          // 线保住了
+        // codex plan-R20-F1：raw 里 textColorToken 是**独立**的 "orange"（与 colorToken 的 "futureNeon"
+        // 不同），解码后两者却双双是 .orange —— raw-aware 判据必须判"不跟随" → 字色**不被**换成 .green
+        #expect(e.drawings.first { $0.id == "R" }?.textColorToken == .orange)
         // 修复后：归并结果不再带未来数据 → finalize 门（同一对判据）也不会再拦这一局
         let merged = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings)
         #expect(merged.hasKnownFutureEnumValues(liveIds: ["R"]) == false)
@@ -1457,6 +1491,20 @@ struct DrawingEditDurabilityGateTests {
         // 原始字节保真：未来字段仍在
         let data = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings).encoded()
         #expect(String(decoding: data, as: UTF8.self).contains("futureIndependentTextColor"))
+    }
+
+    @Test("codex plan-R20-F1: raw-aware「字色是否跟随线色」判据本身（解码比较会误判的那两种形状）")
+    func rawAwareTextColorFollowDecision() throws {
+        // ① raw 里两者不同（futureNeon vs orange）→ **不跟随**（解码后双双 .orange，解码比较会误判成跟随）
+        let independent = #"{"id":"A","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"colorToken":"futureNeon","textColorToken":"orange"}"#
+        #expect(try lossyFromRaw(independent).textColorFollowsLineColorInRaw(id: "A") == false)
+        // ② raw 里两者相同（都是同一个未来值）→ **跟随**（换线色时一并更新是对的）
+        let following = #"{"id":"B","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"colorToken":"futureNeon","textColorToken":"futureNeon"}"#
+        #expect(try lossyFromRaw(following).textColorFollowsLineColorInRaw(id: "B") == true)
+        // ③ 不在集合里 / raw 缺键 → nil（调用方回退解码比较）
+        #expect(try lossyFromRaw(independent).textColorFollowsLineColorInRaw(id: "ZZZ") == nil)
+        let noTextKey = #"{"id":"C","toolType":"horizontal","anchors":[],"isExtended":false,"panelPosition":0,"revealTick":0,"colorToken":"orange"}"#
+        #expect(try lossyFromRaw(noTextKey).textColorFollowsLineColorInRaw(id: "C") == nil)
     }
 
     @Test("N14f 判据陷阱专项: 存盘→重载的**普通**线仍可编辑（漏 !entries.isEmpty 会全灰，当场红）")
@@ -1963,10 +2011,10 @@ git status --porcelain   # 期望：空输出（codex plan-R14-F3：防新建文
 
 0. **已接受的残留（本切片明写，别当没说）**：源码守卫是**文本级**的（调用点计数 + 标识符文件作用域），它挡得住「忘了补几何门就加调用点」和「用方法引用绕过调用 pattern」，但**挡不住**已在白名单文件里的代码把方法引用**传出去**。要彻底焊死只有两条路：SwiftSyntax 级扫描（为一条守卫引入编译器级依赖），或「只有几何校验过的路由能构造」的授权对象——后者在本仓落不了地：能构造它的类型得声明在 UI 路由文件，而那是 UIKit-only 文件（纯 macOS host 不编译），引擎引用它会直接炸掉 host 测试；把几何证明塞进引擎签名又违反 D65「引擎签名不含 geometry 参数」。**现状取舍**：本切片零调用点、危害为零；PR-4 接线时这条守卫是**唯一**的几何门 forcing function，届时若觉得不够，再单独评估上 SwiftSyntax。
 1. **PR-4 的 UI 可用性必须按修订后的 D61/D65 落地**（codex plan-R15-F1 + R18-F2，spec 已同步）：置灰分量 = `locked` + 当前几何 + **「未来数据样式改得到吗」**——
-   - 未来值落在样式写得到的 key（`{lineSubType, lineStyle, thickness, colorToken, labelMode, isExtended, textColorToken}`）→ 控件**可点**（用户换成本版本认识的值即完成修复），引擎按「看结果」最终裁决、被拒时给反馈并**保留选中**；
+   - 未来值落在 `DrawingStyleAvailability.userCoverableFutureKeys` = `{lineSubType, lineStyle, thickness, colorToken, labelMode, isExtended}`（⚠️ **不含 `textColorToken`**，codex plan-R19-F2/R20-F2：本构建无字色控件）→ 控件**可点**（用户换成本版本认识的值即完成修复），引擎按「看结果」最终裁决、被拒时给反馈并**保留选中**；
    - 未来值落在 `anchors[].period` / `tailAnchor.period` 这类**样式碰不到**的位置，或存在**未来顶层字段** → 样式控件**灰**、🗑 **亮**（没有控件能覆盖它，可点即必败；靠删除解封）；
    - **UI 谓词与引擎判据必须共用同一个 helper**（PR-4 抽出来，禁止 UI 自己写一份 key 集合，否则又是两档判据）。
-   - **三条路由级测试**（引擎直调不算覆盖）：① 未来 `colorToken` → 控件可点、换色成功、改粗细被拒有反馈；② 未来顶层字段 → 控件灰、🗑 亮、删除成功；③ 未来 `anchors[0].period` → 控件灰、🗑 亮。
+   - **四条路由级测试**（引擎直调不算覆盖）：① 未来 `colorToken` → 控件可点、换色成功、改粗细被拒有反馈；② 未来顶层字段 → 控件灰、🗑 亮、删除成功；③ 未来 `anchors[0].period` → 控件灰、🗑 亮；④ 未来 `textColorToken` → 控件灰、🗑 亮、删除成功，且**不删除时其 raw 字节保真**（codex plan-R20-F2）。
 2. **PR-4 接线时必须同步改两条源码守卫**（本切片故意写成「零调用点」）：
    - `updateDrawingStyle(` → 恰好 1 处，且在 UI 编辑路由内，且路由**先过 D65 当前几何门 → 若改 `lineSubType` 再过 D58 候选预检 → 才调引擎**；
    - `deleteDrawing(id:` → 恰好 1 处，且在 UI 删除路由内，且路由在**确认框点「删除」之后**重算 `visibleGeometry`（D65 R13-F1 时序）。
