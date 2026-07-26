@@ -738,35 +738,71 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         s.split(whereSeparator: { $0.isWhitespace }).joined()
     }
 
-    /// 一段源码文本 → **剥行注释 + 剥块注释（支持嵌套）+ 删除全部空白** 后的字符串。
-    /// ⚠️ 两次收紧的由来，别退回去：
-    ///   ① 逐行 substring 扫描挡不住 `engine.deleteDrawing(\n id: x\n)`（codex plan-R1-F1）；
-    ///   ② **只折叠空白、只收紧 `"( "` 仍不够**（codex plan-R2-F1）：`engine.deleteDrawing\n(\n id: x\n)`
-    ///      会归一成 `deleteDrawing (id:`（左括号**前面**那个空格没人管）→ 照样漏；块注释
-    ///      `engine.deleteDrawing/* c */(id:` 同理。故直接**删光空白 + 剥块注释**，让匹配与排版完全无关。
+    /// 一段源码文本 → **只剩代码**（剥行注释 / 嵌套块注释 / 字符串字面量内容）**且删光空白**。
+    /// ⚠️ 三次收紧的由来，别退回去（每一条都是 codex 用一段**合法 Swift** 打穿的）：
+    ///   ① 逐行 substring 挡不住 `engine.deleteDrawing(\n id: x\n)`（R1-F1）；
+    ///   ② 只折叠空白、只收紧 `"( "` 仍不够（R2-F1）：`engine.deleteDrawing\n(\n id: x\n)` 会留下
+    ///      `deleteDrawing (id:`（左括号**前面**那个空格没人管）；`deleteDrawing/* c */(id:` 同理；
+    ///   ③ **不跟踪字符串状态就会反向漏**（R7-F1）：`let u = "https://x"` 里的 `//` 会让「吃到行尾」
+    ///      把**同一行后面的真实调用**当注释丢掉；`let s = "/*"` 更狠——块注释状态一开，能吞掉整片代码。
+    ///      故这里是个**小词法器**：正确处理普通串 / 多行串 `"""` / 原始串 `#"…"#`（含 `\#` 转义），
+    ///      并把字符串**内容整段丢弃**（字面量里的 `deleteDrawing(id:` 本来就不是调用，顺带免了假阳性）。
     ///   守卫漏掉一个调用点的后果不是"少测一条"，而是 PR-4 可以在**不补几何门**的情况下接上不可逆删除。
     private func squeezedText(_ raw: String) -> String {
+        let c = Array(raw)
         var out = ""
-        var i = raw.startIndex
+        var i = 0
         var blockDepth = 0
-        while i < raw.endIndex {
-            let rest = raw[i...]
-            if rest.hasPrefix("/*") {
-                blockDepth += 1
-                i = raw.index(i, offsetBy: 2); continue
+        while i < c.count {
+            if blockDepth > 0 {                                     // 块注释内（可嵌套）
+                if c[i] == "/", i + 1 < c.count, c[i + 1] == "*" { blockDepth += 1; i += 2; continue }
+                if c[i] == "*", i + 1 < c.count, c[i + 1] == "/" { blockDepth -= 1; i += 2; continue }
+                i += 1; continue
             }
-            if blockDepth > 0 {
-                if rest.hasPrefix("*/") { blockDepth -= 1; i = raw.index(i, offsetBy: 2); continue }
-                i = raw.index(after: i); continue
-            }
-            if rest.hasPrefix("//") {                       // 行注释：吃到行尾
-                while i < raw.endIndex, raw[i] != "\n" { i = raw.index(after: i) }
+            if c[i] == "/", i + 1 < c.count, c[i + 1] == "*" { blockDepth = 1; i += 2; continue }
+            if c[i] == "/", i + 1 < c.count, c[i + 1] == "/" {      // 行注释：吃到行尾
+                while i < c.count, c[i] != "\n" { i += 1 }
                 continue
             }
-            if !raw[i].isWhitespace { out.append(raw[i]) }   // 空白一律丢弃
-            i = raw.index(after: i)
+            if c[i] == "#" {                                        // 可能是原始串 #"…"# / ##"…"##
+                var h = 0, j = i
+                while j < c.count, c[j] == "#" { h += 1; j += 1 }
+                if j < c.count, c[j] == "\"" { i = skipStringLiteral(c, from: j, hashes: h); continue }
+                out.append(contentsOf: c[i..<j])                     // 不是原始串（如 #expect / #filePath）
+                i = j; continue
+            }
+            if c[i] == "\"" { i = skipStringLiteral(c, from: i, hashes: 0); continue }
+            if !c[i].isWhitespace { out.append(c[i]) }               // 空白一律丢弃
+            i += 1
         }
         return out
+    }
+
+    /// 从 `from`（指向首个 `"`）跳过整个字符串字面量，返回其后第一个下标；内容一律不输出。
+    /// 支持多行 `"""…"""` 与原始串（`hashes` 个 `#`，其转义是 `\` + 同样数量的 `#`）。
+    private func skipStringLiteral(_ c: [Character], from: Int, hashes: Int) -> Int {
+        var i = from
+        let isMultiline = (i + 2 < c.count) && c[i + 1] == "\"" && c[i + 2] == "\""
+        let quoteLen = isMultiline ? 3 : 1
+        i += quoteLen
+        while i < c.count {
+            if c[i] == "\\" {                                        // 转义：普通串 `\x`；原始串 `\#…#x`
+                var j = i + 1, h = 0
+                while j < c.count, c[j] == "#", h < hashes { h += 1; j += 1 }
+                if h == hashes { i = min(j + 1, c.count); continue } // 连吃被转义的那个字符
+            }
+            if c[i] == "\"" {                                        // 收尾：quoteLen 个 `"` + hashes 个 `#`
+                var j = i, q = 0
+                while j < c.count, c[j] == "\"", q < quoteLen { q += 1; j += 1 }
+                if q == quoteLen {
+                    var h = 0
+                    while j < c.count, c[j] == "#", h < hashes { h += 1; j += 1 }
+                    if h == hashes { return j }
+                }
+            }
+            i += 1
+        }
+        return c.count                                               // 未闭合（坏源码）：吃到底，fail-safe
     }
 
     private func squeezedSource(_ path: String) throws -> String {
@@ -849,6 +885,30 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 3, "三种排版都该命中，实际 squeeze：\(s)")
         #expect(!s.contains("行注释里的不算"))
         #expect(!s.contains("块注释里的也不算"))
+    }
+
+    @Test("守卫自检 d（codex plan-R7-F1）：字符串里的注释定界符不得吞掉后面的真实调用；串内的调用不算数")
+    func scannerHandlesStringLiteralsWithCommentDelimiters() {
+        let src = #"""
+        func caller() {
+            let u = "https://example.com/a"; engine.deleteDrawing(id: x)
+            let s = "/*"
+            engine.updateDrawingStyle(id: y, style: st)
+            let r = ##"deleteDrawing(id: 原始串里的不算)"##
+            let m = """
+            deleteDrawing(id: 多行串里的也不算)
+            """
+            let esc = "带转义的引号 \" 之后仍在串内：deleteDrawing(id: 不算)"
+        }
+        """#
+        let s = squeezedText(src)
+        // `"https://…"` 里的 `//` 没把同一行后面的真实调用吃掉；`"/*"` 没开启块注释吞掉下一行
+        #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 1, "实际 squeeze：\(s)")
+        #expect(callCount(inSqueezed: s, pattern: "updateDrawingStyle(") == 1, "实际 squeeze：\(s)")
+        // 字符串内容整段丢弃 → 串里的调用字样不产生假阳性
+        #expect(!s.contains("原始串里的不算"))
+        #expect(!s.contains("多行串里的也不算"))
+        #expect(!s.contains("不算"))
     }
 
     @Test("守卫自检 c（codex plan-R5-F1 + R6-F1）：方法引用不出现调用 pattern，但必被标识符扫描抓到")
