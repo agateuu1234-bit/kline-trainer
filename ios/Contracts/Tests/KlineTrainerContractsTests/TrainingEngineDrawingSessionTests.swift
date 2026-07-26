@@ -2,6 +2,7 @@
 // Spec: 2026-07-10-drawing-tools-P1b-split-addendum.md §3.1.2 / §3.3（#2 #4 #4b）+ plan D45。
 // D42 全局会话（两面板同时可画、互斥模型退役）+ 不变量「drawingModeActive ⇔ 两面板 .drawing」。
 import CoreGraphics        // CGRect（本包不 re-export CoreGraphics；漏了整包编译不过，codex plan-R2-medium）
+import Foundation          // URL/FileManager（N23a 源码守卫：调用图扫描 Sources/）
 import Testing
 @testable import KlineTrainerContracts
 
@@ -14,6 +15,35 @@ struct TrainingEngineDrawingSessionTests {
         let on = e.drawingSession.drawingModeActive
         #expect(e.isDrawingActive(on: .upper) == on, sourceLocation: sourceLocation)
         #expect(e.isDrawingActive(on: .lower) == on, sourceLocation: sourceLocation)
+    }
+
+    // MARK: N23a 源码守卫 helper（Task 5：append 家族信任边界，调用图 D67）
+
+    /// ios/Contracts 目录（由本文件路径回推：Tests/KlineTrainerContractsTests/<本文件> → 上溯 3 层，
+    /// 同 DrawingSessionSourceGuardTests 手法；本文件比它少一层子目录，故少削一层）。
+    private var contractsDir: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()    // KlineTrainerContractsTests
+            .deletingLastPathComponent()    // Tests
+            .deletingLastPathComponent()    // ios/Contracts
+    }
+
+    private var trainingEnginePath: String {
+        contractsDir.appendingPathComponent(
+            "Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift"
+        ).path
+    }
+
+    /// Sources/KlineTrainerContracts 下全部 .swift 文件的绝对路径（含 TrainingEngine.swift 自身——
+    /// 调用图守卫需要看到 setReviewDrawings 在引擎内部委托调 setReviewLossy 这类包内调用）。
+    private func allSwiftFilesUnderSources() throws -> [String] {
+        let root = contractsDir.appendingPathComponent("Sources/KlineTrainerContracts")
+        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else {
+            return []
+        }
+        return enumerator.compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" }
+            .map { $0.path }
     }
 
     @Test("D42：开画线模式 → **两个面板**同时进 .drawing（互斥模型已退役）")
@@ -627,5 +657,88 @@ struct TrainingEngineDrawingSessionTests {
         let before = engine.drawingsRevision
         engine.deleteDrawing(at: 0)
         #expect(engine.drawingsRevision == before + 1)
+    }
+
+    // MARK: Task 5（D67 + D66 append 部分）：append 家族信任边界
+
+    @Test("N23b: appendDrawing/appendReviewDrawing 拒 .segment（引擎层，direct-call），不动 revision")
+    @MainActor func appendRejectsSegment() {
+        let engine = TrainingEngine.preview()
+        let seg = DrawingObject(id: "s", toolType: .horizontal,
+                                anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
+                                isExtended: false, panelPosition: 0, period: .daily, lineSubType: .segment)
+        let before = engine.drawingsRevision
+        #expect(engine.appendDrawing(seg) == false)          // .segment 恒不可渲染 → 拒
+        #expect(engine.drawings.isEmpty)
+        #expect(engine.drawingsRevision == before)           // 拒绝不动 revision
+        #expect(engine.appendReviewDrawing(seg) == false)
+        #expect(engine.reviewDrawings.isEmpty)
+    }
+
+    @Test("N23d: appendDrawing/appendReviewDrawing 拒空 id / 重复 id，拒绝不动 revision（D66 append 部分，codex plan-R5-F1）")
+    @MainActor func appendRejectsEmptyAndDuplicateId() {
+        let engine = TrainingEngine.preview()
+        // 空 id → 拒
+        let empty = makeHLine(id: "", candleIndex: 3, price: 10)
+        #expect(engine.appendDrawing(empty) == false)
+        #expect(engine.drawings.isEmpty)
+        #expect(engine.drawingsRevision == 0)
+        // 正常一条
+        #expect(engine.appendDrawing(makeHLine(id: "A", candleIndex: 3, price: 10)) == true)
+        let after1 = engine.drawingsRevision
+        // 重复 id → 拒、不动 revision
+        #expect(engine.appendDrawing(makeHLine(id: "A", candleIndex: 4, price: 11)) == false)
+        #expect(engine.drawings.count == 1)
+        #expect(engine.drawingsRevision == after1)
+        // review 侧独立判 reviewDrawings：同 id "A" 在 review 侧应可接受（不同数组）
+        #expect(engine.appendReviewDrawing(makeHLine(id: "A", candleIndex: 5, price: 12)) == true)
+        // review 侧再来一条同 id → 拒
+        #expect(engine.appendReviewDrawing(makeHLine(id: "A", candleIndex: 6, price: 13)) == false)
+        #expect(engine.reviewDrawings.count == 1)
+    }
+
+    @Test("N23a: append 家族非 public + 唯一调用点（源码守卫，调用图 D67，codex plan-R5-F2）")
+    func appendFamilyTrustBoundary() throws {
+        // (1) 访问级别：7 个 public 写入面全非 public（编辑 5 + 装载 2）
+        let engineSrc = try String(contentsOfFile: trainingEnginePath, encoding: .utf8)
+        for decl in ["appendDrawing(", "appendReviewDrawing(", "routeDrawingCommit(", "deleteDrawing(at ",
+                     "removeReviewDrawing(at ", "setReviewLossy(", "setReviewDrawings("] {
+            #expect(!engineSrc.contains("public func " + decl))
+            #expect(engineSrc.contains("func " + decl))                       // 仍存在（internal）
+        }
+        // (2) 唯一调用点（**核心**：仅非 public 不够——包内新调用者仍能绕过 handleDrawingTap 的 geometry 门）。
+        //     扫整个 Sources/，统计匹配 callPattern 的「调用」行（排除 defExclude 定义行与注释行）。
+        //     ⚠️ callPattern 必须匹配【真实调用语法】（codex plan-R6-F3）：
+        //        无标签调用 `xxx(...)` 用 "xxx("；带标签调用 `deleteDrawing(at: 0)` 用 "deleteDrawing(at:"（冒号），
+        //        不能用 "deleteDrawing(at(" —— 那样永远匹配不到、守卫恒空恒过（假绿）。
+        func callSites(callPattern: String, defExclude: String) throws -> [(file: String, line: String)] {
+            try allSwiftFilesUnderSources().flatMap { path -> [(String, String)] in
+                try String(contentsOfFile: path, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: false)
+                    .map(String.init)
+                    .filter { line in
+                        let t = line.trimmingCharacters(in: .whitespaces)
+                        return t.contains(callPattern) && !t.contains(defExclude) && !t.hasPrefix("//") && !t.hasPrefix("///")
+                    }
+                    .map { (path, $0) }
+            }
+        }
+        // appendDrawing/appendReviewDrawing 各恰好 1 处调用（`appendDrawing(stamped)`），都在 routeDrawingCommit
+        #expect(try callSites(callPattern: "appendDrawing(", defExclude: "func appendDrawing(").count == 1)
+        #expect(try callSites(callPattern: "appendReviewDrawing(", defExclude: "func appendReviewDrawing(").count == 1)
+        // routeDrawingCommit 恰好 1 处调用（`engine.routeDrawingCommit(committed)`），在 ChartContainerView.handleDrawingTap
+        let route = try callSites(callPattern: "routeDrawingCommit(", defExclude: "func routeDrawingCommit(")
+        #expect(route.count == 1)
+        #expect(route.allSatisfy { $0.file.contains("ChartContainerView") })
+        // deleteDrawing(at:) / removeReviewDrawing(at:) 零生产调用点（D51/D67）——调用语法带标签冒号 `xxx(at: 0)`；
+        //   定义是 `func xxx(at index:`（`at ` 后无冒号），故 pattern `xxx(at:` 只命中调用、不命中定义。
+        #expect(try callSites(callPattern: "deleteDrawing(at:", defExclude: "func deleteDrawing(at").isEmpty)
+        #expect(try callSites(callPattern: "removeReviewDrawing(at:", defExclude: "func removeReviewDrawing(at").isEmpty)
+        // 装载入口：setReviewLossy 只在 TrainingSessionCoordinator（复盘装载 :538）与 TrainingEngine
+        //   （setReviewDrawings :315 委托调它）——不强求 count（委托是合法内部调用），只断言不在别处新增旁路。
+        let reviewLossy = try callSites(callPattern: "setReviewLossy(", defExclude: "func setReviewLossy(")
+        #expect(!reviewLossy.isEmpty)
+        #expect(reviewLossy.allSatisfy { $0.file.contains("TrainingSessionCoordinator") || $0.file.contains("TrainingEngine") })
+        // setReviewDrawings 零 Sources/ 调用点（其定义 :315 委托 setReviewLossy，被 defExclude 排除；测试经 @testable 调、不在 Sources/）
+        #expect(try callSites(callPattern: "setReviewDrawings(", defExclude: "func setReviewDrawings(").isEmpty)
     }
 }

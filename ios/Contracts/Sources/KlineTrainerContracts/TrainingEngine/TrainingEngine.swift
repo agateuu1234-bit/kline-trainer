@@ -309,15 +309,15 @@ public final class TrainingEngine {
     /// 本 setter 作初始播种入口。**P1a Task 12（Z1）**：携带完整有损集 + 加载来的隐藏 id 集（`hiddenIds`），
     /// 使 save 路径（`persistReviewWorkingIfChanged`/`commitReview`）能经 `loadedReviewLossy.reconciled(currentKnown:)`
     /// 重发，保住加载 blob 里未识别的条 + 原样传回 hiddenIds（不覆盖成 `[]`，codex R11-high）。
-    public func setReviewLossy(_ l: LossyDrawingArray, hiddenIds: [DrawingID] = [],
-                               unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry] = []) {
+    func setReviewLossy(_ l: LossyDrawingArray, hiddenIds: [DrawingID] = [],
+                        unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry] = []) {
         loadedReviewLossy = l
         loadedReviewHiddenIds = hiddenIds
         loadedReviewUnknownTopLevel = unknownTopLevel
         reviewDrawings = l.drawings
     }
     /// 兼容旧调用（纯已知，无 unknownRaw/hiddenIds）：包成 lossy 走 `setReviewLossy` 唯一实现。
-    public func setReviewDrawings(_ ds: [DrawingObject]) throws { setReviewLossy(try LossyDrawingArray(drawings: ds)) }
+    func setReviewDrawings(_ ds: [DrawingObject]) throws { setReviewLossy(try LossyDrawingArray(drawings: ds)) }
 
     /// 规范 mark price（Task 9 收口）：global tick `t` 处 `.m3` 收盘价，越界 clamp 到端根、非 nil。
     /// `currentPrice`／`ReviewLedger.state` 的 `markPriceAtTick`／finalize 三处共用同一入口，杜绝重复实现漂移。
@@ -1076,7 +1076,7 @@ extension TrainingEngine {
     }
 
     /// 删除已完成绘线（spec `deleteDrawing(at:)`）。越界 trap（caller bug，与 spec precondition 同风格）。
-    public func deleteDrawing(at index: Int) {
+    func deleteDrawing(at index: Int) {
         precondition(drawings.indices.contains(index), "deleteDrawing index out of bounds")
         drawings.remove(at: index)
         drawingsRevision += 1
@@ -1091,8 +1091,10 @@ extension TrainingEngine {
     /// **whole-branch codex R2-high：返回值 load-bearing** —— 未来做「删旧线 + append 新线」式编辑
     /// （1b-i）的调用者必须先看返回值：返 `false`（被拒）时绝不能已经把旧线删了，否则静默丢线。
     @discardableResult
-    public func appendDrawing(_ drawing: DrawingObject) -> Bool {
+    func appendDrawing(_ drawing: DrawingObject) -> Bool {
         guard isPeriodConsistent(drawing) else { return false }  // 1a-iv fail-closed：坏数据不入库
+        guard DrawingStyleAvailability.horizontalLineSubTypeEnabled(drawing.lineSubType) else { return false }  // D67：.segment 等恒不可渲染值拒
+        guard !drawing.id.isEmpty, !drawings.contains(where: { $0.id == drawing.id }) else { return false }     // D66：id 非空 + 与目标数组唯一
         drawings.append(drawing)
         drawingsRevision += 1
         return true
@@ -1103,8 +1105,10 @@ extension TrainingEngine {
     /// **whole-branch codex R2-high：返回值 load-bearing** —— 未来做「删旧线 + append 新线」式编辑
     /// （1b-i）的调用者必须先看返回值：返 `false`（被拒）时绝不能已经把旧线删了，否则静默丢线。
     @discardableResult
-    public func appendReviewDrawing(_ drawing: DrawingObject) -> Bool {
+    func appendReviewDrawing(_ drawing: DrawingObject) -> Bool {
         guard isPeriodConsistent(drawing) else { return false }  // 1a-iv fail-closed：坏数据不入库
+        guard DrawingStyleAvailability.horizontalLineSubTypeEnabled(drawing.lineSubType) else { return false }  // D67
+        guard !drawing.id.isEmpty, !reviewDrawings.contains(where: { $0.id == drawing.id }) else { return false } // D66（对 reviewDrawings）
         reviewDrawings.append(drawing)
         return true
     }
@@ -1124,7 +1128,7 @@ extension TrainingEngine {
     }
 
     /// `deleteDrawing(at:)` 的 `reviewDrawings` 对应版本（复盘侧删除）。越界 trap，同风格。
-    public func removeReviewDrawing(at index: Int) {
+    func removeReviewDrawing(at index: Int) {
         precondition(reviewDrawings.indices.contains(index), "removeReviewDrawing index out of bounds")
         reviewDrawings.remove(at: index)
     }
@@ -1136,7 +1140,7 @@ extension TrainingEngine {
     /// **关键不变量**：review commit 绝不写 `drawings`（不污染原训练记录）。
     /// review-redesign Task 3：路由前先盖戳 `revealTick = tick.globalTickIndex`（提交那一刻的全局
     /// tick），使 `RenderStateBuilder.make` 的渐显判据（`revealTick <= tick`）对这条画线生效。
-    public func routeDrawingCommit(_ drawing: DrawingObject) {
+    func routeDrawingCommit(_ drawing: DrawingObject) {
         let stamped = DrawingObject(
             id: drawing.id, toolType: drawing.toolType, anchors: drawing.anchors,
             isExtended: drawing.isExtended, panelPosition: drawing.panelPosition,
