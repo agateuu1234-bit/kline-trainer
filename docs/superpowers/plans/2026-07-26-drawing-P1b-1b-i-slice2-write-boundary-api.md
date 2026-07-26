@@ -178,21 +178,20 @@ struct DrawingObjectStyleEditTests {
     @Test("派生①：isExtended 恒 ==(lineSubType == .ray)")
     func derivesIsExtendedFromSubType() throws {
         let base = makeStyledHLine(id: "a", lineSubType: .straight)
-        let ray = try #require(base.withStyle(style(.ray)))
+        let ray = try #require(base.withStyle(style(.ray), textColorFollowsLine: true))
         #expect(ray.isExtended == true)
-        let back = try #require(ray.withStyle(style(.straight)))
+        let back = try #require(ray.withStyle(style(.straight), textColorFollowsLine: true))
         #expect(back.isExtended == false)
     }
 
-    @Test("派生②条件派生：字色本来跟线色相同 → 跟随；已是独立字色 → 保留")
+    @Test("派生②条件派生：`textColorFollowsLine` 决定跟随还是保留（判据由调用方给出，R20-F1）")
     func textColorTokenConditionalDerivation() throws {
-        // 跟随：old.textColorToken == old.colorToken
-        let follow = makeStyledHLine(id: "a", colorToken: .orange, textColorToken: .orange)
-        let f = try #require(follow.withStyle(style(.straight, .solid, 1, .green)))
+        let d = makeStyledHLine(id: "a", colorToken: .orange, textColorToken: .blue)
+        // 跟随（新建路径 / raw 判定为跟随）→ 字色随线色
+        let f = try #require(d.withStyle(style(.straight, .solid, 1, .green), textColorFollowsLine: true))
         #expect(f.textColorToken == .green)
-        // 保留：old.textColorToken(.blue) != old.colorToken(.orange)（known 独立字色，D61 raw-aware 拦不住它）
-        let independent = makeStyledHLine(id: "b", colorToken: .orange, textColorToken: .blue)
-        let g = try #require(independent.withStyle(style(.straight, .solid, 1, .green)))
+        // 不跟随（raw 判定为独立字色）→ 原样保留
+        let g = try #require(d.withStyle(style(.straight, .solid, 1, .green), textColorFollowsLine: false))
         #expect(g.textColorToken == .blue)
         #expect(g.colorToken == .green)
     }
@@ -200,18 +199,18 @@ struct DrawingObjectStyleEditTests {
     @Test("归一化：(ray, .left) 不可表达 → labelMode 落 .hidden；(ray, .right) 原样")
     func normalizesLabelMode() throws {
         let base = makeStyledHLine(id: "a")
-        let r = try #require(base.withStyle(style(.ray, .solid, 1, .orange, .left)))
+        let r = try #require(base.withStyle(style(.ray, .solid, 1, .orange, .left), textColorFollowsLine: true))
         #expect(r.labelMode == .hidden)
-        let r2 = try #require(base.withStyle(style(.ray, .solid, 1, .orange, .right)))
+        let r2 = try #require(base.withStyle(style(.ray, .solid, 1, .orange, .right), textColorFollowsLine: true))
         #expect(r2.labelMode == .right)
     }
 
     @Test("可用性：水平线 .segment 恒不可渲染 → nil（合法子类型放行做反向对照）")
     func rejectsUnrenderableSubTypeForHorizontal() throws {
         let h = makeStyledHLine(id: "a")
-        #expect(h.withStyle(style(.segment)) == nil)
-        #expect(h.withStyle(style(.straight)) != nil)
-        #expect(h.withStyle(style(.ray)) != nil)
+        #expect(h.withStyle(style(.segment), textColorFollowsLine: true) == nil)
+        #expect(h.withStyle(style(.straight), textColorFollowsLine: true) != nil)
+        #expect(h.withStyle(style(.ray), textColorFollowsLine: true) != nil)
     }
 
     @Test("工具门（codex plan-R11-F1）：本构建未实现的**已知**工具 → 整条不可编辑（改写保守）")
@@ -223,8 +222,8 @@ struct DrawingObjectStyleEditTests {
                                   isExtended: false, panelPosition: 0, period: .daily)
         // ⚠️ `withStyle` **不含**工具门（R15-F2：它也服务新建路径）→ 这里必须**放行**；
         //    「未实现工具不可编辑」由 `updateDrawingStyle` 落实（Task 4 的引擎级测试钉死）。
-        #expect(trend.withStyle(style(.straight)) != nil)
-        #expect(trend.withStyle(style(.segment)) != nil)       // 横规则也不适用于它
+        #expect(trend.withStyle(style(.straight), textColorFollowsLine: true) != nil)
+        #expect(trend.withStyle(style(.segment), textColorFollowsLine: true) != nil)       // 横规则也不适用于它
         #expect(DrawingStyleAvailability.isEditableToolType(.trend) == false)
         #expect(DrawingStyleAvailability.isEditableToolType(.horizontal) == true)
         // 判据 = 既有单一真相 `DrawingToolType.implemented`（能不能画，codex plan-R12-F2：不另立登记表）
@@ -247,20 +246,20 @@ struct DrawingObjectStyleEditTests {
     func thicknessDomainGateIsConditional() throws {
         let d = makeStyledHLine(id: "a", thickness: 2)
         // 合法域内：放行
-        #expect(d.withStyle(style(.straight, .solid, 5))?.thickness == 5)
-        #expect(d.withStyle(style(.straight, .solid, 1))?.thickness == 1)
+        #expect(d.withStyle(style(.straight, .solid, 5), textColorFollowsLine: true)?.thickness == 5)
+        #expect(d.withStyle(style(.straight, .solid, 1), textColorFollowsLine: true)?.thickness == 1)
         // 越域**新值**：拒（0 / 负 / 极大）——直接调用者塞不进坏数据
-        #expect(d.withStyle(style(.straight, .solid, 0)) == nil)
-        #expect(d.withStyle(style(.straight, .solid, -3)) == nil)
-        #expect(d.withStyle(style(.straight, .solid, 999_999)) == nil)
+        #expect(d.withStyle(style(.straight, .solid, 0), textColorFollowsLine: true) == nil)
+        #expect(d.withStyle(style(.straight, .solid, -3), textColorFollowsLine: true) == nil)
+        #expect(d.withStyle(style(.straight, .solid, 999_999), textColorFollowsLine: true) == nil)
         // 反向对照（防过度拒绝）：一条**已经**带越域值的线（模拟高版本 thickness=8 解码进来），
         // 只改颜色、thickness 原样带回 → **必须放行**，且 thickness 逐字保留
         let future = makeStyledHLine(id: "f", thickness: 8)
-        let edited = try #require(future.withStyle(style(.straight, .solid, 8, .green)))
+        let edited = try #require(future.withStyle(style(.straight, .solid, 8, .green), textColorFollowsLine: true))
         #expect(edited.thickness == 8)
         #expect(edited.colorToken == .green)
         // 但对同一条线写入**另一个**越域值 → 仍拒（不是"这条线从此免检"）
-        #expect(future.withStyle(style(.straight, .solid, 9)) == nil)
+        #expect(future.withStyle(style(.straight, .solid, 9), textColorFollowsLine: true) == nil)
     }
 
     @Test("归一化 tool-aware（codex plan-R2-F2）：横规则只对横工具成立")
@@ -275,14 +274,14 @@ struct DrawingObjectStyleEditTests {
         #expect(A.normalizedLabelMode(current: .show, lineSubType: .straight, toolType: .trend) == .show)
         // 横线经 withStyle 的实际行为（两道门叠加后）
         let h = makeStyledHLine(id: "h")
-        #expect(h.withStyle(style(.ray, .solid, 1, .orange, .left))?.labelMode == .hidden)
-        #expect(h.withStyle(style(.straight, .solid, 1, .orange, .show))?.labelMode == .hidden)
+        #expect(h.withStyle(style(.ray, .solid, 1, .orange, .left), textColorFollowsLine: true)?.labelMode == .hidden)
+        #expect(h.withStyle(style(.straight, .solid, 1, .orange, .show), textColorFollowsLine: true)?.labelMode == .hidden)
     }
 
     @Test("只动 5 样式字段 + 两个派生：其余字段逐字段原样拷贝")
     func copiesEveryOtherFieldVerbatim() throws {
         let old = makeStyledHLine(id: "a", thickness: 2, locked: true, text: "hello", fontSize: 21)
-        let new = try #require(old.withStyle(style(.straight, .dash1, 4, .green, .right)))
+        let new = try #require(old.withStyle(style(.straight, .dash1, 4, .green, .right), textColorFollowsLine: true))
         #expect(new.id == old.id)
         #expect(new.toolType == old.toolType)
         #expect(new.anchors == old.anchors)
@@ -683,7 +682,7 @@ Expected: FAIL —— 现状 `commitPending` 直接取 `s.labelMode`（不归一
         let s = try source(drawingSession)
         #expect(s.contains("func commitPending("))       // 先证真读到文件（防路径错→空→假绿）
         // 切片2（D59）：5 样式字段不再在这里逐个抄，改为整体过 withStyle（语义闸单点）。
-        #expect(s.contains("base.withStyle(s)"))
+        #expect(s.contains("base.withStyle(s, textColorFollowsLine: true)"))   // 新建路径恒「跟随」
         for f in ["lineSubType: s.lineSubType", "colorToken: s.colorToken"] {
             #expect(!s.contains(f), "commitPending 不得再自行灌样式字段（第二份语义会漂）")
         }
@@ -1430,7 +1429,7 @@ struct DrawingEditDurabilityGateTests {
         #expect(!String(decoding: try merged.encoded(), as: UTF8.self).contains("futureNeon"))
     }
 
-    @Test("codex plan-R19-F2: 未来**字色**不算"用户可覆盖" —— 只改线色**必须被拒**，futureCyan 字节保真")
+    @Test("codex plan-R19-F2: 未来字色不算「用户可覆盖」—— 只改线色必须被拒，futureCyan 字节保真")
     func lineColorEditMustNotEraseFutureTextColor() throws {
         // futureRaw 里 colorToken:"futureNeon" 与 textColorToken:"futureCyan" **解码后都是 .orange**
         //（两个不同的未来值双双 fallback）→ 派生② 会判"字色本来就跟着线色"，换线色时把字色一起改掉。
