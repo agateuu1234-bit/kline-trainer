@@ -851,6 +851,28 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         #expect(!s.contains("块注释里的也不算"))
     }
 
+    @Test("守卫自检 c（codex plan-R5-F1 + R6-F1）：方法引用不出现调用 pattern，但必被标识符扫描抓到")
+    func scannerCatchesMethodReferences() {
+        // 这三行都是**合法 Swift**，且都让调用点计数看不见（源码里没有 `xxx(` 这个形状）。
+        let src = """
+        func sneaky(engine: TrainingEngine) {
+            let f = engine.appendDrawing
+            let g: (DrawingID, DrawingDefaultStyle) -> Bool = engine.updateDrawingStyle
+            let h = engine.routeDrawingCommit
+            later(f, g, h)
+        }
+        """
+        let s = squeezedText(src)
+        // 调用点计数：全 0（这正是 R5/R6 指出的绕过）
+        #expect(callCount(inSqueezed: s, pattern: "appendDrawing(") == 0)
+        #expect(callCount(inSqueezed: s, pattern: "updateDrawingStyle(") == 0)
+        #expect(callCount(inSqueezed: s, pattern: "routeDrawingCommit(") == 0)
+        // 标识符扫描：三个都看得见 → `filesMentioning` 的白名单断言会把这种文件抓出来
+        #expect(s.contains("appendDrawing"))
+        #expect(s.contains("updateDrawingStyle"))
+        #expect(s.contains("routeDrawingCommit"))
+    }
+
     @Test("守卫自检 b（codex plan-R3-F1）：first-argument-label 的定义不得把真实调用扣成 0")
     func scannerCountsFirstArgumentLabelCallsExactly() {
         // `func deleteDrawing(at index: Int)` 与调用 `deleteDrawing(at: 0)` 形状不同：
@@ -1316,6 +1338,20 @@ PR-1 那条守卫用的是**逐行** substring（局部函数 `callSites`）。*
         #expect(reviewLossy.allSatisfy { $0.file.contains("TrainingSessionCoordinator") || $0.file.contains("TrainingEngine") })
         // setReviewDrawings 零 Sources/ 调用点（其定义委托 setReviewLossy；定义本身按 "func"+pattern 扣掉）
         #expect(try callSiteCount("setReviewDrawings(").isEmpty)
+        // (3) **标识符文件作用域**（codex plan-R6-F1）：只数调用 pattern 对 append 家族同样不够——
+        //     `let f = engine.appendDrawing` / `engine.routeDrawingCommit` 这类**方法引用**能把调用挪到别处，
+        //     绕过「唯一调用点在 handleDrawingTap 的 :303 visibleGeometry 门之后」这条**唯一**的几何保证。
+        //     update/delete 已按标识符钉死（N15/N19a），append 家族必须同判据（不留强弱两档）。
+        //     ⚠️ 白名单是对 `f3f67da` 源码**实测**的（`grep -rln` + 逐条确认是代码还是注释），不是推断：
+        //       `appendDrawing`/`appendReviewDrawing` 仅 TrainingEngine.swift 有代码；
+        //       `routeDrawingCommit` 在 TrainingEngine.swift（定义）与 ChartContainerView.swift:304（唯一路由）；
+        //       其余文件（TrainingView/DrawingSession/LossyDrawingArray）里的同名字样**全是注释**，
+        //       扫描器剥注释后不计入 —— 这条正是「必须剥注释」的实证理由，别把剥注释那步删了。
+        #expect(try filesMentioning("appendDrawing").allSatisfy { $0.contains("TrainingEngine.swift") })
+        #expect(try filesMentioning("appendReviewDrawing").allSatisfy { $0.contains("TrainingEngine.swift") })
+        #expect(try filesMentioning("routeDrawingCommit").allSatisfy {
+            $0.contains("TrainingEngine.swift") || $0.contains("ChartContainerView.swift")
+        })
     }
 ```
 
