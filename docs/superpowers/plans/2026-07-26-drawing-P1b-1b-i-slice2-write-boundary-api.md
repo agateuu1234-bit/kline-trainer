@@ -343,9 +343,14 @@ struct DrawingObjectStyleEditTests {
         let ray = try hits("lineSubType == .ray", excluding: dead)
         #expect(try total("lineSubType == .ray", excluding: dead) == 1, "派生① 不止一处：\(ray)")
         #expect(ray.allSatisfy { $0.file == "DrawingObjectStyleEdit.swift" })
-        let txt = try hits("textColorToken == colorToken", excluding: dead)
-        #expect(try total("textColorToken == colorToken", excluding: dead) == 1, "派生② 不止一处：\(txt)")
+        // 派生② 的表达式在 R20-F1 后变成"由调用方给判据"的三元式（codex plan-R22-F2 同步守卫锚点）
+        let txt = try hits("textColorFollowsLine ? s.colorToken : textColorToken", excluding: dead)
+        #expect(try total("textColorFollowsLine ? s.colorToken : textColorToken", excluding: dead) == 1,
+                "派生② 不止一处：\(txt)")
         #expect(txt.allSatisfy { $0.file == "DrawingObjectStyleEdit.swift" })
+        // 并钉死：raw-aware 的判据只在引擎算一次（不许 UI/别处各判一遍"跟不跟随"）
+        #expect(try hits("textColorFollowsLineColorInRaw(").contains { $0.file == "TrainingEngine.swift" })
+        #expect(try total("func textColorFollowsLineColorInRaw(") == 1)
         // 归一化 / 可用性：**规则实现**单点（横线规则体只有一份，且都在 DrawingStyleAvailability.swift），
         // 调用点允许多处（面板灰态/即时规整是同一份规则的消费者，非第二份规则——SD-2b）。
         #expect(try total("func horizontalLabelModeEnabled(") == 1)          // 横线 labelMode 规则体
@@ -489,8 +494,11 @@ extension DrawingObject {
     /// 一次样式编辑中，**用户能显式改到**的持久化 key（codex plan-R19-F2）。
     /// 用途：判断一条高版本线携带的未来枚举值**能不能被用户主动覆盖掉**（→ 可修复），
     /// 还是只会被**隐式**改写 / 根本碰不到（→ 必须拒，字节保真）。
-    /// ⚠️ **不含 `textColorToken`**：本构建没有字色控件（独立字色属 P3），它只由 D59 派生② 隐式跟随线色 →
-    ///   把它算作"可覆盖"，等于允许"用户改线色 → 顺手抹掉一条看不见的高版本字色"。
+    /// ⚠️ **基集合不含 `textColorToken`**：本构建没有字色控件（独立字色属 P3），把它无条件算作"可覆盖"
+    ///   等于允许"用户改线色 → 顺手抹掉一条看不见的高版本**独立**字色"。
+    ///   但它是**条件可覆盖**（codex plan-R22-F1）：当 `textColorFollowsLineColorInRaw(id:) == true`
+    ///   （raw 里字色本就与线色同值）时，改线色连它一起覆盖是正当的显式改动 → 调用方把它并入集合。
+    ///   否则"两个键同为一个未来值"的线会被过度拒绝，只能整条删——正是 D61 修订要避免的数据损失。
     /// ⚠️ 不含 `anchors[].period` / `tailAnchor.period`（样式不碰锚点）、不含任何未来顶层字段（无控件可覆盖）。
     /// UI 的置灰谓词（D65）与本判据**必须共用它**，禁止各写一份 key 集合。
     public static let userCoverableFutureKeys: Set<String> =
@@ -1268,9 +1276,7 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDraw
         guard DrawingStyleAvailability.isEditableToolType(old.toolType) else { return false }
         // ④（D59/D58 引擎支）+ 派生② 的 raw-aware 判据（codex plan-R20-F1）：
         //   加载来的线按 **raw 字符串**判"字色是否跟随线色"（解码值对 unknown 枚举不可靠）；
-        //   raw 里缺这两个键之一、或该 id 不在加载集里（内存新画的线）→ 回退解码比较。
-        let follows = loadedDrawingsLossy.textColorFollowsLineColorInRaw(id: id)
-            ?? (old.textColorToken == old.colorToken)
+        //   raw 里缺这两个键之一、或该 id 不在加载集里（内存新画的线）→ 回退解码比较（`follows` 已在 ③a 算好）。
         guard let updated = old.withStyle(style, textColorFollowsLine: follows) else { return false }
         // ③（D61，**user 2026-07-26 裁决改为"看结果"**——对 spec 原文的显式修订，见下方 ⚠️）**两道**：
         //
@@ -1281,8 +1287,16 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDraw
         //       查不到它了（第二道网也拦不住）。用户没碰过、也看不见的字段，不算"用户显式覆盖"。
         //     ⚠️ `anchors[].period` / `tailAnchor.period` 同理不在集合内（样式根本不碰锚点）。
         //     ⚠️ 未来**顶层字段**没有任何控件能覆盖 → 直接拒。
+        // 先算 raw-aware 的「字色是否跟随线色」（④ 也要用它，算一次）
+        let follows = loadedDrawingsLossy.textColorFollowsLineColorInRaw(id: id)
+            ?? (old.textColorToken == old.colorToken)
+        // `textColorToken` **条件可覆盖**（codex plan-R22-F1）：raw 判定为「跟随」时，改线色会连它一起
+        // 覆盖，属正当的显式改动 → 算可覆盖（否则 colorToken/textColorToken 同为一个未来值的线会被
+        // 过度拒绝、只能整条删）；判定为「独立」时不可覆盖（本构建没有字色控件，改它只会是隐式抹除）。
+        let coverable = DrawingStyleAvailability.userCoverableFutureKeys
+            .union(follows ? ["textColorToken"] : [])
         let futureEntries = loadedDrawingsLossy.knownFutureEnumPayloads().first { $0.id == id }?.entries ?? []
-        guard futureEntries.allSatisfy({ DrawingStyleAvailability.userCoverableFutureKeys.contains($0.key) }),
+        guard futureEntries.allSatisfy({ coverable.contains($0.key) }),
               !loadedDrawingsLossy.hasKnownFutureFields(liveIds: [id]) else { return false }
         //
         // ③b **结果检**（第二道网）：即便未来值落在用户改得到的 key 上，这**一次**改动也未必真覆盖到它
