@@ -760,34 +760,55 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
     ///      故这里是个**小词法器**：正确处理普通串 / 多行串 `"""` / 原始串 `#"…"#`（含 `\#` 转义），
     ///      并把字符串**内容整段丢弃**（字面量里的 `deleteDrawing(id:` 本来就不是调用，顺带免了假阳性）。
     ///   守卫漏掉一个调用点的后果不是"少测一条"，而是 PR-4 可以在**不补几何门**的情况下接上不可逆删除。
+    ///   ④ **顶层与插值体各写一份循环 = 两档判据**（R10-F1）：插值那份不认注释 →
+    ///      `"\(/* ) */ engine.deleteDrawing(id: id))"` 里**注释中的** `)` 被当成插值收尾，真调用反被
+    ///      当字面文本丢掉。根因不是"再补一个 case"，是**同一件事有两份能力不同的实现**（本计划一路在
+    ///      批评的同一个毛病）→ 现在**只有 `scanCode` 一个循环**，顶层与插值体走完全相同的注释/字符串
+    ///      规则，唯一差别是"遇 `)` 是否收尾"。
     private func squeezedText(_ raw: String) -> String {
-        let c = Array(raw)
         var out = ""
-        var i = 0
-        var blockDepth = 0
+        _ = scanCode(Array(raw), from: 0, parenDepth: nil, into: &out)
+        return out
+    }
+
+    /// **唯一**的词法扫描循环。`parenDepth == nil` = 顶层（`)` 不收尾）；非 nil = 插值体（深度归零即返回，
+    /// 那个收尾 `)` 不写进 out）。注释 / 字符串 / 原始串 / 嵌套插值在两种模式下**判据完全一致**。
+    private func scanCode(_ c: [Character], from start: Int, parenDepth: Int?, into out: inout String) -> Int {
+        var i = start
+        var depth = parenDepth ?? 0
         while i < c.count {
-            if blockDepth > 0 {                                     // 块注释内（可嵌套）
-                if c[i] == "/", i + 1 < c.count, c[i + 1] == "*" { blockDepth += 1; i += 2; continue }
-                if c[i] == "*", i + 1 < c.count, c[i + 1] == "/" { blockDepth -= 1; i += 2; continue }
-                i += 1; continue
+            if c[i] == "/", i + 1 < c.count, c[i + 1] == "*" {       // 块注释（可嵌套）
+                var d = 1; i += 2
+                while i < c.count, d > 0 {
+                    if c[i] == "/", i + 1 < c.count, c[i + 1] == "*" { d += 1; i += 2; continue }
+                    if c[i] == "*", i + 1 < c.count, c[i + 1] == "/" { d -= 1; i += 2; continue }
+                    i += 1
+                }
+                continue
             }
-            if c[i] == "/", i + 1 < c.count, c[i + 1] == "*" { blockDepth = 1; i += 2; continue }
-            if c[i] == "/", i + 1 < c.count, c[i + 1] == "/" {      // 行注释：吃到行尾
+            if c[i] == "/", i + 1 < c.count, c[i + 1] == "/" {       // 行注释：吃到行尾
                 while i < c.count, c[i] != "\n" { i += 1 }
                 continue
             }
-            if c[i] == "#" {                                        // 可能是原始串 #"…"# / ##"…"##
+            if c[i] == "#" {                                         // 可能是原始串 #"…"# / ##"…"##
                 var h = 0, j = i
                 while j < c.count, c[j] == "#" { h += 1; j += 1 }
                 if j < c.count, c[j] == "\"" { i = consumeStringLiteral(c, from: j, hashes: h, into: &out); continue }
-                out.append(contentsOf: c[i..<j])                     // 不是原始串（如 #expect / #filePath）
+                out.append(contentsOf: c[i..<j])                      // 不是原始串（如 #expect / #filePath）
                 i = j; continue
             }
             if c[i] == "\"" { i = consumeStringLiteral(c, from: i, hashes: 0, into: &out); continue }
-            if !c[i].isWhitespace { out.append(c[i]) }               // 空白一律丢弃
+            if parenDepth != nil {                                   // 只有插值体在意括号深度
+                if c[i] == "(" { depth += 1 }
+                if c[i] == ")" {
+                    depth -= 1
+                    if depth == 0 { return i + 1 }                    // 插值收尾：这个 `)` 不写进 out
+                }
+            }
+            if !c[i].isWhitespace { out.append(c[i]) }                // 空白一律丢弃
             i += 1
         }
-        return out
+        return c.count
     }
 
     /// 消费一个字符串字面量（`from` 指向首个 `"`），返回其后第一个下标。
@@ -807,7 +828,7 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
                 while j < c.count, c[j] == "#", h < hashes { h += 1; j += 1 }
                 if h == hashes {
                     if j < c.count, c[j] == "(" {                    // 插值 → 递归当**代码**扫
-                        i = consumeInterpolation(c, from: j, into: &out); continue
+                        i = scanCode(c, from: j + 1, parenDepth: 1, into: &out); continue  // `(` 之后起扫
                     }
                     i = min(j + 1, c.count); continue                // 普通转义：连吃被转义的那个字符
                 }
@@ -824,30 +845,6 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
             i += 1                                                   // 字面文本：丢弃
         }
         return c.count                                               // 未闭合（坏源码）：吃到底，fail-safe
-    }
-
-    /// 消费 `(`…匹配的 `)`（`from` 指向那个 `(`），把里面的**代码**写进 `out`；可再嵌套字符串/插值。
-    /// 括号本身：内层的照写（`deleteDrawing(id:x)` 要能被 pattern 命中），最外层这一对不写。
-    private func consumeInterpolation(_ c: [Character], from: Int, into out: inout String) -> Int {
-        var i = from + 1
-        var depth = 1
-        while i < c.count {
-            if c[i] == "\"" { i = consumeStringLiteral(c, from: i, hashes: 0, into: &out); continue }
-            if c[i] == "#" {
-                var h = 0, j = i
-                while j < c.count, c[j] == "#" { h += 1; j += 1 }
-                if j < c.count, c[j] == "\"" { i = consumeStringLiteral(c, from: j, hashes: h, into: &out); continue }
-                out.append(contentsOf: c[i..<j]); i = j; continue
-            }
-            if c[i] == "(" { depth += 1 }
-            if c[i] == ")" {
-                depth -= 1
-                if depth == 0 { return i + 1 }                       // 最外层右括号：不写进 out
-            }
-            if !c[i].isWhitespace { out.append(c[i]) }
-            i += 1
-        }
-        return c.count
     }
 
     private func squeezedSource(_ path: String) throws -> String {
@@ -944,6 +941,23 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 3, "三种排版都该命中，实际 squeeze：\(s)")
         #expect(!s.contains("行注释里的不算"))
         #expect(!s.contains("块注释里的也不算"))
+    }
+
+    @Test("守卫自检 f（codex plan-R10-F1）：插值体里的注释按注释处理——注释中的 `)` 不算插值收尾")
+    func scannerHandlesCommentsInsideInterpolation() {
+        let src = ##"""
+        func caller() {
+            logger.debug("x \(/* ) */ engine.deleteDrawing(id: id))")
+            let m = """
+            y \(// ) 行注释里的右括号
+            engine.updateDrawingStyle(id: i, style: st))
+            """
+        }
+        """##
+        let s = squeezedText(src)
+        // 注释里的 `)` 若被当成插值收尾，真调用就会被当字面文本丢掉 → 计数变 0，本测试当场红
+        #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 1, "实际 squeeze：\(s)")
+        #expect(callCount(inSqueezed: s, pattern: "updateDrawingStyle(") == 1, "实际 squeeze：\(s)")
     }
 
     @Test("守卫自检 e（codex plan-R9-F1）：插值 \\(…) 里的调用与方法引用**照样算数**（它们真的会执行）")
