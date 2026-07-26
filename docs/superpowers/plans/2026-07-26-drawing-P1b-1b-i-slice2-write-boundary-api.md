@@ -14,7 +14,7 @@
 - ⚠️ **对 spec 的一处显式偏离（user 2026-07-26 裁决，codex plan-R14-F1 触发）——D61 编辑门从「看来源」改为「看结果」**：
   spec D61 原文 = 「对携带未来未知枚举值的线**一律**拒绝改样式」。落地改为：**先算候选、与加载快照归并，只有归并结果仍带本构建不支持的未来数据才拒**。
   - **动机**：一律拒会让这条线只能**整条删掉**才能结束存档（finalize 门本就 fail-closed），删整条的数据损失严格大于「用户显式换掉一个本版本表示不了的色号」。
-  - **保护未削弱**：改 thickness 这类不涉及该值的编辑仍被拒（字段级归并会保住原值 → 结果仍带未来数据）；未来**字段**、以及落在 `anchors[].period` / `tailAnchor.period` 等**样式碰不到**位置的未来枚举值，**任何**样式编辑都仍被拒（它们只能靠删除解封，UI 侧据此置灰，codex plan-R18-F2）。
+  - **保护未削弱（两道门）**：③a **可覆盖性预检**——未来值必须全部落在「用户能显式改到」的 key 内（`userCoverableFutureKeys`，**不含 `textColorToken`**：本构建无字色控件，它只会被派生② 隐式改写，codex plan-R19-F2；也不含 `anchors[].period`/`tailAnchor.period`/未来顶层字段），否则一律拒；③b **结果检**——改 thickness 这类没真覆盖到未来值的编辑，归并后仍带 → 拒。两道都过才算「用户显式覆盖」。
   - **已知代价**：一次换线色会把「本来跟随线色」的未来字色一并覆盖（两个未来值解码后都是 `.orange`，派生② 分辨不了）——已用测试钉死并写明是取舍而非缺陷。
   - **判据与 finalize 门同源**（`TrainingSessionCoordinator:729-736` 也是 reconcile 后查同两个门），**但作用域不同**（codex plan-R17-F2）：编辑门只看**被改的那条 id**，finalize 门看**全部存活线 + `unknownRaw`** → 「编辑通过」只意味着**这条线**不再是阻塞项，**不代表整局能存档**（别的未来线 / unknownRaw 仍会拦）。
   - **spec 正文已同步修订**（codex plan-R15-F1：不改 spec 的话，PR-4 照 D65 旧规则把控件灰掉 → 这条修复路径**用户根本点不到**，引擎测试却因直调 API 全绿）：spec 的 D61 加了修订注记、D65 的「未来枚举」置灰分量已删除并写明新 UI 规则 + PR-4 必须补的路由级测试。
@@ -462,6 +462,16 @@ extension DrawingObject {
     ///     本构建就会拿**水平线的样式假设**改写一条自己根本渲染不出的线，且不可逆（本期无 undo）。
     ///   与 D61「高版本线：选得中、改不动样式、可整条删」逐字同构 —— 同一条纪律，只是判据从
     ///   「未知枚举值」扩到「已知但本构建未实现的工具」。
+    /// 一次样式编辑中，**用户能显式改到**的持久化 key（codex plan-R19-F2）。
+    /// 用途：判断一条高版本线携带的未来枚举值**能不能被用户主动覆盖掉**（→ 可修复），
+    /// 还是只会被**隐式**改写 / 根本碰不到（→ 必须拒，字节保真）。
+    /// ⚠️ **不含 `textColorToken`**：本构建没有字色控件（独立字色属 P3），它只由 D59 派生② 隐式跟随线色 →
+    ///   把它算作"可覆盖"，等于允许"用户改线色 → 顺手抹掉一条看不见的高版本字色"。
+    /// ⚠️ 不含 `anchors[].period` / `tailAnchor.period`（样式不碰锚点）、不含任何未来顶层字段（无控件可覆盖）。
+    /// UI 的置灰谓词（D65）与本判据**必须共用它**，禁止各写一份 key 集合。
+    public static let userCoverableFutureKeys: Set<String> =
+        ["lineSubType", "lineStyle", "thickness", "colorToken", "labelMode", "isExtended"]
+
     /// 本构建**写得出样式矩阵**的工具集。与 `DrawingToolType.implemented`（= 画得出 / 提交得了）
     /// **是两件不同的事**（codex plan-R13-F2）：那个集合回答"能不能画"，本集合回答"本构建懂不懂它的
     /// 样式语义"。今天只有水平线有矩阵（`horizontalLineSubTypeEnabled` / `horizontalLabelModeEnabled`）。
@@ -1232,13 +1242,24 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDraw
         //     枚举 case，高版本写的这类线解码后一切"正常"、raw-aware 门看不见 → 没这道门就会被按横线假设改写。
         guard DrawingStyleAvailability.isEditableToolType(old.toolType) else { return false }
         guard let updated = old.withStyle(style) else { return false }             // ④（D59/D58 引擎支）
-        // ③（D61，**user 2026-07-26 裁决改为"看结果"**——对 spec 原文的显式修订，见下方 ⚠️）：
-        //   先算出候选状态、与加载快照**归并**，只有当归并结果**仍**带本构建不支持的未来数据时才拒。
-        //   两个判据并列（codex plan-R13-F1）：`hasKnownFutureEnumValues` 看"已知 key 的未来**值**"，
-        //   `hasKnownFutureFields` 看"`knownDiskKeys` 之外的未来**字段**"（它们能改变已知 key 的含义）。
-        //   判据与 coordinator 的 finalize 门**同源**（`TrainingSessionCoordinator:729-736` 也是先 reconcile
-        //   再用这两个门），但**作用域不同**（codex plan-R17-F2）：这里只查**被改的那条 id**，finalize 查
-        //   **全部存活线 + unknownRaw** → "编辑通过"只说明**这条线**不再阻塞，**不代表整局能存档**。
+        // ③（D61，**user 2026-07-26 裁决改为"看结果"**——对 spec 原文的显式修订，见下方 ⚠️）**两道**：
+        //
+        // ③a **可覆盖性预检**（raw-aware，按 key 判；codex plan-R19-F2）：该线携带的未来枚举值，其 key 必须
+        //     全部落在「**用户能显式改到**的样式 key」内；否则**一律拒**。
+        //     ⚠️ 集合里**没有 `textColorToken`**：本构建**没有字色控件**（独立字色属 P3），它只会被 D59 派生②
+        //       **隐式**改写 —— 用户只改线色，一条高版本的未来字色就被顺手抹掉、而且改完"看结果"的门已经
+        //       查不到它了（第二道网也拦不住）。用户没碰过、也看不见的字段，不算"用户显式覆盖"。
+        //     ⚠️ `anchors[].period` / `tailAnchor.period` 同理不在集合内（样式根本不碰锚点）。
+        //     ⚠️ 未来**顶层字段**没有任何控件能覆盖 → 直接拒。
+        let futureEntries = loadedDrawingsLossy.knownFutureEnumPayloads().first { $0.id == id }?.entries ?? []
+        guard futureEntries.allSatisfy({ DrawingStyleAvailability.userCoverableFutureKeys.contains($0.key) }),
+              !loadedDrawingsLossy.hasKnownFutureFields(liveIds: [id]) else { return false }
+        //
+        // ③b **结果检**（第二道网）：即便未来值落在用户改得到的 key 上，这**一次**改动也未必真覆盖到它
+        //     （例：未来值在 `lineStyle`，用户只改 thickness → 字段级归并保住原 raw）→ 归并后仍带就拒。
+        //     判据与 coordinator 的 finalize 门**同源**（`TrainingSessionCoordinator:729-736` 也是先 reconcile
+        //     再查这两个），但**作用域不同**（codex plan-R17-F2）：这里只查**被改的那条 id**，finalize 查
+        //     **全部存活线 + unknownRaw** → "编辑通过"只说明**这条线**不再阻塞，**不代表整局能存档**。
         var candidate = drawings
         candidate[i] = updated
         guard let merged = try? loadedDrawingsLossy.reconciled(currentKnown: candidate) else { return false }
@@ -1355,7 +1376,9 @@ struct DrawingEditDurabilityGateTests {
 
     @Test("N14a2（D61 修订版，user 2026-07-26 裁决 B）: 换成本版本认识的颜色 → **允许**，且这一局随即可结束存档")
     func futureEnumLineRepairableByChangingColor() throws {
-        // 单个未来值 fixture（colorToken 未来、textColorToken 正常）：用户显式换色 = 覆盖掉那个色号，
+        // 单个未来值 fixture（colorToken 未来、**textColorToken 正常**）：未来值落在用户改得到的 key 上
+        //（`colorToken` ∈ userCoverableFutureKeys）→ 过 ③a；换色真的覆盖掉它 → 过 ③b。
+        // 用户显式换色 = 覆盖掉那个色号，
         // 归并结果不再带未来数据 → 放行；线**保住**（几何/粗细/标注都在），不必整条删。
         let raw = #"{"id":"R","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":2,"colorToken":"futureNeon","labelMode":"hidden","locked":false,"text":"hi","fontSize":14,"textColorToken":"orange","textForm":"plain"}"#
         let e = makeEngineWithLossy(try lossyFromRaw(raw))
@@ -1373,20 +1396,22 @@ struct DrawingEditDurabilityGateTests {
         #expect(!String(decoding: try merged.encoded(), as: UTF8.self).contains("futureNeon"))
     }
 
-    @Test("D61 修订版的**已知后果**（不掩饰）：一次换色会把「跟随线色」的未来字色一起覆盖掉")
-    func repairAlsoOverwritesFollowingFutureTextColor() throws {
+    @Test("codex plan-R19-F2: 未来**字色**不算"用户可覆盖" —— 只改线色**必须被拒**，futureCyan 字节保真")
+    func lineColorEditMustNotEraseFutureTextColor() throws {
         // futureRaw 里 colorToken:"futureNeon" 与 textColorToken:"futureCyan" **解码后都是 .orange**
-        //（两个不同的未来值双双 fallback）→ 派生② 判"字色本来就跟着线色" → 换线色时字色一起变。
-        // 结果：两个未来值都被这次**用户显式换色**覆盖掉。这是选项 B 的已知代价，写在这里免得
-        // 后人以为是 bug：B 的取舍是"保住整条线，付出无法表示的色号"，优于"整条删掉"。
+        //（两个不同的未来值双双 fallback）→ 派生② 会判"字色本来就跟着线色"，换线色时把字色一起改掉。
+        // 但**本构建没有字色控件**：用户既看不见 futureCyan、也从没碰过它 → 那是**隐式**抹除，不是
+        // "用户显式覆盖"。故 ③a 可覆盖性预检必须把这条线整条拒掉（`textColorToken` 不在可覆盖集合里）。
         let e = makeEngineWithLossy(try lossyFromRaw(futureRaw))
+        let before = e.drawings
+        let rev = e.drawingsRevision
         var toGreen = DrawingDefaultStyle(); toGreen.thickness = 1; toGreen.colorToken = .green
-        #expect(e.updateDrawingStyle(id: "F", style: toGreen) == true)
+        #expect(e.updateDrawingStyle(id: "F", style: toGreen) == false)   // 拒
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
         let merged = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings)
         let text = String(decoding: try merged.encoded(), as: UTF8.self)
-        #expect(!text.contains("futureNeon"))
-        #expect(!text.contains("futureCyan"))          // 一起没了——已知后果，非缺陷
-        #expect(merged.hasKnownFutureEnumValues(liveIds: ["F"]) == false)
+        #expect(text.contains("futureNeon"))
+        #expect(text.contains("futureCyan"))           // **两个都字节保真**
     }
 
     @Test("N14b 核心: 编辑被拒后原始字节保真 —— futureNeon / futureCyan 逐字节仍在")
