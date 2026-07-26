@@ -1,0 +1,1190 @@
+# 划线 P1b-1b-i 切片2（写入边界 API：withStyle + updateDrawingStyle + deleteDrawing(id:)）实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 在 PR-1 已建好的引擎地基上，落成 1b-i 的两个**编辑/删除写入面**——`DrawingObject.withStyle`（failable 语义闸单点）、`TrainingEngine.updateDrawingStyle(id:style:)`、`TrainingEngine.deleteDrawing(id:)`——各自带齐 **viewport 无关**的引擎层门（`withStyle` 语义 / `locked` / 未来未知枚举值 / id 唯一非空），全部 `internal` + 源码守卫，零 UI、host `swift test` 全覆盖。
+
+**Architecture:** 三层单点。① `DrawingStyleAvailability` 收编「该 toolType 下这个 lineSubType 恒可渲染吗」判据（PR-1 已在 `TrainingEngine` 私有实现过一份，本切片提为共享单点，append 家族改为委托）；② 新增纯函数 `DrawingObject.withStyle(_:) -> DrawingObject?` 承载 D59 四条语义（派生① `isExtended`、派生② `textColorToken` **条件**派生、`labelMode` 归一化、`lineSubType` 可用性），**两个写入点共用**（`DrawingSession.commitPending` 与新的 `updateDrawingStyle`）；③ 引擎两个新 API 只 enforce viewport 无关的不变量，几何门按 D65/D51 留在 UI 路由（PR-4），本切片用「Sources/ 中调用点恰好 0 处」的源码守卫把口子焊死，PR-4 接线时该守卫必须同步改成「恰好 1 处且在已先验 `visibleGeometry` 的 UI 路由」。
+
+**Tech Stack:** Swift 5.9 / `@Observable` / SwiftPM（`ios/Contracts`）；测试 `swift test`（host，macOS）+ fresh Catalyst `xcodebuild test`（总数闸）；本切片纯逻辑、无 UIKit。
+
+## Global Constraints
+
+- **完整 spec**：`docs/superpowers/specs/2026-07-23-drawing-tools-P1b-1b-i-select-edit-delete-design.md`（决策 D49–D67）。本切片落 **D50 / D51（引擎侧）/ D58（引擎支）/ D59 / D60 / D61 / D62 / D66**。
+- `CONTRACT_VERSION` 保持 **1.12**，`user_version` 保持 **7**，**零迁移**（`DrawingObject` 不新增/不改任何持久化字段；本切片只加运行时 API）。
+- **访问级别纪律**：本切片新增的两个写入 API 一律 `internal`，**不得** `public`（D62/D51）。`withStyle` 同为 `internal`。测试经 `@testable import` 照常可调。
+- **拒绝 = 零改动 + `drawingsRevision` 不递增 + 返 `false`**：四道门任意一道不过，`drawings` 必须逐字段不变，计数器绝不动（D50/D60/D61/D66 逐条写死）。
+- **判据禁止另写第二份**：`lineSubType` 可用性只许来自 `DrawingStyleAvailability`；未来枚举值只许用 `LossyDrawingArray.hasKnownFutureEnumValues(liveIds:)`（**带 `!entries.isEmpty` 语义**，绝不可写成 `knownFutureEnumPayloads()` 的 id-membership，见 D61 ⚠️ / N14f）。
+- **几何（`visibleGeometry`）不属于本切片**：引擎没有 mapper，判不了几何（D65 R13-F1 纠正）。本切片**不得**给两个新 API 加任何 geometry 参数或声称挡 geometry。
+- **测试基线**：本机 host `swift test` 全绿基线 = **1676 passed / 209 suites**（base `f3f67da` = PR-1 merge 后的 main；**控制者已于本 worktree 亲跑实测**，非引自 memory）。每个 Task 结束时全绿。
+- **fresh 非增量 Catalyst 对基线**：本切片新增测试会推高 Catalyst 总数。收尾三绿门必须跑 fresh Catalyst，若总数漂出 `.github/scripts/catalyst-total-baseline.txt`（当前 **1574**）的 ±30 带，按闸门维护规则同步基线三文件，且 `pass-main-current.log` **必须用真 fresh Catalyst 日志重裁**（禁手打伪造行）。
+- **CLAUDE.md §3 外科手术**：不删 `DrawingToolManager` 死代码（spec §1.2 明令）、不改无关注释与格式。
+
+---
+
+## 本切片覆盖 vs 交接（防「漏覆盖」误判，评审请先读这张表）
+
+spec §6 的负向测试清单是**整个 1b-i**（4 个 PR）的并集。本切片是**引擎写入边界**，没有选中态、没有 UI 路由、没有 mapper，故只可能覆盖其中的引擎侧断言。
+
+| spec 测试 | 本切片 | 说明 |
+|---|---|---|
+| N2 `updateDrawingStyle` 只动样式 | ✅ Task 3 | 逐字段不变断言 |
+| N3 update 对不存在 id | ✅ Task 3（引擎侧三条断言）；选中清空 → PR-4 | 「UI 侧选中被清空」需选中态 |
+| N4 delete 对不存在 id | ✅ Task 5（引擎侧） | 同上 |
+| N5 派生规则单点 + 行为 | ✅ Task 1（源码守卫 + `.ray`/`.straight` 行为） | |
+| N12a 引擎层 `.segment` 恒开门 | ✅ Task 3 | |
+| N12b/c UI viewport 预检 + 反向对照 | ❌ → **PR-4** | 需 mapper 与 UI 路由 |
+| N12d 归一化对称（直调传未归一化 style） | ✅ Task 3 | 正是「绕开面板直调」的写法 |
+| N13a/b/c `locked` fail-closed + 反向对照 | ✅ Task 4（a/c）、Task 5（b） | |
+| N13d `locked` 线仍可被选中 | ❌ → **PR-3**（hitTest）/ PR-4 | |
+| N14a/b/e/f/g 未来枚举值门 + 字节保真 + 三条反向对照 | ✅ Task 4 | |
+| N14c 删除仍允许（经 UI 删除路由） | ⚠️ **引擎版**在 Task 5（直调引擎 delete + reconcile 后该条已移除）；**路由版** → PR-4 | 分层，两条都要 |
+| N14d UI 灰置分岔 | ❌ → **PR-4** | 需控件 |
+| N15 update 调用点 + 非 public | ✅ Task 3（本切片语义 = **恰好 0 处**，见 SD-3） | |
+| N19a/d 源码守卫（id 版 / index 版） | ✅ Task 5（a 本切片语义）；d **PR-1 已落**（`deleteDrawing(at:` 零调用点，本切片确认不回归） | |
+| N19b 引擎层 locked 仍拒 | ✅ Task 5 | |
+| N19c/e 路由几何门 / 确认框时间窗 | ❌ → **PR-4** | |
+| N21a/b append 拒空/重复 id | **PR-1 已落**（`appendRejectsEmptyAndDuplicateId`） | 本切片不重复 |
+| N21c update/delete 匹配非唯一即 fail | ✅ Task 3（update）、Task 5（delete） | |
+| N21d 正常路径三条 id 互异 | **PR-1 已落**（`commitPending` UUID） | |
+| N1 / N6 / N7 / N8 / N10 / N11 / N16 / N17 / N18 / N20 / N22 / N23 | PR-1 已落（N10/N11/N20/N22/N23）或 → PR-3/PR-4（N1/N6/N7/N8/N16/N17/N18） | |
+| （超 spec）D34 复盘门下沉引擎 + normal 反向对照 | ✅ Task 3 / Task 5 | SD-7 纵深防御，spec 只把门放在 UI tap 路径 |
+
+---
+
+## 本切片的子决策（控制者已裁决，实施照做）
+
+- **SD-1 `withStyle` 落新文件** `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.swift`：它是「四条语义的唯一出处」，独立文件让 N5 源码守卫锚点稳定，也避免把编辑语义塞进 `Models.swift`（那里是纯持久化值类型）。
+- **SD-2 可用性判据提为共享单点**：新增 `DrawingStyleAvailability.isRenderableSubType(_:toolType:)`；`TrainingEngine` 现有私有 helper `isRenderableSubType(_ d:)` 改为**委托**它（保留原大段注释与调用点，append 家族行为逐字不变）；`withStyle` 调同一个。**禁止**在 `withStyle` 里另写 `toolType == .horizontal` 判断。
+- **SD-2b「判据单点」= 规则实现单点，不是调用点单点**（沿用 D65 R13-F1 对 `visibleGeometry` 的同一澄清：「单点约束指函数实现只有一份，不是说四处传同样的入参」）。因此本切片**不动** `UI/DrawingStyleParams.swift`：面板里的 `normalizedLabelMode` 是**控件即时显示规整**、`horizontalLineSubTypeEnabled` 是**控件灰态**，二者都消费同一份规则实现，不是第二份规则。改动它属 UI 层、且会动 1a-iii 的面板行为与既有守卫，超出本切片范围（CLAUDE.md §3）。N5 守卫据此改钉**更有意义的性质**：两个**写入边界**（`withStyle` / append 家族）**不得直接套横规则**，必须经共享单点 `isRenderableSubType` —— 这正是 PR-1 那个 over-reject 真 bug 的根因形状（把只对水平线成立的规则套到所有 toolType）。
+- **SD-3 调用点守卫在本切片 = 恰好 0 处**：`updateDrawingStyle(` / `deleteDrawing(id:` 在 `Sources/` 中**零调用点**（唯一合法调用者是 PR-4 的 UI 路由，本切片还没有）。守卫写死 0，并在测试注释里写明：**PR-4 接线时必须把断言改成「恰好 1 处 + 该文件是 UI 路由 + 路由在写入瞬刻先验 `visibleGeometry`」**。这样任何人在没补几何门的情况下新增调用点，测试当场红（fail-closed forcing function）。
+- **SD-4 引擎四门顺序**：① id 非空 + 恰好匹配一条（D66）→ ② `locked`（D60）→ ③ 未来未知枚举值（D61，仅 update）→ ④ `withStyle` 语义（D59/D58 引擎支）。四门的可观察行为一致（`false` + 零改动 + 不递增），固定顺序只为可读与测试稳定。
+- **SD-5 两个新 API 只作用于 `drawings`**：`reviewDrawings` 不在其内（D34 复盘本期不获得编辑能力；D56 revision 只覆盖 `drawings`）。id 只存在于 `reviewDrawings` 时按「匹配 0 条」返 `false`。
+- **SD-6 `@discardableResult`** 按 spec D50 原文保留（返回值供测试与调用方即时判断；**但按 D64，选中生命期绝不看返回值**——那是 PR-4 的事）。
+- **SD-7 两个新 API 追加引擎层 `flow.mode != .review` 门（D34 纵深防御，超 spec 字面一行）**：spec D34 把复盘门控定在 `ChartContainerView` 的 tap 路径（UI 层）。但这两个新 API 改的是 `engine.drawings` —— **复盘模式下那正是已归档 record 的原训练线**，改/删它不可逆（本期无 undo），是 spec §4 自己点名的 trust-boundary 危害。UI 门是唯一防线时，PR-4 漏一个分支就直捅归档数据。故引擎自己也 fail-closed（与 D60/D61/D66 同一条纪律：不变量在写入边界强制，UI 门是纵深而非唯一防线）。
+  **不会 over-reject**：复盘新画线走 `appendReviewDrawing`→`reviewDrawings`（另一条路），复盘侧删除走 `removeReviewDrawing(at:)`；本期复盘**不获得**任何编辑 `drawings` 的能力（D34），P5 给复盘编辑能力时也是操作 `reviewDrawings` + 层权限门，不经这两个 API。今天两个 API 零调用点 → 零行为变化。
+
+---
+
+## 测试 fixture（本切片新增，追加进既有共享文件）
+
+既有 `ios/Contracts/Tests/KlineTrainerContractsTests/DrawingTestFixtures.swift` 已有 `makeHLine`。本切片**追加两个** helper（同文件，避免同 module 重复声明冲突）：
+
+```swift
+// 追加到 DrawingTestFixtures.swift 末尾
+import Foundation   // Data（lossy blob 解码）
+
+/// 造一条带完整样式字段的水平线（用于「只动样式」逐字段断言）。
+/// ⚠️ `DrawingAnchor.init` 的 label 顺序是 `(period:candleIndex:price:)`（`Models/Models.swift:214` 实测）。
+func makeStyledHLine(id: String,
+                     lineSubType: LineSubType = .straight, lineStyle: LineStyle = .solid,
+                     thickness: Int = 1, colorToken: DrawingColorToken = .orange,
+                     labelMode: LabelMode = .hidden, locked: Bool = false,
+                     textColorToken: DrawingColorToken = .orange,
+                     text: String = "hi", fontSize: Int = 14,
+                     period: Period = .daily, candleIndex: Int = 3, price: Double = 10) -> DrawingObject {
+    DrawingObject(id: id, toolType: .horizontal,
+                  anchors: [DrawingAnchor(period: period, candleIndex: candleIndex, price: price)],
+                  isExtended: lineSubType == .ray, panelPosition: 0, revealTick: 7,
+                  period: period, lineSubType: lineSubType, lineStyle: lineStyle,
+                  thickness: thickness, colorToken: colorToken, labelMode: labelMode,
+                  locked: locked, text: text, fontSize: fontSize,
+                  textColorToken: textColorToken, textForm: .plain, tailAnchor: nil)
+}
+
+/// 造一个携带指定 lossy 集的引擎（D61 未来枚举值门需要 `loadedDrawingsLossy` 非空）。
+/// 结构照抄既有 `TrainingEngineInteractionTests.engineWithDrawings`（`:174-186`）：内部 `init` 可
+/// 从测试直调（`@testable`），`.m3` 必须覆盖 maxTick（`init` 有 precondition R6-F2）。
+@MainActor
+func makeEngineWithLossy(_ lossy: LossyDrawingArray) -> TrainingEngine {
+    TrainingEngine(
+        flow: NormalFlow(fees: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true), maxTick: 99),
+        allCandles: TrainingEngineActionsTests.m3Candles(Array(repeating: 10, count: 100)),
+        maxTick: 99, initialCapital: 100_000, initialCashBalance: 100_000,
+        initialDrawingsLossy: lossy,                       // init 用它派生 drawings（`:176-178`）
+        initialUpperPeriod: .m3, initialLowerPeriod: .m3)
+}
+
+/// 从一条 raw JSON 造 lossy 集（未来枚举值 fixture 用）。raw 必须是**单条** drawing 的 JSON 对象。
+func lossyFromRaw(_ raw: String) throws -> LossyDrawingArray {
+    try LossyDrawingArray.decode(Data("[\(raw)]".utf8))
+}
+```
+
+> `TrainingEngineActionsTests.m3Candles(_:)` 是同 test module 内的既有 `static func`（`TrainingEngineActionsTests.swift:36`），可直接调用，无需 import。
+
+---
+
+### Task 1: `withStyle` failable 纯函数 + 可用性判据提为共享单点（D59 / D58 引擎支）
+
+**Files:**
+- Create: `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.swift`
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingStyleAvailability.swift`（追加 `isRenderableSubType(_:toolType:)`）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift:1136-1139`（私有 helper 改为委托）
+- Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/DrawingTestFixtures.swift`（**追加**「测试 fixture」节的三个 helper：`makeStyledHLine` / `makeEngineWithLossy` / `lossyFromRaw`——本 Task 的测试就要用 `makeStyledHLine`，故在此一次加齐）
+- Create: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingObjectStyleEditTests.swift`
+
+**Interfaces:**
+- Produces:
+  - `DrawingStyleAvailability.isRenderableSubType(_ sub: LineSubType, toolType: DrawingToolType) -> Bool`（`public static`，与既有两个 helper 同级）
+  - `DrawingObject.withStyle(_ s: DrawingDefaultStyle) -> DrawingObject?`（**internal**，`nil` = 该样式对本对象的 `toolType` 语义不成立）
+- Consumes: 既有 `DrawingStyleAvailability.horizontalLineSubTypeEnabled` / `normalizedLabelMode`、`DrawingDefaultStyle`（5 字段：`lineSubType`/`lineStyle`/`thickness`/`colorToken`/`labelMode`，`Models/DrawingEnums.swift:28-35`）。
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingObjectStyleEditTests.swift`：
+
+```swift
+// ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingObjectStyleEditTests.swift
+// Spec: 2026-07-23-drawing-tools-P1b-1b-i-select-edit-delete-design.md D59（四条语义单点）+ D58 引擎支。
+import Foundation
+import Testing
+@testable import KlineTrainerContracts
+
+@Suite("D59 withStyle：四条语义的唯一出处")
+struct DrawingObjectStyleEditTests {
+
+    private func style(_ sub: LineSubType = .straight, _ ls: LineStyle = .solid, _ th: Int = 1,
+                       _ c: DrawingColorToken = .orange, _ lm: LabelMode = .hidden) -> DrawingDefaultStyle {
+        var s = DrawingDefaultStyle()
+        s.lineSubType = sub; s.lineStyle = ls; s.thickness = th; s.colorToken = c; s.labelMode = lm
+        return s
+    }
+
+    @Test("派生①：isExtended 恒 ==(lineSubType == .ray)")
+    func derivesIsExtendedFromSubType() throws {
+        let base = makeStyledHLine(id: "a", lineSubType: .straight)
+        let ray = try #require(base.withStyle(style(.ray)))
+        #expect(ray.isExtended == true)
+        let back = try #require(ray.withStyle(style(.straight)))
+        #expect(back.isExtended == false)
+    }
+
+    @Test("派生②条件派生：字色本来跟线色相同 → 跟随；已是独立字色 → 保留")
+    func textColorTokenConditionalDerivation() throws {
+        // 跟随：old.textColorToken == old.colorToken
+        let follow = makeStyledHLine(id: "a", colorToken: .orange, textColorToken: .orange)
+        let f = try #require(follow.withStyle(style(.straight, .solid, 1, .green)))
+        #expect(f.textColorToken == .green)
+        // 保留：old.textColorToken(.blue) != old.colorToken(.orange)（known 独立字色，D61 raw-aware 拦不住它）
+        let independent = makeStyledHLine(id: "b", colorToken: .orange, textColorToken: .blue)
+        let g = try #require(independent.withStyle(style(.straight, .solid, 1, .green)))
+        #expect(g.textColorToken == .blue)
+        #expect(g.colorToken == .green)
+    }
+
+    @Test("归一化：(ray, .left) 不可表达 → labelMode 落 .hidden；(ray, .right) 原样")
+    func normalizesLabelMode() throws {
+        let base = makeStyledHLine(id: "a")
+        let r = try #require(base.withStyle(style(.ray, .solid, 1, .orange, .left)))
+        #expect(r.labelMode == .hidden)
+        let r2 = try #require(base.withStyle(style(.ray, .solid, 1, .orange, .right)))
+        #expect(r2.labelMode == .right)
+    }
+
+    @Test("可用性：水平线 .segment 恒不可渲染 → nil；非水平工具的 .segment → 放行（横规则限横工具）")
+    func rejectsUnrenderableSubTypeOnlyForHorizontal() throws {
+        let h = makeStyledHLine(id: "a")
+        #expect(h.withStyle(style(.segment)) == nil)
+        let trend = DrawingObject(id: "t", toolType: .trend,
+                                  anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
+                                  isExtended: false, panelPosition: 0, period: .daily)
+        #expect(trend.withStyle(style(.segment)) != nil)     // P1c 的线段工具不该被横规则误拒
+    }
+
+    @Test("只动 5 样式字段 + 两个派生：其余字段逐字段原样拷贝")
+    func copiesEveryOtherFieldVerbatim() throws {
+        let old = makeStyledHLine(id: "a", thickness: 2, locked: true, text: "hello", fontSize: 21)
+        let new = try #require(old.withStyle(style(.straight, .dash1, 4, .green, .right)))
+        #expect(new.id == old.id)
+        #expect(new.toolType == old.toolType)
+        #expect(new.anchors == old.anchors)
+        #expect(new.period == old.period)
+        #expect(new.panelPosition == old.panelPosition)
+        #expect(new.revealTick == old.revealTick)
+        #expect(new.locked == old.locked)                    // withStyle 不碰 locked（改不改得动由引擎门决定）
+        #expect(new.text == old.text)
+        #expect(new.fontSize == old.fontSize)
+        #expect(new.textForm == old.textForm)
+        #expect(new.tailAnchor == old.tailAnchor)
+        // 5 样式字段确实换了
+        #expect(new.lineStyle == .dash1)
+        #expect(new.thickness == 4)
+        #expect(new.colorToken == .green)
+        #expect(new.labelMode == .right)
+    }
+
+    @Test("N5 源码守卫：D59 四条语义单点 + 写入边界不得直接套横规则")
+    func fourSemanticsSingleSource() throws {
+        let contracts = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()   // ios/Contracts
+        let root = contracts.appendingPathComponent("Sources/KlineTrainerContracts")
+        let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+        #expect(!files.isEmpty)                                  // 先证明真的扫到文件（防路径写错→恒过）
+        /// 剥注释后按 needle 数命中行（反踩坑：解释性注释里的同字样会误判，见 DrawingSessionSourceGuardTests 手法）。
+        func hits(_ needle: String, excluding excluded: Set<String> = []) throws -> [String] {
+            try files.filter { !excluded.contains($0.lastPathComponent) }.flatMap { f -> [String] in
+                try String(contentsOf: f, encoding: .utf8)
+                    .split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+                    .map { line -> String in                     // 整行注释丢弃；行尾 `//` 之后截断
+                        guard let r = line.range(of: "//") else { return line }
+                        return String(line[line.startIndex..<r.lowerBound])
+                    }
+                    .filter { $0.contains(needle) }
+                    .map { "\(f.lastPathComponent): \($0.trimmingCharacters(in: .whitespaces))" }
+            }
+        }
+        // ⚠️ `DrawingToolManager.swift` 是 1a-iv 交接①记录在案的**死代码**（spec §1.2 明令本期不动、
+        //    §8 #5 列为已知限制），它里面那份 `isExtended: lineSubType == .ray` 不参与任何活路径 →
+        //    从计数中排除，并在此写明理由（不排除的话本守卫会因「不许改的代码」永远红）。
+        let dead: Set<String> = ["DrawingToolManager.swift"]
+        // 派生①②：活代码里各恰好一处，且都在 withStyle 所在文件
+        let ray = try hits("lineSubType == .ray", excluding: dead)
+        #expect(ray.count == 1, "派生① 不止一处：\(ray)")
+        #expect(ray.allSatisfy { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
+        let txt = try hits("textColorToken == colorToken", excluding: dead)
+        #expect(txt.count == 1, "派生② 不止一处：\(txt)")
+        #expect(txt.allSatisfy { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
+        // 归一化 / 可用性：**规则实现**单点（定义只在 DrawingStyleAvailability.swift），
+        // 调用点允许多处（面板灰态/即时规整是同一份规则的消费者，非第二份规则——SD-2b）。
+        let normDef = try hits("func normalizedLabelMode(")
+        #expect(normDef.count == 1)
+        #expect(normDef.allSatisfy { $0.hasPrefix("DrawingStyleAvailability.swift") })
+        let availDef = try hits("func horizontalLineSubTypeEnabled(")
+        #expect(availDef.count == 1)
+        #expect(availDef.allSatisfy { $0.hasPrefix("DrawingStyleAvailability.swift") })
+        // 写入边界确实用了它们（不是"忘了归一化"）
+        #expect(try hits("normalizedLabelMode(current:").contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
+        // **核心**（PR-1 over-reject 真 bug 的根因形状）：两个写入边界**不得直接套横规则**，
+        // 必须经共享单点 `isRenderableSubType(_:toolType:)`——横规则只对水平工具成立，直接套会对
+        // 非水平工具（P1c 的 .trend 线段）静默拒掉合法数据。
+        let rawHorizontalRule = try hits("horizontalLineSubTypeEnabled(")
+        #expect(!rawHorizontalRule.contains { $0.hasPrefix("TrainingEngine.swift") },
+                "append 家族必须走 isRenderableSubType 共享单点：\(rawHorizontalRule)")
+        #expect(!rawHorizontalRule.contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") },
+                "withStyle 必须走 isRenderableSubType 共享单点：\(rawHorizontalRule)")
+        let shared = try hits("isRenderableSubType(")
+        #expect(shared.contains { $0.hasPrefix("TrainingEngine.swift") })
+        #expect(shared.contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
+    }
+}
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `cd ios/Contracts && swift test --filter DrawingObjectStyleEditTests 2>&1 | tail -20`
+Expected: 编译失败 `value of type 'DrawingObject' has no member 'withStyle'`。
+
+- [ ] **Step 3: 实现（四处改动）**
+
+**① 新建** `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.swift`：
+
+```swift
+// ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.swift
+// D59（1b-i 切片2）：`DrawingObject` 的**样式语义闸单点**。四条语义在源码中各只出现这一次：
+//   派生① isExtended == (lineSubType == .ray)
+//   派生② textColorToken **条件**派生（本来跟线同色的才继续跟随；已是独立字色则保留）
+//   归一化 labelMode 必须过 DrawingStyleAvailability.normalizedLabelMode（挡 (ray,.left)）
+//   可用性 lineSubType 必须是该 toolType 恒可渲染的值（水平线的 .segment 恒不可渲染 → nil）
+// 两个写入点共用（DrawingSession.commitPending / TrainingEngine.updateDrawingStyle），各自传播失败——
+// 不许任何调用方"自己派生一遍"或"信任面板会归一化"（D59：public/internal 写入面必须自己把关）。
+extension DrawingObject {
+    /// nil = 该样式对本对象的 `toolType` 语义上不成立（当前唯一情形：水平线的 `.segment`）。
+    /// 非 nil 时：只换 5 个样式字段 + 两个派生字段，其余字段逐字段原样拷贝。
+    func withStyle(_ s: DrawingDefaultStyle) -> DrawingObject? {
+        guard DrawingStyleAvailability.isRenderableSubType(s.lineSubType, toolType: toolType) else { return nil }
+        return DrawingObject(
+            id: id, toolType: toolType, anchors: anchors,
+            isExtended: s.lineSubType == .ray,                     // 派生①
+            panelPosition: panelPosition, revealTick: revealTick,
+            period: period,
+            lineSubType: s.lineSubType, lineStyle: s.lineStyle,
+            thickness: s.thickness, colorToken: s.colorToken,
+            labelMode: DrawingStyleAvailability.normalizedLabelMode(current: s.labelMode,
+                                                                    lineSubType: s.lineSubType),
+            locked: locked,                                        // 本函数不碰 locked（能不能改由引擎门 D60 判）
+            text: text, fontSize: fontSize,
+            // 派生②（条件，codex R11-F1）：known 独立字色（如 orange 线 + blue 标签）必须保住；
+            // 无条件 `= s.colorToken` 会把它抹成线色。unknown 枚举那一类由 D61 整条拒编辑兜住。
+            textColorToken: textColorToken == colorToken ? s.colorToken : textColorToken,
+            textForm: textForm, tailAnchor: tailAnchor)
+    }
+}
+```
+
+**② 追加**到 `DrawingStyleAvailability.swift`（放在 `horizontalLineSubTypeEnabled` 之后）：
+
+```swift
+    /// D59/D67 共享单点：该 `toolType` 下 `lineSubType` 是否**恒可渲染**（与 viewport 无关）。
+    /// append 家族的引擎门、`DrawingObject.withStyle` 的可用性闸、设置面板的线型灰态**三处共用**它，
+    /// 禁止各写一份（D59「与设置面板灰态同一真相」）。
+    /// ⚠️ 横规则**只对水平工具成立**（`horizontalLineSubTypeEnabled` 的头注：本期只实现水平线）——
+    /// 对非水平工具无条件套它，会把合法的 `.trend` 线段在共享写入边界静默拒掉（codex WB re-attest R1 实证）。
+    public static func isRenderableSubType(_ sub: LineSubType, toolType: DrawingToolType) -> Bool {
+        guard toolType == .horizontal else { return true }   // 非水平：横规则不适用（矩阵属 P1c）
+        return horizontalLineSubTypeEnabled(sub)
+    }
+```
+
+**③ 改** `TrainingEngine.swift:1136-1139` 的私有 helper 为委托（**保留其上方整段注释一字不动**）：
+
+```swift
+    private func isRenderableSubType(_ d: DrawingObject) -> Bool {
+        DrawingStyleAvailability.isRenderableSubType(d.lineSubType, toolType: d.toolType)
+    }
+```
+
+**④ 追加测试 fixture**：把「测试 fixture」节的 `makeStyledHLine` / `makeEngineWithLossy` / `lossyFromRaw` 三个 helper 原样追加到 `ios/Contracts/Tests/KlineTrainerContractsTests/DrawingTestFixtures.swift` 末尾（本 Task 的测试用 `makeStyledHLine`，后两个供 Task 4 用；一次加齐避免同 module 重复声明冲突）。
+
+> ⚠️ **本 Task 不动 `UI/DrawingStyleParams.swift`**（SD-2b）：面板里的 `normalizedLabelMode`（即时显示规整）与 `horizontalLineSubTypeEnabled`（控件灰态）都是**同一份规则实现的消费者**，不是第二份规则；改它属 UI 层、会动 1a-iii 已交付的面板行为和 `Render/DrawingStylePanelSourceGuardTests.swift:32` 既有守卫，超出本切片范围（CLAUDE.md §3）。N5 守卫钉的是**写入边界不得直接套横规则**（见 Step 1 的测试）。
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `cd ios/Contracts && swift test --filter "DrawingObjectStyleEditTests|DrawingStyleAvailability" 2>&1 | tail -20`
+Expected: 全部 PASS。
+
+- [ ] **Step 5: 全量 host 测试**
+
+Run: `cd ios/Contracts && swift test 2>&1 | tail -5`
+Expected: `Test run with N tests passed`（N = 基线 1676 + 本 Task 新增条数；无 failure）。
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.swift \
+        ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingStyleAvailability.swift \
+        ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/DrawingTestFixtures.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingObjectStyleEditTests.swift
+git commit -m "划线 1b-i 切片2 Task1：withStyle 语义闸单点 + 可用性判据共享单点（D59/D58 引擎支）"
+```
+
+---
+
+### Task 2: `commitPending` 改走 `withStyle`（D59 两个写入点共用同一份语义）
+
+**Files:**
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingSession.swift:146-176`（`commitPending`）
+- Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift:161-186`（`atomicStyleConstruction` 守卫改锚）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingCommitTests.swift`（追加）
+
+**Interfaces:**
+- Consumes: Task 1 的 `DrawingObject.withStyle(_:)`。
+- Produces: `commitPending(panelPosition:)` 的返回对象**必然**满足 D59 四条语义；样式语义不成立时返 `nil`（不提交）。
+
+- [ ] **Step 1: 写失败测试**
+
+追加到 `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingCommitTests.swift`：
+
+```swift
+    @Test("D59：commitPending 经 withStyle —— (ray,.left) 在提交那一刻被归一成 .hidden（不靠面板自觉）")
+    @MainActor func commitNormalizesLabelModeAtWriteBoundary() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        var s = DrawingDefaultStyle()
+        s.lineSubType = .ray
+        s.labelMode = .left                                  // 面板产不出的非法组合，直接塞进会话默认样式
+        e.drawingSession.setDefaultStyle(s)
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+        let d = e.drawingSession.commitPending(panelPosition: 0)
+        #expect(d?.labelMode == .hidden)                     // 写入边界归一化
+        #expect(d?.isExtended == true)                       // 派生① 仍成立
+    }
+
+    @Test("D59：commitPending 对语义不成立的样式返 nil（水平线 .segment）——不提交、不落库")
+    @MainActor func commitRejectsUnrenderableSubType() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        var s = DrawingDefaultStyle()
+        s.lineSubType = .segment                             // 面板里恒灰，但直接设进会话是可达的
+        e.drawingSession.setDefaultStyle(s)
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+        #expect(e.drawingSession.commitPending(panelPosition: 0) == nil)
+        #expect(e.drawingSession.pendingAnchors.isEmpty)     // 拒交同样只丢 pending（保工具/保会话，D31）
+        #expect(e.drawingSession.drawingModeActive == true)
+        #expect(e.drawingSession.activeDrawingTool == .horizontal)
+    }
+
+    @Test("行为等价：正常样式提交后 5 字段 + textColorToken 跟随，与切片2 之前逐字一致")
+    @MainActor func commitStillCarriesStyleAtomically() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        var s = DrawingDefaultStyle()
+        s.lineSubType = .straight; s.lineStyle = .dash1; s.thickness = 3
+        s.colorToken = .green; s.labelMode = .right
+        e.drawingSession.setDefaultStyle(s)
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+        let d = e.drawingSession.commitPending(panelPosition: 0)
+        #expect(d?.lineSubType == .straight)
+        #expect(d?.lineStyle == .dash1)
+        #expect(d?.thickness == 3)
+        #expect(d?.colorToken == .green)
+        #expect(d?.labelMode == .right)
+        #expect(d?.textColorToken == .green)                 // 新线恒「字色跟随线色」（派生② 条件成立）
+        #expect(d?.isExtended == false)
+    }
+```
+
+> 若 `TrainingEngineDrawingCommitTests.swift` 缺 `import CoreGraphics`（`CGRect`）请按文件头既有 import 补齐；`setDefaultStyle` 是既有 internal mutator（`DrawingSession`）。
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `cd ios/Contracts && swift test --filter "commitNormalizesLabelModeAtWriteBoundary|commitRejectsUnrenderableSubType" 2>&1 | tail -20`
+Expected: FAIL —— 现状 `commitPending` 直接取 `s.labelMode`（不归一化）、也不拒 `.segment`。
+
+- [ ] **Step 3: 实现**
+
+把 `DrawingSession.commitPending` 的构造段改为「先造裸对象，再过 `withStyle`」：
+
+```swift
+        let s = defaultStyle
+        // D59（切片2）：样式语义闸**单点** —— 派生①②/归一化/可用性全部由 withStyle 承担，
+        // 本函数不再自己派生任何字段（否则就有第二份语义，面板归一化一改就漂）。
+        // 基对象只带「与样式无关」的部分：锚 / 工具 / 面板位 / period（由 init 从 anchors 取，D29）。
+        let base = DrawingObject(
+            toolType: tool,
+            anchors: pendingAnchors,
+            isExtended: false,          // 占位：随后由 withStyle 的派生① 覆盖
+            panelPosition: panelPosition,
+            revealTick: 0)              // 真值由 engine.routeDrawingCommit 盖
+        discardPendingAnchors()
+        return base.withStyle(s)        // nil = 该样式语义不成立（水平线 .segment）→ 不提交
+```
+
+> ⚠️ `discardPendingAnchors()` 必须在 `return` 之前（保持既有语义：**提交或拒交都只丢 pending**，工具与会话存活）。`base` 的 `colorToken`/`textColorToken` 取 `DrawingObject.init` 默认（都是 `.orange`）→ 相等 → 派生② 走「跟随」分支 → `textColorToken == s.colorToken`，与切片2 之前逐字一致。
+
+- [ ] **Step 4: 改既有源码守卫锚点**
+
+`DrawingSessionSourceGuardTests.swift:161-186` 的 `atomicStyleConstruction` 现在钉的是 `commitPending` 里的 5 行 `lineSubType: s.lineSubType` 字面量——它们已被 `withStyle` 取代。把该测试的 `DrawingSession` 那半段改为：
+
+```swift
+        let s = try source(drawingSession)
+        #expect(s.contains("func commitPending("))       // 先证真读到文件（防路径错→空→假绿）
+        // 切片2（D59）：5 样式字段不再在这里逐个抄，改为整体过 withStyle（语义闸单点）。
+        #expect(s.contains("base.withStyle(s)"))
+        for f in ["lineSubType: s.lineSubType", "colorToken: s.colorToken"] {
+            #expect(!s.contains(f), "commitPending 不得再自行灌样式字段（第二份语义会漂）")
+        }
+```
+
+`TrainingEngine` 那半段（`routeDrawingCommit` 整体透传 5 字段 + 无 append-then-replace）**一字不动**。
+
+- [ ] **Step 5: 运行测试确认通过**
+
+Run: `cd ios/Contracts && swift test --filter "DrawingSessionSourceGuard|TrainingEngineDrawingCommit" 2>&1 | tail -20`
+Expected: 全部 PASS。
+
+- [ ] **Step 6: 全量 host 测试**
+
+Run: `cd ios/Contracts && swift test 2>&1 | tail -5`
+Expected: 全绿（累计计数 = 基线 + Task1/2 新增）。
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingSession.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingCommitTests.swift
+git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle（两个写入点共用语义闸，D59）"
+```
+
+---
+
+### Task 3: `updateDrawingStyle(id:style:)` —— internal 写入面 + id 唯一门 + withStyle 门 + revision（D50/D58 引擎支/D62/D66）
+
+**Files:**
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（在 `deleteDrawing(at:)`/`appendDrawing` 邻近新增方法）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（同文件追加，复用其 `callSites` 源码守卫 helper）
+
+**Interfaces:**
+- Consumes: Task 1 的 `DrawingObject.withStyle(_:)`；既有 `drawingsRevision`（PR-1）。
+- Produces: `TrainingEngine.updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Bool`（**internal**、`@discardableResult`）。成功 → 原地替换 + `drawingsRevision += 1` + `true`；任一门不过 → 零改动 + 不递增 + `false`。
+
+- [ ] **Step 1: 写失败测试**
+
+追加到 `TrainingEngineDrawingSessionTests.swift`（文件已有 `callSites`/`allSwiftFilesUnderSources`/`trainingEnginePath` helper）：
+
+```swift
+    // MARK: 切片2 Task 3（D50/D58 引擎支/D62/D66）：updateDrawingStyle
+
+    private func styleFixture(_ sub: LineSubType = .straight, _ ls: LineStyle = .solid, _ th: Int = 1,
+                              _ c: DrawingColorToken = .orange, _ lm: LabelMode = .hidden) -> DrawingDefaultStyle {
+        var s = DrawingDefaultStyle()
+        s.lineSubType = sub; s.lineStyle = ls; s.thickness = th; s.colorToken = c; s.labelMode = lm
+        return s
+    }
+
+    @Test("N2: updateDrawingStyle 只动 5 样式字段 + 两个派生，其余逐字段不变；revision +1")
+    @MainActor func updateTouchesOnlyStyleFields() throws {
+        let e = TrainingEngine.preview()
+        let old = makeStyledHLine(id: "A", thickness: 1, text: "note", fontSize: 21)
+        #expect(e.appendDrawing(old) == true)
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 4, .green, .right)) == true)
+        let now = try #require(e.drawings.first { $0.id == "A" })
+        #expect(e.drawingsRevision == rev + 1)
+        // 变的
+        #expect(now.lineStyle == .dash1); #expect(now.thickness == 4)
+        #expect(now.colorToken == .green); #expect(now.labelMode == .right)
+        // 不变的（逐字段）
+        #expect(now.id == old.id); #expect(now.anchors == old.anchors); #expect(now.period == old.period)
+        #expect(now.panelPosition == old.panelPosition); #expect(now.revealTick == old.revealTick)
+        #expect(now.locked == old.locked); #expect(now.text == old.text); #expect(now.fontSize == old.fontSize)
+        #expect(now.textForm == old.textForm); #expect(now.tailAnchor == old.tailAnchor)
+    }
+
+    @Test("N3: updateDrawingStyle 对不存在 id → false、drawings 逐字段不变、revision 不递增")
+    @MainActor func updateUnknownIdIsNoop() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "ZZZ", style: styleFixture(.straight, .dash1, 4)) == false)
+        #expect(e.drawings == before)
+        #expect(e.drawings.map(\.id) == before.map(\.id))     // DrawingObject.== 排除 id，故 id 单独比
+        #expect(e.drawingsRevision == rev)
+    }
+
+    @Test("N12a: 引擎层恒开门——水平线改 .segment 被拒，该线逐字段不变、revision 不递增")
+    @MainActor func updateRejectsUnrenderableSubType() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", lineSubType: .straight)) == true)
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.segment)) == false)
+        #expect(e.drawings == before)
+        #expect(e.drawingsRevision == rev)
+    }
+
+    @Test("N5 行为 + N12d: 直调（绕开面板）传未归一化的 (ray,.left) → 结果 .hidden、isExtended 派生成立")
+    @MainActor func updateNormalizesAndDerivesAtWriteBoundary() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", lineSubType: .straight, labelMode: .left)) == true)
+        #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.ray, .solid, 1, .orange, .left)) == true)
+        let now = try #require(e.drawings.first { $0.id == "A" })
+        #expect(now.labelMode == .hidden)                    // (ray,.left) 不可表达
+        #expect(now.isExtended == true)                      // 派生①
+        // 改回 .straight → isExtended 回 false
+        #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.straight)) == true)
+        #expect(e.drawings.first { $0.id == "A" }?.isExtended == false)
+    }
+
+    @Test("N21c(update): id 匹配 ≥2 条 → fail，不改任何一条、revision 不递增（D66，绝不打第一条）")
+    @MainActor func updateFailsOnAmbiguousId() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", thickness: 1)) == true)
+        // 绕过 append 的唯一性门，直接注入第二条同 id（模拟坏状态）
+        e.injectDrawingsForTesting(e.drawings + [makeStyledHLine(id: "A", thickness: 2, candleIndex: 4)])
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 5)) == false)
+        #expect(e.drawings == before)
+        #expect(e.drawingsRevision == rev)
+    }
+
+    @Test("D66: 空 id 恒 fail（写入边界不变量：id 非空）")
+    @MainActor func updateRejectsEmptyId() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "", style: styleFixture(.straight, .dash1)) == false)
+        #expect(e.drawingsRevision == rev)
+    }
+
+    @Test("SD-7/D34 纵深防御: 复盘模式下 updateDrawingStyle 恒 fail（drawings = 已归档 record 的原训练线）")
+    @MainActor func updateRefusedInReviewMode() throws {
+        let e = TrainingEngine.preview(mode: .review)
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", thickness: 1)) == true)   // 造出「归档线」状态
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 5)) == false)
+        #expect(e.drawings == before)
+        #expect(e.drawingsRevision == rev)
+        // 反向对照：同样的调用在 normal 模式成功（防「一律拒绝」）
+        let n = TrainingEngine.preview(mode: .normal)
+        #expect(n.appendDrawing(makeStyledHLine(id: "A", thickness: 1)) == true)
+        #expect(n.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 5)) == true)
+    }
+
+    @Test("N15: updateDrawingStyle 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
+    func updateDrawingStyleTrustBoundary() throws {
+        let engineSrc = try String(contentsOfFile: trainingEnginePath, encoding: .utf8)
+        #expect(engineSrc.contains("func updateDrawingStyle(id:"))          // 仍存在
+        #expect(!engineSrc.contains("public func updateDrawingStyle("))     // 不是 public（D62）
+        // ⚠️ 本切片是引擎写入面，UI 编辑路由属 PR-4 → 现在**零调用点**。
+        //    PR-4 接线时必须把本断言改成：恰好 1 处、且该文件是 UI 编辑路由、且路由在调用前先验
+        //    HorizontalLineTool.visibleGeometry（D58 候选预检 + D65 当前门）。谁不补几何门就加调用点，
+        //    这条当场红——这就是本守卫存在的意义（fail-closed forcing function）。
+        #expect(try callSites(callPattern: "updateDrawingStyle(", defExclude: "func updateDrawingStyle(").isEmpty)
+    }
+```
+
+> `callSites` 目前是 `appendFamilyTrustBoundary` 测试**内部**的局部函数。本 Task 把它**提为 suite 私有方法**（签名不变：`private func callSites(callPattern: String, defExclude: String) throws -> [(file: String, line: String)]`），供两处复用；`appendFamilyTrustBoundary` 内的局部定义删除，其调用点不变。
+
+- [ ] **Step 2: 加测试专用注入口（DEBUG hook）并跑红**
+
+`updateFailsOnAmbiguousId` 需要一个「两条同 id」的坏状态，而所有生产入口都拒它（D66）——这正是 spec N21c 说的「绕过 append 门，直接注入 `drawings`」。沿用 PR-1 已建立的 `xxxForTesting` DEBUG hook 范式，在 `TrainingEngine.swift` 加：
+
+```swift
+#if DEBUG
+    /// 仅测试：直接置换 `drawings`，绕过全部写入门。用于构造生产入口**造不出**的坏状态
+    /// （N21c：两条同 id → update/delete 必须 fail 而不是"打第一条"）。
+    /// 不动 `drawingsRevision`（它只由真实写入面递增；测试自己记录基线）。
+    func injectDrawingsForTesting(_ ds: [DrawingObject]) { drawings = ds }
+#endif
+```
+
+Run: `cd ios/Contracts && swift test --filter "updateTouchesOnlyStyleFields|updateUnknownIdIsNoop|updateRejectsUnrenderableSubType" 2>&1 | tail -20`
+Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDrawingStyle'`。
+
+- [ ] **Step 3: 实现 `updateDrawingStyle`**
+
+在 `TrainingEngine.swift` 的 `appendDrawing` 之后（`:1101` 附近）插入：
+
+```swift
+    /// D50（1b-i）：**唯一**的画线样式编辑写入面。原地替换单个数组元素——流程里**没有"删"那一步**，
+    /// 故 1a-iv 交接①「编辑路径 append 返 false 时绝不能已删原线」在本形状下不可表达（矛盾状态被消灭，
+    /// 而不是靠调用者按正确顺序操作）。
+    /// **访问级别 internal（D62）**：几何门（`visibleGeometry`）只能在持 mapper 的 UI 层，引擎判不了；
+    /// 若本 API public，包外就能绕过那道门落一条渲染不出的线并被 autosave。唯一合法调用者 = 包内那条
+    /// 已先验几何的 UI 编辑路由（PR-4）；源码守卫 N15 钉死调用点数量。
+    /// **五道 viewport 无关的门，任意一道不过 → 零改动 + `drawingsRevision` 不递增 + 返 `false`**：
+    ///   ⓪ 非复盘模式（D34 纵深防御，SD-7）：复盘里 `drawings` 就是已归档 record 的原训练线，
+    ///      改它不可逆；复盘新画线走 `reviewDrawings`，本期复盘不获得编辑能力 → 这道门不 over-reject
+    ///   ① id 非空且**恰好**匹配一条（D66；≥2 条是坏状态，绝不"改第一条碰到的"）
+    ///   ② 目标 `locked == false`（D60；本构建产不出 locked=true，只挡高版本解码来的）
+    ///   ③ 目标**不携带未来未知枚举值**（D61；判据必须是 raw-aware 的 `hasKnownFutureEnumValues`，
+    ///      它已含 `!entries.isEmpty`——写成 `knownFutureEnumPayloads()` 的 id-membership 会误灰所有已加载线）
+    ///   ④ `withStyle` 语义成立（D59：派生①②/归一化/可用性单点；水平线 `.segment` 恒不可渲染 → 拒）
+    @discardableResult
+    func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Bool {
+        guard flow.mode != .review else { return false }                           // ⓪（D34 纵深防御）
+        guard !id.isEmpty else { return false }                                   // ①（D66 非空）
+        let matches = drawings.indices.filter { drawings[$0].id == id }
+        guard matches.count == 1, let i = matches.first else { return false }      // ①（D66 唯一）
+        let old = drawings[i]
+        guard !old.locked else { return false }                                    // ②（D60）
+        guard !loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id]) else { return false }   // ③（D61）
+        guard let updated = old.withStyle(style) else { return false }             // ④（D59/D58 引擎支）
+        drawings[i] = updated
+        drawingsRevision += 1
+        return true
+    }
+```
+
+> ⚠️ 门 ② ③ 的行为测试在 Task 4；本 Task 一次写全实现（三行 guard 不值得拆成两次改同一函数），Task 4 负责把它们**逐条钉死**（含反向对照，防「一律拒绝」骗过测试）。
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `cd ios/Contracts && swift test --filter "updateTouchesOnlyStyleFields|updateUnknownIdIsNoop|updateRejectsUnrenderableSubType|updateNormalizesAndDerivesAtWriteBoundary|updateFailsOnAmbiguousId|updateRejectsEmptyId|updateRefusedInReviewMode|updateDrawingStyleTrustBoundary" 2>&1 | tail -20`
+Expected: 8 tests PASS。
+
+再做一次 mutation 验证（证明复盘门有判别力）：临时注释掉 `guard flow.mode != .review` 那行 → 跑 `swift test --filter updateRefusedInReviewMode` → 期望 FAIL → 恢复。
+
+- [ ] **Step 5: 全量 host 测试**
+
+Run: `cd ios/Contracts && swift test 2>&1 | tail -5`
+Expected: 全绿。
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift
+git commit -m "划线 1b-i 切片2 Task3：updateDrawingStyle internal 写入面 + id 唯一门 + withStyle 门（D50/D62/D66）"
+```
+
+---
+
+### Task 4: `updateDrawingStyle` 的两道耐久性门钉死：`locked`（D60）+ 未来未知枚举值（D61）
+
+**Files:**
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift`（新建）
+- （三个 fixture helper 已在 Task 1 Step 3 ④ 加进 `DrawingTestFixtures.swift`，本 Task 直接用）
+
+**Interfaces:**
+- Consumes: Task 3 的 `updateDrawingStyle`；既有 `LossyDrawingArray.decode` / `hasKnownFutureEnumValues(liveIds:)` / `reconciled(currentKnown:)` / `encoded()`。
+- Produces: 无新生产代码（本 Task 只钉行为）；若某条测试红，说明 Task 3 的门写错了，就地修 Task 3 的实现。
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift`：
+
+```swift
+// ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift
+// Spec: 2026-07-23-...-1b-i-select-edit-delete-design.md D60（locked）/ D61（未来未知枚举值）。
+// 两道门都是**跨版本耐久性**保护：本构建产不出 locked=true、也产不出未来枚举值，
+// 它们只可能从**高版本写的磁盘数据**解码进来 —— 编辑它们会不可逆地抹掉原始字节。
+import Foundation
+import Testing
+@testable import KlineTrainerContracts
+
+@Suite("1b-i 切片2：编辑写入面的耐久性门（locked / 未来未知枚举值）")
+@MainActor
+struct DrawingEditDurabilityGateTests {
+
+    private func style(_ th: Int = 3, _ c: DrawingColorToken = .green) -> DrawingDefaultStyle {
+        var s = DrawingDefaultStyle()
+        s.thickness = th; s.colorToken = c
+        return s
+    }
+
+    /// 一条**携带两个不同未来枚举值**的高版本线：colorToken/textColorToken 双双 fallback 成 .orange，
+    /// 故「解码后 == 比较」区分不了它们 —— 这正是 D61 必须 raw-aware 的理由（codex R7-F2）。
+    private let futureRaw = #"{"id":"F","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"futureNeon","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"futureCyan","textForm":"plain"}"#
+
+    /// 一条**当前版本普通线**（所有枚举字段都是已知值 → knownFutureEnumPayloads 该条 entries 为空）。
+    private let plainRaw = #"{"id":"K","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}"#
+
+    // MARK: D60 locked
+
+    @Test("N13a: locked 线改样式被拒 —— 逐字段不变、revision 不递增")
+    func lockedRejectsStyleEdit() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "L", thickness: 1, locked: true)) == true)
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "L", style: style()) == false)
+        #expect(e.drawings == before)
+        #expect(e.drawingsRevision == rev)
+    }
+
+    @Test("N13c 反向对照: 同一条线 locked == false 时改样式成功、revision +1（防「一律拒绝」骗过 N13a）")
+    func unlockedAcceptsStyleEdit() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "U", thickness: 1, locked: false)) == true)
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "U", style: style(4, .green)) == true)
+        #expect(e.drawings.first { $0.id == "U" }?.thickness == 4)
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
+    // MARK: D61 未来未知枚举值
+
+    @Test("N14a: 携带未来未知枚举值的线 → 改样式 fail-closed（逐字段不变、revision 不递增）")
+    func futureEnumLineRejectsStyleEdit() throws {
+        let e = makeEngineWithLossy(try lossyFromRaw(futureRaw))
+        #expect(e.drawings.count == 1)
+        #expect(e.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: ["F"]) == true)   // 前提成立
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "F", style: style(5, .green)) == false)
+        #expect(e.drawings == before)
+        #expect(e.drawingsRevision == rev)
+    }
+
+    @Test("N14b 核心: 编辑被拒后原始字节保真 —— futureNeon / futureCyan 逐字节仍在")
+    func futureEnumRawBytesSurviveRejectedEdit() throws {
+        let e = makeEngineWithLossy(try lossyFromRaw(futureRaw))
+        #expect(e.updateDrawingStyle(id: "F", style: style(5, .green)) == false)
+        // 走真实持久化路径（coordinator 存盘用的正是 reconciled(currentKnown:).encoded()）
+        let data = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings).encoded()
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("futureNeon"))       // 线色的未来值没被 fallback(.orange) 覆盖
+        #expect(text.contains("futureCyan"))       // 字色的未来值同样保住（两个不同 future 值不得被抹平）
+    }
+
+    @Test("N14e 反向对照: 本构建新建的线（无 unknown 枚举）改线色成功且字色跟随")
+    func currentVersionLineStillEditable() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "N", colorToken: .orange, textColorToken: .orange)) == true)
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "N", style: style(2, .green)) == true)
+        let now = try #require(e.drawings.first { $0.id == "N" })
+        #expect(now.colorToken == .green)
+        #expect(now.textColorToken == .green)                 // 派生② 条件成立 → 跟随
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
+    @Test("N14f 判据陷阱专项: 存盘→重载的**普通**线仍可编辑（漏 !entries.isEmpty 会全灰，当场红）")
+    func reloadedPlainLineStillEditable() throws {
+        let e = makeEngineWithLossy(try lossyFromRaw(plainRaw))
+        #expect(e.drawings.count == 1)
+        // 前提：该条 payload 存在但 entries 为空 → 判据必须判「不命中」
+        #expect(e.loadedDrawingsLossy.knownFutureEnumPayloads().contains { $0.id == "K" })
+        #expect(e.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: ["K"]) == false)
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "K", style: style(4, .green)) == true)
+        #expect(e.drawings.first { $0.id == "K" }?.thickness == 4)
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
+    @Test("N14g: known 独立字色不得被无条件派生抹掉（orange 线 + blue 标签）")
+    func knownIndependentTextColorPreserved() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "I", thickness: 1,
+                                                colorToken: .orange, textColorToken: .blue)) == true)
+        // 只改 thickness → 字色仍 .blue
+        var s = DrawingDefaultStyle(); s.thickness = 4; s.colorToken = .orange
+        #expect(e.updateDrawingStyle(id: "I", style: s) == true)
+        #expect(e.drawings.first { $0.id == "I" }?.textColorToken == .blue)
+        // 改线色成 .green → 字色**仍** .blue（改线色也不夺 known 独立字色）
+        #expect(e.updateDrawingStyle(id: "I", style: style(4, .green)) == true)
+        let now = try #require(e.drawings.first { $0.id == "I" })
+        #expect(now.colorToken == .green)
+        #expect(now.textColorToken == .blue)
+    }
+}
+```
+
+- [ ] **Step 2: 运行测试确认失败（先只加测试、不改实现）**
+
+Run: `cd ios/Contracts && swift test --filter DrawingEditDurabilityGateTests 2>&1 | tail -30`
+Expected: 全部编译通过并**全部 PASS**（Task 3 已把两道 guard 写进实现）。
+
+> ⚠️ **这是本 Task 唯一允许「首跑即绿」的情形**，因为 Task 3 一次写全了四门。为保证这些测试**真有判别力**（不是 vacuous），必须做 Step 3 的红绿验证。
+
+- [ ] **Step 3: 红绿验证（mutation check，不可省）**
+
+依次临时注释掉实现里的两行 guard，确认对应测试**真的红**，然后恢复：
+
+```bash
+cd ios/Contracts
+# ① 注释掉 locked 门（TrainingEngine.updateDrawingStyle 里 `guard !old.locked ...` 那行）
+swift test --filter "lockedRejectsStyleEdit" 2>&1 | tail -5     # 期望：FAIL
+# 恢复该行；再注释掉未来枚举门
+swift test --filter "futureEnumLineRejectsStyleEdit|futureEnumRawBytesSurviveRejectedEdit" 2>&1 | tail -5   # 期望：两条 FAIL
+# 恢复
+# ③ 把派生② 改成无条件 `textColorToken: s.colorToken`（DrawingObjectStyleEdit.swift）
+swift test --filter "knownIndependentTextColorPreserved" 2>&1 | tail -5    # 期望：FAIL
+# 恢复
+# ④ 把 D61 判据改成 id-membership（`knownFutureEnumPayloads().contains { $0.id == id }`）
+swift test --filter "reloadedPlainLineStillEditable" 2>&1 | tail -5        # 期望：FAIL（陷阱被钉死）
+# 恢复
+```
+
+把四次验证的实际输出记进 commit message（形如 `红绿验：locked✔ future✔ 派生②✔ 判据陷阱✔`）。
+
+- [ ] **Step 4: 全量 host 测试**
+
+Run: `cd ios/Contracts && swift test 2>&1 | tail -5`
+Expected: 全绿（确认恢复后无残留改动）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift
+git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（locked D60 / 未来未知枚举值 D61）+ 红绿验"
+```
+
+---
+
+### Task 5: `deleteDrawing(id:)` —— internal 删除写入面 + `locked`/id 唯一门（D51/D60/D66）
+
+**Files:**
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（`deleteDrawing(at:)` 之后新增 id 版本）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（追加）
+
+**Interfaces:**
+- Consumes: 既有 `drawingsRevision`、Task 3 提为 suite 方法的 `callSites` helper。
+- Produces: `TrainingEngine.deleteDrawing(id: DrawingID) -> Bool`（**internal**、`@discardableResult`）。成功 → 移除 + `drawingsRevision += 1` + `true`；id 不存在/非唯一/空 或 `locked` → 零改动 + 不递增 + `false`。
+
+- [ ] **Step 1: 写失败测试**
+
+追加到 `TrainingEngineDrawingSessionTests.swift`：
+
+```swift
+    // MARK: 切片2 Task 5（D51/D60/D66）：deleteDrawing(id:)
+
+    @Test("删除成功: 按 id 移除 + revision +1")
+    @MainActor func deleteByIdRemovesAndBumps() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        #expect(e.appendDrawing(makeStyledHLine(id: "B", candleIndex: 4)) == true)
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "A") == true)
+        #expect(e.drawings.map(\.id) == ["B"])
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
+    @Test("N4: deleteDrawing(id:) 对不存在 id → false、逐字段不变、revision 不递增")
+    @MainActor func deleteUnknownIdIsNoop() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "ZZZ") == false)
+        #expect(e.drawings == before)
+        #expect(e.drawings.map(\.id) == before.map(\.id))
+        #expect(e.drawingsRevision == rev)
+        #expect(e.deleteDrawing(id: "") == false)            // 空 id 同样拒（D66 非空）
+        #expect(e.drawingsRevision == rev)
+    }
+
+    @Test("N13b/N19b: 引擎层删除对 locked 线 fail-closed（降 internal 后引擎门仍在）")
+    @MainActor func deleteRejectsLocked() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "L", locked: true)) == true)
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "L") == false)
+        #expect(e.drawings.map(\.id) == ["L"])               // 仍在
+        #expect(e.drawingsRevision == rev)
+    }
+
+    @Test("N13c 反向对照（删除侧）: 同一条线未锁定时删除成功、revision +1")
+    @MainActor func deleteAcceptsUnlocked() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "U", locked: false)) == true)
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "U") == true)
+        #expect(e.drawings.isEmpty)
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
+    @Test("N21c(delete): id 匹配 ≥2 条 → fail，不删任何一条、revision 不递增")
+    @MainActor func deleteFailsOnAmbiguousId() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        e.injectDrawingsForTesting(e.drawings + [makeStyledHLine(id: "A", candleIndex: 4)])
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "A") == false)
+        #expect(e.drawings.count == before.count)
+        #expect(e.drawingsRevision == rev)
+    }
+
+    @Test("N14c(引擎版): 未来枚举值线**可以删**（D61 只挡改样式，不挡整条删除）")
+    @MainActor func futureEnumLineCanBeDeleted() throws {
+        let raw = #"{"id":"F","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","colorToken":"futureNeon","textColorToken":"futureCyan"}"#
+        let e = makeEngineWithLossy(try lossyFromRaw(raw))
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "F") == true)
+        #expect(e.drawings.isEmpty)
+        #expect(e.drawingsRevision == rev + 1)
+        // 删整条不产生"部分抹除"：reconcile 后该条整体消失（不残留半截 raw）
+        let data = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings).encoded()
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(!text.contains("futureNeon"))
+    }
+
+    @Test("SD-7/D34 纵深防御: 复盘模式下 deleteDrawing(id:) 恒 fail + normal 模式反向对照")
+    @MainActor func deleteRefusedInReviewMode() throws {
+        let e = TrainingEngine.preview(mode: .review)
+        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "A") == false)
+        #expect(e.drawings.map(\.id) == ["A"])               // 归档线仍在
+        #expect(e.drawingsRevision == rev)
+        let n = TrainingEngine.preview(mode: .normal)
+        #expect(n.appendDrawing(makeStyledHLine(id: "A")) == true)
+        #expect(n.deleteDrawing(id: "A") == true)            // 反向对照
+    }
+
+    @Test("N19a: deleteDrawing(id:) 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
+    func deleteByIdTrustBoundary() throws {
+        let engineSrc = try String(contentsOfFile: trainingEnginePath, encoding: .utf8)
+        #expect(engineSrc.contains("func deleteDrawing(id:"))
+        #expect(!engineSrc.contains("public func deleteDrawing(id:"))
+        // PR-4 接线时改成：恰好 1 处、在 UI 删除路由、且路由在**确认框点「删除」之后**重算 visibleGeometry
+        // （D65 R13-F1：确认框有时间窗，线可能滑走 → 只在点 🗑 那刻判几何是时序 bug）。
+        #expect(try callSites(callPattern: "deleteDrawing(id:", defExclude: "func deleteDrawing(id:").isEmpty)
+        // N19d 不回归确认：index 版本仍零调用点、仍非 public（PR-1 已落）
+        #expect(try callSites(callPattern: "deleteDrawing(at:", defExclude: "func deleteDrawing(at").isEmpty)
+        #expect(!engineSrc.contains("public func deleteDrawing(at "))
+    }
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `cd ios/Contracts && swift test --filter "deleteByIdRemovesAndBumps|deleteUnknownIdIsNoop|deleteRejectsLocked" 2>&1 | tail -20`
+Expected: 编译失败 `incorrect argument label in call (have 'id:', expected 'at:')` 或 `no exact matches in call to instance method 'deleteDrawing'`。
+
+- [ ] **Step 3: 实现**
+
+在 `TrainingEngine.swift` 的 `deleteDrawing(at:)`（`:1079-1083`）之后插入：
+
+```swift
+    /// D51（1b-i）：**id 寻址**的删除写入面。选中态存的就是 id；下标会因任何增删漂移，竞态下删错线。
+    /// **访问级别 internal + 源码守卫**（与 `updateDrawingStyle` D62 完全对称）：删除比改样式**更**危险
+    /// （不可逆、本期无 undo），边界只能更严。几何门（离屏线不许删）在 UI 删除路由——引擎没有 mapper，
+    /// **判不了几何、也不声称挡几何**（D65 R13-F1）；路由必须在**确认框点「删除」之后**重算再调本方法。
+    /// 只 enforce viewport 无关的三项，任一不过 → 零改动 + `drawingsRevision` 不递增 + 返 `false`：
+    ///   ⓪ 非复盘模式（D34 纵深防御，SD-7：复盘里 `drawings` = 已归档 record 的原训练线，删它不可逆；
+    ///      复盘侧删除走 `removeReviewDrawing(at:)`，本期复盘不获得删原训练线的能力 → 不 over-reject）
+    ///   ① id 非空且**恰好**匹配一条（D66）
+    ///   ② 目标 `locked == false`（D60）
+    /// ⚠️ **不含**未来未知枚举值分量（D61）：删整条不产生"部分抹除"（raw 随之整体移除），是用户主动处置，
+    ///    与"顺手抹字节"性质不同 —— 高版本线选得中、改不动、但删得掉。
+    @discardableResult
+    func deleteDrawing(id: DrawingID) -> Bool {
+        guard flow.mode != .review else { return false }   // ⓪（D34 纵深防御，SD-7）
+        guard !id.isEmpty else { return false }
+        let matches = drawings.indices.filter { drawings[$0].id == id }
+        guard matches.count == 1, let i = matches.first else { return false }
+        guard !drawings[i].locked else { return false }
+        drawings.remove(at: i)
+        drawingsRevision += 1
+        return true
+    }
+```
+
+- [ ] **Step 4: 运行测试确认通过 + 红绿验证 locked 门**
+
+Run: `cd ios/Contracts && swift test --filter "deleteByIdRemovesAndBumps|deleteUnknownIdIsNoop|deleteRejectsLocked|deleteAcceptsUnlocked|deleteFailsOnAmbiguousId|futureEnumLineCanBeDeleted|deleteRefusedInReviewMode|deleteByIdTrustBoundary" 2>&1 | tail -20`
+Expected: 8 tests PASS。
+
+再做两次 mutation 验证（确认门有判别力）：
+- 临时注释掉 `guard !drawings[i].locked` → `swift test --filter deleteRejectsLocked` → 期望 FAIL → 恢复；
+- 临时注释掉 `guard flow.mode != .review` → `swift test --filter deleteRefusedInReviewMode` → 期望 FAIL → 恢复。
+
+- [ ] **Step 5: 全量 host 测试**
+
+Run: `cd ios/Contracts && swift test 2>&1 | tail -5`
+Expected: 全绿。
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift
+git commit -m "划线 1b-i 切片2 Task5：deleteDrawing(id:) internal 删除写入面 + locked/id 唯一门（D51/D60/D66）"
+```
+
+---
+
+### Task 6: 接手 PR-1 的 Minor backlog（5 项）
+
+> 来源：PR-1 whole-branch Opus 终审判为 backlog 的 3 项文档级 Minor + whole-branch triage 判 backlog 的 2 项。第 6 项「Catalyst 基线尾随」不在此 Task，属收尾三绿门（见文末）。
+> ⚠️ triage 里的「`.segment` 门不 check toolType」**已在 PR-1 的 `42620f6` 修掉**（`isRenderableSubType` 已限 `.horizontal`），本 Task 不重复处理；本切片 Task 1 进一步把它提为共享单点。
+
+**Files:**
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（`routeDrawingCommit` 注释 + append 纵深防御注释）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift:51`（注释「画线数」→「画线签名」）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/Persistence/DrawingSignature.swift`（`tailAnchor` 子字段改长度前缀）
+- Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/DrawingTestFixtures.swift`（`makeHLine` 的 `id` 去默认值）
+- Modify: 3 处 `makeHLine(` 无 id 调用点（`grep -rn 'makeHLine(' Tests/ | grep -v 'makeHLine(id:'` 得到实际清单）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/DrawingSignatureTests.swift`（追加 tailAnchor 单射断言）
+
+- [ ] **Step 1: Minor ① —— `routeDrawingCommit` 吞 append 返回值：写明为何安全 + 编辑路径禁扩**
+
+`routeDrawingCommit`（`:1154-1168`）的两个分支 `appendReviewDrawing(stamped)` / `appendDrawing(stamped)` 丢弃了 `Bool`。在函数注释末尾追加（**不改代码行为**）：
+
+```swift
+    /// **为何这里吞掉 append 的返回值是安全的（PR-1 Opus 终审 Minor ①，1b-i 切片2 补记）**：
+    /// 本路由是**纯 append** 语义——被拒 = no-op（一条线没进库），**不存在"已删原线"的中间态**，故丢弃
+    /// 返回值不会造成静默数据丢失（最坏是这一次提交没生效，用户再点一次即可；其唯一调用点
+    /// `handleDrawingTap` 已先验 `visibleGeometry`，真被引擎拒的只可能是坏数据）。
+    /// ⚠️ **但编辑路径绝不可扩到这里**（1b-i 切片2 的 `updateDrawingStyle` 是**原地替换**、不经本路由）：
+    /// 一旦有人把「删旧 + append 新」式编辑接进本函数，吞掉的 `false` 就变成**静默丢线**
+    /// （codex WB R2-high 原始 finding 的形状）。要扩本路由，必须同时消费返回值并在失败时回滚。
+```
+
+- [ ] **Step 2: Minor ② —— append 边界「只 implemented 工具」纵深防御降级：记录决策（不加门）**
+
+PR-1 把 `.segment` 横规则限定到 `.horizontal` 后，append 边界不再拦「本期尚未实现的工具」。**决策：不补这道门**，理由写进 `isRenderableSubType` 私有 helper 的注释末尾：
+
+```swift
+    /// **纵深防御降级的记录（PR-1 Opus 终审 Minor ②，1b-i 切片2 裁决：不补门）**：本 helper 限定横规则后，
+    /// append 边界不再顺带拦「本期未实现的工具」。这**今天不是洞**：会话/提交侧已 fail-close 到唯一实现的
+    /// 水平线（`DrawingSession.activate` 只被顶栏画图钮以 `.horizontal` 调用），decode/resume 走整组赋值
+    /// 不经 append。补一道「只许 implemented 工具」的门反而会**重犯 PR-1 那个 over-reject**
+    /// （把只对某类型成立的规则套到所有类型 → 对 P1c 的合法数据静默拒），故按 YAGNI 不补，
+    /// 留待 P1c 定义完整的 toolType × lineSubType 矩阵时一并处理。
+```
+
+- [ ] **Step 3: Minor ③ —— Coordinator 注释与实现对齐**
+
+`TrainingSessionCoordinator.swift:51` 的 `// 新需求10：当前 replay 会话创建时的状态基线（tick/交易数/画线数/上下周期）。`
+→ 把「画线数」改成「画线规范语义签名」（PR-1 已把 `drawings.count` 换成 `drawingsSig`，注释滞后）。
+
+- [ ] **Step 4: Minor ④ —— `makeHLine` 默认 id 撞车（让坏状态不可表达）**
+
+`DrawingTestFixtures.swift:5` 的 `id: String = "hl"` 默认值，会让「同一数组里造两条」默认撞 D66 的唯一 id 门。**去掉默认值**（`id: String`），强制每个调用点显式给 id：
+
+```swift
+func makeHLine(id: String, candleIndex: Int = 3, price: Double = 10,
+               period: Period = .daily, thickness: Int = 1, text: String = "") -> DrawingObject {
+```
+
+然后修 3 处无 id 调用点（**已实测清单**，实施时用 `grep -rn 'makeHLine(' Tests/ | grep -v 'makeHLine(id:' | grep -v 'func makeHLine'` 复核，若前面几个 Task 又新增了无 id 调用点则一并补）：
+- `TrainingEngineDrawingSessionTests.swift:646` → `makeHLine(id: "d1", candleIndex: 3, price: 10)`
+- `TrainingEngineDrawingSessionTests.swift:649` → `makeHLine(id: "r1", candleIndex: 4, price: 11)`（review 侧，与上条不同数组但仍给不同 id 更清晰）
+- `TrainingEngineDrawingSessionTests.swift:656` → `makeHLine(id: "d1", candleIndex: 3, price: 10)`
+
+- [ ] **Step 5: Minor ⑤ —— `DrawingSignature` 的 `tailAnchor` 子字段改长度前缀**
+
+`DrawingSignature.swift` 里 `tailAnchor` 那行用逗号拼接三个子字段，与本文件「所有字段一律长度前缀」的单射纪律不一致（今天不碰撞——三个子字段都是数字/枚举 raw；但纪律不该有例外）。改为逐子字段 `lp()`：
+
+```swift
+            String(d.tailAnchor != nil),                       // 区分 tailAnchor==nil 与「有但字段恰好空」
+            d.tailAnchor.map { lp(String($0.candleIndex)) + lp(String($0.price)) + lp($0.period.rawValue) } ?? "",
+```
+
+追加断言到 `DrawingSignatureTests.swift`：
+
+```swift
+    @Test("canonicalDrawingsSignature: tailAnchor 子字段也走长度前缀（单射纪律无例外）")
+    func tailAnchorSubfieldsAreLengthPrefixed() throws {
+        func withTail(_ id: String, _ ci: Int, _ price: Double) -> DrawingObject {
+            DrawingObject(id: id, toolType: .horizontal,
+                          anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
+                          isExtended: false, panelPosition: 0, period: .daily,
+                          tailAnchor: DrawingAnchor(period: .daily, candleIndex: ci, price: price))
+        }
+        // 两条只差 tailAnchor 内容 → 签名必须不同
+        #expect(canonicalDrawingsSignature([withTail("t", 1, 2)]) != canonicalDrawingsSignature([withTail("t", 12, 0)]))
+        // 有 tailAnchor vs 无 tailAnchor → 签名必须不同
+        let noTail = makeHLine(id: "t")
+        #expect(canonicalDrawingsSignature([withTail("t", 1, 2)]) != canonicalDrawingsSignature([noTail]))
+    }
+```
+
+- [ ] **Step 6: 全量 host 测试**
+
+Run: `cd ios/Contracts && swift test 2>&1 | tail -5`
+Expected: 全绿。
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift \
+        ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift \
+        ios/Contracts/Sources/KlineTrainerContracts/Persistence/DrawingSignature.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/DrawingTestFixtures.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/DrawingSignatureTests.swift
+git add -u ios/Contracts/Tests/KlineTrainerContractsTests   # 3 处 makeHLine 调用点
+git commit -m "划线 1b-i 切片2 Task6：接手 PR-1 的 5 项 Minor backlog（注释对齐 + fixture 唯一 id + 签名单射纪律）"
+```
+
+---
+
+## 收尾：三绿门（控制者亲跑，不得委托）
+
+1. **host `swift test`**（fresh，非增量）：
+   ```bash
+   cd "<worktree>/ios/Contracts" && rm -rf .build/arm64-apple-macosx && \
+   echo "BRANCH=$(git branch --show-current) HEAD=$(git rev-parse --short HEAD)" && \
+   swift test 2>&1 | tail -5
+   ```
+   Expected：`Test run with N tests passed`（N = 1676 + 本切片新增；无 failure）。判绿**读输出内容**，不看 exit code（管道会吞退出码）。
+
+2. **fresh 非增量 Catalyst**（本切片加了测试 → 必跑）：按 `.github/scripts/catalyst-gate.sh` 的既有命令跑真 `xcodebuild test`，取实测总数。
+   - 落在 `catalyst-total-baseline.txt`（1574）±30 内 → 不动基线；
+   - 漂出 → 按 G7 维护规则同步三文件（`catalyst-total-baseline.txt` / `pass-main-current.log` **用本次真 fresh 日志重裁** / `catalyst-gate.test.sh` 活基线回显），再跑闸门自测确认全过。
+
+3. **iOS build**：`app-build.yml` 的等价命令（模拟器 + `CODE_SIGNING_ALLOWED=NO`，不碰钥匙串）。
+
+4. **whole-branch 评审**：Opus 全支终审 → `codex:adversarial-review`（`codex-attest.sh`，**`--scope branch-diff` 无窄化**）。attest 后 **Read 账本文件**核 `head_sha == HEAD`；任何 HEAD 移动（哪怕只改 `.github`）都要**重新 attest**。
+
+5. **PR**：`git push` 由控制者跑；`gh pr create` / `gh pr merge` 被 guard 拦 → user 真终端跑。合并后 `gh run watch` 盯 main 真绿。
+
+**本切片无真机验收项**（引擎层，无 UI）——真机上手验收留到 PR-4。
+
+---
+
+## 交接（PR-3 / PR-4 必须接手）
+
+1. **PR-4 接线时必须同步改两条源码守卫**（本切片故意写成「零调用点」）：
+   - `updateDrawingStyle(` → 恰好 1 处，且在 UI 编辑路由内，且路由**先过 D65 当前几何门 → 若改 `lineSubType` 再过 D58 候选预检 → 才调引擎**；
+   - `deleteDrawing(id:` → 恰好 1 处，且在 UI 删除路由内，且路由在**确认框点「删除」之后**重算 `visibleGeometry`（D65 R13-F1 时序）。
+2. **选中态相关的全部负向测试**（N1/N6/N7/N8/N13d/N14c 路由版/N14d/N16/N17/N18/N19c/N19e）归 PR-3/PR-4，本切片一条都没覆盖（见「覆盖 vs 交接」表）。
+3. **D49 面板派生回显**（`DrawingStyleParams` 改收 `style` + `onChange`）归 PR-4。本切片**没有动面板**（SD-2b）：面板照旧自己规整显示态，写入边界另有一道独立归一化（`withStyle`）——两者消费同一份规则实现，PR-4 接线时面板只需把完整 `DrawingDefaultStyle` 交给路由，写入边界会再归一化一次（幂等）。
+4. **1b-ii `setDrawingLocked(id:locked:)`**：必须是**独立** API 并豁免 D60 闸；且它会撞 D61 的坑（锁定一条未来枚举值线也会 re-merge 抹字节）→ 必须做 raw-preserving 单字段 merge，不能照抄本切片的「整条拒绝」（spec §9）。
