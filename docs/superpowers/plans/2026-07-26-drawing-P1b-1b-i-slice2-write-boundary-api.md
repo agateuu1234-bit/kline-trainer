@@ -4,7 +4,7 @@
 
 **Goal:** 在 PR-1 已建好的引擎地基上，落成 1b-i 的两个**编辑/删除写入面**——`DrawingObject.withStyle`（failable 语义闸单点）、`TrainingEngine.updateDrawingStyle(id:style:)`、`TrainingEngine.deleteDrawing(id:)`——各自带齐 **viewport 无关**的引擎层门（`withStyle` 语义 / `locked` / 未来未知枚举值 / id 唯一非空），全部 `internal` + 源码守卫，零 UI、host `swift test` 全覆盖。
 
-**Architecture:** 三层单点。① `DrawingStyleAvailability` 收编「该 toolType 下这个 lineSubType 恒可渲染吗」判据（PR-1 已在 `TrainingEngine` 私有实现过一份，本切片提为共享单点，append 家族改为委托）；② 新增纯函数 `DrawingObject.withStyle(_:) -> DrawingObject?` 承载 D59 四条语义（派生① `isExtended`、派生② `textColorToken` **条件**派生、`labelMode` 归一化、`lineSubType` 可用性），**两个写入点共用**（`DrawingSession.commitPending` 与新的 `updateDrawingStyle`）；③ 引擎两个新 API 只 enforce viewport 无关的不变量，几何门按 D65/D51 留在 UI 路由（PR-4），本切片用「Sources/ 中调用点恰好 0 处」的源码守卫把口子焊死，PR-4 接线时该守卫必须同步改成「恰好 1 处且在已先验 `visibleGeometry` 的 UI 路由」。
+**Architecture:** 三层单点。① `DrawingStyleAvailability` 收编「该 toolType 下这个 lineSubType 恒可渲染吗」判据（PR-1 已在 `TrainingEngine` 私有实现过一份，本切片提为共享单点，append 家族改为委托）；② 新增纯函数 `DrawingObject.withStyle(_:textColorFollowsLine:) -> DrawingObject?` 承载 D59 四条语义（派生① `isExtended`、派生② `textColorToken` **条件**派生、`labelMode` 归一化、`lineSubType` 可用性），**两个写入点共用**（`DrawingSession.commitPending` 与新的 `updateDrawingStyle`）；③ 引擎两个新 API 只 enforce viewport 无关的不变量，几何门按 D65/D51 留在 UI 路由（PR-4），本切片用「Sources/ 中调用点恰好 0 处」的源码守卫把口子焊死，PR-4 接线时该守卫必须同步改成「恰好 1 处且在已先验 `visibleGeometry` 的 UI 路由」。
 
 **Tech Stack:** Swift 5.9 / `@Observable` / SwiftPM（`ios/Contracts`）；测试 `swift test`（host，macOS）+ fresh Catalyst `xcodebuild test`（总数闸）；本切片纯逻辑、无 UIKit。
 
@@ -577,7 +577,7 @@ git status --porcelain   # 期望：空输出（codex plan-R14-F3：防新建文
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingCommitTests.swift`（追加）
 
 **Interfaces:**
-- Consumes: Task 1 的 `DrawingObject.withStyle(_:)`。
+- Consumes: Task 1 的 `DrawingObject.withStyle(_:textColorFollowsLine:)`。
 - Produces: `commitPending(panelPosition:)` 的返回对象**必然**满足 D59 四条语义；样式语义不成立时返 `nil`（不提交）。
 
 - [ ] **Step 1: 写失败测试**
@@ -1088,7 +1088,7 @@ git status --porcelain   # 期望：空输出
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（同文件追加；**直接调用 Task 2 建好的共享扫描器顶层函数**，不再声明任何本地扫描逻辑）
 
 **Interfaces:**
-- Consumes: Task 1 的 `DrawingObject.withStyle(_:)`；既有 `drawingsRevision`（PR-1）。
+- Consumes: Task 1 的 `DrawingObject.withStyle(_:textColorFollowsLine:)`；既有 `drawingsRevision`（PR-1）。
 - Produces: `TrainingEngine.updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Bool`（**internal**、`@discardableResult`）。成功 → 原地替换 + `drawingsRevision += 1` + `true`；任一门不过 → 零改动 + 不递增 + `false`。
 
 - [ ] **Step 1: 写失败测试**
@@ -1274,10 +1274,6 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDraw
         //     矩阵的工具，我们不懂它的样式语义 → **只挡编辑，不挡新建/提交**。`.trend`/`.text` 是**已知**
         //     枚举 case，高版本写的这类线解码后一切"正常"、raw-aware 门看不见 → 没这道门就会被按横线假设改写。
         guard DrawingStyleAvailability.isEditableToolType(old.toolType) else { return false }
-        // ④（D59/D58 引擎支）+ 派生② 的 raw-aware 判据（codex plan-R20-F1）：
-        //   加载来的线按 **raw 字符串**判"字色是否跟随线色"（解码值对 unknown 枚举不可靠）；
-        //   raw 里缺这两个键之一、或该 id 不在加载集里（内存新画的线）→ 回退解码比较（`follows` 已在 ③a 算好）。
-        guard let updated = old.withStyle(style, textColorFollowsLine: follows) else { return false }
         // ③（D61，**user 2026-07-26 裁决改为"看结果"**——对 spec 原文的显式修订，见下方 ⚠️）**两道**：
         //
         // ③a **可覆盖性预检**（raw-aware，按 key 判；codex plan-R19-F2）：该线携带的未来枚举值，其 key 必须
@@ -1299,6 +1295,8 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDraw
         guard futureEntries.allSatisfy({ coverable.contains($0.key) }),
               !loadedDrawingsLossy.hasKnownFutureFields(liveIds: [id]) else { return false }
         //
+        // ④（D59/D58 引擎支）：`follows` 已在 ③a 算好（raw-aware，见上）。
+        guard let updated = old.withStyle(style, textColorFollowsLine: follows) else { return false }
         // ③b **结果检**（第二道网）：即便未来值落在用户改得到的 key 上，这**一次**改动也未必真覆盖到它
         //     （例：未来值在 `lineStyle`，用户只改 thickness → 字段级归并保住原 raw）→ 归并后仍带就拒。
         //     判据与 coordinator 的 finalize 门**同源**（`TrainingSessionCoordinator:729-736` 也是先 reconcile
@@ -2024,10 +2022,10 @@ git status --porcelain   # 期望：空输出（codex plan-R14-F3：防新建文
 
 0. **已接受的残留（本切片明写，别当没说）**：源码守卫是**文本级**的（调用点计数 + 标识符文件作用域），它挡得住「忘了补几何门就加调用点」和「用方法引用绕过调用 pattern」，但**挡不住**已在白名单文件里的代码把方法引用**传出去**。要彻底焊死只有两条路：SwiftSyntax 级扫描（为一条守卫引入编译器级依赖），或「只有几何校验过的路由能构造」的授权对象——后者在本仓落不了地：能构造它的类型得声明在 UI 路由文件，而那是 UIKit-only 文件（纯 macOS host 不编译），引擎引用它会直接炸掉 host 测试；把几何证明塞进引擎签名又违反 D65「引擎签名不含 geometry 参数」。**现状取舍**：本切片零调用点、危害为零；PR-4 接线时这条守卫是**唯一**的几何门 forcing function，届时若觉得不够，再单独评估上 SwiftSyntax。
 1. **PR-4 的 UI 可用性必须按修订后的 D61/D65 落地**（codex plan-R15-F1 + R18-F2，spec 已同步）：置灰分量 = `locked` + 当前几何 + **「未来数据样式改得到吗」**——
-   - 未来值落在 `DrawingStyleAvailability.userCoverableFutureKeys` = `{lineSubType, lineStyle, thickness, colorToken, labelMode, isExtended}`（⚠️ **不含 `textColorToken`**，codex plan-R19-F2/R20-F2：本构建无字色控件）→ 控件**可点**（用户换成本版本认识的值即完成修复），引擎按「看结果」最终裁决、被拒时给反馈并**保留选中**；
+   - 未来值落在 `DrawingStyleAvailability.userCoverableFutureKeys` = `{lineSubType, lineStyle, thickness, colorToken, labelMode, isExtended}`，**再按 raw 条件并入 `textColorToken`**（`textColorFollowsLineColorInRaw(id:) == true` 时才并入，codex plan-R19-F2 → R22-F1；UI 必须调**同一个** helper，不许自己判）→ 控件**可点**（用户换成本版本认识的值即完成修复），引擎按「看结果」最终裁决、被拒时给反馈并**保留选中**；
    - 未来值落在 `anchors[].period` / `tailAnchor.period` 这类**样式碰不到**的位置，或存在**未来顶层字段** → 样式控件**灰**、🗑 **亮**（没有控件能覆盖它，可点即必败；靠删除解封）；
    - **UI 谓词与引擎判据必须共用同一个 helper**（PR-4 抽出来，禁止 UI 自己写一份 key 集合，否则又是两档判据）。
-   - **四条路由级测试**（引擎直调不算覆盖）：① 未来 `colorToken` → 控件可点、换色成功、改粗细被拒有反馈；② 未来顶层字段 → 控件灰、🗑 亮、删除成功；③ 未来 `anchors[0].period` → 控件灰、🗑 亮；④ 未来 `textColorToken` → 控件灰、🗑 亮、删除成功，且**不删除时其 raw 字节保真**（codex plan-R20-F2）。
+   - **五条路由级测试**（引擎直调不算覆盖）：① 未来 `colorToken`（字色为已知值）→ 控件可点、换色成功且字色**保持原值**、改粗细被拒有反馈；② 未来顶层字段 → 控件灰、🗑 亮、删除成功；③ 未来 `anchors[0].period` → 控件灰、🗑 亮；④ **独立**未来 `textColorToken`（raw 里与线色不同值）→ 控件灰、🗑 亮、删除成功，且不删除时 raw 字节保真；⑤ 线色/字色**同为一个未来值**（raw 判真跟随）→ 控件**可点**、换线色成功、两键一起被覆盖（codex plan-R22-F1）。
 2. **PR-4 接线时必须同步改两条源码守卫**（本切片故意写成「零调用点」）：
    - `updateDrawingStyle(` → 恰好 1 处，且在 UI 编辑路由内，且路由**先过 D65 当前几何门 → 若改 `lineSubType` 再过 D58 候选预检 → 才调引擎**；
    - `deleteDrawing(id:` → 恰好 1 处，且在 UI 删除路由内，且路由在**确认框点「删除」之后**重算 `visibleGeometry`（D65 R13-F1 时序）。
