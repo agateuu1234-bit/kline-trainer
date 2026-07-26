@@ -521,6 +521,9 @@ git commit -m "划线 1b-i 切片2 Task1：withStyle 语义闸单点 + 可用性
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingSession.swift:146-176`（`commitPending`）
 - Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift:161-186`（`atomicStyleConstruction` 守卫改锚）
+- Create: `ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScanner.swift`（**共享**源码守卫扫描器，顶层函数；含 `allSwiftFilesUnderSources()`，root = 整个 `Sources/`，覆盖全部 target）
+- Create: `ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScannerTests.swift`（扫描器自检 a–f）
+- Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（删掉 PR-1 的 `contractsDir` / `allSwiftFilesUnderSources()` / `trainingEnginePath` 三个 suite 私有版本，改用共享顶层函数；改完既有 `appendFamilyTrustBoundary` 必须仍绿）
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingCommitTests.swift`（追加）
 
 **Interfaces:**
@@ -1024,8 +1027,7 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
 
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（在 `deleteDrawing(at:)`/`appendDrawing` 邻近新增方法）
-- Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift` 里 PR-1 的 `allSwiftFilesUnderSources()`：root 从 `Sources/KlineTrainerContracts` 改为 `Sources/`（覆盖全部 target，codex plan-R8-F1；改完先跑既有 `appendFamilyTrustBoundary` 确认仍绿）
-- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（同文件追加；复用其既有 `allSwiftFilesUnderSources()` / `trainingEnginePath`，**新增**空白无关扫描器 `squeeze` / `squeezedText` / `squeezedSource` / `callCount(inSqueezed:pattern:)` / `callSiteCount(_:)` / `squeezedContains` 六个 suite 私有方法 + 两条扫描器自检测试）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（同文件追加；**直接调用 Task 2 建好的共享扫描器顶层函数**，不再声明任何本地扫描逻辑）
 
 **Interfaces:**
 - Consumes: Task 1 的 `DrawingObject.withStyle(_:)`；既有 `drawingsRevision`（PR-1）。
