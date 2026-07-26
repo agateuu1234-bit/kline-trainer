@@ -16,7 +16,7 @@
   - **动机**：一律拒会让这条线只能**整条删掉**才能结束存档（finalize 门本就 fail-closed），删整条的数据损失严格大于「用户显式换掉一个本版本表示不了的色号」。
   - **保护未削弱**：改 thickness 这类不涉及该值的编辑仍被拒（字段级归并会保住原值 → 结果仍带未来数据）；未来**字段**（本构建不认识的 key，没有任何控件能覆盖）**任何**编辑都仍被拒。
   - **已知代价**：一次换线色会把「本来跟随线色」的未来字色一并覆盖（两个未来值解码后都是 `.orange`，派生② 分辨不了）——已用测试钉死并写明是取舍而非缺陷。
-  - **判据与 finalize 门同源**（`TrainingSessionCoordinator:729-736` 也是 reconcile 后查同两个门）→ 「编辑通过」⇒「这一局能结束存档」。
+  - **判据与 finalize 门同源**（`TrainingSessionCoordinator:729-736` 也是 reconcile 后查同两个门），**但作用域不同**（codex plan-R17-F2）：编辑门只看**被改的那条 id**，finalize 门看**全部存活线 + `unknownRaw`** → 「编辑通过」只意味着**这条线**不再是阻塞项，**不代表整局能存档**（别的未来线 / unknownRaw 仍会拦）。
   - **spec 正文已同步修订**（codex plan-R15-F1：不改 spec 的话，PR-4 照 D65 旧规则把控件灰掉 → 这条修复路径**用户根本点不到**，引擎测试却因直调 API 全绿）：spec 的 D61 加了修订注记、D65 的「未来枚举」置灰分量已删除并写明新 UI 规则 + PR-4 必须补的路由级测试。
 - `CONTRACT_VERSION` 保持 **1.12**，`user_version` 保持 **7**，**零迁移**（`DrawingObject` 不新增/不改任何持久化字段；本切片只加运行时 API）。
 - **访问级别纪律**：本切片新增的两个写入 API 一律 `internal`，**不得** `public`（D62/D51）。`withStyle` 同为 `internal`。测试经 `@testable import` 照常可调。
@@ -1237,7 +1237,8 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDraw
         //   两个判据并列（codex plan-R13-F1）：`hasKnownFutureEnumValues` 看"已知 key 的未来**值**"，
         //   `hasKnownFutureFields` 看"`knownDiskKeys` 之外的未来**字段**"（它们能改变已知 key 的含义）。
         //   判据与 coordinator 的 finalize 门**同源**（`TrainingSessionCoordinator:729-736` 也是先 reconcile
-        //   再用这两个门），故"编辑通过"⇒"这一局能结束存档"，两个面不会各说各话。
+        //   再用这两个门），但**作用域不同**（codex plan-R17-F2）：这里只查**被改的那条 id**，finalize 查
+        //   **全部存活线 + unknownRaw** → "编辑通过"只说明**这条线**不再阻塞，**不代表整局能存档**。
         var candidate = drawings
         candidate[i] = updated
         guard let merged = try? loadedDrawingsLossy.reconciled(currentKnown: candidate) else { return false }
@@ -1607,6 +1608,39 @@ git status --porcelain   # 期望：空输出（codex plan-R14-F3：防新建文
         #expect(e.deleteDrawing(id: "T") == true)                    // 但删得掉（同 D61 高版本线的处置）
         #expect(e.drawings.isEmpty)
         #expect(e.drawingsRevision == rev + 1)
+    }
+
+    @Test("N14c2（codex plan-R17-F1）: 未来**字段**线也必须删得掉——否则既改不动又删不掉，这一局永久锁死")
+    @MainActor func futureFieldLineCanBeDeleted() throws {
+        // 未来顶层字段没有任何控件能覆盖 → 它永远改不动；删除是**唯一**保底解封手段，
+        // 故 `deleteDrawing(id:)` **绝不能**检查未来数据（spec D65 的门对照表已写死）。
+        let raw = #"{"id":"X","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","futureIndependentTextColor":true}"#
+        let e = makeEngineWithLossy(try lossyFromRaw(raw))
+        #expect(e.loadedDrawingsLossy.hasKnownFutureFields(liveIds: ["X"]) == true)
+        var st = DrawingDefaultStyle(); st.thickness = 3
+        #expect(e.updateDrawingStyle(id: "X", style: st) == false)      // 改不动（没有控件能覆盖那个 key）
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "X") == true)                       // 但删得掉
+        #expect(e.drawings.isEmpty)
+        #expect(e.drawingsRevision == rev + 1)
+        let merged = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings)
+        #expect(!String(decoding: try merged.encoded(), as: UTF8.self).contains("futureIndependentTextColor"))
+    }
+
+    @Test("作用域澄清（codex plan-R17-F2）: 修好一条未来线**不解封整局**——别的未来线仍拦 finalize")
+    @MainActor func repairingOneLineDoesNotClearOtherBlockers() throws {
+        // 两条：F 带未来枚举值（可换色修复）、G 带未来字段（改不动、只能删）
+        let rawF = #"{"id":"F","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"futureNeon","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}"#
+        let rawG = #"{"id":"G","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":2,"price":11.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","futureSomething":7}"#
+        let lossy = try LossyDrawingArray.decode(Data("[\(rawF),\(rawG)]".utf8))
+        let e = makeEngineWithLossy(lossy)
+        var toGreen = DrawingDefaultStyle(); toGreen.thickness = 1; toGreen.colorToken = .green
+        #expect(e.updateDrawingStyle(id: "F", style: toGreen) == true)   // F 被修好
+        let merged = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings)
+        #expect(merged.hasKnownFutureEnumValues(liveIds: ["F"]) == false)   // 这条线不再阻塞
+        // 但整局仍被 G 拦着（finalize 门看全部存活线）——「编辑通过 ⇒ 整局可存档」是错的
+        let liveIds = Set(e.drawings.map(\.id))
+        #expect(merged.hasKnownFutureFields(liveIds: liveIds) == true)
     }
 
     @Test("N14c(引擎版): 未来枚举值线**可以删**（D61 只挡改样式，不挡整条删除）")

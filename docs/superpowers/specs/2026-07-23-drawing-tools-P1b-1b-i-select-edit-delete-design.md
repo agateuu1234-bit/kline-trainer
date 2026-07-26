@@ -251,10 +251,10 @@ extension DrawingObject {
 > **现行规则**：`updateDrawingStyle` 先算候选、与 `loadedDrawingsLossy` 归并，**只有归并结果仍带**
 > 未来枚举值 / 未来字段时才拒。于是：
 > - 改 thickness 等**不涉及**该值的字段 → 结果仍带未来数据 → **仍拒**（P1a 字段级归并会保住原值）；
-> - **换成本版本认识的颜色** → 该值被用户显式覆盖 → 结果干净 → **放行**，线保住、这一局随即可结束存档；
+> - **换成本版本认识的颜色** → 该值被用户显式覆盖 → 结果干净 → **放行**，线保住、**这条线不再是 finalize 的阻塞项**（⚠️ 不等于整局解封：finalize 看的是**全部存活线 + `unknownRaw`**，别的未来线仍会拦，codex R17-F2）；
 > - 未来**字段**（本构建不认识的 key，没有任何控件能覆盖它）→ **任何**编辑仍拒（与原文结论一致）。
 > - 已知代价：一次换线色会把「本来跟随线色」的未来字色一并覆盖（两值解码后都是 `.orange`，派生② 分辨不了）。
-> **判据与 finalize 门同源**（`TrainingSessionCoordinator:729-736` 也是 reconcile 后查同两个门）→「编辑通过」⇒「能结束存档」。
+> **判据与 finalize 门同源**（`TrainingSessionCoordinator:729-736` 也是 reconcile 后查同两个门），但**作用域不同**：编辑门只看**被改的那条 id**，finalize 门看**全部存活线 + `unknownRaw`** → 「编辑通过」只意味着**这条线**不再阻塞，不代表整局可存档。
 > 落地细节见 `docs/superpowers/plans/2026-07-26-drawing-P1b-1b-i-slice2-write-boundary-api.md`。
 
 > **来源：codex R4 high（原始）+ R7 high（推翻我 R4 的机制）。最终形态如下。**
@@ -390,7 +390,15 @@ D63 里我写了「样式编辑**不禁**（改一条当前看不见的线的颜
 
 - **样式控件**按「改样式可用」置灰；**🗑** 按「删除可用」置灰。🔄**2026-07-26 修订**：二者**同进同退**（同为 `locked` + `visibleGeometry`），**不再有「未来枚举值」分岔**——那条线的样式控件**可点**，写入由引擎按「看结果」裁决（换掉那个未来值即成功，改别的字段被拒并给反馈、选中保留）。
 - ⚠️ **两类门的层级不同，别把几何说成引擎 fail-closed（codex R13-F1 纠正我 R11 的过度宣称）**：
-  - **viewport 无关的三项**（`locked` D60 / 未来数据 D61（🔄**2026-07-26 修订**：按**归并后结果**判）/ id 唯一 D66 + `withStyle` 语义 D59）**在引擎层 fail-closed**——即使有人直接调 `updateDrawingStyle` / `deleteDrawing(id:)`，引擎自己拒。
+  - **viewport 无关的引擎层 fail-closed 项**——即使有人直接调，引擎自己拒。⚠️ **两个 API 的门不是同一套**（codex R17-F1 纠正本条 2026-07-26 改写时的笔误：把未来数据门写成两个 API 共有，会得出「带未来字段的线既改不动也删不掉 → 这一局永久锁死」的错误结论）：
+    | 门 | `updateDrawingStyle` | `deleteDrawing(id:)` |
+    |---|---|---|
+    | `locked`（D60） | ✅ 拒 | ✅ 拒 |
+    | id 唯一非空（D66） | ✅ 拒 | ✅ 拒 |
+    | `withStyle` 语义（D59/D58 引擎支） | ✅ 拒 | —（删除不碰样式） |
+    | 工具已实现（D61 同族） | ✅ 拒 | —（删整条不需要懂它的样式） |
+    | **未来数据**（D61，按归并结果判） | ✅ 拒 | ❌ **绝不检查** |
+    **`deleteDrawing(id:)` 必须完全不看未来枚举值 / 未来字段**：删整条把 raw 一并移除，不产生"部分抹除"，且**它是这类线唯一保底的解封手段**（N14c）。给删除加未来数据门 = 把用户锁死在一个既改不动、也删不掉、还结束不了的局里。
   - **几何（`visibleGeometry`）是 route-level 信任边界，不是 engine-level 防御**：引擎**没有 mapper、判不了几何**（D51/D58/D67 一贯如此）。它**只由单一 UI 路由 enforce**。因此 UI 路由**必须在真正写入的那一刻重算 current `visibleGeometry`**——**改样式写入前**、以及**删除确认框点「删除」之后、调引擎之前**（确认框有时间窗：弹框期间线可能因惯性/自动推进滑出屏，若只在点 🗑 那一刻判、不在确认那一刻重算，会删掉一条现在看不见的线）。
   - 换言之：`updateDrawingStyle` / `deleteDrawing(id:)` 的引擎签名**不含** geometry 参数、也不声称挡 geometry；几何完整性靠「唯一调用点在 UI 路由、且该路由在写入瞬刻重算」这条源码守卫 + 时序保证（与 D51/D67 的论证结构一致）。
 - 谓词为真时恢复可用。**滑回来 / 解锁后自动恢复**，无需重选。
@@ -656,6 +664,7 @@ public private(set) var mode: DrawingSessionMode = .draw
   - **a2 换掉那个值 → 放行（🔄**2026-07-26 修订** 新增，修复路径）**：同一条线 → 把 `colorToken` 换成本版本认识的值 → **成功**、`drawingsRevision` +1、归并结果不再带未来枚举值（finalize 门随之解封）。**必须经样式控件的真实路由测一次**（只有引擎直调不算覆盖，见 D65 修订）。
   - **b 原始字节保真（核心）**：接 a，走完整持久化往返（`loadedDrawingsLossy.encoded()`）→ 重载后该条 raw 里 `colorToken:"futureNeon"` 与 `textColorToken:"futureCyan"` **逐字节仍在**（证明编辑被拒后没有任何 re-merge 覆盖 raw）。**这条是 R7-F2 的直接反例**：`colorToken:"futureNeon"` 与 `textColorToken:"futureCyan"` 是两个**不同**的 future 值，均 fallback 成 `.orange`——旧的「解码 `==` 后派生」会把它俩抹平，本测试钉死不会。
   - **c 删除仍允许（防过度 fail-closed）**：同一条未来枚举值线 → 经 UI 删除路由删除（几何可见、未锁定）→ **成功**移除、`drawingsRevision` +1。删整条不产生"部分抹除"，D61 允许。
+  - **c2 未来**字段**线同样删得掉（codex R17-F1 补，不可省）**：一条携带**未来顶层字段**（`knownDiskKeys` 之外的 key）的线——它**没有任何控件能覆盖那个 key**，故永远改不动 → **删除必须成功**，否则这条线既改不动也删不掉、这一局永久无法结束存档。断言删除返 `true`、`drawingsRevision` +1、归并后该条整体消失。
   - **d UI 不再灰置（🔄**2026-07-26 修订** 取代原「灰置分岔」）**：选中该线 → 断言**样式控件可点**、**🗑 亮**；经控件改**粗细** → 被拒且有反馈、选中保留；经控件**换色** → 成功。原「样式控件全灰」的断言已作废（它会让修复路径不可达）。
   - **e 本版本线不受影响（反向对照）**：一条本构建新建的线（无 unknown 枚举值，`textColorToken == colorToken`）→ 改 `colorToken` → **成功**、`textColorToken` **跟随变化**（D59 派生②无条件），与本期之前逐字一致。没有这条，实现可以用「一律拒绝改色」骗过 a。
   - **f 加载的当前版本普通线仍可编辑（D61 判据陷阱专项，codex R9-F1，不可省）**：造一条**普通**当前版本线（所有枚举字段都是已知值，`knownFutureEnumPayloads()` 对它返回的 `entries` 为**空**）→ **存盘 → 重载** → 选中 → 断言样式控件**亮**、`updateDrawingStyle` **成功**、`drawingsRevision` +1（🔄**2026-07-26 修订**：控件本就不再因未来数据置灰，故此处不再断言「控件亮」）。**这条直接钉死 R9-F1 的实现陷阱**：若判据被写成 `knownFutureEnumPayloads()` 的 id-membership（漏 `!entries.isEmpty`），该函数对每条 known 线恒返回一行 → 这条重载的普通线会被误判成"携带未来枚举值"→ 控件全灰、编辑 fail-closed，本测试当场红。**必须走"存盘→重载"往返**（`d` 的 in-memory 新建线走不到这个陷阱——陷阱只在 `loadedDrawingsLossy` 有条目时触发）。
