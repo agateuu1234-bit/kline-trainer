@@ -11,6 +11,13 @@
 ## Global Constraints
 
 - **完整 spec**：`docs/superpowers/specs/2026-07-23-drawing-tools-P1b-1b-i-select-edit-delete-design.md`（决策 D49–D67）。本切片落 **D50 / D51（引擎侧）/ D58（引擎支）/ D59 / D60 / D61 / D62 / D66**。
+- ⚠️ **对 spec 的一处显式偏离（user 2026-07-26 裁决，codex plan-R14-F1 触发）——D61 编辑门从「看来源」改为「看结果」**：
+  spec D61 原文 = 「对携带未来未知枚举值的线**一律**拒绝改样式」。落地改为：**先算候选、与加载快照归并，只有归并结果仍带本构建不支持的未来数据才拒**。
+  - **动机**：一律拒会让这条线只能**整条删掉**才能结束存档（finalize 门本就 fail-closed），删整条的数据损失严格大于「用户显式换掉一个本版本表示不了的色号」。
+  - **保护未削弱**：改 thickness 这类不涉及该值的编辑仍被拒（字段级归并会保住原值 → 结果仍带未来数据）；未来**字段**（本构建不认识的 key，没有任何控件能覆盖）**任何**编辑都仍被拒。
+  - **已知代价**：一次换线色会把「本来跟随线色」的未来字色一并覆盖（两个未来值解码后都是 `.orange`，派生② 分辨不了）——已用测试钉死并写明是取舍而非缺陷。
+  - **判据与 finalize 门同源**（`TrainingSessionCoordinator:729-736` 也是 reconcile 后查同两个门）→ 「编辑通过」⇒「这一局能结束存档」。
+  - **spec 正文未改**（本切片不动 spec 文件）；1b-ii/P5 接手时以本条为准。
 - `CONTRACT_VERSION` 保持 **1.12**，`user_version` 保持 **7**，**零迁移**（`DrawingObject` 不新增/不改任何持久化字段；本切片只加运行时 API）。
 - **访问级别纪律**：本切片新增的两个写入 API 一律 `internal`，**不得** `public`（D62/D51）。`withStyle` 同为 `internal`。测试经 `@testable import` 照常可调。
 - **拒绝 = 零改动 + `drawingsRevision` 不递增 + 返 `false`**：四道门任意一道不过，`drawings` 必须逐字段不变，计数器绝不动（D50/D60/D61/D66 逐条写死）。
@@ -1203,9 +1210,14 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDraw
     ///      改它不可逆；复盘新画线走 `reviewDrawings`，本期复盘不获得编辑能力 → 这道门不 over-reject
     ///   ① id 非空且**恰好**匹配一条（D66；≥2 条是坏状态，绝不"改第一条碰到的"）
     ///   ② 目标 `locked == false`（D60；本构建产不出 locked=true，只挡高版本解码来的）
-    ///   ③ 目标**既不携带未来未知枚举值、也不携带未来顶层字段**（D61 + codex plan-R13-F1；判据必须是
-    ///      raw-aware 的 `hasKnownFutureEnumValues` + `hasKnownFutureFields`，前者已含 `!entries.isEmpty`
-    ///      ——写成 `knownFutureEnumPayloads()` 的 id-membership 会误灰所有已加载线）
+    ///   ③ **改完之后**不再带本构建不支持的未来数据（D61 修订版，user 2026-07-26 裁决）：
+    ///      构造候选 → `loadedDrawingsLossy.reconciled(currentKnown:)` → 对该 id 查
+    ///      `hasKnownFutureEnumValues` + `hasKnownFutureFields`（后者是 codex plan-R13-F1 补的：
+    ///      未来**字段**能改变已知 key 的含义）。前者已含 `!entries.isEmpty`——**绝不可**写成
+    ///      `knownFutureEnumPayloads()` 的 id-membership（会误灰所有已加载线）。归并抛错 = 坏数据 → 拒。
+    ///      ⚠️ **这是对 spec D61 原文的显式修订**：原文是"携带未来枚举值 → 一律拒改样式"，
+    ///      落地为"看**改完的结果**"。理由（user 裁决）：一律拒会让这条线只能**整条删掉**才能结束存档，
+    ///      而删整条的损失严格大于"用户显式换掉一个本版本表示不了的色号"。得失见 §已知后果。
     ///   ④ `withStyle` 语义成立（D59：派生①②/归一化/可用性单点；水平线 `.segment` 恒不可渲染 → 拒）
     @discardableResult
     func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Bool {
@@ -1215,16 +1227,18 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDraw
         guard matches.count == 1, let i = matches.first else { return false }      // ①（D66 唯一）
         let old = drawings[i]
         guard !old.locked else { return false }                                    // ②（D60）
-        // ③（D61）：**两个 raw-aware 门并列**（codex plan-R13-F1）——
-        //   `hasKnownFutureEnumValues` 只看"已知 key 的未来**值**"；高版本还可能加**未来顶层字段**
-        //   （`knownDiskKeys` 之外的 key），它们**能改变已知 key 的含义**：例如一个未来字段声明
-        //   "字色独立于线色"，而解码出的 `textColorToken == colorToken` 恰好相等 → 派生② 会当成"跟随"
-        //   把它覆盖掉，reconcile 时未来字段还原样留着 → 落一份**自相矛盾**的高版本数据。
-        //   coordinator 的 finalize 门（`TrainingSessionCoordinator:734`）本来就是把这两个门 `||` 起来用的，
-        //   编辑面按同一对判据 fail-closed。
-        guard !loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id]),
-              !loadedDrawingsLossy.hasKnownFutureFields(liveIds: [id]) else { return false }
         guard let updated = old.withStyle(style) else { return false }             // ④（D59/D58 引擎支）
+        // ③（D61，**user 2026-07-26 裁决改为"看结果"**——对 spec 原文的显式修订，见下方 ⚠️）：
+        //   先算出候选状态、与加载快照**归并**，只有当归并结果**仍**带本构建不支持的未来数据时才拒。
+        //   两个判据并列（codex plan-R13-F1）：`hasKnownFutureEnumValues` 看"已知 key 的未来**值**"，
+        //   `hasKnownFutureFields` 看"`knownDiskKeys` 之外的未来**字段**"（它们能改变已知 key 的含义）。
+        //   判据与 coordinator 的 finalize 门**同源**（`TrainingSessionCoordinator:729-736` 也是先 reconcile
+        //   再用这两个门），故"编辑通过"⇒"这一局能结束存档"，两个面不会各说各话。
+        var candidate = drawings
+        candidate[i] = updated
+        guard let merged = try? loadedDrawingsLossy.reconciled(currentKnown: candidate) else { return false }
+        guard !merged.hasKnownFutureEnumValues(liveIds: [id]),
+              !merged.hasKnownFutureFields(liveIds: [id]) else { return false }
         drawings[i] = updated
         drawingsRevision += 1
         return true
@@ -1320,21 +1334,61 @@ struct DrawingEditDurabilityGateTests {
 
     // MARK: D61 未来未知枚举值
 
-    @Test("N14a: 携带未来未知枚举值的线 → 改样式 fail-closed（逐字段不变、revision 不递增）")
-    func futureEnumLineRejectsStyleEdit() throws {
+    @Test("N14a（D61 修订版）: 改**不涉及那个未来值**的字段（thickness）→ 仍 fail-closed，因为改完未来值还在")
+    func futureEnumLineRejectsUnrelatedStyleEdit() throws {
         let e = makeEngineWithLossy(try lossyFromRaw(futureRaw))
         #expect(e.drawings.count == 1)
         #expect(e.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: ["F"]) == true)   // 前提成立
         let before = e.drawings
         let rev = e.drawingsRevision
-        #expect(e.updateDrawingStyle(id: "F", style: style(5, .green)) == false)
+        // 只改 thickness：P1a 的字段级归并（`DrawingModelP1aTests:307` 钉死）会**保住** colorToken 原始
+        // 未来值 → 归并结果仍带未来数据 → 拒（这一局仍解不了封，拒掉也没损失）
+        var onlyThickness = DrawingDefaultStyle(); onlyThickness.thickness = 5
+        #expect(e.updateDrawingStyle(id: "F", style: onlyThickness) == false)
         expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("N14a2（D61 修订版，user 2026-07-26 裁决 B）: 换成本版本认识的颜色 → **允许**，且这一局随即可结束存档")
+    func futureEnumLineRepairableByChangingColor() throws {
+        // 单个未来值 fixture（colorToken 未来、textColorToken 正常）：用户显式换色 = 覆盖掉那个色号，
+        // 归并结果不再带未来数据 → 放行；线**保住**（几何/粗细/标注都在），不必整条删。
+        let raw = #"{"id":"R","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":2,"colorToken":"futureNeon","labelMode":"hidden","locked":false,"text":"hi","fontSize":14,"textColorToken":"orange","textForm":"plain"}"#
+        let e = makeEngineWithLossy(try lossyFromRaw(raw))
+        #expect(e.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: ["R"]) == true)   // 修复前：带未来值
+        let rev = e.drawingsRevision
+        var toGreen = DrawingDefaultStyle(); toGreen.thickness = 2; toGreen.colorToken = .green
+        #expect(e.updateDrawingStyle(id: "R", style: toGreen) == true)                    // 允许
+        #expect(e.drawingsRevision == rev + 1)
+        #expect(e.drawings.first { $0.id == "R" }?.colorToken == .green)
+        #expect(e.drawings.first { $0.id == "R" }?.text == "hi")                          // 线保住了
+        // 修复后：归并结果不再带未来数据 → finalize 门（同一对判据）也不会再拦这一局
+        let merged = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings)
+        #expect(merged.hasKnownFutureEnumValues(liveIds: ["R"]) == false)
+        #expect(merged.hasKnownFutureFields(liveIds: ["R"]) == false)
+        #expect(!String(decoding: try merged.encoded(), as: UTF8.self).contains("futureNeon"))
+    }
+
+    @Test("D61 修订版的**已知后果**（不掩饰）：一次换色会把「跟随线色」的未来字色一起覆盖掉")
+    func repairAlsoOverwritesFollowingFutureTextColor() throws {
+        // futureRaw 里 colorToken:"futureNeon" 与 textColorToken:"futureCyan" **解码后都是 .orange**
+        //（两个不同的未来值双双 fallback）→ 派生② 判"字色本来就跟着线色" → 换线色时字色一起变。
+        // 结果：两个未来值都被这次**用户显式换色**覆盖掉。这是选项 B 的已知代价，写在这里免得
+        // 后人以为是 bug：B 的取舍是"保住整条线，付出无法表示的色号"，优于"整条删掉"。
+        let e = makeEngineWithLossy(try lossyFromRaw(futureRaw))
+        var toGreen = DrawingDefaultStyle(); toGreen.thickness = 1; toGreen.colorToken = .green
+        #expect(e.updateDrawingStyle(id: "F", style: toGreen) == true)
+        let merged = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings)
+        let text = String(decoding: try merged.encoded(), as: UTF8.self)
+        #expect(!text.contains("futureNeon"))
+        #expect(!text.contains("futureCyan"))          // 一起没了——已知后果，非缺陷
+        #expect(merged.hasKnownFutureEnumValues(liveIds: ["F"]) == false)
     }
 
     @Test("N14b 核心: 编辑被拒后原始字节保真 —— futureNeon / futureCyan 逐字节仍在")
     func futureEnumRawBytesSurviveRejectedEdit() throws {
         let e = makeEngineWithLossy(try lossyFromRaw(futureRaw))
-        #expect(e.updateDrawingStyle(id: "F", style: style(5, .green)) == false)
+        var onlyThickness = DrawingDefaultStyle(); onlyThickness.thickness = 5   // 不碰颜色 → 必被拒
+        #expect(e.updateDrawingStyle(id: "F", style: onlyThickness) == false)
         // 走真实持久化路径（coordinator 存盘用的正是 reconciled(currentKnown:).encoded()）
         let data = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings).encoded()
         let text = String(decoding: data, as: UTF8.self)
@@ -1366,6 +1420,8 @@ struct DrawingEditDurabilityGateTests {
         #expect(e.loadedDrawingsLossy.hasKnownFutureFields(liveIds: ["X"]) == true)       // 字段门抓得到
         let before = e.drawings
         let rev = e.drawingsRevision
+        // ⚠️ 与未来**枚举值**不同：未来**字段**是本构建根本不认识的 key，**没有任何样式控件能覆盖它**
+        //    → 归并后它必然还在 → 任何样式编辑都被拒（D61 修订版对这一类的结论与原文一致）。
         #expect(e.updateDrawingStyle(id: "X", style: style(4, .green)) == false)
         expectDrawingsUnchanged(e, before, revisionBefore: rev)
         // 原始字节保真：未来字段仍在
