@@ -563,7 +563,7 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
 
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（在 `deleteDrawing(at:)`/`appendDrawing` 邻近新增方法）
-- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（同文件追加；复用其既有 `allSwiftFilesUnderSources()` / `trainingEnginePath`，**新增**空白无关的 `squeeze` / `squeezedSource` / `callSiteCount` / `squeezedContains` suite 私有方法）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（同文件追加；复用其既有 `allSwiftFilesUnderSources()` / `trainingEnginePath`，**新增**空白无关扫描器 `squeeze` / `squeezedText` / `squeezedSource` / `callCount(inSqueezed:pattern:)` / `callSiteCount(_:)` / `squeezedContains` 六个 suite 私有方法 + 两条扫描器自检测试）
 
 **Interfaces:**
 - Consumes: Task 1 的 `DrawingObject.withStyle(_:)`；既有 `drawingsRevision`（PR-1）。
@@ -682,15 +682,14 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         s.split(whereSeparator: { $0.isWhitespace }).joined()
     }
 
-    /// 一份源码 → **剥行注释 + 剥块注释（支持嵌套）+ 删除全部空白** 后的字符串。
+    /// 一段源码文本 → **剥行注释 + 剥块注释（支持嵌套）+ 删除全部空白** 后的字符串。
     /// ⚠️ 两次收紧的由来，别退回去：
     ///   ① 逐行 substring 扫描挡不住 `engine.deleteDrawing(\n id: x\n)`（codex plan-R1-F1）；
     ///   ② **只折叠空白、只收紧 `"( "` 仍不够**（codex plan-R2-F1）：`engine.deleteDrawing\n(\n id: x\n)`
     ///      会归一成 `deleteDrawing (id:`（左括号**前面**那个空格没人管）→ 照样漏；块注释
     ///      `engine.deleteDrawing/* c */(id:` 同理。故直接**删光空白 + 剥块注释**，让匹配与排版完全无关。
     ///   守卫漏掉一个调用点的后果不是"少测一条"，而是 PR-4 可以在**不补几何门**的情况下接上不可逆删除。
-    private func squeezedSource(_ path: String) throws -> String {
-        let raw = try String(contentsOfFile: path, encoding: .utf8)
+    private func squeezedText(_ raw: String) -> String {
         var out = ""
         var i = raw.startIndex
         var blockDepth = 0
@@ -714,14 +713,29 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         return out
     }
 
-    /// `Sources/` 里 `pattern` 的**调用**出现次数（扣掉 `defPattern` 命中的定义），按文件返回。
-    /// pattern/defPattern 会被同样 squeeze，故可按自然写法传入（`"deleteDrawing(id:"` / `"func deleteDrawing(id:"`）。
-    private func callSiteCount(_ pattern: String, defPattern: String) throws -> [(file: String, count: Int)] {
-        let p = squeeze(pattern), d = squeeze(defPattern)
-        return try allSwiftFilesUnderSources().compactMap { path in
-            let s = try squeezedSource(path)
-            let calls = (s.components(separatedBy: p).count - 1) - (s.components(separatedBy: d).count - 1)
-            return calls > 0 ? (path, calls) : nil
+    private func squeezedSource(_ path: String) throws -> String {
+        squeezedText(try String(contentsOfFile: path, encoding: .utf8))
+    }
+
+    /// 一段源码里 `pattern` 的**调用**次数 = 总出现数 − **定义**出现数。
+    /// ⚠️ 定义只按 `"func" + pattern` 扣，**绝不可**另传一个「更宽的 defPattern」（codex plan-R3-F1 实证的真 bug）：
+    ///   `func deleteDrawing(at index: Int)` squeeze 后是 `funcdeleteDrawing(atindex:` ——
+    ///   它**不含**调用 pattern `deleteDrawing(at:`（`at index:` ≠ `at:`），却会命中宽 defPattern
+    ///   `funcdeleteDrawing(at` → 一次**真实的** `deleteDrawing(at: 0)` 调用被扣成 `1-1=0`，
+    ///   守卫恒绿，正好放过它要挡的那条绕过 id 唯一/locked/几何三门的破坏性入口。
+    ///   现在的形状里「扣掉的」必然也是「数进来的」，不可能扣多。
+    private func callCount(inSqueezed s: String, pattern: String) -> Int {
+        let p = squeeze(pattern)
+        let total = s.components(separatedBy: p).count - 1
+        let defs  = s.components(separatedBy: "func" + p).count - 1
+        return total - defs
+    }
+
+    /// `Sources/` 里 `pattern` 的调用点（按文件），零调用的文件不出现。
+    private func callSiteCount(_ pattern: String) throws -> [(file: String, count: Int)] {
+        try allSwiftFilesUnderSources().compactMap { path in
+            let n = callCount(inSqueezed: try squeezedSource(path), pattern: pattern)
+            return n > 0 ? (path, n) : nil
         }
     }
 
@@ -738,17 +752,13 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         //    PR-4 接线时必须把本断言改成：恰好 1 处、且该文件是 UI 编辑路由、且路由在调用前先验
         //    HorizontalLineTool.visibleGeometry（D58 候选预检 + D65 当前门）。谁不补几何门就加调用点，
         //    这条当场红——这就是本守卫存在的意义（fail-closed forcing function）。
-        let sites = try callSiteCount("updateDrawingStyle(", defPattern: "func updateDrawingStyle(")
+        let sites = try callSiteCount("updateDrawingStyle(")
         #expect(sites.isEmpty, "updateDrawingStyle 出现了非预期调用点：\(sites)")
     }
 
-    @Test("守卫自检（codex plan-R1-F1 + R2-F1）：换行/括号前空白/块注释三种排版都逃不掉")
-    func squeezedScannerCatchesAwkwardFormatting() throws {
-        // 对扫描器喂三段**合法 Swift 但排版刁钻**的调用（不写进 Sources/，只验扫描器判别力）——
-        // 若哪天有人把它退回逐行/只折叠空白的扫描，本测试当场红。
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("guard-selfcheck-\(UUID().uuidString).swift")
-        try """
+    @Test("守卫自检 a（codex plan-R1-F1 + R2-F1）：换行/括号前空白/块注释三种排版都逃不掉，注释里的不算")
+    func scannerCatchesAwkwardFormatting() {
+        let src = """
         func caller() {
             engine.deleteDrawing(
                 id: a
@@ -761,13 +771,34 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
             // engine.deleteDrawing(id: 行注释里的不算)
             /* engine.deleteDrawing(id: 块注释里的也不算) */
         }
-        """.write(to: tmp, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: tmp) }
-        let s = try squeezedSource(tmp.path)
-        #expect(s.components(separatedBy: squeeze("deleteDrawing(id:")).count - 1 == 3,
-                "三种排版都该命中，实际：\(s)")
+        """
+        let s = squeezedText(src)
+        #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 3, "三种排版都该命中，实际 squeeze：\(s)")
         #expect(!s.contains("行注释里的不算"))
         #expect(!s.contains("块注释里的也不算"))
+    }
+
+    @Test("守卫自检 b（codex plan-R3-F1）：first-argument-label 的定义不得把真实调用扣成 0")
+    func scannerCountsFirstArgumentLabelCallsExactly() {
+        // `func deleteDrawing(at index: Int)` 与调用 `deleteDrawing(at: 0)` 形状不同：
+        // 前者 squeeze 后是 `funcdeleteDrawing(atindex:`，**不含**调用 pattern。
+        // 用「更宽的 defPattern」去扣就会把这次真实调用抹成 0（守卫恒绿 = 破坏性入口放行）。
+        let src = """
+        func deleteDrawing(at index: Int) {}
+        func caller() { engine.deleteDrawing(at: 0) }
+        """
+        #expect(callCount(inSqueezed: squeezedText(src), pattern: "deleteDrawing(at:") == 1)
+        // 对照：同名 id 版本的定义**确实**含调用 pattern（`func deleteDrawing(id: DrawingID)`）→ 必须被扣掉
+        let src2 = """
+        func deleteDrawing(id: DrawingID) -> Bool { true }
+        """
+        #expect(callCount(inSqueezed: squeezedText(src2), pattern: "deleteDrawing(id:") == 0)
+        // 再对照：定义 + 一次真实调用 → 恰好 1
+        let src3 = """
+        func deleteDrawing(id: DrawingID) -> Bool { true }
+        func caller() { _ = engine.deleteDrawing(id: "x") }
+        """
+        #expect(callCount(inSqueezed: squeezedText(src3), pattern: "deleteDrawing(id:") == 1)
     }
 ```
 
@@ -1128,10 +1159,10 @@ git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（l
         #expect(try !squeezedContains(trainingEnginePath, "public func deleteDrawing(id:"))
         // PR-4 接线时改成：恰好 1 处、在 UI 删除路由、且路由在**确认框点「删除」之后**重算 visibleGeometry
         // （D65 R13-F1：确认框有时间窗，线可能滑走 → 只在点 🗑 那刻判几何是时序 bug）。
-        let idSites = try callSiteCount("deleteDrawing(id:", defPattern: "func deleteDrawing(id:")
+        let idSites = try callSiteCount("deleteDrawing(id:")
         #expect(idSites.isEmpty, "deleteDrawing(id:) 出现了非预期调用点：\(idSites)")
         // N19d 不回归确认：index 版本仍零调用点、仍非 public（PR-1 已落）。
-        let atSites = try callSiteCount("deleteDrawing(at:", defPattern: "func deleteDrawing(at")
+        let atSites = try callSiteCount("deleteDrawing(at:")
         #expect(atSites.isEmpty, "deleteDrawing(at:) 应零调用点：\(atSites)")
         #expect(try !squeezedContains(trainingEnginePath, "public func deleteDrawing(at index:"))
     }
@@ -1194,28 +1225,29 @@ PR-1 那条守卫用的是**逐行** substring（局部函数 `callSites`）。*
             #expect(try squeezedContains(trainingEnginePath, "func " + decl))       // 仍存在（internal）
         }
         // (2) 唯一调用点（**核心**：仅非 public 不够——包内新调用者仍能绕过 handleDrawingTap 的 geometry 门）
-        let appends = try callSiteCount("appendDrawing(", defPattern: "func appendDrawing(")
+        let appends = try callSiteCount("appendDrawing(")
         #expect(appends.map(\.count).reduce(0, +) == 1)
         #expect(appends.allSatisfy { $0.file.contains("TrainingEngine.swift") })    // = routeDrawingCommit 内
-        let reviewAppends = try callSiteCount("appendReviewDrawing(", defPattern: "func appendReviewDrawing(")
+        let reviewAppends = try callSiteCount("appendReviewDrawing(")
         #expect(reviewAppends.map(\.count).reduce(0, +) == 1)
-        let route = try callSiteCount("routeDrawingCommit(", defPattern: "func routeDrawingCommit(")
+        let route = try callSiteCount("routeDrawingCommit(")
         #expect(route.map(\.count).reduce(0, +) == 1)
         #expect(route.allSatisfy { $0.file.contains("ChartContainerView") })        // 在 handleDrawingTap 的门之后
         // index 版删除：零生产调用点（D51/D67）
-        #expect(try callSiteCount("deleteDrawing(at:", defPattern: "func deleteDrawing(at").isEmpty)
-        #expect(try callSiteCount("removeReviewDrawing(at:", defPattern: "func removeReviewDrawing(at").isEmpty)
+        #expect(try callSiteCount("deleteDrawing(at:").isEmpty)
+        #expect(try callSiteCount("removeReviewDrawing(at:").isEmpty)
         // 装载入口：setReviewLossy 只在 Coordinator（复盘装载）与 TrainingEngine（setReviewDrawings 委托）
-        let reviewLossy = try callSiteCount("setReviewLossy(", defPattern: "func setReviewLossy(")
+        let reviewLossy = try callSiteCount("setReviewLossy(")
         #expect(!reviewLossy.isEmpty)
         #expect(reviewLossy.allSatisfy { $0.file.contains("TrainingSessionCoordinator") || $0.file.contains("TrainingEngine") })
-        // setReviewDrawings 零 Sources/ 调用点（其定义委托 setReviewLossy，被 defPattern 扣除）
-        #expect(try callSiteCount("setReviewDrawings(", defPattern: "func setReviewDrawings(").isEmpty)
+        // setReviewDrawings 零 Sources/ 调用点（其定义委托 setReviewLossy；定义本身按 "func"+pattern 扣掉）
+        #expect(try callSiteCount("setReviewDrawings(").isEmpty)
     }
 ```
 
-> ⚠️ 两处必须核对真实源码再写死（[[feedback_plan_embedded_facts_unreliable]]：计划内嵌的**事实**必须实测）：
-> - 定义签名的**参数名**（`deleteDrawing(at index:` / `removeReviewDrawing(at index:`）—— squeeze 后 `func deleteDrawing(atindex:`，与调用 `deleteDrawing(at:` 不同形，故 defPattern 必须带参数名才扣得准。实施时先 `grep -n "func deleteDrawing(at\|func removeReviewDrawing(at" Sources/…/TrainingEngine.swift` 核实。
+> ⚠️ 必须核对真实源码再写死（[[feedback_plan_embedded_facts_unreliable]]：计划内嵌的**事实**必须实测）：
+> - **访问级别断言里的参数名**（`deleteDrawing(at index:` / `removeReviewDrawing(at index:`）：squeeze 后要与真实签名同形才断得准，实施时先 `grep -n "func deleteDrawing(at\|func removeReviewDrawing(at" Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift` 核实。
+>   （**调用点计数**不再需要传 defPattern —— `callSiteCount` 内部固定按 `"func"+pattern` 扣，first-argument-label 的定义因形状不同而**本来就不会**被计入，见守卫自检 b。）
 > - `appendDrawing(` 的**调用**计数：`routeDrawingCommit` 里那一处。若实测不等于 1，先查是不是有新调用点（那才是守卫要抓的），不要直接改数字。
 
 - [ ] **Step 6: 全量 host 测试**
