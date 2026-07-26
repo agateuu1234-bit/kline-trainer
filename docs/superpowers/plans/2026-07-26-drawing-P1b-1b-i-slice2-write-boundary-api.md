@@ -214,6 +214,16 @@ struct DrawingObjectStyleEditTests {
         #expect(new.labelMode == .right)
     }
 
+    // ⚠️ N5 源码守卫（四条语义单点）**不在本 Task**，在 Task 2（codex plan-R1-F2）：
+    //    本 Task 结束时 `DrawingSession.commitPending` 里那份 `isExtended: s.lineSubType == .ray` 还在
+    //    （它到 Task 2 才被 withStyle 取代）→ 守卫此刻必红，破坏「每 task 各自绿再 commit」的节奏。
+    //    守卫必须跟着「最后一份重复语义被消灭」的那个 Task 落地。
+}
+```
+
+（下面这段 N5 守卫代码是 **Task 2 Step 4** 要加的，放在此处仅供对照阅读，实施时按 Task 2 的指示写入同一个测试文件：）
+
+```swift
     @Test("N5 源码守卫：D59 四条语义单点 + 写入边界不得直接套横规则")
     func fourSemanticsSingleSource() throws {
         let contracts = URL(fileURLWithPath: #filePath)
@@ -269,7 +279,6 @@ struct DrawingObjectStyleEditTests {
         #expect(shared.contains { $0.hasPrefix("TrainingEngine.swift") })
         #expect(shared.contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
     }
-}
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -477,23 +486,32 @@ Expected: FAIL —— 现状 `commitPending` 直接取 `s.labelMode`（不归一
 
 `TrainingEngine` 那半段（`routeDrawingCommit` 整体透传 5 字段 + 无 append-then-replace）**一字不动**。
 
-- [ ] **Step 5: 运行测试确认通过**
+- [ ] **Step 5: 加 N5 源码守卫（四条语义单点）——本 Task 才加（codex plan-R1-F2）**
 
-Run: `cd ios/Contracts && swift test --filter "DrawingSessionSourceGuard|TrainingEngineDrawingCommit" 2>&1 | tail -20`
+把 Task 1 Step 1 末尾那段 `fourSemanticsSingleSource`（连同 `hits(_:excluding:)` 局部 helper）**原样**追加进 `Drawing/DrawingObjectStyleEditTests.swift` 的 suite 里。
+
+> **为什么必须等到这个 Task**：Task 1 结束时 `DrawingSession.commitPending` 里仍有第二份 `isExtended: s.lineSubType == .ray`（本 Task Step 3 才消灭它）→ 守卫在 Task 1 结束时**必红**，会逼实现者要么跳过「每 task 全绿再 commit」，要么手工放宽守卫（两者都是坏结果）。守卫跟着「最后一份重复语义被消灭」的 Task 落地，红→绿的因果才对得上。
+>
+> **先跑一次证明它有判别力**：本 Task Step 3 改完 `commitPending` **之前**先把守卫加进去跑一次 → 期望 `派生① 不止一处` FAIL（`DrawingSession.swift` 那份还在）；改完 Step 3 后再跑 → PASS。这就是这条守卫的红绿验。
+
+- [ ] **Step 6: 运行测试确认通过**
+
+Run: `cd ios/Contracts && swift test --filter "DrawingSessionSourceGuard|TrainingEngineDrawingCommit|DrawingObjectStyleEditTests" 2>&1 | tail -20`
 Expected: 全部 PASS。
 
-- [ ] **Step 6: 全量 host 测试**
+- [ ] **Step 7: 全量 host 测试**
 
 Run: `cd ios/Contracts && swift test 2>&1 | tail -5`
 Expected: 全绿（累计计数 = 基线 + Task1/2 新增）。
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingSession.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingObjectStyleEditTests.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingCommitTests.swift
-git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle（两个写入点共用语义闸，D59）"
+git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四条语义单点守卫（D59）"
 ```
 
 ---
@@ -502,7 +520,7 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle（两个�
 
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（在 `deleteDrawing(at:)`/`appendDrawing` 邻近新增方法）
-- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（同文件追加，复用其 `callSites` 源码守卫 helper）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（同文件追加；复用其既有 `allSwiftFilesUnderSources()` / `trainingEnginePath`，**新增**跨行安全的 `normalizedSource` / `normalizedCallSites` suite 私有方法）
 
 **Interfaces:**
 - Consumes: Task 1 的 `DrawingObject.withStyle(_:)`；既有 `drawingsRevision`（PR-1）。
@@ -510,7 +528,7 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle（两个�
 
 - [ ] **Step 1: 写失败测试**
 
-追加到 `TrainingEngineDrawingSessionTests.swift`（文件已有 `callSites`/`allSwiftFilesUnderSources`/`trainingEnginePath` helper）：
+追加到 `TrainingEngineDrawingSessionTests.swift`（文件已有 `allSwiftFilesUnderSources()` / `trainingEnginePath`；`callSites` 是 PR-1 `appendFamilyTrustBoundary` 内的局部函数，**不动它**，本 Task 另加跨行安全的扫描器）：
 
 ```swift
     // MARK: 切片2 Task 3（D50/D58 引擎支/D62/D66）：updateDrawingStyle
@@ -614,20 +632,73 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle（两个�
         #expect(n.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 5)) == true)
     }
 
+    // MARK: 跨行安全的调用点扫描（codex plan-R1-F1）
+
+    /// 一份源码 → **剥注释 + 折叠全部空白（含换行）** 后的单行字符串。
+    /// ⚠️ **逐行 substring 扫描挡不住普通多行写法**（codex plan-R1-F1 实证）：
+    ///     `engine.deleteDrawing(\n    id: selectedID\n)` 没有任何一行含 `deleteDrawing(id:`
+    ///   → 守卫恒绿，而 PR-4 那道「确认后重算几何」就没人逼着补了（不可逆删除失去 forcing function）。
+    ///   带标签的 pattern（`xxx(id:` / `xxx(at:`）尤其脆弱。折叠空白后 `deleteDrawing( id:` 再收紧
+    ///   `( ` → `(`，使跨行与单行写法同形，两者都命中。
+    private func normalizedSource(_ path: String) throws -> String {
+        let stripped = try String(contentsOfFile: path, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> String in                        // 整行注释丢弃；行尾 `//` 之后截断
+                guard let r = line.range(of: "//") else { return String(line) }
+                return String(line[line.startIndex..<r.lowerBound])
+            }
+            .joined(separator: " ")
+        return stripped.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+            .replacingOccurrences(of: "( ", with: "(")
+    }
+
+    /// `Sources/` 里 `pattern` 的**调用**出现次数（扣掉 `defPattern` 命中的定义），按文件返回。
+    /// 跨行调用同样命中（见 `normalizedSource`）。
+    private func normalizedCallSites(_ pattern: String, defPattern: String) throws -> [(file: String, count: Int)] {
+        try allSwiftFilesUnderSources().compactMap { path in
+            let s = try normalizedSource(path)
+            let total = s.components(separatedBy: pattern).count - 1
+            let defs  = s.components(separatedBy: defPattern).count - 1
+            let calls = total - defs
+            return calls > 0 ? (path, calls) : nil
+        }
+    }
+
     @Test("N15: updateDrawingStyle 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
     func updateDrawingStyleTrustBoundary() throws {
-        let engineSrc = try String(contentsOfFile: trainingEnginePath, encoding: .utf8)
-        #expect(engineSrc.contains("func updateDrawingStyle(id:"))          // 仍存在
+        let engineSrc = try normalizedSource(trainingEnginePath)
+        #expect(engineSrc.contains("func updateDrawingStyle(id:"))          // 仍存在（也证明真读到了文件）
         #expect(!engineSrc.contains("public func updateDrawingStyle("))     // 不是 public（D62）
         // ⚠️ 本切片是引擎写入面，UI 编辑路由属 PR-4 → 现在**零调用点**。
         //    PR-4 接线时必须把本断言改成：恰好 1 处、且该文件是 UI 编辑路由、且路由在调用前先验
         //    HorizontalLineTool.visibleGeometry（D58 候选预检 + D65 当前门）。谁不补几何门就加调用点，
         //    这条当场红——这就是本守卫存在的意义（fail-closed forcing function）。
-        #expect(try callSites(callPattern: "updateDrawingStyle(", defExclude: "func updateDrawingStyle(").isEmpty)
+        let sites = try normalizedCallSites("updateDrawingStyle(", defPattern: "func updateDrawingStyle(")
+        #expect(sites.isEmpty, "updateDrawingStyle 出现了非预期调用点：\(sites)")
+    }
+
+    @Test("守卫自检（codex plan-R1-F1）：跨行调用**也**能被 normalizedCallSites 命中")
+    func normalizedScannerCatchesMultilineCalls() throws {
+        // 直接对扫描器喂一段跨行调用文本（不写进 Sources/，只验扫描器本身的判别力）——
+        // 若哪天有人把它退回逐行 substring 扫描，本测试当场红。
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("guard-selfcheck-\(UUID().uuidString).swift")
+        try """
+        func caller() {
+            engine.deleteDrawing(
+                id: selectedID
+            )
+            // engine.deleteDrawing(id: "注释里的不算")
+        }
+        """.write(to: tmp, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let s = try normalizedSource(tmp.path)
+        #expect(s.contains("deleteDrawing(id:"))                       // 跨行调用被折叠后命中
+        #expect(!s.contains("注释里的不算"))                             // 注释确实被剥掉
     }
 ```
 
-> `callSites` 目前是 `appendFamilyTrustBoundary` 测试**内部**的局部函数。本 Task 把它**提为 suite 私有方法**（签名不变：`private func callSites(callPattern: String, defExclude: String) throws -> [(file: String, line: String)]`），供两处复用；`appendFamilyTrustBoundary` 内的局部定义删除，其调用点不变。
+> **不动 PR-1 的 `callSites` 局部函数**（它服务 `appendFamilyTrustBoundary`）：`appendDrawing(` / `appendReviewDrawing(` / `routeDrawingCommit(` 这三个 pattern 是「函数名 + 左括号」，跨行传参也照样在同一行命中，逐行扫描对它们成立。**只有带标签的 pattern（`xxx(id:` / `xxx(at:`）会被跨行写法绕过**，它们在 Task 5 统一升级到 `normalizedCallSites`。
 
 - [ ] **Step 2: 加测试专用注入口（DEBUG hook）并跑红**
 
@@ -884,7 +955,7 @@ git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（l
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（追加）
 
 **Interfaces:**
-- Consumes: 既有 `drawingsRevision`、Task 3 提为 suite 方法的 `callSites` helper。
+- Consumes: 既有 `drawingsRevision`；Task 3 新增的 `normalizedSource` / `normalizedCallSites`（跨行安全扫描器）。
 - Produces: `TrainingEngine.deleteDrawing(id: DrawingID) -> Bool`（**internal**、`@discardableResult`）。成功 → 移除 + `drawingsRevision += 1` + `true`；id 不存在/非唯一/空 或 `locked` → 零改动 + 不递增 + `false`。
 
 - [ ] **Step 1: 写失败测试**
@@ -980,14 +1051,20 @@ git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（l
 
     @Test("N19a: deleteDrawing(id:) 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
     func deleteByIdTrustBoundary() throws {
-        let engineSrc = try String(contentsOfFile: trainingEnginePath, encoding: .utf8)
+        let engineSrc = try normalizedSource(trainingEnginePath)     // 跨行安全（Task 3 的扫描器）
         #expect(engineSrc.contains("func deleteDrawing(id:"))
         #expect(!engineSrc.contains("public func deleteDrawing(id:"))
         // PR-4 接线时改成：恰好 1 处、在 UI 删除路由、且路由在**确认框点「删除」之后**重算 visibleGeometry
         // （D65 R13-F1：确认框有时间窗，线可能滑走 → 只在点 🗑 那刻判几何是时序 bug）。
-        #expect(try callSites(callPattern: "deleteDrawing(id:", defExclude: "func deleteDrawing(id:").isEmpty)
-        // N19d 不回归确认：index 版本仍零调用点、仍非 public（PR-1 已落）
-        #expect(try callSites(callPattern: "deleteDrawing(at:", defExclude: "func deleteDrawing(at").isEmpty)
+        let idSites = try normalizedCallSites("deleteDrawing(id:", defPattern: "func deleteDrawing(id:")
+        #expect(idSites.isEmpty, "deleteDrawing(id:) 出现了非预期调用点：\(idSites)")
+        // N19d 不回归确认：index 版本仍零调用点、仍非 public（PR-1 已落）。
+        // ⚠️ 这两条 PR-1 原本用**逐行** substring 扫描 → 跨行写法可绕过（codex plan-R1-F1）；
+        //    本切片一并升级为跨行安全的扫描（同一族信任边界守卫，判据不该有强弱两档）。
+        let atSites = try normalizedCallSites("deleteDrawing(at:", defPattern: "func deleteDrawing(at")
+        #expect(atSites.isEmpty, "deleteDrawing(at:) 应零调用点：\(atSites)")
+        let reviewAtSites = try normalizedCallSites("removeReviewDrawing(at:", defPattern: "func removeReviewDrawing(at")
+        #expect(reviewAtSites.isEmpty, "removeReviewDrawing(at:) 应零调用点：\(reviewAtSites)")
         #expect(!engineSrc.contains("public func deleteDrawing(at "))
     }
 ```
@@ -1035,12 +1112,30 @@ Expected: 8 tests PASS。
 - 临时注释掉 `guard !drawings[i].locked` → `swift test --filter deleteRejectsLocked` → 期望 FAIL → 恢复；
 - 临时注释掉 `guard flow.mode != .review` → `swift test --filter deleteRefusedInReviewMode` → 期望 FAIL → 恢复。
 
-- [ ] **Step 5: 全量 host 测试**
+- [ ] **Step 5: 把 PR-1 里两条**带标签**断言也升级到跨行安全扫描（codex plan-R1-F1）**
+
+`appendFamilyTrustBoundary`（PR-1）里这两行仍是逐行 substring：
+
+```swift
+        #expect(try callSites(callPattern: "deleteDrawing(at:", defExclude: "func deleteDrawing(at").isEmpty)
+        #expect(try callSites(callPattern: "removeReviewDrawing(at:", defExclude: "func removeReviewDrawing(at").isEmpty)
+```
+
+改成用 Task 3 的跨行安全扫描器（**同一族信任边界守卫不该有强弱两档**——留一条弱的在那里，读者会以为该性质已被钉死）：
+
+```swift
+        #expect(try normalizedCallSites("deleteDrawing(at:", defPattern: "func deleteDrawing(at").isEmpty)
+        #expect(try normalizedCallSites("removeReviewDrawing(at:", defPattern: "func removeReviewDrawing(at").isEmpty)
+```
+
+其余三个 pattern（`appendDrawing(` / `appendReviewDrawing(` / `routeDrawingCommit(`）**保持不动**：它们是「函数名 + 左括号」，跨行传参也在同一行命中，逐行扫描对它们成立（不做无谓改动，CLAUDE.md §3）。
+
+- [ ] **Step 6: 全量 host 测试**
 
 Run: `cd ios/Contracts && swift test 2>&1 | tail -5`
 Expected: 全绿。
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift \
