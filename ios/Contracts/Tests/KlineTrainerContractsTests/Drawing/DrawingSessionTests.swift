@@ -228,4 +228,37 @@ struct DrawingSessionTests {
         #expect(s.pendingAnchors.isEmpty)                         // 提交后清 pending
         #expect(s.activeDrawingTool == .trend)                    // D38：提交后工具保持（连续画线）
     }
+
+    // MARK: Task 4（D57）：选择态显式 mode
+
+    @Test("N10: setMode(.select)/discardPendingAnchors/deactivate 三清语义互不混用")
+    @MainActor func modeMutatorsAreDistinct() {
+        let s = DrawingSession()
+        s.activate(tool: .horizontal)
+        s.addAnchor(DrawingAnchor(period: .daily, candleIndex: 1, price: 5), panel: .upper)
+        // setMode(.select)：mode→.select，drawingModeActive 不变(true)，activeDrawingTool 不变(非nil)，pending 清
+        s.setMode(.select)
+        #expect(s.mode == .select)
+        #expect(s.drawingModeActive == true)
+        #expect(s.activeDrawingTool == .horizontal)
+        #expect(s.pendingAnchors.isEmpty)
+        // 选择态不落锚（D57）：addAnchor no-op
+        s.addAnchor(DrawingAnchor(period: .daily, candleIndex: 2, price: 6), panel: .upper)
+        #expect(s.pendingAnchors.isEmpty)
+        // deactivate：mode 复位 .draw，drawingModeActive→false，activeDrawingTool→nil
+        s.deactivate()
+        #expect(s.mode == .draw)
+        #expect(s.drawingModeActive == false)
+        #expect(s.activeDrawingTool == nil)
+    }
+
+    @Test("D57: 选择态下再点亮同一工具 → 切回 .draw（mode 赋值在幂等 guard 之前）")
+    @MainActor func reArmSameToolReturnsToDraw() {
+        let s = DrawingSession()
+        s.activate(tool: .horizontal)
+        s.setMode(.select)
+        s.activate(tool: .horizontal)      // 同工具：幂等 guard 会 early-return，但 mode 必须已切回 .draw
+        #expect(s.mode == .draw)
+        #expect(s.activeDrawingTool == .horizontal)
+    }
 }
