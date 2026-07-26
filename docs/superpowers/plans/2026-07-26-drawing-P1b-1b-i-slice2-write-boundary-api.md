@@ -800,6 +800,16 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         try squeezedSource(path).contains(squeeze(needle))
     }
 
+    /// `Sources/` 里**提到过**该标识符的文件（剥注释后按裸标识符找，不看后面跟不跟左括号）。
+    /// ⚠️ 为什么必须按「标识符」而不是「调用 pattern」（codex plan-R5-F1）：
+    ///   `let f = engine.updateDrawingStyle` / `let g: (DrawingID, DrawingDefaultStyle) -> Bool = engine.updateDrawingStyle`
+    ///   这类**方法引用**把调用挪到了别处，源码里根本不出现 `updateDrawingStyle(` —— 只数调用 pattern 的守卫
+    ///   会放它过去，而这两个 API 的几何门**只**靠「唯一调用点在已验几何的 UI 路由」这条源码守卫成立。
+    ///   按标识符扫，方法引用也必然让标识符出现在那个文件里 → 照样被抓。
+    private func filesMentioning(_ identifier: String) throws -> [String] {
+        try allSwiftFilesUnderSources().filter { try squeezedSource($0).contains(identifier) }
+    }
+
     @Test("N15: updateDrawingStyle 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
     func updateDrawingStyleTrustBoundary() throws {
         #expect(try squeezedContains(trainingEnginePath, "func updateDrawingStyle(id:"))    // 仍存在（也证明真读到文件）
@@ -810,6 +820,13 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         //    这条当场红——这就是本守卫存在的意义（fail-closed forcing function）。
         let sites = try callSiteCount("updateDrawingStyle(")
         #expect(sites.isEmpty, "updateDrawingStyle 出现了非预期调用点：\(sites)")
+        // **更强的一层（codex plan-R5-F1）**：连**方法引用**（`let f = engine.updateDrawingStyle`）都要挡——
+        // 那种写法源码里不出现 `updateDrawingStyle(`，只数调用 pattern 会放过它，而几何门**只**靠
+        // 「唯一调用点在已验几何的 UI 路由」这条守卫成立。故按**标识符的文件作用域**钉：
+        // 本切片只许出现在引擎自身文件；PR-4 接线时把路由文件加进白名单（**只加那一个**）。
+        let mentions = try filesMentioning("updateDrawingStyle")
+        #expect(mentions.allSatisfy { $0.contains("TrainingEngine.swift") },
+                "updateDrawingStyle 被引擎以外的文件提到（含方法引用）：\(mentions)")
     }
 
     @Test("守卫自检 a（codex plan-R1-F1 + R2-F1）：换行/括号前空白/块注释三种排版都逃不掉，注释里的不算")
@@ -1216,6 +1233,12 @@ git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（l
         let atSites = try callSiteCount("deleteDrawing(at:")
         #expect(atSites.isEmpty, "deleteDrawing(at:) 应零调用点：\(atSites)")
         #expect(try !squeezedContains(trainingEnginePath, "public func deleteDrawing(at index:"))
+        // 标识符作用域（codex plan-R5-F1，连方法引用一起挡）：`deleteDrawing` 本切片只许出现在
+        // 引擎自身文件 + `DrawingToolManager.swift`（1a-iv 交接①在案的**死代码**，spec §1.2/§8#5 明令本期不动，
+        // 它有自己的同名 `deleteDrawing(at:)`，与引擎写入面无关）。PR-4 接线时**只**把删除路由文件加进白名单。
+        let mentions = try filesMentioning("deleteDrawing")
+        #expect(mentions.allSatisfy { $0.contains("TrainingEngine.swift") || $0.contains("DrawingToolManager.swift") },
+                "deleteDrawing 被白名单以外的文件提到（含方法引用）：\(mentions)")
     }
 ```
 
@@ -1448,6 +1471,7 @@ git commit -m "划线 1b-i 切片2 Task6：接手 PR-1 的 5 项 Minor backlog�
 
 ## 交接（PR-3 / PR-4 必须接手）
 
+0. **已接受的残留（本切片明写，别当没说）**：源码守卫是**文本级**的（调用点计数 + 标识符文件作用域），它挡得住「忘了补几何门就加调用点」和「用方法引用绕过调用 pattern」，但**挡不住**已在白名单文件里的代码把方法引用**传出去**。要彻底焊死只有两条路：SwiftSyntax 级扫描（为一条守卫引入编译器级依赖），或「只有几何校验过的路由能构造」的授权对象——后者在本仓落不了地：能构造它的类型得声明在 UI 路由文件，而那是 UIKit-only 文件（纯 macOS host 不编译），引擎引用它会直接炸掉 host 测试；把几何证明塞进引擎签名又违反 D65「引擎签名不含 geometry 参数」。**现状取舍**：本切片零调用点、危害为零；PR-4 接线时这条守卫是**唯一**的几何门 forcing function，届时若觉得不够，再单独评估上 SwiftSyntax。
 1. **PR-4 接线时必须同步改两条源码守卫**（本切片故意写成「零调用点」）：
    - `updateDrawingStyle(` → 恰好 1 处，且在 UI 编辑路由内，且路由**先过 D65 当前几何门 → 若改 `lineSubType` 再过 D58 候选预检 → 才调引擎**；
    - `deleteDrawing(id:` → 恰好 1 处，且在 UI 删除路由内，且路由在**确认框点「删除」之后**重算 `visibleGeometry`（D65 R13-F1 时序）。
