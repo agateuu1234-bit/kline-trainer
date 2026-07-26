@@ -110,7 +110,22 @@ func makeEngineWithLossy(_ lossy: LossyDrawingArray) -> TrainingEngine {
 func lossyFromRaw(_ raw: String) throws -> LossyDrawingArray {
     try LossyDrawingArray.decode(Data("[\(raw)]".utf8))
 }
+
+/// 「拒绝 = 零改动」的**统一**断言（codex plan-R4-F2）。
+/// ⚠️ `DrawingObject.==` **排除 `id`**（`Models.swift` 的 Equatable 实测）→ 只写 `e.drawings == before`
+///   的话，一次「把 id 改写了、其它字段都相同」的坏写入会从**所有** no-op 测试底下溜过去，
+///   而 id 恰是本切片 select/update/delete 的身份键、也是 lossy 归并的锚。故必须**同时**比 id 序列。
+///   每一处「被拒后不变」都用本助手，不要各写各的（判据单点，也免得漏写 id 那半条）。
+@MainActor
+func expectDrawingsUnchanged(_ e: TrainingEngine, _ before: [DrawingObject], revisionBefore: Int,
+                             sourceLocation: SourceLocation = #_sourceLocation) {
+    #expect(e.drawings == before, sourceLocation: sourceLocation)
+    #expect(e.drawings.map(\.id) == before.map(\.id), "id 序列被改写了", sourceLocation: sourceLocation)
+    #expect(e.drawingsRevision == revisionBefore, "拒绝路径不得递增 revision", sourceLocation: sourceLocation)
+}
 ```
+
+> `expectDrawingsUnchanged` 用到 `#expect` / `SourceLocation` → `DrawingTestFixtures.swift` 需 `import Testing`（Swift 的 import 是**文件级**的，别指望别的测试文件的 import）。
 
 > `TrainingEngineActionsTests.m3Candles(_:)` 是同 test module 内的既有 `static func`（`TrainingEngineActionsTests.swift:36`），可直接调用，无需 import。
 
@@ -129,7 +144,7 @@ func lossyFromRaw(_ raw: String) throws -> LossyDrawingArray {
 - Produces:
   - `DrawingStyleAvailability.isRenderableSubType(_ sub: LineSubType, toolType: DrawingToolType) -> Bool`（`public static`，与既有两个 helper 同级）
   - `DrawingStyleAvailability.normalizedLabelMode(current: LabelMode, lineSubType: LineSubType, toolType: DrawingToolType) -> LabelMode`（`public static`，**tool-aware 重载**；非水平工具原样返回，横线委托既有二参版本）
-  - `DrawingObject.withStyle(_ s: DrawingDefaultStyle) -> DrawingObject?`（**internal**，`nil` = 该样式对本对象的 `toolType` 语义不成立）
+  - `DrawingObject.withStyle(_ s: DrawingDefaultStyle) -> DrawingObject?`（**internal**；`nil` 有两种原因：① 该样式的 `lineSubType` 对本对象 `toolType` 恒不可渲染；② `thickness` 越出 1…5 **且**不等于本对象当前值）
 - Consumes: 既有 `DrawingStyleAvailability.horizontalLineSubTypeEnabled` / `normalizedLabelMode`、`DrawingDefaultStyle`（5 字段：`lineSubType`/`lineStyle`/`thickness`/`colorToken`/`labelMode`，`Models/DrawingEnums.swift:28-35`）。
 
 - [ ] **Step 1: 写失败测试**
@@ -192,6 +207,26 @@ struct DrawingObjectStyleEditTests {
                                   anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
                                   isExtended: false, panelPosition: 0, period: .daily)
         #expect(trend.withStyle(style(.segment)) != nil)     // P1c 的线段工具不该被横规则误拒
+    }
+
+    @Test("值域闸（codex plan-R4-F1）：越域 thickness 写不进来，但对象已有的越域值可原样带回")
+    func thicknessDomainGateIsConditional() throws {
+        let d = makeStyledHLine(id: "a", thickness: 2)
+        // 合法域内：放行
+        #expect(d.withStyle(style(.straight, .solid, 5))?.thickness == 5)
+        #expect(d.withStyle(style(.straight, .solid, 1))?.thickness == 1)
+        // 越域**新值**：拒（0 / 负 / 极大）——直接调用者塞不进坏数据
+        #expect(d.withStyle(style(.straight, .solid, 0)) == nil)
+        #expect(d.withStyle(style(.straight, .solid, -3)) == nil)
+        #expect(d.withStyle(style(.straight, .solid, 999_999)) == nil)
+        // 反向对照（防过度拒绝）：一条**已经**带越域值的线（模拟高版本 thickness=8 解码进来），
+        // 只改颜色、thickness 原样带回 → **必须放行**，且 thickness 逐字保留
+        let future = makeStyledHLine(id: "f", thickness: 8)
+        let edited = try #require(future.withStyle(style(.straight, .solid, 8, .green)))
+        #expect(edited.thickness == 8)
+        #expect(edited.colorToken == .green)
+        // 但对同一条线写入**另一个**越域值 → 仍拒（不是"这条线从此免检"）
+        #expect(future.withStyle(style(.straight, .solid, 9)) == nil)
     }
 
     @Test("归一化也必须 tool-aware（codex plan-R2-F2）：非水平工具的 labelMode 不被横线规则改写")
@@ -328,10 +363,21 @@ Expected: 编译失败 `value of type 'DrawingObject' has no member 'withStyle'`
 // 两个写入点共用（DrawingSession.commitPending / TrainingEngine.updateDrawingStyle），各自传播失败——
 // 不许任何调用方"自己派生一遍"或"信任面板会归一化"（D59：public/internal 写入面必须自己把关）。
 extension DrawingObject {
-    /// nil = 该样式对本对象的 `toolType` 语义上不成立（当前唯一情形：水平线的 `.segment`）。
+    /// nil = 该样式对本对象语义上不成立（① 该 `toolType` 下 `lineSubType` 恒不可渲染，如水平线的 `.segment`；
+    /// ② `thickness` 越出本构建的 1…5 值域**且**与本对象当前值不同，见下）。
     /// 非 nil 时：只换 5 个样式字段 + 两个派生字段，其余字段逐字段原样拷贝。
     func withStyle(_ s: DrawingDefaultStyle) -> DrawingObject? {
         guard DrawingStyleAvailability.isRenderableSubType(s.lineSubType, toolType: toolType) else { return nil }
+        // 值域闸（codex plan-R4-F1）：`DrawingDefaultStyle.thickness` 是裸 `Int`、文档域 1…5
+        // （`DrawingEnums.swift:31`），面板控件只产 1…5，但**直接调用者**能塞 0 / 负数 / 极大值，
+        // 经 updateDrawingStyle 落库并 autosave；渲染器那层 clamp 只会**掩盖**坏数据不会阻止它
+        // （同 P1a「持久化 fontSize 可为负」那族，[[feedback_internal_review_misses_bad_data]]）。
+        // ⚠️ **条件式，不是一律拒**（否则过度拒绝，重犯 PR-1 的 over-reject）：`thickness` 是 Int 不是枚举，
+        //    D61 的 raw-aware 判据**看不见**高版本写的 thickness=8 这类值。若无条件要求 1…5，
+        //    PR-4 按 D49 派生回显把 8 原样传回来时，这条线连改颜色都会被拒死。
+        //    故：**写入一个新的越域值 → 拒**；**原样带回本对象已有的越域值 → 放行**（不代高版本决定它的粗细，
+        //    与 D52「装载不加闸」、D61「不认识的就别改」同一条纪律）。
+        guard (1...5).contains(s.thickness) || s.thickness == thickness else { return nil }
         return DrawingObject(
             id: id, toolType: toolType, anchors: anchors,
             isExtended: s.lineSubType == .ray,                     // 派生①
@@ -461,6 +507,20 @@ git commit -m "划线 1b-i 切片2 Task1：withStyle 语义闸单点 + 可用性
         #expect(e.drawingSession.pendingAnchors.isEmpty)     // 拒交同样只丢 pending（保工具/保会话，D31）
         #expect(e.drawingSession.drawingModeActive == true)
         #expect(e.drawingSession.activeDrawingTool == .horizontal)
+    }
+
+    @Test("D59 值域闸也覆盖新建路径（codex plan-R4-F1）：越域 thickness 的默认样式 → 不提交")
+    @MainActor func commitRejectsOutOfDomainThickness() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        var s = DrawingDefaultStyle()
+        s.thickness = 0                                      // 面板产不出，但直接设进会话可达
+        e.drawingSession.setDefaultStyle(s)
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+        #expect(e.drawingSession.commitPending(panelPosition: 0) == nil)
+        #expect(e.drawings.isEmpty)                          // 没有坏数据落进 drawings
     }
 
     @Test("行为等价：正常样式提交后 5 字段 + textColorToken 跟随，与切片2 之前逐字一致")
@@ -609,9 +669,7 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.updateDrawingStyle(id: "ZZZ", style: styleFixture(.straight, .dash1, 4)) == false)
-        #expect(e.drawings == before)
-        #expect(e.drawings.map(\.id) == before.map(\.id))     // DrawingObject.== 排除 id，故 id 单独比
-        #expect(e.drawingsRevision == rev)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
 
     @Test("N12a: 引擎层恒开门——水平线改 .segment 被拒，该线逐字段不变、revision 不递增")
@@ -621,8 +679,7 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.segment)) == false)
-        #expect(e.drawings == before)
-        #expect(e.drawingsRevision == rev)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
 
     @Test("N5 行为 + N12d: 直调（绕开面板）传未归一化的 (ray,.left) → 结果 .hidden、isExtended 派生成立")
@@ -647,17 +704,17 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 5)) == false)
-        #expect(e.drawings == before)
-        #expect(e.drawingsRevision == rev)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
 
     @Test("D66: 空 id 恒 fail（写入边界不变量：id 非空）")
     @MainActor func updateRejectsEmptyId() throws {
         let e = TrainingEngine.preview()
         #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.updateDrawingStyle(id: "", style: styleFixture(.straight, .dash1)) == false)
-        #expect(e.drawingsRevision == rev)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
 
     @Test("SD-7/D34 纵深防御: 复盘模式下 updateDrawingStyle 恒 fail（drawings = 已归档 record 的原训练线）")
@@ -667,8 +724,7 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 5)) == false)
-        #expect(e.drawings == before)
-        #expect(e.drawingsRevision == rev)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
         // 反向对照：同样的调用在 normal 模式成功（防「一律拒绝」）
         let n = TrainingEngine.preview(mode: .normal)
         #expect(n.appendDrawing(makeStyledHLine(id: "A", thickness: 1)) == true)
@@ -928,8 +984,7 @@ struct DrawingEditDurabilityGateTests {
         let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.updateDrawingStyle(id: "L", style: style()) == false)
-        #expect(e.drawings == before)
-        #expect(e.drawingsRevision == rev)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
 
     @Test("N13c 反向对照: 同一条线 locked == false 时改样式成功、revision +1（防「一律拒绝」骗过 N13a）")
@@ -952,8 +1007,7 @@ struct DrawingEditDurabilityGateTests {
         let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.updateDrawingStyle(id: "F", style: style(5, .green)) == false)
-        #expect(e.drawings == before)
-        #expect(e.drawingsRevision == rev)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
 
     @Test("N14b 核心: 编辑被拒后原始字节保真 —— futureNeon / futureCyan 逐字节仍在")
@@ -1087,21 +1141,19 @@ git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（l
         let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.deleteDrawing(id: "ZZZ") == false)
-        #expect(e.drawings == before)
-        #expect(e.drawings.map(\.id) == before.map(\.id))
-        #expect(e.drawingsRevision == rev)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
         #expect(e.deleteDrawing(id: "") == false)            // 空 id 同样拒（D66 非空）
-        #expect(e.drawingsRevision == rev)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
 
     @Test("N13b/N19b: 引擎层删除对 locked 线 fail-closed（降 internal 后引擎门仍在）")
     @MainActor func deleteRejectsLocked() throws {
         let e = TrainingEngine.preview()
         #expect(e.appendDrawing(makeStyledHLine(id: "L", locked: true)) == true)
+        let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.deleteDrawing(id: "L") == false)
-        #expect(e.drawings.map(\.id) == ["L"])               // 仍在
-        #expect(e.drawingsRevision == rev)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)   // 含「仍在」+ id 未被改写
     }
 
     @Test("N13c 反向对照（删除侧）: 同一条线未锁定时删除成功、revision +1")
@@ -1122,8 +1174,7 @@ git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（l
         let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.deleteDrawing(id: "A") == false)
-        #expect(e.drawings.count == before.count)
-        #expect(e.drawingsRevision == rev)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
 
     @Test("N14c(引擎版): 未来枚举值线**可以删**（D61 只挡改样式，不挡整条删除）")
@@ -1144,10 +1195,10 @@ git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（l
     @MainActor func deleteRefusedInReviewMode() throws {
         let e = TrainingEngine.preview(mode: .review)
         #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.deleteDrawing(id: "A") == false)
-        #expect(e.drawings.map(\.id) == ["A"])               // 归档线仍在
-        #expect(e.drawingsRevision == rev)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)   // 归档线仍在、id 未被改写
         let n = TrainingEngine.preview(mode: .normal)
         #expect(n.appendDrawing(makeStyledHLine(id: "A")) == true)
         #expect(n.deleteDrawing(id: "A") == true)            // 反向对照
