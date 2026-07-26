@@ -218,11 +218,18 @@ struct DrawingObjectStyleEditTests {
         #expect(trend.withStyle(style(.segment)) == nil)
         #expect(DrawingStyleAvailability.isEditableToolType(.trend) == false)
         #expect(DrawingStyleAvailability.isEditableToolType(.horizontal) == true)
-        // 判据**派生自既有单一真相**，不是第二份登记表（codex plan-R12-F2）——逐 case 对齐
+        // 判据 = 既有单一真相 `DrawingToolType.implemented`（能不能画，codex plan-R12-F2：不另立登记表）
+        //        **∧** `toolsWithStyleMatrix`（本构建懂不懂它的样式语义，codex plan-R13-F2）
+        typealias A = DrawingStyleAvailability
         for t: DrawingToolType in [.horizontal, .trend, .text, .ray, .fib, .rect] {
-            #expect(DrawingStyleAvailability.isEditableToolType(t) == DrawingToolType.implemented.contains(t),
-                    "\(t) 的可编辑性必须与 DrawingToolType.implemented 一致")
+            #expect(A.isEditableToolType(t) ==
+                    (DrawingToolType.implemented.contains(t) && A.toolsWithStyleMatrix.contains(t)),
+                    "\(t) 的可编辑性必须 = 已实现 ∧ 有样式矩阵")
         }
+        // 漂移告警（fail-closed 方向）：今天两集合恰好相等；P1c 若只把新工具加进 implemented
+        // 而没写样式矩阵，本断言当场红 —— 提醒补矩阵，而不是让它悄悄变成可编辑。
+        #expect(DrawingToolType.implemented == A.toolsWithStyleMatrix,
+                "有工具能画却没有样式矩阵（或反之）：implemented=\(DrawingToolType.implemented) matrix=\(A.toolsWithStyleMatrix)")
         // ⚠️ 与 append 侧**刻意不对称**：同一条 `.trend`+`.segment` 线经 `appendDrawing` 仍必须被接收
         //    （PR-1 的 `nonHorizontalSegmentAccepted` 钉死，本切片不得回归）——进来宽松、改写保守。
     }
@@ -306,18 +313,19 @@ struct DrawingObjectStyleEditTests {
         let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!
             .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
         #expect(!files.isEmpty)                                  // 先证明真的扫到文件（防路径写错→恒过）
-        /// 剥注释后按 needle 数命中行（反踩坑：解释性注释里的同字样会误判，见 DrawingSessionSourceGuardTests 手法）。
-        func hits(_ needle: String, excluding excluded: Set<String> = []) throws -> [String] {
-            try files.filter { !excluded.contains($0.lastPathComponent) }.flatMap { f -> [String] in
-                try String(contentsOf: f, encoding: .utf8)
-                    .split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-                    .map { line -> String in                     // 整行注释丢弃；行尾 `//` 之后截断
-                        guard let r = line.range(of: "//") else { return line }
-                        return String(line[line.startIndex..<r.lowerBound])
-                    }
-                    .filter { $0.contains(needle) }
-                    .map { "\(f.lastPathComponent): \($0.trimmingCharacters(in: .whitespaces))" }
+        /// **复用 Task 2 建的共享扫描器**（codex plan-R13-F3）：逐行 substring 会漏掉
+        /// `lineSubType ==\n .ray` / `textColorToken ==\n colorToken` 这种普通换行写法 →
+        /// 第二份实现可以静默存在而守卫仍绿。squeeze 后匹配与排版无关，且注释/字符串已被剥掉。
+        /// 返回 `[(文件名, 出现次数)]`，只列出现过的文件。
+        func hits(_ needle: String, excluding excluded: Set<String> = []) throws -> [(file: String, count: Int)] {
+            try files.filter { !excluded.contains($0.lastPathComponent) }.compactMap { f in
+                let s = try squeezedText(String(contentsOf: f, encoding: .utf8))
+                let n = s.components(separatedBy: squeeze(needle)).count - 1
+                return n > 0 ? (f.lastPathComponent, n) : nil
             }
+        }
+        func total(_ needle: String, excluding excluded: Set<String> = []) throws -> Int {
+            try hits(needle, excluding: excluded).map(\.count).reduce(0, +)
         }
         // ⚠️ `DrawingToolManager.swift` 是 1a-iv 交接①记录在案的**死代码**（spec §1.2 明令本期不动、
         //    §8 #5 列为已知限制），它里面那份 `isExtended: lineSubType == .ray` 不参与任何活路径 →
@@ -325,42 +333,38 @@ struct DrawingObjectStyleEditTests {
         let dead: Set<String> = ["DrawingToolManager.swift"]
         // 派生①②：活代码里各恰好一处，且都在 withStyle 所在文件
         let ray = try hits("lineSubType == .ray", excluding: dead)
-        #expect(ray.count == 1, "派生① 不止一处：\(ray)")
-        #expect(ray.allSatisfy { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
+        #expect(try total("lineSubType == .ray", excluding: dead) == 1, "派生① 不止一处：\(ray)")
+        #expect(ray.allSatisfy { $0.file == "DrawingObjectStyleEdit.swift" })
         let txt = try hits("textColorToken == colorToken", excluding: dead)
-        #expect(txt.count == 1, "派生② 不止一处：\(txt)")
-        #expect(txt.allSatisfy { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
+        #expect(try total("textColorToken == colorToken", excluding: dead) == 1, "派生② 不止一处：\(txt)")
+        #expect(txt.allSatisfy { $0.file == "DrawingObjectStyleEdit.swift" })
         // 归一化 / 可用性：**规则实现**单点（横线规则体只有一份，且都在 DrawingStyleAvailability.swift），
         // 调用点允许多处（面板灰态/即时规整是同一份规则的消费者，非第二份规则——SD-2b）。
-        let labelRuleDef = try hits("func horizontalLabelModeEnabled(")      // 横线 labelMode 规则体
-        #expect(labelRuleDef.count == 1)
-        #expect(labelRuleDef.allSatisfy { $0.hasPrefix("DrawingStyleAvailability.swift") })
-        let availDef = try hits("func horizontalLineSubTypeEnabled(")        // 横线 subType 规则体
-        #expect(availDef.count == 1)
-        #expect(availDef.allSatisfy { $0.hasPrefix("DrawingStyleAvailability.swift") })
+        #expect(try total("func horizontalLabelModeEnabled(") == 1)          // 横线 labelMode 规则体
+        #expect(try hits("func horizontalLabelModeEnabled(").allSatisfy { $0.file == "DrawingStyleAvailability.swift" })
+        #expect(try total("func horizontalLineSubTypeEnabled(") == 1)        // 横线 subType 规则体
+        #expect(try hits("func horizontalLineSubTypeEnabled(").allSatisfy { $0.file == "DrawingStyleAvailability.swift" })
         // 归一化的两个重载（横线版 + tool-aware 版）都只许住在 DrawingStyleAvailability.swift
-        let normDefs = try hits("func normalizedLabelMode(")
-        #expect(normDefs.count == 2)                                          // 横线版 + tool-aware 版
-        #expect(normDefs.allSatisfy { $0.hasPrefix("DrawingStyleAvailability.swift") })
+        #expect(try total("func normalizedLabelMode(") == 2)
+        #expect(try hits("func normalizedLabelMode(").allSatisfy { $0.file == "DrawingStyleAvailability.swift" })
         // 写入边界确实归一化了，且**走 tool-aware 那个重载**（codex plan-R2-F2：无条件套横规则会改写 .trend 的 labelMode）
-        let styleEditNorm = try hits("normalizedLabelMode(current:").filter { $0.hasPrefix("DrawingObjectStyleEdit.swift") }
-        #expect(!styleEditNorm.isEmpty)
-        #expect(try hits("toolType: toolType").contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
+        #expect(try hits("normalizedLabelMode(current:").contains { $0.file == "DrawingObjectStyleEdit.swift" })
+        #expect(try hits("toolType: toolType").contains { $0.file == "DrawingObjectStyleEdit.swift" })
         // **核心**（PR-1 over-reject 真 bug 的根因形状）：两个写入边界**不得直接套横规则**，
         // 必须经共享单点 `isRenderableSubType(_:toolType:)`——横规则只对水平工具成立，直接套会对
         // 非水平工具（P1c 的 .trend 线段）静默拒掉合法数据。
         let rawHorizontalRule = try hits("horizontalLineSubTypeEnabled(")
-        #expect(!rawHorizontalRule.contains { $0.hasPrefix("TrainingEngine.swift") },
+        #expect(!rawHorizontalRule.contains { $0.file == "TrainingEngine.swift" },
                 "append 家族必须走 isRenderableSubType 共享单点：\(rawHorizontalRule)")
-        #expect(!rawHorizontalRule.contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") },
+        #expect(!rawHorizontalRule.contains { $0.file == "DrawingObjectStyleEdit.swift" },
                 "withStyle 必须走 isRenderableSubType 共享单点：\(rawHorizontalRule)")
         // labelMode 侧同理（codex plan-R2-F2）：写入边界不得直接套横线 labelMode 规则
         let rawLabelRule = try hits("horizontalLabelModeEnabled(")
-        #expect(!rawLabelRule.contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") },
+        #expect(!rawLabelRule.contains { $0.file == "DrawingObjectStyleEdit.swift" },
                 "withStyle 必须走 tool-aware 归一化，不得直接套横线 labelMode 规则：\(rawLabelRule)")
         let shared = try hits("isRenderableSubType(")
-        #expect(shared.contains { $0.hasPrefix("TrainingEngine.swift") })
-        #expect(shared.contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
+        #expect(shared.contains { $0.file == "TrainingEngine.swift" })
+        #expect(shared.contains { $0.file == "DrawingObjectStyleEdit.swift" })
     }
 ```
 
@@ -451,8 +455,17 @@ extension DrawingObject {
     ///     本构建就会拿**水平线的样式假设**改写一条自己根本渲染不出的线，且不可逆（本期无 undo）。
     ///   与 D61「高版本线：选得中、改不动样式、可整条删」逐字同构 —— 同一条纪律，只是判据从
     ///   「未知枚举值」扩到「已知但本构建未实现的工具」。
+    /// 本构建**写得出样式矩阵**的工具集。与 `DrawingToolType.implemented`（= 画得出 / 提交得了）
+    /// **是两件不同的事**（codex plan-R13-F2）：那个集合回答"能不能画"，本集合回答"本构建懂不懂它的
+    /// 样式语义"。今天只有水平线有矩阵（`horizontalLineSubTypeEnabled` / `horizontalLabelModeEnabled`）。
+    /// ⚠️ P1c 给新工具接线时：加进 `DrawingToolType.implemented` 之后它就能画了，但**样式仍改不动**，
+    ///   直到你为它写出子类型/标注矩阵并加进本集合 —— 这个方向的漂移是 **fail-closed**（现象是
+    ///   "新工具的样式控件不生效"，一眼可见、且不污染数据），比反过来 fail-open
+    ///   （尚无矩阵就允许编辑 → 把不受支持的样式组合持久化）安全。
+    static let toolsWithStyleMatrix: Set<DrawingToolType> = [.horizontal]
+
     public static func isEditableToolType(_ t: DrawingToolType) -> Bool {
-        DrawingToolType.implemented.contains(t)
+        DrawingToolType.implemented.contains(t) && toolsWithStyleMatrix.contains(t)
     }
 
     /// D59 共享单点（tool-aware 版）：写入边界用的 `labelMode` 归一化。
@@ -631,6 +644,352 @@ Expected: FAIL —— 现状 `commitPending` 直接取 `s.labelMode`（不归一
 
 `TrainingEngine` 那半段（`routeDrawingCommit` 整体透传 5 字段 + 无 append-then-replace）**一字不动**。
 
+- [ ] **Step 5: 建源码守卫扫描器（共享文件）+ 自检测试（codex plan-R13-F3）**
+
+⚠️ **为什么提成共享文件**：N5 语义单点守卫原本用「逐行 substring」，而 `lineSubType ==\n.ray` / `textColorToken ==\n colorToken` 这种**普通换行写法**会让第二份实现躲过计数（codex plan-R13-F3）→ 单点不变量可以静默回归。扫描器只能有**一份**，两个 suite 共用。
+
+新建 `ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScanner.swift`（**同 test module 的顶层函数**，各 suite 直接调用，禁止再抄局部实现）：
+
+```swift
+// ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScanner.swift
+// 源码守卫共享扫描器（codex plan R1/R2/R3/R7/R8/R9/R10/R13 逐轮收紧的产物）。
+// ⚠️ Swift import 是**文件级**的，本文件必须自带。
+import Foundation
+import Testing
+@testable import KlineTrainerContracts
+
+/// ios/Contracts 目录（由本文件路径回推：Tests/KlineTrainerContractsTests/<本文件> → 上溯 3 层）。
+var contractsDirForGuards: URL {
+    URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+}
+
+/// `Sources/` 下**全部 target** 的 .swift 绝对路径（codex plan-R8-F1：跨 target 调用者也要覆盖）。
+func allSwiftFilesUnderSources() throws -> [String] {
+    let root = contractsDirForGuards.appendingPathComponent("Sources")
+    guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else { return [] }
+    return e.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }.map(\.path)
+}
+
+var trainingEnginePath: String {
+    contractsDirForGuards.appendingPathComponent(
+        "Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift").path
+}
+
+// MARK: 空白无关的调用点扫描（codex plan-R1-F1 → R2-F1 → R3-F1 → R7-F1 → R8-F1 逐轮收紧）
+
+/// ⚠️ **本 Task 同时把扫描根从 `Sources/KlineTrainerContracts` 放宽到整个 `Sources/`**（codex plan-R8-F1）：
+///   本包有两个 target（`KlineTrainerContracts` / `KlineTrainerPersistence`，`Package.swift` 实测），
+///   只扫前者的话，一个**跨 target** 的调用者根本不在扫描范围内。改法 = 把 PR-1 既有 helper
+///   `allSwiftFilesUnderSources()` 的 root 从 `Sources/KlineTrainerContracts` 改成 `Sources/`。
+///   **实测过不会引入假阳性**：`KlineTrainerPersistence` 当前对 `appendDrawing` / `appendReviewDrawing` /
+///   `routeDrawingCommit` / `deleteDrawing` / `updateDrawingStyle` 五个标识符**一次都没提**
+///   （`grep -rln <id> Sources/ | grep -v KlineTrainerContracts/` 全空）→ 各 pattern 计数不变。
+///   实施时先跑一遍既有 `appendFamilyTrustBoundary` 确认仍绿，再往下写新守卫。
+
+/// 删掉**全部**空白字符（用于 needle 与源码两侧，使匹配彻底与排版无关）。
+private func squeeze(_ s: String) -> String {
+    s.split(whereSeparator: { $0.isWhitespace }).joined()
+}
+
+/// 一段源码文本 → **只剩代码**（剥行注释 / 嵌套块注释 / 字符串字面量内容）**且删光空白**。
+/// ⚠️ 三次收紧的由来，别退回去（每一条都是 codex 用一段**合法 Swift** 打穿的）：
+///   ① 逐行 substring 挡不住 `engine.deleteDrawing(\n id: x\n)`（R1-F1）；
+///   ② 只折叠空白、只收紧 `"( "` 仍不够（R2-F1）：`engine.deleteDrawing\n(\n id: x\n)` 会留下
+///      `deleteDrawing (id:`（左括号**前面**那个空格没人管）；`deleteDrawing/* c */(id:` 同理；
+///   ③ **不跟踪字符串状态就会反向漏**（R7-F1）：`let u = "https://x"` 里的 `//` 会让「吃到行尾」
+///      把**同一行后面的真实调用**当注释丢掉；`let s = "/*"` 更狠——块注释状态一开，能吞掉整片代码。
+///      故这里是个**小词法器**：正确处理普通串 / 多行串 `"""` / 原始串 `#"…"#`（含 `\#` 转义），
+///      并把字符串**内容整段丢弃**（字面量里的 `deleteDrawing(id:` 本来就不是调用，顺带免了假阳性）。
+///   守卫漏掉一个调用点的后果不是"少测一条"，而是 PR-4 可以在**不补几何门**的情况下接上不可逆删除。
+///   ④ **顶层与插值体各写一份循环 = 两档判据**（R10-F1）：插值那份不认注释 →
+///      `"\(/* ) */ engine.deleteDrawing(id: id))"` 里**注释中的** `)` 被当成插值收尾，真调用反被
+///      当字面文本丢掉。根因不是"再补一个 case"，是**同一件事有两份能力不同的实现**（本计划一路在
+///      批评的同一个毛病）→ 现在**只有 `scanCode` 一个循环**，顶层与插值体走完全相同的注释/字符串
+///      规则，唯一差别是"遇 `)` 是否收尾"。
+private func squeezedText(_ raw: String) -> String {
+    var out = ""
+    _ = scanCode(Array(raw), from: 0, parenDepth: nil, into: &out)
+    return out
+}
+
+/// **唯一**的词法扫描循环。`parenDepth == nil` = 顶层（`)` 不收尾）；非 nil = 插值体（深度归零即返回，
+/// 那个收尾 `)` 不写进 out）。注释 / 字符串 / 原始串 / 嵌套插值在两种模式下**判据完全一致**。
+private func scanCode(_ c: [Character], from start: Int, parenDepth: Int?, into out: inout String) -> Int {
+    var i = start
+    var depth = parenDepth ?? 0
+    while i < c.count {
+        if c[i] == "/", i + 1 < c.count, c[i + 1] == "*" {       // 块注释（可嵌套）
+            var d = 1; i += 2
+            while i < c.count, d > 0 {
+                if c[i] == "/", i + 1 < c.count, c[i + 1] == "*" { d += 1; i += 2; continue }
+                if c[i] == "*", i + 1 < c.count, c[i + 1] == "/" { d -= 1; i += 2; continue }
+                i += 1
+            }
+            continue
+        }
+        if c[i] == "/", i + 1 < c.count, c[i + 1] == "/" {       // 行注释：吃到行尾
+            while i < c.count, c[i] != "\n" { i += 1 }
+            continue
+        }
+        if c[i] == "#" {                                         // 可能是原始串 #"…"# / ##"…"##
+            var h = 0, j = i
+            while j < c.count, c[j] == "#" { h += 1; j += 1 }
+            if j < c.count, c[j] == "\"" { i = consumeStringLiteral(c, from: j, hashes: h, into: &out); continue }
+            out.append(contentsOf: c[i..<j])                      // 不是原始串（如 #expect / #filePath）
+            i = j; continue
+        }
+        if c[i] == "\"" { i = consumeStringLiteral(c, from: i, hashes: 0, into: &out); continue }
+        if parenDepth != nil {                                   // 只有插值体在意括号深度
+            if c[i] == "(" { depth += 1 }
+            if c[i] == ")" {
+                depth -= 1
+                if depth == 0 { return i + 1 }                    // 插值收尾：这个 `)` 不写进 out
+            }
+        }
+        if !c[i].isWhitespace { out.append(c[i]) }                // 空白一律丢弃
+        i += 1
+    }
+    return c.count
+}
+
+/// 消费一个字符串字面量（`from` 指向首个 `"`），返回其后第一个下标。
+/// **字面文本丢弃，但插值 `\(…)` 里的表达式当代码保留**（codex plan-R9-F1）——
+/// ⚠️ 这条是我 R7 那次修复**自己引入**的失败面：为了不让串里的 `//` 吞代码，我把串内容整段丢了，
+///   于是 `logger.debug("deleted \(engine.deleteDrawing(id: id))")` 这种**真的会执行**的调用
+///   反而从守卫底下溜走。字面量里既有"不是代码的文本"也有"确实是代码的插值"，必须分开处理。
+/// 支持多行 `"""…"""` 与原始串（`hashes` 个 `#`，其转义/插值前缀是 `\` + 同样数量的 `#`）。
+private func consumeStringLiteral(_ c: [Character], from: Int, hashes: Int, into out: inout String) -> Int {
+    var i = from
+    let isMultiline = (i + 2 < c.count) && c[i + 1] == "\"" && c[i + 2] == "\""
+    let quoteLen = isMultiline ? 3 : 1
+    i += quoteLen
+    while i < c.count {
+        if c[i] == "\\" {                                        // `\…` ：插值前缀或普通转义
+            var j = i + 1, h = 0
+            while j < c.count, c[j] == "#", h < hashes { h += 1; j += 1 }
+            if h == hashes {
+                if j < c.count, c[j] == "(" {                    // 插值 → 递归当**代码**扫
+                    i = scanCode(c, from: j + 1, parenDepth: 1, into: &out); continue  // `(` 之后起扫
+                }
+                i = min(j + 1, c.count); continue                // 普通转义：连吃被转义的那个字符
+            }
+        }
+        if c[i] == "\"" {                                        // 收尾：quoteLen 个 `"` + hashes 个 `#`
+            var j = i, q = 0
+            while j < c.count, c[j] == "\"", q < quoteLen { q += 1; j += 1 }
+            if q == quoteLen {
+                var h = 0
+                while j < c.count, c[j] == "#", h < hashes { h += 1; j += 1 }
+                if h == hashes { return j }
+            }
+        }
+        i += 1                                                   // 字面文本：丢弃
+    }
+    return c.count                                               // 未闭合（坏源码）：吃到底，fail-safe
+}
+
+private func squeezedSource(_ path: String) throws -> String {
+    squeezedText(try String(contentsOfFile: path, encoding: .utf8))
+}
+
+/// 一段源码里 `pattern` 的**调用**次数 = 总出现数 − **定义**出现数。
+/// ⚠️ 定义只按 `"func" + pattern` 扣，**绝不可**另传一个「更宽的 defPattern」（codex plan-R3-F1 实证的真 bug）：
+///   `func deleteDrawing(at index: Int)` squeeze 后是 `funcdeleteDrawing(atindex:` ——
+///   它**不含**调用 pattern `deleteDrawing(at:`（`at index:` ≠ `at:`），却会命中宽 defPattern
+///   `funcdeleteDrawing(at` → 一次**真实的** `deleteDrawing(at: 0)` 调用被扣成 `1-1=0`，
+///   守卫恒绿，正好放过它要挡的那条绕过 id 唯一/locked/几何三门的破坏性入口。
+///   现在的形状里「扣掉的」必然也是「数进来的」，不可能扣多。
+private func callCount(inSqueezed s: String, pattern: String) -> Int {
+    let p = squeeze(pattern)
+    let total = s.components(separatedBy: p).count - 1
+    let defs  = s.components(separatedBy: "func" + p).count - 1
+    return total - defs
+}
+
+/// `Sources/` 里 `pattern` 的调用点（按文件），零调用的文件不出现。
+private func callSiteCount(_ pattern: String) throws -> [(file: String, count: Int)] {
+    try allSwiftFilesUnderSources().compactMap { path in
+        let n = callCount(inSqueezed: try squeezedSource(path), pattern: pattern)
+        return n > 0 ? (path, n) : nil
+    }
+}
+
+/// 某文件（squeeze 后）是否含某段文本——访问级别断言用，同样与排版无关。
+private func squeezedContains(_ path: String, _ needle: String) throws -> Bool {
+    try squeezedSource(path).contains(squeeze(needle))
+}
+
+/// 断言某声明**存在**且**不是包外可见的**（`public` / `package` / `open` 一个都不行）。
+/// ⚠️ 只查 `public` 不够（codex plan-R8-F1，已对 `Package.swift` 实测）：本包
+///   `swift-tools-version: 6.0` → **`package` 访问级别可用**，`package func updateDrawingStyle`
+///   能让**另一个 target**（`KlineTrainerPersistence`）直接调这两个写入面，而几何门只存在于
+///   `KlineTrainerContracts` 里那条 UI 路由上 → 信任边界被绕开而守卫仍绿。
+private func expectEngineInternalOnly(_ decl: String,
+                                      sourceLocation: SourceLocation = #_sourceLocation) throws {
+    #expect(try squeezedContains(trainingEnginePath, "func " + decl),
+            "\(decl) 不见了？（先证明真读到文件，防负向断言假绿）", sourceLocation: sourceLocation)
+    for mod in ["public func ", "package func ", "open func "] {
+        #expect(try !squeezedContains(trainingEnginePath, mod + decl),
+                "\(decl) 不得是 \(mod)——包外/跨 target 可达即绕过几何门", sourceLocation: sourceLocation)
+    }
+}
+
+/// `Sources/` 里**提到过**该标识符的文件（剥注释后按裸标识符找，不看后面跟不跟左括号）。
+/// ⚠️ 为什么必须按「标识符」而不是「调用 pattern」（codex plan-R5-F1）：
+///   `let f = engine.updateDrawingStyle` / `let g: (DrawingID, DrawingDefaultStyle) -> Bool = engine.updateDrawingStyle`
+///   这类**方法引用**把调用挪到了别处，源码里根本不出现 `updateDrawingStyle(` —— 只数调用 pattern 的守卫
+///   会放它过去，而这两个 API 的几何门**只**靠「唯一调用点在已验几何的 UI 路由」这条源码守卫成立。
+///   按标识符扫，方法引用也必然让标识符出现在那个文件里 → 照样被抓。
+private func filesMentioning(_ identifier: String) throws -> [String] {
+    try allSwiftFilesUnderSources().filter { try squeezedSource($0).contains(identifier) }
+}
+
+```
+
+> ⚠️ PR-1 的 `TrainingEngineDrawingSessionTests` 里已有 `contractsDir` / `allSwiftFilesUnderSources()` / `trainingEnginePath`（`:22-47`）。搬进共享文件后**删掉那三个 suite 私有版本**（同 module 顶层同名函数会与私有方法共存但语义重复，属"两档判据"的温床）；`appendFamilyTrustBoundary` 改调顶层函数（Task 5 那步会一并处理）。
+
+新建 `ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScannerTests.swift`（自检 = 这套守卫**唯一**的判别力证明）：
+
+```swift
+// ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScannerTests.swift
+import Foundation
+import Testing
+@testable import KlineTrainerContracts
+
+@Suite("源码守卫扫描器自检（a–f）")
+struct SourceGuardScannerTests {
+    @Test("守卫自检 a（codex plan-R1-F1 + R2-F1）：换行/括号前空白/块注释三种排版都逃不掉，注释里的不算")
+    func scannerCatchesAwkwardFormatting() {
+        let src = """
+        func caller() {
+            engine.deleteDrawing(
+                id: a
+            )
+            engine.deleteDrawing
+                (
+                    id: b
+                )
+            engine.deleteDrawing/* 块注释 */(id: c)
+            // engine.deleteDrawing(id: 行注释里的不算)
+            /* engine.deleteDrawing(id: 块注释里的也不算) */
+        }
+        """
+        let s = squeezedText(src)
+        #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 3, "三种排版都该命中，实际 squeeze：\(s)")
+        #expect(!s.contains("行注释里的不算"))
+        #expect(!s.contains("块注释里的也不算"))
+    }
+
+    @Test("守卫自检 f（codex plan-R10-F1）：插值体里的注释按注释处理——注释中的 `)` 不算插值收尾")
+    func scannerHandlesCommentsInsideInterpolation() {
+        let src = ##"""
+        func caller() {
+            logger.debug("x \(/* ) */ engine.deleteDrawing(id: id))")
+            let m = """
+            y \(// ) 行注释里的右括号
+            engine.updateDrawingStyle(id: i, style: st))
+            """
+        }
+        """##
+        let s = squeezedText(src)
+        // 注释里的 `)` 若被当成插值收尾，真调用就会被当字面文本丢掉 → 计数变 0，本测试当场红
+        #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 1, "实际 squeeze：\(s)")
+        #expect(callCount(inSqueezed: s, pattern: "updateDrawingStyle(") == 1, "实际 squeeze：\(s)")
+    }
+
+    @Test("守卫自检 e（codex plan-R9-F1）：插值 \\(…) 里的调用与方法引用**照样算数**（它们真的会执行）")
+    func scannerCountsCallsInsideStringInterpolation() {
+        // ⚠️ 外层用 `##"""`：本 fixture 内部要出现 `\(` **和** `\#(` 两种插值前缀的**字面文本**，
+        //    若外层只用 `#"""`，`\#(…)` 会被 Swift 当成**本测试文件自己的**插值 → 编译错误。
+        let src = ##"""
+        func caller() {
+            logger.debug("deleted \(engine.deleteDrawing(id: id))")
+            let s = "\(engine.updateDrawingStyle(id: i, style: st))"
+            let f = "\(engine.appendDrawing)"
+            let plain = "deleteDrawing(id: 纯文本不算)"
+            let raw = #"\#(engine.routeDrawingCommit(d))"#
+        }
+        """##
+        let s = squeezedText(src)
+        #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 1, "实际 squeeze：\(s)")
+        #expect(callCount(inSqueezed: s, pattern: "updateDrawingStyle(") == 1, "实际 squeeze：\(s)")
+        #expect(callCount(inSqueezed: s, pattern: "routeDrawingCommit(") == 1, "原始串的插值前缀是 \\#(…)：\(s)")
+        #expect(s.contains("appendDrawing"))          // 藏在插值里的**方法引用**，标识符扫描也看得见
+        #expect(!s.contains("纯文本不算"))             // 纯文本仍不算数（不产生假阳性）
+    }
+
+    @Test("守卫自检 d（codex plan-R7-F1）：字符串里的注释定界符不得吞掉后面的真实调用；串内的调用不算数")
+    func scannerHandlesStringLiteralsWithCommentDelimiters() {
+        let src = #"""
+        func caller() {
+            let u = "https://example.com/a"; engine.deleteDrawing(id: x)
+            let s = "/*"
+            engine.updateDrawingStyle(id: y, style: st)
+            let r = ##"deleteDrawing(id: 原始串里的不算)"##
+            let m = """
+            deleteDrawing(id: 多行串里的也不算)
+            """
+            let esc = "带转义的引号 \" 之后仍在串内：deleteDrawing(id: 不算)"
+        }
+        """#
+        let s = squeezedText(src)
+        // `"https://…"` 里的 `//` 没把同一行后面的真实调用吃掉；`"/*"` 没开启块注释吞掉下一行
+        #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 1, "实际 squeeze：\(s)")
+        #expect(callCount(inSqueezed: s, pattern: "updateDrawingStyle(") == 1, "实际 squeeze：\(s)")
+        // 字符串内容整段丢弃 → 串里的调用字样不产生假阳性
+        #expect(!s.contains("原始串里的不算"))
+        #expect(!s.contains("多行串里的也不算"))
+        #expect(!s.contains("不算"))
+    }
+
+    @Test("守卫自检 c（codex plan-R5-F1 + R6-F1）：方法引用不出现调用 pattern，但必被标识符扫描抓到")
+    func scannerCatchesMethodReferences() {
+        // 这三行都是**合法 Swift**，且都让调用点计数看不见（源码里没有 `xxx(` 这个形状）。
+        let src = """
+        func sneaky(engine: TrainingEngine) {
+            let f = engine.appendDrawing
+            let g: (DrawingID, DrawingDefaultStyle) -> Bool = engine.updateDrawingStyle
+            let h = engine.routeDrawingCommit
+            later(f, g, h)
+        }
+        """
+        let s = squeezedText(src)
+        // 调用点计数：全 0（这正是 R5/R6 指出的绕过）
+        #expect(callCount(inSqueezed: s, pattern: "appendDrawing(") == 0)
+        #expect(callCount(inSqueezed: s, pattern: "updateDrawingStyle(") == 0)
+        #expect(callCount(inSqueezed: s, pattern: "routeDrawingCommit(") == 0)
+        // 标识符扫描：三个都看得见 → `filesMentioning` 的白名单断言会把这种文件抓出来
+        #expect(s.contains("appendDrawing"))
+        #expect(s.contains("updateDrawingStyle"))
+        #expect(s.contains("routeDrawingCommit"))
+    }
+
+    @Test("守卫自检 b（codex plan-R3-F1）：first-argument-label 的定义不得把真实调用扣成 0")
+    func scannerCountsFirstArgumentLabelCallsExactly() {
+        // `func deleteDrawing(at index: Int)` 与调用 `deleteDrawing(at: 0)` 形状不同：
+        // 前者 squeeze 后是 `funcdeleteDrawing(atindex:`，**不含**调用 pattern。
+        // 用「更宽的 defPattern」去扣就会把这次真实调用抹成 0（守卫恒绿 = 破坏性入口放行）。
+        let src = """
+        func deleteDrawing(at index: Int) {}
+        func caller() { engine.deleteDrawing(at: 0) }
+        """
+        #expect(callCount(inSqueezed: squeezedText(src), pattern: "deleteDrawing(at:") == 1)
+        // 对照：同名 id 版本的定义**确实**含调用 pattern（`func deleteDrawing(id: DrawingID)`）→ 必须被扣掉
+        let src2 = """
+        func deleteDrawing(id: DrawingID) -> Bool { true }
+        """
+        #expect(callCount(inSqueezed: squeezedText(src2), pattern: "deleteDrawing(id:") == 0)
+        // 再对照：定义 + 一次真实调用 → 恰好 1
+        let src3 = """
+        func deleteDrawing(id: DrawingID) -> Bool { true }
+        func caller() { _ = engine.deleteDrawing(id: "x") }
+        """
+        #expect(callCount(inSqueezed: squeezedText(src3), pattern: "deleteDrawing(id:") == 1)
+    }
+}
+```
+
 - [ ] **Step 5: 加 N5 源码守卫（四条语义单点）——本 Task 才加（codex plan-R1-F2）**
 
 把 Task 1 Step 1 末尾那段 `fourSemanticsSingleSource`（连同 `hits(_:excluding:)` 局部 helper）**原样**追加进 `Drawing/DrawingObjectStyleEditTests.swift` 的 suite 里。
@@ -774,174 +1133,11 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         #expect(n.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 5)) == true)
     }
 
-    // MARK: 空白无关的调用点扫描（codex plan-R1-F1 → R2-F1 → R3-F1 → R7-F1 → R8-F1 逐轮收紧）
-
-    /// ⚠️ **本 Task 同时把扫描根从 `Sources/KlineTrainerContracts` 放宽到整个 `Sources/`**（codex plan-R8-F1）：
-    ///   本包有两个 target（`KlineTrainerContracts` / `KlineTrainerPersistence`，`Package.swift` 实测），
-    ///   只扫前者的话，一个**跨 target** 的调用者根本不在扫描范围内。改法 = 把 PR-1 既有 helper
-    ///   `allSwiftFilesUnderSources()` 的 root 从 `Sources/KlineTrainerContracts` 改成 `Sources/`。
-    ///   **实测过不会引入假阳性**：`KlineTrainerPersistence` 当前对 `appendDrawing` / `appendReviewDrawing` /
-    ///   `routeDrawingCommit` / `deleteDrawing` / `updateDrawingStyle` 五个标识符**一次都没提**
-    ///   （`grep -rln <id> Sources/ | grep -v KlineTrainerContracts/` 全空）→ 各 pattern 计数不变。
-    ///   实施时先跑一遍既有 `appendFamilyTrustBoundary` 确认仍绿，再往下写新守卫。
-
-    /// 删掉**全部**空白字符（用于 needle 与源码两侧，使匹配彻底与排版无关）。
-    private func squeeze(_ s: String) -> String {
-        s.split(whereSeparator: { $0.isWhitespace }).joined()
-    }
-
-    /// 一段源码文本 → **只剩代码**（剥行注释 / 嵌套块注释 / 字符串字面量内容）**且删光空白**。
-    /// ⚠️ 三次收紧的由来，别退回去（每一条都是 codex 用一段**合法 Swift** 打穿的）：
-    ///   ① 逐行 substring 挡不住 `engine.deleteDrawing(\n id: x\n)`（R1-F1）；
-    ///   ② 只折叠空白、只收紧 `"( "` 仍不够（R2-F1）：`engine.deleteDrawing\n(\n id: x\n)` 会留下
-    ///      `deleteDrawing (id:`（左括号**前面**那个空格没人管）；`deleteDrawing/* c */(id:` 同理；
-    ///   ③ **不跟踪字符串状态就会反向漏**（R7-F1）：`let u = "https://x"` 里的 `//` 会让「吃到行尾」
-    ///      把**同一行后面的真实调用**当注释丢掉；`let s = "/*"` 更狠——块注释状态一开，能吞掉整片代码。
-    ///      故这里是个**小词法器**：正确处理普通串 / 多行串 `"""` / 原始串 `#"…"#`（含 `\#` 转义），
-    ///      并把字符串**内容整段丢弃**（字面量里的 `deleteDrawing(id:` 本来就不是调用，顺带免了假阳性）。
-    ///   守卫漏掉一个调用点的后果不是"少测一条"，而是 PR-4 可以在**不补几何门**的情况下接上不可逆删除。
-    ///   ④ **顶层与插值体各写一份循环 = 两档判据**（R10-F1）：插值那份不认注释 →
-    ///      `"\(/* ) */ engine.deleteDrawing(id: id))"` 里**注释中的** `)` 被当成插值收尾，真调用反被
-    ///      当字面文本丢掉。根因不是"再补一个 case"，是**同一件事有两份能力不同的实现**（本计划一路在
-    ///      批评的同一个毛病）→ 现在**只有 `scanCode` 一个循环**，顶层与插值体走完全相同的注释/字符串
-    ///      规则，唯一差别是"遇 `)` 是否收尾"。
-    private func squeezedText(_ raw: String) -> String {
-        var out = ""
-        _ = scanCode(Array(raw), from: 0, parenDepth: nil, into: &out)
-        return out
-    }
-
-    /// **唯一**的词法扫描循环。`parenDepth == nil` = 顶层（`)` 不收尾）；非 nil = 插值体（深度归零即返回，
-    /// 那个收尾 `)` 不写进 out）。注释 / 字符串 / 原始串 / 嵌套插值在两种模式下**判据完全一致**。
-    private func scanCode(_ c: [Character], from start: Int, parenDepth: Int?, into out: inout String) -> Int {
-        var i = start
-        var depth = parenDepth ?? 0
-        while i < c.count {
-            if c[i] == "/", i + 1 < c.count, c[i + 1] == "*" {       // 块注释（可嵌套）
-                var d = 1; i += 2
-                while i < c.count, d > 0 {
-                    if c[i] == "/", i + 1 < c.count, c[i + 1] == "*" { d += 1; i += 2; continue }
-                    if c[i] == "*", i + 1 < c.count, c[i + 1] == "/" { d -= 1; i += 2; continue }
-                    i += 1
-                }
-                continue
-            }
-            if c[i] == "/", i + 1 < c.count, c[i + 1] == "/" {       // 行注释：吃到行尾
-                while i < c.count, c[i] != "\n" { i += 1 }
-                continue
-            }
-            if c[i] == "#" {                                         // 可能是原始串 #"…"# / ##"…"##
-                var h = 0, j = i
-                while j < c.count, c[j] == "#" { h += 1; j += 1 }
-                if j < c.count, c[j] == "\"" { i = consumeStringLiteral(c, from: j, hashes: h, into: &out); continue }
-                out.append(contentsOf: c[i..<j])                      // 不是原始串（如 #expect / #filePath）
-                i = j; continue
-            }
-            if c[i] == "\"" { i = consumeStringLiteral(c, from: i, hashes: 0, into: &out); continue }
-            if parenDepth != nil {                                   // 只有插值体在意括号深度
-                if c[i] == "(" { depth += 1 }
-                if c[i] == ")" {
-                    depth -= 1
-                    if depth == 0 { return i + 1 }                    // 插值收尾：这个 `)` 不写进 out
-                }
-            }
-            if !c[i].isWhitespace { out.append(c[i]) }                // 空白一律丢弃
-            i += 1
-        }
-        return c.count
-    }
-
-    /// 消费一个字符串字面量（`from` 指向首个 `"`），返回其后第一个下标。
-    /// **字面文本丢弃，但插值 `\(…)` 里的表达式当代码保留**（codex plan-R9-F1）——
-    /// ⚠️ 这条是我 R7 那次修复**自己引入**的失败面：为了不让串里的 `//` 吞代码，我把串内容整段丢了，
-    ///   于是 `logger.debug("deleted \(engine.deleteDrawing(id: id))")` 这种**真的会执行**的调用
-    ///   反而从守卫底下溜走。字面量里既有"不是代码的文本"也有"确实是代码的插值"，必须分开处理。
-    /// 支持多行 `"""…"""` 与原始串（`hashes` 个 `#`，其转义/插值前缀是 `\` + 同样数量的 `#`）。
-    private func consumeStringLiteral(_ c: [Character], from: Int, hashes: Int, into out: inout String) -> Int {
-        var i = from
-        let isMultiline = (i + 2 < c.count) && c[i + 1] == "\"" && c[i + 2] == "\""
-        let quoteLen = isMultiline ? 3 : 1
-        i += quoteLen
-        while i < c.count {
-            if c[i] == "\\" {                                        // `\…` ：插值前缀或普通转义
-                var j = i + 1, h = 0
-                while j < c.count, c[j] == "#", h < hashes { h += 1; j += 1 }
-                if h == hashes {
-                    if j < c.count, c[j] == "(" {                    // 插值 → 递归当**代码**扫
-                        i = scanCode(c, from: j + 1, parenDepth: 1, into: &out); continue  // `(` 之后起扫
-                    }
-                    i = min(j + 1, c.count); continue                // 普通转义：连吃被转义的那个字符
-                }
-            }
-            if c[i] == "\"" {                                        // 收尾：quoteLen 个 `"` + hashes 个 `#`
-                var j = i, q = 0
-                while j < c.count, c[j] == "\"", q < quoteLen { q += 1; j += 1 }
-                if q == quoteLen {
-                    var h = 0
-                    while j < c.count, c[j] == "#", h < hashes { h += 1; j += 1 }
-                    if h == hashes { return j }
-                }
-            }
-            i += 1                                                   // 字面文本：丢弃
-        }
-        return c.count                                               // 未闭合（坏源码）：吃到底，fail-safe
-    }
-
-    private func squeezedSource(_ path: String) throws -> String {
-        squeezedText(try String(contentsOfFile: path, encoding: .utf8))
-    }
-
-    /// 一段源码里 `pattern` 的**调用**次数 = 总出现数 − **定义**出现数。
-    /// ⚠️ 定义只按 `"func" + pattern` 扣，**绝不可**另传一个「更宽的 defPattern」（codex plan-R3-F1 实证的真 bug）：
-    ///   `func deleteDrawing(at index: Int)` squeeze 后是 `funcdeleteDrawing(atindex:` ——
-    ///   它**不含**调用 pattern `deleteDrawing(at:`（`at index:` ≠ `at:`），却会命中宽 defPattern
-    ///   `funcdeleteDrawing(at` → 一次**真实的** `deleteDrawing(at: 0)` 调用被扣成 `1-1=0`，
-    ///   守卫恒绿，正好放过它要挡的那条绕过 id 唯一/locked/几何三门的破坏性入口。
-    ///   现在的形状里「扣掉的」必然也是「数进来的」，不可能扣多。
-    private func callCount(inSqueezed s: String, pattern: String) -> Int {
-        let p = squeeze(pattern)
-        let total = s.components(separatedBy: p).count - 1
-        let defs  = s.components(separatedBy: "func" + p).count - 1
-        return total - defs
-    }
-
-    /// `Sources/` 里 `pattern` 的调用点（按文件），零调用的文件不出现。
-    private func callSiteCount(_ pattern: String) throws -> [(file: String, count: Int)] {
-        try allSwiftFilesUnderSources().compactMap { path in
-            let n = callCount(inSqueezed: try squeezedSource(path), pattern: pattern)
-            return n > 0 ? (path, n) : nil
-        }
-    }
-
-    /// 某文件（squeeze 后）是否含某段文本——访问级别断言用，同样与排版无关。
-    private func squeezedContains(_ path: String, _ needle: String) throws -> Bool {
-        try squeezedSource(path).contains(squeeze(needle))
-    }
-
-    /// 断言某声明**存在**且**不是包外可见的**（`public` / `package` / `open` 一个都不行）。
-    /// ⚠️ 只查 `public` 不够（codex plan-R8-F1，已对 `Package.swift` 实测）：本包
-    ///   `swift-tools-version: 6.0` → **`package` 访问级别可用**，`package func updateDrawingStyle`
-    ///   能让**另一个 target**（`KlineTrainerPersistence`）直接调这两个写入面，而几何门只存在于
-    ///   `KlineTrainerContracts` 里那条 UI 路由上 → 信任边界被绕开而守卫仍绿。
-    private func expectEngineInternalOnly(_ decl: String,
-                                          sourceLocation: SourceLocation = #_sourceLocation) throws {
-        #expect(try squeezedContains(trainingEnginePath, "func " + decl),
-                "\(decl) 不见了？（先证明真读到文件，防负向断言假绿）", sourceLocation: sourceLocation)
-        for mod in ["public func ", "package func ", "open func "] {
-            #expect(try !squeezedContains(trainingEnginePath, mod + decl),
-                    "\(decl) 不得是 \(mod)——包外/跨 target 可达即绕过几何门", sourceLocation: sourceLocation)
-        }
-    }
-
-    /// `Sources/` 里**提到过**该标识符的文件（剥注释后按裸标识符找，不看后面跟不跟左括号）。
-    /// ⚠️ 为什么必须按「标识符」而不是「调用 pattern」（codex plan-R5-F1）：
-    ///   `let f = engine.updateDrawingStyle` / `let g: (DrawingID, DrawingDefaultStyle) -> Bool = engine.updateDrawingStyle`
-    ///   这类**方法引用**把调用挪到了别处，源码里根本不出现 `updateDrawingStyle(` —— 只数调用 pattern 的守卫
-    ///   会放它过去，而这两个 API 的几何门**只**靠「唯一调用点在已验几何的 UI 路由」这条源码守卫成立。
-    ///   按标识符扫，方法引用也必然让标识符出现在那个文件里 → 照样被抓。
-    private func filesMentioning(_ identifier: String) throws -> [String] {
-        try allSwiftFilesUnderSources().filter { try squeezedSource($0).contains(identifier) }
-    }
+    // MARK: 源码守卫扫描器 —— **Task 2 已建**（`Tests/.../SourceGuardScanner.swift` 的顶层函数），本文件直接调用：
+    //   `squeeze` / `squeezedText` / `scanCode` / `consumeStringLiteral` / `squeezedSource` /
+    //   `callCount(inSqueezed:pattern:)` / `callSiteCount(_:)` / `squeezedContains(_:_:)` /
+    //   `filesMentioning(_:)` / `expectEngineInternalOnly(_:)`（同 test module 顶层函数，无需再声明）。
+    //   ⚠️ **不得**在本文件另写一份扫描逻辑——同族判据留两档正是本计划一路在修的毛病。
 
     @Test("N15: updateDrawingStyle 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
     func updateDrawingStyleTrustBoundary() throws {
@@ -961,134 +1157,6 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
                 "updateDrawingStyle 被引擎以外的文件提到（含方法引用）：\(mentions)")
     }
 
-    @Test("守卫自检 a（codex plan-R1-F1 + R2-F1）：换行/括号前空白/块注释三种排版都逃不掉，注释里的不算")
-    func scannerCatchesAwkwardFormatting() {
-        let src = """
-        func caller() {
-            engine.deleteDrawing(
-                id: a
-            )
-            engine.deleteDrawing
-                (
-                    id: b
-                )
-            engine.deleteDrawing/* 块注释 */(id: c)
-            // engine.deleteDrawing(id: 行注释里的不算)
-            /* engine.deleteDrawing(id: 块注释里的也不算) */
-        }
-        """
-        let s = squeezedText(src)
-        #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 3, "三种排版都该命中，实际 squeeze：\(s)")
-        #expect(!s.contains("行注释里的不算"))
-        #expect(!s.contains("块注释里的也不算"))
-    }
-
-    @Test("守卫自检 f（codex plan-R10-F1）：插值体里的注释按注释处理——注释中的 `)` 不算插值收尾")
-    func scannerHandlesCommentsInsideInterpolation() {
-        let src = ##"""
-        func caller() {
-            logger.debug("x \(/* ) */ engine.deleteDrawing(id: id))")
-            let m = """
-            y \(// ) 行注释里的右括号
-            engine.updateDrawingStyle(id: i, style: st))
-            """
-        }
-        """##
-        let s = squeezedText(src)
-        // 注释里的 `)` 若被当成插值收尾，真调用就会被当字面文本丢掉 → 计数变 0，本测试当场红
-        #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 1, "实际 squeeze：\(s)")
-        #expect(callCount(inSqueezed: s, pattern: "updateDrawingStyle(") == 1, "实际 squeeze：\(s)")
-    }
-
-    @Test("守卫自检 e（codex plan-R9-F1）：插值 \\(…) 里的调用与方法引用**照样算数**（它们真的会执行）")
-    func scannerCountsCallsInsideStringInterpolation() {
-        // ⚠️ 外层用 `##"""`：本 fixture 内部要出现 `\(` **和** `\#(` 两种插值前缀的**字面文本**，
-        //    若外层只用 `#"""`，`\#(…)` 会被 Swift 当成**本测试文件自己的**插值 → 编译错误。
-        let src = ##"""
-        func caller() {
-            logger.debug("deleted \(engine.deleteDrawing(id: id))")
-            let s = "\(engine.updateDrawingStyle(id: i, style: st))"
-            let f = "\(engine.appendDrawing)"
-            let plain = "deleteDrawing(id: 纯文本不算)"
-            let raw = #"\#(engine.routeDrawingCommit(d))"#
-        }
-        """##
-        let s = squeezedText(src)
-        #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 1, "实际 squeeze：\(s)")
-        #expect(callCount(inSqueezed: s, pattern: "updateDrawingStyle(") == 1, "实际 squeeze：\(s)")
-        #expect(callCount(inSqueezed: s, pattern: "routeDrawingCommit(") == 1, "原始串的插值前缀是 \\#(…)：\(s)")
-        #expect(s.contains("appendDrawing"))          // 藏在插值里的**方法引用**，标识符扫描也看得见
-        #expect(!s.contains("纯文本不算"))             // 纯文本仍不算数（不产生假阳性）
-    }
-
-    @Test("守卫自检 d（codex plan-R7-F1）：字符串里的注释定界符不得吞掉后面的真实调用；串内的调用不算数")
-    func scannerHandlesStringLiteralsWithCommentDelimiters() {
-        let src = #"""
-        func caller() {
-            let u = "https://example.com/a"; engine.deleteDrawing(id: x)
-            let s = "/*"
-            engine.updateDrawingStyle(id: y, style: st)
-            let r = ##"deleteDrawing(id: 原始串里的不算)"##
-            let m = """
-            deleteDrawing(id: 多行串里的也不算)
-            """
-            let esc = "带转义的引号 \" 之后仍在串内：deleteDrawing(id: 不算)"
-        }
-        """#
-        let s = squeezedText(src)
-        // `"https://…"` 里的 `//` 没把同一行后面的真实调用吃掉；`"/*"` 没开启块注释吞掉下一行
-        #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 1, "实际 squeeze：\(s)")
-        #expect(callCount(inSqueezed: s, pattern: "updateDrawingStyle(") == 1, "实际 squeeze：\(s)")
-        // 字符串内容整段丢弃 → 串里的调用字样不产生假阳性
-        #expect(!s.contains("原始串里的不算"))
-        #expect(!s.contains("多行串里的也不算"))
-        #expect(!s.contains("不算"))
-    }
-
-    @Test("守卫自检 c（codex plan-R5-F1 + R6-F1）：方法引用不出现调用 pattern，但必被标识符扫描抓到")
-    func scannerCatchesMethodReferences() {
-        // 这三行都是**合法 Swift**，且都让调用点计数看不见（源码里没有 `xxx(` 这个形状）。
-        let src = """
-        func sneaky(engine: TrainingEngine) {
-            let f = engine.appendDrawing
-            let g: (DrawingID, DrawingDefaultStyle) -> Bool = engine.updateDrawingStyle
-            let h = engine.routeDrawingCommit
-            later(f, g, h)
-        }
-        """
-        let s = squeezedText(src)
-        // 调用点计数：全 0（这正是 R5/R6 指出的绕过）
-        #expect(callCount(inSqueezed: s, pattern: "appendDrawing(") == 0)
-        #expect(callCount(inSqueezed: s, pattern: "updateDrawingStyle(") == 0)
-        #expect(callCount(inSqueezed: s, pattern: "routeDrawingCommit(") == 0)
-        // 标识符扫描：三个都看得见 → `filesMentioning` 的白名单断言会把这种文件抓出来
-        #expect(s.contains("appendDrawing"))
-        #expect(s.contains("updateDrawingStyle"))
-        #expect(s.contains("routeDrawingCommit"))
-    }
-
-    @Test("守卫自检 b（codex plan-R3-F1）：first-argument-label 的定义不得把真实调用扣成 0")
-    func scannerCountsFirstArgumentLabelCallsExactly() {
-        // `func deleteDrawing(at index: Int)` 与调用 `deleteDrawing(at: 0)` 形状不同：
-        // 前者 squeeze 后是 `funcdeleteDrawing(atindex:`，**不含**调用 pattern。
-        // 用「更宽的 defPattern」去扣就会把这次真实调用抹成 0（守卫恒绿 = 破坏性入口放行）。
-        let src = """
-        func deleteDrawing(at index: Int) {}
-        func caller() { engine.deleteDrawing(at: 0) }
-        """
-        #expect(callCount(inSqueezed: squeezedText(src), pattern: "deleteDrawing(at:") == 1)
-        // 对照：同名 id 版本的定义**确实**含调用 pattern（`func deleteDrawing(id: DrawingID)`）→ 必须被扣掉
-        let src2 = """
-        func deleteDrawing(id: DrawingID) -> Bool { true }
-        """
-        #expect(callCount(inSqueezed: squeezedText(src2), pattern: "deleteDrawing(id:") == 0)
-        // 再对照：定义 + 一次真实调用 → 恰好 1
-        let src3 = """
-        func deleteDrawing(id: DrawingID) -> Bool { true }
-        func caller() { _ = engine.deleteDrawing(id: "x") }
-        """
-        #expect(callCount(inSqueezed: squeezedText(src3), pattern: "deleteDrawing(id:") == 1)
-    }
 ```
 
 > **PR-1 的 `callSites` 局部函数（逐行 substring）在 Task 5 被整条替换掉**（codex plan-R2-F1 明确要求同一扫描器覆盖 append/route 守卫）。我一度argue「函数名+左括号的 pattern 不受跨行影响」——但 `engine.appendDrawing\n(x)` 在 Swift 里同样合法，而**判据强弱不一致本身就是缺陷**（同族信任边界守卫留一档弱的，读者会以为该性质已被钉死）。本 Task 只新增扫描器，Task 5 统一切换。
@@ -1125,8 +1193,9 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDraw
     ///      改它不可逆；复盘新画线走 `reviewDrawings`，本期复盘不获得编辑能力 → 这道门不 over-reject
     ///   ① id 非空且**恰好**匹配一条（D66；≥2 条是坏状态，绝不"改第一条碰到的"）
     ///   ② 目标 `locked == false`（D60；本构建产不出 locked=true，只挡高版本解码来的）
-    ///   ③ 目标**不携带未来未知枚举值**（D61；判据必须是 raw-aware 的 `hasKnownFutureEnumValues`，
-    ///      它已含 `!entries.isEmpty`——写成 `knownFutureEnumPayloads()` 的 id-membership 会误灰所有已加载线）
+    ///   ③ 目标**既不携带未来未知枚举值、也不携带未来顶层字段**（D61 + codex plan-R13-F1；判据必须是
+    ///      raw-aware 的 `hasKnownFutureEnumValues` + `hasKnownFutureFields`，前者已含 `!entries.isEmpty`
+    ///      ——写成 `knownFutureEnumPayloads()` 的 id-membership 会误灰所有已加载线）
     ///   ④ `withStyle` 语义成立（D59：派生①②/归一化/可用性单点；水平线 `.segment` 恒不可渲染 → 拒）
     @discardableResult
     func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Bool {
@@ -1136,7 +1205,15 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDraw
         guard matches.count == 1, let i = matches.first else { return false }      // ①（D66 唯一）
         let old = drawings[i]
         guard !old.locked else { return false }                                    // ②（D60）
-        guard !loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id]) else { return false }   // ③（D61）
+        // ③（D61）：**两个 raw-aware 门并列**（codex plan-R13-F1）——
+        //   `hasKnownFutureEnumValues` 只看"已知 key 的未来**值**"；高版本还可能加**未来顶层字段**
+        //   （`knownDiskKeys` 之外的 key），它们**能改变已知 key 的含义**：例如一个未来字段声明
+        //   "字色独立于线色"，而解码出的 `textColorToken == colorToken` 恰好相等 → 派生② 会当成"跟随"
+        //   把它覆盖掉，reconcile 时未来字段还原样留着 → 落一份**自相矛盾**的高版本数据。
+        //   coordinator 的 finalize 门（`TrainingSessionCoordinator:734`）本来就是把这两个门 `||` 起来用的，
+        //   编辑面按同一对判据 fail-closed。
+        guard !loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id]),
+              !loadedDrawingsLossy.hasKnownFutureFields(liveIds: [id]) else { return false }
         guard let updated = old.withStyle(style) else { return false }             // ④（D59/D58 引擎支）
         drawings[i] = updated
         drawingsRevision += 1
@@ -1264,6 +1341,25 @@ struct DrawingEditDurabilityGateTests {
         #expect(now.colorToken == .green)
         #expect(now.textColorToken == .green)                 // 派生② 条件成立 → 跟随
         #expect(e.drawingsRevision == rev + 1)
+    }
+
+    @Test("未来**顶层字段**同样 fail-closed（codex plan-R13-F1）：它能改变已知 key 的含义")
+    func futureTopLevelFieldRejectsStyleEdit() throws {
+        // `futureIndependentTextColor` 是本构建不认识的顶层 key：`hasKnownFutureEnumValues` 看不见它
+        //（所有枚举值都是当前 case），只有 `hasKnownFutureFields` 抓得到。
+        // 若不并这道门：解码出的 textColorToken == colorToken → 派生② 判"跟随"→ 覆盖字色，
+        // 而那个未来字段原样留着 → 落一份自相矛盾的高版本数据。
+        let raw = #"{"id":"X","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain","futureIndependentTextColor":true}"#
+        let e = makeEngineWithLossy(try lossyFromRaw(raw))
+        #expect(e.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: ["X"]) == false)  // 枚举门看不见
+        #expect(e.loadedDrawingsLossy.hasKnownFutureFields(liveIds: ["X"]) == true)       // 字段门抓得到
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "X", style: style(4, .green)) == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+        // 原始字节保真：未来字段仍在
+        let data = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings).encoded()
+        #expect(String(decoding: data, as: UTF8.self).contains("futureIndependentTextColor"))
     }
 
     @Test("N14f 判据陷阱专项: 存盘→重载的**普通**线仍可编辑（漏 !entries.isEmpty 会全灰，当场红）")
@@ -1738,5 +1834,5 @@ git commit -m "划线 1b-i 切片2 Task6：接手 PR-1 的 5 项 Minor backlog�
    - `deleteDrawing(id:` → 恰好 1 处，且在 UI 删除路由内，且路由在**确认框点「删除」之后**重算 `visibleGeometry`（D65 R13-F1 时序）。
 2. **选中态相关的全部负向测试**（N1/N6/N7/N8/N13d/N14c 路由版/N14d/N16/N17/N18/N19c/N19e）归 PR-3/PR-4，本切片一条都没覆盖（见「覆盖 vs 交接」表）。
 3. **D49 面板派生回显**（`DrawingStyleParams` 改收 `style` + `onChange`）归 PR-4。本切片**没有动面板**（SD-2b）：面板照旧自己规整显示态，写入边界另有一道独立归一化（`withStyle`）——两者消费同一份规则实现，PR-4 接线时面板只需把完整 `DrawingDefaultStyle` 交给路由，写入边界会再归一化一次（幂等）。
-4. **P1c 落新工具时照常加进既有的 `DrawingToolType.implemented`**（`Models.swift:50`）即可——编辑面的工具门（`isEditableToolType`）**派生自它**，可编辑性自动跟上，**不存在第二处要记得改**（codex plan-R11-F1 + R12-F2）。这道门今天的作用是挡住**高版本写的已知但未实现工具**被本构建按水平线假设不可逆改写。
+4. **P1c 落新工具 = 两步**（codex plan-R11-F1 / R12-F2 / R13-F2）：① 照常加进既有的 `DrawingToolType.implemented`（`Models.swift:50`，**不另立登记表**）→ 能画；② 为它写出子类型/标注矩阵并加进 `DrawingStyleAvailability.toolsWithStyleMatrix` → 才可改样式。只做 ① 的话样式控件对它不生效（fail-closed、一眼可见、不污染数据），且 `rejectsEditingUnimplementedKnownToolTypes` 的漂移告警会当场红。这道门今天的作用是挡住**高版本写的已知但未实现工具**被本构建按水平线假设不可逆改写。
 5. **1b-ii `setDrawingLocked(id:locked:)`**：必须是**独立** API 并豁免 D60 闸；且它会撞 D61 的坑（锁定一条未来枚举值线也会 re-merge 抹字节）→ 必须做 raw-preserving 单字段 merge，不能照抄本切片的「整条拒绝」（spec §9）。
