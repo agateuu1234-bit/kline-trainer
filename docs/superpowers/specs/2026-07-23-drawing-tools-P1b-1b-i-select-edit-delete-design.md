@@ -245,6 +245,18 @@ extension DrawingObject {
 
 ### D61 跨版本保真：编辑对「携带未来未知枚举值」的线 fail-closed（**不是**在解码值上比较）
 
+> 🔄 **2026-07-26 修订（user 裁决，PR-2 计划 codex R14-F1 触发）：判据从「看来源」改为「看结果」。**
+> 本决策下文写的是「携带未来枚举值 → **一律**拒绝改样式」。实测发现这会让这条线**只能整条删掉**才能结束存档
+> （finalize 门本就 fail-closed），而删整条的数据损失**严格大于**「用户显式换掉一个本版本表示不了的色号」。
+> **现行规则**：`updateDrawingStyle` 先算候选、与 `loadedDrawingsLossy` 归并，**只有归并结果仍带**
+> 未来枚举值 / 未来字段时才拒。于是：
+> - 改 thickness 等**不涉及**该值的字段 → 结果仍带未来数据 → **仍拒**（P1a 字段级归并会保住原值）；
+> - **换成本版本认识的颜色** → 该值被用户显式覆盖 → 结果干净 → **放行**，线保住、这一局随即可结束存档；
+> - 未来**字段**（本构建不认识的 key，没有任何控件能覆盖它）→ **任何**编辑仍拒（与原文结论一致）。
+> - 已知代价：一次换线色会把「本来跟随线色」的未来字色一并覆盖（两值解码后都是 `.orange`，派生② 分辨不了）。
+> **判据与 finalize 门同源**（`TrainingSessionCoordinator:729-736` 也是 reconcile 后查同两个门）→「编辑通过」⇒「能结束存档」。
+> 落地细节见 `docs/superpowers/plans/2026-07-26-drawing-P1b-1b-i-slice2-write-boundary-api.md`。
+
 > **来源：codex R4 high（原始）+ R7 high（推翻我 R4 的机制）。最终形态如下。**
 
 **R4 首次提出的问题**：`textColorToken` 是已持久化字段（`Models/Models.swift:257`），独立字色是 P3 范围（`Drawing/DrawingSession.swift:158-160`）。一条高版本线带独立字色，用户在本构建里只改粗细，字色就被 `withStyle` 静默抹成线色并 autosave → 不可逆跨版本数据丢失。与 D60 同一条推理（[[project_app_public_release_intent]]）。
@@ -357,13 +369,22 @@ D63 里我写了「样式编辑**不禁**（改一条当前看不见的线的颜
 ```
 改样式可用 ⟺ locked == false
             且 在 selectedPanel 当前 mapper 下 visibleGeometry != nil
-            且 !loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id])   ← 见 D61，带 entries 非空；
-                                                                                 绝不写成 knownFutureEnumPayloads() 的 id-membership
+            〔🔄 2026-07-26 修订：**删去**原「且 !hasKnownFutureEnumValues(liveIds:[id])」这一分量〕
 
 删除可用   ⟺ locked == false
             且 在 selectedPanel 当前 mapper 下 visibleGeometry != nil
             （**不含**未来枚举值分量：删整条不产生"部分抹除"，D61 允许删）
 ```
+
+> 🔄 **2026-07-26 修订（user 裁决，PR-2 计划 codex R15-F1 触发）：样式控件不再因「携带未来数据」而置灰。**
+> D61 改为「看结果」之后，**控件粒度预判不出**这次改动会不会把未来值覆盖掉（未来值可能落在任一字段上），
+> 而按旧规则置灰会让 D61 新开的**修复路径（换个本版本认识的颜色）用户根本点不到** —— 引擎测试却因为直调
+> API 而全绿，是典型的「能力存在但不可达」。**现行 UI 规则**：
+> - `locked` / 几何两个分量**照旧置灰**（它们在控件粒度上判得准）；
+> - 「未来数据」**不再作为置灰分量**：控件可点，写入由引擎按「看结果」裁决；被拒时给一次反馈、**保留选中**
+>   （返回值不参与选中生命期，D64 不变）。
+> - **PR-4 必须补一条路由级测试**：一条携带未来颜色值的线，**经样式控件换色** → 真的改成功（证明修复路径
+>   用户可达），而**经样式控件改粗细** → 被拒且有反馈。只有引擎直调测试**不算**覆盖这条。
 
 - **样式控件**按「改样式可用」置灰；**🗑** 按「删除可用」置灰。二者共享 `locked` 与 `visibleGeometry` 分量（这两种情形下**同进同退**），只在「未来枚举值」线上分岔：**样式控件灰、🗑 亮**（这条高版本线看不懂、改不得，但可以整条删掉）。
 - ⚠️ **两类门的层级不同，别把几何说成引擎 fail-closed（codex R13-F1 纠正我 R11 的过度宣称）**：

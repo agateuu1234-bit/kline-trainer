@@ -17,7 +17,7 @@
   - **保护未削弱**：改 thickness 这类不涉及该值的编辑仍被拒（字段级归并会保住原值 → 结果仍带未来数据）；未来**字段**（本构建不认识的 key，没有任何控件能覆盖）**任何**编辑都仍被拒。
   - **已知代价**：一次换线色会把「本来跟随线色」的未来字色一并覆盖（两个未来值解码后都是 `.orange`，派生② 分辨不了）——已用测试钉死并写明是取舍而非缺陷。
   - **判据与 finalize 门同源**（`TrainingSessionCoordinator:729-736` 也是 reconcile 后查同两个门）→ 「编辑通过」⇒「这一局能结束存档」。
-  - **spec 正文未改**（本切片不动 spec 文件）；1b-ii/P5 接手时以本条为准。
+  - **spec 正文已同步修订**（codex plan-R15-F1：不改 spec 的话，PR-4 照 D65 旧规则把控件灰掉 → 这条修复路径**用户根本点不到**，引擎测试却因直调 API 全绿）：spec 的 D61 加了修订注记、D65 的「未来枚举」置灰分量已删除并写明新 UI 规则 + PR-4 必须补的路由级测试。
 - `CONTRACT_VERSION` 保持 **1.12**，`user_version` 保持 **7**，**零迁移**（`DrawingObject` 不新增/不改任何持久化字段；本切片只加运行时 API）。
 - **访问级别纪律**：本切片新增的两个写入 API 一律 `internal`，**不得** `public`（D62/D51）。`withStyle` 同为 `internal`。测试经 `@testable import` 照常可调。
 - **拒绝 = 零改动 + `drawingsRevision` 不递增 + 返 `false`**：四道门任意一道不过，`drawings` 必须逐字段不变，计数器绝不动（D50/D60/D61/D66 逐条写死）。
@@ -221,8 +221,10 @@ struct DrawingObjectStyleEditTests {
         let trend = DrawingObject(id: "t", toolType: .trend,
                                   anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
                                   isExtended: false, panelPosition: 0, period: .daily)
-        #expect(trend.withStyle(style(.straight)) == nil)      // 换任何样式都不行
-        #expect(trend.withStyle(style(.segment)) == nil)
+        // ⚠️ `withStyle` **不含**工具门（R15-F2：它也服务新建路径）→ 这里必须**放行**；
+        //    「未实现工具不可编辑」由 `updateDrawingStyle` 落实（Task 4 的引擎级测试钉死）。
+        #expect(trend.withStyle(style(.straight)) != nil)
+        #expect(trend.withStyle(style(.segment)) != nil)       // 横规则也不适用于它
         #expect(DrawingStyleAvailability.isEditableToolType(.trend) == false)
         #expect(DrawingStyleAvailability.isEditableToolType(.horizontal) == true)
         // 判据 = 既有单一真相 `DrawingToolType.implemented`（能不能画，codex plan-R12-F2：不另立登记表）
@@ -398,11 +400,9 @@ extension DrawingObject {
     /// ② `thickness` 越出本构建的 1…5 值域**且**与本对象当前值不同，见下）。
     /// 非 nil 时：只换 5 个样式字段 + 两个派生字段，其余字段逐字段原样拷贝。
     func withStyle(_ s: DrawingDefaultStyle) -> DrawingObject? {
-        // 工具门（codex plan-R11-F1）：本构建没实现的工具，它的样式矩阵我们根本不懂 → **整条不可编辑**。
-        // `.trend`/`.text` 等是**已知枚举 case**（`Models.swift:39`），高版本写的这类线解码后一切正常、
-        // D61 的 raw-aware 门看不见它们 → 不设这道门，本构建会拿水平线的假设不可逆地改写它们。
-        // 与 append 侧的 `isRenderableSubType` **刻意不对称**（进来宽松、改写保守），理由见该 helper 头注。
-        guard DrawingStyleAvailability.isEditableToolType(toolType) else { return nil }
+        // ⚠️ **工具门不在这里**（codex plan-R15-F2）：`withStyle` 同时服务**新建**（`commitPending`）与
+        //   **编辑**（`updateDrawingStyle`）。把「只有已写出样式矩阵的工具才准动」塞进这里，会让 P1c
+        //   新工具「能激活却提交失败、静默丢锚不出线」。编辑门属于编辑面 → 放在 `updateDrawingStyle`。
         guard DrawingStyleAvailability.isRenderableSubType(s.lineSubType, toolType: toolType) else { return nil }
         // 值域闸（codex plan-R4-F1）：`DrawingDefaultStyle.thickness` 是裸 `Int`、文档域 1…5
         // （`DrawingEnums.swift:31`），面板控件只产 1…5，但**直接调用者**能塞 0 / 负数 / 极大值，
@@ -1227,6 +1227,10 @@ Expected: 编译失败 `value of type 'TrainingEngine' has no member 'updateDraw
         guard matches.count == 1, let i = matches.first else { return false }      // ①（D66 唯一）
         let old = drawings[i]
         guard !old.locked else { return false }                                    // ②（D60）
+        // ②b 工具门（D61 同族，codex plan-R11-F1；位置由 R15-F2 从 withStyle 挪来）：本构建没写出样式
+        //     矩阵的工具，我们不懂它的样式语义 → **只挡编辑，不挡新建/提交**。`.trend`/`.text` 是**已知**
+        //     枚举 case，高版本写的这类线解码后一切"正常"、raw-aware 门看不见 → 没这道门就会被按横线假设改写。
+        guard DrawingStyleAvailability.isEditableToolType(old.toolType) else { return false }
         guard let updated = old.withStyle(style) else { return false }             // ④（D59/D58 引擎支）
         // ③（D61，**user 2026-07-26 裁决改为"看结果"**——对 spec 原文的显式修订，见下方 ⚠️）：
         //   先算出候选状态、与加载快照**归并**，只有当归并结果**仍**带本构建不支持的未来数据时才拒。
@@ -1899,10 +1903,11 @@ git status --porcelain   # 期望：空输出（codex plan-R14-F3：防新建文
 ## 交接（PR-3 / PR-4 必须接手）
 
 0. **已接受的残留（本切片明写，别当没说）**：源码守卫是**文本级**的（调用点计数 + 标识符文件作用域），它挡得住「忘了补几何门就加调用点」和「用方法引用绕过调用 pattern」，但**挡不住**已在白名单文件里的代码把方法引用**传出去**。要彻底焊死只有两条路：SwiftSyntax 级扫描（为一条守卫引入编译器级依赖），或「只有几何校验过的路由能构造」的授权对象——后者在本仓落不了地：能构造它的类型得声明在 UI 路由文件，而那是 UIKit-only 文件（纯 macOS host 不编译），引擎引用它会直接炸掉 host 测试；把几何证明塞进引擎签名又违反 D65「引擎签名不含 geometry 参数」。**现状取舍**：本切片零调用点、危害为零；PR-4 接线时这条守卫是**唯一**的几何门 forcing function，届时若觉得不够，再单独评估上 SwiftSyntax。
-1. **PR-4 接线时必须同步改两条源码守卫**（本切片故意写成「零调用点」）：
+1. **PR-4 的 UI 可用性必须按修订后的 D61/D65 落地**（codex plan-R15-F1，spec 已同步）：样式控件**不再**因「携带未来数据」置灰（`locked`/几何两个分量照旧），写入由引擎按「看结果」裁决、被拒时给反馈并**保留选中**；并**必须补一条路由级测试**：携带未来颜色值的线**经样式控件换色 → 真改成功**（证明修复路径用户可达）、**经控件改粗细 → 被拒且有反馈**。只有引擎直调测试不算覆盖。
+2. **PR-4 接线时必须同步改两条源码守卫**（本切片故意写成「零调用点」）：
    - `updateDrawingStyle(` → 恰好 1 处，且在 UI 编辑路由内，且路由**先过 D65 当前几何门 → 若改 `lineSubType` 再过 D58 候选预检 → 才调引擎**；
    - `deleteDrawing(id:` → 恰好 1 处，且在 UI 删除路由内，且路由在**确认框点「删除」之后**重算 `visibleGeometry`（D65 R13-F1 时序）。
-2. **选中态相关的全部负向测试**（N1/N6/N7/N8/N13d/N14c 路由版/N14d/N16/N17/N18/N19c/N19e）归 PR-3/PR-4，本切片一条都没覆盖（见「覆盖 vs 交接」表）。
-3. **D49 面板派生回显**（`DrawingStyleParams` 改收 `style` + `onChange`）归 PR-4。本切片**没有动面板**（SD-2b）：面板照旧自己规整显示态，写入边界另有一道独立归一化（`withStyle`）——两者消费同一份规则实现，PR-4 接线时面板只需把完整 `DrawingDefaultStyle` 交给路由，写入边界会再归一化一次（幂等）。
-4. **P1c 落新工具 = 两步**（codex plan-R11-F1 / R12-F2 / R13-F2）：① 照常加进既有的 `DrawingToolType.implemented`（`Models.swift:50`，**不另立登记表**）→ 能画；② 为它写出子类型/标注矩阵并加进 `DrawingStyleAvailability.toolsWithStyleMatrix` → 才可改样式。只做 ① 的话样式控件对它不生效（fail-closed、一眼可见、不污染数据），且 `rejectsEditingUnimplementedKnownToolTypes` 的漂移告警会当场红。这道门今天的作用是挡住**高版本写的已知但未实现工具**被本构建按水平线假设不可逆改写。
-5. **1b-ii `setDrawingLocked(id:locked:)`**：必须是**独立** API 并豁免 D60 闸；且它会撞 D61 的坑（锁定一条未来枚举值线也会 re-merge 抹字节）→ 必须做 raw-preserving 单字段 merge，不能照抄本切片的「整条拒绝」（spec §9）。
+3. **选中态相关的全部负向测试**（N1/N6/N7/N8/N13d/N14c 路由版/N14d/N16/N17/N18/N19c/N19e）归 PR-3/PR-4，本切片一条都没覆盖（见「覆盖 vs 交接」表）。
+4. **D49 面板派生回显**（`DrawingStyleParams` 改收 `style` + `onChange`）归 PR-4。本切片**没有动面板**（SD-2b）：面板照旧自己规整显示态，写入边界另有一道独立归一化（`withStyle`）——两者消费同一份规则实现，PR-4 接线时面板只需把完整 `DrawingDefaultStyle` 交给路由，写入边界会再归一化一次（幂等）。
+5. **P1c 落新工具 = 两步**（codex plan-R11-F1 / R12-F2 / R13-F2 / R15-F2）：① 照常加进既有的 `DrawingToolType.implemented`（`Models.swift:50`，**不另立登记表**）→ 能激活、能落锚、**能提交出线**（新建路径**不**受编辑门影响，R15-F2 已把工具门从 `withStyle` 挪进 `updateDrawingStyle`）；② 为它写出子类型/标注矩阵并加进 `DrawingStyleAvailability.toolsWithStyleMatrix` → 才可**改样式**。只做 ① 的话：画得出、但样式控件对它不生效（fail-closed、一眼可见、不污染数据），且漂移告警断言会当场红提醒补矩阵。这道门今天的作用是挡住**高版本写的已知但未实现工具**被本构建按水平线假设不可逆改写。
+6. **1b-ii `setDrawingLocked(id:locked:)`**：必须是**独立** API 并豁免 D60 闸；且它会撞 D61 的坑（锁定一条未来枚举值线也会 re-merge 抹字节）→ 必须做 raw-preserving 单字段 merge，不能照抄本切片的「整条拒绝」（spec §9）。
