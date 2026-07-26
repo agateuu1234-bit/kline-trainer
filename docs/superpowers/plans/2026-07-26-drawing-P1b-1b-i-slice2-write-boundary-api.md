@@ -199,14 +199,27 @@ struct DrawingObjectStyleEditTests {
         #expect(r2.labelMode == .right)
     }
 
-    @Test("可用性：水平线 .segment 恒不可渲染 → nil；非水平工具的 .segment → 放行（横规则限横工具）")
-    func rejectsUnrenderableSubTypeOnlyForHorizontal() throws {
+    @Test("可用性：水平线 .segment 恒不可渲染 → nil（合法子类型放行做反向对照）")
+    func rejectsUnrenderableSubTypeForHorizontal() throws {
         let h = makeStyledHLine(id: "a")
         #expect(h.withStyle(style(.segment)) == nil)
+        #expect(h.withStyle(style(.straight)) != nil)
+        #expect(h.withStyle(style(.ray)) != nil)
+    }
+
+    @Test("工具门（codex plan-R11-F1）：本构建未实现的**已知**工具 → 整条不可编辑（改写保守）")
+    func rejectsEditingUnimplementedKnownToolTypes() throws {
+        // `.trend` 是**已知**枚举 case（`Models.swift:39`）→ 高版本写的这类线解码后一切"正常"，
+        // D61 的 raw-aware 门看不见它；不设工具门的话，本构建会拿水平线的样式假设不可逆地改写它。
         let trend = DrawingObject(id: "t", toolType: .trend,
                                   anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
                                   isExtended: false, panelPosition: 0, period: .daily)
-        #expect(trend.withStyle(style(.segment)) != nil)     // P1c 的线段工具不该被横规则误拒
+        #expect(trend.withStyle(style(.straight)) == nil)      // 换任何样式都不行
+        #expect(trend.withStyle(style(.segment)) == nil)
+        #expect(DrawingStyleAvailability.isEditableToolType(.trend) == false)
+        #expect(DrawingStyleAvailability.isEditableToolType(.horizontal) == true)
+        // ⚠️ 与 append 侧**刻意不对称**：同一条 `.trend`+`.segment` 线经 `appendDrawing` 仍必须被接收
+        //    （PR-1 的 `nonHorizontalSegmentAccepted` 钉死，本切片不得回归）——进来宽松、改写保守。
     }
 
     @Test("值域闸（codex plan-R4-F1）：越域 thickness 写不进来，但对象已有的越域值可原样带回")
@@ -229,20 +242,20 @@ struct DrawingObjectStyleEditTests {
         #expect(future.withStyle(style(.straight, .solid, 9)) == nil)
     }
 
-    @Test("归一化也必须 tool-aware（codex plan-R2-F2）：非水平工具的 labelMode 不被横线规则改写")
+    @Test("归一化 tool-aware（codex plan-R2-F2）：横规则只对横工具成立")
     func labelModeNormalizationIsToolAware() throws {
-        // 水平线：(ray,.left) 归一成 .hidden（横规则成立）
+        typealias A = DrawingStyleAvailability
+        // 直调重载本身：`withStyle` 现在被工具门挡在更前面（R11-F1），非水平走不到归一化那一步，
+        // 故这条规则要在这里单测——它是「P1c 把新工具加进 implementedToolTypes 时不会重蹈 R2-F2」的保险。
+        #expect(A.normalizedLabelMode(current: .left, lineSubType: .ray, toolType: .horizontal) == .hidden)
+        #expect(A.normalizedLabelMode(current: .right, lineSubType: .ray, toolType: .horizontal) == .right)
+        #expect(A.normalizedLabelMode(current: .show, lineSubType: .straight, toolType: .horizontal) == .hidden)
+        #expect(A.normalizedLabelMode(current: .left, lineSubType: .ray, toolType: .trend) == .left)
+        #expect(A.normalizedLabelMode(current: .show, lineSubType: .straight, toolType: .trend) == .show)
+        // 横线经 withStyle 的实际行为（两道门叠加后）
         let h = makeStyledHLine(id: "h")
         #expect(h.withStyle(style(.ray, .solid, 1, .orange, .left))?.labelMode == .hidden)
-        // 非水平（.trend）：同样的 (ray,.left) **原样保留** —— 横规则不适用于它，
-        // 无条件套会把它的 .left 静默改写（与 .segment over-reject 同族的坏数据路径）
-        let trend = DrawingObject(id: "t", toolType: .trend,
-                                  anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
-                                  isExtended: false, panelPosition: 0, period: .daily)
-        #expect(trend.withStyle(style(.ray, .solid, 1, .orange, .left))?.labelMode == .left)
-        // `.show` 在横线上恒灰、在非水平工具上不该被本期擅自改写
         #expect(h.withStyle(style(.straight, .solid, 1, .orange, .show))?.labelMode == .hidden)
-        #expect(trend.withStyle(style(.straight, .solid, 1, .orange, .show))?.labelMode == .show)
     }
 
     @Test("只动 5 样式字段 + 两个派生：其余字段逐字段原样拷贝")
@@ -369,6 +382,11 @@ extension DrawingObject {
     /// ② `thickness` 越出本构建的 1…5 值域**且**与本对象当前值不同，见下）。
     /// 非 nil 时：只换 5 个样式字段 + 两个派生字段，其余字段逐字段原样拷贝。
     func withStyle(_ s: DrawingDefaultStyle) -> DrawingObject? {
+        // 工具门（codex plan-R11-F1）：本构建没实现的工具，它的样式矩阵我们根本不懂 → **整条不可编辑**。
+        // `.trend`/`.text` 等是**已知枚举 case**（`Models.swift:39`），高版本写的这类线解码后一切正常、
+        // D61 的 raw-aware 门看不见它们 → 不设这道门，本构建会拿水平线的假设不可逆地改写它们。
+        // 与 append 侧的 `isRenderableSubType` **刻意不对称**（进来宽松、改写保守），理由见该 helper 头注。
+        guard DrawingStyleAvailability.isEditableToolType(toolType) else { return nil }
         guard DrawingStyleAvailability.isRenderableSubType(s.lineSubType, toolType: toolType) else { return nil }
         // 值域闸（codex plan-R4-F1）：`DrawingDefaultStyle.thickness` 是裸 `Int`、文档域 1…5
         // （`DrawingEnums.swift:31`），面板控件只产 1…5，但**直接调用者**能塞 0 / 负数 / 极大值，
@@ -413,6 +431,22 @@ extension DrawingObject {
     public static func isRenderableSubType(_ sub: LineSubType, toolType: DrawingToolType) -> Bool {
         guard toolType == .horizontal else { return true }   // 非水平：横规则不适用（矩阵属 P1c）
         return horizontalLineSubTypeEnabled(sub)
+    }
+
+    /// 本构建**已实现**的工具集：渲染 / 命中 / 样式矩阵**只对它们成立**（本期只有水平线，母 spec §3.1）。
+    /// P1c 落地新工具时**必须**同时把它加进来，否则新工具画得出却改不动。
+    public static let implementedToolTypes: Set<DrawingToolType> = [.horizontal]
+
+    /// 该工具的样式语义是否被本构建理解 → **能否编辑**（codex plan-R11-F1）。
+    /// ⚠️ **与 `isRenderableSubType`（append 侧）刻意不对称，别"统一"掉**：
+    ///   - **append = 数据进来**：拒绝 = 静默丢掉用户/高版本已有的线 → 必须宽松（PR-1 over-reject 的教训）；
+    ///   - **编辑 = 改写已有数据**：`DrawingToolType` 把 `.trend`/`.text` 等目标工具**已声明为已知 case**，
+    ///     故一条高版本 `.trend` 线解码后是 known 值、**D61 的 raw-aware 门看不见它** → 若放行编辑，
+    ///     本构建就会拿**水平线的样式假设**改写一条自己根本渲染不出的线，且不可逆（本期无 undo）。
+    ///   与 D61「高版本线：选得中、改不动样式、可整条删」逐字同构 —— 同一条纪律，只是判据从
+    ///   「未知枚举值」扩到「已知但本构建未实现的工具」。
+    public static func isEditableToolType(_ t: DrawingToolType) -> Bool {
+        implementedToolTypes.contains(t)
     }
 
     /// D59 共享单点（tool-aware 版）：写入边界用的 `labelMode` 归一化。
@@ -1239,6 +1273,24 @@ struct DrawingEditDurabilityGateTests {
         #expect(e.drawingsRevision == rev + 1)
     }
 
+    @Test("工具门端到端（codex plan-R11-F1）：未实现的已知工具线 —— 改样式被拒、但**保留且可删**")
+    func unimplementedToolLineIsPreservedNotEditable() throws {
+        let e = TrainingEngine.preview()
+        // 一条 `.trend` 线（已知枚举、无未来枚举值 → D61 门不命中）；经 append 进来是**合法**的
+        let trend = DrawingObject(id: "T", toolType: .trend,
+                                  anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
+                                  isExtended: false, panelPosition: 0, period: .daily)
+        #expect(e.appendDrawing(trend) == true)              // 进来宽松（PR-1 行为，不得回归）
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "T", style: style(4, .green)) == false)   // 改写保守
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+        // 但**可以整条删**（与 D61 未来枚举值线同一处置：看得见、改不动、删得掉）
+        #expect(e.deleteDrawing(id: "T") == true)
+        #expect(e.drawings.isEmpty)
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
     @Test("N14g: known 独立字色不得被无条件派生抹掉（orange 线 + blue 标签）")
     func knownIndependentTextColorPreserved() throws {
         let e = TrainingEngine.preview()
@@ -1559,7 +1611,9 @@ git commit -m "划线 1b-i 切片2 Task5：deleteDrawing(id:) internal 删除写
 PR-1 把 `.segment` 横规则限定到 `.horizontal` 后，append 边界不再拦「本期尚未实现的工具」。**决策：不补这道门**，理由写进 `isRenderableSubType` 私有 helper 的注释末尾：
 
 ```swift
-    /// **纵深防御降级的记录（PR-1 Opus 终审 Minor ②，1b-i 切片2 裁决：不补门）**：本 helper 限定横规则后，
+    /// **纵深防御降级的记录（PR-1 Opus 终审 Minor ②，1b-i 切片2 裁决：append 侧不补门）**：
+    /// ⚠️ 别与**编辑面**的工具门（`isEditableToolType`，codex plan-R11-F1）混为一谈——那道门是"改写保守"，
+    /// 这里是"进来宽松"，两者刻意不对称（拒绝进来 = 丢数据；放行改写 = 污染高版本数据）。本 helper 限定横规则后，
     /// append 边界不再顺带拦「本期未实现的工具」。这**今天不是洞**：会话/提交侧已 fail-close 到唯一实现的
     /// 水平线（`DrawingSession.activate` 只被顶栏画图钮以 `.horizontal` 调用），decode/resume 走整组赋值
     /// 不经 append。补一道「只许 implemented 工具」的门反而会**重犯 PR-1 那个 over-reject**
@@ -1665,4 +1719,5 @@ git commit -m "划线 1b-i 切片2 Task6：接手 PR-1 的 5 项 Minor backlog�
    - `deleteDrawing(id:` → 恰好 1 处，且在 UI 删除路由内，且路由在**确认框点「删除」之后**重算 `visibleGeometry`（D65 R13-F1 时序）。
 2. **选中态相关的全部负向测试**（N1/N6/N7/N8/N13d/N14c 路由版/N14d/N16/N17/N18/N19c/N19e）归 PR-3/PR-4，本切片一条都没覆盖（见「覆盖 vs 交接」表）。
 3. **D49 面板派生回显**（`DrawingStyleParams` 改收 `style` + `onChange`）归 PR-4。本切片**没有动面板**（SD-2b）：面板照旧自己规整显示态，写入边界另有一道独立归一化（`withStyle`）——两者消费同一份规则实现，PR-4 接线时面板只需把完整 `DrawingDefaultStyle` 交给路由，写入边界会再归一化一次（幂等）。
-4. **1b-ii `setDrawingLocked(id:locked:)`**：必须是**独立** API 并豁免 D60 闸；且它会撞 D61 的坑（锁定一条未来枚举值线也会 re-merge 抹字节）→ 必须做 raw-preserving 单字段 merge，不能照抄本切片的「整条拒绝」（spec §9）。
+4. **P1c 落新工具时必须同时把它加进 `DrawingStyleAvailability.implementedToolTypes`**（codex plan-R11-F1）：否则新工具画得出、却因编辑面的工具门而改不动样式（现象 = 面板控件对它全灰）。这道门今天的作用是挡住**高版本写的已知但未实现工具**被本构建按水平线假设改写。
+5. **1b-ii `setDrawingLocked(id:locked:)`**：必须是**独立** API 并豁免 D60 闸；且它会撞 D61 的坑（锁定一条未来枚举值线也会 re-merge 抹字节）→ 必须做 raw-preserving 单字段 merge，不能照抄本切片的「整条拒绝」（spec §9）。
