@@ -282,7 +282,9 @@ struct DrawingObjectStyleEditTests {
         let contracts = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()   // ios/Contracts
-        let root = contracts.appendingPathComponent("Sources/KlineTrainerContracts")
+        // 扫**全部 target**（codex plan-R8-F1）：本包有 KlineTrainerContracts / KlineTrainerPersistence 两个，
+        // 只扫前者会漏掉跨 target 的第二份语义。实测后者不含这四条语义的任何表达式，故计数不变。
+        let root = contracts.appendingPathComponent("Sources")
         let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!
             .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
         #expect(!files.isEmpty)                                  // 先证明真的扫到文件（防路径写错→恒过）
@@ -623,6 +625,7 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
 
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（在 `deleteDrawing(at:)`/`appendDrawing` 邻近新增方法）
+- Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift` 里 PR-1 的 `allSwiftFilesUnderSources()`：root 从 `Sources/KlineTrainerContracts` 改为 `Sources/`（覆盖全部 target，codex plan-R8-F1；改完先跑既有 `appendFamilyTrustBoundary` 确认仍绿）
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（同文件追加；复用其既有 `allSwiftFilesUnderSources()` / `trainingEnginePath`，**新增**空白无关扫描器 `squeeze` / `squeezedText` / `squeezedSource` / `callCount(inSqueezed:pattern:)` / `callSiteCount(_:)` / `squeezedContains` 六个 suite 私有方法 + 两条扫描器自检测试）
 
 **Interfaces:**
@@ -731,7 +734,16 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         #expect(n.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 5)) == true)
     }
 
-    // MARK: 空白无关的调用点扫描（codex plan-R1-F1 → R2-F1 收紧）
+    // MARK: 空白无关的调用点扫描（codex plan-R1-F1 → R2-F1 → R3-F1 → R7-F1 → R8-F1 逐轮收紧）
+
+    /// ⚠️ **本 Task 同时把扫描根从 `Sources/KlineTrainerContracts` 放宽到整个 `Sources/`**（codex plan-R8-F1）：
+    ///   本包有两个 target（`KlineTrainerContracts` / `KlineTrainerPersistence`，`Package.swift` 实测），
+    ///   只扫前者的话，一个**跨 target** 的调用者根本不在扫描范围内。改法 = 把 PR-1 既有 helper
+    ///   `allSwiftFilesUnderSources()` 的 root 从 `Sources/KlineTrainerContracts` 改成 `Sources/`。
+    ///   **实测过不会引入假阳性**：`KlineTrainerPersistence` 当前对 `appendDrawing` / `appendReviewDrawing` /
+    ///   `routeDrawingCommit` / `deleteDrawing` / `updateDrawingStyle` 五个标识符**一次都没提**
+    ///   （`grep -rln <id> Sources/ | grep -v KlineTrainerContracts/` 全空）→ 各 pattern 计数不变。
+    ///   实施时先跑一遍既有 `appendFamilyTrustBoundary` 确认仍绿，再往下写新守卫。
 
     /// 删掉**全部**空白字符（用于 needle 与源码两侧，使匹配彻底与排版无关）。
     private func squeeze(_ s: String) -> String {
@@ -836,6 +848,21 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         try squeezedSource(path).contains(squeeze(needle))
     }
 
+    /// 断言某声明**存在**且**不是包外可见的**（`public` / `package` / `open` 一个都不行）。
+    /// ⚠️ 只查 `public` 不够（codex plan-R8-F1，已对 `Package.swift` 实测）：本包
+    ///   `swift-tools-version: 6.0` → **`package` 访问级别可用**，`package func updateDrawingStyle`
+    ///   能让**另一个 target**（`KlineTrainerPersistence`）直接调这两个写入面，而几何门只存在于
+    ///   `KlineTrainerContracts` 里那条 UI 路由上 → 信任边界被绕开而守卫仍绿。
+    private func expectEngineInternalOnly(_ decl: String,
+                                          sourceLocation: SourceLocation = #_sourceLocation) throws {
+        #expect(try squeezedContains(trainingEnginePath, "func " + decl),
+                "\(decl) 不见了？（先证明真读到文件，防负向断言假绿）", sourceLocation: sourceLocation)
+        for mod in ["public func ", "package func ", "open func "] {
+            #expect(try !squeezedContains(trainingEnginePath, mod + decl),
+                    "\(decl) 不得是 \(mod)——包外/跨 target 可达即绕过几何门", sourceLocation: sourceLocation)
+        }
+    }
+
     /// `Sources/` 里**提到过**该标识符的文件（剥注释后按裸标识符找，不看后面跟不跟左括号）。
     /// ⚠️ 为什么必须按「标识符」而不是「调用 pattern」（codex plan-R5-F1）：
     ///   `let f = engine.updateDrawingStyle` / `let g: (DrawingID, DrawingDefaultStyle) -> Bool = engine.updateDrawingStyle`
@@ -848,8 +875,7 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
 
     @Test("N15: updateDrawingStyle 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
     func updateDrawingStyleTrustBoundary() throws {
-        #expect(try squeezedContains(trainingEnginePath, "func updateDrawingStyle(id:"))    // 仍存在（也证明真读到文件）
-        #expect(try !squeezedContains(trainingEnginePath, "public func updateDrawingStyle(")) // 不是 public（D62）
+        try expectEngineInternalOnly("updateDrawingStyle(id:")   // 存在 + 非 public/package/open（D62）
         // ⚠️ 本切片是引擎写入面，UI 编辑路由属 PR-4 → 现在**零调用点**。
         //    PR-4 接线时必须把本断言改成：恰好 1 处、且该文件是 UI 编辑路由、且路由在调用前先验
         //    HorizontalLineTool.visibleGeometry（D58 候选预检 + D65 当前门）。谁不补几何门就加调用点，
@@ -1305,8 +1331,7 @@ git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（l
 
     @Test("N19a: deleteDrawing(id:) 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
     func deleteByIdTrustBoundary() throws {
-        #expect(try squeezedContains(trainingEnginePath, "func deleteDrawing(id:"))
-        #expect(try !squeezedContains(trainingEnginePath, "public func deleteDrawing(id:"))
+        try expectEngineInternalOnly("deleteDrawing(id:")        // 存在 + 非 public/package/open（D51）
         // PR-4 接线时改成：恰好 1 处、在 UI 删除路由、且路由在**确认框点「删除」之后**重算 visibleGeometry
         // （D65 R13-F1：确认框有时间窗，线可能滑走 → 只在点 🗑 那刻判几何是时序 bug）。
         let idSites = try callSiteCount("deleteDrawing(id:")
@@ -1314,7 +1339,7 @@ git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（l
         // N19d 不回归确认：index 版本仍零调用点、仍非 public（PR-1 已落）。
         let atSites = try callSiteCount("deleteDrawing(at:")
         #expect(atSites.isEmpty, "deleteDrawing(at:) 应零调用点：\(atSites)")
-        #expect(try !squeezedContains(trainingEnginePath, "public func deleteDrawing(at index:"))
+        try expectEngineInternalOnly("deleteDrawing(at index:")  // index 版同样不得包外可达（D51 R7 修订）
         // 标识符作用域（codex plan-R5-F1，连方法引用一起挡）：`deleteDrawing` 本切片只许出现在
         // 引擎自身文件 + `DrawingToolManager.swift`（1a-iv 交接①在案的**死代码**，spec §1.2/§8#5 明令本期不动，
         // 它有自己的同名 `deleteDrawing(at:)`，与引擎写入面无关）。PR-4 接线时**只**把删除路由文件加进白名单。
@@ -1377,8 +1402,7 @@ PR-1 那条守卫用的是**逐行** substring（局部函数 `callSites`）。*
         // (1) 访问级别：7 个写入面全非 public（编辑 5 + 装载 2）
         for decl in ["appendDrawing(", "appendReviewDrawing(", "routeDrawingCommit(", "deleteDrawing(at index:",
                      "removeReviewDrawing(at index:", "setReviewLossy(", "setReviewDrawings("] {
-            #expect(try !squeezedContains(trainingEnginePath, "public func " + decl))
-            #expect(try squeezedContains(trainingEnginePath, "func " + decl))       // 仍存在（internal）
+            try expectEngineInternalOnly(decl)      // 非 public **且非 package/open**（codex plan-R8-F1）
         }
         // (2) 唯一调用点（**核心**：仅非 public 不够——包内新调用者仍能绕过 handleDrawingTap 的 geometry 门）
         let appends = try callSiteCount("appendDrawing(")
