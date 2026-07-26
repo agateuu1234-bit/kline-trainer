@@ -512,6 +512,7 @@ git add ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEd
         ios/Contracts/Tests/KlineTrainerContractsTests/DrawingTestFixtures.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingObjectStyleEditTests.swift
 git commit -m "划线 1b-i 切片2 Task1：withStyle 语义闸单点 + 可用性判据共享单点（D59/D58 引擎支）"
+git status --porcelain   # 期望：空输出（codex plan-R14-F3：防新建文件漏 add）
 ```
 
 ---
@@ -657,6 +658,8 @@ Expected: FAIL —— 现状 `commitPending` 直接取 `s.labelMode`（不归一
 // ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScanner.swift
 // 源码守卫共享扫描器（codex plan R1/R2/R3/R7/R8/R9/R10/R13 逐轮收紧的产物）。
 // ⚠️ Swift import 是**文件级**的，本文件必须自带。
+// ⚠️ 这些函数**不得**加 `private`（codex plan-R14-F2）：顶层 `private` 在 Swift 里是**文件作用域**，
+//    加了之后 SourceGuardScannerTests / TrainingEngineDrawingSessionTests 根本调不到 → 整个 Task 编译失败。
 import Foundation
 import Testing
 @testable import KlineTrainerContracts
@@ -691,7 +694,7 @@ var trainingEnginePath: String {
 ///   实施时先跑一遍既有 `appendFamilyTrustBoundary` 确认仍绿，再往下写新守卫。
 
 /// 删掉**全部**空白字符（用于 needle 与源码两侧，使匹配彻底与排版无关）。
-private func squeeze(_ s: String) -> String {
+func squeeze(_ s: String) -> String {
     s.split(whereSeparator: { $0.isWhitespace }).joined()
 }
 
@@ -710,7 +713,7 @@ private func squeeze(_ s: String) -> String {
 ///      当字面文本丢掉。根因不是"再补一个 case"，是**同一件事有两份能力不同的实现**（本计划一路在
 ///      批评的同一个毛病）→ 现在**只有 `scanCode` 一个循环**，顶层与插值体走完全相同的注释/字符串
 ///      规则，唯一差别是"遇 `)` 是否收尾"。
-private func squeezedText(_ raw: String) -> String {
+func squeezedText(_ raw: String) -> String {
     var out = ""
     _ = scanCode(Array(raw), from: 0, parenDepth: nil, into: &out)
     return out
@@ -718,7 +721,7 @@ private func squeezedText(_ raw: String) -> String {
 
 /// **唯一**的词法扫描循环。`parenDepth == nil` = 顶层（`)` 不收尾）；非 nil = 插值体（深度归零即返回，
 /// 那个收尾 `)` 不写进 out）。注释 / 字符串 / 原始串 / 嵌套插值在两种模式下**判据完全一致**。
-private func scanCode(_ c: [Character], from start: Int, parenDepth: Int?, into out: inout String) -> Int {
+func scanCode(_ c: [Character], from start: Int, parenDepth: Int?, into out: inout String) -> Int {
     var i = start
     var depth = parenDepth ?? 0
     while i < c.count {
@@ -762,7 +765,7 @@ private func scanCode(_ c: [Character], from start: Int, parenDepth: Int?, into 
 ///   于是 `logger.debug("deleted \(engine.deleteDrawing(id: id))")` 这种**真的会执行**的调用
 ///   反而从守卫底下溜走。字面量里既有"不是代码的文本"也有"确实是代码的插值"，必须分开处理。
 /// 支持多行 `"""…"""` 与原始串（`hashes` 个 `#`，其转义/插值前缀是 `\` + 同样数量的 `#`）。
-private func consumeStringLiteral(_ c: [Character], from: Int, hashes: Int, into out: inout String) -> Int {
+func consumeStringLiteral(_ c: [Character], from: Int, hashes: Int, into out: inout String) -> Int {
     var i = from
     let isMultiline = (i + 2 < c.count) && c[i + 1] == "\"" && c[i + 2] == "\""
     let quoteLen = isMultiline ? 3 : 1
@@ -792,7 +795,7 @@ private func consumeStringLiteral(_ c: [Character], from: Int, hashes: Int, into
     return c.count                                               // 未闭合（坏源码）：吃到底，fail-safe
 }
 
-private func squeezedSource(_ path: String) throws -> String {
+func squeezedSource(_ path: String) throws -> String {
     squeezedText(try String(contentsOfFile: path, encoding: .utf8))
 }
 
@@ -803,7 +806,7 @@ private func squeezedSource(_ path: String) throws -> String {
 ///   `funcdeleteDrawing(at` → 一次**真实的** `deleteDrawing(at: 0)` 调用被扣成 `1-1=0`，
 ///   守卫恒绿，正好放过它要挡的那条绕过 id 唯一/locked/几何三门的破坏性入口。
 ///   现在的形状里「扣掉的」必然也是「数进来的」，不可能扣多。
-private func callCount(inSqueezed s: String, pattern: String) -> Int {
+func callCount(inSqueezed s: String, pattern: String) -> Int {
     let p = squeeze(pattern)
     let total = s.components(separatedBy: p).count - 1
     let defs  = s.components(separatedBy: "func" + p).count - 1
@@ -811,7 +814,7 @@ private func callCount(inSqueezed s: String, pattern: String) -> Int {
 }
 
 /// `Sources/` 里 `pattern` 的调用点（按文件），零调用的文件不出现。
-private func callSiteCount(_ pattern: String) throws -> [(file: String, count: Int)] {
+func callSiteCount(_ pattern: String) throws -> [(file: String, count: Int)] {
     try allSwiftFilesUnderSources().compactMap { path in
         let n = callCount(inSqueezed: try squeezedSource(path), pattern: pattern)
         return n > 0 ? (path, n) : nil
@@ -819,7 +822,7 @@ private func callSiteCount(_ pattern: String) throws -> [(file: String, count: I
 }
 
 /// 某文件（squeeze 后）是否含某段文本——访问级别断言用，同样与排版无关。
-private func squeezedContains(_ path: String, _ needle: String) throws -> Bool {
+func squeezedContains(_ path: String, _ needle: String) throws -> Bool {
     try squeezedSource(path).contains(squeeze(needle))
 }
 
@@ -828,7 +831,7 @@ private func squeezedContains(_ path: String, _ needle: String) throws -> Bool {
 ///   `swift-tools-version: 6.0` → **`package` 访问级别可用**，`package func updateDrawingStyle`
 ///   能让**另一个 target**（`KlineTrainerPersistence`）直接调这两个写入面，而几何门只存在于
 ///   `KlineTrainerContracts` 里那条 UI 路由上 → 信任边界被绕开而守卫仍绿。
-private func expectEngineInternalOnly(_ decl: String,
+func expectEngineInternalOnly(_ decl: String,
                                       sourceLocation: SourceLocation = #_sourceLocation) throws {
     #expect(try squeezedContains(trainingEnginePath, "func " + decl),
             "\(decl) 不见了？（先证明真读到文件，防负向断言假绿）", sourceLocation: sourceLocation)
@@ -844,7 +847,7 @@ private func expectEngineInternalOnly(_ decl: String,
 ///   这类**方法引用**把调用挪到了别处，源码里根本不出现 `updateDrawingStyle(` —— 只数调用 pattern 的守卫
 ///   会放它过去，而这两个 API 的几何门**只**靠「唯一调用点在已验几何的 UI 路由」这条源码守卫成立。
 ///   按标识符扫，方法引用也必然让标识符出现在那个文件里 → 照样被抓。
-private func filesMentioning(_ identifier: String) throws -> [String] {
+func filesMentioning(_ identifier: String) throws -> [String] {
     try allSwiftFilesUnderSources().filter { try squeezedSource($0).contains(identifier) }
 }
 
@@ -1015,10 +1018,15 @@ Expected: 全绿（累计计数 = 基线 + Task1/2 新增）。
 
 ```bash
 git add ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingSession.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScanner.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScannerTests.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingObjectStyleEditTests.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingCommitTests.swift
-git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四条语义单点守卫（D59）"
+git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + 共享源码守卫扫描器 + N5 四条语义单点守卫（D59）"
+# ⚠️ 每个 Task commit 后都跑一次净检查（codex plan-R14-F3：新建文件未 add → 本地绿而分支/CI 缺文件）
+git status --porcelain   # 期望：空输出
 ```
 
 ---
@@ -1243,6 +1251,7 @@ Expected: 全绿。
 git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift
 git commit -m "划线 1b-i 切片2 Task3：updateDrawingStyle internal 写入面 + id 唯一门 + withStyle 门（D50/D62/D66）"
+git status --porcelain   # 期望：空输出（codex plan-R14-F3：防新建文件漏 add）
 ```
 
 ---
@@ -1449,6 +1458,7 @@ Expected: 全绿（确认恢复后无残留改动）。
 ```bash
 git add ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift
 git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（locked D60 / 未来未知枚举值 D61）+ 红绿验"
+git status --porcelain   # 期望：空输出（codex plan-R14-F3：防新建文件漏 add）
 ```
 
 ---
@@ -1692,6 +1702,7 @@ Expected: 全绿。
 git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift
 git commit -m "划线 1b-i 切片2 Task5：deleteDrawing(id:) internal 删除写入面 + locked/id 唯一门（D51/D60/D66）"
+git status --porcelain   # 期望：空输出（codex plan-R14-F3：防新建文件漏 add）
 ```
 
 ---
@@ -1800,6 +1811,7 @@ git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngin
         ios/Contracts/Tests/KlineTrainerContractsTests/DrawingSignatureTests.swift
 git add -u ios/Contracts/Tests/KlineTrainerContractsTests   # 3 处 makeHLine 调用点
 git commit -m "划线 1b-i 切片2 Task6：接手 PR-1 的 5 项 Minor backlog（注释对齐 + fixture 唯一 id + 签名单射纪律）"
+git status --porcelain   # 期望：空输出（codex plan-R14-F3：防新建文件漏 add）
 ```
 
 ---
