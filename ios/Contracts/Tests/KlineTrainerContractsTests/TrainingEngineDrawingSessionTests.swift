@@ -675,6 +675,30 @@ struct TrainingEngineDrawingSessionTests {
         #expect(engine.reviewDrawings.isEmpty)
     }
 
+    @Test("N23b2: 横规则限横工具——水平 .segment 仍拒，但非水平（.trend）.segment 合法被接收（codex WB re-attest R1）")
+    @MainActor func nonHorizontalSegmentAccepted() {
+        let engine = TrainingEngine.preview()
+        // 对照：水平线 .segment 恒不可渲染 → 仍拒（限定后行为不变，防「blanket 放开」回归）
+        let hSeg = DrawingObject(id: "h", toolType: .horizontal,
+                                 anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
+                                 isExtended: false, panelPosition: 0, period: .daily, lineSubType: .segment)
+        #expect(engine.appendDrawing(hSeg) == false)
+        // 非水平工具（.trend）的 .segment：横规则不适用 → 接收（此前被共享引擎门静默拒→丢线）
+        let tSeg = DrawingObject(id: "t", toolType: .trend,
+                                 anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
+                                 isExtended: false, panelPosition: 0, period: .daily, lineSubType: .segment)
+        let before = engine.drawingsRevision
+        #expect(engine.appendDrawing(tSeg) == true)
+        #expect(engine.drawings.contains { $0.id == "t" })
+        #expect(engine.drawingsRevision == before + 1)   // 接收 → revision +1（非拒绝）
+        // review 侧同一判据
+        let trSeg = DrawingObject(id: "tr", toolType: .trend,
+                                  anchors: [DrawingAnchor(period: .daily, candleIndex: 4, price: 11)],
+                                  isExtended: false, panelPosition: 0, period: .daily, lineSubType: .segment)
+        #expect(engine.appendReviewDrawing(trSeg) == true)
+        #expect(engine.reviewDrawings.contains { $0.id == "tr" })
+    }
+
     @Test("N23d: appendDrawing/appendReviewDrawing 拒空 id / 重复 id，拒绝不动 revision（D66 append 部分，codex plan-R5-F1）")
     @MainActor func appendRejectsEmptyAndDuplicateId() {
         let engine = TrainingEngine.preview()

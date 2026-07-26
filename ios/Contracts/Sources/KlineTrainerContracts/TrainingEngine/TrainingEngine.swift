@@ -1093,7 +1093,7 @@ extension TrainingEngine {
     @discardableResult
     func appendDrawing(_ drawing: DrawingObject) -> Bool {
         guard isPeriodConsistent(drawing) else { return false }  // 1a-iv fail-closed：坏数据不入库
-        guard DrawingStyleAvailability.horizontalLineSubTypeEnabled(drawing.lineSubType) else { return false }  // D67：.segment 等恒不可渲染值拒
+        guard isRenderableSubType(drawing) else { return false }  // D67：仅对水平工具拒 .segment 等恒不可渲染值（见 helper）
         guard !drawing.id.isEmpty, !drawings.contains(where: { $0.id == drawing.id }) else { return false }     // D66：id 非空 + 与目标数组唯一
         drawings.append(drawing)
         drawingsRevision += 1
@@ -1107,7 +1107,7 @@ extension TrainingEngine {
     @discardableResult
     func appendReviewDrawing(_ drawing: DrawingObject) -> Bool {
         guard isPeriodConsistent(drawing) else { return false }  // 1a-iv fail-closed：坏数据不入库
-        guard DrawingStyleAvailability.horizontalLineSubTypeEnabled(drawing.lineSubType) else { return false }  // D67
+        guard isRenderableSubType(drawing) else { return false }  // D67：仅对水平工具拒 .segment 等恒不可渲染值（见 helper）
         guard !drawing.id.isEmpty, !reviewDrawings.contains(where: { $0.id == drawing.id }) else { return false } // D66（对 reviewDrawings）
         reviewDrawings.append(drawing)
         return true
@@ -1125,6 +1125,17 @@ extension TrainingEngine {
     private func isPeriodConsistent(_ d: DrawingObject) -> Bool {
         guard let p = d.anchors.first?.period else { return true }   // 空锚：行为与 1a-iv 之前逐字一致
         return d.anchors.allSatisfy { $0.period == p } && d.period == p
+    }
+
+    /// D67 子类可渲染判据（append 家族单一真相）。
+    /// **whole-branch codex re-attest R1**：`horizontalLineSubTypeEnabled` 明写「本期只实现水平线」
+    /// （`.segment` 恒灰）——那条规则**只对水平工具成立**。此前 append 对**所有** toolType 无条件套它，
+    /// 会把合法的非水平 `.segment`（如 P1c 的 `.trend` 线段）在共享引擎边界静默拒 →
+    /// `routeDrawingCommit` 又吞返回值 → 静默丢线。故把横规则限定在 `.horizontal`；非水平工具的
+    /// 子类矩阵属 P1c、不在本期此横规则内（helper 头注同一 YAGNI 立场），此期不产非水平线故行为等价。
+    private func isRenderableSubType(_ d: DrawingObject) -> Bool {
+        guard d.toolType == .horizontal else { return true }   // 非水平工具：横规则不适用（P1c 再定其矩阵）
+        return DrawingStyleAvailability.horizontalLineSubTypeEnabled(d.lineSubType)
     }
 
     /// `deleteDrawing(at:)` 的 `reviewDrawings` 对应版本（复盘侧删除）。越界 trap，同风格。

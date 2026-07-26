@@ -195,6 +195,20 @@ struct TrainingEngineDrawingCommitTests {
         #expect(stored.revealTick == e.tick.globalTickIndex)   // revealTick 被盖成当前 tick
     }
 
+    @Test("routeDrawingCommit 不静默丢非水平 .segment（codex WB re-attest R1：横 .segment 门此前误管 .trend→routeDrawingCommit 吞返回值→丢线）")
+    func routeDoesNotDropNonHorizontalSegment() {
+        let e = Self.makeNormalEngineAtTick(50)   // normal flow → 写 drawings
+        let anchor = DrawingAnchor(period: .m60, candleIndex: 3, price: 1710.0)
+        let d = DrawingObject(
+            id: "trend-seg", toolType: .trend, anchors: [anchor, anchor],
+            isExtended: true, panelPosition: 1, revealTick: 0,
+            period: .m60, lineSubType: .segment,     // .trend 的 .segment 合法（非水平横规则不适用）
+            thickness: 3, text: "")
+        e.routeDrawingCommit(d)
+        #expect(e.drawings.last?.id == "trend-seg")            // 落库、未被静默丢
+        #expect(e.drawings.last?.lineSubType == .segment)      // 子类原样保留
+    }
+
     @Test("routeDrawingCommit 保留全字段（review 模式，写入 reviewDrawings 不污染 drawings）")
     func routePreservesAllFieldsReviewMode() {
         let e = Self.makeReviewEngineAtTick(60)
