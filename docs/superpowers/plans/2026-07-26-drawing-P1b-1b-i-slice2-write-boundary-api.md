@@ -779,29 +779,38 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
             if c[i] == "#" {                                        // 可能是原始串 #"…"# / ##"…"##
                 var h = 0, j = i
                 while j < c.count, c[j] == "#" { h += 1; j += 1 }
-                if j < c.count, c[j] == "\"" { i = skipStringLiteral(c, from: j, hashes: h); continue }
+                if j < c.count, c[j] == "\"" { i = consumeStringLiteral(c, from: j, hashes: h, into: &out); continue }
                 out.append(contentsOf: c[i..<j])                     // 不是原始串（如 #expect / #filePath）
                 i = j; continue
             }
-            if c[i] == "\"" { i = skipStringLiteral(c, from: i, hashes: 0); continue }
+            if c[i] == "\"" { i = consumeStringLiteral(c, from: i, hashes: 0, into: &out); continue }
             if !c[i].isWhitespace { out.append(c[i]) }               // 空白一律丢弃
             i += 1
         }
         return out
     }
 
-    /// 从 `from`（指向首个 `"`）跳过整个字符串字面量，返回其后第一个下标；内容一律不输出。
-    /// 支持多行 `"""…"""` 与原始串（`hashes` 个 `#`，其转义是 `\` + 同样数量的 `#`）。
-    private func skipStringLiteral(_ c: [Character], from: Int, hashes: Int) -> Int {
+    /// 消费一个字符串字面量（`from` 指向首个 `"`），返回其后第一个下标。
+    /// **字面文本丢弃，但插值 `\(…)` 里的表达式当代码保留**（codex plan-R9-F1）——
+    /// ⚠️ 这条是我 R7 那次修复**自己引入**的失败面：为了不让串里的 `//` 吞代码，我把串内容整段丢了，
+    ///   于是 `logger.debug("deleted \(engine.deleteDrawing(id: id))")` 这种**真的会执行**的调用
+    ///   反而从守卫底下溜走。字面量里既有"不是代码的文本"也有"确实是代码的插值"，必须分开处理。
+    /// 支持多行 `"""…"""` 与原始串（`hashes` 个 `#`，其转义/插值前缀是 `\` + 同样数量的 `#`）。
+    private func consumeStringLiteral(_ c: [Character], from: Int, hashes: Int, into out: inout String) -> Int {
         var i = from
         let isMultiline = (i + 2 < c.count) && c[i + 1] == "\"" && c[i + 2] == "\""
         let quoteLen = isMultiline ? 3 : 1
         i += quoteLen
         while i < c.count {
-            if c[i] == "\\" {                                        // 转义：普通串 `\x`；原始串 `\#…#x`
+            if c[i] == "\\" {                                        // `\…` ：插值前缀或普通转义
                 var j = i + 1, h = 0
                 while j < c.count, c[j] == "#", h < hashes { h += 1; j += 1 }
-                if h == hashes { i = min(j + 1, c.count); continue } // 连吃被转义的那个字符
+                if h == hashes {
+                    if j < c.count, c[j] == "(" {                    // 插值 → 递归当**代码**扫
+                        i = consumeInterpolation(c, from: j, into: &out); continue
+                    }
+                    i = min(j + 1, c.count); continue                // 普通转义：连吃被转义的那个字符
+                }
             }
             if c[i] == "\"" {                                        // 收尾：quoteLen 个 `"` + hashes 个 `#`
                 var j = i, q = 0
@@ -812,9 +821,33 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
                     if h == hashes { return j }
                 }
             }
-            i += 1
+            i += 1                                                   // 字面文本：丢弃
         }
         return c.count                                               // 未闭合（坏源码）：吃到底，fail-safe
+    }
+
+    /// 消费 `(`…匹配的 `)`（`from` 指向那个 `(`），把里面的**代码**写进 `out`；可再嵌套字符串/插值。
+    /// 括号本身：内层的照写（`deleteDrawing(id:x)` 要能被 pattern 命中），最外层这一对不写。
+    private func consumeInterpolation(_ c: [Character], from: Int, into out: inout String) -> Int {
+        var i = from + 1
+        var depth = 1
+        while i < c.count {
+            if c[i] == "\"" { i = consumeStringLiteral(c, from: i, hashes: 0, into: &out); continue }
+            if c[i] == "#" {
+                var h = 0, j = i
+                while j < c.count, c[j] == "#" { h += 1; j += 1 }
+                if j < c.count, c[j] == "\"" { i = consumeStringLiteral(c, from: j, hashes: h, into: &out); continue }
+                out.append(contentsOf: c[i..<j]); i = j; continue
+            }
+            if c[i] == "(" { depth += 1 }
+            if c[i] == ")" {
+                depth -= 1
+                if depth == 0 { return i + 1 }                       // 最外层右括号：不写进 out
+            }
+            if !c[i].isWhitespace { out.append(c[i]) }
+            i += 1
+        }
+        return c.count
     }
 
     private func squeezedSource(_ path: String) throws -> String {
@@ -911,6 +944,27 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 3, "三种排版都该命中，实际 squeeze：\(s)")
         #expect(!s.contains("行注释里的不算"))
         #expect(!s.contains("块注释里的也不算"))
+    }
+
+    @Test("守卫自检 e（codex plan-R9-F1）：插值 \\(…) 里的调用与方法引用**照样算数**（它们真的会执行）")
+    func scannerCountsCallsInsideStringInterpolation() {
+        // ⚠️ 外层用 `##"""`：本 fixture 内部要出现 `\(` **和** `\#(` 两种插值前缀的**字面文本**，
+        //    若外层只用 `#"""`，`\#(…)` 会被 Swift 当成**本测试文件自己的**插值 → 编译错误。
+        let src = ##"""
+        func caller() {
+            logger.debug("deleted \(engine.deleteDrawing(id: id))")
+            let s = "\(engine.updateDrawingStyle(id: i, style: st))"
+            let f = "\(engine.appendDrawing)"
+            let plain = "deleteDrawing(id: 纯文本不算)"
+            let raw = #"\#(engine.routeDrawingCommit(d))"#
+        }
+        """##
+        let s = squeezedText(src)
+        #expect(callCount(inSqueezed: s, pattern: "deleteDrawing(id:") == 1, "实际 squeeze：\(s)")
+        #expect(callCount(inSqueezed: s, pattern: "updateDrawingStyle(") == 1, "实际 squeeze：\(s)")
+        #expect(callCount(inSqueezed: s, pattern: "routeDrawingCommit(") == 1, "原始串的插值前缀是 \\#(…)：\(s)")
+        #expect(s.contains("appendDrawing"))          // 藏在插值里的**方法引用**，标识符扫描也看得见
+        #expect(!s.contains("纯文本不算"))             // 纯文本仍不算数（不产生假阳性）
     }
 
     @Test("守卫自检 d（codex plan-R7-F1）：字符串里的注释定界符不得吞掉后面的真实调用；串内的调用不算数")
