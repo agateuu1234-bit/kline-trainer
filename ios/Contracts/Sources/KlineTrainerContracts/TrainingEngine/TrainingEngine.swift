@@ -23,6 +23,11 @@ public final class TrainingEngine {
     public private(set) var drawdown: DrawdownAccumulator
     public private(set) var markers: [TradeMarker]
     public private(set) var drawings: [DrawingObject]
+    /// D56（1b-i）：内容级 dirty 计数器。**每一个**改动 `drawings` 的引擎 API 都 `+= 1`（append/delete(at:)/
+    /// 后续 update/delete(id:)）。TrainingView 的 autosave 触发器盯它（换掉 `drawings.count`，
+    /// 否则原地改样式不改长度→永不落盘）。**只覆盖 `drawings`，不覆盖 `reviewDrawings`**（复盘本期不改样式）。
+    /// 运行时计数器，不进存储（初值 0，每次装载从 0 起算，绝对值无语义）。
+    public private(set) var drawingsRevision: Int = 0
     /// P1a Task 12（Z1）：加载来的完整有损画线集（含 unknownRaw 原始字节）。`drawings` 是其已知投影
     /// （`loadedDrawingsLossy.drawings`）。coordinator save 路径经 `loadedDrawingsLossy.reconciled(currentKnown:)`
     /// 重发，使加载 blob 里未识别（未来版本）的条穿过 autosave/resume-save/commit 全路径存活。
@@ -304,15 +309,15 @@ public final class TrainingEngine {
     /// 本 setter 作初始播种入口。**P1a Task 12（Z1）**：携带完整有损集 + 加载来的隐藏 id 集（`hiddenIds`），
     /// 使 save 路径（`persistReviewWorkingIfChanged`/`commitReview`）能经 `loadedReviewLossy.reconciled(currentKnown:)`
     /// 重发，保住加载 blob 里未识别的条 + 原样传回 hiddenIds（不覆盖成 `[]`，codex R11-high）。
-    public func setReviewLossy(_ l: LossyDrawingArray, hiddenIds: [DrawingID] = [],
-                               unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry] = []) {
+    func setReviewLossy(_ l: LossyDrawingArray, hiddenIds: [DrawingID] = [],
+                        unknownTopLevel: [ReviewArchiveWrapper.UnknownTopLevelEntry] = []) {
         loadedReviewLossy = l
         loadedReviewHiddenIds = hiddenIds
         loadedReviewUnknownTopLevel = unknownTopLevel
         reviewDrawings = l.drawings
     }
     /// 兼容旧调用（纯已知，无 unknownRaw/hiddenIds）：包成 lossy 走 `setReviewLossy` 唯一实现。
-    public func setReviewDrawings(_ ds: [DrawingObject]) throws { setReviewLossy(try LossyDrawingArray(drawings: ds)) }
+    func setReviewDrawings(_ ds: [DrawingObject]) throws { setReviewLossy(try LossyDrawingArray(drawings: ds)) }
 
     /// 规范 mark price（Task 9 收口）：global tick `t` 处 `.m3` 收盘价，越界 clamp 到端根、非 nil。
     /// `currentPrice`／`ReviewLedger.state` 的 `markPriceAtTick`／finalize 三处共用同一入口，杜绝重复实现漂移。
@@ -1071,9 +1076,10 @@ extension TrainingEngine {
     }
 
     /// 删除已完成绘线（spec `deleteDrawing(at:)`）。越界 trap（caller bug，与 spec precondition 同风格）。
-    public func deleteDrawing(at index: Int) {
+    func deleteDrawing(at index: Int) {
         precondition(drawings.indices.contains(index), "deleteDrawing index out of bounds")
         drawings.remove(at: index)
+        drawingsRevision += 1
     }
 
     /// 追加一条 committed 画线进 `engine.drawings`（RFC §4.4c）。`engine.drawings` 是唯一渲染 +
@@ -1085,9 +1091,12 @@ extension TrainingEngine {
     /// **whole-branch codex R2-high：返回值 load-bearing** —— 未来做「删旧线 + append 新线」式编辑
     /// （1b-i）的调用者必须先看返回值：返 `false`（被拒）时绝不能已经把旧线删了，否则静默丢线。
     @discardableResult
-    public func appendDrawing(_ drawing: DrawingObject) -> Bool {
+    func appendDrawing(_ drawing: DrawingObject) -> Bool {
         guard isPeriodConsistent(drawing) else { return false }  // 1a-iv fail-closed：坏数据不入库
+        guard isRenderableSubType(drawing) else { return false }  // D67：仅对水平工具拒 .segment 等恒不可渲染值（见 helper）
+        guard !drawing.id.isEmpty, !drawings.contains(where: { $0.id == drawing.id }) else { return false }     // D66：id 非空 + 与目标数组唯一
         drawings.append(drawing)
+        drawingsRevision += 1
         return true
     }
 
@@ -1096,8 +1105,10 @@ extension TrainingEngine {
     /// **whole-branch codex R2-high：返回值 load-bearing** —— 未来做「删旧线 + append 新线」式编辑
     /// （1b-i）的调用者必须先看返回值：返 `false`（被拒）时绝不能已经把旧线删了，否则静默丢线。
     @discardableResult
-    public func appendReviewDrawing(_ drawing: DrawingObject) -> Bool {
+    func appendReviewDrawing(_ drawing: DrawingObject) -> Bool {
         guard isPeriodConsistent(drawing) else { return false }  // 1a-iv fail-closed：坏数据不入库
+        guard isRenderableSubType(drawing) else { return false }  // D67：仅对水平工具拒 .segment 等恒不可渲染值（见 helper）
+        guard !drawing.id.isEmpty, !reviewDrawings.contains(where: { $0.id == drawing.id }) else { return false } // D66（对 reviewDrawings）
         reviewDrawings.append(drawing)
         return true
     }
@@ -1116,8 +1127,19 @@ extension TrainingEngine {
         return d.anchors.allSatisfy { $0.period == p } && d.period == p
     }
 
+    /// D67 子类可渲染判据（append 家族单一真相）。
+    /// **whole-branch codex re-attest R1**：`horizontalLineSubTypeEnabled` 明写「本期只实现水平线」
+    /// （`.segment` 恒灰）——那条规则**只对水平工具成立**。此前 append 对**所有** toolType 无条件套它，
+    /// 会把合法的非水平 `.segment`（如 P1c 的 `.trend` 线段）在共享引擎边界静默拒 →
+    /// `routeDrawingCommit` 又吞返回值 → 静默丢线。故把横规则限定在 `.horizontal`；非水平工具的
+    /// 子类矩阵属 P1c、不在本期此横规则内（helper 头注同一 YAGNI 立场），此期不产非水平线故行为等价。
+    private func isRenderableSubType(_ d: DrawingObject) -> Bool {
+        guard d.toolType == .horizontal else { return true }   // 非水平工具：横规则不适用（P1c 再定其矩阵）
+        return DrawingStyleAvailability.horizontalLineSubTypeEnabled(d.lineSubType)
+    }
+
     /// `deleteDrawing(at:)` 的 `reviewDrawings` 对应版本（复盘侧删除）。越界 trap，同风格。
-    public func removeReviewDrawing(at index: Int) {
+    func removeReviewDrawing(at index: Int) {
         precondition(reviewDrawings.indices.contains(index), "removeReviewDrawing index out of bounds")
         reviewDrawings.remove(at: index)
     }
@@ -1129,7 +1151,7 @@ extension TrainingEngine {
     /// **关键不变量**：review commit 绝不写 `drawings`（不污染原训练记录）。
     /// review-redesign Task 3：路由前先盖戳 `revealTick = tick.globalTickIndex`（提交那一刻的全局
     /// tick），使 `RenderStateBuilder.make` 的渐显判据（`revealTick <= tick`）对这条画线生效。
-    public func routeDrawingCommit(_ drawing: DrawingObject) {
+    func routeDrawingCommit(_ drawing: DrawingObject) {
         let stamped = DrawingObject(
             id: drawing.id, toolType: drawing.toolType, anchors: drawing.anchors,
             isExtended: drawing.isExtended, panelPosition: drawing.panelPosition,

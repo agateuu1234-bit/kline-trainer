@@ -35,6 +35,19 @@ public final class DrawingSession {
     /// D39：当前工具。**提交一条线后保持不变**（D38 连续画线）。
     public private(set) var activeDrawingTool: DrawingToolType?
 
+    /// D57（1b-i）：画线态/选择态显式区分。取代母 spec 用 `activeDrawingTool == nil` 编码——
+    /// nil 编码会让 `restoreDrawingSessionAfterPeriodChange` 的 guard 在选择态早退→裂脑（codex R1）。
+    /// 会话存活期间 `activeDrawingTool` 恒非 nil；nil 重回唯一含义「没有会话」。
+    public enum DrawingSessionMode: Equatable, Sendable { case draw, select }
+    public private(set) var mode: DrawingSessionMode = .draw
+
+    /// D57：切换画线/选择态。切 `.select` 保留 activeDrawingTool、丢 pending（半成品多锚线不跨态存活）。
+    /// internal（同容器 mutator 纪律）。
+    func setMode(_ m: DrawingSessionMode) {
+        mode = m
+        discardPendingAnchors()
+    }
+
     /// 未成形画线的锚点暂存（多锚工具用；.horizontal 落一锚即提交）。
     public private(set) var pendingAnchors: [DrawingAnchor] = []
 
@@ -91,6 +104,7 @@ public final class DrawingSession {
     /// 换工具则丢弃旧工具的半成品锚（否则会把上一个工具的锚混进新工具）。
     func activate(tool: DrawingToolType) {
         drawingModeActive = true
+        mode = .draw                              // ← 在幂等 guard 之前（D57，否则选择态点回同工具态切不回）
         guard activeDrawingTool != tool else { return }
         activeDrawingTool = tool
         discardPendingAnchors()
@@ -101,6 +115,7 @@ public final class DrawingSession {
     func deactivate() {
         drawingModeActive = false
         activeDrawingTool = nil
+        mode = .draw                              // 复位，防下次开会话继承旧态
         discardPendingAnchors()
         clearAllShields()   // 1a-iii Task2 模型不变量：退画线无残留盾（防死区拒收后续正常 tap）
     }
@@ -116,7 +131,7 @@ public final class DrawingSession {
     /// 先只丢 pending（**保工具**），再在新面板起新锚。
     /// 非画线模式 / 无工具 → no-op（fail-closed：「没有工具却攒着 pending」不可表达）。
     func addAnchor(_ anchor: DrawingAnchor, panel: PanelId) {
-        guard drawingModeActive, activeDrawingTool != nil else { return }
+        guard drawingModeActive, activeDrawingTool != nil, mode == .draw else { return }   // 选择态恒不落锚
         if let owner = pendingAnchorPanel, owner != panel {
             discardPendingAnchors()
         }
@@ -133,7 +148,7 @@ public final class DrawingSession {
     /// revealTick 由 engine.routeDrawingCommit 盖真值。
     /// **D38：提交后只清 pending —— 工具与会话保持不变（连续画线）**。
     func commitPending(panelPosition: Int) -> DrawingObject? {
-        guard let tool = activeDrawingTool, !pendingAnchors.isEmpty else { return nil }
+        guard mode == .draw, let tool = activeDrawingTool, !pendingAnchors.isEmpty else { return nil }
         // D31（1a-iv）：全锚必须同 period。`DrawingObject.init` 只取 `anchors.first.period`（D29 周期绑定），
         // 混 period 的锚集合存下去 = 后续所有锚的 candleIndex 被按错误周期解释的坏数据。
         // 拒交 + **只丢 pending**（保 activeDrawingTool / drawingModeActive，绝不整场取消）。

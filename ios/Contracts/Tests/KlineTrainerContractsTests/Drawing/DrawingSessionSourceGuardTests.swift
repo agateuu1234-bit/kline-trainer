@@ -173,7 +173,7 @@ struct DrawingSessionSourceGuardTests {
         }
         // 提取 routeDrawingCommit 函数体，钉死「无 append-then-replace」（codex plan-R6-high）：
         // let 字段防不了「append(默认) 后 drawings[last] = 完整」的整元素替换 → 直接禁下标写、且只消费 stamped。
-        let rcStart = try #require(e.range(of: "public func routeDrawingCommit"), "找不到 routeDrawingCommit（结构漂移）")
+        let rcStart = try #require(e.range(of: "func routeDrawingCommit"), "找不到 routeDrawingCommit（结构漂移）")
         let afterRC = String(e[rcStart.upperBound...])
         let rcEnd = try #require(afterRC.range(of: "\n    public func"), "找不到 routeDrawingCommit 结尾")
         let rc = String(afterRC[..<rcEnd.lowerBound])

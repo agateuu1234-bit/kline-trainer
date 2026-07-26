@@ -352,8 +352,8 @@ public struct TrainingView: View {
                 break
             }
         }
-        .onChange(of: engine.drawings.count) { _, _ in
-            lifecycle.autosave(immediate: true)                 // §4.6：画线即存（commit/delete 不推 tick，D9）
+        .onChange(of: engine.drawingsRevision) { _, _ in
+            lifecycle.autosave(immediate: true)                 // §4.6：画线/改样式/删除即存（不推 tick，D9）
         }
         .onChange(of: engine.reviewDrawings.count) { _, _ in
             // review-redesign Task 10：复盘新画线走 reviewDrawings（非 drawings），故上面那条 onChange 不触发；
