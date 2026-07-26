@@ -275,7 +275,16 @@ extension DrawingObject {
 
 ~~`updateDrawingStyle` 对「携带未来未知枚举值」的线 **fail-closed 拒绝**~~ → **现行**：构造候选 → 与 `loadedDrawingsLossy` 归并 → **归并结果仍带**未来枚举值 / 未来字段才拒（返 `false`、零改动、`drawingsRevision` 不递增）。
 
-- **判据 = `engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id])`**（`LossyDrawingArray.swift:273`，coordinator `:1047` 已在用它算净改动）。这是**唯一** raw-aware 的判据——它看磁盘原始字节，不是 fallback 后的解码值。
+- **判据（🔄2026-07-26 修订，codex R18-F1 纠正遗漏）= 对「归并后的结果」查，绝不查未归并的加载快照**：
+  ```
+  var candidate = engine.drawings; candidate[i] = updated              // 先算候选
+  let merged = try engine.loadedDrawingsLossy.reconciled(currentKnown: candidate)
+  拒 ⟺ merged.hasKnownFutureEnumValues(liveIds: [id]) || merged.hasKnownFutureFields(liveIds: [id])
+  ```
+  ⚠️ **绝不可**写成 `engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id])`（未归并快照）——
+  那样用户把颜色换成本版本认识的值之后**仍会被拒**（快照里那个未来 raw 值永远在），本决策新开的修复路径当场废掉。
+  两个 helper 都是 raw-aware（看磁盘原始字节而非 fallback 后的解码值），coordinator 的 finalize 门也是先
+  `reconciled(currentKnown:)` 再查同一对（`TrainingSessionCoordinator:729-736`），两处形状一致。
   - ⚠️ **绝不可写成「该 id 是否出现在 `knownFutureEnumPayloads()` 里」的 membership（codex R9-F1）**：那个函数**对每一条 `.known` 线都恒返回一行**（`:228` 注释明载「即便 `entries` 为空」）→ id-membership 会把**所有** loaded 线误判成「携带未来枚举值」→ **存盘重载后所有已有线样式控件全灰、`updateDrawingStyle` 全 fail-closed**，只有内存里刚画的线还能改。**命中的正确条件是 `id 匹配 且 entries 非空`** —— `hasKnownFutureEnumValues` 已经是这个语义（`:274` `contains { liveIds.contains($0.id) && !$0.entries.isEmpty }`），直接用它、不要自己写 membership。
 - **引擎层可达**：`updateDrawingStyle` 在 `TrainingEngine`，能读 `self.loadedDrawingsLossy`。不需要把 raw 塞进 `DrawingObject`（那会污染值类型），只在写入边界查一次。
 - **`textColorToken` 保护分两类、两个机制叠加（codex R11-F1 纠正）**：本决策的 raw-aware 拒绝只挡住**未来未知枚举值**那一类独立字色（🔄**2026-07-26 修订**：按结果判——改完仍带就拒，用户换掉该值则放行）；**当前已知枚举值**的独立字色（如 `.orange` 线 + `.blue` 标签，P3 控件可能写）在本构建里**可编辑**，靠 D59 派生② 的**条件派生**（解码 `==` 对 known 值可靠）保留。**R7 一度把派生② 改成无条件是错的**（会抹 known 独立字色），已恢复条件派生；两个机制互补、缺一不可，详见 D59 派生② 下的对照表。
@@ -371,7 +380,13 @@ D63 里我写了「样式编辑**不禁**（改一条当前看不见的线的颜
 ```
 改样式可用 ⟺ locked == false
             且 在 selectedPanel 当前 mapper 下 visibleGeometry != nil
-            〔🔄 2026-07-26 修订：**删去**原「且 !hasKnownFutureEnumValues(liveIds:[id])」这一分量〕
+            且 **该线的未来数据「样式改得到」**（🔄2026-07-26 二次修订，codex R18-F2）：
+                 无未来顶层字段（`hasKnownFutureFields`）**且** 其未来枚举 payload 的每个 `entry.key`
+                 都落在**样式写得到的磁盘 key 集合**内 =
+                 `{lineSubType, lineStyle, thickness, colorToken, labelMode, isExtended, textColorToken}`
+                （原「一律不置灰」是过度概括：未来值若落在 `anchors[].period` / `tailAnchor.period`
+                 这类**样式根本不碰**的位置，或落在本构建不认识的顶层字段上，就**没有任何控件能覆盖它** →
+                 控件可点 = 点了必然失败。这类线：**样式控件灰、🗑 亮**，靠删除解封）
 
 删除可用   ⟺ locked == false
             且 在 selectedPanel 当前 mapper 下 visibleGeometry != nil
@@ -383,10 +398,17 @@ D63 里我写了「样式编辑**不禁**（改一条当前看不见的线的颜
 > 而按旧规则置灰会让 D61 新开的**修复路径（换个本版本认识的颜色）用户根本点不到** —— 引擎测试却因为直调
 > API 而全绿，是典型的「能力存在但不可达」。**现行 UI 规则**：
 > - `locked` / 几何两个分量**照旧置灰**（它们在控件粒度上判得准）；
-> - 「未来数据」**不再作为置灰分量**：控件可点，写入由引擎按「看结果」裁决；被拒时给一次反馈、**保留选中**
->   （返回值不参与选中生命期，D64 不变）。
-> - **PR-4 必须补一条路由级测试**：一条携带未来颜色值的线，**经样式控件换色** → 真的改成功（证明修复路径
->   用户可达），而**经样式控件改粗细** → 被拒且有反馈。只有引擎直调测试**不算**覆盖这条。
+> - 「未来数据」**从"一律置灰"改为"按可覆盖性置灰"**（codex R18-F2 二次修订）：
+>   - 未来值落在**样式写得到的 key** 上（如 `colorToken`）→ **控件可点**，用户换成本版本认识的值即完成修复；
+>     写入由引擎按「看结果」最终裁决，被拒时给一次反馈、**保留选中**（返回值不参与选中生命期，D64 不变）。
+>   - 未来值落在**样式碰不到的位置**（`anchors[].period` / `tailAnchor.period`）或存在**未来顶层字段**
+>     → **样式控件灰、🗑 亮**：没有任何控件能覆盖它，给可点的控件只会让用户反复点、反复失败。
+>   - **UI 谓词是"预测"，引擎才是"裁决"**；两者判据必须来自**同一个共享 helper**（PR-4 落地时抽出来，
+>     禁止 UI 自己写一份 key 集合），否则又是两档判据。
+> - **PR-4 必须补三条路由级测试**（只有引擎直调**不算**覆盖）：
+>   ① 未来 `colorToken` 线 → 控件**可点**、经控件换色 → **成功**（修复路径用户可达）；经控件改粗细 → 被拒且有反馈；
+>   ② 未来**顶层字段**线 → 样式控件**灰**、🗑 **亮**、经删除路由删除 → 成功；
+>   ③ 未来 `anchors[0].period` 线 → 样式控件**灰**、🗑 **亮**（样式改不到锚点，可点即必败）。
 
 - **样式控件**按「改样式可用」置灰；**🗑** 按「删除可用」置灰。🔄**2026-07-26 修订**：二者**同进同退**（同为 `locked` + `visibleGeometry`），**不再有「未来枚举值」分岔**——那条线的样式控件**可点**，写入由引擎按「看结果」裁决（换掉那个未来值即成功，改别的字段被拒并给反馈、选中保留）。
 - ⚠️ **两类门的层级不同，别把几何说成引擎 fail-closed（codex R13-F1 纠正我 R11 的过度宣称）**：
