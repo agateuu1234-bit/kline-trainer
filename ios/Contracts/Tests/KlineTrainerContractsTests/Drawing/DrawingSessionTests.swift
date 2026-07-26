@@ -261,4 +261,22 @@ struct DrawingSessionTests {
         #expect(s.mode == .draw)
         #expect(s.activeDrawingTool == .horizontal)
     }
+
+    @Test("D57：commitPending 的 mode==.draw 守卫 —— draw 态可提交，切到 .select 后同一路径改判 nil")
+    @MainActor func commitPendingGuardedByMode() {
+        let s = DrawingSession()
+        s.activate(tool: .horizontal)
+        s.addAnchor(DrawingAnchor(period: .daily, candleIndex: 1, price: 5), panel: .upper)
+        // 对照（防假绿）：draw 态、非空 pending → 正常提交，证明下面的 nil 不是靠「本来就没锚」侥幸过。
+        #expect(s.commitPending(panelPosition: 0) != nil)
+
+        // 选择态下即使重新落锚，commitPending 也返 nil（D57：选择态恒不提交）。
+        // setMode 会 discardPendingAnchors，addAnchor 自身也守 mode==.draw（no-op）——
+        // 故 pendingAnchors 在选择态下结构性恒空；commitPending 的 mode==.draw 守卫是
+        // guard 里最前、且当前唯一实际把关的条件，本断言钉住它。
+        s.setMode(.select)
+        s.addAnchor(DrawingAnchor(period: .daily, candleIndex: 2, price: 6), panel: .upper)
+        #expect(s.pendingAnchors.isEmpty)
+        #expect(s.commitPending(panelPosition: 0) == nil)
+    }
 }
