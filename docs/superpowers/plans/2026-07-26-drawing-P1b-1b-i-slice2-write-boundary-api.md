@@ -55,7 +55,8 @@ spec §6 的负向测试清单是**整个 1b-i**（4 个 PR）的并集。本切
 ## 本切片的子决策（控制者已裁决，实施照做）
 
 - **SD-1 `withStyle` 落新文件** `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.swift`：它是「四条语义的唯一出处」，独立文件让 N5 源码守卫锚点稳定，也避免把编辑语义塞进 `Models.swift`（那里是纯持久化值类型）。
-- **SD-2 可用性判据提为共享单点**：新增 `DrawingStyleAvailability.isRenderableSubType(_:toolType:)`；`TrainingEngine` 现有私有 helper `isRenderableSubType(_ d:)` 改为**委托**它（保留原大段注释与调用点，append 家族行为逐字不变）；`withStyle` 调同一个。**禁止**在 `withStyle` 里另写 `toolType == .horizontal` 判断。
+- **SD-2 两条横线规则都提为 tool-aware 共享单点**：新增 `DrawingStyleAvailability.isRenderableSubType(_:toolType:)` 与 `normalizedLabelMode(current:lineSubType:toolType:)`；`TrainingEngine` 现有私有 helper `isRenderableSubType(_ d:)` 改为**委托**它（保留原大段注释与调用点，append 家族行为逐字不变）；`withStyle` 两者都走 tool-aware 版本。**禁止**在 `withStyle` 里另写 `toolType == .horizontal` 判断，也**禁止**它直接调二参（横线专用）版本。
+  > 为什么两条都要（codex plan-R2-F2）：只把 subType 判据做成 tool-aware、却让 labelMode 归一化无条件套横线规则，等于把 PR-1 那个 over-reject bug **只修了一半**——一条 `.trend` 线经这个「工具无关」的写入边界编辑一次，`.show`/`.left` 就被横线规则静默改写成 `.hidden`。规则的适用范围要么全都限定，要么就不叫单点。
 - **SD-2b「判据单点」= 规则实现单点，不是调用点单点**（沿用 D65 R13-F1 对 `visibleGeometry` 的同一澄清：「单点约束指函数实现只有一份，不是说四处传同样的入参」）。因此本切片**不动** `UI/DrawingStyleParams.swift`：面板里的 `normalizedLabelMode` 是**控件即时显示规整**、`horizontalLineSubTypeEnabled` 是**控件灰态**，二者都消费同一份规则实现，不是第二份规则。改动它属 UI 层、且会动 1a-iii 的面板行为与既有守卫，超出本切片范围（CLAUDE.md §3）。N5 守卫据此改钉**更有意义的性质**：两个**写入边界**（`withStyle` / append 家族）**不得直接套横规则**，必须经共享单点 `isRenderableSubType` —— 这正是 PR-1 那个 over-reject 真 bug 的根因形状（把只对水平线成立的规则套到所有 toolType）。
 - **SD-3 调用点守卫在本切片 = 恰好 0 处**：`updateDrawingStyle(` / `deleteDrawing(id:` 在 `Sources/` 中**零调用点**（唯一合法调用者是 PR-4 的 UI 路由，本切片还没有）。守卫写死 0，并在测试注释里写明：**PR-4 接线时必须把断言改成「恰好 1 处 + 该文件是 UI 路由 + 路由在写入瞬刻先验 `visibleGeometry`」**。这样任何人在没补几何门的情况下新增调用点，测试当场红（fail-closed forcing function）。
 - **SD-4 引擎四门顺序**：① id 非空 + 恰好匹配一条（D66）→ ② `locked`（D60）→ ③ 未来未知枚举值（D61，仅 update）→ ④ `withStyle` 语义（D59/D58 引擎支）。四门的可观察行为一致（`false` + 零改动 + 不递增），固定顺序只为可读与测试稳定。
@@ -127,6 +128,7 @@ func lossyFromRaw(_ raw: String) throws -> LossyDrawingArray {
 **Interfaces:**
 - Produces:
   - `DrawingStyleAvailability.isRenderableSubType(_ sub: LineSubType, toolType: DrawingToolType) -> Bool`（`public static`，与既有两个 helper 同级）
+  - `DrawingStyleAvailability.normalizedLabelMode(current: LabelMode, lineSubType: LineSubType, toolType: DrawingToolType) -> LabelMode`（`public static`，**tool-aware 重载**；非水平工具原样返回，横线委托既有二参版本）
   - `DrawingObject.withStyle(_ s: DrawingDefaultStyle) -> DrawingObject?`（**internal**，`nil` = 该样式对本对象的 `toolType` 语义不成立）
 - Consumes: 既有 `DrawingStyleAvailability.horizontalLineSubTypeEnabled` / `normalizedLabelMode`、`DrawingDefaultStyle`（5 字段：`lineSubType`/`lineStyle`/`thickness`/`colorToken`/`labelMode`，`Models/DrawingEnums.swift:28-35`）。
 
@@ -190,6 +192,22 @@ struct DrawingObjectStyleEditTests {
                                   anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
                                   isExtended: false, panelPosition: 0, period: .daily)
         #expect(trend.withStyle(style(.segment)) != nil)     // P1c 的线段工具不该被横规则误拒
+    }
+
+    @Test("归一化也必须 tool-aware（codex plan-R2-F2）：非水平工具的 labelMode 不被横线规则改写")
+    func labelModeNormalizationIsToolAware() throws {
+        // 水平线：(ray,.left) 归一成 .hidden（横规则成立）
+        let h = makeStyledHLine(id: "h")
+        #expect(h.withStyle(style(.ray, .solid, 1, .orange, .left))?.labelMode == .hidden)
+        // 非水平（.trend）：同样的 (ray,.left) **原样保留** —— 横规则不适用于它，
+        // 无条件套会把它的 .left 静默改写（与 .segment over-reject 同族的坏数据路径）
+        let trend = DrawingObject(id: "t", toolType: .trend,
+                                  anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
+                                  isExtended: false, panelPosition: 0, period: .daily)
+        #expect(trend.withStyle(style(.ray, .solid, 1, .orange, .left))?.labelMode == .left)
+        // `.show` 在横线上恒灰、在非水平工具上不该被本期擅自改写
+        #expect(h.withStyle(style(.straight, .solid, 1, .orange, .show))?.labelMode == .hidden)
+        #expect(trend.withStyle(style(.straight, .solid, 1, .orange, .show))?.labelMode == .show)
     }
 
     @Test("只动 5 样式字段 + 两个派生：其余字段逐字段原样拷贝")
@@ -257,16 +275,22 @@ struct DrawingObjectStyleEditTests {
         let txt = try hits("textColorToken == colorToken", excluding: dead)
         #expect(txt.count == 1, "派生② 不止一处：\(txt)")
         #expect(txt.allSatisfy { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
-        // 归一化 / 可用性：**规则实现**单点（定义只在 DrawingStyleAvailability.swift），
+        // 归一化 / 可用性：**规则实现**单点（横线规则体只有一份，且都在 DrawingStyleAvailability.swift），
         // 调用点允许多处（面板灰态/即时规整是同一份规则的消费者，非第二份规则——SD-2b）。
-        let normDef = try hits("func normalizedLabelMode(")
-        #expect(normDef.count == 1)
-        #expect(normDef.allSatisfy { $0.hasPrefix("DrawingStyleAvailability.swift") })
-        let availDef = try hits("func horizontalLineSubTypeEnabled(")
+        let labelRuleDef = try hits("func horizontalLabelModeEnabled(")      // 横线 labelMode 规则体
+        #expect(labelRuleDef.count == 1)
+        #expect(labelRuleDef.allSatisfy { $0.hasPrefix("DrawingStyleAvailability.swift") })
+        let availDef = try hits("func horizontalLineSubTypeEnabled(")        // 横线 subType 规则体
         #expect(availDef.count == 1)
         #expect(availDef.allSatisfy { $0.hasPrefix("DrawingStyleAvailability.swift") })
-        // 写入边界确实用了它们（不是"忘了归一化"）
-        #expect(try hits("normalizedLabelMode(current:").contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
+        // 归一化的两个重载（横线版 + tool-aware 版）都只许住在 DrawingStyleAvailability.swift
+        let normDefs = try hits("func normalizedLabelMode(")
+        #expect(normDefs.count == 2)                                          // 横线版 + tool-aware 版
+        #expect(normDefs.allSatisfy { $0.hasPrefix("DrawingStyleAvailability.swift") })
+        // 写入边界确实归一化了，且**走 tool-aware 那个重载**（codex plan-R2-F2：无条件套横规则会改写 .trend 的 labelMode）
+        let styleEditNorm = try hits("normalizedLabelMode(current:").filter { $0.hasPrefix("DrawingObjectStyleEdit.swift") }
+        #expect(!styleEditNorm.isEmpty)
+        #expect(try hits("toolType: toolType").contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
         // **核心**（PR-1 over-reject 真 bug 的根因形状）：两个写入边界**不得直接套横规则**，
         // 必须经共享单点 `isRenderableSubType(_:toolType:)`——横规则只对水平工具成立，直接套会对
         // 非水平工具（P1c 的 .trend 线段）静默拒掉合法数据。
@@ -275,6 +299,10 @@ struct DrawingObjectStyleEditTests {
                 "append 家族必须走 isRenderableSubType 共享单点：\(rawHorizontalRule)")
         #expect(!rawHorizontalRule.contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") },
                 "withStyle 必须走 isRenderableSubType 共享单点：\(rawHorizontalRule)")
+        // labelMode 侧同理（codex plan-R2-F2）：写入边界不得直接套横线 labelMode 规则
+        let rawLabelRule = try hits("horizontalLabelModeEnabled(")
+        #expect(!rawLabelRule.contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") },
+                "withStyle 必须走 tool-aware 归一化，不得直接套横线 labelMode 规则：\(rawLabelRule)")
         let shared = try hits("isRenderableSubType(")
         #expect(shared.contains { $0.hasPrefix("TrainingEngine.swift") })
         #expect(shared.contains { $0.hasPrefix("DrawingObjectStyleEdit.swift") })
@@ -311,8 +339,11 @@ extension DrawingObject {
             period: period,
             lineSubType: s.lineSubType, lineStyle: s.lineStyle,
             thickness: s.thickness, colorToken: s.colorToken,
+            // 归一化必须 **tool-aware**（codex plan-R2-F2）：横线规则只对 .horizontal 成立，
+            // 无条件套会把 .trend 等工具的 .show/.left 静默改写成 .hidden（与 .segment over-reject 同族）。
             labelMode: DrawingStyleAvailability.normalizedLabelMode(current: s.labelMode,
-                                                                    lineSubType: s.lineSubType),
+                                                                    lineSubType: s.lineSubType,
+                                                                    toolType: toolType),
             locked: locked,                                        // 本函数不碰 locked（能不能改由引擎门 D60 判）
             text: text, fontSize: fontSize,
             // 派生②（条件，codex R11-F1）：known 独立字色（如 orange 线 + blue 标签）必须保住；
@@ -334,6 +365,18 @@ extension DrawingObject {
     public static func isRenderableSubType(_ sub: LineSubType, toolType: DrawingToolType) -> Bool {
         guard toolType == .horizontal else { return true }   // 非水平：横规则不适用（矩阵属 P1c）
         return horizontalLineSubTypeEnabled(sub)
+    }
+
+    /// D59 共享单点（tool-aware 版）：写入边界用的 `labelMode` 归一化。
+    /// ⚠️ **与 `isRenderableSubType` 必须对称**（codex plan-R2-F1... 见 R2-F2）：`normalizedLabelMode(current:lineSubType:)`
+    /// 里那条「射线不能配『左』」是**水平线的**规则（`horizontalLabelModeEnabled` 头注：母 spec §3.1 水平线行）。
+    /// 若 `withStyle` 这种**工具无关**的写入边界无条件套它，一条 `.trend` 线的 `.show` / `.left` 会被按横线规则
+    /// 静默改写成 `.hidden` —— 与 PR-1 那个 `.segment` over-reject **同族**（把只对某类型成立的规则套到所有类型）。
+    /// 非水平工具：原样返回（它们的 labelMode 矩阵属 P1c，本期不替它们做决定）。
+    public static func normalizedLabelMode(current: LabelMode, lineSubType: LineSubType,
+                                           toolType: DrawingToolType) -> LabelMode {
+        guard toolType == .horizontal else { return current }
+        return normalizedLabelMode(current: current, lineSubType: lineSubType)
     }
 ```
 
@@ -520,7 +563,7 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
 
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（在 `deleteDrawing(at:)`/`appendDrawing` 邻近新增方法）
-- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（同文件追加；复用其既有 `allSwiftFilesUnderSources()` / `trainingEnginePath`，**新增**跨行安全的 `normalizedSource` / `normalizedCallSites` suite 私有方法）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（同文件追加；复用其既有 `allSwiftFilesUnderSources()` / `trainingEnginePath`，**新增**空白无关的 `squeeze` / `squeezedSource` / `callSiteCount` / `squeezedContains` suite 私有方法）
 
 **Interfaces:**
 - Consumes: Task 1 的 `DrawingObject.withStyle(_:)`；既有 `drawingsRevision`（PR-1）。
@@ -632,73 +675,103 @@ git commit -m "划线 1b-i 切片2 Task2：commitPending 接 withStyle + N5 四�
         #expect(n.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 5)) == true)
     }
 
-    // MARK: 跨行安全的调用点扫描（codex plan-R1-F1）
+    // MARK: 空白无关的调用点扫描（codex plan-R1-F1 → R2-F1 收紧）
 
-    /// 一份源码 → **剥注释 + 折叠全部空白（含换行）** 后的单行字符串。
-    /// ⚠️ **逐行 substring 扫描挡不住普通多行写法**（codex plan-R1-F1 实证）：
-    ///     `engine.deleteDrawing(\n    id: selectedID\n)` 没有任何一行含 `deleteDrawing(id:`
-    ///   → 守卫恒绿，而 PR-4 那道「确认后重算几何」就没人逼着补了（不可逆删除失去 forcing function）。
-    ///   带标签的 pattern（`xxx(id:` / `xxx(at:`）尤其脆弱。折叠空白后 `deleteDrawing( id:` 再收紧
-    ///   `( ` → `(`，使跨行与单行写法同形，两者都命中。
-    private func normalizedSource(_ path: String) throws -> String {
-        let stripped = try String(contentsOfFile: path, encoding: .utf8)
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map { line -> String in                        // 整行注释丢弃；行尾 `//` 之后截断
-                guard let r = line.range(of: "//") else { return String(line) }
-                return String(line[line.startIndex..<r.lowerBound])
+    /// 删掉**全部**空白字符（用于 needle 与源码两侧，使匹配彻底与排版无关）。
+    private func squeeze(_ s: String) -> String {
+        s.split(whereSeparator: { $0.isWhitespace }).joined()
+    }
+
+    /// 一份源码 → **剥行注释 + 剥块注释（支持嵌套）+ 删除全部空白** 后的字符串。
+    /// ⚠️ 两次收紧的由来，别退回去：
+    ///   ① 逐行 substring 扫描挡不住 `engine.deleteDrawing(\n id: x\n)`（codex plan-R1-F1）；
+    ///   ② **只折叠空白、只收紧 `"( "` 仍不够**（codex plan-R2-F1）：`engine.deleteDrawing\n(\n id: x\n)`
+    ///      会归一成 `deleteDrawing (id:`（左括号**前面**那个空格没人管）→ 照样漏；块注释
+    ///      `engine.deleteDrawing/* c */(id:` 同理。故直接**删光空白 + 剥块注释**，让匹配与排版完全无关。
+    ///   守卫漏掉一个调用点的后果不是"少测一条"，而是 PR-4 可以在**不补几何门**的情况下接上不可逆删除。
+    private func squeezedSource(_ path: String) throws -> String {
+        let raw = try String(contentsOfFile: path, encoding: .utf8)
+        var out = ""
+        var i = raw.startIndex
+        var blockDepth = 0
+        while i < raw.endIndex {
+            let rest = raw[i...]
+            if rest.hasPrefix("/*") {
+                blockDepth += 1
+                i = raw.index(i, offsetBy: 2); continue
             }
-            .joined(separator: " ")
-        return stripped.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-            .replacingOccurrences(of: "( ", with: "(")
+            if blockDepth > 0 {
+                if rest.hasPrefix("*/") { blockDepth -= 1; i = raw.index(i, offsetBy: 2); continue }
+                i = raw.index(after: i); continue
+            }
+            if rest.hasPrefix("//") {                       // 行注释：吃到行尾
+                while i < raw.endIndex, raw[i] != "\n" { i = raw.index(after: i) }
+                continue
+            }
+            if !raw[i].isWhitespace { out.append(raw[i]) }   // 空白一律丢弃
+            i = raw.index(after: i)
+        }
+        return out
     }
 
     /// `Sources/` 里 `pattern` 的**调用**出现次数（扣掉 `defPattern` 命中的定义），按文件返回。
-    /// 跨行调用同样命中（见 `normalizedSource`）。
-    private func normalizedCallSites(_ pattern: String, defPattern: String) throws -> [(file: String, count: Int)] {
-        try allSwiftFilesUnderSources().compactMap { path in
-            let s = try normalizedSource(path)
-            let total = s.components(separatedBy: pattern).count - 1
-            let defs  = s.components(separatedBy: defPattern).count - 1
-            let calls = total - defs
+    /// pattern/defPattern 会被同样 squeeze，故可按自然写法传入（`"deleteDrawing(id:"` / `"func deleteDrawing(id:"`）。
+    private func callSiteCount(_ pattern: String, defPattern: String) throws -> [(file: String, count: Int)] {
+        let p = squeeze(pattern), d = squeeze(defPattern)
+        return try allSwiftFilesUnderSources().compactMap { path in
+            let s = try squeezedSource(path)
+            let calls = (s.components(separatedBy: p).count - 1) - (s.components(separatedBy: d).count - 1)
             return calls > 0 ? (path, calls) : nil
         }
     }
 
+    /// 某文件（squeeze 后）是否含某段文本——访问级别断言用，同样与排版无关。
+    private func squeezedContains(_ path: String, _ needle: String) throws -> Bool {
+        try squeezedSource(path).contains(squeeze(needle))
+    }
+
     @Test("N15: updateDrawingStyle 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
     func updateDrawingStyleTrustBoundary() throws {
-        let engineSrc = try normalizedSource(trainingEnginePath)
-        #expect(engineSrc.contains("func updateDrawingStyle(id:"))          // 仍存在（也证明真读到了文件）
-        #expect(!engineSrc.contains("public func updateDrawingStyle("))     // 不是 public（D62）
+        #expect(try squeezedContains(trainingEnginePath, "func updateDrawingStyle(id:"))    // 仍存在（也证明真读到文件）
+        #expect(try !squeezedContains(trainingEnginePath, "public func updateDrawingStyle(")) // 不是 public（D62）
         // ⚠️ 本切片是引擎写入面，UI 编辑路由属 PR-4 → 现在**零调用点**。
         //    PR-4 接线时必须把本断言改成：恰好 1 处、且该文件是 UI 编辑路由、且路由在调用前先验
         //    HorizontalLineTool.visibleGeometry（D58 候选预检 + D65 当前门）。谁不补几何门就加调用点，
         //    这条当场红——这就是本守卫存在的意义（fail-closed forcing function）。
-        let sites = try normalizedCallSites("updateDrawingStyle(", defPattern: "func updateDrawingStyle(")
+        let sites = try callSiteCount("updateDrawingStyle(", defPattern: "func updateDrawingStyle(")
         #expect(sites.isEmpty, "updateDrawingStyle 出现了非预期调用点：\(sites)")
     }
 
-    @Test("守卫自检（codex plan-R1-F1）：跨行调用**也**能被 normalizedCallSites 命中")
-    func normalizedScannerCatchesMultilineCalls() throws {
-        // 直接对扫描器喂一段跨行调用文本（不写进 Sources/，只验扫描器本身的判别力）——
-        // 若哪天有人把它退回逐行 substring 扫描，本测试当场红。
+    @Test("守卫自检（codex plan-R1-F1 + R2-F1）：换行/括号前空白/块注释三种排版都逃不掉")
+    func squeezedScannerCatchesAwkwardFormatting() throws {
+        // 对扫描器喂三段**合法 Swift 但排版刁钻**的调用（不写进 Sources/，只验扫描器判别力）——
+        // 若哪天有人把它退回逐行/只折叠空白的扫描，本测试当场红。
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("guard-selfcheck-\(UUID().uuidString).swift")
         try """
         func caller() {
             engine.deleteDrawing(
-                id: selectedID
+                id: a
             )
-            // engine.deleteDrawing(id: "注释里的不算")
+            engine.deleteDrawing
+                (
+                    id: b
+                )
+            engine.deleteDrawing/* 块注释 */(id: c)
+            // engine.deleteDrawing(id: 行注释里的不算)
+            /* engine.deleteDrawing(id: 块注释里的也不算) */
         }
         """.write(to: tmp, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tmp) }
-        let s = try normalizedSource(tmp.path)
-        #expect(s.contains("deleteDrawing(id:"))                       // 跨行调用被折叠后命中
-        #expect(!s.contains("注释里的不算"))                             // 注释确实被剥掉
+        let s = try squeezedSource(tmp.path)
+        #expect(s.components(separatedBy: squeeze("deleteDrawing(id:")).count - 1 == 3,
+                "三种排版都该命中，实际：\(s)")
+        #expect(!s.contains("行注释里的不算"))
+        #expect(!s.contains("块注释里的也不算"))
     }
 ```
 
-> **不动 PR-1 的 `callSites` 局部函数**（它服务 `appendFamilyTrustBoundary`）：`appendDrawing(` / `appendReviewDrawing(` / `routeDrawingCommit(` 这三个 pattern 是「函数名 + 左括号」，跨行传参也照样在同一行命中，逐行扫描对它们成立。**只有带标签的 pattern（`xxx(id:` / `xxx(at:`）会被跨行写法绕过**，它们在 Task 5 统一升级到 `normalizedCallSites`。
+> **PR-1 的 `callSites` 局部函数（逐行 substring）在 Task 5 被整条替换掉**（codex plan-R2-F1 明确要求同一扫描器覆盖 append/route 守卫）。我一度argue「函数名+左括号的 pattern 不受跨行影响」——但 `engine.appendDrawing\n(x)` 在 Swift 里同样合法，而**判据强弱不一致本身就是缺陷**（同族信任边界守卫留一档弱的，读者会以为该性质已被钉死）。本 Task 只新增扫描器，Task 5 统一切换。
 
 - [ ] **Step 2: 加测试专用注入口（DEBUG hook）并跑红**
 
@@ -955,7 +1028,7 @@ git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（l
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`（追加）
 
 **Interfaces:**
-- Consumes: 既有 `drawingsRevision`；Task 3 新增的 `normalizedSource` / `normalizedCallSites`（跨行安全扫描器）。
+- Consumes: 既有 `drawingsRevision`；Task 3 新增的 `squeezedSource` / `callSiteCount` / `squeezedContains`（空白无关扫描器）。
 - Produces: `TrainingEngine.deleteDrawing(id: DrawingID) -> Bool`（**internal**、`@discardableResult`）。成功 → 移除 + `drawingsRevision += 1` + `true`；id 不存在/非唯一/空 或 `locked` → 零改动 + 不递增 + `false`。
 
 - [ ] **Step 1: 写失败测试**
@@ -1051,21 +1124,16 @@ git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（l
 
     @Test("N19a: deleteDrawing(id:) 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
     func deleteByIdTrustBoundary() throws {
-        let engineSrc = try normalizedSource(trainingEnginePath)     // 跨行安全（Task 3 的扫描器）
-        #expect(engineSrc.contains("func deleteDrawing(id:"))
-        #expect(!engineSrc.contains("public func deleteDrawing(id:"))
+        #expect(try squeezedContains(trainingEnginePath, "func deleteDrawing(id:"))
+        #expect(try !squeezedContains(trainingEnginePath, "public func deleteDrawing(id:"))
         // PR-4 接线时改成：恰好 1 处、在 UI 删除路由、且路由在**确认框点「删除」之后**重算 visibleGeometry
         // （D65 R13-F1：确认框有时间窗，线可能滑走 → 只在点 🗑 那刻判几何是时序 bug）。
-        let idSites = try normalizedCallSites("deleteDrawing(id:", defPattern: "func deleteDrawing(id:")
+        let idSites = try callSiteCount("deleteDrawing(id:", defPattern: "func deleteDrawing(id:")
         #expect(idSites.isEmpty, "deleteDrawing(id:) 出现了非预期调用点：\(idSites)")
         // N19d 不回归确认：index 版本仍零调用点、仍非 public（PR-1 已落）。
-        // ⚠️ 这两条 PR-1 原本用**逐行** substring 扫描 → 跨行写法可绕过（codex plan-R1-F1）；
-        //    本切片一并升级为跨行安全的扫描（同一族信任边界守卫，判据不该有强弱两档）。
-        let atSites = try normalizedCallSites("deleteDrawing(at:", defPattern: "func deleteDrawing(at")
+        let atSites = try callSiteCount("deleteDrawing(at:", defPattern: "func deleteDrawing(at")
         #expect(atSites.isEmpty, "deleteDrawing(at:) 应零调用点：\(atSites)")
-        let reviewAtSites = try normalizedCallSites("removeReviewDrawing(at:", defPattern: "func removeReviewDrawing(at")
-        #expect(reviewAtSites.isEmpty, "removeReviewDrawing(at:) 应零调用点：\(reviewAtSites)")
-        #expect(!engineSrc.contains("public func deleteDrawing(at "))
+        #expect(try !squeezedContains(trainingEnginePath, "public func deleteDrawing(at index:"))
     }
 ```
 
@@ -1112,23 +1180,43 @@ Expected: 8 tests PASS。
 - 临时注释掉 `guard !drawings[i].locked` → `swift test --filter deleteRejectsLocked` → 期望 FAIL → 恢复；
 - 临时注释掉 `guard flow.mode != .review` → `swift test --filter deleteRefusedInReviewMode` → 期望 FAIL → 恢复。
 
-- [ ] **Step 5: 把 PR-1 里两条**带标签**断言也升级到跨行安全扫描（codex plan-R1-F1）**
+- [ ] **Step 5: 把 PR-1 的 `appendFamilyTrustBoundary` **整条**换成空白无关扫描（codex plan-R1-F1 + R2-F1）**
 
-`appendFamilyTrustBoundary`（PR-1）里这两行仍是逐行 substring：
-
-```swift
-        #expect(try callSites(callPattern: "deleteDrawing(at:", defExclude: "func deleteDrawing(at").isEmpty)
-        #expect(try callSites(callPattern: "removeReviewDrawing(at:", defExclude: "func removeReviewDrawing(at").isEmpty)
-```
-
-改成用 Task 3 的跨行安全扫描器（**同一族信任边界守卫不该有强弱两档**——留一条弱的在那里，读者会以为该性质已被钉死）：
+PR-1 那条守卫用的是**逐行** substring（局部函数 `callSites`）。**同一族信任边界守卫不该有强弱两档**——留一条弱的在那里，读者会以为该性质已被钉死。把它的局部 `callSites` 删掉，全部改用 Task 3 的 `callSiteCount` / `squeezedContains`：
 
 ```swift
-        #expect(try normalizedCallSites("deleteDrawing(at:", defPattern: "func deleteDrawing(at").isEmpty)
-        #expect(try normalizedCallSites("removeReviewDrawing(at:", defPattern: "func removeReviewDrawing(at").isEmpty)
+    @Test("N23a: append 家族非 public + 唯一调用点（源码守卫，调用图 D67，codex plan-R5-F2；切片2 换空白无关扫描）")
+    func appendFamilyTrustBoundary() throws {
+        // (1) 访问级别：7 个写入面全非 public（编辑 5 + 装载 2）
+        for decl in ["appendDrawing(", "appendReviewDrawing(", "routeDrawingCommit(", "deleteDrawing(at index:",
+                     "removeReviewDrawing(at index:", "setReviewLossy(", "setReviewDrawings("] {
+            #expect(try !squeezedContains(trainingEnginePath, "public func " + decl))
+            #expect(try squeezedContains(trainingEnginePath, "func " + decl))       // 仍存在（internal）
+        }
+        // (2) 唯一调用点（**核心**：仅非 public 不够——包内新调用者仍能绕过 handleDrawingTap 的 geometry 门）
+        let appends = try callSiteCount("appendDrawing(", defPattern: "func appendDrawing(")
+        #expect(appends.map(\.count).reduce(0, +) == 1)
+        #expect(appends.allSatisfy { $0.file.contains("TrainingEngine.swift") })    // = routeDrawingCommit 内
+        let reviewAppends = try callSiteCount("appendReviewDrawing(", defPattern: "func appendReviewDrawing(")
+        #expect(reviewAppends.map(\.count).reduce(0, +) == 1)
+        let route = try callSiteCount("routeDrawingCommit(", defPattern: "func routeDrawingCommit(")
+        #expect(route.map(\.count).reduce(0, +) == 1)
+        #expect(route.allSatisfy { $0.file.contains("ChartContainerView") })        // 在 handleDrawingTap 的门之后
+        // index 版删除：零生产调用点（D51/D67）
+        #expect(try callSiteCount("deleteDrawing(at:", defPattern: "func deleteDrawing(at").isEmpty)
+        #expect(try callSiteCount("removeReviewDrawing(at:", defPattern: "func removeReviewDrawing(at").isEmpty)
+        // 装载入口：setReviewLossy 只在 Coordinator（复盘装载）与 TrainingEngine（setReviewDrawings 委托）
+        let reviewLossy = try callSiteCount("setReviewLossy(", defPattern: "func setReviewLossy(")
+        #expect(!reviewLossy.isEmpty)
+        #expect(reviewLossy.allSatisfy { $0.file.contains("TrainingSessionCoordinator") || $0.file.contains("TrainingEngine") })
+        // setReviewDrawings 零 Sources/ 调用点（其定义委托 setReviewLossy，被 defPattern 扣除）
+        #expect(try callSiteCount("setReviewDrawings(", defPattern: "func setReviewDrawings(").isEmpty)
+    }
 ```
 
-其余三个 pattern（`appendDrawing(` / `appendReviewDrawing(` / `routeDrawingCommit(`）**保持不动**：它们是「函数名 + 左括号」，跨行传参也在同一行命中，逐行扫描对它们成立（不做无谓改动，CLAUDE.md §3）。
+> ⚠️ 两处必须核对真实源码再写死（[[feedback_plan_embedded_facts_unreliable]]：计划内嵌的**事实**必须实测）：
+> - 定义签名的**参数名**（`deleteDrawing(at index:` / `removeReviewDrawing(at index:`）—— squeeze 后 `func deleteDrawing(atindex:`，与调用 `deleteDrawing(at:` 不同形，故 defPattern 必须带参数名才扣得准。实施时先 `grep -n "func deleteDrawing(at\|func removeReviewDrawing(at" Sources/…/TrainingEngine.swift` 核实。
+> - `appendDrawing(` 的**调用**计数：`routeDrawingCommit` 里那一处。若实测不等于 1，先查是不是有新调用点（那才是守卫要抓的），不要直接改数字。
 
 - [ ] **Step 6: 全量 host 测试**
 
