@@ -218,6 +218,11 @@ struct DrawingObjectStyleEditTests {
         #expect(trend.withStyle(style(.segment)) == nil)
         #expect(DrawingStyleAvailability.isEditableToolType(.trend) == false)
         #expect(DrawingStyleAvailability.isEditableToolType(.horizontal) == true)
+        // 判据**派生自既有单一真相**，不是第二份登记表（codex plan-R12-F2）——逐 case 对齐
+        for t: DrawingToolType in [.horizontal, .trend, .text, .ray, .fib, .rect] {
+            #expect(DrawingStyleAvailability.isEditableToolType(t) == DrawingToolType.implemented.contains(t),
+                    "\(t) 的可编辑性必须与 DrawingToolType.implemented 一致")
+        }
         // ⚠️ 与 append 侧**刻意不对称**：同一条 `.trend`+`.segment` 线经 `appendDrawing` 仍必须被接收
         //    （PR-1 的 `nonHorizontalSegmentAccepted` 钉死，本切片不得回归）——进来宽松、改写保守。
     }
@@ -246,7 +251,7 @@ struct DrawingObjectStyleEditTests {
     func labelModeNormalizationIsToolAware() throws {
         typealias A = DrawingStyleAvailability
         // 直调重载本身：`withStyle` 现在被工具门挡在更前面（R11-F1），非水平走不到归一化那一步，
-        // 故这条规则要在这里单测——它是「P1c 把新工具加进 implementedToolTypes 时不会重蹈 R2-F2」的保险。
+        // 故这条规则要在这里单测——它是「P1c 把新工具加进 `DrawingToolType.implemented` 时不会重蹈 R2-F2」的保险。
         #expect(A.normalizedLabelMode(current: .left, lineSubType: .ray, toolType: .horizontal) == .hidden)
         #expect(A.normalizedLabelMode(current: .right, lineSubType: .ray, toolType: .horizontal) == .right)
         #expect(A.normalizedLabelMode(current: .show, lineSubType: .straight, toolType: .horizontal) == .hidden)
@@ -433,11 +438,12 @@ extension DrawingObject {
         return horizontalLineSubTypeEnabled(sub)
     }
 
-    /// 本构建**已实现**的工具集：渲染 / 命中 / 样式矩阵**只对它们成立**（本期只有水平线，母 spec §3.1）。
-    /// P1c 落地新工具时**必须**同时把它加进来，否则新工具画得出却改不动。
-    public static let implementedToolTypes: Set<DrawingToolType> = [.horizontal]
-
     /// 该工具的样式语义是否被本构建理解 → **能否编辑**（codex plan-R11-F1）。
+    /// ⚠️ **复用既有单一真相 `DrawingToolType.implemented`**（`Models.swift:50`），**绝不另立第二份登记表**
+    ///   （codex plan-R12-F2：我上一稿真的另写了一个 `implementedToolTypes`，那会在 P1c 打开新工具时漂移成
+    ///   「画得出、样式控件却永远不生效」）。该集合已被激活门（`TrainingEngine:1259`）与落锚阈值
+    ///   （`DefaultDrawingInputController:43`，其注释原文「单一真相派生」）消费 —— 编辑面跟着它走，
+    ///   P1c 只要照常把新工具加进 `DrawingToolType.implemented`，可编辑性**自动**跟上，无需记住第二处。
     /// ⚠️ **与 `isRenderableSubType`（append 侧）刻意不对称，别"统一"掉**：
     ///   - **append = 数据进来**：拒绝 = 静默丢掉用户/高版本已有的线 → 必须宽松（PR-1 over-reject 的教训）；
     ///   - **编辑 = 改写已有数据**：`DrawingToolType` 把 `.trend`/`.text` 等目标工具**已声明为已知 case**，
@@ -446,7 +452,7 @@ extension DrawingObject {
     ///   与 D61「高版本线：选得中、改不动样式、可整条删」逐字同构 —— 同一条纪律，只是判据从
     ///   「未知枚举值」扩到「已知但本构建未实现的工具」。
     public static func isEditableToolType(_ t: DrawingToolType) -> Bool {
-        implementedToolTypes.contains(t)
+        DrawingToolType.implemented.contains(t)
     }
 
     /// D59 共享单点（tool-aware 版）：写入边界用的 `labelMode` 归一化。
@@ -1273,7 +1279,7 @@ struct DrawingEditDurabilityGateTests {
         #expect(e.drawingsRevision == rev + 1)
     }
 
-    @Test("工具门端到端（codex plan-R11-F1）：未实现的已知工具线 —— 改样式被拒、但**保留且可删**")
+    @Test("工具门端到端（codex plan-R11-F1）：未实现的已知工具线 —— 进得来、但改样式被拒")
     func unimplementedToolLineIsPreservedNotEditable() throws {
         let e = TrainingEngine.preview()
         // 一条 `.trend` 线（已知枚举、无未来枚举值 → D61 门不命中）；经 append 进来是**合法**的
@@ -1285,10 +1291,8 @@ struct DrawingEditDurabilityGateTests {
         let rev = e.drawingsRevision
         #expect(e.updateDrawingStyle(id: "T", style: style(4, .green)) == false)   // 改写保守
         expectDrawingsUnchanged(e, before, revisionBefore: rev)
-        // 但**可以整条删**（与 D61 未来枚举值线同一处置：看得见、改不动、删得掉）
-        #expect(e.deleteDrawing(id: "T") == true)
-        #expect(e.drawings.isEmpty)
-        #expect(e.drawingsRevision == rev + 1)
+        // ⚠️ 「仍可整条删」那半条在 **Task 5**（`deleteDrawing(id:)` 到那时才存在；本 Task 是纯测试
+        //    Task，写在这里会编译不过 —— codex plan-R12-F1）。
     }
 
     @Test("N14g: known 独立字色不得被无条件派生抹掉（orange 线 + blue 标签）")
@@ -1420,6 +1424,21 @@ git commit -m "划线 1b-i 切片2 Task4：钉死编辑面两道耐久性门（l
         let rev = e.drawingsRevision
         #expect(e.deleteDrawing(id: "A") == false)
         expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("工具门补完（codex plan-R11-F1 + R12-F1）：未实现的已知工具线改不动样式，但**可整条删**")
+    @MainActor func unimplementedToolLineIsDeletable() throws {
+        let e = TrainingEngine.preview()
+        let trend = DrawingObject(id: "T", toolType: .trend,
+                                  anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
+                                  isExtended: false, panelPosition: 0, period: .daily)
+        #expect(e.appendDrawing(trend) == true)
+        var st = DrawingDefaultStyle(); st.thickness = 4
+        #expect(e.updateDrawingStyle(id: "T", style: st) == false)   // 改不动（Task 4 已钉，这里做前提复述）
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "T") == true)                    // 但删得掉（同 D61 高版本线的处置）
+        #expect(e.drawings.isEmpty)
+        #expect(e.drawingsRevision == rev + 1)
     }
 
     @Test("N14c(引擎版): 未来枚举值线**可以删**（D61 只挡改样式，不挡整条删除）")
@@ -1719,5 +1738,5 @@ git commit -m "划线 1b-i 切片2 Task6：接手 PR-1 的 5 项 Minor backlog�
    - `deleteDrawing(id:` → 恰好 1 处，且在 UI 删除路由内，且路由在**确认框点「删除」之后**重算 `visibleGeometry`（D65 R13-F1 时序）。
 2. **选中态相关的全部负向测试**（N1/N6/N7/N8/N13d/N14c 路由版/N14d/N16/N17/N18/N19c/N19e）归 PR-3/PR-4，本切片一条都没覆盖（见「覆盖 vs 交接」表）。
 3. **D49 面板派生回显**（`DrawingStyleParams` 改收 `style` + `onChange`）归 PR-4。本切片**没有动面板**（SD-2b）：面板照旧自己规整显示态，写入边界另有一道独立归一化（`withStyle`）——两者消费同一份规则实现，PR-4 接线时面板只需把完整 `DrawingDefaultStyle` 交给路由，写入边界会再归一化一次（幂等）。
-4. **P1c 落新工具时必须同时把它加进 `DrawingStyleAvailability.implementedToolTypes`**（codex plan-R11-F1）：否则新工具画得出、却因编辑面的工具门而改不动样式（现象 = 面板控件对它全灰）。这道门今天的作用是挡住**高版本写的已知但未实现工具**被本构建按水平线假设改写。
+4. **P1c 落新工具时照常加进既有的 `DrawingToolType.implemented`**（`Models.swift:50`）即可——编辑面的工具门（`isEditableToolType`）**派生自它**，可编辑性自动跟上，**不存在第二处要记得改**（codex plan-R11-F1 + R12-F2）。这道门今天的作用是挡住**高版本写的已知但未实现工具**被本构建按水平线假设不可逆改写。
 5. **1b-ii `setDrawingLocked(id:locked:)`**：必须是**独立** API 并豁免 D60 闸；且它会撞 D61 的坑（锁定一条未来枚举值线也会 re-merge 抹字节）→ 必须做 raw-preserving 单字段 merge，不能照抄本切片的「整条拒绝」（spec §9）。
