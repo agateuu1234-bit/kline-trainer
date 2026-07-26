@@ -434,13 +434,19 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   基线文件本身仍是 1532（真实漂移 +9 在 ±30 容差内，未改 catalyst-total-baseline.txt）；但本条
 #   自测的 fixture 必须用一次**真** fresh Catalyst 构建日志重裁（禁手打伪造行，见 R9）——本次
 #   实测 fresh 总用例数 = 1541，故 pass-main-current.log 与下方回显数字同步改为 1541。
+#   1b-i 切片1（本次）：+13 个 host-visible 测试（uikit 59 不变，未动 catalyst-uikit-baseline.txt）。
+#   host swift test 独立实测同为 +13（1661→1674），且新增测试均无 canImport(UIKit) 门 →
+#   Catalyst delta==host delta，pre-PR-1 base=1561。冻结 total 基线此前停在 1532（1a-iv 后续任务
+#   累积漂移 riding 在 ±30 内、未同步），本 PR 真实总数 1574 已漂出 1532±30（+42），故按 G7 维护规则
+#   catalyst-total-baseline.txt 1532→1574，并用本次一份**真** fresh Catalyst 构建日志
+#   （1574 tests / 199 suites，禁手打伪造行）重裁 pass-main-current.log + 下方回显 1541→1574。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1541" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 59 / total 1541）→ GATE PASS 且回显 1541 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1574" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前 main 的真日志经活基线（uikit 59 / total 1574）→ GATE PASS 且回显 1574 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1541，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1574，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 
