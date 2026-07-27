@@ -225,8 +225,10 @@ struct DrawingObjectStyleEditTests {
         // 判据 = 既有单一真相 `DrawingToolType.implemented`（能不能画，codex plan-R12-F2：不另立登记表）
         //        **∧** `toolsWithStyleMatrix`（本构建懂不懂它的样式语义，codex plan-R13-F2）
         typealias A = DrawingStyleAvailability
-        // ⚠️ 断言**具体期望值**，别复述实现（Opus-F7：写成 `== (implemented ∧ matrix)` 恒真——
-        //    今天两集合都是 [.horizontal]，把实现里的 ∧ 改成 ∨ 结果也一样、测试不红）。
+        // ⚠️ 断言**具体期望值**，别复述实现（Opus-F7）：旧写法 `== (implemented ∧ matrix)` 是实现复述，
+        //    改实现它跟着改、永远不红；新写法钉死具体值，任一集合被误扩当场红。
+        //    ⚠️ 但**别过度宣称**（Opus 复核-N4）：两个集合今天恰好相等，`∧` 换成 `∨` 对所有 case 结果一致，
+        //    **没有测试能区分它俩**——维持这个前提靠的是下面那条「两集合相等」的漂移告警。
         #expect(A.isEditableToolType(.horizontal) == true)
         for t: DrawingToolType in [.trend, .text, .ray, .fib, .rect] {
             #expect(A.isEditableToolType(t) == false, "\(t) 本构建没有样式矩阵，不得可编辑")
@@ -275,7 +277,7 @@ struct DrawingObjectStyleEditTests {
     @Test("归一化 tool-aware（codex plan-R2-F2）：横规则只对横工具成立")
     func labelModeNormalizationIsToolAware() throws {
         typealias A = DrawingStyleAvailability
-        // 直调重载本身：`withStyle` 现在被工具门挡在更前面（R11-F1），非水平走不到归一化那一步，
+        // 直调重载本身（Opus 复核-N5 更正）：`withStyle` **不含**工具门（R15-F2 已挪到 `updateDrawingStyle`），
         // 故这条规则要在这里单测——它是「P1c 把新工具加进 `DrawingToolType.implemented` 时不会重蹈 R2-F2」的保险。
         #expect(A.normalizedLabelMode(current: .left, lineSubType: .ray, toolType: .horizontal) == .hidden)
         #expect(A.normalizedLabelMode(current: .right, lineSubType: .ray, toolType: .horizontal) == .right)
@@ -994,10 +996,10 @@ struct SourceGuardScannerTests {
 
 把 Task 1 Step 1 末尾那段 `fourSemanticsSingleSource`（连同 `hits(_:excluding:)` 局部 helper）**原样**追加进 `Drawing/DrawingObjectStyleEditTests.swift` 的 suite 里。
 
-> **为什么必须等到这个 Task**：Task 1 结束时 `DrawingSession.commitPending` 里仍有第二份 `isExtended: s.lineSubType == .ray`（本 Task Step 3 才消灭它）→ 守卫在 Task 1 结束时**必红**，会逼实现者要么跳过「每 task 全绿再 commit」，要么手工放宽守卫（两者都是坏结果）。守卫跟着「最后一份重复语义被消灭」的 Task 落地，红→绿的因果才对得上。
->
-> **先跑一次证明它有判别力**：本 Task Step 3 改完 `commitPending` **之前**先把守卫加进去跑一次 → 期望 `派生① 不止一处` FAIL（`DrawingSession.swift` 那份还在）；改完 Step 3 后再跑 → PASS。这就是这条守卫的红绿验。
-
+> **为什么守卫不放在 Task 1**：Task 1 结束时 `DrawingSession.commitPending` 里仍有第二份
+> `isExtended: s.lineSubType == .ray`（本 Task Step 5 才消灭它）→ 守卫在 Task 1 结束时**必红**，
+> 会逼实现者要么跳过「每 task 全绿再 commit」，要么手工放宽守卫（两者都是坏结果）。
+> 守卫跟着「最后一份重复语义被消灭」的 Task 落地，红→绿的因果才对得上。
 
 > **顺序为什么是这个**（Opus-F4 修正）：N5 守卫必须在**改 `commitPending` 之前**先加、先跑一次，期望 `派生① 不止一处` **FAIL**（此刻 `DrawingSession.commitPending` 里那份 `isExtended: s.lineSubType == .ray` 还在）。
 > 这就是这条守卫的红绿验；跑完红再做 Step 5，Step 6 转绿。**别先实现再加守卫**——那样它一上来就是绿的，判别力零证据。
@@ -1477,7 +1479,7 @@ struct DrawingEditDurabilityGateTests {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败（先只加测试、不改实现）**
+- [ ] **Step 2: 运行测试（本 Task **首跑即绿**——判别力由 Step 3 的红绿验证提供，Opus 复核-N6）**
 
 Run: `cd ios/Contracts && swift test --filter DrawingEditDurabilityGateTests 2>&1 | tail -30`
 Expected: 全部编译通过并**全部 PASS**（Task 3 已把两道 guard 写进实现）。
@@ -1715,7 +1717,7 @@ Expected: 8 tests PASS。
 
 - [ ] **Step 5: 把 PR-1 的 `appendFamilyTrustBoundary` **整条**换成空白无关扫描（codex plan-R1-F1 + R2-F1）**
 
-PR-1 那条守卫用的是**逐行** substring（局部函数 `callSites`）。**同一族信任边界守卫不该有强弱两档**——留一条弱的在那里，读者会以为该性质已被钉死。把它的局部 `callSites` 删掉，全部改用 Task 3 的 `callSiteCount` / `squeezedContains`：
+PR-1 那条守卫用的是**逐行** substring（局部函数 `callSites`）。**同一族信任边界守卫不该有强弱两档**——留一条弱的在那里，读者会以为该性质已被钉死。把它的局部 `callSites` 删掉，全部改用 **Task 2** 建的共享扫描器（`SourceGuardScanner.swift`）的 `callSiteCount` / `squeezedContains`：
 
 ```swift
     @Test("N23a: append 家族非 public + 唯一调用点（源码守卫，调用图 D67，codex plan-R5-F2；切片2 换空白无关扫描）")
@@ -1924,7 +1926,11 @@ git status --porcelain   # 期望：空输出（codex plan-R14-F3：防新建文
 1. **PR-4 的 UI 可用性：spec D65 原文 + 本切片多出的两道引擎门**（Opus-F3）：spec 谓词是
    `改样式可用 = locked==false ∧ visibleGeometry != nil ∧ !hasKnownFutureEnumValues(liveIds:[id])`，
    但本切片的引擎**还拒两类**（超 spec 的纵深防御，spec 未同步）：`∧ !hasKnownFutureFields(liveIds:[id])`（未来**顶层字段**，R13-F1）`∧ isEditableToolType(toolType)`（本构建没写出样式矩阵的工具，R11-F1）。
-   **PR-4 的置灰谓词必须以引擎门为准**——否则一条只带未来顶层字段的线、或一条 `.trend` 线会「控件亮着、点了没反应」；spec D65 谓词待 PR-4 一并修订。`删除可用` 仍不含这些分量。
+   `∧ flow.mode != .review`（复盘门，SD-7——复盘里 `drawings` 是已归档 record 的原训练线）。
+   **PR-4 的置灰谓词必须以引擎门为准**——否则一条只带未来顶层字段的线、一条 `.trend` 线、或复盘模式下的任一条线会「控件亮着、点了没反应」；spec D65 谓词待 PR-4 一并修订。
+   ⚠️ **`删除可用` 也不是 spec 原文那两项**：引擎的 `deleteDrawing(id:)` 同样带复盘门 →
+   `删除可用 = locked==false ∧ visibleGeometry != nil ∧ flow.mode != .review`（不含未来数据/工具分量）。
+   否则复盘里点 🗑 → 弹确认框 → 点「删除」→ 什么也不发生（Opus 复核-N3）。
    ⚠️ **「换个颜色把未来值覆盖掉以解封 finalize」这条修复路径是独立议题**（2026-07-27 user 裁决从本 PR 移出）：它牵扯「哪些 key 用户改得到 / raw 里字色跟不跟随线色 / 选的新值是否等于 fallback / 归并按解码值比对」等一连串细分（codex plan R14→R24 的全部争点），且**只有接上 UI 才验证得了**。PR-4 之前须单独 brainstorming + spec 修订再落地；在那之前**引擎与 UI 都按保守版**（这类线：选得中、样式控件灰、可整条删）。
 2. **PR-4 接线时必须同步改两条源码守卫**（本切片故意写成「零调用点」）：
    - `updateDrawingStyle(` → 恰好 1 处，且在 UI 编辑路由内，且路由**先过 D65 当前几何门 → 若改 `lineSubType` 再过 D58 候选预检 → 才调引擎**；
