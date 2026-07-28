@@ -20,6 +20,15 @@ public enum DrawingStyleAvailability {
         return horizontalLineSubTypeEnabled(sub)
     }
 
+    /// 本构建**写得出样式矩阵**的工具集。与 `DrawingToolType.implemented`（= 画得出 / 提交得了）
+    /// **是两件不同的事**（codex plan-R13-F2）：那个集合回答"能不能画"，本集合回答"本构建懂不懂它的
+    /// 样式语义"。今天只有水平线有矩阵（`horizontalLineSubTypeEnabled` / `horizontalLabelModeEnabled`）。
+    /// ⚠️ P1c 给新工具接线时：加进 `DrawingToolType.implemented` 之后它就能画了，但**样式仍改不动**，
+    ///   直到你为它写出子类型/标注矩阵并加进本集合 —— 这个方向的漂移是 **fail-closed**（现象是
+    ///   "新工具的样式控件不生效"，一眼可见、且不污染数据），比反过来 fail-open
+    ///   （尚无矩阵就允许编辑 → 把不受支持的样式组合持久化）安全。
+    static let toolsWithStyleMatrix: Set<DrawingToolType> = [.horizontal]
+
     /// 该工具的样式语义是否被本构建理解 → **能否编辑**（codex plan-R11-F1）。
     /// ⚠️ **复用既有单一真相 `DrawingToolType.implemented`**（`Models.swift:50`），**绝不另立第二份登记表**
     ///   （codex plan-R12-F2：我上一稿真的另写了一个 `implementedToolTypes`，那会在 P1c 打开新工具时漂移成
@@ -33,15 +42,6 @@ public enum DrawingStyleAvailability {
     ///     本构建就会拿**水平线的样式假设**改写一条自己根本渲染不出的线，且不可逆（本期无 undo）。
     ///   与 D61「高版本线：选得中、改不动样式、可整条删」逐字同构 —— 同一条纪律，只是判据从
     ///   「未知枚举值」扩到「已知但本构建未实现的工具」。
-    /// 本构建**写得出样式矩阵**的工具集。与 `DrawingToolType.implemented`（= 画得出 / 提交得了）
-    /// **是两件不同的事**（codex plan-R13-F2）：那个集合回答"能不能画"，本集合回答"本构建懂不懂它的
-    /// 样式语义"。今天只有水平线有矩阵（`horizontalLineSubTypeEnabled` / `horizontalLabelModeEnabled`）。
-    /// ⚠️ P1c 给新工具接线时：加进 `DrawingToolType.implemented` 之后它就能画了，但**样式仍改不动**，
-    ///   直到你为它写出子类型/标注矩阵并加进本集合 —— 这个方向的漂移是 **fail-closed**（现象是
-    ///   "新工具的样式控件不生效"，一眼可见、且不污染数据），比反过来 fail-open
-    ///   （尚无矩阵就允许编辑 → 把不受支持的样式组合持久化）安全。
-    static let toolsWithStyleMatrix: Set<DrawingToolType> = [.horizontal]
-
     public static func isEditableToolType(_ t: DrawingToolType) -> Bool {
         DrawingToolType.implemented.contains(t) && toolsWithStyleMatrix.contains(t)
     }

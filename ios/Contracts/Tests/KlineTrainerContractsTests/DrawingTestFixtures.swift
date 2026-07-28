@@ -17,20 +17,25 @@ import Testing
 
 /// 造一条带完整样式字段的水平线（用于「只动样式」逐字段断言）。
 /// ⚠️ `DrawingAnchor.init` 的 label 顺序是 `(period:candleIndex:price:)`（`Models/Models.swift:214` 实测）。
+/// ⚠️ `panelPosition`/`textForm`/`tailAnchor` 三个参数（fix round 1 补）：此前硬编码 `0`/`.plain`/`nil`，
+///   恰好等于 `DrawingObject.init` 的默认值 → 调用方无法传非默认值，「逐字段原样拷贝」断言对它们恒真
+///   （改坏实现也测不出）。默认值维持不变，既有调用点不受影响。
 func makeStyledHLine(id: String,
                      lineSubType: LineSubType = .straight, lineStyle: LineStyle = .solid,
                      thickness: Int = 1, colorToken: DrawingColorToken = .orange,
                      labelMode: LabelMode = .hidden, locked: Bool = false,
                      textColorToken: DrawingColorToken = .orange,
                      text: String = "hi", fontSize: Int = 14,
+                     textForm: TextForm = .plain, tailAnchor: DrawingAnchor? = nil,
+                     panelPosition: Int = 0,
                      period: Period = .daily, candleIndex: Int = 3, price: Double = 10) -> DrawingObject {
     DrawingObject(id: id, toolType: .horizontal,
                   anchors: [DrawingAnchor(period: period, candleIndex: candleIndex, price: price)],
-                  isExtended: lineSubType == .ray, panelPosition: 0, revealTick: 7,
+                  isExtended: lineSubType == .ray, panelPosition: panelPosition, revealTick: 7,
                   period: period, lineSubType: lineSubType, lineStyle: lineStyle,
                   thickness: thickness, colorToken: colorToken, labelMode: labelMode,
                   locked: locked, text: text, fontSize: fontSize,
-                  textColorToken: textColorToken, textForm: .plain, tailAnchor: nil)
+                  textColorToken: textColorToken, textForm: textForm, tailAnchor: tailAnchor)
 }
 
 /// 造一个携带指定 lossy 集的引擎（D61 未来枚举值门需要 `loadedDrawingsLossy` 非空）。

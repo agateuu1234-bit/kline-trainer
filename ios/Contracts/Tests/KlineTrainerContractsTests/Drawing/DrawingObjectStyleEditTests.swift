@@ -136,8 +136,14 @@ struct DrawingObjectStyleEditTests {
 
     @Test("只动 5 样式字段 + 两个派生：其余字段逐字段原样拷贝")
     func copiesEveryOtherFieldVerbatim() throws {
-        let old = makeStyledHLine(id: "a", thickness: 2, locked: true, text: "hello", fontSize: 21)
-        let new = try #require(old.withStyle(style(.straight, .dash1, 4, .green, .right)))
+        // fix round 1（Important 1+2 / Minor 3）：lineSubType 与 old 不同 + panelPosition/period/textForm/
+        // tailAnchor 全传非默认值，否则这几处「原样拷贝」断言对任何实现（包括丢字段的坏实现）都恒真。
+        let old = makeStyledHLine(id: "a", lineSubType: .straight, thickness: 2, locked: true,
+                                  text: "hello", fontSize: 21,
+                                  textForm: .borderFilled,
+                                  tailAnchor: DrawingAnchor(period: .weekly, candleIndex: 9, price: 42),
+                                  panelPosition: 2, period: .weekly)
+        let new = try #require(old.withStyle(style(.ray, .dash1, 4, .green, .right)))
         #expect(new.id == old.id)
         #expect(new.toolType == old.toolType)
         #expect(new.anchors == old.anchors)
@@ -150,6 +156,7 @@ struct DrawingObjectStyleEditTests {
         #expect(new.textForm == old.textForm)
         #expect(new.tailAnchor == old.tailAnchor)
         // 5 样式字段确实换了
+        #expect(new.lineSubType == .ray)
         #expect(new.lineStyle == .dash1)
         #expect(new.thickness == 4)
         #expect(new.colorToken == .green)
