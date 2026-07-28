@@ -1134,8 +1134,7 @@ extension TrainingEngine {
     /// `routeDrawingCommit` 又吞返回值 → 静默丢线。故把横规则限定在 `.horizontal`；非水平工具的
     /// 子类矩阵属 P1c、不在本期此横规则内（helper 头注同一 YAGNI 立场），此期不产非水平线故行为等价。
     private func isRenderableSubType(_ d: DrawingObject) -> Bool {
-        guard d.toolType == .horizontal else { return true }   // 非水平工具：横规则不适用（P1c 再定其矩阵）
-        return DrawingStyleAvailability.horizontalLineSubTypeEnabled(d.lineSubType)
+        DrawingStyleAvailability.isRenderableSubType(d.lineSubType, toolType: d.toolType)
     }
 
     /// `deleteDrawing(at:)` 的 `reviewDrawings` 对应版本（复盘侧删除）。越界 trap，同风格。
