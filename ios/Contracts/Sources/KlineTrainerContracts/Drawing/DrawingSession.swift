@@ -13,7 +13,7 @@
 // 跨平台：@MainActor + @Observable，仅依赖 Models 值类型；无 UIKit → host swift test 全覆盖。
 // D44（见 plan）：pending 锚由本容器直接持有，**不再**经 DrawingToolManager（toggle 非 set / enabledTools
 //   闸门会让 addAnchor 撞 precondition / completedDrawings 重复增长三处硬伤）。DrawingObject 的
-//   **唯一写入点**语义（isExtended 由 lineSubType 派生）在 commitPending 内原样保留。
+//   派生/归一化/可用性语义（D59，切片2）经 `withStyle` 统一把关（语义单点），commitPending 不再自行派生。
 
 import Observation
 import CoreGraphics   // ← 1a-iii Task2：PanelShield.rect(CGRect)
@@ -139,11 +139,11 @@ public final class DrawingSession {
         pendingAnchorPanel = panel
     }
 
-    /// pending → DrawingObject。**DrawingObject 的唯一写入点**：isExtended 从 lineSubType 派生
-    /// （不变量 isExtended == (lineSubType == .ray)；矛盾数据不可表达）。
-    /// **1a-iii：5 样式字段全部从 defaultStyle 原子读取**——在 append 之前就灌满，
-    /// 让 routeDrawingCommit 的 append 成为 drawings 的唯一改动（count 触发一次即完整落盘，
-    /// 杜绝「先 append 默认样式、再原地改样式」的提交后套用不落盘缺陷，codex branch-R1/R2）。
+    /// pending → DrawingObject。**DrawingObject 的唯一写入点**：先造裸对象（锚/工具/面板位，与样式无关），
+    /// 再经 `withStyle` 统一派生与归一化（D59 切片2语义单点：isExtended 派生 / textColorToken 条件派生 /
+    /// labelMode 归一化 / lineSubType 可用性全部由 `withStyle` 承担，本函数不再自行派生任何字段）。
+    /// **返回 nil = 该默认样式对本次 toolType 语义上不成立**（如水平线的 `.segment`，或越域 thickness）——
+    /// 调用方（`ChartContainerView.handleDrawingTap`）据此不提交，本次画线数据丢弃、不落库。
     /// period 不传 → 由 DrawingObject.init 取 anchors.first.period（D29 周期绑定，不得回退）。
     /// revealTick 由 engine.routeDrawingCommit 盖真值。
     /// **D38：提交后只清 pending —— 工具与会话保持不变（连续画线）**。

@@ -167,6 +167,7 @@ struct DrawingObjectStyleEditTests {
     //    本 Task 结束时 `DrawingSession.commitPending` 里那份 `isExtended: s.lineSubType == .ray` 还在
     //    （它到 Task 2 才被 withStyle 取代）→ 守卫此刻必红，破坏「每 task 各自绿再 commit」的节奏。
     //    守卫必须跟着「最后一份重复语义被消灭」的那个 Task 落地。
+    //    （已于 Task 2 落地，即下方这条守卫。）
 
     @Test("N5 源码守卫：D59 四条语义单点 + 写入边界不得直接套横规则")
     func fourSemanticsSingleSource() throws {
