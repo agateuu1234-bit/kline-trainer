@@ -167,4 +167,74 @@ struct DrawingObjectStyleEditTests {
     //    本 Task 结束时 `DrawingSession.commitPending` 里那份 `isExtended: s.lineSubType == .ray` 还在
     //    （它到 Task 2 才被 withStyle 取代）→ 守卫此刻必红，破坏「每 task 各自绿再 commit」的节奏。
     //    守卫必须跟着「最后一份重复语义被消灭」的那个 Task 落地。
+
+    @Test("N5 源码守卫：D59 四条语义单点 + 写入边界不得直接套横规则")
+    func fourSemanticsSingleSource() throws {
+        let contracts = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()   // ios/Contracts
+        // 扫**全部 target**（codex plan-R8-F1）：本包有 KlineTrainerContracts / KlineTrainerPersistence 两个，
+        // 只扫前者会漏掉跨 target 的第二份语义。实测后者不含这四条语义的任何表达式，故计数不变。
+        let root = contracts.appendingPathComponent("Sources")
+        let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+        #expect(!files.isEmpty)                                  // 先证明真的扫到文件（防路径写错→恒过）
+        /// **复用 Task 2 建的共享扫描器**（codex plan-R13-F3）：逐行 substring 会漏掉
+        /// `lineSubType ==\n.ray` / `textColorToken ==\n colorToken` 这种普通换行写法 →
+        /// 第二份实现可以静默存在而守卫仍绿。squeeze 后匹配与排版无关，且注释/字符串已被剥掉。
+        /// 返回 `[(文件名, 出现次数)]`，只列出现过的文件。
+        func hits(_ needle: String, excluding excluded: Set<String> = []) throws -> [(file: String, count: Int)] {
+            try files.filter { !excluded.contains($0.lastPathComponent) }.compactMap { f in
+                let s = try squeezedText(String(contentsOf: f, encoding: .utf8))
+                let n = s.components(separatedBy: squeeze(needle)).count - 1
+                return n > 0 ? (f.lastPathComponent, n) : nil
+            }
+        }
+        func total(_ needle: String, excluding excluded: Set<String> = []) throws -> Int {
+            try hits(needle, excluding: excluded).map(\.count).reduce(0, +)
+        }
+        // ⚠️ `DrawingToolManager.swift` 是 1a-iv 交接①记录在案的**死代码**（spec §1.2 明令本期不动、
+        //    §8 #5 列为已知限制），它里面那份 `isExtended: lineSubType == .ray` 不参与任何活路径 →
+        //    从计数中排除，并在此写明理由（不排除的话本守卫会因「不许改的代码」永远红）。
+        let dead: Set<String> = ["DrawingToolManager.swift"]
+        // 派生①②：活代码里各恰好一处，且都在 withStyle 所在文件
+        let ray = try hits("lineSubType == .ray", excluding: dead)
+        #expect(try total("lineSubType == .ray", excluding: dead) == 1, "派生① 不止一处：\(ray)")
+        #expect(ray.allSatisfy { $0.file == "DrawingObjectStyleEdit.swift" })
+        let txt = try hits("textColorToken == colorToken", excluding: dead)
+        #expect(try total("textColorToken == colorToken", excluding: dead) == 1, "派生② 不止一处：\(txt)")
+        #expect(txt.allSatisfy { $0.file == "DrawingObjectStyleEdit.swift" })
+        // 归一化 / 可用性：**规则实现**单点（横线规则体只有一份，且都在 DrawingStyleAvailability.swift），
+        // 调用点允许多处（面板灰态/即时规整是同一份规则的消费者，非第二份规则——SD-2b）。
+        #expect(try total("func horizontalLabelModeEnabled(") == 1)          // 横线 labelMode 规则体
+        #expect(try hits("func horizontalLabelModeEnabled(").allSatisfy { $0.file == "DrawingStyleAvailability.swift" })
+        #expect(try total("func horizontalLineSubTypeEnabled(") == 1)        // 横线 subType 规则体
+        #expect(try hits("func horizontalLineSubTypeEnabled(").allSatisfy { $0.file == "DrawingStyleAvailability.swift" })
+        // 归一化的两个重载（横线版 + tool-aware 版）都只许住在 DrawingStyleAvailability.swift
+        #expect(try total("func normalizedLabelMode(") == 2)
+        #expect(try hits("func normalizedLabelMode(").allSatisfy { $0.file == "DrawingStyleAvailability.swift" })
+        // 写入边界确实归一化了，且**走 tool-aware 那个重载**（codex plan-R2-F2：无条件套横规则会改写 .trend 的 labelMode）
+        #expect(try hits("normalizedLabelMode(current:").contains { $0.file == "DrawingObjectStyleEdit.swift" })
+        // ⚠️ 锚点必须取**整段调用形状**（Opus-F1）：只锚 `toolType: toolType` 是**恒真**的——
+        //    `withStyle` 里 `DrawingObject(id: id, toolType: toolType, anchors: anchors, …)` 这行构造器
+        //    自己就满足它，与调哪个重载无关 → 换回两参横线版也不会红。
+        #expect(try hits("lineSubType: s.lineSubType, toolType: toolType")
+                    .contains { $0.file == "DrawingObjectStyleEdit.swift" },
+                "withStyle 必须调 tool-aware 的三参重载（两参横线版会把 .trend 的 labelMode 按横线规则改写）")
+        // **核心**（PR-1 over-reject 真 bug 的根因形状）：两个写入边界**不得直接套横规则**，
+        // 必须经共享单点 `isRenderableSubType(_:toolType:)`——横规则只对水平工具成立，直接套会对
+        // 非水平工具（P1c 的 .trend 线段）静默拒掉合法数据。
+        let rawHorizontalRule = try hits("horizontalLineSubTypeEnabled(")
+        #expect(!rawHorizontalRule.contains { $0.file == "TrainingEngine.swift" },
+                "append 家族必须走 isRenderableSubType 共享单点：\(rawHorizontalRule)")
+        #expect(!rawHorizontalRule.contains { $0.file == "DrawingObjectStyleEdit.swift" },
+                "withStyle 必须走 isRenderableSubType 共享单点：\(rawHorizontalRule)")
+        // labelMode 侧同理（codex plan-R2-F2）：写入边界不得直接套横线 labelMode 规则
+        let rawLabelRule = try hits("horizontalLabelModeEnabled(")
+        #expect(!rawLabelRule.contains { $0.file == "DrawingObjectStyleEdit.swift" },
+                "withStyle 必须走 tool-aware 归一化，不得直接套横线 labelMode 规则：\(rawLabelRule)")
+        let shared = try hits("isRenderableSubType(")
+        #expect(shared.contains { $0.file == "TrainingEngine.swift" })
+        #expect(shared.contains { $0.file == "DrawingObjectStyleEdit.swift" })
+    }
 }

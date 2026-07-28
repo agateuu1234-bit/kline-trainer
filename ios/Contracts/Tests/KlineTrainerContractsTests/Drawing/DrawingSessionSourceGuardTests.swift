@@ -162,9 +162,11 @@ struct DrawingSessionSourceGuardTests {
     func atomicStyleConstruction() throws {
         let s = try source(drawingSession)
         #expect(s.contains("func commitPending("))       // 先证真读到文件（防路径错→空→假绿）
+        // 切片2（D59）：5 样式字段不再在这里逐个抄，改为整体过 withStyle（语义闸单点）。
+        #expect(s.contains("base.withStyle(s)"))
         for f in ["lineSubType: s.lineSubType", "lineStyle: s.lineStyle", "thickness: s.thickness",
-                  "colorToken: s.colorToken", "labelMode: s.labelMode"] {
-            #expect(s.contains(f))                        // commitPending 单初始化原子灌满
+                  "colorToken: s.colorToken", "labelMode: s.labelMode"] {          // 全 5 个（Opus-F11）
+            #expect(!s.contains(f), "commitPending 不得再自行灌样式字段（第二份语义会漂）：\(f)")
         }
         let e = try source(engine)
         for f in ["lineSubType: drawing.lineSubType", "lineStyle: drawing.lineStyle",

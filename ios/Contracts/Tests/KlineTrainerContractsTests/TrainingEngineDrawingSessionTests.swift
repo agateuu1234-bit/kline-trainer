@@ -18,33 +18,9 @@ struct TrainingEngineDrawingSessionTests {
     }
 
     // MARK: N23a 源码守卫 helper（Task 5：append 家族信任边界，调用图 D67）
-
-    /// ios/Contracts 目录（由本文件路径回推：Tests/KlineTrainerContractsTests/<本文件> → 上溯 3 层，
-    /// 同 DrawingSessionSourceGuardTests 手法；本文件比它少一层子目录，故少削一层）。
-    private var contractsDir: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()    // KlineTrainerContractsTests
-            .deletingLastPathComponent()    // Tests
-            .deletingLastPathComponent()    // ios/Contracts
-    }
-
-    private var trainingEnginePath: String {
-        contractsDir.appendingPathComponent(
-            "Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift"
-        ).path
-    }
-
-    /// Sources/KlineTrainerContracts 下全部 .swift 文件的绝对路径（含 TrainingEngine.swift 自身——
-    /// 调用图守卫需要看到 setReviewDrawings 在引擎内部委托调 setReviewLossy 这类包内调用）。
-    private func allSwiftFilesUnderSources() throws -> [String] {
-        let root = contractsDir.appendingPathComponent("Sources/KlineTrainerContracts")
-        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else {
-            return []
-        }
-        return enumerator.compactMap { $0 as? URL }
-            .filter { $0.pathExtension == "swift" }
-            .map { $0.path }
-    }
+    // PR-2 Task 2：`contractsDir` / `allSwiftFilesUnderSources()` / `trainingEnginePath` 三个 suite 私有版本
+    // 已删除，改用 SourceGuardScanner.swift 里的共享顶层函数（`contractsDirForGuards` / `allSwiftFilesUnderSources()` /
+    // `trainingEnginePath`）——同一份判据两个 suite 共用，不许再抄局部副本。
 
     @Test("D42：开画线模式 → **两个面板**同时进 .drawing（互斥模型已退役）")
     func toggleOnArmsBothPanels() {

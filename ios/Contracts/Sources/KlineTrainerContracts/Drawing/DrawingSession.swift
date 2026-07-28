@@ -159,22 +159,16 @@ public final class DrawingSession {
             return nil
         }
         let s = defaultStyle
-        let drawing = DrawingObject(
+        // D59（切片2）：样式语义闸**单点** —— 派生①②/归一化/可用性全部由 withStyle 承担，
+        // 本函数不再自己派生任何字段（否则就有第二份语义，面板归一化一改就漂）。
+        // 基对象只带「与样式无关」的部分：锚 / 工具 / 面板位 / period（由 init 从 anchors 取，D29）。
+        let base = DrawingObject(
             toolType: tool,
             anchors: pendingAnchors,
-            isExtended: s.lineSubType == .ray,
+            isExtended: false,          // 占位：随后由 withStyle 的派生① 覆盖
             panelPosition: panelPosition,
-            revealTick: 0,
-            lineSubType: s.lineSubType,
-            lineStyle: s.lineStyle,
-            thickness: s.thickness,
-            colorToken: s.colorToken,
-            labelMode: s.labelMode,
-            // codex plan-R7-medium：价格标签渲染用 textColorToken（DrawingLabelLayout.labelContent:75），
-            // 本期卡片只有一个「颜色」控件（线色）→ 标签跟线同色，否则蓝线配橙标签。
-            // （独立「字色」是 P3 的标注文字工具，本期不引入。）
-            textColorToken: s.colorToken)
+            revealTick: 0)              // 真值由 engine.routeDrawingCommit 盖
         discardPendingAnchors()
-        return drawing
+        return base.withStyle(s)        // nil = 该样式语义不成立（水平线 .segment）→ 不提交
     }
 }
