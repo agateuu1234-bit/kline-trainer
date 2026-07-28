@@ -741,4 +741,125 @@ struct TrainingEngineDrawingSessionTests {
         // setReviewDrawings 零 Sources/ 调用点（其定义 :315 委托 setReviewLossy，被 defExclude 排除；测试经 @testable 调、不在 Sources/）
         #expect(try callSites(callPattern: "setReviewDrawings(", defExclude: "func setReviewDrawings(").isEmpty)
     }
+
+    // MARK: 切片2 Task 3（D50/D58 引擎支/D62/D66）：updateDrawingStyle
+
+    private func styleFixture(_ sub: LineSubType = .straight, _ ls: LineStyle = .solid, _ th: Int = 1,
+                              _ c: DrawingColorToken = .orange, _ lm: LabelMode = .hidden) -> DrawingDefaultStyle {
+        var s = DrawingDefaultStyle()
+        s.lineSubType = sub; s.lineStyle = ls; s.thickness = th; s.colorToken = c; s.labelMode = lm
+        return s
+    }
+
+    @Test("N2: updateDrawingStyle 只动 5 样式字段 + 两个派生，其余逐字段不变；revision +1")
+    @MainActor func updateTouchesOnlyStyleFields() throws {
+        let e = TrainingEngine.preview()
+        let old = makeStyledHLine(id: "A", thickness: 1, text: "note", fontSize: 21)
+        #expect(e.appendDrawing(old) == true)
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 4, .green, .right)) == true)
+        let now = try #require(e.drawings.first { $0.id == "A" })
+        #expect(e.drawingsRevision == rev + 1)
+        // 变的
+        #expect(now.lineStyle == .dash1); #expect(now.thickness == 4)
+        #expect(now.colorToken == .green); #expect(now.labelMode == .right)
+        // 不变的（逐字段）
+        #expect(now.id == old.id); #expect(now.anchors == old.anchors); #expect(now.period == old.period)
+        #expect(now.panelPosition == old.panelPosition); #expect(now.revealTick == old.revealTick)
+        #expect(now.locked == old.locked); #expect(now.text == old.text); #expect(now.fontSize == old.fontSize)
+        #expect(now.textForm == old.textForm); #expect(now.tailAnchor == old.tailAnchor)
+    }
+
+    @Test("N3: updateDrawingStyle 对不存在 id → false、drawings 逐字段不变、revision 不递增")
+    @MainActor func updateUnknownIdIsNoop() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "ZZZ", style: styleFixture(.straight, .dash1, 4)) == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("N12a: 引擎层恒开门——水平线改 .segment 被拒，该线逐字段不变、revision 不递增")
+    @MainActor func updateRejectsUnrenderableSubType() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", lineSubType: .straight)) == true)
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.segment)) == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("N5 行为 + N12d: 直调（绕开面板）传未归一化的 (ray,.left) → 结果 .hidden、isExtended 派生成立")
+    @MainActor func updateNormalizesAndDerivesAtWriteBoundary() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", lineSubType: .straight, labelMode: .left)) == true)
+        #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.ray, .solid, 1, .orange, .left)) == true)
+        let now = try #require(e.drawings.first { $0.id == "A" })
+        #expect(now.labelMode == .hidden)                    // (ray,.left) 不可表达
+        #expect(now.isExtended == true)                      // 派生①
+        // 改回 .straight → isExtended 回 false
+        #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.straight)) == true)
+        #expect(e.drawings.first { $0.id == "A" }?.isExtended == false)
+    }
+
+    @Test("N21c(update): id 匹配 ≥2 条 → fail，不改任何一条、revision 不递增（D66，绝不打第一条）")
+    @MainActor func updateFailsOnAmbiguousId() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", thickness: 1)) == true)
+        // 绕过 append 的唯一性门，直接注入第二条同 id（模拟坏状态）
+        e.injectDrawingsForTesting(e.drawings + [makeStyledHLine(id: "A", thickness: 2, candleIndex: 4)])
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 5)) == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("D66: 空 id 恒 fail（写入边界不变量：id 非空）")
+    @MainActor func updateRejectsEmptyId() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "", style: styleFixture(.straight, .dash1)) == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("SD-7/D34 纵深防御: 复盘模式下 updateDrawingStyle 恒 fail（drawings = 已归档 record 的原训练线）")
+    @MainActor func updateRefusedInReviewMode() throws {
+        let e = TrainingEngine.preview(mode: .review)
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", thickness: 1)) == true)   // 造出「归档线」状态
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 5)) == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+        // 反向对照：同样的调用在 normal 模式成功（防「一律拒绝」）
+        let n = TrainingEngine.preview(mode: .normal)
+        #expect(n.appendDrawing(makeStyledHLine(id: "A", thickness: 1)) == true)
+        #expect(n.updateDrawingStyle(id: "A", style: styleFixture(.straight, .dash1, 5)) == true)
+    }
+
+    // MARK: 源码守卫扫描器 —— **Task 2 已建**（`Tests/.../SourceGuardScanner.swift` 的顶层函数），本文件直接调用：
+    //   `squeeze` / `squeezedText` / `scanCode` / `consumeStringLiteral` / `squeezedSource` /
+    //   `callCount(inSqueezed:pattern:)` / `callSiteCount(_:)` / `squeezedContains(_:_:)` /
+    //   `filesMentioning(_:)` / `expectEngineInternalOnly(_:)`（同 test module 顶层函数，无需再声明）。
+    //   ⚠️ **不得**在本文件另写一份扫描逻辑——同族判据留两档正是本计划一路在修的毛病。
+
+    @Test("N15: updateDrawingStyle 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
+    func updateDrawingStyleTrustBoundary() throws {
+        try expectEngineInternalOnly("updateDrawingStyle(id:")   // 存在 + 非 public/package/open（D62）
+        // ⚠️ 本切片是引擎写入面，UI 编辑路由属 PR-4 → 现在**零调用点**。
+        //    PR-4 接线时必须把本断言改成：恰好 1 处、且该文件是 UI 编辑路由、且路由在调用前先验
+        //    HorizontalLineTool.visibleGeometry（D58 候选预检 + D65 当前门）。谁不补几何门就加调用点，
+        //    这条当场红——这就是本守卫存在的意义（fail-closed forcing function）。
+        let sites = try callSiteCount("updateDrawingStyle(")
+        #expect(sites.isEmpty, "updateDrawingStyle 出现了非预期调用点：\(sites)")
+        // **更强的一层（codex plan-R5-F1）**：连**方法引用**（`let f = engine.updateDrawingStyle`）都要挡——
+        // 那种写法源码里不出现 `updateDrawingStyle(`，只数调用 pattern 会放过它，而几何门**只**靠
+        // 「唯一调用点在已验几何的 UI 路由」这条守卫成立。故按**标识符的文件作用域**钉：
+        // 本切片只许出现在引擎自身文件；PR-4 接线时把路由文件加进白名单（**只加那一个**）。
+        let mentions = try filesMentioning("updateDrawingStyle")
+        #expect(mentions.allSatisfy { $0.contains("TrainingEngine.swift") },
+                "updateDrawingStyle 被引擎以外的文件提到（含方法引用）：\(mentions)")
+    }
 }
