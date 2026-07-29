@@ -32,9 +32,12 @@ public enum DrawingStyleAvailability {
     /// 该工具的样式语义是否被本构建理解 → **能否编辑**（codex plan-R11-F1）。
     /// ⚠️ **复用既有单一真相 `DrawingToolType.implemented`**（`Models.swift:50`），**绝不另立第二份登记表**
     ///   （codex plan-R12-F2：我上一稿真的另写了一个 `implementedToolTypes`，那会在 P1c 打开新工具时漂移成
-    ///   「画得出、样式控件却永远不生效」）。该集合已被激活门（`TrainingEngine:1259`）与落锚阈值
-    ///   （`DefaultDrawingInputController:43`，其注释原文「单一真相派生」）消费 —— 编辑面跟着它走，
-    ///   P1c 只要照常把新工具加进 `DrawingToolType.implemented`，可编辑性**自动**跟上，无需记住第二处。
+    ///   「画得出、样式控件却永远不生效」）。该集合已被激活门（`TrainingEngine:1342`）与落锚阈值
+    ///   （`DefaultDrawingInputController:43`，其注释原文「单一真相派生」）消费。
+    ///   `DrawingToolType.implemented` 管**能不能画**，`toolsWithStyleMatrix`（上面）管**本构建懂不懂它的
+    ///   样式语义**——两件事，P1c 落新工具要**两处都加**：只加前者 → 画得出但样式控件不生效，这是
+    ///   fail-closed 的有意设计（见上面 `toolsWithStyleMatrix` 头注），且有 `implemented == toolsWithStyleMatrix`
+    ///   漂移告警测试（`DrawingObjectStyleEditTests`）当场红，不会悄悄漏掉。
     /// ⚠️ **与 `isRenderableSubType`（append 侧）刻意不对称，别"统一"掉**：
     ///   - **append = 数据进来**：拒绝 = 静默丢掉用户/高版本已有的线 → 必须宽松（PR-1 over-reject 的教训）；
     ///   - **编辑 = 改写已有数据**：`DrawingToolType` 把 `.trend`/`.text` 等目标工具**已声明为已知 case**，

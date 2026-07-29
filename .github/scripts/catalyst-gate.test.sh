@@ -440,12 +440,13 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   累积漂移 riding 在 ±30 内、未同步），本 PR 真实总数 1574 已漂出 1532±30（+42），故按 G7 维护规则
 #   catalyst-total-baseline.txt 1532→1574，并用本次一份**真** fresh Catalyst 构建日志
 #   （1574 tests / 199 suites，禁手打伪造行）重裁 pass-main-current.log + 下方回显 1541→1574。
-#   1b-i 切片2（PR-2，写入边界 API）：本 PR 净增 51 条 host-pure 测试（withStyle 语义闸 9 / 共享源码守卫
+#   1b-i 切片2（PR-2，写入边界 API）：本 PR 新增 49 条 host-pure 测试（withStyle 语义闸 9 / 共享源码守卫
 #   扫描器自检 6 + N5 守卫 1 / updateDrawingStyle 引擎门 8 / 两道耐久性门红绿验 9 / deleteDrawing(id:) 11 /
 #   Task6 签名单射 1，另含 fix 轮次的判别力补强），**零新增 UIKit-gated 测试** → uikit 基线仍 59 不动；
-#   真实总数 1574→1625 已漂出 1574±30（+51），故按 G7 维护规则同步 catalyst-total-baseline.txt 1574→1625，
-#   并用本次一份**真** fresh Catalyst 日志（1625 tests / 202 suites，逐行取自真日志、含 xcodebuild 的
-#   XCTestOutputBarrier 插花未修剪，禁手打伪造行）重裁 pass-main-current.log + 下方回显 1574→1625。
+#   真实总数 1574→1625（+51），其中 49 条为本 PR 新增、另 2 条为旧基线未同步的既有漂移（riding 在
+#   ±30 容差内，非本 PR 引入）；已漂出 1574±30，故按 G7 维护规则同步 catalyst-total-baseline.txt
+#   1574→1625，并用本次一份**真** fresh Catalyst 日志（1625 tests / 202 suites，逐行取自真日志、含
+#   xcodebuild 的 XCTestOutputBarrier 插花未修剪，禁手打伪造行）重裁 pass-main-current.log + 下方回显 1574→1625。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
 if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1625" <<<"$out"; then

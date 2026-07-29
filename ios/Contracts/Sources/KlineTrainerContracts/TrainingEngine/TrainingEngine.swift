@@ -1092,7 +1092,9 @@ extension TrainingEngine {
     ///   ① id 非空且**恰好**匹配一条（D66）
     ///   ② 目标 `locked == false`（D60）
     /// ⚠️ **不含**未来未知枚举值分量（D61）：删整条不产生"部分抹除"（raw 随之整体移除），是用户主动处置，
-    ///    与"顺手抹字节"性质不同 —— 高版本线选得中、改不动、但删得掉。
+    ///    与"顺手抹字节"性质不同 —— **未锁定的**高版本线选得中、改不动、但删得掉。`locked` + 携带未来数据
+    ///    这个角落（既改不动也删不掉，`finalize` 会因该线仍带未来数据而 throw、这一局归不了档）本 PR
+    ///    不解决——本 PR 之前更差（根本没有删除 API），留待 PR-4/spec 在删除 UI 落地时一并处置。
     @discardableResult
     func deleteDrawing(id: DrawingID) -> Bool {
         guard flow.mode != .review else { return false }   // ⓪（D34 纵深防御，SD-7）

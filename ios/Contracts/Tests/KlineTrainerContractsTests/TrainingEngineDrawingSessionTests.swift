@@ -862,6 +862,9 @@ struct TrainingEngineDrawingSessionTests {
         // 「唯一调用点在已验几何的 UI 路由」这条守卫成立。故按**标识符的文件作用域**钉：
         // 本切片只许出现在引擎自身文件；PR-4 接线时把路由文件加进白名单（**只加那一个**）。
         let mentions = try filesMentioning("updateDrawingStyle")
+        // 自足断言：`mentions` 若为空数组，下面 `allSatisfy` 恒真通过——扫描器坏掉/扫描根为空也测不出来。
+        // 先钉「确实扫到了东西」（今天必非空：至少引擎自身这一处），再判"扫到的都在白名单里"。
+        #expect(!mentions.isEmpty, "扫描器返回空——`updateDrawingStyle` 连引擎自身都没扫到，守卫已失效")
         // fix round 1（Minor 2）：`.contains("TrainingEngine.swift")` 是路径子串匹配——任何叫
         // `XxxTrainingEngine.swift` 的文件都会被误判进白名单，绕过守卫。改成精确尾匹配
         // （目录 + 文件名都钉死），才真的只放行引擎自身这一个文件。
@@ -1011,6 +1014,9 @@ struct TrainingEngineDrawingSessionTests {
         // 引擎自身文件 + `DrawingToolManager.swift`（1a-iv 交接①在案的**死代码**，spec §1.2/§8#5 明令本期不动，
         // 它有自己的同名 `deleteDrawing(at:)`，与引擎写入面无关）。PR-4 接线时**只**把删除路由文件加进白名单。
         let mentions = try filesMentioning("deleteDrawing")
+        // 自足断言：`mentions` 若为空数组，下面 `allSatisfy` 恒真通过——扫描器坏掉/扫描根为空也测不出来。
+        // 先钉「确实扫到了东西」（今天必非空：引擎自身 + `DrawingToolManager` 两处），再判"扫到的都在白名单里"。
+        #expect(!mentions.isEmpty, "扫描器返回空——`deleteDrawing` 连引擎自身都没扫到，守卫已失效")
         #expect(mentions.allSatisfy {
             $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") || $0.hasSuffix("/Drawing/DrawingToolManager.swift")
         }, "deleteDrawing 被白名单以外的文件提到（含方法引用）：\(mentions)")
