@@ -151,4 +151,59 @@ struct DrawingEditDurabilityGateTests {
         #expect(now.colorToken == .green)
         #expect(now.textColorToken == .blue)
     }
+
+    // MARK: 已知死角（不修，钉现状）—— locked + 未来数据 = 既改不动也删不掉
+
+    /// ⚠️ 本测试钉的是**已知死角的当前行为**，不是期望的最终行为（user 2026-07-27 裁决）。
+    ///
+    /// 死角形状：一条线同时 `locked == true` 且携带本构建不认识的未来数据（未来顶层字段 / 已知 key
+    /// 的未来枚举值）——`updateDrawingStyle` 因门②(locked) 拒它，`deleteDrawing(id:)` 同样因门②(locked)
+    /// 拒它（删除面不查未来数据那道门，但 locked 门两边都查）。而 `TrainingSessionCoordinator` 的
+    /// finalize 判据（`:733-736`）对存活线有未来字段/未来枚举值一律 `throw .dbCorrupted`。
+    /// 合起来 = 这一局既清不掉这条线、也归不了档。
+    ///
+    /// 本 PR 不修，理由（精炼版，详见 PR 描述）：
+    /// 1. 本构建**产不出** `locked == true`（`Sources/` 里没有任何地方写 `DrawingObject.locked = true`；
+    ///    `GestureClassifiers` 的 `st.locked` 是双指手势状态机字段，与本模型无关）——只能从更高版本解码进来。
+    /// 2. `updateDrawingStyle`/`deleteDrawing` 目前在 `Sources/` 中**零调用点**（UI 路由属 PR-4）——今天
+    ///    用户不可达。
+    /// 3. **不是本 PR 引入**：main（`f3f67da`）上只有零调用点的 `deleteDrawing(at:)`，那时这类线同样清不掉。
+    /// 4. spec 已把解药派给 **1b-ii**：`setDrawingLocked(id:locked:)` 是唯一被允许改 `locked` 的入口
+    ///    （spec `:757`），且必须做 **raw-preserving 单字段 merge**（只改 `locked` 一个 key、其余从旧 raw
+    ///    逐字保留），不能照抄本期「整条拒绝」的形状。
+    ///
+    /// ⚠️⚠️ **交接给 1b-ii**：落地 `setDrawingLocked(id:locked:)` 时，这条线一旦被解锁，
+    /// `deleteDrawing(id:)` 就该对它放行（未来数据那道门本就不归删除面管）——**本测试「delete == false」
+    /// 那半条断言必须翻转成 true**，否则说明 `setDrawingLocked` 没把 `locked` 门在下游落到实处。
+    @Test("N14h 已知死角（不修，钉现状）: locked + 未来数据的线 —— 今天既改不动也删不掉，finalize 门仍会命中")
+    func lockedFutureDataLineIsCurrentlyUnrecoverable() throws {
+        // 分量一：locked + 未来**顶层字段**（`futureX`，本构建不认识这个 key）
+        let lockedFutureFieldRaw = #"{"id":"LA","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":true,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain","futureX":9}"#
+        let eA = makeEngineWithLossy(try lossyFromRaw(lockedFutureFieldRaw))
+        #expect(eA.drawings.count == 1)
+        let beforeA = eA.drawings
+        let revA = eA.drawingsRevision
+        #expect(eA.updateDrawingStyle(id: "LA", style: style()) == false)      // 门②(locked) 挡编辑
+        expectDrawingsUnchanged(eA, beforeA, revisionBefore: revA)
+        #expect(eA.deleteDrawing(id: "LA") == false)                          // 门②(locked) 同样挡删除
+        #expect(eA.drawings.contains { $0.id == "LA" })                       // 线仍在
+        #expect(eA.drawingsRevision == revA)                                  // revision 未动
+        // finalize 判据仍会命中：这一局会被 finalize 门 fail-closed 拦下（`TrainingSessionCoordinator:733-736`）
+        let reconciledA = try eA.loadedDrawingsLossy.reconciled(currentKnown: eA.drawings)
+        #expect(reconciledA.hasKnownFutureFields(liveIds: Set(eA.drawings.map(\.id))) == true)
+
+        // 分量二：locked + 已知 key 的未来**枚举值**（`colorToken:"futureNeon"`）
+        let lockedFutureEnumRaw = #"{"id":"LB","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"futureNeon","labelMode":"hidden","locked":true,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}"#
+        let eB = makeEngineWithLossy(try lossyFromRaw(lockedFutureEnumRaw))
+        #expect(eB.drawings.count == 1)
+        let beforeB = eB.drawings
+        let revB = eB.drawingsRevision
+        #expect(eB.updateDrawingStyle(id: "LB", style: style()) == false)      // 门②(locked) 挡编辑
+        expectDrawingsUnchanged(eB, beforeB, revisionBefore: revB)
+        #expect(eB.deleteDrawing(id: "LB") == false)                          // 门②(locked) 同样挡删除
+        #expect(eB.drawings.contains { $0.id == "LB" })                       // 线仍在
+        #expect(eB.drawingsRevision == revB)                                  // revision 未动
+        let reconciledB = try eB.loadedDrawingsLossy.reconciled(currentKnown: eB.drawings)
+        #expect(reconciledB.hasKnownFutureEnumValues(liveIds: Set(eB.drawings.map(\.id))) == true)
+    }
 }
