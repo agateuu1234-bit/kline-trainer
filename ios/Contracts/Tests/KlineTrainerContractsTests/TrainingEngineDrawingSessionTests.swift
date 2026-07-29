@@ -818,7 +818,12 @@ struct TrainingEngineDrawingSessionTests {
     @Test("D66: 空 id 恒 fail（写入边界不变量：id 非空）")
     @MainActor func updateRejectsEmptyId() throws {
         let e = TrainingEngine.preview()
-        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        // fix round 1（Important 1）：夹具里若只有 id "A"，查 id "" 必然 matches.count==0，
+        // 被下一道唯一性门挡下——测试通过与否跟 `guard !id.isEmpty` 这半截无关（恒真）。
+        // 生产入口造不出 id=="" 的线，但 `Models.swift` 解码是 `decodeIfPresent(...) ?? ""`，
+        // 缺 id 就得到空串——真实存在这类坏数据，故用 DEBUG hook 直接注入一条 id=="" 的线，
+        // 使「没有这道门」时 matches.count==1 会真的走到底、真的改写它。
+        e.injectDrawingsForTesting([makeStyledHLine(id: "")])   // 生产入口造不出，正是 hook 的用途
         let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.updateDrawingStyle(id: "", style: styleFixture(.straight, .dash1)) == false)
@@ -859,7 +864,10 @@ struct TrainingEngineDrawingSessionTests {
         // 「唯一调用点在已验几何的 UI 路由」这条守卫成立。故按**标识符的文件作用域**钉：
         // 本切片只许出现在引擎自身文件；PR-4 接线时把路由文件加进白名单（**只加那一个**）。
         let mentions = try filesMentioning("updateDrawingStyle")
-        #expect(mentions.allSatisfy { $0.contains("TrainingEngine.swift") },
+        // fix round 1（Minor 2）：`.contains("TrainingEngine.swift")` 是路径子串匹配——任何叫
+        // `XxxTrainingEngine.swift` 的文件都会被误判进白名单，绕过守卫。改成精确尾匹配
+        // （目录 + 文件名都钉死），才真的只放行引擎自身这一个文件。
+        #expect(mentions.allSatisfy { $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") },
                 "updateDrawingStyle 被引擎以外的文件提到（含方法引用）：\(mentions)")
     }
 }
