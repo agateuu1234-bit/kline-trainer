@@ -26,7 +26,7 @@ public func canonicalDrawingsSignature(_ drawings: [DrawingObject]) -> String {
             d.colorToken.rawValue, d.labelMode.rawValue, String(d.locked),
             d.text, String(d.fontSize), d.textColorToken.rawValue, d.textForm.rawValue,
             String(d.tailAnchor != nil),                       // 区分 tailAnchor==nil 与「有但字段恰好空」
-            d.tailAnchor.map { "\($0.candleIndex),\($0.price),\($0.period.rawValue)" } ?? "",
+            d.tailAnchor.map { lp(String($0.candleIndex)) + lp(String($0.price)) + lp($0.period.rawValue) } ?? "",
             String(d.isExtended), String(d.panelPosition), String(d.revealTick),
         ])
         return fields.map(lp).joined()

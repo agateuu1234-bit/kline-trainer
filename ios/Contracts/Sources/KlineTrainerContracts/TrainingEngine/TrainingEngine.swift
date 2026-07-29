@@ -1202,6 +1202,14 @@ extension TrainingEngine {
     /// 会把合法的非水平 `.segment`（如 P1c 的 `.trend` 线段）在共享引擎边界静默拒 →
     /// `routeDrawingCommit` 又吞返回值 → 静默丢线。故把横规则限定在 `.horizontal`；非水平工具的
     /// 子类矩阵属 P1c、不在本期此横规则内（helper 头注同一 YAGNI 立场），此期不产非水平线故行为等价。
+    /// **纵深防御降级的记录（PR-1 Opus 终审 Minor ②，1b-i 切片2 裁决：append 侧不补门）**：
+    /// ⚠️ 别与**编辑面**的工具门（`isEditableToolType`，codex plan-R11-F1）混为一谈——那道门是"改写保守"，
+    /// 这里是"进来宽松"，两者刻意不对称（拒绝进来 = 丢数据；放行改写 = 污染高版本数据）。本 helper 限定横规则后，
+    /// append 边界不再顺带拦「本期未实现的工具」。这**今天不是洞**：会话/提交侧已 fail-close 到唯一实现的
+    /// 水平线（`DrawingSession.activate` 只被顶栏画图钮以 `.horizontal` 调用），decode/resume 走整组赋值
+    /// 不经 append。补一道「只许 implemented 工具」的门反而会**重犯 PR-1 那个 over-reject**
+    /// （把只对某类型成立的规则套到所有类型 → 对 P1c 的合法数据静默拒），故按 YAGNI 不补，
+    /// 留待 P1c 定义完整的 toolType × lineSubType 矩阵时一并处理。
     private func isRenderableSubType(_ d: DrawingObject) -> Bool {
         DrawingStyleAvailability.isRenderableSubType(d.lineSubType, toolType: d.toolType)
     }
@@ -1219,6 +1227,13 @@ extension TrainingEngine {
     /// **关键不变量**：review commit 绝不写 `drawings`（不污染原训练记录）。
     /// review-redesign Task 3：路由前先盖戳 `revealTick = tick.globalTickIndex`（提交那一刻的全局
     /// tick），使 `RenderStateBuilder.make` 的渐显判据（`revealTick <= tick`）对这条画线生效。
+    /// **为何这里吞掉 append 的返回值是安全的（PR-1 Opus 终审 Minor ①，1b-i 切片2 补记）**：
+    /// 本路由是**纯 append** 语义——被拒 = no-op（一条线没进库），**不存在"已删原线"的中间态**，故丢弃
+    /// 返回值不会造成静默数据丢失（最坏是这一次提交没生效，用户再点一次即可；其唯一调用点
+    /// `handleDrawingTap` 已先验 `visibleGeometry`，真被引擎拒的只可能是坏数据）。
+    /// ⚠️ **但编辑路径绝不可扩到这里**（1b-i 切片2 的 `updateDrawingStyle` 是**原地替换**、不经本路由）：
+    /// 一旦有人把「删旧 + append 新」式编辑接进本函数，吞掉的 `false` 就变成**静默丢线**
+    /// （codex WB R2-high 原始 finding 的形状）。要扩本路由，必须同时消费返回值并在失败时回滚。
     func routeDrawingCommit(_ drawing: DrawingObject) {
         let stamped = DrawingObject(
             id: drawing.id, toolType: drawing.toolType, anchors: drawing.anchors,

@@ -619,17 +619,17 @@ struct TrainingEngineDrawingSessionTests {
     @MainActor func drawingsRevisionCoversDrawingsNotReview() throws {
         let engine = TrainingEngine.preview()          // 既有测试工厂（同文件其它测试在用）
         #expect(engine.drawingsRevision == 0)
-        #expect(engine.appendDrawing(makeHLine(candleIndex: 3, price: 10)) == true)
+        #expect(engine.appendDrawing(makeHLine(id: "d1", candleIndex: 3, price: 10)) == true)
         #expect(engine.drawingsRevision == 1)                 // 严格 +1
         // review 侧不动 drawingsRevision（D56）
-        #expect(engine.appendReviewDrawing(makeHLine(candleIndex: 4, price: 11)) == true)
+        #expect(engine.appendReviewDrawing(makeHLine(id: "r1", candleIndex: 4, price: 11)) == true)
         #expect(engine.drawingsRevision == 1)                 // 仍是 1
     }
 
     @Test("drawingsRevision: deleteDrawing(at:) 严格 +1")
     @MainActor func drawingsRevisionOnDelete() throws {
         let engine = TrainingEngine.preview()
-        _ = engine.appendDrawing(makeHLine(candleIndex: 3, price: 10))
+        _ = engine.appendDrawing(makeHLine(id: "d1", candleIndex: 3, price: 10))
         let before = engine.drawingsRevision
         engine.deleteDrawing(at: 0)
         #expect(engine.drawingsRevision == before + 1)
