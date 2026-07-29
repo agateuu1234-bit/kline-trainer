@@ -1082,6 +1082,29 @@ extension TrainingEngine {
         drawingsRevision += 1
     }
 
+    /// D51（1b-i）：**id 寻址**的删除写入面。选中态存的就是 id；下标会因任何增删漂移，竞态下删错线。
+    /// **访问级别 internal + 源码守卫**（与 `updateDrawingStyle` D62 完全对称）：删除比改样式**更**危险
+    /// （不可逆、本期无 undo），边界只能更严。几何门（离屏线不许删）在 UI 删除路由——引擎没有 mapper，
+    /// **判不了几何、也不声称挡几何**（D65 R13-F1）；路由必须在**确认框点「删除」之后**重算再调本方法。
+    /// 只 enforce viewport 无关的三项，任一不过 → 零改动 + `drawingsRevision` 不递增 + 返 `false`：
+    ///   ⓪ 非复盘模式（D34 纵深防御，SD-7：复盘里 `drawings` = 已归档 record 的原训练线，删它不可逆；
+    ///      复盘侧删除走 `removeReviewDrawing(at:)`，本期复盘不获得删原训练线的能力 → 不 over-reject）
+    ///   ① id 非空且**恰好**匹配一条（D66）
+    ///   ② 目标 `locked == false`（D60）
+    /// ⚠️ **不含**未来未知枚举值分量（D61）：删整条不产生"部分抹除"（raw 随之整体移除），是用户主动处置，
+    ///    与"顺手抹字节"性质不同 —— 高版本线选得中、改不动、但删得掉。
+    @discardableResult
+    func deleteDrawing(id: DrawingID) -> Bool {
+        guard flow.mode != .review else { return false }   // ⓪（D34 纵深防御，SD-7）
+        guard !id.isEmpty else { return false }
+        let matches = drawings.indices.filter { drawings[$0].id == id }
+        guard matches.count == 1, let i = matches.first else { return false }
+        guard !drawings[i].locked else { return false }
+        drawings.remove(at: i)
+        drawingsRevision += 1
+        return true
+    }
+
     /// 追加一条 committed 画线进 `engine.drawings`（RFC §4.4c）。`engine.drawings` 是唯一渲染 +
     /// 持久化真相（`@Observable` 数组突变自动触发重渲染，同 `deleteDrawing`；进入 finalize/pending
     /// 持久化路径）。顺位 4 `DrawingInputController` 在 `manager.commit()` 后调本方法，使

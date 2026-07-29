@@ -697,49 +697,45 @@ struct TrainingEngineDrawingSessionTests {
         #expect(engine.reviewDrawings.count == 1)
     }
 
-    @Test("N23a: append 家族非 public + 唯一调用点（源码守卫，调用图 D67，codex plan-R5-F2）")
+    @Test("N23a: append 家族非 public + 唯一调用点（源码守卫，调用图 D67，codex plan-R5-F2；切片2 换空白无关扫描）")
     func appendFamilyTrustBoundary() throws {
-        // (1) 访问级别：7 个 public 写入面全非 public（编辑 5 + 装载 2）
-        let engineSrc = try String(contentsOfFile: trainingEnginePath, encoding: .utf8)
-        for decl in ["appendDrawing(", "appendReviewDrawing(", "routeDrawingCommit(", "deleteDrawing(at ",
-                     "removeReviewDrawing(at ", "setReviewLossy(", "setReviewDrawings("] {
-            #expect(!engineSrc.contains("public func " + decl))
-            #expect(engineSrc.contains("func " + decl))                       // 仍存在（internal）
+        // (1) 访问级别：7 个写入面全非 public（编辑 5 + 装载 2）
+        for decl in ["appendDrawing(", "appendReviewDrawing(", "routeDrawingCommit(", "deleteDrawing(at index:",
+                     "removeReviewDrawing(at index:", "setReviewLossy(", "setReviewDrawings("] {
+            try expectEngineInternalOnly(decl)      // 非 public **且非 package/open**（codex plan-R8-F1）
         }
-        // (2) 唯一调用点（**核心**：仅非 public 不够——包内新调用者仍能绕过 handleDrawingTap 的 geometry 门）。
-        //     扫整个 Sources/，统计匹配 callPattern 的「调用」行（排除 defExclude 定义行与注释行）。
-        //     ⚠️ callPattern 必须匹配【真实调用语法】（codex plan-R6-F3）：
-        //        无标签调用 `xxx(...)` 用 "xxx("；带标签调用 `deleteDrawing(at: 0)` 用 "deleteDrawing(at:"（冒号），
-        //        不能用 "deleteDrawing(at(" —— 那样永远匹配不到、守卫恒空恒过（假绿）。
-        func callSites(callPattern: String, defExclude: String) throws -> [(file: String, line: String)] {
-            try allSwiftFilesUnderSources().flatMap { path -> [(String, String)] in
-                try String(contentsOfFile: path, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: false)
-                    .map(String.init)
-                    .filter { line in
-                        let t = line.trimmingCharacters(in: .whitespaces)
-                        return t.contains(callPattern) && !t.contains(defExclude) && !t.hasPrefix("//") && !t.hasPrefix("///")
-                    }
-                    .map { (path, $0) }
-            }
-        }
-        // appendDrawing/appendReviewDrawing 各恰好 1 处调用（`appendDrawing(stamped)`），都在 routeDrawingCommit
-        #expect(try callSites(callPattern: "appendDrawing(", defExclude: "func appendDrawing(").count == 1)
-        #expect(try callSites(callPattern: "appendReviewDrawing(", defExclude: "func appendReviewDrawing(").count == 1)
-        // routeDrawingCommit 恰好 1 处调用（`engine.routeDrawingCommit(committed)`），在 ChartContainerView.handleDrawingTap
-        let route = try callSites(callPattern: "routeDrawingCommit(", defExclude: "func routeDrawingCommit(")
-        #expect(route.count == 1)
-        #expect(route.allSatisfy { $0.file.contains("ChartContainerView") })
-        // deleteDrawing(at:) / removeReviewDrawing(at:) 零生产调用点（D51/D67）——调用语法带标签冒号 `xxx(at: 0)`；
-        //   定义是 `func xxx(at index:`（`at ` 后无冒号），故 pattern `xxx(at:` 只命中调用、不命中定义。
-        #expect(try callSites(callPattern: "deleteDrawing(at:", defExclude: "func deleteDrawing(at").isEmpty)
-        #expect(try callSites(callPattern: "removeReviewDrawing(at:", defExclude: "func removeReviewDrawing(at").isEmpty)
-        // 装载入口：setReviewLossy 只在 TrainingSessionCoordinator（复盘装载 :538）与 TrainingEngine
-        //   （setReviewDrawings :315 委托调它）——不强求 count（委托是合法内部调用），只断言不在别处新增旁路。
-        let reviewLossy = try callSites(callPattern: "setReviewLossy(", defExclude: "func setReviewLossy(")
+        // (2) 唯一调用点（**核心**：仅非 public 不够——包内新调用者仍能绕过 handleDrawingTap 的 geometry 门）
+        let appends = try callSiteCount("appendDrawing(")
+        #expect(appends.map(\.count).reduce(0, +) == 1)
+        #expect(appends.allSatisfy { $0.file.contains("TrainingEngine.swift") })    // = routeDrawingCommit 内
+        let reviewAppends = try callSiteCount("appendReviewDrawing(")
+        #expect(reviewAppends.map(\.count).reduce(0, +) == 1)
+        let route = try callSiteCount("routeDrawingCommit(")
+        #expect(route.map(\.count).reduce(0, +) == 1)
+        #expect(route.allSatisfy { $0.file.contains("ChartContainerView") })        // 在 handleDrawingTap 的门之后
+        // index 版删除：零生产调用点（D51/D67）
+        #expect(try callSiteCount("deleteDrawing(at:").isEmpty)
+        #expect(try callSiteCount("removeReviewDrawing(at:").isEmpty)
+        // 装载入口：setReviewLossy 只在 Coordinator（复盘装载）与 TrainingEngine（setReviewDrawings 委托）
+        let reviewLossy = try callSiteCount("setReviewLossy(")
         #expect(!reviewLossy.isEmpty)
         #expect(reviewLossy.allSatisfy { $0.file.contains("TrainingSessionCoordinator") || $0.file.contains("TrainingEngine") })
-        // setReviewDrawings 零 Sources/ 调用点（其定义 :315 委托 setReviewLossy，被 defExclude 排除；测试经 @testable 调、不在 Sources/）
-        #expect(try callSites(callPattern: "setReviewDrawings(", defExclude: "func setReviewDrawings(").isEmpty)
+        // setReviewDrawings 零 Sources/ 调用点（其定义委托 setReviewLossy；定义本身按 "func"+pattern 扣掉）
+        #expect(try callSiteCount("setReviewDrawings(").isEmpty)
+        // (3) **标识符文件作用域**（codex plan-R6-F1）：只数调用 pattern 对 append 家族同样不够——
+        //     `let f = engine.appendDrawing` / `engine.routeDrawingCommit` 这类**方法引用**能把调用挪到别处，
+        //     绕过「唯一调用点在 handleDrawingTap 的 :303 visibleGeometry 门之后」这条**唯一**的几何保证。
+        //     update/delete 已按标识符钉死（N15/N19a），append 家族必须同判据（不留强弱两档）。
+        //     ⚠️ 白名单是对 `f3f67da` 源码**实测**的（`grep -rln` + 逐条确认是代码还是注释），不是推断：
+        //       `appendDrawing`/`appendReviewDrawing` 仅 TrainingEngine.swift 有代码；
+        //       `routeDrawingCommit` 在 TrainingEngine.swift（定义）与 ChartContainerView.swift:304（唯一路由）；
+        //       其余文件（TrainingView/DrawingSession/LossyDrawingArray）里的同名字样**全是注释**，
+        //       扫描器剥注释后不计入 —— 这条正是「必须剥注释」的实证理由，别把剥注释那步删了。
+        #expect(try filesMentioning("appendDrawing").allSatisfy { $0.contains("TrainingEngine.swift") })
+        #expect(try filesMentioning("appendReviewDrawing").allSatisfy { $0.contains("TrainingEngine.swift") })
+        #expect(try filesMentioning("routeDrawingCommit").allSatisfy {
+            $0.contains("TrainingEngine.swift") || $0.contains("ChartContainerView.swift")
+        })
     }
 
     // MARK: 切片2 Task 3（D50/D58 引擎支/D62/D66）：updateDrawingStyle
@@ -869,5 +865,151 @@ struct TrainingEngineDrawingSessionTests {
         // （目录 + 文件名都钉死），才真的只放行引擎自身这一个文件。
         #expect(mentions.allSatisfy { $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") },
                 "updateDrawingStyle 被引擎以外的文件提到（含方法引用）：\(mentions)")
+    }
+
+    // MARK: 切片2 Task 5（D51/D60/D66）：deleteDrawing(id:)
+
+    @Test("删除成功: 按 id 移除 + revision +1")
+    @MainActor func deleteByIdRemovesAndBumps() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        #expect(e.appendDrawing(makeStyledHLine(id: "B", candleIndex: 4)) == true)
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "A") == true)
+        #expect(e.drawings.map(\.id) == ["B"])
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
+    @Test("N4: deleteDrawing(id:) 对不存在 id → false、逐字段不变、revision 不递增")
+    @MainActor func deleteUnknownIdIsNoop() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "ZZZ") == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("D66(delete): 空 id 恒 fail（写入边界不变量：id 非空）")
+    @MainActor func deleteRejectsEmptyId() throws {
+        // 同 Task 3 的 updateRejectsEmptyId 教训：若夹具里只有非空 id 的线，查 id "" 必然
+        // matches.count==0，会先被唯一性门挡下——测试通过与否跟 `guard !id.isEmpty` 这半截无关（恒真）。
+        // 生产入口造不出 id=="" 的线，用 DEBUG hook 直接注入一条 id=="" 的线，
+        // 使「没有这道门」时 matches.count==1 会真的走到底、真的删掉它。
+        let e = TrainingEngine.preview()
+        e.injectDrawingsForTesting([makeStyledHLine(id: "")])   // 生产入口造不出，正是 hook 的用途
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "") == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("N13b/N19b: 引擎层删除对 locked 线 fail-closed（降 internal 后引擎门仍在）")
+    @MainActor func deleteRejectsLocked() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "L", locked: true)) == true)
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "L") == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)   // 含「仍在」+ id 未被改写
+    }
+
+    @Test("N13c 反向对照（删除侧）: 同一条线未锁定时删除成功、revision +1")
+    @MainActor func deleteAcceptsUnlocked() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "U", locked: false)) == true)
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "U") == true)
+        #expect(e.drawings.isEmpty)
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
+    @Test("N21c(delete): id 匹配 ≥2 条 → fail，不删任何一条、revision 不递增")
+    @MainActor func deleteFailsOnAmbiguousId() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        e.injectDrawingsForTesting(e.drawings + [makeStyledHLine(id: "A", candleIndex: 4)])
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "A") == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("工具门补完（codex plan-R11-F1 + R12-F1）：未实现的已知工具线改不动样式，但**可整条删**")
+    @MainActor func unimplementedToolLineIsDeletable() throws {
+        let e = TrainingEngine.preview()
+        let trend = DrawingObject(id: "T", toolType: .trend,
+                                  anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
+                                  isExtended: false, panelPosition: 0, period: .daily)
+        #expect(e.appendDrawing(trend) == true)
+        var st = DrawingDefaultStyle(); st.thickness = 4
+        #expect(e.updateDrawingStyle(id: "T", style: st) == false)   // 改不动（Task 4 已钉，这里做前提复述）
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "T") == true)                    // 但删得掉（同 D61 高版本线的处置）
+        #expect(e.drawings.isEmpty)
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
+    @Test("N14c2（codex plan-R17-F1）: 未来**字段**线也必须删得掉——否则既改不动又删不掉，这一局永久锁死")
+    @MainActor func futureFieldLineCanBeDeleted() throws {
+        // 未来顶层字段没有任何控件能覆盖 → 它永远改不动；删除是**唯一**保底解封手段，
+        // 故 `deleteDrawing(id:)` **绝不能**检查未来数据（spec D65 的门对照表已写死）。
+        let raw = #"{"id":"X","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","futureIndependentTextColor":true}"#
+        let e = makeEngineWithLossy(try lossyFromRaw(raw))
+        #expect(e.loadedDrawingsLossy.hasKnownFutureFields(liveIds: ["X"]) == true)
+        var st = DrawingDefaultStyle(); st.thickness = 3
+        #expect(e.updateDrawingStyle(id: "X", style: st) == false)      // 改不动（没有控件能覆盖那个 key）
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "X") == true)                       // 但删得掉
+        #expect(e.drawings.isEmpty)
+        #expect(e.drawingsRevision == rev + 1)
+        let merged = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings)
+        #expect(!String(decoding: try merged.encoded(), as: UTF8.self).contains("futureIndependentTextColor"))
+    }
+
+    @Test("N14c(引擎版): 未来枚举值线**可以删**（D61 只挡改样式，不挡整条删除）")
+    @MainActor func futureEnumLineCanBeDeleted() throws {
+        let raw = #"{"id":"F","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","colorToken":"futureNeon","textColorToken":"futureCyan"}"#
+        let e = makeEngineWithLossy(try lossyFromRaw(raw))
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "F") == true)
+        #expect(e.drawings.isEmpty)
+        #expect(e.drawingsRevision == rev + 1)
+        // 删整条不产生"部分抹除"：reconcile 后该条整体消失（不残留半截 raw）
+        let data = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings).encoded()
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(!text.contains("futureNeon"))
+    }
+
+    @Test("SD-7/D34 纵深防御: 复盘模式下 deleteDrawing(id:) 恒 fail + normal 模式反向对照")
+    @MainActor func deleteRefusedInReviewMode() throws {
+        let e = TrainingEngine.preview(mode: .review)
+        #expect(e.appendDrawing(makeStyledHLine(id: "A")) == true)
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.deleteDrawing(id: "A") == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)   // 归档线仍在、id 未被改写
+        let n = TrainingEngine.preview(mode: .normal)
+        #expect(n.appendDrawing(makeStyledHLine(id: "A")) == true)
+        #expect(n.deleteDrawing(id: "A") == true)            // 反向对照
+    }
+
+    @Test("N19a: deleteDrawing(id:) 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
+    func deleteByIdTrustBoundary() throws {
+        try expectEngineInternalOnly("deleteDrawing(id:")        // 存在 + 非 public/package/open（D51）
+        // PR-4 接线时改成：恰好 1 处、在 UI 删除路由、且路由在**确认框点「删除」之后**重算 visibleGeometry
+        // （D65 R13-F1：确认框有时间窗，线可能滑走 → 只在点 🗑 那刻判几何是时序 bug）。
+        let idSites = try callSiteCount("deleteDrawing(id:")
+        #expect(idSites.isEmpty, "deleteDrawing(id:) 出现了非预期调用点：\(idSites)")
+        // N19d 不回归确认：index 版本仍零调用点、仍非 public（PR-1 已落）。
+        let atSites = try callSiteCount("deleteDrawing(at:")
+        #expect(atSites.isEmpty, "deleteDrawing(at:) 应零调用点：\(atSites)")
+        try expectEngineInternalOnly("deleteDrawing(at index:")  // index 版同样不得包外可达（D51 R7 修订）
+        // 标识符作用域（codex plan-R5-F1，连方法引用一起挡）：`deleteDrawing` 本切片只许出现在
+        // 引擎自身文件 + `DrawingToolManager.swift`（1a-iv 交接①在案的**死代码**，spec §1.2/§8#5 明令本期不动，
+        // 它有自己的同名 `deleteDrawing(at:)`，与引擎写入面无关）。PR-4 接线时**只**把删除路由文件加进白名单。
+        let mentions = try filesMentioning("deleteDrawing")
+        #expect(mentions.allSatisfy { $0.contains("TrainingEngine.swift") || $0.contains("DrawingToolManager.swift") },
+                "deleteDrawing 被白名单以外的文件提到（含方法引用）：\(mentions)")
     }
 }
