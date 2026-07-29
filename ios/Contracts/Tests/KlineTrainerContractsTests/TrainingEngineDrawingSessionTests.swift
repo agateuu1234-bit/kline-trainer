@@ -707,19 +707,21 @@ struct TrainingEngineDrawingSessionTests {
         // (2) 唯一调用点（**核心**：仅非 public 不够——包内新调用者仍能绕过 handleDrawingTap 的 geometry 门）
         let appends = try callSiteCount("appendDrawing(")
         #expect(appends.map(\.count).reduce(0, +) == 1)
-        #expect(appends.allSatisfy { $0.file.contains("TrainingEngine.swift") })    // = routeDrawingCommit 内
+        #expect(appends.allSatisfy { $0.file.hasSuffix("/TrainingEngine/TrainingEngine.swift") })    // = routeDrawingCommit 内
         let reviewAppends = try callSiteCount("appendReviewDrawing(")
         #expect(reviewAppends.map(\.count).reduce(0, +) == 1)
         let route = try callSiteCount("routeDrawingCommit(")
         #expect(route.map(\.count).reduce(0, +) == 1)
-        #expect(route.allSatisfy { $0.file.contains("ChartContainerView") })        // 在 handleDrawingTap 的门之后
+        #expect(route.allSatisfy { $0.file.hasSuffix("/Render/ChartContainerView.swift") })        // 在 handleDrawingTap 的门之后
         // index 版删除：零生产调用点（D51/D67）
         #expect(try callSiteCount("deleteDrawing(at:").isEmpty)
         #expect(try callSiteCount("removeReviewDrawing(at:").isEmpty)
         // 装载入口：setReviewLossy 只在 Coordinator（复盘装载）与 TrainingEngine（setReviewDrawings 委托）
         let reviewLossy = try callSiteCount("setReviewLossy(")
         #expect(!reviewLossy.isEmpty)
-        #expect(reviewLossy.allSatisfy { $0.file.contains("TrainingSessionCoordinator") || $0.file.contains("TrainingEngine") })
+        #expect(reviewLossy.allSatisfy {
+            $0.file.hasSuffix("/TrainingEngine/TrainingSessionCoordinator.swift") || $0.file.hasSuffix("/TrainingEngine/TrainingEngine.swift")
+        })
         // setReviewDrawings 零 Sources/ 调用点（其定义委托 setReviewLossy；定义本身按 "func"+pattern 扣掉）
         #expect(try callSiteCount("setReviewDrawings(").isEmpty)
         // (3) **标识符文件作用域**（codex plan-R6-F1）：只数调用 pattern 对 append 家族同样不够——
@@ -731,10 +733,10 @@ struct TrainingEngineDrawingSessionTests {
         //       `routeDrawingCommit` 在 TrainingEngine.swift（定义）与 ChartContainerView.swift:304（唯一路由）；
         //       其余文件（TrainingView/DrawingSession/LossyDrawingArray）里的同名字样**全是注释**，
         //       扫描器剥注释后不计入 —— 这条正是「必须剥注释」的实证理由，别把剥注释那步删了。
-        #expect(try filesMentioning("appendDrawing").allSatisfy { $0.contains("TrainingEngine.swift") })
-        #expect(try filesMentioning("appendReviewDrawing").allSatisfy { $0.contains("TrainingEngine.swift") })
+        #expect(try filesMentioning("appendDrawing").allSatisfy { $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") })
+        #expect(try filesMentioning("appendReviewDrawing").allSatisfy { $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") })
         #expect(try filesMentioning("routeDrawingCommit").allSatisfy {
-            $0.contains("TrainingEngine.swift") || $0.contains("ChartContainerView.swift")
+            $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") || $0.hasSuffix("/Render/ChartContainerView.swift")
         })
     }
 
@@ -1009,7 +1011,8 @@ struct TrainingEngineDrawingSessionTests {
         // 引擎自身文件 + `DrawingToolManager.swift`（1a-iv 交接①在案的**死代码**，spec §1.2/§8#5 明令本期不动，
         // 它有自己的同名 `deleteDrawing(at:)`，与引擎写入面无关）。PR-4 接线时**只**把删除路由文件加进白名单。
         let mentions = try filesMentioning("deleteDrawing")
-        #expect(mentions.allSatisfy { $0.contains("TrainingEngine.swift") || $0.contains("DrawingToolManager.swift") },
-                "deleteDrawing 被白名单以外的文件提到（含方法引用）：\(mentions)")
+        #expect(mentions.allSatisfy {
+            $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") || $0.hasSuffix("/Drawing/DrawingToolManager.swift")
+        }, "deleteDrawing 被白名单以外的文件提到（含方法引用）：\(mentions)")
     }
 }
