@@ -1082,6 +1082,31 @@ extension TrainingEngine {
         drawingsRevision += 1
     }
 
+    /// D51（1b-i）：**id 寻址**的删除写入面。选中态存的就是 id；下标会因任何增删漂移，竞态下删错线。
+    /// **访问级别 internal + 源码守卫**（与 `updateDrawingStyle` D62 完全对称）：删除比改样式**更**危险
+    /// （不可逆、本期无 undo），边界只能更严。几何门（离屏线不许删）在 UI 删除路由——引擎没有 mapper，
+    /// **判不了几何、也不声称挡几何**（D65 R13-F1）；路由必须在**确认框点「删除」之后**重算再调本方法。
+    /// 只 enforce viewport 无关的三项，任一不过 → 零改动 + `drawingsRevision` 不递增 + 返 `false`：
+    ///   ⓪ 非复盘模式（D34 纵深防御，SD-7：复盘里 `drawings` = 已归档 record 的原训练线，删它不可逆；
+    ///      复盘侧删除走 `removeReviewDrawing(at:)`，本期复盘不获得删原训练线的能力 → 不 over-reject）
+    ///   ① id 非空且**恰好**匹配一条（D66）
+    ///   ② 目标 `locked == false`（D60）
+    /// ⚠️ **不含**未来未知枚举值分量（D61）：删整条不产生"部分抹除"（raw 随之整体移除），是用户主动处置，
+    ///    与"顺手抹字节"性质不同 —— **未锁定的**高版本线选得中、改不动、但删得掉。`locked` + 携带未来数据
+    ///    这个角落（既改不动也删不掉，`finalize` 会因该线仍带未来数据而 throw、这一局归不了档）本 PR
+    ///    不解决——本 PR 之前更差（根本没有删除 API），留待 PR-4/spec 在删除 UI 落地时一并处置。
+    @discardableResult
+    func deleteDrawing(id: DrawingID) -> Bool {
+        guard flow.mode != .review else { return false }   // ⓪（D34 纵深防御，SD-7）
+        guard !id.isEmpty else { return false }
+        let matches = drawings.indices.filter { drawings[$0].id == id }
+        guard matches.count == 1, let i = matches.first else { return false }
+        guard !drawings[i].locked else { return false }
+        drawings.remove(at: i)
+        drawingsRevision += 1
+        return true
+    }
+
     /// 追加一条 committed 画线进 `engine.drawings`（RFC §4.4c）。`engine.drawings` 是唯一渲染 +
     /// 持久化真相（`@Observable` 数组突变自动触发重渲染，同 `deleteDrawing`；进入 finalize/pending
     /// 持久化路径）。顺位 4 `DrawingInputController` 在 `manager.commit()` 后调本方法，使
@@ -1096,6 +1121,52 @@ extension TrainingEngine {
         guard isRenderableSubType(drawing) else { return false }  // D67：仅对水平工具拒 .segment 等恒不可渲染值（见 helper）
         guard !drawing.id.isEmpty, !drawings.contains(where: { $0.id == drawing.id }) else { return false }     // D66：id 非空 + 与目标数组唯一
         drawings.append(drawing)
+        drawingsRevision += 1
+        return true
+    }
+
+    /// D50（1b-i）：**唯一**的画线样式编辑写入面。原地替换单个数组元素——流程里**没有"删"那一步**，
+    /// 故 1a-iv 交接①「编辑路径 append 返 false 时绝不能已删原线」在本形状下不可表达（矛盾状态被消灭，
+    /// 而不是靠调用者按正确顺序操作）。
+    /// **访问级别 internal（D62）**：几何门（`visibleGeometry`）只能在持 mapper 的 UI 层，引擎判不了；
+    /// 若本 API public，包外就能绕过那道门落一条渲染不出的线并被 autosave。唯一合法调用者 = 包内那条
+    /// 已先验几何的 UI 编辑路由（PR-4）；源码守卫 N15 钉死调用点数量。
+    /// **若干道 viewport 无关的门（下列任意一道不过 ）→ 零改动 + `drawingsRevision` 不递增 + 返 `false`**：
+    ///   ⓪ 非复盘模式（D34 纵深防御，SD-7）：复盘里 `drawings` 就是已归档 record 的原训练线，
+    ///      改它不可逆；复盘新画线走 `reviewDrawings`，本期复盘不获得编辑能力 → 这道门不 over-reject
+    ///   ① id 非空且**恰好**匹配一条（D66；≥2 条是坏状态，绝不"改第一条碰到的"）
+    ///   ② 目标 `locked == false`（D60；本构建产不出 locked=true，只挡高版本解码来的）
+    ///   ③ 目标**既不携带未来未知枚举值、也不携带未来顶层字段**（D61 + codex plan-R13-F1）：判据是
+    ///   raw-aware 的 `hasKnownFutureEnumValues` + `hasKnownFutureFields`（看磁盘原始字节，不是 fallback
+    ///   后的解码值）。前者已含 `!entries.isEmpty`——**绝不可**写成 `knownFutureEnumPayloads()` 的
+    ///   id-membership（会误灰所有已加载线）。**删除面不查这两个门**（删整条不产生"部分抹除"，
+    ///   且它是这类线唯一的解封手段）。
+    ///   ④ `withStyle` 语义成立（D59：派生①②/归一化/可用性单点；水平线 `.segment` 恒不可渲染 → 拒）
+    @discardableResult
+    func updateDrawingStyle(id: DrawingID, style: DrawingDefaultStyle) -> Bool {
+        guard flow.mode != .review else { return false }                           // ⓪（D34 纵深防御）
+        guard !id.isEmpty else { return false }                                   // ①（D66 非空）
+        let matches = drawings.indices.filter { drawings[$0].id == id }
+        guard matches.count == 1, let i = matches.first else { return false }      // ①（D66 唯一）
+        let old = drawings[i]
+        guard !old.locked else { return false }                                    // ②（D60）
+        // ②b 工具门（D61 同族，codex plan-R11-F1；位置由 R15-F2 从 withStyle 挪来）：本构建没写出样式
+        //     矩阵的工具，我们不懂它的样式语义 → **只挡编辑，不挡新建/提交**。`.trend`/`.text` 是**已知**
+        //     枚举 case，高版本写的这类线解码后一切"正常"、raw-aware 门看不见 →没这道门就会被按横线假设改写。
+        guard DrawingStyleAvailability.isEditableToolType(old.toolType) else { return false }
+        // ③（D61 + codex plan-R13-F1）：**两个 raw-aware 门并列**，命中即拒（spec 原文语义：
+        //   携带本构建不支持的未来数据的线，一律不给改样式；用户可整条删除，删除面**不查**这两个门）。
+        //   `hasKnownFutureEnumValues` 看"已知 key 的未来**值**"（已含 `!entries.isEmpty`，**绝不可**写成
+        //   `knownFutureEnumPayloads()` 的 id-membership → 会误灰所有已加载线）；
+        //   `hasKnownFutureFields` 看"`knownDiskKeys` 之外的未来**字段**"（它们能改变已知 key 的含义）。
+        //   ⚠️ **不做「先归并、看结果」的可修复判定**：那条路（允许用户换个颜色把未来值覆盖掉以解封
+        //   finalize）在 2026-07-27 由 user 裁决**退回保守版**——它牵扯"哪些 key 用户改得到 / raw 里字色跟不
+        //   跟随线色 / 选的新值是否等于 fallback"等一连串细分，且在本切片**没有任何用户可见效果**（要 PR-4
+        //   接上 UI 才碰得到）。留待 PR-4 之前作为独立议题定稿。
+        guard !loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id]),
+              !loadedDrawingsLossy.hasKnownFutureFields(liveIds: [id]) else { return false }
+        guard let updated = old.withStyle(style) else { return false }             // ④（D59/D58 引擎支）
+        drawings[i] = updated
         drawingsRevision += 1
         return true
     }
@@ -1133,9 +1204,16 @@ extension TrainingEngine {
     /// 会把合法的非水平 `.segment`（如 P1c 的 `.trend` 线段）在共享引擎边界静默拒 →
     /// `routeDrawingCommit` 又吞返回值 → 静默丢线。故把横规则限定在 `.horizontal`；非水平工具的
     /// 子类矩阵属 P1c、不在本期此横规则内（helper 头注同一 YAGNI 立场），此期不产非水平线故行为等价。
+    /// **纵深防御降级的记录（PR-1 Opus 终审 Minor ②，1b-i 切片2 裁决：append 侧不补门）**：
+    /// ⚠️ 别与**编辑面**的工具门（`isEditableToolType`，codex plan-R11-F1）混为一谈——那道门是"改写保守"，
+    /// 这里是"进来宽松"，两者刻意不对称（拒绝进来 = 丢数据；放行改写 = 污染高版本数据）。本 helper 限定横规则后，
+    /// append 边界不再顺带拦「本期未实现的工具」。这**今天不是洞**：会话/提交侧已 fail-close 到唯一实现的
+    /// 水平线（`DrawingSession.activate` 只被顶栏画图钮以 `.horizontal` 调用），decode/resume 走整组赋值
+    /// 不经 append。补一道「只许 implemented 工具」的门反而会**重犯 PR-1 那个 over-reject**
+    /// （把只对某类型成立的规则套到所有类型 → 对 P1c 的合法数据静默拒），故按 YAGNI 不补，
+    /// 留待 P1c 定义完整的 toolType × lineSubType 矩阵时一并处理。
     private func isRenderableSubType(_ d: DrawingObject) -> Bool {
-        guard d.toolType == .horizontal else { return true }   // 非水平工具：横规则不适用（P1c 再定其矩阵）
-        return DrawingStyleAvailability.horizontalLineSubTypeEnabled(d.lineSubType)
+        DrawingStyleAvailability.isRenderableSubType(d.lineSubType, toolType: d.toolType)
     }
 
     /// `deleteDrawing(at:)` 的 `reviewDrawings` 对应版本（复盘侧删除）。越界 trap，同风格。
@@ -1151,6 +1229,13 @@ extension TrainingEngine {
     /// **关键不变量**：review commit 绝不写 `drawings`（不污染原训练记录）。
     /// review-redesign Task 3：路由前先盖戳 `revealTick = tick.globalTickIndex`（提交那一刻的全局
     /// tick），使 `RenderStateBuilder.make` 的渐显判据（`revealTick <= tick`）对这条画线生效。
+    /// **为何这里吞掉 append 的返回值是安全的（PR-1 Opus 终审 Minor ①，1b-i 切片2 补记）**：
+    /// 本路由是**纯 append** 语义——被拒 = no-op（一条线没进库），**不存在"已删原线"的中间态**，故丢弃
+    /// 返回值不会造成静默数据丢失（最坏是这一次提交没生效，用户再点一次即可；其唯一调用点
+    /// `handleDrawingTap` 已先验 `visibleGeometry`，真被引擎拒的只可能是坏数据）。
+    /// ⚠️ **但编辑路径绝不可扩到这里**（1b-i 切片2 的 `updateDrawingStyle` 是**原地替换**、不经本路由）：
+    /// 一旦有人把「删旧 + append 新」式编辑接进本函数，吞掉的 `false` 就变成**静默丢线**
+    /// （codex WB R2-high 原始 finding 的形状）。要扩本路由，必须同时消费返回值并在失败时回滚。
     func routeDrawingCommit(_ drawing: DrawingObject) {
         let stamped = DrawingObject(
             id: drawing.id, toolType: drawing.toolType, anchors: drawing.anchors,
@@ -1350,5 +1435,10 @@ extension TrainingEngine {
     /// review-redesign Task 5 测试专用：注入 `reviewDrawings`（Task 10 真实路由落地后仍保留——
     /// 供测试直接置状态，不经 `appendReviewDrawing`/`routeDrawingCommit` 手势路径）。
     func setReviewDrawingsForTesting(_ drawings: [DrawingObject]) { reviewDrawings = drawings }
+
+    /// 仅测试：直接置换 `drawings`，绕过全部写入门。用于构造生产入口**造不出**的坏状态
+    /// （N21c：两条同 id → update/delete 必须 fail 而不是"打第一条"）。
+    /// 不动 `drawingsRevision`（它只由真实写入面递增；测试自己记录基线）。
+    func injectDrawingsForTesting(_ ds: [DrawingObject]) { drawings = ds }
 }
 #endif

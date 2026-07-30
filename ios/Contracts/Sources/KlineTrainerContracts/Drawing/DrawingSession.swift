@@ -13,7 +13,7 @@
 // 跨平台：@MainActor + @Observable，仅依赖 Models 值类型；无 UIKit → host swift test 全覆盖。
 // D44（见 plan）：pending 锚由本容器直接持有，**不再**经 DrawingToolManager（toggle 非 set / enabledTools
 //   闸门会让 addAnchor 撞 precondition / completedDrawings 重复增长三处硬伤）。DrawingObject 的
-//   **唯一写入点**语义（isExtended 由 lineSubType 派生）在 commitPending 内原样保留。
+//   派生/归一化/可用性语义（D59，切片2）经 `withStyle` 统一把关（语义单点），commitPending 不再自行派生。
 
 import Observation
 import CoreGraphics   // ← 1a-iii Task2：PanelShield.rect(CGRect)
@@ -139,11 +139,11 @@ public final class DrawingSession {
         pendingAnchorPanel = panel
     }
 
-    /// pending → DrawingObject。**DrawingObject 的唯一写入点**：isExtended 从 lineSubType 派生
-    /// （不变量 isExtended == (lineSubType == .ray)；矛盾数据不可表达）。
-    /// **1a-iii：5 样式字段全部从 defaultStyle 原子读取**——在 append 之前就灌满，
-    /// 让 routeDrawingCommit 的 append 成为 drawings 的唯一改动（count 触发一次即完整落盘，
-    /// 杜绝「先 append 默认样式、再原地改样式」的提交后套用不落盘缺陷，codex branch-R1/R2）。
+    /// pending → DrawingObject。**DrawingObject 的唯一写入点**：先造裸对象（锚/工具/面板位，与样式无关），
+    /// 再经 `withStyle` 统一派生与归一化（D59 切片2语义单点：isExtended 派生 / textColorToken 条件派生 /
+    /// labelMode 归一化 / lineSubType 可用性全部由 `withStyle` 承担，本函数不再自行派生任何字段）。
+    /// **返回 nil = 该默认样式对本次 toolType 语义上不成立**（如水平线的 `.segment`，或越域 thickness）——
+    /// 调用方（`ChartContainerView.handleDrawingTap`）据此不提交，本次画线数据丢弃、不落库。
     /// period 不传 → 由 DrawingObject.init 取 anchors.first.period（D29 周期绑定，不得回退）。
     /// revealTick 由 engine.routeDrawingCommit 盖真值。
     /// **D38：提交后只清 pending —— 工具与会话保持不变（连续画线）**。
@@ -159,22 +159,16 @@ public final class DrawingSession {
             return nil
         }
         let s = defaultStyle
-        let drawing = DrawingObject(
+        // D59（切片2）：样式语义闸**单点** —— 派生①②/归一化/可用性全部由 withStyle 承担，
+        // 本函数不再自己派生任何字段（否则就有第二份语义，面板归一化一改就漂）。
+        // 基对象只带「与样式无关」的部分：锚 / 工具 / 面板位 / period（由 init 从 anchors 取，D29）。
+        let base = DrawingObject(
             toolType: tool,
             anchors: pendingAnchors,
-            isExtended: s.lineSubType == .ray,
+            isExtended: false,          // 占位：随后由 withStyle 的派生① 覆盖
             panelPosition: panelPosition,
-            revealTick: 0,
-            lineSubType: s.lineSubType,
-            lineStyle: s.lineStyle,
-            thickness: s.thickness,
-            colorToken: s.colorToken,
-            labelMode: s.labelMode,
-            // codex plan-R7-medium：价格标签渲染用 textColorToken（DrawingLabelLayout.labelContent:75），
-            // 本期卡片只有一个「颜色」控件（线色）→ 标签跟线同色，否则蓝线配橙标签。
-            // （独立「字色」是 P3 的标注文字工具，本期不引入。）
-            textColorToken: s.colorToken)
+            revealTick: 0)              // 真值由 engine.routeDrawingCommit 盖
         discardPendingAnchors()
-        return drawing
+        return base.withStyle(s)        // nil = 该样式语义不成立（水平线 .segment）→ 不提交
     }
 }

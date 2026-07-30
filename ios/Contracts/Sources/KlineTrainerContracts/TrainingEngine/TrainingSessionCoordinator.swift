@@ -50,7 +50,7 @@ public final class TrainingSessionCoordinator {
     /// 可注入 key 生成器（mirror `now` 范式，D5）。默认 UUID；@testable 测试可覆盖。
     @ObservationIgnored var makeSessionKey: () -> String = { UUID().uuidString }
 
-    // 新需求10：当前 replay 会话创建时的状态基线（tick/交易数/画线数/上下周期）。
+    // 新需求10：当前 replay 会话创建时的状态基线（tick/交易数/画线规范语义签名/上下周期）。
     // 含周期（codex plan-R14-F1）：单指竖滑切周期组合改 upper/lowerPanel.period 而不动 tick/ops/drawings，
     // 须纳入 clean-skip 比较，否则切周期后 Back/flush 被当 clean 跳过 → 丢 PendingReplay 序列化的 upper/lowerPeriod。
     @ObservationIgnored private var replayBaseline: (tick: Int, ops: Int, drawingsSig: String, upper: Period, lower: Period)?

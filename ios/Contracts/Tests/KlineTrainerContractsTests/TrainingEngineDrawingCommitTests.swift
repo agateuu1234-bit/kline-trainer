@@ -351,4 +351,72 @@ struct TrainingEngineDrawingCommitTests {
         #expect(wouldAccept == false)                 // 被拒——调用者据此绝不能先删旧线
         #expect(e.drawings.count == 1)                // 旧线仍在，未被静默丢弃
     }
+
+    @Test("D59：commitPending 经 withStyle —— (ray,.left) 在提交那一刻被归一成 .hidden（不靠面板自觉）")
+    @MainActor func commitNormalizesLabelModeAtWriteBoundary() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        var s = DrawingDefaultStyle()
+        s.lineSubType = .ray
+        s.labelMode = .left                                  // 面板产不出的非法组合，直接塞进会话默认样式
+        e.drawingSession.setDefaultStyle(s)
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+        let d = e.drawingSession.commitPending(panelPosition: 0)
+        #expect(d?.labelMode == .hidden)                     // 写入边界归一化
+        #expect(d?.isExtended == true)                       // 派生① 仍成立
+    }
+
+    @Test("D59：commitPending 对语义不成立的样式返 nil（水平线 .segment）——不提交、不落库")
+    @MainActor func commitRejectsUnrenderableSubType() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        var s = DrawingDefaultStyle()
+        s.lineSubType = .segment                             // 面板里恒灰，但直接设进会话是可达的
+        e.drawingSession.setDefaultStyle(s)
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+        #expect(e.drawingSession.commitPending(panelPosition: 0) == nil)
+        #expect(e.drawingSession.pendingAnchors.isEmpty)     // 拒交同样只丢 pending（保工具/保会话，D31）
+        #expect(e.drawingSession.drawingModeActive == true)
+        #expect(e.drawingSession.activeDrawingTool == .horizontal)
+    }
+
+    @Test("D59 值域闸也覆盖新建路径（codex plan-R4-F1）：越域 thickness 的默认样式 → 不提交")
+    @MainActor func commitRejectsOutOfDomainThickness() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        var s = DrawingDefaultStyle()
+        s.thickness = 0                                      // 面板产不出，但直接设进会话可达
+        e.drawingSession.setDefaultStyle(s)
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+        #expect(e.drawingSession.commitPending(panelPosition: 0) == nil)
+        // ⚠️ 别在这里断言 `e.drawings.isEmpty`（Opus-F8：`commitPending` 从不写 `drawings`，写入的是
+        //    `routeDrawingCommit`，本测试没调它 → 那条恒真、零判别力）。返 nil 本身即保证没东西可路由。
+    }
+
+    @Test("行为等价：正常样式提交后 5 字段 + textColorToken 跟随，与切片2 之前逐字一致")
+    @MainActor func commitStillCarriesStyleAtomically() {
+        let e = TrainingEngine.preview()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.toggleDrawingMode()
+        var s = DrawingDefaultStyle()
+        s.lineSubType = .straight; s.lineStyle = .dash1; s.thickness = 3
+        s.colorToken = .green; s.labelMode = .right
+        e.drawingSession.setDefaultStyle(s)
+        e.drawingSession.addAnchor(DrawingAnchor(period: .m60, candleIndex: 1, price: 10), panel: .upper)
+        let d = e.drawingSession.commitPending(panelPosition: 0)
+        #expect(d?.lineSubType == .straight)
+        #expect(d?.lineStyle == .dash1)
+        #expect(d?.thickness == 3)
+        #expect(d?.colorToken == .green)
+        #expect(d?.labelMode == .right)
+        #expect(d?.textColorToken == .green)                 // 新线恒「字色跟随线色」（派生② 条件成立）
+        #expect(d?.isExtended == false)
+    }
 }

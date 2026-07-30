@@ -25,4 +25,23 @@ struct DrawingSignatureTests {
         let r = [makeHLine(id: "p", text: "\u{1E}q")]
         #expect(canonicalDrawingsSignature(p) != canonicalDrawingsSignature(r))
     }
+
+    /// ⚠️ **本条无红绿验，是不变式复述而非回归测试**（Opus-F6）：`tailAnchor` 的三个子字段是
+    /// `candleIndex`(Int) / `price`(Double) / `period.rawValue`（`3m`/`daily` 等），**都不可能含逗号**，
+    /// 故旧的逗号拼接本来就单射——把实现改回逗号拼接，下面两条断言照样绿。Step 5 的改动价值在
+    /// **纪律统一**（本文件所有字段一律长度前缀，不留"这个字段特殊"的例外），不在修 bug。
+    @Test("canonicalDrawingsSignature: tailAnchor 子字段也走长度前缀（单射纪律无例外；无红绿验，见上）")
+    func tailAnchorSubfieldsAreLengthPrefixed() throws {
+        func withTail(_ id: String, _ ci: Int, _ price: Double) -> DrawingObject {
+            DrawingObject(id: id, toolType: .horizontal,
+                          anchors: [DrawingAnchor(period: .daily, candleIndex: 3, price: 10)],
+                          isExtended: false, panelPosition: 0, period: .daily,
+                          tailAnchor: DrawingAnchor(period: .daily, candleIndex: ci, price: price))
+        }
+        // 两条只差 tailAnchor 内容 → 签名必须不同
+        #expect(canonicalDrawingsSignature([withTail("t", 1, 2)]) != canonicalDrawingsSignature([withTail("t", 12, 0)]))
+        // 有 tailAnchor vs 无 tailAnchor → 签名必须不同
+        let noTail = makeHLine(id: "t")
+        #expect(canonicalDrawingsSignature([withTail("t", 1, 2)]) != canonicalDrawingsSignature([noTail]))
+    }
 }
