@@ -553,8 +553,10 @@ git commit -m "划线 P1b-1b-i PR-3 T2：选中态二元组进 DrawingSession（
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/Render/KLineRenderState.swift`
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/Render/RenderStateBuilder.swift`（`make` 的 `return` 追加一个入参）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/Render/ChartContainerView.swift:184-185`（订阅锚点追加两行）
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/KLineRenderStateTests.swift`（追加）
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/RenderStateBuilderTests.swift`（追加）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift:143-152`（订阅守卫扩两条）
 
 **Interfaces:**
 - Consumes: Task 2 的 `DrawingSession.selectedDrawingID` / `selectedPanel`
@@ -687,26 +689,59 @@ init 签名末位追加 `selectedDrawingID: DrawingID? = nil,`（放在 `previou
                 ? engine.drawingSession.selectedDrawingID : nil)
 ```
 
-- [ ] **Step 5: 跑测试确认通过 + 全量不回归**
+- [ ] **Step 5: 建立选中态的 observation 订阅（否则**另一个**面板的旧高亮擦不掉，codex plan-R4-F1）**
+
+从本 Task 起，`KLineRenderState` 依赖选中态 → **两个**面板的 `updateUIView` 都必须订阅它。风险是本仓踩过的同一个坑：SwiftUI 只订阅 `updateUIView` **执行时实际读到**的 `@Observable`，而 `rebuildRenderState` 的 `make` 在 `bounds <= 0` 时被守卫跳过 → 订阅根本没建立 → 图表冻结（`ChartContainerView.swift:176-185` 大注释记录了这次真机实证的回归）。
+
+**具体危害**（codex 指出，成立）：选中态是**全局**的，但 `selectedDrawingID` 被**缓存在每个面板各自的 `KLineRenderState` 里**。先选中下面板一条、再选中上面板一条 → 会话状态正确，但下面板的 view 若不刷新，**旧高亮会一直留在屏幕上**（两条同时看起来被选中）。
+
+修法 = **照抄该文件既有的订阅锚点范式**：在 `rebuildRenderState` 的 `bounds` 守卫**之前**无条件读一次选中二元组。
+
+`ChartContainerView.swift:184-185` 之后追加：
+
+```swift
+            _ = (panel == .upper) ? engine.upperPanel.revision : engine.lowerPanel.revision
+            _ = engine.tick.globalTickIndex
+            // 1b-i PR-3：选中态进了 KLineRenderState（D41/D55）→ **两个面板**都必须订阅它，
+            // 否则「在另一个面板选中」时，本面板缓存的旧 selectedDrawingID 不会被刷掉，旧高亮留在屏上。
+            // 与上面两行同理由、同位置（bounds 守卫**之前**）：`make` 在 bounds<=0 时被跳过，
+            // 把读取留在 make 里就等于首帧不订阅（`:176-185` 记录的那次真机冻结回归就是这么来的）。
+            _ = engine.drawingSession.selectedPanel
+            _ = engine.drawingSession.selectedDrawingID
+```
+
+并扩既有源码守卫 `DrawingSessionSourceGuardTests.rebuildRenderStateSubscribesToPanelState`（`:143-152`）——SwiftUI observation 行为**单测测不到**，本仓对这一类一贯用源码钉死防误删（该测试的 MARK 原文：「SwiftUI observation/view 行为单测测不到，只能源码钉死防误删」）：
+
+```swift
+        #expect(code.contains("engine.tick.globalTickIndex"))
+        // 1b-i PR-3：选中二元组同样是订阅锚点（删掉任一行 → 在另一面板选中时本面板旧高亮擦不掉）
+        #expect(code.contains("engine.drawingSession.selectedPanel"))
+        #expect(code.contains("engine.drawingSession.selectedDrawingID"))
+```
+
+- [ ] **Step 6: 跑测试确认通过 + 全量不回归**
 
 Expected：全绿，总数 = 上一 Task + 4。
 
-- [ ] **Step 6: 变异验证（3 次）**
+- [ ] **Step 7: 变异验证（4 次）**
 
 | 变异 | 应该红的测试 |
 |---|---|
 | `make` 改成 id-only（去掉 `selectedPanel == panel` 条件） | `selectedIDOnlyReachesItsOwnPanel` + `staleSelectedPanelNeverHighlightsElsewhere` |
 | `make` 恒传 `nil` | `selectedIDOnlyReachesItsOwnPanel` |
+| 删掉 `rebuildRenderState` 里那两行订阅锚点 | `rebuildRenderStateSubscribesToPanelState` |
 | `setSelection` 里顺手 `drawingsRevision += 1`（模拟"选中当成内容变更"） | `selectionNeverPersists`（该变异需改引擎；若不便，改为在 `setSelection` 里改一条 `drawings` 元素） |
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add ios/Contracts/Sources/KlineTrainerContracts/Render/KLineRenderState.swift \
         ios/Contracts/Sources/KlineTrainerContracts/Render/RenderStateBuilder.swift \
+        ios/Contracts/Sources/KlineTrainerContracts/Render/ChartContainerView.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Render/KLineRenderStateTests.swift \
-        ios/Contracts/Tests/KlineTrainerContractsTests/Render/RenderStateBuilderTests.swift
-git commit -m "划线 P1b-1b-i PR-3 T3：选中二元组流进 KLineRenderState（D41/D55，选中态不落盘）"
+        ios/Contracts/Tests/KlineTrainerContractsTests/Render/RenderStateBuilderTests.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift
+git commit -m "划线 P1b-1b-i PR-3 T3：选中二元组流进 KLineRenderState + 两面板订阅锚点（D41/D55）"
 ```
 
 ---
@@ -999,7 +1034,7 @@ git commit -m "划线 P1b-1b-i PR-3 T4：选中高亮渲染（D55 render 增 isS
 - Create: `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingHitTester.swift`
 - Create: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingHitTesterTests.swift`
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/Render/ChartContainerView.swift:292-306`
-- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/ChartContainerViewDrawingSessionTests.swift`（追加 **7 条，全部 UIKit-gated**：复盘门正反两条 / D37 未命中清空（含渲染态断言）/ D54 画线态不 hitTest / 盾 × 选择态两条 / 选中高亮像素级端到端）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/ChartContainerViewDrawingSessionTests.swift`（追加 **8 条，全部 UIKit-gated**：复盘门正反两条 / D37 未命中清空（含渲染态断言）/ D54 画线态不 hitTest / 盾 × 选择态两条 / 选中高亮像素级端到端 / 跨面板 sibling 不残留高亮）
 
 **Interfaces:**
 - Consumes: Task 1 的 `visibleDrawings`、Task 2 的 `setSelection`/`clearSelection`、Task 4 的 `KLineView.drawingTools`
@@ -1151,7 +1186,7 @@ cd "…/ios/Contracts" && swift test --filter DrawingHitTester 2>&1 | tail -20
 
 Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**（`firstHit(` 在 `ChartContainerView.swift` 里还没有调用点——它要到 Step 6 才接上）。这是预期的中间态，**不要**为了让它变绿而提前接线或放宽断言；Step 7 会确认它转绿。
 
-- [ ] **Step 5: 写 UIKit 接线测试（7 条，uikit 基线 +7）**
+- [ ] **Step 5: 写 UIKit 接线测试（8 条，uikit 基线 +8）**
 
 全部追加到 `Render/ChartContainerViewDrawingSessionTests.swift`（**同一个 `@Suite struct` 内**，复用它既有的 `bounds` / `makeRig()` / `mainChartPoint(_:)` 三个 private 成员 —— 实测在 `:17` / `:20-32` / `:39-45`）。
 ⚠️ **禁止把测试体写成占位注释**（`/* 见下方要点 */` 之类）：Swift Testing 会把空测试记成「通过」，uikit 基线一更新就等于给这几条最高危的信任边界发了假绿通行证。**没有断言的测试 = 没有测试**。
@@ -1238,6 +1273,11 @@ Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**�
         let p = mainChartPoint(upperV)
         upperC.handleDrawingTapForTesting(at: p)                   // 画线态落一条
         #expect(engine.drawings.count == 1)                        // 前提成立
+        // ⚠️ `.draw` 分支在 `routeDrawingCommit` 之后**不**重建渲染态（既有行为，生产靠 observation
+        //    刷新；本 rig 是直连 Coordinator，不经 updateUIView）→ 不补这一次重建，`upperV.renderState`
+        //    里还没有这条线，下面的 `before` 会是空的（codex plan-R4-F2）。
+        upperC.rebuildRenderState(bounds: bounds)
+        #expect(upperV.renderState.drawings.count == 1)             // 前提成立：线真的进渲染态了
         engine.drawingSession.setMode(.select)
 
         // 选中前：画出来的是它自己的 colorToken 色
@@ -1258,6 +1298,36 @@ Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**�
             sels.contains { abs(px.r - CGFloat($0.red)) < 0.06 && abs(px.b - CGFloat($0.blue)) < 0.06 }
         }, "选中的线必须以选中色画出（D55）")
         #expect(before != after, "选中前后画面必须真的不同，否则高亮等于没做")
+    }
+
+    @Test("D41 跨面板：在另一个面板选中后，原面板刷新时高亮必须消失（不得两条同时高亮）")
+    func selectingInOtherPanelUnhighlightsSibling() {
+        let (engine, upperC, lowerC, upperV, lowerV) = makeRig()
+        engine.toggleDrawingMode()
+        let pUp = mainChartPoint(upperV), pLow = mainChartPoint(lowerV)
+        upperC.handleDrawingTapForTesting(at: pUp)                 // 上面板一条
+        lowerC.handleDrawingTapForTesting(at: pLow)                // 下面板一条
+        #expect(engine.drawings.count == 2)                        // 前提成立
+        engine.drawingSession.setMode(.select)
+
+        lowerC.handleDrawingTapForTesting(at: pLow)                // 先选中下面板那条
+        let lowID = engine.drawingSession.selectedDrawingID
+        #expect(lowID != nil)                                      // 前提成立
+        #expect(lowerV.renderState.selectedDrawingID == lowID)     // 下面板确实高亮着
+        upperC.rebuildRenderState(bounds: bounds)
+        #expect(upperV.renderState.selectedDrawingID == nil, "上面板不该被下面板的选中点亮（二元组门）")
+
+        upperC.handleDrawingTapForTesting(at: pUp)                 // 改选上面板那条
+        #expect(engine.drawingSession.selectedPanel == .upper)
+        #expect(upperV.renderState.selectedDrawingID == engine.drawingSession.selectedDrawingID)
+
+        // ⚠️ 本 rig 是直连 Coordinator、不经 `updateUIView` → sibling 不会自动刷新，必须手动触发一次
+        //    （生产靠 observation：`rebuildRenderState` 在 bounds 守卫**之前**显式读了选中二元组，
+        //     Task 3 Step 5 已建立该订阅，并由 `rebuildRenderStateSubscribesToPanelState` 源码守卫钉死；
+        //     observation 的真实触发**单测测不到**，同本仓「图表冻结」那次回归的处置）。
+        lowerC.rebuildRenderState(bounds: bounds)
+        #expect(lowerV.renderState.selectedDrawingID == nil,
+                "下面板刷新后必须不再高亮 —— 否则屏幕上会同时有两条选中线")
     }
 
     /// 把 `view` 当前 renderState 画进一张 bitmap，返回线像素的（反 premultiplied）颜色。
@@ -1343,7 +1413,7 @@ Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**�
 ⚠️ 三条实施注意：
 - `TrainingEngineDrawingCommitTests.reviewEngine()` 是 `static func`（非 private，实测 `:77`）→ 跨文件可调；但**先核实**它仍是 `static` 且签名带默认参数，变了就照实际写。
 - `mainChartPoint(_:)` 的注释（`:36-38`）说明了为什么不能用 `mainChartFrame.midX`——preview rig 可见 slice 只有 1 根、midX 落在 overscroll 空白区会被 fail-closed 拒掉。`makeReviewRig()` 的 engine 是 `.m3`×100 根，情况不同但同一个 helper 依然正确（它按 `viewport.startIndex` 算）。
-- 七条测试都**必须**先断言「前提成立」再断言结论（每条都写了）——否则 rig 一坏（比如 tap 根本没落线）所有"不应发生"的断言全部恒真。
+- 八条测试都**必须**先断言「前提成立」再断言结论（每条都写了）——否则 rig 一坏（比如 tap 根本没落线）所有"不应发生"的断言全部恒真。
 
 - [ ] **Step 6: 接 `handleDrawingTap`**
 
@@ -1657,7 +1727,7 @@ grep -c '✔' /tmp/catalyst-pr3.log; grep 'Test run with' /tmp/catalyst-pr3.log 
 - [ ] **Step 6: total 基线（仅当漂出 1625 ± 30）**
 
 只有 G7 报「高于上限 / 低于下限」时才做：把 Step 4 实测的 total 写进 `.github/scripts/catalyst-total-baseline.txt`，并同步 `catalyst-gate.test.sh` 里「活基线覆盖」用例的回显数字，然后**重跑 Step 3 与 Step 4**。
-本切片预计新增 UIKit-gated 测试 **9 条**（Task 4 的 dispatch 2 条 + Task 5 的 7 条）+ host 测试若干 → total 很可能仍在 `1625 ± 30` 带内、**无需** bump；uikit 基线则**无论如何都要**改（Step 2）。
+本切片预计新增 UIKit-gated 测试 **10 条**（Task 4 的 dispatch 2 条 + Task 5 的 8 条）+ host 测试若干 → total 很可能仍在 `1625 ± 30` 带内、**无需** bump；uikit 基线则**无论如何都要**改（Step 2）。
 
 ⚠️ 本 Task 动了 `.github/**` = trust-boundary → **必须触发重新 attest**（Task 8）。
 
