@@ -155,23 +155,53 @@ Expected：`Test run with N tests ... passed`，**记下 N**（后续每个 Task
     }
 
     @MainActor
-    @Test("D40：visibleDrawings 保留 review 叠加层与 revealTick 渐显（抽函数不得改变行为）")
-    func visibleDrawingsKeepsReviewOverlayAndRevealGate() {
-        let r = TrainingEngine.preview(mode: .review)
+    @Test("D40：review 下叠加**两层** —— 原训练线 drawings + 复盘新画线 reviewDrawings，顺序 committed 在前")
+    func visibleDrawingsOverlaysBothLayersInReview() {
+        let r = TrainingEngine.preview(mode: .review)          // upper=.m60 / lower=.daily
         let a = DrawingAnchor(period: .m60, candleIndex: 0, price: 10.3)
-        // 原训练线：revealTick 0（恒已揭示）；复盘新画线：revealTick 5（tick=0 时未到）
-        r.setDrawingsForTesting([DrawingObject(id: "TRAIN", toolType: .horizontal, anchors: [a],
-                                               isExtended: false, panelPosition: 0, revealTick: 0)])
+        // ⚠️ **两层都必须种上**：只测 reviewDrawings 那一半的话，一个漏掉 `engine.drawings +` 的
+        //    `visibleDrawings` 实现照样全绿，而它会让**复盘里原训练线整片消失**（codex plan-R2-F2）。
+        //    review 模式下 `appendDrawing` 被 `flow.mode != .review` 拒（`TrainingEngine.swift:1147`），
+        //    故 committed 层用 DEBUG 注入钩子 `injectDrawingsForTesting`（`TrainingEngine.swift:1442`）种。
+        r.injectDrawingsForTesting([DrawingObject(id: "TRAIN", toolType: .horizontal, anchors: [a],
+                                                  isExtended: false, panelPosition: 0, revealTick: 0)])
+        #expect(r.drawings.map(\.id) == ["TRAIN"])              // 前提：committed 层真的种进去了
         #expect(r.appendReviewDrawing(DrawingObject(id: "LATE", toolType: .horizontal, anchors: [a],
                                                     isExtended: false, panelPosition: 0,
                                                     revealTick: 5)) == true)
+        // tick=0：复盘线未揭示 → 只剩原训练线（**这一条钉死 committed 层没被丢**）
         #expect(RenderStateBuilder.visibleDrawings(engine: r, panel: .upper, tick: 0).map(\.id) == ["TRAIN"])
+        // tick=5：两层都在，顺序 = drawings 在前、reviewDrawings 在后（渲染序 = z-order，复盘线画在上面）
         #expect(RenderStateBuilder.visibleDrawings(engine: r, panel: .upper, tick: 5).map(\.id) == ["TRAIN", "LATE"])
-        // 非 review 模式**不**叠加 reviewDrawings
+    }
+
+    @MainActor
+    @Test("D40：渐显门对**两层一视同仁** —— committed 层的 revealTick 同样生效，不是无条件放行")
+    func revealGateAppliesToCommittedLayerToo() {
+        let r = TrainingEngine.preview(mode: .review)
+        let a = DrawingAnchor(period: .m60, candleIndex: 0, price: 10.3)
+        r.injectDrawingsForTesting([DrawingObject(id: "TRAIN_LATE", toolType: .horizontal, anchors: [a],
+                                                  isExtended: false, panelPosition: 0, revealTick: 4)])
+        #expect(r.drawings.map(\.id) == ["TRAIN_LATE"])        // 前提成立
+        #expect(RenderStateBuilder.visibleDrawings(engine: r, panel: .upper, tick: 3).isEmpty,
+                "revealTick=4 在 tick=3 时未揭示 —— committed 层也要过渐显门")
+        #expect(RenderStateBuilder.visibleDrawings(engine: r, panel: .upper, tick: 4).map(\.id) == ["TRAIN_LATE"])
+    }
+
+    @MainActor
+    @Test("D40：**非** review 模式不叠加 reviewDrawings（叠加层是 review 专属）")
+    func visibleDrawingsExcludesReviewLayerOutsideReview() {
         let n = TrainingEngine.preview(mode: .normal)
+        let a = DrawingAnchor(period: .m60, candleIndex: 0, price: 10.3)
         #expect(n.appendDrawing(DrawingObject(id: "N", toolType: .horizontal, anchors: [a],
                                               isExtended: false, panelPosition: 0)) == true)
-        #expect(RenderStateBuilder.visibleDrawings(engine: n, panel: .upper, tick: 9).map(\.id) == ["N"])
+        // normal 模式下 `appendReviewDrawing` 走不通 → 用 DEBUG 钩子直接置（`TrainingEngine.swift:1437`），
+        // 否则 reviewDrawings 恒空、"不叠加" 这条断言恒真 = 什么也没测到。
+        n.setReviewDrawingsForTesting([DrawingObject(id: "R", toolType: .horizontal, anchors: [a],
+                                                     isExtended: false, panelPosition: 0, revealTick: 0)])
+        #expect(n.reviewDrawings.map(\.id) == ["R"])           // 前提成立（防恒真）
+        #expect(RenderStateBuilder.visibleDrawings(engine: n, panel: .upper, tick: 9).map(\.id) == ["N"],
+                "非 review 模式绝不能把复盘层混进渲染/命中集合")
     }
 
     @Test("D40 源码守卫：可见性判据在 Sources/ 中**各只出现一次**（不得各写一遍）")
@@ -195,13 +225,11 @@ Expected：`Test run with N tests ... passed`，**记下 N**（后续每个 Task
     }
 ```
 
-⚠️ 上面用到的 `setDrawingsForTesting` **可能不存在**。实施第一步先跑：
+⚠️ 上面用到的两个 DEBUG 钩子已对源码核实存在（`TrainingEngine.swift` 末尾 `#if DEBUG extension TrainingEngine`）：
+- `injectDrawingsForTesting(_ ds: [DrawingObject])`（`:1442`，注释原文「仅测试：直接置换 `drawings`，绕过全部写入门」，**不动 `drawingsRevision`**）
+- `setReviewDrawingsForTesting(_ drawings: [DrawingObject])`（`:1437`）
 
-```bash
-grep -rn "ForTesting" ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift | head -20
-```
-
-若没有等价的 DEBUG 注入钩子，**改用生产 API 构造**：review 引擎下先 `appendDrawing`（`TrainingEngine.swift:1147` 的 `guard flow.mode != .review` 会拒）→ 拒了就改成先用 `.normal` 引擎 append 再切不了模式 → **正解是**：用 `TrainingEngine.preview(mode: .review)` + `appendReviewDrawing` 两条（一条 `revealTick: 0`、一条 `revealTick: 5`）验渐显与叠加，**放弃**「原训练线」那一半（`drawings` 在 review 下没有生产写入口）。**不要**为了这条测试新造一个生产写入面。
+实施第一步仍先 `grep -n "ForTesting" ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift` 确认签名没变；**不得**为这几条测试新开任何生产写入面。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -948,7 +976,7 @@ git commit -m "划线 P1b-1b-i PR-3 T4：选中高亮渲染（D55 render 增 isS
 - Create: `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingHitTester.swift`
 - Create: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingHitTesterTests.swift`
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/Render/ChartContainerView.swift:292-306`
-- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/ChartContainerViewDrawingSessionTests.swift`（追加，**UIKit-gated**）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/ChartContainerViewDrawingSessionTests.swift`（追加 **6 条，全部 UIKit-gated**：复盘门正反两条 / D37 未命中清空 / D54 画线态不 hitTest / 盾 × 选择态两条）
 
 **Interfaces:**
 - Consumes: Task 1 的 `visibleDrawings`、Task 2 的 `setSelection`/`clearSelection`、Task 4 的 `KLineView.drawingTools`
@@ -1100,38 +1128,144 @@ cd "…/ios/Contracts" && swift test --filter DrawingHitTester 2>&1 | tail -20
 
 Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**（`firstHit(` 在 `ChartContainerView.swift` 里还没有调用点——它要到 Step 6 才接上）。这是预期的中间态，**不要**为了让它变绿而提前接线或放宽断言；Step 7 会确认它转绿。
 
-- [ ] **Step 5: 写 UIKit 接线测试（会让 uikit 基线 +4）**
+- [ ] **Step 5: 写 UIKit 接线测试（6 条，uikit 基线 +6）**
 
-追加到 `Render/ChartContainerViewDrawingSessionTests.swift`（照该文件既有 fixture 与 `handleDrawingTapForTesting` 范式；先读一遍文件再写，**不要**新造一套 fixture）：
+全部追加到 `Render/ChartContainerViewDrawingSessionTests.swift`（**同一个 `@Suite struct` 内**，复用它既有的 `bounds` / `makeRig()` / `mainChartPoint(_:)` 三个 private 成员 —— 实测在 `:17` / `:20-32` / `:39-45`）。
+⚠️ **禁止把测试体写成占位注释**（`/* 见下方要点 */` 之类）：Swift Testing 会把空测试记成「通过」，uikit 基线一更新就等于给这几条最高危的信任边界发了假绿通行证。**没有断言的测试 = 没有测试**。
 
 ```swift
-    // MARK: - 1b-i PR-3：选择态 tap 接线（D34 复盘门 / D37 未命中清空 / D53 盾优先）
+    // MARK: - 1b-i PR-3：选择态 tap 接线（D34 复盘门 / D37 未命中清空 / D53 盾优先 / D54 画线态不 hitTest）
 
-    @MainActor
-    @Test("D34 trust-boundary：复盘模式的选择态 tap **不选中**（否则可改写已归档 record 的原训练线）")
-    func reviewModeNeverSelects() { /* 见下方要点 */ }
+    /// 复盘 rig：与 `makeRig()` 同构，但 engine 是 review flow。
+    /// engine 复用既有 `TrainingEngineDrawingCommitTests.reviewEngine()`（`:76-90`，两面板均 `.m3`）。
+    private func makeReviewRig() -> (TrainingEngine, ChartContainerView.Coordinator, KLineView) {
+        let engine = TrainingEngineDrawingCommitTests.reviewEngine()
+        let c = ChartContainerView(panel: .upper, engine: engine).makeCoordinator()
+        let v = KLineView(frame: bounds)
+        c.attach(to: v)
+        c.rebuildRenderState(bounds: bounds)     // 出真 viewport（candleStep > 0）
+        return (engine, c, v)
+    }
 
-    @MainActor
-    @Test("D34 反向对照（防过度 fail-closed）：复盘模式的**画线态** tap 照常落线，一字不回归")
-    func reviewModeStillDrawsInDrawMode() { /* 见下方要点 */ }
+    @Test("D34 反向对照（防过度 fail-closed）：复盘的**画线态** tap 照常落线 —— 复盘画线是既有功能，不得回归")
+    func reviewModeStillDrawsInDrawMode() {
+        let (engine, c, v) = makeReviewRig()
+        engine.toggleDrawingMode()
+        #expect(engine.drawingSession.drawingModeActive == true)   // 前提成立
+        #expect(engine.drawingSession.mode == .draw)               // 前提：默认就是画线态
 
-    @MainActor
-    @Test("D37：选择态点空白处 → 不落锚、不选中，且把原有选中清空")
-    func selectModeMissClearsSelectionAndDrawsNothing() { /* 见下方要点 */ }
+        c.handleDrawingTapForTesting(at: mainChartPoint(v))
 
-    @MainActor
-    @Test("D54：画线态单击**恒落锚**、绝不 hitTest —— 点在已有线上是又叠一条，不是选中它")
-    func drawModeTapAlwaysAnchorsNeverSelects() { /* 见下方要点 */ }
+        #expect(engine.reviewDrawings.count == 1, "复盘画线是 1a-iii 起的既有功能，本切片不得回归")
+        #expect(engine.drawings.isEmpty, "复盘新画线不得污染原训练线")
+    }
+
+    @Test("D34 trust-boundary：复盘的**选择态** tap 不选中（否则可改写已归档 record 里的原训练线）")
+    func reviewModeNeverSelects() {
+        let (engine, c, v) = makeReviewRig()
+        engine.toggleDrawingMode()
+        let p = mainChartPoint(v)
+        c.handleDrawingTapForTesting(at: p)                        // 先在画线态落一条，保证 p 上真有线可命中
+        #expect(engine.reviewDrawings.count == 1)                  // 前提成立（否则下面全是恒真）
+        engine.drawingSession.setMode(.select)
+        #expect(engine.drawingSession.mode == .select)
+
+        c.handleDrawingTapForTesting(at: p)                        // 同一点，选择态
+
+        #expect(engine.drawingSession.selectedDrawingID == nil, "复盘不得获得选中能力（D34 trust-boundary）")
+        #expect(engine.drawingSession.selectedPanel == nil)
+        #expect(engine.reviewDrawings.count == 1, "选择态也不落锚：不得又画出第二条")
+        #expect(engine.drawings.isEmpty)
+    }
+
+    @Test("D37：选择态未命中 → 清空选中、且不落锚（先命中建立选中，再点空白处）")
+    func selectModeMissClearsSelectionAndDrawsNothing() {
+        let (engine, upperC, _, upperV, _) = makeRig()
+        engine.toggleDrawingMode()
+        let onLine = mainChartPoint(upperV)
+        upperC.handleDrawingTapForTesting(at: onLine)              // 画线态落一条
+        #expect(engine.drawings.count == 1)                        // 前提成立
+        engine.drawingSession.setMode(.select)
+        upperC.handleDrawingTapForTesting(at: onLine)              // 选择态命中它
+        let hitID = engine.drawings[0].id
+        #expect(engine.drawingSession.selectedDrawingID == hitID)  // 前提成立（否则"被清空"恒真）
+        #expect(engine.drawingSession.selectedPanel == .upper)
+
+        // 同一列、纵向挪开 60pt（远超 8pt 命中容差），仍落在主图内
+        let frame = upperV.renderState.viewport.mainChartFrame
+        let missY = onLine.y - 60 >= frame.minY ? onLine.y - 60 : onLine.y + 60
+        #expect(abs(missY - onLine.y) > 8)                         // 自证：这确实是个"未命中"的点
+        #expect(missY >= frame.minY && missY <= frame.maxY)        // 自证：仍在主图内（不是靠出界侥幸未命中）
+        upperC.handleDrawingTapForTesting(at: CGPoint(x: onLine.x, y: missY))
+
+        #expect(engine.drawingSession.selectedDrawingID == nil, "未命中必须清空选中（D37）")
+        #expect(engine.drawingSession.selectedPanel == nil)
+        #expect(engine.drawings.count == 1, "选择态未命中也绝不落锚")
+    }
+
+    @Test("D54：画线态单击**恒落锚**、绝不 hitTest —— 点在已有线上是又叠一条，不是选中它（验收 #5）")
+    func drawModeTapAlwaysAnchorsNeverSelects() {
+        let (engine, upperC, _, upperV, _) = makeRig()
+        engine.toggleDrawingMode()
+        let p = mainChartPoint(upperV)
+        upperC.handleDrawingTapForTesting(at: p)
+        #expect(engine.drawings.count == 1)                        // 前提成立
+        #expect(engine.drawingSession.mode == .draw)
+
+        upperC.handleDrawingTapForTesting(at: p)                   // 同一点再来一下
+
+        #expect(engine.drawings.count == 2, "画线态点在已有线上 = 又叠一条重合线，不是选中")
+        #expect(engine.drawingSession.selectedDrawingID == nil, "画线态永远不建立选中")
+    }
+
+    @Test("N6/D53：`.pending` 盾对**选择态**同样拒收 —— 既不选中也不落锚")
+    func pendingShieldRejectsSelectTap() {
+        let (engine, upperC, _, upperV, _) = makeRig()
+        engine.toggleDrawingMode()
+        let p = mainChartPoint(upperV)
+        upperC.handleDrawingTapForTesting(at: p)                   // 无盾时先落一条（保证 p 上有线）
+        #expect(engine.drawings.count == 1)                        // 前提成立
+        engine.drawingSession.setMode(.select)
+        engine.drawingSession.setStylePanelVisible(true)           // 两面板 → .pending（fail-closed 窗口）
+        #expect(engine.drawingSession.shield[0] == .pending)       // 前提成立
+
+        upperC.handleDrawingTapForTesting(at: p)
+
+        #expect(engine.drawingSession.selectedDrawingID == nil, ".pending 拒收一切 tap，选择态不例外（D53）")
+        #expect(engine.drawings.count == 1)
+    }
+
+    @Test("N6/D53：`.rect` 区内的选择态 tap 被挡、区外正常选中（证明分叉在盾之后、且盾不过度屏蔽）")
+    func rectShieldBlocksSelectInsideOnly() {
+        let (engine, upperC, _, upperV, _) = makeRig()
+        engine.toggleDrawingMode()
+        let p = mainChartPoint(upperV)
+        upperC.handleDrawingTapForTesting(at: p)
+        #expect(engine.drawings.count == 1)                        // 前提成立
+        let hitID = engine.drawings[0].id
+        engine.drawingSession.setMode(.select)
+
+        // ① 盾盖住 p → 拒收
+        let covering = CGRect(x: p.x - 20, y: p.y - 20, width: 40, height: 40)
+        #expect(covering.contains(p))                              // 自证：这个盾确实盖住了 p
+        engine.drawingSession.setShield(.rect(covering), panel: .upper)
+        upperC.handleDrawingTapForTesting(at: p)
+        #expect(engine.drawingSession.selectedDrawingID == nil, "盾内的 tap 既不落锚也不选中")
+
+        // ② 盾挪到别处（区外）→ 同一点正常选中。**没有这一半**，实现完全可以用「有盾就一律拒收」骗过 ①
+        let far = CGRect(x: 0, y: 0, width: 8, height: 8)
+        #expect(!far.contains(p))                                  // 自证：这个盾没盖住 p
+        engine.drawingSession.setShield(.rect(far), panel: .upper)
+        upperC.handleDrawingTapForTesting(at: p)
+        #expect(engine.drawingSession.selectedDrawingID == hitID, "盾外的 tap 应正常命中选中")
+        #expect(engine.drawings.count == 1, "选择态命中不落锚")
+    }
 ```
 
-四条测试的要点（实施时按文件既有 fixture 写实）：
-
-1. `reviewModeNeverSelects`：`TrainingEngine.preview(mode: .review)` + `appendReviewDrawing` 一条 `.m60` 线 → `beginDrawingSession(tool: .horizontal)` → `drawingSession.setMode(.select)` → `handleDrawingTapForTesting(at:)` 点在线上 → 断言 `session.selectedDrawingID == nil` **且** `reviewDrawings.count` 不变（既不选中也不落线）。
-2. `reviewModeStillDrawsInDrawMode`：同一个 review 引擎，`mode` 保持 `.draw` → tap → 断言 `reviewDrawings.count` **+1**。**这条是防"把复盘门提到 switch 之前"的唯一防线**（那样写复盘就再也画不了线了，是功能回归）。
-3. `selectModeMissClearsSelectionAndDrawsNothing`：`.normal` 引擎，append 一条线在价位 A → 进选择态 → 先 tap 命中它（断言选中建立）→ 再 tap 一个远离任何线的点 → 断言 `selectedDrawingID == nil` 且 `drawings.count` 不变。
-4. `drawModeTapAlwaysAnchorsNeverSelects`：`.normal` 引擎，append 一条线 → **保持 `.draw`** → tap 在那条线上 → 断言 `drawings.count` **+1**（又叠一条）且 `selectedDrawingID == nil`。
-
-盾对选择态生效（D53/N6）已由既有 `DrawingTapHitShieldTests` 覆盖**画线态**那一半；本 Task 在该文件追加**选择态**对照两条：`.pending` 盾下选择态 tap 不选中、`.rect` 区内选择态 tap 不选中。位置在 `Render/DrawingTapHitShieldTests.swift`（也是 UIKit-gated，uikit 基线再 +2）。
+⚠️ 三条实施注意：
+- `TrainingEngineDrawingCommitTests.reviewEngine()` 是 `static func`（非 private，实测 `:77`）→ 跨文件可调；但**先核实**它仍是 `static` 且签名带默认参数，变了就照实际写。
+- `mainChartPoint(_:)` 的注释（`:36-38`）说明了为什么不能用 `mainChartFrame.midX`——preview rig 可见 slice 只有 1 根、midX 落在 overscroll 空白区会被 fail-closed 拒掉。`makeReviewRig()` 的 engine 是 `.m3`×100 根，情况不同但同一个 helper 依然正确（它按 `viewport.startIndex` 算）。
+- 六条测试都**必须**先断言「前提成立」再断言结论（每条都写了）——否则 rig 一坏（比如 tap 根本没落线）所有"不应发生"的断言全部恒真。
 
 - [ ] **Step 6: 接 `handleDrawingTap`**
 
@@ -1206,8 +1340,7 @@ Expected：host 全绿，**含 Step 4 那条一直红着的 `hitDispatchIsSingle
 git add ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingHitTester.swift \
         ios/Contracts/Sources/KlineTrainerContracts/Render/ChartContainerView.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingHitTesterTests.swift \
-        ios/Contracts/Tests/KlineTrainerContractsTests/Render/ChartContainerViewDrawingSessionTests.swift \
-        ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingTapHitShieldTests.swift
+        ios/Contracts/Tests/KlineTrainerContractsTests/Render/ChartContainerViewDrawingSessionTests.swift
 git commit -m "划线 P1b-1b-i PR-3 T5：hitTest 接进生产 tap 路径（D33 逆序 + D34 复盘门只包选择态 + D37 未命中清空）"
 ```
 
@@ -1384,6 +1517,14 @@ git diff --stat .github/scripts/catalyst-uikit-baseline.txt
 
 ⚠️ **必须用这条生成命令，禁手打测试名**（`catalyst-uikit-baseline-reader.py:12-13` 明写「不要手打测试名，转录错误无法复核」）。
 Expected：diff 里**只有新增行**、没有删除行（本切片没删任何 UIKit-gated 测试）。若出现删除行 → **停下报告**，说明改动误伤了既有 UIKit 测试。
+
+⚠️ **重生成基线之前，先逐条检查新增的 UIKit-gated 测试体不是空的 / 没有断言**（codex plan-R2-F1）：基线一更新，这几条就成了「闸门声称在守护」的测试；若其中有空体或只写了注释的，等于给最高危的信任边界发了一张假绿通行证。逐条打开确认每个测试都**既有前提断言、也有结论断言**：
+
+```bash
+# 列出本切片新增的 UIKit-gated 测试名与它们所在的行，逐条人工过一遍（不是 grep 就算数）
+git diff origin/main...HEAD -- ios/Contracts/Tests | grep -n '^+.*@Test(\|^+.*func \|^+.*#expect(' | head -60
+```
+判据：**任何一条新 `@Test` 的函数体里若一个 `#expect` 都没有 → 停下补齐，不许进基线。**
 
 - [ ] **Step 3: 闸门自测（先于 xcodebuild，验基线一致性）**
 
