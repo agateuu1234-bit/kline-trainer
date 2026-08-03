@@ -790,8 +790,11 @@ git commit -m "划线 P1b-1b-i PR-3 T3：选中二元组流进 KLineRenderState 
     @MainActor
     @Test("D55：isSelected == true 时描边改用选中色；false 时仍是 colorToken 的色（同一条线两次渲染可区分）")
     func selectedStrokeUsesSelectionColor() {
+        // ⚠️ `price: 15` / `period: .m3` 是本文件 `Self.mapper()` 的量纲（`priceRange(min:10,max:20)`，
+        //    `:11-18` 实测；既有测试全用 15）。用 100 会让 `visibleGeometry` 返 nil → 一条线都画不出来，
+        //    下面「必须画出了线」当场红（codex plan-R5-F2）。
         let d = DrawingObject(toolType: .horizontal,
-                              anchors: [DrawingAnchor(period: .m60, candleIndex: 5, price: 100)],
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
                               isExtended: false, panelPosition: 0, colorToken: .orange)
         let normal = Self.renderPixelsSelected(d, scheme: .light, isSelected: false)
         let picked = Self.renderPixelsSelected(d, scheme: .light, isSelected: true)
@@ -809,8 +812,8 @@ git commit -m "划线 P1b-1b-i PR-3 T3：选中二元组流进 KLineRenderState 
     @MainActor
     @Test("D55：选中高亮只换颜色 —— 线宽 / 线型 / 几何一字不动")
     func selectionChangesColorOnly() {
-        let d = DrawingObject(toolType: .horizontal,
-                              anchors: [DrawingAnchor(period: .m60, candleIndex: 5, price: 100)],
+        let d = DrawingObject(toolType: .horizontal,                 // 同上：15 在 mapper 的 10...20 内
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
                               isExtended: false, panelPosition: 0,
                               lineStyle: .dash1, thickness: 4, colorToken: .orange)
         let normal = Self.renderPixelsSelected(d, scheme: .light, isSelected: false)
@@ -1034,7 +1037,7 @@ git commit -m "划线 P1b-1b-i PR-3 T4：选中高亮渲染（D55 render 增 isS
 - Create: `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingHitTester.swift`
 - Create: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingHitTesterTests.swift`
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/Render/ChartContainerView.swift:292-306`
-- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/ChartContainerViewDrawingSessionTests.swift`（追加 **8 条，全部 UIKit-gated**：复盘门正反两条 / D37 未命中清空（含渲染态断言）/ D54 画线态不 hitTest / 盾 × 选择态两条 / 选中高亮像素级端到端 / 跨面板 sibling 不残留高亮）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/ChartContainerViewDrawingSessionTests.swift`（追加 **10 条，全部 UIKit-gated**：复盘门正反两条 / D37 未命中清空（含渲染态断言）/ D54 画线态不 hitTest / 盾 × 选择态两条 / D40 路由行为级两条（未揭示线、他面板线）/ 选中高亮像素级端到端 / 跨面板 sibling 不残留高亮）
 
 **Interfaces:**
 - Consumes: Task 1 的 `visibleDrawings`、Task 2 的 `setSelection`/`clearSelection`、Task 4 的 `KLineView.drawingTools`
@@ -1119,6 +1122,18 @@ struct DrawingHitTesterTests {
         #expect(entries.count == 1, "firstHit 的调用点不是 1 处：\(entries)")
         #expect(entries.first?.file.hasSuffix("/Render/ChartContainerView.swift") == true)
         #expect(entries.first?.count == 1)
+        // ③ **只数调用点不够（codex plan-R5-F1）**：`firstHit(in: engine.drawings, …)` 同样只有 1 处调用点，
+        //    却绕过了 belongsToPanel + revealTick 过滤 → 能选中本面板根本没渲染的线。故必须钉**入参来源**：
+        //    唯一那处调用的列表必须来自 `RenderStateBuilder.visibleDrawings`。
+        let route = try squeezedSource(entries[0].file)
+        #expect(route.contains(squeeze("let ordered = RenderStateBuilder.visibleDrawings(")),
+                "命中列表必须来自 visibleDrawings（D40 单一真相）")
+        #expect(route.contains(squeeze("DrawingHitTester.firstHit(in: ordered,")),
+                "firstHit 必须消费上面那个 ordered，不得另喂一个集合")
+        // 反向：路由里不得直接把引擎数组喂进命中（这才是真正要挡的形状）
+        #expect(!route.contains(squeeze("firstHit(in: engine.drawings")))
+        #expect(!route.contains(squeeze("firstHit(in: engine.reviewDrawings")))
+        #expect(!route.contains(squeeze("firstHit(in: view.renderState.drawings")))
         // ③ 自足断言：扫描器真的扫到东西了（防扫描根写错 → 空集合 → 上面 `count == 1` 直接红而非假绿，
         //    但仍显式钉一条，与既有守卫的纪律一致）。
         #expect(try !allSwiftFilesUnderSources().isEmpty)
@@ -1186,7 +1201,7 @@ cd "…/ios/Contracts" && swift test --filter DrawingHitTester 2>&1 | tail -20
 
 Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**（`firstHit(` 在 `ChartContainerView.swift` 里还没有调用点——它要到 Step 6 才接上）。这是预期的中间态，**不要**为了让它变绿而提前接线或放宽断言；Step 7 会确认它转绿。
 
-- [ ] **Step 5: 写 UIKit 接线测试（8 条，uikit 基线 +8）**
+- [ ] **Step 5: 写 UIKit 接线测试（10 条，uikit 基线 +10）**
 
 全部追加到 `Render/ChartContainerViewDrawingSessionTests.swift`（**同一个 `@Suite struct` 内**，复用它既有的 `bounds` / `makeRig()` / `mainChartPoint(_:)` 三个 private 成员 —— 实测在 `:17` / `:20-32` / `:39-45`）。
 ⚠️ **禁止把测试体写成占位注释**（`/* 见下方要点 */` 之类）：Swift Testing 会把空测试记成「通过」，uikit 基线一更新就等于给这几条最高危的信任边界发了假绿通行证。**没有断言的测试 = 没有测试**。
@@ -1298,6 +1313,55 @@ Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**�
             sels.contains { abs(px.r - CGFloat($0.red)) < 0.06 && abs(px.b - CGFloat($0.blue)) < 0.06 }
         }, "选中的线必须以选中色画出（D55）")
         #expect(before != after, "选中前后画面必须真的不同，否则高亮等于没做")
+    }
+
+    @Test("D40 路由（行为级）：最上层但**未揭示**的线不得被选中 —— 证明命中吃的是 visibleDrawings 不是 engine.drawings")
+    func hitIgnoresUnrevealedTopmostLine() {
+        let (engine, upperC, _, upperV, _) = makeRig()
+        engine.toggleDrawingMode()
+        let p = mainChartPoint(upperV)
+        upperC.handleDrawingTapForTesting(at: p)                   // 画线态落一条（revealTick = 当时 tick）
+        #expect(engine.drawings.count == 1)                        // 前提成立
+        let visible = engine.drawings[0]
+        // 在它**之上**（数组末尾 = z-order 最上层）注入一条同几何、但 revealTick 远在未来的线。
+        // 命中若直接吃 `engine.drawings`（绕过渐显过滤），逆序第一个命中的就是这条幽灵线。
+        let ghost = DrawingObject(id: "UNREVEALED", toolType: visible.toolType, anchors: visible.anchors,
+                                  isExtended: visible.isExtended, panelPosition: visible.panelPosition,
+                                  revealTick: engine.tick.globalTickIndex + 9_999, period: visible.period)
+        engine.injectDrawingsForTesting([visible, ghost])
+        engine.drawingSession.setMode(.select)
+
+        upperC.handleDrawingTapForTesting(at: p)
+
+        #expect(engine.drawingSession.selectedDrawingID == visible.id,
+                "未揭示的线不在渲染集合里 → 也不该在命中集合里（D40）")
+    }
+
+    @Test("D40 路由（行为级）：属于**另一个面板**的线不得在本面板被选中（belongsToPanel 过滤真的生效）")
+    func hitIgnoresOtherPanelLine() {
+        let (engine, upperC, _, upperV, _) = makeRig()
+        engine.toggleDrawingMode()
+        let p = mainChartPoint(upperV)
+        upperC.handleDrawingTapForTesting(at: p)
+        #expect(engine.drawings.count == 1)                        // 前提成立
+        let mine = engine.drawings[0]
+        #expect(mine.period == engine.upperPanel.period)           // 前提：它确实属于上面板
+        #expect(engine.upperPanel.period != engine.lowerPanel.period)   // 前提：两面板周期不同（非 fail-safe 态）
+        // 同几何、同 revealTick，但 period 绑到**下**面板 → belongsToPanel 判它不属于上面板
+        let other = DrawingObject(id: "OTHER_PANEL", toolType: mine.toolType,
+                                  anchors: [DrawingAnchor(period: engine.lowerPanel.period,
+                                                          candleIndex: mine.anchors[0].candleIndex,
+                                                          price: mine.anchors[0].price)],
+                                  isExtended: mine.isExtended, panelPosition: 1,
+                                  revealTick: mine.revealTick, period: engine.lowerPanel.period)
+        engine.injectDrawingsForTesting([mine, other])
+        engine.drawingSession.setMode(.select)
+
+        upperC.handleDrawingTapForTesting(at: p)
+
+        #expect(engine.drawingSession.selectedDrawingID == mine.id,
+                "另一个面板的线不在本面板渲染集合里 → 也不该在本面板命中集合里（D40/D29）")
+        #expect(engine.drawingSession.selectedPanel == .upper)
     }
 
     @Test("D41 跨面板：在另一个面板选中后，原面板刷新时高亮必须消失（不得两条同时高亮）")
@@ -1413,7 +1477,7 @@ Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**�
 ⚠️ 三条实施注意：
 - `TrainingEngineDrawingCommitTests.reviewEngine()` 是 `static func`（非 private，实测 `:77`）→ 跨文件可调；但**先核实**它仍是 `static` 且签名带默认参数，变了就照实际写。
 - `mainChartPoint(_:)` 的注释（`:36-38`）说明了为什么不能用 `mainChartFrame.midX`——preview rig 可见 slice 只有 1 根、midX 落在 overscroll 空白区会被 fail-closed 拒掉。`makeReviewRig()` 的 engine 是 `.m3`×100 根，情况不同但同一个 helper 依然正确（它按 `viewport.startIndex` 算）。
-- 八条测试都**必须**先断言「前提成立」再断言结论（每条都写了）——否则 rig 一坏（比如 tap 根本没落线）所有"不应发生"的断言全部恒真。
+- 十条测试都**必须**先断言「前提成立」再断言结论（每条都写了）——否则 rig 一坏（比如 tap 根本没落线）所有"不应发生"的断言全部恒真。
 
 - [ ] **Step 6: 接 `handleDrawingTap`**
 
@@ -1727,7 +1791,7 @@ grep -c '✔' /tmp/catalyst-pr3.log; grep 'Test run with' /tmp/catalyst-pr3.log 
 - [ ] **Step 6: total 基线（仅当漂出 1625 ± 30）**
 
 只有 G7 报「高于上限 / 低于下限」时才做：把 Step 4 实测的 total 写进 `.github/scripts/catalyst-total-baseline.txt`，并同步 `catalyst-gate.test.sh` 里「活基线覆盖」用例的回显数字，然后**重跑 Step 3 与 Step 4**。
-本切片预计新增 UIKit-gated 测试 **10 条**（Task 4 的 dispatch 2 条 + Task 5 的 8 条）+ host 测试若干 → total 很可能仍在 `1625 ± 30` 带内、**无需** bump；uikit 基线则**无论如何都要**改（Step 2）。
+本切片预计新增 UIKit-gated 测试 **12 条**（Task 4 的 dispatch 2 条 + Task 5 的 10 条）+ host 测试约 23 条 → 合计约 **+35**，**很可能把 total 顶出 `1625 ± 30`（上限 1655）→ 大概率要 bump**。以 Step 4 的实测数为准，别按这里的估算提前改。uikit 基线则**无论如何都要**改（Step 2）。
 
 ⚠️ 本 Task 动了 `.github/**` = trust-boundary → **必须触发重新 attest**（Task 8）。
 
