@@ -901,7 +901,30 @@ Expected：编译失败（`selectionRGBA` 不存在 / `render` 参数不匹配�
         ctx.setStrokeColor(...)   // 以下原样不动
 ```
 
-三个测试替身（`DrawingProtocolTests.swift:61` `FakeDrawingTool`、`SpecLiteralGuardTests.swift:44` `SignatureGuardTool`、`DrawDrawingsDispatchTests.swift:181` `SpyDrawingTool`）跟着改签名。`DrawingProtocolTests.swift:22` 附近若有 `tool.render(...)` 调用，补 `isSelected: false`。
+**⚠️ 签名迁移必须一次扫全（codex plan-R3-F1：原稿只列了 conformer，漏了调用点 → 整个 Task 编译不过）。**
+`render` 是 protocol requirement，Swift **不允许**在协议要求上给默认值 → **每一个** conformer 与**每一个**调用点都必须同 Task 迁完。`drawDrawings` 的 `selectedDrawingID` **刻意不给默认值**（给了默认值就等于允许未来某个调用点静默丢掉高亮）。
+
+**实测的全部迁移点（对 `f21cca1` 逐条 grep 得到，共 11 处）**：
+
+| 类别 | 位置 | 改法 |
+|---|---|---|
+| protocol 声明 | `Drawing/DrawingTool.swift:18` | 加 `isSelected: Bool` |
+| 生产 conformer | `Drawing/HorizontalLineTool.swift:82` | 加 `isSelected: Bool` + 消费它 |
+| 测试替身 ×3 | `Drawing/DrawingProtocolTests.swift:61` `FakeDrawingTool`／`Drawing/SpecLiteralGuardTests.swift:44` `SignatureGuardTool`／`Drawing/DrawDrawingsDispatchTests.swift:181` `SpyDrawingTool` | 加 `isSelected: Bool`（Spy 还要把 `received` 扩一维，见上） |
+| `render` 旧调用点 ×3 | `Render/KLineView+Drawing.swift:25`（生产）／`Drawing/DrawingProtocolTests.swift:25`／`Drawing/HorizontalLineToolTests.swift:102`（既有 `renderPixels` helper） | 生产处传 `drawing.id == selectedDrawingID`；两处测试传 `isSelected: false`（保持既有行为） |
+| `drawDrawings` 旧调用点 ×8 | `Render/KLineView.swift:106`（生产）＋ `Drawing/DrawDrawingsDispatchTests.swift:23, 41, 61, 80, 102, 127, 152` | 生产处传 `renderState.selectedDrawingID`；7 处既有测试传 `selectedDrawingID: nil`（保持既有行为） |
+
+- [ ] **Step 4b: 旧签名清扫（commit 前必跑，输出必须为空）**
+
+```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer/.claude/worktrees/drawing-p1b-1b-i-pr3"
+# 旧 render 签名（scheme 之后直接收尾，没有 isSelected）
+grep -rn "\.render(ctx:.*scheme: [^)]*)" ios/Contracts --include="*.swift" | grep -v "isSelected"
+# 旧 drawDrawings 签名（没有 selectedDrawingID）
+grep -rnA 4 "drawDrawings(" ios/Contracts --include="*.swift" | grep -v "func drawDrawings" | grep -B 4 "tools:" | grep -c "selectedDrawingID" 
+```
+Expected：第一条命令**无输出**；第二条的计数 == `drawDrawings` 调用点总数（8）。
+⚠️ 别只靠 `swift build` 报错来找——`#if canImport(UIKit)` 里的调用点在 host 上**根本不编译**，host 绿不代表 Catalyst 绿（本项目踩过：UIKit-gated 代码两头落空）。这条清扫是 host 阶段唯一能抓到它们的手段。
 
 - [ ] **Step 5: 接 dispatch**
 
@@ -976,7 +999,7 @@ git commit -m "划线 P1b-1b-i PR-3 T4：选中高亮渲染（D55 render 增 isS
 - Create: `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingHitTester.swift`
 - Create: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingHitTesterTests.swift`
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/Render/ChartContainerView.swift:292-306`
-- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/ChartContainerViewDrawingSessionTests.swift`（追加 **6 条，全部 UIKit-gated**：复盘门正反两条 / D37 未命中清空 / D54 画线态不 hitTest / 盾 × 选择态两条）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/ChartContainerViewDrawingSessionTests.swift`（追加 **7 条，全部 UIKit-gated**：复盘门正反两条 / D37 未命中清空（含渲染态断言）/ D54 画线态不 hitTest / 盾 × 选择态两条 / 选中高亮像素级端到端）
 
 **Interfaces:**
 - Consumes: Task 1 的 `visibleDrawings`、Task 2 的 `setSelection`/`clearSelection`、Task 4 的 `KLineView.drawingTools`
@@ -1128,7 +1151,7 @@ cd "…/ios/Contracts" && swift test --filter DrawingHitTester 2>&1 | tail -20
 
 Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**（`firstHit(` 在 `ChartContainerView.swift` 里还没有调用点——它要到 Step 6 才接上）。这是预期的中间态，**不要**为了让它变绿而提前接线或放宽断言；Step 7 会确认它转绿。
 
-- [ ] **Step 5: 写 UIKit 接线测试（6 条，uikit 基线 +6）**
+- [ ] **Step 5: 写 UIKit 接线测试（7 条，uikit 基线 +7）**
 
 全部追加到 `Render/ChartContainerViewDrawingSessionTests.swift`（**同一个 `@Suite struct` 内**，复用它既有的 `bounds` / `makeRig()` / `mainChartPoint(_:)` 三个 private 成员 —— 实测在 `:17` / `:20-32` / `:39-45`）。
 ⚠️ **禁止把测试体写成占位注释**（`/* 见下方要点 */` 之类）：Swift Testing 会把空测试记成「通过」，uikit 基线一更新就等于给这几条最高危的信任边界发了假绿通行证。**没有断言的测试 = 没有测试**。
@@ -1196,11 +1219,66 @@ Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**�
         let missY = onLine.y - 60 >= frame.minY ? onLine.y - 60 : onLine.y + 60
         #expect(abs(missY - onLine.y) > 8)                         // 自证：这确实是个"未命中"的点
         #expect(missY >= frame.minY && missY <= frame.maxY)        // 自证：仍在主图内（不是靠出界侥幸未命中）
+        // ⭐ 命中那一刻，**渲染态**也必须立刻带上它（只断言 session 状态证明不了用户看得见高亮）
+        #expect(upperV.renderState.selectedDrawingID == hitID,
+                "命中后必须立刻重建渲染态，否则本帧画的还是旧选中（D41/D55）")
+
         upperC.handleDrawingTapForTesting(at: CGPoint(x: onLine.x, y: missY))
 
         #expect(engine.drawingSession.selectedDrawingID == nil, "未命中必须清空选中（D37）")
         #expect(engine.drawingSession.selectedPanel == nil)
         #expect(engine.drawings.count == 1, "选择态未命中也绝不落锚")
+        #expect(upperV.renderState.selectedDrawingID == nil, "清空后渲染态也必须立刻不再高亮")
+    }
+
+    @Test("D41/D55 端到端：tap 命中 → 该条真的以选中色画出来（像素级，不只是状态位）")
+    func selectedLineActuallyRendersHighlighted() {
+        let (engine, upperC, _, upperV, _) = makeRig()
+        engine.toggleDrawingMode()
+        let p = mainChartPoint(upperV)
+        upperC.handleDrawingTapForTesting(at: p)                   // 画线态落一条
+        #expect(engine.drawings.count == 1)                        // 前提成立
+        engine.drawingSession.setMode(.select)
+
+        // 选中前：画出来的是它自己的 colorToken 色
+        let before = Self.litPixels(of: upperV)
+        #expect(!before.isEmpty, "对照组必须真的画出了线（否则下面的差异断言恒真）")
+
+        upperC.handleDrawingTapForTesting(at: p)                   // 选择态命中
+        #expect(engine.drawingSession.selectedDrawingID == engine.drawings[0].id)   // 前提成立
+
+        let after = Self.litPixels(of: upperV)
+        #expect(!after.isEmpty, "选中后线仍要画出来（不能因为高亮反而消失）")
+        // ⚠️ 不假设测试环境的 scheme（`KLineView.draw` 取 `themeController.resolve(trait:)`，
+        //    CI 上是 light 还是 dark 不由本测试决定）→ 两套选中色都认，判据仍然有力：
+        //    两者都 ≠ 任何 DrawingColorToken 的解析结果（`selectionColorIsOutsideTokenRange` 已钉死）。
+        let sels = [DrawingColorResolver.selectionRGBA(scheme: .light),
+                    DrawingColorResolver.selectionRGBA(scheme: .dark)]
+        #expect(after.contains { px in
+            sels.contains { abs(px.r - CGFloat($0.red)) < 0.06 && abs(px.b - CGFloat($0.blue)) < 0.06 }
+        }, "选中的线必须以选中色画出（D55）")
+        #expect(before != after, "选中前后画面必须真的不同，否则高亮等于没做")
+    }
+
+    /// 把 `view` 当前 renderState 画进一张 bitmap，返回线像素的（反 premultiplied）颜色。
+    /// 与 `HorizontalLineToolTests.litColumn` 同思路，但走的是**真实 `KLineView.draw(_:)` 派发链**
+    /// （renderState → drawDrawings → tool.render），这才证明得了「选中态一路流到了像素」。
+    private static func litPixels(of view: KLineView) -> [(r: CGFloat, g: CGFloat, b: CGFloat)] {
+        let w = Int(view.bounds.width), h = Int(view.bounds.height)
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        UIGraphicsPushContext(ctx)
+        view.draw(view.bounds)
+        UIGraphicsPopContext()
+        var out: [(CGFloat, CGFloat, CGFloat)] = []
+        for i in stride(from: 0, to: w * h * 4, by: 4) {
+            let a = CGFloat(data[i + 3]) / 255
+            guard a > 0.3 else { continue }
+            out.append((CGFloat(data[i]) / 255 / a, CGFloat(data[i + 1]) / 255 / a, CGFloat(data[i + 2]) / 255 / a))
+        }
+        return out
     }
 
     @Test("D54：画线态单击**恒落锚**、绝不 hitTest —— 点在已有线上是又叠一条，不是选中它（验收 #5）")
@@ -1265,7 +1343,7 @@ Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**�
 ⚠️ 三条实施注意：
 - `TrainingEngineDrawingCommitTests.reviewEngine()` 是 `static func`（非 private，实测 `:77`）→ 跨文件可调；但**先核实**它仍是 `static` 且签名带默认参数，变了就照实际写。
 - `mainChartPoint(_:)` 的注释（`:36-38`）说明了为什么不能用 `mainChartFrame.midX`——preview rig 可见 slice 只有 1 根、midX 落在 overscroll 空白区会被 fail-closed 拒掉。`makeReviewRig()` 的 engine 是 `.m3`×100 根，情况不同但同一个 helper 依然正确（它按 `viewport.startIndex` 算）。
-- 六条测试都**必须**先断言「前提成立」再断言结论（每条都写了）——否则 rig 一坏（比如 tap 根本没落线）所有"不应发生"的断言全部恒真。
+- 七条测试都**必须**先断言「前提成立」再断言结论（每条都写了）——否则 rig 一坏（比如 tap 根本没落线）所有"不应发生"的断言全部恒真。
 
 - [ ] **Step 6: 接 `handleDrawingTap`**
 
@@ -1308,6 +1386,15 @@ Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**�
                 } else {
                     session.clearSelection()                         // D37：未命中 → 先清空选中，**且不落锚**
                 }
+                // ⚠️ 选中态变了必须**立刻**重建渲染态（codex plan-R3-F2）：本函数开头 `:280` 的
+                //    `rebuildRenderState` 发生在选中改变**之前**，而高亮渲染读的是
+                //    `KLineRenderState.selectedDrawingID` → 不补这一次重建，本帧画出来的还是旧选中。
+                //    `KLineRenderState` 是 `Equatable` 且 `KLineView.renderState` 有
+                //    `didSet { guard renderState != oldValue else { return }; setNeedsDisplay() }`
+                //    （`KLineView.swift:16-21`）→ 只有 `selectedDrawingID` 变了的新状态照样触发重绘，
+                //    没变则不重绘（无多余绘制）。**不要**改成依赖 SwiftUI observation 顺带刷新：
+                //    Coordinator 这条直连路径不经过 `updateUIView`，那样等于没有证据。
+                rebuildRenderState(bounds: view.bounds)
             }
 ```
 
@@ -1570,7 +1657,7 @@ grep -c '✔' /tmp/catalyst-pr3.log; grep 'Test run with' /tmp/catalyst-pr3.log 
 - [ ] **Step 6: total 基线（仅当漂出 1625 ± 30）**
 
 只有 G7 报「高于上限 / 低于下限」时才做：把 Step 4 实测的 total 写进 `.github/scripts/catalyst-total-baseline.txt`，并同步 `catalyst-gate.test.sh` 里「活基线覆盖」用例的回显数字，然后**重跑 Step 3 与 Step 4**。
-本切片预计新增 UIKit-gated 测试 ~8 条（dispatch 2、Coordinator 4、盾 2）+ host 测试若干 → total 很可能仍在 `1625 ± 30` 带内、**无需** bump；uikit 基线则**无论如何都要**改（Step 2）。
+本切片预计新增 UIKit-gated 测试 **9 条**（Task 4 的 dispatch 2 条 + Task 5 的 7 条）+ host 测试若干 → total 很可能仍在 `1625 ± 30` 带内、**无需** bump；uikit 基线则**无论如何都要**改（Step 2）。
 
 ⚠️ 本 Task 动了 `.github/**` = trust-boundary → **必须触发重新 attest**（Task 8）。
 
