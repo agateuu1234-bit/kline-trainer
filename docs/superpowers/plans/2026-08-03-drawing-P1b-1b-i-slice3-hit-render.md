@@ -18,7 +18,11 @@
 - **base**：`f21cca1`（= main，含 PR-2 #154）。分支 `drawing-tools-p1b-1b-i-pr3`，worktree `.claude/worktrees/drawing-p1b-1b-i-pr3`。
 - **本切片零交互控件**：不做 🗑 键、不做确认框、不做类型行 toggle、不让样式面板作用于选中线 —— **全属 PR-4**。不做 🔒 / 撤销 / `setDrawingLocked` —— **全属 1b-ii**。
 - **PR-2 的两条零调用点守卫必须保持绿**：`TrainingEngineDrawingSessionTests.updateDrawingStyleTrustBoundary`（`updateDrawingStyle(` 在 `Sources/` 零调用点、`filesMentioning("updateDrawingStyle")` 只许出现在 `TrainingEngine.swift`）与 `deleteByIdTrustBoundary`（`deleteDrawing(id:` / `deleteDrawing(at:` 零调用点、`filesMentioning("deleteDrawing")` 白名单 = `TrainingEngine.swift` + `DrawingToolManager.swift`）。→ **本切片的任何新代码、新注释都不得提到这两个标识符**（守卫扫描剥注释，但 `filesMentioning` 按标识符扫剥注释后的代码；注释里提到是安全的，但仍不要写，避免评审误读）。
-- **Catalyst 闸门基线**（实测）：`total` = **1625**（`.github/scripts/catalyst-total-baseline.txt`）、`uikit` = **59**（`.github/scripts/catalyst-uikit-baseline.txt` 行数）、G7 容差 `DELTA` = **30**（`catalyst-gate.sh:227`）。本切片会新增 UIKit-gated 测试 → 两个基线都可能漂。漂出 ±30 时按闸门自带规则同步三文件，且 `pass-main-current.log` fixture **必须用一份真 fresh Catalyst 日志脚本逐行重裁，禁手打伪造行**。
+- **Catalyst 闸门基线**（实测）：`total` = **1625**（`.github/scripts/catalyst-total-baseline.txt`）、`uikit` = **59**（`.github/scripts/catalyst-uikit-baseline.txt` 行数）、G7 容差 `DELTA` = **30**（`catalyst-gate.sh:227`）。本切片**新增 UIKit-gated 测试** →
+  - `catalyst-uikit-baseline.txt` **无条件必须重新生成**（`python3 .github/scripts/uikit-expected-tests.py > …`，禁手打测试名）——它与 total 是否漂移**无关**：`catalyst-gate.test.sh:47-65` 会对当前源码活推导并与基线**逐行比对**，不一致即自测 FAIL；
+  - uikit 基线一改，`fixtures/pass-main-current.log` **必须用一份真 fresh Catalyst 日志脚本逐行重裁，禁手打伪造行**（`catalyst-gate.test.sh:379-380` 的维护规则）；
+  - `catalyst-total-baseline.txt` **只在** total 漂出 `1625 ± 30` 时才动。
+  - ⚠️ `catalyst-gate.sh` **不跑 xcodebuild**（`:24` `LOG="${1:?usage: catalyst-gate.sh <log-path>}"`）——必须自己先跑 `xcodebuild test` 产出日志再把路径传给它。完整命令见 Task 7。
 - **host 基线**（实测，PR-2 合并后 main）：待 Task 0 亲跑确认；PR-2 收尾时本地是 `1726 passed / 212 skipped`。
 - **命名一致性**（后续 Task 依赖，不得改名）：`visibleDrawings(engine:panel:tick:)` / `DrawingHitTester.firstHit(in:point:mapper:tools:)` / `DrawingSession.setSelection(id:panel:)` / `DrawingSession.clearSelection()` / `DrawingSession.selectedDrawingID` / `DrawingSession.selectedPanel` / `KLineRenderState.selectedDrawingID` / `DrawingColorResolver.selectionRGBA(scheme:)` / `DrawingTool.render(ctx:mapper:drawing:scheme:isSelected:)`。
 - **访问级别纪律**（1a-ii 起，`DrawingSession.swift:21-28` 大注释）：容器的**状态**是 `public private(set)`，**mutator 一律 internal**（前面不加 `public`）。新增的 `setSelection` / `clearSelection` 同样 internal，并纳入既有源码守卫。
@@ -1348,11 +1352,14 @@ git commit -m "划线 P1b-1b-i PR-3 T6：切周期善后清空选中（D54 claus
 
 ## Task 7：三绿门 + 基线同步
 
-**Files:**（仅当基线漂出 ±30 时）
-- Modify: `.github/scripts/catalyst-total-baseline.txt`
-- Modify: `.github/scripts/catalyst-uikit-baseline.txt`
-- Modify: `.github/scripts/fixtures/pass-main-current.log`
-- Modify: `.github/scripts/catalyst-gate.test.sh`（「活基线覆盖」回显数字）
+**Files:**
+- Modify（**本切片必改**，因为新增了 UIKit-gated 测试）：`.github/scripts/catalyst-uikit-baseline.txt`、`.github/scripts/fixtures/pass-main-current.log`
+- Modify（**仅当 total 漂出 1625±30**）：`.github/scripts/catalyst-total-baseline.txt`、`.github/scripts/catalyst-gate.test.sh`（「活基线覆盖」回显数字）
+
+> ⚠️ **本 Task 的两条纪律来自 codex plan-R1 的两条真 finding（已逐条对脚本核实）**：
+> ① `catalyst-gate.sh` 的第一行就是 `LOG="${1:?usage: catalyst-gate.sh <log-path>}"`（`:24`）——**它不跑 xcodebuild，只解析一份已存在的日志**。必须先自己跑 `xcodebuild test` 产出日志，再把日志路径传给它。
+> ② **新增 UIKit-gated 测试就必须重新生成 uikit 基线，与 total 是否漂移无关**。`catalyst-gate.test.sh:47-65` 有一条独立的一致性断言：对当前源码活推导 `uikit-expected-tests.py`，与签入的 `catalyst-uikit-baseline.txt` **逐行精确比对**，不一致即自测 FAIL。`.github/scripts/catalyst-gate.test.sh:379-380` 也把这条写成了维护规则：「任何改动 `catalyst-uikit-baseline.txt`、或让真实总用例数漂出基线±30 的 PR，**必须同时用一次真 Catalyst 构建日志重裁 `pass-main-current.log`**（禁手打伪造行）」。
+> （如实记录：codex 这条 finding 的**后果**描述说过头了——它说「gate 会绿而基线静默陈旧」，实际是 `catalyst-gate.test.sh` 这个独立 CI 步骤会红。但**计划里的错是真的**：原稿写成「只有 G7 FAIL 才同步基线」，照做必然让自测红。）
 
 - [ ] **Step 1: host swift test（非增量）**
 
@@ -1364,39 +1371,85 @@ swift test 2>&1 | tail -8
 ```
 Expected：`N passed`、`0 failures`。⚠️ 先 `rm -rf .build/arm64-apple-macosx`——`@Observable` 改 stored property 后陈旧增量构建会在没碰过的 target 上 SIGSEGV（本项目踩过）。
 
-- [ ] **Step 2: fresh Catalyst 全量**
+- [ ] **Step 2: 重新生成 uikit 基线（本切片必做，先于跑 Catalyst）**
 
 ```bash
 cd "/Users/maziming/Coding/Prj_Kline trainer/.claude/worktrees/drawing-p1b-1b-i-pr3"
 git rev-parse --abbrev-ref HEAD; git rev-parse HEAD
-bash .github/scripts/catalyst-gate.sh 2>&1 | tee /tmp/catalyst-pr3.log | tail -40
+wc -l < .github/scripts/catalyst-uikit-baseline.txt          # 改之前：应为 59
+python3 .github/scripts/uikit-expected-tests.py > .github/scripts/catalyst-uikit-baseline.txt
+wc -l < .github/scripts/catalyst-uikit-baseline.txt          # 改之后：59 + 本切片新增的 UIKit-gated 测试数
+git diff --stat .github/scripts/catalyst-uikit-baseline.txt
 ```
-Expected：`GATE PASS`。判绿**读输出内容**，不看 exit code。
 
-- [ ] **Step 3: 基线漂移处置（只有 FAIL 才做）**
+⚠️ **必须用这条生成命令，禁手打测试名**（`catalyst-uikit-baseline-reader.py:12-13` 明写「不要手打测试名，转录错误无法复核」）。
+Expected：diff 里**只有新增行**、没有删除行（本切片没删任何 UIKit-gated 测试）。若出现删除行 → **停下报告**，说明改动误伤了既有 UIKit 测试。
 
-若 G7 因 total 漂出 `1625 ± 30` 而 FAIL：
-1. 从**这一次真跑**的 `/tmp/catalyst-pr3.log` 取实测 total，写进 `catalyst-total-baseline.txt`；
-2. `pass-main-current.log` fixture **用脚本从真日志逐行重裁**（保留绝对路径与任何 `XCTestOutputBarrier` 插花，**不修剪**）——禁手打伪造行；
-3. `catalyst-uikit-baseline.txt` 按新增的 UIKit-gated 测试名逐条追加（本切片预计 +8：dispatch 2、Coordinator 4、盾 2），并逐条与真日志比对；
-4. `catalyst-gate.test.sh` 里「活基线覆盖」的回显数字同步；
-5. 重跑 `bash .github/scripts/catalyst-gate.test.sh`（自测须全过）+ `catalyst-gate.sh`（GATE PASS）。
-6. ⚠️ 动 `.github/**` 属 trust-boundary → 触发重新 attest（见 Task 8）。
-
-- [ ] **Step 4: iOS build**
+- [ ] **Step 3: 闸门自测（先于 xcodebuild，验基线一致性）**
 
 ```bash
 cd "/Users/maziming/Coding/Prj_Kline trainer/.claude/worktrees/drawing-p1b-1b-i-pr3"
-xcodebuild -project ios/KlineTrainer/KlineTrainer.xcodeproj -scheme KlineTrainer \
-  -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build 2>&1 | tail -5
+bash .github/scripts/catalyst-gate.test.sh 2>&1 | tee /tmp/gate-selftest-pr3.log | tail -30
 ```
-Expected：`** BUILD SUCCEEDED **`（等价 `app-build.yml`；不碰钥匙串）。⚠️ 实际 scheme/project 名先 `ls ios/KlineTrainer/` 核实。
+Expected：`UIKit-gated 期望测试清单基线一致性检测（F1）：  ok — …` + 全部用例通过。
+此时「活基线覆盖」那条用例**大概率会红**——它拿真基线去跑 `fixtures/pass-main-current.log`，而那份 fixture 里还没有新测试的 `passed` 行。**这正是 Step 5 要修的**，先记下红在哪条，别现在改。
 
-- [ ] **Step 5: Commit（仅当动了基线）**
+- [ ] **Step 4: fresh Catalyst 全量（自己跑 xcodebuild，再把日志喂给闸门）**
+
+```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer/.claude/worktrees/drawing-p1b-1b-i-pr3/ios/Contracts"
+git rev-parse --abbrev-ref HEAD; git rev-parse HEAD
+rm -rf /tmp/derived                                  # 非增量（fresh）
+set -o pipefail
+xcodebuild test \
+  -scheme KlineTrainerContracts-Package \
+  -destination 'platform=macOS,variant=Mac Catalyst' \
+  -only-testing:KlineTrainerContractsTests \
+  -derivedDataPath /tmp/derived 2>&1 | tee /tmp/catalyst-pr3.log
+echo "XCODEBUILD_EXIT=$?"
+cd "/Users/maziming/Coding/Prj_Kline trainer/.claude/worktrees/drawing-p1b-1b-i-pr3"
+bash .github/scripts/catalyst-gate.sh /tmp/catalyst-pr3.log; echo "GATE_EXIT=$?"
+```
+
+命令逐字取自 `.github/workflows/catalyst-build.yml:65-76`（只把日志路径从 `/tmp/catalyst-build.log` 换成 `/tmp/catalyst-pr3.log`，避免覆盖别的 run 的日志）。
+Expected：日志尾部 `** TEST SUCCEEDED **`；闸门输出 `GATE PASS`。判绿**读输出内容**，不看退出码。
+```bash
+grep -c '✔' /tmp/catalyst-pr3.log; grep 'Test run with' /tmp/catalyst-pr3.log | tail -2   # 记下实测 total
+```
+
+- [ ] **Step 5: 重裁 `pass-main-current.log` fixture（本切片必做）**
+
+`catalyst-uikit-baseline.txt` 变了 → 按 `catalyst-gate.test.sh:379-380` 的维护规则，**必须**用**这一次**的真日志 `/tmp/catalyst-pr3.log` 重裁 fixture。
+
+1. **先读**现有 fixture 的形状，照它裁（`head -20 .github/scripts/fixtures/pass-main-current.log`）——保留 DerivedData / worktree 绝对路径与任何 `XCTestOutputBarrier` 插花，**不修剪**；
+2. 用**脚本**从 `/tmp/catalyst-pr3.log` 逐行取：`** TEST SUCCEEDED **` 标记行 + `Test run with … passed` 汇总行 + 基线里**每一个**测试名对应的 `passed` 行；
+3. **禁手打伪造行**（codex R9 的教训）。脚本取不到某个基线测试名 → **fail-closed 报错并停下**，不许补一行假的；
+4. 重跑 `bash .github/scripts/catalyst-gate.test.sh` → 「活基线覆盖」转绿、**全部用例通过**。
+
+- [ ] **Step 6: total 基线（仅当漂出 1625 ± 30）**
+
+只有 G7 报「高于上限 / 低于下限」时才做：把 Step 4 实测的 total 写进 `.github/scripts/catalyst-total-baseline.txt`，并同步 `catalyst-gate.test.sh` 里「活基线覆盖」用例的回显数字，然后**重跑 Step 3 与 Step 4**。
+本切片预计新增 UIKit-gated 测试 ~8 条（dispatch 2、Coordinator 4、盾 2）+ host 测试若干 → total 很可能仍在 `1625 ± 30` 带内、**无需** bump；uikit 基线则**无论如何都要**改（Step 2）。
+
+⚠️ 本 Task 动了 `.github/**` = trust-boundary → **必须触发重新 attest**（Task 8）。
+
+- [ ] **Step 7: iOS build**
+
+```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer/.claude/worktrees/drawing-p1b-1b-i-pr3"
+git rev-parse --abbrev-ref HEAD; git rev-parse HEAD
+```
+⚠️ **命令逐字取自 `.github/workflows/app-build.yml`**（先读那个 workflow，别照抄下面这行猜的）：
+```bash
+grep -n "xcodebuild" .github/workflows/app-build.yml
+```
+Expected：`** BUILD SUCCEEDED **`（模拟器 + `CODE_SIGNING_ALLOWED=NO`，不碰钥匙串，我或 user 均可跑；真机签名安装才需 user 真终端）。判绿读输出内容，不看退出码。
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add .github/scripts/
-git commit -m "划线 P1b-1b-i PR-3：同步 Catalyst 基线（真 fresh 日志重裁 fixture）"
+git commit -m "划线 P1b-1b-i PR-3：同步 Catalyst uikit 基线 + 真 fresh 日志重裁 fixture"
 ```
 
 ---
