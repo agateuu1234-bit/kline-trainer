@@ -1394,10 +1394,17 @@ Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**�
                 "下面板刷新后必须不再高亮 —— 否则屏幕上会同时有两条选中线")
     }
 
+    /// ⚠️ **必须是具名 `Equatable` 结构体，不能用元组**（codex plan-R6-F1）：Swift 的元组**不遵循协议**，
+    /// 故 `[(r: CGFloat, g: CGFloat, b: CGFloat)]` 不是 `Equatable` 的 `Array`，`before != after`
+    /// **类型检查就过不了**。而这段是 UIKit-gated 的 → host `swift test` 整份不编译、发现不了，
+    /// 要等到 Catalyst 闸门才炸。（既有的 `HorizontalLineToolTests.litColumn` 返回元组数组是安全的，
+    /// 因为那边只 `contains {…}` 逐元素比，从不比整个数组。）
+    private struct Px: Equatable { let r: CGFloat; let g: CGFloat; let b: CGFloat }
+
     /// 把 `view` 当前 renderState 画进一张 bitmap，返回线像素的（反 premultiplied）颜色。
     /// 与 `HorizontalLineToolTests.litColumn` 同思路，但走的是**真实 `KLineView.draw(_:)` 派发链**
     /// （renderState → drawDrawings → tool.render），这才证明得了「选中态一路流到了像素」。
-    private static func litPixels(of view: KLineView) -> [(r: CGFloat, g: CGFloat, b: CGFloat)] {
+    private static func litPixels(of view: KLineView) -> [Px] {
         let w = Int(view.bounds.width), h = Int(view.bounds.height)
         var data = [UInt8](repeating: 0, count: w * h * 4)
         let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
@@ -1406,11 +1413,13 @@ Expected：**4 条行为测试全绿**；`hitDispatchIsSinglePoint` **仍红**�
         UIGraphicsPushContext(ctx)
         view.draw(view.bounds)
         UIGraphicsPopContext()
-        var out: [(CGFloat, CGFloat, CGFloat)] = []
+        var out: [Px] = []
         for i in stride(from: 0, to: w * h * 4, by: 4) {
             let a = CGFloat(data[i + 3]) / 255
             guard a > 0.3 else { continue }
-            out.append((CGFloat(data[i]) / 255 / a, CGFloat(data[i + 1]) / 255 / a, CGFloat(data[i + 2]) / 255 / a))
+            out.append(Px(r: CGFloat(data[i]) / 255 / a,
+                          g: CGFloat(data[i + 1]) / 255 / a,
+                          b: CGFloat(data[i + 2]) / 255 / a))
         }
         return out
     }
