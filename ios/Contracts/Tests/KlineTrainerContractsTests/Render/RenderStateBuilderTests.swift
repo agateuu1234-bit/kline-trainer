@@ -1252,6 +1252,8 @@ struct RenderStateBuilderTests {
         #expect(e.drawingSession.drawingModeActive == true)   // 前提成立（防会话没开导致后面断言恒真）
         e.drawingSession.setMode(.select)
         e.drawingSession.setSelection(id: "P", panel: .upper)
+        #expect(e.drawingSession.selectedDrawingID == "P")     // 前提成立：选中确实生效了（防 setSelection 坏了/被挡下时恒真）
+        #expect(e.drawingSession.selectedPanel == .upper)
         #expect(e.drawings == before, "选中不得改动任何 DrawingObject")
         #expect(e.drawings.map(\.id) == before.map(\.id))
         #expect(e.drawingsRevision == revBefore, "选中不是内容变更，绝不能 bump revision（否则会触发 autosave）")
