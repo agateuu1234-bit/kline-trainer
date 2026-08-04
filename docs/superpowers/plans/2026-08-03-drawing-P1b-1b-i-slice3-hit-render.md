@@ -123,7 +123,7 @@ Expected：`Test run with N tests ... passed`，**记下 N**（后续每个 Task
 - Consumes: 既有 `RenderStateBuilder.belongsToPanel(_:panel:upperPeriod:lowerPeriod:) -> Bool`
 - Produces: `@MainActor static func visibleDrawings(engine: TrainingEngine, panel: PanelId, tick: Int) -> [DrawingObject]`（internal；**返回渲染序**，数组序 = z-order，后画的在上）。Task 5 的命中方逆序消费同一函数。
 
-- [ ] **Step 1: 写失败测试（3 条：等价 / review 叠加层 / 判据单点守卫）**
+- [ ] **Step 1: 写失败测试（5 条：渲染方等价 / review 两层叠加 / committed 层渐显 / 非 review 不叠加 / 判据单点守卫）**
 
 追加到 `Render/RenderStateBuilderTests.swift` 的 suite 内（若该文件用 `@Suite struct`，加进同一个 struct）：
 
@@ -292,15 +292,15 @@ Expected：编译失败，`value of type 'RenderStateBuilder' has no member 'vis
 cd "…/ios/Contracts" && swift test 2>&1 | tail -5
 ```
 
-Expected：全绿，总数 = Task 0 的 N + 3。
+Expected：全绿，总数 = Task 0 的 N + 5。
 
 - [ ] **Step 6: 变异验证（3 次，逐条看红）**
 
 | 变异 | 应该红的测试 |
 |---|---|
-| `visibleDrawings` 里删掉 `&& drawing.revealTick <= tick` | `visibleDrawingsKeepsReviewOverlayAndRevealGate` |
+| `visibleDrawings` 里删掉 `&& drawing.revealTick <= tick` | `revealGateAppliesToCommittedLayerToo` |
 | `make` 改回内联 filter（`visibleDrawings` 保留但没人调） | `visibilityCriteriaAreSinglePoint`（`belongsToPanel` 变 2 处） |
-| `visibleDrawings` 里去掉 review 三元式，恒 `engine.drawings` | `visibleDrawingsKeepsReviewOverlayAndRevealGate` |
+| `visibleDrawings` 里去掉 review 三元式，恒 `engine.drawings` | `visibleDrawingsOverlaysBothLayersInReview` |
 
 每次改坏 → 跑 → **确认真的红** → `git checkout -- <file>` 复原 → 再跑一次确认绿。
 
