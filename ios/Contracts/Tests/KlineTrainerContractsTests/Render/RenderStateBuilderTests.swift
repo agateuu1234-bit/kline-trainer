@@ -1089,6 +1089,102 @@ struct RenderStateBuilderTests {
         #expect(rs.drawings.count == 1)
         #expect(rs.drawings.allSatisfy { $0.period == .m60 })
     }
+
+    // MARK: - D40（1b-i PR-3）：命中集合 ≡ 渲染集合
+
+    @MainActor
+    @Test("D40：make(...).drawings 与 visibleDrawings(...) **逐条相等** —— 渲染方原样消费共享函数")
+    func renderStateDrawingsEqualsVisibleDrawings() {
+        let e = TrainingEngine.preview()                       // upper=.m60 / lower=.daily
+        let up = DrawingAnchor(period: .m60, candleIndex: 0, price: 10.3)
+        let low = DrawingAnchor(period: .daily, candleIndex: 0, price: 10.7)
+        #expect(e.appendDrawing(DrawingObject(id: "U", toolType: .horizontal, anchors: [up],
+                                              isExtended: false, panelPosition: 0)) == true)
+        #expect(e.appendDrawing(DrawingObject(id: "L", toolType: .horizontal, anchors: [low],
+                                              isExtended: false, panelPosition: 1)) == true)
+        let bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
+        for panel in [PanelId.upper, PanelId.lower] {
+            let rs = RenderStateBuilder.make(engine: e, panel: panel, bounds: bounds)
+            let vd = RenderStateBuilder.visibleDrawings(engine: e, panel: panel,
+                                                        tick: e.tick.globalTickIndex)
+            #expect(rs.drawings == vd, "\(panel) 的渲染集合必须**就是**共享函数的返回值")
+        }
+        // 分派正确（防两边都空导致上面恒真）
+        #expect(RenderStateBuilder.visibleDrawings(engine: e, panel: .upper,
+                                                   tick: e.tick.globalTickIndex).map(\.id) == ["U"])
+        #expect(RenderStateBuilder.visibleDrawings(engine: e, panel: .lower,
+                                                   tick: e.tick.globalTickIndex).map(\.id) == ["L"])
+    }
+
+    @MainActor
+    @Test("D40：review 下叠加**两层** —— 原训练线 drawings + 复盘新画线 reviewDrawings，顺序 committed 在前")
+    func visibleDrawingsOverlaysBothLayersInReview() {
+        let r = TrainingEngine.preview(mode: .review)          // upper=.m60 / lower=.daily
+        let a = DrawingAnchor(period: .m60, candleIndex: 0, price: 10.3)
+        // ⚠️ **两层都必须种上**：只测 reviewDrawings 那一半的话，一个漏掉 `engine.drawings +` 的
+        //    `visibleDrawings` 实现照样全绿，而它会让**复盘里原训练线整片消失**（codex plan-R2-F2）。
+        //    review 模式下 `appendDrawing` 被 `flow.mode != .review` 拒（`TrainingEngine.swift:1147`），
+        //    故 committed 层用 DEBUG 注入钩子 `injectDrawingsForTesting`（`TrainingEngine.swift:1442`）种。
+        r.injectDrawingsForTesting([DrawingObject(id: "TRAIN", toolType: .horizontal, anchors: [a],
+                                                  isExtended: false, panelPosition: 0, revealTick: 0)])
+        #expect(r.drawings.map(\.id) == ["TRAIN"])              // 前提：committed 层真的种进去了
+        #expect(r.appendReviewDrawing(DrawingObject(id: "LATE", toolType: .horizontal, anchors: [a],
+                                                    isExtended: false, panelPosition: 0,
+                                                    revealTick: 5)) == true)
+        // tick=0：复盘线未揭示 → 只剩原训练线（**这一条钉死 committed 层没被丢**）
+        #expect(RenderStateBuilder.visibleDrawings(engine: r, panel: .upper, tick: 0).map(\.id) == ["TRAIN"])
+        // tick=5：两层都在，顺序 = drawings 在前、reviewDrawings 在后（渲染序 = z-order，复盘线画在上面）
+        #expect(RenderStateBuilder.visibleDrawings(engine: r, panel: .upper, tick: 5).map(\.id) == ["TRAIN", "LATE"])
+    }
+
+    @MainActor
+    @Test("D40：渐显门对**两层一视同仁** —— committed 层的 revealTick 同样生效，不是无条件放行")
+    func revealGateAppliesToCommittedLayerToo() {
+        let r = TrainingEngine.preview(mode: .review)
+        let a = DrawingAnchor(period: .m60, candleIndex: 0, price: 10.3)
+        r.injectDrawingsForTesting([DrawingObject(id: "TRAIN_LATE", toolType: .horizontal, anchors: [a],
+                                                  isExtended: false, panelPosition: 0, revealTick: 4)])
+        #expect(r.drawings.map(\.id) == ["TRAIN_LATE"])        // 前提成立
+        #expect(RenderStateBuilder.visibleDrawings(engine: r, panel: .upper, tick: 3).isEmpty,
+                "revealTick=4 在 tick=3 时未揭示 —— committed 层也要过渐显门")
+        #expect(RenderStateBuilder.visibleDrawings(engine: r, panel: .upper, tick: 4).map(\.id) == ["TRAIN_LATE"])
+    }
+
+    @MainActor
+    @Test("D40：**非** review 模式不叠加 reviewDrawings（叠加层是 review 专属）")
+    func visibleDrawingsExcludesReviewLayerOutsideReview() {
+        let n = TrainingEngine.preview(mode: .normal)
+        let a = DrawingAnchor(period: .m60, candleIndex: 0, price: 10.3)
+        #expect(n.appendDrawing(DrawingObject(id: "N", toolType: .horizontal, anchors: [a],
+                                              isExtended: false, panelPosition: 0)) == true)
+        // normal 模式下 `appendReviewDrawing` 走不通 → 用 DEBUG 钩子直接置（`TrainingEngine.swift:1437`），
+        // 否则 reviewDrawings 恒空、"不叠加" 这条断言恒真 = 什么也没测到。
+        n.setReviewDrawingsForTesting([DrawingObject(id: "R", toolType: .horizontal, anchors: [a],
+                                                     isExtended: false, panelPosition: 0, revealTick: 0)])
+        #expect(n.reviewDrawings.map(\.id) == ["R"])           // 前提成立（防恒真）
+        #expect(RenderStateBuilder.visibleDrawings(engine: n, panel: .upper, tick: 9).map(\.id) == ["N"],
+                "非 review 模式绝不能把复盘层混进渲染/命中集合")
+    }
+
+    @Test("D40 源码守卫：可见性判据在 Sources/ 中**各只出现一次**（不得各写一遍）")
+    func visibilityCriteriaAreSinglePoint() throws {
+        // ① belongsToPanel 的调用点恰好 1 处（= visibleDrawings 内），且在 RenderStateBuilder.swift
+        let belongs = try callSiteCount("belongsToPanel(")
+        #expect(belongs.count == 1, "belongsToPanel 的调用点不是 1 处：\(belongs)")
+        #expect(belongs.first?.file.hasSuffix("/Render/RenderStateBuilder.swift") == true)
+        #expect(belongs.first?.count == 1)
+        // ② revealTick 渐显判据整个 Sources/ 只出现一次
+        var revealHits: [(String, Int)] = []
+        for path in try allSwiftFilesUnderSources() {
+            let n = try squeezedSource(path).components(separatedBy: squeeze("revealTick <= tick")).count - 1
+            if n > 0 { revealHits.append((path, n)) }
+        }
+        #expect(revealHits.count == 1, "revealTick 渐显判据出现在多处：\(revealHits)")
+        #expect(revealHits.first?.0.hasSuffix("/Render/RenderStateBuilder.swift") == true)
+        #expect(revealHits.first?.1 == 1)
+        // ③ 自足断言：扫描器真的扫到东西了（防扫描根写错 → 空集合 → 上面恒真）
+        #expect(try !allSwiftFilesUnderSources().isEmpty)
+    }
 }
 
 // MARK: - RFC-C Task 6: previousCloseBeforeVisible helper

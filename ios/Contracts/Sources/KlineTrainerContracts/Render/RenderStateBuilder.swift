@@ -50,6 +50,9 @@ public enum RenderStateBuilder {
         let macdRange = NonDegenerateRange.make(
             values: slice.flatMap { [$0.macdDiff, $0.macdDea, $0.macdBar].compactMap { $0 } },
             fallback: -0.001...0.001)
+        // review-redesign Task 3 / Task 10 的渐显与双层叠加语义**原样保留**，只是判据搬进了
+        // `visibleDrawings`（D40 单一真相，1b-i PR-3）——渲染方从此原样消费，不再内联过滤。
+        let visible = visibleDrawings(engine: engine, panel: panel, tick: tick)
         return KLineRenderState(
             panel: panelState,
             frames: ChartPanelFrames.split(in: bounds),
@@ -58,23 +61,31 @@ public enum RenderStateBuilder {
             volumeRange: volumeRange,
             macdRange: macdRange,
             markers: engine.markers,
-            // review-redesign Task 3：画线渐显按 `revealTick`（提交那一刻的全局 tick）而非锚点位置——
-            // `revealTick <= tick` 才渲染；未到达前隐藏，与锚点 candleIndex/面板自身 period 均无关
-            // （迁移自 codex whole-branch R4-F1 的锚点 candleIndex ≤ currentCandleIndex 判据）。
-            // normal/replay 下画线提交时即盖戳当前 tick（历史锚，恒已揭示）；review 步进时逐 tick 揭示。
-            // review-redesign Task 10：review 模式叠加两层——只读原训练线 `engine.drawings` +
-            // 复盘新画线 `engine.reviewDrawings`，两层共用同一渐显规则；非 review 模式仍只含 `drawings`。
-            drawings: (engine.drawings + (engine.flow.mode == .review ? engine.reviewDrawings : [])).filter { drawing in
-                RenderStateBuilder.belongsToPanel(drawing, panel: panel,
-                    upperPeriod: engine.upperPanel.period, lowerPeriod: engine.lowerPanel.period)
-                    && drawing.revealTick <= tick
-            },
+            drawings: visible,
             crosshairPoint: crosshair,   // C8b：长按十字光标由 ChartContainerView.Coordinator 视图层透传（D3）
             previousCloseBeforeVisible: previousCloseBeforeVisible(candles: candles, startIndex: viewport.startIndex))
     }
 
+    /// **D40（1b-i PR-3）：命中集合 ≡ 渲染集合的唯一真相。** 返回某面板此刻看得见的画线，**按渲染序**
+    /// （数组序 = z-order，后画的在上）。渲染方（`make`）**原样消费**；命中方（`DrawingHitTester`）
+    /// `.reversed()` 后取第一个命中（D33 最上层优先）。
+    /// 三条判据只在这里出现一次，**不得在别处再写一遍**（spec §3）：
+    ///   ① review 叠加层（只读原训练线 `drawings` + 复盘新画线 `reviewDrawings`）；
+    ///   ② `belongsToPanel`（D29 周期绑定 + `upper.period == lower.period` 损坏态下退回 `panelPosition`）；
+    ///   ③ `revealTick <= tick` 渐显。
+    /// 各写一遍的后果不是"多一份代码"：同周期 fail-safe 那个损坏态下，点一个面板会命中甚至（PR-4 起）
+    /// 删除**渲染在另一个面板上**的线。
+    @MainActor
+    static func visibleDrawings(engine: TrainingEngine, panel: PanelId, tick: Int) -> [DrawingObject] {
+        (engine.drawings + (engine.flow.mode == .review ? engine.reviewDrawings : [])).filter { drawing in
+            belongsToPanel(drawing, panel: panel,
+                           upperPeriod: engine.upperPanel.period, lowerPeriod: engine.lowerPanel.period)
+                && drawing.revealTick <= tick
+        }
+    }
+
     /// D29（1a-i Task 6）：画线归属哪个面板——按 `drawing.period` 落该 period 当前所在的面板，
-    /// 不再看 `panelPosition`（1b-i 的命中集合 `visibleDrawings` 将复用本函数）。
+    /// 不再看 `panelPosition`（命中集合 `visibleDrawings`（1b-i PR-3）复用本函数）。
     static func belongsToPanel(_ drawing: DrawingObject, panel: PanelId,
                                upperPeriod: Period, lowerPeriod: Period) -> Bool {
         // 先 period 匹配（codex plan-high）：period 不符一律不属于本面板——即使在同周期 fail-safe 下也不例外，
