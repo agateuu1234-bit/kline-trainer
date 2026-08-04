@@ -27,7 +27,7 @@ public enum DrawingColorResolver {
     /// 渲染层在包内、只有 CoreGraphics，取不到 asset catalog，故这里按系统蓝的两套取值内联；
     /// 不精确匹配也只是观感差异，不影响任何判据。
     /// **不占用 `DrawingColorToken` 值域**（与 9 个 token 的解析结果两两不等，`selectionColorIsOutsideTokenRange` 钉死）。
-    /// 对比度：light 底 4.02:1 / dark 底 5.76:1，均 ≥3:1（图形元素阈，`selectionStrokeContrastWCAG` 测）。
+    /// 对比度（对 AppPalette 实际底色）：light 底 3.86:1 / dark 底 4.78:1，均 ≥3:1（图形元素阈，`selectionStrokeContrastWCAG` 测）。
     public static func selectionRGBA(scheme: AppColorScheme) -> AppColorRGBA {
         scheme == .dark ? AppColorRGBA(red: 0.039, green: 0.518, blue: 1.0)   // 夜：systemBlue dark
                         : AppColorRGBA(red: 0.0,   green: 0.478, blue: 1.0)   // 日：systemBlue light

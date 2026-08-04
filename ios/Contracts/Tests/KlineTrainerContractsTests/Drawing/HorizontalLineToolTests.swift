@@ -317,7 +317,8 @@ struct HorizontalLineToolTests {
         let expOrange = DrawingColorResolver.resolve(.orange, scheme: .light)
         let expSel = DrawingColorResolver.selectionRGBA(scheme: .light)
         #expect(cn.contains { abs($0.r - CGFloat(expOrange.red)) < 0.06 && abs($0.b - CGFloat(expOrange.blue)) < 0.06 })
-        #expect(cp.contains { abs($0.r - CGFloat(expSel.red)) < 0.06 && abs($0.b - CGFloat(expSel.blue)) < 0.06 })
+        #expect(cp.contains { abs($0.r - CGFloat(expSel.red)) < 0.06 && abs($0.g - CGFloat(expSel.green)) < 0.06
+                             && abs($0.b - CGFloat(expSel.blue)) < 0.06 })
         #expect(expOrange != expSel, "选中色与 legacy 橙必须不同，否则高亮看不出来")
     }
 

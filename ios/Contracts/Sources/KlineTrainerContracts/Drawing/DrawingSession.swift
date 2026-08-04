@@ -51,8 +51,12 @@ public final class DrawingSession {
 
     /// D54：建立选中。**fail-closed**：非选择态 / 无会话一律拒——这让「画线态里挂着一个选中」
     /// 这个坏状态**不可表达**（而不是靠每个调用点自觉先 setMode）。internal（同容器 mutator 纪律）。
+    /// **空 id 同样拒**（1b-i PR-3 whole-branch fix，同 D66「id 唯一非空是写入边界不变量」）：
+    /// resume 路径（`TrainingEngine.swift:178` 整体赋值 `self.drawings = seededLossy.drawings`）不经
+    /// `appendDrawing` 的 `!id.isEmpty` 门 → 磁盘上一条坏 id 的线可解码进 `drawings`，若放行会让
+    /// 渲染 dispatch 按 `drawing.id == selectedDrawingID` 逐条判、把**所有**空 id 的线一起高亮。
     func setSelection(id: DrawingID, panel: PanelId) {
-        guard drawingModeActive, mode == .select else { return }
+        guard drawingModeActive, mode == .select, !id.isEmpty else { return }
         selectedDrawingID = id
         selectedPanel = panel
     }

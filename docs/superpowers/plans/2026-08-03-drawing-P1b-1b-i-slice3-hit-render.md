@@ -1859,6 +1859,8 @@ bash .claude/scripts/codex-attest.sh --scope branch-diff   # ⚠️ 不加任何
 4. **PR-2 已知缺口仍未闭合**（PR-2 交接③）：在白名单文件**内部** vend 方法引用（`func handle() -> (DrawingID) -> Bool { deleteDrawing }`）能绕过两层守卫；本切片零调用点故不可达，**PR-4 打开攻击面前必须处理**。
 5. **D61「换色修复高版本线」在 PR-4 前需独立定稿**（PR-2 已整块移出）。
 6. **1b-ii 落 `setDrawingLocked` 时必须翻转 N14h 的预期**（`DrawingEditDurabilityGateTests`）——它现在钉住的是「locked + 未来数据线归不了档」这个已接受残留。
+7. **跨面板高亮的 observation 订阅只有源码守卫、没有运行时证据**：`selectingInOtherPanelUnhighlightsSibling`（`ChartContainerViewDrawingSessionTests.swift`）用的是直连 Coordinator 的 rig，靠手动调 `rebuildRenderState` 模拟 SwiftUI 刷新，测不到 `withObservationTracking` 真的会在选中态变化时触发 `updateUIView`。本 PR 因选中态在生产里恒 `nil`（`setMode` 零调用点）而风险为零，但 **PR-4 必须在真机上亲验§7验收清单第1项之外的这一条：跨面板改选时旧面板的高亮是否真的消失**，不能只信源码守卫。
+8. **复盘 + `.select` 是一条「完全死」的 tap**：`handleDrawingTap` 的 `.select` 分支在复盘下会被 `guard engine.flow.mode != .review else { return }` 直接挡（既不画也不选）。当前不可达（复盘没有画线底栏、只有浮动铅笔钮，没有任何 UI 能把 `mode` 切成 `.select`）。**PR-4 必须保证复盘根本进不去 `.select`**（复盘的画线底栏/类型行/选择态 toggle 一律不出现），而不是靠这道死门兜底——否则用户会遇到「点了没反应」的死区。
 
 ---
 
@@ -1878,7 +1880,7 @@ bash .claude/scripts/codex-attest.sh --scope branch-diff   # ⚠️ 不加任何
 | 5 | 画线模式下上下竖滑**切周期** | 周期照常切换；切完之后**还能继续画线**（点一下就出线）——切周期没把画线会话弄坏 | |
 | 6 | 画线模式下左右平移图表、双指缩放 | 平移 / 缩放照常，线跟着图走，松手后有惯性——1a-iv 的手势没被改坏 | |
 | 7 | 改一下线的颜色 / 线型 / 粗细，再画一条 | 新线是刚设的样式；**已有的线颜色一点没变**（本切片不碰任何已有线的样式） | |
-| 8 | 点「退出」离开画线模式，再单击图表 | 出十字光标（正常的看盘手势），**不画线也不选中** | |
+| 8 | 点「退出」离开画线模式，再单击图表 | **什么都不发生**（十字光标要**长按**才出）——不画线、不选中 | |
 | 9 | 进复盘，用**浮动铅笔钮**进画线模式，在图上点一下 | **照常画出一条新线**（复盘画线能力必须完好；这是本切片最容易被改坏的一条） | |
 | 10 | 接上：复盘里再单击一条训练时画的线 | 只会**再落一条新线**，原训练线的颜色 / 粗细**一点没变**、也不高亮 | |
 | 11 | 画一条线 → **直接从后台划掉 App** → 重开续这一局 | 那条线**还在**（autosave 链路没被改动影响） | |

@@ -380,4 +380,22 @@ struct DrawingSessionTests {
         #expect(s.selectedDrawingID == "B")
         #expect(s.selectedPanel == .lower)
     }
+
+    @MainActor
+    @Test("whole-branch fix：空 id 被 setSelection 拒（同 D66「id 唯一非空是写入边界不变量」）")
+    func setSelectionRejectsEmptyID() {
+        let s = DrawingSession()
+        s.activate(tool: .horizontal); s.setMode(.select)
+        // 前提：同一会话下传合法 id 是能设上的（否则下面「被拒」恒真——setSelection 本来就设不上任何东西）
+        s.setSelection(id: "A", panel: .upper)
+        #expect(s.selectedDrawingID == "A")
+        #expect(s.selectedPanel == .upper)
+        s.clearSelection()
+        #expect(s.selectedDrawingID == nil)   // 复位到已知 nil 基线，下面的「被拒」不是「本来就没设过」
+
+        s.setSelection(id: "", panel: .upper)
+
+        #expect(s.selectedDrawingID == nil, "空 id 必须被拒")
+        #expect(s.selectedPanel == nil)
+    }
 }

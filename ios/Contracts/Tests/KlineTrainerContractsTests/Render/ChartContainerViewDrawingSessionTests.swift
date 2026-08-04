@@ -232,12 +232,12 @@ struct ChartContainerViewDrawingSessionTests {
     }
 
     @Test("D37：选择态未命中 → 清空选中、且不落锚（先命中建立选中，再点空白处）")
-    func selectModeMissClearsSelectionAndDrawsNothing() {
+    func selectModeMissClearsSelectionAndDrawsNothing() throws {
         let (engine, upperC, _, upperV, _) = makeRig()
         engine.toggleDrawingMode()
         let onLine = mainChartPoint(upperV)
         upperC.handleDrawingTapForTesting(at: onLine)              // 画线态落一条
-        #expect(engine.drawings.count == 1)                        // 前提成立
+        try #require(engine.drawings.count == 1)                   // 前提成立
         engine.drawingSession.setMode(.select)
         upperC.handleDrawingTapForTesting(at: onLine)              // 选择态命中它
         let hitID = engine.drawings[0].id
@@ -262,12 +262,12 @@ struct ChartContainerViewDrawingSessionTests {
     }
 
     @Test("D41/D55 端到端：tap 命中 → 该条真的以选中色画出来（像素级，不只是状态位）")
-    func selectedLineActuallyRendersHighlighted() {
+    func selectedLineActuallyRendersHighlighted() throws {
         let (engine, upperC, _, upperV, _) = makeRig()
         engine.toggleDrawingMode()
         let p = mainChartPoint(upperV)
         upperC.handleDrawingTapForTesting(at: p)                   // 画线态落一条
-        #expect(engine.drawings.count == 1)                        // 前提成立
+        try #require(engine.drawings.count == 1)                   // 前提成立
         // ⚠️ `.draw` 分支在 `routeDrawingCommit` 之后**不**重建渲染态（既有行为，生产靠 observation
         //    刷新；本 rig 是直连 Coordinator，不经 updateUIView）→ 不补这一次重建，`upperV.renderState`
         //    里还没有这条线，下面的 `before` 会是空的（codex plan-R4-F2）。
@@ -290,18 +290,19 @@ struct ChartContainerViewDrawingSessionTests {
         let sels = [DrawingColorResolver.selectionRGBA(scheme: .light),
                     DrawingColorResolver.selectionRGBA(scheme: .dark)]
         #expect(after.contains { px in
-            sels.contains { abs(px.r - CGFloat($0.red)) < 0.06 && abs(px.b - CGFloat($0.blue)) < 0.06 }
+            sels.contains { abs(px.r - CGFloat($0.red)) < 0.06 && abs(px.g - CGFloat($0.green)) < 0.06
+                          && abs(px.b - CGFloat($0.blue)) < 0.06 }
         }, "选中的线必须以选中色画出（D55）")
         #expect(before != after, "选中前后画面必须真的不同，否则高亮等于没做")
     }
 
     @Test("D40 路由（行为级）：最上层但**未揭示**的线不得被选中 —— 证明命中吃的是 visibleDrawings 不是 engine.drawings")
-    func hitIgnoresUnrevealedTopmostLine() {
+    func hitIgnoresUnrevealedTopmostLine() throws {
         let (engine, upperC, _, upperV, _) = makeRig()
         engine.toggleDrawingMode()
         let p = mainChartPoint(upperV)
         upperC.handleDrawingTapForTesting(at: p)                   // 画线态落一条（revealTick = 当时 tick）
-        #expect(engine.drawings.count == 1)                        // 前提成立
+        try #require(engine.drawings.count == 1)                   // 前提成立
         let visible = engine.drawings[0]
         // 在它**之上**（数组末尾 = z-order 最上层）注入一条同几何、但 revealTick 远在未来的线。
         // 命中若直接吃 `engine.drawings`（绕过渐显过滤），逆序第一个命中的就是这条幽灵线。
@@ -318,12 +319,12 @@ struct ChartContainerViewDrawingSessionTests {
     }
 
     @Test("D40 路由（行为级）：属于**另一个面板**的线不得在本面板被选中（belongsToPanel 过滤真的生效）")
-    func hitIgnoresOtherPanelLine() {
+    func hitIgnoresOtherPanelLine() throws {
         let (engine, upperC, _, upperV, _) = makeRig()
         engine.toggleDrawingMode()
         let p = mainChartPoint(upperV)
         upperC.handleDrawingTapForTesting(at: p)
-        #expect(engine.drawings.count == 1)                        // 前提成立
+        try #require(engine.drawings.count == 1)                   // 前提成立
         let mine = engine.drawings[0]
         #expect(mine.period == engine.upperPanel.period)           // 前提：它确实属于上面板
         #expect(engine.upperPanel.period != engine.lowerPanel.period)   // 前提：两面板周期不同（非 fail-safe 态）
@@ -437,12 +438,12 @@ struct ChartContainerViewDrawingSessionTests {
     }
 
     @Test("N6/D53：`.rect` 区内的选择态 tap 被挡、区外正常选中（证明分叉在盾之后、且盾不过度屏蔽）")
-    func rectShieldBlocksSelectInsideOnly() {
+    func rectShieldBlocksSelectInsideOnly() throws {
         let (engine, upperC, _, upperV, _) = makeRig()
         engine.toggleDrawingMode()
         let p = mainChartPoint(upperV)
         upperC.handleDrawingTapForTesting(at: p)
-        #expect(engine.drawings.count == 1)                        // 前提成立
+        try #require(engine.drawings.count == 1)                   // 前提成立
         let hitID = engine.drawings[0].id
         engine.drawingSession.setMode(.select)
 
