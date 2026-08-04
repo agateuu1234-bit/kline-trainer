@@ -426,10 +426,20 @@ public final class TrainingEngine {
     private func restoreDrawingSessionAfterPeriodChange() {
         guard drawingSession.drawingModeActive, let tool = drawingSession.activeDrawingTool else { return }
         if !drawingSession.pendingAnchors.isEmpty { drawingSession.discardPendingAnchors() }
+        // ③ D54 clause 3 / D57 表格末行（1b-i PR-3）：**结构性不可见 → 清空选中**。
+        //    锚点绑在旧周期的 candleIndex 上，换了周期坐标系就错了；而且 D29 周期绑定下，这条线
+        //    可能已经**迁到另一个面板**去渲染了 —— 它的 id 仍在 `drawings` 里（存在性谓词判"保留"），
+        //    但结构归属判"清空"，两维正交、取并集（D64）。
+        //    ⚠️ **几何性**不可见（平移把线滑出屏）**不**清空（D63）：那会让一次滑动的惯性余速把选中
+        //    悄悄抖掉。本函数只在**周期真的变了**时被调用（`switchPeriodCombo:408` 的守卫），
+        //    平移根本走不到这里 —— 判据的分流是由"谁调用它"保证的，不是靠这里再判一次。
+        drawingSession.clearSelection()
         armPanelForDrawing(tool, panel: .upper)
         armPanelForDrawing(tool, panel: .lower)
         if !(isDrawingActive(on: .upper) && isDrawingActive(on: .lower)) {
-            endDrawingSessionIfActive()   // fail-closed：宁可退出画线，也不留半武装
+            // fail-closed：宁可退出画线，也不留半武装。`endDrawingSessionIfActive` → `deactivate()`
+            // 里已再清一次选中并复位 `mode`（D57 fail-closed 分支要求），此处无需重复。
+            endDrawingSessionIfActive()
         }
     }
 
