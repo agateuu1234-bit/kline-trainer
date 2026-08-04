@@ -22,7 +22,7 @@ struct DrawDrawingsDispatchTests {
         let mapper = makeMapperFixture()
         view.drawDrawings(
             ctx: ctx, mapper: mapper, drawings: [], period: .m60,
-            scheme: .light, tools: [.horizontal: spy]
+            scheme: .light, selectedDrawingID: nil, tools: [.horizontal: spy]
         )
         #expect(spy.received.isEmpty)
     }
@@ -40,7 +40,7 @@ struct DrawDrawingsDispatchTests {
         )
         view.drawDrawings(
             ctx: ctx, mapper: mapper, drawings: [drawing], period: .m60,
-            scheme: .light, tools: [.horizontal: spy]
+            scheme: .light, selectedDrawingID: nil, tools: [.horizontal: spy]
         )
         #expect(spy.received.count == 1)
         #expect(spy.received.first?.drawing == drawing)
@@ -60,7 +60,7 @@ struct DrawDrawingsDispatchTests {
         // tools: [:] = Wave 1 default callsite (empty registry).
         view.drawDrawings(
             ctx: ctx, mapper: mapper, drawings: [drawing], period: .m60,
-            scheme: .light, tools: [:]
+            scheme: .light, selectedDrawingID: nil, tools: [:]
         )
         #expect(spy.received.isEmpty)
     }
@@ -78,7 +78,7 @@ struct DrawDrawingsDispatchTests {
             anchors: [DrawingAnchor(period: .m60, candleIndex: 9, price: 130)],
             isExtended: false, panelPosition: 0, thickness: 2, colorToken: .red)
         view.drawDrawings(ctx: makeCtxFixture(), mapper: makeMapperFixture(),
-            drawings: [d1, d2], period: .m60, scheme: .dark, tools: [.horizontal: spy])
+            drawings: [d1, d2], period: .m60, scheme: .dark, selectedDrawingID: nil, tools: [.horizontal: spy])
         #expect(spy.received.count == 2)
         // 逐条样式各不相同（防「复用第一条 / 样式串味」）
         #expect(spy.received[0].drawing.colorToken == .blue && spy.received[0].drawing.thickness == 4)
@@ -100,7 +100,7 @@ struct DrawDrawingsDispatchTests {
                 anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 150)],   // price 落在 fixture priceRange 100…200 内
                 isExtended: false, panelPosition: 0, lineSubType: sub, labelMode: mode)
             makeViewFixture().drawDrawings(ctx: ctx, mapper: makeMapperFixture(),
-                drawings: [d], period: .m3, scheme: .light, tools: [.horizontal: HorizontalLineTool()])
+                drawings: [d], period: .m3, scheme: .light, selectedDrawingID: nil, tools: [.horizontal: HorizontalLineTool()])
             // 每行非透明像素数；最多的行 = 线行（贯穿全宽）。数「距线行 >4」各行的像素 = 标注文字。
             let rowCounts = (0..<h).map { yy in (0..<w).reduce(0) { $0 + (data[(yy*w + $1)*4 + 3] > 60 ? 1 : 0) } }
             let lineRow = rowCounts.firstIndex(of: rowCounts.max() ?? 0) ?? 0
@@ -125,7 +125,7 @@ struct DrawDrawingsDispatchTests {
                 anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: price)],
                 isExtended: false, panelPosition: 0, labelMode: .left)
             makeViewFixture().drawDrawings(ctx: ctx, mapper: makeMapperFixture(),
-                drawings: [d], period: .m3, scheme: .light, tools: [.horizontal: HorizontalLineTool()])
+                drawings: [d], period: .m3, scheme: .light, selectedDrawingID: nil, tools: [.horizontal: HorizontalLineTool()])
             return (0..<(w * h)).reduce(0) { $0 + (data[$1 * 4 + 3] > 0 ? 1 : 0) }
         }
         #expect(totalLitPixels(price: 9999) == 0)   // 超出 fixture priceRange 100...200 → 线+标注全不画
@@ -150,7 +150,7 @@ struct DrawDrawingsDispatchTests {
                 isExtended: false, panelPosition: 0, labelMode: .left, fontSize: fontSize)
             // 若字号未被 clamp，这一步会把荒谬字号喂进 CoreText（可能挂起/崩溃）——测试跑通本身即为断言。
             makeViewFixture().drawDrawings(ctx: ctx, mapper: makeMapperFixture(),
-                drawings: [d], period: .m3, scheme: .light, tools: [.horizontal: HorizontalLineTool()])
+                drawings: [d], period: .m3, scheme: .light, selectedDrawingID: nil, tools: [.horizontal: HorizontalLineTool()])
             let lit = (0..<(w * h)).reduce(0) { $0 + (data[$1 * 4 + 3] > 0 ? 1 : 0) }
             return (lit, lit > 0)
         }
@@ -166,6 +166,31 @@ struct DrawDrawingsDispatchTests {
         let normal = litPixelsOutsideCanvas(fontSize: 14)
         #expect(normal.drewSomething)
     }
+
+    @Test("D55 dispatch：只有 id == selectedDrawingID 的那一条拿到 isSelected == true")
+    func dispatchPassesIsSelectedForMatchingIDOnly() {
+        let view = makeViewFixture()
+        let spy = SpyDrawingTool()
+        let a = DrawingAnchor(period: .m60, candleIndex: 5, price: 120)
+        let d1 = DrawingObject(id: "A", toolType: .horizontal, anchors: [a], isExtended: false, panelPosition: 0)
+        let d2 = DrawingObject(id: "B", toolType: .horizontal, anchors: [a], isExtended: false, panelPosition: 0)
+        view.drawDrawings(ctx: makeCtxFixture(), mapper: makeMapperFixture(),
+                          drawings: [d1, d2], period: .m60, scheme: .light,
+                          selectedDrawingID: "B", tools: [.horizontal: spy])
+        #expect(spy.received.map(\.isSelected) == [false, true])
+    }
+
+    @Test("D55 dispatch：selectedDrawingID == nil → 一条都不高亮")
+    func dispatchNoSelectionHighlightsNothing() {
+        let view = makeViewFixture()
+        let spy = SpyDrawingTool()
+        let a = DrawingAnchor(period: .m60, candleIndex: 5, price: 120)
+        let d = DrawingObject(id: "A", toolType: .horizontal, anchors: [a], isExtended: false, panelPosition: 0)
+        view.drawDrawings(ctx: makeCtxFixture(), mapper: makeMapperFixture(),
+                          drawings: [d], period: .m60, scheme: .light,
+                          selectedDrawingID: nil, tools: [.horizontal: spy])
+        #expect(spy.received.map(\.isSelected) == [false])
+    }
 }
 
 // MARK: - Spies / fixtures
@@ -176,9 +201,10 @@ struct DrawDrawingsDispatchTests {
 private final class SpyDrawingTool: DrawingTool {
     static var type: DrawingToolType { .horizontal }
     var requiredAnchors: ClosedRange<Int> { 1...1 }
-    private(set) var received: [(drawing: DrawingObject, scheme: AppColorScheme)] = []
-    func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme) {
-        received.append((drawing, scheme))
+    private(set) var received: [(drawing: DrawingObject, scheme: AppColorScheme, isSelected: Bool)] = []
+    func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject,
+                scheme: AppColorScheme, isSelected: Bool) {
+        received.append((drawing, scheme, isSelected))
     }
     func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool { false }
 }

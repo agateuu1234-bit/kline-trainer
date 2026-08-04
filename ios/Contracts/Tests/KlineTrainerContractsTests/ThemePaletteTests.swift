@@ -80,6 +80,15 @@ struct AppPaletteTests {
         #expect(wcagContrastRatio(stroke, AppPalette.dark.background) >= 3.0)
     }
 
+    @MainActor
+    @Test("D55 选中高亮色 vs light/dark 底 对比 ≥ 3:1（图形元素阈，同 drawingStrokeContrastWCAG）")
+    func selectionStrokeContrastWCAG() {
+        #expect(wcagContrastRatio(DrawingColorResolver.selectionRGBA(scheme: .light),
+                                  AppPalette.light.background) >= 3.0)
+        #expect(wcagContrastRatio(DrawingColorResolver.selectionRGBA(scheme: .dark),
+                                  AppPalette.dark.background) >= 3.0)
+    }
+
     @Test("light ≠ dark：关键 token 取值切换")
     func lightDistinctFromDark() {
         #expect(AppPalette.light.background != AppPalette.dark.background)

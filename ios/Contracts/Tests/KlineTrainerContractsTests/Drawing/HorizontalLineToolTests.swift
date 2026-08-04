@@ -99,7 +99,7 @@ struct HorizontalLineToolTests {
         let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
             space: CGColorSpace(name: CGColorSpace.sRGB)!,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        HorizontalLineTool().render(ctx: ctx, mapper: Self.mapper(), drawing: drawing, scheme: scheme)
+        HorizontalLineTool().render(ctx: ctx, mapper: Self.mapper(), drawing: drawing, scheme: scheme, isSelected: false)
         return (data, w, h)
     }
     // x=400 列上（线贯穿全宽，此列必有线像素），反 premultiplied 还原颜色；只取 alpha 明显的像素。
@@ -282,5 +282,69 @@ struct HorizontalLineToolTests {
             anchors: [DrawingAnchor(period: .m3, candleIndex: 100, price: 15)],
             isExtended: false, panelPosition: 0, lineSubType: .ray)
         #expect(HorizontalLineTool.visibleGeometry(for: offRight, mapper: m) == nil)
+    }
+
+    // MARK: - D55（1b-i PR-3）选中高亮
+
+    @MainActor
+    static func renderPixelsSelected(_ drawing: DrawingObject, scheme: AppColorScheme, isSelected: Bool)
+        -> (data: [UInt8], w: Int, h: Int) {
+        let w = 800, h = 360
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        HorizontalLineTool().render(ctx: ctx, mapper: Self.mapper(), drawing: drawing,
+                                    scheme: scheme, isSelected: isSelected)
+        return (data, w, h)
+    }
+
+    @MainActor
+    @Test("D55：isSelected == true 时描边改用选中色；false 时仍是 colorToken 的色（同一条线两次渲染可区分）")
+    func selectedStrokeUsesSelectionColor() {
+        // ⚠️ `price: 15` / `period: .m3` 是本文件 `Self.mapper()` 的量纲（`priceRange(min:10,max:20)`，
+        //    `:11-18` 实测；既有测试全用 15）。用 100 会让 `visibleGeometry` 返 nil → 一条线都画不出来，
+        //    下面「必须画出了线」当场红（codex plan-R5-F2）。
+        let d = DrawingObject(toolType: .horizontal,
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+                              isExtended: false, panelPosition: 0, colorToken: .orange)
+        let normal = Self.renderPixelsSelected(d, scheme: .light, isSelected: false)
+        let picked = Self.renderPixelsSelected(d, scheme: .light, isSelected: true)
+        let cn = Self.litColumn(normal.data, w: normal.w, h: normal.h)
+        let cp = Self.litColumn(picked.data, w: picked.w, h: picked.h)
+        #expect(!cn.isEmpty, "对照组必须真的画出了线（否则下面的差异断言恒真）")
+        #expect(!cp.isEmpty, "选中组必须真的画出了线")
+        let expOrange = DrawingColorResolver.resolve(.orange, scheme: .light)
+        let expSel = DrawingColorResolver.selectionRGBA(scheme: .light)
+        #expect(cn.contains { abs($0.r - CGFloat(expOrange.red)) < 0.06 && abs($0.b - CGFloat(expOrange.blue)) < 0.06 })
+        #expect(cp.contains { abs($0.r - CGFloat(expSel.red)) < 0.06 && abs($0.b - CGFloat(expSel.blue)) < 0.06 })
+        #expect(expOrange != expSel, "选中色与 legacy 橙必须不同，否则高亮看不出来")
+    }
+
+    @MainActor
+    @Test("D55：选中高亮只换颜色 —— 线宽 / 线型 / 几何一字不动")
+    func selectionChangesColorOnly() {
+        let d = DrawingObject(toolType: .horizontal,                 // 同上：15 在 mapper 的 10...20 内
+                              anchors: [DrawingAnchor(period: .m3, candleIndex: 5, price: 15)],
+                              isExtended: false, panelPosition: 0,
+                              lineStyle: .dash1, thickness: 4, colorToken: .orange)
+        let normal = Self.renderPixelsSelected(d, scheme: .light, isSelected: false)
+        let picked = Self.renderPixelsSelected(d, scheme: .light, isSelected: true)
+        // 亮起来的像素**位置集合**必须完全一致（只有颜色变），故只比 alpha 通道
+        let alphaN = (0..<(normal.w * normal.h)).map { normal.data[$0 * 4 + 3] > 76 }
+        let alphaP = (0..<(picked.w * picked.h)).map { picked.data[$0 * 4 + 3] > 76 }
+        #expect(alphaN.contains(true), "对照组必须真的画出了线")
+        #expect(alphaN == alphaP, "选中不得改变线宽/dash/几何——亮起的像素位置必须逐点相同")
+    }
+
+    @Test("D55：选中色不占用 DrawingColorToken 值域（与 7 个彩色 + 自适应 ink 都不相等）")
+    func selectionColorIsOutsideTokenRange() {
+        for scheme in [AppColorScheme.light, .dark] {
+            let sel = DrawingColorResolver.selectionRGBA(scheme: scheme)
+            for token in DrawingColorToken.allCases {
+                #expect(DrawingColorResolver.resolve(token, scheme: scheme) != sel,
+                        "选中色撞上了 token \(token)（scheme \(scheme)）——高亮会与普通线混淆")
+            }
+        }
     }
 }

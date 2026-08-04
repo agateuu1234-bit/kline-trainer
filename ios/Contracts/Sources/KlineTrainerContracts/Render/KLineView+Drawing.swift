@@ -18,11 +18,15 @@ extension KLineView {
                       drawings: [DrawingObject],
                       period: Period,
                       scheme: AppColorScheme,
+                      selectedDrawingID: DrawingID?,
                       tools: [DrawingToolType: any DrawingTool]) {
         _ = period  // reserved（周期过滤在 RenderStateBuilder，见 Task 6；此处仍不消费）
         for drawing in drawings {
             guard let tool = tools[drawing.toolType] else { continue }
-            tool.render(ctx: ctx, mapper: mapper, drawing: drawing, scheme: scheme)
+            // D55：逐条按 id 派发选中态。`selectedDrawingID` 已在 `RenderStateBuilder.make` 过了
+            // 二元组门（只有 `selectedPanel` 那个面板才拿得到非 nil），此处不再判 panel。
+            tool.render(ctx: ctx, mapper: mapper, drawing: drawing, scheme: scheme,
+                        isSelected: drawing.id == selectedDrawingID)
 
             // KLineView+Drawing.swift —— tool.render 之后画价格标签。UIKit 层【零决策】：画不画/文字/色/对齐全在 labelContent，
             // 位置全在 labelRect，本块只负责机械绘制（文字绘制范式同 KLineView+Markers.swift:46-51 / KLineView+Crosshair.swift:112-123）。

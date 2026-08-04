@@ -41,7 +41,10 @@ public final class KLineView: UIView {
     }
 
     /// Wave 3 顺位 4：注册具体 DrawingTool。MVP 单工具内联（6 种工具 + 注册表机制属 Phase 4）。
-    private static let drawingTools: [DrawingToolType: any DrawingTool] = [.horizontal: HorizontalLineTool()]
+    /// **唯一**的工具注册表：渲染 dispatch（`draw(_:)`）与命中 dispatch（`ChartContainerView.Coordinator`
+    /// 的 `.select` 分支，1b-i PR-3）**共用它**。D40 要求命中与渲染同源 —— 各持一份注册表就意味着
+    /// 「画得出却命不中」或反之。故这里是 internal 而非 private（`private` 在 Swift 是**文件作用域**）。
+    static let drawingTools: [DrawingToolType: any DrawingTool] = [.horizontal: HorizontalLineTool()]
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
@@ -106,6 +109,7 @@ public final class KLineView: UIView {
         drawDrawings(ctx: ctx, mapper: mapper, drawings: renderState.drawings,
                      period: renderState.panel.period,
                      scheme: themeController.resolve(trait: traitCollection),
+                     selectedDrawingID: renderState.selectedDrawingID,
                      tools: Self.drawingTools)
         drawMarkers(ctx: ctx, viewport: renderState.viewport, mapper: mapper,
                     markers: renderState.markers, candles: renderState.visibleCandles)
