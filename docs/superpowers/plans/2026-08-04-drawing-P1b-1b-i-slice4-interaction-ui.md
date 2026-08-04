@@ -145,7 +145,7 @@ spec D58 写「给反馈」，但：① §7 的 25 条验收里**没有**任何�
 | 文件 | 职责 |
 |---|---|
 | `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditRouterTests.swift` | 上者的 host 测试（N1 / N12b·c / N13d / N14d / N16 / N17 / N18 / N19c·e / N21d） |
-| `ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift` | PR-4 新增的 UI 接线源码守卫（`setMode` 唯一调用点 / 🗑 接线 / 复盘不可达） |
+| `ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift` | PR-4 的接线源码守卫（视口发布 / `setMode` 唯一调用点 / 🗑 接线 / 复盘不可达 / 两条读法不混用）。**Task 2 Step 6c 建，后续 Task 只追加** |
 
 **修改（源码 6 个）**
 
@@ -244,6 +244,37 @@ Expected：`Test run with 1752 tests in 213 suites passed`。数字对不上 →
                 "误报了，实际文本：\(codeTextPreservingBoundaries(clean))")
     }
 
+    @Test("守卫自检 g3（codex plan-R4-F2）：注释/字面量被剥掉时留下边界 —— 紧贴注释的 vend 逃不掉，紧贴注释的调用不误报")
+    func scannerKeepsBoundaryAcrossComments() {
+        // ① Swift 里注释本身就是 token 分隔符，下面两行都是**合法代码**里的真 vend
+        let vendedAcrossComment = """
+        extension TrainingEngine {
+            func a() -> (DrawingID) -> Bool { return/*x*/deleteDrawing }
+            func b() -> (DrawingID) -> Bool { return//x
+                deleteDrawing }
+        }
+        """
+        #expect(bareIdentifierReferences(inCode: codeTextPreservingBoundaries(vendedAcrossComment),
+                                         identifier: "deleteDrawing") == 2,
+                "紧贴注释的 vend 漏检 —— 第三层守卫可被绕过。实际文本：\(codeTextPreservingBoundaries(vendedAcrossComment))")
+
+        // ② 反向：紧贴注释的**正当调用**不得被误报（边界空格把 `(` 推开了，判据必须跳空格再看）
+        let callAcrossComment = """
+        func caller() {
+            engine.deleteDrawing/* c */(id: c)
+            engine.deleteDrawing
+                (id: d)
+        }
+        """
+        #expect(bareIdentifierReferences(inCode: codeTextPreservingBoundaries(callAcrossComment),
+                                         identifier: "deleteDrawing") == 0,
+                "正当调用被误报成 vend，实际文本：\(codeTextPreservingBoundaries(callAcrossComment))")
+
+        // ③ 边界不得把两个独立 token 粘成一个长标识符（①② 必须看紧邻字符）
+        #expect(bareIdentifierReferences(inCode: "let x = deleteDrawing Foo", identifier: "deleteDrawing") == 1)
+        #expect(bareIdentifierReferences(inCode: "deleteDrawingForTesting()", identifier: "deleteDrawing") == 0)
+    }
+
     @Test("守卫自检 g2：`codeTextPreservingBoundaries` 与 `squeezedText` 是同一个词法器，只差空白处理")
     func boundaryPreservingSharesLexer() {
         let src = """
@@ -284,6 +315,19 @@ func scanCode(_ c: [Character], from start: Int, parenDepth: Int?, into out: ino
 // ② scanCode 内部的空白处理那一行（原 `if !c[i].isWhitespace { out.append(c[i]) }`）
         if !c[i].isWhitespace { out.append(c[i]) }
         else if keepWhitespace, out.last != " " { out.append(" ") }   // 空白折成**一个空格**，保住 token 边界
+```
+
+```swift
+// ②b ⚠️ **注释与字符串字面量被剥掉时也必须留下边界**（codex plan-R4-F2）：
+//    Swift 里注释本身就是 token 分隔符，`return/*x*/deleteDrawing` 是**合法**代码。
+//    只折叠真空白的话它会被压成 `returndeleteDrawing` → 裸标识符判据看到前一个字符是 `n`
+//    → 当成「更长标识符的尾巴」跳过 → **vend 漏检，第三层守卫可被绕过**。
+//    故：行注释 / 块注释 / 字符串字面量三处 `continue` 之前，各补一次边界。
+//    抽成一个小闭包，三处共用（三处各写一遍必然漏掉其中一处）：
+        func emitBoundary() { if keepWhitespace, out.last != " " { out.append(" ") } }
+//    —— 块注释那段 `while i < c.count, d > 0 { … }` 之后、`continue` 之前：`emitBoundary()`
+//    —— 行注释那段 `while i < c.count, c[i] != "\n" { i += 1 }` 之后、`continue` 之前：`emitBoundary()`
+//    —— 两处 `i = consumeStringLiteral(...)` 之后、`continue` 之前：`emitBoundary()`
 ```
 
 ```swift
@@ -332,10 +376,15 @@ func codeTextPreservingBoundaries(_ raw: String) -> String {
 /// 而 `filesMentioning` 的白名单对**文件内部**不再细查 → 两层守卫双双放行（PR-2 终审探针 P2 实证）。
 ///
 /// 判据（一次出现算裸引用 ⟺ 三条同时成立）：
-///   ① 前一个字符不是标识符字符（否则是更长标识符的尾巴，如 `xdeleteDrawing`）；
-///   ② 后一个字符不是标识符字符（否则是更长标识符的头，如 `deleteDrawingForTesting`）；
-///   ③ 后一个字符不是 `(`（那是**声明或调用**，归 `callSiteCount` 那一层管）。
+///   ① **紧邻**的前一个字符不是标识符字符（否则是更长标识符的尾巴，如 `xdeleteDrawing`）；
+///   ② **紧邻**的后一个字符不是标识符字符（否则是更长标识符的头，如 `deleteDrawingForTesting`）；
+///   ③ 后面**第一个非空格**字符不是 `(`（那是**声明或调用**，归 `callSiteCount` 那一层管）。
 /// 末尾无后继字符 → **按裸引用算**（fail-closed）。
+///
+/// ⚠️ **①② 看紧邻、③ 跳空格，两者刻意不同**（codex plan-R4-F2 连带暴露）：
+///   - ①② 若跳空格：`deleteDrawing Foo` 这两个独立 token 会被当成一个长标识符 → **漏检**；
+///   - ③ 若看紧邻：`engine.deleteDrawing/* c */(id: c)` 经边界处理后是 `engine.deleteDrawing (id: c)`，
+///     紧邻字符是空格而不是 `(` → 一次**正当调用**被误报成 vend → **假阳性**（既有自检 a 当场红）。
 func bareIdentifierReferences(inCode s: String, identifier: String) -> Int {
     let chars = Array(s), idf = Array(identifier)
     func isIdentChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
@@ -343,12 +392,15 @@ func bareIdentifierReferences(inCode s: String, identifier: String) -> Int {
     while i + idf.count <= chars.count {
         guard Array(chars[i ..< i + idf.count]) == idf else { i += 1; continue }
         let before: Character? = i > 0 ? chars[i - 1] : nil
-        let after: Character? = i + idf.count < chars.count ? chars[i + idf.count] : nil
-        i += idf.count
-        if let b = before, isIdentChar(b) { continue }        // ①
+        let end = i + idf.count
+        let after: Character? = end < chars.count ? chars[end] : nil
+        i = end
+        if let b = before, isIdentChar(b) { continue }        // ①（紧邻）
         guard let a = after else { count += 1; continue }     // 文件末尾 → fail-closed
-        if isIdentChar(a) { continue }                        // ②
-        if a == "(" { continue }                              // ③
+        if isIdentChar(a) { continue }                        // ②（紧邻）
+        var j = end                                            // ③（跳空格再看）
+        while j < chars.count, chars[j] == " " { j += 1 }
+        if j < chars.count, chars[j] == "(" { continue }
         count += 1
     }
     return count
@@ -376,7 +428,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.claude/worktrees/drawing-p1b-1b-i-
 swift test 2>&1 | tail -5
 ```
 
-Expected：`Test run with 1754 tests ... passed`（1752 + 2）。
+Expected：`Test run with 1755 tests ... passed`（1752 + 3：自检 g / g2 / g3）。
 
 - [ ] **Step 6: 把新守卫挂进两条既有信任边界测试**
 
@@ -432,6 +484,8 @@ git commit -m "划线 P1b-1b-i PR-4 Task1：源码守卫补第三层——白名
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingSession.swift`
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/Render/ChartContainerView.swift:174-205`
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditRouterTests.swift`（新建）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift`（**新建**，Step 6c；Task 4/5/6 只追加）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/RenderStateBuilderTests.swift`（追加，Step 6b）
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionTests.swift`（追加）
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/ChartContainerViewDrawingSessionTests.swift`（追加，**UIKit-gated**）
 - Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingSessionSourceGuardTests.swift`（mutator 清单加两个新名字）
@@ -678,7 +732,8 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.claude/worktrees/drawing-p1b-1b-i-
 swift test 2>&1 | tail -5
 ```
 
-Expected：`Test run with 1760 tests ... passed`（1754 + 6）。
+Expected：`Test run with 1760 tests ... passed`（1755 + 本 Step 前新增的 5 条：会话侧 2 + 路由几何 3）。
+⚠️ 本 Task 走完全部 Step 后还会再加 2 条（Step 6b 的 `renderedViewportDivergesFromReDerivation` + Step 6c 的 `publisherUsesRenderedViewportOnly`）→ **Task 2 收尾时应为 1762**。数字对不上就停下报告（别硬改，基线错了后面每个 Task 的对账都是假的）。
 
 - [ ] **Step 6: Coordinator 发布 mapper + 延后刷新提示（UIKit 侧）**
 
@@ -784,9 +839,35 @@ Expected：**跑了 1 条且 PASS**。若报「聚合分支没造出分叉」→
 
 - [ ] **Step 6c: 源码守卫 —— 发布的必须是渲染真用过的那个视口（确定能杀死 Task 7 变异 #2）**
 
-追加到 `Render/DrawingInteractionUISourceGuardTests.swift`：
+⚠️ **本 Step 要 `Render/DrawingInteractionUISourceGuardTests.swift` 这个文件，它由本 Step 创建**
+（codex plan-R4-F1：初稿把它排在 Task 4 才建，Task 2 却先往里追加 → 要么编译失败、要么守卫被静默丢掉，
+而这条守卫正是「不许发布重推视口」的确定性防线）。**新建**该文件，写入文件头 + 两个共享 helper + 本条守卫；
+Task 4/5/6 只往里**追加**：
 
 ```swift
+// ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift
+// PR-4：交互 UI 与视口发布的接线守卫。**刻意不是 UIKit-gated** —— 它读源码文本，不需要 UIKit 渲染，
+// 放 host 才能在每个 Task 里立刻拿到证据（View 的真实渲染断言另有 Catalyst 测试）。
+// 文本来源纪律见计划 PD7：否定/结构断言走 `code()`（剥注释剥字面量），用户可见文案走 `raw()`。
+import Foundation
+import Testing
+@testable import KlineTrainerContracts
+
+@Suite("PR-4 交互 UI 接线守卫")
+struct DrawingInteractionUISourceGuardTests {
+
+    /// **剥注释、剥字符串字面量内容、删空白**的代码文本。**所有否定断言与结构断言都必须用它**
+    /// （PD7）：读原始文本会被计划里那些「为什么不是 X」的承重注释打红，逼实施者删注释才能过测试。
+    private func code(_ rel: String) throws -> String {
+        try squeezedSource(contractsDirForGuards.appendingPathComponent(rel).path)
+    }
+
+    /// 原始文本。**只用于两件事**：① 用户可见文案（`squeezedSource` 会丢弃字符串字面量内容，
+    /// 文案断言在它上面恒假）；② 「陈旧注释必须删掉」这类**对象就是注释**的断言。
+    private func raw(_ rel: String) throws -> String {
+        try String(contentsOfFile: contractsDirForGuards.appendingPathComponent(rel).path, encoding: .utf8)
+    }
+
     @Test("PD1（codex plan-R3-F2 的确定性防线）：Coordinator 发布的是 `newState.viewport`，且它**不许**自己重推视口")
     func publisherUsesRenderedViewportOnly() throws {
         let cc = try code("Sources/KlineTrainerContracts/Render/ChartContainerView.swift")
@@ -796,7 +877,10 @@ Expected：**跑了 1 条且 PASS**。若报「聚合分支没造出分叉」→
         #expect(!cc.contains("makeViewport"),
                 "ChartContainerView 里出现了 makeViewport —— 重推的视口在聚合分支下与屏幕上的不一致（见 renderedViewportDivergesFromReDerivation）")
     }
+}
 ```
+
+⚠️ Task 4/5/6 往本文件追加测试时，都是插在**最后那个 `}` 之前**，不要重复写文件头与两个 helper。
 
 - [ ] **Step 7: 写 Catalyst 测试（Coordinator 真发布）**
 
@@ -1451,7 +1535,7 @@ git commit -m "划线 P1b-1b-i PR-4 Task3：唯一写入路由 + D65 两个可�
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/UI/DrawingTypeOverlay.swift`
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/UI/DrawingStylePanel.swift`
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift`（`ChartPanelsContainer` 的挂载处）
-- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift`（新建）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift`（**追加**，文件已由 Task 2 Step 6c 建好）
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditRouterTests.swift`（追加复盘不可达行为测试）
 
 **Interfaces:**
@@ -1460,31 +1544,10 @@ git commit -m "划线 P1b-1b-i PR-4 Task3：唯一写入路由 + D65 两个可�
 
 - [ ] **Step 1: 写失败测试（源码守卫，host 可跑）**
 
-新建 `Render/DrawingInteractionUISourceGuardTests.swift`：
+**追加**到 `Render/DrawingInteractionUISourceGuardTests.swift`（文件与两个 helper 已由 Task 2 Step 6c 建好，
+插在末尾那个 `}` 之前，**不要重复写文件头**）：
 
 ```swift
-// ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift
-// PR-4：交互 UI 的接线守卫。**刻意不是 UIKit-gated** —— 它读源码文本，不需要 UIKit 渲染，
-// 放 host 才能在每个 Task 里立刻拿到证据（View 的真实渲染断言另有 Catalyst 测试）。
-import Foundation
-import Testing
-@testable import KlineTrainerContracts
-
-@Suite("PR-4 交互 UI 接线守卫")
-struct DrawingInteractionUISourceGuardTests {
-
-    /// **剥注释、剥字符串字面量内容、删空白**的代码文本。**所有否定断言与结构断言都必须用它**
-    /// （PD7）：读原始文本会被计划里那些「为什么不是 X」的承重注释打红，逼实施者删注释才能过测试。
-    private func code(_ rel: String) throws -> String {
-        try squeezedSource(contractsDirForGuards.appendingPathComponent(rel).path)
-    }
-
-    /// 原始文本。**只用于两件事**：① 用户可见文案（`squeezedSource` 会丢弃字符串字面量内容，
-    /// 文案断言在它上面恒假）；② 「陈旧注释必须删掉」这类**对象就是注释**的断言。
-    private func raw(_ rel: String) throws -> String {
-        try String(contentsOfFile: contractsDirForGuards.appendingPathComponent(rel).path, encoding: .utf8)
-    }
-
     @Test("D57/PD4：setMode 在 Sources/ 里恰好 1 处调用，且在类型行 toggle 的接线上（不是 activate/deactivate）")
     func setModeHasExactlyOneCallSite() throws {
         let sites = try callSiteCount("setMode(")
@@ -1531,7 +1594,6 @@ struct DrawingInteractionUISourceGuardTests {
         let dmb = try #require(tv.range(of: "DrawingBottomBar("), "DrawingBottomBar 未接入")
         #expect(String(tv[..<dmb.lowerBound].suffix(60)).contains(squeeze("if isDrawingActive {")))
     }
-}
 ```
 
 追加到 `Drawing/DrawingEditRouterTests.swift`（行为侧，证明复盘就算被塞进选择态也一无所获）：
@@ -2262,7 +2324,14 @@ tail -40 /tmp/codex-pr4-r1.log
 | R3 | high | Task 7 Step 8 号称是 iOS 构建门，命令块却**只打印 branch/HEAD 并 grep `app-build.yml`**，从没调用过 xcodebuild，就直接写下 Expected `BUILD SUCCEEDED` → **这道必需门根本不执行**。而本切片大改 SwiftUI 签名与 `TrainingView` 调用点，恰恰最可能只在 app scheme 上炸 | **全采纳**。把 `.github/workflows/app-build.yml:41-51` 的**真实**命令与三条闸门 grep 逐字嵌进去（只加 `-pr4` 路径后缀），并保留一条「先 grep workflow 确认命令没漂移」的前置检查 |
 | R3 | medium | Catalyst 的 `coordinatorPublishesRenderedViewport` **杀不死** Task 7 变异 #2：`preview()` 的每根 K 线都是 `high:11/low:9`（已实测 `TrainingEngine.swift:1417`）→ 聚合分支即使触发，合成 partial 与原 aggregate 的 high/low **相同** → `priceRange` 不变 → `make(...).viewport == makeViewport(...)`。于是「重推视口会分叉」这条 **PD1 的前提本身没有测试**，只是一段源码阅读结论 | **全采纳**。补两道：① **host** 测试 `renderedViewportDivergesFromReDerivation` —— 自造「aggregate 自报宽区间(30/1)、已揭示 m3 前缀是窄区间(11/9)」的 fixture，断言 `make` 的视口与 `makeViewport` 重推的**真的不等**，且带自足断言（两个视口都不许退化成 `.empty`）与「造不出分叉就停下报告」的出口；② 源码守卫 `publisherUsesRenderedViewportOnly` —— 发布必须来自 `newState.viewport` 且 `ChartContainerView` 代码里**不许出现 `makeViewport`**，这条**确定**能杀死变异 #2。变异表已改注，明写「不要指望那条 Catalyst 相等断言杀它」 |
 
-**这六条都是我计划自身的缺陷，不是实施风险**——与 [[feedback_plan_code_blocks_cause_vacuous_tests]] 同族：F2 尤其典型，我在 PD2 里**写明了**「靠 engine observable 顺带刷新会滞后」，然后在谓词实现里**自己踩了同一个坑**（让 UI 读现算值，连滞后的机会都没有）。识别出陷阱 ≠ 避开陷阱，判据必须写成可被机械检查的形状——故本轮修复同时补了源码守卫，而不只是改代码。
+**R4 = needs-attention，1 high + 1 medium，两条都是真 finding、已全修**：
+
+| 轮 | 级别 | finding | 我的处置 |
+|---|---|---|---|
+| R4 | high | **Task 排序错**：Task 2 Step 6c 往 `DrawingInteractionUISourceGuardTests.swift` **追加**守卫，而该文件我排在 **Task 4 才创建** → 实施者要么编译失败、要么静默丢掉这条守卫、要么被 Task 4 建文件时覆盖掉。而它正是「不许发布重推视口」的**确定性防线**，丢了就把 R3 刚补上的几何/渲染分叉防护重新打开。另外 Task 2 的期望计数也没算上它 | **全采纳**。文件改由 **Task 2 Step 6c 创建**（文件头 + 两个共享 helper + 本条守卫），Task 4/5/6 一律**只追加**并明写「插在末尾 `}` 之前、不要重复写文件头」；Files 列表、文件结构表、期望计数全部同步（Task 1 收尾 1755、Task 2 收尾 1762） |
+| R4 | medium | `codeTextPreservingBoundaries` 只把**真空白**折成空格，而 `scanCode` **剥掉注释/字面量时不产生任何边界** → `return/*x*/deleteDrawing`（合法 Swift）被压成 `returndeleteDrawing` → 裸标识符判据看到前一字符是 `n`、当成「更长标识符的尾巴」跳过 → **vend 漏检，第三层信任边界守卫在白名单文件内可被绕过** | **全采纳**。行注释 / 块注释 / 字符串字面量三处各补一次 `emitBoundary()`（抽成闭包共用，三处各写一遍必漏其一）。⚠️ **连带暴露我判据里的一个假阳性**：补了边界之后 `deleteDrawing/*c*/(id:)` 变成 `deleteDrawing (id:`，`(` 不再紧邻 → 一次正当调用会被误报成 vend（既有自检 a 当场红）。故判据同步改成 **①② 看紧邻字符（防把两个独立 token 粘成一个长标识符）、③ 跳空格再看 `(`**，并加自检 g3 双向钉死（紧贴注释的 vend 必被抓、紧贴注释的调用不得误报、`deleteDrawing Foo` 与 `deleteDrawingForTesting` 各自判对） |
+
+**这八条都是我计划自身的缺陷，不是实施风险**——与 [[feedback_plan_code_blocks_cause_vacuous_tests]] 同族：F2 尤其典型，我在 PD2 里**写明了**「靠 engine observable 顺带刷新会滞后」，然后在谓词实现里**自己踩了同一个坑**（让 UI 读现算值，连滞后的机会都没有）。识别出陷阱 ≠ 避开陷阱，判据必须写成可被机械检查的形状——故本轮修复同时补了源码守卫，而不只是改代码。
 
 顺带修掉的自查项：初稿 Catalyst 测试 `geometryHintFollowsViewport` **自己调 `setSelectionGeometryVisible` 再断言它变了** = 恒真测试（测的是 setter 而不是 Coordinator），已换成走真实 `rebuildRenderState` 路径并用 `drainMainQueue()` 等 async 跳转（不用固定时长 `sleep` 赌时序）。
 
