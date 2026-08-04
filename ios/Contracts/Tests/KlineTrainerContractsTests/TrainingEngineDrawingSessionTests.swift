@@ -180,6 +180,66 @@ struct TrainingEngineDrawingSessionTests {
         assertInvariant(e)
     }
 
+    // MARK: - 1b-i PR-3（D54 clause 3 / D57 表格末行）：切周期 = 结构性不可见 → 清空选中
+    // ⚠️ 同 :76-80 的警告：这两个测试**必须**用 `engineMultiPeriod()`，用 `preview()` 会撞
+    //    「target 周期无数据 → no-op」守卫 → 恒绿假守卫。
+
+    @Test("N11 扩条：选择态下切周期 —— 选中被清空，但会话/态/两面板武装全部完好（不裂脑）")
+    func periodSwitchClearsSelectionWithoutSplitBrain() {
+        let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        // 一条 .m60 线：切周期前归**上**面板（upper==.m60），切完 (.m15,.m60) 后归**下**面板
+        // —— 正是 D54 clause 3 说的「该线改由另一面板显示」，id 仍在 drawings 里（存在性谓词判"保留"），
+        //    但结构归属判"清空"。
+        #expect(e.appendDrawing(DrawingObject(
+            id: "S", toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m60, candleIndex: 1, price: 10)],
+            isExtended: false, panelPosition: 0)) == true)
+        e.toggleDrawingMode()                                    // 会话开：两面板 .drawing，工具 .horizontal
+        #expect(e.drawingSession.drawingModeActive == true)      // 前提成立（防会话没开→后面断言恒真）
+        e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "S", panel: .upper)
+        #expect(e.drawingSession.selectedDrawingID == "S")       // 前提成立（防下面恒真）
+
+        e.switchPeriodCombo(direction: .toSmaller)               // (.m60,.daily) → (.m15,.m60) 真的能切成功
+
+        #expect(e.upperPanel.period == .m15)                     // 周期真的变了（防假绿：不是撞 no-op 守卫）
+        #expect(e.lowerPanel.period == .m60)
+        #expect(e.drawingSession.selectedDrawingID == nil, "结构性不可见 → 必须清空选中（D54 clause 3）")
+        #expect(e.drawingSession.selectedPanel == nil)
+        #expect(e.drawings.map(\.id) == ["S"], "清的是**选中**，不是那条线本身")
+        // 以下四条是 1a-iv + D57 的不变量，本 Task 不得破坏：
+        #expect(e.drawingSession.drawingModeActive == true)
+        #expect(e.drawingSession.mode == .select, "切周期不改变用户所处的态")
+        #expect(e.drawingSession.activeDrawingTool == .horizontal)
+        assertInvariant(e)                                       // ⭐两面板重新回到 .drawing
+    }
+
+    @Test("D63 对照：不是「任何看不见都清空」—— no-op 的切周期不得碰选中（D31 同一条纪律）")
+    func noOpPeriodSwitchKeepsSelection() {
+        let (e, _) = TrainingEngineInteractionTests.engineMultiPeriod()
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        #expect(e.appendDrawing(DrawingObject(
+            id: "S", toolType: .horizontal,
+            anchors: [DrawingAnchor(period: .m60, candleIndex: 1, price: 10)],
+            isExtended: false, panelPosition: 0)) == true)
+        e.toggleDrawingMode()
+        e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "S", panel: .upper)
+        #expect(e.drawingSession.selectedDrawingID == "S")
+
+        // toLarger：目标 (.daily,.weekly)，engineMultiPeriod 无 .weekly 数据 → D8 守卫 no-op，
+        // `restoreDrawingSessionAfterPeriodChange` **根本不被调用**。
+        e.switchPeriodCombo(direction: .toLarger)
+
+        #expect(e.upperPanel.period == .m60, "前提：这一次切换确实是 no-op（周期没变）")
+        #expect(e.drawingSession.selectedDrawingID == "S", "no-op 的切周期不得碰选中（D31 同一条纪律）")
+        #expect(e.drawingSession.selectedPanel == .upper)
+        assertInvariant(e)
+    }
+
     @Test("codex plan-R9：零 render bounds（首帧未布局）下开会话 —— 不变量仍成立，绝不出现「钮亮着但画不了」")
     func beginSessionWithZeroBoundsKeepsInvariant() {
         let e = TrainingEngine.preview()          // 故意**不**调 recordRenderBounds → bounds 全是 .zero

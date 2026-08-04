@@ -15,6 +15,10 @@ import CoreGraphics
 public protocol DrawingTool {
     static var type: DrawingToolType { get }
     var requiredAnchors: ClosedRange<Int> { get }
-    func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme)
+    /// `isSelected`（D55，1b-i PR-3）：该条是否处于选中态。**瞬时 UI 状态**，由渲染 dispatch 按
+    /// `KLineRenderState.selectedDrawingID` 逐条派发，不来自 `DrawingObject` 任何持久化字段。
+    /// 源码 API 面破坏按 D28 不 bump `CONTRACT_VERSION`、不留 shim（仓内模块、无外部 conformer）。
+    func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject,
+                scheme: AppColorScheme, isSelected: Bool)
     func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool
 }

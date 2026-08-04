@@ -22,6 +22,10 @@ public struct KLineRenderState: Equatable, Sendable {
     public let drawings: [DrawingObject]
     public let crosshairPoint: CGPoint?
     public let previousCloseBeforeVisible: Double?   // RFC-C：可见首根前一根收盘（涨跌基准；切片外，codex R2-M）
+    /// D41/D55（1b-i PR-3）：本面板此刻**被选中**的那条线的 id。**瞬时 UI 状态、不进任何存储路径**。
+    /// `RenderStateBuilder.make` **只在渲染 `selectedPanel` 那个面板时**才带值，其余面板恒 nil
+    /// （选中是 `(panel, id)` 二元组；只按 id 判会让切周期迁走的线在用户没选的面板里继续高亮）。
+    public let selectedDrawingID: DrawingID?
 
     public init(panel: PanelViewState,
                 frames: ChartPanelFrames,
@@ -32,7 +36,8 @@ public struct KLineRenderState: Equatable, Sendable {
                 markers: [TradeMarker],
                 drawings: [DrawingObject],
                 crosshairPoint: CGPoint?,
-                previousCloseBeforeVisible: Double? = nil) {
+                previousCloseBeforeVisible: Double? = nil,
+                selectedDrawingID: DrawingID? = nil) {
         self.panel = panel
         self.frames = frames
         self.viewport = viewport
@@ -43,6 +48,7 @@ public struct KLineRenderState: Equatable, Sendable {
         self.drawings = drawings
         self.crosshairPoint = crosshairPoint
         self.previousCloseBeforeVisible = previousCloseBeforeVisible
+        self.selectedDrawingID = selectedDrawingID
     }
 
     public static let empty: KLineRenderState = .init(

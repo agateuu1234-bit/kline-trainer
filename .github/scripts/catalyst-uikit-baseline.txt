@@ -5,6 +5,8 @@ D35：两条不同样式的 drawing 各自带自己的样式 + scheme 按顺序�
 标注 render 路径：.left/.right 画出文字像素；.hidden/.segment 无标注泄漏（codex plan-R5）
 render 路径回归（codex branch-R3 medium）：价格超出 viewport 区间的线，线与标注均不画；区间内对照组画出
 render 路径（codex branch-R5 medium）：损坏 fontSize（负数/极大）不崩溃、像素不越界
+D55 dispatch：只有 id == selectedDrawingID 的那一条拿到 isSelected == true
+D55 dispatch：selectedDrawingID == nil → 一条都不高亮
 前置实测：ImageRenderer 能 flatten Canvas 图标（子树不塌成零尺寸）——Task4 几何断言的前提
 像素级：三种线型图标都**真的画出了东西**，且两两可分辨（防 ship 空白方块）
 像素级：5 种线样式都画出东西，且两两可分辨（dash 真的落到像素上）
@@ -20,6 +22,16 @@ Coordinator crosshairPoint 默认 nil（视图层瞬态）
 codex R7 fail-closed：主图内 overscroll 空白区的 tap（越界 candleIndex）→ 不落锚不落库，会话存活
 未开会话时点图 = 不画线
 1a-iv：惯性未停时点击 —— 锚落在**定住后**视口映射的那根 K 线上，且提交后图不再滑
+D34 反向对照（防过度 fail-closed）：复盘的**画线态** tap 照常落线 —— 复盘画线是既有功能，不得回归
+D34 trust-boundary：复盘的**选择态** tap 不选中（否则可改写已归档 record 里的原训练线）
+D37：选择态未命中 → 清空选中、且不落锚（先命中建立选中，再点空白处）
+D41/D55 端到端：tap 命中 → 该条真的以选中色画出来（像素级，不只是状态位）
+D40 路由（行为级）：最上层但**未揭示**的线不得被选中 —— 证明命中吃的是 visibleDrawings 不是 engine.drawings
+D40 路由（行为级）：属于**另一个面板**的线不得在本面板被选中（belongsToPanel 过滤真的生效）
+D41 跨面板：在另一个面板选中后，原面板刷新时高亮必须消失（不得两条同时高亮）
+D54：画线态单击**恒落锚**、绝不 hitTest —— 点在已有线上是又叠一条，不是选中它（验收 #5）
+N6/D53：`.pending` 盾对**选择态**同样拒收 —— 既不选中也不落锚
+N6/D53：`.rect` 区内的选择态 tap 被挡、区外正常选中（证明分叉在盾之后、且盾不过度屏蔽）
 布局到有效尺寸后 renderState 重算非空（静态 engine 不依赖 observation 再触发）
 layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复 make）
 布局重算同步 engine bounds → 静态界面后续 pinch 生效（codex R1-F1：不被 stale .zero bounds no-op）

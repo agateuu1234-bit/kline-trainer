@@ -79,10 +79,14 @@ public struct HorizontalLineTool: DrawingTool {
         return (y: y, minX: xr.minX, maxX: xr.maxX)
     }
 
-    public func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme) {
+    public func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject,
+                       scheme: AppColorScheme, isSelected: Bool) {
         guard let g = Self.visibleGeometry(for: drawing, mapper: mapper) else { return }
         ctx.saveGState()
-        let rgba = DrawingColorResolver.resolve(drawing.colorToken, scheme: scheme)
+        // D55：选中高亮**只换描边色** —— 线宽 / dash / 几何一字不动（`selectionChangesColorOnly` 钉死），
+        // 且不写回 `drawing.colorToken`（瞬时 UI 状态，绝不落盘）。
+        let rgba = isSelected ? DrawingColorResolver.selectionRGBA(scheme: scheme)
+                              : DrawingColorResolver.resolve(drawing.colorToken, scheme: scheme)
         ctx.setStrokeColor(CGColor(srgbRed: CGFloat(rgba.red), green: CGFloat(rgba.green),
                                    blue: CGFloat(rgba.blue), alpha: CGFloat(rgba.alpha)))
         ctx.setLineWidth(Self.lineWidth(forThickness: drawing.thickness))

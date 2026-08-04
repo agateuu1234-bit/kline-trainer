@@ -104,13 +104,16 @@ struct DrawingSessionSourceGuardTests {
     func drawingSessionMutatorsAreNotPublic() throws {
         let code = try source("Sources/KlineTrainerContracts/Drawing/DrawingSession.swift")
         for m in ["func activate(", "func deactivate(", "func discardPendingAnchors(",
-                  "func addAnchor(", "func commitPending(", "func setDefaultStyle("] {
+                  "func addAnchor(", "func commitPending(", "func setDefaultStyle(",
+                  "func setSelection(", "func clearSelection("] {     // ← 1b-i PR-3 新增两个 mutator
             #expect(code.contains(m), "mutator \(m) 不见了？")                 // 先证明确实扫到了这些方法
             #expect(!code.contains("public " + m),
                     "\(m) 不得为 public —— 包外能直接改会话就绕开了 begin/endDrawingSession，漂移会回来")
         }
         // 只读态则必须仍是 public（TrainingView / 未来底栏要读）
         #expect(code.contains("public private(set) var drawingModeActive"))
+        #expect(code.contains("public private(set) var selectedDrawingID"))
+        #expect(code.contains("public private(set) var selectedPanel"))
     }
 
     @Test("codex plan-R5-high：只有 TrainingEngine 能开/关会话（Coordinator 只许落锚/提交）")
@@ -149,6 +152,18 @@ struct DrawingSessionSourceGuardTests {
         #expect(code.contains("upperPanel.revision"))
         #expect(code.contains("lowerPanel.revision"))
         #expect(code.contains("engine.tick.globalTickIndex"))
+        // 1b-i PR-3：选中二元组同样是订阅锚点（删掉任一行 → 在另一面板选中时本面板旧高亮擦不掉）
+        #expect(code.contains("engine.drawingSession.selectedPanel"))
+        #expect(code.contains("engine.drawingSession.selectedDrawingID"))
+        // ⚠️ whole-branch fix：**位置**才是 load-bearing 的那一半——只断言字符串存在，把这两行订阅读取
+        //    挪到 `guard bounds.width > 0` **之后**照样全绿，而那正是本仓「K 线图永久冻结」真机回归的
+        //    成因（`:176-191` 大注释记录：bounds<=0 时守卫直接 return，读取根本不会执行 → 订阅没建立）。
+        let selReadRange = try #require(code.range(of: "engine.drawingSession.selectedPanel"),
+                                        "找不到选中态订阅读取（结构漂移）")
+        let boundsGuardRange = try #require(code.range(of: "guard bounds.width > 0"),
+                                            "找不到 bounds 守卫（结构漂移）")
+        #expect(selReadRange.upperBound < boundsGuardRange.lowerBound,
+                "选中态订阅读取必须在 bounds 守卫之前——挪到之后，字符串存在性检查照样全绿，但订阅其实没建立")
     }
 
     @Test("回归守卫（现象①：隐形卡死）：折叠态浮动钮必须随画线模式变外观 + 点它直接退出画线")

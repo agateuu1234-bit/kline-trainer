@@ -22,7 +22,7 @@ struct DrawingProtocolTests {
         let mapper = makeMapperFixture()
         let ctx = makeCtxFixture()
         let drawing = DrawingObject(toolType: .horizontal, anchors: [], isExtended: false, panelPosition: 0)
-        tool.render(ctx: ctx, mapper: mapper, drawing: drawing, scheme: .light)
+        tool.render(ctx: ctx, mapper: mapper, drawing: drawing, scheme: .light, isSelected: false)
         let hit = tool.hitTest(point: .zero, mapper: mapper, drawing: drawing)
         #expect(hit == false)
     }
@@ -57,7 +57,7 @@ struct DrawingProtocolTests {
 private final class FakeDrawingTool: DrawingTool {
     static var type: DrawingToolType { .horizontal }
     var requiredAnchors: ClosedRange<Int> { 1...1 }
-    func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme) {}
+    func render(ctx: CGContext, mapper: CoordinateMapper, drawing: DrawingObject, scheme: AppColorScheme, isSelected: Bool) {}
     func hitTest(point: CGPoint, mapper: CoordinateMapper, drawing: DrawingObject) -> Bool { false }
 }
 

@@ -48,4 +48,9 @@ struct KLineRenderStateTests {
         let captured = await Task.detached { s }.value
         #expect(captured == s)
     }
+
+    @Test("D55：selectedDrawingID 默认 nil —— 既有 init 调用点一律不受影响（源码兼容）")
+    func selectedDrawingIDDefaultsToNil() {
+        #expect(KLineRenderState.empty.selectedDrawingID == nil)
+    }
 }

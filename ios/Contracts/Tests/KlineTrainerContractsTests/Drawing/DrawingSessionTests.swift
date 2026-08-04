@@ -279,4 +279,123 @@ struct DrawingSessionTests {
         #expect(s.pendingAnchors.isEmpty)
         #expect(s.commitPending(panelPosition: 0) == nil)
     }
+
+    // MARK: - 1b-i PR-3：选中态（D41 二元组 / D54 生命期）
+
+    @MainActor
+    @Test("选中是二元组：setSelection 同时写 id 与 panel；clearSelection 两个一起清")
+    func selectionIsPanelIdPair() {
+        let s = DrawingSession()
+        s.activate(tool: .horizontal)
+        s.setMode(.select)
+        s.setSelection(id: "A", panel: .lower)
+        #expect(s.selectedDrawingID == "A")
+        #expect(s.selectedPanel == .lower)
+        s.clearSelection()
+        #expect(s.selectedDrawingID == nil)
+        #expect(s.selectedPanel == nil)          // 只清 id 不清 panel = 半个二元组，禁止
+    }
+
+    @MainActor
+    @Test("D54/D57 不变量：mode == .draw 时选中恒为空（画线态选中不可表达）")
+    func drawModeCannotHoldSelection() {
+        let s = DrawingSession()
+        s.activate(tool: .horizontal)
+        #expect(s.mode == .draw)                 // 前提：本来就是画线态（setSelection 被拒的前提）
+        // ① 画线态下 setSelection 直接被拒（fail-closed，不是"先设上再清掉"）
+        s.setSelection(id: "A", panel: .upper)
+        #expect(s.selectedDrawingID == nil)
+        #expect(s.selectedPanel == nil)
+        // ② 选择态设上 → 切回画线态 → 清空（D54 clause 2）
+        s.setMode(.select)
+        s.setSelection(id: "A", panel: .upper)
+        #expect(s.selectedDrawingID == "A")
+        s.setMode(.draw)
+        #expect(s.selectedDrawingID == nil, "从选择态切回画线态必须清空选中（D54 clause 2）")
+        #expect(s.selectedPanel == nil)
+        // ③ 会话未开时也不许设（fail-closed）
+        let t = DrawingSession()
+        #expect(t.drawingModeActive == false)    // 前提：确实未开会话（setSelection 被拒的前提）
+        t.setSelection(id: "A", panel: .upper)
+        #expect(t.selectedDrawingID == nil)
+    }
+
+    @MainActor
+    @Test("D54 clause 1/2：activate 与 deactivate 都清空选中")
+    func activateAndDeactivateClearSelection() {
+        let s = DrawingSession()
+        s.activate(tool: .horizontal)
+        s.setMode(.select)
+        s.setSelection(id: "A", panel: .upper)
+        #expect(s.selectedDrawingID == "A")      // 前提：确实先设上了（否则下面「被清空」恒真）
+        // activate 同工具（PR-4 的"点亮图标切回画线态"走这条）——D57 已让 mode 在幂等 guard 之前置 .draw
+        s.activate(tool: .horizontal)
+        #expect(s.mode == .draw)
+        #expect(s.selectedDrawingID == nil, "activate 把 mode 打回 .draw，选中必须一起清")
+        // deactivate（退出画线模式，D54 clause 1）
+        s.setMode(.select)
+        s.setSelection(id: "B", panel: .lower)
+        #expect(s.selectedDrawingID == "B")      // 前提：确实先设上了（否则下面「被清空」恒真）
+        s.deactivate()
+        #expect(s.selectedDrawingID == nil)
+        #expect(s.selectedPanel == nil)
+        #expect(s.mode == .draw)
+    }
+
+    @MainActor
+    @Test("N10 扩列：三个「清」语义对**选中态**的差分（discardPendingAnchors 不碰选中）")
+    func threeClearSemanticsDifferOnSelection() {
+        // discardPendingAnchors：只丢 pending 锚，**选中原样保留**
+        let a = DrawingSession()
+        a.activate(tool: .horizontal); a.setMode(.select); a.setSelection(id: "X", panel: .upper)
+        a.discardPendingAnchors()
+        #expect(a.selectedDrawingID == "X", "discardPendingAnchors 只管 pending 锚，不得顺手清选中")
+        #expect(a.mode == .select)
+        #expect(a.drawingModeActive == true)
+        #expect(a.activeDrawingTool == .horizontal)
+        // setMode：清选中、保工具与会话
+        let b = DrawingSession()
+        b.activate(tool: .horizontal); b.setMode(.select); b.setSelection(id: "X", panel: .upper)
+        #expect(b.selectedDrawingID == "X")      // 前提：确实先设上了（否则下面「被清空」恒真）
+        b.setMode(.draw)
+        #expect(b.selectedDrawingID == nil)
+        #expect(b.drawingModeActive == true)
+        #expect(b.activeDrawingTool == .horizontal)
+        // deactivate：全清
+        let c = DrawingSession()
+        c.activate(tool: .horizontal); c.setMode(.select); c.setSelection(id: "X", panel: .upper)
+        c.deactivate()
+        #expect(c.selectedDrawingID == nil)
+        #expect(c.drawingModeActive == false)
+        #expect(c.activeDrawingTool == nil)
+    }
+
+    @MainActor
+    @Test("反向对照（防过度 fail-closed）：选择态下 setSelection 换选另一条 —— 直接替换，不需要先 clear")
+    func selectionReplacesPreviousWithoutClearing() {
+        let s = DrawingSession()
+        s.activate(tool: .horizontal); s.setMode(.select)
+        s.setSelection(id: "A", panel: .upper)
+        s.setSelection(id: "B", panel: .lower)
+        #expect(s.selectedDrawingID == "B")
+        #expect(s.selectedPanel == .lower)
+    }
+
+    @MainActor
+    @Test("whole-branch fix：空 id 被 setSelection 拒（同 D66「id 唯一非空是写入边界不变量」）")
+    func setSelectionRejectsEmptyID() {
+        let s = DrawingSession()
+        s.activate(tool: .horizontal); s.setMode(.select)
+        // 前提：同一会话下传合法 id 是能设上的（否则下面「被拒」恒真——setSelection 本来就设不上任何东西）
+        s.setSelection(id: "A", panel: .upper)
+        #expect(s.selectedDrawingID == "A")
+        #expect(s.selectedPanel == .upper)
+        s.clearSelection()
+        #expect(s.selectedDrawingID == nil)   // 复位到已知 nil 基线，下面的「被拒」不是「本来就没设过」
+
+        s.setSelection(id: "", panel: .upper)
+
+        #expect(s.selectedDrawingID == nil, "空 id 必须被拒")
+        #expect(s.selectedPanel == nil)
+    }
 }
