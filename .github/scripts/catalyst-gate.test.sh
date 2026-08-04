@@ -449,11 +449,13 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   xcodebuild 的 XCTestOutputBarrier 插花未修剪，禁手打伪造行）重裁 pass-main-current.log + 下方回显
 #   1574→1625（whole-branch fix：该份 1625 日志重裁的 pass-main-current.log 已由下面 PR-3 用 1663
 #   日志整份重裁取代，此说法现已不成立——`grep -c XCTestOutputBarrier` 对当前 fixture 实测为 0）。
-#   【1b-i PR-3（本轮）】真实总数 1625→1663（+38，其中 37 条为本 PR 新增——`@Test(` 实测计数
-#   （`git diff f21cca1..HEAD -- ios/Contracts/Tests | grep -c '^+[[:space:]]*@Test('` = 37，host
-#   25 + uikit 12）、1 条为旧基线未同步的既有漂移，非本 PR 引入），uikit 基线 59→71（+12，零删除，
-#   由 uikit-expected-tests.py 重生成）。pass-main-current.log 已用本轮一份**真** fresh Catalyst
-#   日志（1663 tests / 203 suites）逐行重裁。
+#   【1b-i PR-3（本轮）】真实总数 1625→1663（+38）。其中 37 条为 PR-3 在整支终审前新增的测试
+#   （host +25、uikit +12），另 1 条为旧基线未同步的既有漂移、非本 PR 引入。
+#   ⚠️ 这里**刻意不嵌「跑某条 git 命令应得 N」式的自验证**：整支终审的 fix 又补了 1 条 host 测试
+#   （setSelectionRejectsEmptyID），任何以 HEAD 为终点的计数都会把后续提交算进去、注释一落地就过期
+#   （本轮实测：同一条命令在 fix 提交上已从 37 变 38）。要复核请以 baseline 文件与真日志汇总行为准。
+#   uikit 基线 59→71（+12，零删除，由 uikit-expected-tests.py 重生成）。
+#   pass-main-current.log 已用一份**真** fresh Catalyst 日志（1663 tests / 203 suites）逐行重裁。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
 if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1663" <<<"$out"; then
