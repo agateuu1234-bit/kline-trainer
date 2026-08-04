@@ -63,13 +63,13 @@ struct DrawingHitTesterTests {
         // ① `hitTest(` 的**调用**点恰好 1 处 = DrawingHitTester 内（协议声明与 HorizontalLineTool 的
         //    实现都带 `func`，被 callCount 扣掉，不计入调用）。
         let hits = try callSiteCount("hitTest(")
-        #expect(hits.count == 1, "hitTest 的调用点不是 1 处：\(hits)")
+        try #require(hits.count == 1, "hitTest 的调用点不是 1 处：\(hits)")
         #expect(hits.first?.file.hasSuffix("/Drawing/DrawingHitTester.swift") == true)
         #expect(hits.first?.count == 1)
         // ② `firstHit(` 的调用点恰好 1 处 = tap 路由（`ChartContainerView.swift` 的 `.select` 分支）。
         //    PR-4 若要再加一个命中入口，这条当场红 —— 那个入口必须同样先过 `visibleDrawings`。
         let entries = try callSiteCount("firstHit(")
-        #expect(entries.count == 1, "firstHit 的调用点不是 1 处：\(entries)")
+        try #require(entries.count == 1, "firstHit 的调用点不是 1 处：\(entries)")
         #expect(entries.first?.file.hasSuffix("/Render/ChartContainerView.swift") == true)
         #expect(entries.first?.count == 1)
         // ③ **只数调用点不够（codex plan-R5-F1）**：`firstHit(in: engine.drawings, …)` 同样只有 1 处调用点，
