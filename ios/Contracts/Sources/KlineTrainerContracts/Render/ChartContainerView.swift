@@ -296,19 +296,51 @@ public struct ChartContainerView: UIViewRepresentable {
             case .rect(let shield): if shield.contains(point) { return }
             }
             let mapper = CoordinateMapper(viewport: viewport, displayScale: view.traitCollection.displayScale)
-            let ps = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
-            guard let anchor = inputController.tapToAnchor(at: point, panel: ps, mapper: mapper) else { return }
-            session.addAnchor(anchor, panel: panel)          // D31：落在 ≠ pendingAnchorPanel 的面板 → 容器内部只丢 pending
-            guard inputController.shouldCommit(current: session.pendingAnchors, tool: tool) else { return }
-            // 1a-iii：样式（含 lineSubType）由 session.defaultStyle 单一真相决定，commitPending 原子读取。
-            guard let committed = session.commitPending(panelPosition: panel == .upper ? 0 : 1) else { return }
-            // codex rebased-R2：拒绝**不可见**画线再落库（1a-iii 起 ray 可被用户选中）。落在右缘的射线
-            // lineXRange==nil → 既画不出（HorizontalLineTool.render 跳过）、又命不中（hitTest fail-closed），
-            // 但仍会 append+autosave 一条 1b-i 前无从选中/删除的幽灵线。与 tapToAnchor 的源头 fail-closed 同理，
-            // 扩到 ray 右缘几何：可见几何为 nil 就不落库。本期只 .horizontal。
-            guard HorizontalLineTool.visibleGeometry(for: committed, mapper: mapper) != nil else { return }
-            engine.routeDrawingCommit(committed)             // review→reviewDrawings；否则→drawings（Task 10）
-            // ← 此处**故意没有** engine.commitDrawing(panel:)：连续画线（D38），会话与工具保持不变。
+            // D38/D54（1b-i PR-3）：盾之后才分叉 —— 落在面板上的点击**既不落锚、也不选中**（D53）。
+            switch session.mode {
+            case .draw:
+                // ⚠️ 本分支**一字未改**（1a-ii/1a-iii/1a-iv 的落线链路原样）：训练与复盘的落线能力
+                //    是既有功能，本切片只是在它旁边加了一条新分支。
+                let ps = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
+                guard let anchor = inputController.tapToAnchor(at: point, panel: ps, mapper: mapper) else { return }
+                session.addAnchor(anchor, panel: panel)          // D31：落在 ≠ pendingAnchorPanel 的面板 → 容器内部只丢 pending
+                guard inputController.shouldCommit(current: session.pendingAnchors, tool: tool) else { return }
+                // 1a-iii：样式（含 lineSubType）由 session.defaultStyle 单一真相决定，commitPending 原子读取。
+                guard let committed = session.commitPending(panelPosition: panel == .upper ? 0 : 1) else { return }
+                // codex rebased-R2：拒绝**不可见**画线再落库（1a-iii 起 ray 可被用户选中）。落在右缘的射线
+                // lineXRange==nil → 既画不出（HorizontalLineTool.render 跳过）、又命不中（hitTest fail-closed），
+                // 但仍会 append+autosave 一条 1b-i 前无从选中/删除的幽灵线。与 tapToAnchor 的源头 fail-closed 同理，
+                // 扩到 ray 右缘几何：可见几何为 nil 就不落库。本期只 .horizontal。
+                guard HorizontalLineTool.visibleGeometry(for: committed, mapper: mapper) != nil else { return }
+                engine.routeDrawingCommit(committed)             // review→reviewDrawings；否则→drawings（Task 10）
+                // ← 此处**故意没有** engine.commitDrawing(panel:)：连续画线（D38），会话与工具保持不变。
+
+            case .select:
+                // D34 / spec §4（**trust-boundary**）：复盘**不得**获得选中能力 —— 复盘的选中要带
+                // `(layer, id)` 层权限门控，那是 P5；本期若放行，复盘就能改写**已归档 record 里的原训练线**。
+                // ⚠️ 门**只包这一支**：`.draw` 在复盘下照常落线（浮动铅笔钮，1a-iii 起的既有功能）。
+                //    把 guard 提到 switch 之前 = 复盘画线功能回归 —— 与 PR-1 那道 `.segment` 门误管所有
+                //    工具是同一类错误：fail-closed 的门必须限定到它真适用的那一类。
+                guard engine.flow.mode != .review else { return }
+                // D40：命中集合 ≡ 渲染集合 —— 同一个 `visibleDrawings`、同一张 `drawingTools` 注册表。
+                let ordered = RenderStateBuilder.visibleDrawings(
+                    engine: engine, panel: panel, tick: engine.tick.globalTickIndex)
+                if let hit = DrawingHitTester.firstHit(in: ordered, point: point, mapper: mapper,
+                                                       tools: KLineView.drawingTools) {
+                    session.setSelection(id: hit.id, panel: panel)   // 命中 → 选中它（替换原选中）
+                } else {
+                    session.clearSelection()                         // D37：未命中 → 先清空选中，**且不落锚**
+                }
+                // ⚠️ 选中态变了必须**立刻**重建渲染态（codex plan-R3-F2）：本函数开头 `:280` 的
+                //    `rebuildRenderState` 发生在选中改变**之前**，而高亮渲染读的是
+                //    `KLineRenderState.selectedDrawingID` → 不补这一次重建，本帧画出来的还是旧选中。
+                //    `KLineRenderState` 是 `Equatable` 且 `KLineView.renderState` 有
+                //    `didSet { guard renderState != oldValue else { return }; setNeedsDisplay() }`
+                //    （`KLineView.swift:16-21`）→ 只有 `selectedDrawingID` 变了的新状态照样触发重绘，
+                //    没变则不重绘（无多余绘制）。**不要**改成依赖 SwiftUI observation 顺带刷新：
+                //    Coordinator 这条直连路径不经过 `updateUIView`，那样等于没有证据。
+                rebuildRenderState(bounds: view.bounds)
+            }
         }
     }
 }
