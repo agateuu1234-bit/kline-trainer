@@ -647,6 +647,9 @@ git commit -m "划线 P1b-1b-i PR-3 T2：选中态二元组进 DrawingSession（
         #expect(e.drawingSession.drawingModeActive == true)   // 前提成立（防会话没开导致后面断言恒真）
         e.drawingSession.setMode(.select)
         e.drawingSession.setSelection(id: "P", panel: .upper)
+        // 前提成立：不先钉这两句，下面四条「不落盘」断言在 setSelection 变 no-op 时会**全部恒真通过**
+        #expect(e.drawingSession.selectedDrawingID == "P")
+        #expect(e.drawingSession.selectedPanel == .upper)
         #expect(e.drawings == before, "选中不得改动任何 DrawingObject")
         #expect(e.drawings.map(\.id) == before.map(\.id))
         #expect(e.drawingsRevision == revBefore, "选中不是内容变更，绝不能 bump revision（否则会触发 autosave）")
