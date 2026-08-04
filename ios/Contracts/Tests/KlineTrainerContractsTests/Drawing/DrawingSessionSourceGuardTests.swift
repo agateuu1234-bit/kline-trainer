@@ -104,13 +104,16 @@ struct DrawingSessionSourceGuardTests {
     func drawingSessionMutatorsAreNotPublic() throws {
         let code = try source("Sources/KlineTrainerContracts/Drawing/DrawingSession.swift")
         for m in ["func activate(", "func deactivate(", "func discardPendingAnchors(",
-                  "func addAnchor(", "func commitPending(", "func setDefaultStyle("] {
+                  "func addAnchor(", "func commitPending(", "func setDefaultStyle(",
+                  "func setSelection(", "func clearSelection("] {     // ← 1b-i PR-3 新增两个 mutator
             #expect(code.contains(m), "mutator \(m) 不见了？")                 // 先证明确实扫到了这些方法
             #expect(!code.contains("public " + m),
                     "\(m) 不得为 public —— 包外能直接改会话就绕开了 begin/endDrawingSession，漂移会回来")
         }
         // 只读态则必须仍是 public（TrainingView / 未来底栏要读）
         #expect(code.contains("public private(set) var drawingModeActive"))
+        #expect(code.contains("public private(set) var selectedDrawingID"))
+        #expect(code.contains("public private(set) var selectedPanel"))
     }
 
     @Test("codex plan-R5-high：只有 TrainingEngine 能开/关会话（Coordinator 只许落锚/提交）")

@@ -41,10 +41,37 @@ public final class DrawingSession {
     public enum DrawingSessionMode: Equatable, Sendable { case draw, select }
     public private(set) var mode: DrawingSessionMode = .draw
 
+    /// D41（1b-i PR-3）：选中态是 **`(selectedPanel, selectedDrawingID)` 二元组**，与 `activeDrawingTool`
+    /// 同源存在本容器里（底栏、样式面板、tap 处理读写**同一份**，任何一方都不得私存副本）。
+    /// **只带 id 不带 panel 会出错**：D29 周期绑定下，一条线会随切周期从 `selectedPanel` 迁到**另一个**
+    /// 面板——它全局仍在 `drawings` 里，id-only 判据会让它在用户没选的那个面板里继续高亮、继续可操作。
+    /// **D55：瞬时 UI 状态，绝不落盘**（`DrawingObject` 不新增字段，本容器不进任何存储路径）。
+    public private(set) var selectedDrawingID: DrawingID?
+    public private(set) var selectedPanel: PanelId?
+
+    /// D54：建立选中。**fail-closed**：非选择态 / 无会话一律拒——这让「画线态里挂着一个选中」
+    /// 这个坏状态**不可表达**（而不是靠每个调用点自觉先 setMode）。internal（同容器 mutator 纪律）。
+    func setSelection(id: DrawingID, panel: PanelId) {
+        guard drawingModeActive, mode == .select else { return }
+        selectedDrawingID = id
+        selectedPanel = panel
+    }
+
+    /// D54：清空选中。**二元组整体清**（只清 id 会留下半个二元组）。
+    /// ⚠️ 判据一律是**状态**（态变了 / 结构性不可见 / id 不在 `drawings` 里），
+    /// **绝不是**「某个写入 API 返回了 false」（D64；写入 API 的接线属 PR-4）。
+    func clearSelection() {
+        selectedDrawingID = nil
+        selectedPanel = nil
+    }
+
     /// D57：切换画线/选择态。切 `.select` 保留 activeDrawingTool、丢 pending（半成品多锚线不跨态存活）。
+    /// D54 clause 2（1b-i PR-3）：**任何一次态切换都清空选中** —— 切回 `.draw` 时必须清（画线态不该有选中）；
+    /// 切进 `.select` 时本来就没有可清的，无条件清让不变量「`mode == .draw` ⟹ 选中为空」由构造保证。
     /// internal（同容器 mutator 纪律）。
     func setMode(_ m: DrawingSessionMode) {
         mode = m
+        clearSelection()
         discardPendingAnchors()
     }
 
@@ -105,6 +132,7 @@ public final class DrawingSession {
     func activate(tool: DrawingToolType) {
         drawingModeActive = true
         mode = .draw                              // ← 在幂等 guard 之前（D57，否则选择态点回同工具态切不回）
+        clearSelection()                          // ← D54 clause 2：跟着 mode 走，同样必须在幂等 guard 之前
         guard activeDrawingTool != tool else { return }
         activeDrawingTool = tool
         discardPendingAnchors()
@@ -116,6 +144,7 @@ public final class DrawingSession {
         drawingModeActive = false
         activeDrawingTool = nil
         mode = .draw                              // 复位，防下次开会话继承旧态
+        clearSelection()                          // D54 clause 1：退出画线模式即清空选中
         discardPendingAnchors()
         clearAllShields()   // 1a-iii Task2 模型不变量：退画线无残留盾（防死区拒收后续正常 tap）
     }
