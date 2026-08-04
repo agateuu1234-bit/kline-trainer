@@ -1,0 +1,79 @@
+klines@r:p:heap:default:-:false:false:false:false:false:true:true:2:18
+stock_coverage@r:p:heap:default:-:false:false:false:false:false:false:true:3:5
+stocks@r:p:heap:default:-:false:false:false:false:false:true:true:0:2
+training_sets@r:p:heap:default:-:false:false:false:false:false:false:true:3:13
+--columns--
+klines.id:bigint:true
+klines.stock_code:character varying(10):true
+klines.period:character varying(10):true
+klines.datetime:bigint:true
+klines.open:double precision:true
+klines.high:double precision:true
+klines.low:double precision:true
+klines.close:double precision:true
+klines.volume:bigint:true
+klines.amount:numeric(16,2):false
+klines.ticket_index:integer:false
+klines.ma66:numeric(10,4):false
+klines.boll_upper:numeric(10,4):false
+klines.boll_mid:numeric(10,4):false
+klines.boll_lower:numeric(10,4):false
+klines.macd_diff:numeric(10,6):false
+klines.macd_dea:numeric(10,6):false
+klines.macd_bar:numeric(10,6):false
+stock_coverage.stock_code:text:true
+stock_coverage.dense_1m_start_date:date:true
+stock_coverage.dense_1m_end_date:date:true
+stock_coverage.dropped_1m_dates:jsonb:true
+stock_coverage.dense_day_count:integer:true
+stocks.code:character varying(10):true
+stocks.name:character varying(50):true
+training_sets.id:integer:true
+training_sets.stock_code:character varying(10):true
+training_sets.stock_name:character varying(50):true
+training_sets.start_datetime:bigint:true
+training_sets.end_datetime:bigint:true
+training_sets.schema_version:integer:true
+training_sets.file_path:text:true
+training_sets.content_hash:character(8):true
+training_sets.created_at:timestamp without time zone:false
+training_sets.status:character varying(10):true
+training_sets.lease_id:uuid:false
+training_sets.lease_expires_at:timestamp with time zone:false
+training_sets.reserved_at:timestamp with time zone:false
+--constraints--
+klines|ck_klines_price_finite_positive|CHECK (((open > (0)::double precision) AND (open <> 'NaN'::double precision) AND (open <> 'Infinity'::double precision) AND (high > (0)::double precision) AND (high <> 'NaN'::double precision) AND (high <> 'Infinity'::double precision) AND (low > (0)::double precision) AND (low <> 'NaN'::double precision) AND (low <> 'Infinity'::double precision) AND (close > (0)::double precision) AND (close <> 'NaN'::double precision) AND (close <> 'Infinity'::double precision)))
+klines|ck_klines_price_ordering|CHECK (((high >= low) AND (high >= GREATEST(open, close)) AND (low <= LEAST(open, close))))
+klines|klines_pkey|PRIMARY KEY (id)
+klines|klines_stock_code_fkey|FOREIGN KEY (stock_code) REFERENCES stocks(code)
+klines|klines_stock_code_period_datetime_key|UNIQUE (stock_code, period, datetime)
+stock_coverage|ck_stock_coverage_day_count|CHECK ((dense_day_count >= 0))
+stock_coverage|ck_stock_coverage_dropped_is_array|CHECK ((jsonb_typeof(dropped_1m_dates) = 'array'::text))
+stock_coverage|ck_stock_coverage_range|CHECK ((dense_1m_start_date <= dense_1m_end_date))
+stock_coverage|stock_coverage_pkey|PRIMARY KEY (stock_code)
+stocks|stocks_pkey|PRIMARY KEY (code)
+training_sets|ck_content_hash_crc32_lowercase|CHECK ((content_hash ~ '^[0-9a-f]{8}$'::text))
+training_sets|ck_lease_state_invariant|CHECK (((((status)::text = 'unsent'::text) AND (lease_id IS NULL) AND (lease_expires_at IS NULL) AND (reserved_at IS NULL)) OR (((status)::text = ANY ((ARRAY['reserved'::character varying, 'sent'::character varying])::text[])) AND (lease_id IS NOT NULL) AND (lease_expires_at IS NOT NULL) AND (reserved_at IS NOT NULL))))
+training_sets|ck_status_enum|CHECK (((status)::text = ANY ((ARRAY['unsent'::character varying, 'reserved'::character varying, 'sent'::character varying])::text[])))
+training_sets|training_sets_pkey|PRIMARY KEY (id)
+training_sets|uq_stock_start|UNIQUE (stock_code, start_datetime)
+--defaults--
+klines.id=nextval('klines_id_seq'::regclass)
+stock_coverage.dropped_1m_dates='[]'::jsonb
+training_sets.created_at=now()
+training_sets.id=nextval('training_sets_id_seq'::regclass)
+training_sets.schema_version=1
+training_sets.status='unsent'::character varying
+--sequences--
+klines_id_seq:bigint:1:1:9223372036854775807:1:false:1:p
+training_sets_id_seq:integer:1:1:2147483647:1:false:1:p
+--indexes--
+CREATE INDEX idx_klines_lookup ON public.klines USING btree (stock_code, period, datetime)
+CREATE INDEX idx_training_sets_lease_expire ON public.training_sets USING btree (lease_expires_at) WHERE ((status)::text = 'reserved'::text)
+CREATE INDEX idx_training_sets_lease ON public.training_sets USING btree (lease_id) WHERE (lease_id IS NOT NULL)
+CREATE UNIQUE INDEX klines_pkey ON public.klines USING btree (id)
+CREATE UNIQUE INDEX klines_stock_code_period_datetime_key ON public.klines USING btree (stock_code, period, datetime)
+CREATE UNIQUE INDEX stock_coverage_pkey ON public.stock_coverage USING btree (stock_code)
+CREATE UNIQUE INDEX stocks_pkey ON public.stocks USING btree (code)
+CREATE UNIQUE INDEX training_sets_pkey ON public.training_sets USING btree (id)
+CREATE UNIQUE INDEX uq_stock_start ON public.training_sets USING btree (stock_code, start_datetime)
