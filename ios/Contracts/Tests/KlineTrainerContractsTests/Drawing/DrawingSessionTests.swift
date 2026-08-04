@@ -301,6 +301,7 @@ struct DrawingSessionTests {
     func drawModeCannotHoldSelection() {
         let s = DrawingSession()
         s.activate(tool: .horizontal)
+        #expect(s.mode == .draw)                 // 前提：本来就是画线态（setSelection 被拒的前提）
         // ① 画线态下 setSelection 直接被拒（fail-closed，不是"先设上再清掉"）
         s.setSelection(id: "A", panel: .upper)
         #expect(s.selectedDrawingID == nil)
@@ -314,6 +315,7 @@ struct DrawingSessionTests {
         #expect(s.selectedPanel == nil)
         // ③ 会话未开时也不许设（fail-closed）
         let t = DrawingSession()
+        #expect(t.drawingModeActive == false)    // 前提：确实未开会话（setSelection 被拒的前提）
         t.setSelection(id: "A", panel: .upper)
         #expect(t.selectedDrawingID == nil)
     }
@@ -325,6 +327,7 @@ struct DrawingSessionTests {
         s.activate(tool: .horizontal)
         s.setMode(.select)
         s.setSelection(id: "A", panel: .upper)
+        #expect(s.selectedDrawingID == "A")      // 前提：确实先设上了（否则下面「被清空」恒真）
         // activate 同工具（PR-4 的"点亮图标切回画线态"走这条）——D57 已让 mode 在幂等 guard 之前置 .draw
         s.activate(tool: .horizontal)
         #expect(s.mode == .draw)
@@ -332,6 +335,7 @@ struct DrawingSessionTests {
         // deactivate（退出画线模式，D54 clause 1）
         s.setMode(.select)
         s.setSelection(id: "B", panel: .lower)
+        #expect(s.selectedDrawingID == "B")      // 前提：确实先设上了（否则下面「被清空」恒真）
         s.deactivate()
         #expect(s.selectedDrawingID == nil)
         #expect(s.selectedPanel == nil)
@@ -352,6 +356,7 @@ struct DrawingSessionTests {
         // setMode：清选中、保工具与会话
         let b = DrawingSession()
         b.activate(tool: .horizontal); b.setMode(.select); b.setSelection(id: "X", panel: .upper)
+        #expect(b.selectedDrawingID == "X")      // 前提：确实先设上了（否则下面「被清空」恒真）
         b.setMode(.draw)
         #expect(b.selectedDrawingID == nil)
         #expect(b.drawingModeActive == true)
