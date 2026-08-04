@@ -950,7 +950,7 @@ Expected：编译失败（`selectionRGBA` 不存在 / `render` 参数不匹配�
 **⚠️ 签名迁移必须一次扫全（codex plan-R3-F1：原稿只列了 conformer，漏了调用点 → 整个 Task 编译不过）。**
 `render` 是 protocol requirement，Swift **不允许**在协议要求上给默认值 → **每一个** conformer 与**每一个**调用点都必须同 Task 迁完。`drawDrawings` 的 `selectedDrawingID` **刻意不给默认值**（给了默认值就等于允许未来某个调用点静默丢掉高亮）。
 
-**实测的全部迁移点（对 `f21cca1` 逐条 grep 得到，共 11 处）**：
+**实测的全部迁移点（对 `f21cca1` 逐条 grep 得到，共 16 处 = 协议 1 + 生产 conformer 1 + 测试替身 3 + `render` 调用点 3 + `drawDrawings` 调用点 8）**：
 
 | 类别 | 位置 | 改法 |
 |---|---|---|
@@ -958,7 +958,7 @@ Expected：编译失败（`selectionRGBA` 不存在 / `render` 参数不匹配�
 | 生产 conformer | `Drawing/HorizontalLineTool.swift:82` | 加 `isSelected: Bool` + 消费它 |
 | 测试替身 ×3 | `Drawing/DrawingProtocolTests.swift:61` `FakeDrawingTool`／`Drawing/SpecLiteralGuardTests.swift:44` `SignatureGuardTool`／`Drawing/DrawDrawingsDispatchTests.swift:181` `SpyDrawingTool` | 加 `isSelected: Bool`（Spy 还要把 `received` 扩一维，见上） |
 | `render` 旧调用点 ×3 | `Render/KLineView+Drawing.swift:25`（生产）／`Drawing/DrawingProtocolTests.swift:25`／`Drawing/HorizontalLineToolTests.swift:102`（既有 `renderPixels` helper） | 生产处传 `drawing.id == selectedDrawingID`；两处测试传 `isSelected: false`（保持既有行为） |
-| `drawDrawings` 旧调用点 ×8 | `Render/KLineView.swift:106`（生产）＋ `Drawing/DrawDrawingsDispatchTests.swift:23, 41, 61, 80, 102, 127, 152` | 生产处传 `renderState.selectedDrawingID`；7 处既有测试传 `selectedDrawingID: nil`（保持既有行为） |
+| `drawDrawings` 旧调用点 ×8（Step 1 加完新测试后共 10 处，新加的 2 处天生带新参数） | `Render/KLineView.swift:106`（生产）＋ `Drawing/DrawDrawingsDispatchTests.swift:23, 41, 61, 80, 102, 127, 152` | 生产处传 `renderState.selectedDrawingID`；7 处既有测试传 `selectedDrawingID: nil`（保持既有行为） |
 
 - [ ] **Step 4b: 旧签名清扫（commit 前必跑，输出必须为空）**
 
@@ -969,7 +969,7 @@ grep -rn "\.render(ctx:.*scheme: [^)]*)" ios/Contracts --include="*.swift" | gre
 # 旧 drawDrawings 签名（没有 selectedDrawingID）
 grep -rnA 4 "drawDrawings(" ios/Contracts --include="*.swift" | grep -v "func drawDrawings" | grep -B 4 "tools:" | grep -c "selectedDrawingID" 
 ```
-Expected：第一条命令**无输出**；第二条的计数 == `drawDrawings` 调用点总数（8）。
+Expected：第一条命令**无输出**；第二条的计数 == 当时 `drawDrawings` 调用点**总数**。⚠️ 这个总数会随本 Task Step 1 新增的 dispatch 测试增长（计划撰写时是 8，加完 2 条新测试后是 10）——**以当时实际的调用点数为准**，别拿 8 当硬指标。
 ⚠️ 别只靠 `swift build` 报错来找——`#if canImport(UIKit)` 里的调用点在 host 上**根本不编译**，host 绿不代表 Catalyst 绿（本项目踩过：UIKit-gated 代码两头落空）。这条清扫是 host 阶段唯一能抓到它们的手段。
 
 - [ ] **Step 5: 接 dispatch**
