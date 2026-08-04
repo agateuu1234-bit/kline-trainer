@@ -27,7 +27,8 @@
 - **访问级别纪律**（`DrawingSession.swift:21-28` 大注释）：容器**状态** `public private(set)`，**mutator 一律 internal**（前面不加 `public`）。新增的 `setViewportMapper` / `setSelectionGeometryVisible` 同样 internal，并纳入既有源码守卫（`DrawingSessionSourceGuardTests` 的 mutator 清单）。
 - **fail-closed 门必须限定到它真适用的那一类**（PR-1 `.segment` 门误管所有工具 → 非水平线被静默丢弃的教训）。
 - **测试判别力**：每条新测试写完都要做一次**变异验证**（把被测那行改坏 → 测试必须红 → 再改回来）。**UIKit-gated 文件在 host 上 `canImport(UIKit)==false`、根本不参与编译 → host 全绿不构成它们的任何证据，针对它们的变异必须上 Catalyst 真跑**。判绿**读执行量**（`Test run with N tests`）不读 `TEST SUCCEEDED` 字样。
-- **命名一致性**（后续 Task 依赖，不得改名）：`DrawingEditRouter.selectionGeometryVisible(engine:)` / `.canEditStyle(engine:)` / `.canDelete(engine:)` / `.panelStyle(engine:)` / `.applyStyle(_:engine:)` / `.deleteSelected(engine:)` / `DrawingSession.setViewportMapper(_:panel:)` / `.viewportMapper(for:)` / `.selectionGeometryVisible` / `.setSelectionGeometryVisible(_:)` / `bareIdentifierReferences(inCode:identifier:)` / `codeTextPreservingBoundaries(_:)` / `expectIdentifierNeverVended(_:inFiles:)`。
+- **命名一致性**（后续 Task 依赖，不得改名）：`DrawingEditRouter.selectionGeometryVisible(engine:)`（现算）/ `.canEditStyle(engine:)` / `.canDelete(engine:)`（现算，**路由用**）/ `.styleControlsEnabled(engine:)` / `.deleteButtonEnabled(engine:)`（读 observable 提示，**UI 用**）/ `.panelStyle(engine:)` / `.applyStyle(_:engine:)` / `.deleteSelected(engine:)` / `DrawingSession.setViewportMapper(_:panel:)` / `.viewportMapper(for:)` / `.selectionGeometryVisible` / `.setSelectionGeometryVisible(_:)` / `bareIdentifierReferences(inCode:identifier:)` / `codeTextPreservingBoundaries(_:)` / `expectIdentifierNeverVended(_:inFiles:)`。
+- **两条读法不得混用**（PD2）：`Sources/` 里 **UI 层只许调 `styleControlsEnabled` / `deleteButtonEnabled`**，**路由内部只许调 `canEditStyle` / `canDelete`**；反过来任一处都是缺陷（UI 调现算 → 不重绘；路由调提示 → 用陈旧值放行写入）。由 Task 3 的源码守卫钉死。
 - **注释里不得嵌「跑某命令应得 N」式自验证**（终点是 HEAD 会把后续提交算进去，一落地就自证伪）。
 
 ---
@@ -72,11 +73,30 @@ spec D49–D67 已冻结，下列是 spec 留给实施的自由度，**在本计
 **为什么不重新推导**：`RenderStateBuilder.make:39-46` 在「最后一根可见 K 线是进行中聚合」时会用 m3 合成 partial candle 并**重算 `priceRange`**，返回的 `renderViewport` 与 `makeViewport()` 的输出**不同**。SwiftUI 侧再推一遍 = 第二份几何真相，会在这个分支上与渲染/命中分叉——正是 D40「命中集合 ≡ 渲染集合」要消灭的那类缺陷。
 **形状**：`DrawingSession` 存 `@ObservationIgnored` 的 `[Int: CoordinateMapper]`，`Coordinator.rebuildRenderState` 在 `view.renderState = newState` **之后**发布本面板的 mapper。
 
-### PD2　置灰用的 `selectionGeometryVisible` 是**提示**，不是门；真正的门是路由在写入瞬刻的那次重算
+### PD2　几何分量有**两个读法**，且必须刻意分开（codex plan-R1-F2 纠正本计划初稿）
 
-- **门**（唯一强制点）：`DrawingEditRouter` 在**每一次**写入前用 `session.viewportMapper(for:)` 现算 `HorizontalLineTool.visibleGeometry`（D65 R13-F1：确认框有时间窗，只在点 🗑 那刻判是时序 bug）。
-- **提示**：`selectionGeometryVisible` 是 observable，驱动 🗑 与样式控件的 `.disabled`。它若短暂陈旧，最坏后果只是控件亮/灰晚一帧——**写入永远不会因此放行**。
-- **两者调的是同一个 `visibleGeometry` 实现**（spec D65 明写：单点约束指**函数实现**只有一份，不是调用点只有一处）。
+| | 谁用 | 几何怎么读 | 为什么 |
+|---|---|---|---|
+| **门**（唯一强制点） | `applyStyle` / `deleteSelected` 两条写入路由 | 用 `session.viewportMapper(for:)` **现算** `HorizontalLineTool.visibleGeometry` | D65 R13-F1：确认框有时间窗，只在点 🗑 那刻判是时序 bug |
+| **提示**（置灰） | 🗑 与 5 组样式控件的 `.disabled` | 读 **observable** 的 `session.selectionGeometryVisible` | **只有读这个 observable 才能让 SwiftUI 建立依赖**——mapper 是 `@ObservationIgnored`，UI 若也走现算，平移到线看不见时**根本不会重绘**，控件就一直停在旧的亮/灰状态（验收 #18c 当场失效） |
+
+> ⚠️ **本计划初稿在这里写错过**：初稿让 UI 直接调现算版谓词，等于把 observable 提示晾在一边、白建一套信号。codex plan-R1-F2 抓出。**修法不是二选一，而是把两个读法都显式命名**（`canEditStyle` / `canDelete` = 现算，路由用；`styleControlsEnabled` / `deleteButtonEnabled` = 读提示，UI 用），并把**非几何分量抽成共享 helper**，保证两条路径只在「几何怎么读」这一点上不同、不可能在别的分量上漂移。
+
+- **提示陈旧的最坏后果只是控件亮/灰晚一帧**——写入永远不会因此放行（门在路由那一侧）。
+- **两个读法调的是同一个 `visibleGeometry` 实现**（spec D65 明写：单点约束指**函数实现**只有一份，不是调用点只有一处）。
+- **`setSelection` 顺手把提示置 `true`**：选中**只可能**由 `hitTest` 命中产生，而 `hitTest` 内部就是 `visibleGeometry != nil`（D40 同一个函数）——**命中即证明此刻几何可见**。这不是第三份真相，是同一份真相在建立选中那一刻的直接结论；不这么做，验收 #9「单击一条线 → 🗑 从灰变亮」要等一个 runloop 才生效。
+
+### PD2b　面板置灰谓词必须区分「有选中」与「无选中」（codex plan-R1-F1 纠正本计划初稿）
+
+**初稿的错**：`styleEnabled` 无条件取 `canEditStyle(engine:)`，而该谓词在**没有选中**时返回 `false`（`uniqueSelected == nil`）→ 面板控件会在无选中时全灰，用户**改不了「下一条线的默认」**——那是 1a-iii 就有的能力，会被本切片直接回归掉，且砸掉验收 #13（取消选中后改默认、再画一条新线）。
+
+**定稿**：
+```
+样式控件可用 ⟺ 无选中 → **恒可用**（此刻它在改「下一条线的默认」，与任何线的状态无关）
+              有选中 → 由 D65「改样式可用」决定
+🗑 可用      ⟺ 有选中 且 D65「删除可用」（无选中恒灰，spec §1.1 #1 原文）
+```
+两者**不对称是对的**：样式面板在无选中时有正当工作要做（改默认），🗑 在无选中时没有操作对象。
 - **为什么不能省掉提示、靠 engine 的 observable 顺带刷新**：平移改的是 `engine.upperPanel`（会触发 SwiftUI 失效），但 mapper 是在**那次失效引发的 `updateUIView` 里**才更新的 → 面板本帧读到的仍是上一帧的 mapper，惯性停止后这个滞后**不会自动纠正**，验收 #18c 的「平移到看不见 → 变灰」就会不生效。
 - **写入必须延后一个 runloop**（`DispatchQueue.main.async`）：`rebuildRenderState` 的调用点之一是 `updateUIView`（视图更新期），期间改 @Observable 是 SwiftUI 明令的未定义行为。本仓已有同一条逃生门先例（`ChartContainerView.swift:105` 释放 `crosshairOwner`）。**且只在值真的会变时才 dispatch**（平移每帧都写会造成 写→失效→再 update 的循环 + 每帧一次派发）。
 
@@ -435,17 +455,24 @@ git commit -m "划线 P1b-1b-i PR-4 Task1：源码守卫补第三层——白名
         #expect(s.viewportMapper(for: .lower) == nil, "写上面板不得污染下面板")
     }
 
-    @Test("PR-4：selectionGeometryVisible 默认 false；clearSelection 一并复位（没有选中就没有可操作对象）")
-    @MainActor func geometryHintResetsWithSelection() {
+    @Test("PR-4：几何提示随选中生命期走 —— 默认 false；setSelection 置 true（命中即证明可见）；clearSelection 复位")
+    @MainActor func geometryHintFollowsSelectionLifetime() {
         let s = DrawingSession()
         #expect(s.selectionGeometryVisible == false)
         s.activate(tool: .horizontal)
         s.setMode(.select)
         s.setSelection(id: "A", panel: .upper)
-        s.setSelectionGeometryVisible(true)
-        #expect(s.selectionGeometryVisible == true)
+        #expect(s.selectionGeometryVisible == true,
+                "选中只可能来自 hitTest 命中，而 hitTest 内部就是 visibleGeometry != nil —— 命中即证明此刻可见。"
+                + "不置 true 的话，验收 #9「单击一条线 → 🗑 从灰变亮」要等一个 runloop 才生效")
         s.clearSelection()
         #expect(s.selectionGeometryVisible == false, "清空选中必须一并复位几何提示，否则 🗑 会对着空选中亮着")
+        // 被拒的 setSelection（非选择态 / 空 id）不得留下一个「亮着」的提示
+        let t = DrawingSession()
+        t.activate(tool: .horizontal)                 // mode == .draw
+        t.setSelection(id: "A", panel: .upper)        // fail-closed：画线态不建立选中
+        #expect(t.selectedDrawingID == nil)
+        #expect(t.selectionGeometryVisible == false, "选中没建立成，提示不许被置亮")
     }
 ```
 
@@ -586,6 +613,12 @@ Expected：编译失败 —— `value of type 'DrawingSession' has no member 'se
     }
 ```
 
+在 `setSelection(id:panel:)` 体内、两句赋值**之后**追加一行（**必须在 guard 之后**——被拒的选中不得留下亮着的提示）：
+
+```swift
+        selectionGeometryVisible = true            // 命中即证明此刻几何可见（hitTest 内部就是 visibleGeometry != nil，D40）
+```
+
 在 `clearSelection()` 体内追加一行（在两句清空**之后**）：
 
 ```swift
@@ -683,29 +716,38 @@ Expected：`Test run with 1760 tests ... passed`（1754 + 6）。
         _ = (upperC, lowerC)
     }
 
-    @Test("PR-4：平移使选中线滑出纵向范围 → 几何提示转 false（跨 runloop 收敛）")
-    func geometryHintFollowsViewport() async {
+    @Test("PR-4（codex plan-R1-F2 专项）：几何提示由 **Coordinator 真实路径**刷新 —— 选中一条价位远在视口外的线 → 提示转 false")
+    func coordinatorRefreshesGeometryHint() async throws {
         let (engine, upperC, _, upperV, _) = makeRig()
         engine.toggleDrawingMode()
-        upperC.handleDrawingTapForTesting(at: mainChartPoint(upperV))     // 画一条
-        let id = try! #require(engine.drawings.last?.id)
+        upperC.handleDrawingTapForTesting(at: mainChartPoint(upperV))     // 画一条**可见**的
+        let visibleID = try #require(engine.drawings.last?.id)
+        // 再注入一条价位远在视口外的（用注入而非画，因为画不出一条自己看不见的线）
+        engine.injectDrawingsForTesting(engine.drawings + [
+            makeStyledHLine(id: "FAR", period: engine.upperPanel.period,
+                            candleIndex: 0, price: 1_000_000)])
         engine.drawingSession.setMode(.select)
-        engine.drawingSession.setSelection(id: id, panel: .upper)
+
+        engine.drawingSession.setSelection(id: visibleID, panel: .upper)
         upperC.rebuildRenderState(bounds: bounds)
-        await Task.yield(); try? await Task.sleep(nanoseconds: 50_000_000)
+        await drainMainQueue()
         #expect(engine.drawingSession.selectionGeometryVisible == true)
 
-        // 把视口价格区间挪到线的价位之外（直接发布一个不含该价位的视口 = 平移的等价效果）
-        let vp = upperV.renderState.viewport
-        let far = ChartViewport(startIndex: vp.startIndex, visibleCount: vp.visibleCount,
-                                pixelShift: vp.pixelShift, geometry: vp.geometry,
-                                priceRange: PriceRange(min: 1_000_000, max: 2_000_000),
-                                mainChartFrame: vp.mainChartFrame)
-        engine.drawingSession.setViewportMapper(
-            CoordinateMapper(viewport: far, displayScale: upperV.traitCollection.displayScale), panel: .upper)
-        engine.drawingSession.setSelectionGeometryVisible(
-            DrawingEditRouter.selectionGeometryVisible(engine: engine))
-        #expect(engine.drawingSession.selectionGeometryVisible == false)
+        engine.drawingSession.setSelection(id: "FAR", panel: .upper)
+        upperC.rebuildRenderState(bounds: bounds)
+        await drainMainQueue()
+        #expect(engine.drawingSession.selectionGeometryVisible == false,
+                "Coordinator 没有按真实视口把提示改回来 —— 平移到线看不见时控件不会变灰（验收 #18c）")
+    }
+```
+
+并在本 Suite 里加一个排空 helper（**不要用固定时长 sleep 赌时序**）：
+
+```swift
+    /// 排空 main queue：`rebuildRenderState` 用 `DispatchQueue.main.async` 延后写提示
+    /// （视图更新期不得改 @Observable），必须等那一跳真的执行完再断言。
+    private func drainMainQueue() async {
+        await withCheckedContinuation { c in DispatchQueue.main.async { c.resume() } }
     }
 ```
 
@@ -750,7 +792,7 @@ git commit -m "划线 P1b-1b-i PR-4 Task2：发布真实渲染视口 + 几何可
 
 **Interfaces:**
 - Consumes：Task 2 的 `DrawingEditRouter.selectionGeometryVisible(engine:)` / `DrawingSession.viewportMapper(for:)`
-- Produces：`DrawingEditRouter.canEditStyle(engine:) -> Bool`、`.canDelete(engine:) -> Bool`、`.panelStyle(engine:) -> DrawingDefaultStyle`、`.applyStyle(_ style: DrawingDefaultStyle, engine:) -> Bool`、`.deleteSelected(engine:) -> Bool`
+- Produces：`DrawingEditRouter.canEditStyle(engine:) -> Bool`、`.canDelete(engine:) -> Bool`（现算，路由用）、`.styleControlsEnabled(engine:) -> Bool`、`.deleteButtonEnabled(engine:) -> Bool`（读提示，UI 用）、`.panelStyle(engine:) -> DrawingDefaultStyle`、`.applyStyle(_ style: DrawingDefaultStyle, engine:) -> Bool`、`.deleteSelected(engine:) -> Bool`
 
 - [ ] **Step 1: 写失败测试（host，一次写全 N 系列）**
 
@@ -812,6 +854,37 @@ git commit -m "划线 P1b-1b-i PR-4 Task2：发布真实渲染视口 + 几何可
         #expect(DrawingEditRouter.canDelete(engine: e) == true, "但删整条允许（不产生部分抹除）")
         #expect(DrawingEditRouter.deleteSelected(engine: e) == true)
         #expect(e.drawings.isEmpty)
+    }
+
+    @Test("PD2b（codex plan-R1-F1 专项，不可省）：**无选中**时样式控件仍可用（改「下一条线的默认」），但 🗑 恒灰")
+    func noSelectionKeepsStyleControlsUsable() {
+        let e = TrainingEngine.preview()
+        e.toggleDrawingMode()
+        #expect(e.drawingSession.selectedDrawingID == nil)
+        #expect(DrawingEditRouter.styleControlsEnabled(engine: e) == true,
+                "无选中时面板在改默认样式 —— 灰掉它就把 1a-iii 的能力回归掉了（验收 #13）")
+        #expect(DrawingEditRouter.deleteButtonEnabled(engine: e) == false, "无选中时 🗑 恒灰（spec §1.1 #1）")
+        // 反向对照：选中一条**看不见**的线 → 样式控件才该灰（证明上面的 true 不是「一律放行」骗过来的）
+        let e2 = makeSelected(price: 50)
+        e2.drawingSession.setViewportMapper(mapper(priceMin: 200, priceMax: 300), panel: .upper)
+        e2.drawingSession.setSelectionGeometryVisible(false)          // 模拟 Coordinator 刷新后的提示
+        #expect(DrawingEditRouter.styleControlsEnabled(engine: e2) == false)
+        #expect(DrawingEditRouter.deleteButtonEnabled(engine: e2) == false)
+    }
+
+    @Test("PD2（codex plan-R1-F2 专项，不可省）：UI 谓词读 observable 提示、路由谓词现算 —— 提示陈旧时两者必须分岔")
+    func displayReadsHintWhileRouteRecomputes() {
+        let e = makeSelected(price: 50)
+        #expect(e.drawingSession.selectionGeometryVisible == true)     // setSelection 置的
+        // 制造「提示还没被 Coordinator 刷新」的那一帧：视口已经变了，提示仍是旧值
+        e.drawingSession.setViewportMapper(mapper(priceMin: 200, priceMax: 300), panel: .upper)
+        #expect(e.drawingSession.selectionGeometryVisible == true, "前提：提示此刻是陈旧的")
+        #expect(DrawingEditRouter.deleteButtonEnabled(engine: e) == true,
+                "UI 读提示 —— 这一帧它还亮着，这是可接受的一帧延迟")
+        #expect(DrawingEditRouter.canDelete(engine: e) == false,
+                "路由现算 —— 必须已经判死；若这里也是 true，说明路由读了提示，陈旧值会放行真删除")
+        #expect(DrawingEditRouter.deleteSelected(engine: e) == false, "门在路由那一侧：写入必须被拦住")
+        #expect(e.drawings.count == 1)
     }
 
     @Test("PR-2 交接②：谓词必须包含引擎那三道 spec D65 字面没写的门（否则控件亮着点了没反应）")
@@ -1024,31 +1097,64 @@ Expected：编译失败 —— `type 'DrawingEditRouter' has no member 'canEditS
         return matches.count == 1 ? matches.first : nil
     }
 
-    /// 「改样式可用」（D65）。
+    /// 「改样式可用」的**非几何分量**（review / 唯一 / `locked` / 工具已实现 / 未来数据）。
     /// ⚠️ **判据以引擎门为准，不是以 spec D65 的字面为准**（PR-2 交接②）：`updateDrawingStyle`
     /// 比 D65 写的三分量多**三道**——`flow.mode != .review`（D34 纵深）、`isEditableToolType`
     /// （本构建懂不懂这个工具的样式语义）、`hasKnownFutureFields`（未来顶层字段）。
     /// 少一道 = 控件亮着、点了没反应；多一道 = 过度置灰。两边都是缺陷。
     /// （引擎第 ④ 道 `withStyle` 语义闸**不在**本谓词里：它依赖**具体要写的样式**，
     ///   不是「这条线能不能改」的属性，由 `applyStyle` 逐次传播失败。）
-    static func canEditStyle(engine: TrainingEngine) -> Bool {
+    /// **抽出来是为了让「现算」与「读提示」两条路径只在几何这一点上不同**（PD2）——
+    /// 若各写一份，早晚有一天两边的非几何分量会漂移。
+    private static func editableIgnoringGeometry(engine: TrainingEngine) -> Bool {
         guard engine.flow.mode != .review else { return false }
         guard let d = uniqueSelected(engine: engine) else { return false }
         guard !d.locked else { return false }
         guard DrawingStyleAvailability.isEditableToolType(d.toolType) else { return false }
-        guard !engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [d.id]),
-              !engine.loadedDrawingsLossy.hasKnownFutureFields(liveIds: [d.id]) else { return false }
-        return selectionGeometryVisible(engine: engine)
+        return !engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [d.id])
+            && !engine.loadedDrawingsLossy.hasKnownFutureFields(liveIds: [d.id])
     }
 
-    /// 「删除可用」（D65）—— 与上者共享 review / 唯一 / `locked` / 几何四个分量，
+    /// 「删除可用」的**非几何分量** —— 与上者共享 review / 唯一 / `locked` 三个分量，
     /// **不含**未来数据与工具两个分量：删整条不产生"部分抹除"（raw 随之整体移除），
     /// 且它是这类线唯一的用户侧处置通道（D61）。与引擎 `deleteDrawing(id:)` 的三道门逐条对齐。
-    static func canDelete(engine: TrainingEngine) -> Bool {
+    private static func deletableIgnoringGeometry(engine: TrainingEngine) -> Bool {
         guard engine.flow.mode != .review else { return false }
         guard let d = uniqueSelected(engine: engine) else { return false }
-        guard !d.locked else { return false }
-        return selectionGeometryVisible(engine: engine)
+        return !d.locked
+    }
+
+    // MARK: 两个读法（PD2）—— 几何**现算**给写入路由，几何**读 observable 提示**给 UI 置灰
+
+    /// **路由用**（唯一的门）：几何现算。
+    static func canEditStyle(engine: TrainingEngine) -> Bool {
+        editableIgnoringGeometry(engine: engine) && selectionGeometryVisible(engine: engine)
+    }
+
+    /// **路由用**（唯一的门）：几何现算。
+    static func canDelete(engine: TrainingEngine) -> Bool {
+        deletableIgnoringGeometry(engine: engine) && selectionGeometryVisible(engine: engine)
+    }
+
+    /// **UI 用**：5 组样式控件是否可用。
+    /// ⚠️ 两处刻意与上面不同，**都不是笔误**（codex plan-R1-F1/F2）：
+    ///   ① **无选中 → 恒可用**：此刻面板在改「下一条线的默认」，与任何线的状态无关。
+    ///      写成 `canEditStyle` 会让无选中时控件全灰 —— 那是 1a-iii 就有的能力，会被直接回归掉
+    ///      （验收 #13：取消选中后改默认、再画一条新线）。
+    ///   ② 几何读 **observable** 的 `selectionGeometryVisible`，**不是**现算：
+    ///      mapper 是 `@ObservationIgnored`，UI 若走现算，SwiftUI 建立不了依赖 →
+    ///      平移到线看不见时**不重绘** → 控件停在旧状态（验收 #18c 失效）。
+    ///      提示陈旧最坏只是晚一帧，写入仍会被 `canEditStyle` 那道现算的门拦住。
+    static func styleControlsEnabled(engine: TrainingEngine) -> Bool {
+        guard engine.drawingSession.selectedDrawingID != nil else { return true }   // ①
+        return editableIgnoringGeometry(engine: engine)
+            && engine.drawingSession.selectionGeometryVisible                        // ②
+    }
+
+    /// **UI 用**：🗑 是否可用。与 `styleControlsEnabled` **刻意不对称**——无选中时 🗑 没有操作对象，
+    /// 恒灰（spec §1.1 #1 原文：「无选中时灰」）。几何同样读 observable 提示（理由同上）。
+    static func deleteButtonEnabled(engine: TrainingEngine) -> Bool {
+        deletableIgnoringGeometry(engine: engine) && engine.drawingSession.selectionGeometryVisible
     }
 
     // MARK: D49 面板派生样式（**唯一**一处从 DrawingObject 取 5 个样式字段）
@@ -1175,6 +1281,31 @@ Expected：全绿。若 `predicateCoversExtraEngineGates` / 未来枚举那两�
 再加一条**新守卫**（钉死删除路由的几何在「确认之后」而不是「点 🗑 那一刻」）：
 
 ```swift
+    @Test("PD2 结构守卫（codex plan-R1-F2）：两条读法不得混用 —— UI 只调 *Enabled，路由只调 can*")
+    func twoGeometryReadsNeverCrossWired() throws {
+        // UI 层（TrainingView / 底栏 / 面板）不得出现现算版谓词
+        for rel in ["Sources/KlineTrainerContracts/UI/TrainingView.swift",
+                    "Sources/KlineTrainerContracts/UI/DrawingModeBar.swift",
+                    "Sources/KlineTrainerContracts/UI/DrawingStylePanel.swift",
+                    "Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift"] {
+            let code = try squeezedSource(contractsDirForGuards.appendingPathComponent(rel).path)
+            #expect(!code.contains(squeeze("DrawingEditRouter.canEditStyle(")),
+                    "\(rel) 调了现算版谓词 —— SwiftUI 建立不了 observation 依赖，平移后控件不重绘")
+            #expect(!code.contains(squeeze("DrawingEditRouter.canDelete(")), "\(rel) 同上")
+        }
+        // 路由内部不得读 observable 提示（陈旧值会放行真写入）
+        let router = try squeezedSource(contractsDirForGuards
+            .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path)
+        let liveOnly = try #require(router.range(of: squeeze("static func canEditStyle(")))
+        let displayStart = try #require(router.range(of: squeeze("static func styleControlsEnabled(")))
+        let liveBlock = String(router[liveOnly.lowerBound..<displayStart.lowerBound])
+        #expect(!liveBlock.contains(squeeze("session.selectionGeometryVisible")),
+                "现算版谓词里读到了 observable 提示 —— 确认框时间窗内会用陈旧值放行删除（N19e）")
+        // 反向自足断言：UI 版确实读了提示（防上面两条在「谁都没调」的空状态下恒真）
+        #expect(router.contains(squeeze("engine.drawingSession.selectionGeometryVisible")),
+                "UI 版谓词没读 observable 提示 —— 那套信号白建了")
+    }
+
     @Test("N19e 结构守卫：删除路由自己现算几何（不接受调用方传进来的陈旧布尔）")
     func deleteRouteRecomputesGeometryItself() throws {
         let router = contractsDirForGuards
@@ -1546,7 +1677,7 @@ struct DrawingBottomBar: View {
 
 ```swift
                     DrawingBottomBar(typeRowExpanded: $typeRowExpanded,
-                                     deleteEnabled: DrawingEditRouter.canDelete(engine: engine),
+                                     deleteEnabled: DrawingEditRouter.deleteButtonEnabled(engine: engine),
                                      onDelete: { confirmingDeleteDrawing = true })
 ```
 
@@ -1641,7 +1772,8 @@ git commit -m "划线 P1b-1b-i PR-4 Task5：底栏 ③🗑 + 删除确认框（�
     func panelRoutesBySelection() throws {
         let tv = try source("Sources/KlineTrainerContracts/UI/TrainingView.swift")
         #expect(tv.contains("DrawingEditRouter.panelStyle(engine: engine)"))
-        #expect(tv.contains("DrawingEditRouter.canEditStyle(engine: engine)"))
+        #expect(tv.contains("DrawingEditRouter.styleControlsEnabled(engine: engine)"))
+        #expect(tv.contains("DrawingEditRouter.deleteButtonEnabled(engine: engine)"))
         #expect(tv.contains("DrawingEditRouter.applyStyle("))
         #expect(tv.contains("engine.drawingSession.setDefaultStyle("))
         // 分流判据必须是「有没有选中」，不是别的
@@ -1742,7 +1874,7 @@ struct DrawingStyleParams: View {
 ```swift
             // D49：派生值**每次求值现算**（`panelStyle` 内部：有选中取那条线、无选中取 defaultStyle）。
             style: DrawingEditRouter.panelStyle(engine: engine),
-            styleEnabled: DrawingEditRouter.canEditStyle(engine: engine),
+            styleEnabled: DrawingEditRouter.styleControlsEnabled(engine: engine),
             onStyleChange: { next in
                 // D49：有选中 → 只作用于那条线（改动**不回写**「下一条线的默认」）；
                 //      无选中 → 改默认。分流判据是「有没有选中」，别的都不是。
@@ -1873,6 +2005,7 @@ UIKit-gated 文件在 host 上 `canImport(UIKit)==false`、**根本不参与编�
 | 1 | `rebuildRenderState` 里删掉 `session.setViewportMapper(...)` 那一句 | `coordinatorPublishesRenderedViewport` |
 | 2 | 发布的 mapper 改用 `RenderStateBuilder.makeViewport(...)` 重推而不是 `newState.viewport` | `coordinatorPublishesRenderedViewport`（聚合分支下视口不等） |
 | 3 | `DrawingBottomBar` 里删掉 `.disabled(!deleteEnabled)` | `trashButtonDisabledFollowsPredicate` 或 uikit 基线一致性 |
+| 4 | `rebuildRenderState` 里把延后刷新提示那整段删掉（codex plan-R1-F2 专项） | `coordinatorRefreshesGeometryHint` |
 
 每次都必须看到 **`Test run with N tests` 的 N ≫ 0 且 `TEST FAILED`**（0 个测试跑过 + `TEST SUCCEEDED` = 假绿，本项目踩过）。
 ⚠️ `-only-testing` 对 swift-testing 的 `@Test` 显示名**语法不匹配**会静默跑 0 条 → 变异验证一律**跑全量**，靠日志里的 `✘`/`failed` 行定位。
@@ -1921,6 +2054,21 @@ tail -40 /tmp/codex-pr4-r1.log
 
 ---
 
+## codex 对抗性评审记录（如实）
+
+**R1（`619fa5b`，branch-diff 无窄化）= needs-attention，2 条 high，两条都是真 finding、已全修**：
+
+| 轮 | 级别 | finding | 我的处置 |
+|---|---|---|---|
+| R1 | high | `styleEnabled` 无条件取 `canEditStyle`，而该谓词**无选中时返回 false** → 面板在无选中时全灰 → 用户改不了「下一条线的默认」，**回归 1a-iii 的既有能力**，且砸掉验收 #13 | **全采纳**。新增 **PD2b**：样式控件与 🗑 的可用性**刻意不对称**（无选中时面板恒可用、🗑 恒灰），拆出 `styleControlsEnabled` / `deleteButtonEnabled`，并加 `noSelectionKeepsStyleControlsUsable`（带反向对照，防「一律放行」骗过） |
+| R1 | high | `selectionGeometryVisible` 被设计成 observable 信号，但 `canEditStyle` / `canDelete` 返回的是**现算**结果，UI 直接调它们 → SwiftUI **从未读过**那个 observable → 建立不了依赖 → 只改视口的平移不会让底栏/面板重绘，控件停在旧状态（**验收 #18c 失效**） | **全采纳**（codex 给的处方即我采用的形状）。**PD2 重写成两个读法的对照表**：路由用现算（唯一的门）、UI 用 observable 提示；**非几何分量抽成 `editableIgnoringGeometry` / `deletableIgnoringGeometry` 共享**，保证两条路径只在「几何怎么读」这一点上不同。新增 `displayReadsHintWhileRouteRecomputes`（构造「提示陈旧的那一帧」，断言 UI 版仍亮而路由版已判死、真删除被拦）+ 源码守卫 `twoGeometryReadsNeverCrossWired`（UI 文件不得出现现算版、路由内部不得读提示，含反向自足断言）+ Catalyst 的 `coordinatorRefreshesGeometryHint`（走**真实** Coordinator 路径，取代初稿里那条自己手动置位的假测试） |
+
+**这两条都是我计划自身的缺陷，不是实施风险**——与 [[feedback_plan_code_blocks_cause_vacuous_tests]] 同族：F2 尤其典型，我在 PD2 里**写明了**「靠 engine observable 顺带刷新会滞后」，然后在谓词实现里**自己踩了同一个坑**（让 UI 读现算值，连滞后的机会都没有）。识别出陷阱 ≠ 避开陷阱，判据必须写成可被机械检查的形状——故本轮修复同时补了源码守卫，而不只是改代码。
+
+顺带修掉的自查项：初稿 Catalyst 测试 `geometryHintFollowsViewport` **自己调 `setSelectionGeometryVisible` 再断言它变了** = 恒真测试（测的是 setter 而不是 Coordinator），已换成走真实 `rebuildRenderState` 路径并用 `drainMainQueue()` 等 async 跳转（不用固定时长 `sleep` 赌时序）。
+
+---
+
 ## Self-Review（写完后自查记录）
 
 **1. spec 覆盖**
@@ -1948,7 +2096,9 @@ tail -40 /tmp/codex-pr4-r1.log
 | N16a 结构性清空 | **PR-3 已交付**（`restoreDrawingSessionAfterPeriodChange`） |
 | N16d 判据同源 | Task 3 Step 5 的路由几何守卫 |
 | N17 失败原因 × 选中生命期 | Task 3 `selectionLifetimeByExistenceOnly` |
-| N18a/b/c/d | Task 3（d 由 `panelStyle` 不受谓词影响保证：`panelStyle` 不读任何谓词） |
+| N18a/b/c/d | Task 3（d 由 `panelStyle` 不受谓词影响保证：`panelStyle` 不读任何谓词）；置灰读的是 UI 版谓词（PD2） |
+| 验收 #13 无选中改默认 | Task 3 `noSelectionKeepsStyleControlsUsable`（codex R1-F1 补） |
+| 验收 #18c 平移到看不见就变灰 | Task 2 `coordinatorRefreshesGeometryHint`（Catalyst 真路径）+ Task 3 `displayReadsHintWhileRouteRecomputes`（codex R1-F2 补） |
 | N19c 几何门在路由 / N19e 时间窗 | Task 3 |
 | N21c/d id 唯一 | Task 3 `duplicateIdsFailClosed` |
 | N2–N7 / N10–N14 / N19b / N20 / N22 / N23 | **PR-1/PR-2/PR-3 已交付**（已 grep 确认在库） |
