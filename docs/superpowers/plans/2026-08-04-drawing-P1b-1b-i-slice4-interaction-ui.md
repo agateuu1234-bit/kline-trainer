@@ -708,6 +708,96 @@ Expected：`Test run with 1760 tests ... passed`（1754 + 6）。
             }
 ```
 
+- [ ] **Step 6b: 把 PD1 的前提钉成 host 上可机械检查的事实（codex plan-R3-F2）**
+
+> ⚠️ **codex 抓到的真问题**：`makeRig()` 用的 `TrainingEngine.preview()` 里**每一根 K 线都是 `high:11 / low:9`**
+> （`TrainingEngine.swift:1417` 实测）→ 聚合分支即使触发，合成出来的 partial 与原 aggregate 的 high/low **相同**
+> → `priceRange` 不变 → `make(...).viewport == makeViewport(...)`。
+> 于是 Task 7 那条「把 `newState.viewport` 换成 `makeViewport(...)`」的变异**在这个 rig 上杀不死**，
+> Catalyst 那条相等断言并不能证明 PD1 声称的分叉。**PD1 的前提必须自己有测试**，否则它只是一段源码阅读结论。
+
+先在 `Render/RenderStateBuilderTests.swift` 追加一条 **host** 测试（两个函数都是纯函数，不需要 UIKit）：
+
+```swift
+    @Test("PD1 前提（codex plan-R3-F2）：进行中聚合会让 make 的视口与 makeViewport 重推的**真的不同** —— 这就是「不许在别处重新推导」的理由")
+    @MainActor func renderedViewportDivergesFromReDerivation() {
+        // 构造要点（缺一条分叉就出不来）：
+        //   ① 面板周期是**聚合**周期（.m60），其当前那根 aggregate 的 endGlobalIndex > tick（还没走完）；
+        //   ② 该 aggregate 自报一个**宽**区间（high 30 / low 1），而它已揭示的 m3 前缀是**窄**的（high 11 / low 9）
+        //      → 合成 partial 后 PriceRange 必然不同（`PriceRange.calculate` 的 ×0.95/×1.05 不会把差异抹平）；
+        //   ③ 可见 slice 的最后一根就是当前那根（preview 的 reveal 钳位天然满足）。
+        let e = makeAggregateDivergenceEngine()          // 见下方 helper
+        let bounds = CGRect(x: 0, y: 0, width: 320, height: 480)
+        let panelState = e.upperPanel
+        let candles = e.allCandles[panelState.period] ?? []
+        let reDerived = RenderStateBuilder.makeViewport(
+            panelState: panelState, candles: candles, tick: e.tick.globalTickIndex, bounds: bounds)
+        let rendered = RenderStateBuilder.make(engine: e, panel: .upper, bounds: bounds).viewport
+
+        // 前提自足断言：先证明两者都是**有效**视口（都退化成 .empty 的话下面的不等式毫无意义）
+        #expect(rendered.geometry.candleStep > 0, "rendered 视口退化了，本测试无判别力")
+        #expect(reDerived.geometry.candleStep > 0, "reDerived 视口退化了，本测试无判别力")
+        // 结论：两者**必须**不同，且差异就在 priceRange 上
+        #expect(rendered.priceRange != reDerived.priceRange,
+                "聚合分支没造出分叉 —— fixture 不满足①②③，**停下报告**："
+                + "要么修 fixture，要么 PD1「重新推导会分叉」的前提不成立、须重新评估整个设计")
+        #expect(rendered != reDerived)
+    }
+```
+
+helper（放同文件底部；`allCandles` 形状照抄 `TrainingEngine.previewCandles()`，只把 aggregate 的 high/low 撑宽）：
+
+```swift
+    /// 造一个「当前 aggregate 自报宽区间、已揭示 m3 前缀是窄区间」的引擎 —— 聚合分支一触发，
+    /// 合成 partial 的 PriceRange 就与直接用 aggregate 的不同。
+    @MainActor
+    private func makeAggregateDivergenceEngine() -> TrainingEngine {
+        func candle(_ p: Period, start: Int, end: Int, high: Double, low: Double) -> KLineCandle {
+            KLineCandle(period: p, datetime: Int64(start) * 3600,
+                        open: 10, high: high, low: low, close: 10,
+                        volume: 1000, amount: nil, ma66: nil,
+                        bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil,
+                        globalIndex: start, endGlobalIndex: end)
+        }
+        let m3 = (0..<8).map { candle(.m3, start: $0, end: $0, high: 11, low: 9) }      // 窄
+        let m60 = [candle(.m60, start: 0, end: 3, high: 30, low: 1),                    // 宽（未走完）
+                   candle(.m60, start: 4, end: 7, high: 30, low: 1)]
+        return TrainingEngine(
+            flow: NormalFlow(fees: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true), maxTick: 7),
+            allCandles: [.m3: m3, .m60: m60],
+            maxTick: 7, initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m60, initialLowerPeriod: .m60)
+    }
+```
+
+⚠️ **`TrainingEngine` 的内部 `init` 参数以 `DrawingTestFixtures.makeEngineWithLossy`（`:46-51`）为准**——
+上面这份是照它删掉 `initialDrawingsLossy` 写的，签名若对不上就照那一处补齐，**不要新造 init**。
+⚠️ **本 Step 单独跑一次再往下走**：
+
+```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer/.claude/worktrees/drawing-p1b-1b-i-pr4/ios/Contracts"
+swift test --filter renderedViewportDivergesFromReDerivation 2>&1 | tail -20
+```
+Expected：**跑了 1 条且 PASS**。若报「聚合分支没造出分叉」→ **停下报告**（fixture 不对，或 PD1 前提不成立）；
+若跑了 0 条 → filter 没匹配上，**别当通过**（本仓踩过「0 个测试却报 SUCCEEDED」）。
+
+- [ ] **Step 6c: 源码守卫 —— 发布的必须是渲染真用过的那个视口（确定能杀死 Task 7 变异 #2）**
+
+追加到 `Render/DrawingInteractionUISourceGuardTests.swift`：
+
+```swift
+    @Test("PD1（codex plan-R3-F2 的确定性防线）：Coordinator 发布的是 `newState.viewport`，且它**不许**自己重推视口")
+    func publisherUsesRenderedViewportOnly() throws {
+        let cc = try code("Sources/KlineTrainerContracts/Render/ChartContainerView.swift")
+        #expect(cc.contains(squeeze("CoordinateMapper(viewport: newState.viewport,")),
+                "必须发布这一帧渲染真用过的视口")
+        // 重推的入口一次都不许在本文件的**代码**里出现（注释里解释「为什么不重推」是正当的，故剥注释后判）
+        #expect(!cc.contains("makeViewport"),
+                "ChartContainerView 里出现了 makeViewport —— 重推的视口在聚合分支下与屏幕上的不一致（见 renderedViewportDivergesFromReDerivation）")
+    }
+```
+
 - [ ] **Step 7: 写 Catalyst 测试（Coordinator 真发布）**
 
 追加到 `Render/ChartContainerViewDrawingSessionTests.swift`：
@@ -2062,14 +2152,34 @@ Expected：日志尾部 `** TEST SUCCEEDED **`、闸门 `GATE PASS`、`Test run 
 
 ⚠️ 本 Task 动了 `.github/**` = trust-boundary → **必须触发重新 attest**（Task 8）。
 
-- [ ] **Step 8: iOS build**
+- [ ] **Step 8: iOS build（**真的跑构建**，不是 grep workflow）**
+
+> ⚠️ 本计划初稿这一步**只 grep 了 `app-build.yml` 就宣布 Expected: BUILD SUCCEEDED**，等于这道必需门根本不执行（codex plan-R3-F1）。
+> 本切片**大改 SwiftUI 签名与 `TrainingView` 调用点**，是最可能只在 app scheme 上炸的一次——这道门必须真跑。
 
 ```bash
 cd "/Users/maziming/Coding/Prj_Kline trainer/.claude/worktrees/drawing-p1b-1b-i-pr4"
 git rev-parse --abbrev-ref HEAD; git rev-parse HEAD
-grep -n "xcodebuild" .github/workflows/app-build.yml
+# 先确认下面的命令仍与 workflow 一致（漂移了就以 workflow 为准，改这里）
+grep -n -A 8 "Build iOS app target" .github/workflows/app-build.yml
+set -o pipefail
+xcodebuild build \
+  -project ios/KlineTrainer/KlineTrainer.xcodeproj \
+  -scheme KlineTrainer \
+  -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath /tmp/app-derived-pr4 \
+  CODE_SIGNING_ALLOWED=NO 2>&1 | tee /tmp/app-build-pr4.log
+echo "XCODEBUILD_EXIT=$?"
+# 闸门判据逐字取自 app-build.yml:49-51（三条，缺一条都可能放过真失败）
+grep -F "** BUILD SUCCEEDED **" /tmp/app-build-pr4.log || { echo "BUILD SUCCEEDED 缺失"; exit 1; }
+grep -F "** BUILD FAILED **" /tmp/app-build-pr4.log && { echo "BUILD FAILED 触发 gate"; exit 1; }
+grep -E "(^|[[:space:]])error:" /tmp/app-build-pr4.log && { echo "编译/链接 error: 触发 gate"; exit 1; }
+echo "GATE PASS: app target 编译守护"
 ```
-⚠️ **命令逐字取自 `app-build.yml`**（先读那个 workflow，别猜）。Expected：`** BUILD SUCCEEDED **`（模拟器 + `CODE_SIGNING_ALLOWED=NO`，不碰钥匙串）。判绿读输出内容。
+
+命令逐字取自 `.github/workflows/app-build.yml:41-51`（只把 derivedData / 日志路径加了 `-pr4` 后缀，避免覆盖别的 run）。
+模拟器 + `CODE_SIGNING_ALLOWED=NO` → **不碰钥匙串**，我或 user 均可跑（真机签名安装才需 user 真终端）。
+**判绿读日志内容**（那三条 grep），不看 exit code。
 
 - [ ] **Step 9: 三条 UIKit-gated 变异必须在 Catalyst 上真跑（不许只做逻辑推演）**
 
@@ -2078,7 +2188,7 @@ UIKit-gated 文件在 host 上 `canImport(UIKit)==false`、**根本不参与编�
 | # | 把什么改坏 | 期望哪条 Catalyst 测试红 |
 |---|---|---|
 | 1 | `rebuildRenderState` 里删掉 `session.setViewportMapper(...)` 那一句 | `coordinatorPublishesRenderedViewport` |
-| 2 | 发布的 mapper 改用 `RenderStateBuilder.makeViewport(...)` 重推而不是 `newState.viewport` | `coordinatorPublishesRenderedViewport`（聚合分支下视口不等） |
+| 2 | 发布的 mapper 改用 `RenderStateBuilder.makeViewport(...)` 重推而不是 `newState.viewport` | **`publisherUsesRenderedViewportOnly`（host 源码守卫，确定杀死）**。⚠️ **不要指望 `coordinatorPublishesRenderedViewport` 杀它**——`preview()` 的 K 线全是 `high:11/low:9`，聚合分支即使触发也不产生 priceRange 分叉，那条相等断言在这个 rig 上杀不死本变异（codex plan-R3-F2）。分叉本身由 host 的 `renderedViewportDivergesFromReDerivation` 单独钉住 |
 | 3 | `DrawingBottomBar` 里删掉 `.disabled(!deleteEnabled)` | `trashButtonDisabledFollowsPredicate` —— **它红不了就说明它是假绿**，按 Task 5 Step 6 的两条出路处置（换探测方式重验，或整条删掉并如实记录 gap），**不许留着** |
 | 4 | `rebuildRenderState` 里把延后刷新提示那整段删掉（codex plan-R1-F2 专项） | `coordinatorRefreshesGeometryHint` |
 
@@ -2145,7 +2255,14 @@ tail -40 /tmp/codex-pr4-r1.log
 | R2 | high | 新写的源码守卫读**原始文件文本**，而计划自己指示写的**承重注释**恰好包含被禁词：`DrawingTypeOverlay` 注释写「不是 `activeDrawingTool == nil`」而守卫禁 `activeDrawingTool`；底栏注释写「几何/`locked`/唯一性」而守卫禁 `lock`；面板注释写「与 `engine.drawings` 里的真值漂移」而守卫禁 `engine.`。**照计划实施必然 `swift test` 红**，而绕过它的方式是删掉承重注释 | **全采纳**。立 **PD7 文本来源纪律**（否定/结构断言 → `squeezedSource` 剥注释剥字面量；用户可见文案 → 原始文本 + 完整调用语法锚；「陈旧注释必须删」→ 原始文本且写明它测的是注释），并把新写的 8 条守卫 + 改动的 3 条既有守卫**逐条**按表归位。另把「禁止图标名黑名单」换成**结构计数**（「底栏恰好 2 个 `Button`」）——黑名单既漏又误伤注释 |
 | R2 | medium | Catalyst 的 🗑 置灰测试**是恒真的**：唯一断言是「渲染没触发闭包」，删掉 `.disabled(!deleteEnabled)` 照样过。而 🗑 是本切片唯一的破坏性入口 | **全采纳**。改成真读渲染出来的 `accessibilityTraits.notEnabled`（含**前提自足断言**「先证明找到了那个元素」+ 反向对照「enabled 时不得 notEnabled」防一律置灰骗过），并写死一条出路约束：Catalyst 变异**杀不死它**就必须换探测方式或**整条删掉 + 如实记录 gap**，**不许留一条杀不死的测试** |
 
-**这四条都是我计划自身的缺陷，不是实施风险**——与 [[feedback_plan_code_blocks_cause_vacuous_tests]] 同族：F2 尤其典型，我在 PD2 里**写明了**「靠 engine observable 顺带刷新会滞后」，然后在谓词实现里**自己踩了同一个坑**（让 UI 读现算值，连滞后的机会都没有）。识别出陷阱 ≠ 避开陷阱，判据必须写成可被机械检查的形状——故本轮修复同时补了源码守卫，而不只是改代码。
+**R3（`4f6d1ec` 前一提交）= needs-attention，1 high + 1 medium，两条都是真 finding、已全修**：
+
+| 轮 | 级别 | finding | 我的处置 |
+|---|---|---|---|
+| R3 | high | Task 7 Step 8 号称是 iOS 构建门，命令块却**只打印 branch/HEAD 并 grep `app-build.yml`**，从没调用过 xcodebuild，就直接写下 Expected `BUILD SUCCEEDED` → **这道必需门根本不执行**。而本切片大改 SwiftUI 签名与 `TrainingView` 调用点，恰恰最可能只在 app scheme 上炸 | **全采纳**。把 `.github/workflows/app-build.yml:41-51` 的**真实**命令与三条闸门 grep 逐字嵌进去（只加 `-pr4` 路径后缀），并保留一条「先 grep workflow 确认命令没漂移」的前置检查 |
+| R3 | medium | Catalyst 的 `coordinatorPublishesRenderedViewport` **杀不死** Task 7 变异 #2：`preview()` 的每根 K 线都是 `high:11/low:9`（已实测 `TrainingEngine.swift:1417`）→ 聚合分支即使触发，合成 partial 与原 aggregate 的 high/low **相同** → `priceRange` 不变 → `make(...).viewport == makeViewport(...)`。于是「重推视口会分叉」这条 **PD1 的前提本身没有测试**，只是一段源码阅读结论 | **全采纳**。补两道：① **host** 测试 `renderedViewportDivergesFromReDerivation` —— 自造「aggregate 自报宽区间(30/1)、已揭示 m3 前缀是窄区间(11/9)」的 fixture，断言 `make` 的视口与 `makeViewport` 重推的**真的不等**，且带自足断言（两个视口都不许退化成 `.empty`）与「造不出分叉就停下报告」的出口；② 源码守卫 `publisherUsesRenderedViewportOnly` —— 发布必须来自 `newState.viewport` 且 `ChartContainerView` 代码里**不许出现 `makeViewport`**，这条**确定**能杀死变异 #2。变异表已改注，明写「不要指望那条 Catalyst 相等断言杀它」 |
+
+**这六条都是我计划自身的缺陷，不是实施风险**——与 [[feedback_plan_code_blocks_cause_vacuous_tests]] 同族：F2 尤其典型，我在 PD2 里**写明了**「靠 engine observable 顺带刷新会滞后」，然后在谓词实现里**自己踩了同一个坑**（让 UI 读现算值，连滞后的机会都没有）。识别出陷阱 ≠ 避开陷阱，判据必须写成可被机械检查的形状——故本轮修复同时补了源码守卫，而不只是改代码。
 
 顺带修掉的自查项：初稿 Catalyst 测试 `geometryHintFollowsViewport` **自己调 `setSelectionGeometryVisible` 再断言它变了** = 恒真测试（测的是 setter 而不是 Coordinator），已换成走真实 `rebuildRenderState` 路径并用 `drainMainQueue()` 等 async 跳转（不用固定时长 `sleep` 赌时序）。
 
@@ -2181,6 +2298,7 @@ tail -40 /tmp/codex-pr4-r1.log
 | N18a/b/c/d | Task 3（d 由 `panelStyle` 不受谓词影响保证：`panelStyle` 不读任何谓词）；置灰读的是 UI 版谓词（PD2） |
 | 验收 #13 无选中改默认 | Task 3 `noSelectionKeepsStyleControlsUsable`（codex R1-F1 补） |
 | 验收 #18c 平移到看不见就变灰 | Task 2 `coordinatorRefreshesGeometryHint`（Catalyst 真路径）+ Task 3 `displayReadsHintWhileRouteRecomputes`（codex R1-F2 补） |
+| PD1「重推视口会分叉」的**前提** | Task 2 Step 6b `renderedViewportDivergesFromReDerivation`（host）+ Step 6c 源码守卫（codex R3-F2 补） |
 | N19c 几何门在路由 / N19e 时间窗 | Task 3 |
 | N21c/d id 唯一 | Task 3 `duplicateIdsFailClosed` |
 | N2–N7 / N10–N14 / N19b / N20 / N22 / N23 | **PR-1/PR-2/PR-3 已交付**（已 grep 确认在库） |
