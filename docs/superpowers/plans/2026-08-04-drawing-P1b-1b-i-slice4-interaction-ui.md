@@ -30,6 +30,16 @@
 - **命名一致性**（后续 Task 依赖，不得改名）：`DrawingEditRouter.selectionGeometryVisible(engine:)`（现算）/ `.canEditStyle(engine:)` / `.canDelete(engine:)`（现算，**路由用**）/ `.styleControlsEnabled(engine:)` / `.deleteButtonEnabled(engine:)`（读 observable 提示，**UI 用**）/ `.panelStyle(engine:)` / `.applyStyle(_:engine:)` / `.deleteSelected(engine:)` / `DrawingSession.setViewportMapper(_:panel:)` / `.viewportMapper(for:)` / `.selectionGeometryVisible` / `.setSelectionGeometryVisible(_:)` / `bareIdentifierReferences(inCode:identifier:)` / `codeTextPreservingBoundaries(_:)` / `expectIdentifierNeverVended(_:inFiles:)`。
 - **两条读法不得混用**（PD2）：`Sources/` 里 **UI 层只许调 `styleControlsEnabled` / `deleteButtonEnabled`**，**路由内部只许调 `canEditStyle` / `canDelete`**；反过来任一处都是缺陷（UI 调现算 → 不重绘；路由调提示 → 用陈旧值放行写入）。由 Task 3 的源码守卫钉死。
 - **注释里不得嵌「跑某命令应得 N」式自验证**（终点是 HEAD 会把后续提交算进去，一落地就自证伪）。
+- **源码守卫的文本来源纪律（PD7，codex plan-R2-F1 定的规矩，全计划统一遵守）**——本仓已被这条坑过多次（[[feedback_acceptance_grep_anchoring]]）：
+
+  | 断言类型 | 用哪份文本 | 为什么 |
+  |---|---|---|
+  | **否定**断言（「这个标识符不许出现」） | `squeezedSource(path)`（**剥注释、剥字符串字面量内容**）+ needle 过 `squeeze()` | 读原始文本会被**注释里的同名字**打红。计划里那些「为什么不用 X」的承重注释**必然**提到 X；用原始文本 = 逼实施者删注释才能过测试 |
+  | **肯定**的**结构**断言（「这行代码在」） | 同上（`squeezedContains(path, needle)`） | 与排版无关，且不会被注释里的相似文字假绿 |
+  | **肯定**的**用户可见文案**断言（`Text("类型")` / `"确定删除划线？"`） | **原始文本**，且 needle 必须带**完整调用语法**做锚（`.confirmationDialog("确定删除划线？"`），不许只写裸词 | `squeezedSource` 会**丢弃字符串字面量内容** → 文案断言在它上面恒假。裸词锚会被注释里的同一个词假绿 |
+  | 「陈旧注释必须删掉」断言 | **原始文本**（这类断言的对象**就是**注释） | 唯一正当的原始文本否定断言；写清楚它测的是注释 |
+
+  ⚠️ **不要用「禁止出现的图标名/关键词黑名单」表达「只许有这两个控件」**——黑名单既会漏（新图标名不在表里）又会误伤注释。改用**结构计数**（如「本视图恰好 2 个 `Button`」），机械且完备。
 
 ---
 
@@ -1373,7 +1383,15 @@ import Testing
 @Suite("PR-4 交互 UI 接线守卫")
 struct DrawingInteractionUISourceGuardTests {
 
-    private func source(_ rel: String) throws -> String {
+    /// **剥注释、剥字符串字面量内容、删空白**的代码文本。**所有否定断言与结构断言都必须用它**
+    /// （PD7）：读原始文本会被计划里那些「为什么不是 X」的承重注释打红，逼实施者删注释才能过测试。
+    private func code(_ rel: String) throws -> String {
+        try squeezedSource(contractsDirForGuards.appendingPathComponent(rel).path)
+    }
+
+    /// 原始文本。**只用于两件事**：① 用户可见文案（`squeezedSource` 会丢弃字符串字面量内容，
+    /// 文案断言在它上面恒假）；② 「陈旧注释必须删掉」这类**对象就是注释**的断言。
+    private func raw(_ rel: String) throws -> String {
         try String(contentsOfFile: contractsDirForGuards.appendingPathComponent(rel).path, encoding: .utf8)
     }
 
@@ -1384,31 +1402,44 @@ struct DrawingInteractionUISourceGuardTests {
                 "setMode 应只出现在一个文件里、恰好两次（.draw / .select 两个方向），实际：\(sites)")
         #expect(sites.first?.file.hasSuffix("/UI/TrainingView.swift") == true,
                 "唯一调用点必须在类型行 toggle 的接线处，实际：\(sites)")
-        // 切回画线态**不得**走 activate（那是「开会话/换工具」的入口，会话本来就开着）
-        let tv = try source("Sources/KlineTrainerContracts/UI/TrainingView.swift")
-        #expect(!tv.contains(".activate(tool:"), "切回画线态不得开新会话")
+        // 切回画线态**不得**走 activate（那是「开会话/换工具」的入口，会话本来就开着）。
+        // 否定断言 → 剥注释后判（接线处的注释里正当地提到了 activate）。
+        #expect(!(try code("Sources/KlineTrainerContracts/UI/TrainingView.swift"))
+                    .contains(squeeze(".activate(tool:")), "切回画线态不得开新会话")
     }
 
     @Test("D38：图标点亮 == 画线态（判据是 mode，不是 activeDrawingTool 是否为 nil）")
     func typeIconLitMeansDrawMode() throws {
-        let overlay = try source("Sources/KlineTrainerContracts/UI/DrawingTypeOverlay.swift")
-        #expect(overlay.contains("isDrawMode"), "图标亮灭必须由传入的 isDrawMode 决定")
-        #expect(!overlay.contains("activeDrawingTool"),
-                "D57 取代了 nil 编码 —— 视图层不得再用 activeDrawingTool 判态")
-        // 旧注释「本期无选中、不做 toggle」必须随本期删除，否则文档与行为相反
-        #expect(!overlay.contains("不做 toggle"))
-        #expect(!overlay.contains("本期短按 no-op"))
+        let overlayCode = try code("Sources/KlineTrainerContracts/UI/DrawingTypeOverlay.swift")
+        #expect(overlayCode.contains("isDrawMode"), "图标亮灭必须由传入的 isDrawMode 决定")
+        // 否定断言必须剥注释：本视图的文档注释里**正当地**写着「不是 activeDrawingTool == nil」（D57 的理由），
+        // 读原始文本会被自己的注释打红（codex plan-R2-F1）。
+        #expect(!overlayCode.contains("activeDrawingTool"),
+                "D57 取代了 nil 编码 —— 视图层的**代码**里不得再用 activeDrawingTool 判态")
+    }
+
+    @Test("D38：作废的旧注释必须随本期删掉（否则文档与行为相反）—— 本条**刻意**读原始文本，它测的就是注释")
+    func staleToggleCommentsRemoved() throws {
+        let overlayRaw = try raw("Sources/KlineTrainerContracts/UI/DrawingTypeOverlay.swift")
+        #expect(overlayRaw.contains("DrawingTypeOverlay"), "先证明真读到了文件（防路径写错 → 空串 → 否定断言假绿）")
+        for stale in ["不做 toggle", "本期短按 no-op", "恒亮"] {
+            #expect(!overlayRaw.contains(stale), "作废注释仍在：\(stale)")
+        }
     }
 
     @Test("交接⑥：复盘结构上进不去选择态 —— 类型行随样式面板挂载，而面板判据含 showsTradeButtons")
     func reviewCannotReachSelectMode() throws {
-        let tv = try source("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        let tvPath = contractsDirForGuards
+            .appendingPathComponent("Sources/KlineTrainerContracts/UI/TrainingView.swift").path
         // 唯一的 toggle 入口在样式面板里，而面板可见性判据天然排除复盘（canBuySell()==false）
-        #expect(tv.contains("private var stylePanelWillBeVisible: Bool { showsTradeButtons && isDrawingActive && typeRowExpanded }"))
-        #expect(tv.contains("private var showsTradeButtons: Bool { engine.flow.canBuySell() }"))
-        // 底栏同理：DrawingBottomBar 挂在 showsTradeButtons 分支内（既有守卫已钉，这里只做前提复述）
+        #expect(try squeezedContains(tvPath,
+            "private var stylePanelWillBeVisible: Bool { showsTradeButtons && isDrawingActive && typeRowExpanded }"))
+        #expect(try squeezedContains(tvPath, "private var showsTradeButtons: Bool { engine.flow.canBuySell() }"))
+        // 底栏同理：DrawingBottomBar 挂在 showsTradeButtons → isDrawingActive 分支内。
+        // 邻接断言在**剥注释后**做——否则中间插一段注释就能把两者推开、守卫静默失效。
+        let tv = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
         let dmb = try #require(tv.range(of: "DrawingBottomBar("), "DrawingBottomBar 未接入")
-        #expect(String(tv[..<dmb.lowerBound].suffix(120)).contains("if isDrawingActive {"))
+        #expect(String(tv[..<dmb.lowerBound].suffix(60)).contains(squeeze("if isDrawingActive {")))
     }
 }
 ```
@@ -1572,36 +1603,42 @@ git commit -m "划线 P1b-1b-i PR-4 Task4：类型行图标改 toggle —— 点
 追加到 `Render/DrawingInteractionUISourceGuardTests.swift`：
 
 ```swift
-    @Test("spec §1.1 #1 / PD5：底栏只有「类型」与 ③🗑 两个键，不 ship 恒灰的 🔒 / ↩ / ↪")
+    @Test("spec §1.1 #1 / PD5：底栏**恰好 2 个按钮**（类型 + ③🗑），②🔒④↩⑤↪ 属 1b-ii 一个都不渲染")
     func bottomBarHasExactlyTwoKeys() throws {
-        let bar = try source("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
-        #expect(bar.contains("\"类型\""))
-        #expect(bar.contains("systemName: \"trash\""), "③🗑 未接入")
-        #expect(bar.contains(".accessibilityLabel(\"删除\")"))
+        let bar = try code("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
+        // ⚠️ **结构计数，不是「禁止图标名」黑名单**（PD7）：黑名单既漏（新图标名不在表里）
+        //    又误伤注释（本视图注释里正当地写着 `locked` / 🔒 的去向）。恰好 2 个 `Button`
+        //    机械且完备地表达了「只许有这两个控件」。`.buttonStyle` 是小写 b，不参与计数。
+        #expect(bar.components(separatedBy: "Button").count - 1 == 2,
+                "底栏按钮数不是 2 —— 多了就是把 1b-ii 的键提前 ship 了，少了就是 🗑 没接进来")
         #expect(bar.contains("deleteEnabled"), "🗑 必须由传入谓词置灰，不得自己判")
-        #expect(bar.contains(".disabled(!deleteEnabled)"))
-        // ②🔒④↩⑤↪ 属 1b-ii，本期一个都不许出现（母 spec D19：不 ship 未接线的按钮）
-        for banned in ["lock", "arrow.uturn", "arrow.forward", "锁定", "撤销", "前进"] {
-            #expect(!bar.contains(banned), "底栏出现了 1b-ii 才该有的 \(banned)")
-        }
+        #expect(bar.contains(squeeze(".disabled(!deleteEnabled)")))
         // 底栏与另两个 swap 底栏共享同一固定高度（既有不变量，别被本次改动碰掉）
         #expect(bar.contains("BottomBarMetrics.height"))
+        // 用户可见文案 / SF Symbol 名是**字符串字面量** → squeezedSource 会丢弃它们，必须读原始文本，
+        // 且带完整调用语法做锚（裸词会被注释里的同一个词假绿）。
+        let barRaw = try raw("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
+        #expect(barRaw.contains("Text(\"类型\")"))
+        #expect(barRaw.contains("Image(systemName: \"trash\")"), "③🗑 未接入")
+        #expect(barRaw.contains(".accessibilityLabel(\"删除\")"))
     }
 
     @Test("spec §1.1 #5 / D65 R13-F1：🗑 只弹确认框；真正的删除在「删除」按钮的 action 里走路由")
     func deleteGoesThroughConfirmation() throws {
-        let tv = try source("Sources/KlineTrainerContracts/UI/TrainingView.swift")
-        #expect(tv.contains("确定删除划线？"))
-        #expect(tv.contains("Button(\"删除\", role: .destructive)"))
-        #expect(tv.contains("Button(\"取消\", role: .cancel)"))
-        // 🗑 的 action 只置标志位，绝不直接删（弹框有时间窗，线可能滑走）
-        let onDelete = try #require(tv.range(of: "onDelete:"), "底栏 onDelete 未接线")
-        let tail = String(tv[onDelete.upperBound...].prefix(160))
-        #expect(tail.contains("confirmingDeleteDrawing = true"))
-        #expect(!tail.contains("deleteSelected"), "🗑 的 action 里不得直接调删除路由")
+        // ① 用户可见文案 → 原始文本 + 完整调用语法锚
+        let tvRaw = try raw("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        #expect(tvRaw.contains(".confirmationDialog(\"确定删除划线？\""))
+        #expect(tvRaw.contains("Button(\"删除\", role: .destructive)"))
+        #expect(tvRaw.contains("Button(\"取消\", role: .cancel)"))
+        // ② 结构断言 → 剥注释后判
+        let tv = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        // 🗑 的 action **只置标志位**，绝不直接删（弹框有时间窗，线可能滑走 → N19e）。
+        // 整段精确匹配，不用「取后 160 字符再找子串」那种会被排版/注释推偏的邻接判据。
+        #expect(tv.contains(squeeze("onDelete: { confirmingDeleteDrawing = true }")),
+                "🗑 的 action 必须只置标志位；出现别的语句即可能绕过确认框")
         // 唯一一处 deleteSelected 在确认框的「删除」按钮里
-        #expect(tv.components(separatedBy: "DrawingEditRouter.deleteSelected(").count == 2,
-                "deleteSelected 在 TrainingView 里应恰好出现 1 次")
+        #expect(tv.components(separatedBy: squeeze("DrawingEditRouter.deleteSelected(")).count - 1 == 1,
+                "deleteSelected 在 TrainingView 的**代码**里应恰好出现 1 次")
     }
 ```
 
@@ -1706,24 +1743,53 @@ Expected：全绿。
 
 追加到 `Render/DrawingBottomBarHeightTests.swift`（同 Suite，已是 UIKit-gated）：
 
+> ⚠️ **本计划初稿在这里写了一条恒真测试**（codex plan-R2-F2 抓出）：它唯一的断言是「渲染没触发闭包」，
+> 而**删掉 `.disabled(!deleteEnabled)` 它照样通过**——测的是「渲染不会自己点按钮」，不是置灰。
+> 🗑 是本切片唯一的破坏性入口，这种假绿最不能留。下面这条改为**真的读渲染出来的可用性状态**：
+
 ```swift
-    @Test("PR-4：🗑 的 disabled 真的跟随 deleteEnabled（UIHostingController 真渲染，非源码文本）")
-    @MainActor func trashButtonDisabledFollowsPredicate() {
-        // 两种谓词下都必须能渲染出来且高度不变（置灰只降可交互性，不改布局）
-        let off = DrawingBottomBar(typeRowExpanded: .constant(true), deleteEnabled: false, onDelete: {})
-        let on  = DrawingBottomBar(typeRowExpanded: .constant(true), deleteEnabled: true,  onDelete: {})
-        #expect(measuredHeight(off, width: 390) == measuredHeight(on, width: 390))
-        #expect(measuredHeight(off, width: 390) == BottomBarMetrics.height)
-        // 点击回调只在可用时才可能触发：置灰态下 hosting 出来的按钮 isEnabled 必须为 false
-        var tapped = false
-        let host = UIHostingController(
-            rootView: DrawingBottomBar(typeRowExpanded: .constant(true), deleteEnabled: false,
-                                       onDelete: { tapped = true }).frame(width: 390))
-        host.view.bounds = CGRect(x: 0, y: 0, width: 390, height: BottomBarMetrics.height)
-        host.view.setNeedsLayout(); host.view.layoutIfNeeded()
-        #expect(tapped == false, "渲染本身不得触发删除")
+    /// 在 hosted 视图树里按 accessibilityLabel 找元素，返回它的 accessibilityTraits。
+    /// SwiftUI 的按钮在 Catalyst 上既可能是 subview、也可能挂在 `accessibilityElements` 里，两边都要走。
+    @MainActor
+    private func traits(ofLabel label: String, in root: UIView) -> UIAccessibilityTraits? {
+        func walk(_ node: Any) -> UIAccessibilityTraits? {
+            if let e = node as? NSObject, e.accessibilityLabel == label { return e.accessibilityTraits }
+            if let v = node as? UIView {
+                for child in (v.accessibilityElements ?? []) { if let t = walk(child) { return t } }
+                for sub in v.subviews { if let t = walk(sub) { return t } }
+            }
+            return nil
+        }
+        return walk(root)
+    }
+
+    @Test("PR-4（codex plan-R2-F2 专项）：🗑 渲染出来的可用性**真的**跟随 deleteEnabled")
+    @MainActor func trashButtonDisabledFollowsPredicate() throws {
+        func hostedTraits(deleteEnabled: Bool) -> UIAccessibilityTraits? {
+            let host = UIHostingController(
+                rootView: DrawingBottomBar(typeRowExpanded: .constant(true),
+                                           deleteEnabled: deleteEnabled, onDelete: {}).frame(width: 390))
+            host.view.bounds = CGRect(x: 0, y: 0, width: 390, height: BottomBarMetrics.height)
+            host.view.setNeedsLayout(); host.view.layoutIfNeeded()
+            return traits(ofLabel: "删除", in: host.view)
+        }
+        // 前提自足断言：先证明真的找到了那个按钮（找不到 → 下面两条会在 nil 上恒过 = 假绿）
+        let off = try #require(hostedTraits(deleteEnabled: false), "hosted 树里找不到「删除」元素，本测试无判别力")
+        let on  = try #require(hostedTraits(deleteEnabled: true),  "hosted 树里找不到「删除」元素，本测试无判别力")
+        #expect(off.contains(.notEnabled), "deleteEnabled == false 时 🗑 必须渲染成不可用")
+        #expect(!on.contains(.notEnabled), "deleteEnabled == true 时 🗑 必须可用（防「一律置灰」骗过上一条）")
+        // 置灰只降可交互性，不改布局（三个 swap 底栏等高不变量）
+        let bar = DrawingBottomBar(typeRowExpanded: .constant(true), deleteEnabled: false, onDelete: {})
+        #expect(measuredHeight(bar, width: 390) == BottomBarMetrics.height)
     }
 ```
+
+> 🔴 **本条必须在 Catalyst 上做变异验证才算数**（Task 7 Step 9 第 3 项）：删掉 `.disabled(!deleteEnabled)` → 它必须**真的红**。
+> **如果 `traits(ofLabel:in:)` 在 Catalyst 上找不到该元素**（SwiftUI 无障碍树的暴露方式随版本变化，本计划无法预先证实）：
+> **不许把它降级成一条弱断言留在库里** —— 那正是本条要消灭的假绿。届时二选一：
+> ① 换一种能真读到状态的探测方式并重做变异验证；
+> ② **整条删掉**，在 PR body 里如实记录「🗑 置灰只有源码守卫、无运行时证据」，并写进真机验收第一批必验项。
+> 两条路都可以，**唯独不许留一条杀不死的测试**。
 
 - [ ] **Step 7: Commit**
 
@@ -1755,29 +1821,31 @@ git commit -m "划线 P1b-1b-i PR-4 Task5：底栏 ③🗑 + 删除确认框（�
 ```swift
     @Test("D49：面板样式是**派生值**，视图层既不存副本、也不自己从 DrawingObject 取字段")
     func panelStyleIsDerivedNotMirrored() throws {
-        let params = try source("Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift")
-        #expect(params.contains("let style: DrawingDefaultStyle"), "面板必须收调用方算好的派生值")
-        #expect(!params.contains("@State private var style"), "不得存第二份样式状态（常驻面板必然漂移）")
-        #expect(!params.contains("session."), "面板不得再直读/直写 session —— 派生与路由都在调用方（D49）")
-        #expect(!params.contains("engine."), "面板更不得直接碰引擎")
+        // 全部是否定/结构断言 → 一律剥注释后判（本视图的文档注释里正当地提到 `engine.drawings`、
+        // `@State`、`session` 的去向，读原始文本会被自己的注释打红，codex plan-R2-F1）。
+        let params = try code("Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift")
+        #expect(params.contains(squeeze("let style: DrawingDefaultStyle")), "面板必须收调用方算好的派生值")
+        #expect(!params.contains(squeeze("@State private var style")), "不得存第二份样式状态（常驻面板必然漂移）")
+        #expect(!params.contains("session."), "面板的**代码**里不得再直读/直写 session —— 派生与路由都在调用方（D49）")
+        #expect(!params.contains("engine."), "面板的**代码**里更不得直接碰引擎")
         // 5 个样式字段的逐字段取值只许出现在路由里（判据单点）
-        let router = try source("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift")
-        #expect(router.contains("s.lineSubType = d.lineSubType"))
+        let router = try code("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift")
+        #expect(router.contains(squeeze("s.lineSubType = d.lineSubType")))
         for f in ["lineSubType", "lineStyle", "thickness", "colorToken", "labelMode"] {
             #expect(!params.contains("d.\(f)"), "面板里出现了第二份派生：d.\(f)")
         }
     }
 
-    @Test("D49 路由分流 + D65 置灰：有选中写路由、无选中写默认；enabled 来自 canEditStyle")
+    @Test("D49 路由分流 + D65 置灰：有选中写路由、无选中写默认；enabled 来自 UI 版谓词")
     func panelRoutesBySelection() throws {
-        let tv = try source("Sources/KlineTrainerContracts/UI/TrainingView.swift")
-        #expect(tv.contains("DrawingEditRouter.panelStyle(engine: engine)"))
-        #expect(tv.contains("DrawingEditRouter.styleControlsEnabled(engine: engine)"))
-        #expect(tv.contains("DrawingEditRouter.deleteButtonEnabled(engine: engine)"))
-        #expect(tv.contains("DrawingEditRouter.applyStyle("))
-        #expect(tv.contains("engine.drawingSession.setDefaultStyle("))
+        let tv = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        #expect(tv.contains(squeeze("DrawingEditRouter.panelStyle(engine: engine)")))
+        #expect(tv.contains(squeeze("DrawingEditRouter.styleControlsEnabled(engine: engine)")))
+        #expect(tv.contains(squeeze("DrawingEditRouter.deleteButtonEnabled(engine: engine)")))
+        #expect(tv.contains(squeeze("DrawingEditRouter.applyStyle(")))
+        #expect(tv.contains(squeeze("engine.drawingSession.setDefaultStyle(")))
         // 分流判据必须是「有没有选中」，不是别的
-        #expect(tv.contains("engine.drawingSession.selectedDrawingID != nil"))
+        #expect(tv.contains(squeeze("engine.drawingSession.selectedDrawingID != nil")))
         // applyStyle 在 Sources/ 里恰好 1 处（面板是唯一的样式写入入口，D58 末段：
         // 不得绕开面板另开编辑入口，否则 (ray,.left) 会变成只在编辑路径上可达的坏组合）
         let sites = try callSiteCount("DrawingEditRouter.applyStyle(")
@@ -1785,28 +1853,35 @@ git commit -m "划线 P1b-1b-i PR-4 Task5：底栏 ③🗑 + 删除确认框（�
     }
 ```
 
-改 3 条既有守卫（`DrawingStylePanelSourceGuardTests.swift`）：
+改 3 条既有守卫（`DrawingStylePanelSourceGuardTests.swift`）。⚠️ 该文件既有的 `source(_:)`（`:16`）返回的是
+**原始文本**；按 PD7，本期新增/改动的**否定与结构断言**一律改走 `squeezedSource(...)`（同 test module 顶层函数，
+无需 import），否则会被本期新写的承重注释打红（codex plan-R2-F1 就是这么抓出来的）：
 
 ```swift
-// ① :27 hasGroupsAndWiring —— 写入从 session 改成 onChange
-        #expect(code.contains("onChange("))            // 选择真经调用方路由（D49，1b-i PR-4）
+// ① :27 hasGroupsAndWiring —— 写入从 session 改成 onChange（结构断言 → 剥注释）
+        let codeStripped = try squeezedSource(contractsDirForGuards.appendingPathComponent(params).path)
+        #expect(codeStripped.contains("onChange("))     // 选择真经调用方路由（D49，1b-i PR-4）
         // （删掉 `#expect(code.contains("session.setDefaultStyle"))`——那一处已上移到 TrainingView）
+        // ⚠️ 那 5 个组名（"线型"/"线样式"/"粗细"/"颜色"/"标注"）是**用户可见文案**，
+        //    仍留在既有的原始文本 `code` 上判（squeezedSource 会丢弃字符串字面量内容 → 在它上面恒假）。
 ```
 
 ```swift
 // ② :85 readsSessionDirectlyWithoutLocalMirror —— 判据从「直读 session」改成「读传入的派生值」
     @Test("常驻面板读**调用方算好的派生样式**单一真相（不留本地 @State 镜像，防常驻期漂移）")
     func readsDerivedStyleWithoutLocalMirror() throws {
-        let code = try source(params)
-        #expect(code.contains("private var style: DrawingDefaultStyle") == false)   // 不许再自己算
-        #expect(code.contains("let style: DrawingDefaultStyle"))
-        #expect(!code.contains("@State private var style"))
+        // 全是否定/结构断言 → 剥注释（本视图注释里正当地写着「绝不拷成 @State」「不再直读 session」）
+        let code = try squeezedSource(contractsDirForGuards.appendingPathComponent(params).path)
+        #expect(!code.contains(squeeze("private var style: DrawingDefaultStyle")))   // 不许再自己算
+        #expect(code.contains(squeeze("let style: DrawingDefaultStyle")))
+        #expect(!code.contains(squeeze("@State private var style")))
     }
 ```
 
 ```swift
-// ③ :232 mirrorFlipsOnlyTwoBlocks 的锚点
-        #expect(panel.contains("DrawingStyleParams(style: style, enabled: styleEnabled,"))
+// ③ :232 mirrorFlipsOnlyTwoBlocks 的锚点（结构断言 → 剥注释 + squeeze needle）
+        let panelCode = try squeezedSource(contractsDirForGuards.appendingPathComponent(self.panel).path)
+        #expect(panelCode.contains(squeeze("DrawingStyleParams(style: style, enabled: styleEnabled,")))
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -2004,7 +2079,7 @@ UIKit-gated 文件在 host 上 `canImport(UIKit)==false`、**根本不参与编�
 |---|---|---|
 | 1 | `rebuildRenderState` 里删掉 `session.setViewportMapper(...)` 那一句 | `coordinatorPublishesRenderedViewport` |
 | 2 | 发布的 mapper 改用 `RenderStateBuilder.makeViewport(...)` 重推而不是 `newState.viewport` | `coordinatorPublishesRenderedViewport`（聚合分支下视口不等） |
-| 3 | `DrawingBottomBar` 里删掉 `.disabled(!deleteEnabled)` | `trashButtonDisabledFollowsPredicate` 或 uikit 基线一致性 |
+| 3 | `DrawingBottomBar` 里删掉 `.disabled(!deleteEnabled)` | `trashButtonDisabledFollowsPredicate` —— **它红不了就说明它是假绿**，按 Task 5 Step 6 的两条出路处置（换探测方式重验，或整条删掉并如实记录 gap），**不许留着** |
 | 4 | `rebuildRenderState` 里把延后刷新提示那整段删掉（codex plan-R1-F2 专项） | `coordinatorRefreshesGeometryHint` |
 
 每次都必须看到 **`Test run with N tests` 的 N ≫ 0 且 `TEST FAILED`**（0 个测试跑过 + `TEST SUCCEEDED` = 假绿，本项目踩过）。
@@ -2063,7 +2138,14 @@ tail -40 /tmp/codex-pr4-r1.log
 | R1 | high | `styleEnabled` 无条件取 `canEditStyle`，而该谓词**无选中时返回 false** → 面板在无选中时全灰 → 用户改不了「下一条线的默认」，**回归 1a-iii 的既有能力**，且砸掉验收 #13 | **全采纳**。新增 **PD2b**：样式控件与 🗑 的可用性**刻意不对称**（无选中时面板恒可用、🗑 恒灰），拆出 `styleControlsEnabled` / `deleteButtonEnabled`，并加 `noSelectionKeepsStyleControlsUsable`（带反向对照，防「一律放行」骗过） |
 | R1 | high | `selectionGeometryVisible` 被设计成 observable 信号，但 `canEditStyle` / `canDelete` 返回的是**现算**结果，UI 直接调它们 → SwiftUI **从未读过**那个 observable → 建立不了依赖 → 只改视口的平移不会让底栏/面板重绘，控件停在旧状态（**验收 #18c 失效**） | **全采纳**（codex 给的处方即我采用的形状）。**PD2 重写成两个读法的对照表**：路由用现算（唯一的门）、UI 用 observable 提示；**非几何分量抽成 `editableIgnoringGeometry` / `deletableIgnoringGeometry` 共享**，保证两条路径只在「几何怎么读」这一点上不同。新增 `displayReadsHintWhileRouteRecomputes`（构造「提示陈旧的那一帧」，断言 UI 版仍亮而路由版已判死、真删除被拦）+ 源码守卫 `twoGeometryReadsNeverCrossWired`（UI 文件不得出现现算版、路由内部不得读提示，含反向自足断言）+ Catalyst 的 `coordinatorRefreshesGeometryHint`（走**真实** Coordinator 路径，取代初稿里那条自己手动置位的假测试） |
 
-**这两条都是我计划自身的缺陷，不是实施风险**——与 [[feedback_plan_code_blocks_cause_vacuous_tests]] 同族：F2 尤其典型，我在 PD2 里**写明了**「靠 engine observable 顺带刷新会滞后」，然后在谓词实现里**自己踩了同一个坑**（让 UI 读现算值，连滞后的机会都没有）。识别出陷阱 ≠ 避开陷阱，判据必须写成可被机械检查的形状——故本轮修复同时补了源码守卫，而不只是改代码。
+**R2（`0d8aa07`）= needs-attention，1 high + 1 medium，两条都是真 finding、已全修**：
+
+| 轮 | 级别 | finding | 我的处置 |
+|---|---|---|---|
+| R2 | high | 新写的源码守卫读**原始文件文本**，而计划自己指示写的**承重注释**恰好包含被禁词：`DrawingTypeOverlay` 注释写「不是 `activeDrawingTool == nil`」而守卫禁 `activeDrawingTool`；底栏注释写「几何/`locked`/唯一性」而守卫禁 `lock`；面板注释写「与 `engine.drawings` 里的真值漂移」而守卫禁 `engine.`。**照计划实施必然 `swift test` 红**，而绕过它的方式是删掉承重注释 | **全采纳**。立 **PD7 文本来源纪律**（否定/结构断言 → `squeezedSource` 剥注释剥字面量；用户可见文案 → 原始文本 + 完整调用语法锚；「陈旧注释必须删」→ 原始文本且写明它测的是注释），并把新写的 8 条守卫 + 改动的 3 条既有守卫**逐条**按表归位。另把「禁止图标名黑名单」换成**结构计数**（「底栏恰好 2 个 `Button`」）——黑名单既漏又误伤注释 |
+| R2 | medium | Catalyst 的 🗑 置灰测试**是恒真的**：唯一断言是「渲染没触发闭包」，删掉 `.disabled(!deleteEnabled)` 照样过。而 🗑 是本切片唯一的破坏性入口 | **全采纳**。改成真读渲染出来的 `accessibilityTraits.notEnabled`（含**前提自足断言**「先证明找到了那个元素」+ 反向对照「enabled 时不得 notEnabled」防一律置灰骗过），并写死一条出路约束：Catalyst 变异**杀不死它**就必须换探测方式或**整条删掉 + 如实记录 gap**，**不许留一条杀不死的测试** |
+
+**这四条都是我计划自身的缺陷，不是实施风险**——与 [[feedback_plan_code_blocks_cause_vacuous_tests]] 同族：F2 尤其典型，我在 PD2 里**写明了**「靠 engine observable 顺带刷新会滞后」，然后在谓词实现里**自己踩了同一个坑**（让 UI 读现算值，连滞后的机会都没有）。识别出陷阱 ≠ 避开陷阱，判据必须写成可被机械检查的形状——故本轮修复同时补了源码守卫，而不只是改代码。
 
 顺带修掉的自查项：初稿 Catalyst 测试 `geometryHintFollowsViewport` **自己调 `setSelectionGeometryVisible` 再断言它变了** = 恒真测试（测的是 setter 而不是 Coordinator），已换成走真实 `rebuildRenderState` 路径并用 `drainMainQueue()` 等 async 跳转（不用固定时长 `sleep` 赌时序）。
 
