@@ -63,7 +63,12 @@ public enum RenderStateBuilder {
             markers: engine.markers,
             drawings: visible,
             crosshairPoint: crosshair,   // C8b：长按十字光标由 ChartContainerView.Coordinator 视图层透传（D3）
-            previousCloseBeforeVisible: previousCloseBeforeVisible(candles: candles, startIndex: viewport.startIndex))
+            previousCloseBeforeVisible: previousCloseBeforeVisible(candles: candles, startIndex: viewport.startIndex),
+            // D41/D55：选中是 `(selectedPanel, selectedDrawingID)` **二元组** —— 只在渲染 `selectedPanel`
+            // 那个面板时才带 id 进渲染态。**只带 id 不带 panel 会出错**：D29 下一条线会随切周期迁到
+            // 另一个面板，id-only 判据会让它在用户没选的那个面板里继续高亮、继续可操作。
+            selectedDrawingID: engine.drawingSession.selectedPanel == panel
+                ? engine.drawingSession.selectedDrawingID : nil)
     }
 
     /// **D40（1b-i PR-3）：命中集合 ≡ 渲染集合的唯一真相。** 返回某面板此刻看得见的画线，**按渲染序**

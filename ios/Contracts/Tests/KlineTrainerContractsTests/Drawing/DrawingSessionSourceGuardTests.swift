@@ -152,6 +152,9 @@ struct DrawingSessionSourceGuardTests {
         #expect(code.contains("upperPanel.revision"))
         #expect(code.contains("lowerPanel.revision"))
         #expect(code.contains("engine.tick.globalTickIndex"))
+        // 1b-i PR-3：选中二元组同样是订阅锚点（删掉任一行 → 在另一面板选中时本面板旧高亮擦不掉）
+        #expect(code.contains("engine.drawingSession.selectedPanel"))
+        #expect(code.contains("engine.drawingSession.selectedDrawingID"))
     }
 
     @Test("回归守卫（现象①：隐形卡死）：折叠态浮动钮必须随画线模式变外观 + 点它直接退出画线")

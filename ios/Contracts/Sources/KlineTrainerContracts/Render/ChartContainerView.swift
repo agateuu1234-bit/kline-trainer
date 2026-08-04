@@ -183,6 +183,12 @@ public struct ChartContainerView: UIViewRepresentable {
             // + tick 显式重建订阅（值类型 PanelViewState 任一字段变即整体替换 → 通知；layout 路径读了无副作用）。
             _ = (panel == .upper) ? engine.upperPanel.revision : engine.lowerPanel.revision
             _ = engine.tick.globalTickIndex
+            // 1b-i PR-3：选中态进了 KLineRenderState（D41/D55）→ **两个面板**都必须订阅它，
+            // 否则「在另一个面板选中」时，本面板缓存的旧 selectedDrawingID 不会被刷掉，旧高亮留在屏上。
+            // 与上面两行同理由、同位置（bounds 守卫**之前**）：`make` 在 bounds<=0 时被跳过，
+            // 把读取留在 make 里就等于首帧不订阅（`:176-185` 记录的那次真机冻结回归就是这么来的）。
+            _ = engine.drawingSession.selectedPanel
+            _ = engine.drawingSession.selectedDrawingID
             // codex R2-F1：瞬态零尺寸 layout（导航/分屏/旋转过渡）不得改 engine 状态。recordRenderBounds(.zero)
             // 会被当 resize → 零宽 offsetBounds → 把 panel offset clamp 到 0（吞掉用户滚动位置，不可逆）；
             // make(.zero) 也只返 .empty。故无效 bounds 直接早返——零→有效的后续 layout 仍会重建（lastLaidOutBounds 已记 .zero）。

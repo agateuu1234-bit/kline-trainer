@@ -1185,6 +1185,78 @@ struct RenderStateBuilderTests {
         // ③ 自足断言：扫描器真的扫到东西了（防扫描根写错 → 空集合 → 上面恒真）
         #expect(try !allSwiftFilesUnderSources().isEmpty)
     }
+
+    @MainActor
+    @Test("D41 二元组门：只有渲染 selectedPanel 那个面板时才带 selectedDrawingID 进渲染态")
+    func selectedIDOnlyReachesItsOwnPanel() {
+        let e = TrainingEngine.preview()                       // upper=.m60 / lower=.daily
+        let up = DrawingAnchor(period: .m60, candleIndex: 0, price: 10.3)
+        let low = DrawingAnchor(period: .daily, candleIndex: 0, price: 10.7)
+        #expect(e.appendDrawing(DrawingObject(id: "U", toolType: .horizontal, anchors: [up],
+                                              isExtended: false, panelPosition: 0)) == true)
+        #expect(e.appendDrawing(DrawingObject(id: "L", toolType: .horizontal, anchors: [low],
+                                              isExtended: false, panelPosition: 1)) == true)
+        // ⚠️ 必须先喂两面板 renderBounds，否则 beginDrawingSession fail-closed 回滚、会话开不起来，
+        //    setSelection 被 guard 挡下 → 测试假红。范式见 TrainingEngineDrawingSessionTests.swift:391。
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.beginDrawingSession(tool: .horizontal)
+        #expect(e.drawingSession.drawingModeActive == true)   // 前提成立（防会话没开导致后面断言恒真）
+        e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "U", panel: .upper)
+        let bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
+        #expect(RenderStateBuilder.make(engine: e, panel: .upper, bounds: bounds).selectedDrawingID == "U")
+        #expect(RenderStateBuilder.make(engine: e, panel: .lower, bounds: bounds).selectedDrawingID == nil,
+                "选中属于 upper，lower 的渲染态绝不能带上它")
+    }
+
+    @MainActor
+    @Test("D41：id-only 判据会出错的那个场景 —— 选中记在 upper，但该 id 现在归 lower 渲染 → 两个面板都不高亮")
+    func staleSelectedPanelNeverHighlightsElsewhere() {
+        let e = TrainingEngine.preview()
+        let low = DrawingAnchor(period: .daily, candleIndex: 0, price: 10.7)
+        #expect(e.appendDrawing(DrawingObject(id: "MIGRATED", toolType: .horizontal, anchors: [low],
+                                              isExtended: false, panelPosition: 1)) == true)
+        // ⚠️ 必须先喂两面板 renderBounds，否则 beginDrawingSession fail-closed 回滚、会话开不起来，
+        //    setSelection 被 guard 挡下 → 测试假红。范式见 TrainingEngineDrawingSessionTests.swift:391。
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.beginDrawingSession(tool: .horizontal)
+        #expect(e.drawingSession.drawingModeActive == true)   // 前提成立（防会话没开导致后面断言恒真）
+        e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "MIGRATED", panel: .upper)   // 人为造出「线在 lower、选中记在 upper」
+        let bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
+        // lower：id 匹配但 panel 不匹配 → 不带（这正是"只带 id 不带 panel"会画错的那一条）
+        #expect(RenderStateBuilder.make(engine: e, panel: .lower, bounds: bounds).selectedDrawingID == nil)
+        // upper：panel 匹配，字段照带；那条线本就不在 upper 的 drawings 里 → 渲染方自然找不到、不会高亮
+        let upper = RenderStateBuilder.make(engine: e, panel: .upper, bounds: bounds)
+        #expect(upper.selectedDrawingID == "MIGRATED")
+        #expect(upper.drawings.isEmpty)
+    }
+
+    @MainActor
+    @Test("N7：选中态绝不落盘 —— 选中前后 DrawingObject 逐字段一致、契约仍 1.12")
+    func selectionNeverPersists() {
+        let e = TrainingEngine.preview()
+        let a = DrawingAnchor(period: .m60, candleIndex: 0, price: 10.3)
+        let original = DrawingObject(id: "P", toolType: .horizontal, anchors: [a],
+                                     isExtended: false, panelPosition: 0)
+        #expect(e.appendDrawing(original) == true)
+        let before = e.drawings
+        let revBefore = e.drawingsRevision
+        // ⚠️ 必须先喂两面板 renderBounds，否则 beginDrawingSession fail-closed 回滚、会话开不起来，
+        //    setSelection 被 guard 挡下 → 测试假红。范式见 TrainingEngineDrawingSessionTests.swift:391。
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .upper)
+        e.recordRenderBounds(CGRect(x: 0, y: 0, width: 320, height: 480), panel: .lower)
+        e.beginDrawingSession(tool: .horizontal)
+        #expect(e.drawingSession.drawingModeActive == true)   // 前提成立（防会话没开导致后面断言恒真）
+        e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "P", panel: .upper)
+        #expect(e.drawings == before, "选中不得改动任何 DrawingObject")
+        #expect(e.drawings.map(\.id) == before.map(\.id))
+        #expect(e.drawingsRevision == revBefore, "选中不是内容变更，绝不能 bump revision（否则会触发 autosave）")
+        #expect(CONTRACT_VERSION == "1.12")
+    }
 }
 
 // MARK: - RFC-C Task 6: previousCloseBeforeVisible helper
