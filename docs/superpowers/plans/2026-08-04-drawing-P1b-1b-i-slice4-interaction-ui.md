@@ -714,12 +714,35 @@ enum DrawingEditRouter {
     /// 视口取 `session.viewportMapper(for: selectedPanel)` —— 即那个面板**真实渲染用过**的视口。
     /// 任何一环缺失（无选中 / 无视口 / 线已不在 `drawings`）一律 **false（fail-closed）**：
     /// 判不了就不许动，绝不乐观放行。
+    /// 当前选中的那条线（不存在 / 不唯一 / **不在渲染可见集合里** → nil，D66：绝不"取第一条碰到的"）。
+    ///
+    /// ⚠️ **必须从 `RenderStateBuilder.visibleDrawings` 里取，不能从 `engine.drawings` 里取**
+    /// （codex plan-R5-F1）：后者只是全局数组，**不含** D40 那三条判据——review 叠加层 /
+    /// `belongsToPanel`（D29 周期归属 + 同周期 fail-safe）/ `revealTick <= tick` 渐显。
+    /// 只按 id 从全局数组捞，等于把 D63 的**结构性**可见维度整个略过，只重算了几何那一半：
+    /// 一条**渲染不出、也命不中**的线（迁到了另一面板 / 渐显未到），只要价位恰好映进
+    /// `selectedPanel` 就能通过几何检查 → **可被改样式、可被不可逆删除**。
+    /// 「结构性不可见时选中会被别处清掉」是靠**事件**（切周期善后）保证的，而 D64 的全部论点就是
+    /// **能从状态算出来的就不要靠事件传递**——我对「存在性」维度守了这条纪律，这里必须一并守。
+    /// `visibleDrawings` **没有 mapper**、只判结构 → 几何性不可见的线**仍在**集合里（D63 分流照旧：
+    /// 保留选中、面板照常回显、只是控件灰），不会把 D63 退化成「一平移就丢选中」。
+    private static func uniqueSelected(engine: TrainingEngine) -> DrawingObject? {
+        guard let id = engine.drawingSession.selectedDrawingID, !id.isEmpty,
+              let panel = engine.drawingSession.selectedPanel else { return nil }
+        let visible = RenderStateBuilder.visibleDrawings(
+            engine: engine, panel: panel, tick: engine.tick.globalTickIndex)
+        let matches = visible.filter { $0.id == id }
+        return matches.count == 1 ? matches.first : nil
+    }
+
+    /// ⚠️ 目标对象**经 `uniqueSelected` 取**（见其头注，codex plan-R5-F1）—— 那里已经把
+    /// 「结构性可见」（`visibleDrawings` 的三条判据）挡在前面；本函数只负责**几何**那一层。
+    /// 两层叠起来才等于「屏幕上真的看得见这条线」。
     static func selectionGeometryVisible(engine: TrainingEngine) -> Bool {
         let session = engine.drawingSession
-        guard let id = session.selectedDrawingID,
-              let panel = session.selectedPanel,
+        guard let panel = session.selectedPanel,
               let mapper = session.viewportMapper(for: panel),
-              let drawing = engine.drawings.first(where: { $0.id == id }) else { return false }
+              let drawing = uniqueSelected(engine: engine) else { return false }
         return HorizontalLineTool.visibleGeometry(for: drawing, mapper: mapper) != nil
     }
 }
@@ -733,7 +756,7 @@ swift test 2>&1 | tail -5
 ```
 
 Expected：`Test run with 1760 tests ... passed`（1755 + 本 Step 前新增的 5 条：会话侧 2 + 路由几何 3）。
-⚠️ 本 Task 走完全部 Step 后还会再加 2 条（Step 6b 的 `renderedViewportDivergesFromReDerivation` + Step 6c 的 `publisherUsesRenderedViewportOnly`）→ **Task 2 收尾时应为 1762**。数字对不上就停下报告（别硬改，基线错了后面每个 Task 的对账都是假的）。
+⚠️ 本 Task 走完全部 Step 后还会再加 2 条（Step 6b 的 `renderedViewportDivergesFromReDerivation` + Step 6c 的 `publisherUsesRenderedViewportOnly`）→ **Task 2 收尾时应为 1762**（1755 + 7）。数字对不上就停下报告（别硬改，基线错了后面每个 Task 的对账都是假的）。
 
 - [ ] **Step 6: Coordinator 发布 mapper + 延后刷新提示（UIKit 侧）**
 
@@ -1040,6 +1063,57 @@ git commit -m "划线 P1b-1b-i PR-4 Task2：发布真实渲染视口 + 几何可
         #expect(e.drawings.isEmpty)
     }
 
+    @Test("N16a 同族（codex plan-R5-F1 专项，不可省）：**结构性**不可见的线一律判死 —— 渐显未到 / 归属另一面板")
+    func structurallyInvisibleIsAlwaysGated() {
+        // ① revealTick > tick：线在 drawings 里、价位也映得进视口，但**渲染不出、也命不中**
+        let e = TrainingEngine.preview()
+        let far = makeStyledHLine(id: "R", period: e.upperPanel.period, candleIndex: 0, price: 50)
+        // makeStyledHLine 默认 revealTick: 7 —— 先确认它确实还没到（前提自足断言）
+        #expect(far.revealTick > e.tick.globalTickIndex, "fixture 前提不成立：渐显已到，本测试无判别力")
+        e.injectDrawingsForTesting([far])
+        e.toggleDrawingMode(); e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "R", panel: .upper)
+        e.drawingSession.setViewportMapper(mapper(), panel: .upper)
+        #expect(RenderStateBuilder.visibleDrawings(engine: e, panel: .upper,
+                                                   tick: e.tick.globalTickIndex).isEmpty,
+                "前提：这条线确实不在渲染/命中集合里")
+        #expect(DrawingEditRouter.selectionGeometryVisible(engine: e) == false,
+                "只按 id 从 engine.drawings 捞就会漏掉 revealTick —— 用户看不见的线不许过门")
+        #expect(DrawingEditRouter.canEditStyle(engine: e) == false)
+        #expect(DrawingEditRouter.canDelete(engine: e) == false)
+        let rev = e.drawingsRevision
+        var s = DrawingEditRouter.panelStyle(engine: e); s.thickness = 5
+        #expect(DrawingEditRouter.applyStyle(s, engine: e) == false)
+        #expect(DrawingEditRouter.deleteSelected(engine: e) == false)
+        #expect(e.drawings.count == 1, "被拒必须零改动 —— 不可逆删除尤其不能漏过去")
+        #expect(e.drawingsRevision == rev)
+
+        // ② 陈旧的 selectedPanel：线归属**下**面板（period == lowerPanel.period），选中却记着上面板
+        let e2 = TrainingEngine.preview()
+        #expect(e2.upperPanel.period != e2.lowerPanel.period, "前提：两面板周期不同，belongsToPanel 才按 period 判")
+        #expect(e2.appendDrawing(makeStyledHLine(id: "L", period: e2.lowerPanel.period,
+                                                 panelPosition: 1, candleIndex: 0, price: 50)) == true)
+        e2.toggleDrawingMode(); e2.drawingSession.setMode(.select)
+        e2.drawingSession.setSelection(id: "L", panel: .upper)      // 陈旧二元组：id 属下面板、panel 记着上
+        e2.drawingSession.setViewportMapper(mapper(), panel: .upper)
+        #expect(DrawingEditRouter.canEditStyle(engine: e2) == false,
+                "按 selectedPanel 取渲染集合就自动判死；只按 id 捞则会拿另一面板的线去过上面板的几何")
+        #expect(DrawingEditRouter.canDelete(engine: e2) == false)
+        #expect(DrawingEditRouter.deleteSelected(engine: e2) == false)
+        #expect(e2.drawings.count == 1)
+    }
+
+    @Test("D63 不回归（防 R5 修复过头）：**几何性**不可见仍留在结构集合里 —— 选中不抖、面板照常回显")
+    func geometricallyInvisibleStaysStructurallyPresent() {
+        let e = makeSelected(price: 50)
+        e.drawingSession.setViewportMapper(mapper(priceMin: 200, priceMax: 300), panel: .upper)
+        #expect(DrawingEditRouter.selectionGeometryVisible(engine: e) == false)   // 几何判死
+        #expect(e.drawingSession.selectedDrawingID == "A", "选中不许被几何不可见抖掉（D63 的全部价值）")
+        // 面板仍回显那条线的真实样式（N18d：看得见、改不动）
+        #expect(DrawingEditRouter.panelStyle(engine: e).thickness == e.drawings[0].thickness)
+        #expect(DrawingEditRouter.panelStyle(engine: e).colorToken == e.drawings[0].colorToken)
+    }
+
     @Test("PD2b（codex plan-R1-F1 专项，不可省）：**无选中**时样式控件仍可用（改「下一条线的默认」），但 🗑 恒灰")
     func noSelectionKeepsStyleControlsUsable() {
         let e = TrainingEngine.preview()
@@ -1274,12 +1348,7 @@ Expected：编译失败 —— `type 'DrawingEditRouter' has no member 'canEditS
 ```swift
     // MARK: 可用性谓词（D65）—— **必须与引擎门逐条对齐**
 
-    /// 当前选中的那条线（不存在 / 不唯一 → nil，D66：绝不"取第一条碰到的"）。
-    private static func uniqueSelected(engine: TrainingEngine) -> DrawingObject? {
-        guard let id = engine.drawingSession.selectedDrawingID, !id.isEmpty else { return nil }
-        let matches = engine.drawings.filter { $0.id == id }
-        return matches.count == 1 ? matches.first : nil
-    }
+    // ⚠️ `uniqueSelected` 已在 Task 2 Step 4 随本文件建好（`selectionGeometryVisible` 依赖它），**本 Task 不要重复定义**。
 
     /// 「改样式可用」的**非几何分量**（review / 唯一 / `locked` / 工具已实现 / 未来数据）。
     /// ⚠️ **判据以引擎门为准，不是以 spec D65 的字面为准**（PR-2 交接②）：`updateDrawingStyle`
@@ -1359,12 +1428,19 @@ Expected：编译失败 —— `type 'DrawingEditRouter' has no member 'canEditS
 
     // MARK: 两条写入路由（`Sources/` 里 updateDrawingStyle / deleteDrawing(id:) 的**唯一**调用点）
 
-    /// D64：写入之后（无论成败、无论有没有真的调过引擎）按**状态**同步选中——
-    /// id 不在 `drawings` 里就清空。**绝不读任何 API 的返回值**：失败原因有五类，其中三类
-    /// 必须保留选中，一个 Bool 表达不了（spec D64 的全部理由）。
-    private static func syncSelectionByExistence(engine: TrainingEngine) {
-        guard let id = engine.drawingSession.selectedDrawingID else { return }
-        if !engine.drawings.contains(where: { $0.id == id }) { engine.drawingSession.clearSelection() }
+    /// D54 clause 3 + D64：写入之后（无论成败、无论有没有真的调过引擎）按**状态**同步选中。
+    /// **绝不读任何 API 的返回值**：失败原因有五类，其中三类必须保留选中，一个 Bool 表达不了
+    /// （spec D64 的全部理由）。
+    ///
+    /// 判据 = D64 原文那个析取式「清空 ⟺（**结构性**不含 **或** 存在性缺失）」，而
+    /// `visibleDrawings(for: selectedPanel)` **不含该 id** 已经把两项一并覆盖（线被删了就哪个集合都不在）
+    /// → 一个谓词表达完整语义，没有第二处可以写漏（codex plan-R5-F1）。
+    /// ⚠️ **绝不能改用带 mapper 的几何判据**：`visibleDrawings` 无 mapper、**只判结构**，
+    /// 几何性不可见的线仍在集合里 → 不会把 D63 退化成「一次惯性平移就把选中抖掉」（那正是
+    /// D63 明确拒绝 codex 原处方的理由）。
+    private static func syncSelectionByState(engine: TrainingEngine) {
+        guard engine.drawingSession.selectedDrawingID != nil else { return }
+        if uniqueSelected(engine: engine) == nil { engine.drawingSession.clearSelection() }
     }
 
     /// 改选中线的样式。执行顺序（D65 明写，不得调换）：
@@ -1372,7 +1448,7 @@ Expected：编译失败 —— `type 'DrawingEditRouter' has no member 'canEditS
     ///   → ③ 才调引擎（引擎自己再把 viewport 无关的六道门跑一遍）。
     @discardableResult
     static func applyStyle(_ style: DrawingDefaultStyle, engine: TrainingEngine) -> Bool {
-        defer { syncSelectionByExistence(engine: engine) }
+        defer { syncSelectionByState(engine: engine) }
         guard let id = engine.drawingSession.selectedDrawingID,
               let panel = engine.drawingSession.selectedPanel,
               let old = uniqueSelected(engine: engine) else { return false }
@@ -1391,7 +1467,7 @@ Expected：编译失败 —— `type 'DrawingEditRouter' has no member 'canEditS
     /// 重算（`canDelete` 内部现算），只在点 🗑 那一刻判是时序 bug（D65 R13-F1 / N19e）。
     @discardableResult
     static func deleteSelected(engine: TrainingEngine) -> Bool {
-        defer { syncSelectionByExistence(engine: engine) }
+        defer { syncSelectionByState(engine: engine) }
         guard let id = engine.drawingSession.selectedDrawingID else { return false }
         guard canDelete(engine: engine) else { return false }
         return engine.deleteDrawing(id: id)
@@ -2331,7 +2407,16 @@ tail -40 /tmp/codex-pr4-r1.log
 | R4 | high | **Task 排序错**：Task 2 Step 6c 往 `DrawingInteractionUISourceGuardTests.swift` **追加**守卫，而该文件我排在 **Task 4 才创建** → 实施者要么编译失败、要么静默丢掉这条守卫、要么被 Task 4 建文件时覆盖掉。而它正是「不许发布重推视口」的**确定性防线**，丢了就把 R3 刚补上的几何/渲染分叉防护重新打开。另外 Task 2 的期望计数也没算上它 | **全采纳**。文件改由 **Task 2 Step 6c 创建**（文件头 + 两个共享 helper + 本条守卫），Task 4/5/6 一律**只追加**并明写「插在末尾 `}` 之前、不要重复写文件头」；Files 列表、文件结构表、期望计数全部同步（Task 1 收尾 1755、Task 2 收尾 1762） |
 | R4 | medium | `codeTextPreservingBoundaries` 只把**真空白**折成空格，而 `scanCode` **剥掉注释/字面量时不产生任何边界** → `return/*x*/deleteDrawing`（合法 Swift）被压成 `returndeleteDrawing` → 裸标识符判据看到前一字符是 `n`、当成「更长标识符的尾巴」跳过 → **vend 漏检，第三层信任边界守卫在白名单文件内可被绕过** | **全采纳**。行注释 / 块注释 / 字符串字面量三处各补一次 `emitBoundary()`（抽成闭包共用，三处各写一遍必漏其一）。⚠️ **连带暴露我判据里的一个假阳性**：补了边界之后 `deleteDrawing/*c*/(id:)` 变成 `deleteDrawing (id:`，`(` 不再紧邻 → 一次正当调用会被误报成 vend（既有自检 a 当场红）。故判据同步改成 **①② 看紧邻字符（防把两个独立 token 粘成一个长标识符）、③ 跳空格再看 `(`**，并加自检 g3 双向钉死（紧贴注释的 vend 必被抓、紧贴注释的调用不得误报、`deleteDrawing Foo` 与 `deleteDrawingForTesting` 各自判对） |
 
-**这八条都是我计划自身的缺陷，不是实施风险**——与 [[feedback_plan_code_blocks_cause_vacuous_tests]] 同族：F2 尤其典型，我在 PD2 里**写明了**「靠 engine observable 顺带刷新会滞后」，然后在谓词实现里**自己踩了同一个坑**（让 UI 读现算值，连滞后的机会都没有）。识别出陷阱 ≠ 避开陷阱，判据必须写成可被机械检查的形状——故本轮修复同时补了源码守卫，而不只是改代码。
+**R5 = needs-attention，1 条 high（无 medium），真 finding、已修**：
+
+| 轮 | 级别 | finding | 我的处置 |
+|---|---|---|---|
+| R5 | high | `selectionGeometryVisible` 用 `engine.drawings.first(where:)` 找目标，**绕过了 `RenderStateBuilder.visibleDrawings`** —— PR-3 刚建立的「命中集合 ≡ 渲染集合」唯一真相，它还含 `belongsToPanel`（D29 周期归属 + 同周期 fail-safe）与 `revealTick <= tick`。只重算几何那一半，等于把 D63 的**结构性**维度整个略过、改为依赖「切周期时别处会清选中」这个**事件** → 一条渲染不出也命不中的线，只要价位恰好映进 `selectedPanel` 就能过门，**可被改样式、可被不可逆删除** | **全采纳**。`uniqueSelected` 改从 `visibleDrawings(engine:panel:tick:)` 取（四个谓词 + 两条路由 + `panelStyle` 全部继承结构维度）；`syncSelectionByExistence` → `syncSelectionByState`，判据换成 D64 原文那个析取式「结构性不含 **或** 存在性缺失」——`visibleDrawings` 不含该 id 已一并覆盖两项，一个谓词表达完整语义。补两条测试：`structurallyInvisibleIsAlwaysGated`（渐显未到 / 陈旧 selectedPanel 两种形状，各断言四个谓词 + 两条路由全判死且零改动）与 **`geometricallyInvisibleStaysStructurallyPresent`（防修过头）**——`visibleDrawings` 无 mapper、只判结构，几何性不可见的线**仍在**集合里，选中不抖、面板照常回显（否则就把 D63 退化成 codex 当初被 spec 明确拒绝的那个处方） |
+
+**如实记录**：我没能构造出**当前可达**的洞（选中只能由 hitTest 产生、而 hitTest 就走 `visibleDrawings`；切周期已在 PR-3 清选中）→ 这是**纵深加固**，不是已证实的 live bug。但修法极小、严格更安全，且正是 spec 自己的纪律：D64 说「能从状态算出来的就不要靠事件传递」——我对**存在性**维度守了，对**结构性**维度没守。
+⚠️ 本轮修复**差点重犯 R4-F1 的排序错误**两次（`uniqueSelected` 被 Task 2 依赖却定义在 Task 3；两条新测试用了 Task 3 的谓词却被我放进 Task 2）——已各自归位。
+
+**这九条都是我计划自身的缺陷，不是实施风险**——与 [[feedback_plan_code_blocks_cause_vacuous_tests]] 同族：F2 尤其典型，我在 PD2 里**写明了**「靠 engine observable 顺带刷新会滞后」，然后在谓词实现里**自己踩了同一个坑**（让 UI 读现算值，连滞后的机会都没有）。识别出陷阱 ≠ 避开陷阱，判据必须写成可被机械检查的形状——故本轮修复同时补了源码守卫，而不只是改代码。
 
 顺带修掉的自查项：初稿 Catalyst 测试 `geometryHintFollowsViewport` **自己调 `setSelectionGeometryVisible` 再断言它变了** = 恒真测试（测的是 setter 而不是 Coordinator），已换成走真实 `rebuildRenderState` 路径并用 `drainMainQueue()` 等 async 跳转（不用固定时长 `sleep` 赌时序）。
 
