@@ -462,5 +462,54 @@ struct ChartContainerViewDrawingSessionTests {
         #expect(engine.drawingSession.selectedDrawingID == hitID, "盾外的 tap 应正常命中选中")
         #expect(engine.drawings.count == 1, "选择态命中不落锚")
     }
+
+    // MARK: - PR-4：Coordinator 发布视口 mapper + 延后刷新几何提示（PD1/PD2）
+
+    @Test("PR-4：rebuildRenderState 发布的是**这一帧渲染真用过**的视口（与 view.renderState.viewport 逐字相等）")
+    func coordinatorPublishesRenderedViewport() {
+        let (engine, upperC, lowerC, upperV, lowerV) = makeRig()
+        let published = try! #require(engine.drawingSession.viewportMapper(for: .upper))
+        #expect(published.viewport == upperV.renderState.viewport,
+                "发布的视口与真实渲染态不一致 —— 几何门会与屏幕上看到的分叉")
+        #expect(published.displayScale == upperV.traitCollection.displayScale)
+        // 两个面板各自发布、互不覆盖
+        let lower = try! #require(engine.drawingSession.viewportMapper(for: .lower))
+        #expect(lower.viewport == lowerV.renderState.viewport)
+        _ = (upperC, lowerC)
+    }
+
+    @Test("PR-4（codex plan-R1-F2 专项）：几何提示由 **Coordinator 真实路径**刷新 —— 选中一条价位远在视口外的线 → 提示转 false")
+    func coordinatorRefreshesGeometryHint() async throws {
+        let (engine, upperC, _, upperV, _) = makeRig()
+        engine.toggleDrawingMode()
+        upperC.handleDrawingTapForTesting(at: mainChartPoint(upperV))     // 画一条**可见**的
+        let visibleID = try #require(engine.drawings.last?.id)
+        // 再注入一条价位远在视口外的（用注入而非画，因为画不出一条自己看不见的线）
+        // ⚠️ `revealTick: 0`（实测同款修法，见 DrawingEditRouterTests.makeSelected 头注）：`makeRig()` 的
+        // preview() 引擎 tick 恒 0，`makeStyledHLine` 默认 `revealTick: 7`——不传会让这条线在
+        // `visibleDrawings`（D40）那一步就被判「未揭示」而滤掉，本断言会因为「结构性不可见」而不是
+        // 「几何超出视口」变成 false，测不出 Coordinator 的几何刷新路径本身。
+        engine.injectDrawingsForTesting(engine.drawings + [
+            makeStyledHLine(id: "FAR", revealTick: 0, period: engine.upperPanel.period,
+                            candleIndex: 0, price: 1_000_000)])
+        engine.drawingSession.setMode(.select)
+
+        engine.drawingSession.setSelection(id: visibleID, panel: .upper)
+        upperC.rebuildRenderState(bounds: bounds)
+        await drainMainQueue()
+        #expect(engine.drawingSession.selectionGeometryVisible == true)
+
+        engine.drawingSession.setSelection(id: "FAR", panel: .upper)
+        upperC.rebuildRenderState(bounds: bounds)
+        await drainMainQueue()
+        #expect(engine.drawingSession.selectionGeometryVisible == false,
+                "Coordinator 没有按真实视口把提示改回来 —— 平移到线看不见时控件不会变灰（验收 #18c）")
+    }
+
+    /// 排空 main queue：`rebuildRenderState` 用 `DispatchQueue.main.async` 延后写提示
+    /// （视图更新期不得改 @Observable），必须等那一跳真的执行完再断言。
+    private func drainMainQueue() async {
+        await withCheckedContinuation { c in DispatchQueue.main.async { c.resume() } }
+    }
 }
 #endif

@@ -202,6 +202,26 @@ public struct ChartContainerView: UIViewRepresentable {
                 engine: engine, panel: panel, bounds: bounds, crosshair: crosshairPoint)
             RenderSignposter.end(makeToken)
             view.renderState = newState
+            // PR-4（PD1/PD2）：发布**这一帧真的用过**的视口 —— SwiftUI 层（🗑 / 样式面板）没有 mapper，
+            // 而重新推导会与 `make` 的聚合分支（重算 priceRange）分叉。
+            let session = engine.drawingSession
+            session.setViewportMapper(
+                CoordinateMapper(viewport: newState.viewport,
+                                 displayScale: view.traitCollection.displayScale), panel: panel)
+            // 置灰提示：只有**选中所在的那个面板**负责刷新（另一个面板的视口与它无关），
+            // 且只在值**真的会变**时才派发（平移每帧都派发 = 无谓开销）。
+            // ⚠️ **必须延后一个 runloop**：本函数的调用点之一是 `updateUIView`（视图更新期），
+            //    期间改 @Observable 是 SwiftUI 明令的未定义行为；`:105` 释放 crosshairOwner 用的是
+            //    同一条逃生门。提示晚一拍无害——真正的门是路由在写入瞬刻的那次重算（PD2）。
+            if session.selectedPanel == panel,
+               DrawingEditRouter.selectionGeometryVisible(engine: engine) != session.selectionGeometryVisible {
+                DispatchQueue.main.async { [weak engine] in
+                    guard let engine else { return }
+                    // 在**执行时**重算，不用捕获的旧值（期间状态可能又变了）。
+                    engine.drawingSession.setSelectionGeometryVisible(
+                        DrawingEditRouter.selectionGeometryVisible(engine: engine))
+                }
+            }
         }
 
         /// P1b-1a-ii D42：「现在能不能画」的**唯一判据** = 全局会话开关。
