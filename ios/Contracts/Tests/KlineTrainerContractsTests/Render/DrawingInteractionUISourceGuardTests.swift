@@ -77,4 +77,24 @@ struct DrawingInteractionUISourceGuardTests {
         let dmb = try #require(tv.range(of: "DrawingBottomBar("), "DrawingBottomBar 未接入")
         #expect(String(tv[..<dmb.lowerBound].suffix(60)).contains(squeeze("if isDrawingActive {")))
     }
+
+    // ⭐fix round 1（评审变异 3 抓出，本 Task 自己的缺口）：`typeIconLitMeansDrawMode` 只查
+    //   `isDrawMode` 这个**标识符存在**、`activeDrawingTool` **不存在**——把 `DrawingTypeOverlay.body`
+    //   里描边色/前景色两处三元的 `isDrawMode ? … : …` 全改成常量 `Color.accentColor`，`isDrawMode`
+    //   仍被 `accessibilityValue` 用着、`activeDrawingTool` 仍不出现，两条断言原样通过、全量测试零红——
+    //   D38「图标点亮=画线态、熄灭=选择态」这条核心行为在 host 矩阵里因此是**零覆盖**的假设
+    //   （该视图 UIKit-gated，Catalyst 才有像素级证据；但「三元有没有真绑 isDrawMode」是纯文本接线问题，
+    //   不需要渲染就能测——不能把这条也推给 Catalyst）。
+    //   两处**分别**断言（不用合并计数）：只改一处不绑 isDrawMode 时，未改的那条断言仍会因为改动的
+    //   那一处缺失而单独变红，不依赖总数判据，杜绝「改一处漏网」。
+    @Test("D38 fix round 1：描边色/前景色两处 ternary 都必须绑 isDrawMode（否则退化成恒亮/恒灭，Catalyst 之外无第二层覆盖）")
+    func typeOverlayColorTernariesBothBoundToIsDrawMode() throws {
+        let overlayCode = try code("Sources/KlineTrainerContracts/UI/DrawingTypeOverlay.swift")
+        #expect(overlayCode.contains(squeeze(
+            ".stroke(isDrawMode ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: 1.5)")),
+            "描边色不是绑 isDrawMode 的三元——被硬编码成常量，图标会恒亮/恒灭")
+        #expect(overlayCode.contains(squeeze(
+            ".foregroundStyle(isDrawMode ? Color.accentColor : Color.secondary)")),
+            "前景色不是绑 isDrawMode 的三元——被硬编码成常量，图标会恒亮/恒灭")
+    }
 }
