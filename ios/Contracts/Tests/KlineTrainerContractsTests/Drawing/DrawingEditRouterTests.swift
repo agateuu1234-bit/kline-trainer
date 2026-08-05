@@ -468,4 +468,45 @@ struct DrawingEditRouterTests {
         e.drawingSession.setSelection(id: id, panel: .upper)
         return e
     }
+
+    // ============ fix round 1（评审挖出的假覆盖）：hasKnownFutureFields 姊妹门 ============
+
+    /// 一条**枚举值全部已知、但携带未来未知顶层字段**的线（`futureIndependentTextColor:true`，
+    /// 本构建不认识的顶层 key）经 lossy 解码进 engine，并选中它。
+    /// raw **逐字**取自 `DrawingEditDurabilityGateTests.futureTopLevelFieldRejectsStyleEdit`
+    /// （PR-2 已用它钉引擎侧 D61 字段门），构造走 `DrawingTestFixtures` 的 `lossyFromRaw` +
+    /// `makeEngineWithLossy`（该引擎 upper=lower=`.m3`，故 raw 里的 `period` 必须是 `"3m"`；
+    /// 价格 9.0 落在本文件 `mapper()` 的 [0,100] 区间内 → 几何可见）。
+    /// ⚠️ 与 `engineWithFutureEnumLine` **刻意不同**：这条线只压 `hasKnownFutureFields` 那半个门
+    /// （`colorToken`/`textColorToken` 都是当前已知的 `"orange"`，`hasKnownFutureEnumValues` 判
+    /// false）——否则又会被枚举值那道门先挡住，测不到字段门本身（评审亲手变异挖出的假覆盖：
+    /// 删掉 `editableIgnoringGeometry` 里的 `hasKnownFutureFields` 那半句，全量 1782 零红，
+    /// 因为路由层此前唯一的「未来数据」fixture 只命中枚举值门）。
+    private func engineWithFutureFieldLine(id: String) throws -> TrainingEngine {
+        let raw = #"{"id":"X","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain","futureIndependentTextColor":true}"#
+        let e = makeEngineWithLossy(try lossyFromRaw(raw))
+        #expect(e.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id]) == false,
+                "fixture 前提：枚举值门必须**不**命中，否则测的是另一半门（假覆盖同款陷阱）")
+        #expect(e.loadedDrawingsLossy.hasKnownFutureFields(liveIds: [id]) == true,
+                "fixture 前提：字段门必须命中，否则这条 fixture 没有压到目标判据")
+        e.toggleDrawingMode(); e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: id, panel: .upper)
+        return e
+    }
+
+    @Test("PR-4 fix round 1（评审挖出的假覆盖）：未来**顶层字段**线（枚举值全已知）—— 改样式灰，删整条仍亮")
+    func futureFieldLineDisablesEditOnly() throws {
+        let e = try engineWithFutureFieldLine(id: "X")
+        e.drawingSession.setViewportMapper(mapper(), panel: .upper)
+        #expect(DrawingEditRouter.canEditStyle(engine: e) == false, """
+                未来顶层字段线改不动样式（D61）—— 只压 hasKnownFutureFields 这半个门，\
+                engine.updateDrawingStyle 独立复查同一门、真实写入本就被挡住；这里挡的是\
+                「控件亮着、点了没反应」这个 UI 层失效模式
+                """)
+        #expect(DrawingEditRouter.styleControlsEnabled(engine: e) == false, "UI 侧同样要灰")
+        #expect(DrawingEditRouter.canDelete(engine: e) == true, """
+                但删整条允许（D61：未来数据线可整条删，删除面不查这两个门）—— \
+                防「一律拒绝」骗过上面两条负向断言
+                """)
+    }
 }
