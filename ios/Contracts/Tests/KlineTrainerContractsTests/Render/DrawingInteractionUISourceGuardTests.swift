@@ -30,4 +30,51 @@ struct DrawingInteractionUISourceGuardTests {
         #expect(!cc.contains("makeViewport"),
                 "ChartContainerView 里出现了 makeViewport —— 重推的视口在聚合分支下与屏幕上的不一致（见 renderedViewportDivergesFromReDerivation）")
     }
+
+    @Test("D57/PD4：setMode 在 Sources/ 里恰好 1 处调用，且在类型行 toggle 的接线上（不是 activate/deactivate）")
+    func setModeHasExactlyOneCallSite() throws {
+        let sites = try callSiteCount("setMode(")
+        #expect(sites.count == 1 && sites.first?.count == 2,
+                "setMode 应只出现在一个文件里、恰好两次（.draw / .select 两个方向），实际：\(sites)")
+        #expect(sites.first?.file.hasSuffix("/UI/TrainingView.swift") == true,
+                "唯一调用点必须在类型行 toggle 的接线处，实际：\(sites)")
+        // 切回画线态**不得**走 activate（那是「开会话/换工具」的入口，会话本来就开着）。
+        // 否定断言 → 剥注释后判（接线处的注释里正当地提到了 activate）。
+        #expect(!(try code("Sources/KlineTrainerContracts/UI/TrainingView.swift"))
+                    .contains(squeeze(".activate(tool:")), "切回画线态不得开新会话")
+    }
+
+    @Test("D38：图标点亮 == 画线态（判据是 mode，不是 activeDrawingTool 是否为 nil）")
+    func typeIconLitMeansDrawMode() throws {
+        let overlayCode = try code("Sources/KlineTrainerContracts/UI/DrawingTypeOverlay.swift")
+        #expect(overlayCode.contains("isDrawMode"), "图标亮灭必须由传入的 isDrawMode 决定")
+        // 否定断言必须剥注释：本视图的文档注释里**正当地**写着「不是 activeDrawingTool == nil」（D57 的理由），
+        // 读原始文本会被自己的注释打红（codex plan-R2-F1）。
+        #expect(!overlayCode.contains("activeDrawingTool"),
+                "D57 取代了 nil 编码 —— 视图层的**代码**里不得再用 activeDrawingTool 判态")
+    }
+
+    @Test("D38：作废的旧注释必须随本期删掉（否则文档与行为相反）—— 本条**刻意**读原始文本，它测的就是注释")
+    func staleToggleCommentsRemoved() throws {
+        let overlayRaw = try raw("Sources/KlineTrainerContracts/UI/DrawingTypeOverlay.swift")
+        #expect(overlayRaw.contains("DrawingTypeOverlay"), "先证明真读到了文件（防路径写错 → 空串 → 否定断言假绿）")
+        for stale in ["不做 toggle", "本期短按 no-op", "恒亮"] {
+            #expect(!overlayRaw.contains(stale), "作废注释仍在：\(stale)")
+        }
+    }
+
+    @Test("交接⑥：复盘结构上进不去选择态 —— 类型行随样式面板挂载，而面板判据含 showsTradeButtons")
+    func reviewCannotReachSelectMode() throws {
+        let tvPath = contractsDirForGuards
+            .appendingPathComponent("Sources/KlineTrainerContracts/UI/TrainingView.swift").path
+        // 唯一的 toggle 入口在样式面板里，而面板可见性判据天然排除复盘（canBuySell()==false）
+        #expect(try squeezedContains(tvPath,
+            "private var stylePanelWillBeVisible: Bool { showsTradeButtons && isDrawingActive && typeRowExpanded }"))
+        #expect(try squeezedContains(tvPath, "private var showsTradeButtons: Bool { engine.flow.canBuySell() }"))
+        // 底栏同理：DrawingBottomBar 挂在 showsTradeButtons → isDrawingActive 分支内。
+        // 邻接断言在**剥注释后**做——否则中间插一段注释就能把两者推开、守卫静默失效。
+        let tv = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        let dmb = try #require(tv.range(of: "DrawingBottomBar("), "DrawingBottomBar 未接入")
+        #expect(String(tv[..<dmb.lowerBound].suffix(60)).contains(squeeze("if isDrawingActive {")))
+    }
 }

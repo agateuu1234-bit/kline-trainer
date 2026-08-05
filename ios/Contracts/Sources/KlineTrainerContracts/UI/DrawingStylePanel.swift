@@ -16,19 +16,22 @@ struct DrawingStylePanel: View {
     let session: DrawingSession
     let scheme: AppColorScheme
     let position: DrawingStylePanelPosition
+    let onToggleMode: () -> Void              // 1b-i PR-4：类型行图标短按（画线态 ⇄ 选择态）
     let onTogglePosition: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             // 镜像只翻「类型行 ↔ 参数」两大块；参数内部 5 组顺序两态相同、不翻（user 确认）。
             if position == .top {
-                DrawingTypeOverlay(onTogglePosition: onTogglePosition)
+                DrawingTypeOverlay(isDrawMode: session.mode == .draw,
+                                   onToggleMode: onToggleMode, onTogglePosition: onTogglePosition)
                 Divider()
                 DrawingStyleParams(session: session, scheme: scheme)
             } else {
                 DrawingStyleParams(session: session, scheme: scheme)
                 Divider()
-                DrawingTypeOverlay(onTogglePosition: onTogglePosition)
+                DrawingTypeOverlay(isDrawMode: session.mode == .draw,
+                                   onToggleMode: onToggleMode, onTogglePosition: onTogglePosition)
             }
         }
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))

@@ -509,4 +509,32 @@ struct DrawingEditRouterTests {
                 防「一律拒绝」骗过上面两条负向断言
                 """)
     }
+
+    // ⚠️ **与 brief 字面稿的刻意分歧**：字面稿 `makeStyledHLine` 调用不传 `revealTick`（默认 7），
+    //   而 `TrainingEngine.preview(mode: .review)` 走 `ReviewFlow(startTick: 0)` → `tick.globalTickIndex == 0`
+    //   （`safeStartTick` 实测钳到 0）。默认 revealTick(7) > tick(0) 会被 D40 的 `visibleDrawings` 结构性过滤
+    //   直接挡掉，`uniqueSelected` 恒 nil —— 下面四条负向断言会为了**错误的原因**变绿：把
+    //   `updateDrawingStyle`/`deleteDrawing(id:)` 里 `guard flow.mode != .review` 那一行删掉，本测试依然全绿
+    //   （已用变异实验验证），说明它测不到本条要测的复盘门。补 `revealTick: 0`（与本文件 `makeSelected` 同款
+    //   前提）使这条线结构性可见，`uniqueSelected` 真的能取到它，让下面的 false 断言精确来自 review 门。
+    @Test("交接⑥ 纵深：复盘模式下两个谓词恒假、两条路由恒拒（结构上进不去，进去了也动不了）")
+    func reviewModeIsInert() {
+        let e = TrainingEngine.preview(mode: .review)
+        #expect(e.appendDrawing(makeStyledHLine(id: "R", revealTick: 0, period: e.upperPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        e.toggleDrawingMode(); e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "R", panel: .upper)
+        e.drawingSession.setViewportMapper(mapper(), panel: .upper)
+        // 前提自足：证明这条线结构性可见（真进了 uniqueSelected 的候选集），下面的 false 断言才精确
+        // 来自 review 门，而不是巧合地来自 D40 的 revealTick/belongsToPanel 过滤。
+        #expect(RenderStateBuilder.visibleDrawings(engine: e, panel: .upper,
+                                                    tick: e.tick.globalTickIndex).contains { $0.id == "R" },
+                "fixture 前提不成立：线结构性不可见，下面的 false 断言测不到 review 门本身")
+        #expect(DrawingEditRouter.canEditStyle(engine: e) == false)
+        #expect(DrawingEditRouter.canDelete(engine: e) == false)
+        var s = DrawingEditRouter.panelStyle(engine: e); s.thickness = 5
+        #expect(DrawingEditRouter.applyStyle(s, engine: e) == false)
+        #expect(DrawingEditRouter.deleteSelected(engine: e) == false)
+        #expect(e.drawings.count == 1)
+    }
 }

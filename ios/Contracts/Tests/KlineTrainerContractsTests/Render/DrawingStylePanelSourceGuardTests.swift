@@ -291,6 +291,21 @@ struct DrawingStylePanelSourceGuardTests {
         #expect(disappearChain.contains("engine.drawingSession.clearAllShields()"))
     }
 
+    // ⭐补（本 task 自查发现的判别力缺口）：brief 给的 4 条守卫只查 DrawingTypeOverlay.swift 内是否
+    //   **含** `isDrawMode` 标识符、绝不含 `activeDrawingTool`——都不检查 DrawingStylePanel.swift 两处
+    //   call site 实际**传的是什么**。若这里被硬编码成 `isDrawMode: true`（回到改造前恒亮），brief 那 4 条
+    //   一条都不会红（DrawingStylePanel.swift 又是 UIKit-gated，host 上没有运行时测试能兜底）——本 Task
+    //   的核心交付（toggle 真接线）就会失去测试保护。补一条精确锚定两处 call site 字面文本的守卫。
+    @Test("1b-i PR-4：类型行图标亮灭恰好 2 处（.top/.bottom 两分支）都绑 session.mode == .draw，不许被硬编码成常量")
+    func typeOverlayIsDrawModeBoundToSessionMode() throws {
+        let squeezed = squeeze(try source(panel))
+        #expect(squeezed.components(
+            separatedBy: squeeze("DrawingTypeOverlay(isDrawMode: session.mode == .draw,")).count == 3, """
+            两处 DrawingTypeOverlay( 调用都必须原样传 isDrawMode: session.mode == .draw —— 硬编码成 \
+            true/false 会让图标恒亮/恒灭，且 DrawingStylePanel.swift 是 UIKit-gated、host 上没有别的测试能抓到
+            """)
+    }
+
     @Test("旧长按卡片已删除、长按钩子已摘除（不留两套设置入口）")
     func longPressCardRetired() throws {
         let cardPath = srcDir.appendingPathComponent("Sources/KlineTrainerContracts/UI/DrawingStyleCard.swift")

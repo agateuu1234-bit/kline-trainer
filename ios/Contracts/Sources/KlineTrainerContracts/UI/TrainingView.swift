@@ -498,6 +498,12 @@ public struct TrainingView: View {
         ChartPanelsContainer(engine: engine, stylePanelVisible: stylePanelWillBeVisible,
                              scheme: colorScheme == .dark ? .dark : .light,
                              stylePanelPosition: stylePanelPosition,
+                             onToggleMode: {
+                                 // D38/D57：两个方向都走 setMode —— 会话一直开着、工具在选择态恒非 nil（D57），
+                                 // 切回画线态**不是**开会话，不得走 activate（那是 beginDrawingSession 的专属入口）。
+                                 let session = engine.drawingSession
+                                 if session.mode == .draw { session.setMode(.select) } else { session.setMode(.draw) }
+                             },
                              onTogglePosition: { stylePanelPosition = (stylePanelPosition == .bottom ? .top : .bottom) },
                              upperPanel: { panel(.upper) }, lowerPanel: { panel(.lower) })
     }
@@ -676,6 +682,7 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
     let stylePanelVisible: Bool
     let scheme: AppColorScheme                    // 1a-iii 切片2 Task3：样式面板色板取色（DrawingColorResolver）
     let stylePanelPosition: DrawingStylePanelPosition   // 上/下半区（Task4 已接 ⇅ 真行为：refreshShields() 按当前位置求交两面板）
+    let onToggleMode: () -> Void                   // 1b-i PR-4：类型行图标短按（画线态 ⇄ 选择态）
     let onTogglePosition: () -> Void               // ⇅ 回调（替代已删的 onLongPressType）
     @ViewBuilder let upperPanel: () -> Upper
     @ViewBuilder let lowerPanel: () -> Lower
@@ -701,7 +708,8 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
             // （= showsTradeButtons && isDrawingActive && typeRowExpanded，天然排除复盘），本容器不再自算。
             if stylePanelVisible {
                 DrawingStylePanel(session: engine.drawingSession, scheme: scheme,
-                                  position: stylePanelPosition, onTogglePosition: onTogglePosition)
+                                  position: stylePanelPosition,
+                                  onToggleMode: onToggleMode, onTogglePosition: onTogglePosition)
                     // ⭐codex 计划-R1-F2：GeometryReader 必须量**未加 padding 的可见面板本体**——
                     //   量到的 frame 就是写进 shield（经 refreshShields() 的 .rect case）的盾。先量、后 padding：
                     .background(GeometryReader { g in Color.clear

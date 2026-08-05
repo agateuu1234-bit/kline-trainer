@@ -342,6 +342,7 @@ private struct TrainingShellLayout: View {
             stylePanelVisible: showsTradeButtons && isDrawingActive && typeRowExpanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: .bottom,    // 本 task 三个外壳都不带自己的 stylePanelPosition 状态，固定传 .bottom
+            onToggleMode: {},                // 测试不驱动 toggle
             onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
             upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestUpperPanelHeight) },
             lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestLowerPanelHeight) })
@@ -363,6 +364,7 @@ private struct TallPanelsShellLayout: View {
             stylePanelVisible: engine.flow.canBuySell() && engine.drawingSession.drawingModeActive && typeRowExpanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: stylePanelPosition,
+            onToggleMode: {},                // 测试不驱动 toggle
             onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
             upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestTallPanelHeight) },
             lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestTallPanelHeight) })
@@ -382,6 +384,7 @@ private struct ShortUpperShellLayout: View {
             stylePanelVisible: engine.flow.canBuySell() && engine.drawingSession.drawingModeActive && typeRowExpanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: .bottom,    // 本 task 三个外壳都不带自己的 stylePanelPosition 状态，固定传 .bottom
+            onToggleMode: {},                // 测试不驱动 toggle
             onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
             upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestShortUpperPanelHeight) },
             lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestShortLowerPanelHeight) })
@@ -408,6 +411,7 @@ private struct AsymmetricPanelsShellLayout: View {
             stylePanelVisible: engine.flow.canBuySell() && engine.drawingSession.drawingModeActive,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: stylePanelPosition,
+            onToggleMode: {},                // 测试不驱动 toggle
             onTogglePosition: {},           // 测试不驱动 ⇅（位置切换靠重新构造外壳值渲染，非回调）
             upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: upperHeight) },
             lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: lowerHeight) })
