@@ -49,4 +49,137 @@ enum DrawingEditRouter {
               let drawing = uniqueSelected(engine: engine) else { return false }
         return HorizontalLineTool.visibleGeometry(for: drawing, mapper: mapper) != nil
     }
+
+    // MARK: 可用性谓词（D65）—— **必须与引擎门逐条对齐**
+
+    // ⚠️ `uniqueSelected` 已在 Task 2 Step 4 随本文件建好（`selectionGeometryVisible` 依赖它），**本 Task 不要重复定义**。
+
+    /// 「改样式可用」的**非几何分量**（review / 唯一 / `locked` / 工具已实现 / 未来数据）。
+    /// ⚠️ **判据以引擎门为准，不是以 spec D65 的字面为准**（PR-2 交接②）：`updateDrawingStyle`
+    /// 比 D65 写的三分量多**三道**——`flow.mode != .review`（D34 纵深）、`isEditableToolType`
+    /// （本构建懂不懂这个工具的样式语义）、`hasKnownFutureFields`（未来顶层字段）。
+    /// 少一道 = 控件亮着、点了没反应；多一道 = 过度置灰。两边都是缺陷。
+    /// （引擎第 ④ 道 `withStyle` 语义闸**不在**本谓词里：它依赖**具体要写的样式**，
+    ///   不是「这条线能不能改」的属性，由 `applyStyle` 逐次传播失败。）
+    /// **抽出来是为了让「现算」与「读提示」两条路径只在几何这一点上不同**（PD2）——
+    /// 若各写一份，早晚有一天两边的非几何分量会漂移。
+    private static func editableIgnoringGeometry(engine: TrainingEngine) -> Bool {
+        guard engine.flow.mode != .review else { return false }
+        guard let d = uniqueSelected(engine: engine) else { return false }
+        guard !d.locked else { return false }
+        guard DrawingStyleAvailability.isEditableToolType(d.toolType) else { return false }
+        return !engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [d.id])
+            && !engine.loadedDrawingsLossy.hasKnownFutureFields(liveIds: [d.id])
+    }
+
+    /// 「删除可用」的**非几何分量** —— 与上者共享 review / 唯一 / `locked` 三个分量，
+    /// **不含**未来数据与工具两个分量：删整条不产生"部分抹除"（raw 随之整体移除），
+    /// 且它是这类线唯一的用户侧处置通道（D61）。与引擎 `deleteDrawing(id:)` 的三道门逐条对齐。
+    private static func deletableIgnoringGeometry(engine: TrainingEngine) -> Bool {
+        guard engine.flow.mode != .review else { return false }
+        guard let d = uniqueSelected(engine: engine) else { return false }
+        return !d.locked
+    }
+
+    // MARK: 两个读法（PD2）—— 几何**现算**给写入路由，几何**读 observable 提示**给 UI 置灰
+
+    /// **路由用**（唯一的门）：几何现算。
+    static func canEditStyle(engine: TrainingEngine) -> Bool {
+        editableIgnoringGeometry(engine: engine) && selectionGeometryVisible(engine: engine)
+    }
+
+    /// **路由用**（唯一的门）：几何现算。
+    static func canDelete(engine: TrainingEngine) -> Bool {
+        deletableIgnoringGeometry(engine: engine) && selectionGeometryVisible(engine: engine)
+    }
+
+    /// **UI 用**：5 组样式控件是否可用。
+    /// ⚠️ 两处刻意与上面不同，**都不是笔误**（codex plan-R1-F1/F2）：
+    ///   ① **无选中 → 恒可用**：此刻面板在改「下一条线的默认」，与任何线的状态无关。
+    ///      写成 `canEditStyle` 会让无选中时控件全灰 —— 那是 1a-iii 就有的能力，会被直接回归掉
+    ///      （验收 #13：取消选中后改默认、再画一条新线）。
+    ///   ② 几何读 **observable** 的 `selectionGeometryVisible`，**不是**现算：
+    ///      mapper 是 `@ObservationIgnored`，UI 若走现算，SwiftUI 建立不了依赖 →
+    ///      平移到线看不见时**不重绘** → 控件停在旧状态（验收 #18c 失效）。
+    ///      提示陈旧最坏只是晚一帧，写入仍会被 `canEditStyle` 那道现算的门拦住。
+    static func styleControlsEnabled(engine: TrainingEngine) -> Bool {
+        guard engine.drawingSession.selectedDrawingID != nil else { return true }   // ①
+        return editableIgnoringGeometry(engine: engine)
+            && engine.drawingSession.selectionGeometryVisible                        // ②
+    }
+
+    /// **UI 用**：🗑 是否可用。与 `styleControlsEnabled` **刻意不对称**——无选中时 🗑 没有操作对象，
+    /// 恒灰（spec §1.1 #1 原文：「无选中时灰」）。几何同样读 observable 提示（理由同上）。
+    static func deleteButtonEnabled(engine: TrainingEngine) -> Bool {
+        deletableIgnoringGeometry(engine: engine) && engine.drawingSession.selectionGeometryVisible
+    }
+
+    // MARK: D49 面板派生样式（**唯一**一处从 DrawingObject 取 5 个样式字段）
+
+    /// 常驻面板此刻该显示的样式：有选中 → 那条线的当前样式；无选中 → 「下一条线的默认」。
+    /// **是每次求值现算的派生值，不是拷贝进某个 @State 的副本**（D49：常驻面板长期存活，
+    /// 任何第二份样式状态都会与 `engine.drawings` 里的真值漂移）。
+    static func panelStyle(engine: TrainingEngine) -> DrawingDefaultStyle {
+        guard let d = uniqueSelected(engine: engine) else { return engine.drawingSession.defaultStyle }
+        var s = DrawingDefaultStyle()
+        s.lineSubType = d.lineSubType
+        s.lineStyle = d.lineStyle
+        s.thickness = d.thickness
+        s.colorToken = d.colorToken
+        s.labelMode = d.labelMode
+        return s
+    }
+
+    // MARK: 两条写入路由（`Sources/` 里 updateDrawingStyle / deleteDrawing(id:) 的**唯一**调用点）
+
+    /// D54 clause 3 + D64：写入之后（无论成败、无论有没有真的调过引擎）按**状态**同步选中。
+    /// **绝不读任何 API 的返回值**：失败原因有五类，其中三类必须保留选中，一个 Bool 表达不了
+    /// （spec D64 的全部理由）。
+    ///
+    /// 判据 = D64 原文那个析取式「清空 ⟺（**结构性**不含 **或** 存在性缺失）」，而
+    /// `visibleDrawings(for: selectedPanel)` **不含该 id** 已经把两项一并覆盖（线被删了就哪个集合都不在）
+    /// → 一个谓词表达完整语义，没有第二处可以写漏（codex plan-R5-F1）。
+    /// ⚠️ **绝不能改用带 mapper 的几何判据**：`visibleDrawings` 无 mapper、**只判结构**，
+    /// 几何性不可见的线仍在集合里 → 不会把 D63 退化成「一次惯性平移就把选中抖掉」（那正是
+    /// D63 明确拒绝 codex 原处方的理由）。
+    /// ⚠️ **不复用 `uniqueSelected`**：它额外要求「唯一」（`matches.count == 1`），而 D64 的判据
+    /// 里没有这一项——「两条同 id」是坏状态（D66 引擎侧会 fail），不该被本函数顺手当成「不存在」
+    /// 从而夺走用户的选中（spec N17 表格「id 非唯一」一行明写：选中原样保留）。故直接判 **membership**。
+    private static func syncSelectionByState(engine: TrainingEngine) {
+        guard let id = engine.drawingSession.selectedDrawingID,
+              let panel = engine.drawingSession.selectedPanel else { return }
+        let visible = RenderStateBuilder.visibleDrawings(
+            engine: engine, panel: panel, tick: engine.tick.globalTickIndex)
+        if !visible.contains(where: { $0.id == id }) { engine.drawingSession.clearSelection() }
+    }
+
+    /// 改选中线的样式。执行顺序（D65 明写，不得调换）：
+    ///   ① D65 当前几何门（**在写入这一刻现算**）→ ② 仅当 `lineSubType` 真的变了才跑 D58 候选预检
+    ///   → ③ 才调引擎（引擎自己再把 viewport 无关的六道门跑一遍）。
+    @discardableResult
+    static func applyStyle(_ style: DrawingDefaultStyle, engine: TrainingEngine) -> Bool {
+        defer { syncSelectionByState(engine: engine) }
+        guard let id = engine.drawingSession.selectedDrawingID,
+              let panel = engine.drawingSession.selectedPanel,
+              let old = uniqueSelected(engine: engine) else { return false }
+        guard canEditStyle(engine: engine) else { return false }                       // ①
+        if style.lineSubType != old.lineSubType {                                      // ②
+            // 候选对象**必须**用 `withStyle` 造（语义单点 D59），不许自己拼一个 DrawingObject。
+            guard let candidate = old.withStyle(style),
+                  let mapper = engine.drawingSession.viewportMapper(for: panel),
+                  HorizontalLineTool.visibleGeometry(for: candidate, mapper: mapper) != nil
+            else { return false }
+        }
+        return engine.updateDrawingStyle(id: id, style: style)                         // ③
+    }
+
+    /// 删除选中线。**唯一合法调用点是确认框「删除」按钮的 action**——几何必须在**确认那一刻**
+    /// 重算（`canDelete` 内部现算），只在点 🗑 那一刻判是时序 bug（D65 R13-F1 / N19e）。
+    @discardableResult
+    static func deleteSelected(engine: TrainingEngine) -> Bool {
+        defer { syncSelectionByState(engine: engine) }
+        guard let id = engine.drawingSession.selectedDrawingID else { return false }
+        guard canDelete(engine: engine) else { return false }
+        return engine.deleteDrawing(id: id)
+    }
 }
