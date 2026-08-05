@@ -88,4 +88,62 @@ struct DrawingEditRouterTests {
         #expect(DrawingEditRouter.selectionGeometryVisible(engine: e2) == false,
                 "取错面板的 mapper 会让下面板的线用上面板的坐标系判可见性")
     }
+
+    // MARK: - Fix round 1（评审变异实验挖出：uniqueSelected 的 visibleDrawings 结构性过滤零测试覆盖）
+
+    /// codex/评审把 `uniqueSelected` 改成绕过 `visibleDrawings`、直接 `engine.drawings.first(where:)`
+    /// 后跑全量 1762 个测试**一条没红**——因为此前三条测试的 fixture 全构造成"选中的线确实在
+    /// `visibleDrawings` 里"。本条补「渐显未到（revealTick > tick）」这个结构性不可见形状：
+    /// 选中本身不看 revealTick（`setSelection` 只检查 mode/id 非空），mapper 也已发布、价格在几何范围内
+    /// ——如果只看几何，这条线"应该"可见；但它还没被渐显揭示，`uniqueSelected` 必须判它不存在。
+    @Test("D40 结构性过滤：选中一条**渐显未到**（revealTick > tick）的线 → 即使几何/mapper 都齐全也恒 false")
+    func geometryFalseWhenSelectionNotYetRevealed() {
+        let e = TrainingEngine.preview()
+        // 不传 revealTick → 用 makeStyledHLine 默认值 7；e.tick.globalTickIndex 恒 0（TrainingEngine.preview() 实测）
+        // → revealTick(7) > tick(0)，这条线尚未被渐显揭示。
+        #expect(e.appendDrawing(makeStyledHLine(id: "R", period: e.upperPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        e.toggleDrawingMode()
+        e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "R", panel: .upper)          // setSelection 不查 revealTick，能设上
+        e.drawingSession.setViewportMapper(mapper(), panel: .upper)    // 几何门也齐全（价格 50 在 [0,100] 内）
+
+        // 前提自足：先证明 fixture 真的构造出了"结构性不可见"——这条线确实不在 visibleDrawings 里，
+        // 不是因为别的原因（比如 id 打错）巧合地判成 false。
+        let visible = RenderStateBuilder.visibleDrawings(engine: e, panel: .upper, tick: e.tick.globalTickIndex)
+        #expect(!visible.contains { $0.id == "R" },
+                "fixture 没构造出「渐显未到」这个场景——revealTick/tick 组合不对，下面的 false 断言可能是巧合")
+
+        #expect(DrawingEditRouter.selectionGeometryVisible(engine: e) == false,
+                "渐显未到的线不算存在，几何/mapper 再齐全也不许判可见——这是 D40 结构性过滤该挡住的场景")
+    }
+
+    /// 补第二种结构性不可见形状：线的 period 归属**另一个**面板（`belongsToPanel` 判 false），
+    /// 但选中二元组（陈旧地）记在本面板——模拟"一条线随切周期迁到另一面板，选中态没跟着清"那类漂移。
+    @Test("D40 结构性过滤：选中态记的 id 归属**另一个面板**（belongsToPanel 判 false）→ 即使 revealTick/mapper 都齐全也恒 false")
+    func geometryFalseWhenSelectionBelongsToOtherPanel() {
+        let e = TrainingEngine.preview()
+        // 前提：preview() 两面板周期不同，否则 belongsToPanel 会走「同周期 fail-safe」分支（按 panelPosition
+        // 破平局），测的就不是「period 归属判 false」这条路径，而是另一回事。
+        #expect(e.upperPanel.period != e.lowerPanel.period,
+                "前提不成立：preview() 两面板同周期了，belongsToPanel 会走 fail-safe 分支，本测试测不到目标路径")
+
+        // 线的 period 绑 lowerPanel、panelPosition 也标 1（真实归属下面板），revealTick:0 排除渐显因素干扰。
+        #expect(e.appendDrawing(makeStyledHLine(id: "D", panelPosition: 1, revealTick: 0,
+                                                period: e.lowerPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        e.toggleDrawingMode()
+        e.drawingSession.setMode(.select)
+        // 陈旧/错位的二元组：selectedPanel 记的是 .upper，但这条线的 period 归属 lower。
+        e.drawingSession.setSelection(id: "D", panel: .upper)
+        e.drawingSession.setViewportMapper(mapper(), panel: .upper)    // upper 面板 mapper 齐全
+
+        // 前提自足：这条线确实不在 upper 面板的 visibleDrawings 里（belongsToPanel 把它挡在了 upper 之外）。
+        let visibleUpper = RenderStateBuilder.visibleDrawings(engine: e, panel: .upper, tick: e.tick.globalTickIndex)
+        #expect(!visibleUpper.contains { $0.id == "D" },
+                "fixture 没构造出「归属另一面板」这个场景——belongsToPanel 没把它挡在 upper 之外，下面的 false 断言可能是巧合")
+
+        #expect(DrawingEditRouter.selectionGeometryVisible(engine: e) == false,
+                "选中态记的面板与线实际归属的面板对不上——这条线在选中面板看不见，不许判可见")
+    }
 }
