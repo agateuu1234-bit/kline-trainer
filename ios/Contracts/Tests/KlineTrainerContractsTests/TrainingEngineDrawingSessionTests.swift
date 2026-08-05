@@ -930,6 +930,9 @@ struct TrainingEngineDrawingSessionTests {
         // （目录 + 文件名都钉死），才真的只放行引擎自身这一个文件。
         #expect(mentions.allSatisfy { $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") },
                 "updateDrawingStyle 被引擎以外的文件提到（含方法引用）：\(mentions)")
+        // PR-4：白名单文件**内部**的方法 vend（`{ updateDrawingStyle }`）能绕过上面两层
+        // （不出现调用 pattern + 文件本身在白名单里）→ 第三层按「裸标识符」钉死。
+        try expectIdentifierNeverVended("updateDrawingStyle", inFiles: mentions)
     }
 
     // MARK: 切片2 Task 5（D51/D60/D66）：deleteDrawing(id:)
@@ -1080,5 +1083,6 @@ struct TrainingEngineDrawingSessionTests {
         #expect(mentions.allSatisfy {
             $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") || $0.hasSuffix("/Drawing/DrawingToolManager.swift")
         }, "deleteDrawing 被白名单以外的文件提到（含方法引用）：\(mentions)")
+        try expectIdentifierNeverVended("deleteDrawing", inFiles: mentions)
     }
 }
