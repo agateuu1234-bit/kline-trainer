@@ -201,6 +201,15 @@ struct SourceGuardScannerTests {
         // ③ 边界不得把两个独立 token 粘成一个长标识符（①② 必须看紧邻字符）
         #expect(bareIdentifierReferences(inCode: "let x = deleteDrawing Foo", identifier: "deleteDrawing") == 1)
         #expect(bareIdentifierReferences(inCode: "deleteDrawingForTesting()", identifier: "deleteDrawing") == 0)
+
+        // ④ 判据①：以目标标识符**结尾**的更长标识符不得被计成 vend（删掉 check① 本条即红——
+        //    fix round 1 前该判据在 g/g3 里零判别力，评审变异实验实证：删掉 check① 上面 6 条断言一个都不红）。
+        //    ⚠️ 第二条：`confirmDeleteDrawing()`（评审最初建议的带括号形态）已用变异脚本验过**没有判别力**——
+        //    去掉 check① 后它仍判 0，因为末尾 `(` 让 check③ 独立把它挡下来，check① 从未被真正运行到；
+        //    去掉尾部 `()`（本条形态）后末尾变成"匹配后无后继字符" → 走 fail-closed 的 `guard let a = after`
+        //    分支，check① 才是唯一能挡住它的判据，去掉 check① 会真的从 0 变 1。
+        #expect(bareIdentifierReferences(inCode: "let f = xdeleteDrawing", identifier: "deleteDrawing") == 0)
+        #expect(bareIdentifierReferences(inCode: "confirmDeleteDrawing", identifier: "DeleteDrawing") == 0)
     }
 
     @Test("守卫自检 g2：`codeTextPreservingBoundaries` 与 `squeezedText` 是同一个词法器，只差空白处理")
