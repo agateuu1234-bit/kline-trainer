@@ -537,4 +537,61 @@ struct DrawingEditRouterTests {
         #expect(DrawingEditRouter.deleteSelected(engine: e) == false)
         #expect(e.drawings.count == 1)
     }
+
+    // MARK: - PR-4 Task6 fix round 1（评审变异实验挖出：D49/N18d「看得见、改不动」这一半从未被验证过）
+    //
+    // 评审把 `DrawingEditRouter.panelStyle` 改成「`styleControlsEnabled` 为 false 时回退返回
+    // `session.defaultStyle`」（模拟"选中一条 locked/未来数据/看不见的线时，面板悄悄显示默认样式而不是
+    // 真实样式"）——全量 1795 个测试**零条变红**。既有的 `geometricallyInvisibleStaysStructurallyPresent`
+    // 只覆盖了「observable 提示是 stale true」这一种置灰成因；`futureFieldLineDisablesEditOnly` 断言了
+    // `styleControlsEnabled == false` 就收尾，从没回头看 `panelStyle` 在这条路径下到底返回什么。
+    // 覆盖两种不同成因的置灰（locked / 未来顶层字段），防止本仓踩过的「同一族只测一半」。
+    //
+    // ⚠️ 两个 fixture 的真实样式字段（`makeStyledHLine`/`engineWithFutureFieldLine` 的 raw JSON）都恰好
+    // 是 `thickness:1/colorToken:.orange`——与 `DrawingDefaultStyle()` 的默认值**完全相同**。若不处理，
+    // 「回显真实样式」与「悄悄回退成默认」这两种实现在断言上无法区分（断言会恒真）。故两条测试都显式把
+    // `session.defaultStyle` 改成一组明显不同的值（`thickness:5/colorToken:.blue`），再断言 `panelStyle`
+    // 返回的是线的真实值（1/.orange），不是刚设的新默认（5/.blue）。
+
+    @Test("D49/N18d fix round 1（评审挖出的假覆盖）：locked 线灰着但仍回显真实样式，不悄悄回退成默认")
+    func lockedLineStillShowsRealStyleWhileDisabled() {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeStyledHLine(id: "L", thickness: 1, colorToken: .orange, locked: true,
+                                                revealTick: 0, period: e.upperPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        e.toggleDrawingMode(); e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "L", panel: .upper)
+        e.drawingSession.setViewportMapper(mapper(), panel: .upper)
+        // 默认改成与线的真实样式明显不同的值——否则下面两条断言测不出「有没有悄悄回退成默认」。
+        var distinctDefault = DrawingDefaultStyle()
+        distinctDefault.thickness = 5; distinctDefault.colorToken = .blue
+        e.drawingSession.setDefaultStyle(distinctDefault)
+
+        // 前提自足：确实处在置灰态（本条测的是这条路径下 panelStyle 的行为，不是 styleControlsEnabled 本身）
+        #expect(DrawingEditRouter.styleControlsEnabled(engine: e) == false,
+                "fixture 前提不成立：locked 线本该置灰，下面的断言测不到「灰着但仍回显」这个场景")
+
+        // 结论：panelStyle 仍回显这条线的真实样式（1/.orange），不是刚设的默认（5/.blue）
+        let shown = DrawingEditRouter.panelStyle(engine: e)
+        #expect(shown.thickness == 1, "灰态下面板仍应显示这条线的真实粗细，而不是悄悄回退成默认")
+        #expect(shown.colorToken == .orange, "灰态下面板仍应显示这条线的真实颜色，而不是悄悄回退成默认")
+    }
+
+    @Test("D49/N18d fix round 1（评审挖出的假覆盖）：未来顶层字段线灰着但仍回显真实样式，不悄悄回退成默认")
+    func futureFieldLineStillShowsRealStyleWhileDisabled() throws {
+        let e = try engineWithFutureFieldLine(id: "X")
+        e.drawingSession.setViewportMapper(mapper(), panel: .upper)
+        // engineWithFutureFieldLine 的 raw JSON 实际样式是 thickness:1/colorToken:"orange"，与
+        // DrawingDefaultStyle() 的默认值恰好相同——同上，先把默认改成明显不同的值。
+        var distinctDefault = DrawingDefaultStyle()
+        distinctDefault.thickness = 5; distinctDefault.colorToken = .blue
+        e.drawingSession.setDefaultStyle(distinctDefault)
+
+        #expect(DrawingEditRouter.styleControlsEnabled(engine: e) == false,
+                "fixture 前提不成立：未来顶层字段线本该置灰，下面的断言测不到「灰着但仍回显」这个场景")
+
+        let shown = DrawingEditRouter.panelStyle(engine: e)
+        #expect(shown.thickness == 1, "灰态下面板仍应显示这条线的真实粗细，而不是悄悄回退成默认")
+        #expect(shown.colorToken == .orange, "灰态下面板仍应显示这条线的真实颜色，而不是悄悄回退成默认")
+    }
 }
