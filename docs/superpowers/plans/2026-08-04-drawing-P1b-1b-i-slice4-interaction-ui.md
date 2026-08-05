@@ -2416,6 +2416,17 @@ tail -40 /tmp/codex-pr4-r1.log
 **如实记录**：我没能构造出**当前可达**的洞（选中只能由 hitTest 产生、而 hitTest 就走 `visibleDrawings`；切周期已在 PR-3 清选中）→ 这是**纵深加固**，不是已证实的 live bug。但修法极小、严格更安全，且正是 spec 自己的纪律：D64 说「能从状态算出来的就不要靠事件传递」——我对**存在性**维度守了，对**结构性**维度没守。
 ⚠️ 本轮修复**差点重犯 R4-F1 的排序错误**两次（`uniqueSelected` 被 Task 2 依赖却定义在 Task 3；两条新测试用了 Task 3 的谓词却被我放进 Task 2）——已各自归位。
 
+## 收口 = **user override（非 approve），如实记录**
+
+codex 计划评审（`branch-diff`，无 `--focus` 窄化）跑了 **R1–R5 共 5 轮、从未 approve**；账本**无 approve 条目**（needs-attention 时脚本拒写，未伪造）。user 2026-08-05 裁决 **停止计划评审、进实施**，approve 目标移到 whole-branch。override 理由：
+
+1. **严重性稳步递减**：R1 会回归用户可见能力（无选中时面板全灰）→ R2 守卫照做必红 + 恒真测试 → R3 门不执行 → R4 排序与扫描器边界 → R5 我**构造不出当前可达路径**的纵深加固。
+2. **9 条 finding 全是真的、全已修**，且每轮都在挖**新机制**——无自相矛盾、无复述已接受决策，不构成 [[feedback_codex_round6_self_contradiction]] 的停止信号；停在这里是**成本判断**，不是「它开始胡说了」。
+3. **纯计划分支在本仓 codex 0 战 3 负、从未 approve**（PR-1 计划 9 轮、PR-2 计划 24 轮后配额耗尽转 Opus、PR-3 计划 7 轮且 R7 是范畴误判「分支没有实现代码」）→ 在此等 approve 历史上无依据。
+4. **后面还有四道关**：逐 task spec+质量双评审 → 三绿门 → whole-branch Opus → whole-branch codex。
+
+---
+
 **这九条都是我计划自身的缺陷，不是实施风险**——与 [[feedback_plan_code_blocks_cause_vacuous_tests]] 同族：F2 尤其典型，我在 PD2 里**写明了**「靠 engine observable 顺带刷新会滞后」，然后在谓词实现里**自己踩了同一个坑**（让 UI 读现算值，连滞后的机会都没有）。识别出陷阱 ≠ 避开陷阱，判据必须写成可被机械检查的形状——故本轮修复同时补了源码守卫，而不只是改代码。
 
 顺带修掉的自查项：初稿 Catalyst 测试 `geometryHintFollowsViewport` **自己调 `setSelectionGeometryVisible` 再断言它变了** = 恒真测试（测的是 setter 而不是 Coordinator），已换成走真实 `rebuildRenderState` 路径并用 `drainMainQueue()` 等 async 跳转（不用固定时长 `sleep` 赌时序）。
