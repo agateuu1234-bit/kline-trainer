@@ -2,13 +2,17 @@
 #if canImport(UIKit)
 import SwiftUI
 
-/// 画线底栏（单行，1a-iii 切片 1）：只①类型键（收/展类型行，Task 2 接 overlay）。②–⑤ 本期不渲染（D19/D24）。
-/// 与 TradeActionBar/ReviewControlBar 沿用同一套按钮构造配方（buttonStyle/controlSize/font/padding），
-/// 但配方相同不保证测出来的高度相同（Catalyst 真机测量证伪：内容量不同，headless sizeThatFits 还会随
-/// 宽度改变、不可靠）——三者改为显式共享同一个 `BottomBarMetrics.height` 固定高度（1a-iii 切片1 Task1
-/// fix），保证训练/画线/复盘切换零跳动，且钉一个数字比钉一套配方更能被测试直接锚定、防未来漂移。
+/// 画线底栏（单行）：①「类型」键（收/展类型行）+ **③🗑 删除键（1b-i PR-4）**。
+/// ②🔒④↩⑤↪ 属 1b-ii，本期**一个占位都不渲染**（母 spec D19 / D24：不 ship 恒灰的未接线按钮）；
+/// 1b-ii 落 🔒 时插在「类型」与 🗑 之间。
+/// 与 TradeActionBar/ReviewControlBar 共享同一个 `BottomBarMetrics.height` 固定高度 → 三者切换零跳动。
 struct DrawingBottomBar: View {
     @Binding var typeRowExpanded: Bool
+    /// D65「删除可用」谓词的结果。**本视图自己不判任何东西**——几何/locked/唯一性/复盘四个分量
+    /// 都在 `DrawingEditRouter.canDelete` 里，视图只负责显示。
+    let deleteEnabled: Bool
+    /// 只负责**弹确认框**，绝不直接删（D65 R13-F1：弹框期间线可能滑出屏，几何必须在确认那一刻重算）。
+    let onDelete: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -21,6 +25,9 @@ struct DrawingBottomBar: View {
                 }
             }
             .accessibilityLabel("类型")
+            Button(action: onDelete) { Image(systemName: "trash") }
+                .accessibilityLabel("删除")
+                .disabled(!deleteEnabled)
             Spacer()
         }
         .buttonStyle(.bordered)

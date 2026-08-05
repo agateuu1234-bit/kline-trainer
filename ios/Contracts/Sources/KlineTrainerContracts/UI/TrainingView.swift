@@ -55,6 +55,7 @@ public struct TrainingView: View {
     @State private var stylePanelPosition: DrawingStylePanelPosition = .bottom
     @State private var toast = ToastState()      // §B.1：latest-wins 调度核（host-tested）
     @State private var confirmingEnd = false
+    @State private var confirmingDeleteDrawing = false      // 1b-i PR-4：🗑 的删除确认框
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
     @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
@@ -202,6 +203,13 @@ public struct TrainingView: View {
             Button("是", role: .destructive) { endManually() }
             Button("否", role: .cancel) {}
         }
+        // 1b-i PR-4（spec §1.1 #5）：删除必须确认。**几何在这里重算**（`deleteSelected` 内部调
+        // `canDelete`）——弹框期间惯性/自动推进可能把线带出屏，只在点 🗑 那一刻判是时序 bug（D65 R13-F1）。
+        .confirmationDialog("确定删除划线？", isPresented: $confirmingDeleteDrawing,
+                            titleVisibility: .visible) {
+            Button("删除", role: .destructive) { DrawingEditRouter.deleteSelected(engine: engine) }
+            Button("取消", role: .cancel) {}
+        }
         // review-redesign Task 13：复盘「结束」仅在有净改动时弹（ReviewEndPrompt.shouldPrompt 门控于 action 内）。
         .confirmationDialog("结束复盘", isPresented: $confirmingEndReview, titleVisibility: .visible) {
             Button("保存") { performReviewEnd(.save) }
@@ -251,7 +259,9 @@ public struct TrainingView: View {
             chartPanels
             if showsTradeButtons {
                 if isDrawingActive {
-                    DrawingBottomBar(typeRowExpanded: $typeRowExpanded)
+                    DrawingBottomBar(typeRowExpanded: $typeRowExpanded,
+                                     deleteEnabled: DrawingEditRouter.deleteButtonEnabled(engine: engine),
+                                     onDelete: { confirmingDeleteDrawing = true })
                 } else {
                     TradeActionBar(
                         content: TradeActionBarContent(price: engine.currentPrice),

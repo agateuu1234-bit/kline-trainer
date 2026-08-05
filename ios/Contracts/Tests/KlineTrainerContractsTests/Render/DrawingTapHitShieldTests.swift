@@ -187,8 +187,9 @@ struct DrawingTapHitShieldTests {
         // ⭐切片2 新增接线：⇅ 切上下半区（Task4 接真行为，Task3 已把按钮与回调放上）。
         #expect(overlay.contains("onTogglePosition"))
         #expect(bottom.contains("accessibilityLabel(\"类型\")"))       // ①类型键（不变）
-        for banned in ["accessibilityLabel(\"锁定\")", "accessibilityLabel(\"删除\")",
-                       "accessibilityLabel(\"撤销\")", "accessibilityLabel(\"前进\")"] {   // ②–⑤ 仍不渲染
+        #expect(bottom.contains("accessibilityLabel(\"删除\")"))       // ③🗑 删除键（1b-i PR-4 接入）
+        for banned in ["accessibilityLabel(\"锁定\")",
+                       "accessibilityLabel(\"撤销\")", "accessibilityLabel(\"前进\")"] {   // ②④⑤ 仍属 1b-ii，不渲染
             #expect(!overlay.contains(banned)); #expect(!bottom.contains(banned))
         }
     }

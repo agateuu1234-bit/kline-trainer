@@ -97,4 +97,47 @@ struct DrawingInteractionUISourceGuardTests {
             ".foregroundStyle(isDrawMode ? Color.accentColor : Color.secondary)")),
             "前景色不是绑 isDrawMode 的三元——被硬编码成常量，图标会恒亮/恒灭")
     }
+
+    @Test("spec §1.1 #1 / PD5：底栏**恰好 2 个按钮**（类型 + ③🗑），②🔒④↩⑤↪ 属 1b-ii 一个都不渲染")
+    func bottomBarHasExactlyTwoKeys() throws {
+        let bar = try code("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
+        // ⚠️ **结构计数，不是「禁止图标名」黑名单**（PD7）：黑名单既漏（新图标名不在表里）
+        //    又误伤注释（本视图注释里正当地写着 `locked` / 🔒 的去向）。恰好 2 个 `Button`
+        //    机械且完备地表达了「只许有这两个控件」。`.buttonStyle` 是小写 b，不参与计数。
+        #expect(bar.components(separatedBy: "Button").count - 1 == 2,
+                "底栏按钮数不是 2 —— 多了就是把 1b-ii 的键提前 ship 了，少了就是 🗑 没接进来")
+        #expect(bar.contains("deleteEnabled"), "🗑 必须由传入谓词置灰，不得自己判")
+        #expect(bar.contains(squeeze(".disabled(!deleteEnabled)")))
+        // 底栏与另两个 swap 底栏共享同一固定高度（既有不变量，别被本次改动碰掉）
+        #expect(bar.contains("BottomBarMetrics.height"))
+        // 用户可见文案 / SF Symbol 名是**字符串字面量** → squeezedSource 会丢弃它们，必须读原始文本，
+        // 且带完整调用语法做锚（裸词会被注释里的同一个词假绿）。
+        let barRaw = try raw("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
+        #expect(barRaw.contains("Text(\"类型\")"))
+        #expect(barRaw.contains("Image(systemName: \"trash\")"), "③🗑 未接入")
+        #expect(barRaw.contains(".accessibilityLabel(\"删除\")"))
+    }
+
+    @Test("spec §1.1 #5 / D65 R13-F1：🗑 只弹确认框；真正的删除在「删除」按钮的 action 里走路由")
+    func deleteGoesThroughConfirmation() throws {
+        // ① 用户可见文案 → 原始文本 + 完整调用语法锚
+        let tvRaw = try raw("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        #expect(tvRaw.contains(".confirmationDialog(\"确定删除划线？\""))
+        #expect(tvRaw.contains("Button(\"删除\", role: .destructive)"))
+        #expect(tvRaw.contains("Button(\"取消\", role: .cancel)"))
+        // ② 结构断言 → 剥注释后判
+        let tv = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        // 🗑 的 action **只置标志位**，绝不直接删（弹框有时间窗，线可能滑走 → N19e）。
+        // 整段精确匹配，不用「取后 160 字符再找子串」那种会被排版/注释推偏的邻接判据。
+        #expect(tv.contains(squeeze("onDelete: { confirmingDeleteDrawing = true }")),
+                "🗑 的 action 必须只置标志位；出现别的语句即可能绕过确认框")
+        // 唯一一处 deleteSelected 在确认框的「删除」按钮里
+        #expect(tv.components(separatedBy: squeeze("DrawingEditRouter.deleteSelected(")).count - 1 == 1,
+                "deleteSelected 在 TrainingView 的**代码**里应恰好出现 1 次")
+        // 底栏置灰必须读 UI 观察量（deleteButtonEnabled），不得改用现算的 canDelete——两者语义在
+        // DrawingEditRouter 里刻意分成两条路径（PD2：几何一现算给写入路由，一读 observable 提示给 UI），
+        // canDelete 的几何分量非 @Observable 依赖，平移到线不可见时 SwiftUI 不会重绘、控件停在旧状态。
+        #expect(tv.contains(squeeze("deleteEnabled: DrawingEditRouter.deleteButtonEnabled(engine: engine)")),
+                "🗑 置灰必须接 deleteButtonEnabled（读提示），不得接 canDelete（现算）")
+    }
 }
