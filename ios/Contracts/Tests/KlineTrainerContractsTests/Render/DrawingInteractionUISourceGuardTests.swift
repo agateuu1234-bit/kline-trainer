@@ -140,4 +140,50 @@ struct DrawingInteractionUISourceGuardTests {
         #expect(tv.contains(squeeze("deleteEnabled: DrawingEditRouter.deleteButtonEnabled(engine: engine)")),
                 "🗑 置灰必须接 deleteButtonEnabled（读提示），不得接 canDelete（现算）")
     }
+
+    @Test("D49：面板样式是**派生值**，视图层既不存副本、也不自己从 DrawingObject 取字段")
+    func panelStyleIsDerivedNotMirrored() throws {
+        // 全部是否定/结构断言 → 一律剥注释后判（本视图的文档注释里正当地提到 `engine.drawings`、
+        // `@State`、`session` 的去向，读原始文本会被自己的注释打红，codex plan-R2-F1）。
+        let params = try code("Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift")
+        #expect(params.contains(squeeze("let style: DrawingDefaultStyle")), "面板必须收调用方算好的派生值")
+        #expect(!params.contains(squeeze("@State private var style")), "不得存第二份样式状态（常驻面板必然漂移）")
+        #expect(!params.contains("session."), "面板的**代码**里不得再直读/直写 session —— 派生与路由都在调用方（D49）")
+        #expect(!params.contains("engine."), "面板的**代码**里更不得直接碰引擎")
+        // 5 个样式字段的逐字段取值只许出现在路由里（判据单点）
+        let router = try code("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift")
+        #expect(router.contains(squeeze("s.lineSubType = d.lineSubType")))
+        for f in ["lineSubType", "lineStyle", "thickness", "colorToken", "labelMode"] {
+            #expect(!params.contains("d.\(f)"), "面板里出现了第二份派生：d.\(f)")
+        }
+    }
+
+    @Test("D49 路由分流 + D65 置灰：有选中写路由、无选中写默认；enabled 来自 UI 版谓词")
+    func panelRoutesBySelection() throws {
+        let tv = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        #expect(tv.contains(squeeze("DrawingEditRouter.panelStyle(engine: engine)")))
+        #expect(tv.contains(squeeze("DrawingEditRouter.styleControlsEnabled(engine: engine)")))
+        #expect(tv.contains(squeeze("DrawingEditRouter.deleteButtonEnabled(engine: engine)")))
+        #expect(tv.contains(squeeze("DrawingEditRouter.applyStyle(")))
+        #expect(tv.contains(squeeze("engine.drawingSession.setDefaultStyle(")))
+        // 分流判据必须是「有没有选中」，不是别的
+        #expect(tv.contains(squeeze("engine.drawingSession.selectedDrawingID != nil")))
+        // applyStyle 在 Sources/ 里恰好 1 处（面板是唯一的样式写入入口，D58 末段：
+        // 不得绕开面板另开编辑入口，否则 (ray,.left) 会变成只在编辑路径上可达的坏组合）
+        let sites = try callSiteCount("DrawingEditRouter.applyStyle(")
+        #expect(sites.count == 1 && sites.first?.count == 1, "applyStyle 调用点应恰好 1 处，实际：\(sites)")
+    }
+
+    // ⭐补（本 Task 自查发现的判别力缺口）：把 `.disabled(!enabled)` 从 DrawingStyleParams 根链删掉，
+    //   跑一次全量 1794 测试——零条变红（`.opacity(enabled ? 1 : 0.4)` 只管视觉降饱和，控件此刻仍能点）。
+    //   D65「改样式可用」若只降饱和不禁交互，灰态下仍能改样式/仍能污染选中线或默认，是真缺陷；
+    //   `.disabled(!on)` 是逐选项那层已有覆盖，但整块面板级的 `.disabled(!enabled)` 此前无人守。
+    @Test("D65：面板整体必须 `.disabled(!enabled)`（灰态禁交互，不止降饱和）")
+    func panelDisablesInteractionNotJustOpacity() throws {
+        let params = try code("Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift")
+        #expect(params.contains(squeeze(".disabled(!enabled)")),
+                "面板根链缺 .disabled(!enabled) —— 置灰时用户仍能点开控件改样式")
+        #expect(params.contains(squeeze(".opacity(enabled ? 1 : 0.4)")),
+                "面板根链缺灰态视觉反馈（.opacity），母 spec §3：灰＝只降饱和，无解释字")
+    }
 }

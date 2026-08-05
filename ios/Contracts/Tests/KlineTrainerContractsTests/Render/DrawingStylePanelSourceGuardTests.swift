@@ -24,13 +24,18 @@ struct DrawingStylePanelSourceGuardTests {
     private let params = "Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift"
     private let panel  = "Sources/KlineTrainerContracts/UI/DrawingStylePanel.swift"
 
-    @Test("五组控件标签齐 + 消费灰态判据 + 写 setDefaultStyle（迁自卡片守卫）")
+    @Test("五组控件标签齐 + 消费灰态判据 + 写入经 onChange 路由（1b-i PR-4）")
     func hasGroupsAndWiring() throws {
+        // ⚠️ 那 5 个组名（"线型"/"线样式"/"粗细"/"颜色"/"标注"）是**用户可见文案**，
+        //    仍留在既有的原始文本 `code` 上判（squeezedSource 会丢弃字符串字面量内容 → 在它上面恒假）。
         let code = try source(params)
         for label in ["线型", "线样式", "粗细", "颜色", "标注"] { #expect(code.contains(label)) }
         #expect(code.contains("DrawingStyleAvailability"))         // 灰态真被消费
         #expect(code.contains("normalizedLabelMode"))              // 切线型真规整 labelMode
-        #expect(code.contains("session.setDefaultStyle"))          // 选择真写单一真相
+        // 写入从 session 改成 onChange（结构断言 → 剥注释）
+        let codeStripped = try squeezedSource(contractsDirForGuards.appendingPathComponent(params).path)
+        #expect(codeStripped.contains("onChange("))     // 选择真经调用方路由（D49，1b-i PR-4）
+        // （删掉 `#expect(code.contains("session.setDefaultStyle"))`——那一处已上移到 TrainingView）
     }
 
     @Test("面板文案洁净：无「不适用」类解释字（母 spec §3 逐字，迁自卡片守卫）")
@@ -82,11 +87,13 @@ struct DrawingStylePanelSourceGuardTests {
         #expect(code.contains("horizontalLabelModeEnabled"))
     }
 
-    @Test("常驻面板读 session.defaultStyle 单一真相（不留本地 @State 镜像，防常驻期漂移）")
-    func readsSessionDirectlyWithoutLocalMirror() throws {
-        let code = try source(params)
-        #expect(code.contains("session.defaultStyle"))
-        #expect(!code.contains("@State private var style"))
+    @Test("常驻面板读**调用方算好的派生样式**单一真相（不留本地 @State 镜像，防常驻期漂移）")
+    func readsDerivedStyleWithoutLocalMirror() throws {
+        // 全是否定/结构断言 → 剥注释（本视图注释里正当地写着「绝不拷成 @State」「不再直读 session」）
+        let code = try squeezedSource(contractsDirForGuards.appendingPathComponent(params).path)
+        #expect(!code.contains(squeeze("private var style: DrawingDefaultStyle")))   // 不许再自己算
+        #expect(code.contains(squeeze("let style: DrawingDefaultStyle")))
+        #expect(!code.contains(squeeze("@State private var style")))
     }
 
     @Test("颜色行收成 7 彩 + 1 线色（切片3，codex 计划-R2-F3 精确判据）：无 allCases/colorEnabled、恰好 1 个 .black、0 个 .white")
@@ -228,8 +235,9 @@ struct DrawingStylePanelSourceGuardTests {
     func mirrorFlipsOnlyTwoBlocks() throws {
         let panel = try source(self.panel)
         #expect(panel.contains("position == .top"))                 // 两态分支存在
-        // 参数区在两个分支里都是**同一个** DrawingStyleParams 调用 → 组内顺序结构上不可能被翻。
-        #expect(panel.contains("DrawingStyleParams(session: session, scheme: scheme)"))
+        // 参数区在两个分支里都是**同一个** DrawingStyleParams 调用 → 组内顺序结构上不可能被翻（结构断言 → 剥注释 + squeeze needle）。
+        let panelCode = try squeezedSource(contractsDirForGuards.appendingPathComponent(self.panel).path)
+        #expect(panelCode.contains(squeeze("DrawingStyleParams(style: style, enabled: styleEnabled,")))
         let overlay = try source("Sources/KlineTrainerContracts/UI/DrawingTypeOverlay.swift")
         #expect(overlay.contains("onTogglePosition"))
         #expect(overlay.contains("Spacer()"))                       // ⇅ 被 Spacer 推到右端

@@ -16,6 +16,9 @@ struct DrawingStylePanel: View {
     let session: DrawingSession
     let scheme: AppColorScheme
     let position: DrawingStylePanelPosition
+    let style: DrawingDefaultStyle          // D49 派生值（调用方算）
+    let styleEnabled: Bool                  // D65「改样式可用」
+    let onStyleChange: (DrawingDefaultStyle) -> Void
     let onToggleMode: () -> Void              // 1b-i PR-4：类型行图标短按（画线态 ⇄ 选择态）
     let onTogglePosition: () -> Void
 
@@ -26,9 +29,11 @@ struct DrawingStylePanel: View {
                 DrawingTypeOverlay(isDrawMode: session.mode == .draw,
                                    onToggleMode: onToggleMode, onTogglePosition: onTogglePosition)
                 Divider()
-                DrawingStyleParams(session: session, scheme: scheme)
+                DrawingStyleParams(style: style, enabled: styleEnabled,
+                                   scheme: scheme, onChange: onStyleChange)
             } else {
-                DrawingStyleParams(session: session, scheme: scheme)
+                DrawingStyleParams(style: style, enabled: styleEnabled,
+                                   scheme: scheme, onChange: onStyleChange)
                 Divider()
                 DrawingTypeOverlay(isDrawMode: session.mode == .draw,
                                    onToggleMode: onToggleMode, onTogglePosition: onTogglePosition)
