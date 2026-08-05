@@ -21,7 +21,8 @@ from qmt_pilot_db import (CONTRACT_VERSION, FIRST_NORMAL_OID, INTENT_TTL_SECONDS
                           _PIN_SEARCH_PATH_SQL as PIN_SEARCH_PATH_SQL,
                           _maintenance_closure_cte, _transaction_statements,
                           _user_objects, assert_cluster_allowed,
-                          read_pilot_meta_rows,
+                          read_pilot_meta_rows, read_pilot_meta,
+                          assert_db_allowed_for_reuse, assert_db_allowed_for_reset,
                           assert_pilot_db_allowed, create_pilot_database,
                           derive_confirm_token, derive_db_name, quote_ident)
 
@@ -122,7 +123,7 @@ class _FakeConn:
     def __init__(self, *, marker_rows=None, user_objects=None, exempt_objects=None,
                  databases=(), meta_rows=None, fail_connect=False, meta_shape=None,
                  seed_lock_held=True, maintenance_shape=None,
-                 registered_dbnames=True):
+                 registered_dbnames=True, meta_table_present=True):
         self.marker_rows = marker_rows if marker_rows is not None else [
             {"purpose": "qmt_pilot_disposable_cluster"}]
         # 【绝对空】现在是**结构性**判据（任何 oid >= 16384 的目录行 = 用户对象），
@@ -134,6 +135,11 @@ class _FakeConn:
         self.meta_rows = meta_rows or []
         # pilot_meta 的**结构**（闸 0− 的第一层判据）。默认合规；
         # 传 dict 可造出「没有唯一约束的伪造表」等形态。
+        # `public.pilot_meta` 这个**关系名**在不在（4a-2 闸 0− 的第 0 层）。
+        # ⚠️ 与 `meta_shape` 分开建模是有意的：spec O1-F6 要求「表不存在 → not_owned」
+        #    与「表在但形状不合规 → pilot_meta_ambiguous」**可区分**，
+        #    而形状 SQL 对这两种情形返回的东西一模一样（EXISTS 全 false）。
+        self.meta_table_present = meta_table_present
         # 按 seed 的 advisory lock 是否被本连接持有（现在是**在活连接上真验**，
         # 不再是调用方传进来的布尔参数——那个可伪造）。
         self.seed_lock_held = seed_lock_held
@@ -150,6 +156,8 @@ class _FakeConn:
             "user_triggers": 0, "user_rules": 0,
             "extra_indexes": 0, "extra_constraints": 0,
             "rls_policies": 0, "rls_enabled": 0, "inherit_edges": 0}
+        # 闸 2 的**业务表**那五组结构断言（4a-2）。默认合规。
+        self.business_structure = dict(_OK_BUSINESS_STRUCTURE)
         # 业务表上的**行为对象**计数（O4-R34-C1）。默认干净。
         self.business_table_behavior = {
             "user_triggers": 0, "user_rules": 0,
@@ -211,6 +219,9 @@ class _FakeConn:
                         else dict(self.business_table_behavior))
             return (None if self.pilot_table_dependents is None
                     else dict(self.pilot_table_dependents))
+        if "klines_ohlc_double" in query:
+            return (None if self.business_structure is None
+                    else dict(self.business_structure))
         if "meta_is_table" in query:
             return None if self.pilot_schema_shape is None else dict(self.pilot_schema_shape)
         if "marker_is_table" in query:
@@ -226,6 +237,8 @@ class _FakeConn:
         if "unnest($1::text[])" in query:
             # 「schema.sql 声明的表都建出来了吗」（O4-R19-C1）。默认全在。
             return len(args[0]) if self.declared_tables_all_present else 0
+        if "to_regclass('public.pilot_meta') IS NOT NULL" in query:
+            return self.meta_table_present
         if "EXISTS (SELECT 1 FROM public.pilot_database_registry" in query:
             if self.registry_write_bound is False:
                 # 登记那句 SELECT 一行都没取到 → 没插行 → 读后验落空（O4-R36-C1）。
@@ -315,6 +328,13 @@ _OK_PILOT_SHAPE = {
     "meta_is_table": True, "meta_key_unique": True, "meta_columns_ok": True,
     "source_is_table": True, "source_columns_ok": True, "source_key_unique": True,
     "pilot_tables_durable": True}
+
+# 闸 2 的业务表五组（4a-2）。同上：唯一权威副本，新增判据时用例自动跟上。
+_OK_BUSINESS_STRUCTURE = {
+    "business_tables_are_tables": True, "klines_ohlc_double": True,
+    "stock_coverage_present": True, "file_path_is_text": True,
+    "content_hash_present": True, "uq_stock_start_present": True,
+    "uq_stock_start_columns_ok": True}
 
 
 def _connector(mapping):
@@ -3256,3 +3276,927 @@ def test_every_guard_table_shape_proof_covers_table_level_durability():
     #    免得下一轮把它当成同族遗漏「顺手补上」而引入锁死。
     assert "relpersistence" not in m._PILOT_META_SHAPE_SQL, \
         "同侪库的归属自证不该要求持久性 —— 那会让崩溃过的同侪库顶死整台集群"
+
+
+# ===========================================================================
+# 4a-2 —— 库级五闸（spec §3 子项③）
+# ===========================================================================
+# 本段以下全部是 4a-2 新增。分节标题对应 spec §4 的闸序列：
+#   零对象例外 → 闸 0− → 闸 0 → 闸 0b →（复用时另跑 闸 1 → 闸 2）
+# ---------------------------------------------------------------------------
+# 闸 0− —— pilot_meta 授权完整性（spec R80-F1，DROP 与复用两条路径都跑）
+# ---------------------------------------------------------------------------
+
+def _full_meta_rows(**over):
+    """**目标库**的 pilot_meta：九键齐全、seed='probe'、state='ready'。
+
+    ⚠️ 与上面那个 `_meta_rows` 是两回事，别合并：那个建模的是**同侪库**在闸 (ii)
+    里的自证（只有阶段 1 的 7 键，因为崩溃残骸也必须放行），本函数建模的是
+    **本次目标库**在闸 0−/0/0b/1/2 里的完整元数据。
+    """
+    base = {"tool": "qmt_pilot", "seed": "probe",
+            "schema_sha256": "b" * 64, "pilot_schema_sha256": "c" * 64,
+            "contract_version": CONTRACT_VERSION, "export_log_sha256": "a" * 64,
+            "output_dir": "/x/y", "created_at": "20260729T101530123456Z",
+            "state": "ready"}
+    base.update(over)
+    return [{"key": k, "value": v} for k, v in base.items() if v is not None]
+
+
+def test_gate_0minus_missing_pilot_meta_table_is_not_owned():
+    """**表不存在 → `not_owned`**，不是 `pilot_meta_ambiguous`（spec O1-F6 收口）。
+
+    ⚠️ 这一条**必须在形状判据之前单独求值**：`_PILOT_META_SHAPE_SQL` 全部走
+    `to_regclass('public.pilot_meta')`，表不存在时它返回 NULL → 三个 EXISTS 全 false
+    → 与「表在但没有唯一约束」**返回完全一样的东西**。照计划片段那样只靠
+    `except Exception` 兜底的实现，在真 PG 上根本走不到 except（形状 SQL 不会抛），
+    于是「别人建的、名字恰好撞上的非空库」会被报成「元数据自相矛盾」。
+    两者给操作者的下一步动作不同（手工删 vs 交给人查），而报告消费者按这个码分诊。
+    """
+    conn = _FakeConn(meta_table_present=False, meta_shape={
+        "key_is_text": False, "value_is_text": False, "key_is_unique": False})
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(read_pilot_meta(conn))
+    assert ei.value.code == "not_owned"
+
+
+def test_gate_0minus_present_but_bad_shape_is_ambiguous_not_not_owned():
+    """反向钉：表**在**但形状不合规 → `pilot_meta_ambiguous`（不能一律报 not_owned）。"""
+    conn = _FakeConn(meta_shape={"key_is_text": True, "value_is_text": True,
+                                 "key_is_unique": False})
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(read_pilot_meta(conn))
+    assert ei.value.code == "pilot_meta_ambiguous"
+
+
+def test_gate_0minus_rejects_duplicate_key_rows():
+    """`key` 上没有唯一约束、塞进**两行 seed** 的库：闸 0/0b 随后读到哪一行
+    取决于实现，而 `--reset` 的破坏性正建立在这张表上（spec R79-F2 + R80-F1）。
+
+    形状判据必须**复用 `read_pilot_meta_rows`**，不得另写一份。
+    """
+    rows = _full_meta_rows() + [{"key": "seed", "value": "other"}]
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(read_pilot_meta(_FakeConn(meta_rows=rows)))
+    assert ei.value.code == "pilot_meta_ambiguous"
+
+
+@pytest.mark.parametrize("missing_key", ["tool", "seed", "export_log_sha256", "output_dir"])
+def test_gate_0minus_rejects_missing_authorization_key(missing_key):
+    """四个**授权键**任一缺失即拒 —— 闸 0/0b 就是从它们里读值的（spec §4 闸 0− 判据）。
+
+    ⚠️ 逐个参数化而不是只测 `output_dir` 一个：本仓「只修被点名的那一处」已重演十一次，
+    单点测试挡不住「判据里只列了三个键」这种写法。
+    """
+    rows = [r for r in _full_meta_rows() if r["key"] != missing_key]
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(read_pilot_meta(_FakeConn(meta_rows=rows)))
+    assert ei.value.code == "pilot_meta_ambiguous"
+    assert missing_key in str(ei.value)
+
+
+def test_gate_0minus_read_failure_is_unreadable_not_not_owned():
+    """连进去了但**读失败** → `target_db_unreadable`，**不是** `not_owned`（spec P1r3-F6）。
+
+    `ALTER DATABASE … ALLOW_CONNECTIONS false` 做维护的库、权限被收走的库都落在这里。
+    报成 `not_owned` 会给出「这不是本工具建的，请手工删」这个**错误且危险**的下一步动作。
+    """
+    class _ReadBoom(_FakeConn):
+        async def fetchval(self, query, *args):
+            if "to_regclass('public.pilot_meta') IS NOT NULL" in query:
+                raise RuntimeError("permission denied for database")
+            return await super().fetchval(query, *args)
+
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(read_pilot_meta(_ReadBoom()))
+    assert ei.value.code == "target_db_unreadable"
+
+
+def test_gate_0minus_pins_search_path_before_reading():
+    """闸 0− 的第一条语句必须是 search_path 钉桩（O4-R17-C1 同族）。
+
+    不钉的话，`to_regclass('public.pilot_meta')` 之外的解析都由调用方的 search_path 说了算。
+    """
+    conn = _FakeConn(meta_rows=_full_meta_rows())
+    asyncio.run(read_pilot_meta(conn))
+    assert conn.ops[0] == PIN_SEARCH_PATH_SQL, \
+        f"闸 0− 的第一条语句是 {conn.ops[0][:60]!r}，不是 search_path 钉桩"
+
+
+def test_gate_0minus_happy_returns_all_nine_keys():
+    got = asyncio.run(read_pilot_meta(_FakeConn(meta_rows=_full_meta_rows())))
+    assert got["tool"] == "qmt_pilot" and got["seed"] == "probe"
+    assert set(got) == set(PILOT_META_KEYS)
+
+
+# ---------------------------------------------------------------------------
+# 闸 0（归属）/ 0b（绑定）/ state / 闸 1（指纹） + --reset-foreign 令牌
+# ---------------------------------------------------------------------------
+
+_REUSE_KW = dict(db_name="kline_pilot_probe", seed="probe",
+                 schema_sha256="b" * 64, pilot_schema_sha256="c" * 64,
+                 export_log_sha256="a" * 64, output_dir="/x/y")
+_RESET_KW = dict(db_name="kline_pilot_probe", seed="probe",
+                 export_log_sha256="a" * 64, output_dir="/x/y",
+                 reset_foreign_token=None)
+
+
+def _target_pair(**over):
+    """(maint_conn, target_conn)：目标库存在、同机、oid 一致、九键齐全。"""
+    target = _FakeConn(meta_rows=_full_meta_rows(**over))
+    maint = _FakeConn(databases=["kline_pilot_probe"])
+    return maint, target
+
+
+def _reuse(maint, target, **over):
+    kw = {**_REUSE_KW, **over}
+    return assert_db_allowed_for_reuse(
+        maint, connect=_connector({"kline_pilot_probe": target}), **kw)
+
+
+def _reset(maint, target, **over):
+    kw = {**_RESET_KW, **over}
+    return assert_db_allowed_for_reset(
+        maint, connect=_connector({"kline_pilot_probe": target}), **kw)
+
+
+# ── 闸 0 归属 ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("over,label", [
+    ({"seed": "someone_else"}, "seed 不符"),
+    ({"tool": "something_else"}, "tool 不符"),
+])
+def test_reuse_rejects_ownership_mismatch(over, label):
+    maint, target = _target_pair(**over)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reuse(maint, target))
+    assert ei.value.code == "not_owned", label
+
+
+def test_reset_ownership_mismatch_never_offers_a_token():
+    """归属不过时**不给令牌**——令牌只解「同 seed 但绑定不同」这一档（spec R3-F1）。
+
+    归属不符意味着这个库根本不是本工具建的，唯一出路是人工删；
+    给出令牌等于把「换个参数就能删掉别人的库」写进错误提示里。
+    """
+    maint, target = _target_pair(tool="something_else")
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reset(maint, target))
+    assert ei.value.code == "not_owned"
+    assert ei.value.confirm_token is None
+
+
+# ── 闸 0b 绑定 ─────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("over,label", [
+    ({"export_log_sha256": "d" * 64}, "源快照不同"),
+    ({"output_dir": "/other"}, "输出目录不同"),
+])
+def test_reuse_rejects_binding_mismatch(over, label):
+    """两个绑定字段**各自**都要比 —— 只比其中一个的实现在另一档上放行（spec R7-F1）。"""
+    maint, target = _target_pair(**over)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reuse(maint, target))
+    assert ei.value.code == "binding_mismatch", label
+
+
+def test_reuse_binding_compares_output_dir_without_trailing_slash():
+    """建库时存的是 `output_dir.rstrip('/')`，复用时传的可能带尾斜杠 —— 必须归一后比。
+
+    不归一的实现会让**同一套设置**的第二次运行被判成「别人的库」。
+    """
+    maint, target = _target_pair()
+    asyncio.run(_reuse(maint, target, output_dir="/x/y/"))     # 不抛 = 放行
+
+
+def test_reset_binding_mismatch_requires_token_and_prints_identity():
+    """`--reset` 绑定不符 → **`reset_foreign_token_required`**（spec §5，不是 binding_mismatch）
+    并打印所绑身份 + 派生令牌（R34-F1）。
+
+    ⚠️ 计划片段这里写的是 `binding_mismatch`，与 spec §5 的错误码表冲突；
+       4c 报告消费者按这个码分诊「换个 seed」与「要令牌才能删」两种完全不同的处置。
+    """
+    maint, target = _target_pair(output_dir="/someone_else")
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reset(maint, target))
+    assert ei.value.code == "reset_foreign_token_required"
+    assert ei.value.confirm_token == derive_confirm_token(
+        "a" * 64, "/someone_else", "20260729T101530123456Z")
+    assert ei.value.identity["output_dir"] == "/someone_else"
+    assert ei.value.identity["created_at"] == "20260729T101530123456Z"
+    # 身份里只放哈希前 12 位（spec §5：打印给操作者看的是身份不是原文）
+    assert ei.value.identity["export_log_sha256"] == "a" * 12
+
+
+def test_reset_wrong_token_refused():
+    maint, target = _target_pair(output_dir="/someone_else")
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reset(maint, target, reset_foreign_token="deadbeefcafe"))
+    assert ei.value.code == "reset_foreign_token_invalid"
+
+
+def test_reset_correct_token_allowed_and_returns_authorized_oid():
+    """令牌逐字相符 → 放行，并**返回被授权的那个实例 oid**。
+
+    返回 oid 不是锦上添花：`DROP DATABASE` 无法带谓词，授权与 DROP 之间同名库可以被
+    删掉又重建。不把授权绑到实例上，`--reset` 会去删一个**从未被授权**的替身。
+    """
+    maint, target = _target_pair(output_dir="/someone_else")
+    token = derive_confirm_token("a" * 64, "/someone_else", "20260729T101530123456Z")
+    got = asyncio.run(_reset(maint, target, reset_foreign_token=token))
+    assert got == "16400"
+
+
+def test_reset_binding_match_returns_authorized_oid_without_token():
+    maint, target = _target_pair()
+    assert asyncio.run(_reset(maint, target)) == "16400"
+
+
+def test_reset_missing_created_at_cannot_derive_token():
+    """绑定不符而 `created_at` 缺失 → 派生不出令牌 → 提示人工删库（spec §4 闸 0− 注）。
+
+    `created_at` **刻意不在**四个授权键里，所以它可以合法缺席；此时唯一诚实的
+    答复是「本工具给不出令牌」，而不是拿空串硬算一个谁都填不对的令牌。
+    """
+    maint, target = _target_pair(output_dir="/someone_else", created_at=None)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reset(maint, target))
+    assert ei.value.code == "confirm_token_underivable"
+
+
+# ── state / 闸 1 指纹 ──────────────────────────────────────────────────
+
+def test_reuse_rejects_initializing_before_fingerprint_gate():
+    """`state='initializing'` 必须在**闸 1（指纹）之前**求值（spec O4-F8）。
+
+    阶段 1 只写 7 个键、`schema_sha256` 尚未定稿，闸 1 会先撞「值不符」并报
+    `schema_fingerprint_mismatch` → **`db_state_initializing` 永远产不出来**，
+    恢复指引也从「用 --reset 重建」错成「schema 漂移」。
+    本用例故意让指纹**也**不符：次序写反时拿到的会是指纹码。
+    """
+    maint, target = _target_pair(state="initializing", schema_sha256="zzz")
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reuse(maint, target))
+    assert ei.value.code == "db_state_initializing", \
+        "initializing 必须先于指纹闸命中，否则报的是 schema_fingerprint_mismatch"
+
+
+@pytest.mark.parametrize("over,label", [
+    ({"schema_sha256": "d" * 64}, "schema.sql 漂移"),
+    ({"pilot_schema_sha256": "d" * 64}, "pilot_schema.sql 漂移（R63-F1）"),
+    ({"contract_version": "9.99"}, "contract_version 漂移"),
+])
+def test_reuse_rejects_fingerprint_drift(over, label):
+    """指纹闸必须**三项都比** —— 只比 schema_sha256 的实现会让另外两项完全失明。"""
+    maint, target = _target_pair(**over)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reuse(maint, target))
+    assert ei.value.code == "schema_fingerprint_mismatch", label
+
+
+def test_reset_allows_fingerprint_drift():
+    """**反向钉（分寸不能过头，spec R49-F2）**：归属与绑定都相符、但 schema_sha256
+    已漂移的库带 `--reset` → **必须放行到 DROP**。
+
+    把指纹/结构闸也塞进 `--reset` 分支的实现会让陈旧 schema 的库连 reset 都做不了，
+    而 reset 是它唯一的出路。
+    """
+    maint, target = _target_pair(schema_sha256="d" * 64)
+    asyncio.run(_reset(maint, target))                          # 不抛 = 放行
+
+
+def test_reset_allows_initializing():
+    """`--reset` 时 initializing 照常走归属闸 + 绑定闸（两者所需的键阶段 1 就已写入），
+    故**能被正常清掉重来**（spec R55-F1）。"""
+    maint, target = _target_pair(state="initializing")
+    asyncio.run(_reset(maint, target))
+
+
+def test_reset_allows_库_with_only_phase1_keys():
+    """崩在 apply schema 之前的库只有阶段 1 的 7 键 —— `--reset` 必须清得掉。
+
+    把「九键齐全」塞进 DROP 路径的实现会在此变红，那正是 R55-F1 的锁死。
+    """
+    maint, target = _target_pair(schema_sha256=None, contract_version=None,
+                                 state="initializing")
+    asyncio.run(_reset(maint, target))
+
+
+# ── 连接的接管与短连接纪律 ──────────────────────────────────────────────
+
+@pytest.mark.parametrize("mutate,code", [
+    (lambda t: setattr(t, "current_database", "kline_pilot_other"), "connection_wrong_database"),
+    (lambda t: setattr(t, "cluster_id", "cluster-B"), "connection_wrong_cluster"),
+    (lambda t: setattr(t, "current_db_oid", "99999"), "connection_wrong_instance"),
+])
+def test_reuse_adopts_target_connection_before_reading(mutate, code):
+    """每条守卫连接先 `adopt_connection`：钉 search_path + 证明**库/集群/实例**（spec O4-R28/29/35）。
+
+    `connect(name)` 返回什么就用什么是一条没被验过的调用方断言 —— DSN 被改写、
+    连接池串了、同名不同机、名字对但已是替身，读到的 pilot_meta 都与本次要判的对象无关。
+    """
+    maint, target = _target_pair()
+    mutate(target)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reuse(maint, target))
+    assert ei.value.code == code
+
+
+@pytest.mark.parametrize("run,label", [
+    (lambda m, t: _reuse(m, t), "复用"),
+    (lambda m, t: _reset(m, t), "reset"),
+])
+def test_gates_close_the_target_connection_on_success(run, label):
+    """读一律短连接：闸跑完必须把目标库连接关掉（spec O1-F2 规定 1）。
+
+    留着不关，随后的 `DROP DATABASE` 会撞 `is being accessed by other users`——
+    而那正是 reset 这条「唯一出路」最常见的失败方式。
+    """
+    maint, target = _target_pair()
+    asyncio.run(run(maint, target))
+    assert target.closed is True, label
+
+
+@pytest.mark.parametrize("run,label", [
+    (lambda m, t: _reuse(m, t), "复用"),
+    (lambda m, t: _reset(m, t), "reset"),
+])
+def test_gates_close_the_target_connection_on_failure(run, label):
+    """闸**拒绝**时同样要关连接 —— 泄漏的会话会把之后的 DROP 顶住（O4-R24-C2 同族）。"""
+    maint, target = _target_pair(tool="something_else")
+    with pytest.raises(PilotDbBoundaryError):
+        asyncio.run(run(maint, target))
+    assert target.closed is True, label
+
+
+@pytest.mark.parametrize("gate,kw,label", [
+    (assert_db_allowed_for_reuse, _REUSE_KW, "复用"),
+    (assert_db_allowed_for_reset, _RESET_KW, "reset"),
+])
+def test_gates_map_connect_failure_to_target_db_unreadable(gate, kw, label):
+    """连不进目标库 → `target_db_unreadable`（spec P1r3-F6）。
+
+    ⚠️ 绝不能 `try/except` 当成「没查到对象」：那会让一个被 DBA
+    `ALTER DATABASE … ALLOW_CONNECTIONS false` 冻结的库被判【绝对空】而直接 DROP。
+    """
+    maint = _FakeConn(databases=["kline_pilot_probe"])
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        # `_connector({})` = 任何库都连不上
+        asyncio.run(gate(maint, connect=_connector({}), **kw))
+    assert ei.value.code == "target_db_unreadable", label
+
+
+@pytest.mark.parametrize("run,label", [
+    (lambda m, t: _reuse(m, t, db_name="kline_pilot_other"), "复用"),
+    (lambda m, t: _reset(m, t, db_name="kline_pilot_other"), "reset"),
+])
+def test_gates_reject_seed_db_name_mismatch(run, label):
+    """`db_name` 必须就是 `derive_db_name(seed)` —— 两者脱钩时闸判的库与 DDL 作用的库不是同一个。"""
+    maint, target = _target_pair()
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(run(maint, target))
+    assert ei.value.code == "seed_db_name_mismatch", label
+
+
+def test_reuse_happy_path_returns_none():
+    maint, target = _target_pair()
+    assert asyncio.run(_reuse(maint, target)) is None
+
+
+# ---------------------------------------------------------------------------
+# 闸 2 —— 结构断言七组（spec §4「结构断言（复用纵深防御副闸）」）
+# ---------------------------------------------------------------------------
+# ⚠️ **这一闸在计划里被整条推给了 L2 脚本**（"由调用方在真库上跑"），而 spec §4 的
+#    闸分工表明写「闸 2 复用时 ✅ 必过」。只放在验收脚本里的话，4c 调
+#    assert_db_allowed_for_reuse 时闸 2 在**生产路径上根本不存在**，
+#    `structure_mismatch` 永远产不出来，而它防的是「指纹对但库被手工 ALTER 过」。
+
+@pytest.mark.parametrize("field", sorted(_OK_BUSINESS_STRUCTURE))
+def test_reuse_rejects_business_structure_drift(field):
+    """业务表五组断言**逐条**都要有判别力（spec §4：OHLC 类型 / stock_coverage /
+    file_path 类型 / content_hash 列 / uq_stock_start 约束 / 三张表真的是表）。
+
+    ⚠️ 逐字段参数化而不是只造一种坏库：只测一条的写法挡不住「判据里只 and 了三项」。
+    """
+    maint, target = _target_pair()
+    target.business_structure = {**_OK_BUSINESS_STRUCTURE, field: False}
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reuse(maint, target))
+    assert ei.value.code == "structure_mismatch"
+    assert field in str(ei.value), "错误信息必须点名是哪一条判据不成立"
+
+
+@pytest.mark.parametrize("field", sorted(_OK_PILOT_SHAPE))
+def test_reuse_rejects_pilot_table_structure_drift(field):
+    """`pilot_stock_source` 与 `pilot_meta` 自身也在闸 2 里（spec R12-F2 + R79-F2）。
+
+    判据**复用 `_PILOT_SCHEMA_SHAPE_SQL`** —— 与建库时证明「apply 完 pilot_schema.sql
+    结构确实对」的是同一份 SQL，不另写第二份（漂移必然发生，漏一条就是静默放行）。
+    """
+    maint, target = _target_pair()
+    target.pilot_schema_shape = {**_OK_PILOT_SHAPE, field: False}
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reuse(maint, target))
+    assert ei.value.code == "structure_mismatch"
+
+
+def test_reuse_rejects_pilot_meta_missing_created_at():
+    """闸 2 要求 `pilot_meta` **九个键一个不缺**（spec §4）。
+
+    ⚠️ 九个键里只有 `created_at` 走得到这一闸：`tool`/`seed` 归闸 0，
+    两个绑定键归闸 0b，`state` 归 state 档，三个指纹键归闸 1。
+    而 `created_at` 正是 `confirm_token` 的原像 —— 它缺席时**没有任何更早的闸**会发现，
+    直到某天要 `--reset-foreign` 才发现令牌派生不出来、库认不回自己。
+    """
+    maint, target = _target_pair(created_at=None)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reuse(maint, target))
+    assert ei.value.code == "structure_mismatch"
+    assert "created_at" in str(ei.value)
+
+
+@pytest.mark.parametrize("break_it,label", [
+    (lambda t: setattr(t, "business_structure",
+                       {**_OK_BUSINESS_STRUCTURE, "uq_stock_start_present": False}), "业务表结构"),
+    (lambda t: setattr(t, "pilot_schema_shape",
+                       {**_OK_PILOT_SHAPE, "source_is_table": False}), "pilot 表结构"),
+])
+def test_reset_does_not_run_the_structure_gate(break_it, label):
+    """**反向钉（分寸不能过头，spec R49-F2 + 闸分工表）**：闸 2 在 `--reset` 时**不跑**。
+
+    结构坏掉的库恰恰最需要 reset；把闸 2 塞进 DROP 路径会让它连 reset 都做不了。
+    """
+    maint, target = _target_pair()
+    break_it(target)
+    asyncio.run(_reset(maint, target))                          # 不抛 = 放行
+
+
+def test_business_structure_fake_covers_every_predicate():
+    """机械守卫：`_BUSINESS_STRUCTURE_SQL` 的判据集合必须与假件的权威副本逐一对应。
+
+    假件漏建模一条判据，对应的用例就在一个 KeyError / 恒真上空转
+    （与既有的 `test_shape_fakes_cover_every_predicate` 同族）。
+    """
+    import re
+    import qmt_pilot_db as m
+    fields = set(re.findall(r"AS ([a-z_]+)", m._BUSINESS_STRUCTURE_SQL))
+    assert fields == set(_OK_BUSINESS_STRUCTURE), (
+        f"SQL 有 {sorted(fields - set(_OK_BUSINESS_STRUCTURE))}，"
+        f"假件多出 {sorted(set(_OK_BUSINESS_STRUCTURE) - fields)}")
+    # spec §4 逐条点名的五组，一条都不许漏（判据挂在 SQL 文本上，改名即变红）
+    for token in ("public.klines", "public.stock_coverage", "public.training_sets",
+                  "'double precision'", "uq_stock_start", "content_hash", "file_path"):
+        assert token in m._BUSINESS_STRUCTURE_SQL, f"闸 2 缺 spec 点名的判据 {token!r}"
+
+
+def test_structure_gate_reuses_the_module_sql_constants():
+    """闸 2 **必须引用模块常量**，不得内联第二份 SQL。
+
+    另写一份必然漂移（本仓已重演十一次），而漏一条就是静默放行。
+
+    ⚠️ 判据走 **AST 的 Name 节点**，不是 `"_PILOT_SCHEMA_SHAPE_SQL" in 源码文本`：
+       后者被**本函数自己的 docstring** 满足 —— 我第一版就是那么写的，
+       变异（把常量换成内联字面量）跑出来**仍然是绿的**。恒真断言的又一种形态。
+    """
+    import ast
+    import inspect
+    import textwrap
+    import qmt_pilot_db as m
+    tree = ast.parse(textwrap.dedent(inspect.getsource(m._assert_structure)))
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    for const in ("_BUSINESS_STRUCTURE_SQL", "_PILOT_SCHEMA_SHAPE_SQL"):
+        assert const in names, f"闸 2 没有引用 {const} —— 第二份判据一定会漂移"
+    inlined = [n.value for n in ast.walk(tree)
+               if isinstance(n, ast.Constant) and isinstance(n.value, str)
+               and "SELECT" in n.value.upper()]
+    assert not inlined, f"闸 2 里有内联 SQL 字面量：{inlined}"
+
+
+# ── codex 4a-2a R5：验锁前必须先钉 search_path / 闸 0− 拒绝 NULL 值 ──────────
+# ⚠️ 这两条都是**我在 R4 修复时自己引入的**：R4 把验锁加在了任何钉桩之前；
+#    而 R4 之后 reset 才会走到 _bound_identity，NULL 值的裸 TypeError 由此暴露。
+
+_SEED_LOCK_PIN_WHY = """`_SEED_LOCK_HELD_SQL` 用的是不限定的 `pg_locks` / `pg_backend_pid()` /
+`hashtext()`。敌意或残留的 search_path 把一个可写 schema 排在 `pg_catalog` 之前时，
+这三个名字都能被遮蔽 → **锁的证明返回 true 而锁并不存在**，破坏性窗口原样打开。
+凡是自己发起这条证明的函数都是 public 的，**不能靠调用方会先跑别的闸**这条纪律来保证钉桩。"""
+
+
+def _assert_pinned_before_lock_proof(maint):
+    lock_at = next(i for i, q in enumerate(maint.ops) if "pg_locks" in q)
+    pins_before = [i for i, q in enumerate(maint.ops)
+                   if q == PIN_SEARCH_PATH_SQL and i < lock_at]
+    assert pins_before, "验锁之前没有钉 search_path"
+
+
+def test_reset_pins_search_path_before_proving_the_seed_lock():
+    """见 `_SEED_LOCK_PIN_WHY`（codex 4a-2a R5-F1 —— 这是我在 R4 加验锁时自己引入的）。"""
+    maint = _FakeConn(databases=["kline_pilot_probe"])
+    target = _FakeConn(meta_rows=_full_meta_rows())
+    asyncio.run(assert_db_allowed_for_reset(
+        maint, connect=_connector({"kline_pilot_probe": target}), **_RESET_KW))
+    _assert_pinned_before_lock_proof(maint)
+
+
+@pytest.mark.parametrize("null_key", ["export_log_sha256", "output_dir", "created_at"])
+def test_gate_0minus_rejects_null_pilot_meta_values(null_key):
+    """`value` 为 NULL 的 pilot_meta 必须在闸 0− 就被拒（codex R5-F2）。
+
+    形状判据只要求 `value` 是 text，没要求 NOT NULL。一张
+    `export_log_sha256 = NULL` 的表过得了归属闸，随后 `_bound_identity` 在
+    `None[:12]` 上抛**裸 TypeError** —— 一次正确的 fail-closed 守卫会被 4c 记成
+    `FAIL_INFRASTRUCTURE`（§9-1w 明令禁止），而 `derive_confirm_token` 也拿不到原像。
+    """
+    rows = [r if r["key"] != null_key else {"key": null_key, "value": None}
+            for r in _full_meta_rows()]
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(read_pilot_meta(_FakeConn(meta_rows=rows)))
+    assert ei.value.code == "pilot_meta_ambiguous"
+    assert null_key in str(ei.value)
+
+
+def test_reset_with_null_binding_value_is_a_boundary_error_not_a_typeerror():
+    """端到端：NULL 绑定值走 `--reset` 时拿到的是 `PilotDbBoundaryError` 而非 TypeError。"""
+    maint = _FakeConn(databases=["kline_pilot_probe"])
+    rows = [r if r["key"] != "export_log_sha256"
+            else {"key": "export_log_sha256", "value": None}
+            for r in _full_meta_rows()]
+    target = _FakeConn(meta_rows=rows)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(assert_db_allowed_for_reset(
+            maint, connect=_connector({"kline_pilot_probe": target}), **_RESET_KW))
+    assert ei.value.code == "pilot_meta_ambiguous"
+
+
+def test_pilot_meta_shape_proof_requires_not_null():
+    """结构性纵深：同一张表的**两份**形状证明必须对 NOT NULL 说法一致。
+
+    `_PILOT_SCHEMA_SHAPE_SQL` 的 meta_columns_ok 早就要求 `attnotnull`，
+    而闸 0− 的 `_PILOT_META_SHAPE_SQL` 此前没有 —— 同族判据分叉正是本仓反复踩的形态。
+    """
+    import qmt_pilot_db as m
+    assert "a.attnotnull" in m._PILOT_META_SHAPE_SQL, \
+        "闸 0− 的形状证明没要求 value NOT NULL"
+    assert "a.attnotnull" in m._PILOT_SCHEMA_SHAPE_SQL
+
+
+# ---------------------------------------------------------------------------
+
+
+# ── codex 4a-2a R1（high）：复用前必须重跑建库时那组**活体**判据 ──────────
+# 原实现的闸 2 只看「列在不在、类型对不对、约束名有没有」。一个 ready 之后被改过的库
+# ——加个触发器、改个默认值、把 uq_stock_start 换成别的列——照样通过复用闸，
+# 随后 B1/B2 在坏 schema 上读写。而在 DB 边界拦下正是这道闸存在的全部理由。
+
+def test_reuse_rejects_business_behavior_objects_added_after_ready():
+    """往 public.klines 上装一个 INSERT 触发器：列/约束/默认值/索引/序列全不变，
+    **活目录指纹一个字都不动**，而此后每一次导入都被它改写。"""
+    maint, target = _target_pair()
+    target.business_table_behavior = {**_FakeConn().business_table_behavior,
+                                      "user_triggers": 1}
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reuse(maint, target))
+    assert ei.value.code == "business_tables_have_dependents"
+
+
+def test_reuse_rejects_pilot_table_dependents_added_after_ready():
+    """pilot 表上多出来的触发器能就地改写 state 与指纹，额外索引/约束能改变
+    来源代次写入的语义。"""
+    maint, target = _target_pair()
+    target.pilot_table_dependents = {**_FakeConn().pilot_table_dependents,
+                                     "extra_indexes": 1}
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reuse(maint, target))
+    assert ei.value.code == "pilot_tables_have_dependents"
+
+
+def test_reuse_rejects_live_catalog_drift():
+    """`ALTER TABLE … ALTER COLUMN status SET DEFAULT 'sent'` 之类不动表名/列名/类型，
+    只有活目录指纹看得见（O4-R33-C1 建库侧已有此钉，复用侧此前是空的）。"""
+    maint, target = _target_pair()
+    target.business_catalog_text = _CANON_CATALOG_TEXT + "\n-- 被人手工改过一笔"
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reuse(maint, target))
+    assert ei.value.code == "business_schema_drift"
+
+
+@pytest.mark.parametrize("break_it,label", [
+    (lambda t: setattr(t, "business_table_behavior",
+                       {**_FakeConn().business_table_behavior, "user_triggers": 1}), "业务表行为对象"),
+    (lambda t: setattr(t, "pilot_table_dependents",
+                       {**_FakeConn().pilot_table_dependents, "extra_indexes": 1}), "pilot 表依赖物"),
+    (lambda t: setattr(t, "business_catalog_text", "drifted"), "活目录指纹漂移"),
+])
+def test_reset_does_not_run_the_live_health_checks(break_it, label):
+    """**反向钉**：这三条同样只属于复用路径。被改坏的库最需要 reset，
+    把它们塞进 DROP 路径会让它连 reset 都做不了（R49-F2）。"""
+    maint, target = _target_pair()
+    break_it(target)
+    asyncio.run(_reset(maint, target))                          # 不抛 = 放行
+
+
+def test_reuse_and_create_share_the_same_live_health_predicates():
+    """机械守卫：建库路径与复用路径必须调**同一组** helper，不得各写一份。
+
+    codex 4a-2a R1 正是从「复用路径根本没跑这几条」来的；
+    两处各写一遍则必然漂移（本仓已重演十一次）。
+    """
+    import ast
+    import inspect
+    import textwrap
+    import qmt_pilot_db as m
+    shared = {"_assert_no_business_behavior_objects",
+              "_assert_no_pilot_table_dependents",
+              "_assert_live_catalog_matches_canonical"}
+    for fn in (m._assert_structure, m.create_pilot_database):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        assert shared <= names, f"{fn.__name__} 少调了 {sorted(shared - names)}"
+    # 反向断言：三个 helper 里的判据 SQL 必须来自模块常量，不得内联第二份
+    for name in shared:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(m, name))))
+        inlined = [n.value for n in ast.walk(tree)
+                   if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                   and "SELECT" in n.value.upper()]
+        assert not inlined, f"{name} 里有内联 SQL：{inlined}"
+
+
+def test_business_structure_covers_every_required_business_table():
+    """业务表清单必须**从 `REQUIRED_BUSINESS_TABLES` 派生**（codex 4a-2a R1：原来漏了
+    `stocks` —— 它是 klines 的外键目标，没了它导入必然失败，而闸照样放行）。"""
+    import qmt_pilot_db as m
+    for t in REQUIRED_BUSINESS_TABLES:
+        assert f"to_regclass('public.{t}')" in m._BUSINESS_STRUCTURE_SQL, \
+            f"闸 2 的业务表清单漏了 {t}"
+    assert f"= {len(REQUIRED_BUSINESS_TABLES)}" in m._BUSINESS_STRUCTURE_SQL, \
+        "计数阈值没跟着 REQUIRED_BUSINESS_TABLES 走"
+
+
+def test_uq_stock_start_predicate_really_compares_the_columns():
+    """机械守卫：`uq_stock_start` 的**列**必须真的被比对。
+
+    ⚠️ host 假件直接喂 `uq_stock_start_columns_ok` 的布尔，SQL 文本在 L1 是**零覆盖**的
+       —— 把列比对换成 `IS NOT NULL`，上面那组参数化用例**全都照样是绿的**（实测）。
+       所以这里改钉 SQL 文本：删掉 uq_stock_start、用同名但不同列重建时，
+       只看名字的判据照样为真，而 already_done 与写入去重整个建立在
+       (stock_code, start_datetime) 这一对列上。
+    """
+    import qmt_pilot_db as m
+    sql = m._BUSINESS_STRUCTURE_SQL
+    assert "k.conkey" in sql, "没有取出约束的列集合"
+    assert "ARRAY['start_datetime', 'stock_code']" in sql, \
+        "没有把约束的列集合与 (stock_code, start_datetime) 逐一比对"
+
+
+# ── codex 4a-2a R2：关不掉自己的探测连接就不许发 DROP 授权 / 活体判据读失败要归一 ──
+
+class _UncloseableConn(_FakeConn):
+    async def close(self):
+        raise RuntimeError("connection reset by peer")
+
+
+def test_reset_refuses_authorization_when_it_cannot_release_its_own_session():
+    """关不掉自己那条探测会话 → **不发 DROP 授权**（codex R2-F1，high）。
+
+    否则随后的 `DROP DATABASE` 必然被它自己顶住，而操作者拿到的诊断是
+    「有别人连着这个库」—— 那个「别人」就是我们自己。
+    """
+    maint = _FakeConn(databases=["kline_pilot_probe"])
+    target = _UncloseableConn(meta_rows=_full_meta_rows())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(assert_db_allowed_for_reset(
+            maint, connect=_connector({"kline_pilot_probe": target}), **_RESET_KW))
+    assert ei.value.code == "target_db_in_use"
+
+
+def test_close_failure_never_masks_the_gate_verdict():
+    """闸**本身**拒绝时，关不掉连接不得顶掉那个结论（Python finally 语义，O4-W2r1 M-2）。
+
+    拿到 target_db_in_use 而不是 not_owned 的话，操作者会去查「谁连着」，
+    而真相是「这个库根本不是本工具建的」。
+    """
+    maint = _FakeConn(databases=["kline_pilot_probe"])
+    target = _UncloseableConn(meta_rows=_full_meta_rows(tool="something_else"))
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(assert_db_allowed_for_reset(
+            maint, connect=_connector({"kline_pilot_probe": target}), **_RESET_KW))
+    assert ei.value.code == "not_owned", "闸的结论被 close 失败顶掉了"
+
+
+def test_reuse_does_not_fail_closed_on_close_failure():
+    """**刻意的不对称**（钉住，免得下一轮当成同族遗漏「顺手补上」）：
+
+    复用路径不 DROP，一条没关掉的会话不构成 DROP 危险；在这里也 fail-closed
+    会让一次本可以正常复用的运行因为一个 close 抖动而失败。
+    「DROP 之前连接数为 0」这条规定管的是**发放销毁授权**的路径。
+    """
+    maint = _FakeConn(databases=["kline_pilot_probe"])
+    target = _UncloseableConn(meta_rows=_full_meta_rows())
+    assert asyncio.run(assert_db_allowed_for_reuse(
+        maint, connect=_connector({"kline_pilot_probe": target}), **_REUSE_KW)) is None
+
+
+@pytest.mark.parametrize("attr,label", [
+    ("business_table_behavior", "业务表行为对象"),
+    ("pilot_table_dependents", "pilot 表依赖物"),
+    ("business_catalog_text", "活目录指纹"),
+])
+def test_live_health_read_failure_is_a_boundary_error_not_a_raw_exception(attr, label):
+    """活体判据读失败 → `target_db_unreadable`，不得裸逃（codex R2-F2）。
+
+    目标库被并发 DROP / 权限变更 / 目录查询失败都会在这里抛。裸异常会被 4c 兜成
+    `FAIL_INFRASTRUCTURE`，而 §9-1w 明令禁止把一次成功的 fail-closed 守卫记成环境故障。
+    """
+    maint, target = _target_pair()
+    boom = RuntimeError("terminating connection due to administrator command")
+
+    if attr == "business_catalog_text":
+        class _Boom(_FakeConn):
+            async def fetchval(self, query, *args):
+                if "--constraints--" in query:
+                    raise boom
+                return await super().fetchval(query, *args)
+    else:
+        want = "public.stocks" if attr == "business_table_behavior" else "pilot_meta"
+
+        class _Boom(_FakeConn):
+            async def fetchrow(self, query, *args):
+                if "user_triggers" in query and want in query:
+                    raise boom
+                return await super().fetchrow(query, *args)
+
+    target = _Boom(meta_rows=_full_meta_rows())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reuse(maint, target))
+    assert ei.value.code == "target_db_unreadable", label
+
+
+# ── codex 4a-2a R3-F2：确认令牌只走 confirm_token，绝不进 message / identity ──
+
+@pytest.mark.parametrize("token_arg,code", [
+    (None, "reset_foreign_token_required"),
+    ("deadbeefcafe", "reset_foreign_token_invalid"),
+])
+def test_confirm_token_never_leaks_into_report_facing_strings(token_arg, code):
+    """令牌只走 `confirm_token` 这条专用通道（spec §9-1w + PilotDbBoundaryError 契约）。
+
+    把它写进 message 的话，任何把 `str(exc)` 或 `identity` 序列化进报告/日志的调用方
+    都会漏出去 —— 于是 wrapper 可以「读报告取令牌再重跑」，
+    **「知情同意」退化成两步自动化**，而那正是这个令牌被引入来防的事。
+    """
+    import json
+    maint, target = _target_pair(output_dir="/someone_else")
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reset(maint, target, reset_foreign_token=token_arg))
+    exc = ei.value
+    assert exc.code == code
+    token = derive_confirm_token("a" * 64, "/someone_else", "20260729T101530123456Z")
+    assert exc.confirm_token == token, "专用通道里必须有令牌，否则操作者拿不到它"
+    assert token not in str(exc), "令牌漏进了 message"
+    assert token not in json.dumps(exc.identity, ensure_ascii=False), "令牌漏进了 identity"
+
+
+# ── codex 4a-2a R3-F1（user 拍板）：闸 0r —— 复用路径要外部归属凭据 ────────
+
+def test_reuse_requires_an_external_registry_proof():
+    """闸 0 读的全是「被判对象自己写的字」。同侪库（闸 ii）早就因此要求两个独立事实，
+    而目标库这一侧一直只有自证 —— 一个抄来 pilot_meta、绑定又恰好相符的同名外来库
+    会被当成本工具建的库拿去装真数据。"""
+    maint = _FakeConn(databases=["kline_pilot_probe"], registered_dbnames=set())
+    target = _FakeConn(meta_rows=_full_meta_rows())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(assert_db_allowed_for_reuse(
+            maint, connect=_connector({"kline_pilot_probe": target}), **_REUSE_KW))
+    assert ei.value.code == "registry_proof_missing"
+
+
+def test_reuse_registry_proof_read_failure_is_fail_closed():
+    """读不到登记 = 证明不了归属 = 拒绝复用（绝不 try/except 当成「没查到」）。"""
+    class _RegistryBoom(_FakeConn):
+        async def fetchval(self, query, *args):
+            if "pilot_database_registry" in query:
+                raise RuntimeError("maintenance db unreachable")
+            return await super().fetchval(query, *args)
+
+    maint = _RegistryBoom(databases=["kline_pilot_probe"])
+    target = _FakeConn(meta_rows=_full_meta_rows())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(assert_db_allowed_for_reuse(
+            maint, connect=_connector({"kline_pilot_probe": target}), **_REUSE_KW))
+    assert ei.value.code == "registry_proof_missing"
+
+
+def test_reset_does_not_require_the_registry_proof():
+    """**刻意的不对称，钉住它**（user 2026-08-05 拍板）：
+
+    登记表在维护库里、本工具从不清它。一旦维护库被重新初始化，若 `--reset` 也要这条
+    凭据，非空 pilot 库就**再也清不掉**了 —— 那正是 spec 花整轮移除的 R55-F1 锁死。
+    复用被拒时逃生口仍在：`--reset` 重建。
+    下一轮若有人「顺手把 registry 闸也补到 reset 上」，这颗钉子当场变红。
+    """
+    maint = _FakeConn(databases=["kline_pilot_probe"], registered_dbnames=set())
+    target = _FakeConn(meta_rows=_full_meta_rows())
+    assert asyncio.run(assert_db_allowed_for_reset(
+        maint, connect=_connector({"kline_pilot_probe": target}), **_RESET_KW)) == "16400"
+
+
+def test_registry_proof_is_instance_bound_not_name_bound():
+    """机械守卫：这条外部凭据必须走 `_REGISTRY_HAS_SQL`（它 JOIN 了 pg_database.oid）。
+
+    只按名字查的话，「我们建过这个名字、库被删了、别人用同名重建」这一档
+    仍然过得了 —— 陈旧的名字凭据会为一个全新的、不是我们建的库背书。
+    ⚠️ 判据走 AST 的 Name 节点，不看源码文本：注释里提到常量名会让它恒真。
+    """
+    import ast
+    import inspect
+    import textwrap
+    import qmt_pilot_db as m
+    tree = ast.parse(textwrap.dedent(inspect.getsource(m.assert_db_allowed_for_reuse)))
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert "_REGISTRY_HAS_SQL" in names, "复用路径没有走绑实例的那条登记查询"
+    assert "d.oid = r.db_oid" in m._REGISTRY_HAS_SQL, "登记查询没有绑实例"
+    # reset 路径**不许**引用它（不对称是有意的）
+    rtree = ast.parse(textwrap.dedent(inspect.getsource(m.assert_db_allowed_for_reset)))
+    rnames = {n.id for n in ast.walk(rtree) if isinstance(n, ast.Name)}
+    assert "_REGISTRY_HAS_SQL" not in rnames, \
+        "reset 路径引用了登记凭据 —— 维护库一丢，非空库就再也清不掉（R55-F1 锁死）"
+
+
+# ── codex 4a-2a R4-F1：发放 DROP 授权之前必须证明按 seed 的锁真被持有 ──────
+
+def test_reset_refuses_authorization_without_the_seed_lock():
+    """建库 / DROP / 零对象例外三处都验了这把锁，唯独发放 DROP 授权这条路径没验。
+
+    接线失误会让一次运行先 DROP 掉既有库、再在重建时撞 seed_lock_not_held ——
+    库没了而重建没做；同 seed 的两次运行也能一起挤进这段破坏性窗口。
+    """
+    maint = _FakeConn(databases=["kline_pilot_probe"], seed_lock_held=False)
+    target = _FakeConn(meta_rows=_full_meta_rows())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(assert_db_allowed_for_reset(
+            maint, connect=_connector({"kline_pilot_probe": target}), **_RESET_KW))
+    assert ei.value.code == "seed_lock_not_held"
+
+
+def test_reset_checks_the_seed_lock_before_opening_the_target():
+    """锁没拿到就**一条连接都别开** —— 探测连接本身就会把随后的 DROP 顶住。"""
+    maint = _FakeConn(databases=["kline_pilot_probe"], seed_lock_held=False)
+    target = _FakeConn(meta_rows=_full_meta_rows())
+    with pytest.raises(PilotDbBoundaryError):
+        asyncio.run(assert_db_allowed_for_reset(
+            maint, connect=_connector({"kline_pilot_probe": target}), **_RESET_KW))
+    assert target.ops == [], "锁未持有时不该对目标库发出任何查询"
+
+
+def test_reuse_does_not_require_the_seed_lock():
+    """**刻意的不对称**：复用不做任何破坏性动作，要求互斥锁只会让并发的只读复用互相挡。
+
+    这条锁的规定管的是**破坏性窗口**（建库 / DROP / 零对象例外），不是读。
+    """
+    maint = _FakeConn(databases=["kline_pilot_probe"], seed_lock_held=False)
+    target = _FakeConn(meta_rows=_full_meta_rows())
+    assert asyncio.run(assert_db_allowed_for_reuse(
+        maint, connect=_connector({"kline_pilot_probe": target}), **_REUSE_KW)) is None
+
+
+# ── codex 4a-2a R6-F2：每个 public 入口都要自己强制集群闸 ────────────────
+# 它证明的是「这台集群是给 pilot 用的一次性环境」。没有它，一次接线失误就能在
+# **生产集群**上批准复用/销毁，然后往里灌几百只股 —— spec §1 列的风险 ①。
+
+@pytest.mark.parametrize("gate,kw,label", [
+    (assert_db_allowed_for_reuse, _REUSE_KW, "复用"),
+    (assert_db_allowed_for_reset, _RESET_KW, "reset"),
+])
+@pytest.mark.parametrize("break_cluster,code,why", [
+    (lambda m: setattr(m, "marker_rows", []), "no_marker", "集群没有 pilot 标记"),
+    (lambda m: setattr(m, "databases", ["payments_prod", "kline_pilot_probe"]),
+     "unrelated_database", "集群里有无关库"),
+    (lambda m: setattr(m, "exempt_objects", [("pg_class", 9)]),
+     "maintenance_db_not_empty", "维护库除专用表外非空"),
+])
+def test_public_gates_enforce_the_cluster_boundary_themselves(
+        gate, kw, label, break_cluster, code, why):
+    """三种集群闸失败都必须挡住这两个 public 入口（codex R6-F2）。
+
+    `create_pilot_database` 早就为同一条理由把集群闸下沉进函数里（O4-R5-C2）——
+    这两个新入口此前只有 seed/名字检查加目标库读取。
+    """
+    maint = _FakeConn(databases=["kline_pilot_probe"])
+    target = _FakeConn(meta_rows=_full_meta_rows())
+    break_cluster(maint)
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(gate(maint, connect=_connector({"kline_pilot_probe": target}), **kw))
+    assert ei.value.code == code, f"{label} / {why}"
+
+
+@pytest.mark.parametrize("gate,kw,label", [
+    (assert_db_allowed_for_reuse, _REUSE_KW, "复用"),
+    (assert_db_allowed_for_reset, _RESET_KW, "reset"),
+])
+def test_public_gates_run_the_cluster_boundary_before_touching_the_target(gate, kw, label):
+    """集群闸没过 → 目标库上一条查询都不许发（探测连接本身就会顶住随后的 DROP）。"""
+    maint = _FakeConn(databases=["kline_pilot_probe"], marker_rows=[])
+    target = _FakeConn(meta_rows=_full_meta_rows())
+    with pytest.raises(PilotClusterBoundaryError):
+        asyncio.run(gate(maint, connect=_connector({"kline_pilot_probe": target}), **kw))
+    assert target.ops == [], f"{label}：集群闸未过时不该对目标库发出任何查询"

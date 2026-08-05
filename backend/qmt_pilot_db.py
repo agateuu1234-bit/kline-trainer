@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sys
+from typing import NamedTuple
 
 # CLI 只收 --seed；库名恒为 kline_pilot_{seed}，用户无法传入任意库名。
 SEED_RE = re.compile(r"[a-z0-9_]{1,32}")
@@ -82,6 +83,39 @@ _PIN_SEARCH_PATH_SQL = "SET search_path = public, pg_temp"
 async def pin_search_path(conn) -> None:
     """把连接的 search_path 钉到 `pg_catalog, public`。守卫用到的每条连接都要过一遍。"""
     await conn.execute(_PIN_SEARCH_PATH_SQL)
+
+
+async def _close_quietly(conn, label: str) -> bool:
+    """关掉一条探测连接；`close()` 自身抛出**不得替换掉刚判出来的闸结论**。
+
+    **返回是否真的关掉了** —— 调用方据此决定要不要 fail-closed（codex 4a-2a R2-F1）。
+
+    读一律短连接：DROP 之前本进程对目标库的连接数必须为 0（spec O1-F2 规定 1）。
+    ⚠️ `close()` 在 `finally` 里抛出会按 Python 的 finally 语义**顶掉**原异常，
+       于是一次成功的守卫变成裸异常 → 4c 记成 `FAIL_INFRASTRUCTURE`（O4-W2r1 M-2）。
+       故这里只捕获、不上抛。
+    ⚠️ 但抑制**不等于可以忽略**（O4-W3 M-8 + codex R2-F1）：关不掉意味着本进程还占着
+       目标库的一条会话。**发放 DROP 授权的路径必须据此 fail-closed**，
+       否则随后的 `DROP DATABASE` 会撞 `is being accessed by other users`，
+       而操作者拿到的诊断是「有别人连着」——实际上那个「别人」就是我们自己。
+    """
+    try:
+        await conn.close()
+    except Exception as close_exc:
+        print(f"[qmt_pilot] 警告：关闭 {label!r} 的探测连接失败：{close_exc}",
+              file=sys.stderr)
+        return False
+    return True
+
+
+def _assert_target_released(closed: bool, db_name: str) -> None:
+    """发放 DROP 授权之前，必须证明本模块已经放掉自己对目标库的会话（codex R2-F1）。"""
+    if not closed:
+        raise PilotDbBoundaryError(
+            "target_db_in_use",
+            f"本模块没能关掉自己对 {db_name!r} 的探测连接 —— 在这条会话还活着的时候"
+            f"发放 DROP 授权，随后的 DROP 必然被它自己顶住，而报出来的会是"
+            f"「有别人连着」。拒绝发放授权，请重跑。")
 
 
 _CURRENT_DATABASE_SQL = "SELECT current_database()"
@@ -536,7 +570,12 @@ SELECT
              AND NOT a.attisdropped AND format_type(a.atttypid, NULL) = 'text') AS key_is_text,
   EXISTS (SELECT 1 FROM pg_attribute a
            WHERE a.attrelid = to_regclass('public.pilot_meta') AND a.attname = 'value'
-             AND NOT a.attisdropped AND format_type(a.atttypid, NULL) = 'text') AS value_is_text,
+             AND NOT a.attisdropped AND format_type(a.atttypid, NULL) = 'text'
+             -- ⚠️ NOT NULL 是**结构性纵深**（codex 4a-2a R5-F2）：闸 0− 里那条运行时判据
+             --    只看「读出来的值是不是字符串」，这一条从一开始就不让 NULL 存在。
+             --    `_PILOT_SCHEMA_SHAPE_SQL` 的 meta_columns_ok 早就这么要求了 ——
+             --    同一张表的两份形状证明此前对 NOT NULL 说法不一致。
+             AND a.attnotnull)                                                  AS value_is_text,
   EXISTS (SELECT 1 FROM pg_constraint k
            JOIN pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = k.conkey[1]
           WHERE k.conrelid = to_regclass('public.pilot_meta')
@@ -738,18 +777,10 @@ async def assert_cluster_allowed(maint_conn, *, connect, target_db: str | None) 
                 f"验 {name!r} 的归属时失败（{exc}）→ 无法证明它的归属",
             ) from exc
         finally:
-            # 读一律短连接：DROP 之前本进程对目标库的连接数必须为 0（spec O1-F2）。
-            # ⚠️ `close()` 自身抛出会**替换掉**刚判出来的闸结论（Python 的 finally 语义），
-            #    于是一次成功的守卫又变成裸异常 → 4c 记成 FAIL_INFRASTRUCTURE（O4-W2r1 M-2）。
-            try:
-                await other.close()
-            except Exception as close_exc:
-                # ⚠️ 抑制是为了不让 close 顶掉刚判出来的闸结论，**但不能零信号**（O4-W3 M-8）：
-                #    spec O1-F2 要求「DROP 之前本进程对目标库的连接数必须为 0」，
-                #    静默吞掉「关不掉」会让 4a-2 的 DROP 撞 `database is being accessed
-                #    by other users`，又被兜成 FAIL_INFRASTRUCTURE。
-                print(f"[qmt_pilot] 警告：关闭 {name!r} 的探测连接失败：{close_exc}",
-                      file=sys.stderr)
+            # 读一律短连接 + close 失败不顶掉闸结论（判据与理由见 `_close_quietly`）。
+            # ⚠️ 与 4a-2 的库级闸**共用同一份实现**：同一条判据在两处各写一遍，
+            #    正是本 PR 记录在案的「只修被点名的那一处」——故此处是调用不是内联。
+            await _close_quietly(other, name)
 
     # ── (iii) 维护库自身也是【绝对空】（除【维护库专用表集合】外）────────
     # spec §4：维护库除【维护库专用表集合】及其派生物外必须【绝对空】。
@@ -1409,6 +1440,71 @@ SELECT
 _SET_READY_SQL = "UPDATE public.pilot_meta SET value = 'ready' WHERE key = 'state'"
 
 
+# ── 活体健康检查（**建库后**与**复用前**共用同一份判据，codex 4a-2a R1）──────
+# ⚠️ 规范指纹（CANONICAL_*_SHA256）管的是「递进来的 DDL 字节」，
+#    这三条管的是「库**现在**长什么样」。建库时跑过一次不等于复用时还成立：
+#    apply 之后到下一次复用之间，并发的手 / 残留对象 / 人工 ALTER 都能改它。
+#    只在建库路径跑的话，一个被改过的 ready 库照样通过复用闸，
+#    随后 B1/B2 在坏 schema 上读写 —— 正是本闸存在的理由。
+async def _assert_no_business_behavior_objects(conn, *, phase: str) -> None:
+    """业务表上不许有**行为对象**（触发器/规则/RLS/继承边）。
+
+    它们不动列/约束/默认值/索引，**活目录指纹一个字都不动**，
+    而此后每一次导入都被它们改写。
+    """
+    try:
+        row = await conn.fetchrow(_BUSINESS_TABLE_BEHAVIOR_SQL)
+    except Exception as exc:
+        # ⚠️ 读失败不得裸逃（codex R2-F2）：目标库被并发 DROP / 权限变更 / 目录查询失败
+        #    都会在这里抛，裸异常会被 4c 兜成 FAIL_INFRASTRUCTURE ——
+        #    而 §9-1w 明令禁止把一次成功的 fail-closed 守卫记成环境故障。
+        raise PilotDbBoundaryError(
+            "target_db_unreadable", f"读业务表行为对象判据失败（{exc}）") from exc
+    if row is None or any(v for v in row.values()):
+        raise PilotDbBoundaryError(
+            "business_tables_have_dependents",
+            f"{phase}业务表上出现了行为对象（{dict(row) if row else 'None'}）——"
+            f"触发器/规则会改写此后每一次导入，RLS 会让普通角色读不到该读的行，"
+            f"继承边会让子表的行从父表冒出来。这些都不动列/约束/默认值/索引，指纹看不见。")
+
+
+async def _assert_live_catalog_matches_canonical(conn, *, phase: str) -> None:
+    """活目录指纹必须等于规范快照。表名齐全不代表列/类型/可空/约束/索引没被改。"""
+    try:
+        live = await conn.fetchval(_BUSINESS_CATALOG_FINGERPRINT_SQL)
+    except Exception as exc:
+        raise PilotDbBoundaryError(
+            "target_db_unreadable", f"读活目录指纹失败（{exc}）") from exc
+    live_sha = sha256_of_sql(live or "")
+    if live_sha != CANONICAL_BUSINESS_CATALOG_SHA256:
+        raise PilotDbBoundaryError(
+            "business_schema_drift",
+            f"{phase}活目录指纹是 {live_sha!r}，规范值是 "
+            f"{CANONICAL_BUSINESS_CATALOG_SHA256!r} —— "
+            f"表名齐全不代表列/类型/可空/约束/索引没被改。"
+            f"⚠️ 若刚升级过 PostgreSQL 大版本，这是**渲染差异**而不是漂移："
+            f"请用真 PG 验收脚本的 ㉕ 档重新生成 CANONICAL_BUSINESS_CATALOG_SHA256。")
+
+
+async def _assert_no_pilot_table_dependents(conn, *, phase: str) -> None:
+    """pilot 专用表上不许有本工具之外的依赖物（含主键之外的索引/约束）。"""
+    try:
+        row = await conn.fetchrow(_PILOT_TABLE_DEPENDENTS_SQL)
+    except Exception as exc:
+        # ⚠️ 读失败不得裸逃（codex R2-F2）：目标库被并发 DROP / 权限变更 / 目录查询失败
+        #    都会在这里抛，裸异常会被 4c 兜成 FAIL_INFRASTRUCTURE ——
+        #    而 §9-1w 明令禁止把一次成功的 fail-closed 守卫记成环境故障。
+        raise PilotDbBoundaryError(
+            "target_db_unreadable", f"读pilot 表依赖物判据失败（{exc}）") from exc
+    if row is None or any(v for v in row.values()):
+        raise PilotDbBoundaryError(
+            "pilot_tables_have_dependents",
+            f"{phase}pilot 专用表上出现了本工具之外的依赖物"
+            f"（{dict(row) if row else 'None'}）——触发器/规则能就地改写指纹与 state；"
+            f"额外索引/约束能改变来源代次写入的语义；RLS 能让普通角色读不到该读的行；"
+            f"继承边能让子表的行从父表冒出来。")
+
+
 async def create_pilot_database(
     maint_conn, *, connect, db_name: str, seed: str,
     schema_sql: str, pilot_schema_sql: str,
@@ -1482,11 +1578,9 @@ async def create_pilot_database(
                 f"规范指纹 {_canon!r}。**验收标准不能由调用方提供** —— 四个表名建成空壳、"
                 f"少列、缺约束都能过「表名齐了吗」那一关，故这里直接钉字节。")
 
-    if derive_db_name(seed) != db_name:
-        raise PilotDbBoundaryError(
-            "seed_db_name_mismatch",
-            f"db_name {db_name!r} 不是 seed {seed!r} 派生出来的",
-        )
+    # 建库与库级闸**共用同一份判据**（4a-2 抽出 `_assert_seed_db_name`）：
+    # 两处各写一遍正是本 PR 记录在案的「只修被点名的那一处」。
+    _assert_seed_db_name(db_name, seed)
 
     # ⚠️ **集群闸在这里机器强制，不是注释级前提**（O4-R5-C2）：
     #    此前它只写在 docstring 里，于是任何接线失误都能在**未过集群闸**的情况下
@@ -1664,25 +1758,11 @@ async def create_pilot_database(
                 f"（{_expected_tables}）——不能把这样的库标成 ready。")
         # ⚠️ 上面那条的期望清单来自 `schema_sql` **自己**，是**自证**（O4-R29-C2）。
         #    这条用**外部**清单：不管调用方递进来的是什么 SQL，业务表必须齐。
-        _biz = await target.fetchrow(_BUSINESS_TABLE_BEHAVIOR_SQL)
-        if _biz is None or any(v for v in _biz.values()):
-            raise PilotDbBoundaryError(
-                "business_tables_have_dependents",
-                f"apply 完 schema.sql 之后业务表上出现了行为对象"
-                f"（{dict(_biz) if _biz else 'None'}）——触发器/规则会改写此后每一次导入，"
-                f"RLS 会让普通角色读不到该读的行，继承边会让子表的行从父表冒出来。"
-                f"这些都不动列/约束/默认值/索引，指纹看不见。不能把这样的库标成 ready。")
+        # ⚠️ 与复用闸（闸 2）**共用同一份判据** —— 两处各写一遍就是本 PR 记录在案的
+        #    「只修被点名的那一处」（codex 4a-2a R1 正是从「复用路径没跑这几条」来的）。
+        await _assert_no_business_behavior_objects(target, phase="apply 完 schema.sql 之后")
         # ⚠️ 活目录指纹（O4-R32-C2）：规范指纹管「递进来的字节」，这条管「库现在长什么样」。
-        _live = await target.fetchval(_BUSINESS_CATALOG_FINGERPRINT_SQL)
-        _live_sha = sha256_of_sql(_live or "")
-        if _live_sha != CANONICAL_BUSINESS_CATALOG_SHA256:
-            raise PilotDbBoundaryError(
-                "business_schema_drift",
-                f"apply 完 schema.sql 之后，活目录指纹是 {_live_sha!r}，"
-                f"规范值是 {CANONICAL_BUSINESS_CATALOG_SHA256!r} —— "
-                f"表名齐全不代表列/类型/可空/约束/索引没被改。"
-                f"⚠️ 若刚升级过 PostgreSQL 大版本，这是**渲染差异**而不是漂移："
-                f"请用真 PG 验收脚本的 ㉕ 档重新生成 CANONICAL_BUSINESS_CATALOG_SHA256。")
+        await _assert_live_catalog_matches_canonical(target, phase="apply 完 schema.sql 之后，")
         _required = list(REQUIRED_BUSINESS_TABLES)
         _found_required = await target.fetchval(_tables_exist_sql(_required), _required)
         if _found_required != len(_required):
@@ -1719,15 +1799,7 @@ async def create_pilot_database(
         #    都给出更精确的那个 code —— 换序只是把遮蔽换到另一边（实测两种排序各红两档）。
         #    两道都保留（都 fail-closed、都可达）；重叠的那几档，验收脚本断言的是
         #    **性质**（拒了、没标 ready），而不是具体 code。
-        _deps = await target.fetchrow(_PILOT_TABLE_DEPENDENTS_SQL)
-        if _deps is None or any(v for v in _deps.values()):
-            raise PilotDbBoundaryError(
-                "pilot_tables_have_dependents",
-                f"apply 完 schema.sql 之后 pilot 专用表上出现了本工具之外的依赖物"
-                f"（{dict(_deps) if _deps else 'None'}）——触发器/规则能就地改写阶段 2 写进去的"
-                f"指纹与 state；额外索引/约束能改变来源代次写入的语义；"
-                f"RLS 能让普通角色读不到该读的行；继承边能让子表的行从父表冒出来。"
-                f"不能把这样的库标成 ready。")
+        await _assert_no_pilot_table_dependents(target, phase="apply 完 schema.sql 之后 ")
         _src_rows = await target.fetchval(_PILOT_SOURCE_EMPTY_SQL)
         if _src_rows != 0:
             raise PilotDbBoundaryError(
@@ -1813,3 +1885,435 @@ async def create_pilot_database(
                 f"没能成功（{detail}）——维护库里残留着一行「已确认」的销毁授权，"
                 f"它会挡住后续以别的 run_id 重建，也是一张对同名空库的 DROP 授权。"
                 f"请人工删除 public.pilot_create_intent 中 dbname={db_name!r} 的行。")
+
+
+# ===========================================================================
+# 4a-2 —— 库级五闸 + 零对象例外 + --reset-foreign 令牌（spec §3 子项③）
+# ===========================================================================
+# 闸的执行序列（spec §4，照闸表自上而下实现会原样重现 R56-F1 要修的锁死）：
+#   集群闸 (i)(ii)(iii)
+#     → 【零对象例外】六条 ─ 全成立 → 直接 DROP + 两阶段重建（**不进闸 0−/0/0b**）
+#     → 闸 0−（仅对**已存在 pilot_meta 表**的库求值）
+#     → 闸 0 → 闸 0b →（复用时另跑 闸 1 → 闸 2）
+
+# ⚠️ **表在不在必须与形状分开求值**（spec O1-F6 收口）：`_PILOT_META_SHAPE_SQL` 的三个
+#    EXISTS 全部走 `to_regclass('public.pilot_meta')`，表不存在时它返回 NULL →
+#    三个 EXISTS 全 false —— 与「表在但 key 上没有唯一约束」**返回的东西一模一样**，
+#    而形状 SQL 本身**不会抛异常**。故靠 `except Exception` 兜「表不存在」的写法在真 PG 上
+#    永远走不到 except：一个别人建的、名字恰好撞上的非空库会被报成 `pilot_meta_ambiguous`
+#    （「元数据自相矛盾，交给人查」），而正确的诊断是 `not_owned`（「不是本工具建的，请手工删」）。
+#    两者给操作者的下一步动作不同，报告消费者也按这个码分诊。
+_PILOT_META_PRESENT_SQL = "SELECT to_regclass('public.pilot_meta') IS NOT NULL"
+
+
+async def read_pilot_meta(conn) -> dict[str, str]:
+    """闸 0− —— `pilot_meta` 授权完整性（spec §4「闸 0− 的判据」，R80-F1）。
+
+    它管的是「闸 0/0b **读到的值算不算数**」，故必须排在 0/0b **之前**，
+    且 **DROP 与复用两条路径都跑** —— DROP 路径根本不跑闸 2，
+    把 `pilot_meta` 的断言只放进闸 2 会让最危险的那条路径原封不动。
+
+    ⚠️ 只对**已存在 `pilot_meta` 表**的库求值。表不存在这一档**不由 0− 处置**
+       （否则残骸 + `--reset` 会在 0− 第一条就撞 `pilot_meta_ambiguous`
+        「拒绝 DROP、库原样保留」→ **残骸永远清不掉**，spec O1-F5/O1-F6）。
+
+    ⚠️ 形状判据**复用 `read_pilot_meta_rows`**，不得另写一份（spec §4 P1-F7：
+       这条纪律此前「只落在了各自发现它的那个对象上」）。
+
+    raises `PilotDbBoundaryError`，code ∈
+      · `not_owned` —— 表不存在（这个库不是本工具建的）
+      · `pilot_meta_ambiguous` —— 表在但形状不合规 / key 重复 / 授权键缺失
+      · `target_db_unreadable` —— 连进去了但读不出来（spec P1r3-F6）
+    """
+    try:
+        await pin_search_path(conn)
+        present = await conn.fetchval(_PILOT_META_PRESENT_SQL)
+    except Exception as exc:
+        # ⚠️ **绝不兜成 not_owned**（spec P1r3-F6）：`ALTER DATABASE … ALLOW_CONNECTIONS false`
+        #    做维护的库、权限被收走的库都落在这里，而 `not_owned` 给出的下一步动作是
+        #    「不是本工具建的，请手工删」—— 错误且危险。
+        raise PilotDbBoundaryError(
+            "target_db_unreadable",
+            f"连进目标库之后读 pilot_meta 是否存在就失败了（{exc}）——"
+            f"无法证明任何事，一律 fail-closed：拒绝 DROP、拒绝复用") from exc
+    if not present:
+        raise PilotDbBoundaryError(
+            "not_owned",
+            "目标库没有 public.pilot_meta 表——它不是本次 pilot 建的。"
+            "如确需删除请在 pilot 工具之外手工执行")
+    try:
+        seen = await read_pilot_meta_rows(conn)
+    except PilotDbBoundaryError:
+        raise                                  # 形状/重复键 → pilot_meta_ambiguous，原样上抛
+    except Exception as exc:
+        raise PilotDbBoundaryError(
+            "target_db_unreadable",
+            f"pilot_meta 表存在但读不出来（{exc}）") from exc
+
+    # ⚠️ **NULL 值必须在这里拦下**（codex 4a-2a R5-F2）：形状判据只要求 `value` 是 text，
+    #    没要求 NOT NULL。一张 `export_log_sha256 = NULL` 的 pilot_meta 过得了归属闸，
+    #    随后 `_bound_identity` 在 `None[:12]` 上抛**裸 TypeError** ——
+    #    一次正确的 fail-closed 守卫会被 4c 记成 FAIL_INFRASTRUCTURE（§9-1w 明令禁止），
+    #    而 `derive_confirm_token` 也拿不到可用的原像。
+    nulls = sorted(k for k, v in seen.items() if not isinstance(v, str))
+    if nulls:
+        raise PilotDbBoundaryError(
+            "pilot_meta_ambiguous",
+            f"pilot_meta 的 {nulls} 取到了非字符串值（多半是 NULL）——"
+            f"归属/绑定/令牌都要从这些值里读，拒绝 DROP、拒绝复用，库原样保留")
+    missing = [k for k in PILOT_META_AUTHORIZATION_KEYS if k not in seen]
+    if missing:
+        raise PilotDbBoundaryError(
+            "pilot_meta_ambiguous",
+            f"pilot_meta 缺少授权键 {missing}——闸 0/0b 正是从这些键里读值的，"
+            f"缺一个就没有可信的归属/绑定判定。拒绝 DROP、拒绝复用，库原样保留")
+    return seen
+
+
+async def _open_target(maint_conn, connect, db_name: str):
+    """打开一条到目标库的**短连接**并 `adopt_connection` 它。
+
+    ⚠️ **连接生命周期由本模块持有，不是调用方的约定**（spec §4 规定 1）：
+       集群闸 (ii) 与闸 0−/0/0b 都要连进目标库，而目标库自己就匹配 `kline_pilot_*`。
+       只要有一条连接活着，随后的 `DROP DATABASE` 就会撞
+       `is being accessed by other users` —— 真 PG 实测坐实，而 reset 是陈旧 schema 库的
+       唯一出路。把「读完立即 close」写成调用方纪律等于没写：本模块自己开、自己关。
+
+    ⚠️ 三件事一次做完（与 `create_pilot_database` 的目标连接同一条原则）：
+       钉 `search_path` + 证明连的是这个**库名** + 同一台**集群** + 同一个**实例**。
+       `expected_oid` 取自维护连接上的 `pg_database` —— 「本次运行说的那个库」由它定义。
+    """
+    try:
+        cluster_id = await cluster_identity(maint_conn)
+        # ⚠️ 复用 `_CREATED_DB_OID_SQL` 这个**捕获点**（它的职责就是「此刻这个名字对应
+        #    哪个实例」），而不是新写一条按名字查 pg_database 的 SQL ——
+        #    `test_every_pg_database_predicate_binds_to_an_instance` 会挡住后者。
+        expected_oid = await maint_conn.fetchval(_CREATED_DB_OID_SQL, db_name)
+    except Exception as exc:
+        raise PilotDbBoundaryError(
+            "target_db_unreadable",
+            f"在维护连接上取 {db_name!r} 的实例 oid / 集群身份就失败了（{exc}）") from exc
+    if expected_oid is None:
+        raise PilotDbBoundaryError(
+            "target_db_unreadable",
+            f"{db_name!r} 不在 pg_database 里 —— 库级闸只对**已存在**的库求值；"
+            f"库不存在时该走建库路径，走到这里说明调用方的分支判断与实际状态脱节了")
+    try:
+        conn = await connect(db_name)
+    except Exception as exc:
+        # ⚠️ 绝不当成「没查到对象」（spec P1r3-F6）：`datallowconn=false` /
+        #    `datconnlimit=0` / 无 CONNECT 权限 / 正被别人删除都落在这里。
+        raise PilotDbBoundaryError(
+            "target_db_unreadable",
+            f"连不进目标库 {db_name!r}（{exc}）—— 无法证明任何事，一律 fail-closed") from exc
+    try:
+        await adopt_connection(conn, db_name, cluster_id=cluster_id,
+                               expected_oid=expected_oid)
+    except BaseException:
+        # 接管失败也要关掉，否则泄漏的会话会把之后的 DROP 顶住（O4-R24-C2）。
+        await _close_quietly(conn, db_name)
+        raise
+    return conn, expected_oid
+
+
+def _assert_seed_db_name(db_name: str, seed: str) -> None:
+    """`db_name` 必须就是 `derive_db_name(seed)`（与 `create_pilot_database` 同一条判据）。
+
+    两者脱钩时，闸判定的库与 DDL 实际作用的库不是同一个。
+    """
+    if derive_db_name(seed) != db_name:
+        raise PilotDbBoundaryError(
+            "seed_db_name_mismatch",
+            f"db_name {db_name!r} 不是 seed {seed!r} 派生出来的")
+
+
+async def _assert_ownership(meta: dict[str, str], *, seed: str) -> None:
+    """闸 0 —— 归属（`tool` + `seed`）。这个库**能不能被我碰**。"""
+    if meta.get("tool") != "qmt_pilot" or meta.get("seed") != seed:
+        raise PilotDbBoundaryError(
+            "not_owned",
+            f"该库的 pilot_meta 说它属于 tool={meta.get('tool')!r} / seed={meta.get('seed')!r}，"
+            f"而本次 seed={seed!r}——该库不是本次 pilot 建的。"
+            f"如确需删除请在 pilot 工具之外手工执行")
+
+
+def _binding_matches(meta: dict[str, str], *, export_log_sha256: str, output_dir: str) -> bool:
+    """闸 0b —— 绑定（`export_log_sha256` + `output_dir`）。这个库**是不是我这套设置的**。
+
+    ⚠️ `output_dir` 两边都去尾斜杠：建库时存进去的是 `output_dir.rstrip('/')`
+       （见 `create_pilot_database` 的 values），不归一会让**同一套设置**的第二次运行
+       被判成「别人的库」。
+    """
+    return (meta.get("export_log_sha256") == export_log_sha256
+            and meta.get("output_dir") == output_dir.rstrip("/"))
+
+
+def _bound_identity(meta: dict[str, str]) -> dict:
+    """拒绝时打印给操作者看的「这个库绑的是谁」（spec §5：哈希前 12 位 / 目录 / 建库时间）。"""
+    return {"export_log_sha256": meta.get("export_log_sha256", "")[:12],
+            "output_dir": meta.get("output_dir"),
+            "created_at": meta.get("created_at")}
+
+
+# ── 闸 2：结构断言（复用纵深防御副闸，spec §4）───────────────────────────
+# 「即便指纹相符，仍对 pilot 真正依赖的结构逐项断言」——防的是**指纹对但库被手工
+# ALTER 过**。指纹只证明「建库时递进来的字节是哪一份」，证明不了「现在库里长什么样」。
+#
+# ⚠️ **业务表这五组必须写成白名单式的布尔，不能靠 information_schema**（O1-F1 同族）：
+#    `information_schema.columns` 对物化视图/外部表的可见性各版本不一，
+#    而这一闸的意义就是「被换过的东西要被看见」。
+# ⚠️ **三张业务表必须先证明它自己是表**（relkind='r'）：一个列名列类型全对的**视图**
+#    能过下面每一条列断言，而视图上的写入行为与表完全不同。
+# ⚠️ pilot 表那两组**复用 `_PILOT_SCHEMA_SHAPE_SQL`**（建库时证明「apply 完
+#    pilot_schema.sql 结构确实对」的同一份），不另写第二份：两份判据必然漂移，
+#    而漏一条就是静默放行 —— 这正是本 PR 记录在案的「只修被点名的那一处」。
+# ⚠️ 表清单**从 `REQUIRED_BUSINESS_TABLES` 派生**，不再手写三张（codex 4a-2a R1：
+#    原来漏了 `stocks` —— 它是 klines 的外键目标，没了它导入必然失败，而闸照样放行）。
+#    加第五张表时这里自动跟上，不用等下一个评审提醒。
+_BUSINESS_STRUCTURE_SQL = f"""
+SELECT
+  (SELECT count(*) FROM pg_class c
+    WHERE c.oid = ANY (ARRAY[{", ".join(f"to_regclass('public.{t}')" for t in REQUIRED_BUSINESS_TABLES)}])
+      AND c.relkind = 'r') = {len(REQUIRED_BUSINESS_TABLES)}     AS business_tables_are_tables,
+  (SELECT count(*) FROM pg_attribute a
+    WHERE a.attrelid = to_regclass('public.klines') AND NOT a.attisdropped
+      AND a.attnum > 0 AND a.attname IN ('open','high','low','close')
+      AND format_type(a.atttypid, NULL) = 'double precision') = 4 AS klines_ohlc_double,
+  EXISTS (SELECT 1 FROM pg_class c
+           WHERE c.oid = to_regclass('public.stock_coverage')
+             AND c.relkind = 'r')                                AS stock_coverage_present,
+  EXISTS (SELECT 1 FROM pg_attribute a
+           WHERE a.attrelid = to_regclass('public.training_sets')
+             AND a.attname = 'file_path' AND NOT a.attisdropped
+             AND format_type(a.atttypid, NULL) = 'text')         AS file_path_is_text,
+  EXISTS (SELECT 1 FROM pg_attribute a
+           WHERE a.attrelid = to_regclass('public.training_sets')
+             AND a.attname = 'content_hash' AND NOT a.attisdropped
+             AND a.attnum > 0)                                   AS content_hash_present,
+  EXISTS (SELECT 1 FROM pg_constraint k
+           WHERE k.conrelid = to_regclass('public.training_sets')
+             AND k.conname = 'uq_stock_start' AND k.contype = 'u')
+                                                                 AS uq_stock_start_present,
+  -- ⚠️ **名字对不代表列对**（codex 4a-2a R1）：把 uq_stock_start 删掉、用同名但
+  --    不同列重建，上一条照样为真 —— 而 already_done 与写入去重整个建立在
+  --    (stock_code, start_datetime) 这一对列上。
+  EXISTS (SELECT 1 FROM pg_constraint k
+           WHERE k.conrelid = to_regclass('public.training_sets')
+             AND k.conname = 'uq_stock_start' AND k.contype = 'u'
+             AND (SELECT array_agg(a.attname ORDER BY a.attname)
+                    FROM pg_attribute a
+                   WHERE a.attrelid = k.conrelid AND a.attnum = ANY (k.conkey))
+                 = ARRAY['start_datetime', 'stock_code'])        AS uq_stock_start_columns_ok
+"""
+
+
+async def _assert_structure(conn, meta: dict[str, str]) -> None:
+    """闸 2 —— 七组结构断言（**只在复用路径跑**；`--reset` 时不跑，spec §4 闸分工表）。
+
+    七组 = 业务表五组（`_BUSINESS_STRUCTURE_SQL`）+ pilot 两张表的形状
+    （`_PILOT_SCHEMA_SHAPE_SQL`，与建库时同一份）+ `pilot_meta` 九键齐全。
+
+    ⚠️ **九键齐全这一条只有 `created_at` 走得到**：`tool`/`seed` 归闸 0、两个绑定键归
+       闸 0b、`state` 归 state 档、三个指纹键归闸 1。而 `created_at` 正是
+       `confirm_token` 的原像 —— 它缺席时没有任何更早的闸会发现，
+       直到某天要 `--reset-foreign` 才发现令牌派生不出来、库认不回自己。
+    """
+    for label, sql in (("业务表", _BUSINESS_STRUCTURE_SQL),
+                       ("pilot 表", _PILOT_SCHEMA_SHAPE_SQL)):
+        try:
+            row = await conn.fetchrow(sql)
+        except Exception as exc:
+            raise PilotDbBoundaryError(
+                "target_db_unreadable", f"闸 2 读{label}结构失败（{exc}）") from exc
+        if row is None:
+            raise PilotDbBoundaryError(
+                "structure_mismatch", f"闸 2 的{label}结构查询没有返回行")
+        bad = sorted(k for k, v in dict(row).items() if not v)
+        if bad:
+            raise PilotDbBoundaryError(
+                "structure_mismatch",
+                f"该库的{label}结构与 pilot 的依赖不符，不成立的判据：{bad}——"
+                f"指纹只证明建库时递进来的字节，证明不了库现在长什么样。请用 --reset 重建")
+
+    missing = [k for k in PILOT_META_KEYS if k not in meta]
+    if missing:
+        raise PilotDbBoundaryError(
+            "structure_mismatch",
+            f"pilot_meta 缺键 {missing}——闸 2 要求九个键一个不缺。请用 --reset 重建")
+
+    # ⚠️ **建库时跑过的活体判据，复用前必须原样再跑一遍**（codex 4a-2a R1，high）：
+    #    上面那几组只看「列在不在、类型对不对、约束名有没有」，看不见
+    #    ①业务表上新装的触发器/规则/RLS/继承边（它们不动任何形状，却改写每一次导入）
+    #    ②列/默认值/序列/表级属性的任意改动（活目录指纹才看得见）
+    #    ③pilot 表上多出来的索引/约束/触发器
+    #    只在建库路径跑的话，一个 ready 之后被改过的库照样通过复用闸，
+    #    随后 B1/B2 在坏 schema 上读写 —— 而在 DB 边界拦下正是本闸存在的全部理由。
+    await _assert_no_business_behavior_objects(conn, phase="复用前复查：")
+    await _assert_no_pilot_table_dependents(conn, phase="复用前复查：")
+    await _assert_live_catalog_matches_canonical(conn, phase="复用前复查：")
+
+
+async def assert_db_allowed_for_reuse(
+    maint_conn, *, connect, db_name: str, seed: str,
+    schema_sha256: str, pilot_schema_sha256: str,
+    export_log_sha256: str, output_dir: str,
+) -> None:
+    """复用路径：闸 0− → 0 → 0b → **state** → 1 → 2 全过才允许复用。
+
+    ⚠️ `state == 'initializing'` 必须排在**闸 1（指纹）之前**（spec O4-F8）：
+       阶段 1 只写 7 个键、`schema_sha256` 尚未写入，闸 1 会先撞「值不符」并报
+       `schema_fingerprint_mismatch` → `db_state_initializing` 永远产不出来，
+       恢复指引也从「用 --reset 重建」错成「schema 漂移」。
+    """
+    _assert_seed_db_name(db_name, seed)
+    # ⚠️ **集群闸在每个 public 入口各自机器强制**（codex 4a-2a R6-F2）：
+    #    它证明的是「这台集群是给 pilot 用的一次性环境」—— 没有它，一次接线失误就能
+    #    在**生产集群**上批准复用/销毁，然后往里灌几百只股（spec §1 的风险 ①）。
+    #    这几个函数都是 public 的，**不能靠调用方会先跑它**这条纪律。
+    #    `create_pilot_database` 早就为同一条理由把它下沉进函数里（O4-R5-C2）；
+    #    重复调用的代价只是几条只读查询，远小于「漏掉一次」的代价。
+    await assert_cluster_allowed(maint_conn, connect=connect, target_db=db_name)
+    conn, _oid = await _open_target(maint_conn, connect, db_name)
+    try:
+        meta = await read_pilot_meta(conn)                             # 闸 0−
+        await _assert_ownership(meta, seed=seed)                       # 闸 0
+        # 闸 0r —— **外部**归属凭据（codex 4a-2a R3-F1，user 拍板只加在复用路径）。
+        # ⚠️ 闸 0 读的全是「被判对象自己写的字」；同侪库（闸 ii）早就因此要求两个独立
+        #    事实（自证 + 维护库登记绑 oid），而目标库这一侧一直只有自证。
+        #    这里补上同一条外部凭据：`_REGISTRY_HAS_SQL` JOIN 了 pg_database.oid，
+        #    故「我们建过这个名字、库被删了、别人用同名重建」这一档会因 OID 不同而落空。
+        # ⚠️ **刻意只加在复用路径，不加在 --reset**（user 拍板）：登记表在维护库里、
+        #    本工具从不清它，一旦维护库被重新初始化，非空 pilot 库就再也清不掉了 ——
+        #    那正是 spec 花整轮移除的 R55-F1 锁死。复用被拒时逃生口仍在：`--reset` 重建。
+        #    这条不对称是**有意的**，test_reset_does_not_require_the_registry_proof 钉住它。
+        try:
+            registered = await maint_conn.fetchval(_REGISTRY_HAS_SQL, db_name,
+                                                   meta.get("seed"))
+        except Exception as exc:
+            raise PilotDbBoundaryError(
+                "registry_proof_missing",
+                f"读维护库的归属登记失败（{exc}）——证明不了这个库是本工具建的，"
+                f"拒绝复用。用 --reset 重建（reset 不要求这条外部凭据）") from exc
+        if not registered:
+            raise PilotDbBoundaryError(
+                "registry_proof_missing",
+                f"维护库的 pilot_database_registry 里没有绑到**这个实例**的 {db_name!r} "
+                f"登记行——库里的 pilot_meta 是它自己写的字，单凭它证明不了归属。"
+                f"要么这个库不是本工具建的，要么维护库的登记丢了；"
+                f"两种情形的出路都是 --reset 重建（reset 不要求这条外部凭据）")
+        if not _binding_matches(meta, export_log_sha256=export_log_sha256,
+                                output_dir=output_dir):                # 闸 0b
+            raise PilotDbBoundaryError(
+                "binding_mismatch",
+                f"该库绑定的是另一份源快照/输出目录（{_bound_identity(meta)}）——"
+                f"请换 seed，或用 --reset 重建",
+                identity=_bound_identity(meta))
+        if meta.get("state") != "ready":                               # state（先于闸 1）
+            raise PilotDbBoundaryError(
+                "db_state_initializing",
+                f"该库 state={meta.get('state')!r}，上次没跑完 apply schema——"
+                f"一律拒绝复用，请用 --reset 重建")
+        if (meta.get("schema_sha256") != schema_sha256
+                or meta.get("pilot_schema_sha256") != pilot_schema_sha256
+                or meta.get("contract_version") != CONTRACT_VERSION):  # 闸 1
+            raise PilotDbBoundaryError(
+                "schema_fingerprint_mismatch",
+                "schema.sql / pilot_schema.sql / contract_version 与建库时不一致——"
+                "请用 --reset 重建")
+        await _assert_structure(conn, meta)                            # 闸 2
+    finally:
+        await _close_quietly(conn, db_name)
+
+
+async def assert_db_allowed_for_reset(
+    maint_conn, *, connect, db_name: str, seed: str,
+    export_log_sha256: str, output_dir: str, reset_foreign_token: str | None,
+) -> str:
+    """`--reset` 路径：闸 0− → 0 → 0b（不过则要令牌）全过才允许 DROP。
+
+    **返回被授权的那个实例 oid** —— `DROP DATABASE` 带不了谓词，而授权与 DROP 之间
+    同名库可以被删掉又重建。不把授权绑到实例上，`--reset` 会去删一个**从未被授权**的替身
+    （「凡是『这就是我那个库』的断言都要绑实例」的又一处落点）。
+
+    ⚠️ **这不是 `--reset` 的入口**（codex 4a-2a R6-F1）：它只覆盖「目标库有 `pilot_meta`」
+       那一支。崩在 `CREATE DATABASE` 与写 `pilot_meta` 之间的**空残骸**根本没有那张表，
+       在这里会撞 `not_owned`。spec §4 把「零对象例外 → 否则闸 0−」画成一条有向序列，
+       那条逃生口与它的次序由 **4a-2b 的 `authorize_reset`** 提供 ——
+       **调用方一律走 `authorize_reset`，不要直接调本函数。**
+
+    ⚠️ **指纹闸与结构闸不参与 DROP 判定**（spec R49-F2）：闸的分工不可倒置——
+       归属管「能不能碰」，指纹管「能不能直接用」。把指纹塞进 DROP 路径会让一个
+       陈旧 schema 的库连 reset 都做不了，而 reset 是它唯一的出路。
+       同理**不查 state、不查九键齐全**：崩在 apply schema 之前的库只有阶段 1 的 7 键。
+    """
+    _assert_seed_db_name(db_name, seed)
+    # ⚠️ **先钉 search_path，再验锁**（codex 4a-2a R5-F1 —— R4 加这条检查时我把它放在了
+    #    任何钉桩之前）：`_SEED_LOCK_HELD_SQL` 用的是不限定的 `pg_locks` /
+    #    `pg_backend_pid()` / `hashtext()`，敌意或残留的 search_path 把一个可写 schema
+    #    排在 `pg_catalog` 之前时，这三个名字都能被遮蔽 → **锁的证明返回 true 而锁并不存在**，
+    #    R4 刚关上的破坏性窗口原样打开。
+    #    本函数是 public 的、可被直接调用，**不能靠「authorize_reset 会先跑集群闸」这条
+    #    调用方纪律**来保证钉桩 —— 那正是本 PR 反复修的同一个形态。
+    await pin_search_path(maint_conn)
+    # ⚠️ **集群闸在每个 public 入口各自机器强制**（codex 4a-2a R6-F2）：
+    #    它证明的是「这台集群是给 pilot 用的一次性环境」—— 没有它，一次接线失误就能
+    #    在**生产集群**上批准复用/销毁，然后往里灌几百只股（spec §1 的风险 ①）。
+    #    这几个函数都是 public 的，**不能靠调用方会先跑它**这条纪律。
+    #    `create_pilot_database` 早就为同一条理由把它下沉进函数里（O4-R5-C2）；
+    #    重复调用的代价只是几条只读查询，远小于「漏掉一次」的代价。
+    await assert_cluster_allowed(maint_conn, connect=connect, target_db=db_name)
+    # ⚠️ **发放销毁授权之前先证明按 seed 的锁真被持有**（codex 4a-2a R4-F1）。
+    #    `create_pilot_database` / `drop_pilot_database` / 零对象例外三处都验了它，
+    #    唯独这条发放 DROP 授权的路径没验 —— 接线失误会让一次运行先 DROP 掉既有库、
+    #    再在重建时撞 seed_lock_not_held，库没了而重建没做；
+    #    同 seed 的两次运行也能一起挤进这段破坏性窗口。
+    #    （本模块**不取锁**，只验它是否真被持有 —— spec O1-F4 + O4-R5-C2。）
+    if not await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, seed):
+        raise PilotDbBoundaryError(
+            "seed_lock_not_held",
+            f"维护连接上没有持有 seed={seed!r} 的 advisory lock（①c）——"
+            f"绝不在没有互斥的情况下发放 DROP 授权")
+    conn, oid = await _open_target(maint_conn, connect, db_name)
+    # ⚠️ 授权**不在 try 里 return**（codex R2-F1）：`finally` 关连接失败时，
+    #    授权已经在路上了。改成「闸过 → 关连接 → 证明真关掉了 → 才交出 oid」。
+    try:
+        meta = await read_pilot_meta(conn)                             # 闸 0−
+        await _assert_ownership(meta, seed=seed)                       # 闸 0
+        if not _binding_matches(meta, export_log_sha256=export_log_sha256,
+                                output_dir=output_dir):                # 闸 0b 不过
+            _assert_reset_foreign_token(meta, reset_foreign_token)
+    finally:
+        closed = await _close_quietly(conn, db_name)
+    _assert_target_released(closed, db_name)
+    return oid
+
+
+def _assert_reset_foreign_token(meta: dict[str, str],
+                                reset_foreign_token: str | None) -> None:
+    """闸 0b 不过时的令牌校验（spec §5：required / invalid 两个码可区分）。
+
+    ⚠️ 令牌派生排在**分支之前**：`created_at` 不在四个授权键里、可以合法缺席，
+       此时唯一诚实的答复是 `confirm_token_underivable`（提示人工删库），
+       而不是拿空串硬算一个谁都填不对的令牌。
+    """
+    identity = _bound_identity(meta)
+    token = derive_confirm_token(meta.get("export_log_sha256", ""),
+                                 meta.get("output_dir", ""),
+                                 meta.get("created_at", ""))
+    # ⚠️ **令牌绝不进 message**（codex 4a-2a R3-F2；`PilotDbBoundaryError` 的契约与
+    #    spec §9-1w 都写着它只走 `confirm_token` 这条专用通道）。
+    #    任何把 `str(exc)` 写进报告/日志的调用方都会把它漏出去，
+    #    于是 wrapper 可以「读报告取令牌再重跑」——「知情同意」退化成两步自动化。
+    #    由 CLI 显式把 `exc.confirm_token` 打到 stderr 给人看。
+    if reset_foreign_token is None:
+        raise PilotDbBoundaryError(
+            "reset_foreign_token_required",
+            f"该库绑定的是另一套设置：{identity}。"
+            f"确认要销毁它请重跑并带 --reset-foreign=<本次 stderr 打印的确认令牌>",
+            identity=identity, confirm_token=token)
+    if reset_foreign_token != token:
+        raise PilotDbBoundaryError(
+            "reset_foreign_token_invalid",
+            "--reset-foreign 令牌与该库的确认令牌不符"
+            "（正确的令牌只打印在 stderr，不进任何报告字段）",
+            identity=identity, confirm_token=token)
