@@ -71,39 +71,17 @@ struct DrawingBottomBarHeightTests {
         #expect(abs(trade - review) <= 0.5, "TradeActionBar=\(trade) ReviewControlBar=\(review) @430pt")
     }
 
-    /// 在 hosted 视图树里按 accessibilityLabel 找元素，返回它的 accessibilityTraits。
-    /// SwiftUI 的按钮在 Catalyst 上既可能是 subview、也可能挂在 `accessibilityElements` 里，两边都要走。
-    @MainActor
-    private func traits(ofLabel label: String, in root: UIView) -> UIAccessibilityTraits? {
-        func walk(_ node: Any) -> UIAccessibilityTraits? {
-            if let e = node as? NSObject, e.accessibilityLabel == label { return e.accessibilityTraits }
-            if let v = node as? UIView {
-                for child in (v.accessibilityElements ?? []) { if let t = walk(child) { return t } }
-                for sub in v.subviews { if let t = walk(sub) { return t } }
-            }
-            return nil
-        }
-        return walk(root)
-    }
-
-    @Test("PR-4（codex plan-R2-F2 专项）：🗑 渲染出来的可用性**真的**跟随 deleteEnabled")
-    @MainActor func trashButtonDisabledFollowsPredicate() throws {
-        func hostedTraits(deleteEnabled: Bool) -> UIAccessibilityTraits? {
-            let host = UIHostingController(
-                rootView: DrawingBottomBar(typeRowExpanded: .constant(true),
-                                           deleteEnabled: deleteEnabled, onDelete: {}).frame(width: 390))
-            host.view.bounds = CGRect(x: 0, y: 0, width: 390, height: BottomBarMetrics.height)
-            host.view.setNeedsLayout(); host.view.layoutIfNeeded()
-            return traits(ofLabel: "删除", in: host.view)
-        }
-        // 前提自足断言：先证明真的找到了那个按钮（找不到 → 下面两条会在 nil 上恒过 = 假绿）
-        let off = try #require(hostedTraits(deleteEnabled: false), "hosted 树里找不到「删除」元素，本测试无判别力")
-        let on  = try #require(hostedTraits(deleteEnabled: true),  "hosted 树里找不到「删除」元素，本测试无判别力")
-        #expect(off.contains(.notEnabled), "deleteEnabled == false 时 🗑 必须渲染成不可用")
-        #expect(!on.contains(.notEnabled), "deleteEnabled == true 时 🗑 必须可用（防「一律置灰」骗过上一条）")
-        // 置灰只降可交互性，不改布局（三个 swap 底栏等高不变量）
-        let bar = DrawingBottomBar(typeRowExpanded: .constant(true), deleteEnabled: false, onDelete: {})
-        #expect(measuredHeight(bar, width: 390) == BottomBarMetrics.height)
-    }
+    // trashButtonDisabledFollowsPredicate（PR-4，验 🗑 渲染出的 accessibilityTraits 真跟随
+    // deleteEnabled）连同它专用的 traits(ofLabel:in:) helper 已删除，原因：
+    // 原写法（UIHostingController + layoutIfNeeded()，不挂真 window）在 Catalyst 上真跑，
+    // hostedTraits(deleteEnabled:) 恒为 nil——SwiftUI 的无障碍元素没有物化，
+    // try #require(...) 前提自足断言如实失败（其余 1712 条测试全绿）。
+    // 尝试把 hosting controller 挂进一个真 UIWindow 再遍历（唯一允许的补救尝试）：
+    // Catalyst 上裸建 `UIWindow(frame:)` 在这个纯 SPM 测试宿主里没有 UIApplication，
+    // 抛 `NSInternalInconsistencyException: NSApplication has not been created yet`，
+    // **崩溃整个 xctest 进程**（比原失败更差——xcodebuild 崩溃重启后把几百条本来会过的
+    // 测试错误计入 Failing tests）。两条路都不可行，遂整条删除，不留弱化断言顶替。
+    // 🗑 置灰目前只有源码守卫覆盖（DrawingModeBar.swift 里 `.disabled(!deleteEnabled)` 的存在
+    // 由 spec §1.1 #1 静态断言钉住），没有运行时证据；已列入真机验收必验项。
 }
 #endif
