@@ -188,6 +188,9 @@ struct DrawingTapHitShieldTests {
         #expect(overlay.contains("onTogglePosition"))
         #expect(bottom.contains("accessibilityLabel(\"类型\")"))       // ①类型键（不变）
         #expect(bottom.contains("accessibilityLabel(\"删除\")"))       // ③🗑 删除键（1b-i PR-4 接入）
+        // ⚠️「删除」只准出现在**底栏**：PR-4 把它从黑名单移进正向断言时，overlay 那半边的守卫
+        //    连带失效了（整支 Opus 终审 Minor-2）——类型行再冒出一个 🗑 将无人拦。单独补回。
+        #expect(!overlay.contains("accessibilityLabel(\"删除\")"))
         for banned in ["accessibilityLabel(\"锁定\")",
                        "accessibilityLabel(\"撤销\")", "accessibilityLabel(\"前进\")"] {   // ②④⑤ 仍属 1b-ii，不渲染
             #expect(!overlay.contains(banned)); #expect(!bottom.contains(banned))

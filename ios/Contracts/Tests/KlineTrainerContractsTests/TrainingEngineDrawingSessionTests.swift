@@ -1121,8 +1121,14 @@ struct TrainingEngineDrawingSessionTests {
         let liveOnly = try #require(router.range(of: squeeze("static func canEditStyle(")))
         let displayStart = try #require(router.range(of: squeeze("static func styleControlsEnabled(")))
         let liveBlock = String(router[liveOnly.lowerBound..<displayStart.lowerBound])
-        #expect(!liveBlock.contains(squeeze("session.selectionGeometryVisible")),
-                "现算版谓词里读到了 observable 提示 —— 确认框时间窗内会用陈旧值放行删除（N19e）")
+        // ⚠️ **两种拼法都要禁**（整支 Opus 终审 Minor-1，已复验）：needle 只写小写 `session.` 时，
+        //    `engine.drawingSession.selectionGeometryVisible`（**大写 S**，恰恰是最自然的写法）匹配不上
+        //    → 守卫恒不触发。终审的变异 A 正是这么写的，本条当时**没红**，全靠 4 条行为测试拦住。
+        //    源码守卫这一层比行为层弱的根因不是「读错文本来源」（PD7 已解决），而是「needle 拼法不全」。
+        for needle in ["session.selectionGeometryVisible", "drawingSession.selectionGeometryVisible"] {
+            #expect(!liveBlock.contains(squeeze(needle)),
+                    "现算版谓词里读到了 observable 提示（拼法 \(needle)）—— 确认框时间窗内会用陈旧值放行删除（N19e）")
+        }
         // 反向自足断言：UI 版确实读了提示（防上面两条在「谁都没调」的空状态下恒真）
         #expect(router.contains(squeeze("engine.drawingSession.selectionGeometryVisible")),
                 "UI 版谓词没读 observable 提示 —— 那套信号白建了")
