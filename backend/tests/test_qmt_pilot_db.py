@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import pathlib
 import re
+import types
 
 import pytest
 
@@ -23,6 +24,10 @@ from qmt_pilot_db import (CONTRACT_VERSION, FIRST_NORMAL_OID, INTENT_TTL_SECONDS
                           _user_objects, assert_cluster_allowed,
                           read_pilot_meta_rows, read_pilot_meta,
                           assert_db_allowed_for_reuse, assert_db_allowed_for_reset,
+                          try_empty_remnant_exception, _drop_pilot_database,
+                          reset_pilot_database,
+                          init_cluster_marker, MARKER_PURPOSE, authorize_reset,
+                          ResetAuthorization, _RESET_CAPABILITY,
                           assert_pilot_db_allowed, create_pilot_database,
                           derive_confirm_token, derive_db_name, quote_ident)
 
@@ -185,6 +190,9 @@ class _FakeConn:
         # 【维护库专用表集合】两张表的**结构**（闸 (i) 的第一层判据）。默认合规。
         self.maintenance_shape = (maintenance_shape if maintenance_shape is not None
                                   else dict(_OK_MAINTENANCE_SHAPE))
+        # 三张维护表的**在场**情况（R6-F2）。默认全在。
+        self.maintenance_presence = {"marker_present": True, "intent_present": True,
+                                     "registry_present": True}
         self.fail_connect = fail_connect
         self.closed = False
         self.executed: list[str] = []
@@ -224,6 +232,9 @@ class _FakeConn:
                     else dict(self.business_structure))
         if "meta_is_table" in query:
             return None if self.pilot_schema_shape is None else dict(self.pilot_schema_shape)
+        if "marker_present" in query:
+            return (None if self.maintenance_presence is None
+                    else dict(self.maintenance_presence))
         if "marker_is_table" in query:
             return None if self.maintenance_shape is None else dict(self.maintenance_shape)
         if "key_is_unique" in query:
@@ -2499,7 +2510,6 @@ def test_schema_sql_must_not_tamper_with_phase1_metadata(tamper, label):
     assert cleared == [], f"失败路径不该清 intent 行：{cleared}"
 
 
-
 def test_no_sql_constant_proves_uniqueness_with_indisunique():
     """机械守卫：模块里**任何** SQL 都不许拿 `indisunique` 当唯一性证明（O4-R24-C1）。
 
@@ -4200,3 +4210,1371 @@ def test_public_gates_run_the_cluster_boundary_before_touching_the_target(gate, 
     with pytest.raises(PilotClusterBoundaryError):
         asyncio.run(gate(maint, connect=_connector({"kline_pilot_probe": target}), **kw))
     assert target.ops == [], f"{label}：集群闸未过时不该对目标库发出任何查询"
+
+
+# 零对象例外六条 + DROP 前紧贴复查（spec §4「空库残骸的 reset 例外」）
+# ---------------------------------------------------------------------------
+
+class _RemnantMaint(_FakeConn):
+    """维护连接：额外答 `pilot_create_intent` 的读。"""
+
+    def __init__(self, intent_rows=(), **kw):
+        kw.setdefault("databases", ["kline_pilot_probe"])
+        super().__init__(**kw)
+        self.intent_rows = list(intent_rows)
+
+    async def fetch(self, query, *args):
+        # ⚠️ 判别式必须精确到 `FROM public.pilot_create_intent i`：
+        #    闸 (iii) 的豁免 CTE 里也含 `pilot_create_intent` 这个**表名字符串**
+        #    （它是【维护库专用表集合】的成员），裸 `in query` 会把那条查询也劫走，
+        #    于是集群闸拿到 intent 行、在 `r["cat"]` 上炸 KeyError。
+        #    4a-1 的假件已经为「子串分发很脆弱」写过警告 —— 这是它的又一次实证。
+        if "FROM public.pilot_create_intent i " in query:
+            self.ops.append(query)
+            return list(self.intent_rows)
+        return await super().fetch(query, *args)
+
+
+def _intent(seed="probe", age_seconds=0, create_confirmed=True, intent_db_oid="16400"):
+    """⚠️ 字段必须与 `_READ_INTENT_SQL` 的输出**逐字一致**：判据读
+    seed / create_confirmed / intent_db_oid / age_seconds，fixture 少给一个
+    就是「测试在测另一个东西」。"""
+    return [{"seed": seed, "create_confirmed": create_confirmed,
+             "intent_db_oid": intent_db_oid, "age_seconds": age_seconds}]
+
+
+class _EmptyOnProbe(_FakeConn):
+    """第 n 次【绝对空】探测的结果可以不同 —— 用来造「判定与 DROP 之间的空窗」。"""
+
+    def __init__(self, non_empty_probes=(), **kw):
+        super().__init__(**kw)
+        self.probes = 0
+        self.non_empty_probes = set(non_empty_probes)
+
+    async def fetch(self, query, *args):
+        if "SELECT cat, n FROM (" in query and "closure" not in query:
+            self.ops.append(query)
+            self.probes += 1
+            return ([{"cat": "pg_class", "n": 3}]
+                    if self.probes in self.non_empty_probes else [])
+        return await super().fetch(query, *args)
+
+
+def _remnant(maint, target, **over):
+    kw = {"db_name": "kline_pilot_probe", "seed": "probe", **over}
+    return try_empty_remnant_exception(
+        maint, connect=_connector({"kline_pilot_probe": target}), **kw)
+
+
+def test_remnant_exception_all_six_conditions_pass():
+    """六条全成立 + 紧贴复查通过 → 返回**被授权的那个实例 oid**（不是裸 True）。
+
+    返回 oid 而不是布尔：`DROP DATABASE` 带不了谓词，授权与 DROP 之间同名库可以被
+    删掉又重建。授权不绑实例，本工具会去删一个从未被授权的替身。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) == "16400"
+
+
+def test_remnant_exception_requires_exact_db_name():
+    """第 2 条是**全等**而非前缀——它把爆炸半径限制在本次 seed（spec R56-F1）。"""
+    maint = _RemnantMaint(intent_rows=_intent())
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe(),
+                                db_name="kline_pilot_other")) is None
+
+
+def test_remnant_exception_requires_seed_lock_really_held():
+    """第 5 条：按 seed 的 advisory lock 必须**在活连接上真验**（spec O4-R5-C2）。
+
+    ⚠️ 计划片段这里收的是一个 `holds_seed_lock: bool` 参数 —— 那正是 4a-1 已经
+    删掉的可伪造断言（传 True 就能绕过）。判据必须查 `pg_locks`。
+    """
+    maint = _RemnantMaint(intent_rows=_intent(), seed_lock_held=False)
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) is None
+
+
+def test_remnant_exception_requires_absolutely_empty():
+    """第 3 条：一个装着物化视图的库不是残骸。判据用【绝对空】那组白名单式判据，
+    绝不用 information_schema.tables（物化视图会逃过它，spec O1-F1）。"""
+    maint = _RemnantMaint(intent_rows=_intent())
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe(non_empty_probes=[1]))) is None
+
+
+def test_remnant_exception_requires_intent_row():
+    """第 6 条：同事裸 `CREATE DATABASE` 与 `pg_restore --create` 都**没有** intent 行
+    → 拒（spec P1r3-F2：这是第 6 条存在的全部理由）。"""
+    maint = _RemnantMaint(intent_rows=[])
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) is None
+
+
+@pytest.mark.parametrize("over,label", [
+    ({"seed": "other"}, "seed 不符"),
+    ({"create_confirmed": False}, "未确认的行不是授权（O4-R8-C2）"),
+    ({"intent_db_oid": "99999"}, "凭据绑的是另一个实例（O4-R21-C1/R25-C1）"),
+    ({"intent_db_oid": None}, "凭据的实例绑定已被判掉"),
+    ({"age_seconds": INTENT_TTL_SECONDS}, "超过 INTENT_TTL（O4-F2）"),
+    ({"age_seconds": INTENT_TTL_SECONDS + 1}, "远超 INTENT_TTL"),
+])
+def test_remnant_exception_rejects_unqualified_intent_row(over, label):
+    """第 6 条的四个子判据**逐条**都要有判别力。
+
+    · `create_confirmed=false` 的行写在 `CREATE DATABASE` **之前**，证明不了库是本次建的
+      —— 拿它当授权会去 DROP **别人建的**同名空库，无 pilot_meta 归属、无令牌。
+    · 绑到另一个实例的行是**陈旧凭据**：原库被删、别人用同名重建之后，它会为那个
+      全新的、不是我们建的库背书。
+    · 孤儿 intent 行是一条**永久有效的销毁授权**；TTL 把窗口从「永久」收窄到 24h。
+    """
+    maint = _RemnantMaint(intent_rows=_intent(**over))
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) is None, label
+
+
+def test_remnant_exception_ttl_boundary_is_strictly_less_than():
+    """恰好差 1 秒仍算新鲜 —— 边界方向钉住，免得 `<` 与 `<=` 互换而无人察觉。"""
+    maint = _RemnantMaint(intent_rows=_intent(age_seconds=INTENT_TTL_SECONDS - 1))
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) == "16400"
+
+
+def test_remnant_exception_does_not_delete_stale_row():
+    """判定时**不删**超期行——普通运行不替别的 seed 做决定（spec O4-F2 修正②）。
+    清理只在 --init-cluster-marker 里做，且要逐行取 seed 锁。"""
+    maint = _RemnantMaint(intent_rows=_intent(age_seconds=INTENT_TTL_SECONDS + 1))
+    asyncio.run(_remnant(maint, _EmptyOnProbe()))
+    assert not any("DELETE" in q.upper() for q in maint.executed)
+
+
+def test_remnant_exception_rechecks_empty_immediately_before_drop():
+    """第 3 条与 DROP 之间不可原子：实测 `pg_restore --create` 存在
+    「库已建、表还没建」的空窗 → 六条全成立 → **DROP 掉一个正在恢复中的库**
+    （spec P1-F3）。故 DROP 前须**紧贴着**重查一次【绝对空】。"""
+    maint = _RemnantMaint(intent_rows=_intent())
+    target = _EmptyOnProbe(non_empty_probes=[2])       # 判定时空，复查时已有第一张表
+    assert asyncio.run(_remnant(maint, target)) is None
+    assert target.probes == 2, "必须真的探测了两次"
+
+
+def test_remnant_exception_empty_probe_bottoms_out_at_the_whitelist_predicate():
+    """第 3 条与紧贴复查都必须落到**裸【绝对空】**（`_is_absolutely_empty`）上。
+
+    ⚠️ 判据要**跟着调用链走**，不能只看 `try_empty_remnant_exception` 一层：
+       探测被提成 `_probe_absolutely_empty` 之后，只看外层的写法会在一个空集合上
+       恒真（我第一版就是那样，当场变红）。
+    ⚠️ 反向断言：零对象例外这条链上不许出现 `information_schema` 或 relkind 枚举 ——
+       真 PG 实测，一个只含物化视图（relkind='m'）的库会从这两种写法下逃掉，
+       于是**不过闸 0−/0/0b、不要令牌、无提示，直接 DROP**（spec O1-F1）。
+    """
+    import ast
+    import inspect
+    import textwrap
+    import qmt_pilot_db as m
+    chain = [m.try_empty_remnant_exception, m._probe_absolutely_empty]
+    names, srcs = set(), []
+    for fn in chain:
+        src = textwrap.dedent(inspect.getsource(fn))
+        srcs.append(src)
+        names |= {n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)}
+    assert "_probe_absolutely_empty" in names, "零对象例外没有走探测函数"
+    assert "_is_absolutely_empty" in names, "探测链没有落到【绝对空】的唯一实现上"
+    for bad in ("information_schema", "relkind IN", "relkind in"):
+        assert not any(bad in s for s in srcs), f"零对象例外链上出现 {bad!r}"
+
+
+def test_remnant_exception_closes_every_probe_connection():
+    """两次探测都是短连接：留一条活着就会把紧接着的 DROP 顶住（spec O1-F2 规定 1）。"""
+    maint = _RemnantMaint(intent_rows=_intent())
+    target = _EmptyOnProbe()
+    asyncio.run(_remnant(maint, target))
+    assert target.closed is True
+
+
+def test_remnant_exception_rejects_when_replacement_also_claims_the_new_oid():
+    """两次探测之间同名库被删掉又重建，**且替身自称就是新实例** → 仍须 fail-closed。
+
+    ⚠️ 这一档与下面那条不是重复：下面那条被 `adopt_connection` 挡下（替身还自称旧 oid），
+       走的是**连接接管**那条路径。真实的「删掉又重建」里，`connect()` 拿到的是新实例、
+       维护库读到的也是新 oid —— **adopt 会通过**，此时唯一挡得住的是
+       「复查拿到的 oid 必须还是判定时那一个」。
+       去掉那半个判据时，上一条测试**照样是绿的**（实测），本条才会变红。
+    """
+    target = _EmptyOnProbe()
+
+    class _RebuiltAfterFirstProbe(_RemnantMaint):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.oid_reads = 0
+
+        async def fetchval(self, query, *args):
+            if "d.oid::text FROM pg_database d WHERE d.datname::text = $1" in query:
+                self.oid_reads += 1
+                self.ops.append(query)
+                if self.oid_reads > 1:
+                    target.current_db_oid = "99999"     # 替身自称新实例 → adopt 过得了
+                    return "99999"
+                return "16400"
+            return await super().fetchval(query, *args)
+
+    maint = _RebuiltAfterFirstProbe(intent_rows=_intent())
+    assert asyncio.run(_remnant(maint, target)) is None
+    assert maint.oid_reads == 2, "必须真的探测了两次"
+
+
+def test_remnant_exception_read_intent_freshness_uses_the_database_clock():
+    """机械守卫：intent 行的**年龄只能由库自己的时钟算**（spec O4-R23-C1）。
+
+    ⚠️ host 假件直接喂 `age_seconds`，故 SQL 文本本身在 L1 是**零覆盖**的
+       —— 把 `EXTRACT(EPOCH FROM (now() - i.inserted_at))` 换成常量，
+       上面那一组 TTL 用例**全都照样是绿的**（实测）。所以这里改钉 SQL 文本：
+       `created_at` 是调用方传进来的字符串，数据库既不生成也不校验它，
+       很远的未来值让这行永远「新鲜」、永远抢不走 —— 而它是一张 DROP 授权。
+    """
+    import qmt_pilot_db as m
+    sql = m._READ_INTENT_SQL
+    assert "now() - i.inserted_at" in sql, "新鲜度没有用库时钟算"
+    assert "created_at" not in sql, "新鲜度不得取调用方传进来的 created_at"
+    assert "public.pilot_create_intent" in sql, "表引用必须 public. 限定（O4-R4-C1）"
+    assert "i.create_confirmed" in sql and "i.db_oid" in sql, \
+        "第 6 条的确认位与实例绑定必须由这条 SQL 取出来"
+
+
+def test_remnant_exception_rejects_when_adopt_catches_a_stale_instance():
+    """两次探测之间实例被换、而替身仍自称旧 oid → 由 `adopt_connection` 挡下。"""
+    class _SwapAfterFirst(_RemnantMaint):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.oid_reads = 0
+
+        async def fetchval(self, query, *args):
+            if "d.oid::text FROM pg_database d WHERE d.datname::text = $1" in query:
+                self.oid_reads += 1
+                self.ops.append(query)
+                return "16400" if self.oid_reads == 1 else "99999"
+            return await super().fetchval(query, *args)
+
+    maint = _SwapAfterFirst(intent_rows=_intent())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_remnant(maint, _EmptyOnProbe()))
+    assert ei.value.code == "connection_wrong_instance"
+
+
+# ---------------------------------------------------------------------------
+# drop_pilot_database —— spec §4「DROP DATABASE 之前必须断开…」规定 1/2/3
+# ---------------------------------------------------------------------------
+# ⚠️ 计划的 Task 3/4 里**没有任何 DROP 函数**：`assert_db_allowed_for_reset` 只做授权，
+#    而规定 1（连接数为 0）/ 2（禁 FORCE 与 pg_terminate_backend）/ 3（target_db_in_use
+#    fail-closed）三条在 4a 里就没有落点。只放进 L2 脚本的话，验收脚本验的是它自己
+#    写的那句 DROP，不是生产代码 —— 本仓记录在案的 vacuous 覆盖形态。
+
+class _DropMaint(_FakeConn):
+    """维护连接：额外答 `pg_stat_activity`（目标库上还有谁）。"""
+
+    def __init__(self, target_sessions=(), drop_error=None, **kw):
+        kw.setdefault("databases", ["kline_pilot_probe"])
+        super().__init__(**kw)
+        self.target_sessions = list(target_sessions)
+        self.drop_error = drop_error
+
+    async def fetch(self, query, *args):
+        if "pg_stat_activity" in query:
+            self.ops.append(query)
+            return list(self.target_sessions)
+        return await super().fetch(query, *args)
+
+    async def execute(self, query, *args):
+        if query.upper().startswith("DROP DATABASE") and self.drop_error is not None:
+            self.executed.append(query)
+            raise self.drop_error
+        return await super().execute(query, *args)
+
+
+def _session(pid=4242, usename="someone", application_name="psql"):
+    return {"pid": pid, "usename": usename, "application_name": application_name}
+
+
+class _PgError(Exception):
+    def __init__(self, sqlstate, msg="boom"):
+        super().__init__(msg)
+        self.sqlstate = sqlstate
+
+
+def _drop(maint, *, target=None, via_remnant=False, **over):
+    auth = over.pop("authorization",
+                    ResetAuthorization(_RESET_CAPABILITY,
+                                       db_oid=over.pop("authorized_oid", "16400"),
+                                       via_empty_remnant=via_remnant))
+    kw = {"db_name": "kline_pilot_probe", "seed": "probe", **over}
+    return _drop_pilot_database(
+        maint, connect=_connector({"kline_pilot_probe": target or _EmptyOnProbe()}),
+        authorization=auth, **kw)
+
+
+def _drops(conn):
+    return [q for q in conn.executed if q.upper().startswith("DROP DATABASE")]
+
+
+def test_drop_executes_a_plain_quoted_drop():
+    """正常路径：恰好一条 `DROP DATABASE "<名字>"`，标识符走 quote_ident。"""
+    maint = _DropMaint()
+    asyncio.run(_drop(maint))
+    assert _drops(maint) == ['DROP DATABASE "kline_pilot_probe"']
+
+
+def test_drop_refuses_when_any_session_is_on_the_target():
+    """规定 1：DROP 之前断言目标库上**零会话**，并把占用者打印出来（规定 3）。"""
+    maint = _DropMaint(target_sessions=[_session(pid=777, usename="dba",
+                                                 application_name="pgAdmin")])
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop(maint))
+    assert ei.value.code == "target_db_in_use"
+    for token in ("777", "dba", "pgAdmin"):
+        assert token in str(ei.value), f"占用者信息缺 {token}"
+    assert _drops(maint) == [], "闸未过时一句 DDL 都不许执行"
+
+
+def test_drop_refuses_when_the_instance_is_no_longer_the_authorized_one():
+    """授权与 DROP 之间同名库被删掉又重建 → 绝不 DROP 那个**从未被授权**的替身。
+
+    `DROP DATABASE` 带不了谓词，所以判据只能是「紧贴着再读一次 oid」。
+    残留窗口不可消除（如实登记），但把窗口从「整条授权链」收窄到「一次读之后」。
+    """
+    maint = _DropMaint()
+    maint.live_db_oid = "99999"
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop(maint))
+    assert ei.value.code == "target_db_replaced"
+    assert _drops(maint) == []
+
+
+def test_drop_requires_the_seed_lock_to_be_really_held():
+    """破坏性动作同样要求按 seed 的 advisory lock **在活连接上真被持有**（O4-R5-C2）。"""
+    maint = _DropMaint(seed_lock_held=False)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop(maint))
+    assert ei.value.code == "seed_lock_not_held"
+    assert _drops(maint) == []
+
+
+@pytest.mark.parametrize("over,code,label", [
+    ({"db_name": "kline_pilot_other"}, "seed_db_name_mismatch", "名字合法但不是本 seed 的"),
+    ({"db_name": "production_db"}, "illegal_db_name", "名字根本不许被 DROP"),
+    ({"db_name": "kline_pilot_probe\n"}, "illegal_db_name", "尾随换行（O1-F11）"),
+])
+def test_drop_refuses_a_name_it_must_not_touch(over, code, label):
+    """名字护栏排在**最前**，seed 派生判据紧随其后 —— 两条给出的诊断完全不同。
+
+    `production_db` 若先撞 seed 判据，操作者看到的是「不是这个 seed 派生的」，
+    而他真正需要看到的是「这个名字根本不允许被 DROP」。
+    """
+    maint = _DropMaint()
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop(maint, **over))
+    assert ei.value.code == code, label
+    assert _drops(maint) == []
+
+
+def test_drop_maps_object_in_use_to_target_db_in_use_and_never_retries_with_force():
+    """规定 3：断开自己之后仍被**别人**顶住 → fail-closed，**不得重试成强制**。"""
+    maint = _DropMaint(drop_error=_PgError("55006", "is being accessed by other users"))
+    maint.target_sessions = []          # 判定那一刻是空的，DROP 时才被别人连上
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop(maint))
+    assert ei.value.code == "target_db_in_use"
+    assert len(_drops(maint)) == 1, "只许发一次 DROP —— 绝不重试"
+    assert not any("FORCE" in q.upper() for q in maint.executed)
+
+
+def test_drop_does_not_swallow_unrelated_failures():
+    """权限不足之类**不是**「被占用」——不得一律兜成 target_db_in_use（那会误导恢复动作）。"""
+    maint = _DropMaint(drop_error=_PgError("42501", "permission denied to drop database"))
+    with pytest.raises(_PgError):
+        asyncio.run(_drop(maint))
+
+
+def test_module_never_uses_force_or_terminate_backend():
+    """spec §4 规定 2 明令禁止 —— 机械守卫，不靠人工 grep 清单。
+
+    `DROP DATABASE … WITH (FORCE)` 与 `pg_terminate_backend` 会**无差别 terminate
+    别人的会话**，正是本文件全套护栏要避免的行为。
+
+    ⚠️ 判据必须**剥掉注释与 docstring** 再看：本模块的 docstring 里就写着
+       「明令禁止 pg_terminate_backend」—— 只按行首 `#` 过滤的写法会被自己的说明文字
+       触发（我第一版就是那样，当场变红）。`ast.unparse` 顺带把注释也去掉了。
+    """
+    import ast
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parents[1] / "qmt_pilot_db.py").read_text()
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            continue
+        head = body[0]
+        if (isinstance(head, ast.Expr) and isinstance(head.value, ast.Constant)
+                and isinstance(head.value.value, str)):
+            node.body = body[1:] or [ast.Pass()]
+    code = ast.unparse(tree)
+    assert "pg_terminate_backend" not in code, "模块里出现被明令禁止的 pg_terminate_backend"
+    # ⚠️ **不能裸查 `FORCE`**：`_PILOT_TABLE_DEPENDENTS_SQL` 的 SQL 注释里正当地写着
+    #    `ENABLE/FORCE ROW LEVEL SECURITY`（RLS 判据的说明）。判据收窄到「DROP DATABASE
+    #    这条语句里出现 FORCE」—— 那才是被禁的东西。
+    import re
+    hit = re.search(r"DROP\s+DATABASE[^;\n]*FORCE", code, re.IGNORECASE)
+    assert hit is None, f"DROP DATABASE 带上了强制模式：{hit.group(0) if hit else ''!r}"
+    # 反向断言：剥完之后模块正文还在（剥过头会让上面两条恒真）
+    assert "DROP DATABASE" in code and len(code) > 20_000, \
+        "剥离 docstring 把正文也剥掉了 —— 上面的禁用判据会恒真"
+
+
+# ---------------------------------------------------------------------------
+# init_cluster_marker —— 幂等语义 + 孤儿 intent 行清理（spec §4 + O4-F7 + O4-F2 修正③）
+# ---------------------------------------------------------------------------
+
+# ⚠️ **必须是仓库里那份真文件**（codex 4a-2b R5-F1）：init 现在把 `cluster_schema_sql`
+#    钉到 `CANONICAL_CLUSTER_SCHEMA_SHA256`，随手编一段 DDL 过不了那道闸 ——
+#    而这正是它的意义：递进来的 DDL 会直接在**维护库**上执行。
+_CLUSTER_SQL = (_SQL_DIR / "pilot_cluster_schema.sql").read_text(encoding="utf-8")
+
+
+class _InitMaint(_FakeConn):
+    """维护连接：`_LIST_ALL_INTENT_SQL`（不带 WHERE）与三张表结构的「补建后才合规」。"""
+
+    def __init__(self, all_intent_rows=(), intent_table_missing=False, **kw):
+        super().__init__(**kw)
+        self.all_intent_rows = list(all_intent_rows)
+        # 旧版本初始化的集群：marker 在、intent/registry 表不在 → 结构判据先不合规，
+        # 跑过建表 SQL 之后才合规。短路成功的实现修不好这种集群（spec O4-F7）。
+        # 三张维护表**在不在场**（R6-F2：与「在场但结构坏」必须分得开）
+        self.maintenance_presence = {"marker_present": True, "intent_present": True,
+                                     "registry_present": True}
+        if intent_table_missing:
+            self.maintenance_presence["intent_present"] = False
+            self.maintenance_shape = {**_OK_MAINTENANCE_SHAPE,
+                                      "intent_is_table": False,
+                                      "intent_columns_ok": False,
+                                      "intent_dbname_unique": False,
+                                      "maintenance_tables_durable": False}
+
+    async def fetch(self, query, *args):
+        # ⚠️ 同上：精确到 `FROM public.pilot_create_intent` **后面直接换行**
+        #    （即无别名无 WHERE 的那条全表扫描），免得劫走闸 (iii) 的豁免 CTE。
+        if "FROM public.pilot_create_intent\n" in query:
+            self.ops.append(query)
+            return list(self.all_intent_rows)
+        return await super().fetch(query, *args)
+
+    async def execute(self, query, *args):
+        out = await super().execute(query, *args)
+        if "CREATE TABLE" in query.upper():
+            self.maintenance_shape = dict(_OK_MAINTENANCE_SHAPE)   # 补建之后结构就合规了
+            self.maintenance_presence = {k: True for k in self.maintenance_presence}
+        if "pilot_cluster_marker" in query and "INSERT" in query.upper():
+            # 写完标记之后，随后的「每次现查」应当读得到它（codex 4a-2b R3-F1）
+            self.marker_rows = [{"purpose": MARKER_PURPOSE}]
+        return out
+
+
+def _orphan(dbname="kline_pilot_gone", seed="gone", age_seconds=0, db_oid="16400"):
+    """⚠️ 字段必须与 `_LIST_ALL_INTENT_SQL` 的输出逐字一致 —— 少给一个就是
+    「测试在测另一个东西」。`db_oid` 是 R4-F3 之后新增的：预筛要绑实例。"""
+    return {"dbname": dbname, "seed": seed, "age_seconds": age_seconds,
+            "db_oid": db_oid}
+
+
+def _locker(*, grants=True, record=None, released=None):
+    """返回 (try_seed_lock, release_seed_lock) 一对 —— **取了就必须还**（R5-F2）。"""
+    async def _try(seed):
+        if record is not None:
+            record.append(seed)
+        return grants
+
+    async def _release(seed):
+        if released is not None:
+            released.append(seed)
+    return _try, _release
+
+
+def _init(maint, *, targets=None, lock_pair=None):
+    try_lock, release_lock = lock_pair or _locker()
+    return init_cluster_marker(
+        maint, connect=_connector(targets or {}), cluster_schema_sql=_CLUSTER_SQL,
+        try_seed_lock=try_lock, release_seed_lock=release_lock)
+
+
+def _marker_writes(conn):
+    # ⚠️ 判别式必须锚在**语句开头**：`_CLUSTER_SQL` 现在是仓库里那份真文件，
+    #    它的注释里同时含 `pilot_cluster_marker` 与 `INSERT` 两个词，
+    #    松散的子串匹配会把建表 DDL 也算成「写标记」（与 `_deletes` 那次同一族）。
+    return [q for q in conn.executed
+            if q.strip().upper().startswith("INSERT") and "pilot_cluster_marker" in q]
+
+
+def _deletes(conn):
+    # ⚠️ 必须 `.strip()`：孤儿删除 SQL 是三引号常量、以换行开头。不 strip 的话
+    #    「不许删」那几条断言会变成恒真（本轮实测两条用例因此空转过）。
+    return [q for q in conn.executed if q.strip().upper().startswith("DELETE")]
+
+
+def test_init_repairs_a_cluster_initialized_by_an_older_build():
+    """旧版本没有 `pilot_create_intent` 表 → 零对象例外第 6 条恒不成立 → 残骸永远清不掉。
+    **幂等短路成功的实现修不好这种集群**（spec O4-F7）。"""
+    maint = _InitMaint(intent_table_missing=True)
+    asyncio.run(_init(maint))
+    assert any("CREATE TABLE" in q.upper() for q in maint.executed), \
+        "结构不合规时必须补建，不得短路成功"
+
+
+def test_init_verifies_the_shape_after_creating_the_tables():
+    """补建之后**还要再验一次结构** —— 「执行过 DDL」不等于「结构就对」（与闸 (i) 同一条纪律）。
+
+    建表 SQL 是调用方传进来的；传错一份、或库里本就存在一张被 `IF NOT EXISTS` 跳过的
+    旧表，都会让集群带着坏结构被声明为 pilot 专用。
+    """
+    maint = _InitMaint()
+    maint.maintenance_shape = {**_OK_MAINTENANCE_SHAPE, "intent_dbname_unique": False}
+
+    async def _still_broken(query, *args):          # 建表也修不好它
+        return "CREATE TABLE"
+    maint.execute = _still_broken
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "no_marker"
+
+
+@pytest.mark.parametrize("rows,label", [
+    ([{"purpose": MARKER_PURPOSE}, {"purpose": "x"}], "多行"),
+    ([{"purpose": "something_else"}], "值不对"),
+])
+def test_init_rejects_an_illegal_marker(rows, label):
+    """标记非法/多行 → **拒绝**，要求人工处理（spec §4）。绝不「顺手改成对的」。"""
+    maint = _InitMaint(marker_rows=rows)
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "no_marker", label
+    assert _marker_writes(maint) == []
+
+
+def test_init_is_idempotent_when_everything_is_already_legal():
+    """已存在合法单行标记且三张表形状合规 → 直接成功，不重复写标记。"""
+    maint = _InitMaint()
+    asyncio.run(_init(maint))
+    assert _marker_writes(maint) == []
+
+
+def test_init_refuses_to_declare_a_cluster_whose_maintenance_db_is_not_empty():
+    """首次初始化前必须先证明集群干净（闸 (iii)）—— 生产对象可以就放在默认 postgres 库里。"""
+    maint = _InitMaint(marker_rows=[], user_objects=[("pg_class", 7)],
+                       exempt_objects=[("pg_class", 7)])
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "maintenance_db_not_empty"
+    assert _marker_writes(maint) == []
+
+
+def test_init_refuses_when_an_unrelated_database_exists():
+    """首次初始化前必须先证明集群干净（闸 (ii) 的名字那一半）。"""
+    maint = _InitMaint(marker_rows=[], databases=["payments_prod"])
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "unrelated_database"
+    assert _marker_writes(maint) == []
+
+
+def test_init_refuses_when_a_prefixed_but_non_empty_database_exists():
+    """**前缀名不是归属证明**（spec R22-F1，本 spec 第五次）：一台已经有
+    `kline_pilot_x`（非空、来路不明）的集群不该被声明为「一次性可弃」。
+
+    ⚠️ 计划片段这里只查名字前缀 —— 那等于把前缀当成充分的归属证明。
+       首次初始化时 `pilot_database_registry` 必然是空的，所以任何非空的同前缀库
+       都证明不了归属，判据只能是【绝对空】。
+    """
+    stranger = _FakeConn(user_objects=[("pg_class", 3)])
+    maint = _InitMaint(marker_rows=[], databases=["kline_pilot_stranger"])
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint, targets={"kline_pilot_stranger": stranger}))
+    assert ei.value.code == "unowned_pilot_database"
+    assert _marker_writes(maint) == []
+
+
+def test_init_accepts_an_empty_prefixed_remnant_and_writes_the_marker():
+    """反向钉：零用户对象的同名残骸不该挡住初始化（否则 R55-F1 的锁死换形态复发）。"""
+    remnant = _FakeConn()
+    maint = _InitMaint(marker_rows=[], databases=["kline_pilot_remnant"])
+    asyncio.run(_init(maint, targets={"kline_pilot_remnant": remnant}))
+    assert len(_marker_writes(maint)) == 1
+
+
+def test_init_cleans_orphan_rows_only_under_the_seed_lock():
+    """不持 seed 锁就删，会删掉**一次正在进行的运行**的行 → 那次运行随后判第 6 条
+    不成立 → **自己的残骸自己清不掉**（spec O4-F2 修正③）。"""
+    maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_running",
+                                                seed="running")])
+    asyncio.run(_init(maint, lock_pair=_locker(grants=False)))
+    assert _deletes(maint) == [], "取不到 seed 锁就必须跳过，不得删"
+
+
+def test_init_takes_the_lock_of_the_row_being_deleted():
+    """锁必须**逐行按那一行的 seed** 取，不是随便取一把。"""
+    asked = []
+    maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_gone", seed="gone")])
+    asyncio.run(_init(maint, lock_pair=_locker(record=asked)))
+    assert asked == ["gone"]
+
+
+@pytest.mark.parametrize("row,label", [
+    (_orphan(dbname="kline_pilot_stale", seed="stale",
+             age_seconds=INTENT_TTL_SECONDS), "超期"),
+    (_orphan(dbname="kline_pilot_gone", seed="gone"), "库已不存在"),
+])
+def test_init_deletes_stale_or_vanished_rows(row, label):
+    """清理判据 = **超期 OR 库不存在**（spec O4-F2 修正③）。"""
+    maint = _InitMaint(all_intent_rows=[row], databases=["kline_pilot_stale"])
+    asyncio.run(_init(maint, targets={"kline_pilot_stale": _FakeConn()}))
+    assert len(_deletes(maint)) == 1, label
+
+
+def test_init_keeps_a_fresh_row_of_a_live_database():
+    """既新鲜、库又真的存在 → 不是孤儿，不许删。"""
+    maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_live", seed="live")],
+                       databases=["kline_pilot_live"])
+    asyncio.run(_init(maint, targets={"kline_pilot_live": _FakeConn()}))
+    assert _deletes(maint) == []
+
+
+def test_orphan_cleanup_uses_a_delete_that_can_actually_match_an_orphan():
+    """机械守卫：孤儿删除**不能复用** `_DELETE_INTENT_SQL` / `_CLEAR_INTENT_SQL`。
+
+    前者带 `AND NOT create_confirmed`，而孤儿恰恰是**已确认**的行 → 它永远匹配 0 行；
+    两者都还带 `run_id = $2`，而清理孤儿的这次运行**不是**写下那一行的那次运行。
+    计划片段正是调的 `_DELETE_INTENT_SQL(dbname)` —— 参数个数都对不上，
+    真跑起来会是「命令发了、一行没删」的静默失败。
+    """
+    import qmt_pilot_db as m
+    sql = m._DELETE_ORPHAN_INTENT_SQL
+    assert "run_id" not in sql, "孤儿清理不该按 run_id 过滤"
+    assert "create_confirmed" not in sql, "孤儿恰恰是已确认的行"
+    assert "public.pilot_create_intent" in sql, "表引用必须 public. 限定"
+    # ⚠️ 判据必须**在 SQL 里、在锁内**求值（codex 4a-2b R3-F2）：先查后删的写法会按
+    #    快照时的陈旧状态，删掉一条同 seed 运行**刚刷新过的**恢复凭据。
+    assert "now() - inserted_at" in sql, "超期判据没有下沉进 DELETE"
+    assert "pg_database" in sql and "d.oid" in sql, "「库不存在」判据没有下沉、或没绑实例"
+    assert sql.count("$1") == 1 and sql.count("$2") == 1, "参数应为 dbname + TTL 两个"
+
+
+def test_init_orphan_freshness_uses_the_database_clock():
+    """孤儿清理的新鲜度同样只认库时钟（spec O4-R23-C1），不认调用方传的 created_at。"""
+    import qmt_pilot_db as m
+    sql = m._LIST_ALL_INTENT_SQL
+    assert "now() - inserted_at" in sql or "now() - i.inserted_at" in sql
+    assert "created_at" not in sql
+
+
+# ── codex 4a-2a R4-F2：--reset 的单一入口，把 spec §4 的次序焊进模块 ──────
+
+def _authorize(maint, target, **over):
+    kw = {"db_name": "kline_pilot_probe", "seed": "probe",
+          "export_log_sha256": "a" * 64, "output_dir": "/x/y",
+          "reset_foreign_token": None, **over}
+    return authorize_reset(
+        maint, connect=_connector({"kline_pilot_probe": target}), **kw)
+
+
+def test_authorize_reset_clears_an_empty_remnant_that_has_no_pilot_meta():
+    """崩在 `CREATE DATABASE` 与写 `pilot_meta` 之间的**空残骸**必须清得掉。
+
+    它根本没有 pilot_meta，直接走闸 0− 会撞 `not_owned`「拒绝 DROP、库原样保留」
+    → 残骸永远清不掉 —— 正是 R56-F1 花一整轮修的洞，也正是 R55-F1 那句
+    「能被自己 --reset 清掉重来」会变成空话的地方。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    remnant = _EmptyOnProbe(meta_table_present=False)      # 空库：连 pilot_meta 都没有
+    auth = asyncio.run(_authorize(maint, remnant))
+    assert auth.db_oid == "16400" and auth.via_empty_remnant is True
+
+
+def test_authorize_reset_falls_through_to_the_gates_when_the_exception_does_not_apply():
+    """非空库（有 pilot_meta）走正常闸序，例外不适用。"""
+    maint = _RemnantMaint(intent_rows=_intent())
+    target = _EmptyOnProbe(non_empty_probes=[1], meta_rows=_full_meta_rows())
+    auth = asyncio.run(_authorize(maint, target))
+    assert auth.db_oid == "16400" and auth.via_empty_remnant is False
+
+
+def test_authorize_reset_still_refuses_a_foreign_database():
+    """落到闸序之后，归属不符照样拒 —— 单一入口不等于放宽判据。"""
+    maint = _RemnantMaint(intent_rows=_intent())
+    target = _EmptyOnProbe(non_empty_probes=[1],
+                           meta_rows=_full_meta_rows(tool="something_else"))
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_authorize(maint, target))
+    assert ei.value.code == "not_owned"
+
+
+def test_authorize_reset_wires_both_steps_in_the_spec_order():
+    """机械守卫：单一入口必须**同时**引用两步，且例外在前。
+
+    ⚠️ 判据走 AST 而非源码文本 —— docstring 里提到函数名会让文本判据恒真
+    （同一形态在本 PR 已被变异抓到过一次）。
+    """
+    import ast
+    import inspect
+    import textwrap
+    import qmt_pilot_db as m
+    src = textwrap.dedent(inspect.getsource(m.authorize_reset))
+    tree = ast.parse(src)
+    calls = [n.func.id for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    assert "try_empty_remnant_exception" in calls, "单一入口没有走零对象例外"
+    assert "assert_db_allowed_for_reset" in calls, "单一入口没有走闸 0−/0/0b"
+    assert calls.index("try_empty_remnant_exception") < calls.index(
+        "assert_db_allowed_for_reset"), "次序反了：例外必须排在闸 0− 之前"
+
+
+class _CloseFailsOnNth(_EmptyOnProbe):
+    """只在**第 n 次** close 时失败 —— 让两处释放校验各自可分辨。"""
+
+    def __init__(self, fail_on=1, **kw):
+        super().__init__(**kw)
+        self.closes = 0
+        self.fail_on = fail_on
+
+    async def close(self):
+        self.closes += 1
+        if self.closes == self.fail_on:
+            raise RuntimeError("connection reset by peer")
+        await super().close()
+
+
+@pytest.mark.parametrize("fail_on,label", [
+    (1, "判定那次探测关不掉"),
+    (2, "DROP 前紧贴复查那次关不掉"),
+])
+def test_remnant_exception_refuses_authorization_when_it_cannot_release_a_probe(
+        fail_on, label):
+    """零对象例外在交出销毁授权前，**两次探测各自**都要证明会话已放掉（codex R2-F1 同族）。
+
+    ⚠️ 必须按「第几次 close 失败」参数化：让**两次都失败**的写法里，
+       删掉其中任意一处校验另一处仍会拦住 —— 两条变异都跑出绿色（实测），
+       即这两处校验各自的覆盖是零。这与 4a-1 为 `pin_search_path` 记下的
+       「钉桩在多处冗余 → 黑盒断言分辨不出是哪一处」是同一个坑。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_remnant(maint, _CloseFailsOnNth(fail_on=fail_on)))
+    assert ei.value.code == "target_db_in_use", label
+
+
+# ── codex 4a-2b R1：集群闸机器强制 + 调用方 SQL 跑完必须重钉 search_path ──────
+
+def test_authorize_reset_enforces_the_cluster_gate_itself():
+    """零对象例外的第 4 条（集群闸已全过）**必须机器强制，不能只写在 docstring 里**。
+
+    这条路径的下一步就是不可逆的 `DROP DATABASE`；接线失误会让标记闸、无关库闸、
+    维护库空闸全部被跳过。`create_pilot_database` 早就为同一条理由把它下沉进函数里
+    （O4-R5-C2）—— 本入口是同族的第二处。
+    """
+    maint = _RemnantMaint(intent_rows=_intent(), marker_rows=[])   # 集群没有合法标记
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_authorize(maint, _EmptyOnProbe(meta_table_present=False)))
+    assert ei.value.code == "no_marker"
+
+
+def test_authorize_reset_runs_the_cluster_gate_before_anything_touches_the_target():
+    """集群闸没过 → 目标库上一条查询都不许发（探测连接本身就会顶住随后的 DROP）。"""
+    maint = _RemnantMaint(intent_rows=_intent(), marker_rows=[])
+    target = _EmptyOnProbe(meta_table_present=False)
+    with pytest.raises(PilotClusterBoundaryError):
+        asyncio.run(_authorize(maint, target))
+    assert target.ops == [], "集群闸未过时不该对目标库发出任何查询"
+
+
+def test_init_repins_search_path_after_running_caller_supplied_sql():
+    """`cluster_schema_sql` 是**调用方递进来的**文件；跑完必须把名字解析钉回来
+    （O4-R22-C1 同族 —— create 路径对两份 .sql 各钉了一次，init 此前漏了）。
+
+    事务里的普通 `SET search_path` 提交之后**仍留在会话上**（只有 `SET LOCAL` 不留）。
+    一份漂移/敌意的 .sql 只要含一句 `SET search_path = evil, pg_catalog, public`，
+    其后的结构判据 / marker 读取 / pg_database 枚举 / 用户对象扫描 / 孤儿清理
+    就全都跑在它选定的解析下 —— 一台脏的维护库会被判成干净并声明为 pilot 专用。
+    """
+    # ⚠️ 必须用**真会补建**的场景：三表齐全时本函数根本不发 DDL（R8-F1 之后），
+    #    拿健康集群来测这条会在 `next(...)` 上撞 StopIteration —— 那不是「守卫失效」。
+    maint = _InitMaint(intent_table_missing=True)
+    asyncio.run(_init(maint))
+    ddl_at = next(i for i, q in enumerate(maint.ops) if "CREATE TABLE" in q.upper())
+    pins_after = [i for i, q in enumerate(maint.ops)
+                  if q == PIN_SEARCH_PATH_SQL and i > ddl_at]
+    assert pins_after, "跑完调用方 SQL 之后没有重新钉 search_path"
+    # 重钉必须紧跟在调用方 SQL 之后，且**排在任何守卫查询之前**
+    first_guard = next((i for i, q in enumerate(maint.ops)
+                        if i > ddl_at and q != PIN_SEARCH_PATH_SQL), None)
+    assert first_guard is None or pins_after[0] < first_guard, (
+        f"重钉排在了守卫查询之后 —— 中间那条查询仍跑在调用方选定的解析下"
+        f"（第一条守卫查询：{maint.ops[first_guard][:60]!r}）")
+
+
+# ── codex 4a-2b R2：零对象授权会过期 / 落空路径也要证明会话已释放 ──────────
+
+def test_drop_rechecks_emptiness_for_a_remnant_authorization():
+    """零对象例外的授权理由**就是「这个库当时是空的」**，而那是个会过期的事实。
+
+    授权发出到 DROP 执行之间，`pg_restore --create` 或人工建表都能往那个空库里放东西 ——
+    oid 没变、会话数也是 0，于是本工具会 DROP 掉一个**既无 pilot_meta 归属、
+    也没过 --reset-foreign 令牌**的非空库。spec §4 要求那次复查**紧贴 DROP**，
+    而把授权与 DROP 拆成两个函数之后，那个「紧贴」跨了函数边界。
+    """
+    maint = _DropMaint()
+    now_dirty = _EmptyOnProbe(non_empty_probes=[1])     # 紧贴 DROP 复查时已经不空了
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop(maint, target=now_dirty, via_remnant=True))
+    assert ei.value.code == "not_owned"
+    assert _drops(maint) == [], "复查不过时一句 DDL 都不许执行"
+
+
+def test_drop_does_not_require_emptiness_for_a_gate_authorization():
+    """**反向钉**：走闸 0−/0/0b 拿到的授权，要销毁的本来就是装着数据的库。
+
+    把「必须为空」无差别套到两条来路上，会让正常的 --reset 彻底不可用。
+    """
+    maint = _DropMaint()
+    fat = _EmptyOnProbe(non_empty_probes=[1, 2, 3])
+    asyncio.run(_drop(maint, target=fat, via_remnant=False))
+    assert _drops(maint) == ['DROP DATABASE "kline_pilot_probe"']
+
+
+def test_drop_rechecks_the_instance_during_the_remnant_probe():
+    """复查那一刻实例已被换掉 → 绝不 DROP 那个替身。"""
+    maint = _DropMaint()
+    maint.live_db_oid = None
+    target = _EmptyOnProbe()
+    target.current_db_oid = "16400"
+
+    class _SwapAtProbe(_DropMaint):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.oid_reads = 0
+
+        async def fetchval(self, query, *args):
+            if "d.oid::text FROM pg_database d WHERE d.datname::text = $1" in query:
+                self.oid_reads += 1
+                self.ops.append(query)
+                if self.oid_reads >= 2:
+                    target.current_db_oid = "99999"
+                    return "99999"
+                return "16400"
+            return await super().fetchval(query, *args)
+
+    swapped = _SwapAtProbe()
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop(swapped, target=target, via_remnant=True))
+    assert ei.value.code == "target_db_replaced"
+    assert _drops(swapped) == []
+
+
+@pytest.mark.parametrize("probes,fail_on,label", [
+    ([1], 1, "第一次探测判非空、且关不掉"),
+    ([2], 2, "复查判非空、且关不掉"),
+])
+def test_remnant_exception_checks_release_even_when_it_falls_through(
+        probes, fail_on, label):
+    """**落空路径也要证明会话已释放**（codex 4a-2b R2-F2）。
+
+    判空为「非空」时本函数返回 None，`authorize_reset` 随后落到闸 0−/0/0b ——
+    而本模块自己那条没关掉的会话仍活着，最后的 DROP 会以
+    「target_db_in_use，占用者是别人」失败，而那个「别人」就是我们自己。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    target = _CloseFailsOnNth(fail_on=fail_on, non_empty_probes=probes)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_remnant(maint, target))
+    assert ei.value.code == "target_db_in_use", label
+
+
+def test_drop_refuses_when_its_own_remnant_probe_cannot_be_released():
+    """紧贴 DROP 那次复查**自己开的连接**也必须证明关掉了 —— 否则 DROP 会被它顶住。
+
+    ⚠️ 这条是变异抓出来的：只加复查、不校验它自己那条探测连接的释放时，
+       上面那组用例全绿（变异「DROP 探测的释放不校验」跑出 16 passed）。
+    """
+    maint = _DropMaint()
+    unreleasable = _CloseFailsOnNth(fail_on=1)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop(maint, target=unreleasable, via_remnant=True))
+    assert ei.value.code == "target_db_in_use"
+    assert _drops(maint) == [], "释放证明不了时一句 DDL 都不许执行"
+
+
+def test_remnant_exception_pins_search_path_before_proving_the_seed_lock():
+    """见 `_SEED_LOCK_PIN_WHY`（codex 4a-2a R5-F1 同族）。"""
+    maint = _RemnantMaint(intent_rows=_intent())
+    asyncio.run(_remnant(maint, _EmptyOnProbe()))
+    _assert_pinned_before_lock_proof(maint)
+
+
+# ── codex 4a-2b R3：标记不能短路现查 / 孤儿删除判据必须在锁内原子求值 ──────
+
+@pytest.mark.parametrize("dirty,code,why", [
+    (lambda m: setattr(m, "databases", ["payments_prod"]),
+     "unrelated_database", "集群后来被拿去装了真实数据库"),
+    (lambda m: setattr(m, "exempt_objects", [("pg_class", 9)]),
+     "maintenance_db_not_empty", "维护库后来多了用户对象"),
+])
+def test_init_revalidates_the_cluster_even_when_the_marker_already_exists(dirty, code, why):
+    """**标记只证明「有人曾声明过」，现查才证明「现在仍然成立」**（spec §4 R17-F1）。
+
+    此前 (ii)(iii) 只写在「首次初始化」那一支里，于是一台**带着合法标记的脏集群**
+    会被 init 直接判成功，还接着去动维护库里的 intent 行。
+    spec 点名的两条现实路径：①当初为空的 pilot 集群后来装了真实数据库；
+    ②标记随 `pg_dump`/卷拷贝被还原或复制到另一个集群。
+    """
+    maint = _InitMaint()                       # 标记已存在且合法
+    dirty(maint)
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == code, why
+
+
+def test_init_does_not_clean_orphans_on_a_cluster_that_is_no_longer_clean():
+    """现查不过时，**一行 intent 都不许动** —— 那是别的集群/别人的状态。"""
+    maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_gone", seed="gone")],
+                       databases=["payments_prod"])
+    with pytest.raises(PilotClusterBoundaryError):
+        asyncio.run(_init(maint))
+    assert _deletes(maint) == []
+
+
+def test_orphan_delete_predicate_is_evaluated_under_the_lock_not_from_a_snapshot():
+    """机械守卫：「超期 OR 库不存在」必须**在 DELETE 的 WHERE 里**（codex R3-F2）。
+
+    先 `SELECT` 一批、再逐行取锁、然后只按 dbname 删 —— 中间的窗口里同 seed 的另一次
+    运行可以启动、刷新/确认自己的 intent 行、崩在写 pilot_meta 之前、并随连接断开释放锁；
+    此时本循环拿到锁，却按**快照时看到的陈旧状态**把那条**新鲜的恢复凭据**删掉，
+    留下一个零对象例外再也授权不了的空残骸。
+    """
+    import ast
+    import inspect
+    import textwrap
+    import qmt_pilot_db as m
+    sql = m._DELETE_ORPHAN_INTENT_SQL
+    assert "now() - inserted_at" in sql and "pg_database" in sql, \
+        "两条判据没有下沉进 DELETE"
+    # 循环体里不许再出现「按 Python 侧快照决定删不删」的裸删除
+    src = textwrap.dedent(inspect.getsource(m.init_cluster_marker))
+    tree = ast.parse(src)
+    consts = [n.value for n in ast.walk(tree)
+              if isinstance(n, ast.Constant) and isinstance(n.value, str)
+              and "DELETE" in n.value.upper()]
+    assert not consts, f"init 里有内联 DELETE 字面量：{consts}"
+
+
+# ── codex 4a-2b R4：DROP 后清凭据 / 破坏性入口一体化 / 预筛也要绑实例 ────────
+
+def test_drop_clears_the_intent_row_of_the_instance_it_destroyed():
+    """DROP 成功之后必须清掉那条已经无所指的凭据（codex R4-F1）。
+
+    不清的话，那一行仍然**新鲜且已确认**、只是指向一个已消失的 oid；
+    而 `_INSERT_INTENT_SQL` 的接管条件是「同 run_id **或**已超 TTL」，
+    重建用的是**新的 run_id** → RETURNING 为空 → `intent_row_conflict`。
+    于是 `--reset` 把库删掉了却重建不了，要等 TTL 或人工清理 —— **自锁**。
+    """
+    maint = _DropMaint()
+    asyncio.run(_drop(maint, via_remnant=False))
+    cleared = [q for q in maint.executed
+               if q.strip().upper().startswith("DELETE")
+               and "pilot_create_intent" in q]
+    assert len(cleared) == 1, "DROP 之后没有清掉那条 intent 凭据"
+
+
+def test_drop_clear_is_bound_to_the_destroyed_instance():
+    """清理谓词必须绑 (dbname, seed, **被授权销毁的那个 oid**)。
+
+    只按名字清会连**同名新实例**的凭据一起删掉 —— 那是别人的恢复凭据。
+    """
+    import qmt_pilot_db as m
+    sql = m._CLEAR_DROPPED_INTENT_SQL
+    assert "dbname = $1" in sql and "seed = $2" in sql and "db_oid::text = $3" in sql, \
+        f"清理谓词没有同时绑名字/seed/实例：{sql}"
+
+
+def test_reset_pilot_database_is_the_only_public_destructive_entry():
+    """`ResetAuthorization` 只是个公开 NamedTuple —— 把 DROP 单独暴露出去，
+    一次接线失误就能用当前 oid 现造一个凭据、把集群闸/归属闸/绑定闸/令牌全绕过去
+    （codex R4-F2）。故 DROP 私有化，另立授权+销毁一体的公开入口。
+    """
+    import ast
+    import inspect
+    import textwrap
+    import qmt_pilot_db as m
+    assert not hasattr(m, "drop_pilot_database"), \
+        "公开的 drop_pilot_database 还在 —— 破坏性入口必须自己强制自己的护栏"
+    assert hasattr(m, "_drop_pilot_database") and hasattr(m, "reset_pilot_database")
+    tree = ast.parse(textwrap.dedent(inspect.getsource(m.reset_pilot_database)))
+    calls = [n.func.id for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    assert "authorize_reset" in calls and "_drop_pilot_database" in calls
+    assert calls.index("authorize_reset") < calls.index("_drop_pilot_database"), \
+        "次序反了：先授权、再销毁"
+
+
+def test_reset_pilot_database_refuses_a_foreign_database_end_to_end():
+    """端到端：归属不符时一体化入口照样拒，且一句 DDL 都不发。"""
+    target = _EmptyOnProbe(non_empty_probes=[1],
+                           meta_rows=_full_meta_rows(tool="something_else"))
+    maint = _RemnantMaint(intent_rows=_intent())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(reset_pilot_database(
+            maint, connect=_connector({"kline_pilot_probe": target}),
+            db_name="kline_pilot_probe", seed="probe",
+            export_log_sha256="a" * 64, output_dir="/x/y", reset_foreign_token=None))
+    assert ei.value.code == "not_owned"
+    assert _drops(maint) == []
+
+
+def test_orphan_prefilter_treats_a_replaced_same_name_database_as_vanished():
+    """预筛必须**绑实例**（codex R4-F3）：只按名字判「库还在不在」时，
+    「原实例被删掉、别人用同名重建」这一档会被判成「没消失」→ 直接 continue →
+    锁内那条 OID-aware 的 DELETE **永远跑不到**，陈旧行一直赖着把建库卡到 TTL。
+    """
+    maint = _InitMaint(
+        all_intent_rows=[_orphan(dbname="kline_pilot_reborn", seed="reborn",
+                                 db_oid="16400")],           # 凭据记的是**旧**实例
+        databases=["kline_pilot_reborn"])
+    maint.database_oids = {"kline_pilot_reborn": "99999"}    # 同名，但已是另一个实例
+    reborn = _FakeConn()
+    reborn.current_db_oid = "99999"                          # 新实例自称就是 99999
+    asyncio.run(_init(maint, targets={"kline_pilot_reborn": reborn}))
+    assert len(_deletes(maint)) == 1, "同名替身没有被判成 vanished，OID 判据跑不到"
+
+
+# ── codex 4a-2b R5：副作用必须排在证明之后 / 取了锁就必须还 ─────────────────
+
+def test_init_executes_no_ddl_before_proving_the_maintenance_db_is_safe():
+    """`cluster_schema_sql` 会直接在**维护库**上执行。`--maintenance-dsn` 指错到一个
+    生产库时，先建表再拒绝 = 已经在别人库里落下了三张表（codex R5-F1）。
+
+    「副作用排在证明之后」是本 spec 反复立的规矩（intent 行、登记行、确认位都这么排）。
+    """
+    maint = _InitMaint(user_objects=[("pg_class", 9)], exempt_objects=[("pg_class", 9)])
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "maintenance_db_not_empty"
+    assert maint.executed == [], f"拒绝之前已经执行了 DDL：{maint.executed}"
+
+
+def test_init_executes_no_ddl_when_the_marker_is_illegal():
+    """标记非法同样要在**动 DDL 之前**拒 —— 那台集群的维护库不该被我们碰。"""
+    maint = _InitMaint(marker_rows=[{"purpose": MARKER_PURPOSE}, {"purpose": "x"}])
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "no_marker"
+    assert maint.executed == []
+
+
+def test_init_refuses_a_cluster_schema_that_is_not_the_canonical_file():
+    """递进来的 DDL 必须逐字节等于仓库那份（codex R5-F1）。
+
+    4a-1 给 `schema.sql` 与 `pilot_schema.sql` 各钉了规范哈希，唯独这份漏了 ——
+    而漂移的版本可以 DROP/TRUNCATE 掉 marker/intent/registry 三张表，
+    随后的结构判据**只看形状不看行**，被删掉的恢复凭据与归属登记一条都发现不了。
+    """
+    maint = _InitMaint()
+    evil = _CLUSTER_SQL + "\nTRUNCATE public.pilot_create_intent;\n"
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(init_cluster_marker(
+            maint, connect=_connector({}), cluster_schema_sql=evil,
+            try_seed_lock=_locker()[0], release_seed_lock=_locker()[1]))
+    assert ei.value.code == "cluster_schema_not_canonical"
+    assert maint.executed == [], "连一条查询都不该发 —— 这是纯函数判定"
+
+
+def test_canonical_cluster_schema_hash_matches_the_repo_file():
+    """防漂移：改了 `pilot_cluster_schema.sql` 而没更新常量，这颗钉子当场变红
+    （与 4a-1 给另外两份 schema 立的钉子同族）。"""
+    import qmt_pilot_db as m
+    actual = m.sha256_of_sql(
+        (_SQL_DIR / "pilot_cluster_schema.sql").read_text(encoding="utf-8"))
+    assert actual == m.CANONICAL_CLUSTER_SCHEMA_SHA256, (
+        f"pilot_cluster_schema.sql 变了：实算 {actual!r}，"
+        f"常量 {m.CANONICAL_CLUSTER_SCHEMA_SHA256!r}")
+
+
+def test_canonical_cluster_schema_file_stays_non_destructive():
+    """反向断言：那份文件本身只许有 `CREATE TABLE IF NOT EXISTS`。
+
+    光钉哈希挡不住「有人既改了文件、又顺手更新了常量」——而这份 DDL 跑在维护库上，
+    一句 DROP/TRUNCATE 就能把恢复凭据与归属登记清空。
+    """
+    text = (_SQL_DIR / "pilot_cluster_schema.sql").read_text(encoding="utf-8")
+    code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("--"))
+    for banned in ("DROP ", "TRUNCATE", "DELETE ", "ALTER "):
+        assert banned not in code.upper(), f"规范集群 schema 里出现破坏性语句 {banned!r}"
+    assert code.upper().count("CREATE TABLE IF NOT EXISTS") == len(MAINTENANCE_TABLES), \
+        "建表条数与【维护库专用表集合】对不上"
+
+
+def test_orphan_cleanup_releases_every_seed_lock_it_takes():
+    """**取了就必须还**（codex R5-F2）：会话级锁不还会一直挂在维护连接上，
+    挡住后续同 seed 的运行；同一条连接上后来的 `_SEED_LOCK_HELD_SQL`
+    也会观察到一把**本次操作从未刻意取过**的锁。"""
+    taken, freed = [], []
+    maint = _InitMaint(all_intent_rows=[
+        _orphan(dbname="kline_pilot_gone", seed="gone"),
+        _orphan(dbname="kline_pilot_stale", seed="stale",
+                age_seconds=INTENT_TTL_SECONDS + 1)])
+    asyncio.run(_init(maint, lock_pair=_locker(record=taken, released=freed)))
+    assert taken == ["gone", "stale"]
+    assert freed == taken, f"取了 {taken} 却只还了 {freed}"
+
+
+def test_orphan_cleanup_releases_the_lock_even_when_the_delete_fails():
+    """删除抛异常时锁也必须还 —— 否则一次失败会把那个 seed 永久挡住。"""
+    freed = []
+
+    class _DeleteBoom(_InitMaint):
+        async def execute(self, query, *args):
+            if query.strip().upper().startswith("DELETE"):
+                raise RuntimeError("deadlock detected")
+            return await super().execute(query, *args)
+
+    maint = _DeleteBoom(all_intent_rows=[_orphan(dbname="kline_pilot_gone", seed="gone")])
+    with pytest.raises(RuntimeError):
+        asyncio.run(_init(maint, lock_pair=_locker(released=freed)))
+    assert freed == ["gone"], "删除失败时锁没还"
+
+
+def test_orphan_cleanup_does_not_release_a_lock_it_never_took():
+    """取不到锁的那一行**不许调 release** —— 那会把别人正持有的锁还掉。"""
+    freed = []
+    maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_running",
+                                                seed="running")])
+    asyncio.run(_init(maint, lock_pair=_locker(grants=False, released=freed)))
+    assert freed == [], "取不到锁却还了锁 —— 会把别的运行持有的锁释放掉"
+
+
+# ── codex 4a-2b R6：凭据要不可随手伪造 / 预检要分得开「缺席」与「在场但坏」──────
+
+def test_forged_reset_authorization_cannot_reach_drop():
+    """R4-F2 的**二次提出**（codex R6-F1）：上一轮我把 DROP 改私有就算修完了 ——
+    而下划线只是**约定**，同进程调用方照样能 import 它、手搓一个凭据递进去，
+    把集群闸/归属闸/绑定闸/`--reset-foreign` 整条授权链绕过去。
+
+    本模块通篇的原则是「把纪律写成机制」，这里改成能力令牌。
+    """
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        ResetAuthorization(object(), db_oid="16400", via_empty_remnant=False)
+    assert ei.value.code == "forged_reset_authorization"
+
+
+def test_only_authorize_reset_mints_a_usable_authorization():
+    """反向钉：`authorize_reset` 铸出来的凭据必须能用（别把闸修成谁都过不了）。"""
+    maint = _RemnantMaint(intent_rows=_intent())
+    target = _EmptyOnProbe(non_empty_probes=[1], meta_rows=_full_meta_rows())
+    auth = asyncio.run(_authorize(maint, target))
+    assert isinstance(auth, ResetAuthorization)
+    assert auth.db_oid == "16400" and auth.via_empty_remnant is False
+
+
+def test_authorization_has_no_public_constructor_path_in_the_module():
+    """机械守卫：模块里构造 `ResetAuthorization` 的地方**只能**在 `authorize_reset` 里，
+    且都带着能力令牌。多一处不带令牌的构造，这颗钉子当场变红。"""
+    import ast
+    import inspect
+    import textwrap
+    import qmt_pilot_db as m
+    src = pathlib.Path(m.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    sites = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "ResetAuthorization"]
+    assert sites, "一处构造都没找到 —— 匹配式过时了，这颗钉子会变成空的"
+    for call in sites:
+        first = call.args[0] if call.args else None
+        assert isinstance(first, ast.Name) and first.id == "_RESET_CAPABILITY", \
+            "有一处构造没带能力令牌"
+    minted_in = textwrap.dedent(inspect.getsource(m.authorize_reset))
+    assert minted_in.count("ResetAuthorization(") == len(sites), \
+        "能力凭据只许在 authorize_reset 里铸造"
+
+
+@pytest.mark.parametrize("broken,label", [
+    ({"marker_purpose_unique": False}, "marker 在场但没唯一约束"),
+    ({"intent_dbname_unique": False}, "intent 在场但 dbname 没主键"),
+    ({"registry_columns_ok": False}, "registry 在场但列不齐"),
+    # ⚠️ 耐久性横跨三张表，只在**都在场**时才要求 —— 这一档单列，
+    #    否则「三表齐全但被 SET UNLOGGED」会没有用例（变异抓出过）。
+    ({"maintenance_tables_durable": False}, "三表齐全但不是持久表（崩溃后会被 truncate）"),
+])
+def test_init_rejects_a_present_but_malformed_maintenance_table_before_any_ddl(broken, label):
+    """`CREATE TABLE IF NOT EXISTS` **修不好**已存在的坏表，只会跳过（codex R6-F2）。
+
+    预检若只看「结构合不合规」，一张坏表会让判定落到「补建再验」那条路上：
+    DDL 先把**其余缺的表**建出来，然后形状检查才失败 ——
+    结果是在一个最终被拒绝的库里留下了表。
+    """
+    maint = _InitMaint()
+    maint.maintenance_shape = {**_OK_MAINTENANCE_SHAPE, **broken}
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "no_marker", label
+    assert maint.executed == [], f"{label}：拒绝之前已经执行了 DDL"
+
+
+def test_init_still_repairs_a_genuinely_absent_table():
+    """反向钉：**缺席**的表照旧补建（别把 R6-F2 的修复做成「一律拒」）。
+
+    旧版本初始化的集群没有 intent 表 —— 那是 O4-F7 明确要求修好的一档。
+    """
+    maint = _InitMaint(intent_table_missing=True)
+    asyncio.run(_init(maint))
+    assert any("CREATE TABLE" in q.upper() for q in maint.executed), \
+        "缺席的表没有被补建 —— O4-F7 的锁死原样复活"
+
+
+def test_init_does_not_treat_a_read_failure_as_first_initialization():
+    """**绝不把「读失败」一律当成「首次初始化」**（codex R6-F2）：权限问题、坏关系
+    都会落到那条路上，然后带着一个没被证明过的前提去动 DDL。"""
+    class _PresenceBoom(_InitMaint):
+        async def fetchrow(self, query, *args):
+            if "marker_present" in query:
+                raise RuntimeError("permission denied for schema public")
+            return await super().fetchrow(query, *args)
+
+    maint = _PresenceBoom()
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "no_marker"
+    assert maint.executed == [], "读失败之后仍然动了 DDL"
+
+
+# ── codex 4a-2b R7：凭据检查要在**使用点** / 同侪库也要在 DDL 之前证明 ──────
+# ⚠️ R7-F1 是同一个洞的**第三次**提出，前两次我的修法都不够：
+#    R4-F2「函数改私有」→ 下划线只是约定；R6-F1「构造函数要能力令牌」→ 使用点从不查类型。
+#    Python 的注解不强制 —— 鸭子类型直接就过。
+
+@pytest.mark.parametrize("forged,label", [
+    (types.SimpleNamespace(db_oid="16400", via_empty_remnant=False), "鸭子类型冒充"),
+    (types.SimpleNamespace(db_oid="16400", via_empty_remnant=True), "冒充零对象来路"),
+])
+def test_duck_typed_authorization_cannot_reach_drop(forged, label):
+    """任何带 `db_oid` / `via_empty_remnant` 两个属性的对象都能冒充 —— 直到使用点也查类型。"""
+    maint = _DropMaint()
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop_pilot_database(
+            maint, connect=_connector({"kline_pilot_probe": _EmptyOnProbe()}),
+            db_name="kline_pilot_probe", seed="probe", authorization=forged))
+    assert ei.value.code == "forged_reset_authorization", label
+    assert _drops(maint) == [], f"{label}：伪造的凭据竟然走到了 DROP"
+
+
+def test_authorization_bypassing_init_cannot_reach_drop():
+    """`object.__new__` 能绕过 `__init__`（构造函数里的能力检查因此不生效）——
+    使用点还要看 `_minted` 这个只在 `__init__` 里被设上的标记。"""
+    ghost = object.__new__(ResetAuthorization)
+    ghost.db_oid = "16400"
+    ghost.via_empty_remnant = False
+    maint = _DropMaint()
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop_pilot_database(
+            maint, connect=_connector({"kline_pilot_probe": _EmptyOnProbe()}),
+            db_name="kline_pilot_probe", seed="probe", authorization=ghost))
+    assert ei.value.code == "forged_reset_authorization"
+    assert _drops(maint) == []
+
+
+def test_a_subclass_of_the_authorization_is_not_accepted_either():
+    """`type(...) is` 而非 `isinstance`：子类可以覆盖任何东西，同样不算数。"""
+    class _Sneaky(ResetAuthorization):
+        pass
+
+    sneaky = object.__new__(_Sneaky)
+    sneaky.db_oid = "16400"
+    sneaky.via_empty_remnant = False
+    sneaky._minted = True
+    maint = _DropMaint()
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop_pilot_database(
+            maint, connect=_connector({"kline_pilot_probe": _EmptyOnProbe()}),
+            db_name="kline_pilot_probe", seed="probe", authorization=sneaky))
+    assert ei.value.code == "forged_reset_authorization"
+    assert _drops(maint) == []
+
+
+def test_a_genuinely_minted_authorization_still_works():
+    """反向钉：真凭据必须照常放行（别把闸修成谁都过不了）。"""
+    maint = _DropMaint()
+    asyncio.run(_drop(maint, via_remnant=False))
+    assert _drops(maint) == ['DROP DATABASE "kline_pilot_probe"']
+
+
+@pytest.mark.parametrize("dirty,code,why", [
+    (lambda m: setattr(m, "databases", ["payments_prod"]),
+     "unrelated_database", "集群里有生产库"),
+    (lambda m: setattr(m, "databases", ["kline_pilot_stranger"]),
+     "unowned_pilot_database", "同前缀但非空、来路不明"),
+])
+def test_init_proves_peer_databases_are_clean_before_any_ddl(dirty, code, why):
+    """首次初始化时，**同侪库也要在动 DDL 之前**证明干净（codex R7-F2）。
+
+    一台含 `payments_prod` 或来路不明 `kline_pilot_*` 的集群根本不该被声明为 pilot 专用；
+    在它的维护库里建三张表再拒绝，等于在拒绝的集群上留下了痕迹。
+    """
+    maint = _InitMaint(marker_rows=[])
+    dirty(maint)
+    stranger = _FakeConn(user_objects=[("pg_class", 3)])   # 非空
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint, targets={"kline_pilot_stranger": stranger}))
+    assert ei.value.code == code, why
+    assert maint.executed == [], f"{why}：拒绝之前已经执行了 DDL"
+
+
+def test_init_first_time_still_accepts_an_empty_prefixed_remnant():
+    """反向钉：零用户对象的同前缀残骸照旧放行（别把 R7-F2 做成「一律拒」）。"""
+    maint = _InitMaint(marker_rows=[], databases=["kline_pilot_remnant"])
+    asyncio.run(_init(maint, targets={"kline_pilot_remnant": _FakeConn()}))
+    assert len(_marker_writes(maint)) == 1
+
+
+# ── codex 4a-2b R8：混合态（标记在、表缺）同样要先证明同侪库 ────────────────
+# ⚠️ 这是 R7-F2 修复的补漏：我把证明挂在了 `if not rows`（首次初始化）上，
+#    漏了「标记在、intent/registry 缺失」这一档 —— 旧版本部分初始化，
+#    或标记随 pg_dump / 卷拷贝被复制到另一台集群。
+
+@pytest.mark.parametrize("dirty,code,why", [
+    (lambda m: setattr(m, "databases", ["payments_prod"]),
+     "unrelated_database", "混合态 + 集群里有生产库"),
+    (lambda m: setattr(m, "databases", ["kline_pilot_stranger"]),
+     "unowned_pilot_database", "混合态 + 同前缀但非空"),
+])
+def test_init_proves_peers_before_repair_ddl_even_when_the_marker_exists(dirty, code, why):
+    """**标记在、但维护表缺席**时也要先证明同侪库（codex R8-F1）。
+
+    `rows` 非空会让 R7-F2 那段证明被跳过，而补建 DDL 照跑 —— 又在一个最终被拒绝的
+    集群里留下了表。判据必须挂在「**这次会不会真的动 DDL**」上，不是「有没有标记」。
+    """
+    maint = _InitMaint(intent_table_missing=True)      # 标记在、intent 缺 → 混合态
+    dirty(maint)
+    stranger = _FakeConn(user_objects=[("pg_class", 3)])
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint, targets={"kline_pilot_stranger": stranger}))
+    assert ei.value.code == code, why
+    assert maint.executed == [], f"{why}：补建 DDL 在证明之前就跑了"
+
+
+def test_init_executes_no_ddl_at_all_on_a_healthy_cluster():
+    """三表齐全时**一条 DDL 都不发**（R8-F1）。
+
+    `CREATE TABLE IF NOT EXISTS` 虽是空操作，但「健康集群上零 DDL」是可断言的性质，
+    比「发了但没效果」强 —— 也让那些 `executed == []` 的钉子真正咬得住。
+    """
+    maint = _InitMaint()
+    asyncio.run(_init(maint))
+    assert not any("CREATE TABLE" in q.upper() for q in maint.executed), \
+        f"健康集群上仍然发了 DDL：{maint.executed}"
+
+
+def test_init_still_repairs_the_mixed_state_on_a_clean_cluster():
+    """反向钉：集群本身干净时，混合态照旧被修好（别把 R8-F1 做成「一律拒」）。
+
+    旧版本初始化的集群没有 intent 表 —— 那是 O4-F7 明确要求修好的一档。
+    """
+    maint = _InitMaint(intent_table_missing=True)      # 集群干净、只是缺表
+    asyncio.run(_init(maint))
+    assert any("CREATE TABLE" in q.upper() for q in maint.executed), \
+        "干净集群上的混合态没有被补建 —— O4-F7 的锁死原样复活"

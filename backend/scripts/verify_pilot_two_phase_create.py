@@ -38,6 +38,7 @@ from urllib.parse import urlparse
 import asyncpg
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import _pilot_verify_harness as harness  # noqa: E402
 from qmt_pilot_db import (PILOT_META_KEYS, PILOT_META_PHASE1_KEYS,  # noqa: E402
                           PILOT_META_PHASE2_KEYS, _is_absolutely_empty,
                           _SEED_LOCK_HELD_SQL, _user_objects, create_pilot_database,
@@ -281,34 +282,11 @@ class _BoomProxy:
         await self._conn.close()
 
 
-_GUARDED_DSNS: set = set()
-
-
-def _assert_destructive_dsn_allowed(dsn: str, label: str) -> str | None:
-    """破坏性 DSN 闸。**必须先于对该 DSN 的任何 connect/DDL**。
-
-    ⚠️ 上一版只闸了 `DSN`（O4-R9-C2），而 `DSN2` 从环境变量读出来就直接
-    `_drop(dsn2, …)` / `CREATE DATABASE` —— 脚本对外宣称「破坏性操作有护栏」，
-    却对第二个集群**一次都没检查**：DSN2 指错到共享/远端集群，
-    `kline_pilot_selfcheck_p24` 就在那边被不可逆地删掉（O4-R37-C1）。
-    这是本 PR 里「同一条判据只落在被点名的那一处」的第十二次。
-    返回 None = 不放行（调用方负责判失败）。
-    """
-    host = urlparse(dsn).hostname
-    if host not in ("localhost", "127.0.0.1", "::1") and os.environ.get(
-            "QMT_VERIFY_ALLOW_DESTRUCTIVE") != "1":
-        print(f"拒绝运行：{label} 指向非本地库 {host}，本脚本会在它上面建/删库。"
-              "仅对隔离测试库运行；确需对非本地库运行请设 QMT_VERIFY_ALLOW_DESTRUCTIVE=1",
-              file=sys.stderr)
-        return None
-    _GUARDED_DSNS.add(dsn)
-    return dsn
-
-
-def _db_dsn(base_dsn: str, dbname: str) -> str:
-    """把 DSN 的**库名**换掉。绝不能用 str.replace —— 用户名也可能叫 postgres。"""
-    head, _, _ = base_dsn.rpartition("/")
-    return f"{head}/{dbname}"
+# ⚠️ 破坏性 DSN 闸 / 换库名 / 只对过闸 DSN 动手的 DROP，**三个验收脚本共用一份**
+#    （见 `_pilot_verify_harness.py` 的头注）：各抄一份就是把「同一条判据只落在
+#    被点名的那一处」这个本仓重演十二次的毛病，搬到**防止误删数据库**的代码上。
+_assert_destructive_dsn_allowed = harness.assert_destructive_dsn_allowed
+_db_dsn = harness.db_dsn
 
 
 async def _maintenance(base_dsn: str, *, seed: str | None = None) -> asyncpg.Connection:
@@ -340,19 +318,7 @@ async def _plain_connect_p27(name: str):
 _P27_DSN = {"dsn": ""}
 
 
-async def _drop(base_dsn: str, dbname: str) -> None:
-    # ⚠️ **机械守卫**：DROP DATABASE 只对过了破坏性闸的 DSN 执行（O4-R37-C1）。
-    #    「记得给新 DSN 加闸」是纪律，纪律在本 PR 里已经失效十二次；
-    #    这一句让漏加闸的新 DSN 在第一次删库前就炸掉，而不是删完才发现。
-    if base_dsn not in _GUARDED_DSNS:
-        raise AssertionError(
-            f"DROP DATABASE 的目标 DSN 没有过破坏性闸：{urlparse(base_dsn).hostname!r}。"
-            f"先调用 _assert_destructive_dsn_allowed(dsn, '<名字>')")
-    conn = await asyncpg.connect(base_dsn)
-    try:
-        await conn.execute("DROP DATABASE IF EXISTS " + quote_ident(dbname))
-    finally:
-        await conn.close()
+_drop = harness.drop_database
 
 
 async def _read_meta(base_dsn: str, dbname: str) -> dict[str, str] | None:
@@ -411,32 +377,15 @@ async def main() -> int:
     #    那个库就会在收尾时留下来、并在下一次运行时把整个脚本挡住（strangers 分支）。
     #    ⚠️ 必须排在**破坏性清场之前** —— 它是纯源码检查、零副作用，
     #    放在清场之后的话，会被 strangers 闸先触发而永远测不到（实测踩过）。
-    _lits = set(re.findall(r'"(kline_pilot_selfcheck[a-z0-9_]*)"',
-                           pathlib.Path(__file__).read_text()))
-    # ⚠️ **反向断言**（O4-R37-C1）：脚本读了几个 DSN 环境变量，就必须有几个走过破坏性闸。
-    #    只在 DSN2 处补一句「记得加闸」是纪律；纪律在本 PR 里已失效十二次。
-    #    这一句让「新增 DSN3 却忘了加闸」在任何连接发生之前就把脚本挡住。
-    _self_src = pathlib.Path(__file__).read_text()
-    _dsn_envs = set(re.findall(r'os\.environ\.get\("(DSN\d*)"\)', _self_src))
-    _gated = set(re.findall(
-        r'_assert_destructive_dsn_allowed\([A-Za-z_0-9]+, "(DSN\d*)"\)', _self_src))
-    if _dsn_envs - _gated:
-        print(f"拒绝运行：这些 DSN 环境变量没有过破坏性闸："
-              f"{sorted(_dsn_envs - _gated)} —— 本脚本会在它们上面建/删库",
-              file=sys.stderr)
-        return 7
-    assert _gated, "反向断言自身失效：一个过闸调用都没匹配到（正则与代码脱钩了）"
-
-    _bad_scratch = [o for _k, o in _SCRATCH_OBJECTS if "zzqmtverify_" not in o]
-    if _bad_scratch:
-        print(f"拒绝运行：临时对象名没带 `zzqmtverify_` 前缀：{_bad_scratch} —— "
-              f"清场是无条件 DROP，通名会删掉别人的东西", file=sys.stderr)
-        return 6
-    _unlisted = sorted(_lits - set(_SCENARIO_DBS))
-    if _unlisted:
-        print(f"拒绝运行：脚本里用到的这些库名不在 _SCENARIO_DBS 白名单里：{_unlisted}",
-              file=sys.stderr)
-        return 5
+    # ⚠️ 三条纯源码自检（零副作用），**必须排在破坏性清场之前**：放在清场之后会被
+    #    strangers 闸先触发而永远测不到（实测踩过）。判据挂在**本脚本**的源码上，
+    #    故把 `__file__` 传进 harness —— 用 harness 自己的 `__file__` 就成了恒真断言。
+    for _rc in (harness.assert_every_dsn_env_is_gated(__file__),
+                harness.assert_scratch_objects_are_namespaced(_SCRATCH_OBJECTS),
+                harness.assert_every_selfcheck_db_is_whitelisted(
+                    __file__, _SCENARIO_DBS, "kline_pilot_selfcheck")):
+        if _rc is not None:
+            return _rc
 
     # 前置清场：本脚本会在中途崩溃时留下 kline_pilot_selfcheck_* 库与登记行，
     # 而登记表按设计**永不清理**。不清场的话，下一次运行会被上一次的残留顶红，

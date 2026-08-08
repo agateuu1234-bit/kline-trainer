@@ -1552,6 +1552,34 @@ git commit -m "feat(4a): 两阶段建库 + pilot_meta 九键 + 确认令牌派�
 
 ### Task 3: 库级五闸 + 零对象例外 + `--reset-foreign` 令牌 + L2 真 PG 脚本
 
+> # ⛔ 本 Task 的**代码块整体已过期，不可逐字转写**（2026-08-09 回补）
+>
+> **本 Task 已由 `feat/qmt-plan4a-2a-read-gates`（已合并，main `bd2c154`）与
+> `feat/qmt-plan4a-2b-destructive` 实现。下方代码块写于 `qmt_pilot_db.py` 仅 405 行的时期，
+> 而该文件经 codex 32 轮评审已长到 1815 行 —— 照抄下方片段会写出编译不过或恒真的代码。**
+>
+> 实测对不上的地方（每一条都在实施时踩到过）：
+>
+> | 下方代码块里写的 | 实际（4a-1 合并后） |
+> |---|---|
+> | `_DELETE_INTENT_SQL(dbname)` 清孤儿行 | 实际签名 `(dbname, run_id)` 且带 `AND NOT create_confirmed` —— 孤儿恰恰是**已确认**的行，用它删**永远匹配 0 行**（「命令发了、一行没删」的静默失败）。已另立 `_DELETE_ORPHAN_INTENT_SQL` |
+> | `MAINTENANCE_EXEMPT_QUERY` | 常量不存在，现为 `_user_objects(conn, exempt_maintenance=True)` |
+> | `try_empty_remnant_exception(..., holds_seed_lock: bool, ...)` | 那正是 4a-1 已删掉的**可伪造断言**（传 True 就能绕过）。改为在活连接上查 `pg_locks`（O4-R5-C2）|
+> | `try_empty_remnant_exception(..., now_epoch, ...)` | 新鲜度**不许由调用方给时钟**（O4-R23-C1）。年龄改由库自己的 `now() - inserted_at` 算出 |
+> | 测试里新定义 `_meta_rows` / `_FakeConn(empty_counts=…)` | 两者**都已存在**且形状不同（`_meta_rows` 只有阶段 1 的 7 键；`_FakeConn` 用 `user_objects` 列表而非 `empty_counts`）|
+> | `--reset` 绑定不符报 `binding_mismatch` | spec §5 明写 `reset_foreign_token_required`（填错才是 `..._invalid`）。4c 消费者按这个码分诊「换 seed」与「要令牌」两种完全不同的处置 |
+> | `f"…请重跑并带 --reset-foreign={token}"`（令牌进 message）| **违反 `PilotDbBoundaryError` 的契约与 spec §9-1w**：令牌只走 `confirm_token` 通道。写进 message 后，任何把 `str(exc)` 序列化进报告的调用方都会漏，wrapper 就能「读报告取令牌再重跑」（codex 4a-2a R3-F2 抓出）|
+> | 闸 2「由调用方在真库上跑」，整条推给 L2 脚本 | spec §4 的闸分工表写明**「闸 2 复用时 ✅ 必过」**。只放验收脚本里的话，生产路径上根本没有闸 2，`structure_mismatch` 永远产不出来。已实现进模块（user 2026-08-05 拍板）|
+> | 没有任何 DROP 函数 | spec §4 规定 1/2/3（DROP 前连接数为 0 / 禁强制模式与踢会话 / `target_db_in_use` fail-closed）在 4a 没有落点。已新增 `reset_pilot_database`（授权+销毁一体的**唯一公开入口**），`_drop_pilot_database` 私有 |
+>
+> **下方的 L2 脚本部分（Step 13/14）另见
+> `docs/superpowers/plans/2026-08-09-qmt-plan4a-2-l2-scripts.md`** —— 那份按 spec §6.2 的
+> 分工重写过（崩溃恢复三档归 `verify_pilot_two_phase_create.py`，本轮不重复），
+> 且**刻意不内联脚本源码**，正是为了不再重演本 Task 这种「代码块过期」。
+>
+> **保留下方原文的理由**：它是 4a-2 全部设计决策的历史依据，也是
+> `feedback_plan_code_blocks_cause_vacuous_tests` 这条教训最完整的实证。**读，但别抄。**
+
 **Files:**
 - Modify: `backend/qmt_pilot_db.py`
 - Modify: `backend/tests/test_qmt_pilot_db.py`
@@ -2223,6 +2251,22 @@ git commit -m "feat(4a): 库级五闸 + 零对象例外 + --reset-foreign 令牌
 ### Task 4: `--init-cluster-marker` 幂等语义 + 孤儿行清理
 
 > Self-Review 补出来的缺口。**它使 Task 3 的零对象例外真的可用**——没有它，一台由旧版本初始化的集群没有 `pilot_create_intent` 表，第 6 条恒不成立，残骸永远清不掉（spec O4-F7）。
+
+> # ⛔ 本 Task 的**代码块同样已过期，不可逐字转写**（2026-08-09 回补）
+>
+> 已由 `feat/qmt-plan4a-2b-destructive` 实现。下方片段与实际的差异（均为 codex 逼出来的）：
+>
+> | 下方代码块里写的 | 实际 |
+> |---|---|
+> | `await maint_conn.execute(cluster_schema_sql)` **排在所有检查之前** | **副作用必须排在证明之后**（codex 4a-2b R5-F1）：`--maintenance-dsn` 指错到生产库时，先建表再拒绝＝已经在别人库里落下三张表。现拆成「① 零副作用预检 → ② 才动 DDL」|
+> | `cluster_schema_sql` 不校验来源 | 4a-1 给 `schema.sql`/`pilot_schema.sql` 各钉了规范哈希，**唯独这份漏了**。漂移版本可 DROP/TRUNCATE 掉三张维护表，而结构判据**只看形状不看行**。已加 `CANONICAL_CLUSTER_SCHEMA_SHA256` |
+> | 幂等检查只在 `if not rows:` 里跑 (ii)(iii) | **直接违反 spec §4 R17-F1**（逐字：「标记证明的是**有人曾声明过**，只有现查才证明**现在仍然成立**」）。带合法标记的脏集群会被判成功。现改为每次调用都跑完整 `assert_cluster_allowed` |
+> | 预检不区分「表缺席」与「表在场但坏」 | `CREATE TABLE IF NOT EXISTS` **修不好**已存在的坏表只会跳过 → 坏表会让流程走「补建再验」，在最终被拒绝的库里留下表（codex R6-F2）。已加 `_MAINTENANCE_PRESENCE_SQL` 按表分别判 |
+> | `try_seed_lock` 是同步 `Callable[[str], bool]`，且**无释放路径** | 改为 `async`，并新增**必填**的 `release_seed_lock`：会话级锁不还会一直挂在维护连接上，挡住后续同 seed 的运行（codex R5-F2）。取不到锁的那一行**不许**调 release（否则会把别人持有的锁还掉）|
+> | 孤儿删除按 Python 侧快照决定 | 判据必须**下沉进 DELETE 的 WHERE、在锁内当下求值**（codex R3-F2）：取锁与判定之间，同 seed 的运行可以刷新自己的凭据，快照决定会把那条**新鲜的恢复凭据**删掉 |
+> | 孤儿预筛 `r["dbname"] not in live`（只比名字）| 必须绑实例（codex R4-F3）：「原实例被删、别人用同名重建」会被判成「没消失」→ 锁内那条 OID-aware 的 DELETE **永远跑不到** |
+>
+> **读，但别抄。**
 
 **Files:**
 - Modify: `backend/qmt_pilot_db.py`
