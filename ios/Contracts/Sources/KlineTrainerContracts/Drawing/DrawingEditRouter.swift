@@ -185,6 +185,34 @@ enum DrawingEditRouter {
         return engine.updateDrawingStyle(id: id, style: style)                         // ③
     }
 
+    // MARK: 变更意图路由（codex 整支 R3：本 PR 引入的回归修复）
+    //
+    // `DrawingStyleParams` 原来的写入路径从**视图渲染时捕获的快照**（`style` 参数）出发：
+    //   `var next = style; mutate(&next); onChange(next)`。若两个控件在 SwiftUI 完成重渲染之前
+    //   先后触发，第二次动作仍从**同一份旧快照**出发 → 把第一次的改动 revert 掉；选中线路径还会
+    //   `drawingsRevision += 1` → 被 autosave 持久化，回退是真实丢数据。
+    // `origin/main` 上的旧实现本来就是「动作发生那一刻，从活的单一真相现取 `session.defaultStyle`」，
+    // PR-4 把派生值算好传进视图时，把「现取」这个性质丢了。这两个函数把它还回来：
+    // `DrawingStyleParams` 只把**变更意图**（mutation 闭包）传上去，「现取 + 合并」在这里（host 可测）完成。
+
+    /// 把一次样式变更**合并进动作发生那一刻的当前真值**再写入选中线。
+    /// ⚠️ **绝不能改成接收调用方传入的快照**——那正是本函数要修的回归本身。
+    @discardableResult
+    static func applyStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
+                                   engine: TrainingEngine) -> Bool {
+        var next = panelStyle(engine: engine)      // ← 现取（动作发生这一刻的真值，不是渲染时的快照）
+        mutate(&next)
+        return applyStyle(next, engine: engine)
+    }
+
+    /// 无选中时：同样「现取 + 合并」，写「下一条线的默认」。
+    static func applyDefaultStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
+                                          engine: TrainingEngine) {
+        var next = engine.drawingSession.defaultStyle   // ← 现取
+        mutate(&next)
+        engine.drawingSession.setDefaultStyle(next)
+    }
+
     /// 删除选中线。**唯一合法调用点是确认框「删除」按钮的 action**——几何必须在**确认那一刻**
     /// 重算（`canDelete` 内部现算），只在点 🗑 那一刻判是时序 bug（D65 R13-F1 / N19e）。
     @discardableResult

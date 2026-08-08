@@ -511,13 +511,15 @@ public struct TrainingView: View {
                              // D49：派生值**每次求值现算**（`panelStyle` 内部：有选中取那条线、无选中取 defaultStyle）。
                              style: DrawingEditRouter.panelStyle(engine: engine),
                              styleEnabled: DrawingEditRouter.styleControlsEnabled(engine: engine),
-                             onStyleChange: { next in
+                             onStyleChange: { mutate in
                                  // D49：有选中 → 只作用于那条线（改动**不回写**「下一条线的默认」）；
                                  //      无选中 → 改默认。分流判据是「有没有选中」，别的都不是。
+                                 // codex 整支 R3：只转发**变更意图**，「现取当前真值 + 合并」交给
+                                 // DrawingEditRouter（不许在这里先读一份快照，见 DrawingStyleParams.onChange 注释）。
                                  if engine.drawingSession.selectedDrawingID != nil {
-                                     DrawingEditRouter.applyStyle(next, engine: engine)
+                                     DrawingEditRouter.applyStyleMutation(mutate, engine: engine)
                                  } else {
-                                     engine.drawingSession.setDefaultStyle(next)
+                                     DrawingEditRouter.applyDefaultStyleMutation(mutate, engine: engine)
                                  }
                              },
                              onToggleMode: {
@@ -706,7 +708,8 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
     let stylePanelPosition: DrawingStylePanelPosition   // 上/下半区（Task4 已接 ⇅ 真行为：refreshShields() 按当前位置求交两面板）
     let style: DrawingDefaultStyle                 // D49（1b-i PR-4）：面板派生值**每次求值现算**（调用方算）
     let styleEnabled: Bool                          // D65（1b-i PR-4）：改样式可用谓词（UI 版）
-    let onStyleChange: (DrawingDefaultStyle) -> Void
+    /// codex 整支 R3：传**变更意图**（mutation 闭包），不是完整对象——纯转发，见 `DrawingStyleParams.onChange`。
+    let onStyleChange: (@escaping (inout DrawingDefaultStyle) -> Void) -> Void
     let onToggleMode: () -> Void                   // 1b-i PR-4：类型行图标短按（画线态 ⇄ 选择态）
     let onTogglePosition: () -> Void               // ⇅ 回调（替代已删的 onLongPressType）
     @ViewBuilder let upperPanel: () -> Upper

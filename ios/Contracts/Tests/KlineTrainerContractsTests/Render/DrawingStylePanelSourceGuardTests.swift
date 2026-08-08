@@ -96,6 +96,28 @@ struct DrawingStylePanelSourceGuardTests {
         #expect(!code.contains(squeeze("@State private var style")))
     }
 
+    // codex 整支 R3（本 PR 引入的回归修复）：`commit` 曾从 `style`（视图渲染那一刻捕获的快照）出发
+    // 拼下一个值——两个控件在 SwiftUI 完成重渲染之前先后触发时，第二次会拿旧快照把第一次的改动
+    // revert 掉。现在 `commit` 只把变更意图（mutation 闭包）转发给 `onChange`，「现取当前真值 + 合并」
+    // 挪到了 `DrawingEditRouter`（见 `applyStyleMutation`/`applyDefaultStyleMutation` 及其 host 回归测试）。
+    // 本条钉住这个不变量：`commit` 函数体内**不得**出现 `style` —— 一旦出现就是退回了那个快照读法。
+    @Test("commit 只转发变更意图、不读 `style`（codex 整支 R3 回归修复）：commit 函数体内不得出现 style")
+    func commitNeverReadsRenderedSnapshot() throws {
+        let squeezed = try squeezedSource(contractsDirForGuards.appendingPathComponent(params).path)
+        let startMarker = squeeze(
+            "private func commit(_ mutate: @escaping (inout DrawingDefaultStyle) -> Void) {")
+        #expect(squeezed.components(separatedBy: startMarker).count == 2,
+                "commit 签名非唯一出现或已改变——切片锚点失效，判据不可信")
+        let start = try #require(squeezed.range(of: startMarker), "commit 签名未找到").upperBound
+        let end = try #require(squeezed.range(of: "}", range: start..<squeezed.endIndex),
+                                "commit 函数体未闭合").lowerBound
+        let body = String(squeezed[start..<end])
+        #expect(!body.isEmpty, "commit 函数体切片为空——锚点可能切错了地方")
+        #expect(!body.contains("style"),
+                "commit 体内出现 style —— 又从视图渲染时捕获的快照拼值，会把并发的第一枪 revert 掉")
+        #expect(body.contains("onChange(mutate)"), "commit 必须纯转发 mutate 给 onChange")
+    }
+
     @Test("颜色行收成 7 彩 + 1 线色（切片3，codex 计划-R2-F3 精确判据）：无 allCases/colorEnabled、恰好 1 个 .black、0 个 .white")
     func colorRowIsSevenChromaticPlusLineColor() throws {
         let code = try source(params)

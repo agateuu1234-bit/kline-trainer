@@ -428,6 +428,51 @@ struct DrawingEditRouterTests {
         #expect(DrawingEditRouter.panelStyle(engine: e) == defaults)
     }
 
+    // ============ codex 整支 R3（本 PR 引入的回归）：mutation 入口不许从渲染时捕获的快照出发 ============
+    //
+    // `DrawingStyleParams.commit` 原来的写入路径是 `var next = style; mutate(&next); onChange(next)`——
+    // `style` 是**视图渲染那一刻**捕获的快照。若两个控件在 SwiftUI 完成重渲染之前先后触发，第二次动作
+    // 仍从同一份旧快照出发 → 把第一次的改动 revert 掉（选中线路径还经 `drawingsRevision` 被 autosave
+    // 持久化）。`origin/main` 上的旧实现本来就是「动作发生那一刻，从活的单一真相现取」；PR-4 把派生值
+    // 算好传进视图时丢了这个性质。`applyStyleMutation`/`applyDefaultStyleMutation` 把「现取 + 合并」
+    // 收回 `DrawingEditRouter`（host 可测）：本条**不经视图**、直接背靠背调用两次入口，模拟「同一渲染帧
+    // 里两个控件先后触发」——旧实现下第二次会读到过期的 `style` 快照，第一枪会被 revert。
+
+    @Test("codex 整支 R3 回归测试：选中线路径 —— 同一渲染帧连续两枪互不 revert")
+    func consecutiveStyleMutationsDoNotRevertEachOther() {
+        let e = makeSelected(price: 50)
+        // 前提自足：初始值与两枪各自要设的目标值都明显不同，否则下面的断言可能因为「本来就是这个值」恒真。
+        #expect(e.drawings[0].colorToken != .green, "fixture 前提不成立：初始颜色已经是 .green")
+        #expect(e.drawings[0].thickness != 5, "fixture 前提不成立：初始粗细已经是 5")
+        let rev = e.drawingsRevision
+
+        // 背靠背两枪：旧实现（`mutate` 作用在调用方传入的快照上）下，第二枪会拿第一枪之前的旧颜色
+        // 把它 revert 掉；新实现每次都经 `applyStyleMutation` 内部 `panelStyle(engine:)` 现取。
+        #expect(DrawingEditRouter.applyStyleMutation({ $0.colorToken = .green }, engine: e) == true)
+        #expect(DrawingEditRouter.applyStyleMutation({ $0.thickness = 5 }, engine: e) == true)
+
+        #expect(e.drawings[0].colorToken == .green, "第二枪不得把第一枪设的颜色 revert 掉")
+        #expect(e.drawings[0].thickness == 5, "第二枪自己设的粗细必须生效")
+        #expect(e.drawingsRevision == rev + 2, "两枪都是各自独立的真实写入")
+    }
+
+    @Test("codex 整支 R3 回归测试：无选中默认样式路径 —— 同一渲染帧连续两枪互不 revert")
+    func consecutiveDefaultStyleMutationsDoNotRevertEachOther() {
+        let e = TrainingEngine.preview()
+        e.toggleDrawingMode()
+        #expect(e.drawingSession.selectedDrawingID == nil)
+        let initial = DrawingDefaultStyle()   // thickness:1 / colorToken:.orange（构造函数默认值）
+        #expect(initial.colorToken != .green, "fixture 前提不成立：默认颜色已经是 .green")
+        #expect(initial.thickness != 5, "fixture 前提不成立：默认粗细已经是 5")
+        e.drawingSession.setDefaultStyle(initial)
+
+        DrawingEditRouter.applyDefaultStyleMutation({ $0.colorToken = .green }, engine: e)
+        DrawingEditRouter.applyDefaultStyleMutation({ $0.thickness = 5 }, engine: e)
+
+        #expect(e.drawingSession.defaultStyle.colorToken == .green, "第二枪不得把第一枪设的颜色 revert 掉")
+        #expect(e.drawingSession.defaultStyle.thickness == 5, "第二枪自己设的粗细必须生效")
+    }
+
     // ============ D64 存在性谓词 ============
 
     @Test("N17（D64）：id 不存在 → 清空选中；locked / 语义不成立 / 未来枚举 / 预检拒 → 选中保留；删除成功 → 清空")

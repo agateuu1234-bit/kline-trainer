@@ -20,12 +20,16 @@ struct DrawingStyleParams: View {
     let enabled: Bool
     let scheme: AppColorScheme
     /// D49：写入路由由调用方提供（有选中 → 改那条线；无选中 → 改默认）。
-    let onChange: (DrawingDefaultStyle) -> Void
+    /// ⚠️ codex 整支 R3（本 PR 引入的回归修复）：传的是**变更意图**（mutation 闭包），不是完整对象。
+    ///   `commit` **绝不能**再从 `style`（本视图渲染那一刻捕获的快照）出发拼下一个值——若两个控件
+    ///   在 SwiftUI 完成重渲染之前先后触发，第二次会拿旧快照把第一次的改动 revert 掉（选中线路径
+    ///   还会经 `drawingsRevision` 被 autosave 持久化，回退是真丢数据）。「现取当前真值 + 合并」
+    ///   下放给调用方（`DrawingEditRouter.applyStyleMutation`/`applyDefaultStyleMutation`），
+    ///   本视图只负责转发意图。
+    let onChange: (@escaping (inout DrawingDefaultStyle) -> Void) -> Void
 
-    private func commit(_ mutate: (inout DrawingDefaultStyle) -> Void) {
-        var next = style
-        mutate(&next)
-        onChange(next)
+    private func commit(_ mutate: @escaping (inout DrawingDefaultStyle) -> Void) {
+        onChange(mutate)   // ⚠️ 这里不许再读 `style`——见上方 onChange 注释。
     }
 
     var body: some View {
