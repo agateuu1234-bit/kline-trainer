@@ -511,5 +511,51 @@ struct ChartContainerViewDrawingSessionTests {
     private func drainMainQueue() async {
         await withCheckedContinuation { c in DispatchQueue.main.async { c.resume() } }
     }
+
+    // MARK: - codex R2-M2 fix：瞬态零尺寸 bounds 早退必须让本面板 mapper 失效（不安全方向：可能放行不可逆删除）
+
+    /// `rebuildRenderState(bounds: .zero)` 复现的是 spec `:195` 注释点名的真实路径——SwiftUI 在
+    /// 导航/分屏/旋转过渡期会发来一次瞬态零尺寸 update。修复前：这条早退发生在 mapper 发布（`:227`）
+    /// **之前** → `DrawingSession.viewportMappers` 保留上一帧的旧值 → 几何门拿陈旧视口误判「仍可见」
+    /// → `canDelete`/`applyStyle` 可能放行、`deleteSelected` 可能真删掉一条当下判不了几何的线（不可逆）。
+    /// 本条**只有 Catalyst 能测**：`ChartContainerView.Coordinator.rebuildRenderState` 整个类型
+    /// `#if canImport(UIKit)` 门控，host `swift test` 根本不编译这个文件。
+    @Test("codex R2-M2 fix：瞬态零尺寸 bounds → 该面板 mapper 失效，几何门 fail-closed，写入路由零改动")
+    func invalidBoundsClearsMapperAndFailsClosedForDeleteAndStyle() throws {
+        let (engine, upperC, _, upperV, _) = makeRig()
+        engine.toggleDrawingMode()
+        let p = mainChartPoint(upperV)
+        upperC.handleDrawingTapForTesting(at: p)                    // 画线态落一条可见的
+        let id = try #require(engine.drawings.last?.id)
+        engine.drawingSession.setMode(.select)
+        upperC.handleDrawingTapForTesting(at: p)                    // 选择态命中它
+        #expect(engine.drawingSession.selectedDrawingID == id)      // 前提成立
+        #expect(DrawingEditRouter.canDelete(engine: engine) == true, "前提自足：起点是可删的")
+        #expect(engine.drawingSession.viewportMapper(for: .upper) != nil)   // 前提：此刻有有效 mapper
+
+        upperC.rebuildRenderState(bounds: .zero)                    // 瞬态零尺寸（导航/分屏/旋转过渡）
+
+        #expect(engine.drawingSession.viewportMapper(for: .upper) == nil,
+                "无效 bounds 必须清掉本面板 mapper，不留旧值——这是本条 finding 的核心")
+        #expect(DrawingEditRouter.canDelete(engine: engine) == false,
+                "没有当前有效视口 ⇒ 判不了几何 ⇒ fail-closed")
+        #expect(DrawingEditRouter.canEditStyle(engine: engine) == false)
+
+        let rev = engine.drawingsRevision
+        let before = engine.drawings
+        var s = DrawingEditRouter.panelStyle(engine: engine); s.thickness = 9
+        #expect(DrawingEditRouter.applyStyle(s, engine: engine) == false)
+        #expect(DrawingEditRouter.deleteSelected(engine: engine) == false,
+                "不安全方向：陈旧视口绝不许被写入路由当成乐观放行——这是不可逆删除")
+        #expect(engine.drawings == before, "零改动")
+        #expect(engine.drawingsRevision == rev)
+        #expect(engine.drawingSession.selectedDrawingID == id, "选中原样保留（membership 仍成立，不是被夺走）")
+
+        // 零→有效后续 layout 仍会重建（防「clear 之后再也发不出 mapper」这类过度修复）
+        upperC.rebuildRenderState(bounds: bounds)
+        #expect(engine.drawingSession.viewportMapper(for: .upper) != nil,
+                "bounds 恢复有效后必须能重新发布 mapper —— 早退只影响当帧，不是永久锁死")
+        #expect(DrawingEditRouter.canDelete(engine: engine) == true)
+    }
 }
 #endif

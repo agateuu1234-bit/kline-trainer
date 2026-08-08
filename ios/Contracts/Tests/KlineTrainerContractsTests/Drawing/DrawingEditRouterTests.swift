@@ -174,6 +174,52 @@ struct DrawingEditRouterTests {
         #expect(e.drawingsRevision == rev + 1)
     }
 
+    /// codex R2-M2 fix（`ChartContainerView.rebuildRenderState` 瞬态零尺寸 bounds 早退，:195）：
+    /// 无有效渲染视口时该面板的 mapper 必须失效，不能留旧值 —— 否则几何门会拿陈旧视口误判
+    /// 「此刻仍可见」，失败方向不安全（可能放行不可逆删除）。本条直接测 `DrawingSession.clearViewportMapper`
+    /// 这个 mutator 本身与它下游的几何门/写入路由：mapper 一清，`selectionGeometryVisible` 必须转 false，
+    /// `canEditStyle`/`canDelete`/`applyStyle`/`deleteSelected` 必须跟着 fail-closed、零改动。
+    /// ⚠️ **本条测不到 `ChartContainerView.rebuildRenderState` 里那句调用本身**（它是 UIKit-gated、host
+    /// 不编译）——那半条证据在 Catalyst 层的 `ChartContainerViewDrawingSessionTests`。
+    @Test("R2-M2 fix：清空面板 mapper（无有效视口）→ 几何判据 fail-closed，改样式/删除均被拒、零改动")
+    func clearedMapperFailsClosedForEditAndDelete() {
+        let e = makeSelected(price: 50)
+        #expect(DrawingEditRouter.selectionGeometryVisible(engine: e) == true)   // 前提：起点可见
+        #expect(DrawingEditRouter.canEditStyle(engine: e) == true)
+        #expect(DrawingEditRouter.canDelete(engine: e) == true)
+        #expect(e.drawingSession.viewportMapper(for: .upper) != nil)             // 前提：mapper 确实发布着
+
+        e.drawingSession.clearViewportMapper(panel: .upper)
+
+        #expect(e.drawingSession.viewportMapper(for: .upper) == nil, "mapper 必须真的被清掉")
+        #expect(DrawingEditRouter.selectionGeometryVisible(engine: e) == false,
+                "没有当前有效视口 ⇒ 判不了几何 ⇒ fail-closed（不能沿用陈旧视口乐观放行）")
+        #expect(DrawingEditRouter.canEditStyle(engine: e) == false)
+        #expect(DrawingEditRouter.canDelete(engine: e) == false)
+
+        let rev = e.drawingsRevision
+        let before = e.drawings
+        var s = DrawingEditRouter.panelStyle(engine: e); s.thickness = 9
+        #expect(DrawingEditRouter.applyStyle(s, engine: e) == false)
+        #expect(DrawingEditRouter.deleteSelected(engine: e) == false,
+                "不安全方向的门：mapper 缺失绝不能被写入路由当成「乐观放行」——这是不可逆删除")
+        #expect(e.drawings == before, "零改动")
+        #expect(e.drawingsRevision == rev)
+        #expect(e.drawingSession.selectedDrawingID == "A", "选中原样保留（membership 仍成立，不是被夺走）")
+    }
+
+    /// 清另一个面板的 mapper 不该影响本面板的判据（与 `geometryUsesSelectedPanelMapper` 同族对照）。
+    @Test("R2-M2 fix 对照：清的是**另一个**面板的 mapper → 本面板选中的几何判据不受影响")
+    func clearingOtherPanelMapperDoesNotAffectSelectedPanel() {
+        let e = makeSelected(price: 50)   // 选中在 .upper
+        #expect(DrawingEditRouter.canDelete(engine: e) == true)                  // 前提
+
+        e.drawingSession.clearViewportMapper(panel: .lower)                      // 清 .lower（无关面板）
+
+        #expect(DrawingEditRouter.canDelete(engine: e) == true,
+                "清掉无关面板的 mapper 不该牵连本面板的几何判据")
+    }
+
     @Test("N18b（D60）：locked 线两个谓词都假、写入被拒、选中原样保留")
     func lockedDisablesBoth() {
         let e = TrainingEngine.preview()

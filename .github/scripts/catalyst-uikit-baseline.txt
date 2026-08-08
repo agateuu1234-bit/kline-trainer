@@ -34,6 +34,7 @@ N6/D53：`.pending` 盾对**选择态**同样拒收 —— 既不选中也不落
 N6/D53：`.rect` 区内的选择态 tap 被挡、区外正常选中（证明分叉在盾之后、且盾不过度屏蔽）
 PR-4：rebuildRenderState 发布的是**这一帧渲染真用过**的视口（与 view.renderState.viewport 逐字相等）
 PR-4（codex plan-R1-F2 专项）：几何提示由 **Coordinator 真实路径**刷新 —— 选中一条价位远在视口外的线 → 提示转 false
+codex R2-M2 fix：瞬态零尺寸 bounds → 该面板 mapper 失效，几何门 fail-closed，写入路由零改动
 布局到有效尺寸后 renderState 重算非空（静态 engine 不依赖 observation 再触发）
 layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复 make）
 布局重算同步 engine bounds → 静态界面后续 pinch 生效（codex R1-F1：不被 stale .zero bounds no-op）

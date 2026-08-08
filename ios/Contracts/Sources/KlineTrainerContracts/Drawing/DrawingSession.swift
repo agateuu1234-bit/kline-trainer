@@ -62,6 +62,14 @@ public final class DrawingSession {
         viewportMappers[panel == .upper ? 0 : 1] = m
     }
 
+    /// codex R2-M2 fix：某面板此刻**没有**有效渲染视口时把它的 mapper 失效——不留旧值。
+    /// 不清的话，几何门（`DrawingEditRouter.selectionGeometryVisible`）会拿上一帧的陈旧视口
+    /// 误判「此刻仍可见」，而失败方向不安全：`canDelete`/`canEditStyle` 可能放行，
+    /// `deleteSelected` 因此可能删掉一条其实当下判不了几何的线（不可逆）。
+    func clearViewportMapper(panel: PanelId) {
+        viewportMappers[panel == .upper ? 0 : 1] = nil
+    }
+
     func viewportMapper(for panel: PanelId) -> CoordinateMapper? {
         viewportMappers[panel == .upper ? 0 : 1]
     }

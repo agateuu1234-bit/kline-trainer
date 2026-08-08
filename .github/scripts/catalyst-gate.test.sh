@@ -462,11 +462,11 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   pass-main-current.log 已用本轮真 fresh Catalyst 日志（1711 tests / 205 suites）逐行重裁。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1711" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 73 / total 1711）→ GATE PASS 且回显 1711 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1715" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 74 / total 1715）→ GATE PASS 且回显 1715 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1711，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1715，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 
