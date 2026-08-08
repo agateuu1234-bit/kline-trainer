@@ -438,6 +438,57 @@ struct DrawingEditRouterTests {
         #expect(e.drawingSession.selectedDrawingID == "X", "坏状态不是用户的错，别顺手夺走选中")
     }
 
+    /// whole-branch codex medium finding：`uniqueSelected` 只在**可见域**（`visibleDrawings`）里判
+    /// 唯一，而引擎 `updateDrawingStyle`/`deleteDrawing(id:)` 是在**整个** `engine.drawings` 上数
+    /// （D66 字面）。一份可见 + 一份结构性不可见（渐显未到）的重复 id，路由判「唯一」→ 控件会亮，
+    /// 引擎判「非唯一」→ 一律拒 —— 正是 PR-2 交接② 点名的「控件亮着、点了没反应」。
+    /// 本条钉住修复：两个可用性谓词各自新增的「全局 id 唯一」分量必须把控件一并置灰；
+    /// 而 `uniqueSelected`（服务 D49 回显）与 `syncSelectionByState`（服务 N17 选中保留）
+    /// **不能**跟着改可见域语义，否则会把「看得见、改不动」这一半退化成「看不见了/选中被夺走」。
+    @Test("PR-4 codex fix：可见域唯一 + 全局非唯一（渐显未到的重复 id）→ 控件必须灰、写入必须拒、选中/回显不受影响")
+    func globallyDuplicateIdDisablesControlsDespiteVisibleUniqueness() {
+        let e = TrainingEngine.preview()
+        // 可见的一份：thickness/colorToken 与 DrawingDefaultStyle() 默认值（1/.orange）刻意不同，
+        // 否则下面第 5 点「回显真实样式、不是默认」的断言会恒真（测不出「悄悄回退成默认」）。
+        let visible = makeStyledHLine(id: "V", thickness: 3, colorToken: .blue, revealTick: 0,
+                                      period: e.upperPanel.period, candleIndex: 0, price: 50)
+        // 结构性不可见的一份：同 id、revealTick(7) > tick(0)（`TrainingEngine.preview()` 恒为 0）
+        // → 渐显未到，D40 `visibleDrawings` 会把它挡在可见域之外，但它仍在 `engine.drawings` 里。
+        let hiddenDuplicate = makeStyledHLine(id: "V", thickness: 9, colorToken: .green, revealTick: 7,
+                                              period: e.upperPanel.period, candleIndex: 0, price: 50)
+        e.injectDrawingsForTesting([visible, hiddenDuplicate])   // 绕过 appendDrawing 的 D66 门注入坏状态
+        e.toggleDrawingMode(); e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "V", panel: .upper)
+        e.drawingSession.setViewportMapper(mapper(), panel: .upper)
+
+        // 前提自足：真的构造出了「可见域唯一、全局非唯一」这个组合，不是巧合。
+        let visibleSet = RenderStateBuilder.visibleDrawings(engine: e, panel: .upper, tick: e.tick.globalTickIndex)
+        #expect(visibleSet.filter { $0.id == "V" }.count == 1,
+                "fixture 前提不成立：可见域里这个 id 不是恰好一条，下面的断言测不到目标组合")
+        #expect(e.drawings.filter { $0.id == "V" }.count == 2,
+                "fixture 前提不成立：全局没有构造出重复 id")
+
+        // 控件必须灰（本 finding 的核心）：可见域唯一不等于引擎判定的全局唯一。
+        #expect(DrawingEditRouter.styleControlsEnabled(engine: e) == false)
+        #expect(DrawingEditRouter.deleteButtonEnabled(engine: e) == false)
+
+        // 写入必须拒、零改动。
+        let rev = e.drawingsRevision
+        var s = DrawingEditRouter.panelStyle(engine: e); s.thickness = 5
+        #expect(DrawingEditRouter.applyStyle(s, engine: e) == false)
+        #expect(DrawingEditRouter.deleteSelected(engine: e) == false)
+        #expect(e.drawings.count == 2, "被拒必须零改动")
+        #expect(e.drawingsRevision == rev)
+
+        // 选中原样保留（N17：可见域仍 membership 成立，syncSelectionByState 不清它）。
+        #expect(e.drawingSession.selectedDrawingID == "V")
+
+        // D49 回显不受影响：面板仍显示那条**可见**线的真实样式，不是刚灰掉就退回 defaultStyle。
+        let shown = DrawingEditRouter.panelStyle(engine: e)
+        #expect(shown.thickness == 3, "灰态下面板仍应显示可见那条线的真实粗细")
+        #expect(shown.colorToken == .blue, "灰态下面板仍应显示可见那条线的真实颜色")
+    }
+
     // ============ N19e 确认框时间窗（D65 R13-F1）============
 
     @Test("N19e：确认框期间线滑出屏 → 点「删除」在确认那一刻重算几何 → 不调引擎、不删、选中保留")

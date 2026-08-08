@@ -54,6 +54,16 @@ enum DrawingEditRouter {
 
     // ⚠️ `uniqueSelected` 已在 Task 2 Step 4 随本文件建好（`selectionGeometryVisible` 依赖它），**本 Task 不要重复定义**。
 
+    /// 与引擎写入门**同作用域**的 id 唯一性（`TrainingEngine.updateDrawingStyle:1159` /
+    /// `deleteDrawing(id:):1112` 都在**整个** `drawings` 上数）。
+    /// ⚠️ 必须与 `uniqueSelected` 的**可见域**唯一性分开（整支 codex R1）：后者服务 D49 回显
+    /// （面板仍显示那条看得见的线），前者服务可用性谓词（控件置灰）。两者合起来 = 「看得见、改不动」，
+    /// 与 locked / 未来数据线同一套待遇。若谓词沿用可见域判据，一份可见 + 一份隐藏的重复 id 会让
+    /// 控件亮着、点了却被引擎拒 → 正是 PR-2 交接② 点名的「控件亮着、点了没反应」。
+    private static func idIsGloballyUnique(engine: TrainingEngine, id: DrawingID) -> Bool {
+        engine.drawings.filter { $0.id == id }.count == 1
+    }
+
     /// 「改样式可用」的**非几何分量**（review / 唯一 / `locked` / 工具已实现 / 未来数据）。
     /// ⚠️ **判据以引擎门为准，不是以 spec D65 的字面为准**（PR-2 交接②）：`updateDrawingStyle`
     /// 比 D65 写的三分量多**三道**——`flow.mode != .review`（D34 纵深）、`isEditableToolType`
@@ -66,6 +76,7 @@ enum DrawingEditRouter {
     private static func editableIgnoringGeometry(engine: TrainingEngine) -> Bool {
         guard engine.flow.mode != .review else { return false }
         guard let d = uniqueSelected(engine: engine) else { return false }
+        guard idIsGloballyUnique(engine: engine, id: d.id) else { return false }
         guard !d.locked else { return false }
         guard DrawingStyleAvailability.isEditableToolType(d.toolType) else { return false }
         return !engine.loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [d.id])
@@ -78,6 +89,7 @@ enum DrawingEditRouter {
     private static func deletableIgnoringGeometry(engine: TrainingEngine) -> Bool {
         guard engine.flow.mode != .review else { return false }
         guard let d = uniqueSelected(engine: engine) else { return false }
+        guard idIsGloballyUnique(engine: engine, id: d.id) else { return false }
         return !d.locked
     }
 
