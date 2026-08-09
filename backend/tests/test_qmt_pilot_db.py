@@ -4502,6 +4502,84 @@ class _PgError(Exception):
         self.sqlstate = sqlstate
 
 
+def _connlimit_ops(maint):
+    """维护连接上发出的 `ALTER DATABASE … CONNECTION LIMIT` 语句，按顺序。"""
+    return [q for q in maint.executed
+            if "CONNECTION LIMIT" in q.upper() and "ALTER DATABASE" in q.upper()]
+
+
+def test_empty_remnant_drop_seals_new_connections_before_the_final_proof():
+    """零对象例外这条来路：**先封新连接、再复查、才 DROP**（codex 4a-2 R10-F1，critical）。
+
+    该来路绕过 pilot_meta 归属与 `--reset-foreign` 令牌，全部授权理由就是
+    「这个库当时是空的」。验空是一次读 —— 读完到 `DROP DATABASE` 之间真 PG 实测有
+    0.7–2.2 ms：一个普通角色在这段里连进来建表**再断开**，PostgreSQL 就没有活会话可挡，
+    于是一个**已经不空**的库被删掉。真 PG 档 Ⓓ 复现过这次丢失。
+
+    ⚠️ 这里断言的是**次序**：封连接必须排在探测目标库之前，DROP 排在最后。
+       只断言「发过 CONNECTION LIMIT 0」的话，发在 DROP 之后照样绿。
+    """
+    maint = _DropMaint()
+    target = _EmptyOnProbe()
+
+    # ⚠️ 次序要落在**同一条时间线**上：把「连进目标库」这个事件也记进 maint.executed，
+    #    否则只能各自数各自的，比不出「封连接」与「复查」谁先谁后。
+    async def _connect_recording(dbname):
+        maint.executed.append(f"-- CONNECT {dbname}")
+        if dbname != "kline_pilot_probe":
+            raise ConnectionError(f"cannot connect to {dbname}")
+        target.current_database = dbname
+        return target
+
+    auth = ResetAuthorization(_RESET_CAPABILITY, db_oid="16400", via_empty_remnant=True)
+    asyncio.run(_drop_pilot_database(
+        maint, connect=_connect_recording, db_name="kline_pilot_probe",
+        seed="probe", authorization=auth))
+
+    limits = _connlimit_ops(maint)
+    assert limits and "0" in limits[0].rsplit("LIMIT", 1)[1], \
+        f"DROP 前没有把新连接封住：{limits}"
+    seal_at = maint.executed.index(limits[0])
+    drop_at = next(i for i, q in enumerate(maint.executed)
+                   if q.upper().startswith("DROP DATABASE"))
+    connect_at = next(i for i, q in enumerate(maint.executed)
+                      if q.startswith("-- CONNECT "))
+    assert target.probes == 1, f"复查根本没发生（probes={target.probes}）—— 断言会变成空的"
+    assert seal_at < connect_at < drop_at, (
+        f"次序不对：封连接@{seal_at} → 复查@{connect_at} → DROP@{drop_at}。"
+        f"复查若排在封连接之前，R10-F1 的窗口原样存在")
+
+
+def test_non_remnant_drop_does_not_touch_connection_limit():
+    """反向：走闸 0−/0/0b 那条来路**不封连接**（它要销毁的本来就是装着数据的库）。
+
+    别把修复做成「一律封」——那会在每次 reset 上多一次对目标库的 ALTER，
+    而那条来路的授权前提与「库空不空」无关。
+    """
+    maint = _DropMaint()
+    asyncio.run(_drop(maint, via_remnant=False))
+    assert _connlimit_ops(maint) == [], \
+        f"非零对象例外的来路不该动连接限制：{_connlimit_ops(maint)}"
+
+
+def test_empty_remnant_drop_restores_connection_limit_when_refused():
+    """**拒绝路径上必须把连接限制还回去**（R10-F1 修复自带的新失败模式）。
+
+    留着 0 的话，一个本工具**没有**销毁、也不归它管的库会对所有非超级用户
+    **永久不可连** —— 那比原来的窗口更糟。真 PG 档 Ⓓb 端到端钉住同一条。
+    """
+    maint = _DropMaint()
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop(maint, target=_EmptyOnProbe(non_empty_probes=(1,)),
+                          via_remnant=True))
+    assert ei.value.code == "not_owned"
+    limits = _connlimit_ops(maint)
+    assert len(limits) == 2 and "-1" in limits[1], \
+        f"拒绝之后没有恢复连接限制，库被留成非超级用户不可连：{limits}"
+    assert not any(q.upper().startswith("DROP DATABASE") for q in maint.executed), \
+        "复查判不空却还是 DROP 了"
+
+
 def _drop(maint, *, target=None, via_remnant=False, **over):
     auth = over.pop("authorization",
                     ResetAuthorization(_RESET_CAPABILITY,

@@ -2479,6 +2479,27 @@ SELECT a.pid, a.usename, a.application_name
 #    去查「谁连着这个库」，而真相是角色没有 DROP 权限 —— 恢复动作整个走错。
 _OBJECT_IN_USE_SQLSTATE = "55006"
 
+# ── 零对象例外那条来路：DROP 之前把**新连接**封住（codex 4a-2 R10-F1，critical）──
+# 该来路绕过 pilot_meta 归属与 `--reset-foreign` 令牌，全部授权理由就是「库当时是空的」。
+# 而验空是一次读：读完到 `DROP DATABASE` 之间实测有 0.7–2.2 ms，一个普通角色在这段里
+# 连进来建表**再断开**，PostgreSQL 就没有活会话可挡，于是一个已经不空的库被删掉。
+#
+# ⚠️ **必须用 `CONNECTION LIMIT 0`，不能用 `ALLOW_CONNECTIONS false`**（真 PG 实测）：
+#    · `datallowconn = false` 连**超级用户**也挡（`database … is not currently accepting
+#      connections`）→ 封住之后就再也验不了空，这条路根本走不通；
+#    · `datconnlimit = 0` 只挡非超级用户，本工具（超级用户/属主）仍连得进去验空。
+#    两种设置下 `DROP DATABASE` 都能成功。
+# ⚠️ **诚实边界**：它挡不住另一个**超级用户**。但超级用户本来就能直接 DROP 任何库，
+#    这条护栏防的是 `pg_restore --create`、应用角色、人工误操作那一类现实威胁面。
+# ⚠️ 库名不能走占位符（`ALTER DATABASE` 的库名不是可参数化位置）→ 一律 `quote_ident`。
+def _SEAL_CONNECTIONS_SQL(db_name: str) -> str:
+    return f"ALTER DATABASE {quote_ident(db_name)} WITH CONNECTION LIMIT 0"
+
+
+def _UNSEAL_CONNECTIONS_SQL(db_name: str) -> str:
+    return f"ALTER DATABASE {quote_ident(db_name)} WITH CONNECTION LIMIT -1"
+
+
 # DROP 成功之后清掉那条凭据（codex 4a-2b R4-F1）。
 # ⚠️ 不清的话：那一行仍然**新鲜且已确认**，只是指向一个已经消失的 oid。
 #    `_INSERT_INTENT_SQL` 的接管条件是「同 run_id **或**已超 TTL」，
@@ -2560,40 +2581,74 @@ async def _drop_pilot_database(maint_conn, *, connect, db_name: str, seed: str,
             f"而此刻同名库的 oid 是 {oid_now!r} —— 授权之后它被删掉又重建了。"
             f"绝不 DROP 一个本次没有授权过的实例，请人工核对 {db_name!r}")
 
-    # 零对象例外那条来路：把【绝对空】复查**贴到 DROP 前**（codex 4a-2b R2-F1）。
-    if authorization.via_empty_remnant:
-        empty_now, oid_probe, probe_closed = await _probe_absolutely_empty(
-            maint_conn, connect, db_name)
-        _assert_target_released(probe_closed, db_name)
-        if oid_probe != authorization.db_oid:
-            raise PilotDbBoundaryError(
-                "target_db_replaced",
-                f"被授权销毁的 {db_name!r} 实例 oid 是 {authorization.db_oid!r}，"
-                f"紧贴 DROP 复查时已是 {oid_probe!r} —— 授权之后它被删掉又重建了")
-        if not empty_now:
-            raise PilotDbBoundaryError(
-                "not_owned",
-                f"{db_name!r} 是靠「零对象例外」拿到销毁授权的（理由就是它当时是空的），"
-                f"而紧贴 DROP 复查时它**已经不空了** —— 可能有人正在 pg_restore 或手工建表。"
-                f"这个库既没有 pilot_meta 归属、也没过 --reset-foreign 令牌，"
-                f"绝不 DROP。如确需删除请在 pilot 工具之外手工执行")
-
-    # 规定 2：一条朴素的 DROP，不带 FORCE；失败**一次都不重试**。
+    # 零对象例外那条来路：把【绝对空】复查**贴到 DROP 前**（codex 4a-2b R2-F1），
+    # 并且**先把新连接封住**再复查（codex 4a-2 R10-F1，critical）。
+    _sealed = bool(authorization.via_empty_remnant)
+    if _sealed:
+        await maint_conn.execute(_SEAL_CONNECTIONS_SQL(db_name))
     try:
-        await maint_conn.execute(f"DROP DATABASE {quote_ident(db_name)}")
-    except Exception as exc:
-        if getattr(exc, "sqlstate", None) != _OBJECT_IN_USE_SQLSTATE:
-            raise                                  # 权限不足之类不是「被占用」，别误导
+        if authorization.via_empty_remnant:
+            # ⚠️ **封连接必须排在复查之前**：验空是一次读，读完到 `DROP DATABASE`
+            #    之间实测有 0.7–2.2 ms 的窗口。一个普通角色在这段里连进来建表再断开，
+            #    PostgreSQL 就没有活会话可挡，于是本工具会删掉一个**已经不空**的库 ——
+            #    而这条来路**绕过** pilot_meta 归属与 `--reset-foreign` 令牌，
+            #    它的全部授权理由就是「这个库当时是空的」。真 PG 档 Ⓓ 复现过这次丢失。
+            # ⚠️ 封住之后**要重新数一遍会话**：封的是「新连接」，封之前就连着的还在。
+            resealed = await maint_conn.fetch(_TARGET_CLIENT_SESSIONS_SQL, db_name)
+            if resealed:
+                raise PilotDbBoundaryError(
+                    "target_db_in_use",
+                    f"封住新连接之后 {db_name!r} 上仍有 {len(resealed)} 条客户端会话："
+                    f"{[dict(r) for r in resealed]}——它们在封之前就连着。拒绝 DROP")
+            empty_now, oid_probe, probe_closed = await _probe_absolutely_empty(
+                maint_conn, connect, db_name)
+            _assert_target_released(probe_closed, db_name)
+            if oid_probe != authorization.db_oid:
+                raise PilotDbBoundaryError(
+                    "target_db_replaced",
+                    f"被授权销毁的 {db_name!r} 实例 oid 是 {authorization.db_oid!r}，"
+                    f"紧贴 DROP 复查时已是 {oid_probe!r} —— 授权之后它被删掉又重建了")
+            if not empty_now:
+                raise PilotDbBoundaryError(
+                    "not_owned",
+                    f"{db_name!r} 是靠「零对象例外」拿到销毁授权的（理由就是它当时是空的），"
+                    f"而紧贴 DROP 复查时它**已经不空了** —— 可能有人正在 pg_restore 或手工建表。"
+                    f"这个库既没有 pilot_meta 归属、也没过 --reset-foreign 令牌，"
+                    f"绝不 DROP。如确需删除请在 pilot 工具之外手工执行")
+
+        # 规定 2：一条朴素的 DROP，不带 FORCE；失败**一次都不重试**。
         try:
-            now_occupants = [dict(r) for r in
-                             await maint_conn.fetch(_TARGET_SESSIONS_SQL, db_name)]
-        except Exception:                          # 诊断而已，读不到就算了
-            now_occupants = "（占用者清单读取失败）"
-        raise PilotDbBoundaryError(
-            "target_db_in_use",
-            f"DROP {db_name!r} 被其他会话顶住（{exc}）。占用者：{now_occupants}。"
-            f"本工具**一次都不重试、也绝不改用强制模式**——"
-            f"那会无差别中止别人的会话，正是本套护栏要避免的行为") from exc
+            await maint_conn.execute(f"DROP DATABASE {quote_ident(db_name)}")
+        except Exception as exc:
+            if getattr(exc, "sqlstate", None) != _OBJECT_IN_USE_SQLSTATE:
+                raise                              # 权限不足之类不是「被占用」，别误导
+            try:
+                now_occupants = [dict(r) for r in
+                                 await maint_conn.fetch(_TARGET_SESSIONS_SQL, db_name)]
+            except Exception:                      # 诊断而已，读不到就算了
+                now_occupants = "（占用者清单读取失败）"
+            raise PilotDbBoundaryError(
+                "target_db_in_use",
+                f"DROP {db_name!r} 被其他会话顶住（{exc}）。占用者：{now_occupants}。"
+                f"本工具**一次都不重试、也绝不改用强制模式**——"
+                f"那会无差别中止别人的会话，正是本套护栏要避免的行为") from exc
+        _sealed = False                            # 库已不存在，无可恢复也无需恢复
+    finally:
+        if _sealed:
+            # ⚠️ **拒绝之后必须把连接限制还回去**：留着 0 的话，一个本工具**没有**销毁、
+            #    也不归它管的库会对所有非超级用户永久不可连 —— 那比原来的窗口更糟。
+            # ⚠️ 恢复失败**不许吞**：它会顶掉正在传播的原异常，而这正是应该的 ——
+            #    「库被留在不可连状态」比「这次 reset 为什么被拒」更需要人立刻知道。
+            #    原因链仍在 `__context__` 里，不会丢。
+            try:
+                await maint_conn.execute(_UNSEAL_CONNECTIONS_SQL(db_name))
+            except Exception as unseal_exc:
+                raise PilotDbBoundaryError(
+                    "connection_limit_not_restored",
+                    f"{db_name!r} 的连接数上限被本次 DROP 前的封锁设成 0，"
+                    f"而**恢复失败**（{unseal_exc}）——该库现在对所有非超级用户不可连。"
+                    f"请人工执行 ALTER DATABASE {db_name} WITH CONNECTION LIMIT -1。"
+                    f"（本次 reset 被拒的原因见 __context__）") from unseal_exc
 
     # DROP 成功 —— 在**同一把 seed 锁下**清掉那条已经无所指的凭据（R4-F1）。
     try:
