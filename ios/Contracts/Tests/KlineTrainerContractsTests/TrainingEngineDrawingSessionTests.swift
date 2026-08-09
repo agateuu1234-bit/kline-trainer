@@ -908,19 +908,29 @@ struct TrainingEngineDrawingSessionTests {
     //   `filesMentioning(_:)` / `expectEngineInternalOnly(_:)`（同 test module 顶层函数，无需再声明）。
     //   ⚠️ **不得**在本文件另写一份扫描逻辑——同族判据留两档正是本计划一路在修的毛病。
 
-    @Test("N15: updateDrawingStyle 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
+    @Test("N15: updateDrawingStyle 非 public + Sources/ 中恰好 1 处调用（PR-4 已接线，路由在调用前先验几何）")
     func updateDrawingStyleTrustBoundary() throws {
         try expectEngineInternalOnly("updateDrawingStyle(id:")   // 存在 + 非 public/package/open（D62）
-        // ⚠️ 本切片是引擎写入面，UI 编辑路由属 PR-4 → 现在**零调用点**。
-        //    PR-4 接线时必须把本断言改成：恰好 1 处、且该文件是 UI 编辑路由、且路由在调用前先验
-        //    HorizontalLineTool.visibleGeometry（D58 候选预检 + D65 当前门）。谁不补几何门就加调用点，
-        //    这条当场红——这就是本守卫存在的意义（fail-closed forcing function）。
+        // PR-4 已接线：`Sources/` 里**恰好 1 处**调用，且必须在那条已先验几何的 UI 编辑路由里。
         let sites = try callSiteCount("updateDrawingStyle(")
-        #expect(sites.isEmpty, "updateDrawingStyle 出现了非预期调用点：\(sites)")
+        #expect(sites.count == 1, "updateDrawingStyle 的调用文件数应为 1，实际：\(sites)")
+        #expect(sites.first?.count == 1, "同一文件内也只许 1 处，实际：\(sites)")
+        #expect(sites.first?.file.hasSuffix("/Drawing/DrawingEditRouter.swift") == true,
+                "唯一调用点必须是 UI 编辑路由，实际：\(sites)")
+        // 那条路由必须**在调用之前**先验几何（D58 候选预检 + D65 当前门）——只钉"调用点唯一"不够，
+        // 唯一的那处若不验几何，几何完整性同样失守。
+        let router = contractsDirForGuards
+            .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path
+        #expect(try squeezedContains(router, "HorizontalLineTool.visibleGeometry("),
+                "路由里没有几何判据 —— D58/D65 的门不存在")
+        let code = try squeezedSource(router)
+        let geoIdx = try #require(code.range(of: squeeze("HorizontalLineTool.visibleGeometry("))).lowerBound
+        let callIdx = try #require(code.range(of: squeeze("engine.updateDrawingStyle("))).lowerBound
+        #expect(geoIdx < callIdx, "几何判据必须排在 updateDrawingStyle 调用之前")
         // **更强的一层（codex plan-R5-F1）**：连**方法引用**（`let f = engine.updateDrawingStyle`）都要挡——
         // 那种写法源码里不出现 `updateDrawingStyle(`，只数调用 pattern 会放过它，而几何门**只**靠
         // 「唯一调用点在已验几何的 UI 路由」这条守卫成立。故按**标识符的文件作用域**钉：
-        // 本切片只许出现在引擎自身文件；PR-4 接线时把路由文件加进白名单（**只加那一个**）。
+        // 本切片只许出现在引擎自身文件 + 路由文件。
         let mentions = try filesMentioning("updateDrawingStyle")
         // 自足断言：`mentions` 若为空数组，下面 `allSatisfy` 恒真通过——扫描器坏掉/扫描根为空也测不出来。
         // 先钉「确实扫到了东西」（今天必非空：至少引擎自身这一处），再判"扫到的都在白名单里"。
@@ -928,8 +938,13 @@ struct TrainingEngineDrawingSessionTests {
         // fix round 1（Minor 2）：`.contains("TrainingEngine.swift")` 是路径子串匹配——任何叫
         // `XxxTrainingEngine.swift` 的文件都会被误判进白名单，绕过守卫。改成精确尾匹配
         // （目录 + 文件名都钉死），才真的只放行引擎自身这一个文件。
-        #expect(mentions.allSatisfy { $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") },
-                "updateDrawingStyle 被引擎以外的文件提到（含方法引用）：\(mentions)")
+        #expect(mentions.allSatisfy {
+            $0.hasSuffix("/TrainingEngine/TrainingEngine.swift")
+                || $0.hasSuffix("/Drawing/DrawingEditRouter.swift")
+        }, "updateDrawingStyle 被引擎与唯一路由以外的文件提到（含方法引用）：\(mentions)")
+        // PR-4：白名单文件**内部**的方法 vend（`{ updateDrawingStyle }`）能绕过上面两层
+        // （不出现调用 pattern + 文件本身在白名单里）→ 第三层按「裸标识符」钉死。
+        try expectIdentifierNeverVended("updateDrawingStyle", inFiles: mentions)
     }
 
     // MARK: 切片2 Task 5（D51/D60/D66）：deleteDrawing(id:)
@@ -1059,26 +1074,76 @@ struct TrainingEngineDrawingSessionTests {
         #expect(n.deleteDrawing(id: "A") == true)            // 反向对照
     }
 
-    @Test("N19a: deleteDrawing(id:) 非 public + Sources/ 中零调用点（切片2 语义；PR-4 接线时改成恰好 1 处）")
+    @Test("N19a: deleteDrawing(id:) 非 public + Sources/ 中恰好 1 处调用（PR-4 已接线，路由=唯一调用点）")
     func deleteByIdTrustBoundary() throws {
         try expectEngineInternalOnly("deleteDrawing(id:")        // 存在 + 非 public/package/open（D51）
-        // PR-4 接线时改成：恰好 1 处、在 UI 删除路由、且路由在**确认框点「删除」之后**重算 visibleGeometry
-        // （D65 R13-F1：确认框有时间窗，线可能滑走 → 只在点 🗑 那刻判几何是时序 bug）。
+        // PR-4 已接线：`Sources/` 里**恰好 1 处**调用，在 UI 删除路由（`deleteSelected`
+        // 内部先调 `canDelete` 在确认那一刻重算几何，见本文件下方 N19e 结构守卫）。
         let idSites = try callSiteCount("deleteDrawing(id:")
-        #expect(idSites.isEmpty, "deleteDrawing(id:) 出现了非预期调用点：\(idSites)")
-        // N19d 不回归确认：index 版本仍零调用点、仍非 public（PR-1 已落）。
+        #expect(idSites.count == 1 && idSites.first?.count == 1,
+                "deleteDrawing(id:) 应恰好 1 处调用，实际：\(idSites)")
+        #expect(idSites.first?.file.hasSuffix("/Drawing/DrawingEditRouter.swift") == true,
+                "唯一调用点必须是 UI 删除路由，实际：\(idSites)")
+        // N19d 不回归：index 版本仍零调用点、仍非 public。
         let atSites = try callSiteCount("deleteDrawing(at:")
         #expect(atSites.isEmpty, "deleteDrawing(at:) 应零调用点：\(atSites)")
         try expectEngineInternalOnly("deleteDrawing(at index:")  // index 版同样不得包外可达（D51 R7 修订）
         // 标识符作用域（codex plan-R5-F1，连方法引用一起挡）：`deleteDrawing` 本切片只许出现在
         // 引擎自身文件 + `DrawingToolManager.swift`（1a-iv 交接①在案的**死代码**，spec §1.2/§8#5 明令本期不动，
-        // 它有自己的同名 `deleteDrawing(at:)`，与引擎写入面无关）。PR-4 接线时**只**把删除路由文件加进白名单。
+        // 它有自己的同名 `deleteDrawing(at:)`，与引擎写入面无关）+ 本 PR 的删除路由文件。
         let mentions = try filesMentioning("deleteDrawing")
         // 自足断言：`mentions` 若为空数组，下面 `allSatisfy` 恒真通过——扫描器坏掉/扫描根为空也测不出来。
         // 先钉「确实扫到了东西」（今天必非空：引擎自身 + `DrawingToolManager` 两处），再判"扫到的都在白名单里"。
         #expect(!mentions.isEmpty, "扫描器返回空——`deleteDrawing` 连引擎自身都没扫到，守卫已失效")
         #expect(mentions.allSatisfy {
-            $0.hasSuffix("/TrainingEngine/TrainingEngine.swift") || $0.hasSuffix("/Drawing/DrawingToolManager.swift")
+            $0.hasSuffix("/TrainingEngine/TrainingEngine.swift")
+                || $0.hasSuffix("/Drawing/DrawingToolManager.swift")
+                || $0.hasSuffix("/Drawing/DrawingEditRouter.swift")
         }, "deleteDrawing 被白名单以外的文件提到（含方法引用）：\(mentions)")
+        try expectIdentifierNeverVended("deleteDrawing", inFiles: mentions)
+    }
+
+    @Test("PD2 结构守卫（codex plan-R1-F2）：两条读法不得混用 —— UI 只调 *Enabled，路由只调 can*")
+    func twoGeometryReadsNeverCrossWired() throws {
+        // UI 层（TrainingView / 底栏 / 面板）不得出现现算版谓词
+        for rel in ["Sources/KlineTrainerContracts/UI/TrainingView.swift",
+                    "Sources/KlineTrainerContracts/UI/DrawingModeBar.swift",
+                    "Sources/KlineTrainerContracts/UI/DrawingStylePanel.swift",
+                    "Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift"] {
+            let code = try squeezedSource(contractsDirForGuards.appendingPathComponent(rel).path)
+            #expect(!code.contains(squeeze("DrawingEditRouter.canEditStyle(")),
+                    "\(rel) 调了现算版谓词 —— SwiftUI 建立不了 observation 依赖，平移后控件不重绘")
+            #expect(!code.contains(squeeze("DrawingEditRouter.canDelete(")), "\(rel) 同上")
+        }
+        // 路由内部不得读 observable 提示（陈旧值会放行真写入）
+        let router = try squeezedSource(contractsDirForGuards
+            .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path)
+        let liveOnly = try #require(router.range(of: squeeze("static func canEditStyle(")))
+        let displayStart = try #require(router.range(of: squeeze("static func styleControlsEnabled(")))
+        let liveBlock = String(router[liveOnly.lowerBound..<displayStart.lowerBound])
+        // ⚠️ **两种拼法都要禁**（整支 Opus 终审 Minor-1，已复验）：needle 只写小写 `session.` 时，
+        //    `engine.drawingSession.selectionGeometryVisible`（**大写 S**，恰恰是最自然的写法）匹配不上
+        //    → 守卫恒不触发。终审的变异 A 正是这么写的，本条当时**没红**，全靠 4 条行为测试拦住。
+        //    源码守卫这一层比行为层弱的根因不是「读错文本来源」（PD7 已解决），而是「needle 拼法不全」。
+        for needle in ["session.selectionGeometryVisible", "drawingSession.selectionGeometryVisible"] {
+            #expect(!liveBlock.contains(squeeze(needle)),
+                    "现算版谓词里读到了 observable 提示（拼法 \(needle)）—— 确认框时间窗内会用陈旧值放行删除（N19e）")
+        }
+        // 反向自足断言：UI 版确实读了提示（防上面两条在「谁都没调」的空状态下恒真）
+        #expect(router.contains(squeeze("engine.drawingSession.selectionGeometryVisible")),
+                "UI 版谓词没读 observable 提示 —— 那套信号白建了")
+    }
+
+    @Test("N19e 结构守卫：删除路由自己现算几何（不接受调用方传进来的陈旧布尔）")
+    func deleteRouteRecomputesGeometryItself() throws {
+        let router = contractsDirForGuards
+            .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path
+        let code = try squeezedSource(router)
+        // deleteSelected 体内必须调 canDelete（它内部现算 visibleGeometry），
+        // 而不是收一个 `geometryVisible: Bool` 参数（那就把判定时刻交给了调用方 = 时序 bug）。
+        #expect(code.contains(squeeze("static func deleteSelected(engine: TrainingEngine) -> Bool")),
+                "deleteSelected 签名变了？它不得新增任何几何入参")
+        #expect(code.contains(squeeze("guard canDelete(engine: engine)")),
+                "deleteSelected 必须自己调 canDelete 现算几何")
     }
 }

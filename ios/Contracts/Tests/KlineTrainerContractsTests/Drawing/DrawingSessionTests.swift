@@ -2,6 +2,7 @@
 // Spec: docs/superpowers/specs/2026-07-10-drawing-tools-P1b-split-addendum.md §3.1 / §3.3（1a-ii）
 // D39 单一真相容器 / D42 全局会话 + 落锚归属被点击面板 / D31 只丢 pending 保工具 / D38 连续画线。
 import Testing
+import CoreGraphics   // PR-4：fixtureMapper 用 CGRect
 @testable import KlineTrainerContracts
 
 @Suite("DrawingSession：画线共享状态容器（D39/D42/D31/D38）")
@@ -397,5 +398,53 @@ struct DrawingSessionTests {
 
         #expect(s.selectedDrawingID == nil, "空 id 必须被拒")
         #expect(s.selectedPanel == nil)
+    }
+
+    // MARK: - PR-4：视口 mapper 发布 / 几何提示（PD1/PD2）
+
+    @MainActor
+    private func fixtureMapper(priceMin: Double = 0, priceMax: Double = 100) -> CoordinateMapper {
+        CoordinateMapper(
+            viewport: ChartViewport(startIndex: 0, visibleCount: 10, pixelShift: 0,
+                                    geometry: ChartGeometry(candleStep: 10, candleWidth: 8, gap: 2),
+                                    priceRange: PriceRange(min: priceMin, max: priceMax),
+                                    mainChartFrame: CGRect(x: 0, y: 0, width: 100, height: 100)),
+            displayScale: 2)
+    }
+
+    @Test("PR-4：视口 mapper 按面板隔离存取，未发布过的面板返回 nil（fail-closed）")
+    @MainActor func viewportMapperIsPerPanel() {
+        let s = DrawingSession()
+        #expect(s.viewportMapper(for: .upper) == nil)
+        #expect(s.viewportMapper(for: .lower) == nil)
+        let m = fixtureMapper()
+        s.setViewportMapper(m, panel: .upper)
+        #expect(s.viewportMapper(for: .upper) == m)
+        #expect(s.viewportMapper(for: .lower) == nil, "写上面板不得污染下面板")
+    }
+
+    @Test("PR-4：几何提示随选中生命期走 —— 默认 false；setSelection 置 true（命中即证明可见）；clearSelection 复位")
+    @MainActor func geometryHintFollowsSelectionLifetime() {
+        let s = DrawingSession()
+        #expect(s.selectionGeometryVisible == false)
+        s.activate(tool: .horizontal)
+        s.setMode(.select)
+        s.setSelection(id: "A", panel: .upper)
+        // ⚠️ brief 原文是两段字符串字面量用 `+` 相接：`#expect` 的 comment 形参类型是 `Comment?`，
+        // 只接受**字面量**（编译期字面量转换），`+` 的运算结果是运行期 `String`，编译不过。
+        // 改用三引号多行字面量（行尾 `\` 续行、不插入换行符）合成**单个**字面量，文案一字不变。
+        #expect(s.selectionGeometryVisible == true,
+                """
+                选中只可能来自 hitTest 命中，而 hitTest 内部就是 visibleGeometry != nil —— 命中即证明此刻可见。\
+                不置 true 的话，验收 #9「单击一条线 → 🗑 从灰变亮」要等一个 runloop 才生效
+                """)
+        s.clearSelection()
+        #expect(s.selectionGeometryVisible == false, "清空选中必须一并复位几何提示，否则 🗑 会对着空选中亮着")
+        // 被拒的 setSelection（非选择态 / 空 id）不得留下一个「亮着」的提示
+        let t = DrawingSession()
+        t.activate(tool: .horizontal)                 // mode == .draw
+        t.setSelection(id: "A", panel: .upper)        // fail-closed：画线态不建立选中
+        #expect(t.selectedDrawingID == nil)
+        #expect(t.selectionGeometryVisible == false, "选中没建立成，提示不许被置亮")
     }
 }

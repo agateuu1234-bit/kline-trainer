@@ -20,6 +20,10 @@ import Testing
 /// ⚠️ `panelPosition`/`textForm`/`tailAnchor` 三个参数（fix round 1 补）：此前硬编码 `0`/`.plain`/`nil`，
 ///   恰好等于 `DrawingObject.init` 的默认值 → 调用方无法传非默认值，「逐字段原样拷贝」断言对它们恒真
 ///   （改坏实现也测不出）。默认值维持不变，既有调用点不受影响。
+/// ⚠️ `revealTick`（PR-4 Task2 补，实测发现）：默认值 `7` 保持不变（不动既有 36+ 调用点），但暴露成可传参——
+///   `DrawingEditRouterTests` 用 `TrainingEngine.preview()`（`tick.globalTickIndex == 0`，实测）造「已选中且
+///   几何可见」的线，`DrawingEditRouter.uniqueSelected` 经 D40 `visibleDrawings` 过滤 `revealTick <= tick`，
+///   硬编码 7 会让这条线在 tick 0 下恒判「未揭示」→ 几何真相测试恒假，与被测的几何逻辑本身无关。
 func makeStyledHLine(id: String,
                      lineSubType: LineSubType = .straight, lineStyle: LineStyle = .solid,
                      thickness: Int = 1, colorToken: DrawingColorToken = .orange,
@@ -27,11 +31,11 @@ func makeStyledHLine(id: String,
                      textColorToken: DrawingColorToken = .orange,
                      text: String = "hi", fontSize: Int = 14,
                      textForm: TextForm = .plain, tailAnchor: DrawingAnchor? = nil,
-                     panelPosition: Int = 0,
+                     panelPosition: Int = 0, revealTick: Int = 7,
                      period: Period = .daily, candleIndex: Int = 3, price: Double = 10) -> DrawingObject {
     DrawingObject(id: id, toolType: .horizontal,
                   anchors: [DrawingAnchor(period: period, candleIndex: candleIndex, price: price)],
-                  isExtended: lineSubType == .ray, panelPosition: panelPosition, revealTick: 7,
+                  isExtended: lineSubType == .ray, panelPosition: panelPosition, revealTick: revealTick,
                   period: period, lineSubType: lineSubType, lineStyle: lineStyle,
                   thickness: thickness, colorToken: colorToken, labelMode: labelMode,
                   locked: locked, text: text, fontSize: fontSize,

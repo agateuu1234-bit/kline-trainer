@@ -81,6 +81,8 @@ struct DrawingLayoutInvariantTests {
             stylePanelVisible: isDrawing && expanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: position,   // Task4：四态断言需要覆盖 .top（参数化，默认 .bottom 保三态断言不变）
+            style: DrawingDefaultStyle(), styleEnabled: true, onStyleChange: { _ in },  // 本测试不驱动样式，占位值
+            onToggleMode: {},                // 测试不驱动 toggle
             onTogglePosition: {},           // 测试不驱动 ⇅
             upperPanel: { Color.clear.frame(width: invariantPanelWidth, height: invariantPanelHeight) },
             lowerPanel: { Color.clear.frame(width: invariantPanelWidth, height: invariantPanelHeight) })

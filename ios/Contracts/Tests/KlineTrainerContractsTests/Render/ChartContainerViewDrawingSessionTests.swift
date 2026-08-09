@@ -462,5 +462,100 @@ struct ChartContainerViewDrawingSessionTests {
         #expect(engine.drawingSession.selectedDrawingID == hitID, "盾外的 tap 应正常命中选中")
         #expect(engine.drawings.count == 1, "选择态命中不落锚")
     }
+
+    // MARK: - PR-4：Coordinator 发布视口 mapper + 延后刷新几何提示（PD1/PD2）
+
+    @Test("PR-4：rebuildRenderState 发布的是**这一帧渲染真用过**的视口（与 view.renderState.viewport 逐字相等）")
+    func coordinatorPublishesRenderedViewport() {
+        let (engine, upperC, lowerC, upperV, lowerV) = makeRig()
+        let published = try! #require(engine.drawingSession.viewportMapper(for: .upper))
+        #expect(published.viewport == upperV.renderState.viewport,
+                "发布的视口与真实渲染态不一致 —— 几何门会与屏幕上看到的分叉")
+        #expect(published.displayScale == upperV.traitCollection.displayScale)
+        // 两个面板各自发布、互不覆盖
+        let lower = try! #require(engine.drawingSession.viewportMapper(for: .lower))
+        #expect(lower.viewport == lowerV.renderState.viewport)
+        _ = (upperC, lowerC)
+    }
+
+    @Test("PR-4（codex plan-R1-F2 专项）：几何提示由 **Coordinator 真实路径**刷新 —— 选中一条价位远在视口外的线 → 提示转 false")
+    func coordinatorRefreshesGeometryHint() async throws {
+        let (engine, upperC, _, upperV, _) = makeRig()
+        engine.toggleDrawingMode()
+        upperC.handleDrawingTapForTesting(at: mainChartPoint(upperV))     // 画一条**可见**的
+        let visibleID = try #require(engine.drawings.last?.id)
+        // 再注入一条价位远在视口外的（用注入而非画，因为画不出一条自己看不见的线）
+        // ⚠️ `revealTick: 0`（实测同款修法，见 DrawingEditRouterTests.makeSelected 头注）：`makeRig()` 的
+        // preview() 引擎 tick 恒 0，`makeStyledHLine` 默认 `revealTick: 7`——不传会让这条线在
+        // `visibleDrawings`（D40）那一步就被判「未揭示」而滤掉，本断言会因为「结构性不可见」而不是
+        // 「几何超出视口」变成 false，测不出 Coordinator 的几何刷新路径本身。
+        engine.injectDrawingsForTesting(engine.drawings + [
+            makeStyledHLine(id: "FAR", revealTick: 0, period: engine.upperPanel.period,
+                            candleIndex: 0, price: 1_000_000)])
+        engine.drawingSession.setMode(.select)
+
+        engine.drawingSession.setSelection(id: visibleID, panel: .upper)
+        upperC.rebuildRenderState(bounds: bounds)
+        await drainMainQueue()
+        #expect(engine.drawingSession.selectionGeometryVisible == true)
+
+        engine.drawingSession.setSelection(id: "FAR", panel: .upper)
+        upperC.rebuildRenderState(bounds: bounds)
+        await drainMainQueue()
+        #expect(engine.drawingSession.selectionGeometryVisible == false,
+                "Coordinator 没有按真实视口把提示改回来 —— 平移到线看不见时控件不会变灰（验收 #18c）")
+    }
+
+    /// 排空 main queue：`rebuildRenderState` 用 `DispatchQueue.main.async` 延后写提示
+    /// （视图更新期不得改 @Observable），必须等那一跳真的执行完再断言。
+    private func drainMainQueue() async {
+        await withCheckedContinuation { c in DispatchQueue.main.async { c.resume() } }
+    }
+
+    // MARK: - codex R2-M2 fix：瞬态零尺寸 bounds 早退必须让本面板 mapper 失效（不安全方向：可能放行不可逆删除）
+
+    /// `rebuildRenderState(bounds: .zero)` 复现的是 spec `:195` 注释点名的真实路径——SwiftUI 在
+    /// 导航/分屏/旋转过渡期会发来一次瞬态零尺寸 update。修复前：这条早退发生在 mapper 发布（`:227`）
+    /// **之前** → `DrawingSession.viewportMappers` 保留上一帧的旧值 → 几何门拿陈旧视口误判「仍可见」
+    /// → `canDelete`/`applyStyle` 可能放行、`deleteSelected` 可能真删掉一条当下判不了几何的线（不可逆）。
+    /// 本条**只有 Catalyst 能测**：`ChartContainerView.Coordinator.rebuildRenderState` 整个类型
+    /// `#if canImport(UIKit)` 门控，host `swift test` 根本不编译这个文件。
+    @Test("codex R2-M2 fix：瞬态零尺寸 bounds → 该面板 mapper 失效，几何门 fail-closed，写入路由零改动")
+    func invalidBoundsClearsMapperAndFailsClosedForDeleteAndStyle() throws {
+        let (engine, upperC, _, upperV, _) = makeRig()
+        engine.toggleDrawingMode()
+        let p = mainChartPoint(upperV)
+        upperC.handleDrawingTapForTesting(at: p)                    // 画线态落一条可见的
+        let id = try #require(engine.drawings.last?.id)
+        engine.drawingSession.setMode(.select)
+        upperC.handleDrawingTapForTesting(at: p)                    // 选择态命中它
+        #expect(engine.drawingSession.selectedDrawingID == id)      // 前提成立
+        #expect(DrawingEditRouter.canDelete(engine: engine) == true, "前提自足：起点是可删的")
+        #expect(engine.drawingSession.viewportMapper(for: .upper) != nil)   // 前提：此刻有有效 mapper
+
+        upperC.rebuildRenderState(bounds: .zero)                    // 瞬态零尺寸（导航/分屏/旋转过渡）
+
+        #expect(engine.drawingSession.viewportMapper(for: .upper) == nil,
+                "无效 bounds 必须清掉本面板 mapper，不留旧值——这是本条 finding 的核心")
+        #expect(DrawingEditRouter.canDelete(engine: engine) == false,
+                "没有当前有效视口 ⇒ 判不了几何 ⇒ fail-closed")
+        #expect(DrawingEditRouter.canEditStyle(engine: engine) == false)
+
+        let rev = engine.drawingsRevision
+        let before = engine.drawings
+        var s = DrawingEditRouter.panelStyle(engine: engine); s.thickness = 9
+        #expect(DrawingEditRouter.applyStyle(s, engine: engine) == false)
+        #expect(DrawingEditRouter.deleteSelected(engine: engine) == false,
+                "不安全方向：陈旧视口绝不许被写入路由当成乐观放行——这是不可逆删除")
+        #expect(engine.drawings == before, "零改动")
+        #expect(engine.drawingsRevision == rev)
+        #expect(engine.drawingSession.selectedDrawingID == id, "选中原样保留（membership 仍成立，不是被夺走）")
+
+        // 零→有效后续 layout 仍会重建（防「clear 之后再也发不出 mapper」这类过度修复）
+        upperC.rebuildRenderState(bounds: bounds)
+        #expect(engine.drawingSession.viewportMapper(for: .upper) != nil,
+                "bounds 恢复有效后必须能重新发布 mapper —— 早退只影响当帧，不是永久锁死")
+        #expect(DrawingEditRouter.canDelete(engine: engine) == true)
+    }
 }
 #endif

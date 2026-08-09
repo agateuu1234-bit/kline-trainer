@@ -1259,6 +1259,57 @@ struct RenderStateBuilderTests {
         #expect(e.drawingsRevision == revBefore, "选中不是内容变更，绝不能 bump revision（否则会触发 autosave）")
         #expect(CONTRACT_VERSION == "1.12")
     }
+
+    // MARK: - PR-4 Step 6b：PD1 前提（codex plan-R3-F2）
+
+    @Test("PD1 前提（codex plan-R3-F2）：进行中聚合会让 make 的视口与 makeViewport 重推的**真的不同** —— 这就是「不许在别处重新推导」的理由")
+    @MainActor func renderedViewportDivergesFromReDerivation() {
+        // 构造要点（缺一条分叉就出不来）：
+        //   ① 面板周期是**聚合**周期（.m60），其当前那根 aggregate 的 endGlobalIndex > tick（还没走完）；
+        //   ② 该 aggregate 自报一个**宽**区间（high 30 / low 1），而它已揭示的 m3 前缀是**窄**的（high 11 / low 9）
+        //      → 合成 partial 后 PriceRange 必然不同（`PriceRange.calculate` 的 ×0.95/×1.05 不会把差异抹平）；
+        //   ③ 可见 slice 的最后一根就是当前那根（preview 的 reveal 钳位天然满足）。
+        let e = makeAggregateDivergenceEngine()          // 见下方 helper
+        let bounds = CGRect(x: 0, y: 0, width: 320, height: 480)
+        let panelState = e.upperPanel
+        let candles = e.allCandles[panelState.period] ?? []
+        let reDerived = RenderStateBuilder.makeViewport(
+            panelState: panelState, candles: candles, tick: e.tick.globalTickIndex, bounds: bounds)
+        let rendered = RenderStateBuilder.make(engine: e, panel: .upper, bounds: bounds).viewport
+
+        // 前提自足断言：先证明两者都是**有效**视口（都退化成 .empty 的话下面的不等式毫无意义）
+        #expect(rendered.geometry.candleStep > 0, "rendered 视口退化了，本测试无判别力")
+        #expect(reDerived.geometry.candleStep > 0, "reDerived 视口退化了，本测试无判别力")
+        // 结论：两者**必须**不同，且差异就在 priceRange 上
+        #expect(rendered.priceRange != reDerived.priceRange,
+                """
+                聚合分支没造出分叉 —— fixture 不满足①②③，**停下报告**：\
+                要么修 fixture，要么 PD1「重新推导会分叉」的前提不成立、须重新评估整个设计
+                """)
+        #expect(rendered != reDerived)
+    }
+
+    /// 造一个「当前 aggregate 自报宽区间、已揭示 m3 前缀是窄区间」的引擎 —— 聚合分支一触发，
+    /// 合成 partial 的 PriceRange 就与直接用 aggregate 的不同。
+    @MainActor
+    private func makeAggregateDivergenceEngine() -> TrainingEngine {
+        func candle(_ p: Period, start: Int, end: Int, high: Double, low: Double) -> KLineCandle {
+            KLineCandle(period: p, datetime: Int64(start) * 3600,
+                        open: 10, high: high, low: low, close: 10,
+                        volume: 1000, amount: nil, ma66: nil,
+                        bollUpper: nil, bollMid: nil, bollLower: nil,
+                        macdDiff: nil, macdDea: nil, macdBar: nil,
+                        globalIndex: start, endGlobalIndex: end)
+        }
+        let m3 = (0..<8).map { candle(.m3, start: $0, end: $0, high: 11, low: 9) }      // 窄
+        let m60 = [candle(.m60, start: 0, end: 3, high: 30, low: 1),                    // 宽（未走完）
+                   candle(.m60, start: 4, end: 7, high: 30, low: 1)]
+        return TrainingEngine(
+            flow: NormalFlow(fees: FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true), maxTick: 7),
+            allCandles: [.m3: m3, .m60: m60],
+            maxTick: 7, initialCapital: 100_000, initialCashBalance: 100_000,
+            initialUpperPeriod: .m60, initialLowerPeriod: .m60)
+    }
 }
 
 // MARK: - RFC-C Task 6: previousCloseBeforeVisible helper

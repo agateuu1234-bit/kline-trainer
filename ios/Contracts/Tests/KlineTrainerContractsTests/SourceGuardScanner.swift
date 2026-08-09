@@ -64,9 +64,17 @@ func squeezedText(_ raw: String) -> String {
 
 /// **唯一**的词法扫描循环。`parenDepth == nil` = 顶层（`)` 不收尾）；非 nil = 插值体（深度归零即返回，
 /// 那个收尾 `)` 不写进 out）。注释 / 字符串 / 原始串 / 嵌套插值在两种模式下**判据完全一致**。
-func scanCode(_ c: [Character], from start: Int, parenDepth: Int?, into out: inout String) -> Int {
+func scanCode(_ c: [Character], from start: Int, parenDepth: Int?, into out: inout String,
+              keepWhitespace: Bool = false) -> Int {
     var i = start
     var depth = parenDepth ?? 0
+    // ②b ⚠️ **注释与字符串字面量被剥掉时也必须留下边界**（codex plan-R4-F2）：
+    //    Swift 里注释本身就是 token 分隔符，`return/*x*/deleteDrawing` 是**合法**代码。
+    //    只折叠真空白的话它会被压成 `returndeleteDrawing` → 裸标识符判据看到前一个字符是 `n`
+    //    → 当成「更长标识符的尾巴」跳过 → **vend 漏检，第三层守卫可被绕过**。
+    //    故：行注释 / 块注释 / 字符串字面量三处 `continue` 之前，各补一次边界。
+    //    抽成一个小闭包，三处共用（三处各写一遍必然漏掉其中一处）：
+    func emitBoundary() { if keepWhitespace, out.last != " " { out.append(" ") } }
     while i < c.count {
         if c[i] == "/", i + 1 < c.count, c[i + 1] == "*" {       // 块注释（可嵌套）
             var d = 1; i += 2
@@ -75,20 +83,28 @@ func scanCode(_ c: [Character], from start: Int, parenDepth: Int?, into out: ino
                 if c[i] == "*", i + 1 < c.count, c[i + 1] == "/" { d -= 1; i += 2; continue }
                 i += 1
             }
+            emitBoundary()
             continue
         }
         if c[i] == "/", i + 1 < c.count, c[i + 1] == "/" {       // 行注释：吃到行尾
             while i < c.count, c[i] != "\n" { i += 1 }
+            emitBoundary()
             continue
         }
         if c[i] == "#" {                                         // 可能是原始串 #"…"# / ##"…"##
             var h = 0, j = i
             while j < c.count, c[j] == "#" { h += 1; j += 1 }
-            if j < c.count, c[j] == "\"" { i = consumeStringLiteral(c, from: j, hashes: h, into: &out); continue }
+            if j < c.count, c[j] == "\"" {
+                i = consumeStringLiteral(c, from: j, hashes: h, into: &out, keepWhitespace: keepWhitespace)
+                emitBoundary(); continue
+            }
             out.append(contentsOf: c[i..<j])                      // 不是原始串（如 #expect / #filePath）
             i = j; continue
         }
-        if c[i] == "\"" { i = consumeStringLiteral(c, from: i, hashes: 0, into: &out); continue }
+        if c[i] == "\"" {
+            i = consumeStringLiteral(c, from: i, hashes: 0, into: &out, keepWhitespace: keepWhitespace)
+            emitBoundary(); continue
+        }
         if parenDepth != nil {                                   // 只有插值体在意括号深度
             if c[i] == "(" { depth += 1 }
             if c[i] == ")" {
@@ -97,6 +113,7 @@ func scanCode(_ c: [Character], from start: Int, parenDepth: Int?, into out: ino
             }
         }
         if !c[i].isWhitespace { out.append(c[i]) }                // 空白一律丢弃
+        else if keepWhitespace, out.last != " " { out.append(" ") }   // 空白折成**一个空格**，保住 token 边界
         i += 1
     }
     return c.count
@@ -108,7 +125,8 @@ func scanCode(_ c: [Character], from start: Int, parenDepth: Int?, into out: ino
 ///   于是 `logger.debug("deleted \(engine.deleteDrawing(id: id))")` 这种**真的会执行**的调用
 ///   反而从守卫底下溜走。字面量里既有"不是代码的文本"也有"确实是代码的插值"，必须分开处理。
 /// 支持多行 `"""…"""` 与原始串（`hashes` 个 `#`，其转义/插值前缀是 `\` + 同样数量的 `#`）。
-func consumeStringLiteral(_ c: [Character], from: Int, hashes: Int, into out: inout String) -> Int {
+func consumeStringLiteral(_ c: [Character], from: Int, hashes: Int, into out: inout String,
+                          keepWhitespace: Bool = false) -> Int {
     var i = from
     let isMultiline = (i + 2 < c.count) && c[i + 1] == "\"" && c[i + 2] == "\""
     let quoteLen = isMultiline ? 3 : 1
@@ -119,7 +137,8 @@ func consumeStringLiteral(_ c: [Character], from: Int, hashes: Int, into out: in
             while j < c.count, c[j] == "#", h < hashes { h += 1; j += 1 }
             if h == hashes {
                 if j < c.count, c[j] == "(" {                    // 插值 → 递归当**代码**扫
-                    i = scanCode(c, from: j + 1, parenDepth: 1, into: &out); continue  // `(` 之后起扫
+                    i = scanCode(c, from: j + 1, parenDepth: 1, into: &out,
+                                 keepWhitespace: keepWhitespace); continue  // `(` 之后起扫
                 }
                 i = min(j + 1, c.count); continue                // 普通转义：连吃被转义的那个字符
             }
@@ -200,4 +219,67 @@ func expectEngineInternalOnly(_ decl: String,
 ///   按标识符扫，方法引用也必然让标识符出现在那个文件里 → 照样被抓。
 func filesMentioning(_ identifier: String) throws -> [String] {
     try allSwiftFilesUnderSources().filter { try squeezedSource($0).contains(identifier) }
+}
+
+// MARK: 裸标识符引用（方法 vend）扫描 —— PR-4 打开攻击面前必须先关掉的缺口（PR-2 交接③）
+
+/// 与 `squeezedText` **同一个** `scanCode` 循环（剥行注释 / 嵌套块注释 / 字符串字面量内容、
+/// 保留插值体），唯一差别是**空白折成一个空格而不是删掉**。
+/// ⚠️ 为什么必须有这一版：`squeezedText` 把空白全删了，`return deleteDrawing` 会变成
+/// `returndeleteDrawing` —— 裸标识符判据要看「前后是不是标识符字符」，在 squeezed 文本上
+/// 这个判据**两个方向都会错**（把 `return` 的 `n` 当成标识符前缀 → 漏掉真 vend）。
+func codeTextPreservingBoundaries(_ raw: String) -> String {
+    var out = ""
+    _ = scanCode(Array(raw), from: 0, parenDepth: nil, into: &out, keepWhitespace: true)
+    return out
+}
+
+/// 一段（已剥注释/字符串、保留 token 边界的）代码里，`identifier` 以**裸引用**形式出现的次数。
+/// 裸引用 = 方法 vend（`{ deleteDrawing }` / `let f = deleteDrawing` / `{ self.deleteDrawing }`），
+/// 它把调用挪到了别处：源码里不出现 `deleteDrawing(`，`callSiteCount` 数不到；
+/// 而 `filesMentioning` 的白名单对**文件内部**不再细查 → 两层守卫双双放行（PR-2 终审探针 P2 实证）。
+///
+/// 判据（一次出现算裸引用 ⟺ 三条同时成立）：
+///   ① **紧邻**的前一个字符不是标识符字符（否则是更长标识符的尾巴，如 `xdeleteDrawing`）；
+///   ② **紧邻**的后一个字符不是标识符字符（否则是更长标识符的头，如 `deleteDrawingForTesting`）；
+///   ③ 后面**第一个非空格**字符不是 `(`（那是**声明或调用**，归 `callSiteCount` 那一层管）。
+/// 末尾无后继字符 → **按裸引用算**（fail-closed）。
+///
+/// ⚠️ **①② 看紧邻、③ 跳空格，两者刻意不同**（codex plan-R4-F2 连带暴露）：
+///   - ①② 若跳空格：`deleteDrawing Foo` 这两个独立 token 会被当成一个长标识符 → **漏检**；
+///   - ③ 若看紧邻：`engine.deleteDrawing/* c */(id: c)` 经边界处理后是 `engine.deleteDrawing (id: c)`，
+///     紧邻字符是空格而不是 `(` → 一次**正当调用**被误报成 vend → **假阳性**（既有自检 a 当场红）。
+func bareIdentifierReferences(inCode s: String, identifier: String) -> Int {
+    let chars = Array(s), idf = Array(identifier)
+    func isIdentChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+    var count = 0, i = 0
+    while i + idf.count <= chars.count {
+        guard Array(chars[i ..< i + idf.count]) == idf else { i += 1; continue }
+        let before: Character? = i > 0 ? chars[i - 1] : nil
+        let end = i + idf.count
+        let after: Character? = end < chars.count ? chars[end] : nil
+        i = end
+        if let b = before, isIdentChar(b) { continue }        // ①（紧邻）
+        guard let a = after else { count += 1; continue }     // 文件末尾 → fail-closed
+        if isIdentChar(a) { continue }                        // ②（紧邻）
+        var j = end                                            // ③（跳空格再看）
+        while j < chars.count, chars[j] == " " { j += 1 }
+        if j < chars.count, chars[j] == "(" { continue }
+        count += 1
+    }
+    return count
+}
+
+/// 断言 `identifier` 在给定文件集合里**从不**以裸引用（vend）形式出现。
+func expectIdentifierNeverVended(_ identifier: String, inFiles files: [String],
+                                 sourceLocation: SourceLocation = #_sourceLocation) throws {
+    // 自足断言：文件集合为空 → 下面的循环恒真通过，扫描器/白名单写错也测不出来。
+    #expect(!files.isEmpty, "\(identifier) 的 vend 守卫拿到空文件集 —— 守卫已失效",
+            sourceLocation: sourceLocation)
+    for path in files {
+        let raw = try String(contentsOfFile: path, encoding: .utf8)
+        let n = bareIdentifierReferences(inCode: codeTextPreservingBoundaries(raw), identifier: identifier)
+        #expect(n == 0, "\(path) 里有 \(n) 处 `\(identifier)` 裸引用（方法 vend）—— 会绕过唯一调用点守卫",
+                sourceLocation: sourceLocation)
+    }
 }

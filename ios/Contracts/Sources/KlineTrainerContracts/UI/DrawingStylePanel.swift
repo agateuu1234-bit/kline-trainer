@@ -16,19 +16,28 @@ struct DrawingStylePanel: View {
     let session: DrawingSession
     let scheme: AppColorScheme
     let position: DrawingStylePanelPosition
+    let style: DrawingDefaultStyle          // D49 派生值（调用方算）
+    let styleEnabled: Bool                  // D65「改样式可用」
+    /// codex 整支 R3：传**变更意图**（mutation 闭包），不是完整对象——纯转发，见 `DrawingStyleParams.onChange`。
+    let onStyleChange: (@escaping (inout DrawingDefaultStyle) -> Void) -> Void
+    let onToggleMode: () -> Void              // 1b-i PR-4：类型行图标短按（画线态 ⇄ 选择态）
     let onTogglePosition: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             // 镜像只翻「类型行 ↔ 参数」两大块；参数内部 5 组顺序两态相同、不翻（user 确认）。
             if position == .top {
-                DrawingTypeOverlay(onTogglePosition: onTogglePosition)
+                DrawingTypeOverlay(isDrawMode: session.mode == .draw,
+                                   onToggleMode: onToggleMode, onTogglePosition: onTogglePosition)
                 Divider()
-                DrawingStyleParams(session: session, scheme: scheme)
+                DrawingStyleParams(style: style, enabled: styleEnabled,
+                                   scheme: scheme, onChange: onStyleChange)
             } else {
-                DrawingStyleParams(session: session, scheme: scheme)
+                DrawingStyleParams(style: style, enabled: styleEnabled,
+                                   scheme: scheme, onChange: onStyleChange)
                 Divider()
-                DrawingTypeOverlay(onTogglePosition: onTogglePosition)
+                DrawingTypeOverlay(isDrawMode: session.mode == .draw,
+                                   onToggleMode: onToggleMode, onTogglePosition: onTogglePosition)
             }
         }
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))

@@ -133,4 +133,98 @@ struct SourceGuardScannerTests {
         """
         #expect(callCount(inSqueezed: squeezedText(src3), pattern: "deleteDrawing(id:") == 1)
     }
+
+    @Test("守卫自检 g（PR-2 交接③）：白名单文件内部的 vend 方法引用必须被抓到，正常声明/调用不得误报")
+    func scannerCatchesVendedMethodReference() {
+        // ① 会被抓：三种真实 vend 写法
+        let vended = """
+        extension TrainingEngine {
+            func handle() -> (DrawingID) -> Bool { deleteDrawing }
+            func pick() -> ((DrawingID) -> Bool) {
+                let f = deleteDrawing
+                return f
+            }
+            var alias: (DrawingID) -> Bool { self.deleteDrawing }
+        }
+        """
+        #expect(bareIdentifierReferences(inCode: codeTextPreservingBoundaries(vended),
+                                         identifier: "deleteDrawing") == 3,
+                "三处 vend 都该命中，实际文本：\(codeTextPreservingBoundaries(vended))")
+
+        // ② 不得误报：声明 / 调用 / 更长标识符 / 注释 / 字符串字面量
+        let clean = """
+        extension TrainingEngine {
+            func deleteDrawing(id: DrawingID) -> Bool { true }
+            func deleteDrawing(at index: Int) {}
+            func deleteDrawingForTesting() {}
+            func caller() {
+                _ = deleteDrawing(id: "a")
+                self.deleteDrawing(at: 0)
+                deleteDrawingForTesting()
+            }
+            // 注释里写 deleteDrawing 不算
+            /* 块注释里的 deleteDrawing 也不算 */
+            let s = "字符串里的 deleteDrawing 不算"
+        }
+        """
+        #expect(bareIdentifierReferences(inCode: codeTextPreservingBoundaries(clean),
+                                         identifier: "deleteDrawing") == 0,
+                "误报了，实际文本：\(codeTextPreservingBoundaries(clean))")
+    }
+
+    @Test("守卫自检 g3（codex plan-R4-F2）：注释/字面量被剥掉时留下边界 —— 紧贴注释的 vend 逃不掉，紧贴注释的调用不误报")
+    func scannerKeepsBoundaryAcrossComments() {
+        // ① Swift 里注释本身就是 token 分隔符，下面两行都是**合法代码**里的真 vend
+        let vendedAcrossComment = """
+        extension TrainingEngine {
+            func a() -> (DrawingID) -> Bool { return/*x*/deleteDrawing }
+            func b() -> (DrawingID) -> Bool { return//x
+                deleteDrawing }
+        }
+        """
+        #expect(bareIdentifierReferences(inCode: codeTextPreservingBoundaries(vendedAcrossComment),
+                                         identifier: "deleteDrawing") == 2,
+                "紧贴注释的 vend 漏检 —— 第三层守卫可被绕过。实际文本：\(codeTextPreservingBoundaries(vendedAcrossComment))")
+
+        // ② 反向：紧贴注释的**正当调用**不得被误报（边界空格把 `(` 推开了，判据必须跳空格再看）
+        let callAcrossComment = """
+        func caller() {
+            engine.deleteDrawing/* c */(id: c)
+            engine.deleteDrawing
+                (id: d)
+        }
+        """
+        #expect(bareIdentifierReferences(inCode: codeTextPreservingBoundaries(callAcrossComment),
+                                         identifier: "deleteDrawing") == 0,
+                "正当调用被误报成 vend，实际文本：\(codeTextPreservingBoundaries(callAcrossComment))")
+
+        // ③ 边界不得把两个独立 token 粘成一个长标识符（①② 必须看紧邻字符）
+        #expect(bareIdentifierReferences(inCode: "let x = deleteDrawing Foo", identifier: "deleteDrawing") == 1)
+        #expect(bareIdentifierReferences(inCode: "deleteDrawingForTesting()", identifier: "deleteDrawing") == 0)
+
+        // ④ 判据①：以目标标识符**结尾**的更长标识符不得被计成 vend（删掉 check① 本条即红——
+        //    fix round 1 前该判据在 g/g3 里零判别力，评审变异实验实证：删掉 check① 上面 6 条断言一个都不红）。
+        //    ⚠️ 第二条：`confirmDeleteDrawing()`（评审最初建议的带括号形态）已用变异脚本验过**没有判别力**——
+        //    去掉 check① 后它仍判 0，因为末尾 `(` 让 check③ 独立把它挡下来，check① 从未被真正运行到；
+        //    去掉尾部 `()`（本条形态）后末尾变成"匹配后无后继字符" → 走 fail-closed 的 `guard let a = after`
+        //    分支，check① 才是唯一能挡住它的判据，去掉 check① 会真的从 0 变 1。
+        #expect(bareIdentifierReferences(inCode: "let f = xdeleteDrawing", identifier: "deleteDrawing") == 0)
+        #expect(bareIdentifierReferences(inCode: "confirmDeleteDrawing", identifier: "DeleteDrawing") == 0)
+    }
+
+    @Test("守卫自检 g2：`codeTextPreservingBoundaries` 与 `squeezedText` 是同一个词法器，只差空白处理")
+    func boundaryPreservingSharesLexer() {
+        let src = """
+        func f() {
+            // deleteDrawing 注释
+            let s = "deleteDrawing 串"
+            engine.deleteDrawing(id: x)
+        }
+        """
+        // 两者都必须剥掉注释与串内容、都必须保留那一次真实调用
+        #expect(!codeTextPreservingBoundaries(src).contains("注释"))
+        #expect(!codeTextPreservingBoundaries(src).contains("串"))
+        #expect(codeTextPreservingBoundaries(src).contains("engine.deleteDrawing(id: x)"))
+        #expect(squeezedText(src).contains("engine.deleteDrawing(id:x)"))
+    }
 }

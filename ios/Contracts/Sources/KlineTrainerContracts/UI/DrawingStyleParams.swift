@@ -1,7 +1,8 @@
 // Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift
 // 1a-iii 切片2 Task3：常驻样式面板的 5 组参数控件（由 DrawingStyleCard 平移改造）。
 // 与旧卡片的三点差异：①线型/线样式/粗细改「画出来」的图标（spec §3）；②不再持有本地 @State 镜像，
-// 直接读 session.defaultStyle 单一真相（常驻面板长期存活，两份状态必然漂移）；③无「完成」/遮罩关闭语义。
+// 改收调用方算好的派生值 `style`（1b-i PR-4：D49 选中即回显 + D65 置灰，见 style/enabled 字段注释）；
+// ③无「完成」/遮罩关闭语义。
 // 颜色组（切片3）收成「7 彩 + 1 线色」：无独立黑/白格、无禁色灰态；「线色」落 .black canonical，
 // 经 DrawingColorResolver 自适应渲染（日纯黑/夜纯白），删 DrawingStyleAvailability.colorEnabled。
 // 灰掉的项只降饱和 + .disabled，绝不写任何解释文案（母 spec §3 逐字）。
@@ -9,15 +10,26 @@
 import SwiftUI
 
 struct DrawingStyleParams: View {
-    let session: DrawingSession
+    /// D49（1b-i PR-4）：**调用方算好的派生值** —— 有选中就是那条线的当前样式，无选中是
+    /// 「下一条线的默认」。**绝不在本视图里拷成 @State**：常驻面板长期存活，任何第二份
+    /// 样式状态都会与 `engine.drawings` 里的真值漂移（1a-iii 消灭过一次，别再引入）。
+    let style: DrawingDefaultStyle
+    /// D65「改样式可用」谓词的结果。视图**自己不判任何东西**（几何 / locked / 未来数据 /
+    /// 工具已实现 / 复盘五个分量都在 `DrawingEditRouter.canEditStyle` 里）。
+    /// 置灰只降饱和 + `.disabled`，**绝不写任何解释文案**（母 spec §3 逐字）。
+    let enabled: Bool
     let scheme: AppColorScheme
+    /// D49：写入路由由调用方提供（有选中 → 改那条线；无选中 → 改默认）。
+    /// ⚠️ codex 整支 R3（本 PR 引入的回归修复）：传的是**变更意图**（mutation 闭包），不是完整对象。
+    ///   `commit` **绝不能**再从 `style`（本视图渲染那一刻捕获的快照）出发拼下一个值——若两个控件
+    ///   在 SwiftUI 完成重渲染之前先后触发，第二次会拿旧快照把第一次的改动 revert 掉（选中线路径
+    ///   还会经 `drawingsRevision` 被 autosave 持久化，回退是真丢数据）。「现取当前真值 + 合并」
+    ///   下放给调用方（`DrawingEditRouter.applyStyleMutation`/`applyDefaultStyleMutation`），
+    ///   本视图只负责转发意图。
+    let onChange: (@escaping (inout DrawingDefaultStyle) -> Void) -> Void
 
-    private var style: DrawingDefaultStyle { session.defaultStyle }
-
-    private func commit(_ mutate: (inout DrawingDefaultStyle) -> Void) {
-        var next = session.defaultStyle
-        mutate(&next)
-        session.setDefaultStyle(next)
+    private func commit(_ mutate: @escaping (inout DrawingDefaultStyle) -> Void) {
+        onChange(mutate)   // ⚠️ 这里不许再读 `style`——见上方 onChange 注释。
     }
 
     var body: some View {
@@ -53,6 +65,8 @@ struct DrawingStyleParams: View {
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 7)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)      // 灰＝只降饱和，无解释字（母 spec §3）
     }
 
     // 一组 = 组名 caption + 一排选项。caption 是组名，不是解释文案。

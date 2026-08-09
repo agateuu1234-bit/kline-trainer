@@ -49,6 +49,45 @@ public final class DrawingSession {
     public private(set) var selectedDrawingID: DrawingID?
     public private(set) var selectedPanel: PanelId?
 
+    /// PR-4（PD1）：某面板**最近一次真实渲染所用**的坐标映射器，由
+    /// `ChartContainerView.Coordinator.rebuildRenderState` 在写完 `view.renderState` 后发布。
+    /// **必须是渲染真的用过的那一个**，不能在别处重新推导：`RenderStateBuilder.make` 在
+    /// 「最后一根可见 K 线是进行中聚合」时会重算 `priceRange`，重推出来的视口与屏幕上的不一致
+    /// → 几何门与渲染/命中分叉（正是 D40 要消灭的那类缺陷）。
+    /// `@ObservationIgnored` 是 **load-bearing**：平移/惯性期间每帧都写，若参与 observation 会在
+    /// `updateUIView` 里造成 写 → 失效 → 再 `updateUIView` 的循环（`TrainingEngine.swift:70` 同一条陷阱）。
+    @ObservationIgnored private var viewportMappers: [Int: CoordinateMapper] = [:]
+
+    func setViewportMapper(_ m: CoordinateMapper, panel: PanelId) {
+        viewportMappers[panel == .upper ? 0 : 1] = m
+    }
+
+    /// codex R2-M2 fix：某面板此刻**没有**有效渲染视口时把它的 mapper 失效——不留旧值。
+    /// 不清的话，几何门（`DrawingEditRouter.selectionGeometryVisible`）会拿上一帧的陈旧视口
+    /// 误判「此刻仍可见」，而失败方向不安全：`canDelete`/`canEditStyle` 可能放行，
+    /// `deleteSelected` 因此可能删掉一条其实当下判不了几何的线（不可逆）。
+    func clearViewportMapper(panel: PanelId) {
+        viewportMappers[panel == .upper ? 0 : 1] = nil
+    }
+
+    func viewportMapper(for panel: PanelId) -> CoordinateMapper? {
+        viewportMappers[panel == .upper ? 0 : 1]
+    }
+
+    /// PR-4（PD2）：选中线此刻在它所属面板上**几何可见**吗。
+    /// ⚠️ **这是给置灰用的提示，不是门。** 真正的门是 `DrawingEditRouter` 在**写入那一刻**
+    /// 用 `viewportMapper(for:)` 现算的那次 `visibleGeometry`（D65 R13-F1：确认框有时间窗，
+    /// 只在点 🗑 那一刻判几何是时序 bug）。本标志短暂陈旧最坏只是控件亮/灰晚一帧，
+    /// **写入永远不会因此放行**。
+    /// 观察语义：**值没变就不写**——`@Observable` 的 setter 无条件通知，每帧无条件写会造成
+    /// 「写 → SwiftUI 失效 → 再 update → 再写」的循环。
+    public private(set) var selectionGeometryVisible: Bool = false
+
+    func setSelectionGeometryVisible(_ v: Bool) {
+        guard selectionGeometryVisible != v else { return }
+        selectionGeometryVisible = v
+    }
+
     /// D54：建立选中。**fail-closed**：非选择态 / 无会话一律拒——这让「画线态里挂着一个选中」
     /// 这个坏状态**不可表达**（而不是靠每个调用点自觉先 setMode）。internal（同容器 mutator 纪律）。
     /// **空 id 同样拒**（1b-i PR-3 whole-branch fix，同 D66「id 唯一非空是写入边界不变量」）：
@@ -59,6 +98,7 @@ public final class DrawingSession {
         guard drawingModeActive, mode == .select, !id.isEmpty else { return }
         selectedDrawingID = id
         selectedPanel = panel
+        selectionGeometryVisible = true            // 命中即证明此刻几何可见（hitTest 内部就是 visibleGeometry != nil，D40）
     }
 
     /// D54：清空选中。**二元组整体清**（只清 id 会留下半个二元组）。
@@ -67,6 +107,7 @@ public final class DrawingSession {
     func clearSelection() {
         selectedDrawingID = nil
         selectedPanel = nil
+        selectionGeometryVisible = false           // 没有选中就没有可操作对象（🗑 与样式控件一并回灰）
     }
 
     /// D57：切换画线/选择态。切 `.select` 保留 activeDrawingTool、丢 pending（半成品多锚线不跨态存活）。

@@ -456,13 +456,17 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   （本轮实测：同一条命令在 fix 提交上已从 37 变 38）。要复核请以 baseline 文件与真日志汇总行为准。
 #   uikit 基线 59→71（+12，零删除，由 uikit-expected-tests.py 重生成）。
 #   pass-main-current.log 已用一份**真** fresh Catalyst 日志（1663 tests / 203 suites）逐行重裁。
+#   【1b-i PR-4（本轮）】真实总数 1663→1711（+48）；uikit 71→73（+2：Coordinator 视口发布/几何提示刷新）。
+#   PR-4 原本还有第 3 条 UIKit-gated 测试（🗑 无障碍置灰），因在 Catalyst 上探测不到无障碍元素、
+#   且唯一替代探测方式会崩掉 xctest 进程，已整条删除并记入真机验收必验项——不留杀不死的测试。
+#   pass-main-current.log 已用本轮真 fresh Catalyst 日志（1711 tests / 205 suites）逐行重裁。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1663" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 71 / total 1663）→ GATE PASS 且回显 1663 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1715" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 74 / total 1715）→ GATE PASS 且回显 1715 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1663，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1715，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 

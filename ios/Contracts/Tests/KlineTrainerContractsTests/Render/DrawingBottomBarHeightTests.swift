@@ -39,7 +39,7 @@ struct DrawingBottomBarHeightTests {
 
     @MainActor
     private func drawingBottomBarHeight(width: CGFloat) -> CGFloat {
-        let bar = DrawingBottomBar(typeRowExpanded: .constant(false))
+        let bar = DrawingBottomBar(typeRowExpanded: .constant(false), deleteEnabled: false, onDelete: {})
         return measuredHeight(bar, width: width)
     }
 
@@ -70,5 +70,18 @@ struct DrawingBottomBarHeightTests {
         #expect(abs(trade - drawing) <= 0.5, "TradeActionBar=\(trade) DrawingBottomBar=\(drawing) @430pt")
         #expect(abs(trade - review) <= 0.5, "TradeActionBar=\(trade) ReviewControlBar=\(review) @430pt")
     }
+
+    // trashButtonDisabledFollowsPredicate（PR-4，验 🗑 渲染出的 accessibilityTraits 真跟随
+    // deleteEnabled）连同它专用的 traits(ofLabel:in:) helper 已删除，原因：
+    // 原写法（UIHostingController + layoutIfNeeded()，不挂真 window）在 Catalyst 上真跑，
+    // hostedTraits(deleteEnabled:) 恒为 nil——SwiftUI 的无障碍元素没有物化，
+    // try #require(...) 前提自足断言如实失败（其余 1712 条测试全绿）。
+    // 尝试把 hosting controller 挂进一个真 UIWindow 再遍历（唯一允许的补救尝试）：
+    // Catalyst 上裸建 `UIWindow(frame:)` 在这个纯 SPM 测试宿主里没有 UIApplication，
+    // 抛 `NSInternalInconsistencyException: NSApplication has not been created yet`，
+    // **崩溃整个 xctest 进程**（比原失败更差——xcodebuild 崩溃重启后把几百条本来会过的
+    // 测试错误计入 Failing tests）。两条路都不可行，遂整条删除，不留弱化断言顶替。
+    // 🗑 置灰目前只有源码守卫覆盖（DrawingModeBar.swift 里 `.disabled(!deleteEnabled)` 的存在
+    // 由 spec §1.1 #1 静态断言钉住），没有运行时证据；已列入真机验收必验项。
 }
 #endif

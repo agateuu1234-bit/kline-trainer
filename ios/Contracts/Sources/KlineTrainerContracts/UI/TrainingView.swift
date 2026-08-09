@@ -55,6 +55,7 @@ public struct TrainingView: View {
     @State private var stylePanelPosition: DrawingStylePanelPosition = .bottom
     @State private var toast = ToastState()      // §B.1：latest-wins 调度核（host-tested）
     @State private var confirmingEnd = false
+    @State private var confirmingDeleteDrawing = false      // 1b-i PR-4：🗑 的删除确认框
     @State private var backFailed = false      // §4.7a/§4.6：返回保存失败 → alert 重试/放弃（不丢数据）
     @State private var exitInFlight = false   // 退出路径 in-flight 门（对齐 finalizing 模式）：阻返回/放弃双击并发触发 onExit
     @State private var activePanel: PanelId = .lower   // RFC-B T2：分段钮选中面板（默认下图）
@@ -202,6 +203,13 @@ public struct TrainingView: View {
             Button("是", role: .destructive) { endManually() }
             Button("否", role: .cancel) {}
         }
+        // 1b-i PR-4（spec §1.1 #5）：删除必须确认。**几何在这里重算**（`deleteSelected` 内部调
+        // `canDelete`）——弹框期间惯性/自动推进可能把线带出屏，只在点 🗑 那一刻判是时序 bug（D65 R13-F1）。
+        .confirmationDialog("确定删除划线？", isPresented: $confirmingDeleteDrawing,
+                            titleVisibility: .visible) {
+            Button("删除", role: .destructive) { DrawingEditRouter.deleteSelected(engine: engine) }
+            Button("取消", role: .cancel) {}
+        }
         // review-redesign Task 13：复盘「结束」仅在有净改动时弹（ReviewEndPrompt.shouldPrompt 门控于 action 内）。
         .confirmationDialog("结束复盘", isPresented: $confirmingEndReview, titleVisibility: .visible) {
             Button("保存") { performReviewEnd(.save) }
@@ -251,7 +259,9 @@ public struct TrainingView: View {
             chartPanels
             if showsTradeButtons {
                 if isDrawingActive {
-                    DrawingBottomBar(typeRowExpanded: $typeRowExpanded)
+                    DrawingBottomBar(typeRowExpanded: $typeRowExpanded,
+                                     deleteEnabled: DrawingEditRouter.deleteButtonEnabled(engine: engine),
+                                     onDelete: { confirmingDeleteDrawing = true })
                 } else {
                     TradeActionBar(
                         content: TradeActionBarContent(price: engine.currentPrice),
@@ -498,6 +508,26 @@ public struct TrainingView: View {
         ChartPanelsContainer(engine: engine, stylePanelVisible: stylePanelWillBeVisible,
                              scheme: colorScheme == .dark ? .dark : .light,
                              stylePanelPosition: stylePanelPosition,
+                             // D49：派生值**每次求值现算**（`panelStyle` 内部：有选中取那条线、无选中取 defaultStyle）。
+                             style: DrawingEditRouter.panelStyle(engine: engine),
+                             styleEnabled: DrawingEditRouter.styleControlsEnabled(engine: engine),
+                             onStyleChange: { mutate in
+                                 // D49：有选中 → 只作用于那条线（改动**不回写**「下一条线的默认」）；
+                                 //      无选中 → 改默认。分流判据是「有没有选中」，别的都不是。
+                                 // codex 整支 R3：只转发**变更意图**，「现取当前真值 + 合并」交给
+                                 // DrawingEditRouter（不许在这里先读一份快照，见 DrawingStyleParams.onChange 注释）。
+                                 if engine.drawingSession.selectedDrawingID != nil {
+                                     DrawingEditRouter.applyStyleMutation(mutate, engine: engine)
+                                 } else {
+                                     DrawingEditRouter.applyDefaultStyleMutation(mutate, engine: engine)
+                                 }
+                             },
+                             onToggleMode: {
+                                 // D38/D57：两个方向都走 setMode —— 会话一直开着、工具在选择态恒非 nil（D57），
+                                 // 切回画线态**不是**开会话，不得走 activate（那是 beginDrawingSession 的专属入口）。
+                                 let session = engine.drawingSession
+                                 if session.mode == .draw { session.setMode(.select) } else { session.setMode(.draw) }
+                             },
                              onTogglePosition: { stylePanelPosition = (stylePanelPosition == .bottom ? .top : .bottom) },
                              upperPanel: { panel(.upper) }, lowerPanel: { panel(.lower) })
     }
@@ -676,6 +706,11 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
     let stylePanelVisible: Bool
     let scheme: AppColorScheme                    // 1a-iii 切片2 Task3：样式面板色板取色（DrawingColorResolver）
     let stylePanelPosition: DrawingStylePanelPosition   // 上/下半区（Task4 已接 ⇅ 真行为：refreshShields() 按当前位置求交两面板）
+    let style: DrawingDefaultStyle                 // D49（1b-i PR-4）：面板派生值**每次求值现算**（调用方算）
+    let styleEnabled: Bool                          // D65（1b-i PR-4）：改样式可用谓词（UI 版）
+    /// codex 整支 R3：传**变更意图**（mutation 闭包），不是完整对象——纯转发，见 `DrawingStyleParams.onChange`。
+    let onStyleChange: (@escaping (inout DrawingDefaultStyle) -> Void) -> Void
+    let onToggleMode: () -> Void                   // 1b-i PR-4：类型行图标短按（画线态 ⇄ 选择态）
     let onTogglePosition: () -> Void               // ⇅ 回调（替代已删的 onLongPressType）
     @ViewBuilder let upperPanel: () -> Upper
     @ViewBuilder let lowerPanel: () -> Lower
@@ -701,7 +736,9 @@ struct ChartPanelsContainer<Upper: View, Lower: View>: View {
             // （= showsTradeButtons && isDrawingActive && typeRowExpanded，天然排除复盘），本容器不再自算。
             if stylePanelVisible {
                 DrawingStylePanel(session: engine.drawingSession, scheme: scheme,
-                                  position: stylePanelPosition, onTogglePosition: onTogglePosition)
+                                  position: stylePanelPosition,
+                                  style: style, styleEnabled: styleEnabled, onStyleChange: onStyleChange,
+                                  onToggleMode: onToggleMode, onTogglePosition: onTogglePosition)
                     // ⭐codex 计划-R1-F2：GeometryReader 必须量**未加 padding 的可见面板本体**——
                     //   量到的 frame 就是写进 shield（经 refreshShields() 的 .rect case）的盾。先量、后 padding：
                     .background(GeometryReader { g in Color.clear

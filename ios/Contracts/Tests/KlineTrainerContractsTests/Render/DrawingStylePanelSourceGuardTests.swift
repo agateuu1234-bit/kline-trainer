@@ -24,13 +24,18 @@ struct DrawingStylePanelSourceGuardTests {
     private let params = "Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift"
     private let panel  = "Sources/KlineTrainerContracts/UI/DrawingStylePanel.swift"
 
-    @Test("五组控件标签齐 + 消费灰态判据 + 写 setDefaultStyle（迁自卡片守卫）")
+    @Test("五组控件标签齐 + 消费灰态判据 + 写入经 onChange 路由（1b-i PR-4）")
     func hasGroupsAndWiring() throws {
+        // ⚠️ 那 5 个组名（"线型"/"线样式"/"粗细"/"颜色"/"标注"）是**用户可见文案**，
+        //    仍留在既有的原始文本 `code` 上判（squeezedSource 会丢弃字符串字面量内容 → 在它上面恒假）。
         let code = try source(params)
         for label in ["线型", "线样式", "粗细", "颜色", "标注"] { #expect(code.contains(label)) }
         #expect(code.contains("DrawingStyleAvailability"))         // 灰态真被消费
         #expect(code.contains("normalizedLabelMode"))              // 切线型真规整 labelMode
-        #expect(code.contains("session.setDefaultStyle"))          // 选择真写单一真相
+        // 写入从 session 改成 onChange（结构断言 → 剥注释）
+        let codeStripped = try squeezedSource(contractsDirForGuards.appendingPathComponent(params).path)
+        #expect(codeStripped.contains("onChange("))     // 选择真经调用方路由（D49，1b-i PR-4）
+        // （删掉 `#expect(code.contains("session.setDefaultStyle"))`——那一处已上移到 TrainingView）
     }
 
     @Test("面板文案洁净：无「不适用」类解释字（母 spec §3 逐字，迁自卡片守卫）")
@@ -82,11 +87,35 @@ struct DrawingStylePanelSourceGuardTests {
         #expect(code.contains("horizontalLabelModeEnabled"))
     }
 
-    @Test("常驻面板读 session.defaultStyle 单一真相（不留本地 @State 镜像，防常驻期漂移）")
-    func readsSessionDirectlyWithoutLocalMirror() throws {
-        let code = try source(params)
-        #expect(code.contains("session.defaultStyle"))
-        #expect(!code.contains("@State private var style"))
+    @Test("常驻面板读**调用方算好的派生样式**单一真相（不留本地 @State 镜像，防常驻期漂移）")
+    func readsDerivedStyleWithoutLocalMirror() throws {
+        // 全是否定/结构断言 → 剥注释（本视图注释里正当地写着「绝不拷成 @State」「不再直读 session」）
+        let code = try squeezedSource(contractsDirForGuards.appendingPathComponent(params).path)
+        #expect(!code.contains(squeeze("private var style: DrawingDefaultStyle")))   // 不许再自己算
+        #expect(code.contains(squeeze("let style: DrawingDefaultStyle")))
+        #expect(!code.contains(squeeze("@State private var style")))
+    }
+
+    // codex 整支 R3（本 PR 引入的回归修复）：`commit` 曾从 `style`（视图渲染那一刻捕获的快照）出发
+    // 拼下一个值——两个控件在 SwiftUI 完成重渲染之前先后触发时，第二次会拿旧快照把第一次的改动
+    // revert 掉。现在 `commit` 只把变更意图（mutation 闭包）转发给 `onChange`，「现取当前真值 + 合并」
+    // 挪到了 `DrawingEditRouter`（见 `applyStyleMutation`/`applyDefaultStyleMutation` 及其 host 回归测试）。
+    // 本条钉住这个不变量：`commit` 函数体内**不得**出现 `style` —— 一旦出现就是退回了那个快照读法。
+    @Test("commit 只转发变更意图、不读 `style`（codex 整支 R3 回归修复）：commit 函数体内不得出现 style")
+    func commitNeverReadsRenderedSnapshot() throws {
+        let squeezed = try squeezedSource(contractsDirForGuards.appendingPathComponent(params).path)
+        let startMarker = squeeze(
+            "private func commit(_ mutate: @escaping (inout DrawingDefaultStyle) -> Void) {")
+        #expect(squeezed.components(separatedBy: startMarker).count == 2,
+                "commit 签名非唯一出现或已改变——切片锚点失效，判据不可信")
+        let start = try #require(squeezed.range(of: startMarker), "commit 签名未找到").upperBound
+        let end = try #require(squeezed.range(of: "}", range: start..<squeezed.endIndex),
+                                "commit 函数体未闭合").lowerBound
+        let body = String(squeezed[start..<end])
+        #expect(!body.isEmpty, "commit 函数体切片为空——锚点可能切错了地方")
+        #expect(!body.contains("style"),
+                "commit 体内出现 style —— 又从视图渲染时捕获的快照拼值，会把并发的第一枪 revert 掉")
+        #expect(body.contains("onChange(mutate)"), "commit 必须纯转发 mutate 给 onChange")
     }
 
     @Test("颜色行收成 7 彩 + 1 线色（切片3，codex 计划-R2-F3 精确判据）：无 allCases/colorEnabled、恰好 1 个 .black、0 个 .white")
@@ -228,8 +257,9 @@ struct DrawingStylePanelSourceGuardTests {
     func mirrorFlipsOnlyTwoBlocks() throws {
         let panel = try source(self.panel)
         #expect(panel.contains("position == .top"))                 // 两态分支存在
-        // 参数区在两个分支里都是**同一个** DrawingStyleParams 调用 → 组内顺序结构上不可能被翻。
-        #expect(panel.contains("DrawingStyleParams(session: session, scheme: scheme)"))
+        // 参数区在两个分支里都是**同一个** DrawingStyleParams 调用 → 组内顺序结构上不可能被翻（结构断言 → 剥注释 + squeeze needle）。
+        let panelCode = try squeezedSource(contractsDirForGuards.appendingPathComponent(self.panel).path)
+        #expect(panelCode.contains(squeeze("DrawingStyleParams(style: style, enabled: styleEnabled,")))
         let overlay = try source("Sources/KlineTrainerContracts/UI/DrawingTypeOverlay.swift")
         #expect(overlay.contains("onTogglePosition"))
         #expect(overlay.contains("Spacer()"))                       // ⇅ 被 Spacer 推到右端
@@ -289,6 +319,21 @@ struct DrawingStylePanelSourceGuardTests {
         // （不经 syncPanelShields，不受 stylePanelWillBeVisible 分流）。
         let disappearChain = try slice(tv, from: ".onDisappear {", to: "private var topBar: some View {")
         #expect(disappearChain.contains("engine.drawingSession.clearAllShields()"))
+    }
+
+    // ⭐补（本 task 自查发现的判别力缺口）：brief 给的 4 条守卫只查 DrawingTypeOverlay.swift 内是否
+    //   **含** `isDrawMode` 标识符、绝不含 `activeDrawingTool`——都不检查 DrawingStylePanel.swift 两处
+    //   call site 实际**传的是什么**。若这里被硬编码成 `isDrawMode: true`（回到改造前恒亮），brief 那 4 条
+    //   一条都不会红（DrawingStylePanel.swift 又是 UIKit-gated，host 上没有运行时测试能兜底）——本 Task
+    //   的核心交付（toggle 真接线）就会失去测试保护。补一条精确锚定两处 call site 字面文本的守卫。
+    @Test("1b-i PR-4：类型行图标亮灭恰好 2 处（.top/.bottom 两分支）都绑 session.mode == .draw，不许被硬编码成常量")
+    func typeOverlayIsDrawModeBoundToSessionMode() throws {
+        let squeezed = squeeze(try source(panel))
+        #expect(squeezed.components(
+            separatedBy: squeeze("DrawingTypeOverlay(isDrawMode: session.mode == .draw,")).count == 3, """
+            两处 DrawingTypeOverlay( 调用都必须原样传 isDrawMode: session.mode == .draw —— 硬编码成 \
+            true/false 会让图标恒亮/恒灭，且 DrawingStylePanel.swift 是 UIKit-gated、host 上没有别的测试能抓到
+            """)
     }
 
     @Test("旧长按卡片已删除、长按钩子已摘除（不留两套设置入口）")

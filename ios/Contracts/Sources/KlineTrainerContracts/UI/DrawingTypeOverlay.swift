@@ -1,7 +1,7 @@
 // ios/Contracts/Sources/KlineTrainerContracts/UI/DrawingTypeOverlay.swift
 // 1a-iii 切片1 Task2：类型行改 overlay（不占 chartPanels VStack 高度，浮在图表上方，`.overlay(alignment: .bottom)`
-// 挂在 TrainingView.chartPanels）。内容从旧 DrawingModeBar.typeRow 原样平移（本期只 1 个水平线图标、恒亮、
-// 无 toggle；D19：不 ship 未接线的 ②–⑤）。
+// 挂在 TrainingView.chartPanels）。内容从旧 DrawingModeBar.typeRow 原样平移（本期只 1 个水平线图标；
+// D19：不 ship 未接线的 ②–⑤）。
 // 1a-iii 切片2 Task3：本视图现是 `DrawingStylePanel`（常驻面板，替代长按卡片）的类型行子块——展开与否
 // 已由 `ChartPanelsContainer` 的挂载条件单独决定（面板存在即展开），本视图不再自判 expanded、也不再持有
 // 长按手势（长按弹卡片的设置入口已被常驻面板取代）；第一道命中盾整体上移到 `DrawingStylePanel` 根
@@ -17,18 +17,25 @@
 import SwiftUI
 
 struct DrawingTypeOverlay: View {
+    /// D38/D57（1b-i PR-4）：图标**点亮 = 画线态**、熄灭 = 选择态。判据是 `DrawingSession.mode`
+    /// 这个**显式**状态，**不是** `activeDrawingTool == nil`——nil 编码会让切周期善后早退致裂脑（D57）。
+    let isDrawMode: Bool
+    let onToggleMode: () -> Void              // 1b-i PR-4：短按在画线态 / 选择态之间切
     let onTogglePosition: () -> Void          // 1a-iii 切片2 Task3：⇅ 切换面板上/下半区（Task4 已接真行为）
 
-    // 类型行：本期只 1 个水平线图标，恒亮浅蓝框（D38：本期无选中、不做 toggle）。
+    // 类型行：本期只 1 个水平线图标，点亮（浅蓝框）= 画线态，熄灭 = 选择态。
     var body: some View {
         HStack(spacing: 12) {
-            Button { /* 本期短按 no-op：只有一个工具、已恒选中 */ } label: {
+            Button(action: onToggleMode) {
                 Image(systemName: "minus")
                     .frame(width: 40, height: 32)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor, lineWidth: 1.5))
-                    .foregroundStyle(Color.accentColor)
+                    .overlay(RoundedRectangle(cornerRadius: 6)
+                        .stroke(isDrawMode ? Color.accentColor : Color.secondary.opacity(0.35),
+                                lineWidth: 1.5))
+                    .foregroundStyle(isDrawMode ? Color.accentColor : Color.secondary)
             }
             .accessibilityLabel("水平线")
+            .accessibilityValue(isDrawMode ? "画线态" : "选择态")
             Spacer()
             Button(action: onTogglePosition) {
                 Image(systemName: "arrow.up.arrow.down")

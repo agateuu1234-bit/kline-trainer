@@ -187,8 +187,12 @@ struct DrawingTapHitShieldTests {
         // ⭐切片2 新增接线：⇅ 切上下半区（Task4 接真行为，Task3 已把按钮与回调放上）。
         #expect(overlay.contains("onTogglePosition"))
         #expect(bottom.contains("accessibilityLabel(\"类型\")"))       // ①类型键（不变）
-        for banned in ["accessibilityLabel(\"锁定\")", "accessibilityLabel(\"删除\")",
-                       "accessibilityLabel(\"撤销\")", "accessibilityLabel(\"前进\")"] {   // ②–⑤ 仍不渲染
+        #expect(bottom.contains("accessibilityLabel(\"删除\")"))       // ③🗑 删除键（1b-i PR-4 接入）
+        // ⚠️「删除」只准出现在**底栏**：PR-4 把它从黑名单移进正向断言时，overlay 那半边的守卫
+        //    连带失效了（整支 Opus 终审 Minor-2）——类型行再冒出一个 🗑 将无人拦。单独补回。
+        #expect(!overlay.contains("accessibilityLabel(\"删除\")"))
+        for banned in ["accessibilityLabel(\"锁定\")",
+                       "accessibilityLabel(\"撤销\")", "accessibilityLabel(\"前进\")"] {   // ②④⑤ 仍属 1b-ii，不渲染
             #expect(!overlay.contains(banned)); #expect(!bottom.contains(banned))
         }
     }
@@ -342,6 +346,8 @@ private struct TrainingShellLayout: View {
             stylePanelVisible: showsTradeButtons && isDrawingActive && typeRowExpanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: .bottom,    // 本 task 三个外壳都不带自己的 stylePanelPosition 状态，固定传 .bottom
+            style: DrawingDefaultStyle(), styleEnabled: true, onStyleChange: { _ in },  // 本测试不驱动样式，占位值
+            onToggleMode: {},                // 测试不驱动 toggle
             onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
             upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestUpperPanelHeight) },
             lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestLowerPanelHeight) })
@@ -363,6 +369,8 @@ private struct TallPanelsShellLayout: View {
             stylePanelVisible: engine.flow.canBuySell() && engine.drawingSession.drawingModeActive && typeRowExpanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: stylePanelPosition,
+            style: DrawingDefaultStyle(), styleEnabled: true, onStyleChange: { _ in },  // 本测试不驱动样式，占位值
+            onToggleMode: {},                // 测试不驱动 toggle
             onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
             upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestTallPanelHeight) },
             lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestTallPanelHeight) })
@@ -382,6 +390,8 @@ private struct ShortUpperShellLayout: View {
             stylePanelVisible: engine.flow.canBuySell() && engine.drawingSession.drawingModeActive && typeRowExpanded,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: .bottom,    // 本 task 三个外壳都不带自己的 stylePanelPosition 状态，固定传 .bottom
+            style: DrawingDefaultStyle(), styleEnabled: true, onStyleChange: { _ in },  // 本测试不驱动样式，占位值
+            onToggleMode: {},                // 测试不驱动 toggle
             onTogglePosition: {},           // 测试不驱动 ⇅（Task4 的位置切换靠重新构造外壳值渲染，非回调）
             upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestShortUpperPanelHeight) },
             lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: shieldTestShortLowerPanelHeight) })
@@ -408,6 +418,8 @@ private struct AsymmetricPanelsShellLayout: View {
             stylePanelVisible: engine.flow.canBuySell() && engine.drawingSession.drawingModeActive,
             scheme: .light,                 // 测试固定日间，避免随宿主外观漂移
             stylePanelPosition: stylePanelPosition,
+            style: DrawingDefaultStyle(), styleEnabled: true, onStyleChange: { _ in },  // 本测试不驱动样式，占位值
+            onToggleMode: {},                // 测试不驱动 toggle
             onTogglePosition: {},           // 测试不驱动 ⇅（位置切换靠重新构造外壳值渲染，非回调）
             upperPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: upperHeight) },
             lowerPanel: { Color.clear.frame(width: shieldTestPanelWidth, height: lowerHeight) })

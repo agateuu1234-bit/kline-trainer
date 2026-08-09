@@ -192,7 +192,17 @@ public struct ChartContainerView: UIViewRepresentable {
             // codex R2-F1：瞬态零尺寸 layout（导航/分屏/旋转过渡）不得改 engine 状态。recordRenderBounds(.zero)
             // 会被当 resize → 零宽 offsetBounds → 把 panel offset clamp 到 0（吞掉用户滚动位置，不可逆）；
             // make(.zero) 也只返 .empty。故无效 bounds 直接早返——零→有效的后续 layout 仍会重建（lastLaidOutBounds 已记 .zero）。
-            guard bounds.width > 0, bounds.height > 0 else { return }
+            guard bounds.width > 0, bounds.height > 0 else {
+                // codex R2-M2 fix：这条早退发生在 mapper 发布（下方 `setViewportMapper`）之前——若不清，
+                // `DrawingSession.viewportMappers` 会保留上一帧的旧值，几何门（`DrawingEditRouter`）拿它
+                // 误判「此刻仍可见」。失败方向不安全：可能放行 `deleteSelected`/`applyStyle`，而当下
+                // 根本没有任何有效渲染视口。⚠️ 只清 mapper（DrawingSession 的 `@ObservationIgnored`
+                // 纯 UI 状态）——绝不碰 engine，理由与上面这条早退存在的原因相同（`recordRenderBounds(.zero)`
+                // 会吞掉用户滚动位置，不可逆）。
+                engine.drawingSession.clearViewportMapper(panel: panel)
+                refreshSelectionGeometryHint(engine: engine)
+                return
+            }
             // codex R1-F1：与 updateUIView 同序先记录 bounds——pinch（读 engine 缓存 bounds，无 bounds 入参）/
             // 画线 range / resize 归一都依赖 lastRenderedBounds。静态界面（Review）只走本路径，若不同步则
             // 缓存停在 .zero → 出图后 pinch no-op。recordRenderBounds 内 `previous!=bounds` 守卫保幂等，不扰常态。
@@ -202,6 +212,44 @@ public struct ChartContainerView: UIViewRepresentable {
                 engine: engine, panel: panel, bounds: bounds, crosshair: crosshairPoint)
             RenderSignposter.end(makeToken)
             view.renderState = newState
+            // PR-4（PD1/PD2）：发布**这一帧真的用过**的视口 —— SwiftUI 层（🗑 / 样式面板）没有 mapper，
+            // 而重新推导会与 `make` 的聚合分支（重算 priceRange）分叉。
+            let session = engine.drawingSession
+            if newState.visibleCandles.isEmpty {
+                // codex R2-M2 fix 顺带项（已实测坐实，非猜测）：本面板此刻没有 candles → `make` 返回
+                // `.empty`，其 `mainChartFrame` 全零。这种退化视口对 `.straight` 子类型**不会**
+                // fail-closed —— `priceToY` 在 `frame.height==0` 时恒算出 `y=0`，而 `frame.minY==maxY==0`
+                // 让 `y∈[minY,maxY]` 恒真，`visibleGeometry` 因此返回非 nil 的退化几何
+                // （`(y:0,minX:0,maxX:0)`），不是 nil。发布这种 mapper 会让几何门在"图根本没数据"时
+                // 仍判「可见」。故同样清掉、不发布。
+                session.clearViewportMapper(panel: panel)
+            } else {
+                session.setViewportMapper(
+                    CoordinateMapper(viewport: newState.viewport,
+                                     displayScale: view.traitCollection.displayScale), panel: panel)
+            }
+            refreshSelectionGeometryHint(engine: engine)
+        }
+
+        /// PD2：只在值真的变了时才刷新几何提示（延后到 view-update 期之后写 `@Observable`）。
+        /// 三处调用共用同一份，避免各写一遍漂移——正常渲染完之后 / 无效 bounds 早退 / 本面板尚无
+        /// candles，`rebuildRenderState` 这三个分支都会让 mapper 变化，提示都要跟着走。
+        /// 置灰提示：只有**选中所在的那个面板**负责刷新（另一个面板的视口与它无关），
+        /// 且只在值**真的会变**时才派发（平移每帧都派发 = 无谓开销）。
+        /// ⚠️ **必须延后一个 runloop**：本函数的调用点之一是 `updateUIView`（视图更新期），
+        ///    期间改 @Observable 是 SwiftUI 明令的未定义行为；`:105` 释放 crosshairOwner 用的是
+        ///    同一条逃生门。提示晚一拍无害——真正的门是路由在写入瞬刻的那次重算（PD2）。
+        private func refreshSelectionGeometryHint(engine: TrainingEngine) {
+            let session = engine.drawingSession
+            guard session.selectedPanel == panel,
+                  DrawingEditRouter.selectionGeometryVisible(engine: engine) != session.selectionGeometryVisible
+            else { return }
+            DispatchQueue.main.async { [weak engine] in
+                guard let engine else { return }
+                // 在**执行时**重算，不用捕获的旧值（期间状态可能又变了）。
+                engine.drawingSession.setSelectionGeometryVisible(
+                    DrawingEditRouter.selectionGeometryVisible(engine: engine))
+            }
         }
 
         /// P1b-1a-ii D42：「现在能不能画」的**唯一判据** = 全局会话开关。
