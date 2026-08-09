@@ -59,7 +59,8 @@ _NAME_RE = re.compile(r"\Akline_pilot_conc[a-z0-9_]*\Z")
 #    `b1` 这个库**本该从不存在**（Ⓑ 断言它没被建出来），但库名字面量在源码里，
 #    `assert_every_selfcheck_db_is_whitelisted` 要求它照样登记；
 #    而万一某次运行因缺陷真把它建出来了，清场也才收得掉。
-_CONC_DBS = ("kline_pilot_conc_b1", "kline_pilot_conc_d1", "kline_pilot_conc_d2")
+_CONC_DBS = ("kline_pilot_conc_b1", "kline_pilot_conc_d1", "kline_pilot_conc_d2",
+             "kline_pilot_conc_e1")
 
 # 本脚本不在维护库里造任何临时对象。
 _SCRATCH_OBJECTS: tuple = ()
@@ -70,7 +71,7 @@ _IMMEDIATE_SECONDS = 1.0
 
 # 验收闸的**完整性清单**：收尾核对每一档都真的跑过。
 # ⚠️ 少一档即失败 —— 「静默没跑」与「通过了」在输出上完全一样。
-_EXPECTED_SCENARIOS = ("Ⓐ", "Ⓐb", "Ⓑ", "Ⓑb", "Ⓑd", "Ⓑc", "Ⓒ", "Ⓓ", "Ⓓb")
+_EXPECTED_SCENARIOS = ("Ⓐ", "Ⓐb", "Ⓑ", "Ⓑb", "Ⓑd", "Ⓑc", "Ⓒ", "Ⓓ", "Ⓓb", "Ⓔ")
 
 # Ⓓ 用的普通（非超级用户）角色。`datconnlimit = 0` 对超级用户不生效，
 # 所以这一档必须用一个真的普通角色，否则测的是「超级用户能不能连」——恒真。
@@ -546,6 +547,96 @@ async def main() -> int:
             await conn_m2.execute(f"DROP ROLE IF EXISTS {quote_ident(_PLAIN_ROLE)}")
         finally:
             await conn_m2.close()
+
+    # ── Ⓔ **非超级用户**维护角色：在任何破坏性动作之前就被挡住 ────────────
+    #    起因是 codex 4a-2 R12-F1 担心「非超级用户部署下窗口仍在」。
+    #    本档实测出一个**比那个担心更根本**的事实：
+    #    【绝对空】判据 `_user_objects` 要遍历**所有**带 oid 列的 pg_catalog 表，
+    #    其中 `pg_user_mapping` 非超级用户读不了 → `InsufficientPrivilegeError`。
+    #    也就是说**整个模块早就隐含要求超级用户维护角色**（不只是 DROP 前的封锁），
+    #    非超级用户连集群闸都过不去，根本走不到 DROP ——
+    #    R12-F1 设想的「仍然删得掉库的非超级用户部署」在现实里到不了那一步。
+    #    ⚠️ 这条前提此前是**偶然**成立的（没人写下来、也没人验过）。这一档把它钉成
+    #       可验证的事实，并证明它是 **fail-closed** 的：库没被动、配置也没被改一半。
+    #    ⚠️ 不要「顺手让 `_user_objects` 跳过读不了的目录」—— 那是 fail-open：
+    #       模块明写「查不出目录清单 → 抛异常，绝不返回『空』」。
+    scenario("Ⓔ")
+    print("Ⓔ 非超级用户维护角色：破坏性动作之前就被挡住，且什么都没留下")
+    seed_e = "conc_e1"
+    db_e = f"kline_pilot_{seed_e}"
+    owner = "zzqmtverify_owner"
+    sup = await asyncpg.connect(base_dsn)
+    try:
+        await sup.execute("DROP DATABASE IF EXISTS " + quote_ident(db_e))
+        await sup.execute(f"DROP ROLE IF EXISTS {quote_ident(owner)}")
+        await sup.execute(
+            f"CREATE ROLE {quote_ident(owner)} LOGIN CREATEDB PASSWORD '{_PLAIN_PASSWORD}'")
+        await sup.execute("CREATE DATABASE " + quote_ident(db_e)
+                          + " OWNER " + quote_ident(owner))
+        # 维护库里的三张表要让这个角色读写（真实部署里也要这么授）
+        for tbl in ("pilot_cluster_marker", "pilot_create_intent",
+                    "pilot_database_registry"):
+            await sup.execute(
+                f"GRANT SELECT, INSERT, UPDATE, DELETE ON public.{tbl} "
+                f"TO {quote_ident(owner)}")
+        await sup.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db_e)
+        await sup.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
+            "  WHERE d.datname::text = $1",
+            db_e, seed_e, _BUILD_ARGS["created_at"], "conc-e1")
+
+        owner_dsn = re.sub(r"//[^:/@]+:[^@]*@",
+                           f"//{owner}:{_PLAIN_PASSWORD}@", base_dsn)
+        owner_conn = await asyncpg.connect(owner_dsn)
+        try:
+            check(not await owner_conn.fetchval(
+                "SELECT current_setting('is_superuser') = 'on'"),
+                "Ⓔ 前置：这个维护角色**不是**超级用户")
+            if not await _try_seed_lock(owner_conn, seed_e):
+                check(False, "Ⓔ 前置：取到 seed 锁")
+
+            async def _owner_connect(name: str):
+                return await asyncpg.connect(harness.db_dsn(owner_dsn, name))
+
+            try:
+                await reset_pilot_database(
+                    owner_conn, connect=_owner_connect, db_name=db_e, seed=seed_e,
+                    export_log_sha256=_BUILD_ARGS["export_log_sha256"],
+                    output_dir=_BUILD_ARGS["output_dir"], reset_foreign_token=None)
+                refused_e, err_e = False, ""
+            except Exception as exc:
+                refused_e, err_e = True, f"{type(exc).__name__}: {exc}"
+            check(refused_e,
+                  "Ⓔ 非超级用户维护角色被挡住（不是悄悄降级继续跑）",
+                  "竟然跑完了 —— 那说明【绝对空】的目录遍历没有真的遍历全")
+            check("permission denied" in err_e,
+                  "Ⓔ 挡住它的是**读不了系统目录**（模块隐含要求超级用户维护角色）",
+                  f"实得 {err_e}")
+            still = await sup.fetchval(
+                "SELECT count(*) FROM pg_database WHERE datname = $1", db_e)
+            check(still == 1, "Ⓔ fail-closed：目标库**没有**被删",
+                  f"库不见了（count={still}）—— 权限不足却还是执行了破坏性动作")
+            limit_e = await sup.fetchval(
+                "SELECT datconnlimit FROM pg_database WHERE datname = $1", db_e)
+            check(limit_e == -1,
+                  "Ⓔ 也没有把目标库留在半封锁状态（datconnlimit 仍是 −1）",
+                  f"实得 datconnlimit={limit_e} —— 配置被改了一半就抛了")
+        finally:
+            await owner_conn.close()
+    finally:
+        try:
+            await sup.execute("DROP DATABASE IF EXISTS " + quote_ident(db_e))
+            await sup.execute(
+                "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db_e)
+            for tbl in ("pilot_cluster_marker", "pilot_create_intent",
+                        "pilot_database_registry"):
+                await sup.execute(f"REVOKE ALL ON public.{tbl} FROM {quote_ident(owner)}")
+            await sup.execute(f"DROP ROLE IF EXISTS {quote_ident(owner)}")
+        finally:
+            await sup.close()
 
     # ── 收尾 ────────────────────────────────────────────────────────────
     post = await asyncpg.connect(base_dsn)

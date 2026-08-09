@@ -193,9 +193,12 @@ class _FakeConn:
         # 三张维护表的**在场**情况（R6-F2）。默认全在。
         self.maintenance_presence = {"marker_present": True, "intent_present": True,
                                      "registry_present": True}
-        # 维护角色是不是超级用户（codex 4a-2 R11-F2）。`CONNECTION LIMIT 0` 对
-        # 非超级用户同样生效 —— 封完之后本工具自己也连不进去验空。
+        # 维护角色是不是超级用户，以及生产代码**问过几次**。
+        # ⚠️ R12-F1 之后封锁**不许**依赖它：先连上再封，已建立的会话不受
+        #    `CONNECTION LIMIT 0` 影响，所以普通角色也能验空。
+        #    这个计数器就是用来钉「不许依赖」的 —— 问一次就说明分支又回来了。
         self.is_superuser = True
+        self.is_superuser_queries = 0
         # 目标库**当前**的连接数上限。封锁之后必须恢复成**这个值**，不是写死的 -1。
         self.datconnlimit = -1
         self.fail_connect = fail_connect
@@ -253,7 +256,13 @@ class _FakeConn:
         if "unnest($1::text[])" in query:
             # 「schema.sql 声明的表都建出来了吗」（O4-R19-C1）。默认全在。
             return len(args[0]) if self.declared_tables_all_present else 0
+        # ⚠️ **精确匹配整条语句，不能用子串**：`_SEED_LOCK_HELD_SQL` 的文本里也含
+        #    `pg_backend_pid()`，按子串分发会把锁判定的返回值一起劫走 ——
+        #    实测当场打红九条用例（本仓「假件子串分发被自己的判据劫走」第 N 次）。
+        if query.strip() == "SELECT pg_backend_pid()":
+            return _HELD_PID
         if "is_superuser" in query:
+            self.is_superuser_queries += 1
             return self.is_superuser
         if "datconnlimit" in query:
             return self.datconnlimit
@@ -4479,19 +4488,47 @@ def test_remnant_exception_rejects_when_adopt_catches_a_stale_instance():
 #    fail-closed）三条在 4a 里就没有落点。只放进 L2 脚本的话，验收脚本验的是它自己
 #    写的那句 DROP，不是生产代码 —— 本仓记录在案的 vacuous 覆盖形态。
 
+# 假连接持有的那条目标库会话的 pid（`pg_backend_pid()`）。
+_HELD_PID = 90001
+
+
 class _DropMaint(_FakeConn):
     """维护连接：额外答 `pg_stat_activity`（目标库上还有谁）。"""
 
-    def __init__(self, target_sessions=(), drop_error=None, **kw):
+    def __init__(self, target_sessions=(), late_sessions=(), drop_error=None, **kw):
         kw.setdefault("databases", ["kline_pilot_probe"])
         super().__init__(**kw)
         self.target_sessions = list(target_sessions)
+        # 「在最前面那次占用者检查之后、封锁之前才连进来」的会话 ——
+        # 只有**封锁之后**那次复查看得见它。没有这个区分的话，
+        # 「封锁后复查」这条闸的用例会被最前面那条闸先接走，永远测不到自己。
+        self.late_sessions = list(late_sessions)
+        # 每次占用者查询的 (SQL, 参数)。⚠️ 假件**自己**实现了 pid 过滤（它不执行 SQL），
+        #    所以「生产是否真的在 SQL 里排除自己」在假件层观测不到 ——
+        #    只能断言「发出的是带排除子句的那条、且参数是持住那条会话的 pid」。
+        #    语义证明归真 PG 档 Ⓓ：那一档持着会话仍然 DROP 成功，
+        #    生产若不排除自己就会撞 target_db_in_use。
+        self.session_queries: list[tuple] = []
         self.drop_error = drop_error
 
     async def fetch(self, query, *args):
         if "pg_stat_activity" in query:
             self.ops.append(query)
-            return list(self.target_sessions)
+            self.session_queries.append((query, args))
+            rows = list(self.target_sessions)
+            # ⚠️ 建模真实时序：**我们自己持住的那条会话只在连上之后才存在**。
+            #    带排除子句的那条查询是在「已经连上目标库」之后才发的，
+            #    所以只有它看得见 `_HELD_PID`；DROP 最前面那次占用者检查发生在
+            #    连上之前，看不到。把自己无条件塞进两次查询都是失真的 ——
+            #    那会让最前面那条闸把我们自己判成占用者，与真 PG 不符。
+            if "a.pid <> $2" in query and len(args) > 1:
+                rows = rows + self.late_sessions + [
+                    _session(pid=_HELD_PID, usename="qmt_pilot",
+                             application_name="qmt_pilot_probe")]
+                # ⚠️ 排除要**真的按 pid 过滤**（codex 4a-2 R12-F1）：假件若不建模它，
+                #    「排除自己」与「没排除」在测试里完全一样，两条用例都在恒真上空转。
+                rows = [r for r in rows if r["pid"] != args[1]]
+            return rows
         return await super().fetch(query, *args)
 
     async def execute(self, query, *args):
@@ -4529,10 +4566,17 @@ def test_empty_remnant_drop_seals_new_connections_before_the_final_proof():
        只断言「发过 CONNECTION LIMIT 0」的话，发在 DROP 之后照样绿。
     """
     maint = _DropMaint()
-    target = _EmptyOnProbe()
 
-    # ⚠️ 次序要落在**同一条时间线**上：把「连进目标库」这个事件也记进 maint.executed，
-    #    否则只能各自数各自的，比不出「封连接」与「复查」谁先谁后。
+    # ⚠️ 次序要落在**同一条时间线**上：把「连进目标库」与「验空」这两个事件也记进
+    #    maint.executed，否则只能各自数各自的，比不出谁先谁后。
+    class _TimelineTarget(_EmptyOnProbe):
+        async def fetch(self, query, *args):
+            if "SELECT cat, n FROM (" in query:
+                maint.executed.append("-- PROBE empty")
+            return await super().fetch(query, *args)
+
+    target = _TimelineTarget()
+
     async def _connect_recording(dbname):
         maint.executed.append(f"-- CONNECT {dbname}")
         if dbname != "kline_pilot_probe":
@@ -4548,15 +4592,18 @@ def test_empty_remnant_drop_seals_new_connections_before_the_final_proof():
     limits = _connlimit_ops(maint)
     assert limits and "0" in limits[0].rsplit("LIMIT", 1)[1], \
         f"DROP 前没有把新连接封住：{limits}"
+    at = lambda pred: next(i for i, q in enumerate(maint.executed) if pred(q))
+    connect_at = at(lambda q: q.startswith("-- CONNECT "))
     seal_at = maint.executed.index(limits[0])
-    drop_at = next(i for i, q in enumerate(maint.executed)
-                   if q.upper().startswith("DROP DATABASE"))
-    connect_at = next(i for i, q in enumerate(maint.executed)
-                      if q.startswith("-- CONNECT "))
+    probe_at = at(lambda q: q == "-- PROBE empty")
+    drop_at = at(lambda q: q.upper().startswith("DROP DATABASE"))
     assert target.probes == 1, f"复查根本没发生（probes={target.probes}）—— 断言会变成空的"
-    assert seal_at < connect_at < drop_at, (
-        f"次序不对：封连接@{seal_at} → 复查@{connect_at} → DROP@{drop_at}。"
-        f"复查若排在封连接之前，R10-F1 的窗口原样存在")
+    assert connect_at < seal_at < probe_at < drop_at, (
+        f"次序不对：连上@{connect_at} → 封锁@{seal_at} → 验空@{probe_at} → "
+        f"DROP@{drop_at}。\n"
+        f"· 连上必须**先于**封锁：已建立的会话不受 CONNECTION LIMIT 0 影响，"
+        f"这正是「不需要超级用户」的全部依据（R12-F1）；\n"
+        f"· 验空必须**后于**封锁：否则读完到 DROP 之间的窗口原样存在（R10-F1）。")
 
 
 def test_non_remnant_drop_does_not_touch_connection_limit():
@@ -4608,21 +4655,88 @@ def test_empty_remnant_drop_restores_the_databases_prior_connection_limit():
         f"恢复的不是原值 7，而是 {limits[1]!r} —— 库的连接策略被这次操作改掉了"
 
 
-def test_empty_remnant_drop_skips_sealing_when_maintenance_role_is_not_superuser():
-    """非超级用户维护角色下**不封连接**（codex 4a-2 R11-F2，high）。
+def test_empty_remnant_drop_seals_even_for_a_non_superuser_maintenance_role():
+    """**非超级用户也照样封锁**（codex 4a-2 R12-F1，high）。
 
-    `datconnlimit = 0` 对非超级用户同样生效 —— 一个属主 / CREATEDB 的非超级用户
-    维护 DSN 封完之后**连自己都进不去**，紧贴 DROP 的验空必然失败，
-    零对象例外这条**唯一**的残骸逃生口对这类部署直接失效（R55-F1 锁死换形态）。
-    故封锁只在能证明「封完自己还进得去」时才做。
+    R11 那一版是「不是超级用户就跳过封锁、只打一条警告继续跑」——
+    codex 指出那等于**在一个仍然删得掉库的部署上，把数据丢失窗口原样留着**：
+    我拿数据安全换了可用性。
+
+    真 PG 实测给出的出路：**先连上再封**。`CONNECTION LIMIT 0` 只挡**新**连接，
+    已经建立的会话（哪怕是普通角色）照常可用 —— 于是「必须超级用户」这个前提
+    整个不需要了：验空就在那条已持有的会话上做。
     """
     maint = _DropMaint()
     maint.is_superuser = False
     asyncio.run(_drop(maint, target=_EmptyOnProbe(), via_remnant=True))
-    assert _connlimit_ops(maint) == [], \
-        f"非超级用户下仍然封了连接，封完就再也验不了空：{_connlimit_ops(maint)}"
+    limits = _connlimit_ops(maint)
+    assert limits and "0" in limits[0].rsplit("LIMIT", 1)[1], \
+        f"非超级用户下没有封连接 —— R12-F1 的窗口原样存在：{limits}"
     assert any(q.upper().startswith("DROP DATABASE") for q in maint.executed), \
-        "跳过封锁之后连 DROP 都不做了 —— 逃生口被堵死"
+        "封了却不 DROP —— 逃生口被堵死"
+    assert maint.is_superuser_queries == 0, \
+        "封锁又去问「是不是超级用户」了 —— 那条分支正是 R12-F1 要拆掉的"
+
+
+def test_empty_remnant_drop_excludes_its_own_held_session_from_the_occupant_check():
+    """持住的那条会话是**我们自己的**，不能把自己算成占用者。
+
+    真 PG 实测：`pg_stat_activity` 里就是有我们这条 `client backend`。
+    不排除的话，新架构一上来就把自己判成「有别人连着」，逃生口永远走不通。
+    """
+    maint = _DropMaint()          # 别人一条都没有；`pg_stat_activity` 里只有我们自己
+    asyncio.run(_drop(maint, target=_EmptyOnProbe(), via_remnant=True))
+    assert any(q.upper().startswith("DROP DATABASE") for q in maint.executed), \
+        "把自己持有的那条会话当成了占用者 —— 零对象例外从此走不通"
+    # ⚠️ 上一条在假件层其实观测不到「是不是 SQL 在排除」（假件自己实现了过滤）。
+    #    这里补一条**结构**断言：封锁之后发出的必须是**带排除子句**的那条查询，
+    #    且参数就是持住那条会话的 pid。语义由真 PG 档 Ⓓ 坐实。
+    post_seal = [(q, a) for q, a in maint.session_queries if len(a) > 1]
+    assert post_seal, "封锁之后根本没有重新数一遍会话"
+    q, a = post_seal[-1]
+    assert "a.pid <> $2" in q and a[1] == _HELD_PID, \
+        f"复查用的不是「排除自己」的那条查询，或参数不是持住的 pid：{q!r} args={a}"
+
+
+def test_empty_remnant_drop_still_refuses_when_another_client_session_exists():
+    """**反向**：排除自己之后，别人的会话仍然必须挡住 DROP。
+
+    只加「排除自己」而不留这一条，封锁后那次复查会退化成恒不触发。
+    ⚠️ 用 `late_sessions` 造「最前面那次检查之后才连进来」的会话 ——
+       用 `target_sessions` 的话最前面那条闸会先接走，这一条就测不到自己。
+    """
+    maint = _DropMaint(late_sessions=[_session(pid=4242)])
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop(maint, target=_EmptyOnProbe(), via_remnant=True))
+    assert ei.value.code == "target_db_in_use"
+    assert not any(q.upper().startswith("DROP DATABASE") for q in maint.executed), \
+        "有别人连着却还是 DROP 了"
+
+
+def test_empty_remnant_drop_verifies_emptiness_on_the_single_held_session():
+    """验空必须在**那条已持有的会话**上做，不许封锁之后再新开连接（R12-F1）。
+
+    再开一条就又要求「封完还进得去」= 又回到超级用户前提；
+    而且新连接与封锁之间是另一个窗口。判据：整条 DROP 路径**只连目标库一次**。
+    """
+    maint = _DropMaint()
+    target = _EmptyOnProbe()
+    connects = []
+
+    async def _connect_counting(dbname):
+        connects.append(dbname)
+        if dbname != "kline_pilot_probe":
+            raise ConnectionError(f"cannot connect to {dbname}")
+        target.current_database = dbname
+        return target
+
+    auth = ResetAuthorization(_RESET_CAPABILITY, db_oid="16400", via_empty_remnant=True)
+    asyncio.run(_drop_pilot_database(
+        maint, connect=_connect_counting, db_name="kline_pilot_probe",
+        seed="probe", authorization=auth))
+    assert connects == ["kline_pilot_probe"], \
+        f"目标库被连了 {len(connects)} 次 —— 验空没有复用那条已持有的会话：{connects}"
+    assert target.probes == 1, f"验空发生了 {target.probes} 次"
 
 
 def test_dropped_intent_cleanup_is_not_bound_to_the_destroyed_oid_alone():
