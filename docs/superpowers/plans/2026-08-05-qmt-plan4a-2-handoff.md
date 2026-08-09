@@ -79,6 +79,24 @@ gh pr create --base main --head feat/qmt-plan4a-2b-destructive --title "QMT 4a-2
 | spec 一致性 | `python3 tools/check_spec_consistency.py` | **全过**；`--self-test` 的 11 项各自被反例触发 |
 | mutation | 控制者亲验，逐条中和判据看具名测试变红后复原 | 4a-2a **93 条**、4a-2b **107 条**，**全部 RED** |
 | 工作区 | `git status --porcelain` | 0 个变更 |
+| **L2 真 PG ①**（4a-1）| `DSN=… DSN2=… .venv/bin/python backend/scripts/verify_pilot_two_phase_create.py` | **28 档全绿** |
+| **L2 真 PG ②**（本轮新增）| `DSN=… DSN2=… .venv/bin/python backend/scripts/verify_pilot_db_lifecycle.py` | **37 档全绿**（连跑三轮稳定）|
+| **L2 真 PG ③**（本轮新增）| `DSN=… DSN2=… .venv/bin/python backend/scripts/verify_pilot_concurrency.py` | **7 档全绿** |
+| L2 档位的 mutation | 控制者亲验，逐条中和生产守卫看**该档**的 FAIL 行出现后复原 | 24 条：**22 条 RED**，2 条如实登记为「被遮蔽 / 纯纵深」 |
+
+### ⚠️⚠️ L2 脚本挖出**两个生产缺陷**（假件层结构性测不到，429 条 host 测试 + codex 十四轮全漏）
+
+| # | 缺陷 | 影响 | 修法 |
+|---|---|---|---|
+| 1 | `_BUSINESS_STRUCTURE_SQL` 里 `array_agg(a.attname …) = ARRAY[…]` 是 `name[] = text[]`，**PostgreSQL 无此操作符** | 该查询在**任何**库上都抛 → 闸 2 的业务表五组判据**从未成功执行过一次**，全兜成 `target_db_unreadable`。fail-closed 不放行危险东西，但**整条复用路径 100% 不可用**，且错误码把运维指向权限/连通性而不是「schema 漂移 → 用 --reset 重建」 | `array_agg(a.attname::text ORDER BY a.attname::text)` |
+| 2 | DROP 预检数了 `pg_stat_activity` 的**全部**行，把 `autovacuum worker` 当成占用者（PostgreSQL 自己的 `DROP DATABASE` 不算它 —— 真 PG 实测坐实）| `--reset`（陈旧 schema 库的**唯一**出路）**间歇性**假拒，还给运维一条执行不了的动作（「请让它们自行退出后重试」，而占用者是后台进程）。CI 里是 flake，现场是「重试几次又好了」的玄学 | 预检拆出 `_TARGET_CLIENT_SESSIONS_SQL`（`backend_type = 'client backend'`）；诊断仍看全部后端 |
+
+**为什么 host 层结构性抓不到**：假件 `_FakeConn` 按 SQL 子串派发预置字典，
+**SQL 文本一次都没送进 PostgreSQL**。这正是 L2 脚本存在的全部理由。
+
+**为什么本脚本原有档位也没抓到第 1 个**：它们**全部**断言「拒了」——
+一条**恒抛**的闸在每一档看起来都在正常工作。故新增 ⑰b「健康库复用**必须被放行**」，
+它是本脚本唯一断言「放行」的复用档。
 
 **mutation 抓出来的、光读代码发现不了的测试自身缺陷（如实记，共 8 处）**：
 1. 守卫被**自己的 docstring** 满足而恒真（把常量换成内联 SQL 仍绿）→ 改走 AST Name 节点
@@ -204,18 +222,37 @@ gh pr create --base main --head feat/qmt-plan4a-2b-destructive --title "QMT 4a-2
 | 8 | 打开 4a-2a 的 diff，找 `assert_db_allowed_for_reset` | 里面**没有**指纹比对、没有 `state` 判断、没有闸 2、没有九键检查（reset 是陈旧库唯一的出路） | |
 | 9 | 打开 4a-2b 的 diff，找 `_drop_pilot_database` | 恰好一条 `DROP DATABASE`，**不带**任何强制选项，失败后**没有**重试 | |
 | 10 | 在 `backend/qmt_pilot_db.py` 里搜 `def drop_pilot_database`（不带下划线）| **搜不到** —— 破坏性入口只有 `reset_pilot_database` 一个，授权与销毁一体 | |
+| 11 | 两个测试库容器起着（`docker ps` 能看到 `qmt-pg-r8` 和 `qmt-pg-r8b`）时，按下面「L2 三连跑」那段命令逐行跑三个脚本 | 三行末尾分别是 `✅ 28 档`、`✅ 37 档`、`✅ 7 档`，**都带「断言全部成立（真 PostgreSQL）」**；任何一行出现 `FAIL` 或 `❌` 即判 F | |
+| 12 | 把 `verify_pilot_db_lifecycle.py` **连跑三遍**，比较三次的末行 | 三次**完全一样**（都是 `✅ 37 档`）—— 这一条专门查「间歇性假拒」那类 flake，跑一遍绿不算数 | |
 
 > ⚠️ 判绿一律**读输出内容**，不要看管道后的 exit code（`cmd | tail` 之后 `$?` 是 tail 的）。
+> ⚠️ 第 11/12 条尤其：**读末尾那行 `✅ N 档…`**，别读中间某段 PASS —— 中间全是 PASS 而
+> 末行是 `❌` 的情况本轮真实发生过（我自己就因为只看了过滤片段而漏判了一次）。
+
+### L2 三连跑（第 11/12 条用；一行一条，别用 `&&` 串）
+
+```
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-plan4a-2"
+export DSN="postgresql://postgres:$(docker inspect qmt-pg-r8 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^POSTGRES_PASSWORD=' | cut -d= -f2)@localhost:55444/postgres"
+export DSN2="postgresql://postgres:$(docker inspect qmt-pg-r8b --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^POSTGRES_PASSWORD=' | cut -d= -f2)@localhost:55445/postgres"
+.venv/bin/python backend/scripts/verify_pilot_two_phase_create.py
+.venv/bin/python backend/scripts/verify_pilot_db_lifecycle.py
+.venv/bin/python backend/scripts/verify_pilot_concurrency.py
+```
 
 ---
 
 ## 七、下一步（**不在本两个 PR 内**）
 
-- **PR-2 = 两个 L2 真 PG 脚本**：`verify_pilot_db_lifecycle.py`（13 档）+
-  `verify_pilot_concurrency.py`。它们是「假件不得替代真 PG」这条纪律的唯一落地处 ——
-  假件对「同一 session 第二次取锁」和「第一次取锁」反应完全一样，也建模不出
-  `relkind` 覆盖面与 DROP 是否真被顶住。本轮已有**四处**判据被记为「host 层零覆盖、
-  只靠 SQL 文本守卫」，它们的语义正是要靠 L2 坐实。
+- ~~**PR-2 = 两个 L2 真 PG 脚本**~~ → **已完成，见计划
+  `docs/superpowers/plans/2026-08-09-qmt-plan4a-2-l2-scripts.md`**：
+  `verify_pilot_db_lifecycle.py`（**37 档**）+ `verify_pilot_concurrency.py`（**7 档**），
+  外加把 4a-1 那个脚本的安全护栏抽进共用的 `_pilot_verify_harness.py`。
+  它们是「假件不得替代真 PG」这条纪律的唯一落地处 —— 而它们**立刻兑现了**：
+  挖出上面 §三 记的**两个生产缺陷**，都是 429 条 host 测试与 codex 十四轮
+  结构性抓不到的（假件按子串派发预置字典，SQL 文本不进 PG）。
+- **2b 开 PR 之前还要做**：`git rebase origin/main` → 重跑 codex 对抗性评审
+  （本轮又改了生产代码两处，上一轮的评审结论**不覆盖**它们）。
 - 之后才是 4b（SMB 真拉取）与 4c（100 股出货）。
 
 **交付口径（禁述清单）**：本轮的正确表述是「**4a 的库级护栏建好、用假件验过**」。
