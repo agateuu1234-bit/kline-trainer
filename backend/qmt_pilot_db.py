@@ -534,10 +534,20 @@ SELECT
           WHERE k.conrelid = to_regclass('public.pilot_database_registry')
             AND k.contype = 'p' AND array_length(k.conkey, 1) = 1
             AND a.attname = 'dbname')                   AS registry_dbname_unique,
-""" + _durable_tables_sql(("public.pilot_cluster_marker",
-                            "public.pilot_create_intent",
-                            "public.pilot_database_registry"),
-                           "maintenance_tables_durable")
+""" + ",\n".join(
+    # ⚠️ **每张表各一条，不能合成一个跨表的 count**（codex 4a-2 R9-F1）：
+    #    合成一条时它**归因不到具体哪张表**，于是 `init_cluster_marker` 的预检只能
+    #    「三张全在场才要求它」—— 而混合态（一张在场但不耐久 + 另一张缺席）就此漏过：
+    #    `malformed` 为空 → `_needs_repair_ddl` 为真 → **DDL 先落地**，
+    #    之后才由建库**后**的形状检查拒绝，于是在一个最终被拒的维护库里留下了表。
+    #    那正是「① 零副作用预检 → ② 才允许动 DDL」这条契约要防的（`--maintenance-dsn`
+    #    指错到生产库）。拆成每表一条之后，判据名的前缀（marker_/intent_/registry_）
+    #    自动接进 `_MAINTENANCE_SHAPE_OWNER` 的「只对在场的表求值」机制，
+    #    在场却不耐久的表在**预检阶段**就被点名。
+    _durable_tables_sql((f"public.{tbl}",), alias)
+    for tbl, alias in (("pilot_cluster_marker", "marker_durable"),
+                       ("pilot_create_intent", "intent_durable"),
+                       ("pilot_database_registry", "registry_durable")))
 
 MARKER_PURPOSE = "qmt_pilot_disposable_cluster"
 
@@ -2618,12 +2628,13 @@ SELECT to_regclass('public.pilot_cluster_marker')    IS NOT NULL AS marker_prese
 """
 
 # `_MAINTENANCE_SHAPE_SQL` 的判据名 → 它属于哪张表。
-# ⚠️ `maintenance_tables_durable` 横跨三张表（`_durable_tables_sql` 一次数三个），
-#    缺表时它必然为假，故**只在三张表都在场时**才要求它成立。
+# ⚠️ 耐久性判据现在是**每表一条**（`marker_durable` / `intent_durable` /
+#    `registry_durable`），故它和形状判据一样按前缀归属，**不再需要**
+#    「三张全在场才要求」那条例外 —— 那条例外正是 R9-F1 的洞：混合态下
+#    在场却不耐久的表会漏过预检，让 DDL 先落地（详见 `_MAINTENANCE_SHAPE_SQL` 的注释）。
 _MAINTENANCE_SHAPE_OWNER = {"marker_": "marker_present",
                             "intent_": "intent_present",
                             "registry_": "registry_present"}
-_MAINTENANCE_DURABLE_KEY = "maintenance_tables_durable"
 
 # 孤儿清理要看**全部** intent 行（`_READ_INTENT_SQL` 只看本次库名那一行）。
 # 新鲜度同样只认库自己的时钟（O4-R23-C1）。
@@ -2720,8 +2731,6 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
         k for k, v in dict(shape).items() if not v
         and any(k.startswith(pre) and presence[owner]
                 for pre, owner in _MAINTENANCE_SHAPE_OWNER.items()))
-    if not malformed and all(presence.values()) and not shape[_MAINTENANCE_DURABLE_KEY]:
-        malformed = [_MAINTENANCE_DURABLE_KEY]
     if malformed:
         raise PilotClusterBoundaryError(
             "no_marker",

@@ -138,7 +138,7 @@ _UNRELATED_DB = "zzqmtverify_unrelated"
 # 验收闸的**完整性清单**：收尾核对每一档都真的跑过。
 # ⚠️ 少一档即失败 —— **「静默没跑」与「通过了」在输出上完全一样**，
 #    这与本仓反复栽过的「空转的检查比没有检查更糟」是同一族。
-_EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑨b", "⑨c", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑰b", "⑱", "⑲", "⑳", "⑳b", "㉑",
+_EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑤", "⑤b", "⑥", "⑦", "⑧", "⑨", "⑨b", "⑨c", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑰b", "⑱", "⑲", "⑳", "⑳b", "㉑",
                        "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉘", "㉙", "㉚", "㉛", "㉜", "㉜b")
 
 
@@ -411,6 +411,69 @@ async def main() -> int:
               f"竟然建出了 {left}")
         # 复原：把维护表建回来，供后续档位与下一次运行使用。
         await conn.execute("DROP TABLE IF EXISTS public.zzqmtverify_lifecycle_probe")
+        await _apply_cluster_schema(conn)
+        await _write_marker(conn)
+    finally:
+        await conn.close()
+
+    # ── ⑤b **混合态**：一张维护表在场但不耐久 + 另外两张缺席 → 仍须零 DDL 拒 ──
+    #    （codex 4a-2 R9-F1）⑤ 造的是「三张全缺」，那时 `_needs_repair_ddl` 与
+    #    「已在场的表合不合规」不冲突，故证伪不了混合态。
+    #    缺陷形态（已修）：耐久性判据原本是**横跨三张表的一个 count**，
+    #    归因不到具体某张表，于是实现只在「三张全在场」时才要求它 ——
+    #    结果：marker 在场但 UNLOGGED、intent/registry 缺席时预检**放行**，
+    #    DDL 先落地建出两张表，之后才由建库**后**的形状检查拒绝。
+    #    修法=拆成 `marker_durable` / `intent_durable` / `registry_durable` 每表一条，
+    #    自动接进「只对在场的表求值」的前缀归属机制。
+    #    这违反本函数写死的契约「① 零副作用预检 → ② 才允许动 DDL」，
+    #    而它防的正是 `--maintenance-dsn` 指错到生产库那一档。
+    scenario("⑤b")
+    print("⑤b 混合态：marker 在场但 UNLOGGED + 另两张缺席 → 必须零 DDL 拒")
+    conn = await _connect(base_dsn)
+    try:
+        await conn.execute("DROP TABLE IF EXISTS public.pilot_create_intent")
+        await conn.execute("DROP TABLE IF EXISTS public.pilot_database_registry")
+        # marker 留着、内容合法，只把它变成**不耐久**（崩溃后会被 truncate）。
+        await conn.execute("ALTER TABLE public.pilot_cluster_marker SET UNLOGGED")
+        # ⚠️ 前置：证明这个混合态真的造出来了 —— 否则下面两条断言是恒真的。
+        persist = await conn.fetchval(
+            "SELECT c.relpersistence FROM pg_class c"
+            "  WHERE c.oid = to_regclass('public.pilot_cluster_marker')")
+        absent = [t for t in ("pilot_create_intent", "pilot_database_registry")
+                  if await conn.fetchval(
+                      "SELECT to_regclass($1) IS NULL", f"public.{t}")]
+        # ⚠️ `relpersistence` 的类型是 `"char"`，asyncpg 取回来是 **bytes**（`b'u'`），
+        #    直接和 `"u"` 比会恒假 —— 那样这条前置就永远红，混合态到底造没造出来反而看不见。
+        check(persist in ("u", b"u") and len(absent) == 2,
+              "⑤b 前置：marker 在场且 UNLOGGED、另两张确实缺席",
+              f"marker relpersistence={persist!r}，缺席的={absent}")
+
+        async def _never_b(_seed):
+            return False
+
+        async def _noop_b(_seed):
+            return None
+
+        cluster_sql = (_BACKEND / "sql/pilot_cluster_schema.sql").read_text(encoding="utf-8")
+        try:
+            await init_cluster_marker(conn, connect=connect_peer,
+                                      cluster_schema_sql=cluster_sql,
+                                      try_seed_lock=_never_b, release_seed_lock=_noop_b)
+            check(False, "⑤b 已在场的维护表不合规时 init 必须拒", "竟然成功了")
+        except PilotClusterBoundaryError as exc:
+            check(exc.code == "no_marker",
+                  "⑤b 混合态 → no_marker", f"实得 {exc.code}：{exc}")
+        # **判据的要害在这里**：拒是不够的，必须**拒在 DDL 之前**。
+        made = [t for t in ("pilot_create_intent", "pilot_database_registry")
+                if await conn.fetchval(
+                    "SELECT to_regclass($1) IS NOT NULL", f"public.{t}")]
+        check(not made,
+              "⑤b 拒绝**之前**一条 DDL 都没执行（缺席的两张表事后仍不存在）",
+              f"竟然在一个最终被拒的维护库里建出了 {made}")
+        # 复原
+        await conn.execute("DROP TABLE IF EXISTS public.pilot_cluster_marker")
+        await conn.execute("DROP TABLE IF EXISTS public.pilot_create_intent")
+        await conn.execute("DROP TABLE IF EXISTS public.pilot_database_registry")
         await _apply_cluster_schema(conn)
         await _write_marker(conn)
     finally:

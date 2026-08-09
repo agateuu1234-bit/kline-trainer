@@ -333,7 +333,11 @@ _OK_MAINTENANCE_SHAPE = {
     "marker_purpose_unique": True, "intent_is_table": True,
     "intent_columns_ok": True, "intent_dbname_unique": True,
     "registry_is_table": True, "registry_columns_ok": True,
-    "registry_dbname_unique": True, "maintenance_tables_durable": True}
+    "registry_dbname_unique": True,
+    # ⚠️ 耐久性判据是**每表一条**（codex 4a-2 R9-F1）：合成一个跨表 count 时它归因不到
+    #    具体哪张表，`init_cluster_marker` 的预检只能「三张全在场才要求」，
+    #    于是混合态（一张在场但不耐久 + 另一张缺席）漏过预检、让 DDL 先落地。
+    "marker_durable": True, "intent_durable": True, "registry_durable": True}
 
 _OK_PILOT_SHAPE = {
     "meta_is_table": True, "meta_key_unique": True, "meta_columns_ok": True,
@@ -1452,9 +1456,12 @@ def test_create_pilot_database_writes_all_nine_meta_keys():
     ("registry_is_table", "registry 表缺失 —— 闸 (ii) 的外部凭据无处可查"),
     ("registry_columns_ok", "registry 列不全或类型不对"),
     ("registry_dbname_unique", "registry.dbname 无唯一约束 —— 同名可塞多行"),
-    ("maintenance_tables_durable",
-     "三张维护表被 SET UNLOGGED / 挂 RLS / 换表空间 —— 崩溃后 intent 行被 truncate，"
-     "而它是零对象例外授权 DROP DATABASE 的凭据（O4-R37-C2）"),
+    # ⚠️ 耐久性判据**每表一条**（codex 4a-2 R9-F1 把跨表 count 拆开了）：
+    #    被 SET UNLOGGED / 挂 RLS / 换表空间 → 崩溃后 intent 行被 truncate，
+    #    而它是零对象例外授权 DROP DATABASE 的凭据（O4-R37-C2）。
+    ("marker_durable", "marker 表不耐久（UNLOGGED / RLS / 换表空间）"),
+    ("intent_durable", "intent 表不耐久 —— 崩溃后 DROP 授权凭据被 truncate"),
+    ("registry_durable", "registry 表不耐久 —— 崩溃后归属登记被 truncate"),
 ])
 def test_cluster_gate_i_requires_shape_proof_of_both_maintenance_tables(broken_key, label):
     """闸 (i) 必须先证**结构**再读值（O4-R8-C1）。
@@ -4650,7 +4657,7 @@ class _InitMaint(_FakeConn):
                                       "intent_is_table": False,
                                       "intent_columns_ok": False,
                                       "intent_dbname_unique": False,
-                                      "maintenance_tables_durable": False}
+                                      "intent_durable": False}
 
     async def fetch(self, query, *args):
         # ⚠️ 同上：精确到 `FROM public.pilot_create_intent` **后面直接换行**
@@ -5397,9 +5404,11 @@ def test_authorization_has_no_public_constructor_path_in_the_module():
     ({"marker_purpose_unique": False}, "marker 在场但没唯一约束"),
     ({"intent_dbname_unique": False}, "intent 在场但 dbname 没主键"),
     ({"registry_columns_ok": False}, "registry 在场但列不齐"),
-    # ⚠️ 耐久性横跨三张表，只在**都在场**时才要求 —— 这一档单列，
-    #    否则「三表齐全但被 SET UNLOGGED」会没有用例（变异抓出过）。
-    ({"maintenance_tables_durable": False}, "三表齐全但不是持久表（崩溃后会被 truncate）"),
+    # ⚠️ 耐久性判据**每表一条**（codex 4a-2 R9-F1）：三张各配一档，
+    #    否则某一张被 SET UNLOGGED 时可能只有别的判据在兜（变异抓出过这类遮蔽）。
+    ({"marker_durable": False}, "marker 在场但不是持久表（崩溃后会被 truncate）"),
+    ({"intent_durable": False}, "intent 在场但不是持久表"),
+    ({"registry_durable": False}, "registry 在场但不是持久表"),
 ])
 def test_init_rejects_a_present_but_malformed_maintenance_table_before_any_ddl(broken, label):
     """`CREATE TABLE IF NOT EXISTS` **修不好**已存在的坏表，只会跳过（codex R6-F2）。
@@ -5414,6 +5423,30 @@ def test_init_rejects_a_present_but_malformed_maintenance_table_before_any_ddl(b
         asyncio.run(_init(maint))
     assert ei.value.code == "no_marker", label
     assert maint.executed == [], f"{label}：拒绝之前已经执行了 DDL"
+
+
+def test_init_rejects_mixed_state_present_but_non_durable_plus_absent_table():
+    """**混合态**：一张在场但不耐久 + 另一张缺席 → 仍须在任何 DDL 之前拒（codex 4a-2 R9-F1）。
+
+    这一档正好落在上面两条钉子的**交叉点**上，两边各自都覆盖不到：
+      · `test_init_rejects_a_present_but_malformed…` 造的是「三张全在场」；
+      · `test_init_still_repairs_a_genuinely_absent_table` 造的是「缺表但其余合规」。
+
+    耐久性判据此前是一个**跨三张表的 count**，归因不到具体哪张表，于是预检只能
+    「三张全在场才要求它」—— 混合态下 `malformed` 为空 → `_needs_repair_ddl` 为真
+    → **DDL 先落地**建出缺的表，之后才由建库**后**的形状检查拒绝，
+    于是在一个最终被拒的维护库里留下了表。而这条路径防的正是
+    `--maintenance-dsn` 指错到生产库那一档。
+
+    真 PG 侧的同一条判据由 `verify_pilot_db_lifecycle.py` 档 ⑤b 坐实
+    （marker 在场且 UNLOGGED + 另两张缺席 → 拒且缺席的表事后仍不存在）。
+    """
+    maint = _InitMaint(intent_table_missing=True)
+    maint.maintenance_shape = {**maint.maintenance_shape, "marker_durable": False}
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "no_marker"
+    assert maint.executed == [], "混合态下拒绝之前已经执行了 DDL"
 
 
 def test_init_still_repairs_a_genuinely_absent_table():
