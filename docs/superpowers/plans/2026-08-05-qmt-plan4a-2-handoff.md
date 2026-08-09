@@ -12,7 +12,7 @@
 |---|---|---|
 | ~~`feat/qmt-plan4a-2a-read-gates`~~ | ✅ **MERGED #158**（main squash `bd2c154`，2026-08-08）| 库级**只读**闸：0− / 0 / 0r / 0b / state / 1 / 2 |
 | `fix/qmt-gate2-name-text-cast` | **待 push / 开 PR**；codex **一轮 approve**，账本已核 | 修 2a 带进 main 的死闸（`name[] = text[]`），+80 / −1 |
-| `feat/qmt-plan4a-2b-destructive` | **待 push / 开 PR**（10 个提交，+5863 / −84）| 零对象例外 + `authorize_reset` + **`reset_pilot_database`**（授权+销毁一体）+ `--init-cluster-marker` + **共用 harness + 两个新 L2 真 PG 脚本** |
+| `feat/qmt-plan4a-2b-destructive` | **待 push / 开 PR**（十余个提交，约 +5900 / −84；**准确数字用命令现查，别信写死的**）| 零对象例外 + `authorize_reset` + **`reset_pilot_database`**（授权+销毁一体）+ `--init-cluster-marker` + **共用 harness + 两个新 L2 真 PG 脚本** |
 
 > ⚠️ **`fix/qmt-gate2-name-text-cast` 优先。** 它修的是**此刻就躺在 `main` 上**的缺陷：
 > 闸 2 的业务表结构查询在真 PostgreSQL 上恒抛，**五组判据从未成功执行过一次**。
@@ -77,8 +77,14 @@ git fetch origin
 git rev-list --count HEAD..origin/main
 ```
 
-期望：**没有输出** / `feat/qmt-plan4a-2b-destructive` / `fe33591` / **`0`**
+期望：**没有输出**（工作区干净）/ `feat/qmt-plan4a-2b-destructive` / 最后一条是 **`0`**
 （已与 main 齐平，**不需要 rebase**）。
+
+⚠️ **本地提交数先记下来**（写死在文档里必然被后续提交打过期）：
+
+```
+git rev-list --count origin/main..HEAD
+```
 
 推送之后同样用远端判据核实：
 
@@ -86,7 +92,8 @@ git rev-list --count HEAD..origin/main
 git rev-list --count origin/main..origin/feat/qmt-plan4a-2b-destructive
 ```
 
-期望：**10**。之后开 PR，正文用 `--body-file` 指向：
+期望：**与上一步记下的本地提交数完全相等**（不等就是没推全）。之后开 PR，
+正文用 `--body-file` 指向：
 
 ```
 /Users/maziming/Coding/Prj_Kline trainer/.dev/pr-bodies/pr_body_4a2b.md
@@ -105,7 +112,7 @@ git rev-list --count origin/main..origin/feat/qmt-plan4a-2b-destructive
 | 项 | 命令 | 结果 |
 |---|---|---|
 | host 全量（4a-2a） | `cd backend && ../.venv/bin/python -m pytest tests/ -q -p no:randomly` | **660 passed**（合并前 563） |
-| host 全量（4a-2b，**交付态 `fe33591`**） | 同上 | **795 passed** |
+| host 全量（4a-2b，交付态） | 同上 | **795 passed** |
 | 本文件单跑 | `pytest tests/test_qmt_pilot_db.py -q` | 4a-2a **330** / 4a-2b **465**（合并前 233） |
 | spec 一致性 | `python3 tools/check_spec_consistency.py` | **全过**；`--self-test` 的 11 项各自被反例触发 |
 | mutation | 控制者亲验，逐条中和判据看具名测试变红后复原 | 4a-2a **93 条**、4a-2b **107 条**，**全部 RED** |
@@ -171,8 +178,8 @@ git rev-list --count origin/main..origin/feat/qmt-plan4a-2b-destructive
 
 **为什么停在 R13**：严重度五轮是 medium → critical → 2×high → high+medium → high，
 **不是递减**；且每轮修复都在长新的评审面。同时本 PR 严重超出「≤3 子项 ≤500 行」
-（10 个提交 / +5863 −84）——**不收敛有一部分是打包问题**，仓库记忆里明写过
-「大 PR codex 不收敛 → 切超小片」。就地重切要重写 10 个提交的历史，
+（十余个提交 / 约 +5900 −84）——**不收敛有一部分是打包问题**，仓库记忆里明写过
+「大 PR codex 不收敛 → 切超小片」。就地重切要重写整条分支的历史，
 成本与风险更高，故选择**把评审挪到 PR 上继续**（与 2a 在 R6 的处置一致）。
 
 ---
@@ -332,9 +339,9 @@ export DSN2="postgresql://postgres:$(docker inspect qmt-pg-r8b --format '{{range
    封死；对**另一个超级用户**保留 —— 但超级用户本来就能直接 DROP 任何库。
 4. **档 ㉜ 的判别力被前面的档遮蔽**（不编场景，如实登记）：让集群闸持住连接的强变异
    确实制造出滞留会话，但它在档 ④ 的清场就把脚本打死了，按构造 ㉜ 不可能是第一个观测点。
-5. **本 PR 严重超出「≤3 子项 ≤500 行」**（10 个提交 / +5863 −84）。
+5. **本 PR 严重超出「≤3 子项 ≤500 行」**（十余个提交 / 约 +5900 −84）。
    **不收敛有一部分是打包问题** —— 仓库记忆里明写过「大 PR codex 不收敛 → 切超小片」。
-   就地重切要重写 10 个提交的历史，成本与风险更高，故选择把评审挪到 PR 上继续。
+   就地重切要重写整条分支的历史，成本与风险更高，故选择把评审挪到 PR 上继续。
 
 ### 再往后
 
