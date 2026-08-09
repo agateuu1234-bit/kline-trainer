@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sys
+import weakref
 
 # CLI 只收 --seed；库名恒为 kline_pilot_{seed}，用户无法传入任意库名。
 SEED_RE = re.compile(r"[a-z0-9_]{1,32}")
@@ -2618,13 +2619,28 @@ async def _drop_pilot_database(maint_conn, *, connect, db_name: str, seed: str,
     #    照样能递进来，走完名字/锁/会话/oid 四道检查之后直接 DROP ——
     #    把归属闸、绑定闸、集群闸与 `--reset-foreign` 整条链绕过去。
     #    `type(...) is` 而非 `isinstance`：子类同样不算数（它可以覆盖任何东西）。
-    if type(authorization) is not ResetAuthorization or not getattr(
-            authorization, "_minted", False):
+    # ⚠️ **判定只认登记表，不读对象上的属性**（codex 4a-2 R14-F2，同一个洞的第四次提出：
+    #    R4-F2 改私有 → R6-F1 加构造令牌 → R7-F1 使用点查类型 → 本条）。
+    #    实测坐实：`object.__new__` 绕过 `__init__` 之后手设一句 `_minted = True`，
+    #    「类型 + 标记」两道全过；而**真**凭据的 `via_empty_remnant` 也能被改写成 False，
+    #    从而跳过 DROP 前的封锁与【绝对空】紧贴复查。可变属性不是能力边界。
+    #    登记表由 `authorize_reset` 在铸造那一刻写入，值是当时的权威事实。
+    _record = _MINTED_AUTHORIZATIONS.get(authorization) \
+        if type(authorization) is ResetAuthorization else None
+    if _record is None:
         raise PilotDbBoundaryError(
             "forged_reset_authorization",
-            f"销毁授权不是 authorize_reset 铸造出来的（实得 "
+            f"销毁授权不在本模块的铸造登记表里（实得 "
             f"{type(authorization).__name__}）—— 拒绝执行 DROP。"
             f"请改调 reset_pilot_database（授权与销毁一体的唯一公开入口）。")
+    _auth_db, _auth_seed, _auth_oid, _auth_via_remnant = _record
+    # ⚠️ 授权是**给某个库的某个 seed** 铸的，不是一张通用许可证：
+    #    只认对象本身的话，一份合法授权能被挪去销毁另一个库。
+    if _auth_db != db_name or _auth_seed != seed:
+        raise PilotDbBoundaryError(
+            "forged_reset_authorization",
+            f"这份授权是给 {_auth_db!r} / seed={_auth_seed!r} 铸的，"
+            f"而本次要销毁的是 {db_name!r} / seed={seed!r} —— 拒绝执行 DROP。")
     await pin_search_path(maint_conn)
     # ⚠️ 名字护栏排在**最前**（比 seed 派生判据还早）：它是最根本、最便宜的一条。
     #    反过来先跑 `_assert_seed_db_name` 的话，`db_name='production_db'` 会被报成
@@ -2649,10 +2665,10 @@ async def _drop_pilot_database(maint_conn, *, connect, db_name: str, seed: str,
 
     # 绑实例：紧贴着再确认一次「这仍是被授权的那个实例」。
     oid_now = await maint_conn.fetchval(_CREATED_DB_OID_SQL, db_name)
-    if oid_now != authorization.db_oid:
+    if oid_now != _auth_oid:
         raise PilotDbBoundaryError(
             "target_db_replaced",
-            f"被授权销毁的 {db_name!r} 实例 oid 是 {authorization.db_oid!r}，"
+            f"被授权销毁的 {db_name!r} 实例 oid 是 {_auth_oid!r}，"
             f"而此刻同名库的 oid 是 {oid_now!r} —— 授权之后它被删掉又重建了。"
             f"绝不 DROP 一个本次没有授权过的实例，请人工核对 {db_name!r}")
 
@@ -2661,7 +2677,7 @@ async def _drop_pilot_database(maint_conn, *, connect, db_name: str, seed: str,
     _sealed = False
     _prior_limit = None
     try:
-        if authorization.via_empty_remnant:
+        if _auth_via_remnant:
             # ── **持住一条目标库连接，全程不放**（codex 4a-2 R12-F1/F2）──────
             # 这条来路**绕过** pilot_meta 归属与 `--reset-foreign` 令牌，
             # 它的全部授权理由就是「这个库当时是空的」——而那是个会过期的事实。
@@ -2676,19 +2692,19 @@ async def _drop_pilot_database(maint_conn, *, connect, db_name: str, seed: str,
             #       不可能落到一个同名替身头上（R12-F2）。
             target_conn, oid_held = await _open_target(maint_conn, connect, db_name)
             try:
-                if oid_held != authorization.db_oid:
+                if oid_held != _auth_oid:
                     raise PilotDbBoundaryError(
                         "target_db_replaced",
                         f"被授权销毁的 {db_name!r} 实例 oid 是 "
-                        f"{authorization.db_oid!r}，而持住的这条会话连到的是 "
+                        f"{_auth_oid!r}，而持住的这条会话连到的是 "
                         f"{oid_held!r} —— 授权之后它被删掉又重建了")
                 _prior_limit = await maint_conn.fetchval(
-                    _READ_CONNLIMIT_SQL, db_name, authorization.db_oid)
+                    _READ_CONNLIMIT_SQL, db_name, _auth_oid)
                 if _prior_limit is None:
                     raise PilotDbBoundaryError(
                         "target_db_replaced",
                         f"读 {db_name!r} 的连接数上限时取不到被授权的那个实例 "
-                        f"（oid={authorization.db_oid!r}）—— 绝不对替身动配置或 DROP")
+                        f"（oid={_auth_oid!r}）—— 绝不对替身动配置或 DROP")
                 await maint_conn.execute(_SEAL_CONNECTIONS_SQL(db_name))
                 _sealed = True
                 # ⚠️ 封的是**新**连接；封之前就连着的还在，故封住之后要再数一遍。
@@ -2756,7 +2772,7 @@ async def _drop_pilot_database(maint_conn, *, connect, db_name: str, seed: str,
     # DROP 成功 —— 在**同一把 seed 锁下**清掉那条已经无所指的凭据（R4-F1）。
     try:
         await maint_conn.execute(_CLEAR_DROPPED_INTENT_SQL, db_name, seed,
-                                 authorization.db_oid)
+                                 _auth_oid)
     except Exception as exc:
         # ⚠️ 库**已经删掉了**，这一步失败不能让调用方以为 DROP 没成功；
         #    但也不能静默 —— 残留的凭据会把随后的重建卡成 intent_row_conflict。
@@ -3020,6 +3036,20 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
         if not await try_seed_lock(r["seed"]):
             continue                       # 有运行正在用这个 seed —— 跳过，绝不删
         try:
+            # ⚠️ **回调返回真不算证明**（codex 4a-2 R14-F1，high）：
+            #    `_SEED_LOCK_HELD_SQL` 在本模块有四个使用点（建库 / reset 授权 / DROP /
+            #    零对象例外），**唯独这里没有** —— 而这里做的是 DELETE 恢复凭据。
+            #    两种现实情形会让布尔为真却毫无互斥：
+            #      · 调用方回调接错线（本模块**不取锁**，取锁完全在调用方那侧）；
+            #      · advisory lock 在同一 session 内**可重入** —— 这条连接若早已因别的
+            #        原因持有同一把锁，`pg_try_advisory_lock` 照样返回真。
+            #    删错的后果是抹掉一次进行中/崩溃中的建库**唯一的恢复凭据**，
+            #    留下一个零对象例外再也授权不了的空残骸（R55-F1 锁死换形态）。
+            # ⚠️ 判据要求锁在 **`maint_conn` 这条连接上**（`_SEED_LOCK_HELD_SQL` 绑
+            #    `pg_backend_pid()`）—— DELETE 正是在它上面跑的。调用方若在别的连接上取锁，
+            #    这里判假、跳过，是**正确**的 fail-closed。
+            if not await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, r["seed"]):
+                continue                   # `finally` 仍会把回调取的那把还回去
             # ⚠️ 上面那两条 Python 判据只是**省掉不必要的取锁**；真正的删除判据在 SQL 里，
             #    在锁内按**当下**的 inserted_at 与 pg_database 求值（R3-F2）。
             await maint_conn.execute(_DELETE_ORPHAN_INTENT_SQL, r["dbname"],
@@ -3038,9 +3068,24 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
 #    把集群闸 / 归属闸 / 绑定闸 / `--reset-foreign` 整条授权链绕过去，直接 DROP。
 #    本模块通篇的原则就是「把纪律写成机制」，这里是最后一处还停在纪律上的。
 #    改法：凭据的构造要一个**模块私有的哨兵**，只有 `authorize_reset` 拿得到。
-#    （诚实说明：拿 `qmt_pilot_db._RESET_CAPABILITY` 仍然能构造出来 —— 但那已经不是
-#      「接线失误」，而是明确的刻意绕过，且在评审里一眼可见。这条闸挡的是前者。）
+#
+# ⚠️ **但哨兵 + `_minted` 标记仍然不够**（codex 4a-2 R14-F2，high，实测坐实）：
+#    `object.__new__(ResetAuthorization)` 绕过 `__init__`（哨兵检查因此不生效），
+#    再手设一句 `_minted = True`（它就在 `__slots__` 里），
+#    `type(...) is` 与 `_minted` 两道检查**全过**；
+#    而一份**真**凭据的 `via_empty_remnant` 也能被改写成 False，
+#    从而跳过 DROP 前的封锁与【绝对空】紧贴复查 —— 那是 R10 那条 critical
+#    （真 PG 已复现数据丢失）唯一的防线。
+#    **可变的 Python 属性不是能力边界。**
+#    真正的机制：把授权状态存进**模块私有的登记表**，使用点只认登记表里的值，
+#    完全不读对象上的属性。伪造的对象不在表里；篡改对象上的属性对判定毫无影响。
 _RESET_CAPABILITY = object()
+
+# 授权登记表：`authorize_reset` 铸造时写入，`_drop_pilot_database` 使用时按对象查回。
+# 值 = 铸造那一刻的权威事实 `(db_name, seed, db_oid, via_empty_remnant)`。
+# ⚠️ 用 `WeakKeyDictionary`：凭据用完即弃，不能让登记表变成泄漏源。
+#    键按**对象身份**比对（`ResetAuthorization` 不定义 `__eq__`/`__hash__`）。
+_MINTED_AUTHORIZATIONS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 
 class ResetAuthorization:
@@ -3059,9 +3104,11 @@ class ResetAuthorization:
     在**真正 DROP 之前**把那次复查补回来。
     """
 
-    # `_minted` 只在 `__init__` 里被设成 True —— `object.__new__(ResetAuthorization)`
-    # 绕过 `__init__` 时它根本不存在，使用点的检查会当场发现（R7-F1）。
-    __slots__ = ("db_oid", "via_empty_remnant", "_minted")
+    # ⚠️ 这两个属性只供**诊断/展示**（`__repr__`、调用方日志）。
+    #    使用点（`_drop_pilot_database`）**不读它们** —— 权威值在
+    #    `_MINTED_AUTHORIZATIONS` 里，篡改这里改不动判定（R14-F2）。
+    # ⚠️ `__weakref__` 是 `WeakKeyDictionary` 做键的前提。
+    __slots__ = ("db_oid", "via_empty_remnant", "__weakref__")
 
     def __init__(self, capability, db_oid: str, via_empty_remnant: bool) -> None:
         if capability is not _RESET_CAPABILITY:
@@ -3072,11 +3119,25 @@ class ResetAuthorization:
                 "请改调 reset_pilot_database（授权与销毁一体的唯一公开入口）。")
         self.db_oid = db_oid
         self.via_empty_remnant = via_empty_remnant
-        self._minted = True
 
     def __repr__(self) -> str:
         return (f"ResetAuthorization(db_oid={self.db_oid!r}, "
                 f"via_empty_remnant={self.via_empty_remnant!r})")
+
+
+def _mint_authorization(db_name: str, seed: str, db_oid: str, *,
+                        via_empty_remnant: bool) -> ResetAuthorization:
+    """铸造一份销毁授权，并把**当时的权威事实**记进登记表（codex 4a-2 R14-F2）。
+
+    ⚠️ 两个铸造点走**同一个**函数：两处各写一遍「构造 + 登记」，必然有一天只改一处 ——
+       那时登记表里少一条，一份合法授权会被使用点当成伪造品拒掉（或更糟，反过来）。
+    ⚠️ 登记的是 `(db_name, seed, db_oid, via_empty_remnant)` **四元组**，
+       不只是 oid：授权是给**某个库的某个 seed** 铸的，不是通用许可证。
+    """
+    auth = ResetAuthorization(_RESET_CAPABILITY, db_oid=db_oid,
+                              via_empty_remnant=via_empty_remnant)
+    _MINTED_AUTHORIZATIONS[auth] = (db_name, seed, db_oid, via_empty_remnant)
+    return auth
 
 
 async def authorize_reset(
@@ -3109,14 +3170,12 @@ async def authorize_reset(
     remnant_oid = await try_empty_remnant_exception(
         maint_conn, connect=connect, db_name=db_name, seed=seed)
     if remnant_oid is not None:
-        return ResetAuthorization(_RESET_CAPABILITY, db_oid=remnant_oid,
-                                  via_empty_remnant=True)
+        return _mint_authorization(db_name, seed, remnant_oid, via_empty_remnant=True)
     oid = await assert_db_allowed_for_reset(
         maint_conn, connect=connect, db_name=db_name, seed=seed,
         export_log_sha256=export_log_sha256, output_dir=output_dir,
         reset_foreign_token=reset_foreign_token)
-    return ResetAuthorization(_RESET_CAPABILITY, db_oid=oid,
-                              via_empty_remnant=False)
+    return _mint_authorization(db_name, seed, oid, via_empty_remnant=False)
 
 
 async def reset_pilot_database(

@@ -28,6 +28,7 @@ from qmt_pilot_db import (CONTRACT_VERSION, FIRST_NORMAL_OID, INTENT_TTL_SECONDS
                           reset_pilot_database,
                           init_cluster_marker, MARKER_PURPOSE, authorize_reset,
                           ResetAuthorization, _RESET_CAPABILITY,
+                          _mint_authorization,
                           assert_pilot_db_allowed, create_pilot_database,
                           derive_confirm_token, derive_db_name, quote_ident)
 
@@ -4760,7 +4761,9 @@ def test_empty_remnant_drop_seals_new_connections_before_the_final_proof():
         target.current_database = dbname
         return target
 
-    auth = ResetAuthorization(_RESET_CAPABILITY, db_oid="16400", via_empty_remnant=True)
+    # ⚠️ 合法凭据必须走 `_mint_authorization`（R14-F2）：使用点只认登记表。
+    auth = _mint_authorization("kline_pilot_probe", "probe", "16400",
+                               via_empty_remnant=True)
     asyncio.run(_drop_pilot_database(
         maint, connect=_connect_recording, db_name="kline_pilot_probe",
         seed="probe", authorization=auth))
@@ -4906,7 +4909,9 @@ def test_empty_remnant_drop_verifies_emptiness_on_the_single_held_session():
         target.current_database = dbname
         return target
 
-    auth = ResetAuthorization(_RESET_CAPABILITY, db_oid="16400", via_empty_remnant=True)
+    # ⚠️ 合法凭据必须走 `_mint_authorization`（R14-F2）：使用点只认登记表。
+    auth = _mint_authorization("kline_pilot_probe", "probe", "16400",
+                               via_empty_remnant=True)
     asyncio.run(_drop_pilot_database(
         maint, connect=_connect_counting, db_name="kline_pilot_probe",
         seed="probe", authorization=auth))
@@ -4937,11 +4942,16 @@ def test_dropped_intent_cleanup_is_not_bound_to_the_destroyed_oid_alone():
 
 
 def _drop(maint, *, target=None, via_remnant=False, **over):
-    auth = over.pop("authorization",
-                    ResetAuthorization(_RESET_CAPABILITY,
-                                       db_oid=over.pop("authorized_oid", "16400"),
-                                       via_empty_remnant=via_remnant))
+    # ⚠️ 合法凭据必须走 `_mint_authorization`（R14-F2）：使用点只认**登记表**，
+    #    直接 `ResetAuthorization(...)` 造出来的不在表里，会被当成伪造品拒掉 ——
+    #    那正是这条修复的机制本身。
+    # ⚠️ 先算 kw 再铸：授权登记的是 (db_name, seed, ...)，
+    #    在知道 override 之前铸就会登记成默认的库名/seed，与本次调用对不上。
+    oid = over.pop("authorized_oid", "16400")
+    explicit = over.pop("authorization", None)
     kw = {"db_name": "kline_pilot_probe", "seed": "probe", **over}
+    auth = explicit if explicit is not None else _mint_authorization(
+        kw["db_name"], kw["seed"], oid, via_empty_remnant=via_remnant)
     return _drop_pilot_database(
         maint, connect=_connector({"kline_pilot_probe": target or _EmptyOnProbe()}),
         authorization=auth, **kw)
@@ -5829,9 +5839,22 @@ def test_authorization_has_no_public_constructor_path_in_the_module():
         first = call.args[0] if call.args else None
         assert isinstance(first, ast.Name) and first.id == "_RESET_CAPABILITY", \
             "有一处构造没带能力令牌"
-    minted_in = textwrap.dedent(inspect.getsource(m.authorize_reset))
+    # ⚠️ R14-F2 之后，构造从 `authorize_reset` 下沉到 `_mint_authorization`
+    #    （两个铸造点走同一个函数，免得「构造 + 登记」只改一处）。
+    #    判据随之改成：**唯一的构造点就在 `_mint_authorization` 里**。
+    minted_in = textwrap.dedent(inspect.getsource(m._mint_authorization))
     assert minted_in.count("ResetAuthorization(") == len(sites), \
-        "能力凭据只许在 authorize_reset 里铸造"
+        "能力凭据只许在 _mint_authorization 里铸造"
+    # 而 `_mint_authorization` 必须把它记进登记表 —— 不记的话使用点会把合法授权判成伪造。
+    assert "_MINTED_AUTHORIZATIONS[" in minted_in, \
+        "铸造之后没有写登记表 —— 使用点只认登记表，合法授权会被当成伪造品拒掉"
+    # 反向：调用铸造函数的地方只许是 `authorize_reset`。
+    callers = {n.name for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                       and c.func.id == "_mint_authorization" for c in ast.walk(n))}
+    assert callers == {"authorize_reset"}, \
+        f"铸造授权的地方不只 authorize_reset 一个：{sorted(callers)}"
 
 
 @pytest.mark.parametrize("broken,label", [
@@ -5943,6 +5966,106 @@ def test_authorization_bypassing_init_cannot_reach_drop():
             db_name="kline_pilot_probe", seed="probe", authorization=ghost))
     assert ei.value.code == "forged_reset_authorization"
     assert _drops(maint) == []
+
+
+def test_a_fully_populated_lookalike_authorization_is_still_rejected():
+    """把一份**长得和真凭据一模一样**的对象递进来，也必须被拒（codex 4a-2 R14-F2，high）。
+
+    `..._bypassing_init_...` 那条只做了 `object.__new__` 而没填属性，测的是比真实攻击
+    更弱的形态。R14 实测坐实：当时的机制是「`type(...) is` + `_minted` 标记」，
+    而 `_minted` 就在 `__slots__` 里 —— 手设一句就两道全过。
+    **可变的 Python 属性不是能力边界。**
+
+    现在的机制是**模块私有的铸造登记表**：使用点按对象身份查回铸造那一刻的权威事实，
+    完全不读对象上的属性。于是「填得再像」也没用 —— 它不在表里。
+    （诚实说明：直接往 `_MINTED_AUTHORIZATIONS` 里塞一条仍然能绕过，
+      但那与拿 `_RESET_CAPABILITY` 同级：明确的刻意绕过，不是接线失误。）
+    """
+    lookalike = object.__new__(ResetAuthorization)
+    lookalike.db_oid = "16400"
+    lookalike.via_empty_remnant = False
+    maint = _DropMaint()
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop_pilot_database(
+            maint, connect=_connector({"kline_pilot_probe": _EmptyOnProbe()}),
+            db_name="kline_pilot_probe", seed="probe", authorization=lookalike))
+    assert ei.value.code == "forged_reset_authorization"
+    assert _drops(maint) == [], "填满属性的伪造凭据竟然走到了 DROP"
+
+
+def test_the_minted_flag_attribute_no_longer_exists():
+    """**反向钉**：`_minted` 这个可变标记必须已经不存在。
+
+    留着它就还有人会去读它 —— 而它正是 R14-F2 证伪掉的那条「能力边界」。
+    """
+    auth = _mint_authorization("kline_pilot_probe", "probe", "16400",
+                               via_empty_remnant=False)
+    assert not hasattr(auth, "_minted"), \
+        "`_minted` 还在 —— 那条被证伪的「能力边界」又回来了"
+    with pytest.raises(AttributeError):
+        auth._minted = True          # `__slots__` 里没有它，设不上
+
+
+def test_mutating_a_real_authorization_cannot_skip_the_empty_remnant_recheck():
+    """把**真**凭据的 `via_empty_remnant` 改掉，不许因此跳过封锁与紧贴复查（R14-F2）。
+
+    零对象例外那条来路的授权理由就是「这个库当时是空的」——
+    翻掉这个标志就等于跳过 DROP 前的封锁 + 【绝对空】复查，
+    而那正是 R10 那条 critical（真 PG 已复现数据丢失）唯一的防线。
+    判据：DROP 之前必须**仍然**封了连接。
+    """
+    auth = _mint_authorization("kline_pilot_probe", "probe", "16400",
+                               via_empty_remnant=True)
+    auth.via_empty_remnant = False                     # ← 篡改对象上的属性
+    maint = _DropMaint()
+    asyncio.run(_drop_pilot_database(
+        maint, connect=_connector({"kline_pilot_probe": _EmptyOnProbe()}),
+        db_name="kline_pilot_probe", seed="probe", authorization=auth))
+    assert _connlimit_ops(maint), \
+        "改掉 via_empty_remnant 就跳过了 DROP 前的封锁 —— R10 那条 critical 的防线被绕开"
+
+
+def test_authorization_minted_for_another_database_cannot_reach_drop():
+    """给**别的库/seed** 铸的凭据不许用来删这个库（R14-F2 的同族）。
+
+    授权是给**某个库的某个 seed** 铸的，不是一张通用许可证：
+    只认「这个对象是我们铸的」而不认「它是给谁铸的」，
+    一份合法授权就能被挪去销毁另一个库。
+    """
+    auth = _mint_authorization("kline_pilot_probe", "probe", "16400",
+                               via_empty_remnant=False)
+    maint = _DropMaint(databases=["kline_pilot_other"])
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop_pilot_database(
+            maint, connect=_connector({"kline_pilot_other": _EmptyOnProbe()}),
+            db_name="kline_pilot_other", seed="other", authorization=auth))
+    assert ei.value.code == "forged_reset_authorization"
+    assert _drops(maint) == [], "给别的库铸的凭据竟然删了这个库"
+
+
+def test_orphan_cleanup_refuses_when_the_callback_lies_about_the_lock():
+    """孤儿清理不许只信回调的布尔（codex 4a-2 R14-F1，high）。
+
+    `_SEED_LOCK_HELD_SQL` 在模块里有四个使用点（建库 / reset 授权 / DROP / 零对象例外），
+    **唯独孤儿清理没有** —— 它直接把 `try_seed_lock(...)` 的返回值当成独占证明就 DELETE。
+    而 advisory lock 在同一 session 内**可重入**：一个接错线的回调、或同连接上早已
+    因别的原因持有的锁，都会返回真而**不提供任何互斥**。
+    后果是删掉一次进行中/崩溃中的建库**唯一的恢复凭据** ——
+    留下一个零对象例外再也授权不了的空残骸（R55-F1 锁死换形态）。
+    """
+    orphan = {"dbname": "kline_pilot_ghost", "seed": "ghost",
+              "db_oid": "99999", "age_seconds": 10 ** 9}
+    maint = _InitMaint(all_intent_rows=[orphan], seed_lock_held=False)  # 回调撒谎
+
+    async def _lying_try(_seed):
+        return True                            # 说取到了，实际 pg_locks 里没有
+
+    async def _noop(_seed):
+        return None
+
+    asyncio.run(_init(maint, lock_pair=(_lying_try, _noop)))
+    assert not [q for q in maint.executed if q.strip().upper().startswith("DELETE")], \
+        "回调撒谎说持有锁，孤儿清理就把恢复凭据删了"
 
 
 def test_a_subclass_of_the_authorization_is_not_accepted_either():
