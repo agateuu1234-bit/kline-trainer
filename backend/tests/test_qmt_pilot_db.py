@@ -3278,6 +3278,79 @@ def test_every_guard_table_shape_proof_covers_table_level_durability():
         "同侪库的归属自证不该要求持久性 —— 那会让崩溃过的同侪库顶死整台集群"
 
 
+# `name` 型的系统目录列。聚合成数组之后与 `text[]` 字面量比较时**没有相等操作符**。
+_NAME_TYPED_CATALOG_COLUMNS = ("attname", "relname", "conname", "nspname",
+                               "typname", "proname", "rolname", "spcname")
+
+# 「聚合了 name 型目录列却没转成 text」的出现处。
+# ⚠️ 是**结构计数**，不是禁词黑名单：数的是「这个形状出现了几次」，要求为 0。
+_UNCAST_NAME_AGG_RE = re.compile(
+    r"array_agg\(\s*(?:DISTINCT\s+)?[A-Za-z_][A-Za-z_0-9]*\.(?:%s)\b(?!\s*::)"
+    % "|".join(_NAME_TYPED_CATALOG_COLUMNS))
+
+
+def _strip_sql_line_comments(sql: str) -> str:
+    """剥掉 SQL 的 `--` 行注释。
+
+    ⚠️ 「守卫读哪份文本」本身就是判据的一部分：这是一条**否定**断言，
+       而承重注释里往往正好要写出被禁的那个形状来解释它为什么被禁 ——
+       不剥注释的话，写清楚理由反而会把自己打红。
+    """
+    return "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+
+
+def _uncast_name_aggregations(sql: str):
+    return _UNCAST_NAME_AGG_RE.findall(_strip_sql_line_comments(sql))
+
+
+def test_scanner_for_uncast_name_aggregation_actually_discriminates():
+    """**双向自检**：上面那条扫描必须对坏形状变红、对好形状放行。
+
+    否定断言最常见的失效方式是「正则与代码脱钩之后恒为空」——
+    那时它永远为真，而被它保护的判据早已坏掉。
+    """
+    bad = "SELECT (SELECT array_agg(a.attname ORDER BY a.attname) FROM pg_attribute a) = ARRAY['x']"
+    good = "SELECT (SELECT array_agg(a.attname::text ORDER BY a.attname::text) FROM pg_attribute a) = ARRAY['x']"
+    assert _uncast_name_aggregations(bad), "扫描器对坏形状不报 —— 它已经失去判别力"
+    assert not _uncast_name_aggregations(good), "扫描器对已转型的写法误报"
+    # 剥注释这一步本身也要能被证伪：注释里写出坏形状不该把守卫打红。
+    commented = "-- 反例：array_agg(a.attname ORDER BY a.attname)\n" + good
+    assert not _uncast_name_aggregations(commented), \
+        "注释里出现的坏形状被当成了真代码 —— 承重注释会把守卫自己打红"
+
+
+def test_no_name_typed_catalog_column_is_aggregated_without_a_text_cast():
+    """`name[]` 与 `text[]` 之间**没有**相等操作符（真 PostgreSQL 15 实测）：
+
+        SELECT array_agg(a.attname ORDER BY a.attname) … = ARRAY['start_datetime','stock_code']
+        → ERROR: operator does not exist: name[] = text[]
+
+    后果不是「这条判据判假」，而是**整条结构查询抛异常**：闸 2 于是在任何库上都
+    兜成 `target_db_unreadable`，业务表五组判据**一次都执行不到**。
+    它是 fail-closed 的（不放行危险东西），但整条复用路径不可用，
+    且错误码把运维指向权限/连通性，而不是「schema 漂移 → 用 --reset 重建」。
+
+    ⚠️ 这条判据在**假件层结构性测不到**：`_FakeConn` 按 SQL 子串派发预置字典，
+       SQL 文本一次都不进 PostgreSQL。真语义由 L2 真-PG 脚本坐实
+       （`verify_pilot_db_lifecycle.py` 档 ⑰b「健康库复用**必须被放行**」）；
+       在没有 PostgreSQL 的 CI 上，这条源码结构守卫是唯一拦得住它的东西。
+    ⚠️ 标量 `name = text` 是**合法**的，只有数组没有 —— 故判据只针对
+       `array_agg(<别名>.<name 型列>)`，不去禁标量比较。
+    """
+    import qmt_pilot_db as m
+    offenders = {}
+    for name, value in vars(m).items():
+        if isinstance(value, str) and "array_agg" in value:
+            hits = _uncast_name_aggregations(value)
+            if hits:
+                offenders[name] = hits
+    assert not offenders, (
+        f"这些模块 SQL 把 name 型目录列聚合成数组却没有 ::text：{offenders}。"
+        f"与 text[] 字面量比较时 PostgreSQL 会抛 "
+        f"`operator does not exist: name[] = text[]`，"
+        f"于是**整条**查询失败、判据一次都执行不到")
+
+
 # ===========================================================================
 # 4a-2 —— 库级五闸（spec §3 子项③）
 # ===========================================================================
