@@ -430,7 +430,7 @@ spec §6.2 逐字：「OHLC 仍 `DECIMAL` / `file_path` 为 `VARCHAR` / 缺 `uq_
 - Consumes: `_pilot_verify_harness`
 - Produces: 独立可执行脚本
 
-- [ ] **Step 1: 三档**
+- [x] **Step 1: 三档 → 实交七档**（Ⓐ Ⓐb Ⓑ Ⓑb Ⓑd Ⓑc Ⓒ）
 
 spec §6.2 逐字：「同 `--seed`、不同 `--maintenance-dsn` 的两个进程 —— 断言第二个在
 `pg_try_advisory_lock` 处**立刻**失败返回（**须设短超时并断言它没有在等**），
@@ -446,19 +446,36 @@ spec §6.2 逐字：「同 `--seed`、不同 `--maintenance-dsn` 的两个进程
 `pg_advisory_lock` 最终也会返回 false 之外的东西，而「等了 30 秒才失败」
 在一次并发运行里等于把另一次运行挂住。
 
-- [ ] **Step 2: 跑**
+**实施时补的四档（理由都是「原三档证伪不了它」）**：
 
-```
-DSN="…55444…" DSN2="…55445…" ./.venv/bin/python backend/scripts/verify_pilot_concurrency.py; echo "EXIT=$?"
-```
-Expected: 三档 `PASS`，末行 `EXIT=0`
+| 档 | 造什么 | 断言 |
+|---|---|---|
+| Ⓐb | 在**第二台集群**（DSN2）上取同一个 seed 的锁 | **取得到** —— advisory lock 是**每集群**的，`--maintenance-dsn` 指到另一台集群时按 seed 的互斥**完全不存在**。这条限制必须是被验证过的事实，不是想当然。（也顺带证明 DSN2 与 DSN 真是两台集群）|
+| Ⓑb | 用**两参数** `pg_try_advisory_lock(int,int)` 拼出**同样的 classid/objid** | 前置断言它真撞上了同一个键（objsubid=2），然后 `_SEED_LOCK_HELD_SQL` 必须**不认** |
+| Ⓑd | 用 `pg_try_advisory_lock_shared`（classid/objid/**objsubid 全一样**，只差 mode）| 前置断言撞上同键同 objsubid + **反向**证明另一条连接能同时拿到它（共享锁根本不互斥），然后谓词必须**不认** |
+| Ⓑc | 找一个 `hashtext` 为**负**的 seed，取锁 | 谓词必须判「持有」—— 键派生里有 `(classid::bigint << 32) \| objid::bigint`，而 `hashtext` 返回有符号 int4，**约一半的 seed 是负数**。现有档位用的 seed 恰好都是正数是碰运气，不是被验证过的性质。（实测：PG 的 `<<` 回绕，负值算得对，无缺陷）|
 
-- [ ] **Step 3: 变异验证**
+- [x] **Step 2: 跑** —— 七档全 PASS，`EXIT=0`
 
-| 中和方式 | 必须变红的档 |
-|---|---|
-| `_SEED_LOCK_HELD_SQL` 的 `objsubid = 1` 去掉 | Ⓐ（两参数形式能冒充）|
-| `create_pilot_database` 的 seed 锁判定改成恒真 | Ⓑ |
+- [x] **Step 3: 变异验证**（4 条，全部由控制者亲跑亲验）
+
+| 中和方式 | 档 | 结果 |
+|---|---|---|
+| `_SEED_LOCK_HELD_SQL` 去掉 `objsubid = 1` | Ⓑb | RED |
+| `_SEED_LOCK_HELD_SQL` 去掉 `mode = 'ExclusiveLock'` | Ⓑd | RED |
+| 键派生改成 `abs(hashtext(...))` | Ⓑc | RED |
+| `create_pilot_database` 的 seed 锁判定恒真 | Ⓑ | RED |
+
+> ⚠️ **计划原写的「去掉 `objsubid = 1` → Ⓐ 变红」是错的**：Ⓐ 验的是
+> `pg_try_advisory_lock` 的**平台行为**，`_SEED_LOCK_HELD_SQL` 根本没参与，
+> 那条变异打不红 Ⓐ。真正被它证伪的是新加的 Ⓑb。
+>
+> ⚠️ **Ⓐ / Ⓐb / Ⓒ 没有对应的生产守卫可中和**（如实登记）：本模块**从不取锁**
+> （spec O1-F4），它只验锁是否被持有。这三档验的是 PostgreSQL 的平台行为
+> ——「try 版立刻返回」「锁是每集群的」「会话级锁随连接断开释放」——
+> 而这三条正是 spec §4 整套互斥设计的**地基假设**，属于
+> 「设计地基靠基础设施行为 → 必须在真环境验，不能用假件」那一族。
+> **不为它们编一个够得到的变异**：编出来的只会是假覆盖。
 
 - [ ] **Step 4: 提交**
 
