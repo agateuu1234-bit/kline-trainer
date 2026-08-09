@@ -2492,12 +2492,32 @@ _OBJECT_IN_USE_SQLSTATE = "55006"
 # ⚠️ **诚实边界**：它挡不住另一个**超级用户**。但超级用户本来就能直接 DROP 任何库，
 #    这条护栏防的是 `pg_restore --create`、应用角色、人工误操作那一类现实威胁面。
 # ⚠️ 库名不能走占位符（`ALTER DATABASE` 的库名不是可参数化位置）→ 一律 `quote_ident`。
+# ⚠️ **封锁只在能证明「封完自己还进得去」时才做**（codex 4a-2 R11-F2，high）：
+#    `datconnlimit = 0` 对**非超级用户同样生效**。一个属主 / CREATEDB 的非超级用户
+#    维护 DSN 封完之后连自己都连不进去 → 紧贴 DROP 的验空必然失败 →
+#    零对象例外这条**唯一**的残骸逃生口对这类部署直接失效（R55-F1 锁死换形态）。
+#    故先问一句再决定；问不到 / 不是超级用户就**不封**（窗口保留，如实登记）。
+_IS_SUPERUSER_SQL = "SELECT current_setting('is_superuser') = 'on'"
+
+# 封锁之前先读回**原值**，拒绝路径恢复的是它、不是写死的 −1（codex 4a-2 R11-F2）。
+# 一律恢复 −1 会把一个本工具**明确选择不销毁**的库的连接策略永久改成「无限制」。
+# ⚠️ **绑实例**（`test_every_pg_database_predicate_binds_to_an_instance` 当场抓到）：
+#    按名字读的话，授权与这次读之间同名库被删掉又重建时，读到的是**替身**的上限，
+#    随后还会把封锁/恢复施加到替身头上。取不到行 = 已经不是被授权的那个实例 → 不封。
+#    （残留：`ALTER DATABASE` 的目标只能按名字给，绑不了 oid。这条读 + DROP 前的
+#     oid 复核把它夹在中间，是这里能做到的全部。）
+_READ_CONNLIMIT_SQL = ("SELECT d.datconnlimit FROM pg_database d"
+                       " WHERE d.datname::text = $1 AND d.oid::text = $2")
+
+
 def _SEAL_CONNECTIONS_SQL(db_name: str) -> str:
     return f"ALTER DATABASE {quote_ident(db_name)} WITH CONNECTION LIMIT 0"
 
 
-def _UNSEAL_CONNECTIONS_SQL(db_name: str) -> str:
-    return f"ALTER DATABASE {quote_ident(db_name)} WITH CONNECTION LIMIT -1"
+def _RESTORE_CONNLIMIT_SQL(db_name: str, limit: int) -> str:
+    # `limit` 来自 `pg_database.datconnlimit`（int），不是调用方递进来的字符串 ——
+    # 故直接内插；库名仍走 `quote_ident`。
+    return f"ALTER DATABASE {quote_ident(db_name)} WITH CONNECTION LIMIT {int(limit)}"
 
 
 # DROP 成功之后清掉那条凭据（codex 4a-2b R4-F1）。
@@ -2507,8 +2527,26 @@ def _UNSEAL_CONNECTIONS_SQL(db_name: str) -> str:
 #    于是 `--reset` 把库删掉了却重建不了，要等 TTL 或人工清理 —— 自锁。
 # ⚠️ 谓词绑 (dbname, seed, **被授权销毁的那个 oid**)：只删本次真的销毁掉的那一行，
 #    绝不碰别人的、也绝不碰同名新实例的。
-_CLEAR_DROPPED_INTENT_SQL = ("DELETE FROM public.pilot_create_intent"
-                             " WHERE dbname = $1 AND seed = $2 AND db_oid::text = $3")
+# ⚠️ **但不能只认那个 oid**（codex 4a-2 R11-F1，high）：`db_oid` 可空，而
+#    `_INSERT_INTENT_SQL` 在 `CREATE DATABASE` **之前**写行 —— 那一刻它就是 NULL。
+#    一次失败的建库若连自己的撤回也失败（连接断 / 进程被杀），就留下一行
+#    **新鲜、未确认、db_oid = NULL** 的行。随后 `--reset` 删掉库、只按 oid 清理时
+#    NULL 匹配不上 → 该行留存 → 用**新 run_id** 重建时接管条件
+#    （同 run_id **或** 超 TTL）都不成立 → `intent_row_conflict`：
+#    **破坏性 reset 之后重建不了**，要等 TTL 或人工修。
+#    故补上「这一行指不到任何活着的同名实例」这一支 —— 它同时覆盖 NULL 与陈旧 oid。
+# ⚠️ 「指不到活实例」的判据**在 SQL 里当下求值**（与 `_DELETE_ORPHAN_INTENT_SQL` 同一条
+#    纪律）：先查后删的话，查完到删之间同名库可以被重建，于是删掉一条**新鲜有效**的凭据。
+# ⚠️ 仍然限定 `seed = $2`：seed 与 dbname 由 `derive_db_name` 一一对应，
+#    对不上的行不是本工具在这条路径上写的，不碰它才是 fail-closed。
+_CLEAR_DROPPED_INTENT_SQL = """
+DELETE FROM public.pilot_create_intent
+ WHERE dbname = $1 AND seed = $2
+   AND (db_oid::text = $3
+        OR NOT EXISTS (SELECT 1 FROM pg_database d
+                        WHERE d.datname::text = public.pilot_create_intent.dbname
+                          AND d.oid = public.pilot_create_intent.db_oid))
+"""
 
 
 async def _drop_pilot_database(maint_conn, *, connect, db_name: str, seed: str,
@@ -2583,9 +2621,28 @@ async def _drop_pilot_database(maint_conn, *, connect, db_name: str, seed: str,
 
     # 零对象例外那条来路：把【绝对空】复查**贴到 DROP 前**（codex 4a-2b R2-F1），
     # 并且**先把新连接封住**再复查（codex 4a-2 R10-F1，critical）。
-    _sealed = bool(authorization.via_empty_remnant)
-    if _sealed:
-        await maint_conn.execute(_SEAL_CONNECTIONS_SQL(db_name))
+    _sealed = False
+    _prior_limit = None
+    if authorization.via_empty_remnant:
+        # 封锁的前提是「封完本工具自己还连得进去验空」——只有超级用户不受
+        # `datconnlimit` 约束。证明不了就**不封**，而不是封了之后把自己关在门外。
+        if await maint_conn.fetchval(_IS_SUPERUSER_SQL):
+            _prior_limit = await maint_conn.fetchval(_READ_CONNLIMIT_SQL, db_name,
+                                                     authorization.db_oid)
+            if _prior_limit is None:
+                raise PilotDbBoundaryError(
+                    "target_db_replaced",
+                    f"读 {db_name!r} 的连接数上限时，被授权销毁的那个实例 "
+                    f"（oid={authorization.db_oid!r}）已经不在了 —— "
+                    f"授权之后它被删掉又重建了。绝不对替身执行封锁或 DROP")
+            await maint_conn.execute(_SEAL_CONNECTIONS_SQL(db_name))
+            _sealed = True
+        else:
+            # ⚠️ 不静默：这条路径退回到「验空与 DROP 之间有 0.7–2.2 ms 窗口」的旧行为，
+            #    操作者有权知道自己拿到的是哪一种保证。
+            print(f"[qmt_pilot] 警告：维护角色不是超级用户，跳过 {db_name!r} 的 DROP 前"
+                  f"连接封锁 —— 验空与 DROP 之间的窗口保留。"
+                  f"要拿到强保证请用超级用户的 --maintenance-dsn。", file=sys.stderr)
     try:
         if authorization.via_empty_remnant:
             # ⚠️ **封连接必须排在复查之前**：验空是一次读，读完到 `DROP DATABASE`
@@ -2640,14 +2697,16 @@ async def _drop_pilot_database(maint_conn, *, connect, db_name: str, seed: str,
             # ⚠️ 恢复失败**不许吞**：它会顶掉正在传播的原异常，而这正是应该的 ——
             #    「库被留在不可连状态」比「这次 reset 为什么被拒」更需要人立刻知道。
             #    原因链仍在 `__context__` 里，不会丢。
+            restore_to = -1 if _prior_limit is None else _prior_limit
             try:
-                await maint_conn.execute(_UNSEAL_CONNECTIONS_SQL(db_name))
+                await maint_conn.execute(_RESTORE_CONNLIMIT_SQL(db_name, restore_to))
             except Exception as unseal_exc:
                 raise PilotDbBoundaryError(
                     "connection_limit_not_restored",
                     f"{db_name!r} 的连接数上限被本次 DROP 前的封锁设成 0，"
                     f"而**恢复失败**（{unseal_exc}）——该库现在对所有非超级用户不可连。"
-                    f"请人工执行 ALTER DATABASE {db_name} WITH CONNECTION LIMIT -1。"
+                    f"请人工执行 ALTER DATABASE {db_name} WITH CONNECTION LIMIT "
+                    f"{restore_to}（封锁前的原值）。"
                     f"（本次 reset 被拒的原因见 __context__）") from unseal_exc
 
     # DROP 成功 —— 在**同一把 seed 锁下**清掉那条已经无所指的凭据（R4-F1）。

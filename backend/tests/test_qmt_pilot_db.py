@@ -193,6 +193,11 @@ class _FakeConn:
         # 三张维护表的**在场**情况（R6-F2）。默认全在。
         self.maintenance_presence = {"marker_present": True, "intent_present": True,
                                      "registry_present": True}
+        # 维护角色是不是超级用户（codex 4a-2 R11-F2）。`CONNECTION LIMIT 0` 对
+        # 非超级用户同样生效 —— 封完之后本工具自己也连不进去验空。
+        self.is_superuser = True
+        # 目标库**当前**的连接数上限。封锁之后必须恢复成**这个值**，不是写死的 -1。
+        self.datconnlimit = -1
         self.fail_connect = fail_connect
         self.closed = False
         self.executed: list[str] = []
@@ -248,6 +253,10 @@ class _FakeConn:
         if "unnest($1::text[])" in query:
             # 「schema.sql 声明的表都建出来了吗」（O4-R19-C1）。默认全在。
             return len(args[0]) if self.declared_tables_all_present else 0
+        if "is_superuser" in query:
+            return self.is_superuser
+        if "datconnlimit" in query:
+            return self.datconnlimit
         if "to_regclass('public.pilot_meta') IS NOT NULL" in query:
             return self.meta_table_present
         if "EXISTS (SELECT 1 FROM public.pilot_database_registry" in query:
@@ -4578,6 +4587,63 @@ def test_empty_remnant_drop_restores_connection_limit_when_refused():
         f"拒绝之后没有恢复连接限制，库被留成非超级用户不可连：{limits}"
     assert not any(q.upper().startswith("DROP DATABASE") for q in maint.executed), \
         "复查判不空却还是 DROP 了"
+
+
+def test_empty_remnant_drop_restores_the_databases_prior_connection_limit():
+    """恢复必须还原**原值**，不能写死 −1（codex 4a-2 R11-F2，high）。
+
+    封锁是 `CONNECTION LIMIT 0`，而拒绝路径若一律恢复成 −1，就把一个本工具
+    **明确选择不销毁**的库的连接策略永久改成了「无限制」——
+    那是在一次「我们决定不动它」的操作里，悄悄改掉了它的配置。
+    """
+    maint = _DropMaint()
+    maint.datconnlimit = 7                     # 库原本有一个非默认上限
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_drop(maint, target=_EmptyOnProbe(non_empty_probes=(1,)),
+                          via_remnant=True))
+    assert ei.value.code == "not_owned"
+    limits = _connlimit_ops(maint)
+    assert len(limits) == 2, f"应当是「封 0 → 恢复」两条：{limits}"
+    assert limits[1].rsplit("LIMIT", 1)[1].strip() == "7", \
+        f"恢复的不是原值 7，而是 {limits[1]!r} —— 库的连接策略被这次操作改掉了"
+
+
+def test_empty_remnant_drop_skips_sealing_when_maintenance_role_is_not_superuser():
+    """非超级用户维护角色下**不封连接**（codex 4a-2 R11-F2，high）。
+
+    `datconnlimit = 0` 对非超级用户同样生效 —— 一个属主 / CREATEDB 的非超级用户
+    维护 DSN 封完之后**连自己都进不去**，紧贴 DROP 的验空必然失败，
+    零对象例外这条**唯一**的残骸逃生口对这类部署直接失效（R55-F1 锁死换形态）。
+    故封锁只在能证明「封完自己还进得去」时才做。
+    """
+    maint = _DropMaint()
+    maint.is_superuser = False
+    asyncio.run(_drop(maint, target=_EmptyOnProbe(), via_remnant=True))
+    assert _connlimit_ops(maint) == [], \
+        f"非超级用户下仍然封了连接，封完就再也验不了空：{_connlimit_ops(maint)}"
+    assert any(q.upper().startswith("DROP DATABASE") for q in maint.executed), \
+        "跳过封锁之后连 DROP 都不做了 —— 逃生口被堵死"
+
+
+def test_dropped_intent_cleanup_is_not_bound_to_the_destroyed_oid_alone():
+    """DROP 之后的凭据清理**不能只认被销毁的那个 oid**（codex 4a-2 R11-F1，high）。
+
+    `pilot_create_intent.db_oid` 可空，而 `_INSERT_INTENT_SQL` 在 `CREATE DATABASE`
+    **之前**写行 —— 那一刻它就是 NULL。若那次建库失败、而它自己的清理也失败
+    （连接断 / 进程被杀），就留下一行**新鲜、未确认、db_oid = NULL** 的行。
+    随后 `--reset` 删掉库，只按 `db_oid = <被销毁的 oid>` 清理时 NULL 匹配不上 →
+    该行留存 → 用**新 run_id** 重建时接管条件（同 run_id 或超 TTL）都不成立 →
+    `intent_row_conflict`：**破坏性 reset 之后重建不了**，要等 TTL 或人工。
+
+    ⚠️ 这是一条**结构守卫**：SQL 的真语义在假件层评估不了（假件不执行 SQL）。
+       真语义由 L2 真-PG 档 Ⓔ 坐实（留一行 NULL-oid 的新鲜行 → reset → 用新
+       run_id 重建**必须成功**）。这里只保证「谓词没有退回成只认 oid」这件事
+       在没有 PostgreSQL 的 CI 上也拦得住。
+    """
+    import qmt_pilot_db as m
+    sql = m._CLEAR_DROPPED_INTENT_SQL
+    assert "pg_database" in sql and "NOT EXISTS" in sql.upper(), (
+        f"清理谓词只按 db_oid 匹配，NULL / 陈旧 oid 的行会留下来并把重建卡死：{sql!r}")
 
 
 def _drop(maint, *, target=None, via_remnant=False, **over):

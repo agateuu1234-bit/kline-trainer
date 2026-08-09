@@ -117,6 +117,7 @@ _LIFECYCLE_DBS = (
     "kline_pilot_lifecycle_r25",
     "kline_pilot_lifecycle_r26",
     "kline_pilot_lifecycle_r27",
+    "kline_pilot_lifecycle_r27b",
     "kline_pilot_lifecycle_r28",
     "kline_pilot_lifecycle_r29",
     "kline_pilot_lifecycle_r30",
@@ -139,7 +140,7 @@ _UNRELATED_DB = "zzqmtverify_unrelated"
 # ⚠️ 少一档即失败 —— **「静默没跑」与「通过了」在输出上完全一样**，
 #    这与本仓反复栽过的「空转的检查比没有检查更糟」是同一族。
 _EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑤", "⑤b", "⑥", "⑦", "⑧", "⑨", "⑨b", "⑨c", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑰b", "⑱", "⑲", "⑳", "⑳b", "㉑",
-                       "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉘", "㉙", "㉚", "㉛", "㉜", "㉜b")
+                       "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉗b", "㉘", "㉙", "㉚", "㉛", "㉜", "㉜b")
 
 
 async def _connect(dsn: str) -> asyncpg.Connection:
@@ -1186,6 +1187,59 @@ async def main() -> int:
     finally:
         await maint.close()
     await harness.drop_database(base_dsn, db27)
+
+    # ── ㉗b DROP 之后必须连**指不到活实例**的凭据一起清（codex 4a-2 R11-F1）──
+    #    `pilot_create_intent.db_oid` 可空，而 intent 行写在 `CREATE DATABASE` **之前**
+    #    —— 那一刻它就是 NULL。一次失败的建库若连自己的撤回也失败（连接断/进程被杀），
+    #    就留下一行**新鲜、未确认、db_oid = NULL** 的行。
+    #    只按「被销毁的那个 oid」清理时 NULL 匹配不上 → 该行留存 →
+    #    用**新 run_id** 重建时接管条件（同 run_id 或超 TTL）都不成立 →
+    #    `intent_row_conflict`：**破坏性 reset 之后重建不了**，要等 TTL 或人工。
+    #    ⚠️ ㉗ 造的是零对象例外那条路的残骸凭据（db_oid 绑对），证伪不了这一档。
+    scenario("㉗b")
+    print("㉗b reset 之后连 db_oid=NULL 的陈旧凭据也要清掉，否则重建被卡死")
+    seed27b = "lifecycle_r27b"
+    db27b = await _build(base_dsn, seed27b, connect_peer)
+    maint = await _maintenance(base_dsn, seed=seed27b)
+    try:
+        # 建库成功时自己的凭据已被清掉；这里注入「上一次失败的建库留下的」那种行：
+        # 新鲜、未确认、db_oid = NULL、**且 run_id 与后面的重建不同**。
+        await maint.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db27b)
+        await maint.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+            " VALUES ($1, $2, $3, $4, false, NULL)",
+            db27b, seed27b, _CREATED_AT, f"lifecycle-{seed27b}-crashed")
+        stale = await maint.fetchrow(
+            "SELECT create_confirmed, db_oid IS NULL AS oid_is_null"
+            "  FROM public.pilot_create_intent WHERE dbname = $1", db27b)
+        check(stale is not None and not stale["create_confirmed"] and stale["oid_is_null"],
+              "㉗b 前置：陈旧的「未确认 + db_oid 为 NULL」凭据已就位",
+              f"实得 {dict(stale) if stale else None}")
+        try:
+            await reset_pilot_database(maint, connect=connect_peer, db_name=db27b,
+                                       seed=seed27b, **_RESET_ARGS)
+        except Exception as exc:
+            check(False, "㉗b 前置：reset 必须成功", f"抛了：{type(exc).__name__}: {exc}")
+        left = await maint.fetchval(
+            "SELECT count(*) FROM public.pilot_create_intent WHERE dbname = $1", db27b)
+        check(left == 0,
+              "㉗b DROP 之后那条 db_oid=NULL 的陈旧凭据也被清掉了",
+              f"事后仍有 {left} 条 —— 它会把重建卡成 intent_row_conflict")
+        # 要害：紧接着用**新 run_id** 重建必须成功。
+        try:
+            await create_pilot_database(maint, connect=connect_peer, db_name=db27b,
+                                        seed=seed27b,
+                                        run_id=f"lifecycle-{seed27b}-rebuild",
+                                        **_BUILD_ARGS)
+            check(True, "㉗b 紧接着用**新 run_id** 重建成功（没被陈旧凭据卡死）")
+        except Exception as exc:
+            check(False, "㉗b 紧接着用**新 run_id** 重建成功（没被陈旧凭据卡死）",
+                  f"重建抛了：{type(exc).__name__}: {exc}")
+    finally:
+        await maint.close()
+    await harness.drop_database(base_dsn, db27b)
 
     # ── ㉘ 零对象例外的【绝对空】复查必须**紧贴 DROP**（2b R2-F1）────────
     #    授权理由就是「这个库当时是空的」，而那是一个**会过期的事实**。

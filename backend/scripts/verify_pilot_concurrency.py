@@ -475,6 +475,12 @@ async def main() -> int:
             f"CREATE ROLE {quote_ident(_PLAIN_ROLE)} LOGIN PASSWORD '{_PLAIN_PASSWORD}'")
         await conn_m2.execute("DROP DATABASE IF EXISTS " + quote_ident(db_db))
         await conn_m2.execute("CREATE DATABASE " + quote_ident(db_db))
+        # ⚠️ 给它一个**非默认**的连接上限（codex 4a-2 R11-F2）：
+        #    此前这一档只断言「恢复成 −1」，于是「一律写死 −1」照样绿 ——
+        #    而那会把一个本工具**明确选择不销毁**的库的连接策略永久改成「无限制」。
+        #    判据必须是「还原成**原来那个值**」。
+        await conn_m2.execute(
+            f"ALTER DATABASE {quote_ident(db_db)} WITH CONNECTION LIMIT 7")
         await conn_m2.execute(
             "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db_db)
         await conn_m2.execute(
@@ -517,9 +523,10 @@ async def main() -> int:
               f"连目标库 {squat['n']} 次，注入={squat['did']}")
         limit = await conn_m2.fetchval(
             "SELECT datconnlimit FROM pg_database WHERE datname = $1", db_db)
-        check(limit == -1,
-              "Ⓓb 拒绝之后连接限制**已恢复**（datconnlimit = -1）",
-              f"实得 datconnlimit={limit}（0 = 库被留成非超级用户不可连）")
+        check(limit == 7,
+              "Ⓓb 拒绝之后连接限制恢复成了**原来那个值 7**（不是写死的 −1）",
+              f"实得 datconnlimit={limit}"
+              f"（0 = 库被留成非超级用户不可连；−1 = 原有的连接策略被这次操作抹掉了）")
         # 端到端再证一次：普通角色现在真的连得进去。
         plain2 = harness.db_dsn(
             re.sub(r"//[^:/@]+:[^@]*@", f"//{_PLAIN_ROLE}:{_PLAIN_PASSWORD}@", base_dsn),
