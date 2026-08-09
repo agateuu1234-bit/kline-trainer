@@ -3455,6 +3455,109 @@ def _reset(maint, target, **over):
         maint, connect=_connector({"kline_pilot_probe": target}), **kw)
 
 
+@pytest.mark.parametrize("bad,label", [
+    ({"output_dir": None}, "output_dir 缺失 —— 会在 _binding_matches 的 .rstrip 上抛裸 AttributeError"),
+    ({"output_dir": ""}, "output_dir 空串 —— rstrip 之后仍是空，会与畸形 pilot_meta 的空绑定判成相符"),
+    ({"output_dir": "/"}, "output_dir 只有斜杠 —— 同上，去尾斜杠之后是空绑定"),
+    ({"output_dir": "relative/path"}, "output_dir 不是绝对路径"),
+    ({"export_log_sha256": None}, "export_log_sha256 缺失"),
+    ({"export_log_sha256": "nothex"}, "export_log_sha256 不是 64 位小写十六进制"),
+])
+@pytest.mark.parametrize("entry", ["reuse", "reset", "authorize"])
+def test_every_public_reset_or_reuse_entry_validates_the_binding_scalars(entry, bad, label):
+    """**复用/销毁两条路都要先验调用方标量**（codex 4a-2 R13-F1，high）。
+
+    建库路径早就有 `assert_identity_scalars`，而它**全模块只有那一个调用点** ——
+    reset / 复用把调用方递进来的 `export_log_sha256` / `output_dir` **原样**
+    送进破坏性闸：
+      · `output_dir=None` → `_binding_matches` 的 `.rstrip('/')` 抛**裸 AttributeError**，
+        而且是在集群闸与目标库连接**都做完之后**（spec §9-1w 明令禁止把一次守卫
+        记成 FAIL_INFRASTRUCTURE）；
+      · `output_dir=''` / `'/'` → 去尾斜杠后是空串，遇到 `output_dir` 为空的**畸形
+        pilot_meta** 就判成「绑定相符」→ 在一个不该匹配的库上放行销毁授权。
+    这与「缺失/畸形的调用方标量一律 fail-closed」的契约不符，而这条路径的下一步
+    是不可逆的 `DROP DATABASE`。
+    """
+    maint = _DropMaint() if entry == "authorize" else _FakeConn(databases=["kline_pilot_probe"])
+    target = _FakeConn(meta_rows=_full_meta_rows())
+    run = {"reuse": _reuse, "reset": _reset, "authorize": _authorize}[entry]
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(run(maint, target, **bad))
+    assert ei.value.code == "identity_scalar_invalid", f"{entry} / {label}"
+
+
+@pytest.mark.parametrize("entry", ["reuse", "reset", "authorize"])
+def test_binding_scalar_guard_runs_before_touching_the_target_database(entry):
+    """**在碰目标库之前**就拦下（codex R13-F1 的要害之一）。
+
+    验在后面等于「先连进去、先跑集群闸、再发现调用方给的是垃圾」——
+    副作用与诊断都错位。判据：拒绝时**一次都没连过目标库**。
+    """
+    connects = []
+
+    async def _counting(dbname):
+        connects.append(dbname)
+        raise AssertionError("不该连目标库 —— 标量应该在这之前就被拦下")
+
+    maint = _DropMaint() if entry == "authorize" else _FakeConn(databases=["kline_pilot_probe"])
+    kw = {"db_name": "kline_pilot_probe", "seed": "probe",
+          "export_log_sha256": "a" * 64, "output_dir": None}
+    if entry == "reuse":
+        kw.update(schema_sha256="s", pilot_schema_sha256="p")
+        call = assert_db_allowed_for_reuse(maint, connect=_counting, **kw)
+    elif entry == "reset":
+        call = assert_db_allowed_for_reset(maint, connect=_counting,
+                                           reset_foreign_token=None, **kw)
+    else:
+        call = authorize_reset(maint, connect=_counting, reset_foreign_token=None, **kw)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(call)
+    assert ei.value.code == "identity_scalar_invalid"
+    assert connects == [], f"标量还没验就连了目标库：{connects}"
+
+
+def test_binding_scalar_guard_is_reachable_from_every_entry_that_takes_them():
+    """**机械守卫**：凡是签名里带这两个标量的 public 入口，都必须验它们。
+
+    「记得在新入口也验一遍」是纪律，而纪律在这套代码里已经失效过十几次。
+    这一条让「新加一个收这两个标量的 public 入口却忘了验」当场变红。
+    """
+    import ast
+    import inspect
+    import qmt_pilot_db as m
+    tree = ast.parse(inspect.getsource(m))
+
+    def _entries_taking_binding_scalars():
+        # ⚠️ 只扫**会碰数据库的**（async）public 入口。判据是「性质」不是「点名」：
+        #    `assert_binding_scalars` 自己是那条守卫；`derive_confirm_token` 是**纯派生**，
+        #    它的输入来自库里的 pilot_meta（已过闸 0− 的非空/形状判据），
+        #    不是调用方递进来的，也不授权任何东西 —— 两者都不属于本判据要覆盖的族。
+        found = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            if node.name.startswith("_"):
+                continue                  # 私有的由 public 入口负责
+            names = ({a.arg for a in node.args.args}
+                     | {a.arg for a in node.args.kwonlyargs})
+            if {"export_log_sha256", "output_dir"} <= names:
+                found.append(node)
+        return found
+
+    entries = _entries_taking_binding_scalars()
+    # ⚠️ **反向自检必须走同一个扫描器**：上一版把扫描逻辑又抄了一遍去自检，
+    #    于是破坏主循环的判据时自检照样绿 —— 自检守的是副本不是本体（变异当场抓到）。
+    assert entries, "扫描器一个入口都没找到 —— 它已经失去判别力，下面那条会恒真"
+    guards = {"assert_binding_scalars", "assert_identity_scalars"}
+    missing = [n.name for n in entries
+               if not ({c.func.id for c in ast.walk(n)
+                        if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+                       & guards)]
+    assert not missing, (
+        f"这些 public 入口收了 export_log_sha256/output_dir 却没验它们：{missing}"
+        f" —— 破坏性路径上的调用方标量必须 fail-closed")
+
+
 # ── 闸 0 归属 ──────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("over,label", [

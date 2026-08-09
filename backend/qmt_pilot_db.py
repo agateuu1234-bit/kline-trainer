@@ -192,14 +192,25 @@ _HEX64_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 _CREATED_AT_RE = re.compile(r"\A\d{8}T\d{12}Z\Z")
 
 
-def assert_identity_scalars(export_log_sha256, output_dir, created_at) -> None:
-    """三个**身份/绑定**标量必须在任何副作用之前验掉（O4-R32-C1）。
+def assert_binding_scalars(export_log_sha256, output_dir) -> None:
+    """**绑定**标量（闸 0b 的两个）必须在任何副作用之前验掉。
 
     此前它们一路裸奔到 `values` 才被用上：`output_dir=None` 直到 `CREATE DATABASE` /
     确认 / 登记**都做完之后**才在 `.rstrip('/')` 上崩掉；空串或 `"/"` 则会被安静地
-    存成一个空绑定。而这三者正是 `confirm_token` 的原像与 `--reset-foreign` 的绑定依据 ——
+    存成一个空绑定。而这两者正是 `confirm_token` 的原像与 `--reset-foreign` 的绑定依据 ——
     存进去的是垃圾，令牌就派生不出来，库也认不回自己。
-    与本模块「缺失/畸形的调用方标量一律 fail-closed」的契约一致：**在写 intent 行之前**拦下。
+
+    ⚠️ **复用/销毁两条路也必须验**（codex 4a-2 R13-F1，high）：此前整套校验
+       **只有建库路径调**，而 reset / 复用把调用方递进来的这两个值**原样**送进
+       破坏性闸 ——
+         · `output_dir=None` → `_binding_matches` 的 `.rstrip('/')` 抛**裸 AttributeError**，
+           且是在集群闸与目标库连接**都做完之后**（spec §9-1w 明令禁止把一次守卫
+           记成 FAIL_INFRASTRUCTURE）；
+         · `output_dir=''` / `'/'` → 去尾斜杠后是空串，遇到 `output_dir` 为空的
+           **畸形 pilot_meta** 就判成「绑定相符」→ 在一个不该匹配的库上放行销毁授权。
+       而这条路径的下一步是不可逆的 `DROP DATABASE`。
+    ⚠️ 抽成独立函数是因为 reset / 复用**拿不到 `created_at`**（它只在建库时由调用方给）。
+       两处各写一份校验必然漂移 —— 本仓记录在案的毛病。
     """
     if not isinstance(export_log_sha256, str) or not _HEX64_RE.match(export_log_sha256):
         raise PilotDbBoundaryError(
@@ -213,6 +224,15 @@ def assert_identity_scalars(export_log_sha256, output_dir, created_at) -> None:
             "identity_scalar_invalid",
             f"output_dir 必须是**绝对路径**且去掉尾斜杠后非空，实得 {output_dir!r}——"
             f"空绑定会让 confirm_token 派生不出来、库认不回自己")
+
+
+def assert_identity_scalars(export_log_sha256, output_dir, created_at) -> None:
+    """建库路径的三个**身份/绑定**标量（绑定两个 + `created_at`）。
+
+    绑定那两个复用 `assert_binding_scalars` —— 复用/销毁路径也要验它们，
+    而那两条路拿不到 `created_at`。
+    """
+    assert_binding_scalars(export_log_sha256, output_dir)
     if not isinstance(created_at, str) or not _CREATED_AT_RE.match(created_at):
         raise PilotDbBoundaryError(
             "identity_scalar_invalid",
@@ -2190,6 +2210,9 @@ async def assert_db_allowed_for_reuse(
        `schema_fingerprint_mismatch` → `db_state_initializing` 永远产不出来，
        恢复指引也从「用 --reset 重建」错成「schema 漂移」。
     """
+    # ⚠️ 调用方标量先验（codex 4a-2 R13-F1）：它们**在碰目标库之前**就要 fail-closed，
+    #    否则先连进去、先跑集群闸、最后才在 `.rstrip('/')` 上抛裸 AttributeError。
+    assert_binding_scalars(export_log_sha256, output_dir)
     _assert_seed_db_name(db_name, seed)
     # ⚠️ **集群闸在每个 public 入口各自机器强制**（codex 4a-2a R6-F2）：
     #    它证明的是「这台集群是给 pilot 用的一次性环境」—— 没有它，一次接线失误就能
@@ -2271,6 +2294,8 @@ async def assert_db_allowed_for_reset(
        陈旧 schema 的库连 reset 都做不了，而 reset 是它唯一的出路。
        同理**不查 state、不查九键齐全**：崩在 apply schema 之前的库只有阶段 1 的 7 键。
     """
+    # 同上（R13-F1）：破坏性路径上的调用方标量必须先 fail-closed。
+    assert_binding_scalars(export_log_sha256, output_dir)
     _assert_seed_db_name(db_name, seed)
     # ⚠️ **先钉 search_path，再验锁**（codex 4a-2a R5-F1 —— R4 加这条检查时我把它放在了
     #    任何钉桩之前）：`_SEED_LOCK_HELD_SQL` 用的是不限定的 `pg_locks` /
@@ -3074,6 +3099,9 @@ async def authorize_reset(
        `DROP DATABASE`。`create_pilot_database` 早就为同一条理由把它下沉进函数里了。
        重复调用的代价只是几条只读查询，远小于「漏掉一次」的代价。
     """
+    # 同上（R13-F1）：**排在集群闸之前** —— 零对象例外那条路根本不用这两个标量，
+    # 若不在入口验，坏调用方状态下也能一路走到 DROP 授权。
+    assert_binding_scalars(export_log_sha256, output_dir)
     await assert_cluster_allowed(maint_conn, connect=connect, target_db=db_name)
     remnant_oid = await try_empty_remnant_exception(
         maint_conn, connect=connect, db_name=db_name, seed=seed)
@@ -3100,6 +3128,9 @@ async def reset_pilot_database(
        `DROP DATABASE`。本模块对「破坏性入口自己强制自己的护栏」这条已经贯彻到
        `create_pilot_database` 与 `authorize_reset`，这里是同一条原则的最后一处落点。
     """
+    # 同上（R13-F1）：**每个 public 入口各自机器强制**，不靠「authorize_reset 会先验」
+    # 这条调用方纪律 —— 那正是本模块反复修的同一形态。
+    assert_binding_scalars(export_log_sha256, output_dir)
     authorization = await authorize_reset(
         maint_conn, connect=connect, db_name=db_name, seed=seed,
         export_log_sha256=export_log_sha256, output_dir=output_dir,
