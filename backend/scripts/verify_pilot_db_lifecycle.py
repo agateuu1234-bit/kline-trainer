@@ -42,7 +42,8 @@ import asyncpg
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import _pilot_verify_harness as harness  # noqa: E402
-from qmt_pilot_db import (MARKER_PURPOSE, PilotClusterBoundaryError,  # noqa: E402
+from qmt_pilot_db import (MARKER_PURPOSE, PILOT_META_KEYS,  # noqa: E402
+                          PilotClusterBoundaryError,
                           PilotDbBoundaryError, assert_cluster_allowed,
                           assert_db_allowed_for_reuse, authorize_reset,
                           create_pilot_database, init_cluster_marker,
@@ -95,6 +96,13 @@ _LIFECYCLE_DBS = (
     "kline_pilot_lifecycle_g9c",
     "kline_pilot_lifecycle_t10",
     "kline_pilot_lifecycle_t11",
+    "kline_pilot_lifecycle_s15",
+    "kline_pilot_lifecycle_r17b",
+    "kline_pilot_lifecycle_x18",
+    "kline_pilot_lifecycle_x19",
+    "kline_pilot_lifecycle_x20",
+    "kline_pilot_lifecycle_x20b",
+    "kline_pilot_lifecycle_x21",
 )
 
 # 本脚本在维护库里造的临时对象。前缀 `zzqmtverify_` 表明归属（harness 自检钉住）。
@@ -110,7 +118,7 @@ _UNRELATED_DB = "zzqmtverify_unrelated"
 # 验收闸的**完整性清单**：收尾核对每一档都真的跑过。
 # ⚠️ 少一档即失败 —— **「静默没跑」与「通过了」在输出上完全一样**，
 #    这与本仓反复栽过的「空转的检查比没有检查更糟」是同一族。
-_EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑨b", "⑨c", "⑩", "⑪", "⑫", "⑬", "⑭")
+_EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑨b", "⑨c", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑰b", "⑱", "⑲", "⑳", "⑳b", "㉑")
 
 
 async def _connect(dsn: str) -> asyncpg.Connection:
@@ -702,6 +710,158 @@ async def main() -> int:
     finally:
         await maint.close()
     await harness.drop_database(base_dsn, db11)
+
+
+    # ── ⑮⑯⑰ state 流转 + initializing **两向** ──────────────────────────
+    #    ⚠️ 只验 state 的流转与复用/reset 两个方向 ——
+    #       **建库两阶段的崩溃恢复归 `verify_pilot_two_phase_create.py`，本脚本不重复**
+    #       （spec §6.2 的分工硬约束）。
+    scenario("⑮")
+    print("⑮ 正常建库跑完 → state=ready 且九键齐全")
+    seed15 = "lifecycle_s15"
+    db15 = await _build(base_dsn, seed15, connect_peer)
+    peer = await asyncpg.connect(harness.db_dsn(base_dsn, db15))
+    try:
+        meta15 = {r["key"]: r["value"] for r in
+                  await peer.fetch("SELECT key, value FROM public.pilot_meta")}
+    finally:
+        await peer.close()
+    check(meta15.get("state") == "ready", "⑮ 跑完之后 state=ready",
+          f"实得 {meta15.get('state')!r}")
+    missing15 = [k for k in PILOT_META_KEYS if k not in meta15]
+    check(not missing15, "⑮ pilot_meta 九键齐全", f"缺 {missing15}")
+
+    scenario("⑯")
+    print("⑯ state=initializing 走复用 → 必须报 db_state_initializing")
+    # ⚠️ 判据是**取到哪个码**，不只是「拒了」：state 必须排在闸 1（指纹）**之前**求值，
+    #    否则闸 1 会先撞「值不符」并报 schema_fingerprint_mismatch，
+    #    于是 db_state_initializing 永远产不出来、恢复指引也从「用 --reset 重建」
+    #    错成「schema 漂移」（spec O4-F8）。
+    # ⚠️ 必须造成**真正的阶段-1 崩溃形态**，不能只把 `state` 翻回去：
+    #    在一个跑完的库上单翻 `state`，`schema_sha256`/`contract_version` 仍然相符，
+    #    于是把 state 判定挪到闸 1 之后**这一档照样绿** —— 注释宣称在测次序，
+    #    夹具却观测不到次序（实测：该变异一度存活）。
+    #    spec O4-F8 的论证前提逐字是「阶段 1 只写 7 个键、schema_sha256/
+    #    contract_version 尚未写入」，故把阶段 2 的两个键**删掉**才是这一档的真身。
+    await _in_db(base_dsn, db15,
+                 "UPDATE public.pilot_meta SET value = 'initializing' WHERE key = 'state'",
+                 "DELETE FROM public.pilot_meta"
+                 " WHERE key IN ('schema_sha256', 'contract_version')")
+    maint = await _maintenance(base_dsn, seed=seed15)
+    try:
+        try:
+            await assert_db_allowed_for_reuse(
+                maint, connect=connect_peer, db_name=db15, seed=seed15, **_REUSE_ARGS)
+            check(False, "⑯ initializing 必须拒绝复用", "竟然放行了")
+        except PilotDbBoundaryError as exc:
+            check(exc.code == "db_state_initializing",
+                  "⑯ initializing → db_state_initializing（**不是**指纹码）",
+                  f"实得 {exc.code}")
+    finally:
+        await maint.close()
+
+    scenario("⑰")
+    print("⑰ 反向钉：同一个 initializing 库走 --reset → 必须 DROP + 重建")
+    # spec R55-F1：--reset 时归属闸与绑定闸所需的键在阶段 1 就已写入，
+    # 故它**能被正常清掉重来**。把 state 判定塞进 DROP 路径就是那个锁死。
+    from qmt_pilot_db import reset_pilot_database
+    maint = await _maintenance(base_dsn, seed=seed15)
+    try:
+        try:
+            await reset_pilot_database(maint, connect=connect_peer, db_name=db15,
+                                       seed=seed15, **_RESET_ARGS)
+        except Exception as exc:
+            check(False, "⑰ initializing 的库必须能被 --reset 清掉",
+                  f"竟然被拒：{type(exc).__name__}: {exc}")
+        else:
+            check(not await _database_exists(maint, db15),
+                  "⑰ initializing 的库真的被 DROP 掉了")
+    finally:
+        await maint.close()
+    try:
+        await _build(base_dsn, seed15, connect_peer)
+    except Exception as exc:
+        check(False, "⑰ DROP 之后能正常重建", f"重建抛了：{type(exc).__name__}: {exc}")
+    else:
+        conn = await _connect(base_dsn)
+        try:
+            check(await _database_exists(conn, db15), "⑰ DROP 之后能正常重建")
+        finally:
+            await conn.close()
+    await harness.drop_database(base_dsn, db15)
+
+    # ── ⑰b 健康 ready 库：整条复用闸**零异常全过** ──────────────────────
+    #    ⚠️ 这一档是本脚本**唯一**断言「放行」的复用档，而它是刚性必需的：
+    #       其余每一档都断言「拒了」，于是一条**恒抛**的闸在每一档看起来都在正常工作。
+    #       实测坐实过 —— `_BUSINESS_STRUCTURE_SQL` 里 `array_agg(a.attname)` 出来是
+    #       `name[]`、右边字面量是 `text[]`，PostgreSQL 无此操作符，该查询在**任何**库上
+    #       都抛，闸 2 的业务表五组判据于是从未成功执行过一次，全兜成
+    #       `target_db_unreadable`。host 层测不到（`_FakeConn` 按子串派发预置字典，
+    #       SQL 文本一次都没送进 PG），只有真 PG 上一次**成功**的复用能证伪它。
+    scenario("⑰b")
+    print("⑰b 健康 ready 库 → 整条复用闸零异常全过（闸 2 的每条查询都真跑过）")
+    db17b = await _build(base_dsn, "lifecycle_r17b", connect_peer)
+    maint = await _maintenance(base_dsn, seed="lifecycle_r17b")
+    try:
+        try:
+            await assert_db_allowed_for_reuse(
+                maint, connect=connect_peer, db_name=db17b,
+                seed="lifecycle_r17b", **_REUSE_ARGS)
+            check(True, "⑰b 健康库复用被放行")
+        except PilotDbBoundaryError as exc:
+            check(False, "⑰b 健康库复用被放行", f"竟然拒了：{exc.code}：{exc}")
+    finally:
+        await maint.close()
+    await harness.drop_database(base_dsn, db17b)
+
+    # ── ⑱⑲⑳㉑ 陈旧库四件套 fail-closed（spec §6.2 逐字）────────────────
+    #    ⚠️ 四档都断言**取到的是 `structure_mismatch`**，不只是「拒了」——
+    #       重叠判据下取到别的码说明闸的次序错了。
+    for tag, seed, label, damage in (
+        ("⑱", "lifecycle_x18", "OHLC 仍是 DECIMAL", (
+            "ALTER TABLE public.klines ALTER COLUMN open  TYPE DECIMAL(10,4)",
+            "ALTER TABLE public.klines ALTER COLUMN high  TYPE DECIMAL(10,4)",
+            "ALTER TABLE public.klines ALTER COLUMN low   TYPE DECIMAL(10,4)",
+            "ALTER TABLE public.klines ALTER COLUMN close TYPE DECIMAL(10,4)",
+        )),
+        ("⑲", "lifecycle_x19", "file_path 是 VARCHAR", (
+            "ALTER TABLE public.training_sets ALTER COLUMN file_path TYPE VARCHAR(255)",
+        )),
+        ("⑳", "lifecycle_x20", "缺 uq_stock_start", (
+            "ALTER TABLE public.training_sets DROP CONSTRAINT uq_stock_start",
+        )),
+        # ⚠️ ⑳ 单独证伪不了 `uq_stock_start_columns_ok`：约束整个没了时
+        #    `uq_stock_start_present` 也为假，两条判据互相遮蔽。而 codex 4a-2a R1 加
+        #    `columns_ok` 针对的正是**同名但换了列**——名字在、列错了，`present` 为真。
+        #    没有这一档，把 `columns_ok` 删掉整套档位照样全绿。
+        ("⑳b", "lifecycle_x20b", "uq_stock_start 同名但换了列", (
+            "ALTER TABLE public.training_sets DROP CONSTRAINT uq_stock_start",
+            "ALTER TABLE public.training_sets"
+            " ADD CONSTRAINT uq_stock_start UNIQUE (stock_code, file_path)",
+        )),
+        ("㉑", "lifecycle_x21", "缺 content_hash 列", (
+            "ALTER TABLE public.training_sets DROP COLUMN content_hash",
+        )),
+    ):
+        scenario(tag)
+        print(f"{tag} 陈旧库：{label}")
+        dbname = await _build(base_dsn, seed, connect_peer)
+        await _in_db(base_dsn, dbname, *damage)
+        maint = await _maintenance(base_dsn, seed=seed)
+        try:
+            try:
+                await assert_db_allowed_for_reuse(
+                    maint, connect=connect_peer, db_name=dbname, seed=seed, **_REUSE_ARGS)
+                check(False, f"{tag} 结构坏掉必须拒绝复用", "竟然放行了")
+            except PilotDbBoundaryError as exc:
+                check(exc.code == "structure_mismatch",
+                      f"{tag} {label} → structure_mismatch",
+                      f"实得 {exc.code}：{exc}")
+            check(await _database_exists(maint, dbname),
+                  f"{tag} 拒绝之后目标库仍然存在（DROP 从未执行）")
+        finally:
+            await maint.close()
+        await harness.drop_database(base_dsn, dbname)
 
     # ── 收尾 ────────────────────────────────────────────────────────────
     conn = await _connect(base_dsn)

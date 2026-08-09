@@ -2106,10 +2106,16 @@ SELECT
   -- ⚠️ **名字对不代表列对**（codex 4a-2a R1）：把 uq_stock_start 删掉、用同名但
   --    不同列重建，上一条照样为真 —— 而 already_done 与写入去重整个建立在
   --    (stock_code, start_datetime) 这一对列上。
+  -- ⚠️ `attname` 的类型是 `name`，`array_agg` 出来就是 `name[]`；而右边的数组字面量是
+  --    `text[]`，**PostgreSQL 没有 `name[] = text[]` 操作符**（标量 `name = text` 有，
+  --    数组没有）。不转型的话这条不是「判假」而是**整条查询抛异常**，闸 2 于是在任何库上
+  --    都兜成 `target_db_unreadable`，业务表五组判据一次都执行不到。
+  --    host 层测不出来（`_FakeConn` 派发预置字典，SQL 文本不进 PG）——
+  --    真 PG 档 ⑰b「健康库复用被放行」是这条的判别力来源。
   EXISTS (SELECT 1 FROM pg_constraint k
            WHERE k.conrelid = to_regclass('public.training_sets')
              AND k.conname = 'uq_stock_start' AND k.contype = 'u'
-             AND (SELECT array_agg(a.attname ORDER BY a.attname)
+             AND (SELECT array_agg(a.attname::text ORDER BY a.attname::text)
                     FROM pg_attribute a
                    WHERE a.attrelid = k.conrelid AND a.attnum = ANY (k.conkey))
                  = ARRAY['start_datetime', 'stock_code'])        AS uq_stock_start_columns_ok

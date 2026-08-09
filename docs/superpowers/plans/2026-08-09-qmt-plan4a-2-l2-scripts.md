@@ -225,10 +225,23 @@ spec §6.2：「归属闸与绑定闸的**破坏性分支**（真验「目标库
 | 档 | 造什么 | 断言 |
 |---|---|---|
 | ⑮ | 正常建库跑完 | `pilot_meta.state == 'ready'` 且九键齐全 |
-| ⑯ | 手工把 `state` 改回 `'initializing'`，走**复用** | `db_state_initializing`（**不是** `schema_fingerprint_mismatch`）|
+| ⑯ | 造**真正的阶段-1 崩溃形态**：`state='initializing'` **且删掉阶段 2 的两个键**（`schema_sha256`/`contract_version`），走**复用** | `db_state_initializing`（**不是** `schema_fingerprint_mismatch`）|
+
+> ⚠️ **⑯ 的夹具最初写错了**（实施时实测发现）：在一个跑完的库上只翻 `state`，指纹仍然相符，
+> 于是「把 state 判定挪到闸 1 之后」这条变异**存活** —— 注释宣称在测次序，夹具却观测不到次序。
+> spec O4-F8 的论证前提逐字是「阶段 1 只写 7 个键」，删掉阶段 2 那两个键才是这一档的真身。
 | ⑰ **反向钉** | 同 ⑯ 的库，走 **`--reset`** | **必须 DROP + 重建成功**（R55-F1）|
 
-- [ ] **Step 2: 陈旧库四件套 fail-closed**
+- [x] **Step 1b（实施时追加）：⑰b 健康库复用**必须被放行****
+
+本脚本其余每一档都断言「拒了」，于是一条**恒抛**的闸在每一档看起来都在正常工作。
+⑰b 是唯一断言「放行」的复用档，它是刚性必需的 —— 见下面 Step 3 记录的生产缺陷。
+
+| 档 | 造什么 | 断言 |
+|---|---|---|
+| ⑰b | 正常建库跑完（零损坏）走**复用** | **零异常放行**（闸 2 的每条查询都真的在真 PG 上成功跑过）|
+
+- [x] **Step 2: 陈旧库四件套 fail-closed**
 
 spec §6.2 逐字：「OHLC 仍 `DECIMAL` / `file_path` 为 `VARCHAR` / 缺 `uq_stock_start` / 缺 `content_hash`」。
 四档各造一个**结构被改坏**的 ready 库，走复用：
@@ -238,23 +251,53 @@ spec §6.2 逐字：「OHLC 仍 `DECIMAL` / `file_path` 为 `VARCHAR` / 缺 `uq_
 | ⑱ | `ALTER TABLE klines ALTER COLUMN open TYPE DECIMAL(10,4)` 等四列 | `structure_mismatch`；DROP 从未执行 |
 | ⑲ | `ALTER TABLE training_sets ALTER COLUMN file_path TYPE VARCHAR(255)` | 同上 |
 | ⑳ | `ALTER TABLE training_sets DROP CONSTRAINT uq_stock_start` | 同上 |
+| ⑳b **（实施时追加）** | 删掉 `uq_stock_start` 后**用同名但不同列重建**（`(stock_code, file_path)`）| 同上 |
 | ㉑ | `ALTER TABLE training_sets DROP COLUMN content_hash` | 同上 |
 
-⚠️ 四档都要断言 **`db_boundary_error` 取到的是 `structure_mismatch`**，
+⚠️ 每档都要断言 **`db_boundary_error` 取到的是 `structure_mismatch`**，
 而不只是「拒了」—— 重叠判据下取到别的码说明闸的次序错了。
 
-- [ ] **Step 3: 跑，确认七档全 PASS**
+⚠️ **⑳b 为什么必须有**：⑳ 把约束整个删掉时 `uq_stock_start_present` 与
+`uq_stock_start_columns_ok` **同时**为假、互相遮蔽，⑳ 单独证伪不了后者。而
+`columns_ok` 正是 codex 4a-2a R1 为「同名换列」加的 —— 没有 ⑳b，把它整条删掉全套档位照样全绿。
 
-- [ ] **Step 4: 变异验证**
+- [x] **Step 3: 跑，确认全 PASS**
 
-| 中和方式 | 必须变红的档 |
-|---|---|
-| `assert_db_allowed_for_reuse` 的 `state` 判定挪到闸 1 之后 | ⑯ |
-| `assert_db_allowed_for_reset` 加上 `state` 判定 | ⑰ |
-| `_BUSINESS_STRUCTURE_SQL` 的 `klines_ohlc_double` 改成恒真 | ⑱ |
-| 同上 `file_path_is_text` | ⑲ |
-| 同上 `uq_stock_start_present` | ⑳ |
-| 同上 `content_hash_present` | ㉑ |
+> ### ⚠️ 本步挖出一个生产缺陷（已修，见 Step 4 最后一行）
+>
+> `_BUSINESS_STRUCTURE_SQL` 里 `array_agg(a.attname ORDER BY a.attname)` 出来是 `name[]`，
+> 右边字面量是 `text[]`，**PostgreSQL 没有 `name[] = text[]` 操作符**（标量 `name = text` 有）。
+> 该查询在**任何**库上都抛，闸 2 的业务表五组判据于是**从未成功执行过一次**，
+> 全部兜成 `target_db_unreadable`。
+>
+> - **影响**：fail-closed，不放行任何危险东西；但整条复用路径 100% 不可用，
+>   且错误码把运维指向权限/连通性，而不是「schema 漂移 → 用 --reset 重建」。
+> - **为什么 429 条 host 测试 + codex 十四轮全没抓到**：host 层 `_FakeConn` 按子串派发
+>   预置字典，**SQL 文本一次都没送进 PG**。这是 L2 脚本存在的全部理由。
+> - **为什么本脚本原有档位也没抓到**：它们**全部**断言「拒了」，
+>   一条恒抛的闸在每一档看起来都在正常工作 → 追加 ⑰b。
+> - **修法**：`array_agg(a.attname::text ORDER BY a.attname::text)`（`backend/qmt_pilot_db.py`）。
+
+- [x] **Step 4: 变异验证**（8 条，全部由控制者亲跑亲验变红）
+
+| 中和方式 | 必须变红的档 | 结果 |
+|---|---|---|
+| `assert_db_allowed_for_reuse` 的 `state` 判定挪到闸 1 之后 | ⑯ | RED（取到 `schema_fingerprint_mismatch`）|
+| `assert_db_allowed_for_reset` 加上 `state` 判定 | ⑰ | RED |
+| `_BUSINESS_STRUCTURE_SQL` 的 `klines_ohlc_double` 改成恒真 | ⑱ | RED |
+| 同上 `file_path_is_text` | ⑲ | RED |
+| 同上 `uq_stock_start_present` **与** `uq_stock_start_columns_ok` **两条一起** | ⑳ | RED |
+| 同上 `uq_stock_start_columns_ok` **单独** | ⑳b | RED |
+| 同上 `content_hash_present` | ㉑ | RED |
+| 撤掉 `::text`（把 `name[] = text[]` 复原）| ⑰b | RED |
+
+> ⚠️ 计划原写「中和 `uq_stock_start_present` → ⑳ 变红」，**实测该变异存活**：
+> 约束整个没了时 `columns_ok` 也为假、替它兜住。两条判据必须**一起**关，
+> 而 `columns_ok` 的单独判别力由新增的 ⑳b 提供。
+>
+> ⚠️ 变异跑器的档位匹配从 `tag in line` 收紧成**整 token 相等**：
+> ⑨/⑨b/⑨c、⑰/⑰b、⑳/⑳b 互为子串，用 `in` 会让 ⑳b 的 FAIL 行把 ⑳ 的变异算成「抓到了」——
+> **跑器自己会变成假绿的来源**（这一轮实测撞到）。
 
 - [ ] **Step 5: 提交**
 
