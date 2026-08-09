@@ -8,14 +8,21 @@
 
 ## 一、两条分支（4a-2b 基于 4a-2a）
 
-| 分支 | HEAD | 内容 | 生产代码 | 子项 |
-|---|---|---|---|---|
-| `feat/qmt-plan4a-2a-read-gates` | `75e9efc` | 库级**只读**闸：0− / 0 / 0r / 0b / state / 1 / 2 | +549 / −45 | 3 |
-| `feat/qmt-plan4a-2b-destructive` | 见 `git log -1`（自引用，写死会随 amend 过期）| 零对象例外 + `authorize_reset` + **`reset_pilot_database`**（授权+销毁一体）+ `--init-cluster-marker` | +450 | 3 |
+| 分支 | 状态 | 内容 |
+|---|---|---|
+| ~~`feat/qmt-plan4a-2a-read-gates`~~ | ✅ **MERGED #158**（main squash `bd2c154`，2026-08-08）| 库级**只读**闸：0− / 0 / 0r / 0b / state / 1 / 2 |
+| `fix/qmt-gate2-name-text-cast` | **待 push / 开 PR**；codex **一轮 approve**，账本已核 | 修 2a 带进 main 的死闸（`name[] = text[]`），+80 / −1 |
+| `feat/qmt-plan4a-2b-destructive` | **待 push / 开 PR**（10 个提交，+5863 / −84）| 零对象例外 + `authorize_reset` + **`reset_pilot_database`**（授权+销毁一体）+ `--init-cluster-marker` + **共用 harness + 两个新 L2 真 PG 脚本** |
 
-> ⚠️ 破坏性入口**只有 `reset_pilot_database` 一个**：`_drop_pilot_database` 是私有的。
-> `ResetAuthorization` 只是个公开 NamedTuple，把 DROP 单独暴露出去，一次接线失误就能
-> 用当前 oid 现造一个凭据、把集群闸/归属闸/绑定闸/`--reset-foreign` 全绕过去（codex 4a-2b R4-F2）。
+> ⚠️ **`fix/qmt-gate2-name-text-cast` 优先。** 它修的是**此刻就躺在 `main` 上**的缺陷：
+> 闸 2 的业务表结构查询在真 PostgreSQL 上恒抛，**五组判据从未成功执行过一次**。
+> 它与 2b 完全解耦，且已拿到 approve —— 先推它。
+> ⚠️ 那条分支**不要 rebase**：attest 账本绑死在 `363fda9`，rebase 会让 `head_sha` 对不上、门变红。
+
+> ⚠️ 破坏性入口**只有 `reset_pilot_database` 一个**：`_drop_pilot_database` 是私有的，
+> 且 `ResetAuthorization` 需要一个**只有 `authorize_reset` 拿得到的模块私有哨兵**才能铸造，
+> 使用点还用 `type(x) is` 复核（R4-F2 → R6-F1 → R7-F1 三轮才收口）。
+> 把 DROP 单独暴露出去，一次接线失误就能现造凭据、把集群闸/归属闸/绑定闸/`--reset-foreign` 全绕过去。
 
 **4a-2a 零 DDL、零破坏性能力**；所有会 DROP / 建表 / 删行的动作都集中在 4a-2b，
 让评审把注意力压在危险的那一半上。
@@ -24,48 +31,72 @@
 
 ---
 
-## 二、推分支（一行一条，别用 `&&` 串，行尾别加 `#` 注释）
+## 二、推分支与开 PR（2026-08-09 更新：2a 已合并，现在是**两条**待推）
 
 > 踩过的坑：`git add x && git commit  # 说明` 里的 `#` 会被当**路径**传给 `git add` →
 > add 失败 → `&&` 短路 → **commit 根本没发生**，而随后的推送照样成功，
 > 推上去的是一个与 main 相同的空分支。命令看着全绿，结果是空的。
+> **所以：一行一条，别用 `&&` 串，行尾别加 `#` 注释。**
+
+### ① 先做 `fix/qmt-gate2-name-text-cast`（优先，codex 一轮 approve）
+
+它修的是**此刻就躺在 `main` 上**的缺陷，与 2b 完全解耦。
 
 ```
-cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-plan4a-2"
-git branch --show-current
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-gate2-textcast"
+git status --porcelain
+git rev-parse --abbrev-ref HEAD
 git rev-parse --short HEAD
-git checkout feat/qmt-plan4a-2a-read-gates
-git push -u origin feat/qmt-plan4a-2a-read-gates
 ```
 
-**验收判据用远端，不看本地**（0 就是没推上去）：
+期望：**没有输出** / `fix/qmt-gate2-name-text-cast` / `363fda9`。对不上先停下。
+
+然后推送，并用**远端**判据核实（`0` 就是没推上去，别看推送自己的输出）：
 
 ```
-git fetch origin
-git rev-list --count origin/main..origin/feat/qmt-plan4a-2a-read-gates
+git rev-list --count origin/main..origin/fix/qmt-gate2-name-text-cast
 ```
 
-期望：**1**。
-
-开 PR（标题/正文中文，正文直接引本文件）：
+期望：**1**。之后开 PR，正文用 `--body-file` 指向：
 
 ```
-gh pr create --base main --head feat/qmt-plan4a-2a-read-gates --title "QMT 4a-2a：pilot 库级只读闸（闸 0− / 0 / 0r / 0b / state / 1 / 2）" --body "见 docs/superpowers/plans/2026-08-05-qmt-plan4a-2-handoff.md"
+/Users/maziming/Coding/Prj_Kline trainer/.dev/pr-bodies/pr_body_textcast.md
 ```
 
-**等 4a-2a 合并之后**再做 4a-2b：
+⚠️ **这条分支不要 rebase** —— attest 账本绑死在 `363fda9`，rebase 会让 `head_sha`
+对不上、把门弄红。真要 rebase 就得重跑一轮评审。
+
+### ② 再做 `feat/qmt-plan4a-2b-destructive`
 
 ```
 cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-plan4a-2"
+git status --porcelain
+git rev-parse --abbrev-ref HEAD
+git rev-parse --short HEAD
 git fetch origin
-git checkout feat/qmt-plan4a-2b-destructive
-git rebase origin/main
-git push -u origin feat/qmt-plan4a-2b-destructive
-gh pr create --base main --head feat/qmt-plan4a-2b-destructive --title "QMT 4a-2b：零对象例外 + reset 单一入口 + drop_pilot_database + --init-cluster-marker" --body "见 docs/superpowers/plans/2026-08-05-qmt-plan4a-2-handoff.md"
+git rev-list --count HEAD..origin/main
 ```
+
+期望：**没有输出** / `feat/qmt-plan4a-2b-destructive` / `fe33591` / **`0`**
+（已与 main 齐平，**不需要 rebase**）。
+
+推送之后同样用远端判据核实：
+
+```
+git rev-list --count origin/main..origin/feat/qmt-plan4a-2b-destructive
+```
+
+期望：**10**。之后开 PR，正文用 `--body-file` 指向：
+
+```
+/Users/maziming/Coding/Prj_Kline trainer/.dev/pr-bodies/pr_body_4a2b.md
+```
+
+> 两份 PR 描述都放在 `.dev/pr-bodies/`（**gitignored**，不进仓库、但不随会话消失）。
 
 ⚠️ 每次推送之后**去看 CI 是不是真绿** —— 推送成功不代表闸门过了。
 ⚠️ `codex-review-verify` 在 main 上长期红（至少自 2026-07-24 起），不是本轮引入、也不在必需集。
+⛔ **4a-2b 不建议在评审看过之前合并** —— 理由见 §四。
 
 ---
 
@@ -74,22 +105,26 @@ gh pr create --base main --head feat/qmt-plan4a-2b-destructive --title "QMT 4a-2
 | 项 | 命令 | 结果 |
 |---|---|---|
 | host 全量（4a-2a） | `cd backend && ../.venv/bin/python -m pytest tests/ -q -p no:randomly` | **660 passed**（合并前 563） |
-| host 全量（4a-2b） | 同上 | **759 passed** |
-| 本文件单跑 | `pytest tests/test_qmt_pilot_db.py -q` | 4a-2a **330** / 4a-2b **429**（合并前 233） |
+| host 全量（4a-2b，**交付态 `fe33591`**） | 同上 | **795 passed** |
+| 本文件单跑 | `pytest tests/test_qmt_pilot_db.py -q` | 4a-2a **330** / 4a-2b **465**（合并前 233） |
 | spec 一致性 | `python3 tools/check_spec_consistency.py` | **全过**；`--self-test` 的 11 项各自被反例触发 |
 | mutation | 控制者亲验，逐条中和判据看具名测试变红后复原 | 4a-2a **93 条**、4a-2b **107 条**，**全部 RED** |
 | 工作区 | `git status --porcelain` | 0 个变更 |
 | **L2 真 PG ①**（4a-1）| `DSN=… DSN2=… .venv/bin/python backend/scripts/verify_pilot_two_phase_create.py` | **28 档全绿** |
-| **L2 真 PG ②**（本轮新增）| `DSN=… DSN2=… .venv/bin/python backend/scripts/verify_pilot_db_lifecycle.py` | **37 档全绿**（连跑三轮稳定）|
-| **L2 真 PG ③**（本轮新增）| `DSN=… DSN2=… .venv/bin/python backend/scripts/verify_pilot_concurrency.py` | **7 档全绿** |
+| **L2 真 PG ②**（本轮新增）| `DSN=… DSN2=… .venv/bin/python backend/scripts/verify_pilot_db_lifecycle.py` | **39 档全绿**（连跑三轮稳定）|
+| **L2 真 PG ③**（本轮新增）| `DSN=… DSN2=… .venv/bin/python backend/scripts/verify_pilot_concurrency.py` | **10 档全绿** |
 | L2 档位的 mutation | 控制者亲验，逐条中和生产守卫看**该档**的 FAIL 行出现后复原 | 24 条：**22 条 RED**，2 条如实登记为「被遮蔽 / 纯纵深」 |
+| R9–R13 修复的 mutation | 同上（host 具名测试 / 真 PG 该档） | **21 条全 RED** |
 
-### ⚠️⚠️ L2 脚本挖出**两个生产缺陷**（假件层结构性测不到，429 条 host 测试 + codex 十四轮全漏）
+真 PG 档位合计 **77**（28 + 39 + 10）。
+
+### ⚠️⚠️ L2 脚本挖出**三个生产缺陷**（假件层结构性测不到，795 条 host 测试 + codex 前八轮全漏）
 
 | # | 缺陷 | 影响 | 修法 |
 |---|---|---|---|
 | 1 | `_BUSINESS_STRUCTURE_SQL` 里 `array_agg(a.attname …) = ARRAY[…]` 是 `name[] = text[]`，**PostgreSQL 无此操作符** | 该查询在**任何**库上都抛 → 闸 2 的业务表五组判据**从未成功执行过一次**，全兜成 `target_db_unreadable`。fail-closed 不放行危险东西，但**整条复用路径 100% 不可用**，且错误码把运维指向权限/连通性而不是「schema 漂移 → 用 --reset 重建」 | `array_agg(a.attname::text ORDER BY a.attname::text)` |
 | 2 | DROP 预检数了 `pg_stat_activity` 的**全部**行，把 `autovacuum worker` 当成占用者（PostgreSQL 自己的 `DROP DATABASE` 不算它 —— 真 PG 实测坐实）| `--reset`（陈旧 schema 库的**唯一**出路）**间歇性**假拒，还给运维一条执行不了的动作（「请让它们自行退出后重试」，而占用者是后台进程）。CI 里是 flake，现场是「重试几次又好了」的玄学 | 预检拆出 `_TARGET_CLIENT_SESSIONS_SQL`（`backend_type = 'client backend'`）；诊断仍看全部后端 |
+| 3 | 验空与 `DROP DATABASE` 之间有 **0.7–2.2 ms** 的 TOCTOU 窗口（codex R10，critical）| 真 PG 上**已复现数据丢失**：普通角色在窗口里连进去建了表**再断开**，PostgreSQL 没有活会话可挡，库照样被删 —— 而这条来路**绕过** `pilot_meta` 归属与 `--reset-foreign` 令牌 | 三轮迭代（R10 → R11 → R12）收口成「**全程持住一条目标库连接**」：连上 + adopt → 读原 connlimit → 封锁 → 占用者复查（排除自己 pid）→ 在这条会话上验空 → 关闭 → DROP |
 
 **为什么 host 层结构性抓不到**：假件 `_FakeConn` 按 SQL 子串派发预置字典，
 **SQL 文本一次都没送进 PostgreSQL**。这正是 L2 脚本存在的全部理由。
@@ -113,7 +148,36 @@ gh pr create --base main --head feat/qmt-plan4a-2b-destructive --title "QMT 4a-2
 
 ---
 
-## 四、codex 对抗性评审（4a-2a 跑了 R1–R6，4a-2b 跑了 R1–R8）
+## 四、codex 对抗性评审（4a-2a：R1–R6；4a-2b：R1–R13）
+
+### ⛔ 交付时的口径（2026-08-09 更新）
+
+**4a-2b 一共跑了 13 轮，从未 approve。**R9–R13 又挖出 **7 条 finding，全部为真、
+全部已修、全部做过变异验证**（明细见下表）。
+
+**最后一轮（R13）的修复本身零评审** —— 它改的是 DROP 授权路径上的调用方标量校验。
+**故：不建议在评审看过之前合并 4a-2b。**
+2a 当初能 override 的三条理由（零 DDL / 零破坏性 / 下游零调用点）在 2b **一条都不成立**。
+
+| 轮 | 严重度 | finding | 修法 |
+|---|---|---|---|
+| R9 | medium | 混合态（一表在场但不耐久 + 另一表缺席）下 init **先落 DDL 再拒** | 耐久性判据拆成每表一条 |
+| R10 | **critical** | 零对象例外 DROP 的 TOCTOU **数据丢失**窗口（真 PG 复现） | DROP 前 `CONNECTION LIMIT 0` |
+| R11 | high | 清理只认被销毁的 oid → `db_oid=NULL` 陈旧行留存 → **reset 后重建不了** | 谓词补「指不到活实例」，锁内当下求值 |
+| R11 | high | 恢复写死 −1（抹掉原策略）+ 非超级用户**自锁** | 读回原值再恢复 |
+| R12 | high | 「非超级用户就跳过封锁」= 窗口原样留着 | **架构改动**：全程持住一条目标库连接 |
+| R12 | medium | 两条 `ALTER DATABASE` 按名字发，可能落到同名替身 | 同上（持有期间名字↔实例稳定） |
+| R13 | high | 复用/销毁两条路**不验**调用方绑定标量 | 抽 `assert_binding_scalars`，四入口各自强制 |
+
+**为什么停在 R13**：严重度五轮是 medium → critical → 2×high → high+medium → high，
+**不是递减**；且每轮修复都在长新的评审面。同时本 PR 严重超出「≤3 子项 ≤500 行」
+（10 个提交 / +5863 −84）——**不收敛有一部分是打包问题**，仓库记忆里明写过
+「大 PR codex 不收敛 → 切超小片」。就地重切要重写 10 个提交的历史，
+成本与风险更高，故选择**把评审挪到 PR 上继续**（与 2a 在 R6 的处置一致）。
+
+---
+
+### 历史（截至 2026-08-08 的 R1–R8）
 
 **十四轮全是 `needs-attention`，从未 approve。**二十七条 finding。
 ⚠️ 其中**两族反复未闭合**：「破坏性入口可被伪造凭据驱动」提了 3 次、
@@ -213,7 +277,7 @@ gh pr create --base main --head feat/qmt-plan4a-2b-destructive --title "QMT 4a-2
 | # | 动作 | 期望 | P/F |
 |---|---|---|---|
 | 1 | 在 worktree 根跑 `cd backend && ../.venv/bin/python -m pytest tests/test_qmt_pilot_db.py -q` | 末行显示 `passed`，无 `failed`/`error` | |
-| 2 | 跑 `cd backend && ../.venv/bin/python -m pytest tests/ -q; echo "EXIT=$?"` | `EXIT=0`，且数量比合并前（563）只增不减 | |
+| 2 | 跑 `cd backend && ../.venv/bin/python -m pytest tests/ -q; echo "EXIT=$?"` | `EXIT=0`，且数量比合并前（759）只增不减（交付态实测 **795 passed**） | |
 | 3 | 在 `backend/qmt_pilot_db.py` 里搜 `assert ` （带空格） | **一处都搜不到**（守卫一律 if/raise） | |
 | 4 | 在 `backend/qmt_pilot_db.py` 里搜 `pg_terminate_backend` | 只出现在**说明文字**里，不出现在任何被执行的语句/字符串里（有机械测试钉住） | |
 | 5 | 在 `backend/qmt_pilot_db.py` 里搜 `information_schema.tables` | **搜不到**（【绝对空】必须白名单式） | |
@@ -222,10 +286,13 @@ gh pr create --base main --head feat/qmt-plan4a-2b-destructive --title "QMT 4a-2
 | 8 | 打开 4a-2a 的 diff，找 `assert_db_allowed_for_reset` | 里面**没有**指纹比对、没有 `state` 判断、没有闸 2、没有九键检查（reset 是陈旧库唯一的出路） | |
 | 9 | 打开 4a-2b 的 diff，找 `_drop_pilot_database` | 恰好一条 `DROP DATABASE`，**不带**任何强制选项，失败后**没有**重试 | |
 | 10 | 在 `backend/qmt_pilot_db.py` 里搜 `def drop_pilot_database`（不带下划线）| **搜不到** —— 破坏性入口只有 `reset_pilot_database` 一个，授权与销毁一体 | |
-| 11 | 两个测试库容器起着（`docker ps` 能看到 `qmt-pg-r8` 和 `qmt-pg-r8b`）时，按下面「L2 三连跑」那段命令逐行跑三个脚本 | 三行末尾分别是 `✅ 28 档`、`✅ 37 档`、`✅ 7 档`，**都带「断言全部成立（真 PostgreSQL）」**；任何一行出现 `FAIL` 或 `❌` 即判 F | |
-| 12 | 把 `verify_pilot_db_lifecycle.py` **连跑三遍**，比较三次的末行 | 三次**完全一样**（都是 `✅ 37 档`）—— 这一条专门查「间歇性假拒」那类 flake，跑一遍绿不算数 | |
+| 11 | 两个测试库容器起着（`docker ps` 能看到 `qmt-pg-r8` 和 `qmt-pg-r8b`）时，按下面「L2 三连跑」那段命令逐行跑三个脚本 | 三行末尾分别是 `✅ 28 档`、`✅ 39 档`、`✅ 10 档`，**都带「断言全部成立（真 PostgreSQL）」**；任何一行出现 `FAIL` 或 `❌` 即判 F | |
+| 12 | 把 `verify_pilot_db_lifecycle.py` **连跑三遍**，比较三次的末行 | 三次**完全一样**（都是 `✅ 39 档`）—— 这一条专门查「间歇性假拒」那类 flake，跑一遍绿不算数 | |
+
+| 13 | 把 `authorize_reset` 里那行 `assert_binding_scalars(export_log_sha256, output_dir)` 手工删掉，重跑第 1 条 | 必须出现 `FAILED …binding_scalar…`；**看完把改动还原** | |
 
 > ⚠️ 判绿一律**读输出内容**，不要看管道后的 exit code（`cmd | tail` 之后 `$?` 是 tail 的）。
+> ⚠️ 第 13 条是本轮的要害之一：它证明 R13 新加的守卫**真的拦得住**，不是恒真断言。
 > ⚠️ 第 11/12 条尤其：**读末尾那行 `✅ N 档…`**，别读中间某段 PASS —— 中间全是 PASS 而
 > 末行是 `❌` 的情况本轮真实发生过（我自己就因为只看了过滤片段而漏判了一次）。
 
@@ -244,17 +311,36 @@ export DSN2="postgresql://postgres:$(docker inspect qmt-pg-r8b --format '{{range
 
 ## 七、下一步（**不在本两个 PR 内**）
 
-- ~~**PR-2 = 两个 L2 真 PG 脚本**~~ → **已完成，见计划
-  `docs/superpowers/plans/2026-08-09-qmt-plan4a-2-l2-scripts.md`**：
-  `verify_pilot_db_lifecycle.py`（**37 档**）+ `verify_pilot_concurrency.py`（**7 档**），
+- ~~**PR-2 = 两个 L2 真 PG 脚本**~~ → **已完成并并入本 PR**，见计划
+  `docs/superpowers/plans/2026-08-09-qmt-plan4a-2-l2-scripts.md`：
+  `verify_pilot_db_lifecycle.py`（**39 档**）+ `verify_pilot_concurrency.py`（**10 档**），
   外加把 4a-1 那个脚本的安全护栏抽进共用的 `_pilot_verify_harness.py`。
   它们是「假件不得替代真 PG」这条纪律的唯一落地处 —— 而它们**立刻兑现了**：
-  挖出上面 §三 记的**两个生产缺陷**，都是 429 条 host 测试与 codex 十四轮
+  挖出上面 §三 记的**三个生产缺陷**，都是 795 条 host 测试与 codex 前八轮
   结构性抓不到的（假件按子串派发预置字典，SQL 文本不进 PG）。
-- **2b 开 PR 之前还要做**：`git rebase origin/main` → 重跑 codex 对抗性评审
-  （本轮又改了生产代码两处，上一轮的评审结论**不覆盖**它们）。
-- 之后才是 4b（SMB 真拉取）与 4c（100 股出货）。
 
-**交付口径（禁述清单）**：本轮的正确表述是「**4a 的库级护栏建好、用假件验过**」。
+### 已知残留（交付时如实登记，**不含糊**）
+
+1. **R13 的修复零评审** —— 它改的是 DROP 授权路径上的调用方标量校验。
+   这是「不建议在评审看过之前合并 4a-2b」的首要理由。
+2. **超级用户维护角色是硬前提。**【绝对空】判据要遍历所有带 oid 列的 `pg_catalog` 表，
+   其中 `pg_user_mapping` 非超级用户读不了。该前提此前是**偶然**成立的（没写下来也没验过），
+   现由档 Ⓔ 钉成可验证事实，并证明它 **fail-closed**（库没被删、连接限制也没留在半封锁状态）。
+   ⛔ **不要**「顺手让 `_user_objects` 跳过读不了的目录」—— 那是 fail-open，
+   模块明写「查不出目录清单就抛，绝不返回『空』」。
+3. **DROP 与最后一次重核之间仍有毫秒级窗口**：对**非超级用户**已由 `CONNECTION LIMIT 0`
+   封死；对**另一个超级用户**保留 —— 但超级用户本来就能直接 DROP 任何库。
+4. **档 ㉜ 的判别力被前面的档遮蔽**（不编场景，如实登记）：让集群闸持住连接的强变异
+   确实制造出滞留会话，但它在档 ④ 的清场就把脚本打死了，按构造 ㉜ 不可能是第一个观测点。
+5. **本 PR 严重超出「≤3 子项 ≤500 行」**（10 个提交 / +5863 −84）。
+   **不收敛有一部分是打包问题** —— 仓库记忆里明写过「大 PR codex 不收敛 → 切超小片」。
+   就地重切要重写 10 个提交的历史，成本与风险更高，故选择把评审挪到 PR 上继续。
+
+### 再往后
+
+- 4b（SMB 真拉取）→ 4c（100 股出货）。**都在 4a-2b 落地之后。**
+
+**交付口径（禁述清单）**：本轮的正确表述是
+「**4a 的库级护栏建好，并在真 PostgreSQL 上验过 77 档**」。
 **禁述**「pilot 已完成」「100 股已出货」「真实数据接入完成」——
 **真 QMT 数据一个字节都还没流过。**
