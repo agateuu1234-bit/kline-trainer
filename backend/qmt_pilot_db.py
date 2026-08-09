@@ -2437,9 +2437,31 @@ async def try_empty_remnant_exception(
 # 必须放行到 DROP + 重建」这条正向钉上，reset 这条唯一出路在最常见的路径上不可用。
 # 本模块的对策是**自己持有连接生命周期**（见 `_open_target` / `_probe_absolutely_empty`），
 # 这里再加一道显式断言。
+# **诊断用**：DROP 真的被顶住之后打印占用者 —— 这里要看**全部**后端，
+# 包括非客户端的，操作者需要知道到底是谁。
 _TARGET_SESSIONS_SQL = """
 SELECT a.pid, a.usename, a.application_name
   FROM pg_stat_activity a WHERE a.datname = $1 ORDER BY a.pid
+"""
+
+# **预检用**：DROP 之前判「目标库上还有没有别人」。
+# ⚠️ **绝不能数 `pg_stat_activity` 的全部行**（真 PG 实测，4a-2 的 L2 脚本挖出）：
+#    `autovacuum worker` 会以 `usename = NULL` / `application_name = ''` 出现在任何库上，
+#    而 **PostgreSQL 自己的 `DROP DATABASE` 不把它算作占用者** —— 它会先终止目标库上的
+#    autovacuum worker 再删（实测：`autovacuum_naptime=1s` 下抓到该 worker 在场，
+#    同一时刻 `DROP DATABASE` 成功）。
+#    数进来的后果是 `--reset` —— 陈旧 schema 库的**唯一**出路 —— 会**间歇性**假拒，
+#    并给出一条运维根本执行不了的动作（「请让它们自行退出后重试」，而占用者是后台进程）。
+#    这类不确定性在 CI 里表现为 flake，在现场表现为「重试几次又好了」的玄学。
+# ⚠️ **收窄不削弱护栏**：真正会顶住 DROP 的后端仍由 DROP 自己的 55006 兜住，
+#    并映射成同一个 `target_db_in_use`（见下面的 except 分支）——
+#    预检的职责只是「早失败 + 给出好消息」，最终裁决权在 `DROP DATABASE` 本身。
+# ⚠️ 反向：收窄过头会让这条预检**永不触发**。真 PG 档 ㉜b（目标库上开一条真客户端连接
+#    → reset 必须报 target_db_in_use）钉住它没有变成空转。
+_TARGET_CLIENT_SESSIONS_SQL = """
+SELECT a.pid, a.usename, a.application_name
+  FROM pg_stat_activity a
+ WHERE a.datname = $1 AND a.backend_type = 'client backend' ORDER BY a.pid
 """
 
 # `DROP DATABASE` 因**其他会话**占用而失败的 SQLSTATE。
@@ -2511,7 +2533,7 @@ async def _drop_pilot_database(maint_conn, *, connect, db_name: str, seed: str,
             f"并发的同 seed 运行会在彼此的 DROP/CREATE 之间穿插")
 
     # 规定 1：目标库上零会话。本模块自己开的探测连接都已 close，剩下的都是别人的。
-    occupants = await maint_conn.fetch(_TARGET_SESSIONS_SQL, db_name)
+    occupants = await maint_conn.fetch(_TARGET_CLIENT_SESSIONS_SQL, db_name)
     if occupants:
         raise PilotDbBoundaryError(
             "target_db_in_use",
