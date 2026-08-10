@@ -45,6 +45,37 @@ def test_db_dsn_rejects_keyword_value_dsn_instead_of_guessing():
         harness.db_dsn("host=127.0.0.1 port=5432 dbname=postgres", "scratch")
 
 
+# ── 库名白名单扫描器（R9-F3）──────────────────────────────────────────────
+
+def _scan(tmp_path, source: str, whitelist):
+    f = tmp_path / "fake_verifier.py"
+    f.write_text(source, encoding="utf-8")
+    return harness.assert_every_selfcheck_db_is_whitelisted(
+        f, whitelist, "kline_pilot_selfcheck")
+
+
+def test_single_quoted_database_literal_cannot_bypass_the_whitelist(tmp_path):
+    """R9-F3 的回归：旧扫描器是正则、只认**双引号**、只认 `[a-z0-9_]*` 的名字。
+
+    `evil_db = 'kline_pilot_selfcheck_ev"il'` 单引号、名字里还带引号，
+    整条从判据底下溜过去了 —— 而它是真的会被 `CREATE DATABASE` 建出来的。
+    """
+    src = "evil_db = 'kline_pilot_selfcheck_ev\"il'\n"
+    assert _scan(tmp_path, src, ("kline_pilot_selfcheck_ok",)) == 5
+
+
+def test_whitelisted_database_literal_is_allowed(tmp_path):
+    # 正向对照：登记了就该放行，否则上一条在「扫描器恒拒」时也是绿的。
+    src = "evil_db = 'kline_pilot_selfcheck_ev\"il'\n"
+    assert _scan(tmp_path, src, ('kline_pilot_selfcheck_ev"il',)) is None
+
+
+def test_prose_mentioning_the_prefix_is_not_mistaken_for_a_database_name(tmp_path):
+    # 文档字符串里提到前缀不算库名 —— 判据是「这个字面量**就是**前缀底下的名字」。
+    src = '"""本脚本会建/删 kline_pilot_selfcheck_* 库。"""\n'
+    assert _scan(tmp_path, src, ()) is None
+
+
 # ── 破坏性 DSN 闸（R7-F1）────────────────────────────────────────────────
 # ⚠️ 每条用不同的 DSN 串：放行会把它记进模块级的 `_GUARDED_DSNS`，共用串会串味。
 

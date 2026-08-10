@@ -17,13 +17,20 @@ O4-R9-C2 / O4-R33-C2 / O4-R34-C2 / O4-R37-C1 四轮才收口的。新脚本各�
 """
 from __future__ import annotations
 
+import ast
 import os
 import pathlib
 import re
 import sys
 from urllib.parse import quote, urlparse, urlsplit, urlunsplit
 
-import asyncpg
+# ⚠️ **不在顶层 import asyncpg**（codex 4a-2b/S1 R9-F2）：本模块的纯函数
+#    （`db_dsn` / 破坏性 DSN 闸 / 三条源码自检）一个数据库驱动都不需要，而
+#    `backend/requirements-test.txt` **不装 asyncpg**（本仓既有约定：生产模块里
+#    也一律局部 import，见 `import_csv.py` / `generate_training_sets.py`）。
+#    顶层 import 会让 `backend/tests/test_pilot_verify_harness.py` 在 CI 上
+#    **收集阶段就报 ImportError，整个套件跟着挂**——实测过，不是推演。
+#    CI 还把「任何 skipped」判成失败，故 `importorskip` 也不是出路。
 
 _BACKEND = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_BACKEND))
@@ -104,6 +111,7 @@ async def drop_database(base_dsn: str, dbname: str) -> None:
         raise AssertionError(
             f"DROP DATABASE 的目标 DSN 没有过破坏性闸：{urlparse(base_dsn).hostname!r}。"
             f"先调用 assert_destructive_dsn_allowed(dsn, '<名字>')")
+    import asyncpg  # 局部 import，见文件头的说明
     conn = await asyncpg.connect(base_dsn)
     try:
         await conn.execute("DROP DATABASE IF EXISTS " + quote_ident(dbname))
@@ -169,9 +177,19 @@ def assert_every_selfcheck_db_is_whitelisted(
               f"裸前缀是扫描器的参数，把它登记成库名会让这条自检失去判别力",
               file=sys.stderr)
         return 5
+    # ⚠️ **按 AST 取字符串字面量，不要用正则**（codex 4a-2b/S1 R9-F3）：
+    #    上一版的正则只认**双引号**、且只认 `[a-z0-9_]*` 的名字，于是
+    #    `evil_db = 'kline_pilot_selfcheck_ev"il'`（单引号、名字里还带引号）
+    #    **整条从判据底下溜过去了** —— 而它是真的会被 `CREATE DATABASE` 建出来的。
+    #    崩在 CREATE 与 DROP 之间就会留下一个不在白名单里的同前缀库，
+    #    下一次运行看到它只能拒绝启动（strangers 闸），要人工清。
+    #    判据也从「名字长成什么样」改成 `startswith(prefix)` —— 名字里有什么字符
+    #    不是重点，**在不在这个前缀底下**才是。
     src = pathlib.Path(script_path).read_text(encoding="utf-8")
-    literals = {x for x in re.findall(rf'"({re.escape(prefix)}[a-z0-9_]*)"', src)
-                if x != prefix}
+    literals = {node.value
+                for node in ast.walk(ast.parse(src))
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and node.value.startswith(prefix) and node.value != prefix}
     unlisted = sorted(literals - set(scenario_dbs))
     if unlisted:
         print(f"拒绝运行：脚本里用到的这些库名不在白名单里：{unlisted}", file=sys.stderr)
@@ -206,6 +224,7 @@ async def acquire_run_lock(base_dsn: str, prefix: str):
     ⚠️ 锁握在**返回的这条连接**上，调用方要让它活到进程结束：advisory lock 是会话级的，
        连接一关（含崩溃、被杀）就自动释放 —— 这正是我们要的，不会留下死锁。
     """
+    import asyncpg  # 局部 import，见文件头的说明
     conn = await asyncpg.connect(db_dsn(base_dsn, _LOCK_DATABASE))
     try:
         if not await conn.fetchval(_RUN_LOCK_SQL, prefix):

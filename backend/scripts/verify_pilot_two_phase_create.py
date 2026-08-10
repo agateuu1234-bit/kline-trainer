@@ -73,6 +73,10 @@ _SCRATCH_OBJECTS = (
 )
 
 _SCENARIO_DBS = (
+    # ⚠️ ⑫c 用它验「库名含引号时必须走 quote_ident」。它**真的会被建出来**，
+    #    故必须登记：崩在 CREATE 与 DROP 之间会留下同前缀的残留库，
+    #    不在白名单里的话下一次运行只能拒绝启动（codex R9-F3）。
+    'kline_pilot_selfcheck_ev"il',
     "kline_pilot_selfcheck_ok",
     "kline_pilot_selfcheck_p1",
     "kline_pilot_selfcheck_p10",
@@ -1466,7 +1470,18 @@ async def main() -> int:
         #    验收闸里「跳过」与「通过」在最终信号上没有区别。
         check(False, "㉔ 跨集群同名库",
               "DSN2 没过破坏性 DSN 闸 —— 这一档**没有跑**。")
+    # ⚠️ **第二台集群也要握运行锁**（codex 4a-2b/S1 R9-F1，high）：㉔ 接下来在
+    #    DSN2 上 `DROP` + `CREATE` 同一个**固定库名**。R7/R8 那把锁只锁了
+    #    `base_dsn` 所在的集群 —— 若此刻有另一个验收正以 DSN2 为主集群在跑，
+    #    这里会把**它正在用的**场景库删掉/换掉，正是那把锁本来要关掉的那条竞态。
+    #    取不到就判失败而不是「跳过」：验收闸里「跳过」与「通过」在最终信号上没有区别。
+    #    锁一直握到进程结束（`_entry` 的 finally 统一关）。
+    elif (_far_lock := await harness.acquire_run_lock(dsn2, _SELFCHECK_PREFIX)) is None:
+        check(False, "㉔ 跨集群同名库",
+              "DSN2 那台集群上已有另一个同前缀的验收在跑 —— 这一档**没有跑**。"
+              "绝不在它头上删/建固定名的库；等它跑完再来。")
     else:
+        _LOCK_CONNS.append(_far_lock)
         scenario("㉔")
         print("\n㉔ 同名但在另一台集群上（只有真 PG 能验）")
         db = "kline_pilot_selfcheck_p24"
@@ -2137,17 +2152,19 @@ async def main() -> int:
 #    清场会把前者**正在用**的库 DROP 掉、把它的 intent/registry 行删掉。
 #    锁握在一条活到进程结束的连接上 —— advisory lock 是会话级的，连接一关（含崩溃、
 #    被杀）就自动释放，不会留下死锁。
-_LOCK_CONN = None
+# ⚠️ 是**列表**不是单个：㉔ 那类档会在第二台集群上删/建固定名的库，
+#    那台集群的锁也要一起握到进程结束（codex R9-F1）。
+_LOCK_CONNS = []
 
 
 async def _acquire_run_lock(base_dsn: str) -> int | None:
-    global _LOCK_CONN
-    _LOCK_CONN = await harness.acquire_run_lock(base_dsn, _SELFCHECK_PREFIX)
-    if _LOCK_CONN is None:
+    lock = await harness.acquire_run_lock(base_dsn, _SELFCHECK_PREFIX)
+    if lock is None:
         print(f"拒绝运行：同一集群上已有另一个 {_SELFCHECK_PREFIX!r} 前缀的验收在跑。"
               f"两个运行的场景库名完全相同，继续下去会把对方正在用的库和凭据删掉。"
               f"等它跑完再来（它一结束锁就自动放）。", file=sys.stderr)
         return 8
+    _LOCK_CONNS.append(lock)
     return None
 
 
@@ -2155,8 +2172,8 @@ async def _entry() -> int:
     try:
         return await main()
     finally:
-        if _LOCK_CONN is not None:
-            await _LOCK_CONN.close()
+        for _lock in _LOCK_CONNS:
+            await _lock.close()
 
 
 if __name__ == "__main__":

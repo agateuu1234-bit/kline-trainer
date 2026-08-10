@@ -440,17 +440,19 @@ async def main() -> int:
 #    清场会把前者**正在用**的库 DROP 掉、把它的 intent/registry 行删掉。
 #    锁握在一条活到进程结束的连接上 —— advisory lock 是会话级的，连接一关（含崩溃、
 #    被杀）就自动释放，不会留下死锁。
-_LOCK_CONN = None
+# ⚠️ 是**列表**不是单个：㉔ 那类档会在第二台集群上删/建固定名的库，
+#    那台集群的锁也要一起握到进程结束（codex R9-F1）。
+_LOCK_CONNS = []
 
 
 async def _acquire_run_lock(base_dsn: str) -> int | None:
-    global _LOCK_CONN
-    _LOCK_CONN = await harness.acquire_run_lock(base_dsn, _PREFIX)
-    if _LOCK_CONN is None:
+    lock = await harness.acquire_run_lock(base_dsn, _PREFIX)
+    if lock is None:
         print(f"拒绝运行：同一集群上已有另一个 {_PREFIX!r} 前缀的验收在跑。"
               f"两个运行的场景库名完全相同，继续下去会把对方正在用的库和凭据删掉。"
               f"等它跑完再来（它一结束锁就自动放）。", file=sys.stderr)
         return 8
+    _LOCK_CONNS.append(lock)
     return None
 
 
@@ -458,8 +460,8 @@ async def _entry() -> int:
     try:
         return await main()
     finally:
-        if _LOCK_CONN is not None:
-            await _LOCK_CONN.close()
+        for _lock in _LOCK_CONNS:
+            await _lock.close()
 
 
 if __name__ == "__main__":
