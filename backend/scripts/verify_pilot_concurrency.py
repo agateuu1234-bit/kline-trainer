@@ -248,13 +248,21 @@ async def main() -> int:
         except Exception as exc:
             check(False, "Ⓑ 没持锁 → seed_lock_not_held",
                   f"抛的不是 PilotDbBoundaryError：{type(exc).__name__}: {exc}")
-        # 零副作用：既没有新库，也没有新 intent 行。
+        # 零副作用：新库、新 intent 行、新 registry 行，**三样都不许有**。
+        # ⚠️ registry 这一条是 codex 4a-2b/S1 R5-F1（high）补的：原来只查了前两样，
+        #    而 `pilot_database_registry` 是**归属凭据** —— 一个绕过锁闸、抢先写下
+        #    registry 行的回归，会被这一档判成「零副作用」放行，接着被收尾清场抹掉痕迹，
+        #    然后毒化此后所有的归属判定。断言必须在**清场之前**，否则查的是清场的效果。
         made = await conn_b.fetchval(
             "SELECT count(*) FROM pg_database WHERE datname = $1", db_b)
         check(made == 0, "Ⓑ 拒绝之后 pg_database 里没有那个库", f"竟然存在（count={made}）")
         rows = await conn_b.fetchval(
             "SELECT count(*) FROM public.pilot_create_intent WHERE dbname = $1", db_b)
         check(rows == 0, "Ⓑ 拒绝之后维护库里没有新的 intent 行", f"竟然留下了 {rows} 行")
+        regs = await conn_b.fetchval(
+            "SELECT count(*) FROM public.pilot_database_registry WHERE dbname = $1", db_b)
+        check(regs == 0, "Ⓑ 拒绝之后维护库里没有新的 registry 行（归属凭据）",
+              f"竟然留下了 {regs} 行 —— 绕过锁闸写下的归属凭据会毒化此后所有归属判定")
 
         # ── Ⓑb 两参数形式的 advisory lock **不得冒充**按 seed 的锁 ─────────
         #    O4-R6-C1：`pg_advisory_lock(int,int)` 能拼出**同样的 classid/objid**，

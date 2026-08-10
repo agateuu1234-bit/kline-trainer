@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""验证 4a-2 的**库级闸与破坏性路径**在真 PostgreSQL 上真的成立。
+"""验证 4a-2 的库级闸在真 PostgreSQL 上真的成立（**S1 切片：破坏性路径尚未覆盖**）。
+
+⛔ **本脚本目前不是 spec §6.2 生命周期那一组的 ship gate**
+   （codex 4a-2b/S1 R5-F2）：下面「本脚本管」那张分工表写的是**这个文件最终**要
+   覆盖的范围，而 S1 这一片**只实现了其中不依赖破坏性入口的部分**。
+   ⚠️ 这与 R1/R3 在并发脚本上栽过的是同一条：全绿摘要照样打印，读的人会把它
+      当成整组生命周期验收已过 —— 而风险最高的 DROP 路径此刻一档都没跑。
+
+   **此刻不跑**（随 S2 / S3 补回，见
+   `docs/superpowers/plans/2026-08-10-qmt-plan4a-2b-repackaging.md`）：
+     · `authorize_reset` / `reset_pilot_database` / `drop_pilot_database` 全部破坏性分支
+     · `--reset-foreign` 三跑
+     · 空壳残留 DROP 的 TOCTOU 与持连接封口
+     · 孤儿清理、集群标记初始化
+   **此刻跑**：集群闸 / 复用闸 / 绑定闸 / 陈旧库 / 业务表结构漂移 等只读与复用档，
+   外加清场护栏自身的两档回归（㉕㉖）。
 
 背景：4a-2 的 host 单测用的是假 conn，它**建模不了**这些东西 ——
 「库到底有没有被创建/删除」「集群里现在有什么」「同一个 key 能不能插进两行」
@@ -688,6 +703,10 @@ async def main() -> int:
         print(f"\n❌ {len(failures)} 条断言不成立：{failures}", file=sys.stderr)
         return 1
     print(f"\n✅ {len(_EXPECTED_SCENARIOS)} 档断言全部成立（真 PostgreSQL）")
+    # ⚠️ 全绿**不等于** spec §6.2 生命周期那一组被满足 —— S1 只跑了非破坏性档。
+    #    只写在 docstring 里跑的人看不见，故打到输出上（与并发脚本同一处理）。
+    print("⚠️ 注意：本片（S1）不覆盖任何破坏性路径 —— reset / drop / --reset-foreign 三跑 /"
+          " 孤儿清理 / 集群标记初始化一档都没跑，随 S2、S3 补回。")
     return 0
 
 
