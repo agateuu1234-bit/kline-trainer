@@ -393,35 +393,19 @@ async def main() -> int:
     _pre = await asyncpg.connect(base_dsn)
     try:
         await _pre.execute((_BACKEND / "sql/pilot_cluster_schema.sql").read_text())
-        matched = [r["datname"] for r in await _pre.fetch(
-            "SELECT datname FROM pg_database WHERE datname LIKE 'kline_pilot_selfcheck%'")]
-        # ⚠️ 精确白名单（O4-R33-C2）：前缀匹配 ≠ 本脚本建的。
-        leftovers = [x for x in matched if x in _SCENARIO_DBS]
-        strangers = [x for x in matched if x not in _SCENARIO_DBS]
-        if strangers and os.environ.get("QMT_VERIFY_FORCE_CLEANUP") != "1":
-            print(f"拒绝运行：这些库名匹配 selfcheck 前缀但**不是本脚本建的**：{strangers}。"
-                  f"本脚本会不可逆地删库，故不碰不认识的名字。"
-                  f"确认它们可弃后设 QMT_VERIFY_FORCE_CLEANUP=1 重跑，或先自行删除。",
-                  file=sys.stderr)
-            return 4
-        leftovers += strangers if os.environ.get("QMT_VERIFY_FORCE_CLEANUP") == "1" else []
-        for name in leftovers:
-            # ⚠️ 名字是从 pg_database 按 LIKE 读回来的，**不是常量**（O4-R20-C1）：
-            #    PostgreSQL 的库名可以含引号/分号，而 asyncpg.execute 支持多语句 ——
-            #    裸 f-string 拼接能让本脚本以 DSN（通常是超级用户）多跑一条 DROP，
-            #    localhost 闸挡不住这一档（共享的本地开发集群同样中招）。
-            #    **挡住注入的是 `quote_ident`**：它把名字变成字面标识符，内容再怪也无法逃逸。
-            #    ⚠️ 曾经在这里加过一层「名字不合 `_SELFCHECK_NAME_RE` 就跳过」——**已撤掉**：
-            #    它挡不住任何东西（转义已经挡住了），却制造了一个**不可恢复**的陷阱 ——
-            #    上一次运行崩溃留下的怪名字库会被永远跳过，而它又会让集群闸判「存在无关数据库」，
-            #    脚本从此再也跑不起来（实测踩到）。
-            if not _SELFCHECK_NAME_RE.fullmatch(name):
-                print(f"（清掉命名异常的残留库 {name!r} —— 它只可能是本脚本崩溃时留下的）")
-            await _pre.execute("DROP DATABASE IF EXISTS " + quote_ident(name))
-        await _pre.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck%'")
-        await _pre.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck%'")
+        # ⚠️ 这里原本是 harness 那段清场的**内联副本**，且用的是
+        #    `datname LIKE 'kline_pilot_selfcheck%'` —— 与 codex 4a-2b/S1 R4-F1 是**同一条缺陷**：
+        #    `_` 在 LIKE 里是单字符通配符，`kline0pilot0selfcheck0prod` 这种完全无关的库名
+        #    会被判成同前缀的 stranger，带 `QMT_VERIFY_FORCE_CLEANUP=1` 时**被直接 DROP**。
+        #    改判据必须按**判据本身**穷尽全仓，而不是只改被报告的那一处 —— 故这里不是
+        #    再抄一遍修好的比较式，而是直接换成共享实现（harness 存在的理由正是这个）。
+        leftovers = await harness.sweep_leftover_databases(
+            _pre, prefix="kline_pilot_selfcheck", scenario_dbs=_SCENARIO_DBS,
+            name_re=_SELFCHECK_NAME_RE)
+        if isinstance(leftovers, int):
+            return leftovers
+        # ⚠️ 登记表是**恢复与归属凭据**，同样不能按前缀删（R4-F2）——只删点名的库名。
+        await harness.purge_metadata_for(_pre, _SCENARIO_DBS)
         # ⑭ 中途崩溃会留下影子目录 schema 与探针表 —— 它们是维护库里的**用户对象**，
         # 下一次运行会在场景 ① 就被闸 (iii) 顶红（与真因毫无关系）。
         # ⚠️ 这些临时对象**必须用明确属于本脚本的前缀**（O4-R34-C2）：
@@ -1007,7 +991,8 @@ async def main() -> int:
         gone = await m.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", evil_db)
         check(gone is None, "转义后能正常删掉，且没有波及别的库")
         others = await m.fetchval(
-            "SELECT count(*) FROM pg_database WHERE datname LIKE 'kline_pilot_%'")
+            "SELECT count(*) FROM pg_database WHERE left(datname, length($1)) = $1",
+            "kline_pilot_")
         check(others == 0, "没有别的 kline_pilot_* 库被误删", f"实得 {others} 个")
     finally:
         await m.close()
@@ -1048,10 +1033,9 @@ async def main() -> int:
     await _drop(base_dsn, db)
     m = await _maintenance(base_dsn)
     try:
-        await m.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_p17%'")
-        await m.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_p17%'")
+        await harness.purge_metadata_for(m, (
+            "kline_pilot_selfcheck_p17",
+        ))
     finally:
         await m.close()
 
@@ -1163,10 +1147,10 @@ async def main() -> int:
 
     m = await _maintenance(base_dsn)
     try:
-        await m.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_p19%'")
-        await m.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_p19%'")
+        await harness.purge_metadata_for(m, (
+            "kline_pilot_selfcheck_p19a",
+            "kline_pilot_selfcheck_p19b",
+        ))
         await m.execute("DROP SCHEMA IF EXISTS zzqmtverify_poison_ns CASCADE")
     finally:
         await m.close()
@@ -1266,10 +1250,10 @@ async def main() -> int:
     await _drop(base_dsn, db)
     m = await _maintenance(base_dsn)
     try:
-        await m.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_p20%'")
-        await m.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_p20%'")
+        await harness.purge_metadata_for(m, (
+            "kline_pilot_selfcheck_p20",
+            "kline_pilot_selfcheck_p20b",
+        ))
     finally:
         await m.close()
 
@@ -1405,10 +1389,9 @@ async def main() -> int:
 
     m = await _maintenance(base_dsn)
     try:
-        await m.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_p22%'")
-        await m.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_p22%'")
+        await harness.purge_metadata_for(m, (
+            "kline_pilot_selfcheck_p22",
+        ))
     finally:
         await m.close()
 
@@ -1452,10 +1435,10 @@ async def main() -> int:
     await _drop(base_dsn, db)
     m = await _maintenance(base_dsn)
     try:
-        await m.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_p23%'")
-        await m.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_p23%'")
+        await harness.purge_metadata_for(m, (
+            "kline_pilot_selfcheck_p23",
+            "kline_pilot_selfcheck_p23v",
+        ))
     finally:
         await m.close()
 
@@ -1516,10 +1499,9 @@ async def main() -> int:
         await _drop(base_dsn, db)
         m = await _maintenance(base_dsn)
         try:
-            await m.execute(
-                "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_p24%'")
-            await m.execute(
-                "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_p24%'")
+            await harness.purge_metadata_for(m, (
+                "kline_pilot_selfcheck_p24",
+            ))
         finally:
             await m.close()
 
@@ -1932,9 +1914,8 @@ async def main() -> int:
         objs = await _user_objects(maint, exempt_maintenance=True)
         check(not objs, "改回规范 DEFAULT 后恢复判空（证明上一条不是恒真）",
               f"残留 {objs}")
-        await maint.execute("DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_%'")
         # 同上：登记表永不清理 → 本脚本必须自己收尾，否则下一次运行带着上一次的凭据跑。
-        await maint.execute("DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_%'")
+        await harness.purge_metadata_for(maint, _SCENARIO_DBS)
     finally:
         await maint.close()
 

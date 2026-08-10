@@ -158,8 +158,17 @@ async def sweep_leftover_databases(conn, *, prefix: str, scenario_dbs,
        真有人用这个前缀建了库的话，会在任何校验之前就被**不可逆地删掉**；
        localhost 闸挡不住这一档（它挡的是「别指向远端」，不是「别删本地别人的库」）。
     """
+    # ⚠️ **绝不能写 `datname LIKE prefix || '%'`**（codex 4a-2b/S1 R4-F1，high，实测复现）：
+    #    `_` 在 LIKE 里是**单字符通配符**，而本仓两个前缀（`kline_pilot_lifecycle_` /
+    #    `kline_pilot_conc_`）全是下划线 —— `kline0pilot0lifecycle0prod` 这种**完全
+    #    不在本前缀下**的库名会被判成「本前缀下的 strangers」，于是：
+    #      · 不带 force：整个脚本被它挡死（返回 4），且拒绝理由是假的；
+    #      · 带 force：**直接 DROP 掉它**。
+    #    实测：造 `kline0pilot0lifecycle0prod` 灌 1000 行数据，`QMT_VERIFY_FORCE_CLEANUP=1`
+    #    跑一次生命周期脚本 —— 库没了，而脚本照常打印「✅ 16 档断言全部成立」。
+    #    `left(datname, length($1)) = $1` 是**字面**前缀比较，不解释任何元字符。
     matched = [r["datname"] for r in await conn.fetch(
-        "SELECT datname FROM pg_database WHERE datname LIKE $1", f"{prefix}%")]
+        "SELECT datname FROM pg_database WHERE left(datname, length($1)) = $1", prefix)]
     leftovers = [x for x in matched if x in scenario_dbs]
     strangers = [x for x in matched if x not in scenario_dbs]
     forced = os.environ.get("QMT_VERIFY_FORCE_CLEANUP") == "1"
@@ -171,6 +180,14 @@ async def sweep_leftover_databases(conn, *, prefix: str, scenario_dbs,
         return 4
     if forced:
         leftovers += strangers
+    # ⚠️ 二道闸，**在任何一次 DROP 之前**整体校验（不是边删边查 —— 否则第 3 个名字
+    #    不合格时，前 2 个已经被删掉了）。上面那条判据将来若被改回通配符匹配，
+    #    这里**抛**而不是删库：把 R4-F1 那种**静默不可逆的数据丢失**降级成一次响亮的崩溃。
+    outside = [x for x in leftovers if not x.startswith(prefix)]
+    if outside:
+        raise AssertionError(
+            f"内部错误：清场选中了不在前缀 {prefix!r} 之下的库 {outside!r} —— "
+            f"已中止，本次未删任何库")
     for name in leftovers:
         # ⚠️ 名字是读回来的、不是常量 → 必须 quote_ident（O4-R20-C1）。
         #    ⚠️ 曾经在这里加过「名字不合正则就跳过」——**已撤掉**：它挡不住任何东西
@@ -180,3 +197,22 @@ async def sweep_leftover_databases(conn, *, prefix: str, scenario_dbs,
             print(f"（清掉命名异常的残留库 {name!r} —— 它只可能是本脚本崩溃时留下的）")
         await conn.execute("DROP DATABASE IF EXISTS " + quote_ident(name))
     return leftovers
+
+
+async def purge_metadata_for(conn, dbnames) -> None:
+    """清场：只删**点名的这些库名**在两张维护表里的登记行。
+
+    ⚠️ **绝不能按前缀 DELETE**（codex 4a-2b/S1 R4-F2，high，实测复现）：
+       `pilot_create_intent` / `pilot_database_registry` 是**恢复与归属凭据** ——
+       intent 行在 `CREATE DATABASE` **之前**就写下，正是崩溃之后判「这个库是谁的、
+       能不能回收」的唯一依据。按前缀删会把**别的运行**的凭据一起抹掉；再叠加
+       LIKE 的 `_` 通配符（R4-F1），连不在本前缀下的名字也一起抹。
+       实测：预先写入 `kline0pilot0lifecycle0prod`（不在本前缀下）与
+       `kline_pilot_lifecycle_otherrun_7788`（同前缀、别的运行）两组 intent+registry，
+       跑一次生命周期脚本 —— 四行全没了，而脚本照常打印「✅ 16 档断言全部成立」。
+    """
+    names = list(dbnames)
+    await conn.execute(
+        "DELETE FROM public.pilot_create_intent WHERE dbname = ANY($1::text[])", names)
+    await conn.execute(
+        "DELETE FROM public.pilot_database_registry WHERE dbname = ANY($1::text[])", names)

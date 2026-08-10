@@ -109,6 +109,12 @@ _SCRATCH_OBJECTS = (
 # ⚠️ 它不匹配 `_PREFIX`，故**不进** `_LIFECYCLE_DBS`（那张表是「同前缀库」的白名单）。
 _UNRELATED_DB = "zzqmtverify_unrelated"
 
+# ㉕ 的诱饵库：**匹配 `LIKE 'kline_pilot_lifecycle_%'`，却不以该前缀开头**
+# （`_` 是 LIKE 的单字符通配符，这里每个 `_` 位置都换成了 `0`）。
+# ⚠️ 它的归属标记 `zzqmtverify` 只能长在**中间** —— 放开头就不再匹配那条通配符模式，
+#    这一档也就测不到 R4-F1 了。
+_LIKE_DECOY_DB = "kline0pilot0lifecycle0zzqmtverify0decoy"
+
 # 本脚本可能 DROP 的**不带 pilot 前缀**的库。它们在 `sweep_leftover_databases` 的
 # 白名单机制之外，故单独登记 + 单独 fail-closed。
 # ⚠️ **这是一条真栽过的**（codex 4a-2b/S1 R2-F1，high，实测复现）：
@@ -117,7 +123,7 @@ _UNRELATED_DB = "zzqmtverify_unrelated"
 #    而那时任何档位都还没跑、任何归属都还没证明。
 #    这与 harness 那条「精确白名单，绝不按前缀盲删」是同一条纪律，
 #    只是数据库这一侧此前漏了 —— 前缀名不是归属证明，固定名同样不是。
-_OWNED_EXTRA_DBS = (_UNRELATED_DB,)
+_OWNED_EXTRA_DBS = (_UNRELATED_DB, _LIKE_DECOY_DB)
 
 # 验收闸的**完整性清单**：收尾核对每一档都真的跑过。
 # ⚠️ 少一档即失败 —— **「静默没跑」与「通过了」在输出上完全一样**，
@@ -125,7 +131,7 @@ _OWNED_EXTRA_DBS = (_UNRELATED_DB,)
 # ⚠️ 本片（S1）**只含不依赖破坏性入口的档**；其余随 S2 / S3 补回来 ——
 #    见 docs/superpowers/plans/2026-08-10-qmt-plan4a-2b-repackaging.md
 _EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑥", "⑦", "⑧", "⑮", "⑯",
-                       "⑰b", "⑱", "⑲", "⑳", "⑳b", "㉑", "㉔")
+                       "⑰b", "⑱", "⑲", "⑳", "⑳b", "㉑", "㉔", "㉕", "㉖")
 
 
 async def _connect(dsn: str) -> asyncpg.Connection:
@@ -208,15 +214,18 @@ async def _in_db(base_dsn: str, dbname: str, *statements: str) -> None:
 
 
 def assert_extra_dbs_are_namespaced() -> int | None:
-    """`_OWNED_EXTRA_DBS` 里每个名字都必须带 `zzqmtverify_` 归属前缀。
+    """`_OWNED_EXTRA_DBS` 里每个名字都必须带 `zzqmtverify` 归属标记。
 
     ⚠️ 与 `assert_scratch_objects_are_namespaced` 同一条纪律，只是作用在**库**上：
        清理是 `DROP DATABASE`，通名（`scratch` / `tmpdb`）会在开发机或 CI 上
        把别人同名的库**不可逆地**删掉。
+    ⚠️ 判的是**标记在不在**，不是它在不在开头：`_LIKE_DECOY_DB` 必须匹配
+       `LIKE 'kline_pilot_lifecycle_%'` 才测得到 R4-F1，因此它开头只能是 `kline`。
+       让名字不可能与别人重名的是 `zzqmtverify` 这个串本身，不是它的位置。
     """
-    bad = [d for d in _OWNED_EXTRA_DBS if not d.startswith("zzqmtverify_")]
+    bad = [d for d in _OWNED_EXTRA_DBS if "zzqmtverify" not in d]
     if bad:
-        print(f"拒绝运行：这些非 pilot 前缀的库名没带 `zzqmtverify_` 归属前缀：{bad}"
+        print(f"拒绝运行：这些非 pilot 前缀的库名没带 `zzqmtverify` 归属标记：{bad}"
               f" —— 清理它们是 DROP DATABASE，通名会删掉别人的库", file=sys.stderr)
         return 6
     return None
@@ -300,10 +309,7 @@ async def main() -> int:
         if isinstance(swept, int):
             return swept
         await _sweep_unrelated(pre)
-        await pre.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE $1", f"{_PREFIX}%")
-        await pre.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE $1", f"{_PREFIX}%")
+        await harness.purge_metadata_for(pre, _LIFECYCLE_DBS)
         if swept:
             print(f"（前置清场：删掉上一次运行残留的 {swept}）")
     finally:
@@ -603,6 +609,68 @@ async def main() -> int:
     finally:
         await maint.close()
     await harness.drop_database(base_dsn, db24)
+
+    # ── ㉕ 前缀扫描按**字面**比，不吃 `_` 通配符（R4-F1 回归）──────────────
+    #    诱饵库匹配 `LIKE 'kline_pilot_lifecycle_%'` 但不以该前缀开头。
+    #    旧判据下：不带 force 它被当成 stranger → 清场返回 4（㉕a 红）；
+    #             带 force 则被 DROP（㉕b 红）。
+    scenario("㉕")
+    print("㉕ 前缀扫描不吃 `_` 通配符")
+    conn = await _connect(base_dsn)
+    try:
+        await conn.execute("CREATE DATABASE " + quote_ident(_LIKE_DECOY_DB))
+        leftover = f"{_PREFIX}g6"          # 真前缀下、且在白名单里 → 应当被删
+        await conn.execute("DROP DATABASE IF EXISTS " + quote_ident(leftover))
+        await conn.execute("CREATE DATABASE " + quote_ident(leftover))
+        swept = await harness.sweep_leftover_databases(
+            conn, prefix=_PREFIX, scenario_dbs=_LIFECYCLE_DBS, name_re=_NAME_RE)
+        decoy_alive = await conn.fetchval(
+            "SELECT count(*) FROM pg_database WHERE datname = $1", _LIKE_DECOY_DB)
+        check(swept == [leftover], "㉕a 清场删掉真前缀下的残留、且只删它",
+              f"实得 {swept!r}（`4` = 判据把诱饵库当成了同前缀的 stranger）")
+        check(decoy_alive == 1, "㉕b 只是 LIKE 命中的无关库不被删",
+              f"{_LIKE_DECOY_DB!r} 没了 —— 判据把 `_` 当通配符了")
+        await conn.execute("DROP DATABASE IF EXISTS " + quote_ident(_LIKE_DECOY_DB))
+    finally:
+        await conn.close()
+
+    # ── ㉖ 凭据表清场只删点名的库名（R4-F2 回归）──────────────────────────
+    #    intent 行在 CREATE DATABASE **之前**写下，是崩溃后判归属的唯一依据；
+    #    按前缀删会把**别的运行**的凭据一并抹掉。
+    scenario("㉖")
+    print("㉖ 凭据表清场只删点名的库名")
+    bystander = f"{_PREFIX}otherrun_7788"   # 同前缀、但**不在** `_LIFECYCLE_DBS` 里
+    mine = _LIFECYCLE_DBS[0]
+    conn = await _connect(base_dsn)
+    try:
+        for name in (bystander, mine):
+            await conn.execute(
+                "INSERT INTO public.pilot_create_intent"
+                " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+                " VALUES ($1, 'x', now(), 'other-run', true, NULL)", name)
+            await conn.execute(
+                "INSERT INTO public.pilot_database_registry"
+                " (dbname, seed, run_id, claimed_at, db_oid)"
+                " VALUES ($1, 'x', 'other-run', now(), 1)", name)
+        await harness.purge_metadata_for(conn, _LIFECYCLE_DBS)
+        kept_i = await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_create_intent WHERE dbname = $1", bystander)
+        kept_r = await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_database_registry WHERE dbname = $1", bystander)
+        gone_i = await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_create_intent WHERE dbname = $1", mine)
+        gone_r = await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_database_registry WHERE dbname = $1", mine)
+        check(kept_i == 1 and kept_r == 1, "㉖a 别的运行的凭据不被清场删掉",
+              f"{bystander!r} 的 intent={kept_i} registry={kept_r}，期望各 1")
+        check(gone_i == 0 and gone_r == 0, "㉖b 点名库名的登记行确实被清掉",
+              f"{mine!r} 的 intent={gone_i} registry={gone_r}，期望各 0")
+    finally:
+        await conn.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", bystander)
+        await conn.execute(
+            "DELETE FROM public.pilot_database_registry WHERE dbname = $1", bystander)
+        await conn.close()
 
     # ── 收尾 ────────────────────────────────────────────────────────────
     conn = await _connect(base_dsn)

@@ -162,10 +162,7 @@ async def main() -> int:
             pre, prefix=_PREFIX, scenario_dbs=_CONC_DBS, name_re=_NAME_RE)
         if isinstance(swept, int):
             return swept
-        await pre.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE $1", f"{_PREFIX}%")
-        await pre.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE $1", f"{_PREFIX}%")
+        await harness.purge_metadata_for(pre, _CONC_DBS)
         if swept:
             print(f"（前置清场：删掉上一次运行残留的 {swept}）")
     finally:
@@ -376,10 +373,7 @@ async def main() -> int:
     try:
         for name in _CONC_DBS:
             await post.execute("DROP DATABASE IF EXISTS " + quote_ident(name))
-        await post.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE $1", f"{_PREFIX}%")
-        await post.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE $1", f"{_PREFIX}%")
+        await harness.purge_metadata_for(post, _CONC_DBS)
     finally:
         await post.close()
 
