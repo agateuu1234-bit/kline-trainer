@@ -43,7 +43,8 @@ L2 脚本 import 的这些符号 **`origin/main` 上不存在**：
 
 | 依赖 | 档 |
 |---|---|
-| **只用 main 已有符号**（14 档）| ① ② ③ ④ ⑭ ⑮ ⑯ ⑰b ⑱ ⑲ ⑳ ⑳b ㉑ ㉔ |
+| **只用 main 已有符号**（13 档）| ① ② ③ ④ ⑮ ⑯ ⑰b ⑱ ⑲ ⑳ ⑳b ㉑ ㉔ |
+| ⚠️ **数据依赖**（符号扫描看不见，实施时才发现）| **⑭** 断言 `leaked` / `right_token` —— 由 ⑪⑫ 捕获的**数据**，故必须与 ⑪⑫ 同片（S2）|
 | `init_cluster_marker`（5 档）| ⑤ ⑤b ㉖ ㉙ ㉚ |
 | `authorize_reset` / `reset_pilot_database`（20 档）| ⑥ ⑦ ⑧ ⑨ ⑨b ⑨c ⑩ ⑪ ⑫ ⑬ ⑰ ㉒ ㉓ ㉕ ㉗ ㉗b ㉘ ㉛ ㉜ ㉜b |
 
@@ -58,8 +59,8 @@ concurrency 10 档：**Ⓐ Ⓐb Ⓑ Ⓑb Ⓑd Ⓑc Ⓒ 只用 main 已有符号*
 
 | 片 | 分支名 | 内容 | 生产代码 | 档位 |
 |---|---|---|---|---|
-| **S1** | `feat/qmt-4a2b-s1-verify-harness` | `_pilot_verify_harness.py` + `verify_pilot_two_phase_create.py` 改造 + concurrency 7 档 + lifecycle 14 档（+ ⑥⑦⑧ 的复用半）| **零** | 28 + 7 + 17 |
-| **S2** | `feat/qmt-4a2b-s2-destructive-core` | 零对象例外 + `authorize_reset` + `reset_pilot_database` + 授权登记表 + **封锁统一（含 R15-F1）** | ~+1000 | lifecycle **新增 17 档 + 给 ⑥⑦⑧ 补 reset 半**、concurrency +3 档 |
+| **S1** ✅已实施 | `feat/qmt-4a2b-s1-verify-harness` | harness + `verify_pilot_two_phase_create.py` 改造 + concurrency 7 档 + lifecycle **16 档**（含 ⑥⑦⑧ 的复用半）| **零** | 28 + 16 + 7 |
+| **S2** | `feat/qmt-4a2b-s2-destructive-core` | 零对象例外 + `authorize_reset` + `reset_pilot_database` + 授权登记表 + **封锁统一（含 R15-F1）** | ~+1000 | lifecycle **新增 18 档（含 ⑭）+ 给 ⑥⑦⑧ 补 reset 半 + 补回 ⑰**、concurrency +3 档 |
 | **S3** | `feat/qmt-4a2b-s3-cluster-init` | `--init-cluster-marker` + 孤儿清理（含 R14-F1 验锁）| ~+400 | +5 lifecycle |
 
 **次序：S1 → S2 → S3。** S1 零生产改动，应当快速 approve；S2 是十五轮 finding 的**集中地**，
