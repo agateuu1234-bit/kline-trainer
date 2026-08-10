@@ -9,9 +9,13 @@ spec §6.2 逐字：「同 `--seed`、不同 `--maintenance-dsn` 的两个进程
    也会「最终返回」，而在一次并发运行里「等了 30 秒才失败」等于把另一次运行挂住。
 
 ⚠️ **本模块从不取锁**（spec O1-F4：advisory lock 只在同一 session 内可重入，
-   模块另开连接去取会自锁）。它只**验锁是否真被持有** —— 故本脚本分两类档：
-     · Ⓐ/Ⓐb/Ⓒ 验的是 **PostgreSQL 的平台行为**（没有对应的生产守卫可中和，如实登记）；
-     · Ⓑ/Ⓑb/Ⓑc 验的是**本模块那条验锁谓词** `_SEED_LOCK_HELD_SQL`，可中和可证伪。
+   模块另开连接去取会自锁）。取锁是**调用方**的事，而会取 pilot seed 锁的那个
+   wrapper 属于 4c、此刻**还不存在** —— 所以本脚本无法「驱动生产取锁路径」，
+   那一档要等 4c 落地后加在它的验收里。本脚本分两类档：
+     · Ⓐ/Ⓐb/Ⓒ 验 **PostgreSQL 的平台行为**（spec §4 互斥设计的地基假设；
+       没有对应的生产守卫可中和，如实登记，**不为它编一个够得到的变异**）；
+     · Ⓑ/Ⓑb/Ⓑc/Ⓑd 验**本模块的生产判据** —— `create_pilot_database` 无锁必拒
+       且零副作用、`_SEED_LOCK_HELD_SQL` 不认两参数/共享锁冒充。可中和可证伪。
 
 用法：
     DSN="postgresql://…:55444/postgres" DSN2="postgresql://…:55445/postgres" \
@@ -167,9 +171,19 @@ async def main() -> int:
     conn_a = await asyncpg.connect(base_dsn)
     conn_b = await asyncpg.connect(base_dsn)
     try:
-        # ── Ⓐ 第二个进程必须**立刻**失败返回，而不是在等 ────────────────
+        # ── Ⓐ 第二把同 seed 的锁必须**立刻**失败返回，而不是在等 ──────────
+        # ⚠️ **这一档验的是 PostgreSQL 的平台行为，不是本工具的行为**
+        #    （codex 4a-2b/S1 R1-F1 说它「没驱动生产取锁路径」——**本模块根本没有
+        #    取锁路径**：spec O1-F4 把取锁放在调用方，`qmt_pilot_db.py` 全文只
+        #    「验锁是否被持有」、一次都不取；会取 pilot seed 锁的那个 wrapper 属于 4c，
+        #    此刻还不存在。等它存在时，「两个真进程并发跑」那一档应当加在**它**的验收里。）
+        #    本档的价值：spec §4 整套互斥设计的**地基假设**（try 版立刻返回、
+        #    锁是每集群的、会话级锁随连接断开释放）必须在真 PG 上被验过，
+        #    而不是想当然 —— 属于「设计地基靠基础设施行为 → 必须真环境验」那一族。
+        #    **驱动生产判据的是 Ⓑ 系列**（`create_pilot_database` 无锁必拒 + 零副作用、
+        #    `_SEED_LOCK_HELD_SQL` 不认两参数/共享锁冒充）。
         scenario("Ⓐ")
-        print("Ⓐ A 持锁时 B 取同一把锁 → 立刻返回 false")
+        print("Ⓐ A 持锁时 B 取同一把锁 → 立刻返回 false（PostgreSQL 平台行为）")
         check(await _try_seed_lock(conn_a, seed), "Ⓐ 前置：A 取到了 seed 锁")
         got_b, elapsed = await _timed_try_seed_lock(conn_b, seed)
         check(got_b is False, "Ⓐ B 取不到锁", "B 竟然也取到了（互斥失效）")

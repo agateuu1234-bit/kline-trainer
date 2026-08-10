@@ -17,13 +17,11 @@
 
     P1=$(docker inspect qmt-pg-r8  --format '{{range .Config.Env}}{{println .}}{{end}}' \\
          | grep POSTGRES_PASSWORD | cut -d= -f2)
-    P2=$(docker inspect qmt-pg-r8b --format '{{range .Config.Env}}{{println .}}{{end}}' \\
-         | grep POSTGRES_PASSWORD | cut -d= -f2)
     DSN="postgresql://postgres:${P1}@localhost:55444/postgres" \\
-    DSN2="postgresql://postgres:${P2}@localhost:55445/postgres" \\
       .venv/bin/python backend/scripts/verify_pilot_db_lifecycle.py; echo "EXIT=$?"
 
-⚠️ **DSN2 必填，缺了直接判失败** —— spec §9 明写「跳过被当成通过」是本仓栽过的坑。
+⚠️ **本脚本只要 DSN**：它没有跨集群档，要求 DSN2 会让人以为跨集群被覆盖了。
+   跨集群那条（advisory lock 是每集群的）在 `verify_pilot_concurrency.py` 的 Ⓐb。
 ⚠️ **判绿读输出内容，不要看管道后的 exit code**（`cmd | tail` 之后 `$?` 是 tail 的）。
 
 退出码：0=全绿 / 1=有档没跑或有 FAIL / 2=用法 / 3=DSN 未过破坏性闸 /
@@ -214,22 +212,21 @@ async def _sweep_unrelated(conn) -> None:
 
 async def main() -> int:
     base_dsn = os.environ.get("DSN")
-    dsn2 = os.environ.get("DSN2")
     if not base_dsn:
         print("用法：DSN='postgresql://user:pw@host:port/postgres' "
-              "DSN2='…' python backend/scripts/verify_pilot_db_lifecycle.py",
+              "python backend/scripts/verify_pilot_db_lifecycle.py",
               file=sys.stderr)
         return 2
-    if not dsn2:
-        # ⚠️ **绝不「跳过」**（spec §9）：一档静默没跑，与它通过了，在输出上完全一样。
-        print("拒绝运行：DSN2 未设置。本脚本的跨集群档位需要第二个 PostgreSQL；"
-              "缺它一律判失败，不接受跳过。", file=sys.stderr)
-        return 2
+    # ⚠️ **本脚本不要 DSN2**（codex 4a-2b/S1 R1-F2）：它此前读了 DSN2、过了破坏性闸、
+    #    还因为缺它而硬失败，**却一处都没用过**——「本脚本的跨集群档位」这句话是假的，
+    #    这个脚本一个跨集群档都没有。要求一个用不到的环境变量，会让操作者与 CI
+    #    以为跨集群被覆盖了，正是本仓反复栽的「宣称的保证 > 实际提供的保证」。
+    #    真正用 DSN2 的是 `verify_pilot_concurrency.py` 的 Ⓐb（advisory lock 是每集群的）。
+    #    ⚠️ 将来这里真加了跨集群档，**必须同时**把 DSN2 的读取 + 破坏性闸加回来 ——
+    #       `harness.assert_every_dsn_env_is_gated` 会在任何连接之前挡住「读了却没加闸」。
 
     # 破坏性闸**必须先于对该 DSN 的任何 connect/DDL**。
     if harness.assert_destructive_dsn_allowed(base_dsn, "DSN") is None:
-        return 3
-    if harness.assert_destructive_dsn_allowed(dsn2, "DSN2") is None:
         return 3
 
     # 三条纯源码自检（零副作用），**必须排在破坏性清场之前**：
