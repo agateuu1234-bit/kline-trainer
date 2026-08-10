@@ -56,9 +56,13 @@
 > 1. **用户发起的**锁定切换，唯一入口是 `setDrawingLocked`；
 > 2. `undoDrawing` / `redoDrawing` 是**仅有的第二个**能改 `locked` 的入口，且受三条硬约束限制
 >    （见 D79）：只从**内部快照**恢复、**不接受任何外部参数**、**不入栈**；
-> 3. 除这三个函数外，`Sources/` 中**零处**改 `locked`、零处直接改 `drawings` 数组。
+> 3. **`locked` 与 `drawings` 是两个不同大小的写入面，必须分开陈述**（codex R6-F1，**已核实为真**）：
+>    - **能改变 `locked` 值的函数恰好两个**：`setDrawingLocked`（语义性写入）与 `applyUndoEntry`（整对象快照恢复，`undoDrawing` / `redoDrawing` 共用它这一个私有单点）。除这两个外，`Sources/` 中零处改 `locked`。
+>    - **`drawings` 数组的写入面是另一个更大的集合**（`appendDrawing` / `deleteDrawing(id:)` / `deleteDrawing(at:)` / `updateDrawingStyle` / `setDrawingLocked` / `applyUndoEntry` / `init` / `injectDrawingsForTesting`）。
 >
-> 源码守卫按第 3 条写（结构计数，见 §1.6 N-B），**不是**按原稿那句话写。
+> ⚠️ 原稿第 3 条写成「除这三个函数外零处直接改 `drawings` 数组」，**这句话是假的** —— 四个既有写入 API 都改 `drawings`，本 spec 后面又把它们列进白名单，等于自相矛盾。照它去写守卫，只会得到一条在合法代码上就红、然后被临时放宽的守卫 —— 正是本 spec 要防的那种漂移。
+>
+> **唯一权威清单 = D79 第一层那张表**（§2.3b）。PR-1 的 N-B 与 PR-2 的 D79 守卫**都从那一张表派生，不各自另立一份**。
 
 ```swift
 // 访问级别必须是 internal —— 不写 public，且这一条要被守卫钉住（见 §1.6 N-G）
@@ -188,7 +192,7 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
    判据 = `drawings[` 下标赋值 / `drawings.remove` / `drawings.insert` / `drawings.append` 的出现总数**恰好等于**白名单函数里的出现数。**多一处即红。**
    ⛔ **PR-1 这条判据里不含整体赋值 `drawings = `**（codex R4-F3，medium，**已核实为真**）：现树上 `init:178` 的 `self.drawings = seededLossy.drawings` 与 `injectDrawingsForTesting:1452` 的 `drawings = ds` 都是合法的整体赋值，而它们要到 PR-2 的 D79 表里才被分类。把整体赋值放进 PR-1 的判据，**守卫在功能还没写之前就是红的** —— 实施者只会顺手放宽它，那它就再也保护不了 locked 写入边界。
    整体赋值统一由 **PR-2 的 D79 穷尽性判据**接管（那张表把 `init` 与 `injectDrawingsForTesting` 都显式分类了），两条判据**互不重叠**。
-   - **PR-1 的白名单** = `appendDrawing` / `deleteDrawing(at:)` / `deleteDrawing(id:)` / `updateDrawingStyle` / `setDrawingLocked`。
+   - **PR-1 的白名单从 D79 那张唯一权威表派生，不另立一份**（codex R6-F1）= 表中做「下标 / 增删」的那些行：`appendDrawing` / `deleteDrawing(at:)` / `deleteDrawing(id:)` / `updateDrawingStyle` / `setDrawingLocked`（`init` 与 `injectDrawingsForTesting` 是整体赋值，按下一段不在 PR-1 判据内）。
    - **PR-2 落地时把本条升级为 D79 第一层那张表的穷尽性判据**（覆盖面从「下标 / 增删」扩到**全部** `drawings` 写入点，含整体赋值与 `injectDrawingsForTesting`），并把 `applyUndoEntry` 加进白名单。⚠️ **两条守卫必须合并成一条，不许并存** —— 同一族判据留两份、迟早漂移（`feedback_fix_the_whole_predicate_family_not_the_reported_site`）。⚠️ 白名单是**具名函数**，不许用 `*Drawing*` 之类通配（通配会让下一个新写入口静默溜过，`feedback_parallel_session_branch_contamination` 的 G6 教训）。
 
 ⚠️ 第 2 条是 codex R1-F1 逼出来的：只写第 1 条的话，`drawings[index] = before`（整对象赋值，字面上不含 `locked:`）会**从守卫底下溜过去**，而它恰恰是改 `locked` 的第二条路径 —— 守卫比它声称的不变量弱，正是本仓反复踩的判据漂移。
@@ -276,9 +280,17 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 
 ⚠️ **`cancelDrawingAllPanels` 是第三个函数，原稿漏了它**（codex R4-F2，high，**已核实为真**）：只在 begin / end 清栈会让它退出后残留一个陈旧栈；而原稿那条「activate/deactivate 只准出现在 begin/end 内」的守卫会直接在 `:1321` 这行**既有合法代码**上误红。
 
-**规则**：上述 3 个函数**每一个**都必须清栈。
-**守卫按「共处」写，不按函数名清单写**：断言 `Sources/` 中**凡是含 `drawingSession.activate(` 或 `drawingSession.deactivate(` 的函数，必定也含 `clearDrawingUndoStack()`**。
-这样将来任何人加第四条会话翻转路径，守卫立刻变红直到他也清栈 —— 判据钉在**状态翻转**这件事上，而不是钉在一份会过期的函数名单上（`feedback_fix_the_whole_predicate_family_not_the_reported_site`）。
+**规则**：清栈必须绑在 **`drawingModeActive` 真的翻转**的那一刻（`false→true` 或 `true→false`），**不是**绑在"进了某个函数"。
+
+⚠️ **「函数里有 activate/deactivate 就得有 clearDrawingUndoStack」这条共处判据不够**（codex R6-F2，**已核实为真**）：`beginDrawingSession`（`:1351`）第一行就是 `guard DrawingToolType.implemented.contains(tool) else { return }` —— 一条**没有任何状态翻转**的早退；它还是 `public`，会话已经开着时再调一次也不构成翻转。实施者只要把 `clearDrawingUndoStack()` 放在函数入口，就能满足共处判据，却在这两种情况下**悄悄抹掉一条有效的撤销记录**——用户什么都没做，↩ 就灰了。
+
+**落地形态**：清栈与 `drawingSession.activate(` / `deactivate(` **同一条语句序列、同一个分支**内（即：真的调了 activate/deactivate 才清），而不是函数入口。
+
+**守卫两条并用**（单靠任一条都能被绕过）：
+1. **共处**：凡含 `drawingSession.activate(` 或 `drawingSession.deactivate(` 的函数，必定含 `clearDrawingUndoStack()` —— 保证将来第四条翻转路径不会漏掉清栈。当前应命中 `beginDrawingSession` / `endDrawingSessionIfActive` / `cancelDrawingAllPanels` 三个函数。
+2. **行为**（比守卫更硬，见 N-Q4/N-Q5）：被拒的 begin 与冗余的 begin-while-active **必须保留栈** —— 这条把「入口清栈」那种实现直接测红。
+
+判据钉在**状态翻转**上，而不是钉在一份会过期的函数名单上（`feedback_fix_the_whole_predicate_family_not_the_reported_site`）。
 
 **并加测试**（N-Q，见 §2.6）：`.tradeTriggered`（下单成交）与 `cancelDrawingAllPanels` 两条**非 UI 触发**的退出路径各一条，断言栈被清空。
 
@@ -467,15 +479,20 @@ undo / redo 共用一个私有单点 `applyUndoEntry`，进它先过下面这组
 - **N-Q2 `cancelDrawingAllPanels`（第三条拆除路径，原稿漏了）**：同上，改用 `cancelDrawingAllPanels()` 结束会话 → 同样断言栈已清空。
 - **N-Q3 切周期必须**保留**栈（正向测试，防我们把它误当退出路径）**：画一条线 → `switchPeriodCombo(...)` 真的换了组合 → 断言 ① `drawingModeActive` **仍为 true**（与既有 `realPeriodChangeDiscardsOnlyPendingAnchors` 一致）；② 撤销栈**仍非空**、↩ **仍可用**；③ 点 ↩ 能正确撤掉切周期之前画的那条线。
 
+- **N-Q4 被拒的 begin 必须保留栈（codex R6-F2）**：画一条线（栈非空）→ 调 `beginDrawingSession(tool:)` 传一个**未实现**的工具（走 `:1352` 那条 `guard ... implemented` 早退，无任何状态翻转）→ 断言撤销栈**仍非空**、↩ 仍可用、点 ↩ 仍能正确撤销。
+- **N-Q5 冗余的 begin-while-active 必须保留栈**：会话已开 → 画一条线（栈非空）→ 再调一次 `beginDrawingSession(tool: .horizontal)` → 断言栈**仍非空**且内容不变。
+
+⚠️ N-Q4 / N-Q5 是把「清栈放在函数入口」那种实现**直接测红**的两条 —— 光靠 N-S 的共处守卫拦不住它。
 ⚠️ N-Q1 / N-Q2 **不得**用「点退出按钮」那条 UI 路径代替 —— 那条恰恰是本来就会清的，用它测等于什么都没测（同 N-N3 原稿那个恒过测试的错误）。
 
 **N-R　no-op 样式点击不冲掉撤销记录（D80 的 PR-2 侧，codex R3-F2）**
 改一条线的颜色（栈里是这次真编辑）→ **把同一个颜色再点一次**（`before == after`）→ 断言撤销栈**栈顶仍是那次真编辑**（不是被 no-op 覆盖）→ 点 ↩ → 颜色回到**改之前**。
 **不得**只断言「revision 没变」—— 那测不出栈被覆盖。
 
-**N-S　会话翻转与清栈**共处**（D74 守卫，钉在状态翻转上、不钉函数名单）**
+**N-S　会话翻转与清栈**共处**（D74 守卫之一 —— 单靠它不够，必须配 N-Q4/N-Q5）**
 源码守卫：`Sources/` 中**凡是含 `drawingSession.activate(` 或 `drawingSession.deactivate(` 的函数，必定也含 `clearDrawingUndoStack()`**。当前应命中三个函数：`beginDrawingSession` / `endDrawingSessionIfActive` / `cancelDrawingAllPanels`。
 配反向自检：造一个含 `deactivate(` 但不含清栈的函数 → 守卫必须变红。
+⚠️ **本守卫拦不住「清栈写在函数入口」**（那样它照样共处、却会在早退与冗余调用上误清）—— 那条由**行为测试** N-Q4 / N-Q5 兜住。两者缺一不可。
 ⚠️ **不许**写成「只准出现在 begin/end 内」—— 那条在 `cancelDrawingAllPanels:1321` 这行**既有合法代码**上就是红的（codex R4-F2）。
 
 **N-O　撤销不绕过 review 门**
