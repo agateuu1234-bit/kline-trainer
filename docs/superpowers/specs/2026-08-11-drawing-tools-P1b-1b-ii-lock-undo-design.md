@@ -25,7 +25,7 @@
 | 片 | 交付 | 生产代码估算 |
 |---|---|---|
 | **PR-1　锁定** | 底栏 **②🔒** + `setDrawingLocked` 引擎 API + 路由与可用性谓词 + 锁定线的置灰传播 | ~120 行 |
-| **PR-2　撤销** | 底栏 **④↩ ⑤↪** + 撤销栈（深度 1）+ 四类动作的 undo / redo | ~180 行 |
+| **PR-2　撤销** | 底栏 **④↩ ⑤↪** + 撤销栈（深度 1）+ 四类动作的 undo / redo + D79 的双层陈旧栈防护 | ~220 行 |
 
 **次序不可乱：PR-1 → PR-2。**
 
@@ -44,7 +44,21 @@
 
 ### 1.1 D69　`setDrawingLocked(id:locked:)` 的门列表
 
-新增引擎 API，**是 `Sources/` 里唯一被允许改 `locked` 的入口**：
+新增引擎 API。
+
+> ⚠️ **不变量的作用域必须写准**（codex R1-F1，high，**已核实为真**）。
+> 原稿写的是「`Sources/` 里**唯一**被允许改 `locked` 的入口」，而 §2.3 的 D76 又要求 undo / redo 用
+> `drawings[index] = before/after` 恢复快照——快照里**含 `locked`**。两句话不可能同时成立：
+> 严格执行前者会让 PR-2 的「撤销锁定」无法实现；而把 undo 改成去调 `setDrawingLocked`，
+> 又会踩到**入栈重入**（撤销这个动作本身又入一次栈）和 D69 的幂等零递增路径。
+>
+> **修正后的不变量（PR-1 / PR-2 共同遵守）**：
+> 1. **用户发起的**锁定切换，唯一入口是 `setDrawingLocked`；
+> 2. `undoDrawing` / `redoDrawing` 是**仅有的第二个**能改 `locked` 的入口，且受三条硬约束限制
+>    （见 D79）：只从**内部快照**恢复、**不接受任何外部参数**、**不入栈**；
+> 3. 除这三个函数外，`Sources/` 中**零处**改 `locked`、零处直接改 `drawings` 数组。
+>
+> 源码守卫按第 3 条写（结构计数，见 §1.6 N-B），**不是**按原稿那句话写。
 
 ```swift
 @discardableResult
@@ -151,7 +165,18 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 
 **N-B　解锁是唯一通路**
 `updateDrawingStyle` 对 locked 线恒返回 `false` 且不改 `drawingsRevision`（回归保护 D60）；解锁只能经 `setDrawingLocked`。
-**并加源码守卫**：`Sources/` 中除 `setDrawingLocked` 外**零处**写 `locked:` 为非拷贝值。守卫必须**剥注释剥字面量**后再断言（`feedback_source_guard_text_source_discipline`），并配一条反向自检（故意加一处写入 → 守卫必须变红）。
+**并加源码守卫（按 D69 修正后的第 3 条不变量写，不是按「唯一入口」那句写）**：
+
+守卫是**结构计数**，不是禁词黑名单（`feedback_source_guard_text_source_discipline`）。判据两条，缺一不可：
+
+1. **`locked` 的具名写入**：`Sources/` 中形如 `locked: <非 old.locked / 非 d.locked 的表达式>` 的位置**恰好 1 处**，且在 `setDrawingLocked` 里。
+2. **`drawings` 数组的结构性改动**：`drawings[` 下标赋值 / `drawings.remove` / `drawings.insert` / `drawings.append` 的出现总数**恰好等于**白名单函数里的出现数。**多一处即红。**
+   - **PR-1 的白名单** = `appendDrawing` / `deleteDrawing(at:)` / `deleteDrawing(id:)` / `updateDrawingStyle` / `setDrawingLocked`。
+   - **PR-2 落地时把 `applyUndoEntry`（D79 的私有单点）加进白名单** —— 这是 PR-2 必须动这条守卫的**唯一**一处，动它就要同步更新反向自检。⚠️ 白名单是**具名函数**，不许用 `*Drawing*` 之类通配（通配会让下一个新写入口静默溜过，`feedback_parallel_session_branch_contamination` 的 G6 教训）。
+
+⚠️ 第 2 条是 codex R1-F1 逼出来的：只写第 1 条的话，`drawings[index] = before`（整对象赋值，字面上不含 `locked:`）会**从守卫底下溜过去**，而它恰恰是改 `locked` 的第二条路径 —— 守卫比它声称的不变量弱，正是本仓反复踩的判据漂移。
+
+守卫必须**剥注释剥字面量**后再断言，并各配一条**反向自检**（分别故意加一处 `locked:` 写入、一处 `drawings[i] =` 赋值 → 对应那条守卫必须变红）。
 
 **N-C　门列表逐条**
 ⓪ 复盘模式下 `setDrawingLocked` 恒 `false`、`drawings` 与 `drawingsRevision` 均不动；
@@ -240,6 +265,30 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 两者都 `drawingsRevision += 1` 并照常落盘。
 **redo 恒用 `after` 快照，绝不从当前默认样式 / 当前选中态重算**（D25 / split addendum §7.3 #6c）。
 
+### 2.3b D79　陈旧下标是**崩溃级**缺陷 —— 双层防护（根因 + 兜底），不是只加校验
+
+codex R1-F2（high，**已核实为真**）：原稿的 D76 直接在存下来的 `index` 上做 `remove(at:)` / `insert(at:)` / 下标赋值，**一处边界与身份校验都没有**。而 D74 把栈的生命周期交给了 UI 驱动 —— 只要有一条路径漏了清栈（模式切换、续局重载、任何把 `drawings` 整体换掉的加载路径），栈里就留着一条对不上号的记录。
+
+**后果比"结果不对"严重**：Swift 数组越界是 **trap（进程直接崩）**，`do/catch` 接不住；不越界但身份对不上时，则是**删掉 / 改写了另一条线**，然后 `drawingsRevision += 1` 让这个坏状态**被 autosave 固化**。
+
+按本仓纪律「修 symptom 会挪动失败面 → 必须让坏状态不可表达」（`feedback_internal_review_misses_bad_data`），**两层都要，不许只做兜底那层**：
+
+**第一层（根因）：栈由引擎自己作废，不指望 UI 记得清。**
+`drawings` 被**整体替换**的每一条路径（加载 / `resumePendingReplay` 续局 / replay 种入 / 任何非四个写入 API 的赋值）都必须**同步清空撤销栈**。落点与 D74 一致：栈在引擎里，清栈也在引擎里，UI 的进 / 退画线模式只是**额外**再清一次。
+⚠️ 这条必须配**穷尽性守卫**，不能只改手头想到的那几处：源码守卫断言「`Sources/` 中对 `drawings` 的整体赋值（`drawings = ...`）出现处**全部**位于清栈函数内」——判据按**判据本身**穷尽全仓，不是按报告点位改（`feedback_fix_the_whole_predicate_family_not_the_reported_site`）。
+
+**第二层（兜底）：`applyUndoEntry` 的前置条件，逐 case 写死。**
+undo / redo 共用一个私有单点 `applyUndoEntry`，进它先过下面这组门，**任一不成立 → 返回 `false`、`drawings` 不动、`drawingsRevision` 不递增、并把整个撤销栈作废**（fail-closed，不留半吊子状态）：
+
+| 目标操作 | 前置条件 |
+|---|---|
+| `remove(at: index)` | `drawings.indices.contains(index)` **且** `drawings[index].id == 快照 id` |
+| `insert(obj, at: index)` | `0...drawings.count` 含 `index` **且** `obj.id` 在 `drawings` 中**不存在**（防 D66 的重复 id） |
+| `drawings[index] = obj` | `drawings.indices.contains(index)` **且** `drawings[index].id == obj.id` |
+
+**第三条硬约束（防重入）：`applyUndoEntry` 自身绝不入栈。**
+撤销栈是深度 1 的 before/after 对，undo 只是把栈顶标记成「已撤销」、redo 标回去；**两者都不产生新栈项**。这正是 D69 修正后的不变量第 2 条所要求的——否则「撤销一次锁定」会把这次撤销本身又推进栈里，第二次点 ↩ 的行为无法定义。
+
 ### 2.4 D77　undo / redo 之后的选中态
 
 | 情形 | 选中态 |
@@ -286,6 +335,22 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 空栈时调 `undoDrawing` / `redoDrawing` → 返回 `false`、`drawings` 与 `drawingsRevision` 均不动、**不触发 autosave**。
 **并配正向档**：非空栈调用必须返回 `true` 且 `drawings` 真的变了（同 N-C 的理由）。
 
+**N-N2　陈旧栈项 —— 三个 case 各一条（D79 第二层，codex R1-F2）**
+直接给引擎种一条**对不上号**的栈项，断言 fail-closed：
+① **下标越界**（index 大于 `drawings.count`）→ `undoDrawing()` 返回 `false`、**不崩**、`drawings` 与 `drawingsRevision` 均不动；
+② **下标在界内但 id 对不上**（那个位置换成了别的线）→ 同样 `false`、**那条无辜的线逐字段不变**；
+③ **insert 时 id 已存在**（重复 id）→ `false`，`drawings` 条数不变。
+三条都必须再断言**撤销栈已被作废**（随后 ↩ / ↪ 均不可用）。
+⚠️ ① 是**崩溃回归测试**：没有它，越界 trap 在测试里表现为整个 xctest 进程挂掉而不是一条红断言，容易被误读成环境问题。
+
+**N-N3　整体替换必清栈（D79 第一层，根因）**
+画一条线（栈非空）→ 走 `resumePendingReplay` 续局重载 → 断言撤销栈**已空**（↩ 不可用），且此时调 `undoDrawing()` 返回 `false` 不动数据。
+**并加源码守卫**：`Sources/` 中 `drawings = ` 整体赋值的出现处**全部**位于清栈函数内（穷尽性判据，配反向自检）。
+
+**N-N4　undo / redo 不入栈（D79 第三条）**
+锁定一条线 → ↩ → 断言撤销栈**深度仍是 1 且栈顶还是那次锁定**（不是"撤销锁定"这个新动作）→ 再点 ↩ 无效果（N-K 已覆盖行为，本条覆盖**栈内容**）。
+**不得**只断言「第二次点没反应」—— 那在「入栈了但恰好被深度 1 挤掉」的错误实现下也会过。
+
 **N-O　撤销不绕过 review 门**
 复盘模式下 `undoDrawing` / `redoDrawing` 恒 `false`（D34 纵深防御；栈本就不该在复盘里建起来，但引擎侧仍要有门）。
 
@@ -322,7 +387,17 @@ PR-1 的 N-A～N-H 与 1b-i / 1a-i 的既有测试在本 PR 仍全绿。
 
 **两个 PR 均为纯 UI / 引擎层：`CONTRACT_VERSION` 保持 `1.12`、`user_version` 保持 `7`、零迁移。**
 
-依据：`locked` 字段自 P1a 的迁移 0009 起就已在 `style_json` 列里往返（`LossyDrawingArray.knownDiskKeys` 含 `"locked"`），本 spec 不新增任何字段、不扩展任何枚举值域、只写入 `.horizontal`。撤销栈**不落盘**（D25：退出画线模式即清空），不进契约。
+依据（**逐条给出，不用「只写入 `.horizontal`」这种笼统说法**——codex R1-F3 指出原稿的理由站在假前提上）：
+
+1. **不新增字段、不新建迁移**：`locked` 自 P1a 的迁移 0009 起就在 `style_json` 列里往返（`LossyDrawingArray.knownDiskKeys` 含 `"locked"`）。
+2. **不扩展任何枚举值域**：本 spec 不产生任何新的 `toolType` / 样式枚举值。**新建**画线仍只产 `.horizontal`。
+3. **对非 `.horizontal` 记录的"编辑"是否构成跨版本写入 —— 分两层回答**：
+   - **UI 路径不可达**（已核实）：`DrawingHitTester.firstHit`（`Drawing/DrawingHitTester.swift:26`）对渲染注册表里没有的工具**直接返回 `false`**，而 P1b 的注册表只有 `.horizontal`。选不中 ⇒ 路由取不到目标 ⇒ `setDrawingLocked` 够不着。故**本构建的用户无法锁定 / 解锁任何非水平线**。
+   - **即便够得着也不产生版本错位**：raw-preserving 单字段 merge（D70）保证除 `locked` 外的原始字节逐字不动，`toolType` 与所有未来字段原样保留。高版本读回去看到的是**它自己那条线，只有 `locked` 被翻转** —— 这正是用户请求的语义，不是数据损坏。
+4. **撤销栈不落盘**（D25：退出画线模式即清空），不进契约。
+
+**举证测试（不可省）**：给 N-A 增加**第三个分量** —— 一条 `toolType` 为 `.trend`（枚举已声明、本构建无渲染器）且带未来字段的线，断言 ① 它**不出现在命中结果里**（选不中）；② 若绕过路由直接调引擎 `setDrawingLocked`，保存后 `toolType` 与全部未来字节**逐字不变**、只有 `locked` 变了。
+第 ① 条锁住"UI 不可达"这个论点，第 ② 条锁住"即便可达也无损"这个论点 —— **两条都要，只写一条都是把结论建在没测过的那半上。**
 
 ---
 
@@ -331,4 +406,7 @@ PR-1 的 N-A～N-H 与 1b-i / 1a-i 的既有测试在本 PR 仍全绿。
 - **P1c**：`undoDrawing` / `redoDrawing` 目前假设一次动作只影响**一条**线。P1c 的折线画制中临时 4 键（`[回退][前进]` 作用于**锚点**而非整条线）是另一套语义，**不得**复用本 spec 的撤销栈。
 - **P5**：复盘获得编辑能力时，`reviewDrawings` 需要等价的 revision 触发器（D56）与等价的撤销栈；且选中必须扩展为 `(layer, id)` 二元组并按层门控（D34 / split addendum §9）。
 - **P6**：`defaultStyle` 持久层零引用（不落盘），杀 App 重开后「下一条线的默认」回出厂值。**是已知的 P6 范围，不是本 spec 的回归。**
-- **残留（本 spec 不修，明确记录）**：带未来数据的线解锁后仍**改不动样式**（D61 门保留在 `updateDrawingStyle` 上）。用户对这类线的处置通道是整条删除。P3 / 未来版本认识那些值后自然解禁。
+- **残留①（本 spec 不修，明确记录）**：带未来数据的线解锁后仍**改不动样式**（D61 门保留在 `updateDrawingStyle` 上）。用户对这类线的处置通道是整条删除。P3 / 未来版本认识那些值后自然解禁。
+- **残留②（codex R1-F3 顺出来的，本 spec 不修）**：高版本写的**非水平线**若带 `locked == true`，在本构建里**既解不开也删不掉**——因为它**选不中**（无渲染器 ⇒ 不命中），路由够不着，而 `deleteDrawing(id:)` 的 locked 门也会拒它，`finalize` 门则会因未来数据 `throw`。
+  这是 **N14h 的同族**，且**与 D69 是否带工具门无关**：带了工具门同样锁不上也解不开，因为门在引擎、而卡点在"选不中"。真正的解药是 P1c 给这些工具**装上渲染器**（选得中 ⇒ 解得开 ⇒ 删得掉），届时本条自然消失。
+  ⚠️ **P1c 必须接手**：它的三组举证测试第 3 组（「可解码但无渲染器」路径）要把这条一并覆盖 —— 不能只测"不渲染"，还要测**这类线不会把整局卡死在归不了档的状态里**。
