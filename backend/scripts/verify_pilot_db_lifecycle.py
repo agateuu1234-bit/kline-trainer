@@ -106,9 +106,18 @@ _SCRATCH_OBJECTS = (
 )
 
 # 无关库（不带 pilot 前缀）—— 用于集群闸 ② 那一档。
-# ⚠️ 它不匹配 `_PREFIX`，故**不进** `_LIFECYCLE_DBS`（那张表是「同前缀库」的白名单）；
-#    它的清理单独做，见 `_sweep_unrelated`。
+# ⚠️ 它不匹配 `_PREFIX`，故**不进** `_LIFECYCLE_DBS`（那张表是「同前缀库」的白名单）。
 _UNRELATED_DB = "zzqmtverify_unrelated"
+
+# 本脚本可能 DROP 的**不带 pilot 前缀**的库。它们在 `sweep_leftover_databases` 的
+# 白名单机制之外，故单独登记 + 单独 fail-closed。
+# ⚠️ **这是一条真栽过的**（codex 4a-2b/S1 R2-F1，high，实测复现）：
+#    前置清场原本无条件 `DROP DATABASE IF EXISTS zzqmtverify_unrelated` ——
+#    在共享 PG 上手工建一个同名库、灌 500 行数据，**光是启动本脚本就把它删光了**，
+#    而那时任何档位都还没跑、任何归属都还没证明。
+#    这与 harness 那条「精确白名单，绝不按前缀盲删」是同一条纪律，
+#    只是数据库这一侧此前漏了 —— 前缀名不是归属证明，固定名同样不是。
+_OWNED_EXTRA_DBS = (_UNRELATED_DB,)
 
 # 验收闸的**完整性清单**：收尾核对每一档都真的跑过。
 # ⚠️ 少一档即失败 —— **「静默没跑」与「通过了」在输出上完全一样**，
@@ -198,13 +207,52 @@ async def _in_db(base_dsn: str, dbname: str, *statements: str) -> None:
         await conn.close()
 
 
-async def _sweep_unrelated(conn) -> None:
-    """清掉本脚本可能留下的无关库与临时对象。
+def assert_extra_dbs_are_namespaced() -> int | None:
+    """`_OWNED_EXTRA_DBS` 里每个名字都必须带 `zzqmtverify_` 归属前缀。
 
-    ⚠️ 只删**本脚本自己造的那个固定名字**，不按前缀盲扫 —— 与 harness 的
-       白名单清场同一条纪律：前缀匹配 ≠ 本脚本建的。
+    ⚠️ 与 `assert_scratch_objects_are_namespaced` 同一条纪律，只是作用在**库**上：
+       清理是 `DROP DATABASE`，通名（`scratch` / `tmpdb`）会在开发机或 CI 上
+       把别人同名的库**不可逆地**删掉。
     """
-    await conn.execute("DROP DATABASE IF EXISTS " + quote_ident(_UNRELATED_DB))
+    bad = [d for d in _OWNED_EXTRA_DBS if not d.startswith("zzqmtverify_")]
+    if bad:
+        print(f"拒绝运行：这些非 pilot 前缀的库名没带 `zzqmtverify_` 归属前缀：{bad}"
+              f" —— 清理它们是 DROP DATABASE，通名会删掉别人的库", file=sys.stderr)
+        return 6
+    return None
+
+
+async def assert_extra_dbs_are_not_preexisting(conn) -> int | None:
+    """前置清场：`_OWNED_EXTRA_DBS` 里的库**若已经存在就拒绝运行**（R2-F1）。
+
+    ⚠️ 判据是「本次运行之前它就在」——那说明它**不是本脚本这次造的**，
+       归属证明不成立，绝不删。这与 harness 的 strangers 分支同一语义与同一逃生口。
+    """
+    present = [d for d in _OWNED_EXTRA_DBS if await conn.fetchval(
+        "SELECT count(*) FROM pg_database WHERE datname = $1", d)]
+    if not present:
+        return None
+    if os.environ.get("QMT_VERIFY_FORCE_CLEANUP") == "1":
+        print(f"（QMT_VERIFY_FORCE_CLEANUP=1：删掉已存在的 {present}）")
+        for d in present:
+            await conn.execute("DROP DATABASE IF EXISTS " + quote_ident(d))
+        return None
+    print(f"拒绝运行：这些库在本次运行**之前**就存在：{present}。"
+          f"本脚本会不可逆地删掉它们，而它们不是本次造的、归属无从证明。"
+          f"确认可弃后设 QMT_VERIFY_FORCE_CLEANUP=1 重跑，或先自行删除。",
+          file=sys.stderr)
+    return 4
+
+
+async def _sweep_unrelated(conn) -> None:
+    """收尾：清掉**本次运行造出来的**无关库与临时对象。
+
+    ⚠️ 只在成功路径上跑，此时这些东西确实是本次造的 ——
+       「本次之前就存在」那一档由 `assert_extra_dbs_are_not_preexisting` 在
+       任何 DDL 之前挡掉。
+    """
+    for d in _OWNED_EXTRA_DBS:
+        await conn.execute("DROP DATABASE IF EXISTS " + quote_ident(d))
     for kind, obj in _SCRATCH_OBJECTS:
         await conn.execute(f"DROP {kind} IF EXISTS {obj}"
                            + (" CASCADE" if kind == "SCHEMA" else ""))
@@ -233,6 +281,7 @@ async def main() -> int:
     # 放在清场之后会被 strangers 闸先触发而永远测不到。
     for rc in (harness.assert_every_dsn_env_is_gated(__file__),
                harness.assert_scratch_objects_are_namespaced(_SCRATCH_OBJECTS),
+               assert_extra_dbs_are_namespaced(),
                harness.assert_every_selfcheck_db_is_whitelisted(
                    __file__, _LIFECYCLE_DBS, _PREFIX)):
         if rc is not None:
@@ -243,6 +292,9 @@ async def main() -> int:
     pre = await _connect(base_dsn)
     try:
         await _apply_cluster_schema(pre)
+        rc = await assert_extra_dbs_are_not_preexisting(pre)
+        if rc is not None:
+            return rc
         swept = await harness.sweep_leftover_databases(
             pre, prefix=_PREFIX, scenario_dbs=_LIFECYCLE_DBS, name_re=_NAME_RE)
         if isinstance(swept, int):
