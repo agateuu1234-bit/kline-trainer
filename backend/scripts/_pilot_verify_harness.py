@@ -21,7 +21,7 @@ import os
 import pathlib
 import re
 import sys
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse, urlsplit, urlunsplit
 
 import asyncpg
 
@@ -55,12 +55,23 @@ def assert_destructive_dsn_allowed(dsn: str, label: str) -> str | None:
 
 
 def db_dsn(base_dsn: str, dbname: str) -> str:
-    """把 DSN 的**库名**换掉。
+    """把 DSN 的**库名**换掉，其余部分（查询参数等）原样保留。
 
     ⚠️ 绝不能用 `str.replace` —— 用户名也可能叫 `postgres`。
+    ⚠️ 也绝不能按**最后一个 `/`** 切（codex 4a-2b/S1 R6-F2）：查询参数里带斜杠的
+       合法 DSN（`...?sslrootcert=/tmp/ca.crt`）最后那个 `/` 在 query 里，切出来的
+       结果**库名根本没换**，而调用方以为自己连的是临时库，实际连着维护库并在上面
+       跑 DDL/探针 —— 既污染维护库，又让整个验收信号不可信。
+       故只替换 URL 的 **path** 分量。
+    ⚠️ 只认 URL 形态：keyword/value 形态（`host=... dbname=...`）在这里**抛**而不是
+       猜 —— 猜错的代价是把探针指向别的库，而本仓的脚本一律用 URL 形态。
     """
-    head, _, _ = base_dsn.rpartition("/")
-    return f"{head}/{dbname}"
+    parts = urlsplit(base_dsn)
+    if parts.scheme not in ("postgres", "postgresql"):
+        raise AssertionError(
+            f"db_dsn 只支持 URL 形态的 DSN（postgres:// 或 postgresql://），"
+            f"实得 scheme={parts.scheme!r}")
+    return urlunsplit(parts._replace(path="/" + quote(dbname, safe="")))
 
 
 async def drop_database(base_dsn: str, dbname: str) -> None:

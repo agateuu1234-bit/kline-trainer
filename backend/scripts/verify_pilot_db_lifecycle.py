@@ -50,6 +50,7 @@ import os
 import pathlib
 import re
 import sys
+import uuid
 
 import asyncpg
 
@@ -654,19 +655,40 @@ async def main() -> int:
     #    按前缀删会把**别的运行**的凭据一并抹掉。
     scenario("㉖")
     print("㉖ 凭据表清场只删点名的库名")
-    bystander = f"{_PREFIX}otherrun_7788"   # 同前缀、但**不在** `_LIFECYCLE_DBS` 里
+    # ⚠️ 旁观者的名字与 run_id 必须**本次运行唯一**（codex 4a-2b/S1 R6-F1，high）：
+    #    上一版用固定名 `…otherrun_7788`，插入前不查、`finally` 里只按 dbname 无条件删。
+    #    `dbname` 是这两张表的**主键** —— 该名字若已有真行（真运行留下的，或上一次被
+    #    打断的验收留下的），INSERT 直接抛，而 `finally` 照样把那些**真凭据**删掉。
+    #    也就是说：这一档本身犯了它要防的那个错。
+    #    现在：唯一名 + 插入前 fail-closed 断言不存在 + 清理按 `dbname` **且** `run_id`，
+    #    绝不碰不是本次写下的行。
+    token = uuid.uuid4().hex[:12]
+    bystander = f"{_PREFIX}bystander_{token}"   # 同前缀、但**不在** `_LIFECYCLE_DBS` 里
+    bystander_run = f"zzqmtverify-bystander-{token}"
     mine = _LIFECYCLE_DBS[0]
     conn = await _connect(base_dsn)
     try:
+        pre_i = await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_create_intent WHERE dbname = $1", bystander)
+        pre_r = await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_database_registry WHERE dbname = $1", bystander)
+        if pre_i or pre_r:
+            # 唯一名撞上 = 归属无从证明 → 不写、不删、直接判失败。
+            check(False, "㉖ 前置：旁观者库名在本次运行之前必须没有任何登记行",
+                  f"{bystander!r} 已有 intent={pre_i} registry={pre_r} —— 拒绝碰它")
+            raise RuntimeError(f"㉖ 旁观者名字 {bystander!r} 已被占用，拒绝改动它的凭据")
+        # `mine` 在本脚本自己的白名单里 —— 先清掉它自己的行再插，免得将来新增某个
+        # 会给 c4 写 intent 的档位时，这里因主键冲突而崩（那是脆弱，不是判据）。
+        await harness.purge_metadata_for(conn, (mine,))
         for name in (bystander, mine):
             await conn.execute(
                 "INSERT INTO public.pilot_create_intent"
                 " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
-                " VALUES ($1, 'x', now(), 'other-run', true, NULL)", name)
+                " VALUES ($1, 'x', now(), $2, true, NULL)", name, bystander_run)
             await conn.execute(
                 "INSERT INTO public.pilot_database_registry"
                 " (dbname, seed, run_id, claimed_at, db_oid)"
-                " VALUES ($1, 'x', 'other-run', now(), 1)", name)
+                " VALUES ($1, 'x', $2, now(), 1)", name, bystander_run)
         await harness.purge_metadata_for(conn, _LIFECYCLE_DBS)
         kept_i = await conn.fetchval(
             "SELECT count(*) FROM public.pilot_create_intent WHERE dbname = $1", bystander)
@@ -681,10 +703,14 @@ async def main() -> int:
         check(gone_i == 0 and gone_r == 0, "㉖b 点名库名的登记行确实被清掉",
               f"{mine!r} 的 intent={gone_i} registry={gone_r}，期望各 0")
     finally:
+        # ⚠️ `run_id` 必须一起进 WHERE：只按 dbname 删就是「删掉不是本次写的行」——
+        #    正是本档要证伪的那件事。
         await conn.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", bystander)
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1 AND run_id = $2",
+            bystander, bystander_run)
         await conn.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname = $1", bystander)
+            "DELETE FROM public.pilot_database_registry WHERE dbname = $1 AND run_id = $2",
+            bystander, bystander_run)
         await conn.close()
 
     # ── 收尾 ────────────────────────────────────────────────────────────
