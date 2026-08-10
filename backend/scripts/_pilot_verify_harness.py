@@ -41,13 +41,31 @@ def assert_destructive_dsn_allowed(dsn: str, label: str) -> str | None:
     而 `DSN2` 从环境变量读出来就直接 `_drop(dsn2, …)` —— 脚本对外宣称
     「破坏性操作有护栏」，却对第二个集群**一次都没检查**。
 
+    ⚠️ **「本地」不是「可弃」**（codex 4a-2b/S1 R7-F1，high）：上一版把
+       localhost/127.0.0.1/::1 直接放行，不要求任何确认。而这些脚本一上来就会在
+       目标 DSN 上建三张维护表、写集群标记、扫库删库、清凭据 —— **DSN 打错一位端口**
+       指到本机真开发库，这些动作在「证明目标可弃」之前就已经全做完了。
+       本仓恰恰有一个跑在本机的真 PostgreSQL，这不是假想。
+       ⚠️ 也**不能拿集群标记当证明** —— 标记是脚本自己写的，自证不成立。
+       故：**每一次**破坏性运行都要 `QMT_VERIFY_ALLOW_DESTRUCTIVE=1` 明示「这个集群可弃」。
+
+    ⚠️ 非本地**另外**要 `QMT_VERIFY_ALLOW_REMOTE=1`：若两者共用一个变量，那么
+       「本地也要设」这条一旦落地，人人都会常设它，远端那道闸就自动失效了 ——
+       加一条闸却顺手废掉另一条，是本仓栽过的形状。一个变量只表达一件事。
+
     返回 None = 不放行（调用方负责判失败并给出退出码）。
     """
     host = urlparse(dsn).hostname
+    if os.environ.get("QMT_VERIFY_ALLOW_DESTRUCTIVE") != "1":
+        print(f"拒绝运行：{label}（{host}）—— 本脚本会在这个集群上建表/建库/删库/删凭据。"
+              "仅对**可弃的**隔离测试集群运行；确认它可弃后设 QMT_VERIFY_ALLOW_DESTRUCTIVE=1。"
+              "⚠️ 本地不等于可弃：指到本机真开发库同样会被改。",
+              file=sys.stderr)
+        return None
     if host not in ("localhost", "127.0.0.1", "::1") and os.environ.get(
-            "QMT_VERIFY_ALLOW_DESTRUCTIVE") != "1":
+            "QMT_VERIFY_ALLOW_REMOTE") != "1":
         print(f"拒绝运行：{label} 指向非本地库 {host}，本脚本会在它上面建/删库。"
-              "仅对隔离测试库运行；确需对非本地库运行请设 QMT_VERIFY_ALLOW_DESTRUCTIVE=1",
+              "确需对非本地库运行请**另外**设 QMT_VERIFY_ALLOW_REMOTE=1",
               file=sys.stderr)
         return None
     _GUARDED_DSNS.add(dsn)
@@ -159,6 +177,23 @@ def assert_every_selfcheck_db_is_whitelisted(
         print(f"拒绝运行：脚本里用到的这些库名不在白名单里：{unlisted}", file=sys.stderr)
         return 5
     return None
+
+
+_RUN_LOCK_SQL = "SELECT pg_try_advisory_lock(hashtext('kline_pilot_verify_' || $1))"
+
+
+async def acquire_prefix_lock(conn, prefix: str) -> bool:
+    """在**这条连接**上取本前缀的运行锁。取不到 = 同集群上已有另一个同前缀的验收在跑。
+
+    ⚠️ 存在的理由（codex 4a-2b/S1 R7-F2）：三个脚本的场景库名都是**固定**的，
+       同一集群上并发跑两个同前缀的验收，后者的前置清场会把前者**正在用**的库
+       `DROP` 掉、把它的 intent/registry 行删掉 —— 而前者此刻可能正跑在一半。
+       库名做成 run-scoped 是另一条路，但那要改动全部白名单与扫描器；
+       这把锁是同等效果的最小实现。
+    ⚠️ 锁必须**握在一条活到进程结束的连接**上：advisory lock 是会话级的，
+       连接一关就自动释放 —— 这正是我们要的（崩溃/被杀也不会留下死锁）。
+    """
+    return bool(await conn.fetchval(_RUN_LOCK_SQL, prefix))
 
 
 async def sweep_leftover_databases(conn, *, prefix: str, scenario_dbs,

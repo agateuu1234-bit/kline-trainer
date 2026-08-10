@@ -43,3 +43,41 @@ def test_db_dsn_rejects_keyword_value_dsn_instead_of_guessing():
     # keyword/value 形态没有 path 分量 —— 猜错的代价是把探针指向别的库，故抛。
     with pytest.raises(AssertionError, match="URL 形态"):
         harness.db_dsn("host=127.0.0.1 port=5432 dbname=postgres", "scratch")
+
+
+# ── 破坏性 DSN 闸（R7-F1）────────────────────────────────────────────────
+# ⚠️ 每条用不同的 DSN 串：放行会把它记进模块级的 `_GUARDED_DSNS`，共用串会串味。
+
+def test_local_dsn_is_refused_without_the_disposable_cluster_optin(monkeypatch):
+    """R7-F1 的回归：**「本地」不是「可弃」**。
+
+    旧实现把 localhost/127.0.0.1/::1 直接放行 —— DSN 打错一位端口指到本机真开发库，
+    脚本会在「证明目标可弃」之前就建表、写标记、扫库删库、清凭据。
+    """
+    monkeypatch.delenv("QMT_VERIFY_ALLOW_DESTRUCTIVE", raising=False)
+    monkeypatch.delenv("QMT_VERIFY_ALLOW_REMOTE", raising=False)
+    assert harness.assert_destructive_dsn_allowed(
+        "postgresql://u:p@127.0.0.1:5432/r7local", "DSN") is None
+
+
+def test_local_dsn_passes_with_the_disposable_cluster_optin(monkeypatch):
+    # 正向对照：健康输入必须被放行，否则上一条在「闸恒拒」时也是绿的。
+    monkeypatch.setenv("QMT_VERIFY_ALLOW_DESTRUCTIVE", "1")
+    monkeypatch.delenv("QMT_VERIFY_ALLOW_REMOTE", raising=False)
+    dsn = "postgresql://u:p@127.0.0.1:5432/r7localok"
+    assert harness.assert_destructive_dsn_allowed(dsn, "DSN") == dsn
+
+
+def test_remote_dsn_needs_its_own_optin_on_top(monkeypatch):
+    """两个变量各表达一件事：可弃 ≠ 允许打远端。
+
+    共用一个变量的话，「本地也要设」一落地，人人常设它，远端那道闸就自动失效了。
+    """
+    monkeypatch.setenv("QMT_VERIFY_ALLOW_DESTRUCTIVE", "1")
+    monkeypatch.delenv("QMT_VERIFY_ALLOW_REMOTE", raising=False)
+    assert harness.assert_destructive_dsn_allowed(
+        "postgresql://u:p@db.example.com:5432/r7remote", "DSN") is None
+
+    monkeypatch.setenv("QMT_VERIFY_ALLOW_REMOTE", "1")
+    dsn = "postgresql://u:p@db.example.com:5432/r7remoteok"
+    assert harness.assert_destructive_dsn_allowed(dsn, "DSN") == dsn

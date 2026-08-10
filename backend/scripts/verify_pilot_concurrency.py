@@ -38,8 +38,13 @@
        且零副作用、`_SEED_LOCK_HELD_SQL` 不认两参数/共享锁冒充。可中和可证伪。
 
 用法：
+    QMT_VERIFY_ALLOW_DESTRUCTIVE=1 \
     DSN="postgresql://…:55444/postgres" DSN2="postgresql://…:55445/postgres" \
         ./.venv/bin/python backend/scripts/verify_pilot_concurrency.py
+
+⚠️ **每一次运行都要 `QMT_VERIFY_ALLOW_DESTRUCTIVE=1`**（codex R7-F1）——「本地」不是
+   「可弃」。指向非本地集群还要**另外**设 `QMT_VERIFY_ALLOW_REMOTE=1`。
+   退出码 8 = 同集群上已有另一个同前缀的验收在跑。
 """
 from __future__ import annotations
 
@@ -153,6 +158,9 @@ async def main() -> int:
                    __file__, _CONC_DBS, _PREFIX)):
         if rc is not None:
             return rc
+
+    if (rc := await _acquire_run_lock(base_dsn)) is not None:
+        return rc
 
     pre = await asyncpg.connect(base_dsn)
     try:
@@ -401,5 +409,32 @@ async def main() -> int:
     return 0
 
 
+# ── 每前缀的运行锁（codex 4a-2b/S1 R7-F2）────────────────────────────────
+# ⚠️ 本脚本的场景库名是**固定**的。同一集群上并发跑两个同前缀的验收，后者的前置
+#    清场会把前者**正在用**的库 DROP 掉、把它的 intent/registry 行删掉。
+#    锁握在一条活到进程结束的连接上 —— advisory lock 是会话级的，连接一关（含崩溃、
+#    被杀）就自动释放，不会留下死锁。
+_LOCK_CONN = None
+
+
+async def _acquire_run_lock(base_dsn: str) -> int | None:
+    global _LOCK_CONN
+    _LOCK_CONN = await asyncpg.connect(base_dsn)
+    if not await harness.acquire_prefix_lock(_LOCK_CONN, _PREFIX):
+        print(f"拒绝运行：同一集群上已有另一个 {_PREFIX!r} 前缀的验收在跑。"
+              f"两个运行的场景库名完全相同，继续下去会把对方正在用的库和凭据删掉。"
+              f"等它跑完再来（它一结束锁就自动放）。", file=sys.stderr)
+        return 8
+    return None
+
+
+async def _entry() -> int:
+    try:
+        return await main()
+    finally:
+        if _LOCK_CONN is not None:
+            await _LOCK_CONN.close()
+
+
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    sys.exit(asyncio.run(_entry()))

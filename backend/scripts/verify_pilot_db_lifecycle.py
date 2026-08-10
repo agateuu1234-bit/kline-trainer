@@ -32,15 +32,21 @@
 
     P1=$(docker inspect qmt-pg-r8  --format '{{range .Config.Env}}{{println .}}{{end}}' \\
          | grep POSTGRES_PASSWORD | cut -d= -f2)
+    QMT_VERIFY_ALLOW_DESTRUCTIVE=1 \\
     DSN="postgresql://postgres:${P1}@localhost:55444/postgres" \\
       .venv/bin/python backend/scripts/verify_pilot_db_lifecycle.py; echo "EXIT=$?"
+
+⚠️ **每一次运行都要 `QMT_VERIFY_ALLOW_DESTRUCTIVE=1`**（codex R7-F1）——「本地」不是
+   「可弃」：这个变量是操作者对「这个集群整个可以被毁掉」的明示。指向非本地集群
+   还要**另外**设 `QMT_VERIFY_ALLOW_REMOTE=1`。
 
 ⚠️ **本脚本只要 DSN**：它没有跨集群档，要求 DSN2 会让人以为跨集群被覆盖了。
    跨集群那条（advisory lock 是每集群的）在 `verify_pilot_concurrency.py` 的 Ⓐb。
 ⚠️ **判绿读输出内容，不要看管道后的 exit code**（`cmd | tail` 之后 `$?` 是 tail 的）。
 
 退出码：0=全绿 / 1=有档没跑或有 FAIL / 2=用法 / 3=DSN 未过破坏性闸 /
-4=残留库不在白名单 / 5=库名没登记 / 6=临时对象名没带前缀 / 7=DSN 环境变量没过闸。
+4=残留库不在白名单 / 5=库名没登记 / 6=临时对象名没带前缀 / 7=DSN 环境变量没过闸 /
+8=同集群上已有另一个同前缀的验收在跑。
 """
 from __future__ import annotations
 
@@ -147,7 +153,7 @@ _OWNED_EXTRA_DBS = (_UNRELATED_DB, _LIKE_DECOY_DB)
 # ⚠️ 本片（S1）**只含不依赖破坏性入口的档**；其余随 S2 / S3 补回来 ——
 #    见 docs/superpowers/plans/2026-08-10-qmt-plan4a-2b-repackaging.md
 _EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑥", "⑦", "⑧", "⑮", "⑯",
-                       "⑰b", "⑱", "⑲", "⑳", "⑳b", "㉑", "㉔", "㉕", "㉖")
+                       "⑰b", "⑱", "⑲", "⑳", "⑳b", "㉑", "㉔", "㉕", "㉖", "㉗")
 
 
 async def _connect(dsn: str) -> asyncpg.Connection:
@@ -311,6 +317,9 @@ async def main() -> int:
                    __file__, _LIFECYCLE_DBS, _PREFIX)):
         if rc is not None:
             return rc
+
+    if (rc := await _acquire_run_lock(base_dsn)) is not None:
+        return rc
 
     # 前置清场：上一次崩溃会留下库、登记行与临时对象；不清的话下一次运行会被
     # 上一次的残留顶红，且红的位置与真因毫无关系。
@@ -713,6 +722,22 @@ async def main() -> int:
             bystander, bystander_run)
         await conn.close()
 
+    # ── ㉗ 同集群上第二个同前缀的验收必须取不到运行锁（R7-F2 回归）───────────
+    #    本进程已经握着这把锁（`_acquire_run_lock`）。另一条连接再取必须失败 ——
+    #    否则并发的两个运行会互删对方正在用的库与凭据。
+    scenario("㉗")
+    print("㉗ 同前缀的第二个验收取不到运行锁")
+    rival = await _connect(base_dsn)
+    try:
+        got = await harness.acquire_prefix_lock(rival, _PREFIX)
+        check(not got, "㉗a 第二个同前缀运行取不到锁",
+              "竟然取到了 —— 两个运行会互删对方正在用的库和凭据")
+        other = await harness.acquire_prefix_lock(rival, "kline_pilot_someotherprefix")
+        check(other, "㉗b 别的前缀不受影响（证明 ㉗a 不是「这把锁谁都取不到」）",
+              "连不相干的前缀都取不到 —— 那 ㉗a 就是恒真的")
+    finally:
+        await rival.close()
+
     # ── 收尾 ────────────────────────────────────────────────────────────
     conn = await _connect(base_dsn)
     try:
@@ -736,5 +761,32 @@ async def main() -> int:
     return 0
 
 
+# ── 每前缀的运行锁（codex 4a-2b/S1 R7-F2）────────────────────────────────
+# ⚠️ 本脚本的场景库名是**固定**的。同一集群上并发跑两个同前缀的验收，后者的前置
+#    清场会把前者**正在用**的库 DROP 掉、把它的 intent/registry 行删掉。
+#    锁握在一条活到进程结束的连接上 —— advisory lock 是会话级的，连接一关（含崩溃、
+#    被杀）就自动释放，不会留下死锁。
+_LOCK_CONN = None
+
+
+async def _acquire_run_lock(base_dsn: str) -> int | None:
+    global _LOCK_CONN
+    _LOCK_CONN = await asyncpg.connect(base_dsn)
+    if not await harness.acquire_prefix_lock(_LOCK_CONN, _PREFIX):
+        print(f"拒绝运行：同一集群上已有另一个 {_PREFIX!r} 前缀的验收在跑。"
+              f"两个运行的场景库名完全相同，继续下去会把对方正在用的库和凭据删掉。"
+              f"等它跑完再来（它一结束锁就自动放）。", file=sys.stderr)
+        return 8
+    return None
+
+
+async def _entry() -> int:
+    try:
+        return await main()
+    finally:
+        if _LOCK_CONN is not None:
+            await _LOCK_CONN.close()
+
+
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(asyncio.run(_entry()))

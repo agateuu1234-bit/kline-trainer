@@ -19,6 +19,7 @@
 用法（需真 PG；DSN 指向的库里会建/删 `kline_pilot_selfcheck_*`）：
 
     docker run --rm -d --name pg4a -e POSTGRES_PASSWORD=postgres -p 55432:5432 postgres:15.12
+    QMT_VERIFY_ALLOW_DESTRUCTIVE=1 \
     DSN='postgresql://postgres:postgres@localhost:55432/postgres' \
       .venv/bin/python backend/scripts/verify_pilot_two_phase_create.py
     docker rm -f pg4a
@@ -51,6 +52,7 @@ from qmt_pilot_db import (PILOT_META_KEYS, PILOT_META_PHASE1_KEYS,  # noqa: E402
 _BACKEND = pathlib.Path(__file__).resolve().parents[1]
 # 本脚本只会造/删这个形状的库；前置清场只敢删符合它的（O4-R20-C1）。
 _SELFCHECK_NAME_RE = re.compile(r"\Akline_pilot_selfcheck[a-z0-9_]*\Z")
+_SELFCHECK_PREFIX = "kline_pilot_selfcheck"
 # ⚠️ 验收闸的**完整性清单**（O4-R31-C1）：收尾核对每一档都真的跑过。
 #    少一档即失败 —— **「静默没跑」与「通过了」在输出上完全一样**，
 #    这与本仓反复栽过的「空转的检查比没有检查更糟」是同一族。
@@ -383,9 +385,12 @@ async def main() -> int:
     for _rc in (harness.assert_every_dsn_env_is_gated(__file__),
                 harness.assert_scratch_objects_are_namespaced(_SCRATCH_OBJECTS),
                 harness.assert_every_selfcheck_db_is_whitelisted(
-                    __file__, _SCENARIO_DBS, "kline_pilot_selfcheck")):
+                    __file__, _SCENARIO_DBS, _SELFCHECK_PREFIX)):
         if _rc is not None:
             return _rc
+
+    if (_rc := await _acquire_run_lock(base_dsn)) is not None:
+        return _rc
 
     # 前置清场：本脚本会在中途崩溃时留下 kline_pilot_selfcheck_* 库与登记行，
     # 而登记表按设计**永不清理**。不清场的话，下一次运行会被上一次的残留顶红，
@@ -2127,5 +2132,32 @@ async def main() -> int:
     return 0
 
 
+# ── 每前缀的运行锁（codex 4a-2b/S1 R7-F2）────────────────────────────────
+# ⚠️ 本脚本的场景库名是**固定**的。同一集群上并发跑两个同前缀的验收，后者的前置
+#    清场会把前者**正在用**的库 DROP 掉、把它的 intent/registry 行删掉。
+#    锁握在一条活到进程结束的连接上 —— advisory lock 是会话级的，连接一关（含崩溃、
+#    被杀）就自动释放，不会留下死锁。
+_LOCK_CONN = None
+
+
+async def _acquire_run_lock(base_dsn: str) -> int | None:
+    global _LOCK_CONN
+    _LOCK_CONN = await asyncpg.connect(base_dsn)
+    if not await harness.acquire_prefix_lock(_LOCK_CONN, _SELFCHECK_PREFIX):
+        print(f"拒绝运行：同一集群上已有另一个 {_SELFCHECK_PREFIX!r} 前缀的验收在跑。"
+              f"两个运行的场景库名完全相同，继续下去会把对方正在用的库和凭据删掉。"
+              f"等它跑完再来（它一结束锁就自动放）。", file=sys.stderr)
+        return 8
+    return None
+
+
+async def _entry() -> int:
+    try:
+        return await main()
+    finally:
+        if _LOCK_CONN is not None:
+            await _LOCK_CONN.close()
+
+
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(asyncio.run(_entry()))
