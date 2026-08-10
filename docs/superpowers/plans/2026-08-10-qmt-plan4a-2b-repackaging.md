@@ -98,6 +98,21 @@ concurrency 10 档：**Ⓐ Ⓐb Ⓑ Ⓑb Ⓑd Ⓑc Ⓒ 只用 main 已有符号*
    还因缺它硬失败，**却一处都没用过** —— 原分支也一样。已在 S1 去掉。
    ⚠️ S2/S3 若要加跨集群档，**必须把读取 + 破坏性闸一起加回来**。
 
+## ⛔ 明确未覆盖、且**不在本计划三片范围内**的一条（别忘了它）
+
+**spec §6.2 第三组的「两个真进程并发」尚未被满足**（codex S1 R1-F1 / R3-F1 两轮提出）。
+
+它要求驱动**真正取锁并做破坏性操作的那个入口**。而 `qmt_pilot_db.py` **从不取锁**
+（spec O1-F4，取锁是调用方的事），会取 pilot seed 锁的 wrapper 属于 **4c，此刻还不存在**
+（实测：全仓 advisory lock 的取锁点在 `import_csv` / `generate_training_sets` /
+`scheduler`，pilot 的 seed 锁**零处**）。
+
+→ **这一档必须加进 4c 的验收**，判据：两个真进程并发 + 短超时 +
+  事前事后断言败者**没建库、没删库、没写 intent / registry 行**。
+
+`verify_pilot_concurrency.py` 已在 docstring **和运行输出**里把这条缺口打出来
+（只写 docstring 跑的人看不见）。Ⓐ/Ⓐb/Ⓒ 是平台行为证据，**不是** §6.2 的 ship gate。
+
 ## Task 1: S1 —— 共用护栏 + 只读档位（零生产代码改动）
 
 **Files:**
