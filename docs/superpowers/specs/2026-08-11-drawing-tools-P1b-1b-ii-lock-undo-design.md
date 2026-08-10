@@ -24,7 +24,7 @@
 
 | 片 | 交付 | 生产代码估算 |
 |---|---|---|
-| **PR-1　锁定** | 底栏 **②🔒** + `setDrawingLocked` 引擎 API + 路由与可用性谓词 + 锁定线的置灰传播 | ~120 行 |
+| **PR-1　锁定** | 底栏 **②🔒** + `setDrawingLocked` 引擎 API + 路由与可用性谓词 + 锁定线的置灰传播 + D80「内容未变 = 零副作用」 | ~140 行 |
 | **PR-2　撤销** | 底栏 **④↩ ⑤↪** + 撤销栈（深度 1）+ 四类动作的 undo / redo + D79 的双层陈旧栈防护 | ~220 行 |
 
 **次序不可乱：PR-1 → PR-2。**
@@ -167,10 +167,20 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 `updateDrawingStyle` 对 locked 线恒返回 `false` 且不改 `drawingsRevision`（回归保护 D60）；解锁只能经 `setDrawingLocked`。
 **并加源码守卫（按 D69 修正后的第 3 条不变量写，不是按「唯一入口」那句写）**：
 
-守卫是**结构计数**，不是禁词黑名单（`feedback_source_guard_text_source_discipline`）。判据两条，缺一不可：
+守卫是**结构计数**，不是禁词黑名单（`feedback_source_guard_text_source_discipline`）。
 
-1. **`locked` 的具名写入**：`Sources/` 中形如 `locked: <非 old.locked / 非 d.locked 的表达式>` 的位置**恰好 1 处**，且在 `setDrawingLocked` 里。
-2. **`drawings` 数组的结构性改动**：`drawings[` 下标赋值 / `drawings.remove` / `drawings.insert` / `drawings.append` 的出现总数**恰好等于**白名单函数里的出现数。**多一处即红。**
+⚠️ **作用域必须先收窄，否则守卫在现有合法代码上就是红的**（codex R3-F3，medium，**已核实为真**）。全 `Sources/` 的文本计数会撞上三类合法存在：
+- `DrawingObject.withStyle` 里的 `locked: locked`（**拷贝直传**，该函数明写「不碰 locked」）；
+- `routeDrawingCommit` 里的 `locked: drawing.locked`（同样是拷贝直传）；
+- `PreviewFakes/InMemoryFakes.swift:88` 的 `drawings[id] = drawingsIn` 与 `Render/KLineRenderState.swift:48` 的 `self.drawings = drawings` —— **同名但完全无关**的另一个 `drawings`。
+
+守卫若在这些上面变红，实施者只会临时放宽它，那它就再也保护不了任何东西。
+
+判据两条，缺一不可：
+
+1. **`locked` 的**语义性**写入**：作用域限 **`TrainingEngine.swift`**，判据 = 形如 `locked: <表达式>` 且该表达式**不是**从同一对象拷贝直传（`locked` / `old.locked` / `d.locked` / `drawing.locked` 这一族）的位置 —— 全文件**恰好 1 处**，在 `setDrawingLocked` 里。
+   **拷贝直传形态必须显式列成白名单并各配一条自检**（断言它们**不**触发守卫），否则守卫会在 `withStyle` / `routeDrawingCommit` 上误红。
+2. **`drawings` 数组的结构性改动**：作用域限 **`TrainingEngine.swift` 里 `TrainingEngine` 自己那个 `drawings` 存储属性**（不是全 `Sources/` 的任意同名变量 —— 见上面第三类误报）。判据 = `drawings[` 下标赋值 / `drawings.remove` / `drawings.insert` / `drawings.append` / `drawings = ` 的出现总数**恰好等于**白名单函数里的出现数。**多一处即红。**
    - **PR-1 的白名单** = `appendDrawing` / `deleteDrawing(at:)` / `deleteDrawing(id:)` / `updateDrawingStyle` / `setDrawingLocked`。
    - **PR-2 落地时把本条升级为 D79 第一层那张表的穷尽性判据**（覆盖面从「下标 / 增删」扩到**全部** `drawings` 写入点，含整体赋值与 `injectDrawingsForTesting`），并把 `applyUndoEntry` 加进白名单。⚠️ **两条守卫必须合并成一条，不许并存** —— 同一族判据留两份、迟早漂移（`feedback_fix_the_whole_predicate_family_not_the_reported_site`）。⚠️ 白名单是**具名函数**，不许用 `*Drawing*` 之类通配（通配会让下一个新写入口静默溜过，`feedback_parallel_session_branch_contamination` 的 G6 教训）。
 
@@ -189,8 +199,12 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 各写一条：锁定选中线 → `styleControlsEnabled == false` 且 `deleteButtonEnabled == false`；解锁 → 两者恢复 `true`。
 **变异验证**：分别删掉那两处 `!d.locked` → 对应那条必须变红。
 
-**N-E　幂等不触发 autosave**
-已锁的线再调 `setDrawingLocked(locked: true)` → 返回 `true`、`drawingsRevision` **不变**、`drawings` 逐字段不变。
+**N-E　幂等不触发 autosave（D80，四个 API 各一条 —— 不是只测锁定）**
+- 已锁的线再调 `setDrawingLocked(locked: true)` → 返回 `true`、`drawingsRevision` **不变**、`drawings` 逐字段不变。
+- **同样式再调 `updateDrawingStyle`**（把当前正在用的那套样式原样传回去）→ 返回 `true`、`drawingsRevision` **不变**、不触发 autosave。
+  ⚠️ 这是对已合并 API 的**有意行为改动**（D80），本条即其回归声明。
+  **变异验证**：把 `before == after` 那道判据去掉 → 本条必须变红。
+- 并复核 1b-i 的 N2（`TrainingEngineDrawingSessionTests.swift:812`）在改动后仍绿；若它其实传的是同样式，则它此前就是恒真的，须一并修。
 
 **N-F　落盘往返（接 1b-i 的 D56 那一组）**
 `setDrawingLocked` 各写一条「调用 → `drawingsRevision` **严格递增 1** → autosave 被触发 → 重新加载后仍是锁定态」。
@@ -222,7 +236,7 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 
 ## 2. PR-2：撤销 / 前进
 
-### 2.1 D74　撤销栈存放在 `TrainingEngine`，生命周期由 UI 驱动
+### 2.1 D74　撤销栈存放在 `TrainingEngine`，生命周期也由引擎的 D45 收口点驱动
 
 **存储在引擎**（不是 `DrawingSession`）。
 
@@ -230,7 +244,20 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 1. 撤销必须在 `drawings` 数组上**按精确下标**操作（D25：数组序 = z-order），那是引擎的私有存储。
 2. **入栈点必须与写入点同处**。四个写入 API 全在引擎里；把入栈放在引擎，「做了写入却忘了入栈」在结构上不可能发生。放 UI 层则每个调用点都要记得入栈 —— 1b-i 的 D56 教训（「每一个改 `drawings` 的 API 都要 `drawingsRevision += 1`，忘一个就静默丢 autosave，且没有任何编译期保护」）已经证明「靠调用方记得」是错的。
 
-**生命周期由 UI 显式驱动**（D25：进画线模式建栈、退出清空）：引擎另出 `clearDrawingUndoStack()`，由画线模式的进入 / 退出各调一次。存储在引擎、生命周期在 UI，两者不矛盾。
+**生命周期也在引擎，不经过 UI**（codex R3-F1，high，**已核实为真**）。
+
+⚠️ 原稿写的是「生命周期由 UI 显式驱动：由画线模式的进入 / 退出各调一次 `clearDrawingUndoStack()`」。**这条是错的**，实测：
+
+- 画线模式的开 / 关本来就是引擎的事，`beginDrawingSession`（`TrainingEngine.swift:1351`）/ `endDrawingSessionIfActive`（`:1370`）是代码里明写的 **D45 单一收口点**；
+- 而 `endDrawingSessionIfActive` 被**引擎内部六处**调用：`:442`（半武装 fail-closed 回滚）、`:468`、`:532`、`:1276`（`commitDrawing`）、`:1284`（`cancelDrawing`）、`:1331` —— 其中包含 **`.tradeTriggered`（下单成交）** 与 **`.periodComboSwitched`（切周期组合）** 两条路径。
+
+⇒ **画线模式完全可以在 UI 一无所知的情况下结束。** 靠 UI 调清栈，等于把「撤销栈不跨会话」这条 D25 契约挂在一条随时会被绕过的路径上：下单一次 → 会话已结束 → 但栈还在 → 若 `drawings` 恰好没变，D79 第二层的身份校验**全都通过** → 用户在下一个会话里点 ↩，撤掉的是**上一个会话早已提交的动作**，还会被 autosave 固化。
+
+**修正后的规则**：清栈**挂在引擎自己的两个收口点上**——
+`beginDrawingSession` 成功建立会话时清一次（新会话必须从空栈开始）、`endDrawingSessionIfActive` 结束会话时清一次。**UI 一行都不用调。**
+
+**并加守卫**：`drawingSession.activate(` / `drawingSession.deactivate(` 在 `Sources/` 中的出现处**全部**位于这两个函数内 —— 保证没有第三条路径能在不清栈的情况下翻转 `drawingModeActive`。
+**并加测试**（N-Q，见 §2.6）：`.tradeTriggered` 与 `.periodComboSwitched` 这两条**非 UI 触发**的退出路径各一条，断言栈被清空。
 
 ### 2.2 D75　入栈点 = 四个引擎写入 API 各自的成功路径
 
@@ -241,7 +268,32 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 | 改样式 | `updateDrawingStyle` | 旧对象 | 新对象 | 该线下标 |
 | 锁定 / 解锁 | `setDrawingLocked` | 旧对象 | 新对象 | 该线下标 |
 
-**只有真的改了 `drawings` 才入栈** —— 与 `drawingsRevision += 1` **同一个位置、同一个条件**。D69 的幂等路径（`locked` 未变）既不递增 revision 也**不入栈**。
+**只有真的改了 `drawings` 才入栈** —— 与 `drawingsRevision += 1` **同一个位置、同一个条件**。
+
+### 2.2b D80　四个写入 API 统一「内容未变 = 零副作用」（codex R3-F2，high，**已核实为真**）
+
+> ⚠️ **本决策虽写在 PR-2 章节（因为它的动机来自撤销栈），但落地在 PR-1** —— PR-2 的入栈条件依赖它。
+> PR-1 的举证在 §1.6 N-E，PR-2 的下游断言在 §2.6 N-R。
+
+**缺陷**：`updateDrawingStyle`（`TrainingEngine.swift:1178-1180`）在 `withStyle` 成功后**无条件** `drawingsRevision += 1`，**没有** `updated != old` 检查。而常驻样式面板的控件在「当前值」上**仍然可点**（1a-iii 的既有形态）。于是：
+
+> 用户改了一条线的颜色（栈里存着这次真编辑）→ 手指顺手又点了一下**已经选中的那个颜色**
+> → `withStyle` 成功、`before == after` → 若 PR-2 把入栈挂在这条成功路径上，
+> **唯一那条有用的撤销记录被一个 no-op 冲掉，之前那次真编辑再也撤不回来。**
+
+深度 1 的栈让这个后果不可逆 —— 这不是"多存一条废记录"，是**用户真编辑的丢失**。
+
+**修正（统一到四个 API，不是只补 `updateDrawingStyle`）**：
+
+> **`before == after` ⇒ 返回 `true`、`drawingsRevision` 不递增、不入栈、不触发 autosave。**
+
+判据用 `DrawingObject.==`（它含全部 18 个字段中除 `id` 外的内容分量，`locked` 也在内，见 `Models.swift:366-372`）。
+
+**为什么统一而不是只挡入栈**：
+1. D69 已经给 `setDrawingLocked` 定了幂等零递增。只补 `updateDrawingStyle` 的入栈、不管它的 revision，会留下「锁定幂等不递增、样式幂等递增」的不对称 —— 同族判据留两套形状，本仓的漂移历史说明它一定会咬人。
+2. 统一之后 **`drawingsRevision` 递增 ⟺ `drawings` 内容真的变了** 成为一条干净的不变量，而入栈条件就**恰好等于**它。两者同条件同位置 ⇒ 「入栈与 revision 不同步」这个坏状态**不可表达**，而不是靠实施者两处都记得写。
+
+⚠️ **这是对已合并 API（`updateDrawingStyle`）的有意行为改动**，PR-1 就要落地（PR-2 的入栈依赖它）。必须配一条**回归测试**声明该改动，并复核 1b-i 的 N2（`TrainingEngineDrawingSessionTests.swift:812`「revision +1」）—— 它断言的是**真改样式**的场景，不受影响；若实测发现它其实传的是同样式，则该测试本身此前就是恒真的，须一并修。
 
 栈深度 1：新动作直接**覆盖**栈顶，并把 redo 位清空（D25：做了新动作 → ↪ 置灰）。
 
@@ -294,7 +346,7 @@ codex R1-F2（high，**已核实为真**）：原稿的 D76 直接在存下来�
 **为什么 5 和 6 要作废而不是入栈**：两者都绕过栈直接改数组、且会让已存的下标失准，但它们都不是「用户动作」，入栈没有语义（用户撤销不了一次测试注入）。作废是唯一正确的表态。
 **6 尤其不能省** —— 不作废的话，任何「先种一个非空栈、再注入一批线」的测试都会造出一个**下标必然错位**的引擎却全绿，正是本仓的假绿套路。
 
-**守卫改为穷尽性判据**（不是原稿那条）：断言 `Sources/` 中 `drawings` 的写入点集合**恰好等于**上表的具名函数集合。新增任何一处写入面 → 守卫变红，直到实施者把它归入上表某一类。这样判据是按**判据本身**穷尽的，不是按这次报告到的点位改（`feedback_fix_the_whole_predicate_family_not_the_reported_site`）。
+**守卫改为穷尽性判据**（不是原稿那条）：断言 **`TrainingEngine.swift` 里 `TrainingEngine.drawings` 的写入点集合**（作用域同 §1.6 N-B 第 2 条，**不是**全 `Sources/` 的同名变量）**恰好等于**上表的具名函数集合。新增任何一处写入面 → 守卫变红，直到实施者把它归入上表某一类。这样判据是按**判据本身**穷尽的，不是按这次报告到的点位改（`feedback_fix_the_whole_predicate_family_not_the_reported_site`）。
 
 **第二层（兜底）：`applyUndoEntry` 的前置条件，逐 case 写死。**
 undo / redo 共用一个私有单点 `applyUndoEntry`，进它先过下面这组门，**任一不成立 → 返回 `false`、`drawings` 不动、`drawingsRevision` 不递增、并把整个撤销栈作废**（fail-closed，不留半吊子状态）：
@@ -374,6 +426,19 @@ undo / redo 共用一个私有单点 `applyUndoEntry`，进它先过下面这组
 锁定一条线 → ↩ → 断言撤销栈**深度仍是 1 且栈顶还是那次锁定**（不是"撤销锁定"这个新动作）→ 再点 ↩ 无效果（N-K 已覆盖行为，本条覆盖**栈内容**）。
 **不得**只断言「第二次点没反应」—— 那在「入栈了但恰好被深度 1 挤掉」的错误实现下也会过。
 
+**N-Q　非 UI 触发的会话退出必清栈（D74 修正，codex R3-F1）**
+两条**不经过任何 UI 调用**的路径各一条：
+- **N-Q1 下单成交**：进画线模式 → 画一条线（栈非空）→ 触发 `.tradeTriggered`（引擎内部会调 `endDrawingSessionIfActive`）→ 断言撤销栈**已空**、↩ / ↪ 均不可用、`undoDrawing()` 返回 `false` 且不动数据。
+- **N-Q2 切周期组合**：同上，改用 `.periodComboSwitched` 触发。
+⚠️ **不得**用「点退出按钮」那条 UI 路径代替 —— 那条恰恰是唯一本来就会清的，用它测等于什么都没测（同 N-N3 原稿那个恒过测试的错误）。
+
+**N-R　no-op 样式点击不冲掉撤销记录（D80 的 PR-2 侧，codex R3-F2）**
+改一条线的颜色（栈里是这次真编辑）→ **把同一个颜色再点一次**（`before == after`）→ 断言撤销栈**栈顶仍是那次真编辑**（不是被 no-op 覆盖）→ 点 ↩ → 颜色回到**改之前**。
+**不得**只断言「revision 没变」—— 那测不出栈被覆盖。
+
+**N-S　会话状态翻转的唯一通路（D74 守卫）**
+源码守卫：`drawingSession.activate(` / `drawingSession.deactivate(` 在 `Sources/` 中的出现处**全部**位于 `beginDrawingSession` / `endDrawingSessionIfActive` 内，配反向自检。
+
 **N-O　撤销不绕过 review 门**
 复盘模式下 `undoDrawing` / `redoDrawing` 恒 `false`（D34 纵深防御；栈本就不该在复盘里建起来，但引擎侧仍要有门）。
 
@@ -400,6 +465,9 @@ PR-1 的 N-A～N-H 与 1b-i / 1a-i 的既有测试在本 PR 仍全绿。
 | 14 | 撤销之后再画一条新线，看 ↪ | ↪ 变灰（做了新动作，"前进"就失效了） | |
 | 15 | 改一条线的颜色 → 点 ↩ → 在样式面板把默认颜色改成**绿色** → 再点 ↪ | 那条线回到**你之前改的那个颜色**，**不是**绿色 | |
 | 16 | 点「退出」离开画线模式，再进来，看 ↩ / ↪ | 两个都是灰的（撤销记录不跨会话保留） | |
+| 16b | 画一条线（不点退出）→ 直接**下一单**（买或卖）→ 再进画线模式看 ↩ | ↩ 是灰的。<br>说明：下单会**隐式结束**画线会话，所以撤销记录跟着清掉——这是对的，不是 bug | |
+| 16c | 画一条线（不点退出）→ **竖滑切一次周期** → 再看 ↩ | ↩ 是灰的（切周期组合同样会结束画线会话） | |
+| 16d | 改一条线的颜色 → 把**同一个颜色再点一次** → 点 ↩ | 颜色回到**改之前**那个色。<br>（不是"没反应"——重复点同一个颜色不该把你上一次的真改动冲掉） | |
 | 17 | 撤销一条线之后**杀掉 App**，续这一局 | 撤销的结果被保留了（那条线确实不在）；↩ / ↪ 都是灰的 | |
 | 18 | 进复盘模式看画线入口 | 还是浮动铅笔钮，**没有**两行底栏 | |
 | 19 | 「再次训练」（replay）模式下重做第 3～9 条 | 行为与训练模式完全一致 | |
