@@ -172,7 +172,7 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 1. **`locked` 的具名写入**：`Sources/` 中形如 `locked: <非 old.locked / 非 d.locked 的表达式>` 的位置**恰好 1 处**，且在 `setDrawingLocked` 里。
 2. **`drawings` 数组的结构性改动**：`drawings[` 下标赋值 / `drawings.remove` / `drawings.insert` / `drawings.append` 的出现总数**恰好等于**白名单函数里的出现数。**多一处即红。**
    - **PR-1 的白名单** = `appendDrawing` / `deleteDrawing(at:)` / `deleteDrawing(id:)` / `updateDrawingStyle` / `setDrawingLocked`。
-   - **PR-2 落地时把 `applyUndoEntry`（D79 的私有单点）加进白名单** —— 这是 PR-2 必须动这条守卫的**唯一**一处，动它就要同步更新反向自检。⚠️ 白名单是**具名函数**，不许用 `*Drawing*` 之类通配（通配会让下一个新写入口静默溜过，`feedback_parallel_session_branch_contamination` 的 G6 教训）。
+   - **PR-2 落地时把本条升级为 D79 第一层那张表的穷尽性判据**（覆盖面从「下标 / 增删」扩到**全部** `drawings` 写入点，含整体赋值与 `injectDrawingsForTesting`），并把 `applyUndoEntry` 加进白名单。⚠️ **两条守卫必须合并成一条，不许并存** —— 同一族判据留两份、迟早漂移（`feedback_fix_the_whole_predicate_family_not_the_reported_site`）。⚠️ 白名单是**具名函数**，不许用 `*Drawing*` 之类通配（通配会让下一个新写入口静默溜过，`feedback_parallel_session_branch_contamination` 的 G6 教训）。
 
 ⚠️ 第 2 条是 codex R1-F1 逼出来的：只写第 1 条的话，`drawings[index] = before`（整对象赋值，字面上不含 `locked:`）会**从守卫底下溜过去**，而它恰恰是改 `locked` 的第二条路径 —— 守卫比它声称的不变量弱，正是本仓反复踩的判据漂移。
 
@@ -273,9 +273,28 @@ codex R1-F2（high，**已核实为真**）：原稿的 D76 直接在存下来�
 
 按本仓纪律「修 symptom 会挪动失败面 → 必须让坏状态不可表达」（`feedback_internal_review_misses_bad_data`），**两层都要，不许只做兜底那层**：
 
-**第一层（根因）：栈由引擎自己作废，不指望 UI 记得清。**
-`drawings` 被**整体替换**的每一条路径（加载 / `resumePendingReplay` 续局 / replay 种入 / 任何非四个写入 API 的赋值）都必须**同步清空撤销栈**。落点与 D74 一致：栈在引擎里，清栈也在引擎里，UI 的进 / 退画线模式只是**额外**再清一次。
-⚠️ 这条必须配**穷尽性守卫**，不能只改手头想到的那几处：源码守卫断言「`Sources/` 中对 `drawings` 的整体赋值（`drawings = ...`）出现处**全部**位于清栈函数内」——判据按**判据本身**穷尽全仓，不是按报告点位改（`feedback_fix_the_whole_predicate_family_not_the_reported_site`）。
+**第一层（根因）：把 `drawings` 的写入面穷尽分类，每一类都必须对栈表态。**
+
+⚠️ 本层的原稿要求「`drawings` 被整体替换时清栈」，并用 `resumePendingReplay` 举证 —— **两处都错**（codex R2-F1，high，**已核实为真**）：
+`resumePendingReplay`（`TrainingSessionCoordinator.swift:851`）走的是 `TrainingEngine.make(...)`（`:919`），**造的是一个全新引擎**，新引擎的栈本来就是空的 → 那条测试恒过、证明不了任何事。而「所有 `drawings = ` 赋值都要在清栈函数里」守的也是错的不变量：唯一的整体赋值是**构造函数**，要求构造走清栈函数没有意义。
+
+**实测（`grep` 全 `Sources/`）：`drawings` 的写入面恰好六处，且没有任何一处是生产期的原地整体替换。**
+
+| # | 位置 | 性质 | PR-2 必须让它对栈做什么 |
+|---|---|---|---|
+| 1 | `TrainingEngine.swift:178` `self.drawings = seededLossy.drawings` | **构造**（不是替换） | 无需动作 —— 新引擎的栈按定义为空 |
+| 2 | `:1115` `deleteDrawing(id:)` | 四写入 API | **入栈**（D75） |
+| 3 | `:1133` `appendDrawing` | 四写入 API | **入栈**（D75） |
+| 4 | `:1179` `updateDrawingStyle` | 四写入 API | **入栈**（D75） |
+| 5 | `:1091` `deleteDrawing(at:)` | **零生产调用点**，但会移位下标 | **作废整个栈** |
+| 6 | `:1452` `injectDrawingsForTesting` | 仅测试可达 | **作废整个栈** |
+| 7 | `setDrawingLocked`（PR-1 新增） | 四写入 API | **入栈**（D75） |
+| 8 | `applyUndoEntry`（PR-2 新增） | 撤销执行单点 | **既不入栈也不作废**（D79 第三条） |
+
+**为什么 5 和 6 要作废而不是入栈**：两者都绕过栈直接改数组、且会让已存的下标失准，但它们都不是「用户动作」，入栈没有语义（用户撤销不了一次测试注入）。作废是唯一正确的表态。
+**6 尤其不能省** —— 不作废的话，任何「先种一个非空栈、再注入一批线」的测试都会造出一个**下标必然错位**的引擎却全绿，正是本仓的假绿套路。
+
+**守卫改为穷尽性判据**（不是原稿那条）：断言 `Sources/` 中 `drawings` 的写入点集合**恰好等于**上表的具名函数集合。新增任何一处写入面 → 守卫变红，直到实施者把它归入上表某一类。这样判据是按**判据本身**穷尽的，不是按这次报告到的点位改（`feedback_fix_the_whole_predicate_family_not_the_reported_site`）。
 
 **第二层（兜底）：`applyUndoEntry` 的前置条件，逐 case 写死。**
 undo / redo 共用一个私有单点 `applyUndoEntry`，进它先过下面这组门，**任一不成立 → 返回 `false`、`drawings` 不动、`drawingsRevision` 不递增、并把整个撤销栈作废**（fail-closed，不留半吊子状态）：
@@ -343,9 +362,13 @@ undo / redo 共用一个私有单点 `applyUndoEntry`，进它先过下面这组
 三条都必须再断言**撤销栈已被作废**（随后 ↩ / ↪ 均不可用）。
 ⚠️ ① 是**崩溃回归测试**：没有它，越界 trap 在测试里表现为整个 xctest 进程挂掉而不是一条红断言，容易被误读成环境问题。
 
-**N-N3　整体替换必清栈（D79 第一层，根因）**
-画一条线（栈非空）→ 走 `resumePendingReplay` 续局重载 → 断言撤销栈**已空**（↩ 不可用），且此时调 `undoDrawing()` 返回 `false` 不动数据。
-**并加源码守卫**：`Sources/` 中 `drawings = ` 整体赋值的出现处**全部**位于清栈函数内（穷尽性判据，配反向自检）。
+**N-N3　绕过栈的写入面必作废栈（D79 第一层，根因）—— 必须是**同一个引擎**，不许换新引擎**
+⚠️ 本条原稿用 `resumePendingReplay` 举证，**恒过且证明不了任何事**（那条路径造的是新引擎，栈本来就空）。改为**在同一个引擎实例上**做：
+
+- **N-N3a**：在一个已有引擎上画一条线（栈非空）→ 调 `injectDrawingsForTesting(...)` 换一批线 → 断言撤销栈**已作废**（↩ / ↪ 均不可用），且此时 `undoDrawing()` 返回 `false`、`drawings` 与 `drawingsRevision` 都不动。
+- **N-N3b**：同上，但改用 `deleteDrawing(at:)`（零生产调用点、但会移位下标）→ 同样断言栈已作废。
+
+**并加源码守卫**：`Sources/` 中 `drawings` 的写入点集合**恰好等于** D79 第一层那张表里的具名函数集合（穷尽性判据），配反向自检 —— 故意新增一处 `drawings.append` → 守卫必须变红。
 
 **N-N4　undo / redo 不入栈（D79 第三条）**
 锁定一条线 → ↩ → 断言撤销栈**深度仍是 1 且栈顶还是那次锁定**（不是"撤销锁定"这个新动作）→ 再点 ↩ 无效果（N-K 已覆盖行为，本条覆盖**栈内容**）。
