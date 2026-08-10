@@ -61,9 +61,13 @@
 > 源码守卫按第 3 条写（结构计数，见 §1.6 N-B），**不是**按原稿那句话写。
 
 ```swift
+// 访问级别必须是 internal —— 不写 public，且这一条要被守卫钉住（见 §1.6 N-G）
 @discardableResult
 func setDrawingLocked(id: DrawingID, locked: Bool) -> Bool
 ```
+
+⚠️ **`internal` 是 trust boundary 的一部分，不是风格偏好**（codex R5-F1，high，**已核实为真**）。
+既有四个写入 API（`deleteDrawing(at:):1089` / `deleteDrawing(id:):1109` / `appendDrawing:1129` / `updateDrawingStyle:1156`）**全是 internal**，本 API 沿用同一形状。但原稿只把它写在签名里、没写成**受测的不变量**，而 N-G 只数调用点 —— **一个 `public setDrawingLocked` 完全能通过调用点守卫**，同时让 App 层任何调用方按 id 直接改任意线的 `locked`：不需要选中、不需要几何可见、绕过 D71 的全部路由门，然后被 autosave 固化。那正是 D51/D62 当初替删除 / 改样式关掉的同一类洞。
 
 门列表（**逐条与 `updateDrawingStyle:1156-1182` 对照给出取舍，不许照抄、也不许凭直觉增删**）：
 
@@ -213,8 +217,10 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 `setDrawingLocked` 各写一条「调用 → `drawingsRevision` **严格递增 1** → autosave 被触发 → 重新加载后仍是锁定态」。
 **并含续局 replay 那条**（split addendum §7.3 #3）：`resumePendingReplay` 续局后**只**锁定一条线（不推 tick / 不交易 / 不增删 / 不切周期）→ `saveProgress` 真的写盘。
 
-**N-G　唯一调用点**
-源码守卫：`Sources/` 中 `setDrawingLocked(` 的调用点**恰好 1 处**，且在 `DrawingEditRouter.swift`（同 D62 对另两个 API 的既有守卫，扩进同一族）。
+**N-G　唯一调用点 + 访问级别（两条判据，缺一即漏）**
+1. **唯一调用点**：`Sources/` 中 `setDrawingLocked(` 的调用点**恰好 1 处**，且在 `DrawingEditRouter.swift`（同 D62 对另两个 API 的既有守卫，扩进同一族）。
+2. **非 public**（codex R5-F1）：`setDrawingLocked` 的声明**不得**带 `public` / `open`。守卫在 `TrainingEngine.swift` 上断言其声明行匹配 internal 形态，配反向自检（给它加上 `public` → 守卫必须变红）。
+⚠️ 只有第 1 条**挡不住**这个洞：`public` 声明的调用点数照样是 1，守卫全绿，但包外调用方已经能绕过整条路由。
 
 **N-H　前作回归**
 1b-i 的 D33 / D34 / D37 / D49 / D63 / D64 / D65 测试与 1a-i 的 D29 / D35 测试在本 PR 仍全绿。
@@ -392,6 +398,14 @@ undo / redo 共用一个私有单点 `applyUndoEntry`，进它先过下面这组
 | redo 各情形 | 与上表对称 |
 
 实现上**不新写一套判据**：`undoDrawing` / `redoDrawing` 返回后由路由调用已有的 `syncSelectionByState`（`DrawingEditRouter.swift:160`）——它的判据「选中 id 不在 `visibleDrawings` 里就清空」已经把上表四行全覆盖，没有第二处可以写漏（D64）。
+
+⚠️ **但「由路由调用」必须被守卫钉住，否则这一节等于没写**（codex R5-F2，medium，**已核实为真**）：
+底栏的 ↩ / ↪ 如果被直接接到 `engine.undoDrawing()` 上，**引擎侧的往返测试（N-M）照样全绿**，可选中态永远不同步 —— 撤销掉的正好是选中那条线时，`selectedDrawingID` 变成一个指向已不存在的线的死值：高亮没了、🔒 / 🗑 灰着、要等用户再点一下别处才恢复。
+
+**故 PR-2 必须**：
+1. 在 `DrawingEditRouter` 加 `undo(engine:)` / `redo(engine:)` 两个方法，形状同 `deleteSelected`（`defer { syncSelectionByState(engine:) }` + 调引擎）；
+2. **守卫**（并入 N-G 同族）：`Sources/` 中 `undoDrawing(` / `redoDrawing(` 的调用点**各恰好 1 处**、都在 `DrawingEditRouter.swift`，且两者同样是 **internal**；
+3. **测试 N-T**：撤销 / 重做把**当前选中的那条线**移除时，断言 `selectedDrawingID` 被清空、🔒 与 🗑 回灰；而撤销「改样式 / 锁定」时断言选中态**不变**（对应 D77 表格四行）。
 
 ### 2.5 D78　④↩ ⑤↪ 的置灰判据
 
