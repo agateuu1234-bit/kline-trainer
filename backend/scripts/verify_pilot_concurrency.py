@@ -1,9 +1,29 @@
 #!/usr/bin/env python3
-"""pilot 建库/销毁的**并发互斥**真-PostgreSQL 验收（spec §6.2 第三组）。
+"""pilot seed 锁的**平台行为 + 模块验锁谓词**真-PostgreSQL 验收。
 
-spec §6.2 逐字：「同 `--seed`、不同 `--maintenance-dsn` 的两个进程 —— 断言第二个在
-`pg_try_advisory_lock` 处**立刻**失败返回（**须设短超时并断言它没有在等**），
-且未执行任何 `DROP`/`CREATE`；杀掉第一个后第二个能立即取得锁」。
+⛔ **本脚本不是 spec §6.2 第三组的 ship gate —— 那一条尚未被满足**
+   （codex 4a-2b/S1 R1-F1 / R3-F1，两轮提出；R1 我只改了档位注释、
+   顶部仍在逐字引用那条要求，等于还在宣称自己满足它 —— 那是**不完整的修复**）。
+
+   spec §6.2 第三组要的是：「同 `--seed`、不同 `--maintenance-dsn` 的**两个进程** ——
+   断言第二个在 `pg_try_advisory_lock` 处立刻失败返回，且未执行任何 `DROP`/`CREATE`；
+   杀掉第一个后第二个能立即取得锁」。
+
+   它要求驱动**真正取锁并做破坏性操作的那个入口**。而本模块**从不取锁**
+   （spec O1-F4），取锁是调用方的事，会取 pilot seed 锁的 wrapper 属于 **4c、
+   此刻还不存在**（实测：全仓 advisory lock 的取锁点在 import_csv /
+   generate_training_sets / scheduler，pilot 的 seed 锁**零处**）。
+   → **那一档必须加进 4c 的验收**，判据：两个真进程并发、短超时、
+     并在事前事后断言败者**没建库、没删库、没写 intent/registry 行**。
+
+   本脚本提供的是**两类证据**，都不足以替代上面那一条：
+     · Ⓐ/Ⓐb/Ⓒ —— **PostgreSQL 的平台行为**（spec §4 整套互斥设计的地基假设：
+       try 版立刻返回 / 锁是每集群的 / 会话级锁随连接断开释放）。
+       属于「设计地基靠基础设施行为 → 必须真环境验，不能用假件」那一族；
+       **没有对应的生产守卫可中和，如实登记，不为它编一个够得到的变异**。
+     · Ⓑ/Ⓑb/Ⓑc/Ⓑd —— **本模块的生产判据**：`create_pilot_database` 无锁必拒
+       且零副作用、`_SEED_LOCK_HELD_SQL` 不认两参数形式与共享锁的冒充。
+       可中和可证伪。
 
 ⚠️ **「立刻」必须用时间断言，不能只断言返回 false**：阻塞版 `pg_advisory_lock`
    也会「最终返回」，而在一次并发运行里「等了 30 秒才失败」等于把另一次运行挂住。
@@ -372,6 +392,10 @@ async def main() -> int:
         print(f"\n❌ {len(failures)} 条断言不成立：{failures}", file=sys.stderr)
         return 1
     print(f"\n✅ {len(_EXPECTED_SCENARIOS)} 档断言全部成立（真 PostgreSQL）")
+    # ⚠️ 全绿**不等于** spec §6.2 第三组被满足 —— 那一条要驱动真正取锁的入口
+    #    （4c 的 wrapper，尚不存在）。只写在 docstring 里跑的人看不见，故打到输出上。
+    print("⚠️ 注意：本脚本不覆盖 spec §6.2 第三组的「两个真进程并发」——"
+          "取锁方是 4c 的 wrapper（尚不存在），那一档须加进 4c 的验收。")
     return 0
 
 
