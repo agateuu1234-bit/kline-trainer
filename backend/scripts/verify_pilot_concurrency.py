@@ -224,10 +224,36 @@ async def main() -> int:
         print("Ⓐb 同一个 seed 在**另一台集群**上不构成互斥（锁是每集群的）")
         conn_other = await asyncpg.connect(dsn2)
         try:
+            # ⚠️ **先证明 DSN2 真的是另一台集群**（codex 4a-2b/S1 R8-F2）：
+            #    「取锁互不影响」根本不能当跨集群的证据 —— advisory lock 本来就是
+            #    **每库**的（本机真 PG 实测：同集群连 /postgres 与 /template1，
+            #    同一个 key 两边都取得到，`pg_locks` 两行 objid 相同 database 不同）。
+            #    把 DSN2 指到同集群的另一个库，下面那条断言照样通过，
+            #    于是本档对「锁不跨集群」这条**地基假设**给出假绿。
+            #    `system_identifier` 是集群初始化时生成的身份，才是真判据。
+            distinct = await harness.assert_distinct_clusters(conn_a, conn_other)
+            check(distinct, "Ⓐb 前置：DSN2 必须是**另一台集群**（比 system_identifier）",
+                  "DSN2 与 DSN 的 system_identifier 相同 —— 它只是同一集群上的另一个库，"
+                  "这一档证明不了任何跨集群的事")
+            # 负面对照：同集群、不同库的连接，同一把锁**照样取得到** ——
+            # 这正是「取锁成功 ≠ 另一台集群」的现场证据，也让上面那条前置不是装饰。
+            same_cluster_other_db = await asyncpg.connect(
+                harness.db_dsn(base_dsn, "template1"))
+            try:
+                same_sysid = not await harness.assert_distinct_clusters(
+                    conn_a, same_cluster_other_db)
+                got_same, _ = await _timed_try_seed_lock(same_cluster_other_db, seed)
+                check(same_sysid and got_same is True,
+                      "Ⓐb− 负面对照：同集群的另一个库上同 seed 的锁也取得到"
+                      "（故「取到了」不构成跨集群的证据）",
+                      f"same_sysid={same_sysid} got={got_same}")
+            finally:
+                await same_cluster_other_db.close()
+
             got_other, elapsed_other = await _timed_try_seed_lock(conn_other, seed)
             check(got_other is True,
                   "Ⓐb 另一台集群上同 seed 的锁**照样取得到**（互斥不跨集群）",
-                  "竟然取不到 —— 要么 DSN2 与 DSN 是同一台集群，要么锁语义与假设不符")
+                  "竟然取不到 —— 锁语义与假设不符")
             check(elapsed_other < _IMMEDIATE_SECONDS,
                   f"Ⓐb 且是立刻取到的（耗时 {elapsed_other*1000:.1f} ms）",
                   f"耗时 {elapsed_other:.3f}s")
@@ -419,8 +445,8 @@ _LOCK_CONN = None
 
 async def _acquire_run_lock(base_dsn: str) -> int | None:
     global _LOCK_CONN
-    _LOCK_CONN = await asyncpg.connect(base_dsn)
-    if not await harness.acquire_prefix_lock(_LOCK_CONN, _PREFIX):
+    _LOCK_CONN = await harness.acquire_run_lock(base_dsn, _PREFIX)
+    if _LOCK_CONN is None:
         print(f"拒绝运行：同一集群上已有另一个 {_PREFIX!r} 前缀的验收在跑。"
               f"两个运行的场景库名完全相同，继续下去会把对方正在用的库和凭据删掉。"
               f"等它跑完再来（它一结束锁就自动放）。", file=sys.stderr)

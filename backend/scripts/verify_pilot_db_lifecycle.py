@@ -723,20 +723,24 @@ async def main() -> int:
         await conn.close()
 
     # ── ㉗ 同集群上第二个同前缀的验收必须取不到运行锁（R7-F2 回归）───────────
-    #    本进程已经握着这把锁（`_acquire_run_lock`）。另一条连接再取必须失败 ——
+    #    本进程已经握着这把锁（`_acquire_run_lock`）。第二个运行必须取不到 ——
     #    否则并发的两个运行会互删对方正在用的库与凭据。
+    #    ⚠️ 判据必须用**同集群、不同库**的 DSN（codex R8-F1）：advisory lock 是每库的，
+    #       上一版在「调用方 DSN 所指的库」上取锁，这一档拿同一个 DSN 去试，
+    #       测不到「换个库名就绕过去了」这条真缺陷。
     scenario("㉗")
-    print("㉗ 同前缀的第二个验收取不到运行锁")
-    rival = await _connect(base_dsn)
-    try:
-        got = await harness.acquire_prefix_lock(rival, _PREFIX)
-        check(not got, "㉗a 第二个同前缀运行取不到锁",
-              "竟然取到了 —— 两个运行会互删对方正在用的库和凭据")
-        other = await harness.acquire_prefix_lock(rival, "kline_pilot_someotherprefix")
-        check(other, "㉗b 别的前缀不受影响（证明 ㉗a 不是「这把锁谁都取不到」）",
-              "连不相干的前缀都取不到 —— 那 ㉗a 就是恒真的")
-    finally:
-        await rival.close()
+    print("㉗ 同集群的第二个验收取不到运行锁（哪怕它的 DSN 指向别的库）")
+    rival_dsn = harness.db_dsn(base_dsn, "template1")   # 同集群、不同库
+    denied = await harness.acquire_run_lock(rival_dsn, _PREFIX)
+    if denied is not None:
+        await denied.close()
+    check(denied is None, "㉗a 同集群、DSN 指向别的库的第二个运行同样取不到锁",
+          "竟然取到了 —— 换个库名就绕过运行锁，两个运行会互删对方正在用的库和凭据")
+    other = await harness.acquire_run_lock(base_dsn, "kline_pilot_someotherprefix")
+    check(other is not None, "㉗b 别的前缀不受影响（证明 ㉗a 不是「这把锁谁都取不到」）",
+          "连不相干的前缀都取不到 —— 那 ㉗a 就是恒真的")
+    if other is not None:
+        await other.close()
 
     # ── 收尾 ────────────────────────────────────────────────────────────
     conn = await _connect(base_dsn)
@@ -771,8 +775,8 @@ _LOCK_CONN = None
 
 async def _acquire_run_lock(base_dsn: str) -> int | None:
     global _LOCK_CONN
-    _LOCK_CONN = await asyncpg.connect(base_dsn)
-    if not await harness.acquire_prefix_lock(_LOCK_CONN, _PREFIX):
+    _LOCK_CONN = await harness.acquire_run_lock(base_dsn, _PREFIX)
+    if _LOCK_CONN is None:
         print(f"拒绝运行：同一集群上已有另一个 {_PREFIX!r} 前缀的验收在跑。"
               f"两个运行的场景库名完全相同，继续下去会把对方正在用的库和凭据删掉。"
               f"等它跑完再来（它一结束锁就自动放）。", file=sys.stderr)

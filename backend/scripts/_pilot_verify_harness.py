@@ -182,18 +182,52 @@ def assert_every_selfcheck_db_is_whitelisted(
 _RUN_LOCK_SQL = "SELECT pg_try_advisory_lock(hashtext('kline_pilot_verify_' || $1))"
 
 
-async def acquire_prefix_lock(conn, prefix: str) -> bool:
-    """在**这条连接**上取本前缀的运行锁。取不到 = 同集群上已有另一个同前缀的验收在跑。
+# 取运行锁用的 canonical 库。**必须是集群里固定的那一个**，见下面的说明。
+# ⚠️ 不能用 `template1`：`CREATE DATABASE` 以它为模板，源库上挂着别的连接会直接失败。
+_LOCK_DATABASE = "postgres"
+
+
+async def acquire_run_lock(base_dsn: str, prefix: str):
+    """取本前缀的**集群级**运行锁。取到返回持锁连接，取不到返回 None。
 
     ⚠️ 存在的理由（codex 4a-2b/S1 R7-F2）：三个脚本的场景库名都是**固定**的，
        同一集群上并发跑两个同前缀的验收，后者的前置清场会把前者**正在用**的库
        `DROP` 掉、把它的 intent/registry 行删掉 —— 而前者此刻可能正跑在一半。
        库名做成 run-scoped 是另一条路，但那要改动全部白名单与扫描器；
        这把锁是同等效果的最小实现。
-    ⚠️ 锁必须**握在一条活到进程结束的连接**上：advisory lock 是会话级的，
-       连接一关就自动释放 —— 这正是我们要的（崩溃/被杀也不会留下死锁）。
+
+    ⚠️ **advisory lock 是每「库」的，不是每「集群」的**（codex R8-F1；本机真 PG 实测：
+       同一集群上连 `/postgres` 与连 `/template1`，`pg_try_advisory_lock` 同一个 key
+       **两边都取到了**，`pg_locks` 里两行 objid 相同、database 不同）。
+       上一版在「调用方给的 DSN 所指的那个库」上取锁 —— 两个运行只要 DSN 的库名不同
+       就都能取到，而它们抢的是**同一个 `pg_database` 命名空间**里的同一批固定库名。
+       故这里一律改连集群的 canonical 库再取：库名由本模块钉死，调用方改不动。
+
+    ⚠️ 锁握在**返回的这条连接**上，调用方要让它活到进程结束：advisory lock 是会话级的，
+       连接一关（含崩溃、被杀）就自动释放 —— 这正是我们要的，不会留下死锁。
     """
-    return bool(await conn.fetchval(_RUN_LOCK_SQL, prefix))
+    conn = await asyncpg.connect(db_dsn(base_dsn, _LOCK_DATABASE))
+    try:
+        if not await conn.fetchval(_RUN_LOCK_SQL, prefix):
+            await conn.close()
+            return None
+    except BaseException:
+        await conn.close()
+        raise
+    return conn
+
+
+async def assert_distinct_clusters(conn_a, conn_b) -> bool:
+    """两条连接是不是真的连在**两个不同的 PostgreSQL 集群**上。
+
+    ⚠️ 「取锁互不影响」**不能**当作跨集群的证据（codex 4a-2b/S1 R8-F2）：
+       advisory lock 本来就是每库的，把 DSN2 指到**同一集群的另一个库**，
+       那个断言照样通过 —— 于是脚本对「锁不跨集群」这条假设给出假绿。
+       `system_identifier` 是集群初始化时生成的身份，才是真判据。
+    """
+    a = await conn_a.fetchval("SELECT system_identifier FROM pg_control_system()")
+    b = await conn_b.fetchval("SELECT system_identifier FROM pg_control_system()")
+    return a != b
 
 
 async def sweep_leftover_databases(conn, *, prefix: str, scenario_dbs,

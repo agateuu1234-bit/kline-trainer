@@ -2142,8 +2142,8 @@ _LOCK_CONN = None
 
 async def _acquire_run_lock(base_dsn: str) -> int | None:
     global _LOCK_CONN
-    _LOCK_CONN = await asyncpg.connect(base_dsn)
-    if not await harness.acquire_prefix_lock(_LOCK_CONN, _SELFCHECK_PREFIX):
+    _LOCK_CONN = await harness.acquire_run_lock(base_dsn, _SELFCHECK_PREFIX)
+    if _LOCK_CONN is None:
         print(f"拒绝运行：同一集群上已有另一个 {_SELFCHECK_PREFIX!r} 前缀的验收在跑。"
               f"两个运行的场景库名完全相同，继续下去会把对方正在用的库和凭据删掉。"
               f"等它跑完再来（它一结束锁就自动放）。", file=sys.stderr)
