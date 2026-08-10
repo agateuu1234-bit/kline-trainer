@@ -19,6 +19,7 @@
 用法（需真 PG；DSN 指向的库里会建/删 `kline_pilot_selfcheck_*`）：
 
     docker run --rm -d --name pg4a -e POSTGRES_PASSWORD=postgres -p 55432:5432 postgres:15.12
+    QMT_VERIFY_ALLOW_DESTRUCTIVE=1 \
     DSN='postgresql://postgres:postgres@localhost:55432/postgres' \
       .venv/bin/python backend/scripts/verify_pilot_two_phase_create.py
     docker rm -f pg4a
@@ -38,6 +39,7 @@ from urllib.parse import urlparse
 import asyncpg
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import _pilot_verify_harness as harness  # noqa: E402
 from qmt_pilot_db import (PILOT_META_KEYS, PILOT_META_PHASE1_KEYS,  # noqa: E402
                           PILOT_META_PHASE2_KEYS, _is_absolutely_empty,
                           _SEED_LOCK_HELD_SQL, _user_objects, create_pilot_database,
@@ -50,6 +52,7 @@ from qmt_pilot_db import (PILOT_META_KEYS, PILOT_META_PHASE1_KEYS,  # noqa: E402
 _BACKEND = pathlib.Path(__file__).resolve().parents[1]
 # 本脚本只会造/删这个形状的库；前置清场只敢删符合它的（O4-R20-C1）。
 _SELFCHECK_NAME_RE = re.compile(r"\Akline_pilot_selfcheck[a-z0-9_]*\Z")
+_SELFCHECK_PREFIX = "kline_pilot_selfcheck"
 # ⚠️ 验收闸的**完整性清单**（O4-R31-C1）：收尾核对每一档都真的跑过。
 #    少一档即失败 —— **「静默没跑」与「通过了」在输出上完全一样**，
 #    这与本仓反复栽过的「空转的检查比没有检查更糟」是同一族。
@@ -70,6 +73,10 @@ _SCRATCH_OBJECTS = (
 )
 
 _SCENARIO_DBS = (
+    # ⚠️ ⑫c 用它验「库名含引号时必须走 quote_ident」。它**真的会被建出来**，
+    #    故必须登记：崩在 CREATE 与 DROP 之间会留下同前缀的残留库，
+    #    不在白名单里的话下一次运行只能拒绝启动（codex R9-F3）。
+    'kline_pilot_selfcheck_ev"il',
     "kline_pilot_selfcheck_ok",
     "kline_pilot_selfcheck_p1",
     "kline_pilot_selfcheck_p10",
@@ -281,34 +288,11 @@ class _BoomProxy:
         await self._conn.close()
 
 
-_GUARDED_DSNS: set = set()
-
-
-def _assert_destructive_dsn_allowed(dsn: str, label: str) -> str | None:
-    """破坏性 DSN 闸。**必须先于对该 DSN 的任何 connect/DDL**。
-
-    ⚠️ 上一版只闸了 `DSN`（O4-R9-C2），而 `DSN2` 从环境变量读出来就直接
-    `_drop(dsn2, …)` / `CREATE DATABASE` —— 脚本对外宣称「破坏性操作有护栏」，
-    却对第二个集群**一次都没检查**：DSN2 指错到共享/远端集群，
-    `kline_pilot_selfcheck_p24` 就在那边被不可逆地删掉（O4-R37-C1）。
-    这是本 PR 里「同一条判据只落在被点名的那一处」的第十二次。
-    返回 None = 不放行（调用方负责判失败）。
-    """
-    host = urlparse(dsn).hostname
-    if host not in ("localhost", "127.0.0.1", "::1") and os.environ.get(
-            "QMT_VERIFY_ALLOW_DESTRUCTIVE") != "1":
-        print(f"拒绝运行：{label} 指向非本地库 {host}，本脚本会在它上面建/删库。"
-              "仅对隔离测试库运行；确需对非本地库运行请设 QMT_VERIFY_ALLOW_DESTRUCTIVE=1",
-              file=sys.stderr)
-        return None
-    _GUARDED_DSNS.add(dsn)
-    return dsn
-
-
-def _db_dsn(base_dsn: str, dbname: str) -> str:
-    """把 DSN 的**库名**换掉。绝不能用 str.replace —— 用户名也可能叫 postgres。"""
-    head, _, _ = base_dsn.rpartition("/")
-    return f"{head}/{dbname}"
+# ⚠️ 破坏性 DSN 闸 / 换库名 / 只对过闸 DSN 动手的 DROP，**三个验收脚本共用一份**
+#    （见 `_pilot_verify_harness.py` 的头注）：各抄一份就是把「同一条判据只落在
+#    被点名的那一处」这个本仓重演十二次的毛病，搬到**防止误删数据库**的代码上。
+_assert_destructive_dsn_allowed = harness.assert_destructive_dsn_allowed
+_db_dsn = harness.db_dsn
 
 
 async def _maintenance(base_dsn: str, *, seed: str | None = None) -> asyncpg.Connection:
@@ -340,19 +324,7 @@ async def _plain_connect_p27(name: str):
 _P27_DSN = {"dsn": ""}
 
 
-async def _drop(base_dsn: str, dbname: str) -> None:
-    # ⚠️ **机械守卫**：DROP DATABASE 只对过了破坏性闸的 DSN 执行（O4-R37-C1）。
-    #    「记得给新 DSN 加闸」是纪律，纪律在本 PR 里已经失效十二次；
-    #    这一句让漏加闸的新 DSN 在第一次删库前就炸掉，而不是删完才发现。
-    if base_dsn not in _GUARDED_DSNS:
-        raise AssertionError(
-            f"DROP DATABASE 的目标 DSN 没有过破坏性闸：{urlparse(base_dsn).hostname!r}。"
-            f"先调用 _assert_destructive_dsn_allowed(dsn, '<名字>')")
-    conn = await asyncpg.connect(base_dsn)
-    try:
-        await conn.execute("DROP DATABASE IF EXISTS " + quote_ident(dbname))
-    finally:
-        await conn.close()
+_drop = harness.drop_database
 
 
 async def _read_meta(base_dsn: str, dbname: str) -> dict[str, str] | None:
@@ -411,32 +383,18 @@ async def main() -> int:
     #    那个库就会在收尾时留下来、并在下一次运行时把整个脚本挡住（strangers 分支）。
     #    ⚠️ 必须排在**破坏性清场之前** —— 它是纯源码检查、零副作用，
     #    放在清场之后的话，会被 strangers 闸先触发而永远测不到（实测踩过）。
-    _lits = set(re.findall(r'"(kline_pilot_selfcheck[a-z0-9_]*)"',
-                           pathlib.Path(__file__).read_text()))
-    # ⚠️ **反向断言**（O4-R37-C1）：脚本读了几个 DSN 环境变量，就必须有几个走过破坏性闸。
-    #    只在 DSN2 处补一句「记得加闸」是纪律；纪律在本 PR 里已失效十二次。
-    #    这一句让「新增 DSN3 却忘了加闸」在任何连接发生之前就把脚本挡住。
-    _self_src = pathlib.Path(__file__).read_text()
-    _dsn_envs = set(re.findall(r'os\.environ\.get\("(DSN\d*)"\)', _self_src))
-    _gated = set(re.findall(
-        r'_assert_destructive_dsn_allowed\([A-Za-z_0-9]+, "(DSN\d*)"\)', _self_src))
-    if _dsn_envs - _gated:
-        print(f"拒绝运行：这些 DSN 环境变量没有过破坏性闸："
-              f"{sorted(_dsn_envs - _gated)} —— 本脚本会在它们上面建/删库",
-              file=sys.stderr)
-        return 7
-    assert _gated, "反向断言自身失效：一个过闸调用都没匹配到（正则与代码脱钩了）"
+    # ⚠️ 三条纯源码自检（零副作用），**必须排在破坏性清场之前**：放在清场之后会被
+    #    strangers 闸先触发而永远测不到（实测踩过）。判据挂在**本脚本**的源码上，
+    #    故把 `__file__` 传进 harness —— 用 harness 自己的 `__file__` 就成了恒真断言。
+    for _rc in (harness.assert_every_dsn_env_is_gated(__file__),
+                harness.assert_scratch_objects_are_namespaced(_SCRATCH_OBJECTS),
+                harness.assert_every_selfcheck_db_is_whitelisted(
+                    __file__, _SCENARIO_DBS, _SELFCHECK_PREFIX)):
+        if _rc is not None:
+            return _rc
 
-    _bad_scratch = [o for _k, o in _SCRATCH_OBJECTS if "zzqmtverify_" not in o]
-    if _bad_scratch:
-        print(f"拒绝运行：临时对象名没带 `zzqmtverify_` 前缀：{_bad_scratch} —— "
-              f"清场是无条件 DROP，通名会删掉别人的东西", file=sys.stderr)
-        return 6
-    _unlisted = sorted(_lits - set(_SCENARIO_DBS))
-    if _unlisted:
-        print(f"拒绝运行：脚本里用到的这些库名不在 _SCENARIO_DBS 白名单里：{_unlisted}",
-              file=sys.stderr)
-        return 5
+    if (_rc := await _acquire_run_lock(base_dsn)) is not None:
+        return _rc
 
     # 前置清场：本脚本会在中途崩溃时留下 kline_pilot_selfcheck_* 库与登记行，
     # 而登记表按设计**永不清理**。不清场的话，下一次运行会被上一次的残留顶红，
@@ -444,35 +402,19 @@ async def main() -> int:
     _pre = await asyncpg.connect(base_dsn)
     try:
         await _pre.execute((_BACKEND / "sql/pilot_cluster_schema.sql").read_text())
-        matched = [r["datname"] for r in await _pre.fetch(
-            "SELECT datname FROM pg_database WHERE datname LIKE 'kline_pilot_selfcheck%'")]
-        # ⚠️ 精确白名单（O4-R33-C2）：前缀匹配 ≠ 本脚本建的。
-        leftovers = [x for x in matched if x in _SCENARIO_DBS]
-        strangers = [x for x in matched if x not in _SCENARIO_DBS]
-        if strangers and os.environ.get("QMT_VERIFY_FORCE_CLEANUP") != "1":
-            print(f"拒绝运行：这些库名匹配 selfcheck 前缀但**不是本脚本建的**：{strangers}。"
-                  f"本脚本会不可逆地删库，故不碰不认识的名字。"
-                  f"确认它们可弃后设 QMT_VERIFY_FORCE_CLEANUP=1 重跑，或先自行删除。",
-                  file=sys.stderr)
-            return 4
-        leftovers += strangers if os.environ.get("QMT_VERIFY_FORCE_CLEANUP") == "1" else []
-        for name in leftovers:
-            # ⚠️ 名字是从 pg_database 按 LIKE 读回来的，**不是常量**（O4-R20-C1）：
-            #    PostgreSQL 的库名可以含引号/分号，而 asyncpg.execute 支持多语句 ——
-            #    裸 f-string 拼接能让本脚本以 DSN（通常是超级用户）多跑一条 DROP，
-            #    localhost 闸挡不住这一档（共享的本地开发集群同样中招）。
-            #    **挡住注入的是 `quote_ident`**：它把名字变成字面标识符，内容再怪也无法逃逸。
-            #    ⚠️ 曾经在这里加过一层「名字不合 `_SELFCHECK_NAME_RE` 就跳过」——**已撤掉**：
-            #    它挡不住任何东西（转义已经挡住了），却制造了一个**不可恢复**的陷阱 ——
-            #    上一次运行崩溃留下的怪名字库会被永远跳过，而它又会让集群闸判「存在无关数据库」，
-            #    脚本从此再也跑不起来（实测踩到）。
-            if not _SELFCHECK_NAME_RE.fullmatch(name):
-                print(f"（清掉命名异常的残留库 {name!r} —— 它只可能是本脚本崩溃时留下的）")
-            await _pre.execute("DROP DATABASE IF EXISTS " + quote_ident(name))
-        await _pre.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck%'")
-        await _pre.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck%'")
+        # ⚠️ 这里原本是 harness 那段清场的**内联副本**，且用的是
+        #    `datname LIKE 'kline_pilot_selfcheck%'` —— 与 codex 4a-2b/S1 R4-F1 是**同一条缺陷**：
+        #    `_` 在 LIKE 里是单字符通配符，`kline0pilot0selfcheck0prod` 这种完全无关的库名
+        #    会被判成同前缀的 stranger，带 `QMT_VERIFY_FORCE_CLEANUP=1` 时**被直接 DROP**。
+        #    改判据必须按**判据本身**穷尽全仓，而不是只改被报告的那一处 —— 故这里不是
+        #    再抄一遍修好的比较式，而是直接换成共享实现（harness 存在的理由正是这个）。
+        leftovers = await harness.sweep_leftover_databases(
+            _pre, prefix="kline_pilot_selfcheck", scenario_dbs=_SCENARIO_DBS,
+            name_re=_SELFCHECK_NAME_RE)
+        if isinstance(leftovers, int):
+            return leftovers
+        # ⚠️ 登记表是**恢复与归属凭据**，同样不能按前缀删（R4-F2）——只删点名的库名。
+        await harness.purge_metadata_for(_pre, _SCENARIO_DBS)
         # ⑭ 中途崩溃会留下影子目录 schema 与探针表 —— 它们是维护库里的**用户对象**，
         # 下一次运行会在场景 ① 就被闸 (iii) 顶红（与真因毫无关系）。
         # ⚠️ 这些临时对象**必须用明确属于本脚本的前缀**（O4-R34-C2）：
@@ -1058,7 +1000,8 @@ async def main() -> int:
         gone = await m.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", evil_db)
         check(gone is None, "转义后能正常删掉，且没有波及别的库")
         others = await m.fetchval(
-            "SELECT count(*) FROM pg_database WHERE datname LIKE 'kline_pilot_%'")
+            "SELECT count(*) FROM pg_database WHERE left(datname, length($1)) = $1",
+            "kline_pilot_")
         check(others == 0, "没有别的 kline_pilot_* 库被误删", f"实得 {others} 个")
     finally:
         await m.close()
@@ -1099,10 +1042,9 @@ async def main() -> int:
     await _drop(base_dsn, db)
     m = await _maintenance(base_dsn)
     try:
-        await m.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_p17%'")
-        await m.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_p17%'")
+        await harness.purge_metadata_for(m, (
+            "kline_pilot_selfcheck_p17",
+        ))
     finally:
         await m.close()
 
@@ -1214,10 +1156,10 @@ async def main() -> int:
 
     m = await _maintenance(base_dsn)
     try:
-        await m.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_p19%'")
-        await m.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_p19%'")
+        await harness.purge_metadata_for(m, (
+            "kline_pilot_selfcheck_p19a",
+            "kline_pilot_selfcheck_p19b",
+        ))
         await m.execute("DROP SCHEMA IF EXISTS zzqmtverify_poison_ns CASCADE")
     finally:
         await m.close()
@@ -1317,10 +1259,10 @@ async def main() -> int:
     await _drop(base_dsn, db)
     m = await _maintenance(base_dsn)
     try:
-        await m.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_p20%'")
-        await m.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_p20%'")
+        await harness.purge_metadata_for(m, (
+            "kline_pilot_selfcheck_p20",
+            "kline_pilot_selfcheck_p20b",
+        ))
     finally:
         await m.close()
 
@@ -1456,10 +1398,9 @@ async def main() -> int:
 
     m = await _maintenance(base_dsn)
     try:
-        await m.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_p22%'")
-        await m.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_p22%'")
+        await harness.purge_metadata_for(m, (
+            "kline_pilot_selfcheck_p22",
+        ))
     finally:
         await m.close()
 
@@ -1503,10 +1444,10 @@ async def main() -> int:
     await _drop(base_dsn, db)
     m = await _maintenance(base_dsn)
     try:
-        await m.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_p23%'")
-        await m.execute(
-            "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_p23%'")
+        await harness.purge_metadata_for(m, (
+            "kline_pilot_selfcheck_p23",
+            "kline_pilot_selfcheck_p23v",
+        ))
     finally:
         await m.close()
 
@@ -1529,7 +1470,18 @@ async def main() -> int:
         #    验收闸里「跳过」与「通过」在最终信号上没有区别。
         check(False, "㉔ 跨集群同名库",
               "DSN2 没过破坏性 DSN 闸 —— 这一档**没有跑**。")
+    # ⚠️ **第二台集群也要握运行锁**（codex 4a-2b/S1 R9-F1，high）：㉔ 接下来在
+    #    DSN2 上 `DROP` + `CREATE` 同一个**固定库名**。R7/R8 那把锁只锁了
+    #    `base_dsn` 所在的集群 —— 若此刻有另一个验收正以 DSN2 为主集群在跑，
+    #    这里会把**它正在用的**场景库删掉/换掉，正是那把锁本来要关掉的那条竞态。
+    #    取不到就判失败而不是「跳过」：验收闸里「跳过」与「通过」在最终信号上没有区别。
+    #    锁一直握到进程结束（`_entry` 的 finally 统一关）。
+    elif (_far_lock := await harness.acquire_run_lock(dsn2, _SELFCHECK_PREFIX)) is None:
+        check(False, "㉔ 跨集群同名库",
+              "DSN2 那台集群上已有另一个同前缀的验收在跑 —— 这一档**没有跑**。"
+              "绝不在它头上删/建固定名的库；等它跑完再来。")
     else:
+        _LOCK_CONNS.append(_far_lock)
         scenario("㉔")
         print("\n㉔ 同名但在另一台集群上（只有真 PG 能验）")
         db = "kline_pilot_selfcheck_p24"
@@ -1567,10 +1519,9 @@ async def main() -> int:
         await _drop(base_dsn, db)
         m = await _maintenance(base_dsn)
         try:
-            await m.execute(
-                "DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_p24%'")
-            await m.execute(
-                "DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_p24%'")
+            await harness.purge_metadata_for(m, (
+                "kline_pilot_selfcheck_p24",
+            ))
         finally:
             await m.close()
 
@@ -1983,9 +1934,8 @@ async def main() -> int:
         objs = await _user_objects(maint, exempt_maintenance=True)
         check(not objs, "改回规范 DEFAULT 后恢复判空（证明上一条不是恒真）",
               f"残留 {objs}")
-        await maint.execute("DELETE FROM public.pilot_create_intent WHERE dbname LIKE 'kline_pilot_selfcheck_%'")
         # 同上：登记表永不清理 → 本脚本必须自己收尾，否则下一次运行带着上一次的凭据跑。
-        await maint.execute("DELETE FROM public.pilot_database_registry WHERE dbname LIKE 'kline_pilot_selfcheck_%'")
+        await harness.purge_metadata_for(maint, _SCENARIO_DBS)
     finally:
         await maint.close()
 
@@ -2197,5 +2147,34 @@ async def main() -> int:
     return 0
 
 
+# ── 每前缀的运行锁（codex 4a-2b/S1 R7-F2）────────────────────────────────
+# ⚠️ 本脚本的场景库名是**固定**的。同一集群上并发跑两个同前缀的验收，后者的前置
+#    清场会把前者**正在用**的库 DROP 掉、把它的 intent/registry 行删掉。
+#    锁握在一条活到进程结束的连接上 —— advisory lock 是会话级的，连接一关（含崩溃、
+#    被杀）就自动释放，不会留下死锁。
+# ⚠️ 是**列表**不是单个：㉔ 那类档会在第二台集群上删/建固定名的库，
+#    那台集群的锁也要一起握到进程结束（codex R9-F1）。
+_LOCK_CONNS = []
+
+
+async def _acquire_run_lock(base_dsn: str) -> int | None:
+    lock = await harness.acquire_run_lock(base_dsn, _SELFCHECK_PREFIX)
+    if lock is None:
+        print(f"拒绝运行：同一集群上已有另一个 {_SELFCHECK_PREFIX!r} 前缀的验收在跑。"
+              f"两个运行的场景库名完全相同，继续下去会把对方正在用的库和凭据删掉。"
+              f"等它跑完再来（它一结束锁就自动放）。", file=sys.stderr)
+        return 8
+    _LOCK_CONNS.append(lock)
+    return None
+
+
+async def _entry() -> int:
+    try:
+        return await main()
+    finally:
+        for _lock in _LOCK_CONNS:
+            await _lock.close()
+
+
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(asyncio.run(_entry()))
