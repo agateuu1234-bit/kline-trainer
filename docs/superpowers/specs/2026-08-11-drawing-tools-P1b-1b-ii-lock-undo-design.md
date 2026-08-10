@@ -180,7 +180,10 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 
 1. **`locked` 的**语义性**写入**：作用域限 **`TrainingEngine.swift`**，判据 = 形如 `locked: <表达式>` 且该表达式**不是**从同一对象拷贝直传（`locked` / `old.locked` / `d.locked` / `drawing.locked` 这一族）的位置 —— 全文件**恰好 1 处**，在 `setDrawingLocked` 里。
    **拷贝直传形态必须显式列成白名单并各配一条自检**（断言它们**不**触发守卫），否则守卫会在 `withStyle` / `routeDrawingCommit` 上误红。
-2. **`drawings` 数组的结构性改动**：作用域限 **`TrainingEngine.swift` 里 `TrainingEngine` 自己那个 `drawings` 存储属性**（不是全 `Sources/` 的任意同名变量 —— 见上面第三类误报）。判据 = `drawings[` 下标赋值 / `drawings.remove` / `drawings.insert` / `drawings.append` / `drawings = ` 的出现总数**恰好等于**白名单函数里的出现数。**多一处即红。**
+2. **`drawings` 数组的结构性改动**：作用域限 **`TrainingEngine.swift` 里 `TrainingEngine` 自己那个 `drawings` 存储属性**（不是全 `Sources/` 的任意同名变量 —— 见上面第三类误报）。
+   判据 = `drawings[` 下标赋值 / `drawings.remove` / `drawings.insert` / `drawings.append` 的出现总数**恰好等于**白名单函数里的出现数。**多一处即红。**
+   ⛔ **PR-1 这条判据里不含整体赋值 `drawings = `**（codex R4-F3，medium，**已核实为真**）：现树上 `init:178` 的 `self.drawings = seededLossy.drawings` 与 `injectDrawingsForTesting:1452` 的 `drawings = ds` 都是合法的整体赋值，而它们要到 PR-2 的 D79 表里才被分类。把整体赋值放进 PR-1 的判据，**守卫在功能还没写之前就是红的** —— 实施者只会顺手放宽它，那它就再也保护不了 locked 写入边界。
+   整体赋值统一由 **PR-2 的 D79 穷尽性判据**接管（那张表把 `init` 与 `injectDrawingsForTesting` 都显式分类了），两条判据**互不重叠**。
    - **PR-1 的白名单** = `appendDrawing` / `deleteDrawing(at:)` / `deleteDrawing(id:)` / `updateDrawingStyle` / `setDrawingLocked`。
    - **PR-2 落地时把本条升级为 D79 第一层那张表的穷尽性判据**（覆盖面从「下标 / 增删」扩到**全部** `drawings` 写入点，含整体赋值与 `injectDrawingsForTesting`），并把 `applyUndoEntry` 加进白名单。⚠️ **两条守卫必须合并成一条，不许并存** —— 同一族判据留两份、迟早漂移（`feedback_fix_the_whole_predicate_family_not_the_reported_site`）。⚠️ 白名单是**具名函数**，不许用 `*Drawing*` 之类通配（通配会让下一个新写入口静默溜过，`feedback_parallel_session_branch_contamination` 的 G6 教训）。
 
@@ -249,15 +252,34 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 ⚠️ 原稿写的是「生命周期由 UI 显式驱动：由画线模式的进入 / 退出各调一次 `clearDrawingUndoStack()`」。**这条是错的**，实测：
 
 - 画线模式的开 / 关本来就是引擎的事，`beginDrawingSession`（`TrainingEngine.swift:1351`）/ `endDrawingSessionIfActive`（`:1370`）是代码里明写的 **D45 单一收口点**；
-- 而 `endDrawingSessionIfActive` 被**引擎内部六处**调用：`:442`（半武装 fail-closed 回滚）、`:468`、`:532`、`:1276`（`commitDrawing`）、`:1284`（`cancelDrawing`）、`:1331` —— 其中包含 **`.tradeTriggered`（下单成交）** 与 **`.periodComboSwitched`（切周期组合）** 两条路径。
+- 而 `endDrawingSessionIfActive` 被**引擎内部六处**调用：`:442`（半武装 fail-closed 回滚）、`:468`、`:532`（**`advanceAndAccount` = 下单成交**）、`:1276`（`commitDrawing`）、`:1284`（`cancelDrawing`）、`:1331`（`toggleDrawingMode`）。
+  ⚠️ **只核实"有六个调用点"不够，必须逐个核实语义** —— 本 spec 在 R3 就栽在这里：当时把 `.periodComboSwitched` 也当成了退出路径，R4 才查出 `switchPeriodCombo` 末尾是 `restoreDrawingSessionAfterPeriodChange()`、**刻意保留**会话（详见本节末的 ⛔ 段）。
 
 ⇒ **画线模式完全可以在 UI 一无所知的情况下结束。** 靠 UI 调清栈，等于把「撤销栈不跨会话」这条 D25 契约挂在一条随时会被绕过的路径上：下单一次 → 会话已结束 → 但栈还在 → 若 `drawings` 恰好没变，D79 第二层的身份校验**全都通过** → 用户在下一个会话里点 ↩，撤掉的是**上一个会话早已提交的动作**，还会被 autosave 固化。
 
-**修正后的规则**：清栈**挂在引擎自己的两个收口点上**——
-`beginDrawingSession` 成功建立会话时清一次（新会话必须从空栈开始）、`endDrawingSessionIfActive` 结束会话时清一次。**UI 一行都不用调。**
+**修正后的规则**：清栈挂在**会话状态真的翻转**的那一刻，而不是挂在某几个函数名上。
 
-**并加守卫**：`drawingSession.activate(` / `drawingSession.deactivate(` 在 `Sources/` 中的出现处**全部**位于这两个函数内 —— 保证没有第三条路径能在不清栈的情况下翻转 `drawingModeActive`。
-**并加测试**（N-Q，见 §2.6）：`.tradeTriggered` 与 `.periodComboSwitched` 这两条**非 UI 触发**的退出路径各一条，断言栈被清空。
+实测 `drawingSession.activate(` / `drawingSession.deactivate(` 在 `Sources/` 中恰好 **4 处、分布在 3 个函数**里：
+
+| 位置 | 函数 | 性质 |
+|---|---|---|
+| `TrainingEngine.swift:1362` `activate` | `beginDrawingSession` | 开会话 |
+| `:1359` `deactivate` | `beginDrawingSession` 的 fail-closed 回滚 | 开失败 → 等于没开 |
+| `:1378` `deactivate` | `endDrawingSessionIfActive` | 正常结束 |
+| `:1321` `deactivate` | **`cancelDrawingAllPanels`** | **真实拆除路径**（public，既有测试用它退出画线模式）|
+
+⚠️ **`cancelDrawingAllPanels` 是第三个函数，原稿漏了它**（codex R4-F2，high，**已核实为真**）：只在 begin / end 清栈会让它退出后残留一个陈旧栈；而原稿那条「activate/deactivate 只准出现在 begin/end 内」的守卫会直接在 `:1321` 这行**既有合法代码**上误红。
+
+**规则**：上述 3 个函数**每一个**都必须清栈。
+**守卫按「共处」写，不按函数名清单写**：断言 `Sources/` 中**凡是含 `drawingSession.activate(` 或 `drawingSession.deactivate(` 的函数，必定也含 `clearDrawingUndoStack()`**。
+这样将来任何人加第四条会话翻转路径，守卫立刻变红直到他也清栈 —— 判据钉在**状态翻转**这件事上，而不是钉在一份会过期的函数名单上（`feedback_fix_the_whole_predicate_family_not_the_reported_site`）。
+
+**并加测试**（N-Q，见 §2.6）：`.tradeTriggered`（下单成交）与 `cancelDrawingAllPanels` 两条**非 UI 触发**的退出路径各一条，断言栈被清空。
+
+> ⛔ **切周期 `.periodComboSwitched` 不属于退出路径 —— 原稿把它列进来是错的**（codex R4-F1，high，**已核实为真**）。
+> `switchPeriodCombo`（`TrainingEngine.swift:391`）末尾调的是 `restoreDrawingSessionAfterPeriodChange()`（`:416`），其文档 `:419-421` 逐字写着：「**只丢 pending 锚**…保留 `activeDrawingTool` 与 `drawingModeActive` —— **绝不**调 `deactivate()`」。既有测试 `realPeriodChangeDiscardsOnlyPendingAnchors` 也断言切周期后会话与两面板**仍在**画线模式。
+> 照原稿实现只有两个结果：要么把 1a-iv 刚放开的「画线模式内切周期」焊死（功能回归），要么在用户**还在同一个会话里**时静默丢掉一条有效的撤销记录。
+> **正确语义：切周期后撤销栈原样保留**（同一个会话没结束）。这一条要写成**正向**测试，见 N-Q3。
 
 ### 2.2 D75　入栈点 = 四个引擎写入 API 各自的成功路径
 
@@ -426,18 +448,21 @@ undo / redo 共用一个私有单点 `applyUndoEntry`，进它先过下面这组
 锁定一条线 → ↩ → 断言撤销栈**深度仍是 1 且栈顶还是那次锁定**（不是"撤销锁定"这个新动作）→ 再点 ↩ 无效果（N-K 已覆盖行为，本条覆盖**栈内容**）。
 **不得**只断言「第二次点没反应」—— 那在「入栈了但恰好被深度 1 挤掉」的错误实现下也会过。
 
-**N-Q　非 UI 触发的会话退出必清栈（D74 修正，codex R3-F1）**
-两条**不经过任何 UI 调用**的路径各一条：
-- **N-Q1 下单成交**：进画线模式 → 画一条线（栈非空）→ 触发 `.tradeTriggered`（引擎内部会调 `endDrawingSessionIfActive`）→ 断言撤销栈**已空**、↩ / ↪ 均不可用、`undoDrawing()` 返回 `false` 且不动数据。
-- **N-Q2 切周期组合**：同上，改用 `.periodComboSwitched` 触发。
-⚠️ **不得**用「点退出按钮」那条 UI 路径代替 —— 那条恰恰是唯一本来就会清的，用它测等于什么都没测（同 N-N3 原稿那个恒过测试的错误）。
+**N-Q　会话生命周期与撤销栈 —— 两条要清、一条**不能**清（D74 修正，codex R3-F1 + R4-F1/F2）**
+- **N-Q1 下单成交（非 UI 触发）**：进画线模式 → 画一条线（栈非空）→ 走 `advanceAndAccount`（内部 `.tradeTriggered` + `endDrawingSessionIfActive`，`TrainingEngine.swift:532`）→ 断言撤销栈**已空**、↩ / ↪ 均不可用、`undoDrawing()` 返回 `false` 且不动数据。
+- **N-Q2 `cancelDrawingAllPanels`（第三条拆除路径，原稿漏了）**：同上，改用 `cancelDrawingAllPanels()` 结束会话 → 同样断言栈已清空。
+- **N-Q3 切周期必须**保留**栈（正向测试，防我们把它误当退出路径）**：画一条线 → `switchPeriodCombo(...)` 真的换了组合 → 断言 ① `drawingModeActive` **仍为 true**（与既有 `realPeriodChangeDiscardsOnlyPendingAnchors` 一致）；② 撤销栈**仍非空**、↩ **仍可用**；③ 点 ↩ 能正确撤掉切周期之前画的那条线。
+
+⚠️ N-Q1 / N-Q2 **不得**用「点退出按钮」那条 UI 路径代替 —— 那条恰恰是本来就会清的，用它测等于什么都没测（同 N-N3 原稿那个恒过测试的错误）。
 
 **N-R　no-op 样式点击不冲掉撤销记录（D80 的 PR-2 侧，codex R3-F2）**
 改一条线的颜色（栈里是这次真编辑）→ **把同一个颜色再点一次**（`before == after`）→ 断言撤销栈**栈顶仍是那次真编辑**（不是被 no-op 覆盖）→ 点 ↩ → 颜色回到**改之前**。
 **不得**只断言「revision 没变」—— 那测不出栈被覆盖。
 
-**N-S　会话状态翻转的唯一通路（D74 守卫）**
-源码守卫：`drawingSession.activate(` / `drawingSession.deactivate(` 在 `Sources/` 中的出现处**全部**位于 `beginDrawingSession` / `endDrawingSessionIfActive` 内，配反向自检。
+**N-S　会话翻转与清栈**共处**（D74 守卫，钉在状态翻转上、不钉函数名单）**
+源码守卫：`Sources/` 中**凡是含 `drawingSession.activate(` 或 `drawingSession.deactivate(` 的函数，必定也含 `clearDrawingUndoStack()`**。当前应命中三个函数：`beginDrawingSession` / `endDrawingSessionIfActive` / `cancelDrawingAllPanels`。
+配反向自检：造一个含 `deactivate(` 但不含清栈的函数 → 守卫必须变红。
+⚠️ **不许**写成「只准出现在 begin/end 内」—— 那条在 `cancelDrawingAllPanels:1321` 这行**既有合法代码**上就是红的（codex R4-F2）。
 
 **N-O　撤销不绕过 review 门**
 复盘模式下 `undoDrawing` / `redoDrawing` 恒 `false`（D34 纵深防御；栈本就不该在复盘里建起来，但引擎侧仍要有门）。
@@ -466,7 +491,7 @@ PR-1 的 N-A～N-H 与 1b-i / 1a-i 的既有测试在本 PR 仍全绿。
 | 15 | 改一条线的颜色 → 点 ↩ → 在样式面板把默认颜色改成**绿色** → 再点 ↪ | 那条线回到**你之前改的那个颜色**，**不是**绿色 | |
 | 16 | 点「退出」离开画线模式，再进来，看 ↩ / ↪ | 两个都是灰的（撤销记录不跨会话保留） | |
 | 16b | 画一条线（不点退出）→ 直接**下一单**（买或卖）→ 再进画线模式看 ↩ | ↩ 是灰的。<br>说明：下单会**隐式结束**画线会话，所以撤销记录跟着清掉——这是对的，不是 bug | |
-| 16c | 画一条线（不点退出）→ **竖滑切一次周期** → 再看 ↩ | ↩ 是灰的（切周期组合同样会结束画线会话） | |
+| 16c | 画一条线（不点退出）→ **竖滑切一次周期** → 再看 ↩，然后点它 | ↩ **仍然是亮的**，点下去能把那条线撤掉。<br>⚠️ 与 16b 刻意相反：切周期**不会**结束画线会话（你还在画线模式里），所以撤销记录必须留着 | |
 | 16d | 改一条线的颜色 → 把**同一个颜色再点一次** → 点 ↩ | 颜色回到**改之前**那个色。<br>（不是"没反应"——重复点同一个颜色不该把你上一次的真改动冲掉） | |
 | 17 | 撤销一条线之后**杀掉 App**，续这一局 | 撤销的结果被保留了（那条线确实不在）；↩ / ↪ 都是灰的 | |
 | 18 | 进复盘模式看画线入口 | 还是浮动铅笔钮，**没有**两行底栏 | |
