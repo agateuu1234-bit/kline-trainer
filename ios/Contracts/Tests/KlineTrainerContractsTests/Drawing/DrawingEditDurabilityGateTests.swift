@@ -173,10 +173,13 @@ struct DrawingEditDurabilityGateTests {
     ///    （spec `:757`），且必须做 **raw-preserving 单字段 merge**（只改 `locked` 一个 key、其余从旧 raw
     ///    逐字保留），不能照抄本期「整条拒绝」的形状。
     ///
-    /// ⚠️⚠️ **交接给 1b-ii**：落地 `setDrawingLocked(id:locked:)` 时，这条线一旦被解锁，
-    /// `deleteDrawing(id:)` 就该对它放行（未来数据那道门本就不归删除面管）——**本测试「delete == false」
-    /// 那半条断言必须翻转成 true**，否则说明 `setDrawingLocked` 没把 `locked` 门在下游落到实处。
-    @Test("N14h 已知死角（不修，钉现状）: locked + 未来数据的线 —— 今天既改不动也删不掉，finalize 门仍会命中")
+    /// N14h（1b-ii PR-1 已解开一半）：locked + 未来数据的线。
+    /// **锁着时**仍然既改不动（门②）也删不掉（门②）——这部分不变。
+    /// **但 `setDrawingLocked` 落地后它可以被解锁**，解锁之后 `deleteDrawing(id:)` 必须放行
+    /// （未来数据那道门本就不归删除面管）→ 用户对这类线的处置通道从此存在。
+    /// ⚠️ **仍然残留**：解锁后它依旧**改不动样式**（D61 门保留在 `updateDrawingStyle` 上）。
+    ///    这是保护而非缺陷，P3/未来版本认识那些枚举值后自然解禁。
+    @Test("N14h: locked + 未来数据的线 —— 锁着时改不动删不掉，解锁后可删除")
     func lockedFutureDataLineIsCurrentlyUnrecoverable() throws {
         // 分量一：locked + 未来**顶层字段**（`futureX`，本构建不认识这个 key）
         let lockedFutureFieldRaw = #"{"id":"LA","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":true,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain","futureX":9}"#
@@ -192,6 +195,14 @@ struct DrawingEditDurabilityGateTests {
         // finalize 判据仍会命中：这一局会被 finalize 门 fail-closed 拦下（`TrainingSessionCoordinator:733-736`）
         let reconciledA = try eA.loadedDrawingsLossy.reconciled(currentKnown: eA.drawings)
         #expect(reconciledA.hasKnownFutureFields(liveIds: Set(eA.drawings.map(\.id))) == true)
+        // 1b-ii PR-1：解锁 → 删除必须放行（1b-i 头注逐字交接的翻转点）
+        #expect(eA.setDrawingLocked(id: "LA", locked: false) == true)
+        #expect(eA.drawings.first(where: { $0.id == "LA" })?.locked == false)
+        let revAfterUnlockA = eA.drawingsRevision
+        #expect(eA.deleteDrawing(id: "LA") == true)                    // ← 由 false 翻转为 true
+        #expect(!eA.drawings.contains { $0.id == "LA" })               // 线真的没了
+        #expect(eA.drawingsRevision == revAfterUnlockA + 1)
+        // 残留仍在：解锁不解禁样式编辑（D61 门还在 updateDrawingStyle 上）
 
         // 分量二：locked + 已知 key 的未来**枚举值**（`colorToken:"futureNeon"`）
         let lockedFutureEnumRaw = #"{"id":"LB","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"futureNeon","labelMode":"hidden","locked":true,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}"#
@@ -206,6 +217,12 @@ struct DrawingEditDurabilityGateTests {
         #expect(eB.drawingsRevision == revB)                                  // revision 未动
         let reconciledB = try eB.loadedDrawingsLossy.reconciled(currentKnown: eB.drawings)
         #expect(reconciledB.hasKnownFutureEnumValues(liveIds: Set(eB.drawings.map(\.id))) == true)
+        // 1b-ii PR-1：解锁 → 删除必须放行（同上，分量二）
+        #expect(eB.setDrawingLocked(id: "LB", locked: false) == true)
+        // 残留：解锁后仍改不动样式（D61 门仍拒）—— 必须在删除之前断言，删了就没得改了
+        #expect(eB.updateDrawingStyle(id: "LB", style: style()) == false)
+        #expect(eB.deleteDrawing(id: "LB") == true)
+        #expect(!eB.drawings.contains { $0.id == "LB" })
     }
 
     // MARK: D70 raw-preserving 举证（1b-ii PR-1 Task 2）——「机制已存在」这条设计假设的证据
@@ -232,6 +249,18 @@ struct DrawingEditDurabilityGateTests {
         let out = String(decoding: try merged.encoded(), as: UTF8.self)
         #expect(out.contains("\"colorToken\":\"futureNeon\""), "未来枚举值被 fallback 覆盖了：\(out)")
         #expect(out.contains("\"locked\":true"), "locked 没写进去：\(out)")
+    }
+
+    @Test("L13a 落盘(内存层): 锁定 → revision +1 → merge/encode/decode 往返后仍是锁定态")
+    @MainActor func lockedSurvivesLossyRoundTrip() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeHorizontalDrawing(id: "S1")))
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "S1", locked: true))
+        #expect(e.drawingsRevision == rev + 1)
+        let merged = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings)
+        let reloaded = try LossyDrawingArray.decode(try merged.encoded())
+        #expect(reloaded.drawings.first(where: { $0.id == "S1" })?.locked == true)
     }
 
     /// 契约举证（spec §3 第 3 条第 ① 分量）：非水平线在本构建**选不中** ⇒ 路由够不着 ⇒ 用户锁不了它。

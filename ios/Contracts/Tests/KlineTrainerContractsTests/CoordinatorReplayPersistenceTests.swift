@@ -241,6 +241,30 @@ struct CoordinatorReplayPersistenceTests {
         #expect(e2?.flow.mode == .replay)
     }
 
+    /// L13b（N-F 主证据）：训练局里**只锁定一条线**（不推 tick / 不交易 / 不增删）
+    /// → 走真实 saveProgress → endSession → 重新载入后仍是锁定态。
+    @Test func lockOnlyChange_persistsAcrossSaveAndReload() async throws {
+        let h = try CoordinatorTestHarness.make()
+        let e1 = try await h.coordinator.replay(recordId: h.seededRecordId)
+        // fresh replay 不带任何已有线（见 D30②）→ 必须先画一条、存盘、续局，才有线可锁
+        #expect(e1.appendDrawing(makeHorizontalDrawing(id: "K1")))
+        try await h.coordinator.saveProgress(engine: e1)
+        await h.coordinator.endSession()
+
+        let e2 = try #require(try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId))
+        #expect(e2.drawings.first(where: { $0.id == "K1" })?.locked == false)
+        let rev = e2.drawingsRevision
+        // ★ 本局**唯一**的改动就是锁定（split addendum §7.3 #3 / 验收 #8 的等价自动化）
+        #expect(e2.setDrawingLocked(id: "K1", locked: true) == true)
+        #expect(e2.drawingsRevision == rev + 1)        // 严格 +1 —— autosave 的触发信号
+        try await h.coordinator.saveProgress(engine: e2)
+        await h.coordinator.endSession()
+
+        let e3 = try #require(try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId))
+        #expect(e3.drawings.first(where: { $0.id == "K1" })?.locked == true,
+                "只锁定、别的什么都没改 → 存盘被 clean-skip 吞掉了（D30① 回归）")
+    }
+
     @Test func resumePendingReplay_recordIdMismatch_returnsNil_noClear() async throws {
         let h = try CoordinatorTestHarness.make()
         let e1 = try await h.coordinator.replay(recordId: h.seededRecordId)
