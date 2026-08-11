@@ -296,17 +296,32 @@ git commit -m "feat(1b-ii PR-1): setDrawingLocked 引擎 API —— 豁免 D60 l
         lineSubType: .straight, lineStyle: .solid, thickness: 1, colorToken: .orange,
         labelMode: .hidden, locked: false, text: "", fontSize: 14,
         textColorToken: .orange, textForm: .plain, tailAnchor: nil)
-    // ⚠️ mapper 没有现成 helper（**已实测：仓里没有 `makeTestMapper`**）。
-    //    照既有写法自己造：`CoordinateMapper(viewport: <vp>, displayScale: 1)`
-    //    （见 GeometryTests.swift:255 / :322、TrainingEnginePinchTests.swift:199）。
-    //    实施者先读 GeometryTests.swift:255 那段，复用它构造 viewport 的方式，别另造一套。
-    let mapper = CoordinateMapper(viewport: /* 照 GeometryTests:255 构造 */, displayScale: 1)
+    // mapper：主图 y ∈ [0,100]、价格区间 [0,100]（与 DrawingEditRouterTests:15-22 同款，已实测可编译）
+    let mapper = CoordinateMapper(
+        viewport: ChartViewport(startIndex: 0, visibleCount: 10, pixelShift: 0,
+                                geometry: ChartGeometry(candleStep: 10, candleWidth: 8, gap: 2),
+                                priceRange: PriceRange(min: 0, max: 100),
+                                mainChartFrame: CGRect(x: 0, y: 0, width: 100, height: 100)),
+        displayScale: 2)
+    // ⚠️ **注册表显式传入，不用 `KLineView.drawingTools`** —— `KLineView` 是 UIKit-gated，
+    //    host `swift test` 上根本不编译（codex P-R4-F1）。本条证明的是判据本身：
+    //    「注册表里没有的工具 ⇒ 不命中」。「生产注册表里确实没有 `.trend`」由 L8c 在 Catalyst 上证。
     let hit = DrawingHitTester.firstHit(
         in: [trend], point: CGPoint(x: 10, y: 10),
-        mapper: mapper, tools: KLineView.drawingTools)
+        mapper: mapper, tools: [.horizontal: HorizontalLineTool()])
     #expect(hit == nil, "注册表里没有 .trend 的渲染器，却命中了 —— 契约论点 ① 不成立")
+    // 同一判据的正向档：同样的点、同样的注册表，一条**水平线**必须命中
+    // （否则「返回 nil」可能只是因为几何/点位不对，与注册表无关 → 本测试就没有判别力）
+    let hline = makeHorizontalDrawing(id: "H1", price: 50)
+    #expect(DrawingHitTester.firstHit(in: [hline], point: CGPoint(x: 10, y: 50),
+                                      mapper: mapper,
+                                      tools: [.horizontal: HorizontalLineTool()]) != nil,
+            "正向档失败 —— 说明 nil 不是因为「注册表里没有」，本测试无判别力")
 }
 ```
+
+⚠️ **正向档不可省**：只断言 `.trend` 返回 nil，无法区分「因为注册表里没它」还是「因为点位/几何根本不对」。
+一个恒返回 nil 的 `firstHit` 也能让前半条全绿 —— 正向档才把判别力钉住。
 
 ```swift
 /// L8b 契约分量②（codex P-R1-F3）：**即便绕过路由直调引擎**，保存后 `toolType` 与全部未来字节
@@ -346,12 +361,28 @@ git commit -m "feat(1b-ii PR-1): setDrawingLocked 引擎 API —— 豁免 D60 l
 > - `.trend` 是合法 case，但它在 `Models.swift:39` 的**逗号列表**里声明（`case horizontal, trend, channel, …`），`grep "case trend"` 找不到 —— 不要因此以为它不存在。
 > - `DrawingToolType.implemented` 实测 = `[.horizontal]`（`Models.swift:50`），故 `.trend` 既进不了 `beginDrawingSession`，也不在 `KLineView.drawingTools` 注册表里。
 
-- [ ] **Step 2: 跑测试确认通过**
+- [ ] **Step 2: 跑测试确认通过（全部 host 可跑，无 UIKit 依赖）**
 
 ```bash
 cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)" && swift test 2>&1 | tail -5
 ```
-⚠️ **L8 若因 `KLineView` / `makeTestMapper` 在 host 上不可见而编译失败**（`KLineView` 是 UIKit-gated），把 L8 单独挪到 UIKit-gated 测试文件并在 Catalyst 上跑；host 侧保留 L6/L7。**不要**为了让它编译过而把断言弱化。
+L6 / L7 / L8 / L8b **四条都在 host 上跑**：`DrawingHitTester`、`HorizontalLineTool`、`CoordinateMapper` 全是纯 CoreGraphics，**没有一处碰 `KLineView`**。
+
+> **契约论点 ① 的另一半 = L8c，归 Task 7**，落在 **`Tests/KlineTrainerContractsTests/Render/KLineViewCompileTests.swift`**。
+> ⚠️ **不能**放进 `DrawingInteractionUISourceGuardTests.swift` —— 那个文件**刻意不是 UIKit-gated**
+> （它读源码文本、跑 host，见其文件头注），`KLineView` 在那儿根本不可见。
+> `KLineViewCompileTests.swift` 是 `#if canImport(UIKit)` 门控的，Catalyst 上真跑。
+> （已实测：`KLineView.drawingTools` 是 `KLineView.swift:47` 的 `static let`，当前值恰为 `[.horizontal: HorizontalLineTool()]`。）
+> ```swift
+> @Test("L8c 契约: 生产渲染注册表里确实没有 .trend（L8 的另一半，必须在 Catalyst 上跑）")
+> func productionRegistryHasNoTrend() {
+>     #expect(KLineView.drawingTools[.trend] == nil,
+>             "生产注册表里出现了 .trend 渲染器 —— L8 的前提失效，契约理由需重写")
+>     #expect(KLineView.drawingTools[.horizontal] != nil, "正向档：水平线必须在注册表里")
+> }
+> ```
+> **两半缺一不可**：L8 证明「注册表里没有 ⇒ 不命中」这条判据成立，L8c 证明「生产注册表里真的没有 `.trend`」。
+> 只有 L8 = 判据对但前提没验；只有 L8c = 前提对但判据没验。
 
 - [ ] **Step 3: 变异验证（本 task 的核心，控制者亲验）**
 
@@ -359,7 +390,9 @@ cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git
 |---|---|
 | 把 `Models.swift:370` 的 `&& lhs.locked == rhs.locked` 删掉 | **L6、L7** —— 证明它们真的走到了 merge 路径 |
 | 把 `mergeKnownFields` 里 `if let ov, jsonValueEqual(cv, ov) { continue }` 改成无条件 `dict[k] = cv` | **L7**（未来枚举值会被 fallback 覆盖） |
-| 把 `DrawingHitTester.firstHit:26` 的 `guard let tool = ... else { return false }` 改成 `else { return true }` | L8 |
+| 把 `DrawingHitTester.firstHit:26` 的 `guard let tool = ... else { return false }` 改成 `else { return true }` | L8（`.trend` 会命中） |
+| 把 `firstHit` 换成恒 `return nil` | **L8 的正向档**（前半仍绿 → 正是正向档的价值） |
+| 往 `KLineView.drawingTools` 里加一条 `.trend` 项 | **L8c**（Catalyst，Task 7） |
 
 > ⛔ **第一条变异若 L6/L7 仍绿 → 立即停止本 PR，报告控制者。** 说明 D70 的设计假设没被证明，raw-preserving 需要自己实现。
 
@@ -918,6 +951,7 @@ git commit -m "feat(1b-ii PR-1): 锁定路由与可用性谓词（D71）—— s
 - Modify: `Sources/KlineTrainerContracts/UI/TrainingView.swift:262-264`
 - Modify: `Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift:101-119`（`bottomBarHasExactlyTwoKeys` → 三键版，见 Step 3）
 - Modify: `Tests/KlineTrainerContractsTests/Render/DrawingBottomBarHeightTests.swift:42`（**加参数后既有构造会编译不过**，见 Step 3b）
+- Modify: `Tests/KlineTrainerContractsTests/Render/KLineViewCompileTests.swift`（新增 **L8c** —— 契约论点 ① 的 Catalyst 那一半，UIKit-gated 文件，见 Task 2 Step 2 的说明）
 
 > ⚠️ **两处既有测试会被本 task 的签名改动打穿，必须同期改**（codex P-R2-F4，已实测）：
 > - `DrawingBottomBarHeightTests.swift:42` = `DrawingBottomBar(typeRowExpanded: .constant(false), deleteEnabled: false, onDelete: {})` —— 加三个必填参数后**编译失败**；
@@ -1076,6 +1110,7 @@ git add ios/Contracts/Sources/KlineTrainerContracts/UI/DrawingModeBar.swift \
         ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingBottomBarHeightTests.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/Render/KLineViewCompileTests.swift \
         .github/scripts/catalyst-total-baseline.txt .github/scripts/catalyst-uikit-baseline.txt
 git commit -m "feat(1b-ii PR-1): 底栏 ②🔒 + 置灰传播（D72）；既有两键守卫与高度测试同期升三键"
 git status --porcelain   # 必须为空
