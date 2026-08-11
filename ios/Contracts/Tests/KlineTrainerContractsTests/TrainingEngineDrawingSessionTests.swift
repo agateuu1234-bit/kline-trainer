@@ -947,6 +947,78 @@ struct TrainingEngineDrawingSessionTests {
         try expectIdentifierNeverVended("updateDrawingStyle", inFiles: mentions)
     }
 
+    // MARK: 1b-ii PR-1 Task 4（D71）：setDrawingLocked 信任边界三层守卫 + locked/drawings 写入面守卫
+
+    @Test("L11: setDrawingLocked 非 public + Sources/ 中恰好 1 处调用（路由在调用前先验几何）")
+    @MainActor func setDrawingLockedTrustBoundary() throws {
+        // 第一层：存在 + 非 public/package/open（含 public extension，D69 约束 3）
+        try expectEngineInternalOnly("setDrawingLocked(id:")
+
+        // 第二层：`Sources/` 里恰好 1 处调用，且在那条已先验几何的 UI 路由里
+        let sites = try callSiteCount("setDrawingLocked(")
+        #expect(sites.count == 1, "setDrawingLocked 的调用文件数应为 1，实际：\(sites)")
+        #expect(sites.first?.count == 1, "同一文件内也只许 1 处，实际：\(sites)")
+        #expect(sites.first?.file.hasSuffix("/Drawing/DrawingEditRouter.swift") == true,
+                "唯一调用点必须是 UI 编辑路由，实际：\(sites)")
+
+        // 几何判据必须排在调用之前（只钉"调用点唯一"不够，唯一那处若不验几何同样失守）
+        let router = contractsDirForGuards
+            .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path
+        let code = try squeezedSource(router)
+        let geoIdx = try #require(code.range(of: squeeze("HorizontalLineTool.visibleGeometry("))).lowerBound
+        let callIdx = try #require(code.range(of: squeeze("engine.setDrawingLocked("))).lowerBound
+        #expect(geoIdx < callIdx, "几何判据必须排在 setDrawingLocked 调用之前")
+
+        // 第三层：方法引用（`let f = engine.setDrawingLocked`）不出现调用 pattern，只数调用会放过它
+        let mentions = try filesMentioning("setDrawingLocked")
+        #expect(!mentions.isEmpty, "扫描器返回空 —— 守卫已失效")
+        #expect(mentions.allSatisfy {
+            $0.hasSuffix("/TrainingEngine/TrainingEngine.swift")
+                || $0.hasSuffix("/Drawing/DrawingEditRouter.swift")
+        }, "setDrawingLocked 被引擎与唯一路由以外的文件提到（含方法引用）：\(mentions)")
+        try expectIdentifierNeverVended("setDrawingLocked", inFiles: mentions)
+    }
+
+    /// N-B 第 1 条（spec §1.6）：`TrainingEngine.swift` 里**语义性** locked 写入恰好 1 处。
+    /// 拷贝直传（`locked: locked` / `old.locked` / `d.locked` / `drawing.locked`）不算。
+    @Test("L12: TrainingEngine 里非拷贝直传的 locked 写入恰好 1 处（在 setDrawingLocked 里）")
+    @MainActor func semanticLockedWriteIsSingleSite() throws {
+        let code = try squeezedSource(trainingEnginePath)
+        let total = code.components(separatedBy: "locked:").count - 1
+        var passthrough = 0
+        for form in ["locked:locked", "locked:old.locked", "locked:d.locked", "locked:drawing.locked"] {
+            passthrough += code.components(separatedBy: form).count - 1
+        }
+        #expect(total - passthrough == 1,
+                "语义性 locked 写入应恰好 1 处，实际 total=\(total) passthrough=\(passthrough)")
+        #expect(code.contains(squeeze("locked: newLocked")),
+                "那一处必须是 setDrawingLocked 里的 `locked: newLocked`（见 Global Constraint #1）")
+    }
+
+    /// N-B 第 2 条（spec §1.6）—— **不可省，与 L12 是两条不同的判据**（codex P-R1-F1）。
+    /// L12 只数 `locked:` 字样；而**整对象赋值** `drawings[i] = <locked 不同的对象>` 字面上**不含**
+    /// `locked:`，会从 L12 底下整个溜过去 —— 它恰恰是绕过路由/几何/唯一性信任边界的第二条路。
+    /// 故本条按**结构性写入点**穷尽计数。
+    ///
+    /// ⚠️ 必须排除 `reviewDrawings`：它以**子串**形式包含 `drawings`，朴素计数会把复盘侧写入
+    ///    算进来（假阳性）；而为了迁就它去放宽判据，又会让真正的新写入面溜过去。
+    ///    故判据 = 「`drawings` 紧邻的前一个字符不是标识符字符」，与 `bareIdentifierReferences` 同款边界法。
+    @Test("L12b: TrainingEngine 里 drawings 的结构性写入点恰好 5 处（穷尽性，多一处即红）")
+    @MainActor func engineDrawingsWriteSurfaceIsExhaustive() throws {
+        let code = try squeezedSource(trainingEnginePath)
+        let n = engineDrawingsStructuralWrites(code)
+        // PR-1 后的构成（每一处都必须能对上号）：
+        //   drawings.remove(at:) ×2  → deleteDrawing(at:) / deleteDrawing(id:)
+        //   drawings.append(     ×1  → appendDrawing
+        //   drawings[x] =        ×2  → updateDrawingStyle / setDrawingLocked
+        //   drawings.insert(     ×0  → PR-2 才引入（届时期望值改为 6）
+        #expect(n == 5, """
+            drawings 结构性写入点应为 5，实际 \(n)。
+            多了 = 出现了未经分类的新写入面（可能绕过路由/几何/唯一性三道门）；
+            少了 = 判据坏了或某个写入面被挪走。两种都必须查清再改期望值，不许直接改数字。
+            """)
+    }
+
     // MARK: 切片2 Task 5（D51/D60/D66）：deleteDrawing(id:)
 
     @Test("删除成功: 按 id 移除 + revision +1")

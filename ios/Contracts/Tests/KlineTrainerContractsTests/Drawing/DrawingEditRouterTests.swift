@@ -813,4 +813,24 @@ struct DrawingEditRouterTests {
         #expect(DrawingEditRouter.toggleLockSelected(engine: e) == true)  // 再点一次 → 解锁
         #expect(e.drawings.first(where: { $0.id == "A" })?.locked == false)
     }
+
+    // 评审挖出的缺口（Task 6 codex 评审）：`lockableIgnoringGeometry` 里的
+    // `guard engine.flow.mode != .review`（D34 信任边界）零测试覆盖 —— 删掉它，上面 L14-L18b 七条
+    // 没有一条会变红（它们全在 normal 模式下跑）。照 `reviewModeIsInert`（:663）的搭法补上。
+    @Test("L19 D34 纵深防御: 复盘模式下 canToggleLock/lockButtonEnabled 恒 false")
+    @MainActor func lockRefusedInReviewMode() throws {
+        let e = TrainingEngine.preview(mode: .review)
+        #expect(e.appendDrawing(makeStyledHLine(id: "R", revealTick: 0, period: e.upperPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        e.toggleDrawingMode(); e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "R", panel: .upper)
+        e.drawingSession.setViewportMapper(mapper(), panel: .upper)
+        // 前提自足：证明这条线结构性可见（真进了 uniqueSelected 的候选集），下面的 false 断言才精确
+        // 来自 review 门，而不是巧合地来自 D40 的 revealTick/belongsToPanel 过滤。
+        #expect(RenderStateBuilder.visibleDrawings(engine: e, panel: .upper,
+                                                    tick: e.tick.globalTickIndex).contains { $0.id == "R" },
+                "fixture 前提不成立：线结构性不可见，下面的 false 断言测不到 review 门本身")
+        #expect(DrawingEditRouter.canToggleLock(engine: e) == false)
+        #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == false)
+    }
 }

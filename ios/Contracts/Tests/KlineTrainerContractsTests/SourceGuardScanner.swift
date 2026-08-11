@@ -283,3 +283,29 @@ func expectIdentifierNeverVended(_ identifier: String, inFiles files: [String],
                 sourceLocation: sourceLocation)
     }
 }
+
+/// `TrainingEngine.swift` 里对**引擎自己那个 `drawings`** 的结构性写入点计数（1b-ii PR-1，N-B 第 2 条）。
+/// 排除 `reviewDrawings`（子串包含 `drawings`）：判据 = 紧邻前一个字符不是标识符字符。
+/// 只数**写**：`drawings[$0].id` 这种下标**读**不算（`]` 后面跟的是 `.` 不是 `=`）。
+func engineDrawingsStructuralWrites(_ squeezedCode: String) -> Int {
+    let chars = Array(squeezedCode)
+    func isIdentChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+    func startsBare(at i: Int, _ needle: [Character]) -> Bool {
+        guard i + needle.count <= chars.count, Array(chars[i ..< i + needle.count]) == needle else { return false }
+        if i > 0, isIdentChar(chars[i - 1]) { return false }      // reviewDrawings → 排除
+        return true
+    }
+    var count = 0
+    for needle in ["drawings.remove(", "drawings.insert(", "drawings.append("].map(Array.init) {
+        for i in chars.indices where startsBare(at: i, needle) { count += 1 }
+    }
+    let sub = Array("drawings[")
+    for i in chars.indices where startsBare(at: i, sub) {
+        var j = i + sub.count
+        while j < chars.count, chars[j] != "]" { j += 1 }         // 跳过下标表达式
+        guard j + 1 < chars.count, chars[j] == "]", chars[j + 1] == "=" else { continue }
+        if j + 2 < chars.count, chars[j + 2] == "=" { continue }  // `==` 是比较不是赋值
+        count += 1
+    }
+    return count
+}
