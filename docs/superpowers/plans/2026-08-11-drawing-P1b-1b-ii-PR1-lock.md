@@ -299,6 +299,40 @@ git commit -m "feat(1b-ii PR-1): setDrawingLocked 引擎 API —— 豁免 D60 l
 }
 ```
 
+```swift
+/// L8b 契约分量②（codex P-R1-F3）：**即便绕过路由直调引擎**，保存后 `toolType` 与全部未来字节
+/// 逐字不变、**只有 `locked` 变了**。
+/// L8 只证明了「UI 够不着」，本条证明「够着了也无损」—— spec §3 第 3 条要求**两条都有**，
+/// 只写一条等于把结论建在没测过的那一半上。
+@Test("L8b 契约: .trend + 未来字段的线直调 setDrawingLocked → toolType 与未来字节逐字不变")
+@MainActor func lockOnFutureToolPreservesEverythingElse() throws {
+    let raw = #"{"id":"T2","toolType":"trend","anchors":[{"period":"3m","candleIndex":1,"price":9.0},{"period":"3m","candleIndex":5,"price":12.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain","futureY":42}"#
+    let e = makeEngineWithLossy(try lossyFromRaw(raw))
+    #expect(e.drawings.first?.toolType == .trend, "`.trend` 是已声明 case，应解码成 .known")
+    #expect(e.setDrawingLocked(id: "T2", locked: true) == true,
+            "引擎侧不带工具门（D69 ②b）—— 这里就是要证明它够得着也无损")
+    let merged = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings)
+    let out = String(decoding: try merged.encoded(), as: UTF8.self)
+    #expect(out.contains("\"toolType\":\"trend\""), "toolType 被改写了：\(out)")
+    #expect(out.contains("\"futureY\":42"), "未来字段被抹掉了：\(out)")
+    #expect(out.contains("\"locked\":true"), "locked 没写进去：\(out)")
+    // ★「**只有** locked 变了」必须是真判据，不能靠几条 contains 凑：
+    //   把两边的 `locked` 都摘掉再逐字节比 —— 剩下的必须完全相同。
+    func strippingLocked(_ json: String) throws -> Data {
+        var d = try #require(
+            (try JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any])
+        d.removeValue(forKey: "locked")
+        return try JSONSerialization.data(withJSONObject: d, options: [.sortedKeys])
+    }
+    let elem = try #require(JSONTopLevelArray.rawElementStrings(try merged.encoded())?.first)
+    #expect(try strippingLocked(elem) == (try strippingLocked(raw)),
+            "除 locked 外还有字段被改动了。产物：\(elem)")
+}
+```
+
+⚠️ 最后那条是本测试的**主判据**：前面几条 `contains` 只能证明「某几个字段还在」，证明不了
+「**没有别的字段被悄悄改掉**」。少了它，一个把 `thickness` 顺手归一化掉的实现照样全绿。
+
 > ⚠️ **两条已实测的接口事实**（别照直觉写）：
 > - `.trend` 是合法 case，但它在 `Models.swift:39` 的**逗号列表**里声明（`case horizontal, trend, channel, …`），`grep "case trend"` 找不到 —— 不要因此以为它不存在。
 > - `DrawingToolType.implemented` 实测 = `[.horizontal]`（`Models.swift:50`），故 `.trend` 既进不了 `beginDrawingSession`，也不在 `KLineView.drawingTools` 注册表里。
@@ -480,6 +514,60 @@ git commit -m "feat(1b-ii PR-1): D80 内容未变=零副作用 —— updateDraw
     #expect(code.contains(squeeze("locked: newLocked")),
             "那一处必须是 setDrawingLocked 里的 `locked: newLocked`（见 Global Constraint #1）")
 }
+
+/// N-B 第 2 条（spec §1.6）—— **不可省，与 L12 是两条不同的判据**（codex P-R1-F1）。
+/// L12 只数 `locked:` 字样；而**整对象赋值** `drawings[i] = <locked 不同的对象>` 字面上**不含**
+/// `locked:`，会从 L12 底下整个溜过去 —— 它恰恰是绕过路由/几何/唯一性信任边界的第二条路。
+/// 故本条按**结构性写入点**穷尽计数。
+///
+/// ⚠️ 必须排除 `reviewDrawings`：它以**子串**形式包含 `drawings`，朴素计数会把复盘侧写入
+///    算进来（假阳性）；而为了迁就它去放宽判据，又会让真正的新写入面溜过去。
+///    故判据 = 「`drawings` 紧邻的前一个字符不是标识符字符」，与 `bareIdentifierReferences` 同款边界法。
+@Test("L12b: TrainingEngine 里 drawings 的结构性写入点恰好 5 处（穷尽性，多一处即红）")
+@MainActor func engineDrawingsWriteSurfaceIsExhaustive() throws {
+    let code = try squeezedSource(trainingEnginePath)
+    let n = engineDrawingsStructuralWrites(code)
+    // PR-1 后的构成（每一处都必须能对上号）：
+    //   drawings.remove(at:) ×2  → deleteDrawing(at:) / deleteDrawing(id:)
+    //   drawings.append(     ×1  → appendDrawing
+    //   drawings[x] =        ×2  → updateDrawingStyle / setDrawingLocked
+    //   drawings.insert(     ×0  → PR-2 才引入（届时期望值改为 6）
+    #expect(n == 5, """
+        drawings 结构性写入点应为 5，实际 \(n)。
+        多了 = 出现了未经分类的新写入面（可能绕过路由/几何/唯一性三道门）；
+        少了 = 判据坏了或某个写入面被挪走。两种都必须查清再改期望值，不许直接改数字。
+        """)
+}
+```
+
+**并把计数 helper 加到 `Tests/KlineTrainerContractsTests/SourceGuardScanner.swift`**（与其他扫描器同处，**不得**在测试文件里另写一份）：
+
+```swift
+/// `TrainingEngine.swift` 里对**引擎自己那个 `drawings`** 的结构性写入点计数（1b-ii PR-1，N-B 第 2 条）。
+/// 排除 `reviewDrawings`（子串包含 `drawings`）：判据 = 紧邻前一个字符不是标识符字符。
+/// 只数**写**：`drawings[$0].id` 这种下标**读**不算（`]` 后面跟的是 `.` 不是 `=`）。
+func engineDrawingsStructuralWrites(_ squeezedCode: String) -> Int {
+    let chars = Array(squeezedCode)
+    func isIdentChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+    func startsBare(at i: Int, _ needle: [Character]) -> Bool {
+        guard i + needle.count <= chars.count, Array(chars[i ..< i + needle.count]) == needle else { return false }
+        if i > 0, isIdentChar(chars[i - 1]) { return false }      // reviewDrawings → 排除
+        return true
+    }
+    var count = 0
+    for needle in ["drawings.remove(", "drawings.insert(", "drawings.append("].map(Array.init) {
+        for i in chars.indices where startsBare(at: i, needle) { count += 1 }
+    }
+    let sub = Array("drawings[")
+    for i in chars.indices where startsBare(at: i, sub) {
+        var j = i + sub.count
+        while j < chars.count, chars[j] != "]" { j += 1 }         // 跳过下标表达式
+        guard j + 1 < chars.count, chars[j] == "]", chars[j + 1] == "=" else { continue }
+        if j + 2 < chars.count, chars[j + 2] == "=" { continue }  // `==` 是比较不是赋值
+        count += 1
+    }
+    return count
+}
 ```
 
 - [ ] **Step 2: 跑测试确认通过**
@@ -498,6 +586,8 @@ cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git
 | 把路由里几何门挪到调用**之后** | L11 的 `geoIdx < callIdx` |
 | 在 `TrainingEngine.swift` 里另加一处 `locked: true` | L12 |
 | 把 `locked: newLocked` 改成 `locked: locked`（并把参数名改回去） | L12 —— **这条证明 Global Constraint #1 不是空话** |
+| 在 `TrainingEngine.swift` 里另加一处 `drawings[0] = someObj`（**不含 `locked:` 字样**） | **L12b**（L12 抓不到 —— 这正是 codex P-R1-F1 指出的缺口） |
+| 把 `reviewDrawings.append(` 也算进计数（即去掉边界排除） | L12b（会变成 6 ≠ 5，证明排除逻辑真的在起作用） |
 
 - [ ] **Step 4: 提交**
 
@@ -558,11 +648,20 @@ git commit -m "test(1b-ii PR-1): setDrawingLocked 三层信任边界守卫 + 语
     #expect(!eB.drawings.contains { $0.id == "LB" })
 ```
 
-- [ ] **Step 3: 新增落盘往返测试（N-F）**
+- [ ] **Step 3: 新增落盘测试（N-F）—— 必须走**真实存盘路径**，不许只在内存里 reconcile**
+
+> ⚠️ **本 step 初稿只在内存里 `reconciled` + `decode`，被 codex P-R1-F2 判为不合格**：那样根本没碰
+> `drawingsRevision` 触发的 autosave、`TrainingSessionCoordinator.saveProgress`、以及活动会话的
+> clean-skip 判据。**「锁定改动没真写盘」这个回归会让内存版测试全绿，却让验收清单第 7/8 条真机失败。**
+> 故改为经 `CoordinatorTestHarness` 走**真实 save → endSession → resume** 全链路。
+> 文件改到 `Tests/KlineTrainerContractsTests/CoordinatorReplayPersistenceTests.swift`（harness 在那儿）。
+
+L13a 保留内存版作为**快速判据**（它仍有价值：证明 merge 层不丢 locked），留在
+`DrawingEditDurabilityGateTests.swift`：
 
 ```swift
-@Test("L13 落盘: 锁定 → revision +1 → 重新加载后仍是锁定态")
-@MainActor func lockedSurvivesReload() throws {
+@Test("L13a 落盘(内存层): 锁定 → revision +1 → merge/encode/decode 往返后仍是锁定态")
+@MainActor func lockedSurvivesLossyRoundTrip() throws {
     let e = TrainingEngine.preview()
     #expect(e.appendDrawing(makeHorizontalDrawing(id: "S1")))
     let rev = e.drawingsRevision
@@ -573,6 +672,41 @@ git commit -m "test(1b-ii PR-1): setDrawingLocked 三层信任边界守卫 + 语
     #expect(reloaded.drawings.first(where: { $0.id == "S1" })?.locked == true)
 }
 ```
+
+**但不能只有它** —— 它证明不了「锁定这个改动会真的触发写盘」：
+
+```swift
+/// L13b（N-F 主证据）：训练局里**只锁定一条线**（不推 tick / 不交易 / 不增删）
+/// → 走真实 saveProgress → endSession → 重新载入后仍是锁定态。
+@Test func lockOnlyChange_persistsAcrossSaveAndReload() async throws {
+    let h = try CoordinatorTestHarness.make()
+    let e1 = try await h.coordinator.replay(recordId: h.seededRecordId)
+    // fresh replay 不带任何已有线（见 D30②）→ 必须先画一条、存盘、续局，才有线可锁
+    #expect(e1.appendDrawing(makeHorizontalDrawing(id: "K1")))
+    try await h.coordinator.saveProgress(engine: e1)
+    await h.coordinator.endSession()
+
+    let e2 = try #require(try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId))
+    #expect(e2.drawings.first(where: { $0.id == "K1" })?.locked == false)
+    let rev = e2.drawingsRevision
+    // ★ 本局**唯一**的改动就是锁定（split addendum §7.3 #3 / 验收 #8 的等价自动化）
+    #expect(e2.setDrawingLocked(id: "K1", locked: true) == true)
+    #expect(e2.drawingsRevision == rev + 1)        // 严格 +1 —— autosave 的触发信号
+    try await h.coordinator.saveProgress(engine: e2)
+    await h.coordinator.endSession()
+
+    let e3 = try #require(try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId))
+    #expect(e3.drawings.first(where: { $0.id == "K1" })?.locked == true,
+            "只锁定、别的什么都没改 → 存盘被 clean-skip 吞掉了（D30① 回归）")
+}
+```
+
+⚠️ **实施者必须先读 `CoordinatorReplayPersistenceTests.swift:11-40`**（`CoordinatorTestHarness` 的
+`make()` / `seededRecordId`）与 `:229-243`（`replay → saveProgress → endSession → resumePendingReplay`
+的既有写法），**照搬那套 harness**，不要另造。
+
+⚠️ **不得**把「只锁定」换成「锁定 + 推一根 tick」之类 —— 那样 tick 变化本身就会让存盘发生，
+**测不出**「锁定这个改动有没有独立触发落盘」，正是 D30① 要防的那条。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -585,8 +719,9 @@ cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git
 | 中和什么 | 应变红 |
 |---|---|
 | 把 `deleteDrawing(id:)` 的 `guard !drawings[i].locked` 改成恒真 | N14h 的「锁着时删不掉」那半 |
-| 让 `setDrawingLocked` 恒 `return false` | N14h 新增那半 + L13 |
-| 删掉 `drawingsRevision += 1` | L13 |
+| 让 `setDrawingLocked` 恒 `return false` | N14h 新增那半 + L13a + **L13b** |
+| 删掉 `drawingsRevision += 1` | L13a + **L13b**（L13b 是「锁定真的触发写盘」的唯一证据） |
+| 把 `saveProgress` 的 clean-skip 判据改成无条件跳过 | **L13b**（L13a 恒绿 —— 这正是 codex P-R1-F2 指出的缺口） |
 
 - [ ] **Step 6: 提交**
 
@@ -830,7 +965,12 @@ git commit -m "feat(1b-ii PR-1): 底栏 ②🔒 + 置灰传播（D72）"
 
 ## Self-Review（写完计划后自查，已执行）
 
-**1. spec §1 覆盖**：D69 门列表 → Task 1；D70 raw-preserving → Task 2；D80 → Task 3；N-B/N-G 守卫 → Task 4；D73 N14h 翻转 + N-F 落盘 → Task 5；D71 路由谓词 → Task 6；D72 UI + N-D 置灰 → Task 6(L16)/Task 7。契约举证（§3 第 3 条两个分量）→ Task 2 的 L8 + Task 2 的 L6/L7。**无遗漏。**
+**1. spec §1 覆盖**：D69 门列表 → Task 1（L1–L5）；D70 raw-preserving → Task 2（L6/L7）；D80 → Task 3（L9/L10）；**N-B 两条判据** → Task 4（L12 语义 `locked:` + **L12b 结构性 `drawings` 写入面**）；N-G 三层 → Task 4（L11）；D73 N14h 翻转 → Task 5；**N-F 落盘** → Task 5（L13a 内存层 + **L13b 真实 save/resume 全链路**）；D71 路由谓词 → Task 6；D72 UI + N-D 置灰 → Task 6(L16)/Task 7。**契约举证（§3 第 3 条两个分量）** → Task 2 的 **L8（选不中）+ L8b（直调也无损）**。
+
+**1b. codex P-R1 补齐的三处**（初稿相对已 approve 的 spec **少交付**，非 spec 缺陷）：
+- **F1** N-B 只写了第 1 条判据 → 补 **L12b**。整对象赋值 `drawings[i] = <locked 不同的对象>` 字面上不含 `locked:`，会从 L12 底下整个溜过去，而它正是绕过信任边界的第二条路。
+- **F2** N-F 只在内存里 reconcile → 补 **L13b**，经 `CoordinatorTestHarness` 走真实 `saveProgress → endSession → resumePendingReplay`。「锁定改动没真写盘」这个回归会让内存版全绿、却让真机验收 #7/#8 失败。
+- **F3** 契约举证只做了「选不中」那半 → 补 **L8b**，含「除 `locked` 外逐字节相同」的主判据（几条 `contains` 证明不了「没有别的字段被悄悄改掉」）。
 
 **2. 占位符扫描**：两处**有意留白**，均已写明「先读哪个既有文件、复用它的哪套构造」——
 ① Task 6 Step 1 的五条测试体（选中 + 几何可见的 engine 搭法，读 `DrawingEditRouterTests.swift` 既有 `deleteButtonEnabled` 系列）；
