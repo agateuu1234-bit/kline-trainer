@@ -1146,4 +1146,64 @@ struct TrainingEngineDrawingSessionTests {
         #expect(code.contains(squeeze("guard canDelete(engine: engine)")),
                 "deleteSelected 必须自己调 canDelete 现算几何")
     }
+
+    // MARK: 1b-ii PR-1 Task 1（D69）：setDrawingLocked 门列表
+
+    /// 正向档（Global Constraint #9 要求）：健康输入**必须被放行**，且真的改了 locked。
+    /// 少了这一条，一个恒 `return false` 的实现会让下面四条负向断言全绿。
+    @Test("L1 正向: 训练模式 + id 唯一非空 + 未锁 → 上锁成功、locked 变 true、revision +1")
+    @MainActor func setLockedHappyPath() throws {
+        let e = TrainingEngine.preview()
+        let d = makeHorizontalDrawing(id: "L1")
+        #expect(e.appendDrawing(d))
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "L1", locked: true) == true)
+        #expect(e.drawings.first(where: { $0.id == "L1" })?.locked == true)
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
+    /// 解锁必须走得通 —— 这是本 API 存在的全部理由（D69 门② 被刻意豁免）。
+    @Test("L2 解锁: 已锁的线能解开（updateDrawingStyle 的 locked 门在此不适用）")
+    @MainActor func setLockedCanUnlock() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeHorizontalDrawing(id: "L2")))
+        #expect(e.setDrawingLocked(id: "L2", locked: true))
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "L2", locked: false) == true)
+        #expect(e.drawings.first(where: { $0.id == "L2" })?.locked == false)
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
+    @Test("L3 门⓪: 复盘模式恒拒，drawings 与 revision 都不动")
+    @MainActor func setLockedRejectedInReview() throws {
+        let e = TrainingEngine.preview(mode: .review)   // 既有形态，同 :893 / :1066
+        #expect(e.appendDrawing(makeHorizontalDrawing(id: "L3")))
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "L3", locked: true) == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("L4 门①: 空 id → false，什么都不动")
+    @MainActor func setLockedRejectsEmptyID() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeHorizontalDrawing(id: "L4")))
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "", locked: true) == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    /// 重复 id：**两条都不许被改**（不是「改第一条」）。
+    @Test("L5 门①: 重复 id → false，且两条同 id 的线都没被改")
+    @MainActor func setLockedRejectsDuplicateID() throws {
+        let e = TrainingEngine.preview()
+        e.injectDrawingsForTesting([makeHorizontalDrawing(id: "DUP"),
+                                    makeHorizontalDrawing(id: "DUP", price: 11.0)])
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "DUP", locked: true) == false)
+        #expect(e.drawings.allSatisfy { $0.locked == false })
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
 }

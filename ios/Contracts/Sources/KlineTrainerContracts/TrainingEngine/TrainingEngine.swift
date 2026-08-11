@@ -1181,6 +1181,39 @@ extension TrainingEngine {
         return true
     }
 
+    /// D69（1b-ii PR-1）：`locked` 的**语义性写入唯一入口**。
+    /// 门列表刻意与 `updateDrawingStyle` 不同，逐条理由见 spec §1.1 的对照表：
+    ///   ⓪ review 门（D34 纵深）、① id 非空 + 全局唯一（D66）—— **保留**；
+    ///   ② locked 门（D60）—— **豁免**。带上它就永远解不开锁，这是本 API 存在的全部理由；
+    ///   ②b 工具门、③ D61 raw-aware 两道门 —— **不带**。锁定不解释任何样式语义，只翻一个布尔；
+    ///      原始字节由保存路径既有的 `mergeKnownFields` 逐 key 保全（D70，Task 2 举证）。
+    ///   ④ `withStyle` 语义闸 —— **不经过**（该函数明写「本函数不碰 locked」）。
+    /// **内容未变 = 零副作用**（D80）：返回 `true`，但 `drawingsRevision` 不递增、不触发 autosave。
+    /// ⚠️ 参数内部名必须是 `newLocked` 而不是 `locked`，且必须就地构造、不抽 helper ——
+    ///    否则 Task 4 的守卫（`TrainingEngine.swift` 里非拷贝直传的 `locked:` 恰好 1 处）会误判。
+    @discardableResult
+    func setDrawingLocked(id: DrawingID, locked newLocked: Bool) -> Bool {
+        guard flow.mode != .review else { return false }                       // ⓪（D34）
+        guard !id.isEmpty else { return false }                                // ①（D66 非空）
+        let matches = drawings.indices.filter { drawings[$0].id == id }
+        guard matches.count == 1, let i = matches.first else { return false }  // ①（D66 唯一）
+        let old = drawings[i]
+        guard old.locked != newLocked else { return true }                     // D80：内容未变 → 零副作用
+        drawings[i] = DrawingObject(
+            id: old.id, toolType: old.toolType, anchors: old.anchors,
+            isExtended: old.isExtended, panelPosition: old.panelPosition,
+            revealTick: old.revealTick, period: old.period,
+            lineSubType: old.lineSubType, lineStyle: old.lineStyle,
+            thickness: old.thickness, colorToken: old.colorToken,
+            labelMode: old.labelMode,
+            locked: newLocked,                                                 // ← 唯一真正改动的字段
+            text: old.text, fontSize: old.fontSize,
+            textColorToken: old.textColorToken, textForm: old.textForm,
+            tailAnchor: old.tailAnchor)
+        drawingsRevision += 1
+        return true
+    }
+
     /// review-redesign Task 10：复盘新画线唯一写入面——追加进 `reviewDrawings`（不触碰 `drawings`，
     /// 不污染原训练记录）。`RenderStateBuilder.make` review 模式据此叠加 `drawings + reviewDrawings`。
     /// **whole-branch codex R2-high：返回值 load-bearing** —— 未来做「删旧线 + append 新线」式编辑
