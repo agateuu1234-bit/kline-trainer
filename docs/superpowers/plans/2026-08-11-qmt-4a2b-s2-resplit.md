@@ -72,6 +72,29 @@ S2a 的 ⑨b ⑨c ㉝ ㉛ 全是「例外不适用 → not_owned」——
 被非 drop 测试间接依赖）与 lifecycle 三档的拆半上，加两轮完整闸门与两个 codex 周期，
 **更接近六到八成**。收益不变：S2b 的评审面缩到约 150 行控制流。
 
+## 四之二、计划的 codex 对抗性评审（R1，2026-08-11）
+
+`--scope branch-diff --base 567987b --head feat/qmt-4a2b-s2a-authorization` @ `f6b49a2`。
+⚠️ 走 branch-diff 不走 working-tree：**对已提交文件跑 working-tree 恒无 diff 可审
+→ 必出假 approve**（主仓账本里那几条 plan/spec 的 override 记录就是这个死角）。
+
+**verdict = needs-attention，共 1 条 finding**：lifecycle 脚本 import 了
+`reset_pilot_database` / `_TARGET_CLIENT_SESSIONS_SQL` 两个本片已不存在的符号 → 脚本
+在任何档位跑起来之前就 ImportError，而 `_EXPECTED_SCENARIOS` 仍宣称那些档存在。
+
+**处置：不算新发现** —— 这正是本计划 Step 5 尚未执行的那一处，已在 `f6b49a2` 的
+commit message 里逐条登记为「明知是红」。codex 给的建议
+（"roll this script back to only the scenarios supported by the current production module"）
+逐字就是 Step 5。
+
+**⭐ 计划本身零 finding**：切面划分（§一）、三档拆半（§二）、守卫空转风险（Step 4）、
+成本修正（§四）均未被点到。
+
+⚠️ **但这轮是静态评审**：codex 明确报告它**跑不了 pytest**
+（"the sandbox has no usable writable temp directory"）。所以「计划零 finding」证明的是
+**读下来没发现设计漏洞**，不是「跑过了没问题」。Step 5 做完后的 S2a 整体评审
+必须在**能真跑测试**的条件下重来一轮，那一轮才是 S2a 的收口依据。
+
 ## 五、风险
 
 1. **拆半的三档写歪 → S2a 假绿**。缓解：每拆一档，先在 S2a 上把
