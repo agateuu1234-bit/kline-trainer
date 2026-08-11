@@ -1,0 +1,843 @@
+# 划线 P1b-1b-ii PR-1（锁定 / 解锁）Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 让用户能锁定 / 解锁一条选中的划线 —— 底栏补 ②🔒，锁定后 🗑 与样式面板全灰、`locked` 随画线落盘；同时把「内容未变 = 零副作用」统一到写入 API 上（D80），为 PR-2 的撤销栈打地基。
+
+**Architecture:** 新增引擎 API `setDrawingLocked(id:locked:)` 作为 `locked` 的**语义性写入唯一入口**（豁免 D60 的 locked 闸，否则锁上就解不开）；写入路由与可用性谓词加在既有 `DrawingEditRouter`（无 UIKit → host 可测），形状严格镜像已有的删除三件套；raw-preserving 由保存路径既有的 `mergeKnownFields` 免费提供，本 PR **不新建**合并机制，只写举证测试证明它成立。
+
+**Tech Stack:** Swift 6 / swift-testing（`@Test` + `#expect`）· SwiftUI（`#if canImport(UIKit)` 门控）· SPM 包 `KlineTrainerContracts`
+
+**Spec:** `docs/superpowers/specs/2026-08-11-drawing-tools-P1b-1b-ii-lock-undo-design.md` §1（D68–D73 + D80），codex 对抗性评审 **R7 approve**（账本 `branch:drawing-tools-p1b-1b-ii@b8683c2ba9281104ab205acf59a68c7e18209cc1`）。
+
+**基线（实测，2026-08-11）：** host `swift test` = **1803 tests passed**。分支 `drawing-tools-p1b-1b-ii`，base `origin/main` `567987b`。
+
+---
+
+## Global Constraints
+
+以下每一条都是**所有 task 的隐含要求**，违反即判不合格。
+
+### 硬性命名 / 形状约束（不照做守卫必红，实施者会误以为守卫坏了）
+
+1. **`setDrawingLocked` 的第二个参数必须用 `newLocked` 作内部名**：
+   `func setDrawingLocked(id: DrawingID, locked newLocked: Bool) -> Bool`
+   **理由（非风格偏好）**：Task 4 的守卫判据是「`TrainingEngine.swift` 里形如 `locked: <非拷贝直传表达式>` 的位置恰好 1 处」，而拷贝直传排除名单含裸 `locked`。若参数内部名就叫 `locked`、构造时写 `locked: locked`，守卫会把它当拷贝直传**不计数** → 期望 1 实得 0 → **守卫在功能正确的情况下变红**。写 `locked: newLocked` 才能被数到。
+2. **`setDrawingLocked` 内部必须就地构造 `DrawingObject`（18 个字段逐字段拷贝，只有 `locked` 取 `newLocked`），不得新增 `withLocked` 之类的 helper**。理由同上：helper 会把那处唯一的语义性写入挪出 `TrainingEngine.swift`，守卫的作用域与实现就对不上了。
+3. **`setDrawingLocked` 必须是 `internal`**：不写 `public` / `package` / `open`，也不得放进 `public extension TrainingEngine`（成员会继承访问级别）。既有四个写入 API 全是 internal。
+4. **禁止**用 `updateDrawingStyle` 改 `locked`（会被 D60 闸直接拒），也禁止在 `withStyle` 里碰 `locked`（该函数明写「本函数不碰 locked」）。
+
+### 判绿与验证纪律
+
+5. **每条闸门命令必须同时打印 branch 与 HEAD**：
+   `echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)"`
+6. **判绿读输出内容（`Test run with N tests ... passed` 那一行），不读管道后的退出码**。
+7. **每条新测试都要做变异验证**：中和被测判据 → 看**那条具名测试**变红 → 复原。
+   **复原一律用 `cp`**：`cp <file> /tmp/bak && ...改... && cp /tmp/bak <file>`。**绝不用 `git checkout <file>`**（会静默抹掉未提交改动）。
+   变异验证由**控制者亲验**，不接受实施者自报「验过了」。
+8. **写每一条测试时自问：「如果被测 API 换成空实现 / 恒返回 false，这条会红吗？」** 答不出「会」的，说明这条没有判别力，重写。
+9. **一族全是「应该被拒绝」的断言必须配一条正向档**（健康输入必须被放行 + 断言取到的是哪个结果）—— 否则一个恒返回 `false` 的实现也会全绿。
+10. **UIKit-gated 文件（`#if canImport(UIKit)`）在 host `swift test` 上根本不编译** → 涉及 `DrawingModeBar.swift` 的测试与其变异验证**必须上 Catalyst** `xcodebuild test`，不能只看 host 绿。
+
+### 契约
+
+11. `CONTRACT_VERSION` 保持 `"1.12"`、`user_version` 保持 `7`、**零迁移**。不新增字段、不扩展枚举值域。
+12. **禁述**「1b-ii 已完成」——本 PR 只做锁定，撤销 / 前进属 PR-2。
+
+---
+
+## File Structure
+
+| 文件 | 动作 | 责任 |
+|---|---|---|
+| `Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift` | 修改 | 新增 `setDrawingLocked`；给 `updateDrawingStyle` 加 D80 的「内容未变」早退 |
+| `Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift` | 修改 | 新增 `lockableIgnoringGeometry` / `canToggleLock` / `lockButtonEnabled` / `toggleLockSelected` |
+| `Sources/KlineTrainerContracts/UI/DrawingModeBar.swift` | 修改 | 底栏插入 ②🔒（在①类型与③🗑 之间） |
+| `Sources/KlineTrainerContracts/UI/TrainingView.swift:262-264` | 修改 | 给 `DrawingBottomBar` 传 `lockEnabled` / `lockIsOn` / `onToggleLock` |
+| `Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift` | 修改 | 引擎门测试 + D80 + 信任边界守卫（镜像既有 N15） |
+| `Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift` | 修改 | N14h 断言翻转 + raw-preserving 举证 |
+| `Tests/KlineTrainerContractsTests/Drawing/DrawingEditRouterTests.swift` | 修改 | 路由与谓词测试 |
+| `Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift` | 修改 | 底栏 ②🔒 的源码守卫 |
+
+**既有可复用资产（不要重写）**：`Tests/.../SourceGuardScanner.swift` 顶层函数 `expectEngineInternalOnly` / `callSiteCount` / `filesMentioning` / `expectIdentifierNeverVended` / `squeezedContains` / `squeezedSource`；`Tests/.../DrawingTestFixtures.swift` 的 `makeEngineWithLossy` / `lossyFromRaw` / `expectDrawingsUnchanged`。
+⚠️ **不得**在别处另写一份扫描逻辑 —— 同族判据留两档正是本仓一路在修的毛病。
+
+---
+
+## Task 1: 引擎 API `setDrawingLocked` —— 门列表 + 幂等
+
+**Files:**
+- Modify: `Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（插在 `updateDrawingStyle` 之后，约 `:1182` 后）
+- Test: `Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`
+
+**Interfaces:**
+- Consumes: `flow.mode`、`drawings`、`drawingsRevision`（均为引擎既有成员）
+- Produces: `setDrawingLocked(id:locked:) -> Bool` —— Task 5/6 的唯一 `locked` 写入面
+
+- [ ] **Step 1: 写失败测试（门列表逐条 + 正向档）**
+
+加到 `TrainingEngineDrawingSessionTests.swift`：
+
+```swift
+// MARK: 1b-ii PR-1 Task 1（D69）：setDrawingLocked 门列表
+
+/// 正向档（Global Constraint #9 要求）：健康输入**必须被放行**，且真的改了 locked。
+/// 少了这一条，一个恒 `return false` 的实现会让下面四条负向断言全绿。
+@Test("L1 正向: 训练模式 + id 唯一非空 + 未锁 → 上锁成功、locked 变 true、revision +1")
+@MainActor func setLockedHappyPath() throws {
+    let e = TrainingEngine.preview()
+    let d = makeHorizontalDrawing(id: "L1")
+    #expect(e.appendDrawing(d))
+    let rev = e.drawingsRevision
+    #expect(e.setDrawingLocked(id: "L1", locked: true) == true)
+    #expect(e.drawings.first(where: { $0.id == "L1" })?.locked == true)
+    #expect(e.drawingsRevision == rev + 1)
+}
+
+/// 解锁必须走得通 —— 这是本 API 存在的全部理由（D69 门② 被刻意豁免）。
+@Test("L2 解锁: 已锁的线能解开（updateDrawingStyle 的 locked 门在此不适用）")
+@MainActor func setLockedCanUnlock() throws {
+    let e = TrainingEngine.preview()
+    #expect(e.appendDrawing(makeHorizontalDrawing(id: "L2")))
+    #expect(e.setDrawingLocked(id: "L2", locked: true))
+    let rev = e.drawingsRevision
+    #expect(e.setDrawingLocked(id: "L2", locked: false) == true)
+    #expect(e.drawings.first(where: { $0.id == "L2" })?.locked == false)
+    #expect(e.drawingsRevision == rev + 1)
+}
+
+@Test("L3 门⓪: 复盘模式恒拒，drawings 与 revision 都不动")
+@MainActor func setLockedRejectedInReview() throws {
+    let e = TrainingEngine.preview(mode: .review)   // 既有形态，同 :893 / :1066
+    #expect(e.appendDrawing(makeHorizontalDrawing(id: "L3")))
+    let before = e.drawings
+    let rev = e.drawingsRevision
+    #expect(e.setDrawingLocked(id: "L3", locked: true) == false)
+    expectDrawingsUnchanged(e, before, revisionBefore: rev)
+}
+
+@Test("L4 门①: 空 id → false，什么都不动")
+@MainActor func setLockedRejectsEmptyID() throws {
+    let e = TrainingEngine.preview()
+    #expect(e.appendDrawing(makeHorizontalDrawing(id: "L4")))
+    let before = e.drawings
+    let rev = e.drawingsRevision
+    #expect(e.setDrawingLocked(id: "", locked: true) == false)
+    expectDrawingsUnchanged(e, before, revisionBefore: rev)
+}
+
+/// 重复 id：**两条都不许被改**（不是「改第一条」）。
+@Test("L5 门①: 重复 id → false，且两条同 id 的线都没被改")
+@MainActor func setLockedRejectsDuplicateID() throws {
+    let e = TrainingEngine.preview()
+    e.injectDrawingsForTesting([makeHorizontalDrawing(id: "DUP"),
+                                makeHorizontalDrawing(id: "DUP", price: 11.0)])
+    let before = e.drawings
+    let rev = e.drawingsRevision
+    #expect(e.setDrawingLocked(id: "DUP", locked: true) == false)
+    #expect(e.drawings.allSatisfy { $0.locked == false })
+    expectDrawingsUnchanged(e, before, revisionBefore: rev)
+}
+```
+
+- [ ] **Step 2: 补 fixture helper `makeHorizontalDrawing`**
+
+**已实测**（2026-08-11）：`makeHorizontalDrawing` 在仓里**不存在**，必须新建；
+`TrainingEngine.preview(mode:)` 与 `injectDrawingsForTesting` **已存在**，直接用。
+造复盘态引擎的既有写法是 `TrainingEngine.preview(mode: .review)`（见 `TrainingEngineDrawingSessionTests.swift:893` / `:1066`）—— **没有** `previewReview()` 这种东西。
+
+加到 `Tests/KlineTrainerContractsTests/DrawingTestFixtures.swift`（顶层函数，**不加 `private`**：Swift 顶层 `private` 是文件作用域，加了别的测试文件调不到）：
+
+```swift
+/// 一条默认样式的水平线（period 固定 .m3，与 TrainingEngine.preview() 的上面板一致）。
+func makeHorizontalDrawing(id: String, price: Double = 10.0, locked: Bool = false) -> DrawingObject {
+    DrawingObject(
+        id: id, toolType: .horizontal,
+        anchors: [DrawingAnchor(period: .m3, candleIndex: 1, price: price)],
+        isExtended: false, panelPosition: 0, revealTick: 0, period: .m3,
+        lineSubType: .straight, lineStyle: .solid, thickness: 1, colorToken: .orange,
+        labelMode: .hidden, locked: locked, text: "", fontSize: 14,
+        textColorToken: .orange, textForm: .plain, tailAnchor: nil)
+}
+```
+
+- [ ] **Step 3: 跑测试确认失败**
+
+```bash
+cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)" && swift test 2>&1 | tail -20
+```
+预期：编译失败，`value of type 'TrainingEngine' has no member 'setDrawingLocked'`。
+
+- [ ] **Step 4: 实现（就地构造，18 字段逐字段拷贝）**
+
+插在 `TrainingEngine.swift` 的 `updateDrawingStyle` 之后：
+
+```swift
+    /// D69（1b-ii PR-1）：`locked` 的**语义性写入唯一入口**。
+    /// 门列表刻意与 `updateDrawingStyle` 不同，逐条理由见 spec §1.1 的对照表：
+    ///   ⓪ review 门（D34 纵深）、① id 非空 + 全局唯一（D66）—— **保留**；
+    ///   ② locked 门（D60）—— **豁免**。带上它就永远解不开锁，这是本 API 存在的全部理由；
+    ///   ②b 工具门、③ D61 raw-aware 两道门 —— **不带**。锁定不解释任何样式语义，只翻一个布尔；
+    ///      原始字节由保存路径既有的 `mergeKnownFields` 逐 key 保全（D70，Task 2 举证）。
+    ///   ④ `withStyle` 语义闸 —— **不经过**（该函数明写「本函数不碰 locked」）。
+    /// **内容未变 = 零副作用**（D80）：返回 `true`，但 `drawingsRevision` 不递增、不触发 autosave。
+    /// ⚠️ 参数内部名必须是 `newLocked` 而不是 `locked`，且必须就地构造、不抽 helper ——
+    ///    否则 Task 4 的守卫（`TrainingEngine.swift` 里非拷贝直传的 `locked:` 恰好 1 处）会误判。
+    @discardableResult
+    func setDrawingLocked(id: DrawingID, locked newLocked: Bool) -> Bool {
+        guard flow.mode != .review else { return false }                       // ⓪（D34）
+        guard !id.isEmpty else { return false }                                // ①（D66 非空）
+        let matches = drawings.indices.filter { drawings[$0].id == id }
+        guard matches.count == 1, let i = matches.first else { return false }  // ①（D66 唯一）
+        let old = drawings[i]
+        guard old.locked != newLocked else { return true }                     // D80：内容未变 → 零副作用
+        drawings[i] = DrawingObject(
+            id: old.id, toolType: old.toolType, anchors: old.anchors,
+            isExtended: old.isExtended, panelPosition: old.panelPosition,
+            revealTick: old.revealTick, period: old.period,
+            lineSubType: old.lineSubType, lineStyle: old.lineStyle,
+            thickness: old.thickness, colorToken: old.colorToken,
+            labelMode: old.labelMode,
+            locked: newLocked,                                                 // ← 唯一真正改动的字段
+            text: old.text, fontSize: old.fontSize,
+            textColorToken: old.textColorToken, textForm: old.textForm,
+            tailAnchor: old.tailAnchor)
+        drawingsRevision += 1
+        return true
+    }
+```
+
+- [ ] **Step 5: 跑测试确认通过**
+
+```bash
+cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)" && swift test 2>&1 | tail -5
+```
+预期：`Test run with 1808 tests ... passed`（1803 + 本 task 新增 5 条）。
+
+- [ ] **Step 6: 变异验证（控制者亲验，5 条各验一次）**
+
+| 中和什么 | 应变红的具名测试 |
+|---|---|
+| 删掉 `guard flow.mode != .review` | L3 |
+| 删掉 `guard !id.isEmpty` | L4 |
+| 把 `matches.count == 1` 改成 `matches.count >= 1` | L5 |
+| 把整个函数体换成 `return false` | **L1、L2**（负向四条仍绿 → 正是正向档的价值） |
+| 删掉 `drawingsRevision += 1` | L1、L2 |
+
+复原用 `cp`，禁用 `git checkout`。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/DrawingTestFixtures.swift
+git commit -m "feat(1b-ii PR-1): setDrawingLocked 引擎 API —— 豁免 D60 locked 闸的唯一语义写入面（D69）"
+```
+
+---
+
+## Task 2: D70 raw-preserving 举证 —— 证明「机制已存在」这条设计假设
+
+**Files:**
+- Test: `Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift`
+
+**Interfaces:**
+- Consumes: Task 1 的 `setDrawingLocked`；既有 `makeEngineWithLossy` / `lossyFromRaw`；`LossyDrawingArray.reconciled(currentKnown:)` / `.encoded()`
+- Produces: 无新 API —— 本 task 纯举证
+
+> ⚠️ **本 task 是 PR-1 的地基。** spec D70 断言「raw-preserving 单字段 merge 在 P1a 就已存在」（`reconciled` → `mergeKnownFields` 只覆盖真变化的 key，而 `DrawingObject.==` 含 `locked`）。**这是读代码推演出来的假设，不是已验证事实。**
+> **若 Step 3 的变异验证发现测试仍绿，整条设计假设作废** —— 立即停止，把结论报给控制者，PR-1 需回到「自己实现单字段 merge」的方案。
+
+- [ ] **Step 1: 写举证测试（两个分量：未来顶层字段 + 未来枚举值）**
+
+```swift
+/// D70 举证（1b-ii PR-1 Task 2）：只改 `locked` 时，其余原始字节必须逐字保留。
+/// 机制来自 P1a：`reconciled` 见 `cur != old` → 走 `mergeKnownFields` → 只覆盖**真变化**的 key。
+@Test("L6 raw-preserving: 锁定带未来顶层字段的线 → futureX 仍在、locked 已变 true")
+@MainActor func lockPreservesFutureTopLevelField() throws {
+    let raw = #"{"id":"P1","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"orange","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain","futureX":9}"#
+    let e = makeEngineWithLossy(try lossyFromRaw(raw))
+    #expect(e.setDrawingLocked(id: "P1", locked: true))
+    let merged = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings)
+    let out = String(decoding: try merged.encoded(), as: UTF8.self)
+    #expect(out.contains("\"futureX\":9"), "未来顶层字段被抹掉了：\(out)")
+    #expect(out.contains("\"locked\":true"), "locked 没写进去：\(out)")
+}
+
+@Test("L7 raw-preserving: 锁定带未来枚举值的线 → futureNeon 仍在、locked 已变 true")
+@MainActor func lockPreservesFutureEnumValue() throws {
+    let raw = #"{"id":"P2","toolType":"horizontal","anchors":[{"period":"3m","candleIndex":1,"price":9.0}],"isExtended":false,"panelPosition":0,"revealTick":0,"period":"3m","lineSubType":"straight","lineStyle":"solid","thickness":1,"colorToken":"futureNeon","labelMode":"hidden","locked":false,"text":"","fontSize":14,"textColorToken":"orange","textForm":"plain"}"#
+    let e = makeEngineWithLossy(try lossyFromRaw(raw))
+    #expect(e.setDrawingLocked(id: "P2", locked: true))
+    let merged = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings)
+    let out = String(decoding: try merged.encoded(), as: UTF8.self)
+    #expect(out.contains("\"colorToken\":\"futureNeon\""), "未来枚举值被 fallback 覆盖了：\(out)")
+    #expect(out.contains("\"locked\":true"), "locked 没写进去：\(out)")
+}
+
+/// 契约举证（spec §3 第 3 条第 ① 分量）：非水平线在本构建**选不中** ⇒ 路由够不着 ⇒ 用户锁不了它。
+@Test("L8 契约: .trend 线不出现在命中结果里（无渲染器 ⇒ 选不中）")
+@MainActor func futureToolTypeIsNotHittable() throws {
+    let trend = DrawingObject(
+        id: "T1", toolType: .trend,
+        anchors: [DrawingAnchor(period: .m3, candleIndex: 1, price: 10.0),
+                  DrawingAnchor(period: .m3, candleIndex: 5, price: 12.0)],
+        isExtended: false, panelPosition: 0, revealTick: 0, period: .m3,
+        lineSubType: .straight, lineStyle: .solid, thickness: 1, colorToken: .orange,
+        labelMode: .hidden, locked: false, text: "", fontSize: 14,
+        textColorToken: .orange, textForm: .plain, tailAnchor: nil)
+    // ⚠️ mapper 没有现成 helper（**已实测：仓里没有 `makeTestMapper`**）。
+    //    照既有写法自己造：`CoordinateMapper(viewport: <vp>, displayScale: 1)`
+    //    （见 GeometryTests.swift:255 / :322、TrainingEnginePinchTests.swift:199）。
+    //    实施者先读 GeometryTests.swift:255 那段，复用它构造 viewport 的方式，别另造一套。
+    let mapper = CoordinateMapper(viewport: /* 照 GeometryTests:255 构造 */, displayScale: 1)
+    let hit = DrawingHitTester.firstHit(
+        in: [trend], point: CGPoint(x: 10, y: 10),
+        mapper: mapper, tools: KLineView.drawingTools)
+    #expect(hit == nil, "注册表里没有 .trend 的渲染器，却命中了 —— 契约论点 ① 不成立")
+}
+```
+
+> ⚠️ **两条已实测的接口事实**（别照直觉写）：
+> - `.trend` 是合法 case，但它在 `Models.swift:39` 的**逗号列表**里声明（`case horizontal, trend, channel, …`），`grep "case trend"` 找不到 —— 不要因此以为它不存在。
+> - `DrawingToolType.implemented` 实测 = `[.horizontal]`（`Models.swift:50`），故 `.trend` 既进不了 `beginDrawingSession`，也不在 `KLineView.drawingTools` 注册表里。
+
+- [ ] **Step 2: 跑测试确认通过**
+
+```bash
+cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)" && swift test 2>&1 | tail -5
+```
+⚠️ **L8 若因 `KLineView` / `makeTestMapper` 在 host 上不可见而编译失败**（`KLineView` 是 UIKit-gated），把 L8 单独挪到 UIKit-gated 测试文件并在 Catalyst 上跑；host 侧保留 L6/L7。**不要**为了让它编译过而把断言弱化。
+
+- [ ] **Step 3: 变异验证（本 task 的核心，控制者亲验）**
+
+| 中和什么 | 应变红 |
+|---|---|
+| 把 `Models.swift:370` 的 `&& lhs.locked == rhs.locked` 删掉 | **L6、L7** —— 证明它们真的走到了 merge 路径 |
+| 把 `mergeKnownFields` 里 `if let ov, jsonValueEqual(cv, ov) { continue }` 改成无条件 `dict[k] = cv` | **L7**（未来枚举值会被 fallback 覆盖） |
+| 把 `DrawingHitTester.firstHit:26` 的 `guard let tool = ... else { return false }` 改成 `else { return true }` | L8 |
+
+> ⛔ **第一条变异若 L6/L7 仍绿 → 立即停止本 PR，报告控制者。** 说明 D70 的设计假设没被证明，raw-preserving 需要自己实现。
+
+- [ ] **Step 4: 提交**
+
+```bash
+git add ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift
+git commit -m "test(1b-ii PR-1): D70 raw-preserving 举证 + .trend 选不中的契约举证"
+```
+
+---
+
+## Task 3: D80 —— 四个写入 API 统一「内容未变 = 零副作用」
+
+**Files:**
+- Modify: `Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift:1178-1181`（`updateDrawingStyle` 尾部）
+- Test: `Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`
+
+**Interfaces:**
+- Consumes: Task 1 的 `setDrawingLocked`（其幂等路径已就位）
+- Produces: 「`drawingsRevision` 递增 ⟺ `drawings` 内容真的变了」这条不变量 —— PR-2 的入栈条件直接等于它
+
+> ⚠️ **这是对已合并 API 的有意行为改动**，不是回归。动机见 spec §2.2b：样式控件在**当前值**上仍可点，重复点同一个颜色会产生 `before == after` 的 no-op；PR-2 若把入栈挂在成功路径上，这个 no-op 会把深度 1 栈里唯一那条真编辑挤掉、不可恢复。
+
+- [ ] **Step 1: 写失败测试**
+
+```swift
+@Test("L9 D80: 同样式再调 updateDrawingStyle → 返回 true 但 revision 不动、内容不变")
+@MainActor func updateStyleNoOpHasNoSideEffect() throws {
+    let e = TrainingEngine.preview()
+    #expect(e.appendDrawing(makeHorizontalDrawing(id: "N1")))
+    var s = DrawingDefaultStyle()
+    s.thickness = 3; s.colorToken = .green
+    #expect(e.updateDrawingStyle(id: "N1", style: s))          // 第一次：真改动
+    let before = e.drawings
+    let rev = e.drawingsRevision
+    #expect(e.updateDrawingStyle(id: "N1", style: s) == true)   // 第二次：同样式 no-op
+    expectDrawingsUnchanged(e, before, revisionBefore: rev)
+}
+
+@Test("L10 D80: 已锁的线再上锁 → 返回 true 但 revision 不动")
+@MainActor func setLockedIdempotentHasNoSideEffect() throws {
+    let e = TrainingEngine.preview()
+    #expect(e.appendDrawing(makeHorizontalDrawing(id: "N2")))
+    #expect(e.setDrawingLocked(id: "N2", locked: true))
+    let before = e.drawings
+    let rev = e.drawingsRevision
+    #expect(e.setDrawingLocked(id: "N2", locked: true) == true)
+    expectDrawingsUnchanged(e, before, revisionBefore: rev)
+}
+```
+
+- [ ] **Step 2: 跑测试确认 L9 失败、L10 通过**
+
+```bash
+cd "ios/Contracts" && swift test 2>&1 | grep -E "L9|L10|Test run with"
+```
+预期：L9 FAIL（`updateDrawingStyle` 目前无条件递增），L10 PASS（Task 1 已实现幂等）。
+
+- [ ] **Step 3: 实现 —— 在 `updateDrawingStyle` 的 `drawings[i] = updated` 之前加早退**
+
+把 `TrainingEngine.swift:1178-1181` 改成：
+
+```swift
+        guard let updated = old.withStyle(style) else { return false }             // ④（D59/D58 引擎支）
+        // D80（1b-ii PR-1）：**内容未变 = 零副作用**。样式控件在「当前值」上仍可点，
+        // 重复点同一个颜色会走到这里且 `updated == old`。原先无条件 `drawingsRevision += 1`，
+        // 会让这个 no-op 触发一次无谓 autosave；更严重的是 PR-2 把入栈挂在本成功路径上时，
+        // 它会把深度 1 撤销栈里唯一那条**真编辑**挤掉、不可恢复（codex R3-F2）。
+        // 判据用 `DrawingObject.==`（含除 id 外全部内容分量，`locked` 也在内，Models.swift:366-372）。
+        // 统一之后「`drawingsRevision` 递增 ⟺ 内容真的变了」成为不变量，PR-2 的入栈条件恰好等于它。
+        guard updated != old else { return true }
+        drawings[i] = updated
+        drawingsRevision += 1
+        return true
+```
+
+- [ ] **Step 4: 跑测试确认通过 + 复核既有 N2 未被破坏**
+
+```bash
+cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)" && swift test 2>&1 | tail -5
+```
+预期：全绿。
+**并单独复核既有 N2**（`TrainingEngineDrawingSessionTests.swift:812`「updateDrawingStyle 只动 5 样式字段 + 两个派生，其余逐字段不变；revision +1」）：
+读它的测试体，确认它传的是**与原值不同**的样式。**若发现它传的其实是同样式，那它此前就是一条恒真测试** —— 修正它并在提交信息里如实记录。
+
+- [ ] **Step 5: 变异验证**
+
+| 中和什么 | 应变红 |
+|---|---|
+| 删掉 `guard updated != old else { return true }` | L9 |
+| 删掉 Task 1 里的 `guard old.locked != newLocked else { return true }` | L10 |
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift
+git commit -m "feat(1b-ii PR-1): D80 内容未变=零副作用 —— updateDrawingStyle 加早退（对已合并 API 的有意改动）"
+```
+
+---
+
+## Task 4: 信任边界三层守卫（镜像既有 N15）
+
+**Files:**
+- Test: `Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`
+
+**Interfaces:**
+- Consumes: `SourceGuardScanner.swift` 的 `expectEngineInternalOnly` / `callSiteCount` / `filesMentioning` / `expectIdentifierNeverVended` / `squeezedContains` / `squeezedSource` / `contractsDirForGuards`
+- Produces: 无新 API
+
+> ⚠️ 本 task 依赖 Task 6 的路由 —— **调用点守卫要到 Task 6 落地后才会绿**。
+> 实施顺序两选一：① 先做 Task 6 再回来做本 task；② 本 task 先只写「非 public + 不得 vend」两层，调用点那层随 Task 6 一起提交。**推荐 ①**（一次写全，避免守卫半成品）。
+
+- [ ] **Step 1: 写守卫测试（逐字镜像既有 N15 的形状）**
+
+```swift
+@Test("L11: setDrawingLocked 非 public + Sources/ 中恰好 1 处调用（路由在调用前先验几何）")
+@MainActor func setDrawingLockedTrustBoundary() throws {
+    // 第一层：存在 + 非 public/package/open（含 public extension，D69 约束 3）
+    try expectEngineInternalOnly("setDrawingLocked(id:")
+
+    // 第二层：`Sources/` 里恰好 1 处调用，且在那条已先验几何的 UI 路由里
+    let sites = try callSiteCount("setDrawingLocked(")
+    #expect(sites.count == 1, "setDrawingLocked 的调用文件数应为 1，实际：\(sites)")
+    #expect(sites.first?.count == 1, "同一文件内也只许 1 处，实际：\(sites)")
+    #expect(sites.first?.file.hasSuffix("/Drawing/DrawingEditRouter.swift") == true,
+            "唯一调用点必须是 UI 编辑路由，实际：\(sites)")
+
+    // 几何判据必须排在调用之前（只钉"调用点唯一"不够，唯一那处若不验几何同样失守）
+    let router = contractsDirForGuards
+        .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path
+    let code = try squeezedSource(router)
+    let geoIdx = try #require(code.range(of: squeeze("HorizontalLineTool.visibleGeometry("))).lowerBound
+    let callIdx = try #require(code.range(of: squeeze("engine.setDrawingLocked("))).lowerBound
+    #expect(geoIdx < callIdx, "几何判据必须排在 setDrawingLocked 调用之前")
+
+    // 第三层：方法引用（`let f = engine.setDrawingLocked`）不出现调用 pattern，只数调用会放过它
+    let mentions = try filesMentioning("setDrawingLocked")
+    #expect(!mentions.isEmpty, "扫描器返回空 —— 守卫已失效")
+    #expect(mentions.allSatisfy {
+        $0.hasSuffix("/TrainingEngine/TrainingEngine.swift")
+            || $0.hasSuffix("/Drawing/DrawingEditRouter.swift")
+    }, "setDrawingLocked 被引擎与唯一路由以外的文件提到（含方法引用）：\(mentions)")
+    try expectIdentifierNeverVended("setDrawingLocked", inFiles: mentions)
+}
+
+/// N-B 第 1 条（spec §1.6）：`TrainingEngine.swift` 里**语义性** locked 写入恰好 1 处。
+/// 拷贝直传（`locked: locked` / `old.locked` / `d.locked` / `drawing.locked`）不算。
+@Test("L12: TrainingEngine 里非拷贝直传的 locked 写入恰好 1 处（在 setDrawingLocked 里）")
+@MainActor func semanticLockedWriteIsSingleSite() throws {
+    let code = try squeezedSource(trainingEnginePath)
+    let total = code.components(separatedBy: "locked:").count - 1
+    var passthrough = 0
+    for form in ["locked:locked", "locked:old.locked", "locked:d.locked", "locked:drawing.locked"] {
+        passthrough += code.components(separatedBy: form).count - 1
+    }
+    #expect(total - passthrough == 1,
+            "语义性 locked 写入应恰好 1 处，实际 total=\(total) passthrough=\(passthrough)")
+    #expect(code.contains(squeeze("locked: newLocked")),
+            "那一处必须是 setDrawingLocked 里的 `locked: newLocked`（见 Global Constraint #1）")
+}
+```
+
+- [ ] **Step 2: 跑测试确认通过**
+
+```bash
+cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)" && swift test 2>&1 | grep -E "L11|L12|Test run with"
+```
+
+- [ ] **Step 3: 反向自检（每条守卫各一次，控制者亲验）**
+
+| 临时改动 | 应变红 |
+|---|---|
+| 给 `setDrawingLocked` 加 `public` | L11 第一层 |
+| 在 `TrainingView.swift` 里加一句 `_ = engine.setDrawingLocked(id: "x", locked: true)` | L11 第二层 |
+| 在路由里加 `let f = engine.setDrawingLocked`（不调用） | L11 第三层（vend） |
+| 把路由里几何门挪到调用**之后** | L11 的 `geoIdx < callIdx` |
+| 在 `TrainingEngine.swift` 里另加一处 `locked: true` | L12 |
+| 把 `locked: newLocked` 改成 `locked: locked`（并把参数名改回去） | L12 —— **这条证明 Global Constraint #1 不是空话** |
+
+- [ ] **Step 4: 提交**
+
+```bash
+git add ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift
+git commit -m "test(1b-ii PR-1): setDrawingLocked 三层信任边界守卫 + 语义性 locked 写入单点守卫"
+```
+
+---
+
+## Task 5: N14h 断言翻转 + 落盘往返
+
+**Files:**
+- Modify: `Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift:178`（`lockedFutureDataLineIsCurrentlyUnrecoverable`）
+- Test: 同文件新增落盘往返
+
+**Interfaces:**
+- Consumes: Task 1 的 `setDrawingLocked`
+
+> 1b-i 在该测试头注里**逐字交接**：「这条线一旦被解锁，`deleteDrawing(id:)` 就该对它放行 —— 本测试「delete == false」那半条断言**必须翻转成 true**，否则说明 `setDrawingLocked` 没把 `locked` 门在下游落到实处。」
+
+- [ ] **Step 1: 改测试名与头注**
+
+把 `@Test("N14h 已知死角（不修，钉现状）: ...")` 改成：
+
+```swift
+/// N14h（1b-ii PR-1 已解开一半）：locked + 未来数据的线。
+/// **锁着时**仍然既改不动（门②）也删不掉（门②）——这部分不变。
+/// **但 `setDrawingLocked` 落地后它可以被解锁**，解锁之后 `deleteDrawing(id:)` 必须放行
+/// （未来数据那道门本就不归删除面管）→ 用户对这类线的处置通道从此存在。
+/// ⚠️ **仍然残留**：解锁后它依旧**改不动样式**（D61 门保留在 `updateDrawingStyle` 上）。
+///    这是保护而非缺陷，P3/未来版本认识那些枚举值后自然解禁。
+@Test("N14h: locked + 未来数据的线 —— 锁着时改不动删不掉，解锁后可删除")
+```
+
+- [ ] **Step 2: 在两个分量（LA / LB）末尾各追加解锁 → 删除放行的断言**
+
+在分量一 `eA` 现有断言之后追加：
+
+```swift
+    // 1b-ii PR-1：解锁 → 删除必须放行（1b-i 头注逐字交接的翻转点）
+    #expect(eA.setDrawingLocked(id: "LA", locked: false) == true)
+    #expect(eA.drawings.first(where: { $0.id == "LA" })?.locked == false)
+    let revAfterUnlockA = eA.drawingsRevision
+    #expect(eA.deleteDrawing(id: "LA") == true)                    // ← 由 false 翻转为 true
+    #expect(!eA.drawings.contains { $0.id == "LA" })               // 线真的没了
+    #expect(eA.drawingsRevision == revAfterUnlockA + 1)
+    // 残留仍在：解锁不解禁样式编辑（D61 门还在 updateDrawingStyle 上）
+```
+
+分量二 `eB` 同法追加（把 `LA` 换成 `LB`、`eA` 换成 `eB`）。
+⚠️ 「解锁后仍改不动样式」这条要在**删除之前**断言（删了就没得改了）：
+
+```swift
+    #expect(eB.setDrawingLocked(id: "LB", locked: false) == true)
+    #expect(eB.updateDrawingStyle(id: "LB", style: style()) == false)   // 残留：D61 门仍拒
+    #expect(eB.deleteDrawing(id: "LB") == true)
+    #expect(!eB.drawings.contains { $0.id == "LB" })
+```
+
+- [ ] **Step 3: 新增落盘往返测试（N-F）**
+
+```swift
+@Test("L13 落盘: 锁定 → revision +1 → 重新加载后仍是锁定态")
+@MainActor func lockedSurvivesReload() throws {
+    let e = TrainingEngine.preview()
+    #expect(e.appendDrawing(makeHorizontalDrawing(id: "S1")))
+    let rev = e.drawingsRevision
+    #expect(e.setDrawingLocked(id: "S1", locked: true))
+    #expect(e.drawingsRevision == rev + 1)
+    let merged = try e.loadedDrawingsLossy.reconciled(currentKnown: e.drawings)
+    let reloaded = try LossyDrawingArray.decode(try merged.encoded())
+    #expect(reloaded.drawings.first(where: { $0.id == "S1" })?.locked == true)
+}
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+```bash
+cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)" && swift test 2>&1 | tail -5
+```
+
+- [ ] **Step 5: 变异验证**
+
+| 中和什么 | 应变红 |
+|---|---|
+| 把 `deleteDrawing(id:)` 的 `guard !drawings[i].locked` 改成恒真 | N14h 的「锁着时删不掉」那半 |
+| 让 `setDrawingLocked` 恒 `return false` | N14h 新增那半 + L13 |
+| 删掉 `drawingsRevision += 1` | L13 |
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift
+git commit -m "test(1b-ii PR-1): N14h 断言翻转（解锁后可删除）+ 锁定态落盘往返"
+```
+
+---
+
+## Task 6: 路由与可用性谓词（D71）
+
+**Files:**
+- Modify: `Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift`
+- Test: `Tests/KlineTrainerContractsTests/Drawing/DrawingEditRouterTests.swift`
+
+**Interfaces:**
+- Consumes: Task 1 的 `setDrawingLocked`；既有 `uniqueSelected` / `idIsGloballyUnique` / `selectionGeometryVisible` / `syncSelectionByState`
+- Produces: `DrawingEditRouter.lockButtonEnabled(engine:) -> Bool`、`lockIsOn(engine:) -> Bool`、`toggleLockSelected(engine:) -> Bool` —— Task 7 的 UI 消费这三个
+
+- [ ] **Step 1: 写失败测试**
+
+```swift
+@Test("L14 谓词: 无选中 → 🔒 灰")
+@MainActor func lockButtonDisabledWithoutSelection() throws { /* 构造无选中的 engine，断言 lockButtonEnabled == false */ }
+
+@Test("L15 谓词: 选中且几何可见 → 🔒 亮；锁定后仍亮（否则解不开锁）")
+@MainActor func lockButtonStaysEnabledWhenLocked() throws { /* 选中 → true；setDrawingLocked(true) → 仍 true */ }
+
+@Test("L16 谓词: 锁定线 → 🗑 灰、样式控件灰（复用既有 !d.locked 分量，首次真执行）")
+@MainActor func lockedLineDisablesDeleteAndStyle() throws { /* deleteButtonEnabled == false && styleControlsEnabled == false */ }
+
+@Test("L17 图标态: 无选中→开锁；选中未锁→开锁；选中已锁→闭锁")
+@MainActor func lockIconReflectsSelectedLine() throws { /* lockIsOn 三态 */ }
+
+@Test("L18 路由: 几何不可见时 toggleLockSelected 恒 false 且不改 locked")
+@MainActor func toggleLockFailsClosedWithoutGeometry() throws { /* 不设 viewportMapper → false */ }
+```
+
+> ⚠️ **测试体留白是本 plan 唯一允许的一处**，因为构造「选中 + 几何可见」的 engine 需要既有 `DrawingEditRouterTests.swift` 里的 setup helper。
+> **实施者第一步必须先读该文件**，复用它现成的 `deleteButtonEnabled` 系列测试的构造方式（同文件已有「选中 + mapper + 可见」的完整搭法），**照搬那套 setup**，不要自己另造一套。
+
+- [ ] **Step 2: 跑测试确认失败**（`no member 'lockButtonEnabled'`）
+
+- [ ] **Step 3: 实现（加在 `deleteSelected` 之后，形状严格镜像删除三件套）**
+
+```swift
+    // MARK: 锁定（1b-ii PR-1，D71）—— 形状镜像上面的删除三件套
+
+    /// 「锁定可用」的**非几何分量**。
+    /// ⚠️ 与 `deletableIgnoringGeometry` 只差一处：**没有** `!d.locked` 分量。
+    /// 这不是笔误 —— 锁定线**必须仍能被选中并解锁**（spec §7.1 逐字），带上那道门就永远解不开。
+    private static func lockableIgnoringGeometry(engine: TrainingEngine) -> Bool {
+        guard engine.flow.mode != .review else { return false }
+        guard let d = uniqueSelected(engine: engine) else { return false }
+        return idIsGloballyUnique(engine: engine, id: d.id)
+    }
+
+    /// **路由用**（唯一的门）：几何现算。
+    static func canToggleLock(engine: TrainingEngine) -> Bool {
+        lockableIgnoringGeometry(engine: engine) && selectionGeometryVisible(engine: engine)
+    }
+
+    /// **UI 用**：🔒 是否可用。几何读 observable 提示（理由同 `deleteButtonEnabled`）。
+    static func lockButtonEnabled(engine: TrainingEngine) -> Bool {
+        lockableIgnoringGeometry(engine: engine) && engine.drawingSession.selectionGeometryVisible
+    }
+
+    /// **UI 用**：🔒 图标该显示闭锁还是开锁 —— 只反映选中线的 `locked`，无选中取开锁（中性态）。
+    static func lockIsOn(engine: TrainingEngine) -> Bool {
+        uniqueSelected(engine: engine)?.locked ?? false
+    }
+
+    /// 切换选中线的锁定态。`setDrawingLocked` 在 `Sources/` 里的**唯一**调用点。
+    @discardableResult
+    static func toggleLockSelected(engine: TrainingEngine) -> Bool {
+        defer { syncSelectionByState(engine: engine) }
+        guard let id = engine.drawingSession.selectedDrawingID,
+              let current = uniqueSelected(engine: engine) else { return false }
+        guard canToggleLock(engine: engine) else { return false }
+        return engine.setDrawingLocked(id: id, locked: !current.locked)
+    }
+```
+
+- [ ] **Step 4: 跑测试确认通过**
+
+```bash
+cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)" && swift test 2>&1 | tail -5
+```
+
+- [ ] **Step 5: 变异验证**
+
+| 中和什么 | 应变红 |
+|---|---|
+| 给 `lockableIgnoringGeometry` 加回 `guard !d.locked` | L15（锁定后 🔒 会变灰 → 解不开锁） |
+| 删掉 `editableIgnoringGeometry` 里的 `!d.locked` | L16 的样式那半 |
+| 删掉 `deletableIgnoringGeometry` 里的 `!d.locked` | L16 的 🗑 那半 |
+| `canToggleLock` 去掉几何分量 | L18 |
+| `lockIsOn` 恒返回 `false` | L17 |
+
+- [ ] **Step 6: 提交 + 回头补 Task 4 的调用点守卫**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditRouterTests.swift
+git commit -m "feat(1b-ii PR-1): 锁定路由与可用性谓词（D71）—— setDrawingLocked 的唯一调用点"
+```
+提交后**回到 Task 4 Step 2** 跑 L11，确认调用点守卫此刻转绿。
+
+---
+
+## Task 7: 底栏 ②🔒 与置灰传播（D72）
+
+**Files:**
+- Modify: `Sources/KlineTrainerContracts/UI/DrawingModeBar.swift`
+- Modify: `Sources/KlineTrainerContracts/UI/TrainingView.swift:262-264`
+- Test: `Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift`
+
+**Interfaces:**
+- Consumes: Task 6 的 `lockButtonEnabled` / `lockIsOn` / `toggleLockSelected`
+- Produces: 无（终端 UI）
+
+> ⚠️ **`DrawingModeBar.swift` 是 `#if canImport(UIKit)` 门控的，host `swift test` 上根本不编译。**
+> 本 task 的测试与其**变异验证必须上 Catalyst**（Global Constraint #10）。只看 host 绿 = 假绿。
+
+- [ ] **Step 1: 改 `DrawingBottomBar`（插在①类型与③🗑 之间）**
+
+头注改为：
+```swift
+/// 画线底栏（单行）：①「类型」键 + **②🔒 锁定（1b-ii PR-1）** + ③🗑 删除。
+/// ④↩⑤↪ 属 1b-ii PR-2，本期**一个占位都不渲染**（母 spec D19 / D24：不 ship 恒灰的未接线按钮）。
+```
+
+新增两个入参（放在 `deleteEnabled` 之前，与 ②在③之前的视觉顺序一致）：
+```swift
+    /// D71「锁定可用」谓词的结果。**本视图自己不判任何东西**——判据全在 `DrawingEditRouter`。
+    let lockEnabled: Bool
+    /// 选中线当前是否锁定 —— 只决定图标形态（闭锁 / 开锁），不参与可用性。
+    let lockIsOn: Bool
+    let onToggleLock: () -> Void
+```
+
+在①类型 Button 与③🗑 Button 之间插入：
+```swift
+            Button(action: onToggleLock) {
+                Image(systemName: lockIsOn ? "lock" : "lock.open")
+            }
+                .accessibilityLabel(lockIsOn ? "解锁" : "锁定")
+                .disabled(!lockEnabled)
+```
+
+- [ ] **Step 2: 改 `TrainingView.swift:262-264` 的调用点**
+
+```swift
+                    DrawingBottomBar(typeRowExpanded: $typeRowExpanded,
+                                     lockEnabled: DrawingEditRouter.lockButtonEnabled(engine: engine),
+                                     lockIsOn: DrawingEditRouter.lockIsOn(engine: engine),
+                                     onToggleLock: { DrawingEditRouter.toggleLockSelected(engine: engine) },
+                                     deleteEnabled: DrawingEditRouter.deleteButtonEnabled(engine: engine),
+                                     onDelete: { confirmingDeleteDrawing = true })
+```
+
+- [ ] **Step 3: 写源码守卫（底栏形状 + 判据来源）**
+
+加到 `DrawingInteractionUISourceGuardTests.swift`：
+
+```swift
+@Test("L19 底栏: ②🔒 已渲染，④↩⑤↪ 一个占位都没有（D24 按期填充）")
+@MainActor func bottomBarHasLockButNotUndoRedo() throws {
+    let bar = contractsDirForGuards
+        .appendingPathComponent("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift").path
+    let code = try squeezedSource(bar)
+    #expect(code.contains(squeeze("systemName: lockIsOn ? \"lock\" : \"lock.open\"")),
+            "🔒 图标没接 lockIsOn —— 图标态不会反映选中线的锁定状态")
+    #expect(code.contains(squeeze(".disabled(!lockEnabled)")), "🔒 没接可用性谓词")
+    // ④↩⑤↪ 属 PR-2：本期一个占位都不许渲染
+    for undoIcon in ["arrow.uturn.backward", "arrow.uturn.forward"] {
+        #expect(!code.contains(squeeze(undoIcon)), "\(undoIcon) 属 PR-2，本期不得渲染")
+    }
+}
+
+@Test("L20 底栏不自判: 可用性只来自 DrawingEditRouter，视图里没有 locked 判断")
+@MainActor func bottomBarDoesNotJudgeLockItself() throws {
+    let bar = contractsDirForGuards
+        .appendingPathComponent("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift").path
+    let code = try squeezedSource(bar)
+    #expect(!code.contains(squeeze(".locked")), "底栏不得自己读 DrawingObject.locked —— 判据必须在路由里")
+}
+```
+
+- [ ] **Step 4: host 跑一遍（确认没破坏既有）**
+
+```bash
+cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)" && swift test 2>&1 | tail -5
+```
+
+- [ ] **Step 5: Catalyst 真跑（本 task 的唯一有效证据）**
+
+```bash
+echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git rev-parse --short HEAD)"
+xcodebuild test -scheme KlineTrainerContracts -destination 'platform=macOS,variant=Mac Catalyst' 2>&1 | tail -30
+```
+判绿读 `TEST SUCCEEDED` **且** 执行量与基线一致（Global Constraint #6：不看退出码）。
+并跑 `.github/scripts/catalyst-gate.sh` 确认 `GATE PASS`，同步更新 `catalyst-total-baseline.txt` / `catalyst-uikit-baseline.txt`。
+
+- [ ] **Step 6: 变异验证（必须在 Catalyst 上做）**
+
+| 中和什么 | 应变红 |
+|---|---|
+| 把 `.disabled(!lockEnabled)` 删掉 | L19 |
+| 把 `lockIsOn ? "lock" : "lock.open"` 改成固定 `"lock"` | L19 |
+| 在底栏里加一个 `arrow.uturn.backward` 图标 | L19 |
+| 在底栏里加一句读 `drawing.locked` 的判断 | L20 |
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add ios/Contracts/Sources/KlineTrainerContracts/UI/DrawingModeBar.swift \
+        ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift \
+        .github/scripts/catalyst-total-baseline.txt .github/scripts/catalyst-uikit-baseline.txt
+git commit -m "feat(1b-ii PR-1): 底栏 ②🔒 + 置灰传播（D72）"
+```
+
+---
+
+## 收尾：三绿门（作者亲核，缺一不可）
+
+- [ ] **host** `swift test` → 读 `Test run with N tests ... passed`
+- [ ] **Catalyst** `xcodebuild test` → `TEST SUCCEEDED` + `catalyst-gate.sh` `GATE PASS` + 闸门自测
+- [ ] **iOS app** `xcodebuild build` → `BUILD SUCCEEDED`
+- [ ] 三条命令各自打印 branch / HEAD
+- [ ] `git log 567987b..HEAD --oneline` + `git diff --stat 567987b..HEAD` 复核：提交与文件清单**只属本 PR**（防跨 PR 串味）
+
+## 收尾：非程序员验收清单
+
+按 spec §1.7 的 **11 条**执行（真机 iPhone，Debug 构建 + `KLINE_SEED_FIXTURE=1`）。
+⚠️ 装机两坑（见 `project_device_testing_requires_seed_fixture`）：构建必须 user 在真终端跑（codesign 需钥匙串授权）；装完必须**先 terminate 再冷启动**，否则 `init()` 不重跑、seed 不生效。
+
+---
+
+## Self-Review（写完计划后自查，已执行）
+
+**1. spec §1 覆盖**：D69 门列表 → Task 1；D70 raw-preserving → Task 2；D80 → Task 3；N-B/N-G 守卫 → Task 4；D73 N14h 翻转 + N-F 落盘 → Task 5；D71 路由谓词 → Task 6；D72 UI + N-D 置灰 → Task 6(L16)/Task 7。契约举证（§3 第 3 条两个分量）→ Task 2 的 L8 + Task 2 的 L6/L7。**无遗漏。**
+
+**2. 占位符扫描**：两处**有意留白**，均已写明「先读哪个既有文件、复用它的哪套构造」——
+① Task 6 Step 1 的五条测试体（选中 + 几何可见的 engine 搭法，读 `DrawingEditRouterTests.swift` 既有 `deleteButtonEnabled` 系列）；
+② Task 2 L8 的 `CoordinateMapper` viewport（读 `GeometryTests.swift:255`）。
+理由是照搬既有构造比我凭空写一份更不容易出错 —— 本仓「计划的**代码块**本身是恒真测试的根因」那条教训明确指向「别在计划里发明测试搭法」。其余步骤均含可直接执行的真代码。
+
+**2b. 内嵌事实逐条实测**（本仓「计划内嵌事实不可靠」教训，2026-08-11 全部跑过）：
+`TrainingEngine.preview(mode:)` ✅存在（**`previewReview()` 不存在，初稿写错已修**）· `injectDrawingsForTesting` ✅ · `DrawingHitTester.firstHit` ✅ · `KLineView.drawingTools` ✅ · `LossyDrawingArray.decode` ✅ · `DrawingAnchor` ✅ · `.trend` ✅（逗号列表声明）· `DrawingToolType.implemented == [.horizontal]` ✅ · `makeHorizontalDrawing` ❌需新建（计划已给定义）· `makeTestMapper` ❌不存在（已改为照既有写法自造）· `DrawingBottomBar` 现有入参 = `typeRowExpanded` / `deleteEnabled` / `onDelete` ✅ · 既有守卫模板 N15 在 `TrainingEngineDrawingSessionTests.swift:911-948` ✅
+
+**3. 类型一致性**：`setDrawingLocked(id:locked:)` 在 Task 1 定义、Task 4/5/6 引用一致；`lockButtonEnabled` / `lockIsOn` / `toggleLockSelected` 在 Task 6 定义、Task 7 消费一致；`makeHorizontalDrawing(id:price:locked:)` 在 Task 1 Step 2 定义、Task 1/2/3/5 使用一致。
