@@ -68,6 +68,7 @@
 
 **Files:**
 - Modify: `Sources/KlineTrainerContracts/TrainingEngine/TrainingEngine.swift`（插在 `updateDrawingStyle` 之后，约 `:1182` 后）
+- Modify: `Tests/KlineTrainerContractsTests/DrawingTestFixtures.swift`（新增 `makeHorizontalDrawing`，见 Step 2）
 - Test: `Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`
 
 **Interfaces:**
@@ -457,11 +458,12 @@ git commit -m "feat(1b-ii PR-1): D80 内容未变=零副作用 —— updateDraw
 ## Task 4: 信任边界三层守卫（镜像既有 N15）
 
 **Files:**
+- Modify: `Tests/KlineTrainerContractsTests/SourceGuardScanner.swift`（新增 `engineDrawingsStructuralWrites`）
 - Test: `Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift`
 
 **Interfaces:**
 - Consumes: `SourceGuardScanner.swift` 的 `expectEngineInternalOnly` / `callSiteCount` / `filesMentioning` / `expectIdentifierNeverVended` / `squeezedContains` / `squeezedSource` / `contractsDirForGuards`
-- Produces: 无新 API
+- Produces: `engineDrawingsStructuralWrites(_ squeezedCode: String) -> Int`（顶层函数，**不加 `private`** —— Swift 顶层 `private` 是文件作用域，加了别的测试文件调不到）
 
 > ⚠️ 本 task 依赖 Task 6 的路由 —— **调用点守卫要到 Task 6 落地后才会绿**。
 > 实施顺序两选一：① 先做 Task 6 再回来做本 task；② 本 task 先只写「非 public + 不得 vend」两层，调用点那层随 Task 6 一起提交。**推荐 ①**（一次写全，避免守卫半成品）。
@@ -592,8 +594,10 @@ cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git
 - [ ] **Step 4: 提交**
 
 ```bash
-git add ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift
-git commit -m "test(1b-ii PR-1): setDrawingLocked 三层信任边界守卫 + 语义性 locked 写入单点守卫"
+git add ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScanner.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/TrainingEngineDrawingSessionTests.swift
+git commit -m "test(1b-ii PR-1): setDrawingLocked 三层信任边界守卫 + locked/drawings 两条写入面守卫"
+git status --porcelain   # 必须为空 —— 漏 stage 的 helper 会让分支编译不过（codex P-R2-F2）
 ```
 
 ---
@@ -601,8 +605,8 @@ git commit -m "test(1b-ii PR-1): setDrawingLocked 三层信任边界守卫 + 语
 ## Task 5: N14h 断言翻转 + 落盘往返
 
 **Files:**
-- Modify: `Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift:178`（`lockedFutureDataLineIsCurrentlyUnrecoverable`）
-- Test: 同文件新增落盘往返
+- Modify: `Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift:178`（`lockedFutureDataLineIsCurrentlyUnrecoverable` 翻转 + 新增 L13a）
+- Modify: `Tests/KlineTrainerContractsTests/CoordinatorReplayPersistenceTests.swift`（**新增 L13b —— N-F 的主证据，harness 在这个文件里**）
 
 **Interfaces:**
 - Consumes: Task 1 的 `setDrawingLocked`
@@ -726,8 +730,10 @@ cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git
 - [ ] **Step 6: 提交**
 
 ```bash
-git add ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift
-git commit -m "test(1b-ii PR-1): N14h 断言翻转（解锁后可删除）+ 锁定态落盘往返"
+git add ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingEditDurabilityGateTests.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/CoordinatorReplayPersistenceTests.swift
+git commit -m "test(1b-ii PR-1): N14h 断言翻转（解锁后可删除）+ 锁定态真实存盘往返（L13b）"
+git status --porcelain   # 必须为空 —— 漏 stage L13b 等于把 N-F 的唯一主证据丢在工作区（codex P-R2-F1）
 ```
 
 ---
@@ -838,7 +844,14 @@ git commit -m "feat(1b-ii PR-1): 锁定路由与可用性谓词（D71）—— s
 **Files:**
 - Modify: `Sources/KlineTrainerContracts/UI/DrawingModeBar.swift`
 - Modify: `Sources/KlineTrainerContracts/UI/TrainingView.swift:262-264`
-- Test: `Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift`
+- Modify: `Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift:101-119`（`bottomBarHasExactlyTwoKeys` → 三键版，见 Step 3）
+- Modify: `Tests/KlineTrainerContractsTests/Render/DrawingBottomBarHeightTests.swift:42`（**加参数后既有构造会编译不过**，见 Step 3b）
+
+> ⚠️ **两处既有测试会被本 task 的签名改动打穿，必须同期改**（codex P-R2-F4，已实测）：
+> - `DrawingBottomBarHeightTests.swift:42` = `DrawingBottomBar(typeRowExpanded: .constant(false), deleteEnabled: false, onDelete: {})` —— 加三个必填参数后**编译失败**；
+> - `DrawingInteractionUISourceGuardTests.swift:102` `bottomBarHasExactlyTwoKeys` 断言**恰好 2 个 Button** 且 🔒 不渲染 —— 本 task 会让它变红。
+>
+> **不改它们的后果不是「少测一条」，而是实施者为了让树变绿去削弱这两条守卫本身。**
 
 **Interfaces:**
 - Consumes: Task 6 的 `lockButtonEnabled` / `lockIsOn` / `toggleLockSelected`
@@ -888,29 +901,52 @@ git commit -m "feat(1b-ii PR-1): 锁定路由与可用性谓词（D71）—— s
 
 加到 `DrawingInteractionUISourceGuardTests.swift`：
 
+> ⚠️ **不要新写 L19/L20 —— 改既有的 `bottomBarHasExactlyTwoKeys`**（`DrawingInteractionUISourceGuardTests.swift:101-119`）。
+> 它已经在用正确形态：**结构计数读 `code(...)`（squeezed）、用户可见文案与 SF Symbol 名读 `raw(...)`（原始文本）**。
+> 我初稿让 L19 用 `squeezedSource` 去断言 `"lock"` 字面量 —— **`squeezedSource` 会丢弃字符串字面量内容**
+> （`consumeStringLiteral` 明写「字面文本：丢弃」），所以那条正向断言在**正确实现**上反而会失败，
+> 而对 `arrow.uturn.*` 的否定断言则是**恒真的废断言**。这违反了本仓已记的
+> 「用户可见文案读原始文本、否定/结构断言剥注释剥字面量」那条守则（codex P-R2-F3）。
+
+**改法：把既有测试从「恰好 2 个按钮」升级为「恰好 3 个」，并补 🔒 的两类断言。**
+
 ```swift
-@Test("L19 底栏: ②🔒 已渲染，④↩⑤↪ 一个占位都没有（D24 按期填充）")
-@MainActor func bottomBarHasLockButNotUndoRedo() throws {
-    let bar = contractsDirForGuards
-        .appendingPathComponent("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift").path
-    let code = try squeezedSource(bar)
-    #expect(code.contains(squeeze("systemName: lockIsOn ? \"lock\" : \"lock.open\"")),
+@Test("spec §1.1 / D24：底栏**恰好 3 个按钮**（类型 + ②🔒 + ③🗑），④↩⑤↪ 属 PR-2 一个都不渲染")
+func bottomBarHasExactlyThreeKeys() throws {
+    let bar = try code("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
+    // 结构计数（PD7：不是「禁止图标名」黑名单）—— 1b-ii PR-1 把 2 改成 3
+    #expect(bar.components(separatedBy: "Button").count - 1 == 3,
+            "底栏按钮数不是 3 —— 多了就是把 PR-2 的 ↩↪ 提前 ship 了，少了就是 🔒 或 🗑 没接进来")
+    #expect(bar.contains("deleteEnabled"), "🗑 必须由传入谓词置灰，不得自己判")
+    #expect(bar.contains(squeeze(".disabled(!deleteEnabled)")))
+    #expect(bar.contains("lockEnabled"), "🔒 必须由传入谓词置灰，不得自己判")
+    #expect(bar.contains(squeeze(".disabled(!lockEnabled)")))
+    // 底栏不得自己读 locked —— 判据必须在路由里（结构断言，读 squeezed 正确）
+    #expect(!bar.contains(squeeze("drawing.locked")), "底栏不得自己读 DrawingObject.locked")
+    #expect(bar.contains("BottomBarMetrics.height"))
+    // ★ 用户可见文案 / SF Symbol 名是**字符串字面量** → 必须读原始文本，且带完整调用语法做锚
+    let barRaw = try raw("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
+    #expect(barRaw.contains("Text(\"类型\")"))
+    #expect(barRaw.contains("Image(systemName: \"trash\")"), "③🗑 未接入")
+    #expect(barRaw.contains(".accessibilityLabel(\"删除\")"))
+    #expect(barRaw.contains("Image(systemName: lockIsOn ? \"lock\" : \"lock.open\")"),
             "🔒 图标没接 lockIsOn —— 图标态不会反映选中线的锁定状态")
-    #expect(code.contains(squeeze(".disabled(!lockEnabled)")), "🔒 没接可用性谓词")
-    // ④↩⑤↪ 属 PR-2：本期一个占位都不许渲染
+    #expect(barRaw.contains(".accessibilityLabel(lockIsOn ? \"解锁\" : \"锁定\")"))
+    // ④↩⑤↪ 属 PR-2：本期一个占位都不许渲染（读原始文本才数得到字面量）
     for undoIcon in ["arrow.uturn.backward", "arrow.uturn.forward"] {
-        #expect(!code.contains(squeeze(undoIcon)), "\(undoIcon) 属 PR-2，本期不得渲染")
+        #expect(!barRaw.contains(undoIcon), "\(undoIcon) 属 PR-2，本期不得渲染")
     }
 }
-
-@Test("L20 底栏不自判: 可用性只来自 DrawingEditRouter，视图里没有 locked 判断")
-@MainActor func bottomBarDoesNotJudgeLockItself() throws {
-    let bar = contractsDirForGuards
-        .appendingPathComponent("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift").path
-    let code = try squeezedSource(bar)
-    #expect(!code.contains(squeeze(".locked")), "底栏不得自己读 DrawingObject.locked —— 判据必须在路由里")
-}
 ```
+
+- [ ] **Step 3b: 修既有 `DrawingBottomBarHeightTests.swift:42` 的构造**
+
+```swift
+        let bar = DrawingBottomBar(typeRowExpanded: .constant(false),
+                                   lockEnabled: false, lockIsOn: false, onToggleLock: {},
+                                   deleteEnabled: false, onDelete: {})
+```
+⚠️ 参数顺序必须与 `DrawingBottomBar` 的声明顺序一致（②🔒 在 ③🗑 之前）。
 
 - [ ] **Step 4: host 跑一遍（确认没破坏既有）**
 
@@ -942,8 +978,10 @@ xcodebuild test -scheme KlineTrainerContracts -destination 'platform=macOS,varia
 git add ios/Contracts/Sources/KlineTrainerContracts/UI/DrawingModeBar.swift \
         ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingBottomBarHeightTests.swift \
         .github/scripts/catalyst-total-baseline.txt .github/scripts/catalyst-uikit-baseline.txt
-git commit -m "feat(1b-ii PR-1): 底栏 ②🔒 + 置灰传播（D72）"
+git commit -m "feat(1b-ii PR-1): 底栏 ②🔒 + 置灰传播（D72）；既有两键守卫与高度测试同期升三键"
+git status --porcelain   # 必须为空
 ```
 
 ---
@@ -954,6 +992,8 @@ git commit -m "feat(1b-ii PR-1): 底栏 ②🔒 + 置灰传播（D72）"
 - [ ] **Catalyst** `xcodebuild test` → `TEST SUCCEEDED` + `catalyst-gate.sh` `GATE PASS` + 闸门自测
 - [ ] **iOS app** `xcodebuild build` → `BUILD SUCCEEDED`
 - [ ] 三条命令各自打印 branch / HEAD
+- [ ] **`git status --porcelain` 必须为空**（codex P-R2-F1/F2）—— 在**脏工作区**里跑绿是假绿：漏 stage 的守卫 helper 会让分支编译不过，漏 stage 的 L13b 等于把 N-F 的唯一主证据丢在本地。
+- [ ] **三绿必须在 `git status` 干净之后重跑一遍**，证明「已提交的那棵树」是绿的，而不是「工作区那棵树」是绿的。
 - [ ] `git log 567987b..HEAD --oneline` + `git diff --stat 567987b..HEAD` 复核：提交与文件清单**只属本 PR**（防跨 PR 串味）
 
 ## 收尾：非程序员验收清单
