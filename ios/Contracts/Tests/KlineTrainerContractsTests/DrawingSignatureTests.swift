@@ -44,4 +44,19 @@ struct DrawingSignatureTests {
         let noTail = makeHLine(id: "t")
         #expect(canonicalDrawingsSignature([withTail("t", 1, 2)]) != canonicalDrawingsSignature([noTail]))
     }
+
+    /// 不变量锁（1b-ii PR-1 修复轮1，user 亲验发现）：`resumePendingReplay`（`TrainingSessionCoordinator:945`）
+    /// 会把 `replayHasPersisted` 置 `true`（「续局本就拥有该记录的槽 → 永不 clean-skip」）。这意味着
+    /// `saveProgress` 的 replay clean-skip 判据（依赖本签名）**在续局路径上今天永不求值** —— 拿掉
+    /// `canonicalDrawingsSignature` 里的 `String(d.locked)` 那一行，全套 1827+ 条测试（含 L13b）**全绿不变**。
+    /// 本条不测「今天会不会丢」（今天不会，因为这条路径不可达），测的是**若未来那个时机被改动**、
+    /// clean-skip 在续局也生效了，签名本身是否对 `locked` 敏感 —— 敏感性是「以后不静默丢锁定」的地基。
+    /// D30② 裁定：本 PR 不改 `replayHasPersisted` 时机、不动 clean-skip 判据，只加这条锁。
+    @Test("签名不变量: 只翻转 locked 必须改变 canonicalDrawingsSignature（clean-skip 的敏感性依赖它）")
+    func lockedIsPartOfDrawingsSignature() {
+        let a = makeHorizontalDrawing(id: "SIG", locked: false)
+        let b = makeHorizontalDrawing(id: "SIG", locked: true)
+        #expect(canonicalDrawingsSignature([a]) != canonicalDrawingsSignature([b]),
+                "签名对 locked 失明 → 若将来 clean-skip 在续局路径上生效，只锁定的改动会被静默丢弃")
+    }
 }
