@@ -1176,6 +1176,13 @@ extension TrainingEngine {
         guard !loadedDrawingsLossy.hasKnownFutureEnumValues(liveIds: [id]),
               !loadedDrawingsLossy.hasKnownFutureFields(liveIds: [id]) else { return false }
         guard let updated = old.withStyle(style) else { return false }             // ④（D59/D58 引擎支）
+        // D80（1b-ii PR-1）：**内容未变 = 零副作用**。样式控件在「当前值」上仍可点，
+        // 重复点同一个颜色会走到这里且 `updated == old`。原先无条件 `drawingsRevision += 1`，
+        // 会让这个 no-op 触发一次无谓 autosave；更严重的是 PR-2 把入栈挂在本成功路径上时，
+        // 它会把深度 1 撤销栈里唯一那条**真编辑**挤掉、不可恢复（codex R3-F2）。
+        // 判据用 `DrawingObject.==`（含除 id 外全部内容分量，`locked` 也在内，Models.swift:366-372）。
+        // 统一之后「`drawingsRevision` 递增 ⟺ 内容真的变了」成为不变量，PR-2 的入栈条件恰好等于它。
+        guard updated != old else { return true }
         drawings[i] = updated
         drawingsRevision += 1
         return true

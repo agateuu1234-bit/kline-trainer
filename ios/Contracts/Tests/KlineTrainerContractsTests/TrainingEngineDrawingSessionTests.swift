@@ -1211,4 +1211,30 @@ struct TrainingEngineDrawingSessionTests {
         #expect(e.drawings.allSatisfy { $0.locked == false })
         expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
+
+    // MARK: 1b-ii PR-1 Task 3（D80）：四个写入 API 统一「内容未变 = 零副作用」
+
+    @Test("L9 D80: 同样式再调 updateDrawingStyle → 返回 true 但 revision 不动、内容不变")
+    @MainActor func updateStyleNoOpHasNoSideEffect() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeHorizontalDrawing(id: "N1")))
+        var s = DrawingDefaultStyle()
+        s.thickness = 3; s.colorToken = .green
+        #expect(e.updateDrawingStyle(id: "N1", style: s))          // 第一次：真改动
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "N1", style: s) == true)   // 第二次：同样式 no-op
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("L10 D80: 已锁的线再上锁 → 返回 true 但 revision 不动")
+    @MainActor func setLockedIdempotentHasNoSideEffect() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeHorizontalDrawing(id: "N2")))
+        #expect(e.setDrawingLocked(id: "N2", locked: true))
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "N2", locked: true) == true)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
 }
