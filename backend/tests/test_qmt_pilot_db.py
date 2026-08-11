@@ -4901,3 +4901,52 @@ def test_authorization_has_no_public_constructor_path_in_the_module():
                        and c.func.id == "_mint_authorization" for c in ast.walk(n))}
     assert callers == {"authorize_reset"}, \
         f"铸造授权的地方不只 authorize_reset 一个：{sorted(callers)}"
+
+
+def test_no_production_module_reaches_past_the_public_authorization_entry():
+    """机械守卫：生产代码不许绕过 `authorize_reset` 直接碰铸造凭据的内部件。
+
+    ⚠️ **先把这颗钉子能做到什么说清楚，免得它被当成它不是的东西**：
+       **Python 进程内不存在能力边界。** 同进程调用方永远可以
+       `import qmt_pilot_db as m` 然后 `m._MINTED_AUTHORIZATIONS[obj] = facts`。
+       所以「私有名 + 铸造登记表」**防不住蓄意绕过**，也不该被写成防得住。
+       它防的是 spec §1 风险① 那一类：**接线失误**（4c 接线时错调了内部函数）。
+       而接线失误一定表现为**仓库里多出一个调用点** —— 那是机械抓得住的。
+
+    ⚠️ **本片（S2a）零破坏性能力**：`_drop_pilot_database` / `reset_pilot_database`
+       随 S2b 落地，故名单里没有它们。S2b 补回时**必须把那两个名字加进来**。
+    """
+    import ast
+    import qmt_pilot_db as m
+    private = {"_mint_authorization", "_MINTED_AUTHORIZATIONS",
+               "ResetAuthorization", "_RESET_CAPABILITY"}
+
+    # ⚠️ **自检 A（本片新加）**：名单里的符号必须在模块里**真实存在**。
+    #    不存在的名字扫不到任何引用 → 那一项恒真。S2a 正是从 S2 切下来的，
+    #    名单极易留着已经切走的符号 —— 这条让那种漂移当场变红，而不是静默空转。
+    absent = sorted(n for n in private if not hasattr(m, n))
+    assert not absent, (
+        f"守卫名单里这些符号在模块里不存在，对应的检查是**恒真**的：{absent}"
+        f" —— 要么把它们从名单里去掉，要么它们本就该在本片里")
+
+    backend = pathlib.Path(m.__file__).resolve().parent
+    scanned, offenders = [], []
+    for path in sorted(backend.rglob("*.py")):
+        rel = path.relative_to(backend)
+        if rel.parts[0] == "tests" or path.samefile(m.__file__):
+            continue                       # 测试当然要碰；模块自己就是定义处
+        scanned.append(str(rel))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "qmt_pilot_db":
+                offenders += [f"{rel}: from qmt_pilot_db import {a.name}"
+                              for a in node.names if a.name in private]
+            elif isinstance(node, ast.Attribute) and node.attr in private:
+                offenders.append(f"{rel}: …{node.attr}")
+    # ⚠️ **自检 B**：扫描器必须真的扫到文件，否则下面那条是恒真的
+    #    （本仓记录在案：机械检查器被它该抓的损坏禁用了自身解析器 → 静默全绿）。
+    assert scanned, "扫描器一个生产文件都没找到 —— 它已经失去判别力"
+    assert any("scripts/" in s for s in scanned), \
+        f"没扫到 scripts/ —— 验收脚本正是最可能图省事直接调私有函数的地方：{scanned}"
+    assert not offenders, (
+        f"这些生产文件绕过 authorize_reset 直接碰了铸造凭据的内部件：{offenders}")
