@@ -11,9 +11,11 @@
    `docs/superpowers/plans/2026-08-10-qmt-plan4a-2b-repackaging.md` Task 3）：
      · `init_cluster_marker` 的幂等语义与「副作用排在证明之后」
      · 孤儿 intent 行的清理（含取锁必须还、判据必须在锁内当下求值）
-   **此刻跑**：集群闸 / 复用闸 / 绑定闸 / 陈旧库 / 业务表结构漂移 / 零对象例外 /
-   `--reset-foreign` 三跑 / DROP 前的封锁与紧贴复查（**两条来路**）/ DROP 后清凭据，
-   外加清场护栏自身的三档回归（㉕㉖㉗）。
+   **此刻跑**：集群闸 / 复用闸 / 绑定闸 / 陈旧库 / 业务表结构漂移 /
+   零对象例外与 `--reset-foreign` 的**授权判定**（只到「授权发得出来」为止）/
+   清场护栏自身的三档回归（㉕㉖㉗）。
+   ⛔ **此刻不跑**：DROP 的执行本身、DROP 前的封锁与紧贴复查、占用者检查、
+   DROP 后的凭据清理 —— 本片模块里根本没有 `_drop_pilot_database`。随 S2b 补回。
 
 背景：4a-2 的 host 单测用的是假 conn，它**建模不了**这些东西 ——
 「库到底有没有被创建/删除」「集群里现在有什么」「同一个 key 能不能插进两行」
@@ -1196,8 +1198,19 @@ async def main() -> int:
     print(f"\n✅ {len(_EXPECTED_SCENARIOS)} 档断言全部成立（真 PostgreSQL）")
     # ⚠️ 全绿**不等于** spec §6.2 生命周期那一组被满足 —— S1 只跑了非破坏性档。
     #    只写在 docstring 里跑的人看不见，故打到输出上（与并发脚本同一处理）。
-    print("⚠️ 注意：本片（S2）仍不覆盖 --init-cluster-marker —— 集群标记初始化的幂等语义"
-          "与孤儿 intent 行清理一档都没跑，随 S3 补回。")
+    # ⚠️ **这段话必须说清楚本片到底证明了什么**（codex S2a-R1-F2）：
+    #    上一版只说「不覆盖 --init-cluster-marker」，**暗示其余都覆盖了** ——
+    #    而本片所有 reset 档只调到 `authorize_reset` 为止。
+    #    DROP 执行 / 紧贴复查 / 会话封锁 / 凭据清理**全部坏掉，本脚本照样全绿**。
+    #    在最高风险的那条路径上给出假信心，正是本仓反复栽的
+    #    「宣称的保证 > 实际提供的保证」。
+    print("⚠️⚠️ 本片（S2a）只验到**授权发得出来**为止，**不验 DROP 真的执行得下去**：")
+    print("     · `reset_pilot_database` / `_drop_pilot_database` 不在本片，模块里没有这两个符号；")
+    print("     · 故 DROP 执行、DROP 前的【绝对空】/归属/身份紧贴复查、连接封锁与占用者检查、")
+    print("       DROP 后的凭据清理 —— 这些**一档都没跑**，坏掉也不会让本脚本变红。")
+    print("     · 它们随 **S2b** 补回（⑨⑬⑰ 的 DROP 半 + ㉘ ㉜ ㉜b ㉞ ㉞b ㉟）。")
+    print("⚠️ 另：`--init-cluster-marker` 的幂等语义与孤儿 intent 清理随 **S3** 补回。")
+    print("⛔ 因此本脚本**此刻不是** spec §6.2 生命周期那一组的 ship gate。")
     return 0
 
 
