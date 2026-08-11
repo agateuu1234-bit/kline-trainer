@@ -258,6 +258,19 @@ git commit -m "feat(1b-ii PR-1): setDrawingLocked 引擎 API —— 豁免 D60 l
 > ⚠️ **本 task 是 PR-1 的地基。** spec D70 断言「raw-preserving 单字段 merge 在 P1a 就已存在」（`reconciled` → `mergeKnownFields` 只覆盖真变化的 key，而 `DrawingObject.==` 含 `locked`）。**这是读代码推演出来的假设，不是已验证事实。**
 > **若 Step 3 的变异验证发现测试仍绿，整条设计假设作废** —— 立即停止，把结论报给控制者，PR-1 需回到「自己实现单字段 merge」的方案。
 
+- [ ] **Step 0: 给 `DrawingEditDurabilityGateTests.swift` 补 `import CoreGraphics`**
+
+该文件当前只有 `import Foundation` / `import Testing` / `@testable import KlineTrainerContracts`（**已实测**），
+而下面 L8 用到 `CGRect` / `CGPoint` —— 本包**不会**替你 re-export 这两个符号，不补 import 直接编译失败
+（codex P-R5-F2）。同目录的 `DrawingEditRouterTests.swift` 就是明确写了 `import CoreGraphics` 的先例。
+
+```swift
+import Foundation
+import Testing
+import CoreGraphics        // ← 新增：L8 的 CGRect / CGPoint
+@testable import KlineTrainerContracts
+```
+
 - [ ] **Step 1: 写举证测试（两个分量：未来顶层字段 + 未来枚举值）**
 
 ```swift
