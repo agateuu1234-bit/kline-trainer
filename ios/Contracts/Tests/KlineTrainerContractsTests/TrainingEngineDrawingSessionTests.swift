@@ -961,7 +961,13 @@ struct TrainingEngineDrawingSessionTests {
         #expect(sites.first?.file.hasSuffix("/Drawing/DrawingEditRouter.swift") == true,
                 "唯一调用点必须是 UI 编辑路由，实际：\(sites)")
 
-        // 几何判据必须排在调用之前（只钉"调用点唯一"不够，唯一那处若不验几何同样失守）
+        // ⚠️ 整支终审③：这条只证「几何判据的字面文本排在调用字面之前」——`code.range(of:)` 取的是**首次**
+        //    出现，而 `HorizontalLineTool.visibleGeometry(` 首次出现在文件最前面的 `selectionGeometryVisible`
+        //    里，与 `toggleLockSelected` 自己有没有验几何**无关**（删掉 `toggleLockSelected` 里的
+        //    `guard canToggleLock(engine: engine)` 这条断言照样绿）。它对「文件里存在几何判据」这件事
+        //    仍有意义，故保留；但「唯一那处若不验几何同样失守」这句不准——那道更强的保证由下面
+        //    `toggleLockRouteRecomputesGeometryItself` 承担（逐字断言 `guard canToggleLock(engine: engine)`
+        //    确实出现在 `toggleLockSelected` 体内）。
         let router = contractsDirForGuards
             .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path
         let code = try squeezedSource(router)
@@ -1186,20 +1192,33 @@ struct TrainingEngineDrawingSessionTests {
             #expect(!code.contains(squeeze("DrawingEditRouter.canEditStyle(")),
                     "\(rel) 调了现算版谓词 —— SwiftUI 建立不了 observation 依赖，平移后控件不重绘")
             #expect(!code.contains(squeeze("DrawingEditRouter.canDelete(")), "\(rel) 同上")
+            #expect(!code.contains(squeeze("DrawingEditRouter.canToggleLock(")), "\(rel) 同上")
         }
-        // 路由内部不得读 observable 提示（陈旧值会放行真写入）
+        // 路由内部不得读 observable 提示（陈旧值会放行真写入）。
+        // ⚠️ 整支终审②：三个 can* 现算谓词**逐个按函数名切片**（不是取「第一个到最后一个」的一整段）——
+        //    `canToggleLock` 定义在文件末尾，与它相邻的 `lockButtonEnabled` 是 UI 版、**必须**读 observable
+        //    提示；若图省事把切片扩大到覆盖 canToggleLock 就会把 lockButtonEnabled 的合法读也扫进来，
+        //    把这条守卫打成恒红。故每个 can* 只切到**紧邻它的下一个函数**为止。
         let router = try squeezedSource(contractsDirForGuards
             .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path)
-        let liveOnly = try #require(router.range(of: squeeze("static func canEditStyle(")))
-        let displayStart = try #require(router.range(of: squeeze("static func styleControlsEnabled(")))
-        let liveBlock = String(router[liveOnly.lowerBound..<displayStart.lowerBound])
-        // ⚠️ **两种拼法都要禁**（整支 Opus 终审 Minor-1，已复验）：needle 只写小写 `session.` 时，
-        //    `engine.drawingSession.selectionGeometryVisible`（**大写 S**，恰恰是最自然的写法）匹配不上
-        //    → 守卫恒不触发。终审的变异 A 正是这么写的，本条当时**没红**，全靠 4 条行为测试拦住。
-        //    源码守卫这一层比行为层弱的根因不是「读错文本来源」（PD7 已解决），而是「needle 拼法不全」。
-        for needle in ["session.selectionGeometryVisible", "drawingSession.selectionGeometryVisible"] {
-            #expect(!liveBlock.contains(squeeze(needle)),
-                    "现算版谓词里读到了 observable 提示（拼法 \(needle)）—— 确认框时间窗内会用陈旧值放行删除（N19e）")
+        let canPredicateSlices: [(name: String, nextMarker: String)] = [
+            ("canEditStyle", "static func canDelete("),
+            ("canDelete", "static func styleControlsEnabled("),
+            ("canToggleLock", "static func lockButtonEnabled("),
+        ]
+        for (name, nextMarker) in canPredicateSlices {
+            let start = try #require(router.range(of: squeeze("static func \(name)(")),
+                                      "\(name) 不见了？")
+            let end = try #require(router.range(of: squeeze(nextMarker)), "\(nextMarker) 不见了？")
+            let liveBlock = String(router[start.lowerBound..<end.lowerBound])
+            // ⚠️ **两种拼法都要禁**（整支 Opus 终审 Minor-1，已复验）：needle 只写小写 `session.` 时，
+            //    `engine.drawingSession.selectionGeometryVisible`（**大写 S**，恰恰是最自然的写法）匹配不上
+            //    → 守卫恒不触发。终审的变异 A 正是这么写的，本条当时**没红**，全靠 4 条行为测试拦住。
+            //    源码守卫这一层比行为层弱的根因不是「读错文本来源」（PD7 已解决），而是「needle 拼法不全」。
+            for needle in ["session.selectionGeometryVisible", "drawingSession.selectionGeometryVisible"] {
+                #expect(!liveBlock.contains(squeeze(needle)),
+                        "\(name) 里读到了 observable 提示（拼法 \(needle)）—— 确认框时间窗内会用陈旧值放行写入（N19e）")
+            }
         }
         // 反向自足断言：UI 版确实读了提示（防上面两条在「谁都没调」的空状态下恒真）
         #expect(router.contains(squeeze("engine.drawingSession.selectionGeometryVisible")),
@@ -1217,6 +1236,21 @@ struct TrainingEngineDrawingSessionTests {
                 "deleteSelected 签名变了？它不得新增任何几何入参")
         #expect(code.contains(squeeze("guard canDelete(engine: engine)")),
                 "deleteSelected 必须自己调 canDelete 现算几何")
+    }
+
+    /// 镜像 `deleteRouteRecomputesGeometryItself`（整支终审③）：L11 里「几何判据排在调用之前」
+    /// 那条断言只看**首次出现位置**，与 `toggleLockSelected` 自己有没有验几何无关（详见 L11 处注释）——
+    /// 真正能挡住「删掉 `guard canToggleLock(...)` 却不被抓到」的是这一条：直接断言 `toggleLockSelected`
+    /// 体内逐字含 `guard canToggleLock(engine: engine)`，且签名不得新增几何入参。
+    @Test("N19e 镜像 / D71：锁定路由自己现算几何（不接受调用方传进来的陈旧布尔）")
+    func toggleLockRouteRecomputesGeometryItself() throws {
+        let router = contractsDirForGuards
+            .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path
+        let code = try squeezedSource(router)
+        #expect(code.contains(squeeze("static func toggleLockSelected(engine: TrainingEngine) -> Bool")),
+                "toggleLockSelected 签名变了？它不得新增任何几何入参")
+        #expect(code.contains(squeeze("guard canToggleLock(engine: engine)")),
+                "toggleLockSelected 必须自己调 canToggleLock 现算几何")
     }
 
     // MARK: 1b-ii PR-1 Task 1（D69）：setDrawingLocked 门列表

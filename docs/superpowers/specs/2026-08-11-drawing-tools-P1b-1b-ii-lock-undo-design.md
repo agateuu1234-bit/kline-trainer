@@ -327,7 +327,7 @@ PR-1 必须改这个测试：保留「锁着时改不动、删不掉」两条断
 
 > **`before == after` ⇒ 返回 `true`、`drawingsRevision` 不递增、不入栈、不触发 autosave。**
 
-判据用 `DrawingObject.==`（它含全部 18 个字段中除 `id` 外的内容分量，`locked` 也在内，见 `Models.swift:366-372`）。
+判据用 `DrawingObject.==`（它含全部 18 个字段中除 `id` 外的内容分量，`locked` 也在内，见 `Models.swift:366-375`）。
 
 **为什么统一而不是只挡入栈**：
 1. D69 已经给 `setDrawingLocked` 定了幂等零递增。只补 `updateDrawingStyle` 的入栈、不管它的 revision，会留下「锁定幂等不递增、样式幂等递增」的不对称 —— 同族判据留两套形状，本仓的漂移历史说明它一定会咬人。

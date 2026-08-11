@@ -261,8 +261,13 @@ struct CoordinatorReplayPersistenceTests {
         await h.coordinator.endSession()
 
         let e3 = try #require(try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId))
+        // ⚠️ 整支终审④：文案原先指向 clean-skip，但 resumePendingReplay（TrainingSessionCoordinator.swift:945）
+        //    早已把 replayHasPersisted 置 true，:614 的 clean-skip 判据在这条路径上永不求值——本测试根本
+        //    走不到那条分支。它真正覆盖的是 setDrawingLocked → 有损归并（reconciled）→ DB（saveReplay/
+        //    loadReplay）→ decode 的全链路往返。clean-skip 对 locked 的敏感性由
+        //    DrawingSignatureTests.lockedIsPartOfDrawingsSignature 单独覆盖，不是本测试。
         #expect(e3.drawings.first(where: { $0.id == "K1" })?.locked == true,
-                "只锁定、别的什么都没改 → 存盘被 clean-skip 吞掉了（D30① 回归）")
+                "只锁定、别的什么都没改 → setDrawingLocked→有损归并→DB→decode 全链路往返丢了 locked")
     }
 
     @Test func resumePendingReplay_recordIdMismatch_returnsNil_noClear() async throws {

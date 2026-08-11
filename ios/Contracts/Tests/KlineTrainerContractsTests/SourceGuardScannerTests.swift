@@ -227,4 +227,34 @@ struct SourceGuardScannerTests {
         #expect(codeTextPreservingBoundaries(src).contains("engine.deleteDrawing(id: x)"))
         #expect(squeezedText(src).contains("engine.deleteDrawing(id:x)"))
     }
+
+    @Test("守卫自检 h（整支终审①）：`engineDrawingsStructuralWrites` 覆盖全部数组变异方法族 + 嵌套下标配对，reviewDrawings/纯读不误报")
+    func structuralWritesCoversFullMutationFamilyAndNestedSubscript() {
+        func n(_ src: String) -> Int { engineDrawingsStructuralWrites(squeezedText(src)) }
+
+        // 既有形态基线（回归，防本条自检自己先坏掉）
+        #expect(n("drawings.append(x)") == 1)
+        #expect(n("reviewDrawings.append(x)") == 0, "reviewDrawings 是另一个数组，不得被算进 drawings 的写入面")
+        #expect(n("_ = drawings[$0].id == id") == 0, "下标读不算写")
+        #expect(n("drawings[i] = x") == 1)
+        #expect(n("_ = drawings[i] == x") == 0, "`==` 是比较不是赋值")
+
+        // 整支终审①新增：z-order 打乱族，每条都必须被判据抓到（PR-2 崩溃级陈旧下标的根因就在这一族）。
+        // 各自单独判 ==1（不是 ==2）顺带证明了新 needle 与既有 `drawings.remove(` 不重叠——
+        // 若 `drawings.remove(` 也误配上 `drawings.removeAll(` 这种更长的形态，这里会变成 2。
+        #expect(n("drawings.removeAll(where: { $0.id == id })") == 1)
+        #expect(n("drawings.removeFirst()") == 1)
+        #expect(n("drawings.removeLast()") == 1)
+        #expect(n("_ = drawings.popLast()") == 1)
+        #expect(n("drawings.swapAt(0, 1)") == 1, "swapAt 打乱 z-order")
+        #expect(n("drawings.sort()") == 1, "sort 打乱 z-order")
+        #expect(n("drawings.reverse()") == 1, "reverse 打乱 z-order")
+        #expect(n("drawings.replaceSubrange(0..<1, with: [x])") == 1)
+        #expect(n("drawings += [y]") == 1)
+
+        // 嵌套下标：原判据「扫到第一个 `]` 就停」在这里会漏计（内层 `]` 被误当成下标收尾，
+        // 紧邻的外层 `]` 而非 `=` 让赋值检查失败）——必须配对方括号才能算对。
+        #expect(n("drawings[idx[k]] = z") == 1,
+                "嵌套下标必须配对方括号，不能扫到第一个 `]` 就当下标结束")
+    }
 }
