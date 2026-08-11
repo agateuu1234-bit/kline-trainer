@@ -48,6 +48,31 @@ export_log_sha256, output_dir, reset_foreign_token)` 是**唯一**入口，函�
 **保留**：`try_empty_remnant_exception` / `_has_qualified_intent_row` /
 `assert_db_allowed_for_reset` / `assert_binding_scalars` —— 它们是**判定**，不是凭据。
 
+## 三之二、⚠️ `authorize_reset` 本身也要删（设计评审 R1 暴露的缺口）
+
+§三 的删除清单**漏了 `authorize_reset`**。评审那条 finding 让这个问题显形：
+它说「keep S2a to non-destructive 判定 helpers」—— 而 `authorize_reset` 不是判定 helper，
+它是「集群闸 + 走哪条路的决策 + 铸造」三件事的**封装**。把铸造删掉之后：
+
+· 它还剩「集群闸 + 决定走 remnant 还是闸 0−/0/0b」，**而这正是塌缩后要放进
+  `reset_pilot_database` 函数体里的那段次序** —— 留一个公开函数在外面，
+  就等于把缝**又留下了一半**：调用方仍可「先问一次走哪条路，再自己去 DROP」。
+· 它的返回值若改成「oid + 走了哪条路」的纯数据，那就是 `ResetGateOutcome` 换个名字。
+  数据虽不是能力，但只要 DROP 那边**信**它，缝就还在；而只要 DROP 那边**不信**
+  （自己重新推导），这个返回值就没有存在意义。**两条路都指向：删掉它。**
+
+**结论**：`authorize_reset` 一并删除。spec §4 的次序（集群闸 → 零对象例外 →
+否则闸 0−/0/0b）从「焊进一个公开函数」改为「焊进 `reset_pilot_database` 的函数体」——
+R4-F2 当初要的性质不变，只是落点从 S2a 移到 S2b。
+
+⚠️ **连带影响，别漏**：
+· S2a 的 lifecycle ⑨ ⑬ ⑰ 三档目前断言的是 `auth.via_empty_remnant`，
+  必须改成直接对判定函数断言（⑨ → `try_empty_remnant_exception` 返回非 None；
+  ⑬⑰ → `assert_db_allowed_for_reset` 不抛且返回 oid）。
+· host 里 `test_authorize_reset_*` 整族要么删、要么改挂判定函数。
+· **S2a 因此会更小**：只剩四个判定 helper + 它们的档位。这是对的 ——
+  「零破坏性能力」现在是**结构上的**，不再是「有凭据但没人消费」这种偶然。
+
 ## 四、对切分的影响（必须重划）
 
 塌缩之后 S2a/S2b 按「授权链 / DROP 执行」切**不再成立** —— 它们是同一个函数了。
@@ -63,7 +88,10 @@ export_log_sha256, output_dir, reset_foreign_token)` 是**唯一**入口，函�
 
 ## 五、Steps
 
-- [ ] 1. S2a 上删掉整套凭据机器 → verify: `_mint_authorization` 等五个符号 grep 为 0
+- [ ] 1. S2a 上删掉整套凭据机器**外加 `authorize_reset`**（见 §三之二）
+      → verify: `ResetAuthorization` / `_RESET_CAPABILITY` / `_MINTED_AUTHORIZATIONS` /
+      `_MintedFacts` / `_mint_authorization` / `ResetGateOutcome` / `authorize_reset`
+      七个符号在 `backend/` 下 grep 为 0（注释里的历史叙述除外，但不许有悬空引用）
 - [ ] 2. `assert_db_allowed_for_reset` 退回返回 `str`（撤销 R3-F1 的 `ResetGateOutcome`）
       → verify: 该函数的 `_REGISTRY_HAS_SQL` AST 反向守卫仍在且非空转
 - [ ] 3. 相关 host 测试重写（凭据族整批删除，改为对判定函数直接断言）
