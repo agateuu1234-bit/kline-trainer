@@ -27,6 +27,14 @@
 3. **`setDrawingLocked` 必须是 `internal`**：不写 `public` / `package` / `open`，也不得放进 `public extension TrainingEngine`（成员会继承访问级别）。既有四个写入 API 全是 internal。
 4. **禁止**用 `updateDrawingStyle` 改 `locked`（会被 D60 闸直接拒），也禁止在 `withStyle` 里碰 `locked`（该函数明写「本函数不碰 locked」）。
 
+### 测试落位（写错位置会「找不到符号」，别以为是别的问题）
+
+4b. 本 PR 复用的三组 helper **都是 `private`**，故新测试必须写进**同一个 suite 类型内**，不能新建文件：
+   - `makeSelected(...)` / `mapper(...)` → `DrawingEditRouterTests.swift`（`:15` / `:30`）
+   - `code(_:)` / `raw(_:)` → `DrawingInteractionUISourceGuardTests.swift`（`:14` / `:20`）
+   - `CoordinatorTestHarness` → `CoordinatorReplayPersistenceTests.swift`（`:11`）
+   反之，`SourceGuardScanner.swift` 与 `DrawingTestFixtures.swift` 里的是**顶层函数、不带 `private`**，跨文件可用 —— 新加的 helper 也**不得**加 `private`（Swift 顶层 `private` 是文件作用域，加了别的测试文件就调不到）。
+
 ### 判绿与验证纪律
 
 5. **每条闸门命令必须同时打印 branch 与 HEAD**：
@@ -750,25 +758,86 @@ git status --porcelain   # 必须为空 —— 漏 stage L13b 等于把 N-F 的�
 
 - [ ] **Step 1: 写失败测试**
 
+> **实施前置**：本文件已有私有 helper `makeSelected(price:id:lineSubType:candleIndex:)`（`:30-42`）
+> 与 `mapper(priceMin:priceMax:)`（`:15-22`），造的是「会话已开 + 选择态 + 上面板选中一条价格 50 的
+> 水平线 + mapper 已发布」。下面五条**直接用它们**，不要另造。
+
 ```swift
-@Test("L14 谓词: 无选中 → 🔒 灰")
-@MainActor func lockButtonDisabledWithoutSelection() throws { /* 构造无选中的 engine，断言 lockButtonEnabled == false */ }
+// MARK: 1b-ii PR-1 Task 6（D71）：锁定谓词与路由
 
-@Test("L15 谓词: 选中且几何可见 → 🔒 亮；锁定后仍亮（否则解不开锁）")
-@MainActor func lockButtonStaysEnabledWhenLocked() throws { /* 选中 → true；setDrawingLocked(true) → 仍 true */ }
+@Test("L14 谓词: 无选中 → 🔒 恒灰（与 🗑 同规则，与样式控件刻意不对称）")
+@MainActor func lockButtonDisabledWithoutSelection() {
+    let e = makeSelected()
+    e.drawingSession.clearSelection()
+    #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == false)
+}
 
-@Test("L16 谓词: 锁定线 → 🗑 灰、样式控件灰（复用既有 !d.locked 分量，首次真执行）")
-@MainActor func lockedLineDisablesDeleteAndStyle() throws { /* deleteButtonEnabled == false && styleControlsEnabled == false */ }
+@Test("L15 谓词: 选中且几何可见 → 🔒 亮；**锁定之后仍亮**（否则永远解不开锁）")
+@MainActor func lockButtonStaysEnabledWhenLocked() {
+    let e = makeSelected(id: "A")
+    #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == true)
+    #expect(e.setDrawingLocked(id: "A", locked: true) == true)
+    #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == true,
+            "锁定线必须仍能被选中并解锁 —— 谓词里带 !d.locked 就是这条挂掉")
+}
+
+@Test("L15b 谓词: 选中但线滑出可见价格区间 → 🔒 灰（几何门与 🗑 同待遇）")
+@MainActor func lockButtonDisabledWhenOffscreen() {
+    let e = makeSelected(price: 50)
+    #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == true)
+    e.drawingSession.setViewportMapper(mapper(priceMin: 200, priceMax: 300), panel: .upper)
+    #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == false)
+}
+
+@Test("L16 谓词: 锁定线 → 🗑 灰、样式控件灰（既有 !d.locked 分量首次真执行）")
+@MainActor func lockedLineDisablesDeleteAndStyle() {
+    let e = makeSelected(id: "A")
+    #expect(DrawingEditRouter.deleteButtonEnabled(engine: e) == true)
+    #expect(DrawingEditRouter.styleControlsEnabled(engine: e) == true)
+    #expect(e.setDrawingLocked(id: "A", locked: true) == true)
+    #expect(DrawingEditRouter.deleteButtonEnabled(engine: e) == false)
+    #expect(DrawingEditRouter.styleControlsEnabled(engine: e) == false)
+    #expect(e.setDrawingLocked(id: "A", locked: false) == true)      // 解锁后恢复
+    #expect(DrawingEditRouter.deleteButtonEnabled(engine: e) == true)
+    #expect(DrawingEditRouter.styleControlsEnabled(engine: e) == true)
+}
 
 @Test("L17 图标态: 无选中→开锁；选中未锁→开锁；选中已锁→闭锁")
-@MainActor func lockIconReflectsSelectedLine() throws { /* lockIsOn 三态 */ }
+@MainActor func lockIconReflectsSelectedLine() {
+    let e = makeSelected(id: "A")
+    #expect(DrawingEditRouter.lockIsOn(engine: e) == false)          // 选中未锁
+    #expect(e.setDrawingLocked(id: "A", locked: true) == true)
+    #expect(DrawingEditRouter.lockIsOn(engine: e) == true)           // 选中已锁
+    e.drawingSession.clearSelection()
+    #expect(DrawingEditRouter.lockIsOn(engine: e) == false)          // 无选中取中性态（开锁）
+}
 
-@Test("L18 路由: 几何不可见时 toggleLockSelected 恒 false 且不改 locked")
-@MainActor func toggleLockFailsClosedWithoutGeometry() throws { /* 不设 viewportMapper → false */ }
+@Test("L18 路由: 几何不可见时 toggleLockSelected 恒 false 且 locked 一个字都不改")
+@MainActor func toggleLockFailsClosedWithoutGeometry() {
+    let e = makeSelected(id: "A")
+    e.drawingSession.setViewportMapper(mapper(priceMin: 200, priceMax: 300), panel: .upper)
+    let rev = e.drawingsRevision
+    #expect(DrawingEditRouter.toggleLockSelected(engine: e) == false)
+    #expect(e.drawings.first(where: { $0.id == "A" })?.locked == false)
+    #expect(e.drawingsRevision == rev, "被几何门拒了却动了 revision = 白触发一次 autosave")
+}
+
+@Test("L18b 路由正向: 几何可见时 toggleLockSelected 真的翻转 locked 且 revision +1")
+@MainActor func toggleLockTogglesWhenVisible() {
+    let e = makeSelected(id: "A")
+    let rev = e.drawingsRevision
+    #expect(DrawingEditRouter.toggleLockSelected(engine: e) == true)
+    #expect(e.drawings.first(where: { $0.id == "A" })?.locked == true)
+    #expect(e.drawingsRevision == rev + 1)
+    #expect(DrawingEditRouter.toggleLockSelected(engine: e) == true)  // 再点一次 → 解锁
+    #expect(e.drawings.first(where: { $0.id == "A" })?.locked == false)
+}
 ```
 
-> ⚠️ **测试体留白是本 plan 唯一允许的一处**，因为构造「选中 + 几何可见」的 engine 需要既有 `DrawingEditRouterTests.swift` 里的 setup helper。
-> **实施者第一步必须先读该文件**，复用它现成的 `deleteButtonEnabled` 系列测试的构造方式（同文件已有「选中 + mapper + 可见」的完整搭法），**照搬那套 setup**，不要自己另造一套。
+> ⚠️ **初稿这五条的函数体只有注释**，被 codex P-R3-F1 判为 high：那样的测试**编译得过、也恒绿**，
+> 哪怕 `lockButtonEnabled` 恒 false、`toggleLockSelected` 是空实现、几何门整个删掉。
+> 这正是本仓已记的「**计划的代码块本身是恒真测试的根因**」—— 我当时的理由（「照搬既有 setup 更稳」）
+> 只适用于**搭台那一行**，不该把**断言**也留白。现在断言全部写死，只有 setup 复用既有 helper。
 
 - [ ] **Step 2: 跑测试确认失败**（`no member 'lockButtonEnabled'`）
 
@@ -822,11 +891,14 @@ cd "ios/Contracts" && echo "branch=$(git rev-parse --abbrev-ref HEAD) HEAD=$(git
 
 | 中和什么 | 应变红 |
 |---|---|
-| 给 `lockableIgnoringGeometry` 加回 `guard !d.locked` | L15（锁定后 🔒 会变灰 → 解不开锁） |
+| 给 `lockableIgnoringGeometry` 加回 `guard !d.locked` | L15（锁定后 🔒 变灰 → 解不开锁） |
 | 删掉 `editableIgnoringGeometry` 里的 `!d.locked` | L16 的样式那半 |
 | 删掉 `deletableIgnoringGeometry` 里的 `!d.locked` | L16 的 🗑 那半 |
 | `canToggleLock` 去掉几何分量 | L18 |
+| `lockButtonEnabled` 去掉几何分量 | L15b |
 | `lockIsOn` 恒返回 `false` | L17 |
+| `toggleLockSelected` 换成空实现 `return false` | **L18b**（L18 仍绿 → 正是正向档的价值） |
+| `lockButtonEnabled` 恒返回 `true` | L14 |
 
 - [ ] **Step 6: 提交 + 回头补 Task 4 的调用点守卫**
 
@@ -939,6 +1011,28 @@ func bottomBarHasExactlyThreeKeys() throws {
 }
 ```
 
+**并新增一条 `TrainingView` 接线守卫（codex P-R3-F2，high）：**
+
+```swift
+/// ⚠️ 只查 `DrawingModeBar.swift` **挡不住**「按钮长得对但根本没接上」：
+///   `DrawingBottomBar(lockEnabled: true, lockIsOn: false, onToggleLock: {}, …)` 会让上面那条
+///   三键守卫**全绿**，而屏幕上那个 🔒 恒亮、点了没反应。可用性与动作的**真相在路由里**，
+///   故必须钉死 `TrainingView` 传进去的就是路由那三个函数。
+@Test("底栏 🔒 的可用性/图标态/动作三者都必须接 DrawingEditRouter，不得传常量或空闭包")
+func trainingViewWiresLockToRouter() throws {
+    let tv = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+    #expect(tv.contains(squeeze("lockEnabled: DrawingEditRouter.lockButtonEnabled(engine: engine)")),
+            "🔒 的可用性没接路由 —— 可能传了常量")
+    #expect(tv.contains(squeeze("lockIsOn: DrawingEditRouter.lockIsOn(engine: engine)")),
+            "🔒 的图标态没接路由")
+    #expect(tv.contains(squeeze("DrawingEditRouter.toggleLockSelected(engine: engine)")),
+            "🔒 的动作没接路由 —— 可能是空闭包")
+}
+```
+
+⚠️ **本条读 `code(...)`（squeezed）是对的** —— 断言的是**代码结构**（函数调用），不是字符串字面量；
+排版/换行不影响匹配，正是 squeeze 的用途。与上一条读 `raw(...)` 的 SF Symbol 断言**刻意不同**。
+
 - [ ] **Step 3b: 修既有 `DrawingBottomBarHeightTests.swift:42` 的构造**
 
 ```swift
@@ -967,10 +1061,13 @@ xcodebuild test -scheme KlineTrainerContracts -destination 'platform=macOS,varia
 
 | 中和什么 | 应变红 |
 |---|---|
-| 把 `.disabled(!lockEnabled)` 删掉 | L19 |
-| 把 `lockIsOn ? "lock" : "lock.open"` 改成固定 `"lock"` | L19 |
-| 在底栏里加一个 `arrow.uturn.backward` 图标 | L19 |
-| 在底栏里加一句读 `drawing.locked` 的判断 | L20 |
+| 把 `.disabled(!lockEnabled)` 删掉 | 三键守卫 |
+| 把 `lockIsOn ? "lock" : "lock.open"` 改成固定 `"lock"` | 三键守卫（raw 那半） |
+| 在底栏里加一个 `arrow.uturn.backward` 图标 | 三键守卫（按钮数 3→4 + raw 否定断言） |
+| 在底栏里加一句读 `drawing.locked` 的判断 | 三键守卫（结构那半） |
+| 把 `TrainingView` 的 `lockEnabled:` 改成常量 `true` | **接线守卫**（三键守卫仍绿 —— 正是 P-R3-F2 指出的缺口） |
+| 把 `onToggleLock:` 改成空闭包 `{}` | **接线守卫** |
+| 把 `lockIsOn:` 改成常量 `false` | **接线守卫** |
 
 - [ ] **Step 7: 提交**
 
