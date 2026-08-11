@@ -14,6 +14,23 @@
 
 ---
 
+## 评审收口记录（**codex 未 approve，user override —— 不得写成「已收敛」**）
+
+**spec 阶段**：codex R1–R6 共 14 个 finding 全修 → **R7 自然 approve**，账本
+`branch:drawing-tools-p1b-1b-ii@b8683c2ba9281104ab205acf59a68c7e18209cc1`（已 Read 文件核实 `head_sha` 与当时 HEAD 逐字一致，无 focus 窄化）。
+
+**计划阶段**：P-R1–P-R5 共 11 个 finding，**前 10 个全真、全修**；**P-R5 仍是 `needs-attention`，账本未写**。
+user 于 2026-08-11 拍板 **override 收口进实施**，理由三条：
+
+1. **P-R5-F1 复述的是已接受残留**。它指的「高版本写的 `locked` 非水平线在本构建里既解不开也删不掉、且会让整局归不了档」，在 spec §4「残留②」（`:557-559`）**逐字记录在案**，连 `finalize` 会 throw 这个后果都写了 —— 而 **codex 自己在 spec 阶段 R7 approve 了含该残留的 spec**。本轮未提供任何新信息。按本仓既有判据，**重提已接受决策 = stop 信号**（1a-i R6 先例）。
+2. **它开的药方超出 PR-1 边界**：「装渲染器 / 加版本门 / 加按 id 的管理通道」属 **P1c**。PR-1 是锁定切片（~140 行），拉进跨版本恢复会直接撑破「≤3 子项 ≤500 行」，并需重开一份已 approve 的 spec。
+3. **可达性窄且自消解**：本构建**产不出**这种数据（只写 `.horizontal`），场景要求先存在一个更高版本；而那个更高版本即 P1c+，自带渲染器 → 选得中、解得开、删得掉，残留自然消失。App 未上架，不存在在野的 P1b 构建可供版本错位。
+
+⚠️ **本 override 的边界**：仅覆盖「残留② 不在 PR-1 修」。**不覆盖**实施期新发现的任何缺陷 —— 实施中 codex / 内部 review 提出的新 finding 仍须照修。
+⚠️ **PR 描述必须如实写明**：计划阶段收口时 codex verdict 为 `needs-attention`，非 approve。
+
+---
+
 ## Global Constraints
 
 以下每一条都是**所有 task 的隐含要求**，违反即判不合格。
