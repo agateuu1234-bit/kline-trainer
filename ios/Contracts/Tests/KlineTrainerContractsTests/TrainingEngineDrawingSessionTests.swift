@@ -1184,10 +1184,15 @@ struct TrainingEngineDrawingSessionTests {
         expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
 
+    /// fix round 1（控制者复核）：原版用 `appendDrawing(id: "L4")` 造非空 id 画线，对 `id: ""` 查询时
+    /// `matches` 恒为空 —— 唯一性门（`matches.count == 1`）先把它挡掉了，删掉 `guard !id.isEmpty`
+    /// 变异验证不出来（实测确认：全 5 条测试仍绿）。改用 `injectDrawingsForTesting` 塞一条 id 为空
+    /// 字符串的画线（绕过 `appendDrawing` 的 D66 非空检查）：这样 `id: ""` 在 `matches` 里能找到唯一
+    /// 匹配，唯一性门够不着这条路径，只剩 `guard !id.isEmpty` 能拒它 —— 判别力落在它本该守的那道门上。
     @Test("L4 门①: 空 id → false，什么都不动")
     @MainActor func setLockedRejectsEmptyID() throws {
         let e = TrainingEngine.preview()
-        #expect(e.appendDrawing(makeHorizontalDrawing(id: "L4")))
+        e.injectDrawingsForTesting([makeHorizontalDrawing(id: "")])
         let before = e.drawings
         let rev = e.drawingsRevision
         #expect(e.setDrawingLocked(id: "", locked: true) == false)
