@@ -65,12 +65,10 @@ from qmt_pilot_db import (INTENT_TTL_SECONDS, MARKER_PURPOSE,  # noqa: E402
                           PILOT_META_KEYS, PilotClusterBoundaryError,
                           PilotDbBoundaryError, assert_cluster_allowed,
                           assert_db_allowed_for_reuse, authorize_reset,
-                          create_pilot_database, quote_ident,
-                          reset_pilot_database, sha256_of_sql)
-# ⚠️ 私有名，**刻意**直接引用：㉜b 要断言的是「模块自己那条预检谓词看得见这条会话」，
-#    判据必须与模块真正用的那一条**逐字同源** —— 在脚本里另写一份等价 SQL，
-#    两份必然漂移，而漂移的方向恰好会让这一档失去判别力（收窄过头就测不出来了）。
-from qmt_pilot_db import _TARGET_CLIENT_SESSIONS_SQL  # noqa: E402
+                          create_pilot_database, quote_ident, sha256_of_sql)
+# ⚠️ 本片（S2a）**零破坏性能力**：`reset_pilot_database` / `_TARGET_CLIENT_SESSIONS_SQL`
+#    连同整个 `_drop_pilot_database` 都在 S2b，模块里根本没有这些符号。
+#    引用它们会让本脚本在任何档位跑起来之前就 ImportError（codex S2a-plan-R1 实测）。
 _SCHEMA_SQL = (pathlib.Path(__file__).resolve().parents[1]
                / "sql/schema.sql").read_text(encoding="utf-8")
 _PILOT_SCHEMA_SQL = (pathlib.Path(__file__).resolve().parents[1]
@@ -109,9 +107,6 @@ _NAME_RE = re.compile(r"\Akline_pilot_lifecycle[a-z0-9_]*\Z")
 #    新增场景时忘了把库名加进来，`assert_every_selfcheck_db_is_whitelisted` 会在
 #    任何连接发生之前 return 5。
 _LIFECYCLE_DBS = (
-    # ⚠️ `c4` 由 ①②③④ 用 f"{_PREFIX}c4" 拼出，**不是源码里的字面量** ——
-    #    扫描器（只认字面量）不会要求它，但清场必须认得它：
-    #    否则崩溃留下的 c4 会被当成 stranger，把整个脚本挡住（返回 4）。
     "kline_pilot_lifecycle_c4",
     "kline_pilot_lifecycle_g6",
     "kline_pilot_lifecycle_g7",
@@ -119,8 +114,6 @@ _LIFECYCLE_DBS = (
     "kline_pilot_lifecycle_g9",
     "kline_pilot_lifecycle_g9b",
     "kline_pilot_lifecycle_g9c",
-    "kline_pilot_lifecycle_t10",
-    "kline_pilot_lifecycle_t11",
     "kline_pilot_lifecycle_r17b",
     "kline_pilot_lifecycle_r22",
     "kline_pilot_lifecycle_r23",
@@ -129,13 +122,13 @@ _LIFECYCLE_DBS = (
     "kline_pilot_lifecycle_r31",
     "kline_pilot_lifecycle_r32",
     "kline_pilot_lifecycle_r32b",
-    # ⚠️ 这三个库名跟着**重编号**走（㉝/㉞/㉞b，见 `_EXPECTED_SCENARIOS` 上面那张映射表）：
-    #    库名与档号对不上时，清场日志与失败行指向的会是两个不同的东西。
     "kline_pilot_lifecycle_r33",
     "kline_pilot_lifecycle_r34",
     "kline_pilot_lifecycle_r34b",
     "kline_pilot_lifecycle_r35",
     "kline_pilot_lifecycle_s15",
+    "kline_pilot_lifecycle_t10",
+    "kline_pilot_lifecycle_t11",
     "kline_pilot_lifecycle_x18",
     "kline_pilot_lifecycle_x19",
     "kline_pilot_lifecycle_x20",
@@ -183,10 +176,9 @@ _OWNED_EXTRA_DBS = (_UNRELATED_DB, _LIKE_DECOY_DB)
 #      · 旧 ㉗b（连 db_oid=NULL 的陈旧凭据也清） → 本脚本 **㉞b**
 #    ㉟ 是本片新增的（R15-F1 的语义证明），旧分支上没有。
 #    ⚠️ S3 搬「孤儿删除锁内原子求值」时同样撞号（旧 ㉖）—— 那一档届时另编，别沿用旧号。
-_EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑥", "⑦", "⑧", "⑨", "⑨b", "⑨c",
-                       "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑰b",
-                       "⑱", "⑲", "⑳", "⑳b", "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗",
-                       "㉘", "㉛", "㉜", "㉜b", "㉝", "㉞", "㉞b", "㉟")
+_EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑥", "⑦", "⑧", "⑨", "⑨b",
+                       "⑨c", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑰b", "⑱",
+                       "⑲", "⑳", "⑳b", "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉛", "㉝")
 
 
 async def _connect(dsn: str) -> asyncpg.Connection:
@@ -558,30 +550,10 @@ async def main() -> int:
                   f"空残骸的 --reset 被拒了：{type(exc).__name__}: {exc}")
     finally:
         await maint.close()
-
-    # 真的把它 DROP 掉并重建 —— 「声称的恢复能力必须逐条验到 DROP 真的能执行为止」
-    maint = await _maintenance(base_dsn, seed=seed9)
-    try:
-        try:
-            await reset_pilot_database(maint, connect=connect_peer, db_name=db9,
-                                       seed=seed9, **_RESET_ARGS)
-        except Exception as exc:
-            check(False, "⑨ 空残骸真的被 DROP 掉了",
-                  f"reset 抛了：{type(exc).__name__}: {exc}")
-        else:
-            check(not await _database_exists(maint, db9), "⑨ 空残骸真的被 DROP 掉了")
-    finally:
-        await maint.close()
-    try:
-        rebuilt = await _build(base_dsn, seed9, connect_peer)
-    except Exception as exc:
-        check(False, "⑨ DROP 之后能正常重建", f"重建抛了：{type(exc).__name__}: {exc}")
-    else:
-        conn = await _connect(base_dsn)
-        try:
-            check(await _database_exists(conn, rebuilt), "⑨ DROP 之后能正常重建")
-        finally:
-            await conn.close()
+    # ⚠️ 「真的 DROP 掉 + 重建」那半**在 S2b**（它要 `reset_pilot_database`，
+    #    而本片零破坏性能力、模块里根本没有那个符号）。
+    #    ⚠️ S2b 落地时必须补回来：本片只证明到「授权发得出来」为止，
+    #    证明不了「DROP 真的执行得下去」——那正是 R55-F1 要钉的东西。
     await harness.drop_database(base_dsn, db9)
 
 
@@ -760,29 +732,29 @@ async def main() -> int:
           f"令牌 {right_token!r} 漏进了：{[m for m in leaked if right_token in m]}")
 
     scenario("⑬")
-    print("⑬ 带**正确**令牌 → 必须真的 DROP 掉")
+    print("⑬ 带**正确**令牌 → 授权必须放行（**唯一**证明令牌真的解锁了的一档）")
+    # ⚠️ 少了这一档，实现可以「一律拒」而 ⑩⑪⑫ 全绿 —— 那是把 R55-F1 的锁死钉进 CI。
+    # ⚠️ 「真的 DROP 掉」那半**在 S2b**：本片零破坏性能力，只证明到「授权发得出来」。
     maint = await _maintenance(base_dsn, seed=seed11)
     try:
         try:
-            await reset_pilot_database(maint, connect=connect_peer, db_name=db11,
-                                       seed=seed11,
-                                       **{**_RESET_ARGS,
-                                          "reset_foreign_token": right_token})
+            auth13 = await authorize_reset(
+                maint, connect=connect_peer, db_name=db11, seed=seed11,
+                **{**_RESET_ARGS, "reset_foreign_token": right_token})
+            check(auth13.via_empty_remnant is False,
+                  "⑬ 正确令牌 → 授权来自闸 0−/0/0b（不是零对象例外）",
+                  f"via_empty_remnant={auth13.via_empty_remnant}")
         except Exception as exc:
-            check(False, "⑬ 正确令牌必须解锁 DROP",
+            check(False, "⑬ 正确令牌必须解锁授权",
                   f"竟然被拒：{type(exc).__name__}: {exc}")
-        else:
-            check(not await _database_exists(maint, db11),
-                  "⑬ 正确令牌 → 目标库真的被 DROP 掉了")
+        check(await _database_exists(maint, db11),
+              "⑬ 本片不销毁：授权发出后目标库仍然存在（DROP 归 S2b）")
     finally:
         await maint.close()
     await harness.drop_database(base_dsn, db11)
 
 
     # ── ⑮⑯⑰ state 流转 + initializing **两向** ──────────────────────────
-    #    ⚠️ 反向钉 ⑰（同一个 initializing 库走 --reset 必须能 DROP + 重建）**在 S2** ——
-    #       它要 `reset_pilot_database`。⚠️ S2 落地时必须补回来：少了它，
-    #       实现可以「一律拒」而 ⑯ 照样绿，那就是把 R55-F1 的锁死钉进 CI。
     #    ⚠️ 只验 state 的流转与复用方向 ——
     #       **建库两阶段的崩溃恢复归 `verify_pilot_two_phase_create.py`，本脚本不重复**
     #       （spec §6.2 的分工硬约束）。
@@ -831,32 +803,24 @@ async def main() -> int:
         await maint.close()
 
     scenario("⑰")
-    print("⑰ 反向钉：同一个 initializing 库走 --reset → 必须 DROP + 重建")
+    print("⑰ 反向钉：同一个 initializing 库走 --reset → 授权必须放行")
     # spec R55-F1：--reset 时归属闸与绑定闸所需的键在阶段 1 就已写入，
     # 故它**能被正常清掉重来**。把 state 判定塞进 DROP 路径就是那个锁死。
+    # ⚠️ 少了这一档，实现可以「一律拒」而 ⑯ 照样绿。
+    # ⚠️ 「真的 DROP + 重建」那半**在 S2b**：本片零破坏性能力。
     maint = await _maintenance(base_dsn, seed=seed15)
     try:
         try:
-            await reset_pilot_database(maint, connect=connect_peer, db_name=db15,
-                                       seed=seed15, **_RESET_ARGS)
+            auth17 = await authorize_reset(maint, connect=connect_peer, db_name=db15,
+                                           seed=seed15, **_RESET_ARGS)
+            check(auth17.via_empty_remnant is False,
+                  "⑰ initializing 的库必须能拿到 --reset 授权",
+                  f"via_empty_remnant={auth17.via_empty_remnant}")
         except Exception as exc:
-            check(False, "⑰ initializing 的库必须能被 --reset 清掉",
+            check(False, "⑰ initializing 的库必须能拿到 --reset 授权",
                   f"竟然被拒：{type(exc).__name__}: {exc}")
-        else:
-            check(not await _database_exists(maint, db15),
-                  "⑰ initializing 的库真的被 DROP 掉了")
     finally:
         await maint.close()
-    try:
-        await _build(base_dsn, seed15, connect_peer)
-    except Exception as exc:
-        check(False, "⑰ DROP 之后能正常重建", f"重建抛了：{type(exc).__name__}: {exc}")
-    else:
-        conn = await _connect(base_dsn)
-        try:
-            check(await _database_exists(conn, db15), "⑰ DROP 之后能正常重建")
-        finally:
-            await conn.close()
     await harness.drop_database(base_dsn, db15)
 
     # ── ⑰b 健康 ready 库：整条复用闸**零异常全过** ──────────────────────
@@ -1167,160 +1131,6 @@ async def main() -> int:
         await maint.close()
     await harness.drop_database(base_dsn, db33)
 
-    # ── ㉞ DROP 成功之后必须清掉那条凭据（2b R4-F1）────────────────────
-    #    不清的话：那一行仍新鲜且已确认、只是指向一个已消失的实例，
-    #    而重建用的是**新的 run_id** → 接管条件不成立 → `intent_row_conflict`，
-    #    于是 `--reset` 把库删掉了却重建不了。
-    scenario("㉞")
-    print("㉞ reset 之后凭据被清掉，且能用**新 run_id** 立刻重建")
-    seed34 = "lifecycle_r34"
-    db34 = f"kline_pilot_{seed34}"
-    maint = await _maintenance(base_dsn, seed=seed34)
-    try:
-        # ⚠️ **夹具不能用 `_build`**：`create_pilot_database` 跑成功时自己就把 intent 行
-        #    清掉了（`_CLEAR_INTENT_SQL`），于是「事后 0 条」恒真、这一档整个是空的
-        #    （本轮变异当场抓到：把 DROP 后的清理整条删掉，㉞ 照样绿）。
-        #    R4-F1 要防的是**零对象例外那条路**：崩在写 pilot_meta 之前的残骸，
-        #    它那行凭据仍然新鲜且已确认，只有 DROP 之后的清理能收掉。
-        await harness.drop_database(base_dsn, db34)
-        await maint.execute("CREATE DATABASE " + quote_ident(db34))
-        await maint.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db34)
-        await maint.execute(
-            "INSERT INTO public.pilot_create_intent"
-            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
-            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
-            "  WHERE d.datname::text = $1",
-            db34, seed34, _CREATED_AT, f"lifecycle-{seed34}")
-        check(1 == await maint.fetchval(
-            "SELECT count(*) FROM public.pilot_create_intent WHERE dbname = $1", db34),
-            "㉞ 前置：残骸的 intent 凭据已就位")
-        try:
-            await reset_pilot_database(maint, connect=connect_peer, db_name=db34,
-                                       seed=seed34, **_RESET_ARGS)
-        except Exception as exc:
-            check(False, "㉞ 前置：reset 必须成功", f"抛了：{type(exc).__name__}: {exc}")
-        left = await maint.fetchval(
-            "SELECT count(*) FROM public.pilot_create_intent WHERE dbname = $1", db34)
-        check(left == 0, "㉞ DROP 之后那条 intent 凭据被清掉了", f"事后仍有 {left} 条")
-        # ⚠️ **必须换 run_id**：沿用同一个 run_id 时接管条件本来就成立，
-        #    这一档会变成恒真。
-        try:
-            await create_pilot_database(maint, connect=connect_peer, db_name=db34,
-                                        seed=seed34, run_id=f"lifecycle-{seed34}-again",
-                                        **_BUILD_ARGS)
-            check(True, "㉞ 紧接着用**新 run_id** 重建成功（没被陈旧凭据卡住）")
-        except Exception as exc:
-            check(False, "㉞ 紧接着用**新 run_id** 重建成功（没被陈旧凭据卡住）",
-                  f"重建抛了：{type(exc).__name__}: {exc}")
-    finally:
-        await maint.close()
-    await harness.drop_database(base_dsn, db34)
-
-    # ── ㉞b DROP 之后必须连**指不到活实例**的凭据一起清（codex 4a-2 R11-F1）──
-    #    `pilot_create_intent.db_oid` 可空，而 intent 行写在 `CREATE DATABASE` **之前**
-    #    —— 那一刻它就是 NULL。一次失败的建库若连自己的撤回也失败（连接断/进程被杀），
-    #    就留下一行**新鲜、未确认、db_oid = NULL** 的行。
-    #    只按「被销毁的那个 oid」清理时 NULL 匹配不上 → 该行留存 →
-    #    用**新 run_id** 重建时接管条件（同 run_id 或超 TTL）都不成立 →
-    #    `intent_row_conflict`：**破坏性 reset 之后重建不了**，要等 TTL 或人工。
-    #    ⚠️ ㉞ 造的是零对象例外那条路的残骸凭据（db_oid 绑对），证伪不了这一档。
-    scenario("㉞b")
-    print("㉞b reset 之后连 db_oid=NULL 的陈旧凭据也要清掉，否则重建被卡死")
-    seed34b = "lifecycle_r34b"
-    db34b = await _build(base_dsn, seed34b, connect_peer)
-    maint = await _maintenance(base_dsn, seed=seed34b)
-    try:
-        # 建库成功时自己的凭据已被清掉；这里注入「上一次失败的建库留下的」那种行：
-        # 新鲜、未确认、db_oid = NULL、**且 run_id 与后面的重建不同**。
-        await maint.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db34b)
-        await maint.execute(
-            "INSERT INTO public.pilot_create_intent"
-            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
-            " VALUES ($1, $2, $3, $4, false, NULL)",
-            db34b, seed34b, _CREATED_AT, f"lifecycle-{seed34b}-crashed")
-        stale = await maint.fetchrow(
-            "SELECT create_confirmed, db_oid IS NULL AS oid_is_null"
-            "  FROM public.pilot_create_intent WHERE dbname = $1", db34b)
-        check(stale is not None and not stale["create_confirmed"] and stale["oid_is_null"],
-              "㉞b 前置：陈旧的「未确认 + db_oid 为 NULL」凭据已就位",
-              f"实得 {dict(stale) if stale else None}")
-        try:
-            await reset_pilot_database(maint, connect=connect_peer, db_name=db34b,
-                                       seed=seed34b, **_RESET_ARGS)
-        except Exception as exc:
-            check(False, "㉞b 前置：reset 必须成功", f"抛了：{type(exc).__name__}: {exc}")
-        left = await maint.fetchval(
-            "SELECT count(*) FROM public.pilot_create_intent WHERE dbname = $1", db34b)
-        check(left == 0,
-              "㉞b DROP 之后那条 db_oid=NULL 的陈旧凭据也被清掉了",
-              f"事后仍有 {left} 条 —— 它会把重建卡成 intent_row_conflict")
-        # 要害：紧接着用**新 run_id** 重建必须成功。
-        try:
-            await create_pilot_database(maint, connect=connect_peer, db_name=db34b,
-                                        seed=seed34b,
-                                        run_id=f"lifecycle-{seed34b}-rebuild",
-                                        **_BUILD_ARGS)
-            check(True, "㉞b 紧接着用**新 run_id** 重建成功（没被陈旧凭据卡死）")
-        except Exception as exc:
-            check(False, "㉞b 紧接着用**新 run_id** 重建成功（没被陈旧凭据卡死）",
-                  f"重建抛了：{type(exc).__name__}: {exc}")
-    finally:
-        await maint.close()
-    await harness.drop_database(base_dsn, db34b)
-
-    # ── ㉘ 零对象例外的【绝对空】复查必须**紧贴 DROP**（2b R2-F1）────────
-    #    授权理由就是「这个库当时是空的」，而那是一个**会过期的事实**。
-    #    这里在 DROP 前的那次复查连进目标库**之前**往库里建一张表，
-    #    模拟 `pg_restore --create` 或人工建表挤进那个窗口。
-    scenario("㉘")
-    print("㉘ 授权之后、DROP 之前库变得不空 → 必须拒绝 DROP")
-    seed28 = "lifecycle_r28"
-    db28 = f"kline_pilot_{seed28}"
-    # ⚠️ 只数**连向目标库**的连接：集群闸 (ii) 会跳过目标库，故连它的只有
-    #    `_probe_absolutely_empty` —— 授权里两次（初判 + 紧贴复查），
-    #    `_drop_pilot_database` 里第三次。第 3 次就是 DROP 前的那一次。
-    probe_calls = {"n": 0}
-    injected: list[int] = []
-
-    async def _connect_with_injection(name: str):
-        if name == db28:
-            probe_calls["n"] += 1
-            if probe_calls["n"] == 3:
-                await _in_db(base_dsn, db28,
-                             "CREATE TABLE public.zzqmtverify_squatter (id int)")
-                injected.append(probe_calls["n"])
-        return await connect_peer(name)
-
-    maint = await _maintenance(base_dsn, seed=seed28)
-    try:
-        await harness.drop_database(base_dsn, db28)
-        await maint.execute("CREATE DATABASE " + quote_ident(db28))
-        await maint.execute(
-            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db28)
-        await maint.execute(
-            "INSERT INTO public.pilot_create_intent"
-            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
-            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
-            "  WHERE d.datname::text = $1",
-            db28, seed28, _CREATED_AT, f"lifecycle-{seed28}")
-        try:
-            await reset_pilot_database(maint, connect=_connect_with_injection,
-                                       db_name=db28, seed=seed28, **_RESET_ARGS)
-            check(False, "㉘ 窗口里变得不空的库必须拒绝 DROP", "竟然删掉了")
-        except PilotDbBoundaryError as exc:
-            check(exc.code == "not_owned",
-                  "㉘ 窗口里变得不空 → 拒绝 DROP（not_owned）", f"实得 {exc.code}：{exc}")
-        # 同 ㉖：先证明注入真的插进了那个窗口，否则下面两条是恒真的。
-        check(injected == [3],
-              "㉘ 前置：建表确实插在 DROP 前那次复查之前",
-              f"连向目标库的次数 = {probe_calls['n']}，注入点 = {injected}")
-        check(await _database_exists(maint, db28), "㉘ 拒绝之后目标库仍然存在")
-    finally:
-        await maint.close()
-    await harness.drop_database(base_dsn, db28)
-
     # ── ㉛ 【绝对空】必须看见物化视图（spec §9-1a2）────────────────────
     #    物化视图**存着真数据**，而按 information_schema 或只数普通表的实现看不见它。
     scenario("㉛")
@@ -1367,158 +1177,6 @@ async def main() -> int:
     finally:
         await maint.close()
     await harness.drop_database(base_dsn, db31)
-
-    # ── ㉜ 集群闸遍历过目标库之后**立刻** DROP 必须成功（spec §4 规定 4）──
-    #    集群闸 (ii) 与闸 0−/0/0b 都会连进目标库（它自己就匹配 kline_pilot_*）。
-    #    只要有一条连接活着，随后的 DROP 就会撞 `is being accessed by other users`——
-    #    而 reset 是陈旧 schema 库的唯一出路。这一档钉的是「读一律短连接」真做到了。
-    #
-    #    ⚠️ **变异验证的如实结论（别当成「这一档管着 _close_quietly」）**：
-    #       · 把闸 (ii) 的 `await _close_quietly(other, name)` 换成 `pass` —— **变异存活**。
-    #         CPython 的引用计数会在 `other` 出作用域时立刻回收并断开，
-    #         「忘了关」在这个解释器上根本产生不出滞留会话。
-    #       · 换成「不关且**持住引用**」—— 滞留会话真的出现了，但它在 **④ 的清场**
-    #         （本脚本第一次 DROP）就抛 ObjectInUseError 把脚本打死，远早于本档。
-    #         凡是走 reset 的档（⑨⑬⑰㉗㉘…）都排在本档之前，
-    #         故**按构造本档不可能是第一个观测点**。
-    #       结论：该性质确实被套件捕获，只是首个观测点不是这里。本档的独立价值是
-    #       **正向钉**——防「实现为了省事把 reset 一律拒掉」那一类回归（与 ⑨/⑰ 同族）。
-    #       **不为它编一个够得到的变异**：编出来的只会是假覆盖。
-    scenario("㉜")
-    print("㉜ 集群闸读过目标库之后立刻 --reset → 必须成功 DROP + 重建")
-    seed32 = "lifecycle_r32"
-    db32 = await _build(base_dsn, seed32, connect_peer)
-    maint = await _maintenance(base_dsn, seed=seed32)
-    try:
-        # 先让集群闸真的连进目标库读一遍（target_db 传 None，目标库不被跳过）。
-        try:
-            await assert_cluster_allowed(maint, connect=connect_peer, target_db=None)
-            check(True, "㉜ 前置：集群闸把目标库当同侪库读过一遍")
-        except Exception as exc:
-            check(False, "㉜ 前置：集群闸把目标库当同侪库读过一遍",
-                  f"集群闸抛了：{type(exc).__name__}: {exc}")
-        try:
-            await reset_pilot_database(maint, connect=connect_peer, db_name=db32,
-                                       seed=seed32, **_RESET_ARGS)
-        except Exception as exc:
-            # ⚠️ 占用者只报 pid/usename 时没法判断该拿它怎么办。把 `backend_type` 一起打出来：
-            #    `client backend` = 真有人连着（本脚本或别人）；
-            #    `autovacuum worker` 之类 = 非客户端后端，操作者根本「让它自行退出」不了。
-            who = [dict(r) for r in await maint.fetch(
-                "SELECT pid, usename, application_name, backend_type, state"
-                "  FROM pg_stat_activity WHERE datname = $1", db32)]
-            check(False, "㉜ 紧接着的 DROP 必须成功（没有被自己的连接顶住）",
-                  f"reset 抛了：{type(exc).__name__}: {exc}；此刻占用者={who}")
-        else:
-            check(not await _database_exists(maint, db32),
-                  "㉜ 紧接着的 DROP 必须成功（没有被自己的连接顶住）")
-    finally:
-        await maint.close()
-    try:
-        await _build(base_dsn, seed32, connect_peer)
-    except Exception as exc:
-        check(False, "㉜ DROP 之后能正常重建", f"重建抛了：{type(exc).__name__}: {exc}")
-    else:
-        conn = await _connect(base_dsn)
-        try:
-            check(await _database_exists(conn, db32), "㉜ DROP 之后能正常重建")
-        finally:
-            await conn.close()
-    await harness.drop_database(base_dsn, db32)
-
-    # ── ㉜b **反向**：目标库上有真客户端连接时，DROP 预检必须触发 ──────────
-    #    ⚠️ 这一档存在的唯一理由是「防止 ㉜ 那条修复收窄过头」：
-    #       预检从「数 pg_stat_activity 全部行」收窄成「只数 backend_type =
-    #       'client backend'」之后，一个写错的过滤条件会让它**永不触发** ——
-    #       而它是 DROP 之前唯一一道「别人还连着」的早失败闸。
-    #    ⚠️ 「不数 autovacuum worker」那一向**没有常驻档**：逼出一个 autovacuum worker
-    #       要改集群的 autovacuum_naptime（ALTER SYSTEM，持久且全局），
-    #       对一个验收脚本太侵入。该向由一次性真 PG 实验坐实并记进计划，如实登记。
-    scenario("㉜b")
-    print("㉜b 目标库上有真客户端连接 → reset 预检必须报 target_db_in_use")
-    seed32b = "lifecycle_r32b"
-    db32b = await _build(base_dsn, seed32b, connect_peer)
-    squatter = await asyncpg.connect(harness.db_dsn(base_dsn, db32b))
-    maint = await _maintenance(base_dsn, seed=seed32b)
-    try:
-        # ⚠️ 断言的是**模块自己那条预检谓词**，不是脚本另写的等价查询 ——
-        #    过滤条件写错（收窄过头）时只有前者会变。
-        seen = await maint.fetch(_TARGET_CLIENT_SESSIONS_SQL, db32b)
-        check(len(seen) == 1,
-              "㉜b 前置：**模块的预检谓词**确实看得见那条客户端会话（没收窄过头）",
-              f"实得 {[dict(r) for r in seen]}")
-        try:
-            await reset_pilot_database(maint, connect=connect_peer, db_name=db32b,
-                                       seed=seed32b, **_RESET_ARGS)
-            check(False, "㉜b 有客户端连接时必须拒绝 DROP", "竟然删掉了")
-        except PilotDbBoundaryError as exc:
-            check(exc.code == "target_db_in_use",
-                  "㉜b 有客户端连接 → target_db_in_use", f"实得 {exc.code}：{exc}")
-        check(await _database_exists(maint, db32b), "㉜b 拒绝之后目标库仍然存在")
-    finally:
-        await squatter.close()
-        await maint.close()
-    await harness.drop_database(base_dsn, db32b)
-
-    # ── ㉟ **正常路**的授权前提也会在窗口里失效（codex 4a-2 R15-F1，high）────────
-    #    零对象例外那条路的「紧贴复查」由 ㉘ 钉着；本档钉的是**另一条路** ——
-    #    走闸 0−/0/0b 拿到授权之后、DROP 之前，把 `pilot_meta.seed` 改掉。
-    #    上一版的封锁块只包了 remnant 那条，正常路一条复验都没有：oid 没变、
-    #    会话数为 0，于是一个**已经不归本次 seed** 的库照样被删掉。
-    #
-    #    注入点的算法（不是猜的，按代码路径数出来的）：走 `reset_pilot_database`
-    #    的正常路一共连**三次**目标库 ——
-    #      1 `try_empty_remnant_exception` 的【绝对空】初判（库非空 → 例外不适用）
-    #      2 `assert_db_allowed_for_reset` 的 `_open_target`（读 pilot_meta 发授权）
-    #      3 `_drop_pilot_database` 持住的那条（**本档要打的就是这次之前**）
-    #    集群闸 (ii) 会跳过目标库自己，故不计数。
-    scenario("㉟")
-    print("㉟ 正常 reset 授权之后、DROP 之前归属被改掉 → 必须拒绝且库仍在")
-    seed35 = "lifecycle_r35"
-    db35 = await _build(base_dsn, seed35, connect_peer)
-    conn = await _connect(base_dsn)
-    try:
-        limit_before = await conn.fetchval(
-            "SELECT datconnlimit FROM pg_database WHERE datname = $1", db35)
-    finally:
-        await conn.close()
-    calls35 = {"n": 0}
-    injected35: list[int] = []
-
-    async def _connect_tampering(name: str):
-        if name == db35:
-            calls35["n"] += 1
-            if calls35["n"] == 3:
-                await _in_db(base_dsn, db35,
-                             "UPDATE public.pilot_meta SET value = 'someone_else'"
-                             " WHERE key = 'seed'")
-                injected35.append(calls35["n"])
-        return await connect_peer(name)
-
-    maint = await _maintenance(base_dsn, seed=seed35)
-    try:
-        try:
-            await reset_pilot_database(maint, connect=_connect_tampering,
-                                       db_name=db35, seed=seed35, **_RESET_ARGS)
-            check(False, "㉟ 归属在窗口里被改掉的库必须拒绝 DROP", "竟然删掉了")
-        except PilotDbBoundaryError as exc:
-            check(exc.code == "not_owned",
-                  "㉟ 窗口里归属被改 → 拒绝 DROP（not_owned）", f"实得 {exc.code}：{exc}")
-        # ⚠️ 先证明注入**真的**插进了那个窗口，否则上面那条是恒真的
-        #    （与 ㉘ 同一条纪律：夹具没生效时「拒了」也可能是别的原因）。
-        check(injected35 == [3],
-              "㉟ 前置：改归属确实插在 DROP 前那次连接之前",
-              f"连向目标库的次数 = {calls35['n']}，注入点 = {injected35}")
-        check(await _database_exists(maint, db35), "㉟ 拒绝之后目标库仍然存在")
-        limit_after = await maint.fetchval(
-            "SELECT datconnlimit FROM pg_database WHERE datname = $1", db35)
-        check(limit_after == limit_before,
-              "㉟ 拒绝之后连接数上限被还回原值（没把库留在半封锁状态）",
-              f"封锁前 {limit_before!r}，事后 {limit_after!r}")
-    finally:
-        await maint.close()
-    await harness.drop_database(base_dsn, db35)
-
 
     # ── 收尾 ────────────────────────────────────────────────────────────
     conn = await _connect(base_dsn)
