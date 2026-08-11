@@ -260,6 +260,9 @@ public struct TrainingView: View {
             if showsTradeButtons {
                 if isDrawingActive {
                     DrawingBottomBar(typeRowExpanded: $typeRowExpanded,
+                                     lockEnabled: DrawingEditRouter.lockButtonEnabled(engine: engine),
+                                     lockIsOn: DrawingEditRouter.lockIsOn(engine: engine),
+                                     onToggleLock: { DrawingEditRouter.toggleLockSelected(engine: engine) },
                                      deleteEnabled: DrawingEditRouter.deleteButtonEnabled(engine: engine),
                                      onDelete: { confirmingDeleteDrawing = true })
                 } else {
