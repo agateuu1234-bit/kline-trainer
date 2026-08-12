@@ -2376,7 +2376,7 @@ def _assert_reset_foreign_token(meta: dict[str, str],
 #    陈旧的行会为那个全新的、不是我们建的库背书 —— 而它是 DROP 授权（O4-R21-C1 / R25-C1）。
 _READ_INTENT_SQL = """
 SELECT i.seed, i.create_confirmed, i.db_oid::text AS intent_db_oid,
-       EXTRACT(EPOCH FROM (now() - i.inserted_at))::bigint AS age_seconds
+       EXTRACT(EPOCH FROM (now() - i.inserted_at)) AS age_seconds
   FROM public.pilot_create_intent i WHERE i.dbname = $1
 """
 
@@ -2405,12 +2405,23 @@ async def _has_qualified_intent_row(maint_conn, db_name: str, *, seed: str, oid:
          在一条不可逆的路径上，宁可暂时拒绝。
     ⚠️ 抢占那一侧（`_INSERT_INTENT_SQL` 的 `>= $5`）不用改：负年龄在那里的效果是
        「抢不走这一行」，本来就是 fail-closed 的方向。两侧的不对称是**有意的**。
+
+    ⚠️ **年龄两侧都不许取整**（codex S2a-R3-F1，真 PG 15 实测）：
+       上一版在 SQL 里写 `::bigint`、在 Python 里再套一层 `int()` ——
+       `::bigint` 是**四舍五入不是截断**（`(-0.1)::bigint = 0`），`int(-0.1)` 也是 0。
+       于是一行「比 `now()` 早不到半秒」的**未来** `inserted_at` 会被算成 age 0，
+       原样过掉上面那条下界检查 —— 下界这条修复整个被抹掉。
+       两层取整都已去掉：SQL 返回原始的分数秒（PG 15 上是 `numeric` → `Decimal`），
+       Python 直接比较。
+       ⚠️ 安全增量诚实说只有半秒（真正危险的是**很远**的未来值，那一档一直判得掉）；
+          修它的理由是**代码要和自己写下的保证一致** —— 本仓反复栽的
+          「宣称的保证 > 实际提供的保证」正是这一类。
     """
     rows = await maint_conn.fetch(_READ_INTENT_SQL, db_name)
     return any(r["seed"] == seed
                and r["create_confirmed"]
                and r["intent_db_oid"] == oid
-               and 0 <= int(r["age_seconds"]) < INTENT_TTL_SECONDS
+               and 0 <= r["age_seconds"] < INTENT_TTL_SECONDS
                for r in rows)
 
 

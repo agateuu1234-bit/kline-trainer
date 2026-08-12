@@ -65,7 +65,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import _pilot_verify_harness as harness  # noqa: E402
 from qmt_pilot_db import (INTENT_TTL_SECONDS, MARKER_PURPOSE,  # noqa: E402
                           PILOT_META_KEYS, PilotClusterBoundaryError,
-                          PilotDbBoundaryError, assert_cluster_allowed,
+                          PilotDbBoundaryError, _READ_INTENT_SQL,
+                          assert_cluster_allowed,
                           assert_db_allowed_for_reset,
                           assert_db_allowed_for_reuse,
                           create_pilot_database, quote_ident, sha256_of_sql,
@@ -1227,6 +1228,31 @@ async def main() -> int:
             check(exc.code == "not_owned",
                   "㉝b 例外不适用 → 落到闸 0− 判 not_owned", f"实得 {exc.code}：{exc}")
         check(await _database_exists(maint, db33b), "㉝b 拒绝之后那个空库仍然存在")
+
+        # ── ㉝b 第二段：**亚秒级**的未来时间戳，符号不许被取整抹掉（codex S2a-R3-F1）──
+        # ⚠️ 上面那半用的是「TTL + 1 小时」的未来值 —— 它大到**整数判据也拦得住**，
+        #    故对「SQL 里 `::bigint` 四舍五入把 −0.1 抹成 0」这条**零判别力**。
+        #    真 PG 15 实测：`(-0.1)::bigint = 0`、`(-0.4)::bigint = 0`。
+        # ⚠️ 判据钉的是**模块自己那条 SQL 返回了什么**，不是脚本另写一条等价查询 ——
+        #    取整被加回去时只有前者会变（与 ㉜b 断言模块预检谓词同一条纪律）。
+        # ⚠️ 端到端那一半在这里**故意不做**：整条闸序要跑好几百毫秒，
+        #    一个 400ms 的未来值到那时早就变成过去了 —— 那样的档是 flake，不是覆盖。
+        #    端到端方向由上面那半（TTL+1h）承担，本段只钉「符号活着走出 SQL」。
+        await maint.execute(
+            "UPDATE public.pilot_create_intent"
+            "   SET inserted_at = now() + interval '400 milliseconds'"
+            " WHERE dbname = $1", db33b)
+        sub = await maint.fetch(_READ_INTENT_SQL, db33b)
+        sub_age = sub[0]["age_seconds"] if sub else None
+        check(sub_age is not None and sub_age < 0,
+              "㉝b2 400ms 的未来 inserted_at → **模块的 SQL** 返回的年龄仍是负数",
+              f"实得 age_seconds={sub_age!r}（0 = 被 ::bigint 四舍五入抹掉了符号，"
+              f"下界那条修复就此失效）")
+        check(sub_age is not None and -1 < sub_age < 0,
+              "㉝b2 而且它是**分数秒**（证明确实取到了亚秒精度，不是整秒 −1）",
+              f"实得 age_seconds={sub_age!r}")
+        await maint.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db33b)
     finally:
         await maint.close()
     await harness.drop_database(base_dsn, db33b)

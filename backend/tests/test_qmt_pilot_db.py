@@ -4529,6 +4529,8 @@ def test_remnant_exception_requires_intent_row():
     ({"age_seconds": INTENT_TTL_SECONDS + 1}, "远超 INTENT_TTL"),
     ({"age_seconds": -1}, "inserted_at 在**未来**（codex S2a-R2-F2）"),
     ({"age_seconds": -INTENT_TTL_SECONDS * 365}, "inserted_at 在很远的未来"),
+    ({"age_seconds": -0.1}, "inserted_at 在**亚秒级**未来（codex S2a-R3-F1）"),
+    ({"age_seconds": -0.4999}, "亚秒级未来的上沿（四舍五入会把它抹成 0）"),
 ])
 def test_remnant_exception_rejects_unqualified_intent_row(over, label):
     """第 6 条的四个子判据**逐条**都要有判别力。
@@ -4548,6 +4550,26 @@ def test_remnant_exception_ttl_boundary_is_strictly_less_than():
     """恰好差 1 秒仍算新鲜 —— 边界方向钉住，免得 `<` 与 `<=` 互换而无人察觉。"""
     maint = _RemnantMaint(intent_rows=_intent(age_seconds=INTENT_TTL_SECONDS - 1))
     assert asyncio.run(_remnant(maint, _EmptyOnProbe())) == "16400"
+
+
+def test_remnant_exception_age_predicate_never_rounds_away_the_sign():
+    """机械守卫：判据两侧都不许取整（codex S2a-R3-F1）。
+
+    ⚠️ 这条洞**同时**藏在两层，只堵一层没用：
+      · SQL 的 `::bigint` 是四舍五入（真 PG 15 实测 `(-0.1)::bigint = 0`）；
+      · Python 的 `int(-0.1)` 也是 0。
+    ⚠️ 判据走 AST 的调用节点，不看源码文本：注释里提到 `int(` 会让文本判据恒真。
+    """
+    import inspect
+    import textwrap
+    import qmt_pilot_db as m
+    tree = ast.parse(textwrap.dedent(inspect.getsource(m._has_qualified_intent_row)))
+    calls = [n.func.id for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    assert calls, "扫描器一个调用都没解析到 —— 下面那条会恒真"
+    for rounding in ("int", "round"):
+        assert rounding not in calls, \
+            f"年龄在 Python 里被 {rounding}() 取整了 —— 亚秒级未来时间戳的符号会被抹掉"
 
 
 def test_remnant_exception_accepts_a_row_inserted_this_instant():
@@ -4735,6 +4757,13 @@ def test_remnant_exception_read_intent_freshness_uses_the_database_clock():
     assert "public.pilot_create_intent" in sql, "表引用必须 public. 限定（O4-R4-C1）"
     assert "i.create_confirmed" in sql and "i.db_oid" in sql, \
         "第 6 条的确认位与实例绑定必须由这条 SQL 取出来"
+    # ⚠️ **年龄不许在 SQL 里取整**（codex S2a-R3-F1，真 PG 15 实测）：
+    #    `::bigint` 是**四舍五入**不是截断 —— `(-0.1)::bigint = 0`。
+    #    于是一行「比 now() 早不到半秒」的**未来** inserted_at 会被算成 age 0，
+    #    过得了下界检查，而下界正是 R2-F2 那条修复的全部内容。
+    #    Python 那侧的 `int()` 是第二层同样的抹除（`int(-0.1) == 0`），两层都要去掉。
+    assert "::bigint" not in sql, \
+        "年龄在 SQL 里被取整了 —— 亚秒级的未来时间戳会被抹成 age 0（符号丢失）"
 
 
 
