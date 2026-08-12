@@ -14,8 +14,6 @@ from __future__ import annotations
 import hashlib
 import re
 import sys
-import weakref
-from typing import NamedTuple
 
 # CLI 只收 --seed；库名恒为 kline_pilot_{seed}，用户无法传入任意库名。
 SEED_RE = re.compile(r"[a-z0-9_]{1,32}")
@@ -2069,19 +2067,6 @@ def _binding_matches(meta: dict[str, str], *, export_log_sha256: str, output_dir
             and meta.get("output_dir") == output_dir.rstrip("/"))
 
 
-def _identity_triple(meta: dict[str, str]) -> tuple:
-    """目标库**自称的身份**，逐字取值（不截断）。
-
-    ⚠️ 与 `_bound_identity` 是两回事，别混用：那个把 sha 截成前 12 位是给人看的，
-       拿它做安全比对等于把判据从 256 位削到 48 位。
-    ⚠️ 这三个值正是 `derive_confirm_token` 的原像 —— 它们不变，令牌就不变；
-       它们变了，授权时成立的那个前提（不管是「绑定相符」还是「令牌对得上」）
-       就都不再成立。
-    """
-    return (meta.get("export_log_sha256"), meta.get("output_dir"),
-            meta.get("created_at"))
-
-
 def _bound_identity(meta: dict[str, str]) -> dict:
     """拒绝时打印给操作者看的「这个库绑的是谁」（spec §5：哈希前 12 位 / 目录 / 建库时间）。"""
     return {"export_log_sha256": meta.get("export_log_sha256", "")[:12],
@@ -2268,37 +2253,29 @@ async def assert_db_allowed_for_reuse(
         await _close_quietly(conn, db_name)
 
 
-class ResetGateOutcome(NamedTuple):
-    """`assert_db_allowed_for_reset` 的结果。
-
-    ⚠️ `bound_identity` 不是诊断字段，是**授权前提的快照**（codex 4a-2/S2 R3-F1）：
-       本函数放行的理由只有两种 —— 「绑定与调用方相符」或「`--reset-foreign` 令牌
-       对得上该库自称的身份」。**两种理由都只对『当时那份 pilot_meta』成立。**
-       把它带出去，DROP 前才能验「前提还在不在」；只带 oid 出去的话，
-       使用点就只能重新猜一遍理由，而「重新猜」必然把两种理由取并集 ——
-       那正是 R3-F1 那条洞：授权时靠绑定相符过的，事后能被一份别的身份的令牌接管。
-    """
-    db_oid: str
-    bound_identity: tuple
-
-
 async def assert_db_allowed_for_reset(
     maint_conn, *, connect, db_name: str, seed: str,
     export_log_sha256: str, output_dir: str, reset_foreign_token: str | None,
-) -> ResetGateOutcome:
+) -> str:
     """`--reset` 路径：闸 0− → 0 → 0b（不过则要令牌）全过才允许 DROP。
 
-    **返回被授权的那个实例 oid + 授权那一刻该库自称的身份** ——
-    `DROP DATABASE` 带不了谓词，而授权与 DROP 之间同名库可以被删掉又重建、
-    `pilot_meta` 也可以被改写。不把授权绑到实例上，`--reset` 会去删一个**从未被授权**的
-    替身；不把它绑到身份上，授权前提可以在窗口里被换掉
-    （「凡是『这就是我那个库』的断言都要绑实例」的又一处落点）。
+    **返回被授权的那个实例 oid** —— `DROP DATABASE` 带不了谓词，而授权与 DROP 之间
+    同名库可以被删掉又重建。不把授权绑到实例上，`--reset` 会去删一个**从未被授权**的
+    替身（「凡是『这就是我那个库』的断言都要绑实例」的又一处落点）。
+
+    ⚠️ **本函数不再交出「授权那一刻该库自称的身份」**（2026-08-12 塌缩，撤销 R3-F1 的
+       `ResetGateOutcome`）。R3-F1 那条洞（靠绑定相符过的授权被别的身份的令牌接管）
+       在塌缩之后**换了形态**：判定与 DROP 收进同一次调用，复验的判据是
+       「拿**本次入参**在封锁下把本函数整个重跑一遍」——
+       两种放行理由各自重新成立，取不到并集，也就不需要身份快照。
+       而一个没有消费者的授权前提快照正是被删掉的那类负债。
 
     ⚠️ **这不是 `--reset` 的入口**（codex 4a-2a R6-F1）：它只覆盖「目标库有 `pilot_meta`」
        那一支。崩在 `CREATE DATABASE` 与写 `pilot_meta` 之间的**空残骸**根本没有那张表，
        在这里会撞 `not_owned`。spec §4 把「零对象例外 → 否则闸 0−」画成一条有向序列，
-       那条逃生口与它的次序由 **4a-2b 的 `authorize_reset`** 提供 ——
-       **调用方一律走 `authorize_reset`，不要直接调本函数。**
+       那条逃生口是 `try_empty_remnant_exception`，**两步的次序焊在 S2b 的
+       `reset_pilot_database` 函数体里** —— 调用方一律走那个唯一公开入口，
+       不要自己拼这两步。
 
     ⚠️ **指纹闸与结构闸不参与 DROP 判定**（spec R49-F2）：闸的分工不可倒置——
        归属管「能不能碰」，指纹管「能不能直接用」。把指纹塞进 DROP 路径会让一个
@@ -2313,7 +2290,7 @@ async def assert_db_allowed_for_reset(
     #    `pg_backend_pid()` / `hashtext()`，敌意或残留的 search_path 把一个可写 schema
     #    排在 `pg_catalog` 之前时，这三个名字都能被遮蔽 → **锁的证明返回 true 而锁并不存在**，
     #    R4 刚关上的破坏性窗口原样打开。
-    #    本函数是 public 的、可被直接调用，**不能靠「authorize_reset 会先跑集群闸」这条
+    #    本函数是 public 的、可被直接调用，**不能靠「调用方会先跑集群闸」这条
     #    调用方纪律**来保证钉桩 —— 那正是本 PR 反复修的同一个形态。
     await pin_search_path(maint_conn)
     # ⚠️ **集群闸在每个 public 入口各自机器强制**（codex 4a-2a R6-F2）：
@@ -2343,11 +2320,10 @@ async def assert_db_allowed_for_reset(
         if not _binding_matches(meta, export_log_sha256=export_log_sha256,
                                 output_dir=output_dir):                # 闸 0b 不过
             _assert_reset_foreign_token(meta, reset_foreign_token)
-        authorized_identity = _identity_triple(meta)
     finally:
         closed = await _close_quietly(conn, db_name)
     _assert_target_released(closed, db_name)
-    return ResetGateOutcome(oid, authorized_identity)
+    return oid
 
 
 def _assert_reset_foreign_token(meta: dict[str, str],
@@ -2446,7 +2422,7 @@ async def try_empty_remnant_exception(
       1. 本次带 `--reset`（由调用方保证：不带 `--reset` 时根本不调用本函数）
       2. 库名**恰等于** `kline_pilot_<seed>`（**全等**不是前缀——把爆炸半径限制在本次 seed）
       3. 该库满足**【绝对空】**（白名单式的 `_user_objects`，物化视图逃不过）
-      4. 集群闸 (i)(ii)(iii) 已全过（由调用方保证）
+      4. 集群闸 (i)(ii)(iii) 已全过 —— **本函数自己跑，不收调用方的保证**（见下）
       5. ①c 的按 seed advisory lock **在活连接上真被持有**（O4-R5-C2：不收调用方的布尔）
       6. 维护库 `public.pilot_create_intent` 有本次库名的行、`seed` 相符、
          **`create_confirmed = true`**、**`db_oid` 就是本次探测到的那个实例**、
@@ -2463,13 +2439,24 @@ async def try_empty_remnant_exception(
     # 2. 库名全等（不是前缀）
     if db_name != derive_db_name(seed):
         return None
+    # ⚠️ **第 4 条在这里机器强制**（codex 4a-2b R1-F1；2026-08-12 塌缩后落到本函数）：
+    #    这一条此前由 `authorize_reset` 代跑，而那个入口连同整套凭据机器已被删除。
+    #    不下沉的话，第 4 条就退回成「写在 docstring 里、由调用方保证」——
+    #    一次接线失误就能在**未过集群闸**的情况下拿到销毁授权：
+    #    标记闸、无关库闸、维护库空闸全部被跳过，而这条路径的下一步是不可逆的
+    #    `DROP DATABASE`。`create_pilot_database` 与 `assert_db_allowed_for_reset`
+    #    早就为同一条理由把它下沉进各自函数里（O4-R5-C2 / 4a-2a R6-F2），本函数是第三处。
+    #    ⚠️ 排在库名全等**之后**：名字不是本次 seed 的库，本函数的答复恒为「例外不适用」，
+    #       不授权任何东西，没有理由为它去连一遍同侪库；而名字一旦相符，
+    #       后面每一步都可能通向授权，集群闸必须先过。
+    await assert_cluster_allowed(maint_conn, connect=connect, target_db=db_name)
     # 5. 按 seed 的锁**真被持有**
     if not await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, seed):
         return None
     # 3. 【绝对空】
     empty, oid, closed = await _probe_absolutely_empty(maint_conn, connect, db_name)
     # ⚠️ **每一次探测之后都要证明会话已释放，不只是「例外成立」那条路**（codex 4a-2b R2-F2）：
-    #    判空为「非空」时本函数返回 None，`authorize_reset` 随后落到闸 0−/0/0b ——
+    #    判空为「非空」时本函数返回 None，调用方随后落到闸 0−/0/0b ——
     #    而本模块自己那条没关掉的会话仍活着，最后的 DROP 会以
     #    「target_db_in_use，占用者是别人」失败，而那个「别人」就是我们自己。
     _assert_target_released(closed, db_name)
@@ -2488,156 +2475,34 @@ async def try_empty_remnant_exception(
     return oid
 
 
-# ⚠️ **不可伪造的能力令牌**（codex 4a-2b R6-F1，R4-F2 的二次提出）：
-#    上一轮我把 DROP 改成 `_drop_pilot_database` 私有函数就算修完了 —— 而下划线只是**约定**，
-#    不是**机制**。同进程的调用方照样能 import 它、手搓一个
-#    `ResetAuthorization(db_oid=<当前 oid>, via_empty_remnant=False)` 递进去，
-#    把集群闸 / 归属闸 / 绑定闸 / `--reset-foreign` 整条授权链绕过去，直接 DROP。
-#    本模块通篇的原则就是「把纪律写成机制」，这里是最后一处还停在纪律上的。
-#    改法：凭据的构造要一个**模块私有的哨兵**，只有 `authorize_reset` 拿得到。
+# ── ⛔ 这里曾经有一整套「可传递的销毁授权凭据」，2026-08-12 被删除 ────────────
 #
-# ⚠️ **但哨兵 + `_minted` 标记仍然不够**（codex 4a-2 R14-F2，high，实测坐实）：
-#    `object.__new__(ResetAuthorization)` 绕过 `__init__`（哨兵检查因此不生效），
-#    再手设一句 `_minted = True`（它就在 `__slots__` 里），
-#    `type(...) is` 与 `_minted` 两道检查**全过**；
-#    而一份**真**凭据的 `via_empty_remnant` 也能被改写成 False，
-#    从而跳过 DROP 前的封锁与【绝对空】紧贴复查 —— 那是 R10 那条 critical
-#    （真 PG 已复现数据丢失）唯一的防线。
-#    **可变的 Python 属性不是能力边界。**
-#    真正的机制：把授权状态存进**模块私有的登记表**，使用点只认登记表里的值，
-#    完全不读对象上的属性。伪造的对象不在表里；篡改对象上的属性对判定毫无影响。
-_RESET_CAPABILITY = object()
-
-# 授权登记表：`authorize_reset` 铸造时写入；**使用点在 S2b**（`_drop_pilot_database`），
-# 本片只负责「铸造 + 登记」这一半 —— 本片没有任何东西能拿这张凭据去删库。
-# 值 = 铸造那一刻的权威事实 `(db_name, seed, db_oid, via_empty_remnant)`。
-# ⚠️ 用 `WeakKeyDictionary`：凭据用完即弃，不能让登记表变成泄漏源。
-#    键按**对象身份**比对（`ResetAuthorization` 不定义 `__eq__`/`__hash__`）。
-_MINTED_AUTHORIZATIONS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
-
-
-class ResetAuthorization:
-    """`--reset` 的授权凭据 —— **带上它是怎么来的**（codex 4a-2b R2-F1）。
-
-    两条来路的**前提性质完全不同**：
-      · 走闸 0−/0/0b 的：前提是 `pilot_meta` 的归属 + 绑定（或 `--reset-foreign` 令牌），
-        与「库里有没有东西」无关 —— 一个装满数据的库正是它要销毁的对象；
-      · 走零对象例外的：前提**就是「这个库是空的」**，而那是一个**会过期的事实**。
-
-    spec §4 写的是「`DROP DATABASE` 之前须**紧贴着**重查一次【绝对空】」。
-    把授权与 DROP 拆成两个函数之后，那个「紧贴」就跨了函数边界 ——
-    授权发出到 DROP 执行之间，`pg_restore --create` 或人工建表都能往那个空库里放东西，
-    而 oid 没变、会话数也可能是 0，于是本工具会 DROP 掉一个**既无 pilot_meta 归属、
-    也没过 --reset-foreign 令牌**的非空库。故把来路记进凭据，由 `drop_pilot_database`
-    在**真正 DROP 之前**把那次复查补回来。
-    """
-
-    # ⚠️ 这两个属性只供**诊断/展示**（`__repr__`、调用方日志）。
-    #    使用点（S2b 的 `_drop_pilot_database`）**不读它们** —— 权威值在
-    #    `_MINTED_AUTHORIZATIONS` 里，篡改这里改不动判定（R14-F2）。
-    # ⚠️ `__weakref__` 是 `WeakKeyDictionary` 做键的前提。
-    __slots__ = ("db_oid", "via_empty_remnant", "__weakref__")
-
-    def __init__(self, capability, db_oid: str, via_empty_remnant: bool) -> None:
-        if capability is not _RESET_CAPABILITY:
-            raise PilotDbBoundaryError(
-                "forged_reset_authorization",
-                "ResetAuthorization 只能由 authorize_reset 铸造 —— 手搓一个递给 DROP，"
-                "等于把集群闸/归属闸/绑定闸/--reset-foreign 整条授权链绕过去。"
-                "请改调 reset_pilot_database（授权与销毁一体的唯一公开入口，随 S2b 落地）。")
-        self.db_oid = db_oid
-        self.via_empty_remnant = via_empty_remnant
-
-    def __repr__(self) -> str:
-        return (f"ResetAuthorization(db_oid={self.db_oid!r}, "
-                f"via_empty_remnant={self.via_empty_remnant!r})")
-
-
-class _MintedFacts(NamedTuple):
-    """铸造那一刻的权威事实 —— **S2b 的 `_drop_pilot_database`** 的全部判定依据。
-
-    ⚠️ 本片（S2a）**零破坏性能力**：这张凭据铸出来之后无处可用，是有意的。
-       使用点连同 `DROP DATABASE` 一起随 S2b 落地。
-
-    ⚠️ 用具名字段而不是裸元组：使用点要按**来路**分支复验前提（R15-F1），
-       七个位置里错一位就是「复验了另一件事」，而那条路径的下一步不可逆。
-    ⚠️ `authorized_identity` = **授权那一刻目标库自称的身份**
-       `(export_log_sha256, output_dir, created_at)`，零对象例外那条路为 `None`
-       （那种库根本没有 `pilot_meta`）。
-
-       它替代了「记调用方标量 + 记令牌，然后在使用点重新判一遍」那套写法。
-       **为什么必须是「记下来再比对」而不是「重新判一遍」**（codex 4a-2/S2 R3-F1，high）：
-       授权只会因为**其中一个**理由通过 —— 要么「绑定与调用方相符」，
-       要么「`--reset-foreign` 令牌对得上该库自称的身份」。使用点若重新判，
-       就只能写成 `绑定相符 or 令牌对得上`，即**两种理由取并集** ——
-       于是「授权时靠绑定相符过的」可以被一份**别的身份的**令牌接管：
-       窗口里把 `pilot_meta` 改成那份令牌对应的身份，令牌当场对得上，DROP 照发，
-       而授权它的那个理由早就不成立了。（我上一版正是这么写的，
-       还把它登记成「只是诊断措辞不同」—— 那条登记是错的，实测能走到 DROP。）
-       记下身份再比对就没有这个并集：**理由不管是哪一个，都只对那一份身份成立。**
-    """
-    db_name: str
-    seed: str
-    db_oid: str
-    via_empty_remnant: bool
-    authorized_identity: tuple | None
-
-
-def _mint_authorization(db_name: str, seed: str, db_oid: str, *,
-                        via_empty_remnant: bool,
-                        authorized_identity: tuple | None) -> ResetAuthorization:
-    """铸造一份销毁授权，并把**当时的权威事实**记进登记表（codex 4a-2 R14-F2）。
-
-    ⚠️ 两个铸造点走**同一个**函数：两处各写一遍「构造 + 登记」，必然有一天只改一处 ——
-       那时登记表里少一条，一份合法授权会被使用点当成伪造品拒掉（或更糟，反过来）。
-    ⚠️ 登记的不只是 oid：授权是给**某个库的某个 seed** 铸的，不是通用许可证；
-       而 R15-F1 之后使用点还要在封锁下复验**授权前提本身**，
-       故绑定标量与令牌也一并记下（见 `_MintedFacts`）。
-    """
-    auth = ResetAuthorization(_RESET_CAPABILITY, db_oid=db_oid,
-                              via_empty_remnant=via_empty_remnant)
-    _MINTED_AUTHORIZATIONS[auth] = _MintedFacts(
-        db_name, seed, db_oid, via_empty_remnant, authorized_identity)
-    return auth
-
-
-async def authorize_reset(
-    maint_conn, *, connect, db_name: str, seed: str,
-    export_log_sha256: str, output_dir: str, reset_foreign_token: str | None,
-) -> ResetAuthorization:
-    """`--reset` 的**唯一入口**：先判零对象例外，不适用再走闸 0− → 0 → 0b。
-
-    返回被授权销毁的那个实例 oid，交给 `drop_pilot_database`。
-
-    ⚠️ **次序做进模块，不留给调用方纪律**（codex 4a-2a R4-F2）：
-       spec §4 把「集群闸 → 零对象例外六条 → 否则 闸 0−/0/0b」画成一条有向序列。
-       调用方漏调前一步时，一个崩在 `CREATE DATABASE` 与写 `pilot_meta` 之间的
-       **空残骸**（它根本没有 pilot_meta）会在闸 0− 撞 `not_owned`
-       「拒绝 DROP、库原样保留」→ **残骸永远清不掉** ——
-       正是 R56-F1 花一整轮修的那个洞，也正是 R55-F1 那句「能被自己 --reset 清掉重来」
-       会变成空话的地方。把两步之间的关系写成注释等于没写：这里用一个函数把它焊死。
-
-    ⚠️ **集群闸在这里机器强制，不是注释级前提**（O4-R5-C2 同族，codex 4a-2b R1-F1）：
-       零对象例外的第 4 条写着「集群闸 (i)(ii)(iii) 已全过」，此前只写在 docstring 里，
-       于是任何接线失误都能在**未过集群闸**的情况下拿到 DROP 授权 ——
-       标记闸、无关库闸、维护库空闸全部被跳过，而这条路径的下一步就是不可逆的
-       `DROP DATABASE`。`create_pilot_database` 早就为同一条理由把它下沉进函数里了。
-       重复调用的代价只是几条只读查询，远小于「漏掉一次」的代价。
-    """
-    # 同上（R13-F1）：**排在集群闸之前** —— 零对象例外那条路根本不用这两个标量，
-    # 若不在入口验，坏调用方状态下也能一路走到 DROP 授权。
-    assert_binding_scalars(export_log_sha256, output_dir)
-    await assert_cluster_allowed(maint_conn, connect=connect, target_db=db_name)
-    remnant_oid = await try_empty_remnant_exception(
-        maint_conn, connect=connect, db_name=db_name, seed=seed)
-    if remnant_oid is not None:
-        # 空残骸没有 `pilot_meta`，也就没有「自称的身份」可钉 ——
-        # 它的授权前提是【绝对空】+ intent 凭据，两条都由使用点在封锁下重查。
-        return _mint_authorization(db_name, seed, remnant_oid,
-                                   via_empty_remnant=True, authorized_identity=None)
-    outcome = await assert_db_allowed_for_reset(
-        maint_conn, connect=connect, db_name=db_name, seed=seed,
-        export_log_sha256=export_log_sha256, output_dir=output_dir,
-        reset_foreign_token=reset_foreign_token)
-    return _mint_authorization(db_name, seed, outcome.db_oid, via_empty_remnant=False,
-                               authorized_identity=outcome.bound_identity)
+# 被删掉的是：能力哨兵、授权登记表、凭据类、铸造函数，以及把它们串起来的那个
+# `--reset` 单一入口，外加把「授权那一刻的身份」带出函数的那个具名返回值。
+#
+# ⚠️ **为什么值得在生产代码里记这一笔**：那套机器不是一次设计失误，是**五轮加固**的
+#    产物 —— 同一个洞被 codex 连提六次（4a-2b R4-F2 → R6-F1 → R7-F1 → R14-F2 →
+#    S2-R2-F1 → S2a-R1-F1），修法依次是「改私有 → 加构造哨兵 → 使用点查类型 →
+#    改查登记表 → 加仓库级 AST 守卫」，**每一次都被下一轮拆穿**。
+#
+#    根因不在加固不够狠。DROP 前要重验的每一条都能**从目标库的活状态重新推导**：
+#    名字、seed 锁、集群闸、占用者、oid、【绝对空】、intent 凭据、`pilot_meta` 归属。
+#    唯独「绑定是否与**调用方递进来的**标量相符 / `--reset-foreign` 令牌对不对」
+#    推导不出来 —— 它依赖一个库里没有的事实：*这次运行的调用方是谁、他说了什么*。
+#    于是那一条只能靠「授权时记下来的东西」，而那个东西正是伪造者控制的入参：
+#    **凭据本身就是那条前提的唯一载体，加固凭据永远堵不上它。**
+#
+#    修法是让缝消失，而不是给缝加锁：判定与 DROP 收进 S2b 的 `reset_pilot_database`
+#    **一个函数体**，来路退化成函数内的局部变量，伪造不了；绑定/令牌那一条直接拿
+#    **本次调用的入参**在封锁下重验，不再有「记下来的事实」。
+#
+#    本片（S2a）因此只剩**判定 helper**：`assert_binding_scalars` /
+#    `try_empty_remnant_exception` / `_has_qualified_intent_row` /
+#    `assert_db_allowed_for_reset`。它们回答「这个库能不能碰」，**不发放任何东西**。
+#    「零破坏性能力」于是是**结构上的** —— 不再是「有凭据但暂时没人消费」这种偶然。
+#
+#    ⚠️ spec §4 那条有向序列（集群闸 → 零对象例外 → 否则闸 0−/0/0b）**本片不再有任何
+#       东西机器强制**：它随 `reset_pilot_database` 的函数体在 S2b 落地。
+#       本片能证明的只是这两步在同一份 fixture 上给出相反的判定
+#       （test_the_empty_remnant_escape_hatch_is_the_only_thing_that_can_clear_a_remnant）。
+#       这是本片**明写接受的残留**，不是遗漏。

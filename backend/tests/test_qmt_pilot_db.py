@@ -2,6 +2,7 @@
 """Plan 4a 护栏 L1 单测。Spec: docs/superpowers/specs/2026-07-27-qmt-plan4a-db-guardrails-design.md"""
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import pathlib
@@ -24,9 +25,7 @@ from qmt_pilot_db import (CONTRACT_VERSION, FIRST_NORMAL_OID, INTENT_TTL_SECONDS
                           _user_objects, assert_cluster_allowed,
                           read_pilot_meta_rows, read_pilot_meta,
                           assert_db_allowed_for_reuse, assert_db_allowed_for_reset,
-                          try_empty_remnant_exception, authorize_reset,
-                          ResetAuthorization, _RESET_CAPABILITY,
-                          _mint_authorization,
+                          try_empty_remnant_exception,
                           assert_pilot_db_allowed, create_pilot_database,
                           derive_confirm_token, derive_db_name, quote_ident)
 
@@ -3530,7 +3529,7 @@ def _reset(maint, target, **over):
     ({"export_log_sha256": None}, "export_log_sha256 缺失"),
     ({"export_log_sha256": "nothex"}, "export_log_sha256 不是 64 位小写十六进制"),
 ])
-@pytest.mark.parametrize("entry", ["reuse", "reset", "authorize"])
+@pytest.mark.parametrize("entry", ["reuse", "reset"])
 def test_every_public_reset_or_reuse_entry_validates_the_binding_scalars(entry, bad, label):
     """**复用/销毁两条路都要先验调用方标量**（codex 4a-2 R13-F1，high）。
 
@@ -3544,17 +3543,21 @@ def test_every_public_reset_or_reuse_entry_validates_the_binding_scalars(entry, 
         pilot_meta** 就判成「绑定相符」→ 在一个不该匹配的库上放行销毁授权。
     这与「缺失/畸形的调用方标量一律 fail-closed」的契约不符，而这条路径的下一步
     是不可逆的 `DROP DATABASE`。
+
+    ⚠️ **塌缩之后这一族只剩两个入口**（`authorize_reset` 已删）：`try_empty_remnant_exception`
+       的签名里根本没有这两个标量（空残骸那条路不用它们），故它不属于本族。
+       「收了这两个标量的 public 入口都要验」这条**性质**由下面那颗机械钉子按签名扫，
+       不靠这里的点名清单。
     """
-    maint = (_RemnantMaint(intent_rows=_intent()) if entry == "authorize"
-             else _FakeConn(databases=["kline_pilot_probe"]))
+    maint = _FakeConn(databases=["kline_pilot_probe"])
     target = _FakeConn(meta_rows=_full_meta_rows())
-    run = {"reuse": _reuse, "reset": _reset, "authorize": _authorize}[entry]
+    run = {"reuse": _reuse, "reset": _reset}[entry]
     with pytest.raises(PilotDbBoundaryError) as ei:
         asyncio.run(run(maint, target, **bad))
     assert ei.value.code == "identity_scalar_invalid", f"{entry} / {label}"
 
 
-@pytest.mark.parametrize("entry", ["reuse", "reset", "authorize"])
+@pytest.mark.parametrize("entry", ["reuse", "reset"])
 def test_binding_scalar_guard_runs_before_touching_the_target_database(entry):
     """**在碰目标库之前**就拦下（codex R13-F1 的要害之一）。
 
@@ -3567,18 +3570,15 @@ def test_binding_scalar_guard_runs_before_touching_the_target_database(entry):
         connects.append(dbname)
         raise AssertionError("不该连目标库 —— 标量应该在这之前就被拦下")
 
-    maint = (_RemnantMaint(intent_rows=_intent()) if entry == "authorize"
-             else _FakeConn(databases=["kline_pilot_probe"]))
+    maint = _FakeConn(databases=["kline_pilot_probe"])
     kw = {"db_name": "kline_pilot_probe", "seed": "probe",
           "export_log_sha256": "a" * 64, "output_dir": None}
     if entry == "reuse":
         kw.update(schema_sha256="s", pilot_schema_sha256="p")
         call = assert_db_allowed_for_reuse(maint, connect=_counting, **kw)
-    elif entry == "reset":
+    else:
         call = assert_db_allowed_for_reset(maint, connect=_counting,
                                            reset_foreign_token=None, **kw)
-    else:
-        call = authorize_reset(maint, connect=_counting, reset_foreign_token=None, **kw)
     with pytest.raises(PilotDbBoundaryError) as ei:
         asyncio.run(call)
     assert ei.value.code == "identity_scalar_invalid"
@@ -3703,24 +3703,24 @@ def test_reset_wrong_token_refused():
 
 
 def test_reset_correct_token_allowed_and_returns_authorized_oid():
-    """令牌逐字相符 → 放行，并**返回被授权的那个实例 oid**。
+    """令牌逐字相符 → 放行，并**返回被授权的那个实例 oid（裸 str）**。
 
     返回 oid 不是锦上添花：`DROP DATABASE` 无法带谓词，授权与 DROP 之间同名库可以被
     删掉又重建。不把授权绑到实例上，`--reset` 会去删一个**从未被授权**的替身。
+
+    ⚠️ **不再带出「授权那一刻该库自称的身份」**（撤销 R3-F1 的 `ResetGateOutcome`）：
+       塌缩之后判定与 DROP 在**同一次调用**里，复验的判据是「拿**本次入参**在封锁下
+       重跑一遍闸 0/0b/令牌」，不是「和记下来的身份比对」。带出去的身份快照没有消费者，
+       而一个没人消费的授权前提快照正是本 PR 删掉的那类负债。
     """
     maint, target = _target_pair(output_dir="/someone_else")
     token = derive_confirm_token("a" * 64, "/someone_else", "20260729T101530123456Z")
-    got = asyncio.run(_reset(maint, target, reset_foreign_token=token))
-    assert got.db_oid == "16400"
-    # R3-F1：还要交回**授权那一刻该库自称的身份** —— 使用点靠它验「理由还在不在」。
-    assert got.bound_identity == ("a" * 64, "/someone_else", "20260729T101530123456Z")
+    assert asyncio.run(_reset(maint, target, reset_foreign_token=token)) == "16400"
 
 
 def test_reset_binding_match_returns_authorized_oid_without_token():
     maint, target = _target_pair()
-    got = asyncio.run(_reset(maint, target))
-    assert got.db_oid == "16400"
-    assert got.bound_identity == ("a" * 64, "/x/y", "20260729T101530123456Z")
+    assert asyncio.run(_reset(maint, target)) == "16400"
 
 
 def test_reset_missing_created_at_cannot_derive_token():
@@ -4309,7 +4309,7 @@ def test_reset_does_not_require_the_registry_proof():
     target = _FakeConn(meta_rows=_full_meta_rows())
     assert asyncio.run(assert_db_allowed_for_reset(
         maint, connect=_connector({"kline_pilot_probe": target}),
-        **_RESET_KW)).db_oid == "16400"
+        **_RESET_KW)) == "16400"
 
 
 def test_registry_proof_is_instance_bound_not_name_bound():
@@ -4702,69 +4702,42 @@ def test_module_never_uses_force_or_terminate_backend():
 
 
 
-# ── codex 4a-2a R4-F2：--reset 的单一入口，把 spec §4 的次序焊进模块 ──────
+# ── 零对象例外与闸 0−/0/0b 的分工（R56-F1 / R55-F1）────────────────────────
+#
+# ⚠️ **这里曾经有一个 `authorize_reset` 单一入口，它连同整套「可传递的授权凭据」
+#    在 2026-08-12 被删掉了。**为什么值得在测试文件里记一笔：那套机器是被 codex
+#    连提**六次**（R4-F2 → R6-F1 → R7-F1 → R14-F2 → S2-R2-F1 → S2a-R1-F1）
+#    的同一个洞逼出来的五轮加固 —— 改私有 → 加构造哨兵 → 使用点查类型 → 改查登记表
+#    → 加仓库级 AST 守卫，**每一轮都被下一轮拆穿**。
+#    根因不是加固不够狠，而是「授权」与「销毁」之间那道**缝**本身：
+#    绑定/令牌那一条判据推导不出来，只能靠「授权时记下来的东西」，
+#    而那个东西正是伪造者控制的入参。**加固凭据永远堵不上它。**
+#    修法是让缝消失 —— 判定与 DROP 收进 S2b 的 `reset_pilot_database` 一个函数体，
+#    没有可传递的对象、没有登记表、没有铸造函数。
+#    本片（S2a）因此只剩**判定 helper**，连一张可用的凭据都不存在。
 
-def _authorize(maint, target, **over):
-    kw = {"db_name": "kline_pilot_probe", "seed": "probe",
-          "export_log_sha256": "a" * 64, "output_dir": "/x/y",
-          "reset_foreign_token": None, **over}
-    return authorize_reset(
-        maint, connect=_connector({"kline_pilot_probe": target}), **kw)
+def test_the_empty_remnant_escape_hatch_is_the_only_thing_that_can_clear_a_remnant():
+    """同一个空残骸：闸 0−/0/0b **拒**，零对象例外**放行** —— 两半各自可分辨。
 
+    崩在 `CREATE DATABASE` 与写 `pilot_meta` 之间的残骸根本没有 pilot_meta，
+    直接走闸 0− 会撞 `not_owned`「拒绝 DROP、库原样保留」→ 残骸永远清不掉
+    （R56-F1 花一整轮修的洞，也正是 R55-F1 那句「能被自己 --reset 清掉重来」
+    会变成空话的地方）。
 
-
-def test_authorize_reset_clears_an_empty_remnant_that_has_no_pilot_meta():
-    """崩在 `CREATE DATABASE` 与写 `pilot_meta` 之间的**空残骸**必须清得掉。
-
-    它根本没有 pilot_meta，直接走闸 0− 会撞 `not_owned`「拒绝 DROP、库原样保留」
-    → 残骸永远清不掉 —— 正是 R56-F1 花一整轮修的洞，也正是 R55-F1 那句
-    「能被自己 --reset 清掉重来」会变成空话的地方。
+    ⚠️ 这一档取代了原来那条「`authorize_reset` 能清掉空残骸」——
+       塌缩之后没有单一入口了，**两步的次序**由 S2b 的 `reset_pilot_database` 焊死；
+       本片能证明也只能证明的是：**这两步在同一份 fixture 上给出相反的判定**。
+       少了这条对照，「例外返回 oid」看起来仍像在工作，却证明不了它有存在的必要。
     """
+    remnant_kw = dict(meta_table_present=False)      # 空库：连 pilot_meta 都没有
+    # 例外这一半：放行，并交回被授权的那个实例 oid
     maint = _RemnantMaint(intent_rows=_intent())
-    remnant = _EmptyOnProbe(meta_table_present=False)      # 空库：连 pilot_meta 都没有
-    auth = asyncio.run(_authorize(maint, remnant))
-    assert auth.db_oid == "16400" and auth.via_empty_remnant is True
-
-
-
-def test_authorize_reset_falls_through_to_the_gates_when_the_exception_does_not_apply():
-    """非空库（有 pilot_meta）走正常闸序，例外不适用。"""
-    maint = _RemnantMaint(intent_rows=_intent())
-    target = _EmptyOnProbe(non_empty_probes=[1], meta_rows=_full_meta_rows())
-    auth = asyncio.run(_authorize(maint, target))
-    assert auth.db_oid == "16400" and auth.via_empty_remnant is False
-
-
-
-def test_authorize_reset_still_refuses_a_foreign_database():
-    """落到闸序之后，归属不符照样拒 —— 单一入口不等于放宽判据。"""
-    maint = _RemnantMaint(intent_rows=_intent())
-    target = _EmptyOnProbe(non_empty_probes=[1],
-                           meta_rows=_full_meta_rows(tool="something_else"))
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe(**remnant_kw))) == "16400"
+    # 闸这一半：同一份残骸 —— 必须拒，且拒的理由是「不是本工具建的」
+    maint2 = _FakeConn(databases=["kline_pilot_probe"])
     with pytest.raises(PilotDbBoundaryError) as ei:
-        asyncio.run(_authorize(maint, target))
+        asyncio.run(_reset(maint2, _FakeConn(**remnant_kw)))
     assert ei.value.code == "not_owned"
-
-
-
-def test_authorize_reset_wires_both_steps_in_the_spec_order():
-    """机械守卫：单一入口必须**同时**引用两步，且例外在前。
-
-    ⚠️ 判据走 AST 而非源码文本 —— docstring 里提到函数名会让文本判据恒真
-    （同一形态在本 PR 已被变异抓到过一次）。
-    """
-    import ast
-    import inspect
-    import textwrap
-    import qmt_pilot_db as m
-    src = textwrap.dedent(inspect.getsource(m.authorize_reset))
-    tree = ast.parse(src)
-    calls = [n.func.id for n in ast.walk(tree)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
-    assert "try_empty_remnant_exception" in calls, "单一入口没有走零对象例外"
-    assert "assert_db_allowed_for_reset" in calls, "单一入口没有走闸 0−/0/0b"
-    assert calls.index("try_empty_remnant_exception") < calls.index(
-        "assert_db_allowed_for_reset"), "次序反了：例外必须排在闸 0− 之前"
 
 
 
@@ -4806,26 +4779,31 @@ def test_remnant_exception_refuses_authorization_when_it_cannot_release_a_probe(
 
 # ── codex 4a-2b R1：集群闸机器强制 + 调用方 SQL 跑完必须重钉 search_path ──────
 
-def test_authorize_reset_enforces_the_cluster_gate_itself():
+def test_remnant_exception_enforces_the_cluster_gate_itself():
     """零对象例外的第 4 条（集群闸已全过）**必须机器强制，不能只写在 docstring 里**。
 
     这条路径的下一步就是不可逆的 `DROP DATABASE`；接线失误会让标记闸、无关库闸、
-    维护库空闸全部被跳过。`create_pilot_database` 早就为同一条理由把它下沉进函数里
-    （O4-R5-C2）—— 本入口是同族的第二处。
+    维护库空闸全部被跳过。`create_pilot_database` 与 `assert_db_allowed_for_reset`
+    早就为同一条理由把它下沉进函数里（O4-R5-C2 / 4a-2a R6-F2）。
+
+    ⚠️ **这一条原本挂在 `authorize_reset` 上**（4a-2b R1-F1）。塌缩把那个入口删了，
+       若不把集群闸一并下沉进本函数，一条 public 判定入口就会退回到
+       「第 4 条只写在 docstring 里、由调用方保证」—— 那正是 R1-F1 修掉的形态。
+       重复调用的代价只是几条只读查询。
     """
     maint = _RemnantMaint(intent_rows=_intent(), marker_rows=[])   # 集群没有合法标记
     with pytest.raises(PilotClusterBoundaryError) as ei:
-        asyncio.run(_authorize(maint, _EmptyOnProbe(meta_table_present=False)))
+        asyncio.run(_remnant(maint, _EmptyOnProbe(meta_table_present=False)))
     assert ei.value.code == "no_marker"
 
 
 
-def test_authorize_reset_runs_the_cluster_gate_before_anything_touches_the_target():
+def test_remnant_exception_runs_the_cluster_gate_before_anything_touches_the_target():
     """集群闸没过 → 目标库上一条查询都不许发（探测连接本身就会顶住随后的 DROP）。"""
     maint = _RemnantMaint(intent_rows=_intent(), marker_rows=[])
     target = _EmptyOnProbe(meta_table_present=False)
     with pytest.raises(PilotClusterBoundaryError):
-        asyncio.run(_authorize(maint, target))
+        asyncio.run(_remnant(maint, target))
     assert target.ops == [], "集群闸未过时不该对目标库发出任何查询"
 
 
@@ -4838,7 +4816,7 @@ def test_remnant_exception_checks_release_even_when_it_falls_through(
         probes, fail_on, label):
     """**落空路径也要证明会话已释放**（codex 4a-2b R2-F2）。
 
-    判空为「非空」时本函数返回 None，`authorize_reset` 随后落到闸 0−/0/0b ——
+    判空为「非空」时本函数返回 None，调用方随后落到闸 0−/0/0b ——
     而本模块自己那条没关掉的会话仍活着，最后的 DROP 会以
     「target_db_in_use，占用者是别人」失败，而那个「别人」就是我们自己。
     """
@@ -4858,95 +4836,116 @@ def test_remnant_exception_pins_search_path_before_proving_the_seed_lock():
 
 
 
-def test_only_authorize_reset_mints_a_usable_authorization():
-    """反向钉：`authorize_reset` 铸出来的凭据必须能用（别把闸修成谁都过不了）。"""
-    maint = _RemnantMaint(intent_rows=_intent())
-    target = _EmptyOnProbe(non_empty_probes=[1], meta_rows=_full_meta_rows())
-    auth = asyncio.run(_authorize(maint, target))
-    assert isinstance(auth, ResetAuthorization)
-    assert auth.db_oid == "16400" and auth.via_empty_remnant is False
+# ── 塌缩守卫：**可传递的授权凭据**不许再出现（2026-08-12）─────────────────
+#
+# 被删掉的七个名字。⚠️ 这不是一张「私有名单」——**它们一个都不该存在**：
+#   · `ResetAuthorization` / `_RESET_CAPABILITY` / `_MINTED_AUTHORIZATIONS` /
+#     `_MintedFacts` / `_mint_authorization`：整套凭据机器（铸造 + 登记 + 哨兵）；
+#   · `authorize_reset`：「集群闸 + 走哪条路的决策 + 铸造」的封装 —— 留着它等于
+#     把缝留下一半（调用方仍可「先问一次走哪条路，再自己去 DROP」）；
+#   · `ResetGateOutcome`：把「授权那一刻的身份」带出函数的载体。数据虽不是能力，
+#     但只要 DROP 那边**信**它，缝就还在；而只要 DROP 那边不信（自己重新推导），
+#     它就没有存在意义。
+_COLLAPSED_AUTHORIZATION_SYMBOLS = frozenset({
+    "ResetAuthorization", "_RESET_CAPABILITY", "_MINTED_AUTHORIZATIONS",
+    "_MintedFacts", "_mint_authorization", "ResetGateOutcome", "authorize_reset",
+})
 
 
+def _collapsed_symbol_hits(source: str, label: str) -> list[str]:
+    """在一份源码里找**代码层面**引用了被塌缩符号的地方。
 
-def test_authorization_has_no_public_constructor_path_in_the_module():
-    """机械守卫：模块里构造 `ResetAuthorization` 的地方**只能**在 `authorize_reset` 里，
-    且都带着能力令牌。多一处不带令牌的构造，这颗钉子当场变红。"""
-    import ast
-    import inspect
-    import textwrap
+    ⚠️ 走 AST 不走文本：本文件与模块里都有大段解释「为什么删掉 `ResetAuthorization`」
+       的注释与 docstring，文本判据会被这些**承重的历史叙述**打红，
+       而绕开它的办法是删注释 —— 那正是本仓明令禁止的判据形态。
+       `ast` 天然看不见注释；docstring 是 `Constant` 不是 `Name`，也不会被算进来。
+    """
+    tree = ast.parse(source)
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            hits += [f"{label}: from {node.module} import {a.name}"
+                     for a in node.names if a.name in _COLLAPSED_AUTHORIZATION_SYMBOLS]
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _COLLAPSED_AUTHORIZATION_SYMBOLS:
+                hits.append(f"{label}: …{node.attr}")
+        elif isinstance(node, ast.Name):
+            if node.id in _COLLAPSED_AUTHORIZATION_SYMBOLS:
+                hits.append(f"{label}: {node.id}")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in _COLLAPSED_AUTHORIZATION_SYMBOLS:
+                hits.append(f"{label}: def/class {node.name}")
+    return sorted(hits)
+
+
+def test_collapsed_symbol_scanner_actually_discriminates():
+    """扫描器的**正向**自检：七个名字 × 四种写法，一种都不许漏。
+
+    ⚠️ 没有这一条，下面那两颗钉子就是「对一个恒空集合断言为空」——
+       本仓记录在案的「机械检查器被它该抓的损坏禁用了自身解析器 → 静默全绿」。
+    """
+    for name in sorted(_COLLAPSED_AUTHORIZATION_SYMBOLS):
+        for form, src in (
+            ("import", f"from qmt_pilot_db import {name}\n"),
+            ("name", f"x = {name}\n"),
+            ("attribute", f"import qmt_pilot_db as m\ny = m.{name}\n"),
+            ("definition", f"def {name}():\n    pass\n"),
+        ):
+            assert _collapsed_symbol_hits(src, "probe"), \
+                f"扫描器漏掉了 {name} 的 {form} 形态"
+    # 反向：正常代码不许被误报（否则这颗钉子只会逼人删注释）
+    assert _collapsed_symbol_hits(
+        "# ResetAuthorization 是被删掉的\n"
+        "def f():\n"
+        "    '''authorize_reset 曾经在这里铸造 _MINTED_AUTHORIZATIONS'''\n"
+        "    return try_empty_remnant_exception\n", "probe") == [], \
+        "扫描器把注释/docstring 里的历史叙述当成了引用"
+
+
+def test_the_transferable_reset_authorization_machinery_is_gone_from_the_module():
+    """核心不变量：`qmt_pilot_db` 里**不存在**可传递的销毁授权。
+
+    同一个洞被 codex 提了**六次**，五次加固全被下一轮拆穿 ——
+    因为「绑定/令牌那一条」推导不出来，只能靠「授权时记下来的东西」，
+    而那个东西正是伪造者控制的入参。**加固凭据永远堵不上它。**
+    这颗钉子守的不是某一次加固，而是「缝不许再被造出来」本身。
+    """
     import qmt_pilot_db as m
     src = pathlib.Path(m.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    sites = [n for n in ast.walk(tree)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-             and n.func.id == "ResetAuthorization"]
-    assert sites, "一处构造都没找到 —— 匹配式过时了，这颗钉子会变成空的"
-    for call in sites:
-        first = call.args[0] if call.args else None
-        assert isinstance(first, ast.Name) and first.id == "_RESET_CAPABILITY", \
-            "有一处构造没带能力令牌"
-    # ⚠️ R14-F2 之后，构造从 `authorize_reset` 下沉到 `_mint_authorization`
-    #    （两个铸造点走同一个函数，免得「构造 + 登记」只改一处）。
-    #    判据随之改成：**唯一的构造点就在 `_mint_authorization` 里**。
-    minted_in = textwrap.dedent(inspect.getsource(m._mint_authorization))
-    assert minted_in.count("ResetAuthorization(") == len(sites), \
-        "能力凭据只许在 _mint_authorization 里铸造"
-    # 而 `_mint_authorization` 必须把它记进登记表 —— 不记的话使用点会把合法授权判成伪造。
-    assert "_MINTED_AUTHORIZATIONS[" in minted_in, \
-        "铸造之后没有写登记表 —— 使用点只认登记表，合法授权会被当成伪造品拒掉"
-    # 反向：调用铸造函数的地方只许是 `authorize_reset`。
-    callers = {n.name for n in ast.walk(tree)
-               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-               and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-                       and c.func.id == "_mint_authorization" for c in ast.walk(n))}
-    assert callers == {"authorize_reset"}, \
-        f"铸造授权的地方不只 authorize_reset 一个：{sorted(callers)}"
+    hits = _collapsed_symbol_hits(src, "qmt_pilot_db.py")
+    assert not hits, f"可传递的授权凭据又被造回来了：{hits}"
+    # ⚠️ **自检**：同一个扫描器必须在同一份源码上**看得见还活着的判定函数** ——
+    #    否则「一个都没扫到」与「解析器坏了」在输出上完全一样。
+    alive = frozenset({"try_empty_remnant_exception", "assert_db_allowed_for_reset"})
+    defined = {n.name for n in ast.walk(ast.parse(src))
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    assert alive <= defined, \
+        f"扫描器在这份源码上连判定函数都找不到，上面那条是恒真的：{sorted(defined)[:5]}"
 
 
-def test_no_production_module_reaches_past_the_public_authorization_entry():
-    """机械守卫：生产代码不许绕过 `authorize_reset` 直接碰铸造凭据的内部件。
+def test_no_production_file_reintroduces_a_transferable_reset_authorization():
+    """仓库级：`backend/` 下**任何**生产文件都不许把那套机器造回来。
 
-    ⚠️ **先把这颗钉子能做到什么说清楚，免得它被当成它不是的东西**：
-       **Python 进程内不存在能力边界。** 同进程调用方永远可以
-       `import qmt_pilot_db as m` 然后 `m._MINTED_AUTHORIZATIONS[obj] = facts`。
-       所以「私有名 + 铸造登记表」**防不住蓄意绕过**，也不该被写成防得住。
-       它防的是 spec §1 风险① 那一类：**接线失误**（4c 接线时错调了内部函数）。
-       而接线失误一定表现为**仓库里多出一个调用点** —— 那是机械抓得住的。
-
-    ⚠️ **本片（S2a）零破坏性能力**：`_drop_pilot_database` / `reset_pilot_database`
-       随 S2b 落地，故名单里没有它们。S2b 补回时**必须把那两个名字加进来**。
+    ⚠️ **先把这颗钉子能做到什么说清楚**：**Python 进程内不存在能力边界**，
+       所以它防不住蓄意绕过，也不该被写成防得住。它防的是 spec §1 风险① 那一类
+       **接线失误**，以及「下一轮有人觉得『再加一道锁就行了』又把缝造回来」——
+       两者都一定表现为**仓库里多出一个符号**，那是机械抓得住的。
     """
-    import ast
     import qmt_pilot_db as m
-    private = {"_mint_authorization", "_MINTED_AUTHORIZATIONS",
-               "ResetAuthorization", "_RESET_CAPABILITY"}
-
-    # ⚠️ **自检 A（本片新加）**：名单里的符号必须在模块里**真实存在**。
-    #    不存在的名字扫不到任何引用 → 那一项恒真。S2a 正是从 S2 切下来的，
-    #    名单极易留着已经切走的符号 —— 这条让那种漂移当场变红，而不是静默空转。
-    absent = sorted(n for n in private if not hasattr(m, n))
-    assert not absent, (
-        f"守卫名单里这些符号在模块里不存在，对应的检查是**恒真**的：{absent}"
-        f" —— 要么把它们从名单里去掉，要么它们本就该在本片里")
-
     backend = pathlib.Path(m.__file__).resolve().parent
     scanned, offenders = [], []
     for path in sorted(backend.rglob("*.py")):
         rel = path.relative_to(backend)
-        if rel.parts[0] == "tests" or path.samefile(m.__file__):
-            continue                       # 测试当然要碰；模块自己就是定义处
+        if rel.parts[0] == "tests":
+            continue                       # 测试当然要提这些名字（本文件就在提）
         scanned.append(str(rel))
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "qmt_pilot_db":
-                offenders += [f"{rel}: from qmt_pilot_db import {a.name}"
-                              for a in node.names if a.name in private]
-            elif isinstance(node, ast.Attribute) and node.attr in private:
-                offenders.append(f"{rel}: …{node.attr}")
-    # ⚠️ **自检 B**：扫描器必须真的扫到文件，否则下面那条是恒真的
-    #    （本仓记录在案：机械检查器被它该抓的损坏禁用了自身解析器 → 静默全绿）。
+        offenders += _collapsed_symbol_hits(
+            path.read_text(encoding="utf-8"), str(rel))
+    # ⚠️ **自检 A**：扫描器必须真的扫到文件，否则下面那条是恒真的。
     assert scanned, "扫描器一个生产文件都没找到 —— 它已经失去判别力"
+    # ⚠️ **自检 B**：`scripts/` 是最可能图省事直接引内部符号的地方，必须在扫描面内。
     assert any("scripts/" in s for s in scanned), \
-        f"没扫到 scripts/ —— 验收脚本正是最可能图省事直接调私有函数的地方：{scanned}"
-    assert not offenders, (
-        f"这些生产文件绕过 authorize_reset 直接碰了铸造凭据的内部件：{offenders}")
+        f"没扫到 scripts/ —— 验收脚本正是最可能图省事的地方：{scanned}"
+    assert any(s == "qmt_pilot_db.py" for s in scanned), \
+        "没扫到 qmt_pilot_db.py 本体 —— 定义处才是最要紧的那一个"
+    assert not offenders, f"这些生产文件把可传递的授权凭据造回来了：{offenders}"
