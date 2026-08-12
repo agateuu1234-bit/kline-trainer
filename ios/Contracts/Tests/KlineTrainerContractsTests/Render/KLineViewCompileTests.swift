@@ -35,5 +35,13 @@ struct KLineViewCompileTests {
         view.renderState = changed
         #expect(view.renderState.crosshairPoint == CGPoint(x: 10, y: 20))
     }
+
+    @Test("L8c 契约: 生产渲染注册表里确实没有 .trend（L8 的另一半，必须在 Catalyst 上跑）")
+    @MainActor
+    func productionRegistryHasNoTrend() {
+        #expect(KLineView.drawingTools[.trend] == nil,
+                "生产注册表里出现了 .trend 渲染器 —— L8 的前提失效，契约理由需重写")
+        #expect(KLineView.drawingTools[.horizontal] != nil, "正向档：水平线必须在注册表里")
+    }
 }
 #endif

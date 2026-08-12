@@ -283,3 +283,52 @@ func expectIdentifierNeverVended(_ identifier: String, inFiles files: [String],
                 sourceLocation: sourceLocation)
     }
 }
+
+/// `TrainingEngine.swift` 里对**引擎自己那个 `drawings`** 的结构性写入点计数（1b-ii PR-1，N-B 第 2 条）。
+/// 排除 `reviewDrawings`（子串包含 `drawings`）：判据 = 紧邻前一个字符不是标识符字符。
+/// 只数**写**：`drawings[$0].id` 这种下标**读**不算（`]` 后面跟的是 `.` 不是 `=`）。
+/// ⚠️ 整支终审①：判据必须穷尽**全部**会打乱数组内容/顺序的方法（`removeAll`/`removeFirst`/
+///    `removeLast`/`popLast`/`swapAt`/`sort`/`reverse`/`replaceSubrange`/`+= [...]`），
+///    其中 `swapAt`/`sort`/`reverse` 会打乱 z-order —— PR-2 判定的崩溃级陈旧下标根因正在这一族里。
+///    这些 needle 与既有 `drawings.remove(` 互不重叠：`drawings.remove(` 要求 `remove` 紧跟 `(`，
+///    `drawings.removeAll(`/`removeFirst(`/`removeLast(` 在该位置是 `A`/`F`/`L`，不会被双计
+///    （见 SourceGuardScannerTests「守卫自检 h」的合成串验证）。
+/// ⚠️ 下标扫描原先「扫到第一个 `]` 就停」，嵌套下标 `drawings[idx[k]] = x` 会在内层 `]` 处提前收尾，
+///    `chars[j+1]` 落在外层 `]` 上（不是 `=`）→ 漏计；现改为**配对方括号**（`[` 加深、`]` 减深，
+///    深度回零才是真正的下标收尾）。
+func engineDrawingsStructuralWrites(_ squeezedCode: String) -> Int {
+    let chars = Array(squeezedCode)
+    func isIdentChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+    func startsBare(at i: Int, _ needle: [Character]) -> Bool {
+        guard i + needle.count <= chars.count, Array(chars[i ..< i + needle.count]) == needle else { return false }
+        if i > 0, isIdentChar(chars[i - 1]) { return false }      // reviewDrawings → 排除
+        return true
+    }
+    var count = 0
+    let callNeedles = [
+        "drawings.remove(", "drawings.insert(", "drawings.append(",
+        "drawings.removeAll(", "drawings.removeFirst(", "drawings.removeLast(",
+        "drawings.popLast(", "drawings.swapAt(", "drawings.sort(",
+        "drawings.reverse(", "drawings.replaceSubrange(",
+    ]
+    for needle in callNeedles.map(Array.init) {
+        for i in chars.indices where startsBare(at: i, needle) { count += 1 }
+    }
+    let plusEquals = Array("drawings+=[")
+    for i in chars.indices where startsBare(at: i, plusEquals) { count += 1 }
+    let sub = Array("drawings[")
+    for i in chars.indices where startsBare(at: i, sub) {
+        var j = i + sub.count
+        var depth = 1                                              // 已消费开括号，从深度 1 起配对
+        while j < chars.count, depth > 0 {
+            if chars[j] == "[" { depth += 1 }
+            else if chars[j] == "]" { depth -= 1 }
+            j += 1
+        }
+        // 循环退出时 j 已越过匹配的 `]`（嵌套下标也配对到最外层），紧接着看是不是赋值。
+        guard j < chars.count, chars[j] == "=" else { continue }
+        if j + 1 < chars.count, chars[j + 1] == "=" { continue }  // `==` 是比较不是赋值
+        count += 1
+    }
+    return count
+}

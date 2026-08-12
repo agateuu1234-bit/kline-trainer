@@ -2,12 +2,16 @@
 #if canImport(UIKit)
 import SwiftUI
 
-/// 画线底栏（单行）：①「类型」键（收/展类型行）+ **③🗑 删除键（1b-i PR-4）**。
-/// ②🔒④↩⑤↪ 属 1b-ii，本期**一个占位都不渲染**（母 spec D19 / D24：不 ship 恒灰的未接线按钮）；
-/// 1b-ii 落 🔒 时插在「类型」与 🗑 之间。
+/// 画线底栏（单行）：①「类型」键 + **②🔒 锁定（1b-ii PR-1）** + ③🗑 删除。
+/// ④↩⑤↪ 属 1b-ii PR-2，本期**一个占位都不渲染**（母 spec D19 / D24：不 ship 恒灰的未接线按钮）。
 /// 与 TradeActionBar/ReviewControlBar 共享同一个 `BottomBarMetrics.height` 固定高度 → 三者切换零跳动。
 struct DrawingBottomBar: View {
     @Binding var typeRowExpanded: Bool
+    /// D71「锁定可用」谓词的结果。**本视图自己不判任何东西**——判据全在 `DrawingEditRouter`。
+    let lockEnabled: Bool
+    /// 选中线当前是否锁定 —— 只决定图标形态（闭锁 / 开锁），不参与可用性。
+    let lockIsOn: Bool
+    let onToggleLock: () -> Void
     /// D65「删除可用」谓词的结果。**本视图自己不判任何东西**——几何/locked/唯一性/复盘四个分量
     /// 都在 `DrawingEditRouter.canDelete` 里，视图只负责显示。
     let deleteEnabled: Bool
@@ -25,6 +29,11 @@ struct DrawingBottomBar: View {
                 }
             }
             .accessibilityLabel("类型")
+            Button(action: onToggleLock) {
+                Image(systemName: lockIsOn ? "lock" : "lock.open")
+            }
+                .accessibilityLabel(lockIsOn ? "解锁" : "锁定")
+                .disabled(!lockEnabled)
             Button(action: onDelete) { Image(systemName: "trash") }
                 .accessibilityLabel("删除")
                 .disabled(!deleteEnabled)
