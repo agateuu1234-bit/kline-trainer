@@ -96,8 +96,73 @@ R4-F2 当初要的性质不变，只是落点从 S2a 移到 S2b。
       → verify: 该函数的 `_REGISTRY_HAS_SQL` AST 反向守卫仍在且非空转
 - [x] 3. 相关 host 测试重写（凭据族整批删除，改为对判定函数直接断言）
 - [x] 4. lifecycle 的 ⑨⑬⑰ 授权半改成断言判定函数的返回值（不再有 `auth.via_empty_remnant`）
-- [ ] 5. 全套闸门 + codex
-- [ ] 6. S2b′：`reset_pilot_database` 单函数落地 + 9 档 + concurrency 3 档
+- [x] 5. 全套闸门（✅）+ codex（⛔ **未做**：`codex:adversarial-review` 在本 harness 里是
+      disable-model-invocation，只能由 user 亲自 `/codex:adversarial-review` 触发）
+- [x] 6. S2b′：`reset_pilot_database` 单函数落地 + 9 档 + concurrency 3 档
+
+## 五之三、Step 6（S2b′）的执行记录（2026-08-12）
+
+**分支** `feat/qmt-4a2b-s2b-drop`（从 S2a 最终态 `7b66151` 快进对齐）。
+
+### 落地的形状
+
+`reset_pilot_database(maint_conn, *, connect, db_name, seed, export_log_sha256,
+output_dir, reset_foreign_token) -> str` —— 一个函数体里走完
+「名字护栏 → 集群闸 → seed 锁 → 零对象例外 / 否则闸 0−/0/0b → 占用者预检 →
+实例复核 → 持连接封锁 → 紧贴复验 → DROP → 清凭据」。
+来路 `via_empty_remnant` 是**局部变量**；绑定/令牌那一条拿**本次调用的入参**在封锁下重跑。
+
+⭐ **S2a 那条明写接受的残留在这里偿还**：spec §4 的有向序列焊回一个函数体，
+由 `test_reset_welds_the_spec_order_into_one_function_body`（AST）守着。
+
+### 与参考分支（`feat/qmt-4a2b-s2-destructive-core` @ `e038bc0`）的三处实质差异
+
+1. **闸 0−/0/0b 抽成 `_assert_reset_gates_on(conn, …)`，两个使用点共用一份实现**
+   （授权那一刻 + 封锁下的复验）。参考分支那版复验写的是另一套判据
+   （比对 `_identity_triple` 快照），两份判据必然漂移 —— 与 `_has_qualified_intent_row`
+   当初被抽出来是同一条理由（R2-F1）。
+2. **§六 的判据改了，没照搬**：复验不再「和记下来的身份比对」，而是拿本次入参重跑。
+   连带两个 host 档的期望码变了：绑定被改 → `reset_foreign_token_required`
+   （旧：`binding_mismatch`）；foreign 路身份被改 → `reset_foreign_token_invalid`。
+3. **新增 lifecycle ㉟b**（§六 明写「㉟ 必须改判据别照搬」的落点）：㉟ 改的是 `seed`，
+   在复验里被**闸 0** 拦住，闸 0b/令牌那一段**一次都没求值**。㉟b 改绑定，
+   是唯一够得到那一段的档 —— 由变异实测坐实（见下 N3）。
+
+### 一处**有意的语义变化**（对外可观察，单列）
+
+窗口里**只改 `created_at`** 不再被拒。旧实现把身份记成三元组，故会拒；
+塌缩之后本次的放行理由是「绑定与调用方的两个标量相符」，而 `created_at` 不参与该理由
+（它只是令牌的原像之一，而这条路不需要令牌），目标实例 oid / 归属 / 绑定都没变 ——
+**当初批准销毁它的理由原样成立**。走令牌那条路不受影响（令牌由三元组派生）。
+由 `test_normal_reset_still_proceeds_when_only_created_at_changes_under_the_seal` 明写钉住。
+
+### 变异验证账本（**每一条都由控制者本人跑**，`cp` 还原）
+
+| # | 中和的判据 | 预期变红的**具名**档 | 实测 |
+|---|---|---|---|
+| N1 | 封锁下的正常路复验整段删掉 | 正常路复验族 | **5 红**：ownership / binding / foreign-identity / 恢复连接上限 / 「两处共用一份实现」 |
+| N2 | 共用闸核里的令牌分支中和成 `pass` | 令牌族 + 两条 §六 档 | **7 红**，含 `…revalidates_the_binding_under_the_seal` 与 `…identity_changes_under_the_seal` |
+| N3 | 封锁下的复验**只剩归属半**（砍掉绑定/令牌半），跑真 PG lifecycle | **只有 ㉟b** | **恰好 ㉟b 两条 FAIL（「竟然删掉了」——库真的被删了）**，㉟ 四条**全部照样 PASS** → 坐实 ㉟b 不是 ㉟ 的重复 |
+| N4 | 封锁（`CONNECTION LIMIT 0`）整条去掉，跑真 PG concurrency | **只有 Ⓓ** | **恰好 1 条 FAIL**：「竟然连进去并建了表 —— 于是一个已经不空的库会被 DROP 掉」（R10-F1 那条 critical 当场复现）|
+| N5 | DROP 之后的凭据清理改成 `pass` | ㉞ ㉞b + 两条 host | 真 PG **4 条 FAIL**（凭据没清 + 重建撞 intent 冲突），host **2 红** |
+
+### 闸门（本机实测，判绿读输出内容）
+
+| 闸 | 结果 |
+|---|---|
+| host 全量 `pytest backend/tests` | **755 passed**（S2a 717 + 本片 38）|
+| L2 真 PG `verify_pilot_db_lifecycle.py` | **39 档全绿**（S2a 32 + ⑨⑬⑰ 的 DROP 半 + ㉘ ㉜ ㉜b ㉞ ㉞b ㉟ ㉟b）|
+| L2 真 PG `verify_pilot_concurrency.py` | **10 档全绿**（7 + Ⓓ Ⓓb Ⓔ）|
+| L2 真 PG `verify_pilot_two_phase_create.py` | **28 档全绿** |
+| `tools/check_spec_consistency.py` / `--self-test` | 两条都过 |
+
+### ⛔ 本片**没有**做到的（如实登记）
+
+· **codex 对抗性评审两片都没跑**：`codex:adversarial-review` 在本 harness 里是
+  disable-model-invocation，Claude 调不动，必须由 user 亲自
+  `/codex:adversarial-review` 触发。**在拿到真 approve 之前，两片都不算收口。**
+· 「不数 autovacuum worker」那一向仍无常驻档（要改集群 `autovacuum_naptime`）。
+· `--init-cluster-marker` 幂等语义与孤儿 intent 清理仍在 S3。
 
 ## 五之二、Step 1–4 的执行记录（2026-08-12，提交 `6bde10f`）
 
