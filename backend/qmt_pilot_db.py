@@ -2257,11 +2257,15 @@ async def assert_db_allowed_for_reset(
     maint_conn, *, connect, db_name: str, seed: str,
     export_log_sha256: str, output_dir: str, reset_foreign_token: str | None,
 ) -> str:
-    """`--reset` 路径：闸 0− → 0 → 0b（不过则要令牌）全过才允许 DROP。
+    """`--reset` 路径的**判定**：闸 0− → 0 → 0b（不过则要令牌）全过才允许 DROP。
 
-    **返回被授权的那个实例 oid** —— `DROP DATABASE` 带不了谓词，而授权与 DROP 之间
-    同名库可以被删掉又重建。不把授权绑到实例上，`--reset` 会去删一个**从未被授权**的
-    替身（「凡是『这就是我那个库』的断言都要绑实例」的又一处落点）。
+    **返回被判定的那个实例 oid** —— `DROP DATABASE` 带不了谓词，而判定与 DROP 之间
+    同名库可以被删掉又重建。判定不绑实例，`--reset` 会去删一个**从未过闸**的替身
+    （「凡是『这就是我那个库』的断言都要绑实例」的又一处落点）。
+
+    ⚠️ **返回值同样不是授权、不是能力** —— 与 `try_empty_remnant_exception` 逐字同一条
+       （codex S2a-R1-F1）：oid 是公开信息，本模块没有任何东西会因为收到它而去 DROP。
+       真正销毁的 `reset_pilot_database`（S2b）自己调用本函数，结果留在函数内的局部变量里。
 
     ⚠️ **本函数不再交出「授权那一刻该库自称的身份」**（2026-08-12 塌缩，撤销 R3-F1 的
        `ResetGateOutcome`）。R3-F1 那条洞（靠绑定相符过的授权被别的身份的令牌接管）
@@ -2399,12 +2403,29 @@ async def _probe_absolutely_empty(maint_conn, connect, db_name: str):
     """开一条短连接，adopt 它，问这个库是不是【绝对空】。
 
     返回 `(是否空, 实例 oid, 是否真的把连接关掉了)`。
-    ⚠️ 第三项不是多余的（codex 4a-2a R2-F1 同族）：这条探测直接喂给 DROP 授权，
+    ⚠️ 第三项不是多余的（codex 4a-2a R2-F1 同族）：这条探测直接喂给零对象例外的判定，
        关不掉就意味着本进程还占着目标库的会话，随后的 DROP 会被它自己顶住。
+
+    ⚠️ **读失败必须归一成 `target_db_unreadable`，不得裸逃**（codex S2a-R2-F2）：
+       目标库被并发 DROP、权限变更、目录查询失败都会在 `_is_absolutely_empty` 里抛。
+       这是本模块同一族判据的最后一处漏网 —— `read_pilot_meta`、闸 2 的结构查询、
+       复用路径的活体判据（R2-F2）三处早就转了。裸异常会被 4c 兜成
+       `FAIL_INFRASTRUCTURE`，而 spec §9-1w 明令禁止把一次成功的 fail-closed 守卫
+       记成环境故障：操作者会去查基础设施，而真相是「这个库现在读不出来，拒绝销毁」。
+    ⚠️ **读失败的结论不许被 close 失败顶掉**：与 `assert_db_allowed_for_reset` 那条
+       「闸的结论不得被 close 失败顶掉」（O4-W2r1 M-2）是同一条规矩。
+       两种情形都是拒绝（fail-closed），差别只在给出的下一步动作对不对。
+       故本函数在读失败这条路上**不跑** `_assert_target_released`
+       —— 调用方那两处照旧只在拿到 `closed` 之后跑，各自的判别力不受影响。
     """
     conn, oid = await _open_target(maint_conn, connect, db_name)
     try:
         empty = await _is_absolutely_empty(conn)
+    except Exception as exc:
+        raise PilotDbBoundaryError(
+            "target_db_unreadable",
+            f"连进 {db_name!r} 之后读【绝对空】判据失败（{exc}）——"
+            f"证明不了它是不是空的，一律 fail-closed：拒绝销毁") from exc
     finally:
         closed = await _close_quietly(conn, db_name)
     return empty, oid, closed
@@ -2413,10 +2434,33 @@ async def _probe_absolutely_empty(maint_conn, connect, db_name: str):
 async def try_empty_remnant_exception(
     maint_conn, *, connect, db_name: str, seed: str,
 ) -> str | None:
-    """零对象例外 —— 返回**被授权销毁的那个实例 oid**，不适用则返回 None。
+    """零对象例外的**判定** —— 返回**被判定的那个实例 oid**，不适用则返回 None。
 
-    返回非 None = 六条全成立且 DROP 前的紧贴复查也通过 → 允许直接 DROP + 两阶段重建，
+    返回非 None = 六条**在判定这一刻**全成立 → 这个库走的是零对象例外那条路，
     **不进闸 0−/0/0b、不需要 `--reset-foreign`**（空库没有身份可确认、也没有数据可丢）。
+
+    ⚠️⚠️ **返回值不是授权，也不是能力**（codex S2a-R1-F1 逼出来的措辞更正；
+       上一版把它写成「被**授权销毁**的那个实例 oid」，那个措辞是错的）：
+       · 它是一个 oid 字符串，而 oid 是**公开信息** —— 任何人一句
+         `SELECT oid FROM pg_database WHERE datname = …` 就能拿到。
+         交出它不给任何人任何它本来没有的东西。
+       · 本模块里**没有任何东西**会因为收到这个值而去 DROP。
+         真正执行销毁的是 `reset_pilot_database`（S2b），而它**不收**这个值 ——
+         它自己调用本函数，把结果留在一个**函数内的局部变量**里。
+         这正是 2026-08-12 塌缩要买的东西：判定与销毁之间没有可传递的对象。
+       · 因此「拿到返回值 → 自己去 DROP」这条路的危险性**不在本函数**：
+         那样的调用方要自己写 `DROP DATABASE`，而它绕过的是整个模块，
+         不是绕过一道本模块能设的闸。Python 进程内不存在能力边界，
+         本模块通篇的立场是「把纪律写成机制」，而不是假装私有名是机制
+         —— 那正是这个洞前五轮加固失败的原因。
+
+    ⚠️ **本函数证明的是判定那一刻的事实，而这些事实会过期**（这一点必须说死）：
+       【绝对空】与 intent 凭据都可能在返回之后被改掉。把窗口关上的**唯一**地方是
+       `reset_pilot_database` 的封锁临界区：它持住一条目标库连接、把库封成
+       `CONNECTION LIMIT 0`、在封锁下**重查**【绝对空】+ intent 凭据 + 实例 oid，
+       然后在**不放开那条连接**的情况下走到 DROP。
+       ⛔ **本片（S2a）里那段临界区不存在** —— 它随 S2b 落地。
+       故在本片，本函数的返回值只证明「判定成立过」，不证明任何时刻的可销毁性。
 
     六条（**当且仅当**全部成立）：
       1. 本次带 `--reset`（由调用方保证：不带 `--reset` 时根本不调用本函数）

@@ -4585,6 +4585,85 @@ def test_remnant_exception_empty_probe_bottoms_out_at_the_whitelist_predicate():
 
 
 
+class _EmptyProbeReadFails(_EmptyOnProbe):
+    """连得进去，但【绝对空】那条目录读**抛异常**（并发 DROP / 权限变更 / 目录查询失败）。"""
+
+    def __init__(self, boom=None, **kw):
+        super().__init__(**kw)
+        self.boom = boom or RuntimeError(
+            "terminating connection due to administrator command")
+
+    async def fetch(self, query, *args):
+        if "SELECT cat, n FROM (" in query and "closure" not in query:
+            raise self.boom
+        return await super().fetch(query, *args)
+
+
+class _EmptyProbeReadAndCloseFail(_EmptyProbeReadFails):
+    async def close(self):
+        raise RuntimeError("connection reset by peer")
+
+
+def test_remnant_probe_read_failure_is_a_boundary_error_not_a_raw_exception():
+    """【绝对空】读失败 → `target_db_unreadable`，不得裸逃（codex S2a-R2-F2）。
+
+    ⚠️ 这是本模块**同一族判据的最后一处漏网**：复用路径的活体判据（R2-F2）、
+       闸 2 的结构查询、`read_pilot_meta` 三处早就把读失败转成
+       `target_db_unreadable` 了，唯独零对象例外的探测没转。
+       裸异常会被 4c 兜成 `FAIL_INFRASTRUCTURE`，而 spec §9-1w 明令禁止
+       把一次成功的 fail-closed 守卫记成环境故障 —— 恢复动作整个走错
+       （去查基础设施，而真相是「这个库现在读不出来，拒绝销毁」）。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_remnant(maint, _EmptyProbeReadFails()))
+    assert ei.value.code == "target_db_unreadable"
+
+
+def test_remnant_probe_read_failure_is_not_masked_by_a_close_failure():
+    """**刻意的不对称，钉住它**：读失败的结论不得被「关不掉连接」顶掉。
+
+    与 `test_close_failure_never_masks_the_gate_verdict`（O4-W2r1 M-2）同一条规矩 ——
+    拿到 `target_db_in_use` 的话，操作者会去查「谁连着这个库」，
+    而真相是「这条探测根本读不出来」。两种情形都是拒绝（fail-closed），
+    差别只在**给出的下一步动作对不对**。
+    ⚠️ codex S2a-R2-F2 的第二半建议「读失败时也要跑 `_assert_target_released`」——
+       那会让 close 失败顶掉读失败的结论，正是上面那条既有钉子禁止的形态，故不采纳。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_remnant(maint, _EmptyProbeReadAndCloseFail()))
+    assert ei.value.code == "target_db_unreadable", "读失败的结论被 close 失败顶掉了"
+
+
+def test_every_target_side_read_failure_maps_to_target_db_unreadable():
+    """**族级**：三条会连进目标库的路径，读失败一律归一到 `target_db_unreadable`。
+
+    ⚠️ 本仓记录在案的形态是「只修被点名的那一处」—— 这一条按**判据本身**覆盖全族，
+       新增一条会连目标库的路径而忘了归一时当场变红。
+    """
+    boom = RuntimeError("terminating connection due to administrator command")
+
+    class _MetaReadBoom(_FakeConn):
+        async def fetchval(self, query, *args):
+            if "to_regclass('public.pilot_meta') IS NOT NULL" in query:
+                raise boom
+            return await super().fetchval(query, *args)
+
+    cases = [
+        ("复用（闸 0− 读 pilot_meta）",
+         lambda: _reuse(_FakeConn(databases=["kline_pilot_probe"]), _MetaReadBoom())),
+        ("--reset 闸 0−（读 pilot_meta）",
+         lambda: _reset(_FakeConn(databases=["kline_pilot_probe"]), _MetaReadBoom())),
+        ("零对象例外的【绝对空】探测",
+         lambda: _remnant(_RemnantMaint(intent_rows=_intent()), _EmptyProbeReadFails())),
+    ]
+    for label, run in cases:
+        with pytest.raises(PilotDbBoundaryError) as ei:
+            asyncio.run(run())
+        assert ei.value.code == "target_db_unreadable", label
+
+
 def test_remnant_exception_closes_every_probe_connection():
     """两次探测都是短连接：留一条活着就会把紧接着的 DROP 顶住（spec O1-F2 规定 1）。"""
     maint = _RemnantMaint(intent_rows=_intent())
