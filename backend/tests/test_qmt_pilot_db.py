@@ -5141,12 +5141,15 @@ class _ResetMaint(_RemnantMaint):
     """维护连接：在 `_RemnantMaint`（答 intent 行）之上再答 `pg_stat_activity`。"""
 
     def __init__(self, target_sessions=(), late_sessions=(), drop_error=None,
-                 vanish_on_drop=False, seal_error=None, replace_on_drop=None, **kw):
+                 vanish_on_drop=False, seal_error=None, restore_error=None,
+                 replace_on_drop=None, **kw):
         kw.setdefault("intent_rows", _intent())
         super().__init__(**kw)
         # 「服务端执行了、客户端没收到回包」这一族（codex 4a-2/S2 R1-F1 / R1-F2）。
         self.vanish_on_drop = vanish_on_drop
         self.seal_error = seal_error
+        # 拒绝路径上「把封锁还回去」那条 ALTER 失败（codex 合并评审 R2-F1）。
+        self.restore_error = restore_error
         # 「DROP 生效了，但这个**名字**随即被另一个实例占住」（codex 4a-2/S2 R6-F1）。
         # 与 vanish_on_drop 是两回事：那个是名字整个没了。
         self.replace_on_drop = replace_on_drop
@@ -5187,6 +5190,10 @@ class _ResetMaint(_RemnantMaint):
             if self.replace_on_drop is not None:
                 self.live_db_oid = self.replace_on_drop
             raise self.drop_error
+        if ("ALTER DATABASE" in query.upper() and "LIMIT 0" not in query.upper()
+                and self.restore_error is not None):
+            self.executed.append(query)
+            raise self.restore_error
         if "CONNECTION LIMIT 0" in query.upper() and self.seal_error is not None:
             # 同族：ALTER 已经生效，只是 execute 抛了（codex 4a-2/S2 R1-F1）。
             self.executed.append(query)
@@ -5443,6 +5450,49 @@ def test_the_seal_is_restored_while_the_target_session_is_still_held():
     assert restores[-1] < tampered.closed_after_ops, (
         f"恢复的 ALTER 发在 close 之后（restore@{restores[-1]}，"
         f"close@{tampered.closed_after_ops}）—— 那时名字可能已经指向替身")
+
+
+def test_the_held_session_is_closed_even_when_restoring_the_seal_fails():
+    """恢复封锁失败时，**自己那条目标库会话照样要关**（codex 合并评审 R2-F1）。
+
+    ⚠️ **这是我上一轮修 F2 时自己引入的回归，如实登记**：把恢复挪到 close 之前之后，
+       `_restore_seal()` 一抛，`_close_quietly(target_conn)` 就再也到不了 ——
+       一次 fail-closed 的拒绝会把库**既留在封锁态、又被本进程占着**，
+       随后的重试连 DROP 都发不出去（会被我们自己顶住）。
+       「修 symptom 会挪动失败面」在本仓记录在案，这是又一次。
+    ⚠️ 抛出去的仍然是 `connection_limit_not_restored`：
+       「库被留在不可连状态」比「这次 reset 为什么被拒」更需要人立刻知道。
+    """
+    maint = _ResetMaint(late_sessions=[_session(pid=555)],
+                        restore_error=_PgError("08006", "connection reset"))
+    # ⚠️ **持住的那条必须是独立对象**：三次连接共用一个假件时，探测那次的 close
+    #    会把 `closed` 先置成 True，这条断言就恒真了（写第一版时当场踩到）。
+    probe = _EmptyOnProbe(non_empty_probes=[1], meta_rows=_full_meta_rows())
+    held = _FakeConn(meta_rows=_full_meta_rows())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reset_db(maint, targets=[probe, probe, held]))
+    assert ei.value.code == "connection_limit_not_restored"
+    assert held.closed is True, \
+        "恢复失败之后没关掉自己那条目标库会话 —— 库既被封着又被我们自己占着"
+    assert _drops(maint) == []
+
+
+def test_a_close_failure_does_not_mask_the_revalidation_verdict():
+    """**刻意的不对称，钉住它**：复验拒绝时，关不掉会话不得顶掉那个结论。
+
+    与 `test_close_failure_never_masks_the_gate_verdict`（O4-W2r1 M-2）同一条规矩。
+    ⚠️ codex 合并评审 R2-F1 的第二半建议「close 失败也要显式上报」——
+       那会让 `target_db_in_use` 顶掉 `not_owned`，操作者于是去查「谁连着这个库」，
+       而真相是「这个库在窗口里被改成别人的了」。故不采纳。
+       关不掉这件事仍由 `_close_quietly` 打警告，且此时会话还活着反而**护住**了这个库。
+    """
+    maint = _ResetMaint()
+    ok = _EmptyOnProbe(non_empty_probes=[1], meta_rows=_full_meta_rows())
+    tampered = _UncloseableConn(meta_rows=_full_meta_rows(seed="someone_else"))
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reset_db(maint, targets=[ok, ok, tampered]))
+    assert ei.value.code == "not_owned", "复验的结论被 close 失败顶掉了"
+    assert _drops(maint) == []
 
 
 def test_reset_restores_the_databases_prior_connection_limit_when_refused():

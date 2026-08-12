@@ -2945,11 +2945,18 @@ async def reset_pilot_database(
             #    与「发 ALTER」之间把同名库删掉重建，于是这段代码去改一个**从未过闸**的
             #    替身的配置。持着会话期间别人删不掉这个库（DROP 会撞 55006），
             #    名字↔实例因此是钉死的，这里的恢复不需要也不该再核 oid。
-            if _sealed and not _proof_passed:
-                await _restore_seal(maint_conn, db_name, _prior)
-                _sealed = False
-            # 自己的会话必须先放掉，否则下面的 DROP 会被**我们自己**顶住。
-            _held_closed = await _close_quietly(target_conn, db_name)
+            # ⚠️ **恢复抛不抛，自己的会话都必须关**（codex 合并评审 R2-F1 ——
+            #    这是我上一轮把恢复挪到 close 之前时**自己引入的回归**，如实登记）：
+            #    `_restore_seal()` 一抛就跳过 close 的话，一次 fail-closed 的拒绝会把库
+            #    **既留在封锁态、又被本进程占着**，随后的重试连 DROP 都发不出去
+            #    （会被我们自己顶住）。「修 symptom 会挪动失败面」在本仓记录在案。
+            try:
+                if _sealed and not _proof_passed:
+                    await _restore_seal(maint_conn, db_name, _prior)
+                    _sealed = False
+            finally:
+                # 自己的会话必须放掉，否则下面的 DROP 会被**我们自己**顶住。
+                _held_closed = await _close_quietly(target_conn, db_name)
         _assert_target_released(_held_closed, db_name)
 
         # 规定 2：一条朴素的 DROP，不带 FORCE；失败**一次都不重试**。
