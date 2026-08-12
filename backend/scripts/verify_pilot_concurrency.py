@@ -45,6 +45,7 @@
 ⚠️ **每一次运行都要 `QMT_VERIFY_ALLOW_DESTRUCTIVE=1`**（codex R7-F1）——「本地」不是
    「可弃」。指向非本地集群还要**另外**设 `QMT_VERIFY_ALLOW_REMOTE=1`。
    退出码 8 = 同集群上已有另一个同前缀的验收在跑。
+   退出码 9 = 本脚本要用的固定名角色在运行之前就已存在（不是本次造的，绝不删）。
 """
 from __future__ import annotations
 
@@ -106,6 +107,18 @@ _EXPECTED_SCENARIOS = ("Ⓐ", "Ⓐb", "Ⓑ", "Ⓑb", "Ⓑd", "Ⓑc", "Ⓒ", "Ⓓ
 # 所以这一档必须用一个真的普通角色，否则测的是「超级用户能不能连」——恒真。
 _PLAIN_ROLE = "zzqmtverify_plain"
 _PLAIN_PASSWORD = "zzqmtverify"
+# Ⓔ 用的属主角色（非超级用户、有 CREATEDB）。
+_OWNER_ROLE = "zzqmtverify_owner"
+
+# 本脚本会 `CREATE ROLE` / `DROP ROLE` 的**固定名**角色。
+# ⚠️ **这是与 harness 那条「精确白名单、绝不按前缀盲删」完全同源的一条纪律，
+#    只是作用在角色上**（codex 合并评审 R3-F2）。此前这里是无条件
+#    `DROP ROLE IF EXISTS zzqmtverify_plain` —— 与 4a-2b/S1 R2-F1 那条**真栽过**的
+#    「无条件 DROP DATABASE IF EXISTS zzqmtverify_unrelated」是同一个形态：
+#    在共享集群上，光是启动本脚本就会把一个**不是本次造的**同名角色连同它的
+#    登录/权限状态一起抹掉，而那时任何档位都还没跑、任何归属都还没证明。
+#    **固定名不是归属证明。**
+_OWNED_ROLES = (_PLAIN_ROLE, _OWNER_ROLE)
 
 
 async def _apply_cluster_schema(conn) -> None:
@@ -135,6 +148,26 @@ async def _timed_try_seed_lock(conn, seed: str) -> tuple[bool, float]:
     t0 = time.monotonic()
     got = await _try_seed_lock(conn, seed)
     return got, time.monotonic() - t0
+
+
+async def assert_roles_are_not_preexisting(conn) -> int | None:
+    """前置清场：`_OWNED_ROLES` 里的角色**若已经存在就拒绝运行**（R3-F2）。
+
+    ⚠️ 判据是「本次运行之前它就在」——那说明它**不是本脚本这次造的**，
+       归属证明不成立，绝不删。与 `assert_extra_dbs_are_not_preexisting`
+       （库那一侧）同语义、同逃生口：明确告诉操作者手工删哪一个再重跑。
+    """
+    rows = await conn.fetch(
+        "SELECT rolname FROM pg_roles WHERE rolname = ANY($1::text[])",
+        list(_OWNED_ROLES))
+    if rows:
+        names = sorted(r["rolname"] for r in rows)
+        print(f"拒绝运行：这些角色在本次运行之前就已经存在：{names}——"
+              f"本脚本会 CREATE/DROP 它们，而它们不是本次造的，归属证明不成立，绝不删。"
+              f"确认无用后请手工执行 "
+              f"{'; '.join(f'DROP ROLE {n}' for n in names)} 再重跑。", file=sys.stderr)
+        return 9
+    return None
 
 
 async def main() -> int:
@@ -180,6 +213,9 @@ async def main() -> int:
         await harness.purge_metadata_for(pre, _CONC_DBS)
         if swept:
             print(f"（前置清场：删掉上一次运行残留的 {swept}）")
+        # ⚠️ 角色这一侧的同源守卫（R3-F2）：固定名不是归属证明。
+        if (rc := await assert_roles_are_not_preexisting(pre)) is not None:
+            return rc
     finally:
         await pre.close()
 
@@ -432,7 +468,6 @@ async def main() -> int:
     db_d = f"kline_pilot_{seed_d}"
     conn_m = await asyncpg.connect(base_dsn)
     try:
-        await conn_m.execute(f"DROP ROLE IF EXISTS {quote_ident(_PLAIN_ROLE)}")
         await conn_m.execute(
             f"CREATE ROLE {quote_ident(_PLAIN_ROLE)} LOGIN PASSWORD '{_PLAIN_PASSWORD}'")
         await conn_m.execute("DROP DATABASE IF EXISTS " + quote_ident(db_d))
@@ -544,7 +579,6 @@ async def main() -> int:
     db_db = f"kline_pilot_{seed_db}"
     conn_m2 = await asyncpg.connect(base_dsn)
     try:
-        await conn_m2.execute(f"DROP ROLE IF EXISTS {quote_ident(_PLAIN_ROLE)}")
         await conn_m2.execute(
             f"CREATE ROLE {quote_ident(_PLAIN_ROLE)} LOGIN PASSWORD '{_PLAIN_PASSWORD}'")
         await conn_m2.execute("DROP DATABASE IF EXISTS " + quote_ident(db_db))
@@ -737,11 +771,10 @@ async def main() -> int:
     print("Ⓔ 非超级用户维护角色：破坏性动作之前就被挡住，且什么都没留下")
     seed_e = "conc_e1"
     db_e = f"kline_pilot_{seed_e}"
-    owner = "zzqmtverify_owner"
+    owner = _OWNER_ROLE
     sup = await asyncpg.connect(base_dsn)
     try:
         await sup.execute("DROP DATABASE IF EXISTS " + quote_ident(db_e))
-        await sup.execute(f"DROP ROLE IF EXISTS {quote_ident(owner)}")
         await sup.execute(
             f"CREATE ROLE {quote_ident(owner)} LOGIN CREATEDB PASSWORD '{_PLAIN_PASSWORD}'")
         await sup.execute("CREATE DATABASE " + quote_ident(db_e)
