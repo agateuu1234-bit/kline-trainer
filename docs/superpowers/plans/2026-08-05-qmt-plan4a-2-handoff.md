@@ -14,8 +14,18 @@
 | 片 | 内容 | 状态 |
 |---|---|---|
 | **S1** | 共用护栏 + 只读档位（**零生产代码改动**） | ✅ MERGED **#162**（main `567987b`） |
-| **S2** | 零对象例外 + `authorize_reset` + `reset_pilot_database` + 授权登记表 + 封锁统一（R15-F1） | **本 PR** |
+| **S2a** | 判定 helper（零对象例外 + 闸 0−/0/0b + 绑定标量）+ 32 档只到判定为止的真 PG | **本 PR** |
+| **S2b′** | `reset_pilot_database` 单函数（封锁临界区 + DROP + 清凭据）+ 9 档破坏性真 PG + concurrency 3 档 | 未开始 |
 | **S3** | `--init-cluster-marker` + 孤儿清理（含 R9-F1 / R14-F1） | 未开始 |
+
+> ⛔⛔ **本文件 §一–§七（含那张验收清单）是 2026-08-09 的原文，对 S2a 已经不适用。**
+> 2026-08-12 的**塌缩重构**删掉了整套「可传递的授权凭据」，
+> `authorize_reset` / `ResetAuthorization` / `_mint_authorization` / `ResetGateOutcome`
+> 这些名字在代码里**已经不存在**；`reset_pilot_database` / `_drop_pilot_database`
+> 则要到 S2b′ 才有。原文里凡是提到这些名字、以及「39 档 / 10 档」的行，
+> 照着做一定对不上。
+> · 塌缩的由来与设计：`2026-08-12-qmt-4a2b-reset-api-collapse.md`
+> · **S2a 该跑的验收清单**：`2026-08-12-qmt-4a2b-s2a-acceptance.md`（用那一份，别用下面那份）
 
 ⛔ **PR #161 在三片全部合并之前不要关闭** —— 它是唯一完整记录 R1–R15 账本与
 三个生产缺陷的地方。三片合完再关，并在关闭评论里指向那份重打包计划。

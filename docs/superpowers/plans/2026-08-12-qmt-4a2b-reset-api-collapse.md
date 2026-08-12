@@ -88,16 +88,61 @@ R4-F2 当初要的性质不变，只是落点从 S2a 移到 S2b。
 
 ## 五、Steps
 
-- [ ] 1. S2a 上删掉整套凭据机器**外加 `authorize_reset`**（见 §三之二）
+- [x] 1. S2a 上删掉整套凭据机器**外加 `authorize_reset`**（见 §三之二）
       → verify: `ResetAuthorization` / `_RESET_CAPABILITY` / `_MINTED_AUTHORIZATIONS` /
       `_MintedFacts` / `_mint_authorization` / `ResetGateOutcome` / `authorize_reset`
       七个符号在 `backend/` 下 grep 为 0（注释里的历史叙述除外，但不许有悬空引用）
-- [ ] 2. `assert_db_allowed_for_reset` 退回返回 `str`（撤销 R3-F1 的 `ResetGateOutcome`）
+- [x] 2. `assert_db_allowed_for_reset` 退回返回 `str`（撤销 R3-F1 的 `ResetGateOutcome`）
       → verify: 该函数的 `_REGISTRY_HAS_SQL` AST 反向守卫仍在且非空转
-- [ ] 3. 相关 host 测试重写（凭据族整批删除，改为对判定函数直接断言）
-- [ ] 4. lifecycle 的 ⑨⑬⑰ 授权半改成断言判定函数的返回值（不再有 `auth.via_empty_remnant`）
+- [x] 3. 相关 host 测试重写（凭据族整批删除，改为对判定函数直接断言）
+- [x] 4. lifecycle 的 ⑨⑬⑰ 授权半改成断言判定函数的返回值（不再有 `auth.via_empty_remnant`）
 - [ ] 5. 全套闸门 + codex
 - [ ] 6. S2b′：`reset_pilot_database` 单函数落地 + 9 档 + concurrency 3 档
+
+## 五之二、Step 1–4 的执行记录（2026-08-12，提交 `6bde10f`）
+
+### 与计划的三处偏离（都是执行中才显形的，逐条交代）
+
+1. **多删了 `_identity_triple`**。它是 `ResetGateOutcome.bound_identity` 的唯一生产者，
+   `ResetGateOutcome` 一删它就是孤儿。连带删掉 `import weakref` 与
+   `from typing import NamedTuple`（模块里再无其他使用点）。
+2. **多加了一处生产行为：`assert_cluster_allowed` 下沉进 `try_empty_remnant_exception`。**
+   ⚠️ 这不是纯删除，单列出来。零对象例外的第 4 条（集群闸已全过）此前由
+   `authorize_reset` 代跑 —— 那正是 codex 4a-2b R1-F1 修掉的东西。删掉那个入口而不下沉，
+   第 4 条就退回成「写在 docstring 里、由调用方保证」，而这条路径的下一步是不可逆的
+   `DROP DATABASE`。排在「库名全等」判据**之后**：名字不是本次 seed 的库恒答「不适用」，
+   不授权任何东西，没有理由为它去连一遍同侪库。
+3. **lifecycle ⑨ 多加了一个对照半**（`⑨-对照`）：同一份残骸走闸 0−/0/0b 必须判
+   `not_owned`。没有它，「例外返回了 oid」证明不了例外**有存在的必要** ——
+   而它存在的全部理由就是「闸 0− 对残骸只会判 not_owned」。host 层同理
+   （`test_the_empty_remnant_escape_hatch_is_the_only_thing_that_can_clear_a_remnant`）。
+
+### 变异验证账本（**每一条都由控制者本人跑**，`cp` 还原，从不用 `git checkout`）
+
+| # | 中和的判据 | 预期变红的**具名**测试 | 实测 |
+|---|---|---|---|
+| M1 | 删掉 `try_empty_remnant_exception` 里的 `assert_cluster_allowed` | 集群闸两档 | **恰好 2 红**：`test_remnant_exception_enforces_the_cluster_gate_itself` / `..._runs_the_cluster_gate_before_anything_touches_the_target`（其余 375 绿）|
+| M2 | `assert_db_allowed_for_reset` 的 `return oid` → `return "0"` | 三个「交回本实例 oid」档 | **恰好 3 红**：`test_reset_correct_token_allowed…` / `test_reset_binding_match…` / `test_reset_does_not_require_the_registry_proof` |
+| M2-L2 | 同上，跑真 PG lifecycle | ⑬ ⑰ ㉒ ㉓ 四档 | **恰好 4 条 FAIL**，报文逐条打印「实得 '0'，该库当前 oid='4709…'」 |
+| M3a | 在模块里把 `class ResetAuthorization` 造回来 | 两颗塌缩守卫 | **恰好 2 红**：`…machinery_is_gone_from_the_module` + `…no_production_file_reintroduces…` |
+| M3b | 在 `scripts/verify_pilot_db_lifecycle.py` 里引 `_m._mint_authorization` | **只有**仓库级那一颗 | **恰好 1 红**（模块级那颗仍绿）→ 证明两颗守卫**各自可分辨**，不是一颗的复制品 |
+| M4 | 把扫描器 `_collapsed_symbol_hits` 中和成 `return []` | 扫描器的正向自检 | **恰好 1 红**：`test_collapsed_symbol_scanner_actually_discriminates`；⚠️ 而两颗**使用**它的守卫**照样全绿** —— 这正是自检存在的全部理由（本仓记录在案的「机械检查器被它该抓的损坏禁用了自身解析器 → 静默全绿」）|
+| M5a | `try_empty_remnant_exception` 开头直接 `return None` | 例外族 + 逃生口对照 | 13 红（整个函数被打死，含 `…escape_hatch…` 的第一句断言）|
+| M5a-L2 | 同上，跑真 PG lifecycle | **只有 ⑨** | **恰好 1 条 FAIL（⑨）**；⑨b / ⑨c / ㉝ / ㉛ 那四条「例外不适用」**全部照样 PASS** —— 这就是本仓「一族全是『拒了』时，一条恒 None 的实现在每一档看起来都在正常工作」的当场复现，⑨ 是唯一钉得住它的正向档 |
+| M5c | 让闸 0− 把「没有 `pilot_meta` 表」的残骸当成合规归属放行 | 逃生口对照的**第二句** | **恰好 2 红**：`test_gate_0minus_missing_pilot_meta_table_is_not_owned` + `…escape_hatch…`（后者死在 `DID NOT RAISE`，正是第二句）|
+
+⚠️ **一条没能证明的**：M1（集群闸下沉）在**真 PG 上没有任何档变红** ——
+lifecycle 每个 remnant 档的维护库都写了合法 marker，没有「标记缺失 + 走例外」这种档。
+故「集群闸下沉」这一条**只有 host 层证据**，L2 层零覆盖，如实登记。
+
+### 闸门（本机实测，判绿读输出内容）
+
+| 闸 | 结果 |
+|---|---|
+| host 全量 `pytest backend/tests` | **717 passed**（基线 727；净 −10 = 删 9 个 test 函数 −7 个 parametrize 档 +6 个新 test）|
+| L2 真 PG `verify_pilot_db_lifecycle.py` | **32 档 / 68 条断言 / 0 FAIL**，**连跑三遍末行完全一致** |
+| L2 真 PG `verify_pilot_two_phase_create.py` | **28 档全绿** |
+| L2 真 PG `verify_pilot_concurrency.py` | **7 档全绿**（本片不动它）|
 
 ## 六、⚠️ 必须在 S2b′ 复验的一条
 
