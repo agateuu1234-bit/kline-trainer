@@ -1173,10 +1173,17 @@ ON CONFLICT (dbname) DO UPDATE
     --    很远的未来值让这行永远「新鲜」、永远抢不走；很远的过去值让一行**活着的**
     --    intent 立刻可被别人接管。而这一行是 DROP 授权，有效期不能由调用方说了算。
     --    `inserted_at` 由库自己的 `now()` 写入，抢占时一并刷新。
+    -- ⚠️ **比较用 `statement_timestamp()` 而不是 `now()`**（codex S2a-R4-F2，真 PG 15 实测）：
+    --    `now()` 是**事务开始时刻**。维护连接处在长事务里时它冻在过去，
+    --    一行真实已过期的凭据会被量成「还新鲜」。读侧那条（`_READ_INTENT_SQL`）
+    --    的后果是**放行一次本该过期的销毁授权**，这里的后果是**该抢的抢不走**；
+    --    两处判的是同一条 TTL 语义，故用**同一个**时钟源，不留漂移。
+    -- ⚠️ 写入 `inserted_at` 仍用 `now()`：列的 DEFAULT 就是 `now()`（4a-1 的结构闸钉着），
+    --    两边必须一致；而长事务里写 `now()` 只会让行显得更老、更早过期 —— 保守方向。
     --    （这一改顺带干掉了 R18 那段 `to_timestamp(created_at, 'YYYYMMDD"T"HH24MISSUS')`
     --     解析：本工具写的 ISO-8601 basic 格式 PostgreSQL 隐式转换认不了，
     --     曾因 `OR` 短路而**从未被真正求值过**。判据换源之后那条路径不复存在。）
-    OR EXTRACT(EPOCH FROM (now() - public.pilot_create_intent.inserted_at)) >= $5
+    OR EXTRACT(EPOCH FROM (statement_timestamp() - public.pilot_create_intent.inserted_at)) >= $5
 RETURNING run_id
 """
 
@@ -2285,11 +2292,15 @@ async def assert_db_allowed_for_reset(
     maint_conn, *, connect, db_name: str, seed: str,
     export_log_sha256: str, output_dir: str, reset_foreign_token: str | None,
 ) -> str:
-    """`--reset` 路径：闸 0− → 0 → 0b（不过则要令牌）全过才允许 DROP。
+    """`--reset` 路径的**判定**：闸 0− → 0 → 0b（不过则要令牌）全过才允许 DROP。
 
-    **返回被授权的那个实例 oid** —— `DROP DATABASE` 带不了谓词，而授权与 DROP 之间
-    同名库可以被删掉又重建。不把授权绑到实例上，`--reset` 会去删一个**从未被授权**的
-    替身（「凡是『这就是我那个库』的断言都要绑实例」的又一处落点）。
+    **返回被判定的那个实例 oid** —— `DROP DATABASE` 带不了谓词，而判定与 DROP 之间
+    同名库可以被删掉又重建。判定不绑实例，`--reset` 会去删一个**从未过闸**的替身
+    （「凡是『这就是我那个库』的断言都要绑实例」的又一处落点）。
+
+    ⚠️ **返回值同样不是授权、不是能力** —— 与 `try_empty_remnant_exception` 逐字同一条
+       （codex S2a-R1-F1）：oid 是公开信息，本模块没有任何东西会因为收到它而去 DROP。
+       真正销毁的 `reset_pilot_database`（S2b）自己调用本函数，结果留在函数内的局部变量里。
 
     ⚠️ **本函数不再交出「授权那一刻该库自称的身份」**（2026-08-12 塌缩，撤销 R3-F1 的
        `ResetGateOutcome`）。R3-F1 那条洞（靠绑定相符过的授权被别的身份的令牌接管）
@@ -2389,7 +2400,8 @@ def _assert_reset_foreign_token(meta: dict[str, str],
 #   · 必须取 `create_confirmed` 并要求它为 true（O4-R8-C2）——
 #     intent 行写在 `CREATE DATABASE` **之前**，未确认的行证明不了「这个库是本次建的」；
 #     拿它当授权会去 DROP **别人建的**同名空库，无 pilot_meta 归属、无 --reset-foreign 令牌。
-# ⚠️ 新鲜度只认**库自己的时钟**（O4-R23-C1）：年龄由 `now() - inserted_at` 在库里算出来，
+# ⚠️ 新鲜度只认**库自己的时钟**（O4-R23-C1）：年龄由 `statement_timestamp() - inserted_at`
+#    在库里算出来，
 #    调用方**给不进来**一个 `now`。`created_at` 是调用方传进来的字符串，数据库既不生成也不
 #    校验 —— 很远的未来值让这行永远「新鲜」、永远抢不走；很远的过去值让活着的行立刻可被接管。
 #    而这一行是 DROP 授权，有效期不能由调用方说了算。
@@ -2398,7 +2410,7 @@ def _assert_reset_foreign_token(meta: dict[str, str],
 #    陈旧的行会为那个全新的、不是我们建的库背书 —— 而它是 DROP 授权（O4-R21-C1 / R25-C1）。
 _READ_INTENT_SQL = """
 SELECT i.seed, i.create_confirmed, i.db_oid::text AS intent_db_oid,
-       EXTRACT(EPOCH FROM (now() - i.inserted_at))::bigint AS age_seconds
+       EXTRACT(EPOCH FROM (statement_timestamp() - i.inserted_at)) AS age_seconds
   FROM public.pilot_create_intent i WHERE i.dbname = $1
 """
 
@@ -2407,17 +2419,43 @@ async def _has_qualified_intent_row(maint_conn, db_name: str, *, seed: str, oid:
     """零对象例外第 6 条：有没有一行「新鲜、已确认、且绑在**这个实例**上」的凭据。
 
     ⚠️ 抽成一个函数是因为它有**两个**使用点（codex 4a-2/S2 R2-F1）：
-       授权时判一次（`try_empty_remnant_exception`），DROP 前在封锁下**再判一次**
-       （**S2b 的 `_drop_pilot_database`**，本片不含）—— 这一条与【绝对空】一样会过期：
+       判定时判一次（`try_empty_remnant_exception`），DROP 前在封锁下**再判一次**
+       （**S2b 的 `reset_pilot_database`**，本片不含）—— 这一条与【绝对空】一样会过期：
        凭据可以被别的运行清掉、被换成指向另一个实例的行、或者就是过了 TTL。
        两处各写一份判据必然漂移，而漂移的方向恰好会让复验那一处失去判别力
        —— 本仓记录在案的毛病。
+
+    ⚠️ **年龄必须落在 `[0, TTL)`，负数一律判掉**（codex S2a-R2-F2）：
+       `inserted_at` 由库自己的 `now()` 写入，正常情况下不可能在未来 —— 但**时钟回拨、
+       从备份还原、人工修表**都会造出未来值。那时 `now() - inserted_at` 为负，
+       只判上界的写法（`age < TTL`）会把它当成「刚写下的、最新鲜的」凭据，
+       于是 TTL 把销毁授权窗口从「永久」收窄到 24h 这条保证（spec O4-F2）**整个失效**：
+       一行不可能的时间戳换来一张永不过期的 DROP 授权。
+    ⚠️ 判掉之后那个空残骸会**暂时清不掉**（时钟修好或 TTL 追上之前）——
+       这是有意的取舍，不是 R55-F1 那种锁死：
+       · 它是**自愈**的（时钟一正常就恢复），也不影响有 `pilot_meta` 的库
+         （那些走闸 0−/0/0b，根本不看这一行）；
+       · 而反方向的代价是**拿一个不可能的时间戳去 DROP 一个库**。
+         在一条不可逆的路径上，宁可暂时拒绝。
+    ⚠️ 抢占那一侧（`_INSERT_INTENT_SQL` 的 `>= $5`）不用改：负年龄在那里的效果是
+       「抢不走这一行」，本来就是 fail-closed 的方向。两侧的不对称是**有意的**。
+
+    ⚠️ **年龄两侧都不许取整**（codex S2a-R3-F1，真 PG 15 实测）：
+       上一版在 SQL 里写 `::bigint`、在 Python 里再套一层 `int()` ——
+       `::bigint` 是**四舍五入不是截断**（`(-0.1)::bigint = 0`），`int(-0.1)` 也是 0。
+       于是一行「比 `now()` 早不到半秒」的**未来** `inserted_at` 会被算成 age 0，
+       原样过掉上面那条下界检查 —— 下界这条修复整个被抹掉。
+       两层取整都已去掉：SQL 返回原始的分数秒（PG 15 上是 `numeric` → `Decimal`），
+       Python 直接比较。
+       ⚠️ 安全增量诚实说只有半秒（真正危险的是**很远**的未来值，那一档一直判得掉）；
+          修它的理由是**代码要和自己写下的保证一致** —— 本仓反复栽的
+          「宣称的保证 > 实际提供的保证」正是这一类。
     """
     rows = await maint_conn.fetch(_READ_INTENT_SQL, db_name)
     return any(r["seed"] == seed
                and r["create_confirmed"]
                and r["intent_db_oid"] == oid
-               and int(r["age_seconds"]) < INTENT_TTL_SECONDS
+               and 0 <= r["age_seconds"] < INTENT_TTL_SECONDS
                for r in rows)
 
 
@@ -2425,12 +2463,29 @@ async def _probe_absolutely_empty(maint_conn, connect, db_name: str):
     """开一条短连接，adopt 它，问这个库是不是【绝对空】。
 
     返回 `(是否空, 实例 oid, 是否真的把连接关掉了)`。
-    ⚠️ 第三项不是多余的（codex 4a-2a R2-F1 同族）：这条探测直接喂给 DROP 授权，
+    ⚠️ 第三项不是多余的（codex 4a-2a R2-F1 同族）：这条探测直接喂给零对象例外的判定，
        关不掉就意味着本进程还占着目标库的会话，随后的 DROP 会被它自己顶住。
+
+    ⚠️ **读失败必须归一成 `target_db_unreadable`，不得裸逃**（codex S2a-R2-F2）：
+       目标库被并发 DROP、权限变更、目录查询失败都会在 `_is_absolutely_empty` 里抛。
+       这是本模块同一族判据的最后一处漏网 —— `read_pilot_meta`、闸 2 的结构查询、
+       复用路径的活体判据（R2-F2）三处早就转了。裸异常会被 4c 兜成
+       `FAIL_INFRASTRUCTURE`，而 spec §9-1w 明令禁止把一次成功的 fail-closed 守卫
+       记成环境故障：操作者会去查基础设施，而真相是「这个库现在读不出来，拒绝销毁」。
+    ⚠️ **读失败的结论不许被 close 失败顶掉**：与 `assert_db_allowed_for_reset` 那条
+       「闸的结论不得被 close 失败顶掉」（O4-W2r1 M-2）是同一条规矩。
+       两种情形都是拒绝（fail-closed），差别只在给出的下一步动作对不对。
+       故本函数在读失败这条路上**不跑** `_assert_target_released`
+       —— 调用方那两处照旧只在拿到 `closed` 之后跑，各自的判别力不受影响。
     """
     conn, oid = await _open_target(maint_conn, connect, db_name)
     try:
         empty = await _is_absolutely_empty(conn)
+    except Exception as exc:
+        raise PilotDbBoundaryError(
+            "target_db_unreadable",
+            f"连进 {db_name!r} 之后读【绝对空】判据失败（{exc}）——"
+            f"证明不了它是不是空的，一律 fail-closed：拒绝销毁") from exc
     finally:
         closed = await _close_quietly(conn, db_name)
     return empty, oid, closed
@@ -2439,10 +2494,33 @@ async def _probe_absolutely_empty(maint_conn, connect, db_name: str):
 async def try_empty_remnant_exception(
     maint_conn, *, connect, db_name: str, seed: str,
 ) -> str | None:
-    """零对象例外 —— 返回**被授权销毁的那个实例 oid**，不适用则返回 None。
+    """零对象例外的**判定** —— 返回**被判定的那个实例 oid**，不适用则返回 None。
 
-    返回非 None = 六条全成立且 DROP 前的紧贴复查也通过 → 允许直接 DROP + 两阶段重建，
+    返回非 None = 六条**在判定这一刻**全成立 → 这个库走的是零对象例外那条路，
     **不进闸 0−/0/0b、不需要 `--reset-foreign`**（空库没有身份可确认、也没有数据可丢）。
+
+    ⚠️⚠️ **返回值不是授权，也不是能力**（codex S2a-R1-F1 逼出来的措辞更正；
+       上一版把它写成「被**授权销毁**的那个实例 oid」，那个措辞是错的）：
+       · 它是一个 oid 字符串，而 oid 是**公开信息** —— 任何人一句
+         `SELECT oid FROM pg_database WHERE datname = …` 就能拿到。
+         交出它不给任何人任何它本来没有的东西。
+       · 本模块里**没有任何东西**会因为收到这个值而去 DROP。
+         真正执行销毁的是 `reset_pilot_database`（S2b），而它**不收**这个值 ——
+         它自己调用本函数，把结果留在一个**函数内的局部变量**里。
+         这正是 2026-08-12 塌缩要买的东西：判定与销毁之间没有可传递的对象。
+       · 因此「拿到返回值 → 自己去 DROP」这条路的危险性**不在本函数**：
+         那样的调用方要自己写 `DROP DATABASE`，而它绕过的是整个模块，
+         不是绕过一道本模块能设的闸。Python 进程内不存在能力边界，
+         本模块通篇的立场是「把纪律写成机制」，而不是假装私有名是机制
+         —— 那正是这个洞前五轮加固失败的原因。
+
+    ⚠️ **本函数证明的是判定那一刻的事实，而这些事实会过期**（这一点必须说死）：
+       【绝对空】与 intent 凭据都可能在返回之后被改掉。把窗口关上的**唯一**地方是
+       `reset_pilot_database` 的封锁临界区：它持住一条目标库连接、把库封成
+       `CONNECTION LIMIT 0`、在封锁下**重查**【绝对空】+ intent 凭据 + 实例 oid，
+       然后在**不放开那条连接**的情况下走到 DROP。
+       ⛔ **本片（S2a）里那段临界区不存在** —— 它随 S2b 落地。
+       故在本片，本函数的返回值只证明「判定成立过」，不证明任何时刻的可销毁性。
 
     六条（**当且仅当**全部成立）：
       1. 本次带 `--reset`（由调用方保证：不带 `--reset` 时根本不调用本函数）

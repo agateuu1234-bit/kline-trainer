@@ -65,8 +65,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import _pilot_verify_harness as harness  # noqa: E402
 from qmt_pilot_db import (INTENT_TTL_SECONDS, MARKER_PURPOSE,  # noqa: E402
                           PILOT_META_KEYS, PilotClusterBoundaryError,
-                          PilotDbBoundaryError, assert_cluster_allowed,
-                          _TARGET_CLIENT_SESSIONS_SQL,
+                          PilotDbBoundaryError, _READ_INTENT_SQL,
+                          _TARGET_CLIENT_SESSIONS_SQL, assert_cluster_allowed,
                           assert_db_allowed_for_reset,
                           assert_db_allowed_for_reuse,
                           create_pilot_database, quote_ident,
@@ -133,6 +133,8 @@ _LIFECYCLE_DBS = (
     "kline_pilot_lifecycle_r32",
     "kline_pilot_lifecycle_r32b",
     "kline_pilot_lifecycle_r33",
+    "kline_pilot_lifecycle_r33b",
+    "kline_pilot_lifecycle_r33c",
     "kline_pilot_lifecycle_r34",
     "kline_pilot_lifecycle_r34b",
     "kline_pilot_lifecycle_r35",
@@ -190,7 +192,7 @@ _OWNED_EXTRA_DBS = (_UNRELATED_DB, _LIKE_DECOY_DB)
 _EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑥", "⑦", "⑧", "⑨", "⑨b",
                        "⑨c", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑰b", "⑱",
                        "⑲", "⑳", "⑳b", "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉛",
-                       "㉝", "㉘", "㉜", "㉜b", "㉞", "㉞b", "㉟", "㉟b")
+                       "㉝", "㉝b", "㉝c", "㉘", "㉜", "㉜b", "㉞", "㉞b", "㉟", "㉟b")
 
 
 async def _connect(dsn: str) -> asyncpg.Connection:
@@ -1242,6 +1244,139 @@ async def main() -> int:
     finally:
         await maint.close()
     await harness.drop_database(base_dsn, db33)
+
+    # ── ㉝b intent 的年龄必须落在 `[0, TTL)` —— **未来**的 inserted_at 一律判掉 ──
+    #    （codex S2a-R2-F2）时钟回拨 / 从备份还原 / 人工修表都会造出未来值。
+    #    只判上界（`age < TTL`）的写法会把它当成「刚写下的、最新鲜的」凭据，
+    #    于是「TTL 把销毁授权窗口从永久收窄到 24h」（spec O4-F2）整条保证失效。
+    #    ⚠️ 这一档是 ㉝ 的**判别力补丁**，不是重复：㉝ 把 `inserted_at` 推到**过去**、
+    #       靠上界判掉；下界（`0 <=`）在 ㉝ 上**一次都没求值**。
+    scenario("㉝b")
+    print("㉝b inserted_at 在未来 → 例外不适用（年龄必须非负）")
+    seed33b = "lifecycle_r33b"
+    db33b = f"kline_pilot_{seed33b}"
+    maint = await _maintenance(base_dsn, seed=seed33b)
+    try:
+        await harness.drop_database(base_dsn, db33b)
+        await maint.execute("CREATE DATABASE " + quote_ident(db33b))
+        await maint.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db33b)
+        await maint.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
+            "  WHERE d.datname::text = $1",
+            db33b, seed33b, _CREATED_AT, f"lifecycle-{seed33b}")
+        # `inserted_at` 推到**未来**（其余五条全部成立 —— 只剩年龄这一条不合格）。
+        await maint.execute(
+            "UPDATE public.pilot_create_intent"
+            "   SET inserted_at = now() + make_interval(secs => $2)"
+            " WHERE dbname = $1", db33b, float(INTENT_TTL_SECONDS + 3600))
+        # 先证明夹具真的造出了负年龄，否则下面那条可能是因为别的原因绿的。
+        age33b = await maint.fetchval(
+            "SELECT EXTRACT(EPOCH FROM (now() - inserted_at))::bigint"
+            "  FROM public.pilot_create_intent WHERE dbname = $1", db33b)
+        check(age33b is not None and age33b < 0,
+              "㉝b 前置：库时钟算出来的年龄确实是**负数**",
+              f"实得 age_seconds={age33b!r} —— 夹具没造出未来值，这一档测不到下界")
+        got33b = await try_empty_remnant_exception(
+            maint, connect=connect_peer, db_name=db33b, seed=seed33b)
+        check(got33b is None, "㉝b 未来的 inserted_at → 零对象例外不适用",
+              f"竟然交出了 oid={got33b!r} —— 一行不可能的时间戳换来一张永不过期的 DROP 授权")
+        try:
+            await assert_db_allowed_for_reset(
+                maint, connect=connect_peer, db_name=db33b, seed=seed33b, **_RESET_ARGS)
+            check(False, "㉝b 例外不适用后走闸 0− 必须拒", "竟然放行了")
+        except PilotDbBoundaryError as exc:
+            check(exc.code == "not_owned",
+                  "㉝b 例外不适用 → 落到闸 0− 判 not_owned", f"实得 {exc.code}：{exc}")
+        check(await _database_exists(maint, db33b), "㉝b 拒绝之后那个空库仍然存在")
+
+        # ── ㉝b 第二段：**亚秒级**的未来时间戳，符号不许被取整抹掉（codex S2a-R3-F1）──
+        # ⚠️ 上面那半用的是「TTL + 1 小时」的未来值 —— 它大到**整数判据也拦得住**，
+        #    故对「SQL 里 `::bigint` 四舍五入把 −0.1 抹成 0」这条**零判别力**。
+        #    真 PG 15 实测：`(-0.1)::bigint = 0`、`(-0.4)::bigint = 0`。
+        # ⚠️ 判据钉的是**模块自己那条 SQL 返回了什么**，不是脚本另写一条等价查询 ——
+        #    取整被加回去时只有前者会变（与 ㉜b 断言模块预检谓词同一条纪律）。
+        # ⚠️ 端到端那一半在这里**故意不做**：整条闸序要跑好几百毫秒，
+        #    一个 400ms 的未来值到那时早就变成过去了 —— 那样的档是 flake，不是覆盖。
+        #    端到端方向由上面那半（TTL+1h）承担，本段只钉「符号活着走出 SQL」。
+        await maint.execute(
+            "UPDATE public.pilot_create_intent"
+            "   SET inserted_at = now() + interval '400 milliseconds'"
+            " WHERE dbname = $1", db33b)
+        sub = await maint.fetch(_READ_INTENT_SQL, db33b)
+        sub_age = sub[0]["age_seconds"] if sub else None
+        check(sub_age is not None and sub_age < 0,
+              "㉝b2 400ms 的未来 inserted_at → **模块的 SQL** 返回的年龄仍是负数",
+              f"实得 age_seconds={sub_age!r}（0 = 被 ::bigint 四舍五入抹掉了符号，"
+              f"下界那条修复就此失效）")
+        check(sub_age is not None and -1 < sub_age < 0,
+              "㉝b2 而且它是**分数秒**（证明确实取到了亚秒精度，不是整秒 −1）",
+              f"实得 age_seconds={sub_age!r}")
+        await maint.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db33b)
+    finally:
+        await maint.close()
+    await harness.drop_database(base_dsn, db33b)
+
+    # ── ㉝c TTL 不许拿**事务开始时刻**去量（codex S2a-R4-F2）─────────────
+    #    PostgreSQL 的 `now()` 是**事务开始时刻**，不是当前时刻。维护连接处在长事务里
+    #    （4c 的 wrapper 很可能把整段 reset 包进事务）时它冻在过去，
+    #    一行**真实已过期**的销毁凭据会被量成「还新鲜」→ 零对象例外照样放行。
+    #    ⚠️ 这一档是 ㉝ / ㉝b 的**判别力补丁**：那两档都在**自动提交**下跑，
+    #       `now()` 与 `statement_timestamp()` 几乎相等 —— 时钟源这一条在它们身上
+    #       **一次都没求值**。把时钟源换回 `now()`，㉝ 与 ㉝b 照样全绿。
+    #    ⚠️ 判据是**模块自己那条 SQL 返回了什么**，不是脚本另写一条等价查询。
+    scenario("㉝c")
+    print("㉝c 长事务里 TTL 仍按语句时刻量（`now()` 会冻在事务开始那一刻）")
+    seed33c = "lifecycle_r33c"
+    db33c = f"kline_pilot_{seed33c}"
+    maint = await _maintenance(base_dsn, seed=seed33c)
+    try:
+        await harness.drop_database(base_dsn, db33c)
+        await maint.execute("CREATE DATABASE " + quote_ident(db33c))
+        await maint.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db33c)
+        await maint.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
+            "  WHERE d.datname::text = $1",
+            db33c, seed33c, _CREATED_AT, f"lifecycle-{seed33c}")
+        # 开一个事务并让它「变老」——之后这条连接上的 `now()` 就冻在 1.2s 前。
+        await maint.execute("BEGIN")
+        try:
+            await maint.fetchval("SELECT pg_sleep(1.2)")
+            drift = float(await maint.fetchval(
+                "SELECT EXTRACT(EPOCH FROM (statement_timestamp() - now()))"))
+            check(drift >= 1.0,
+                  "㉝c 前置：事务里的 `now()` 确实落后语句时刻 ≥1s",
+                  f"实得 drift={drift:.3f}s —— 事务没变老，这一档测不到时钟源")
+            # 造一行**真实已过期 0.1 秒**的凭据：按真实时钟（clock_timestamp）回推。
+            await maint.execute(
+                "UPDATE public.pilot_create_intent"
+                "   SET inserted_at = clock_timestamp() - make_interval(secs => $2)"
+                " WHERE dbname = $1", db33c, float(INTENT_TTL_SECONDS) + 0.1)
+            rows = await maint.fetch(_READ_INTENT_SQL, db33c)
+            age = float(rows[0]["age_seconds"]) if rows else None
+            check(age is not None and age >= INTENT_TTL_SECONDS,
+                  "㉝c **模块的 SQL** 在长事务里仍把它量成已过期",
+                  f"实得 age_seconds={age!r}，TTL={INTENT_TTL_SECONDS}"
+                  f"（小于 TTL = 用了 `now()`，一行真实已过期的销毁凭据被判成新鲜）")
+            got33c = await try_empty_remnant_exception(
+                maint, connect=connect_peer, db_name=db33c, seed=seed33c)
+            check(got33c is None,
+                  "㉝c 长事务里那行过期凭据仍然不得让零对象例外成立",
+                  f"竟然交出了 oid={got33c!r}")
+        finally:
+            await maint.execute("ROLLBACK")
+        check(await _database_exists(maint, db33c), "㉝c 拒绝之后那个空库仍然存在")
+        await maint.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db33c)
+    finally:
+        await maint.close()
+    await harness.drop_database(base_dsn, db33c)
 
     # ── ㉛ 【绝对空】必须看见物化视图（spec §9-1a2）────────────────────
     #    物化视图**存着真数据**，而按 information_schema 或只数普通表的实现看不见它。

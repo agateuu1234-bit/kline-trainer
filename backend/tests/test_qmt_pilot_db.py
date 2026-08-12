@@ -4527,6 +4527,10 @@ def test_remnant_exception_requires_intent_row():
     ({"intent_db_oid": None}, "凭据的实例绑定已被判掉"),
     ({"age_seconds": INTENT_TTL_SECONDS}, "超过 INTENT_TTL（O4-F2）"),
     ({"age_seconds": INTENT_TTL_SECONDS + 1}, "远超 INTENT_TTL"),
+    ({"age_seconds": -1}, "inserted_at 在**未来**（codex S2a-R2-F2）"),
+    ({"age_seconds": -INTENT_TTL_SECONDS * 365}, "inserted_at 在很远的未来"),
+    ({"age_seconds": -0.1}, "inserted_at 在**亚秒级**未来（codex S2a-R3-F1）"),
+    ({"age_seconds": -0.4999}, "亚秒级未来的上沿（四舍五入会把它抹成 0）"),
 ])
 def test_remnant_exception_rejects_unqualified_intent_row(over, label):
     """第 6 条的四个子判据**逐条**都要有判别力。
@@ -4545,6 +4549,68 @@ def test_remnant_exception_rejects_unqualified_intent_row(over, label):
 def test_remnant_exception_ttl_boundary_is_strictly_less_than():
     """恰好差 1 秒仍算新鲜 —— 边界方向钉住，免得 `<` 与 `<=` 互换而无人察觉。"""
     maint = _RemnantMaint(intent_rows=_intent(age_seconds=INTENT_TTL_SECONDS - 1))
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) == "16400"
+
+
+def test_intent_ttl_is_never_measured_against_the_transaction_clock():
+    """**族级**：凡是拿时钟减 `inserted_at` 判 TTL 的地方，都不许用 `now()`
+    （codex S2a-R4-F2，真 PG 15 实测）。
+
+    PostgreSQL 的 `now()` 是**事务开始时刻**，不是当前时刻。维护连接若处在一个
+    长事务里（4c 的 wrapper 很可能把整段 reset 包进事务），`now()` 就冻在过去：
+    实测 —— 事务开始 1.2s 后，一行**真实年龄 = TTL + 0.1s（已过期）**的凭据
+    被 `now()` 量成 `TTL − 1.1s` → **判为新鲜** → 零对象例外照样放行，
+    「TTL 把销毁授权窗口收窄到 24h」（spec O4-F2）再一次失效。
+    `statement_timestamp()` 是**本条语句**开始的时刻，不受事务年龄影响。
+
+    ⚠️ 判据覆盖**两条** SQL（读侧判新鲜、写侧判能不能抢占），不是只修被点名的那一处。
+    ⚠️ **写侧的 `inserted_at = now()` 刻意不改**：列的 DEFAULT 就是 `now()`（4a-1 的
+       结构闸钉着它），两边必须一致；而长事务里写 `now()` 只会让行显得**更老**、
+       更早过期 —— 那是保守方向。这条不对称是有意的。
+    """
+    import re
+    import qmt_pilot_db as m
+    pat = re.compile(r"EXTRACT\(EPOCH FROM \(\s*([A-Za-z_]+\(\))\s*-")
+    for name in ("_READ_INTENT_SQL", "_INSERT_INTENT_SQL"):
+        sql = getattr(m, name)
+        clocks = pat.findall(sql)
+        # 反向自检：扫不到任何时钟表达式 = 匹配式过时了，下面那条会恒真
+        assert clocks, f"{name} 里一处「时钟 − inserted_at」都没扫到 —— 这颗钉子是空的"
+        for clock in clocks:
+            assert clock == "statement_timestamp()", (
+                f"{name} 用 {clock} 判 TTL —— `now()` 是**事务开始时刻**，"
+                f"长事务里一行已过期的销毁凭据会被判成新鲜")
+
+
+def test_remnant_exception_age_predicate_never_rounds_away_the_sign():
+    """机械守卫：判据两侧都不许取整（codex S2a-R3-F1）。
+
+    ⚠️ 这条洞**同时**藏在两层，只堵一层没用：
+      · SQL 的 `::bigint` 是四舍五入（真 PG 15 实测 `(-0.1)::bigint = 0`）；
+      · Python 的 `int(-0.1)` 也是 0。
+    ⚠️ 判据走 AST 的调用节点，不看源码文本：注释里提到 `int(` 会让文本判据恒真。
+    """
+    import inspect
+    import textwrap
+    import qmt_pilot_db as m
+    tree = ast.parse(textwrap.dedent(inspect.getsource(m._has_qualified_intent_row)))
+    calls = [n.func.id for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    assert calls, "扫描器一个调用都没解析到 —— 下面那条会恒真"
+    for rounding in ("int", "round"):
+        assert rounding not in calls, \
+            f"年龄在 Python 里被 {rounding}() 取整了 —— 亚秒级未来时间戳的符号会被抹掉"
+
+
+def test_remnant_exception_accepts_a_row_inserted_this_instant():
+    """**正向钉**：`age_seconds == 0`（刚写下的那一行）必须仍然合格。
+
+    ⚠️ 这一条守的是 codex S2a-R2-F2 那条修复的**下界方向**：判据从
+       `age < TTL` 收紧成 `0 <= age < TTL` 之后，写成 `0 < age` 会把
+       **同一次运行刚写下的凭据**判掉 —— 空残骸从此清不掉（R55-F1 锁死换个来路）。
+       上界由 `…ttl_boundary_is_strictly_less_than` 守，两端各一颗钉子。
+    """
+    maint = _RemnantMaint(intent_rows=_intent(age_seconds=0))
     assert asyncio.run(_remnant(maint, _EmptyOnProbe())) == "16400"
 
 
@@ -4583,6 +4649,85 @@ def test_remnant_exception_empty_probe_bottoms_out_at_the_whitelist_predicate():
     for bad in ("information_schema", "relkind IN", "relkind in"):
         assert not any(bad in s for s in srcs), f"零对象例外链上出现 {bad!r}"
 
+
+
+class _EmptyProbeReadFails(_EmptyOnProbe):
+    """连得进去，但【绝对空】那条目录读**抛异常**（并发 DROP / 权限变更 / 目录查询失败）。"""
+
+    def __init__(self, boom=None, **kw):
+        super().__init__(**kw)
+        self.boom = boom or RuntimeError(
+            "terminating connection due to administrator command")
+
+    async def fetch(self, query, *args):
+        if "SELECT cat, n FROM (" in query and "closure" not in query:
+            raise self.boom
+        return await super().fetch(query, *args)
+
+
+class _EmptyProbeReadAndCloseFail(_EmptyProbeReadFails):
+    async def close(self):
+        raise RuntimeError("connection reset by peer")
+
+
+def test_remnant_probe_read_failure_is_a_boundary_error_not_a_raw_exception():
+    """【绝对空】读失败 → `target_db_unreadable`，不得裸逃（codex S2a-R2-F2）。
+
+    ⚠️ 这是本模块**同一族判据的最后一处漏网**：复用路径的活体判据（R2-F2）、
+       闸 2 的结构查询、`read_pilot_meta` 三处早就把读失败转成
+       `target_db_unreadable` 了，唯独零对象例外的探测没转。
+       裸异常会被 4c 兜成 `FAIL_INFRASTRUCTURE`，而 spec §9-1w 明令禁止
+       把一次成功的 fail-closed 守卫记成环境故障 —— 恢复动作整个走错
+       （去查基础设施，而真相是「这个库现在读不出来，拒绝销毁」）。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_remnant(maint, _EmptyProbeReadFails()))
+    assert ei.value.code == "target_db_unreadable"
+
+
+def test_remnant_probe_read_failure_is_not_masked_by_a_close_failure():
+    """**刻意的不对称，钉住它**：读失败的结论不得被「关不掉连接」顶掉。
+
+    与 `test_close_failure_never_masks_the_gate_verdict`（O4-W2r1 M-2）同一条规矩 ——
+    拿到 `target_db_in_use` 的话，操作者会去查「谁连着这个库」，
+    而真相是「这条探测根本读不出来」。两种情形都是拒绝（fail-closed），
+    差别只在**给出的下一步动作对不对**。
+    ⚠️ codex S2a-R2-F2 的第二半建议「读失败时也要跑 `_assert_target_released`」——
+       那会让 close 失败顶掉读失败的结论，正是上面那条既有钉子禁止的形态，故不采纳。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_remnant(maint, _EmptyProbeReadAndCloseFail()))
+    assert ei.value.code == "target_db_unreadable", "读失败的结论被 close 失败顶掉了"
+
+
+def test_every_target_side_read_failure_maps_to_target_db_unreadable():
+    """**族级**：三条会连进目标库的路径，读失败一律归一到 `target_db_unreadable`。
+
+    ⚠️ 本仓记录在案的形态是「只修被点名的那一处」—— 这一条按**判据本身**覆盖全族，
+       新增一条会连目标库的路径而忘了归一时当场变红。
+    """
+    boom = RuntimeError("terminating connection due to administrator command")
+
+    class _MetaReadBoom(_FakeConn):
+        async def fetchval(self, query, *args):
+            if "to_regclass('public.pilot_meta') IS NOT NULL" in query:
+                raise boom
+            return await super().fetchval(query, *args)
+
+    cases = [
+        ("复用（闸 0− 读 pilot_meta）",
+         lambda: _reuse(_FakeConn(databases=["kline_pilot_probe"]), _MetaReadBoom())),
+        ("--reset 闸 0−（读 pilot_meta）",
+         lambda: _reset(_FakeConn(databases=["kline_pilot_probe"]), _MetaReadBoom())),
+        ("零对象例外的【绝对空】探测",
+         lambda: _remnant(_RemnantMaint(intent_rows=_intent()), _EmptyProbeReadFails())),
+    ]
+    for label, run in cases:
+        with pytest.raises(PilotDbBoundaryError) as ei:
+            asyncio.run(run())
+        assert ei.value.code == "target_db_unreadable", label
 
 
 def test_remnant_exception_closes_every_probe_connection():
@@ -4637,11 +4782,20 @@ def test_remnant_exception_read_intent_freshness_uses_the_database_clock():
     """
     import qmt_pilot_db as m
     sql = m._READ_INTENT_SQL
-    assert "now() - i.inserted_at" in sql, "新鲜度没有用库时钟算"
+    assert "statement_timestamp() - i.inserted_at" in sql, "新鲜度没有用库时钟算"
+    # ⚠️ 时钟源必须是 `statement_timestamp()` 而不是 `now()`（事务开始时刻）——
+    #    由 `test_intent_ttl_is_never_measured_against_the_transaction_clock` 按族覆盖。
     assert "created_at" not in sql, "新鲜度不得取调用方传进来的 created_at"
     assert "public.pilot_create_intent" in sql, "表引用必须 public. 限定（O4-R4-C1）"
     assert "i.create_confirmed" in sql and "i.db_oid" in sql, \
         "第 6 条的确认位与实例绑定必须由这条 SQL 取出来"
+    # ⚠️ **年龄不许在 SQL 里取整**（codex S2a-R3-F1，真 PG 15 实测）：
+    #    `::bigint` 是**四舍五入**不是截断 —— `(-0.1)::bigint = 0`。
+    #    于是一行「比 now() 早不到半秒」的**未来** inserted_at 会被算成 age 0，
+    #    过得了下界检查，而下界正是 R2-F2 那条修复的全部内容。
+    #    Python 那侧的 `int()` 是第二层同样的抹除（`int(-0.1) == 0`），两层都要去掉。
+    assert "::bigint" not in sql, \
+        "年龄在 SQL 里被取整了 —— 亚秒级的未来时间戳会被抹成 age 0（符号丢失）"
 
 
 
