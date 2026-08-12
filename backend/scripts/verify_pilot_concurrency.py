@@ -89,7 +89,7 @@ _NAME_RE = re.compile(r"\Akline_pilot_conc[a-z0-9_]*\Z")
 #    `assert_every_selfcheck_db_is_whitelisted` 要求它照样登记；
 #    而万一某次运行因缺陷真把它建出来了，清场也才收得掉。
 _CONC_DBS = ("kline_pilot_conc_b1", "kline_pilot_conc_d1", "kline_pilot_conc_d2",
-             "kline_pilot_conc_e1")
+             "kline_pilot_conc_d3", "kline_pilot_conc_e1")
 
 # 本脚本不在维护库里造任何临时对象。
 _SCRATCH_OBJECTS: tuple = ()
@@ -100,7 +100,7 @@ _IMMEDIATE_SECONDS = 1.0
 
 # 验收闸的**完整性清单**：收尾核对每一档都真的跑过。
 # ⚠️ 少一档即失败 —— 「静默没跑」与「通过了」在输出上完全一样。
-_EXPECTED_SCENARIOS = ("Ⓐ", "Ⓐb", "Ⓑ", "Ⓑb", "Ⓑd", "Ⓑc", "Ⓒ", "Ⓓ", "Ⓓb", "Ⓔ")
+_EXPECTED_SCENARIOS = ("Ⓐ", "Ⓐb", "Ⓑ", "Ⓑb", "Ⓑd", "Ⓑc", "Ⓒ", "Ⓓ", "Ⓓb", "Ⓓc", "Ⓔ")
 
 # Ⓓ 用的普通（非超级用户）角色。`datconnlimit = 0` 对超级用户不生效，
 # 所以这一档必须用一个真的普通角色，否则测的是「超级用户能不能连」——恒真。
@@ -620,6 +620,106 @@ async def main() -> int:
             await conn_m2.execute(f"DROP ROLE IF EXISTS {quote_ident(_PLAIN_ROLE)}")
         finally:
             await conn_m2.close()
+
+    # ── Ⓓc 封锁必须连**超级用户**的新连接一起挡住（codex 合并评审 F1）──────────
+    #    Ⓓ 用的是普通角色，而 `CONNECTION LIMIT 0` **本来就只挡非超级用户** ——
+    #    也就是说 Ⓓ 对「超级用户能不能挤进窗口」这一条**零判别力**。
+    #    而本工具在 pilot 部署里**就是**超级用户跑的（Ⓔ 证明非超级用户连集群闸都过不去），
+    #    所以「另一个用同一套凭据的并发任务」才是最现实的威胁面：
+    #    它能在最后一次复验之后、DROP 之前连进来建表再断开，
+    #    于是一个**已经不空**的库照样被删掉 —— 正是 R10-F1 那条 critical 的形态。
+    #    收口手段：封锁语句同时设 `ALLOW_CONNECTIONS false`（真 PG 15 实测：
+    #    已建立的会话不受影响、新的超级用户连接被挡、DROP 仍然成功）。
+    scenario("Ⓓc")
+    print("Ⓓc 验空之后、DROP 之前，**超级用户**同样必须连不进目标库")
+    seed_dc = "conc_d3"
+    db_dc = f"kline_pilot_{seed_dc}"
+    conn_m3 = await asyncpg.connect(base_dsn)
+    try:
+        await conn_m3.execute("DROP DATABASE IF EXISTS " + quote_ident(db_dc))
+        await conn_m3.execute("CREATE DATABASE " + quote_ident(db_dc))
+        await conn_m3.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db_dc)
+        await conn_m3.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
+            "  WHERE d.datname::text = $1",
+            db_dc, seed_dc, _BUILD_ARGS["created_at"], "conc-d3")
+        if not await _try_seed_lock(conn_m3, seed_dc):
+            check(False, "Ⓓc 前置：取到 seed 锁")
+
+        # ⚠️ 入侵者用的是**超级用户**的 DSN（与本工具同一套凭据）——
+        #    这正是 Ⓓ 用普通角色测不到的那一向。
+        super_dsn = harness.db_dsn(base_dsn, db_dc)
+        sup_connects = {"n": 0}
+        win = {"fired": False, "connected": None, "error": ""}
+
+        class _CloseHookedSuper:
+            """在**持住的那条目标库连接被关闭的那一刻**注入 ——
+            即「最后一次复验已经做完、DROP 还没发出」的窗口。"""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            async def close(self, *a, **k):
+                win["fired"] = True
+                try:
+                    intruder = await asyncpg.connect(super_dsn)
+                except Exception as exc:
+                    win["connected"] = False
+                    win["error"] = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+                else:
+                    win["connected"] = True
+                    try:
+                        await intruder.execute(
+                            "CREATE TABLE public.zzqmtverify_super_squatted (id int)")
+                    finally:
+                        await intruder.close()
+                return await self._inner.close(*a, **k)
+
+        async def _connect_with_super_window(name: str):
+            inner = await connect_peer(name)
+            if name == db_dc:
+                sup_connects["n"] += 1
+                # 第 3 次连目标库 = `reset_pilot_database` 封锁临界区持住的那条
+                #（前两次在 try_empty_remnant_exception 的两次探测里）。
+                if sup_connects["n"] == 3:
+                    return _CloseHookedSuper(inner)
+            return inner
+
+        try:
+            await reset_pilot_database(conn_m3, connect=_connect_with_super_window,
+                                       db_name=db_dc, seed=seed_dc,
+                                       export_log_sha256=_BUILD_ARGS["export_log_sha256"],
+                                       output_dir=_BUILD_ARGS["output_dir"],
+                                       reset_foreign_token=None)
+            dropped_dc = True
+        except Exception as exc:
+            dropped_dc = False
+            win["error"] = win["error"] or f"{type(exc).__name__}: {exc}"
+        # 先证明注入真的落在那个窗口里，否则下面那条是恒真的。
+        check(win["fired"] and sup_connects["n"] == 3,
+              "Ⓓc 前置：注入确实落在「最后一次复验做完、DROP 之前」那一刻",
+              f"连目标库 {sup_connects['n']} 次，注入触发={win['fired']}")
+        check(win["connected"] is False,
+              "Ⓓc 窗口里**超级用户**也连不进目标库（封锁带 ALLOW_CONNECTIONS false）",
+              f"竟然连进去并建了表 —— 于是一个已经不空的库会被 DROP 掉；"
+              f"connected={win['connected']}（CONNECTION LIMIT 0 挡不住超级用户）")
+        still_dc = await conn_m3.fetchval(
+            "SELECT count(*) FROM pg_database WHERE datname = $1", db_dc)
+        check(dropped_dc and not still_dc,
+              "Ⓓc 反向：封超级用户不影响本工具自己 —— 空残骸仍被正常 DROP 掉",
+              f"dropped={dropped_dc}；{win['error']}")
+    finally:
+        try:
+            await conn_m3.execute("SELECT pg_advisory_unlock_all()")
+            await conn_m3.execute("DROP DATABASE IF EXISTS " + quote_ident(db_dc))
+        finally:
+            await conn_m3.close()
 
     # ── Ⓔ **非超级用户**维护角色：在任何破坏性动作之前就被挡住 ────────────
     #    起因是 codex 4a-2 R12-F1 担心「非超级用户部署下窗口仍在」。

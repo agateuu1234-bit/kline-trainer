@@ -196,6 +196,9 @@ class _FakeConn:
         self.is_superuser_queries = 0
         # 目标库**当前**的连接数上限。封锁之后必须恢复成**这个值**，不是写死的 -1。
         self.datconnlimit = -1
+        # 目标库**当前**是否接受连接。同上：恢复的是这个值，不是写死的 true ——
+        # 一个被 DBA 明确设成不可连的库，本工具拒绝销毁之后不该把它「顺手打开」。
+        self.datallowconn = True
         self.fail_connect = fail_connect
         self.closed = False
         self.executed: list[str] = []
@@ -237,6 +240,12 @@ class _FakeConn:
             return None if self.pilot_schema_shape is None else dict(self.pilot_schema_shape)
         if "marker_is_table" in query:
             return None if self.maintenance_shape is None else dict(self.maintenance_shape)
+        if "d.datallowconn, d.datconnlimit" in query:
+            # 封锁前读回的**原值**（两列一行）。取不到 = 已经不是那个实例。
+            if self.datconnlimit is None:
+                return None
+            return {"datallowconn": self.datallowconn,
+                    "datconnlimit": self.datconnlimit}
         if "key_is_unique" in query:
             return dict(self.meta_shape)
         raise AssertionError(f"_FakeConn 收到未预期的 fetchrow: {query[:80]}")
@@ -337,8 +346,15 @@ class _FakeConn:
         verb = query.strip().split()[0].upper() if query.strip() else ""
         return f"{verb} 1" if verb in ("DELETE", "UPDATE", "INSERT") else verb
 
+    closed_after_ops = None
+
     async def close(self):
         self.closed = True
+        # 次序判据用：close 这一刻，**维护连接**已经发出了多少条语句。
+        # 由 `_seq_connector` 在交出连接时注入 `_maint_executed`（同一个 list 对象）。
+        maint_log = getattr(self, "_maint_executed", None)
+        if maint_log is not None:
+            self.closed_after_ops = len(maint_log)
 
 
 # ⚠️ **两份形状字典各自只有一份权威副本**（O4-R37-C2）：此前它们在
@@ -5241,6 +5257,8 @@ def _reset_db(maint, *, target=None, targets=None, via_remnant=False, **over):
                       else _EmptyOnProbe(non_empty_probes=[1],
                                          meta_rows=_full_meta_rows()))
         targets = [target]
+    for t in targets:
+        t._maint_executed = maint.executed          # 次序判据用（见 _FakeConn.close）
     return reset_pilot_database(
         maint, connect=_seq_connector(kw["db_name"], targets), **kw)
 
@@ -5349,7 +5367,7 @@ def test_remnant_reset_seals_new_connections_before_the_final_proof():
     maint = _ResetMaint()
     asyncio.run(_reset_db(maint, via_remnant=True))
     assert _connlimit_ops(maint)[:1] == [
-        'ALTER DATABASE "kline_pilot_probe" WITH CONNECTION LIMIT 0']
+        'ALTER DATABASE "kline_pilot_probe" WITH ALLOW_CONNECTIONS false CONNECTION LIMIT 0']
 
 
 def test_normal_reset_is_also_sealed_before_its_recheck():
@@ -5357,7 +5375,74 @@ def test_normal_reset_is_also_sealed_before_its_recheck():
     maint = _ResetMaint()
     asyncio.run(_reset_db(maint))
     assert _connlimit_ops(maint)[:1] == [
-        'ALTER DATABASE "kline_pilot_probe" WITH CONNECTION LIMIT 0']
+        'ALTER DATABASE "kline_pilot_probe" WITH ALLOW_CONNECTIONS false CONNECTION LIMIT 0']
+
+
+def test_the_seal_blocks_new_connections_from_superusers_too():
+    """封锁必须挡住**超级用户**的新连接（codex 合并评审 F1，真 PG 15 实测）。
+
+    `CONNECTION LIMIT 0` **只挡非超级用户** —— 模块自己一直如实登记着这条边界。
+    问题是本工具在 pilot 部署里**就是**超级用户跑的（并发档 Ⓔ 已证明非超级用户
+    连集群闸都过不去），所以「另一个用同一套凭据的并发任务」正是最现实的威胁面：
+    它能在最后一次复验之后、DROP 之前连进来建表再断开，
+    于是一个**已经不空**的库被删掉 —— 正是封锁要堵的那个数据丢失形态。
+
+    ⚠️ 真 PG 15 实测（本轮亲跑）确认 `ALLOW_CONNECTIONS false` 可用，且推翻了
+       模块此前那条「用不了」的注释 —— 那条注释假设的是**先封再连**的次序：
+       · 已建立的会话**不受** `datallowconn=false` 影响 → 持住的那条仍能验空；
+       · **新的超级用户**连接被挡（`is not currently accepting connections`）；
+       · `datallowconn=false` 时 `DROP DATABASE` 照样成功。
+       R12-F1 早就把次序定成「先连上再封」，那条注释是那次改动之后没跟着更新的。
+    """
+    maint = _ResetMaint()
+    asyncio.run(_reset_db(maint, via_remnant=True))
+    seal = [q for q in maint.executed if "ALLOW_CONNECTIONS" in q.upper()]
+    assert seal, "封锁没有动 ALLOW_CONNECTIONS —— 超级用户仍能在窗口里连进来"
+    assert seal[0] == ('ALTER DATABASE "kline_pilot_probe" '
+                       'WITH ALLOW_CONNECTIONS false CONNECTION LIMIT 0'), \
+        f"封锁语句形状不对：{seal[0]!r}"
+
+
+def test_reset_restores_both_seal_flags_to_their_prior_values():
+    """拒绝之后**两个**标志都要还成原值（R11-F2 的判据扩到 `datallowconn`）。
+
+    ⚠️ 一律恢复成 `true` 会把一个被 DBA **明确设成不可连**的库顺手打开 ——
+       与「一律恢复 −1 会抹掉原有连接策略」是同一条毛病。
+    """
+    maint = _ResetMaint(late_sessions=[_session(pid=555)])
+    maint.datconnlimit = 7
+    maint.datallowconn = False
+    with pytest.raises(PilotDbBoundaryError):
+        asyncio.run(_reset_db(maint))
+    assert _connlimit_ops(maint) == [
+        'ALTER DATABASE "kline_pilot_probe" WITH ALLOW_CONNECTIONS false CONNECTION LIMIT 0',
+        'ALTER DATABASE "kline_pilot_probe" WITH ALLOW_CONNECTIONS false CONNECTION LIMIT 7'], \
+        f"两个标志没有各自还成原值：{_connlimit_ops(maint)}"
+
+
+def test_the_seal_is_restored_while_the_target_session_is_still_held():
+    """复验拒绝时，恢复必须发生在**还持着目标库会话**的时候（codex 合并评审 F2）。
+
+    放掉会话之后再按名字发 `ALTER DATABASE`，名字↔实例就不再稳定：
+    并发的特权进程可以在「按 oid 核对」与「发 ALTER」之间把同名库删掉重建，
+    于是这段代码去改一个**从未过闸**的替身的配置。
+    持着会话期间别人删不掉这个库（DROP 会撞 55006），名字↔实例因此是钉死的。
+
+    ⚠️ 判据是**发出的次序**：恢复的 ALTER 必须排在目标库连接 close 之前。
+    """
+    maint = _ResetMaint()
+    ok = _EmptyOnProbe(non_empty_probes=[1], meta_rows=_full_meta_rows())
+    tampered = _FakeConn(meta_rows=_full_meta_rows(seed="someone_else"))
+    with pytest.raises(PilotDbBoundaryError):
+        asyncio.run(_reset_db(maint, targets=[ok, ok, tampered]))
+    assert tampered.closed is True, "持住的那条会话最后没关"
+    assert tampered.closed_after_ops is not None, "夹具没记下 close 时刻"
+    restores = [i for i, q in enumerate(maint.executed)
+                if "ALLOW_CONNECTIONS" in q.upper() and "LIMIT 0" not in q.upper()]
+    assert restores, "拒绝之后压根没恢复封锁"
+    assert restores[-1] < tampered.closed_after_ops, (
+        f"恢复的 ALTER 发在 close 之后（restore@{restores[-1]}，"
+        f"close@{tampered.closed_after_ops}）—— 那时名字可能已经指向替身")
 
 
 def test_reset_restores_the_databases_prior_connection_limit_when_refused():
@@ -5370,8 +5455,8 @@ def test_reset_restores_the_databases_prior_connection_limit_when_refused():
     with pytest.raises(PilotDbBoundaryError):
         asyncio.run(_reset_db(maint))
     assert _connlimit_ops(maint) == [
-        'ALTER DATABASE "kline_pilot_probe" WITH CONNECTION LIMIT 0',
-        'ALTER DATABASE "kline_pilot_probe" WITH CONNECTION LIMIT 7']
+        'ALTER DATABASE "kline_pilot_probe" WITH ALLOW_CONNECTIONS false CONNECTION LIMIT 0',
+        'ALTER DATABASE "kline_pilot_probe" WITH ALLOW_CONNECTIONS true CONNECTION LIMIT 7']
 
 
 def test_reset_seals_even_for_a_non_superuser_maintenance_role():
@@ -5424,8 +5509,8 @@ def test_seal_is_recorded_before_the_alter_is_awaited():
     with pytest.raises(Exception):
         asyncio.run(_reset_db(maint))
     assert _connlimit_ops(maint) == [
-        'ALTER DATABASE "kline_pilot_probe" WITH CONNECTION LIMIT 0',
-        'ALTER DATABASE "kline_pilot_probe" WITH CONNECTION LIMIT 5'], \
+        'ALTER DATABASE "kline_pilot_probe" WITH ALLOW_CONNECTIONS false CONNECTION LIMIT 0',
+        'ALTER DATABASE "kline_pilot_probe" WITH ALLOW_CONNECTIONS true CONNECTION LIMIT 5'], \
         "封锁的 ALTER 抛了就当没执行 —— 库会被永久留在不可连状态"
 
 
@@ -5585,8 +5670,8 @@ def test_normal_reset_restores_the_connection_limit_when_the_revalidation_refuse
     with pytest.raises(PilotDbBoundaryError):
         asyncio.run(_reset_db(maint, targets=[ok, ok, tampered]))
     assert _connlimit_ops(maint) == [
-        'ALTER DATABASE "kline_pilot_probe" WITH CONNECTION LIMIT 0',
-        'ALTER DATABASE "kline_pilot_probe" WITH CONNECTION LIMIT 7']
+        'ALTER DATABASE "kline_pilot_probe" WITH ALLOW_CONNECTIONS false CONNECTION LIMIT 0',
+        'ALTER DATABASE "kline_pilot_probe" WITH ALLOW_CONNECTIONS true CONNECTION LIMIT 7']
 
 
 def test_the_sealed_recheck_and_the_authorizing_gate_share_one_implementation():
