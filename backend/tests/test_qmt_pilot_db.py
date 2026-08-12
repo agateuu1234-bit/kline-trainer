@@ -4552,6 +4552,36 @@ def test_remnant_exception_ttl_boundary_is_strictly_less_than():
     assert asyncio.run(_remnant(maint, _EmptyOnProbe())) == "16400"
 
 
+def test_intent_ttl_is_never_measured_against_the_transaction_clock():
+    """**族级**：凡是拿时钟减 `inserted_at` 判 TTL 的地方，都不许用 `now()`
+    （codex S2a-R4-F2，真 PG 15 实测）。
+
+    PostgreSQL 的 `now()` 是**事务开始时刻**，不是当前时刻。维护连接若处在一个
+    长事务里（4c 的 wrapper 很可能把整段 reset 包进事务），`now()` 就冻在过去：
+    实测 —— 事务开始 1.2s 后，一行**真实年龄 = TTL + 0.1s（已过期）**的凭据
+    被 `now()` 量成 `TTL − 1.1s` → **判为新鲜** → 零对象例外照样放行，
+    「TTL 把销毁授权窗口收窄到 24h」（spec O4-F2）再一次失效。
+    `statement_timestamp()` 是**本条语句**开始的时刻，不受事务年龄影响。
+
+    ⚠️ 判据覆盖**两条** SQL（读侧判新鲜、写侧判能不能抢占），不是只修被点名的那一处。
+    ⚠️ **写侧的 `inserted_at = now()` 刻意不改**：列的 DEFAULT 就是 `now()`（4a-1 的
+       结构闸钉着它），两边必须一致；而长事务里写 `now()` 只会让行显得**更老**、
+       更早过期 —— 那是保守方向。这条不对称是有意的。
+    """
+    import re
+    import qmt_pilot_db as m
+    pat = re.compile(r"EXTRACT\(EPOCH FROM \(\s*([A-Za-z_]+\(\))\s*-")
+    for name in ("_READ_INTENT_SQL", "_INSERT_INTENT_SQL"):
+        sql = getattr(m, name)
+        clocks = pat.findall(sql)
+        # 反向自检：扫不到任何时钟表达式 = 匹配式过时了，下面那条会恒真
+        assert clocks, f"{name} 里一处「时钟 − inserted_at」都没扫到 —— 这颗钉子是空的"
+        for clock in clocks:
+            assert clock == "statement_timestamp()", (
+                f"{name} 用 {clock} 判 TTL —— `now()` 是**事务开始时刻**，"
+                f"长事务里一行已过期的销毁凭据会被判成新鲜")
+
+
 def test_remnant_exception_age_predicate_never_rounds_away_the_sign():
     """机械守卫：判据两侧都不许取整（codex S2a-R3-F1）。
 
@@ -4752,7 +4782,9 @@ def test_remnant_exception_read_intent_freshness_uses_the_database_clock():
     """
     import qmt_pilot_db as m
     sql = m._READ_INTENT_SQL
-    assert "now() - i.inserted_at" in sql, "新鲜度没有用库时钟算"
+    assert "statement_timestamp() - i.inserted_at" in sql, "新鲜度没有用库时钟算"
+    # ⚠️ 时钟源必须是 `statement_timestamp()` 而不是 `now()`（事务开始时刻）——
+    #    由 `test_intent_ttl_is_never_measured_against_the_transaction_clock` 按族覆盖。
     assert "created_at" not in sql, "新鲜度不得取调用方传进来的 created_at"
     assert "public.pilot_create_intent" in sql, "表引用必须 public. 限定（O4-R4-C1）"
     assert "i.create_confirmed" in sql and "i.db_oid" in sql, \

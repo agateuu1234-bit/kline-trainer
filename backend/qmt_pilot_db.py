@@ -1173,10 +1173,17 @@ ON CONFLICT (dbname) DO UPDATE
     --    很远的未来值让这行永远「新鲜」、永远抢不走；很远的过去值让一行**活着的**
     --    intent 立刻可被别人接管。而这一行是 DROP 授权，有效期不能由调用方说了算。
     --    `inserted_at` 由库自己的 `now()` 写入，抢占时一并刷新。
+    -- ⚠️ **比较用 `statement_timestamp()` 而不是 `now()`**（codex S2a-R4-F2，真 PG 15 实测）：
+    --    `now()` 是**事务开始时刻**。维护连接处在长事务里时它冻在过去，
+    --    一行真实已过期的凭据会被量成「还新鲜」。读侧那条（`_READ_INTENT_SQL`）
+    --    的后果是**放行一次本该过期的销毁授权**，这里的后果是**该抢的抢不走**；
+    --    两处判的是同一条 TTL 语义，故用**同一个**时钟源，不留漂移。
+    -- ⚠️ 写入 `inserted_at` 仍用 `now()`：列的 DEFAULT 就是 `now()`（4a-1 的结构闸钉着），
+    --    两边必须一致；而长事务里写 `now()` 只会让行显得更老、更早过期 —— 保守方向。
     --    （这一改顺带干掉了 R18 那段 `to_timestamp(created_at, 'YYYYMMDD"T"HH24MISSUS')`
     --     解析：本工具写的 ISO-8601 basic 格式 PostgreSQL 隐式转换认不了，
     --     曾因 `OR` 短路而**从未被真正求值过**。判据换源之后那条路径不复存在。）
-    OR EXTRACT(EPOCH FROM (now() - public.pilot_create_intent.inserted_at)) >= $5
+    OR EXTRACT(EPOCH FROM (statement_timestamp() - public.pilot_create_intent.inserted_at)) >= $5
 RETURNING run_id
 """
 
@@ -2367,7 +2374,8 @@ def _assert_reset_foreign_token(meta: dict[str, str],
 #   · 必须取 `create_confirmed` 并要求它为 true（O4-R8-C2）——
 #     intent 行写在 `CREATE DATABASE` **之前**，未确认的行证明不了「这个库是本次建的」；
 #     拿它当授权会去 DROP **别人建的**同名空库，无 pilot_meta 归属、无 --reset-foreign 令牌。
-# ⚠️ 新鲜度只认**库自己的时钟**（O4-R23-C1）：年龄由 `now() - inserted_at` 在库里算出来，
+# ⚠️ 新鲜度只认**库自己的时钟**（O4-R23-C1）：年龄由 `statement_timestamp() - inserted_at`
+#    在库里算出来，
 #    调用方**给不进来**一个 `now`。`created_at` 是调用方传进来的字符串，数据库既不生成也不
 #    校验 —— 很远的未来值让这行永远「新鲜」、永远抢不走；很远的过去值让活着的行立刻可被接管。
 #    而这一行是 DROP 授权，有效期不能由调用方说了算。
@@ -2376,7 +2384,7 @@ def _assert_reset_foreign_token(meta: dict[str, str],
 #    陈旧的行会为那个全新的、不是我们建的库背书 —— 而它是 DROP 授权（O4-R21-C1 / R25-C1）。
 _READ_INTENT_SQL = """
 SELECT i.seed, i.create_confirmed, i.db_oid::text AS intent_db_oid,
-       EXTRACT(EPOCH FROM (now() - i.inserted_at)) AS age_seconds
+       EXTRACT(EPOCH FROM (statement_timestamp() - i.inserted_at)) AS age_seconds
   FROM public.pilot_create_intent i WHERE i.dbname = $1
 """
 

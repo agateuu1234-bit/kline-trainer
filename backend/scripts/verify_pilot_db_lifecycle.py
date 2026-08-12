@@ -134,6 +134,7 @@ _LIFECYCLE_DBS = (
     "kline_pilot_lifecycle_r32b",
     "kline_pilot_lifecycle_r33",
     "kline_pilot_lifecycle_r33b",
+    "kline_pilot_lifecycle_r33c",
     "kline_pilot_lifecycle_r34",
     "kline_pilot_lifecycle_r34b",
     "kline_pilot_lifecycle_r35",
@@ -189,7 +190,7 @@ _OWNED_EXTRA_DBS = (_UNRELATED_DB, _LIKE_DECOY_DB)
 #    ⚠️ S3 搬「孤儿删除锁内原子求值」时同样撞号（旧 ㉖）—— 那一档届时另编，别沿用旧号。
 _EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑥", "⑦", "⑧", "⑨", "⑨b",
                        "⑨c", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑰b", "⑱",
-                       "⑲", "⑳", "⑳b", "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉛", "㉝", "㉝b")
+                       "⑲", "⑳", "⑳b", "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉛", "㉝", "㉝b", "㉝c")
 
 
 async def _connect(dsn: str) -> asyncpg.Connection:
@@ -1256,6 +1257,64 @@ async def main() -> int:
     finally:
         await maint.close()
     await harness.drop_database(base_dsn, db33b)
+
+    # ── ㉝c TTL 不许拿**事务开始时刻**去量（codex S2a-R4-F2）─────────────
+    #    PostgreSQL 的 `now()` 是**事务开始时刻**，不是当前时刻。维护连接处在长事务里
+    #    （4c 的 wrapper 很可能把整段 reset 包进事务）时它冻在过去，
+    #    一行**真实已过期**的销毁凭据会被量成「还新鲜」→ 零对象例外照样放行。
+    #    ⚠️ 这一档是 ㉝ / ㉝b 的**判别力补丁**：那两档都在**自动提交**下跑，
+    #       `now()` 与 `statement_timestamp()` 几乎相等 —— 时钟源这一条在它们身上
+    #       **一次都没求值**。把时钟源换回 `now()`，㉝ 与 ㉝b 照样全绿。
+    #    ⚠️ 判据是**模块自己那条 SQL 返回了什么**，不是脚本另写一条等价查询。
+    scenario("㉝c")
+    print("㉝c 长事务里 TTL 仍按语句时刻量（`now()` 会冻在事务开始那一刻）")
+    seed33c = "lifecycle_r33c"
+    db33c = f"kline_pilot_{seed33c}"
+    maint = await _maintenance(base_dsn, seed=seed33c)
+    try:
+        await harness.drop_database(base_dsn, db33c)
+        await maint.execute("CREATE DATABASE " + quote_ident(db33c))
+        await maint.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db33c)
+        await maint.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
+            "  WHERE d.datname::text = $1",
+            db33c, seed33c, _CREATED_AT, f"lifecycle-{seed33c}")
+        # 开一个事务并让它「变老」——之后这条连接上的 `now()` 就冻在 1.2s 前。
+        await maint.execute("BEGIN")
+        try:
+            await maint.fetchval("SELECT pg_sleep(1.2)")
+            drift = float(await maint.fetchval(
+                "SELECT EXTRACT(EPOCH FROM (statement_timestamp() - now()))"))
+            check(drift >= 1.0,
+                  "㉝c 前置：事务里的 `now()` 确实落后语句时刻 ≥1s",
+                  f"实得 drift={drift:.3f}s —— 事务没变老，这一档测不到时钟源")
+            # 造一行**真实已过期 0.1 秒**的凭据：按真实时钟（clock_timestamp）回推。
+            await maint.execute(
+                "UPDATE public.pilot_create_intent"
+                "   SET inserted_at = clock_timestamp() - make_interval(secs => $2)"
+                " WHERE dbname = $1", db33c, float(INTENT_TTL_SECONDS) + 0.1)
+            rows = await maint.fetch(_READ_INTENT_SQL, db33c)
+            age = float(rows[0]["age_seconds"]) if rows else None
+            check(age is not None and age >= INTENT_TTL_SECONDS,
+                  "㉝c **模块的 SQL** 在长事务里仍把它量成已过期",
+                  f"实得 age_seconds={age!r}，TTL={INTENT_TTL_SECONDS}"
+                  f"（小于 TTL = 用了 `now()`，一行真实已过期的销毁凭据被判成新鲜）")
+            got33c = await try_empty_remnant_exception(
+                maint, connect=connect_peer, db_name=db33c, seed=seed33c)
+            check(got33c is None,
+                  "㉝c 长事务里那行过期凭据仍然不得让零对象例外成立",
+                  f"竟然交出了 oid={got33c!r}")
+        finally:
+            await maint.execute("ROLLBACK")
+        check(await _database_exists(maint, db33c), "㉝c 拒绝之后那个空库仍然存在")
+        await maint.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db33c)
+    finally:
+        await maint.close()
+    await harness.drop_database(base_dsn, db33c)
 
     # ── ㉛ 【绝对空】必须看见物化视图（spec §9-1a2）────────────────────
     #    物化视图**存着真数据**，而按 information_schema 或只数普通表的实现看不见它。
