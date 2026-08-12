@@ -2385,17 +2385,32 @@ async def _has_qualified_intent_row(maint_conn, db_name: str, *, seed: str, oid:
     """零对象例外第 6 条：有没有一行「新鲜、已确认、且绑在**这个实例**上」的凭据。
 
     ⚠️ 抽成一个函数是因为它有**两个**使用点（codex 4a-2/S2 R2-F1）：
-       授权时判一次（`try_empty_remnant_exception`），DROP 前在封锁下**再判一次**
-       （**S2b 的 `_drop_pilot_database`**，本片不含）—— 这一条与【绝对空】一样会过期：
+       判定时判一次（`try_empty_remnant_exception`），DROP 前在封锁下**再判一次**
+       （**S2b 的 `reset_pilot_database`**，本片不含）—— 这一条与【绝对空】一样会过期：
        凭据可以被别的运行清掉、被换成指向另一个实例的行、或者就是过了 TTL。
        两处各写一份判据必然漂移，而漂移的方向恰好会让复验那一处失去判别力
        —— 本仓记录在案的毛病。
+
+    ⚠️ **年龄必须落在 `[0, TTL)`，负数一律判掉**（codex S2a-R2-F2）：
+       `inserted_at` 由库自己的 `now()` 写入，正常情况下不可能在未来 —— 但**时钟回拨、
+       从备份还原、人工修表**都会造出未来值。那时 `now() - inserted_at` 为负，
+       只判上界的写法（`age < TTL`）会把它当成「刚写下的、最新鲜的」凭据，
+       于是 TTL 把销毁授权窗口从「永久」收窄到 24h 这条保证（spec O4-F2）**整个失效**：
+       一行不可能的时间戳换来一张永不过期的 DROP 授权。
+    ⚠️ 判掉之后那个空残骸会**暂时清不掉**（时钟修好或 TTL 追上之前）——
+       这是有意的取舍，不是 R55-F1 那种锁死：
+       · 它是**自愈**的（时钟一正常就恢复），也不影响有 `pilot_meta` 的库
+         （那些走闸 0−/0/0b，根本不看这一行）；
+       · 而反方向的代价是**拿一个不可能的时间戳去 DROP 一个库**。
+         在一条不可逆的路径上，宁可暂时拒绝。
+    ⚠️ 抢占那一侧（`_INSERT_INTENT_SQL` 的 `>= $5`）不用改：负年龄在那里的效果是
+       「抢不走这一行」，本来就是 fail-closed 的方向。两侧的不对称是**有意的**。
     """
     rows = await maint_conn.fetch(_READ_INTENT_SQL, db_name)
     return any(r["seed"] == seed
                and r["create_confirmed"]
                and r["intent_db_oid"] == oid
-               and int(r["age_seconds"]) < INTENT_TTL_SECONDS
+               and 0 <= int(r["age_seconds"]) < INTENT_TTL_SECONDS
                for r in rows)
 
 

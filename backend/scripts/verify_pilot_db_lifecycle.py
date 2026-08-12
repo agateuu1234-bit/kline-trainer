@@ -132,6 +132,7 @@ _LIFECYCLE_DBS = (
     "kline_pilot_lifecycle_r32",
     "kline_pilot_lifecycle_r32b",
     "kline_pilot_lifecycle_r33",
+    "kline_pilot_lifecycle_r33b",
     "kline_pilot_lifecycle_r34",
     "kline_pilot_lifecycle_r34b",
     "kline_pilot_lifecycle_r35",
@@ -187,7 +188,7 @@ _OWNED_EXTRA_DBS = (_UNRELATED_DB, _LIKE_DECOY_DB)
 #    ⚠️ S3 搬「孤儿删除锁内原子求值」时同样撞号（旧 ㉖）—— 那一档届时另编，别沿用旧号。
 _EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑥", "⑦", "⑧", "⑨", "⑨b",
                        "⑨c", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑰b", "⑱",
-                       "⑲", "⑳", "⑳b", "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉛", "㉝")
+                       "⑲", "⑳", "⑳b", "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉛", "㉝", "㉝b")
 
 
 async def _connect(dsn: str) -> asyncpg.Connection:
@@ -1179,6 +1180,56 @@ async def main() -> int:
     finally:
         await maint.close()
     await harness.drop_database(base_dsn, db33)
+
+    # ── ㉝b intent 的年龄必须落在 `[0, TTL)` —— **未来**的 inserted_at 一律判掉 ──
+    #    （codex S2a-R2-F2）时钟回拨 / 从备份还原 / 人工修表都会造出未来值。
+    #    只判上界（`age < TTL`）的写法会把它当成「刚写下的、最新鲜的」凭据，
+    #    于是「TTL 把销毁授权窗口从永久收窄到 24h」（spec O4-F2）整条保证失效。
+    #    ⚠️ 这一档是 ㉝ 的**判别力补丁**，不是重复：㉝ 把 `inserted_at` 推到**过去**、
+    #       靠上界判掉；下界（`0 <=`）在 ㉝ 上**一次都没求值**。
+    scenario("㉝b")
+    print("㉝b inserted_at 在未来 → 例外不适用（年龄必须非负）")
+    seed33b = "lifecycle_r33b"
+    db33b = f"kline_pilot_{seed33b}"
+    maint = await _maintenance(base_dsn, seed=seed33b)
+    try:
+        await harness.drop_database(base_dsn, db33b)
+        await maint.execute("CREATE DATABASE " + quote_ident(db33b))
+        await maint.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db33b)
+        await maint.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
+            "  WHERE d.datname::text = $1",
+            db33b, seed33b, _CREATED_AT, f"lifecycle-{seed33b}")
+        # `inserted_at` 推到**未来**（其余五条全部成立 —— 只剩年龄这一条不合格）。
+        await maint.execute(
+            "UPDATE public.pilot_create_intent"
+            "   SET inserted_at = now() + make_interval(secs => $2)"
+            " WHERE dbname = $1", db33b, float(INTENT_TTL_SECONDS + 3600))
+        # 先证明夹具真的造出了负年龄，否则下面那条可能是因为别的原因绿的。
+        age33b = await maint.fetchval(
+            "SELECT EXTRACT(EPOCH FROM (now() - inserted_at))::bigint"
+            "  FROM public.pilot_create_intent WHERE dbname = $1", db33b)
+        check(age33b is not None and age33b < 0,
+              "㉝b 前置：库时钟算出来的年龄确实是**负数**",
+              f"实得 age_seconds={age33b!r} —— 夹具没造出未来值，这一档测不到下界")
+        got33b = await try_empty_remnant_exception(
+            maint, connect=connect_peer, db_name=db33b, seed=seed33b)
+        check(got33b is None, "㉝b 未来的 inserted_at → 零对象例外不适用",
+              f"竟然交出了 oid={got33b!r} —— 一行不可能的时间戳换来一张永不过期的 DROP 授权")
+        try:
+            await assert_db_allowed_for_reset(
+                maint, connect=connect_peer, db_name=db33b, seed=seed33b, **_RESET_ARGS)
+            check(False, "㉝b 例外不适用后走闸 0− 必须拒", "竟然放行了")
+        except PilotDbBoundaryError as exc:
+            check(exc.code == "not_owned",
+                  "㉝b 例外不适用 → 落到闸 0− 判 not_owned", f"实得 {exc.code}：{exc}")
+        check(await _database_exists(maint, db33b), "㉝b 拒绝之后那个空库仍然存在")
+    finally:
+        await maint.close()
+    await harness.drop_database(base_dsn, db33b)
 
     # ── ㉛ 【绝对空】必须看见物化视图（spec §9-1a2）────────────────────
     #    物化视图**存着真数据**，而按 information_schema 或只数普通表的实现看不见它。

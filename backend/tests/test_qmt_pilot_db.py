@@ -4527,6 +4527,8 @@ def test_remnant_exception_requires_intent_row():
     ({"intent_db_oid": None}, "凭据的实例绑定已被判掉"),
     ({"age_seconds": INTENT_TTL_SECONDS}, "超过 INTENT_TTL（O4-F2）"),
     ({"age_seconds": INTENT_TTL_SECONDS + 1}, "远超 INTENT_TTL"),
+    ({"age_seconds": -1}, "inserted_at 在**未来**（codex S2a-R2-F2）"),
+    ({"age_seconds": -INTENT_TTL_SECONDS * 365}, "inserted_at 在很远的未来"),
 ])
 def test_remnant_exception_rejects_unqualified_intent_row(over, label):
     """第 6 条的四个子判据**逐条**都要有判别力。
@@ -4545,6 +4547,18 @@ def test_remnant_exception_rejects_unqualified_intent_row(over, label):
 def test_remnant_exception_ttl_boundary_is_strictly_less_than():
     """恰好差 1 秒仍算新鲜 —— 边界方向钉住，免得 `<` 与 `<=` 互换而无人察觉。"""
     maint = _RemnantMaint(intent_rows=_intent(age_seconds=INTENT_TTL_SECONDS - 1))
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) == "16400"
+
+
+def test_remnant_exception_accepts_a_row_inserted_this_instant():
+    """**正向钉**：`age_seconds == 0`（刚写下的那一行）必须仍然合格。
+
+    ⚠️ 这一条守的是 codex S2a-R2-F2 那条修复的**下界方向**：判据从
+       `age < TTL` 收紧成 `0 <= age < TTL` 之后，写成 `0 < age` 会把
+       **同一次运行刚写下的凭据**判掉 —— 空残骸从此清不掉（R55-F1 锁死换个来路）。
+       上界由 `…ttl_boundary_is_strictly_less_than` 守，两端各一颗钉子。
+    """
+    maint = _RemnantMaint(intent_rows=_intent(age_seconds=0))
     assert asyncio.run(_remnant(maint, _EmptyOnProbe())) == "16400"
 
 
