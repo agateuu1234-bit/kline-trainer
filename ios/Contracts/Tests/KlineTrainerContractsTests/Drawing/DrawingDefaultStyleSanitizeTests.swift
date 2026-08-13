@@ -28,16 +28,27 @@ struct DrawingDefaultStyleSanitizeTests {
     /// T15b（不变量锁）：非水平工具**不得**被套上水平线规则。
     /// 本片调用点恒 .horizontal，故只能单元级构造 —— 但 P1c 一旦加工具，这条就是生产路径。
     ///
-    /// ⚠️ **子类型分量必须用 `.segment`，不能用 `.ray`**（codex plan-P-R11 medium，**已实测**）：
-    ///    `horizontalLineSubTypeEnabled` 里 `.straight/.ray → true`、**只有 `.segment → false`**
-    ///    （`DrawingStyleAvailability.swift`）。用 `.ray` 时，正确实现（tool-aware 重载）与
-    ///    错误实现（错调水平线专用谓词）**返回同一个值** ⇒ 该分量零判别力。
-    ///    换 `.segment` 后：正确实现原样保留、错误实现会把它改写成 `.straight` —— 判据这才立起来。
-    @Test func non_horizontal_tool_keeps_its_label_and_subtype() {
+    /// ⚠️ **必须拆成两档，不能只取一组值**（修复轮1，根因=计划前几轮评审改出的缺陷）：
+    ///    `horizontalLabelModeEnabled(.left, lineSubType:)` 的判据是 `lineSubType != .ray`，
+    ///    `horizontalLineSubTypeEnabled` 里**只有 `.segment → false`**（`DrawingStyleAvailability.swift`）。
+    ///    这条不变量有两种正交的绕过，单一取值只抓得住一种：
+    ///      · `.ray` + `.left` 的 **labelMode**：2 参重载给 `.hidden`、3 参 tool-aware 给 `.left` —— 只有它抓得住 M15b；
+    ///      · `.segment` + `.left` 的 **lineSubType**：2 参重载给 `.straight`、3 参 tool-aware 给 `.segment` —— 只有它抓得住 M15d；
+    ///      · 反过来（`.segment` 的 labelMode / `.ray` 的 lineSubType）两种实现**返回同一个值**，零判别力
+    ///        （这正是原来单一测试 `non_horizontal_tool_keeps_its_label_and_subtype` 用 `.segment` 时，
+    ///        M15b 变异全程零判别力的根因，已实测确认）。
+    @Test func non_horizontal_tool_keeps_its_label() {
+        var s = DrawingDefaultStyle(); s.lineSubType = .ray; s.labelMode = .left
+        let out = s.sanitized(for: .trend)
+        #expect(out.labelMode == .left)          // 横线的「射线不能配左」不得外溢（M15b 打这一条）
+        #expect(out.lineSubType == .ray)
+    }
+
+    @Test func non_horizontal_tool_keeps_its_subtype() {
         var s = DrawingDefaultStyle(); s.lineSubType = .segment; s.labelMode = .left
         let out = s.sanitized(for: .trend)
-        #expect(out.labelMode == .left)          // 横线的「射线不能配左」不得外溢
-        #expect(out.lineSubType == .segment)     // 横线的「拒 .segment」同样不得外溢
+        #expect(out.lineSubType == .segment)     // 横线的「拒 .segment」不得外溢（M15d 打这一条）
+        #expect(out.labelMode == .left)
     }
 
     /// 正向档：健康值原样穿过（防「全是拒了的套件」掩盖恒回落的实现）
