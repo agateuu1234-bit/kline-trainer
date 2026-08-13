@@ -13,7 +13,7 @@
 **基线**：`origin/main` `20f615a`。分支 `feat/drawing-session-default-persistence`，worktree `.dev/worktree/drawing-default-persist`。
 基线闸门（同一 commit `20f615a` 上实跑）：host `swift test` = **`Test run with 1831 tests in 215 suites passed`**。
 
-本 spec 新增决策编号从 **D90** 起（D81–D89 属自动选中 spec）。
+本 spec 新增决策编号从 **D90** 起（D81–D89 属自动选中 spec）。本文件定义 **D90–D99**。
 
 ---
 
@@ -131,10 +131,52 @@ replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 
 （`0006` / `0009` 的注释里逐字写着同一条纪律：「只走 migration，不动 v1_4_baselineDDL/app_schema_v1.sql」。）
 **实施时不得**为了「保持一致」去改基线 DDL —— 那会真的打红 drift 闸门。
 
-### 3.4 契约版本：**不 bump `CONTRACT_VERSION`**
+### 3.4 D97　契约版本：**必须 bump `CONTRACT_VERSION` 1.12 → 1.13**，并同步 m01 矩阵
 
-可空列 + 附加式：**旧解码器读新库**（新列它不 SELECT，忽略）/ **新解码器读旧库**（`0010` 会把列建出来，值为 NULL → 回落）
-⇒ **双向兼容**。与 `lossyRaw`、`reveal_tick` 当初的处置同构。
+> **来源：codex spec-R1 high。我上一稿写「不 bump」，直接违反本仓写死的治理规则。**
+
+**规则是明文的**（`docs/governance/m01-schema-versioning-contract.md` 的 bump 策略，逐字）：
+
+> **必须 bump 顶层 `CONTRACT_VERSION`**（破坏性 / 跨系统变更）：删 state / 改 raw value / 改既有语义 /
+> 改恢复扫描集 / **影响 DDL** / 改 OpenAPI / 任何跨系统契约字段调整
+
+本片新增两列 + 新 migration ⇒ **命中「影响 DDL」** ⇒ 必须 bump。
+
+**本片必须做的两件事**（照最近一次真 bump `09be7cd`「1.11→1.12 + m01 矩阵同步」的先例）：
+
+1. `Models.swift:7` `CONTRACT_VERSION` **`"1.12"` → `"1.13"`**；
+2. `docs/governance/m01-schema-versioning-contract.md` 矩阵**两行**同步：
+   顶层行 → `"1.13"`；**app.sqlite GRDB migration 行 → `0010_v1.12_drawing_default_style`**。
+
+> ⚠️ **必须如实记录的既有漂移（不是本片造成的，也不是本片可援引的先例）**：
+> 该矩阵的 app.sqlite 行**当前仍停在 `0003_v1.4_purge_leased`**，而代码已跑到 `0009_v1.11_drawing_style`
+> ⇒ **`0004`–`0009` 六个 app.sqlite DDL 迁移都未同步矩阵、也未逐次联动顶层 bump**。
+> 本片**不负责回填这六次**（范围外），但**必须把自己这一次做对**，并在 PR 描述里点明这处既有漂移，
+> 免得后来者把「矩阵值 ≠ 代码现状」当成本片引入的问题。
+> ⚠️ 另注：`scripts/acceptance/plan_1f_m0_1_schema_versioning.sh` 断言的仍是 `"1.5"` 且**不在 CI**
+> （CI 只跑 `hardening_6_framework.sh`）—— **本片不改它**（改一个不在 CI 的陈旧脚本没有收益，且它断言的是 Wave-0 快照）。
+
+### 3.5 D98　版本错位的**诚实**分析：旧写者会把新列抹成 NULL（已接受残留）
+
+> **来源：codex spec-R1 high 的后半段。我上一稿写「⇒ 双向兼容」，那是错的 —— 我只论证了「读」，没论证「写」。**
+
+| 方向 | 结论 |
+|---|---|
+| **新二进制读旧库** | ✅ `0010` 把列建出来、值为 NULL → 回落出厂（D92 ④） |
+| **旧二进制读新库** | ✅ 它的 `SELECT * ` 拿到多余列不管；按列名取值的字段一个不少 |
+| **旧二进制写新库** | ❌ **会把 `drawing_default_style` 抹成 NULL** —— repo 是 `INSERT OR REPLACE INTO pending_training (…具名列…)`，`REPLACE` 整行重建，不在列表里的列取默认值（NULL） |
+
+**这条不可能靠「加个可空列」规避**，因为 app.sqlite **没有任何降级保护**（`user_version` 闸只存在于**训练组**库的 `DefaultTrainingSetDBFactory:25-31`，app.sqlite 侧没有对应物）。
+
+**处置：接受为残留，理由是爆炸半径可精确界定**——
+
+- 被抹掉的**恰好只有本局默认这一个装饰性偏好**：其余 14 列全在旧写者的列清单里，tick / 持仓 / 交易 / 画线**一个都不受影响**；
+- **最坏后果 = 回到本片修复之前的行为**（本局默认回落出厂）。**不丢任何训练数据**；
+- 这不是本片引入的性质：`INSERT OR REPLACE` + 具名列清单是本仓持久化的**既有形状**，`0004` 的 `session_key` 同样暴露在同一机制下。本片只是**又一个**列。
+
+**⚠️ 明令禁止的两种"改进"**：
+- **不得**为此把 repo 改成 `UPDATE`-style 部分写入 —— 那会改动一条 shipped 的写入语义，风险远大于收益，且不属本片范围；
+- **不得**在 spec 里继续宣称「双向兼容」。**只能说「读向兼容；写向在降级时丢一个装饰性偏好」**。
 
 ---
 
@@ -175,19 +217,44 @@ replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 
 
 **这是「能打开但用不了」，比打不开更难排查。**
 
-### 5.2 sanitize 规则（三条，**判据一律复用既有单一真相，禁止另写一份**）
+### 5.2 D99　sanitizer 必须落在**平台中立的 Contracts 层**，且值域**只留一份字面量**
 
-| 字段 | 规则 | 复用谁 |
+> **来源：codex spec-R1 medium。我上一稿写「`thickness` 复用 `DrawingStyleParams` 的 `Array(1...5)`」——**
+> **那是不可实施的**：`DrawingStyleParams` 整个文件包在 `#if canImport(UIKit)` 里且是 `internal`
+> （`UI/DrawingStyleParams.swift:9,12`），而解码器住在 `KlineTrainerPersistence`。
+> 照原文实施只有两条路：**复制一份值域**（那就没有单一真相了）或**把 UI 内部暴露出去**（更糟）。
+
+**形状**：在 **`KlineTrainerContracts`（无 UIKit）** 给 `DrawingDefaultStyle` 加两样东西 ——
+
+```swift
+public extension DrawingDefaultStyle {
+    /// 粗细值域的**唯一**字面量来源。面板与解码器都必须引用它，禁止任何地方再写 `1...5`。
+    static let thicknessRange: ClosedRange<Int> = 1...5
+
+    /// 把一份**可能来自磁盘 / 来自未来版本**的默认样式收敛成本构建一定能用的值。
+    /// 三条规则各自复用既有单一真相，本函数**不新写任何判据**。
+    func sanitized(for toolType: DrawingToolType) -> DrawingDefaultStyle
+}
+```
+
+| 字段 | 规则 | 复用谁（**禁止另写一份**） |
 |---|---|---|
-| `lineSubType` | 必须是该工具**可渲染**的值（水平线的 `.segment` 拒 → 回落 `.straight`） | `DrawingStyleAvailability.isRenderableSubType` |
-| `thickness` | 夹回 `1…5` | 与面板同一值域（`DrawingStyleParams` 的 `Array(1...5)`） |
-| `labelMode` | 经归一化（挡 `(ray, .left)` 这类组合） | `DrawingStyleAvailability.normalizedLabelMode(current:lineSubType:)` |
+| `lineSubType` | 必须是该 `toolType` **可渲染**的值（水平线的 `.segment` 拒 → 回落 `.straight`） | `DrawingStyleAvailability.isRenderableSubType` |
+| `thickness` | 夹回 `DrawingDefaultStyle.thicknessRange` | 本节新增的那**一个**常量 |
+| `labelMode` | 归一化（挡 `(ray, .left)`） | `DrawingStyleAvailability.normalizedLabelMode(current:lineSubType:)` |
+
+**连带的必做改动**：`DrawingStyleParams` 里的 `options(Array(1...5), …)` **必须改成引用 `DrawingDefaultStyle.thicknessRange`**。
+不改它，「单一真相」就是一句空话 —— 两处字面量迟早漂移，而漂移的后果正是 §5.1 那个「能打开但画不出线」。
 
 ### 5.3 sanitize 的位置
 
-**在解码边界**（repo 读出来那一刻）就 sanitize，**不是**等到 resume 种子那一步。
-理由：种子只有一个调用点是今天的事实，而**解码结果是公共值**；把 sanitize 放在边界上，
+**在解码边界**（repo 读出来那一刻）就调 `sanitized(for:)`，**不是**等到 resume 种子那一步。
+理由：种子今天只有一个调用点是**事实**、不是**保证**，而**解码结果是公共值**；把 sanitize 放在边界上，
 「一个坏默认能被读进内存」这件事从构造上就不成立。
+
+⚠️ 本片只有水平线一个工具，`sanitized(for:)` 的 `toolType` 入参在调用点恒为 `.horizontal`。
+**仍然必须带这个入参**——`isRenderableSubType` 的判据本身就是按 toolType 分的（1b-ii PR-1 曾因为把横规则套到所有工具而出过缺陷），
+写死 `.horizontal` 会在 P1c 引入新工具时变成一条静默的错误规则。
 
 ---
 
@@ -267,6 +334,8 @@ replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 
 | **T12** | replay 续局：存 → resume → `session.defaultStyle` 逐字段 == 存进去的 | host + DB 边界 |
 | **T13** | normal 续局：同上 | host + DB 边界 |
 | **T14** | **fresh 会话不种**：开新局 → `session.defaultStyle` == 出厂值 | host（§1 新局回落） |
+| **T15** | `CONTRACT_VERSION == "1.13"` | host（D97） |
+| **T16** | `DrawingDefaultStyle.thicknessRange` 与面板实际渲染的档数**同源**：面板选项数 == `thicknessRange.count` | **Catalyst**（面板是 UIKit-gated；D99 的单一真相守门） |
 
 ### 7.2 变异清单（**强制清单 = 本表每一条**，刻意不枚举编号）
 
@@ -284,6 +353,8 @@ replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 
 | M10 | `resumePendingReplay` 的种子那一句删掉 | **只有 T12** 红 |
 | M11 | 让 fresh 会话也种子（把种子挪到公共构造路径） | **只有 T14** 红 |
 | M12 | `user_version` 仍写 7 | T8/T9 红 |
+| M13 | `CONTRACT_VERSION` 留在 `"1.12"` | **只有 T15** 红 |
+| M14 | 把 `thicknessRange` 改成 `1...4`（模拟两处字面量漂移） | **只有 T16** 红 —— 证明面板确实是从该常量派生、不是自己写了个 `1...5` |
 
 **实施要求**：本表**每一条**逐条关门看红，PR 描述里逐条记录「红的是**哪个测试名**」+ 恢复后重新变绿。
 变异复原一律 `cp` 到 /tmp 再 `cp` 回，**禁止 `git checkout <file>`**（[[feedback_git_checkout_destroys_uncommitted_work]]）。
@@ -303,11 +374,12 @@ replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 
 | **G1** | `setDefaultStyle` 在 `Sources/` 里的调用点**恰好 3 个**：`DrawingEditRouter`（面板写入，既有）+ `resumePending` + `resumePendingReplay` | 结构计数 |
 | **G2** | `drawing_default_style` 这个**列名**在 `Sources/` 里出现的位置**恰好 3 处文件**：migration、两个 repo impl | 结构计数 |
 | **G3** | `replayBaseline` 的元组构造点**恰好 3 处**且**都包含 `defaultStyle`** | 结构计数 + 内容断言（防「加了字段但某处基线捕获忘了带」） |
+| **G5** | `1...5` / `1 ... 5` 这类粗细值域字面量在 `Sources/` 里**恰好 1 处**（= `DrawingDefaultStyle.thicknessRange` 的定义），面板与解码器都只引用它 | 结构计数（**剥注释剥字面量后匹配**；D99 的机械守门） |
 | **G4** | `TrainingView.showsTradeButtons` 的定义式必须仍为 `engine.flow.canBuySell()` | **内容断言**。这是 D90 复盘排除的**唯一依据**；它一旦改动，守卫报红，逼实施者回来重判排除是否仍成立 |
 
 **纪律**：结构计数一律**剥注释、剥字符串字面量**后再匹配；每个守卫配**双向自检**（该命中的必须命中、不该命中的必须不命中）；
 锚点失效必须**报错**不得静默返回 0（[[feedback_mechanical_checker_parser_disabled]]）。
-**G1–G3 在当前树上是红的**，必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
+**G1–G3 / G5 在当前树上是红的**，必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
 **G4 今天就是绿的**，属回归守卫，可先落库。
 
 ---
@@ -367,6 +439,27 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 |---|---|
 | SQLite schema | **有**：两张表各 +1 可空列，新增迁移 `0010`，`user_version` 7 → 8 |
 | `v1_4_baselineDDL` / `app_schema_v1.sql` | **零**（冻结基线不动；schema-drift 闸门因此不受影响） |
-| `CONTRACT_VERSION` | **不 bump**（可空列 + 附加式 ⇒ 双向兼容，与 `reveal_tick` / `lossyRaw` 同构） |
+| `CONTRACT_VERSION` | **必须 bump `1.12` → `1.13`**（命中 m01「影响 DDL」）+ m01 矩阵两行同步（D97 §3.4） |
+| 版本错位 | **读向兼容；写向在降级时丢一个装饰性偏好**（旧写者的 `INSERT OR REPLACE` 会把新列抹成 NULL）。已接受残留，爆炸半径与理由见 D98 §3.5。**不得再宣称「双向兼容」** |
 | 磁盘上的画线数据（`drawings` / `review_archive`） | **零** |
 | `DrawingObject` | **零**（本局默认不是画线对象的字段） |
+
+
+---
+
+## 12. codex 对抗性评审逐轮
+
+| 轮 | 评审对象 | verdict | finding | 处置 |
+|---|---|---|---|---|
+| **R1** | `feat/drawing-session-default-persistence` @ `daca81b`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：新增 app.sqlite DDL 却写「不 bump `CONTRACT_VERSION`」，违反治理规则；且「双向兼容」只论证了读，**旧写者的 `INSERT OR REPLACE` 会把新列抹成 NULL**<br>**1 medium**：D93 要求解码器复用 `DrawingStyleParams` 的 `Array(1...5)`，但那是 `#if canImport(UIKit)` 里的 internal 视图，**持久化层够不着**，照写只能复制一份值域或暴露 UI 内部 | **两条全采纳，均已实测证实**。high → 新增 **D97**（必须 bump `1.12→1.13` + m01 矩阵两行同步，照 `09be7cd` 先例）与 **D98**（版本错位的诚实分析：读向兼容 / 写向降级丢一个装饰性偏好，接受为残留并界定爆炸半径 = 仅该列，其余 14 列全在旧写者清单里，最坏 = 回到本片修复前）。medium → 新增 **D99**（`thicknessRange` + `sanitized(for:)` 落 Contracts 平台中立层，`DrawingStyleParams` 改为引用同一常量），配 T15/T16、M13/M14、守卫 G5 |
+
+**R1 额外自查发现（codex 未提，我核矩阵时撞见）**：`docs/governance/m01-schema-versioning-contract.md`
+的 app.sqlite 行**仍停在 `0003_v1.4_purge_leased`**，而代码已到 `0009` ⇒ **`0004`–`0009` 六次 DDL 迁移都未同步矩阵**。
+已写进 D97 作为「既有漂移」标注：本片不回填，但必须把自己这次做对，并在 PR 描述里点明，免得被误认为本片引入。
+
+**R1 的形状**：我把「可空列 + 附加式」当成了「所以不用 bump」，**跳过了去读治理文档那一步**——
+规则明文写着「影响 DDL → 必须 bump」，我一次都没查就下了结论。
+而「双向兼容」那句是同一个毛病的另一面：**只推演了对我的结论有利的那个方向（读）**。
+
+纪律沉淀：**凡涉及版本 / 契约 / 迁移，先去读治理文档的原文，再下结论**；
+**兼容性必须四个方向都写**（新读旧 / 旧读新 / 新写旧 / **旧写新**），少一个方向就是没论证。
