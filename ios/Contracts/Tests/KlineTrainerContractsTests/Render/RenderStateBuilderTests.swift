@@ -1235,7 +1235,7 @@ struct RenderStateBuilderTests {
     }
 
     @MainActor
-    @Test("N7：选中态绝不落盘 —— 选中前后 DrawingObject 逐字段一致、契约仍 1.12")
+    @Test("N7：选中态绝不落盘 —— 选中前后 DrawingObject 逐字段一致、契约仍 1.13")
     func selectionNeverPersists() {
         let e = TrainingEngine.preview()
         let a = DrawingAnchor(period: .m60, candleIndex: 0, price: 10.3)
