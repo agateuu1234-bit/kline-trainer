@@ -75,7 +75,20 @@ TrainingView.swift:83   showsTradeButtons        = engine.flow.canBuySell()     
 ### 2.2 ⚠️ 这条排除的**失效条件**必须写死
 
 **P5 若让复盘用上新底栏 / 常驻样式面板，本条排除立刻失效**，必须**同期**把 `review_archive` 一并接上，否则复盘会出现与本片修复前一模一样的丢失。
-**实施要求**：源码守卫 G4（§8）把这个谓词钉住 —— `showsTradeButtons` 的定义一旦改动，守卫必须报红，逼实施者回来重新判断本条排除是否仍成立。
+**实施要求**：源码守卫把这个谓词钉住，一旦被改动就报红，逼实施者回来重新判断本条排除是否仍成立。
+
+⚠️ **必须钉住的是整条可达链，不是其中一项**（codex spec-R2 medium，**已核实为真**）：
+上一稿的 G4 只断言 `showsTradeButtons` 仍为 `engine.flow.canBuySell()`。可判据是**三项合取**，
+改另外两项（`isDrawingActive` / `typeRowExpanded`）、或**另开一条挂载样式面板的路径**，
+G4 都照样绿，而复盘就悄悄具备了改本局默认的能力 —— 且它的改动**不会被存**，正是本片要消灭的丢失。
+
+**改为三条守卫合起来钉**（§8 的 G4 / G4b / G4c）：
+1. `showsTradeButtons` 的定义式仍为 `engine.flow.canBuySell()`；
+2. **`stylePanelWillBeVisible` 的整条定义式**仍为 `showsTradeButtons && isDrawingActive && typeRowExpanded`；
+3. **样式面板的挂载点在 `Sources/` 里恰好 1 处**（防「另开一条路径」）。
+
+**并写死一条无条件规则**：**任何让复盘可达「改本局默认」的改动，必须同期把 `review_archive` 接上**——
+守卫是提醒，这条规则才是义务。
 
 ### 2.3 replay 为什么必须一起做
 
@@ -145,8 +158,16 @@ replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 
 **本片必须做的两件事**（照最近一次真 bump `09be7cd`「1.11→1.12 + m01 矩阵同步」的先例）：
 
 1. `Models.swift:7` `CONTRACT_VERSION` **`"1.12"` → `"1.13"`**；
-2. `docs/governance/m01-schema-versioning-contract.md` 矩阵**两行**同步：
-   顶层行 → `"1.13"`；**app.sqlite GRDB migration 行 → `0010_v1.12_drawing_default_style`**。
+2. `docs/governance/m01-schema-versioning-contract.md` 矩阵**三行**同步（codex spec-R2 medium：我上一稿漏了第 3 行）：
+   - 顶层行 → `"1.13"`；
+   - **app.sqlite GRDB migration 行 → `0010_v1.12_drawing_default_style`**；
+   - **Swift 模型版本（`M0.3`）行 → `1.4`** —— 该行的触发条件逐字是「**Codable 字段 / 枚举 case 变更；联动顶层**」，
+     而本片给 `PendingTraining` / `PendingReplay` 各加了一个 Codable 字段，**正命中**。
+
+   > **为什么不采纳 codex 给的另一个选项（「把 Codable 改动整个移出本 PR」）**：
+   > 那会造出一个**有损的 Codable**——新增的存储属性不进 `encode(to:)` / `init(from:)`，
+   > 编码一次就把值丢了。今天它零消费者，可它是 `public` 的，**将来第一个用它的人会踩**。
+   > 加一行矩阵的成本，远低于埋一个有损编解码器。
 
 > ⚠️ **必须如实记录的既有漂移（不是本片造成的，也不是本片可援引的先例）**：
 > 该矩阵的 app.sqlite 行**当前仍停在 `0003_v1.4_purge_leased`**，而代码已跑到 `0009_v1.11_drawing_style`
@@ -194,7 +215,7 @@ replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 
 
 | # | 约束 | 不这么做会怎样 |
 |---|---|---|
-| **①** | **逐字段 `decodeIfPresent` + 未知值回落该字段的出厂值，整个解码过程绝不 `throw`** | 见 §4.1 |
+| **①** | **逐字段独立解码 + 任何失败都只回落该字段，整个解码过程绝不 `throw`**。⚠️ **「失败」包括三类：键缺失 / 值不是合法枚举 / **值的 JSON 类型就不对**（`decodeIfPresent(Int.self)` 遇到 `"fat"` 会抛）。实现上每个字段必须各自 `try?`，**不得**把五个字段包在同一个 `try` 里 | 见 §4.1；漏掉第三类 = 能过 T4/T5 却仍 brick（codex R2-medium） |
 | **②** | **列值本身不是合法 JSON / 不是对象 → 整个字段回落出厂，仍不 throw** | 同上；坏字节的形态不止「枚举值不认识」 |
 | **③** | **本列的解码失败绝不影响同一行其它列**（tick / 持仓 / 交易 / 画线一律照常读出） | 否则等价于 ① 的后果 |
 | **④** | **列为 NULL（旧档）→ `drawingDefaultStyle = nil`，不报错、不写日志噪音** | 用户升级后手上那局打不开 |
@@ -269,6 +290,19 @@ public extension DrawingDefaultStyle {
 **做法**：在 `TrainingView` 新增一条 `.onChange(of: engine.drawingSession.defaultStyle)` → `lifecycle.autosave(immediate: true)`
 （`DrawingDefaultStyle` 已是 `Equatable`，`DrawingSession` 是 `@Observable` ⇒ 值真变了才触发）。
 
+**⚠️ 这条的证据只能是源码守卫，不能是 host 假件计数**（codex spec-R2 high，**已核实为真**）：
+
+上一稿把 T10（host 假件数 `savePending` 次数）当作 D94 / M7 的唯一证据。**那是零判别力的**——
+host 测试够不着 `TrainingView`（`#if canImport(UIKit)`），它只能自己去调 `lifecycle.autosave()`，
+那证明的是「autosave 被调用时会存」，**不是**「值变了视图会去调」。
+⇒ 实施者**把 `.onChange` 整条删掉，T10 照样绿**，而用户「只改默认就退出」照丢不误。
+
+**改为**：D94 的守门是**守卫 G6**（§8）——断言 `TrainingView` 里存在一条
+`.onChange(of: engine.drawingSession.defaultStyle)` 且其闭包体内调用 `lifecycle.autosave(immediate: true)`。
+**M7 的判绿对象随之改为 G6，不再是 T10。**
+T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默认值写进去」（值传递），
+**spec 里不得再把它写成 D94 的证据**。
+
 **⚠️ 明令禁止的两种偷懒**：
 - **不得**让 `setDefaultStyle` 去 bump `drawingsRevision`。D56 明写该计数**只覆盖 `drawings`**；
   污染它会让 1b-ii 撤销 PR 的入栈条件（「revision 递增 ⟺ 内容真的变了」）失真。
@@ -325,11 +359,12 @@ public extension DrawingDefaultStyle {
 | **T3** | 列为 NULL（旧档）→ `drawingDefaultStyle == nil`，**其余字段照常读出**，不抛 | **DB 边界** |
 | **T4** | 列含 `{"colorToken":"未来色"}` → **整行照常读出**，仅该字段回落出厂 | **DB 边界**（D92 ①） |
 | **T5** | 列含**非法 JSON**（如 `"{{{"`）→ 整行照常读出，整个默认回落出厂 | **DB 边界**（D92 ②） |
+| **T5b** | 列含**类型不匹配**：`{"thickness":"fat"}` / `{"lineSubType":7}` / `{"colorToken":null}` / `{"lineStyle":[]}` / `{"labelMode":{}}` —— **五个字段各一条** → 整行照常读出，**只有该字段**回落出厂、其余四个字段**保留磁盘上的合法值** | **DB 边界**（codex spec-R2 medium：`decodeIfPresent(Int.self)` 能过 T4/T5 却在这里抛） |
 | **T6** | 列含 `{"lineSubType":"segment"}` → 读出后**能正常提交一条线** | **host**（D93；断言 `commitPending` 返回非 nil） |
 | **T7** | 列含 `{"thickness":99}` / `{"thickness":0}` → 夹回 `1…5` | **host**（D93） |
 | **T8** | 迁移：pre-0010 库跑完 migrator → 两表**都有**该列且 `user_version == 8` | **DB 边界**（仿 `Migration0009Tests` / `AppDB0005MigrationTests` 的裸库套路） |
 | **T9** | fresh install 跑完整 migrator → `user_version == 8` | **DB 边界**（`AppDB0005MigrationTests` 里那条现有断言要从 7 改 8） |
-| **T10** | **只改默认**（不动任何线）→ `savePending` 落盘次数 **+1** | host（用假件的 `savePending` 计数，D94） |
+| **T10** | 调用 `saveProgress` 时，**默认值确实被带进了写入载荷** | host（假件截获 `PendingTraining`，逐字段断言）。⚠️ **它不是 D94 的证据**（够不着视图），D94 的证据是守卫 **G6** |
 | **T11** | **fresh replay 只改默认** → `saveReplay` **确实写了**（clean-skip 未跳过） | host（D95，**这条是 clean-skip 的唯一守门**） |
 | **T12** | replay 续局：存 → resume → `session.defaultStyle` 逐字段 == 存进去的 | host + DB 边界 |
 | **T13** | normal 续局：同上 | host + DB 边界 |
@@ -341,13 +376,15 @@ public extension DrawingDefaultStyle {
 
 | # | 变异 | 必须且只应变红 |
 |---|---|---|
+| **M2b** | 把 `stylePanelWillBeVisible` 的定义改成 `isDrawingActive && typeRowExpanded`（去掉 `showsTradeButtons`，= 让复盘也能挂面板） | **只有 G4b** 红（G4 仍绿 —— 这条证明单靠 G4 挡不住） |
 | M1 | migration 里删掉 `pending_replay` 那一句 `ALTER` | T8 的 replay 分支红；training 分支**不得**红 |
 | M2 | repo 的 `INSERT` 语句里去掉该列 | T1/T2 红；T3 **不得**红 |
 | M3 | repo 的读取改成恒 `nil` | T1/T2 红 |
-| M4 | 把逐字段容错解码换成合成 `Codable`（遇未知即抛） | **只有 T4/T5** 红 |
+| M4 | 把逐字段容错解码换成合成 `Codable`（遇未知即抛） | **只有 T4/T5/T5b** 红 |
+| **M4b** | 保留逐字段解码，但把每个字段的 `try?` 改成 `try`（只挡「枚举值不认识」，不挡类型不匹配） | **只有 T5b** 红 —— 这条专门证明 T4/T5 挡不住类型不匹配 |
 | M5 | 删掉 sanitize 的 `lineSubType` 分量 | **只有 T6** 红 |
 | M6 | 删掉 sanitize 的 `thickness` 夹取 | **只有 T7** 红 |
-| M7 | 删掉 D94 新增的 `onChange` 触发 | **只有 T10** 红 |
+| M7 | 删掉 D94 新增的 `onChange` 触发 | **只有守卫 G6** 红（**不是 T10** —— host 够不着视图，T10 对它零判别力，codex R2-high） |
 | M8 | `replayBaseline` 去掉 `defaultStyle` 分量（回到五元组） | **只有 T11** 红 |
 | M9 | `resumePending` 的种子那一句删掉 | **只有 T13** 红 |
 | M10 | `resumePendingReplay` 的种子那一句删掉 | **只有 T12** 红 |
@@ -374,12 +411,15 @@ public extension DrawingDefaultStyle {
 | **G1** | `setDefaultStyle` 在 `Sources/` 里的调用点**恰好 3 个**：`DrawingEditRouter`（面板写入，既有）+ `resumePending` + `resumePendingReplay` | 结构计数 |
 | **G2** | `drawing_default_style` 这个**列名**在 `Sources/` 里出现的位置**恰好 3 处文件**：migration、两个 repo impl | 结构计数 |
 | **G3** | `replayBaseline` 的元组构造点**恰好 3 处**且**都包含 `defaultStyle`** | 结构计数 + 内容断言（防「加了字段但某处基线捕获忘了带」） |
+| **G4** | `TrainingView.showsTradeButtons` 的定义式仍为 `engine.flow.canBuySell()` | **内容断言** |
+| **G4b** | `TrainingView.stylePanelWillBeVisible` 的**整条定义式**仍为 `showsTradeButtons && isDrawingActive && typeRowExpanded` | **内容断言**（codex R2-medium：只钉 G4 会漏掉「改另外两项」这条路） |
+| **G4c** | 样式面板（`DrawingStyleParams` / `DrawingStylePanel`）的**挂载点**在 `Sources/` 里**恰好 1 处** | 结构计数（防「另开一条挂载路径」绕过 G4/G4b） |
 | **G5** | `1...5` / `1 ... 5` 这类粗细值域字面量在 `Sources/` 里**恰好 1 处**（= `DrawingDefaultStyle.thicknessRange` 的定义），面板与解码器都只引用它 | 结构计数（**剥注释剥字面量后匹配**；D99 的机械守门） |
-| **G4** | `TrainingView.showsTradeButtons` 的定义式必须仍为 `engine.flow.canBuySell()` | **内容断言**。这是 D90 复盘排除的**唯一依据**；它一旦改动，守卫报红，逼实施者回来重判排除是否仍成立 |
+| **G6** | `TrainingView` 里存在一条 `.onChange(of: engine.drawingSession.defaultStyle)`，且其闭包体内调用 `lifecycle.autosave(immediate: true)` | **结构 + 内容断言**。这是 **D94 的唯一守门**（host 够不着视图，见 §6.1）；**M7 判绿看它，不看 T10** |
 
 **纪律**：结构计数一律**剥注释、剥字符串字面量**后再匹配；每个守卫配**双向自检**（该命中的必须命中、不该命中的必须不命中）；
 锚点失效必须**报错**不得静默返回 0（[[feedback_mechanical_checker_parser_disabled]]）。
-**G1–G3 / G5 在当前树上是红的**，必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
+**G1–G3 / G4b / G4c / G5 / G6 在当前树上是红的**（G4b/G4c 依赖的谓词今天就存在，但守卫本身尚未写；G4 今天就是绿的），必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
 **G4 今天就是绿的**，属回归守卫，可先落库。
 
 ---
@@ -457,9 +497,17 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 的 app.sqlite 行**仍停在 `0003_v1.4_purge_leased`**，而代码已到 `0009` ⇒ **`0004`–`0009` 六次 DDL 迁移都未同步矩阵**。
 已写进 D97 作为「既有漂移」标注：本片不回填，但必须把自己这次做对，并在 PR 描述里点明，免得被误认为本片引入。
 
+| **R2** | 同分支 @ `a6ed039`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：T10 是 D94/M7 的唯一证据，但它是 host 假件计数，而要证的行为是 UIKit-gated `TrainingView` 里的 `.onChange` —— **删掉 `.onChange`，T10 照样绿**<br>**medium①**：m01 还有一行「Swift 模型版本｜Codable 字段变更→联动顶层」，我只同步了两行<br>**medium②**：G4 只钉 `showsTradeButtons`，可判据是三项合取，改另外两项或另开挂载路径都能绕过<br>**medium③**：T4/T5 只覆盖「枚举值不认识」和「整段非 JSON」，漏了**类型不匹配**（`{"thickness":"fat"}`），`decodeIfPresent(Int.self)` 能过 T4/T5 却在这里抛 | **四条全采纳**。high → D94 的守门改为**守卫 G6**（断言 `.onChange` 存在且调 `autosave`），**M7 判绿看 G6 不看 T10**；T10 降级为「值确实进了写入载荷」。①→ 矩阵改同步**三行**（Swift 模型版本 1.3→1.4）；**不采纳** codex 的另一选项「把 Codable 改动移出 PR」——那会造出有损 Codable，今天零消费者但它是 public，将来第一个用的人会踩。②→ 拆成 G4/G4b/G4c 三条（含整条 `stylePanelWillBeVisible` 定义式 + 挂载点计数），并写死无条件规则「任何让复盘可达改默认的改动必须同期接上 `review_archive`」，加变异 M2b。③→ D92 ① 明写「失败包括三类」+ 每字段各自 `try?`、禁止五字段包一个 `try`；加 T5b（五字段各一条）与 M4b |
+
 **R1 的形状**：我把「可空列 + 附加式」当成了「所以不用 bump」，**跳过了去读治理文档那一步**——
 规则明文写着「影响 DDL → 必须 bump」，我一次都没查就下了结论。
 而「双向兼容」那句是同一个毛病的另一面：**只推演了对我的结论有利的那个方向（读）**。
+
+**R2 high 的形状 = 「零判别力变异」的第二次**（自动选中 spec R5-medium 是第一次）：我给判据配了变异，却没问「**这条变异真的会让那条测试变红吗**」。T10 在 host、`.onChange` 在 UIKit-gated 视图里，两者**根本不在同一个可执行面上**。
+纪律沉淀：**每写一条「M 变异 → T 测试红」的配对，必须先确认这两者在同一个可执行面上**（同一 target、同一平台门）。跨面的配对是空头保证书。
+
+**R2 medium② 的形状**：**守卫只钉了合取式的一项**。判据是 `A && B && C` 时，钉 A 等于没钉。
+纪律沉淀：**守卫必须钉住整条可达链**；且守卫是提醒、不是义务本身 —— 义务要单独写成无条件规则。
 
 纪律沉淀：**凡涉及版本 / 契约 / 迁移，先去读治理文档的原文，再下结论**；
 **兼容性必须四个方向都写**（新读旧 / 旧读新 / 新写旧 / **旧写新**），少一个方向就是没论证。
