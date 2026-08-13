@@ -120,7 +120,12 @@ struct CoordinatorDefaultStylePersistTests {
         #expect(resumed.drawingSession.defaultStyle == s)
     }
 
-    /// T14：**fresh 会话不种** —— 新局必须回落出厂值（用户 2026-08-13 裁决）
+    /// T14：**fresh 会话不种** —— 新局必须回落出厂值（用户 2026-08-13 裁决）。
+    /// ⚠️ **对 M11（种子被误挪进 fresh 会话公共构造路径）零判别力**：本测试在开 e2 之前先
+    /// `db.clearPending()` 抹掉了那一行——若实现被错误地改成「fresh 路径也去读 pending 表」，
+    /// 到这里读到的必然是 `nil`，观察不到任何差异，本测试恒绿。它测的是「结束一局→开新局」这条
+    /// **真实清档流程**，判别力在 T14b（Task 6 实施者跑 M11 变异时实测暴露，计划/spec 已同步补
+    /// `f92f77c`）。
     @Test func fresh_session_does_not_seed() async throws {
         let (url, db) = try makeFreshDB(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let c1 = makeCoordinator(db: db)
@@ -131,6 +136,22 @@ struct CoordinatorDefaultStylePersistTests {
         try db.clearPending()
         let e2 = try await makeCoordinator(db: db).startNewNormalSession()
         #expect(e2.drawingSession.defaultStyle == DrawingDefaultStyle())
+    }
+
+    /// T14b：**pending 行仍在**时开新局 —— 同样不得种子（这条才对 M11 有判别力）。
+    /// `startNewNormalSession()` 本身从不碰 `pending_training`（不读也不清）——「上一局存档还留着、
+    /// 用户又直接开了新局」是生产上真实够得到的状态（清档是另一条路径的职责，不是这个方法的前置条件），
+    /// 所以这里刻意**不** `clearPending()`，让那一行非出厂默认的存档留在表里。
+    @Test func fresh_session_does_not_seed_even_when_pending_row_exists() async throws {
+        let (url, db) = try makeFreshDB(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let c1 = makeCoordinator(db: db)
+        let e1 = try await c1.startNewNormalSession()
+        e1.drawingSession.setDefaultStyle(nonDefaultStyle())
+        try await c1.saveProgress(engine: e1)
+        // ⚠️ 刻意**不** clearPending：存档里带着非出厂默认的那一行还在
+        let e2 = try await makeCoordinator(db: db).startNewNormalSession()
+        #expect(e2.drawingSession.defaultStyle == DrawingDefaultStyle(),
+                "fresh 会话绝不从 pending 存档种子 —— 新局用全局默认（D96）")
     }
 }
 #endif
