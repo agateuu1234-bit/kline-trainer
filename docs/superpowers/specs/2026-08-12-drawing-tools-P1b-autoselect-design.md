@@ -131,7 +131,7 @@ func setCommittedSelection(id: DrawingID, panel: PanelId) {
 
 ### 2.4 `setCommittedSelection` 也置 `selectionGeometryVisible = true`
 
-与 `setSelection` 同理由：能走到这一步，`ChartContainerView` 已经在**同一次** tap 里对这条线跑过 `HorizontalLineTool.visibleGeometry != nil`（`ChartContainerView.swift:362` 的落库门）——命中即证明此刻几何可见。
+与 `setSelection` 同理由：能走到这一步，**同一次调用**里已经对这条线跑过 `HorizontalLineTool.visibleGeometry != nil`（D85 §5.1 第 ② 步的落库门，即今天 `ChartContainerView.swift:362` 那道门搬家后的位置）——过了那道门即证明此刻几何可见。
 
 ---
 
@@ -144,8 +144,20 @@ func setCommittedSelection(id: DrawingID, panel: PanelId) {
 | # | 情形 | 选中 |
 |---|---|---|
 | **1** | 这条线**因这次提交而新出现**在 `selectedPanel` 的可见集合里（判据见 §3.3） | **选中它**（`setCommittedSelection`） |
-| **2** | 尝试了但被拒 —— 周期不一致 / `withStyle` 返 nil / `visibleGeometry` 为 nil / `appendDrawing` 返 false / id 与既有线碰撞 | **清空选中**（`clearSelection`） |
-| **3** | 还没走到提交（多锚工具采集中途，P1c 才有；本期水平线单锚落锚即提交，实际不可达） | **不动选中** |
+| **2** | 尝试了但被拒（全部五条出口见下表） | **清空选中**（`clearSelection`） |
+| **3** | 还没走到提交（`tapToAnchor` 返 nil，或 `shouldCommit` 为 false —— 多锚工具采集中途，P1c 才有；本期水平线单锚落锚即提交，实际不可达） | **不动选中** |
+
+**分支 2 的五条出口必须逐条列全**（codex spec-R1 唯一 high finding，**已对源码核实为真**，见 §3.4）：
+
+| 出口 | 触发 | 今天在哪 |
+|---|---|---|
+| a | `commitPending` 返 nil —— 多锚 period 不一致 | `ChartContainerView.swift:357` 的 `guard … else { return }` |
+| b | `commitPending` 返 nil —— `withStyle` 语义闸拒（水平线的 `.segment`） | 同上，同一个 guard |
+| c | `visibleGeometry` 预检为 nil（射线锚点越主图右缘） | `ChartContainerView.swift:362` 的 `guard … else { return }` |
+| d | `appendDrawing` 返 false —— period 不一致 / 非可渲染子类 / id 空 | `routeDrawingCommit` 之后（返回值被吞） |
+| e | id 与既有线碰撞 | 同 d |
+
+⚠️ **a / b / c 三条在今天的代码里是 `return`，走不到 `routeDrawingCommit`**。这是本 spec 上一稿的实质缺陷 —— 见 §3.4 的修正。
 
 ### 3.2 分支 2 为什么必须是「清空」而不是「保持原样」
 
@@ -175,9 +187,31 @@ func setCommittedSelection(id: DrawingID, panel: PanelId) {
 
 **必须取的是提交前的快照，不是提交后再回头判**：实施时必须在调 `routeDrawingCommit` **之前**求值 ①（存成一个局部 `Bool`），提交之后再求 ②。把 ① 挪到提交之后求值 = 恒为 false = 自动选中整体失效。
 
-### 3.4 边界：本决策只管「用户在画线态新画的线」
+### 3.4 分支 2 的收口位置（codex spec-R1 high，**上一稿在这里是错的**）
 
-**undo / redo 恢复回来的线不适用本决策**，一律不自动选中（1b-ii spec `:408` 原样成立）。理由：那条线不是用户此刻「画」出来的，它可能落在屏幕外、可能属于另一个面板，把选中硬塞给它反而重新制造 D37 的陈旧选中。PR-2 实施时**不得**复用 `commitAndSelect`。
+> **来源：codex 对抗性评审 R1 唯一 high finding，已对源码逐行核实为真。**
+>
+> **上一稿的错**：D83 把「被拒 → 清空选中」写全了，D85 却只要求把 `ChartContainerView.swift:363` 的
+> `engine.routeDrawingCommit(committed)` 换成一个只从**已提交对象**出发的路由。而出口 **a / b / c 是 `return`**，
+> 在那一行**之前**就退出了 —— 于是最主要的两条被拒路径**永远不会清空选中**。
+>
+> **这不是理论洞**：§3.2 我自己举的可达性例子（射线锚点越右缘）走的正是出口 **c**。
+> 后果就是 D37 那个陷阱原样复现：一次失败的画线之后，🔒 / 🗑 / 样式仍作用于**上一条**线。
+
+**错误的修法（明令禁止）**：在 `ChartContainerView` 的两处 `guard … else { return }` 里各补一句
+`session.clearSelection()`。那会把分支 2 的判据散进**三个**地方，其中两处在 UIKit-gated 文件里
+（host 上不编译）—— 正是 D85 要消灭的东西，且「三处保持一致」没有任何机制保证。
+
+**正确的修法**：把**整段「尝试提交」**从 `ChartContainerView` 搬进路由。分界线定在
+`inputController.shouldCommit(...)` **之后** —— 它是「分支 3（还没到提交）」与「分支 1/2（已尝试提交）」
+的天然分水岭，且 `shouldCommit` 需要 `tool` 与 `inputController`，留在原处最省。
+
+搬完之后：**分支 1 与分支 2 的全部五条出口都在同一个函数体内**，一处写完，没有第二处可以写漏。
+具体函数形状见 D85 §5.1。
+
+### 3.5 边界：本决策只管「用户在画线态新画的线」
+
+**undo / redo 恢复回来的线不适用本决策**，一律不自动选中（1b-ii spec `:408` 原样成立）。理由：那条线不是用户此刻「画」出来的，它可能落在屏幕外、可能属于另一个面板，把选中硬塞给它反而重新制造 D37 的陈旧选中。PR-2 实施时**不得**复用 `commitPendingAndSelect`。
 
 ---
 
@@ -197,11 +231,13 @@ func setCommittedSelection(id: DrawingID, panel: PanelId) {
 
 故必须显式：`guard engine.flow.mode != .review`。
 
-### 4.2 门的位置：**在 `commitAndSelect` 内部、`routeDrawingCommit` 之后**
+### 4.2 门的位置：**在 `commitPendingAndSelect` 内部、`routeDrawingCommit` 之后**（第 ⑤ 步）
 
 ⚠️ 这道门**只能包住「选中」那一步**。**绝不能**放到 `routeDrawingCommit` 之前、也不能提到 `ChartContainerView` 的 `.draw` 分支之外 —— 那会把**复盘的落线能力整个回归掉**（浮动铅笔钮，1a-iii 起的既有功能，D26 明写复盘继续用它）。
 
-**位置钉死在 `DrawingEditRouter.commitAndSelect` 内部**（而不是在 `ChartContainerView` 里 `if !review { ... }`）。这不只是风格问题：门放在 `commitAndSelect` 里 ⇒ **「把门挪错位置」这个变异在 host `swift test` 上就能验**（M2）；放在 UIKit-gated 的 `ChartContainerView` 里就只能赌 Catalyst。
+**位置钉死在 `DrawingEditRouter.commitPendingAndSelect` 的第 ⑤ 步**（而不是在 `ChartContainerView` 里 `if !review { ... }`）。这不只是风格问题：门放在路由里 ⇒ **「把门挪错位置」这个变异在 host `swift test` 上就能验**（M2）；放在 UIKit-gated 的 `ChartContainerView` 里就只能赌 Catalyst。
+
+**这道门只管「授予选中」，不管「清空选中」**（D85 §5.1 约束 1）：第 ① / ② 步的 `clearSelection()` 在门**之前**、不受它管辖。清空从不授予任何能力，而一次被拒的提交在任何模式下都不该留下陈旧选中。
 
 这与 1b-i PR-3 在 `.select` 分支里那道门的写法逐字同构（`ChartContainerView.swift:369-371` 的注释原文：「门**只包这一支**……fail-closed 的门必须限定到它真适用的那一类」），也与 1b-ii PR-1 那道 `.segment` 门误管所有工具是同一类错误。
 
@@ -215,28 +251,51 @@ func setCommittedSelection(id: DrawingID, panel: PanelId) {
 
 ```swift
 // Drawing/DrawingEditRouter.swift
-/// D83 / D84：提交一条新画的线，并按**状态**决定选中处置。
-/// `routeDrawingCommit` 在 `Sources/` 里的**唯一**调用点。
-static func commitAndSelect(_ committed: DrawingObject, panel: PanelId, engine: TrainingEngine)
+/// D83 / D84：**从 pending 锚提交一条新线，并按状态决定选中处置。**
+/// 覆盖 D83 分支 1 与分支 2 的**全部五条出口**（§3.1 表）—— 这是它必须从
+/// `commitPending` 开始、而不是从 `routeDrawingCommit` 开始的全部理由（§3.4）。
+/// `commitPending` 与 `routeDrawingCommit` 在 `Sources/` 里的**唯一**调用点。
+static func commitPendingAndSelect(panel: PanelId,
+                                   mapper: CoordinateMapper,
+                                   engine: TrainingEngine)
 ```
 
-`ChartContainerView.swift:363` 的 `engine.routeDrawingCommit(committed)` 改为调它。
+`ChartContainerView` 的 `.draw` 分支相应**缩短**为：
 
-**函数体的四步顺序是 load-bearing 的，一步都不许换位**：
+```swift
+case .draw:
+    let ps = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
+    guard let anchor = inputController.tapToAnchor(at: point, panel: ps, mapper: mapper) else { return }
+    session.addAnchor(anchor, panel: panel)
+    guard inputController.shouldCommit(current: session.pendingAnchors, tool: tool) else { return }  // ← 分支 3 的边界
+    DrawingEditRouter.commitPendingAndSelect(panel: panel, mapper: mapper, engine: engine)
+    rebuildRenderState(bounds: view.bounds)      // §5.3
+```
 
-| 步 | 做什么 | 换位的后果 |
+四道 guard 变一次调用：UIKit-gated 文件里的判据**净减少两条**。
+
+**函数体的六步顺序是 load-bearing 的，一步都不许换位**：
+
+| 步 | 做什么 | 换位 / 省略的后果 |
 |---|---|---|
-| **①** | 先取快照：`let wasPresent = engine.drawings.contains { $0.id == committed.id }` | 挪到 ② 之后 → 恒 true → 自动选中整体失效（M5c） |
-| **②** | `engine.routeDrawingCommit(committed)` —— **无条件**，复盘照常落线 | —— |
-| **③** | `guard engine.flow.mode != .review else { return }` —— 复盘到此为止（D84） | 挪到 ② 之前 → 复盘落线功能回归（M2） |
-| **④** | `wasPresent == false && visibleDrawings(…, panel: panel, …).contains { $0.id == committed.id }` → `setCommittedSelection`；否则 → `clearSelection`（D83 分支 1 / 2） | 见 M5a / M5b / M6 |
+| **①** | `guard let committed = engine.drawingSession.commitPending(panelPosition: panel == .upper ? 0 : 1) else { clearSelection(); return }` | 省掉 `clearSelection` → 出口 a / b 留下陈旧选中（M13） |
+| **②** | `guard HorizontalLineTool.visibleGeometry(for: committed, mapper: mapper) != nil else { clearSelection(); return }` | 省掉 `clearSelection` → 出口 c 留下陈旧选中（M14，= codex R1 的原始 finding） |
+| **③** | `let wasPresent = engine.drawings.contains { $0.id == committed.id }` | 挪到 ④ 之后 → 恒 true → 自动选中整体失效（M5c） |
+| **④** | `engine.routeDrawingCommit(committed)` —— **无条件**，复盘照常落线 | —— |
+| **⑤** | `guard engine.flow.mode != .review else { return }` —— 复盘到此为止（D84） | 挪到 ④ 之前 → 复盘落线功能回归（M2） |
+| **⑥** | `!wasPresent && visibleDrawings(…, panel: panel, …).contains { $0.id == committed.id }` → `setCommittedSelection`；否则 → `clearSelection`（出口 d / e） | 见 M5a / M5b / M6 |
 
-③ 用 `return` 而不是 `if`：复盘下**既不选中也不清空**。这不是遗漏 —— 复盘里根本产生不出选中（`.select` 分支在复盘早退，`ChartContainerView.swift:372`），没有可清的东西。
+**三条实施约束**：
+
+1. **① / ② 的 `clearSelection` 不受 D84 复盘门管辖**（门在 ⑤，在它们之后）。这是有意的：D84 管的是复盘**不得获得**选中能力，而「清空」从不授予任何能力 —— 无论哪个模式，一次被拒的提交都不该留下陈旧选中。**不得**把 ⑤ 提前去包住 ① / ②。
+2. **② 用的是调用方传进来的 `mapper`，不是 `session.viewportMapper(for: panel)`**。今天 `ChartContainerView.swift:362` 那道落库门用的就是本次 tap 现算的 mapper；换成 session 里发布的那一份会在「本面板无 candles」时变成 fail-closed —— 那是对**既有落库门**的行为改动，不属本片范围。**不得顺手"改进"**。
+3. **① / ② 的判据与顺序一字不改地承接今天的 `ChartContainerView.swift:357/362`**（同一个 `commitPending`、同一个 `visibleGeometry`）。本片只是给它们各补一句 `clearSelection()` 并搬了位置，**不新增、不放宽、不重排任何落库门**。
 
 ### 5.2 为什么要挪
 
 1. **判别力**：D83 / D84 是本片最危险的两条判据，留在 `ChartContainerView`（`#if canImport(UIKit)` 包裹，**host `swift test` 上根本不编译**）就只能赌 Catalyst 才有证据。挪进 `DrawingEditRouter`（该文件顶部注释已写明「无 UIKit ⇒ host `swift test` 就能跑」）后，两条判据连同全部变异验证都在 host 上完成。
-2. **写入面收口**：`routeDrawingCommit` 从此在 `Sources/` 里恰好一个调用点，可上源码守卫 —— 与 `updateDrawingStyle` / `deleteDrawing(id:)` / `setDrawingLocked` 同待遇（D62 / D51 / D71 建立的模式）。
+2. **写入面收口**：`commitPending` 与 `routeDrawingCommit` 从此在 `Sources/` 里各恰好一个调用点，可上源码守卫 —— 与 `updateDrawingStyle` / `deleteDrawing(id:)` / `setDrawingLocked` 同待遇（D62 / D51 / D71 建立的模式）。
+3. **分支 2 的五条出口收进同一个函数体**（§3.4）—— 这是 codex spec-R1 那条 high finding 的正面修复，也是把边界定在 `shouldCommit` 之后而不是 `routeDrawingCommit` 之前的**决定性**理由。
 
 ### 5.3 `.draw` 分支必须补一次 `rebuildRenderState`
 
@@ -323,7 +382,7 @@ mutate(&next)
 | # | 变异 | 必须且只应变红 |
 |---|---|---|
 | M1 | 删掉 D84 的 `flow.mode != .review` 门 | 复盘档（选中越界）红；训练档 P1/P2 **不得**红 |
-| M2 | 把 D84 的门（`commitAndSelect` 第 ③ 步）挪到第 ② 步 `routeDrawingCommit` **之前** | 复盘**落线**档红（`reviewDrawings.count` 不再递增）；这一条证明 §4.2 的双断言不是空转 |
+| M2 | 把 D84 的门（第 ⑤ 步）挪到第 ④ 步 `routeDrawingCommit` **之前** | 复盘**落线**档红（`reviewDrawings.count` 不再递增）；这一条证明 §4.2 的双断言不是空转 |
 | M3 | 把 `setCommittedSelection` 的守卫改成 `mode == .select` | P1 红（自动选中整体失效） |
 | M4 | 把 `setSelection` 的守卫放宽成 `mode != nil` / 删掉 | 「画线态调 `setSelection` 必须被拒」的不变量锁测试红 |
 | M5a | 删掉 D83 谓词的合取项 **①**（提交前不存在该 id） | **只有** id 碰撞档红（预置一条与 committed 同 id 的既有线 → 断言选中**保持为 nil**，不得变成那条老线） |
@@ -336,8 +395,12 @@ mutate(&next)
 | M10 | 把 D86 选择态改成也写 `setDefaultStyle` | **只有** P4 红 |
 | M11 | 把 `applyPanelStyleMutation` 的 base 改成调用方传入的快照 | 「两次连续改动不互相 revert」的档红（PR-4 R3 那条回归的守门测试） |
 | M12 | 删掉 `.draw` 分支新增的 `rebuildRenderState` | 渲染态档红（`KLineRenderState.selectedDrawingID` 本帧仍是旧值） |
+| **M13** | 删掉第 **①** 步（`commitPending` 返 nil）的 `clearSelection()` | **只有**「已有选中 → 下一次提交因 `commitPending` 返 nil 被拒」的档红（出口 a / b） |
+| **M14** | 删掉第 **②** 步（几何预检失败）的 `clearSelection()` | **只有**「已有选中 → 下一次提交因射线越右缘被拒」的档红（出口 c，= **codex spec-R1 那条 high finding 的守门测试**） |
 
-**实施要求**：M1–M12（含 M5a/b/c）**逐条关门看红**，并在 PR 描述里逐条记录「红的是**哪个测试名**」。实施者自报「验过了」不算数（[[feedback_mutation_testing_beats_reading]]）。
+**M13 / M14 的档必须造成「先有一个选中，再让下一次提交被拒」**——只造「无选中时提交被拒」是零判别力的（那种档在删掉 `clearSelection` 后照样绿）。这正是 [[feedback_mutation_must_target_the_exact_predicate]] 说的「红的是哪一条」。
+
+**实施要求**：M1–M14（含 M5a/b/c）**逐条关门看红**，并在 PR 描述里逐条记录「红的是**哪个测试名**」。实施者自报「验过了」不算数（[[feedback_mutation_testing_beats_reading]]）。
 变异复原一律 `cp` 到 /tmp 再 `cp` 回，**禁止 `git checkout <file>`**（会静默抹掉未提交改动，[[feedback_git_checkout_destroys_uncommitted_work]]）。
 
 ### 7.3 不变量锁测试（对「不可达」的正确写法）
@@ -353,12 +416,13 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 
 | 判据 | 跑在哪 | 变异 |
 |---|---|---|
-| D82（两入口互斥）、D83（快照顺序 + 两个合取项 + 三分支）、D84（复盘门位置）、D86（三张表 + 写入顺序 + 现取） | **host `swift test`**（`DrawingSession` / `DrawingEditRouter` / `RenderStateBuilder` 均无 UIKit） | M1 / M2 / M3 / M4 / M5a / M5b / M5c / M6 / M7 / M8 / M9 / M10 / M11 |
+| D82（两入口互斥）、D83（六步顺序 + 五条出口 + 两个合取项）、D84（复盘门位置）、D86（三张表 + 写入顺序 + 现取） | **host `swift test`**（`DrawingSession` / `DrawingEditRouter` / `RenderStateBuilder` / `HorizontalLineTool` / `CoordinateMapper` 均无 UIKit） | M1 / M2 / M3 / M4 / M5a / M5b / M5c / M6 / M7 / M8 / M9 / M10 / M11 / **M13 / M14** |
 | `ChartContainerView.draw` 分支换调用 + 补 `rebuildRenderState`；`TrainingView` 删 if 分流 | 源码守卫（host）+ **Catalyst 编译与测试门** | **M12（只有它必须上 Catalyst）** |
 
-**D85 把复盘门与状态谓词整体挪进 `DrawingEditRouter` 的直接收益就在这张表**：13 条变异里 12 条落在 host。
+**D85 把「尝试提交」整段挪进 `DrawingEditRouter` 的直接收益就在这张表**：15 条变异里 14 条落在 host。
+若按上一稿只挪 `routeDrawingCommit` 一句，M13 / M14 这两条（= codex R1 那条 high finding 的守门测试）就只能上 Catalyst。
 
-⚠️ **UIKit-gated 文件在 host 上根本不编译** → M12 必须上 Catalyst 跑（[[feedback_uikit_gated_evidence_traps]]），且 Catalyst 必须用 `-scheme KlineTrainerContracts-Package` + `set -o pipefail`（[[feedback_catalyst_scheme_and_pipefail_double_trap]]）。判绿读**执行量**，不读 `TEST SUCCEEDED` 字样。
+⚠️ **UIKit-gated 文件在 host 上根本不编译** → M12（唯一一条）必须上 Catalyst 跑（[[feedback_uikit_gated_evidence_traps]]），且 Catalyst 必须用 `-scheme KlineTrainerContracts-Package` + `set -o pipefail`（[[feedback_catalyst_scheme_and_pipefail_double_trap]]）。判绿读**执行量**，不读 `TEST SUCCEEDED` 字样。
 
 ---
 
@@ -367,9 +431,11 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 | # | 守卫 | 形状 |
 |---|---|---|
 | **G1** | `routeDrawingCommit` 在 `Sources/` 里**恰好 1 个**调用点，且在 `Drawing/DrawingEditRouter.swift` 内 | 结构计数 |
+| **G1b** | `commitPending` 在 `Sources/` 里**恰好 1 个**调用点，且在 `Drawing/DrawingEditRouter.swift` 内（D85 §5.1 第 ① 步）—— 防实施者「只搬一半」，把 `commitPending` 留在 `ChartContainerView` 里 | 结构计数 |
 | **G2** | `setCommittedSelection` 在 `Sources/` 里**恰好 1 个**调用点，且在 `Drawing/DrawingEditRouter.swift` 内 | 结构计数 |
 | **G3** | `applyStyleMutation` / `applyDefaultStyleMutation` 两个标识符在 `Sources/` 的**代码文本**里**恰好 0 次**出现（已删除） | 结构计数。⚠️ **必须剥注释后再数** —— D86 §6.2 要求给 `applyPanelStyleMutation` 写一句「取代 applyStyleMutation / applyDefaultStyleMutation」的承重注释，不剥注释 G3 会被这句注释自己打红，而「删掉那句注释」就成了合法绕过路径 |
 | **G4** | `applyPanelStyleMutation` 在 `Sources/` 里**恰好 1 个**调用点，且在 `UI/TrainingView.swift` 内 | 结构计数 |
+| **G4b** | `clearSelection` 在 `Drawing/DrawingEditRouter.swift` 里**至少 4 个**调用点（第 ① / ② / ⑥ 步 + 既有 `syncSelectionByState`）—— 少于 4 说明分支 2 的某条出口没接上 | 结构计数（**下界**，不是精确值：`applyStyle` / `deleteSelected` 等既有路径也可能增加，故用 ≥ 不用 ==） |
 | **G5** | `setSelection`（不含 `setCommittedSelection`）在 `Sources/` 里**恰好 1 个**调用点，且在 `Render/ChartContainerView.swift` 内 | 结构计数（**匹配必须用完整调用语法锚**，`setSelection(` 会被 `setCommittedSelection(` 的子串误命中 → 需要边界锚） |
 
 **纪律（缺一即失效）**：
@@ -377,7 +443,7 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 - **不得写成「禁词黑名单」**，一律用结构计数（[[feedback_source_guard_text_source_discipline]]）。
 - 否定 / 结构断言必须**剥注释、剥字符串字面量**再匹配 —— 否则本 spec 引用的那些承重注释会把守卫自己打红，且「删注释」会变成合法绕过路径。
 - **每个守卫必须配双向自检**：喂一段「本该命中」的样本必须命中、喂一段「本该不命中」的样本必须不命中。锚点失效必须**报错**，不得静默返回 0（[[feedback_mechanical_checker_parser_disabled]]）。
-- ⚠️ **G1–G4 描述的是改动之后的状态，在当前树上是红的**（G1 今天的唯一调用点在 `ChartContainerView`、不在 `DrawingEditRouter`；G2/G4 的符号今天还不存在；G3 今天恰好相反、两个标识符都还在）。故它们**必须与对应的生产改动写在同一个 task 里**，不得作为「前置守卫」先行落库 —— 一条开局就红的守卫等于给实施者发放宽许可证（[[feedback_source_guard_must_be_green_on_current_tree]]）。每个 task 结束时它自己那几条守卫必须是绿的。
+- ⚠️ **G1 / G1b / G2 / G3 / G4 / G4b 描述的是改动之后的状态，在当前树上是红的**（G1 与 G1b 今天的唯一调用点都在 `ChartContainerView`、不在 `DrawingEditRouter`；G2/G4 的符号今天还不存在；G3 今天恰好相反、两个标识符都还在；G4b 今天只有 1 个）。故它们**必须与对应的生产改动写在同一个 task 里**，不得作为「前置守卫」先行落库 —— 一条开局就红的守卫等于给实施者发放宽许可证（[[feedback_source_guard_must_be_green_on_current_tree]]）。每个 task 结束时它自己那几条守卫必须是绿的。
 - **G5 今天已经是绿的**（`setSelection` 的唯一调用点已在 `ChartContainerView.swift:378`），它是**回归守卫**，可以先落库。
 
 ---
@@ -409,7 +475,11 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 | 19 | 从主页进**复盘**（历史记录 → 复盘），用浮动铅笔钮画一条线 | 线**能画出来**（落线功能没坏）；线**不变蓝**、底栏无选中相关变化（复盘不获得选中能力） | |
 | 20 | 重新进画线模式画一条线（它变蓝），然后**在图上竖滑切周期** | 蓝色高亮**消失**（选中被清空），🔒 🗑 回灰；画线模式**仍然开着**（可以接着画） | |
 
-**#18 与 #19 是本片的两条硬边界**（不跨局 / 复盘不越界），任何一条不过都是阻塞级。
+| 21 | 画一条线（它变蓝选中）→ 在样式面板把**线型**从「直线」改成「**射线**」→ 然后**在图表最右边缘**点一下 | **没有画出新线**（射线锚点越右缘，本来就画不出）；**同时蓝色高亮消失、🔒 🗑 回灰**（选中被清空，没有停在上一条线上） | |
+| 22 | 承接 #21，把线型改回「直线」，在图中间点一下 | 正常画出新线并变蓝选中（前一步的拒绝没有把功能卡死） | |
+
+**#18 / #19 / #21 是本片的三条硬边界**（不跨局 / 复盘不越界 / **被拒的画线不留陈旧选中**），任何一条不过都是阻塞级。
+**#21 是 codex spec-R1 那条 high finding 的真机守门项**（对应 M14）——上一稿的设计在这一步会「线没画出来，但上一条线还是蓝的」，🗑 一按删错东西。
 
 ---
 
@@ -417,7 +487,7 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 
 ### 10.1 交给 1b-ii PR-2（撤销 / 前进）
 
-- **undo / redo 恢复回来的线不自动选中**（1b-ii `:408` 原样成立）。**不得复用 `commitAndSelect`**（D83 §3.4）。
+- **undo / redo 恢复回来的线不自动选中**（1b-ii `:408` 原样成立）。**不得复用 `commitPendingAndSelect`**（D83 §3.5）。
 - undo 把一条线删掉时，若它正被选中 → 由 D54 clause 4（存在性谓词）自动清空，PR-2 **不需要**为此新增判据。
 - PR-2 的入栈动作里包含「改样式」。D86 让**画线态**的一次改样式同时改了「线」和「本局默认」——**PR-2 必须决定 undo 是否一并回滚默认**，这是 PR-2 的 spec 范围，本片不预判。
 
@@ -440,3 +510,15 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 
 **零**。不新增 / 不修改任何持久化字段、不改 `CONTRACT_VERSION`、不加迁移、不改 settings 表。
 `DrawingSession` 的选中态是**瞬时 UI 状态，绝不落盘**（D55 原样成立）。
+
+---
+
+## 12. codex 对抗性评审逐轮
+
+| 轮 | 评审对象 | verdict | finding | 处置 |
+|---|---|---|---|---|
+| **R1** | `feat/drawing-p1b-autoselect` @ `725534a`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：D83 要求「提交被拒 → 清空选中」，但 D85 只让实施者替换 `routeDrawingCommit` 那一句；而 `commitPending` 返 nil 与几何预检失败这两条出口在今天的代码里是 `return`，**根本到不了那一句** → 分支 2 对最主要的两条被拒路径永不执行，D37 的陷阱原样复现 | **全采纳**。已对源码逐行核实为真，且**是本 spec 自身的矛盾**：§3.2 我自己举的可达性例子（射线越右缘）走的正是那条 `return`。修法**不是**在 `ChartContainerView` 补两句 `clearSelection`（会把判据散进三处、其中两处 host 测不到），而是把**整段「尝试提交」**搬进路由（D85 §5.1 六步），使分支 2 的五条出口收进同一个函数体。连带产出：出口清单表（§3.1）、M13 / M14 两条守门变异、真机验收 #21 |
+
+**R1 的形状**：我把「要做什么」写全了，却把「在哪做」写在了一个**那些路径到不了**的位置。
+这与 [[feedback_internal_review_misses_bad_data]] 记录的形状一致 —— 判据本身没错，错在**没有对着真实控制流核一遍每条出口是否真的流经收口点**。
+纪律沉淀：**凡是写「所有 X 都要走 Y」的 spec，必须先把 X 的出口逐条列出来，再逐条核它是否真的到得了 Y**（§3.1 那张出口表就是这条纪律的产物）。
