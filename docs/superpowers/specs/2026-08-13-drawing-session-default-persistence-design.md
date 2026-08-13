@@ -413,6 +413,11 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **必做** | 守卫 **G6**（结构 + 内容断言：`.onChange(of: engine.drawingSession.defaultStyle)` 存在且调 `lifecycle.autosave(immediate: true)`） |
 | **plan 阶段的探路（spike），成则加、不成则如实记录** | 把两条 autosave 触发抽成一个**纯 SwiftUI 的 `ViewModifier`**（沿用本仓「抽共享、不复制」的 `ChartPanelsContainer` 范式），再用 ④ 的 `ImageRenderer` 路子渲染一个**最小纯 SwiftUI 宿主**验证 `.onChange` 真的触发。**能跑通就加进必测；跑不通就在 PR 描述里如实写明「D94 只有结构证据，行为证据受阻于已记录的平台限制」** |
 
+**spike 的已知抓手（实测，减少探路成本）**：
+- **「排空在飞 autosave」这一半已经解决** —— `TrainingSessionCoordinator.drainAutosaveForTesting()`（`:178`，`#if DEBUG` 测试钩子，注释原文「生产无 await 点，测试需确定性排空」）。
+- **未知的只剩一半**：headless `ImageRenderer` 下 `.onChange` 会不会真的触发（本仓四条路的记录只覆盖**几何测量**，未覆盖 `.onChange` 触发）。**spike 只需回答这一个问题。**
+- ⚠️ 抽 `ViewModifier` 时**必须把既有那条 `drawingsRevision` 触发一起抽进去**，否则会出现「两条触发分居两处」，正是本 spec 反复在治的漂移形态。
+
 ⚠️ **不得**因为「codex 要求了」就把一条**未经证实可构造**的测试写进必做清单 ——
 那正是本轮工作反复栽过的「零判别力 / 写不出来的档」（自动选中 spec R5-medium、本 spec R2-high）。
 
