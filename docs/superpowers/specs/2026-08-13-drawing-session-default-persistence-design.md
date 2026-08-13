@@ -1,0 +1,372 @@
+# 划线「本局默认」持久化设计 spec（持久化 PR）
+
+**日期**：2026-08-13
+
+**上游 spec**（继续全部生效，本文件不推翻其中任何一条）：
+
+- 母 spec `docs/superpowers/specs/2026-07-04-drawing-tools-expansion-design.md`（D1–D22，**§13 = 全局默认，属 P6**）
+- 拆分补充 spec `docs/superpowers/specs/2026-07-10-drawing-tools-P1b-split-addendum.md`（D23–D48）
+- 1b-i `docs/superpowers/specs/2026-07-23-drawing-tools-P1b-1b-i-select-edit-delete-design.md`（D49–D67）
+- 1b-ii `docs/superpowers/specs/2026-08-11-drawing-tools-P1b-1b-ii-lock-undo-design.md`（D68–D80）
+- **自动选中 spec** `docs/superpowers/specs/2026-08-12-drawing-tools-P1b-autoselect-design.md`（D81–D89，**D87 = 本片的需求来源**）
+
+**基线**：`origin/main` `20f615a`。分支 `feat/drawing-session-default-persistence`，worktree `.dev/worktree/drawing-default-persist`。
+基线闸门（同一 commit `20f615a` 上实跑）：host `swift test` = **`Test run with 1831 tests in 215 suites passed`**。
+
+本 spec 新增决策编号从 **D90** 起（D81–D89 属自动选中 spec）。
+
+---
+
+## 0. 范围与由来
+
+### 0.1 需求来源：用户 2026-08-13 裁决（逐字）
+
+> 「每一局训练，然后退出了再回来，其实相当于原来的训练**还没有完全结束**嘛，因为用户没有点结束按键，只是相当于返回了再继续进行训练。……相当于是个**断点**，我重新开始，那也要**继承之前我已经做的这些改动**……而不是重置回我们这个 APP 的默认设置。」
+
+**自动选中 spec 的 D87 已据此定死需求**，本 spec 只负责**实现它**，不重新讨论要不要做。
+
+### 0.2 本片在三 PR 链条中的位置（**次序强制，不可颠倒**）
+
+```
+本片（持久化 PR） ──强制──▶ 自动选中 PR ──强制──▶ 1b-ii 撤销 PR
+```
+
+**为什么本片必须最先**（**自动选中 spec** 的 D89，那份文件的 §6.8，已实测）：自动选中 PR 的 D86 让画线态一次改样式**同时写「线」和「本局默认」**，而「线」经 `drawingsRevision` → autosave **会落盘**。若本局默认此时尚未持久化，续训后就是「**线是新样式、默认回落出厂**」的**半持久化**坏状态 —— 那是 main 上不存在、由自动选中 PR 制造的。本片先落地，该中间态**结构上不会出现**。
+
+**本片单独上线是净收益**：它修的是 main 上**今天就有**的缺口（`defaultStyle` 在 `KlineTrainerPersistence/` 出现 **0 次**），且本片**不引入任何与之耦合的新落盘写入**。
+
+### 0.3 本 spec 不做
+
+- **全局默认**（齿轮「画线设置」界面 + 它的落盘）—— 母 spec §13 = **P6**，一字不动。
+  本片持久化的是**本局覆盖量**，不是全局默认。二者别混。
+- 自动选中 / 改样式两套语义（自动选中 spec）。
+- 复盘存档 `review_archive`（**可证明排除**，见 D90）。
+- 节点 / 多锚 / 放大镜（P1c / P4）。
+
+---
+
+## 1. 行为定义
+
+| 事件 | 本局默认 |
+|---|---|
+| 局内改样式（画线态 / 选择态无选中） | 更新 **并立刻存盘**（D94） |
+| 点「返回」回主页 → 「继续训练」续**同一局** | **继承** |
+| App 被杀 / 切后台被系统回收 → 续训 | **继承** |
+| 本局**结束**（点结束 / 自动结束）后**新开一局** | **回落**到全局默认（今天无齿轮界面 ⇒ 出厂值；P6 之后 = 齿轮里设的那个）。**用户 2026-08-13 确认** |
+| 历史记录 →「再次训练（replay）」 | **算新的一局** ⇒ 开始时回落；replay **自己**局内改的，在 replay 的断点续局时继承。**用户 2026-08-13 确认** |
+| 复盘 | **不适用**（改不了，见 D90） |
+| 升级前建的旧存档 | **能正常打开**，本局默认回落出厂（D92 约束 ④） |
+
+---
+
+## 2. D90　存档面 = `pending_training` + `pending_replay` 两张表；复盘**可证明**排除
+
+### 2.1 复盘排除的依据是一个**谓词**，不是「大概用不上」
+
+常驻样式面板在复盘**根本不渲染**：
+
+```
+TrainingView.swift:116  stylePanelWillBeVisible = showsTradeButtons && isDrawingActive && typeRowExpanded
+TrainingView.swift:83   showsTradeButtons        = engine.flow.canBuySell()      // 复盘恒 false
+```
+
+⇒ 复盘里**改不了**本局默认 ⇒ 没有任何东西需要存 ⇒ `review_archive` 不在本片存档面内。
+
+### 2.2 ⚠️ 这条排除的**失效条件**必须写死
+
+**P5 若让复盘用上新底栏 / 常驻样式面板，本条排除立刻失效**，必须**同期**把 `review_archive` 一并接上，否则复盘会出现与本片修复前一模一样的丢失。
+**实施要求**：源码守卫 G4（§8）把这个谓词钉住 —— `showsTradeButtons` 的定义一旦改动，守卫必须报红，逼实施者回来重新判断本条排除是否仍成立。
+
+### 2.3 replay 为什么必须一起做
+
+replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 在 replay 为 true），用户在 replay 里同样能改本局默认；replay 有自己的断点续局（`pending_replay` 槽 + `resumePendingReplay`）。少做 replay = 同一个缺口换个入口原样存在。
+
+---
+
+## 3. D91　物理形状：**每表一个可空 TEXT 列**存样式 JSON + `0010` 迁移
+
+### 3.1 为什么必须动 SQL 列，而不是「给模型加个 Codable key」
+
+> **来源：自动选中 spec 的 codex R6 critical。我在那份 spec 里写过「给 `PendingTraining` 的 Codable 加可选 key 即可」，那是错的。**
+
+| 实测事实 | 出处 |
+|---|---|
+| `pending_training` 是**逐列建表** | `AppDBMigrations.swift:57-71`（+ `0004` 追加 `session_key`） |
+| `pending_replay` 同构，建于 `0006` | `AppDBMigrations.swift:164-184` |
+| repo 写盘是 `INSERT OR REPLACE INTO pending_training (…14 个具名列…) VALUES (…)`，读盘按列名取 | `PendingTrainingRepositoryImpl.swift:18-45` |
+| **`PendingTraining` / `PendingReplay` 的 `Codable` 在生产路径上有几个消费者** | **0 个**（全仓 grep 无 `JSONEncoder` 编解码这两个类型的生产调用） |
+
+⇒ **只加 Codable key 会「什么都不做」**：内存 round-trip 测试全绿，而值从来没进过数据库。
+这就是本片最需要防的那种假绿（[[feedback_uikit_gated_evidence_traps]] 同族）。
+
+### 3.2 形状
+
+- 两张表各加 **`drawing_default_style TEXT`（可空）**，存一份 JSON：
+  `{"lineSubType":…,"lineStyle":…,"thickness":…,"colorToken":…,"labelMode":…}`
+- **一个 JSON 列而不是五个标量列**：与 `drawings.style_json TEXT` 的房内惯例逐字同构（`0009`）。
+  「某个字段坏了不牵连其余」这条**由解码器保证**（D92 逐字段容错），**不需要**靠拆五列来实现；
+  拆五列只会把一次 `ALTER` 变成十次、把一次读列变成十次，收益为零。
+- **模型层**：`PendingTraining` / `PendingReplay` 各加 `drawingDefaultStyle: DrawingDefaultStyle?`
+  （`nil` = 旧档 / 未写过）。两个 `init` 的新参数**必须带默认值 `= nil`**，否则 `DebugFixtureData.swift:181`
+  等既有构造点全部编译失败。
+- **模型 Codable 同步更新**（`decodeIfPresent` / `encodeIfPresent`），但见 §7 的判绿纪律：
+  **模型 round-trip 绿 ≠ 落盘成功**，必测证据只认 DB 边界测试。
+
+### 3.3 迁移
+
+```
+0010_v1.12_drawing_default_style
+    ALTER TABLE pending_training ADD COLUMN drawing_default_style TEXT
+    ALTER TABLE pending_replay   ADD COLUMN drawing_default_style TEXT
+    PRAGMA user_version = 8
+```
+
+- 照 **`0008_v1.10_drawing_reveal_tick`** 的先例（`AppDBMigrations.swift:205-208`）：可空列直接 `ALTER ADD`，
+  **不需要 `0009` 那种「建新表 + 回填 + 换名」重建**（那是因为要加 `NOT NULL`/`UNIQUE`/`CHECK`，本片不需要）。
+- **`user_version` 7 → 8**（现行终态 7 由 `0009` 设置，`AppDBMigrations.swift:244`）。
+- **不动 `v1_4_baselineDDL` / `ios/sql/app_schema_v1.sql`**（v1.4 冻结基线）。
+
+**⚠️ schema-drift 闸门无需改动，且这是可证明的**：`scripts/check_app_schema_drift.sh` 只比对
+`v1_4_baselineDDL` 与 `app_schema_v1.sql` 两者；新迁移不碰基线 ⇒ 闸门不受影响。
+（`0006` / `0009` 的注释里逐字写着同一条纪律：「只走 migration，不动 v1_4_baselineDDL/app_schema_v1.sql」。）
+**实施时不得**为了「保持一致」去改基线 DDL —— 那会真的打红 drift 闸门。
+
+### 3.4 契约版本：**不 bump `CONTRACT_VERSION`**
+
+可空列 + 附加式：**旧解码器读新库**（新列它不 SELECT，忽略）/ **新解码器读旧库**（`0010` 会把列建出来，值为 NULL → 回落）
+⇒ **双向兼容**。与 `lossyRaw`、`reveal_tick` 当初的处置同构。
+
+---
+
+## 4. D92　容错解码：一个装饰性偏好的坏字节，**绝不允许**让整局训练存档打不开
+
+### 4.1 危险点
+
+`LineSubType` / `LineStyle` / `DrawingColorToken` / `LabelMode` 全是 `String` 原始值枚举（`DrawingEnums.swift:6-20`）。
+**合成 `Codable` 解码遇到未知原始值会 `throw`**。而 `loadPending` 的任何 throw 都会沿
+`resumePending` 传播 ⇒ **用户手上那一局进行中的训练直接打不开**。
+
+用一个**颜色偏好**的坏字节换掉用户一整局训练 —— 这是本片最严重的失败模式。
+
+### 4.2 四条硬约束
+
+| # | 约束 | 不这么做会怎样 |
+|---|---|---|
+| **①** | **逐字段 `decodeIfPresent` + 未知值回落该字段的出厂值，整个解码过程绝不 `throw`** | 见 §4.1 |
+| **②** | **列值本身不是合法 JSON / 不是对象 → 整个字段回落出厂，仍不 throw** | 同上；坏字节的形态不止「枚举值不认识」 |
+| **③** | **本列的解码失败绝不影响同一行其它列**（tick / 持仓 / 交易 / 画线一律照常读出） | 否则等价于 ① 的后果 |
+| **④** | **列为 NULL（旧档）→ `drawingDefaultStyle = nil`，不报错、不写日志噪音** | 用户升级后手上那局打不开 |
+
+**⚠️ 与既有 `settings` 表的策略刻意不同，且这个不对称是有意的**：
+`SettingsDAOImpl` 对 `commission_rate` 等**财务**键是「present but malformed → `.dbCorrupted`」（`SettingsDAOImpl.swift:36-44`），
+因为静默回退会污染钱的计算。**画线默认是装饰性偏好，反过来**：宁可回落出厂，也绝不让它 brick 一局训练。
+实施时**不得**「为了和 settings 一致」把本列改成抛错。
+
+---
+
+## 5. D93　解码后必须 **sanitize**，判据复用既有单一真相
+
+### 5.1 危险点
+
+若磁盘上躺着 `lineSubType = "segment"`：`DrawingSession.commitPending` 里的 `withStyle` 对水平线的 `.segment`
+**恒返回 nil**（`HorizontalLineTool.lineXRange` 的 `.segment` 分支恒 nil，1b-i D58/D59 已实测坐实）
+⇒ 用户进画线模式后**点多少下都画不出一条线**，屏幕上没有任何提示（母 spec §3：灰只降饱和、绝不写解释文案）。
+越域 `thickness`（如 0 或 99）同理会让 `withStyle` 拒绝。
+
+**这是「能打开但用不了」，比打不开更难排查。**
+
+### 5.2 sanitize 规则（三条，**判据一律复用既有单一真相，禁止另写一份**）
+
+| 字段 | 规则 | 复用谁 |
+|---|---|---|
+| `lineSubType` | 必须是该工具**可渲染**的值（水平线的 `.segment` 拒 → 回落 `.straight`） | `DrawingStyleAvailability.isRenderableSubType` |
+| `thickness` | 夹回 `1…5` | 与面板同一值域（`DrawingStyleParams` 的 `Array(1...5)`） |
+| `labelMode` | 经归一化（挡 `(ray, .left)` 这类组合） | `DrawingStyleAvailability.normalizedLabelMode(current:lineSubType:)` |
+
+### 5.3 sanitize 的位置
+
+**在解码边界**（repo 读出来那一刻）就 sanitize，**不是**等到 resume 种子那一步。
+理由：种子只有一个调用点是今天的事实，而**解码结果是公共值**；把 sanitize 放在边界上，
+「一个坏默认能被读进内存」这件事从构造上就不成立。
+
+---
+
+## 6. D94–D96　写入触发、clean-skip、读回种子
+
+### 6.1 D94　必须**新增** autosave 触发；**不得**复用 `drawingsRevision`
+
+**现状**：唯一的画线相关 autosave 触发是 `TrainingView.swift:368`
+`.onChange(of: engine.drawingsRevision) { lifecycle.autosave(immediate: true) }`。
+**「只改了默认、没改任何线」不 bump `drawingsRevision`** ⇒ 改完默认立刻杀进程 = 白改。
+
+**做法**：在 `TrainingView` 新增一条 `.onChange(of: engine.drawingSession.defaultStyle)` → `lifecycle.autosave(immediate: true)`
+（`DrawingDefaultStyle` 已是 `Equatable`，`DrawingSession` 是 `@Observable` ⇒ 值真变了才触发）。
+
+**⚠️ 明令禁止的两种偷懒**：
+- **不得**让 `setDefaultStyle` 去 bump `drawingsRevision`。D56 明写该计数**只覆盖 `drawings`**；
+  污染它会让 1b-ii 撤销 PR 的入栈条件（「revision 递增 ⟺ 内容真的变了」）失真。
+- **不得**依赖「反正用户改完总会画线，画线时会存」。用户完全可能改完默认就退出。
+
+### 6.2 D95　replay 的 clean-skip **必须**纳入本局默认
+
+**现状**（`TrainingSessionCoordinator.swift:611-621`）：`!replayHasPersisted` 时，若当前态 == `replayBaseline`
+则**直接 `return`、不写盘**。基线元组是 `(tick, ops, drawingsSig, upper, lower)`。
+
+⇒ fresh replay 里**只改默认**：五个分量一个没变 → **clean-skip 跳过** → 续局必丢。
+
+**做法**：`replayBaseline` 加第六个分量 `defaultStyle`，并加进 clean-skip 的合取；
+三处捕获基线的地方（`:207` 测试入口 / `:588` fresh / `:942` 续局）**必须同步**。
+
+> ⚠️ **同形状的旧 bug 就记在源码注释里**：`TrainingSessionCoordinator.swift:55` 逐字写着
+> 「须纳入 clean-skip 比较，否则切周期后 Back/flush 被当 clean 跳过 → 丢 PendingReplay 序列化的 upper/lowerPeriod」。
+> 本片是同一个坑的第二次。**凡是新增进 `PendingReplay` 的字段，都必须问一遍「它进 clean-skip 判据了吗」。**
+
+### 6.3 D96　读回种子：两处，且**只在有值时**种
+
+| 位置 | 做法 |
+|---|---|
+| `TrainingSessionCoordinator.resumePending()` `:294` | 建好 engine 后：`if let s = pending.drawingDefaultStyle { engine.drawingSession.setDefaultStyle(s) }` |
+| `TrainingSessionCoordinator.resumePendingReplay()` `:851` | 同上，取 `pending.drawingDefaultStyle` |
+
+- **`nil` 时不动**（保持 `DrawingDefaultStyle()` 出厂值）—— 旧档与「从未改过」走同一条路，无需区分。
+- **fresh 会话（`startNewNormalSession` / `replay` 从头 / `review`）一律不种** ⇒ 新局回落，符合 §1 与用户裁决。
+- `setDefaultStyle` 是 `DrawingSession` 的 internal mutator，`TrainingSessionCoordinator` 同模块可调，**不得**为此把它改成 `public`（容器 mutator 纪律，`DrawingSession.swift:21-28`）。
+
+### 6.4 写入点：两处，各自读活的 session
+
+`TrainingSessionCoordinator.saveProgress` 内两处构造点：`:623`（replay）与 `:650`（normal），
+各自补 `drawingDefaultStyle: engine.drawingSession.defaultStyle`。
+**取活值、不取快照**（与该函数内其它字段同一写法）。
+
+---
+
+## 7. 测试与判别力
+
+> ⚠️ **本片最大的假绿陷阱，必须写在最前面**：
+> `InMemoryPendingTrainingRepository` / `InMemoryPendingReplayRepository`（`PreviewFakes/InMemoryFakes.swift:132,180`）
+> **原样存取整个 `PendingTraining` / `PendingReplay` 值**。⇒ 一旦模型加了字段，**内存假件自动往返成功**，
+> 哪怕 SQL 列根本没建、repo 根本没读写。
+> **故：`drawingDefaultStyle` 的落盘证据只认 DB 边界测试（真 GRDB），内存假件的往返一律不算数。**
+> （这正是自动选中 spec 的 codex R6 critical 所指的形状。）
+
+### 7.1 必测清单（每条注明**在哪一层**）
+
+| # | 用例 | 层 |
+|---|---|---|
+| **T1** | 存 → 读往返：五个字段**逐字段**相等 | **DB 边界**（真 GRDB，仿 `DefaultPendingTrainingRepositoryTests`） |
+| **T2** | replay 槽同样往返 | **DB 边界**（仿 `PendingReplayPersistenceTests`） |
+| **T3** | 列为 NULL（旧档）→ `drawingDefaultStyle == nil`，**其余字段照常读出**，不抛 | **DB 边界** |
+| **T4** | 列含 `{"colorToken":"未来色"}` → **整行照常读出**，仅该字段回落出厂 | **DB 边界**（D92 ①） |
+| **T5** | 列含**非法 JSON**（如 `"{{{"`）→ 整行照常读出，整个默认回落出厂 | **DB 边界**（D92 ②） |
+| **T6** | 列含 `{"lineSubType":"segment"}` → 读出后**能正常提交一条线** | **host**（D93；断言 `commitPending` 返回非 nil） |
+| **T7** | 列含 `{"thickness":99}` / `{"thickness":0}` → 夹回 `1…5` | **host**（D93） |
+| **T8** | 迁移：pre-0010 库跑完 migrator → 两表**都有**该列且 `user_version == 8` | **DB 边界**（仿 `Migration0009Tests` / `AppDB0005MigrationTests` 的裸库套路） |
+| **T9** | fresh install 跑完整 migrator → `user_version == 8` | **DB 边界**（`AppDB0005MigrationTests` 里那条现有断言要从 7 改 8） |
+| **T10** | **只改默认**（不动任何线）→ `savePending` 落盘次数 **+1** | host（用假件的 `savePending` 计数，D94） |
+| **T11** | **fresh replay 只改默认** → `saveReplay` **确实写了**（clean-skip 未跳过） | host（D95，**这条是 clean-skip 的唯一守门**） |
+| **T12** | replay 续局：存 → resume → `session.defaultStyle` 逐字段 == 存进去的 | host + DB 边界 |
+| **T13** | normal 续局：同上 | host + DB 边界 |
+| **T14** | **fresh 会话不种**：开新局 → `session.defaultStyle` == 出厂值 | host（§1 新局回落） |
+
+### 7.2 变异清单（**强制清单 = 本表每一条**，刻意不枚举编号）
+
+| # | 变异 | 必须且只应变红 |
+|---|---|---|
+| M1 | migration 里删掉 `pending_replay` 那一句 `ALTER` | T8 的 replay 分支红；training 分支**不得**红 |
+| M2 | repo 的 `INSERT` 语句里去掉该列 | T1/T2 红；T3 **不得**红 |
+| M3 | repo 的读取改成恒 `nil` | T1/T2 红 |
+| M4 | 把逐字段容错解码换成合成 `Codable`（遇未知即抛） | **只有 T4/T5** 红 |
+| M5 | 删掉 sanitize 的 `lineSubType` 分量 | **只有 T6** 红 |
+| M6 | 删掉 sanitize 的 `thickness` 夹取 | **只有 T7** 红 |
+| M7 | 删掉 D94 新增的 `onChange` 触发 | **只有 T10** 红 |
+| M8 | `replayBaseline` 去掉 `defaultStyle` 分量（回到五元组） | **只有 T11** 红 |
+| M9 | `resumePending` 的种子那一句删掉 | **只有 T13** 红 |
+| M10 | `resumePendingReplay` 的种子那一句删掉 | **只有 T12** 红 |
+| M11 | 让 fresh 会话也种子（把种子挪到公共构造路径） | **只有 T14** 红 |
+| M12 | `user_version` 仍写 7 | T8/T9 红 |
+
+**实施要求**：本表**每一条**逐条关门看红，PR 描述里逐条记录「红的是**哪个测试名**」+ 恢复后重新变绿。
+变异复原一律 `cp` 到 /tmp 再 `cp` 回，**禁止 `git checkout <file>`**（[[feedback_git_checkout_destroys_uncommitted_work]]）。
+
+### 7.3 必配的**正向档**
+
+本片判据多为「坏输入被容错」形状。按 [[feedback_all_reject_suite_masks_always_throwing_guard]]，
+**必须配「健康输入原样穿过」的正向档并断言取到的是哪个值** —— T1 / T2 / T12 / T13 就是它们，
+且**必须逐字段断言**（只断言「非 nil」是零判别力的）。
+
+---
+
+## 8. 源码守卫
+
+| # | 守卫 | 形状 |
+|---|---|---|
+| **G1** | `setDefaultStyle` 在 `Sources/` 里的调用点**恰好 3 个**：`DrawingEditRouter`（面板写入，既有）+ `resumePending` + `resumePendingReplay` | 结构计数 |
+| **G2** | `drawing_default_style` 这个**列名**在 `Sources/` 里出现的位置**恰好 3 处文件**：migration、两个 repo impl | 结构计数 |
+| **G3** | `replayBaseline` 的元组构造点**恰好 3 处**且**都包含 `defaultStyle`** | 结构计数 + 内容断言（防「加了字段但某处基线捕获忘了带」） |
+| **G4** | `TrainingView.showsTradeButtons` 的定义式必须仍为 `engine.flow.canBuySell()` | **内容断言**。这是 D90 复盘排除的**唯一依据**；它一旦改动，守卫报红，逼实施者回来重判排除是否仍成立 |
+
+**纪律**：结构计数一律**剥注释、剥字符串字面量**后再匹配；每个守卫配**双向自检**（该命中的必须命中、不该命中的必须不命中）；
+锚点失效必须**报错**不得静默返回 0（[[feedback_mechanical_checker_parser_disabled]]）。
+**G1–G3 在当前树上是红的**，必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
+**G4 今天就是绿的**，属回归守卫，可先落库。
+
+---
+
+## 9. 验收清单（真机，非 coder 可执行）
+
+前置：Debug 构建 + `KLINE_SEED_FIXTURE=1` 装机（[[project_device_testing_requires_seed_fixture]]；NAS 后端未部署，
+不带 seed 必报「训练组文件不存在」，**是环境缺口不是回归**）。
+
+| # | 动作 | 预期 | 通过/失败 |
+|---|---|---|---|
+| 1 | 开一局新训练 → 进画线模式 → 画一条线 | 线是**出厂橙** | |
+| 2 | 在样式面板把颜色改成**紫**、粗细改成 **3** → 再画一条线 | 新线是**紫色、粗细 3** | |
+| 3 | 承接 #2，点「返回」回主页 → 点「继续训练」→ 进画线模式 → 画一条线 | 新线**仍是紫色、粗细 3**（继承成功） | |
+| 4 | 承接 #3，再把颜色改成**绿** → **直接杀掉 App**（上划关掉，不点返回）→ 重开 → 「继续训练」→ 画一条线 | 新线是**绿色**（只改默认也立刻存了盘） | |
+| 5 | 承接 #4，把这一局**打完**（或点「结束本局」）→ 回主页 → **开一局全新训练** → 画一条线 | 新线是**出厂橙**，**不是**绿色（新局回落） | |
+| 6 | 从历史记录点某条 →「再次训练」→ 画一条线 | 线是**出厂橙**（replay 算新的一局） | |
+| 7 | 承接 #6，在 replay 里把颜色改成**蓝** → 点「返回」→ 再从历史记录点同一条 →「再次训练」（续局） | 画出的线是**蓝色**（replay 的断点续局也继承） | |
+| 8 | 从历史记录进**复盘**，用浮动铅笔钮画线 | 能正常画线；**没有样式面板**（复盘本来就改不了默认，符合设计） | |
+| 9 | **用升级前建的进行中训练**（若手上有）→ 「继续训练」 | **能正常打开**，画线默认是出厂橙 | |
+
+**#3 / #4 / #5 是三条硬边界**（断点继承 / 只改默认也存盘 / 新局回落），任何一条不过都是阻塞级。
+
+⚠️ **#9 若装不出升级前的存档，必须如实标「无法验证」并在 PR 描述里写明，不得直接打勾**
+（[[feedback_uikit_gated_evidence_traps]]：不好测不是打勾的理由）。它的自动化替身是 T3/T8。
+
+---
+
+## 10. 交接与残留
+
+### 10.1 交给自动选中 PR
+
+- 本片合入后，自动选中 spec 的 **D89 前置条件即告满足**，自动选中 PR 方可实施。
+- **自动选中 spec** 的 §6.8.3 那条「一致性回归」（画线态改样式 → autosave → 续训 → **线与默认双双恢复且互相一致**）
+  在本片之前必然红、本片之后应当能绿 —— 它是次序正确性的机械证据。
+
+### 10.2 交给 P6（母 spec §13）
+
+P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值改成齿轮里设的全局默认。
+「本局覆盖量跨断点续训继承」本片已解决，**P6 不要重做**，也不得把本片的列改成写全局默认。
+
+### 10.3 交给 P5
+
+**D90 §2.2 的失效条件**：P5 若让复盘用上新底栏 / 常驻样式面板，本片对 `review_archive` 的排除立刻失效，
+必须同期接上，否则复盘出现与本片修复前一样的丢失。G4 是它的机械提醒。
+
+### 10.4 已接受残留
+
+- **同一台设备上「本局默认」不跨局携带** —— 这是用户 2026-08-13 明确选择的语义（新局回落全局默认），不是缺口。
+- **复盘用不到本局默认**（恒出厂值）——复盘没有样式面板，是 main 上的既有事实，本片不改变。
+
+---
+
+## 11. 契约影响
+
+| 项 | 影响 |
+|---|---|
+| SQLite schema | **有**：两张表各 +1 可空列，新增迁移 `0010`，`user_version` 7 → 8 |
+| `v1_4_baselineDDL` / `app_schema_v1.sql` | **零**（冻结基线不动；schema-drift 闸门因此不受影响） |
+| `CONTRACT_VERSION` | **不 bump**（可空列 + 附加式 ⇒ 双向兼容，与 `reveal_tick` / `lossyRaw` 同构） |
+| 磁盘上的画线数据（`drawings` / `review_archive`） | **零** |
+| `DrawingObject` | **零**（本局默认不是画线对象的字段） |
