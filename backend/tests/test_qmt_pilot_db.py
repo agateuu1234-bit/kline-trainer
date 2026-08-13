@@ -2,10 +2,12 @@
 """Plan 4a 护栏 L1 单测。Spec: docs/superpowers/specs/2026-07-27-qmt-plan4a-db-guardrails-design.md"""
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import pathlib
 import re
+import types
 
 import pytest
 
@@ -23,6 +25,7 @@ from qmt_pilot_db import (CONTRACT_VERSION, FIRST_NORMAL_OID, INTENT_TTL_SECONDS
                           _user_objects, assert_cluster_allowed,
                           read_pilot_meta_rows, read_pilot_meta,
                           assert_db_allowed_for_reuse, assert_db_allowed_for_reset,
+                          try_empty_remnant_exception,
                           assert_pilot_db_allowed, create_pilot_database,
                           derive_confirm_token, derive_db_name, quote_ident)
 
@@ -185,6 +188,14 @@ class _FakeConn:
         # 【维护库专用表集合】两张表的**结构**（闸 (i) 的第一层判据）。默认合规。
         self.maintenance_shape = (maintenance_shape if maintenance_shape is not None
                                   else dict(_OK_MAINTENANCE_SHAPE))
+        # 维护角色是不是超级用户，以及生产代码**问过几次**。
+        # ⚠️ R12-F1 之后封锁**不许**依赖它：先连上再封，已建立的会话不受
+        #    `CONNECTION LIMIT 0` 影响，所以普通角色也能验空。
+        #    这个计数器就是用来钉「不许依赖」的 —— 问一次就说明分支又回来了。
+        self.is_superuser = True
+        self.is_superuser_queries = 0
+        # 目标库**当前**的连接数上限。封锁之后必须恢复成**这个值**，不是写死的 -1。
+        self.datconnlimit = -1
         self.fail_connect = fail_connect
         self.closed = False
         self.executed: list[str] = []
@@ -237,6 +248,16 @@ class _FakeConn:
         if "unnest($1::text[])" in query:
             # 「schema.sql 声明的表都建出来了吗」（O4-R19-C1）。默认全在。
             return len(args[0]) if self.declared_tables_all_present else 0
+        # ⚠️ **精确匹配整条语句，不能用子串**：`_SEED_LOCK_HELD_SQL` 的文本里也含
+        #    `pg_backend_pid()`，按子串分发会把锁判定的返回值一起劫走 ——
+        #    实测当场打红九条用例（本仓「假件子串分发被自己的判据劫走」第 N 次）。
+        if query.strip() == "SELECT pg_backend_pid()":
+            return _HELD_PID
+        if "is_superuser" in query:
+            self.is_superuser_queries += 1
+            return self.is_superuser
+        if "datconnlimit" in query:
+            return self.datconnlimit
         if "to_regclass('public.pilot_meta') IS NOT NULL" in query:
             return self.meta_table_present
         if "EXISTS (SELECT 1 FROM public.pilot_database_registry" in query:
@@ -267,7 +288,14 @@ class _FakeConn:
         raise AssertionError(f"_FakeConn 收到未预期的 fetchval: {query[:80]}")
 
     def _oid_now(self):
-        """同名库**此刻**是哪个实例。未发生替换时就是 `current_db_oid`。"""
+        """同名库**此刻**是哪个实例。未发生替换时就是 `current_db_oid`。
+
+        ⚠️ `db_is_gone` 建模「这个名字在 `pg_database` 里已经查不到了」——
+           与 `live_db_oid`（被换成了另一个实例）是两回事，别合并：
+           前者是 DROP 真的生效了，后者是同名替身。
+        """
+        if getattr(self, "db_is_gone", False):
+            return None
         return self.current_db_oid if self.live_db_oid is None else self.live_db_oid
 
     def _sql_oid_predicate_rejects(self, query, args):
@@ -3493,6 +3521,112 @@ def _reset(maint, target, **over):
         maint, connect=_connector({"kline_pilot_probe": target}), **kw)
 
 
+@pytest.mark.parametrize("bad,label", [
+    ({"output_dir": None}, "output_dir 缺失 —— 会在 _binding_matches 的 .rstrip 上抛裸 AttributeError"),
+    ({"output_dir": ""}, "output_dir 空串 —— rstrip 之后仍是空，会与畸形 pilot_meta 的空绑定判成相符"),
+    ({"output_dir": "/"}, "output_dir 只有斜杠 —— 同上，去尾斜杠之后是空绑定"),
+    ({"output_dir": "relative/path"}, "output_dir 不是绝对路径"),
+    ({"export_log_sha256": None}, "export_log_sha256 缺失"),
+    ({"export_log_sha256": "nothex"}, "export_log_sha256 不是 64 位小写十六进制"),
+])
+@pytest.mark.parametrize("entry", ["reuse", "reset"])
+def test_every_public_reset_or_reuse_entry_validates_the_binding_scalars(entry, bad, label):
+    """**复用/销毁两条路都要先验调用方标量**（codex 4a-2 R13-F1，high）。
+
+    建库路径早就有 `assert_identity_scalars`，而它**全模块只有那一个调用点** ——
+    reset / 复用把调用方递进来的 `export_log_sha256` / `output_dir` **原样**
+    送进破坏性闸：
+      · `output_dir=None` → `_binding_matches` 的 `.rstrip('/')` 抛**裸 AttributeError**，
+        而且是在集群闸与目标库连接**都做完之后**（spec §9-1w 明令禁止把一次守卫
+        记成 FAIL_INFRASTRUCTURE）；
+      · `output_dir=''` / `'/'` → 去尾斜杠后是空串，遇到 `output_dir` 为空的**畸形
+        pilot_meta** 就判成「绑定相符」→ 在一个不该匹配的库上放行销毁授权。
+    这与「缺失/畸形的调用方标量一律 fail-closed」的契约不符，而这条路径的下一步
+    是不可逆的 `DROP DATABASE`。
+
+    ⚠️ **塌缩之后这一族只剩两个入口**（`authorize_reset` 已删）：`try_empty_remnant_exception`
+       的签名里根本没有这两个标量（空残骸那条路不用它们），故它不属于本族。
+       「收了这两个标量的 public 入口都要验」这条**性质**由下面那颗机械钉子按签名扫，
+       不靠这里的点名清单。
+    """
+    maint = _FakeConn(databases=["kline_pilot_probe"])
+    target = _FakeConn(meta_rows=_full_meta_rows())
+    run = {"reuse": _reuse, "reset": _reset}[entry]
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(run(maint, target, **bad))
+    assert ei.value.code == "identity_scalar_invalid", f"{entry} / {label}"
+
+
+@pytest.mark.parametrize("entry", ["reuse", "reset"])
+def test_binding_scalar_guard_runs_before_touching_the_target_database(entry):
+    """**在碰目标库之前**就拦下（codex R13-F1 的要害之一）。
+
+    验在后面等于「先连进去、先跑集群闸、再发现调用方给的是垃圾」——
+    副作用与诊断都错位。判据：拒绝时**一次都没连过目标库**。
+    """
+    connects = []
+
+    async def _counting(dbname):
+        connects.append(dbname)
+        raise AssertionError("不该连目标库 —— 标量应该在这之前就被拦下")
+
+    maint = _FakeConn(databases=["kline_pilot_probe"])
+    kw = {"db_name": "kline_pilot_probe", "seed": "probe",
+          "export_log_sha256": "a" * 64, "output_dir": None}
+    if entry == "reuse":
+        kw.update(schema_sha256="s", pilot_schema_sha256="p")
+        call = assert_db_allowed_for_reuse(maint, connect=_counting, **kw)
+    else:
+        call = assert_db_allowed_for_reset(maint, connect=_counting,
+                                           reset_foreign_token=None, **kw)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(call)
+    assert ei.value.code == "identity_scalar_invalid"
+    assert connects == [], f"标量还没验就连了目标库：{connects}"
+
+
+def test_binding_scalar_guard_is_reachable_from_every_entry_that_takes_them():
+    """**机械守卫**：凡是签名里带这两个标量的 public 入口，都必须验它们。
+
+    「记得在新入口也验一遍」是纪律，而纪律在这套代码里已经失效过十几次。
+    这一条让「新加一个收这两个标量的 public 入口却忘了验」当场变红。
+    """
+    import ast
+    import inspect
+    import qmt_pilot_db as m
+    tree = ast.parse(inspect.getsource(m))
+
+    def _entries_taking_binding_scalars():
+        # ⚠️ 只扫**会碰数据库的**（async）public 入口。判据是「性质」不是「点名」：
+        #    `assert_binding_scalars` 自己是那条守卫；`derive_confirm_token` 是**纯派生**，
+        #    它的输入来自库里的 pilot_meta（已过闸 0− 的非空/形状判据），
+        #    不是调用方递进来的，也不授权任何东西 —— 两者都不属于本判据要覆盖的族。
+        found = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            if node.name.startswith("_"):
+                continue                  # 私有的由 public 入口负责
+            names = ({a.arg for a in node.args.args}
+                     | {a.arg for a in node.args.kwonlyargs})
+            if {"export_log_sha256", "output_dir"} <= names:
+                found.append(node)
+        return found
+
+    entries = _entries_taking_binding_scalars()
+    # ⚠️ **反向自检必须走同一个扫描器**：上一版把扫描逻辑又抄了一遍去自检，
+    #    于是破坏主循环的判据时自检照样绿 —— 自检守的是副本不是本体（变异当场抓到）。
+    assert entries, "扫描器一个入口都没找到 —— 它已经失去判别力，下面那条会恒真"
+    guards = {"assert_binding_scalars", "assert_identity_scalars"}
+    missing = [n.name for n in entries
+               if not ({c.func.id for c in ast.walk(n)
+                        if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+                       & guards)]
+    assert not missing, (
+        f"这些 public 入口收了 export_log_sha256/output_dir 却没验它们：{missing}"
+        f" —— 破坏性路径上的调用方标量必须 fail-closed")
+
+
 # ── 闸 0 归属 ──────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("over,label", [
@@ -3569,15 +3703,19 @@ def test_reset_wrong_token_refused():
 
 
 def test_reset_correct_token_allowed_and_returns_authorized_oid():
-    """令牌逐字相符 → 放行，并**返回被授权的那个实例 oid**。
+    """令牌逐字相符 → 放行，并**返回被授权的那个实例 oid（裸 str）**。
 
     返回 oid 不是锦上添花：`DROP DATABASE` 无法带谓词，授权与 DROP 之间同名库可以被
     删掉又重建。不把授权绑到实例上，`--reset` 会去删一个**从未被授权**的替身。
+
+    ⚠️ **不再带出「授权那一刻该库自称的身份」**（撤销 R3-F1 的 `ResetGateOutcome`）：
+       塌缩之后判定与 DROP 在**同一次调用**里，复验的判据是「拿**本次入参**在封锁下
+       重跑一遍闸 0/0b/令牌」，不是「和记下来的身份比对」。带出去的身份快照没有消费者，
+       而一个没人消费的授权前提快照正是本 PR 删掉的那类负债。
     """
     maint, target = _target_pair(output_dir="/someone_else")
     token = derive_confirm_token("a" * 64, "/someone_else", "20260729T101530123456Z")
-    got = asyncio.run(_reset(maint, target, reset_foreign_token=token))
-    assert got == "16400"
+    assert asyncio.run(_reset(maint, target, reset_foreign_token=token)) == "16400"
 
 
 def test_reset_binding_match_returns_authorized_oid_without_token():
@@ -4170,7 +4308,8 @@ def test_reset_does_not_require_the_registry_proof():
     maint = _FakeConn(databases=["kline_pilot_probe"], registered_dbnames=set())
     target = _FakeConn(meta_rows=_full_meta_rows())
     assert asyncio.run(assert_db_allowed_for_reset(
-        maint, connect=_connector({"kline_pilot_probe": target}), **_RESET_KW)) == "16400"
+        maint, connect=_connector({"kline_pilot_probe": target}),
+        **_RESET_KW)) == "16400"
 
 
 def test_registry_proof_is_instance_bound_not_name_bound():
@@ -4273,3 +4412,694 @@ def test_public_gates_run_the_cluster_boundary_before_touching_the_target(gate, 
     with pytest.raises(PilotClusterBoundaryError):
         asyncio.run(gate(maint, connect=_connector({"kline_pilot_probe": target}), **kw))
     assert target.ops == [], f"{label}：集群闸未过时不该对目标库发出任何查询"
+
+
+
+
+# 零对象例外六条 + DROP 前紧贴复查（spec §4「空库残骸的 reset 例外」）
+# ---------------------------------------------------------------------------
+
+class _RemnantMaint(_FakeConn):
+    """维护连接：额外答 `pilot_create_intent` 的读。"""
+
+    def __init__(self, intent_rows=(), **kw):
+        kw.setdefault("databases", ["kline_pilot_probe"])
+        super().__init__(**kw)
+        self.intent_rows = list(intent_rows)
+
+    async def fetch(self, query, *args):
+        # ⚠️ 判别式必须精确到 `FROM public.pilot_create_intent i`：
+        #    闸 (iii) 的豁免 CTE 里也含 `pilot_create_intent` 这个**表名字符串**
+        #    （它是【维护库专用表集合】的成员），裸 `in query` 会把那条查询也劫走，
+        #    于是集群闸拿到 intent 行、在 `r["cat"]` 上炸 KeyError。
+        #    4a-1 的假件已经为「子串分发很脆弱」写过警告 —— 这是它的又一次实证。
+        if "FROM public.pilot_create_intent i " in query:
+            self.ops.append(query)
+            return list(self.intent_rows)
+        return await super().fetch(query, *args)
+
+
+
+def _intent(seed="probe", age_seconds=0, create_confirmed=True, intent_db_oid="16400"):
+    """⚠️ 字段必须与 `_READ_INTENT_SQL` 的输出**逐字一致**：判据读
+    seed / create_confirmed / intent_db_oid / age_seconds，fixture 少给一个
+    就是「测试在测另一个东西」。"""
+    return [{"seed": seed, "create_confirmed": create_confirmed,
+             "intent_db_oid": intent_db_oid, "age_seconds": age_seconds}]
+
+
+
+class _EmptyOnProbe(_FakeConn):
+    """第 n 次【绝对空】探测的结果可以不同 —— 用来造「判定与 DROP 之间的空窗」。"""
+
+    def __init__(self, non_empty_probes=(), **kw):
+        super().__init__(**kw)
+        self.probes = 0
+        self.non_empty_probes = set(non_empty_probes)
+
+    async def fetch(self, query, *args):
+        if "SELECT cat, n FROM (" in query and "closure" not in query:
+            self.ops.append(query)
+            self.probes += 1
+            return ([{"cat": "pg_class", "n": 3}]
+                    if self.probes in self.non_empty_probes else [])
+        return await super().fetch(query, *args)
+
+
+
+def _remnant(maint, target, **over):
+    kw = {"db_name": "kline_pilot_probe", "seed": "probe", **over}
+    return try_empty_remnant_exception(
+        maint, connect=_connector({"kline_pilot_probe": target}), **kw)
+
+
+
+def test_remnant_exception_all_six_conditions_pass():
+    """六条全成立 + 紧贴复查通过 → 返回**被授权的那个实例 oid**（不是裸 True）。
+
+    返回 oid 而不是布尔：`DROP DATABASE` 带不了谓词，授权与 DROP 之间同名库可以被
+    删掉又重建。授权不绑实例，本工具会去删一个从未被授权的替身。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) == "16400"
+
+
+
+def test_remnant_exception_requires_exact_db_name():
+    """第 2 条是**全等**而非前缀——它把爆炸半径限制在本次 seed（spec R56-F1）。"""
+    maint = _RemnantMaint(intent_rows=_intent())
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe(),
+                                db_name="kline_pilot_other")) is None
+
+
+
+def test_remnant_exception_requires_seed_lock_really_held():
+    """第 5 条：按 seed 的 advisory lock 必须**在活连接上真验**（spec O4-R5-C2）。
+
+    ⚠️ 计划片段这里收的是一个 `holds_seed_lock: bool` 参数 —— 那正是 4a-1 已经
+    删掉的可伪造断言（传 True 就能绕过）。判据必须查 `pg_locks`。
+    """
+    maint = _RemnantMaint(intent_rows=_intent(), seed_lock_held=False)
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) is None
+
+
+
+def test_remnant_exception_requires_absolutely_empty():
+    """第 3 条：一个装着物化视图的库不是残骸。判据用【绝对空】那组白名单式判据，
+    绝不用 information_schema.tables（物化视图会逃过它，spec O1-F1）。"""
+    maint = _RemnantMaint(intent_rows=_intent())
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe(non_empty_probes=[1]))) is None
+
+
+
+def test_remnant_exception_requires_intent_row():
+    """第 6 条：同事裸 `CREATE DATABASE` 与 `pg_restore --create` 都**没有** intent 行
+    → 拒（spec P1r3-F2：这是第 6 条存在的全部理由）。"""
+    maint = _RemnantMaint(intent_rows=[])
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) is None
+
+
+
+@pytest.mark.parametrize("over,label", [
+    ({"seed": "other"}, "seed 不符"),
+    ({"create_confirmed": False}, "未确认的行不是授权（O4-R8-C2）"),
+    ({"intent_db_oid": "99999"}, "凭据绑的是另一个实例（O4-R21-C1/R25-C1）"),
+    ({"intent_db_oid": None}, "凭据的实例绑定已被判掉"),
+    ({"age_seconds": INTENT_TTL_SECONDS}, "超过 INTENT_TTL（O4-F2）"),
+    ({"age_seconds": INTENT_TTL_SECONDS + 1}, "远超 INTENT_TTL"),
+    ({"age_seconds": -1}, "inserted_at 在**未来**（codex S2a-R2-F2）"),
+    ({"age_seconds": -INTENT_TTL_SECONDS * 365}, "inserted_at 在很远的未来"),
+    ({"age_seconds": -0.1}, "inserted_at 在**亚秒级**未来（codex S2a-R3-F1）"),
+    ({"age_seconds": -0.4999}, "亚秒级未来的上沿（四舍五入会把它抹成 0）"),
+])
+def test_remnant_exception_rejects_unqualified_intent_row(over, label):
+    """第 6 条的四个子判据**逐条**都要有判别力。
+
+    · `create_confirmed=false` 的行写在 `CREATE DATABASE` **之前**，证明不了库是本次建的
+      —— 拿它当授权会去 DROP **别人建的**同名空库，无 pilot_meta 归属、无令牌。
+    · 绑到另一个实例的行是**陈旧凭据**：原库被删、别人用同名重建之后，它会为那个
+      全新的、不是我们建的库背书。
+    · 孤儿 intent 行是一条**永久有效的销毁授权**；TTL 把窗口从「永久」收窄到 24h。
+    """
+    maint = _RemnantMaint(intent_rows=_intent(**over))
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) is None, label
+
+
+
+def test_remnant_exception_ttl_boundary_is_strictly_less_than():
+    """恰好差 1 秒仍算新鲜 —— 边界方向钉住，免得 `<` 与 `<=` 互换而无人察觉。"""
+    maint = _RemnantMaint(intent_rows=_intent(age_seconds=INTENT_TTL_SECONDS - 1))
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) == "16400"
+
+
+def test_intent_ttl_is_never_measured_against_the_transaction_clock():
+    """**族级**：凡是拿时钟减 `inserted_at` 判 TTL 的地方，都不许用 `now()`
+    （codex S2a-R4-F2，真 PG 15 实测）。
+
+    PostgreSQL 的 `now()` 是**事务开始时刻**，不是当前时刻。维护连接若处在一个
+    长事务里（4c 的 wrapper 很可能把整段 reset 包进事务），`now()` 就冻在过去：
+    实测 —— 事务开始 1.2s 后，一行**真实年龄 = TTL + 0.1s（已过期）**的凭据
+    被 `now()` 量成 `TTL − 1.1s` → **判为新鲜** → 零对象例外照样放行，
+    「TTL 把销毁授权窗口收窄到 24h」（spec O4-F2）再一次失效。
+    `statement_timestamp()` 是**本条语句**开始的时刻，不受事务年龄影响。
+
+    ⚠️ 判据覆盖**两条** SQL（读侧判新鲜、写侧判能不能抢占），不是只修被点名的那一处。
+    ⚠️ **写侧的 `inserted_at = now()` 刻意不改**：列的 DEFAULT 就是 `now()`（4a-1 的
+       结构闸钉着它），两边必须一致；而长事务里写 `now()` 只会让行显得**更老**、
+       更早过期 —— 那是保守方向。这条不对称是有意的。
+    """
+    import re
+    import qmt_pilot_db as m
+    pat = re.compile(r"EXTRACT\(EPOCH FROM \(\s*([A-Za-z_]+\(\))\s*-")
+    for name in ("_READ_INTENT_SQL", "_INSERT_INTENT_SQL"):
+        sql = getattr(m, name)
+        clocks = pat.findall(sql)
+        # 反向自检：扫不到任何时钟表达式 = 匹配式过时了，下面那条会恒真
+        assert clocks, f"{name} 里一处「时钟 − inserted_at」都没扫到 —— 这颗钉子是空的"
+        for clock in clocks:
+            assert clock == "statement_timestamp()", (
+                f"{name} 用 {clock} 判 TTL —— `now()` 是**事务开始时刻**，"
+                f"长事务里一行已过期的销毁凭据会被判成新鲜")
+
+
+def test_remnant_exception_age_predicate_never_rounds_away_the_sign():
+    """机械守卫：判据两侧都不许取整（codex S2a-R3-F1）。
+
+    ⚠️ 这条洞**同时**藏在两层，只堵一层没用：
+      · SQL 的 `::bigint` 是四舍五入（真 PG 15 实测 `(-0.1)::bigint = 0`）；
+      · Python 的 `int(-0.1)` 也是 0。
+    ⚠️ 判据走 AST 的调用节点，不看源码文本：注释里提到 `int(` 会让文本判据恒真。
+    """
+    import inspect
+    import textwrap
+    import qmt_pilot_db as m
+    tree = ast.parse(textwrap.dedent(inspect.getsource(m._has_qualified_intent_row)))
+    calls = [n.func.id for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    assert calls, "扫描器一个调用都没解析到 —— 下面那条会恒真"
+    for rounding in ("int", "round"):
+        assert rounding not in calls, \
+            f"年龄在 Python 里被 {rounding}() 取整了 —— 亚秒级未来时间戳的符号会被抹掉"
+
+
+def test_remnant_exception_accepts_a_row_inserted_this_instant():
+    """**正向钉**：`age_seconds == 0`（刚写下的那一行）必须仍然合格。
+
+    ⚠️ 这一条守的是 codex S2a-R2-F2 那条修复的**下界方向**：判据从
+       `age < TTL` 收紧成 `0 <= age < TTL` 之后，写成 `0 < age` 会把
+       **同一次运行刚写下的凭据**判掉 —— 空残骸从此清不掉（R55-F1 锁死换个来路）。
+       上界由 `…ttl_boundary_is_strictly_less_than` 守，两端各一颗钉子。
+    """
+    maint = _RemnantMaint(intent_rows=_intent(age_seconds=0))
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe())) == "16400"
+
+
+
+def test_remnant_exception_does_not_delete_stale_row():
+    """判定时**不删**超期行——普通运行不替别的 seed 做决定（spec O4-F2 修正②）。
+    清理只在 --init-cluster-marker 里做，且要逐行取 seed 锁。"""
+    maint = _RemnantMaint(intent_rows=_intent(age_seconds=INTENT_TTL_SECONDS + 1))
+    asyncio.run(_remnant(maint, _EmptyOnProbe()))
+    assert not any("DELETE" in q.upper() for q in maint.executed)
+
+
+
+def test_remnant_exception_empty_probe_bottoms_out_at_the_whitelist_predicate():
+    """第 3 条与紧贴复查都必须落到**裸【绝对空】**（`_is_absolutely_empty`）上。
+
+    ⚠️ 判据要**跟着调用链走**，不能只看 `try_empty_remnant_exception` 一层：
+       探测被提成 `_probe_absolutely_empty` 之后，只看外层的写法会在一个空集合上
+       恒真（我第一版就是那样，当场变红）。
+    ⚠️ 反向断言：零对象例外这条链上不许出现 `information_schema` 或 relkind 枚举 ——
+       真 PG 实测，一个只含物化视图（relkind='m'）的库会从这两种写法下逃掉，
+       于是**不过闸 0−/0/0b、不要令牌、无提示，直接 DROP**（spec O1-F1）。
+    """
+    import ast
+    import inspect
+    import textwrap
+    import qmt_pilot_db as m
+    chain = [m.try_empty_remnant_exception, m._probe_absolutely_empty]
+    names, srcs = set(), []
+    for fn in chain:
+        src = textwrap.dedent(inspect.getsource(fn))
+        srcs.append(src)
+        names |= {n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)}
+    assert "_probe_absolutely_empty" in names, "零对象例外没有走探测函数"
+    assert "_is_absolutely_empty" in names, "探测链没有落到【绝对空】的唯一实现上"
+    for bad in ("information_schema", "relkind IN", "relkind in"):
+        assert not any(bad in s for s in srcs), f"零对象例外链上出现 {bad!r}"
+
+
+
+class _EmptyProbeReadFails(_EmptyOnProbe):
+    """连得进去，但【绝对空】那条目录读**抛异常**（并发 DROP / 权限变更 / 目录查询失败）。"""
+
+    def __init__(self, boom=None, **kw):
+        super().__init__(**kw)
+        self.boom = boom or RuntimeError(
+            "terminating connection due to administrator command")
+
+    async def fetch(self, query, *args):
+        if "SELECT cat, n FROM (" in query and "closure" not in query:
+            raise self.boom
+        return await super().fetch(query, *args)
+
+
+class _EmptyProbeReadAndCloseFail(_EmptyProbeReadFails):
+    async def close(self):
+        raise RuntimeError("connection reset by peer")
+
+
+def test_remnant_probe_read_failure_is_a_boundary_error_not_a_raw_exception():
+    """【绝对空】读失败 → `target_db_unreadable`，不得裸逃（codex S2a-R2-F2）。
+
+    ⚠️ 这是本模块**同一族判据的最后一处漏网**：复用路径的活体判据（R2-F2）、
+       闸 2 的结构查询、`read_pilot_meta` 三处早就把读失败转成
+       `target_db_unreadable` 了，唯独零对象例外的探测没转。
+       裸异常会被 4c 兜成 `FAIL_INFRASTRUCTURE`，而 spec §9-1w 明令禁止
+       把一次成功的 fail-closed 守卫记成环境故障 —— 恢复动作整个走错
+       （去查基础设施，而真相是「这个库现在读不出来，拒绝销毁」）。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_remnant(maint, _EmptyProbeReadFails()))
+    assert ei.value.code == "target_db_unreadable"
+
+
+def test_remnant_probe_read_failure_is_not_masked_by_a_close_failure():
+    """**刻意的不对称，钉住它**：读失败的结论不得被「关不掉连接」顶掉。
+
+    与 `test_close_failure_never_masks_the_gate_verdict`（O4-W2r1 M-2）同一条规矩 ——
+    拿到 `target_db_in_use` 的话，操作者会去查「谁连着这个库」，
+    而真相是「这条探测根本读不出来」。两种情形都是拒绝（fail-closed），
+    差别只在**给出的下一步动作对不对**。
+    ⚠️ codex S2a-R2-F2 的第二半建议「读失败时也要跑 `_assert_target_released`」——
+       那会让 close 失败顶掉读失败的结论，正是上面那条既有钉子禁止的形态，故不采纳。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_remnant(maint, _EmptyProbeReadAndCloseFail()))
+    assert ei.value.code == "target_db_unreadable", "读失败的结论被 close 失败顶掉了"
+
+
+def test_every_target_side_read_failure_maps_to_target_db_unreadable():
+    """**族级**：三条会连进目标库的路径，读失败一律归一到 `target_db_unreadable`。
+
+    ⚠️ 本仓记录在案的形态是「只修被点名的那一处」—— 这一条按**判据本身**覆盖全族，
+       新增一条会连目标库的路径而忘了归一时当场变红。
+    """
+    boom = RuntimeError("terminating connection due to administrator command")
+
+    class _MetaReadBoom(_FakeConn):
+        async def fetchval(self, query, *args):
+            if "to_regclass('public.pilot_meta') IS NOT NULL" in query:
+                raise boom
+            return await super().fetchval(query, *args)
+
+    cases = [
+        ("复用（闸 0− 读 pilot_meta）",
+         lambda: _reuse(_FakeConn(databases=["kline_pilot_probe"]), _MetaReadBoom())),
+        ("--reset 闸 0−（读 pilot_meta）",
+         lambda: _reset(_FakeConn(databases=["kline_pilot_probe"]), _MetaReadBoom())),
+        ("零对象例外的【绝对空】探测",
+         lambda: _remnant(_RemnantMaint(intent_rows=_intent()), _EmptyProbeReadFails())),
+    ]
+    for label, run in cases:
+        with pytest.raises(PilotDbBoundaryError) as ei:
+            asyncio.run(run())
+        assert ei.value.code == "target_db_unreadable", label
+
+
+def test_remnant_exception_closes_every_probe_connection():
+    """两次探测都是短连接：留一条活着就会把紧接着的 DROP 顶住（spec O1-F2 规定 1）。"""
+    maint = _RemnantMaint(intent_rows=_intent())
+    target = _EmptyOnProbe()
+    asyncio.run(_remnant(maint, target))
+    assert target.closed is True
+
+
+
+def test_remnant_exception_rejects_when_replacement_also_claims_the_new_oid():
+    """两次探测之间同名库被删掉又重建，**且替身自称就是新实例** → 仍须 fail-closed。
+
+    ⚠️ 这一档与下面那条不是重复：下面那条被 `adopt_connection` 挡下（替身还自称旧 oid），
+       走的是**连接接管**那条路径。真实的「删掉又重建」里，`connect()` 拿到的是新实例、
+       维护库读到的也是新 oid —— **adopt 会通过**，此时唯一挡得住的是
+       「复查拿到的 oid 必须还是判定时那一个」。
+       去掉那半个判据时，上一条测试**照样是绿的**（实测），本条才会变红。
+    """
+    target = _EmptyOnProbe()
+
+    class _RebuiltAfterFirstProbe(_RemnantMaint):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.oid_reads = 0
+
+        async def fetchval(self, query, *args):
+            if "d.oid::text FROM pg_database d WHERE d.datname::text = $1" in query:
+                self.oid_reads += 1
+                self.ops.append(query)
+                if self.oid_reads > 1:
+                    target.current_db_oid = "99999"     # 替身自称新实例 → adopt 过得了
+                    return "99999"
+                return "16400"
+            return await super().fetchval(query, *args)
+
+    maint = _RebuiltAfterFirstProbe(intent_rows=_intent())
+    assert asyncio.run(_remnant(maint, target)) is None
+    assert maint.oid_reads == 2, "必须真的探测了两次"
+
+
+
+def test_remnant_exception_read_intent_freshness_uses_the_database_clock():
+    """机械守卫：intent 行的**年龄只能由库自己的时钟算**（spec O4-R23-C1）。
+
+    ⚠️ host 假件直接喂 `age_seconds`，故 SQL 文本本身在 L1 是**零覆盖**的
+       —— 把 `EXTRACT(EPOCH FROM (now() - i.inserted_at))` 换成常量，
+       上面那一组 TTL 用例**全都照样是绿的**（实测）。所以这里改钉 SQL 文本：
+       `created_at` 是调用方传进来的字符串，数据库既不生成也不校验它，
+       很远的未来值让这行永远「新鲜」、永远抢不走 —— 而它是一张 DROP 授权。
+    """
+    import qmt_pilot_db as m
+    sql = m._READ_INTENT_SQL
+    assert "statement_timestamp() - i.inserted_at" in sql, "新鲜度没有用库时钟算"
+    # ⚠️ 时钟源必须是 `statement_timestamp()` 而不是 `now()`（事务开始时刻）——
+    #    由 `test_intent_ttl_is_never_measured_against_the_transaction_clock` 按族覆盖。
+    assert "created_at" not in sql, "新鲜度不得取调用方传进来的 created_at"
+    assert "public.pilot_create_intent" in sql, "表引用必须 public. 限定（O4-R4-C1）"
+    assert "i.create_confirmed" in sql and "i.db_oid" in sql, \
+        "第 6 条的确认位与实例绑定必须由这条 SQL 取出来"
+    # ⚠️ **年龄不许在 SQL 里取整**（codex S2a-R3-F1，真 PG 15 实测）：
+    #    `::bigint` 是**四舍五入**不是截断 —— `(-0.1)::bigint = 0`。
+    #    于是一行「比 now() 早不到半秒」的**未来** inserted_at 会被算成 age 0，
+    #    过得了下界检查，而下界正是 R2-F2 那条修复的全部内容。
+    #    Python 那侧的 `int()` 是第二层同样的抹除（`int(-0.1) == 0`），两层都要去掉。
+    assert "::bigint" not in sql, \
+        "年龄在 SQL 里被取整了 —— 亚秒级的未来时间戳会被抹成 age 0（符号丢失）"
+
+
+
+def test_remnant_exception_rejects_when_adopt_catches_a_stale_instance():
+    """两次探测之间实例被换、而替身仍自称旧 oid → 由 `adopt_connection` 挡下。"""
+    class _SwapAfterFirst(_RemnantMaint):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.oid_reads = 0
+
+        async def fetchval(self, query, *args):
+            if "d.oid::text FROM pg_database d WHERE d.datname::text = $1" in query:
+                self.oid_reads += 1
+                self.ops.append(query)
+                return "16400" if self.oid_reads == 1 else "99999"
+            return await super().fetchval(query, *args)
+
+    maint = _SwapAfterFirst(intent_rows=_intent())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_remnant(maint, _EmptyOnProbe()))
+    assert ei.value.code == "connection_wrong_instance"
+
+
+
+def test_module_never_uses_force_or_terminate_backend():
+    """spec §4 规定 2 明令禁止 —— 机械守卫，不靠人工 grep 清单。
+
+    `DROP DATABASE … WITH (FORCE)` 与 `pg_terminate_backend` 会**无差别 terminate
+    别人的会话**，正是本文件全套护栏要避免的行为。
+
+    ⚠️ 判据必须**剥掉注释与 docstring** 再看：本模块的 docstring 里就写着
+       「明令禁止 pg_terminate_backend」—— 只按行首 `#` 过滤的写法会被自己的说明文字
+       触发（我第一版就是那样，当场变红）。`ast.unparse` 顺带把注释也去掉了。
+    """
+    import ast
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parents[1] / "qmt_pilot_db.py").read_text()
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            continue
+        head = body[0]
+        if (isinstance(head, ast.Expr) and isinstance(head.value, ast.Constant)
+                and isinstance(head.value.value, str)):
+            node.body = body[1:] or [ast.Pass()]
+    code = ast.unparse(tree)
+    assert "pg_terminate_backend" not in code, "模块里出现被明令禁止的 pg_terminate_backend"
+    # ⚠️ **不能裸查 `FORCE`**：`_PILOT_TABLE_DEPENDENTS_SQL` 的 SQL 注释里正当地写着
+    #    `ENABLE/FORCE ROW LEVEL SECURITY`（RLS 判据的说明）。判据收窄到「DROP DATABASE
+    #    这条语句里出现 FORCE」—— 那才是被禁的东西。
+    import re
+    hit = re.search(r"DROP\s+DATABASE[^;\n]*FORCE", code, re.IGNORECASE)
+    assert hit is None, f"DROP DATABASE 带上了强制模式：{hit.group(0) if hit else ''!r}"
+    # 反向断言：剥完之后模块正文还在（剥过头会让上面两条恒真）
+    assert "DROP DATABASE" in code and len(code) > 20_000, \
+        "剥离 docstring 把正文也剥掉了 —— 上面的禁用判据会恒真"
+
+
+
+# ── 零对象例外与闸 0−/0/0b 的分工（R56-F1 / R55-F1）────────────────────────
+#
+# ⚠️ **这里曾经有一个 `authorize_reset` 单一入口，它连同整套「可传递的授权凭据」
+#    在 2026-08-12 被删掉了。**为什么值得在测试文件里记一笔：那套机器是被 codex
+#    连提**六次**（R4-F2 → R6-F1 → R7-F1 → R14-F2 → S2-R2-F1 → S2a-R1-F1）
+#    的同一个洞逼出来的五轮加固 —— 改私有 → 加构造哨兵 → 使用点查类型 → 改查登记表
+#    → 加仓库级 AST 守卫，**每一轮都被下一轮拆穿**。
+#    根因不是加固不够狠，而是「授权」与「销毁」之间那道**缝**本身：
+#    绑定/令牌那一条判据推导不出来，只能靠「授权时记下来的东西」，
+#    而那个东西正是伪造者控制的入参。**加固凭据永远堵不上它。**
+#    修法是让缝消失 —— 判定与 DROP 收进 S2b 的 `reset_pilot_database` 一个函数体，
+#    没有可传递的对象、没有登记表、没有铸造函数。
+#    本片（S2a）因此只剩**判定 helper**，连一张可用的凭据都不存在。
+
+def test_the_empty_remnant_escape_hatch_is_the_only_thing_that_can_clear_a_remnant():
+    """同一个空残骸：闸 0−/0/0b **拒**，零对象例外**放行** —— 两半各自可分辨。
+
+    崩在 `CREATE DATABASE` 与写 `pilot_meta` 之间的残骸根本没有 pilot_meta，
+    直接走闸 0− 会撞 `not_owned`「拒绝 DROP、库原样保留」→ 残骸永远清不掉
+    （R56-F1 花一整轮修的洞，也正是 R55-F1 那句「能被自己 --reset 清掉重来」
+    会变成空话的地方）。
+
+    ⚠️ 这一档取代了原来那条「`authorize_reset` 能清掉空残骸」——
+       塌缩之后没有单一入口了，**两步的次序**由 S2b 的 `reset_pilot_database` 焊死；
+       本片能证明也只能证明的是：**这两步在同一份 fixture 上给出相反的判定**。
+       少了这条对照，「例外返回 oid」看起来仍像在工作，却证明不了它有存在的必要。
+    """
+    remnant_kw = dict(meta_table_present=False)      # 空库：连 pilot_meta 都没有
+    # 例外这一半：放行，并交回被授权的那个实例 oid
+    maint = _RemnantMaint(intent_rows=_intent())
+    assert asyncio.run(_remnant(maint, _EmptyOnProbe(**remnant_kw))) == "16400"
+    # 闸这一半：同一份残骸 —— 必须拒，且拒的理由是「不是本工具建的」
+    maint2 = _FakeConn(databases=["kline_pilot_probe"])
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_reset(maint2, _FakeConn(**remnant_kw)))
+    assert ei.value.code == "not_owned"
+
+
+
+class _CloseFailsOnNth(_EmptyOnProbe):
+    """只在**第 n 次** close 时失败 —— 让两处释放校验各自可分辨。"""
+
+    def __init__(self, fail_on=1, **kw):
+        super().__init__(**kw)
+        self.closes = 0
+        self.fail_on = fail_on
+
+    async def close(self):
+        self.closes += 1
+        if self.closes == self.fail_on:
+            raise RuntimeError("connection reset by peer")
+        await super().close()
+
+
+
+@pytest.mark.parametrize("fail_on,label", [
+    (1, "判定那次探测关不掉"),
+    (2, "DROP 前紧贴复查那次关不掉"),
+])
+def test_remnant_exception_refuses_authorization_when_it_cannot_release_a_probe(
+        fail_on, label):
+    """零对象例外在交出销毁授权前，**两次探测各自**都要证明会话已放掉（codex R2-F1 同族）。
+
+    ⚠️ 必须按「第几次 close 失败」参数化：让**两次都失败**的写法里，
+       删掉其中任意一处校验另一处仍会拦住 —— 两条变异都跑出绿色（实测），
+       即这两处校验各自的覆盖是零。这与 4a-1 为 `pin_search_path` 记下的
+       「钉桩在多处冗余 → 黑盒断言分辨不出是哪一处」是同一个坑。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_remnant(maint, _CloseFailsOnNth(fail_on=fail_on)))
+    assert ei.value.code == "target_db_in_use", label
+
+
+
+# ── codex 4a-2b R1：集群闸机器强制 + 调用方 SQL 跑完必须重钉 search_path ──────
+
+def test_remnant_exception_enforces_the_cluster_gate_itself():
+    """零对象例外的第 4 条（集群闸已全过）**必须机器强制，不能只写在 docstring 里**。
+
+    这条路径的下一步就是不可逆的 `DROP DATABASE`；接线失误会让标记闸、无关库闸、
+    维护库空闸全部被跳过。`create_pilot_database` 与 `assert_db_allowed_for_reset`
+    早就为同一条理由把它下沉进函数里（O4-R5-C2 / 4a-2a R6-F2）。
+
+    ⚠️ **这一条原本挂在 `authorize_reset` 上**（4a-2b R1-F1）。塌缩把那个入口删了，
+       若不把集群闸一并下沉进本函数，一条 public 判定入口就会退回到
+       「第 4 条只写在 docstring 里、由调用方保证」—— 那正是 R1-F1 修掉的形态。
+       重复调用的代价只是几条只读查询。
+    """
+    maint = _RemnantMaint(intent_rows=_intent(), marker_rows=[])   # 集群没有合法标记
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_remnant(maint, _EmptyOnProbe(meta_table_present=False)))
+    assert ei.value.code == "no_marker"
+
+
+
+def test_remnant_exception_runs_the_cluster_gate_before_anything_touches_the_target():
+    """集群闸没过 → 目标库上一条查询都不许发（探测连接本身就会顶住随后的 DROP）。"""
+    maint = _RemnantMaint(intent_rows=_intent(), marker_rows=[])
+    target = _EmptyOnProbe(meta_table_present=False)
+    with pytest.raises(PilotClusterBoundaryError):
+        asyncio.run(_remnant(maint, target))
+    assert target.ops == [], "集群闸未过时不该对目标库发出任何查询"
+
+
+
+@pytest.mark.parametrize("probes,fail_on,label", [
+    ([1], 1, "第一次探测判非空、且关不掉"),
+    ([2], 2, "复查判非空、且关不掉"),
+])
+def test_remnant_exception_checks_release_even_when_it_falls_through(
+        probes, fail_on, label):
+    """**落空路径也要证明会话已释放**（codex 4a-2b R2-F2）。
+
+    判空为「非空」时本函数返回 None，调用方随后落到闸 0−/0/0b ——
+    而本模块自己那条没关掉的会话仍活着，最后的 DROP 会以
+    「target_db_in_use，占用者是别人」失败，而那个「别人」就是我们自己。
+    """
+    maint = _RemnantMaint(intent_rows=_intent())
+    target = _CloseFailsOnNth(fail_on=fail_on, non_empty_probes=probes)
+    with pytest.raises(PilotDbBoundaryError) as ei:
+        asyncio.run(_remnant(maint, target))
+    assert ei.value.code == "target_db_in_use", label
+
+
+
+def test_remnant_exception_pins_search_path_before_proving_the_seed_lock():
+    """见 `_SEED_LOCK_PIN_WHY`（codex 4a-2a R5-F1 同族）。"""
+    maint = _RemnantMaint(intent_rows=_intent())
+    asyncio.run(_remnant(maint, _EmptyOnProbe()))
+    _assert_pinned_before_lock_proof(maint)
+
+
+
+# ── 塌缩守卫：**可传递的授权凭据**不许再出现（2026-08-12）─────────────────
+#
+# 被删掉的七个名字。⚠️ 这不是一张「私有名单」——**它们一个都不该存在**：
+#   · `ResetAuthorization` / `_RESET_CAPABILITY` / `_MINTED_AUTHORIZATIONS` /
+#     `_MintedFacts` / `_mint_authorization`：整套凭据机器（铸造 + 登记 + 哨兵）；
+#   · `authorize_reset`：「集群闸 + 走哪条路的决策 + 铸造」的封装 —— 留着它等于
+#     把缝留下一半（调用方仍可「先问一次走哪条路，再自己去 DROP」）；
+#   · `ResetGateOutcome`：把「授权那一刻的身份」带出函数的载体。数据虽不是能力，
+#     但只要 DROP 那边**信**它，缝就还在；而只要 DROP 那边不信（自己重新推导），
+#     它就没有存在意义。
+_COLLAPSED_AUTHORIZATION_SYMBOLS = frozenset({
+    "ResetAuthorization", "_RESET_CAPABILITY", "_MINTED_AUTHORIZATIONS",
+    "_MintedFacts", "_mint_authorization", "ResetGateOutcome", "authorize_reset",
+})
+
+
+def _collapsed_symbol_hits(source: str, label: str) -> list[str]:
+    """在一份源码里找**代码层面**引用了被塌缩符号的地方。
+
+    ⚠️ 走 AST 不走文本：本文件与模块里都有大段解释「为什么删掉 `ResetAuthorization`」
+       的注释与 docstring，文本判据会被这些**承重的历史叙述**打红，
+       而绕开它的办法是删注释 —— 那正是本仓明令禁止的判据形态。
+       `ast` 天然看不见注释；docstring 是 `Constant` 不是 `Name`，也不会被算进来。
+    """
+    tree = ast.parse(source)
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            hits += [f"{label}: from {node.module} import {a.name}"
+                     for a in node.names if a.name in _COLLAPSED_AUTHORIZATION_SYMBOLS]
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _COLLAPSED_AUTHORIZATION_SYMBOLS:
+                hits.append(f"{label}: …{node.attr}")
+        elif isinstance(node, ast.Name):
+            if node.id in _COLLAPSED_AUTHORIZATION_SYMBOLS:
+                hits.append(f"{label}: {node.id}")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in _COLLAPSED_AUTHORIZATION_SYMBOLS:
+                hits.append(f"{label}: def/class {node.name}")
+    return sorted(hits)
+
+
+def test_collapsed_symbol_scanner_actually_discriminates():
+    """扫描器的**正向**自检：七个名字 × 四种写法，一种都不许漏。
+
+    ⚠️ 没有这一条，下面那两颗钉子就是「对一个恒空集合断言为空」——
+       本仓记录在案的「机械检查器被它该抓的损坏禁用了自身解析器 → 静默全绿」。
+    """
+    for name in sorted(_COLLAPSED_AUTHORIZATION_SYMBOLS):
+        for form, src in (
+            ("import", f"from qmt_pilot_db import {name}\n"),
+            ("name", f"x = {name}\n"),
+            ("attribute", f"import qmt_pilot_db as m\ny = m.{name}\n"),
+            ("definition", f"def {name}():\n    pass\n"),
+        ):
+            assert _collapsed_symbol_hits(src, "probe"), \
+                f"扫描器漏掉了 {name} 的 {form} 形态"
+    # 反向：正常代码不许被误报（否则这颗钉子只会逼人删注释）
+    assert _collapsed_symbol_hits(
+        "# ResetAuthorization 是被删掉的\n"
+        "def f():\n"
+        "    '''authorize_reset 曾经在这里铸造 _MINTED_AUTHORIZATIONS'''\n"
+        "    return try_empty_remnant_exception\n", "probe") == [], \
+        "扫描器把注释/docstring 里的历史叙述当成了引用"
+
+
+def test_the_transferable_reset_authorization_machinery_is_gone_from_the_module():
+    """核心不变量：`qmt_pilot_db` 里**不存在**可传递的销毁授权。
+
+    同一个洞被 codex 提了**六次**，五次加固全被下一轮拆穿 ——
+    因为「绑定/令牌那一条」推导不出来，只能靠「授权时记下来的东西」，
+    而那个东西正是伪造者控制的入参。**加固凭据永远堵不上它。**
+    这颗钉子守的不是某一次加固，而是「缝不许再被造出来」本身。
+    """
+    import qmt_pilot_db as m
+    src = pathlib.Path(m.__file__).read_text(encoding="utf-8")
+    hits = _collapsed_symbol_hits(src, "qmt_pilot_db.py")
+    assert not hits, f"可传递的授权凭据又被造回来了：{hits}"
+    # ⚠️ **自检**：同一个扫描器必须在同一份源码上**看得见还活着的判定函数** ——
+    #    否则「一个都没扫到」与「解析器坏了」在输出上完全一样。
+    alive = frozenset({"try_empty_remnant_exception", "assert_db_allowed_for_reset"})
+    defined = {n.name for n in ast.walk(ast.parse(src))
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    assert alive <= defined, \
+        f"扫描器在这份源码上连判定函数都找不到，上面那条是恒真的：{sorted(defined)[:5]}"
+
+
+def test_no_production_file_reintroduces_a_transferable_reset_authorization():
+    """仓库级：`backend/` 下**任何**生产文件都不许把那套机器造回来。
+
+    ⚠️ **先把这颗钉子能做到什么说清楚**：**Python 进程内不存在能力边界**，
+       所以它防不住蓄意绕过，也不该被写成防得住。它防的是 spec §1 风险① 那一类
+       **接线失误**，以及「下一轮有人觉得『再加一道锁就行了』又把缝造回来」——
+       两者都一定表现为**仓库里多出一个符号**，那是机械抓得住的。
+    """
+    import qmt_pilot_db as m
+    backend = pathlib.Path(m.__file__).resolve().parent
+    scanned, offenders = [], []
+    for path in sorted(backend.rglob("*.py")):
+        rel = path.relative_to(backend)
+        if rel.parts[0] == "tests":
+            continue                       # 测试当然要提这些名字（本文件就在提）
+        scanned.append(str(rel))
+        offenders += _collapsed_symbol_hits(
+            path.read_text(encoding="utf-8"), str(rel))
+    # ⚠️ **自检 A**：扫描器必须真的扫到文件，否则下面那条是恒真的。
+    assert scanned, "扫描器一个生产文件都没找到 —— 它已经失去判别力"
+    # ⚠️ **自检 B**：`scripts/` 是最可能图省事直接引内部符号的地方，必须在扫描面内。
+    assert any("scripts/" in s for s in scanned), \
+        f"没扫到 scripts/ —— 验收脚本正是最可能图省事的地方：{scanned}"
+    assert any(s == "qmt_pilot_db.py" for s in scanned), \
+        "没扫到 qmt_pilot_db.py 本体 —— 定义处才是最要紧的那一个"
+    assert not offenders, f"这些生产文件把可传递的授权凭据造回来了：{offenders}"
