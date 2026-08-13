@@ -125,11 +125,17 @@ struct DrawingDefaultStyleSanitizeTests {
 
     /// T15b（不变量锁）：非水平工具**不得**被套上水平线规则。
     /// 本片调用点恒 .horizontal，故只能单元级构造 —— 但 P1c 一旦加工具，这条就是生产路径。
+    ///
+    /// ⚠️ **子类型分量必须用 `.segment`，不能用 `.ray`**（codex plan-P-R11 medium，**已实测**）：
+    ///    `horizontalLineSubTypeEnabled` 里 `.straight/.ray → true`、**只有 `.segment → false`**
+    ///    （`DrawingStyleAvailability.swift`）。用 `.ray` 时，正确实现（tool-aware 重载）与
+    ///    错误实现（错调水平线专用谓词）**返回同一个值** ⇒ 该分量零判别力。
+    ///    换 `.segment` 后：正确实现原样保留、错误实现会把它改写成 `.straight` —— 判据这才立起来。
     @Test func non_horizontal_tool_keeps_its_label_and_subtype() {
-        var s = DrawingDefaultStyle(); s.lineSubType = .ray; s.labelMode = .left
+        var s = DrawingDefaultStyle(); s.lineSubType = .segment; s.labelMode = .left
         let out = s.sanitized(for: .trend)
-        #expect(out.labelMode == .left)        // 横线的「射线不能配左」不得外溢
-        #expect(out.lineSubType == .ray)
+        #expect(out.labelMode == .left)          // 横线的「射线不能配左」不得外溢
+        #expect(out.lineSubType == .segment)     // 横线的「拒 .segment」同样不得外溢
     }
 
     /// 正向档：健康值原样穿过（防「全是拒了的套件」掩盖恒回落的实现）
@@ -281,7 +287,7 @@ Expected: `5 tests passed`
 > **先读 `ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScanner.swift` 用它已有的 API 改写**，
 > **不要**新建第二个扫描器。并按仓规给新扫描能力配**双向自检**（喂一个含 `1...5` 的样本必须命中、喂 `1...4` 必须不命中）。
 
-- [ ] **Step 7: 变异验证（M5 / M6 / M14 / M14b / M15b）**
+- [ ] **Step 7: 变异验证（M5 / M6 / M14 / M14b / M15b / M15d）**
 
 ```bash
 # 备份**变异表里出现的每一个文件**（M14b 变异的是 HorizontalLineTool，不是 DrawingEnums）
@@ -295,7 +301,8 @@ cp ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.sw
 |---|---|---|
 | M5 | 删掉 `isRenderableSubType` 那三行 | `horizontal_segment_falls_back_to_straight` |
 | M6 | 删掉 `thickness` 的夹取 | `thickness_is_clamped_to_range` |
-| M15b | `normalizedLabelMode` 换成**两参**重载 | `non_horizontal_tool_keeps_its_label_and_subtype` |
+| M15b | `normalizedLabelMode` 换成**两参**重载 | `non_horizontal_tool_keeps_its_label_and_subtype` 的 **labelMode 分量** |
+| **M15d** | `sanitized` 里把 `DrawingStyleAvailability.isRenderableSubType(sub, toolType:)` 换成水平线专用的 `horizontalLineSubTypeEnabled(sub)` | `non_horizontal_tool_keeps_its_label_and_subtype` 的 **lineSubType 分量**（`.segment` 被错误改写成 `.straight`）。⚠️ 这条是 codex plan-P-R11 medium 的产物：原测试该分量用 `.ray`，而 `.ray` 在两种实现下**返回同一个值** ⇒ 零判别力 |
 | M14 | `thicknessRange` 改成 `1...4` | **G5**（`1...5` 计数掉到 0）+ **G5b** 三条整段表达式全失配。⚠️ 原写「面板档数断言 T16」，T16 已由 G5b 的整段比对承接（见 Step 6 说明） |
 | **M14b** | 把 `HorizontalLineTool:33` 改回 `min(max(t, 1), 5)`（模拟「换写法绕过字面量计数」） | **只有 G5b** 红（G5 字面量条**仍绿** —— 正则看不见 min/max 形态，这正是 G5b 存在的理由） |
 
@@ -997,10 +1004,15 @@ CONTRACT_VERSION = "1.13"
 
 - [ ] **Step 5: 改 m01 矩阵三行**
 
-`docs/governance/m01-schema-versioning-contract.md` 矩阵：
-- 顶层行 `"1.12"` → `"1.13"`
-- app.sqlite GRDB migration 行 `0003_v1.4_purge_leased` → `0010_v1.13_drawing_default_style`
-- Swift 模型版本（`M0.3`）行 `1.3` → `1.4`
+`docs/governance/m01-schema-versioning-contract.md` 矩阵。⚠️ **反引号是单元格文本的一部分**：
+G8 按「行首标签 → 第二列**整格**」精确比对，改的时候**只换反引号里面的内容、反引号留着**
+（实测该表三行的第二列本来就带反引号；改成裸值会让 G8 恒红 —— codex plan-P-R11 medium 的关切点）：
+
+| 行首标签 | 现在的整格文本 | 改成的整格文本 |
+|---|---|---|
+| `CONTRACT_VERSION`（顶层标识） | ``​`"1.12"`​`` | ``​`"1.13"`​`` |
+| app.sqlite GRDB migration | ``​`0003_v1.4_purge_leased`​`` | ``​`0010_v1.13_drawing_default_style`​`` |
+| Swift 模型版本（`M0.3`） | ``​`1.3`​`` | ``​`1.4`​`` |
 
 - [ ] **Step 6: 跑三处闸门确认通过**
 
@@ -1447,6 +1459,7 @@ git status --short          # 必须为空（非空 = 脏树假绿或变异没�
 **Files:**
 - Modify: `…/TrainingEngine/TrainingSessionCoordinator.swift:56`（`replayBaseline` 元组）、`:207 / :588 / :942`（三处基线捕获）、`:611-621`（clean-skip）、`:623`（replay 写）、`:650`（normal 写）、`:294+`（resumePending 种子）、`:851+`（resumePendingReplay 种子）
 - Test: `ios/Contracts/Tests/KlineTrainerPersistenceTests/CoordinatorDefaultStylePersistTests.swift`（新建）⚠️ **在 Persistence target，不在 Contracts** —— coordinator 的真-DB 装配范式在那边（`CoordinatorLossyPreserveTests` / `CoordinatorCapitalIntegrationTests`）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/CoordinatorDefaultStyleSourceGuardTests.swift`（新建，**G1 + G3**）⚠️ **在 Contracts target** —— `SourceGuardScanner` 是该测试模块内的 internal，跨 target 取不到。本 task **两个测试目标各放各的**，不要为凑一处而复制扫描器
 
 **Interfaces:**
 - Consumes: `PendingTraining.drawingDefaultStyle` / `PendingReplay.drawingDefaultStyle`（Task 2）
@@ -1617,7 +1630,7 @@ cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter Coord
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 ```
 
-- [ ] **Step 7: 守卫 G1 / G3 + 变异（M7 部分 / M8 / M9 / M10 / M11）**
+- [ ] **Step 7: 守卫 G1 / G3 + 变异（M8 / M8b / M9 / M10 / M11）**
 
 **变异前先备份本表点名的每个文件**（禁止 `git checkout` 复原 —— 会静默抹掉未提交改动）：
 
@@ -1625,24 +1638,83 @@ cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift t
 cp ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift /tmp/TrainingSessionCoordinator.swift.bak
 ```
 
-逐条变异 → 跑 → 记录**红的是哪个测试名** → `cp /tmp/<file>.bak <原路径>` 复原 → `git status --short` 确认干净，再做下一条。
+**先写 G1 / G3 的真代码**（codex plan-P-R11 medium：上一稿这里**只有两条散文 bullet**
+—— 与 P-R8 挖出的 G7 同一个毛病，我那轮只修了被点名的 G7，**没有按判据穷尽同族**）。
 
-- **G1**：`setDefaultStyle` 在 `Sources/` 里**恰好 3 个调用点**（`DrawingEditRouter` + 两处 resume）。
-- **G3**：`replayBaseline` 的元组构造点**恰好 3 处**且**都含 `defaultStyle`**。
+⚠️ 和 G7 一样，它们**必须落在 `KlineTrainerContractsTests`**：`SourceGuardScanner` 是该测试模块内的
+internal，跨 target 取不到；而本 task 的行为测试在 `KlineTrainerPersistenceTests`（真-DB coordinator
+装配在那边）。**两个测试目标各放各的**，不要为了凑一处而复制扫描器。
+
+新建 `ios/Contracts/Tests/KlineTrainerContractsTests/CoordinatorDefaultStyleSourceGuardTests.swift`：
+
+```swift
+import Testing
+@testable import KlineTrainerContracts
+
+/// G1（D96）：`setDefaultStyle` 的调用点**恰好 3 个** ——
+/// `DrawingEditRouter`（面板写入，既有）+ `resumePending` + `resumePendingReplay`（本片新增两处种子）。
+/// 多于 3 ⇒ 出现了第四条写默认的路径，必须回来重审「哪些时机允许改本局默认」；
+/// 少于 3 ⇒ 有一处种子没接上（正是 M9 / M10 要造的形态）。
+@Test func g1_setDefaultStyle_has_exactly_three_call_sites() throws {
+    let sites = try callSiteCount("setDefaultStyle(")
+    let total = sites.reduce(0) { $0 + $1.count }
+    #expect(total == 3, "setDefaultStyle 调用点应恰好 3 个，实测 \(total)：\(sites.map { "\($0.file)×\($0.count)" })")
+    for needle in ["DrawingEditRouter.swift", "TrainingSessionCoordinator.swift"] {
+        #expect(sites.contains { $0.file.hasSuffix(needle) },
+                "\(needle) 里应有 setDefaultStyle 调用点，实测：\(sites.map(\.file))")
+    }
+    // 两处 resume 都在 coordinator 同一个文件里 ⇒ 该文件应占 2 次（只数总数会漏「两处种子挤成一处」）
+    #expect(sites.first { $0.file.hasSuffix("TrainingSessionCoordinator.swift") }?.count == 2,
+            "coordinator 里应恰好 2 处（resumePending + resumePendingReplay）")
+}
+
+/// G3（D95）：`replayBaseline` 的元组构造点**恰好 3 处**，且**每一处都带 defaultStyle 分量**。
+/// 只数处数挡不住「加了字段但某一处基线捕获忘了带」—— 那正是 clean-skip 静默失效的形态。
+@Test func g3_replayBaseline_captures_all_include_defaultStyle() throws {
+    let path = contractsDirForGuards
+        .appendingPathComponent("Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift").path
+    let src = try squeezedSource(path)
+    let assigns = src.components(separatedBy: squeeze("replayBaseline = (")).count - 1
+    #expect(assigns == 3, "replayBaseline 的元组构造点应恰好 3 处，实测 \(assigns)")
+
+    // 每一处都必须带 defaultStyle：构造点数 == 「构造点且其后不远处出现 defaultStyle」的数量
+    let withStyle = src.components(separatedBy: squeeze("replayBaseline = ("))
+        .dropFirst()
+        .filter { $0.prefix(400).contains(squeeze("defaultStyle")) }
+        .count
+    #expect(withStyle == 3, "有 \(assigns - withStyle) 处 replayBaseline 捕获没带 defaultStyle（D95 会静默失效）")
+}
+
+/// G1 / G3 的**双向自检**：不存在的符号必须数出 0，样本里缺分量必须被判出来
+///（防「pattern 打错字 → 恒 0 / 恒真 → 守卫恒绿」）。
+@Test func g1_g3_scanners_are_not_vacuous() throws {
+    #expect(try callSiteCount("setDefaultStyleZZZ(").isEmpty)
+    let sample = squeeze("replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count, sig, up, low)")
+    #expect(!sample.contains(squeeze("defaultStyle")), "缺分量的样本必须不满足 G3 的内容条")
+}
+```
+
+跑：`swift test --filter CoordinatorDefaultStyleSourceGuardTests`，此刻应 **FAIL**（种子与分量都还没加），
+Step 3–5 落地后转绿。
+
+逐条变异 → 跑 → 记录**红的是哪个测试名** → `cp /tmp/<file>.bak <原路径>` 复原 → `git status --short` 确认干净，再做下一条。
 
 | 变异 | 改法 | 只应变红 |
 |---|---|---|
-| M8 | `replayBaseline` 去掉 `defaultStyle` 分量 | **只有 T11** |
-| M9 | 删掉 `resumePending` 的种子 | **只有 T13** |
-| M10 | 删掉 `resumePendingReplay` 的种子 | **只有 T12** |
-| M11 | 把种子挪到 fresh 会话的公共构造路径 | **只有 T14** |
+| M8 | `replayBaseline` 去掉 `defaultStyle` 分量 | **T11** + **G3** 的内容条 |
+| M9 | 删掉 `resumePending` 的种子 | **T13** + **G1**（coordinator 那格从 2 掉到 1） |
+| M10 | 删掉 `resumePendingReplay` 的种子 | **T12** + **G1**（同上） |
+| M11 | 把种子挪到 fresh 会话的公共构造路径 | **只有 T14**（G1 的总数仍是 3 —— 这条专证「计数挡不住挪位置」，行为测试不可替代） |
+| **M8b** | **只**把**三处**基线捕获里的**一处**去掉 `defaultStyle`（另两处保留） | **只有 G3** 的内容条红（T11 可能仍绿 —— 它只跑得到其中一条路径）—— 专证「不只数处数、要逐处查分量」 |
 
 - [ ] **Step 8: 提交**
 
 ```bash
-# ⚠️ 测试在 **KlineTrainerPersistenceTests**（真-DB coordinator 装配在那边），不是 Contracts
+# ⚠️ 行为测试在 **KlineTrainerPersistenceTests**（真-DB coordinator 装配在那边），
+#    源码守卫在 **KlineTrainerContractsTests**（SourceGuardScanner 在那个模块内）——两个都要 stage
 git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift \
-        ios/Contracts/Tests/KlineTrainerPersistenceTests/CoordinatorDefaultStylePersistTests.swift
+        ios/Contracts/Tests/KlineTrainerPersistenceTests/CoordinatorDefaultStylePersistTests.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/CoordinatorDefaultStyleSourceGuardTests.swift
 git commit -m "feat(coordinator): 本局默认写入两处存档 + clean-skip 纳入 + resume 两处种子（D94-D96）"
 git status --short          # 必须为空
 ```

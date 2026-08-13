@@ -537,6 +537,7 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **M16** | 从 `PendingTraining.encode(to:)` 里删掉 `encodeIfPresent(drawingDefaultStyle…)`（= 造出「有损 Codable」） | **只有 T17** 红；T1/T2/T12/T13 **全绿** —— 这条专证「DB 边界测试对 Codable 契约零判别力」（codex R8-medium） |
 | **M16b** | 把 `init(from:)` 的 `decodeIfPresent` 改成 `decode`（旧载荷缺 key 即抛） | **只有 T18** 红 |
 | **M15b** | 把 `sanitized` 里的 `labelMode` 归一化换成**两参**重载 `normalizedLabelMode(current:lineSubType:)` | **只有 T15b** 红 —— 这条专证「tool-aware 签名挡不住传错重载」（codex R5-medium） |
+| **M15d** | 把 `sanitized` 里的 `isRenderableSubType(_:toolType:)` 换成水平线专用的 `horizontalLineSubTypeEnabled(_:)` | **只有 T15b 的 `lineSubType` 分量** 红。⚠️ 该分量的取值**必须是 `.segment`**：实测 `horizontalLineSubTypeEnabled` 只有 `.segment → false`，用 `.ray` 时两种实现返回同一个值 ⇒ 零判别力（codex plan-P-R11 medium） |
 | **M15** | 把 `pending_replay` 的读路径改回「直接 `JSONDecoder().decode`」（绕过共享函数） | **只有 replay 侧**的 T4/T5/T5b 红，**training 侧全绿** + 守卫 **G7** 红 —— 专证「两张表各跑一遍」不是冗余（codex R3-medium） |
 | **M17** | 只把**一个**测试文件里的 `user_version` 终态断言改回 `7`（取 `TrainingResetPortTests.swift` —— 它是「起草时的清单里没有」的那三个之一） | **只有守卫 G9** 红，且失败信息**点名该文件:行** —— 这条专证 G9 是**发现式**的、够得到清单外的文件（codex plan-P-R7 high） |
 | **M17b** | 把 G9 抽取比较值的正则改成永不匹配 | **G9 的两条防空转断言**（断言点总数 ≥ 10、覆盖文件数 ≥ 5）红 —— 扫描器坏掉必须变红，不得静默全绿（[[feedback_mechanical_checker_parser_disabled]]） |
