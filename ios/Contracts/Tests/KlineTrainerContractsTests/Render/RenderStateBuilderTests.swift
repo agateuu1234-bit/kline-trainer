@@ -1257,7 +1257,7 @@ struct RenderStateBuilderTests {
         #expect(e.drawings == before, "选中不得改动任何 DrawingObject")
         #expect(e.drawings.map(\.id) == before.map(\.id))
         #expect(e.drawingsRevision == revBefore, "选中不是内容变更，绝不能 bump revision（否则会触发 autosave）")
-        #expect(CONTRACT_VERSION == "1.12")
+        #expect(CONTRACT_VERSION == "1.13")
     }
 
     // MARK: - PR-4 Step 6b：PD1 前提（codex plan-R3-F2）

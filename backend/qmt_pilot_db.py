@@ -814,7 +814,7 @@ async def assert_cluster_allowed(maint_conn, *, connect, target_db: str | None) 
 
 # 与 ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift 的 CONTRACT_VERSION
 # 逐字相等。两边必须同时改（test_contract_version_matches_swift_source_of_truth 是这条的钉）。
-CONTRACT_VERSION = "1.12"
+CONTRACT_VERSION = "1.13"
 
 # pilot_meta 的九个键，顺序固定。
 # created_at **不参与放行判定，但参与令牌派生**（spec O1-F14）。
