@@ -505,7 +505,7 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **T13** | normal 续局：同上 | host + DB 边界 |
 | **T14** | **fresh 会话不种**：开新局 → `session.defaultStyle` == 出厂值 | host（§1 新局回落） |
 | **T15** | **两份**常量都是 `"1.13"`：Swift 侧 `#expect(CONTRACT_VERSION == "1.13")`（**两处测试都要改**）+ backend `qmt_pilot_db.CONTRACT_VERSION == "1.13"` | host（Swift）+ **backend pytest**（D97）。⚠️ `test_qmt_pilot_db.py:798` 的跨语言断言**不改**，它同步后自动绿 |
-| **T15b** | `sanitized(for: .trend)`（**非水平工具**）**不改写** `labelMode`：喂 `(lineSubType: .ray, labelMode: .left)` → 原样返回 `.left`（横线规则不得外溢）。同法验 `lineSubType` 不被横规则拒 | host（**不变量锁**：本片调用点恒 `.horizontal`，故只能单元级构造） |
+| **T15b**（**两档**，缺一不可） | `sanitized(for: .trend)`（**非水平工具**）**不改写** `labelMode`：喂 `(lineSubType: .ray, labelMode: .left)` → 原样返回 `.left`（横线规则不得外溢）。同法验 `lineSubType` 不被横规则拒 | host（**不变量锁**：本片调用点恒 `.horizontal`，故只能单元级构造） |
 | **T17** | **`PendingTraining` 的 Codable 往返**：造一个 `drawingDefaultStyle` 为**非出厂值**的实例 → encode → decode → **逐字段相等** | host（codex spec-R8 medium：DB 路径不走 Codable，漏 `encodeIfPresent` 时 T1/T2/T12/T13 **全绿**） |
 | **T17b** | `PendingReplay` 同上 | host |
 | **T18** | **旧载荷解码**：JSON 里**没有** `drawingDefaultStyle` 这个 key → 解码成功且该字段 == `nil`，其余字段照常 | host（两个模型各一条；`init(from:)` 必须 `decodeIfPresent`） |
@@ -533,11 +533,11 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | M13 | **只**改 Swift 那份、backend 那份留在 `"1.12"` | **backend 的 `test_qmt_pilot_db.py:798`** 红（跨语言一致性守卫）—— 这条专证「两份源必须同改」 |
 | **M13b** | 两份都留在 `"1.12"` | **只有 T15** 红 |
 | **M13c** | 两份常量都改对、migration 也加了，**但 m01 矩阵三行一行没动** | **只有守卫 G8** 红 —— 这条专证「矩阵同步是被强制的，不是靠自觉」（codex R7-medium） |
-| M14 | 把 `thicknessRange` 改成 `1...4`（模拟两处字面量漂移） | **G5**（`1...5` 计数掉到 0）+ **G5b**（三个消费者的整段表达式全失配）—— 证明三个消费者确实从该常量派生 |
+| M14 | 把 `thicknessRange` 改成 `1...4`（模拟两处字面量漂移） | **只有 G5**（`1...5` 字面量计数掉到 0）。⚠️ **G5b 不得红** —— 它比对消费者是否引用常量的**名字**，与常量**取值**无关（Task 1 实施者实测） |
 | **M16** | 从 `PendingTraining.encode(to:)` 里删掉 `encodeIfPresent(drawingDefaultStyle…)`（= 造出「有损 Codable」） | **只有 T17** 红；T1/T2/T12/T13 **全绿** —— 这条专证「DB 边界测试对 Codable 契约零判别力」（codex R8-medium） |
 | **M16b** | 把 `init(from:)` 的 `decodeIfPresent` 改成 `decode`（旧载荷缺 key 即抛） | **只有 T18** 红 |
-| **M15b** | 把 `sanitized` 里的 `labelMode` 归一化换成**两参**重载 `normalizedLabelMode(current:lineSubType:)` | **只有 T15b** 红 —— 这条专证「tool-aware 签名挡不住传错重载」（codex R5-medium） |
-| **M15d** | 把 `sanitized` 里的 `isRenderableSubType(_:toolType:)` 换成水平线专用的 `horizontalLineSubTypeEnabled(_:)` | **只有 T15b 的 `lineSubType` 分量** 红。⚠️ 该分量的取值**必须是 `.segment`**：实测 `horizontalLineSubTypeEnabled` 只有 `.segment → false`，用 `.ray` 时两种实现返回同一个值 ⇒ 零判别力（codex plan-P-R11 medium） |
+| **M15b** | 把 `sanitized` 里的 `labelMode` 归一化换成**两参**重载 `normalizedLabelMode(current:lineSubType:)` | **只有 T15b 的 `.ray` 档** 红 —— 专证「tool-aware 签名挡不住传错重载」（codex R5-medium） |
+| **M15d** | 把 `sanitized` 里的 `isRenderableSubType(_:toolType:)` 换成水平线专用的 `horizontalLineSubTypeEnabled(_:)` | **只有 T15b 的 `.segment` 档** 红 |
 | **M15** | 把 `pending_replay` 的读路径改回「直接 `JSONDecoder().decode`」（绕过共享函数） | **只有 replay 侧**的 T4/T5/T5b 红，**training 侧全绿** + 守卫 **G7** 红 —— 专证「两张表各跑一遍」不是冗余（codex R3-medium） |
 | **M17** | 只把**一个**测试文件里的 `user_version` 终态断言改回 `7`（取 `TrainingResetPortTests.swift` —— 它是「起草时的清单里没有」的那三个之一） | **只有守卫 G9** 红，且失败信息**点名该文件:行** —— 这条专证 G9 是**发现式**的、够得到清单外的文件（codex plan-P-R7 high） |
 | **M17b** | 把 G9 抽取比较值的正则改成永不匹配 | **G9 的两条防空转断言**（断言点总数 ≥ 10、覆盖文件数 ≥ 5）红 —— 扫描器坏掉必须变红，不得静默全绿（[[feedback_mechanical_checker_parser_disabled]]） |

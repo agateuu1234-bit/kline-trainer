@@ -126,16 +126,26 @@ struct DrawingDefaultStyleSanitizeTests {
     /// T15b（不变量锁）：非水平工具**不得**被套上水平线规则。
     /// 本片调用点恒 .horizontal，故只能单元级构造 —— 但 P1c 一旦加工具，这条就是生产路径。
     ///
-    /// ⚠️ **子类型分量必须用 `.segment`，不能用 `.ray`**（codex plan-P-R11 medium，**已实测**）：
-    ///    `horizontalLineSubTypeEnabled` 里 `.straight/.ray → true`、**只有 `.segment → false`**
-    ///    （`DrawingStyleAvailability.swift`）。用 `.ray` 时，正确实现（tool-aware 重载）与
-    ///    错误实现（错调水平线专用谓词）**返回同一个值** ⇒ 该分量零判别力。
-    ///    换 `.segment` 后：正确实现原样保留、错误实现会把它改写成 `.straight` —— 判据这才立起来。
-    @Test func non_horizontal_tool_keeps_its_label_and_subtype() {
+    /// ⚠️ **必须是两档，不是一档**（Task 1 实施者实测 + [[feedback_same_predicate_multiple_bypasses]]）：
+    ///    这条不变量有**两种正交的绕过**，而单一取值只抓得住其中一种 ——
+    ///      · `horizontalLabelModeEnabled(.left, lineSubType:)` 的判据是 `lineSubType != .ray`
+    ///        ⇒ 只有 **`.ray` + `.left`** 时，2 参重载（.hidden）与 3 参 tool-aware（.left）**取值不同**
+    ///      · `horizontalLineSubTypeEnabled` 只有 **`.segment` → false**
+    ///        ⇒ 只有 **`.segment`** 时，水平线专用谓词（.straight）与 tool-aware（.segment）**取值不同**
+    ///    用 `.segment` 一档时 labelMode 分量两种实现**返回同一个值** ⇒ M15b 零判别力（实测）；
+    ///    用 `.ray` 一档时 subType 分量同理 ⇒ M15d 零判别力。**两档缺一不可。**
+    @Test func non_horizontal_tool_keeps_its_label() {
+        var s = DrawingDefaultStyle(); s.lineSubType = .ray; s.labelMode = .left
+        let out = s.sanitized(for: .trend)
+        #expect(out.labelMode == .left)          // 横线的「射线不能配左」不得外溢（M15b 打这一条）
+        #expect(out.lineSubType == .ray)
+    }
+
+    @Test func non_horizontal_tool_keeps_its_subtype() {
         var s = DrawingDefaultStyle(); s.lineSubType = .segment; s.labelMode = .left
         let out = s.sanitized(for: .trend)
-        #expect(out.labelMode == .left)          // 横线的「射线不能配左」不得外溢
-        #expect(out.lineSubType == .segment)     // 横线的「拒 .segment」同样不得外溢
+        #expect(out.lineSubType == .segment)     // 横线的「拒 .segment」不得外溢（M15d 打这一条）
+        #expect(out.labelMode == .left)
     }
 
     /// 正向档：健康值原样穿过（防「全是拒了的套件」掩盖恒回落的实现）
@@ -301,9 +311,9 @@ cp ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.sw
 |---|---|---|
 | M5 | 删掉 `isRenderableSubType` 那三行 | `horizontal_segment_falls_back_to_straight` |
 | M6 | 删掉 `thickness` 的夹取 | `thickness_is_clamped_to_range` |
-| M15b | `normalizedLabelMode` 换成**两参**重载 | `non_horizontal_tool_keeps_its_label_and_subtype` 的 **labelMode 分量** |
-| **M15d** | `sanitized` 里把 `DrawingStyleAvailability.isRenderableSubType(sub, toolType:)` 换成水平线专用的 `horizontalLineSubTypeEnabled(sub)` | `non_horizontal_tool_keeps_its_label_and_subtype` 的 **lineSubType 分量**（`.segment` 被错误改写成 `.straight`）。⚠️ 这条是 codex plan-P-R11 medium 的产物：原测试该分量用 `.ray`，而 `.ray` 在两种实现下**返回同一个值** ⇒ 零判别力 |
-| M14 | `thicknessRange` 改成 `1...4` | **G5**（`1...5` 计数掉到 0）+ **G5b** 三条整段表达式全失配。⚠️ 原写「面板档数断言 T16」，T16 已由 G5b 的整段比对承接（见 Step 6 说明） |
+| M15b | `normalizedLabelMode` 换成**两参**重载 | **只有 `non_horizontal_tool_keeps_its_label`**（`.ray` 那档）。⚠️ `non_horizontal_tool_keeps_its_subtype` **不得**红 —— 它对这条变异零判别力，这正是要两档的原因 |
+| **M15d** | `sanitized` 里把 `DrawingStyleAvailability.isRenderableSubType(sub, toolType:)` 换成水平线专用的 `horizontalLineSubTypeEnabled(sub)` | **只有 `non_horizontal_tool_keeps_its_subtype`**（`.segment` 那档）。⚠️ `non_horizontal_tool_keeps_its_label` **不得**红 |
+| M14 | `thicknessRange` 改成 `1...4` | **只有 G5**（`1...5` 字面量计数掉到 0）。⚠️ **G5b 不得红** —— 它比对的是消费者是否引用常量的**名字**，与常量的**取值**无关（Task 1 实施者实测；我在 P-R10 写「G5b 三条全失配」是错的）。T16 由 G5b 承接的是「同源」，M14 证的是「值域只有一份字面量」，两件事 |
 | **M14b** | 把 `HorizontalLineTool:33` 改回 `min(max(t, 1), 5)`（模拟「换写法绕过字面量计数」） | **只有 G5b** 红（G5 字面量条**仍绿** —— 正则看不见 min/max 形态，这正是 G5b 存在的理由） |
 
 - [ ] **Step 8: 跑 host 全量 + 提交**
