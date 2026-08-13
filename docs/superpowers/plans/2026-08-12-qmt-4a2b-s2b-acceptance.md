@@ -45,16 +45,18 @@ export QMT_VERIFY_ALLOW_DESTRUCTIVE=1
 
 > ⚠️ DSN 指向的**不是**本机时**另外**还要 `export QMT_VERIFY_ALLOW_REMOTE=1`。
 > ⚠️ 退出码 **8** = 同一台集群上已经有另一个同前缀的验收在跑 —— 等它跑完再来。
+> ⚠️ 退出码 **9**（并发脚本）= 它要用的固定名角色（`zzqmtverify_plain` / `zzqmtverify_owner`）
+>    在运行之前就已存在 —— 那说明不是本次造的，脚本**拒绝碰它**。按 stderr 的提示手工清掉再跑。
 > ⚠️ **判绿一律读输出内容**（末尾那行 `✅ N 档…`），**不要看管道后的退出码**。
 
 ## 二、验收表（动作 / 期望 / 通过-不通过）
 
 | # | 动作 | 期望看到 | 通过? |
 |---|---|---|---|
-| 1 | `.venv/bin/python -m pytest backend/tests -q` | 末行 `755 passed`，**0 failed / 0 error / 0 skipped** | |
-| 2 | `.venv/bin/python backend/scripts/verify_pilot_db_lifecycle.py` | 末尾 `✅ 39 档断言全部成立（真 PostgreSQL）`；整篇**没有** `FAIL` 也没有 `❌` | |
-| 3 | 把第 2 条**再跑两遍**，比较三次的末行 | 三次**完全一样**（都是 `✅ 39 档`）—— 专查「间歇性假拒」那类 flake | |
-| 4 | `.venv/bin/python backend/scripts/verify_pilot_concurrency.py` | 末行 `✅ 10 档断言全部成立（真 PostgreSQL）` | |
+| 1 | `.venv/bin/python -m pytest backend/tests -q` | 末行 `770 passed`，**0 failed / 0 error / 0 skipped** | |
+| 2 | `.venv/bin/python backend/scripts/verify_pilot_db_lifecycle.py` | 末尾 `✅ 41 档断言全部成立（真 PostgreSQL）`；整篇**没有** `FAIL` 也没有 `❌` | |
+| 3 | 把第 2 条**再跑两遍**，比较三次的末行 | 三次**完全一样**（都是 `✅ 41 档`）—— 专查「间歇性假拒」那类 flake | |
+| 4 | `.venv/bin/python backend/scripts/verify_pilot_concurrency.py` | 末行 `✅ 11 档断言全部成立（真 PostgreSQL）` | |
 | 5 | `.venv/bin/python backend/scripts/verify_pilot_two_phase_create.py` | 末行 `✅ 28 档断言全部成立（真 PostgreSQL）` | |
 | 6 | 整行贴进终端：<br>`grep -rn "def authorize_reset\|class ResetAuthorization\|_mint_authorization\|_MINTED_AUTHORIZATIONS\|_RESET_CAPABILITY\|class ResetGateOutcome" backend/ --include='*.py' \| grep -v "^backend/tests/"` | **一行输出都没有** —— 塌缩买到的东西在本片仍然成立：判定与销毁之间没有可传递的凭据 | |
 | 7 | `grep -rn "DROP DATABASE" backend/qmt_pilot_db.py \| grep -v "^.*:[0-9]*: *#"` | 只有**一行**长成真的在发 SQL 的样子（`f"DROP DATABASE {quote_ident(db_name)}"`），其余全是说明文字或报错串 | |
@@ -62,17 +64,35 @@ export QMT_VERIFY_ALLOW_DESTRUCTIVE=1
 | 9 | `.venv/bin/python tools/check_spec_consistency.py --self-test` | 末行 `✅ mutation 自测通过（11 项检查各自被反例触发）` | |
 | 10 | 看第 2 条输出的**最后几行** | 必须能看到「仍**没有**覆盖的」那一段（`--init-cluster-marker` 随 S3；autovacuum worker 那一向没有常驻档）。**看不到就判不通过** —— 一份不肯说自己没验什么的报告，比没有报告更危险 | |
 
-### 四条「守卫真的拦得住吗」的手工反证（做完**务必还原**）
+### 五条「守卫真的拦得住吗」的手工反证（做完**务必还原**）
 
 | # | 动作 | 期望看到 | 通过? |
 |---|---|---|---|
-| 11 | 打开 `backend/qmt_pilot_db.py`，在 `reset_pilot_database` 里找到封锁临界区那句 `await maint_conn.execute(_SEAL_CONNECTIONS_SQL(db_name))`，把它连同上一行 `_sealed = True` 一起改成 `_sealed = False`，存盘，跑第 4 条 | 必须出现 `FAIL  Ⓓ 窗口里普通角色**连不进**目标库` 且写着「竟然连进去并建了表」。**看完改回去**，重跑第 4 条确认回到 `✅ 10 档` | |
-| 12 | 打开 `backend/qmt_pilot_db.py`，把封锁临界区里 `else:` 分支那句 `await _assert_reset_gates_on(target_conn, …)` 换成两行：`_meta_now = await read_pilot_meta(target_conn)` 和 `await _assert_ownership(_meta_now, seed=seed)`，存盘，跑第 2 条 | 必须**只有 ㉟b 变红**（`竟然删掉了`），而 ㉟ 仍然 PASS —— 这证明 ㉟b 不是 ㉟ 的重复，它单独钉着「绑定/令牌那半也要在封锁下重跑」。**看完改回去**，重跑第 2 条确认回到 `✅ 39 档` | |
-| 13 | 打开 `backend/qmt_pilot_db.py`，把最后那句 `await maint_conn.execute(_CLEAR_DROPPED_INTENT_SQL, db_name, seed, db_oid)` 改成 `pass`，存盘，跑第 2 条 | ㉞ 与 ㉞b 各出**两条** FAIL（凭据没清掉 + 重建被卡成 intent 冲突）。**看完改回去**，重跑第 2 条确认回到 `✅ 39 档` | |
-| 14 | 打开 `backend/qmt_pilot_db.py`，把 `reset_pilot_database` 里那句 `db_oid = await try_empty_remnant_exception(…)` 整段（含随后的 `if not via_empty_remnant:`）注释掉、改成直接走 `assert_db_allowed_for_reset`，存盘，跑第 1 条 | 必须出现 `FAILED …test_reset_welds_the_spec_order_into_one_function_body`，另外 ⑨ 那一族也会红。**看完改回去**，重跑第 1 条确认回到 `755 passed` | |
+| 11 | 打开 `backend/qmt_pilot_db.py`，在 `reset_pilot_database` 里找到封锁临界区那句 `await maint_conn.execute(_SEAL_CONNECTIONS_SQL(db_name))`，把它连同上一行 `_sealed = True` 一起改成 `_sealed = False`，存盘，跑第 4 条 | 必须出现 `FAIL  Ⓓ 窗口里普通角色**连不进**目标库` 且写着「竟然连进去并建了表」。**看完改回去**，重跑第 4 条确认回到 `✅ 11 档` | |
+| 12 | 打开 `backend/qmt_pilot_db.py`，把封锁临界区里 `else:` 分支那句 `await _assert_reset_gates_on(target_conn, …)` 换成两行：`_meta_now = await read_pilot_meta(target_conn)` 和 `await _assert_ownership(_meta_now, seed=seed)`，存盘，跑第 2 条 | 必须**只有 ㉟b 变红**（`竟然删掉了`），而 ㉟ 仍然 PASS —— 这证明 ㉟b 不是 ㉟ 的重复，它单独钉着「绑定/令牌那半也要在封锁下重跑」。**看完改回去**，重跑第 2 条确认回到 `✅ 41 档` | |
+| 13 | 打开 `backend/qmt_pilot_db.py`，把最后那句 `await maint_conn.execute(_CLEAR_DROPPED_INTENT_SQL, db_name, seed, db_oid)` 改成 `pass`，存盘，跑第 2 条 | ㉞ 与 ㉞b 各出**两条** FAIL（凭据没清掉 + 重建被卡成 intent 冲突）。**看完改回去**，重跑第 2 条确认回到 `✅ 41 档` | |
+| 14 | 打开 `backend/qmt_pilot_db.py`，把 `reset_pilot_database` 里那句 `db_oid = await try_empty_remnant_exception(…)` 整段（含随后的 `if not via_empty_remnant:`）注释掉、改成直接走 `assert_db_allowed_for_reset`，存盘，跑第 1 条 | 必须出现 `FAILED …test_reset_welds_the_spec_order_into_one_function_body`，另外 ⑨ 那一族也会红。**看完改回去**，重跑第 1 条确认回到 `770 passed` | |
+| 15 | 用任意 PG 客户端（psql / DBeaver 皆可）连上 DSN 那台集群，执行 `CREATE ROLE zzqmtverify_plain LOGIN PASSWORD 'x'`，然后跑第 4 条，再 `echo "EXIT=$?"` | 必须 **`EXIT=9`**、stderr 打出「这些角色在本次运行之前就已经存在」；**并且回客户端确认那个角色仍然在**（`SELECT rolname FROM pg_roles WHERE rolname='zzqmtverify_plain'` 有一行）—— 守卫护住了它、没删。看完手工 `DROP ROLE zzqmtverify_plain`，重跑第 4 条确认回到 `✅ 11 档` | |
 
-> ⚠️ 第 11–14 条是本片的要害。四条都是**改一行/一段、看指定的档变红、改回去**；
+> ⚠️ 第 11–15 条是本片的要害。前四条是**改一行/一段、看指定的档变红、改回去**；
+> 第 15 条不改代码，它证明「验收脚本不会误删别人的角色」。
 > 改回去之后一定要重跑一次确认真的还原了。
+
+## 二之二、⭐ codex 对抗性评审的结论（PR 评审者请先读这一段）
+
+**本片（连同 S2a）跑了 3 轮**合并视角的 codex（`--base 567987b --head feat/qmt-4a2b-s2b-drop`），
+**从未 approve**。挖出的临界区缺陷全部修完并各自变异验证：
+封锁挡不住超级用户 / 恢复会改到替身的配置 / 恢复抛异常时跳过关自己的会话
+（**最后那条是实施者自己上一轮引入的回归**，如实登记）。
+逐轮账本见 `2026-08-12-qmt-4a2b-reset-api-collapse.md` §五之四。
+
+⚠️ 唯一未修的一条（R3-F1，high）：`--reset` 只靠目标库自证的 `pilot_meta`、
+**刻意不要**维护库的 registry 凭据。这条不对称是 **user 2026-08-05 拍板**的
+（否则维护库一重初始化，非空 pilot 库就再也清不掉 = R55-F1 锁死）。
+codex 给的中间路线「缺凭据时要人工确认令牌」已由 **user 2026-08-13 拍板放进 4c**
+（见 4c spec §10a），不在本片实施。
+
+**收口方式 = user override（2026-08-13）**，边界写在计划 §五之四。
 
 ## 三、已知的、**本片明写接受**的残留
 
