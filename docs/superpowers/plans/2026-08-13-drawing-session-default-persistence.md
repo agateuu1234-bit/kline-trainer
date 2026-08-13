@@ -48,7 +48,9 @@
 
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/Models/DrawingEnums.swift:27-35`
-- Modify: `ios/Contracts/Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift:60`
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift:58`
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.swift:27`（**写入边界受理闸**）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/Drawing/HorizontalLineTool.swift:33`（渲染 clamp）
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingDefaultStyleSanitizeTests.swift`（新建）
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingStylePanelSourceGuardTests.swift`（追加 G5）
 
@@ -148,25 +150,54 @@ cd "ios/Contracts" && swift test --filter DrawingDefaultStyleSanitizeTests 2>&1 
 ```
 Expected: `5 tests passed`
 
-- [ ] **Step 5: 面板改用同一常量**
+- [ ] **Step 5: 三个消费者全部改用同一常量**
 
-`DrawingStyleParams.swift:60` 把 `options(Array(1...5), current: style.thickness,` 改为：
+值域在本仓有**三个持有者**（codex plan-P-R3 high② 指出前两个，第三个是我连带自查发现的）：
 
-```swift
-                options(Array(DrawingDefaultStyle.thicknessRange), current: style.thickness,
-```
+| 文件:行 | 现状 | 改成 |
+|---|---|---|
+| `DrawingStyleParams.swift:58` | `options(Array(1...5), current: style.thickness,` | `options(Array(DrawingDefaultStyle.thicknessRange), current: style.thickness,` |
+| `DrawingObjectStyleEdit.swift:27` | `guard (1...5).contains(s.thickness) \|\| s.thickness == thickness else { return nil }` | `guard DrawingDefaultStyle.thicknessRange.contains(s.thickness) \|\| s.thickness == thickness else { return nil }` |
+| `HorizontalLineTool.swift:33` | `let clamped = min(max(t, 1), 5)` | `let clamped = min(max(t, DrawingDefaultStyle.thicknessRange.lowerBound), DrawingDefaultStyle.thicknessRange.upperBound)` |
+
+⚠️ **三处都是同值改名，行为零变化** —— 尤其 `DrawingObjectStyleEdit:27` 那条**条件式**
+（`… || s.thickness == thickness`：写入新的越域值→拒、原样带回本对象已有的越域值→放行）
+是 D61/D52 的既有语义，**只换值域的表达方式，那半个条件一字不动**。
 
 - [ ] **Step 6: 加源码守卫 G5（追加到 `DrawingStylePanelSourceGuardTests.swift`）**
 
 ```swift
-/// G5：粗细值域字面量在 Sources/ 里**恰好 1 处**（= thicknessRange 的定义）。
-/// 面板与持久化解码器都只引用它 —— 两处字面量迟早漂移，而漂移的后果是「能打开但画不出线」。
-@Test func thickness_range_literal_appears_exactly_once_in_sources() throws {
+/// G5：粗细值域**单一真相**。
+/// ⚠️ **不能只数 `1...5` 字面量**（codex plan-P-R3 high② + 我的连带自查）：同一个值域在本仓有
+///    **三种书写形态**，换个写法就绕过纯字面量计数 ——
+///      · `DrawingStyleParams.swift:58`        `Array(1...5)`            （面板档位）
+///      · `DrawingObjectStyleEdit.swift:27`    `(1...5).contains(...)`   （**写入边界受理闸**）
+///      · `HorizontalLineTool.swift:33`        `min(max(t, 1), 5)`       （渲染 clamp，**正则看不见**）
+///    故 G5 = 「字面量恰好 1 处」**加上**「三个消费者都**引用常量**」两条断言。
+@Test func thickness_domain_has_exactly_one_literal_source() throws {
     let hits = try SourceGuardScanner.countOccurrences(
         pattern: #"1\s*\.\.\.\s*5"#,
         inSourcesMatching: { _ in true },
         stripCommentsAndStringLiterals: true)
-    #expect(hits == 1, "粗细值域字面量应只在 DrawingDefaultStyle.thicknessRange 出现一次，实测 \(hits) 处")
+    #expect(hits == 1, "`1...5` 字面量应只在 DrawingDefaultStyle.thicknessRange 的定义处出现，实测 \(hits) 处")
+}
+
+/// G5b：三个消费者必须**引用常量**，而不是各写各的数字。
+/// 这条比数字面量结实 —— 它挡得住「换成 min/max 写法」这种绕过。
+@Test func thickness_domain_consumers_reference_the_constant() throws {
+    for file in ["UI/DrawingStyleParams.swift",
+                 "Drawing/DrawingObjectStyleEdit.swift",
+                 "Drawing/HorizontalLineTool.swift"] {
+        let src = try SourceGuardScanner.strippedSource(of: file)
+        #expect(src.contains("thicknessRange"),
+                "\(file) 没有引用 DrawingDefaultStyle.thicknessRange —— 值域又分叉了")
+    }
+}
+
+/// G5b 的**双向自检**：不含常量引用的样本必须被判不合格
+@Test func g5b_rejects_hardcoded_bounds() {
+    let fake = "let clamped = min(max(t, 1), 5)"
+    #expect(!fake.contains("thicknessRange"))
 }
 ```
 
@@ -186,7 +217,8 @@ cp ios/Contracts/Sources/KlineTrainerContracts/Models/DrawingEnums.swift /tmp/Dr
 | M5 | 删掉 `isRenderableSubType` 那三行 | `horizontal_segment_falls_back_to_straight` |
 | M6 | 删掉 `thickness` 的夹取 | `thickness_is_clamped_to_range` |
 | M15b | `normalizedLabelMode` 换成**两参**重载 | `non_horizontal_tool_keeps_its_label_and_subtype` |
-| M14 | `thicknessRange` 改成 `1...4` | G5 + 面板档数相关断言 |
+| M14 | `thicknessRange` 改成 `1...4` | G5 字面量条（定义处变了）+ 面板档数断言 T16 |
+| **M14b** | 把 `HorizontalLineTool:33` 改回 `min(max(t, 1), 5)`（模拟「换写法绕过字面量计数」） | **只有 G5b** 红（G5 字面量条**仍绿** —— 正则看不见 min/max 形态，这正是 G5b 存在的理由） |
 
 - [ ] **Step 8: 跑 host 全量 + 提交**
 
@@ -374,13 +406,16 @@ import Foundation
 @Suite("migration 0010：升级路径 + 全新安装")
 struct Migration0010Tests {
 
-    /// T8（**升级路径**，本组的重点）：构造一个「0001–0009 已应用」的真 pre-0010 库，
+    /// T8（**升级路径**，本组重点）：构造一个「0001–0009 已应用」的真 pre-0010 库，
     /// 种入既有行，再跑完整 migrator → 两张表都要长出新列，**且既有行必须活着**。
     ///
     /// ⚠️ **不能用 `makeFreshDB()`**（codex plan-P-R2 high）：那是从空库跑完整 migrator，
-    ///    证明的是**全新安装**。一个把列加到 baseline / 早期迁移里的实现，fresh 测试照样全绿，
-    ///    而**线上 v7 用户永远拿不到这一列** —— 迁移的全部意义就在升级路径。
-    ///    构造真 pre-0010 现场用 GRDB 的 `migrate(_:upTo:)`，**不要**手抄 9 个迁移体。
+    ///    证明的是**全新安装**。把列加到 baseline / 早期迁移的实现，fresh 测试照样全绿，
+    ///    而**线上 v7 用户永远拿不到这一列**。
+    /// ⚠️ **种行必须用 legacy raw SQL，不能用 repo**（codex plan-P-R3 high）：
+    ///    Task 5 会把 repo 的 INSERT 改成**带新列**，而此刻库还停在 0009（无该列）
+    ///    ⇒ 在最终树上 repo 种行会直接报 `no such column`，测试跑不到 0010 就先炸了。
+    ///    **下面的列清单是 0009 时代的形状，逐字写死，不得改成引用 repo。**
     @Test func upgrade_from_v7_adds_column_to_both_tables_and_keeps_existing_rows() throws {
         let queue = try DatabaseQueue()
         let migrator = AppDBMigrations.makeMigrator()
@@ -395,21 +430,29 @@ struct Migration0010Tests {
             #expect(!cols.contains("drawing_default_style"), "\(t) 在 0009 阶段就不该有新列")
         }
 
-        // ② 种既有行（此时**没有**新列）—— 升级不得把它们弄丢
-        let fee = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
-        let dd = DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0)
-        let p = try PendingTraining(
-            trainingSetFilename: "z.sqlite", globalTickIndex: 3,
-            upperPeriod: .m60, lowerPeriod: .daily, positionData: Data([7]),
-            cashBalance: 88_000, feeSnapshot: fee, tradeOperations: [], drawings: [],
-            startedAt: 123, accumulatedCapital: 100_000, drawdown: dd, sessionKey: "k")
-        let r = try PendingReplay(
-            recordId: 9, trainingSetFilename: "z.sqlite", globalTickIndex: 3,
-            upperPeriod: .m60, lowerPeriod: .daily, positionData: Data([7]),
-            cashBalance: 88_000, feeSnapshot: fee, tradeOperations: [], drawings: [],
-            startedAt: 123, accumulatedCapital: 100_000, drawdown: dd)
-        try queue.write { try PendingTrainingRepositoryImpl.savePending($0, pending: p) }
-        try queue.write { try PendingReplayRepositoryImpl.saveReplay($0, replay: r) }
+        // ② 用 **0009 时代的列清单** raw SQL 种既有行（此时无新列）
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO pending_training
+                  (id, training_set_filename, global_tick_index, upper_period, lower_period,
+                   position_data, fee_snapshot, trade_operations, drawings,
+                   started_at, accumulated_capital, cash_balance, drawdown, session_key)
+                VALUES (1, 'z.sqlite', 3, 'm60', 'daily', 'BwA=',
+                        '{"commissionRate":0.0001,"minCommissionEnabled":true}', '[]', '[]',
+                        123, 100000.0, 88000.0,
+                        '{"peakCapital":100000,"maxDrawdown":0}', 'k')
+                """)
+            try db.execute(sql: """
+                INSERT INTO pending_replay
+                  (id, record_id, training_set_filename, global_tick_index, upper_period, lower_period,
+                   position_data, fee_snapshot, trade_operations, drawings,
+                   started_at, accumulated_capital, cash_balance, drawdown)
+                VALUES (1, 9, 'z.sqlite', 3, 'm60', 'daily', 'BwA=',
+                        '{"commissionRate":0.0001,"minCommissionEnabled":true}', '[]', '[]',
+                        123, 100000.0, 88000.0,
+                        '{"peakCapital":100000,"maxDrawdown":0}')
+                """)
+        }
 
         // ③ 跑完整 migrator（只应跑 0010）
         try migrator.migrate(queue)
@@ -419,9 +462,9 @@ struct Migration0010Tests {
             let cols = try queue.read { db in
                 try Row.fetchAll(db, sql: "PRAGMA table_info(\(t))").map { $0["name"] as String }
             }
-            #expect(cols.contains("drawing_default_style"), "\(t) 升级后仍缺 drawing_default_style，实测：\(cols)")
+            #expect(cols.contains("drawing_default_style"), "\(t) 升级后仍缺该列，实测：\(cols)")
         }
-        // 既有行必须活着，且新列为 NULL（旧档语义）
+        // ④ 既有行必须活着；**此刻才允许用 repo 读**（列已存在）
         #expect(try queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM pending_training") } == 1)
         #expect(try queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM pending_replay") } == 1)
         #expect(try queue.read { try PendingTrainingRepositoryImpl.loadPending($0) }?.drawingDefaultStyle == nil)
