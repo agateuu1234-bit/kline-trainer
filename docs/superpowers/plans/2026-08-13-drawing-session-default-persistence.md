@@ -1902,7 +1902,8 @@ cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter Drawi
 # 收尾：host 全量（Global Constraints 要求每个 task 都跑并记录条数）
 (set -o pipefail; swift test 2>&1 | tail -3)
 
-cd "$(git rev-parse --show-toplevel)" && (set -o pipefail; xcodebuild test \
+# ⚠️ 必须 cd 到 **ios/Contracts**（Package.swift 在那里；仓库根没有任何 xcodeproj/workspace/Package.swift）
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; xcodebuild test \
   -scheme KlineTrainerContracts-Package -destination 'platform=macOS,variant=Mac Catalyst' \
   2>&1 | tee /tmp/catalyst.log | tail -5)
 grep -c "Test Case .* passed" /tmp/catalyst.log    # 判绿读执行量，不读 TEST SUCCEEDED
@@ -1973,7 +1974,8 @@ cd "$repo/backend" && { python3 -m pytest tests/test_qmt_pilot_db.py -q 2>&1 | t
 # ④ Catalyst —— 唯一编译 TrainingView 的门。两个坑必须同时避开：
 #    -scheme 必须是 KlineTrainerContracts-Package（library scheme 不编译 testTarget，该门曾报绿半年）
 #    pipefail 必须有（tee 会吞掉退出码）—— 已在 PREAMBLE 里全局打开
-cd "$repo" && { xcodebuild test \
+# ⚠️ 必须 cd 到 **ios/Contracts**（Package.swift 在那里，不在仓库根）
+cd "$repo/ios/Contracts" && { xcodebuild test \
   -scheme KlineTrainerContracts-Package -destination 'platform=macOS,variant=Mac Catalyst' \
   2>&1 | tee /tmp/catalyst_final.log | tail -5; } \
   || { echo "!! ④ Catalyst 红"; exit 1; }
