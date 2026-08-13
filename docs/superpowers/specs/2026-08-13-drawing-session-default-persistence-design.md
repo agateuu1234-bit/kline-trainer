@@ -433,7 +433,20 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | 级别 | 内容 |
 |---|---|
 | **必做** | 守卫 **G6**（结构 + 内容断言：`.onChange(of: engine.drawingSession.defaultStyle)` 存在且调 `lifecycle.autosave(immediate: true)`） |
-| **plan 阶段的探路（spike），成则加、不成则如实记录** | 把两条 autosave 触发抽成一个**纯 SwiftUI 的 `ViewModifier`**（沿用本仓「抽共享、不复制」的 `ChartPanelsContainer` 范式），再用 ④ 的 `ImageRenderer` 路子渲染一个**最小纯 SwiftUI 宿主**验证 `.onChange` 真的触发。**能跑通就加进必测；跑不通就在 PR 描述里如实写明「D94 只有结构证据，行为证据受阻于已记录的平台限制」** |
+| **✅ 已跑通（Task 8 实测，第一次尝试即成）** —— 原列为「plan 阶段的探路（spike），成则加、不成则如实记录」 | 把两条 autosave 触发抽成一个**纯 SwiftUI 的 `ViewModifier`**（沿用本仓「抽共享、不复制」的 `ChartPanelsContainer` 范式），再用 ④ 的 `ImageRenderer` 路子渲染一个**最小纯 SwiftUI 宿主**验证 `.onChange` 真的触发。**能跑通就加进必测；跑不通就在 PR 描述里如实写明「D94 只有结构证据，行为证据受阻于已记录的平台限制」** |
+
+**⭐ spike 的实测结果（Task 8，2026-08-14）**：**跑通**。D94 因此**不再只有结构证据**。
+
+- 新增行为测试 `DrawingAutosaveTriggersSpikeTests`（`Tests/KlineTrainerContractsTests/Render/`）：
+  同一个 `ImageRenderer` 实例重赋 `.content` 保留 view 身份 → `drainAutosaveForTesting()` 排空 →
+  断言 `InMemoryPendingTrainingRepository.saveCount`，走的是 **coordinator 真实 autosave 落盘路径**，不是 spy。
+- 配**基线断言**（首帧渲染必须 `saveCount == 0`，否则「渲染两次恰好存一次」也能满足）
+  与**对照组**（既有 `drawingsRevision` 触发）—— 后者用于区分「spike 手法不可靠」与「D94 真的没触发」。
+- ⚠️ **限定**：该测试是 `#if canImport(UIKit)`，**只在 Catalyst 门执行**，host `swift test` 不编译它。
+  **host 全绿不能当作 D94 行为证据仍成立的信号。**
+- ⚠️ **重构的代价**：两条触发被抽进 `DrawingAutosaveTriggersModifier` 后，
+  「`onChange` 存在于文件里」不再等于「它生效」⇒ 新增守卫 **G6b** 钉生产挂载点（见 §8），
+  变异 **M18** 证明该缺口真实存在。
 
 **spike 的已知抓手（实测，减少探路成本）**：
 - **「排空在飞 autosave」这一半已经解决** —— `TrainingSessionCoordinator.drainAutosaveForTesting()`（`:178`，`#if DEBUG` 测试钩子，注释原文「生产无 await 点，测试需确定性排空」）。
@@ -525,7 +538,8 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **M4b** | 保留逐字段解码，但把每个字段的 `try?` 改成 `try`（只挡「枚举值不认识」，不挡类型不匹配） | **只有 T5b** 红 —— 这条专门证明 T4/T5 挡不住类型不匹配 |
 | M5 | 删掉 sanitize 的 `lineSubType` 分量 | **只有 T6** 红 |
 | M6 | 删掉 sanitize 的 `thickness` 夹取 | **只有 T7** 红 |
-| M7 | 删掉 D94 新增的 `onChange` 触发 | **只有守卫 G6** 红（**不是 T10** —— host 够不着视图，T10 对它零判别力，codex R2-high） |
+| M7 | 删掉 D94 新增的 `onChange` 触发 | **G6**（守卫）**+ 新增的行为测试** `DrawingAutosaveTriggersSpikeTests.onChangeOfDefaultStyleTriggersRealAutosave` **同时红**（**不是 T10** —— host 够不着视图，T10 对它零判别力，codex R2-high）。⚠️ 行为测试是 `#if canImport(UIKit)`，**只在 Catalyst 门执行**，host 上不编译 |
+| **M18**（Task 8 重构后新增） | 删掉 `TrainingView` body 里那句 `.modifier(DrawingAutosaveTriggersModifier(…))` | **只有 G6b** 红。⚠️ **G6 与 spike 两条行为测试都不会红** —— G6 找的 `onChange` 还在同一文件的 modifier 结构体里、spike 在自己的宿主里挂 modifier ⇒ 这正是「抽 ViewModifier 把两条触发拖进一个未被守卫的单点」这个缺口的证明 |
 | M8 | `replayBaseline` 去掉 `defaultStyle` 分量（回到五元组） | **只有 T11** 红 |
 | M9 | `resumePending` 的种子那一句删掉 | **只有 T13** 红 |
 | M10 | `resumePendingReplay` 的种子那一句删掉 | **只有 T12** 红 |
@@ -569,6 +583,7 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **G8** | 解析 `docs/governance/m01-schema-versioning-contract.md` 的矩阵，断言**三行都已同步**：顶层 == `"1.13"`、app.sqlite GRDB migration 行 == `0010_v1.13_drawing_default_style`、Swift 模型版本行 == `1.4` | **内容断言**（codex spec-R7 medium：D97 要求同步三行，却**没有任何机制**在它没做时报红 —— 而「矩阵停在 `0003`、代码已到 `0009`」正是本 spec 自己点名的既有漂移，**不加守卫就是原样重演一次**）。⚠️ 目标是 **markdown 文档**、不是 Swift 源，故**不适用剥字符串字面量那条纪律**；按表格行解析，并配双向自检（改任一行 → 红；无关行改动 → 仍绿） |
 | **G7** | `DrawingDefaultStyleColumn.decode` 在 `Sources/` 里**恰好 2 个调用点**，且分别落在 `PendingTrainingRepositoryImpl` 与 `PendingReplayRepositoryImpl` 两个文件内；**并配反向条**：除该 enum 自身外零处 `JSONDecoder().decode(DrawingDefaultStyle` | 结构计数（D100：少于 2 = 有一条读路径没接上；多于 2 = 出现第三条读路径，必须回来重审） |
 | **G6** | `TrainingView` 里存在一条 `.onChange(of: engine.drawingSession.defaultStyle)`，且其闭包体内调用 `lifecycle.autosave(immediate: true)` | **结构 + 内容断言**。这是 **D94 的唯一守门**（host 够不着视图，见 §6.1）；**M7 判绿看它，不看 T10** |
+| **G6b**（Task 8 重构后新增） | `DrawingAutosaveTriggersModifier(` 在 `Sources/` 里**恰好 1 个调用点**、落在 `TrainingView.swift`、且以 `.modifier(…)` 形态挂在 body 链上 | 结构计数 + 内容断言。⚠️ **抽 ViewModifier 之后 G6 不再够用**：`onChange` 挪进结构体后仍在同一文件，删掉 body 的挂载时 **G6 与 spike 行为测试都不会红**，而生产上**两条**触发（`defaultStyle` **与既有的 `drawingsRevision`**）会一起静默失效 —— 即重构把一条本来安全的既有触发也拖进了同一个单点。变异 **M18** 证明之 |
 | **G9** | **遍历**（不是照清单读）`KlineTrainerPersistenceTests/` 下每个 `.swift`，找出所有 `PRAGMA user_version` 断言点；断言值为 `7` 的必须是**部分迁移落点**（其上方最近一行 `.migrate(` 带 `upTo:`）。附两条防空转下界：断言点总数 ≥ 10、覆盖文件数 ≥ 5 | **发现式结构扫描**（**剥 `//` 注释**后匹配；`PRAGMA user_version = N` 是写入不是断言，排除）。<br>⚠️ **为什么必须发现式**（codex plan-P-R7 **high**）：本 spec 的 plan 起草时列了「3 个文件 6 处」，全仓实扫是 **6 个文件 11 处**，漏掉的三个文件（`AppDBMigrationsTests` / `TrainingResetPortTests` / `Migration0009Tests`）里**全是终态断言** ⇒ 照清单改完，CI 会在三个从没被提过的文件上红。**清单会过期，目录遍历不会。**<br>⚠️ **判据不能写成「全仓不许出现 `== 7`」**：`0010` 的升级测试在 `migrate(_:upTo: "0009_v1.11_drawing_style")` 之后**合法地**断言 `== 7` |
 
 **为什么删掉 G2**（codex spec-R6 medium，**已核实为真**）：
