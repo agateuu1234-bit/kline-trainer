@@ -714,6 +714,40 @@ def test_init_proves_peer_databases_are_clean_before_any_ddl(dirty, code, why):
     assert maint.executed == [], f"{why}：拒绝之前已经执行了 DDL"
 
 
+def test_init_does_not_leave_a_marker_when_the_final_gate_rejects():
+    """**标记必须是最后一个不可回滚的信任写入**（codex S3-R4）。
+
+    上一版是「先写标记、再跑现查」，而现查**仍然可能拒绝** —— 预检通过之后、
+    写标记之前的窗口里冒出一个同侪库、连不进某个库、维护库多了用户对象，
+    都会让它抛。于是一次**报告失败**的 `--init-cluster-marker` 却在集群里留下了
+    一个**合法标记**；而本工具的契约是**从不清标记**，这份残留只能人工收拾。
+
+    ⚠️ 造法：让「预检那一刻干净、最终现查那一刻变脏」—— 第二次枚举 pg_database
+       时才冒出无关库。只在构造函数里设 `databases` 是造不出这个窗口的
+       （那样预检就先拒了，测不到本条判据）。
+    """
+    class _DirtyOnSecondScan(_InitMaint):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.db_scans = 0
+
+        async def fetch(self, query, *args):
+            if "datistemplate" in query:
+                self.db_scans += 1
+                if self.db_scans >= 2:          # 第二次现查时集群已经变脏
+                    self.databases = ["payments_prod"]
+            return await super().fetch(query, *args)
+
+    maint = _DirtyOnSecondScan(marker_rows=[])   # 首次初始化
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "unrelated_database"
+    assert maint.db_scans >= 2, \
+        "只枚举了一次 pg_database —— 写标记之前那道现查根本没跑，这条用例在空转"
+    assert _marker_writes(maint) == [], \
+        "最终现查拒绝了，却已经把标记写进去了 —— 一次失败的 init 留下了合法标记"
+
+
 def test_init_first_time_still_accepts_an_empty_prefixed_remnant():
     """反向钉：零用户对象的同前缀残骸照旧放行（别把上面那条做成「一律拒」）。
 
@@ -842,6 +876,62 @@ _MAINTENANCE_SHAPE_OWNER = {"marker_": "marker_present",
                             "registry_": "registry_present"}
 
 
+async def _assert_disposable_cluster(maint_conn, *, connect) -> None:
+    """「这台集群整个可弃」的**免标记**证明 —— 首次初始化用的那一组闸 (ii)(iii)。
+
+    ⚠️ **和 `assert_cluster_allowed` 的区别，以及为什么两个都要有**：
+      · `assert_cluster_allowed` 的闸 (i) 要求**已经有合法标记** —— 首次初始化时
+        标记还没写，它必然拒绝。而闸 (ii) 的完整版会认同侪 pilot 库的**归属登记**，
+        那在首次初始化时必然为空。
+      · 本函数用**严判据**：同前缀库必须【绝对空】。这在「登记表要么为空、
+        要么根本不存在」的那一刻是**唯一诚实的选择** —— 同侪库的外部凭据无从取得，
+        「证明不了」只能等价于「拒绝」。
+      · 反过来，把这套严判据套到**已建成**的集群上会把正常的 pilot 库判成外来物，
+        所以已有标记的那条路必须走 `assert_cluster_allowed`。
+
+    ⚠️ **零副作用**（只读），故可以在同一次运行里调用两次：
+      一次在动 DDL **之前**（不在别人的库里留下表），
+      一次在写标记**之前**（标记是不可回滚的信任写入，见调用点）。
+    """
+    leftover = await _user_objects(maint_conn, exempt_maintenance=True)
+    if leftover:
+        raise PilotClusterBoundaryError(
+            "maintenance_db_not_empty",
+            f"维护库除 {MAINTENANCE_TABLES} 外还有用户对象 {leftover}"
+            f"——「没有别的数据库」不等于「这台集群没在用」。"
+            f"在证明它可弃之前，本工具不会在它上面建任何表")
+    _cluster_id = await cluster_identity(maint_conn)
+    for row in await maint_conn.fetch(_LIST_DATABASES_SQL):
+        name = row["datname"]
+        if PILOT_DB_NAME_RE.fullmatch(name) is None:
+            raise PilotClusterBoundaryError(
+                "unrelated_database",
+                f"集群里存在无关数据库 {name!r}，拒绝把它声明为 pilot 专用集群"
+                f"——在证明之前不会在它的维护库里建任何表")
+        try:
+            other = await connect(name)
+        except Exception as exc:
+            raise PilotClusterBoundaryError(
+                "unowned_pilot_database",
+                f"连不进 {name!r}（{exc}）→ 无法证明它是可弃的残骸") from exc
+        try:
+            await adopt_connection(other, name, cluster_id=_cluster_id,
+                                   expected_oid=row["db_oid"])
+            if not await _is_absolutely_empty(other):
+                raise PilotClusterBoundaryError(
+                    "unowned_pilot_database",
+                    f"{name!r} 名字匹配 kline_pilot_* 但非空，且这台集群还没有任何"
+                    f"归属登记——前缀名不是归属证明，拒绝把它声明为 pilot 专用集群")
+        except PilotClusterBoundaryError:
+            raise
+        except Exception as exc:
+            raise PilotClusterBoundaryError(
+                "unowned_pilot_database",
+                f"验 {name!r} 是否为空时失败（{exc}）→ 无法证明") from exc
+        finally:
+            await _close_quietly(other, name)
+
+
 async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
                               try_seed_lock, release_seed_lock) -> None:
     """`qmt_pilot --init-cluster-marker`：把一台干净集群声明为 pilot 专用。
@@ -941,36 +1031,7 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
     #        由下面完整的 `assert_cluster_allowed`（认同侪库归属证明）把关。
     _needs_repair_ddl = not all(presence.values())
     if not rows or _needs_repair_ddl:
-        _pre_cluster_id = await cluster_identity(maint_conn)
-        for row in await maint_conn.fetch(_LIST_DATABASES_SQL):
-            name = row["datname"]
-            if PILOT_DB_NAME_RE.fullmatch(name) is None:
-                raise PilotClusterBoundaryError(
-                    "unrelated_database",
-                    f"集群里存在无关数据库 {name!r}，拒绝把它声明为 pilot 专用集群"
-                    f"——在证明之前不会在它的维护库里建任何表")
-            try:
-                other = await connect(name)
-            except Exception as exc:
-                raise PilotClusterBoundaryError(
-                    "unowned_pilot_database",
-                    f"连不进 {name!r}（{exc}）→ 无法证明它是可弃的残骸") from exc
-            try:
-                await adopt_connection(other, name, cluster_id=_pre_cluster_id,
-                                       expected_oid=row["db_oid"])
-                if not await _is_absolutely_empty(other):
-                    raise PilotClusterBoundaryError(
-                        "unowned_pilot_database",
-                        f"{name!r} 名字匹配 kline_pilot_* 但非空，且这台集群还没有任何"
-                        f"归属登记——前缀名不是归属证明，拒绝把它声明为 pilot 专用集群")
-            except PilotClusterBoundaryError:
-                raise
-            except Exception as exc:
-                raise PilotClusterBoundaryError(
-                    "unowned_pilot_database",
-                    f"验 {name!r} 是否为空时失败（{exc}）→ 无法证明") from exc
-            finally:
-                await _close_quietly(other, name)
+        await _assert_disposable_cluster(maint_conn, connect=connect)
 
     # ── ② 到这里才第一次产生副作用 ──────────────────────────────────────
     #     此刻 marker/intent/registry 可能还不存在，闸 (i) 会因此拒绝，
@@ -1001,22 +1062,35 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
             f"补建之后【维护库专用表集合】的结构仍不合规"
             f"（{dict(shape) if shape else 'None'}）——请人工处理")
 
-    if not rows:
-        # 3. 同侪库已在 1e 证明过（零副作用），这里只剩写标记。
-        await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)
-
-    # 4. ⚠️ **无论标记是不是本次刚写的，都要现查一遍 (i)(ii)(iii)**。
+    # 3+4. **现查一遍集群仍然可弃，然后（首次初始化时）才写标记**。
     #    spec §4 R17-F1 逐字写着：「标记证明的是**有人曾声明过**，只有现查才证明
     #    **现在仍然成立**」，并点名两条现实路径 ——
     #    ① 当初为空的 pilot 集群后来被拿去装了真实数据库；
     #    ② 标记随 pg_dump / 卷拷贝被**还原或复制到另一个集群**。
-    #    此前这几条检查只写在「首次初始化」那一支里，于是一台带着合法标记的脏集群
-    #    会被 init 直接判成功，还接着去动维护库里的 intent 行。
-    #    这里用**完整的** `assert_cluster_allowed`（而不是 1e 那组「首次初始化」判据）：
-    #    此刻标记与三张表都已就位，(i) 过得了；而 (ii) 的完整版会认同侪 pilot 库的
-    #    归属证明 —— 1e 那组要求「同前缀库必须绝对空」只在**登记表必然为空**的
-    #    首次初始化那一刻成立，套到已建成的集群上会把正常的 pilot 库判成外来物。
-    await assert_cluster_allowed(maint_conn, connect=connect, target_db=None)
+    #
+    # ⚠️ **次序：现查在前、写标记在后**（codex S3-R4）。上一版是「先写标记、
+    #    再跑 `assert_cluster_allowed`」，而那一步**仍然可能拒绝** —— 窗口里冒出一个
+    #    同侪库、连不进某个库、维护库多了用户对象，都会让它抛。于是一次**报告失败**的
+    #    `--init-cluster-marker` 却在集群里留下了一个**合法标记**；而本工具的契约是
+    #    **从不清标记**（清除是人工动作），这份残留只能人工收拾，
+    #    并且让后来的人看到一个「从未由成功的 init 产生过」的标记。
+    #    改法：把标记写入变成**最后一个、不可回滚的信任写入**。
+    #    （⛔ 另一条路「失败时把本次写的标记删掉」被否：那要给本模块新增
+    #      「删标记」这一能力，与「本工具从不清标记」的契约直接冲突。）
+    if rows:
+        # 已有合法标记 → 用**完整的** `assert_cluster_allowed`：此刻标记与三张表
+        # 都已就位，(i) 过得了；而 (ii) 的完整版会认同侪 pilot 库的**归属登记** ——
+        # `_assert_disposable_cluster` 那组严判据（同前缀库必须绝对空）只在
+        # 登记表必然为空的首次初始化那一刻成立，套到已建成的集群上会把正常的
+        # pilot 库判成外来物。本条路**不写标记**，故没有次序问题。
+        await assert_cluster_allowed(maint_conn, connect=connect, target_db=None)
+    else:
+        # 首次初始化：标记还没写，闸 (i) 必然拒绝，故用**免标记**的等价现查。
+        # ⚠️ 这一次是在 DDL **之后**跑的，与 1d/1e 那次不是同一个时刻 ——
+        #    正是它把「预检通过之后、写标记之前」那个窗口关上。
+        await _assert_disposable_cluster(maint_conn, connect=connect)
+        # ⚠️ **本函数唯一不可回滚的信任写入，必须排在所有会拒绝的检查之后。**
+        await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)
 ```
 
 - [ ] **Step 4: 跑测试确认变绿**
@@ -1228,6 +1302,60 @@ def test_orphan_cleanup_skips_a_seed_whose_lock_this_connection_already_holds():
     assert _deletes(maint) == [], "本连接事前已持有该 seed 的锁，仍然删了凭据"
     assert took == [], "事前已持有就不该再去取锁（可重入只会让计数器涨上去）"
     assert freed == [], "没取过就不许还 —— 那会把别处正持有的锁释放掉"
+
+
+def test_orphan_cleanup_verifies_the_release_actually_took_effect():
+    """**还了也要验**（codex S3-R4）—— 与「取到了也要验」是同一条纪律。
+
+    `release_seed_lock` 和 `try_seed_lock` 一样是**调用方递进来的回调**：空实现、
+    连错连接、只释放一层可重入计数，都会「成功返回」而锁**仍挂在 `maint_conn` 上**。
+    会话级锁泄漏会挡住后续同 seed 的建库/reset；更毒的是它会被
+    `test_orphan_cleanup_skips_a_seed_whose_lock_this_connection_already_holds`
+    那条 fail-closed 判据放大成「这条连接从此再也清不掉该 seed 的孤儿」——
+    静默跳过，理由看起来还完全合理。
+    """
+    maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_gone", seed="gone")])
+
+    async def _grant(seed):
+        maint.held_seeds.add(seed)
+        return True
+
+    async def _noop_release(_seed):
+        return None                    # 空实现：锁没还，`held_seeds` 里还留着
+
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint, lock_pair=(_grant, _noop_release)))
+    assert ei.value.code == "seed_lock_not_released"
+
+
+def test_orphan_cleanup_release_check_does_not_mask_the_original_failure():
+    """`finally` 里 raise 会接替正在传播的异常，但原异常必须留在 `__context__` 里。
+
+    否则「DELETE 失败」会被「锁没还」盖掉，排查时看到的是**第二个**症状。
+    """
+    maint_holder = {}
+
+    class _DeleteBoom(_InitMaint):
+        async def execute(self, query, *args):
+            if query.strip().upper().startswith("DELETE"):
+                raise RuntimeError("deadlock detected")
+            return await super().execute(query, *args)
+
+    maint = _DeleteBoom(all_intent_rows=[_orphan(dbname="kline_pilot_gone", seed="gone")])
+    maint_holder["m"] = maint
+
+    async def _grant(seed):
+        maint.held_seeds.add(seed)
+        return True
+
+    async def _noop_release(_seed):
+        return None                    # 既没还锁，DELETE 又炸了
+
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint, lock_pair=(_grant, _noop_release)))
+    assert ei.value.code == "seed_lock_not_released"
+    assert isinstance(ei.value.__context__, RuntimeError), \
+        f"原始的 DELETE 异常没留在 __context__ 里：{ei.value.__context__!r}"
 
 
 def test_orphan_cleanup_releases_every_seed_lock_it_takes():
@@ -1505,6 +1633,29 @@ DELETE FROM public.pilot_create_intent
             #    的运行；同一条连接上后来的 `_SEED_LOCK_HELD_SQL` 也会观察到一把
             #    **本次操作从未刻意取过**的锁。
             await release_seed_lock(r["seed"])
+            # ⚠️ **还了也要验**（codex S3-R4）—— 与「取到了也要验」是同一条纪律，
+            #    上一版只验了取、没验还。`release_seed_lock` 和 `try_seed_lock` 一样是
+            #    **调用方递进来的回调**：空实现、连错连接、只释放一层可重入计数，
+            #    都会「成功返回」而锁**仍挂在 `maint_conn` 上**。
+            #    这条泄漏尤其毒，因为上面那条「事前已持有就跳过」的 fail-closed 判据
+            #    会把它放大成**这条连接从此再也清不掉该 seed 的孤儿**（静默跳过，
+            #    而且理由看起来完全合理）。
+            # ⚠️ 只对**本次确实取到**的那把锁作此要求：走到这里就说明
+            #    「事前未持有 + 回调授予 + 活连接复核为真」三条都成立过。
+            if await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, r["seed"]):
+                raise PilotClusterBoundaryError(
+                    "seed_lock_not_released",
+                    f"孤儿清理为 seed={r['seed']!r} 取了 advisory lock，"
+                    f"调用方的 release 回调返回了，但这把锁**仍挂在维护连接上**。"
+                    f"它是会话级的：不还会挡住后续同 seed 的建库/reset，"
+                    f"也会让本函数以后把该 seed 的孤儿静默跳过。"
+                    f"请检查 release_seed_lock 的接线（是否空实现／是否作用在另一条连接／"
+                    f"是否只释放了一层可重入计数），或重开维护连接。")
+            # ⚠️ 在 `finally` 里 raise 会**接替**正在传播的异常，但原异常仍保留在
+            #    `__context__` 里（Python 语义），信息不丢。
+            # ⛔ **不在这里关闭/毒化 `maint_conn`**（codex 建议过）：连接是调用方的，
+            #    本模块通篇不拥有它、也从不关它；关掉会让调用方拿到一个它没预料到的
+            #    死连接，且掩盖真正的接线错误。抛一个点名的 code 更诚实。
 ```
 
 - [ ] **Step 4: 跑测试确认变绿**
@@ -1537,6 +1688,10 @@ DELETE FROM public.pilot_create_intent
 | **M30** | 删掉取锁前那条 `if await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, ...): continue` | `test_orphan_cleanup_skips_a_seed_whose_lock_this_connection_already_holds` |
 | **M31** | 把 `_InitMaint.fetchval` 的 `"pg_locks"` 分支改回返回**静态** `self.seed_lock_held` | **必须仍有测试变红**。若全绿 = 锁状态没建模成迁移，取锁前/后两条判据里有一条恒真——这一条验的是**假件自己**的判别力 |
 | **M32** | `_LIFECYCLE_DBS` 去掉 `kline_pilot_lifecycle_r37` 一行，然后**在 ㊲ 建库之后 kill 脚本**，再跑一次 | 第二次运行必须 `return 4` 并点名 `kline_pilot_lifecycle_r37`。这条验的是「漏登记会锁死后续运行」这一后果真的存在（跑完用 `QMT_VERIFY_FORCE_CLEANUP=1` 收拾） |
+| **M33** | 把首次初始化那支改回「先 `_WRITE_MARKER_SQL` 再 `_assert_disposable_cluster`」 | `test_init_does_not_leave_a_marker_when_the_final_gate_rejects` |
+| **M34** | 删掉写标记前那次 `await _assert_disposable_cluster(...)`（只留预检那次） | 同上（`db_scans >= 2` 那条前置断言先红 —— 它专防这条用例空转） |
+| **M35** | 删掉 `finally` 里 release 之后那条 `_SEED_LOCK_HELD_SQL` 复核 | `test_orphan_cleanup_verifies_the_release_actually_took_effect` + `..._does_not_mask_the_original_failure` |
+| **M36** | 把 `_assert_disposable_cluster` 里的 `_user_objects` 检查删掉（只留同侪库那半） | `test_init_refuses_to_declare_a_cluster_whose_maintenance_db_is_not_empty` |
 | M22 | 把清理循环挪到 `await assert_cluster_allowed(...)` **之前** | `test_init_does_not_clean_orphans_on_a_cluster_that_is_no_longer_clean` |
 | M23 | 循环只处理 `rows[:1]`（提前 break） | `test_orphan_cleanup_releases_every_seed_lock_it_takes` |
 
@@ -2153,6 +2308,15 @@ bash .claude/scripts/codex-attest.sh --scope branch-diff --base 8578a59 --head f
 | **R1** | `needs-attention`（**未 approve**） | **[high]** 孤儿清理用 `now()` 量 TTL，而仓里既有的两条 intent TTL 判据早已因同一原因（codex S2a-R4-F2，真 PG 15 实测）换成 `statement_timestamp()`；`init_cluster_marker` 收的是已连好的连接、不控制事务生命周期，长事务里 `now()` 冻在过去 → 真实已过期的孤儿被量成新鲜 → 残骸永远清不掉。**且计划里的机械测试写死要求 `now()`，会把正确的修法判红。** | **全部接受并已改**（见下） |
 | **R2** | `needs-attention`（**未 approve**） | **[high]** DELETE 只绑 dbname 不绑 seed；**[medium]** advisory lock 可重入让「取到了」的证明失效；**[medium]** 新场景库名没进 `_LIFECYCLE_DBS` | **三条结论全接受，两条的理由我按实测改写**（见下） |
 | **R3** | `needs-attention`（**未 approve**） | **[high]** `_InitMaint` 的 `maintenance_presence` / `intent_table_missing` 初始化被误放到 `fetchval` 的 `return` 之后 → 死代码 → `intent_table_missing=True` 整个失效，补建路径那几条用例**改测健康集群**；**[medium]** Task 4 的 Interfaces 块与 Self-Review 仍写着两参数 DELETE 契约，与同一份计划里的 SQL/测试自相矛盾 | **两条全接受，全是 R2 编辑引入的自伤**；已修，并加了两道机械自检 |
+
+| **R4** | `needs-attention`（**未 approve**） | **[high]** 首次初始化「先写标记、再跑现查」—— 现查仍可能拒绝，于是一次**报告失败**的 init 在集群里留下**合法标记**，而契约是「本工具从不清标记」；**[high]** `release_seed_lock` 只调用、**从不验证**锁真的还回去了 —— 空实现/连错连接/只释放一层可重入计数都会「成功返回」而锁仍挂着 | **两条全接受**；标记写入改成最后一个不可回滚写入（抽出 `_assert_disposable_cluster` 复用），release 后加活连接复核 |
+
+R4 两条的核实与处置：
+
+- ✅ **[high] 标记次序** —— 属实且可达：`assert_cluster_allowed` 会**重新枚举** `pg_database` 并逐个连进同侪库，预检到它之间的窗口里冒出同侪库、连接抖动、维护库多个用户对象，任一都会让它抛，而标记已经落地。修法取**重排**而非「失败时删标记」：后者要给本模块新增「删标记」能力，与契约直接冲突。抽出 `_assert_disposable_cluster`（免标记、零副作用）在写标记**之前**再跑一次，标记成为最后一个副作用。
+  ⚠️ 诚实说明**残留**：DDL（三张表）仍然可能在一次最终失败的 init 里留下 —— 那是**无法消除**的，`CREATE TABLE` 与后续检查不可能原子，且闸 (i) 本来就要求这三张表存在才能评估。已把「标记」与「表」的风险等级分开：标记是**信任声明**，表是**结构**且不授权任何东西。
+- ✅ **[high] release 未验证** —— 属实，且与我已经接受的「回调返回真不算证明」是**同一条纪律的另一半**（上一版只验了取、没验还）。这条泄漏尤其毒：R2 加的「事前已持有就跳过」会把它放大成**该连接从此静默跳过该 seed 的孤儿清理**，而跳过的理由看起来完全合理。已加 release 后的活连接复核 + 具名 code `seed_lock_not_released`。
+  ⚠️ **反驳一半**：codex 建议「fail loudly **and close/poison the connection**」。**不关连接** —— 它是调用方的，本模块通篇不拥有也从不关它；关掉会让调用方拿到一个没预料到的死连接，还掩盖真正的接线错误。抛一个点名的 code 更诚实。
 
 ⚠️ **R3 的两条都不是设计问题，是我在 R2 编辑时弄坏的** —— 一条把初始化splice进了别的方法体，一条改了 SQL 与测试却漏改契约声明。故加了两道**对计划本身**的机械检查（见 Self-Review 第 6 条），并把「假件自检」升格成一条正式用例 `test_init_maint_fake_actually_models_the_states_it_claims`。
 
