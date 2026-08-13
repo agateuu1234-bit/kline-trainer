@@ -45,6 +45,7 @@
 ⚠️ **每一次运行都要 `QMT_VERIFY_ALLOW_DESTRUCTIVE=1`**（codex R7-F1）——「本地」不是
    「可弃」。指向非本地集群还要**另外**设 `QMT_VERIFY_ALLOW_REMOTE=1`。
    退出码 8 = 同集群上已有另一个同前缀的验收在跑。
+   退出码 9 = 本脚本要用的固定名角色在运行之前就已存在（不是本次造的，绝不删）。
 """
 from __future__ import annotations
 
@@ -60,7 +61,8 @@ import asyncpg
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import _pilot_verify_harness as harness  # noqa: E402
 from qmt_pilot_db import (MARKER_PURPOSE, PilotDbBoundaryError,  # noqa: E402
-                          create_pilot_database, quote_ident, sha256_of_sql)
+                          create_pilot_database, quote_ident,
+                          reset_pilot_database, sha256_of_sql)
 # ⚠️ 私有名，**刻意**直接引用：Ⓑb/Ⓑc 要证伪的就是这条谓词本身，
 #    在脚本里另写一份等价 SQL，两份必然漂移，而漂移会让这两档失去判别力。
 from qmt_pilot_db import _SEED_LOCK_HELD_SQL  # noqa: E402
@@ -87,7 +89,8 @@ _NAME_RE = re.compile(r"\Akline_pilot_conc[a-z0-9_]*\Z")
 #    `b1` 这个库**本该从不存在**（Ⓑ 断言它没被建出来），但库名字面量在源码里，
 #    `assert_every_selfcheck_db_is_whitelisted` 要求它照样登记；
 #    而万一某次运行因缺陷真把它建出来了，清场也才收得掉。
-_CONC_DBS = ("kline_pilot_conc_b1",)
+_CONC_DBS = ("kline_pilot_conc_b1", "kline_pilot_conc_d1", "kline_pilot_conc_d2",
+             "kline_pilot_conc_d3", "kline_pilot_conc_e1")
 
 # 本脚本不在维护库里造任何临时对象。
 _SCRATCH_OBJECTS: tuple = ()
@@ -98,7 +101,24 @@ _IMMEDIATE_SECONDS = 1.0
 
 # 验收闸的**完整性清单**：收尾核对每一档都真的跑过。
 # ⚠️ 少一档即失败 —— 「静默没跑」与「通过了」在输出上完全一样。
-_EXPECTED_SCENARIOS = ("Ⓐ", "Ⓐb", "Ⓑ", "Ⓑb", "Ⓑd", "Ⓑc", "Ⓒ")
+_EXPECTED_SCENARIOS = ("Ⓐ", "Ⓐb", "Ⓑ", "Ⓑb", "Ⓑd", "Ⓑc", "Ⓒ", "Ⓓ", "Ⓓb", "Ⓓc", "Ⓔ")
+
+# Ⓓ 用的普通（非超级用户）角色。`datconnlimit = 0` 对超级用户不生效，
+# 所以这一档必须用一个真的普通角色，否则测的是「超级用户能不能连」——恒真。
+_PLAIN_ROLE = "zzqmtverify_plain"
+_PLAIN_PASSWORD = "zzqmtverify"
+# Ⓔ 用的属主角色（非超级用户、有 CREATEDB）。
+_OWNER_ROLE = "zzqmtverify_owner"
+
+# 本脚本会 `CREATE ROLE` / `DROP ROLE` 的**固定名**角色。
+# ⚠️ **这是与 harness 那条「精确白名单、绝不按前缀盲删」完全同源的一条纪律，
+#    只是作用在角色上**（codex 合并评审 R3-F2）。此前这里是无条件
+#    `DROP ROLE IF EXISTS zzqmtverify_plain` —— 与 4a-2b/S1 R2-F1 那条**真栽过**的
+#    「无条件 DROP DATABASE IF EXISTS zzqmtverify_unrelated」是同一个形态：
+#    在共享集群上，光是启动本脚本就会把一个**不是本次造的**同名角色连同它的
+#    登录/权限状态一起抹掉，而那时任何档位都还没跑、任何归属都还没证明。
+#    **固定名不是归属证明。**
+_OWNED_ROLES = (_PLAIN_ROLE, _OWNER_ROLE)
 
 
 async def _apply_cluster_schema(conn) -> None:
@@ -128,6 +148,26 @@ async def _timed_try_seed_lock(conn, seed: str) -> tuple[bool, float]:
     t0 = time.monotonic()
     got = await _try_seed_lock(conn, seed)
     return got, time.monotonic() - t0
+
+
+async def assert_roles_are_not_preexisting(conn) -> int | None:
+    """前置清场：`_OWNED_ROLES` 里的角色**若已经存在就拒绝运行**（R3-F2）。
+
+    ⚠️ 判据是「本次运行之前它就在」——那说明它**不是本脚本这次造的**，
+       归属证明不成立，绝不删。与 `assert_extra_dbs_are_not_preexisting`
+       （库那一侧）同语义、同逃生口：明确告诉操作者手工删哪一个再重跑。
+    """
+    rows = await conn.fetch(
+        "SELECT rolname FROM pg_roles WHERE rolname = ANY($1::text[])",
+        list(_OWNED_ROLES))
+    if rows:
+        names = sorted(r["rolname"] for r in rows)
+        print(f"拒绝运行：这些角色在本次运行之前就已经存在：{names}——"
+              f"本脚本会 CREATE/DROP 它们，而它们不是本次造的，归属证明不成立，绝不删。"
+              f"确认无用后请手工执行 "
+              f"{'; '.join(f'DROP ROLE {n}' for n in names)} 再重跑。", file=sys.stderr)
+        return 9
+    return None
 
 
 async def main() -> int:
@@ -173,6 +213,9 @@ async def main() -> int:
         await harness.purge_metadata_for(pre, _CONC_DBS)
         if swept:
             print(f"（前置清场：删掉上一次运行残留的 {swept}）")
+        # ⚠️ 角色这一侧的同源守卫（R3-F2）：固定名不是归属证明。
+        if (rc := await assert_roles_are_not_preexisting(pre)) is not None:
+            return rc
     finally:
         await pre.close()
 
@@ -409,6 +452,398 @@ async def main() -> int:
                 await c.close()
             except Exception:
                 pass
+
+    # ── Ⓓ 零对象例外的 DROP 窗口：验空之后、DROP 之前不许有人连进来 ─────────
+    #    （codex 4a-2 R10-F1，critical）这条来路**绕过** pilot_meta 归属与
+    #    `--reset-foreign` 令牌，它的全部授权理由就是「这个库当时是空的」。
+    #    验空是一次读，读完到 `DROP DATABASE` 之间实测有 0.7–2.2 ms：
+    #    一个普通角色在这段里连进来建表再断开，PostgreSQL 就没有活会话可挡，
+    #    于是本工具会删掉一个**已经不空**的库。
+    #    收口手段（真 PG 实测选定）：`ALTER DATABASE … CONNECTION LIMIT 0`。
+    #      · `ALLOW_CONNECTIONS false` 连**超级用户**也挡 → 验空根本做不了，不可用；
+    #      · `CONNECTION LIMIT 0` 只挡非超级用户 → 本工具仍连得进去验空。
+    scenario("Ⓓ")
+    print("Ⓓ 验空之后、DROP 之前，普通角色必须连不进目标库")
+    seed_d = "conc_d1"
+    db_d = f"kline_pilot_{seed_d}"
+    conn_m = await asyncpg.connect(base_dsn)
+    try:
+        await conn_m.execute(
+            f"CREATE ROLE {quote_ident(_PLAIN_ROLE)} LOGIN PASSWORD '{_PLAIN_PASSWORD}'")
+        await conn_m.execute("DROP DATABASE IF EXISTS " + quote_ident(db_d))
+        await conn_m.execute("CREATE DATABASE " + quote_ident(db_d))
+        # PG 15 起 PUBLIC 不再自带 schema public 的 CREATE 权限 ——
+        # 不给这个授权的话，「窗口里建了表」这件事会因为权限而不发生，
+        # 于是修复前后都「没建成」，这一档就恒绿了。
+        seedconn = await asyncpg.connect(harness.db_dsn(base_dsn, db_d))
+        try:
+            await seedconn.execute(
+                f"GRANT CREATE ON SCHEMA public TO {quote_ident(_PLAIN_ROLE)}")
+        finally:
+            await seedconn.close()
+        await conn_m.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db_d)
+        await conn_m.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
+            "  WHERE d.datname::text = $1",
+            db_d, seed_d, _BUILD_ARGS["created_at"], "conc-d1")
+        if not await _try_seed_lock(conn_m, seed_d):
+            check(False, "Ⓓ 前置：取到 seed 锁")
+
+        # 把 DSN 的用户名/口令换成普通角色，再把库名换成目标库。
+        plain_dsn = harness.db_dsn(
+            re.sub(r"//[^:/@]+:[^@]*@", f"//{_PLAIN_ROLE}:{_PLAIN_PASSWORD}@", base_dsn),
+            db_d)
+
+        target_connects = {"n": 0}
+        window = {"fired": False, "connected": None, "error": ""}
+
+        class _CloseHooked:
+            """代理目标库连接：在**它被关闭的那一刻**执行注入 ——
+            那正是「验空已经读完、DROP 还没发出」的窗口。"""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            async def close(self, *a, **k):
+                window["fired"] = True
+                try:
+                    intruder = await asyncpg.connect(plain_dsn)
+                except Exception as exc:
+                    window["connected"] = False
+                    window["error"] = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+                else:
+                    window["connected"] = True
+                    try:
+                        await intruder.execute(
+                            "CREATE TABLE public.zzqmtverify_squatted (id int)")
+                    finally:
+                        await intruder.close()
+                return await self._inner.close(*a, **k)
+
+        async def _connect_with_window(name: str):
+            inner = await connect_peer(name)
+            if name == db_d:
+                target_connects["n"] += 1
+                # 第 3 次连目标库 = `reset_pilot_database` 封锁临界区持住的那条
+                #（前两次在 try_empty_remnant_exception 的两次探测里）。
+                if target_connects["n"] == 3:
+                    return _CloseHooked(inner)
+            return inner
+
+        try:
+            await reset_pilot_database(conn_m, connect=_connect_with_window,
+                                       db_name=db_d, seed=seed_d,
+                                       export_log_sha256=_BUILD_ARGS["export_log_sha256"],
+                                       output_dir=_BUILD_ARGS["output_dir"],
+                                       reset_foreign_token=None)
+            dropped = True
+        except Exception as exc:
+            dropped = False
+            window["error"] = window["error"] or f"{type(exc).__name__}: {exc}"
+        # ⚠️ 先证明注入真的落在那个窗口里，否则下面那条是恒真的。
+        check(window["fired"] and target_connects["n"] == 3,
+              "Ⓓ 前置：注入确实落在「验空读完、DROP 之前」那一刻",
+              f"连目标库 {target_connects['n']} 次，注入触发={window['fired']}")
+        check(window["connected"] is False,
+              "Ⓓ 窗口里普通角色**连不进**目标库（DROP 前已封住新连接）",
+              f"竟然连进去并建了表 —— 于是一个已经不空的库会被 DROP 掉；"
+              f"connected={window['connected']}")
+        still_there = await conn_m.fetchval(
+            "SELECT count(*) FROM pg_database WHERE datname = $1", db_d)
+        check(dropped and not still_there,
+              "Ⓓ 反向：封连接不影响本工具自己 —— 空残骸仍被正常 DROP 掉",
+              f"dropped={dropped}；{window['error']}")
+    finally:
+        try:
+            await conn_m.execute("SELECT pg_advisory_unlock_all()")
+            await conn_m.execute("DROP DATABASE IF EXISTS " + quote_ident(db_d))
+            await conn_m.execute(f"DROP ROLE IF EXISTS {quote_ident(_PLAIN_ROLE)}")
+        finally:
+            await conn_m.close()
+
+    # ── Ⓓb **反向**：被拒之后连接限制必须还回去 ──────────────────────────
+    #    Ⓓ 的修复在 DROP 前把库封成 `CONNECTION LIMIT 0`。若拒绝路径上忘了恢复，
+    #    一个本工具**没有**销毁、也不归它管的库会对所有非超级用户**永久不可连** ——
+    #    那比原来的窗口更糟。这一档专门钉恢复。
+    #    ⚠️ 这里的入侵者用**超级用户**（超级用户不受 connlimit 限制），
+    #       且注入在 probe **读之前** —— 于是复查判「不空」→ 拒绝 → 走恢复路径。
+    scenario("Ⓓb")
+    print("Ⓓb 封连接之后被拒 → 连接限制必须恢复（库不能被留成不可连）")
+    seed_db = "conc_d2"
+    db_db = f"kline_pilot_{seed_db}"
+    conn_m2 = await asyncpg.connect(base_dsn)
+    try:
+        await conn_m2.execute(
+            f"CREATE ROLE {quote_ident(_PLAIN_ROLE)} LOGIN PASSWORD '{_PLAIN_PASSWORD}'")
+        await conn_m2.execute("DROP DATABASE IF EXISTS " + quote_ident(db_db))
+        await conn_m2.execute("CREATE DATABASE " + quote_ident(db_db))
+        # ⚠️ 给它一个**非默认**的连接上限（codex 4a-2 R11-F2）：
+        #    此前这一档只断言「恢复成 −1」，于是「一律写死 −1」照样绿 ——
+        #    而那会把一个本工具**明确选择不销毁**的库的连接策略永久改成「无限制」。
+        #    判据必须是「还原成**原来那个值**」。
+        await conn_m2.execute(
+            f"ALTER DATABASE {quote_ident(db_db)} WITH CONNECTION LIMIT 7")
+        await conn_m2.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db_db)
+        await conn_m2.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
+            "  WHERE d.datname::text = $1",
+            db_db, seed_db, _BUILD_ARGS["created_at"], "conc-d2")
+        if not await _try_seed_lock(conn_m2, seed_db):
+            check(False, "Ⓓb 前置：取到 seed 锁")
+
+        squat = {"n": 0, "did": False}
+
+        async def _connect_squatting(name: str):
+            if name == db_db:
+                squat["n"] += 1
+                if squat["n"] == 3:      # DROP 前那次复查，**读之前**把库弄脏
+                    sup = await asyncpg.connect(harness.db_dsn(base_dsn, db_db))
+                    try:
+                        await sup.execute("CREATE TABLE public.zzqmtverify_late (id int)")
+                        squat["did"] = True
+                    finally:
+                        await sup.close()
+            return await connect_peer(name)
+
+        refused = ""
+        try:
+            await reset_pilot_database(conn_m2, connect=_connect_squatting,
+                                       db_name=db_db, seed=seed_db,
+                                       export_log_sha256=_BUILD_ARGS["export_log_sha256"],
+                                       output_dir=_BUILD_ARGS["output_dir"],
+                                       reset_foreign_token=None)
+            check(False, "Ⓓb 复查发现不空时必须拒绝 DROP", "竟然删掉了")
+        except PilotDbBoundaryError as exc:
+            refused = exc.code
+            check(exc.code == "not_owned",
+                  "Ⓓb 复查发现不空 → 拒绝 DROP（not_owned）", f"实得 {exc.code}：{exc}")
+        check(squat["did"] and squat["n"] == 3,
+              "Ⓓb 前置：注入确实落在 DROP 前那次复查之前",
+              f"连目标库 {squat['n']} 次，注入={squat['did']}")
+        limit = await conn_m2.fetchval(
+            "SELECT datconnlimit FROM pg_database WHERE datname = $1", db_db)
+        check(limit == 7,
+              "Ⓓb 拒绝之后连接限制恢复成了**原来那个值 7**（不是写死的 −1）",
+              f"实得 datconnlimit={limit}"
+              f"（0 = 库被留成非超级用户不可连；−1 = 原有的连接策略被这次操作抹掉了）")
+        # 端到端再证一次：普通角色现在真的连得进去。
+        plain2 = harness.db_dsn(
+            re.sub(r"//[^:/@]+:[^@]*@", f"//{_PLAIN_ROLE}:{_PLAIN_PASSWORD}@", base_dsn),
+            db_db)
+        try:
+            back = await asyncpg.connect(plain2)
+            await back.close()
+            check(True, "Ⓓb 普通角色**又连得进**目标库了（端到端确认恢复生效）")
+        except Exception as exc:
+            check(False, "Ⓓb 普通角色**又连得进**目标库了（端到端确认恢复生效）",
+                  f"仍连不进：{type(exc).__name__}: {str(exc).splitlines()[0]}"
+                  f"；拒绝码={refused}")
+    finally:
+        try:
+            await conn_m2.execute("SELECT pg_advisory_unlock_all()")
+            await conn_m2.execute("DROP DATABASE IF EXISTS " + quote_ident(db_db))
+            await conn_m2.execute(f"DROP ROLE IF EXISTS {quote_ident(_PLAIN_ROLE)}")
+        finally:
+            await conn_m2.close()
+
+    # ── Ⓓc 封锁必须连**超级用户**的新连接一起挡住（codex 合并评审 F1）──────────
+    #    Ⓓ 用的是普通角色，而 `CONNECTION LIMIT 0` **本来就只挡非超级用户** ——
+    #    也就是说 Ⓓ 对「超级用户能不能挤进窗口」这一条**零判别力**。
+    #    而本工具在 pilot 部署里**就是**超级用户跑的（Ⓔ 证明非超级用户连集群闸都过不去），
+    #    所以「另一个用同一套凭据的并发任务」才是最现实的威胁面：
+    #    它能在最后一次复验之后、DROP 之前连进来建表再断开，
+    #    于是一个**已经不空**的库照样被删掉 —— 正是 R10-F1 那条 critical 的形态。
+    #    收口手段：封锁语句同时设 `ALLOW_CONNECTIONS false`（真 PG 15 实测：
+    #    已建立的会话不受影响、新的超级用户连接被挡、DROP 仍然成功）。
+    scenario("Ⓓc")
+    print("Ⓓc 验空之后、DROP 之前，**超级用户**同样必须连不进目标库")
+    seed_dc = "conc_d3"
+    db_dc = f"kline_pilot_{seed_dc}"
+    conn_m3 = await asyncpg.connect(base_dsn)
+    try:
+        await conn_m3.execute("DROP DATABASE IF EXISTS " + quote_ident(db_dc))
+        await conn_m3.execute("CREATE DATABASE " + quote_ident(db_dc))
+        await conn_m3.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db_dc)
+        await conn_m3.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
+            "  WHERE d.datname::text = $1",
+            db_dc, seed_dc, _BUILD_ARGS["created_at"], "conc-d3")
+        if not await _try_seed_lock(conn_m3, seed_dc):
+            check(False, "Ⓓc 前置：取到 seed 锁")
+
+        # ⚠️ 入侵者用的是**超级用户**的 DSN（与本工具同一套凭据）——
+        #    这正是 Ⓓ 用普通角色测不到的那一向。
+        super_dsn = harness.db_dsn(base_dsn, db_dc)
+        sup_connects = {"n": 0}
+        win = {"fired": False, "connected": None, "error": ""}
+
+        class _CloseHookedSuper:
+            """在**持住的那条目标库连接被关闭的那一刻**注入 ——
+            即「最后一次复验已经做完、DROP 还没发出」的窗口。"""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            async def close(self, *a, **k):
+                win["fired"] = True
+                try:
+                    intruder = await asyncpg.connect(super_dsn)
+                except Exception as exc:
+                    win["connected"] = False
+                    win["error"] = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+                else:
+                    win["connected"] = True
+                    try:
+                        await intruder.execute(
+                            "CREATE TABLE public.zzqmtverify_super_squatted (id int)")
+                    finally:
+                        await intruder.close()
+                return await self._inner.close(*a, **k)
+
+        async def _connect_with_super_window(name: str):
+            inner = await connect_peer(name)
+            if name == db_dc:
+                sup_connects["n"] += 1
+                # 第 3 次连目标库 = `reset_pilot_database` 封锁临界区持住的那条
+                #（前两次在 try_empty_remnant_exception 的两次探测里）。
+                if sup_connects["n"] == 3:
+                    return _CloseHookedSuper(inner)
+            return inner
+
+        try:
+            await reset_pilot_database(conn_m3, connect=_connect_with_super_window,
+                                       db_name=db_dc, seed=seed_dc,
+                                       export_log_sha256=_BUILD_ARGS["export_log_sha256"],
+                                       output_dir=_BUILD_ARGS["output_dir"],
+                                       reset_foreign_token=None)
+            dropped_dc = True
+        except Exception as exc:
+            dropped_dc = False
+            win["error"] = win["error"] or f"{type(exc).__name__}: {exc}"
+        # 先证明注入真的落在那个窗口里，否则下面那条是恒真的。
+        check(win["fired"] and sup_connects["n"] == 3,
+              "Ⓓc 前置：注入确实落在「最后一次复验做完、DROP 之前」那一刻",
+              f"连目标库 {sup_connects['n']} 次，注入触发={win['fired']}")
+        check(win["connected"] is False,
+              "Ⓓc 窗口里**超级用户**也连不进目标库（封锁带 ALLOW_CONNECTIONS false）",
+              f"竟然连进去并建了表 —— 于是一个已经不空的库会被 DROP 掉；"
+              f"connected={win['connected']}（CONNECTION LIMIT 0 挡不住超级用户）")
+        still_dc = await conn_m3.fetchval(
+            "SELECT count(*) FROM pg_database WHERE datname = $1", db_dc)
+        check(dropped_dc and not still_dc,
+              "Ⓓc 反向：封超级用户不影响本工具自己 —— 空残骸仍被正常 DROP 掉",
+              f"dropped={dropped_dc}；{win['error']}")
+    finally:
+        try:
+            await conn_m3.execute("SELECT pg_advisory_unlock_all()")
+            await conn_m3.execute("DROP DATABASE IF EXISTS " + quote_ident(db_dc))
+        finally:
+            await conn_m3.close()
+
+    # ── Ⓔ **非超级用户**维护角色：在任何破坏性动作之前就被挡住 ────────────
+    #    起因是 codex 4a-2 R12-F1 担心「非超级用户部署下窗口仍在」。
+    #    本档实测出一个**比那个担心更根本**的事实：
+    #    【绝对空】判据 `_user_objects` 要遍历**所有**带 oid 列的 pg_catalog 表，
+    #    其中 `pg_user_mapping` 非超级用户读不了 → `InsufficientPrivilegeError`。
+    #    也就是说**整个模块早就隐含要求超级用户维护角色**（不只是 DROP 前的封锁），
+    #    非超级用户连集群闸都过不去，根本走不到 DROP ——
+    #    R12-F1 设想的「仍然删得掉库的非超级用户部署」在现实里到不了那一步。
+    #    ⚠️ 这条前提此前是**偶然**成立的（没人写下来、也没人验过）。这一档把它钉成
+    #       可验证的事实，并证明它是 **fail-closed** 的：库没被动、配置也没被改一半。
+    #    ⚠️ 不要「顺手让 `_user_objects` 跳过读不了的目录」—— 那是 fail-open：
+    #       模块明写「查不出目录清单 → 抛异常，绝不返回『空』」。
+    scenario("Ⓔ")
+    print("Ⓔ 非超级用户维护角色：破坏性动作之前就被挡住，且什么都没留下")
+    seed_e = "conc_e1"
+    db_e = f"kline_pilot_{seed_e}"
+    owner = _OWNER_ROLE
+    sup = await asyncpg.connect(base_dsn)
+    try:
+        await sup.execute("DROP DATABASE IF EXISTS " + quote_ident(db_e))
+        await sup.execute(
+            f"CREATE ROLE {quote_ident(owner)} LOGIN CREATEDB PASSWORD '{_PLAIN_PASSWORD}'")
+        await sup.execute("CREATE DATABASE " + quote_ident(db_e)
+                          + " OWNER " + quote_ident(owner))
+        # 维护库里的三张表要让这个角色读写（真实部署里也要这么授）
+        for tbl in ("pilot_cluster_marker", "pilot_create_intent",
+                    "pilot_database_registry"):
+            await sup.execute(
+                f"GRANT SELECT, INSERT, UPDATE, DELETE ON public.{tbl} "
+                f"TO {quote_ident(owner)}")
+        await sup.execute(
+            "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db_e)
+        await sup.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
+            "  WHERE d.datname::text = $1",
+            db_e, seed_e, _BUILD_ARGS["created_at"], "conc-e1")
+
+        owner_dsn = re.sub(r"//[^:/@]+:[^@]*@",
+                           f"//{owner}:{_PLAIN_PASSWORD}@", base_dsn)
+        owner_conn = await asyncpg.connect(owner_dsn)
+        try:
+            check(not await owner_conn.fetchval(
+                "SELECT current_setting('is_superuser') = 'on'"),
+                "Ⓔ 前置：这个维护角色**不是**超级用户")
+            if not await _try_seed_lock(owner_conn, seed_e):
+                check(False, "Ⓔ 前置：取到 seed 锁")
+
+            async def _owner_connect(name: str):
+                return await asyncpg.connect(harness.db_dsn(owner_dsn, name))
+
+            try:
+                await reset_pilot_database(
+                    owner_conn, connect=_owner_connect, db_name=db_e, seed=seed_e,
+                    export_log_sha256=_BUILD_ARGS["export_log_sha256"],
+                    output_dir=_BUILD_ARGS["output_dir"], reset_foreign_token=None)
+                refused_e, err_e = False, ""
+            except Exception as exc:
+                refused_e, err_e = True, f"{type(exc).__name__}: {exc}"
+            check(refused_e,
+                  "Ⓔ 非超级用户维护角色被挡住（不是悄悄降级继续跑）",
+                  "竟然跑完了 —— 那说明【绝对空】的目录遍历没有真的遍历全")
+            check("permission denied" in err_e,
+                  "Ⓔ 挡住它的是**读不了系统目录**（模块隐含要求超级用户维护角色）",
+                  f"实得 {err_e}")
+            still = await sup.fetchval(
+                "SELECT count(*) FROM pg_database WHERE datname = $1", db_e)
+            check(still == 1, "Ⓔ fail-closed：目标库**没有**被删",
+                  f"库不见了（count={still}）—— 权限不足却还是执行了破坏性动作")
+            limit_e = await sup.fetchval(
+                "SELECT datconnlimit FROM pg_database WHERE datname = $1", db_e)
+            check(limit_e == -1,
+                  "Ⓔ 也没有把目标库留在半封锁状态（datconnlimit 仍是 −1）",
+                  f"实得 datconnlimit={limit_e} —— 配置被改了一半就抛了")
+        finally:
+            await owner_conn.close()
+    finally:
+        try:
+            await sup.execute("DROP DATABASE IF EXISTS " + quote_ident(db_e))
+            await sup.execute(
+                "DELETE FROM public.pilot_create_intent WHERE dbname = $1", db_e)
+            for tbl in ("pilot_cluster_marker", "pilot_create_intent",
+                        "pilot_database_registry"):
+                await sup.execute(f"REVOKE ALL ON public.{tbl} FROM {quote_ident(owner)}")
+            await sup.execute(f"DROP ROLE IF EXISTS {quote_ident(owner)}")
+        finally:
+            await sup.close()
+
 
     # ── 收尾 ────────────────────────────────────────────────────────────
     post = await asyncpg.connect(base_dsn)
