@@ -625,11 +625,12 @@ final class UserVersionAssertionGuardTests: XCTestCase {
 
     /// 扫一份源码。**先剥 `//` 之后的内容**再匹配 —— 注释里的断言不算数，
     /// 承重注释（行尾那串迁移史）也不得污染判据。
+    /// ⚠️ 剥注释必须**跟踪字符串状态**：朴素地「见 `//` 就吃到行尾」会被
+    /// `let u = "https://x"` 这种字面量骗到，把**同一行后面的真实代码**一起丢掉 ——
+    /// 那是**反向漏**（少数了断言 ⇒ 守卫悄悄放宽），比误报危险。本仓
+    /// `SourceGuardScanner.swift:49` 已把这个坑写在案。
     static func sites(in source: String, file: String) -> [Site] {
-        let lines = source.components(separatedBy: "\n").map { l -> String in
-            guard let r = l.range(of: "//") else { return l }
-            return String(l[l.startIndex..<r.lowerBound])
-        }
+        let lines = source.components(separatedBy: "\n").map { stripLineComment($0) }
         var out: [Site] = []
         for (i, l) in lines.enumerated() where l.contains("PRAGMA user_version") {
             // `PRAGMA user_version = N` 是**写入**（fixture 造现场），不是断言
@@ -642,6 +643,21 @@ final class UserVersionAssertionGuardTests: XCTestCase {
                 partial = lines[j].contains("upTo:"); break
             }
             out.append(Site(file: file, line: i + 1, value: v, afterPartialMigrate: partial))
+        }
+        return out
+    }
+
+    /// 剥行注释，但**只在引号外**认 `//`（转义 `\"` 不计入配对）。
+    static func stripLineComment(_ l: String) -> String {
+        var out = "", inStr = false, esc = false
+        let c = Array(l)
+        var i = 0
+        while i < c.count {
+            if esc { esc = false; out.append(c[i]); i += 1; continue }
+            if c[i] == "\\" { esc = true; out.append(c[i]); i += 1; continue }
+            if c[i] == "\"" { inStr.toggle(); out.append(c[i]); i += 1; continue }
+            if !inStr, c[i] == "/", i + 1 < c.count, c[i + 1] == "/" { break }
+            out.append(c[i]); i += 1
         }
         return out
     }
@@ -699,6 +715,12 @@ final class UserVersionAssertionGuardTests: XCTestCase {
         // let uv = try Int.fetchOne(db, sql: "PRAGMA user_version"); XCTAssertEqual(uv, 7)
         """
         let written = #"try db.execute(sql: "PRAGMA user_version = 2")"#
+        // 反向漏样本：字符串里的 `//` 不得把同一行后面的真实代码吃掉
+        let urlInString = """
+        try migrator.migrate(queue)
+        let note = "see https://example.com"; let uv = try Int.fetchOne(db, sql: "PRAGMA user_version")
+        XCTAssertEqual(uv, 7)
+        """
 
         let v = Self.sites(in: violating, file: "X")
         let l = Self.sites(in: legal, file: "X")
@@ -708,6 +730,8 @@ final class UserVersionAssertionGuardTests: XCTestCase {
         XCTAssertTrue(l.first?.afterPartialMigrate ?? false, "upTo: 之后的 7 是合法的")
         XCTAssertTrue(Self.sites(in: commented, file: "X").isEmpty, "注释里的断言不得计入")
         XCTAssertTrue(Self.sites(in: written, file: "X").isEmpty, "PRAGMA 写入语句不是断言")
+        XCTAssertEqual(Self.sites(in: urlInString, file: "X").map(\.value), [7],
+                       "字符串里的 // 不得把同一行后面的真实代码吃掉（反向漏 = 守卫悄悄放宽）")
     }
 }
 ```
@@ -1248,7 +1272,7 @@ cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter Pendi
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 ```
 
-- [ ] **Step 6: 守卫 G7 + 变异（M2 / M3 / M4 / M4b / M4c / M15）**
+- [ ] **Step 6: 守卫 G7 + 变异（M2 / M3 / M4 / M4b / M4c / M15 / M15c）**
 
 **变异前先备份本表点名的每个文件**（禁止 `git checkout` 复原 —— 会静默抹掉未提交改动）：
 
@@ -1258,9 +1282,57 @@ cp ios/Contracts/Sources/KlineTrainerPersistence/Internal/PendingTrainingReposit
 cp ios/Contracts/Sources/KlineTrainerPersistence/Internal/PendingReplayRepositoryImpl.swift /tmp/PendingReplayRepositoryImpl.swift.bak
 ```
 
-逐条变异 → 跑 → 记录**红的是哪个测试名** → `cp /tmp/<file>.bak <原路径>` 复原 → `git status --short` 确认干净，再做下一条。
+**先写 G7 的真代码**（codex P-R8 medium：早稿这里只有一句散文 —— 而其余守卫都有可跑的实现，
+一条只存在于描述里的守卫等于没有）。
 
-G7：`DrawingDefaultStyleColumn.decode` 在 `Sources/` 里**恰好 2 个调用点**，分别在两个 repo impl 内。
+⚠️ **它必须放在 `KlineTrainerContractsTests`**，不能放 `KlineTrainerPersistenceTests`：
+`SourceGuardScanner` 的那些函数是**测试模块内的 internal**，跨 target 取不到；而它的扫描根
+（`allSwiftFilesUnderSources()`）已经是**整个 `Sources/`**，够得着 `Sources/KlineTrainerPersistence/`。
+**不要**因为够不着就在持久化测试目标里再造一个扫描器。
+
+新建 `ios/Contracts/Tests/KlineTrainerContractsTests/PersistenceDecoderBoundaryGuardTests.swift`：
+
+```swift
+import Testing
+@testable import KlineTrainerContracts
+
+/// G7（D100）：`drawing_default_style` 列的容错解码必须是**唯一边界**。
+///
+/// ⚠️ 光数「恰好 2 个调用点」挡不住 D100 真正怕的那件事 —— **两个 repo 各拷一份容错解码器**
+/// 同样是「各调一次自己那份」，调用点计数与行为矩阵**双双通过**，而单边界不变量已经没了。
+/// 故 G7 = 正向的「2 个调用点、落在指定的两个文件里」**加上**反向的「零处自行解码」。
+@Test func g7_column_decoder_is_the_single_boundary() throws {
+    let sites = try callSiteCount("DrawingDefaultStyleColumn.decode(")
+    let total = sites.reduce(0) { $0 + $1.count }
+    #expect(total == 2, "解码调用点应恰好 2 个，实测 \(total)：\(sites.map(\.file))")
+
+    // 不只数总数，还要数**落点**：2 次都挤在同一个 repo 里同样是「另一条读路径没接上」
+    for needle in ["PendingTrainingRepositoryImpl.swift", "PendingReplayRepositoryImpl.swift"] {
+        #expect(sites.contains { $0.file.hasSuffix(needle) && $0.count == 1 },
+                "\(needle) 里应恰好 1 个解码调用点，实测：\(sites.map { "\($0.file)×\($0.count)" })")
+    }
+}
+
+/// G7 反向条：除该 enum 自身外，`Sources/` 里零处直接解码这个类型。
+@Test func g7_no_direct_decode_path_exists() throws {
+    let direct = try callSiteCount("JSONDecoder().decode(DrawingDefaultStyle")
+        .filter { !$0.file.hasSuffix("DrawingDefaultStyleColumn.swift") }
+    #expect(direct.isEmpty, "出现了绕过共享解码器的直接解码路径：\(direct.map(\.file))")
+}
+
+/// G7 的**双向自检**：证明上面两条不是恒真的 —— 一个真实存在的符号必须数得出来，
+/// 一个不存在的符号必须数出 0（防「pattern 打错字 → 恒 0 → 恒绿」）。
+@Test func g7_scanner_is_not_vacuous() throws {
+    #expect(try callSiteCount("DrawingDefaultStyleColumn.encode(").reduce(0) { $0 + $1.count } == 2,
+            "encode 同样是两处（两个 repo 的写路径）—— 数不出来说明 pattern 或扫描根坏了")
+    #expect(try callSiteCount("DrawingDefaultStyleColumnZZZ.decode(").isEmpty)
+}
+```
+
+跑：`swift test --filter PersistenceDecoderBoundaryGuardTests`，此刻应 **FAIL**（符号还没建），
+Step 3/4 落地后转绿。
+
+逐条变异 → 跑 → 记录**红的是哪个测试名** → `cp /tmp/<file>.bak <原路径>` 复原 → `git status --short` 确认干净，再做下一条。
 
 | 变异 | 改法 | 只应变红 |
 |---|---|---|
@@ -1270,7 +1342,8 @@ G7：`DrawingDefaultStyleColumn.decode` 在 `Sources/` 里**恰好 2 个调用�
 | M4b | 每个字段的 `as?` 换成强制解包 | T5b |
 | M4c | **只**保留 `colorToken` 的容错、其余四个改成强制 | T4 的另外三条（`colorToken` 那条**仍绿**） |
 | **M4d** | 任一字段类型不匹配时**整份丢回出厂**（而非逐字段回落） | **只有 T5b** 红 —— 专证「只断言没抛」是假绿（codex plan-P-R1 medium） |
-| M15 | replay 的 `loadReplay` 改成直接 `JSONDecoder().decode` | **只有 replay 侧**的 T4/T5/T5b + G7 |
+| M15 | replay 的 `loadReplay` 改成直接 `JSONDecoder().decode` | **只有 replay 侧**的 T4/T5/T5b + G7 的**反向条**（`g7_no_direct_decode_path_exists`） |
+| **M15c** | 把 `DrawingDefaultStyleColumn.decode` 的**函数体整段拷进 `PendingReplayRepositoryImpl`**、replay 改调那份拷贝（行为完全等价） | **只有 `g7_column_decoder_is_the_single_boundary`** 红（落点断言：replay 那格变 0）。⚠️ **T3–T5b 全绿、正向计数也仍是 2** —— 这条专证「只数总数挡不住拷贝一份」（codex P-R8 medium） |
 
 - [ ] **Step 7: 提交**
 
@@ -1278,7 +1351,8 @@ G7：`DrawingDefaultStyleColumn.decode` 在 `Sources/` 里**恰好 2 个调用�
 git add ios/Contracts/Sources/KlineTrainerPersistence/Internal/DrawingDefaultStyleColumn.swift \
         ios/Contracts/Sources/KlineTrainerPersistence/Internal/PendingTrainingRepositoryImpl.swift \
         ios/Contracts/Sources/KlineTrainerPersistence/Internal/PendingReplayRepositoryImpl.swift \
-        ios/Contracts/Tests/KlineTrainerPersistenceTests/PendingDefaultStyleColumnTests.swift
+        ios/Contracts/Tests/KlineTrainerPersistenceTests/PendingDefaultStyleColumnTests.swift \
+        ios/Contracts/Tests/KlineTrainerContractsTests/PersistenceDecoderBoundaryGuardTests.swift
 git commit -m "feat(db): 两张 pending 表读写 drawing_default_style，共用容错解码器（D92/D93/D100）"
 git status --short          # 必须为空（非空 = 脏树假绿或变异没复原）
 ```
@@ -1664,21 +1738,43 @@ git status --short          # 必须为空（非空 = 脏树假绿或变异没�
 把 `TrainingView` 的**两条** autosave 触发抽成一个**纯 SwiftUI `ViewModifier`**（两条一起抽，否则会出现「两条触发分居两处」的漂移），再用 `ImageRenderer` + `drainAutosaveForTesting()` 在最小纯 SwiftUI 宿主里验证 `.onChange` 真的触发。
 **跑通** → 加进必测，M7 的判绿对象改为它；**跑不通** → 在 PR 描述如实写「D94 只有结构证据，行为证据受阻于 `DrawingLayoutInvariantTests:9-28` 记录的平台限制」。
 
-- [ ] **Step 2: 三门齐跑并记录数字**
+- [ ] **Step 2: 四门齐跑并记录数字**
+
+> ⚠️ **Catalyst 这一门不能省**（codex P-R8 medium）：Step 1 的 spike **会改 `TrainingView`**
+> —— 抽 `ViewModifier` 是对 UIKit-gated 文件的重构，而 **host `swift test` 根本不编译它**。
+> Task 7 的 Catalyst 跑在 spike **之前**，所以「spike 引入的 Catalyst-only 编译/运行回归」
+> 会从所有出厂闸门底下溜过去（[[feedback_uikit_gated_evidence_traps]]）。
+> **spike 无论成败（包括「改了又改回去」）都要重跑这一门** —— 判据是「TrainingView 被动过」，
+> 不是「spike 成功了」。
 
 ```bash
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
 echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
   || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
-cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)                       # host
-cd "$(git rev-parse --show-toplevel)" && bash scripts/check_app_schema_drift.sh   # drift
-cd "$(git rev-parse --show-toplevel)/backend" && python3 -m pytest tests/test_qmt_pilot_db.py -q 2>&1 | tail -3              # backend
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)                       # ① host
+cd "$(git rev-parse --show-toplevel)" && bash scripts/check_app_schema_drift.sh   # ② drift
+cd "$(git rev-parse --show-toplevel)/backend" && python3 -m pytest tests/test_qmt_pilot_db.py -q 2>&1 | tail -3              # ③ backend
+
+# ④ Catalyst —— 唯一编译 TrainingView 的门。两个坑必须同时避开：
+#    -scheme 必须是 KlineTrainerContracts-Package（library scheme 不编译 testTarget，该门曾报绿半年）
+#    set -o pipefail 必须有（tee 会吞掉退出码）
+cd "$(git rev-parse --show-toplevel)" && (set -o pipefail; xcodebuild test \
+  -scheme KlineTrainerContracts-Package -destination 'platform=macOS,variant=Mac Catalyst' \
+  2>&1 | tee /tmp/catalyst_final.log | tail -5)
+grep -c "Test Case .* passed" /tmp/catalyst_final.log   # 判绿读**执行量**，不读 TEST SUCCEEDED
 ```
+
+Expected：① host ≥ 1831 + 本片新增；④ Catalyst 执行量 **≥ Task 7 那次记录的条数**
+（`grep -c` 掉下去 = 有测试没跑起来，属假绿，必须查明再判绿）。
 
 - [ ] **Step 3: 交付前检查单**
 
 - [ ] 变异表**每一条**都关门看红过，PR 描述里记录了「红的是哪个测试名」+ 恢复后重新变绿
+- [ ] **D94 的证据级别已如实写进 PR 描述**（codex P-R8 medium）：spike 跑通 → 写明行为测试名；
+      spike 跑不通 → **逐字**写「D94 只有结构证据（G6），行为证据受阻于 `DrawingLayoutInvariantTests:9-28`
+      记录的平台限制；**即时 autosave 属已接受的未验证残留**」。⛔ **不得**在任何地方把 D94 表述成「已验证/已修复」
+- [ ] **Catalyst 门在 spike 之后重跑过**，且执行量 ≥ Task 7 记录值（spike 动的是 UIKit-gated 文件）
 - [ ] PR 描述复述了 spec §12 的 **override 边界**
 - [ ] PR 描述写明 **bump 后 QMT pilot 库须 `--reset` 重建**（闸门按设计工作、非回归）
 - [ ] PR 描述写明 **m01 矩阵在本片之前就已漂移**（停在 `0003`，代码已到 `0009`），本片只负责把自己这次做对

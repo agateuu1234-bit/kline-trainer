@@ -307,17 +307,29 @@ public extension DrawingDefaultStyle {
 两个 repo 的读路径**各调它一次**，除此之外 `Sources/` 里零处自行解码该列。
 
 ```swift
-// KlineTrainerPersistence internal
-/// 从列值（可能为 NULL / 非法 JSON / 类型不匹配 / 未来枚举值）读出一份**一定可用**的默认样式。
-/// **绝不 throw**（D92）；返回 nil 仅表示「列为 NULL / 无有效内容」。
-func decodeDrawingDefaultStyle(_ raw: String?) -> DrawingDefaultStyle?
+// KlineTrainerPersistence internal —— 编解码同一个命名空间，**两个方向都只有一份实现**
+/// `drawing_default_style` 列的唯一编解码点。
+enum DrawingDefaultStyleColumn {
+    /// 从列值（可能为 NULL / 非法 JSON / 类型不匹配 / 未来枚举值）读出一份**一定可用**的默认样式。
+    /// **绝不 throw**（D92）；返回 nil 仅表示「列为 NULL / 无有效内容」。
+    static func decode(_ raw: String?) -> DrawingDefaultStyle?
+    static func encode(_ style: DrawingDefaultStyle?) -> String?
+}
 ```
+
+⚠️ **符号名以此为准**（codex plan-P-R8 medium）：早稿写成自由函数 `decodeDrawingDefaultStyle`，
+plan 实现的是 `DrawingDefaultStyleColumn.decode` —— **守卫钉的名字和实现的名字对不上，守卫就是空的**。
+统一取 `DrawingDefaultStyleColumn`：它把 `encode` 也收进同一个命名空间，而 `encode` 同样必须单点
+（写路径两处 repo 也各调一次），自由函数形态表达不了这一半。
 
 **测试要求（覆盖矩阵，缺一格即不算过）**：**T3 / T4 / T5 / T5b 的每一条，都必须在 `pending_training`
 与 `pending_replay` 上各跑一遍**。允许用参数化测试（同一份用例喂两个 repo），但**不允许只跑一张表**。
 
-**守卫 G7**：`decodeDrawingDefaultStyle` 在 `Sources/` 里**恰好 2 个调用点**，分别在两个 repo impl 文件内。
+**守卫 G7**：`DrawingDefaultStyleColumn.decode` 在 `Sources/` 里**恰好 2 个调用点**，且分别落在
+`PendingTrainingRepositoryImpl` 与 `PendingReplayRepositoryImpl` 两个文件内（**不只数总数，还要数落点**）。
 少于 2 ⇒ 有一条读路径没接上（正是本 finding 的形态）；多于 2 ⇒ 出现了第三条读路径，必须回来重新审。
+**同时必须有反向条**：`Sources/` 里除该 enum 自身外，**零处**出现 `JSONDecoder().decode(DrawingDefaultStyle`
+—— 否则「两个 repo 各拷一份容错解码器」能同时满足行为矩阵和调用点计数，而 D100 的单边界不变量已经没了。
 
 **变异 M15**：把 `pending_replay` 读路径改回「直接 `JSONDecoder().decode`」（绕过共享函数）
 ⇒ **只有 replay 侧的 T4/T5/T5b 红**，training 侧全绿 —— 这条专门证明「两张表各跑一遍」不是冗余。
@@ -543,7 +555,7 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **G4c** | 样式面板（`DrawingStyleParams` / `DrawingStylePanel`）的**挂载点**在 `Sources/` 里**恰好 1 处** | 结构计数（防「另开一条挂载路径」绕过 G4/G4b） |
 | **G5** | `1...5` / `1 ... 5` 这类粗细值域字面量在 `Sources/` 里**恰好 1 处**（= `DrawingDefaultStyle.thicknessRange` 的定义），面板与解码器都只引用它 | 结构计数（**剥注释剥字面量后匹配**；D99 的机械守门） |
 | **G8** | 解析 `docs/governance/m01-schema-versioning-contract.md` 的矩阵，断言**三行都已同步**：顶层 == `"1.13"`、app.sqlite GRDB migration 行 == `0010_v1.13_drawing_default_style`、Swift 模型版本行 == `1.4` | **内容断言**（codex spec-R7 medium：D97 要求同步三行，却**没有任何机制**在它没做时报红 —— 而「矩阵停在 `0003`、代码已到 `0009`」正是本 spec 自己点名的既有漂移，**不加守卫就是原样重演一次**）。⚠️ 目标是 **markdown 文档**、不是 Swift 源，故**不适用剥字符串字面量那条纪律**；按表格行解析，并配双向自检（改任一行 → 红；无关行改动 → 仍绿） |
-| **G7** | `decodeDrawingDefaultStyle` 在 `Sources/` 里**恰好 2 个调用点**，分别在两个 repo impl 文件内 | 结构计数（D100：少于 2 = 有一条读路径没接上；多于 2 = 出现第三条读路径，必须回来重审） |
+| **G7** | `DrawingDefaultStyleColumn.decode` 在 `Sources/` 里**恰好 2 个调用点**，且分别落在 `PendingTrainingRepositoryImpl` 与 `PendingReplayRepositoryImpl` 两个文件内；**并配反向条**：除该 enum 自身外零处 `JSONDecoder().decode(DrawingDefaultStyle` | 结构计数（D100：少于 2 = 有一条读路径没接上；多于 2 = 出现第三条读路径，必须回来重审） |
 | **G6** | `TrainingView` 里存在一条 `.onChange(of: engine.drawingSession.defaultStyle)`，且其闭包体内调用 `lifecycle.autosave(immediate: true)` | **结构 + 内容断言**。这是 **D94 的唯一守门**（host 够不着视图，见 §6.1）；**M7 判绿看它，不看 T10** |
 | **G9** | **遍历**（不是照清单读）`KlineTrainerPersistenceTests/` 下每个 `.swift`，找出所有 `PRAGMA user_version` 断言点；断言值为 `7` 的必须是**部分迁移落点**（其上方最近一行 `.migrate(` 带 `upTo:`）。附两条防空转下界：断言点总数 ≥ 10、覆盖文件数 ≥ 5 | **发现式结构扫描**（**剥 `//` 注释**后匹配；`PRAGMA user_version = N` 是写入不是断言，排除）。<br>⚠️ **为什么必须发现式**（codex plan-P-R7 **high**）：本 spec 的 plan 起草时列了「3 个文件 6 处」，全仓实扫是 **6 个文件 11 处**，漏掉的三个文件（`AppDBMigrationsTests` / `TrainingResetPortTests` / `Migration0009Tests`）里**全是终态断言** ⇒ 照清单改完，CI 会在三个从没被提过的文件上红。**清单会过期，目录遍历不会。**<br>⚠️ **判据不能写成「全仓不许出现 `== 7`」**：`0010` 的升级测试在 `migrate(_:upTo: "0009_v1.11_drawing_style")` 之后**合法地**断言 `== 7` |
 
@@ -685,7 +697,7 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 
 | **R2** | 同分支 @ `a6ed039`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：T10 是 D94/M7 的唯一证据，但它是 host 假件计数，而要证的行为是 UIKit-gated `TrainingView` 里的 `.onChange` —— **删掉 `.onChange`，T10 照样绿**<br>**medium①**：m01 还有一行「Swift 模型版本｜Codable 字段变更→联动顶层」，我只同步了两行<br>**medium②**：G4 只钉 `showsTradeButtons`，可判据是三项合取，改另外两项或另开挂载路径都能绕过<br>**medium③**：T4/T5 只覆盖「枚举值不认识」和「整段非 JSON」，漏了**类型不匹配**（`{"thickness":"fat"}`），`decodeIfPresent(Int.self)` 能过 T4/T5 却在这里抛 | **四条全采纳**。high → D94 的守门改为**守卫 G6**（断言 `.onChange` 存在且调 `autosave`），**M7 判绿看 G6 不看 T10**；T10 降级为「值确实进了写入载荷」。①→ 矩阵改同步**三行**（Swift 模型版本 1.3→1.4）；**不采纳** codex 的另一选项「把 Codable 改动移出 PR」——那会造出有损 Codable，今天零消费者但它是 public，将来第一个用的人会踩。②→ 拆成 G4/G4b/G4c 三条（含整条 `stylePanelWillBeVisible` 定义式 + 挂载点计数），并写死无条件规则「任何让复盘可达改默认的改动必须同期接上 `review_archive`」，加变异 M2b。③→ D92 ① 明写「失败包括三类」+ 每字段各自 `try?`、禁止五字段包一个 `try`；加 T5b（五字段各一条）与 M4b |
 
-| **R3** | 同分支 @ `a850e5e`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**首次无 high**） | **medium①**：T3–T5b 只说「**列**含坏值」，没说哪张表；两个 repo 是**各自独立的读路径** ⇒ 可以只把 `pending_training` 做对，`pending_replay` 照样在坏值上抛 ⇒ replay 续局被 brick<br>**medium②**：§11 契约影响行仍写「m01 矩阵**两行**」，与 D97 已改成的**三行**自相矛盾 | **两条全采纳**。①→ 新增 **D100**：容错解码 + sanitize 收进**一个共享函数** `decodeDrawingDefaultStyle`，两个 repo **各调一次**；**T3/T4/T5/T5b 每条都必须两张表各跑一遍**；配守卫 **G7**（恰好 2 个调用点）与变异 **M15**（把 replay 读路径改回直接 decode → 只有 replay 侧红）。②→ §11 那行改写为三行并逐条列出 |
+| **R3** | 同分支 @ `a850e5e`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**首次无 high**） | **medium①**：T3–T5b 只说「**列**含坏值」，没说哪张表；两个 repo 是**各自独立的读路径** ⇒ 可以只把 `pending_training` 做对，`pending_replay` 照样在坏值上抛 ⇒ replay 续局被 brick<br>**medium②**：§11 契约影响行仍写「m01 矩阵**两行**」，与 D97 已改成的**三行**自相矛盾 | **两条全采纳**。①→ 新增 **D100**：容错解码 + sanitize 收进**一个共享函数** `decodeDrawingDefaultStyle`，两个 repo **各调一次**；**T3/T4/T5/T5b 每条都必须两张表各跑一遍**；配守卫 **G7**（恰好 2 个调用点；⚠️该符号后于 **P-R8** 统一为 `DrawingDefaultStyleColumn.decode`，见 §5.2b）与变异 **M15**（把 replay 读路径改回直接 decode → 只有 replay 侧红）。②→ §11 那行改写为三行并逐条列出 |
 
 | **R4** | 同分支 @ `60e8753`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：D97 只让改 `Models.swift` + m01 矩阵，漏了 **`backend/qmt_pilot_db.py` 里的第二份 `CONTRACT_VERSION`**，而 `backend/tests/test_qmt_pilot_db.py:798` **读 Swift 文件**做跨语言一致性断言 ⇒ 只改一边立刻红<br>**1 medium**：迁移名写成 `0010_v1.12_…`，可本片要把契约 bump 到 **1.13**；既有命名（`0008_v1.10` / `0009_v1.11`）都是「该迁移所属的契约版本」⇒ 这次 DDL 会看起来属于上一个契约版本 | **两条全采纳**。high → D97 扩成**四处必改 + 一处必不改**的清单（Swift 常量 / backend 常量 / Swift 两处 `#expect` 断言 / **`test_qmt_pilot_db.py:798` 不得改**——它动态读 Swift 比对，同步后自动绿，改它=把守卫弄瞎）；变异拆成 M13（只改一边 → backend 跨语言守卫红）与 M13b（两边都不改 → T15 红）。medium → 迁移改名 `0010_v1.13_drawing_default_style`（含 m01 记录的 id），并写明命名规则 |
 
