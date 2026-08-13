@@ -158,7 +158,7 @@ func setCommittedSelection(id: DrawingID, panel: PanelId) {
 | b | `commitPending` 返 nil —— `withStyle` 语义闸拒（水平线的 `.segment`） | ① | **否**：`.segment` 在面板里恒灰（`DrawingStyleAvailability.horizontalLineSubTypeEnabled` 返 false），而本片零持久化 → `session.defaultStyle` 只可能来自出厂值或面板写入，两者都产不出 `.segment` |
 | c | `visibleGeometry` 预检为 nil（射线锚点越主图右缘） | ② | **否，且可证明恒不可达** —— 见下方 §3.2 的证明 |
 | d | `appendDrawing` 返 false —— `isPeriodConsistent` / `isRenderableSubType` / id 空 | ⑥ | **否**：三道门分别已被 `commitPending` 的同 period 校验（`TrainingEngine.swift:1246-1249` 只比对象自身的锚与 period）、出口 b 的同一判据、`DrawingObject.init` 的 UUID 前置满足 |
-| e | id 与既有线碰撞（`appendDrawing` 的 `!drawings.contains(id)` 门） | ③ 判 `wasPresent == true` → ⑥ 拒 | **否**：id 是新生成的 UUID |
+| e | id 与既有线碰撞（`appendDrawing` 的 `!drawings.contains(id)` 门） | ③ 判 `wasPresent == true` → ⑥ 拒 | **否，且结构上不可能**：`commitPending` 内部经 `DrawingObject.init` 生成**全新 UUID**，外部无参数可控。⚠️ 正因如此，合取项 ① 是**纯纵深不变量**，且它的变异档（M5a）**只能经内层 `routeAndSelect` 构造**——这是 D85 拆内外两层的直接理由（codex spec-R5 medium） |
 | **f** | 落库**成功**，但该线**不属于本面板**（`belongsToPanel` 判 period 不匹配 / 同周期 fail-safe 下 `panelPosition` 破平局失败） | ⑥ 的合取项 ② 为 false | **否**（锚的 period 取自被点面板，`DefaultDrawingInputController.swift:33`）；但**它是合取项 ② 唯一能被单元测试构造到的档**（codex R2-medium，见 M5b） |
 
 ### 3.2 分支 2 在本期是**纵深不变量**，不是用户可见行为（codex spec-R2 high 纠正）
@@ -297,16 +297,33 @@ case .draw:
 
 四道 guard 变一次调用：UIKit-gated 文件里的判据**净减少两条**。
 
-**函数体的六步顺序是 load-bearing 的，一步都不许换位**：
+**拆成内外两层**（codex spec-R5 medium：**每条要求的变异都必须能真的写出来**）：
 
-| 步 | 做什么 | 换位 / 省略的后果 |
-|---|---|---|
-| **①** | `guard let committed = engine.drawingSession.commitPending(panelPosition: panel == .upper ? 0 : 1) else { clearSelection(); return }` | 省掉 `clearSelection` → 出口 a / b 留下陈旧选中（M13） |
-| **②** | `guard HorizontalLineTool.visibleGeometry(for: committed, mapper: mapper) != nil else { clearSelection(); return }` | 省掉 `clearSelection` → 出口 c 留下陈旧选中（M14，= codex R1 的原始 finding） |
-| **③** | `let wasPresent = engine.drawings.contains { $0.id == committed.id }` | 挪到 ④ 之后 → 恒 true → 自动选中整体失效（M5c） |
-| **④** | `engine.routeDrawingCommit(committed)` —— **无条件**，复盘照常落线 | —— |
-| **⑤** | `guard engine.flow.mode != .review else { return }` —— 复盘到此为止（D84） | 挪到 ④ 之前 → 复盘落线功能回归（M2） |
-| **⑥** | `!wasPresent && visibleDrawings(…, panel: panel, …).contains { $0.id == committed.id }` → `setCommittedSelection`；否则 → `clearSelection`（出口 d / e） | 见 M5a / M5b / M6 |
+```swift
+/// 外层 = 生产入口。只做「从 pending 锚造出候选对象」这两道门（①②），随后交给内层。
+static func commitPendingAndSelect(panel: PanelId, mapper: CoordinateMapper, engine: TrainingEngine)
+
+/// 内层 = 落库与选中处置（③④⑤⑥）。**接收一个已经造好的 `DrawingObject`**。
+/// 这个缝不是为测试硬开的口子，它就是「造对象」与「落库+定选中」两件事的自然分界；
+/// 但它顺带让 M5a / M5b / M5c / M2 四条变异**可构造**——外层的 `commitPending` 内部生成全新 UUID，
+/// 测试无从预知 id，也就造不出 id 碰撞档（`DrawingObject.init` 的 id 无参数可控）。
+static func routeAndSelect(_ committed: DrawingObject, panel: PanelId, engine: TrainingEngine)
+```
+
+⚠️ **拆层不得削弱 R1 的收口**：六条出口仍然全部落在这两个函数里、同一个文件里；
+`commitPending` 与 `routeDrawingCommit` 在 `Sources/` 里仍各只有一个调用点（G1 / G1b 不变）；
+生产路径上 `routeAndSelect` **只有外层一个调用点**（新增守卫 **G6**）。
+
+**六步顺序是 load-bearing 的，一步都不许换位**：
+
+| 步 | 层 | 做什么 | 换位 / 省略的后果 |
+|---|---|---|---|
+| **①** | 外 | `guard let committed = engine.drawingSession.commitPending(panelPosition: panel == .upper ? 0 : 1) else { clearSelection(); return }` | 省掉 `clearSelection` → 出口 a / b 留下陈旧选中（M13） |
+| **②** | 外 | `guard HorizontalLineTool.visibleGeometry(for: committed, mapper: mapper) != nil else { clearSelection(); return }` | 省掉 `clearSelection` → 出口 c 留下陈旧选中（M14，= codex R1 的原始 finding） |
+| **③** | 内 | `let wasPresent = engine.drawings.contains { $0.id == committed.id }` | 挪到 ④ 之后 → 恒 true → 自动选中整体失效（M5c） |
+| **④** | 内 | `engine.routeDrawingCommit(committed)` —— **无条件**，复盘照常落线 | —— |
+| **⑤** | 内 | `guard engine.flow.mode != .review else { return }` —— 复盘到此为止（D84） | 挪到 ④ 之前 → 复盘落线功能回归（M2） |
+| **⑥** | 内 | `!wasPresent && visibleDrawings(…, panel: panel, …).contains { $0.id == committed.id }` → `setCommittedSelection`；否则 → `clearSelection`（出口 d / e） | 见 M5a / M5b / M6 |
 
 **三条实施约束**：
 
@@ -436,9 +453,9 @@ mutate(&next)
 | M2 | 把 D84 的门（第 ⑤ 步）挪到第 ④ 步 `routeDrawingCommit` **之前** | 复盘**落线**档红（`reviewDrawings.count` 不再递增）；这一条证明 §4.2 的双断言不是空转 |
 | M3 | 把 `setCommittedSelection` 的守卫改成 `mode == .select` | P1 红（自动选中整体失效） |
 | M4 | 把 `setSelection` 的守卫放宽成 `mode != nil` / 删掉 | 「画线态调 `setSelection` 必须被拒」的不变量锁测试红 |
-| M5a | 删掉 D83 谓词的合取项 **①**（提交前不存在该 id） | **只有** id 碰撞档红（预置一条与 committed 同 id 的既有线 → 断言选中**保持为 nil**，不得变成那条老线） |
+| M5a | 删掉 D83 谓词的合取项 **①**（提交前不存在该 id） | **只有** id 碰撞档红。⚠️ **必须经内层 `routeAndSelect` 构造**（codex spec-R5 medium）：外层的 `commitPending` 内部生成全新 UUID、测试无从预知，**经外层根本写不出这条档**。造法：自己构造一个 id 已知的 `DrawingObject`、先把同 id 的另一条线塞进 `engine.drawings`、再调内层 → 断言选中**保持为 nil**，不得变成那条老线 |
 | M5b | 把 D83 谓词的合取项 **②** 改成恒 true | **只有出口 f 档**红（codex spec-R2 medium 重定向）。⚠️ **原先举的两个例子（周期不一致 / 射线越右缘）对 ② 零判别力** —— 六步流程下它们分别死在第 ① / ② 步，**根本到不了第 ⑥ 步**。正确造法：单元级构造一个「锚的 period ≠ 被点面板当前 period」的 pending 锚（`addAnchor` 不校验二者一致），使 ①②③④ 全过、`appendDrawing` 也成功（`isPeriodConsistent` 只比对象自身的锚与 period，`TrainingEngine.swift:1246-1249`），但 `belongsToPanel` 判它不属于本面板 → 合取项 ② 为 false → 断言**不授予选中** |
-| M5c | 把合取项 ① 的求值挪到 `routeDrawingCommit` **之后** | P1 红（自动选中整体失效）—— 这条证明「快照顺序」不是纸面约定 |
+| M5c | 把第 ③ 步（`wasPresent` 快照）挪到第 ④ 步 `routeDrawingCommit` **之后** | P1 红（自动选中整体失效）—— 这条证明「快照顺序」不是纸面约定。经内层构造 |
 | M6 | 删掉 D83 分支 2 的 `clearSelection()` | **只有**「先选中一条、再让下一次提交被拒」的档红 |
 | M7 | 把 `panelStyle` 的 `.draw` 分支改回「有选中取那条线」 | 「画线态 + 选中线已锁定 + 改样式 → 面板显示新默认」的档红 |
 | M8 | 把 `styleControlsEnabled` 的 `.draw` 分支改回现有谓词 | **只有**「画线态 + 选中线已锁定 → 控件仍可用」的档红（= 用户 Q2 选择的判别力所在） |
@@ -469,7 +486,7 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 
 - **N-lock-3**（出口 a/b，对应 M13）：先建立一个选中 → 塞一组 period 互不相同的 pending 锚（或让 `withStyle` 返 nil）→ 调用 → 断言 `selectedDrawingID == nil` 且 `drawings.count` 未变。
 - **N-lock-4**（出口 c，对应 M14）：先建立一个选中 → 构造一个使 `indexToX(anchor) >= mainChartFrame.maxX` 的 `mapper`（**单元级直接造 viewport，不要试图从 tap 造 —— §3.2 已证明造不出来**）→ 断言 `selectedDrawingID == nil` 且未落库。
-- **N-lock-5**（出口 f，对应 M5b）：塞一个「period ≠ 被点面板当前 period」的 pending 锚 → 调用 → 断言**落库成功**（`drawings.count` +1）**但不授予选中**（`selectedDrawingID == nil`）。这条是合取项 ② 唯一的判别力来源。
+- **N-lock-5**（出口 f，对应 M5b；**经内层 `routeAndSelect` 构造**）：造一个 period ≠ 被点面板当前 period 的 `DrawingObject` → 调内层 → 断言**落库成功**（`drawings.count` +1）**但不授予选中**（`selectedDrawingID == nil`）。这条是合取项 ② 唯一的判别力来源。
 
 ⚠️ 三条都必须**先建立一个选中**再触发（M13/M14）或**断言落库确实发生**（N-lock-5）——少了前置状态，删掉被测那一句照样绿。
 
@@ -479,6 +496,8 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 |---|---|---|
 | D82（两入口互斥）、D83（六步顺序 + 六条出口 + 两个合取项）、D84（复盘门位置）、D86（三张表 + 写入顺序 + 现取） | **host `swift test`**（`DrawingSession` / `DrawingEditRouter` / `RenderStateBuilder` / `HorizontalLineTool` / `CoordinateMapper` 均无 UIKit） | M1 / M2 / M3 / M4 / M5a / M5b / M5c / M6 / M7 / M8 / M9 / M10 / M11 / **M13 / M14** |
 | `ChartContainerView.draw` 分支换调用 + 补 `rebuildRenderState`；`TrainingView` 删 if 分流 | 源码守卫（host）+ **Catalyst 编译与测试门** | **M12（只有它必须上 Catalyst）** |
+
+**M2 / M5a / M5b / M5c 四条经内层 `routeAndSelect` 构造，M13 / M14 经外层 `commitPendingAndSelect` 构造**（D85 §5.1 拆层的理由）。
 
 **D85 把「尝试提交」整段挪进 `DrawingEditRouter` 的直接收益就在这张表**：15 条变异里 14 条落在 host。
 若按上一稿只挪 `routeDrawingCommit` 一句，M13 / M14 这两条（= codex R1 那条 high finding 的守门测试）就只能上 Catalyst。
@@ -494,6 +513,7 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 | **G1** | `routeDrawingCommit` 在 `Sources/` 里**恰好 1 个**调用点，且在 `Drawing/DrawingEditRouter.swift` 内 | 结构计数 |
 | **G1b** | `commitPending` 在 `Sources/` 里**恰好 1 个**调用点，且在 `Drawing/DrawingEditRouter.swift` 内（D85 §5.1 第 ① 步）—— 防实施者「只搬一半」，把 `commitPending` 留在 `ChartContainerView` 里 | 结构计数 |
 | **G2** | `setCommittedSelection` 在 `Sources/` 里**恰好 1 个**调用点，且在 `Drawing/DrawingEditRouter.swift` 内 | 结构计数 |
+| **G6** | `routeAndSelect` 在 `Sources/` 里**恰好 1 个**调用点，且在 `Drawing/DrawingEditRouter.swift` 内（= 外层 `commitPendingAndSelect`）——拆内外两层**不得**变成两个生产入口 | 结构计数 |
 | **G3** | `applyStyleMutation` / `applyDefaultStyleMutation` 两个标识符在 `Sources/` 的**代码文本**里**恰好 0 次**出现（已删除） | 结构计数。⚠️ **必须剥注释后再数** —— D86 §6.2 要求给 `applyPanelStyleMutation` 写一句「取代 applyStyleMutation / applyDefaultStyleMutation」的承重注释，不剥注释 G3 会被这句注释自己打红，而「删掉那句注释」就成了合法绕过路径 |
 | **G4** | `applyPanelStyleMutation` 在 `Sources/` 里**恰好 1 个**调用点，且在 `UI/TrainingView.swift` 内 | 结构计数 |
 | **G4b** | `clearSelection` 在 `Drawing/DrawingEditRouter.swift` 里**至少 4 个**调用点（第 ① / ② / ⑥ 步 + 既有 `syncSelectionByState`）—— 少于 4 说明分支 2 的某条出口没接上 | 结构计数（**下界**，不是精确值：`applyStyle` / `deleteSelected` 等既有路径也可能增加，故用 ≥ 不用 ==） |
@@ -504,7 +524,7 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 - **不得写成「禁词黑名单」**，一律用结构计数（[[feedback_source_guard_text_source_discipline]]）。
 - 否定 / 结构断言必须**剥注释、剥字符串字面量**再匹配 —— 否则本 spec 引用的那些承重注释会把守卫自己打红，且「删注释」会变成合法绕过路径。
 - **每个守卫必须配双向自检**：喂一段「本该命中」的样本必须命中、喂一段「本该不命中」的样本必须不命中。锚点失效必须**报错**，不得静默返回 0（[[feedback_mechanical_checker_parser_disabled]]）。
-- ⚠️ **G1 / G1b / G2 / G3 / G4 / G4b 描述的是改动之后的状态，在当前树上是红的**（G1 与 G1b 今天的唯一调用点都在 `ChartContainerView`、不在 `DrawingEditRouter`；G2/G4 的符号今天还不存在；G3 今天恰好相反、两个标识符都还在；G4b 今天只有 1 个）。故它们**必须与对应的生产改动写在同一个 task 里**，不得作为「前置守卫」先行落库 —— 一条开局就红的守卫等于给实施者发放宽许可证（[[feedback_source_guard_must_be_green_on_current_tree]]）。每个 task 结束时它自己那几条守卫必须是绿的。
+- ⚠️ **G1 / G1b / G2 / G3 / G4 / G4b / G6 描述的是改动之后的状态，在当前树上是红的**（G1 与 G1b 今天的唯一调用点都在 `ChartContainerView`、不在 `DrawingEditRouter`；G2/G4 的符号今天还不存在；G3 今天恰好相反、两个标识符都还在；G4b 今天只有 1 个）。故它们**必须与对应的生产改动写在同一个 task 里**，不得作为「前置守卫」先行落库 —— 一条开局就红的守卫等于给实施者发放宽许可证（[[feedback_source_guard_must_be_green_on_current_tree]]）。每个 task 结束时它自己那几条守卫必须是绿的。
 - **G5 今天已经是绿的**（`setSelection` 的唯一调用点已在 `ChartContainerView.swift:378`），它是**回归守卫**，可以先落库。
 
 ---
@@ -593,6 +613,8 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 
 | **R4** | 同分支 @ `4571adf`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：本片把「本局默认」立成一等语义，却没定义它的生命期；`DrawingSession.defaultStyle` 不在任何存档里 → 退出续训后回落出厂值，属用户可见的状态丢失 | **部分采纳（事实收、归因驳）**。**事实成立**：`defaultStyle` 在 `KlineTrainerPersistence/` 出现 **0 次**，退出训练再续训确实回落出厂值；而我的 spec 从头到尾**没定义过这个生命期**——真缺口，已补 **D87**（§6.6）。**归因不成立**：codex 称「本片**制造**了这个状态」，实测为否——`TrainingEngine.swift:54` 逐字写着「会话是局内瞬态，不持久化」，且 main 上画线态**恒无选中**（D54）→ 画线态改样式本来就走 `applyDefaultStyleMutation`，**本片没有新增任何一次 `setDefaultStyle` 调用**，写入频率完全未变。故定位为「既有行为 + 已接受残留 + 交 P6」，本片不修（修它 = 三条存档契约 + 向后兼容解码 + 为不 bump revision 的变更另设 autosave 触发，远超 60–90 行边界）。连带纠正其子论断：锁定线致 `applyStyle` 被拒时不触发 autosave 是**正确行为**（`drawings` 没变，没东西要存）。产出：D87 + 验收 #23（记录既定行为、非阻塞项）+ 残留与 P6 交接各一条 |
 
+| **R5** | 同分支 @ `d1f51f8`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：D87 把「本局默认」定成引擎实例生命期、验收 #23 还把「续训回落出厂值」标成正常非阻塞，等于用「本局默认」这个名字给一次用户可见的状态丢失背书；要么持久化，要么正名并**取得明确的产品裁决**<br>**1 medium**：M5a 要求预置一条与 committed 同 id 的线，但 `commitPending` 内部经 `DrawingObject.init` 生成**全新 UUID**、`commitPendingAndSelect` 签名里没有任何 id 缝 → **这条变异档根本写不出来**，合取项 ① 拿到的是一张空头保证书 | **medium 全采纳**：D85 拆成**内外两层**（外层 `commitPendingAndSelect` 管 ①②，内层 `routeAndSelect(_:panel:engine:)` 管 ③④⑤⑥），M2 / M5a / M5b / M5c 四条改经内层构造；出口 e 的可达性表述改为「结构上不可能」并把 ① 诚实标为纯纵深不变量；新增守卫 **G6**（`routeAndSelect` 恰好一个生产调用点，拆层不得变成两个入口）。**high 升级为产品裁决**：codex 的处方本身就是「取得明确的产品裁决」，而生命期该多长是用户的决定不是我的 —— 已停下来交由用户拍板 |
+
 **R1 的形状**：我把「要做什么」写全了，却把「在哪做」写在了一个**那些路径到不了**的位置。
 这与 [[feedback_internal_review_misses_bad_data]] 记录的形状一致 —— 判据本身没错，错在**没有对着真实控制流核一遍每条出口是否真的流经收口点**。
 纪律沉淀：**凡是写「所有 X 都要走 Y」的 spec，必须先把 X 的出口逐条列出来，再逐条核它是否真的到得了 Y**（§3.1 那张出口表就是这条纪律的产物）。
@@ -609,4 +631,7 @@ R1 = 只核了出口到收口点、没核收口点位置；R2 = 只核了出口�
 
 **R4 的形状**（与 R1–R3 不同族）：不是「路只看了一半」，而是**给一个概念起了名字却没定义它的生命期**。「本局默认」在本片之前只是 `session.defaultStyle` 一个实现细节，本片把它写成用户语义（子项 ②）之后，「它活多久」就成了必须回答的问题，而我一个字没写。
 纪律沉淀（第四条）：**spec 每引入或提升一个有状态的概念，必须同时写死它的三件事——谁能写、活多久、什么时候没**。
-⚠️ 同时这一轮也提醒：**评审给的归因要单独核**（[[feedback_mutation_must_target_the_exact_predicate]]）。本轮 finding 的事实对、归因错（说本片制造了它），若不核就照单全收，会把一块 main 上的既有残留误算进本片的账、并可能因此把一整块持久化契约改动拉进这个 60–90 行的切片。
+**R5 medium 的形状**（与 R1–R3 同族的第四次变体）：这次不是「用户到不了那条路」，而是「**测试到不了那条判据**」。我给合取项 ① 配了变异档，却没验过那条档**用我自己提出的 API 能不能写出来**。
+纪律沉淀（第五条）：**每条变异档都要当场回答「用哪个入口、拿什么入参构造」**；答不出来的，要么开一条自然的缝（内外分层，不是为测试注入工厂），要么删掉判据别假装它被覆盖了。
+
+⚠️ 同时 R4 那一轮也提醒：**评审给的归因要单独核**（[[feedback_mutation_must_target_the_exact_predicate]]）。本轮 finding 的事实对、归因错（说本片制造了它），若不核就照单全收，会把一块 main 上的既有残留误算进本片的账、并可能因此把一整块持久化契约改动拉进这个 60–90 行的切片。
