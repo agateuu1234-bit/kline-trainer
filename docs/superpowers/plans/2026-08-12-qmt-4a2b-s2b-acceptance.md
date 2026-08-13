@@ -42,6 +42,13 @@ export DSN2="postgresql://postgres:$(docker inspect qmt-pg-r8b --format '{{range
 ```
 export QMT_VERIFY_ALLOW_DESTRUCTIVE=1
 ```
+```
+export PY="/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python"
+```
+
+> ⚠️ **venv 在主仓，worktree 里没有** —— 在 worktree 里敲 `.venv/bin/python` 会得到
+> `zsh: no such file or directory`。故本清单一律用上面这个 `$PY`，
+> 且**必须带引号**（路径里有空格）。先 `"$PY" -V` 确认打印 `Python 3.11.15`。
 
 > ⚠️ DSN 指向的**不是**本机时**另外**还要 `export QMT_VERIFY_ALLOW_REMOTE=1`。
 > ⚠️ 退出码 **8** = 同一台集群上已经有另一个同前缀的验收在跑 —— 等它跑完再来。
@@ -53,15 +60,15 @@ export QMT_VERIFY_ALLOW_DESTRUCTIVE=1
 
 | # | 动作 | 期望看到 | 通过? |
 |---|---|---|---|
-| 1 | `.venv/bin/python -m pytest backend/tests -q` | 末行 `770 passed`，**0 failed / 0 error / 0 skipped** | |
-| 2 | `.venv/bin/python backend/scripts/verify_pilot_db_lifecycle.py` | 末尾 `✅ 41 档断言全部成立（真 PostgreSQL）`；整篇**没有** `FAIL` 也没有 `❌` | |
+| 1 | `"$PY" -m pytest backend/tests -q` | 末行 `770 passed`，**0 failed / 0 error / 0 skipped** | |
+| 2 | `"$PY" backend/scripts/verify_pilot_db_lifecycle.py` | 末尾 `✅ 41 档断言全部成立（真 PostgreSQL）`；整篇**没有** `FAIL` 也没有 `❌` | |
 | 3 | 把第 2 条**再跑两遍**，比较三次的末行 | 三次**完全一样**（都是 `✅ 41 档`）—— 专查「间歇性假拒」那类 flake | |
-| 4 | `.venv/bin/python backend/scripts/verify_pilot_concurrency.py` | 末行 `✅ 11 档断言全部成立（真 PostgreSQL）` | |
-| 5 | `.venv/bin/python backend/scripts/verify_pilot_two_phase_create.py` | 末行 `✅ 28 档断言全部成立（真 PostgreSQL）` | |
+| 4 | `"$PY" backend/scripts/verify_pilot_concurrency.py` | 末行 `✅ 11 档断言全部成立（真 PostgreSQL）` | |
+| 5 | `"$PY" backend/scripts/verify_pilot_two_phase_create.py` | 末行 `✅ 28 档断言全部成立（真 PostgreSQL）` | |
 | 6 | 整行贴进终端：<br>`grep -rn "def authorize_reset\|class ResetAuthorization\|_mint_authorization\|_MINTED_AUTHORIZATIONS\|_RESET_CAPABILITY\|class ResetGateOutcome" backend/ --include='*.py' \| grep -v "^backend/tests/"` | **一行输出都没有** —— 塌缩买到的东西在本片仍然成立：判定与销毁之间没有可传递的凭据 | |
 | 7 | `grep -rn "DROP DATABASE" backend/qmt_pilot_db.py \| grep -v "^.*:[0-9]*: *#"` | 只有**一行**长成真的在发 SQL 的样子（`f"DROP DATABASE {quote_ident(db_name)}"`），其余全是说明文字或报错串 | |
-| 8 | `.venv/bin/python tools/check_spec_consistency.py` | 末行 `✅ 一致性检查全过` | |
-| 9 | `.venv/bin/python tools/check_spec_consistency.py --self-test` | 末行 `✅ mutation 自测通过（11 项检查各自被反例触发）` | |
+| 8 | `"$PY" tools/check_spec_consistency.py` | 末行 `✅ 一致性检查全过` | |
+| 9 | `"$PY" tools/check_spec_consistency.py --self-test` | 末行 `✅ mutation 自测通过（11 项检查各自被反例触发）` | |
 | 10 | 看第 2 条输出的**最后几行** | 必须能看到「仍**没有**覆盖的」那一段（`--init-cluster-marker` 随 S3；autovacuum worker 那一向没有常驻档）。**看不到就判不通过** —— 一份不肯说自己没验什么的报告，比没有报告更危险 | |
 
 ### 五条「守卫真的拦得住吗」的手工反证（做完**务必还原**）
