@@ -504,6 +504,7 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **T12** | replay 续局：存 → resume → `session.defaultStyle` 逐字段 == 存进去的 | host + DB 边界 |
 | **T13** | normal 续局：同上 | host + DB 边界 |
 | **T14** | **fresh 会话不种**：开新局 → `session.defaultStyle` == 出厂值 | host（§1 新局回落） |
+| **T14b**（**M11 的唯一判别档**） | **pending 行仍在**时开新局 → `session.defaultStyle` 仍 == 出厂值 | host。⚠️ T14 因先 `clearPending()` 而对 M11 **零判别力**（Task 6 实测）；已实测 `startNewNormalSession()` 完全不碰 pending ⇒ 该状态生产可达 |
 | **T15** | **两份**常量都是 `"1.13"`：Swift 侧 `#expect(CONTRACT_VERSION == "1.13")`（**两处测试都要改**）+ backend `qmt_pilot_db.CONTRACT_VERSION == "1.13"` | host（Swift）+ **backend pytest**（D97）。⚠️ `test_qmt_pilot_db.py:798` 的跨语言断言**不改**，它同步后自动绿 |
 | **T15b**（**两档**，缺一不可） | `sanitized(for: .trend)`（**非水平工具**）**不改写** `labelMode`：喂 `(lineSubType: .ray, labelMode: .left)` → 原样返回 `.left`（横线规则不得外溢）。同法验 `lineSubType` 不被横规则拒 | host（**不变量锁**：本片调用点恒 `.horizontal`，故只能单元级构造） |
 | **T17** | **`PendingTraining` 的 Codable 往返**：造一个 `drawingDefaultStyle` 为**非出厂值**的实例 → encode → decode → **逐字段相等** | host（codex spec-R8 medium：DB 路径不走 Codable，漏 `encodeIfPresent` 时 T1/T2/T12/T13 **全绿**） |
@@ -528,7 +529,7 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | M8 | `replayBaseline` 去掉 `defaultStyle` 分量（回到五元组） | **只有 T11** 红 |
 | M9 | `resumePending` 的种子那一句删掉 | **只有 T13** 红 |
 | M10 | `resumePendingReplay` 的种子那一句删掉 | **只有 T12** 红 |
-| M11 | 让 fresh 会话也种子（把种子挪到公共构造路径） | **只有 T14** 红 |
+| M11 | 让 fresh 会话也种子（把种子挪到公共构造路径） | **只有 T14b** 红（**不是 T14** —— 它先 clearPending，恒绿） |
 | M12 | `user_version` 仍写 7 | T8/T9 红 |
 | M13 | **只**改 Swift 那份、backend 那份留在 `"1.12"` | **backend 的 `test_qmt_pilot_db.py:798`** 红（跨语言一致性守卫）—— 这条专证「两份源必须同改」 |
 | **M13b** | 两份都留在 `"1.12"` | **只有 T15** 红 |

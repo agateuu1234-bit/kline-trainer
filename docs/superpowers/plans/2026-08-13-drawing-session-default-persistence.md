@@ -1581,6 +1581,12 @@ struct CoordinatorDefaultStylePersistTests {
         #expect(resumed.drawingSession.defaultStyle == s)
     }
 
+    /// ⚠️ **T14 必须配一条 T14b**（Task 6 实施者跑 M11 时实测暴露）：
+    ///    T14 在开新局前 `db.clearPending()`，**行已经没了** ⇒ 「把种子挪到 fresh 路径」
+    ///    这条变异挪过去也读不到东西 ⇒ T14 **恒绿、零判别力**。
+    ///    已实测 `startNewNormalSession()` **完全不碰 pending**（既不清也不读），
+    ///    所以「pending 行还在 + 开新局」是生产上够得到的真实状态 ——
+    ///    由 **T14b（不清 pending）** 来钉「fresh 会话绝不从存档种子」这条不变量。
     /// T14：**fresh 会话不种** —— 新局必须回落出厂值（用户 2026-08-13 裁决）
     @Test func fresh_session_does_not_seed() async throws {
         let (url, db) = try makeFreshDB(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -1592,6 +1598,19 @@ struct CoordinatorDefaultStylePersistTests {
         try db.clearPending()
         let e2 = try await makeCoordinator(db: db).startNewNormalSession()
         #expect(e2.drawingSession.defaultStyle == DrawingDefaultStyle())
+    }
+
+    /// T14b：**pending 行仍在**时开新局 —— 同样不得种子（这条才对 M11 有判别力）
+    @Test func fresh_session_does_not_seed_even_when_pending_row_exists() async throws {
+        let (url, db) = try makeFreshDB(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let c1 = makeCoordinator(db: db)
+        let e1 = try await c1.startNewNormalSession()
+        e1.drawingSession.setDefaultStyle(nonDefaultStyle())
+        try await c1.saveProgress(engine: e1)
+        // ⚠️ 刻意**不** clearPending：存档里带着非出厂默认的那一行还在
+        let e2 = try await makeCoordinator(db: db).startNewNormalSession()
+        #expect(e2.drawingSession.defaultStyle == DrawingDefaultStyle(),
+                "fresh 会话绝不从 pending 存档种子 —— 新局用全局默认（D96）")
     }
 }
 #endif
@@ -1735,7 +1754,7 @@ Step 3–5 落地后转绿。
 | M8 | `replayBaseline` 去掉 `defaultStyle` 分量 | **T11** + **G3** 的内容条 |
 | M9 | 删掉 `resumePending` 的种子 | **T13** + **G1**（coordinator 那格从 2 掉到 1） |
 | M10 | 删掉 `resumePendingReplay` 的种子 | **T12** + **G1**（同上） |
-| M11 | 把种子挪到 fresh 会话的公共构造路径 | **只有 T14**（G1 的总数仍是 3 —— 这条专证「计数挡不住挪位置」，行为测试不可替代） |
+| M11 | 把种子挪到 fresh 会话的公共构造路径（读 `pendingRepo.loadPending()`） | **只有 T14b** 红（G1 的总数仍是 3 —— 专证「计数挡不住挪位置」，行为测试不可替代）。⚠️ **T14 对这条零判别力**（Task 6 实施者实测）：它开新局前先 `db.clearPending()`，行已被抹掉 ⇒ 挪过去的种子也读不到东西 ⇒ **恒绿**。必须由不清 pending 的 **T14b** 来打 |
 | **M8b** | **只**把**三处**基线捕获里的**一处**去掉 `defaultStyle`（另两处保留） | **只有 G3** 的内容条红（T11 可能仍绿 —— 它只跑得到其中一条路径）—— 专证「不只数处数、要逐处查分量」 |
 
 - [ ] **Step 8: 提交**
