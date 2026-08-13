@@ -122,8 +122,9 @@ replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 
 - **模型层**：`PendingTraining` / `PendingReplay` 各加 `drawingDefaultStyle: DrawingDefaultStyle?`
   （`nil` = 旧档 / 未写过）。两个 `init` 的新参数**必须带默认值 `= nil`**，否则 `DebugFixtureData.swift:181`
   等既有构造点全部编译失败。
-- **模型 Codable 同步更新**（`decodeIfPresent` / `encodeIfPresent`），但见 §7 的判绿纪律：
-  **模型 round-trip 绿 ≠ 落盘成功**，必测证据只认 DB 边界测试。
+- **模型 Codable 同步更新**（`decodeIfPresent` / `encodeIfPresent`）。**两个方向的判绿纪律都要记住**：
+  ① **模型 round-trip 绿 ≠ 落盘成功** —— 落盘证据只认 DB 边界测试（§3.1）；
+  ② **DB 边界绿 ≠ Codable 契约完好** —— DB 路径根本不走 Codable，漏 `encodeIfPresent` 时 DB 测试全绿（codex spec-R8）。故 **Codable 契约有自己的守门 T17/T17b/T18**，与 DB 边界测试**互不替代**。
 
 ### 3.3 迁移
 
@@ -484,6 +485,9 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **T14** | **fresh 会话不种**：开新局 → `session.defaultStyle` == 出厂值 | host（§1 新局回落） |
 | **T15** | **两份**常量都是 `"1.13"`：Swift 侧 `#expect(CONTRACT_VERSION == "1.13")`（**两处测试都要改**）+ backend `qmt_pilot_db.CONTRACT_VERSION == "1.13"` | host（Swift）+ **backend pytest**（D97）。⚠️ `test_qmt_pilot_db.py:770` 的跨语言断言**不改**，它同步后自动绿 |
 | **T15b** | `sanitized(for: .trend)`（**非水平工具**）**不改写** `labelMode`：喂 `(lineSubType: .ray, labelMode: .left)` → 原样返回 `.left`（横线规则不得外溢）。同法验 `lineSubType` 不被横规则拒 | host（**不变量锁**：本片调用点恒 `.horizontal`，故只能单元级构造） |
+| **T17** | **`PendingTraining` 的 Codable 往返**：造一个 `drawingDefaultStyle` 为**非出厂值**的实例 → encode → decode → **逐字段相等** | host（codex spec-R8 medium：DB 路径不走 Codable，漏 `encodeIfPresent` 时 T1/T2/T12/T13 **全绿**） |
+| **T17b** | `PendingReplay` 同上 | host |
+| **T18** | **旧载荷解码**：JSON 里**没有** `drawingDefaultStyle` 这个 key → 解码成功且该字段 == `nil`，其余字段照常 | host（两个模型各一条；`init(from:)` 必须 `decodeIfPresent`） |
 | **T16** | `DrawingDefaultStyle.thicknessRange` 与面板实际渲染的档数**同源**：面板选项数 == `thicknessRange.count` | **Catalyst**（面板是 UIKit-gated；D99 的单一真相守门） |
 
 ### 7.2 变异清单（**强制清单 = 本表每一条**，刻意不枚举编号）
@@ -509,6 +513,8 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **M13b** | 两份都留在 `"1.12"` | **只有 T15** 红 |
 | **M13c** | 两份常量都改对、migration 也加了，**但 m01 矩阵三行一行没动** | **只有守卫 G8** 红 —— 这条专证「矩阵同步是被强制的，不是靠自觉」（codex R7-medium） |
 | M14 | 把 `thicknessRange` 改成 `1...4`（模拟两处字面量漂移） | **只有 T16** 红 —— 证明面板确实是从该常量派生、不是自己写了个 `1...5` |
+| **M16** | 从 `PendingTraining.encode(to:)` 里删掉 `encodeIfPresent(drawingDefaultStyle…)`（= 造出「有损 Codable」） | **只有 T17** 红；T1/T2/T12/T13 **全绿** —— 这条专证「DB 边界测试对 Codable 契约零判别力」（codex R8-medium） |
+| **M16b** | 把 `init(from:)` 的 `decodeIfPresent` 改成 `decode`（旧载荷缺 key 即抛） | **只有 T18** 红 |
 | **M15b** | 把 `sanitized` 里的 `labelMode` 归一化换成**两参**重载 `normalizedLabelMode(current:lineSubType:)` | **只有 T15b** 红 —— 这条专证「tool-aware 签名挡不住传错重载」（codex R5-medium） |
 | **M15** | 把 `pending_replay` 的读路径改回「直接 `JSONDecoder().decode`」（绕过共享函数） | **只有 replay 侧**的 T4/T5/T5b 红，**training 侧全绿** + 守卫 **G7** 红 —— 专证「两张表各跑一遍」不是冗余（codex R3-medium） |
 
@@ -624,7 +630,46 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 
 ---
 
-## 12. codex 对抗性评审逐轮
+## 12. 收口声明（用户 override，2026-08-13）
+
+**本 spec 在 codex R8 的 finding 修复后由用户 override 收口，未取得 `approve`。**
+
+| | |
+|---|---|
+| **最后一轮** | R8 @ `d95e738`，`needs-attention`，**0 high / 1 medium**，**已核实为真并修复** |
+| **用户裁决** | 采纳「再跑 1–2 轮；若仍只有 medium 且属表述/覆盖精度即 override 收口」（2026-08-13） |
+| **共计** | **8 轮，从未 approve**；R1–R8 的 finding **全部核实为真**（唯 R4 的**归因**经实测驳回，其事实照收） |
+| **收敛证据** | R3 起**连续六轮 0 high**；finding 形态从「设计错误」→「覆盖精度」→「表述精度」单调下降 |
+
+### override 的边界（**写死，不得扩张**）
+
+**覆盖**：文档措辞 / 摘要一致性 / 测试矩阵的表述粒度 —— 即「写错了会让人做错事，但不会让代码丢数据」的那一类。
+
+**不覆盖（一条都不覆盖）**：
+
+- **D92 容错解码**（逐字段独立 `try?`、三类失败全挡、绝不 `throw`）—— 它防的是**一整局训练存档打不开**；
+- **D93 / D99 解码后 sanitize**（且必须用 **tool-aware** 重载）—— 它防的是**能打开但一条线都画不出来**；
+- **D95 replay clean-skip 纳入 defaultStyle** —— 它防的是**只改默认时静默不写盘**；
+- **D96 两处 resume 种子 + fresh 会话不种**；
+- **D97 三处 `CONTRACT_VERSION` + m01 三行 + G8 守卫**；
+- **D98 版本错位的四方向结论**（**不得**再宣称「双向兼容」）；
+- **D100 两个 repo 共用一个解码器 + 每条坏值档两张表各跑一遍**；
+- §7 的**任何一条** T / M / 正向档，以及 §8 的**任何一条**守卫。
+
+**换言之：override 只赦免「文档写法」，不赦免「行为正确性」。**
+实施阶段若发现上述任一条难以落地，**必须回来改 spec 并重跑评审**，不得以「spec 已 override」为由跳过。
+
+### 交付前必须做的动作
+
+1. **实施完成后，整支 codex 评审照常要跑**（override 只覆盖 spec 阶段，不覆盖代码）；
+2. 进度 memory 记为「**spec override 收口，未 approve**」，不得记 ✅；
+3. PR 描述必须复述本节的 override 边界，**并额外写明两件事**：
+   - 本 PR bump 了 `CONTRACT_VERSION`，**已建的 QMT pilot 库须 `--reset` 重建**（D97，闸门按设计工作、非回归）；
+   - m01 矩阵的 app.sqlite 行**在本片之前就已漂移**（停在 `0003`，代码已到 `0009`），本片只负责把自己这次做对。
+
+---
+
+## 13. codex 对抗性评审逐轮
 
 | 轮 | 评审对象 | verdict | finding | 处置 |
 |---|---|---|---|---|
@@ -648,9 +693,15 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 
 | **R7** | 同分支 @ `a2f1790`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**0 high**） | **medium①**：D94 只有 G6 这条结构证据；且真机 #4「杀 App」**会被既有后台 flush 掩盖**，不隔离该触发<br>**medium②**：D97 要求同步 m01 三行，却**没有任何守卫**在它没做时报红 —— 而本 spec 自己点名的「矩阵停在 0003」正是这么来的 | **两条全采纳，且①的核实结果比 codex 说的更严重**：`TrainingView.swift:347-363` 的 `.onChange(of: scenePhase)` 在 `.inactive/.background` 调 `flushForBackground()` ⇒ **我给 D94 写的理由「改完默认就杀进程 = 白改」本身是假的**（后台 flush 已覆盖）。已更正：新增 §6.1b 更正理由（D94 真实价值 = **收窄崩溃窗口** + 与既有 `drawingsRevision` 触发的一致性）、§6.1c 如实标注证据强度（必做 = G6；行为测试列为 **plan 阶段 spike**，因本仓 `DrawingLayoutInvariantTests:9-28` 已实测记录整壳托管视图测试的**四条路三条死**、唯一可行的 `ImageRenderer` 对含 `UIViewRepresentable` 的整壳会塌成 0）；验收 #4 改为「验端到端链路、不隔离 D94」。②→ 新增守卫 **G8**（解析 m01 markdown 断言三行）与变异 **M13c** |
 
+| **R8** | 同分支 @ `d95e738`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**0 high，仅 1 medium**） | 我坚持「Codable 不能有损」（还为此 bump 了 M0.3 那行），却**没给这个决定配任何测试** —— DB 路径不走 Codable，`encode(to:)` 漏掉 `encodeIfPresent` 时 T1/T2/T12/T13 **全绿** | **全采纳**。新增 **T17 / T17b**（两个模型的 Codable 往返，非出厂值逐字段相等）与 **T18**（旧载荷缺 key → 解码成功且为 `nil`），配变异 **M16**（删 `encodeIfPresent` → 只有 T17 红、DB 测试全绿）与 **M16b**（`decodeIfPresent`→`decode` → 只有 T18 红）；D91 补写双向判绿纪律 |
+
 **R1 的形状**：我把「可空列 + 附加式」当成了「所以不用 bump」，**跳过了去读治理文档那一步**——
 规则明文写着「影响 DDL → 必须 bump」，我一次都没查就下了结论。
 而「双向兼容」那句是同一个毛病的另一面：**只推演了对我的结论有利的那个方向（读）**。
+
+**R8 的形状**：**我做了一个决定，却没给它配守门**。「Codable 不能有损」是我在 R2 主动选的（还驳回了 codex 给的另一个选项），可整份测试矩阵里**一条 Codable 测试都没有** —— 而 DB 边界测试对它**零判别力**（根本不走那条路径）。
+纪律沉淀：**每做一个「必须是 X 而不是 Y」的决定，当场问「哪条测试会在它变成 Y 时变红」**；答不出来，这个决定就只是一句话。
+⚠️ 与 R2/R7 同族：**证据要落在被决定的那条路径上**，隔壁路径的绿灯不算数。
 
 **R7 medium① 的形状 = 本轮最值得记的一条**：**我为一条机制写的理由，被同一个文件里 20 行外的既有代码证伪了**。我论证「不加这条触发就会丢」，却没去看**已经存在的后台 flush**。
 纪律沉淀：**论证「不做 X 就会出事」之前，先把「现在是靠什么兜住的」找出来** —— 很多时候已有兜底，X 的真实价值要小得多；理由写错会连带把验收步骤写成**无判别力**的（本例 #4）。
