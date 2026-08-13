@@ -105,6 +105,10 @@ public struct PendingTraining: Codable, Equatable, Sendable {
     public let accumulatedCapital: Double
     public let drawdown: DrawdownAccumulator
     public let sessionKey: String
+    /// D90/D91：本局画线默认样式。`nil` = 旧档 / 本局从未改过（→ 回落全局默认）。
+    /// ⚠️ **落盘边界是 repo 的具名列 SQL，不是这个 Codable**（本类型的 Codable 生产上零消费者）；
+    ///    但它是 `public`，故必须保持**无损**，否则未来第一个消费者会静默丢值。
+    public let drawingDefaultStyle: DrawingDefaultStyle?
 
     public var drawings: [DrawingObject] { lossy.drawings }    // 计算属性（下游消费不变）
 
@@ -121,7 +125,8 @@ public struct PendingTraining: Codable, Equatable, Sendable {
         startedAt: Int64,
         accumulatedCapital: Double,
         drawdown: DrawdownAccumulator,
-        sessionKey: String
+        sessionKey: String,
+        drawingDefaultStyle: DrawingDefaultStyle? = nil
     ) {
         self.trainingSetFilename = trainingSetFilename
         self.globalTickIndex = globalTickIndex
@@ -136,6 +141,7 @@ public struct PendingTraining: Codable, Equatable, Sendable {
         self.accumulatedCapital = accumulatedCapital
         self.drawdown = drawdown
         self.sessionKey = sessionKey
+        self.drawingDefaultStyle = drawingDefaultStyle
     }
 
     /// 便捷 init：coordinator fresh save 用（纯已知；活编辑保住 unknown = P1b 引擎携带 lossy，§Y）。
@@ -153,7 +159,8 @@ public struct PendingTraining: Codable, Equatable, Sendable {
         startedAt: Int64,
         accumulatedCapital: Double,
         drawdown: DrawdownAccumulator,
-        sessionKey: String
+        sessionKey: String,
+        drawingDefaultStyle: DrawingDefaultStyle? = nil
     ) throws {
         self.init(
             trainingSetFilename: trainingSetFilename,
@@ -168,7 +175,8 @@ public struct PendingTraining: Codable, Equatable, Sendable {
             startedAt: startedAt,
             accumulatedCapital: accumulatedCapital,
             drawdown: drawdown,
-            sessionKey: sessionKey
+            sessionKey: sessionKey,
+            drawingDefaultStyle: drawingDefaultStyle
         )
     }
 
@@ -177,7 +185,7 @@ public struct PendingTraining: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case trainingSetFilename, globalTickIndex, upperPeriod, lowerPeriod, positionData
         case cashBalance, feeSnapshot, tradeOperations, drawings, lossyRaw, startedAt
-        case accumulatedCapital, drawdown, sessionKey
+        case accumulatedCapital, drawdown, sessionKey, drawingDefaultStyle
     }
 
     public init(from decoder: Decoder) throws {
@@ -201,6 +209,7 @@ public struct PendingTraining: Codable, Equatable, Sendable {
         accumulatedCapital = try c.decode(Double.self, forKey: .accumulatedCapital)
         drawdown = try c.decode(DrawdownAccumulator.self, forKey: .drawdown)
         sessionKey = try c.decode(String.self, forKey: .sessionKey)
+        drawingDefaultStyle = try c.decodeIfPresent(DrawingDefaultStyle.self, forKey: .drawingDefaultStyle)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -220,6 +229,7 @@ public struct PendingTraining: Codable, Equatable, Sendable {
         try c.encode(accumulatedCapital, forKey: .accumulatedCapital)
         try c.encode(drawdown, forKey: .drawdown)
         try c.encode(sessionKey, forKey: .sessionKey)
+        try c.encodeIfPresent(drawingDefaultStyle, forKey: .drawingDefaultStyle)
     }
 }
 
@@ -241,6 +251,10 @@ public struct PendingReplay: Codable, Equatable, Sendable {
     public let startedAt: Int64
     public let accumulatedCapital: Double
     public let drawdown: DrawdownAccumulator
+    /// D90/D91：本局画线默认样式。`nil` = 旧档 / 本局从未改过（→ 回落全局默认）。
+    /// ⚠️ **落盘边界是 repo 的具名列 SQL，不是这个 Codable**（本类型的 Codable 生产上零消费者）；
+    ///    但它是 `public`，故必须保持**无损**，否则未来第一个消费者会静默丢值。
+    public let drawingDefaultStyle: DrawingDefaultStyle?
 
     public var drawings: [DrawingObject] { lossy.drawings }    // 计算属性（下游消费不变）
 
@@ -257,7 +271,8 @@ public struct PendingReplay: Codable, Equatable, Sendable {
         lossy: LossyDrawingArray,
         startedAt: Int64,
         accumulatedCapital: Double,
-        drawdown: DrawdownAccumulator
+        drawdown: DrawdownAccumulator,
+        drawingDefaultStyle: DrawingDefaultStyle? = nil
     ) {
         self.recordId = recordId
         self.trainingSetFilename = trainingSetFilename
@@ -272,6 +287,7 @@ public struct PendingReplay: Codable, Equatable, Sendable {
         self.startedAt = startedAt
         self.accumulatedCapital = accumulatedCapital
         self.drawdown = drawdown
+        self.drawingDefaultStyle = drawingDefaultStyle
     }
 
     /// 便捷 init：coordinator fresh save 用（纯已知；活编辑保住 unknown = P1b 引擎携带 lossy，§Y）。
@@ -289,7 +305,8 @@ public struct PendingReplay: Codable, Equatable, Sendable {
         drawings: [DrawingObject],
         startedAt: Int64,
         accumulatedCapital: Double,
-        drawdown: DrawdownAccumulator
+        drawdown: DrawdownAccumulator,
+        drawingDefaultStyle: DrawingDefaultStyle? = nil
     ) throws {
         self.init(
             recordId: recordId,
@@ -304,7 +321,8 @@ public struct PendingReplay: Codable, Equatable, Sendable {
             lossy: try LossyDrawingArray(drawings: drawings),
             startedAt: startedAt,
             accumulatedCapital: accumulatedCapital,
-            drawdown: drawdown
+            drawdown: drawdown,
+            drawingDefaultStyle: drawingDefaultStyle
         )
     }
 
@@ -313,7 +331,7 @@ public struct PendingReplay: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case recordId, trainingSetFilename, globalTickIndex, upperPeriod, lowerPeriod, positionData
         case cashBalance, feeSnapshot, tradeOperations, drawings, lossyRaw, startedAt
-        case accumulatedCapital, drawdown
+        case accumulatedCapital, drawdown, drawingDefaultStyle
     }
 
     public init(from decoder: Decoder) throws {
@@ -337,6 +355,7 @@ public struct PendingReplay: Codable, Equatable, Sendable {
         startedAt = try c.decode(Int64.self, forKey: .startedAt)
         accumulatedCapital = try c.decode(Double.self, forKey: .accumulatedCapital)
         drawdown = try c.decode(DrawdownAccumulator.self, forKey: .drawdown)
+        drawingDefaultStyle = try c.decodeIfPresent(DrawingDefaultStyle.self, forKey: .drawingDefaultStyle)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -356,6 +375,7 @@ public struct PendingReplay: Codable, Equatable, Sendable {
         try c.encode(startedAt, forKey: .startedAt)
         try c.encode(accumulatedCapital, forKey: .accumulatedCapital)
         try c.encode(drawdown, forKey: .drawdown)
+        try c.encodeIfPresent(drawingDefaultStyle, forKey: .drawingDefaultStyle)
     }
 }
 
