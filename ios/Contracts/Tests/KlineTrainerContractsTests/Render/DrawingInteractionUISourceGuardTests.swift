@@ -215,4 +215,92 @@ struct DrawingInteractionUISourceGuardTests {
         #expect(params.contains(squeeze(".opacity(enabled ? 1 : 0.4)")),
                 "面板根链缺灰态视觉反馈（.opacity），母 spec §3：灰＝只降饱和，无解释字")
     }
+
+    // MARK: Task 7 — G4b / G4c / G6（本局默认 autosave 触发 + 视图层守卫，D94/D90）
+
+    /// 共用小工具：从（已剥注释/字面量、空白已压掉的）squeezed 源码里，按大括号配对取出
+    /// `needle`（内部先 squeeze）后第一个 `{...}` 的闭包体（同样是 squeezed 文本，无空白）。
+    /// 为什么必须这么做：两条 `.onChange` 都在同一个文件里，任何「A 出现过 + B 出现过」式的
+    /// 分离 contains 都会被**另一条**满足（codex plan-P-R1 high①：既有的 drawingsRevision
+    /// 那条已经含 `lifecycle.autosave(immediate: true)`）。
+    private func closureBody(after needle: String, in src: String) throws -> String {
+        let n = squeeze(needle)
+        guard let head = src.range(of: n) else {
+            Issue.record("未找到 \(n)"); return ""      // 锚点失效必须报错，不得静默返回空
+        }
+        guard let open = src.range(of: "{", range: head.upperBound..<src.endIndex) else {
+            Issue.record("\(n) 之后没有 `{`"); return ""
+        }
+        var depth = 0
+        var i = open.lowerBound
+        while i < src.endIndex {
+            if src[i] == "{" { depth += 1 }
+            if src[i] == "}" { depth -= 1; if depth == 0 { return String(src[open.upperBound..<i]) } }
+            i = src.index(after: i)
+        }
+        Issue.record("\(n) 的闭包大括号未配对"); return ""
+    }
+
+    /// G6：D94 的**唯一**守门 —— host 够不着 TrainingView（UIKit-gated），行为测试受阻于
+    /// 本仓已记录的平台限制。⚠️ **必须断言「那一条」闭包体内**有 autosave，不能分开判两个子串
+    ///    （codex plan-P-R1 high①：分开判时，一个**空闭包**照样全绿）。
+    @Test("Task 7 G6：本局默认样式的 onChange 闭包体内必须调 autosave(immediate: true)（D94）")
+    func trainingViewDefaultStyleOnChangeBodyCallsAutosave() throws {
+        let src = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        let body = try closureBody(after: "onChange(of: engine.drawingSession.defaultStyle)", in: src)
+        #expect(body.contains(squeeze("lifecycle.autosave(immediate: true)")),
+                "本局默认的 onChange 闭包体内没有调 autosave（D94）——空闭包也会让旧版 G6 变绿")
+    }
+
+    /// G6 的**双向自检**：喂一个「有 onChange 但闭包为空」的样本必须**不**满足
+    @Test("Task 7 G6 自检：空闭包必须被判不合格（防分离 contains 的假绿）")
+    func g6RejectsEmptyOnChangeBody() throws {
+        let fake = squeeze(
+            ".onChange(of: engine.drawingsRevision) { _, _ in lifecycle.autosave(immediate: true) }\n"
+          + ".onChange(of: engine.drawingSession.defaultStyle) { _, _ in }")
+        let body = try closureBody(after: "onChange(of: engine.drawingSession.defaultStyle)", in: fake)
+        #expect(!body.contains(squeeze("lifecycle.autosave")), "自检失败：空闭包竟被判为合格")
+    }
+
+    /// 取 `private var X: Bool { <RHS> }` 的 RHS（squeezed，已无空白）。
+    private func definitionRHS(of name: String, in src: String) throws -> String {
+        try closureBody(after: "var \(name): Bool", in: src)
+    }
+
+    /// G4b：复盘排除依赖的是**整条合取式**。
+    /// ⚠️ **不能用 `contains`**（codex plan-P-R1 high②）：`… && typeRowExpanded || isReview`
+    ///    仍然包含原子串、照样绿。改为取出定义式右侧、squeeze 后**精确相等**。
+    @Test("Task 7 G4b：stylePanelWillBeVisible 定义式必须精确等于三元合取（D90）")
+    func stylePanelVisibilityPredicateIsExactlyTheThreeWayConjunction() throws {
+        let src = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        let rhs = try definitionRHS(of: "stylePanelWillBeVisible", in: src)
+        #expect(rhs == squeeze("showsTradeButtons && isDrawingActive && typeRowExpanded"),
+                "stylePanelWillBeVisible 的定义式被改动了，D90 的复盘排除失效，实测：\(rhs)")
+    }
+
+    /// G4b 的**双向自检**：放宽后的谓词必须被判不合格
+    @Test("Task 7 G4b 自检：放宽后的谓词必须被判不合格（防 contains 假绿）")
+    func g4bRejectsBroadenedPredicate() throws {
+        let fake = squeeze(
+            "private var stylePanelWillBeVisible: Bool { showsTradeButtons && isDrawingActive && typeRowExpanded || isReview }")
+        let rhs = try definitionRHS(of: "stylePanelWillBeVisible", in: fake)
+        #expect(rhs != squeeze("showsTradeButtons && isDrawingActive && typeRowExpanded"))
+    }
+
+    /// G4c：样式面板挂载点在 `Sources/` 里**恰好 1 处**（防「另开一条路径」绕过 G4/G4b）。
+    /// ⚠️ 挂载点计数不得是空函数体式的恒绿 no-op（codex plan-P-R1 high②）——用 callSiteCount 真数。
+    @Test("Task 7 G4c：DrawingStylePanel( 挂载点在 Sources/ 里恰好 1 处")
+    func stylePanelHasExactlyOneMountSite() throws {
+        let sites = try callSiteCount("DrawingStylePanel(")
+        let total = sites.reduce(0) { $0 + $1.count }
+        #expect(total == 1, "样式面板挂载点应恰好 1 处，实测 \(total)（\(sites)）—— 多一处 = 有绕过 G4/G4b 的新路径")
+    }
+
+    /// G4c 的**双向自检**：两处挂载的样本必须被数出 2（防「恒返回 1」的计数实现）
+    @Test("Task 7 G4c 自检：两处挂载必须被数出 2")
+    func g4cRejectsSecondMountSite() {
+        let fake = "DrawingStylePanel(a: 1)\nDrawingStylePanel(b: 2)"
+        let n = fake.components(separatedBy: "DrawingStylePanel(").count - 1
+        #expect(n == 2)
+    }
 }

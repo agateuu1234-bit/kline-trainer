@@ -368,6 +368,12 @@ public struct TrainingView: View {
         .onChange(of: engine.drawingsRevision) { _, _ in
             lifecycle.autosave(immediate: true)                 // §4.6：画线/改样式/删除即存（不推 tick，D9）
         }
+        .onChange(of: engine.drawingSession.defaultStyle) { _, _ in
+            // D94：本局默认是局内状态，与画线改动同等待遇（旁边那条是 drawingsRevision）。
+            // ⚠️ 价值是**收窄崩溃窗口** —— 用户主动退出/切后台已由 scenePhase 的
+            //    flushForBackground 覆盖（:357-363），别把本条的作用写夸张。
+            lifecycle.autosave(immediate: true)
+        }
         .onChange(of: engine.reviewDrawings.count) { _, _ in
             // review-redesign Task 10：复盘新画线走 reviewDrawings（非 drawings），故上面那条 onChange 不触发；
             // 镜像同款「画线即存」语义，改调 autosaveReview（Task 7）。非 review 模式下 reviewDrawings 恒不变，no-op。
