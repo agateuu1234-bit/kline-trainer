@@ -290,7 +290,7 @@ public extension DrawingDefaultStyle {
 |---|---|---|
 | `lineSubType` | 必须是该 `toolType` **可渲染**的值（水平线的 `.segment` 拒 → 回落 `.straight`） | `DrawingStyleAvailability.isRenderableSubType` |
 | `thickness` | 夹回 `DrawingDefaultStyle.thicknessRange` | 本节新增的那**一个**常量 |
-| `labelMode` | 归一化（挡 `(ray, .left)`） | `DrawingStyleAvailability.normalizedLabelMode(current:lineSubType:)` |
+| `labelMode` | 归一化（挡 `(ray, .left)`） | **`DrawingStyleAvailability.normalizedLabelMode(current:lineSubType:toolType:)`** —— **必须用带 `toolType` 的那个重载** |
 
 **连带的必做改动**：`DrawingStyleParams` 里的 `options(Array(1...5), …)` **必须改成引用 `DrawingDefaultStyle.thicknessRange`**。
 不改它，「单一真相」就是一句空话 —— 两处字面量迟早漂移，而漂移的后果正是 §5.1 那个「能打开但画不出线」。
@@ -326,6 +326,16 @@ func decodeDrawingDefaultStyle(_ raw: String?) -> DrawingDefaultStyle?
 **在解码边界**（repo 读出来那一刻）就调 `sanitized(for:)`，**不是**等到 resume 种子那一步。
 理由：种子今天只有一个调用点是**事实**、不是**保证**，而**解码结果是公共值**；把 sanitize 放在边界上，
 「一个坏默认能被读进内存」这件事从构造上就不成立。
+
+**⚠️ 两条规则都必须用 tool-aware 重载，不得用水平线专用版**（codex spec-R5 medium，**已核实为真，且源码注释就是为防这个而写的**）：
+
+| 规则 | ✅ 必须用 | ❌ 不得用 | 用错的后果 |
+|---|---|---|---|
+| `lineSubType` | `isRenderableSubType(_:toolType:)` | `horizontalLineSubTypeEnabled(_:)` | 非水平工具的合法 `.segment` 被静默拒 |
+| `labelMode` | `normalizedLabelMode(current:lineSubType:**toolType:**)` | `normalizedLabelMode(current:lineSubType:)` | 一条 `.trend` 线的 `.show` / `.left` 被按**横线**规则静默改写成 `.hidden` |
+
+> 后一格不是推演 —— `DrawingStyleAvailability.swift` 里那个 tool-aware 重载的头注**逐字写着**这个后果，> 并把它归为「与 1b-ii 锁定 PR 那个 `.segment` over-reject **同族**（把只对某类型成立的规则套到所有类型）」。
+> ⚠️ **我上一稿在同一个决策里自相矛盾**：既写了「保留 `toolType` 入参，写死 `.horizontal` 会在 P1c 变成静默错误规则」，> 又在规则表里指定了水平线专用的那个重载。**tool-aware 的函数签名挡不住调用方传错重载。**
 
 ⚠️ 本片只有水平线一个工具，`sanitized(for:)` 的 `toolType` 入参在调用点恒为 `.horizontal`。
 **仍然必须带这个入参**——`isRenderableSubType` 的判据本身就是按 toolType 分的（1b-ii PR-1 曾因为把横规则套到所有工具而出过缺陷），
@@ -424,6 +434,7 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 | **T13** | normal 续局：同上 | host + DB 边界 |
 | **T14** | **fresh 会话不种**：开新局 → `session.defaultStyle` == 出厂值 | host（§1 新局回落） |
 | **T15** | **两份**常量都是 `"1.13"`：Swift 侧 `#expect(CONTRACT_VERSION == "1.13")`（**两处测试都要改**）+ backend `qmt_pilot_db.CONTRACT_VERSION == "1.13"` | host（Swift）+ **backend pytest**（D97）。⚠️ `test_qmt_pilot_db.py:770` 的跨语言断言**不改**，它同步后自动绿 |
+| **T15b** | `sanitized(for: .trend)`（**非水平工具**）**不改写** `labelMode`：喂 `(lineSubType: .ray, labelMode: .left)` → 原样返回 `.left`（横线规则不得外溢）。同法验 `lineSubType` 不被横规则拒 | host（**不变量锁**：本片调用点恒 `.horizontal`，故只能单元级构造） |
 | **T16** | `DrawingDefaultStyle.thicknessRange` 与面板实际渲染的档数**同源**：面板选项数 == `thicknessRange.count` | **Catalyst**（面板是 UIKit-gated；D99 的单一真相守门） |
 
 ### 7.2 变异清单（**强制清单 = 本表每一条**，刻意不枚举编号）
@@ -447,6 +458,7 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 | M13 | **只**改 Swift 那份、backend 那份留在 `"1.12"` | **backend 的 `test_qmt_pilot_db.py:770`** 红（跨语言一致性守卫）—— 这条专证「两份源必须同改」 |
 | **M13b** | 两份都留在 `"1.12"` | **只有 T15** 红 |
 | M14 | 把 `thicknessRange` 改成 `1...4`（模拟两处字面量漂移） | **只有 T16** 红 —— 证明面板确实是从该常量派生、不是自己写了个 `1...5` |
+| **M15b** | 把 `sanitized` 里的 `labelMode` 归一化换成**两参**重载 `normalizedLabelMode(current:lineSubType:)` | **只有 T15b** 红 —— 这条专证「tool-aware 签名挡不住传错重载」（codex R5-medium） |
 | **M15** | 把 `pending_replay` 的读路径改回「直接 `JSONDecoder().decode`」（绕过共享函数） | **只有 replay 侧**的 T4/T5/T5b 红，**training 侧全绿** + 守卫 **G7** 红 —— 专证「两张表各跑一遍」不是冗余（codex R3-medium） |
 
 **实施要求**：本表**每一条**逐条关门看红，PR 描述里逐条记录「红的是**哪个测试名**」+ 恢复后重新变绿。
@@ -562,9 +574,14 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 
 **⚠️ R4 顺藤摸出的第四层（codex 只提到前两层，我拉线才看见）**：`CONTRACT_VERSION` 还是 **QMT pilot 的运行时闸门**——`qmt_pilot_db.py:1694` 把它写进 pilot DB 元数据、`:2224` 的**闸 1** 拿它校验 ⇒ **本片 bump 之后，已建的 pilot 库会报 `schema_fingerprint_mismatch`、必须 `--reset` 重建**。这是闸门按设计工作、不是缺陷，但**必须写进 PR 描述**，否则合入后第一个跑 QMT 验证的人会当成回归去查。已写进 D97。
 
+| **R5** | 同分支 @ `6599805`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**仅 1 medium**） | D99 的规则表让实施者复用 `normalizedLabelMode(current:lineSubType:)` —— 那是**水平线专用**重载；仓里另有 tool-aware 重载正是为防这个而存在。P1c 新工具照此实施，加载持久化默认会把合法的非水平 `labelMode` 静默改写成 `.hidden` | **全采纳，已核实为真**。`DrawingStyleAvailability.swift` 里 tool-aware 重载的头注**逐字**写着这个后果并把它归为「与 1b-ii 锁定 PR 的 `.segment` over-reject 同族」。⚠️ **这是我在同一个决策里自相矛盾**：D99 我亲手写了「保留 `toolType` 入参，写死 `.horizontal` 会在 P1c 变成静默错误规则」，转头在规则表里指定了水平线专用重载。改：规则表加「✅必须用 / ❌不得用 / 用错的后果」三列（两条规则各一行）；新增 **T15b**（`sanitized(for: .trend)` 不改写 labelMode，不变量锁）与 **M15b**（换回两参重载 → 只有 T15b 红）|
+
 **R1 的形状**：我把「可空列 + 附加式」当成了「所以不用 bump」，**跳过了去读治理文档那一步**——
 规则明文写着「影响 DDL → 必须 bump」，我一次都没查就下了结论。
 而「双向兼容」那句是同一个毛病的另一面：**只推演了对我的结论有利的那个方向（读）**。
+
+**R5 的形状**：**函数签名 tool-aware，挡不住调用方传错重载**。我把「让 `sanitized` 带 `toolType` 参数」当成了「工具无关性已经解决」，却没检查**表里每一条规则各自调的是哪个重载** —— 参数传下去了，规则本身仍是水平线专用的。
+纪律沉淀：**「我加了个参数来表达 X」不等于「X 被遵守了」**；带变体/重载的 API，必须逐条判据写明**用哪一个重载、用错会怎样**，并各配一条只有它够得到的档。
 
 **R4 的形状**：**我把「一个常量」当成了「一处定义」**。它实际有两份源、两处断言、一处跨语言守卫，外加一个把它当运行时闸门用的下游系统 —— 五个地方，我只写了一个。
 纪律沉淀：**改任何「版本 / 契约标识」之前，先全仓 grep 它的名字**，把**定义处 / 断言处 / 跨语言校验处 / 把它当运行时判据的下游**四类逐一列出来；
