@@ -55,7 +55,7 @@ struct DrawingStyleParams: View {
                         icon: { LineStyleIcon(style: $0) }) { picked in commit { $0.lineStyle = picked } }
             }
             group("粗细") {
-                options(Array(1...5), current: style.thickness,
+                options(Array(DrawingDefaultStyle.thicknessRange), current: style.thickness,
                         enabled: { _ in true },
                         label: { "粗细\($0)" },
                         icon: { ThicknessIcon(thickness: $0) }) { picked in commit { $0.thickness = picked } }
