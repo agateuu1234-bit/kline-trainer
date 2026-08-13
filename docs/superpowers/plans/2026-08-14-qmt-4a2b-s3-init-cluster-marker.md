@@ -372,13 +372,6 @@ class _InitMaint(_FakeConn):
         #    改成集合之后，`_locker` 在授予时写入、释放时移出，两次查询自然不同。
         #    `pre_held_seeds` = 进入 init **之前**就已挂在这条连接上的锁（可重入那一档）。
         self.held_seeds = set(pre_held_seeds)
-
-    async def fetchval(self, query, *args):
-        # 父类按 `"pg_locks" in query` 返回静态布尔；这里改成按集合作答。
-        if "pg_locks" in query:
-            self.ops.append(query)
-            return args[0] in self.held_seeds
-        return await super().fetchval(query, *args)
         # 三张维护表**在不在场**（与「在场但结构坏」必须分得开）。
         self.maintenance_presence = {"marker_present": True, "intent_present": True,
                                      "registry_present": True}
@@ -391,6 +384,16 @@ class _InitMaint(_FakeConn):
                                       "intent_columns_ok": False,
                                       "intent_dbname_unique": False,
                                       "intent_durable": False}
+
+    async def fetchval(self, query, *args):
+        # 父类按 `"pg_locks" in query` 返回静态布尔；这里改成按集合作答。
+        # ⚠️ 本方法**只建模锁状态**，别往里塞构造期的初始化 —— 那样会落在
+        #    `return` 之后成为死代码，而假件「看起来配好了」（S3-R3 实测踩过：
+        #    `intent_table_missing=True` 整个失效，补建路径那几条用例改测了健康集群）。
+        if "pg_locks" in query:
+            self.ops.append(query)
+            return args[0] in self.held_seeds
+        return await super().fetchval(query, *args)
 
     async def fetch(self, query, *args):
         # ⚠️ 精确到 `FROM public.pilot_create_intent` **后面直接换行**（即无别名无 WHERE
@@ -484,6 +487,37 @@ def _deletes(conn):
 然后追加第一批用例（幂等 / 补建 / 拒非法 / 零 DDL）：
 
 ```python
+def test_init_maint_fake_actually_models_the_states_it_claims():
+    """**假件自检**：`_InitMaint` 的两个开关必须真的改变它的作答（codex S3-R3）。
+
+    ⚠️ 这不是形式主义。实测踩过：`maintenance_presence` / `intent_table_missing`
+       的初始化被误放到 `fetchval` 的 `return` **之后**成了死代码 ——
+       假件「看起来配好了」，而 `intent_table_missing=True` 整个失效，
+       补建路径那几条用例**改测了健康集群**（`_needs_repair_ddl` 恒假），
+       于是「旧版本集群修不修得好」「混合态零 DDL」两条判据一次都没被求值。
+       与 `test_shape_fakes_cover_every_predicate` 同族：**先证明假件建模对了，
+       再拿它去证明生产代码**。
+    """
+    healthy = _InitMaint()
+    assert healthy.maintenance_presence == {
+        "marker_present": True, "intent_present": True, "registry_present": True}
+    assert healthy.maintenance_shape == _OK_MAINTENANCE_SHAPE
+
+    missing = _InitMaint(intent_table_missing=True)
+    assert missing.maintenance_presence["intent_present"] is False, \
+        "intent_table_missing 没有把 intent 置为缺席 —— 补建路径的用例会改测健康集群"
+    for key in ("intent_is_table", "intent_columns_ok", "intent_dbname_unique",
+                "intent_durable"):
+        assert missing.maintenance_shape[key] is False, f"{key} 没有跟着置假"
+    # marker / registry 不受影响 —— 否则造出来的是「三张全缺」而不是**混合态**
+    assert missing.maintenance_presence["marker_present"] is True
+    assert missing.maintenance_shape["marker_durable"] is True
+
+    # 锁状态：默认空；`pre_held_seeds` 真的会被 `_SEED_LOCK_HELD_SQL` 看见
+    assert _InitMaint().held_seeds == set()
+    assert _InitMaint(pre_held_seeds=("x",)).held_seeds == {"x"}
+
+
 def test_init_is_idempotent_when_everything_is_already_legal():
     """已存在合法单行标记且三张表形状合规 → 直接成功，不重复写标记。"""
     maint = _InitMaint()
@@ -1044,7 +1078,14 @@ git commit -m "S3 Task3：init_cluster_marker 第一段 —— 零副作用预�
 
 **Interfaces:**
 - Consumes: `INTENT_TTL_SECONDS`（main 已有）、`_SEED_LOCK_HELD_SQL`（main 已有）、`_LIST_DATABASES_SQL`
-- Produces: `_LIST_ALL_INTENT_SQL`（输出列 `dbname` / `seed` / `db_oid`(text) / `age_seconds`(bigint)）、`_DELETE_ORPHAN_INTENT_SQL`（参数 `$1=dbname`、`$2=ttl_seconds`）
+- Produces:
+  - `_LIST_ALL_INTENT_SQL` —— 输出列 `dbname` / `seed` / `db_oid`(text) / `age_seconds`(**double precision，不取整**)
+  - `_DELETE_ORPHAN_INTENT_SQL` —— 参数 **`$1=dbname`、`$2=seed`、`$3=ttl_seconds`（三个）**
+    ⚠️ **`$2=seed` 不是记账细节，是信任边界**：这条 DELETE 的授权来自「本次持有的是
+    **这一行 seed** 的 advisory lock」。写成两参数（只按 dbname 删）就等于让实现/评审
+    清单里出现一条「不绑所锁那一行也算对」的契约，而 dbname↔seed 的对应**没有任何
+    数据库约束在兜**（无 CHECK、`dbname` 非生成列）。调用处必须是
+    `(r["dbname"], r["seed"], INTENT_TTL_SECONDS)`。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -2101,7 +2142,9 @@ bash .claude/scripts/codex-attest.sh --scope branch-diff --base 8578a59 --head f
 
 **2. 占位符扫描**：无 TBD / TODO / 「similar to Task N」；每个代码步骤都带完整可粘贴的代码块。唯一的「以实测为准」是 Task 3/4 Step 6 的 pytest 总数 —— 那是**故意的**（内嵌「跑某命令应得 N」的自证会自过期，本仓踩过），判绿判据写的是「无 failed/error」而不是硬编码数字。
 
-**3. 类型一致性**：`init_cluster_marker(maint_conn, *, connect, cluster_schema_sql, try_seed_lock, release_seed_lock)` 的签名在 Task 3 定义、Task 4 追加使用、Task 5 三处调用，五处逐字一致。`_LIST_ALL_INTENT_SQL` 的输出列（`dbname` / `seed` / `db_oid` / `age_seconds`）与假件 `_orphan()` 的字典键、与循环体读的键，三处逐字一致。`_DELETE_ORPHAN_INTENT_SQL` 的两个参数（`$1=dbname`、`$2=ttl`）与调用处 `(r["dbname"], INTENT_TTL_SECONDS)` 一致，且被机械守卫 `sql.count("$1") == 1 and sql.count("$2") == 1` 钉住。
+**3. 类型一致性**：`init_cluster_marker(maint_conn, *, connect, cluster_schema_sql, try_seed_lock, release_seed_lock)` 的签名在 Task 3 定义、Task 4 追加使用、Task 5 三处调用，五处逐字一致。`_LIST_ALL_INTENT_SQL` 的输出列（`dbname` / `seed` / `db_oid` / `age_seconds`）与假件 `_orphan()` 的字典键、与循环体读的键，三处逐字一致。`_DELETE_ORPHAN_INTENT_SQL` 的**三个**参数（`$1=dbname`、`$2=seed`、`$3=ttl`）与调用处 `(r["dbname"], r["seed"], INTENT_TTL_SECONDS)` 一致，且被两条机械守卫钉住：`"seed = $2" in sql` 与 `sql.count("$1") == sql.count("$2") == sql.count("$3") == 1`；行为层再由 `test_orphan_cleanup_binds_the_delete_to_the_row_it_locked` 断言实参元组恰为 `(dbname, seed, ttl)`。
+
+⚠️ **本节这次是逐个 `grep` 核过的，不是凭印象写的**（S3-R3 抓到过一次：SQL 与测试都改成了三参数，而本节和 Task 4 的 Interfaces 块还留着两参数的旧契约 —— 一份自相矛盾的计划会让实施者按其中错的那半去写）。核法：`grep -n 'ttl_seconds\|\$2=ttl\|(dbname, seed, ttl)\|\$1=dbname' <plan>`，逐条打开看。
 
 **4. codex 对抗评审轮次记录**
 
@@ -2109,6 +2152,9 @@ bash .claude/scripts/codex-attest.sh --scope branch-diff --base 8578a59 --head f
 |---|---|---|---|
 | **R1** | `needs-attention`（**未 approve**） | **[high]** 孤儿清理用 `now()` 量 TTL，而仓里既有的两条 intent TTL 判据早已因同一原因（codex S2a-R4-F2，真 PG 15 实测）换成 `statement_timestamp()`；`init_cluster_marker` 收的是已连好的连接、不控制事务生命周期，长事务里 `now()` 冻在过去 → 真实已过期的孤儿被量成新鲜 → 残骸永远清不掉。**且计划里的机械测试写死要求 `now()`，会把正确的修法判红。** | **全部接受并已改**（见下） |
 | **R2** | `needs-attention`（**未 approve**） | **[high]** DELETE 只绑 dbname 不绑 seed；**[medium]** advisory lock 可重入让「取到了」的证明失效；**[medium]** 新场景库名没进 `_LIFECYCLE_DBS` | **三条结论全接受，两条的理由我按实测改写**（见下） |
+| **R3** | `needs-attention`（**未 approve**） | **[high]** `_InitMaint` 的 `maintenance_presence` / `intent_table_missing` 初始化被误放到 `fetchval` 的 `return` 之后 → 死代码 → `intent_table_missing=True` 整个失效，补建路径那几条用例**改测健康集群**；**[medium]** Task 4 的 Interfaces 块与 Self-Review 仍写着两参数 DELETE 契约，与同一份计划里的 SQL/测试自相矛盾 | **两条全接受，全是 R2 编辑引入的自伤**；已修，并加了两道机械自检 |
+
+⚠️ **R3 的两条都不是设计问题，是我在 R2 编辑时弄坏的** —— 一条把初始化splice进了别的方法体，一条改了 SQL 与测试却漏改契约声明。故加了两道**对计划本身**的机械检查（见 Self-Review 第 6 条），并把「假件自检」升格成一条正式用例 `test_init_maint_fake_actually_models_the_states_it_claims`。
 
 R2 的逐条核实（**两条的机制我不同意，结论仍改**）：
 
@@ -2131,6 +2177,39 @@ R1 的三条已实测复核，**不是**照单全收：
 - ⚠️ **评审没说到、但更要命的一条（我自己补的）**：族级守卫 `test_intent_ttl_is_never_measured_against_the_transaction_clock` 遍历的是**手写名单** `("_READ_INTENT_SQL", "_INSERT_INTENT_SQL")`。S3 的两条新 SQL 是同族第三、四个成员，手写名单**不会收录它们** —— 就算把 SQL 改对了，守卫对新成员仍是**零覆盖**，下一次改错没人拦。故 Step 1b 把族成员改成**从模块推导** + 双向核对，并配变异 M21d 验守卫**自己**的判别力。
 - ⚠️ 评审建议的「加一条真 PG 或单测模拟长事务」已落为**档 ㊲**；顺带发现 ⑤ ⑤b ㉙ ㉚ ㊱ 全在自动提交下跑，对时钟源**零判别力**（㉝c 那一档早就写下过同样的教训）。
 
-**5. 已知的判别力空缺（诚实登记）**：
+**5. 对计划本身的机械自检（S3-R3 之后加，每次改完计划都要重跑）**
+
+计划里的代码块会被**逐字粘贴**进测试文件，故它自己就得过语法与死代码检查。两条都已在当前版本上跑过：
+
+```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4a2b-s3"
+export PY="/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python"
+"$PY" - <<'EOF'
+import ast, re, pathlib, textwrap
+p = pathlib.Path("docs/superpowers/plans/2026-08-14-qmt-4a2b-s3-init-cluster-marker.md")
+blocks = re.findall(r"```python\n(.*?)```", p.read_text(encoding="utf-8"), re.S)
+bad = 0
+for i, b in enumerate(blocks, 1):
+    src = textwrap.dedent(b)
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as e:
+        if src.lstrip().startswith(("def ", "class ", "@pytest")):
+            print(f"❌ 块#{i} 语法错误 line~{e.lineno}: {e.msg}"); bad += 1
+        continue
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for j, st in enumerate(node.body[:-1]):
+                if isinstance(st, (ast.Return, ast.Raise)):
+                    print(f"❌ 块#{i} {node.name}(): 第 {st.lineno} 行之后是死代码"); bad += 1
+print("✅ 通过" if not bad else f"❌ {bad} 处")
+EOF
+```
+
+- **①语法**：25 个块里 4 个是有意的片段（参数化表尾、三引号续接、`for` 头），其余全部 `ast.parse` 通过。
+- **②死代码**：无「`return`/`raise` 之后仍有语句」。**这一条正是 R3 那个 high 的形态** —— `fetchval` 里 `return` 之后跟着 11 行构造期初始化，肉眼扫过去像是 `__init__` 的一部分。
+- **③契约一致性**：`grep -n 'ttl_seconds\|\$2=ttl\|\$1=dbname\|(dbname, seed, ttl)'` 逐条打开核 —— R3 的 medium 就是这里漏的。
+
+**6. 已知的判别力空缺（诚实登记）**：
 - Task 2 里闸 (i) 新增的三条 `*_durable` 参数化档**对别名拆分零判别力**（假件整字典回传）——已在 Task 2 正文里写明，判别力由 `test_shape_fakes_cover_every_predicate`（机械）+ Task 3 的混合态用例（行为）+ 真 PG ⑤b（语义）三层提供。
 - Task 4 里四条反向钉（`…only_under_the_seed_lock` / `…keeps_a_fresh_row…` / `…does_not_release_a_lock_it_never_took` / `…refuses_when_the_callback_lies…`）在功能未实现时**恒绿**，不能当「红→绿」证据 —— 已在 Step 2 写明，判别力由 M13/M15/M19/M17 逐条证明。
