@@ -296,6 +296,15 @@ public extension DrawingDefaultStyle {
 **连带的必做改动**：`DrawingStyleParams` 里的 `options(Array(1...5), …)` **必须改成引用 `DrawingDefaultStyle.thicknessRange`**。
 不改它，「单一真相」就是一句空话 —— 两处字面量迟早漂移，而漂移的后果正是 §5.1 那个「能打开但画不出线」。
 
+⚠️ **值域的消费者是四个，不是三个**（codex plan-P-R9 **high**）：除 `DrawingStyleParams`（面板档位）、
+`DrawingObjectStyleEdit`（写入受理闸）、`HorizontalLineTool`（渲染 clamp）之外，
+**本片新增的持久化解码器 `DrawingDefaultStyleColumn` 也是消费者** —— 它读的是**磁盘上可能越界的值**。
+而两条既有守卫都盖不住它：`1...5` 字面量计数**看不见 `min(max(` 形态**，
+消费者引用断言的文件清单里**没有解码器**。
+⇒ 解码器**必须把夹取委托给 `sanitized(for:)`，自己一行数值边界都不许有**，
+由守卫 **G5c** 钉死（正向「必须调 `sanitized(`」+ 反向「本文件内零处 `min(max(` / `1...5`」）。
+反向条**只能限定在解码器这一个文件**：`Sources/` 全域 `min(max(` 实测有 **27 处**正当用途。
+
 ### 5.2b D100　容错解码 + sanitize 必须是**两个 repo 共用的一个函数**，且两张表都要有坏值档
 
 > **来源：codex spec-R3 medium。** 上一稿的 T3–T5b 只说「**列**含坏值」，没说是**哪张表**的列。
@@ -553,7 +562,8 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **G4** | `TrainingView.showsTradeButtons` 的定义式仍为 `engine.flow.canBuySell()` | **内容断言** |
 | **G4b** | `TrainingView.stylePanelWillBeVisible` 的**整条定义式**仍为 `showsTradeButtons && isDrawingActive && typeRowExpanded` | **内容断言**（codex R2-medium：只钉 G4 会漏掉「改另外两项」这条路） |
 | **G4c** | 样式面板（`DrawingStyleParams` / `DrawingStylePanel`）的**挂载点**在 `Sources/` 里**恰好 1 处** | 结构计数（防「另开一条挂载路径」绕过 G4/G4b） |
-| **G5** | `1...5` / `1 ... 5` 这类粗细值域字面量在 `Sources/` 里**恰好 1 处**（= `DrawingDefaultStyle.thicknessRange` 的定义），面板与解码器都只引用它 | 结构计数（**剥注释剥字面量后匹配**；D99 的机械守门） |
+| **G5** | `1...5` / `1 ... 5` 这类粗细值域字面量在 `Sources/` 里**恰好 1 处**（= `DrawingDefaultStyle.thicknessRange` 的定义） | 结构计数（**剥注释剥字面量后匹配**；D99 的机械守门）。⚠️ 它**看不见 `min(max(` 形态**，故必须与 G5b/G5c 合用 |
+| **G5c** | 持久化解码器 `DrawingDefaultStyleColumn.swift` **必须调 `sanitized(`**，且**本文件内零处** `min(max(` / `1...5` | 正向 + 反向内容断言（codex plan-P-R9 **high**：值域消费者是**四个**，G5 的正则与 G5b 的文件清单**双双盖不住磁盘读回路径**）。反向条只限该文件 —— `Sources/` 全域 `min(max(` 实测 27 处正当用途 |
 | **G8** | 解析 `docs/governance/m01-schema-versioning-contract.md` 的矩阵，断言**三行都已同步**：顶层 == `"1.13"`、app.sqlite GRDB migration 行 == `0010_v1.13_drawing_default_style`、Swift 模型版本行 == `1.4` | **内容断言**（codex spec-R7 medium：D97 要求同步三行，却**没有任何机制**在它没做时报红 —— 而「矩阵停在 `0003`、代码已到 `0009`」正是本 spec 自己点名的既有漂移，**不加守卫就是原样重演一次**）。⚠️ 目标是 **markdown 文档**、不是 Swift 源，故**不适用剥字符串字面量那条纪律**；按表格行解析，并配双向自检（改任一行 → 红；无关行改动 → 仍绿） |
 | **G7** | `DrawingDefaultStyleColumn.decode` 在 `Sources/` 里**恰好 2 个调用点**，且分别落在 `PendingTrainingRepositoryImpl` 与 `PendingReplayRepositoryImpl` 两个文件内；**并配反向条**：除该 enum 自身外零处 `JSONDecoder().decode(DrawingDefaultStyle` | 结构计数（D100：少于 2 = 有一条读路径没接上；多于 2 = 出现第三条读路径，必须回来重审） |
 | **G6** | `TrainingView` 里存在一条 `.onChange(of: engine.drawingSession.defaultStyle)`，且其闭包体内调用 `lifecycle.autosave(immediate: true)` | **结构 + 内容断言**。这是 **D94 的唯一守门**（host 够不着视图，见 §6.1）；**M7 判绿看它，不看 T10** |
@@ -577,7 +587,7 @@ G4 / G4b / G6 断言的是 **Swift 表达式**，G5 数的是 **Swift 代码里�
 
 **纪律**：结构计数一律**剥注释、剥字符串字面量**后再匹配；每个守卫配**双向自检**（该命中的必须命中、不该命中的必须不命中）；
 锚点失效必须**报错**不得静默返回 0（[[feedback_mechanical_checker_parser_disabled]]）。
-**G1 / G3 / G4b / G4c / G5 / G6 / G7 / G8 / G9 在当前树上是红的**（G4b/G4c 依赖的谓词今天就存在，但守卫本身尚未写；G4 今天就是绿的），必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
+**G1 / G3 / G4b / G4c / G5 / G5c / G6 / G7 / G8 / G9 在当前树上是红的**（G4b/G4c 依赖的谓词今天就存在，但守卫本身尚未写；G4 今天就是绿的），必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
 **G4 今天就是绿的**，属回归守卫，可先落库。
 
 ---
@@ -668,6 +678,7 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 - **D96 两处 resume 种子 + fresh 会话不种**；
 - **D97 的四处 `CONTRACT_VERSION` + m01 三行 + 守卫 G8**；
 - **G9 的发现式形态**（改成「照清单枚举文件」即视为未实现）；
+- **G5c**（持久化解码器不得自带值域）—— 它盖的是 G5/G5b 双双盖不住的那条磁盘读回路径；
 - **D98 版本错位的四方向结论**（**不得**再宣称「双向兼容」）；
 - **D100 两个 repo 共用一个解码器 + 每条坏值档两张表各跑一遍**；
 - §7 的**任何一条** T / M / 正向档，以及 §8 的**任何一条**守卫。

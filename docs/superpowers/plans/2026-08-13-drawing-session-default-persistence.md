@@ -1272,7 +1272,7 @@ cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter Pendi
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 ```
 
-- [ ] **Step 6: 守卫 G7 + 变异（M2 / M3 / M4 / M4b / M4c / M15 / M15c）**
+- [ ] **Step 6: 守卫 G7 + G5c + 变异（M2 / M3 / M4 / M4b / M4c / M15 / M15c / M14c）**
 
 **变异前先备份本表点名的每个文件**（禁止 `git checkout` 复原 —— 会静默抹掉未提交改动）：
 
@@ -1327,6 +1327,31 @@ import Testing
             "encode 同样是两处（两个 repo 的写路径）—— 数不出来说明 pattern 或扫描根坏了")
     #expect(try callSiteCount("DrawingDefaultStyleColumnZZZ.decode(").isEmpty)
 }
+
+/// G5c（codex P-R9 **high**）：**持久化解码器也是粗细值域的消费者**，而 Task 1 的 G5b
+/// 只钉了三个 UI/渲染消费者、G5 的字面量计数又**看不见 `min(max(` 形态**
+///（那正是 G5b 当初存在的理由）——于是「在解码器里自己写一个 clamp」
+/// **能同时躲过 G5 和 G5b**，让**磁盘读回路径**与 UI/编辑/渲染路径的值域悄悄分叉。
+/// D99 要防的正是这个：存档里一个越界粗细，读回来被夹成 A、界面按 B 渲染。
+///
+/// 判据 = 正向「必须委托给唯一的 sanitizer」+ 反向「自己不得有任何数值边界」。
+/// ⚠️ 反向条**只能限定在这一个文件里**：`Sources/` 全域 `min(max(` **实测有 27 处正当用途**
+///    （PanLinkage / PinchZoomModel / Theme / …），全域禁会把一大片无关代码打红。
+@Test func g5c_persistence_decoder_has_no_thickness_bounds_of_its_own() throws {
+    let path = contractsDirForGuards
+        .appendingPathComponent("Sources/KlineTrainerPersistence/Internal/DrawingDefaultStyleColumn.swift").path
+    let src = try squeezedSource(path)        // 已剥注释与字符串字面量
+
+    // 防空转：先证明真读到了那个文件（否则下面的否定断言恒真）
+    #expect(src.contains(squeeze("DrawingDefaultStyle")), "没读到解码器源文件？路径推导坏了")
+
+    #expect(src.contains(squeeze("sanitized(")),
+            "解码器必须把夹取**委托**给唯一的 sanitizer，而不是自己写边界")
+    for shape in ["min(max(", "1...5"] {
+        #expect(!src.contains(squeeze(shape)),
+                "解码器里出现了自成一套的粗细边界写法 `\(shape)` —— 值域又分叉了（D99）")
+    }
+}
 ```
 
 跑：`swift test --filter PersistenceDecoderBoundaryGuardTests`，此刻应 **FAIL**（符号还没建），
@@ -1343,6 +1368,7 @@ Step 3/4 落地后转绿。
 | M4c | **只**保留 `colorToken` 的容错、其余四个改成强制 | T4 的另外三条（`colorToken` 那条**仍绿**） |
 | **M4d** | 任一字段类型不匹配时**整份丢回出厂**（而非逐字段回落） | **只有 T5b** 红 —— 专证「只断言没抛」是假绿（codex plan-P-R1 medium） |
 | M15 | replay 的 `loadReplay` 改成直接 `JSONDecoder().decode` | **只有 replay 侧**的 T4/T5/T5b + G7 的**反向条**（`g7_no_direct_decode_path_exists`） |
+| **M14c** | 在 `DrawingDefaultStyleColumn.decode` 里**自己写一句** `let t = min(max(raw, 1), 5)` 夹取粗细（不走 `sanitized`，行为在今天完全等价） | **只有 `g5c_persistence_decoder_has_no_thickness_bounds_of_its_own`** 红。⚠️ **G5 的字面量条仍绿**（正则看不见 `min(max(`）、**G5b 仍绿**（它的文件清单里没有解码器）、T1–T6 **全绿** —— 这条专证「磁盘读回路径能躲过既有两条值域守卫」（codex P-R9 high） |
 | **M15c** | 把 `DrawingDefaultStyleColumn.decode` 的**函数体整段拷进 `PendingReplayRepositoryImpl`**、replay 改调那份拷贝（行为完全等价） | **只有 `g7_column_decoder_is_the_single_boundary`** 红（落点断言：replay 那格变 0）。⚠️ **T3–T5b 全绿、正向计数也仍是 2** —— 这条专证「只数总数挡不住拷贝一份」（codex P-R8 medium） |
 
 - [ ] **Step 7: 提交**
