@@ -1304,6 +1304,57 @@ def test_orphan_cleanup_skips_a_seed_whose_lock_this_connection_already_holds():
     assert freed == [], "没取过就不许还 —— 那会把别处正持有的锁释放掉"
 
 
+def test_first_init_writes_no_marker_when_orphan_cleanup_fails():
+    """**清理会抛，故必须排在写标记之前**（codex S3-R5）。
+
+    这是 R4 那条修复的**续集**：R4 只把标记挪到了「首次初始化那一支的最后」，
+    而 Task 4 随后在**整个函数的最后**又接了一段会抛的清理循环 ——
+    首次初始化于是又能「报告失败、却留下一个合法标记」，
+    而契约是「本工具从不清标记」。典型的「修 symptom 会挪动失败面」。
+    """
+    class _DeleteBoom(_InitMaint):
+        async def execute(self, query, *args):
+            if query.strip().upper().startswith("DELETE"):
+                raise RuntimeError("deadlock detected")
+            return await super().execute(query, *args)
+
+    maint = _DeleteBoom(
+        marker_rows=[],                                   # 首次初始化
+        all_intent_rows=[_orphan(dbname="kline_pilot_gone", seed="gone")])
+    with pytest.raises(RuntimeError):
+        asyncio.run(_init(maint))
+    assert _marker_writes(maint) == [], \
+        "孤儿清理失败了，却已经把标记写进去了 —— 一次失败的 init 留下了合法标记"
+
+
+def test_first_init_proves_the_cluster_again_immediately_before_the_marker():
+    """信任写入必须由**紧挨着它**的证明背书（spec §4「DROP 前须紧贴着重查」同族）。
+
+    授权清理的那次证明与写标记之间隔着整个清理循环 —— 取锁、DELETE、释放，
+    每一步都要时间，窗口里集群可以变脏。
+    """
+    maint = _InitMaint(marker_rows=[],
+                       all_intent_rows=[_orphan(dbname="kline_pilot_gone", seed="gone")])
+    asyncio.run(_init(maint))
+    assert len(_marker_writes(maint)) == 1
+
+    # ⚠️ **判据是次序，不是计数**（`_FakeConn.ops` 的注释：「计数是脆弱断言 ——
+    #    中间多一处合法调用就会假红；次序才是判据」）。这里要证的性质就一条：
+    #    **写标记之前、清理之后，还有一次 pg_database 现查。**
+    marker_at = next(i for i, q in enumerate(maint.ops)
+                     if q.strip().upper().startswith("INSERT")
+                     and "pilot_cluster_marker" in q)
+    delete_at = max(i for i, q in enumerate(maint.ops)
+                    if q.strip().upper().startswith("DELETE"))
+    assert delete_at < marker_at, "清理排在了写标记之后 —— 会抛的活不许排在信任写入之后"
+    assert any("datistemplate" in q for q in maint.ops[delete_at + 1:marker_at]), (
+        "清理之后、写标记之前没有再现查一次 pg_database —— "
+        "标记会由一次隔着整个清理循环的**陈旧**证明背书")
+    # 标记必须是**最后一条**真正执行的语句：它之后不许再有任何会抛的活
+    assert maint.executed[-1] == _marker_writes(maint)[0], \
+        f"写标记之后还执行了别的语句：{maint.executed[maint.executed.index(_marker_writes(maint)[0]) + 1:]}"
+
+
 def test_orphan_cleanup_verifies_the_release_actually_took_effect():
     """**还了也要验**（codex S3-R4）—— 与「取到了也要验」是同一条纪律。
 
@@ -1577,7 +1628,51 @@ DELETE FROM public.pilot_create_intent
 """
 ```
 
-在 `init_cluster_marker` 末尾（`await assert_cluster_allowed(...)` 之后）追加：
+⚠️ **插入位置是本 Task 最容易做错的一步，先读完这一段再动手（codex S3-R5）。**
+
+Task 3 结束时函数末尾长这样：
+
+```python
+    if rows:
+        await assert_cluster_allowed(maint_conn, connect=connect, target_db=None)
+    else:
+        await _assert_disposable_cluster(maint_conn, connect=connect)
+        await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)   # ← 当时是最后一句
+```
+
+**清理循环不能追加在这之后。** 清理循环**会抛**（DELETE 失败、`seed_lock_not_released`），
+一旦排在写标记之后，首次初始化就又回到 R4 那个洞：**报告失败、却留下一个合法标记**，
+而契约是「本工具从不清标记」。R4 我只把标记挪到了「那一支的最后」，没考虑到 Task 4 随后
+会在**整个函数的最后**再接一段会抛的代码 —— 典型的「修 symptom 会挪动失败面」。
+
+**正确形态**（改完之后函数的结尾）：
+
+```python
+    if rows:
+        await assert_cluster_allowed(maint_conn, connect=connect, target_db=None)
+    else:
+        # 这一次证明的是「可以动这台集群的 intent 行」——授权下面的清理。
+        await _assert_disposable_cluster(maint_conn, connect=connect)
+
+    # 5. 孤儿 intent 行清理（下面那一大段）。**它会抛**，故必须排在写标记之前。
+    ...清理循环...
+
+    # 6. 首次初始化：**紧贴着**再证一次，然后写标记。
+    if not rows:
+        # ⚠️ **「紧贴」是 spec 立过的纪律**（§4：「DROP 前须**紧贴着**重查一次【绝对空】」）：
+        #    上面那次证明与这里之间隔着整个清理循环 —— 取锁、DELETE、释放，
+        #    每一步都要时间，窗口里集群可以变脏。信任写入必须由**紧挨着它**的证明背书。
+        await _assert_disposable_cluster(maint_conn, connect=connect)
+        # ⚠️ **本函数的最后一句，之后不许再有任何会抛的语句。**
+        #    它是唯一不可回滚的信任写入（契约：本工具从不清标记）。
+        await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)
+```
+
+**为什么这样就到头了**：写标记成了函数的**字面最后一句**，它之后不存在任何代码，
+「副作用次序」这条原则在本函数内**再没有新的落点**可以移动。
+
+具体做法：把 Task 3 末尾 `else:` 分支里的 `_WRITE_MARKER_SQL` 那一句**剪切**出来，
+按上面的形态重新组织；然后在两者之间插入下面的清理循环。
 
 ```python
     # 5. 孤儿 intent 行清理：超期 OR 库不存在，且取得到那一行 seed 的锁。
@@ -1692,6 +1787,8 @@ DELETE FROM public.pilot_create_intent
 | **M34** | 删掉写标记前那次 `await _assert_disposable_cluster(...)`（只留预检那次） | 同上（`db_scans >= 2` 那条前置断言先红 —— 它专防这条用例空转） |
 | **M35** | 删掉 `finally` 里 release 之后那条 `_SEED_LOCK_HELD_SQL` 复核 | `test_orphan_cleanup_verifies_the_release_actually_took_effect` + `..._does_not_mask_the_original_failure` |
 | **M36** | 把 `_assert_disposable_cluster` 里的 `_user_objects` 检查删掉（只留同侪库那半） | `test_init_refuses_to_declare_a_cluster_whose_maintenance_db_is_not_empty` |
+| **M37** | 把 `_WRITE_MARKER_SQL` 那句挪回清理循环**之前**（即 Task 3 的原位置） | `test_first_init_writes_no_marker_when_orphan_cleanup_fails` + `test_first_init_proves_the_cluster_again_immediately_before_the_marker`（`delete_at < marker_at` 那条） |
+| **M38** | 删掉写标记前那次「紧贴」`_assert_disposable_cluster` | `test_first_init_proves_the_cluster_again_immediately_before_the_marker`（`datistemplate in ops[delete_at+1:marker_at]` 那条） |
 | M22 | 把清理循环挪到 `await assert_cluster_allowed(...)` **之前** | `test_init_does_not_clean_orphans_on_a_cluster_that_is_no_longer_clean` |
 | M23 | 循环只处理 `rows[:1]`（提前 break） | `test_orphan_cleanup_releases_every_seed_lock_it_takes` |
 
@@ -2310,6 +2407,11 @@ bash .claude/scripts/codex-attest.sh --scope branch-diff --base 8578a59 --head f
 | **R3** | `needs-attention`（**未 approve**） | **[high]** `_InitMaint` 的 `maintenance_presence` / `intent_table_missing` 初始化被误放到 `fetchval` 的 `return` 之后 → 死代码 → `intent_table_missing=True` 整个失效，补建路径那几条用例**改测健康集群**；**[medium]** Task 4 的 Interfaces 块与 Self-Review 仍写着两参数 DELETE 契约，与同一份计划里的 SQL/测试自相矛盾 | **两条全接受，全是 R2 编辑引入的自伤**；已修，并加了两道机械自检 |
 
 | **R4** | `needs-attention`（**未 approve**） | **[high]** 首次初始化「先写标记、再跑现查」—— 现查仍可能拒绝，于是一次**报告失败**的 init 在集群里留下**合法标记**，而契约是「本工具从不清标记」；**[high]** `release_seed_lock` 只调用、**从不验证**锁真的还回去了 —— 空实现/连错连接/只释放一层可重入计数都会「成功返回」而锁仍挂着 | **两条全接受**；标记写入改成最后一个不可回滚写入（抽出 `_assert_disposable_cluster` 复用），release 后加活连接复核 |
+
+| **R5** | `needs-attention`（**未 approve**） | **[high]** R4 只把标记挪到「首次初始化那一支的最后」，而 Task 4 随后在**整个函数的最后**又接了会抛的清理循环（DELETE 失败 / `seed_lock_not_released`，后者正是 R4 我自己加的）→ 首次初始化又能「报告失败、却留下合法标记」 | **接受**；标记改成**函数字面最后一句**，清理排在它之前，并在它之前补一次「紧贴」复查 |
+
+⚠️ **R5 这一条是我 R4 修复的直接回归** —— 教科书式的「修 symptom 会挪动失败面」：我把标记挪到了分支末尾，却没考虑到下一个 Task 会在函数末尾追加会抛的代码，而那段代码里**新加的 raise 正是 R4 修复的产物**。
+**为什么这次是终点**：写标记现在是函数的**字面最后一句**，它之后不存在任何代码 —— 「副作用次序」这条原则在本函数内**再没有新的落点**。用例 `test_first_init_proves_the_cluster_again_immediately_before_the_marker` 用 `maint.executed[-1]` 把这条性质钉死。
 
 R4 两条的核实与处置：
 
