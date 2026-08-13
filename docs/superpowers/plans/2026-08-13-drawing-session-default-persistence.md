@@ -24,6 +24,15 @@
 - **禁止**改 `backend/tests/test_qmt_pilot_db.py:770`（它动态读 Swift 文件比对，同步后自动绿；改它 = 把跨语言守卫弄瞎）。
 - 源码守卫的结构计数**一律剥注释、剥字符串字面量**后再匹配；每条守卫**配双向自检**（该命中的命中、不该命中的不命中）；锚点失效必须**报错**不得静默返回 0。
 - 新增 API 的访问级别：`DrawingSession` 的 mutator 一律 **internal**，不得加 `public`。
+- ⭐ **每个 task 的三条命令必须由它的 `Files` 段与变异表「派生」，不得各写一份**（codex plan-P-R4：同一份计划里连栽三处）：
+  1. **`git add` 的文件集 == 该 task `Files` 段列出的全部文件**（Create + Modify + Test，一个不少）。
+     **唯一例外**：`Files` 段里标注「**不得修改**」的条目（如 Task 4 的 `backend/tests/test_qmt_pilot_db.py`）
+     —— 它们列在那里是为了**提醒别碰**，**不进 `git add`**；
+
+  2. **变异前的 `cp` 备份必须覆盖变异表里出现的每一个文件**（不只是"主"文件）；
+  3. **`--filter` 必须覆盖该 task 改动过的每一个测试文件**。
+- ⭐ **每个 task 收尾必须 `git status --short` 确认工作区干净**（输出为空）。
+  非空 = 有改动没被 commit（脏树假绿）或变异没复原干净 —— **两者都必须当场查清再继续**。
 
 ---
 
@@ -208,9 +217,12 @@ Expected: `5 tests passed`
 - [ ] **Step 7: 变异验证（M5 / M6 / M14 / M15b）**
 
 ```bash
-cp ios/Contracts/Sources/KlineTrainerContracts/Models/DrawingEnums.swift /tmp/DrawingEnums.bak
+# 备份**变异表里出现的每一个文件**（M14b 变异的是 HorizontalLineTool，不是 DrawingEnums）
+cp ios/Contracts/Sources/KlineTrainerContracts/Models/DrawingEnums.swift        /tmp/DrawingEnums.bak
+cp ios/Contracts/Sources/KlineTrainerContracts/Drawing/HorizontalLineTool.swift /tmp/HorizontalLineTool.bak
+cp ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.swift /tmp/DrawingObjectStyleEdit.bak
 ```
-逐条改 → 跑 → 记录红的测试名 → `cp /tmp/DrawingEnums.bak` 复原：
+逐条改 → 跑 → 记录红的测试名 → 用对应的 `.bak` `cp` 回去复原（**禁止 `git checkout`**）：
 
 | 变异 | 改法 | 只应变红 |
 |---|---|---|
@@ -224,11 +236,15 @@ cp ios/Contracts/Sources/KlineTrainerContracts/Models/DrawingEnums.swift /tmp/Dr
 
 ```bash
 cd "ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
+# 与本 task 的 Files 段逐一对应（三个消费者 + 定义 + 两个测试文件）
 git add ios/Contracts/Sources/KlineTrainerContracts/Models/DrawingEnums.swift \
         ios/Contracts/Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift \
+        ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.swift \
+        ios/Contracts/Sources/KlineTrainerContracts/Drawing/HorizontalLineTool.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Drawing/DrawingDefaultStyleSanitizeTests.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingStylePanelSourceGuardTests.swift
 git commit -m "feat(drawing): DrawingDefaultStyle.thicknessRange + sanitized(for:)（D99）"
+git status --short          # 必须为空
 ```
 
 ---
@@ -537,7 +553,7 @@ Expected: **无输出**（所有终态断言已迁到 8；`2` / `4` 两处不在
 - [ ] **Step 5: 跑测试确认通过 + drift 闸门**
 
 ```bash
-cd "ios/Contracts" && swift test --filter "Migration0010Tests|AppDB0005MigrationTests" 2>&1 | tail -5
+cd "ios/Contracts" && swift test --filter "Migration0010Tests|AppDB0005MigrationTests|ReviewArchiveMigrationTests|PendingReplayPersistenceTests" 2>&1 | tail -5
 cd "/Users/maziming/Coding/Prj_Kline trainer" && bash scripts/check_app_schema_drift.sh
 ```
 Expected: 测试全过；drift 脚本输出 `OK: AppDBMigrations.swift schema 与 ios/sql/app_schema_v1.sql 一致`
@@ -552,10 +568,14 @@ Expected: 测试全过；drift 脚本输出 `OK: AppDBMigrations.swift schema �
 - [ ] **Step 7: 提交**
 
 ```bash
+# ⚠️ user_version 断言散在**三个**测试文件里，三个都要 staged（漏一个 = 脏树假绿 / CI 红）
 git add ios/Contracts/Sources/KlineTrainerPersistence/Internal/AppDBMigrations.swift \
         ios/Contracts/Tests/KlineTrainerPersistenceTests/Migration0010Tests.swift \
-        ios/Contracts/Tests/KlineTrainerPersistenceTests/AppDB0005MigrationTests.swift
+        ios/Contracts/Tests/KlineTrainerPersistenceTests/AppDB0005MigrationTests.swift \
+        ios/Contracts/Tests/KlineTrainerPersistenceTests/ReviewArchiveMigrationTests.swift \
+        ios/Contracts/Tests/KlineTrainerPersistenceTests/PendingReplayPersistenceTests.swift
 git commit -m "feat(db): migration 0010 两张 pending 表加 drawing_default_style + user_version 8（D91）"
+git status --short          # 必须为空
 ```
 
 ---
@@ -1136,9 +1156,11 @@ cd "ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 - [ ] **Step 8: 提交**
 
 ```bash
+# ⚠️ 测试在 **KlineTrainerPersistenceTests**（真-DB coordinator 装配在那边），不是 Contracts
 git add ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift \
-        ios/Contracts/Tests/KlineTrainerContractsTests/CoordinatorDefaultStylePersistTests.swift
+        ios/Contracts/Tests/KlineTrainerPersistenceTests/CoordinatorDefaultStylePersistTests.swift
 git commit -m "feat(coordinator): 本局默认写入两处存档 + clean-skip 纳入 + resume 两处种子（D94-D96）"
+git status --short          # 必须为空
 ```
 
 ---
