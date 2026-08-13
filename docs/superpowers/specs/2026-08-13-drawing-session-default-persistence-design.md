@@ -13,7 +13,7 @@
 **基线**：`origin/main` `20f615a`。分支 `feat/drawing-session-default-persistence`，worktree `.dev/worktree/drawing-default-persist`。
 基线闸门（同一 commit `20f615a` 上实跑）：host `swift test` = **`Test run with 1831 tests in 215 suites passed`**。
 
-本 spec 新增决策编号从 **D90** 起（D81–D89 属自动选中 spec）。本文件定义 **D90–D99**。
+本 spec 新增决策编号从 **D90** 起（D81–D89 属自动选中 spec）。本文件定义 **D90–D100**。
 
 ---
 
@@ -267,6 +267,32 @@ public extension DrawingDefaultStyle {
 **连带的必做改动**：`DrawingStyleParams` 里的 `options(Array(1...5), …)` **必须改成引用 `DrawingDefaultStyle.thicknessRange`**。
 不改它，「单一真相」就是一句空话 —— 两处字面量迟早漂移，而漂移的后果正是 §5.1 那个「能打开但画不出线」。
 
+### 5.2b D100　容错解码 + sanitize 必须是**两个 repo 共用的一个函数**，且两张表都要有坏值档
+
+> **来源：codex spec-R3 medium。** 上一稿的 T3–T5b 只说「**列**含坏值」，没说是**哪张表**的列。
+> 而 `PendingTrainingRepositoryImpl` 与 `PendingReplayRepositoryImpl` 是**两条各自独立的读路径**
+> ⇒ 实施者可以只把 `pending_training` 的坏值路径做对，`pending_replay` 照样在坏值上抛 ⇒ **replay 续局被 brick**，
+> 正是 D92 要消灭的那个失败模式换了张表。
+
+**形状**：容错解码 + sanitize 收进**一个** internal 函数（住在 `KlineTrainerPersistence`），
+两个 repo 的读路径**各调它一次**，除此之外 `Sources/` 里零处自行解码该列。
+
+```swift
+// KlineTrainerPersistence internal
+/// 从列值（可能为 NULL / 非法 JSON / 类型不匹配 / 未来枚举值）读出一份**一定可用**的默认样式。
+/// **绝不 throw**（D92）；返回 nil 仅表示「列为 NULL / 无有效内容」。
+func decodeDrawingDefaultStyle(_ raw: String?) -> DrawingDefaultStyle?
+```
+
+**测试要求（覆盖矩阵，缺一格即不算过）**：**T3 / T4 / T5 / T5b 的每一条，都必须在 `pending_training`
+与 `pending_replay` 上各跑一遍**。允许用参数化测试（同一份用例喂两个 repo），但**不允许只跑一张表**。
+
+**守卫 G7**：`decodeDrawingDefaultStyle` 在 `Sources/` 里**恰好 2 个调用点**，分别在两个 repo impl 文件内。
+少于 2 ⇒ 有一条读路径没接上（正是本 finding 的形态）；多于 2 ⇒ 出现了第三条读路径，必须回来重新审。
+
+**变异 M15**：把 `pending_replay` 读路径改回「直接 `JSONDecoder().decode`」（绕过共享函数）
+⇒ **只有 replay 侧的 T4/T5/T5b 红**，training 侧全绿 —— 这条专门证明「两张表各跑一遍」不是冗余。
+
 ### 5.3 sanitize 的位置
 
 **在解码边界**（repo 读出来那一刻）就调 `sanitized(for:)`，**不是**等到 resume 种子那一步。
@@ -356,10 +382,10 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 |---|---|---|
 | **T1** | 存 → 读往返：五个字段**逐字段**相等 | **DB 边界**（真 GRDB，仿 `DefaultPendingTrainingRepositoryTests`） |
 | **T2** | replay 槽同样往返 | **DB 边界**（仿 `PendingReplayPersistenceTests`） |
-| **T3** | 列为 NULL（旧档）→ `drawingDefaultStyle == nil`，**其余字段照常读出**，不抛 | **DB 边界** |
-| **T4** | 列含 `{"colorToken":"未来色"}` → **整行照常读出**，仅该字段回落出厂 | **DB 边界**（D92 ①） |
-| **T5** | 列含**非法 JSON**（如 `"{{{"`）→ 整行照常读出，整个默认回落出厂 | **DB 边界**（D92 ②） |
-| **T5b** | 列含**类型不匹配**：`{"thickness":"fat"}` / `{"lineSubType":7}` / `{"colorToken":null}` / `{"lineStyle":[]}` / `{"labelMode":{}}` —— **五个字段各一条** → 整行照常读出，**只有该字段**回落出厂、其余四个字段**保留磁盘上的合法值** | **DB 边界**（codex spec-R2 medium：`decodeIfPresent(Int.self)` 能过 T4/T5 却在这里抛） |
+| **T3** | 列为 NULL（旧档）→ `drawingDefaultStyle == nil`，**其余字段照常读出**，不抛 | **DB 边界 ×2 表**（D100） |
+| **T4** | 列含 `{"colorToken":"未来色"}` → **整行照常读出**，仅该字段回落出厂 | **DB 边界 ×2 表**（D92 ① / D100） |
+| **T5** | 列含**非法 JSON**（如 `"{{{"`）→ 整行照常读出，整个默认回落出厂 | **DB 边界 ×2 表**（D92 ② / D100） |
+| **T5b** | 列含**类型不匹配**：`{"thickness":"fat"}` / `{"lineSubType":7}` / `{"colorToken":null}` / `{"lineStyle":[]}` / `{"labelMode":{}}` —— **五个字段各一条** → 整行照常读出，**只有该字段**回落出厂、其余四个字段**保留磁盘上的合法值** | **DB 边界 ×2 表**（codex spec-R2 medium：`decodeIfPresent(Int.self)` 能过 T4/T5 却在这里抛；×2 表见 D100） |
 | **T6** | 列含 `{"lineSubType":"segment"}` → 读出后**能正常提交一条线** | **host**（D93；断言 `commitPending` 返回非 nil） |
 | **T7** | 列含 `{"thickness":99}` / `{"thickness":0}` → 夹回 `1…5` | **host**（D93） |
 | **T8** | 迁移：pre-0010 库跑完 migrator → 两表**都有**该列且 `user_version == 8` | **DB 边界**（仿 `Migration0009Tests` / `AppDB0005MigrationTests` 的裸库套路） |
@@ -392,6 +418,7 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 | M12 | `user_version` 仍写 7 | T8/T9 红 |
 | M13 | `CONTRACT_VERSION` 留在 `"1.12"` | **只有 T15** 红 |
 | M14 | 把 `thicknessRange` 改成 `1...4`（模拟两处字面量漂移） | **只有 T16** 红 —— 证明面板确实是从该常量派生、不是自己写了个 `1...5` |
+| **M15** | 把 `pending_replay` 的读路径改回「直接 `JSONDecoder().decode`」（绕过共享函数） | **只有 replay 侧**的 T4/T5/T5b 红，**training 侧全绿** + 守卫 **G7** 红 —— 专证「两张表各跑一遍」不是冗余（codex R3-medium） |
 
 **实施要求**：本表**每一条**逐条关门看红，PR 描述里逐条记录「红的是**哪个测试名**」+ 恢复后重新变绿。
 变异复原一律 `cp` 到 /tmp 再 `cp` 回，**禁止 `git checkout <file>`**（[[feedback_git_checkout_destroys_uncommitted_work]]）。
@@ -415,11 +442,12 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 | **G4b** | `TrainingView.stylePanelWillBeVisible` 的**整条定义式**仍为 `showsTradeButtons && isDrawingActive && typeRowExpanded` | **内容断言**（codex R2-medium：只钉 G4 会漏掉「改另外两项」这条路） |
 | **G4c** | 样式面板（`DrawingStyleParams` / `DrawingStylePanel`）的**挂载点**在 `Sources/` 里**恰好 1 处** | 结构计数（防「另开一条挂载路径」绕过 G4/G4b） |
 | **G5** | `1...5` / `1 ... 5` 这类粗细值域字面量在 `Sources/` 里**恰好 1 处**（= `DrawingDefaultStyle.thicknessRange` 的定义），面板与解码器都只引用它 | 结构计数（**剥注释剥字面量后匹配**；D99 的机械守门） |
+| **G7** | `decodeDrawingDefaultStyle` 在 `Sources/` 里**恰好 2 个调用点**，分别在两个 repo impl 文件内 | 结构计数（D100：少于 2 = 有一条读路径没接上；多于 2 = 出现第三条读路径，必须回来重审） |
 | **G6** | `TrainingView` 里存在一条 `.onChange(of: engine.drawingSession.defaultStyle)`，且其闭包体内调用 `lifecycle.autosave(immediate: true)` | **结构 + 内容断言**。这是 **D94 的唯一守门**（host 够不着视图，见 §6.1）；**M7 判绿看它，不看 T10** |
 
 **纪律**：结构计数一律**剥注释、剥字符串字面量**后再匹配；每个守卫配**双向自检**（该命中的必须命中、不该命中的必须不命中）；
 锚点失效必须**报错**不得静默返回 0（[[feedback_mechanical_checker_parser_disabled]]）。
-**G1–G3 / G4b / G4c / G5 / G6 在当前树上是红的**（G4b/G4c 依赖的谓词今天就存在，但守卫本身尚未写；G4 今天就是绿的），必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
+**G1–G3 / G4b / G4c / G5 / G6 / G7 在当前树上是红的**（G4b/G4c 依赖的谓词今天就存在，但守卫本身尚未写；G4 今天就是绿的），必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
 **G4 今天就是绿的**，属回归守卫，可先落库。
 
 ---
@@ -479,7 +507,7 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 |---|---|
 | SQLite schema | **有**：两张表各 +1 可空列，新增迁移 `0010`，`user_version` 7 → 8 |
 | `v1_4_baselineDDL` / `app_schema_v1.sql` | **零**（冻结基线不动；schema-drift 闸门因此不受影响） |
-| `CONTRACT_VERSION` | **必须 bump `1.12` → `1.13`**（命中 m01「影响 DDL」）+ m01 矩阵两行同步（D97 §3.4） |
+| `CONTRACT_VERSION` | **必须 bump `1.12` → `1.13`**（命中 m01「影响 DDL」）+ **m01 矩阵三行同步**（D97 §3.4）：① 顶层 → `"1.13"`　② app.sqlite GRDB migration 行 → `0010_v1.12_drawing_default_style`　③ **Swift 模型版本（M0.3）行 → `1.4`**（Codable 字段变更，联动顶层） |
 | 版本错位 | **读向兼容；写向在降级时丢一个装饰性偏好**（旧写者的 `INSERT OR REPLACE` 会把新列抹成 NULL）。已接受残留，爆炸半径与理由见 D98 §3.5。**不得再宣称「双向兼容」** |
 | 磁盘上的画线数据（`drawings` / `review_archive`） | **零** |
 | `DrawingObject` | **零**（本局默认不是画线对象的字段） |
@@ -491,7 +519,7 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 
 | 轮 | 评审对象 | verdict | finding | 处置 |
 |---|---|---|---|---|
-| **R1** | `feat/drawing-session-default-persistence` @ `daca81b`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：新增 app.sqlite DDL 却写「不 bump `CONTRACT_VERSION`」，违反治理规则；且「双向兼容」只论证了读，**旧写者的 `INSERT OR REPLACE` 会把新列抹成 NULL**<br>**1 medium**：D93 要求解码器复用 `DrawingStyleParams` 的 `Array(1...5)`，但那是 `#if canImport(UIKit)` 里的 internal 视图，**持久化层够不着**，照写只能复制一份值域或暴露 UI 内部 | **两条全采纳，均已实测证实**。high → 新增 **D97**（必须 bump `1.12→1.13` + m01 矩阵两行同步，照 `09be7cd` 先例）与 **D98**（版本错位的诚实分析：读向兼容 / 写向降级丢一个装饰性偏好，接受为残留并界定爆炸半径 = 仅该列，其余 14 列全在旧写者清单里，最坏 = 回到本片修复前）。medium → 新增 **D99**（`thicknessRange` + `sanitized(for:)` 落 Contracts 平台中立层，`DrawingStyleParams` 改为引用同一常量），配 T15/T16、M13/M14、守卫 G5 |
+| **R1** | `feat/drawing-session-default-persistence` @ `daca81b`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：新增 app.sqlite DDL 却写「不 bump `CONTRACT_VERSION`」，违反治理规则；且「双向兼容」只论证了读，**旧写者的 `INSERT OR REPLACE` 会把新列抹成 NULL**<br>**1 medium**：D93 要求解码器复用 `DrawingStyleParams` 的 `Array(1...5)`，但那是 `#if canImport(UIKit)` 里的 internal 视图，**持久化层够不着**，照写只能复制一份值域或暴露 UI 内部 | **两条全采纳，均已实测证实**。high → 新增 **D97**（必须 bump `1.12→1.13` + m01 矩阵同步，照 `09be7cd` 先例；⚠️ **当时写的是两行，R2 已补为三行**，现行以 D97 为准）与 **D98**（版本错位的诚实分析：读向兼容 / 写向降级丢一个装饰性偏好，接受为残留并界定爆炸半径 = 仅该列，其余 14 列全在旧写者清单里，最坏 = 回到本片修复前）。medium → 新增 **D99**（`thicknessRange` + `sanitized(for:)` 落 Contracts 平台中立层，`DrawingStyleParams` 改为引用同一常量），配 T15/T16、M13/M14、守卫 G5 |
 
 **R1 额外自查发现（codex 未提，我核矩阵时撞见）**：`docs/governance/m01-schema-versioning-contract.md`
 的 app.sqlite 行**仍停在 `0003_v1.4_purge_leased`**，而代码已到 `0009` ⇒ **`0004`–`0009` 六次 DDL 迁移都未同步矩阵**。
@@ -499,9 +527,18 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 
 | **R2** | 同分支 @ `a6ed039`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：T10 是 D94/M7 的唯一证据，但它是 host 假件计数，而要证的行为是 UIKit-gated `TrainingView` 里的 `.onChange` —— **删掉 `.onChange`，T10 照样绿**<br>**medium①**：m01 还有一行「Swift 模型版本｜Codable 字段变更→联动顶层」，我只同步了两行<br>**medium②**：G4 只钉 `showsTradeButtons`，可判据是三项合取，改另外两项或另开挂载路径都能绕过<br>**medium③**：T4/T5 只覆盖「枚举值不认识」和「整段非 JSON」，漏了**类型不匹配**（`{"thickness":"fat"}`），`decodeIfPresent(Int.self)` 能过 T4/T5 却在这里抛 | **四条全采纳**。high → D94 的守门改为**守卫 G6**（断言 `.onChange` 存在且调 `autosave`），**M7 判绿看 G6 不看 T10**；T10 降级为「值确实进了写入载荷」。①→ 矩阵改同步**三行**（Swift 模型版本 1.3→1.4）；**不采纳** codex 的另一选项「把 Codable 改动移出 PR」——那会造出有损 Codable，今天零消费者但它是 public，将来第一个用的人会踩。②→ 拆成 G4/G4b/G4c 三条（含整条 `stylePanelWillBeVisible` 定义式 + 挂载点计数），并写死无条件规则「任何让复盘可达改默认的改动必须同期接上 `review_archive`」，加变异 M2b。③→ D92 ① 明写「失败包括三类」+ 每字段各自 `try?`、禁止五字段包一个 `try`；加 T5b（五字段各一条）与 M4b |
 
+| **R3** | 同分支 @ `a850e5e`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**首次无 high**） | **medium①**：T3–T5b 只说「**列**含坏值」，没说哪张表；两个 repo 是**各自独立的读路径** ⇒ 可以只把 `pending_training` 做对，`pending_replay` 照样在坏值上抛 ⇒ replay 续局被 brick<br>**medium②**：§11 契约影响行仍写「m01 矩阵**两行**」，与 D97 已改成的**三行**自相矛盾 | **两条全采纳**。①→ 新增 **D100**：容错解码 + sanitize 收进**一个共享函数** `decodeDrawingDefaultStyle`，两个 repo **各调一次**；**T3/T4/T5/T5b 每条都必须两张表各跑一遍**；配守卫 **G7**（恰好 2 个调用点）与变异 **M15**（把 replay 读路径改回直接 decode → 只有 replay 侧红）。②→ §11 那行改写为三行并逐条列出 |
+
 **R1 的形状**：我把「可空列 + 附加式」当成了「所以不用 bump」，**跳过了去读治理文档那一步**——
 规则明文写着「影响 DDL → 必须 bump」，我一次都没查就下了结论。
 而「双向兼容」那句是同一个毛病的另一面：**只推演了对我的结论有利的那个方向（读）**。
+
+**R3 medium① 的形状**：我把两条**独立的读路径**当成了一条来写测试——「列含坏值」这个说法**掩盖了它有两个宿主**。
+纪律沉淀：**凡是同一份数据存在 N 个独立读/写路径，测试矩阵必须显式写成 N 份**；用「那个列 / 那个字段」这类**不指明宿主**的措辞，等于默许只做一份。
+
+**R3 medium② 的形状**：又一次「改了 A 忘了同步 B」——D97 从两行改三行，§11 的摘要行没跟着改。
+⚠️ 这已是本轮工作里同一形状的第 N 次（自动选中 spec 的 R9/R10/R11 全是它）。**摘要性表格是重灾区**：它复述别处的结论，却没有任何机制保证同步。
+纪律沉淀：**摘要表里不复述可变数字，改为指向权威处**（写「见 D97」而不是「两行」）。
 
 **R2 high 的形状 = 「零判别力变异」的第二次**（自动选中 spec R5-medium 是第一次）：我给判据配了变异，却没问「**这条变异真的会让那条测试变红吗**」。T10 在 host、`.onChange` 在 UIKit-gated 视图里，两者**根本不在同一个可执行面上**。
 纪律沉淀：**每写一条「M 变异 → T 测试红」的配对，必须先确认这两者在同一个可执行面上**（同一 target、同一平台门）。跨面的配对是空头保证书。
