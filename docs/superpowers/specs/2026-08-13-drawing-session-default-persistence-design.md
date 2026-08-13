@@ -367,10 +367,54 @@ host 测试够不着 `TrainingView`（`#if canImport(UIKit)`），它只能自�
 T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默认值写进去」（值传递），
 **spec 里不得再把它写成 D94 的证据**。
 
-**⚠️ 明令禁止的两种偷懒**：
-- **不得**让 `setDefaultStyle` 去 bump `drawingsRevision`。D56 明写该计数**只覆盖 `drawings`**；
-  污染它会让 1b-ii 撤销 PR 的入栈条件（「revision 递增 ⟺ 内容真的变了」）失真。
-- **不得**依赖「反正用户改完总会画线，画线时会存」。用户完全可能改完默认就退出。
+**⚠️ 明令禁止的偷懒**：**不得**让 `setDefaultStyle` 去 bump `drawingsRevision`。
+D56 明写该计数**只覆盖 `drawings`**；污染它会让 1b-ii 撤销 PR 的入栈条件（「revision 递增 ⟺ 内容真的变了」）失真。
+
+### 6.1b ⚠️ **我给 D94 写的理由是错的，必须更正**（codex spec-R7 medium，**已实测**）
+
+上一稿写「改完默认立刻杀进程 = 白改」。**实测为假**：
+
+```
+TrainingView.swift:347-363
+.onChange(of: scenePhase) { _, newPhase in
+    case .inactive, .background:
+        Task { await lifecycle.flushForBackground() }   // ← 失活/后台立即 flush
+```
+
+用户上划关 App **必先经过 `.inactive` / `.background`** ⇒ **后台 flush 已经把默认存下来了**
+（`flushForBackground` 走 `saveProgress`，而 D96 已让它带上默认值）。
+点「返回」回主页同理（返回本来就走保存路径）。
+
+**⇒ D94 的真实价值只有一条：收窄崩溃窗口**（App **崩溃**而非用户主动退出时，没有任何 scenePhase 转场，
+「改完默认 → 崩溃」这段窗口内的改动会丢）。**外加一条一致性理由**：本仓对**画线**改动已经有
+`.onChange(of: engine.drawingsRevision) { autosave(immediate: true) }`（`TrainingView.swift:368`），
+本局默认是同一类局内状态，不给它同等待遇是无理由的不对称。
+
+**⇒ 连带更正验收 #4**：它**无法隔离 D94**（后台 flush 会掩盖）。见 §9 的更正。
+
+### 6.1c D94 的证据强度：**如实标注，不假装有行为证据**
+
+codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样式 → 排空 autosave → 断言载荷含新默认）。
+**本 spec 不把它写成必做项**，理由是本仓已有**实测记录在案**的平台限制：
+
+> `DrawingLayoutInvariantTests.swift:9-28` 逐条记录了 headless Catalyst 上托管视图测量的**四条路**：
+> ① accessibilityIdentifier + UIView 树 → 恒 nil；② 真 `UIWindow` → **直接崩掉整个 xctest runner**；
+> ③ `UIHostingController` + `layoutIfNeeded` → preference 不 flush；
+> ④ `ImageRenderer` + PreferenceKey → **可行，但只对纯 SwiftUI 子树**；
+> 渲染含 `UIViewRepresentable` 的**整壳**会「塌成 frame=(0,0,0,0)」。
+
+而 `TrainingView` 恰好含 `ChartContainerView`（`UIViewRepresentable`）与 segmented `Picker`。
+**在整壳上做行为测试，是本仓已证伪的路。**
+
+**故 D94 的证据分两级，且必须如实这么写**：
+
+| 级别 | 内容 |
+|---|---|
+| **必做** | 守卫 **G6**（结构 + 内容断言：`.onChange(of: engine.drawingSession.defaultStyle)` 存在且调 `lifecycle.autosave(immediate: true)`） |
+| **plan 阶段的探路（spike），成则加、不成则如实记录** | 把两条 autosave 触发抽成一个**纯 SwiftUI 的 `ViewModifier`**（沿用本仓「抽共享、不复制」的 `ChartPanelsContainer` 范式），再用 ④ 的 `ImageRenderer` 路子渲染一个**最小纯 SwiftUI 宿主**验证 `.onChange` 真的触发。**能跑通就加进必测；跑不通就在 PR 描述里如实写明「D94 只有结构证据，行为证据受阻于已记录的平台限制」** |
+
+⚠️ **不得**因为「codex 要求了」就把一条**未经证实可构造**的测试写进必做清单 ——
+那正是本轮工作反复栽过的「零判别力 / 写不出来的档」（自动选中 spec R5-medium、本 spec R2-high）。
 
 ### 6.2 D95　replay 的 clean-skip **必须**纳入本局默认
 
@@ -458,6 +502,7 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 | M12 | `user_version` 仍写 7 | T8/T9 红 |
 | M13 | **只**改 Swift 那份、backend 那份留在 `"1.12"` | **backend 的 `test_qmt_pilot_db.py:770`** 红（跨语言一致性守卫）—— 这条专证「两份源必须同改」 |
 | **M13b** | 两份都留在 `"1.12"` | **只有 T15** 红 |
+| **M13c** | 两份常量都改对、migration 也加了，**但 m01 矩阵三行一行没动** | **只有守卫 G8** 红 —— 这条专证「矩阵同步是被强制的，不是靠自觉」（codex R7-medium） |
 | M14 | 把 `thicknessRange` 改成 `1...4`（模拟两处字面量漂移） | **只有 T16** 红 —— 证明面板确实是从该常量派生、不是自己写了个 `1...5` |
 | **M15b** | 把 `sanitized` 里的 `labelMode` 归一化换成**两参**重载 `normalizedLabelMode(current:lineSubType:)` | **只有 T15b** 红 —— 这条专证「tool-aware 签名挡不住传错重载」（codex R5-medium） |
 | **M15** | 把 `pending_replay` 的读路径改回「直接 `JSONDecoder().decode`」（绕过共享函数） | **只有 replay 侧**的 T4/T5/T5b 红，**training 侧全绿** + 守卫 **G7** 红 —— 专证「两张表各跑一遍」不是冗余（codex R3-medium） |
@@ -484,6 +529,7 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 | **G4b** | `TrainingView.stylePanelWillBeVisible` 的**整条定义式**仍为 `showsTradeButtons && isDrawingActive && typeRowExpanded` | **内容断言**（codex R2-medium：只钉 G4 会漏掉「改另外两项」这条路） |
 | **G4c** | 样式面板（`DrawingStyleParams` / `DrawingStylePanel`）的**挂载点**在 `Sources/` 里**恰好 1 处** | 结构计数（防「另开一条挂载路径」绕过 G4/G4b） |
 | **G5** | `1...5` / `1 ... 5` 这类粗细值域字面量在 `Sources/` 里**恰好 1 处**（= `DrawingDefaultStyle.thicknessRange` 的定义），面板与解码器都只引用它 | 结构计数（**剥注释剥字面量后匹配**；D99 的机械守门） |
+| **G8** | 解析 `docs/governance/m01-schema-versioning-contract.md` 的矩阵，断言**三行都已同步**：顶层 == `"1.13"`、app.sqlite GRDB migration 行 == `0010_v1.13_drawing_default_style`、Swift 模型版本行 == `1.4` | **内容断言**（codex spec-R7 medium：D97 要求同步三行，却**没有任何机制**在它没做时报红 —— 而「矩阵停在 `0003`、代码已到 `0009`」正是本 spec 自己点名的既有漂移，**不加守卫就是原样重演一次**）。⚠️ 目标是 **markdown 文档**、不是 Swift 源，故**不适用剥字符串字面量那条纪律**；按表格行解析，并配双向自检（改任一行 → 红；无关行改动 → 仍绿） |
 | **G7** | `decodeDrawingDefaultStyle` 在 `Sources/` 里**恰好 2 个调用点**，分别在两个 repo impl 文件内 | 结构计数（D100：少于 2 = 有一条读路径没接上；多于 2 = 出现第三条读路径，必须回来重审） |
 | **G6** | `TrainingView` 里存在一条 `.onChange(of: engine.drawingSession.defaultStyle)`，且其闭包体内调用 `lifecycle.autosave(immediate: true)` | **结构 + 内容断言**。这是 **D94 的唯一守门**（host 够不着视图，见 §6.1）；**M7 判绿看它，不看 T10** |
 
@@ -505,7 +551,7 @@ G4 / G4b / G6 断言的是 **Swift 表达式**，G5 数的是 **Swift 代码里�
 
 **纪律**：结构计数一律**剥注释、剥字符串字面量**后再匹配；每个守卫配**双向自检**（该命中的必须命中、不该命中的必须不命中）；
 锚点失效必须**报错**不得静默返回 0（[[feedback_mechanical_checker_parser_disabled]]）。
-**G1 / G3 / G4b / G4c / G5 / G6 / G7 在当前树上是红的**（G4b/G4c 依赖的谓词今天就存在，但守卫本身尚未写；G4 今天就是绿的），必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
+**G1 / G3 / G4b / G4c / G5 / G6 / G7 / G8 在当前树上是红的**（G4b/G4c 依赖的谓词今天就存在，但守卫本身尚未写；G4 今天就是绿的），必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
 **G4 今天就是绿的**，属回归守卫，可先落库。
 
 ---
@@ -520,14 +566,14 @@ G4 / G4b / G6 断言的是 **Swift 表达式**，G5 数的是 **Swift 代码里�
 | 1 | 开一局新训练 → 进画线模式 → 画一条线 | 线是**出厂橙** | |
 | 2 | 在样式面板把颜色改成**紫**、粗细改成 **3** → 再画一条线 | 新线是**紫色、粗细 3** | |
 | 3 | 承接 #2，点「返回」回主页 → 点「继续训练」→ 进画线模式 → 画一条线 | 新线**仍是紫色、粗细 3**（继承成功） | |
-| 4 | 承接 #3，再把颜色改成**绿** → **直接杀掉 App**（上划关掉，不点返回）→ 重开 → 「继续训练」→ 画一条线 | 新线是**绿色**（只改默认也立刻存了盘） | |
+| 4 | 承接 #3，再把颜色改成**绿** → **直接杀掉 App**（上划关掉，不点返回）→ 重开 → 「继续训练」→ 画一条线 | 新线是**绿色**。⚠️ **本条不隔离 D94**（codex R7 已证：上划关 App 必先进后台，`flushForBackground` 会先存一次）——它验的是「**默认真的进了存档、且能被读回**」这条端到端链路，**不是**「立即触发」。D94 的证据是守卫 **G6**（§6.1c） | |
 | 5 | 承接 #4，把这一局**打完**（或点「结束本局」）→ 回主页 → **开一局全新训练** → 画一条线 | 新线是**出厂橙**，**不是**绿色（新局回落） | |
 | 6 | 从历史记录点某条 →「再次训练」→ 画一条线 | 线是**出厂橙**（replay 算新的一局） | |
 | 7 | 承接 #6，在 replay 里把颜色改成**蓝** → 点「返回」→ 再从历史记录点同一条 →「再次训练」（续局） | 画出的线是**蓝色**（replay 的断点续局也继承） | |
 | 8 | 从历史记录进**复盘**，用浮动铅笔钮画线 | 能正常画线；**没有样式面板**（复盘本来就改不了默认，符合设计） | |
 | 9 | **用升级前建的进行中训练**（若手上有）→ 「继续训练」 | **能正常打开**，画线默认是出厂橙 | |
 
-**#3 / #4 / #5 是三条硬边界**（断点继承 / 只改默认也存盘 / 新局回落），任何一条不过都是阻塞级。
+**#3 / #4 / #5 是三条硬边界**（断点继承 / **默认进得了存档也读得回来** / 新局回落），任何一条不过都是阻塞级。
 
 ⚠️ **#9 若装不出升级前的存档，必须如实标「无法验证」并在 PR 描述里写明，不得直接打勾**
 （[[feedback_uikit_gated_evidence_traps]]：不好测不是打勾的理由）。它的自动化替身是 T3/T8。
@@ -595,9 +641,15 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 
 | **R6** | 同分支 @ `d04d409`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**0 high**） | **medium①**：T4 只测了 `colorToken` 的未来枚举值；`lineSubType`/`lineStyle`/`labelMode` 只有类型不匹配覆盖 ⇒ 实施者可以只给 `colorToken` 加 `try?`，`{"lineStyle":"dash5"}` 照样抛、照样 brick<br>**medium②**：**G2 与守卫纪律自相矛盾** —— 它要数的是**写在 Swift 字符串字面量里的 SQL 列名**，而同节纪律要求「剥字符串字面量后再匹配」；剥完证据就没了。照字面实现永远红，全局放宽则所有守卫可被伪造 | **两条全采纳**。①→ T4 扩成**四个枚举字段各一条 ×2 表**，加变异 **M4c**（只给 `colorToken` 留 `try?` → 只有另外三条红、`colorToken` 那条仍绿）。②→ **删除 G2**（而非打补丁）：它想防的「只接了一张表」已被 T1/T2/T8 的**行为证据**直接覆盖，**行为证据严格强于文本计数**；给它写 SQL-aware 解析器要付双份成本（解析器自身还需自测）。已逐条核过其余守卫：G1/G3/G7 数 Swift 标识符、G4/G4b/G6 断言 Swift 表达式、G5 数代码里的 `1...5` —— **无一依赖字符串字面量内容**，剥离纪律对它们全部适用 |
 
+| **R7** | 同分支 @ `a2f1790`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**0 high**） | **medium①**：D94 只有 G6 这条结构证据；且真机 #4「杀 App」**会被既有后台 flush 掩盖**，不隔离该触发<br>**medium②**：D97 要求同步 m01 三行，却**没有任何守卫**在它没做时报红 —— 而本 spec 自己点名的「矩阵停在 0003」正是这么来的 | **两条全采纳，且①的核实结果比 codex 说的更严重**：`TrainingView.swift:347-363` 的 `.onChange(of: scenePhase)` 在 `.inactive/.background` 调 `flushForBackground()` ⇒ **我给 D94 写的理由「改完默认就杀进程 = 白改」本身是假的**（后台 flush 已覆盖）。已更正：新增 §6.1b 更正理由（D94 真实价值 = **收窄崩溃窗口** + 与既有 `drawingsRevision` 触发的一致性）、§6.1c 如实标注证据强度（必做 = G6；行为测试列为 **plan 阶段 spike**，因本仓 `DrawingLayoutInvariantTests:9-28` 已实测记录整壳托管视图测试的**四条路三条死**、唯一可行的 `ImageRenderer` 对含 `UIViewRepresentable` 的整壳会塌成 0）；验收 #4 改为「验端到端链路、不隔离 D94」。②→ 新增守卫 **G8**（解析 m01 markdown 断言三行）与变异 **M13c** |
+
 **R1 的形状**：我把「可空列 + 附加式」当成了「所以不用 bump」，**跳过了去读治理文档那一步**——
 规则明文写着「影响 DDL → 必须 bump」，我一次都没查就下了结论。
 而「双向兼容」那句是同一个毛病的另一面：**只推演了对我的结论有利的那个方向（读）**。
+
+**R7 medium① 的形状 = 本轮最值得记的一条**：**我为一条机制写的理由，被同一个文件里 20 行外的既有代码证伪了**。我论证「不加这条触发就会丢」，却没去看**已经存在的后台 flush**。
+纪律沉淀：**论证「不做 X 就会出事」之前，先把「现在是靠什么兜住的」找出来** —— 很多时候已有兜底，X 的真实价值要小得多；理由写错会连带把验收步骤写成**无判别力**的（本例 #4）。
+⚠️ 连带纪律：**评审建议的测试，也要先过「本仓做不做得出来」这一关**。codex 建议的整壳行为测试，本仓 `DrawingLayoutInvariantTests:9-28` 已把四条路的成败逐条记在案 —— 照搬进必做清单就是又写一条写不出来的档。**先查仓内是否已有该技术路线的实测记录。**
 
 **R6 medium② 的形状**：**我写的守卫，被我自己在同一节写的守卫纪律否定了**。两条都对 —— 剥字面量是对的、要防漏接一张表也是对的 —— 但**放在一起就不可实现**。
 纪律沉淀：**每加一条守卫，当场用同节的匹配纪律走一遍**：剥完注释与字面量之后，**它要找的证据还在不在**？不在，就说明这条守卫要么换形态、要么本来就该由测试承担。
