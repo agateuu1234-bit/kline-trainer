@@ -1979,7 +1979,16 @@ cd "$repo/ios/Contracts" && { xcodebuild test \
   -scheme KlineTrainerContracts-Package -destination 'platform=macOS,variant=Mac Catalyst' \
   2>&1 | tee /tmp/catalyst_final.log | tail -5; } \
   || { echo "!! ④ Catalyst 红"; exit 1; }
-grep -c "Test Case .* passed" /tmp/catalyst_final.log   # 判绿读**执行量**，不读 TEST SUCCEEDED
+# 判绿读**执行量**，不读 TEST SUCCEEDED。⚠️ 两个数字都要看（控制者 Task 7 实测）：
+grep -c "Test Case .* passed" /tmp/catalyst_final.log            # ① XCTest 执行量（应 == host 的 XCTest 数）
+grep -E "Test run with [0-9]+ tests" /tmp/catalyst_final.log     # ② swift-testing：**会有两行**（两个 bundle）
+
+# ⚠️ 只数 ① 是不够的：XCTest 数**不随 swift-testing 新增而变**，本片新增的测试几乎全是 swift-testing。
+# ⚠️ ② 的两行要**相加**再和 host 比。实测关系（Task 7 时点）：
+#      host swift-testing = 1873 / 220 suites
+#      Catalyst = 1774（Contracts bundle）+ 173（Persistence bundle）= **1947**
+#      差值 **+74 = UIKit-gated 那批**（host 根本不编译它们）——这与仓库历史基线 "uikit 74" 吻合。
+#    若 Catalyst 总数**不再明显多于 host**，说明 UIKit-gated 那批没跑起来 = 假绿，必须查明再判绿。
 ```
 
 Expected：① host ≥ 1831 + 本片新增；④ Catalyst 执行量 **≥ Task 7 那次记录的条数**
