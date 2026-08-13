@@ -98,24 +98,46 @@ struct DrawingInteractionUISourceGuardTests {
             "前景色不是绑 isDrawMode 的三元——被硬编码成常量，图标会恒亮/恒灭")
     }
 
-    @Test("spec §1.1 #1 / PD5：底栏**恰好 2 个按钮**（类型 + ③🗑），②🔒④↩⑤↪ 属 1b-ii 一个都不渲染")
-    func bottomBarHasExactlyTwoKeys() throws {
+    @Test("spec §1.1 / D24：底栏**恰好 3 个按钮**（类型 + ②🔒 + ③🗑），④↩⑤↪ 属 PR-2 一个都不渲染")
+    func bottomBarHasExactlyThreeKeys() throws {
         let bar = try code("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
-        // ⚠️ **结构计数，不是「禁止图标名」黑名单**（PD7）：黑名单既漏（新图标名不在表里）
-        //    又误伤注释（本视图注释里正当地写着 `locked` / 🔒 的去向）。恰好 2 个 `Button`
-        //    机械且完备地表达了「只许有这两个控件」。`.buttonStyle` 是小写 b，不参与计数。
-        #expect(bar.components(separatedBy: "Button").count - 1 == 2,
-                "底栏按钮数不是 2 —— 多了就是把 1b-ii 的键提前 ship 了，少了就是 🗑 没接进来")
+        // 结构计数（PD7：不是「禁止图标名」黑名单）—— 1b-ii PR-1 把 2 改成 3
+        #expect(bar.components(separatedBy: "Button").count - 1 == 3,
+                "底栏按钮数不是 3 —— 多了就是把 PR-2 的 ↩↪ 提前 ship 了，少了就是 🔒 或 🗑 没接进来")
         #expect(bar.contains("deleteEnabled"), "🗑 必须由传入谓词置灰，不得自己判")
         #expect(bar.contains(squeeze(".disabled(!deleteEnabled)")))
-        // 底栏与另两个 swap 底栏共享同一固定高度（既有不变量，别被本次改动碰掉）
+        #expect(bar.contains("lockEnabled"), "🔒 必须由传入谓词置灰，不得自己判")
+        #expect(bar.contains(squeeze(".disabled(!lockEnabled)")))
+        // 底栏不得自己读 locked —— 判据必须在路由里（结构断言，读 squeezed 正确）
+        #expect(!bar.contains(squeeze("drawing.locked")), "底栏不得自己读 DrawingObject.locked")
         #expect(bar.contains("BottomBarMetrics.height"))
-        // 用户可见文案 / SF Symbol 名是**字符串字面量** → squeezedSource 会丢弃它们，必须读原始文本，
-        // 且带完整调用语法做锚（裸词会被注释里的同一个词假绿）。
+        // ★ 用户可见文案 / SF Symbol 名是**字符串字面量** → 必须读原始文本，且带完整调用语法做锚
         let barRaw = try raw("Sources/KlineTrainerContracts/UI/DrawingModeBar.swift")
         #expect(barRaw.contains("Text(\"类型\")"))
         #expect(barRaw.contains("Image(systemName: \"trash\")"), "③🗑 未接入")
         #expect(barRaw.contains(".accessibilityLabel(\"删除\")"))
+        #expect(barRaw.contains("Image(systemName: lockIsOn ? \"lock\" : \"lock.open\")"),
+                "🔒 图标没接 lockIsOn —— 图标态不会反映选中线的锁定状态")
+        #expect(barRaw.contains(".accessibilityLabel(lockIsOn ? \"解锁\" : \"锁定\")"))
+        // ④↩⑤↪ 属 PR-2：本期一个占位都不许渲染（读原始文本才数得到字面量）
+        for undoIcon in ["arrow.uturn.backward", "arrow.uturn.forward"] {
+            #expect(!barRaw.contains(undoIcon), "\(undoIcon) 属 PR-2，本期不得渲染")
+        }
+    }
+
+    /// ⚠️ 只查 `DrawingModeBar.swift` **挡不住**「按钮长得对但根本没接上」：
+    ///   `DrawingBottomBar(lockEnabled: true, lockIsOn: false, onToggleLock: {}, …)` 会让上面那条
+    ///   三键守卫**全绿**，而屏幕上那个 🔒 恒亮、点了没反应。可用性与动作的**真相在路由里**，
+    ///   故必须钉死 `TrainingView` 传进去的就是路由那三个函数。
+    @Test("底栏 🔒 的可用性/图标态/动作三者都必须接 DrawingEditRouter，不得传常量或空闭包")
+    func trainingViewWiresLockToRouter() throws {
+        let tv = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        #expect(tv.contains(squeeze("lockEnabled: DrawingEditRouter.lockButtonEnabled(engine: engine)")),
+                "🔒 的可用性没接路由 —— 可能传了常量")
+        #expect(tv.contains(squeeze("lockIsOn: DrawingEditRouter.lockIsOn(engine: engine)")),
+                "🔒 的图标态没接路由")
+        #expect(tv.contains(squeeze("DrawingEditRouter.toggleLockSelected(engine: engine)")),
+                "🔒 的动作没接路由 —— 可能是空闭包")
     }
 
     @Test("spec §1.1 #5 / D65 R13-F1：🗑 只弹确认框；真正的删除在「删除」按钮的 action 里走路由")
