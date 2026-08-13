@@ -382,6 +382,14 @@ Expected: 3 tests passed；全量 ≥ 1831 + 新增条数
 
 - [ ] **Step 7: 变异验证（M16 / M16b）**
 
+**变异前先备份本表点名的每个文件**（禁止 `git checkout` 复原 —— 会静默抹掉未提交改动）：
+
+```bash
+cp ios/Contracts/Sources/KlineTrainerContracts/AppState.swift /tmp/AppState.swift.bak
+```
+
+逐条变异 → 跑 → 记录**红的是哪个测试名** → `cp /tmp/<file>.bak <原路径>` 复原 → `git status --short` 确认干净，再做下一条。
+
 | 变异 | 改法 | 只应变红 |
 |---|---|---|
 | M16 | 删掉 `PendingTraining.encode(to:)` 的 `encodeIfPresent` | `pendingTraining_codable_roundtrip_preserves_style` |
@@ -394,6 +402,7 @@ git add ios/Contracts/Sources/KlineTrainerContracts/AppState.swift \
         ios/Contracts/Sources/KlineTrainerContracts/Models/DrawingEnums.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/PendingCodableDefaultStyleTests.swift
 git commit -m "feat(contracts): PendingTraining/PendingReplay 加 drawingDefaultStyle（无损 Codable，D91）"
+git status --short          # 必须为空（非空 = 脏树假绿或变异没复原）
 ```
 
 ---
@@ -560,6 +569,15 @@ Expected: 测试全过；drift 脚本输出 `OK: AppDBMigrations.swift schema �
 
 - [ ] **Step 6: 变异验证（M1 / M12）**
 
+**变异前先备份本表点名的每个文件**（禁止 `git checkout` 复原 —— 会静默抹掉未提交改动）：
+
+```bash
+cp ios/Contracts/Sources/KlineTrainerPersistence/Internal/AppDBMigrations.swift /tmp/AppDBMigrations.swift.bak
+cp ios/sql/app_schema_v1.sql /tmp/app_schema_v1.sql.bak
+```
+
+逐条变异 → 跑 → 记录**红的是哪个测试名** → `cp /tmp/<file>.bak <原路径>` 复原 → `git status --short` 确认干净，再做下一条。
+
 | 变异 | 改法 | 只应变红 |
 |---|---|---|
 | M1 | 删掉 `pending_replay` 那一句 `ALTER` | `test_0010_adds_column_to_both_pending_tables` 的 replay 分支；`user_version` 那条**不得**红 |
@@ -666,6 +684,16 @@ Expected: Swift 全过；backend 跨语言断言 **自动变绿**（它动态读
 
 - [ ] **Step 7: 变异验证（M13 / M13b / M13c）**
 
+**变异前先备份本表点名的每个文件**（禁止 `git checkout` 复原 —— 会静默抹掉未提交改动）：
+
+```bash
+cp ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift /tmp/Models.swift.bak
+cp backend/qmt_pilot_db.py /tmp/qmt_pilot_db.py.bak
+cp docs/governance/m01-schema-versioning-contract.md /tmp/m01-schema-versioning-contract.md.bak
+```
+
+逐条变异 → 跑 → 记录**红的是哪个测试名** → `cp /tmp/<file>.bak <原路径>` 复原 → `git status --short` 确认干净，再做下一条。
+
 | 变异 | 改法 | 只应变红 |
 |---|---|---|
 | M13 | **只**把 backend 那份改回 `"1.12"` | `backend/tests/test_qmt_pilot_db.py` 的跨语言断言 |
@@ -681,6 +709,7 @@ git add ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift backend/
         docs/governance/m01-schema-versioning-contract.md \
         ios/Contracts/Tests/KlineTrainerPersistenceTests/M01MatrixSyncGuardTests.swift
 git commit -m "chore(contract): CONTRACT_VERSION 1.12→1.13（两份源）+ m01 矩阵三行同步 + 守卫 G8（D97）"
+git status --short          # 必须为空（非空 = 脏树假绿或变异没复原）
 ```
 
 > ⚠️ **提交信息里必须留一句**：本次 bump 会让**已建的 QMT pilot 库**在闸 1 报 `schema_fingerprint_mismatch`，
@@ -952,6 +981,16 @@ cd "ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 
 - [ ] **Step 6: 守卫 G7 + 变异（M2 / M3 / M4 / M4b / M4c / M15）**
 
+**变异前先备份本表点名的每个文件**（禁止 `git checkout` 复原 —— 会静默抹掉未提交改动）：
+
+```bash
+cp ios/Contracts/Sources/KlineTrainerPersistence/Internal/DrawingDefaultStyleColumn.swift /tmp/DrawingDefaultStyleColumn.swift.bak
+cp ios/Contracts/Sources/KlineTrainerPersistence/Internal/PendingTrainingRepositoryImpl.swift /tmp/PendingTrainingRepositoryImpl.swift.bak
+cp ios/Contracts/Sources/KlineTrainerPersistence/Internal/PendingReplayRepositoryImpl.swift /tmp/PendingReplayRepositoryImpl.swift.bak
+```
+
+逐条变异 → 跑 → 记录**红的是哪个测试名** → `cp /tmp/<file>.bak <原路径>` 复原 → `git status --short` 确认干净，再做下一条。
+
 G7：`DrawingDefaultStyleColumn.decode` 在 `Sources/` 里**恰好 2 个调用点**，分别在两个 repo impl 内。
 
 | 变异 | 改法 | 只应变红 |
@@ -972,6 +1011,7 @@ git add ios/Contracts/Sources/KlineTrainerPersistence/Internal/DrawingDefaultSty
         ios/Contracts/Sources/KlineTrainerPersistence/Internal/PendingReplayRepositoryImpl.swift \
         ios/Contracts/Tests/KlineTrainerPersistenceTests/PendingDefaultStyleColumnTests.swift
 git commit -m "feat(db): 两张 pending 表读写 drawing_default_style，共用容错解码器（D92/D93/D100）"
+git status --short          # 必须为空（非空 = 脏树假绿或变异没复原）
 ```
 
 ---
@@ -1143,6 +1183,14 @@ cd "ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 
 - [ ] **Step 7: 守卫 G1 / G3 + 变异（M7 部分 / M8 / M9 / M10 / M11）**
 
+**变异前先备份本表点名的每个文件**（禁止 `git checkout` 复原 —— 会静默抹掉未提交改动）：
+
+```bash
+cp ios/Contracts/Sources/KlineTrainerContracts/TrainingEngine/TrainingSessionCoordinator.swift /tmp/TrainingSessionCoordinator.swift.bak
+```
+
+逐条变异 → 跑 → 记录**红的是哪个测试名** → `cp /tmp/<file>.bak <原路径>` 复原 → `git status --short` 确认干净，再做下一条。
+
 - **G1**：`setDefaultStyle` 在 `Sources/` 里**恰好 3 个调用点**（`DrawingEditRouter` + 两处 resume）。
 - **G3**：`replayBaseline` 的元组构造点**恰好 3 处**且**都含 `defaultStyle`**。
 
@@ -1291,6 +1339,14 @@ grep -c "Test Case .* passed" /tmp/catalyst.log    # 判绿读执行量，不读
 
 - [ ] **Step 5: 变异 M7 / M7b / M2c / M2d**
 
+**变异前先备份本表点名的每个文件**（禁止 `git checkout` 复原 —— 会静默抹掉未提交改动）：
+
+```bash
+cp ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift /tmp/TrainingView.swift.bak
+```
+
+逐条变异 → 跑 → 记录**红的是哪个测试名** → `cp /tmp/<file>.bak <原路径>` 复原 → `git status --short` 确认干净，再做下一条。
+
 | 变异 | 改法 | 只应变红 |
 |---|---|---|
 | M7 | 删掉 Step 3 那条 `.onChange` | **只有 G6**（T10 **不得**红 —— 它对视图触发零判别力，这正是 G6 存在的理由） |
@@ -1304,6 +1360,7 @@ grep -c "Test Case .* passed" /tmp/catalyst.log    # 判绿读执行量，不读
 git add ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift \
         ios/Contracts/Tests/KlineTrainerContractsTests/Render/DrawingInteractionUISourceGuardTests.swift
 git commit -m "feat(ui): 本局默认改动即触发 autosave + 视图层守卫 G4b/G4c/G6（D94/D90）"
+git status --short          # 必须为空（非空 = 脏树假绿或变异没复原）
 ```
 
 ---
