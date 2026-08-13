@@ -128,7 +128,7 @@ replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 
 ### 3.3 迁移
 
 ```
-0010_v1.12_drawing_default_style
+0010_v1.13_drawing_default_style
     ALTER TABLE pending_training ADD COLUMN drawing_default_style TEXT
     ALTER TABLE pending_replay   ADD COLUMN drawing_default_style TEXT
     PRAGMA user_version = 8
@@ -137,6 +137,9 @@ replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 
 - 照 **`0008_v1.10_drawing_reveal_tick`** 的先例（`AppDBMigrations.swift:205-208`）：可空列直接 `ALTER ADD`，
   **不需要 `0009` 那种「建新表 + 回填 + 换名」重建**（那是因为要加 `NOT NULL`/`UNIQUE`/`CHECK`，本片不需要）。
 - **`user_version` 7 → 8**（现行终态 7 由 `0009` 设置，`AppDBMigrations.swift:244`）。
+- **迁移名里的 `v1.13` 必须与本片同 PR 落地的 `CONTRACT_VERSION` 一致**（codex spec-R4 medium）：
+  既有命名 `0006_v1.8` / `0007_v1.9` / `0008_v1.10` / `0009_v1.11` 都是「该迁移所属的契约版本」。
+  写成 `v1.12`（bump 前的值）会让这次 DDL 看起来属于**上一个**契约版本，与 m01 矩阵记录的 id 自相矛盾。
 - **不动 `v1_4_baselineDDL` / `ios/sql/app_schema_v1.sql`**（v1.4 冻结基线）。
 
 **⚠️ schema-drift 闸门无需改动，且这是可证明的**：`scripts/check_app_schema_drift.sh` 只比对
@@ -155,12 +158,37 @@ replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 
 
 本片新增两列 + 新 migration ⇒ **命中「影响 DDL」** ⇒ 必须 bump。
 
-**本片必须做的两件事**（照最近一次真 bump `09be7cd`「1.11→1.12 + m01 矩阵同步」的先例）：
+**⚠️ `CONTRACT_VERSION` 在本仓有 _两份_ 源，且它们之间有跨语言一致性测试**（codex spec-R4 high，**已实测**）：
+
+| # | 位置 | 现值 | 本片要做的 |
+|---|---|---|---|
+| 1 | `ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift:7` | `"1.12"` | → `"1.13"` |
+| 2 | **`backend/qmt_pilot_db.py:798`** | `"1.12"`（头注明写「与 Swift 那份保持一致」） | → `"1.13"` |
+| 3 | `ios/Contracts/Tests/KlineTrainerContractsTests/ModelsTests.swift:8` | `#expect(CONTRACT_VERSION == "1.12")` | → `"1.13"` |
+| 4 | `ios/Contracts/Tests/KlineTrainerContractsTests/Render/RenderStateBuilderTests.swift:1260` | 同上 | → `"1.13"` |
+| — | `backend/tests/test_qmt_pilot_db.py:770` | `assert f'CONTRACT_VERSION = "{CONTRACT_VERSION}"' in swift` | **不要改** —— 它**动态读 Swift 文件**比对，两边同步后自动绿；去改它就是把跨语言守卫改瞎 |
+
+⇒ **只改 Swift 那一份，`backend/tests/test_qmt_pilot_db.py:770` 立刻红**（它读 Swift 源文件做断言）。
+⇒ **少改任何一处，本片的闸门都过不去**；改错第 5 行则是把守卫本身弄坏。
+
+**⚠️⚠️ 跨项目连带影响：bump 会让在用的 QMT pilot 库需要 `--reset` 重建**（本片必须提前告知，否则会被误判为回归）：
+
+`qmt_pilot_db.py:1694` 把 `contract_version` 写进 pilot DB 元数据，`:2224` 的**闸 1** 校验
+`meta.get("contract_version") != CONTRACT_VERSION` → 不符即抛 `schema_fingerprint_mismatch`
+（「schema.sql / pilot_schema.sql / contract_version 与建库时不一致——请用 `--reset` 重建」）。
+
+- 这是**闸门按设计工作**，不是缺陷；
+- 但**本片合入后第一次跑 QMT 验证的人会撞上它**。**必须写进 PR 描述**：
+  「本 PR bump 了 `CONTRACT_VERSION`，已建的 pilot 库须 `--reset` 重建，这是预期行为」。
+- ⚠️ 本片**不负责**替 QMT 重建任何库，也**不得**为了避开这条而放弃 bump ——
+  bump 是 m01 的硬要求（见上）。
+
+**本片必须做的另两件事**（照最近一次真 bump `09be7cd`「1.11→1.12 + m01 矩阵同步」的先例）：
 
 1. `Models.swift:7` `CONTRACT_VERSION` **`"1.12"` → `"1.13"`**；
 2. `docs/governance/m01-schema-versioning-contract.md` 矩阵**三行**同步（codex spec-R2 medium：我上一稿漏了第 3 行）：
    - 顶层行 → `"1.13"`；
-   - **app.sqlite GRDB migration 行 → `0010_v1.12_drawing_default_style`**；
+   - **app.sqlite GRDB migration 行 → `0010_v1.13_drawing_default_style`**；
    - **Swift 模型版本（`M0.3`）行 → `1.4`** —— 该行的触发条件逐字是「**Codable 字段 / 枚举 case 变更；联动顶层**」，
      而本片给 `PendingTraining` / `PendingReplay` 各加了一个 Codable 字段，**正命中**。
 
@@ -395,7 +423,7 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 | **T12** | replay 续局：存 → resume → `session.defaultStyle` 逐字段 == 存进去的 | host + DB 边界 |
 | **T13** | normal 续局：同上 | host + DB 边界 |
 | **T14** | **fresh 会话不种**：开新局 → `session.defaultStyle` == 出厂值 | host（§1 新局回落） |
-| **T15** | `CONTRACT_VERSION == "1.13"` | host（D97） |
+| **T15** | **两份**常量都是 `"1.13"`：Swift 侧 `#expect(CONTRACT_VERSION == "1.13")`（**两处测试都要改**）+ backend `qmt_pilot_db.CONTRACT_VERSION == "1.13"` | host（Swift）+ **backend pytest**（D97）。⚠️ `test_qmt_pilot_db.py:770` 的跨语言断言**不改**，它同步后自动绿 |
 | **T16** | `DrawingDefaultStyle.thicknessRange` 与面板实际渲染的档数**同源**：面板选项数 == `thicknessRange.count` | **Catalyst**（面板是 UIKit-gated；D99 的单一真相守门） |
 
 ### 7.2 变异清单（**强制清单 = 本表每一条**，刻意不枚举编号）
@@ -416,7 +444,8 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 | M10 | `resumePendingReplay` 的种子那一句删掉 | **只有 T12** 红 |
 | M11 | 让 fresh 会话也种子（把种子挪到公共构造路径） | **只有 T14** 红 |
 | M12 | `user_version` 仍写 7 | T8/T9 红 |
-| M13 | `CONTRACT_VERSION` 留在 `"1.12"` | **只有 T15** 红 |
+| M13 | **只**改 Swift 那份、backend 那份留在 `"1.12"` | **backend 的 `test_qmt_pilot_db.py:770`** 红（跨语言一致性守卫）—— 这条专证「两份源必须同改」 |
+| **M13b** | 两份都留在 `"1.12"` | **只有 T15** 红 |
 | M14 | 把 `thicknessRange` 改成 `1...4`（模拟两处字面量漂移） | **只有 T16** 红 —— 证明面板确实是从该常量派生、不是自己写了个 `1...5` |
 | **M15** | 把 `pending_replay` 的读路径改回「直接 `JSONDecoder().decode`」（绕过共享函数） | **只有 replay 侧**的 T4/T5/T5b 红，**training 侧全绿** + 守卫 **G7** 红 —— 专证「两张表各跑一遍」不是冗余（codex R3-medium） |
 
@@ -507,7 +536,7 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 |---|---|
 | SQLite schema | **有**：两张表各 +1 可空列，新增迁移 `0010`，`user_version` 7 → 8 |
 | `v1_4_baselineDDL` / `app_schema_v1.sql` | **零**（冻结基线不动；schema-drift 闸门因此不受影响） |
-| `CONTRACT_VERSION` | **必须 bump `1.12` → `1.13`**（命中 m01「影响 DDL」）+ **m01 矩阵三行同步**（D97 §3.4）：① 顶层 → `"1.13"`　② app.sqlite GRDB migration 行 → `0010_v1.12_drawing_default_style`　③ **Swift 模型版本（M0.3）行 → `1.4`**（Codable 字段变更，联动顶层） |
+| `CONTRACT_VERSION` | **必须 bump `1.12` → `1.13`**（命中 m01「影响 DDL」）+ **m01 矩阵三行同步**（D97 §3.4）：① 顶层 → `"1.13"`　② app.sqlite GRDB migration 行 → `0010_v1.13_drawing_default_style`　③ **Swift 模型版本（M0.3）行 → `1.4`**（Codable 字段变更，联动顶层）。⚠️ **常量有两份源**（Swift + `backend/qmt_pilot_db.py`）且有跨语言一致性测试，**必须同改**；连带 QMT pilot 库需 `--reset` 重建 —— **全部细节见 D97 §3.4，本行不复述清单** |
 | 版本错位 | **读向兼容；写向在降级时丢一个装饰性偏好**（旧写者的 `INSERT OR REPLACE` 会把新列抹成 NULL）。已接受残留，爆炸半径与理由见 D98 §3.5。**不得再宣称「双向兼容」** |
 | 磁盘上的画线数据（`drawings` / `review_archive`） | **零** |
 | `DrawingObject` | **零**（本局默认不是画线对象的字段） |
@@ -529,9 +558,17 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 
 | **R3** | 同分支 @ `a850e5e`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**首次无 high**） | **medium①**：T3–T5b 只说「**列**含坏值」，没说哪张表；两个 repo 是**各自独立的读路径** ⇒ 可以只把 `pending_training` 做对，`pending_replay` 照样在坏值上抛 ⇒ replay 续局被 brick<br>**medium②**：§11 契约影响行仍写「m01 矩阵**两行**」，与 D97 已改成的**三行**自相矛盾 | **两条全采纳**。①→ 新增 **D100**：容错解码 + sanitize 收进**一个共享函数** `decodeDrawingDefaultStyle`，两个 repo **各调一次**；**T3/T4/T5/T5b 每条都必须两张表各跑一遍**；配守卫 **G7**（恰好 2 个调用点）与变异 **M15**（把 replay 读路径改回直接 decode → 只有 replay 侧红）。②→ §11 那行改写为三行并逐条列出 |
 
+| **R4** | 同分支 @ `60e8753`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：D97 只让改 `Models.swift` + m01 矩阵，漏了 **`backend/qmt_pilot_db.py` 里的第二份 `CONTRACT_VERSION`**，而 `backend/tests/test_qmt_pilot_db.py:770` **读 Swift 文件**做跨语言一致性断言 ⇒ 只改一边立刻红<br>**1 medium**：迁移名写成 `0010_v1.12_…`，可本片要把契约 bump 到 **1.13**；既有命名（`0008_v1.10` / `0009_v1.11`）都是「该迁移所属的契约版本」⇒ 这次 DDL 会看起来属于上一个契约版本 | **两条全采纳**。high → D97 扩成**四处必改 + 一处必不改**的清单（Swift 常量 / backend 常量 / Swift 两处 `#expect` 断言 / **`test_qmt_pilot_db.py:770` 不得改**——它动态读 Swift 比对，同步后自动绿，改它=把守卫弄瞎）；变异拆成 M13（只改一边 → backend 跨语言守卫红）与 M13b（两边都不改 → T15 红）。medium → 迁移改名 `0010_v1.13_drawing_default_style`（含 m01 记录的 id），并写明命名规则 |
+
+**⚠️ R4 顺藤摸出的第四层（codex 只提到前两层，我拉线才看见）**：`CONTRACT_VERSION` 还是 **QMT pilot 的运行时闸门**——`qmt_pilot_db.py:1694` 把它写进 pilot DB 元数据、`:2224` 的**闸 1** 拿它校验 ⇒ **本片 bump 之后，已建的 pilot 库会报 `schema_fingerprint_mismatch`、必须 `--reset` 重建**。这是闸门按设计工作、不是缺陷，但**必须写进 PR 描述**，否则合入后第一个跑 QMT 验证的人会当成回归去查。已写进 D97。
+
 **R1 的形状**：我把「可空列 + 附加式」当成了「所以不用 bump」，**跳过了去读治理文档那一步**——
 规则明文写着「影响 DDL → 必须 bump」，我一次都没查就下了结论。
 而「双向兼容」那句是同一个毛病的另一面：**只推演了对我的结论有利的那个方向（读）**。
+
+**R4 的形状**：**我把「一个常量」当成了「一处定义」**。它实际有两份源、两处断言、一处跨语言守卫，外加一个把它当运行时闸门用的下游系统 —— 五个地方，我只写了一个。
+纪律沉淀：**改任何「版本 / 契约标识」之前，先全仓 grep 它的名字**，把**定义处 / 断言处 / 跨语言校验处 / 把它当运行时判据的下游**四类逐一列出来；
+其中**跨语言一致性守卫要单独判断「改它还是不改它」** —— 动态比对型的守卫**改了就是弄瞎**。
 
 **R3 medium① 的形状**：我把两条**独立的读路径**当成了一条来写测试——「列含坏值」这个说法**掩盖了它有两个宿主**。
 纪律沉淀：**凡是同一份数据存在 N 个独立读/写路径，测试矩阵必须显式写成 N 份**；用「那个列 / 那个字段」这类**不指明宿主**的措辞，等于默许只做一份。
