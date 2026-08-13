@@ -562,7 +562,7 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | ~~**G2**~~ | ~~列名 `drawing_default_style` 的出现处计数~~ **已删除** —— 见下方「为什么删掉 G2」 | —— |
 | **G3** | `replayBaseline` 的元组构造点**恰好 3 处**且**都包含 `defaultStyle`** | 结构计数 + 内容断言（防「加了字段但某处基线捕获忘了带」） |
 | **G4** | `TrainingView.showsTradeButtons` 的定义式仍为 `engine.flow.canBuySell()` | **内容断言** |
-| **G4b** | `TrainingView.stylePanelWillBeVisible` 的**整条定义式**仍为 `showsTradeButtons && isDrawingActive && typeRowExpanded` | **内容断言**（codex R2-medium：只钉 G4 会漏掉「改另外两项」这条路） |
+| **G4b** | `TrainingView.stylePanelWillBeVisible` 的**整条定义式**仍为 `showsTradeButtons && isDrawingActive && typeRowExpanded` | **内容断言**（codex R2-medium：只钉 G4 会漏掉「改另外两项」这条路）。<br>⚠️ **已接受残留（Task 7 评审实测）**：既有测试 **`交接⑥`**（`DrawingInteractionUISourceGuardTests.reviewCannotReachSelectMode`）**已经首尾钉死同一条定义式**（连 `private var … Bool {` 到 `typeRowExpanded }` 一起匹配），并且**同时钉了 G4 那条**。⇒ 就判别力而言 **G4b 对 M2b/M2c 是冗余的**。保留它的理由只有两条：失败信息更定位；交接⑥ 名义上测的是「复盘进不去选择态」这件**别的**事，若它日后被改写/精简，`stylePanelWillBeVisible` 那颗钉子可能被连带摘掉。<br>⚠️ **两个方向都要防**：别当重复删掉（[[feedback_same_predicate_multiple_bypasses]]），也别误当成真的双层防线 —— 今天它们**同生共死** |
 | **G4c** | 样式面板（`DrawingStyleParams` / `DrawingStylePanel`）的**挂载点**在 `Sources/` 里**恰好 1 处** | 结构计数（防「另开一条挂载路径」绕过 G4/G4b） |
 | **G5** | `1...5` / `1 ... 5` 这类粗细值域字面量在 `Sources/` 里**恰好 1 处**（= `DrawingDefaultStyle.thicknessRange` 的定义） | 结构计数（**剥注释剥字面量后匹配**；D99 的机械守门）。⚠️ 它**看不见 `min(max(` 形态**，故必须与 G5b/G5c 合用 |
 | **G5c** | 持久化解码器 `DrawingDefaultStyleColumn.swift` **必须调 `sanitized(`**，且**本文件内零处** `min(max(` / `1...5` | 正向 + 反向内容断言（codex plan-P-R9 **high**：值域消费者是**四个**，G5 的正则与 G5b 的文件清单**双双盖不住磁盘读回路径**）。反向条只限该文件 —— `Sources/` 全域 `min(max(` 实测 27 处正当用途 |
