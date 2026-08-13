@@ -14,14 +14,14 @@
 
 ## Global Constraints
 
-- **基线**：`origin/main` `20f615a`；分支 `feat/drawing-session-default-persistence`；worktree `.dev/worktree/drawing-default-persist`。
+- **基线**：`origin/main` `94c12a0`；分支 `feat/drawing-session-default-persistence`；worktree `.dev/worktree/drawing-default-persist`。
 - **闸门基线（实测）**：host `swift test` = `Test run with 1831 tests in 215 suites passed`。**每个 task 收尾必须跑 host 全量并记录条数**。
 - **Catalyst 门必须用** `-scheme KlineTrainerContracts-Package` **且** `set -o pipefail`（library scheme 不编译 testTarget；tee 吞退出码）。**判绿读执行量，不读 `TEST SUCCEEDED` 字样。**
 - **变异复原一律 `cp` 到 `/tmp` 再 `cp` 回**，禁止 `git checkout <file>`（会静默抹掉未提交改动）。
 - **每条变异必须逐条关门看红**，并在 PR 描述记录「红的是**哪个测试名**」+ 恢复后重新变绿。
 - **禁止**让 `setDefaultStyle` 去 bump `drawingsRevision`（D56：该计数只覆盖 `drawings`）。
 - **禁止**改 `v1_4_baselineDDL` / `ios/sql/app_schema_v1.sql`（v1.4 冻结基线，改了会真打红 drift 闸门）。
-- **禁止**改 `backend/tests/test_qmt_pilot_db.py:770`（它动态读 Swift 文件比对，同步后自动绿；改它 = 把跨语言守卫弄瞎）。
+- **禁止**改 `backend/tests/test_qmt_pilot_db.py:798`（它动态读 Swift 文件比对，同步后自动绿；改它 = 把跨语言守卫弄瞎）。
 - 源码守卫的结构计数**一律剥注释、剥字符串字面量**后再匹配；每条守卫**配双向自检**（该命中的命中、不该命中的不命中）；锚点失效必须**报错**不得静默返回 0。
 - 新增 API 的访问级别：`DrawingSession` 的 mutator 一律 **internal**，不得加 `public`。
 - ⭐ **每个 task 的三条命令必须由它的 `Files` 段与变异表「派生」，不得各写一份**（codex plan-P-R4：同一份计划里连栽三处）：
@@ -239,7 +239,7 @@ Expected: `5 tests passed`
 > **先读 `ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScanner.swift` 用它已有的 API 改写**，
 > **不要**新建第二个扫描器。并按仓规给新扫描能力配**双向自检**（喂一个含 `1...5` 的样本必须命中、喂 `1...4` 必须不命中）。
 
-- [ ] **Step 7: 变异验证（M5 / M6 / M14 / M15b）**
+- [ ] **Step 7: 变异验证（M5 / M6 / M14 / M14b / M15b）**
 
 ```bash
 # 备份**变异表里出现的每一个文件**（M14b 变异的是 HorizontalLineTool，不是 DrawingEnums）
@@ -464,8 +464,9 @@ git status --short          # 必须为空（非空 = 脏树假绿或变异没�
 
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerPersistence/Internal/AppDBMigrations.swift:244`（`0009` 之后）
-- Modify: **既有 `user_version` 断言共 6 处、分三个文件**（下表逐条列全；⚠️ **其中两处绝不能改**）
+- Modify: **既有 `user_version` 断言共 11 处、分六个文件**（Step 4 的表逐条列全；⚠️ **其中 9 处改 8、2 处绝不能改**）
 - Test: `ios/Contracts/Tests/KlineTrainerPersistenceTests/Migration0010Tests.swift`（新建）
+- Test: `ios/Contracts/Tests/KlineTrainerPersistenceTests/UserVersionAssertionGuardTests.swift`（新建，**G9**）
 
 **Interfaces:**
 - Produces: 两张表上的 `drawing_default_style TEXT`（可空）；`PRAGMA user_version == 8`
@@ -597,29 +598,154 @@ Expected: 两条都 FAIL（缺列 / user_version 仍为 7）
         }
 ```
 
-- [ ] **Step 4: 改既有断言（**逐条对照本表，不要 sed 全局替换**）**
+- [ ] **Step 4: 写 G9 —— 发现式 `user_version` 断言守卫（**先写，会红**）**
 
-> ⚠️ **`user_version` 的断言点有 6 个、分三个文件**（我起草时只找到 1 个 —— 全仓 grep 才发现）。
-> **其中两处断的是「部分迁移的中间落点」，改了就把测试的意义毁掉。**
+> ⚠️ **为什么必须是「发现式」而不是一张清单**：本 plan 的 codex P-R7 证明了清单会漏 ——
+> 我起草时列了 **3 个文件 6 处**，全仓实扫是 **6 个文件 11 处**（漏掉的三个文件里全是终态断言，
+> 实施者按清单改完，CI 会在三个没人提过的文件上红）。**清单会过期，目录遍历不会。**
+>
+> 判据的形状也要选对：不能写成「全仓不许出现 `== 7`」——本 task 自己的升级测试
+> （`migrate(_:upTo: "0009_v1.11_drawing_style")` 之后）就**合法地**断言 `== 7`。
+> 正确判据 = **「值为 7」只在「最近一次 `.migrate(` 带了 `upTo:`」时合法**。
+
+```swift
+// UserVersionAssertionGuardTests.swift
+import XCTest
+
+/// G9：发现式守卫 —— 不信任任何人写的文件清单，自己遍历测试目录。
+/// 判据：`PRAGMA user_version` 的断言值若为 `7`，则它上方最近一次 `.migrate(` **必须**带 `upTo:`
+///（即它是「部分迁移的中间落点」）。跑完整 migrator 之后的终态断言在 0010 之后一律是 `8`。
+final class UserVersionAssertionGuardTests: XCTestCase {
+
+    struct Site: Equatable {
+        let file: String, line: Int, value: Int
+        /// 上方最近一行 `.migrate(` 是否带 `upTo:`；上方根本没有 `.migrate(` 时为 false
+        let afterPartialMigrate: Bool
+    }
+
+    /// 扫一份源码。**先剥 `//` 之后的内容**再匹配 —— 注释里的断言不算数，
+    /// 承重注释（行尾那串迁移史）也不得污染判据。
+    static func sites(in source: String, file: String) -> [Site] {
+        let lines = source.components(separatedBy: "\n").map { l -> String in
+            guard let r = l.range(of: "//") else { return l }
+            return String(l[l.startIndex..<r.lowerBound])
+        }
+        var out: [Site] = []
+        for (i, l) in lines.enumerated() where l.contains("PRAGMA user_version") {
+            // `PRAGMA user_version = N` 是**写入**（fixture 造现场），不是断言
+            if l.contains("PRAGMA user_version =") { continue }
+            // 断言值可能就在本行，也可能在随后几行（`let uv = …` 换行再 `XCTAssertEqual(uv, 7)`）
+            let window = lines[i..<min(i + 4, lines.count)].joined(separator: "\n")
+            guard let v = firstComparedInt(window) else { continue }
+            var partial = false
+            for j in stride(from: i, through: 0, by: -1) where lines[j].contains(".migrate(") {
+                partial = lines[j].contains("upTo:"); break
+            }
+            out.append(Site(file: file, line: i + 1, value: v, afterPartialMigrate: partial))
+        }
+        return out
+    }
+
+    /// 抓窗口里第一个「被比较的整数」：`== 7` 与 `, 7)` 两种形态。
+    private static func firstComparedInt(_ s: String) -> Int? {
+        let ns = s as NSString
+        var best: (loc: Int, val: Int)? = nil
+        for p in ["== *([0-9]+)", ", *([0-9]+)\\)"] {
+            guard let re = try? NSRegularExpression(pattern: p),
+                  let m = re.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)),
+                  let v = Int(ns.substring(with: m.range(at: 1))) else { continue }
+            if best == nil || m.range.location < best!.loc { best = (m.range.location, v) }
+        }
+        return best?.val
+    }
+
+    static func scanTestsDirectory() throws -> [Site] {
+        let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let me = URL(fileURLWithPath: #filePath).lastPathComponent
+        guard let e = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil)
+        else { XCTFail("无法遍历 \(dir.path)"); return [] }
+        var out: [Site] = []
+        for case let u as URL in e where u.pathExtension == "swift" && u.lastPathComponent != me {
+            out += sites(in: try String(contentsOf: u, encoding: .utf8), file: u.lastPathComponent)
+        }
+        return out.sorted { ($0.file, $0.line) < ($1.file, $1.line) }
+    }
+
+    func test_no_terminal_user_version_assertion_still_reads_7() throws {
+        let all = try Self.scanTestsDirectory()
+        // 反向断言防空转：正则或目录遍历一坏，下面的 filter 就恒为空、守卫恒绿
+        XCTAssertGreaterThanOrEqual(all.count, 10, "只扫到 \(all.count) 处断言 —— 扫描器坏了")
+        XCTAssertGreaterThanOrEqual(Set(all.map(\.file)).count, 5,
+            "只覆盖 \(Set(all.map(\.file)).count) 个文件 —— 目录遍历坏了")
+
+        let bad = all.filter { $0.value == 7 && !$0.afterPartialMigrate }
+        XCTAssertTrue(bad.isEmpty, "以下 user_version 终态断言仍停在 7（0010 之后应为 8）：\n"
+            + bad.map { "  \($0.file):\($0.line)" }.joined(separator: "\n"))
+    }
+
+    /// 双向自检：判据本身既要抓得住违规，又不能误伤合法的中间落点，也不能把注释算进来。
+    func test_scanner_discriminates_terminal_from_partial() {
+        let violating = """
+        try migrator.migrate(queue)
+        let uv = try Int.fetchOne(db, sql: "PRAGMA user_version")
+        XCTAssertEqual(uv, 7)
+        """
+        let legal = """
+        try migrator.migrate(queue, upTo: "0009_v1.11_drawing_style")
+        #expect((try Int.fetchOne(db, sql: "PRAGMA user_version") ?? -1) == 7)
+        """
+        let commented = """
+        try migrator.migrate(queue)
+        // let uv = try Int.fetchOne(db, sql: "PRAGMA user_version"); XCTAssertEqual(uv, 7)
+        """
+        let written = #"try db.execute(sql: "PRAGMA user_version = 2")"#
+
+        let v = Self.sites(in: violating, file: "X")
+        let l = Self.sites(in: legal, file: "X")
+        XCTAssertEqual(v.map(\.value), [7])
+        XCTAssertEqual(l.map(\.value), [7])
+        XCTAssertFalse(v.first?.afterPartialMigrate ?? true, "跑完整 migrator 后的断言不得被当成中间落点")
+        XCTAssertTrue(l.first?.afterPartialMigrate ?? false, "upTo: 之后的 7 是合法的")
+        XCTAssertTrue(Self.sites(in: commented, file: "X").isEmpty, "注释里的断言不得计入")
+        XCTAssertTrue(Self.sites(in: written, file: "X").isEmpty, "PRAGMA 写入语句不是断言")
+    }
+}
+```
+
+```bash
+repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+[ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
+  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter UserVersionAssertionGuardTests 2>&1 | tail -20
+```
+Expected：`test_scanner_discriminates_terminal_from_partial` **PASS**（自检本就该绿）；
+`test_no_terminal_user_version_assertion_still_reads_7` **FAIL**，且失败信息**逐行列出 9 处**文件:行 ——
+这 9 行就是 Step 5 的工作清单（**以它为准，不以下表为准**）。
+
+- [ ] **Step 5: 改既有断言（**先跑 Step 4 的失败清单，再对照本表逐条改，不要 sed 全局替换**）**
+
+> ⚠️ 全仓 `user_version` 断言共 **11 处 / 6 个文件**：**9 处终态改 8**，
+> **2 处是「部分迁移的中间落点」，改了就把测试的意义毁掉**。
 
 | 文件:行 | 现值 | 动作 |
 |---|---|---|
-| `AppDB0005MigrationTests.swift:22-23`（`test_fresh_install_full_migrator_user_version_7`） | `7` | **改 8**；函数名与 `:17` 注释里的 `7` 一并改 8 |
+| `AppDB0005MigrationTests.swift:22-23`（`test_fresh_install_full_migrator_user_version_7`） | `7` | **改 8**；函数名尾 `_7`→`_8`、`:17` 注释里的 `user_version=7`→`=8` |
 | `AppDB0005MigrationTests.swift:29` | `2` | ❌ **不动**（`partial：仅 0001/0003/0004 → user_version 2`，真 pre-0005 前提） |
 | `AppDB0005MigrationTests.swift:40` | `7` | **改 8** |
 | `AppDB0005MigrationTests.swift:72` | `7` | **改 8**；行尾注释 `（0009 bump→7）` 改 `（0010 bump→8）` |
 | `ReviewArchiveMigrationTests.swift:14` | `7` | **改 8** |
 | `ReviewArchiveMigrationTests.swift:25` | `4` | ❌ **不动**（`0006 落点`，构造 pre-0007 现场） |
 | `ReviewArchiveMigrationTests.swift:34` | `7` | **改 8**；行尾注释 `升级到 v7` 改 `v8` |
-| `PendingReplayPersistenceTests.swift:11-14`（`migration0006_createsTable_userVersion7`） | `7` | **改 8**；函数名与行尾注释一并改 |
+| `PendingReplayPersistenceTests.swift:8`（`migration0006_createsTable_userVersion7`） | `7` | **改 8**；函数名尾 `7`→`8`、行尾注释一并改 |
+| **`AppDBMigrationsTests.swift:59`**（`test_full_migrator_sets_user_version_7`） | `7` | **改 8**；函数名尾 `_7`→`_8`、`:51` 的 `MARK` 注释 `（0009 终态 = 7）`→`（0010 终态 = 8）`、行尾迁移史注释末尾追加 `，0010（本片）bump 至 8` |
+| **`TrainingResetPortTests.swift:77`** | `7` | **改 8**；行尾注释 `0009 后完整 migrator 终态 = 7` → `0010 后完整 migrator 终态 = 8` |
+| **`Migration0009Tests.swift:35`** | `7` | **改 8**（`migratedDB()` 跑的是 `full.migrate(dbq)` **全量**，不是「停在 0009」）；`:9` 注释 `再跑全量迁移（到 0009）`→`（到 0010）` |
 
-**自检**：改完跑
-```bash
-grep -rn "user_version" ios/Contracts/Tests/ | grep -E "== *7|, *7\)"
-```
-Expected: **无输出**（所有终态断言已迁到 8；`2` / `4` 两处不在此模式内、保持原样）
+**自检**：不再用 grep（旧稿那条 `grep -E "== *7"` 期望「无输出」，会被本 task 自己那条**合法的**升级前置断言 `== 7` 打成永久失败）。
+自检 = **重跑 G9**，`test_no_terminal_user_version_assertion_still_reads_7` 必须由红转绿。
 
-- [ ] **Step 5: 跑测试确认通过 + drift 闸门**
+- [ ] **Step 6: 跑测试确认通过 + drift 闸门**
 
 ```bash
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
@@ -634,13 +760,15 @@ cd "$(git rev-parse --show-toplevel)" && bash scripts/check_app_schema_drift.sh
 ```
 Expected: 测试全过；drift 脚本输出 `OK: AppDBMigrations.swift schema 与 ios/sql/app_schema_v1.sql 一致`
 
-- [ ] **Step 6: 变异验证（M1 / M12）**
+- [ ] **Step 7: 变异验证（M1 / M12 / M17 / M17b）**
 
 **变异前先备份本表点名的每个文件**（禁止 `git checkout` 复原 —— 会静默抹掉未提交改动）：
 
 ```bash
 cp ios/Contracts/Sources/KlineTrainerPersistence/Internal/AppDBMigrations.swift /tmp/AppDBMigrations.swift.bak
 cp ios/sql/app_schema_v1.sql /tmp/app_schema_v1.sql.bak
+cp ios/Contracts/Tests/KlineTrainerPersistenceTests/TrainingResetPortTests.swift /tmp/TrainingResetPortTests.swift.bak
+cp ios/Contracts/Tests/KlineTrainerPersistenceTests/UserVersionAssertionGuardTests.swift /tmp/UserVersionAssertionGuardTests.swift.bak
 ```
 
 逐条变异 → 跑 → 记录**红的是哪个测试名** → `cp /tmp/<file>.bak <原路径>` 复原 → `git status --short` 确认干净，再做下一条。
@@ -648,17 +776,24 @@ cp ios/sql/app_schema_v1.sql /tmp/app_schema_v1.sql.bak
 | 变异 | 改法 | 只应变红 |
 |---|---|---|
 | M1 | 删掉 `pending_replay` 那一句 `ALTER` | `test_0010_adds_column_to_both_pending_tables` 的 replay 分支；`user_version` 那条**不得**红 |
-| M12 | `PRAGMA user_version = 8` 改回 `7` | `test_fresh_install_user_version_is_8` + `AppDB0005MigrationTests` 那条 |
+| M12 | `PRAGMA user_version = 8` 改回 `7` | `test_fresh_install_user_version_is_8` + `AppDB0005MigrationTests` / `AppDBMigrationsTests` / `TrainingResetPortTests` / `Migration0009Tests` / `ReviewArchiveMigrationTests` / `PendingReplayPersistenceTests` 的终态断言 |
+| **M17** | **只把 `TrainingResetPortTests.swift` 那处终态断言改回 `7`**（模拟「漏改一个文件」） | **`test_no_terminal_user_version_assertion_still_reads_7`（G9）**，且失败信息里点名 `TrainingResetPortTests.swift` —— 这条专证 G9 真的**发现得到清单外的文件** |
+| **M17b** | 把 G9 的 `firstComparedInt` 正则改成永不匹配（`"zz([0-9]+)"`） | **G9 的两条防空转断言**（`all.count >= 10` / 文件数 `>= 5`）—— 证明扫描器坏掉时守卫变红而不是静默全绿 |
 
-- [ ] **Step 7: 提交**
+- [ ] **Step 8: 提交**
 
 ```bash
-# ⚠️ user_version 断言散在**三个**测试文件里，三个都要 staged（漏一个 = 脏树假绿 / CI 红）
+# ⚠️ user_version 断言散在**六个**测试文件里（P-R7：起草时只列了三个），六个都要 staged
+#    —— 漏一个 = 脏树假绿 / CI 红。清单以 Step 4 的 G9 失败输出为准。
 git add ios/Contracts/Sources/KlineTrainerPersistence/Internal/AppDBMigrations.swift \
         ios/Contracts/Tests/KlineTrainerPersistenceTests/Migration0010Tests.swift \
+        ios/Contracts/Tests/KlineTrainerPersistenceTests/UserVersionAssertionGuardTests.swift \
         ios/Contracts/Tests/KlineTrainerPersistenceTests/AppDB0005MigrationTests.swift \
         ios/Contracts/Tests/KlineTrainerPersistenceTests/ReviewArchiveMigrationTests.swift \
-        ios/Contracts/Tests/KlineTrainerPersistenceTests/PendingReplayPersistenceTests.swift
+        ios/Contracts/Tests/KlineTrainerPersistenceTests/PendingReplayPersistenceTests.swift \
+        ios/Contracts/Tests/KlineTrainerPersistenceTests/AppDBMigrationsTests.swift \
+        ios/Contracts/Tests/KlineTrainerPersistenceTests/TrainingResetPortTests.swift \
+        ios/Contracts/Tests/KlineTrainerPersistenceTests/Migration0009Tests.swift
 git commit -m "feat(db): migration 0010 两张 pending 表加 drawing_default_style + user_version 8（D91）"
 git status --short          # 必须为空
 ```
@@ -669,12 +804,12 @@ git status --short          # 必须为空
 
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift:7`
-- Modify: `backend/qmt_pilot_db.py:798`
+- Modify: `backend/qmt_pilot_db.py:817`
 - Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/ModelsTests.swift:8`
 - Modify: `ios/Contracts/Tests/KlineTrainerContractsTests/Render/RenderStateBuilderTests.swift:1260`
 - Modify: `docs/governance/m01-schema-versioning-contract.md`（矩阵**三行**）
 - Test: `ios/Contracts/Tests/KlineTrainerPersistenceTests/M01MatrixSyncGuardTests.swift`（新建，G8）
-- **不得修改**：`backend/tests/test_qmt_pilot_db.py:770`
+- **不得修改**：`backend/tests/test_qmt_pilot_db.py:798`
 
 - [ ] **Step 1: 写失败测试（G8）**
 
@@ -684,30 +819,70 @@ import XCTest
 
 /// G8：m01 矩阵三行必须与本 PR 同步。
 /// 为什么需要它：本片 spec 自己点名的「矩阵停在 0003、代码已到 0009」正是「要求同步但无人强制」的产物。
+///
+/// ⚠️ 判据必须**按行首标签取整格比对**，不能对整节做 `contains`（codex P-R7 medium）：
+/// 矩阵章节里紧跟着一串「bump 记录」引用块，而 Step 5 会往那里**新加一条写着 `"1.13"`、
+/// `0010_v1.13_drawing_default_style`、`1.4` 的记录**。整节 `contains` 会被这条新记录喂饱，
+/// 于是「顶层行忘了改」照样绿 —— 那正是本守卫要防的那个失败。
 final class M01MatrixSyncGuardTests: XCTestCase {
+
     private func matrixSection() throws -> String {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let doc = try String(contentsOf: root
-            .appendingPathComponent("docs/governance/m01-schema-versioning-contract.md"))
+            .appendingPathComponent("docs/governance/m01-schema-versioning-contract.md"), encoding: .utf8)
         guard let start = doc.range(of: "## CONTRACT_VERSION 矩阵"),
-              let end = doc.range(of: "## Bump 策略", range: start.upperBound..<doc.endIndex)
+              let end = doc.range(of: "**存储表位 速查**", range: start.upperBound..<doc.endIndex)
         else { XCTFail("m01 矩阵锚点失效，无法定位章节"); return "" }   // 锚点失效必须报错，不得静默返回空
         return String(doc[start.upperBound..<end.lowerBound])
     }
 
-    func test_m01_matrix_three_rows_are_in_sync() throws {
-        let s = try matrixSection()
-        XCTAssertTrue(s.contains("`\"1.13\"`"), "m01 顶层版本行未同步到 1.13")
-        XCTAssertTrue(s.contains("0010_v1.13_drawing_default_style"), "m01 app.sqlite migration 行未同步")
-        XCTAssertTrue(s.contains("| `1.4`") || s.contains("`1.4` "), "m01 Swift 模型版本行未同步到 1.4")
+    /// 解析 markdown 表 → [首列标签: 第二列值]。跳过表头分隔行与所有非 `|` 开头的行
+    ///（bump 记录是 `>` 引用块，天然被排除）。
+    static func rows(_ section: String) -> [String: String] {
+        var out: [String: String] = [:]
+        for raw in section.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("|"), line.hasSuffix("|") else { continue }
+            let cells = line.dropFirst().dropLast()
+                .components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard cells.count >= 2, !cells[1].isEmpty,
+                  !cells[1].allSatisfy({ $0 == "-" || $0 == ":" }) else { continue }
+            out[cells[0]] = cells[1]
+        }
+        return out
     }
 
-    /// 双向自检：一个不含这些值的样本必须不满足（防「恒真断言」）
-    func test_guard_rejects_stale_matrix_sample() {
-        let stale = "| `CONTRACT_VERSION`（顶层标识） | `\"1.12\"` | … |"
-        XCTAssertFalse(stale.contains("`\"1.13\"`"))
+    func test_m01_matrix_three_rows_are_in_sync() throws {
+        let r = Self.rows(try matrixSection())
+        XCTAssertGreaterThanOrEqual(r.count, 5, "只解析出 \(r.count) 行 —— 表解析坏了（防空转）")
+        XCTAssertEqual(r["`CONTRACT_VERSION`（顶层标识）"], "`\"1.13\"`", "m01 顶层版本行未同步")
+        XCTAssertEqual(r["app.sqlite GRDB migration"], "`0010_v1.13_drawing_default_style`",
+                       "m01 app.sqlite migration 行未同步")
+        XCTAssertEqual(r["Swift 模型版本（`M0.3`）"], "`1.4`", "m01 Swift 模型版本行未同步")
+    }
+
+    /// 双向自检：**用同一个解析器**跑一份「三行都还是旧值、但 bump 记录里三个新值全都出现过」的样本。
+    /// 旧稿的自检只对局部字符串调 `String.contains`，测的是标准库不是判据 —— 恒绿。
+    func test_parser_is_immune_to_values_that_only_appear_in_bump_notes() {
+        let sample = """
+        | 维度 | 当前版本 | 变更触发 bump 的条件 |
+        |---|---|---|
+        | `CONTRACT_VERSION`（顶层标识） | `"1.12"` | … |
+        | PostgreSQL schema（`schema.sql` migration id） | `0004_qmt_price_double_and_coverage` | … |
+        | 训练组 SQLite `PRAGMA user_version` | `1` | … |
+        | app.sqlite GRDB migration | `0003_v1.4_purge_leased` | … |
+        | Swift 模型版本（`M0.3`） | `1.3` | … |
+
+        > **bump 记录**：顶层 `CONTRACT_VERSION` `"1.12"` → `"1.13"`；app.sqlite 同步至
+        > `0010_v1.13_drawing_default_style`；Swift 模型版本 `1.3` → `1.4`。
+        """
+        let r = Self.rows(sample)
+        XCTAssertEqual(r.count, 5, "样本应解析出 5 行（防空转）")
+        XCTAssertNotEqual(r["`CONTRACT_VERSION`（顶层标识）"], "`\"1.13\"`")
+        XCTAssertNotEqual(r["app.sqlite GRDB migration"], "`0010_v1.13_drawing_default_style`")
+        XCTAssertNotEqual(r["Swift 模型版本（`M0.3`）"], "`1.4`")
     }
 }
 ```
@@ -725,11 +900,19 @@ Expected: `test_m01_matrix_three_rows_are_in_sync` FAIL（三条断言均未满�
 
 - [ ] **Step 3: 改两份常量**
 
+> ⚠️ **行号只是提示，别当坐标用**：`backend/` 的两个行号在 2026-08-12 被 PR #164 整体推下去过
+>（`qmt_pilot_db.py` 的常量 798→817、跨语言守卫 770→798）。**先 grep 定位再改**：
+> ```bash
+> grep -n '^CONTRACT_VERSION' backend/qmt_pilot_db.py
+> grep -rn 'CONTRACT_VERSION == "1.12"' ios/Contracts/Tests/
+> ```
+> 两条命令各自应恰好 1 行 / 2 行；行数对不上就停下来问，不要猜。
+
 `ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift:7`：
 ```swift
 public let CONTRACT_VERSION = "1.13"
 ```
-`backend/qmt_pilot_db.py:798`：
+`backend/qmt_pilot_db.py`（grep 出来的那一行，起草时在 `:817`）：
 ```python
 CONTRACT_VERSION = "1.13"
 ```
@@ -791,7 +974,7 @@ git status --short          # 必须为空（非空 = 脏树假绿或变异没�
 ```
 
 > ⚠️ **提交信息里必须留一句**：本次 bump 会让**已建的 QMT pilot 库**在闸 1 报 `schema_fingerprint_mismatch`，
-> 需 `--reset` 重建 —— **这是闸门按设计工作，不是回归**（`qmt_pilot_db.py:1694/2224`）。
+> 需 `--reset` 重建 —— **这是闸门按设计工作，不是回归**（`qmt_pilot_db.py:1720/2253`）。
 
 ---
 
@@ -934,7 +1117,7 @@ struct PendingDefaultStyleColumnTests {
         for slot in Slot.allCases {
             for (raw, check) in cases {
                 guard let loaded = try seedRowThenReadStyle(slot, column: raw), let s = loaded else {
-                    { Issue.record("\(slot.table) 在 \(raw) 上抛了或返回 nil"); return }
+                    Issue.record("\(slot.table) 在 \(raw) 上抛了或返回 nil"); continue
                 }
                 #expect(check(s), "\(slot.table) / \(raw)：坏字段未回落或牵连了别的字段")
             }
@@ -970,7 +1153,7 @@ struct PendingDefaultStyleColumnTests {
         for slot in Slot.allCases {
             for (raw, check) in cases {
                 guard let loaded = try seedRowThenReadStyle(slot, column: raw), let s = loaded else {
-                    Issue.record("\(slot.table) 在 \(raw) 上抛了或返回 nil"); return
+                    Issue.record("\(slot.table) 在 \(raw) 上抛了或返回 nil"); continue
                 }
                 #expect(check(s), "\(slot.table) / \(raw)：坏字段未回落，或把同一对象里健康的 companion 字段一起丢了")
             }
@@ -1442,7 +1625,10 @@ cd "$(git rev-parse --show-toplevel)" && (set -o pipefail; xcodebuild test \
 grep -c "Test Case .* passed" /tmp/catalyst.log    # 判绿读执行量，不读 TEST SUCCEEDED
 ```
 
-- [ ] **Step 5: 变异 M7 / M7b / M2c / M2d**
+- [ ] **Step 5: 变异 M7 / M7b / M2b / M2c / M2d**
+
+> ⚠️ 编号提醒：spec §7.2 里 **`M2` 是 Task 5 的「INSERT 去掉该列」**，与这里的 `M2b/M2c/M2d`
+> 没有承接关系（spec 遗留的编号巧合）。本步只跑下表五条，**不要**顺手把 `M2` 也拉进来。
 
 **变异前先备份本表点名的每个文件**（禁止 `git checkout` 复原 —— 会静默抹掉未提交改动）：
 
@@ -1456,6 +1642,7 @@ cp ios/Contracts/Sources/KlineTrainerContracts/UI/TrainingView.swift /tmp/Traini
 |---|---|---|
 | M7 | 删掉 Step 3 那条 `.onChange` | **只有 G6**（T10 **不得**红 —— 它对视图触发零判别力，这正是 G6 存在的理由） |
 | **M7b** | `.onChange` **留着但闭包体清空** `{ _, _ in }` | **只有 G6** —— 专证「分离两个 `contains` 的旧写法是假绿」（codex plan-P-R1 high①） |
+| **M2b** | `stylePanelWillBeVisible` 的定义里**去掉 `showsTradeButtons`**（= 让复盘也能挂面板，正是 D90 排除复盘的那条依据被拆掉） | **只有 G4b** 红，**G4 仍绿** —— 这条专证「单靠 G4 挡不住」（spec §7.2 M2b，起草时漏进 plan） |
 | **M2c** | `stylePanelWillBeVisible` 改成 `… && typeRowExpanded \|\| isReview`（放宽） | **只有 G4b** —— 专证 `contains` 挡不住放宽（high②） |
 | **M2d** | 再加一处 `DrawingStylePanel(` 挂载 | **只有 G4c** —— 专证空函数体的旧写法是恒绿 no-op（high②） |
 

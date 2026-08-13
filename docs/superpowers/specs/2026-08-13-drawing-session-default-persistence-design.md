@@ -10,8 +10,8 @@
 - 1b-ii `docs/superpowers/specs/2026-08-11-drawing-tools-P1b-1b-ii-lock-undo-design.md`（D68–D80）
 - **自动选中 spec** `docs/superpowers/specs/2026-08-12-drawing-tools-P1b-autoselect-design.md`（D81–D89，**D87 = 本片的需求来源**）
 
-**基线**：`origin/main` `20f615a`。分支 `feat/drawing-session-default-persistence`，worktree `.dev/worktree/drawing-default-persist`。
-基线闸门（同一 commit `20f615a` 上实跑）：host `swift test` = **`Test run with 1831 tests in 215 suites passed`**。
+**基线**：`origin/main` `94c12a0`。分支 `feat/drawing-session-default-persistence`，worktree `.dev/worktree/drawing-default-persist`。
+基线闸门（同一 commit `94c12a0` 上实跑）：host `swift test` = **`Test run with 1831 tests in 215 suites passed`**。
 
 本 spec 新增决策编号从 **D90** 起（D81–D89 属自动选中 spec）。本文件定义 **D90–D100**。
 
@@ -164,17 +164,17 @@ replay 的底栏与常驻样式面板**与训练完全相同**（`canBuySell()` 
 | # | 位置 | 现值 | 本片要做的 |
 |---|---|---|---|
 | 1 | `ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift:7` | `"1.12"` | → `"1.13"` |
-| 2 | **`backend/qmt_pilot_db.py:798`** | `"1.12"`（头注明写「与 Swift 那份保持一致」） | → `"1.13"` |
+| 2 | **`backend/qmt_pilot_db.py:817`** | `"1.12"`（头注明写「与 Swift 那份保持一致」） | → `"1.13"` |
 | 3 | `ios/Contracts/Tests/KlineTrainerContractsTests/ModelsTests.swift:8` | `#expect(CONTRACT_VERSION == "1.12")` | → `"1.13"` |
 | 4 | `ios/Contracts/Tests/KlineTrainerContractsTests/Render/RenderStateBuilderTests.swift:1260` | 同上 | → `"1.13"` |
-| — | `backend/tests/test_qmt_pilot_db.py:770` | `assert f'CONTRACT_VERSION = "{CONTRACT_VERSION}"' in swift` | **不要改** —— 它**动态读 Swift 文件**比对，两边同步后自动绿；去改它就是把跨语言守卫改瞎 |
+| — | `backend/tests/test_qmt_pilot_db.py:798` | `assert f'CONTRACT_VERSION = "{CONTRACT_VERSION}"' in swift` | **不要改** —— 它**动态读 Swift 文件**比对，两边同步后自动绿；去改它就是把跨语言守卫改瞎 |
 
-⇒ **只改 Swift 那一份，`backend/tests/test_qmt_pilot_db.py:770` 立刻红**（它读 Swift 源文件做断言）。
+⇒ **只改 Swift 那一份，`backend/tests/test_qmt_pilot_db.py:798` 立刻红**（它读 Swift 源文件做断言）。
 ⇒ **少改任何一处，本片的闸门都过不去**；改错第 5 行则是把守卫本身弄坏。
 
 **⚠️⚠️ 跨项目连带影响：bump 会让在用的 QMT pilot 库需要 `--reset` 重建**（本片必须提前告知，否则会被误判为回归）：
 
-`qmt_pilot_db.py:1694` 把 `contract_version` 写进 pilot DB 元数据，`:2224` 的**闸 1** 校验
+`qmt_pilot_db.py:1720` 把 `contract_version` 写进 pilot DB 元数据，`:2253` 的**闸 1** 校验
 `meta.get("contract_version") != CONTRACT_VERSION` → 不符即抛 `schema_fingerprint_mismatch`
 （「schema.sql / pilot_schema.sql / contract_version 与建库时不一致——请用 `--reset` 重建」）。
 
@@ -483,7 +483,7 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **T12** | replay 续局：存 → resume → `session.defaultStyle` 逐字段 == 存进去的 | host + DB 边界 |
 | **T13** | normal 续局：同上 | host + DB 边界 |
 | **T14** | **fresh 会话不种**：开新局 → `session.defaultStyle` == 出厂值 | host（§1 新局回落） |
-| **T15** | **两份**常量都是 `"1.13"`：Swift 侧 `#expect(CONTRACT_VERSION == "1.13")`（**两处测试都要改**）+ backend `qmt_pilot_db.CONTRACT_VERSION == "1.13"` | host（Swift）+ **backend pytest**（D97）。⚠️ `test_qmt_pilot_db.py:770` 的跨语言断言**不改**，它同步后自动绿 |
+| **T15** | **两份**常量都是 `"1.13"`：Swift 侧 `#expect(CONTRACT_VERSION == "1.13")`（**两处测试都要改**）+ backend `qmt_pilot_db.CONTRACT_VERSION == "1.13"` | host（Swift）+ **backend pytest**（D97）。⚠️ `test_qmt_pilot_db.py:798` 的跨语言断言**不改**，它同步后自动绿 |
 | **T15b** | `sanitized(for: .trend)`（**非水平工具**）**不改写** `labelMode`：喂 `(lineSubType: .ray, labelMode: .left)` → 原样返回 `.left`（横线规则不得外溢）。同法验 `lineSubType` 不被横规则拒 | host（**不变量锁**：本片调用点恒 `.horizontal`，故只能单元级构造） |
 | **T17** | **`PendingTraining` 的 Codable 往返**：造一个 `drawingDefaultStyle` 为**非出厂值**的实例 → encode → decode → **逐字段相等** | host（codex spec-R8 medium：DB 路径不走 Codable，漏 `encodeIfPresent` 时 T1/T2/T12/T13 **全绿**） |
 | **T17b** | `PendingReplay` 同上 | host |
@@ -509,7 +509,7 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | M10 | `resumePendingReplay` 的种子那一句删掉 | **只有 T12** 红 |
 | M11 | 让 fresh 会话也种子（把种子挪到公共构造路径） | **只有 T14** 红 |
 | M12 | `user_version` 仍写 7 | T8/T9 红 |
-| M13 | **只**改 Swift 那份、backend 那份留在 `"1.12"` | **backend 的 `test_qmt_pilot_db.py:770`** 红（跨语言一致性守卫）—— 这条专证「两份源必须同改」 |
+| M13 | **只**改 Swift 那份、backend 那份留在 `"1.12"` | **backend 的 `test_qmt_pilot_db.py:798`** 红（跨语言一致性守卫）—— 这条专证「两份源必须同改」 |
 | **M13b** | 两份都留在 `"1.12"` | **只有 T15** 红 |
 | **M13c** | 两份常量都改对、migration 也加了，**但 m01 矩阵三行一行没动** | **只有守卫 G8** 红 —— 这条专证「矩阵同步是被强制的，不是靠自觉」（codex R7-medium） |
 | M14 | 把 `thicknessRange` 改成 `1...4`（模拟两处字面量漂移） | **只有 T16** 红 —— 证明面板确实是从该常量派生、不是自己写了个 `1...5` |
@@ -517,6 +517,8 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **M16b** | 把 `init(from:)` 的 `decodeIfPresent` 改成 `decode`（旧载荷缺 key 即抛） | **只有 T18** 红 |
 | **M15b** | 把 `sanitized` 里的 `labelMode` 归一化换成**两参**重载 `normalizedLabelMode(current:lineSubType:)` | **只有 T15b** 红 —— 这条专证「tool-aware 签名挡不住传错重载」（codex R5-medium） |
 | **M15** | 把 `pending_replay` 的读路径改回「直接 `JSONDecoder().decode`」（绕过共享函数） | **只有 replay 侧**的 T4/T5/T5b 红，**training 侧全绿** + 守卫 **G7** 红 —— 专证「两张表各跑一遍」不是冗余（codex R3-medium） |
+| **M17** | 只把**一个**测试文件里的 `user_version` 终态断言改回 `7`（取 `TrainingResetPortTests.swift` —— 它是「起草时的清单里没有」的那三个之一） | **只有守卫 G9** 红，且失败信息**点名该文件:行** —— 这条专证 G9 是**发现式**的、够得到清单外的文件（codex plan-P-R7 high） |
+| **M17b** | 把 G9 抽取比较值的正则改成永不匹配 | **G9 的两条防空转断言**（断言点总数 ≥ 10、覆盖文件数 ≥ 5）红 —— 扫描器坏掉必须变红，不得静默全绿（[[feedback_mechanical_checker_parser_disabled]]） |
 
 **实施要求**：本表**每一条**逐条关门看红，PR 描述里逐条记录「红的是**哪个测试名**」+ 恢复后重新变绿。
 变异复原一律 `cp` 到 /tmp 再 `cp` 回，**禁止 `git checkout <file>`**（[[feedback_git_checkout_destroys_uncommitted_work]]）。
@@ -543,6 +545,7 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **G8** | 解析 `docs/governance/m01-schema-versioning-contract.md` 的矩阵，断言**三行都已同步**：顶层 == `"1.13"`、app.sqlite GRDB migration 行 == `0010_v1.13_drawing_default_style`、Swift 模型版本行 == `1.4` | **内容断言**（codex spec-R7 medium：D97 要求同步三行，却**没有任何机制**在它没做时报红 —— 而「矩阵停在 `0003`、代码已到 `0009`」正是本 spec 自己点名的既有漂移，**不加守卫就是原样重演一次**）。⚠️ 目标是 **markdown 文档**、不是 Swift 源，故**不适用剥字符串字面量那条纪律**；按表格行解析，并配双向自检（改任一行 → 红；无关行改动 → 仍绿） |
 | **G7** | `decodeDrawingDefaultStyle` 在 `Sources/` 里**恰好 2 个调用点**，分别在两个 repo impl 文件内 | 结构计数（D100：少于 2 = 有一条读路径没接上；多于 2 = 出现第三条读路径，必须回来重审） |
 | **G6** | `TrainingView` 里存在一条 `.onChange(of: engine.drawingSession.defaultStyle)`，且其闭包体内调用 `lifecycle.autosave(immediate: true)` | **结构 + 内容断言**。这是 **D94 的唯一守门**（host 够不着视图，见 §6.1）；**M7 判绿看它，不看 T10** |
+| **G9** | **遍历**（不是照清单读）`KlineTrainerPersistenceTests/` 下每个 `.swift`，找出所有 `PRAGMA user_version` 断言点；断言值为 `7` 的必须是**部分迁移落点**（其上方最近一行 `.migrate(` 带 `upTo:`）。附两条防空转下界：断言点总数 ≥ 10、覆盖文件数 ≥ 5 | **发现式结构扫描**（**剥 `//` 注释**后匹配；`PRAGMA user_version = N` 是写入不是断言，排除）。<br>⚠️ **为什么必须发现式**（codex plan-P-R7 **high**）：本 spec 的 plan 起草时列了「3 个文件 6 处」，全仓实扫是 **6 个文件 11 处**，漏掉的三个文件（`AppDBMigrationsTests` / `TrainingResetPortTests` / `Migration0009Tests`）里**全是终态断言** ⇒ 照清单改完，CI 会在三个从没被提过的文件上红。**清单会过期，目录遍历不会。**<br>⚠️ **判据不能写成「全仓不许出现 `== 7`」**：`0010` 的升级测试在 `migrate(_:upTo: "0009_v1.11_drawing_style")` 之后**合法地**断言 `== 7` |
 
 **为什么删掉 G2**（codex spec-R6 medium，**已核实为真**）：
 
@@ -562,7 +565,7 @@ G4 / G4b / G6 断言的是 **Swift 表达式**，G5 数的是 **Swift 代码里�
 
 **纪律**：结构计数一律**剥注释、剥字符串字面量**后再匹配；每个守卫配**双向自检**（该命中的必须命中、不该命中的必须不命中）；
 锚点失效必须**报错**不得静默返回 0（[[feedback_mechanical_checker_parser_disabled]]）。
-**G1 / G3 / G4b / G4c / G5 / G6 / G7 / G8 在当前树上是红的**（G4b/G4c 依赖的谓词今天就存在，但守卫本身尚未写；G4 今天就是绿的），必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
+**G1 / G3 / G4b / G4c / G5 / G6 / G7 / G8 / G9 在当前树上是红的**（G4b/G4c 依赖的谓词今天就存在，但守卫本身尚未写；G4 今天就是绿的），必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
 **G4 今天就是绿的**，属回归守卫，可先落库。
 
 ---
@@ -651,7 +654,8 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 - **D93 / D99 解码后 sanitize**（且必须用 **tool-aware** 重载）—— 它防的是**能打开但一条线都画不出来**；
 - **D95 replay clean-skip 纳入 defaultStyle** —— 它防的是**只改默认时静默不写盘**；
 - **D96 两处 resume 种子 + fresh 会话不种**；
-- **D97 三处 `CONTRACT_VERSION` + m01 三行 + G8 守卫**；
+- **D97 的四处 `CONTRACT_VERSION` + m01 三行 + 守卫 G8**；
+- **G9 的发现式形态**（改成「照清单枚举文件」即视为未实现）；
 - **D98 版本错位的四方向结论**（**不得**再宣称「双向兼容」）；
 - **D100 两个 repo 共用一个解码器 + 每条坏值档两张表各跑一遍**；
 - §7 的**任何一条** T / M / 正向档，以及 §8 的**任何一条**守卫。
@@ -683,9 +687,9 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 
 | **R3** | 同分支 @ `a850e5e`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**首次无 high**） | **medium①**：T3–T5b 只说「**列**含坏值」，没说哪张表；两个 repo 是**各自独立的读路径** ⇒ 可以只把 `pending_training` 做对，`pending_replay` 照样在坏值上抛 ⇒ replay 续局被 brick<br>**medium②**：§11 契约影响行仍写「m01 矩阵**两行**」，与 D97 已改成的**三行**自相矛盾 | **两条全采纳**。①→ 新增 **D100**：容错解码 + sanitize 收进**一个共享函数** `decodeDrawingDefaultStyle`，两个 repo **各调一次**；**T3/T4/T5/T5b 每条都必须两张表各跑一遍**；配守卫 **G7**（恰好 2 个调用点）与变异 **M15**（把 replay 读路径改回直接 decode → 只有 replay 侧红）。②→ §11 那行改写为三行并逐条列出 |
 
-| **R4** | 同分支 @ `60e8753`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：D97 只让改 `Models.swift` + m01 矩阵，漏了 **`backend/qmt_pilot_db.py` 里的第二份 `CONTRACT_VERSION`**，而 `backend/tests/test_qmt_pilot_db.py:770` **读 Swift 文件**做跨语言一致性断言 ⇒ 只改一边立刻红<br>**1 medium**：迁移名写成 `0010_v1.12_…`，可本片要把契约 bump 到 **1.13**；既有命名（`0008_v1.10` / `0009_v1.11`）都是「该迁移所属的契约版本」⇒ 这次 DDL 会看起来属于上一个契约版本 | **两条全采纳**。high → D97 扩成**四处必改 + 一处必不改**的清单（Swift 常量 / backend 常量 / Swift 两处 `#expect` 断言 / **`test_qmt_pilot_db.py:770` 不得改**——它动态读 Swift 比对，同步后自动绿，改它=把守卫弄瞎）；变异拆成 M13（只改一边 → backend 跨语言守卫红）与 M13b（两边都不改 → T15 红）。medium → 迁移改名 `0010_v1.13_drawing_default_style`（含 m01 记录的 id），并写明命名规则 |
+| **R4** | 同分支 @ `60e8753`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：D97 只让改 `Models.swift` + m01 矩阵，漏了 **`backend/qmt_pilot_db.py` 里的第二份 `CONTRACT_VERSION`**，而 `backend/tests/test_qmt_pilot_db.py:798` **读 Swift 文件**做跨语言一致性断言 ⇒ 只改一边立刻红<br>**1 medium**：迁移名写成 `0010_v1.12_…`，可本片要把契约 bump 到 **1.13**；既有命名（`0008_v1.10` / `0009_v1.11`）都是「该迁移所属的契约版本」⇒ 这次 DDL 会看起来属于上一个契约版本 | **两条全采纳**。high → D97 扩成**四处必改 + 一处必不改**的清单（Swift 常量 / backend 常量 / Swift 两处 `#expect` 断言 / **`test_qmt_pilot_db.py:798` 不得改**——它动态读 Swift 比对，同步后自动绿，改它=把守卫弄瞎）；变异拆成 M13（只改一边 → backend 跨语言守卫红）与 M13b（两边都不改 → T15 红）。medium → 迁移改名 `0010_v1.13_drawing_default_style`（含 m01 记录的 id），并写明命名规则 |
 
-**⚠️ R4 顺藤摸出的第四层（codex 只提到前两层，我拉线才看见）**：`CONTRACT_VERSION` 还是 **QMT pilot 的运行时闸门**——`qmt_pilot_db.py:1694` 把它写进 pilot DB 元数据、`:2224` 的**闸 1** 拿它校验 ⇒ **本片 bump 之后，已建的 pilot 库会报 `schema_fingerprint_mismatch`、必须 `--reset` 重建**。这是闸门按设计工作、不是缺陷，但**必须写进 PR 描述**，否则合入后第一个跑 QMT 验证的人会当成回归去查。已写进 D97。
+**⚠️ R4 顺藤摸出的第四层（codex 只提到前两层，我拉线才看见）**：`CONTRACT_VERSION` 还是 **QMT pilot 的运行时闸门**——`qmt_pilot_db.py:1720` 把它写进 pilot DB 元数据、`:2253` 的**闸 1** 拿它校验 ⇒ **本片 bump 之后，已建的 pilot 库会报 `schema_fingerprint_mismatch`、必须 `--reset` 重建**。这是闸门按设计工作、不是缺陷，但**必须写进 PR 描述**，否则合入后第一个跑 QMT 验证的人会当成回归去查。已写进 D97。
 
 | **R5** | 同分支 @ `6599805`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**仅 1 medium**） | D99 的规则表让实施者复用 `normalizedLabelMode(current:lineSubType:)` —— 那是**水平线专用**重载；仓里另有 tool-aware 重载正是为防这个而存在。P1c 新工具照此实施，加载持久化默认会把合法的非水平 `labelMode` 静默改写成 `.hidden` | **全采纳，已核实为真**。`DrawingStyleAvailability.swift` 里 tool-aware 重载的头注**逐字**写着这个后果并把它归为「与 1b-ii 锁定 PR 的 `.segment` over-reject 同族」。⚠️ **这是我在同一个决策里自相矛盾**：D99 我亲手写了「保留 `toolType` 入参，写死 `.horizontal` 会在 P1c 变成静默错误规则」，转头在规则表里指定了水平线专用重载。改：规则表加「✅必须用 / ❌不得用 / 用错的后果」三列（两条规则各一行）；新增 **T15b**（`sanitized(for: .trend)` 不改写 labelMode，不变量锁）与 **M15b**（换回两参重载 → 只有 T15b 红）|
 
