@@ -29,6 +29,10 @@ enum DrawingDefaultStyleColumn {
         if let v = obj["colorToken"]  as? String, let e = DrawingColorToken(rawValue: v) { s.colorToken = e }
         if let v = obj["labelMode"]   as? String, let e = LabelMode(rawValue: v)     { s.labelMode = e }
         // D93：解码边界即 sanitize —— 让「一个坏默认被读进内存」从构造上不可能。
+        // ⚠️ **P1c 必须回来重判这个 `.horizontal` 实参**（spec §5.3 裁决「调用点恒 .horizontal、
+        //    但保留入参」，本处是那个「恒 .horizontal」的落点）：一旦加入 `.trend` 等新工具，
+        //    一份合法的 `.segment` 本局默认会**写得进磁盘、读回来被静默改成 .straight**，
+        //    而 T15b 只锁单元级不变量、**那天不会有任何测试变红**。
         return s.sanitized(for: .horizontal)
     }
 }

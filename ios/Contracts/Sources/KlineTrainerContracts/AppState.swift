@@ -108,6 +108,10 @@ public struct PendingTraining: Codable, Equatable, Sendable {
     /// D90/D91：本局画线默认样式。`nil` = 旧档 / 本局从未改过（→ 回落全局默认）。
     /// ⚠️ **落盘边界是 repo 的具名列 SQL，不是这个 Codable**（本类型的 Codable 生产上零消费者）；
     ///    但它是 `public`，故必须保持**无损**，否则未来第一个消费者会静默丢值。
+    /// ⚠️ **这条 Codable 路径不具备列边界的逐字段容错**（D92 只覆盖 SQL 列那条）：
+    ///    `DrawingDefaultStyle` 用的是合成 Codable，key 在但内容坏（未知 rawValue / 类型不匹配）时**会抛**；
+    ///    `decodeIfPresent` 只兜「key 缺失或为 null」。今天零风险（本类型的 Codable 生产零消费者），
+    ///    **若将来给它接生产消费者，必须先补容错**，否则踩的正是 D92 要消灭的失败模式。
     public let drawingDefaultStyle: DrawingDefaultStyle?
 
     public var drawings: [DrawingObject] { lossy.drawings }    // 计算属性（下游消费不变）
@@ -254,6 +258,10 @@ public struct PendingReplay: Codable, Equatable, Sendable {
     /// D90/D91：本局画线默认样式。`nil` = 旧档 / 本局从未改过（→ 回落全局默认）。
     /// ⚠️ **落盘边界是 repo 的具名列 SQL，不是这个 Codable**（本类型的 Codable 生产上零消费者）；
     ///    但它是 `public`，故必须保持**无损**，否则未来第一个消费者会静默丢值。
+    /// ⚠️ **这条 Codable 路径不具备列边界的逐字段容错**（D92 只覆盖 SQL 列那条）：
+    ///    `DrawingDefaultStyle` 用的是合成 Codable，key 在但内容坏（未知 rawValue / 类型不匹配）时**会抛**；
+    ///    `decodeIfPresent` 只兜「key 缺失或为 null」。今天零风险（本类型的 Codable 生产零消费者），
+    ///    **若将来给它接生产消费者，必须先补容错**，否则踩的正是 D92 要消灭的失败模式。
     public let drawingDefaultStyle: DrawingDefaultStyle?
 
     public var drawings: [DrawingObject] { lossy.drawings }    // 计算属性（下游消费不变）

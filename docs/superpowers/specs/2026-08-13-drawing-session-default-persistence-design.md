@@ -641,6 +641,32 @@ G4 / G4b / G6 断言的是 **Swift 表达式**，G5 数的是 **Swift 代码里�
 - **自动选中 spec** 的 §6.8.3 那条「一致性回归」（画线态改样式 → autosave → 续训 → **线与默认双双恢复且互相一致**）
   在本片之前必然红、本片之后应当能绿 —— 它是次序正确性的机械证据。
 
+### 10.1b ⭐ 交给 P1c（整支评审 Important，2026-08-14）
+
+**P1c 加新工具的当天，必须回来重判解码边界的 `toolType` 实参。**
+
+`DrawingDefaultStyleColumn.decode` 里两处 `sanitized(for: .horizontal)` 是 §5.3
+「调用点恒 `.horizontal`、但保留入参」那条裁决的**落点**。一旦 `DrawingToolType` 里
+`.trend` 等被接进生产：一份合法的 `.segment` 本局默认**写得进磁盘**，
+**读回来会被静默改写成 `.straight`** —— 而 `T15b` 只锁了单元级不变量
+（`sanitized(for: .trend)` 不外溢横线规则），**那天不会有任何测试变红**。
+⇒ 已在该函数体内留下承重注释；P1c 的 spec 必须把「重判这个实参」列为必做项。
+
+### 10.1c 交给「谁第一个消费 `Pending*` 的 Codable」
+
+本片给 `PendingTraining` / `PendingReplay` 加了 `drawingDefaultStyle` 并保持**无损** Codable，
+但**那条路径不具备列边界的逐字段容错**（D92 只覆盖 SQL 列那条）：
+`DrawingDefaultStyle` 是合成 Codable，key 在而内容坏（未知 rawValue / 类型不匹配）时**会抛**；
+`decodeIfPresent` 只兜「key 缺失或为 null」。今天零风险（§3.1 已实测该 Codable 生产零消费者），
+**接第一个生产消费者之前必须先补容错**。已在两处字段头注留下承重注释。
+
+### 10.1d 交给 P6：**「用户没改过」这个信息已经丢了**
+
+生产写路径**永远不写 NULL**（`defaultStyle` 非可选），所以
+「列为 NULL」只对 **pre-0010 的老档**成立。P6 落全局默认时若指望用 NULL 区分
+「本局用户没改过默认」与「改成了恰好等于出厂值」——**区分不出来**。需要这个区分的话，
+得另加显式标记，不能指望这一列。
+
 ### 10.2 交给 P6（母 spec §13）
 
 P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值改成齿轮里设的全局默认。
