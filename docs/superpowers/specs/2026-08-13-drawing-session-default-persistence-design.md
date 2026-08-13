@@ -509,7 +509,7 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | **T17** | **`PendingTraining` 的 Codable 往返**：造一个 `drawingDefaultStyle` 为**非出厂值**的实例 → encode → decode → **逐字段相等** | host（codex spec-R8 medium：DB 路径不走 Codable，漏 `encodeIfPresent` 时 T1/T2/T12/T13 **全绿**） |
 | **T17b** | `PendingReplay` 同上 | host |
 | **T18** | **旧载荷解码**：JSON 里**没有** `drawingDefaultStyle` 这个 key → 解码成功且该字段 == `nil`，其余字段照常 | host（两个模型各一条；`init(from:)` 必须 `decodeIfPresent`） |
-| **T16** | `DrawingDefaultStyle.thicknessRange` 与面板实际渲染的档数**同源**：面板选项数 == `thicknessRange.count` | **Catalyst**（面板是 UIKit-gated；D99 的单一真相守门） |
+| **T16**（**已改为源码层判据**，codex plan-P-R10 medium） | 面板与常量**同源**，判据 = `DrawingStyleParams` 里**整段** `options(Array(DrawingDefaultStyle.thicknessRange),` 原样存在（守卫 **G5b**） | **host**（源码扫描）。⚠️ 原写「Catalyst 上断言渲染档数 == `thicknessRange.count`」——实测 `options(Array(1...5), …)` 写在 SwiftUI `body` 内、**无纯访问器**，要断言渲染档数就得渲整壳，而本仓 `DrawingLayoutInvariantTests:9-28` 已记录托管视图**四条路三条死** ⇒ 那是一条**未经证实可构造**的档，不得留在必测清单上 |
 
 ### 7.2 变异清单（**强制清单 = 本表每一条**，刻意不枚举编号）
 
@@ -533,7 +533,7 @@ codex spec-R7 建议加一条 Catalyst 行为测试（走真面板/路由改样�
 | M13 | **只**改 Swift 那份、backend 那份留在 `"1.12"` | **backend 的 `test_qmt_pilot_db.py:798`** 红（跨语言一致性守卫）—— 这条专证「两份源必须同改」 |
 | **M13b** | 两份都留在 `"1.12"` | **只有 T15** 红 |
 | **M13c** | 两份常量都改对、migration 也加了，**但 m01 矩阵三行一行没动** | **只有守卫 G8** 红 —— 这条专证「矩阵同步是被强制的，不是靠自觉」（codex R7-medium） |
-| M14 | 把 `thicknessRange` 改成 `1...4`（模拟两处字面量漂移） | **只有 T16** 红 —— 证明面板确实是从该常量派生、不是自己写了个 `1...5` |
+| M14 | 把 `thicknessRange` 改成 `1...4`（模拟两处字面量漂移） | **G5**（`1...5` 计数掉到 0）+ **G5b**（三个消费者的整段表达式全失配）—— 证明三个消费者确实从该常量派生 |
 | **M16** | 从 `PendingTraining.encode(to:)` 里删掉 `encodeIfPresent(drawingDefaultStyle…)`（= 造出「有损 Codable」） | **只有 T17** 红；T1/T2/T12/T13 **全绿** —— 这条专证「DB 边界测试对 Codable 契约零判别力」（codex R8-medium） |
 | **M16b** | 把 `init(from:)` 的 `decodeIfPresent` 改成 `decode`（旧载荷缺 key 即抛） | **只有 T18** 红 |
 | **M15b** | 把 `sanitized` 里的 `labelMode` 归一化换成**两参**重载 `normalizedLabelMode(current:lineSubType:)` | **只有 T15b** 红 —— 这条专证「tool-aware 签名挡不住传错重载」（codex R5-medium） |

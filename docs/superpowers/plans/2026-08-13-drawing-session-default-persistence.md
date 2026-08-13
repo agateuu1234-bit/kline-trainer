@@ -41,13 +41,23 @@
 
 ```bash
 # ── GATE PREAMBLE（每个闸门块照抄，勿省）──
+set -o pipefail          # ⚠️ 必须在这里：本计划所有闸门都 `… | tail -N`，
+                         #    不加它，`$?` 是 tail 的（永远 0）→ 测试红了闸门照样绿
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
 echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
   || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
+# 每条验证命令都用它包一层，红了立刻停，不许往下走
+gate() { echo "── $1"; shift; "$@" || { echo "!! 闸门失败：$*"; exit 1; }; }
 ```
 
   它**不是提示、是闸**：分支不对直接非零退出 —— 「在另一个 checkout 上全绿」这条假绿路径被结构性堵死。
+- ⭐ **`set -o pipefail` 放在 PREAMBLE 里是有意的单一来源**（codex plan-P-R10 **high**）：
+  本计划有 **19 处** `… | tail -N` 形态的闸门，逐行去补一定漏（本轮就是漏在 backend pytest 那条上，
+  而它恰好是 `CONTRACT_VERSION` 跨语言守卫的唯一出口 —— 漏了它，本片最怕的版本错位就无人拦）。
+  规则：**任何带管道的验证命令都必须落在贴过 PREAMBLE 的块里**；
+  多门连跑的块（Task 4 / Task 8）还要每门单独 `|| exit 1`，**不许一门红了继续跑下一门然后报绿**
+  （[[feedback_gate_pipe_swallows_exit_code]]）。
 - ⭐ **每个 task 收尾必须 `git status --short` 确认工作区干净**（输出为空）。
   非空 = 有改动没被 commit（脏树假绿）或变异没复原干净 —— **两者都必须当场查清再继续**。
 
@@ -135,10 +145,11 @@ struct DrawingDefaultStyleSanitizeTests {
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter DrawingDefaultStyleSanitizeTests 2>&1 | tail -20
 ```
 Expected: 编译失败，`value of type 'DrawingDefaultStyle' has no member 'sanitized'`
@@ -176,10 +187,11 @@ public extension DrawingDefaultStyle {
 - [ ] **Step 4: 跑测试确认通过**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter DrawingDefaultStyleSanitizeTests 2>&1 | tail -5
 ```
 Expected: `5 tests passed`
@@ -218,22 +230,52 @@ Expected: `5 tests passed`
 
 /// G5b：三个消费者必须**引用常量**，而不是各写各的数字。
 /// 这条比数字面量结实 —— 它挡得住「换成 min/max 写法」这种绕过。
+///
+/// ⚠️ 判据是**整段表达式精确比对**，不是「文件里出现过 thicknessRange 这个词」
+///（codex plan-P-R10 medium 顺出来的加固）：只查词，一个
+/// `options(Array(1...4), …)` 配上文件别处任意一处装饰性的 `thicknessRange` 引用就能过。
+/// 精确比对同时**顶掉了 spec 原来的 T16** —— 见下方说明。
 @Test func thickness_domain_consumers_reference_the_constant() throws {
-    for file in ["UI/DrawingStyleParams.swift",
-                 "Drawing/DrawingObjectStyleEdit.swift",
-                 "Drawing/HorizontalLineTool.swift"] {
+    let expected: [(file: String, expr: String)] = [
+        ("UI/DrawingStyleParams.swift",         "options(Array(DrawingDefaultStyle.thicknessRange),"),
+        ("Drawing/DrawingObjectStyleEdit.swift", "DrawingDefaultStyle.thicknessRange.contains(s.thickness)"),
+        ("Drawing/HorizontalLineTool.swift",
+         "min(max(t, DrawingDefaultStyle.thicknessRange.lowerBound), DrawingDefaultStyle.thicknessRange.upperBound)"),
+    ]
+    for (file, expr) in expected {
         let src = try SourceGuardScanner.strippedSource(of: file)
-        #expect(src.contains("thicknessRange"),
-                "\(file) 没有引用 DrawingDefaultStyle.thicknessRange —— 值域又分叉了")
+        #expect(src.contains(squeeze(expr)),
+                "\(file) 不是从 DrawingDefaultStyle.thicknessRange 派生的（期望整段：\(expr)）")
     }
 }
 
-/// G5b 的**双向自检**：不含常量引用的样本必须被判不合格
+/// G5b 的**双向自检**：不含常量引用的样本必须被判不合格，
+/// 且「文件里另有一处 thicknessRange、但档位仍是硬编码」也必须被判不合格
+///（证明判据是整段表达式、不是词频）。
 @Test func g5b_rejects_hardcoded_bounds() {
     let fake = "let clamped = min(max(t, 1), 5)"
-    #expect(!fake.contains("thicknessRange"))
+    #expect(!fake.contains(squeeze("options(Array(DrawingDefaultStyle.thicknessRange),")))
+    let sneaky = squeeze("""
+    // 别处提过一次常量
+    let hint = DrawingDefaultStyle.thicknessRange.count
+    options(Array(1...4), current: style.thickness,
+    """)
+    #expect(!sneaky.contains(squeeze("options(Array(DrawingDefaultStyle.thicknessRange),")),
+            "词频式判据会放过这个样本 —— 判据必须是整段表达式")
 }
 ```
+
+> ⚠️ **spec 的 T16 由这条精确比对承接，不再单列**（codex plan-P-R10 medium，**核实后按第二条建议收口**）：
+> T16 原本要求「**Catalyst 上断言面板实际渲染的档数 == `thicknessRange.count`**」。
+> 实测 `DrawingStyleParams.swift:58` 的 `options(Array(1...5), …)` 写在 SwiftUI `body` **里**，
+> **没有任何可被测试调用的纯访问器** ⇒ 要断言「渲染出几档」就必须把整个视图渲出来，
+> 而本仓 `DrawingLayoutInvariantTests:9-28` 已实测记录托管视图测量**四条路三条死**。
+> 把一条**未经证实可构造**的测试留在必测清单上，正是本轮反复在治的「零判别力档」
+>（[[feedback_spec_all_paths_must_reach_the_chokepoint]] 的「测试到不了判据」变体）。
+> **承接方式**：G5b 从「含 `thicknessRange` 这个词」升级为「**整段表达式**
+> `options(Array(DrawingDefaultStyle.thicknessRange),` 必须原样存在」——
+> 面板档数与常量同源这件事，被**源码层面**钉死，且今天就跑得起来。
+> **M14 的判绿对象随之改为 G5 + G5b**（把定义改成 `1...4`：G5 的 `1...5` 计数掉到 0 → 红）。
 
 > ⚠️ 若 `SourceGuardScanner` 无 `countOccurrences(pattern:inSourcesMatching:stripCommentsAndStringLiterals:)`，
 > **先读 `ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScanner.swift` 用它已有的 API 改写**，
@@ -254,16 +296,17 @@ cp ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.sw
 | M5 | 删掉 `isRenderableSubType` 那三行 | `horizontal_segment_falls_back_to_straight` |
 | M6 | 删掉 `thickness` 的夹取 | `thickness_is_clamped_to_range` |
 | M15b | `normalizedLabelMode` 换成**两参**重载 | `non_horizontal_tool_keeps_its_label_and_subtype` |
-| M14 | `thicknessRange` 改成 `1...4` | G5 字面量条（定义处变了）+ 面板档数断言 T16 |
+| M14 | `thicknessRange` 改成 `1...4` | **G5**（`1...5` 计数掉到 0）+ **G5b** 三条整段表达式全失配。⚠️ 原写「面板档数断言 T16」，T16 已由 G5b 的整段比对承接（见 Step 6 说明） |
 | **M14b** | 把 `HorizontalLineTool:33` 改回 `min(max(t, 1), 5)`（模拟「换写法绕过字面量计数」） | **只有 G5b** 红（G5 字面量条**仍绿** —— 正则看不见 min/max 形态，这正是 G5b 存在的理由） |
 
 - [ ] **Step 8: 跑 host 全量 + 提交**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 # 与本 task 的 Files 段逐一对应（三个消费者 + 定义 + 两个测试文件）
 git add ios/Contracts/Sources/KlineTrainerContracts/Models/DrawingEnums.swift \
@@ -282,6 +325,7 @@ git status --short          # 必须为空
 
 **Files:**
 - Modify: `ios/Contracts/Sources/KlineTrainerContracts/AppState.swift`（`PendingTraining` `:94-224`、`PendingReplay` `:230-…`）
+- Modify: `ios/Contracts/Sources/KlineTrainerContracts/Models/DrawingEnums.swift:28`（Step 5 改声明；Step 8 会 stage 它 —— codex plan-P-R10 medium：Files 段是 `git add` / 备份 / `--filter` 的唯一来源，漏在这里 = 实施者按规则办事却漏 stage）
 - Test: `ios/Contracts/Tests/KlineTrainerContractsTests/PendingCodableDefaultStyleTests.swift`（新建）
 
 **Interfaces:**
@@ -360,10 +404,11 @@ struct PendingCodableDefaultStyleTests {
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter PendingCodableDefaultStyleTests 2>&1 | tail -20
 ```
 Expected: 编译失败，`extra argument 'drawingDefaultStyle' in call`
@@ -422,10 +467,11 @@ public struct DrawingDefaultStyle: Codable, Equatable, Sendable {
 - [ ] **Step 6: 跑测试确认通过 + 全量**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter PendingCodableDefaultStyleTests 2>&1 | tail -5
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 ```
@@ -577,10 +623,11 @@ struct Migration0010Tests {
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter Migration0010Tests 2>&1 | tail -20
 ```
 Expected: 两条都 FAIL（缺列 / user_version 仍为 7）
@@ -737,10 +784,11 @@ final class UserVersionAssertionGuardTests: XCTestCase {
 ```
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter UserVersionAssertionGuardTests 2>&1 | tail -20
 ```
 Expected：`test_scanner_discriminates_terminal_from_partial` **PASS**（自检本就该绿）；
@@ -772,10 +820,11 @@ Expected：`test_scanner_discriminates_terminal_from_partial` **PASS**（自检�
 - [ ] **Step 6: 跑测试确认通过 + drift 闸门**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter "Migration0010Tests|AppDB0005MigrationTests|ReviewArchiveMigrationTests|PendingReplayPersistenceTests" 2>&1 | tail -5
 # 收尾：host 全量（Global Constraints 要求每个 task 都跑并记录条数）
 (set -o pipefail; swift test 2>&1 | tail -3)
@@ -914,10 +963,11 @@ final class M01MatrixSyncGuardTests: XCTestCase {
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter M01MatrixSyncGuardTests 2>&1 | tail -10
 ```
 Expected: `test_m01_matrix_three_rows_are_in_sync` FAIL（三条断言均未满足）
@@ -941,7 +991,7 @@ public let CONTRACT_VERSION = "1.13"
 CONTRACT_VERSION = "1.13"
 ```
 
-- [ ] **Step 4: 改两处 Swift 断言**
+- [ ] **Step 4: 改两处 Swift 断言（= spec 的 **T15** 在 Swift 侧那一半；另一半是 Step 6 的 backend pytest）**
 
 `ModelsTests.swift:8` 与 `RenderStateBuilderTests.swift:1260` 的 `#expect(CONTRACT_VERSION == "1.12")` 均改为 `"1.13"`。
 
@@ -955,15 +1005,19 @@ CONTRACT_VERSION = "1.13"
 - [ ] **Step 6: 跑三处闸门确认通过**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
-cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter "M01MatrixSyncGuardTests|ModelsTests|RenderStateBuilderTests" 2>&1 | tail -5
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
+cd "$repo/ios/Contracts" && { swift test --filter "M01MatrixSyncGuardTests|ModelsTests|RenderStateBuilderTests" 2>&1 | tail -5; } \
+  || { echo "!! Swift 定向门红"; exit 1; }
 # 收尾：host 全量（Global Constraints 要求每个 task 都跑并记录条数）
-(set -o pipefail; swift test 2>&1 | tail -3)
+{ swift test 2>&1 | tail -3; } || { echo "!! host 全量红"; exit 1; }
 
-cd "$(git rev-parse --show-toplevel)/backend" && python3 -m pytest tests/test_qmt_pilot_db.py -k contract_version -q 2>&1 | tail -5
+# ⚠️ backend 这门是 CONTRACT_VERSION 跨语言守卫的**唯一出口** —— 绝不能让它红了还往下走
+cd "$repo/backend" && { python3 -m pytest tests/test_qmt_pilot_db.py -k contract_version -q 2>&1 | tail -5; } \
+  || { echo "!! backend 跨语言守卫红"; exit 1; }
 ```
 Expected: Swift 全过；backend 跨语言断言 **自动变绿**（它动态读 Swift 文件，两边同步即过）
 
@@ -1009,6 +1063,7 @@ git status --short          # 必须为空（非空 = 脏树假绿或变异没�
 - Modify: `…/Internal/PendingTrainingRepositoryImpl.swift:18-31, 33-85`
 - Modify: `…/Internal/PendingReplayRepositoryImpl.swift:18-30, 32-81`
 - Test: `ios/Contracts/Tests/KlineTrainerPersistenceTests/PendingDefaultStyleColumnTests.swift`（新建）
+- Test: `ios/Contracts/Tests/KlineTrainerContractsTests/PersistenceDecoderBoundaryGuardTests.swift`（新建，**G7 + G5c**；必须落在 Contracts 测试目标 —— `SourceGuardScanner` 是该模块内 internal）
 
 **Interfaces:**
 - Consumes: `DrawingDefaultStyle.sanitized(for:)`（Task 1）· 模型字段（Task 2）· 列（Task 3）
@@ -1197,10 +1252,11 @@ struct PendingDefaultStyleColumnTests {
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter PendingDefaultStyleColumnTests 2>&1 | tail -20
 ```
 Expected: 编译失败（`DrawingDefaultStyleColumn` 不存在）
@@ -1264,10 +1320,11 @@ enum DrawingDefaultStyleColumn {
 - [ ] **Step 5: 跑测试确认通过 + 全量**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter PendingDefaultStyleColumnTests 2>&1 | tail -5
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 ```
@@ -1507,10 +1564,11 @@ struct CoordinatorDefaultStylePersistTests {
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter CoordinatorDefaultStylePersistTests 2>&1 | tail -20
 ```
 
@@ -1550,10 +1608,11 @@ cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter Coord
 - [ ] **Step 6: 跑测试 + 全量**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter CoordinatorDefaultStylePersistTests 2>&1 | tail -5
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 ```
@@ -1689,10 +1748,11 @@ private func definitionRHS(of name: String, in src: String) throws -> String {
 - [ ] **Step 2: 跑守卫确认失败**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter DrawingInteractionUISourceGuardTests 2>&1 | tail -10
 ```
 Expected: `training_view_wires_default_style_autosave_trigger` FAIL
@@ -1711,10 +1771,11 @@ Expected: `training_view_wires_default_style_autosave_trigger` FAIL
 - [ ] **Step 4: 跑守卫 + Catalyst 门**
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
 cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter DrawingInteractionUISourceGuardTests 2>&1 | tail -5
 # 收尾：host 全量（Global Constraints 要求每个 task 都跑并记录条数）
 (set -o pipefail; swift test 2>&1 | tail -3)
@@ -1774,20 +1835,26 @@ git status --short          # 必须为空（非空 = 脏树假绿或变异没�
 > 不是「spike 成功了」。
 
 ```bash
+set -o pipefail
 repo=$(git rev-parse --show-toplevel); cd "$repo" || exit 1
-echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)"
+echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)  HEAD=$(git rev-parse --short HEAD)  REPO=$repo"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "feat/drawing-session-default-persistence" ] \
-  || { echo "!! 错误的分支/checkout，拒绝判绿"; exit 1; }
-cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)                       # ① host
-cd "$(git rev-parse --show-toplevel)" && bash scripts/check_app_schema_drift.sh   # ② drift
-cd "$(git rev-parse --show-toplevel)/backend" && python3 -m pytest tests/test_qmt_pilot_db.py -q 2>&1 | tail -3              # ③ backend
+  || { echo "!! 闸门跑在错误的分支/checkout 上，拒绝判绿"; exit 1; }
+# ⚠️ 四门**逐门 || exit 1**：一门红了必须当场停，不许继续跑下一门然后凭最后一条的退出码报绿
+cd "$repo/ios/Contracts" && { swift test 2>&1 | tail -3; } \
+  || { echo "!! ① host 红"; exit 1; }
+cd "$repo" && bash scripts/check_app_schema_drift.sh \
+  || { echo "!! ② schema drift 红"; exit 1; }
+cd "$repo/backend" && { python3 -m pytest tests/test_qmt_pilot_db.py -q 2>&1 | tail -3; } \
+  || { echo "!! ③ backend 红（CONTRACT_VERSION 跨语言守卫就在这门里）"; exit 1; }
 
 # ④ Catalyst —— 唯一编译 TrainingView 的门。两个坑必须同时避开：
 #    -scheme 必须是 KlineTrainerContracts-Package（library scheme 不编译 testTarget，该门曾报绿半年）
-#    set -o pipefail 必须有（tee 会吞掉退出码）
-cd "$(git rev-parse --show-toplevel)" && (set -o pipefail; xcodebuild test \
+#    pipefail 必须有（tee 会吞掉退出码）—— 已在 PREAMBLE 里全局打开
+cd "$repo" && { xcodebuild test \
   -scheme KlineTrainerContracts-Package -destination 'platform=macOS,variant=Mac Catalyst' \
-  2>&1 | tee /tmp/catalyst_final.log | tail -5)
+  2>&1 | tee /tmp/catalyst_final.log | tail -5; } \
+  || { echo "!! ④ Catalyst 红"; exit 1; }
 grep -c "Test Case .* passed" /tmp/catalyst_final.log   # 判绿读**执行量**，不读 TEST SUCCEEDED
 ```
 
