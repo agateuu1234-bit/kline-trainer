@@ -36,14 +36,16 @@ host `swift test` = **`Test run with 1831 tests in 215 suites passed`**。
 |---|---|---|---|
 | **PR-1** | **① 画完自动选中** | 提交成功 → 那条线立刻选中；仍留在画线态可接着画；🔒 / 🗑 / 样式面板立刻作用于它 | ~40 行 |
 | **PR-1** | **② 改样式的两套语义** | 画线态改 = 本局默认 + 顺带套到刚画那条；选择态改旧线 = 只改那一条 | ~40 行 |
-| **PR-2** | **③ 本局默认随存档续训继承** | 把本局默认写进 `PendingTraining` / `PendingReplay` 两条存档 + 新增 autosave 触发 + resume 时种回去（D87 / §6.7） | ~120–180 行 |
+| **PR-2** | **③ 本局默认随存档续训继承** | **本 spec 不设计它** —— 它是一整块持久化 / 迁移切片（新增列 ×2 表 + migration + `user_version` + repo 读写 + schema-drift 闸门 + **replay clean-skip 判据** + autosave 触发 + 容错解码 + sanitize + 两条 resume 种子），**另开一份 spec**（D88 / §6.7） | 另行估算 |
 
-**PR-1 = 纯内存交互语义，零持久化改动；PR-2 = 持久化契约改动。两者失败面完全不交叠**，故拆开评审
-（沿用用户 2026-08-12 对本片打包方式的原始偏好，也是 [[feedback_big_pr_codex_noncovergence]] 的纪律）。
-**次序：PR-1 → PR-2**（PR-2 要存的那个值由 PR-1 的 D86 决定谁在写它）。
+**本 spec 的设计范围 = PR-1**。PR-2 的**需求**由 D87 定死（用户 2026-08-13 裁决），
+它的**设计**另开 spec（D88 / §6.7：codex R6 的 critical 已经证明，塞进本文件一节只会产出一份接不到盘上的方案）。
 
-⚠️ **PR-1 单独上线是安全的**：它不改变本局默认「不跨续训」这个 **main 上的既有行为**（§6.6 已实测：
-`setDefaultStyle` 的写入频率一次没多）。但**那是一个待修的缺口、不是已接受的行为** —— PR-1 的验收清单必须如实这么写。
+**次序：PR-1 → PR-2**（PR-2 要存的那个值，由 PR-1 的 D86 决定谁在写它）。
+
+⚠️ **PR-1 可以先合，但本片在 PR-2 合入前不算交付完成**（D89 / §6.8）。
+PR-1 不改变本局默认「不跨续训」这个 **main 上的既有缺口**（§6.6 已实测：`setDefaultStyle` 写入频率一次没多），
+但**那是待修的缺口、不是已接受的行为**——故验收表里**不设任何一条把它写成正常的项**。
 
 ### 0.3 D81　本片**不含**任何持久化改动 —— 全局默认属 §P6，用户已裁决
 
@@ -61,7 +63,7 @@ host `swift test` = **`Test run with 1831 tests in 215 suites passed`**。
 「**全局**默认落盘」连同齿轮「画线设置」界面整块留给 **P6**（母 spec §13），到时一并做。
 
 ⚠️ **这一条只管「全局默认」，与「本局默认」无关**。用户 2026-08-13 另有裁决：**本局默认必须跨断点续训继承**
-（D87 / §6.7），那是 **PR-2** 的范围，动的是 `PendingTraining` / `PendingReplay` 两条**存档**契约，
+（D87 / §6.6），那是 **PR-2** 的范围，动的是 `pending_training` / `pending_replay` 两张**表**的物理 schema，
 **不是** settings 表、**不是**全局默认。两件事别混。
 
 **为什么不先把「读」那一半做了**：今天没有任何东西会去写那五个 key，读出来恒为出厂值 —— 那是没有真实验收场景的投机代码（CLAUDE.md §2）。P6 做界面时读写一起落地，代价更低、验收面完整。
@@ -441,33 +443,63 @@ mutate(&next)
   **本片没有新增任何一次 `setDefaultStyle` 调用**）。
   这条事实**不再是「所以不用修」的理由**，但它仍然是**切分**的理由：PR-1 不制造新缺口，故 PR-1 可以先合。
 
-### 6.7 D88　PR-2：本局默认的存档面、容错解码与 autosave 触发
+### 6.7 D88　PR-2（本局默认持久化）**另开一份 spec**，不在本文件内设计
 
-**存档面 = `PendingTraining` + `PendingReplay` 两条，复盘 `ReviewArchiveWrapper` 明确排除。**
+> **来源：codex spec-R6 一条 critical + 一条 high，均已对源码实测证实。我上一稿的 D88 在物理层是错的。**
 
-**复盘排除是可证明的，不是省事**：常驻样式面板在复盘**根本不渲染** ——
-`TrainingView.swift:116` `stylePanelWillBeVisible = showsTradeButtons && isDrawingActive && typeRowExpanded`，
-而 `showsTradeButtons = engine.flow.canBuySell()` 在复盘恒 false。
-⇒ 复盘里**改不了**本局默认 ⇒ 没有任何东西需要存。
-⚠️ 这条排除的**依据是那个谓词**，不是「复盘大概用不上」。**P5 若让复盘用上新底栏 / 常驻面板，这条排除立刻失效**，
-必须同期把复盘存档一并接上 —— 写进 §10 交接。
+**上一稿错在哪（必须写清楚，这是本 spec 犯过的第三次同族错误）**：
 
-**四条硬约束（缺一即缺陷）**：
+我写「`PendingTraining` / `PendingReplay` 的 Codable 是显式的，新增 key 走 `decodeIfPresent` 附加式即可」。
+**实测：那个 Codable 根本不是落盘边界。**
 
-| # | 约束 | 不这么做会怎样 |
-|---|---|---|
-| **①** | **逐字段 `decodeIfPresent` + 未知值回落出厂，绝不 throw。** `LineSubType` / `LineStyle` / `DrawingColorToken` / `LabelMode` 都是 `String` 原始值枚举，**合成解码遇到未知值会抛** | 一个**装饰性偏好**的坏字节 → **整局训练存档不可解码** → 用户丢掉一整局进行中的训练。这是本约束存在的唯一理由，也是它绝不能被「简洁起见用合成 Codable」优化掉的理由 |
-| **②** | **解码后必须 sanitize**：`lineSubType` 必须经 `DrawingStyleAvailability.isRenderableSubType`（水平线的 `.segment` 拒）、`thickness` 必须夹回 `1…5`、`labelMode` 必须经 `normalizedLabelMode`。判据**复用既有单一真相，禁止另写一份** | 磁盘上躺着 `.segment` → `commitPending` 的 `withStyle` **恒返回 nil** → 用户进了画线模式**一条线都画不出来**，且屏幕上没有任何提示。越域 `thickness` 同理 |
-| **③** | **新增 autosave 触发**：现有触发是 `.onChange(of: engine.drawingsRevision)`（`TrainingView.swift:368`），而「只改了默认、没改任何线」**不 bump 它** | 用户改完默认立刻杀进程 → 改动没进存档 → 续训回落。**修了一半等于没修** |
-| **④** | **旧存档（无该 key）→ 回落出厂值，不报错**。照抄 `PendingTraining` 已有的 `lossyRaw` 先例（`AppState.swift:195-199`：`decodeIfPresent` 有就用、没有就退化） | 用户升级 App 后，手上那局进行中的训练直接打不开 |
+| 实测事实 | 出处 |
+|---|---|
+| `pending_training` 是**逐列建表**（`training_set_filename` / `global_tick_index` / … / `drawdown` / `session_key`） | `AppDBMigrations.swift:57-71` + `0004` |
+| `pending_replay` 同构，**另建于 migration `0006`**，且该 migration 自己 `PRAGMA user_version = 4` | `AppDBMigrations.swift:164-184` |
+| repo 写盘是 `INSERT OR REPLACE INTO pending_training (…14 个具名列…) VALUES (…)`，读盘按列名取 | `PendingTrainingRepositoryImpl.swift:18-45` |
 
-**契约版本**：`PendingTraining` / `PendingReplay` 的 Codable 是**显式**的（`AppState.swift:177-223`），
-新增 key 走 `decodeIfPresent` / `encodeIfPresent` **附加式**，**旧解码器读新档时忽略该 key、新解码器读旧档时回落**
-⇒ **双向兼容，不 bump `CONTRACT_VERSION`**（与 `lossyRaw` 当初的处置逐字同构）。
+⇒ 照上一稿实施，会得到**内存 round-trip 测试全绿、而值从来没进过数据库**——[[feedback_uikit_gated_evidence_traps]] 那一族的假绿。
 
-**PR-2 的判别力要求**（每条都要有只有它够得到的档）：
-坏枚举值不毒死整局存档（约束 ①）/ `.segment` 解码进来后仍能正常画线（约束 ②）/
-只改默认不改线也会存盘（约束 ③）/ 旧档无 key 能打开且回落出厂（约束 ④）/ 存-读往返逐字段相等。
+**另一条实测（codex R6 high，同样属实）**：replay 的写盘有 **clean-skip**——
+`replayBaseline = (tick, ops, drawingsSig, upper, lower)`（`TrainingSessionCoordinator.swift:56`），
+在 `!replayHasPersisted` 时生效（`:611-615`）。
+⇒ fresh replay 里**只改了默认**：四个分量一个没变 → **clean-skip 跳过、根本不写盘** → 续局必丢。
+⚠️ `TrainingSessionCoordinator.swift:55` 的注释里记着**同一形状的旧 bug**（当初漏把 periods 纳入比较），我原地重踩了一次。
+
+**决策：PR-2 另开 spec，走完整的 brainstorming → spec → codex 评审 → plan 流程。**
+
+理由不是回避评审，恰恰相反——R6 的 critical 说的就是「PR-2 的持久化方案不完整」，
+而补完它需要设计的东西已经是一整块持久化切片，与画线交互是**完全不同的风险面**：
+
+物理形状（两个可空列 vs 一个版本化 JSON blob）· 新 migration 编号与 `user_version` · 两张表的 repo 读写 ·
+内存假件与 debug fixture · **schema-drift 闸门覆盖**（`scripts/check_app_schema_drift.sh`）·
+**replay clean-skip 判据与 baseline 元组扩展** · autosave 触发 · 容错解码 · 解码后 sanitize · 两条 resume 种子。
+
+把它塞进本文件一节，产出的必然是一份「看起来完整、实施时才发现没接到盘上」的设计——
+本轮 critical 已经演示过一次了。
+
+**交给 PR-2 spec 的既得事实（已实测，不必重查）**：上表三条 + clean-skip 那条 + 下列两条硬约束：
+
+| 约束 | 不这么做会怎样 |
+|---|---|
+| **逐字段容错解码 + 未知枚举回落出厂，绝不 throw**（`LineSubType` / `LineStyle` / `DrawingColorToken` / `LabelMode` 都是 `String` 原始值枚举，合成解码遇未知值**会抛**） | 一个**装饰性偏好**的坏字节 → **整局训练存档不可解码** → 用户丢掉一整局进行中的训练 |
+| **解码后必须 sanitize**（`lineSubType` 经 `DrawingStyleAvailability.isRenderableSubType`、`thickness` 夹回 `1…5`、`labelMode` 经 `normalizedLabelMode`，判据**复用既有单一真相**） | 磁盘上躺着 `.segment` → `commitPending` 的 `withStyle` **恒返回 nil** → 用户进画线模式**一条线都画不出来**，且无任何提示 |
+
+**存档面 = `pending_training` + `pending_replay` 两张表；复盘 `review_archive` 可证明排除**：
+常驻样式面板在复盘**根本不渲染**（`TrainingView.swift:116` `stylePanelWillBeVisible` 依赖 `showsTradeButtons`
+= `engine.flow.canBuySell()`，复盘恒 false）⇒ 复盘里改不了本局默认 ⇒ 没有东西要存。
+⚠️ **这条排除的依据是那个谓词**。**P5 若让复盘用上新底栏 / 常驻面板，排除立刻失效**，必须同期接上 `review_archive`。
+
+### 6.8 D89　发布闸：PR-1 **不单独构成本片的交付**
+
+> **来源：codex spec-R6 high。** 上一稿说「PR-1 单独上线是安全的」，同时验收 #23 写着「新线是出厂橙」——
+> 等于用一条验收项给一次**用户可见的状态丢失**盖章。这条批评成立。
+
+- **PR-1 可以先合进 main**（小 PR 评审是纪律，[[feedback_big_pr_codex_noncovergence]]），
+  但**本片在 PR-2 合入之前不算交付完成**，不出「已完成」结论、不打 tag、不向用户宣布该功能可用。
+- **验收表里删掉原 #23**（那条「新线是出厂橙 = 正常」的项）。它不再作为验收项存在，只在本节记录为
+  **PR-1 阶段的已知中间态**：main 上本来就是这样，PR-1 不引入不加重（§6.6 已实测），**PR-2 修它**。
+- PR-1 合入后可以跑 **#1–#22** 拿早期反馈，但**清单顶部必须写明「本片交付未完成，等 PR-2」**。
 
 ---
 
@@ -604,16 +636,11 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 
 | 21 | 画一条线（它变蓝选中）→ 在样式面板把**线型**改成「**射线**」→ 再在图上点一下画一条新射线 | 画出一条射线并**变蓝选中**（射线与直线走同一条自动选中路径，没有被几何门误拒） | |
 
-| 23 **(PR-1)** | 在画线态把颜色改成一个好认的色（比如紫）→ 点「返回」退出训练回主页 → 点「继续训练」续上同一局 → 进画线模式画一条线 | 新线是**出厂橙**。⚠️ **这是 PR-1 阶段的已知缺口**（main 上就是这样，PR-1 不引入不加重）——**PR-2 会把它修成紫色**。此处记录是为了让 PR-1 的验收人知道「这一条现在就该是橙的」，**不是**说这个行为是对的 | |
-| 24 **(PR-2)** | 同 #23 的步骤，在 **PR-2 合入后**再跑一遍 | 新线是**紫色**（本局默认跨断点续训**继承**了，D87） | |
-| 25 **(PR-2)** | 改完默认后**直接杀掉 App**（不点返回）→ 重开 → 「继续训练」→ 画一条线 | 新线是改过的颜色（约束 ③：只改默认也会立刻存盘） | |
-| 26 **(PR-2)** | 用**上一个版本**建的进行中训练（升级前的存档）→ 「继续训练」 | **能正常打开**，画线默认是出厂橙（约束 ④：旧档无该 key → 回落，不报错）。⚠️ 若装不出上一版存档，此条标「无法验证」并在 PR 描述里写明，**不得直接打勾** | |
-
 **#18 / #19 是本片的两条硬边界**（不跨局 / 复盘不越界），任何一条不过都是阻塞级。
-**#23 是 PR-1 的「已知缺口」项**——它的作用是让 PR-1 的验收人知道这一条现在就该是橙的，**并且知道 PR-2 会修它**。
-**#24 是 PR-2 的硬边界**（本局默认必须跨断点续训继承，D87 用户裁决），不过即阻塞。
-**#25 / #26 是 PR-2 的两条数据安全项**：#25 证明「只改默认」也真的进了存档；#26 证明升级后旧存档打得开——
-⚠️ **#26 若无法构造上一版存档，必须如实标「无法验证」**，绝不能因为不好测就打勾（[[feedback_uikit_gated_evidence_traps]]）。
+
+⚠️ **本清单是 PR-1 阶段验收，跑完不代表本片交付完成**（D89 / §6.8）——「本局默认跨断点续训继承」
+（D87，用户 2026-08-13 裁决）由 PR-2 交付，它的验收项写在 PR-2 自己的 spec 里，**不在本表**。
+**本表刻意不设任何一条把「续训后回落出厂橙」写成正常的项**：那是待修的缺口，不是已接受的行为。
 
 ⚠️ **分支 2（提交被拒 → 清空选中）没有真机验收项，这是刻意的**：§3.2 已证明它的六条出口在本期经真实 tap **全部不可达**（出口 c 更是可证明恒不可达）。
 上一稿曾为它写过一条阻塞级真机项（射线点最右缘），**codex spec-R2 high 指出那条路走不通、我核实属实并已删除** —— 一条用户根本走不到的验收步骤，只会让人在真机上反复试、试不出来，然后要么误判为回归、要么随手打勾。
@@ -635,6 +662,9 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 
 - `DrawingSession.defaultStyle` 的**初始值**改为从全局默认种下（今天是 `DrawingDefaultStyle()` 出厂值）；
 - 本片建立的「局内改只作用于本局」语义**不需要改动**（母 spec §13 逐字就是这个）。
+- **PR-2（本局默认持久化）另开 spec**，D88 / §6.7 已把实测过的事实全部交接过去（两张表的物理 schema、
+  repo 的具名列读写、`0006` migration 与 `user_version`、replay clean-skip 的 baseline 元组、
+  容错解码与 sanitize 两条硬约束、复盘可证明排除及其失效条件）。**那份 spec 从这些事实起步，不必重查。**
 - **P6 只需要接一件事**：把「新开一局时的初始值」从出厂值改成齿轮里设的全局默认。
   「本局覆盖量跨续训继承」由本片 PR-2 已经解决（D87 / D88），**P6 不要重做**。
 - ⚠️ **P5 的联动**：D88 把复盘排除在存档面之外，依据是「常驻样式面板在复盘不渲染」这个谓词。
@@ -670,6 +700,8 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 
 | **R5** | 同分支 @ `d1f51f8`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：D87 把「本局默认」定成引擎实例生命期、验收 #23 还把「续训回落出厂值」标成正常非阻塞，等于用「本局默认」这个名字给一次用户可见的状态丢失背书；要么持久化，要么正名并**取得明确的产品裁决**<br>**1 medium**：M5a 要求预置一条与 committed 同 id 的线，但 `commitPending` 内部经 `DrawingObject.init` 生成**全新 UUID**、`commitPendingAndSelect` 签名里没有任何 id 缝 → **这条变异档根本写不出来**，合取项 ① 拿到的是一张空头保证书 | **medium 全采纳**：D85 拆成**内外两层**（外层 `commitPendingAndSelect` 管 ①②，内层 `routeAndSelect(_:panel:engine:)` 管 ③④⑤⑥），M2 / M5a / M5b / M5c 四条改经内层构造；出口 e 的可达性表述改为「结构上不可能」并把 ① 诚实标为纯纵深不变量；新增守卫 **G6**（`routeAndSelect` 恰好一个生产调用点，拆层不得变成两个入口）。**high 交产品裁决后全采纳**：codex 的处方本身就是 get explicit product acceptance。**用户 2026-08-13 裁决：返回 ≠ 结束，续训是断点续跑，本局默认必须继承**（逐字见 §6.6）。据此 **D87 整条重写**（生命期从「引擎实例」改为「本局训练存档」）、**新增 D88**（§6.7：存档面 / 容错解码 / sanitize / autosave 触发四条硬约束）、本片**改回两个 PR**（PR-1 交互语义零持久化、PR-2 存档契约）、验收 #23 翻转并新增 #24–#26。⚠️ 我 R4 那版「引擎实例生命期 + 已接受残留」是对母 spec §13「该**记录**局部覆盖」的**误读**——「记录」本就意味着覆盖量绑在记录上。R4 里**保留成立**的只有一条事实：这是 main 上的既有缺口、PR-1 不引入不加重（故 PR-1 仍可先合） |
 
+| **R6** | 同分支 @ `13d8a03`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 critical**：D88 按「给 `PendingTraining` 的 Codable 加可选 key」写持久化，但 pending 状态实际是 **SQL 具名列**，那个 Codable 根本不是落盘边界 → 照做会得到「内存往返全绿、值从没进过数据库」<br>**1 high**：replay 有 clean-skip（`replayBaseline = (tick, ops, drawingsSig, upper, lower)`，`!replayHasPersisted` 时生效），fresh replay 里只改默认 → 四个分量全没变 → 跳过不写盘 → 续局必丢<br>**1 high**：PR-1 单独上线 + 验收 #23「新线是出厂橙」= 给用户可见的状态丢失盖章 | **三条全采纳，全部实测证实**（`AppDBMigrations.swift:57-71,164-184` / `PendingTrainingRepositoryImpl.swift:18-45` / `TrainingSessionCoordinator.swift:56,611-615`）。⚠️ clean-skip 那条尤其难堪：`TrainingSessionCoordinator.swift:55` 的注释里记着**同一形状的旧 bug**（当初漏把 periods 纳入比较），我原地重踩。处置：**D88 整节改写为「PR-2 另开 spec」**，并把 R6 挖出的全部实测事实交接过去（补完它需要的是列 / migration / `user_version` / schema-drift 闸门 / clean-skip 判据这一整块持久化切片，与画线交互是不同风险面，塞进本文件一节只会再产出一份接不到盘上的方案——本轮 critical 已演示过一次）；**新增 D89 发布闸**（PR-1 可先合但本片在 PR-2 前不算交付完成）；**删掉验收 #23**，验收表加横幅 |
+
 **R1 的形状**：我把「要做什么」写全了，却把「在哪做」写在了一个**那些路径到不了**的位置。
 这与 [[feedback_internal_review_misses_bad_data]] 记录的形状一致 —— 判据本身没错，错在**没有对着真实控制流核一遍每条出口是否真的流经收口点**。
 纪律沉淀：**凡是写「所有 X 都要走 Y」的 spec，必须先把 X 的出口逐条列出来，再逐条核它是否真的到得了 Y**（§3.1 那张出口表就是这条纪律的产物）。
@@ -678,6 +710,9 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 于是六条出口本期一条都走不到，我却给其中一条写了阻塞级真机验收，还拿它当 §3.2 的可达性论据。
 纪律沉淀（补齐 R1 那条的另一半）：**出口表必须带「本期可达性」一列，且逐条给出可达 / 不可达的源码依据**；**不可达的出口不得写成真机验收项**，只能写成不变量锁测试（[[feedback_mutation_must_target_the_exact_predicate]]）。
 **R3 的形状**：验收清单里的每一步我都**没有对着既有的门逐步模拟一遍**——#4 锁定之后，下一步的 🗑 早已被 `!d.locked` 关掉了，而我照着「先锁再删」的直觉写了下去。
+
+**R6 的形状 = 同一族的第三次，也是最贵的一次**：我核到**模型层**（`PendingTraining` 有显式 Codable、有 `lossyRaw` 先例）就停了，**没有一路核到真正落盘的那一层**（逐列 DDL + repo 的具名列 SQL）。模型能编码 ≠ 那份编码会被写进数据库。
+纪律沉淀（第六条）：**凡涉及「存哪里」，必须一路核到 DDL 与真正执行的那条 SQL**；「这个类型是 Codable」对落盘而言是**零证据**。
 
 ⚠️ **三轮的共同根因是同一个：我论证「这条路存在 / 这一步做得到」时，只看了路的一半。**
 R1 = 只核了出口到收口点、没核收口点位置；R2 = 只核了出口到收口点、没核用户到出口；R3 = 只核了动作、没核动作此刻是否被门允许。
