@@ -421,7 +421,7 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 | **T1** | 存 → 读往返：五个字段**逐字段**相等 | **DB 边界**（真 GRDB，仿 `DefaultPendingTrainingRepositoryTests`） |
 | **T2** | replay 槽同样往返 | **DB 边界**（仿 `PendingReplayPersistenceTests`） |
 | **T3** | 列为 NULL（旧档）→ `drawingDefaultStyle == nil`，**其余字段照常读出**，不抛 | **DB 边界 ×2 表**（D100） |
-| **T4** | 列含 `{"colorToken":"未来色"}` → **整行照常读出**，仅该字段回落出厂 | **DB 边界 ×2 表**（D92 ① / D100） |
+| **T4** | **未来枚举值，四个枚举字段各一条**：`{"lineSubType":"arc"}` / `{"lineStyle":"dash5"}` / `{"colorToken":"未来色"}` / `{"labelMode":"center"}` → **整行照常读出**，仅该字段回落出厂、其余三个枚举字段**保留磁盘上的合法值** | **DB 边界 ×2 表**（D92 ① / D100）。⚠️ **四个字段一个都不能少**（codex R6-medium：只测 `colorToken`，实施者可以只给它加 `try?`，`{"lineStyle":"dash5"}` 照样抛） |
 | **T5** | 列含**非法 JSON**（如 `"{{{"`）→ 整行照常读出，整个默认回落出厂 | **DB 边界 ×2 表**（D92 ② / D100） |
 | **T5b** | 列含**类型不匹配**：`{"thickness":"fat"}` / `{"lineSubType":7}` / `{"colorToken":null}` / `{"lineStyle":[]}` / `{"labelMode":{}}` —— **五个字段各一条** → 整行照常读出，**只有该字段**回落出厂、其余四个字段**保留磁盘上的合法值** | **DB 边界 ×2 表**（codex spec-R2 medium：`decodeIfPresent(Int.self)` 能过 T4/T5 却在这里抛；×2 表见 D100） |
 | **T6** | 列含 `{"lineSubType":"segment"}` → 读出后**能正常提交一条线** | **host**（D93；断言 `commitPending` 返回非 nil） |
@@ -446,6 +446,7 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 | M2 | repo 的 `INSERT` 语句里去掉该列 | T1/T2 红；T3 **不得**红 |
 | M3 | repo 的读取改成恒 `nil` | T1/T2 红 |
 | M4 | 把逐字段容错解码换成合成 `Codable`（遇未知即抛） | **只有 T4/T5/T5b** 红 |
+| **M4c** | **只给 `colorToken` 留 `try?`**，其余三个枚举字段改回 `try`（模拟「只照着旧 T4 实施」） | **只有 T4 的 `lineSubType`/`lineStyle`/`labelMode` 三条**红，`colorToken` 那条**仍绿** —— 专证「四个字段各一条」不是冗余（codex R6-medium） |
 | **M4b** | 保留逐字段解码，但把每个字段的 `try?` 改成 `try`（只挡「枚举值不认识」，不挡类型不匹配） | **只有 T5b** 红 —— 这条专门证明 T4/T5 挡不住类型不匹配 |
 | M5 | 删掉 sanitize 的 `lineSubType` 分量 | **只有 T6** 红 |
 | M6 | 删掉 sanitize 的 `thickness` 夹取 | **只有 T7** 红 |
@@ -477,7 +478,7 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 | # | 守卫 | 形状 |
 |---|---|---|
 | **G1** | `setDefaultStyle` 在 `Sources/` 里的调用点**恰好 3 个**：`DrawingEditRouter`（面板写入，既有）+ `resumePending` + `resumePendingReplay` | 结构计数 |
-| **G2** | `drawing_default_style` 这个**列名**在 `Sources/` 里出现的位置**恰好 3 处文件**：migration、两个 repo impl | 结构计数 |
+| ~~**G2**~~ | ~~列名 `drawing_default_style` 的出现处计数~~ **已删除** —— 见下方「为什么删掉 G2」 | —— |
 | **G3** | `replayBaseline` 的元组构造点**恰好 3 处**且**都包含 `defaultStyle`** | 结构计数 + 内容断言（防「加了字段但某处基线捕获忘了带」） |
 | **G4** | `TrainingView.showsTradeButtons` 的定义式仍为 `engine.flow.canBuySell()` | **内容断言** |
 | **G4b** | `TrainingView.stylePanelWillBeVisible` 的**整条定义式**仍为 `showsTradeButtons && isDrawingActive && typeRowExpanded` | **内容断言**（codex R2-medium：只钉 G4 会漏掉「改另外两项」这条路） |
@@ -486,9 +487,25 @@ T10 仍然保留，但它的作用**降级为**「`saveProgress` 确实会把默
 | **G7** | `decodeDrawingDefaultStyle` 在 `Sources/` 里**恰好 2 个调用点**，分别在两个 repo impl 文件内 | 结构计数（D100：少于 2 = 有一条读路径没接上；多于 2 = 出现第三条读路径，必须回来重审） |
 | **G6** | `TrainingView` 里存在一条 `.onChange(of: engine.drawingSession.defaultStyle)`，且其闭包体内调用 `lifecycle.autosave(immediate: true)` | **结构 + 内容断言**。这是 **D94 的唯一守门**（host 够不着视图，见 §6.1）；**M7 判绿看它，不看 T10** |
 
+**为什么删掉 G2**（codex spec-R6 medium，**已核实为真**）：
+
+G2 要数的 `drawing_default_style` 是**写在 Swift 字符串字面量里的 SQL 列名**，
+而下面那条纪律要求「结构计数**剥字符串字面量**后再匹配」——**剥完，G2 要找的证据就没了**。
+照字面实现 ⇒ 永远红；为它全局放宽剥离规则 ⇒ 所有守卫都变得**可被注释 / 无关字符串伪造**。
+**这是一条自我否定的守卫。**
+
+**它同时还是冗余的**：G2 想防的「只给一张表接上了列」，**T1 / T2（两张表各跑一遍的 DB 边界往返）
+是直接的行为证据**——列没进 `pending_replay` 的 `INSERT`，T2 当场失败；migration 漏了哪张表，T8 当场失败。
+**行为证据严格强于文本计数**，故按 CLAUDE.md §2 删掉 G2，而不是给它打一个 SQL-aware 的补丁
+（那要新写一个 Swift 字符串字面量解析器，且它自身又需要一套自测 —— 为一个已被覆盖的风险付双份成本）。
+
+⚠️ **其余守卫不受影响，已逐条核过**：G1 / G3 / G7 数的是 **Swift 标识符**，
+G4 / G4b / G6 断言的是 **Swift 表达式**，G5 数的是 **Swift 代码里的 `1...5`** ——
+**没有一条依赖字符串字面量里的内容**，剥离纪律对它们全部适用。
+
 **纪律**：结构计数一律**剥注释、剥字符串字面量**后再匹配；每个守卫配**双向自检**（该命中的必须命中、不该命中的必须不命中）；
 锚点失效必须**报错**不得静默返回 0（[[feedback_mechanical_checker_parser_disabled]]）。
-**G1–G3 / G4b / G4c / G5 / G6 / G7 在当前树上是红的**（G4b/G4c 依赖的谓词今天就存在，但守卫本身尚未写；G4 今天就是绿的），必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
+**G1 / G3 / G4b / G4c / G5 / G6 / G7 在当前树上是红的**（G4b/G4c 依赖的谓词今天就存在，但守卫本身尚未写；G4 今天就是绿的），必须与对应生产改动写在**同一个 task** 里（[[feedback_source_guard_must_be_green_on_current_tree]]）；
 **G4 今天就是绿的**，属回归守卫，可先落库。
 
 ---
@@ -576,9 +593,15 @@ P6 只需接**一件事**：把「**新开一局时的初始值**」从出厂值
 
 | **R5** | 同分支 @ `6599805`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**仅 1 medium**） | D99 的规则表让实施者复用 `normalizedLabelMode(current:lineSubType:)` —— 那是**水平线专用**重载；仓里另有 tool-aware 重载正是为防这个而存在。P1c 新工具照此实施，加载持久化默认会把合法的非水平 `labelMode` 静默改写成 `.hidden` | **全采纳，已核实为真**。`DrawingStyleAvailability.swift` 里 tool-aware 重载的头注**逐字**写着这个后果并把它归为「与 1b-ii 锁定 PR 的 `.segment` over-reject 同族」。⚠️ **这是我在同一个决策里自相矛盾**：D99 我亲手写了「保留 `toolType` 入参，写死 `.horizontal` 会在 P1c 变成静默错误规则」，转头在规则表里指定了水平线专用重载。改：规则表加「✅必须用 / ❌不得用 / 用错的后果」三列（两条规则各一行）；新增 **T15b**（`sanitized(for: .trend)` 不改写 labelMode，不变量锁）与 **M15b**（换回两参重载 → 只有 T15b 红）|
 
+| **R6** | 同分支 @ `d04d409`（整支 branch-diff，零 focus 窄化） | `needs-attention`（**0 high**） | **medium①**：T4 只测了 `colorToken` 的未来枚举值；`lineSubType`/`lineStyle`/`labelMode` 只有类型不匹配覆盖 ⇒ 实施者可以只给 `colorToken` 加 `try?`，`{"lineStyle":"dash5"}` 照样抛、照样 brick<br>**medium②**：**G2 与守卫纪律自相矛盾** —— 它要数的是**写在 Swift 字符串字面量里的 SQL 列名**，而同节纪律要求「剥字符串字面量后再匹配」；剥完证据就没了。照字面实现永远红，全局放宽则所有守卫可被伪造 | **两条全采纳**。①→ T4 扩成**四个枚举字段各一条 ×2 表**，加变异 **M4c**（只给 `colorToken` 留 `try?` → 只有另外三条红、`colorToken` 那条仍绿）。②→ **删除 G2**（而非打补丁）：它想防的「只接了一张表」已被 T1/T2/T8 的**行为证据**直接覆盖，**行为证据严格强于文本计数**；给它写 SQL-aware 解析器要付双份成本（解析器自身还需自测）。已逐条核过其余守卫：G1/G3/G7 数 Swift 标识符、G4/G4b/G6 断言 Swift 表达式、G5 数代码里的 `1...5` —— **无一依赖字符串字面量内容**，剥离纪律对它们全部适用 |
+
 **R1 的形状**：我把「可空列 + 附加式」当成了「所以不用 bump」，**跳过了去读治理文档那一步**——
 规则明文写着「影响 DDL → 必须 bump」，我一次都没查就下了结论。
 而「双向兼容」那句是同一个毛病的另一面：**只推演了对我的结论有利的那个方向（读）**。
+
+**R6 medium② 的形状**：**我写的守卫，被我自己在同一节写的守卫纪律否定了**。两条都对 —— 剥字面量是对的、要防漏接一张表也是对的 —— 但**放在一起就不可实现**。
+纪律沉淀：**每加一条守卫，当场用同节的匹配纪律走一遍**：剥完注释与字面量之后，**它要找的证据还在不在**？不在，就说明这条守卫要么换形态、要么本来就该由测试承担。
+⚠️ 更一般的：**「文本计数」和「行为测试」能覆盖同一个风险时，优先行为测试** —— 文本计数只在「行为测不到」（如 UIKit-gated 的 `.onChange`，见 G6）时才有不可替代性。
 
 **R5 的形状**：**函数签名 tool-aware，挡不住调用方传错重载**。我把「让 `sanitized` 带 `toolType` 参数」当成了「工具无关性已经解决」，却没检查**表里每一条规则各自调的是哪个重载** —— 参数传下去了，规则本身仍是水平线专用的。
 纪律沉淀：**「我加了个参数来表达 X」不等于「X 被遵守了」**；带变体/重载的 API，必须逐条判据写明**用哪一个重载、用错会怎样**，并各配一条只有它够得到的档。
