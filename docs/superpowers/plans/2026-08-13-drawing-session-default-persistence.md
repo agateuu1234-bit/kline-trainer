@@ -364,39 +364,88 @@ git commit -m "feat(contracts): PendingTraining/PendingReplay 加 drawingDefault
 
 ```swift
 // Migration0010Tests.swift
-import XCTest
-import GRDB
+import Testing
+import Foundation
+@preconcurrency import GRDB
 @testable import KlineTrainerPersistence
 @testable import KlineTrainerContracts
 
-final class Migration0010Tests: XCTestCase {
+@MainActor
+@Suite("migration 0010：升级路径 + 全新安装")
+struct Migration0010Tests {
 
-    /// T8：pre-0010 库跑完 migrator → **两张表都有**该列
-    func test_0010_adds_column_to_both_pending_tables() throws {
-        let url = try AppDBFixture.makeFreshDB()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let q = try AppDBFixture.openRaw(at: url)
-        for table in ["pending_training", "pending_replay"] {
-            let cols = try q.read { db in
-                try Row.fetchAll(db, sql: "PRAGMA table_info(\(table))").map { $0["name"] as String }
+    /// T8（**升级路径**，本组的重点）：构造一个「0001–0009 已应用」的真 pre-0010 库，
+    /// 种入既有行，再跑完整 migrator → 两张表都要长出新列，**且既有行必须活着**。
+    ///
+    /// ⚠️ **不能用 `makeFreshDB()`**（codex plan-P-R2 high）：那是从空库跑完整 migrator，
+    ///    证明的是**全新安装**。一个把列加到 baseline / 早期迁移里的实现，fresh 测试照样全绿，
+    ///    而**线上 v7 用户永远拿不到这一列** —— 迁移的全部意义就在升级路径。
+    ///    构造真 pre-0010 现场用 GRDB 的 `migrate(_:upTo:)`，**不要**手抄 9 个迁移体。
+    @Test func upgrade_from_v7_adds_column_to_both_tables_and_keeps_existing_rows() throws {
+        let queue = try DatabaseQueue()
+        let migrator = AppDBMigrations.makeMigrator()
+
+        // ① 停在 0009 —— 真 pre-0010 现场
+        try migrator.migrate(queue, upTo: "0009_v1.11_drawing_style")
+        #expect(try queue.read { try Int.fetchOne($0, sql: "PRAGMA user_version") } == 7)
+        for t in ["pending_training", "pending_replay"] {
+            let cols = try queue.read { db in
+                try Row.fetchAll(db, sql: "PRAGMA table_info(\(t))").map { $0["name"] as String }
             }
-            XCTAssertTrue(cols.contains("drawing_default_style"),
-                          "\(table) 缺少 drawing_default_style 列，实测列表：\(cols)")
+            #expect(!cols.contains("drawing_default_style"), "\(t) 在 0009 阶段就不该有新列")
+        }
+
+        // ② 种既有行（此时**没有**新列）—— 升级不得把它们弄丢
+        let fee = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+        let dd = DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0)
+        let p = try PendingTraining(
+            trainingSetFilename: "z.sqlite", globalTickIndex: 3,
+            upperPeriod: .m60, lowerPeriod: .daily, positionData: Data([7]),
+            cashBalance: 88_000, feeSnapshot: fee, tradeOperations: [], drawings: [],
+            startedAt: 123, accumulatedCapital: 100_000, drawdown: dd, sessionKey: "k")
+        let r = try PendingReplay(
+            recordId: 9, trainingSetFilename: "z.sqlite", globalTickIndex: 3,
+            upperPeriod: .m60, lowerPeriod: .daily, positionData: Data([7]),
+            cashBalance: 88_000, feeSnapshot: fee, tradeOperations: [], drawings: [],
+            startedAt: 123, accumulatedCapital: 100_000, drawdown: dd)
+        try queue.write { try PendingTrainingRepositoryImpl.savePending($0, pending: p) }
+        try queue.write { try PendingReplayRepositoryImpl.saveReplay($0, replay: r) }
+
+        // ③ 跑完整 migrator（只应跑 0010）
+        try migrator.migrate(queue)
+
+        #expect(try queue.read { try Int.fetchOne($0, sql: "PRAGMA user_version") } == 8)
+        for t in ["pending_training", "pending_replay"] {
+            let cols = try queue.read { db in
+                try Row.fetchAll(db, sql: "PRAGMA table_info(\(t))").map { $0["name"] as String }
+            }
+            #expect(cols.contains("drawing_default_style"), "\(t) 升级后仍缺 drawing_default_style，实测：\(cols)")
+        }
+        // 既有行必须活着，且新列为 NULL（旧档语义）
+        #expect(try queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM pending_training") } == 1)
+        #expect(try queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM pending_replay") } == 1)
+        #expect(try queue.read { try PendingTrainingRepositoryImpl.loadPending($0) }?.drawingDefaultStyle == nil)
+        #expect(try queue.read { try PendingReplayRepositoryImpl.loadReplay($0) }?.drawingDefaultStyle == nil)
+    }
+
+    /// T9（**全新安装**，与 T8 分开）：从空库跑完整 migrator → 终态 user_version = 8 且两表有列。
+    @Test func fresh_install_reaches_v8_with_column() throws {
+        let queue = try DatabaseQueue()
+        try AppDBMigrations.makeMigrator().migrate(queue)
+        #expect(try queue.read { try Int.fetchOne($0, sql: "PRAGMA user_version") } == 8)
+        for t in ["pending_training", "pending_replay"] {
+            let cols = try queue.read { db in
+                try Row.fetchAll(db, sql: "PRAGMA table_info(\(t))").map { $0["name"] as String }
+            }
+            #expect(cols.contains("drawing_default_style"), "\(t)")
         }
     }
-
-    /// T9：fresh install 跑完整 migrator → user_version 终态为 8
-    func test_fresh_install_user_version_is_8() throws {
-        let url = try AppDBFixture.makeFreshDB()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let q = try AppDBFixture.openRaw(at: url)
-        let v: Int = try q.read { try Int.fetchOne($0, sql: "PRAGMA user_version") ?? 0 }
-        XCTAssertEqual(v, 8)
-    }
-    // ⚠️ 本条与既有 `AppDB0005MigrationTests.test_fresh_install_full_migrator_user_version_7` 重叠。
-    //    **改那一条即可，本条可不新建** —— 保留在此只为说明 T9 的归属。实施时二选一，别留两份同义断言。
 }
 ```
+
+> ⚠️ `migrate(_:upTo:)` 的**确切拼写以 GRDB 6.29.3 为准**：若该重载不存在，
+> 退回本仓 `AppDB0005MigrationTests:102-121` 的「部分 migrator」范式（注册**与 `AppDBMigrations` 同 id 同体**的前序迁移）。
+> **两条路都可以，但绝不能退回 `makeFreshDB()`** —— 那就把升级路径的覆盖整个丢了。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -606,6 +655,55 @@ struct PendingDefaultStyleColumnTests {
         var table: String { self == .training ? "pending_training" : "pending_replay" }
     }
 
+    /// **真 repo 往返**（T1/T2）：构造带 `drawingDefaultStyle` 的对象 → `savePending`/`saveReplay`
+    /// → `loadPending`/`loadReplay`。**全程不碰 raw SQL**。
+    /// ⚠️ 这条必须与下面的 `seedRowThenReadStyle` **分开**（codex plan-P-R2 medium）：
+    ///    那个 helper 总是先 raw UPDATE 覆写该列，于是「往返」根本没测到 repo 的 INSERT ——
+    ///    把该列从 INSERT 里删掉（M2）也照样绿。**写路径必须由这条来守。**
+    private func saveThenLoad(_ slot: Slot, style: DrawingDefaultStyle?) throws -> DrawingDefaultStyle? {
+        let queue = try DatabaseQueue()
+        try AppDBMigrations.makeMigrator().migrate(queue)
+        let fee = FeeSnapshot(commissionRate: 0.0001, minCommissionEnabled: true)
+        let dd = DrawdownAccumulator(peakCapital: 100_000, maxDrawdown: 0)
+        switch slot {
+        case .training:
+            let p = try PendingTraining(
+                trainingSetFilename: "z.sqlite", globalTickIndex: 3,
+                upperPeriod: .m60, lowerPeriod: .daily, positionData: Data([7]),
+                cashBalance: 88_000, feeSnapshot: fee, tradeOperations: [], drawings: [],
+                startedAt: 123, accumulatedCapital: 100_000, drawdown: dd, sessionKey: "k",
+                drawingDefaultStyle: style)
+            try queue.write { try PendingTrainingRepositoryImpl.savePending($0, pending: p) }
+            return try queue.read { try PendingTrainingRepositoryImpl.loadPending($0) }?.drawingDefaultStyle
+        case .replay:
+            let p = try PendingReplay(
+                recordId: 9, trainingSetFilename: "z.sqlite", globalTickIndex: 3,
+                upperPeriod: .m60, lowerPeriod: .daily, positionData: Data([7]),
+                cashBalance: 88_000, feeSnapshot: fee, tradeOperations: [], drawings: [],
+                startedAt: 123, accumulatedCapital: 100_000, drawdown: dd,
+                drawingDefaultStyle: style)
+            try queue.write { try PendingReplayRepositoryImpl.saveReplay($0, replay: p) }
+            return try queue.read { try PendingReplayRepositoryImpl.loadReplay($0) }?.drawingDefaultStyle
+        }
+    }
+
+    /// T1/T2 正向档：**经真写入路径**往返，逐字段相等
+    @Test func repo_roundtrip_preserves_all_five_fields() throws {
+        for slot in Slot.allCases {
+            var s = DrawingDefaultStyle()
+            s.lineSubType = .ray; s.lineStyle = .dash3; s.thickness = 4
+            s.colorToken = .cyan; s.labelMode = .right
+            #expect(try saveThenLoad(slot, style: s) == s, "\(slot.table) 往返丢字段")
+        }
+    }
+
+    /// T3：模型里就是 nil（旧档 / 从未改过）→ 写进去是 NULL、读回来是 nil，其余字段照常
+    @Test func repo_roundtrip_nil_style_stays_nil() throws {
+        for slot in Slot.allCases {
+            #expect(try saveThenLoad(slot, style: nil) == nil, "\(slot.table)")
+        }
+    }
+
     /// 三步：存一行 → raw SQL 把该列覆写成 `raw` → 走**真 repo 的 load 路径**读回。
     /// ⚠️ 必须经 repo 的 load，不得直接调 `DrawingDefaultStyleColumn.decode` ——
     ///    那样就测不到「repo 到底有没有接上这个函数」（M2/M3/M15 全靠这一点才有判别力）。
@@ -645,20 +743,8 @@ struct PendingDefaultStyleColumnTests {
         }
     }
 
-    /// T1/T2 正向档：健康值往返，逐字段相等
-    @Test func roundtrip_preserves_all_five_fields() throws {
-        for slot in Slot.allCases {
-            var s = DrawingDefaultStyle()
-            s.lineSubType = .ray; s.lineStyle = .dash3; s.thickness = 4
-            s.colorToken = .cyan; s.labelMode = .right
-            let raw = DrawingDefaultStyleColumn.encode(s)
-            let back = try seedRowThenReadStyle(slot, column: raw)
-            #expect(back == .some(s), "\(slot.table) 往返丢字段")
-        }
-    }
-
-    /// T3：列为 NULL（旧档）→ nil，其余字段照常，不抛
-    @Test func null_column_yields_nil_and_row_still_loads() throws {
+    /// T3b：列被外部置为 NULL（raw 路径）→ 仍读作 nil、不抛
+    @Test func raw_null_column_reads_as_nil() throws {
         for slot in Slot.allCases {
             #expect(try seedRowThenReadStyle(slot, column: nil) == .some(nil), "\(slot.table)")
         }
@@ -805,7 +891,7 @@ G7：`DrawingDefaultStyleColumn.decode` 在 `Sources/` 里**恰好 2 个调用�
 
 | 变异 | 改法 | 只应变红 |
 |---|---|---|
-| M2 | INSERT 里去掉该列 | 两张表的往返档 |
+| M2 | INSERT 里去掉该列 | **`repo_roundtrip_preserves_all_five_fields`**（走真写入路径那条）。⚠️ **不是** `seedRowThenReadStyle` 系列 —— 那些 helper 自己会 raw UPDATE 写该列，对写路径**零判别力**（codex plan-P-R2 medium） |
 | M3 | `decode` 恒返回 nil | 往返档 |
 | M4 | `decode` 换成 `JSONDecoder().decode(DrawingDefaultStyle.self, …)` | T4 / T5 / T5b |
 | M4b | 每个字段的 `as?` 换成强制解包 | T5b |
