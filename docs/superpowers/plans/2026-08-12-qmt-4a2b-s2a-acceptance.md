@@ -42,6 +42,13 @@ export DSN2="postgresql://postgres:$(docker inspect qmt-pg-r8b --format '{{range
 ```
 export QMT_VERIFY_ALLOW_DESTRUCTIVE=1
 ```
+```
+export PY="/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python"
+```
+
+> ⚠️ **venv 在主仓，worktree 里没有** —— 在 worktree 里敲 `.venv/bin/python` 会得到
+> `zsh: no such file or directory`。故本清单一律用上面这个 `$PY`，
+> 且**必须带引号**（路径里有空格）。先 `"$PY" -V` 确认打印 `Python 3.11.15`。
 
 > ⚠️ `QMT_VERIFY_ALLOW_DESTRUCTIVE=1` **每次运行都要**。它是操作者对「这台集群整个可以被
 > 毁掉」的明示；不带就直接退出码 3、一档都不跑。DSN 指向的**不是**本机时**另外**还要
@@ -56,13 +63,13 @@ export QMT_VERIFY_ALLOW_DESTRUCTIVE=1
 
 | # | 动作 | 期望看到 | 通过? |
 |---|---|---|---|
-| 1 | `.venv/bin/python -m pytest backend/tests -q`（在 worktree 根目录跑）| 末行 `727 passed`，**0 failed / 0 error / 0 skipped** | |
+| 1 | `"$PY" -m pytest backend/tests -q`（在 worktree 根目录跑）| 末行 `727 passed`，**0 failed / 0 error / 0 skipped** | |
 | 2 | 整行贴进终端：<br>`grep -rn "def authorize_reset\|class ResetAuthorization\|_mint_authorization\|_MINTED_AUTHORIZATIONS\|_RESET_CAPABILITY\|class ResetGateOutcome" backend/ --include='*.py' \| grep -v "^backend/tests/"` | **一行输出都没有**（测试文件里那些是守卫的名单与历史注释，已被后半段过滤掉）| |
 | 3 | `grep -n "DROP DATABASE" backend/qmt_pilot_db.py` | 会打印十几行。逐行看：**每一行要么以 `#` 开头、要么在三引号说明文字里、要么在 `f"…"` 报错串里**；**没有一行长成 `await …execute("DROP DATABASE …")` 这种真的在发 SQL 的样子** —— 本片零破坏性能力 | |
-| 4 | `.venv/bin/python backend/scripts/verify_pilot_db_lifecycle.py` | 末尾 `✅ 34 档断言全部成立（真 PostgreSQL）`；整篇**没有** `FAIL` 也没有 `❌` | |
+| 4 | `"$PY" backend/scripts/verify_pilot_db_lifecycle.py` | 末尾 `✅ 34 档断言全部成立（真 PostgreSQL）`；整篇**没有** `FAIL` 也没有 `❌` | |
 | 5 | 把第 4 条**再跑两遍**，比较三次的末行 | 三次**完全一样**（都是 `✅ 34 档`）。这一条专查「间歇性假拒」那类 flake，跑一遍绿不算数 | |
-| 6 | `.venv/bin/python backend/scripts/verify_pilot_two_phase_create.py` | 末行 `✅ 28 档断言全部成立（真 PostgreSQL）` | |
-| 7 | `.venv/bin/python backend/scripts/verify_pilot_concurrency.py` | 末行 `✅ 7 档断言全部成立（真 PostgreSQL）` | |
+| 6 | `"$PY" backend/scripts/verify_pilot_two_phase_create.py` | 末行 `✅ 28 档断言全部成立（真 PostgreSQL）` | |
+| 7 | `"$PY" backend/scripts/verify_pilot_concurrency.py` | 末行 `✅ 7 档断言全部成立（真 PostgreSQL）` | |
 | 8 | 看第 4 条输出的**最后十几行** | 必须能看到三段⚠️：①本片只验到「闸/例外判得对不对」，**不验 DROP 真的执行得下去**；②spec §4 那条有向序列本片**没有任何东西机器强制**；③`--init-cluster-marker` 随 S3 补回。**看不到这三段就判不通过** —— 一份不肯说自己没验什么的报告，比没有报告更危险 | |
 | 9 | `unset QMT_VERIFY_ALLOW_DESTRUCTIVE`，再跑一次第 4 条，然后 `echo "EXIT=$?"` | `EXIT=3`，且**一个 PASS 行都看不到**（证明破坏性闸不是摆设）。看完记得把它重新 `export` 回来 | |
 
