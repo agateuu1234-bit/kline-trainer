@@ -486,9 +486,11 @@ struct Migration0010Tests {
 }
 ```
 
-> ⚠️ `migrate(_:upTo:)` 的**确切拼写以 GRDB 6.29.3 为准**：若该重载不存在，
-> 退回本仓 `AppDB0005MigrationTests:102-121` 的「部分 migrator」范式（注册**与 `AppDBMigrations` 同 id 同体**的前序迁移）。
-> **两条路都可以，但绝不能退回 `makeFreshDB()`** —— 那就把升级路径的覆盖整个丢了。
+> ✅ **`migrate(_:upTo:)` 已实测存在**：`ios/Contracts/.build/checkouts/GRDB.swift/GRDB/Migration/DatabaseMigrator.swift:252`
+> `public func migrate(_ writer: some DatabaseWriter, upTo targetIdentifier: String) throws`
+> —— 本仓 vendored 的就是这份，签名逐字可用，**不必再找替代路子**。
+> （备用范式仍记录在此：`AppDB0005MigrationTests:102-121` 的「部分 migrator」写法，注册**与 `AppDBMigrations` 同 id 同体**的前序迁移。
+> **两条路都可以，但绝不能退回 `makeFreshDB()`** —— 那就把升级路径的覆盖整个丢了。）
 
 - [ ] **Step 2: 跑测试确认失败**
 
