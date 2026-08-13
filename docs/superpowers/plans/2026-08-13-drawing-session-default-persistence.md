@@ -31,6 +31,12 @@
 
   2. **变异前的 `cp` 备份必须覆盖变异表里出现的每一个文件**（不只是"主"文件）；
   3. **`--filter` 必须覆盖该 task 改动过的每一个测试文件**。
+- ⭐ **所有闸门命令一律从 `$(git rev-parse --show-toplevel)` 派生路径，禁止写死绝对路径**
+  （codex plan-P-R5 medium③）：本片在 worktree `.dev/worktree/drawing-default-persist` 里干活，
+  写死主仓绝对路径会让 **drift 闸 / backend pytest / Catalyst 去校验另一个 checkout** ——
+  分支明明是坏的却全绿，正是最危险的那种假绿。
+- ⭐ **每条闸门命令同时打印 branch / HEAD**，判绿前先确认对象是本分支
+  （`git rev-parse --abbrev-ref HEAD && git rev-parse --short HEAD`）。
 - ⭐ **每个 task 收尾必须 `git status --short` 确认工作区干净**（输出为空）。
   非空 = 有改动没被 commit（脏树假绿）或变异没复原干净 —— **两者都必须当场查清再继续**。
 
@@ -118,7 +124,7 @@ struct DrawingDefaultStyleSanitizeTests {
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
-cd "ios/Contracts" && swift test --filter DrawingDefaultStyleSanitizeTests 2>&1 | tail -20
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter DrawingDefaultStyleSanitizeTests 2>&1 | tail -20
 ```
 Expected: 编译失败，`value of type 'DrawingDefaultStyle' has no member 'sanitized'`
 
@@ -155,7 +161,7 @@ public extension DrawingDefaultStyle {
 - [ ] **Step 4: 跑测试确认通过**
 
 ```bash
-cd "ios/Contracts" && swift test --filter DrawingDefaultStyleSanitizeTests 2>&1 | tail -5
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter DrawingDefaultStyleSanitizeTests 2>&1 | tail -5
 ```
 Expected: `5 tests passed`
 
@@ -235,7 +241,7 @@ cp ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingObjectStyleEdit.sw
 - [ ] **Step 8: 跑 host 全量 + 提交**
 
 ```bash
-cd "ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 # 与本 task 的 Files 段逐一对应（三个消费者 + 定义 + 两个测试文件）
 git add ios/Contracts/Sources/KlineTrainerContracts/Models/DrawingEnums.swift \
         ios/Contracts/Sources/KlineTrainerContracts/UI/DrawingStyleParams.swift \
@@ -296,8 +302,11 @@ struct PendingCodableDefaultStyleTests {
         #expect(back.drawingDefaultStyle == s)
     }
 
-    /// T18：旧载荷（无该 key）→ 解码成功且为 nil，其余字段照常
-    @Test func old_payload_without_key_decodes_to_nil() throws {
+    /// T18：旧载荷（无该 key）→ 解码成功且为 nil，其余字段照常。**两个模型各一条**。
+    /// ⚠️ `PendingTraining` 与 `PendingReplay` 各有**自己的**显式 `init(from:)`
+    ///    ⇒ 只测一个，另一个可以照样写成 `decode` 而把旧 replay 载荷 brick 掉
+    ///    （codex plan-P-R5 medium②；与 D100「N 条独立路径就要 N 份测试」同一条纪律）。
+    @Test func old_pendingTraining_payload_without_key_decodes_to_nil() throws {
         let p = try PendingTrainingFixture.make(drawingDefaultStyle: nil)
         var obj = try JSONSerialization.jsonObject(
             with: try JSONEncoder().encode(p)) as! [String: Any]
@@ -306,6 +315,17 @@ struct PendingCodableDefaultStyleTests {
         let back = try JSONDecoder().decode(PendingTraining.self, from: data)
         #expect(back.drawingDefaultStyle == nil)
         #expect(back.globalTickIndex == p.globalTickIndex)   // 其余字段未受影响
+    }
+
+    @Test func old_pendingReplay_payload_without_key_decodes_to_nil() throws {
+        let p = try PendingReplayFixture.make(drawingDefaultStyle: nil)
+        var obj = try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(p)) as! [String: Any]
+        obj.removeValue(forKey: "drawingDefaultStyle")
+        let data = try JSONSerialization.data(withJSONObject: obj)
+        let back = try JSONDecoder().decode(PendingReplay.self, from: data)
+        #expect(back.drawingDefaultStyle == nil)
+        #expect(back.recordId == p.recordId)                 // 其余字段未受影响
     }
 }
 ```
@@ -317,7 +337,7 @@ struct PendingCodableDefaultStyleTests {
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
-cd "ios/Contracts" && swift test --filter PendingCodableDefaultStyleTests 2>&1 | tail -20
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter PendingCodableDefaultStyleTests 2>&1 | tail -20
 ```
 Expected: 编译失败，`extra argument 'drawingDefaultStyle' in call`
 
@@ -375,8 +395,8 @@ public struct DrawingDefaultStyle: Codable, Equatable, Sendable {
 - [ ] **Step 6: 跑测试确认通过 + 全量**
 
 ```bash
-cd "ios/Contracts" && swift test --filter PendingCodableDefaultStyleTests 2>&1 | tail -5
-cd "ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter PendingCodableDefaultStyleTests 2>&1 | tail -5
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 ```
 Expected: 3 tests passed；全量 ≥ 1831 + 新增条数
 
@@ -392,8 +412,10 @@ cp ios/Contracts/Sources/KlineTrainerContracts/AppState.swift /tmp/AppState.swif
 
 | 变异 | 改法 | 只应变红 |
 |---|---|---|
-| M16 | 删掉 `PendingTraining.encode(to:)` 的 `encodeIfPresent` | `pendingTraining_codable_roundtrip_preserves_style` |
-| M16b | `init(from:)` 的 `decodeIfPresent` 改 `decode` | `old_payload_without_key_decodes_to_nil` |
+| M16 | 删掉 **`PendingTraining`** `encode(to:)` 的 `encodeIfPresent` | **只有** `pendingTraining_codable_roundtrip_preserves_style` |
+| **M16c** | 删掉 **`PendingReplay`** `encode(to:)` 的 `encodeIfPresent` | **只有** `pendingReplay_codable_roundtrip_preserves_style` —— 两个模型各有自己的 Codable，必须各配一条 |
+| M16b | **`PendingTraining`** `init(from:)` 的 `decodeIfPresent` 改 `decode` | **只有** `old_pendingTraining_payload_without_key_decodes_to_nil` |
+| **M16d** | **`PendingReplay`** `init(from:)` 的 `decodeIfPresent` 改 `decode` | **只有** `old_pendingReplay_payload_without_key_decodes_to_nil`（codex plan-P-R5 medium②：只测一个模型时这条抓不到） |
 
 - [ ] **Step 8: 提交**
 
@@ -456,13 +478,16 @@ struct Migration0010Tests {
         }
 
         // ② 用 **0009 时代的列清单** raw SQL 种既有行（此时无新列）
+        // ⚠️ `upper_period` 必须写 **'60m'**（`Period.m60` 的 rawValue，`Models.swift:14`），
+        //    写成 'm60' 会让 `Period(rawValue:)` 返 nil → load 抛 `.dbCorrupted`
+        //    ⇒ 升级测试因**坏 fixture** 而红，而不是因为迁移有问题（false red，codex plan-P-R5 medium①）。
         try queue.write { db in
             try db.execute(sql: """
                 INSERT INTO pending_training
                   (id, training_set_filename, global_tick_index, upper_period, lower_period,
                    position_data, fee_snapshot, trade_operations, drawings,
                    started_at, accumulated_capital, cash_balance, drawdown, session_key)
-                VALUES (1, 'z.sqlite', 3, 'm60', 'daily', 'BwA=',
+                VALUES (1, 'z.sqlite', 3, '60m', 'daily', 'BwA=',
                         '{"commissionRate":0.0001,"minCommissionEnabled":true}', '[]', '[]',
                         123, 100000.0, 88000.0,
                         '{"peakCapital":100000,"maxDrawdown":0}', 'k')
@@ -472,7 +497,7 @@ struct Migration0010Tests {
                   (id, record_id, training_set_filename, global_tick_index, upper_period, lower_period,
                    position_data, fee_snapshot, trade_operations, drawings,
                    started_at, accumulated_capital, cash_balance, drawdown)
-                VALUES (1, 9, 'z.sqlite', 3, 'm60', 'daily', 'BwA=',
+                VALUES (1, 9, 'z.sqlite', 3, '60m', 'daily', 'BwA=',
                         '{"commissionRate":0.0001,"minCommissionEnabled":true}', '[]', '[]',
                         123, 100000.0, 88000.0,
                         '{"peakCapital":100000,"maxDrawdown":0}')
@@ -520,7 +545,7 @@ struct Migration0010Tests {
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
-cd "ios/Contracts" && swift test --filter Migration0010Tests 2>&1 | tail -20
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter Migration0010Tests 2>&1 | tail -20
 ```
 Expected: 两条都 FAIL（缺列 / user_version 仍为 7）
 
@@ -562,8 +587,8 @@ Expected: **无输出**（所有终态断言已迁到 8；`2` / `4` 两处不在
 - [ ] **Step 5: 跑测试确认通过 + drift 闸门**
 
 ```bash
-cd "ios/Contracts" && swift test --filter "Migration0010Tests|AppDB0005MigrationTests|ReviewArchiveMigrationTests|PendingReplayPersistenceTests" 2>&1 | tail -5
-cd "/Users/maziming/Coding/Prj_Kline trainer" && bash scripts/check_app_schema_drift.sh
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter "Migration0010Tests|AppDB0005MigrationTests|ReviewArchiveMigrationTests|PendingReplayPersistenceTests" 2>&1 | tail -5
+cd "$(git rev-parse --show-toplevel)" && bash scripts/check_app_schema_drift.sh
 ```
 Expected: 测试全过；drift 脚本输出 `OK: AppDBMigrations.swift schema 与 ios/sql/app_schema_v1.sql 一致`
 
@@ -648,7 +673,7 @@ final class M01MatrixSyncGuardTests: XCTestCase {
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
-cd "ios/Contracts" && swift test --filter M01MatrixSyncGuardTests 2>&1 | tail -10
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter M01MatrixSyncGuardTests 2>&1 | tail -10
 ```
 Expected: `test_m01_matrix_three_rows_are_in_sync` FAIL（三条断言均未满足）
 
@@ -677,8 +702,8 @@ CONTRACT_VERSION = "1.13"
 - [ ] **Step 6: 跑三处闸门确认通过**
 
 ```bash
-cd "ios/Contracts" && swift test --filter "M01MatrixSyncGuardTests|ModelsTests" 2>&1 | tail -5
-cd "/Users/maziming/Coding/Prj_Kline trainer/backend" && python3 -m pytest tests/test_qmt_pilot_db.py -k contract_version -q 2>&1 | tail -5
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter "M01MatrixSyncGuardTests|ModelsTests" 2>&1 | tail -5
+cd "$(git rev-parse --show-toplevel)/backend" && python3 -m pytest tests/test_qmt_pilot_db.py -k contract_version -q 2>&1 | tail -5
 ```
 Expected: Swift 全过；backend 跨语言断言 **自动变绿**（它动态读 Swift 文件，两边同步即过）
 
@@ -912,7 +937,7 @@ struct PendingDefaultStyleColumnTests {
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
-cd "ios/Contracts" && swift test --filter PendingDefaultStyleColumnTests 2>&1 | tail -20
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter PendingDefaultStyleColumnTests 2>&1 | tail -20
 ```
 Expected: 编译失败（`DrawingDefaultStyleColumn` 不存在）
 
@@ -975,8 +1000,8 @@ enum DrawingDefaultStyleColumn {
 - [ ] **Step 5: 跑测试确认通过 + 全量**
 
 ```bash
-cd "ios/Contracts" && swift test --filter PendingDefaultStyleColumnTests 2>&1 | tail -5
-cd "ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter PendingDefaultStyleColumnTests 2>&1 | tail -5
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 ```
 
 - [ ] **Step 6: 守卫 G7 + 变异（M2 / M3 / M4 / M4b / M4c / M15）**
@@ -1138,7 +1163,7 @@ struct CoordinatorDefaultStylePersistTests {
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
-cd "ios/Contracts" && swift test --filter CoordinatorDefaultStylePersistTests 2>&1 | tail -20
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter CoordinatorDefaultStylePersistTests 2>&1 | tail -20
 ```
 
 - [ ] **Step 3: 两处写入**
@@ -1177,8 +1202,8 @@ cd "ios/Contracts" && swift test --filter CoordinatorDefaultStylePersistTests 2>
 - [ ] **Step 6: 跑测试 + 全量**
 
 ```bash
-cd "ios/Contracts" && swift test --filter CoordinatorDefaultStylePersistTests 2>&1 | tail -5
-cd "ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter CoordinatorDefaultStylePersistTests 2>&1 | tail -5
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)
 ```
 
 - [ ] **Step 7: 守卫 G1 / G3 + 变异（M7 部分 / M8 / M9 / M10 / M11）**
@@ -1312,7 +1337,7 @@ private func definitionRHS(of name: String, in src: String) throws -> String {
 - [ ] **Step 2: 跑守卫确认失败**
 
 ```bash
-cd "ios/Contracts" && swift test --filter DrawingInteractionUISourceGuardTests 2>&1 | tail -10
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter DrawingInteractionUISourceGuardTests 2>&1 | tail -10
 ```
 Expected: `training_view_wires_default_style_autosave_trigger` FAIL
 
@@ -1330,8 +1355,8 @@ Expected: `training_view_wires_default_style_autosave_trigger` FAIL
 - [ ] **Step 4: 跑守卫 + Catalyst 门**
 
 ```bash
-cd "ios/Contracts" && swift test --filter DrawingInteractionUISourceGuardTests 2>&1 | tail -5
-cd "/Users/maziming/Coding/Prj_Kline trainer" && (set -o pipefail; xcodebuild test \
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && swift test --filter DrawingInteractionUISourceGuardTests 2>&1 | tail -5
+cd "$(git rev-parse --show-toplevel)" && (set -o pipefail; xcodebuild test \
   -scheme KlineTrainerContracts-Package -destination 'platform=macOS,variant=Mac Catalyst' \
   2>&1 | tee /tmp/catalyst.log | tail -5)
 grep -c "Test Case .* passed" /tmp/catalyst.log    # 判绿读执行量，不读 TEST SUCCEEDED
@@ -1375,9 +1400,9 @@ git status --short          # 必须为空（非空 = 脏树假绿或变异没�
 - [ ] **Step 2: 三门齐跑并记录数字**
 
 ```bash
-cd "ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)                       # host
-cd "/Users/maziming/Coding/Prj_Kline trainer" && bash scripts/check_app_schema_drift.sh   # drift
-cd backend && python3 -m pytest tests/test_qmt_pilot_db.py -q 2>&1 | tail -3              # backend
+cd "$(git rev-parse --show-toplevel)/ios/Contracts" && (set -o pipefail; swift test 2>&1 | tail -3)                       # host
+cd "$(git rev-parse --show-toplevel)" && bash scripts/check_app_schema_drift.sh   # drift
+cd "$(git rev-parse --show-toplevel)/backend" && python3 -m pytest tests/test_qmt_pilot_db.py -q 2>&1 | tail -3              # backend
 ```
 
 - [ ] **Step 3: 交付前检查单**
