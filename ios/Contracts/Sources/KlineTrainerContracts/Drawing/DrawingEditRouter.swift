@@ -222,4 +222,40 @@ enum DrawingEditRouter {
         guard canDelete(engine: engine) else { return false }
         return engine.deleteDrawing(id: id)
     }
+
+    // MARK: 锁定（1b-ii PR-1，D71）—— 形状镜像上面的删除三件套
+
+    /// 「锁定可用」的**非几何分量**。
+    /// ⚠️ 与 `deletableIgnoringGeometry` 只差一处：**没有** `!d.locked` 分量。
+    /// 这不是笔误 —— 锁定线**必须仍能被选中并解锁**（spec §7.1 逐字），带上那道门就永远解不开。
+    private static func lockableIgnoringGeometry(engine: TrainingEngine) -> Bool {
+        guard engine.flow.mode != .review else { return false }
+        guard let d = uniqueSelected(engine: engine) else { return false }
+        return idIsGloballyUnique(engine: engine, id: d.id)
+    }
+
+    /// **路由用**（唯一的门）：几何现算。
+    static func canToggleLock(engine: TrainingEngine) -> Bool {
+        lockableIgnoringGeometry(engine: engine) && selectionGeometryVisible(engine: engine)
+    }
+
+    /// **UI 用**：🔒 是否可用。几何读 observable 提示（理由同 `deleteButtonEnabled`）。
+    static func lockButtonEnabled(engine: TrainingEngine) -> Bool {
+        lockableIgnoringGeometry(engine: engine) && engine.drawingSession.selectionGeometryVisible
+    }
+
+    /// **UI 用**：🔒 图标该显示闭锁还是开锁 —— 只反映选中线的 `locked`，无选中取开锁（中性态）。
+    static func lockIsOn(engine: TrainingEngine) -> Bool {
+        uniqueSelected(engine: engine)?.locked ?? false
+    }
+
+    /// 切换选中线的锁定态。`setDrawingLocked` 在 `Sources/` 里的**唯一**调用点。
+    @discardableResult
+    static func toggleLockSelected(engine: TrainingEngine) -> Bool {
+        defer { syncSelectionByState(engine: engine) }
+        guard let id = engine.drawingSession.selectedDrawingID,
+              let current = uniqueSelected(engine: engine) else { return false }
+        guard canToggleLock(engine: engine) else { return false }
+        return engine.setDrawingLocked(id: id, locked: !current.locked)
+    }
 }

@@ -72,3 +72,14 @@ func expectDrawingsUnchanged(_ e: TrainingEngine, _ before: [DrawingObject], rev
     #expect(e.drawings.map(\.id) == before.map(\.id), "id 序列被改写了", sourceLocation: sourceLocation)
     #expect(e.drawingsRevision == revisionBefore, "拒绝路径不得递增 revision", sourceLocation: sourceLocation)
 }
+
+/// 一条默认样式的水平线（period 固定 .m3，与 TrainingEngine.preview() 的上面板一致）。
+func makeHorizontalDrawing(id: String, price: Double = 10.0, locked: Bool = false) -> DrawingObject {
+    DrawingObject(
+        id: id, toolType: .horizontal,
+        anchors: [DrawingAnchor(period: .m3, candleIndex: 1, price: price)],
+        isExtended: false, panelPosition: 0, revealTick: 0, period: .m3,
+        lineSubType: .straight, lineStyle: .solid, thickness: 1, colorToken: .orange,
+        labelMode: .hidden, locked: locked, text: "", fontSize: 14,
+        textColorToken: .orange, textForm: .plain, tailAnchor: nil)
+}

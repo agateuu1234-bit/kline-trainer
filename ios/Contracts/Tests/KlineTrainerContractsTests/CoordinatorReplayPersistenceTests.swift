@@ -241,6 +241,35 @@ struct CoordinatorReplayPersistenceTests {
         #expect(e2?.flow.mode == .replay)
     }
 
+    /// L13b（N-F 主证据）：训练局里**只锁定一条线**（不推 tick / 不交易 / 不增删）
+    /// → 走真实 saveProgress → endSession → 重新载入后仍是锁定态。
+    @Test func lockOnlyChange_persistsAcrossSaveAndReload() async throws {
+        let h = try CoordinatorTestHarness.make()
+        let e1 = try await h.coordinator.replay(recordId: h.seededRecordId)
+        // fresh replay 不带任何已有线（见 D30②）→ 必须先画一条、存盘、续局，才有线可锁
+        #expect(e1.appendDrawing(makeHorizontalDrawing(id: "K1")))
+        try await h.coordinator.saveProgress(engine: e1)
+        await h.coordinator.endSession()
+
+        let e2 = try #require(try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId))
+        #expect(e2.drawings.first(where: { $0.id == "K1" })?.locked == false)
+        let rev = e2.drawingsRevision
+        // ★ 本局**唯一**的改动就是锁定（split addendum §7.3 #3 / 验收 #8 的等价自动化）
+        #expect(e2.setDrawingLocked(id: "K1", locked: true) == true)
+        #expect(e2.drawingsRevision == rev + 1)        // 严格 +1 —— autosave 的触发信号
+        try await h.coordinator.saveProgress(engine: e2)
+        await h.coordinator.endSession()
+
+        let e3 = try #require(try await h.coordinator.resumePendingReplay(recordId: h.seededRecordId))
+        // ⚠️ 整支终审④：文案原先指向 clean-skip，但 resumePendingReplay（TrainingSessionCoordinator.swift:945）
+        //    早已把 replayHasPersisted 置 true，:614 的 clean-skip 判据在这条路径上永不求值——本测试根本
+        //    走不到那条分支。它真正覆盖的是 setDrawingLocked → 有损归并（reconciled）→ DB（saveReplay/
+        //    loadReplay）→ decode 的全链路往返。clean-skip 对 locked 的敏感性由
+        //    DrawingSignatureTests.lockedIsPartOfDrawingsSignature 单独覆盖，不是本测试。
+        #expect(e3.drawings.first(where: { $0.id == "K1" })?.locked == true,
+                "只锁定、别的什么都没改 → setDrawingLocked→有损归并→DB→decode 全链路往返丢了 locked")
+    }
+
     @Test func resumePendingReplay_recordIdMismatch_returnsNil_noClear() async throws {
         let h = try CoordinatorTestHarness.make()
         let e1 = try await h.coordinator.replay(recordId: h.seededRecordId)

@@ -947,6 +947,84 @@ struct TrainingEngineDrawingSessionTests {
         try expectIdentifierNeverVended("updateDrawingStyle", inFiles: mentions)
     }
 
+    // MARK: 1b-ii PR-1 Task 4（D71）：setDrawingLocked 信任边界三层守卫 + locked/drawings 写入面守卫
+
+    @Test("L11: setDrawingLocked 非 public + Sources/ 中恰好 1 处调用（路由在调用前先验几何）")
+    @MainActor func setDrawingLockedTrustBoundary() throws {
+        // 第一层：存在 + 非 public/package/open（含 public extension，D69 约束 3）
+        try expectEngineInternalOnly("setDrawingLocked(id:")
+
+        // 第二层：`Sources/` 里恰好 1 处调用，且在那条已先验几何的 UI 路由里
+        let sites = try callSiteCount("setDrawingLocked(")
+        #expect(sites.count == 1, "setDrawingLocked 的调用文件数应为 1，实际：\(sites)")
+        #expect(sites.first?.count == 1, "同一文件内也只许 1 处，实际：\(sites)")
+        #expect(sites.first?.file.hasSuffix("/Drawing/DrawingEditRouter.swift") == true,
+                "唯一调用点必须是 UI 编辑路由，实际：\(sites)")
+
+        // ⚠️ 整支终审③：这条只证「几何判据的字面文本排在调用字面之前」——`code.range(of:)` 取的是**首次**
+        //    出现，而 `HorizontalLineTool.visibleGeometry(` 首次出现在文件最前面的 `selectionGeometryVisible`
+        //    里，与 `toggleLockSelected` 自己有没有验几何**无关**（删掉 `toggleLockSelected` 里的
+        //    `guard canToggleLock(engine: engine)` 这条断言照样绿）。它对「文件里存在几何判据」这件事
+        //    仍有意义，故保留；但「唯一那处若不验几何同样失守」这句不准——那道更强的保证由下面
+        //    `toggleLockRouteRecomputesGeometryItself` 承担（逐字断言 `guard canToggleLock(engine: engine)`
+        //    确实出现在 `toggleLockSelected` 体内）。
+        let router = contractsDirForGuards
+            .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path
+        let code = try squeezedSource(router)
+        let geoIdx = try #require(code.range(of: squeeze("HorizontalLineTool.visibleGeometry("))).lowerBound
+        let callIdx = try #require(code.range(of: squeeze("engine.setDrawingLocked("))).lowerBound
+        #expect(geoIdx < callIdx, "几何判据必须排在 setDrawingLocked 调用之前")
+
+        // 第三层：方法引用（`let f = engine.setDrawingLocked`）不出现调用 pattern，只数调用会放过它
+        let mentions = try filesMentioning("setDrawingLocked")
+        #expect(!mentions.isEmpty, "扫描器返回空 —— 守卫已失效")
+        #expect(mentions.allSatisfy {
+            $0.hasSuffix("/TrainingEngine/TrainingEngine.swift")
+                || $0.hasSuffix("/Drawing/DrawingEditRouter.swift")
+        }, "setDrawingLocked 被引擎与唯一路由以外的文件提到（含方法引用）：\(mentions)")
+        try expectIdentifierNeverVended("setDrawingLocked", inFiles: mentions)
+    }
+
+    /// N-B 第 1 条（spec §1.6）：`TrainingEngine.swift` 里**语义性** locked 写入恰好 1 处。
+    /// 拷贝直传（`locked: locked` / `old.locked` / `d.locked` / `drawing.locked`）不算。
+    @Test("L12: TrainingEngine 里非拷贝直传的 locked 写入恰好 1 处（在 setDrawingLocked 里）")
+    @MainActor func semanticLockedWriteIsSingleSite() throws {
+        let code = try squeezedSource(trainingEnginePath)
+        let total = code.components(separatedBy: "locked:").count - 1
+        var passthrough = 0
+        for form in ["locked:locked", "locked:old.locked", "locked:d.locked", "locked:drawing.locked"] {
+            passthrough += code.components(separatedBy: form).count - 1
+        }
+        #expect(total - passthrough == 1,
+                "语义性 locked 写入应恰好 1 处，实际 total=\(total) passthrough=\(passthrough)")
+        #expect(code.contains(squeeze("locked: newLocked")),
+                "那一处必须是 setDrawingLocked 里的 `locked: newLocked`（见 Global Constraint #1）")
+    }
+
+    /// N-B 第 2 条（spec §1.6）—— **不可省，与 L12 是两条不同的判据**（codex P-R1-F1）。
+    /// L12 只数 `locked:` 字样；而**整对象赋值** `drawings[i] = <locked 不同的对象>` 字面上**不含**
+    /// `locked:`，会从 L12 底下整个溜过去 —— 它恰恰是绕过路由/几何/唯一性信任边界的第二条路。
+    /// 故本条按**结构性写入点**穷尽计数。
+    ///
+    /// ⚠️ 必须排除 `reviewDrawings`：它以**子串**形式包含 `drawings`，朴素计数会把复盘侧写入
+    ///    算进来（假阳性）；而为了迁就它去放宽判据，又会让真正的新写入面溜过去。
+    ///    故判据 = 「`drawings` 紧邻的前一个字符不是标识符字符」，与 `bareIdentifierReferences` 同款边界法。
+    @Test("L12b: TrainingEngine 里 drawings 的结构性写入点恰好 5 处（穷尽性，多一处即红）")
+    @MainActor func engineDrawingsWriteSurfaceIsExhaustive() throws {
+        let code = try squeezedSource(trainingEnginePath)
+        let n = engineDrawingsStructuralWrites(code)
+        // PR-1 后的构成（每一处都必须能对上号）：
+        //   drawings.remove(at:) ×2  → deleteDrawing(at:) / deleteDrawing(id:)
+        //   drawings.append(     ×1  → appendDrawing
+        //   drawings[x] =        ×2  → updateDrawingStyle / setDrawingLocked
+        //   drawings.insert(     ×0  → PR-2 才引入（届时期望值改为 6）
+        #expect(n == 5, """
+            drawings 结构性写入点应为 5，实际 \(n)。
+            多了 = 出现了未经分类的新写入面（可能绕过路由/几何/唯一性三道门）；
+            少了 = 判据坏了或某个写入面被挪走。两种都必须查清再改期望值，不许直接改数字。
+            """)
+    }
+
     // MARK: 切片2 Task 5（D51/D60/D66）：deleteDrawing(id:)
 
     @Test("删除成功: 按 id 移除 + revision +1")
@@ -1114,20 +1192,33 @@ struct TrainingEngineDrawingSessionTests {
             #expect(!code.contains(squeeze("DrawingEditRouter.canEditStyle(")),
                     "\(rel) 调了现算版谓词 —— SwiftUI 建立不了 observation 依赖，平移后控件不重绘")
             #expect(!code.contains(squeeze("DrawingEditRouter.canDelete(")), "\(rel) 同上")
+            #expect(!code.contains(squeeze("DrawingEditRouter.canToggleLock(")), "\(rel) 同上")
         }
-        // 路由内部不得读 observable 提示（陈旧值会放行真写入）
+        // 路由内部不得读 observable 提示（陈旧值会放行真写入）。
+        // ⚠️ 整支终审②：三个 can* 现算谓词**逐个按函数名切片**（不是取「第一个到最后一个」的一整段）——
+        //    `canToggleLock` 定义在文件末尾，与它相邻的 `lockButtonEnabled` 是 UI 版、**必须**读 observable
+        //    提示；若图省事把切片扩大到覆盖 canToggleLock 就会把 lockButtonEnabled 的合法读也扫进来，
+        //    把这条守卫打成恒红。故每个 can* 只切到**紧邻它的下一个函数**为止。
         let router = try squeezedSource(contractsDirForGuards
             .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path)
-        let liveOnly = try #require(router.range(of: squeeze("static func canEditStyle(")))
-        let displayStart = try #require(router.range(of: squeeze("static func styleControlsEnabled(")))
-        let liveBlock = String(router[liveOnly.lowerBound..<displayStart.lowerBound])
-        // ⚠️ **两种拼法都要禁**（整支 Opus 终审 Minor-1，已复验）：needle 只写小写 `session.` 时，
-        //    `engine.drawingSession.selectionGeometryVisible`（**大写 S**，恰恰是最自然的写法）匹配不上
-        //    → 守卫恒不触发。终审的变异 A 正是这么写的，本条当时**没红**，全靠 4 条行为测试拦住。
-        //    源码守卫这一层比行为层弱的根因不是「读错文本来源」（PD7 已解决），而是「needle 拼法不全」。
-        for needle in ["session.selectionGeometryVisible", "drawingSession.selectionGeometryVisible"] {
-            #expect(!liveBlock.contains(squeeze(needle)),
-                    "现算版谓词里读到了 observable 提示（拼法 \(needle)）—— 确认框时间窗内会用陈旧值放行删除（N19e）")
+        let canPredicateSlices: [(name: String, nextMarker: String)] = [
+            ("canEditStyle", "static func canDelete("),
+            ("canDelete", "static func styleControlsEnabled("),
+            ("canToggleLock", "static func lockButtonEnabled("),
+        ]
+        for (name, nextMarker) in canPredicateSlices {
+            let start = try #require(router.range(of: squeeze("static func \(name)(")),
+                                      "\(name) 不见了？")
+            let end = try #require(router.range(of: squeeze(nextMarker)), "\(nextMarker) 不见了？")
+            let liveBlock = String(router[start.lowerBound..<end.lowerBound])
+            // ⚠️ **两种拼法都要禁**（整支 Opus 终审 Minor-1，已复验）：needle 只写小写 `session.` 时，
+            //    `engine.drawingSession.selectionGeometryVisible`（**大写 S**，恰恰是最自然的写法）匹配不上
+            //    → 守卫恒不触发。终审的变异 A 正是这么写的，本条当时**没红**，全靠 4 条行为测试拦住。
+            //    源码守卫这一层比行为层弱的根因不是「读错文本来源」（PD7 已解决），而是「needle 拼法不全」。
+            for needle in ["session.selectionGeometryVisible", "drawingSession.selectionGeometryVisible"] {
+                #expect(!liveBlock.contains(squeeze(needle)),
+                        "\(name) 里读到了 observable 提示（拼法 \(needle)）—— 确认框时间窗内会用陈旧值放行写入（N19e）")
+            }
         }
         // 反向自足断言：UI 版确实读了提示（防上面两条在「谁都没调」的空状态下恒真）
         #expect(router.contains(squeeze("engine.drawingSession.selectionGeometryVisible")),
@@ -1145,5 +1236,111 @@ struct TrainingEngineDrawingSessionTests {
                 "deleteSelected 签名变了？它不得新增任何几何入参")
         #expect(code.contains(squeeze("guard canDelete(engine: engine)")),
                 "deleteSelected 必须自己调 canDelete 现算几何")
+    }
+
+    /// 镜像 `deleteRouteRecomputesGeometryItself`（整支终审③）：L11 里「几何判据排在调用之前」
+    /// 那条断言只看**首次出现位置**，与 `toggleLockSelected` 自己有没有验几何无关（详见 L11 处注释）——
+    /// 真正能挡住「删掉 `guard canToggleLock(...)` 却不被抓到」的是这一条：直接断言 `toggleLockSelected`
+    /// 体内逐字含 `guard canToggleLock(engine: engine)`，且签名不得新增几何入参。
+    @Test("N19e 镜像 / D71：锁定路由自己现算几何（不接受调用方传进来的陈旧布尔）")
+    func toggleLockRouteRecomputesGeometryItself() throws {
+        let router = contractsDirForGuards
+            .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path
+        let code = try squeezedSource(router)
+        #expect(code.contains(squeeze("static func toggleLockSelected(engine: TrainingEngine) -> Bool")),
+                "toggleLockSelected 签名变了？它不得新增任何几何入参")
+        #expect(code.contains(squeeze("guard canToggleLock(engine: engine)")),
+                "toggleLockSelected 必须自己调 canToggleLock 现算几何")
+    }
+
+    // MARK: 1b-ii PR-1 Task 1（D69）：setDrawingLocked 门列表
+
+    /// 正向档（Global Constraint #9 要求）：健康输入**必须被放行**，且真的改了 locked。
+    /// 少了这一条，一个恒 `return false` 的实现会让下面四条负向断言全绿。
+    @Test("L1 正向: 训练模式 + id 唯一非空 + 未锁 → 上锁成功、locked 变 true、revision +1")
+    @MainActor func setLockedHappyPath() throws {
+        let e = TrainingEngine.preview()
+        let d = makeHorizontalDrawing(id: "L1")
+        #expect(e.appendDrawing(d))
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "L1", locked: true) == true)
+        #expect(e.drawings.first(where: { $0.id == "L1" })?.locked == true)
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
+    /// 解锁必须走得通 —— 这是本 API 存在的全部理由（D69 门② 被刻意豁免）。
+    @Test("L2 解锁: 已锁的线能解开（updateDrawingStyle 的 locked 门在此不适用）")
+    @MainActor func setLockedCanUnlock() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeHorizontalDrawing(id: "L2")))
+        #expect(e.setDrawingLocked(id: "L2", locked: true))
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "L2", locked: false) == true)
+        #expect(e.drawings.first(where: { $0.id == "L2" })?.locked == false)
+        #expect(e.drawingsRevision == rev + 1)
+    }
+
+    @Test("L3 门⓪: 复盘模式恒拒，drawings 与 revision 都不动")
+    @MainActor func setLockedRejectedInReview() throws {
+        let e = TrainingEngine.preview(mode: .review)   // 既有形态，同 :893 / :1066
+        #expect(e.appendDrawing(makeHorizontalDrawing(id: "L3")))
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "L3", locked: true) == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    /// fix round 1（控制者复核）：原版用 `appendDrawing(id: "L4")` 造非空 id 画线，对 `id: ""` 查询时
+    /// `matches` 恒为空 —— 唯一性门（`matches.count == 1`）先把它挡掉了，删掉 `guard !id.isEmpty`
+    /// 变异验证不出来（实测确认：全 5 条测试仍绿）。改用 `injectDrawingsForTesting` 塞一条 id 为空
+    /// 字符串的画线（绕过 `appendDrawing` 的 D66 非空检查）：这样 `id: ""` 在 `matches` 里能找到唯一
+    /// 匹配，唯一性门够不着这条路径，只剩 `guard !id.isEmpty` 能拒它 —— 判别力落在它本该守的那道门上。
+    @Test("L4 门①: 空 id → false，什么都不动")
+    @MainActor func setLockedRejectsEmptyID() throws {
+        let e = TrainingEngine.preview()
+        e.injectDrawingsForTesting([makeHorizontalDrawing(id: "")])
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "", locked: true) == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    /// 重复 id：**两条都不许被改**（不是「改第一条」）。
+    @Test("L5 门①: 重复 id → false，且两条同 id 的线都没被改")
+    @MainActor func setLockedRejectsDuplicateID() throws {
+        let e = TrainingEngine.preview()
+        e.injectDrawingsForTesting([makeHorizontalDrawing(id: "DUP"),
+                                    makeHorizontalDrawing(id: "DUP", price: 11.0)])
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "DUP", locked: true) == false)
+        #expect(e.drawings.allSatisfy { $0.locked == false })
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    // MARK: 1b-ii PR-1 Task 3（D80）：四个写入 API 统一「内容未变 = 零副作用」
+
+    @Test("L9 D80: 同样式再调 updateDrawingStyle → 返回 true 但 revision 不动、内容不变")
+    @MainActor func updateStyleNoOpHasNoSideEffect() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeHorizontalDrawing(id: "N1")))
+        var s = DrawingDefaultStyle()
+        s.thickness = 3; s.colorToken = .green
+        #expect(e.updateDrawingStyle(id: "N1", style: s))          // 第一次：真改动
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.updateDrawingStyle(id: "N1", style: s) == true)   // 第二次：同样式 no-op
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("L10 D80: 已锁的线再上锁 → 返回 true 但 revision 不动")
+    @MainActor func setLockedIdempotentHasNoSideEffect() throws {
+        let e = TrainingEngine.preview()
+        #expect(e.appendDrawing(makeHorizontalDrawing(id: "N2")))
+        #expect(e.setDrawingLocked(id: "N2", locked: true))
+        let before = e.drawings
+        let rev = e.drawingsRevision
+        #expect(e.setDrawingLocked(id: "N2", locked: true) == true)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
     }
 }

@@ -736,4 +736,101 @@ struct DrawingEditRouterTests {
         #expect(shown.thickness == 1, "灰态下面板仍应显示这条线的真实粗细，而不是悄悄回退成默认")
         #expect(shown.colorToken == .orange, "灰态下面板仍应显示这条线的真实颜色，而不是悄悄回退成默认")
     }
+
+    // MARK: 1b-ii PR-1 Task 6（D71）：锁定谓词与路由
+
+    @Test("L14 谓词: 无选中 → 🔒 恒灰（与 🗑 同规则，与样式控件刻意不对称）")
+    @MainActor func lockButtonDisabledWithoutSelection() {
+        let e = makeSelected()
+        e.drawingSession.clearSelection()
+        #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == false)
+    }
+
+    @Test("L15 谓词: 选中且几何可见 → 🔒 亮；**锁定之后仍亮**（否则永远解不开锁）")
+    @MainActor func lockButtonStaysEnabledWhenLocked() {
+        let e = makeSelected(id: "A")
+        #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == true)
+        #expect(e.setDrawingLocked(id: "A", locked: true) == true)
+        #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == true,
+                "锁定线必须仍能被选中并解锁 —— 谓词里带 !d.locked 就是这条挂掉")
+    }
+
+    // ⚠️ **与 brief 字面稿的刻意分歧**：字面稿只 `setViewportMapper` 不补 `setSelectionGeometryVisible(false)`。
+    //   `lockButtonEnabled` 按 Step 3 读的是 **observable 提示**（理由同 `deleteButtonEnabled`），而
+    //   `displayReadsHintWhileRouteRecomputes` 已实测证明：单独 `setViewportMapper` **不会**刷新这个提示——
+    //   `deleteButtonEnabled` 在那条测试里换了视口后仍读到旧的 `true`。故本条不补上这一行会恒假失败
+    //   （已实测：不补时第二个断言得到 `true`，与被测的几何逻辑本身无关）。补法与 `noSelectionKeepsStyleControlsUsable`
+    //   「模拟 Coordinator 刷新后的提示」同款——不改断言，只补齐 fixture 让它真正构造出被测场景。
+    @Test("L15b 谓词: 选中但线滑出可见价格区间 → 🔒 灰（几何门与 🗑 同待遇）")
+    @MainActor func lockButtonDisabledWhenOffscreen() {
+        let e = makeSelected(price: 50)
+        #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == true)
+        e.drawingSession.setViewportMapper(mapper(priceMin: 200, priceMax: 300), panel: .upper)
+        e.drawingSession.setSelectionGeometryVisible(false)          // 模拟 Coordinator 刷新后的提示
+        #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == false)
+    }
+
+    @Test("L16 谓词: 锁定线 → 🗑 灰、样式控件灰（既有 !d.locked 分量首次真执行）")
+    @MainActor func lockedLineDisablesDeleteAndStyle() {
+        let e = makeSelected(id: "A")
+        #expect(DrawingEditRouter.deleteButtonEnabled(engine: e) == true)
+        #expect(DrawingEditRouter.styleControlsEnabled(engine: e) == true)
+        #expect(e.setDrawingLocked(id: "A", locked: true) == true)
+        #expect(DrawingEditRouter.deleteButtonEnabled(engine: e) == false)
+        #expect(DrawingEditRouter.styleControlsEnabled(engine: e) == false)
+        #expect(e.setDrawingLocked(id: "A", locked: false) == true)      // 解锁后恢复
+        #expect(DrawingEditRouter.deleteButtonEnabled(engine: e) == true)
+        #expect(DrawingEditRouter.styleControlsEnabled(engine: e) == true)
+    }
+
+    @Test("L17 图标态: 无选中→开锁；选中未锁→开锁；选中已锁→闭锁")
+    @MainActor func lockIconReflectsSelectedLine() {
+        let e = makeSelected(id: "A")
+        #expect(DrawingEditRouter.lockIsOn(engine: e) == false)          // 选中未锁
+        #expect(e.setDrawingLocked(id: "A", locked: true) == true)
+        #expect(DrawingEditRouter.lockIsOn(engine: e) == true)           // 选中已锁
+        e.drawingSession.clearSelection()
+        #expect(DrawingEditRouter.lockIsOn(engine: e) == false)          // 无选中取中性态（开锁）
+    }
+
+    @Test("L18 路由: 几何不可见时 toggleLockSelected 恒 false 且 locked 一个字都不改")
+    @MainActor func toggleLockFailsClosedWithoutGeometry() {
+        let e = makeSelected(id: "A")
+        e.drawingSession.setViewportMapper(mapper(priceMin: 200, priceMax: 300), panel: .upper)
+        let rev = e.drawingsRevision
+        #expect(DrawingEditRouter.toggleLockSelected(engine: e) == false)
+        #expect(e.drawings.first(where: { $0.id == "A" })?.locked == false)
+        #expect(e.drawingsRevision == rev, "被几何门拒了却动了 revision = 白触发一次 autosave")
+    }
+
+    @Test("L18b 路由正向: 几何可见时 toggleLockSelected 真的翻转 locked 且 revision +1")
+    @MainActor func toggleLockTogglesWhenVisible() {
+        let e = makeSelected(id: "A")
+        let rev = e.drawingsRevision
+        #expect(DrawingEditRouter.toggleLockSelected(engine: e) == true)
+        #expect(e.drawings.first(where: { $0.id == "A" })?.locked == true)
+        #expect(e.drawingsRevision == rev + 1)
+        #expect(DrawingEditRouter.toggleLockSelected(engine: e) == true)  // 再点一次 → 解锁
+        #expect(e.drawings.first(where: { $0.id == "A" })?.locked == false)
+    }
+
+    // 评审挖出的缺口（Task 6 codex 评审）：`lockableIgnoringGeometry` 里的
+    // `guard engine.flow.mode != .review`（D34 信任边界）零测试覆盖 —— 删掉它，上面 L14-L18b 七条
+    // 没有一条会变红（它们全在 normal 模式下跑）。照 `reviewModeIsInert`（:663）的搭法补上。
+    @Test("L19 D34 纵深防御: 复盘模式下 canToggleLock/lockButtonEnabled 恒 false")
+    @MainActor func lockRefusedInReviewMode() throws {
+        let e = TrainingEngine.preview(mode: .review)
+        #expect(e.appendDrawing(makeStyledHLine(id: "R", revealTick: 0, period: e.upperPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        e.toggleDrawingMode(); e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "R", panel: .upper)
+        e.drawingSession.setViewportMapper(mapper(), panel: .upper)
+        // 前提自足：证明这条线结构性可见（真进了 uniqueSelected 的候选集），下面的 false 断言才精确
+        // 来自 review 门，而不是巧合地来自 D40 的 revealTick/belongsToPanel 过滤。
+        #expect(RenderStateBuilder.visibleDrawings(engine: e, panel: .upper,
+                                                    tick: e.tick.globalTickIndex).contains { $0.id == "R" },
+                "fixture 前提不成立：线结构性不可见，下面的 false 断言测不到 review 门本身")
+        #expect(DrawingEditRouter.canToggleLock(engine: e) == false)
+        #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == false)
+    }
 }

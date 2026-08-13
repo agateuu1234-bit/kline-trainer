@@ -460,13 +460,20 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   PR-4 原本还有第 3 条 UIKit-gated 测试（🗑 无障碍置灰），因在 Catalyst 上探测不到无障碍元素、
 #   且唯一替代探测方式会崩掉 xctest 进程，已整条删除并记入真机验收必验项——不留杀不死的测试。
 #   pass-main-current.log 已用本轮真 fresh Catalyst 日志（1711 tests / 205 suites）逐行重裁。
+#   【1b-ii PR-1 Task7（本轮）】总数 1715→1745（+30）：其中 28 条为 Task1-6 期间新增的
+#   host-visible 测试（此前未同步进本基线，riding 在 ±30 容差内直到本次漂出上限）；
+#   Task7 本身净 +2——DrawingInteractionUISourceGuardTests 的两键守卫升三键 + 新增
+#   TrainingView 接线守卫（净 +1 host-visible），KLineViewCompileTests 新增 L8c 契约测试
+#   productionRegistryHasNoTrend（+1 UIKit-gated，钉住生产渲染注册表里没有 .trend）。
+#   uikit 74→75（+1，同上 L8c）。pass-main-current.log 已用本轮真 fresh Catalyst 日志
+#   （1745 tests / 205 suites）逐行重裁。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1715" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 74 / total 1715）→ GATE PASS 且回显 1715 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1745" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 75 / total 1745）→ GATE PASS 且回显 1745 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1715，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1745，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 
