@@ -351,6 +351,18 @@ struct DrawingStylePanelSourceGuardTests {
         #expect(hits == 1, "`1...5` 字面量应只在 DrawingDefaultStyle.thicknessRange 的定义处出现，实测 \(hits) 处")
     }
 
+    /// G5 的**双向自检**：把 G5 赖以成立的那条隐含性质钉住 ——
+    /// 仓里有 3 处 `///` 注释提到 `1...5`，`hits == 1` 能成立**全靠注释被剥掉**。
+    /// 正向：真代码里的字面量必须数得到；反向：注释里的同一串必须数不到。
+    @Test func g5_scanner_counts_code_literals_but_not_comments() {
+        let code = squeezedText("let r = 1...5")
+        #expect(code.components(separatedBy: squeeze("1...5")).count - 1 == 1,
+                "真代码里的 1...5 必须被数到 —— 数不到说明剥离逻辑吃掉了真代码")
+        let comment = squeezedText("/// thickness (1...5, clamped)")
+        #expect(comment.components(separatedBy: squeeze("1...5")).count - 1 == 0,
+                "注释里的 1...5 不得被数到 —— G5 的 hits==1 正是靠这条性质")
+    }
+
     /// G5b：三个消费者必须**引用常量**，而不是各写各的数字。
     /// 这条比数字面量结实 —— 它挡得住「换成 min/max 写法」这种绕过。
     ///

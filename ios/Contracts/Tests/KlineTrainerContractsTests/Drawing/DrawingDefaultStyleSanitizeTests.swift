@@ -44,6 +44,7 @@ struct DrawingDefaultStyleSanitizeTests {
         #expect(out.lineSubType == .ray)
     }
 
+    /// T15b 的第二档（为什么必须拆成两档，见上面 `non_horizontal_tool_keeps_its_label` 的文档注释）。
     @Test func non_horizontal_tool_keeps_its_subtype() {
         var s = DrawingDefaultStyle(); s.lineSubType = .segment; s.labelMode = .left
         let out = s.sanitized(for: .trend)
