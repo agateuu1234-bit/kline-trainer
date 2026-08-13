@@ -77,7 +77,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4a2b-s3" && echo 
 
 S1 实施时新造三档并占用了 **㉕㉖㉗**。参考分支的「孤儿删除锁内原子求值」用的是**旧 ㉖**，与 main 的 ㉖（凭据表清场只删点名的库名）**直接相撞** → 本计划给它**另编新号 ㊱**。其余四档 **⑤ / ⑤b / ㉙ / ㉚** 在 main 上确认空闲，沿用参考的号。
 
-**S3 完成后 `_EXPECTED_SCENARIOS` = 46 档。**
+**S3 完成后 `_EXPECTED_SCENARIOS` = 47 档。**
 
 ---
 
@@ -1162,7 +1162,7 @@ def test_orphan_cleanup_uses_a_delete_that_can_actually_match_an_orphan():
     assert "public.pilot_create_intent" in sql, "表引用必须 public. 限定"
     # ⚠️ 判据必须**在 SQL 里、在锁内**求值：先查后删的写法会按快照时的陈旧状态，
     #    删掉一条同 seed 运行**刚刷新过的**恢复凭据。
-    assert "now() - inserted_at" in sql, "超期判据没有下沉进 DELETE"
+    assert "statement_timestamp() - inserted_at" in sql, "超期判据没有下沉进 DELETE"
     assert "pg_database" in sql and "d.oid" in sql, "「库不存在」判据没有下沉、或没绑实例"
     assert sql.count("$1") == 1 and sql.count("$2") == 1, "参数应为 dbname + TTL 两个"
 
@@ -1175,8 +1175,11 @@ def test_init_orphan_freshness_uses_the_database_clock():
     """
     import qmt_pilot_db as m
     sql = m._LIST_ALL_INTENT_SQL
-    assert "now() - inserted_at" in sql or "now() - i.inserted_at" in sql
+    assert "statement_timestamp() - inserted_at" in sql, "新鲜度没有用库时钟算"
     assert "created_at" not in sql
+    # ⚠️ 年龄不许在 SQL 里取整：`::bigint` 是四舍五入不是截断
+    #    （真 PG 15 实测 `(-0.1)::bigint = 0`），`_READ_INTENT_SQL` 已经去掉了它。
+    assert "::bigint" not in sql, "年龄被取整了 —— 与 _READ_INTENT_SQL 的口径漂移"
 
 
 def test_orphan_delete_predicate_is_evaluated_under_the_lock_not_from_a_snapshot():
@@ -1190,7 +1193,7 @@ def test_orphan_delete_predicate_is_evaluated_under_the_lock_not_from_a_snapshot
     import textwrap
     import qmt_pilot_db as m
     sql = m._DELETE_ORPHAN_INTENT_SQL
-    assert "now() - inserted_at" in sql and "pg_database" in sql, \
+    assert "statement_timestamp() - inserted_at" in sql and "pg_database" in sql, \
         "两条判据没有下沉进 DELETE"
     src = textwrap.dedent(inspect.getsource(m.init_cluster_marker))
     tree = ast.parse(src)
@@ -1199,6 +1202,60 @@ def test_orphan_delete_predicate_is_evaluated_under_the_lock_not_from_a_snapshot
               and "DELETE" in n.value.upper()]
     assert not consts, f"init 里有内联 DELETE 字面量：{consts}"
 ```
+
+- [ ] **Step 1b: 把新 SQL 接进既有的**族级**时钟守卫，并让族成员**不再靠手写名单**
+
+⚠️ **这一步是 codex S3-R1 那条 high 的根因层修复，不是附带清理。**
+
+仓里已经有一条族级守卫 `test_intent_ttl_is_never_measured_against_the_transaction_clock`（`backend/tests/test_qmt_pilot_db.py:4570` 附近），它遍历的是一份**手写名单**：
+
+```python
+    for name in ("_READ_INTENT_SQL", "_INSERT_INTENT_SQL"):
+```
+
+S3 新增的 `_LIST_ALL_INTENT_SQL` / `_DELETE_ORPHAN_INTENT_SQL` 是**同一族的第三、第四个成员**，而手写名单**不会自动收录它们** —— 守卫看起来在工作、对新成员却零覆盖。这正是 `feedback_fix_the_whole_predicate_family_not_the_reported_site` 记的那个形态（同一 PR 重演过 7 次），也正是「机械检查器被它该抓的损坏禁用了自身解析器 → 静默全绿」的近亲。
+
+改成**从模块推导**族成员，并保留手写名单做**双向**核对：
+
+```python
+def test_intent_ttl_is_never_measured_against_the_transaction_clock():
+    """**族级**：凡是拿时钟减 `inserted_at` 判 TTL 的地方，都不许用 `now()`
+    （codex S2a-R4-F2，真 PG 15 实测；S3-R1 把族扩到四个成员）。
+
+    ...（既有 docstring 保留，补一句）...
+
+    ⚠️ **族成员由模块推导，不靠手写名单**（S3-R1 的根因层修复）：手写名单在新增
+       第三、第四条 SQL 时不会自动收录它们 —— 守卫看起来在工作、对新成员却零覆盖。
+       `_EXPECTED` 只作**双向**核对：模块里冒出新成员而名单没跟上 → 红；
+       名单写了模块里没有的名字（改名/删除）→ 也红。
+    """
+    import re
+    import qmt_pilot_db as m
+    pat = re.compile(r"EXTRACT\(EPOCH FROM \(\s*([A-Za-z_]+\(\))\s*-")
+    # 「量 inserted_at 年龄」的族 = 模块级 *_SQL 常量里，既提到 inserted_at
+    #   又含一处「时钟() −」的那些。`_MAINTENANCE_SHAPE_SQL` 只提列名、不量年龄，
+    #   故不在族里（已实测确认它被正确排除）。
+    derived = {n for n in dir(m)
+               if n.endswith("_SQL") and isinstance(getattr(m, n), str)
+               and "inserted_at" in getattr(m, n) and pat.search(getattr(m, n))}
+    _EXPECTED = {"_READ_INTENT_SQL", "_INSERT_INTENT_SQL",
+                 "_LIST_ALL_INTENT_SQL", "_DELETE_ORPHAN_INTENT_SQL"}
+    assert derived == _EXPECTED, (
+        f"「量 inserted_at 年龄」的 SQL 族变了：模块里多出 {sorted(derived - _EXPECTED)}，"
+        f"名单里多出 {sorted(_EXPECTED - derived)} —— 新成员必须显式进这份名单，"
+        f"否则它的时钟源无人把关")
+    for name in sorted(derived):
+        sql = getattr(m, name)
+        clocks = pat.findall(sql)
+        # 反向自检：扫不到任何时钟表达式 = 匹配式过时了，下面那条会恒真
+        assert clocks, f"{name} 里一处「时钟 − inserted_at」都没扫到 —— 这颗钉子是空的"
+        for clock in clocks:
+            assert clock == "statement_timestamp()", (
+                f"{name} 用 {clock} 判 TTL —— `now()` 是**事务开始时刻**，"
+                f"长事务里一行已过期的销毁凭据会被判成新鲜")
+```
+
+**推导式已在 `8578a59` 上实跑验证**（2026-08-14）：当前只捞到 `_INSERT_INTENT_SQL` / `_READ_INTENT_SQL` 两个，`_MAINTENANCE_SHAPE_SQL`（提到 `inserted_at` 但不量年龄）被正确排除。故这份守卫在**改名单之前**是绿的、在**加上两个新名字之后**立刻变红（模块里还没有它们）—— 符合「守卫必须在功能还没写的当前树上就是绿的」那条守则的次序要求：**先实现 SQL，再改名单**，或两者同一步提交。
 
 - [ ] **Step 2: 跑测试确认变红**
 
@@ -1215,9 +1272,17 @@ def test_orphan_delete_predicate_is_evaluated_under_the_lock_not_from_a_snapshot
 ```python
 # 孤儿清理要看**全部** intent 行（`_READ_INTENT_SQL` 只看本次库名那一行）。
 # 新鲜度同样只认库自己的时钟（O4-R23-C1）。
+# ⚠️ **时钟源必须是 `statement_timestamp()`，不是 `now()`**（codex S2a-R4-F2 立的族规，
+#    真 PG 15 实测；S3-R1 指出本函数漏了它）：`now()` 是**事务开始时刻**。
+#    `init_cluster_marker` 收的是一条**已经连好的**连接、不控制事务生命周期，
+#    4c 的 wrapper 很可能把整段维护操作包进事务 —— 那时 `now()` 冻在过去，
+#    一行**真实已过期**的孤儿会被量成「还新鲜」→ 预筛跳过 → 残骸永远清不掉。
+#    与 `_READ_INTENT_SQL` / `_INSERT_INTENT_SQL` 用**同一个**时钟源，不留漂移。
+# ⚠️ **不加 `::bigint`**：`::bigint` 是四舍五入不是截断（真 PG 15 实测
+#    `(-0.1)::bigint = 0`）。`_READ_INTENT_SQL` 已经把这个转换去掉了，这里跟同一口径。
 _LIST_ALL_INTENT_SQL = """
 SELECT dbname, seed, db_oid::text AS db_oid,
-       EXTRACT(EPOCH FROM (now() - inserted_at))::bigint AS age_seconds
+       EXTRACT(EPOCH FROM (statement_timestamp() - inserted_at)) AS age_seconds
   FROM public.pilot_create_intent
 """
 
@@ -1235,10 +1300,13 @@ SELECT dbname, seed, db_oid::text AS db_oid,
 #    故把「超期 OR 库不存在」两条判据下沉进 DELETE 的 WHERE 里。
 # ⚠️ 「库不存在」绑实例（`d.oid = db_oid`）而不是只比名字：一条指向已消失实例的行
 #    本来就该被清掉，哪怕现在有个同名的新库。
+# ⚠️ 时钟源同上：`statement_timestamp()`。这条尤其要紧 —— 它是**权威判据**
+#    （预筛只是省取锁）。长事务里用 `now()` 的话，取到锁之后这条 DELETE 会匹配 0 行，
+#    于是「命令发了、一行没删」的静默失败，正是 R9 那次回归的形态。
 _DELETE_ORPHAN_INTENT_SQL = """
 DELETE FROM public.pilot_create_intent
  WHERE dbname = $1
-   AND (EXTRACT(EPOCH FROM (now() - inserted_at)) >= $2
+   AND (EXTRACT(EPOCH FROM (statement_timestamp() - inserted_at)) >= $2
         OR NOT EXISTS (SELECT 1 FROM pg_database d
                         WHERE d.datname::text = public.pilot_create_intent.dbname
                           AND d.oid = public.pilot_create_intent.db_oid))
@@ -1256,7 +1324,10 @@ DELETE FROM public.pilot_create_intent
     #    预筛只是省掉不必要的取锁；真正的判据在锁内的 SQL 里，两者的口径必须一致。
     live = {(r["datname"], r["db_oid"]) for r in await maint_conn.fetch(_LIST_DATABASES_SQL)}
     for r in await maint_conn.fetch(_LIST_ALL_INTENT_SQL):
-        stale = int(r["age_seconds"]) >= INTENT_TTL_SECONDS
+        # ⚠️ **不取整**（codex S2a-R3-F1 立的族规）：`int()` 与 `::bigint` 都会把
+        #    符号抹掉（`int(-0.1) == 0`），而 `_READ_INTENT_SQL` 那侧已经两层都去掉了。
+        #    这里是预筛，取整不致命，但口径必须与锁内那条 DELETE 一致。
+        stale = float(r["age_seconds"]) >= INTENT_TTL_SECONDS
         vanished = (r["dbname"], r["db_oid"]) not in live
         if not (stale or vanished):
             continue
@@ -1308,7 +1379,11 @@ DELETE FROM public.pilot_create_intent
 | M18 | 把 `finally: await release_seed_lock(...)` 改成普通行（不在 finally 里） | `test_orphan_cleanup_releases_the_lock_even_when_the_delete_fails` |
 | M19 | 把 `release_seed_lock` 挪到 `if not await try_seed_lock(...)` 的 `continue` 之前 | `test_orphan_cleanup_does_not_release_a_lock_it_never_took` |
 | M20 | `_DELETE_ORPHAN_INTENT_SQL` 去掉 `AND (EXTRACT… OR NOT EXISTS…)` 整段 | `test_orphan_cleanup_uses_a_delete_that_can_actually_match_an_orphan` + `test_orphan_delete_predicate_is_evaluated_under_the_lock_not_from_a_snapshot` |
-| M21 | `_LIST_ALL_INTENT_SQL` 把 `now() - inserted_at` 换成 `now() - created_at::timestamptz` | `test_init_orphan_freshness_uses_the_database_clock` |
+| M21 | `_LIST_ALL_INTENT_SQL` 把 `statement_timestamp() - inserted_at` 换成 `statement_timestamp() - created_at::timestamptz` | `test_init_orphan_freshness_uses_the_database_clock` |
+| **M21b** | `_LIST_ALL_INTENT_SQL` 的 `statement_timestamp()` 换回 `now()` | `test_intent_ttl_is_never_measured_against_the_transaction_clock`（**具名到 `_LIST_ALL_INTENT_SQL`**）+ `test_init_orphan_freshness_uses_the_database_clock` |
+| **M21c** | `_DELETE_ORPHAN_INTENT_SQL` 的 `statement_timestamp()` 换回 `now()` | 同上，具名到 `_DELETE_ORPHAN_INTENT_SQL`；另 `test_orphan_cleanup_uses_a_delete_that_can_actually_match_an_orphan` |
+| **M21d** | 把族守卫的 `derived` 换回手写 `("_READ_INTENT_SQL", "_INSERT_INTENT_SQL")`，同时把 `_LIST_ALL_INTENT_SQL` 改成 `now()` | **必须仍有测试变红**。若全绿 = 推导式失效，守卫回到「新成员零覆盖」状态 —— 这一条验的是守卫**自己**的判别力 |
+| **M21e** | `_LIST_ALL_INTENT_SQL` 的 age 加回 `::bigint` | `test_init_orphan_freshness_uses_the_database_clock`（`::bigint` 那条断言） |
 | M22 | 把清理循环挪到 `await assert_cluster_allowed(...)` **之前** | `test_init_does_not_clean_orphans_on_a_cluster_that_is_no_longer_clean` |
 | M23 | 循环只处理 `rows[:1]`（提前 break） | `test_orphan_cleanup_releases_every_seed_lock_it_takes` |
 
@@ -1344,6 +1419,9 @@ git commit -m "S3 Task4：init_cluster_marker 第二段 —— 孤儿 intent 清
 | **㉙** | 带合法标记的集群上事后出现无关库 → init 仍须拒（标记不得短路现查） | `test_init_revalidates_the_cluster_even_when_the_marker_already_exists` |
 | **㉚** | 孤儿清理取了 seed 锁之后必须还（三条一起：取过锁 + 孤儿真被清掉 + 锁已还） | `test_orphan_cleanup_releases_every_seed_lock_it_takes` |
 | **㊱** | **新号**（旧 ㉖ 已被 S1 占用）：预筛之后取锁之前被刷新的凭据**不许被删** —— 判据在锁内当下求值 | `test_orphan_delete_predicate_is_evaluated_under_the_lock_not_from_a_snapshot` |
+| **㊲** | **新增（codex S3-R1）**：**长事务**里孤儿清理仍按语句时刻量 —— 一行真实已过期的孤儿仍被删掉 | `test_intent_ttl_is_never_measured_against_the_transaction_clock` |
+
+> **㊲ 为什么非有不可**：既有的 ㉝c 有一句自己写下的警告 ——「㉝ / ㉝b 都在**自动提交**下跑，`now()` 与 `statement_timestamp()` 几乎相等，**时钟源这一条在它们身上一次都没求值**」。⑤ ⑤b ㉙ ㉚ ㊱ 全是自动提交，同样对时钟源零判别力。不补 ㊲ 的话，S3 关于时钟源的证据就只剩 host 层的文本断言（那只证明「SQL 里写着这几个字」，不证明「长事务里真的量对了」）。
 
 - [ ] **Step 1: 改 import 与 `_EXPECTED_SCENARIOS`**
 
@@ -1352,8 +1430,8 @@ git commit -m "S3 Task4：init_cluster_marker 第二段 —— 孤儿 intent 清
 ```python
 from qmt_pilot_db import (INTENT_TTL_SECONDS, MARKER_PURPOSE,  # noqa: E402
                           PILOT_META_KEYS, PilotClusterBoundaryError,
-                          PilotDbBoundaryError, _READ_INTENT_SQL,
-                          _SEED_LOCK_HELD_SQL,
+                          PilotDbBoundaryError, _LIST_ALL_INTENT_SQL,
+                          _READ_INTENT_SQL, _SEED_LOCK_HELD_SQL,
                           _TARGET_CLIENT_SESSIONS_SQL, assert_cluster_allowed,
                           assert_db_allowed_for_reset,
                           assert_db_allowed_for_reuse,
@@ -1363,15 +1441,17 @@ from qmt_pilot_db import (INTENT_TTL_SECONDS, MARKER_PURPOSE,  # noqa: E402
                           try_empty_remnant_exception)
 ```
 
-`_EXPECTED_SCENARIOS` 改成 46 档（新增 ⑤ ⑤b ㉙ ㉚ ㊱，其余顺序不动）：
+`_EXPECTED_SCENARIOS` 改成 47 档（新增 ⑤ ⑤b ㉙ ㉚ ㊱ ㊲，其余顺序不动）：
 
 ```python
 _EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑤", "⑤b", "⑥", "⑦", "⑧", "⑨", "⑨b",
                        "⑨c", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑰b", "⑱",
                        "⑲", "⑳", "⑳b", "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉙",
-                       "㉚", "㊱", "㉛",
+                       "㉚", "㊱", "㊲", "㉛",
                        "㉝", "㉝b", "㉝c", "㉘", "㉜", "㉜b", "㉞", "㉞b", "㉟", "㉟b")
 ```
+
+**S3 完成后 = 47 档**（基线 41 + ⑤ ⑤b ㉙ ㉚ ㊱ ㊲）。
 
 - [ ] **Step 2: 跑脚本确认变红**
 
@@ -1379,7 +1459,7 @@ _EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑤", "⑤b", "⑥", "⑦", 
 docker start qmt-pg-r8 qmt-pg-r8b
 QMT_VERIFY_ALLOW_DESTRUCTIVE=1 "$PY" backend/scripts/verify_pilot_db_lifecycle.py 2>&1 | grep -E "档断言全部成立|FAIL|❌|未运行|缺"
 ```
-预期：脚本报**声明了 46 档但只跑了 41 档**（`_EXPECTED_SCENARIOS` 与 `ran` 集合的差集非空）。这是本 Task 的「红」——先让缺档机制自己叫出来，再去补场景。
+预期：脚本报**声明了 47 档但只跑了 41 档**（`_EXPECTED_SCENARIOS` 与 `ran` 集合的差集非空）。这是本 Task 的「红」——先让缺档机制自己叫出来，再去补场景。
 
 > 若脚本没有「声明 vs 实跑」的差集检查而是静默通过，**先补这条检查**（它本身就是「机械检查器被它该抓的损坏禁用了自身解析器」那一族的防线），再继续。
 
@@ -1644,6 +1724,112 @@ QMT_VERIFY_ALLOW_DESTRUCTIVE=1 "$PY" backend/scripts/verify_pilot_db_lifecycle.p
     await harness.drop_database(base_dsn, db36)
 ```
 
+- [ ] **Step 5a: 写 ㊲ —— 长事务里的时钟源（codex S3-R1）**
+
+⚠️ 本档的形态直接照 ㉝c 那一档（它已在 main 上跑绿），只是把被测对象从 `try_empty_remnant_exception` 换成 `init_cluster_marker` 的孤儿清理路径。
+
+⚠️ **必须把「超期」这一半单独隔离出来**：孤儿判据是「超期 **OR** 库不存在」。若这一档里的库不存在，`vanished` 会独自把行删掉，**时钟源那一条一次都不会求值** —— 这一档就成了空转。故本档**必须建出那个库并把 `db_oid` 绑上去**，让 `vanished` 为假、只剩 `stale` 说话。
+
+```python
+    # ── ㊲ 长事务里 TTL 仍按语句时刻量（codex S3-R1；与 ㉝c 同族）──────────
+    #    `now()` 是**事务开始时刻**。`init_cluster_marker` 收的是一条**已经连好的**
+    #    连接、不控制事务生命周期，4c 的 wrapper 很可能把整段维护操作包进事务 ——
+    #    那时 `now()` 冻在过去，一行**真实已过期**的孤儿被量成「还新鲜」→
+    #    预筛跳过 → 残骸永远清不掉。
+    #    ⚠️ ⑤ ⑤b ㉙ ㉚ ㊱ 全在**自动提交**下跑，`now()` 与 `statement_timestamp()`
+    #       几乎相等 —— 时钟源这一条在它们身上**一次都没求值**（㉝c 那一档写下的教训）。
+    #    ⚠️ 本档刻意把库**建出来并绑 oid**：孤儿判据是「超期 OR 库不存在」，
+    #       库若不存在，`vanished` 会独自把行删掉，时钟源根本不被求值 → 空转。
+    scenario("㊲")
+    print("㊲ 长事务里孤儿清理仍按语句时刻量（`now()` 会冻在事务开始那一刻）")
+    seed37 = "lifecycle_r37"
+    db37 = f"kline_pilot_{seed37}"
+    conn = await _connect(base_dsn)
+    try:
+        # `CREATE DATABASE` 不能在事务块里 —— 必须排在 BEGIN 之前。
+        await harness.drop_database(base_dsn, db37)
+        await conn.execute("CREATE DATABASE " + quote_ident(db37))
+        await conn.execute("DELETE FROM public.pilot_create_intent")
+        await conn.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed, db_oid)"
+            " SELECT $1, $2, $3, $4, true, d.oid FROM pg_database d"
+            "  WHERE d.datname::text = $1",
+            db37, seed37, _CREATED_AT, f"lifecycle-{seed37}")
+        # 前置①：那个库**确实存在且 oid 对得上** → `vanished` 为假，只剩 `stale` 说话。
+        bound = await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_create_intent i"
+            " JOIN pg_database d ON d.datname::text = i.dbname AND d.oid = i.db_oid"
+            " WHERE i.dbname = $1", db37)
+        check(bound == 1,
+              "㊲ 前置：孤儿行绑在一个**存在的**实例上（隔离掉「库不存在」那一半）",
+              f"JOIN 命中 {bound} 行 —— 没隔离住，这一档会被 vanished 带过去")
+
+        await conn.execute("BEGIN")
+        try:
+            await conn.fetchval("SELECT pg_sleep(1.2)")
+            # 前置②：事务里的 `now()` 确实落后语句时刻 —— 否则这一档测不到时钟源。
+            drift = float(await conn.fetchval(
+                "SELECT EXTRACT(EPOCH FROM (statement_timestamp() - now()))"))
+            check(drift >= 1.0,
+                  "㊲ 前置：事务里的 `now()` 确实落后语句时刻 ≥1s",
+                  f"实得 drift={drift:.3f}s —— 事务没变老，这一档测不到时钟源")
+            # 造一行**真实已过期 0.1 秒**的孤儿：按真实时钟（clock_timestamp）回推。
+            # 用 `now()` 量的话它是 TTL−1.1s → 判成新鲜 → 不删。
+            await conn.execute(
+                "UPDATE public.pilot_create_intent"
+                "   SET inserted_at = clock_timestamp() - make_interval(secs => $2)"
+                " WHERE dbname = $1", db37, float(INTENT_TTL_SECONDS) + 0.1)
+            # 前置③：**模块自己那条 SQL** 在长事务里把它量成已过期。
+            rows37 = await conn.fetch(_LIST_ALL_INTENT_SQL)
+            age37 = next((float(r["age_seconds"]) for r in rows37
+                          if r["dbname"] == db37), None)
+            check(age37 is not None and age37 >= INTENT_TTL_SECONDS,
+                  "㊲ **模块的 `_LIST_ALL_INTENT_SQL`** 在长事务里仍把它量成已过期",
+                  f"实得 age_seconds={age37!r}，TTL={INTENT_TTL_SECONDS}"
+                  f"（小于 TTL = 用了 `now()`，预筛会直接跳过这一行）")
+
+            took37: list[str] = []
+
+            async def _try37(seed_of_row):
+                took37.append(seed_of_row)
+                return bool(await conn.fetchval(
+                    "SELECT pg_try_advisory_lock(hashtext('kline_pilot_' || $1))",
+                    seed_of_row))
+
+            async def _rel37(seed_of_row):
+                await conn.execute(
+                    "SELECT pg_advisory_unlock(hashtext('kline_pilot_' || $1))",
+                    seed_of_row)
+
+            cluster_sql = (_BACKEND / "sql/pilot_cluster_schema.sql").read_text(
+                encoding="utf-8")
+            try:
+                await init_cluster_marker(conn, connect=connect_peer,
+                                          cluster_schema_sql=cluster_sql,
+                                          try_seed_lock=_try37,
+                                          release_seed_lock=_rel37)
+            except Exception as exc:
+                check(False, "㊲ init 本身必须跑完", f"抛了：{type(exc).__name__}: {exc}")
+            check(took37 == [seed37],
+                  "㊲ 前置：预筛把这一行判成了孤儿并去取锁（用 `now()` 时这里是空的）",
+                  f"try_seed_lock 收到的 seed 列表 = {took37}")
+            # 判据看**数据库状态**：真实已过期的孤儿必须真的不在了。
+            left37 = await conn.fetchval(
+                "SELECT count(*) FROM public.pilot_create_intent WHERE dbname = $1", db37)
+            check(left37 == 0,
+                  "㊲ 长事务里那行真实已过期的孤儿**确实被删掉了**",
+                  f"事后仍有 {left37} 条 —— 锁内那条 DELETE 用了 `now()`，匹配 0 行")
+        finally:
+            await conn.execute("ROLLBACK")
+        await conn.execute("DELETE FROM public.pilot_create_intent WHERE dbname = $1", db37)
+    finally:
+        await conn.close()
+    await harness.drop_database(base_dsn, db37)
+```
+
+> ⚠️ **实施时必须现场确认的一点**：`ROLLBACK` 会把事务里那次 DELETE 一起回滚，故 `left37 == 0` 的断言**必须在 ROLLBACK 之前**求值（上面的写法已经是这样）。若实施时发现 `init_cluster_marker` 在显式事务里因别的原因跑不完（例如某条守卫查询要求自动提交），**不要**把这一档改成自动提交来「修绿」—— 那会让它退化成又一个对时钟源零判别力的档；正确做法是停下来报告，由控制者判断。
+
 - [ ] **Step 5b: 更新脚本尾部的「本脚本证明了什么」免责段**
 
 ⚠️ **这一步不是文档美化，是判据的一部分**：脚本尾部（约 L1783-1790）现在**逐字打印**着
@@ -1658,7 +1844,8 @@ S3 落地之后这句就成了**假陈述**，而这段话存在的全部理由�
 ```python
     print("✅ 本片（S3）在 S2b′ 的基础上补齐 `--init-cluster-marker`：")
     print("   零副作用预检（⑤ ⑤b）、标记不得短路现查（㉙）、")
-    print("   孤儿 intent 清理的取锁/还锁（㉚）与锁内当下求值（㊱）。")
+    print("   孤儿 intent 清理的取锁/还锁（㉚）、锁内当下求值（㊱）、")
+    print("   以及长事务下的 TTL 时钟源（㊲，与 ㉝c 同族）。")
     print("⚠️ 仍**没有**覆盖的：")
     print("     · 「不数 autovacuum worker」那一向没有常驻档（要改集群 autovacuum_naptime，")
     print("       对验收脚本太侵入）—— 由一次性真 PG 实验坐实并记进计划，如实登记。")
@@ -1683,7 +1870,7 @@ S3 落地之后这句就成了**假陈述**，而这段话存在的全部理由�
 docker start qmt-pg-r8 qmt-pg-r8b
 QMT_VERIFY_ALLOW_DESTRUCTIVE=1 "$PY" backend/scripts/verify_pilot_db_lifecycle.py 2>&1 | grep -E "档断言全部成立|FAIL|❌"
 ```
-预期：**46 档断言全部成立**，无 FAIL。
+预期：**47 档断言全部成立**，无 FAIL。
 
 同时人工核一遍尾部免责段的输出，确认里面**没有**「随 S3 补回」这类已经不成立的陈述：
 
@@ -1707,7 +1894,8 @@ cp backend/qmt_pilot_db.py /tmp/s3_t5_backup.py
 
 | # | 变异 | 必须变红的档 |
 |---|---|---|
-| M24 | `_DELETE_ORPHAN_INTENT_SQL` 去掉 `EXTRACT(EPOCH FROM (now() - inserted_at)) >= $2 OR` 前半，改成只按 `NOT EXISTS(...)` —— 再把整段 `AND (...)` 删光 | **㊱**（被刷新的凭据被删掉，`still == 0`） |
+| M24 | `_DELETE_ORPHAN_INTENT_SQL` 把整段 `AND (EXTRACT(...) >= $2 OR NOT EXISTS(...))` 删光（只按 dbname 删） | **㊱**（被刷新的凭据被删掉，`still == 0`） |
+| **M28** | `_DELETE_ORPHAN_INTENT_SQL` + `_LIST_ALL_INTENT_SQL` 的 `statement_timestamp()` 双双换回 `now()` | **㊲**（`took37 == []` 或 `left37 == 1`）—— 且 ⑤ ⑤b ㉙ ㉚ ㊱ **必须仍然全绿**，那正是「自动提交档对时钟源零判别力」的证据 |
 | M25 | Task 2 的三条 `*_durable` 别名合回一条 `maintenance_tables_durable` | **⑤b**（`left` 非空 —— 补建 DDL 真的落地了） |
 | M26 | 删掉清理循环的 `finally: await release_seed_lock(...)` | **㉚**（`_SEED_LOCK_HELD_SQL` 仍为真） |
 | M27 | 删掉末尾的 `await assert_cluster_allowed(...)` | **㉙**（init 竟然成功了） |
@@ -1718,7 +1906,7 @@ cp backend/qmt_pilot_db.py /tmp/s3_t5_backup.py
 
 ```bash
 git add backend/scripts/verify_pilot_db_lifecycle.py
-git commit -m "S3 Task5：真 PG 验收补五档（⑤ ⑤b ㉙ ㉚ ㊱），lifecycle 41→46 档"
+git commit -m "S3 Task5：真 PG 验收补六档（⑤ ⑤b ㉙ ㉚ ㊱ ㊲），lifecycle 41→47 档"
 ```
 
 ---
@@ -1730,7 +1918,7 @@ git commit -m "S3 Task5：真 PG 验收补五档（⑤ ⑤b ㉙ ㉚ ㊱），lif
 | 闸门 | 基线 | S3 实测 |
 |---|---|---|
 | `"$PY" -m pytest backend/tests -q` | 770 passed | ___ passed |
-| `verify_pilot_db_lifecycle.py` | 41 档 | 46 档 |
+| `verify_pilot_db_lifecycle.py` | 41 档 | 47 档 |
 | `verify_pilot_concurrency.py` | 11 档 | 11 档 |
 | `verify_pilot_two_phase_create.py` | 28 档 | 28 档 |
 | 变异表 M1–M27 | — | 逐条「变异 → 具名用例变红 → `cp` 复原」，由控制者亲跑 |
@@ -1770,12 +1958,26 @@ bash .claude/scripts/codex-attest.sh --scope branch-diff --base 8578a59 --head f
 | ① 逐行先取该行 seed 的锁，取不到就跳过 | Task 4 M13 / M14 + `test_init_cleans_orphan_rows_only_under_the_seed_lock` |
 | ② 取到才删、删完立刻释放 | Task 4 M18 / M19 + 真 PG ㉚ |
 | ③ 判据 = 超期 OR 库不存在，且「库不存在」在**同一条 SQL 里当下求值** | Task 4 M20 / M16 + 真 PG ㊱ |
-| 验收断言必须看**数据库状态** | ㉚ 的 `gone == 0`、㊱ 的 `still == 1`、⑤/⑤b 的 `to_regclass(...)` —— 全部查表，无一条只断言「发过 DELETE」 |
+| 验收断言必须看**数据库状态** | ㉚ 的 `gone == 0`、㊱ 的 `still == 1`、㊲ 的 `left37 == 0`、⑤/⑤b 的 `to_regclass(...)` —— 全部查表，无一条只断言「发过 DELETE」 |
+| TTL 时钟源必须是 `statement_timestamp()`（族规，codex S2a-R4-F2） | Task 4 的两条新 SQL + **Step 1b 把族守卫改成从模块推导**（不再手写名单）+ 真 PG ㊲ + 变异 M21b/M21c/M21d |
 
 **2. 占位符扫描**：无 TBD / TODO / 「similar to Task N」；每个代码步骤都带完整可粘贴的代码块。唯一的「以实测为准」是 Task 3/4 Step 6 的 pytest 总数 —— 那是**故意的**（内嵌「跑某命令应得 N」的自证会自过期，本仓踩过），判绿判据写的是「无 failed/error」而不是硬编码数字。
 
 **3. 类型一致性**：`init_cluster_marker(maint_conn, *, connect, cluster_schema_sql, try_seed_lock, release_seed_lock)` 的签名在 Task 3 定义、Task 4 追加使用、Task 5 三处调用，五处逐字一致。`_LIST_ALL_INTENT_SQL` 的输出列（`dbname` / `seed` / `db_oid` / `age_seconds`）与假件 `_orphan()` 的字典键、与循环体读的键，三处逐字一致。`_DELETE_ORPHAN_INTENT_SQL` 的两个参数（`$1=dbname`、`$2=ttl`）与调用处 `(r["dbname"], INTENT_TTL_SECONDS)` 一致，且被机械守卫 `sql.count("$1") == 1 and sql.count("$2") == 1` 钉住。
 
-**4. 已知的判别力空缺（诚实登记）**：
+**4. codex 对抗评审轮次记录**
+
+| 轮 | verdict | finding | 处置 |
+|---|---|---|---|
+| **R1** | `needs-attention`（**未 approve**） | **[high]** 孤儿清理用 `now()` 量 TTL，而仓里既有的两条 intent TTL 判据早已因同一原因（codex S2a-R4-F2，真 PG 15 实测）换成 `statement_timestamp()`；`init_cluster_marker` 收的是已连好的连接、不控制事务生命周期，长事务里 `now()` 冻在过去 → 真实已过期的孤儿被量成新鲜 → 残骸永远清不掉。**且计划里的机械测试写死要求 `now()`，会把正确的修法判红。** | **全部接受并已改**（见下） |
+
+R1 的三条已实测复核，**不是**照单全收：
+
+- ✅ `statement_timestamp()` 确在 main 的两条 SQL 上（`qmt_pilot_db.py:1186` / `:2413`），且带 `codex S2a-R4-F2，真 PG 15 实测` 的出处注释 —— 评审关于「仓里已经换过」的陈述**属实**。
+- ✅ 「计划的测试会把正确修法判红」**属实**，而且这正是 `feedback_plan_code_blocks_cause_vacuous_tests` 记的形态。
+- ⚠️ **评审没说到、但更要命的一条（我自己补的）**：族级守卫 `test_intent_ttl_is_never_measured_against_the_transaction_clock` 遍历的是**手写名单** `("_READ_INTENT_SQL", "_INSERT_INTENT_SQL")`。S3 的两条新 SQL 是同族第三、四个成员，手写名单**不会收录它们** —— 就算把 SQL 改对了，守卫对新成员仍是**零覆盖**，下一次改错没人拦。故 Step 1b 把族成员改成**从模块推导** + 双向核对，并配变异 M21d 验守卫**自己**的判别力。
+- ⚠️ 评审建议的「加一条真 PG 或单测模拟长事务」已落为**档 ㊲**；顺带发现 ⑤ ⑤b ㉙ ㉚ ㊱ 全在自动提交下跑，对时钟源**零判别力**（㉝c 那一档早就写下过同样的教训）。
+
+**5. 已知的判别力空缺（诚实登记）**：
 - Task 2 里闸 (i) 新增的三条 `*_durable` 参数化档**对别名拆分零判别力**（假件整字典回传）——已在 Task 2 正文里写明，判别力由 `test_shape_fakes_cover_every_predicate`（机械）+ Task 3 的混合态用例（行为）+ 真 PG ⑤b（语义）三层提供。
 - Task 4 里四条反向钉（`…only_under_the_seed_lock` / `…keeps_a_fresh_row…` / `…does_not_release_a_lock_it_never_took` / `…refuses_when_the_callback_lies…`）在功能未实现时**恒绿**，不能当「红→绿」证据 —— 已在 Step 2 写明，判别力由 M13/M15/M19/M17 逐条证明。
