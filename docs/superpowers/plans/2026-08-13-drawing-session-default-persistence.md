@@ -691,20 +691,30 @@ struct PendingDefaultStyleColumnTests {
         }
     }
 
-    /// T5b：**类型不匹配**，五个字段各一条 —— decodeIfPresent(Int.self) 能过 T4/T5 却在这里抛
+    /// T5b：**类型不匹配**，五个字段各一条 —— `decodeIfPresent(Int.self)` 能过 T4/T5 却在这里抛。
+    /// ⚠️ **每条都带一个健康的 companion 字段并断言它存活**（codex plan-P-R1 medium）：
+    ///    上一稿只断言「没抛且非 nil」，于是一个「任何类型不匹配就把整份默认丢回出厂」的实现
+    ///    照样全绿 —— 而那**违反 D92 的逐字段回落不变量**。判据必须和 T4 对称。
     @Test func type_mismatch_falls_back_field_locally() throws {
-        let raws = [
-            #"{"thickness":"fat","colorToken":"cyan"}"#,
-            #"{"lineSubType":7,"colorToken":"cyan"}"#,
-            #"{"colorToken":null,"thickness":4}"#,
-            #"{"lineStyle":[],"colorToken":"cyan"}"#,
-            #"{"labelMode":{},"colorToken":"cyan"}"#,
+        let cases: [(String, (DrawingDefaultStyle) -> Bool)] = [
+            // 坏字段回落到出厂值；companion 字段必须**保留磁盘上的值**
+            (#"{"thickness":"fat","colorToken":"cyan"}"#,
+             { $0.thickness == DrawingDefaultStyle().thickness && $0.colorToken == .cyan }),
+            (#"{"lineSubType":7,"colorToken":"cyan"}"#,
+             { $0.lineSubType == .straight && $0.colorToken == .cyan }),
+            (#"{"colorToken":null,"thickness":4}"#,
+             { $0.colorToken == DrawingDefaultStyle().colorToken && $0.thickness == 4 }),
+            (#"{"lineStyle":[],"colorToken":"cyan"}"#,
+             { $0.lineStyle == .solid && $0.colorToken == .cyan }),
+            (#"{"labelMode":{},"colorToken":"cyan"}"#,
+             { $0.labelMode == .hidden && $0.colorToken == .cyan }),
         ]
         for slot in Slot.allCases {
-            for raw in raws {
-                guard let loaded = try seedRowThenReadStyle(slot, column: raw), loaded != nil else {
-                    { Issue.record("\(slot.table) 在 \(raw) 上抛了"); return }
+            for (raw, check) in cases {
+                guard let loaded = try seedRowThenReadStyle(slot, column: raw), let s = loaded else {
+                    Issue.record("\(slot.table) 在 \(raw) 上抛了或返回 nil"); return
                 }
+                #expect(check(s), "\(slot.table) / \(raw)：坏字段未回落，或把同一对象里健康的 companion 字段一起丢了")
             }
         }
     }
@@ -800,6 +810,7 @@ G7：`DrawingDefaultStyleColumn.decode` 在 `Sources/` 里**恰好 2 个调用�
 | M4 | `decode` 换成 `JSONDecoder().decode(DrawingDefaultStyle.self, …)` | T4 / T5 / T5b |
 | M4b | 每个字段的 `as?` 换成强制解包 | T5b |
 | M4c | **只**保留 `colorToken` 的容错、其余四个改成强制 | T4 的另外三条（`colorToken` 那条**仍绿**） |
+| **M4d** | 任一字段类型不匹配时**整份丢回出厂**（而非逐字段回落） | **只有 T5b** 红 —— 专证「只断言没抛」是假绿（codex plan-P-R1 medium） |
 | M15 | replay 的 `loadReplay` 改成直接 `JSONDecoder().decode` | **只有 replay 侧**的 T4/T5/T5b + G7 |
 
 - [ ] **Step 7: 提交**
@@ -1010,25 +1021,92 @@ git commit -m "feat(coordinator): 本局默认写入两处存档 + clean-skip �
 - [ ] **Step 1: 写失败守卫（G6 / G4b / G4c）**
 
 ```swift
+// 共用小工具：从剥过注释/字面量的源码里，**按大括号配对**取出某个修饰符的闭包体。
+// 为什么必须这么做：两条 `.onChange` 都在同一个文件里，任何「A 出现过 + B 出现过」式的
+// 分离 contains 都会被**另一条**满足（codex plan-P-R1 high①：既有的 drawingsRevision
+// 那条已经含 `lifecycle.autosave(immediate: true)`）。
+private func closureBody(after needle: String, in src: String) throws -> String {
+    guard let head = src.range(of: needle) else {
+        Issue.record("未找到 \(needle)"); return ""      // 锚点失效必须报错，不得静默返回空
+    }
+    guard let open = src.range(of: "{", range: head.upperBound..<src.endIndex) else {
+        Issue.record("\(needle) 之后没有 `{`"); return ""
+    }
+    var depth = 0
+    var i = open.lowerBound
+    while i < src.endIndex {
+        if src[i] == "{" { depth += 1 }
+        if src[i] == "}" { depth -= 1; if depth == 0 { return String(src[open.upperBound..<i]) } }
+        i = src.index(after: i)
+    }
+    Issue.record("\(needle) 的闭包大括号未配对"); return ""
+}
+
 /// G6：D94 的**唯一**守门 —— host 够不着 TrainingView（UIKit-gated），行为测试受阻于
 /// 本仓已记录的平台限制（DrawingLayoutInvariantTests:9-28：四条路三条死）。
-@Test func training_view_wires_default_style_autosave_trigger() throws {
+/// ⚠️ **必须断言「那一条」闭包体内**有 autosave，不能分开判两个子串
+///    （codex plan-P-R1 high①：分开判时，一个**空闭包**照样全绿）。
+@Test func training_view_default_style_onchange_body_calls_autosave() throws {
     let src = try SourceGuardScanner.strippedSource(of: "UI/TrainingView.swift")
-    #expect(src.contains("onChange(of: engine.drawingSession.defaultStyle)"),
-            "缺少本局默认的 autosave 触发（D94）")
-    // 触发体内必须真的调 autosave，而不是空闭包
-    #expect(src.contains("lifecycle.autosave(immediate: true)"))
+    let body = try closureBody(after: "onChange(of: engine.drawingSession.defaultStyle)", in: src)
+    #expect(body.contains("lifecycle.autosave(immediate: true)"),
+            "本局默认的 onChange 闭包体内没有调 autosave（D94）——空闭包也会让旧版 G6 变绿")
 }
 
-/// G4b：复盘排除依赖的是**整条合取式**，不是其中一项（只钉 showsTradeButtons 挡不住改另外两项）
-@Test func style_panel_visibility_predicate_unchanged() throws {
-    let src = try SourceGuardScanner.strippedSource(of: "UI/TrainingView.swift")
-    #expect(src.contains("showsTradeButtons && isDrawingActive && typeRowExpanded"))
+/// G6 的**双向自检**：喂一个「有 onChange 但闭包为空」的样本必须**不**满足
+@Test func g6_rejects_empty_onchange_body() throws {
+    let fake = ".onChange(of: engine.drawingsRevision) { _, _ in lifecycle.autosave(immediate: true) }\n"
+             + ".onChange(of: engine.drawingSession.defaultStyle) { _, _ in }"
+    let body = try closureBody(after: "onChange(of: engine.drawingSession.defaultStyle)", in: fake)
+    #expect(!body.contains("lifecycle.autosave"), "自检失败：空闭包竟被判为合格")
 }
 
-/// G4c：样式面板挂载点恰好 1 处（防「另开一条路径」绕过 G4/G4b）
-@Test func style_panel_has_exactly_one_mount_site() throws { /* 结构计数，剥注释与字面量 */ }
+/// 取 `private var X: Bool { <RHS> }` 的 RHS，压掉所有连续空白。
+private func definitionRHS(of name: String, in src: String) throws -> String {
+    let body = try closureBody(after: "var \(name): Bool", in: src)
+    return body.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+}
+
+/// G4b：复盘排除依赖的是**整条合取式**。
+/// ⚠️ **不能用 `contains`**（codex plan-P-R1 high②）：`… && typeRowExpanded || isReview`
+///    仍然包含原子串、照样绿。改为取出定义式右侧、**归一化空白后精确相等**。
+@Test func style_panel_visibility_predicate_is_exactly_the_three_way_conjunction() throws {
+    let src = try SourceGuardScanner.strippedSource(of: "UI/TrainingView.swift")
+    let rhs = try definitionRHS(of: "stylePanelWillBeVisible", in: src)
+    #expect(rhs == "showsTradeButtons && isDrawingActive && typeRowExpanded",
+            "stylePanelWillBeVisible 的定义式被改动了，D90 的复盘排除失效，实测：\(rhs)")
+}
+
+/// G4b 的**双向自检**：放宽后的谓词必须被判不合格
+@Test func g4b_rejects_broadened_predicate() throws {
+    let fake = "private var stylePanelWillBeVisible: Bool { showsTradeButtons && isDrawingActive && typeRowExpanded || isReview }"
+    let rhs = try definitionRHS(of: "stylePanelWillBeVisible", in: fake)
+    #expect(rhs != "showsTradeButtons && isDrawingActive && typeRowExpanded")
+}
+
+/// G4c：样式面板挂载点在 `Sources/` 里**恰好 1 处**（防「另开一条路径」绕过 G4/G4b）。
+/// ⚠️ 上一稿这里是**空函数体** —— 编译通过、恒绿的 no-op（codex plan-P-R1 high②）。
+@Test func style_panel_has_exactly_one_mount_site() throws {
+    let hits = try SourceGuardScanner.countOccurrences(
+        pattern: #"DrawingStylePanel\s*\("#,
+        inSourcesMatching: { _ in true },
+        stripCommentsAndStringLiterals: true)
+    #expect(hits == 1, "样式面板挂载点应恰好 1 处，实测 \(hits) —— 多一处 = 有绕过 G4/G4b 的新路径")
+}
+
+/// G4c 的**双向自检**：两处挂载的样本必须被数出 2（防「恒返回 1」的计数实现）
+@Test func g4c_rejects_second_mount_site() {
+    let fake = "DrawingStylePanel(a: 1)\nDrawingStylePanel(b: 2)"
+    let n = fake.components(separatedBy: "DrawingStylePanel(").count - 1
+    #expect(n == 2)
+}
 ```
+
+> ⚠️ `SourceGuardScanner.strippedSource(of:)` / `countOccurrences(...)` 的**确切签名以
+> `ios/Contracts/Tests/KlineTrainerContractsTests/SourceGuardScanner.swift` 为准**：
+> 先读它、用它已有的 API 改写上面这些调用，**不要新建第二个扫描器**。
+> 若它尚无「按大括号配对取闭包体」的能力，就把上面的 `closureBody` 作为**测试文件内的私有 helper** 保留
+> （它不依赖扫描器，只依赖已剥离的源码字符串）。
 
 - [ ] **Step 2: 跑守卫确认失败**
 
@@ -1058,9 +1136,14 @@ cd "/Users/maziming/Coding/Prj_Kline trainer" && (set -o pipefail; xcodebuild te
 grep -c "Test Case .* passed" /tmp/catalyst.log    # 判绿读执行量，不读 TEST SUCCEEDED
 ```
 
-- [ ] **Step 5: 变异 M7**
+- [ ] **Step 5: 变异 M7 / M7b / M2c / M2d**
 
-删掉 Step 3 那条 `.onChange` → **只有 G6 变红**（T10 **不得**红 —— 它对视图触发零判别力，这正是 G6 存在的理由）。
+| 变异 | 改法 | 只应变红 |
+|---|---|---|
+| M7 | 删掉 Step 3 那条 `.onChange` | **只有 G6**（T10 **不得**红 —— 它对视图触发零判别力，这正是 G6 存在的理由） |
+| **M7b** | `.onChange` **留着但闭包体清空** `{ _, _ in }` | **只有 G6** —— 专证「分离两个 `contains` 的旧写法是假绿」（codex plan-P-R1 high①） |
+| **M2c** | `stylePanelWillBeVisible` 改成 `… && typeRowExpanded \|\| isReview`（放宽） | **只有 G4b** —— 专证 `contains` 挡不住放宽（high②） |
+| **M2d** | 再加一处 `DrawingStylePanel(` 挂载 | **只有 G4c** —— 专证空函数体的旧写法是恒绿 no-op（high②） |
 
 - [ ] **Step 6: 提交**
 
