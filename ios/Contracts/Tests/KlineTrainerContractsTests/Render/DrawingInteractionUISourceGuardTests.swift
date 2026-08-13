@@ -262,6 +262,33 @@ struct DrawingInteractionUISourceGuardTests {
         #expect(!body.contains(squeeze("lifecycle.autosave")), "自检失败：空闭包竟被判为合格")
     }
 
+    /// G6b（Task 8 修复轮 1）：**modifier 必须真的挂在 TrainingView 的 body 上**。
+    /// task-8 spike 把 drawingsRevision + defaultStyle 两条 `.onChange` 抽进了
+    /// `DrawingAutosaveTriggersModifier`（同文件，见其定义处）——抽取之后「onChange 存在于文件里」
+    /// 不再等于「它生效」：删掉 body 里那句 `.modifier(...)`，G6 仍绿（onChange 还在 modifier 结构体
+    /// 内，同一个文件）、spike 行为测试也仍绿（它们在自己的最小宿主里挂 modifier，根本不经过
+    /// TrainingView 的 body），而生产上两条 autosave 触发（defaultStyle **与既有的 drawingsRevision**
+    /// 一起）会静默失效——这个缺口比新增功能本身更严重，因为它把一条本来安全的既有触发也拖下水。
+    @Test("Task 8 G6b：DrawingAutosaveTriggersModifier 必须挂在 TrainingView 的 body 上")
+    func autosaveTriggersModifierIsAttachedInProduction() throws {
+        let sites = try callSiteCount("DrawingAutosaveTriggersModifier(")
+        let total = sites.reduce(0) { $0 + $1.count }
+        #expect(total == 1, "Sources/ 里应恰好 1 处挂载，实测 \(total)：\(sites.map { "\($0.file)×\($0.count)" })")
+        #expect(sites.first?.file.hasSuffix("TrainingView.swift") == true,
+                "挂载点应在 TrainingView.swift，实测：\(sites.map(\.file))")
+        // 必须是**挂在 body 上**的形态，不是别处随便构造一个实例
+        let src = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        #expect(src.contains(squeeze(".modifier(DrawingAutosaveTriggersModifier(")),
+                "modifier 没有以 .modifier(...) 形态挂在 body 链上")
+    }
+
+    /// G6b 自检：只声明不挂载必须被判不合格。
+    @Test("Task 8 G6b 自检：只声明不挂载必须被判不合格")
+    func g6bRejectsDeclarationWithoutAttachment() {
+        let fake = squeeze("struct DrawingAutosaveTriggersModifier: ViewModifier { func body(content: Content) -> some View { content } }")
+        #expect(!fake.contains(squeeze(".modifier(DrawingAutosaveTriggersModifier(")))
+    }
+
     /// 取 `private var X: Bool { <RHS> }` 的 RHS（squeezed，已无空白）。
     private func definitionRHS(of name: String, in src: String) throws -> String {
         try closureBody(after: "var \(name): Bool", in: src)
