@@ -58,6 +58,18 @@ gate() { echo "── $1"; shift; "$@" || { echo "!! 闸门失败：$*"; exit 1;
   规则：**任何带管道的验证命令都必须落在贴过 PREAMBLE 的块里**；
   多门连跑的块（Task 4 / Task 8）还要每门单独 `|| exit 1`，**不许一门红了继续跑下一门然后报绿**
   （[[feedback_gate_pipe_swallows_exit_code]]）。
+- ⭐⭐ **判绿不能只读 `swift test | tail -3`**（Task 3 控制者实测发现）：那行
+  `Test run with N tests in M suites passed` **只统计 swift-testing（`@Test`/`@Suite`）**，
+  本仓另有 **269 条 XCTest**（`func test…`）**完全不在这行里** —— 而本计划的守卫
+  **G9 是 XCTest、G8 也是 XCTest**。只看这行，「守卫根本没跑」与「守卫跑了且通过」长得一模一样。
+  （闸门本身靠 PREAMBLE 的 `pipefail` + 退出码仍是安全的；缺的是**人读到的证据**。）
+  **收尾判绿一律加这两条**：
+  ```bash
+  swift test 2>&1 | tee /tmp/gate.log | tail -3          # swift-testing 汇总
+  grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/gate.log | tail -2   # XCTest 执行量
+  grep -E "Test Case .*<本 task 新增的 XCTest 名>.* passed" /tmp/gate.log     # 点名确认它真跑了
+  ```
+  报告里**必须同时记录两个数字**（swift-testing 条数 / XCTest 条数），只报一个视为证据不全。
 - ⭐ **每个 task 收尾必须 `git status --short` 确认工作区干净**（输出为空）。
   非空 = 有改动没被 commit（脏树假绿）或变异没复原干净 —— **两者都必须当场查清再继续**。
 
