@@ -942,7 +942,7 @@ def try_one(code):
   "cluster_boundary_error": "no_marker|unrelated_database|unowned_pilot_database|maintenance_db_not_empty|intent_not_confirmed|registry_not_written|intent_not_cleared|created_database_replaced",  // 后 3 项 O4-R18-C2；末项 O4-R36-C1
   // R39-F2 + R80-F1；后 5 项由 4a 实现引入（PR 4a 收尾的机械检查①）
   // ⚠️ 原文是一条被注释截断的两行字符串，且尾部三项重复了一遍 —— 已合成单行并去重（O4 自查补）
-  "db_boundary_error": "not_owned|registry_proof_missing|pilot_meta_ambiguous|target_db_in_use|target_db_unreadable|db_state_initializing|binding_mismatch|reset_foreign_token_required|reset_foreign_token_invalid|schema_fingerprint_mismatch|structure_mismatch|illegal_db_name|illegal_seed|seed_db_name_mismatch|confirm_token_underivable|destructive_without_reset|run_id_missing|seed_lock_not_held|intent_row_conflict|schema_transaction_conflict|schema_transaction_missing|pilot_schema_malformed|ready_not_set|fingerprint_content_mismatch|schema_declares_no_tables|schema_tables_missing|pilot_schema_invalidated|phase1_meta_tampered|pilot_tables_have_dependents|final_meta_mismatch|pilot_source_not_empty|connection_wrong_database|connection_wrong_cluster|connection_wrong_instance|business_tables_missing|schema_not_canonical|identity_scalar_invalid|business_schema_drift|business_tables_have_dependents",  // 后 7 项 O4-R18-C2；再后 3 项 O4-R19-C1；后二项 O4-R21-C2 / R22-C2。⚠️ forged_reset_authorization 曾由 4a-2b/S2a 引入（手搓的伪造凭据够不到销毁入口），2026-08-12 塌缩把整套可传递凭据删掉之后**没有任何代码路径抛得出它**，故移出本枚举——留着就是给消费者一个永远等不到的码。⚠️ target_db_replaced / connection_limit_not_restored 属 **S2b 的 DROP 路径**，随那一片补进本枚举，同一条理由
+  "db_boundary_error": "not_owned|registry_proof_missing|pilot_meta_ambiguous|target_db_in_use|target_db_unreadable|db_state_initializing|binding_mismatch|reset_foreign_token_required|reset_foreign_token_invalid|schema_fingerprint_mismatch|structure_mismatch|illegal_db_name|illegal_seed|seed_db_name_mismatch|confirm_token_underivable|destructive_without_reset|run_id_missing|seed_lock_not_held|intent_row_conflict|schema_transaction_conflict|schema_transaction_missing|pilot_schema_malformed|ready_not_set|fingerprint_content_mismatch|schema_declares_no_tables|schema_tables_missing|pilot_schema_invalidated|phase1_meta_tampered|pilot_tables_have_dependents|final_meta_mismatch|pilot_source_not_empty|connection_wrong_database|connection_wrong_cluster|connection_wrong_instance|business_tables_missing|schema_not_canonical|identity_scalar_invalid|business_schema_drift|business_tables_have_dependents|target_db_replaced|connection_limit_not_restored",  // 后 7 项 O4-R18-C2；再后 3 项 O4-R19-C1；后二项 O4-R21-C2 / R22-C2。⚠️ forged_reset_authorization 曾由 4a-2b/S2a 引入（手搓的伪造凭据够不到销毁入口），2026-08-12 塌缩把整套可传递凭据删掉之后**没有任何代码路径抛得出它**，故移出本枚举——留着就是给消费者一个永远等不到的码。⚠️ 末二项由 **4a-2b/S2b′ 的 `reset_pilot_database`** 引入（DROP 前实例被换掉 / 封锁后连接上限恢复失败），同一条纪律：抛得出来才写进来
   "db_bound_identity": {"export_log_sha256_prefix": "…", "output_dir": "…",        // 该库自称的身份
                         "created_at": "…"},                     // ⚠️ confirm_token 只进 stderr，不进本文件
   "fatal_error": {"stage": "db|staging_read|disk|…", "exception": "…"},   // **报告顶层**，两字段
@@ -1328,6 +1328,38 @@ Docker `postgres:15.12`，脚本 `verify_pilot_e2e.py`（与 4a 的 `verify_pilo
 
 - 训练组作废/版本化（P3-D10①）：独立 plan
 - 复盘/划线等其余 backlog：见各自 plan
+
+### 10a. ⭐ 待办：`--reset` 缺外部归属凭据时要不要人工确认令牌
+
+**来源**：codex 对抗性评审 4a-2b 合并轮 R3-F1（high），**user 2026-08-13 认可、拍板放到 4c**。
+
+**现状（有意为之，别当 bug 修掉）**：`--reset` 路径**刻意不要**维护库的
+`pilot_database_registry` 凭据，只认目标库自证的 `pilot_meta`。
+理由是 user 2026-08-05 拍板的：登记表在维护库里、本工具从不清它，
+维护库一旦被重新初始化，**非空 pilot 库就再也清不掉**——那正是 spec 花整轮移除的
+R55-F1 锁死。这条不对称由 `test_reset_does_not_require_the_registry_proof` 钉着。
+
+**codex 指出的真实后果**：一个**伪造/拷贝**的同名 `kline_pilot_<seed>` 库，
+只要 `tool` / `seed` / `export_log_sha256` / `output_dir` 四个值凑齐，
+就会被不可逆地 DROP —— 哪怕本工具从没建过那个实例。
+（现有兜底：集群闸要求整台集群被显式声明为一次性可弃 + 库名恰等于本次 seed +
+持有按 seed 的 advisory lock。门槛不低，但不是零。）
+
+**要评估的中间路线**：缺外部凭据时**要一个显式的人工确认令牌**
+（复用现成的 `--reset-foreign` 机制与 `confirm_token` 专用通道），
+即「不锁死逃生口、但要求知情同意」。两个顾虑都能满足。
+
+**为什么放 4c 而不是 4a-2b**：
+1. 这是**新增授权语义**，不是修缺陷 —— 按仓库规矩要走
+   `superpowers:brainstorming` → `writing-plans`，不该塞进一个已跑 9 轮的 PR 尾巴；
+2. 令牌是给**人**看的，而消费/打印它的 CLI 在 4c。放在 4a-2b 只能验到
+   「函数抛得出这个码」，验不到「操作者真的看得见、并能据此重跑」——
+   又会多出一条「本片验不到」的残留；
+3. 4a-2b 已明写接受该残留，PR 描述里逐字登记。
+
+⚠️ **动手前必须先回答**：维护库被重新初始化之后，操作者**拿得到**那个令牌吗？
+   令牌由目标库自称的身份派生（`derive_confirm_token`），不依赖登记表 —— 初步看拿得到，
+   但要在 brainstorming 里坐实，否则就是把 R55-F1 锁死换个形态请回来。
 
 ---
 
