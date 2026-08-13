@@ -940,17 +940,26 @@ final class M01MatrixSyncGuardTests: XCTestCase {
         return String(doc[start.upperBound..<end.lowerBound])
     }
 
-    /// 解析 markdown 表 → [首列标签: 第二列值]。跳过表头分隔行与所有非 `|` 开头的行
+    /// 解析 markdown 表 → [首列标签: 第二列值]。**只收 `|---|` 分隔行之后的数据行**
     ///（bump 记录是 `>` 引用块，天然被排除）。
+    ///
+    /// ⚠️ **必须显式跳过表头行**（Task 4 实施者实测暴露、控制者复现确认）：
+    ///    只靠「第二列全是 `-`/`:` 就跳过」**只能跳掉分隔行本身**，表头那行
+    ///    （`| 维度 | 当前版本 | … |`）会被当成一条数据 ⇒ 解析出 6 行而不是 5 行，
+    ///    自检里的防空转计数恒不成立。markdown 的语义就是「分隔行之前是表头」，
+    ///    所以判据取「见到分隔行之后才开始收」——而不是把期望计数从 5 改成 6
+    ///    （那是把错误固化，且 `rows()` 会继续返回一条根本不是数据的行）。
     static func rows(_ section: String) -> [String: String] {
         var out: [String: String] = [:]
+        var seenDivider = false
         for raw in section.components(separatedBy: "\n") {
             let line = raw.trimmingCharacters(in: .whitespaces)
             guard line.hasPrefix("|"), line.hasSuffix("|") else { continue }
             let cells = line.dropFirst().dropLast()
                 .components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
-            guard cells.count >= 2, !cells[1].isEmpty,
-                  !cells[1].allSatisfy({ $0 == "-" || $0 == ":" }) else { continue }
+            guard cells.count >= 2, !cells[1].isEmpty else { continue }
+            if cells[1].allSatisfy({ $0 == "-" || $0 == ":" }) { seenDivider = true; continue }
+            guard seenDivider else { continue }        // 分隔行之前 = 表头，不是数据
             out[cells[0]] = cells[1]
         }
         return out
