@@ -358,11 +358,27 @@ git commit -m "S3 Task2：维护表耐久性判据拆成每表一条（为 init 
 
 ```python
 class _InitMaint(_FakeConn):
-    """维护连接：三张表的「在场」与「补建后才合规」，以及全表 intent 扫描。"""
+    """维护连接：三张表的「在场」与「补建后才合规」、全表 intent 扫描、**锁状态的迁移**。"""
 
-    def __init__(self, all_intent_rows=(), intent_table_missing=False, **kw):
+    def __init__(self, all_intent_rows=(), intent_table_missing=False,
+                 pre_held_seeds=(), **kw):
         super().__init__(**kw)
         self.all_intent_rows = list(all_intent_rows)
+        # ⚠️ **锁状态必须建模成会变的集合，不能是一个静态布尔**（codex S3-R2 之后）：
+        #    孤儿清理现在在**取锁前后各查一次** `_SEED_LOCK_HELD_SQL` ——
+        #    前一次必须为假（证明这把锁不是本连接早就持有的），后一次必须为真
+        #    （证明回调真的把它取到了）。父类的 `seed_lock_held` 是**一个布尔**，
+        #    两次查询会得到同一个答案，于是**两条判据里必然有一条恒真、测不出东西**。
+        #    改成集合之后，`_locker` 在授予时写入、释放时移出，两次查询自然不同。
+        #    `pre_held_seeds` = 进入 init **之前**就已挂在这条连接上的锁（可重入那一档）。
+        self.held_seeds = set(pre_held_seeds)
+
+    async def fetchval(self, query, *args):
+        # 父类按 `"pg_locks" in query` 返回静态布尔；这里改成按集合作答。
+        if "pg_locks" in query:
+            self.ops.append(query)
+            return args[0] in self.held_seeds
+        return await super().fetchval(query, *args)
         # 三张维护表**在不在场**（与「在场但结构坏」必须分得开）。
         self.maintenance_presence = {"marker_present": True, "intent_present": True,
                                      "registry_present": True}
@@ -402,21 +418,32 @@ def _orphan(dbname="kline_pilot_gone", seed="gone", age_seconds=0, db_oid="16400
             "db_oid": db_oid}
 
 
-def _locker(*, grants=True, record=None, released=None):
-    """返回 (try_seed_lock, release_seed_lock) 一对 —— **取了就必须还**。"""
+def _locker(maint=None, *, grants=True, record=None, released=None):
+    """返回 (try_seed_lock, release_seed_lock) 一对 —— **取了就必须还**。
+
+    ⚠️ 真授予时**同步更新假件的 `held_seeds`**：模块随后要在 `maint_conn` 上用
+       `_SEED_LOCK_HELD_SQL` 复核，「回调说取到了」与「连接上真挂着」必须一致。
+       两者**故意可以做成不一致** —— 那正是「回调撒谎」那一档（传一对不更新
+       `held_seeds` 的自制回调即可，见
+       `test_orphan_cleanup_refuses_when_the_callback_lies_about_the_lock`）。
+    """
     async def _try(seed):
         if record is not None:
             record.append(seed)
+        if grants and maint is not None:
+            maint.held_seeds.add(seed)
         return grants
 
     async def _release(seed):
         if released is not None:
             released.append(seed)
+        if maint is not None:
+            maint.held_seeds.discard(seed)
     return _try, _release
 
 
 def _init(maint, *, targets=None, lock_pair=None):
-    try_lock, release_lock = lock_pair or _locker()
+    try_lock, release_lock = lock_pair or _locker(maint)
     return init_cluster_marker(
         maint, connect=_connector(targets or {}), cluster_schema_sql=_CLUSTER_SQL,
         try_seed_lock=try_lock, release_seed_lock=release_lock)
@@ -524,10 +551,15 @@ def test_init_refuses_a_cluster_schema_that_is_not_the_canonical_file():
     """
     maint = _InitMaint()
     evil = _CLUSTER_SQL + "\nTRUNCATE public.pilot_create_intent;\n"
+    # ⚠️ **一对回调必须来自同一次 `_locker(...)` 调用**：写成
+    #    `try_seed_lock=_locker(maint)[0], release_seed_lock=_locker(maint)[1]`
+    #    会造出**两对互不相干**的闭包，`record` / `released` 各记各的 —— 一族
+    #    「取了没还」的断言会因此恒真。
+    _lp = _locker(maint)
     with pytest.raises(PilotClusterBoundaryError) as ei:
         asyncio.run(init_cluster_marker(
             maint, connect=_connector({}), cluster_schema_sql=evil,
-            try_seed_lock=_locker()[0], release_seed_lock=_locker()[1]))
+            try_seed_lock=_lp[0], release_seed_lock=_lp[1]))
     assert ei.value.code == "cluster_schema_not_canonical"
     assert maint.ops == [], "连一条查询都不该发 —— 这是纯函数判定"
 
@@ -1024,7 +1056,7 @@ def test_init_cleans_orphan_rows_only_under_the_seed_lock():
     第 6 条不成立 → **自己的残骸自己清不掉**（spec O4-F2 修正③）。"""
     maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_running",
                                                 seed="running")])
-    asyncio.run(_init(maint, lock_pair=_locker(grants=False)))
+    asyncio.run(_init(maint, lock_pair=_locker(maint, grants=False)))
     assert _deletes(maint) == [], "取不到 seed 锁就必须跳过，不得删"
 
 
@@ -1032,7 +1064,7 @@ def test_init_takes_the_lock_of_the_row_being_deleted():
     """锁必须**逐行按那一行的 seed** 取，不是随便取一把。"""
     asked = []
     maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_gone", seed="gone")])
-    asyncio.run(_init(maint, lock_pair=_locker(record=asked)))
+    asyncio.run(_init(maint, lock_pair=_locker(maint, record=asked)))
     assert asked == ["gone"]
 
 
@@ -1097,7 +1129,8 @@ def test_orphan_cleanup_refuses_when_the_callback_lies_about_the_lock():
     """
     orphan = {"dbname": "kline_pilot_ghost", "seed": "ghost",
               "db_oid": "99999", "age_seconds": 10 ** 9}
-    maint = _InitMaint(all_intent_rows=[orphan], seed_lock_held=False)  # 回调撒谎
+    # 回调撒谎：`held_seeds` 始终为空（连接上并没有那把锁），而回调返回 True。
+    maint = _InitMaint(all_intent_rows=[orphan])
 
     async def _lying_try(_seed):
         return True                            # 说取到了，实际 pg_locks 里没有
@@ -1109,6 +1142,53 @@ def test_orphan_cleanup_refuses_when_the_callback_lies_about_the_lock():
     assert _deletes(maint) == [], "回调撒谎说持有锁，孤儿清理就把恢复凭据删了"
 
 
+def test_orphan_cleanup_binds_the_delete_to_the_row_it_locked():
+    """DELETE 必须按**取锁的那一行**删（codex S3-R2）。
+
+    授权来自「本次持有的是这一行 seed 的 advisory lock」。只按 dbname 删的话，
+    语句靠的是「dbname 恒为 `kline_pilot_<seed>`」这条**跨列不变量**，
+    而它**没有任何数据库约束在兜** —— 孤儿清理处理的恰恰是来路不明的行
+    （旧版本写的 / `pg_restore` 还原的 / 人工插的），对它们那条不变量不成立。
+    """
+    seen = []
+
+    class _RecordArgs(_InitMaint):
+        async def execute(self, query, *args):
+            if query.strip().upper().startswith("DELETE"):
+                seen.append(args)
+            return await super().execute(query, *args)
+
+    maint = _RecordArgs(all_intent_rows=[_orphan(dbname="kline_pilot_gone",
+                                                 seed="gone")])
+    asyncio.run(_init(maint))
+    assert seen == [("kline_pilot_gone", "gone", INTENT_TTL_SECONDS)], \
+        f"DELETE 的参数不是 (dbname, seed, ttl)：{seen}"
+
+
+def test_orphan_cleanup_skips_a_seed_whose_lock_this_connection_already_holds():
+    """**取锁之前先证明本连接还没持有它**（codex S3-R2，真 PG 15.12 实测坐实）。
+
+    advisory lock 在同一 session 内**可重入**：实测 `pg_try_advisory_lock` 对一把
+    本连接已持有的锁**照样返回 true**（计数器 1→2），而 `_SEED_LOCK_HELD_SQL`
+    在调用之前**就已经是 true`** —— 于是「取到了 + 复核为真」这套证明
+    对这一行**没有提供任何新的互斥**。
+
+    危险的是**自己**这一档：本连接正在为该 seed 干别的事（4c 的 wrapper 把 init
+    套进一次 create/reset、或连接池里漏回来一把锁），而这里把它**进行中的**
+    恢复凭据删掉 —— 就是「不加锁会删掉一次正在进行的运行的行」换了个形态。
+
+    ⚠️ 反向的一半由 `test_init_deletes_stale_or_vanished_rows` 兜着：
+       事前**没**持有时照常清理，别把这条修成「一律跳过」。
+    """
+    took, freed = [], []
+    maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_gone", seed="gone")],
+                       pre_held_seeds=("gone",))     # 事前就持有 → 必须 fail-closed
+    asyncio.run(_init(maint, lock_pair=_locker(maint, record=took, released=freed)))
+    assert _deletes(maint) == [], "本连接事前已持有该 seed 的锁，仍然删了凭据"
+    assert took == [], "事前已持有就不该再去取锁（可重入只会让计数器涨上去）"
+    assert freed == [], "没取过就不许还 —— 那会把别处正持有的锁释放掉"
+
+
 def test_orphan_cleanup_releases_every_seed_lock_it_takes():
     """**取了就必须还**：会话级锁不还会一直挂在维护连接上，挡住后续同 seed 的运行；
     同一条连接上后来的 `_SEED_LOCK_HELD_SQL` 也会观察到一把**本次从未刻意取过**的锁。"""
@@ -1117,7 +1197,7 @@ def test_orphan_cleanup_releases_every_seed_lock_it_takes():
         _orphan(dbname="kline_pilot_gone", seed="gone"),
         _orphan(dbname="kline_pilot_stale", seed="stale",
                 age_seconds=INTENT_TTL_SECONDS + 1)])
-    asyncio.run(_init(maint, lock_pair=_locker(record=taken, released=freed)))
+    asyncio.run(_init(maint, lock_pair=_locker(maint, record=taken, released=freed)))
     assert taken == ["gone", "stale"]
     assert freed == taken, f"取了 {taken} 却只还了 {freed}"
 
@@ -1134,7 +1214,7 @@ def test_orphan_cleanup_releases_the_lock_even_when_the_delete_fails():
 
     maint = _DeleteBoom(all_intent_rows=[_orphan(dbname="kline_pilot_gone", seed="gone")])
     with pytest.raises(RuntimeError):
-        asyncio.run(_init(maint, lock_pair=_locker(released=freed)))
+        asyncio.run(_init(maint, lock_pair=_locker(maint, released=freed)))
     assert freed == ["gone"], "删除失败时锁没还"
 
 
@@ -1143,7 +1223,7 @@ def test_orphan_cleanup_does_not_release_a_lock_it_never_took():
     freed = []
     maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_running",
                                                 seed="running")])
-    asyncio.run(_init(maint, lock_pair=_locker(grants=False, released=freed)))
+    asyncio.run(_init(maint, lock_pair=_locker(maint, grants=False, released=freed)))
     assert freed == [], "取不到锁却还了锁 —— 会把别的运行持有的锁释放掉"
 
 
@@ -1164,7 +1244,11 @@ def test_orphan_cleanup_uses_a_delete_that_can_actually_match_an_orphan():
     #    删掉一条同 seed 运行**刚刷新过的**恢复凭据。
     assert "statement_timestamp() - inserted_at" in sql, "超期判据没有下沉进 DELETE"
     assert "pg_database" in sql and "d.oid" in sql, "「库不存在」判据没有下沉、或没绑实例"
-    assert sql.count("$1") == 1 and sql.count("$2") == 1, "参数应为 dbname + TTL 两个"
+    # ⚠️ **必须绑 seed**（codex S3-R2）：授权来自「持有这一行 seed 的锁」，
+    #    语句就得按那一行删。dbname↔seed 的对应只有代码在维持，没有 DB 约束在兜。
+    assert "seed = $2" in sql, "DELETE 没绑 seed —— 拿着 A 的锁能删掉 B 的凭据"
+    assert (sql.count("$1") == 1 and sql.count("$2") == 1
+            and sql.count("$3") == 1), "参数应为 dbname + seed + TTL 三个"
 
 
 def test_init_orphan_freshness_uses_the_database_clock():
@@ -1303,10 +1387,21 @@ SELECT dbname, seed, db_oid::text AS db_oid,
 # ⚠️ 时钟源同上：`statement_timestamp()`。这条尤其要紧 —— 它是**权威判据**
 #    （预筛只是省取锁）。长事务里用 `now()` 的话，取到锁之后这条 DELETE 会匹配 0 行，
 #    于是「命令发了、一行没删」的静默失败，正是 R9 那次回归的形态。
+# ⚠️ **必须同时绑 `seed`（codex S3-R2）**：这条 DELETE 的授权来自「本次持有的是
+#    **这一行 seed** 的 advisory lock」。只按 dbname 删的话，语句本身与它的授权
+#    对不上号 —— 它靠的是「dbname 恒为 `kline_pilot_<seed>`、seed 是它的函数」
+#    这条**跨列不变量**，而那条不变量**没有任何数据库约束在兜**
+#    （`pilot_create_intent` 既无 `CHECK (dbname = 'kline_pilot_' || seed)`、
+#     `dbname` 也不是生成列）。孤儿清理处理的恰恰是**来路不明的行**：旧版本写的、
+#    `pg_restore` 还原的、人工插的 —— 对它们那条不变量不成立。
+#    绑上 seed 之后，失配时**删 0 行**（fail-closed），而不是拿着 A 的锁删 B 的凭据。
+#    ⛔ **不在本片给 .sql 加 CHECK 约束**：那会改动被钉死的
+#       `CANONICAL_CLUSTER_SCHEMA_SHA256` 与闸 (i) 的形状判据，远超 S3 范围。
 _DELETE_ORPHAN_INTENT_SQL = """
 DELETE FROM public.pilot_create_intent
  WHERE dbname = $1
-   AND (EXTRACT(EPOCH FROM (statement_timestamp() - inserted_at)) >= $2
+   AND seed = $2
+   AND (EXTRACT(EPOCH FROM (statement_timestamp() - inserted_at)) >= $3
         OR NOT EXISTS (SELECT 1 FROM pg_database d
                         WHERE d.datname::text = public.pilot_create_intent.dbname
                           AND d.oid = public.pilot_create_intent.db_oid))
@@ -1331,6 +1426,19 @@ DELETE FROM public.pilot_create_intent
         vanished = (r["dbname"], r["db_oid"]) not in live
         if not (stale or vanished):
             continue
+        # ⚠️ **取锁之前先证明本连接还没持有它**（codex S3-R2，真 PG 15.12 实测坐实）：
+        #    advisory lock 在同一 session 内**可重入** —— 实测 `pg_try_advisory_lock`
+        #    对一把本连接已持有的锁**照样返回 true**（计数器 1→2），而
+        #    `_SEED_LOCK_HELD_SQL` 在调用之前**就已经是 true**。于是下面那道复核
+        #    证明不了任何**新**的互斥，等于对这一行没有锁。
+        #    危险的是**自己**这一档：本连接正在为该 seed 干别的事（4c 的 wrapper 把
+        #    init 套进一次 create/reset、或连接池里漏回来一把锁），而这里把它
+        #    **进行中的**恢复凭据删掉 —— 正是「不加锁会删掉一次正在进行的运行的行」
+        #    那条要防的后果，只是换成了同连接的形态。
+        #    （对**别的 session** 的互斥仍然成立：我们持有时别人取不到。）
+        #    判据 fail-closed：已持有 → 跳过，不删、也不 release（那是别处的锁）。
+        if await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, r["seed"]):
+            continue
         if not await try_seed_lock(r["seed"]):
             continue                       # 有运行正在用这个 seed —— 跳过，绝不删
         try:
@@ -1350,7 +1458,7 @@ DELETE FROM public.pilot_create_intent
             # ⚠️ 上面那两条 Python 判据只是**省掉不必要的取锁**；真正的删除判据在 SQL 里，
             #    在锁内按**当下**的 inserted_at 与 pg_database 求值。
             await maint_conn.execute(_DELETE_ORPHAN_INTENT_SQL, r["dbname"],
-                                     INTENT_TTL_SECONDS)
+                                     r["seed"], INTENT_TTL_SECONDS)
         finally:
             # ⚠️ **取了就必须还**：会话级锁不还会一直挂在维护连接上，挡住后续同 seed
             #    的运行；同一条连接上后来的 `_SEED_LOCK_HELD_SQL` 也会观察到一把
@@ -1384,6 +1492,10 @@ DELETE FROM public.pilot_create_intent
 | **M21c** | `_DELETE_ORPHAN_INTENT_SQL` 的 `statement_timestamp()` 换回 `now()` | 同上，具名到 `_DELETE_ORPHAN_INTENT_SQL`；另 `test_orphan_cleanup_uses_a_delete_that_can_actually_match_an_orphan` |
 | **M21d** | 把族守卫的 `derived` 换回手写 `("_READ_INTENT_SQL", "_INSERT_INTENT_SQL")`，同时把 `_LIST_ALL_INTENT_SQL` 改成 `now()` | **必须仍有测试变红**。若全绿 = 推导式失效，守卫回到「新成员零覆盖」状态 —— 这一条验的是守卫**自己**的判别力 |
 | **M21e** | `_LIST_ALL_INTENT_SQL` 的 age 加回 `::bigint` | `test_init_orphan_freshness_uses_the_database_clock`（`::bigint` 那条断言） |
+| **M29** | `_DELETE_ORPHAN_INTENT_SQL` 去掉 `AND seed = $2`（参数退回两个，调用处同步改） | `test_orphan_cleanup_binds_the_delete_to_the_row_it_locked` + `test_orphan_cleanup_uses_a_delete_that_can_actually_match_an_orphan` |
+| **M30** | 删掉取锁前那条 `if await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, ...): continue` | `test_orphan_cleanup_skips_a_seed_whose_lock_this_connection_already_holds` |
+| **M31** | 把 `_InitMaint.fetchval` 的 `"pg_locks"` 分支改回返回**静态** `self.seed_lock_held` | **必须仍有测试变红**。若全绿 = 锁状态没建模成迁移，取锁前/后两条判据里有一条恒真——这一条验的是**假件自己**的判别力 |
+| **M32** | `_LIFECYCLE_DBS` 去掉 `kline_pilot_lifecycle_r37` 一行，然后**在 ㊲ 建库之后 kill 脚本**，再跑一次 | 第二次运行必须 `return 4` 并点名 `kline_pilot_lifecycle_r37`。这条验的是「漏登记会锁死后续运行」这一后果真的存在（跑完用 `QMT_VERIFY_FORCE_CLEANUP=1` 收拾） |
 | M22 | 把清理循环挪到 `await assert_cluster_allowed(...)` **之前** | `test_init_does_not_clean_orphans_on_a_cluster_that_is_no_longer_clean` |
 | M23 | 循环只处理 `rows[:1]`（提前 break） | `test_orphan_cleanup_releases_every_seed_lock_it_takes` |
 
@@ -1422,6 +1534,32 @@ git commit -m "S3 Task4：init_cluster_marker 第二段 —— 孤儿 intent 清
 | **㊲** | **新增（codex S3-R1）**：**长事务**里孤儿清理仍按语句时刻量 —— 一行真实已过期的孤儿仍被删掉 | `test_intent_ttl_is_never_measured_against_the_transaction_clock` |
 
 > **㊲ 为什么非有不可**：既有的 ㉝c 有一句自己写下的警告 ——「㉝ / ㉝b 都在**自动提交**下跑，`now()` 与 `statement_timestamp()` 几乎相等，**时钟源这一条在它们身上一次都没求值**」。⑤ ⑤b ㉙ ㉚ ㊱ 全是自动提交，同样对时钟源零判别力。不补 ㊲ 的话，S3 关于时钟源的证据就只剩 host 层的文本断言（那只证明「SQL 里写着这几个字」，不证明「长事务里真的量对了」）。
+
+- [ ] **Step 0: 把三个新库名加进 `_LIFECYCLE_DBS`（codex S3-R2，漏了会锁死后续每一次运行）**
+
+⚠️ **这一步排在最前，漏掉的后果是「下一次运行整个起不来」，不是「少测一档」。**
+
+`backend/scripts/verify_pilot_db_lifecycle.py:119` 的 `_LIFECYCLE_DBS` 是**精确白名单**。按字母序插入三行：
+
+```python
+    "kline_pilot_lifecycle_r28",
+    "kline_pilot_lifecycle_r30",          # ㉚（只写 intent 行，不建库）
+    "kline_pilot_lifecycle_r31",
+    ...
+    "kline_pilot_lifecycle_r35b",
+    "kline_pilot_lifecycle_r36",          # ㊱
+    "kline_pilot_lifecycle_r37",          # ㊲
+    "kline_pilot_lifecycle_s15",
+```
+
+**为什么这三个都要加**（两条后果，第二条 codex 没说到，是我核出来的）：
+
+1. **同前缀 stranger 闸会顶死整个脚本**：`sweep_leftover_databases`（`_pilot_verify_harness.py:252`）把「匹配前缀但不在白名单」的库判成 `strangers` → **`return 4`，拒绝运行**。㊱/㊲ 都真的 `CREATE DATABASE`，崩在 CREATE 与 DROP 之间就会留下这样一个库。
+2. **凭据行清不掉**：`purge_metadata_for(conn, _LIFECYCLE_DBS)`（同文件 `:301`）**只删点名库名**的 intent/registry 行。㉚ ㊱ ㊲ **三档都 INSERT 了 intent 行** —— 不在白名单里的话，崩溃残留的凭据行连前置清场都清不掉，会去污染后续档位。㉚ 虽然从不建库，但它写 intent 行，**同样必须登记**。
+
+⚠️ **源码扫描器拦不住这个漏**（已实测）：`assert_every_selfcheck_db_is_whitelisted`（`:160`）走 **AST 字符串字面量** + `startswith("kline_pilot_lifecycle_")`。而本脚本一贯的写法是 `seed37 = "lifecycle_r37"` + `f"kline_pilot_{seed37}"` —— 那个字面量**不以前缀开头**，扫描器看不见它。既有的 30 个场景全是这个形状，全靠**人工登记**。
+
+⛔ **不在 S3 修这个扫描器盲区**（codex 建议过「扩展 harness 让 f-string 名字无法绕过」）：那要改 harness 的公共扫描逻辑并回头核对既有 30 个场景，是独立的一片工作。**如实登记为已知残留**，写进本片的验收清单。
 
 - [ ] **Step 1: 改 import 与 `_EXPECTED_SCENARIOS`**
 
@@ -1970,6 +2108,21 @@ bash .claude/scripts/codex-attest.sh --scope branch-diff --base 8578a59 --head f
 | 轮 | verdict | finding | 处置 |
 |---|---|---|---|
 | **R1** | `needs-attention`（**未 approve**） | **[high]** 孤儿清理用 `now()` 量 TTL，而仓里既有的两条 intent TTL 判据早已因同一原因（codex S2a-R4-F2，真 PG 15 实测）换成 `statement_timestamp()`；`init_cluster_marker` 收的是已连好的连接、不控制事务生命周期，长事务里 `now()` 冻在过去 → 真实已过期的孤儿被量成新鲜 → 残骸永远清不掉。**且计划里的机械测试写死要求 `now()`，会把正确的修法判红。** | **全部接受并已改**（见下） |
+| **R2** | `needs-attention`（**未 approve**） | **[high]** DELETE 只绑 dbname 不绑 seed；**[medium]** advisory lock 可重入让「取到了」的证明失效；**[medium]** 新场景库名没进 `_LIFECYCLE_DBS` | **三条结论全接受，两条的理由我按实测改写**（见下） |
+
+R2 的逐条核实（**两条的机制我不同意，结论仍改**）：
+
+- ⚠️ **[high] 绑 seed —— 评审说的竞态被命名不变量挡住，但结论仍成立**。实测：`derive_db_name(seed) = f"kline_pilot_{seed}"`（`qmt_pilot_db.py:295`），spec 逐字写着「两个不同 seed 撞同一个 dbname 不可能」，`_INSERT_INTENT_SQL` 的 `EXCLUDED.dbname` 与 `EXCLUDED.seed` 由同一调用方按同一 seed 派生 —— 「同名行换了 seed」在生产路径上**造不出来**。**真正的理由是另一条**：那条不变量**没有任何数据库约束在兜**（无 CHECK、`dbname` 非生成列），而孤儿清理处理的恰恰是来路不明的行（旧版本写的 / `pg_restore` 还原的 / 人工插的）。DELETE 的授权来自「持有这一行 seed 的锁」，语句就该按那一行删。**已加 `AND seed = $2`**，失配时删 0 行（fail-closed）。
+- ✅ **[medium] 可重入 —— 真 PG 15.12 实测坐实**：`pg_try_advisory_lock` 对一把本连接已持有的锁**照样返回 true**（计数器 1→2），`_SEED_LOCK_HELD_SQL` 在调用前**就已经是 true**，那道复核证明不了任何**新**互斥。已加「取锁前先证明本连接还没持有」的 fail-closed 前置检查。
+  ⚠️ **但评审的后半句我反驳**：它把「release 只减一次、既有的锁留在 session 上」当缺陷 —— 那恰恰是**正确**行为（不能释放不是自己取的锁），`test_orphan_cleanup_does_not_release_a_lock_it_never_took` 钉的就是这条。**不改**。
+  ⚠️ 也要说准：对**别的 session** 的互斥仍然成立（我们持有时别人取不到）。真正的危险是**自己**这一档 —— 本连接正在为该 seed 干别的事，而 init 删掉它进行中的凭据。
+- ✅ **[medium] 白名单 —— 完全成立，是我漏的**，已加 Step 0。**评审只说到一条后果，我核出第二条**：除了 stranger 闸顶死运行，`purge_metadata_for` 只清点名库名的 intent/registry 行，故 ㉚（从不建库、但写 intent 行）**同样必须登记**。
+  ⛔ 评审建议「扩展 harness 让 f-string 名字不能绕过扫描器」**不在 S3 做**：那要改公共扫描逻辑并回头核对既有 30 个场景，如实登记为残留。
+
+**R2 修复顺带暴露的两个自引入缺陷**（不是评审提的，是改的过程中撞出来的）：
+
+- 🐞 `_FakeConn.seed_lock_held` 是**一个静态布尔**，而孤儿清理现在**取锁前后各查一次**同一条 SQL —— 用静态布尔建模的话，两条判据里**必然有一条恒真**（且默认 `True` 会让所有既有孤儿用例直接跳过清理）。已把 `_InitMaint` 的锁状态改成**会迁移的集合** `held_seeds`，并配变异 **M31** 验假件自己的判别力。
+- 🐞 计划里 `try_seed_lock=_locker()[0], release_seed_lock=_locker()[1]` 造的是**两对互不相干**的闭包，`record`/`released` 各记各的 —— 一族「取了没还」的断言会因此恒真。已改成同一次调用取一对。
 
 R1 的三条已实测复核，**不是**照单全收：
 
