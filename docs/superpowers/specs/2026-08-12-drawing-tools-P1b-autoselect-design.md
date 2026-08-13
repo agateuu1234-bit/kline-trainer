@@ -378,21 +378,50 @@ static func routeAndSelect(_ committed: DrawingObject, panel: PanelId, engine: T
 
 ```swift
 /// D86：常驻面板的**唯一**写入入口。取代 applyStyleMutation / applyDefaultStyleMutation。
+/// ⚠️ 画线态**把同一个 mutation 分别套到两个 base 上**（§6.3 #0），不是套一份默认快照。
 static func applyPanelStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
                                     engine: TrainingEngine)
+
+/// §6.4 base ②：选中线**当前**的 5 个样式字段（无选中 / 不唯一 / 结构性不可见 → nil）。
+/// 与 `panelStyle` 的选择态分支同源取值，但**语义不同**：那个回答「面板显示什么」，
+/// 这个回答「改线时从哪儿起算」。两者在画线态**刻意不同**（前者取默认、后者取线）。
+private static func selectedLineStyle(engine: TrainingEngine) -> DrawingDefaultStyle?
 ```
 
 - `TrainingView.swift:517-527` 那个 `if engine.drawingSession.selectedDrawingID != nil { applyStyleMutation } else { applyDefaultStyleMutation }` 分流**必须删掉**，改为无条件调 `applyPanelStyleMutation`。留着就是**第二份判据**，早晚与 `panelStyle` / `styleControlsEnabled` 漂移。
 - `applyStyleMutation` / `applyDefaultStyleMutation`（`DrawingEditRouter.swift:200-214`）被 `applyPanelStyleMutation` **严格泛化**（三个分支的 base 与写入与它们逐一等价），成为本次改动制造的孤儿 → **一并删除**（CLAUDE.md §3：清理自己造成的孤儿）。`applyStyle`（真正的写入路由）**保留不动**。
 
-### 6.3 画线态写入的三条硬约束
+### 6.3 画线态写入的四条硬约束
+
+0. **套到线上的是「同一个字段级改动」，不是「默认的整份快照」**（codex spec-R9 high，**已实测推演证实**）。
+
+   **反例（上一稿会真的发生）**：画线 A（橙、粗细 1，自动选中）→ **锁定 A** → 改颜色为紫
+   （默认变紫；`applyStyle` 被 `!d.locked` 拒 → A 仍是橙 ⇒ **默认与 A 已分叉**）→ **解锁 A** → 只改**粗细**为 3。
+   上一稿此刻 `next = 默认快照 {紫, 3}` **整份**套上去 ⇒ **A 的颜色被静默从橙改成紫**，
+   并经 `drawingsRevision` → autosave **落盘**。用户只碰了粗细，被改掉的却是他刚刚特意锁起来保护过的颜色。
+
+   **正解**：两处各自「现取 + 同一个 mutation」——
+
+   ```swift
+   var d = engine.drawingSession.defaultStyle          // base ①：默认自己
+   mutate(&d); engine.drawingSession.setDefaultStyle(d)
+   if let cur = selectedLineStyle(engine: engine) {    // base ②：**那条线自己当前的 5 个样式字段**
+       var l = cur; mutate(&l); _ = applyStyle(l, engine: engine)
+   }
+   ```
+
+   ⇒ 线上**只有用户真正点的那一项**会变；先前被门拒过的那一项**保持被保护的值**，
+   不会在下一次无关操作里被"追认"。
+
+   ⚠️ **`applyStyle` 的入参是完整的 `DrawingDefaultStyle`**（D50 的 API 形状，本片不改），
+   所以「只改一项」**只能靠选对 base 来表达**，不能靠「只传变了的字段」。**base 选错就是这条缺陷本身。**
 
 1. **顺序 load-bearing：先写默认，再 best-effort 改线。**
    默认是主语义、必须成功；线是附带、可能被门拒（锁定 / 滑出屏幕 / 未来数据 / 工具未实现）。反过来写会让「线改失败」在实现上很容易被顺手写成「整个操作失败」，而用户点了一下颜色却什么都没变。
 2. **`applyStyle` 失败不回滚默认、不给任何反馈。** 母 spec §3 逐字：灰只降饱和、**绝不写任何解释文案**。
 3. **`applyStyle` 的返回值在画线态被刻意丢弃**（`_ =`），且**不得**据它决定选中生命期 —— D64 原样成立（失败原因有五类，三类必须保留选中，一个 Bool 表达不了）。
 
-### 6.4 「现取」纪律保持 + base 必须与显示同源
+### 6.4 「现取」纪律保持 + **两个 base 各自的选取规则**
 
 ```swift
 var next = panelStyle(engine: engine)   // ← 现取：动作发生这一刻的真值，不是视图渲染时的快照
@@ -401,7 +430,16 @@ mutate(&next)
 
 这是 1b-i PR-4 codex 整支 R3 修过的那个**真丢数据**的回归（两个控件在 SwiftUI 重渲染之前先后触发，第二次拿旧快照把第一次 revert 掉，选中线路径还会经 `drawingsRevision` 被 autosave 持久化）。**绝不能改成接收调用方传入的快照。**
 
-**新增的一条不变量**：base **必须与面板此刻显示的东西同源**。`panelStyle` 已按 mode 分流（画线态取默认、选择态取线），`applyPanelStyleMutation` 直接复用它 → 这条一致性由**共用同一个函数**保证，不是靠两处各写一遍。
+**base 的选取规则**（codex spec-R9 high 之后修订）：
+
+| 写入目标 | base | 理由 |
+|---|---|---|
+| **本局默认** | `session.defaultStyle` | 它就是「下一笔要画成什么样」的真值 |
+| **选中的那条线** | **那条线自己当前的 5 个样式字段**（`selectedLineStyle`） | 只有这样，一次改动才只影响用户真正点的那一项（§6.3 #0） |
+
+⚠️ **「面板显示什么」与「写线时用哪个 base」不是同一个问题**：画线态**显示**默认（§6.1 第一张表），
+但**写线**的 base 是线自己。上一稿把两者合成一个 `panelStyle` 复用，正是 §6.3 #0 那条缺陷的来源。
+**「现取」纪律对两个 base 同样成立**——都在动作发生那一刻取，绝不用视图渲染时的快照。
 
 ### 6.5 副作用与已接受残留
 
@@ -438,11 +476,13 @@ mutate(&next)
 **R4 那版被推翻的部分与保留的部分**（写清楚，免得当成反复）：
 
 - **推翻**：「引擎实例生命期 + 已接受残留 + 交 P6」这个定位，以及据此写的「验收 #23 = 记录既定行为、非阻塞」。
-- **保留（仍然成立、已实测）**：这个丢失行为是 **main 上的既有行为**，本片**不引入也不加重**
+- **保留（仍然成立、已实测）**：**`setDefaultStyle` 这一条写入路径**上，本片确实零增量
   （`defaultStyle` 在 `KlineTrainerPersistence/` 出现 **0 次**；`TrainingEngine.swift:54` 逐字「会话是局内瞬态」；
-  main 上画线态**恒无选中**（D54）→ 画线态改样式本来就走 `applyDefaultStyleMutation` → `setDefaultStyle`，
-  **本片没有新增任何一次 `setDefaultStyle` 调用**）。
-  这条事实**不再是「所以不用修」的理由**，但它仍然是**切分**的理由：PR-1 不制造新缺口，故 PR-1 可以先合。
+  main 上画线态**恒无选中**（D54）→ 画线态改样式本来就走 `applyDefaultStyleMutation` → `setDefaultStyle`）。
+- ⚠️ **但这条事实推不出「PR-1 可以先合」**（codex R8 → R9 连续指出，**已实测证实**）：D86 给画线态**新增**了一条
+  `applyStyle` 写入，它经 `updateDrawingStyle` → `drawingsRevision` → autosave **会落盘**。于是 PR-1 单独上线会产生
+  「线已落盘、默认没落盘」的**半持久化**坏状态 —— main 上并不存在。
+  **故：PR-1 不得先于 PR-2 合入**（D89 / §6.8）。本节**不再**为「PR-1 先合」提供任何依据。
 
 ### 6.7 D88　PR-2（本局默认持久化）**另开一份 spec**，不在本文件内设计
 
@@ -562,6 +602,7 @@ R7 那版的论据是：「PR-1 新增 `setDefaultStyle` 调用 **0** 次，`def
 | **P3** 画线态 + 有选中 + 改样式 | 那条线的该字段变了 **且** `session.defaultStyle` 的该字段也变了（**逐字段断言**） |
 | **P4** 选择态 + 选中旧线 + 改样式 | 那条线变了 **且** `session.defaultStyle` **逐字段未变**（D49 保留的那一半，判别力就在这条） |
 | **P5** 画线态 + 无选中（刚进会话还没画） + 改样式 | `session.defaultStyle` 变了、`drawings` 全部未变 |
+| **P7** 画线态 + 选中线未锁定 + 改**一项**样式 | 那条线**只有该项**变、其余 4 项**逐字段未变**；`session.defaultStyle` 该项也变。⚠️ 断言「其余 4 项未变」是 §6.3 #0 的正向证据，不能只断言变了的那一项 |
 | **P6** 画线态 + 自动选中的线**已锁定**（codex spec-R3 high 要求的回归档） | `deleteButtonEnabled == false` **且** `canDelete == false`（自动选中**不得**让锁定线变得可删）；同时 `lockButtonEnabled == true`（🔒 仍可用于解锁，否则永远解不开）。**两个断言缺一不可**——只断言前者，一个「锁定线连 🔒 也灰掉」的实现照样绿 |
 
 ### 7.2 变异清单（每条注明**只有它够得到**的档）
@@ -581,6 +622,7 @@ R7 那版的论据是：「PR-1 新增 `setDefaultStyle` 调用 **0** 次，`def
 | M9 | 把 D86 画线态的 `setDefaultStyle` 删掉（只改线） | P3 的 `defaultStyle` 断言红、线的断言不红 |
 | M10 | 把 D86 选择态改成也写 `setDefaultStyle` | **只有** P4 红 |
 | M11 | 把 `applyPanelStyleMutation` 的 base 改成调用方传入的快照 | 「两次连续改动不互相 revert」的档红（PR-4 R3 那条回归的守门测试） |
+| **M15** | 把画线态**写线**的 base 从 `selectedLineStyle` 改回 `session.defaultStyle`（= 上一稿的整份快照） | **只有「锁定分叉」档**红（§6.3 #0 的反例：画线 → 锁定 → 改色被拒 → 解锁 → 只改粗细 → 断言**颜色仍是原色**）。⚠️ 这条档**必须走完整五步**；少了「锁定 → 改色被拒」那一步，默认与线不会分叉，改回快照也照样绿 = 零判别力 |
 | M12 | 删掉 `.draw` 分支新增的 `rebuildRenderState` | 渲染态档红（`KLineRenderState.selectedDrawingID` 本帧仍是旧值） |
 | **M13** | 删掉第 **①** 步（`commitPending` 返 nil）的 `clearSelection()` | **只有**「已有选中 → 下一次提交因 `commitPending` 返 nil 被拒」的档红（出口 a / b） |
 | **M14** | 删掉第 **②** 步（几何预检失败）的 `clearSelection()` | **只有**「已有选中 → 下一次提交因射线越右缘被拒」的档红（出口 c，= **codex spec-R1 那条 high finding 的守门测试**） |
@@ -677,7 +719,9 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 
 | 21 | 画一条线（它变蓝选中）→ 在样式面板把**线型**改成「**射线**」→ 再在图上点一下画一条新射线 | 画出一条射线并**变蓝选中**（射线与直线走同一条自动选中路径，没有被几何门误拒） | |
 
-**#18 / #19 是本片的两条硬边界**（不跨局 / 复盘不越界），任何一条不过都是阻塞级。
+| 23 | 画一条线（自动选中）→ 点 🔒 锁定 → 在面板换一个**颜色**（线不会变色，锁着）→ 点 🔒 解锁 → 再只改**粗细** | 线的**粗细变了、颜色仍是原来那个**（没有被刚才那次没生效的换色悄悄追认）。⚠️ 若颜色跟着变了 = §6.3 #0 那条缺陷复现，**阻塞级** | |
+
+**#18 / #19 / #23 是本片的三条硬边界**（不跨局 / 复盘不越界 / **被拒的改动不得被后续无关操作追认**），任何一条不过都是阻塞级。
 
 ⚠️ **本清单是 PR-1 阶段验收，跑完不代表本片交付完成**（D89 / §6.8）——「本局默认跨断点续训继承」
 （D87，用户 2026-08-13 裁决）由 PR-2 交付，它的验收项写在 PR-2 自己的 spec 里，**不在本表**。
@@ -715,7 +759,7 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 
 - **画线态下 `panelStyle` 不回显选中线**（§6.5 #3）。这是有意修订，验收 #11 是它的正面证据。
 - **画线态下 `applyStyle` 失败无任何反馈**（§6.3 #2）。母 spec §3 逐字要求「绝不写解释文案」，用户看到的现象是「线没变、但下一笔会变」。
-- **本局默认不跨 resume 在 PR-1 阶段仍然存在**（D87 §6.6）。它是 main 上的既有缺口、PR-1 不引入不加重（`setDefaultStyle` 写入频率未变），**由本片的 PR-2 修复**——不是交给 P6，也不是已接受残留。
+- ⚠️ **「本局默认不跨 resume」不是已接受残留，是 PR-2 的交付内容**（D87 §6.6）。且 **PR-1 不得先于 PR-2 合入**（D89 §6.8）——PR-1 会新增一条落盘的 `applyStyle` 写入，单独上线即产生「线已落盘、默认没落盘」的半持久化坏状态。**本条列在此处只为指路，不构成残留接受**。
 - **验收 #3（🔒/🗑 变亮）只有真机目视证据**，与 1b-i PR-4 的「🗑 置灰只有源码守卫无运行时证据」同类。属体验问题，非数据安全。
 
 ---
@@ -739,13 +783,15 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 
 | **R4** | 同分支 @ `4571adf`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：本片把「本局默认」立成一等语义，却没定义它的生命期；`DrawingSession.defaultStyle` 不在任何存档里 → 退出续训后回落出厂值，属用户可见的状态丢失 | **部分采纳（事实收、归因驳）**。**事实成立**：`defaultStyle` 在 `KlineTrainerPersistence/` 出现 **0 次**，退出训练再续训确实回落出厂值；而我的 spec 从头到尾**没定义过这个生命期**——真缺口，已补 **D87**（§6.6）。**归因不成立**：codex 称「本片**制造**了这个状态」，实测为否——`TrainingEngine.swift:54` 逐字写着「会话是局内瞬态，不持久化」，且 main 上画线态**恒无选中**（D54）→ 画线态改样式本来就走 `applyDefaultStyleMutation`，**本片没有新增任何一次 `setDefaultStyle` 调用**，写入频率完全未变。故定位为「既有行为 + 已接受残留 + 交 P6」，本片不修（修它 = 三条存档契约 + 向后兼容解码 + 为不 bump revision 的变更另设 autosave 触发，远超 60–90 行边界）。连带纠正其子论断：锁定线致 `applyStyle` 被拒时不触发 autosave 是**正确行为**（`drawings` 没变，没东西要存）。产出：D87 + 验收 #23（记录既定行为、非阻塞项）+ 残留与 P6 交接各一条 |
 
-| **R5** | 同分支 @ `d1f51f8`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：D87 把「本局默认」定成引擎实例生命期、验收 #23 还把「续训回落出厂值」标成正常非阻塞，等于用「本局默认」这个名字给一次用户可见的状态丢失背书；要么持久化，要么正名并**取得明确的产品裁决**<br>**1 medium**：M5a 要求预置一条与 committed 同 id 的线，但 `commitPending` 内部经 `DrawingObject.init` 生成**全新 UUID**、`commitPendingAndSelect` 签名里没有任何 id 缝 → **这条变异档根本写不出来**，合取项 ① 拿到的是一张空头保证书 | **medium 全采纳**：D85 拆成**内外两层**（外层 `commitPendingAndSelect` 管 ①②，内层 `routeAndSelect(_:panel:engine:)` 管 ③④⑤⑥），M2 / M5a / M5b / M5c 四条改经内层构造；出口 e 的可达性表述改为「结构上不可能」并把 ① 诚实标为纯纵深不变量；新增守卫 **G6**（`routeAndSelect` 恰好一个生产调用点，拆层不得变成两个入口）。**high 交产品裁决后全采纳**：codex 的处方本身就是 get explicit product acceptance。**用户 2026-08-13 裁决：返回 ≠ 结束，续训是断点续跑，本局默认必须继承**（逐字见 §6.6）。据此 **D87 整条重写**（生命期从「引擎实例」改为「本局训练存档」）、**新增 D88**（§6.7：存档面 / 容错解码 / sanitize / autosave 触发四条硬约束）、本片**改回两个 PR**（PR-1 交互语义零持久化、PR-2 存档契约）、验收 #23 翻转并新增 #24–#26。⚠️ 我 R4 那版「引擎实例生命期 + 已接受残留」是对母 spec §13「该**记录**局部覆盖」的**误读**——「记录」本就意味着覆盖量绑在记录上。R4 里**保留成立**的只有一条事实：这是 main 上的既有缺口、PR-1 不引入不加重（故 PR-1 仍可先合） |
+| **R5** | 同分支 @ `d1f51f8`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**：D87 把「本局默认」定成引擎实例生命期、验收 #23 还把「续训回落出厂值」标成正常非阻塞，等于用「本局默认」这个名字给一次用户可见的状态丢失背书；要么持久化，要么正名并**取得明确的产品裁决**<br>**1 medium**：M5a 要求预置一条与 committed 同 id 的线，但 `commitPending` 内部经 `DrawingObject.init` 生成**全新 UUID**、`commitPendingAndSelect` 签名里没有任何 id 缝 → **这条变异档根本写不出来**，合取项 ① 拿到的是一张空头保证书 | **medium 全采纳**：D85 拆成**内外两层**（外层 `commitPendingAndSelect` 管 ①②，内层 `routeAndSelect(_:panel:engine:)` 管 ③④⑤⑥），M2 / M5a / M5b / M5c 四条改经内层构造；出口 e 的可达性表述改为「结构上不可能」并把 ① 诚实标为纯纵深不变量；新增守卫 **G6**（`routeAndSelect` 恰好一个生产调用点，拆层不得变成两个入口）。**high 交产品裁决后全采纳**：codex 的处方本身就是 get explicit product acceptance。**用户 2026-08-13 裁决：返回 ≠ 结束，续训是断点续跑，本局默认必须继承**（逐字见 §6.6）。据此 **D87 整条重写**（生命期从「引擎实例」改为「本局训练存档」）、**新增 D88**（§6.7：存档面 / 容错解码 / sanitize / autosave 触发四条硬约束）、本片**改回两个 PR**（PR-1 交互语义零持久化、PR-2 存档契约）、验收 #23 翻转并新增 #24–#26。⚠️ 我 R4 那版「引擎实例生命期 + 已接受残留」是对母 spec §13「该**记录**局部覆盖」的**误读**——「记录」本就意味着覆盖量绑在记录上。R4 里**保留成立**的只有一条事实：这是 main 上的既有缺口、PR-1 不引入不加重。⚠️ **括号里当时那句「故 PR-1 仍可先合」已被 R8 / R9 推翻**（D86 新增的 `applyStyle` 会落盘 → 半持久化），现行结论见 D89 §6.8 |
 
 | **R6** | 同分支 @ `13d8a03`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 critical**：D88 按「给 `PendingTraining` 的 Codable 加可选 key」写持久化，但 pending 状态实际是 **SQL 具名列**，那个 Codable 根本不是落盘边界 → 照做会得到「内存往返全绿、值从没进过数据库」<br>**1 high**：replay 有 clean-skip（`replayBaseline = (tick, ops, drawingsSig, upper, lower)`，`!replayHasPersisted` 时生效），fresh replay 里只改默认 → 四个分量全没变 → 跳过不写盘 → 续局必丢<br>**1 high**：PR-1 单独上线 + 验收 #23「新线是出厂橙」= 给用户可见的状态丢失盖章 | **三条全采纳，全部实测证实**（`AppDBMigrations.swift:57-71,164-184` / `PendingTrainingRepositoryImpl.swift:18-45` / `TrainingSessionCoordinator.swift:56,611-615`）。⚠️ clean-skip 那条尤其难堪：`TrainingSessionCoordinator.swift:55` 的注释里记着**同一形状的旧 bug**（当初漏把 periods 纳入比较），我原地重踩。处置：**D88 整节改写为「PR-2 另开 spec」**，并把 R6 挖出的全部实测事实交接过去（补完它需要的是列 / migration / `user_version` / schema-drift 闸门 / clean-skip 判据这一整块持久化切片，与画线交互是不同风险面，塞进本文件一节只会再产出一份接不到盘上的方案——本轮 critical 已演示过一次）；**新增 D89 发布闸**（PR-1 可先合但本片在 PR-2 前不算交付完成）；**删掉验收 #23**，验收表加横幅 |
 
 | **R7** | 同分支 @ `5581d94`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high**（R6 第三条的窄化重提）：D89 只是散文闸，仍允许 PR-1 先合；若 main 可发布，用户就能改默认→续训→丢掉。处方：把 PR-1 卡在 PR-2 之后，或藏进 feature flag | **部分采纳**。**接受**：我上一稿只**断言**「PR-1 可以先合是安全的」、**没写论据** —— 属实。D89 已整节重写，把「零增量」实测摆进去（main 上画线态**恒无选中** ⇒ 改样式本来就走 `setDefaultStyle`；PR-1 新增调用 **0** 次；`defaultStyle` 在持久化层出现 **0** 次），散文闸换成本仓真实的发布机制（不进 freeze tag / 不宣布可用 / 进度 memory 标未完成 / PR 描述横幅）。**驳回**：两个处方都不成比例 —— 合并闸对**零增量**改动的安全收益为 0；feature flag 反而**增加**风险（死路径 + 违反 D19/D24 + 制造无闸门覆盖的构建配置）。§6.8.4 如实记录这处**判断分歧**（remedy 是否成比例），并写明 R7 陈述的**事实**我全部接受 |
 
 | **R8** | 同分支 @ `12a92d7`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **1 high（新论据，不是空重提）**：我 R7 的「零增量」只数了 `setDefaultStyle` 调用次数，**漏了 D86 新增的 `applyStyle`** —— 它经 `updateDrawingStyle` → `drawingsRevision` → autosave **会落盘**。于是 PR-1 之后「线已落盘、默认没落盘」，续训回来线是新色、默认回落出厂、再画一条又是旧色 —— **main 上不存在的半持久化坏状态**，且直接违反 D87 的用户裁决 | **全采纳**，实测证实。R7 那版 D89 的结论及其「remedy 不成比例」的论证**一并作废**（前提没了）。但**没有采纳它给的两个处方**（合并闸 / feature flag），而是用**更便宜也更彻底**的解法：**把两个 PR 的次序倒过来**。依赖方向实测支持倒序 —— `session.defaultStyle` 在 main 上已存在、已被 `applyDefaultStyleMutation` 写，**PR-2 不依赖 PR-1、今天就能单独实施**。倒序后：PR-2 先合＝净修既有缺口且无耦合；PR-1 后合＝线与默认一起落盘一起恢复，**半持久化中间态结构上不会出现**。另采纳其要求的一致性回归（§6.8.3），并写明该测试**在 PR-2 之前必然红** —— 这就是次序不可颠倒的机械证据 |
+
+| **R9** | 同分支 @ `b6b5823`（整支 branch-diff，零 focus 窄化） | `needs-attention` | **high①**：§6.6 与 §10.3 里仍留着「PR-1 不引入不加重 / 可以先合」的旧断言，与 R8 之后的 D89 直接打架，且那是**现行条文**不是评审历史，可被拿来单独 ship PR-1<br>**high②（新缺陷，我完全没想到）**：D86 画线态是「取默认快照 → 改一项 → **整份**套到线上」。于是：画线 A → 锁定 → 改色（默认变、线被拒 ⇒ 分叉）→ 解锁 → 只改粗细 ⇒ **A 的颜色被静默追认成紫**并落盘。用户只碰了粗细，被改的是他特意锁起来保护过的颜色 | **两条全采纳**。①：两处陈旧断言已改写，并给 §12 的 R5 行补了纠正尾注。②：D86 写入算法改为**同一个 mutation 分别套两个 base** —— 默认的 base 是默认自己，**线的 base 是那条线当前的 5 个样式字段**（新增 `selectedLineStyle`）；§6.4 明写「面板显示什么」与「写线用哪个 base」**不是同一个问题**（上一稿把两者合成一个 `panelStyle` 复用，正是缺陷来源）；新增变异 **M15** + 正向档 **P7** + 真机验收 **#23**（升为第三条硬边界），并写明 M15 的档**必须走完整五步**，少了「锁定→改色被拒」就不会分叉、零判别力 |
 
 **R1 的形状**：我把「要做什么」写全了，却把「在哪做」写在了一个**那些路径到不了**的位置。
 这与 [[feedback_internal_review_misses_bad_data]] 记录的形状一致 —— 判据本身没错，错在**没有对着真实控制流核一遍每条出口是否真的流经收口点**。
@@ -760,6 +806,9 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 纪律沉淀（第六条）：**凡涉及「存哪里」，必须一路核到 DDL 与真正执行的那条 SQL**；「这个类型是 Codable」对落盘而言是**零证据**。
 
 **R7 的形状**：不是新缺陷，是**同一条 finding 因为我的修法只有断言、没有论据而被重提**。
+**R9 high② 的形状**（本片第一条**纯设计**缺陷，与「只看了路的一半」不同族）：我为了守住「派生值单一真相」的纪律，让 `panelStyle` 一个函数同时承担了**两件不同的事**——「面板该显示什么」和「改动从哪个值起算」。这两件事在选择态恰好同源，**在画线态必须分开**。复用得太狠，就把一条正确的纪律用成了缺陷。
+纪律沉淀（第九条）：**「单一真相」是对同一个问题只留一个答案，不是对两个问题共用一个函数**；合并前先问「这两处求的真的是同一个量吗」。
+
 **R8 的形状 = 同一族的第四次**：这次不是「路只看了一半」，是**耦合只量了一边**。我数了「新增几次 `setDefaultStyle`」（0 次，属实），却没问「PR-1 有没有新增**别的会落盘**的写入，而它和这个不落盘的值是一对」——有，就是 `applyStyle`。
 纪律沉淀（第八条）：**证明「零增量」时，必须把新增的写入面整体列一遍，而不是只数被质疑的那一个符号**；两个语义上成对的值，**一个落盘一个不落盘，比两个都不落盘更糟**。
 
