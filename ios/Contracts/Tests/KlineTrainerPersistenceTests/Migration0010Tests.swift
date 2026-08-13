@@ -72,8 +72,13 @@ struct Migration0010Tests {
         // ④ 既有行必须活着；**此刻才允许用 repo 读**（列已存在）
         #expect(try queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM pending_training") } == 1)
         #expect(try queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM pending_replay") } == 1)
-        #expect(try queue.read { try PendingTrainingRepositoryImpl.loadPending($0) }?.drawingDefaultStyle == nil)
-        #expect(try queue.read { try PendingReplayRepositoryImpl.loadReplay($0) }?.drawingDefaultStyle == nil)
+        // ⚠️ 本 task 阶段 repo **尚未接线**读该列（那是后续 task），
+        //    故这里**不能**断言字段值 —— 那会是恒真的。这两条只证一件事：
+        //    新增列之后，既有读路径仍能正常解码出行（新列不会打穿 SELECT 的解码）。
+        #expect(try queue.read { try PendingTrainingRepositoryImpl.loadPending($0) } != nil,
+                "加列后 pending_training 的既有读路径应仍能解码出行")
+        #expect(try queue.read { try PendingReplayRepositoryImpl.loadReplay($0) } != nil,
+                "加列后 pending_replay 的既有读路径应仍能解码出行")
     }
 
     /// T9（**全新安装**，与 T8 分开）：从空库跑完整 migrator → 终态 user_version = 8 且两表有列。

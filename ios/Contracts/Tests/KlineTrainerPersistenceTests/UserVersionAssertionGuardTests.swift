@@ -27,8 +27,10 @@ final class UserVersionAssertionGuardTests: XCTestCase {
             let window = lines[i..<min(i + 4, lines.count)].joined(separator: "\n")
             guard let v = firstComparedInt(window) else { continue }
             var partial = false
-            for j in stride(from: i, through: 0, by: -1) where lines[j].contains(".migrate(") {
-                partial = lines[j].contains("upTo:"); break
+            for j in stride(from: i, through: 0, by: -1) {
+                // 先撞到函数声明 ⇒ 本函数体内没有 .migrate( ⇒ 不是部分迁移落点（安全方向）
+                if lines[j].contains("func ") { break }
+                if lines[j].contains(".migrate(") { partial = lines[j].contains("upTo:"); break }
             }
             out.append(Site(file: file, line: i + 1, value: v, afterPartialMigrate: partial))
         }
@@ -120,5 +122,25 @@ final class UserVersionAssertionGuardTests: XCTestCase {
         XCTAssertTrue(Self.sites(in: written, file: "X").isEmpty, "PRAGMA 写入语句不是断言")
         XCTAssertEqual(Self.sites(in: urlInString, file: "X").map(\.value), [7],
                        "字符串里的 // 不得把同一行后面的真实代码吃掉（反向漏 = 守卫悄悄放宽）")
+    }
+
+    /// 回扫不得跨函数边界：函数 A 以 `upTo:` 结尾，紧接着函数 B 自己不含 `.migrate(`
+    /// （靠 helper 做 full migrate）却断言 `== 7` —— B 必须被判为终态断言（不合法），
+    /// 不能因为文本上离 A 的 `upTo:` 最近就被误判成中间落点。
+    func test_scanner_does_not_cross_function_boundary() {
+        let crossFunction = """
+        @Test func a() throws {
+            try migrator.migrate(queue, upTo: "0009_v1.11_drawing_style")
+            #expect((try Int.fetchOne(db, sql: "PRAGMA user_version") ?? -1) == 7)
+        }
+        @Test func b() throws {
+            let uv = try Int.fetchOne(db, sql: "PRAGMA user_version")
+            XCTAssertEqual(uv, 7)
+        }
+        """
+        let sites = Self.sites(in: crossFunction, file: "X")
+        XCTAssertEqual(sites.count, 2)
+        XCTAssertTrue(sites[0].afterPartialMigrate, "A：同函数内有 upTo: ⇒ 合法中间落点")
+        XCTAssertFalse(sites[1].afterPartialMigrate, "B：本函数体内无 .migrate( ⇒ 必须被判为终态")
     }
 }
