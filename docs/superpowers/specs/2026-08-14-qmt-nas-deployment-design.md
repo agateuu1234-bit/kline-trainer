@@ -199,7 +199,17 @@ docker compose 项目 kline-trainer
 - 取值是**固定的两个字面量**，不是类名派生（否则会得到 `asyncpgleaserepository` 这种）。
 - `_default_repo` 未设的第三态在组合根不可达（模块 import 即设 InMemory）→ **不设第三个取值、不写不可达分支**（对齐 CLAUDE.md §2）。
 
-**被否的更强方案**：加 `KLINE_REQUIRE_DB=1` 让缺 DSN 时拒绝启动。多一份配置面，而 `/health` 字段已足够支撑验收，YAGNI。
+**补强：`/health` 字段只覆盖「验收那一刻」，不覆盖后续重启**（codex spec-R3 F3）。
+P8 的 `/health` 检查只是一个时间点的快照。后来若 `.env` 丢失/被改、或在错误目录跑 `docker compose up`，变量插值会得到**空串** → `os.environ.get("DATABASE_URL")` 返回 `""`（falsy）→ **静默回落 InMemory**，服务照样 `status: ok` 地跑着，只是一行数据都没有。空串比未设更阴险。
+
+**采纳的修法：compose 必需变量语法 `${DATABASE_URL:?…}`（C1-9）**，不是加 `KLINE_REQUIRE_DB` 开关。理由：
+
+- **零生产代码改动** —— `main.py` 的 InMemory 回落保持原样，那本来就是给本地 dev / CI 用的，不该为部署场景改掉它；
+- **零新配置开关** —— 不引入一个「本身也会被配错」的旗标；
+- **每次 `up` 都拦**，不是只拦一次；
+- 实测对**未设**和**空串**都拒，报错信息可读，正常值放行（2026-08-14）。
+
+**被否方案**：`KLINE_REQUIRE_DB=1`。它要改生产代码 + 多一份配置面，而拦截点比 compose 语法更晚（进程起来之后），收益不如上面那条。
 
 ---
 
@@ -219,7 +229,8 @@ docker compose 项目 kline-trainer
 | C1-5 | 训练组目录挂载进 `api` 容器时是**只读**（`:ro`），容器内路径固定为 `/data/training-sets` |
 | C1-6 | **（codex spec-R2 F3 收窄）** `.env.example` 必须定义**全仓每一个 DSN 环境变量消费者**读取的名字。实测消费者共 5 处：`app/main.py:16` / `app/scheduler_main.py:60` / `import_csv.py:571` / `generate_training_sets.py:765` 读 **`DATABASE_URL`**；`scripts/nas-preflight.sh:23` 读 **`DB_URL`**。而 `.env.example` 当前**只定义 `DB_URL`** → 四个生产消费者读的名字一个都没定义。本切片的修法是 **`DATABASE_URL` 补进去**（各带用途注释：`DATABASE_URL` = 容器内网 `db:5432`，后端代码读；`DB_URL` = 宿主侧管理用 DSN，`nas-preflight.sh` 读），**不是把 `DB_URL` 改名删掉**——改名会直接打断 `nas-preflight.sh` 的必需变量检查 |
 | C1-7 | `GET /health` 返回 `{"status": "ok", "repository": <"asyncpg" \| "inmemory">}`，`repository` 反映**请求时**装配的 repository |
-| C1-8 | **（收 W1-R1）** compose 里**每一个** `image:` 都带 `@sha256:` digest，含既有的 `db` 服务。digest 必须取**多架构 manifest list（OCI image index）**的顶层 digest，不得取单平台 manifest 的 digest——否则镜像被钉死在一个架构上（Mac 是 arm64、NAS 是 amd64）。已实测 `postgres:15.12` 与 `python:3.11.14-slim` 均为 index 且覆盖 `linux/amd64` + `linux/arm64/v8`（`docker buildx imagetools inspect`，2026-08-14） |
+| C1-8 | **（收 W1-R1；codex spec-R3 F1 已纠正）** 供应链固定按服务类型分两条，**不是「所有 image: 都带 digest」**：<br>① **拉取型服务**（有 `image:`、无 `build:`，本设计里只有 `db`）→ `image:` 必须带 `@sha256:` digest；<br>② **构建型服务**（有 `build:`，本设计里只有 `api`）→ **不得**在 `image:` 里带 digest，其供应链固定由 Dockerfile 的 `FROM …@sha256:` 承担（C1-2）。本设计里 `api` **不写 `image:` 键**，镜像名由 compose 项目名派生为 `kline-trainer-api`（C1-3）。<br>digest 一律取**多架构 manifest list（OCI image index）**的顶层 digest，不得取单平台 manifest digest——否则镜像被钉死在一个架构上（Mac arm64 / NAS amd64）。已实测 `postgres:15.12` 与 `python:3.11.14-slim` 均为 index 且覆盖 `linux/amd64` + `linux/arm64/v8`（`docker buildx imagetools inspect`，2026-08-14） |
+| C1-9 | **（codex spec-R3 F3）** compose 传给 `api` 的 `DATABASE_URL` 必须用 **Compose 必需变量语法** `${DATABASE_URL:?<可读错误信息>}`，使 DSN 缺失或为空串时 `docker compose up` **立即失败**而非静默起一个 InMemory 后端。已实测该语法对**未设**与**空串**都拒、消息可读、正常值放行（2026-08-14） |
 
 ### §5.2 测试判据（每条都须变异验证）
 
@@ -248,10 +259,15 @@ docker compose 项目 kline-trainer
 | T4-3 | 训练组挂载带 `:ro` 且容器侧是 `/data/training-sets` | 删 `:ro` → 红 |
 | T5-1 | Dockerfile base image 是精确 patch tag **且带 `@sha256:` digest** | 改成 `python:3.11-slim`（去 digest）→ 红 |
 | T5-2 | Dockerfile 装的是 `requirements-api.txt` | 改成 `requirements.txt` → 红 |
-| T6-1 | **正向档**：当前树上 compose 的每个 `image:` 都带 `@sha256:` → 绿 | — |
-| T6-2 | 去掉 `db` 服务 image 的 digest（退回裸 `postgres:15.12`）→ T6-1 红 | 只去一个 |
-| T6-3 | 去掉 `api`/Dockerfile 侧的 digest → 对应的具名测试红 | 只去另一个（两侧都要单独验，防「只要有一个带 digest 就绿」的弱判据） |
+| T6-1 | **正向档**：当前树上「拉取型服务的 `image:` 带 digest」+「构建型服务的 `image:` 不带 digest」两条同时成立 → 绿 | — |
+| T6-2 | 去掉 `db` 服务 image 的 digest（退回裸 `postgres:15.12`）→ T6-1 红 | 拉取型侧 |
+| T6-3 | 给 `api`（构建型）加一个带 `@sha256:` 的 `image:` → **具名的那条**红 | 构建型侧（**codex spec-R3 F1 就是这个坑**，必须有反向档钉住，不能只测「有 digest」） |
 | T6-4 | 断言无任何 `:latest` | 改一个 image 为 `:latest` → 红 |
+| T6-5 | Dockerfile `FROM` 去掉 digest → T5-1 红 | 见 T5-1 |
+| T6-6 | ⚠️ **仅结构断言不足以覆盖 T6-3 那类错误**：实测 `docker compose config` 对 `build:` + digest `image:` 的坏配置**返回 0**，真正的报错要到 `docker compose build` 才出现（`failed to solve: build tag cannot contain a digest`）。故验收清单**必须**含一条「真跑一次 `docker compose build` 并读结论行」 | 这条是 runbook 判据，不是单测 |
+| T7-1 | **正向档**：`DATABASE_URL` 有值时 `docker compose config` 退出 0 且解析出该值 | — |
+| T7-2 | `DATABASE_URL` **未设** → `docker compose config` 非零退出且报必需变量缺失 | 去掉 `:?` 后缀 → T7-2 红 |
+| T7-3 | `DATABASE_URL` **为空串** → 同样非零退出（空串与未设两档都要有，`:-` 默认值语法只挡未设、挡不住空串） | 把 `:?` 换成 `:-` → T7-3 红 |
 
 **已知会变红的既有测试**：`backend/tests/test_health.py::test_health_returns_200`（断言 `== {"status": "ok"}` 精确相等）。这是**预期中的 TDD 先红**，随 C1-7 一起更新。
 
@@ -332,6 +348,7 @@ docker compose 项目 kline-trainer
 | **P9** | **§9.2 的 NAS-A/B 真 PG 烟测 8 条（此刻 `training_sets` 表为空，只有烟测自己插的临时行）** | Claude 可跑 | 8 条全过；含 NAS-A.3 的 10 分钟等待 |
 | **P10** | **删光烟测临时行**，并断言表为空 | Claude 可跑 | `SELECT count(*) FROM training_sets` **= 0**（⚠️ 这条断言是 P11 的前置硬门） |
 | P11 | 3 条 INSERT 写 `training_sets`，`file_path` 用 `/data/training-sets/…` | Claude 可跑 | 恰好 3 行、全 `status=unsent`、`content_hash` 与 P7 一致 |
+| **P11b** | **暴露前重新校验 tailnet 暴露面**（codex spec-R3 F2）：跑 `tailscale status --json`，逐节点断言归属者全为 `agateuu1234@`、无 shared/external 节点 | Claude 可跑 | 断言通过；**任一节点归属者不同或出现外部共享 → 停止，不得执行 P12**（须先回到 §11-R8 重新评估） |
 | P12 | `tailscale serve --bg --https=443 http://127.0.0.1:8010`（⛔ **不得用 `funnel`**，见 §4-D1） | Claude 可跑 | Mac 上 `curl https://fnos.tail9dc815.ts.net/health` 成功且证书可验；`tailscale serve status` 输出**不含** funnel |
 | P13 | Debug 构建装机 + `devicectl` 带 `KLINE_BACKEND_BASE_URL` 启动 | **user**（需签名，真终端） | App 启动无错 |
 | P14 | 走 §9 验收 | **user**（真机目视） | G1–G4 全过 |
@@ -445,7 +462,7 @@ docker compose 项目 kline-trainer
 | R5 | `stock_name` 与 `stock_code` 同值 → App 里训练组显示的是代码不是中文名 | **已知且接受**，是真实 QMT 数据本身没带中文名，非缺陷。不在本次修 |
 | R6 | 手机端环境变量只在 `devicectl` 启动的那次进程有效 | §7 已明写；不影响 G4 |
 | R7 | 部署 runbook 里的命令若在 worktree 里跑会踩 `.venv` 不存在的坑 | 配方一律用绝对路径变量、一行一条命令；不在 worktree 里假设 `.venv` |
-| **R8** | **API 零认证**：任意 tailnet 节点可 `reserve` → `download` → `confirm`，把全部训练组预占、下载并打成 `sent` | **本次接受 —— user 2026-08-14 明示裁决**（codex spec-R2 F1 建议加 bearer token，user 选择不加）。实测边界：7 个节点归属者全是 `agateuu1234@`、无外部共享（§2.4），故实际暴露范围 = user 自己的设备。硬门是 §4-D1 的 **funnel 禁令**（走 funnel 则暴露到公网，该残留立刻不可接受）。被否方案：bearer token 需改 `DefaultAPIClient`（§6.3 明说不动）+ 设备端多一个配置通道 + 后端中间件 + 测试 ≈ 第三个切片。⚠️ **这条不随 App 上架自动消失** —— 真上云服务器时必须先解决认证，届时属正式部署 PR 的**阻塞项**，**不得沿用本次的接受理由**（本次理由的成立前提是「单用户 tailnet + 无外部共享 + 无 funnel」，上云后三条全部不成立） |
+| **R8** | **API 零认证**：任意 tailnet 节点可 `reserve` → `download` → `confirm`，把全部训练组预占、下载并打成 `sent` | **本次接受 —— user 2026-08-14 明示裁决**（codex spec-R2 F1 / spec-R3 F2 两轮均建议加 bearer token，user 两次范围内均选择不加；**后续轮次不得把这条当新 finding 反复提**）。<br>**codex spec-R3 F2 的增量部分已采纳**：接受理由原本只建立在 brainstorming 期的一次快照上；现加 **P11b 硬门**——暴露前重新校验 tailnet 归属者与外部共享，不通过则不许执行 P12。实测边界：7 个节点归属者全是 `agateuu1234@`、无外部共享（§2.4），故实际暴露范围 = user 自己的设备。硬门是 §4-D1 的 **funnel 禁令**（走 funnel 则暴露到公网，该残留立刻不可接受）。被否方案：bearer token 需改 `DefaultAPIClient`（§6.3 明说不动）+ 设备端多一个配置通道 + 后端中间件 + 测试 ≈ 第三个切片。⚠️ **这条不随 App 上架自动消失** —— 真上云服务器时必须先解决认证，届时属正式部署 PR 的**阻塞项**，**不得沿用本次的接受理由**（本次理由的成立前提是「单用户 tailnet + 无外部共享 + 无 funnel」，上云后三条全部不成立） |
 | **R9** | `scripts/nas-preflight.sh` 的拓扑假设**已经**与 compose 默认不一致（**先于本次改动存在**） | 它第 57 行检查 `$NAS_HOST:5433` 从 Mac 可达，而 compose 默认 `${DB_BIND_HOST:-127.0.0.1}:5433` 只绑回环 → 该脚本在默认配置下本就跑不过第 3 步。**本次不修**（CLAUDE.md §3：不改与本请求无关的既有代码），但**本次 runbook 完全不使用它**——我们用 `/health` 在 NAS 回环 + 经 tailnet 两处各验一次（P8 / P12）。⚠️ 本次只保证不**新增**破坏（C1-6 保留 `DB_URL` 定义），不声称该脚本可用 |
 
 ---
