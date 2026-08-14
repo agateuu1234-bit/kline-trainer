@@ -445,7 +445,7 @@ docker compose 项目 kline-trainer
 | R5 | `stock_name` 与 `stock_code` 同值 → App 里训练组显示的是代码不是中文名 | **已知且接受**，是真实 QMT 数据本身没带中文名，非缺陷。不在本次修 |
 | R6 | 手机端环境变量只在 `devicectl` 启动的那次进程有效 | §7 已明写；不影响 G4 |
 | R7 | 部署 runbook 里的命令若在 worktree 里跑会踩 `.venv` 不存在的坑 | 配方一律用绝对路径变量、一行一条命令；不在 worktree 里假设 `.venv` |
-| **R8** | **API 零认证**：任意 tailnet 节点可 `reserve` → `download` → `confirm`，把全部训练组预占、下载并打成 `sent` | **本次接受**。实测边界：7 个节点归属者全是 `agateuu1234@`、无外部共享（§2.4），故实际暴露范围 = user 自己的设备。硬门是 §4-D1 的 **funnel 禁令**（走 funnel 则暴露到公网，该残留立刻不可接受）。⚠️ **这条不随 App 上架自动消失** —— 真上云服务器时必须先解决认证，届时属正式部署 PR 的阻塞项，不得沿用本次的接受理由 |
+| **R8** | **API 零认证**：任意 tailnet 节点可 `reserve` → `download` → `confirm`，把全部训练组预占、下载并打成 `sent` | **本次接受 —— user 2026-08-14 明示裁决**（codex spec-R2 F1 建议加 bearer token，user 选择不加）。实测边界：7 个节点归属者全是 `agateuu1234@`、无外部共享（§2.4），故实际暴露范围 = user 自己的设备。硬门是 §4-D1 的 **funnel 禁令**（走 funnel 则暴露到公网，该残留立刻不可接受）。被否方案：bearer token 需改 `DefaultAPIClient`（§6.3 明说不动）+ 设备端多一个配置通道 + 后端中间件 + 测试 ≈ 第三个切片。⚠️ **这条不随 App 上架自动消失** —— 真上云服务器时必须先解决认证，届时属正式部署 PR 的**阻塞项**，**不得沿用本次的接受理由**（本次理由的成立前提是「单用户 tailnet + 无外部共享 + 无 funnel」，上云后三条全部不成立） |
 | **R9** | `scripts/nas-preflight.sh` 的拓扑假设**已经**与 compose 默认不一致（**先于本次改动存在**） | 它第 57 行检查 `$NAS_HOST:5433` 从 Mac 可达，而 compose 默认 `${DB_BIND_HOST:-127.0.0.1}:5433` 只绑回环 → 该脚本在默认配置下本就跑不过第 3 步。**本次不修**（CLAUDE.md §3：不改与本请求无关的既有代码），但**本次 runbook 完全不使用它**——我们用 `/health` 在 NAS 回环 + 经 tailnet 两处各验一次（P8 / P12）。⚠️ 本次只保证不**新增**破坏（C1-6 保留 `DB_URL` 定义），不声称该脚本可用 |
 
 ---
