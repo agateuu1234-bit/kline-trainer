@@ -344,7 +344,8 @@ P8 的 `/health` 检查只是一个时间点的快照。后来若 `.env` 丢失/
 | P4 | 把 `backend/` 需要的文件同步到 NAS 部署目录 | Claude 可跑 | 文件校验一致 |
 | **P4b** | **构建前校验每个 pin 的 digest 是多架构 index**（codex spec-R4 F2，判据见 T6-7）：对 compose 的 `db` image 与 Dockerfile `FROM` 各跑一次 `docker buildx imagetools inspect` | Claude 可跑 | 两者 `MediaType` 均为 OCI image index，且 `Platform` 同时含 `linux/amd64` 与 `linux/arm64/v8` |
 | P5 | 写 `.env`（真密码，不入库；`DATABASE_URL` 指向 compose 内网 `db:5432`） | Claude 可跑 | `.env` 不进 git |
-| P6 | `docker compose up -d db`，等就绪后灌 `backend/sql/schema.sql` | Claude 可跑 | `\dt` 出 4 张表 |
+| P6 | `docker compose up -d db`（**必须是全新空卷**，见下方 R5-F2 说明），等就绪后灌 `backend/sql/schema.sql` | Claude 可跑 | ⚠️ `\dt` 出 4 张表**不是充分判据**，见 P6b |
+| **P6b** | **schema 形状硬门**（codex spec-R5 F2）：直接查 NAS 库的实际形状，逐条比对关键列类型 / 索引 / CHECK 约束 | Claude 可跑 | `klines.open/high/low/close` 为 `double precision`；`training_sets.file_path` 为 `text`、`content_hash` 为 `bpchar(8)`；四条 CHECK（`ck_content_hash_crc32_lowercase` / `ck_status_enum` / `ck_lease_state_invariant` / `ck_klines_price_finite_positive`）**全部存在**；`stock_coverage` 三条 CHECK 存在。**任一不符 → 停止，销毁卷重来**，不得往下插数据 |
 | P7 | scp 3 个 zip 到宿主训练组目录 | Claude 可跑 | **NAS 上重算 CRC32 = `851f9444` / `32892a5f` / `150d8d6c`** |
 | P8 | `docker compose up -d api`（在 NAS 上构建镜像） | Claude 可跑 | `curl 127.0.0.1:8010/health` → `repository == "asyncpg"` |
 | **P9** | **§9.2 的 NAS-A/B 真 PG 烟测 8 条（此刻 `training_sets` 表为空，只有烟测自己插的临时行）** | Claude 可跑 | 8 条全过；含 NAS-A.3 的 10 分钟等待 |
@@ -358,9 +359,26 @@ P8 的 `/health` 检查只是一个时间点的快照。后来若 `.env` 丢失/
 | P15 | **（仅失败重跑时）** 按 **§7.1** 复位库侧 3 行 + 清设备侧状态，回到 P12b | 库侧 Claude 可跑 / 设备侧 **user** | 3 行回到 `unsent` 且 lease 三列全 NULL；设备上无残留训练组 |
 | **P16** | **关闭暴露端点**（codex spec-R4 F1）：`tailscale serve reset`（或等效关闭命令） | Claude 可跑 | `tailscale serve status` 输出 **`No serve config`**（= NAS 上实测过的初始态，§2.4） |
 
-**⚠️ 暴露窗口的生命周期是硬约束**（codex spec-R4 F1）：`tailscale serve --bg` 是**持久**配置，不会自己消失。P12 开、P16 关，**中间就是全部的暴露窗口**。验收通过后必须执行 P16——「验收做完了」不等于「可以把端点一直挂着」。这条是 §11-R8 接受理由的第四个成立前提（见 R8）。
+**⚠️ 暴露窗口的生命周期是硬约束**（codex spec-R4 F1 + **R5 F1 收紧**）：`tailscale serve --bg` 是**持久**配置，不会自己消失。
+
+**P16 是 P12 之后每一条路径的强制收尾，不只是成功路径**（R5-F1）。初稿把 P16 写成「验收通过后必须执行」——**这是漏洞**：P13/P14 失败或中途暂停时，端点仍然对全 tailnet 开着，而 P15 正好把 3 行复位回 `unsent`，此时任何其它 tailnet 节点（或设备上一个残留的 App 进程）都能把库存预占/下载/confirm 掉，直接毁掉下一次验收。
+
+正确契约（`finally` 语义）：
+
+| 路径 | P16 是否必须执行 |
+|---|---|
+| P14 验收全过 | **是** |
+| P13/P14 失败 | **是**，且必须在 P15 复位**之前**关 |
+| 中途暂停 / 人为中止 / 换机 / 下班 | **是** |
+| P15 复位后准备再来一轮 | 复位期间保持关闭，**重新开始时才由 P12 重新打开** |
+
+即：**只有在「正要做 P13/P14」这一小段窗口里，端点才允许是开的。** 这是 §11-R8 接受理由的第四个成立前提（见 R8）。
 
 **⚠️ 次序是硬约束，不是排版**（codex spec-R2 F2）：烟测（P9）必须在插入 3 行真数据（P11）**之前**跑完并清空。理由见 §9.2 —— `reserve` 无法指定行，烟测会抢走真数据行。P10 的 `count = 0` 断言就是这道门的机械判据。
+
+**⚠️ 为什么 `\dt` 出 4 张表不算数**（codex spec-R5 F2）：`backend/sql/schema.sql` 建表全部用 **`CREATE TABLE IF NOT EXISTS`**（已实测：`schema.sql:8/13/57/69` 四处建表全带该子句，全文件共 7 处 `IF NOT EXISTS`）。这意味着——如果 PG 卷不是全新的（比如上一次部署留下的、或者列类型/CHECK 约束跟当前 DDL 有漂移的旧卷），**`schema.sql` 会静默跳过所有建表、什么都不修**，而 `\dt` 照样输出 4 张表、P6 照样「通过」。随后插入的数据和真机验收就跑在一个**没被校验过的 schema** 上，故障现象会跟数据 bug / App bug 混在一起，极难区分。
+
+故 P6 追加两条硬约束：① **卷必须是全新的**（部署前确认 compose 项目 `kline-trainer` 无既有 `pgdata` 卷，有则先销毁）；② **P6b 直接查实际形状**，不看建表语句的返回值。
 
 **⚠️ P11 的环境变量只在这次 `devicectl` 启动的进程里有效**：之后从桌面图标点开 App 不会带这个变量，后端地址回落到默认值。这**不影响 G4**——训练组已落本地缓存，离线可看可练。
 
