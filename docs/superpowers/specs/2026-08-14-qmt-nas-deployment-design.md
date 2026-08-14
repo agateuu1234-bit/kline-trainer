@@ -204,7 +204,8 @@ docker compose 项目 kline-trainer
 |---|---|
 | C1-1 | `requirements-api.txt` 的包集合**恰好**是 `{fastapi, uvicorn, asyncpg}`，每个都是精确 pin（无 `>=` / `<` / `~=`），且 pin 值与 `requirements.txt` 中同名包**完全一致** |
 | C1-2 | `Dockerfile` 的 base image 是**精确 patch 版本 tag + `@sha256:` digest**（不得含 `latest`，不得用浮动的 `3.11-slim`），且安装的是 `requirements-api.txt` 而非 `requirements.txt` |
-| C1-3 | compose 含顶层显式项目名 `kline-trainer`；新增 `api` 服务，`depends_on` 含 `db` |
+| C1-3 | compose 含顶层显式项目名 `kline-trainer`；新增 `api` 服务 |
+| C1-3b | **（codex spec-R1 F3）** `db` 服务带 healthcheck；`api` 的 `depends_on` 用 **`condition: service_healthy`** 而非裸 `depends_on: [db]`；`api` 带 `restart: unless-stopped`（与既有 `db` 服务同风格） |
 | C1-4 | `api` 的宿主端口绑定默认值是 **`127.0.0.1`**（形如 `${API_BIND_HOST:-127.0.0.1}`），不得默认对 LAN 开放 |
 | C1-5 | 训练组目录挂载进 `api` 容器时是**只读**（`:ro`），容器内路径固定为 `/data/training-sets` |
 | C1-6 | `.env.example` 里定义的 DSN 变量名与 `app/main.py` 实际读取的名字**一致**（当前是 `DB_URL` vs `DATABASE_URL`，不一致——本切片修掉） |
@@ -227,7 +228,10 @@ docker compose 项目 kline-trainer
 | T3-2 | **正向档**：装配 `AsyncpgLeaseRepository`（注入 fake pool，不需要真 PG），`GET /health` → `repository == "asyncpg"` | — |
 | T3-3 | `status` 字段仍为 `"ok"` | 删掉 `status` → 红 |
 | T3-4 | 中和 `/health` 的 repository 判定（写死一个值）→ T3-1 或 T3-2 其中**具名的那一条**变红 | — |
-| T4-1 | 用 pyyaml 解析 compose 做结构断言：`api` 服务存在、`depends_on` 含 `db`、顶层 `name == "kline-trainer"` | 删 `name` → 红 |
+| T4-1 | 用 pyyaml 解析 compose 做结构断言：`api` 服务存在、顶层 `name == "kline-trainer"` | 删 `name` → 红 |
+| T4-1b | `api.depends_on.db.condition == "service_healthy"`（**不是**裸列表形式） | 改成 `depends_on: [db]` → 红 |
+| T4-1c | `db` 服务定义了 `healthcheck` | 删 healthcheck → 红 |
+| T4-1d | `api` 有 `restart` 策略 | 删 `restart` → 红 |
 | T4-2 | `api` 端口绑定默认值是 `127.0.0.1` | 改成 `0.0.0.0` → 红 |
 | T4-3 | 训练组挂载带 `:ro` 且容器侧是 `/data/training-sets` | 删 `:ro` → 红 |
 | T5-1 | Dockerfile base image 是精确 patch tag **且带 `@sha256:` digest** | 改成 `python:3.11-slim`（去 digest）→ 红 |
@@ -317,10 +321,37 @@ docker compose 项目 kline-trainer
 | P10 | `tailscale serve --bg --https=443 http://127.0.0.1:8010` | Claude 可跑 | Mac 上 `curl https://fnos.tail9dc815.ts.net/health` 成功且证书可验 |
 | P11 | Debug 构建装机 + `devicectl` 带 `KLINE_BACKEND_BASE_URL` 启动 | **user**（需签名，真终端） | App 启动无错 |
 | P12 | 走 §9 验收 | **user**（真机目视） | G1–G4 全过 |
+| P13 | **（仅失败重跑时）** 按 **§7.1** 复位库侧 3 行 + 清设备侧状态，回到 P11 | 库侧 Claude 可跑 / 设备侧 **user** | 3 行回到 `unsent` 且 lease 三列全 NULL；设备上无残留训练组 |
 
 **⚠️ P11 的环境变量只在这次 `devicectl` 启动的进程里有效**：之后从桌面图标点开 App 不会带这个变量，后端地址回落到默认值。这**不影响 G4**——训练组已落本地缓存，离线可看可练。
 
 **并行安全**（本次全程遵守）：不碰 `.dev/worktree/qmt-4a2b-s3`；Mac 上只碰 `qmt-trial` 容器，绝不碰 `qmt-pg-r8` / `qmt-pg-r8b`；不动主仓 HEAD，代码从 `origin/main` 切**新** worktree。
+
+### §7.1 验收可重跑契约（codex spec-R1 F2，2026-08-14）
+
+**为什么需要**（依据实测的真实 SQL，非推演）：
+
+- `reserve_meta` 的谓词是 `WHERE status = 'unsent' OR (status = 'reserved' AND lease_expires_at <= $1)`（`lease_repo.py:122-125`）→ **`sent` 行永远不会被再次选中**。
+- `reserved` 行靠 10 分钟 TTL 自愈，**`sent` 行永不自愈**。
+- 本次库存**恰好 3 行**，而 G2/G3 要求的正是这 3 行走到 `sent`。
+
+→ **一次部分失败的真机跑（如 2 行 confirm 成功、第 3 行断网）会永久吃掉库存**，此后无法再跑一次干净的 3 行验收。这不是理论风险：真机链路涉及证书、Tailscale、签名、网络，首次跑通常不会一把过。
+
+**库侧复位契约**：
+
+1. 对那 3 个 id 无条件置 `status='unsent'`，并把 `lease_id` / `lease_expires_at` / `reserved_at` **三列同时置 NULL**。
+   ⚠️ 三列必须一起 NULL —— `ck_lease_state_invariant` 规定 `unsent` 行的 lease 三列必须全空，漏一列整条 UPDATE 被 CHECK 拒绝。
+2. **必须是无条件 UPDATE，不得写成依赖当前状态的条件更新** —— 复位要在「已经是 unsent」时重复执行也安全（幂等），否则第二次重跑会静默不生效。
+3. 复位后核实：查这 3 行，`status` 全 `unsent` 且三列全 NULL。
+
+**设备侧复位契约（⚠️ 这条不做会产生假绿）**：
+
+必须 **uninstall App 再装**，不能只是覆盖安装（`project_device_testing_requires_seed_fixture`：install 不擦 data）。理由：
+
+- App 的缓存按训练组 id 键控。**上一轮已经落地的 3 个训练组在覆盖安装后仍然在**——此时 G2「看到 3 个训练组」和 G4「能进去画 K 线」会在**上一轮的残留物**上「通过」，而这一轮其实一个字节都没下载。这是标准的假绿。
+- P2 journal 的残留行还会在下次启动时触发 `retryPendingConfirmations`：拿旧 lease 去 confirm 已复位的行 → `decide_confirm` 走 `row.lease_id != lease_id` 分支 → `LEASE_INVALID` → 409 → journal 标 `.rejected` 并**删掉本地缓存副本**。行为上自洽，但会让「训练组莫名消失」这种现象混进验收观察，干扰判断。
+
+**判绿纪律**：任何一次重跑，若**没有**同时做库侧复位 + 设备侧 uninstall，其 G2/G4 观察结果**一律作废**，不得记为通过。
 
 ---
 
@@ -336,6 +367,8 @@ docker compose 项目 kline-trainer
 | tailnet HTTPS 没开 | `tailscale serve --https` 报错或证书不可验 | P1 的判据 |
 | 租约 10 分钟过期后才 confirm | confirm 返 409 `lease_expired`，行退回 `unsent` | 库里查 `status` + `lease_expires_at` |
 | schema_version 不为 1 | App 侧 `openAndVerify` 失败 | §2.2 已实测为 1，理论上不该发生 |
+| NAS 断电重启，`api` 比 PG 先起来 | `create_pool` 抛错 → FastAPI startup 失败 → 容器退出后不再拉起 | C1-3b 的 healthcheck + `service_healthy` + `restart` 三件套预防；判据是 `docker compose ps` 里 `api` 为 running |
+| **重跑时没复位就直接看结果**（假绿） | G2/G4 在上一轮残留的缓存训练组上「通过」，实际本轮零下载 | §7.1 的库侧复位 + 设备侧 uninstall；缺任一项则该次 G2/G4 观察作废 |
 
 ---
 
@@ -346,6 +379,7 @@ docker compose 项目 kline-trainer
 - **G1**：`curl https://fnos.tail9dc815.ts.net/health` → `repository == "asyncpg"`。
   ⚠️ 这是**快速前置检查**，不是决定性证据。决定性证据是 **G3**：InMemory repo 里零行，若真走了 InMemory，`reserve` 会返回 `sets: []`、手机一个 zip 都拉不到、库里三行也不会变 `sent`。G2+G3 同时成立即排除了假件路径。
 - **G2**：面板状态行显示 3 个成功 + 本地训练组列表出现 3 条。
+  ⚠️ **若本次是重跑**，必须先按 **§7.1** 完成库侧复位 + 设备侧 uninstall，否则 G2/G4 会在上一轮残留的缓存上假绿，观察结果作废。
 - **G3**：在 NAS 的 PG 里查那 3 行，`status` 全为 `sent`。
 - **G4**：真机目视，任选一条进去有蜡烛渲染。
 
@@ -404,9 +438,26 @@ docker compose 项目 kline-trainer
 
 | 编号 | 内容 | 账本轨迹 | 本次处置 |
 |---|---|---|---|
-| **PR11-R1** | 生产 `backendBaseURL` 是 placeholder `http://kline-trainer.local` | `docs/acceptance/2026-06-08-wave2-pr11-composition-root.md:67` 起 → Wave 2 completion `DEFERRED → NAS 部署` → Wave 3 completion 仍 **OPEN** | **CLOSE**（切片二 §6） |
+| **PR11-R1** | 生产 `backendBaseURL` 是 placeholder `http://kline-trainer.local` | `docs/acceptance/2026-06-08-wave2-pr11-composition-root.md:67` 起 → Wave 2 completion `DEFERRED → NAS 部署` → Wave 3 completion 仍 **OPEN** | **保持 OPEN，仅收窄描述**（见 §13.0） |
 | **W1-R1** | `docker-compose.yml` 用 image tag 而非 `@sha256:` digest | Wave 1 completion §48 → W1-R1，Wave 2/3 completion 均 **OPEN**，处置写明「归 NAS 部署 PR」 | **CLOSE**（切片一 C1-8 / T6，user 2026-08-14 拍板一并收） |
 | **W1-R2** | 3-5 个样本训练组数据未生成（源自 H7 = plan v1.5 Phase 0 第 7 步「手动检查 3-5 个训练组数据正确性」） | Wave 1 completion §49 起 **OPEN**，理由「需 NAS 真实 CSV 数据源 + B1/B2 真跑」 | **部分满足，不 CLOSE**（见下） |
+
+### §13.0 PR11-R1 为什么**不能**标 CLOSE（codex spec-R1 F1，2026-08-14）
+
+本 spec 初稿把 PR11-R1 标成 CLOSE，**这是 overclaim，已纠正**。
+
+PR11-R1 的原始定义是「**生产** `backendBaseURL` = placeholder」。而切片二只打通 **Debug** 通道（`#if DEBUG` 读 `KLINE_BACKEND_BASE_URL`）；**Release 构建仍然回落到硬编码的 `http://kline-trainer.local`**，Release 配置通道本次明确不做（§6.3，user 已定）。所以：
+
+- Release / TestFlight 包**仍然带着原来那个上架阻塞**；
+- 即便是 Debug 包，只要不是那一次 `devicectl` 启动的进程（比如从桌面图标点开），也会回落到 placeholder（§7-P11 已明写）。
+
+因此「Debug 演示能过」**不等于**生产阻塞已解。本仓 Wave 3 completion 曾把同型问题点名为 **overclaim**（把无运行时接线的 bounce 列进运行时矩阵），此处是同一种错，不再犯。
+
+**处置**：PR11-R1 **保持 OPEN**，描述收窄为——
+
+> Debug 通道已可配（`KLINE_BACKEND_BASE_URL`，切片二）；**Release 配置通道仍 OPEN**，归正式部署 PR。本次的 NAS 验收属 **debug-only 链路验证**，不构成生产 URL 配置的关闭证据。
+
+**连带的措辞纪律**（并入 §1 禁述族）：本次交付的任何文档 / PR 描述 / 提交信息**不得**出现「backendBaseURL 已可配置（不加限定）」「PR11-R1 已关闭」「生产后端地址已接通」。提到时必须带 **debug-only** 限定。
 
 ### §13.1 W1-R2 为什么只能标「部分满足」
 
