@@ -19,6 +19,8 @@
 
 **禁述**（本 spec 及后续所有文档）：「pilot 已完成」「100 股已出货」「真实数据接入完成」。本次只搬 3 个片段做端到端链路验收，不代表数据接入闭合。
 
+> 本次交付同时是三条挂了三个 Wave 的既有 residual（**PR11-R1 / W1-R1 / W1-R2**）点名归属的那个「NAS 部署 PR」。逐条处置见 **§13**。
+
 ---
 
 ## §2 已实测事实清单
@@ -194,19 +196,20 @@ docker compose 项目 kline-trainer
 
 ## §5 交付切片一：后端容器化
 
-**范围**：`backend/Dockerfile`（新增）、`backend/requirements-api.txt`（新增）、`backend/docker-compose.yml`（改）、`backend/.env.example`（改）、`backend/app/main.py`（改 `/health`）、对应测试、验收清单。**零 App 改动。**
+**范围**：`backend/Dockerfile`（新增）、`backend/requirements-api.txt`（新增）、`backend/docker-compose.yml`（改：新增 `api` 服务 + 收掉 W1-R1 的 image digest pin）、`backend/.env.example`（改）、`backend/app/main.py`（改 `/health`）、对应测试、验收清单。**零 App 改动。**
 
 ### §5.1 契约
 
 | 编号 | 契约 |
 |---|---|
 | C1-1 | `requirements-api.txt` 的包集合**恰好**是 `{fastapi, uvicorn, asyncpg}`，每个都是精确 pin（无 `>=` / `<` / `~=`），且 pin 值与 `requirements.txt` 中同名包**完全一致** |
-| C1-2 | `Dockerfile` 的 base image 是**精确 patch 版本 tag**（不得含 `latest`，不得用浮动的 `3.11-slim`），且安装的是 `requirements-api.txt` 而非 `requirements.txt` |
+| C1-2 | `Dockerfile` 的 base image 是**精确 patch 版本 tag + `@sha256:` digest**（不得含 `latest`，不得用浮动的 `3.11-slim`），且安装的是 `requirements-api.txt` 而非 `requirements.txt` |
 | C1-3 | compose 含顶层显式项目名 `kline-trainer`；新增 `api` 服务，`depends_on` 含 `db` |
 | C1-4 | `api` 的宿主端口绑定默认值是 **`127.0.0.1`**（形如 `${API_BIND_HOST:-127.0.0.1}`），不得默认对 LAN 开放 |
 | C1-5 | 训练组目录挂载进 `api` 容器时是**只读**（`:ro`），容器内路径固定为 `/data/training-sets` |
 | C1-6 | `.env.example` 里定义的 DSN 变量名与 `app/main.py` 实际读取的名字**一致**（当前是 `DB_URL` vs `DATABASE_URL`，不一致——本切片修掉） |
 | C1-7 | `GET /health` 返回 `{"status": "ok", "repository": <"asyncpg" \| "inmemory">}`，`repository` 反映**请求时**装配的 repository |
+| C1-8 | **（收 W1-R1）** compose 里**每一个** `image:` 都带 `@sha256:` digest，含既有的 `db` 服务。digest 必须取**多架构 manifest list（OCI image index）**的顶层 digest，不得取单平台 manifest 的 digest——否则镜像被钉死在一个架构上（Mac 是 arm64、NAS 是 amd64）。已实测 `postgres:15.12` 与 `python:3.11.14-slim` 均为 index 且覆盖 `linux/amd64` + `linux/arm64/v8`（`docker buildx imagetools inspect`，2026-08-14） |
 
 ### §5.2 测试判据（每条都须变异验证）
 
@@ -227,8 +230,12 @@ docker compose 项目 kline-trainer
 | T4-1 | 用 pyyaml 解析 compose 做结构断言：`api` 服务存在、`depends_on` 含 `db`、顶层 `name == "kline-trainer"` | 删 `name` → 红 |
 | T4-2 | `api` 端口绑定默认值是 `127.0.0.1` | 改成 `0.0.0.0` → 红 |
 | T4-3 | 训练组挂载带 `:ro` 且容器侧是 `/data/training-sets` | 删 `:ro` → 红 |
-| T5-1 | Dockerfile base image 是精确 patch tag | 改成 `python:3.11-slim` → 红 |
+| T5-1 | Dockerfile base image 是精确 patch tag **且带 `@sha256:` digest** | 改成 `python:3.11-slim`（去 digest）→ 红 |
 | T5-2 | Dockerfile 装的是 `requirements-api.txt` | 改成 `requirements.txt` → 红 |
+| T6-1 | **正向档**：当前树上 compose 的每个 `image:` 都带 `@sha256:` → 绿 | — |
+| T6-2 | 去掉 `db` 服务 image 的 digest（退回裸 `postgres:15.12`）→ T6-1 红 | 只去一个 |
+| T6-3 | 去掉 `api`/Dockerfile 侧的 digest → 对应的具名测试红 | 只去另一个（两侧都要单独验，防「只要有一个带 digest 就绿」的弱判据） |
+| T6-4 | 断言无任何 `:latest` | 改一个 image 为 `:latest` → 红 |
 
 **已知会变红的既有测试**：`backend/tests/test_health.py::test_health_returns_200`（断言 `== {"status": "ok"}` 精确相等）。这是**预期中的 TDD 先红**，随 C1-7 一起更新。
 
@@ -386,3 +393,34 @@ docker compose 项目 kline-trainer
 - 实施走 TDD：**先看红再实现**；每条新测试**必须变异验证**（中和判据 → 看**具名的那条**变红 → 用 `cp` 复原，⛔ 绝不用 `git checkout <file>`），且由控制者亲跑。
 - 收口走 `.claude/scripts/codex-attest.sh --base main --head <分支>` 的 branch-diff，**不许窄化 focus**。拿到 approve 先确认它**真跑了测试**。没真 approve 就如实写 needs-attention / 接受残留 / override，**不得**写「收敛」。
 - `git push` / `gh pr create` / `gh pr merge` 全部由 user 在真终端跑。
+
+---
+
+## §13 既有 residual 账目
+
+本次交付**就是**三条 residual 在治理账本里点名归属的那个「NAS 部署 PR」。原始定义在 `kline_trainer_plan_v1.5.md` §九 Phase 0 第 6 步「Docker 部署 FastAPI」+ §二目录结构（`Backend/docker-compose.yml` + `.env`）+ §8.1「所有配置集中于 `.env`，便于日后迁移服务器」；`kline_trainer_modules_v1.4.md:129` 把 PostgreSQL 部署位置写作 NAS。
+
+**为什么拖了三个 Wave**：卡点是 **W1-R2** 的前置条件「需 NAS 真实 CSV 数据源 + B1/B2 真跑」。没有真实数据时，即便部署了后端，库里也是空的——手机拉不到东西，验收无从谈起。真实 QMT 数据是 **2026-08-14** 才第一次跑出 3 个片段的。次序上部署必须排在数据之后。
+
+| 编号 | 内容 | 账本轨迹 | 本次处置 |
+|---|---|---|---|
+| **PR11-R1** | 生产 `backendBaseURL` 是 placeholder `http://kline-trainer.local` | `docs/acceptance/2026-06-08-wave2-pr11-composition-root.md:67` 起 → Wave 2 completion `DEFERRED → NAS 部署` → Wave 3 completion 仍 **OPEN** | **CLOSE**（切片二 §6） |
+| **W1-R1** | `docker-compose.yml` 用 image tag 而非 `@sha256:` digest | Wave 1 completion §48 → W1-R1，Wave 2/3 completion 均 **OPEN**，处置写明「归 NAS 部署 PR」 | **CLOSE**（切片一 C1-8 / T6，user 2026-08-14 拍板一并收） |
+| **W1-R2** | 3-5 个样本训练组数据未生成（源自 H7 = plan v1.5 Phase 0 第 7 步「手动检查 3-5 个训练组数据正确性」） | Wave 1 completion §49 起 **OPEN**，理由「需 NAS 真实 CSV 数据源 + B1/B2 真跑」 | **部分满足，不 CLOSE**（见下） |
+
+### §13.1 W1-R2 为什么只能标「部分满足」
+
+本次确实拿到了 3 个用**真实 QMT 数据**生成的训练片段，并且验证强度**高于** H7 原本要求的「SQLite 客户端打开验证」——它们会走完整的 App 端到端链路（CRC32 → 解压 → `user_version` 校验 → 非空校验 → 缓存 → 真机渲染）。
+
+但**不得据此标 CLOSE**，三条理由：
+
+1. 这 3 个片段是在**本地副本上做了临时转换**后生成的（源共享全程只读），**不是**走生产路径产出的。
+2. 生产路径上还压着两个已知缺陷（`export_log.period` 写 `1d` 而代码只认 `daily` → 日线被静默 `continue` 跳过；`status='empty'` 行让 `parse_export_log` 整份崩掉），归 4b/4c，**本次不修**（§10）。
+3. 3 组 ≠ H7 语境下的样本充分性，更远不是 plan v1.5 Phase 0 第 4 步的「生成 100 个训练组」。
+
+故本次只把 W1-R2 从 OPEN 改注为「**部分满足：3 组真实数据已端到端验证；生产路径仍欠 4b/4c 两个缺陷修复**」，并继续守 §1 的禁述。
+
+### §13.2 本次**不**收的既有 residual
+
+- `docs/acceptance/2026-05-29-pr-b3-fastapi-lease.md` §residual 的 **migration-runner defer**（迁移执行脚本 + 版本追踪）：本次仍不做。理由是本次只需在**空库**上跑一次 `schema.sql`，不涉及任何 schema 变更（见 §4-D3 第 1 条）。
+- B4 调度器相关 residual：本次不部署调度器（§5.3）。
