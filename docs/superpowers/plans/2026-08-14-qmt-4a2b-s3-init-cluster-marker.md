@@ -77,7 +77,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4a2b-s3" && echo 
 
 S1 实施时新造三档并占用了 **㉕㉖㉗**。参考分支的「孤儿删除锁内原子求值」用的是**旧 ㉖**，与 main 的 ㉖（凭据表清场只删点名的库名）**直接相撞** → 本计划给它**另编新号 ㊱**。其余四档 **⑤ / ⑤b / ㉙ / ㉚** 在 main 上确认空闲，沿用参考的号。
 
-**S3 完成后 `_EXPECTED_SCENARIOS` = 47 档。**
+**S3 完成后 `_EXPECTED_SCENARIOS` = 48 档。**
 
 ---
 
@@ -779,6 +779,94 @@ def test_init_proves_peers_before_repair_ddl_even_when_the_marker_exists(dirty, 
     assert maint.executed == [], f"{why}：补建 DDL 在证明之前就跑了"
 
 
+def test_repair_accepts_a_registered_nonempty_pilot_peer(): 
+    """**混合态修复必须认同侪库的归属登记**（codex S3-R6）。
+
+    形态：marker + `pilot_database_registry` 在场且合规，只有 `pilot_create_intent` 缺失，
+    而集群里有一个**已登记的、装着真数据的**合法 pilot 库。
+
+    此前所有「要动 DDL」的路径都走【绝对空】严判据 —— 于是这个完全正常的库被判成
+    外来物，整台集群被锁在修复路径之外。而 O4-F7 引入修复路径的**全部理由**就是
+    「短路成功的实现修不好旧版本初始化的集群」；对一台真有 pilot 库的集群修不了，
+    等于这条路径没兑现它的承诺。这是 spec 反复打的**锁死**洞（R55-F1 一族）换形态。
+
+    ⚠️ 严判据在**首次初始化**那一刻仍是对的（登记表根本不存在，凭据无从取得）——
+       由 `test_init_proves_peer_databases_are_clean_before_any_ddl` 守着，别一起放宽。
+    """
+    peer = _FakeConn(user_objects=[("pg_class", 42)],          # 非空：装着真数据
+                     meta_rows=[{"key": k, "value": v} for k, v in {
+                         "tool": "qmt_pilot", "seed": "live", "state": "ready",
+                         "contract_version": CONTRACT_VERSION,
+                         "export_log_sha256": "a" * 64, "output_dir": "/x/y",
+                         "created_at": "20260809T101530123456Z"}.items()])
+    maint = _InitMaint(intent_table_missing=True,              # 混合态：只缺 intent
+                       databases=["kline_pilot_live"],
+                       registered_dbnames={"kline_pilot_live"})
+    asyncio.run(_init(maint, targets={"kline_pilot_live": peer}))
+    assert any("CREATE TABLE" in q.upper() for q in maint.executed), \
+        "已登记的非空 pilot 库把修复路径挡住了 —— 锁死洞原样复活"
+
+
+def test_repair_still_rejects_an_unregistered_nonempty_peer():
+    """**反向钉**：登记表可用**不等于**放行一切非空同前缀库。
+
+    两个独立事实缺一不可 —— 库自己的 `pilot_meta` 合规（自证）**且**这个库名
+    确实在维护库的登记表里（被判对象改不到）。这里造「meta 像样但没登记」，
+    必须仍然拒。否则上面那条放宽就把闸 (ii) 的外部凭据整个掏空了。
+    """
+    peer = _FakeConn(user_objects=[("pg_class", 42)],
+                     meta_rows=[{"key": k, "value": v} for k, v in {
+                         "tool": "qmt_pilot", "seed": "faker", "state": "ready",
+                         "contract_version": CONTRACT_VERSION,
+                         "export_log_sha256": "a" * 64, "output_dir": "/x/y",
+                         "created_at": "20260809T101530123456Z"}.items()])
+    maint = _InitMaint(intent_table_missing=True,
+                       databases=["kline_pilot_faker"],
+                       registered_dbnames=set())               # **没**登记
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint, targets={"kline_pilot_faker": peer}))
+    assert ei.value.code == "unowned_pilot_database"
+    assert maint.executed == [], "拒绝之前已经执行了 DDL"
+
+
+def test_first_init_does_not_get_the_registry_relaxation():
+    """**首次初始化那一刻登记表不存在，严判据必须原样保留**。
+
+    放宽只针对「登记表在场且合规」的混合态。首次初始化时 `registry_usable=False`，
+    一个非空的同前缀库照旧拒 —— 哪怕它自己写了一份像样的 pilot_meta
+    （那是**自证**，而唯一能反驳自证的外部凭据此刻根本不存在）。
+    """
+    peer = _FakeConn(user_objects=[("pg_class", 42)],
+                     meta_rows=[{"key": k, "value": v} for k, v in {
+                         "tool": "qmt_pilot", "seed": "live", "state": "ready",
+                         "contract_version": CONTRACT_VERSION,
+                         "export_log_sha256": "a" * 64, "output_dir": "/x/y",
+                         "created_at": "20260809T101530123456Z"}.items()])
+    maint = _InitMaint(marker_rows=[], databases=["kline_pilot_live"],
+                       registered_dbnames={"kline_pilot_live"})
+    # 首次初始化：三张表都不在场
+    maint.maintenance_presence = {k: False for k in maint.maintenance_presence}
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint, targets={"kline_pilot_live": peer}))
+    assert ei.value.code == "unowned_pilot_database"
+
+
+def test_both_peer_proofs_use_the_same_two_facts():
+    """机械守卫：闸 (ii) 与修复路径的归属判据**必须是同一组两个事实**。
+
+    同一条判据在两处各写一遍是本仓反复栽的形态。这里不要求两处代码相同（它们的
+    上下文不同），但要求**都**引用 `_looks_like_our_pilot_db` 与 `_REGISTRY_HAS_SQL`
+    —— 任一处日后被改成「只看 pilot_meta」就当场变红。
+    """
+    import inspect
+    import qmt_pilot_db as m
+    for fn in (m.assert_cluster_allowed, m._assert_disposable_cluster):
+        src = inspect.getsource(fn)
+        assert "_looks_like_our_pilot_db(" in src, f"{fn.__name__} 缺自证那一半"
+        assert "_REGISTRY_HAS_SQL" in src, f"{fn.__name__} 缺外部登记凭据那一半"
+        assert "_is_absolutely_empty(" in src, f"{fn.__name__} 缺【绝对空】那一档豁免"
+
+
 def test_init_still_repairs_the_mixed_state_on_a_clean_cluster():
     """反向钉：集群本身干净时，混合态照旧被修好（别把上面那条做成「一律拒」）。"""
     maint = _InitMaint(intent_table_missing=True)      # 集群干净、只是缺表
@@ -876,18 +964,41 @@ _MAINTENANCE_SHAPE_OWNER = {"marker_": "marker_present",
                             "registry_": "registry_present"}
 
 
-async def _assert_disposable_cluster(maint_conn, *, connect) -> None:
+async def _assert_disposable_cluster(maint_conn, *, connect,
+                                     registry_usable: bool = False) -> None:
     """「这台集群整个可弃」的**免标记**证明 —— 首次初始化用的那一组闸 (ii)(iii)。
+
+    `registry_usable`：`pilot_database_registry` **在场且形状合规**时传 True
+    —— 那时同侪库的**外部归属凭据取得到**，就不该再要求它们【绝对空】。
+    详见下面「两种同侪库判据」那一段（codex S3-R6）。
+
+    ⚠️ **调用方一律传 `presence["registry_present"]`，即「动 DDL 之前」的在场情况**，
+       不要在 DDL 之后重新查一次：补建刚造出来的登记表**必然是空的**，
+       拿它去「证明」同侪库归属等于零证据。用 DDL 前的快照既正确又保守 ——
+       首次初始化那一刻登记表不存在 → 严判据；混合态修复时它带着真实内容 → 认凭据。
+    ⚠️ 形状不合规的登记表走不到这里：`init_cluster_marker` 的 1b 那一步
+       （在场的表必须各自合规）会**零 DDL** 先拒掉，故「在场」即「可用」。
 
     ⚠️ **和 `assert_cluster_allowed` 的区别，以及为什么两个都要有**：
       · `assert_cluster_allowed` 的闸 (i) 要求**已经有合法标记** —— 首次初始化时
         标记还没写，它必然拒绝。而闸 (ii) 的完整版会认同侪 pilot 库的**归属登记**，
         那在首次初始化时必然为空。
-      · 本函数用**严判据**：同前缀库必须【绝对空】。这在「登记表要么为空、
-        要么根本不存在」的那一刻是**唯一诚实的选择** —— 同侪库的外部凭据无从取得，
-        「证明不了」只能等价于「拒绝」。
-      · 反过来，把这套严判据套到**已建成**的集群上会把正常的 pilot 库判成外来物，
-        所以已有标记的那条路必须走 `assert_cluster_allowed`。
+    **两种同侪库判据，由 `registry_usable` 选（codex S3-R6）**：
+      · `registry_usable=False`（**首次初始化**）：登记表根本不存在 → 同侪库的外部
+        凭据**无从取得** → 「证明不了」只能等价于「拒绝」，故要求同前缀库【绝对空】。
+      · `registry_usable=True`（**混合态修复**：marker + registry 在场、intent 缺失）：
+        登记表在场且合规（形状不合规的话 1b 那一步早就零 DDL 拒了），
+        于是**外部归属凭据取得到** —— 此时仍要求【绝对空】会把一个
+        **已登记的、装着真数据的合法 pilot 库**判成外来物，
+        把整台集群锁在修复路径之外。而 O4-F7 引入修复路径的全部理由，
+        就是「短路成功的实现修不好旧版本初始化的集群」。
+        ⚠️ 这正是 spec 反复打的那类**锁死**洞（R55-F1 一族）换了个形态。
+      · 归属证明与闸 (ii) 用**同一组两个独立事实**：库自己的 `pilot_meta` 合规
+        （`_looks_like_our_pilot_db`）**且**这个库名在维护库的登记表里确实被声明过
+        （`_REGISTRY_HAS_SQL`，它 JOIN `pg_database` 绑实例）。
+        两条都不成立时才落到【绝对空】那一档。
+      · 反过来，把严判据套到**已建成**的集群上同样会把正常的 pilot 库判成外来物，
+        所以已有标记且三表齐全的那条路仍然走 `assert_cluster_allowed`（完整闸 (i)(ii)(iii)）。
 
     ⚠️ **零副作用**（只读），故可以在同一次运行里调用两次：
       一次在动 DDL **之前**（不在别人的库里留下表），
@@ -917,11 +1028,27 @@ async def _assert_disposable_cluster(maint_conn, *, connect) -> None:
         try:
             await adopt_connection(other, name, cluster_id=_cluster_id,
                                    expected_oid=row["db_oid"])
+            if registry_usable:
+                # ⚠️ 与闸 (ii) **同一组两个独立事实**：库自己的 pilot_meta 合规
+                #    （自证）**且**这个库名在维护库的登记表里被声明过（被判对象改不到，
+                #    且 `_REGISTRY_HAS_SQL` JOIN `pg_database` 绑实例）。
+                # ⚠️ 读 meta 失败/形状不合规**不在这里拒**：下面还有【绝对空】那一档豁免
+                #    （与闸 (ii) 的处理逐字一致 —— 否则一个合法的崩溃残骸会被判成外来物）。
+                try:
+                    meta = await read_pilot_meta_rows(other)
+                except Exception:
+                    meta = {}
+                if _looks_like_our_pilot_db(meta, name) and await maint_conn.fetchval(
+                        _REGISTRY_HAS_SQL, name, meta.get("seed")):
+                    continue              # 已登记的合法 pilot 库 → 放行
             if not await _is_absolutely_empty(other):
                 raise PilotClusterBoundaryError(
                     "unowned_pilot_database",
-                    f"{name!r} 名字匹配 kline_pilot_* 但非空，且这台集群还没有任何"
-                    f"归属登记——前缀名不是归属证明，拒绝把它声明为 pilot 专用集群")
+                    f"{name!r} 名字匹配 kline_pilot_* 但非空"
+                    + ("，且它没有合法 pilot_meta / 没在维护库的登记表里登记过"
+                       if registry_usable else
+                       "，且这台集群还没有任何归属登记")
+                    + "——前缀名不是归属证明，拒绝把它声明为 pilot 专用集群")
         except PilotClusterBoundaryError:
             raise
         except Exception as exc:
@@ -1031,7 +1158,8 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
     #        由下面完整的 `assert_cluster_allowed`（认同侪库归属证明）把关。
     _needs_repair_ddl = not all(presence.values())
     if not rows or _needs_repair_ddl:
-        await _assert_disposable_cluster(maint_conn, connect=connect)
+        await _assert_disposable_cluster(maint_conn, connect=connect,
+                                         registry_usable=presence["registry_present"])
 
     # ── ② 到这里才第一次产生副作用 ──────────────────────────────────────
     #     此刻 marker/intent/registry 可能还不存在，闸 (i) 会因此拒绝，
@@ -1088,7 +1216,8 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
         # 首次初始化：标记还没写，闸 (i) 必然拒绝，故用**免标记**的等价现查。
         # ⚠️ 这一次是在 DDL **之后**跑的，与 1d/1e 那次不是同一个时刻 ——
         #    正是它把「预检通过之后、写标记之前」那个窗口关上。
-        await _assert_disposable_cluster(maint_conn, connect=connect)
+        await _assert_disposable_cluster(maint_conn, connect=connect,
+                                         registry_usable=presence["registry_present"])
         # ⚠️ **本函数唯一不可回滚的信任写入，必须排在所有会拒绝的检查之后。**
         await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)
 ```
@@ -1636,7 +1765,8 @@ Task 3 结束时函数末尾长这样：
     if rows:
         await assert_cluster_allowed(maint_conn, connect=connect, target_db=None)
     else:
-        await _assert_disposable_cluster(maint_conn, connect=connect)
+        await _assert_disposable_cluster(maint_conn, connect=connect,
+                                         registry_usable=presence["registry_present"])
         await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)   # ← 当时是最后一句
 ```
 
@@ -1652,7 +1782,8 @@ Task 3 结束时函数末尾长这样：
         await assert_cluster_allowed(maint_conn, connect=connect, target_db=None)
     else:
         # 这一次证明的是「可以动这台集群的 intent 行」——授权下面的清理。
-        await _assert_disposable_cluster(maint_conn, connect=connect)
+        await _assert_disposable_cluster(maint_conn, connect=connect,
+                                         registry_usable=presence["registry_present"])
 
     # 5. 孤儿 intent 行清理（下面那一大段）。**它会抛**，故必须排在写标记之前。
     ...清理循环...
@@ -1662,7 +1793,8 @@ Task 3 结束时函数末尾长这样：
         # ⚠️ **「紧贴」是 spec 立过的纪律**（§4：「DROP 前须**紧贴着**重查一次【绝对空】」）：
         #    上面那次证明与这里之间隔着整个清理循环 —— 取锁、DELETE、释放，
         #    每一步都要时间，窗口里集群可以变脏。信任写入必须由**紧挨着它**的证明背书。
-        await _assert_disposable_cluster(maint_conn, connect=connect)
+        await _assert_disposable_cluster(maint_conn, connect=connect,
+                                         registry_usable=presence["registry_present"])
         # ⚠️ **本函数的最后一句，之后不许再有任何会抛的语句。**
         #    它是唯一不可回滚的信任写入（契约：本工具从不清标记）。
         await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)
@@ -1789,6 +1921,10 @@ Task 3 结束时函数末尾长这样：
 | **M36** | 把 `_assert_disposable_cluster` 里的 `_user_objects` 检查删掉（只留同侪库那半） | `test_init_refuses_to_declare_a_cluster_whose_maintenance_db_is_not_empty` |
 | **M37** | 把 `_WRITE_MARKER_SQL` 那句挪回清理循环**之前**（即 Task 3 的原位置） | `test_first_init_writes_no_marker_when_orphan_cleanup_fails` + `test_first_init_proves_the_cluster_again_immediately_before_the_marker`（`delete_at < marker_at` 那条） |
 | **M38** | 删掉写标记前那次「紧贴」`_assert_disposable_cluster` | `test_first_init_proves_the_cluster_again_immediately_before_the_marker`（`datistemplate in ops[delete_at+1:marker_at]` 那条） |
+| **M39** | `_assert_disposable_cluster` 的 `if registry_usable:` 整段删掉（退回一律严判据） | `test_repair_accepts_a_registered_nonempty_pilot_peer` |
+| **M40** | 把 `registry_usable` 的两个事实改成只判 `_looks_like_our_pilot_db`（去掉 `_REGISTRY_HAS_SQL`） | `test_repair_still_rejects_an_unregistered_nonempty_peer` + `test_both_peer_proofs_use_the_same_two_facts` |
+| **M41** | 调用处把 `registry_usable=presence["registry_present"]` 改成恒 `True` | `test_first_init_does_not_get_the_registry_relaxation` |
+| **M42** | 调用处改成在 DDL **之后**重查在场情况再传（而不是用 DDL 前的 `presence`） | `test_first_init_does_not_get_the_registry_relaxation`（补建出的空登记表会让首次初始化误走宽判据） |
 | M22 | 把清理循环挪到 `await assert_cluster_allowed(...)` **之前** | `test_init_does_not_clean_orphans_on_a_cluster_that_is_no_longer_clean` |
 | M23 | 循环只处理 `rows[:1]`（提前 break） | `test_orphan_cleanup_releases_every_seed_lock_it_takes` |
 
@@ -1825,6 +1961,9 @@ git commit -m "S3 Task4：init_cluster_marker 第二段 —— 孤儿 intent 清
 | **㉚** | 孤儿清理取了 seed 锁之后必须还（三条一起：取过锁 + 孤儿真被清掉 + 锁已还） | `test_orphan_cleanup_releases_every_seed_lock_it_takes` |
 | **㊱** | **新号**（旧 ㉖ 已被 S1 占用）：预筛之后取锁之前被刷新的凭据**不许被删** —— 判据在锁内当下求值 | `test_orphan_delete_predicate_is_evaluated_under_the_lock_not_from_a_snapshot` |
 | **㊲** | **新增（codex S3-R1）**：**长事务**里孤儿清理仍按语句时刻量 —— 一行真实已过期的孤儿仍被删掉 | `test_intent_ttl_is_never_measured_against_the_transaction_clock` |
+| **㊳** | **新增（codex S3-R6）**：混合态修复 + **已登记的非空** pilot 库 → 修复成功；同场景下**未登记**的非空同前缀库 → 仍拒 | `test_repair_accepts_a_registered_nonempty_pilot_peer` / `..._still_rejects_an_unregistered_nonempty_peer` |
+
+> **㊳ 为什么要上真 PG**：这是本片唯一一处**放宽**判据的改动（原本一律要求同前缀库【绝对空】）。放宽必须由真库证明它没有**过度**放宽 —— host 假件的 `registered_dbnames` 是一个布尔/集合，`_REGISTRY_HAS_SQL` 那句 `JOIN pg_database d ON d.oid = r.db_oid` 的**绑实例**语义在假件上完全不求值。同一档里必须同时跑「已登记 → 放行」与「未登记 → 拒」两向。
 
 > **㊲ 为什么非有不可**：既有的 ㉝c 有一句自己写下的警告 ——「㉝ / ㉝b 都在**自动提交**下跑，`now()` 与 `statement_timestamp()` 几乎相等，**时钟源这一条在它们身上一次都没求值**」。⑤ ⑤b ㉙ ㉚ ㊱ 全是自动提交，同样对时钟源零判别力。不补 ㊲ 的话，S3 关于时钟源的证据就只剩 host 层的文本断言（那只证明「SQL 里写着这几个字」，不证明「长事务里真的量对了」）。
 
@@ -1842,6 +1981,8 @@ git commit -m "S3 Task4：init_cluster_marker 第二段 —— 孤儿 intent 清
     "kline_pilot_lifecycle_r35b",
     "kline_pilot_lifecycle_r36",          # ㊱
     "kline_pilot_lifecycle_r37",          # ㊲
+    "kline_pilot_lifecycle_r38",          # ㊳（已登记的非空 pilot 库）
+    "kline_pilot_lifecycle_r38stranger",  # ㊳（未登记的非空同前缀库）
     "kline_pilot_lifecycle_s15",
 ```
 
@@ -1872,17 +2013,17 @@ from qmt_pilot_db import (INTENT_TTL_SECONDS, MARKER_PURPOSE,  # noqa: E402
                           try_empty_remnant_exception)
 ```
 
-`_EXPECTED_SCENARIOS` 改成 47 档（新增 ⑤ ⑤b ㉙ ㉚ ㊱ ㊲，其余顺序不动）：
+`_EXPECTED_SCENARIOS` 改成 48 档（新增 ⑤ ⑤b ㉙ ㉚ ㊱ ㊲ ㊳，其余顺序不动）：
 
 ```python
 _EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑤", "⑤b", "⑥", "⑦", "⑧", "⑨", "⑨b",
                        "⑨c", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑰b", "⑱",
                        "⑲", "⑳", "⑳b", "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉙",
-                       "㉚", "㊱", "㊲", "㉛",
+                       "㉚", "㊱", "㊲", "㊳", "㉛",
                        "㉝", "㉝b", "㉝c", "㉘", "㉜", "㉜b", "㉞", "㉞b", "㉟", "㉟b")
 ```
 
-**S3 完成后 = 47 档**（基线 41 + ⑤ ⑤b ㉙ ㉚ ㊱ ㊲）。
+**S3 完成后 = 48 档**（基线 41 + ⑤ ⑤b ㉙ ㉚ ㊱ ㊲ ㊳）。
 
 - [ ] **Step 2: 跑脚本确认变红**
 
@@ -1890,7 +2031,7 @@ _EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑤", "⑤b", "⑥", "⑦", 
 docker start qmt-pg-r8 qmt-pg-r8b
 QMT_VERIFY_ALLOW_DESTRUCTIVE=1 "$PY" backend/scripts/verify_pilot_db_lifecycle.py 2>&1 | grep -E "档断言全部成立|FAIL|❌|未运行|缺"
 ```
-预期：脚本报**声明了 47 档但只跑了 41 档**（`_EXPECTED_SCENARIOS` 与 `ran` 集合的差集非空）。这是本 Task 的「红」——先让缺档机制自己叫出来，再去补场景。
+预期：脚本报**声明了 48 档但只跑了 41 档**（`_EXPECTED_SCENARIOS` 与 `ran` 集合的差集非空）。这是本 Task 的「红」——先让缺档机制自己叫出来，再去补场景。
 
 > 若脚本没有「声明 vs 实跑」的差集检查而是静默通过，**先补这条检查**（它本身就是「机械检查器被它该抓的损坏禁用了自身解析器」那一族的防线），再继续。
 
@@ -2261,6 +2402,101 @@ QMT_VERIFY_ALLOW_DESTRUCTIVE=1 "$PY" backend/scripts/verify_pilot_db_lifecycle.p
 
 > ⚠️ **实施时必须现场确认的一点**：`ROLLBACK` 会把事务里那次 DELETE 一起回滚，故 `left37 == 0` 的断言**必须在 ROLLBACK 之前**求值（上面的写法已经是这样）。若实施时发现 `init_cluster_marker` 在显式事务里因别的原因跑不完（例如某条守卫查询要求自动提交），**不要**把这一档改成自动提交来「修绿」—— 那会让它退化成又一个对时钟源零判别力的档；正确做法是停下来报告，由控制者判断。
 
+- [ ] **Step 5c: 写 ㊳ —— 混合态修复认同侪库的归属登记（codex S3-R6）**
+
+⚠️ 本档必须**双向**：同一个混合态下，「已登记的非空库 → 放行修复」与「未登记的非空库 → 拒」都要跑到。只测放行那一半，等于证明了「放宽生效」却没证明「没有过度放宽」。
+
+```python
+    # ── ㊳ 混合态修复必须认同侪库的**外部归属登记**（codex S3-R6）────────────
+    #    形态：marker + pilot_database_registry 在场且合规，只有 pilot_create_intent 缺失。
+    #    此前所有「要动 DDL」的路径都走【绝对空】严判据 → 一个**已登记的、装着真数据的**
+    #    合法 pilot 库被判成外来物 → 整台集群锁在修复路径之外，
+    #    而 O4-F7 引入修复路径的全部理由就是「修好旧版本初始化的集群」。
+    #    ⚠️ 这是本片唯一一处**放宽**判据的改动，故必须由真库同时证明两向。
+    scenario("㊳")
+    print("㊳ 混合态修复：已登记的非空 pilot 库放行、未登记的非空同前缀库仍拒")
+    seed38 = "lifecycle_r38"
+    db38 = f"kline_pilot_{seed38}"
+    conn = await _connect(base_dsn)
+    try:
+        # 1) 造一个**真正由本工具建出来**的 pilot 库（带合法 pilot_meta + 登记行）
+        await harness.drop_database(base_dsn, db38)
+        await _apply_cluster_schema(conn)
+        await _write_marker(conn)
+        got38 = await conn.fetchval(
+            "SELECT pg_try_advisory_lock(hashtext('kline_pilot_' || $1))", seed38)
+        check(bool(got38), "㊳ 前置：取到 seed 锁")
+        try:
+            await create_pilot_database(conn, connect=connect_peer, seed=seed38,
+                                        run_id=f"lifecycle-{seed38}", **_BUILD_ARGS)
+        finally:
+            await conn.execute(
+                "SELECT pg_advisory_unlock(hashtext('kline_pilot_' || $1))", seed38)
+        # 往里塞真数据 —— 它必须是**非空**的，否则会被【绝对空】那一档豁免带过去，
+        # 归属登记这条判据一次都不会被求值（本仓栽过多次的空转形态）。
+        await _in_db(base_dsn, db38,
+                     "CREATE TABLE public.zzqmtverify_payload (id int)",
+                     "INSERT INTO public.zzqmtverify_payload"
+                     " SELECT generate_series(1, 500)")
+        check(not await _is_db_absolutely_empty(base_dsn, db38),
+              "㊳ 前置：那个已登记的 pilot 库确实**非空**（否则本档空转）")
+        registered = await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_database_registry WHERE dbname = $1", db38)
+        check(registered == 1, "㊳ 前置：它确实在登记表里", f"登记了 {registered} 行")
+
+        # 2) 造混合态：只把 pilot_create_intent 删掉（marker / registry 留着）
+        await conn.execute("DROP TABLE IF EXISTS public.pilot_create_intent")
+        check(not await conn.fetchval(
+            "SELECT to_regclass('public.pilot_create_intent') IS NOT NULL"),
+            "㊳ 前置：intent 表确实不在场（混合态成立）")
+
+        async def _never38(_seed):
+            return False
+
+        async def _noop38(_seed):
+            return None
+
+        cluster_sql = (_BACKEND / "sql/pilot_cluster_schema.sql").read_text(encoding="utf-8")
+        # 3) **放行那一向**：修复必须成功，且 intent 表被补建出来
+        try:
+            await init_cluster_marker(conn, connect=connect_peer,
+                                      cluster_schema_sql=cluster_sql,
+                                      try_seed_lock=_never38, release_seed_lock=_noop38)
+        except Exception as exc:
+            check(False, "㊳ 已登记的非空 pilot 库不得挡住修复",
+                  f"抛了：{type(exc).__name__}: {exc}")
+        check(bool(await conn.fetchval(
+            "SELECT to_regclass('public.pilot_create_intent') IS NOT NULL")),
+            "㊳ 修复真的把 pilot_create_intent 补建出来了")
+
+        # 4) **拒绝那一向**：同一个混合态下，**未登记**的非空同前缀库必须仍被拒
+        stranger38 = f"{_PREFIX}r38stranger"
+        await harness.drop_database(base_dsn, stranger38)
+        await conn.execute("CREATE DATABASE " + quote_ident(stranger38))
+        await _in_db(base_dsn, stranger38,
+                     "CREATE TABLE public.zzqmtverify_payload (id int)",
+                     "INSERT INTO public.zzqmtverify_payload SELECT generate_series(1, 10)")
+        await conn.execute("DROP TABLE IF EXISTS public.pilot_create_intent")   # 再造混合态
+        try:
+            await init_cluster_marker(conn, connect=connect_peer,
+                                      cluster_schema_sql=cluster_sql,
+                                      try_seed_lock=_never38, release_seed_lock=_noop38)
+            check(False, "㊳ 未登记的非空同前缀库必须拒", "竟然成功了")
+        except PilotClusterBoundaryError as exc:
+            check(exc.code == "unowned_pilot_database",
+                  "㊳ 未登记的非空同前缀库 → unowned_pilot_database", f"实得 {exc.code}")
+        check(not await conn.fetchval(
+            "SELECT to_regclass('public.pilot_create_intent') IS NOT NULL"),
+            "㊳ 拒绝那一向是**零 DDL** 的（intent 表事后仍不存在）")
+        await harness.drop_database(base_dsn, stranger38)
+        await _apply_cluster_schema(conn)          # 复原供后续档位使用
+    finally:
+        await conn.close()
+    await harness.drop_database(base_dsn, db38)
+```
+
+⚠️ **实施前置**：本档用到 `create_pilot_database` / `_BUILD_ARGS` / `_in_db`，脚本里都已存在；另需一个「某个库是不是【绝对空】」的小助手 `_is_db_absolutely_empty(base_dsn, dbname)` —— 若脚本里还没有，照 `_relation_exists` 的形状加一个（连进去调 `_is_absolutely_empty`）。`kline_pilot_lifecycle_r38` 与 `kline_pilot_lifecycle_r38stranger` **两个名字都要进 Step 0 的 `_LIFECYCLE_DBS`**。
+
 - [ ] **Step 5b: 更新脚本尾部的「本脚本证明了什么」免责段**
 
 ⚠️ **这一步不是文档美化，是判据的一部分**：脚本尾部（约 L1783-1790）现在**逐字打印**着
@@ -2301,7 +2537,7 @@ S3 落地之后这句就成了**假陈述**，而这段话存在的全部理由�
 docker start qmt-pg-r8 qmt-pg-r8b
 QMT_VERIFY_ALLOW_DESTRUCTIVE=1 "$PY" backend/scripts/verify_pilot_db_lifecycle.py 2>&1 | grep -E "档断言全部成立|FAIL|❌"
 ```
-预期：**47 档断言全部成立**，无 FAIL。
+预期：**48 档断言全部成立**，无 FAIL。
 
 同时人工核一遍尾部免责段的输出，确认里面**没有**「随 S3 补回」这类已经不成立的陈述：
 
@@ -2337,7 +2573,7 @@ cp backend/qmt_pilot_db.py /tmp/s3_t5_backup.py
 
 ```bash
 git add backend/scripts/verify_pilot_db_lifecycle.py
-git commit -m "S3 Task5：真 PG 验收补六档（⑤ ⑤b ㉙ ㉚ ㊱ ㊲），lifecycle 41→47 档"
+git commit -m "S3 Task5：真 PG 验收补七档（⑤ ⑤b ㉙ ㉚ ㊱ ㊲ ㊳），lifecycle 41→48 档"
 ```
 
 ---
@@ -2349,7 +2585,7 @@ git commit -m "S3 Task5：真 PG 验收补六档（⑤ ⑤b ㉙ ㉚ ㊱ ㊲）�
 | 闸门 | 基线 | S3 实测 |
 |---|---|---|
 | `"$PY" -m pytest backend/tests -q` | 770 passed | ___ passed |
-| `verify_pilot_db_lifecycle.py` | 41 档 | 47 档 |
+| `verify_pilot_db_lifecycle.py` | 41 档 | 48 档 |
 | `verify_pilot_concurrency.py` | 11 档 | 11 档 |
 | `verify_pilot_two_phase_create.py` | 28 档 | 28 档 |
 | 变异表 M1–M27 | — | 逐条「变异 → 具名用例变红 → `cp` 复原」，由控制者亲跑 |
@@ -2409,6 +2645,15 @@ bash .claude/scripts/codex-attest.sh --scope branch-diff --base 8578a59 --head f
 | **R4** | `needs-attention`（**未 approve**） | **[high]** 首次初始化「先写标记、再跑现查」—— 现查仍可能拒绝，于是一次**报告失败**的 init 在集群里留下**合法标记**，而契约是「本工具从不清标记」；**[high]** `release_seed_lock` 只调用、**从不验证**锁真的还回去了 —— 空实现/连错连接/只释放一层可重入计数都会「成功返回」而锁仍挂着 | **两条全接受**；标记写入改成最后一个不可回滚写入（抽出 `_assert_disposable_cluster` 复用），release 后加活连接复核 |
 
 | **R5** | `needs-attention`（**未 approve**） | **[high]** R4 只把标记挪到「首次初始化那一支的最后」，而 Task 4 随后在**整个函数的最后**又接了会抛的清理循环（DELETE 失败 / `seed_lock_not_released`，后者正是 R4 我自己加的）→ 首次初始化又能「报告失败、却留下合法标记」 | **接受**；标记改成**函数字面最后一句**，清理排在它之前，并在它之前补一次「紧贴」复查 |
+
+| **R6** | `needs-attention`（**未 approve**） | **[high]** 混合态（marker+registry 在场、intent 缺失）走【绝对空】严判据 → 一个**已登记的、装着真数据的**合法 pilot 库被判成外来物 → 整台集群锁在修复路径之外，而 O4-F7 引入修复路径的全部理由就是修好这种集群 | **接受**，按 **user 拍板的方案 B**：只在新函数上加 `registry_usable` 开关，**零改动已合并的 `assert_cluster_allowed`** |
+
+R6 的核实与处置：
+
+- ✅ **属实**。我写在 `_assert_disposable_cluster` docstring 里的理由「登记表要么为空、要么根本不存在」在混合态下**前提不成立** —— registry 可以在场且带着真实内容。而闸 (ii) 的同侪归属证明**根本不碰 `pilot_create_intent`**（实测：它只用 `read_pilot_meta_rows` + `_REGISTRY_HAS_SQL` + `_is_absolutely_empty`），所以那份凭据在混合态下是**取得到**的，我却把它扔了。
+- 📉 **严重度有界，已实测**：`pilot_cluster_schema.sql` 由**单个提交**（#157）一次性引入三张表 —— **没有任何已发布版本会产生部分表集**；且至今不存在真实 pilot 集群。故这是**恢复路径的可用性**问题（可由人工损坏／部分还原到达），不是版本错位或数据安全问题。
+- 🧭 **方案由 user 拍板（B）**：只改新函数，不动已合并的 `assert_cluster_allowed`（该函数是本模块最安全攸关的一处，4a-1 曾被评审 32 轮）。代价=归属判断在两处各有一份，已用机械守卫 `test_both_peer_proofs_use_the_same_two_facts` 钉住两处必须引用**同一组**符号。
+- ⚠️ **放宽必须双向验证**：这是本片唯一一处**放宽**判据的改动。配了三条 host 反向钉（未登记的非空库仍拒 / 首次初始化不享受放宽 / 两处判据同源）+ 真 PG 档 **㊳**（同一混合态下「已登记 → 放行」与「未登记 → 拒」两向都跑）。假件的 `registered_dbnames` 是个集合，`_REGISTRY_HAS_SQL` 里 `JOIN pg_database ON d.oid = r.db_oid` 的**绑实例**语义在 host 上完全不求值 —— 故 ㊳ 不可省。
 
 ⚠️ **R5 这一条是我 R4 修复的直接回归** —— 教科书式的「修 symptom 会挪动失败面」：我把标记挪到了分支末尾，却没考虑到下一个 Task 会在函数末尾追加会抛的代码，而那段代码里**新加的 raise 正是 R4 修复的产物**。
 **为什么这次是终点**：写标记现在是函数的**字面最后一句**，它之后不存在任何代码 —— 「副作用次序」这条原则在本函数内**再没有新的落点**。用例 `test_first_init_proves_the_cluster_again_immediately_before_the_marker` 用 `maint.executed[-1]` 把这条性质钉死。
