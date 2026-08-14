@@ -132,6 +132,15 @@ docker compose 项目 kline-trainer
 
 **明确接受的代价**：手机必须开着 Tailscale App 才能下载。下载完成后**不影响** G4——训练组已落本地缓存，离线可用。
 
+**⛔ 硬禁止：`tailscale funnel`**（codex spec-R2 F1）。
+`serve` 只对**本 tailnet 内部**暴露；`funnel` 会把同一个端点暴露到**公网**。本 API **零认证**（§10），一旦走 funnel，任何人都能 `GET /training-sets/meta` 预占并下载全部训练组。故：
+
+- 部署只许用 `tailscale serve`；
+- P12 的判据里加一条：`tailscale serve status` 的输出**不得含 funnel**；
+- 后续任何文档 / runbook / 配方**不得**出现 `tailscale funnel` 字样。
+
+**暴露面的实测边界 + 接受的残留**：本 tailnet 现有 7 个节点（`mac-mini` / `agatemac-mini` / `desktop-cimqfns` / `fnos` / `ipad162` / `iphone-15-pro-max` / `macbook-air`），`tailscale status` 显示**归属者全部是 `agateuu1234@`**，无外部共享节点（§2.4 实测）。因此「任意 tailnet 成员可预占/下载/confirm 全部训练组」这一暴露面的实际范围 = **user 自己的 7 台设备**。本次**接受**该残留（详见 §11-R8），不加认证；但上面的 funnel 禁令是硬门，不属于可接受范围。
+
 **被否方案 · dynv6 子域名 + Lucky 反代**：唯一优势是「更像将来上云的形态」。但将来上云是真域名 + 公网 + 真 LE 证书，与今天在内网绕劫持不是同一个问题。保留为后备：**它与本设计零冲突**——`backendBaseURL` 只是环境变量里的一个字符串，换条路不改任何代码。
 
 ### D2 · 后端怎么跑 → **容器 + docker compose**
@@ -208,7 +217,7 @@ docker compose 项目 kline-trainer
 | C1-3b | **（codex spec-R1 F3）** `db` 服务带 healthcheck；`api` 的 `depends_on` 用 **`condition: service_healthy`** 而非裸 `depends_on: [db]`；`api` 带 `restart: unless-stopped`（与既有 `db` 服务同风格） |
 | C1-4 | `api` 的宿主端口绑定默认值是 **`127.0.0.1`**（形如 `${API_BIND_HOST:-127.0.0.1}`），不得默认对 LAN 开放 |
 | C1-5 | 训练组目录挂载进 `api` 容器时是**只读**（`:ro`），容器内路径固定为 `/data/training-sets` |
-| C1-6 | `.env.example` 里定义的 DSN 变量名与 `app/main.py` 实际读取的名字**一致**（当前是 `DB_URL` vs `DATABASE_URL`，不一致——本切片修掉） |
+| C1-6 | **（codex spec-R2 F3 收窄）** `.env.example` 必须定义**全仓每一个 DSN 环境变量消费者**读取的名字。实测消费者共 5 处：`app/main.py:16` / `app/scheduler_main.py:60` / `import_csv.py:571` / `generate_training_sets.py:765` 读 **`DATABASE_URL`**；`scripts/nas-preflight.sh:23` 读 **`DB_URL`**。而 `.env.example` 当前**只定义 `DB_URL`** → 四个生产消费者读的名字一个都没定义。本切片的修法是 **`DATABASE_URL` 补进去**（各带用途注释：`DATABASE_URL` = 容器内网 `db:5432`，后端代码读；`DB_URL` = 宿主侧管理用 DSN，`nas-preflight.sh` 读），**不是把 `DB_URL` 改名删掉**——改名会直接打断 `nas-preflight.sh` 的必需变量检查 |
 | C1-7 | `GET /health` 返回 `{"status": "ok", "repository": <"asyncpg" \| "inmemory">}`，`repository` 反映**请求时**装配的 repository |
 | C1-8 | **（收 W1-R1）** compose 里**每一个** `image:` 都带 `@sha256:` digest，含既有的 `db` 服务。digest 必须取**多架构 manifest list（OCI image index）**的顶层 digest，不得取单平台 manifest 的 digest——否则镜像被钉死在一个架构上（Mac 是 arm64、NAS 是 amd64）。已实测 `postgres:15.12` 与 `python:3.11.14-slim` 均为 index 且覆盖 `linux/amd64` + `linux/arm64/v8`（`docker buildx imagetools inspect`，2026-08-14） |
 
@@ -221,9 +230,12 @@ docker compose 项目 kline-trainer
 | T1-3 | 反向：改掉 `requirements.txt` 里同名包的 pin → T1-1 红 | 改另一侧的 pin（两个方向都要验） |
 | T1-4 | 包集合恰好 `{fastapi, uvicorn, asyncpg}` | 往 `requirements-api.txt` 加一行 `pandas-ta` → 红 |
 | T1-5 | 全 pin 无 range | 把某行改成 `fastapi>=0.115` → 红 |
-| T2-1 | **结构提取**：从 `app/main.py` 解析出 lifespan 实际读取的环境变量名（AST 提取，**不是**测试里再硬写一遍字面量——否则恒真），断言 `.env.example` 存在同名 `KEY=` 行 | — |
-| T2-2 | 把 `.env.example` 的名字改回 `DB_URL` → T2-1 红 | 改 env 侧 |
-| T2-3 | 把 `main.py` 改成读别的名字 → T2-1 红 | 改代码侧（两个方向都要验） |
+| T2-1 | **整族扫描（codex spec-R2 F3）**：机械枚举**全仓**读取 DSN 环境变量的消费者——Python 侧用 AST 提取 `os.environ.get(...)` / `os.environ[...]` 的键名，shell 侧提取 `source backend/.env` 后被引用/校验的变量名——断言**每一个**都在 `.env.example` 里有同名 `KEY=` 行。**不得**把变量名在测试里再硬写一遍（否则恒真） | — |
+| T2-2 | 从 `.env.example` 删掉 `DATABASE_URL` → T2-1 红 | 改 env 侧 |
+| T2-3 | 从 `.env.example` 删掉 `DB_URL` → T2-1 红（证明扫描**真的覆盖了 shell 消费者**，不只是 Python 那一半） | 改 env 侧另一半 |
+| T2-4 | 把 `main.py` 改成读别的名字 → T2-1 红 | 改代码侧 |
+| T2-5 | **新增一个**读未定义 DSN 变量的 Python 消费者 → T2-1 红 | 证明扫描是枚举式的、不是写死的 5 个名字 |
+| T2-6 | **正向档**：当前树修完后 T2-1 绿 | — |
 | T3-1 | **正向档**：无 `DATABASE_URL` 起 app，`GET /health` → `repository == "inmemory"` | — |
 | T3-2 | **正向档**：装配 `AsyncpgLeaseRepository`（注入 fake pool，不需要真 PG），`GET /health` → `repository == "asyncpg"` | — |
 | T3-3 | `status` 字段仍为 `"ok"` | 删掉 `status` → 红 |
@@ -316,12 +328,16 @@ docker compose 项目 kline-trainer
 | P5 | 写 `.env`（真密码，不入库；`DATABASE_URL` 指向 compose 内网 `db:5432`） | Claude 可跑 | `.env` 不进 git |
 | P6 | `docker compose up -d db`，等就绪后灌 `backend/sql/schema.sql` | Claude 可跑 | `\dt` 出 4 张表 |
 | P7 | scp 3 个 zip 到宿主训练组目录 | Claude 可跑 | **NAS 上重算 CRC32 = `851f9444` / `32892a5f` / `150d8d6c`** |
-| P8 | 3 条 INSERT 写 `training_sets`，`file_path` 用 `/data/training-sets/…` | Claude 可跑 | 3 行 `status=unsent`，`content_hash` 与 P7 一致 |
-| P9 | `docker compose up -d api`（在 NAS 上构建镜像） | Claude 可跑 | `curl 127.0.0.1:8010/health` → `repository == "asyncpg"` |
-| P10 | `tailscale serve --bg --https=443 http://127.0.0.1:8010` | Claude 可跑 | Mac 上 `curl https://fnos.tail9dc815.ts.net/health` 成功且证书可验 |
-| P11 | Debug 构建装机 + `devicectl` 带 `KLINE_BACKEND_BASE_URL` 启动 | **user**（需签名，真终端） | App 启动无错 |
-| P12 | 走 §9 验收 | **user**（真机目视） | G1–G4 全过 |
-| P13 | **（仅失败重跑时）** 按 **§7.1** 复位库侧 3 行 + 清设备侧状态，回到 P11 | 库侧 Claude 可跑 / 设备侧 **user** | 3 行回到 `unsent` 且 lease 三列全 NULL；设备上无残留训练组 |
+| P8 | `docker compose up -d api`（在 NAS 上构建镜像） | Claude 可跑 | `curl 127.0.0.1:8010/health` → `repository == "asyncpg"` |
+| **P9** | **§9.2 的 NAS-A/B 真 PG 烟测 8 条（此刻 `training_sets` 表为空，只有烟测自己插的临时行）** | Claude 可跑 | 8 条全过；含 NAS-A.3 的 10 分钟等待 |
+| **P10** | **删光烟测临时行**，并断言表为空 | Claude 可跑 | `SELECT count(*) FROM training_sets` **= 0**（⚠️ 这条断言是 P11 的前置硬门） |
+| P11 | 3 条 INSERT 写 `training_sets`，`file_path` 用 `/data/training-sets/…` | Claude 可跑 | 恰好 3 行、全 `status=unsent`、`content_hash` 与 P7 一致 |
+| P12 | `tailscale serve --bg --https=443 http://127.0.0.1:8010`（⛔ **不得用 `funnel`**，见 §4-D1） | Claude 可跑 | Mac 上 `curl https://fnos.tail9dc815.ts.net/health` 成功且证书可验；`tailscale serve status` 输出**不含** funnel |
+| P13 | Debug 构建装机 + `devicectl` 带 `KLINE_BACKEND_BASE_URL` 启动 | **user**（需签名，真终端） | App 启动无错 |
+| P14 | 走 §9 验收 | **user**（真机目视） | G1–G4 全过 |
+| P15 | **（仅失败重跑时）** 按 **§7.1** 复位库侧 3 行 + 清设备侧状态，回到 P13 | 库侧 Claude 可跑 / 设备侧 **user** | 3 行回到 `unsent` 且 lease 三列全 NULL；设备上无残留训练组 |
+
+**⚠️ 次序是硬约束，不是排版**（codex spec-R2 F2）：烟测（P9）必须在插入 3 行真数据（P11）**之前**跑完并清空。理由见 §9.2 —— `reserve` 无法指定行，烟测会抢走真数据行。P10 的 `count = 0` 断言就是这道门的机械判据。
 
 **⚠️ P11 的环境变量只在这次 `devicectl` 启动的进程里有效**：之后从桌面图标点开 App 不会带这个变量，后端地址回落到默认值。这**不影响 G4**——训练组已落本地缓存，离线可看可练。
 
@@ -385,10 +401,21 @@ docker compose 项目 kline-trainer
 
 ### §9.2 顺带收掉仓库里躺着没跑过的清单
 
-`docs/acceptance/2026-05-29-pr-b3-fastapi-lease.md` 的 **§NAS 真 PG 烟测**（NAS-A.1～A.4、NAS-B.1～B.4，共 8 条）本次一并执行。
+`docs/acceptance/2026-05-29-pr-b3-fastapi-lease.md` 的 **§NAS 真 PG 烟测**（NAS-A.1～A.4、NAS-B.1～B.4，共 8 条）本次一并执行，作为 **§7 的 P9**。
 
 - NAS-A.3 需要**等 10 分钟 + 1 秒**（租约 TTL）。这条耗时长但必须真跑，不得推演。
-- 执行时用**另建的临时测试行**，不要用那 3 行真数据（避免把它们提前打成 `sent` 影响 G3）。
+- **必须在插入 3 行真数据之前跑**（P9 < P11），跑完删光临时行并断言 `count = 0`（P10）。
+
+> **本 spec 初稿在这里写错过，已纠正**（codex spec-R2 F2，2026-08-14）：
+> 初稿写的是「执行时用另建的临时测试行，不要用那 3 行真数据」。**这条路根本走不通** ——
+> `reserve_meta` 的 SQL 是 `... ORDER BY created_at LIMIT $2`（`lease_repo.py:122-128`），
+> **没有任何参数能指定要预占哪一行**。临时行的 `created_at` 晚于 3 行真数据，所以
+> `GET /training-sets/meta?count=1` 拿到的**必然是最早的那行真数据**，而 NAS-B.3 紧接着就会
+> 把它 confirm 成 `sent` —— 真数据行在手机还没开始下载前就被烧掉，G2/G3 直接失效。
+>
+> 这是 memory 里 `feedback_spec_all_paths_must_reach_the_chokepoint` 那条守则的又一次重演：
+> 我断言了「用临时行」，却没核实**这个动作有没有办法够到那一行**。唯一可靠的隔离手段是
+> **时间隔离**（表里此刻除了临时行没有别的行），不是「意图上用临时行」。
 
 ### §9.3 清单形态
 
@@ -418,6 +445,8 @@ docker compose 项目 kline-trainer
 | R5 | `stock_name` 与 `stock_code` 同值 → App 里训练组显示的是代码不是中文名 | **已知且接受**，是真实 QMT 数据本身没带中文名，非缺陷。不在本次修 |
 | R6 | 手机端环境变量只在 `devicectl` 启动的那次进程有效 | §7 已明写；不影响 G4 |
 | R7 | 部署 runbook 里的命令若在 worktree 里跑会踩 `.venv` 不存在的坑 | 配方一律用绝对路径变量、一行一条命令；不在 worktree 里假设 `.venv` |
+| **R8** | **API 零认证**：任意 tailnet 节点可 `reserve` → `download` → `confirm`，把全部训练组预占、下载并打成 `sent` | **本次接受**。实测边界：7 个节点归属者全是 `agateuu1234@`、无外部共享（§2.4），故实际暴露范围 = user 自己的设备。硬门是 §4-D1 的 **funnel 禁令**（走 funnel 则暴露到公网，该残留立刻不可接受）。⚠️ **这条不随 App 上架自动消失** —— 真上云服务器时必须先解决认证，届时属正式部署 PR 的阻塞项，不得沿用本次的接受理由 |
+| **R9** | `scripts/nas-preflight.sh` 的拓扑假设**已经**与 compose 默认不一致（**先于本次改动存在**） | 它第 57 行检查 `$NAS_HOST:5433` 从 Mac 可达，而 compose 默认 `${DB_BIND_HOST:-127.0.0.1}:5433` 只绑回环 → 该脚本在默认配置下本就跑不过第 3 步。**本次不修**（CLAUDE.md §3：不改与本请求无关的既有代码），但**本次 runbook 完全不使用它**——我们用 `/health` 在 NAS 回环 + 经 tailnet 两处各验一次（P8 / P12）。⚠️ 本次只保证不**新增**破坏（C1-6 保留 `DB_URL` 定义），不声称该脚本可用 |
 
 ---
 
