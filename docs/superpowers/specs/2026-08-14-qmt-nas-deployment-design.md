@@ -265,6 +265,7 @@ P8 的 `/health` 检查只是一个时间点的快照。后来若 `.env` 丢失/
 | T6-4 | 断言无任何 `:latest` | 改一个 image 为 `:latest` → 红 |
 | T6-5 | Dockerfile `FROM` 去掉 digest → T5-1 红 | 见 T5-1 |
 | T6-6 | ⚠️ **仅结构断言不足以覆盖 T6-3 那类错误**：实测 `docker compose config` 对 `build:` + digest `image:` 的坏配置**返回 0**，真正的报错要到 `docker compose build` 才出现（`failed to solve: build tag cannot contain a digest`）。故验收清单**必须**含一条「真跑一次 `docker compose build` 并读结论行」 | 这条是 runbook 判据，不是单测 |
+| T6-7 | ⚠️ **结构断言同样抓不住「单平台 digest」**（codex spec-R4 F2）：T6-1…T6-5 只校验 `@sha256:` 的**有无**，而一个**单平台 manifest 的 digest** 完全能满足这些结构判据，却会在另一个架构上 pull/build 失败（Mac arm64 ↔ NAS amd64）。故 C1-8 的「必须是多架构 index digest」这条**必须另配机械判据**：对每个 pin 的 ref 跑 `docker buildx imagetools inspect`，断言 ① `MediaType` 是 OCI image index（不是单个 manifest）② `Platform` 列表同时含 `linux/amd64` 与 `linux/arm64/v8`。<br>⛔ **这条不能做成 pytest** —— 它需要网络 + Docker 且要访问 Docker Hub，而 `requirements-test.txt` 无 docker 依赖、CI 也不保证有 Docker daemon（对齐 `feedback_test_imports_must_not_need_optional_deps`）。**归验收清单的 runbook 判据**，在构建前执行 | runbook 判据，不是单测 |
 | T7-1 | **正向档**：`DATABASE_URL` 有值时 `docker compose config` 退出 0 且解析出该值 | — |
 | T7-2 | `DATABASE_URL` **未设** → `docker compose config` 非零退出且报必需变量缺失 | 去掉 `:?` 后缀 → T7-2 红 |
 | T7-3 | `DATABASE_URL` **为空串** → 同样非零退出（空串与未设两档都要有，`:-` 默认值语法只挡未设、挡不住空串） | 把 `:?` 换成 `:-` → T7-3 红 |
@@ -341,6 +342,7 @@ P8 的 `/health` 检查只是一个时间点的快照。后来若 `.env` 丢失/
 | P2 | 手机打开 Tailscale App 并连上 | **user** | `tailscale status` 里 `iphone-15-pro-max` 不再 offline |
 | P3 | NAS 建部署目录（**新目录**，避开四月遗留的 `klinetrainer` / `Kline Trainer`） | Claude 可跑 | 目录存在且可写 |
 | P4 | 把 `backend/` 需要的文件同步到 NAS 部署目录 | Claude 可跑 | 文件校验一致 |
+| **P4b** | **构建前校验每个 pin 的 digest 是多架构 index**（codex spec-R4 F2，判据见 T6-7）：对 compose 的 `db` image 与 Dockerfile `FROM` 各跑一次 `docker buildx imagetools inspect` | Claude 可跑 | 两者 `MediaType` 均为 OCI image index，且 `Platform` 同时含 `linux/amd64` 与 `linux/arm64/v8` |
 | P5 | 写 `.env`（真密码，不入库；`DATABASE_URL` 指向 compose 内网 `db:5432`） | Claude 可跑 | `.env` 不进 git |
 | P6 | `docker compose up -d db`，等就绪后灌 `backend/sql/schema.sql` | Claude 可跑 | `\dt` 出 4 张表 |
 | P7 | scp 3 个 zip 到宿主训练组目录 | Claude 可跑 | **NAS 上重算 CRC32 = `851f9444` / `32892a5f` / `150d8d6c`** |
@@ -350,9 +352,13 @@ P8 的 `/health` 检查只是一个时间点的快照。后来若 `.env` 丢失/
 | P11 | 3 条 INSERT 写 `training_sets`，`file_path` 用 `/data/training-sets/…` | Claude 可跑 | 恰好 3 行、全 `status=unsent`、`content_hash` 与 P7 一致 |
 | **P11b** | **暴露前重新校验 tailnet 暴露面**（codex spec-R3 F2）：跑 `tailscale status --json`，逐节点断言归属者全为 `agateuu1234@`、无 shared/external 节点 | Claude 可跑 | 断言通过；**任一节点归属者不同或出现外部共享 → 停止，不得执行 P12**（须先回到 §11-R8 重新评估） |
 | P12 | `tailscale serve --bg --https=443 http://127.0.0.1:8010`（⛔ **不得用 `funnel`**，见 §4-D1） | Claude 可跑 | Mac 上 `curl https://fnos.tail9dc815.ts.net/health` 成功且证书可验；`tailscale serve status` 输出**不含** funnel |
+| **P12b** | **紧邻真机验收前再校验一次暴露面**（同 P11b 判据）——P11b 到 P13 之间隔着装机/签名，可能是几十分钟到几天 | Claude 可跑 | 同 P11b；不通过则不许开始 P13 |
 | P13 | Debug 构建装机 + `devicectl` 带 `KLINE_BACKEND_BASE_URL` 启动 | **user**（需签名，真终端） | App 启动无错 |
 | P14 | 走 §9 验收 | **user**（真机目视） | G1–G4 全过 |
-| P15 | **（仅失败重跑时）** 按 **§7.1** 复位库侧 3 行 + 清设备侧状态，回到 P13 | 库侧 Claude 可跑 / 设备侧 **user** | 3 行回到 `unsent` 且 lease 三列全 NULL；设备上无残留训练组 |
+| P15 | **（仅失败重跑时）** 按 **§7.1** 复位库侧 3 行 + 清设备侧状态，回到 P12b | 库侧 Claude 可跑 / 设备侧 **user** | 3 行回到 `unsent` 且 lease 三列全 NULL；设备上无残留训练组 |
+| **P16** | **关闭暴露端点**（codex spec-R4 F1）：`tailscale serve reset`（或等效关闭命令） | Claude 可跑 | `tailscale serve status` 输出 **`No serve config`**（= NAS 上实测过的初始态，§2.4） |
+
+**⚠️ 暴露窗口的生命周期是硬约束**（codex spec-R4 F1）：`tailscale serve --bg` 是**持久**配置，不会自己消失。P12 开、P16 关，**中间就是全部的暴露窗口**。验收通过后必须执行 P16——「验收做完了」不等于「可以把端点一直挂着」。这条是 §11-R8 接受理由的第四个成立前提（见 R8）。
 
 **⚠️ 次序是硬约束，不是排版**（codex spec-R2 F2）：烟测（P9）必须在插入 3 行真数据（P11）**之前**跑完并清空。理由见 §9.2 —— `reserve` 无法指定行，烟测会抢走真数据行。P10 的 `count = 0` 断言就是这道门的机械判据。
 
@@ -462,7 +468,7 @@ P8 的 `/health` 检查只是一个时间点的快照。后来若 `.env` 丢失/
 | R5 | `stock_name` 与 `stock_code` 同值 → App 里训练组显示的是代码不是中文名 | **已知且接受**，是真实 QMT 数据本身没带中文名，非缺陷。不在本次修 |
 | R6 | 手机端环境变量只在 `devicectl` 启动的那次进程有效 | §7 已明写；不影响 G4 |
 | R7 | 部署 runbook 里的命令若在 worktree 里跑会踩 `.venv` 不存在的坑 | 配方一律用绝对路径变量、一行一条命令；不在 worktree 里假设 `.venv` |
-| **R8** | **API 零认证**：任意 tailnet 节点可 `reserve` → `download` → `confirm`，把全部训练组预占、下载并打成 `sent` | **本次接受 —— user 2026-08-14 明示裁决**（codex spec-R2 F1 / spec-R3 F2 两轮均建议加 bearer token，user 两次范围内均选择不加；**后续轮次不得把这条当新 finding 反复提**）。<br>**codex spec-R3 F2 的增量部分已采纳**：接受理由原本只建立在 brainstorming 期的一次快照上；现加 **P11b 硬门**——暴露前重新校验 tailnet 归属者与外部共享，不通过则不许执行 P12。实测边界：7 个节点归属者全是 `agateuu1234@`、无外部共享（§2.4），故实际暴露范围 = user 自己的设备。硬门是 §4-D1 的 **funnel 禁令**（走 funnel 则暴露到公网，该残留立刻不可接受）。被否方案：bearer token 需改 `DefaultAPIClient`（§6.3 明说不动）+ 设备端多一个配置通道 + 后端中间件 + 测试 ≈ 第三个切片。⚠️ **这条不随 App 上架自动消失** —— 真上云服务器时必须先解决认证，届时属正式部署 PR 的**阻塞项**，**不得沿用本次的接受理由**（本次理由的成立前提是「单用户 tailnet + 无外部共享 + 无 funnel」，上云后三条全部不成立） |
+| **R8** | **API 零认证**：任意 tailnet 节点可 `reserve` → `download` → `confirm`，把全部训练组预占、下载并打成 `sent` | **本次接受 —— user 2026-08-14 明示裁决**（codex spec-R2 F1 / spec-R3 F2 两轮均建议加 bearer token，user 两次范围内均选择不加；**后续轮次不得把这条当新 finding 反复提**）。<br>**codex spec-R3 F2 的增量部分已采纳**：接受理由原本只建立在 brainstorming 期的一次快照上；现加 **P11b 硬门**——暴露前重新校验 tailnet 归属者与外部共享，不通过则不许执行 P12。<br>**codex spec-R4 F1 的增量部分已采纳**：`tailscale serve --bg` 是持久配置，原 runbook **没有关闭步骤**（真漏项，与认证与否无关）→ 现加 **P12b**（紧邻真机验收再校验一次）+ **P16**（用完必关，判据 `No serve config`）。<br>**接受理由的成立前提共四条**（缺一即不成立）：① 单用户 tailnet ② 无外部共享节点 ③ 无 funnel ④ **暴露窗口仅限 P12→P16 的验收期间，用完即关**。实测边界：7 个节点归属者全是 `agateuu1234@`、无外部共享（§2.4），故实际暴露范围 = user 自己的设备。硬门是 §4-D1 的 **funnel 禁令**（走 funnel 则暴露到公网，该残留立刻不可接受）。被否方案：bearer token 需改 `DefaultAPIClient`（§6.3 明说不动）+ 设备端多一个配置通道 + 后端中间件 + 测试 ≈ 第三个切片。⚠️ **这条不随 App 上架自动消失** —— 真上云服务器时必须先解决认证，届时属正式部署 PR 的**阻塞项**，**不得沿用本次的接受理由**（本次理由的成立前提是「单用户 tailnet + 无外部共享 + 无 funnel」，上云后三条全部不成立） |
 | **R9** | `scripts/nas-preflight.sh` 的拓扑假设**已经**与 compose 默认不一致（**先于本次改动存在**） | 它第 57 行检查 `$NAS_HOST:5433` 从 Mac 可达，而 compose 默认 `${DB_BIND_HOST:-127.0.0.1}:5433` 只绑回环 → 该脚本在默认配置下本就跑不过第 3 步。**本次不修**（CLAUDE.md §3：不改与本请求无关的既有代码），但**本次 runbook 完全不使用它**——我们用 `/health` 在 NAS 回环 + 经 tailnet 两处各验一次（P8 / P12）。⚠️ 本次只保证不**新增**破坏（C1-6 保留 `DB_URL` 定义），不声称该脚本可用 |
 
 ---
