@@ -27,6 +27,7 @@ from qmt_pilot_db import (CONTRACT_VERSION, FIRST_NORMAL_OID, INTENT_TTL_SECONDS
                           assert_db_allowed_for_reuse, assert_db_allowed_for_reset,
                           try_empty_remnant_exception, reset_pilot_database,
                           assert_pilot_db_allowed, create_pilot_database,
+                          init_cluster_marker, MARKER_PURPOSE,
                           derive_confirm_token, derive_db_name, quote_ident)
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -188,6 +189,12 @@ class _FakeConn:
         # 【维护库专用表集合】两张表的**结构**（闸 (i) 的第一层判据）。默认合规。
         self.maintenance_shape = (maintenance_shape if maintenance_shape is not None
                                   else dict(_OK_MAINTENANCE_SHAPE))
+        # 三张维护表**在不在场**（`_MAINTENANCE_PRESENCE_SQL`）。默认全在场。
+        # ⚠️ 与 `maintenance_shape` **分开建模是有意的**：`init_cluster_marker` 必须能
+        #    区分「表不存在」（交给 DDL 补建）与「表在但结构坏」（零 DDL 拒绝）——
+        #    `CREATE TABLE IF NOT EXISTS` 修不好后者，只会跳过。
+        self.maintenance_presence = {"marker_present": True, "intent_present": True,
+                                     "registry_present": True}
         # 维护角色是不是超级用户，以及生产代码**问过几次**。
         # ⚠️ R12-F1 之后封锁**不许**依赖它：先连上再封，已建立的会话不受
         #    `CONNECTION LIMIT 0` 影响，所以普通角色也能验空。
@@ -238,6 +245,11 @@ class _FakeConn:
                     else dict(self.business_structure))
         if "meta_is_table" in query:
             return None if self.pilot_schema_shape is None else dict(self.pilot_schema_shape)
+        # ⚠️ 显式排在形状查询**之前**：两条 SQL 的判据名不相交（present / is_table），
+        #    但本仓已被子串分发劫走过多次，故写死次序并说明判别依据。
+        if "marker_present" in query:
+            return (None if self.maintenance_presence is None
+                    else dict(self.maintenance_presence))
         if "marker_is_table" in query:
             return None if self.maintenance_shape is None else dict(self.maintenance_shape)
         if "d.datallowconn, d.datconnlimit" in query:
@@ -5969,3 +5981,527 @@ def test_canonical_cluster_schema_file_stays_non_destructive():
         assert banned not in code.upper(), f"规范集群 schema 里出现破坏性语句 {banned!r}"
     assert code.upper().count("CREATE TABLE IF NOT EXISTS") == len(MAINTENANCE_TABLES), \
         "建表条数与【维护库专用表集合】对不上"
+
+
+class _InitMaint(_FakeConn):
+    """维护连接：三张表的「在场」与「补建后才合规」、全表 intent 扫描、**锁状态的迁移**。"""
+
+    def __init__(self, all_intent_rows=(), intent_table_missing=False,
+                 pre_held_seeds=(), **kw):
+        super().__init__(**kw)
+        self.all_intent_rows = list(all_intent_rows)
+        # ⚠️ **锁状态必须建模成会变的集合，不能是一个静态布尔**：孤儿清理在
+        #    **取锁前后各查一次** `_SEED_LOCK_HELD_SQL` —— 前一次必须为假（证明这把锁
+        #    不是本连接早就持有的），后一次必须为真（证明回调真的把它取到了）。
+        #    父类的 `seed_lock_held` 是**一个布尔**，两次查询会得到同一个答案，
+        #    于是**两条判据里必然有一条恒真、测不出东西**。
+        #    `pre_held_seeds` = 进入 init **之前**就已挂在这条连接上的锁（可重入那一档）。
+        self.held_seeds = set(pre_held_seeds)
+        if intent_table_missing:
+            # 旧版本初始化的集群：marker 在、intent 不在 → 结构判据先不合规，
+            # 跑过建表 SQL 之后才合规。短路成功的实现修不好这种集群（spec O4-F7）。
+            self.maintenance_presence["intent_present"] = False
+            self.maintenance_shape = {**_OK_MAINTENANCE_SHAPE,
+                                      "intent_is_table": False,
+                                      "intent_columns_ok": False,
+                                      "intent_dbname_unique": False,
+                                      "intent_durable": False}
+
+    async def fetchval(self, query, *args):
+        # 父类按 `"pg_locks" in query` 返回静态布尔；这里改成按集合作答。
+        # ⚠️ 本方法**只建模锁状态**，别往里塞构造期的初始化 —— 那样会落在 `return`
+        #    之后成为死代码，而假件「看起来配好了」。
+        if "pg_locks" in query:
+            self.ops.append(query)
+            return args[0] in self.held_seeds
+        return await super().fetchval(query, *args)
+
+    async def fetch(self, query, *args):
+        # ⚠️ 精确到 `FROM public.pilot_create_intent` **后面直接换行**（即无别名无 WHERE
+        #    的那条全表扫描），免得劫走闸 (iii) 的豁免 CTE 或按库名读的那条。
+        if "FROM public.pilot_create_intent\n" in query:
+            self.ops.append(query)
+            return list(self.all_intent_rows)
+        return await super().fetch(query, *args)
+
+    async def execute(self, query, *args):
+        out = await super().execute(query, *args)
+        if "CREATE TABLE" in query.upper():
+            self.maintenance_shape = dict(_OK_MAINTENANCE_SHAPE)   # 补建之后结构就合规
+            self.maintenance_presence = {k: True for k in self.maintenance_presence}
+        if "pilot_cluster_marker" in query and "INSERT" in query.upper():
+            # 写完标记之后，随后的「每次现查」应当读得到它。
+            self.marker_rows = [{"purpose": MARKER_PURPOSE}]
+        return out
+
+
+def _orphan(dbname="kline_pilot_gone", seed="gone", age_seconds=0, db_oid="16400"):
+    """⚠️ 字段必须与 `_LIST_ALL_INTENT_SQL` 的输出**逐字一致** —— 少给一个就是
+    「测试在测另一个东西」。`db_oid` 是预筛绑实例用的。"""
+    return {"dbname": dbname, "seed": seed, "age_seconds": age_seconds,
+            "db_oid": db_oid}
+
+
+def _locker(maint=None, *, grants=True, record=None, released=None):
+    """返回 (try_seed_lock, release_seed_lock) 一对 —— **取了就必须还**。
+
+    ⚠️ 真授予时**同步更新假件的 `held_seeds`**：模块随后要在 `maint_conn` 上用
+       `_SEED_LOCK_HELD_SQL` 复核，「回调说取到了」与「连接上真挂着」必须一致。
+       两者**故意可以做成不一致** —— 那正是「回调撒谎」那一档。
+    """
+    async def _try(seed):
+        if record is not None:
+            record.append(seed)
+        if grants and maint is not None:
+            maint.held_seeds.add(seed)
+        return grants
+
+    async def _release(seed):
+        if released is not None:
+            released.append(seed)
+        if maint is not None:
+            maint.held_seeds.discard(seed)
+    return _try, _release
+
+
+def _init(maint, *, targets=None, lock_pair=None):
+    try_lock, release_lock = lock_pair or _locker(maint)
+    return init_cluster_marker(
+        maint, connect=_connector(targets or {}), cluster_schema_sql=_CLUSTER_SQL,
+        try_seed_lock=try_lock, release_seed_lock=release_lock)
+
+
+def _marker_writes(conn):
+    # ⚠️ 判别式必须锚在**语句开头**：`_CLUSTER_SQL` 是仓库里那份真文件，
+    #    它的注释里同时含 `pilot_cluster_marker` 与 `INSERT` 两个词，
+    #    松散的子串匹配会把建表 DDL 也算成「写标记」。
+    return [q for q in conn.executed
+            if q.strip().upper().startswith("INSERT") and "pilot_cluster_marker" in q]
+
+
+def _deletes(conn):
+    # ⚠️ 必须 `.strip()`：孤儿删除 SQL 是三引号常量、以换行开头。不 strip 的话
+    #    「不许删」那几条断言会变成恒真。
+    return [q for q in conn.executed if q.strip().upper().startswith("DELETE")]
+
+
+def _registered_looking_peer(seed="live"):
+    """一个**非空**、且自己写了一份合规 pilot_meta 的同前缀库。
+
+    ⚠️ 键必须**覆盖 `PILOT_META_PHASE1_KEYS` 全部 7 个**（`_looks_like_our_pilot_db`
+       的第一条判据就是这个）。漏一个（实测漏过 `pilot_schema_sha256`）会让
+       自证那一半直接为假 —— 于是「必须拒」那几条用例**因为错误的原因通过**，
+       对「登记表判据」零判别力，而「必须放行」那条会假红。
+       故这里从常量派生，而不是手写一份清单。
+    """
+    values = {"tool": "qmt_pilot", "seed": seed, "state": "ready",
+              "export_log_sha256": "a" * 64, "output_dir": "/x/y",
+              "created_at": "20260809T101530123456Z",
+              "pilot_schema_sha256": "b" * 64}
+    missing = set(PILOT_META_PHASE1_KEYS) - set(values)
+    assert not missing, f"假件的 pilot_meta 漏了阶段 1 的键：{sorted(missing)}"
+    return _FakeConn(user_objects=[("pg_class", 42)],
+                     meta_rows=[{"key": k, "value": v} for k, v in values.items()])
+
+
+def test_init_maint_fake_actually_models_the_states_it_claims():
+    """**假件自检**：`_InitMaint` 的两个开关必须真的改变它的作答。
+
+    ⚠️ 这不是形式主义。实测踩过：`maintenance_presence` / `intent_table_missing`
+       的初始化被误放到 `fetchval` 的 `return` **之后**成了死代码 ——
+       假件「看起来配好了」，而 `intent_table_missing=True` 整个失效，
+       补建路径那几条用例**改测了健康集群**（`_needs_repair_ddl` 恒假）。
+       与 `test_every_guard_table_shape_proof_covers_table_level_durability` 同族：
+       **先证明假件建模对了，再拿它去证明生产代码**。
+    """
+    healthy = _InitMaint()
+    assert healthy.maintenance_presence == {
+        "marker_present": True, "intent_present": True, "registry_present": True}
+    assert healthy.maintenance_shape == _OK_MAINTENANCE_SHAPE
+
+    missing = _InitMaint(intent_table_missing=True)
+    assert missing.maintenance_presence["intent_present"] is False, \
+        "intent_table_missing 没有把 intent 置为缺席 —— 补建路径的用例会改测健康集群"
+    for key in ("intent_is_table", "intent_columns_ok", "intent_dbname_unique",
+                "intent_durable"):
+        assert missing.maintenance_shape[key] is False, f"{key} 没有跟着置假"
+    # marker / registry 不受影响 —— 否则造出来的是「三张全缺」而不是**混合态**
+    assert missing.maintenance_presence["marker_present"] is True
+    assert missing.maintenance_shape["marker_durable"] is True
+
+    # 锁状态：默认空；`pre_held_seeds` 真的会被 `_SEED_LOCK_HELD_SQL` 看见
+    assert _InitMaint().held_seeds == set()
+    assert _InitMaint(pre_held_seeds=("x",)).held_seeds == {"x"}
+
+
+def test_init_is_idempotent_when_everything_is_already_legal():
+    """已存在合法单行标记且三张表形状合规 → 直接成功，不重复写标记。"""
+    maint = _InitMaint()
+    asyncio.run(_init(maint))
+    assert _marker_writes(maint) == []
+
+
+def test_init_executes_no_ddl_at_all_on_a_healthy_cluster():
+    """三表齐全时**一条 DDL 都不发**。
+
+    `CREATE TABLE IF NOT EXISTS` 虽是空操作，但「健康集群上零 DDL」是可断言的性质，
+    比「发了但没效果」强 —— 也让那些 `executed == []` 的钉子真正咬得住。
+    """
+    maint = _InitMaint()
+    asyncio.run(_init(maint))
+    assert not any("CREATE TABLE" in q.upper() for q in maint.executed), \
+        f"健康集群上仍然发了 DDL：{maint.executed}"
+
+
+def test_init_repairs_a_cluster_initialized_by_an_older_build():
+    """旧版本没有 `pilot_create_intent` 表 → 零对象例外第 6 条恒不成立 → 残骸永远清不掉。
+    **幂等短路成功的实现修不好这种集群**（spec O4-F7）。"""
+    maint = _InitMaint(intent_table_missing=True)
+    asyncio.run(_init(maint))
+    assert any("CREATE TABLE" in q.upper() for q in maint.executed), \
+        "结构不合规时必须补建，不得短路成功"
+
+
+def test_init_verifies_the_shape_after_creating_the_tables():
+    """补建之后**还要再验一次结构** —— 「执行过 DDL」不等于「结构就对」。
+
+    建表 SQL 由调用方传入；传错一份、或库里本就存在一张被 `IF NOT EXISTS` 跳过的
+    旧表，都会让集群带着坏结构被声明为 pilot 专用。
+
+    ⚠️ **必须走「首次初始化」那条路**（变异 M10 实测坐实）：标记已在的那条路末尾是
+       `assert_cluster_allowed`，它**也**复验维护表形状、**也**抛 `no_marker` ——
+       拿它来测的话，把「建后复验」整段删掉测试照样绿，这条用例对它零判别力。
+       首次初始化那条路末尾是 `_assert_disposable_cluster`，它**不看**维护表形状，
+       于是「建后复验」是唯一拦得住坏结构的地方。
+    """
+    maint = _InitMaint(marker_rows=[])
+    maint.maintenance_presence = {k: False for k in maint.maintenance_presence}
+    maint.maintenance_shape = {**_OK_MAINTENANCE_SHAPE, "intent_dbname_unique": False}
+
+    async def _still_broken(query, *args):          # 建表也修不好它
+        maint.executed.append(query)
+        maint.ops.append(query)
+        return "CREATE TABLE"
+    maint.execute = _still_broken
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "no_marker"
+    assert _marker_writes(maint) == [], "结构还不合规就把标记写进去了"
+
+
+@pytest.mark.parametrize("rows,label", [
+    ([{"purpose": MARKER_PURPOSE}, {"purpose": "x"}], "多行"),
+    ([{"purpose": "something_else"}], "值不对"),
+])
+def test_init_rejects_an_illegal_marker(rows, label):
+    """标记非法/多行 → **拒绝**，要求人工处理（spec §4）。绝不「顺手改成对的」。"""
+    maint = _InitMaint(marker_rows=rows)
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "no_marker", label
+    assert _marker_writes(maint) == []
+    assert maint.executed == [], f"{label}：拒绝之前已经执行了 DDL"
+
+
+def test_init_refuses_a_cluster_schema_that_is_not_the_canonical_file():
+    """递进来的 DDL 必须逐字节等于仓库那份。"""
+    maint = _InitMaint()
+    evil = _CLUSTER_SQL + "\nTRUNCATE public.pilot_create_intent;\n"
+    # ⚠️ **一对回调必须来自同一次 `_locker(...)` 调用**：写成 `_locker(m)[0], _locker(m)[1]`
+    #    会造出两对互不相干的闭包，`record`/`released` 各记各的 → 一族断言恒真。
+    _lp = _locker(maint)
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(init_cluster_marker(
+            maint, connect=_connector({}), cluster_schema_sql=evil,
+            try_seed_lock=_lp[0], release_seed_lock=_lp[1]))
+    assert ei.value.code == "cluster_schema_not_canonical"
+    assert maint.ops == [], "连一条查询都不该发 —— 这是纯函数判定"
+
+
+def test_init_refuses_to_declare_a_cluster_whose_maintenance_db_is_not_empty():
+    """首次初始化前必须先证明集群干净（闸 (iii)）—— 生产对象可以就放在默认 postgres 库里。"""
+    maint = _InitMaint(marker_rows=[], user_objects=[("pg_class", 7)],
+                       exempt_objects=[("pg_class", 7)])
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "maintenance_db_not_empty"
+    assert _marker_writes(maint) == []
+
+
+def test_init_executes_no_ddl_before_proving_the_maintenance_db_is_safe():
+    """`cluster_schema_sql` 会直接在**维护库**上执行。`--maintenance-dsn` 指错到一个
+    生产库时，先建表再拒绝 = 已经在别人库里落下了三张表。
+
+    ⚠️ **必须造一个 DDL 真会跑的场景**（变异 M12 实测）：三张表齐全时
+       `_needs_repair_ddl` 为假、本来就一条 DDL 都不发，`executed == []` 是恒真的，
+       这条用例对「证明排在副作用之前」零判别力。故用**混合态**（缺 intent →
+       补建 DDL 会跑）+ 脏维护库，让「先证明还是先建表」真正分得出来。
+    """
+    maint = _InitMaint(intent_table_missing=True,
+                       user_objects=[("pg_class", 9)], exempt_objects=[("pg_class", 9)])
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "maintenance_db_not_empty"
+    assert maint.executed == [], f"拒绝之前已经执行了 DDL：{maint.executed}"
+
+
+@pytest.mark.parametrize("broken,label", [
+    ({"marker_purpose_unique": False}, "marker 在场但没唯一约束"),
+    ({"intent_dbname_unique": False}, "intent 在场但 dbname 没主键"),
+    ({"registry_columns_ok": False}, "registry 在场但列不齐"),
+    ({"marker_durable": False}, "marker 在场但不是持久表（崩溃后会被 truncate）"),
+    ({"intent_durable": False}, "intent 在场但不是持久表"),
+    ({"registry_durable": False}, "registry 在场但不是持久表"),
+])
+def test_init_rejects_a_present_but_malformed_maintenance_table_before_any_ddl(broken, label):
+    """`CREATE TABLE IF NOT EXISTS` **修不好**已存在的坏表，只会跳过。
+
+    ⚠️ **判别力的诚实交代**（变异 M4 实测）：本组用例造的是「三张全在场」，此时
+       `_needs_repair_ddl` 为假、DDL 本就不跑，于是「建后复验」那一步会兜住同样的
+       坏结构并抛同一个 `no_marker` —— 把 `_MAINTENANCE_SHAPE_OWNER` 的前缀映射
+       删掉，本组**仍然全绿**。
+       真正证明「按表归属」的是下面那条 `..._mixed_state_present_but_non_durable`
+       （一张在场但不耐久 + 另一张缺席 → DDL 会跑 → 只有预检阶段的按表归属拦得住）。
+       本组钉的是「在场的坏表要被点名拒绝」这条性质本身，别把它当成归属机制的证据。
+    """
+    maint = _InitMaint()
+    maint.maintenance_shape = {**_OK_MAINTENANCE_SHAPE, **broken}
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "no_marker", label
+    assert maint.executed == [], f"{label}：拒绝之前已经执行了 DDL"
+
+
+def test_init_rejects_mixed_state_present_but_non_durable_plus_absent_table():
+    """**混合态**：一张在场但不耐久 + 另一张缺席 → 仍须在任何 DDL 之前拒。
+
+    这一档正好落在两条钉子的**交叉点**上，两边各自都覆盖不到。
+    耐久性判据若是一个**跨三张表的 count**，归因不到具体哪张表，于是预检只能
+    「三张全在场才要求它」—— 混合态下 `malformed` 为空 → DDL 先落地。
+    真 PG 侧由档 ⑤b 坐实。
+    """
+    maint = _InitMaint(intent_table_missing=True)
+    maint.maintenance_shape = {**maint.maintenance_shape, "marker_durable": False}
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "no_marker"
+    assert maint.executed == [], "混合态下拒绝之前已经执行了 DDL"
+
+
+def test_init_still_repairs_a_genuinely_absent_table():
+    """反向钉：**缺席**的表照旧补建（别把上面那条做成「一律拒」）。"""
+    maint = _InitMaint(intent_table_missing=True)
+    asyncio.run(_init(maint))
+    assert any("CREATE TABLE" in q.upper() for q in maint.executed), \
+        "缺席的表没有被补建 —— O4-F7 的锁死原样复活"
+
+
+def test_init_does_not_treat_a_read_failure_as_first_initialization():
+    """**绝不把「读失败」一律当成「首次初始化」**：权限问题、坏关系都会落到那条路上，
+    然后带着一个没被证明过的前提去动 DDL。"""
+    class _PresenceBoom(_InitMaint):
+        async def fetchrow(self, query, *args):
+            if "marker_present" in query:
+                raise RuntimeError("permission denied for schema public")
+            return await super().fetchrow(query, *args)
+
+    maint = _PresenceBoom()
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "no_marker"
+    assert maint.executed == [], "读失败之后仍然动了 DDL"
+
+
+@pytest.mark.parametrize("dirty,code,why", [
+    (lambda m: setattr(m, "databases", ["payments_prod"]),
+     "unrelated_database", "集群里有生产库"),
+    (lambda m: setattr(m, "databases", ["kline_pilot_stranger"]),
+     "unowned_pilot_database", "同前缀但非空、来路不明"),
+])
+def test_init_proves_peer_databases_are_clean_before_any_ddl(dirty, code, why):
+    """首次初始化时，**同侪库也要在动 DDL 之前**证明干净。"""
+    maint = _InitMaint(marker_rows=[])
+    maint.maintenance_presence = {k: False for k in maint.maintenance_presence}
+    dirty(maint)
+    stranger = _FakeConn(user_objects=[("pg_class", 3)])   # 非空
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint, targets={"kline_pilot_stranger": stranger}))
+    assert ei.value.code == code, why
+    assert maint.executed == [], f"{why}：拒绝之前已经执行了 DDL"
+
+
+def test_init_first_time_still_accepts_an_empty_prefixed_remnant():
+    """反向钉：零用户对象的同前缀残骸照旧放行（别把上面那条做成「一律拒」）。"""
+    maint = _InitMaint(marker_rows=[], databases=["kline_pilot_remnant"])
+    maint.maintenance_presence = {k: False for k in maint.maintenance_presence}
+    asyncio.run(_init(maint, targets={"kline_pilot_remnant": _FakeConn()}))
+    assert len(_marker_writes(maint)) == 1
+
+
+@pytest.mark.parametrize("dirty,code,why", [
+    (lambda m: setattr(m, "databases", ["payments_prod"]),
+     "unrelated_database", "混合态 + 集群里有生产库"),
+    (lambda m: setattr(m, "databases", ["kline_pilot_stranger"]),
+     "unowned_pilot_database", "混合态 + 同前缀但非空"),
+])
+def test_init_proves_peers_before_repair_ddl_even_when_the_marker_exists(dirty, code, why):
+    """**标记在、但维护表缺席**时也要先证明同侪库。
+
+    判据必须挂在「**这次会不会真的动 DDL**」上，不是「有没有标记」。
+    """
+    maint = _InitMaint(intent_table_missing=True)      # 标记在、intent 缺 → 混合态
+    dirty(maint)
+    stranger = _FakeConn(user_objects=[("pg_class", 3)])
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint, targets={"kline_pilot_stranger": stranger}))
+    assert ei.value.code == code, why
+    assert maint.executed == [], f"{why}：补建 DDL 在证明之前就跑了"
+
+
+def test_init_still_repairs_the_mixed_state_on_a_clean_cluster():
+    """反向钉：集群本身干净时，混合态照旧被修好（别把上面那条做成「一律拒」）。"""
+    maint = _InitMaint(intent_table_missing=True)      # 集群干净、只是缺表
+    asyncio.run(_init(maint))
+    assert any("CREATE TABLE" in q.upper() for q in maint.executed), \
+        "干净集群上的混合态没有被补建 —— O4-F7 的锁死原样复活"
+
+
+@pytest.mark.parametrize("dirty,code,why", [
+    (lambda m: setattr(m, "databases", ["payments_prod"]),
+     "unrelated_database", "集群后来被拿去装了真实数据库"),
+    (lambda m: setattr(m, "exempt_objects", [("pg_class", 9)]),
+     "maintenance_db_not_empty", "维护库后来多了用户对象"),
+])
+def test_init_revalidates_the_cluster_even_when_the_marker_already_exists(dirty, code, why):
+    """**标记只证明「有人曾声明过」，现查才证明「现在仍然成立」**（spec §4 R17-F1）。"""
+    maint = _InitMaint()                       # 标记已存在且合法
+    dirty(maint)
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == code, why
+
+
+def test_init_repins_search_path_after_running_caller_supplied_sql():
+    """`cluster_schema_sql` 是**调用方递进来的**文件；跑完必须把名字解析钉回来。"""
+    # ⚠️ 必须用**真会补建**的场景：三表齐全时本函数根本不发 DDL。
+    maint = _InitMaint(intent_table_missing=True)
+    asyncio.run(_init(maint))
+    ddl_at = next(i for i, q in enumerate(maint.ops) if "CREATE TABLE" in q.upper())
+    pins_after = [i for i, q in enumerate(maint.ops)
+                  if q == PIN_SEARCH_PATH_SQL and i > ddl_at]
+    assert pins_after, "跑完调用方 SQL 之后没有重新钉 search_path"
+    first_guard = next((i for i, q in enumerate(maint.ops)
+                        if i > ddl_at and q != PIN_SEARCH_PATH_SQL), None)
+    assert first_guard is None or pins_after[0] < first_guard, (
+        f"重钉排在了守卫查询之后 —— 中间那条查询仍跑在调用方选定的解析下"
+        f"（第一条守卫查询：{maint.ops[first_guard][:60]!r}）")
+
+
+def test_repair_accepts_a_registered_nonempty_pilot_peer():
+    """**混合态修复必须认同侪库的归属登记**（codex S3-R6）。
+
+    形态：marker + registry 在场且合规，只有 intent 缺失，而集群里有一个
+    **已登记的、装着真数据的**合法 pilot 库。此前一律走【绝对空】严判据 →
+    这个完全正常的库被判成外来物，整台集群被锁在修复路径之外。
+    """
+    maint = _InitMaint(intent_table_missing=True,              # 混合态：只缺 intent
+                       databases=["kline_pilot_live"],
+                       registered_dbnames={"kline_pilot_live"})
+    asyncio.run(_init(maint, targets={"kline_pilot_live": _registered_looking_peer()}))
+    assert any("CREATE TABLE" in q.upper() for q in maint.executed), \
+        "已登记的非空 pilot 库把修复路径挡住了 —— 锁死洞原样复活"
+
+
+def test_repair_still_rejects_an_unregistered_nonempty_peer():
+    """**反向钉**：登记表可用**不等于**放行一切非空同前缀库。
+
+    两个独立事实缺一不可 —— 库自己的 pilot_meta 合规（自证）**且**这个库名
+    确实在维护库的登记表里（被判对象改不到）。
+    """
+    maint = _InitMaint(intent_table_missing=True,
+                       databases=["kline_pilot_faker"],
+                       registered_dbnames=set())               # **没**登记
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint,
+                          targets={"kline_pilot_faker": _registered_looking_peer("faker")}))
+    assert ei.value.code == "unowned_pilot_database"
+    assert maint.executed == [], "拒绝之前已经执行了 DDL"
+
+
+@pytest.mark.parametrize("presence_over,label", [
+    ({"marker_present": False, "intent_present": False, "registry_present": False},
+     "三张表都不在场（真·首次初始化）"),
+    # ⚠️ **这一档是 codex S3-R7 抓到的洞**：上一版只造了「三张全不在场」，
+    #    于是「标记缺失、登记表在场」这个组合**一次都没被测过**，
+    #    而放宽判据当时只看 `registry_present` —— 它正好在这一档为真。
+    ({"marker_present": False, "intent_present": False, "registry_present": True},
+     "标记缺失但登记表在场（人工清过标记 / 部分还原 / 对手写入）"),
+    ({"marker_present": False, "intent_present": True, "registry_present": True},
+     "标记缺失、另两张都在场"),
+])
+def test_no_legal_marker_never_gets_the_registry_relaxation(presence_over, label):
+    """**没有合法标记时，登记表不构成可信凭据**（codex S3-R7）。
+
+    标记才是「这个维护库是我们的」那句话的**信任根** —— 闸 (ii) 之所以敢信登记表，
+    正因为闸 (i) **先**验过标记。放宽若只看 `registry_present`，则人工清过标记、
+    维护库被部分还原、或对手能写维护库时，登记行会被当成归属证明 →
+    一个非空的伪 pilot 库过关 → 然后**写下一个合法标记**。
+    """
+    maint = _InitMaint(marker_rows=[], databases=["kline_pilot_live"],
+                       registered_dbnames={"kline_pilot_live"})
+    maint.maintenance_presence = {**maint.maintenance_presence, **presence_over}
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint, targets={"kline_pilot_live": _registered_looking_peer()}))
+    assert ei.value.code == "unowned_pilot_database", label
+    assert _marker_writes(maint) == [], f"{label}：拒绝了，却已经把标记写进去了"
+    assert maint.executed == [], f"{label}：拒绝之前已经执行了 DDL"
+
+
+def test_both_peer_proofs_use_the_same_two_facts():
+    """机械守卫：闸 (ii) 与修复路径的归属判据**必须是同一组两个事实**。"""
+    import inspect
+    import qmt_pilot_db as m
+    for fn in (m.assert_cluster_allowed, m._assert_disposable_cluster):
+        src = inspect.getsource(fn)
+        assert "_looks_like_our_pilot_db(" in src, f"{fn.__name__} 缺自证那一半"
+        assert "_REGISTRY_HAS_SQL" in src, f"{fn.__name__} 缺外部登记凭据那一半"
+        assert "_is_absolutely_empty(" in src, f"{fn.__name__} 缺【绝对空】那一档豁免"
+
+
+@pytest.mark.parametrize("dirty,code,why", [
+    (lambda m: setattr(m, "databases", ["payments_prod"]),
+     "unrelated_database", "窗口里冒出一个无关库"),
+    (lambda m: setattr(m, "exempt_objects", [("pg_class", 9)]),
+     "maintenance_db_not_empty", "窗口里维护库多了用户对象"),
+])
+def test_init_does_not_leave_a_marker_when_the_final_gate_rejects(dirty, code, why):
+    """**标记必须是最后一个不可回滚的信任写入**（codex S3-R4）。
+
+    写标记之前那次现查**仍然可能拒绝** —— 预检通过之后、写标记之前的窗口里
+    冒出一个同侪库、或维护库多了用户对象，都会让它抛。若标记先写，
+    一次**报告失败**的 `--init-cluster-marker` 就在集群里留下了一个**合法标记**，
+    而契约是**从不清标记** —— 只能人工收拾。
+
+    ⚠️ 造法：让「预检那一刻干净、最终现查那一刻变脏」。只在构造函数里设脏是造不出
+       这个窗口的（那样预检就先拒了，测不到本条判据）。
+    ⚠️ 触发点用**语义**的「DDL 跑完之后」，不用调用计数：助手是先查 `_user_objects`
+       再枚举 `pg_database`，两档走到的查询次序不同，按次数翻脏会让其中一档空转
+       （实测踩过）。「DDL 之后」恰好就是这条判据要保护的那个窗口。
+    """
+    class _DirtyAfterDdl(_InitMaint):
+        async def execute(self, query, *args):
+            out = await super().execute(query, *args)
+            if "CREATE TABLE" in query.upper():
+                dirty(self)                     # 窗口打开：预检已过，标记还没写
+            return out
+
+    maint = _DirtyAfterDdl(marker_rows=[])      # 首次初始化
+    maint.maintenance_presence = {k: False for k in maint.maintenance_presence}
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == code, why
+    # 前置：DDL 真的跑了 → 翻脏真的发生了。否则下面那条「没写标记」是恒真的。
+    assert any("CREATE TABLE" in q.upper() for q in maint.executed), \
+        "补建 DDL 没跑 → 翻脏没触发 → 这条用例在空转"
+    assert _marker_writes(maint) == [], \
+        f"{why}：最终现查拒绝了，却已经把标记写进去了"

@@ -3049,3 +3049,250 @@ async def reset_pilot_database(
             f"会让随后以新 run_id 的重建撞 intent_row_conflict。"
             f"请人工删除 public.pilot_create_intent 中 dbname={db_name!r} 的行。") from exc
     return db_oid
+
+
+# ── --init-cluster-marker（spec §4「`--init-cluster-marker` 的幂等语义写死」+ O4-F7）──
+# ⚠️ `public.` 限定（O4-R4-C1）：不限定时由 search_path 决定写进哪个 schema。
+_WRITE_MARKER_SQL = ("INSERT INTO public.pilot_cluster_marker (purpose) VALUES ($1)"
+                     " ON CONFLICT (purpose) DO NOTHING")
+
+# ⚠️ **「表不存在」与「表在但坏了」必须分得开**：
+#    `cluster_schema_sql` 用的是 `CREATE TABLE IF NOT EXISTS` —— 它**修不好**一张已存在
+#    但结构损坏的表，只会跳过。而预检若只看「结构合不合规」，一张坏表会让判定落到
+#    「补建再验」那条路上：DDL 先把**其余缺的表**建出来，然后形状检查才失败 ——
+#    结果是在一个最终被拒绝的库里留下了表。
+#    故预检按表分别判：**在场的必须自己合规（否则零 DDL 拒绝），缺席的才交给 DDL 补建。**
+_MAINTENANCE_PRESENCE_SQL = """
+SELECT to_regclass('public.pilot_cluster_marker')    IS NOT NULL AS marker_present,
+       to_regclass('public.pilot_create_intent')     IS NOT NULL AS intent_present,
+       to_regclass('public.pilot_database_registry') IS NOT NULL AS registry_present
+"""
+
+# `_MAINTENANCE_SHAPE_SQL` 的判据名 → 它属于哪张表。
+# ⚠️ 耐久性判据是**每表一条**（`marker_durable` / `intent_durable` / `registry_durable`），
+#    故它和形状判据一样按前缀归属，**不需要**「三张全在场才要求」那条例外 ——
+#    那条例外正是混合态下「在场却不耐久的表漏过预检、让 DDL 先落地」的洞。
+_MAINTENANCE_SHAPE_OWNER = {"marker_": "marker_present",
+                            "intent_": "intent_present",
+                            "registry_": "registry_present"}
+
+
+async def _assert_disposable_cluster(maint_conn, *, connect,
+                                     registry_usable: bool = False) -> None:
+    """「这台集群整个可弃」的**免标记**证明 —— 首次初始化用的那一组闸 (ii)(iii)。
+
+    `registry_usable`：`pilot_database_registry` **在场且形状合规**、
+    **且已有合法标记**时才传 True。详见下面「两种同侪库判据」。
+
+    ⚠️ **调用方一律传「动 DDL 之前」的在场情况**，不要在 DDL 之后重新查一次：
+       补建刚造出来的登记表**必然是空的**，拿它去「证明」同侪库归属等于零证据。
+
+    **两种同侪库判据，由 `registry_usable` 选**：
+      · `registry_usable=False`（**首次初始化，或标记缺失**）：没有合法标记时，
+        登记表**不构成可信凭据** —— 标记才是「这个维护库是我们的」那句话的信任根，
+        闸 (ii) 之所以敢信登记表，正因为闸 (i) **先**验过标记。
+        故此时同侪库的外部凭据**取不到**，「证明不了」只能等价于「拒绝」，
+        要求同前缀库【绝对空】。
+      · `registry_usable=True`（**混合态修复**：marker + registry 在场、intent 缺失）：
+        外部归属凭据取得到 —— 此时仍要求【绝对空】会把一个**已登记的、装着真数据的
+        合法 pilot 库**判成外来物，把整台集群锁在修复路径之外，
+        而 O4-F7 引入修复路径的全部理由就是「修好旧版本初始化的集群」。
+      · 归属证明与闸 (ii) 用**同一组两个独立事实**：库自己的 `pilot_meta` 合规
+        （`_looks_like_our_pilot_db`）**且**这个库名在维护库的登记表里确实被声明过
+        （`_REGISTRY_HAS_SQL`，它 JOIN `pg_database` 绑实例）。
+
+    ⚠️ **零副作用**（只读），故可以在同一次运行里调用多次：
+      一次在动 DDL **之前**（不在别人的库里留下表），
+      一次在写标记**之前**（标记是不可回滚的信任写入）。
+    """
+    leftover = await _user_objects(maint_conn, exempt_maintenance=True)
+    if leftover:
+        raise PilotClusterBoundaryError(
+            "maintenance_db_not_empty",
+            f"维护库除 {MAINTENANCE_TABLES} 外还有用户对象 {leftover}"
+            f"——「没有别的数据库」不等于「这台集群没在用」。"
+            f"在证明它可弃之前，本工具不会在它上面建任何表")
+    _cluster_id = await cluster_identity(maint_conn)
+    for row in await maint_conn.fetch(_LIST_DATABASES_SQL):
+        name = row["datname"]
+        if PILOT_DB_NAME_RE.fullmatch(name) is None:
+            raise PilotClusterBoundaryError(
+                "unrelated_database",
+                f"集群里存在无关数据库 {name!r}，拒绝把它声明为 pilot 专用集群"
+                f"——在证明之前不会在它的维护库里建任何表")
+        try:
+            other = await connect(name)
+        except Exception as exc:
+            raise PilotClusterBoundaryError(
+                "unowned_pilot_database",
+                f"连不进 {name!r}（{exc}）→ 无法证明它是可弃的残骸") from exc
+        try:
+            await adopt_connection(other, name, cluster_id=_cluster_id,
+                                   expected_oid=row["db_oid"])
+            if registry_usable:
+                # ⚠️ 与闸 (ii) **同一组两个独立事实**。读 meta 失败/形状不合规
+                #    **不在这里拒**：下面还有【绝对空】那一档豁免（与闸 (ii) 逐字一致
+                #    —— 否则一个合法的崩溃残骸会被判成外来物）。
+                try:
+                    meta = await read_pilot_meta_rows(other)
+                except Exception:
+                    meta = {}
+                if _looks_like_our_pilot_db(meta, name) and await maint_conn.fetchval(
+                        _REGISTRY_HAS_SQL, name, meta.get("seed")):
+                    continue              # 已登记的合法 pilot 库 → 放行
+            if not await _is_absolutely_empty(other):
+                raise PilotClusterBoundaryError(
+                    "unowned_pilot_database",
+                    f"{name!r} 名字匹配 kline_pilot_* 但非空"
+                    + ("，且它没有合法 pilot_meta / 没在维护库的登记表里登记过"
+                       if registry_usable else
+                       "，且这台集群还没有任何归属登记")
+                    + "——前缀名不是归属证明，拒绝把它声明为 pilot 专用集群")
+        except PilotClusterBoundaryError:
+            raise
+        except Exception as exc:
+            raise PilotClusterBoundaryError(
+                "unowned_pilot_database",
+                f"验 {name!r} 是否为空时失败（{exc}）→ 无法证明") from exc
+        finally:
+            await _close_quietly(other, name)
+
+
+async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
+                              try_seed_lock, release_seed_lock) -> None:
+    """`qmt_pilot --init-cluster-marker`：把一台干净集群声明为 pilot 专用。
+
+    幂等语义（spec §4 + O4-F7）：
+      · 已存在合法单行标记 **且**【维护库专用表集合】形状合规 → 直接成功；
+      · 标记合法但 intent / registry 表缺失或形状不符 → **补建再成功**
+        （短路成功的实现修不好旧版本初始化的集群：旧版没有 intent 表 →
+         零对象例外第 6 条恒不成立 → 残骸永远清不掉）；
+      · 标记非法 / 多行 → **拒绝**，要求人工处理（绝不「顺手改成对的」）。
+
+    谁写／谁读／谁清（spec §4）：本函数写标记；闸 (i) 每次运行读；
+    **本工具从不清标记**（清除是人工动作）。孤儿 intent 行**只在本函数里清**。
+
+    `try_seed_lock` / `release_seed_lock`: `async (seed) -> bool` / `async (seed) -> None`
+    —— 由调用方注入。本模块**不自己取锁**（spec O1-F4：advisory lock 只在同一 session
+    内可重入，模块另开连接去取会自锁），但**取了就必须还**，且**取与还都要在活连接上验**。
+
+    ⚠️ **副作用严格排在证明之后**：`cluster_schema_sql` 是调用方递进来的 DDL，
+       且会直接作用在**维护库**上。故本函数分成两段：
+       **① 零副作用预检** → **② 才允许动 DDL**；
+       而唯一不可回滚的信任写入（写标记）是函数的**字面最后一句**。
+    """
+    # ── ① 零副作用预检：这一段结束之前，本函数不对任何库产生副作用 ──────────
+    # 1a. 递进来的 DDL 必须逐字节等于仓库里那份规范文件。
+    #     纯函数判定，排在最前 —— 连一次查询都不用发（连 pin 都在它之后）。
+    _actual = sha256_of_sql(cluster_schema_sql)
+    if _actual != CANONICAL_CLUSTER_SCHEMA_SHA256:
+        raise PilotClusterBoundaryError(
+            "cluster_schema_not_canonical",
+            f"pilot_cluster_schema.sql 与仓库里的规范文件不是同一份："
+            f"传入指纹 {_actual!r}，规范指纹 {CANONICAL_CLUSTER_SCHEMA_SHA256!r}。"
+            f"这份 DDL 会直接在**维护库**上执行；漂移的版本可以 DROP/TRUNCATE 掉 "
+            f"marker / intent / registry 三张表，而结构判据**只看形状不看行**，"
+            f"被删掉的恢复凭据与归属登记一条都发现不了。")
+
+    await pin_search_path(maint_conn)
+
+    # 1b. 在场的维护表必须**各自**结构合规。
+    #     ⚠️ 绝不把「读失败」一律当成「首次初始化」—— 权限问题、坏关系都会落到那条路上，
+    #        然后带着一个没被证明过的前提去动 DDL。是否首次由 **presence** 说了算。
+    try:
+        presence = await maint_conn.fetchrow(_MAINTENANCE_PRESENCE_SQL)
+        shape = await maint_conn.fetchrow(_MAINTENANCE_SHAPE_SQL)
+    except Exception as exc:
+        raise PilotClusterBoundaryError(
+            "no_marker",
+            f"读不出【维护库专用表集合】的在场情况/结构（{exc}）——"
+            f"在证明之前不会对这个库做任何 DDL") from exc
+    if presence is None or shape is None:
+        raise PilotClusterBoundaryError(
+            "no_marker", "【维护库专用表集合】的在场/结构查询没有返回行")
+    malformed = sorted(
+        k for k, v in dict(shape).items() if not v
+        and any(k.startswith(pre) and presence[owner]
+                for pre, owner in _MAINTENANCE_SHAPE_OWNER.items()))
+    if malformed:
+        raise PilotClusterBoundaryError(
+            "no_marker",
+            f"维护库里已存在的专用表结构不合规：{malformed}。"
+            f"`CREATE TABLE IF NOT EXISTS` **修不好**已存在的坏表，只会跳过 ——"
+            f"继续下去只会在一个最终要拒绝的库里留下别的表。请人工处理")
+
+    # 1c. 标记合法性（只读）。marker 表不在场 = 首次初始化，不是错误。
+    rows = await maint_conn.fetch(_READ_MARKER_SQL) if presence["marker_present"] else []
+    if len(rows) > 1 or (len(rows) == 1 and rows[0]["purpose"] != MARKER_PURPOSE):
+        raise PilotClusterBoundaryError(
+            "no_marker",
+            f"pilot_cluster_marker 形状非法（{len(rows)} 行："
+            f"{[r['purpose'] for r in rows]}）——请人工处理")
+
+    # 1c-2. **登记表能不能当归属凭据用**。
+    #    ⚠️ **必须同时要求「已有合法标记」**，不能只看登记表在不在场：
+    #       登记表在闸 (ii) 里之所以可信，是因为闸 (i) **先**验过标记 ——
+    #       标记才是「这个维护库是我们的」那句话的**信任根**。
+    #       marker 缺失 / registry 在场且有行 这个组合是**真实可达**的：
+    #         · 契约明写「清除标记是**人工动作**」，人真的清过；
+    #         · 维护库被部分 pg_dump/还原；· 对手能写维护库。
+    #       只看 `registry_present` 的话，这三种情形下 registry 的行会被当成归属证明，
+    #       让一个**非空的、装成 pilot 样子的**同前缀库过关，然后**写下一个合法标记** ——
+    #       等于绕过首次初始化的【绝对空】证明，把人工清标记这个逃生阀也一并废掉。
+    #    ⚠️ 形状不合规的登记表走不到这里（1b 已零 DDL 拒），故「在场」即「形状可用」；
+    #       但**可用 ≠ 可信**，可信要由标记来背书。
+    _registry_usable = bool(rows) and presence["registry_present"]
+
+    # ⚠️ 「维护库除专用表外必须绝对空」这条**只留一份**，在 `_assert_disposable_cluster`
+    #    里（变异 M12 实测：此处再写一遍是纯冗余 —— 凡是会跑 DDL 的路径都会调那个助手，
+    #    而不跑 DDL 的路径由末尾的 `assert_cluster_allowed` 闸 (iii) 兜住）。
+    #    同一条判据在两处各写一遍是本仓反复踩的形态，故删。
+
+    # 1e. **凡是要动 DDL，同侪库都得先证明干净**。
+    #     ⚠️ 判据挂在「**这次会不会真的动 DDL**」上，不是「有没有标记」：
+    #        挂在 `if not rows`（首次初始化）会漏掉**混合态** —— 标记在、而
+    #        intent / registry 缺失（旧版本部分初始化，或标记随 pg_dump/卷拷贝被复制）。
+    #        那时 `rows` 非空 → 证明被跳过 → 补建 DDL 照跑 → 之后才拒。
+    _needs_repair_ddl = not all(presence.values())
+    if not rows or _needs_repair_ddl:
+        await _assert_disposable_cluster(maint_conn, connect=connect,
+                                         registry_usable=_registry_usable)
+
+    # ── ② 到这里才第一次产生副作用 ──────────────────────────────────────
+    # ⚠️ **三张表都在场时根本不发这条语句**：`CREATE TABLE IF NOT EXISTS` 虽是空操作，
+    #    但「健康集群上一条 DDL 都不执行」是可断言的性质，比「发了但没效果」强 ——
+    #    也让那些 `executed == []` 的钉子真正咬得住。
+    if _needs_repair_ddl:
+        await maint_conn.execute(cluster_schema_sql)
+        # ⚠️ **调用方的 SQL 跑完必须重新钉 search_path**：事务里的普通 `SET search_path`
+        #    **提交之后仍留在会话上**（只有 `SET LOCAL` 不留）。一份漂移/敌意的 .sql
+        #    只要含一句 `SET search_path = evil, …`，其后**所有**守卫查询就都跑在
+        #    它选定的名字解析下，于是一台脏的维护库被判成干净并声明为 pilot 专用。
+        await pin_search_path(maint_conn)
+
+    # 2. 建完**再验一次结构**：「执行过 DDL」不等于「结构就对」（与闸 (i) 同一条纪律）。
+    shape = await maint_conn.fetchrow(_MAINTENANCE_SHAPE_SQL)
+    if shape is None or not all(shape.values()):
+        raise PilotClusterBoundaryError(
+            "no_marker",
+            f"补建之后【维护库专用表集合】的结构仍不合规"
+            f"（{dict(shape) if shape else 'None'}）——请人工处理")
+
+    # 3. **现查一遍集群仍然可弃**。
+    #    spec §4 R17-F1：「标记证明的是**有人曾声明过**，只有现查才证明**现在仍然成立**」，
+    #    点名两条现实路径：①当初为空的 pilot 集群后来装了真实数据库；
+    #    ②标记随 pg_dump / 卷拷贝被还原或复制到另一个集群。
+    if rows:
+        # 已有合法标记 → 用**完整的** `assert_cluster_allowed`：此刻标记与三张表
+        # 都已就位，(i) 过得了；而 (ii) 的完整版会认同侪 pilot 库的**归属登记**。
+        # 本条路**不写标记**，故没有次序问题。
+        await assert_cluster_allowed(maint_conn, connect=connect, target_db=None)
+    else:
+        # 首次初始化：标记还没写，闸 (i) 必然拒绝，故用**免标记**的等价现查。
+        # ⚠️ 这一次是在 DDL **之后**跑的，与 1d/1e 那次不是同一个时刻 ——
+        #    正是它把「预检通过之后、写标记之前」那个窗口关上。
+        await _assert_disposable_cluster(maint_conn, connect=connect,
+                                         registry_usable=_registry_usable)
+        # ⚠️ **本函数唯一不可回滚的信任写入，必须排在所有会拒绝的检查之后。**
+        #    Task 4 会在这一句**之前**插入孤儿清理（它会抛）。
+        await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)
