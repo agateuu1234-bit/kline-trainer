@@ -366,7 +366,13 @@ _OK_MAINTENANCE_SHAPE = {
     "marker_purpose_unique": True, "intent_is_table": True,
     "intent_columns_ok": True, "intent_dbname_unique": True,
     "registry_is_table": True, "registry_columns_ok": True,
-    "registry_dbname_unique": True, "maintenance_tables_durable": True}
+    "registry_dbname_unique": True,
+    # ⚠️ 耐久性判据**每表一条，不能合成一个跨表的 count**：合成一条时它
+    #    **归因不到具体哪张表**，于是 `init_cluster_marker` 的预检只能
+    #    「三张全在场才要求它」—— 混合态（一张在场但不耐久 + 另一张缺席）就此漏过，
+    #    DDL 先落地，之后才拒。拆开之后，判据名前缀自动接进
+    #    `_MAINTENANCE_SHAPE_OWNER` 的「只对在场的表求值」机制。
+    "marker_durable": True, "intent_durable": True, "registry_durable": True}
 
 _OK_PILOT_SHAPE = {
     "meta_is_table": True, "meta_key_unique": True, "meta_columns_ok": True,
@@ -1485,9 +1491,19 @@ def test_create_pilot_database_writes_all_nine_meta_keys():
     ("registry_is_table", "registry 表缺失 —— 闸 (ii) 的外部凭据无处可查"),
     ("registry_columns_ok", "registry 列不全或类型不对"),
     ("registry_dbname_unique", "registry.dbname 无唯一约束 —— 同名可塞多行"),
-    ("maintenance_tables_durable",
-     "三张维护表被 SET UNLOGGED / 挂 RLS / 换表空间 —— 崩溃后 intent 行被 truncate，"
+    # ⚠️ 耐久性判据**每表一条**：三张各配一档。这三档对「别名拆没拆」本身
+    #    **零判别力**（假件把整个字典交回，闸 (i) 做的是 `all(shape.values())`，
+    #    与真 SQL 的别名无关）—— 加它们是为了让假件与 SQL 一一对应。
+    #    拆分本身的判别力由 `test_shape_fakes_cover_every_predicate`（机械，读真 SQL 文本）
+    #    与 Task 3 的混合态用例（行为）提供。
+    ("marker_durable",
+     "pilot_cluster_marker 被 SET UNLOGGED / 挂 RLS / 换表空间"),
+    ("intent_durable",
+     "pilot_create_intent 被 SET UNLOGGED —— 崩溃后 intent 行被 truncate，"
      "而它是零对象例外授权 DROP DATABASE 的凭据（O4-R37-C2）"),
+    ("registry_durable",
+     "pilot_database_registry 被 SET UNLOGGED —— 崩溃后归属登记消失，"
+     "既有 pilot 库在闸 (ii) 里变成外来物"),
 ])
 def test_cluster_gate_i_requires_shape_proof_of_both_maintenance_tables(broken_key, label):
     """闸 (i) 必须先证**结构**再读值（O4-R8-C1）。

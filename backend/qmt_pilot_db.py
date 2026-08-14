@@ -554,10 +554,20 @@ SELECT
           WHERE k.conrelid = to_regclass('public.pilot_database_registry')
             AND k.contype = 'p' AND array_length(k.conkey, 1) = 1
             AND a.attname = 'dbname')                   AS registry_dbname_unique,
-""" + _durable_tables_sql(("public.pilot_cluster_marker",
-                            "public.pilot_create_intent",
-                            "public.pilot_database_registry"),
-                           "maintenance_tables_durable")
+""" + ",\n".join(
+    # ⚠️ **每张表各一条，不能合成一个跨表的 count**：合成一条时它**归因不到具体哪张表**，
+    #    于是 `init_cluster_marker` 的预检只能「三张全在场才要求它」—— 而混合态
+    #    （一张在场但不耐久 + 另一张缺席）就此漏过：`malformed` 为空 →
+    #    `_needs_repair_ddl` 为真 → **DDL 先落地**建出缺的表，之后才由建库**后**的
+    #    形状检查拒绝，于是在一个最终被拒的维护库里留下了表。
+    #    那正是「① 零副作用预检 → ② 才允许动 DDL」这条契约要防的
+    #    （`--maintenance-dsn` 指错到生产库）。拆成每表一条之后，判据名的前缀
+    #    （marker_/intent_/registry_）自动接进 `_MAINTENANCE_SHAPE_OWNER` 的
+    #    「只对在场的表求值」机制，在场却不耐久的表在**预检阶段**就被点名。
+    _durable_tables_sql((f"public.{tbl}",), alias)
+    for tbl, alias in (("pilot_cluster_marker", "marker_durable"),
+                       ("pilot_create_intent", "intent_durable"),
+                       ("pilot_database_registry", "registry_durable")))
 
 MARKER_PURPOSE = "qmt_pilot_disposable_cluster"
 
