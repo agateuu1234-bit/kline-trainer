@@ -829,26 +829,50 @@ def test_repair_still_rejects_an_unregistered_nonempty_peer():
     assert maint.executed == [], "拒绝之前已经执行了 DDL"
 
 
-def test_first_init_does_not_get_the_registry_relaxation():
-    """**首次初始化那一刻登记表不存在，严判据必须原样保留**。
-
-    放宽只针对「登记表在场且合规」的混合态。首次初始化时 `registry_usable=False`，
-    一个非空的同前缀库照旧拒 —— 哪怕它自己写了一份像样的 pilot_meta
-    （那是**自证**，而唯一能反驳自证的外部凭据此刻根本不存在）。
-    """
-    peer = _FakeConn(user_objects=[("pg_class", 42)],
+def _registered_looking_peer(seed="live"):
+    """一个**非空**、且自己写了一份合规 pilot_meta 的同前缀库。"""
+    return _FakeConn(user_objects=[("pg_class", 42)],
                      meta_rows=[{"key": k, "value": v} for k, v in {
-                         "tool": "qmt_pilot", "seed": "live", "state": "ready",
+                         "tool": "qmt_pilot", "seed": seed, "state": "ready",
                          "contract_version": CONTRACT_VERSION,
                          "export_log_sha256": "a" * 64, "output_dir": "/x/y",
                          "created_at": "20260809T101530123456Z"}.items()])
+
+
+@pytest.mark.parametrize("presence_over,label", [
+    ({"marker_present": False, "intent_present": False, "registry_present": False},
+     "三张表都不在场（真·首次初始化）"),
+    # ⚠️ **这一档是 codex S3-R7 抓到的洞**：上一版只造了「三张全不在场」，
+    #    于是「标记缺失、登记表在场」这个组合**一次都没被测过**，
+    #    而放宽判据当时只看 `registry_present` —— 它正好在这一档为真。
+    ({"marker_present": False, "intent_present": False, "registry_present": True},
+     "标记缺失但登记表在场（人工清过标记 / 部分还原 / 对手写入）"),
+    ({"marker_present": False, "intent_present": True, "registry_present": True},
+     "标记缺失、另两张都在场"),
+])
+def test_no_legal_marker_never_gets_the_registry_relaxation(presence_over, label):
+    """**没有合法标记时，登记表不构成可信凭据**（codex S3-R7）。
+
+    标记才是「这个维护库是我们的」那句话的**信任根** —— 闸 (ii) 之所以敢信登记表，
+    正因为闸 (i) **先**验过标记。放宽若只看 `registry_present`，则：
+    人工清过标记（契约明写这是**人工动作**）、维护库被部分还原、或对手能写维护库时，
+    登记表里的行会被当成归属证明 → 一个**非空的、装成 pilot 样子的**同前缀库过关
+    → 然后**写下一个合法标记**。等于绕过首次初始化的【绝对空】证明，
+    还把「人工清标记」这个逃生阀一并废掉。
+
+    ⚠️ 反向的一半由 `test_repair_accepts_a_registered_nonempty_pilot_peer` 守着
+       （标记在场的混合态**必须**认登记凭据），别把这条修成「一律严判据」。
+    """
+    peer = _registered_looking_peer()
     maint = _InitMaint(marker_rows=[], databases=["kline_pilot_live"],
                        registered_dbnames={"kline_pilot_live"})
-    # 首次初始化：三张表都不在场
-    maint.maintenance_presence = {k: False for k in maint.maintenance_presence}
+    maint.maintenance_presence = {**maint.maintenance_presence, **presence_over}
     with pytest.raises(PilotClusterBoundaryError) as ei:
         asyncio.run(_init(maint, targets={"kline_pilot_live": peer}))
-    assert ei.value.code == "unowned_pilot_database"
+    assert ei.value.code == "unowned_pilot_database", label
+    assert _marker_writes(maint) == [], \
+        f"{label}：拒绝了，却已经把标记写进去了"
+    assert maint.executed == [], f"{label}：拒绝之前已经执行了 DDL"
 
 
 def test_both_peer_proofs_use_the_same_two_facts():
@@ -984,8 +1008,11 @@ async def _assert_disposable_cluster(maint_conn, *, connect,
         标记还没写，它必然拒绝。而闸 (ii) 的完整版会认同侪 pilot 库的**归属登记**，
         那在首次初始化时必然为空。
     **两种同侪库判据，由 `registry_usable` 选（codex S3-R6）**：
-      · `registry_usable=False`（**首次初始化**）：登记表根本不存在 → 同侪库的外部
-        凭据**无从取得** → 「证明不了」只能等价于「拒绝」，故要求同前缀库【绝对空】。
+      · `registry_usable=False`（**首次初始化，或标记缺失**）：没有合法标记时，
+        登记表**不构成可信凭据** —— 标记才是「这个维护库是我们的」那句话的信任根，
+        闸 (ii) 之所以敢信登记表，正因为闸 (i) **先**验过标记（codex S3-R7）。
+        故此时同侪库的外部凭据**取不到**，「证明不了」只能等价于「拒绝」，
+        要求同前缀库【绝对空】。
       · `registry_usable=True`（**混合态修复**：marker + registry 在场、intent 缺失）：
         登记表在场且合规（形状不合规的话 1b 那一步早就零 DDL 拒了），
         于是**外部归属凭据取得到** —— 此时仍要求【绝对空】会把一个
@@ -1134,6 +1161,21 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
             f"pilot_cluster_marker 形状非法（{len(rows)} 行："
             f"{[r['purpose'] for r in rows]}）——请人工处理")
 
+    # 1c-2. **登记表能不能当归属凭据用**（codex S3-R7）。
+    #    ⚠️ **必须同时要求「已有合法标记」**，不能只看登记表在不在场：
+    #       登记表在 gate (ii) 里之所以可信，是因为闸 (i) **先**验过标记 ——
+    #       标记才是「这个维护库是我们的」那句话的**信任根**。
+    #       marker 缺失 / registry 在场且有行 这个组合是**真实可达**的：
+    #         · 契约明写「清除标记是**人工动作**」，人真的清过；
+    #         · 维护库被部分 pg_dump/还原；
+    #         · 对手能写维护库。
+    #       只看 `registry_present` 的话，这三种情形下 registry 的行会被当成归属证明，
+    #       让一个**非空的、装成 pilot 样子的**同前缀库过关，然后**写下一个合法标记** ——
+    #       等于绕过首次初始化的【绝对空】证明，把人工清标记这个逃生阀也一并废掉。
+    #    ⚠️ 形状不合规的登记表走不到这里（1b 已零 DDL 拒），故「在场」即「形状可用」；
+    #       但**可用 ≠ 可信**，可信要由标记来背书。
+    _registry_usable = bool(rows) and presence["registry_present"]
+
     # 1d. 维护库除【维护库专用表集合】外必须绝对空（只读）。
     #     **这一条是「能不能在这个库里建 pilot 维护表」的全部依据** ——
     #     它挡的正是「--maintenance-dsn 指到了生产库」。
@@ -1159,7 +1201,7 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
     _needs_repair_ddl = not all(presence.values())
     if not rows or _needs_repair_ddl:
         await _assert_disposable_cluster(maint_conn, connect=connect,
-                                         registry_usable=presence["registry_present"])
+                                         registry_usable=_registry_usable)
 
     # ── ② 到这里才第一次产生副作用 ──────────────────────────────────────
     #     此刻 marker/intent/registry 可能还不存在，闸 (i) 会因此拒绝，
@@ -1217,7 +1259,7 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
         # ⚠️ 这一次是在 DDL **之后**跑的，与 1d/1e 那次不是同一个时刻 ——
         #    正是它把「预检通过之后、写标记之前」那个窗口关上。
         await _assert_disposable_cluster(maint_conn, connect=connect,
-                                         registry_usable=presence["registry_present"])
+                                         registry_usable=_registry_usable)
         # ⚠️ **本函数唯一不可回滚的信任写入，必须排在所有会拒绝的检查之后。**
         await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)
 ```
@@ -1766,7 +1808,7 @@ Task 3 结束时函数末尾长这样：
         await assert_cluster_allowed(maint_conn, connect=connect, target_db=None)
     else:
         await _assert_disposable_cluster(maint_conn, connect=connect,
-                                         registry_usable=presence["registry_present"])
+                                         registry_usable=_registry_usable)
         await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)   # ← 当时是最后一句
 ```
 
@@ -1783,7 +1825,7 @@ Task 3 结束时函数末尾长这样：
     else:
         # 这一次证明的是「可以动这台集群的 intent 行」——授权下面的清理。
         await _assert_disposable_cluster(maint_conn, connect=connect,
-                                         registry_usable=presence["registry_present"])
+                                         registry_usable=_registry_usable)
 
     # 5. 孤儿 intent 行清理（下面那一大段）。**它会抛**，故必须排在写标记之前。
     ...清理循环...
@@ -1794,7 +1836,7 @@ Task 3 结束时函数末尾长这样：
         #    上面那次证明与这里之间隔着整个清理循环 —— 取锁、DELETE、释放，
         #    每一步都要时间，窗口里集群可以变脏。信任写入必须由**紧挨着它**的证明背书。
         await _assert_disposable_cluster(maint_conn, connect=connect,
-                                         registry_usable=presence["registry_present"])
+                                         registry_usable=_registry_usable)
         # ⚠️ **本函数的最后一句，之后不许再有任何会抛的语句。**
         #    它是唯一不可回滚的信任写入（契约：本工具从不清标记）。
         await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)
@@ -1923,8 +1965,9 @@ Task 3 结束时函数末尾长这样：
 | **M38** | 删掉写标记前那次「紧贴」`_assert_disposable_cluster` | `test_first_init_proves_the_cluster_again_immediately_before_the_marker`（`datistemplate in ops[delete_at+1:marker_at]` 那条） |
 | **M39** | `_assert_disposable_cluster` 的 `if registry_usable:` 整段删掉（退回一律严判据） | `test_repair_accepts_a_registered_nonempty_pilot_peer` |
 | **M40** | 把 `registry_usable` 的两个事实改成只判 `_looks_like_our_pilot_db`（去掉 `_REGISTRY_HAS_SQL`） | `test_repair_still_rejects_an_unregistered_nonempty_peer` + `test_both_peer_proofs_use_the_same_two_facts` |
-| **M41** | 调用处把 `registry_usable=presence["registry_present"]` 改成恒 `True` | `test_first_init_does_not_get_the_registry_relaxation` |
-| **M42** | 调用处改成在 DDL **之后**重查在场情况再传（而不是用 DDL 前的 `presence`） | `test_first_init_does_not_get_the_registry_relaxation`（补建出的空登记表会让首次初始化误走宽判据） |
+| **M41** | 调用处把 `registry_usable=_registry_usable` 改成恒 `True` | `test_no_legal_marker_never_gets_the_registry_relaxation`（三档全红） |
+| **M43** | `_registry_usable` 去掉 `bool(rows) and`（退回只看 `registry_present`） | `test_no_legal_marker_never_gets_the_registry_relaxation[presence_over1-…]` 与 `[presence_over2-…]`（**具名到「标记缺失但登记表在场」那两档**；第一档 presence 全假，对这条判据零判别力，别拿它当证据） |
+| **M42** | 调用处改成在 DDL **之后**重查在场情况再传（而不是用 DDL 前的 `presence`） | `test_no_legal_marker_never_gets_the_registry_relaxation`（补建出的空登记表会让首次初始化误走宽判据） |
 | M22 | 把清理循环挪到 `await assert_cluster_allowed(...)` **之前** | `test_init_does_not_clean_orphans_on_a_cluster_that_is_no_longer_clean` |
 | M23 | 循环只处理 `rows[:1]`（提前 break） | `test_orphan_cleanup_releases_every_seed_lock_it_takes` |
 
@@ -1961,7 +2004,7 @@ git commit -m "S3 Task4：init_cluster_marker 第二段 —— 孤儿 intent 清
 | **㉚** | 孤儿清理取了 seed 锁之后必须还（三条一起：取过锁 + 孤儿真被清掉 + 锁已还） | `test_orphan_cleanup_releases_every_seed_lock_it_takes` |
 | **㊱** | **新号**（旧 ㉖ 已被 S1 占用）：预筛之后取锁之前被刷新的凭据**不许被删** —— 判据在锁内当下求值 | `test_orphan_delete_predicate_is_evaluated_under_the_lock_not_from_a_snapshot` |
 | **㊲** | **新增（codex S3-R1）**：**长事务**里孤儿清理仍按语句时刻量 —— 一行真实已过期的孤儿仍被删掉 | `test_intent_ttl_is_never_measured_against_the_transaction_clock` |
-| **㊳** | **新增（codex S3-R6）**：混合态修复 + **已登记的非空** pilot 库 → 修复成功；同场景下**未登记**的非空同前缀库 → 仍拒 | `test_repair_accepts_a_registered_nonempty_pilot_peer` / `..._still_rejects_an_unregistered_nonempty_peer` |
+| **㊳** | **新增（codex S3-R6/R7）**，**三向**：①混合态 + **已登记的非空** pilot 库 → 修复成功；②同场景 + **未登记**的非空同前缀库 → 拒；③**标记被清掉**但登记表仍在 + 非空同前缀库 → 拒**且不写标记** | `test_repair_accepts_a_registered_nonempty_pilot_peer` / `..._still_rejects_an_unregistered_nonempty_peer` / `test_no_legal_marker_never_gets_the_registry_relaxation` |
 
 > **㊳ 为什么要上真 PG**：这是本片唯一一处**放宽**判据的改动（原本一律要求同前缀库【绝对空】）。放宽必须由真库证明它没有**过度**放宽 —— host 假件的 `registered_dbnames` 是一个布尔/集合，`_REGISTRY_HAS_SQL` 那句 `JOIN pg_database d ON d.oid = r.db_oid` 的**绑实例**语义在假件上完全不求值。同一档里必须同时跑「已登记 → 放行」与「未登记 → 拒」两向。
 
@@ -2489,7 +2532,35 @@ QMT_VERIFY_ALLOW_DESTRUCTIVE=1 "$PY" backend/scripts/verify_pilot_db_lifecycle.p
             "SELECT to_regclass('public.pilot_create_intent') IS NOT NULL"),
             "㊳ 拒绝那一向是**零 DDL** 的（intent 表事后仍不存在）")
         await harness.drop_database(base_dsn, stranger38)
-        await _apply_cluster_schema(conn)          # 复原供后续档位使用
+
+        # 5) **第三向（codex S3-R7）**：标记缺失、登记表在场 → 登记凭据**不可信**，
+        #    非空同前缀库必须仍被拒，且**不得写下标记**。
+        #    标记才是「这个维护库是我们的」的信任根；契约明写清除标记是**人工动作**，
+        #    所以「人清过标记」是真实可达的状态。
+        await _apply_cluster_schema(conn)
+        await _clear_marker(conn)                              # 人工清标记
+        check(not await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_cluster_marker"),
+            "㊳ 前置：标记确实被清掉了")
+        still_registered = await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_database_registry WHERE dbname = $1", db38)
+        check(still_registered == 1,
+              "㊳ 前置：登记行仍在（这一档要测的就是「有登记、无标记」）",
+              f"登记了 {still_registered} 行")
+        try:
+            await init_cluster_marker(conn, connect=connect_peer,
+                                      cluster_schema_sql=cluster_sql,
+                                      try_seed_lock=_never38, release_seed_lock=_noop38)
+            check(False, "㊳ 无标记时登记表不得当归属凭据用", "竟然成功了")
+        except PilotClusterBoundaryError as exc:
+            check(exc.code == "unowned_pilot_database",
+                  "㊳ 标记缺失 + 登记在场 + 非空同前缀库 → unowned_pilot_database",
+                  f"实得 {exc.code}：{exc}")
+        check(not await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_cluster_marker"),
+            "㊳ 拒绝之后**没有**写下标记（否则绕过了【绝对空】证明，"
+            "还把人工清标记这个逃生阀废掉了）")
+        await _write_marker(conn)                  # 复原供后续档位使用
     finally:
         await conn.close()
     await harness.drop_database(base_dsn, db38)
@@ -2647,6 +2718,11 @@ bash .claude/scripts/codex-attest.sh --scope branch-diff --base 8578a59 --head f
 | **R5** | `needs-attention`（**未 approve**） | **[high]** R4 只把标记挪到「首次初始化那一支的最后」，而 Task 4 随后在**整个函数的最后**又接了会抛的清理循环（DELETE 失败 / `seed_lock_not_released`，后者正是 R4 我自己加的）→ 首次初始化又能「报告失败、却留下合法标记」 | **接受**；标记改成**函数字面最后一句**，清理排在它之前，并在它之前补一次「紧贴」复查 |
 
 | **R6** | `needs-attention`（**未 approve**） | **[high]** 混合态（marker+registry 在场、intent 缺失）走【绝对空】严判据 → 一个**已登记的、装着真数据的**合法 pilot 库被判成外来物 → 整台集群锁在修复路径之外，而 O4-F7 引入修复路径的全部理由就是修好这种集群 | **接受**，按 **user 拍板的方案 B**：只在新函数上加 `registry_usable` 开关，**零改动已合并的 `assert_cluster_allowed`** |
+
+| **R7** | `needs-attention`（**未 approve**） | **[high]** R6 的放宽只看 `registry_present`，于是**标记缺失但登记表在场**（人工清过标记／部分还原／对手写维护库）时，登记行会被当成归属证明放行一个非空的伪 pilot 库，**并写下合法标记** —— 绕过首次初始化的【绝对空】证明，还废掉「人工清标记」这个逃生阀。我那条反向钉只造了「三张表全不在场」，恰好没覆盖这个组合 | **接受**；`_registry_usable = bool(rows) and presence["registry_present"]`，反向钉改成三档参数化 + ㊳ 加第三向 |
+
+⚠️ **R7 又是我上一轮修复的洞** —— 而且是**同一族**：R6 我论证「登记表在场 ⇒ 凭据取得到」时，只看了「表在不在」，没问「**凭什么信它**」。根因一句话：**标记才是「这个维护库是我们的」的信任根**；闸 (ii) 敢信登记表，正因为闸 (i) **先**验过标记。我把凭据从它的信任根上摘下来单独用了。
+⚠️ 我那条反向钉 `presence` 三个全设 False，**对这条判据零判别力** —— 变异 M43 特意点名只有后两档能证伪它，别拿第一档当证据。
 
 R6 的核实与处置：
 
