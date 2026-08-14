@@ -1268,6 +1268,16 @@ REQUIRED_BUSINESS_TABLES = ("stocks", "klines", "stock_coverage", "training_sets
 #    `test_canonical_schema_hashes_match_the_repo_files` —— 改了 .sql 而没更新常量，它当场变红。
 CANONICAL_SCHEMA_SHA256 = "02c47d43b5bf64c8d61140f1d080c142f63e994679c69eff9142571568dbc28a"
 CANONICAL_PILOT_SCHEMA_SHA256 = "8d018f98c5a29583e4eea8204680ea09f570ab9b3acf5479fb01ea0745527d7a"
+# ⚠️ **`pilot_cluster_schema.sql` 同样必须钉字节**：4a-1 给 schema.sql 与
+#    pilot_schema.sql 各钉了规范哈希，唯独这份漏了 —— 而它是 `--init-cluster-marker`
+#    直接拿去在**维护库**上执行的 DDL。不钉的话，一份漂移/敌意的文件可以
+#    DROP/TRUNCATE 掉 marker / intent / registry 三张表，而随后的结构判据
+#    **只看形状不看行**，被删掉的 intent/登记行它一条都发现不了 ——
+#    于是恢复凭据与归属登记被静默清空，集群照样被判成「初始化成功」。
+#    （spec §4 P1r3-F9 删掉的是**存进集群里**的 `cluster_schema_sha256` —— 那是因为
+#      集群里没有地方存、无对照物；**模块常量**是另一回事，与上面两个同族。）
+CANONICAL_CLUSTER_SCHEMA_SHA256 = (
+    "d9167bcc3c8ebea784fc9ae8968f12e41614919947e5f601b500bbdd76db3985")
 
 # ⚠️ **规范指纹证明的是「递进来的字节」，不是「库现在长什么样」**（O4-R32-C2）：
 #    apply 之后到写 ready 之间，业务表仍可能被改（并发的手、残留对象、PG 侧异常）——

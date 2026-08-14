@@ -5918,3 +5918,38 @@ def test_no_production_module_reaches_past_the_public_reset_entry():
         f"没扫到 scripts/ —— 验收脚本正是最可能图省事的地方：{scanned}"
     assert not offenders, (
         f"这些生产文件绕过了 reset_pilot_database 直接碰破坏性内部件：{offenders}")
+
+
+# ---------------------------------------------------------------------------
+# init_cluster_marker —— 幂等语义 + 孤儿 intent 行清理（spec §4 + O4-F7 + O4-F2 修正③）
+# ---------------------------------------------------------------------------
+
+# ⚠️ **必须是仓库里那份真文件**：init 把 `cluster_schema_sql` 钉到
+#    `CANONICAL_CLUSTER_SCHEMA_SHA256`，随手编一段 DDL 过不了那道闸 ——
+#    而这正是它的意义：递进来的 DDL 会直接在**维护库**上执行。
+_CLUSTER_SQL = (_SQL_DIR / "pilot_cluster_schema.sql").read_text(encoding="utf-8")
+
+
+def test_canonical_cluster_schema_hash_matches_the_repo_file():
+    """防漂移：改了 `pilot_cluster_schema.sql` 而没更新常量，这颗钉子当场变红
+    （与 4a-1 给另外两份 schema 立的钉子同族）。"""
+    import qmt_pilot_db as m
+    actual = m.sha256_of_sql(
+        (_SQL_DIR / "pilot_cluster_schema.sql").read_text(encoding="utf-8"))
+    assert actual == m.CANONICAL_CLUSTER_SCHEMA_SHA256, (
+        f"pilot_cluster_schema.sql 变了：实算 {actual!r}，"
+        f"常量 {m.CANONICAL_CLUSTER_SCHEMA_SHA256!r}")
+
+
+def test_canonical_cluster_schema_file_stays_non_destructive():
+    """反向断言：那份文件本身只许有 `CREATE TABLE IF NOT EXISTS`。
+
+    光钉哈希挡不住「有人既改了文件、又顺手更新了常量」——而这份 DDL 跑在维护库上，
+    一句 DROP/TRUNCATE 就能把恢复凭据与归属登记清空。
+    """
+    text = (_SQL_DIR / "pilot_cluster_schema.sql").read_text(encoding="utf-8")
+    code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("--"))
+    for banned in ("DROP ", "TRUNCATE", "DELETE ", "ALTER "):
+        assert banned not in code.upper(), f"规范集群 schema 里出现破坏性语句 {banned!r}"
+    assert code.upper().count("CREATE TABLE IF NOT EXISTS") == len(MAINTENANCE_TABLES), \
+        "建表条数与【维护库专用表集合】对不上"
