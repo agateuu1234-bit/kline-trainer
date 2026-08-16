@@ -83,7 +83,7 @@ check_file_entries() {
     local f
     for f in "$@"; do
         is_plan_or_spec_file "$f" || continue
-        local current_blob override_blob override_log_line ledger_blob
+        local current_blob override_blob override_log_line override_digest ledger_blob
         current_blob=$(ledger_compute_file_blob_at_ref "$ref" "$f")
         if [ -z "$current_blob" ]; then
             local viol="$f (cannot resolve at $ref)"
@@ -93,8 +93,12 @@ check_file_entries() {
         fi
         override_blob=$(ledger_get_file_override_blob "$f")
         override_log_line=$(ledger_get_file_override_log_line "$f")
+        # Validate the cited audit line by CONTENT, not by line count. A count check
+        # passes unchanged after that line is rewritten, so it never bound the override
+        # it claimed to. Entries without a digest fail closed rather than fall back.
+        override_digest=$(ledger_get_file_override_digest "$f")
         if [ -n "$override_blob" ] && [ "$override_blob" = "$current_blob" ]; then
-            if ledger_validate_audit_log_line "$override_log_line"; then
+            if ledger_validate_audit_entry "$override_log_line" "$override_digest"; then
                 printf '[guard-attest-ledger] OVERRIDE IN USE: file:%s (audit log line=%s)\n' "$f" "$override_log_line" >&2
                 continue
             else
@@ -118,13 +122,14 @@ check_branch_entry() {
     # args: <branch> <head_sha> <base>
     # P1-F3: same override recognition for branch entries
     local branch="$1" head="$2" base="$3"
-    local fp_current fp_ledger override_head override_log_line
+    local fp_current fp_ledger override_head override_log_line override_digest
     fp_current=$(ledger_compute_branch_fingerprint "$base" "$head")
     fp_ledger=$(ledger_get_branch_fingerprint "$branch" "$head")
     override_head=$(ledger_get_branch_override_head "$branch" "$head")
     override_log_line=$(ledger_get_branch_override_log_line "$branch" "$head")
+    override_digest=$(ledger_get_branch_override_digest "$branch" "$head")
     if [ -n "$override_head" ] && [ "$override_head" = "$head" ]; then
-        if ledger_validate_audit_log_line "$override_log_line"; then
+        if ledger_validate_audit_entry "$override_log_line" "$override_digest"; then
             printf '[guard-attest-ledger] OVERRIDE IN USE: branch:%s@%s (audit log line=%s)\n' "$branch" "$head" "$override_log_line" >&2
             return 0
         else

@@ -16,11 +16,11 @@ VERIFY="$SCRIPT_DIR/verify-codex-tree.mjs"
 if [ "${CODEX_ATTEST_TEST_MODE:-0}" = "1" ]; then
     PIN="${CODEX_PIN_FILE:-$REPO_ROOT/codex.pin.json}"
     GIT_BIN="${CODEX_PINNED_GIT:-git}"
-    CACHE_ROOT="${CODEX_PINNED_CACHE:-$HOME/.cache/kline-trainer-codex}"
+    CACHE_ROOT="${CODEX_PINNED_CACHE:-$HOME/.cache/prj-workflow-codex}"
 else
     PIN="$REPO_ROOT/codex.pin.json"
     GIT_BIN="git"
-    CACHE_ROOT="$HOME/.cache/kline-trainer-codex"
+    CACHE_ROOT="$HOME/.cache/prj-workflow-codex"
 fi
 
 err() { printf '[resolve-pinned-codex] %s\n' "$*" >&2; }
