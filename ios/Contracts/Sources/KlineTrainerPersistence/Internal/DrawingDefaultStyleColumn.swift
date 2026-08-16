@@ -15,12 +15,20 @@ enum DrawingDefaultStyleColumn {
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// nil = 列为 NULL / 无任何可用内容。**任何解码失败都只影响对应字段**。
+    /// **只有列为 NULL 才返回 nil**（= 旧档 / 本局从未改过 ⇒ resume 不种子）。
+    /// 整段 JSON 坏掉返回的是**出厂默认、非 nil**（取舍见下方注释）；
+    /// 除此之外**任何解码失败都只影响对应字段**。
     static func decode(_ raw: String?) -> DrawingDefaultStyle? {
         guard let raw else { return nil }
         guard let data = raw.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return DrawingDefaultStyle().sanitized(for: .horizontal) }   // 整段坏 → 全量回落
+        // 整段坏 → 全量回落**出厂默认（非 nil）**，刻意不回落 nil。理由：
+        //   · 无数据错误 —— 出厂值即全局默认，`sanitized` 对它是恒等变换，
+        //     与「回 nil ⇒ resume 跳过种子 ⇒ 会话保持出厂值」殊途同归；
+        //   · ⚠️ 但两者**语义强度不同**：非 nil 是**显式**把本局默认钉回已知良好值，
+        //     nil 是**跳过**、听凭会话当时是什么。别为了"对称"改成 nil。
+        // 已接受的代价：读回后「列损坏」与「从未改过」**不可区分**（可观测性损失，非数据错误）。
+        else { return DrawingDefaultStyle().sanitized(for: .horizontal) }
 
         var s = DrawingDefaultStyle()
         if let v = obj["lineSubType"] as? String, let e = LineSubType(rawValue: v)   { s.lineSubType = e }

@@ -23,8 +23,14 @@ public enum TextForm: String, Codable, Equatable, Sendable, CaseIterable {
     case borderTransparent, borderFilled, plain
 }
 
-/// 「下一条要画的线」的默认样式（1a-iii）。整局内存有效、不落盘（持久化全局默认属 P6）。
+/// 「下一条要画的线」的默认样式（1a-iii）。
 /// 是 DrawingSession 上的单一真相，提交路径 commitPending 原子消费它构造完整 DrawingObject。
+/// ⚠️ **本局默认现在会随存档落盘**（D90 起，本类型因此是持久化契约的一部分）：
+///    经 `drawing_default_style` 列写进 `pending_training` / `pending_replay`，
+///    断点续训 / 续 replay 时读回并种子（`TrainingSessionCoordinator:331,943`）。
+///    ⇒ **增删改字段必须走 m01 的 bump 流程**，并顾及 `DrawingDefaultStyleColumn`
+///    的逐字段容错解码与 `sanitized(for:)`。
+///    （**跨局**的全局默认仍属 P6、尚未实现 —— 与本条是两件事，别混。）
 public struct DrawingDefaultStyle: Codable, Equatable, Sendable {
     public var lineSubType: LineSubType = .straight
     public var lineStyle: LineStyle = .solid
