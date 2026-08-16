@@ -467,13 +467,20 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   productionRegistryHasNoTrend（+1 UIKit-gated，钉住生产渲染注册表里没有 .trend）。
 #   uikit 74→75（+1，同上 L8c）。pass-main-current.log 已用本轮真 fresh Catalyst 日志
 #   （1745 tests / 205 suites）逐行重裁。
+#   【本局画线默认样式持久化（本轮）】总数 1745→1778（+33）：Task 1-8 新增的 host-visible
+#   测试（容错解码 / sanitize / 迁移 0010 / 两表列读写 / coordinator 写入与种子 / 视图层守卫
+#   G4b·G4c·G6·G6b / m01 矩阵守卫 / user_version 断言守卫等）。uikit 75→77（+2）：Task 8 的
+#   D94 行为证据 spike 两条（`DrawingAutosaveTriggersSpikeTests`：defaultStyle 触发档 + 既有
+#   drawingsRevision 对照组），它们 `#if canImport(UIKit)` 门控、host `swift test` 完全不编译，
+#   故只能落在本门。pass-main-current.log 已用本轮真 fresh Catalyst 日志（1778 tests /
+#   208 suites，`-only-testing:KlineTrainerContractsTests`，与 CI 同款命令）逐行重裁。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1745" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 75 / total 1745）→ GATE PASS 且回显 1745 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1778" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 77 / total 1778）→ GATE PASS 且回显 1778 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1745，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1778，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 
