@@ -1,4 +1,5 @@
 """Unit tests for .claude/scripts/ledger-lib.sh helpers."""
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -63,10 +64,14 @@ class TestLedgerWriteFile:
 
 class TestLedgerWriteBranch:
     def test_write_branch_entry(self, temp_git_repo, ledger_path):
+        # Signature gained base_sha (4th) and an optional reviewer (9th). base_sha is
+        # the frozen revision actually reviewed: storing only the ref name let two
+        # reviews of the same head against different bases collide on one key, and left
+        # the ledger unable to prove which base a verdict described.
         run_lib_fn("ledger_init_if_missing", [], temp_git_repo)
         r = run_lib_fn("ledger_write_branch",
-                       ["feature-X", "d34db33f", "origin/main", "sha256:diff",
-                        "2026-04-19T00:00:00Z", "sha256:verdict", "1"],
+                       ["feature-X", "d34db33f", "origin/main", "basesha1",
+                        "sha256:diff", "2026-04-19T00:00:00Z", "sha256:verdict", "1"],
                        temp_git_repo)
         assert r.returncode == 0, r.stderr
         data = json.loads(ledger_path.read_text())
@@ -74,7 +79,26 @@ class TestLedgerWriteBranch:
         assert e["kind"] == "branch"
         assert e["head_sha"] == "d34db33f"
         assert e["base"] == "origin/main"
+        assert e["base_sha"] == "basesha1"
         assert e["diff_fingerprint"] == "sha256:diff"
+        # Omitted reviewer records "unspecified" rather than guessing: a wrong
+        # attribution is worse than an absent one.
+        assert e["reviewer"] == "unspecified"
+
+    def test_write_branch_entry_records_reviewer(self, temp_git_repo, ledger_path):
+        # Two engines (codex-attest.sh, kimi-attest.sh) write the same ledger and are
+        # not equally trustworthy, so an approve that does not name its reviewer cannot
+        # be audited later.
+        run_lib_fn("ledger_init_if_missing", [], temp_git_repo)
+        r = run_lib_fn("ledger_write_branch",
+                       ["feature-X", "d34db33f", "origin/main", "basesha1",
+                        "sha256:diff", "2026-04-19T00:00:00Z", "sha256:verdict", "1",
+                        "kimi-code/k3@kimi-code/0.36.1"],
+                       temp_git_repo)
+        assert r.returncode == 0, r.stderr
+        data = json.loads(ledger_path.read_text())
+        assert data["entries"]["branch:feature-X@d34db33f"]["reviewer"] == \
+            "kimi-code/k3@kimi-code/0.36.1"
 
 
 class TestLedgerLookupFile:
@@ -96,6 +120,25 @@ class TestLedgerLookupFile:
 
 class TestLedgerLookupBranch:
     def test_lookup_returns_fingerprint(self, temp_git_repo, ledger_path):
+        # Returns "<fingerprint>|<base_sha>" now. Reporting the fingerprint alone let a
+        # caller confirm a write while the stored entry described a different base.
+        ledger_path.write_text(json.dumps({
+            "version": 1,
+            "entries": {"branch:feat@d34db33f": {
+                "kind": "branch",
+                "diff_fingerprint": "sha256:diff",
+                "base_sha": "basesha1",
+            }},
+        }))
+        r = run_lib_fn("ledger_get_branch_fingerprint", ["feat", "d34db33f"], temp_git_repo)
+        assert r.returncode == 0
+        assert r.stdout.strip() == "sha256:diff|basesha1"
+
+    def test_lookup_pre_migration_entry_has_empty_base(self, temp_git_repo, ledger_path):
+        # Entries written before base_sha existed are still readable; the base half is
+        # simply empty. This repo carries such entries, so the accessor must not fail on
+        # them -- but an empty base can never match a caller's frozen SHA, so an old
+        # entry cannot be mistaken for a fresh attestation either.
         ledger_path.write_text(json.dumps({
             "version": 1,
             "entries": {"branch:feat@d34db33f": {
@@ -105,7 +148,7 @@ class TestLedgerLookupBranch:
         }))
         r = run_lib_fn("ledger_get_branch_fingerprint", ["feat", "d34db33f"], temp_git_repo)
         assert r.returncode == 0
-        assert r.stdout.strip() == "sha256:diff"
+        assert r.stdout.strip() == "sha256:diff|"
 
 
 class TestComputeFileBlob:
@@ -162,12 +205,38 @@ class TestOverrideAccessors:
         r = run_lib_fn("ledger_get_file_override_blob", ["x.md"], temp_git_repo)
         assert r.stdout.strip() == ""
 
-    def test_validate_audit_log_line_ok(self, temp_git_repo, override_log_path):
+    # ledger_validate_audit_log_line only counted lines. A count check still passes
+    # after the cited line is rewritten, so it never actually bound the override it
+    # claimed to. It is replaced by ledger_validate_audit_entry, which re-reads that
+    # exact line and recomputes its digest. The cases below keep the old coverage
+    # (valid line / out-of-range line) and add the one the old check could not catch.
+
+    @staticmethod
+    def _digest(line: str) -> str:
+        return "sha256:" + hashlib.sha256(line.encode()).hexdigest()
+
+    def test_validate_audit_entry_ok(self, temp_git_repo, override_log_path):
         override_log_path.write_text('{"one":1}\n{"two":2}\n{"three":3}\n')
-        r = run_lib_fn("ledger_validate_audit_log_line", ["2"], temp_git_repo)
+        r = run_lib_fn("ledger_validate_audit_entry",
+                       ["2", self._digest('{"two":2}')], temp_git_repo)
         assert r.returncode == 0
 
-    def test_validate_audit_log_line_tampered(self, temp_git_repo, override_log_path):
+    def test_validate_audit_entry_line_out_of_range(self, temp_git_repo, override_log_path):
         override_log_path.write_text('{"one":1}\n')
-        r = run_lib_fn("ledger_validate_audit_log_line", ["5"], temp_git_repo)
+        r = run_lib_fn("ledger_validate_audit_entry",
+                       ["5", self._digest('{"one":1}')], temp_git_repo)
+        assert r.returncode != 0
+
+    def test_validate_audit_entry_rejects_rewritten_line(self, temp_git_repo, override_log_path):
+        # The case the line-count check passed: same line count, different content.
+        override_log_path.write_text('{"one":1}\n{"TAMPERED":2}\n{"three":3}\n')
+        r = run_lib_fn("ledger_validate_audit_entry",
+                       ["2", self._digest('{"two":2}')], temp_git_repo)
+        assert r.returncode != 0
+
+    def test_validate_audit_entry_requires_digest(self, temp_git_repo, override_log_path):
+        # An entry with no recorded digest must fail closed, not fall back to a weaker
+        # check -- pre-migration entries would otherwise keep the old hole open.
+        override_log_path.write_text('{"one":1}\n{"two":2}\n')
+        r = run_lib_fn("ledger_validate_audit_entry", ["2", ""], temp_git_repo)
         assert r.returncode != 0
