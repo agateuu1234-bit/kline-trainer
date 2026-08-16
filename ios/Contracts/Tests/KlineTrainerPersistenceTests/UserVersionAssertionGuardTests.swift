@@ -6,7 +6,16 @@ import XCTest
 final class UserVersionAssertionGuardTests: XCTestCase {
 
     struct Site: Equatable {
-        let file: String, line: Int, value: Int
+        let file: String, line: Int
+        /// `nil` = 找到了 `PRAGMA user_version` 的**读取**，但窗口内**抓不到被比较的整数**
+        /// （书写形态超出扫描器能力，例如断言隔了 4 行以上）。
+        /// ⚠️ 这一档必须**显式报出来**，绝不能像旧版那样 `continue` 静默丢弃：
+        ///    锚点失效时静默跳过 ⇒ 发现式守卫悄悄少一个站点，而它的全部价值就是
+        ///    「不信任任何人写的清单、自己把站点数全」。本仓已为同族问题栽过
+        ///    （机械检查器被它该抓的损坏禁用了自身解析器 → 静默全绿）。
+        ///    真实漂移另有运行时兜底（该测试自身会因 uv 实为 8 而失败），故本档定为
+        ///    「守卫职能缺失」而非「数据错误」—— 但仍必须出声。
+        let value: Int?
         /// 上方最近一行 `.migrate(` 是否带 `upTo:`；上方根本没有 `.migrate(` 时为 false
         let afterPartialMigrate: Bool
     }
@@ -23,9 +32,19 @@ final class UserVersionAssertionGuardTests: XCTestCase {
         for (i, l) in lines.enumerated() where l.contains("PRAGMA user_version") {
             // `PRAGMA user_version = N` 是**写入**（fixture 造现场），不是断言
             if l.contains("PRAGMA user_version =") { continue }
+            // 只有**真执行 SQL 的代码行**才算站点。文档/样例里的纯提及（如
+            // `M01MatrixSyncGuardTests` 里那份 m01 矩阵 markdown 表格，单元格文本恰好是
+            // 「训练组 SQLite \`PRAGMA user_version\`」）不是断言，也永远抓不到被比较的整数。
+            // ⚠️ 这条 `continue` 与下面「抓不到整数」那档**性质完全不同**，别合并：
+            //    这里是**用正面结构判据断定它不是站点**（安全）；
+            //    那里是**判据够不着、不知道**，必须出声（否则就是静默漏站）。
+            // 实测依据：本树 `Tests/` 下 33 处 `PRAGMA user_version` 里，全部真实读/写站点
+            // 都带 `sql:`；不带的只有注释（已剥）、守卫自身（扫描时排除）、以及上述表格样例。
+            guard l.contains("sql:") else { continue }
             // 断言值可能就在本行，也可能在随后几行（`let uv = …` 换行再 `XCTAssertEqual(uv, 7)`）
+            // ⚠️ 抓不到时**记成 value == nil 的站点**，不 `continue` —— 见 `Site.value` 的注释。
             let window = lines[i..<min(i + 4, lines.count)].joined(separator: "\n")
-            guard let v = firstComparedInt(window) else { continue }
+            let v = firstComparedInt(window)
             var partial = false
             for j in stride(from: i, through: 0, by: -1) {
                 // 先撞到函数声明 ⇒ 本函数体内没有 .migrate( ⇒ 不是部分迁移落点（安全方向）
@@ -84,9 +103,53 @@ final class UserVersionAssertionGuardTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(Set(all.map(\.file)).count, 5,
             "只覆盖 \(Set(all.map(\.file)).count) 个文件 —— 目录遍历坏了")
 
+        // 锚点失效必须**出声**：抓不到被比较整数的站点在旧版被 `continue` 静默丢弃，
+        // 于是 G9 的「把站点数全」这一职能对该书写形态无声失效。
+        let unparsed = all.filter { $0.value == nil }
+        XCTAssertTrue(unparsed.isEmpty,
+            "以下站点找到了 PRAGMA user_version 读取、却在 4 行窗口内抓不到被比较的整数 ——\n"
+            + "G9 对这种书写形态会漏站。请改写该测试、或调宽/增强扫描器，**不得**放任静默漏站：\n"
+            + unparsed.map { "  \($0.file):\($0.line)" }.joined(separator: "\n"))
+
         let bad = all.filter { $0.value == 7 && !$0.afterPartialMigrate }
         XCTAssertTrue(bad.isEmpty, "以下 user_version 终态断言仍停在 7（0010 之后应为 8）：\n"
             + bad.map { "  \($0.file):\($0.line)" }.joined(separator: "\n"))
+    }
+
+    /// 双向自检：抓不到整数的站点必须被**记下并报出**，而不是被丢掉；
+    /// 同时正常书写形态不得被误记成「未解析」。
+    func test_scanner_reports_unparsable_site_instead_of_dropping_it() {
+        // 断言隔了 4 行以上 —— 正是 R2 评审点名的那种书写形态
+        let farAway = """
+        try migrator.migrate(queue)
+        let uv = try Int.fetchOne(db, sql: "PRAGMA user_version")
+        let a = 1
+        let b = 2
+        let c = 3
+        XCTAssertEqual(uv, 7)
+        """
+        let s = Self.sites(in: farAway, file: "X")
+        XCTAssertEqual(s.count, 1, "站点必须被记下，不得静默丢弃")
+        XCTAssertNil(s.first?.value, "窗口外取不到整数 ⇒ 必须记成未解析（value == nil），不是 continue")
+
+        // 反向：正常形态不得被误记成未解析（否则这条守卫会在健康树上恒红）
+        let normal = """
+        try migrator.migrate(queue)
+        let uv = try Int.fetchOne(db, sql: "PRAGMA user_version")
+        XCTAssertEqual(uv, 8)
+        """
+        XCTAssertEqual(Self.sites(in: normal, file: "X").first?.value, 8,
+                       "健康书写形态必须正常解析，不得误判为未解析")
+
+        // 反向 2：**文档/样例里的纯提及不是站点** —— 本树真实存在这一档
+        // （`M01MatrixSyncGuardTests` 的 m01 矩阵 markdown 样例），
+        // 若把它当站点，会因永远抓不到整数而让上面那条「未解析」断言在健康树上恒红。
+        let markdownMention = """
+        | 维度 | 当前版本 | 变更触发 bump 的条件 |
+        | 训练组 SQLite `PRAGMA user_version` | `1` | … |
+        """
+        XCTAssertTrue(Self.sites(in: markdownMention, file: "X").isEmpty,
+                      "无 sql: 的纯文本提及不是执行站点，不得计入")
     }
 
     /// 双向自检：判据本身既要抓得住违规，又不能误伤合法的中间落点，也不能把注释算进来。
