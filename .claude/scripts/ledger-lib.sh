@@ -19,7 +19,13 @@ ledger_lock_acquire() {
         # attestation gate permanently rather than for one timeout.
         local owner
         owner=$(cat "$LEDGER_LOCK_PATH/owner" 2>/dev/null || true)
-        if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+        # Liveness via `ps`, not `kill -0`. kill -0 also fails with EPERM for a pid that
+        # EXISTS but belongs to another user, so a recycled pid landing on a root process
+        # would be read as "dead" and the recovery below would delete a live lock --
+        # producing exactly the concurrent read-modify-write this lock exists to prevent.
+        # ps returns 0 for any existing pid regardless of owner, which is the question
+        # actually being asked.
+        if [ -n "$owner" ] && ! ps -p "$owner" >/dev/null 2>&1; then
             echo "[ledger] recovering lock orphaned by dead pid $owner" >&2
             rm -rf "$LEDGER_LOCK_PATH" 2>/dev/null || true
             continue
@@ -202,18 +208,17 @@ PY
 # File-scoped counterpart to ledger_get_branch_override_digest. Upstream only needed the
 # branch form because its attest path refuses file targets outright; this repo still
 # carries file-scoped override entries, and without this getter the guard hook could
-# only check that the audit log is long enough -- a check that a rewritten log line
-# passes unchanged. Missing digest prints empty, and the caller fails closed.
+# only check that the audit log is long enough -- a check a rewritten line passes.
 ledger_get_file_override_digest() {
     [ -f "$LEDGER_PATH" ] || return 0
-    python3 - "$LEDGER_PATH" "$1" <<'PY'
+    python3 - "$LEDGER_PATH" "$1" <<'PY2'
 import json, sys
 p, rel = sys.argv[1:3]
 try: d=json.load(open(p))
 except Exception: print(""); sys.exit(0)
 e=d.get("entries",{}).get(f"file:{rel}")
 print(e.get("audit_entry_digest","") if (e and e.get("override")) else "")
-PY
+PY2
 }
 
 ledger_get_branch_override_head() {

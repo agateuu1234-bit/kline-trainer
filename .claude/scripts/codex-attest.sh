@@ -257,6 +257,13 @@ if [ "$SCOPE" = "working-tree" ]; then
     echo "[codex-attest] review complete, verdict=approve. No ledger entry: working-tree" >&2
     echo "  scope cannot attest. Commit and use: --scope branch-diff --head <branch>" >&2
     exit 20
+elif [ "$SCOPE" = "branch-diff" ] && [ "$REVIEW_ONLY" = "true" ]; then
+    # --review-only means "review, record nothing" -- it was only ever read on the
+    # working-tree path, so passing it with branch-diff silently wrote an attestation
+    # anyway. The entry was accurate, but a caller who asked not to record one got one.
+    echo "[codex-attest] review complete, verdict=approve. No ledger entry: --review-only" >&2
+    echo "  was requested. Re-run without it to attest this branch." >&2
+    exit 20
 elif [ "$SCOPE" = "branch-diff" ]; then
     # Who issued this verdict. kimi-attest.sh writes to the same ledger and the two
     # engines are not interchangeable, so an entry that does not name its reviewer
