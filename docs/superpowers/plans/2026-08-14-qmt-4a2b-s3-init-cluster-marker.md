@@ -15,8 +15,10 @@
 > ⚠️ **实施后追记（2026-08-18）**：本计划文中多处写「S3 完成后 = **48 档**」，
 > 而**实际交付是 49 档** —— 实施阶段的整支对抗评审（Kimi S3-WB-R3）挖出
 > `db_oid IS NULL` 让「库不存在」判据恒真这条真缺陷，为此追加了真 PG 档 **㊴**。
-> 计划正文保留原样（它是**当时**的计划记录），全部偏离逐条列在**文末「实施偏离登记」**。
-> 拿这份计划核对代码时，**以文末那张表为准**。
+> 计划正文保留原样（它是**当时**的计划记录）。
+> ⛔ **计划里的代码块不是交付代码的副本** —— 实施与评审阶段改过 13 处行为
+> （机械比对得出，见文末「实施偏离登记 · 附」）。**拿这份计划核对时，一律以仓库代码为准**；
+> 文末登记的是**判断层面**的偏离（数字、判据、档数、变异归因）加上那份可复跑的比对脚本。
 
 ## 评审收口状态（2026-08-14，**必须先读**）
 
@@ -2910,3 +2912,68 @@ EOF
   `test_both_peer_proofs_use_the_same_two_facts` **没红**——它读的是
   `inspect.getsource` 的**原始文本**，而该符号名恰好在 docstring 里被逐字提到。
   **这是真缺陷**，已把守卫改成走 AST 标识符（prose 里提多少次都不算数），改后 M40 如期变红。
+
+
+### 附：计划代码块 ↔ 交付代码的行为差异（机械比对，2026-08-18）
+
+⚠️ **这一节不手抄清单**（手抄的清单当天就开始烂）。它给的是一段**可复跑**的比对，
+任何时候都能重新得出当下的真实差异 —— 这正是本仓「计划内嵌的事实必须逐条实测」那条守则。
+
+```bash
+cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4a2b-s3"
+"/Users/maziming/Coding/Prj_Kline trainer/.venv/bin/python" - <<'EOF'
+import ast, pathlib, re, textwrap
+def strip_doc(node):
+    for n in ast.walk(node):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
+            b = n.body
+            if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
+               and isinstance(b[0].value.value, str):
+                n.body = b[1:] or [ast.Pass()]
+    return node
+def defs(src):
+    out = {}
+    try:
+        tree = ast.parse(textwrap.dedent(src))
+    except SyntaxError:
+        return out                      # 计划里有意的片段（参数化表尾、for 头）跳过
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out[n.name] = ast.dump(strip_doc(ast.parse(ast.unparse(n))))
+    return out
+plan = pathlib.Path("docs/superpowers/plans/2026-08-14-qmt-4a2b-s3-init-cluster-marker.md").read_text()
+planned = {}
+for b in re.findall(r"```python\n(.*?)```", plan, re.S):
+    planned.update(defs(b))
+delivered = {}
+for f in ("backend/tests/test_qmt_pilot_db.py", "backend/qmt_pilot_db.py",
+          "backend/scripts/verify_pilot_db_lifecycle.py"):
+    delivered.update(defs(pathlib.Path(f).read_text()))
+both = sorted(set(planned) & set(delivered))
+diff = [n for n in both if planned[n] != delivered[n]]
+print(f"同名定义 {len(both)}；剥掉 docstring 后仍有行为差异的 {len(diff)}：")
+for n in diff: print("   -", n)
+EOF
+```
+
+**2026-08-18 实测输出**：同名定义 55 个，**13 个**有行为差异 ——
+`_InitMaint` / `_registered_looking_peer` / `init_cluster_marker` /
+`test_both_peer_proofs_use_the_same_two_facts` /
+`test_init_does_not_leave_a_marker_when_the_final_gate_rejects` /
+`test_init_executes_no_ddl_before_proving_the_maintenance_db_is_safe` /
+`test_init_first_time_still_accepts_an_empty_prefixed_remnant` /
+`test_init_maint_fake_actually_models_the_states_it_claims` /
+`test_init_proves_peer_databases_are_clean_before_any_ddl` /
+`test_init_verifies_the_shape_after_creating_the_tables` /
+`test_no_legal_marker_never_gets_the_registry_relaxation` /
+`test_repair_accepts_a_registered_nonempty_pilot_peer` /
+`test_repair_still_rejects_an_unregistered_nonempty_peer`。
+
+**其中理由值得单独记下的四处**（其余是 Task 1-3 实施时的就地调整，交付代码为准）：
+
+| 定义 | 计划版怎么写的 | 交付版怎么改的、为什么 |
+|---|---|---|
+| `_registered_looking_peer` | meta 里**漏了** `pilot_schema_sha256`（`PILOT_META_PHASE1_KEYS` 的 7 个键之一） | `_looks_like_our_pilot_db` 对它恒为 False → 「必须拒」那几档会**因为错误的原因通过**，对 R7 那条 high 的修复零判别力。交付版改成**从常量派生** + `assert` 防呆（Kimi S3-WB-R5 指出计划版未登记） |
+| `_InitMaint.execute` | `if "pilot_cluster_marker" in query and "INSERT" in query.upper()` | 松散子串会让**补建 DDL** 造出幻影标记（`_CLUSTER_SQL` 的注释里两个词都有）。改成锚定语句开头，并给假件自检补了两条断言（Kimi S3-WB-R1） |
+| `test_init_verifies_the_shape_after_creating_the_tables` | 用 `intent_table_missing=True` 造场景 | 那样对「**建后**复验」零判别力（变异 M10 实测）；改走首次初始化路径 |
+| `init_cluster_marker` | Task 3 的形态 | Task 4 重排（清理循环插在写标记前 + 紧贴复查）、WB-R3 两处守卫查询具名化 + `db_oid IS NOT NULL` |
