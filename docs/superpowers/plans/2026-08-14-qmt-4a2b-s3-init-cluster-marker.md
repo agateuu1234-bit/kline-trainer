@@ -12,6 +12,12 @@
 
 ---
 
+> ⚠️ **实施后追记（2026-08-18）**：本计划文中多处写「S3 完成后 = **48 档**」，
+> 而**实际交付是 49 档** —— 实施阶段的整支对抗评审（Kimi S3-WB-R3）挖出
+> `db_oid IS NULL` 让「库不存在」判据恒真这条真缺陷，为此追加了真 PG 档 **㊴**。
+> 计划正文保留原样（它是**当时**的计划记录），全部偏离逐条列在**文末「实施偏离登记」**。
+> 拿这份计划核对代码时，**以文末那张表为准**。
+
 ## 评审收口状态（2026-08-14，**必须先读**）
 
 **codex 对抗评审跑了 7 轮，`verdict` 全部是 `needs-attention`，⛔ 从未 approve。**
@@ -147,7 +153,7 @@ cd "/Users/maziming/Coding/Prj_Kline trainer/.dev/worktree/qmt-4a2b-s3" && echo 
 
 S1 实施时新造三档并占用了 **㉕㉖㉗**。参考分支的「孤儿删除锁内原子求值」用的是**旧 ㉖**，与 main 的 ㉖（凭据表清场只删点名的库名）**直接相撞** → 本计划给它**另编新号 ㊱**。其余四档 **⑤ / ⑤b / ㉙ / ㉚** 在 main 上确认空闲，沿用参考的号。
 
-**S3 完成后 `_EXPECTED_SCENARIOS` = 48 档。**
+**S3 完成后 `_EXPECTED_SCENARIOS` = 48 档。**（⚠️ **实际交付 49 档**：评审阶段追加 ㊴，见文末「实施偏离登记」）
 
 ---
 
@@ -2136,7 +2142,7 @@ _EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑤", "⑤b", "⑥", "⑦", 
                        "㉝", "㉝b", "㉝c", "㉘", "㉜", "㉜b", "㉞", "㉞b", "㉟", "㉟b")
 ```
 
-**S3 完成后 = 48 档**（基线 41 + ⑤ ⑤b ㉙ ㉚ ㊱ ㊲ ㊳）。
+**S3 完成后 = 48 档**（基线 41 + ⑤ ⑤b ㉙ ㉚ ㊱ ㊲ ㊳）。（⚠️ **实际交付 49 档**：评审阶段追加 ㊴，见文末「实施偏离登记」）
 
 - [ ] **Step 2: 跑脚本确认变红**
 
@@ -2725,10 +2731,10 @@ git commit -m "S3 Task5：真 PG 验收补七档（⑤ ⑤b ㉙ ㉚ ㊱ ㊲ ㊳�
 
 | 闸门 | 基线 | S3 实测 |
 |---|---|---|
-| `"$PY" -m pytest backend/tests -q` | 770 passed | ___ passed |
-| `verify_pilot_db_lifecycle.py` | 41 档 | 48 档 |
-| `verify_pilot_concurrency.py` | 11 档 | 11 档 |
-| `verify_pilot_two_phase_create.py` | 28 档 | 28 档 |
+| `"$PY" -m pytest backend/tests -q` | 770 passed（切分支时）→ 810（Task1-3 后） | **836 passed** |
+| `verify_pilot_db_lifecycle.py` | 41 档 | **49 档**（含评审追加的 ㊴） |
+| `verify_pilot_concurrency.py` | 11 档 | **11 档**（实测） |
+| `verify_pilot_two_phase_create.py` | 28 档 | **28 档**（实测） |
 | 变异表 M1–M27 | — | 逐条「变异 → 具名用例变红 → `cp` 复原」，由控制者亲跑 |
 
 - [ ] **写非 coder 可执行的验收清单**（中文，action / expected / pass-fail 三列；禁用 `.claude/workflow-rules.json` 里列的禁止措辞）—— 这是仓库治理条款 2 的硬要求，每个模块/阶段交付都要有。
