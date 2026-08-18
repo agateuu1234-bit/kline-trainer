@@ -32,6 +32,9 @@ from qmt_pilot_db import (CONTRACT_VERSION, FIRST_NORMAL_OID, INTENT_TTL_SECONDS
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
 
+# 假件自检要「真的发一次写标记语句」，故直接引生产常量，不另抄一份文本
+from qmt_pilot_db import _WRITE_MARKER_SQL as _WRITE_MARKER_SQL_FOR_FAKE  # noqa: E402
+
 
 @pytest.mark.parametrize("bad_name", [
     "",                                   # 空串
@@ -372,7 +375,7 @@ class _FakeConn:
 # ⚠️ **两份形状字典各自只有一份权威副本**（O4-R37-C2）：此前它们在
 #    `_FakeConn.__init__` 与两三个用例里各写一遍，新增判据时只改被点名的那一处 ——
 #    正是本 PR 里重演到第十一次的那个形态。任何新键加进这里，
-#    所有用例自动跟上；漏加会在 `test_shape_fakes_cover_every_predicate` 变红。
+#    所有用例自动跟上；漏加会在 `test_every_guard_table_shape_proof_covers_table_level_durability` 变红。
 _OK_MAINTENANCE_SHAPE = {
     "marker_is_table": True, "marker_purpose_text": True,
     "marker_purpose_unique": True, "intent_is_table": True,
@@ -1506,7 +1509,7 @@ def test_create_pilot_database_writes_all_nine_meta_keys():
     # ⚠️ 耐久性判据**每表一条**：三张各配一档。这三档对「别名拆没拆」本身
     #    **零判别力**（假件把整个字典交回，闸 (i) 做的是 `all(shape.values())`，
     #    与真 SQL 的别名无关）—— 加它们是为了让假件与 SQL 一一对应。
-    #    拆分本身的判别力由 `test_shape_fakes_cover_every_predicate`（机械，读真 SQL 文本）
+    #    拆分本身的判别力由 `test_every_guard_table_shape_proof_covers_table_level_durability`（机械，读真 SQL 文本）
     #    与 Task 3 的混合态用例（行为）提供。
     ("marker_durable",
      "pilot_cluster_marker 被 SET UNLOGGED / 挂 RLS / 换表空间"),
@@ -3990,7 +3993,7 @@ def test_business_structure_fake_covers_every_predicate():
     """机械守卫：`_BUSINESS_STRUCTURE_SQL` 的判据集合必须与假件的权威副本逐一对应。
 
     假件漏建模一条判据，对应的用例就在一个 KeyError / 恒真上空转
-    （与既有的 `test_shape_fakes_cover_every_predicate` 同族）。
+    （与既有的 `test_every_guard_table_shape_proof_covers_table_level_durability` 同族）。
     """
     import re
     import qmt_pilot_db as m
@@ -6047,8 +6050,14 @@ class _InitMaint(_FakeConn):
         if "CREATE TABLE" in query.upper():
             self.maintenance_shape = dict(_OK_MAINTENANCE_SHAPE)   # 补建之后结构就合规
             self.maintenance_presence = {k: True for k in self.maintenance_presence}
-        if "pilot_cluster_marker" in query and "INSERT" in query.upper():
+        if (query.strip().upper().startswith("INSERT")
+                and "pilot_cluster_marker" in query):
             # 写完标记之后，随后的「每次现查」应当读得到它。
+            # ⚠️ **判别式必须锚在语句开头**（Kimi S3-WB-R1 抓到，与 `_marker_writes`
+            #    那条注释同规格）：`_CLUSTER_SQL` 是仓库里那份真文件，它的注释里
+            #    同时含 `pilot_cluster_marker` 与 `INSERT`（"INSERT 时为 NULL"），
+            #    松散子串匹配会让**补建 DDL** 也把假件的标记置成合法 ——
+            #    一个幻影标记，与这一行自己写的「写完标记之后」直接矛盾。
             self.marker_rows = [{"purpose": MARKER_PURPOSE}]
         return out
 
@@ -6150,6 +6159,19 @@ def test_init_maint_fake_actually_models_the_states_it_claims():
     # 锁状态：默认空；`pre_held_seeds` 真的会被 `_SEED_LOCK_HELD_SQL` 看见
     assert _InitMaint().held_seeds == set()
     assert _InitMaint(pre_held_seeds=("x",)).held_seeds == {"x"}
+
+    # 标记只由**真的写标记**那条语句产生，补建 DDL 不许造出幻影标记
+    # （Kimi S3-WB-R1：`_CLUSTER_SQL` 的注释里同时含 `pilot_cluster_marker` 与
+    #  `INSERT`——"INSERT 时为 NULL"——松散子串匹配会让补建把假件的标记置成合法，
+    #  与 `_InitMaint.execute` 那一行自己写的「写完标记之后」直接矛盾）。
+    ddl_only = _InitMaint(marker_rows=[])
+    asyncio.run(ddl_only.execute(_CLUSTER_SQL))
+    assert ddl_only.marker_rows == [], \
+        "补建 DDL 把假件的标记置成了合法 —— 幻影标记会让「首次初始化」那族用例失去判别力"
+    wrote = _InitMaint(marker_rows=[])
+    asyncio.run(wrote.execute(_WRITE_MARKER_SQL_FOR_FAKE, MARKER_PURPOSE))
+    assert wrote.marker_rows == [{"purpose": MARKER_PURPOSE}], \
+        "真的写了标记之后，随后的现查却读不到它 —— 假件把幂等那一支建模错了"
 
 
 def test_init_is_idempotent_when_everything_is_already_legal():
@@ -6876,3 +6898,30 @@ def test_orphan_delete_predicate_is_evaluated_under_the_lock_not_from_a_snapshot
               if isinstance(n, ast.Constant) and isinstance(n.value, str)
               and "DELETE" in n.value.upper()]
     assert not consts, f"init 里有内联 DELETE 字面量：{consts}"
+
+
+def test_every_test_name_cited_in_a_comment_actually_exists():
+    """机械守卫：注释/docstring 里用反引号点名的测试，必须真的存在于本文件。
+
+    抓到的形态（Kimi S3-WB-R1）：三处注释把「别名拆分的机械判别力」归给
+    test_shape_fakes_cover_every_predicate —— 一个**全仓都不存在**的名字。
+    判据本身在（真名是 `test_every_guard_table_shape_proof_covers_table_level_durability`），
+    ⚠️ 上面那个错名**刻意不加反引号**：加了的话，这颗钉子会被自己举的例子打红 ——
+       一条开局就红的守卫等于给实施者发放宽许可证。举例与判据必须分得开。
+    坏的是**归属**：按图索骥的人找不到那颗钉子，而它将来被改名/删除时，
+    这几处注释也没有任何东西会提醒需要同步 —— 正是本仓
+    「机械检查器被它该抓的损坏禁用了自身解析器」那一族的近亲。
+
+    ⚠️ 只管本文件内的引用：跨文件的符号（真 PG 脚本的档位、生产函数名）不在此列，
+       它们各有各的守卫。
+    ⚠️ 反向自检：一个引用都扫不到 = 匹配式过时了，下面那条断言会恒真。
+    """
+    src = pathlib.Path(__file__).read_text(encoding="utf-8")
+    defined = set(re.findall(r"^def (test_\w+)", src, re.M))
+    cited = set(re.findall(r"`(test_\w+)`", src))
+    assert cited, "一个被反引号点名的测试都没扫到 —— 这颗钉子是空的"
+    missing = sorted(cited - defined)
+    assert not missing, (
+        f"注释点名了本文件里并不存在的测试：{missing}。"
+        f"判据可能还在、只是名字指错 —— 按图索骥的读者找不到它，"
+        f"而那颗钉子被改名/删除时也没有东西会变红")

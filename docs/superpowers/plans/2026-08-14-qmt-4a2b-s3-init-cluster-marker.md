@@ -280,7 +280,7 @@ git commit -m "S3 Task1：把 pilot_cluster_schema.sql 钉成规范文件（哈�
 **为什么必须先拆**：`_MAINTENANCE_SHAPE_SQL` 当前那条耐久性判据是一个**跨三张表的 count**，别名 `maintenance_tables_durable`。Task 3 的零副作用预检要「**在场的表必须自己合规（否则零 DDL 拒绝），缺席的才交给 DDL 补建**」，靠的是判据名前缀（`marker_` / `intent_` / `registry_`）归属到具体某张表。一个跨表的 count **归因不到任何一张表**，于是**混合态**（marker 在场但 UNLOGGED + intent/registry 缺席）会漏过预检 → `_needs_repair_ddl` 为真 → **DDL 先落地**建出两张表，之后才由建库**后**的形状检查拒绝 —— 在一个最终被拒的维护库里留下了表，正是「① 零副作用预检 → ② 才允许动 DDL」这条契约要防的那一档（`--maintenance-dsn` 指错到生产库）。
 
 **⚠️ 判别力交代（诚实说明）**：本 Task 的两条 host 断言里，
-- `test_shape_fakes_cover_every_predicate`（现有，L3297 附近）**有**判别力：它对**真 SQL 文本**做 `re.findall(r"AS ([a-z_]+)")` 与假件权威副本比对，别名没拆就变红；
+- `test_every_guard_table_shape_proof_covers_table_level_durability`（现有，L3297 附近）**有**判别力：它对**真 SQL 文本**做 `re.findall(r"AS ([a-z_]+)")` 与假件权威副本比对，别名没拆就变红；
 - 闸 (i) 的参数化表（现有，L1488 附近）加三条 `*_durable` 档**没有**判别力：`_FakeConn.fetchrow` 把 `self.maintenance_shape` 整个字典交回，`assert_cluster_allowed` 做的是 `all(shape.values())` —— 假件里有什么键就判什么键，与真 SQL 的别名无关。**加它们是为了让假件与 SQL 保持一一对应**（漏建模一条判据，对应用例就在恒真上空转），判别力由上面那条机械守卫和 Task 3 的行为用例提供。
 
 真正证明这条拆分的**行为**用例是 Task 3 的 `test_init_rejects_mixed_state_present_but_non_durable_plus_absent_table`，真 PG 侧由 Task 5 的档 ⑤b 坐实。
@@ -565,7 +565,7 @@ def test_init_maint_fake_actually_models_the_states_it_claims():
        假件「看起来配好了」，而 `intent_table_missing=True` 整个失效，
        补建路径那几条用例**改测了健康集群**（`_needs_repair_ddl` 恒假），
        于是「旧版本集群修不修得好」「混合态零 DDL」两条判据一次都没被求值。
-       与 `test_shape_fakes_cover_every_predicate` 同族：**先证明假件建模对了，
+       与 `test_every_guard_table_shape_proof_covers_table_level_durability` 同族：**先证明假件建模对了，
        再拿它去证明生产代码**。
     """
     healthy = _InitMaint()
@@ -2868,5 +2868,5 @@ EOF
 - **③契约一致性**：`grep -n 'ttl_seconds\|\$2=ttl\|\$1=dbname\|(dbname, seed, ttl)'` 逐条打开核 —— R3 的 medium 就是这里漏的。
 
 **6. 已知的判别力空缺（诚实登记）**：
-- Task 2 里闸 (i) 新增的三条 `*_durable` 参数化档**对别名拆分零判别力**（假件整字典回传）——已在 Task 2 正文里写明，判别力由 `test_shape_fakes_cover_every_predicate`（机械）+ Task 3 的混合态用例（行为）+ 真 PG ⑤b（语义）三层提供。
+- Task 2 里闸 (i) 新增的三条 `*_durable` 参数化档**对别名拆分零判别力**（假件整字典回传）——已在 Task 2 正文里写明，判别力由 `test_every_guard_table_shape_proof_covers_table_level_durability`（机械）+ Task 3 的混合态用例（行为）+ 真 PG ⑤b（语义）三层提供。
 - Task 4 里四条反向钉（`…only_under_the_seed_lock` / `…keeps_a_fresh_row…` / `…does_not_release_a_lock_it_never_took` / `…refuses_when_the_callback_lies…`）在功能未实现时**恒绿**，不能当「红→绿」证据 —— 已在 Step 2 写明，判别力由 M13/M15/M19/M17 逐条证明。
