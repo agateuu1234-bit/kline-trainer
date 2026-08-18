@@ -1,0 +1,10 @@
+{
+  "_comment": "Pinned Kimi reviewer capability. Mirrors codex.pin.json: the gate's reviewer is fixed by a file that lives in the repo, not by the environment, so lowering the bar produces a reviewable diff instead of an invisible export. kimi-attest.sh reads these values and re-verifies them against the generated review-only config before every run.",
+  "kimi_code": {
+    "model": "kimi-code/k3",
+    "effort": "high",
+    "min_context_size": 1048576,
+    "_why_model": "k3 carries a 1M context; kimi-for-coding (the interactive default that reviews silently ran on until 2026-08-16) carries 256K and no reasoning-effort tiers. Adversarial review depends on holding the surrounding code while cross-checking a finding.",
+    "_why_min_context": "k3 and k3-256k differ only by suffix. The floor stops a rename or typo from seating the 256K variant under the same name."
+  }
+}

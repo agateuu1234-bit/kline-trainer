@@ -49,7 +49,9 @@
       "Bash(git show --stat:*)",
       "Bash(git show HEAD^:*)",
       "Bash(git show HEAD^^:*)",
-      "Bash(git show HEAD^^^:*)"
+      "Bash(git show HEAD^^^:*)",
+      "Bash(bash .claude/scripts/kimi-attest.sh:*)",
+      "Bash(.claude/scripts/kimi-attest.sh:*)"
     ],
     "ask": [
       "Bash(git push --force)",
@@ -305,7 +307,9 @@
       "Bash(git hash-object *.pem)",
       "Bash(git hash-object *.key)",
       "Bash(git hash-object *id_rsa*)",
-      "Bash(*ack-drift.sh*)"
+      "Bash(*ack-drift.sh*)",
+      "Edit(kimi.pin.json)",
+      "Write(kimi.pin.json)"
     ]
   },
   "hooks": {
