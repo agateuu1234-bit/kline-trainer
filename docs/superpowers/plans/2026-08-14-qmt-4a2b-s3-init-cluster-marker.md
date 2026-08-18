@@ -2870,3 +2870,37 @@ EOF
 **6. 已知的判别力空缺（诚实登记）**：
 - Task 2 里闸 (i) 新增的三条 `*_durable` 参数化档**对别名拆分零判别力**（假件整字典回传）——已在 Task 2 正文里写明，判别力由 `test_every_guard_table_shape_proof_covers_table_level_durability`（机械）+ Task 3 的混合态用例（行为）+ 真 PG ⑤b（语义）三层提供。
 - Task 4 里四条反向钉（`…only_under_the_seed_lock` / `…keeps_a_fresh_row…` / `…does_not_release_a_lock_it_never_took` / `…refuses_when_the_callback_lies…`）在功能未实现时**恒绿**，不能当「红→绿」证据 —— 已在 Step 2 写明，判别力由 M13/M15/M19/M17 逐条证明。
+
+---
+
+## 实施偏离登记（2026-08-18，实施与评审阶段实测）
+
+计划里内嵌的事实**逐条实测**过，下面这些与计划不符，如实登记（判据以实测为准）：
+
+| # | 计划怎么写的 | 实测/实施结果 |
+|---|---|---|
+| 1 | Task 5 Step 0 正文说「把**三个**新库名加进白名单」 | 它下面的代码块实际列了 **5 个**（`r30`/`r36`/`r37`/`r38`/`r38stranger`，后两个是 R6/R7 加 ㊳ 时带进来的）。按 5 个加；评审阶段又加了 `r39`（㊴），共 **6 个** |
+| 2 | 收口表写「变异表 **M1–M27**」 | 正文实际排到 **M43**。按正文全部条目跑 |
+| 3 | ㊳ 的代码块：`create_pilot_database(conn, connect=…, seed=…, run_id=…, **_BUILD_ARGS)` | 漏了必填关键字 `db_name=`，照抄直接 `TypeError`。已补 |
+| 4 | 基线「770 passed」（在 `8578a59` 实测） | 那是**切分支时**的数字；Task 1-3 落地后基线已是 **810**。Task 4 后 830，评审修复后 **836** |
+| 5 | 真 PG 变异 **M24** 写「把整段判据删光」 | 那样 `$3` 不再被引用、而调用处仍传 3 个参数 → `IndeterminateDatatypeError`，红的理由**不是**判据失效。改成 `AND ($3::double precision IS NOT NULL)`（保留三参数、判据恒真）后，红档收敛到**只有 ㊱**，理由正确 |
+| 6 | 档数「S3 完成后 = 48 档」 | 评审 WB-R3 挖出 `db_oid IS NULL` 那条真缺陷，新增档 **㊴**（双向）→ **49 档** |
+
+**变异归因偏差（结论都成立，但红的不是计划点名的那一条）——如实登记，不改判据去迁就计划：**
+
+- **M13**（删 `try_seed_lock` 守卫）：计划点名 `…only_under_the_seed_lock`，实测该条**仍绿**——
+  因为回调没被调用时 `held_seeds` 也不会更新，紧随其后的活连接复核照样 `continue`。
+  真正变红的是 `…does_not_release_a_lock_it_never_took`（`finally` 仍会去还一把从未取到的锁）等 12 条。
+  两条判据**互相掩盖**，故补跑组合变异 **M13b**（两道锁证明一起拆）→
+  `…only_under_the_seed_lock` 如期变红，证明这一对合起来**没有洞**。
+- **M33 / M34 / M38**（写标记次序、紧贴复查）：计划点名 `…does_not_leave_a_marker_when_the_final_gate_rejects`，
+  实测变红的是 `…proves_the_cluster_again_immediately_before_the_marker`。
+  原因：授权清理那次 `_assert_disposable_cluster` 会**先**拒绝那个脏窗口，前者走不到。
+  补跑组合变异 **M34b**（两次现查一起删）→ 前者如期变红。
+- **M42**（改用 DDL 之后重查的在场情况）：**零红**，且这是**等价变异**——
+  `registry_present` 由假变真只可能发生在「登记表刚被补建出来」，而那张表**必然是空的**；
+  放宽判据要求「这个库名在登记表里有行」，空表授权不了任何东西。故无测试能区分，不是覆盖漏洞。
+- **M40**（去掉 `_REGISTRY_HAS_SQL` 那一半）：计划点名的
+  `test_both_peer_proofs_use_the_same_two_facts` **没红**——它读的是
+  `inspect.getsource` 的**原始文本**，而该符号名恰好在 docstring 里被逐字提到。
+  **这是真缺陷**，已把守卫改成走 AST 标识符（prose 里提多少次都不算数），改后 M40 如期变红。

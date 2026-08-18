@@ -3188,6 +3188,19 @@ SELECT dbname, seed, db_oid::text AS db_oid,
 #    故把「超期 OR 库不存在」两条判据下沉进 DELETE 的 WHERE 里。
 # ⚠️ 「库不存在」绑实例（`d.oid = db_oid`）而不是只比名字：一条指向已消失实例的行
 #    本来就该被清掉，哪怕现在有个同名的新库。
+# ⚠️ **`db_oid` 为空的行不许走「库不存在」那一支**（Kimi S3-WB-R3）：SQL 里
+#    `d.oid = NULL` 求值为 NULL → `NOT EXISTS` **恒真**，那一支对这类行退化成「恒可删」。
+#    而 `_INSERT_INTENT_SQL` **不写 `db_oid`** —— 它在建库确认那一步才写。于是
+#    「INSERT intent → `CREATE DATABASE` 成功 → 崩在确认之前」这个窗口
+#    （两阶段建库存在的全部理由）留下的正是一行**新鲜的、db_oid 为空**的行，
+#    而那个库**真的存在**。删掉它与本模块自己写下的
+#    「该行 create_confirmed=false，授权不了 DROP，**将由 INTENT_TTL 清理**」直接矛盾。
+#    铁律是「一切**证明不了**等价于**拒绝**」——证明不了那个库消失了，就不以此为由删。
+#    超期那一支不受影响：db_oid 为空的行照样会过期，不会永久占住库名。
+# ⚠️ 与 `_CLEAR_DROPPED_INTENT_SQL` 的不对称是**有意的**：那一条跑在
+#    「持着这一行 seed 的锁、且**刚刚成功 DROP 掉那个库**」之后，此刻「指不到活实例」
+#    本来就成立，且并发的建库被锁挡在外面 —— 它清的是自己刚制造的残骸。
+#    本条面对的是**来路不明、可能正处在建库窗口中**的行，故必须保守。
 # ⚠️ 时钟源同上：`statement_timestamp()`。这条尤其要紧 —— 它是**权威判据**
 #    （预筛只是省取锁）。长事务里用 `now()` 的话，取到锁之后这条 DELETE 会匹配 0 行，
 #    于是「命令发了、一行没删」的静默失败，正是 R9 那次回归的形态。
@@ -3206,9 +3219,10 @@ DELETE FROM public.pilot_create_intent
  WHERE dbname = $1
    AND seed = $2
    AND (EXTRACT(EPOCH FROM (statement_timestamp() - inserted_at)) >= $3
-        OR NOT EXISTS (SELECT 1 FROM pg_database d
-                        WHERE d.datname::text = public.pilot_create_intent.dbname
-                          AND d.oid = public.pilot_create_intent.db_oid))
+        OR (public.pilot_create_intent.db_oid IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM pg_database d
+                             WHERE d.datname::text = public.pilot_create_intent.dbname
+                               AND d.oid = public.pilot_create_intent.db_oid)))
 """
 
 
@@ -3276,7 +3290,17 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
             f"继续下去只会在一个最终要拒绝的库里留下别的表。请人工处理")
 
     # 1c. 标记合法性（只读）。marker 表不在场 = 首次初始化，不是错误。
-    rows = await maint_conn.fetch(_READ_MARKER_SQL) if presence["marker_present"] else []
+    # ⚠️ 读失败必须转成**具名**的 boundary error（spec O1-F10；Kimi S3-WB-R3）：
+    #    闸 (i) 对这条查询早就包了，而这里漏了 —— 同一个函数里 1b 包了、1c 没包。
+    #    裸 asyncpg 异常逃出去，4c 会记成 FAIL_INFRASTRUCTURE 而不是「集群不合规」。
+    #    可达路径：表在目录里看得见（1b 过得了）但缺 SELECT 权限，
+    #    或 1b 与 1c 之间那张表被并发 DROP。方向本来就 fail-closed，坏的是**分类**。
+    try:
+        rows = await maint_conn.fetch(_READ_MARKER_SQL) if presence["marker_present"] else []
+    except Exception as exc:
+        raise PilotClusterBoundaryError(
+            "no_marker",
+            f"维护库读不出 pilot_cluster_marker：{exc}——在证明之前不会做任何 DDL") from exc
     if len(rows) > 1 or (len(rows) == 1 and rows[0]["purpose"] != MARKER_PURPOSE):
         raise PilotClusterBoundaryError(
             "no_marker",
@@ -3325,7 +3349,13 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
         await pin_search_path(maint_conn)
 
     # 2. 建完**再验一次结构**：「执行过 DDL」不等于「结构就对」（与闸 (i) 同一条纪律）。
-    shape = await maint_conn.fetchrow(_MAINTENANCE_SHAPE_SQL)
+    # ⚠️ 同 1c：读失败也要是具名 boundary error，不是裸异常。
+    try:
+        shape = await maint_conn.fetchrow(_MAINTENANCE_SHAPE_SQL)
+    except Exception as exc:
+        raise PilotClusterBoundaryError(
+            "no_marker",
+            f"补建之后读不出【维护库专用表集合】的结构：{exc}——请人工处理") from exc
     if shape is None or not all(shape.values()):
         raise PilotClusterBoundaryError(
             "no_marker",
@@ -3362,7 +3392,11 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
         #    符号抹掉（`int(-0.1) == 0`），而 `_READ_INTENT_SQL` 那侧已经两层都去掉了。
         #    这里是预筛，取整不致命，但口径必须与锁内那条 DELETE 一致。
         stale = float(r["age_seconds"]) >= INTENT_TTL_SECONDS
-        vanished = (r["dbname"], r["db_oid"]) not in live
+        # ⚠️ 与锁内那条 DELETE **同口径**：`db_oid` 为空 = 证明不了那个库消失了，
+        #    不以此为由删（Kimi S3-WB-R3）。两处口径必须一致 —— 否则预筛放过去的行
+        #    会在锁内匹配 0 行，成为「命令发了、一行没删」的静默失败。
+        vanished = (r["db_oid"] is not None
+                    and (r["dbname"], r["db_oid"]) not in live)
         if not (stale or vanished):
             continue
         # ⚠️ **取锁之前先证明本连接还没持有它**（codex S3-R2，真 PG 15.12 实测坐实）：

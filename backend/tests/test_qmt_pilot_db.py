@@ -6925,3 +6925,108 @@ def test_every_test_name_cited_in_a_comment_actually_exists():
         f"注释点名了本文件里并不存在的测试：{missing}。"
         f"判据可能还在、只是名字指错 —— 按图索骥的读者找不到它，"
         f"而那颗钉子被改名/删除时也没有东西会变红")
+
+
+def test_orphan_cleanup_keeps_a_fresh_row_that_has_no_recorded_instance():
+    """`db_oid` 为空 = **证明不了**那个库消失了，不等于「它消失了」（Kimi S3-WB-R3）。
+
+    `_INSERT_INTENT_SQL` **不写 `db_oid`** —— 它在建库确认那一步才写。于是
+    「INSERT 了 intent、`CREATE DATABASE` 成功、崩在确认之前」这个窗口
+    （两阶段建库存在的全部理由）会留下一行**新鲜的、`db_oid` 为空的**行，
+    而那个库**真的存在**。
+    SQL 里 `d.oid = NULL` 求值为 NULL → `NOT EXISTS` **恒真** → 这类行被判成
+    「库已不存在」→ 不论多新鲜都立刻删掉，与模块自己写下的
+    「该行 create_confirmed=false，授权不了 DROP，**将由 INTENT_TTL 清理**」直接矛盾。
+    本仓的铁律是「一切**证明不了**等价于**拒绝**」，这里的拒绝就是**不删**。
+    """
+    maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_half", seed="half",
+                                                db_oid=None)],
+                       databases=["kline_pilot_half"])
+    asyncio.run(_init(maint, targets={"kline_pilot_half": _FakeConn()}))
+    assert _deletes(maint) == [], \
+        "一行新鲜的、尚未确认实例的凭据被当成「库已不存在」删掉了"
+
+
+def test_orphan_cleanup_still_deletes_a_stale_row_that_has_no_recorded_instance():
+    """**正向档**：上一条不许把「`db_oid` 为空」变成**永不过期**。
+
+    超期这条判据与实例无关，`db_oid` 为空的行照样归它管 ——
+    否则一条崩在确认之前的行会永久占住那个库名。
+    """
+    maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_old", seed="old",
+                                                db_oid=None,
+                                                age_seconds=INTENT_TTL_SECONDS)],
+                       databases=["kline_pilot_old"])
+    asyncio.run(_init(maint, targets={"kline_pilot_old": _FakeConn()}))
+    assert len(_deletes(maint)) == 1, "超期的行因为 db_oid 为空而清不掉了"
+
+
+def test_orphan_delete_never_treats_an_unrecorded_instance_as_vanished():
+    """机械守卫：锁内那条 DELETE 必须显式排掉 `db_oid IS NULL`。
+
+    ⚠️ 这一条**只有真库能证**（`= NULL` 的三值逻辑假件不求值），
+       语义那一半由 `verify_pilot_db_lifecycle.py` 档 ㊴ 坐实；
+       这里钉的是「判据写进 SQL 里了」。
+    """
+    import qmt_pilot_db as m
+    sql = m._DELETE_ORPHAN_INTENT_SQL
+    assert "db_oid IS NOT NULL" in sql, \
+        "「库不存在」那一支没有排掉 db_oid 为空的行 —— NOT EXISTS 对它恒真"
+    # 反向自检：排除条件必须落在**库不存在**那一支里，不是随手加在别处
+    assert sql.index("db_oid IS NOT NULL") < sql.index("NOT EXISTS"), \
+        "db_oid IS NOT NULL 没有排在 NOT EXISTS 之前 —— 它守不住那一支"
+
+
+@pytest.mark.parametrize("guard,why", [
+    ("_READ_MARKER_SQL", "1c 读标记"),
+    ("_MAINTENANCE_SHAPE_SQL", "第 2 步补建之后复验结构"),
+])
+def test_init_turns_a_failed_guard_query_into_a_named_boundary_error(guard, why):
+    """守卫查询失败必须是**具名的** boundary error（spec O1-F10；Kimi S3-WB-R3）。
+
+    闸 (i) 对**同样这两条查询**都包了 try/except 转成 `no_marker`
+    （`qmt_pilot_db.py` 闸 (i) 内逐字如此），而 `init_cluster_marker` 里
+    1b 包了、1c 与建后复验没包 —— 同一个函数内部的不一致，显然是漏的不是有意的。
+    裸 asyncpg 异常逃出去，4c 会把它记成 FAIL_INFRASTRUCTURE 而不是「集群不合规」。
+
+    可达路径：marker 表在目录里看得见（1b 过得了）但维护角色缺 SELECT 权限，
+    或 1b 与 1c 之间那张表被并发 DROP。方向本来就是 fail-closed（发生在任何 DDL 之前），
+    坏的是**分类**。
+    """
+    import qmt_pilot_db as m
+    marker_sql, shape_sql = m._READ_MARKER_SQL, m._MAINTENANCE_SHAPE_SQL
+    target = marker_sql if guard == "_READ_MARKER_SQL" else shape_sql
+
+    # ⚠️ **建后复验那一档必须只在 DDL 之后才抛**：`_MAINTENANCE_SHAPE_SQL` 在 1b
+    #    就被读过一次，而 1b **已经**包了 try/except —— 无差别地抛会让这一档在 1b
+    #    就拿到 `no_marker`，于是它**根本走不到**第 2 步，成了一条恒真的空档
+    #    （实测踩到：第一版就是这样，开局即绿）。
+    class _Boom(_InitMaint):
+        armed = (guard == "_READ_MARKER_SQL")      # 读标记那档一开始就武装
+
+        async def execute(self, query, *args):
+            out = await super().execute(query, *args)
+            if "CREATE TABLE" in query.upper():
+                self.armed = True                  # 补建跑完 → 只炸建后复验那一次
+            return out
+
+        async def fetch(self, query, *args):
+            if self.armed and query == target:
+                raise RuntimeError("permission denied for table")
+            return await super().fetch(query, *args)
+
+        async def fetchrow(self, query, *args):
+            if self.armed and query == target:
+                raise RuntimeError("permission denied for table")
+            return await super().fetchrow(query, *args)
+
+    # 建后复验那一条要先走到 DDL，故用「缺 intent 表」的混合态把补建路径打开
+    maint = (_Boom() if guard == "_READ_MARKER_SQL"
+             else _Boom(intent_table_missing=True))
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint))
+    assert ei.value.code == "no_marker", f"{why}：失败没有转成具名 boundary error"
+    if guard == "_MAINTENANCE_SHAPE_SQL":
+        # 前置：补建 DDL 真的跑了 → 抛的是**第 2 步**那一次，不是 1b 那一次
+        assert any("CREATE TABLE" in q.upper() for q in maint.executed), \
+            "补建 DDL 没跑 → 这一档抛在 1b（那里本来就包了），对第 2 步零判别力"

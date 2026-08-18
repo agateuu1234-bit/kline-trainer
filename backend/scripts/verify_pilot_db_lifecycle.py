@@ -147,6 +147,7 @@ _LIFECYCLE_DBS = (
     "kline_pilot_lifecycle_r37",          # ㊲
     "kline_pilot_lifecycle_r38",          # ㊳（已登记的非空 pilot 库）
     "kline_pilot_lifecycle_r38stranger",  # ㊳（未登记的非空同前缀库）
+    "kline_pilot_lifecycle_r39",          # ㊴（db_oid 为空的凭据）
     "kline_pilot_lifecycle_s15",
     "kline_pilot_lifecycle_t10",
     "kline_pilot_lifecycle_t11",
@@ -201,7 +202,7 @@ _OWNED_EXTRA_DBS = (_UNRELATED_DB, _LIKE_DECOY_DB)
 _EXPECTED_SCENARIOS = ("①", "②", "③", "④", "⑤", "⑤b", "⑥", "⑦", "⑧", "⑨", "⑨b",
                        "⑨c", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑰b", "⑱",
                        "⑲", "⑳", "⑳b", "㉑", "㉒", "㉓", "㉔", "㉕", "㉖", "㉗", "㉙",
-                       "㉚", "㊱", "㊲", "㊳", "㉛",
+                       "㉚", "㊱", "㊲", "㊳", "㊴", "㉛",
                        "㉝", "㉝b", "㉝c", "㉘", "㉜", "㉜b", "㉞", "㉞b", "㉟", "㉟b")
 
 
@@ -2058,6 +2059,90 @@ async def main() -> int:
         await conn.close()
     await harness.drop_database(base_dsn, db38)
 
+    # ── ㊴ `db_oid` 为空的凭据不许被当成「库已不存在」（Kimi S3-WB-R3）──────────
+    #    `_INSERT_INTENT_SQL` **不写 db_oid** —— 确认那一步才写。故「INSERT intent →
+    #    CREATE DATABASE 成功 → 崩在确认之前」这个窗口（两阶段建库存在的全部理由）
+    #    留下的正是一行**新鲜的、db_oid 为空**的行，而那个库**真的存在**。
+    #    SQL 里 `d.oid = NULL` 求值为 NULL → `NOT EXISTS` **恒真** ——
+    #    这条三值逻辑**假件根本不求值**（它的 DELETE 不是真的在跑 SQL），只有真库能证。
+    #    ⚠️ **双向**：新鲜的不许删（否则删掉一次进行中/崩溃中建库的凭据），
+    #       超期的照样要删（否则「db_oid 为空」就等于**永不过期**，永久占住库名）。
+    scenario("㊴")
+    print("㊴ db_oid 为空的凭据：新鲜的不许删、超期的照样删")
+    seed39 = "lifecycle_r39"
+    db39 = f"kline_pilot_{seed39}"
+    conn = await _connect(base_dsn)
+    try:
+        await harness.drop_database(base_dsn, db39)
+        await conn.execute("CREATE DATABASE " + quote_ident(db39))   # 建**成功了**
+        await conn.execute("DELETE FROM public.pilot_create_intent")
+        # 崩在确认之前：create_confirmed=false，且 **db_oid 为空**（列默认就是 NULL）
+        await conn.execute(
+            "INSERT INTO public.pilot_create_intent"
+            " (dbname, seed, created_at, run_id, create_confirmed)"
+            " VALUES ($1, $2, $3, $4, false)",
+            db39, seed39, _CREATED_AT, f"lifecycle-{seed39}")
+        # ⚠️ 前置：这一行的 db_oid 真的是 NULL，且库真的在 —— 否则本档测的是别的东西。
+        check(bool(await conn.fetchval(
+            "SELECT db_oid IS NULL FROM public.pilot_create_intent WHERE dbname = $1", db39)),
+            "㊴ 前置：那一行的 db_oid 确实为空")
+        check(await _database_exists(conn, db39), "㊴ 前置：那个库确实存在")
+
+        took39: list[str] = []
+
+        async def _try39(seed_of_row):
+            took39.append(seed_of_row)
+            return bool(await conn.fetchval(
+                "SELECT pg_try_advisory_lock(hashtext('kline_pilot_' || $1))", seed_of_row))
+
+        async def _rel39(seed_of_row):
+            await conn.execute(
+                "SELECT pg_advisory_unlock(hashtext('kline_pilot_' || $1))", seed_of_row)
+
+        cluster_sql = (_BACKEND / "sql/pilot_cluster_schema.sql").read_text(encoding="utf-8")
+
+        # ── 第一向：新鲜 → 必须留下 ──────────────────────────────────
+        try:
+            await init_cluster_marker(conn, connect=connect_peer,
+                                      cluster_schema_sql=cluster_sql,
+                                      try_seed_lock=_try39, release_seed_lock=_rel39)
+        except Exception as exc:
+            check(False, "㊴ init 本身必须跑完（第一向）",
+                  f"抛了：{type(exc).__name__}: {exc}")
+        fresh_left = await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_create_intent WHERE dbname = $1", db39)
+        check(fresh_left == 1,
+              "㊴ 新鲜的、db_oid 为空的凭据**没有**被当成「库已不存在」删掉",
+              f"事后剩 {fresh_left} 条 —— `d.oid = NULL` 让 NOT EXISTS 恒真了")
+
+        # ── 第二向：改成超期 → 必须删掉（证明第一向不是「永不过期」）──────
+        await conn.execute(
+            "UPDATE public.pilot_create_intent"
+            "   SET inserted_at = statement_timestamp() - make_interval(secs => $2)"
+            " WHERE dbname = $1", db39, float(INTENT_TTL_SECONDS + 60))
+        try:
+            await init_cluster_marker(conn, connect=connect_peer,
+                                      cluster_schema_sql=cluster_sql,
+                                      try_seed_lock=_try39, release_seed_lock=_rel39)
+        except Exception as exc:
+            check(False, "㊴ init 本身必须跑完（第二向）",
+                  f"抛了：{type(exc).__name__}: {exc}")
+        # 前置：第二向确实走到了取锁那一步（第一向不该走到）
+        check(took39 == [seed39],
+              "㊴ 前置：只有超期那一向去取了锁（新鲜那一向应当在预筛就跳过）",
+              f"try_seed_lock 收到的 seed 列表 = {took39}")
+        stale_left = await conn.fetchval(
+            "SELECT count(*) FROM public.pilot_create_intent WHERE dbname = $1", db39)
+        check(stale_left == 0,
+              "㊴ 超期之后照样被清掉（db_oid 为空**不等于**永不过期）",
+              f"事后仍有 {stale_left} 条")
+        check(not await conn.fetchval(_SEED_LOCK_HELD_SQL, seed39),
+              "㊴ init 返回后维护连接上不再持有那把 seed 锁")
+        await conn.execute("DELETE FROM public.pilot_create_intent WHERE dbname = $1", db39)
+    finally:
+        await conn.close()
+    await harness.drop_database(base_dsn, db39)
+
     # ── ㉜ 集群闸读过目标库之后立刻 --reset → 必须成功（R12-F1 的正向钉）────────
     #    ⚠️ 本档的独立价值是**正向钉** —— 防「实现为了省事把 reset 一律拒掉」
     #       那一类回归（与 ⑨/⑰ 同族）。
@@ -2267,7 +2352,8 @@ async def main() -> int:
     print("✅ 本片（S3）在此基础上补齐 `--init-cluster-marker`：零副作用预检（⑤ ⑤b）、")
     print("   标记不得短路现查（㉙）、孤儿 intent 清理的取锁/还锁（㉚）、")
     print("   锁内当下求值（㊱）、长事务下的 TTL 时钟源（㊲，与 ㉝c 同族）、")
-    print("   以及混合态修复认同侪库归属登记的**双向**证明（㊳）。")
+    print("   混合态修复认同侪库归属登记的**双向**证明（㊳），")
+    print("   以及 db_oid 为空的凭据不被当成「库已不存在」（㊴，双向）。")
     print("⚠️ 仍**没有**覆盖的：")
     print("     · 「不数 autovacuum worker」那一向没有常驻档（要改集群 autovacuum_naptime，")
     print("       对验收脚本太侵入）—— 由一次性真 PG 实验坐实并记进计划，如实登记。")
