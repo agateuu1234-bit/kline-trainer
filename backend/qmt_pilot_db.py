@@ -3158,6 +3158,60 @@ async def _assert_disposable_cluster(maint_conn, *, connect,
             await _close_quietly(other, name)
 
 
+# 孤儿清理要看**全部** intent 行（`_READ_INTENT_SQL` 只看本次库名那一行）。
+# 新鲜度同样只认库自己的时钟（O4-R23-C1）。
+# ⚠️ **时钟源必须是 `statement_timestamp()`，不是 `now()`**（codex S2a-R4-F2 立的族规，
+#    真 PG 15 实测；S3-R1 指出本函数漏了它）：`now()` 是**事务开始时刻**。
+#    `init_cluster_marker` 收的是一条**已经连好的**连接、不控制事务生命周期，
+#    4c 的 wrapper 很可能把整段维护操作包进事务 —— 那时 `now()` 冻在过去，
+#    一行**真实已过期**的孤儿会被量成「还新鲜」→ 预筛跳过 → 残骸永远清不掉。
+#    与 `_READ_INTENT_SQL` / `_INSERT_INTENT_SQL` 用**同一个**时钟源，不留漂移。
+# ⚠️ **不加 `::bigint`**：`::bigint` 是四舍五入不是截断（真 PG 15 实测
+#    `(-0.1)::bigint = 0`）。`_READ_INTENT_SQL` 已经把这个转换去掉了，这里跟同一口径。
+_LIST_ALL_INTENT_SQL = """
+SELECT dbname, seed, db_oid::text AS db_oid,
+       EXTRACT(EPOCH FROM (statement_timestamp() - inserted_at)) AS age_seconds
+  FROM public.pilot_create_intent
+"""
+
+# ⚠️ **绝不能复用 `_DELETE_INTENT_SQL` / `_CLEAR_INTENT_SQL`**：
+#    · `_DELETE_INTENT_SQL` 带 `AND NOT create_confirmed`，而孤儿恰恰是**已确认**的行
+#      —— 它永远匹配 0 行，清理成了「命令发了、一行没删」的静默失败；
+#    · 两者都还带 `run_id = $2`，而清理孤儿的这次运行**不是**写下那一行的那次运行。
+#    孤儿的授权来自「取到了那一行 seed 的 advisory lock + 它超期或库已不存在」，
+#    不来自 run_id，故判据只按 dbname。
+# ⚠️ **判据必须写在这条 SQL 里、在锁内原子求值**：
+#    先 `SELECT` 出一批行、再逐行取锁、然后只按 dbname 删，中间的窗口里
+#    **同 seed 的另一次运行**可以启动、刷新/确认它自己的 intent 行、崩在写 pilot_meta 之前、
+#    并随连接断开释放会话锁 —— 此时本循环拿到锁，却按**快照时看到的陈旧状态**
+#    把那条**新鲜的恢复凭据**删掉，留下一个零对象例外再也授权不了的空残骸。
+#    故把「超期 OR 库不存在」两条判据下沉进 DELETE 的 WHERE 里。
+# ⚠️ 「库不存在」绑实例（`d.oid = db_oid`）而不是只比名字：一条指向已消失实例的行
+#    本来就该被清掉，哪怕现在有个同名的新库。
+# ⚠️ 时钟源同上：`statement_timestamp()`。这条尤其要紧 —— 它是**权威判据**
+#    （预筛只是省取锁）。长事务里用 `now()` 的话，取到锁之后这条 DELETE 会匹配 0 行，
+#    于是「命令发了、一行没删」的静默失败，正是 R9 那次回归的形态。
+# ⚠️ **必须同时绑 `seed`（codex S3-R2）**：这条 DELETE 的授权来自「本次持有的是
+#    **这一行 seed** 的 advisory lock」。只按 dbname 删的话，语句本身与它的授权
+#    对不上号 —— 它靠的是「dbname 恒为 `kline_pilot_<seed>`、seed 是它的函数」
+#    这条**跨列不变量**，而那条不变量**没有任何数据库约束在兜**
+#    （`pilot_create_intent` 既无 `CHECK (dbname = 'kline_pilot_' || seed)`、
+#     `dbname` 也不是生成列）。孤儿清理处理的恰恰是**来路不明的行**：旧版本写的、
+#    `pg_restore` 还原的、人工插的 —— 对它们那条不变量不成立。
+#    绑上 seed 之后，失配时**删 0 行**（fail-closed），而不是拿着 A 的锁删 B 的凭据。
+#    ⛔ **不在本片给 .sql 加 CHECK 约束**：那会改动被钉死的
+#       `CANONICAL_CLUSTER_SCHEMA_SHA256` 与闸 (i) 的形状判据，远超 S3 范围。
+_DELETE_ORPHAN_INTENT_SQL = """
+DELETE FROM public.pilot_create_intent
+ WHERE dbname = $1
+   AND seed = $2
+   AND (EXTRACT(EPOCH FROM (statement_timestamp() - inserted_at)) >= $3
+        OR NOT EXISTS (SELECT 1 FROM pg_database d
+                        WHERE d.datname::text = public.pilot_create_intent.dbname
+                          AND d.oid = public.pilot_create_intent.db_oid))
+"""
+
+
 async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
                               try_seed_lock, release_seed_lock) -> None:
     """`qmt_pilot --init-cluster-marker`：把一台干净集群声明为 pilot 专用。
@@ -3291,8 +3345,96 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
         # 首次初始化：标记还没写，闸 (i) 必然拒绝，故用**免标记**的等价现查。
         # ⚠️ 这一次是在 DDL **之后**跑的，与 1d/1e 那次不是同一个时刻 ——
         #    正是它把「预检通过之后、写标记之前」那个窗口关上。
+        # ⚠️ 这一次证明的是「**可以动这台集群的 intent 行**」——它授权下面第 5 段的
+        #    孤儿清理，**不**给标记背书。标记由第 6 段那次**紧贴**的复查背书。
         await _assert_disposable_cluster(maint_conn, connect=connect,
                                          registry_usable=_registry_usable)
-        # ⚠️ **本函数唯一不可回滚的信任写入，必须排在所有会拒绝的检查之后。**
-        #    Task 4 会在这一句**之前**插入孤儿清理（它会抛）。
+
+    # 5. 孤儿 intent 行清理：超期 OR 库不存在，且取得到那一行 seed 的锁。
+    # ⚠️ **预筛也必须绑实例**：只按名字判「库还在不在」时，
+    #    「原实例被删掉、别人用同名重建」这一档会被判成「没消失」→ 直接 continue →
+    #    下面那条 OID-aware 的 DELETE **永远跑不到**，一条指向已消失实例的陈旧行
+    #    就一直赖着，把后续的建库/reset 卡到 TTL 为止。
+    #    预筛只是省掉不必要的取锁；真正的判据在锁内的 SQL 里，两者的口径必须一致。
+    live = {(r["datname"], r["db_oid"]) for r in await maint_conn.fetch(_LIST_DATABASES_SQL)}
+    for r in await maint_conn.fetch(_LIST_ALL_INTENT_SQL):
+        # ⚠️ **不取整**（codex S2a-R3-F1 立的族规）：`int()` 与 `::bigint` 都会把
+        #    符号抹掉（`int(-0.1) == 0`），而 `_READ_INTENT_SQL` 那侧已经两层都去掉了。
+        #    这里是预筛，取整不致命，但口径必须与锁内那条 DELETE 一致。
+        stale = float(r["age_seconds"]) >= INTENT_TTL_SECONDS
+        vanished = (r["dbname"], r["db_oid"]) not in live
+        if not (stale or vanished):
+            continue
+        # ⚠️ **取锁之前先证明本连接还没持有它**（codex S3-R2，真 PG 15.12 实测坐实）：
+        #    advisory lock 在同一 session 内**可重入** —— 实测 `pg_try_advisory_lock`
+        #    对一把本连接已持有的锁**照样返回 true**（计数器 1→2），而
+        #    `_SEED_LOCK_HELD_SQL` 在调用之前**就已经是 true**。于是下面那道复核
+        #    证明不了任何**新**的互斥，等于对这一行没有锁。
+        #    危险的是**自己**这一档：本连接正在为该 seed 干别的事（4c 的 wrapper 把
+        #    init 套进一次 create/reset、或连接池里漏回来一把锁），而这里把它
+        #    **进行中的**恢复凭据删掉 —— 正是「不加锁会删掉一次正在进行的运行的行」
+        #    那条要防的后果，只是换成了同连接的形态。
+        #    （对**别的 session** 的互斥仍然成立：我们持有时别人取不到。）
+        #    判据 fail-closed：已持有 → 跳过，不删、也不 release（那是别处的锁）。
+        if await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, r["seed"]):
+            continue
+        if not await try_seed_lock(r["seed"]):
+            continue                       # 有运行正在用这个 seed —— 跳过，绝不删
+        try:
+            # ⚠️ **回调返回真不算证明**：`_SEED_LOCK_HELD_SQL` 在本模块有四个使用点
+            #    （建库 / reset 授权 / DROP / 零对象例外），而这里做的是
+            #    **DELETE 恢复凭据**。两种现实情形会让布尔为真却毫无互斥：
+            #      · 调用方回调接错线（本模块**不取锁**，取锁完全在调用方那侧）；
+            #      · advisory lock 在同一 session 内**可重入** —— 这条连接若早已因别的
+            #        原因持有同一把锁，`pg_try_advisory_lock` 照样返回真。
+            #    删错的后果是抹掉一次进行中/崩溃中的建库**唯一的恢复凭据**，
+            #    留下一个零对象例外再也授权不了的空残骸。
+            # ⚠️ 判据要求锁在 **`maint_conn` 这条连接上**（`_SEED_LOCK_HELD_SQL` 绑
+            #    `pg_backend_pid()`）—— DELETE 正是在它上面跑的。调用方若在别的连接上取锁，
+            #    这里判假、跳过，是**正确**的 fail-closed。
+            if not await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, r["seed"]):
+                continue                   # `finally` 仍会把回调取的那把还回去
+            # ⚠️ 上面那两条 Python 判据只是**省掉不必要的取锁**；真正的删除判据在 SQL 里，
+            #    在锁内按**当下**的 inserted_at 与 pg_database 求值。
+            await maint_conn.execute(_DELETE_ORPHAN_INTENT_SQL, r["dbname"],
+                                     r["seed"], INTENT_TTL_SECONDS)
+        finally:
+            # ⚠️ **取了就必须还**：会话级锁不还会一直挂在维护连接上，挡住后续同 seed
+            #    的运行；同一条连接上后来的 `_SEED_LOCK_HELD_SQL` 也会观察到一把
+            #    **本次操作从未刻意取过**的锁。
+            await release_seed_lock(r["seed"])
+            # ⚠️ **还了也要验**（codex S3-R4）—— 与「取到了也要验」是同一条纪律，
+            #    上一版只验了取、没验还。`release_seed_lock` 和 `try_seed_lock` 一样是
+            #    **调用方递进来的回调**：空实现、连错连接、只释放一层可重入计数，
+            #    都会「成功返回」而锁**仍挂在 `maint_conn` 上**。
+            #    这条泄漏尤其毒，因为上面那条「事前已持有就跳过」的 fail-closed 判据
+            #    会把它放大成**这条连接从此再也清不掉该 seed 的孤儿**（静默跳过，
+            #    而且理由看起来完全合理）。
+            # ⚠️ 只对**本次确实取到**的那把锁作此要求：走到这里就说明
+            #    「事前未持有 + 回调授予 + 活连接复核为真」三条都成立过。
+            if await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, r["seed"]):
+                raise PilotClusterBoundaryError(
+                    "seed_lock_not_released",
+                    f"孤儿清理为 seed={r['seed']!r} 取了 advisory lock，"
+                    f"调用方的 release 回调返回了，但这把锁**仍挂在维护连接上**。"
+                    f"它是会话级的：不还会挡住后续同 seed 的建库/reset，"
+                    f"也会让本函数以后把该 seed 的孤儿静默跳过。"
+                    f"请检查 release_seed_lock 的接线（是否空实现／是否作用在另一条连接／"
+                    f"是否只释放了一层可重入计数），或重开维护连接。")
+            # ⚠️ 在 `finally` 里 raise 会**接替**正在传播的异常，但原异常仍保留在
+            #    `__context__` 里（Python 语义），信息不丢。
+            # ⛔ **不在这里关闭/毒化 `maint_conn`**（codex 建议过）：连接是调用方的，
+            #    本模块通篇不拥有它、也从不关它；关掉会让调用方拿到一个它没预料到的
+            #    死连接，且掩盖真正的接线错误。抛一个点名的 code 更诚实。
+
+    # 6. 首次初始化：**紧贴着**再证一次，然后写标记。
+    if not rows:
+        # ⚠️ **「紧贴」是 spec 立过的纪律**（§4：「DROP 前须**紧贴着**重查一次【绝对空】」）：
+        #    上面那次证明与这里之间隔着整个清理循环 —— 取锁、DELETE、释放，
+        #    每一步都要时间，窗口里集群可以变脏。信任写入必须由**紧挨着它**的证明背书。
+        await _assert_disposable_cluster(maint_conn, connect=connect,
+                                         registry_usable=_registry_usable)
+        # ⚠️ **本函数的最后一句，之后不许再有任何会抛的语句。**
+        #    它是唯一不可回滚的信任写入（契约：本工具从不清标记），
+        #    而「副作用次序」这条原则在本函数内**再没有新的落点**可以移动。
         await maint_conn.execute(_WRITE_MARKER_SQL, MARKER_PURPOSE)
