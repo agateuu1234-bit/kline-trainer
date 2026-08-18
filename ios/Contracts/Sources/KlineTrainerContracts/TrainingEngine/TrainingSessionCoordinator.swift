@@ -53,7 +53,9 @@ public final class TrainingSessionCoordinator {
     // 新需求10：当前 replay 会话创建时的状态基线（tick/交易数/画线规范语义签名/上下周期）。
     // 含周期（codex plan-R14-F1）：单指竖滑切周期组合改 upper/lowerPanel.period 而不动 tick/ops/drawings，
     // 须纳入 clean-skip 比较，否则切周期后 Back/flush 被当 clean 跳过 → 丢 PendingReplay 序列化的 upper/lowerPeriod。
-    @ObservationIgnored private var replayBaseline: (tick: Int, ops: Int, drawingsSig: String, upper: Period, lower: Period)?
+    @ObservationIgnored private var replayBaseline: (tick: Int, ops: Int, drawingsSig: String,
+                                                     upper: Period, lower: Period,
+                                                     defaultStyle: DrawingDefaultStyle)?
     // 新需求10（codex plan-R6-F1）：本 replay 会话是否已成功写过槽（拥有槽）。
     // fresh=false、任一次成功 saveReplay 后=true。
     // clean-skip **仅在 !replayHasPersisted 时**生效——首写后永不跳过，否则"加画线→写→删画线(count 回基线)
@@ -206,7 +208,8 @@ public final class TrainingSessionCoordinator {
     func recaptureReplayBaselineForTesting(_ engine: TrainingEngine) {
         replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count,
                           canonicalDrawingsSignature(engine.drawings),
-                          engine.upperPanel.period, engine.lowerPanel.period)
+                          engine.upperPanel.period, engine.lowerPanel.period,
+                          engine.drawingSession.defaultStyle)
     }
     #endif
 
@@ -325,6 +328,7 @@ public final class TrainingSessionCoordinator {
                 initialDrawdown: pending.drawdown,
                 initialUpperPeriod: pending.upperPeriod,
                 initialLowerPeriod: pending.lowerPeriod)
+            if let s = pending.drawingDefaultStyle { engine.drawingSession.setDefaultStyle(s) }  // D96：断点续训继承本局默认（nil=旧档/从未改过，不种）
             activeReader = reader
             activeEngine = engine
             activeFile = file
@@ -587,7 +591,8 @@ public final class TrainingSessionCoordinator {
             activeRecord = record                    // RFC-B D5：复用已加载 record（原本被丢弃，零新 I/O）
             replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count,
                               canonicalDrawingsSignature(engine.drawings),
-                              engine.upperPanel.period, engine.lowerPanel.period)  // fresh 基线（含周期，codex plan-R14-F1）
+                              engine.upperPanel.period, engine.lowerPanel.period,
+                              engine.drawingSession.defaultStyle)  // fresh 基线（含周期，codex plan-R14-F1；含本局默认，D95）
             replayHasPersisted = false              // fresh：尚未拥有槽（codex plan-R6-F1）
             resetAutosaveState()                    // 新需求10（codex plan-R7-F1）：重开 autosave 栅栏（terminating=false 等）
             return engine
@@ -617,7 +622,8 @@ public final class TrainingSessionCoordinator {
                base.ops == engine.tradeOperations.count,
                base.drawingsSig == canonicalDrawingsSignature(engine.drawings),
                base.upper == engine.upperPanel.period,      // codex plan-R14-F1：切周期也算脏
-               base.lower == engine.lowerPanel.period {
+               base.lower == engine.lowerPanel.period,
+               base.defaultStyle == engine.drawingSession.defaultStyle {
                 return
             }
             let replay = PendingReplay(
@@ -636,7 +642,8 @@ public final class TrainingSessionCoordinator {
                 lossy: try engine.loadedDrawingsLossy.reconciled(currentKnown: engine.drawings),
                 startedAt: started,
                 accumulatedCapital: engine.initialCapital,
-                drawdown: engine.drawdown)
+                drawdown: engine.drawdown,
+                drawingDefaultStyle: engine.drawingSession.defaultStyle)
             try pendingReplayRepo.saveReplay(replay)
             replayHasPersisted = true     // codex plan-R6-F1：已拥有槽，此后 saveProgress 永不 clean-skip
             return
@@ -665,7 +672,8 @@ public final class TrainingSessionCoordinator {
             startedAt: started,
             accumulatedCapital: engine.initialCapital,         // D4：本局起始资金
             drawdown: engine.drawdown,
-            sessionKey: key)                                   // RFC §4.7c：durable session key
+            sessionKey: key,                                   // RFC §4.7c：durable session key
+            drawingDefaultStyle: engine.drawingSession.defaultStyle)
         try pendingRepo.savePending(pending)
     }
 
@@ -932,6 +940,7 @@ public final class TrainingSessionCoordinator {
                 initialDrawdown: pending.drawdown,
                 initialUpperPeriod: pending.upperPeriod,
                 initialLowerPeriod: pending.lowerPeriod)
+            if let s = pending.drawingDefaultStyle { engine.drawingSession.setDefaultStyle(s) }  // D96：replay 续局继承本局默认（nil=旧档/从未改过，不种）
             activeReader = reader
             activeEngine = engine
             activeFile = file
@@ -941,7 +950,8 @@ public final class TrainingSessionCoordinator {
             activeSessionKey = nil                    // replay 无 sessionKey
             replayBaseline = (engine.tick.globalTickIndex, engine.tradeOperations.count,
                               canonicalDrawingsSignature(engine.drawings),
-                              engine.upperPanel.period, engine.lowerPanel.period)  // 续局基线=resumed 态（含周期，codex plan-R4/R14-F1）
+                              engine.upperPanel.period, engine.lowerPanel.period,
+                              engine.drawingSession.defaultStyle)  // 续局基线=resumed 态（含周期，codex plan-R4/R14-F1；含本局默认，D95）
             replayHasPersisted = true                 // 续局本就拥有该记录的槽 → 永不 clean-skip（codex plan-R6-F1）
             resetAutosaveState()                      // 新 session：清栅栏/脏/cadence/错误
             return engine

@@ -26,11 +26,11 @@
 
 | 维度 | 当前版本 | 变更触发 bump 的条件 |
 |---|---|---|
-| `CONTRACT_VERSION`（顶层标识） | `"1.12"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
+| `CONTRACT_VERSION`（顶层标识） | `"1.13"` | 跨系统或破坏性持久化变更 bump 联动；P2 本地 journal state 的**兼容新增**不联动 |
 | PostgreSQL schema（`schema.sql` migration id） | `0004_qmt_price_double_and_coverage` | 任何 PostgreSQL DDL 变更（含加列）；联动顶层 |
 | 训练组 SQLite `PRAGMA user_version` | `1` | 训练组 schema 结构变更；联动顶层 |
-| app.sqlite GRDB migration | `0003_v1.4_purge_leased` | app.sqlite DDL / 新表 / **DML 数据清理 migration**（v1.4 新增：删除 v1.3 残留 `state='leased'` journal 行）；联动顶层 |
-| Swift 模型版本（`M0.3`） | `1.3` | Codable 字段 / 枚举 case 变更；联动顶层 |
+| app.sqlite GRDB migration | `0010_v1.13_drawing_default_style` | app.sqlite DDL / 新表 / **DML 数据清理 migration**（v1.4 新增：删除 v1.3 残留 `state='leased'` journal 行）；联动顶层 |
+| Swift 模型版本（`M0.3`） | `1.4` | Codable 字段 / 枚举 case 变更；联动顶层 |
 | `P2 journal states` enum | `v2` | 删除 / 改 raw value / 改既有语义 / 改恢复扫描集 → bump 顶层；仅追加本地中间态 → 只 bump 本子版本，reader 须显式处理未知 state |
 
 > **bump 记录（2026-05-25，Wave 1 顺位 8 E2）**：顶层 `CONTRACT_VERSION` `"1.4"` → `"1.5"`。触发 = E2 PositionManager typed throwing `init(from:)` 把 `position_data` 列从"任何字节"收紧为"合法否则拒收"，命中 §Bump 策略 **A 类"改既有语义"**。**无 DDL 变更**（`position_data` 仍 `TEXT NOT NULL`，收紧属 reader 侧语义），故仅 bump 顶层标识，三套存储 sub-version（PostgreSQL/训练组/app.sqlite）不变、不新增 migration 文件。详见 `kline_trainer_plan_v1.5.md` §4.2.7。
@@ -42,6 +42,8 @@
 > **矩阵 stale 校正（同次）**：顶层 cell 此前 stale 为 `"1.7"`，实际代码已在本次之前被**三个** PR 连续 bump 至 `"1.11"` 而未同步本矩阵——#136 replay 续局 + 复盘可步进重演（`1.7`→`1.8`，commit `be737d0`）、#139 复盘完整重设计（`1.8`→`1.10`，**同一 squash PR 内两步**，commit `b016bac`）、#140 划线工具 P1a 契约地基（`1.10`→`1.11`，commit `96d2ac4`）。本次一并校正到 `"1.12"`（含本次 bump）。同 2026-06-22 记录里「cell 此前 stale 为 `1.5`」的先例处理方式。
 >
 > 注：#132 RFC-A（`1.6`→`1.7`，commit `8b7a6c2`）**不属于**本段 catch-up 区间——它即上一条 2026-06-22 记录所记的那次 bump，此处不重复计入。
+
+> **bump 记录（2026-08-13，划线本局默认样式持久化）**：顶层 `CONTRACT_VERSION` `"1.12"` → `"1.13"`。触发 = A 类「影响 DDL」：app.sqlite migration `0010_v1.13_drawing_default_style` —— `pending_training` / `pending_replay` 两张表各新增一个可空 TEXT 列 `drawing_default_style`（JSON 编码的画线本局默认样式），`user_version` 7 → 8。同时命中「Codable 字段变更；联动顶层」：`PendingTraining` / `PendingReplay` 各新增一个 Codable 存储属性，Swift 模型版本 `1.3` → `1.4`。PostgreSQL schema / 训练组 SQLite 均未变（本片是纯 app.sqlite 本地持久化，无跨系统字段）。详见 `docs/superpowers/specs/2026-08-13-drawing-session-default-persistence-design.md` §3.4（D97）。
 
 **存储表位 速查**（spec L129-131）：
 

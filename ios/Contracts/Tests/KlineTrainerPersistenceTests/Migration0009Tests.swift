@@ -6,7 +6,7 @@ import GRDB
 // 画线工具扩充 P1a Task 9：迁移 0009 给 drawings 加 style_json（可空）+ draw_uuid
 // （NOT NULL + CHECK(<> '') + UNIQUE，D20 DB 边界强制）；表重建保留原列/PK/FK。
 final class Migration0009Tests: XCTestCase {
-    // 建一个迁移到 0008（user_version 6）、含 1 条 drawings 行的 DB，再跑全量迁移（到 0009）。
+    // 建一个迁移到 0008（user_version 6）、含 1 条 drawings 行的 DB，再跑全量迁移（到 0010）。
     // training_records 列清单照搬 AppDB0005MigrationTests.insertRecord（实际 schema，非 brief 占位列名）。
     private func migratedDB() throws -> DatabaseQueue {
         let dbq = try DatabaseQueue()
@@ -33,7 +33,7 @@ final class Migration0009Tests: XCTestCase {
         let dbq = try migratedDB()
         try dbq.read { db in
             let uv = try Int.fetchOne(db, sql: "PRAGMA user_version")
-            XCTAssertEqual(uv, 7)
+            XCTAssertEqual(uv, 8)
             let row = try Row.fetchOne(db, sql: "SELECT draw_uuid, style_json FROM drawings WHERE id = 1")
             XCTAssertEqual(row?["draw_uuid"], "legacy-7-1")     // 回填格式
             XCTAssertNil(row?["style_json"] as String?)          // 旧行 style_json NULL

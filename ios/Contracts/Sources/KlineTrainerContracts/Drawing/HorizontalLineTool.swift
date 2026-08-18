@@ -30,7 +30,7 @@ public struct HorizontalLineTool: DrawingTool {
 
     /// thickness (1...5, clamp) → 线宽（pt）。档 1 = 1.5pt，等于今天线宽（视觉零变化）。
     nonisolated static func lineWidth(forThickness t: Int) -> CGFloat {
-        let clamped = min(max(t, 1), 5)
+        let clamped = min(max(t, DrawingDefaultStyle.thicknessRange.lowerBound), DrawingDefaultStyle.thicknessRange.upperBound)
         return 1.0 + 0.5 * CGFloat(clamped)   // 1→1.5, 2→2.0, 3→2.5, 4→3.0, 5→3.5
     }
     /// lineStyle → CGContext setLineDash 的 lengths；.solid 返回空数组（无 dash）。

@@ -40,6 +40,8 @@ layoutSubviews 同 bounds 只回调一次（lastLaidOutBounds 去重，挡重复
 布局重算同步 engine bounds → 静态界面后续 pinch 生效（codex R1-F1：不被 stale .zero bounds no-op）
 瞬态零尺寸 layout 不 clamp panel offset（codex R2-F1：滚动位置不被吞）
 零尺寸 rebuild（updateUIView 路径）不 clamp offset（codex R3-F1：observation 路径同护）
+D94 spike：defaultStyle 变化 → onChange 触发 → coordinator 真落盘一次
+对照组：既有 drawingsRevision 触发同一路径（供判定 spike 手法本身是否可靠）
 宽度 390pt：三个底栏等高（≤0.5pt 容差）
 宽度 430pt：三个底栏等高（≤0.5pt 容差）
 四态布局不变量：训练 / 画线-收起 / 画线-展开(下半区) / 画线-展开(上半区)——chartPanels 容器 frame 逐像素相等

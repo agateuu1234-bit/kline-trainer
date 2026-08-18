@@ -244,6 +244,15 @@ enum AppDBMigrations {
             try db.execute(sql: "PRAGMA user_version = 7")
         }
 
+        // 0010：本局画线默认样式持久化（v1.12→1.13）。additive：两张 pending 表各加**可空** TEXT 列，
+        // 故直接 ALTER ADD 即可（对比 0009 需要 NOT NULL/UNIQUE 才走「建新表+回填+换名」）。
+        // 只走 migration，不动 v1_4_baselineDDL/app_schema_v1.sql（v1.4 冻结基线，drift-checked）。
+        migrator.registerMigration("0010_v1.13_drawing_default_style") { db in
+            try db.execute(sql: "ALTER TABLE pending_training ADD COLUMN drawing_default_style TEXT")
+            try db.execute(sql: "ALTER TABLE pending_replay ADD COLUMN drawing_default_style TEXT")
+            try db.execute(sql: "PRAGMA user_version = 8")
+        }
+
         return migrator
     }
 }

@@ -814,7 +814,7 @@ async def assert_cluster_allowed(maint_conn, *, connect, target_db: str | None) 
 
 # 与 ios/Contracts/Sources/KlineTrainerContracts/Models/Models.swift 的 CONTRACT_VERSION
 # 逐字相等。两边必须同时改（test_contract_version_matches_swift_source_of_truth 是这条的钉）。
-CONTRACT_VERSION = "1.12"
+CONTRACT_VERSION = "1.13"
 
 # pilot_meta 的九个键，顺序固定。
 # created_at **不参与放行判定，但参与令牌派生**（spec O1-F14）。
@@ -2260,6 +2260,34 @@ async def assert_db_allowed_for_reuse(
         await _close_quietly(conn, db_name)
 
 
+async def _assert_reset_gates_on(
+    conn, *, seed: str, export_log_sha256: str, output_dir: str,
+    reset_foreign_token: str | None,
+) -> None:
+    """闸 0− → 0 → 0b（不过则要令牌）—— 在**一条已经连上目标库的会话**上求值。
+
+    ⚠️ 抽成一个函数是因为它有**两个**使用点，而且两处必须逐字同判：
+       ① `assert_db_allowed_for_reset`：授权那一刻；
+       ② `reset_pilot_database` 的封锁临界区：DROP 之前紧贴着**拿本次调用的入参**
+          重跑一遍（塌缩设计 §六）。
+       两处各写一份判据必然漂移，而漂移的方向恰好会让复验那一处失去判别力
+       —— `_has_qualified_intent_row` 当初被抽出来就是这条理由（codex 4a-2/S2 R2-F1）。
+
+    ⚠️ **为什么复验可以「重新判」而不必「和记下来的身份比对」**（撤销 R3-F1 的形状）：
+       R3-F1 当初要求记身份，是因为授权与 DROP 拆成了两个函数 —— 使用点若重新判，
+       只能写成「绑定相符 **or** 令牌对得上」，两种理由取并集，
+       于是靠绑定相符过的授权能被一份**别的身份的**令牌接管。
+       塌缩之后两处在**同一次调用**里，`export_log_sha256` / `output_dir` /
+       `reset_foreign_token` 三个入参完全相同：并集的两侧都只对「本次调用者的权限」
+       成立，接管不了。故不再需要身份快照，也就不再有可被伪造的「记下来的事实」。
+    """
+    meta = await read_pilot_meta(conn)                                 # 闸 0−
+    await _assert_ownership(meta, seed=seed)                           # 闸 0
+    if not _binding_matches(meta, export_log_sha256=export_log_sha256,
+                            output_dir=output_dir):                    # 闸 0b 不过
+        _assert_reset_foreign_token(meta, reset_foreign_token)
+
+
 async def assert_db_allowed_for_reset(
     maint_conn, *, connect, db_name: str, seed: str,
     export_log_sha256: str, output_dir: str, reset_foreign_token: str | None,
@@ -2326,11 +2354,9 @@ async def assert_db_allowed_for_reset(
     # ⚠️ 授权**不在 try 里 return**（codex R2-F1）：`finally` 关连接失败时，
     #    授权已经在路上了。改成「闸过 → 关连接 → 证明真关掉了 → 才交出 oid」。
     try:
-        meta = await read_pilot_meta(conn)                             # 闸 0−
-        await _assert_ownership(meta, seed=seed)                       # 闸 0
-        if not _binding_matches(meta, export_log_sha256=export_log_sha256,
-                                output_dir=output_dir):                # 闸 0b 不过
-            _assert_reset_foreign_token(meta, reset_foreign_token)
+        await _assert_reset_gates_on(
+            conn, seed=seed, export_log_sha256=export_log_sha256,
+            output_dir=output_dir, reset_foreign_token=reset_foreign_token)
     finally:
         closed = await _close_quietly(conn, db_name)
     _assert_target_released(closed, db_name)
@@ -2584,3 +2610,422 @@ async def try_empty_remnant_exception(
 #       本片能证明的只是这两步在同一份 fixture 上给出相反的判定
 #       （test_the_empty_remnant_escape_hatch_is_the_only_thing_that_can_clear_a_remnant）。
 #       这是本片**明写接受的残留**，不是遗漏。
+
+
+# ── S2b′：破坏性执行面 —— `reset_pilot_database` 一个函数 ────────────────────
+#
+# ⚠️ 上面那段横幅讲的是**为什么这里没有可传递的凭据**。本节是那个设计的另一半：
+#    判定与销毁在**同一个函数体**里走完，来路只是一个局部变量。
+
+# 诊断用：DROP 被顶住时打印**全部**后端（含非客户端的）——操作者需要知道到底是谁。
+_TARGET_SESSIONS_SQL = """
+SELECT a.pid, a.usename, a.application_name
+  FROM pg_stat_activity a WHERE a.datname = $1 ORDER BY a.pid
+"""
+
+# **预检用**：DROP 之前判「目标库上还有没有别人」。
+# ⚠️ **绝不能数 `pg_stat_activity` 的全部行**（真 PG 实测，4a-2 的 L2 脚本挖出）：
+#    `autovacuum worker` 会以 `usename = NULL` / `application_name = ''` 出现在任何库上，
+#    而 **PostgreSQL 自己的 `DROP DATABASE` 不把它算作占用者** —— 它会先终止目标库上的
+#    autovacuum worker 再删（实测：`autovacuum_naptime=1s` 下抓到该 worker 在场，
+#    同一时刻 `DROP DATABASE` 成功）。
+#    数进来的后果是 `--reset` —— 陈旧 schema 库的**唯一**出路 —— 会**间歇性**假拒，
+#    并给出一条运维根本执行不了的动作（「请让它们自行退出后重试」，而占用者是后台进程）。
+# ⚠️ **收窄不削弱护栏**：真正会顶住 DROP 的后端仍由 DROP 自己的 55006 兜住，
+#    并映射成同一个 `target_db_in_use`。预检的职责只是「早失败 + 给出好消息」，
+#    最终裁决权在 `DROP DATABASE` 本身。
+# ⚠️ 反向：收窄过头会让这条预检**永不触发**。真 PG 档 ㉜b（目标库上开一条真客户端连接
+#    → reset 必须报 target_db_in_use）钉住它没有变成空转。
+_TARGET_CLIENT_SESSIONS_SQL = """
+SELECT a.pid, a.usename, a.application_name
+  FROM pg_stat_activity a
+ WHERE a.datname = $1 AND a.backend_type = 'client backend' ORDER BY a.pid
+"""
+
+# `DROP DATABASE` 因**其他会话**占用而失败的 SQLSTATE。
+# ⚠️ 只有这一档才映射成 `target_db_in_use`：权限不足（42501）之类兜进来会让操作者
+#    去查「谁连着这个库」，而真相是角色没有 DROP 权限 —— 恢复动作整个走错。
+_OBJECT_IN_USE_SQLSTATE = "55006"
+
+# 持住的那条目标库会话自己的 pid —— 占用者检查要按它把自己排除掉。
+_BACKEND_PID_SQL = "SELECT pg_backend_pid()"
+
+# 占用者检查的「排除自己」版本（codex 4a-2 R12-F1）。
+# ⚠️ 真 PG 实测：我们持住的那条 `client backend` **就在** `pg_stat_activity` 里。
+#    不排除的话，一上来就把自己判成「有别人连着」，零对象例外这条逃生口
+#    永远走不通 —— 而它正是崩溃残骸唯一的出路（R55-F1）。
+# ⚠️ 排除**只按 pid**：pid 是我们从那条会话自己问出来的，
+#    比「按 application_name / usename 猜哪条是自己」可靠得多。
+_OTHER_CLIENT_SESSIONS_SQL = """
+SELECT a.pid, a.usename, a.application_name
+  FROM pg_stat_activity a
+ WHERE a.datname = $1 AND a.backend_type = 'client backend' AND a.pid <> $2
+ ORDER BY a.pid
+"""
+
+# 封锁之前先读回**原值**，拒绝路径恢复的是它、不是写死的 −1（codex 4a-2 R11-F2）。
+# 一律恢复 −1 会把一个本工具**明确选择不销毁**的库的连接策略永久改成「无限制」。
+# ⚠️ **绑实例**：按名字读的话，判定与这次读之间同名库被删掉又重建时，读到的是**替身**
+#    的上限，随后还会把封锁/恢复施加到替身头上。取不到行 = 已经不是那个实例 → 不封。
+#    （残留：`ALTER DATABASE` 的目标只能按名字给，绑不了 oid。这条读 + DROP 前的
+#     oid 复核把它夹在中间，是这里能做到的全部。）
+_READ_CONNLIMIT_SQL = ("SELECT d.datallowconn, d.datconnlimit FROM pg_database d"
+                       " WHERE d.datname::text = $1 AND d.oid::text = $2")
+
+
+def _SEAL_CONNECTIONS_SQL(db_name: str) -> str:
+    """把目标库封成「谁都连不进来」——**两个标志一条语句**。
+
+    ⚠️ **`ALLOW_CONNECTIONS false` 是这里的要害**（codex 合并评审 F1，真 PG 15 亲测）：
+       `CONNECTION LIMIT 0` **只挡非超级用户**，而本工具在 pilot 部署里**就是**超级用户
+       跑的（并发档 Ⓔ 已证明非超级用户连集群闸都过不去）。于是「另一个用同一套凭据的
+       并发任务」——`pg_restore --create`、另一个运维脚本 —— 能在最后一次复验之后、
+       DROP 之前连进来建表再断开，一个**已经不空**的库照样被删掉。
+       那正是这道封锁存在的全部理由（R10-F1，critical，真 PG 已复现数据丢失）。
+
+    ⚠️ **此前这里写着「`ALLOW_CONNECTIONS false` 用不了」——那条注释是错的，已推翻。**
+       它假设的是「**先封再连**」的次序（封住之后就没法连进去验空）。而 R12-F1 早就把
+       次序定成「**先连上再封**」，那条注释没跟着更新。本轮真 PG 15 实测：
+       · 已建立的会话**不受** `datallowconn=false` 影响 → 持住的那条仍然验得了空；
+       · **新的超级用户**连接被挡（`is not currently accepting connections`）；
+       · `datallowconn=false` 时 `DROP DATABASE` 照样成功。
+
+    ⚠️ 两个标志写在**一条** `ALTER` 里：分两条会留下「封了一半」的中间态，
+       而这两条之间正是要堵的那个窗口。
+    ⚠️ 仍保留 `CONNECTION LIMIT 0`：它是 Ⓓ/Ⓓb 两档真 PG 钉着的那一半，
+       且两个标志在服务端是独立生效的 —— 一条没落地时另一条仍拦得住非超级用户。
+    ⚠️ 库名不是可参数化位置 → 一律 `quote_ident`。
+    """
+    return (f"ALTER DATABASE {quote_ident(db_name)}"
+            f" WITH ALLOW_CONNECTIONS false CONNECTION LIMIT 0")
+
+
+def _RESTORE_CONNLIMIT_SQL(db_name: str, allowconn: bool, limit: int) -> str:
+    """把两个标志各自还成**封锁前读回来的原值**。
+
+    ⚠️ 一律恢复成 `true` / `-1` 会把一个本工具**明确选择不销毁**的库的连接策略抹掉 ——
+       被 DBA 有意设成不可连的库会被「顺手打开」（R11-F2 对 `datconnlimit` 的原判据，
+       这里扩到 `datallowconn`）。
+    ⚠️ 两个值都来自 `pg_database`（bool / int），不是调用方递进来的字符串 → 直接内插；
+       库名仍走 `quote_ident`。
+    """
+    return (f"ALTER DATABASE {quote_ident(db_name)}"
+            f" WITH ALLOW_CONNECTIONS {'true' if allowconn else 'false'}"
+            f" CONNECTION LIMIT {int(limit)}")
+
+
+# DROP 成功之后清掉那条凭据（codex 4a-2b R4-F1）。
+# ⚠️ 不清的话：那一行仍然**新鲜且已确认**，只是指向一个已经消失的 oid。
+#    `_INSERT_INTENT_SQL` 的接管条件是「同 run_id **或**已超 TTL」，
+#    而重建用的是**新的 run_id** → RETURNING 为空 → `intent_row_conflict`。
+#    于是 `--reset` 把库删掉了却重建不了，要等 TTL 或人工清理 —— 自锁。
+# ⚠️ 谓词绑 (dbname, seed, **被销毁的那个 oid**)：只删本次真的销毁掉的那一行，
+#    绝不碰别人的、也绝不碰同名新实例的。
+# ⚠️ **但不能只认那个 oid**（codex 4a-2 R11-F1，high）：`db_oid` 可空，而
+#    `_INSERT_INTENT_SQL` 在 `CREATE DATABASE` **之前**写行 —— 那一刻它就是 NULL。
+#    一次失败的建库若连自己的撤回也失败（连接断 / 进程被杀），就留下一行
+#    **新鲜、未确认、db_oid = NULL** 的行。随后 `--reset` 删掉库、只按 oid 清理时
+#    NULL 匹配不上 → 该行留存 → 用**新 run_id** 重建时接管条件都不成立 →
+#    `intent_row_conflict`：**破坏性 reset 之后重建不了**。
+#    故补上「这一行指不到任何活着的同名实例」这一支 —— 它同时覆盖 NULL 与陈旧 oid。
+# ⚠️ 「指不到活实例」的判据**在 SQL 里当下求值**：先查后删的话，查完到删之间
+#    同名库可以被重建，于是删掉一条**新鲜有效**的凭据。
+# ⚠️ 仍然限定 `seed = $2`：seed 与 dbname 由 `derive_db_name` 一一对应，
+#    对不上的行不是本工具在这条路径上写的，不碰它才是 fail-closed。
+_CLEAR_DROPPED_INTENT_SQL = """
+DELETE FROM public.pilot_create_intent
+ WHERE dbname = $1 AND seed = $2
+   AND (db_oid::text = $3
+        OR NOT EXISTS (SELECT 1 FROM pg_database d
+                        WHERE d.datname::text = public.pilot_create_intent.dbname
+                          AND d.oid = public.pilot_create_intent.db_oid))
+"""
+
+
+async def _restore_seal(maint_conn, db_name: str, prior, *, require_oid: str | None = None):
+    """把封锁前读回来的两个标志还给目标库。**两个使用点共用这一份实现。**
+
+    ⚠️ **拒绝之后必须还回去**：留着 `datallowconn=false` / `datconnlimit=0` 的话，
+       一个本工具**没有**销毁、也不归它管的库会永久不可连 —— 那比原来的窗口更糟。
+    ⚠️ **恢复失败不许吞**：它会顶掉正在传播的原异常，而这正是应该的 ——
+       「库被留在不可连状态」比「这次 reset 为什么被拒」更需要人立刻知道。
+       原因链仍在 `__context__` 里，不会丢。
+
+    `require_oid` = None 表示**调用方还持着目标库会话**：名字↔实例在那段里是钉死的
+    （别人删不掉这个库），不需要也不该再核 oid。
+    传了 oid 则表示会话已经放掉，只能先核对再按名字下手 —— 那条路上有一个
+    已登记的不可消除窗口（`ALTER DATABASE` 绑不了 oid）。
+    """
+    # `prior` 为 None 只可能出现在「还没读到原值就抛了」的路径上，那时也还没封锁；
+    # 真走到这里时按最保守的默认还原（与 R11-F2 之前的写死值一致，仅作兜底）。
+    allowconn = True if prior is None else prior["datallowconn"]
+    limit = -1 if prior is None else prior["datconnlimit"]
+    try:
+        if require_oid is not None:
+            # ⚠️ **只对本次要删的那个实例恢复**（R6-F1 的另一半）：走到这里时这个名字
+            #    可能已经指向**另一个实例**（替身），也可能整个消失。
+            #    对替身发 `ALTER DATABASE` 等于动一个我们从没判过的库；
+            #    对已消失的库发，则会用一个次生错误盖掉正在传播的真因。
+            if await maint_conn.fetchval(_CREATED_DB_OID_SQL, db_name) != require_oid:
+                return
+        await maint_conn.execute(_RESTORE_CONNLIMIT_SQL(db_name, allowconn, limit))
+    except Exception as unseal_exc:
+        raise PilotDbBoundaryError(
+            "connection_limit_not_restored",
+            f"{db_name!r} 被本次 DROP 前的封锁设成「不接受连接、上限 0」，"
+            f"而**恢复失败**（{unseal_exc}）——该库现在对所有人不可连。"
+            f"请人工执行 ALTER DATABASE {db_name} WITH ALLOW_CONNECTIONS "
+            f"{'true' if allowconn else 'false'} CONNECTION LIMIT {limit}"
+            f"（封锁前的原值）。（本次 reset 被拒的原因见 __context__）") from unseal_exc
+
+
+async def reset_pilot_database(
+    maint_conn, *, connect, db_name: str, seed: str,
+    export_log_sha256: str, output_dir: str, reset_foreign_token: str | None,
+) -> str:
+    """`--reset` 的**唯一公开入口**：判定与销毁一体，返回被销毁的那个实例 oid。
+
+    一次走完：名字护栏 → 集群闸 → seed 锁 → 零对象例外 / 否则闸 0−/0/0b →
+    占用者预检 → 实例复核 → 持连接封锁 → 紧贴复验 → DROP → 清凭据。
+
+    ⚠️ **没有可传递的授权对象、没有登记表、没有铸造函数**（2026-08-12 塌缩）：
+       同一个洞被 codex 提了六次，五轮加固全被下一轮拆穿 —— 因为「授权」与「销毁」
+       之间那道缝上有一条**推导不出来**的前提（绑定是否与调用方递进来的标量相符 /
+       `--reset-foreign` 令牌对不对），它只能靠「授权时记下来的东西」，
+       而那个东西正是伪造者控制的入参。修法是让缝消失：来路 `via_empty_remnant`
+       在这里只是一个**局部变量**，绑定/令牌那一条拿**本次调用的入参**在封锁下重跑。
+
+    ⚠️ **明令禁止** `DROP DATABASE … WITH (FORCE)` 与 `pg_terminate_backend`（spec §4 规定 2）：
+       它们会无差别 terminate 别人的会话，正是本文件全套护栏要避免的行为。
+       被别人顶住时**一次都不重试**，直接 fail-closed 报 `target_db_in_use` 并打印占用者。
+
+    > 已知残留（如实登记，不可消除）：封锁下的复验与 `DROP` 之间仍有一个窗口。
+    > 把窗口从「整条判定链」收窄到「一次读之后」是这里能做到的全部。
+    """
+    # ⚠️ 调用方标量先验（codex 4a-2 R13-F1）：**在碰目标库之前**就要 fail-closed。
+    #    这一步也让本函数落进 `test_binding_scalar_guard_is_reachable_from_every_entry…`
+    #    那颗按签名扫描的机械钉子的覆盖面里。
+    assert_binding_scalars(export_log_sha256, output_dir)
+    # ⚠️ 名字护栏排在**最前**（比 seed 派生判据还早）：它是最根本、最便宜的一条。
+    #    反过来先跑 `_assert_seed_db_name` 的话，`db_name='postgres'` 会被报成
+    #    「不是这个 seed 派生的」，而操作者真正需要看到的是「这个名字根本不允许被 DROP」。
+    assert_pilot_db_allowed(db_name, reset=True, destructive=True)
+    _assert_seed_db_name(db_name, seed)
+    await pin_search_path(maint_conn)
+    # ⚠️ 集群闸：「这台集群是给 pilot 用的一次性环境」是整套破坏性护栏的地基假设，
+    #    而本函数下一步就通向不可逆的 `DROP DATABASE`（O4-R5-C2 同族）。
+    #    排在**封锁之前**：集群闸没过就不该对目标库动任何配置。
+    await assert_cluster_allowed(maint_conn, connect=connect, target_db=db_name)
+    # 破坏性动作要求按 seed 的锁**在活连接上真被持有**（O4-R5-C2：不收调用方的布尔）。
+    if not await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, seed):
+        raise PilotDbBoundaryError(
+            "seed_lock_not_held",
+            f"维护连接上没有持有 seed={seed!r} 的 advisory lock（①c）——"
+            f"并发的同 seed 运行会在彼此的 DROP/CREATE 之间穿插")
+
+    # ── spec §4 的有向序列，**焊在这一个函数体里** ─────────────────────────
+    # 调用方漏调前一步时，一个崩在 `CREATE DATABASE` 与写 `pilot_meta` 之间的
+    # **空残骸**（它根本没有 pilot_meta）会在闸 0− 撞 `not_owned`
+    # 「拒绝 DROP、库原样保留」→ **残骸永远清不掉**（R56-F1 / R55-F1）。
+    # ⚠️ `via_empty_remnant` 是**局部变量**：它记的是「本次实际走了哪条路」，
+    #    没有任何外部输入能改它 —— 这正是塌缩要买的东西。
+    db_oid = await try_empty_remnant_exception(
+        maint_conn, connect=connect, db_name=db_name, seed=seed)
+    via_empty_remnant = db_oid is not None
+    if not via_empty_remnant:
+        db_oid = await assert_db_allowed_for_reset(
+            maint_conn, connect=connect, db_name=db_name, seed=seed,
+            export_log_sha256=export_log_sha256, output_dir=output_dir,
+            reset_foreign_token=reset_foreign_token)
+
+    # 规定 1：目标库上零会话。本模块自己开的探测连接都已 close，剩下的都是别人的。
+    occupants = await maint_conn.fetch(_TARGET_CLIENT_SESSIONS_SQL, db_name)
+    if occupants:
+        raise PilotDbBoundaryError(
+            "target_db_in_use",
+            f"{db_name!r} 上还有 {len(occupants)} 条会话，拒绝 DROP："
+            f"{[dict(r) for r in occupants]}。"
+            f"请让它们自行退出后重试——本工具**绝不**强制踢掉别人的会话")
+
+    # 绑实例：紧贴着再确认一次「这仍是判定时的那个实例」。
+    oid_now = await maint_conn.fetchval(_CREATED_DB_OID_SQL, db_name)
+    if oid_now != db_oid:
+        raise PilotDbBoundaryError(
+            "target_db_replaced",
+            f"判定放行的 {db_name!r} 实例 oid 是 {db_oid!r}，"
+            f"而此刻同名库的 oid 是 {oid_now!r} —— 判定之后它被删掉又重建了。"
+            f"绝不 DROP 一个本次没有判过的实例，请人工核对 {db_name!r}")
+
+    # ── 封锁 + 紧贴复验：**两条来路都进这个临界区**（codex 4a-2 R15-F1，high）──
+    # 两条路的前提都会过期：零对象例外的前提是「这个库当时是空的」；
+    # 闸 0−/0/0b 的前提是「pilot_meta 说它归属本次 seed，且绑定相符或令牌对得上」——
+    # 而 `pilot_meta` 只是目标库里的一张普通表，判定到 DROP 之间任何人都能改它。
+    # 复验的形状按来路分（前提本来就不同），**封锁与临界区是共用的**：
+    # 前提本身「随时可能被改掉」这一点两条路完全一样，分两套写必然只修一半。
+    _sealed = False
+    _prior = None
+    _proof_passed = False
+    try:
+        # ── **持住一条目标库连接，全程不放**（codex 4a-2 R12-F1/F2）──────
+        # 为什么是「先连上再封」而不是「先封再连」（真 PG 实测定的次序）：
+        #   · 已建立的会话**不受** `CONNECTION LIMIT 0` 影响，哪怕是普通角色
+        #     → 复验就在这条会话上做，**「必须超级用户」这个前提整个不需要了**。
+        #   · 持有会话期间**别人删不掉这个库**（DROP 会撞 55006）
+        #     → 名字↔实例在整段里是稳定的，两条按名字发的 `ALTER DATABASE`
+        #       不可能落到一个同名替身头上。
+        target_conn, oid_held = await _open_target(maint_conn, connect, db_name)
+        try:
+            if oid_held != db_oid:
+                raise PilotDbBoundaryError(
+                    "target_db_replaced",
+                    f"判定放行的 {db_name!r} 实例 oid 是 {db_oid!r}，"
+                    f"而持住的这条会话连到的是 {oid_held!r} —— 它被删掉又重建了")
+            _prior = await maint_conn.fetchrow(
+                _READ_CONNLIMIT_SQL, db_name, db_oid)
+            if _prior is None:
+                raise PilotDbBoundaryError(
+                    "target_db_replaced",
+                    f"读 {db_name!r} 的连接策略时取不到判定放行的那个实例 "
+                    f"（oid={db_oid!r}）—— 绝不对替身动配置或 DROP")
+            # ⚠️ **标记记在 `await` 之前**（codex 4a-2/S2 R1-F1，high）：
+            #    `execute()` 抛异常**不等于**服务端没执行 —— 回包丢、连接断、进程被
+            #    信号打断都会抛，而 `ALTER DATABASE` 已经生效。标记记在 await 之后的话，
+            #    这一档里 `_sealed` 仍是 False、`finally` 整段被跳过，
+            #    目标库被永久留在 `CONNECTION LIMIT 0`，对所有非超级用户不可连。
+            #    反过来「其实没执行却去恢复」只是发一条把上限设回原值的 ALTER —— 幂等无害。
+            _sealed = True
+            await maint_conn.execute(_SEAL_CONNECTIONS_SQL(db_name))
+            # ⚠️ 封的是**新**连接；封之前就连着的还在，故封住之后要再数一遍。
+            # ⚠️ 而**我们自己持着的那条**也在 `pg_stat_activity` 里（真 PG 实测），
+            #    不按 pid 排除的话这条闸一上来就把自己判成占用者，逃生口永远走不通。
+            held_pid = await target_conn.fetchval(_BACKEND_PID_SQL)
+            others = await maint_conn.fetch(_OTHER_CLIENT_SESSIONS_SQL,
+                                            db_name, held_pid)
+            if others:
+                raise PilotDbBoundaryError(
+                    "target_db_in_use",
+                    f"封住新连接之后 {db_name!r} 上仍有 {len(others)} 条**别人的**"
+                    f"客户端会话：{[dict(r) for r in others]}"
+                    f"——它们在封之前就连着。拒绝 DROP")
+            if via_empty_remnant:
+                # 零对象例外：前提是「它是空的」**且**「有一行新鲜、已确认、绑在这个
+                # 实例上的 intent 凭据」—— 两条都会过期，故两条都重查。
+                # ⚠️ 只重查【绝对空】是不够的（codex 4a-2/S2 R2-F1）：凭据可以被别的运行
+                #    清掉、被换成指向另一个实例的行、或者就是过了 TTL。少了这一半，
+                #    一个「空但已经没有归属证明」的库照样会被删掉 —— 而这条来路
+                #    **绕过** pilot_meta 归属与 `--reset-foreign` 令牌，凭据是它仅有的归属依据。
+                if not await _is_absolutely_empty(target_conn):
+                    raise PilotDbBoundaryError(
+                        "not_owned",
+                        f"{db_name!r} 是靠「零对象例外」过的闸"
+                        f"（理由就是它当时是空的），而紧贴 DROP 复查时它**已经不空了**"
+                        f"—— 可能有人正在 pg_restore 或手工建表。这个库既没有 "
+                        f"pilot_meta 归属、也没过 --reset-foreign 令牌，绝不 DROP。"
+                        f"如确需删除请在 pilot 工具之外手工执行")
+                if not await _has_qualified_intent_row(maint_conn, db_name,
+                                                       seed=seed, oid=db_oid):
+                    raise PilotDbBoundaryError(
+                        "not_owned",
+                        f"{db_name!r} 是靠「零对象例外」过的闸，而它的归属依据"
+                        f"——那行新鲜、已确认、绑在实例 {db_oid!r} 上的 "
+                        f"pilot_create_intent 凭据——在紧贴 DROP 复查时**已经不成立了**"
+                        f"（被清掉、被换成指向别的实例的行、或已过期）。"
+                        f"这个库既没有 pilot_meta 归属、也没过 --reset-foreign 令牌，绝不 DROP")
+            else:
+                # 正常路：**拿本次调用的入参**把闸 0−/0/0b/令牌整个重跑一遍
+                # （塌缩设计 §六；判据与授权那一刻**逐字同一份实现**）。
+                await _assert_reset_gates_on(
+                    target_conn, seed=seed, export_log_sha256=export_log_sha256,
+                    output_dir=output_dir, reset_foreign_token=reset_foreign_token)
+            _proof_passed = True
+        finally:
+            # ⚠️ **复验没过时，恢复必须发生在还持着这条会话的时候**
+            #    （codex 合并评审 F2）：`ALTER DATABASE` 只能按**名字**下手，绑不了 oid。
+            #    放掉会话之后名字↔实例就不再稳定 —— 并发的特权进程可以在「按 oid 核对」
+            #    与「发 ALTER」之间把同名库删掉重建，于是这段代码去改一个**从未过闸**的
+            #    替身的配置。持着会话期间别人删不掉这个库（DROP 会撞 55006），
+            #    名字↔实例因此是钉死的，这里的恢复不需要也不该再核 oid。
+            # ⚠️ **恢复抛不抛，自己的会话都必须关**（codex 合并评审 R2-F1 ——
+            #    这是我上一轮把恢复挪到 close 之前时**自己引入的回归**，如实登记）：
+            #    `_restore_seal()` 一抛就跳过 close 的话，一次 fail-closed 的拒绝会把库
+            #    **既留在封锁态、又被本进程占着**，随后的重试连 DROP 都发不出去
+            #    （会被我们自己顶住）。「修 symptom 会挪动失败面」在本仓记录在案。
+            try:
+                if _sealed and not _proof_passed:
+                    await _restore_seal(maint_conn, db_name, _prior)
+                    _sealed = False
+            finally:
+                # 自己的会话必须放掉，否则下面的 DROP 会被**我们自己**顶住。
+                _held_closed = await _close_quietly(target_conn, db_name)
+        _assert_target_released(_held_closed, db_name)
+
+        # 规定 2：一条朴素的 DROP，不带 FORCE；失败**一次都不重试**。
+        try:
+            await maint_conn.execute(f"DROP DATABASE {quote_ident(db_name)}")
+        except Exception as exc:
+            if getattr(exc, "sqlstate", None) == _OBJECT_IN_USE_SQLSTATE:
+                try:
+                    now_occupants = [dict(r) for r in
+                                     await maint_conn.fetch(_TARGET_SESSIONS_SQL, db_name)]
+                except Exception:                  # 诊断而已，读不到就算了
+                    now_occupants = "（占用者清单读取失败）"
+                raise PilotDbBoundaryError(
+                    "target_db_in_use",
+                    f"DROP {db_name!r} 被其他会话顶住（{exc}）。占用者：{now_occupants}。"
+                    f"本工具**一次都不重试、也绝不改用强制模式**——"
+                    f"那会无差别中止别人的会话，正是本套护栏要避免的行为") from exc
+            # ⚠️ **抛异常 ≠ 服务端没执行**（codex 4a-2/S2 R1-F2，high）：回包丢、连接断
+            #    都会抛，而 `DROP DATABASE` 已经生效。只按「execute 抛没抛」判的话：
+            #      · 下面的 `finally` 会对一个**已经不存在**的库发恢复 ALTER，
+            #        用一个次生错误盖掉真正的原因；
+            #      · `_CLEAR_DROPPED_INTENT_SQL` 一次都不跑 → 那行凭据仍然新鲜且已确认、
+            #        却指向消失了的实例 → 紧接着用**新 run_id** 重建撞 `intent_row_conflict`：
+            #        库删掉了却重建不了。
+            #    故与 `pg_database` 对账，判据**绑被销毁的那个 oid**（不是只比名字）。
+            # ⚠️ 对不上账（连账都查不了）时一律**当作没删掉**上抛原异常 —— fail-closed。
+            try:
+                _oid_after = await maint_conn.fetchval(_CREATED_DB_OID_SQL, db_name)
+            except Exception:
+                raise exc from None
+            # ⚠️ **只有「这个名字整个不在了」才算成功**（codex 4a-2/S2 R6-F1，high）：
+            #    判据写成 `_oid_after != db_oid` 会把「名字还在、但已经是另一个实例」
+            #    也当成成功 —— 那一刻我们要删的实例确实没了，**但这个名字此刻被一个
+            #    没过任何闸的库占着**。报成功 → 调用方接着重建 → 撞 duplicate_database，
+            #    而且它拿到的是一个**破坏性操作的假成功信号**。
+            if _oid_after is not None:
+                if _oid_after == db_oid:
+                    raise                          # 名字还在、还是那个实例 → 真失败
+                raise PilotDbBoundaryError(
+                    "target_db_replaced",
+                    f"DROP {db_name!r} 的结果无法确认（{exc}）：本次要删的实例 "
+                    f"{db_oid!r} 已经不在，但这个名字此刻指向另一个实例 "
+                    f"{_oid_after!r} —— 它没过本次的任何一道闸。"
+                    f"绝不把这种情况报成 reset 成功，也绝不碰那个替身。"
+                    f"请人工核对 {db_name!r} 是谁建的，并清理 "
+                    f"public.pilot_create_intent 中 dbname={db_name!r} 的残留行") from exc
+            # 名字整个不在了 → DROP 其实成功了，按成功收尾。
+        _sealed = False                            # 库已不存在，无可恢复也无需恢复
+    finally:
+        if _sealed:
+            # 走到这里只剩一种情形：**复验过了、DROP 却失败或结果不确定**。
+            # 那时目标库会话必须已经放掉（不放掉 DROP 会被我们自己顶住），
+            # 名字↔实例于是不再被钉住 —— 只能先按 oid 核一次再按名字发 ALTER。
+            # ⚠️ **这是一条已登记的不可消除残留**（codex 合并评审 F2 的另一半）：
+            #    `ALTER DATABASE` 的目标只能按名字给，绑不了 oid，核对与 ALTER 之间
+            #    仍有一个窗口。**复验拒绝那条路径不走这里** ——
+            #    它在还持着目标库会话的时候就已经恢复完了，那条路上名字↔实例是钉死的。
+            await _restore_seal(maint_conn, db_name, _prior, require_oid=db_oid)
+
+    # DROP 成功 —— 在**同一把 seed 锁下**清掉那条已经无所指的凭据（R4-F1）。
+    try:
+        await maint_conn.execute(_CLEAR_DROPPED_INTENT_SQL, db_name, seed, db_oid)
+    except Exception as exc:
+        # ⚠️ 库**已经删掉了**，这一步失败不能让调用方以为 DROP 没成功；
+        #    但也不能静默 —— 残留的凭据会把随后的重建卡成 intent_row_conflict。
+        raise PilotClusterBoundaryError(
+            "intent_not_cleared",
+            f"{db_name!r} **已经被成功 DROP**，但清理它那条 pilot_create_intent 凭据失败"
+            f"（{exc}）。该行仍然新鲜且已确认、却指向一个已消失的实例，"
+            f"会让随后以新 run_id 的重建撞 intent_row_conflict。"
+            f"请人工删除 public.pilot_create_intent 中 dbname={db_name!r} 的行。") from exc
+    return db_oid

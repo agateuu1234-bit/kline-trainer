@@ -19,13 +19,15 @@ enum PendingReplayRepositoryImpl {
             INSERT OR REPLACE INTO pending_replay
               (id, record_id, training_set_filename, global_tick_index, upper_period, lower_period,
                position_data, fee_snapshot, trade_operations, drawings,
-               started_at, accumulated_capital, cash_balance, drawdown)
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               started_at, accumulated_capital, cash_balance, drawdown,
+               drawing_default_style)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, arguments: [
                 p.recordId, p.trainingSetFilename, p.globalTickIndex,
                 p.upperPeriod.rawValue, p.lowerPeriod.rawValue,
                 positionB64, feeJSON, opsJSON, drawingsJSON,
-                p.startedAt, p.accumulatedCapital, p.cashBalance, drawdownJSON
+                p.startedAt, p.accumulatedCapital, p.cashBalance, drawdownJSON,
+                DrawingDefaultStyleColumn.encode(p.drawingDefaultStyle)
             ])
     }
 
@@ -76,7 +78,8 @@ enum PendingReplayRepositoryImpl {
             tradeOperations: ops, lossy: lossy,
             startedAt: row["started_at"],
             accumulatedCapital: row["accumulated_capital"],
-            drawdown: drawdown
+            drawdown: drawdown,
+            drawingDefaultStyle: DrawingDefaultStyleColumn.decode(row["drawing_default_style"])
         )
     }
 

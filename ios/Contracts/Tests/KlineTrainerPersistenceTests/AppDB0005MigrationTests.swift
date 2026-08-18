@@ -14,13 +14,13 @@ final class AppDB0005MigrationTests: XCTestCase {
     }
     override func tearDown() async throws { try? FileManager.default.removeItem(at: dbURL.deletingLastPathComponent()) }
 
-    // fresh-install 终态：单独用 makeFreshDB（跑完整 migrator）断言 user_version=7（0009 新增）
-    func test_fresh_install_full_migrator_user_version_7() throws {
+    // fresh-install 终态：单独用 makeFreshDB（跑完整 migrator）断言 user_version=8（0010 新增）
+    func test_fresh_install_full_migrator_user_version_8() throws {
         let freshURL = try AppDBFixture.makeFreshDB()
         defer { try? FileManager.default.removeItem(at: freshURL.deletingLastPathComponent()) }
         let q = try AppDBFixture.openRaw(at: freshURL)
         let v: Int = try q.read { try Int.fetchOne($0, sql: "PRAGMA user_version") ?? 0 }
-        XCTAssertEqual(v, 7)
+        XCTAssertEqual(v, 8)
     }
 
     func test_0005_backfills_total_capital_from_last_record_and_keeps_other_keys() throws {
@@ -36,8 +36,8 @@ final class AppDB0005MigrationTests: XCTestCase {
             try Self.insertRecord(db, createdAt: 1000, total: 100_000, profit: 20_000)   // id=1
             try Self.insertRecord(db, createdAt: 1000, total: 120_000, profit: 10_000)   // id=2 → 130000 胜
         }
-        try AppDBMigrations.makeMigrator().migrate(q)   // 完整 migrator：0005+0006+0007+0008+0009 在此真跑
-        XCTAssertEqual(try q.read { try Int.fetchOne($0, sql: "PRAGMA user_version") ?? 0 }, 7)
+        try AppDBMigrations.makeMigrator().migrate(q)   // 完整 migrator：0005+0006+0007+0008+0009+0010 在此真跑
+        XCTAssertEqual(try q.read { try Int.fetchOne($0, sql: "PRAGMA user_version") ?? 0 }, 8)
         let s = try q.read { db -> [String: String] in
             var d: [String: String] = [:]
             for r in try Row.fetchAll(db, sql: "SELECT key,value FROM settings") { d[r["key"]] = r["value"] }
@@ -69,7 +69,7 @@ final class AppDB0005MigrationTests: XCTestCase {
             try Self.insertRecord(db, createdAt: 1000, total: .greatestFiniteMagnitude, profit: .greatestFiniteMagnitude)
         }
         try AppDBMigrations.makeMigrator().migrate(q)
-        XCTAssertEqual(try q.read { try Int.fetchOne($0, sql: "PRAGMA user_version") ?? 0 }, 7)   // 仍推进（0009 bump→7）
+        XCTAssertEqual(try q.read { try Int.fetchOne($0, sql: "PRAGMA user_version") ?? 0 }, 8)   // 仍推进（0010 bump→8）
         let cap = try q.read { try String.fetchOne($0, sql: "SELECT value FROM settings WHERE key='total_capital'") }
         XCTAssertEqual(Double(cap!)!, 100_000, accuracy: 1e-6)   // 非有限派生 → 不写，保留默认（合法）
     }
