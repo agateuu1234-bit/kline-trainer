@@ -489,6 +489,18 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   `selectedLineActuallyRendersHighlighted`（`before` 快照的手动 rebuildRenderState 挪到
 #   `setMode(.select)` 之后，否则带着自动选中的旧渲染态、`before==after` 恒真）。
 #   pass-main-current.log 已用本轮真 fresh Catalyst 日志（1798 tests / 211 suites）逐行重裁。
+#   【画完自动选中 Task 7（本轮）】total 1798→1811（+13）：Task 5 新增 7 条 + Task 6 新增 6 条
+#   host-visible 测试（styleFields/selectedLineStyle 显示置灰 + applyPanelStyleMutation 两个
+#   base 写入 + G3/G4 守卫），均为纯 host-visible（无 canImport(UIKit) 门），Catalyst delta 与
+#   host swift-testing delta（1901→1907，同为 +6；1894→1901，+7）对得上。uikit 清单不变，仍是
+#   78（本轮未新增/删除任何 UIKit-gated 测试，故不触发四处联动）。
+#   ⚠️ 同步理由**不是**「+13 漂出了 ±30 容差」——1798+30=1828，1811 远没到上限，实测没有漂出；
+#   真实理由是：若不同步，下一轮读到的仍是旧基线 1798，窗口下限锁死在 1798−30=1768，而当前真实
+#   总数已经是 1811 ⇒ 从 1811 掉到 1768 都不会报警，等于把这道门「掉 30 条就报警」的设计意图
+#   悄悄放宽成了「掉 43 条才报警」，且这个偏移会随每一片不同步而逐片累积。不同步 = 门被静默
+#   放宽，不是「反正没超容差就不用管」。
+#   pass-main-current.log 本轮未重裁（该 fixture 仍是 uikit 78 / total 1798 的真实冻结日志，
+#   1798 落在新窗口 [1781,1841] 内，下方活基线自测断言的回显数字不受影响）。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
 if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1798" <<<"$out"; then
