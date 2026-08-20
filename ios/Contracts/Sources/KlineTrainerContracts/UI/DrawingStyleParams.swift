@@ -24,7 +24,7 @@ struct DrawingStyleParams: View {
     ///   `commit` **绝不能**再从 `style`（本视图渲染那一刻捕获的快照）出发拼下一个值——若两个控件
     ///   在 SwiftUI 完成重渲染之前先后触发，第二次会拿旧快照把第一次的改动 revert 掉（选中线路径
     ///   还会经 `drawingsRevision` 被 autosave 持久化，回退是真丢数据）。「现取当前真值 + 合并」
-    ///   下放给调用方（`DrawingEditRouter.applyStyleMutation`/`applyDefaultStyleMutation`），
+    ///   下放给调用方（`DrawingEditRouter.applyPanelStyleMutation`），
     ///   本视图只负责转发意图。
     let onChange: (@escaping (inout DrawingDefaultStyle) -> Void) -> Void
 

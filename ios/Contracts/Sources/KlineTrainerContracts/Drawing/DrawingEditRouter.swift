@@ -225,8 +225,17 @@ enum DrawingEditRouter {
         return styleFields(of: d)
     }
 
-    /// D86：常驻面板的**唯一**写入入口。取代 applyStyleMutation / applyDefaultStyleMutation
-    /// （三个分支的 base 与写入与它们逐一等价，是严格泛化 → 那两个成为本次改动制造的孤儿，已一并删除）。
+    /// D86：常驻面板的**唯一**写入入口。取代 applyStyleMutation / applyDefaultStyleMutation。
+    /// ⚠️ **不是**三个分支都与被取代的旧函数逐字等价：
+    ///    - 分支 ②（选择态+有选中）/ 分支 ③（选择态+无选中）与旧的 `applyStyleMutation` /
+    ///      `applyDefaultStyleMutation` **逐字等价** —— 这是「可以安全删掉旧函数」这一结论的证据；
+    ///    - 分支 ①（画线态）是 **D86 的新语义**，与旧行为**有意不同**：旧函数从未覆盖过画线态，
+    ///      本分支把「改样式」在画线态下的含义从「只改选中线」改成「改本局默认 + best-effort
+    ///      顺带套到线上」，且**必须**用两个独立的 base（见下方反例）——那两个旧函数成为孤儿是
+    ///      因为分支 ②③ 吸收了它们，不是因为分支 ① 把它们泛化了。
+    ///    ⚠️ **不得**把分支 ① 的 base 改回 `panelStyle(engine:)`：画线态下它 ≡ `defaultStyle`，
+    ///       改回去就是把整份默认快照套到线上（§6.3 #0 的缺陷），
+    ///       `lockedDivergenceIsNeverRetroactivelyApplied`（M15）那条五步档会红。
     ///
     /// ⚠️ **画线态把同一个 mutation 分别套到两个 base 上**（spec §6.3 #0），**不是**套一份默认快照。
     ///    反例（上一稿会真的发生）：画线 A（橙、粗细 1，自动选中）→ 锁定 A → 改颜色为紫

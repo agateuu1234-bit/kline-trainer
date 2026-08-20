@@ -434,7 +434,7 @@ struct DrawingEditRouterTests {
     // `style` 是**视图渲染那一刻**捕获的快照。若两个控件在 SwiftUI 完成重渲染之前先后触发，第二次动作
     // 仍从同一份旧快照出发 → 把第一次的改动 revert 掉（选中线路径还经 `drawingsRevision` 被 autosave
     // 持久化）。`origin/main` 上的旧实现本来就是「动作发生那一刻，从活的单一真相现取」；PR-4 把派生值
-    // 算好传进视图时丢了这个性质。`applyStyleMutation`/`applyDefaultStyleMutation` 把「现取 + 合并」
+    // 算好传进视图时丢了这个性质。`applyPanelStyleMutation` 把「现取 + 合并」
     // 收回 `DrawingEditRouter`（host 可测）：本条**不经视图**、直接背靠背调用两次入口，模拟「同一渲染帧
     // 里两个控件先后触发」——旧实现下第二次会读到过期的 `style` 快照，第一枪会被 revert。
 
