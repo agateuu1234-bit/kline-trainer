@@ -215,6 +215,44 @@ enum DrawingEditRouter {
 
     // MARK: D83 / D84 / D85 提交路由（自动选中 spec §3 / §4 / §5）
 
+    /// **外层 = 生产入口**：从 pending 锚提交一条新线，并按状态决定选中处置。
+    ///
+    /// 覆盖 D83 分支 1 与分支 2 的**全部六条出口**（spec §3.1 那张表）—— 这就是它必须从
+    /// `commitPending` 开始、而不是从 `routeDrawingCommit` 开始的全部理由（spec §3.4）：
+    /// 出口 a / b / c 在改动前是 `ChartContainerView` 里的 `return`，在 `routeDrawingCommit`
+    /// **之前**就退出了，于是最主要的两条被拒路径**永远不会清空选中**，D37 那个陷阱原样复现。
+    /// ⚠️ **错误的修法（明令禁止，spec §3.4）**：在 `ChartContainerView` 的两处 `guard … else { return }`
+    ///    里各补一句 `clearSelection()` —— 那会把分支 2 的判据散进三个地方，其中两处在 UIKit-gated
+    ///    文件里（host 上根本不编译），且「三处保持一致」没有任何机制保证。
+    ///
+    /// `commitPending` 与 `routeDrawingCommit` 在 `Sources/` 里的**唯一**调用点（源码守卫 G1 / G1b）。
+    static func commitPendingAndSelect(panel: PanelId, mapper: CoordinateMapper, engine: TrainingEngine) {
+        let session = engine.drawingSession
+
+        // ① 出口 a（多锚 period 不一致）/ 出口 b（`withStyle` 语义闸拒，如水平线的 `.segment`）。
+        //    判据与顺序**一字承接**改动前 `ChartContainerView` 的那道门 —— 本片只是给它补一句
+        //    `clearSelection()` 并搬了位置，**不新增、不放宽、不重排任何落库门**（spec §5.1 约束 3）。
+        guard let committed = session.commitPending(panelPosition: panel == .upper ? 0 : 1) else {
+            session.clearSelection()                       // 变异 M13 守这一句
+            return
+        }
+
+        // ② 出口 c（射线锚点越主图右缘 → `lineXRange` 返 nil）。承接改动前那道「不可见画线不落库」的门。
+        //    ⚠️ 用的是**调用方传进来的 `mapper`**，**不是** `session.viewportMapper(for: panel)`
+        //       （spec §5.1 约束 2）：改动前那道门用的就是本次 tap 现算的 mapper；换成 session 里
+        //       发布的那一份会在「本面板无 candles」时变成 fail-closed —— 那是对**既有落库门**的
+        //       行为改动，不属本片范围。**不得顺手"改进"**。
+        guard HorizontalLineTool.visibleGeometry(for: committed, mapper: mapper) != nil else {
+            session.clearSelection()                       // 变异 M14 守这一句（= codex spec-R1 那条 high）
+            return
+        }
+
+        // ⚠️ ① / ② 的 `clearSelection()` 在 D84 复盘门（内层第 ⑤ 步）**之前**，这是有意的
+        //    （spec §5.1 约束 1）：那道门管的是复盘**不得获得**选中能力，而「清空」从不授予任何能力
+        //    —— 无论哪个模式，一次被拒的提交都不该留下陈旧选中。**不得**把第 ⑤ 步提前去包住 ① / ②。
+        routeAndSelect(committed, panel: panel, engine: engine)
+    }
+
     /// **内层**：落库与选中处置（六步流程的 ③④⑤⑥）。**接收一个已经造好的 `DrawingObject`**。
     ///
     /// 这个缝不是为测试硬开的口子，它就是「造对象」与「落库 + 定选中」两件事的自然分界；

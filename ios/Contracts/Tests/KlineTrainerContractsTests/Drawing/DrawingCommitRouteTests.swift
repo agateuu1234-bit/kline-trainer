@@ -136,4 +136,115 @@ struct DrawingCommitRouteTests {
         #expect(e.drawingSession.selectedDrawingID == "S1",
                 "把 wasPresent 挪到 routeDrawingCommit 之后 → 恒 true → 自动选中整体失效")
     }
+
+    // ── 外层：P1 / P2 正向档（走完整六步）──
+
+    @Test("P1：训练态 + 画线态 + 健康锚点 → 提交后选中 == 新那条的 id，落锚面板 == selectedPanel，drawings +1")
+    func outerCommitSelectsTheNewLine() throws {
+        let e = Self.drawingEngine()
+        let before = e.drawings.count
+        e.drawingSession.addAnchor(
+            DrawingAnchor(period: e.upperPanel.period, candleIndex: 0, price: 50), panel: .upper)
+
+        DrawingEditRouter.commitPendingAndSelect(panel: .upper, mapper: Self.mapper(), engine: e)
+
+        #expect(e.drawings.count == before + 1)
+        let newId = try #require(e.drawings.last?.id)
+        #expect(e.drawingSession.selectedDrawingID == newId, "选中的必须**就是**刚提交那条")
+        #expect(e.drawingSession.selectedPanel == .upper)
+    }
+
+    @Test("P2：连画两条 → 选中**转移**到第二条（== id2 且 != id1），drawings == 2")
+    func outerSecondCommitTransfersSelection() throws {
+        let e = Self.drawingEngine()
+        e.drawingSession.addAnchor(
+            DrawingAnchor(period: e.upperPanel.period, candleIndex: 0, price: 50), panel: .upper)
+        DrawingEditRouter.commitPendingAndSelect(panel: .upper, mapper: Self.mapper(), engine: e)
+        let id1 = try #require(e.drawingSession.selectedDrawingID)
+
+        e.drawingSession.addAnchor(
+            DrawingAnchor(period: e.upperPanel.period, candleIndex: 1, price: 60), panel: .upper)
+        DrawingEditRouter.commitPendingAndSelect(panel: .upper, mapper: Self.mapper(), engine: e)
+
+        #expect(e.drawings.count == 2)
+        let id2 = try #require(e.drawingSession.selectedDrawingID)
+        #expect(id2 != id1, "选中没有转移到第二条")
+        #expect(e.drawings.last?.id == id2)
+    }
+
+    @Test("画线态**不退出**：连续画线（D38）—— 两次提交之后仍是 .draw 且工具没变")
+    func outerKeepsDrawingSessionAlive() {
+        let e = Self.drawingEngine()
+        let tool = e.drawingSession.activeDrawingTool
+        e.drawingSession.addAnchor(
+            DrawingAnchor(period: e.upperPanel.period, candleIndex: 0, price: 50), panel: .upper)
+        DrawingEditRouter.commitPendingAndSelect(panel: .upper, mapper: Self.mapper(), engine: e)
+        #expect(e.drawingSession.mode == .draw)
+        #expect(e.drawingSession.drawingModeActive == true)
+        #expect(e.drawingSession.activeDrawingTool == tool)
+    }
+
+    // ── N-lock-3（出口 a，对应 M13）：commitPending 返 nil ──
+
+    @Test("N-lock-3 / 出口 a：先有选中 → 多锚 period 不一致致 commitPending 返 nil → 选中被清空、零落库")
+    func exitAClearsSelectionAndLandsNothing() {
+        let e = Self.drawingEngine()
+        #expect(e.appendDrawing(Self.upperCandidate(e, id: "OLD", price: 40)) == true)
+        e.drawingSession.setCommittedSelection(id: "OLD", panel: .upper)   // 先建立一个选中
+        #expect(e.drawingSession.selectedDrawingID == "OLD")
+        let before = e.drawings.count
+
+        // 两个 period 互不相同的锚 → commitPending 的 allSatisfy 门拒 → 返 nil（出口 a）
+        e.drawingSession.addAnchor(
+            DrawingAnchor(period: e.upperPanel.period, candleIndex: 0, price: 50), panel: .upper)
+        e.drawingSession.addAnchor(
+            DrawingAnchor(period: e.lowerPanel.period, candleIndex: 1, price: 60), panel: .upper)
+        #expect(e.drawingSession.pendingAnchors.count == 2, "两个锚都要在 pending 里，本档才成立")
+
+        DrawingEditRouter.commitPendingAndSelect(panel: .upper, mapper: Self.mapper(), engine: e)
+
+        #expect(e.drawings.count == before, "出口 a 不得落库")
+        #expect(e.drawingSession.selectedDrawingID == nil, "出口 a 留下了陈旧选中（M13 要挡的就是这个）")
+    }
+
+    // ── N-lock-4（出口 c，对应 M14）：几何预检 nil ──
+
+    @Test("N-lock-4 / 出口 c：先有选中 → 射线锚点越主图右缘致 visibleGeometry 返 nil → 选中被清空、零落库")
+    func exitCClearsSelectionAndLandsNothing() {
+        let e = Self.drawingEngine()
+        #expect(e.appendDrawing(Self.upperCandidate(e, id: "OLD", price: 40)) == true)
+        e.drawingSession.setCommittedSelection(id: "OLD", panel: .upper)
+        #expect(e.drawingSession.selectedDrawingID == "OLD")
+        let before = e.drawings.count
+
+        // 本局默认改成射线；锚落在 candleIndex 20 →
+        // indexToX(20) = (20-0)*10 + 0 = 200 ≥ mainChartFrame.maxX(100) → lineXRange 返 nil。
+        // ⚠️ 必须**单元级直接造 viewport**：spec §3.2 已证明这一条经真实 tap 恒不可达
+        //   （tapToAnchor 的 contains 门 + xToIndex 的 round-trip 后置条件）。
+        var s = e.drawingSession.defaultStyle
+        s.lineSubType = .ray
+        e.drawingSession.setDefaultStyle(s)
+        e.drawingSession.addAnchor(
+            DrawingAnchor(period: e.upperPanel.period, candleIndex: 20, price: 50), panel: .upper)
+
+        DrawingEditRouter.commitPendingAndSelect(panel: .upper, mapper: Self.mapper(), engine: e)
+
+        #expect(e.drawings.count == before, "出口 c 不得落库（既有落库门，本片一字不改）")
+        #expect(e.drawingSession.selectedDrawingID == nil, "出口 c 留下了陈旧选中（= codex spec-R1 那条 high）")
+    }
+
+    // ── 边界：② 用的必须是**调用方传进来的** mapper，不是 session 里发布的那一份 ──
+
+    @Test("第 ② 步用调用方传入的 mapper：session 从未发布过视口也照样提交成功（不得顺手改成 fail-closed）")
+    func exitCUsesCallerMapperNotSessionMapper() {
+        let e = Self.drawingEngine()
+        #expect(e.drawingSession.viewportMapper(for: .upper) == nil, "本档要求 session 里没有已发布的视口")
+        e.drawingSession.addAnchor(
+            DrawingAnchor(period: e.upperPanel.period, candleIndex: 0, price: 50), panel: .upper)
+
+        DrawingEditRouter.commitPendingAndSelect(panel: .upper, mapper: Self.mapper(), engine: e)
+
+        #expect(e.drawings.count == 1,
+                "改成 session.viewportMapper(for:) 会在这里变成 fail-closed —— 那是对既有落库门的行为改动")
+    }
 }

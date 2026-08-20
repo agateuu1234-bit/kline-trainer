@@ -94,4 +94,55 @@ final class DrawingAutoSelectSourceGuardTests: XCTestCase {
         XCTAssertEqual(callCount(inSqueezed: squeezedText(negative), pattern: "setSelection(id:"), 0,
                        "自检②失败：定义/注释/互斥入口被误计 —— 守卫会假红")
     }
+
+    // MARK: G6（本 task 落地：拆内外两层不得变成两个生产入口）
+
+    func testG6_routeAndSelectHasExactlyOneCallSiteInRouter() throws {
+        try assertExactlyOneSite("routeAndSelect(", inFileSuffixed: "Drawing/DrawingEditRouter.swift")
+    }
+
+    func testG6SelfCheck_bothDirections() {
+        let positive = """
+        func caller() { routeAndSelect(committed, panel: panel, engine: engine) }
+        """
+        XCTAssertEqual(callCount(inSqueezed: squeezedText(positive), pattern: "routeAndSelect("), 1,
+                       "自检①失败：真实调用没被数到 —— 守卫已失效")
+
+        let negative = """
+        static func routeAndSelect(_ committed: DrawingObject, panel: PanelId, engine: TrainingEngine) { }
+        // routeAndSelect(注释里的不算)
+        """
+        XCTAssertEqual(callCount(inSqueezed: squeezedText(negative), pattern: "routeAndSelect("), 0,
+                       "自检②失败：定义/注释被误计 —— 守卫会假红")
+    }
+
+    // MARK: G4b（本 task 落地：分支 2 的每条出口都真的接上了 clearSelection）
+
+    func testG4b_routerHasAtLeastFourClearSelectionCallSites() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()   // ios/Contracts
+        let path = repoRoot.appendingPathComponent(routerPath).path
+        let n = callCount(inSqueezed: try squeezedSource(path), pattern: "clearSelection(")
+        // **下界**不是精确值（spec §8 G4b）：applyStyle / deleteSelected 等既有路径也可能增加。
+        // 4 = 外层第 ① 步 + 外层第 ② 步 + 内层第 ⑥ 步的 else + 既有 syncSelectionByState。
+        XCTAssertGreaterThanOrEqual(n, 4,
+            "DrawingEditRouter 里只有 \(n) 处 clearSelection —— 分支 2 的某条出口没接上")
+    }
+
+    func testG4bSelfCheck_bothDirections() {
+        let positive = """
+        func a() { session.clearSelection() }
+        func b() { engine.drawingSession.clearSelection() }
+        """
+        XCTAssertEqual(callCount(inSqueezed: squeezedText(positive), pattern: "clearSelection("), 2,
+                       "自检①失败：真实调用没被数全 —— 守卫已失效")
+
+        let negative = """
+        func clearSelection() { }
+        // session.clearSelection(注释里的不算)
+        """
+        XCTAssertEqual(callCount(inSqueezed: squeezedText(negative), pattern: "clearSelection("), 0,
+                       "自检②失败：定义/注释被误计 —— 守卫会假红")
+    }
 }
