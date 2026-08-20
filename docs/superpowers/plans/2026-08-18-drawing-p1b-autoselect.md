@@ -1942,7 +1942,7 @@ echo "branch=$(git -C "$repo" branch --show-current) HEAD=$(git -C "$repo" rev-p
 cd "$repo/ios/Contracts" && swift test --filter DrawingPanelStyleSemanticsTests 2>&1 | tail -10
 ```
 
-预期：`Test run with 14 tests in 1 suites passed`（Task 5 的 8 条 + 本 task 的 6 条）。
+预期：`Test run with 13 tests in 1 suites passed`（Task 5 的 7 条 + 本 task 的 6 条）。
 
 - [ ] **Step 5: 写守卫 G3 / G4**
 
