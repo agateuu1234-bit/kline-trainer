@@ -2733,7 +2733,7 @@ git commit -m "S3 Task5：真 PG 验收补七档（⑤ ⑤b ㉙ ㉚ ㊱ ㊲ ㊳�
 
 | 闸门 | 基线 | S3 实测 |
 |---|---|---|
-| `"$PY" -m pytest backend/tests -q` | 770 passed（切分支时）→ 810（Task1-3 后） | **836 passed** |
+| `"$PY" -m pytest backend/tests -q` | 770 passed（切分支时）→ 810（Task1-3 后） | **838 passed**（评审阶段又 +2） |
 | `verify_pilot_db_lifecycle.py` | 41 档 | **49 档**（含评审追加的 ㊴） |
 | `verify_pilot_concurrency.py` | 11 档 | **11 档**（实测） |
 | `verify_pilot_two_phase_create.py` | 28 档 | **28 档**（实测） |
@@ -2890,7 +2890,7 @@ EOF
 | 1 | Task 5 Step 0 正文说「把**三个**新库名加进白名单」 | 它下面的代码块实际列了 **5 个**（`r30`/`r36`/`r37`/`r38`/`r38stranger`，后两个是 R6/R7 加 ㊳ 时带进来的）。按 5 个加；评审阶段又加了 `r39`（㊴），共 **6 个** |
 | 2 | 收口表写「变异表 **M1–M27**」 | 正文实际排到 **M43**。按正文全部条目跑 |
 | 3 | ㊳ 的代码块：`create_pilot_database(conn, connect=…, seed=…, run_id=…, **_BUILD_ARGS)` | 漏了必填关键字 `db_name=`，照抄直接 `TypeError`。已补 |
-| 4 | 基线「770 passed」（在 `8578a59` 实测） | 那是**切分支时**的数字；Task 1-3 落地后基线已是 **810**。Task 4 后 830，评审修复后 **836** |
+| 4 | 基线「770 passed」（在 `8578a59` 实测） | 那是**切分支时**的数字；Task 1-3 落地后基线已是 **810**。Task 4 后 830，评审修复后 **838** |
 | 5 | 真 PG 变异 **M24** 写「把整段判据删光」 | 那样 `$3` 不再被引用、而调用处仍传 3 个参数 → `IndeterminateDatatypeError`，红的理由**不是**判据失效。改成 `AND ($3::double precision IS NOT NULL)`（保留三参数、判据恒真）后，红档收敛到**只有 ㊱**，理由正确 |
 | 6 | 档数「S3 完成后 = 48 档」 | 评审 WB-R3 挖出 `db_oid IS NULL` 那条真缺陷，新增档 **㊴**（双向）→ **49 档** |
 

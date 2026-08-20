@@ -3361,6 +3361,12 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
         await pin_search_path(maint_conn)
 
     # 2. 建完**再验一次结构**：「执行过 DDL」不等于「结构就对」（与闸 (i) 同一条纪律）。
+    # ⚠️ **健康集群上这一次是冗余的，而这份冗余是有意的 —— 别把它「优化」掉**
+    #    （合并前自评 Minor#1）：没跑 DDL 时 1b 刚验过一遍。留着它有两个理由：
+    #      ① 1b 的 `malformed` 只对**在场的表**求值（按 `_MAINTENANCE_SHAPE_OWNER`
+    #        的前缀归属）—— 将来新增一条前缀不在那张表里的判据，1b 会漏掉、这里抓得住；
+    #      ② `cluster_schema_sql` 是**调用方递进来的**文件，跑完必须无条件复验，
+    #        而「跑没跑」这个条件本身就来自调用方给的在场情况。
     # ⚠️ 同 1c：读失败也要是具名 boundary error，不是裸异常。
     try:
         shape = await maint_conn.fetchrow(_MAINTENANCE_SHAPE_SQL)
