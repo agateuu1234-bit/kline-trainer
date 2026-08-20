@@ -3228,7 +3228,19 @@ DELETE FROM public.pilot_create_intent
 
 async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
                               try_seed_lock, release_seed_lock) -> None:
-    """`qmt_pilot --init-cluster-marker`：把一台干净集群声明为 pilot 专用。
+    """`qmt_pilot --init-cluster-marker` 的**实现函数**：把一台干净集群声明为 pilot 专用。
+
+    ⛔ **那条命令本身此刻还不存在**（codex S3-WB-R1 据此报了一条 high，如实登记）：
+       本模块是**纯库**，全仓没有 `qmt_pilot` 可执行入口、没有 argparse、
+       `pyproject.toml` 里也没有 console_scripts。这不是本片的疏漏，是**既定的切分边界**：
+       spec 第 7 行写死「本文件的作用域 = PR 4a：护栏、集群闸、建/复用/reset 生命周期」，
+       §10「后续（不在本 PR）」把 **pilot 编排**整块划给 **4c**，命令行属于编排。
+       实测佐证：4a 的**四个**公开入口（`create_pilot_database` / `reset_pilot_database` /
+       `init_cluster_marker` / `try_empty_remnant_exception`）**全都**只被单测与真 PG
+       验收脚本调用，一个生产调用者都没有 —— 这个状态在本片之前就是如此，本片没有改变它。
+       ⚠️ 之所以要在这里写明：闸 (i) 的两条错误提示逐字写着「请跑 `qmt_pilot
+          --init-cluster-marker`」，读的人（包括一位认真的评审者）会据此以为命令已经能跑。
+          4c 落地之前，**这条路只能由 4c 的 wrapper 或验收脚本走**。
 
     幂等语义（spec §4 + O4-F7）：
       · 已存在合法单行标记 **且**【维护库专用表集合】形状合规 → 直接成功；
