@@ -1639,7 +1639,7 @@ echo "branch=$(git -C "$repo" branch --show-current) HEAD=$(git -C "$repo" rev-p
 cd "$repo/ios/Contracts" && swift test --filter DrawingPanelStyleSemanticsTests 2>&1 | tail -10
 ```
 
-预期：`Test run with 8 tests in 1 suites passed`。
+预期：`Test run with 7 tests in 1 suites passed`（本节代码块共 7 个 `@Test`）。
 
 - [ ] **Step 5: 跑 host 全量**
 
