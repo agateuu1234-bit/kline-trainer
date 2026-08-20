@@ -96,6 +96,30 @@ public final class DrawingSession {
     /// 渲染 dispatch 按 `drawing.id == selectedDrawingID` 逐条判、把**所有**空 id 的线一起高亮。
     func setSelection(id: DrawingID, panel: PanelId) {
         guard drawingModeActive, mode == .select, !id.isEmpty else { return }
+        assignSelection(id: id, panel: panel)
+    }
+
+    /// D82（自动选中 spec §2.3）：**提交路径专用**。画线态下能产生选中的**唯一**入口。
+    /// 守卫与 `setSelection` **互斥**：那边只认 `.select`，这边只认 `.draw`；两者的并集
+    /// 恰好等于允许的全集。于是「画线态靠 hitTest 挂上一个选中」这条路**结构上不存在**，
+    /// `ChartContainerView` 的 `.draw` 分支里不需要写任何防御性代码。
+    /// ⚠️ **不得**把两个入口合并成一个带 mode 参数的函数（spec §2.3 明令）—— 那会让
+    ///    「哪个 mode 允许」重新变成调用点的责任，也就是这条 D82 要消灭的东西。
+    /// `!id.isEmpty` 与 `setSelection` 同理由（见其头注：resume 路径不经 `appendDrawing` 的门）。
+    /// `selectionGeometryVisible = true` 与 `setSelection` 同理由（spec §2.4）：能走到这一步，
+    /// **同一次调用**里已经对这条线跑过 `HorizontalLineTool.visibleGeometry != nil`
+    /// （`DrawingEditRouter.commitPendingAndSelect` 的第 ② 步）——过了那道门即证明此刻几何可见。
+    /// internal（同容器 mutator 纪律，见文件顶部大注释：mutator 一旦 public，包外就能绕过
+    /// `beginDrawingSession` / `endDrawingSessionIfActive` 这两个唯一收口点）。
+    func setCommittedSelection(id: DrawingID, panel: PanelId) {
+        guard drawingModeActive, mode == .draw, !id.isEmpty else { return }
+        assignSelection(id: id, panel: panel)
+    }
+
+    /// 两个入口**共用的赋值体**（spec §2.3：若要消重，只允许抽一个 `private` 的赋值 helper，
+    /// **两个入口各自保留自己的守卫**）。抽出来让「两个入口的函数体一致」由**构造**保证，
+    /// 而不是靠两份三行代码日后不漂移这个承诺。
+    private func assignSelection(id: DrawingID, panel: PanelId) {
         selectedDrawingID = id
         selectedPanel = panel
         selectionGeometryVisible = true            // 命中即证明此刻几何可见（hitTest 内部就是 visibleGeometry != nil，D40）

@@ -448,3 +448,79 @@ struct DrawingSessionTests {
         #expect(t.selectionGeometryVisible == false, "选中没建立成，提示不许被置亮")
     }
 }
+
+@Suite("D82：画线态选中的唯一入口 —— 两个入口守卫互斥")
+@MainActor
+struct DrawingCommittedSelectionEntryTests {
+
+    /// 造「会话已开、处于画线态（默认就是 .draw）」的引擎。
+    private func drawingSessionEngine() -> TrainingEngine {
+        let e = TrainingEngine.preview()
+        e.toggleDrawingMode()                       // beginDrawingSession(tool: .horizontal)
+        #expect(e.drawingSession.drawingModeActive == true)
+        #expect(e.drawingSession.mode == .draw)
+        return e
+    }
+
+    // ── 正向档（防「全是拒了的套件掩盖恒抛守卫」，spec §7.1 的同一条纪律）──
+
+    @Test("画线态 + 非空 id → setCommittedSelection **建立**选中，并置 selectionGeometryVisible")
+    func committedEntryGrantsInDrawMode() {
+        let e = drawingSessionEngine()
+        e.drawingSession.setCommittedSelection(id: "A", panel: .upper)
+        #expect(e.drawingSession.selectedDrawingID == "A")      // 断言等于哪个 id，不是「非 nil」
+        #expect(e.drawingSession.selectedPanel == .upper)
+        #expect(e.drawingSession.selectionGeometryVisible == true)   // spec §2.4
+    }
+
+    @Test("选择态 + 非空 id → setSelection **建立**选中（既有入口未被本片削弱）")
+    func selectEntryStillGrantsInSelectMode() {
+        let e = drawingSessionEngine()
+        e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "B", panel: .lower)
+        #expect(e.drawingSession.selectedDrawingID == "B")
+        #expect(e.drawingSession.selectedPanel == .lower)
+        #expect(e.drawingSession.selectionGeometryVisible == true)
+    }
+
+    // ── N-lock-1 / N-lock-2：两个入口互斥（spec §7.3）──
+
+    @Test("N-lock-1：mode == .draw 时调 setSelection → 选中保持 nil（画线态恒不做命中判定）")
+    func setSelectionRejectedInDrawMode() {
+        let e = drawingSessionEngine()
+        e.drawingSession.setSelection(id: "A", panel: .upper)
+        #expect(e.drawingSession.selectedDrawingID == nil)
+        #expect(e.drawingSession.selectedPanel == nil)
+        #expect(e.drawingSession.selectionGeometryVisible == false)
+    }
+
+    @Test("N-lock-2：mode == .select 时调 setCommittedSelection → 选中保持 nil（提交路径专用）")
+    func committedEntryRejectedInSelectMode() {
+        let e = drawingSessionEngine()
+        e.drawingSession.setMode(.select)
+        e.drawingSession.setCommittedSelection(id: "A", panel: .upper)
+        #expect(e.drawingSession.selectedDrawingID == nil)
+        #expect(e.drawingSession.selectedPanel == nil)
+        #expect(e.drawingSession.selectionGeometryVisible == false)
+    }
+
+    // ── 另两个分量各自单独被守（防「三条合取里只有一条在工作」）──
+
+    @Test("空 id 两个入口都拒（resume 路径可解码出空 id 的线，放行会让所有空 id 的线一起高亮）")
+    func emptyIdRejectedByBothEntries() {
+        let e = drawingSessionEngine()
+        e.drawingSession.setCommittedSelection(id: "", panel: .upper)
+        #expect(e.drawingSession.selectedDrawingID == nil, "画线态入口漏了 !id.isEmpty")
+        e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "", panel: .upper)
+        #expect(e.drawingSession.selectedDrawingID == nil, "选择态入口漏了 !id.isEmpty")
+    }
+
+    @Test("没有画线会话时 setCommittedSelection 恒拒（fail-closed）")
+    func committedEntryRejectedWithoutSession() {
+        let e = TrainingEngine.preview()             // 没调 toggleDrawingMode
+        #expect(e.drawingSession.drawingModeActive == false)
+        e.drawingSession.setCommittedSelection(id: "A", panel: .upper)
+        #expect(e.drawingSession.selectedDrawingID == nil)
+    }
+}
