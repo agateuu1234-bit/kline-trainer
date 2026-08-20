@@ -115,6 +115,11 @@ enum DrawingEditRouter {
     ///      平移到线看不见时**不重绘** → 控件停在旧状态（验收 #18c 失效）。
     ///      提示陈旧最坏只是晚一帧，写入仍会被 `canEditStyle` 那道现算的门拦住。
     static func styleControlsEnabled(engine: TrainingEngine) -> Bool {
+        // D86（自动选中 spec §6.1 第二张表）：分流判据是 `session.mode`，不再是「有没有选中」。
+        // 画线态**恒可用** —— 面板此刻改的是「本局默认」（必然写得进去），与任何线的状态无关；
+        // 锁定的线只该让**附带的** `applyStyle` 被拒（§6.3 #2：灰只降饱和、绝不写解释文案），
+        // 不该把面板整个灰掉。
+        guard engine.drawingSession.mode == .select else { return true }
         guard engine.drawingSession.selectedDrawingID != nil else { return true }   // ①
         return editableIgnoringGeometry(engine: engine)
             && engine.drawingSession.selectionGeometryVisible                        // ②
@@ -132,7 +137,23 @@ enum DrawingEditRouter {
     /// **是每次求值现算的派生值，不是拷贝进某个 @State 的副本**（D49：常驻面板长期存活，
     /// 任何第二份样式状态都会与 `engine.drawings` 里的真值漂移）。
     static func panelStyle(engine: TrainingEngine) -> DrawingDefaultStyle {
-        guard let d = uniqueSelected(engine: engine) else { return engine.drawingSession.defaultStyle }
+        // D86（自动选中 spec §6.1 第一张表）：分流判据是 `session.mode`，不再是「有没有选中」。
+        // 画线态恒显示**本局默认**（=「接下来要画的样式」）。这条规则的自洽性来源是 D38：
+        // 画线态下点图表是落锚、**不做 hitTest** → 画线态下被选中的必然是刚画的那一条；
+        // 提交那一刻两者相等（`commitPending` 就是用 `defaultStyle` 造的线），只在「那条线改不动、
+        // 默认继续改」之后才分叉 —— 而画线态的语义本来就是「我下一笔要画成什么样」。
+        // 这是对 D49 的**有意修订**（§6.5 #3），不是回归。
+        guard engine.drawingSession.mode == .select,
+              let d = uniqueSelected(engine: engine) else { return engine.drawingSession.defaultStyle }
+        return styleFields(of: d)
+    }
+
+    /// 从一条线上取 5 个样式字段。**`Sources/` 里唯一一处从 `DrawingObject` 取样式**（D49）。
+    /// ⚠️ 它服务两个**不同的问题**：`panelStyle` 的选择态分支问「面板显示什么」，
+    ///    Task 6 的 `selectedLineStyle` 问「改线时从哪儿起算」。两者在画线态**刻意不同**
+    ///    （前者取默认、后者取线）—— 合并成一个函数正是 codex spec-R9 那条 high 的来源
+    ///    （§6.4：「单一真相」是对同一个问题只留一个答案，不是对两个问题共用一个函数）。
+    private static func styleFields(of d: DrawingObject) -> DrawingDefaultStyle {
         var s = DrawingDefaultStyle()
         s.lineSubType = d.lineSubType
         s.lineStyle = d.lineStyle
