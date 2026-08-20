@@ -7030,3 +7030,52 @@ def test_init_turns_a_failed_guard_query_into_a_named_boundary_error(guard, why)
         # 前置：补建 DDL 真的跑了 → 抛的是**第 2 步**那一次，不是 1b 那一次
         assert any("CREATE TABLE" in q.upper() for q in maint.executed), \
             "补建 DDL 没跑 → 这一档抛在 1b（那里本来就包了），对第 2 步零判别力"
+
+
+def test_orphan_cleanup_verifies_the_lock_even_when_release_itself_raises():
+    """release 回调**自己抛**的时候，复核尤其不能被跳过（codex S3-WB-R2）。
+
+    上一版把「还了也要验」写在 `await release_seed_lock(...)` 之后的**同一层**：
+    回调一抛，那条复核整句被跳过 —— 而**回调抛异常恰恰是锁最可能没还掉的那一档**
+    （连接断了、只释放了一层可重入计数、release 打到了另一条连接上）。
+    后果是裸异常逃出去（不是具名 boundary error），泄漏**静默**发生，
+    再被取锁前那条 fail-closed 判据放大成「这条连接从此再也清不掉该 seed 的孤儿」。
+    """
+    maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_gone", seed="gone")])
+
+    async def _grant(seed):
+        maint.held_seeds.add(seed)
+        return True
+
+    async def _boom_release(_seed):
+        raise RuntimeError("connection reset by peer")   # 锁**没**还掉，且回调抛了
+
+    with pytest.raises(PilotClusterBoundaryError) as ei:
+        asyncio.run(_init(maint, lock_pair=(_grant, _boom_release)))
+    assert ei.value.code == "seed_lock_not_released", \
+        "release 回调抛了，泄漏复核就被跳过了"
+    assert isinstance(ei.value.__context__, RuntimeError), \
+        f"回调自己的异常没留在 __context__ 里：{ei.value.__context__!r}"
+
+
+def test_orphan_cleanup_lets_a_release_failure_surface_when_the_lock_did_come_off():
+    """**正向档**：上一条不许退化成「release 一抛就一律报锁泄漏」。
+
+    回调抛了、但锁**确实**还掉了 → 那是调用方自己的接线问题，
+    原样抛出去最诚实；报成 `seed_lock_not_released` 会指错方向。
+    """
+    maint = _InitMaint(all_intent_rows=[_orphan(dbname="kline_pilot_gone", seed="gone")])
+
+    async def _grant(seed):
+        maint.held_seeds.add(seed)
+        return True
+
+    async def _release_then_boom(seed):
+        maint.held_seeds.discard(seed)                   # 锁真的还掉了
+        raise RuntimeError("bookkeeping failed after unlock")
+
+    with pytest.raises(RuntimeError) as ei:
+        asyncio.run(_init(maint, lock_pair=(_grant, _release_then_boom)))
+    assert not isinstance(ei.value, PilotClusterBoundaryError), \
+        "锁明明还掉了，却报成了锁泄漏 —— 指错方向"
+    assert "bookkeeping failed" in str(ei.value)

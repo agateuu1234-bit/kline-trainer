@@ -3448,25 +3448,36 @@ async def init_cluster_marker(maint_conn, *, connect, cluster_schema_sql: str,
             # ⚠️ **取了就必须还**：会话级锁不还会一直挂在维护连接上，挡住后续同 seed
             #    的运行；同一条连接上后来的 `_SEED_LOCK_HELD_SQL` 也会观察到一把
             #    **本次操作从未刻意取过**的锁。
-            await release_seed_lock(r["seed"])
-            # ⚠️ **还了也要验**（codex S3-R4）—— 与「取到了也要验」是同一条纪律，
-            #    上一版只验了取、没验还。`release_seed_lock` 和 `try_seed_lock` 一样是
-            #    **调用方递进来的回调**：空实现、连错连接、只释放一层可重入计数，
-            #    都会「成功返回」而锁**仍挂在 `maint_conn` 上**。
-            #    这条泄漏尤其毒，因为上面那条「事前已持有就跳过」的 fail-closed 判据
-            #    会把它放大成**这条连接从此再也清不掉该 seed 的孤儿**（静默跳过，
-            #    而且理由看起来完全合理）。
-            # ⚠️ 只对**本次确实取到**的那把锁作此要求：走到这里就说明
-            #    「事前未持有 + 回调授予 + 活连接复核为真」三条都成立过。
-            if await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, r["seed"]):
-                raise PilotClusterBoundaryError(
-                    "seed_lock_not_released",
-                    f"孤儿清理为 seed={r['seed']!r} 取了 advisory lock，"
-                    f"调用方的 release 回调返回了，但这把锁**仍挂在维护连接上**。"
-                    f"它是会话级的：不还会挡住后续同 seed 的建库/reset，"
-                    f"也会让本函数以后把该 seed 的孤儿静默跳过。"
-                    f"请检查 release_seed_lock 的接线（是否空实现／是否作用在另一条连接／"
-                    f"是否只释放了一层可重入计数），或重开维护连接。")
+            # ⚠️ **复核必须放在嵌套 `finally` 里**（codex S3-WB-R2）：上一版把它写在
+            #    `await release_seed_lock(...)` 之后的**同一层**，于是回调**自己抛**时
+            #    整条复核被跳过 —— 而「回调抛异常」恰恰是**锁最可能没还掉**的那一档
+            #    （连接断了 / 只释放了一层可重入计数 / release 打在了另一条连接上）。
+            #    后果：裸异常逃出（不是具名 boundary error）、泄漏静默发生，
+            #    再被取锁前那条 fail-closed 判据放大成「这条连接从此清不掉该 seed 的孤儿」。
+            # ⚠️ 回调抛了、但锁**确实**还掉了那一档：原样让回调的异常抛出去 ——
+            #    那是调用方自己的接线问题，报成 `seed_lock_not_released` 会指错方向。
+            try:
+                await release_seed_lock(r["seed"])
+            finally:
+                # ⚠️ **还了也要验**（codex S3-R4）—— 与「取到了也要验」是同一条纪律，
+                #    上一版只验了取、没验还。`release_seed_lock` 和 `try_seed_lock` 一样是
+                #    **调用方递进来的回调**：空实现、连错连接、只释放一层可重入计数，
+                #    都会「成功返回」而锁**仍挂在 `maint_conn` 上**。
+                #    这条泄漏尤其毒，因为上面那条「事前已持有就跳过」的 fail-closed 判据
+                #    会把它放大成**这条连接从此再也清不掉该 seed 的孤儿**（静默跳过，
+                #    而且理由看起来完全合理）。
+                # ⚠️ 只对**本次确实取到**的那把锁作此要求：走到这里就说明
+                #    「事前未持有 + 回调授予 + 活连接复核为真」三条都成立过。
+                if await maint_conn.fetchval(_SEED_LOCK_HELD_SQL, r["seed"]):
+                    raise PilotClusterBoundaryError(
+                        "seed_lock_not_released",
+                        f"孤儿清理为 seed={r['seed']!r} 取了 advisory lock，"
+                        f"调用方的 release 回调已经跑过（正常返回**或自己抛了**），"
+                        f"但这把锁**仍挂在维护连接上**。"
+                        f"它是会话级的：不还会挡住后续同 seed 的建库/reset，"
+                        f"也会让本函数以后把该 seed 的孤儿静默跳过。"
+                        f"请检查 release_seed_lock 的接线（是否空实现／是否作用在另一条连接／"
+                        f"是否只释放了一层可重入计数），或重开维护连接。")
             # ⚠️ 在 `finally` 里 raise 会**接替**正在传播的异常，但原异常仍保留在
             #    `__context__` 里（Python 语义），信息不丢。
             # ⛔ **不在这里关闭/毒化 `maint_conn`**（codex 建议过）：连接是调用方的，
