@@ -180,27 +180,25 @@ struct DrawingInteractionUISourceGuardTests {
         }
     }
 
-    @Test("D49 路由分流 + D65 置灰：有选中写路由、无选中写默认；enabled 来自 UI 版谓词")
-    func panelRoutesBySelection() throws {
+    @Test("D86：面板写入统一按 mode 分流 —— TrainingView 只转发变更意图，**不得再自己判有没有选中**")
+    func panelRoutesByMode() throws {
         let tv = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
         #expect(tv.contains(squeeze("DrawingEditRouter.panelStyle(engine: engine)")))
         #expect(tv.contains(squeeze("DrawingEditRouter.styleControlsEnabled(engine: engine)")))
         #expect(tv.contains(squeeze("DrawingEditRouter.deleteButtonEnabled(engine: engine)")))
-        // codex 整支 R3（本 PR 引入的回归修复）：TrainingView 只转发**变更意图**，不再自己先读一份
-        // 快照/直接落盘——「现取当前真值 + 合并」全部下放给 DrawingEditRouter 的两个 mutation 入口。
-        #expect(tv.contains(squeeze("DrawingEditRouter.applyStyleMutation(")))
-        #expect(tv.contains(squeeze("DrawingEditRouter.applyDefaultStyleMutation(")))
-        // 分流判据必须是「有没有选中」，不是别的
-        #expect(tv.contains(squeeze("engine.drawingSession.selectedDrawingID != nil")))
-        // applyStyleMutation 在 Sources/ 里恰好 1 处（面板是唯一的样式写入入口，D58 末段：
-        // 不得绕开面板另开编辑入口，否则 (ray,.left) 会变成只在编辑路径上可达的坏组合）
-        let sites = try callSiteCount("DrawingEditRouter.applyStyleMutation(")
-        #expect(sites.count == 1 && sites.first?.count == 1,
-                "applyStyleMutation 调用点应恰好 1 处，实际：\(sites)")
-        // applyDefaultStyleMutation 同理恰好 1 处（无选中路径的唯一入口）。
-        let defaultSites = try callSiteCount("DrawingEditRouter.applyDefaultStyleMutation(")
-        #expect(defaultSites.count == 1 && defaultSites.first?.count == 1,
-                "applyDefaultStyleMutation 调用点应恰好 1 处，实际：\(defaultSites)")
+        // D86：唯一写入入口（调用点计数归 G4 管，这里只钉「真的接上了」）
+        #expect(tv.contains(squeeze("DrawingEditRouter.applyPanelStyleMutation(")))
+        // spec §6.2：`onStyleChange` 闭包里留一个「有没有选中」的分流就是**第二份判据**，
+        // 早晚与 panelStyle / styleControlsEnabled 漂移。**判据限定在闭包体内**——
+        // 裸写 `!tv.contains("selectedDrawingID")` 会被本视图其它正当用途打红（假红）。
+        let start = try #require(tv.range(of: squeeze("onStyleChange: { mutate in")),
+                                 "找不到 onStyleChange 闭包起点 —— 锚点失效必须报错，不得静默通过")
+        let after = String(tv[start.upperBound...])
+        let end = try #require(after.range(of: squeeze("onToggleMode:")),
+                               "找不到闭包终点锚 onToggleMode —— 锚点失效必须报错")
+        let body = String(after[..<end.lowerBound])
+        #expect(!body.contains("selectedDrawingID"),
+                "onStyleChange 里还留着按「有没有选中」的分流 —— 那是 D86 要消灭的第二份判据")
     }
 
     // ⭐补（本 Task 自查发现的判别力缺口）：把 `.disabled(!enabled)` 从 DrawingStyleParams 根链删掉，

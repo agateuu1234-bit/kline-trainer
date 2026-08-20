@@ -216,22 +216,62 @@ enum DrawingEditRouter {
     // PR-4 把派生值算好传进视图时，把「现取」这个性质丢了。这两个函数把它还回来：
     // `DrawingStyleParams` 只把**变更意图**（mutation 闭包）传上去，「现取 + 合并」在这里（host 可测）完成。
 
-    /// 把一次样式变更**合并进动作发生那一刻的当前真值**再写入选中线。
-    /// ⚠️ **绝不能改成接收调用方传入的快照**——那正是本函数要修的回归本身。
-    @discardableResult
-    static func applyStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
-                                   engine: TrainingEngine) -> Bool {
-        var next = panelStyle(engine: engine)      // ← 现取（动作发生这一刻的真值，不是渲染时的快照）
-        mutate(&next)
-        return applyStyle(next, engine: engine)
+    /// §6.4 base ②：选中线**当前**的 5 个样式字段（无选中 / 不唯一 / 结构性不可见 → nil）。
+    /// 与 `panelStyle` 的选择态分支**同源取值**（都经 `uniqueSelected` + `styleFields`），
+    /// 但**语义不同**：那个回答「面板显示什么」，这个回答「改线时从哪儿起算」。
+    /// 两者在画线态**刻意不同** —— 前者取默认、后者取线。
+    private static func selectedLineStyle(engine: TrainingEngine) -> DrawingDefaultStyle? {
+        guard let d = uniqueSelected(engine: engine) else { return nil }
+        return styleFields(of: d)
     }
 
-    /// 无选中时：同样「现取 + 合并」，写「下一条线的默认」。
-    static func applyDefaultStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
-                                          engine: TrainingEngine) {
-        var next = engine.drawingSession.defaultStyle   // ← 现取
-        mutate(&next)
-        engine.drawingSession.setDefaultStyle(next)
+    /// D86：常驻面板的**唯一**写入入口。取代 applyStyleMutation / applyDefaultStyleMutation
+    /// （三个分支的 base 与写入与它们逐一等价，是严格泛化 → 那两个成为本次改动制造的孤儿，已一并删除）。
+    ///
+    /// ⚠️ **画线态把同一个 mutation 分别套到两个 base 上**（spec §6.3 #0），**不是**套一份默认快照。
+    ///    反例（上一稿会真的发生）：画线 A（橙、粗细 1，自动选中）→ 锁定 A → 改颜色为紫
+    ///    （默认变紫；`applyStyle` 被 `!d.locked` 拒 → A 仍是橙 ⇒ **默认与 A 已分叉**）→ 解锁 A
+    ///    → 只改**粗细**为 3。若此刻把「默认的整份快照 {紫, 3}」套上去 ⇒ **A 的颜色被静默从橙改成紫**，
+    ///    并经 `drawingsRevision` → autosave **落盘**。用户只碰了粗细，被改掉的却是他刚刚特意
+    ///    锁起来保护过的颜色。
+    ///    ⚠️ `applyStyle` 的入参是**完整的** `DrawingDefaultStyle`（D50 的 API 形状，本片不改），
+    ///       所以「只改一项」**只能靠选对 base 来表达**。**base 选错就是这条缺陷本身。**
+    ///
+    /// ⚠️ 两个 base 都**现取**（动作发生这一刻的真值，不是视图渲染时的快照）——
+    ///    **绝不能改成接收调用方传入的快照**，那正是 1b-i PR-4 整支 R3 修过的那个真丢数据回归
+    ///    （两个控件在 SwiftUI 重渲染之前先后触发，第二次拿旧快照把第一次 revert 掉，
+    ///    选中线路径还会经 `drawingsRevision` 被 autosave 持久化）。
+    static func applyPanelStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
+                                        engine: TrainingEngine) {
+        let session = engine.drawingSession
+        if session.mode == .draw {
+            // **顺序 load-bearing**：先写默认（主语义、必须成功），**再** best-effort 改线
+            // （附带、可能被锁定 / 滑出屏幕 / 未来数据 / 工具未实现四类门拒）。反过来写会让
+            // 「线改失败」在实现上很容易被顺手写成「整个操作失败」，而用户点了一下颜色却什么都没变。
+            var d = session.defaultStyle                        // base ①：默认自己
+            mutate(&d)
+            session.setDefaultStyle(d)
+            if let cur = selectedLineStyle(engine: engine) {    // base ②：那条线自己当前的 5 个样式字段
+                var l = cur
+                mutate(&l)
+                // ⚠️ 返回值**刻意丢弃**且**不得**据它决定选中生命期（D64 原样成立：失败原因有五类，
+                //    其中三类必须保留选中，一个 Bool 表达不了）。失败也**不回滚默认、不给任何反馈**
+                //    （母 spec §3 逐字：灰只降饱和、绝不写任何解释文案）。
+                _ = applyStyle(l, engine: engine)
+            }
+        } else if session.selectedDrawingID != nil {
+            // 选择态 + 有选中：只改那一条，**不回写默认**（D49 的核心价值，原样保留）。
+            // base 取 `panelStyle` —— 选择态下它与 `selectedLineStyle` 同源，且这一支与被本函数
+            // 取代的 `applyStyleMutation` **逐字等价**（严格泛化的证据）。
+            var l = panelStyle(engine: engine)
+            mutate(&l)
+            _ = applyStyle(l, engine: engine)
+        } else {
+            // 选择态 + 无选中：改「下一条线的默认」。与被取代的 `applyDefaultStyleMutation` 逐字等价。
+            var d = session.defaultStyle
+            mutate(&d)
+            session.setDefaultStyle(d)
+        }
     }
 
     // MARK: D83 / D84 / D85 提交路由（自动选中 spec §3 / §4 / §5）

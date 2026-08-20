@@ -99,7 +99,7 @@ struct DrawingStylePanelSourceGuardTests {
     // codex 整支 R3（本 PR 引入的回归修复）：`commit` 曾从 `style`（视图渲染那一刻捕获的快照）出发
     // 拼下一个值——两个控件在 SwiftUI 完成重渲染之前先后触发时，第二次会拿旧快照把第一次的改动
     // revert 掉。现在 `commit` 只把变更意图（mutation 闭包）转发给 `onChange`，「现取当前真值 + 合并」
-    // 挪到了 `DrawingEditRouter`（见 `applyStyleMutation`/`applyDefaultStyleMutation` 及其 host 回归测试）。
+    // 挪到了 `DrawingEditRouter`（见 `applyPanelStyleMutation` 及其 host 回归测试）。
     // 本条钉住这个不变量：`commit` 函数体内**不得**出现 `style` —— 一旦出现就是退回了那个快照读法。
     @Test("commit 只转发变更意图、不读 `style`（codex 整支 R3 回归修复）：commit 函数体内不得出现 style")
     func commitNeverReadsRenderedSnapshot() throws {

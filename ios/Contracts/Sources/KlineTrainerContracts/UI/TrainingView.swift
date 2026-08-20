@@ -531,19 +531,18 @@ public struct TrainingView: View {
         ChartPanelsContainer(engine: engine, stylePanelVisible: stylePanelWillBeVisible,
                              scheme: colorScheme == .dark ? .dark : .light,
                              stylePanelPosition: stylePanelPosition,
-                             // D49：派生值**每次求值现算**（`panelStyle` 内部：有选中取那条线、无选中取 defaultStyle）。
+                             // D86：派生值**每次求值现算**（`panelStyle` 内部按 `session.mode` 分流：
+                             // 画线态恒取本局默认；选择态有选中取那条线、无选中取默认）。
                              style: DrawingEditRouter.panelStyle(engine: engine),
                              styleEnabled: DrawingEditRouter.styleControlsEnabled(engine: engine),
                              onStyleChange: { mutate in
-                                 // D49：有选中 → 只作用于那条线（改动**不回写**「下一条线的默认」）；
-                                 //      无选中 → 改默认。分流判据是「有没有选中」，别的都不是。
-                                 // codex 整支 R3：只转发**变更意图**，「现取当前真值 + 合并」交给
-                                 // DrawingEditRouter（不许在这里先读一份快照，见 DrawingStyleParams.onChange 注释）。
-                                 if engine.drawingSession.selectedDrawingID != nil {
-                                     DrawingEditRouter.applyStyleMutation(mutate, engine: engine)
-                                 } else {
-                                     DrawingEditRouter.applyDefaultStyleMutation(mutate, engine: engine)
-                                 }
+                                 // D86：显示 / 置灰 / 写入三件事**统一按 `session.mode` 分流**，
+                                 // UI 层**不得再自己判**。这里原先那个
+                                 // `if selectedDrawingID != nil { … } else { … }` 是**第二份判据**，
+                                 // 早晚与 `panelStyle` / `styleControlsEnabled` 漂移 → 必须删掉（spec §6.2）。
+                                 // codex 整支 R3 的纪律不变：只转发**变更意图**（mutation 闭包），
+                                 // 「现取当前真值 + 合并」交给 DrawingEditRouter，不许在这里先读一份快照。
+                                 DrawingEditRouter.applyPanelStyleMutation(mutate, engine: engine)
                              },
                              onToggleMode: {
                                  // D38/D57：两个方向都走 setMode —— 会话一直开着、工具在选择态恒非 nil（D57），

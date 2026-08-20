@@ -182,4 +182,52 @@ final class DrawingAutoSelectSourceGuardTests: XCTestCase {
         XCTAssertEqual(callCount(inSqueezed: sqn, pattern: "commitPending("), 0,
                        "自检②失败：G1b 把定义/注释/commitPendingAndSelect 误计了")
     }
+
+    // MARK: G3 / G4（本 task 落地：旧的两个 mutation 已删净，新入口只有一个调用点）
+
+    /// ⚠️ **必须剥注释后再数**（spec §8 G3）：`applyPanelStyleMutation` 的头注里写着
+    ///    「取代 applyStyleMutation / applyDefaultStyleMutation」这句**承重注释**，
+    ///    不剥注释 G3 会被这句注释自己打红，而「删掉那句注释」就成了合法绕过路径。
+    ///    `filesMentioning` 内部走 `squeezedSource`（已剥注释与字符串字面量），满足这一条。
+    func testG3_oldMutationIdentifiersAreFullyRemoved() throws {
+        for identifier in ["applyStyleMutation", "applyDefaultStyleMutation"] {
+            let files = try filesMentioning(identifier)
+            XCTAssertTrue(files.isEmpty,
+                "『\(identifier)』本应已删除，仍出现在：\(files)（注释已剥，故这是真实代码残留）")
+        }
+    }
+
+    /// 自足断言：证明扫描器**真的在扫**（否则「一个都没找到」与「扫描器坏了」长得一样）。
+    func testG3IsNotVacuous_scannerReallyFindsTheReplacement() throws {
+        let files = try filesMentioning("applyPanelStyleMutation")
+        XCTAssertFalse(files.isEmpty, "扫描器连新入口都找不到 —— G3 是空转的")
+    }
+
+    func testG4_applyPanelStyleMutationHasExactlyOneCallSiteInTrainingView() throws {
+        try assertExactlyOneSite("applyPanelStyleMutation(", inFileSuffixed: "UI/TrainingView.swift")
+    }
+
+    func testG3AndG4SelfCheck_bothDirections() {
+        // ① 本该命中
+        let positive = """
+        func caller() { DrawingEditRouter.applyPanelStyleMutation(mutate, engine: engine) }
+        """
+        XCTAssertEqual(callCount(inSqueezed: squeezedText(positive),
+                                 pattern: "applyPanelStyleMutation("), 1, "自检①失败：G4")
+
+        // ② 本该**不**命中：定义 / 注释 / 名字互不为子串
+        let negative = """
+        static func applyPanelStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
+                                            engine: TrainingEngine) { }
+        // 取代 applyStyleMutation / applyDefaultStyleMutation
+        """
+        let sqn = squeezedText(negative)
+        XCTAssertEqual(callCount(inSqueezed: sqn, pattern: "applyPanelStyleMutation("), 0,
+                       "自检②失败：定义被误计 —— G4 会假红")
+        XCTAssertFalse(sqn.contains("applyStyleMutation"),
+                       "自检②失败：注释没被剥掉 —— G3 会被自己的承重注释打红")
+        // 名字互不为子串（防未来改名引入误命中）
+        XCTAssertFalse("applyPanelStyleMutation".contains("applyStyleMutation"))
+        XCTAssertFalse("applyPanelStyleMutation".contains("applyDefaultStyleMutation"))
+    }
 }
