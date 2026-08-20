@@ -769,7 +769,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
     // ── 外层：P1 / P2 正向档（走完整六步）──
 
     @Test("P1：训练态 + 画线态 + 健康锚点 → 提交后选中 == 新那条的 id，落锚面板 == selectedPanel，drawings +1")
-    func outerCommitSelectsTheNewLine() {
+    func outerCommitSelectsTheNewLine() throws {
         let e = Self.drawingEngine()
         let before = e.drawings.count
         e.drawingSession.addAnchor(
@@ -778,25 +778,25 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
         DrawingEditRouter.commitPendingAndSelect(panel: .upper, mapper: Self.mapper(), engine: e)
 
         #expect(e.drawings.count == before + 1)
-        let newId = try! #require(e.drawings.last?.id)
+        let newId = try #require(e.drawings.last?.id)
         #expect(e.drawingSession.selectedDrawingID == newId, "选中的必须**就是**刚提交那条")
         #expect(e.drawingSession.selectedPanel == .upper)
     }
 
     @Test("P2：连画两条 → 选中**转移**到第二条（== id2 且 != id1），drawings == 2")
-    func outerSecondCommitTransfersSelection() {
+    func outerSecondCommitTransfersSelection() throws {
         let e = Self.drawingEngine()
         e.drawingSession.addAnchor(
             DrawingAnchor(period: e.upperPanel.period, candleIndex: 0, price: 50), panel: .upper)
         DrawingEditRouter.commitPendingAndSelect(panel: .upper, mapper: Self.mapper(), engine: e)
-        let id1 = try! #require(e.drawingSession.selectedDrawingID)
+        let id1 = try #require(e.drawingSession.selectedDrawingID)
 
         e.drawingSession.addAnchor(
             DrawingAnchor(period: e.upperPanel.period, candleIndex: 1, price: 60), panel: .upper)
         DrawingEditRouter.commitPendingAndSelect(panel: .upper, mapper: Self.mapper(), engine: e)
 
         #expect(e.drawings.count == 2)
-        let id2 = try! #require(e.drawingSession.selectedDrawingID)
+        let id2 = try #require(e.drawingSession.selectedDrawingID)
         #expect(id2 != id1, "选中没有转移到第二条")
         #expect(e.drawings.last?.id == id2)
     }
@@ -1136,6 +1136,8 @@ struct ChartContainerViewAutoSelectTests {
 #endif
 ```
 
+⚠️ 把 `try!` 写成 `func … throws` + `try #require`（swift-testing 惯例，本仓既有测试的写法）。
+
 ⚠️ **先确认 `handleDrawingTapForTesting` 与 `KLineRenderState.selectedDrawingID` 两个名字在当前树上真实存在**（同目录 `ChartContainerViewDrawingSessionTests.swift` 已在用前者）。若签名不同，**以当前树为准改测试，不要改生产代码去迁就测试**。
 
 - [ ] **Step 2: 跑测试，确认它失败**
@@ -1184,6 +1186,41 @@ grep -c "✔ Test .* passed after" /tmp/catalyst-t4-red.log     # 判绿读执�
                 rebuildRenderState(bounds: view.bounds)
                 // ← 此处**故意没有** engine.commitDrawing(panel:)：连续画线（D38），会话与工具保持不变。
 ```
+
+- [ ] **Step 3b: 把既有守卫 `rejectsInvisibleDrawingBeforePersist` **重新指向路由文件**（不是删掉它）**
+
+> **控制者裁决（开工前冲突扫描 F1）**：`Drawing/DrawingSessionSourceGuardTests.swift` 里的
+> `rejectsInvisibleDrawingBeforePersist` 断言「`ChartContainerView` 里 `session.commitPending(` 与
+> `engine.routeDrawingCommit(` **之间**夹着 `HorizontalLineTool.visibleGeometry(` + `!= nil`」。
+> Step 3 把这三样全从该文件搬走了 → 它的 `try #require(code.range(of: "session.commitPending("))`
+> **会当场红**。
+>
+> **裁决：重新指向 `Drawing/DrawingEditRouter.swift`，不得删除。**
+> 理由：这条守卫守的不变量（**不可见画线不落库** —— 落在右缘的射线会 append + autosave 成一条
+> 画不出、命不中、删不掉的幽灵线）**在 D85 搬家之后一字不变地继续成立**，只是换了文件。
+> 删掉它 = 本片顺手拆掉了一道与自己无关的安全网，正是 spec §1「不新增门、不放宽门」的反面。
+
+把该测试改为（**只换文件与注释，判据结构一字不动**）：
+
+```swift
+    @Test("codex rebased-R2：不可见画线（右缘 ray 等 visibleGeometry==nil）不落库——commitPending 与 routeDrawingCommit 之间有 fail-closed 守卫")
+    func rejectsInvisibleDrawingBeforePersist() throws {
+        // ⚠️ 自动选中 PR（D85）把整段「尝试提交」从 ChartContainerView 搬进了 DrawingEditRouter，
+        //    本守卫随之改读路由文件。**守的不变量一字未变**：落在右缘的射线不得 append + autosave
+        //    成一条画不出 / 命不中 / 删不掉的幽灵线。
+        let code = try source("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift")
+        let s = try #require(code.range(of: "session.commitPending("), "找不到 commitPending 调用")
+        let tail = String(code[s.upperBound...])
+        let e = try #require(tail.range(of: "engine.routeDrawingCommit("), "找不到 routeDrawingCommit")
+        let between = String(tail[..<e.lowerBound])
+        #expect(between.contains("HorizontalLineTool.visibleGeometry("))
+        #expect(between.contains("!= nil"))
+    }
+```
+
+⚠️ **两处必须实测确认再改**：① `source(_:)` 这个 helper 接的是「相对 `ios/Contracts` 的路径」（见该文件顶部的 `contractsDir` 定义）；② 搬家后 `routeDrawingCommit` 在路由文件里位于**内层** `routeAndSelect`，而 `commitPending` 在**外层** —— 外层在文件中排在内层**之前**（Task 3 Step 3 明确要求插在 `routeAndSelect` 之前），故「先 `commitPending` 后 `routeDrawingCommit`」的文本顺序成立。**若实测顺序相反，报回，不要为了让守卫过而调换生产代码的函数顺序。**
+
+同时把同文件里 `#expect(code.contains("session.addAnchor("))` 那两条「先证明真读到文件」的自足断言逐条跑一遍确认仍绿（`addAnchor` 仍留在 `ChartContainerView`）。
 
 - [ ] **Step 4: 跑 Catalyst，确认它通过**
 
@@ -1901,7 +1938,50 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/gate-t6.log | tail -2
 grep -E "Test Case .*(testG3_oldMutationIdentifiersAreFullyRemoved|testG4_applyPanelStyleMutationHasExactlyOneCallSiteInTrainingView).* passed" /tmp/gate-t6.log
 ```
 
-⚠️ 删掉两个旧函数会让**引用它们的既有测试**编译失败。逐个打开看：若那条测试测的是「选择态改线不回写默认」这类**语义**，改成调 `applyPanelStyleMutation` 即可（语义等价）；若它测的是旧函数本身的存在，**删掉它**（它测的东西已经不存在了）。**不要为了让旧测试过而把旧函数留着** —— 那正是 G3 要抓的。
+⚠️ **删掉两个旧函数会打破三处既有测试。开工前的冲突扫描已把它们逐个定位并裁决，照下表做，不要自己另行发挥：**
+
+> **控制者裁决（开工前冲突扫描 F2 / F3 / F5）。** 共同原则：**不要为了让旧测试过而把旧函数留着**
+> —— 那正是 G3 要抓的；也**不要**把守的不变量顺手删掉 —— 那是拆别人的安全网。
+
+| # | 位置 | 为什么会红 | 裁决 |
+|---|---|---|---|
+| **F2** | `Render/DrawingInteractionUISourceGuardTests.swift::panelRoutesBySelection`（`:183-204`） | 五条断言：`tv.contains("DrawingEditRouter.applyStyleMutation(")` / `…applyDefaultStyleMutation(` / `tv.contains("engine.drawingSession.selectedDrawingID != nil")` / 两条 `callSiteCount(…) == 1` | **改写成 D86 形态**，见下方代码 |
+| **F3** | `Drawing/DrawingEditRouterTests.swift:437-470` 两条「现取而非快照」的行为测试 | 直接调用被删的两个函数；且 `:451-452` 断言 `applyStyleMutation(…) == true`，而新入口返回 `Void` | **平移到 `applyPanelStyleMutation`**，见下方 |
+| **F5** | `Render/DrawingStylePanelSourceGuardTests.swift:102` | 只在**注释**里提到旧名（`squeezedSource` 剥注释，且 G3 只扫 `Sources/`）→ **不会红** | 顺手把注释里的旧名改成 `applyPanelStyleMutation`（纯注释、零行为）；**这是本片改动造成的文档孤儿，属 CLAUDE.md §3 允许的清理** |
+
+**F2 的改写**（`panelRoutesBySelection`）：删掉那五条，换成三条 —— 两条正向（新入口真的接上了）+ 一条**限定在 `onStyleChange:` 闭包体内**的负向（UI 层不得再自己判）：
+
+```swift
+    @Test("D86：面板写入统一按 mode 分流 —— TrainingView 只转发变更意图，**不得再自己判有没有选中**")
+    func panelRoutesByMode() throws {
+        let tv = try code("Sources/KlineTrainerContracts/UI/TrainingView.swift")
+        #expect(tv.contains(squeeze("DrawingEditRouter.panelStyle(engine: engine)")))
+        #expect(tv.contains(squeeze("DrawingEditRouter.styleControlsEnabled(engine: engine)")))
+        #expect(tv.contains(squeeze("DrawingEditRouter.deleteButtonEnabled(engine: engine)")))
+        // D86：唯一写入入口（调用点计数归 G4 管，这里只钉「真的接上了」）
+        #expect(tv.contains(squeeze("DrawingEditRouter.applyPanelStyleMutation(")))
+        // spec §6.2：`onStyleChange` 闭包里留一个「有没有选中」的分流就是**第二份判据**，
+        // 早晚与 panelStyle / styleControlsEnabled 漂移。**判据限定在闭包体内**——
+        // 裸写 `!tv.contains("selectedDrawingID")` 会被本视图其它正当用途打红（假红）。
+        let start = try #require(tv.range(of: squeeze("onStyleChange: { mutate in")),
+                                 "找不到 onStyleChange 闭包起点 —— 锚点失效必须报错，不得静默通过")
+        let after = String(tv[start.upperBound...])
+        let end = try #require(after.range(of: squeeze("onToggleMode:")),
+                               "找不到闭包终点锚 onToggleMode —— 锚点失效必须报错")
+        let body = String(after[..<end.lowerBound])
+        #expect(!body.contains("selectedDrawingID"),
+                "onStyleChange 里还留着按「有没有选中」的分流 —— 那是 D86 要消灭的第二份判据")
+    }
+```
+
+⚠️ **两处必须实测**：① `code(_:)` / `squeeze(_:)` 两个 helper 在该文件里的真实签名；② 两个锚（`onStyleChange: { mutate in` 与 `onToggleMode:`）**在 squeeze 之后**的真实形态 —— `squeeze` 会删空白，锚串要跟着写成 squeeze 后的样子（照该文件既有断言的写法）。**锚点取不到必须 `#require` 报错，不得静默返回空串通过**（[[feedback_mechanical_checker_parser_disabled]]）。
+
+**F3 的平移**（`DrawingEditRouterTests.swift:437-470`）：两条测试的**被测性质不变**（「现取当前真值，不是渲染时的快照」），只换入口：
+
+- `applyStyleMutation({ … }, engine: e)` → `applyPanelStyleMutation({ … }, engine: e)`；
+- **删掉 `== true`**（新入口返回 `Void`），改为断言**结果字段值**（比原来的 `== true` 更强）；
+- ⚠️ **先确认那两条测试的 rig 处于哪个 mode**：若是 `.select` + 有选中 / `.select` + 无选中，`applyPanelStyleMutation` 走的正是与旧函数**逐字等价**的那两支，语义完全保留；**若 rig 是 `.draw` 态，则语义会变（画线态现在同时写默认），此时必须把 rig 显式设成 `.select` 以保持原测试的被测性质**，并在提交信息里写明这一点。
+- ⚠️ **不要**因为 Task 6 新写的 `consecutiveMutationsDoNotRevertEachOther` 看起来覆盖了同一性质就删掉这两条：新那条测的是**画线态**、这两条测的是**选择态与无选中态**，三者互不重叠（判别力不同）。
 
 - [ ] **Step 7: 变异 M9 / M10 / M11 / M15**
 
