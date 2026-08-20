@@ -1233,6 +1233,29 @@ grep -c "✔ Test .* passed after" /tmp/catalyst-t4-red.log     # 判绿读执�
 
 同时把同文件里 `#expect(code.contains("session.addAnchor("))` 那两条「先证明真读到文件」的自足断言逐条跑一遍确认仍绿（`addAnchor` 仍留在 `ChartContainerView`）。
 
+- [ ] **Step 3c: 修好 `N23a` —— 它从 Task 2 起就一直红着，本步是它的收口点**
+
+> **控制者裁决（Task 2 之后的穷尽扫描 F7-a）**：`TrainingEngineDrawingSessionTests.swift::N23a`
+> （测试名以 `N23a: append 家族非 public + 唯一调用点` 开头）有**三条**断言钉死了
+> `routeDrawingCommit` 的位置，从 **Task 2 建好内层那一刻起就是红的**（那时它有 2 个调用点）：
+>
+> | 行 | 断言 | Task 4 之后的真值 |
+> |---|---|---|
+> | `:773` | `callSiteCount("routeDrawingCommit(")` 总数 `== 1` | 仍是 1 ✅（旧调用点已被 Step 3 删掉） |
+> | `:774` | 唯一调用点 `hasSuffix("/Render/ChartContainerView.swift")` | ❌ **改成** `/Drawing/DrawingEditRouter.swift` |
+> | `:798` | `filesMentioning("routeDrawingCommit")` 白名单 = `TrainingEngine.swift` ∪ `ChartContainerView.swift` | ❌ **改成** `TrainingEngine.swift` ∪ `DrawingEditRouter.swift` |
+>
+> **裁决：改文件名，判据结构一字不动，不得放宽成「≥1」或「或者在路由里」。**
+> 这条守卫护的是「`routeDrawingCommit` 的唯一调用点必须在一道已验几何的门之后」——
+> D85 把那道门连同调用点一起搬进了路由，不变量原样成立，只是换了地址。
+> 放宽成析取式会让「两处都有」重新变得可表达，正是它要挡的东西。
+
+改完必须**同时**确认：
+- `:768-771` 的 `appendDrawing` / `appendReviewDrawing` 断言**仍绿**（本片没动 `routeDrawingCommit` 的函数体）；
+- `:798` 白名单里那句承重注释（解释「其余文件里的同名字样全是注释，扫描器剥注释后不计入」）**保留**，并追加一行说明本片把路由从 `ChartContainerView` 搬到了 `DrawingEditRouter`。
+
+⚠️ **本步是整支「预期红」的终点**：Task 4 收尾时 host 全量必须**零红**。若仍有红，说明搬家没搬干净或搬错了地方，**停下来查清，不要把断言改宽让它变绿**。
+
 - [ ] **Step 4: 跑 Catalyst，确认它通过**
 
 ```bash
@@ -1959,6 +1982,35 @@ grep -E "Test Case .*(testG3_oldMutationIdentifiersAreFullyRemoved|testG4_applyP
 | **F2** | `Render/DrawingInteractionUISourceGuardTests.swift::panelRoutesBySelection`（`:183-204`） | 五条断言：`tv.contains("DrawingEditRouter.applyStyleMutation(")` / `…applyDefaultStyleMutation(` / `tv.contains("engine.drawingSession.selectedDrawingID != nil")` / 两条 `callSiteCount(…) == 1` | **改写成 D86 形态**，见下方代码 |
 | **F3** | `Drawing/DrawingEditRouterTests.swift:437-470` 两条「现取而非快照」的行为测试 | 直接调用被删的两个函数；且 `:451-452` 断言 `applyStyleMutation(…) == true`，而新入口返回 `Void` | **平移到 `applyPanelStyleMutation`**，见下方 |
 | **F5** | `Render/DrawingStylePanelSourceGuardTests.swift:102` | 只在**注释**里提到旧名（`squeezedSource` 剥注释，且 G3 只扫 `Sources/`）→ **不会红** | 顺手把注释里的旧名改成 `applyPanelStyleMutation`（纯注释、零行为）；**这是本片改动造成的文档孤儿，属 CLAUDE.md §3 允许的清理** |
+| **F7-b** | `CoordinatorDefaultStyleSourceGuardTests.swift::g1_setDefaultStyle_has_exactly_three_call_sites`（`:12-23`） | `setDefaultStyle(` 的调用点总数从 **3 变 4** —— `applyDefaultStyleMutation`（1 处）被 `applyPanelStyleMutation` 取代，而后者有**两处** `setDefaultStyle`（画线态分支 + 无选中分支） | **改成 4，并把 `DrawingEditRouter` 那一格从「存在」收紧成「恰好 2」**，见下方代码。**不得**为了不改守卫而去合并那两个分支 |
+
+**F7-b 的详细裁决**（这条守卫来自持久化片 #166，它的头注写着「多于 3 ⇒ 出现了第四条写默认的路径，**必须回来重审「哪些时机允许改本局默认」**」）：
+
+**重审结论：这第四条路径是允许的，它就是 D86 的全部内容** —— 画线态改样式 = 改本局默认（spec §6.1 第三张表）。
+故守卫应当**跟着改到新的真值**，而不是被绕过。改法：
+
+```swift
+/// G1（D96 + 自动选中 PR 的 D86）：`setDefaultStyle` 的调用点**恰好 4 个** ——
+/// `DrawingEditRouter.applyPanelStyleMutation` **2 处**（D86：画线态分支写「本局默认」+
+/// 无选中分支写「下一条线的默认」）+ `resumePending` + `resumePendingReplay`（两处续训种子）。
+/// ⚠️ 3→4 是**自动选中 PR 有意为之**：D86 让画线态的一次改样式同时写「那条线」与「本局默认」，
+///    这是新增的第四条写默认路径，已按本守卫头注的要求重审并接受（spec §6.1 / §6.3）。
+/// 多于 4 ⇒ 又出现了新的写默认路径，必须再次回来重审；
+/// 少于 4 ⇒ 有一处没接上（种子漏接，或 D86 的某个分支没写默认）。
+@Test func g1_setDefaultStyle_has_exactly_four_call_sites() throws {
+    let sites = try callSiteCount("setDefaultStyle(")
+    let total = sites.reduce(0) { $0 + $1.count }
+    #expect(total == 4, "setDefaultStyle 调用点应恰好 4 个，实测 \(total)：\(sites.map { "\($0.file)×\($0.count)" })")
+    // 逐文件计数（只数总数会漏「两处挤成一处、另一处多出一次」这种互相抵消的坏状态）
+    #expect(sites.first { $0.file.hasSuffix("DrawingEditRouter.swift") }?.count == 2,
+            "路由里应恰好 2 处（D86 画线态分支 + 无选中分支），实测：\(sites.map { "\($0.file)×\($0.count)" })")
+    #expect(sites.first { $0.file.hasSuffix("TrainingSessionCoordinator.swift") }?.count == 2,
+            "coordinator 里应恰好 2 处（resumePending + resumePendingReplay）")
+}
+```
+
+⚠️ **两条不许做的**：① **不得**把 D86 的画线态分支与无选中分支合并成一处 `setDefaultStyle` 来「凑回 3」—— 那会毁掉「三个分支各自与被删的旧函数逐一等价」这条**严格泛化**的论证（它正是「可以安全删掉旧的」这一结论的证据本身）；② **不得**把 `== 4` 放宽成 `>= 3`。
+⚠️ 测试函数**改了名**（`three` → `four`），确认全仓没有别处按旧名引用它（`grep -rn g1_setDefaultStyle`）。
 
 **F2 的改写**（`panelRoutesBySelection`）：删掉那五条，换成三条 —— 两条正向（新入口真的接上了）+ 一条**限定在 `onStyleChange:` 闭包体内**的负向（UI 层不得再自己判）：
 
