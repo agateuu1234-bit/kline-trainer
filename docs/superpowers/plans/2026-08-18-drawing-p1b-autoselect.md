@@ -728,7 +728,15 @@ cp ios/Contracts/Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift /
 |---|---|---|
 | **M1** | 删掉第 ⑤ 步整行 `guard engine.flow.mode != .review else { return }` | **只有** `reviewLandsLineButNeverSelects` 的**第二个**断言（选中越界）；`innerGrantsSelectionOnHealthyCommit` / `innerTransfersSelectionToSecond` **不得**红 |
 | **M2** | 把第 ⑤ 步整行**挪到**第 ④ 步 `engine.routeDrawingCommit(committed)` **之前** | **只有** `reviewLandsLineButNeverSelects` 的**第一个**断言（`reviewDrawings.count` 不再递增）。这条证明 §4.2 的双断言不是空转 |
-| **M5a** | 把第 ⑥ 步的合取项 **①** 删掉（`if visible.contains(...)`，去掉 `!wasPresent &&`） | **只有** `idCollisionNeverSelectsStaleLine`；其余全绿 |
+| **M5a** | 把第 ⑥ 步的合取项 **①** 删掉（`if visible.contains(...)`，去掉 `!wasPresent &&`） | **`idCollisionNeverSelectsStaleLine` 和 `rejectedCommitClearsExistingSelection` 两条**（实测修正，见下）；其余全绿 |
+
+> ⚠️ **M5a 预期的修正（Task 2 实测 + 评审独立推演双向确认）**：本行原先只写了一条，是**我的预测遗漏，不是缺陷**。
+> 删掉合取项 ① 后，第 ⑥ 步退化成「只要**同 id 的任意一条**线在可见集合里就授予选中」，而 id 碰撞场景下
+> **那条同 id 的老线本来就在集合里** ⇒ `setCommittedSelection(id: "DUP", …)` 被**无条件**执行一次。
+> 两条测试因此各自独立地探测到**同一处**错误写入，只是初始状态不同：
+> 一条从 `nil` 被写成 `"DUP"`，另一条从已有的 `"DUP"` 被**重复赋值**（而不是被清空）。
+> **「只应变红」防的是无关测试被打红，不是禁止两条相关测试同时红。** 撤回变异后两条各自独立变绿，
+> 说明各自都在真实约束这段代码，不存在空转。
 | **M5b** | 把第 ⑥ 步的合取项 **②** 改成恒真（`if !wasPresent {`） | **只有** `landsButDoesNotBelongToPanelSoNoSelection`；其余全绿 |
 | **M5c** | 把第 ③ 步 `let wasPresent = …` **挪到**第 ④ 步之后 | `snapshotTakenBeforeCommit` + `innerGrantsSelectionOnHealthyCommit` + `innerTransfersSelectionToSecond`（自动选中整体失效） |
 | **M6** | 把第 ⑥ 步的 `else { engine.drawingSession.clearSelection() }` 整个删掉（改成只有 `if`） | **只有** `rejectedCommitClearsExistingSelection`；`idCollisionNeverSelectsStaleLine` **不得**红（它开局就没有选中，删掉 `clearSelection` 照样绿 —— 这正是「M6 的档必须先建立一个选中」的原因） |
