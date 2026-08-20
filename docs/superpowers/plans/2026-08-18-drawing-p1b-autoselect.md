@@ -659,7 +659,18 @@ cd "$repo/ios/Contracts" && swift test --filter DrawingCommitRouteTests 2>&1 | t
 
 - [ ] **Step 5: 写守卫 G2**
 
-追加到 `DrawingAutoSelectSourceGuardTests.swift` 的 `// MARK: G5` 段之前（保持 MARK 分段顺序 G1/G1b/G2/G3/G4/G4b/G5/G6 与 spec §8 表一致；本 task 只填 G2）：
+**先做一件清理**（控制者裁决，Task 1 评审的 Minor）：`DrawingAutoSelectSourceGuardTests.swift` 顶部有三个 `private let` 路径常量，实测 **0 个被引用**。其中 `routerPath` 在 **Task 3 的 G4b** 会真的用到（保留），而 `containerPath` / `trainingViewPath` **任何 task 都不会用到**（G1/G1b/G3/G4/G5 全部经 `assertExactlyOneSite` 传硬编码后缀字符串）。
+
+**删掉这两行**（CLAUDE.md §2：不写超出当前需求的代码；这是本计划自己造成的孤儿，属 §3 允许的清理）：
+
+```swift
+    private let containerPath = "Sources/KlineTrainerContracts/Render/ChartContainerView.swift"
+    private let trainingViewPath = "Sources/KlineTrainerContracts/UI/TrainingView.swift"
+```
+
+⚠️ **`routerPath` 那一行留着**，Task 3 的 `testG4b_…` 要用。删完跑一次 `swift test --filter DrawingAutoSelectSourceGuardTests` 确认仍全绿。
+
+然后追加到 `DrawingAutoSelectSourceGuardTests.swift` 的 `// MARK: G5` 段之前（保持 MARK 分段顺序 G1/G1b/G2/G3/G4/G4b/G5/G6 与 spec §8 表一致；本 task 只填 G2）：
 
 ```swift
     // MARK: G2（本 task 落地：setCommittedSelection 的唯一调用点必须在路由里）
