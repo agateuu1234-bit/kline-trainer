@@ -317,7 +317,7 @@ public struct ChartContainerView: UIViewRepresentable {
 
         /// P1b-1a-ii：drawing 模式单指点击落锚 → 投影 engine.drawings/reviewDrawings。
         /// 全链路：tapToAnchor（逆映射）→ drawingSession.addAnchor（归属=**被点的这个面板**，D42）
-        ///        → shouldCommit → drawingSession.commitPending → engine.routeDrawingCommit。
+        ///        → shouldCommit → DrawingEditRouter.commitPendingAndSelect → rebuildRenderState（D85）。
         /// **不再调 engine.commitDrawing(panel:)** —— 那会退出 `.drawing`，即旧的「画一条就退出」（D38）。
         /// 测试入口：`handleDrawingTapForTesting`（internal；生产路径仍只经 arbiter.onTap）。
         func handleDrawingTapForTesting(at point: CGPoint) { handleDrawingTap(at: point) }

@@ -60,6 +60,9 @@ struct DrawingSessionSourceGuardTests {
         // ⚠️ 自动选中 PR（D85）把整段「尝试提交」从 ChartContainerView 搬进了 DrawingEditRouter，
         //    本守卫随之改读路由文件。**守的不变量一字未变**：落在右缘的射线不得 append + autosave
         //    成一条画不出 / 命不中 / 删不掉的幽灵线。
+        // ⚠️ commitPending / visibleGeometry 在**外层** commitPendingAndSelect，routeDrawingCommit
+        //    在**内层** routeAndSelect——文本相邻不再等价于控制流相邻，本守卫现在还依赖 G6
+        //    （`routeAndSelect(` 在 Sources/ 里恰好 1 个调用点、就是外层这一处）才完整成立。
         let code = try source("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift")
         // 取 commitPending 到 routeDrawingCommit 的片段，断言中间夹了 visibleGeometry != nil 的守卫
         // （否则落在右缘的射线会 append+autosave 成一条画不出/命不中/1b-i 前删不掉的幽灵线）。

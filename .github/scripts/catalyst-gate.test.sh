@@ -476,12 +476,16 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   208 suites，`-only-testing:KlineTrainerContractsTests`，与 CI 同款命令）逐行重裁。
 #   【画完自动选中（本轮）】总数 1778→1798（+20）：其中 1 条为本轮 Task 4 新增的 M12 守门测试
 #   （ChartContainerViewAutoSelectTests，`#if canImport(UIKit)` 门控，host swift test 完全不编译）；
-#   其余 19 条为 Task 1-3 期间新增的 host-visible 测试（此前未同步进本基线，riding 在 ±30
-#   容差内直到本次漂出上限）。uikit 77→78（+1，同上 M12）。
+#   其余 19 条是本分支自己 Task 1-3 新增的 host-visible 测试（非外部漂移，只是当时没顺手同步
+#   进本基线）。同步理由**不是**「+20 漂出了 ±30 容差」——1778+30=1808，1798 根本没到上限；
+#   真实理由是本轮新增了 UIKit-gated 测试，uikit 清单一变、gate self-test 的一致性检测就会红，
+#   四处必须联动同步，顺带把 Task 1-3 累积的 +19 一并平账。uikit 77→78（+1，同上 M12）。
 #   Task 4 把 `.draw` 分支的落库+选中收口进 `DrawingEditRouter.commitPendingAndSelect`
 #   后，两条既有 UIKit-gated 行为测试的前提被自动选中打破（选中不再是"画线态恒空"）：
 #   `drawModeTapAlwaysAnchorsNeverSelects`（D54 的"画线态永远不建立选中"一句已被 spec D54
-#   明文推翻，判据改为"选中的必须是刚提交的新那条，不是靠 hitTest 命中已有那条"）、
+#   明文推翻，判据改为"提交后选中的必须是刚画的那条新线"——**结果态**判据，不能证明
+#   "不是靠 hitTest 命中已有那条"：`DrawingHitTester.firstHit` 取最上层，两种实现选到的都是
+#   同一条，该机制改由三条既有结构守卫另行承担，见该测试注释）、
 #   `selectedLineActuallyRendersHighlighted`（`before` 快照的手动 rebuildRenderState 挪到
 #   `setMode(.select)` 之后，否则带着自动选中的旧渲染态、`before==after` 恒真）。
 #   pass-main-current.log 已用本轮真 fresh Catalyst 日志（1798 tests / 211 suites）逐行重裁。

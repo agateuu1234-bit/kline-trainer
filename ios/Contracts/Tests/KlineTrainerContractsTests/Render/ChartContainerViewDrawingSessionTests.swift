@@ -422,13 +422,24 @@ struct ChartContainerViewDrawingSessionTests {
 
         #expect(engine.drawings.count == 2, "画线态点在已有线上 = 又叠一条重合线，不是选中")
         // D85 起画线态提交会自动选中**刚画的那条**（spec D54：推翻「画线态选中恒为空」这一句，
-        // 四条清空 clause 全留）。本测试要证明的不变量没变——只是判据从「恒无选中」换成了
-        // 「选中的必须是刚提交的新那条，不是靠 hitTest 命中已有的第一条」：若命中的是 hitTest
-        // 逻辑而非自动选中，选中的会是 `firstId`（tap 点几何命中的正是第一条）。
+        // 四条清空 clause 全留）。本测试钉的是**结果态**：提交后选中的必须是刚画的那条新线
+        // （secondId），不能停在旧的（firstId）或变成 nil。
+        // ⚠️ 本断言**不能**区分「真自动选中」与「提交后又跑了一次 hitTest」——两者结果恰好重合：
+        //    `DrawingHitTester.firstHit` 是 `ordered.reversed().first`（取最上层，
+        //    `Drawing/DrawingHitTester.swift:22`），两条重合线里第二条最后 append、z-order 最上层，
+        //    坏实现选到的也会是 secondId。
+        // 「画线态恒不做命中判定」这条**机制**不靠本测试证明，由三条结构守卫分别承担：
+        //   ① `DrawingHitTester.firstHit(` 在 Sources/ 里恰好 1 个调用点，钉死在 `.select` 分支
+        //      （`ChartContainerView.swift:380`）—— `DrawingHitTesterTests.hitDispatchIsSinglePoint`；
+        //   ② `setSelection(id:` 在 Sources/ 里恰好 1 个调用点，同样钉在 `.select` 分支
+        //      （`ChartContainerView.swift:382`）—— G5
+        //      （`DrawingAutoSelectSourceGuardTests.testG5_setSelectionHasExactlyOneCallSiteInChartContainerView`）；
+        //   ③ 即便有人硬调 `setSelection`，它自己的守卫是 `mode == .select` fail-closed（D82，
+        //      `DrawingSession.swift:98`），画线态下恒为空操作 —— `N-lock-1`（`DrawingSessionTests.swift:488`）。
         let secondId = try #require(engine.drawings.last?.id)
         #expect(secondId != firstId)
         #expect(engine.drawingSession.selectedDrawingID == secondId,
-                "画线态提交后自动选中的必须是刚画的那条新线，不是靠 hitTest 选中已有的第一条")
+                "画线态提交后必须选中刚画的这条新线（结果态；「不是 hitTest 命中已有线」这条机制由上方三条结构守卫另行承担）")
     }
 
     @Test("N6/D53：`.pending` 盾对**选择态**同样拒收 —— 既不选中也不落锚")
