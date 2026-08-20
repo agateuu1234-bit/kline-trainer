@@ -1237,7 +1237,19 @@ grep -c "✔ Test .* passed after" /tmp/catalyst-t4-red.log     # 判绿读执�
     }
 ```
 
-⚠️ **两处必须实测确认再改**：① `source(_:)` 这个 helper 接的是「相对 `ios/Contracts` 的路径」（见该文件顶部的 `contractsDir` 定义）；② 搬家后 `routeDrawingCommit` 在路由文件里位于**内层** `routeAndSelect`，而 `commitPending` 在**外层** —— 外层在文件中排在内层**之前**（Task 3 Step 3 明确要求插在 `routeAndSelect` 之前），故「先 `commitPending` 后 `routeDrawingCommit`」的文本顺序成立。**若实测顺序相反，报回，不要为了让守卫过而调换生产代码的函数顺序。**
+⚠️ ① `source(_:)` 这个 helper 接的是「相对 `ios/Contracts` 的路径」（见该文件顶部的 `contractsDir` 定义），**照它的既有调用写**。
+
+✅ ② **文本顺序前提已由控制者在 Task 3 之后实测确认，不必再摸**（`DrawingEditRouter.swift` @ `bc8bec8`）：
+
+| 需要的东西 | 实测行号 |
+|---|---|
+| `session.commitPending(` | **235**（外层 `commitPendingAndSelect`，起于 229） |
+| `HorizontalLineTool.visibleGeometry(` + `!= nil` | **245**（夹在两者之间 ✅） |
+| `engine.routeDrawingCommit(` | **271**（内层 `routeAndSelect`，起于 265） |
+
+⇒「先 `commitPending`、中间夹几何门、后 `routeDrawingCommit`」的文本顺序**成立**，守卫照搬判据即可通过。
+Task 4 只删 `ChartContainerView` 里的旧门，**不动 `DrawingEditRouter.swift`**，故该顺序在本 task 内不会变。
+⚠️ 若你实测下来顺序与上表不符（说明有人动过路由文件），**报回**，不要为了让守卫过而调换生产代码的函数顺序。
 
 同时把同文件里 `#expect(code.contains("session.addAnchor("))` 那两条「先证明真读到文件」的自足断言逐条跑一遍确认仍绿（`addAnchor` 仍留在 `ChartContainerView`）。
 
