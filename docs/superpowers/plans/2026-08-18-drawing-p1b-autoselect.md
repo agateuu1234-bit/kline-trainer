@@ -2028,25 +2028,26 @@ git push -u origin feat/drawing-p1b-autoselect
 
 ⚠️ push / 开 PR 前 **pwd + branch + HEAD 三连**（[[feedback_worktree_cwd_drift]]）。主仓 `gh` 被 guard 拦时，把命令交给 user 在真终端跑（[[feedback_worktree_local_ledger_user_tty_pr]]）。
 
-- [ ] **Step 4: 对抗性评审（Kimi 通道）**
+- [ ] **Step 4: 对抗性评审（Codex 通道）**
 
-先探额度（Kimi 会撞额度且**失败无声**）：
+> **通道决定（user 2026-08-20）**：Codex 限额已恢复，**本片评审走 Codex**，不走 Kimi。
+> `codex:adversarial-review` 是本仓**唯一**的 Codex 评审通道；`codex:rescue` 是辅助工具，**不是**评审通道。
+> Skill 若被 harness 挡住，**不等于这条能力不存在** —— 直接跑底层脚本
+> （[[feedback_codex_skill_blocked_use_attest_script.md]]）。
+
+跑整支评审（**base 是持久化分支，不是 origin/main** —— 否则会把已 approve 的 #166 那 52 个提交重审一遍）：
 
 ```bash
-kimi -m kimi-code/k3 -p "回复两个字：正常" --output-format stream-json
-```
-
-再跑整支评审（**base 是持久化分支，不是 origin/main** —— 否则会把已 approve 的 #166 那 52 个提交重审一遍）：
-
-```bash
-.claude/scripts/kimi-attest.sh --scope branch-diff \
+.claude/scripts/codex-attest.sh --scope branch-diff \
   --head feat/drawing-p1b-autoselect \
   --base feat/drawing-session-default-persistence
 ```
 
-- ⭐ **零 focus 窄化**（`--scope branch-diff`，不传任何 focus 目标）—— 窄化会产出假 approve 且账本静默不写。
+- ⭐ **零 focus 窄化**（`--scope branch-diff`，不传任何 focus 目标）—— 窄化会产出**假 approve** 且账本静默不写（[[feedback_codex_focus_narrowing_false_approve]]）。
+- ⛔ **绝不给脚本传未知参数**（含 `--help`）：兜底分支会把**任何未知参数**当成 focus 目标 → 假 approve + 写脏账本，三周内踩过两次（[[feedback_codex_attest_unknown_arg_becomes_focus]]）。
 - ⭐ **被杀（日志里没有 `Verdict:` 行）≠ verdict**，**重跑且不计轮次**（[[feedback_codex_review_killed_not_verdict]]）。
-- ⭐ **`kimi-attest.sh` 会吞掉 CLI 报错**（[[feedback_kimi_attest_swallows_cli_errors]]）—— 每轮跑完必须 **Read 账本文件**核实 `head_sha` == 当前 HEAD，不能只看脚本的退出码。
+- ⭐ 每轮跑完必须 **Read 账本文件**核实 `head_sha` == 当前 HEAD，不能只看脚本的退出码；**attest 之后别再 rebase**。
+- ⚠️ Bash 对含 `attest-ledger.json` 的命令有 deny 规则，**别用 Write 绕**；需要清理时写脚本交给 user 在真终端跑。
 - ⭐ 若某轮 finding 明显是「两片交界处才说得清」的形态（[[feedback_slice_boundary_masquerades_as_defect]]），**再单独跑一轮合并视角**：`--base origin/main`，把持久化片与本片当**一次完整改动**审。
 - ⭐ **codex 没 approve 别写「收敛」**；6+ 轮出现自相矛盾 / 复述已接受 residual → 停下来报回。
 
