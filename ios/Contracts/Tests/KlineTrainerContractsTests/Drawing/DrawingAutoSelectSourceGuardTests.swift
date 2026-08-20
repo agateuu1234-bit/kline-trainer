@@ -16,8 +16,6 @@ import XCTest
 final class DrawingAutoSelectSourceGuardTests: XCTestCase {
 
     private let routerPath  = "Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift"
-    private let containerPath = "Sources/KlineTrainerContracts/Render/ChartContainerView.swift"
-    private let trainingViewPath = "Sources/KlineTrainerContracts/UI/TrainingView.swift"
 
     /// `Sources/` 里某调用 pattern 的调用点（file, count）。零调用的文件不出现。
     private func sites(_ pattern: String) throws -> [(file: String, count: Int)] {
@@ -35,6 +33,33 @@ final class DrawingAutoSelectSourceGuardTests: XCTestCase {
         XCTAssertTrue(s.first?.file.hasSuffix(suffix) == true,
                       "『\(pattern)』的唯一调用点应在 \(suffix)，实际在 \(s.first?.file ?? "<无>")",
                       file: file, line: line)
+    }
+
+    // MARK: G2（本 task 落地：setCommittedSelection 的唯一调用点必须在路由里）
+
+    func testG2_setCommittedSelectionHasExactlyOneCallSiteInRouter() throws {
+        try assertExactlyOneSite("setCommittedSelection(id:",
+                                 inFileSuffixed: "Drawing/DrawingEditRouter.swift")
+    }
+
+    func testG2SelfCheck_bothDirections() {
+        let positive = """
+        func caller() {
+            engine.drawingSession.setCommittedSelection(id: committed.id, panel: panel)
+        }
+        """
+        XCTAssertEqual(callCount(inSqueezed: squeezedText(positive),
+                                 pattern: "setCommittedSelection(id:"), 1,
+                       "自检①失败：真实调用没被数到 —— 守卫已失效")
+
+        let negative = """
+        func setCommittedSelection(id: DrawingID, panel: PanelId) { }
+        // engine.drawingSession.setCommittedSelection(id: 注释里的不算)
+        func caller() { session.setSelection(id: hit.id, panel: panel) }
+        """
+        XCTAssertEqual(callCount(inSqueezed: squeezedText(negative),
+                                 pattern: "setCommittedSelection(id:"), 0,
+                       "自检②失败：定义/注释/另一个入口被误计 —— 守卫会假红")
     }
 
     // MARK: G5（回归守卫 —— 改动前就已经是绿的，故与生产改动分开落库是合法的）

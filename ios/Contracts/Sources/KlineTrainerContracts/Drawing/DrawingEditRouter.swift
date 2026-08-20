@@ -213,6 +213,49 @@ enum DrawingEditRouter {
         engine.drawingSession.setDefaultStyle(next)
     }
 
+    // MARK: D83 / D84 / D85 提交路由（自动选中 spec §3 / §4 / §5）
+
+    /// **内层**：落库与选中处置（六步流程的 ③④⑤⑥）。**接收一个已经造好的 `DrawingObject`**。
+    ///
+    /// 这个缝不是为测试硬开的口子，它就是「造对象」与「落库 + 定选中」两件事的自然分界；
+    /// 但它顺带让四条变异**可构造**（spec §5.1）—— 外层的 `commitPending` 内部经
+    /// `DrawingObject.init` 生成**全新 UUID**，测试无从预知 id，经外层根本写不出 id 碰撞档。
+    ///
+    /// ⚠️ **六步顺序是 load-bearing 的，一步都不许换位**（每一步的换位后果见各自行内注）。
+    /// ⚠️ 生产路径上**只有外层 `commitPendingAndSelect` 一个调用点**（源码守卫 G6）——
+    ///    拆内外两层**不得**变成两个生产入口。
+    static func routeAndSelect(_ committed: DrawingObject, panel: PanelId, engine: TrainingEngine) {
+        // ③ 提交**前**的存在性快照。**必须在 ④ 之前求值**：挪到 ④ 之后恒为 true
+        //    → 第 ⑥ 步的合取项 ① 恒假 → 自动选中整体失效（变异 M5c）。
+        let wasPresent = engine.drawings.contains { $0.id == committed.id }
+
+        // ④ **无条件**落库：复盘照常落线（浮动铅笔钮，1a-iii 起的既有功能，D26 明写复盘继续用它）。
+        engine.routeDrawingCommit(committed)
+
+        // ⑤ D84 复盘门。**只包住「授予选中」这一步**（spec §4.2）：
+        //    挪到 ④ 之前 = 复盘的**落线**功能整个回归掉（变异 M2），与 1b-ii 那道 `.segment` 门
+        //    误管所有工具是同一类错误 —— fail-closed 的门必须限定到它真适用的那一类。
+        //    删掉它 = 复盘获得选中能力，于是能对**已归档 record 里的原训练线**做 🗑 / 🔒 / 改样式
+        //    （D34 trust boundary，带 (层, id) 权限门控的复盘选中是 P5，变异 M1）。
+        guard engine.flow.mode != .review else { return }
+
+        // ⑥ D83 的判据 = **提交前后两次状态快照的合取**，**绝不读任何返回值**（D64：
+        //    `routeDrawingCommit` 返回 `Void`、吞掉 `appendDrawing` 的返回值；而失败原因有五类，
+        //    一个 Bool 表达不了）。
+        //    合取项 ①（提交前不存在）单独挡 id 碰撞——少了它会选中那条**陈旧的老线**（D37 的陷阱）；
+        //    合取项 ②（提交后在**本面板**的可见集合里）单独挡周期不一致 / 几何 nil / revealTick 未到 /
+        //    归属判到了另一个面板。
+        //    ⚠️ ② 用 **membership**，不用 `count == 1`：与 `syncSelectionByState` 的判据纪律逐字一致
+        //    （见其头注「不复用 uniqueSelected」），有了 ① 之后「同 id 出现两条」在本路径上不可达。
+        let visible = RenderStateBuilder.visibleDrawings(
+            engine: engine, panel: panel, tick: engine.tick.globalTickIndex)
+        if !wasPresent && visible.contains(where: { $0.id == committed.id }) {
+            engine.drawingSession.setCommittedSelection(id: committed.id, panel: panel)
+        } else {
+            engine.drawingSession.clearSelection()          // 出口 d / e / f
+        }
+    }
+
     /// 删除选中线。**唯一合法调用点是确认框「删除」按钮的 action**——几何必须在**确认那一刻**
     /// 重算（`canDelete` 内部现算），只在点 🗑 那一刻判是时序 bug（D65 R13-F1 / N19e）。
     @discardableResult
