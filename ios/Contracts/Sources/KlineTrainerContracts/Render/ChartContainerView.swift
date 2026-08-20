@@ -347,20 +347,24 @@ public struct ChartContainerView: UIViewRepresentable {
             // D38/D54（1b-i PR-3）：盾之后才分叉 —— 落在面板上的点击**既不落锚、也不选中**（D53）。
             switch session.mode {
             case .draw:
-                // ⚠️ 本分支**一字未改**（1a-ii/1a-iii/1a-iv 的落线链路原样）：训练与复盘的落线能力
-                //    是既有功能，本切片只是在它旁边加了一条新分支。
                 let ps = (panel == .upper) ? engine.upperPanel : engine.lowerPanel
                 guard let anchor = inputController.tapToAnchor(at: point, panel: ps, mapper: mapper) else { return }
                 session.addAnchor(anchor, panel: panel)          // D31：落在 ≠ pendingAnchorPanel 的面板 → 容器内部只丢 pending
+                // D83 分支 3 的边界（spec §3.4）：`shouldCommit` 是「还没发起提交」与「已尝试提交」的
+                // 天然分水岭。它之前返回 = 连锚都没成形 → **不动选中**（一次误触不该夺走选中，
+                // 而画线态无法重新选中：D38 画线态恒不做命中判定）。
                 guard inputController.shouldCommit(current: session.pendingAnchors, tool: tool) else { return }
-                // 1a-iii：样式（含 lineSubType）由 session.defaultStyle 单一真相决定，commitPending 原子读取。
-                guard let committed = session.commitPending(panelPosition: panel == .upper ? 0 : 1) else { return }
-                // codex rebased-R2：拒绝**不可见**画线再落库（1a-iii 起 ray 可被用户选中）。落在右缘的射线
-                // lineXRange==nil → 既画不出（HorizontalLineTool.render 跳过）、又命不中（hitTest fail-closed），
-                // 但仍会 append+autosave 一条 1b-i 前无从选中/删除的幽灵线。与 tapToAnchor 的源头 fail-closed 同理，
-                // 扩到 ray 右缘几何：可见几何为 nil 就不落库。本期只 .horizontal。
-                guard HorizontalLineTool.visibleGeometry(for: committed, mapper: mapper) != nil else { return }
-                engine.routeDrawingCommit(committed)             // review→reviewDrawings；否则→drawings（Task 10）
+                // D85：整段「尝试提交」收口进路由 —— 四道 guard 变一次调用，UIKit-gated 文件里的判据
+                // **净减少两条**；分支 2 的六条出口从此在同一个函数体内，host `swift test` 就能验。
+                // ⚠️ **不得**在这里另写 clearSelection（spec §3.4 明令）：判据散进三处、其中两处
+                //    在本文件里（host 上不编译），且「三处保持一致」没有任何机制保证。
+                DrawingEditRouter.commitPendingAndSelect(panel: panel, mapper: mapper, engine: engine)
+                // ⚠️ 选中态变了必须**立刻**重建渲染态（理由与下面 `.select` 分支那一句逐字相同，spec §5.3）：
+                //    本函数开头的 `rebuildRenderState` 发生在选中改变**之前**，而高亮渲染读的是
+                //    `KLineRenderState.selectedDrawingID` → 不补这一次重建，本帧画出来的还是旧选中。
+                //    **不要**改成依赖 SwiftUI observation 顺带刷新：Coordinator 这条直连路径不经
+                //    `updateUIView`，那样等于没有证据。
+                rebuildRenderState(bounds: view.bounds)
                 // ← 此处**故意没有** engine.commitDrawing(panel:)：连续画线（D38），会话与工具保持不变。
 
             case .select:

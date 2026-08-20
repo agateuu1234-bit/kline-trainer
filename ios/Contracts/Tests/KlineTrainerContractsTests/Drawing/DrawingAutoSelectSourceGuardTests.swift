@@ -145,4 +145,41 @@ final class DrawingAutoSelectSourceGuardTests: XCTestCase {
         XCTAssertEqual(callCount(inSqueezed: squeezedText(negative), pattern: "clearSelection("), 0,
                        "自检②失败：定义/注释被误计 —— 守卫会假红")
     }
+
+    // MARK: G1 / G1b（本 task 落地：两个写入面各自收口到路由里，「只搬一半」会被抓）
+
+    func testG1_routeDrawingCommitHasExactlyOneCallSiteInRouter() throws {
+        try assertExactlyOneSite("routeDrawingCommit(", inFileSuffixed: "Drawing/DrawingEditRouter.swift")
+    }
+
+    /// G1b 防的是「只搬一半」——把 `commitPending` 留在 `ChartContainerView` 里，
+    /// 于是出口 a / b 的 clearSelection 又回到了 host 测不到的地方。
+    func testG1b_commitPendingHasExactlyOneCallSiteInRouter() throws {
+        try assertExactlyOneSite("commitPending(", inFileSuffixed: "Drawing/DrawingEditRouter.swift")
+    }
+
+    func testG1AndG1bSelfCheck_bothDirections() {
+        let positive = """
+        func caller() {
+            engine.routeDrawingCommit(committed)
+            let c = session.commitPending(panelPosition: 0)
+        }
+        """
+        let sq = squeezedText(positive)
+        XCTAssertEqual(callCount(inSqueezed: sq, pattern: "routeDrawingCommit("), 1, "自检①失败：G1")
+        XCTAssertEqual(callCount(inSqueezed: sq, pattern: "commitPending("), 1, "自检①失败：G1b")
+
+        let negative = """
+        func routeDrawingCommit(_ drawing: DrawingObject) { }
+        func commitPending(panelPosition: Int) -> DrawingObject? { nil }
+        // engine.routeDrawingCommit(注释里的不算)
+        func caller() { commitPendingAndSelect(panel: panel, mapper: mapper, engine: engine) }
+        """
+        let sqn = squeezedText(negative)
+        XCTAssertEqual(callCount(inSqueezed: sqn, pattern: "routeDrawingCommit("), 0, "自检②失败：G1")
+        // ⚠️ 关键的一条：`commitPendingAndSelect(` **不含**子串 `commitPending(`（那里是 `A` 不是 `(`），
+        //    外层入口不得被 G1b 误计成第二个调用点。
+        XCTAssertEqual(callCount(inSqueezed: sqn, pattern: "commitPending("), 0,
+                       "自检②失败：G1b 把定义/注释/commitPendingAndSelect 误计了")
+    }
 }

@@ -474,13 +474,24 @@ expect 1 total-baseline-above-delta.log  "高于上限" \
 #   drawingsRevision 对照组），它们 `#if canImport(UIKit)` 门控、host `swift test` 完全不编译，
 #   故只能落在本门。pass-main-current.log 已用本轮真 fresh Catalyst 日志（1778 tests /
 #   208 suites，`-only-testing:KlineTrainerContractsTests`，与 CI 同款命令）逐行重裁。
+#   【画完自动选中（本轮）】总数 1778→1798（+20）：其中 1 条为本轮 Task 4 新增的 M12 守门测试
+#   （ChartContainerViewAutoSelectTests，`#if canImport(UIKit)` 门控，host swift test 完全不编译）；
+#   其余 19 条为 Task 1-3 期间新增的 host-visible 测试（此前未同步进本基线，riding 在 ±30
+#   容差内直到本次漂出上限）。uikit 77→78（+1，同上 M12）。
+#   Task 4 把 `.draw` 分支的落库+选中收口进 `DrawingEditRouter.commitPendingAndSelect`
+#   后，两条既有 UIKit-gated 行为测试的前提被自动选中打破（选中不再是"画线态恒空"）：
+#   `drawModeTapAlwaysAnchorsNeverSelects`（D54 的"画线态永远不建立选中"一句已被 spec D54
+#   明文推翻，判据改为"选中的必须是刚提交的新那条，不是靠 hitTest 命中已有那条"）、
+#   `selectedLineActuallyRendersHighlighted`（`before` 快照的手动 rebuildRenderState 挪到
+#   `setMode(.select)` 之后，否则带着自动选中的旧渲染态、`before==after` 恒真）。
+#   pass-main-current.log 已用本轮真 fresh Catalyst 日志（1798 tests / 211 suites）逐行重裁。
 out=$(env -u UIKIT_EXPECTED_TESTS_SCRIPT -u CATALYST_TOTAL_BASELINE_FILE bash "$GATE" "$FIX/pass-main-current.log" 2>&1)
 got=$?
-if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1778" <<<"$out"; then
-    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 77 / total 1778）→ GATE PASS 且回显 1778 (exit=$got)"
+if [ "$got" -eq 0 ] && grep -qF "GATE PASS" <<<"$out" && grep -qF "1798" <<<"$out"; then
+    echo "  ok   — 活基线覆盖：代表当前分支的真日志经活基线（uikit 78 / total 1798）→ GATE PASS 且回显 1798 (exit=$got)"
     PASSED=$((PASSED + 1))
 else
-    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1778，实得 exit=$got, out=$out"
+    echo "  FAIL — 活基线覆盖本该 GATE PASS 且回显 1798，实得 exit=$got, out=$out"
     FAILED=$((FAILED + 1))
 fi
 

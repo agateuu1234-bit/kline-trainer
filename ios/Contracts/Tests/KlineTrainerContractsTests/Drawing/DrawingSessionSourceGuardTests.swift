@@ -57,7 +57,10 @@ struct DrawingSessionSourceGuardTests {
 
     @Test("codex rebased-R2：不可见画线（右缘 ray 等 visibleGeometry==nil）不落库——commitPending 与 routeDrawingCommit 之间有 fail-closed 守卫")
     func rejectsInvisibleDrawingBeforePersist() throws {
-        let code = try source(chartContainer)
+        // ⚠️ 自动选中 PR（D85）把整段「尝试提交」从 ChartContainerView 搬进了 DrawingEditRouter，
+        //    本守卫随之改读路由文件。**守的不变量一字未变**：落在右缘的射线不得 append + autosave
+        //    成一条画不出 / 命不中 / 删不掉的幽灵线。
+        let code = try source("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift")
         // 取 commitPending 到 routeDrawingCommit 的片段，断言中间夹了 visibleGeometry != nil 的守卫
         // （否则落在右缘的射线会 append+autosave 成一条画不出/命不中/1b-i 前删不掉的幽灵线）。
         let s = try #require(code.range(of: "session.commitPending("), "找不到 commitPending 调用")
@@ -124,7 +127,10 @@ struct DrawingSessionSourceGuardTests {
         #expect(!chart.contains(".activate(tool:"))     // Coordinator 不得自行开会话
         #expect(!chart.contains(".deactivate()"))       // 也不得自行关会话
         #expect(chart.contains("session.addAnchor("))   // 它该做的只有落锚
-        #expect(chart.contains("session.commitPending("))
+        // 自动选中 PR（D85）后：Coordinator 自己不再直写 session.commitPending(——
+        // 「提交」改为委托 DrawingEditRouter.commitPendingAndSelect（其内部才真正调用 commitPending，
+        // 见 rejectsInvisibleDrawingBeforePersist）。守的不变量未变：Coordinator 仍不得自行开/关会话。
+        #expect(chart.contains("DrawingEditRouter.commitPendingAndSelect("))
     }
 
     @Test("codex plan-R2-high：面板级 FSM 原语只许 TrainingEngine 自己调（防再接一条漂移路径）")

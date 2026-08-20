@@ -268,12 +268,15 @@ struct ChartContainerViewDrawingSessionTests {
         let p = mainChartPoint(upperV)
         upperC.handleDrawingTapForTesting(at: p)                   // 画线态落一条
         try #require(engine.drawings.count == 1)                   // 前提成立
-        // ⚠️ `.draw` 分支在 `routeDrawingCommit` 之后**不**重建渲染态（既有行为，生产靠 observation
-        //    刷新；本 rig 是直连 Coordinator，不经 updateUIView）→ 不补这一次重建，`upperV.renderState`
-        //    里还没有这条线，下面的 `before` 会是空的（codex plan-R4-F2）。
+        engine.drawingSession.setMode(.select)
+        // D85 起 `.draw` 提交会自动选中刚画的那条（spec D54：推翻「画线态选中恒为空」这一句，
+        // 四条清空 clause 全留）；但态切换本身仍会清空选中（D54 clause 2 原样保留）——
+        // `setMode(.select)` 之后选中已是 nil。渲染态是直连 Coordinator，不经 updateUIView，
+        // 必须手动重建才能让 `upperV.renderState` 反映这次清空（否则下面 `before` 会带着旧高亮）。
         upperC.rebuildRenderState(bounds: bounds)
         #expect(upperV.renderState.drawings.count == 1)             // 前提成立：线真的进渲染态了
-        engine.drawingSession.setMode(.select)
+        #expect(upperV.renderState.selectedDrawingID == nil,
+                "态切换后必须已清空选中，否则下面 before 起点不干净，后面的差异断言就恒真")
 
         // 选中前：画出来的是它自己的 colorToken 色
         let before = Self.litPixels(of: upperV)
@@ -406,18 +409,26 @@ struct ChartContainerViewDrawingSessionTests {
     }
 
     @Test("D54：画线态单击**恒落锚**、绝不 hitTest —— 点在已有线上是又叠一条，不是选中它（验收 #5）")
-    func drawModeTapAlwaysAnchorsNeverSelects() {
+    func drawModeTapAlwaysAnchorsNeverSelects() throws {
         let (engine, upperC, _, upperV, _) = makeRig()
         engine.toggleDrawingMode()
         let p = mainChartPoint(upperV)
         upperC.handleDrawingTapForTesting(at: p)
         #expect(engine.drawings.count == 1)                        // 前提成立
         #expect(engine.drawingSession.mode == .draw)
+        let firstId = try #require(engine.drawings.last?.id)
 
         upperC.handleDrawingTapForTesting(at: p)                   // 同一点再来一下
 
         #expect(engine.drawings.count == 2, "画线态点在已有线上 = 又叠一条重合线，不是选中")
-        #expect(engine.drawingSession.selectedDrawingID == nil, "画线态永远不建立选中")
+        // D85 起画线态提交会自动选中**刚画的那条**（spec D54：推翻「画线态选中恒为空」这一句，
+        // 四条清空 clause 全留）。本测试要证明的不变量没变——只是判据从「恒无选中」换成了
+        // 「选中的必须是刚提交的新那条，不是靠 hitTest 命中已有的第一条」：若命中的是 hitTest
+        // 逻辑而非自动选中，选中的会是 `firstId`（tap 点几何命中的正是第一条）。
+        let secondId = try #require(engine.drawings.last?.id)
+        #expect(secondId != firstId)
+        #expect(engine.drawingSession.selectedDrawingID == secondId,
+                "画线态提交后自动选中的必须是刚画的那条新线，不是靠 hitTest 选中已有的第一条")
     }
 
     @Test("N6/D53：`.pending` 盾对**选择态**同样拒收 —— 既不选中也不落锚")
