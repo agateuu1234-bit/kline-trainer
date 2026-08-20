@@ -835,6 +835,15 @@ M4 对应的那条判据在生产路径上**根本不会被求值**（`.draw` �
 2. 进度 memory 记为「**spec override 收口，未 approve**」，不得记 ✅；
 3. PR 描述里必须复述本节的 override 边界。
 
+### 实施状态（2026-08-18）
+
+**自动选中 PR 已实施完毕**，7 个 task 全部落地（分支 `feat/drawing-p1b-autoselect`，
+base = `feat/drawing-session-default-persistence`）。§7.2 表格里的每一条 M 均已逐条关门看红，
+红的测试名与复原后重新变绿的证据记在 PR 描述里。
+
+**本 spec 的收口状态不变：override 收口，未取得 approve。**
+本节只记录实施进度，**不构成对 §12 override 边界的任何扩张**。
+
 ---
 
 ## 13. codex 对抗性评审逐轮
