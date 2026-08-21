@@ -1007,3 +1007,43 @@ def test_claim_dir_succeeds_and_marker_is_reachable_by_path(tmp_path: Path):
     finally:
         os.close(lock_fd)
         os.close(dir_fd)
+
+
+def test_write_owner_marker_does_not_truncate_hardlinked_tmp(tmp_path: Path):
+    # R3 codex high：`O_NOFOLLOW` 挡符号链接，**挡不住硬链接**——硬链接不是「链接」，
+    # 它就是同一个 inode 的另一个名字。可预测的 `<marker>.tmp` + `O_TRUNC`
+    # ⇒ 同 UID 的进程把外部文件硬链到这个名字上，我们一 open 就把它清空。
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious content")
+    d = tmp_path / "dest"
+    d.mkdir(mode=0o700)
+    os.link(str(victim), str(d / ".staging_owner.json.tmp"))   # 预置硬链接
+    root = open_root(str(d))
+    try:
+        write_owner_marker(root, ".staging_owner.json",
+                           {"tool": "qmt_fetch", "dest": str(d)})
+    finally:
+        os.close(root)
+    # 外部文件既没被截断也没被改写
+    assert victim.read_text() == "precious content"
+    # 而标记本身照常落地
+    assert json.loads((d / ".staging_owner.json").read_text())["tool"] == "qmt_fetch"
+
+
+def test_write_owner_marker_leaves_no_temp_file_on_failure(tmp_path: Path, monkeypatch):
+    # 用不可预测的唯一名字之后，失败路径必须把它清掉，否则每次崩溃都留一个垃圾
+    root = open_root(str(tmp_path))
+    real_replace = os.replace
+
+    def boom(*a, **k):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", boom)
+    try:
+        with pytest.raises(OSError):
+            write_owner_marker(root, ".staging_owner.json",
+                               {"tool": "qmt_fetch", "dest": str(tmp_path)})
+    finally:
+        monkeypatch.setattr(os, "replace", real_replace)
+        os.close(root)
+    assert list(tmp_path.iterdir()) == []      # 一个临时文件都没剩下

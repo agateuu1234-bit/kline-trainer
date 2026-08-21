@@ -520,17 +520,37 @@ def write_owner_marker(dir_fd: int, marker_name: str, payload: dict) -> None:
             raise MarkerInvalidError(
                 f"归属标记 {marker_name!r} 已存在但不是普通文件——拒绝写入。"
             )
-    tmp_name = marker_name + ".tmp"
+    # ⚠️ 临时文件必须是**不可预测的唯一名字 + `O_EXCL`**（R3-codex-high）：
+    # `O_NOFOLLOW` 挡符号链接，**挡不住硬链接**——硬链接不是「链接」，它就是同一个
+    # inode 的另一个名字。可预测的 `<marker>.tmp` 配 `O_TRUNC`，会让一个把外部文件
+    # 硬链到该名字上的同 UID 进程，被我们亲手**清空那个外部文件**：一次目录认领
+    # 变成了任意同 UID 文件损坏。`O_EXCL` 则保证我们只写自己刚创建出来的那个 inode。
+    #
+    # ⚠️ 诚实边界：这防的是**同 UID 的对手**，而这种对手若真的存在，本来就能改我们的
+    # CSV、读我们的数据——本条不声称把它挡在门外，只是不再由本工具**亲手**替它造成
+    # 边界外的破坏。顺带一个非对抗性的好处：崩溃留下的旧临时文件不会被静默复用。
+    # （`O_EXCL` 创建成功即证明该 inode 是我们造的，故 codex 建议的
+    #   「再 fstat 核属主与链接数」在这里是冗余的，不加。）
+    tmp_name = f"{marker_name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
     fd = open_under(
-        dir_fd, tmp_name, flags=os.O_CREAT | os.O_WRONLY | os.O_TRUNC, mode=0o600
+        dir_fd, tmp_name,
+        flags=os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode=0o600,
     )
     try:
-        os.write(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    # ⚠️ 直接传 dir_fd，不做 os.supports_dir_fd 能力探测（O4-F14）
-    os.replace(tmp_name, marker_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        try:
+            os.write(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        # ⚠️ 直接传 dir_fd，不做 os.supports_dir_fd 能力探测（O4-F14）
+        os.replace(tmp_name, marker_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        # 失败路径必须把唯一命名的临时文件清掉，否则每次崩溃都留一个垃圾
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+        raise
     fsync_dir(dir_fd)
 
 
