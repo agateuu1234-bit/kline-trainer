@@ -493,6 +493,27 @@ def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
                 f"{lock_name!r} 正被另一次运行持有，请等待或确认。"
                 f"（锁由内核持有、进程死亡即释放，**不需要也不应该手工删锁**）"
             ) from e
+        # ⚠️ **取锁之后必须确认目录项仍指向我们锁住的那个 inode**（R9-codex-high）。
+        # `flock` 锁的是**打开那一刻 `lock_name` 指向的 inode**，而目录项可以被
+        # unlink/rename 换掉：第二个进程打开并锁住**新的 inode** 也会成功，
+        # 于是两个 `qmt_fetch` 各自持有一把「独占锁」同时往一棵 staging 里写 ——
+        # **脑裂**，而锁的全部意义就是防止这个。
+        # 判据与 `assert_fd_still_at` / `_assert_leaf_still_is` 同源：路径 vs inode。
+        #
+        # ⚠️ 与那两处同样的诚实边界：这**不关闭**竞态（目录项在检查之后仍可被换），
+        # 它把「静默脑裂」变成「取锁时就被抓住并 fail-closed」。
+        # 需要持续保证的调用方（S4/S5 的拷贝循环）应在每次关键提交前
+        # 用 `assert_fd_still_at` 再复核一次。
+        st_name = os.lstat(lock_name, dir_fd=dir_fd)
+        st_held = os.fstat(lock_fd)
+        if (st_name.st_dev, st_name.st_ino) != (st_held.st_dev, st_held.st_ino):
+            raise LockDisciplineError(
+                f"锁文件 {lock_name!r} 的目录项在取锁之后被换掉了——"
+                f"我们锁住的 inode 已不是这个名字指向的那个。"
+                f"继续下去会与另一次运行**同时**持有各自的「独占锁」（脑裂）。"
+                f"拒绝启动。"
+            )
+
         # ⚠️ **取锁不改动锁 inode 的任何一个字节**（R8-codex-high）。
         # spec R48-F2 明写锁文件内容「仅供人读诊断，不参与任何判定」——
         # 既然如此就没有任何理由去截断它。持有者信息写到**独立文件**，

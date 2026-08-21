@@ -1332,3 +1332,35 @@ def test_module_contains_no_destructive_truncation():
         f"本模块不得再出现截断性写入（R3/R5/R8 同族）：{offenders}。"
         f"要写文件一律走 _atomic_write_json（唯一名 + O_EXCL + os.replace）。"
     )
+
+
+def test_acquire_lock_detects_lock_entry_replaced_after_open(tmp_path: Path, monkeypatch):
+    # R9 codex high：**锁的脑裂**。我们锁住的是「打开那一刻 lock_name 指向的 inode」，
+    # 而目录项可以被换掉：第二个进程锁住**新的 inode** 也会成功，两边都以为自己独占。
+    # 判据与 assert_fd_still_at 同源：取锁之后比对 lstat(名字) 与 fstat(fd)。
+    root = open_root(str(tmp_path))
+    real_flock = fcntl.flock
+
+    def racing_flock(fd, op):
+        r = real_flock(fd, op)
+        (tmp_path / ".staging.lock").unlink()          # 有人换掉了目录项
+        (tmp_path / ".staging.lock").write_text("{}")
+        return r
+
+    monkeypatch.setattr(fcntl, "flock", racing_flock)
+    try:
+        with pytest.raises(LockDisciplineError, match="被换掉"):
+            acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+    finally:
+        monkeypatch.setattr(fcntl, "flock", real_flock)
+        os.close(root)
+
+
+def test_acquire_lock_still_works_when_entry_is_stable(tmp_path: Path):
+    # 正向档：没有人动目录项时，新判据不得把正常取锁拒掉
+    root = open_root(str(tmp_path))
+    try:
+        lk = acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+        os.close(lk)
+    finally:
+        os.close(root)
