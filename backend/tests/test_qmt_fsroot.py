@@ -395,7 +395,9 @@ def test_full_fsync_command_constant_exists():
 import json
 import subprocess
 import sys
-from qmt_fsroot import LockDisciplineError, LockUnavailableError, acquire_lock
+from qmt_fsroot import (
+    LockDisciplineError, LockUnavailableError, acquire_lock, assert_lock_still_held,
+)
 
 
 def test_acquire_lock_succeeds_and_writes_human_readable_holder(tmp_path: Path):
@@ -1363,4 +1365,38 @@ def test_acquire_lock_still_works_when_entry_is_stable(tmp_path: Path):
         lk = acquire_lock(root, ".staging.lock", tool="qmt_fetch")
         os.close(lk)
     finally:
+        os.close(root)
+
+
+def test_assert_lock_still_held_detects_entry_replacement(tmp_path: Path):
+    # R10 codex high：一次性检查给不了**持久**互斥。S1 能提供的是一个
+    # 供调用方在**每次状态改变之前**复核的原语；持久性由调用方的提交循环负责。
+    # 名字与 assert_fd_still_at 刻意区分开 —— codex 明确点出
+    # 「目录可达性检查不能被误当成锁完整性检查」。
+    root = open_root(str(tmp_path))
+    lk = acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+    try:
+        assert_lock_still_held(root, ".staging.lock", lk)      # 正常时不抛
+        (tmp_path / ".staging.lock").unlink()
+        (tmp_path / ".staging.lock").write_text("{}")          # 目录项被换掉
+        with pytest.raises(LockDisciplineError, match="被换掉"):
+            assert_lock_still_held(root, ".staging.lock", lk)
+    finally:
+        os.close(lk)
+        os.close(root)
+
+
+def test_assert_lock_still_held_is_not_the_same_check_as_fd_still_at(tmp_path: Path):
+    # 两者查的是不同的东西：目录还在原地，锁却已被掉包 ——
+    # 只做 assert_fd_still_at 的调用方会完全看不见这件事
+    root = open_root(str(tmp_path))
+    lk = acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+    try:
+        (tmp_path / ".staging.lock").unlink()
+        (tmp_path / ".staging.lock").write_text("{}")
+        assert_fd_still_at(str(tmp_path), root, label="--dest")   # 目录本身没问题
+        with pytest.raises(LockDisciplineError):
+            assert_lock_still_held(root, ".staging.lock", lk)     # 锁却已经不是那把
+    finally:
+        os.close(lk)
         os.close(root)

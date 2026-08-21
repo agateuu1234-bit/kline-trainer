@@ -31,7 +31,7 @@ __all__ = [
     # 耐久提交
     "fsync_dir", "full_fsync",
     # 锁
-    "acquire_lock", "probe_unclaimed_dir",
+    "acquire_lock", "probe_unclaimed_dir", "assert_lock_still_held",
     # 归属
     "write_owner_marker", "verify_owner_marker", "claim_dir",
     # 边界判据
@@ -433,6 +433,37 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[written:]
 
 
+def assert_lock_still_held(dir_fd: int, lock_name: str, lock_fd: int) -> None:
+    """复核：`lock_name` 这个目录项**仍然**指向我们锁住的那个 inode。
+
+    `flock` 锁的是**打开那一刻**该名字指向的 inode。目录项被 unlink/rename 换掉之后，
+    第二个进程打开并锁住**新的 inode** 同样会成功 —— 两个 `qmt_fetch` 各自持有一把
+    「独占锁」同时往一棵 staging 里写。**脑裂**，而锁的全部意义就是防这个（R9/R10）。
+
+    ⚠️ **一次检查给不了持久互斥**（codex R10 原话，我同意）。故本函数被做成一个
+    **供调用方反复调用**的原语：S4/S5 的拷贝循环应在**每一次状态改变之前**调它，
+    而不是只在取锁时调一次。`acquire_lock` 自己在返回前调一次，只保证「取锁那一刻是干净的」。
+
+    ⚠️ **与 `assert_fd_still_at` 是两件事，名字刻意分开**（codex R10 明确点出
+    「目录可达性检查不能被误当成锁完整性检查」）：目录可以好端端在原地，
+    而锁已经被掉包 —— 只查目录的调用方对此完全失明。
+
+    ⚠️ **能力边界，如实声明**：本函数**挡不住**一个执意替换目录项的同 UID 进程，
+    任何「检查 + 使用」的组合都挡不住。spec §4.1 R36-F2 早已把这条边界写死：
+    **「`.staging.lock` 只约束尊重它的工具」** —— 一个会去替换锁目录项的进程，
+    按定义就不在这个约束之内。本函数提供的是**可检测性**（把静默脑裂变成
+    当场 fail-closed），不是对敌互斥。
+    """
+    st_name = os.lstat(lock_name, dir_fd=dir_fd)
+    st_held = os.fstat(lock_fd)
+    if (st_name.st_dev, st_name.st_ino) != (st_held.st_dev, st_held.st_ino):
+        raise LockDisciplineError(
+            f"锁文件 {lock_name!r} 的目录项被换掉了——"
+            f"我们锁住的 inode 已不是这个名字指向的那个。"
+            f"继续下去会与另一次运行**同时**持有各自的「独占锁」（脑裂）。拒绝。"
+        )
+
+
 def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
     """取得目录生命周期锁，返回锁 fd（调用方全程持有到最后一次提交之后）。
 
@@ -504,15 +535,7 @@ def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
         # 它把「静默脑裂」变成「取锁时就被抓住并 fail-closed」。
         # 需要持续保证的调用方（S4/S5 的拷贝循环）应在每次关键提交前
         # 用 `assert_fd_still_at` 再复核一次。
-        st_name = os.lstat(lock_name, dir_fd=dir_fd)
-        st_held = os.fstat(lock_fd)
-        if (st_name.st_dev, st_name.st_ino) != (st_held.st_dev, st_held.st_ino):
-            raise LockDisciplineError(
-                f"锁文件 {lock_name!r} 的目录项在取锁之后被换掉了——"
-                f"我们锁住的 inode 已不是这个名字指向的那个。"
-                f"继续下去会与另一次运行**同时**持有各自的「独占锁」（脑裂）。"
-                f"拒绝启动。"
-            )
+        assert_lock_still_held(dir_fd, lock_name, lock_fd)
 
         # ⚠️ **取锁不改动锁 inode 的任何一个字节**（R8-codex-high）。
         # spec R48-F2 明写锁文件内容「仅供人读诊断，不参与任何判定」——
