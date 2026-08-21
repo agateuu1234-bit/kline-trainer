@@ -949,6 +949,10 @@ def test_claim_dir_revalidates_leaf_after_taking_lock(tmp_path: Path, monkeypatc
     # 归属标记**没有**落进别人的目录
     assert not (target / ".staging_owner.json").exists()
     assert (target / "zip_of_someone_else.zip").read_text() == "precious"
+    # 且**一个字节都没写** —— 连我们自己那个被挪走的目录里也没有标记。
+    # 这正是「发布前复核」独有的性质：发布后复核同样会 fail-closed，
+    # 但那时标记已经落进去了（虽无害，却违背本仓反复强调的「拒绝即一个字节都不写」）
+    assert not (tmp_path / "stolen" / ".staging_owner.json").exists()
 
 
 def test_open_root_create_leaf_still_works_without_a_race(tmp_path: Path):
@@ -959,3 +963,47 @@ def test_open_root_create_leaf_still_works_without_a_race(tmp_path: Path):
         assert os.fstat(fd).st_ino == target.stat().st_ino
     finally:
         os.close(fd)
+
+
+def test_claim_dir_revalidates_after_marker_is_published(tmp_path: Path, monkeypatch):
+    # R2 codex high：写标记本身不是原子的（tmp → fsync → replace → fsync 目录）。
+    # **写之前**复核挡不住「复核之后、写完之前」被调包 —— 标记会落到一个可能已被
+    # unlink 的旧 inode 上，而 --dest 指向别处：正是 O2-F9 描述的最坏结局
+    # 「工具以 rc=0 宣称 staging 就绪，而磁盘上什么都没有」。
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "precious.zip").write_text("someone elses data")
+    target = tmp_path / "dest"
+    import qmt_fsroot as M
+    real_write = M.write_owner_marker
+
+    def racing_write(dir_fd, marker_name, payload):
+        # 在发布归属的**当中**调包
+        os.rename(str(target), str(tmp_path / "stolen"))
+        os.rename(str(victim), str(target))
+        return real_write(dir_fd, marker_name, payload)
+
+    monkeypatch.setattr(M, "write_owner_marker", racing_write)
+    with pytest.raises(BoundaryError):
+        claim_dir(str(target), lock_name=".staging.lock",
+                  marker_name=".staging_owner.json",
+                  marker_payload={"tool": "qmt_fetch", "dest": str(target)},
+                  tool="qmt_fetch")
+    # 别人的目录既没被写进标记、数据也没被动
+    assert not (target / ".staging_owner.json").exists()
+    assert (target / "precious.zip").read_text() == "someone elses data"
+
+
+def test_claim_dir_succeeds_and_marker_is_reachable_by_path(tmp_path: Path):
+    # 正向档：无竞态时新增的发布后复核不得把正常路径拒掉，
+    # 且标记必须**能通过路径读到**（这正是发布后复核要保证的性质）
+    target = tmp_path / "dest"
+    dir_fd, lock_fd = claim_dir(
+        str(target), lock_name=".staging.lock", marker_name=".staging_owner.json",
+        marker_payload={"tool": "qmt_fetch", "seed": "s1", "dest": str(target)},
+        tool="qmt_fetch")
+    try:
+        assert json.loads((target / ".staging_owner.json").read_text())["seed"] == "s1"
+    finally:
+        os.close(lock_fd)
+        os.close(dir_fd)

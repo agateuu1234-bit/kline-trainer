@@ -164,18 +164,30 @@ def _assert_freshly_created(dir_fd: int, abs_path: str) -> None:
         )
 
 
-def _assert_leaf_still_is(parent_fd: int, leaf: str, dir_fd: int, abs_path: str) -> None:
-    """取锁之后拿**留住的父目录 fd** 反查：`lstat(leaf, dir_fd=父)` 必须仍是我们钉住的 inode。
+def _assert_leaf_still_is(parent_fd: int, leaf: str, dir_fd: int, abs_path: str,
+                          *, when: str) -> None:
+    """拿**留住的父目录 fd** 反查：`lstat(leaf, dir_fd=父)` 必须仍是我们钉住的 inode。
 
-    取锁是本工具的串行化点，故这道反查把「`open` 成功之后、发布归属之前」那道缝
-    **彻底关掉**：此刻若名字已被指向别的 inode，归属标记绝不会落进去。
+    ⚠️ **它不「关闭」竞态，`flock` 也关不了**（R2-codex-high 更正了本函数上一版
+    「彻底关掉」的说法——那是**声称超出实际保证**）：`flock` 只约束**尊重它的工具**，
+    **拦不住任何第三方进程改动父目录的命名空间**。父目录不归本工具所有，
+    只要它可被别人写，这个窗口就在。
+
+    它真正提供的是两件可证的事：
+      ① **写入永远不会落到别人的目录里** —— 一切写都经 `dir_fd`，走的是我们钉住的
+         inode，不是路径；
+      ② **发布之后立刻复核**，故「路径已指向别处而我们仍宣称成功」这一档
+         **一定会被抓到并 fail-closed**，绝不会以 rc=0 收场。
+
+    调用方在需要「持续可达」的地方仍须周期性用 `assert_fd_still_at` 复核
+    （codex R2 的附带建议；S4/S5 的拷贝循环适用）。
     """
     st_name = os.lstat(leaf, dir_fd=parent_fd)
     st_fd = os.fstat(dir_fd)
     if (st_name.st_dev, st_name.st_ino) != (st_fd.st_dev, st_fd.st_ino):
         raise BoundaryError(
-            f"{abs_path} 在取锁之后已不再指向本次创建的那个目录"
-            f"——有人在 `open` 与发布归属之间把它换掉了。拒绝，一个字节都不写。"
+            f"{abs_path} 在{when}已不再指向本次创建的那个目录"
+            f"——有人把它换掉了。拒绝，且本工具的写入全部经 fd，没有落进别人的目录。"
         )
 
 
@@ -246,7 +258,9 @@ def open_root(abs_path: str, *, create_leaf: bool = False) -> int:
     ⚠️ **`mkdir` 与随后的 `open` 是两次按名字的独立查找**（R1-codex-high）：
     两者之间目录可被改名调包。POSIX 关不掉这道缝，故用 `_assert_freshly_created`
     把伤害限死为「只可能认领一个与自己刚造的不可区分的空目录」；
-    **需要真正关掉它的调用方请用 `claim_dir`**——它在取锁之后还会拿父目录 fd 反查一次。
+    **需要更强保证的调用方请用 `claim_dir`**——它在取锁之后**与发布归属之后**
+    各拿父目录 fd 反查一次，使「路径已指向别处而仍宣称成功」不可能发生
+    （⚠️ 那仍**不是**关闭竞态：父目录的命名空间不归本工具控制）。
 
     ⚠️ **绝不用 `os.rename` 做「不覆盖发布」**：POSIX 的 `rename(2)` 在「源是目录、
     目标是**空目录**」时**会把目标替换掉**（macOS 同此），于是一个预先建好的空目录
@@ -589,6 +603,11 @@ def claim_dir(abs_path: str, *, lock_name: str, marker_name: str,
 
     **`--dest` 与 `--output` 在 `EEXIST` 这一档结局不同**（R91-F2），
     由调用方决定，本原语不替它们决定。
+
+    ⚠️ **本函数不声称序列化父目录的命名空间**（R2-codex-high）：`flock` 只约束
+    尊重它的工具。它声称的是——**写入永远经 fd 而非路径**（不会落进别人的目录），
+    且**取锁后与发布后各复核一次**，故「路径已指向别处而仍以 rc=0 宣称成功」
+    不可能发生。持续可达性由调用方用 `assert_fd_still_at` 周期性复核。
     """
     dir_fd, parent_fd, leaf = _open_root_impl(abs_path, create_leaf=True)
     lock_fd = None
@@ -596,8 +615,14 @@ def claim_dir(abs_path: str, *, lock_name: str, marker_name: str,
         lock_fd = acquire_lock(dir_fd, lock_name, tool=tool)
         # 取锁是串行化点：此刻拿**留住的父目录 fd** 反查一次，
         # 把「open 之后、发布归属之前」那道缝彻底关掉（R1-codex-high）
-        _assert_leaf_still_is(parent_fd, leaf, dir_fd, abs_path)
+        _assert_leaf_still_is(parent_fd, leaf, dir_fd, abs_path, when="取锁之后")
         write_owner_marker(dir_fd, marker_name, marker_payload)
+        # ⚠️ 发布**之后**必须再复核一次（R2-codex-high）：写标记这一串
+        # （tmp → fsync → replace → fsync 目录）**不是原子的**，「写之前复核」
+        # 挡不住「复核之后、写完之前」被调包 —— 那会让标记落到一个可能已被 unlink
+        # 的旧 inode 上，而 abs_path 指向别处，正是 O2-F9 那个最坏结局：
+        # **工具以 rc=0 宣称就绪，而操作者按路径去看什么都没有**。
+        _assert_leaf_still_is(parent_fd, leaf, dir_fd, abs_path, when="发布归属之后")
     except BaseException:
         if lock_fd is not None:
             os.close(lock_fd)
