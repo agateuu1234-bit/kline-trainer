@@ -1156,3 +1156,58 @@ def test_acquire_lock_accepts_preexisting_single_link_lock_file(tmp_path: Path):
             os.close(lk)
     finally:
         os.close(root)
+
+
+def test_verify_owner_marker_rejects_oversized_marker(tmp_path: Path):
+    # R6 codex high：归属标记是**不可信输入**（它决定一个已存在的目录可不可信），
+    # 读到 EOF 为止 ⇒ 一个几 GB 的标记让进程 OOM，而不是干净地 MarkerInvalidError。
+    (tmp_path / ".staging_owner.json").write_bytes(b"x" * (128 * 1024))
+    root = open_root(str(tmp_path))
+    try:
+        with pytest.raises(MarkerInvalidError, match="过大"):
+            verify_owner_marker(root, ".staging_owner.json", expect_tool="qmt_fetch",
+                                self_field="dest", self_value=str(tmp_path))
+    finally:
+        os.close(root)
+
+
+def test_verify_owner_marker_rejects_file_growing_during_read(tmp_path: Path, monkeypatch):
+    # 只查 st_size 不够：文件可以**边读边长**（codex 明确点出）。
+    # 上限必须在**读的过程中**卡住，否则 st_size 那道早拒可以被绕过。
+    import signal
+    (tmp_path / ".staging_owner.json").write_text('{"tool": "qmt_fetch"}')
+    real_read = os.read
+
+    def endless_read(fd, n):
+        return b"x" * n              # 永远读得到，永不 EOF
+
+    root = open_root(str(tmp_path))
+
+    def _timeout(signum, frame):
+        raise AssertionError("verify_owner_marker 没有在读取过程中卡住上限")
+
+    old_handler = signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(10)
+    try:
+        monkeypatch.setattr(os, "read", endless_read)
+        with pytest.raises(MarkerInvalidError, match="过大"):
+            verify_owner_marker(root, ".staging_owner.json", expect_tool="qmt_fetch",
+                                self_field="dest", self_value=str(tmp_path))
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+        monkeypatch.setattr(os, "read", real_read)
+        os.close(root)
+
+
+def test_verify_owner_marker_accepts_normal_sized_marker(tmp_path: Path):
+    # 正向档：正常大小的标记不得被新上限误杀
+    root = open_root(str(tmp_path))
+    try:
+        write_owner_marker(root, ".staging_owner.json",
+                           {"tool": "qmt_fetch", "seed": "s1", "dest": str(tmp_path)})
+        got = verify_owner_marker(root, ".staging_owner.json", expect_tool="qmt_fetch",
+                                  self_field="dest", self_value=str(tmp_path))
+        assert got["seed"] == "s1"
+    finally:
+        os.close(root)

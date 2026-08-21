@@ -40,6 +40,14 @@ __all__ = [
 ]
 
 
+# 归属标记的序列化上限。标记只有寥寥几个字段（`tool` + 自指路径 + `seed` +
+# 可选的 `export_log_sha256`），64 KiB 是宽松到不可能误伤的量级。
+# **它是安全上限，不是性能调优**（R6-codex-high）：标记是**不可信输入**——
+# 它决定一个已存在的目录可不可信——读到 EOF 为止意味着一个被植入的几 GB 文件
+# 能把进程 OOM 掉，而不是得到一个干净的 `MarkerInvalidError`。
+_MARKER_MAX_BYTES = 64 * 1024
+
+
 class PathDisciplineError(ValueError):
     """路径字符串本身不合规：相对/绝对方向不对、或含 `.` / `..` / 空分量。"""
 
@@ -636,11 +644,26 @@ def verify_owner_marker(dir_fd: int, marker_name: str, *, expect_tool: str,
             raise MarkerInvalidError(
                 f"归属标记 {marker_name!r} 存在但不是普通文件——拒绝。"
             )
+        # ⚠️ 上限必须卡在**读取过程中**，不能只查 `st_size`（R6-codex-high）：
+        # `st_size` 是打开那一刻的快照，文件完全可以**边读边长**，只查它会被绕过。
+        #
+        # ⚠️ codex 还建议叠一道 `st_size` 早拒，**未采纳**并说明理由：
+        # 读取本身每次上限 64 KiB、累计到 64 KiB 即停，两条路的实际读取量同量级，
+        # 早拒省不下什么；而它**无法被任何测试单独钉住**（变异 M30 实测仍然全绿，
+        # 因为读中计数把同样的场景也接住了）。本仓被「机械检查器悄悄烂掉」坑过，
+        # 一道钉不住的守卫是负债不是资产 —— 只留能被钉住的那一道。
         chunks: list[bytes] = []
+        total = 0
         while True:
             chunk = os.read(fd, 65536)
             if not chunk:
                 break
+            total += len(chunk)
+            if total > _MARKER_MAX_BYTES:
+                raise MarkerInvalidError(
+                    f"归属标记 {marker_name!r} 在读取过程中超过上限 "
+                    f"{_MARKER_MAX_BYTES} 字节（文件正在增长）——拒绝，过大。"
+                )
             chunks.append(chunk)
         raw = b"".join(chunks)
     finally:
