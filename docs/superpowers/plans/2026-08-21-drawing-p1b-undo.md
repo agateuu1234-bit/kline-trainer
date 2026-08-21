@@ -2027,8 +2027,11 @@ struct DrawingUndoRouterTests {
     func test_uG7_routerUndoRedoSyncSelectionAndNeverAutoSelect() throws {
         let router = try squeezedSource(contractsDirForGuards
             .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path)
+        // ⚠️ `functionBody` 内部会自己拼上 `(`（needle = `func <name>(`），
+        //    所以这里**只能传裸函数名** —— 传 "undo(engine" 会拼成 `func undo(engine(`，
+        //    永远匹配不到 ⇒ 走 XCTFail 的锚点失效分支（幸好它会出声，不是静默恒绿）。
         for fn in ["undo", "redo"] {
-            let body = functionBody(router, funcName: "\(fn)(engine")
+            let body = functionBody(router, funcName: fn)
             XCTAssertFalse(body.isEmpty, "锚点失效：找不到路由的 \(fn)(engine:)")
             XCTAssertTrue(body.contains(squeeze("defer { syncSelectionByState(engine: engine) }")),
                           "\(fn) 缺少选中态同步 —— D77 的四行全靠它")
