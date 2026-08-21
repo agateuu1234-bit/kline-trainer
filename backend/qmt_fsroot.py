@@ -215,3 +215,42 @@ def open_under(root_fd: int, relpath: str, *, flags: int, mode: int = 0o600,
     finally:
         for fd in opened:
             os.close(fd)
+
+
+def parent_fd_under(root_fd: int, relpath: str) -> tuple[int, str]:
+    """逐分量无跟随走到 `relpath` 的**父目录**，返回 `(parent_fd, leaf)`。
+
+    **为什么需要它**：`open_under` 只能 `open()`，而按股事务里最关键的三个动作——
+    `os.replace(.part → final)`、回滚 `unlink`、对子目录 `fsync`——都要
+    **父目录 fd + basename**（O2-F4）。实施者最自然的写法 `os.unlink(str(staging / rel))`
+    会让 `.inflight.json` 的形状校验（只要求 `resolve()` 后落在 staging 之内，
+    而 **`resolve()` 会跟随符号链接**）放行一条**破坏性恢复路径**删到边界之外。
+
+    与 `open_under` 同规格三条（O4-F14）：
+      ① 分量规则相同（拒空分量 / `.` / `..`，逐段 `O_DIRECTORY|O_NOFOLLOW`）；
+      ② 中间 fd 在 `finally` 里关掉，**返回的 `parent_fd` 归调用方、用完必须关**
+         ——每股泄漏 3~4 个 fd 会让「staging 已被 rename 掉」这类分叉检查
+         拿着陈旧 fd 继续成立；
+      ③ 恢复路径上撞逃逸的处置由调用方决定（S4：不删任何文件、保留 `.inflight.json`、
+         记 `stopped_reason: staging_path_escape` 后 rc≠0）。
+
+    ⚠️ 单分量时父目录**就是** `root_fd`，故一律返回 `os.dup(root_fd)`——
+    否则调用方一关就把根 fd 连带关掉了。
+    """
+    *dirs, leaf = _split_rel(relpath)
+    cur = root_fd
+    opened: list[int] = []
+    try:
+        for d in dirs:
+            try:
+                nxt = os.open(
+                    d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur
+                )
+            except OSError as e:
+                _raise_walk_error(relpath, d, e)
+            opened.append(nxt)
+            cur = nxt
+        return os.dup(cur), leaf
+    finally:
+        for fd in opened:
+            os.close(fd)

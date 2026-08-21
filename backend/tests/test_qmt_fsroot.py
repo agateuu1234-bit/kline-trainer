@@ -255,3 +255,99 @@ def test_open_under_does_not_leak_intermediate_fds(tmp_path: Path):
         assert after - before <= 2      # 允许 listdir 自身的抖动
     finally:
         os.close(root)
+
+
+# ----------------------------------------------------------- Task 5: parent_fd_under
+from qmt_fsroot import parent_fd_under
+
+
+def test_parent_fd_under_returns_parent_and_leaf(tmp_path: Path):
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    root = open_root(str(tmp_path))
+    try:
+        pfd, leaf = parent_fd_under(root, "a/b/c.csv")
+        try:
+            assert leaf == "c.csv"
+            assert os.fstat(pfd).st_ino == (tmp_path / "a" / "b").stat().st_ino
+        finally:
+            os.close(pfd)
+    finally:
+        os.close(root)
+
+
+def test_parent_fd_under_single_component_dups_root(tmp_path: Path):
+    # 单分量时父目录**就是** root——必须返回 dup，否则调用方一关就把 root_fd 关掉了
+    root = open_root(str(tmp_path))
+    try:
+        pfd, leaf = parent_fd_under(root, "manifest.json")
+        assert leaf == "manifest.json"
+        assert pfd != root
+        os.close(pfd)
+        os.fstat(root)                  # root 仍可用，没被连带关掉
+    finally:
+        os.close(root)
+
+
+def test_parent_fd_under_supports_replace_and_unlink_and_fsync(tmp_path: Path):
+    # 按股事务最关键的三个动作都要「父目录 fd + basename」（O2-F4）
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "x.csv.part").write_text("data")
+    root = open_root(str(tmp_path))
+    try:
+        pfd, leaf = parent_fd_under(root, "d/x.csv")
+        try:
+            # ⚠️ 直接传 src_dir_fd/dst_dir_fd，不做 os.supports_dir_fd 能力探测：
+            # 本机 `os.replace in os.supports_dir_fd` 为 False 而实际能跑通，
+            # 写探测的实现会恰好退回被明令禁止的按路径改名（O4-F14）
+            os.replace("x.csv.part", leaf, src_dir_fd=pfd, dst_dir_fd=pfd)
+            assert (tmp_path / "d" / "x.csv").read_text() == "data"
+            os.fsync(pfd)
+            os.unlink(leaf, dir_fd=pfd)
+            assert not (tmp_path / "d" / "x.csv").exists()
+        finally:
+            os.close(pfd)
+    finally:
+        os.close(root)
+
+
+def test_parent_fd_under_rejects_symlinked_component(tmp_path: Path):
+    # `.inflight.json` 的形状校验用 resolve()，而 **resolve() 会跟随符号链接**——
+    # 逐段无跟随是最后一道防线，否则一条**破坏性恢复路径**会删到边界之外（O4-F14 ①）
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "victim.csv").write_text("someone elses data")
+    inside = tmp_path / "root"
+    inside.mkdir()
+    (inside / "sub").symlink_to(outside)
+    root = open_root(str(inside))
+    try:
+        with pytest.raises(PathEscapeError) as ei:
+            parent_fd_under(root, "sub/victim.csv")
+        assert ei.value.component == "sub"
+    finally:
+        os.close(root)
+    assert (outside / "victim.csv").read_text() == "someone elses data"
+
+
+def test_parent_fd_under_rejects_bad_components(tmp_path: Path):
+    root = open_root(str(tmp_path))
+    try:
+        for bad in ("/abs/x", "a/../b", "a/./b", "a//b", ""):
+            with pytest.raises(PathDisciplineError):
+                parent_fd_under(root, bad)
+    finally:
+        os.close(root)
+
+
+def test_parent_fd_under_does_not_leak_intermediate_fds(tmp_path: Path):
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    root = open_root(str(tmp_path))
+    try:
+        before = len(os.listdir("/dev/fd"))
+        for _ in range(50):
+            pfd, _leaf = parent_fd_under(root, "a/b/c.csv")
+            os.close(pfd)
+        after = len(os.listdir("/dev/fd"))
+        assert after - before <= 2
+    finally:
+        os.close(root)
