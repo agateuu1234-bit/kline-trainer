@@ -19,6 +19,27 @@ import socket
 import stat
 
 
+__all__ = [
+    # 异常
+    "PathDisciplineError", "PathEscapeError", "DirectoryExistsError",
+    "LockUnavailableError", "LockDisciplineError", "MarkerInvalidError",
+    "BoundaryError",
+    # 路径规则
+    "normalize_abs_path", "split_components",
+    # 逐段无跟随
+    "open_root", "open_under", "parent_fd_under",
+    # 耐久提交
+    "fsync_dir", "full_fsync",
+    # 锁
+    "acquire_lock", "probe_unclaimed_dir",
+    # 归属
+    "write_owner_marker", "verify_owner_marker", "claim_dir",
+    # 边界判据
+    "assert_readonly_fd", "assert_no_path_overlap",
+    "assert_distinct_inodes", "assert_fd_still_at",
+]
+
+
 class PathDisciplineError(ValueError):
     """路径字符串本身不合规：相对/绝对方向不对、或含 `.` / `..` / 空分量。"""
 

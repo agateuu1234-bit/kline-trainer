@@ -849,3 +849,32 @@ def test_assert_fd_still_at_detects_swapped_directory(tmp_path: Path):
             assert_fd_still_at(str(d), fd, label="--dest")
     finally:
         os.close(fd)
+
+
+# ------------------------------------------------------------------- Task 12: 收口
+def test_all_exports_exist():
+    import qmt_fsroot as M
+    for name in M.__all__:
+        assert hasattr(M, name), name
+
+
+def test_acquire_lock_refuses_fifo_lock_file(tmp_path: Path):
+    # 目录那一档由 EISDIR 在 open 处接走，**够不到 S_ISREG**；
+    # FIFO 能被 O_RDWR 成功打开，只有 fstat 类型检查拦得住它（R72-F2）
+    os.mkfifo(str(tmp_path / ".staging.lock"))
+    root = open_root(str(tmp_path))
+    try:
+        with pytest.raises(LockDisciplineError):
+            acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+    finally:
+        os.close(root)
+
+
+def test_probe_refuses_fifo_lock_file(tmp_path: Path):
+    os.mkfifo(str(tmp_path / ".staging.lock"))
+    root = open_root(str(tmp_path))
+    try:
+        with pytest.raises(LockDisciplineError):
+            probe_unclaimed_dir(root, ".staging.lock")
+    finally:
+        os.close(root)
