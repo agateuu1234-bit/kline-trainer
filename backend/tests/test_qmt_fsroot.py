@@ -686,3 +686,80 @@ def test_write_owner_marker_refuses_symlink_target(tmp_path: Path):
     finally:
         os.close(root)
     assert outside.read_text() == "{}"
+
+
+# ---------------------------------------------------------------- Task 10: claim_dir
+from qmt_fsroot import claim_dir
+
+
+def test_claim_dir_creates_locks_and_marks(tmp_path: Path):
+    target = tmp_path / "dest"
+    dir_fd, lock_fd = claim_dir(
+        str(target), lock_name=".staging.lock", marker_name=".staging_owner.json",
+        marker_payload={"tool": "qmt_fetch", "seed": "s1", "dest": str(target)},
+        tool="qmt_fetch",
+    )
+    try:
+        assert target.is_dir()
+        assert (target / ".staging_owner.json").exists()
+        assert (target / ".staging.lock").exists()
+        got = verify_owner_marker(dir_fd, ".staging_owner.json", expect_tool="qmt_fetch",
+                                  self_field="dest", self_value=str(target))
+        assert got["seed"] == "s1"
+    finally:
+        os.close(lock_fd)
+        os.close(dir_fd)
+
+
+def test_claim_dir_takes_lock_before_publishing_ownership(tmp_path: Path, monkeypatch):
+    # R97-F2：取锁必须早于发布归属。若顺序反了，两个 qmt_fetch 能同时
+    # 往一棵 staging 里写（其中一个刚写完标记还没取到锁）
+    order = []
+    import qmt_fsroot as M
+    real_lock, real_mark = M.acquire_lock, M.write_owner_marker
+    monkeypatch.setattr(
+        M, "acquire_lock",
+        lambda *a, **k: (order.append("lock"), real_lock(*a, **k))[1])
+    monkeypatch.setattr(
+        M, "write_owner_marker",
+        lambda *a, **k: (order.append("marker"), real_mark(*a, **k))[1])
+    target = tmp_path / "dest"
+    dir_fd, lock_fd = claim_dir(
+        str(target), lock_name=".staging.lock", marker_name=".staging_owner.json",
+        marker_payload={"tool": "qmt_fetch", "dest": str(target)}, tool="qmt_fetch")
+    try:
+        assert order == ["lock", "marker"]
+    finally:
+        os.close(lock_fd)
+        os.close(dir_fd)
+
+
+def test_claim_dir_raises_directory_exists_and_writes_nothing(tmp_path: Path):
+    # 撞 EEXIST 时**一个字节都不写**——处置由调用方按各自规格决定（R91-F2）：
+    # --dest 有合法标记 → 退回复用路径的完整准入序列；--output → 一律拒绝
+    target = tmp_path / "dest"
+    target.mkdir()
+    with pytest.raises(DirectoryExistsError):
+        claim_dir(str(target), lock_name=".staging.lock",
+                  marker_name=".staging_owner.json",
+                  marker_payload={"tool": "qmt_fetch", "dest": str(target)},
+                  tool="qmt_fetch")
+    assert list(target.iterdir()) == []
+
+
+def test_claim_dir_leaves_nothing_when_lock_unavailable(tmp_path: Path, monkeypatch):
+    import qmt_fsroot as M
+
+    def boom(*a, **k):
+        raise LockUnavailableError("held")
+
+    monkeypatch.setattr(M, "acquire_lock", boom)
+    target = tmp_path / "dest"
+    with pytest.raises(LockUnavailableError):
+        claim_dir(str(target), lock_name=".staging.lock",
+                  marker_name=".staging_owner.json",
+                  marker_payload={"tool": "qmt_fetch", "dest": str(target)},
+                  tool="qmt_fetch")
+    # 目录已被 mkdir 出来（不可避免），但**没有标记** → 下次启动会走 probe 的
+    # "vacuum" 分支，拿到唯一能干净 rmdir 的那一档指引
+    assert target.is_dir() and list(target.iterdir()) == []

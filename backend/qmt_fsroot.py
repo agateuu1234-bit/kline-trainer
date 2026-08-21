@@ -480,3 +480,42 @@ def verify_owner_marker(dir_fd: int, marker_name: str, *, expect_tool: str,
             f"——标记可能是从别处整体搬来的"
         )
     return data
+
+
+def claim_dir(abs_path: str, *, lock_name: str, marker_name: str,
+              marker_payload: dict, tool: str) -> tuple[int, int]:
+    """首次使用 / 认领协议（`--dest` 与 `--output` **创建方式同规格**，R64-F1 + R66-F2）：
+
+      1. `open_root(create_leaf=True)` —— 从 `/` 逐分量 `O_NOFOLLOW` 走到父目录，
+         再 `os.mkdir(dir_fd=父fd)`：`mkdir` 是**唯一可移植的目录级独占创建原语**，
+         而逐段走保证「独占创建」发生在**验过的那个父 inode** 里（R75-F2）；
+      2. 取 `flock` —— **先取锁，再发布归属**（R97-F2）。顺序反了，
+         两个进程就能同时往一棵 staging 里写；
+      3. 写标记 + `fsync(文件)` + `fsync(该目录)`（父目录的 `fsync` 已在第 1 步做掉）。
+
+    返回 `(dir_fd, lock_fd)`，**两者都归调用方、全程持有、用完必须关**。
+
+    **路径已存在 → `DirectoryExistsError`，一个字节都不写。**
+    这一档**只能 fail-closed，不能自动认领**：`mkdir` 之后的目录**不携带任何出处信息**，
+    「我崩在半路留下的空目录」与「操作者预先建好的空目录」在磁盘上**完全一样**；
+    意图记录只能证明「我打算建」，不能证明「我建成了」；写完标记后的「复查目录为空」
+    只证明「里面没有文件」，**不证明「这个目录是我造的」**（R66-F2）。
+    **造不出证据时，唯一诚实的做法是拒绝并交给人**——宁可要一次人工介入，
+    不要一次静默越界。
+
+    **`--dest` 与 `--output` 在 `EEXIST` 这一档结局不同**（R91-F2），
+    由调用方决定，本原语不替它们决定。
+    """
+    dir_fd = open_root(abs_path, create_leaf=True)
+    try:
+        lock_fd = acquire_lock(dir_fd, lock_name, tool=tool)
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    try:
+        write_owner_marker(dir_fd, marker_name, marker_payload)
+    except BaseException:
+        os.close(lock_fd)
+        os.close(dir_fd)
+        raise
+    return dir_fd, lock_fd
