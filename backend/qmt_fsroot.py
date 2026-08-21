@@ -168,3 +168,50 @@ def open_root(abs_path: str, *, create_leaf: bool = False) -> int:
     except BaseException:
         os.close(fd)
         raise
+
+
+def open_under(root_fd: int, relpath: str, *, flags: int, mode: int = 0o600,
+               create_dirs: bool = False) -> int:
+    """相对 `root_fd` **逐分量**无跟随打开，返回叶子的 fd（调用方负责关）。
+
+    **`dir_fd=` 只保证起点、`O_NOFOLLOW` 只作用于最后一段**——中间的 `a` 或 `b`
+    是符号链接时，内核照样跟随。于是一棵被复用的 staging 里，只要
+    `1分钟K线_前复权` 被换成指向 staging 之外的链接，`qmt_fetch` 就会把 `.part`/CSV
+    **写到 staging 树外面**，随后 pilot 又会**从树外面读**，而全套 `staging_intact`
+    哈希校验查的是「同一条路径读回来的字节」——**换过的分量对它完全透明**（R74-F2）。
+
+    `create_dirs=True` 只创建本工具自己的目录（`0o700`），**且只在 `mkdir` 真的成功时**
+    才 `fsync` 其父目录（O2-F3）——子目录创建也是一次命名空间改动，漏掉会让
+    manifest 已提交「文件在该目录下」而**目录项没落地**：重启后记录在、文件与目录都不在，
+    既不是 `untracked_target_file`（那要求文件存在）也回收不了（R84-F2）。
+
+    只有 `ELOOP` / `ENOTDIR` 算逃逸；`ENOENT` 原样上抛为 `FileNotFoundError`
+    （「不存在」与「被换掉」是两件事）。
+    """
+    *dirs, leaf = _split_rel(relpath)
+    cur = root_fd
+    opened: list[int] = []
+    try:
+        for d in dirs:
+            if create_dirs:
+                try:
+                    os.mkdir(d, 0o700, dir_fd=cur)
+                except FileExistsError:
+                    pass
+                else:
+                    os.fsync(cur)      # 新建成功才 fsync 父目录（O2-F3 / R84-F2）
+            try:
+                nxt = os.open(
+                    d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur
+                )
+            except OSError as e:
+                _raise_walk_error(relpath, d, e)
+            opened.append(nxt)
+            cur = nxt
+        try:
+            return os.open(leaf, flags | os.O_NOFOLLOW, mode, dir_fd=cur)
+        except OSError as e:
+            _raise_walk_error(relpath, leaf, e)
+    finally:
+        for fd in opened:
+            os.close(fd)
