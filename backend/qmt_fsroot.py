@@ -62,6 +62,10 @@ class MarkerInvalidError(Exception):
     """归属标记不存在 / 非法 JSON / 字段不符。"""
 
 
+class BoundaryError(Exception):
+    """信任边界判据不过（只读 / 路径重叠 / inode 不符）。"""
+
+
 def normalize_abs_path(raw: str) -> str:
     """入口处的**纯字符串**规范化：去尾斜杠、折叠重复 `/`。**绝不 `realpath()`**（O4-F17）。
 
@@ -519,3 +523,72 @@ def claim_dir(abs_path: str, *, lock_name: str, marker_name: str,
         os.close(dir_fd)
         raise
     return dir_fd, lock_fd
+
+
+def assert_readonly_fd(fd: int, *, label: str) -> None:
+    """**非写入式**只读判据：`os.fstatvfs(fd).f_flag & ST_RDONLY` 为真才继续（R5-F3）。
+
+    ⚠️ **禁止用「试写一个临时文件」去探测**：那种主动探测在**恰恰是它要防的那个
+    危险场景里**（共享真的可写）会**由本工具自己去写权威导出共享**——探测成功即污染。
+    再叠加崩溃、删除失败或源本身是审计敏感目录，安全检查反而成了第一个破坏者。
+    **为了防止破坏而引入的机制，本身带着破坏性**。
+
+    ⚠️ 本判据**只证明「这是某个只读目录」**：本机根卷 `/` 自己就是
+    `apfs … read-only`，**「只读」在 macOS 上根本区分不出「网络共享」与「本地卷」**
+    （R19-F2，已实测）。绑住「就是那台机器上的那个共享」要靠**挂载身份**，那是 S5。
+    """
+    if not (os.fstatvfs(fd).f_flag & os.ST_RDONLY):
+        raise BoundaryError(
+            f"{label} 不是只读挂载。请以 `-o rdonly` 重新挂载："
+            f"`mount_smbfs -o rdonly //<user>@<host>/<share> <挂载点>`。"
+            f"（`rdonly` 的效果是连 super-user 也写不了——这是强制要求，不是建议。）"
+        )
+
+
+def assert_no_path_overlap(labeled: dict[str, str]) -> None:
+    """任意两个目录**规范化后**不得相等、不得互为子树（R4-F4）。
+
+    否则一旦源挂载是可写的，`qmt_fetch` 会把 `.staging.lock` / `fetch_manifest.json`
+    / `.part` / 拷贝出来的 CSV **写进那个权威导出共享里**，污染的正是本次要取证的数据集。
+
+    **按分量比，不按字符串前缀比**：`/a/srcx` 不是 `/a/src` 的子树。
+    本判据与 `assert_distinct_inodes` **并用**——路径判据可被换掉，inode 判据不会。
+    """
+    items = [(lab, split_components(p)) for lab, p in labeled.items()]
+    for i, (la, ca) in enumerate(items):
+        for lb, cb in items[i + 1:]:
+            if ca == cb:
+                raise BoundaryError(f"{la} 与 {lb} 是同一个目录")
+            shorter, longer, ls, ll = (
+                (ca, cb, la, lb) if len(ca) < len(cb) else (cb, ca, lb, la)
+            )
+            if longer[:len(shorter)] == shorter:
+                raise BoundaryError(f"{ll} 落在 {ls} 的目录树之内")
+
+
+def assert_distinct_inodes(labeled_fds: dict[str, int]) -> None:
+    """另比 `(st_dev, st_ino)`——**路径判据可被换掉，inode 判据不会**（R84-F1）。"""
+    seen: dict[tuple[int, int], str] = {}
+    for label, fd in labeled_fds.items():
+        st = os.fstat(fd)
+        key = (st.st_dev, st.st_ino)
+        if key in seen:
+            raise BoundaryError(
+                f"{label} 与 {seen[key]} 指向同一个 inode"
+                f"（路径不同不代表目录不同——符号链接/硬链接别名会让两条路径落到同一棵树）"
+            )
+        seen[key] = label
+
+
+def assert_fd_still_at(abs_path: str, fd: int, *, label: str) -> None:
+    """运行中途**分叉检查**：`os.stat(路径)` 的 `(st_dev, st_ino)` 必须等于 `os.fstat(fd)`。
+
+    `--source` **没有归属标记、也没有锁**（它不是我们的目录），
+    **没有任何东西阻止它在两条闸之间被换掉**（R84-F1 / R91-F1）。
+    """
+    st_path = os.stat(abs_path)
+    st_fd = os.fstat(fd)
+    if (st_path.st_dev, st_path.st_ino) != (st_fd.st_dev, st_fd.st_ino):
+        raise BoundaryError(
+            f"{label} 在运行中途被改名或改指：钉住的 inode 与当前路径已不是同一个"
+        )

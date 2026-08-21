@@ -763,3 +763,89 @@ def test_claim_dir_leaves_nothing_when_lock_unavailable(tmp_path: Path, monkeypa
     # 目录已被 mkdir 出来（不可避免），但**没有标记** → 下次启动会走 probe 的
     # "vacuum" 分支，拿到唯一能干净 rmdir 的那一档指引
     assert target.is_dir() and list(target.iterdir()) == []
+
+
+# ------------------------------------------------------------- Task 11: 三条边界判据
+from qmt_fsroot import (
+    BoundaryError, assert_distinct_inodes, assert_fd_still_at,
+    assert_no_path_overlap, assert_readonly_fd,
+)
+
+
+def test_assert_readonly_fd_rejects_writable_dir(tmp_path: Path):
+    # 非写入式判据：statvfs 问内核要挂载标志。
+    # ⚠️ 禁止用「试写一个临时文件」探测——那种主动探测在**恰恰是它要防的
+    # 那个危险场景里**（共享真的可写）会由本工具**亲手去写权威导出共享**，
+    # 探测成功即污染（R5-F3）
+    rw = open_root(str(tmp_path))
+    try:
+        with pytest.raises(BoundaryError, match="只读"):
+            assert_readonly_fd(rw, label="--source")
+    finally:
+        os.close(rw)
+
+
+@pytest.mark.skipif(not (os.statvfs("/").f_flag & os.ST_RDONLY),
+                    reason="本机根卷不是只读挂载（macOS SSV 之外的平台）")
+def test_assert_readonly_fd_accepts_readonly_volume():
+    # ⚠️ 本判据只证明「这是某个只读目录」：本机根卷 / 自己就是 apfs … read-only，
+    # 「只读」在 macOS 上**区分不出网络共享与本地卷**（R19-F2，已实测）
+    ro = open_root("/")
+    try:
+        assert_readonly_fd(ro, label="--source")
+    finally:
+        os.close(ro)
+
+
+def test_assert_no_path_overlap_rejects_equal_and_subtree(tmp_path: Path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "inner").mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    assert_no_path_overlap({"--source": str(src), "--dest": str(dest)})
+    with pytest.raises(BoundaryError):
+        assert_no_path_overlap({"--source": str(src), "--dest": str(src)})
+    with pytest.raises(BoundaryError):
+        # 否则一旦源挂载是可写的，qmt_fetch 会把锁/manifest/.part/CSV
+        # **写进那个权威导出共享里**，污染的正是本次要取证的数据集（R4-F4）
+        assert_no_path_overlap({"--source": str(src), "--dest": str(src / "inner")})
+    with pytest.raises(BoundaryError):
+        assert_no_path_overlap({"--source": str(src / "inner"), "--dest": str(src)})
+
+
+def test_assert_no_path_overlap_is_not_fooled_by_sibling_prefix(tmp_path: Path):
+    # /a/srcx 不是 /a/src 的子树——字符串前缀比较会误判
+    (tmp_path / "src").mkdir()
+    (tmp_path / "srcx").mkdir()
+    assert_no_path_overlap({"--source": str(tmp_path / "src"),
+                            "--dest": str(tmp_path / "srcx")})
+
+
+def test_assert_distinct_inodes_catches_symlink_aliased_dirs(tmp_path: Path):
+    # 路径判据可被换掉，inode 判据不会（R84-F1）
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "alias").symlink_to(real)
+    a = open_root(str(real))
+    b = os.open(str(tmp_path / "alias"), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(BoundaryError):
+            assert_distinct_inodes({"--source": a, "--dest": b})
+    finally:
+        os.close(a)
+        os.close(b)
+
+
+def test_assert_fd_still_at_detects_swapped_directory(tmp_path: Path):
+    d = tmp_path / "staging"
+    d.mkdir()
+    fd = open_root(str(d))
+    try:
+        assert_fd_still_at(str(d), fd, label="--dest")
+        d.rename(tmp_path / "moved")
+        (tmp_path / "staging").mkdir()       # 有人在原路径上放了另一棵树
+        with pytest.raises(BoundaryError, match="--dest"):
+            assert_fd_still_at(str(d), fd, label="--dest")
+    finally:
+        os.close(fd)
