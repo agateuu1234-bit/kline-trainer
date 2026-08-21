@@ -697,7 +697,7 @@ def test_claim_dir_creates_locks_and_marks(tmp_path: Path):
     dir_fd, lock_fd = claim_dir(
         str(target), lock_name=".staging.lock", marker_name=".staging_owner.json",
         marker_payload={"tool": "qmt_fetch", "seed": "s1", "dest": str(target)},
-        tool="qmt_fetch",
+        tool="qmt_fetch", self_field="dest",
     )
     try:
         assert target.is_dir()
@@ -726,7 +726,8 @@ def test_claim_dir_takes_lock_before_publishing_ownership(tmp_path: Path, monkey
     target = tmp_path / "dest"
     dir_fd, lock_fd = claim_dir(
         str(target), lock_name=".staging.lock", marker_name=".staging_owner.json",
-        marker_payload={"tool": "qmt_fetch", "dest": str(target)}, tool="qmt_fetch")
+        marker_payload={"tool": "qmt_fetch", "dest": str(target)},
+        tool="qmt_fetch", self_field="dest")
     try:
         assert order == ["lock", "marker"]
     finally:
@@ -743,7 +744,7 @@ def test_claim_dir_raises_directory_exists_and_writes_nothing(tmp_path: Path):
         claim_dir(str(target), lock_name=".staging.lock",
                   marker_name=".staging_owner.json",
                   marker_payload={"tool": "qmt_fetch", "dest": str(target)},
-                  tool="qmt_fetch")
+                  tool="qmt_fetch", self_field="dest")
     assert list(target.iterdir()) == []
 
 
@@ -759,7 +760,7 @@ def test_claim_dir_leaves_nothing_when_lock_unavailable(tmp_path: Path, monkeypa
         claim_dir(str(target), lock_name=".staging.lock",
                   marker_name=".staging_owner.json",
                   marker_payload={"tool": "qmt_fetch", "dest": str(target)},
-                  tool="qmt_fetch")
+                  tool="qmt_fetch", self_field="dest")
     # 目录已被 mkdir 出来（不可避免），但**没有标记** → 下次启动会走 probe 的
     # "vacuum" 分支，拿到唯一能干净 rmdir 的那一档指引
     assert target.is_dir() and list(target.iterdir()) == []
@@ -945,7 +946,7 @@ def test_claim_dir_revalidates_leaf_after_taking_lock(tmp_path: Path, monkeypatc
         claim_dir(str(target), lock_name=".staging.lock",
                   marker_name=".staging_owner.json",
                   marker_payload={"tool": "qmt_fetch", "dest": str(target)},
-                  tool="qmt_fetch")
+                  tool="qmt_fetch", self_field="dest")
     # 归属标记**没有**落进别人的目录
     assert not (target / ".staging_owner.json").exists()
     assert (target / "zip_of_someone_else.zip").read_text() == "precious"
@@ -988,7 +989,7 @@ def test_claim_dir_revalidates_after_marker_is_published(tmp_path: Path, monkeyp
         claim_dir(str(target), lock_name=".staging.lock",
                   marker_name=".staging_owner.json",
                   marker_payload={"tool": "qmt_fetch", "dest": str(target)},
-                  tool="qmt_fetch")
+                  tool="qmt_fetch", self_field="dest")
     # 别人的目录既没被写进标记、数据也没被动
     assert not (target / ".staging_owner.json").exists()
     assert (target / "precious.zip").read_text() == "someone elses data"
@@ -1001,7 +1002,7 @@ def test_claim_dir_succeeds_and_marker_is_reachable_by_path(tmp_path: Path):
     dir_fd, lock_fd = claim_dir(
         str(target), lock_name=".staging.lock", marker_name=".staging_owner.json",
         marker_payload={"tool": "qmt_fetch", "seed": "s1", "dest": str(target)},
-        tool="qmt_fetch")
+        tool="qmt_fetch", self_field="dest")
     try:
         assert json.loads((target / ".staging_owner.json").read_text())["seed"] == "s1"
     finally:
@@ -1211,3 +1212,83 @@ def test_verify_owner_marker_accepts_normal_sized_marker(tmp_path: Path):
         assert got["seed"] == "s1"
     finally:
         os.close(root)
+
+
+# ============ R7 codex high：写侧发布的标记必须能通过读侧自己的校验 ============
+# 本仓把「写侧形状与读侧要求逐字相同」（R94-F2）和「一个信号只有同时进了写侧规定
+# 与读侧校验才真的存在」（R93-F1）列为头等纪律 —— claim_dir 却把调用方给的内容
+# **原样发布**，从不检查它能不能过自己的 verify_owner_marker。
+
+def _claim(target, payload, tool="qmt_fetch", self_field="dest"):
+    return claim_dir(str(target), lock_name=".staging.lock",
+                     marker_name=".staging_owner.json",
+                     marker_payload=payload, tool=tool, self_field=self_field)
+
+
+def test_claim_dir_rejects_oversized_payload_before_any_side_effect(tmp_path: Path):
+    target = tmp_path / "dest"
+    with pytest.raises(MarkerInvalidError, match="过大"):
+        _claim(target, {"tool": "qmt_fetch", "dest": str(target), "junk": "x" * 200000})
+    # ⚠️ 必须在 mkdir **之前**就拒 —— 否则留下一个半初始化目录，下一次运行
+    # 既不是首次（路径存在）也复用不了（标记非法），工具自己解不开
+    assert not target.exists()
+
+
+def test_claim_dir_rejects_non_serializable_payload_before_any_side_effect(tmp_path: Path):
+    target = tmp_path / "dest"
+    with pytest.raises(MarkerInvalidError, match="序列化"):
+        _claim(target, {"tool": "qmt_fetch", "dest": str(target), "bad": {1, 2, 3}})
+    assert not target.exists()
+
+
+def test_claim_dir_rejects_wrong_tool_before_any_side_effect(tmp_path: Path):
+    target = tmp_path / "dest"
+    with pytest.raises(MarkerInvalidError, match="tool"):
+        _claim(target, {"tool": "qmt_pilot", "dest": str(target)})
+    assert not target.exists()
+
+
+def test_claim_dir_rejects_missing_self_field_before_any_side_effect(tmp_path: Path):
+    target = tmp_path / "dest"
+    with pytest.raises(MarkerInvalidError, match="自指"):
+        _claim(target, {"tool": "qmt_fetch"})
+    assert not target.exists()
+
+
+def test_claim_dir_rejects_self_field_pointing_elsewhere(tmp_path: Path):
+    target = tmp_path / "dest"
+    with pytest.raises(MarkerInvalidError, match="自指"):
+        _claim(target, {"tool": "qmt_fetch", "dest": str(tmp_path / "somewhere_else")})
+    assert not target.exists()
+
+
+def test_claim_dir_published_marker_round_trips_through_verifier(tmp_path: Path):
+    # 正向档：发布出去的标记必须当场能被读侧接受（写侧读侧配对闭合）
+    target = tmp_path / "dest"
+    dir_fd, lock_fd = _claim(target, {"tool": "qmt_fetch", "seed": "s1",
+                                      "dest": str(target)})
+    try:
+        got = verify_owner_marker(dir_fd, ".staging_owner.json",
+                                  expect_tool="qmt_fetch",
+                                  self_field="dest", self_value=str(target))
+        assert got["seed"] == "s1"
+    finally:
+        os.close(lock_fd)
+        os.close(dir_fd)
+
+
+def test_claim_dir_catches_writer_reader_drift(tmp_path: Path, monkeypatch):
+    # 发布后的回读，钉的是**写侧与读侧的配对**，不是 payload 本身
+    # （payload 由发布前自检负责）。故它的反例必须来自**写侧漂移**：
+    # 让 write_owner_marker 写出一份与 payload 不一致的字节，
+    # claim_dir 必须当场发现并 fail-closed，而不是宣称认领成功。
+    import qmt_fsroot as M
+    real_write = M.write_owner_marker
+
+    def drifting_write(dir_fd, marker_name, payload):
+        return real_write(dir_fd, marker_name, {"tool": "somebody_else"})
+
+    monkeypatch.setattr(M, "write_owner_marker", drifting_write)
+    target = tmp_path / "dest"
+    with pytest.raises(MarkerInvalidError, match="超出本工具的理解范围"):
+        _claim(target, {"tool": "qmt_fetch", "dest": str(target)})

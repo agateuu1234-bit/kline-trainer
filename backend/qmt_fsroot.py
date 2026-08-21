@@ -689,7 +689,7 @@ def verify_owner_marker(dir_fd: int, marker_name: str, *, expect_tool: str,
 
 
 def claim_dir(abs_path: str, *, lock_name: str, marker_name: str,
-              marker_payload: dict, tool: str) -> tuple[int, int]:
+              marker_payload: dict, tool: str, self_field: str) -> tuple[int, int]:
     """首次使用 / 认领协议（`--dest` 与 `--output` **创建方式同规格**，R64-F1 + R66-F2）：
 
       1. `open_root(create_leaf=True)` —— 从 `/` 逐分量 `O_NOFOLLOW` 走到父目录，
@@ -712,11 +712,47 @@ def claim_dir(abs_path: str, *, lock_name: str, marker_name: str,
     **`--dest` 与 `--output` 在 `EEXIST` 这一档结局不同**（R91-F2），
     由调用方决定，本原语不替它们决定。
 
+    ⚠️ **发布前先自检、发布后再回读**（R7-codex-high）：本仓把「写侧形状与读侧要求
+    逐字相同」（R94-F2）与「一个信号只有同时进了写侧规定与读侧校验才真的存在」
+    （R93-F1）列为头等纪律，而本函数原先把调用方给的 `marker_payload` **原样发布**，
+    从不检查它能否通过自己的 `verify_owner_marker`。后果是：内容超限 / 缺 `tool` /
+    自指字段不符时，目录被**认领成功**，而**下一次运行拒绝这份标记** ——
+    该目录既不是首次（路径存在）也复用不了（标记非法），**工具自己解不开**。
+    且序列化失败原先发生在 `mkdir` 与取锁**之后**，会留下半初始化目录。
+
+    故：**任何副作用之前**先把 `marker_payload` 序列化并逐条自检
+    （可 JSON 化 / 不超 `_MARKER_MAX_BYTES` / `tool` 相符 / `self_field` 存在且
+    等于规范化后的 `abs_path`）；发布之后再用 `verify_owner_marker` **回读一次**，
+    把写侧与读侧真正配上对。
+
     ⚠️ **本函数不声称序列化父目录的命名空间**（R2-codex-high）：`flock` 只约束
     尊重它的工具。它声称的是——**写入永远经 fd 而非路径**（不会落进别人的目录），
     且**取锁后与发布后各复核一次**，故「路径已指向别处而仍以 rc=0 宣称成功」
     不可能发生。持续可达性由调用方用 `assert_fd_still_at` 周期性复核。
     """
+    # ---- 任何副作用之前：把标记内容按读侧的要求逐条自检（R7-codex-high）----
+    normalized = normalize_abs_path(abs_path)
+    if marker_payload.get("tool") != tool:
+        raise MarkerInvalidError(
+            f"标记内容的 tool 为 {marker_payload.get('tool')!r}，不是 {tool!r}"
+            f"——写侧发布的标记必须能通过读侧自己的校验。一个字节都不写。"
+        )
+    if marker_payload.get(self_field) != normalized:
+        raise MarkerInvalidError(
+            f"标记内容的自指字段 {self_field!r} 为 "
+            f"{marker_payload.get(self_field)!r}，而目标路径是 {normalized!r}"
+            f"——写侧发布的标记必须能通过读侧自己的校验。一个字节都不写。"
+        )
+    try:
+        encoded = json.dumps(marker_payload, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError) as e:
+        raise MarkerInvalidError(f"标记内容无法序列化成 JSON: {e}。一个字节都不写。") from e
+    if len(encoded) > _MARKER_MAX_BYTES:
+        raise MarkerInvalidError(
+            f"标记内容过大（{len(encoded)} 字节 > {_MARKER_MAX_BYTES}）"
+            f"——读侧会拒绝它。一个字节都不写。"
+        )
+
     dir_fd, parent_fd, leaf = _open_root_impl(abs_path, create_leaf=True)
     lock_fd = None
     try:
@@ -731,6 +767,19 @@ def claim_dir(abs_path: str, *, lock_name: str, marker_name: str,
         # 的旧 inode 上，而 abs_path 指向别处，正是 O2-F9 那个最坏结局：
         # **工具以 rc=0 宣称就绪，而操作者按路径去看什么都没有**。
         _assert_leaf_still_is(parent_fd, leaf, dir_fd, abs_path, when="发布归属之后")
+        # 写侧读侧配对闭合：刚发布的标记必须当场能被读侧接受。
+        # 有了上面的发布前自检，这一步在实践中不该失败；它失败即说明现场
+        # **超出本工具的理解范围**，按本仓纪律 fail-closed 并把出路交给人。
+        try:
+            verify_owner_marker(dir_fd, marker_name, expect_tool=tool,
+                                self_field=self_field, self_value=normalized)
+        except MarkerInvalidError as e:
+            raise MarkerInvalidError(
+                f"刚发布的归属标记无法通过读侧校验（{e}）——现场超出本工具的理解范围。"
+                f"请先列出 {abs_path} 的内容核对，确认无用后手工清理："
+                f"`rm -f {abs_path}/{marker_name} {abs_path}/{lock_name} "
+                f"&& rmdir {abs_path}`"
+            ) from e
     except BaseException:
         if lock_fd is not None:
             os.close(lock_fd)
