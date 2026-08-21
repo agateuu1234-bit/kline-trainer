@@ -341,3 +341,55 @@ def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
     except BaseException:
         os.close(lock_fd)
         raise
+
+
+def probe_unclaimed_dir(dir_fd: int, lock_name: str) -> str:
+    """一个**没有合法归属标记**的既存目录，该给操作者什么指引——三分支，一个都不能省。
+
+    探测形态由 P2-F1 写死，**绝不带 `O_CREAT`**：带了会在一个已被证明不属于我们的目录里
+    造出锁文件，随后建议的 `rmdir` 恰恰因为这个文件而 `ENOTEMPTY`，
+    **修复指引自己把自己堵死**；这直接违反「取锁要写文件，打错字的 `--dest`
+    会先在未经证明的目录里落下锁文件」（R65-F1）。
+
+    返回值与调用方必须给出的指引：
+
+    - `"vacuum"` —— 锁文件**不存在**。这是崩在 `mkdir` 与建锁文件之间留下的**真空目录**，
+      也是**唯一 `rmdir` 能干净成功的一档**（O4-F6）。调用方须**先复查目录确为空**，
+      再给 `rmdir <dir>` 指引。
+    - `"busy"` —— `flock` 取不到。报「**另一次运行正在认领该目录，请等待或确认**」，
+      **绝不建议 `rmdir`**（O2-F9：那个窗口里至少有一次 openat+flock、一次写、三次
+      `fsync`，操作者照做后 A 持有的 fd 仍指向已被 unlink 的 inode，
+      此后几百个 CSV 全写进一棵**不可达**的树，而 A 以 rc=0 宣称就绪）。
+    - `"stale"` —— `flock` 取得了，才**可能**是残骸。⚠️ 此时目录里**必然有**锁文件
+      （正是我们刚打开的那个），**裸 `rmdir` 必撞 `ENOTEMPTY`**（已实测）。
+      故指引必须是：先列出目录内容供操作者核对，再给
+      「若确认除锁文件外为空：`rm -f <dir>/<lock> && rmdir <dir>`」。
+
+    锁文件是符号链接、目录或其它非普通文件 → `LockDisciplineError`（R72-F2）。
+    """
+    try:
+        lock_fd = open_under(dir_fd, lock_name, flags=os.O_RDWR)   # ⚠️ 绝不带 O_CREAT
+    except FileNotFoundError:
+        return "vacuum"
+    except PathEscapeError as e:
+        raise LockDisciplineError(
+            f"锁文件 {lock_name!r} 不是普通文件（{e}）——拒绝启动。"
+        ) from e
+    except IsADirectoryError as e:
+        # 与 acquire_lock 同规格：EISDIR 在 fstat 之前就抛出，S_ISREG 够不着
+        raise LockDisciplineError(
+            f"锁文件 {lock_name!r} 存在但是一个目录——拒绝启动。"
+        ) from e
+    try:
+        if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+            raise LockDisciplineError(
+                f"锁文件 {lock_name!r} 存在但不是普通文件——拒绝启动。"
+            )
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return "busy"
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)     # 取得后立即释放，不写任何内容
+        return "stale"
+    finally:
+        os.close(lock_fd)

@@ -492,3 +492,86 @@ def test_acquire_lock_raises_when_held(tmp_path: Path):
         os.close(lk)
         os.close(root)
         os.close(root2)
+
+
+# ------------------------------------------------------- Task 8: probe_unclaimed_dir
+from qmt_fsroot import probe_unclaimed_dir
+
+
+def test_probe_vacuum_when_lock_file_absent(tmp_path: Path):
+    # 崩在 mkdir 与建锁文件之间留下的**真空目录**，
+    # 也是**唯一 rmdir 能干净成功的一档**（O4-F6）
+    root = open_root(str(tmp_path))
+    try:
+        assert probe_unclaimed_dir(root, ".staging.lock") == "vacuum"
+    finally:
+        os.close(root)
+
+
+def test_probe_busy_when_lock_held_by_another_process(tmp_path: Path):
+    lockpath = tmp_path / ".staging.lock"
+    proc = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl, os, sys, time\n"
+         f"fd = os.open({str(lockpath)!r}, os.O_CREAT | os.O_RDWR, 0o600)\n"
+         "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+         "sys.stdout.write('held'); sys.stdout.flush()\n"
+         "time.sleep(30)\n"],
+        stdout=subprocess.PIPE)
+    try:
+        assert proc.stdout.read(4) == b"held"
+        root = open_root(str(tmp_path))
+        try:
+            # 取不到锁 → 「另一次运行正在认领该目录」，**绝不建议 rmdir**（O2-F9）
+            assert probe_unclaimed_dir(root, ".staging.lock") == "busy"
+        finally:
+            os.close(root)
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_probe_stale_when_lock_file_present_but_free(tmp_path: Path):
+    (tmp_path / ".staging.lock").write_text("{}")
+    root = open_root(str(tmp_path))
+    try:
+        assert probe_unclaimed_dir(root, ".staging.lock") == "stale"
+    finally:
+        os.close(root)
+
+
+def test_probe_never_creates_the_lock_file(tmp_path: Path):
+    # ⚠️ 带 O_CREAT 会在一个**已被证明不属于我们的目录**里造文件——
+    # `--dest` 打错成 /Users/me/Documents 时，工具先落下 .staging.lock，
+    # 然后建议 rmdir，而 rmdir 恰恰因为我们刚造的这个文件而 ENOTEMPTY，
+    # **修复指引自己把自己堵死**；真正的残骸空目录也再 rmdir 不掉（P2-F1）
+    root = open_root(str(tmp_path))
+    try:
+        assert probe_unclaimed_dir(root, ".staging.lock") == "vacuum"
+    finally:
+        os.close(root)
+    assert list(tmp_path.iterdir()) == []          # 目录仍然是空的
+
+
+def test_probe_rejects_symlinked_lock_file(tmp_path: Path):
+    outside = tmp_path / "outside.lock"
+    outside.write_text("")
+    inside = tmp_path / "root"
+    inside.mkdir()
+    (inside / ".staging.lock").symlink_to(outside)
+    root = open_root(str(inside))
+    try:
+        with pytest.raises(LockDisciplineError):
+            probe_unclaimed_dir(root, ".staging.lock")
+    finally:
+        os.close(root)
+
+
+def test_probe_rejects_directory_lock_name(tmp_path: Path):
+    (tmp_path / ".staging.lock").mkdir()
+    root = open_root(str(tmp_path))
+    try:
+        with pytest.raises(LockDisciplineError):
+            probe_unclaimed_dir(root, ".staging.lock")
+    finally:
+        os.close(root)
