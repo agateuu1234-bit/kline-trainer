@@ -403,7 +403,7 @@ def test_acquire_lock_succeeds_and_writes_human_readable_holder(tmp_path: Path):
     try:
         lk = acquire_lock(root, ".staging.lock", tool="qmt_fetch")
         try:
-            info = json.loads((tmp_path / ".staging.lock").read_text())
+            info = json.loads((tmp_path / ".staging.lock.holder").read_text())
             # 持有者信息**仅供人读诊断，不参与判定**（R48-F2）
             assert info["tool"] == "qmt_fetch"
             assert info["pid"] == os.getpid()
@@ -1152,7 +1152,10 @@ def test_acquire_lock_accepts_preexisting_single_link_lock_file(tmp_path: Path):
     try:
         lk = acquire_lock(root, ".staging.lock", tool="qmt_fetch")
         try:
-            assert json.loads((tmp_path / ".staging.lock").read_text())["tool"] == "qmt_fetch"
+            assert json.loads(
+                (tmp_path / ".staging.lock.holder").read_text())["tool"] == "qmt_fetch"
+            # 锁文件本身**一个字节都没被动**（R8：取锁不得截断任何 inode）
+            assert (tmp_path / ".staging.lock").read_text() == '{"stale": true}'
         finally:
             os.close(lk)
     finally:
@@ -1292,3 +1295,40 @@ def test_claim_dir_catches_writer_reader_drift(tmp_path: Path, monkeypatch):
     target = tmp_path / "dest"
     with pytest.raises(MarkerInvalidError, match="超出本工具的理解范围"):
         _claim(target, {"tool": "qmt_fetch", "dest": str(target)})
+
+
+# ============ R8 codex high：取锁不得截断任何 inode（灭掉整个截断家族）============
+
+def test_acquire_lock_never_mutates_the_lock_inode(tmp_path: Path):
+    # spec R48-F2 明写锁文件内容「仅供人读诊断，不参与任何判定」——
+    # 那就没有任何理由去改它。取锁只 flock，诊断写到独立文件。
+    lock = tmp_path / ".staging.lock"
+    lock.write_text("whatever was here before")
+    root = open_root(str(tmp_path))
+    try:
+        lk = acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+        try:
+            assert lock.read_text() == "whatever was here before"
+            assert json.loads(
+                (tmp_path / ".staging.lock.holder").read_text())["tool"] == "qmt_fetch"
+        finally:
+            os.close(lk)
+    finally:
+        os.close(root)
+
+
+def test_module_contains_no_destructive_truncation():
+    # 机械锚点（AST 级，不是 grep 注释）：本模块**一次截断性写入都不剩**。
+    # R3 / R5 / R8 是同一家族的三次复发（标记临时文件 / 锁硬链接 / 锁截断竞态）。
+    # 按本仓「穷尽全族」的纪律，家族一旦灭掉，就要留一个守卫防它复活。
+    import ast
+    import qmt_fsroot as M
+    tree = ast.parse(open(M.__file__, encoding="utf-8").read())
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in ("ftruncate", "O_TRUNC"):
+            offenders.append(f"{node.attr} @ line {node.lineno}")
+    assert offenders == [], (
+        f"本模块不得再出现截断性写入（R3/R5/R8 同族）：{offenders}。"
+        f"要写文件一律走 _atomic_write_json（唯一名 + O_EXCL + os.replace）。"
+    )

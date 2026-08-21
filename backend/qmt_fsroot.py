@@ -470,17 +470,16 @@ def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
             raise LockDisciplineError(
                 f"锁文件 {lock_name!r} 存在但不是普通文件——拒绝启动。"
             )
-        # ⚠️ 与 R3 同族的**硬链接截断**（R5-codex-high）：本函数下面要
-        # `ftruncate(0)` + 写诊断 JSON。若 `lock_name` 是一个把外部文件硬链过来的
-        # 名字，我们就会**亲手清空那个外部文件**——一次取锁变成任意同 UID 文件损坏。
-        # `O_NOFOLLOW` 挡符号链接、`S_ISREG` 挡 FIFO，两者都**挡不住硬链接**。
-        # 判据用 `st_nlink == 1`：硬链接过来的外部文件必然 ≥ 2，而只存在于本目录的
-        # 锁文件（无论是本次新建的还是上次留下的）恰好是 1。
+        # ⚠️ **本判据原来的理由已经不成立了，如实登记**（R5 → R8）：
+        # 它当初（R5-codex-high）是为了保护本函数下面那次 `ftruncate(0)` —— 若
+        # `lock_name` 是把外部文件硬链过来的名字，截断就会毁掉边界外的数据。
+        # **R8 之后本函数一个字节都不再写锁 inode**，那条伤害路径整个消失了。
         #
-        # ⚠️ 诚实残留：对手若把自己的文件 **rename** 到这个名字上（而不是硬链），
-        # `nlink` 仍是 1，本判据测不出。但那要求对手先能写进本工具 0700 的工作目录，
-        # 且是把自己的数据主动搬进来——与 R3 的口径一致，本条不声称挡住同 UID 对手，
-        # 只是不再由本工具亲手替它造成边界外的破坏。
+        # 保留它的理由变成了另一条、也弱得多：**一个 0700 工作目录里出现多名字的
+        # 锁文件本身就是异常现场**，按本仓纪律异常即 fail-closed。
+        # 它**不再**声称阻止任何数据破坏。
+        # （原先登记的「对手用 rename 而非 link 则测不出」这条残留，
+        #   随伤害路径一起失去意义，不再作为残留登记。）
         if lock_st.st_nlink != 1:
             raise LockDisciplineError(
                 f"锁文件 {lock_name!r} 有 {lock_st.st_nlink} 个硬链接——"
@@ -494,12 +493,20 @@ def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
                 f"{lock_name!r} 正被另一次运行持有，请等待或确认。"
                 f"（锁由内核持有、进程死亡即释放，**不需要也不应该手工删锁**）"
             ) from e
-        os.ftruncate(lock_fd, 0)
-        os.lseek(lock_fd, 0, os.SEEK_SET)
-        _write_all(lock_fd, json.dumps(
-            {"tool": tool, "pid": os.getpid(), "hostname": socket.gethostname()},
-            ensure_ascii=False,
-        ).encode("utf-8"))
+        # ⚠️ **取锁不改动锁 inode 的任何一个字节**（R8-codex-high）。
+        # spec R48-F2 明写锁文件内容「仅供人读诊断，不参与任何判定」——
+        # 既然如此就没有任何理由去截断它。持有者信息写到**独立文件**，
+        # 走 `_atomic_write_json`（唯一名 + `O_EXCL` + `os.replace`）。
+        #
+        # ⚠️ 对 codex 这一条的**部分不同意**（已在提交信息里登记）：它说
+        # 「检查之后被硬链到别处，随后的 ftruncate 会破坏那个外部路径」——
+        # 可那个 inode **本来就是我们的**，里面只有我们自己的诊断 JSON，
+        # 攻击者链过去的是我们的文件，截断它没有毁掉任何属于别人的数据，
+        # harm 被说重了。但它的**另一条建议是对的且更彻底**，故照此重构：
+        # 重构之后这个争论本身就不存在了。
+        _atomic_write_json(dir_fd, lock_name + ".holder", {
+            "tool": tool, "pid": os.getpid(), "hostname": socket.gethostname(),
+        })
         return lock_fd
     except BaseException:
         os.close(lock_fd)
@@ -559,6 +566,55 @@ def probe_unclaimed_dir(dir_fd: int, lock_name: str) -> str:
         os.close(lock_fd)
 
 
+def _atomic_write_json(dir_fd: int, name: str, payload: dict) -> None:
+    """原子写一份 JSON：`lstat` 守卫 → 唯一名 `O_EXCL` 临时文件 → `fsync(文件)`
+    → `os.replace` → `fsync(目录)`。**本模块唯一的文件写入路径。**
+
+    ⚠️ **绝不截断既存 inode**（R3 / R5 / R8 同一家族的三次复发：标记临时文件、
+    锁硬链接、锁截断竞态）。`O_NOFOLLOW` 挡符号链接、`S_ISREG` 挡 FIFO，
+    两者**都挡不住硬链接**；而 `st_nlink == 1` 这类检查与随后的截断之间
+    必然存在窗口，**反复加检查关不掉它**。
+    真正的解法是：**只写自己用 `O_EXCL` 刚创建出来的 inode**，然后 `os.replace`
+    发布 —— `replace` 换的是目录项，不碰目标 inode 的字节，外部硬链接保有自己的数据。
+
+    临时名带 pid 与随机后缀，故崩溃留下的旧临时文件不会被静默复用；
+    失败路径把它 unlink 掉。
+    """
+    try:
+        st = os.lstat(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISLNK(st.st_mode):
+            raise PathEscapeError(
+                relative_path=name, component=name, errno=_errno.ELOOP
+            )
+        if not stat.S_ISREG(st.st_mode):
+            raise MarkerInvalidError(
+                f"{name!r} 已存在但不是普通文件——拒绝写入。"
+            )
+    tmp_name = f"{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+    fd = open_under(
+        dir_fd, tmp_name,
+        flags=os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode=0o600,
+    )
+    try:
+        try:
+            _write_all(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        # ⚠️ 直接传 dir_fd，不做 os.supports_dir_fd 能力探测（O4-F14）
+        os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+        raise
+    fsync_dir(dir_fd)
+
+
 def write_owner_marker(dir_fd: int, marker_name: str, payload: dict) -> None:
     """原子写归属标记：`lstat` 拒符号链接 → tmp → `fsync(文件)` → `os.replace` → `fsync(目录)`。
 
@@ -573,51 +629,7 @@ def write_owner_marker(dir_fd: int, marker_name: str, payload: dict) -> None:
     ⚠️ **本函数不管顺序**：调用方必须**先取锁再写标记**（R97-F2 取锁早于发布归属）。
     父目录的 `fsync` 由 `open_root(create_leaf=True)` 在 `mkdir` 之后做掉。
     """
-    try:
-        st = os.lstat(marker_name, dir_fd=dir_fd)
-    except FileNotFoundError:
-        pass
-    else:
-        if stat.S_ISLNK(st.st_mode):
-            raise PathEscapeError(
-                relative_path=marker_name, component=marker_name, errno=_errno.ELOOP
-            )
-        if not stat.S_ISREG(st.st_mode):
-            raise MarkerInvalidError(
-                f"归属标记 {marker_name!r} 已存在但不是普通文件——拒绝写入。"
-            )
-    # ⚠️ 临时文件必须是**不可预测的唯一名字 + `O_EXCL`**（R3-codex-high）：
-    # `O_NOFOLLOW` 挡符号链接，**挡不住硬链接**——硬链接不是「链接」，它就是同一个
-    # inode 的另一个名字。可预测的 `<marker>.tmp` 配 `O_TRUNC`，会让一个把外部文件
-    # 硬链到该名字上的同 UID 进程，被我们亲手**清空那个外部文件**：一次目录认领
-    # 变成了任意同 UID 文件损坏。`O_EXCL` 则保证我们只写自己刚创建出来的那个 inode。
-    #
-    # ⚠️ 诚实边界：这防的是**同 UID 的对手**，而这种对手若真的存在，本来就能改我们的
-    # CSV、读我们的数据——本条不声称把它挡在门外，只是不再由本工具**亲手**替它造成
-    # 边界外的破坏。顺带一个非对抗性的好处：崩溃留下的旧临时文件不会被静默复用。
-    # （`O_EXCL` 创建成功即证明该 inode 是我们造的，故 codex 建议的
-    #   「再 fstat 核属主与链接数」在这里是冗余的，不加。）
-    tmp_name = f"{marker_name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
-    fd = open_under(
-        dir_fd, tmp_name,
-        flags=os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode=0o600,
-    )
-    try:
-        try:
-            _write_all(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        # ⚠️ 直接传 dir_fd，不做 os.supports_dir_fd 能力探测（O4-F14）
-        os.replace(tmp_name, marker_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-    except BaseException:
-        # 失败路径必须把唯一命名的临时文件清掉，否则每次崩溃都留一个垃圾
-        try:
-            os.unlink(tmp_name, dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
-        raise
-    fsync_dir(dir_fd)
+    _atomic_write_json(dir_fd, marker_name, payload)
 
 
 def verify_owner_marker(dir_fd: int, marker_name: str, *, expect_tool: str,
