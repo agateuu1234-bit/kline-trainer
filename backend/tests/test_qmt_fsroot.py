@@ -389,3 +389,106 @@ def test_full_fsync_uses_F_FULLFSYNC_not_plain_fsync(tmp_path: Path, monkeypatch
 
 def test_full_fsync_command_constant_exists():
     assert hasattr(fcntl, "F_FULLFSYNC")     # 本机实测值 51
+
+
+# ------------------------------------------------------------- Task 7: acquire_lock
+import json
+import subprocess
+import sys
+from qmt_fsroot import LockDisciplineError, LockUnavailableError, acquire_lock
+
+
+def test_acquire_lock_succeeds_and_writes_human_readable_holder(tmp_path: Path):
+    root = open_root(str(tmp_path))
+    try:
+        lk = acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+        try:
+            info = json.loads((tmp_path / ".staging.lock").read_text())
+            # 持有者信息**仅供人读诊断，不参与判定**（R48-F2）
+            assert info["tool"] == "qmt_fetch"
+            assert info["pid"] == os.getpid()
+            assert "hostname" in info
+        finally:
+            os.close(lk)
+    finally:
+        os.close(root)
+
+
+def test_acquire_lock_is_exclusive_across_processes(tmp_path: Path):
+    root = open_root(str(tmp_path))
+    lk = acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+    try:
+        script = (
+            "import fcntl, os, sys\n"
+            f"fd = os.open({str(tmp_path / '.staging.lock')!r}, os.O_RDWR)\n"
+            "try:\n"
+            "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "    sys.exit(0)\n"
+            "except OSError:\n"
+            "    sys.exit(3)\n"
+        )
+        r = subprocess.run([sys.executable, "-c", script])
+        assert r.returncode == 3          # 另一个**进程**确实拿不到
+    finally:
+        os.close(lk)
+        os.close(root)
+
+
+def test_lock_released_when_holder_process_dies(tmp_path: Path):
+    # 锁由**内核**持有，进程无论正常退出还是被杀都自动释放；
+    # 存在性锁（O_CREAT|O_EXCL）会与「执行阶段中途崩溃」叠成**死锁**：
+    # 每次重跑都卡在取锁那一步，只能人工删锁（R48-F2 / §9-5n）
+    script = (
+        "import fcntl, os\n"
+        f"fd = os.open({str(tmp_path / '.staging.lock')!r}, os.O_CREAT | os.O_RDWR, 0o600)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "os.kill(os.getpid(), 9)\n"
+    )
+    subprocess.run([sys.executable, "-c", script])
+    assert (tmp_path / ".staging.lock").exists()     # 锁文件**残留**了
+    root = open_root(str(tmp_path))
+    try:
+        lk = acquire_lock(root, ".staging.lock", tool="qmt_fetch")   # 照样取得
+        os.close(lk)
+    finally:
+        os.close(root)
+
+
+def test_acquire_lock_refuses_symlinked_lock_file(tmp_path: Path):
+    # 锁文件在直觉里像「临时协调物」，恰恰因此被漏掉；
+    # 凡本工具会写入的路径，无论承载数据还是协调状态，都过同一套符号链接纪律（R72-F2）
+    outside = tmp_path / "outside.lock"
+    outside.write_text("")
+    inside = tmp_path / "root"
+    inside.mkdir()
+    (inside / ".staging.lock").symlink_to(outside)
+    root = open_root(str(inside))
+    try:
+        with pytest.raises(LockDisciplineError):
+            acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+    finally:
+        os.close(root)
+    assert outside.read_text() == ""       # 一个字节都没写进去
+
+
+def test_acquire_lock_refuses_non_regular_lock_file(tmp_path: Path):
+    (tmp_path / ".staging.lock").mkdir()
+    root = open_root(str(tmp_path))
+    try:
+        with pytest.raises(LockDisciplineError):
+            acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+    finally:
+        os.close(root)
+
+
+def test_acquire_lock_raises_when_held(tmp_path: Path):
+    root = open_root(str(tmp_path))
+    lk = acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+    root2 = open_root(str(tmp_path))
+    try:
+        with pytest.raises(LockUnavailableError):
+            acquire_lock(root2, ".staging.lock", tool="qmt_fetch")
+    finally:
+        os.close(lk)
+        os.close(root)
+        os.close(root2)

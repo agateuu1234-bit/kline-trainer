@@ -13,7 +13,10 @@ Spec: docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md §4.1
 from __future__ import annotations
 import errno as _errno
 import fcntl
+import json
 import os
+import socket
+import stat
 
 
 class PathDisciplineError(ValueError):
@@ -282,3 +285,59 @@ def full_fsync(fd: int) -> None:
     （实测：`fsync(dirfd)` 在本机 APFS 上返回 0，**不会有任何报错提示这层保证并不存在**。）
     """
     fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
+
+
+def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
+    """取得目录生命周期锁，返回锁 fd（调用方全程持有到最后一次提交之后）。
+
+    **锁由内核持有，进程无论正常退出还是被杀都自动释放**（R48-F2）。
+    **锁文件残留不构成拒绝**——唯一判据是 `flock` 能否取得，也**不得提示人工删锁**：
+    存在性锁（`O_CREAT|O_EXCL`）的释放靠「进程记得删文件」，而 `kill -9` / 断电时
+    它删不掉，会与「执行阶段中途崩溃」叠成**死锁**。
+
+    序列：`openat(O_CREAT|O_RDWR|O_NOFOLLOW, 0o600)` → `fstat` 确认**普通文件**
+    → `flock(LOCK_EX|LOCK_NB)` → 写持有者信息。
+    `ELOOP` 或类型不符 → `LockDisciplineError`（拒绝启动，**一个字节都不写**，R72-F2）。
+
+    持有者信息（pid / 主机名 / 工具名）**仅供人读诊断，不参与任何判定**。
+    锁文件本身**不进耐久提交协议的闭合清单**（显式豁免：它存在与否不参与判定，
+    丢了下次重建即可）。
+    """
+    try:
+        lock_fd = open_under(
+            dir_fd, lock_name, flags=os.O_CREAT | os.O_RDWR, mode=0o600
+        )
+    except PathEscapeError as e:
+        raise LockDisciplineError(
+            f"锁文件 {lock_name!r} 不是普通文件（{e}）——拒绝启动，一个字节都不写。"
+        ) from e
+    except IsADirectoryError as e:
+        # ⚠️ 锁名被一个**目录**占住时，`open(O_CREAT|O_RDWR)` 在 `fstat` 之前就抛
+        # `EISDIR` —— 下面那道 `S_ISREG` 检查**根本够不着**。spec R72-F2 只写了
+        # 「ELOOP 或 fstat 类型不符」，照字面实现会在这一档漏出裸 traceback。
+        # （`S_ISREG` 仍然是活的：FIFO 能被 `O_RDWR` 打开成功，由它拦下。）
+        raise LockDisciplineError(
+            f"锁文件 {lock_name!r} 存在但是一个目录——拒绝启动，一个字节都不写。"
+        ) from e
+    try:
+        if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+            raise LockDisciplineError(
+                f"锁文件 {lock_name!r} 存在但不是普通文件——拒绝启动。"
+            )
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            raise LockUnavailableError(
+                f"{lock_name!r} 正被另一次运行持有，请等待或确认。"
+                f"（锁由内核持有、进程死亡即释放，**不需要也不应该手工删锁**）"
+            ) from e
+        os.ftruncate(lock_fd, 0)
+        os.lseek(lock_fd, 0, os.SEEK_SET)
+        os.write(lock_fd, json.dumps(
+            {"tool": tool, "pid": os.getpid(), "hostname": socket.gethostname()},
+            ensure_ascii=False,
+        ).encode("utf-8"))
+        return lock_fd
+    except BaseException:
+        os.close(lock_fd)
+        raise
