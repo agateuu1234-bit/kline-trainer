@@ -12,6 +12,7 @@ Spec: docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md §4.1
 """
 from __future__ import annotations
 import errno as _errno
+import os
 
 
 class PathDisciplineError(ValueError):
@@ -96,3 +97,44 @@ def _split_rel(relpath: str) -> list[str]:
             f"相对路径不得含空分量 / `.` / `..`，收到 {relpath!r}"
         )
     return parts
+
+
+def _raise_walk_error(relative_path: str, component: str, exc: OSError):
+    """逐段走时的错误分流：只有 `ELOOP` / `ENOTDIR` 算**逃逸**，其余原样上抛。
+
+    `ENOENT` 尤其不能算逃逸——「路径不存在」与「路径被换成了符号链接」是两件事，
+    前者是操作者忘了挂载（spec §5 要求提示 `mount_smbfs`），后者是信任边界被绕过。
+    """
+    if exc.errno in (_errno.ELOOP, _errno.ENOTDIR):
+        raise PathEscapeError(
+            relative_path=relative_path, component=component, errno=exc.errno
+        ) from exc
+    raise exc
+
+
+def open_root(abs_path: str, *, create_leaf: bool = False) -> int:
+    """从 `/` 起**逐分量** `O_DIRECTORY|O_NOFOLLOW` 打开，返回叶子目录的 fd（调用方全程持有）。
+
+    `O_NOFOLLOW` **只保护最后一段**——`/a/b/out` 里 `a`、`b` 若是符号链接（或在 pin 之前
+    被换成符号链接），内核照样跟随，于是被钉住的是**另一棵树**的 inode，此后所有 `*at`
+    纪律都忠实地作用在**错的目录**上：报告、zip、staging CSV 全部写进去，而工具坚信
+    信任边界已经闭合。**pin 本身是这套边界的起点，起点被绕过则其后一切纪律归零**（R75-F2）。
+
+    **不做 `realpath()`**——那正是「跟随」。
+    """
+    comps = split_components(abs_path)
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for d in comps:
+            try:
+                nxt = os.open(
+                    d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
+                )
+            except OSError as e:
+                _raise_walk_error(abs_path, d, e)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise

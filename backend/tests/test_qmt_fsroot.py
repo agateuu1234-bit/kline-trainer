@@ -46,3 +46,58 @@ def test_split_rel_rejects_absolute_empty_dot_dotdot():
     for bad in ("a//b", "a/./b", "a/../b", ""):
         with pytest.raises(PathDisciplineError):
             _split_rel(bad)
+
+
+# ---------------------------------------------------------------- Task 2: open_root
+import errno
+import os
+from pathlib import Path
+from qmt_fsroot import PathEscapeError, open_root
+
+
+def test_open_root_pins_existing_dir(tmp_path: Path):
+    d = tmp_path / "a" / "b"
+    d.mkdir(parents=True)
+    fd = open_root(str(d))
+    try:
+        assert os.fstat(fd).st_ino == d.stat().st_ino
+    finally:
+        os.close(fd)
+
+
+def test_open_root_rejects_symlinked_intermediate_component(tmp_path: Path):
+    # `O_NOFOLLOW` 只保护最后一段——中间分量被换成符号链接时，
+    # 裸 os.open 会把 pin 钉在**另一棵树**上（spec §4.1 R75-F2）
+    real = tmp_path / "real"
+    (real / "leaf").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(real)
+    with pytest.raises(PathEscapeError) as ei:
+        open_root(str(tmp_path / "link" / "leaf"))
+    assert ei.value.component == "link"
+    # 本机实测：目录分量是符号链接得 ENOTDIR，**不是** ELOOP（O4-F12）
+    assert ei.value.errno == errno.ENOTDIR
+
+
+def test_open_root_escape_message_does_not_claim_symlink(tmp_path: Path):
+    # ENOTDIR 与「这里放了个普通文件」不可区分，消息不得声称是符号链接（O4-F12）
+    (tmp_path / "notadir").write_text("x")
+    with pytest.raises(PathEscapeError) as ei:
+        open_root(str(tmp_path / "notadir" / "leaf"))
+    assert "可能是符号链接，也可能是个文件" in str(ei.value)
+    assert ei.value.component == "notadir"
+
+
+def test_open_root_missing_component_is_plain_filenotfound(tmp_path: Path):
+    # 「不存在」不是「逃逸」——S5 的 CLI 要能把它翻译成「请先 mount_smbfs」
+    with pytest.raises(FileNotFoundError):
+        open_root(str(tmp_path / "nope"))
+
+
+def test_open_root_tolerates_trailing_slash(tmp_path: Path):
+    d = tmp_path / "a"
+    d.mkdir()
+    fd = open_root(str(d) + "/")
+    try:
+        assert os.fstat(fd).st_ino == d.stat().st_ino
+    finally:
+        os.close(fd)
