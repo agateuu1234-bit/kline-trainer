@@ -575,3 +575,114 @@ def test_probe_rejects_directory_lock_name(tmp_path: Path):
             probe_unclaimed_dir(root, ".staging.lock")
     finally:
         os.close(root)
+
+
+# ------------------------------------------------------------------ Task 9: 归属标记
+import shutil
+from qmt_fsroot import MarkerInvalidError, verify_owner_marker, write_owner_marker
+
+
+def test_write_and_verify_dest_marker(tmp_path: Path):
+    root = open_root(str(tmp_path))
+    try:
+        write_owner_marker(root, ".staging_owner.json",
+                           {"tool": "qmt_fetch", "seed": "s1", "dest": str(tmp_path)})
+        got = verify_owner_marker(root, ".staging_owner.json",
+                                  expect_tool="qmt_fetch",
+                                  self_field="dest", self_value=str(tmp_path))
+        assert got["seed"] == "s1"
+    finally:
+        os.close(root)
+
+
+def test_same_primitive_expresses_output_marker(tmp_path: Path):
+    # 同一套原语必须能表达 --output 的第 1 层（tool + output_dir 自指），
+    # 差异只有 EEXIST 那一档（由调用方决定，不在本模块）
+    root = open_root(str(tmp_path))
+    try:
+        write_owner_marker(root, ".pilot_output.json",
+                           {"tool": "qmt_pilot", "output_dir": str(tmp_path),
+                            "seed": "s1", "export_log_sha256": "a" * 64})
+        got = verify_owner_marker(root, ".pilot_output.json",
+                                  expect_tool="qmt_pilot",
+                                  self_field="output_dir", self_value=str(tmp_path))
+        # 第 2 层（seed + export_log_sha256）**必须等到 manifest 校验通过之后**才验，
+        # 不在本模块（R31-F1）——这里只把整份内容交回去
+        assert got["export_log_sha256"] == "a" * 64
+    finally:
+        os.close(root)
+
+
+def test_verify_rejects_wrong_tool(tmp_path: Path):
+    root = open_root(str(tmp_path))
+    try:
+        write_owner_marker(root, ".staging_owner.json",
+                           {"tool": "qmt_pilot", "dest": str(tmp_path)})
+        with pytest.raises(MarkerInvalidError, match="tool"):
+            verify_owner_marker(root, ".staging_owner.json", expect_tool="qmt_fetch",
+                                self_field="dest", self_value=str(tmp_path))
+    finally:
+        os.close(root)
+
+
+def test_verify_rejects_marker_moved_wholesale(tmp_path: Path):
+    # 自指字段的全部意义：防标记被**整体搬走**到另一个目录还继续生效
+    a = tmp_path / "a"
+    a.mkdir()
+    b = tmp_path / "b"
+    b.mkdir()
+    root_a = open_root(str(a))
+    try:
+        write_owner_marker(root_a, ".staging_owner.json",
+                           {"tool": "qmt_fetch", "dest": str(a)})
+    finally:
+        os.close(root_a)
+    shutil.copy(a / ".staging_owner.json", b / ".staging_owner.json")
+    root_b = open_root(str(b))
+    try:
+        with pytest.raises(MarkerInvalidError, match="dest"):
+            verify_owner_marker(root_b, ".staging_owner.json", expect_tool="qmt_fetch",
+                                self_field="dest", self_value=str(b))
+    finally:
+        os.close(root_b)
+
+
+def test_verify_rejects_missing_and_malformed(tmp_path: Path):
+    root = open_root(str(tmp_path))
+    try:
+        with pytest.raises(MarkerInvalidError):
+            verify_owner_marker(root, ".staging_owner.json", expect_tool="qmt_fetch",
+                                self_field="dest", self_value=str(tmp_path))
+        (tmp_path / ".staging_owner.json").write_text("{not json")
+        with pytest.raises(MarkerInvalidError):
+            verify_owner_marker(root, ".staging_owner.json", expect_tool="qmt_fetch",
+                                self_field="dest", self_value=str(tmp_path))
+    finally:
+        os.close(root)
+
+
+def test_write_owner_marker_leaves_no_tmp_behind(tmp_path: Path):
+    root = open_root(str(tmp_path))
+    try:
+        write_owner_marker(root, ".staging_owner.json",
+                           {"tool": "qmt_fetch", "dest": str(tmp_path)})
+    finally:
+        os.close(root)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".staging_owner.json"]
+
+
+def test_write_owner_marker_refuses_symlink_target(tmp_path: Path):
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    inside = tmp_path / "root"
+    inside.mkdir()
+    (inside / ".staging_owner.json").symlink_to(outside)
+    root = open_root(str(inside))
+    try:
+        # 一个名字对得上的符号链接会让写入**跟出目录**，把归属判定整个绕过去（R13-F2）
+        with pytest.raises(PathEscapeError):
+            write_owner_marker(root, ".staging_owner.json",
+                               {"tool": "qmt_fetch", "dest": str(inside)})
+    finally:
+        os.close(root)
+    assert outside.read_text() == "{}"

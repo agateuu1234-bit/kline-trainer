@@ -393,3 +393,90 @@ def probe_unclaimed_dir(dir_fd: int, lock_name: str) -> str:
         return "stale"
     finally:
         os.close(lock_fd)
+
+
+def write_owner_marker(dir_fd: int, marker_name: str, payload: dict) -> None:
+    """原子写归属标记：`lstat` 拒符号链接 → tmp → `fsync(文件)` → `os.replace` → `fsync(目录)`。
+
+    标记文件与报告一样走「临时文件 + `os.replace`」原子落地（R13-F2）。
+
+    ⚠️ **`lstat` 那一道不是多余的**：`os.replace` **不跟随**目标符号链接（它替换的是链接
+    本身），所以「写不出去」这个后果确实不会发生——但**依赖这个副作用等于把纪律
+    建立在一个未经声明的实现细节上**，正是 spec 反复点名的「形容词 + 具体调用不符」。
+    且一个我们自以为已归属的目录里凭空出现同名符号链接，本身就是「现场超出理解范围」，
+    该 fail-closed 而不是静默把它替换掉。
+
+    ⚠️ **本函数不管顺序**：调用方必须**先取锁再写标记**（R97-F2 取锁早于发布归属）。
+    父目录的 `fsync` 由 `open_root(create_leaf=True)` 在 `mkdir` 之后做掉。
+    """
+    try:
+        st = os.lstat(marker_name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISLNK(st.st_mode):
+            raise PathEscapeError(
+                relative_path=marker_name, component=marker_name, errno=_errno.ELOOP
+            )
+        if not stat.S_ISREG(st.st_mode):
+            raise MarkerInvalidError(
+                f"归属标记 {marker_name!r} 已存在但不是普通文件——拒绝写入。"
+            )
+    tmp_name = marker_name + ".tmp"
+    fd = open_under(
+        dir_fd, tmp_name, flags=os.O_CREAT | os.O_WRONLY | os.O_TRUNC, mode=0o600
+    )
+    try:
+        os.write(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    # ⚠️ 直接传 dir_fd，不做 os.supports_dir_fd 能力探测（O4-F14）
+    os.replace(tmp_name, marker_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    fsync_dir(dir_fd)
+
+
+def verify_owner_marker(dir_fd: int, marker_name: str, *, expect_tool: str,
+                        self_field: str, self_value: str) -> dict:
+    """**第 1 层**归属校验：`tool` 相符 + **自指字段**等于 `self_value`。返回整份标记内容。
+
+    第 1 层**不依赖 manifest，任何时候都能验**。它一旦通过，就确立了
+    「**这个目录是本工具的，我有权在里面新增东西**」——但**不足以支撑「作废既有报告」**
+    （R31-F1 / R40-F1）。**第 2 层**（`seed` + `export_log_sha256`）**必须等到
+    manifest 校验通过之后**才验，**不在本模块**——本函数把整份内容交回给调用方去做。
+
+    自指字段的全部意义是**防标记被整体搬走**：一份从别处拷来的标记，
+    `tool` 会对上，只有自指字段对不上。
+    """
+    try:
+        fd = open_under(dir_fd, marker_name, flags=os.O_RDONLY)
+    except FileNotFoundError as e:
+        raise MarkerInvalidError(f"归属标记 {marker_name!r} 不存在") from e
+    try:
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+    finally:
+        os.close(fd)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        raise MarkerInvalidError(f"归属标记 {marker_name!r} 不是合法 JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise MarkerInvalidError(f"归属标记 {marker_name!r} 顶层不是对象")
+    if data.get("tool") != expect_tool:
+        raise MarkerInvalidError(
+            f"归属标记 {marker_name!r} 的 tool 为 {data.get('tool')!r}，"
+            f"不是 {expect_tool!r}——这个目录不属于本工具"
+        )
+    if data.get(self_field) != self_value:
+        raise MarkerInvalidError(
+            f"归属标记 {marker_name!r} 的自指字段 {self_field!r} 为 "
+            f"{data.get(self_field)!r}，而当前路径是 {self_value!r}"
+            f"——标记可能是从别处整体搬来的"
+        )
+    return data
