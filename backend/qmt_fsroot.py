@@ -12,6 +12,7 @@ Spec: docs/superpowers/specs/2026-07-27-qmt-plan4b-fetch-design.md §4.1
 """
 from __future__ import annotations
 import errno as _errno
+import fcntl
 import os
 
 
@@ -254,3 +255,30 @@ def parent_fd_under(root_fd: int, relpath: str) -> tuple[int, str]:
     finally:
         for fd in opened:
             os.close(fd)
+
+
+def fsync_dir(dir_fd: int) -> None:
+    """命名空间改动（`os.replace` / `os.mkdir` / `unlink`）之后 `fsync` 其所在目录。
+
+    **目录项的持久化不由文件的 `fsync` 保证**：断电后文件系统完全可能只持久化了
+    rename、没持久化 manifest 的 replace（或反过来）——于是重启后 staging 里躺着两个
+    final 文件而 manifest 无记录，正是按股事务要消灭的那个状态（R45-F2）。
+    「原子」（`os.replace` 不会看到半截）与「耐久」（崩溃后仍在）是两件事。
+    """
+    os.fsync(dir_fd)
+
+
+def full_fsync(fd: int) -> None:
+    """`fcntl(fd, F_FULLFSYNC)` —— 本平台唯一把字节真正推到盘上的调用。
+
+    macOS `man 2 fsync` 原文：「if the drive loses power or the OS crashes, the
+    application may find that only some or none of their data was written.
+    The disk drive may also **re-order** the data … **This is not a theoretical
+    edge case.**」——即 `fsync` 在本平台上**既不保证断电耐久、也不保证跨设备写序**。
+
+    **定案：断电在威胁模型之内**（O4-F11）。故 **manifest 提交**与
+    **回滚时那道顺序屏障**两处用本函数（每股 1~2 次，400 股量级完全可接受），
+    其余落地点保留 `fsync_dir` / `os.fsync`。
+    （实测：`fsync(dirfd)` 在本机 APFS 上返回 0，**不会有任何报错提示这层保证并不存在**。）
+    """
+    fcntl.fcntl(fd, fcntl.F_FULLFSYNC)

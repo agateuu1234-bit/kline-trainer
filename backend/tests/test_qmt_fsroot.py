@@ -351,3 +351,41 @@ def test_parent_fd_under_does_not_leak_intermediate_fds(tmp_path: Path):
         assert after - before <= 2
     finally:
         os.close(root)
+
+
+# --------------------------------------------------------------- Task 6: 耐久提交原语
+import fcntl
+from qmt_fsroot import fsync_dir, full_fsync
+
+
+def test_fsync_dir_accepts_directory_fd(tmp_path: Path):
+    root = open_root(str(tmp_path))
+    try:
+        fsync_dir(root)          # 不抛即可（APFS 上 fsync(dirfd) 返回 0）
+    finally:
+        os.close(root)
+
+
+def test_full_fsync_uses_F_FULLFSYNC_not_plain_fsync(tmp_path: Path, monkeypatch):
+    # macOS `man 2 fsync` 明写 fsync **既不保证断电耐久、也不保证跨设备写序**
+    # （"This is not a theoretical edge case."）。断电在威胁模型之内（O4-F11），
+    # 故 manifest 提交与顺序屏障两处必须真的走 F_FULLFSYNC——
+    # 用 fsync 写出来的「目录项丢失注入测试」绿灯**证明不了任何东西**。
+    calls = []
+    real_fcntl = fcntl.fcntl
+    monkeypatch.setattr(
+        fcntl, "fcntl",
+        lambda fd, cmd, *a: (calls.append(cmd), real_fcntl(fd, cmd, *a))[1],
+    )
+    p = tmp_path / "f"
+    p.write_text("x")
+    fd = os.open(str(p), os.O_RDONLY)
+    try:
+        full_fsync(fd)
+    finally:
+        os.close(fd)
+    assert calls == [fcntl.F_FULLFSYNC]
+
+
+def test_full_fsync_command_constant_exists():
+    assert hasattr(fcntl, "F_FULLFSYNC")     # 本机实测值 51
