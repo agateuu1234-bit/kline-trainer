@@ -141,23 +141,49 @@ def _raise_walk_error(relative_path: str, component: str, exc: OSError):
     raise exc
 
 
-def open_root(abs_path: str, *, create_leaf: bool = False) -> int:
-    """从 `/` 起**逐分量** `O_DIRECTORY|O_NOFOLLOW` 打开，返回叶子目录的 fd（调用方全程持有）。
+def _assert_freshly_created(dir_fd: int, abs_path: str) -> None:
+    """`mkdir` 与随后的 `open` 是**两次按名字的独立查找**——中间那道缝无法用 POSIX 关掉
+    （没有「建目录并直接拿到 fd」的原子原语）。本检查**不关闭竞态，只把伤害限死**：
+    调包进来的必须是**空的、0700、属于本用户**的目录，否则拒绝。
 
-    `O_NOFOLLOW` **只保护最后一段**——`/a/b/out` 里 `a`、`b` 若是符号链接（或在 pin 之前
-    被换成符号链接），内核照样跟随，于是被钉住的是**另一棵树**的 inode，此后所有 `*at`
-    纪律都忠实地作用在**错的目录**上。**pin 本身是这套边界的起点，起点被绕过则
-    其后一切纪律归零**（R75-F2）。**不做 `realpath()`**——那正是「跟随」。
+    于是 finding 描述的那种伤害（「把文件写进一个不相干的目录」「覆盖别人的产物」）
+    在结构上不可能发生——能被静默认领的，只有一个与我们刚造出来的那个**不可区分**的
+    空目录，认领它不毁任何数据。
 
-    `create_leaf=True`（首次使用/认领）：逐段走到**父目录**后用 `os.mkdir(dir_fd=父fd)`
-    **独占创建**叶子——`mkdir` 是**唯一可移植的目录级排他原语**，已存在即 `EEXIST`；
-    而逐段走保证「独占创建」发生在**验过的那个父 inode** 里（R75-F2）。
-    创建成功后 `fsync` 父目录（耐久提交协议：`mkdir` 改的是目录项，
-    而目录项的持久化不由文件的 `fsync` 保证，R45-F2）。
+    ⚠️ 这不是归属证明。R66-F2 已经论证过「复查目录为空只证明里面没有文件，
+    **不证明这个目录是我造的**」——那条结论在这里仍然成立，本检查的作用是**伤害上界**，
+    不是出处证明。真正把「open 之后到发布归属之前」那道缝关掉的是
+    `claim_dir` 里取锁后的那次反查。
+    """
+    st = os.fstat(dir_fd)
+    if (st.st_mode & 0o777) != 0o700 or st.st_uid != os.geteuid() or os.listdir(dir_fd):
+        raise BoundaryError(
+            f"{abs_path} 不是本次刚创建的那个空目录"
+            f"（权限 {st.st_mode & 0o777:o}、属主 {st.st_uid}、非空={bool(os.listdir(dir_fd))}）"
+            f"——在 `mkdir` 与 `open` 之间它被换掉了。拒绝启动，一个字节都不写。"
+        )
 
-    ⚠️ **绝不用 `os.rename` 做「不覆盖发布」**：POSIX 的 `rename(2)` 在「源是目录、
-    目标是**空目录**」时**会把目标替换掉**（macOS 同此），于是一个预先建好的空目录
-    会被静默删除并认领（R64-F1）。
+
+def _assert_leaf_still_is(parent_fd: int, leaf: str, dir_fd: int, abs_path: str) -> None:
+    """取锁之后拿**留住的父目录 fd** 反查：`lstat(leaf, dir_fd=父)` 必须仍是我们钉住的 inode。
+
+    取锁是本工具的串行化点，故这道反查把「`open` 成功之后、发布归属之前」那道缝
+    **彻底关掉**：此刻若名字已被指向别的 inode，归属标记绝不会落进去。
+    """
+    st_name = os.lstat(leaf, dir_fd=parent_fd)
+    st_fd = os.fstat(dir_fd)
+    if (st_name.st_dev, st_name.st_ino) != (st_fd.st_dev, st_fd.st_ino):
+        raise BoundaryError(
+            f"{abs_path} 在取锁之后已不再指向本次创建的那个目录"
+            f"——有人在 `open` 与发布归属之间把它换掉了。拒绝，一个字节都不写。"
+        )
+
+
+def _open_root_impl(abs_path: str, *, create_leaf: bool):
+    """`open_root` 的实现体。返回 `(fd, parent_fd, leaf)`。
+
+    `create_leaf=True` 时把**父目录 fd 一并交出去**，供 `claim_dir` 在取锁之后反查；
+    `create_leaf=False` 时 `parent_fd` / `leaf` 均为 `None`。
     """
     comps = split_components(abs_path)
     if create_leaf and not comps:
@@ -190,13 +216,46 @@ def open_root(abs_path: str, *, create_leaf: bool = False) -> int:
                 )
             except OSError as e:
                 _raise_walk_error(abs_path, leaf, e)
+            try:
+                _assert_freshly_created(nxt, abs_path)
+            except BaseException:
+                os.close(nxt)
+                raise
             os.fsync(fd)          # 父目录耐久（R45-F2）
-            os.close(fd)
-            fd = nxt
-        return fd
+            return nxt, fd, leaf  # fd 作为 parent_fd 交给调用方
+        return fd, None, None
     except BaseException:
         os.close(fd)
         raise
+
+
+def open_root(abs_path: str, *, create_leaf: bool = False) -> int:
+    """从 `/` 起**逐分量** `O_DIRECTORY|O_NOFOLLOW` 打开，返回叶子目录的 fd（调用方全程持有）。
+
+    `O_NOFOLLOW` **只保护最后一段**——`/a/b/out` 里 `a`、`b` 若是符号链接（或在 pin 之前
+    被换成符号链接），内核照样跟随，于是被钉住的是**另一棵树**的 inode，此后所有 `*at`
+    纪律都忠实地作用在**错的目录**上。**pin 本身是这套边界的起点，起点被绕过则
+    其后一切纪律归零**（R75-F2）。**不做 `realpath()`**——那正是「跟随」。
+
+    `create_leaf=True`（首次使用/认领）：逐段走到**父目录**后用 `os.mkdir(dir_fd=父fd)`
+    **独占创建**叶子——`mkdir` 是**唯一可移植的目录级排他原语**，已存在即 `EEXIST`；
+    而逐段走保证「独占创建」发生在**验过的那个父 inode** 里（R75-F2）。
+    创建成功后 `fsync` 父目录（耐久提交协议：`mkdir` 改的是目录项，
+    而目录项的持久化不由文件的 `fsync` 保证，R45-F2）。
+
+    ⚠️ **`mkdir` 与随后的 `open` 是两次按名字的独立查找**（R1-codex-high）：
+    两者之间目录可被改名调包。POSIX 关不掉这道缝，故用 `_assert_freshly_created`
+    把伤害限死为「只可能认领一个与自己刚造的不可区分的空目录」；
+    **需要真正关掉它的调用方请用 `claim_dir`**——它在取锁之后还会拿父目录 fd 反查一次。
+
+    ⚠️ **绝不用 `os.rename` 做「不覆盖发布」**：POSIX 的 `rename(2)` 在「源是目录、
+    目标是**空目录**」时**会把目标替换掉**（macOS 同此），于是一个预先建好的空目录
+    会被静默删除并认领（R64-F1）。
+    """
+    fd, parent_fd, _leaf = _open_root_impl(abs_path, create_leaf=create_leaf)
+    if parent_fd is not None:
+        os.close(parent_fd)
+    return fd
 
 
 def open_under(root_fd: int, relpath: str, *, flags: int, mode: int = 0o600,
@@ -531,18 +590,21 @@ def claim_dir(abs_path: str, *, lock_name: str, marker_name: str,
     **`--dest` 与 `--output` 在 `EEXIST` 这一档结局不同**（R91-F2），
     由调用方决定，本原语不替它们决定。
     """
-    dir_fd = open_root(abs_path, create_leaf=True)
+    dir_fd, parent_fd, leaf = _open_root_impl(abs_path, create_leaf=True)
+    lock_fd = None
     try:
         lock_fd = acquire_lock(dir_fd, lock_name, tool=tool)
-    except BaseException:
-        os.close(dir_fd)
-        raise
-    try:
+        # 取锁是串行化点：此刻拿**留住的父目录 fd** 反查一次，
+        # 把「open 之后、发布归属之前」那道缝彻底关掉（R1-codex-high）
+        _assert_leaf_still_is(parent_fd, leaf, dir_fd, abs_path)
         write_owner_marker(dir_fd, marker_name, marker_payload)
     except BaseException:
-        os.close(lock_fd)
+        if lock_fd is not None:
+            os.close(lock_fd)
         os.close(dir_fd)
         raise
+    finally:
+        os.close(parent_fd)
     return dir_fd, lock_fd
 
 

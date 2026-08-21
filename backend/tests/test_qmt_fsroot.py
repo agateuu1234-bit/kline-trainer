@@ -878,3 +878,84 @@ def test_probe_refuses_fifo_lock_file(tmp_path: Path):
             probe_unclaimed_dir(root, ".staging.lock")
     finally:
         os.close(root)
+
+
+# ===================== R1 codex high：mkdir 与 open 之间的调包竞态 =====================
+# 「独占创建」只保证 mkdir 那一刻名字不存在，**不保证随后 open 到的是同一个 inode**。
+# POSIX 没有「建目录并直接拿到 fd」的原子原语，故本族测试钉的是两件事：
+#   ① mkdir→open 那道缝：**把伤害限死**（换进来的必须是空的、0700、属于自己的目录，
+#      否则拒绝）——它不「关闭」竞态，只让未被发现的调包不可能毁掉别人的数据；
+#   ② open→取锁→发标记 那道缝：**彻底关闭**（取锁后拿留住的父目录 fd 反查一次）。
+
+def test_open_root_create_leaf_refuses_swapped_nonempty_leaf(tmp_path: Path, monkeypatch):
+    # 攻击者赢得竞态：把我们刚建的目录挪走，把**别人有数据的目录**放到同一个名字上
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "data.csv").write_text("someone elses data")
+    target = tmp_path / "dest"
+    real_mkdir = os.mkdir
+
+    def racing_mkdir(name, mode=0o777, *, dir_fd=None):
+        real_mkdir(name, mode, dir_fd=dir_fd)
+        os.rename(str(target), str(tmp_path / "stolen"))
+        os.rename(str(victim), str(target))
+
+    monkeypatch.setattr(os, "mkdir", racing_mkdir)
+    with pytest.raises(BoundaryError, match="刚创建"):
+        open_root(str(target), create_leaf=True)
+    # 别人的数据一个字节都没被动
+    assert (target / "data.csv").read_text() == "someone elses data"
+
+
+def test_open_root_create_leaf_refuses_leaf_not_owned_by_us(tmp_path: Path, monkeypatch):
+    # 换进来的是空目录但**权限不是 0700**（说明不是本工具造的）
+    intruder = tmp_path / "intruder"
+    intruder.mkdir(mode=0o755)
+    target = tmp_path / "dest"
+    real_mkdir = os.mkdir
+
+    def racing_mkdir(name, mode=0o777, *, dir_fd=None):
+        real_mkdir(name, mode, dir_fd=dir_fd)
+        os.rename(str(target), str(tmp_path / "stolen"))
+        os.rename(str(intruder), str(target))
+
+    monkeypatch.setattr(os, "mkdir", racing_mkdir)
+    with pytest.raises(BoundaryError, match="刚创建"):
+        open_root(str(target), create_leaf=True)
+
+
+def test_claim_dir_revalidates_leaf_after_taking_lock(tmp_path: Path, monkeypatch):
+    # 第二道缝：open 成功之后、发布归属之前被调包。
+    # 取锁是我们的串行化点，故取锁**之后**必须拿留住的父目录 fd 反查一次
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "zip_of_someone_else.zip").write_text("precious")
+    target = tmp_path / "dest"
+    import qmt_fsroot as M
+    real_lock = M.acquire_lock
+
+    def racing_lock(dir_fd, lock_name, *, tool):
+        fd = real_lock(dir_fd, lock_name, tool=tool)
+        os.rename(str(target), str(tmp_path / "stolen"))
+        os.rename(str(victim), str(target))
+        return fd
+
+    monkeypatch.setattr(M, "acquire_lock", racing_lock)
+    with pytest.raises(BoundaryError):
+        claim_dir(str(target), lock_name=".staging.lock",
+                  marker_name=".staging_owner.json",
+                  marker_payload={"tool": "qmt_fetch", "dest": str(target)},
+                  tool="qmt_fetch")
+    # 归属标记**没有**落进别人的目录
+    assert not (target / ".staging_owner.json").exists()
+    assert (target / "zip_of_someone_else.zip").read_text() == "precious"
+
+
+def test_open_root_create_leaf_still_works_without_a_race(tmp_path: Path):
+    # 正向档：没有竞态时新增的检查不得把正常路径拒掉（防止退化成「一律报调包」）
+    target = tmp_path / "dest"
+    fd = open_root(str(target), create_leaf=True)
+    try:
+        assert os.fstat(fd).st_ino == target.stat().st_ino
+    finally:
+        os.close(fd)
