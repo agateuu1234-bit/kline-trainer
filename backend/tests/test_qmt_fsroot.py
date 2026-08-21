@@ -1121,3 +1121,38 @@ def test_verify_owner_marker_rejects_fifo_even_when_a_writer_feeds_valid_json(tm
     finally:
         writer.kill()
         writer.wait()
+
+
+def test_acquire_lock_refuses_hardlinked_lock_file(tmp_path: Path):
+    # R5 codex high：与 R3 同族 —— 锁文件不带 O_EXCL、只靠 fstat 认「是普通文件」，
+    # 于是一个把外部文件硬链到 lock_name 上的同 UID 进程，会被我们
+    # `ftruncate(0)` + 写诊断 JSON **亲手清空那个外部文件**。
+    # 判据：`st_nlink == 1` —— 硬链接过来的外部文件必然 ≥ 2，
+    # 而只存在于本目录的锁文件恰好是 1。
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious content")
+    d = tmp_path / "dest"
+    d.mkdir(mode=0o700)
+    os.link(str(victim), str(d / ".staging.lock"))
+    root = open_root(str(d))
+    try:
+        with pytest.raises(LockDisciplineError, match="硬链接"):
+            acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+    finally:
+        os.close(root)
+    assert victim.read_text() == "precious content"   # 一个字节都没动
+
+
+def test_acquire_lock_accepts_preexisting_single_link_lock_file(tmp_path: Path):
+    # 正向档（codex 明确要求覆盖「已存在」这一支）：上一次运行留下的正常锁文件
+    # nlink==1，必须照常取得，不得被新判据误杀
+    (tmp_path / ".staging.lock").write_text('{"stale": true}')
+    root = open_root(str(tmp_path))
+    try:
+        lk = acquire_lock(root, ".staging.lock", tool="qmt_fetch")
+        try:
+            assert json.loads((tmp_path / ".staging.lock").read_text())["tool"] == "qmt_fetch"
+        finally:
+            os.close(lk)
+    finally:
+        os.close(root)

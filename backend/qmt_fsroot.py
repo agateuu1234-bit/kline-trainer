@@ -462,6 +462,23 @@ def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
             raise LockDisciplineError(
                 f"锁文件 {lock_name!r} 存在但不是普通文件——拒绝启动。"
             )
+        # ⚠️ 与 R3 同族的**硬链接截断**（R5-codex-high）：本函数下面要
+        # `ftruncate(0)` + 写诊断 JSON。若 `lock_name` 是一个把外部文件硬链过来的
+        # 名字，我们就会**亲手清空那个外部文件**——一次取锁变成任意同 UID 文件损坏。
+        # `O_NOFOLLOW` 挡符号链接、`S_ISREG` 挡 FIFO，两者都**挡不住硬链接**。
+        # 判据用 `st_nlink == 1`：硬链接过来的外部文件必然 ≥ 2，而只存在于本目录的
+        # 锁文件（无论是本次新建的还是上次留下的）恰好是 1。
+        #
+        # ⚠️ 诚实残留：对手若把自己的文件 **rename** 到这个名字上（而不是硬链），
+        # `nlink` 仍是 1，本判据测不出。但那要求对手先能写进本工具 0700 的工作目录，
+        # 且是把自己的数据主动搬进来——与 R3 的口径一致，本条不声称挡住同 UID 对手，
+        # 只是不再由本工具亲手替它造成边界外的破坏。
+        if lock_st.st_nlink != 1:
+            raise LockDisciplineError(
+                f"锁文件 {lock_name!r} 有 {lock_st.st_nlink} 个硬链接——"
+                f"它同时是别处某个文件的名字，写入会破坏边界之外的数据。"
+                f"拒绝启动，一个字节都不写。"
+            )
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as e:
