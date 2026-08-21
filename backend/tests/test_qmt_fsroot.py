@@ -1047,3 +1047,77 @@ def test_write_owner_marker_leaves_no_temp_file_on_failure(tmp_path: Path, monke
         monkeypatch.setattr(os, "replace", real_replace)
         os.close(root)
     assert list(tmp_path.iterdir()) == []      # 一个临时文件都没剩下
+
+
+def test_verify_owner_marker_does_not_hang_on_fifo(tmp_path: Path):
+    # R4 codex high：`open(O_RDONLY)` 打开 FIFO 会**一直阻塞等写入方**。
+    # 打开在先、查类型在后 ⇒ 一个被篡改的归属目录会让启动**永久挂起**，
+    # 而不是 fail-closed。锁文件那边早有 S_ISREG 检查，标记这边漏了
+    # ——正是「同一条安全推理必须应用到它适用的每一个对象上」。
+    # ⚠️ 用 alarm 兜底：回归时必须表现为**失败**，不是挂死整个测试套件。
+    import signal
+    os.mkfifo(str(tmp_path / ".staging_owner.json"))
+    root = open_root(str(tmp_path))
+
+    def _timeout(signum, frame):
+        raise AssertionError("verify_owner_marker 在 FIFO 上挂住了（应当 fail-closed）")
+
+    old_handler = signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(5)
+    try:
+        with pytest.raises(MarkerInvalidError):
+            verify_owner_marker(root, ".staging_owner.json", expect_tool="qmt_fetch",
+                                self_field="dest", self_value=str(tmp_path))
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+        os.close(root)
+
+
+def test_write_owner_marker_survives_short_writes(tmp_path: Path, monkeypatch):
+    # R4 codex medium：POSIX 允许**部分写入**。忽略 os.write 的返回值 ⇒
+    # 截断的 JSON 被 fsync + 原子发布出去，claim_dir 却照样返回成功，
+    # 而随后的归属校验会拒掉它 —— 目录就此搁浅。
+    real_write = os.write
+
+    def stingy_write(fd, data):
+        return real_write(fd, data[:5])        # 每次最多写 5 字节
+
+    monkeypatch.setattr(os, "write", stingy_write)
+    root = open_root(str(tmp_path))
+    try:
+        write_owner_marker(root, ".staging_owner.json",
+                           {"tool": "qmt_fetch", "seed": "s1", "dest": str(tmp_path)})
+    finally:
+        os.close(root)
+        monkeypatch.setattr(os, "write", real_write)
+    got = json.loads((tmp_path / ".staging_owner.json").read_text())
+    assert got == {"tool": "qmt_fetch", "seed": "s1", "dest": str(tmp_path)}
+
+
+def test_verify_owner_marker_rejects_fifo_even_when_a_writer_feeds_valid_json(tmp_path: Path):
+    # 无写入方的 FIFO 读出来是空的，靠 JSON 解析就能拒掉——那**测不出类型闸**。
+    # 类型闸真正挡的是**有写入方**的 FIFO：对手可以现场喂一份形状完全合法的标记，
+    # 让我们把它当成归属证明。故必须「先探类型再读」，而不是「读到什么再判断」。
+    fifo = tmp_path / ".staging_owner.json"
+    os.mkfifo(str(fifo))
+    payload = json.dumps({"tool": "qmt_fetch", "dest": str(tmp_path)})
+    writer = subprocess.Popen(
+        [sys.executable, "-c",
+         "import time\n"
+         f"f = open({str(fifo)!r}, 'w')\n"
+         f"f.write({payload!r})\n"
+         "f.flush()\n"
+         "time.sleep(30)\n"])
+    try:
+        root = open_root(str(tmp_path))
+        try:
+            with pytest.raises(MarkerInvalidError, match="不是普通文件"):
+                verify_owner_marker(root, ".staging_owner.json",
+                                    expect_tool="qmt_fetch",
+                                    self_field="dest", self_value=str(tmp_path))
+        finally:
+            os.close(root)
+    finally:
+        writer.kill()
+        writer.wait()

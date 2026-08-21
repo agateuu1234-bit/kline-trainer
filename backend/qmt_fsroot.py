@@ -385,6 +385,46 @@ def full_fsync(fd: int) -> None:
     fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
 
 
+def _open_regular_probe(dir_fd: int, name: str, *, flags: int, mode: int = 0o600):
+    """以 `O_NONBLOCK` 打开并返回 `(fd, st)`；确认是普通文件后清掉 `O_NONBLOCK`。
+
+    **为什么必须带 `O_NONBLOCK`（R4-codex-high）**：`open(O_RDONLY)` 打开 FIFO 会
+    **一直阻塞等写入方** —— 于是「打开在先、查类型在后」的写法，会让一个被篡改的
+    目录把启动**永久挂起**，而不是 fail-closed。带上它 `open` 立刻返回，
+    随后由调用方按各自的语义 `S_ISREG` 拒掉。
+
+    ⚠️ 也**不要**指望「`O_RDWR` 打开 FIFO 不阻塞」：那个行为 POSIX **未定义**
+    （本仓纪律：凡断言某个系统调用有某种性质，都必须对着 man page 逐条核实）。
+    三个打开点（取锁、探测、读标记）统一走本函数，避免「同一条纪律只落在其中一处」。
+    """
+    fd = open_under(dir_fd, name, flags=flags | os.O_NONBLOCK, mode=mode)
+    try:
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode):
+            cur = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, cur & ~os.O_NONBLOCK)
+        return fd, st
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """把 `data` **整量**写完。
+
+    **POSIX 允许部分写入**（R4-codex-medium）：忽略 `os.write` 的返回值，会让一份
+    截断的 JSON 被 `fsync` 之后原子发布出去，而调用方照样返回成功 —— 随后的归属
+    校验再把它拒掉，目录就此搁浅。（`EINTR` 由 CPython 自动重试，PEP 475，
+    故这里只需处理短写。）
+    """
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError(f"写入未推进（返回 {written}），拒绝发布可能截断的内容")
+        view = view[written:]
+
+
 def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
     """取得目录生命周期锁，返回锁 fd（调用方全程持有到最后一次提交之后）。
 
@@ -402,7 +442,7 @@ def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
     丢了下次重建即可）。
     """
     try:
-        lock_fd = open_under(
+        lock_fd, lock_st = _open_regular_probe(
             dir_fd, lock_name, flags=os.O_CREAT | os.O_RDWR, mode=0o600
         )
     except PathEscapeError as e:
@@ -418,7 +458,7 @@ def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
             f"锁文件 {lock_name!r} 存在但是一个目录——拒绝启动，一个字节都不写。"
         ) from e
     try:
-        if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+        if not stat.S_ISREG(lock_st.st_mode):
             raise LockDisciplineError(
                 f"锁文件 {lock_name!r} 存在但不是普通文件——拒绝启动。"
             )
@@ -431,7 +471,7 @@ def acquire_lock(dir_fd: int, lock_name: str, *, tool: str) -> int:
             ) from e
         os.ftruncate(lock_fd, 0)
         os.lseek(lock_fd, 0, os.SEEK_SET)
-        os.write(lock_fd, json.dumps(
+        _write_all(lock_fd, json.dumps(
             {"tool": tool, "pid": os.getpid(), "hostname": socket.gethostname()},
             ensure_ascii=False,
         ).encode("utf-8"))
@@ -466,7 +506,8 @@ def probe_unclaimed_dir(dir_fd: int, lock_name: str) -> str:
     锁文件是符号链接、目录或其它非普通文件 → `LockDisciplineError`（R72-F2）。
     """
     try:
-        lock_fd = open_under(dir_fd, lock_name, flags=os.O_RDWR)   # ⚠️ 绝不带 O_CREAT
+        lock_fd, lock_st = _open_regular_probe(
+            dir_fd, lock_name, flags=os.O_RDWR)                    # ⚠️ 绝不带 O_CREAT
     except FileNotFoundError:
         return "vacuum"
     except PathEscapeError as e:
@@ -479,7 +520,7 @@ def probe_unclaimed_dir(dir_fd: int, lock_name: str) -> str:
             f"锁文件 {lock_name!r} 存在但是一个目录——拒绝启动。"
         ) from e
     try:
-        if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+        if not stat.S_ISREG(lock_st.st_mode):
             raise LockDisciplineError(
                 f"锁文件 {lock_name!r} 存在但不是普通文件——拒绝启动。"
             )
@@ -538,7 +579,7 @@ def write_owner_marker(dir_fd: int, marker_name: str, payload: dict) -> None:
     )
     try:
         try:
-            os.write(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            _write_all(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -567,10 +608,17 @@ def verify_owner_marker(dir_fd: int, marker_name: str, *, expect_tool: str,
     `tool` 会对上，只有自指字段对不上。
     """
     try:
-        fd = open_under(dir_fd, marker_name, flags=os.O_RDONLY)
+        fd, st = _open_regular_probe(dir_fd, marker_name, flags=os.O_RDONLY)
     except FileNotFoundError as e:
         raise MarkerInvalidError(f"归属标记 {marker_name!r} 不存在") from e
+    except IsADirectoryError as e:
+        raise MarkerInvalidError(f"归属标记 {marker_name!r} 是一个目录") from e
     try:
+        if not stat.S_ISREG(st.st_mode):
+            # FIFO / 设备 / socket：**先探类型再读**，否则 O_RDONLY 会挂死在 FIFO 上
+            raise MarkerInvalidError(
+                f"归属标记 {marker_name!r} 存在但不是普通文件——拒绝。"
+            )
         chunks: list[bytes] = []
         while True:
             chunk = os.read(fd, 65536)
