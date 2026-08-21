@@ -117,21 +117,51 @@ def open_root(abs_path: str, *, create_leaf: bool = False) -> int:
 
     `O_NOFOLLOW` **只保护最后一段**——`/a/b/out` 里 `a`、`b` 若是符号链接（或在 pin 之前
     被换成符号链接），内核照样跟随，于是被钉住的是**另一棵树**的 inode，此后所有 `*at`
-    纪律都忠实地作用在**错的目录**上：报告、zip、staging CSV 全部写进去，而工具坚信
-    信任边界已经闭合。**pin 本身是这套边界的起点，起点被绕过则其后一切纪律归零**（R75-F2）。
+    纪律都忠实地作用在**错的目录**上。**pin 本身是这套边界的起点，起点被绕过则
+    其后一切纪律归零**（R75-F2）。**不做 `realpath()`**——那正是「跟随」。
 
-    **不做 `realpath()`**——那正是「跟随」。
+    `create_leaf=True`（首次使用/认领）：逐段走到**父目录**后用 `os.mkdir(dir_fd=父fd)`
+    **独占创建**叶子——`mkdir` 是**唯一可移植的目录级排他原语**，已存在即 `EEXIST`；
+    而逐段走保证「独占创建」发生在**验过的那个父 inode** 里（R75-F2）。
+    创建成功后 `fsync` 父目录（耐久提交协议：`mkdir` 改的是目录项，
+    而目录项的持久化不由文件的 `fsync` 保证，R45-F2）。
+
+    ⚠️ **绝不用 `os.rename` 做「不覆盖发布」**：POSIX 的 `rename(2)` 在「源是目录、
+    目标是**空目录**」时**会把目标替换掉**（macOS 同此），于是一个预先建好的空目录
+    会被静默删除并认领（R64-F1）。
     """
     comps = split_components(abs_path)
+    if create_leaf and not comps:
+        raise PathDisciplineError("create_leaf 需要至少一个分量，不能对 `/` 用")
+    dirs = comps[:-1] if create_leaf else comps
+    leaf = comps[-1] if create_leaf else None
     fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
     try:
-        for d in comps:
+        for d in dirs:
             try:
                 nxt = os.open(
                     d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
                 )
             except OSError as e:
                 _raise_walk_error(abs_path, d, e)
+            os.close(fd)
+            fd = nxt
+        if create_leaf:
+            try:
+                os.mkdir(leaf, 0o700, dir_fd=fd)
+            except FileExistsError as e:
+                raise DirectoryExistsError(
+                    f"路径已存在：{abs_path}。"
+                    f"`EEXIST` 只证明**目录**存在，不证明它属于本工具——"
+                    f"处置由调用方按各自规格决定（R91-F2）。"
+                ) from e
+            try:
+                nxt = os.open(
+                    leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
+                )
+            except OSError as e:
+                _raise_walk_error(abs_path, leaf, e)
+            os.fsync(fd)          # 父目录耐久（R45-F2）
             os.close(fd)
             fd = nxt
         return fd

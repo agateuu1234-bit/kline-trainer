@@ -101,3 +101,51 @@ def test_open_root_tolerates_trailing_slash(tmp_path: Path):
         assert os.fstat(fd).st_ino == d.stat().st_ino
     finally:
         os.close(fd)
+
+
+# ------------------------------------------------- Task 3: open_root(create_leaf)
+from qmt_fsroot import DirectoryExistsError
+
+
+def test_open_root_create_leaf_creates_with_0700(tmp_path: Path):
+    target = tmp_path / "dest"
+    fd = open_root(str(target), create_leaf=True)
+    try:
+        assert target.is_dir()
+        assert (target.stat().st_mode & 0o777) == 0o700
+        assert os.fstat(fd).st_ino == target.stat().st_ino
+    finally:
+        os.close(fd)
+
+
+def test_open_root_create_leaf_is_exclusive(tmp_path: Path):
+    # mkdir 是**唯一可移植的目录级独占创建原语**；已存在即 EEXIST。
+    # 绝不能用 os.rename 做「不覆盖发布」——POSIX 的 rename 在目标是**空目录**时
+    # 会把目标**替换**掉，预建或并发抢建的空目录会被静默删除并认领（R64-F1）
+    target = tmp_path / "dest"
+    target.mkdir()
+    with pytest.raises(DirectoryExistsError):
+        open_root(str(target), create_leaf=True)
+
+
+def test_open_root_create_leaf_exclusive_even_when_target_nonempty(tmp_path: Path):
+    target = tmp_path / "dest"
+    target.mkdir()
+    (target / "x").write_text("y")
+    with pytest.raises(DirectoryExistsError):
+        open_root(str(target), create_leaf=True)
+    assert (target / "x").read_text() == "y"   # 一个字节都没动
+
+
+def test_open_root_create_leaf_rejects_symlinked_parent(tmp_path: Path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    with pytest.raises(PathEscapeError):
+        open_root(str(tmp_path / "link" / "dest"), create_leaf=True)
+    assert not (real / "dest").exists()        # 没在别人的树里造目录
+
+
+def test_open_root_create_leaf_rejects_root(tmp_path: Path):
+    with pytest.raises(PathDisciplineError, match="至少一个分量"):
+        open_root("/", create_leaf=True)
