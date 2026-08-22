@@ -439,6 +439,16 @@ struct DrawingUndoEntry {
     /// ⚠️ 深度 1 的栈用**一个布尔**表达 undo/redo 两个位，而不是两个数组 ——
     ///    「↩ 和 ↪ 同时可用」「已撤销却还能再撤」这类坏状态因此不可表达。
     var isUndone: Bool
+
+    /// ⚠️ **显式构造器，不用自动生成的那个**（codex plan-R1，**已核实为真**）。
+    ///    自动构造器要求实参**按存储属性声明顺序**给标签；Task 5 要往本结构里加第三个字段
+    ///    `defaultDelta`，一旦它插在中间、或调用处顺序写反，就是一个**编译期**错误 ——
+    ///    而卡住的正好是风险最高的成对回滚那一步。写死一个显式签名，把顺序收在这一处：
+    ///    将来再加字段只需在**这里**追加一个带默认值的尾参，既有调用点一处都不用动。
+    init(drawingsDelta: DrawingsDelta, isUndone: Bool) {
+        self.drawingsDelta = drawingsDelta
+        self.isUndone = isUndone
+    }
 }
 ```
 
@@ -1728,15 +1738,28 @@ struct DrawingDefaultStyleDelta: Equatable {
 }
 ```
 
-并给 `DrawingUndoEntry` 加字段（**必须带默认值 `= nil`**，否则 Task 1/3 那些两参构造点全部编译不过）：
+并给 `DrawingUndoEntry` 加**第三个字段**（放在 `isUndone` **之后**，即声明顺序的**最末**），
+同时把 Task 1 那个显式构造器扩成三参、**新参数带默认值 `= nil` 且排在最后**：
 
 ```swift
     /// 「本局默认」那一半（D102）。**只有画线态改样式那条路会带** ——
     /// 那一次动作是**两处写入**（那条线 + 本局默认，见 `DrawingEditRouter.applyPanelStyleMutation`
     /// 的 `.draw` 分支）。撤销必须把这一对当**一个**动作一并回滚，否则被撤销掉的样式会在
     /// 下一笔新画的线上、以及断点续训之后复活（自动选中 spec §10.1，**override 不覆盖**）。
-    var defaultDelta: DrawingDefaultStyleDelta? = nil
+    var defaultDelta: DrawingDefaultStyleDelta?
+
+    /// ⚠️ 新参数**必须排在最后且带默认值**（codex plan-R1）：这样 Task 1 / Task 3 里那些
+    ///    两参构造点（`DrawingUndoEntry(drawingsDelta:isUndone:)`）**一处都不用改**。
+    ///    把它插在中间 = 那些调用点全部编译不过。
+    init(drawingsDelta: DrawingsDelta, isUndone: Bool,
+         defaultDelta: DrawingDefaultStyleDelta? = nil) {
+        self.drawingsDelta = drawingsDelta
+        self.isUndone = isUndone
+        self.defaultDelta = defaultDelta
+    }
 ```
+
+⚠️ **构造实参一律按 `drawingsDelta` → `isUndone` → `defaultDelta` 的顺序写**，全计划无例外。
 
 **3b. `TrainingEngine.swift` 撤销栈区块：加作用域，并改写 `recordDrawingUndoDelta`：**
 
@@ -1781,11 +1804,12 @@ struct DrawingDefaultStyleDelta: Equatable {
         // D101：`drawings` 没变就不入栈 —— 只改了本局默认的动作**撤不回来**，这是已接受残留。
         guard let delta = scope.delta else { return }
         let after = drawingSession.defaultStyle
+        // ⚠️ 实参顺序 = 声明顺序 `drawingsDelta` → `isUndone` → `defaultDelta`（codex plan-R1）。
         drawingUndoEntry = DrawingUndoEntry(
             drawingsDelta: delta,
+            isUndone: false,
             defaultDelta: after == scope.defaultBefore
-                ? nil : DrawingDefaultStyleDelta(before: scope.defaultBefore, after: after),
-            isUndone: false)
+                ? nil : DrawingDefaultStyleDelta(before: scope.defaultBefore, after: after))
     }
 ```
 
@@ -2496,7 +2520,8 @@ PR 描述**必须**包含：
 **2. 占位符扫描**：全文无 TBD / TODO / "类似 Task N" / "写测试覆盖以上"。每个代码步都给了可直接粘贴的代码块；`<实测新值>` 只出现在 Task 8 的 Catalyst 基线（那是**必须实跑才能知道**的数，已配取数命令）。
 
 **3. 类型一致性**（跨 task 逐个核对）：
-- `DrawingUndoEntry(drawingsDelta:isUndone:)` 在 Task 1/3 用两参构造，Task 5 加的 `defaultDelta` **带默认值 `= nil`** → 既有构造点不受影响 ✓
+- `DrawingUndoEntry` 的构造顺序**钉死为 `drawingsDelta` → `isUndone` → `defaultDelta`**，且由 Task 1 写下的**显式构造器**承载（不用自动生成的那个）。Task 5 只在**末尾**追加带默认值的第三参 → Task 1/3 那些两参构造点一处都不用改 ✓
+  （codex plan-R1 抓到的就是这里：原稿把 `defaultDelta` 写在 `isUndone` 前面，Swift 会因实参顺序不符声明顺序而**编译不过**，卡住的正是风险最高的 Task 5。已核实为真并按其"显式构造器"建议修。）
 - `canUndoDrawing` / `canRedoDrawing`（Task 1）→ Task 6 的 `undoButtonEnabled` / `redoButtonEnabled` 引用 ✓ 名字一致
 - `clearDrawingUndoStack()`（Task 1 定义，private）→ Task 2 三处、Task 3 三处、Task 4 两处调用，**全在 `TrainingEngine.swift` 内** ✓（private 的可访问性成立）
 - `applyUndoEntry(_:direction:)`（Task 3）→ Task 5 在其中加默认恢复 ✓
