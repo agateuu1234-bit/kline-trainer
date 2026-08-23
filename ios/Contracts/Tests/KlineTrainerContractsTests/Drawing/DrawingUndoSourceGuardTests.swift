@@ -308,4 +308,52 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
         XCTAssertNil(engineDrawingsWritesByFunction(good, functions: ["noSuchFunc"])["noSuchFunc"],
                      "锚点失效必须返回 nil（缺键），不得静默返回 0")
     }
+
+    /// U-G5（D102）：`performDrawingAction` 在 `Sources/` 中的调用点**恰好 1 处**，且在
+    /// `DrawingEditRouter.applyPanelStyleMutation` 里；作用域必须包住**整个**函数体
+    /// （`performDrawingAction {` 紧跟在函数签名之后）。
+    /// ⚠️ 只数调用点不够：把作用域只包住 `.draw` 那一个分支，调用点仍是 1 处、成对回滚的测试也照样绿，
+    ///    但选择态那一支就落在作用域之外 —— 将来任何人给选择态补上「顺带写默认」的语义时，
+    ///    那一对会静默拆成两条记录。故必须**同时**断言"紧跟在签名之后"。
+    func test_uG5_actionScopeWrapsWholePanelStyleMutation() throws {
+        // ⚠️ 不能用 `callSiteCount("performDrawingAction(")` —— 它数的是带括号的 pattern，
+        //    而本函数的调用点是**尾随闭包**语法 `engine.performDrawingAction { … }`，源码里
+        //    根本不出现 `(` ⇒ 那条判据恒为 0，与下面第三句「调用点必须正是无括号写法」互斥。
+        //    改用裸标识符判据（同 U-G3 对无括号计算属性的处理）：它对**定义**不计数
+        //    （`func performDrawingAction(` 后面是 `(`），恰好只数尾随闭包调用。
+        var sites: [(file: String, count: Int)] = []
+        for f in try filesMentioning("performDrawingAction") {
+            let n = bareIdentifierReferences(inCode: try boundaryCodeOf(f),
+                                             identifier: "performDrawingAction")
+            if n > 0 { sites.append((f, n)) }
+        }
+        let total = sites.reduce(0) { $0 + $1.count }
+        XCTAssertEqual(total, 1, "performDrawingAction 调用点应恰好 1 处，实测：\(sites)")
+        XCTAssertEqual(sites.first?.file.hasSuffix("/Drawing/DrawingEditRouter.swift"), true,
+                       "唯一调用点必须在路由里")
+
+        let router = try squeezedSource(contractsDirForGuards
+            .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path)
+        let sig = squeeze("engine: TrainingEngine) { engine.performDrawingAction {")
+        XCTAssertTrue(router.contains(sig),
+                      "作用域必须紧跟 applyPanelStyleMutation 的签名、包住整个函数体（不是只包 .draw 分支）")
+    }
+
+    /// U-G5 的**双向自检**。
+    func test_uG5_scanner_is_not_vacuous() throws {
+        XCTAssertEqual(bareIdentifierReferences(
+            inCode: codeTextPreservingBoundaries("f { engine.performDrawingAction { } }"),
+            identifier: "performDrawingAction"), 1, "尾随闭包调用必须被判成裸引用")
+        XCTAssertEqual(bareIdentifierReferences(
+            inCode: codeTextPreservingBoundaries("func performDrawingAction(_ b: () -> Void) { }"),
+            identifier: "performDrawingAction"), 0, "定义本身（后面紧跟 `(`）不得被误计成调用点")
+
+        let onlyDrawBranch = squeezedText("""
+            static func applyPanelStyleMutation(_ m: X, engine: TrainingEngine) {
+                if session.mode == .draw { engine.performDrawingAction { } }
+            }
+            """)
+        XCTAssertFalse(onlyDrawBranch.contains(squeeze("engine: TrainingEngine) { engine.performDrawingAction {")),
+                       "只包住 .draw 分支的样本必须不满足邻接条件")
+    }
 }

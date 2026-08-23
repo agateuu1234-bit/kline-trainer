@@ -38,6 +38,17 @@ public final class TrainingEngine {
     ///    只能加计算属性/方法；本片其余撤销代码（`canUndoDrawing`/`recordDrawingUndoDelta` 等）仍留在
     ///    那个 extension 里，靠同文件 `private` 可见性访问这个字段。
     private var drawingUndoEntry: DrawingUndoEntry?
+    /// D102：「一次动作」作用域的中间态。`nil` = 当前没有打开的作用域。
+    /// ⚠️ 用**一个可选结构**而不是几个平行布尔/可选量 —— 「作用域没开却存着 defaultBefore」
+    ///    这类坏状态因此不可表达。
+    /// ⚠️ 存储属性同上一条理由必须留在**类体本身**——本包的 `performDrawingAction` /
+    ///    `recordDrawingUndoDelta` 仍留在 `:745` 起的 extension 里，靠同文件 `private` 可见性访问。
+    private struct DrawingActionScope {
+        let defaultBefore: DrawingDefaultStyle
+        var delta: DrawingUndoEntry.DrawingsDelta?
+        var aborted: Bool
+    }
+    private var drawingActionScope: DrawingActionScope?
     /// P1a Task 12（Z1）：加载来的完整有损画线集（含 unknownRaw 原始字节）。`drawings` 是其已知投影
     /// （`loadedDrawingsLossy.drawings`）。coordinator save 路径经 `loadedDrawingsLossy.reconciled(currentKnown:)`
     /// 重发，使加载 blob 里未识别（未来版本）的条穿过 autosave/resume-save/commit 全路径存活。
@@ -1478,13 +1489,68 @@ extension TrainingEngine {
     ///   ② 有人绕过栈直接改了 `drawings`、让已存下标失准时（D79 第一层，Task 4）。
     private func clearDrawingUndoStack() { drawingUndoEntry = nil }
 
+    /// D102：把 `body` 里发生的写入合并成**一条**撤销记录。
+    ///
+    /// **为什么需要它**：自动选中片（D86）让画线态的一次改样式变成**两处写入** ——
+    /// 先写「本局默认」（`DrawingSession`），再 best-effort 改「那条线」（引擎）。
+    /// 入栈点在引擎的四个写入 API 里（D74/D75），它**看不见**前面那次默认写入；
+    /// 照原样各入一条，深度 1 的栈会让第二条把第一条挤掉 —— 正是交接 §10.1 点名的坏结果。
+    ///
+    /// **为什么不把入栈搬到路由层**：D74 的理由「入栈必须与写入同处，否则'写了却忘了入栈'
+    /// 要靠人记」一个字都没过时（1b-i 的 D56 已经证明过一次）。本作用域是在**不破坏**那条理由
+    /// 的前提下，补上「一次动作可以跨两个写入面」这件 spec 当时没有的事。
+    ///
+    /// **唯一调用点** = `DrawingEditRouter.applyPanelStyleMutation`（守卫 U-G5 钉死）。
+    /// 其余三条动作路径（删线 / 锁定 / 画线提交）**不包作用域**，写入 API 直接自成一条记录。
+    func performDrawingAction(_ body: () -> Void) {
+        // 嵌套 = 「哪一层算一个动作」无法定义 → fail-closed：整个外层动作作废，绝不 crash。
+        guard drawingActionScope == nil else {
+            drawingActionScope?.aborted = true
+            body()
+            return
+        }
+        drawingActionScope = DrawingActionScope(
+            defaultBefore: drawingSession.defaultStyle, delta: nil, aborted: false)
+        body()
+        let scope = drawingActionScope
+        drawingActionScope = nil
+
+        guard let scope, !scope.aborted else { clearDrawingUndoStack(); return }
+        let after = drawingSession.defaultStyle
+        let defaultChanged = (after != scope.defaultBefore)
+
+        // D101：`drawings` 没变就不入栈 —— 只改了本局默认的动作**撤不回来**，这是已接受残留。
+        guard let delta = scope.delta else {
+            // ⚠️ **但不能就这么放着**（codex plan-R3 high，已核实为真）：
+            //    栈顶那条记录的默认分量说「默认从 X 变成 Y」，而用户刚刚又把默认改成了 Z。
+            //    此后 ↩ 按 X 写回、↪ 按 Y 写回 —— **两个方向都会静默覆盖掉用户刚选的 Z**，
+            //    并经 autosave 落盘。不变量：**默认分量两端必须仍与当前默认值对得上**；
+            //    对不上就把这一半丢掉。`drawings` 那一半照常保留 —— 那条线根本没被碰过。
+            if defaultChanged { drawingUndoEntry?.defaultDelta = nil }
+            return
+        }
+        // ⚠️ 实参顺序 = 声明顺序 `drawingsDelta` → `isUndone` → `defaultDelta`（codex plan-R1）。
+        drawingUndoEntry = DrawingUndoEntry(
+            drawingsDelta: delta,
+            isUndone: false,
+            defaultDelta: defaultChanged
+                ? DrawingDefaultStyleDelta(before: scope.defaultBefore, after: after) : nil)
+    }
+
     /// 入栈单点。**唯一**被四个写入 API 的成功路径调用（D75）。
     /// **位置纪律**：必须紧贴 `drawingsRevision += 1` —— D80 之后
     /// 「`drawingsRevision` 递增 ⟺ `drawings` 内容真的变了」是不变量，而入栈条件**恰好等于**它（D101）。
     /// 同条件同位置 ⇒ 「入栈与 revision 不同步」这个坏状态不可表达，而不是靠实施者两处都记得写。
     private func recordDrawingUndoDelta(_ delta: DrawingUndoEntry.DrawingsDelta) {
-        // 深度 1：新动作直接**覆盖**栈顶，redo 位随之清空（`isUndone: false`）——
-        // D25：做了新动作 → ↪ 置灰。
+        if drawingActionScope != nil {
+            // 一个作用域内只允许**一次** `drawings` 改动（D102）。第二次到达 = 我们对
+            // 「一个动作」的建模已经与现实脱节 → fail-closed 作废，**绝不 crash**
+            // （这条路径在生产里不可达，但 crash 会把一个建模问题变成用户可见的闪退）。
+            if drawingActionScope?.delta != nil { drawingActionScope?.aborted = true }
+            else { drawingActionScope?.delta = delta }
+            return
+        }
+        // 深度 1：新动作直接覆盖栈顶，redo 位随之清空（D25）。
         drawingUndoEntry = DrawingUndoEntry(drawingsDelta: delta, isUndone: false)
     }
 
@@ -1555,6 +1621,12 @@ extension TrainingEngine {
             drawings[index] = target
         }
 
+        // D102：本局默认与那条线是**同一个动作**的两半，一并回滚 / 一并重做。
+        // 写它会经 `DrawingSession.defaultStyle` 的 @Observable 变化触发 autosave
+        // （TrainingView 的 DrawingAutosaveTriggersModifier，D94）—— 本片不新增任何触发器。
+        if let dd = entry.defaultDelta {
+            drawingSession.setDefaultStyle(direction == .undo ? dd.before : dd.after)
+        }
         drawingsRevision += 1     // 照常触发 autosave（D56：与四个写入 API 同一个 dirty 信号）
         return true
     }

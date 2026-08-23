@@ -548,3 +548,198 @@ struct DrawingUndoStaleEntryTests {
         #expect(e.canUndoDrawing == false && e.canRedoDrawing == false, "栈必须已作废")
     }
 }
+
+@Suite("1b-ii 撤销：画线态改样式的成对回滚（D102 + 自动选中 spec §10.1）")
+@MainActor
+struct DrawingUndoPairedRollbackTests {
+
+    /// 「画线态 + 上面板一条已选中的线 + mapper 已发布」。直接复用自动选中片的搭台函数
+    /// （同一个测试模块，internal 可达）—— 另抄一份必然与它漂移。
+    static func drawModeEngine(locked: Bool = false) -> TrainingEngine {
+        DrawingPanelStyleSemanticsTests.drawModeWithSelected(
+            id: "A", locked: locked, colorToken: .orange, thickness: 1)
+    }
+
+    // ── ⭐ 交接 §10.1 点名的**必配回归**：一并回滚、一并重做 ──
+
+    @Test("⭐成对回滚：画线态改样式 → ↩ → 线与本局默认**双双**回到改动前")
+    func undoRollsBackBothLineAndSessionDefault() {
+        let e = Self.drawModeEngine()
+        #expect(e.drawings[0].thickness == 1)
+        #expect(e.drawingSession.defaultStyle.thickness == 1, "前置：默认与线都是 1")
+
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
+        #expect(e.drawings[0].thickness == 3, "前置：那条线真的被改了")
+        #expect(e.drawingSession.defaultStyle.thickness == 3, "前置：本局默认也真的被改了（两处写入）")
+
+        #expect(e.undoDrawing() == true)
+        #expect(e.drawings[0].thickness == 1, "线必须回到改动前")
+        #expect(e.drawingSession.defaultStyle.thickness == 1,
+                """
+                本局默认也必须回到改动前。
+                只回滚线不回滚默认 ⇒ 被撤销掉的样式会在**下一笔新画的线**上复活，
+                而且经 autosave 落盘、断点续训之后还在（自动选中 spec §10.1 逐字）。
+                """)
+    }
+
+    @Test("⭐成对重做：↪ → 线与本局默认**双双**回到改动后")
+    func redoRestoresBothLineAndSessionDefault() {
+        let e = Self.drawModeEngine()
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
+        #expect(e.undoDrawing() == true)
+        #expect(e.redoDrawing() == true)
+        #expect(e.drawings[0].thickness == 3)
+        #expect(e.drawingSession.defaultStyle.thickness == 3)
+    }
+
+    @Test("⭐成对：两处写入只产生**一条**栈记录（深度 1 下第二条会把第一条挤掉 = 交接点名的坏结果）")
+    func pairProducesExactlyOneEntry() {
+        let e = Self.drawModeEngine()
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
+        guard case .replaced(let before, let after, _) = e.drawingUndoEntryForTesting!.drawingsDelta else {
+            Issue.record("栈顶不是 replaced"); return
+        }
+        #expect(before.thickness == 1 && after.thickness == 3, "drawings 那一半必须是这次改动本身")
+        #expect(e.drawingUndoEntryForTesting?.defaultDelta?.before.thickness == 1)
+        #expect(e.drawingUndoEntryForTesting?.defaultDelta?.after.thickness == 3)
+        // 深度 1：只有一条 → 撤销一次就回到起点，再撤无效
+        #expect(e.undoDrawing() == true)
+        #expect(e.undoDrawing() == false, "两处写入若各入一条，这里会是 true —— 那正是要防的")
+    }
+
+    // ── D101：只改默认、没碰线 → 不入栈（含已接受残留的正面证据） ──
+
+    @Test("D101：画线态那条线被锁 → 只有默认变了 → **不入栈**，栈顶保持原样（已接受残留）")
+    func lockedLineMeansDefaultOnlyChangeIsNotPushed() {
+        let e = Self.drawModeEngine(locked: true)
+        // 先造一条真记录（锁定动作本身可撤销）
+        #expect(e.drawingSession.selectedDrawingID == "A")
+        let topBefore = e.drawingUndoEntryForTesting?.drawingsDelta
+
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
+        #expect(e.drawingSession.defaultStyle.thickness == 3, "默认确实变了")
+        #expect(e.drawings[0].thickness == 1, "线锁着，applyStyle 被 D60 拒 —— 没被改")
+
+        let topAfter = e.drawingUndoEntryForTesting?.drawingsDelta
+        #expect((topBefore == nil) == (topAfter == nil), "栈顶存在性不得改变")
+        #expect(e.drawingUndoEntryForTesting?.defaultDelta == nil,
+                "只改默认不入栈（D101）：栈顶不许多出一个 defaultDelta")
+    }
+
+    // ── ⭐ 落盘往返：成对回滚必须**作为同一份状态**存下去、再一起读回来（codex plan-R9）──
+
+    @Test("⭐落盘往返（undo）：画线态改样式 → ↩ → 存档 → 续局 → 线与本局默认**双双**是改动前那一侧")
+    func pairedUndoSurvivesSaveAndResume() async throws {
+        let (coord, _, _, _) = TrainingSessionPersistenceTests.makeCoordinator(
+            candles: TrainingSessionPersistenceTests.validCandles())
+        coord.now = { 222 }
+        let e = try await coord.startNewNormalSession()
+        e.toggleDrawingMode()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", thickness: 1, revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 0, price: 10)) == true)
+        e.drawingSession.setCommittedSelection(id: "A", panel: .upper)
+        e.drawingSession.setViewportMapper(DrawingPanelStyleSemanticsTests.mapper(), panel: .upper)
+
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
+        #expect(e.drawings[0].thickness == 3 && e.drawingSession.defaultStyle.thickness == 3)
+        #expect(e.undoDrawing() == true)
+
+        try await coord.saveProgress(engine: e)
+        await coord.endSession()
+        let resumed = try #require(try await coord.resumePending())
+
+        // ⭐ 两半必须落在**同一侧**。只测 revision +1 证明不了这一条：
+        //    autosave 的排序 / 合并一旦出问题，完全可能把「已回滚的线」和「没回滚的默认」一起存下去，
+        //    于是被撤销掉的样式在续训之后、在下一笔新画的线上复活 —— 正是 D102 要防的那个高代价形态。
+        #expect(resumed.drawings.first { $0.id == "A" }?.thickness == 1, "线必须是改动前那一侧")
+        #expect(resumed.drawingSession.defaultStyle.thickness == 1, "本局默认必须**同样**是改动前那一侧")
+        // 顺带钉住验收 #17：撤销栈不跨局（新引擎的栈按定义为空）
+        #expect(resumed.canUndoDrawing == false && resumed.canRedoDrawing == false)
+    }
+
+    @Test("⭐落盘往返（redo）：↩ 后再 ↪ → 存档 → 续局 → 线与本局默认**双双**是改动后那一侧")
+    func pairedRedoSurvivesSaveAndResume() async throws {
+        let (coord, _, _, _) = TrainingSessionPersistenceTests.makeCoordinator(
+            candles: TrainingSessionPersistenceTests.validCandles())
+        coord.now = { 222 }
+        let e = try await coord.startNewNormalSession()
+        e.toggleDrawingMode()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", thickness: 1, revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 0, price: 10)) == true)
+        e.drawingSession.setCommittedSelection(id: "A", panel: .upper)
+        e.drawingSession.setViewportMapper(DrawingPanelStyleSemanticsTests.mapper(), panel: .upper)
+
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
+        #expect(e.undoDrawing() == true)
+        #expect(e.redoDrawing() == true)
+
+        try await coord.saveProgress(engine: e)
+        await coord.endSession()
+        let resumed = try #require(try await coord.resumePending())
+        #expect(resumed.drawings.first { $0.id == "A" }?.thickness == 3, "线必须是改动后那一侧")
+        #expect(resumed.drawingSession.defaultStyle.thickness == 3, "本局默认必须**同样**是改动后那一侧")
+    }
+
+    // ── ⭐ D101 不变量：默认分量过期必须丢掉（codex plan-R3 high）──
+    //    两个方向各一条 —— codex 只报了 ↪ 那一半，↩ 同样会覆盖用户的新默认。
+
+    @Test("⭐R3-↪ 方向：旧记录已撤销 + 用户又单独改了默认 → ↪ 不得覆盖新默认")
+    func staleDefaultDeltaDoesNotClobberOnRedo() {
+        let e = Self.drawModeEngine()
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)   // 成对入栈
+        #expect(e.undoDrawing() == true)                                             // ↪ 可用
+        #expect(e.canRedoDrawing == true)
+        #expect(e.drawingSession.defaultStyle.thickness == 1)
+
+        // 让那条线不再够得着（几何判不了），**但不结束会话** → 栈按 N-Q3 原样保留
+        e.drawingSession.clearViewportMapper(panel: .upper)
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 5 }, engine: e)   // 只改默认
+        #expect(e.drawingSession.defaultStyle.thickness == 5, "前置：默认真的变成 5 了")
+        #expect(e.drawings[0].thickness == 1, "前置：那条线被几何门拒了，没被改")
+        #expect(e.drawingUndoEntryForTesting?.defaultDelta == nil,
+                "过期的默认分量必须被丢掉 —— 留着它 ↪ 就会拿旧值覆盖用户刚选的 5")
+
+        #expect(e.redoDrawing() == true)
+        #expect(e.drawings[0].thickness == 3, "线那一半仍然有效，↪ 照常把它重做回去")
+        #expect(e.drawingSession.defaultStyle.thickness == 5,
+                "⭐用户刚选的默认 5 必须原样保留 —— 被旧记录的 after 覆盖成 3 就是本条要防的缺陷")
+    }
+
+    @Test("⭐R3-↩ 方向（codex 未报，复核补出）：记录尚未撤销 + 用户又单独改了默认 → ↩ 不得覆盖新默认")
+    func staleDefaultDeltaDoesNotClobberOnUndo() {
+        let e = Self.drawModeEngine()
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)   // 成对入栈，未撤销
+        e.drawingSession.clearViewportMapper(panel: .upper)
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 5 }, engine: e)   // 只改默认
+        #expect(e.drawingSession.defaultStyle.thickness == 5)
+        #expect(e.drawingUndoEntryForTesting?.defaultDelta == nil, "过期的默认分量必须被丢掉")
+
+        #expect(e.undoDrawing() == true)
+        #expect(e.drawings[0].thickness == 1, "线那一半仍然有效，↩ 照常把它退回去")
+        #expect(e.drawingSession.defaultStyle.thickness == 5,
+                "⭐用户刚选的默认 5 必须原样保留 —— 被旧记录的 before 覆盖成 1 就是本条要防的缺陷")
+    }
+
+    @Test("D101：选择态改样式只写线、不写默认 → 栈记录里 defaultDelta 必须是 nil")
+    func selectModeEditHasNoDefaultDelta() {
+        let e = DrawingPanelStyleSemanticsTests.selectModeWithSelected(id: "A", colorToken: .orange)
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
+        #expect(e.drawings[0].thickness == 3)
+        #expect(e.drawingUndoEntryForTesting?.defaultDelta == nil,
+                "选择态本来就不回写默认（D49 的核心价值）→ 这条记录不该带默认分量")
+        #expect(e.undoDrawing() == true)
+        #expect(e.drawings[0].thickness == 1)
+    }
+
+    @Test("N-R（D80 的 PR-2 侧）：画线态 no-op 点击不冲掉栈顶那次真编辑，↩ 仍回到最初")
+    func noopClickInDrawModeDoesNotClobber() {
+        let e = Self.drawModeEngine()
+        DrawingEditRouter.applyPanelStyleMutation({ $0.colorToken = .purple }, engine: e)   // 真编辑
+        DrawingEditRouter.applyPanelStyleMutation({ $0.colorToken = .purple }, engine: e)   // 同一个颜色再点一次
+        #expect(e.undoDrawing() == true)
+        #expect(e.drawings[0].colorToken == .orange, "必须回到**最初**那个色，不是回到紫")
+        #expect(e.drawingSession.defaultStyle.colorToken == .orange, "默认也一并回到最初")
+    }
+}

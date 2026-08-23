@@ -252,6 +252,11 @@ enum DrawingEditRouter {
     ///    选中线路径还会经 `drawingsRevision` 被 autosave 持久化）。
     static func applyPanelStyleMutation(_ mutate: (inout DrawingDefaultStyle) -> Void,
                                         engine: TrainingEngine) {
+        // D102（1b-ii 撤销 PR）：画线态的一次改样式是**两处写入**（本局默认 + 那条线）。
+        // 包在作用域里，两处合并成**一条**撤销记录 —— undo / redo 一并回滚一并重做。
+        // ⚠️ 必须包住**整个**函数体，不是只包 `.draw` 分支：将来任何人给别的分支补上
+        //    「顺带写默认」的语义时，那一对不会静默拆成两条（守卫 U-G5 钉死这条邻接关系）。
+        engine.performDrawingAction {
         let session = engine.drawingSession
         if session.mode == .draw {
             // **顺序 load-bearing**：先写默认（主语义、必须成功），**再** best-effort 改线
@@ -280,6 +285,7 @@ enum DrawingEditRouter {
             var d = session.defaultStyle
             mutate(&d)
             session.setDefaultStyle(d)
+        }
         }
     }
 

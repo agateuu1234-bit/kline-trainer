@@ -31,15 +31,35 @@ struct DrawingUndoEntry {
     ///    「↩ 和 ↪ 同时可用」「已撤销却还能再撤」这类坏状态因此不可表达。
     var isUndone: Bool
 
+    /// 「本局默认」那一半（D102）。**只有画线态改样式那条路会带** ——
+    /// 那一次动作是**两处写入**（那条线 + 本局默认，见 `DrawingEditRouter.applyPanelStyleMutation`
+    /// 的 `.draw` 分支）。撤销必须把这一对当**一个**动作一并回滚，否则被撤销掉的样式会在
+    /// 下一笔新画的线上、以及断点续训之后复活（自动选中 spec §10.1，**override 不覆盖**）。
+    var defaultDelta: DrawingDefaultStyleDelta?
+
     /// ⚠️ **显式构造器，不用自动生成的那个**（codex plan-R1，**已核实为真**）。
     ///    自动构造器要求实参**按存储属性声明顺序**给标签；Task 5 要往本结构里加第三个字段
     ///    `defaultDelta`，一旦它插在中间、或调用处顺序写反，就是一个**编译期**错误 ——
     ///    而卡住的正好是风险最高的成对回滚那一步。写死一个显式签名，把顺序收在这一处：
     ///    将来再加字段只需在**这里**追加一个带默认值的尾参，既有调用点一处都不用动。
-    init(drawingsDelta: DrawingsDelta, isUndone: Bool) {
+    ///
+    /// ⚠️ 新参数**必须排在最后且带默认值**（codex plan-R1）：这样 Task 1 / Task 3 里那些
+    ///    两参构造点（`DrawingUndoEntry(drawingsDelta:isUndone:)`）**一处都不用改**。
+    ///    把它插在中间 = 那些调用点全部编译不过。
+    init(drawingsDelta: DrawingsDelta, isUndone: Bool,
+         defaultDelta: DrawingDefaultStyleDelta? = nil) {
         self.drawingsDelta = drawingsDelta
         self.isUndone = isUndone
+        self.defaultDelta = defaultDelta
     }
+}
+
+/// 「本局默认」那一半的前后快照（D102）。
+/// ⚠️ **用一个成对的结构而不是两个可选字段** —— `before` 有值而 `after` 没有（或反过来）
+///    是个说不通的状态，用两个 `Optional` 就把它变成可表达的了。
+struct DrawingDefaultStyleDelta: Equatable {
+    let before: DrawingDefaultStyle
+    let after: DrawingDefaultStyle
 }
 
 /// undo / redo 共用同一个执行单点，方向由本枚举表达 —— 两份镜像实现必然漂移（D76 的表格是对称的）。
