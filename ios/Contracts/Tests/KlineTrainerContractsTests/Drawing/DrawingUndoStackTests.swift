@@ -785,3 +785,90 @@ struct DrawingUndoPairedRollbackTests {
         #expect(e.drawingSession.defaultStyle.colorToken == .orange, "默认也一并回到最初")
     }
 }
+
+@Suite("1b-ii 撤销：路由与选中态（D77）+ 置灰判据（D78）")
+@MainActor
+struct DrawingUndoRouterTests {
+
+    static func drawModeEngine() -> TrainingEngine {
+        DrawingPanelStyleSemanticsTests.drawModeWithSelected(id: "A", colorToken: .orange, thickness: 1)
+    }
+
+    // ── N-T：D77 表格四行 ──
+
+    @Test("N-T：undo 把**当前选中**那条线移除 → 选中被清空，🔒 / 🗑 回灰")
+    func undoRemovingSelectedLineClearsSelection() {
+        let e = TrainingEngine.preview()
+        e.toggleDrawingMode()
+        let d = makeStyledHLine(id: "A", revealTick: 0, period: e.upperPanel.period,
+                                candleIndex: 0, price: 50)
+        #expect(e.appendDrawing(d) == true)
+        e.drawingSession.setCommittedSelection(id: "A", panel: .upper)
+        e.drawingSession.setViewportMapper(DrawingPanelStyleSemanticsTests.mapper(), panel: .upper)
+        #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == true, "前置：🔒 是亮的")
+
+        #expect(DrawingEditRouter.undo(engine: e) == true)
+        #expect(e.drawingSession.selectedDrawingID == nil, "线没了，选中必须被清空（D54 clause 4）")
+        #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == false, "🔒 必须回灰")
+        #expect(DrawingEditRouter.deleteButtonEnabled(engine: e) == false, "🗑 必须回灰")
+    }
+
+    @Test("N-T：undo「改样式」→ 对象还在原下标、身份没变 → 选中**不变**")
+    func undoStyleKeepsSelection() {
+        let e = Self.drawModeEngine()
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
+        #expect(DrawingEditRouter.undo(engine: e) == true)
+        #expect(e.drawingSession.selectedDrawingID == "A", "身份没变，选中必须原样保留")
+    }
+
+    @Test("N-T + 交接②：undo「删线」把线恢复回来 → **不自动选中**")
+    func undoRestoredLineIsNotAutoSelected() {
+        let e = TrainingEngine.preview()
+        e.toggleDrawingMode()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", revealTick: 0, period: e.upperPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        #expect(e.deleteDrawing(id: "A") == true)
+        #expect(e.drawingSession.selectedDrawingID == nil, "前置：删完没有选中")
+        #expect(DrawingEditRouter.undo(engine: e) == true)
+        #expect(e.drawings.map(\.id) == ["A"], "线确实回来了")
+        #expect(e.drawingSession.selectedDrawingID == nil,
+                "恢复回来的线**不自动选中**（与 D37「新提交的线不自动选中」一致，交接 §10.1 第 2 条）")
+    }
+
+    // ── D78：置灰判据「与选中态无关、与几何无关」 ──
+
+    @Test("D78：↩ / ↪ 的可用性**不看**选中态、**不看**几何（刻意不对称）")
+    func undoRedoEnabledIgnoresSelectionAndGeometry() {
+        let e = Self.drawModeEngine()
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
+        #expect(DrawingEditRouter.undoButtonEnabled(engine: e) == true)
+        #expect(DrawingEditRouter.redoButtonEnabled(engine: e) == false)
+
+        // 清掉选中 + 撤掉 mapper（几何判不了）—— 两个 🔒/🗑 会灰，但 ↩ 必须仍然亮
+        e.drawingSession.clearSelection()
+        e.drawingSession.clearViewportMapper(panel: .upper)
+        #expect(DrawingEditRouter.lockButtonEnabled(engine: e) == false, "对照：🔒 灰了")
+        #expect(DrawingEditRouter.undoButtonEnabled(engine: e) == true,
+                "撤销是**会话级**操作，不需要选中任何线、也不需要那条线此刻看得见（D78）")
+
+        #expect(DrawingEditRouter.undo(engine: e) == true)
+        #expect(DrawingEditRouter.undoButtonEnabled(engine: e) == false)
+        #expect(DrawingEditRouter.redoButtonEnabled(engine: e) == true)
+    }
+
+    @Test("D78：刚进画线模式什么都没做 → ↩ / ↪ 都是灰的；做了新动作 → ↪ 变灰")
+    func enabledPredicatesAtSessionStartAndAfterNewAction() {
+        let e = TrainingEngine.preview()
+        e.toggleDrawingMode()
+        #expect(DrawingEditRouter.undoButtonEnabled(engine: e) == false)
+        #expect(DrawingEditRouter.redoButtonEnabled(engine: e) == false)
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", revealTick: 0, period: e.upperPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        #expect(DrawingEditRouter.undo(engine: e) == true)
+        #expect(DrawingEditRouter.redoButtonEnabled(engine: e) == true)
+        #expect(e.appendDrawing(makeStyledHLine(id: "B", revealTick: 0, period: e.upperPanel.period,
+                                                candleIndex: 1, price: 60)) == true)
+        #expect(DrawingEditRouter.redoButtonEnabled(engine: e) == false,
+                "做了新动作 → ↪ 失效（D25）")
+    }
+}

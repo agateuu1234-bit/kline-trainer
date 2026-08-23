@@ -415,4 +415,33 @@ enum DrawingEditRouter {
         guard canToggleLock(engine: engine) else { return false }
         return engine.setDrawingLocked(id: id, locked: !current.locked)
     }
+
+    // MARK: 撤销 / 前进（1b-ii 撤销 PR，D76 / D77 / D78）—— 形状同上面的删除 / 锁定三件套
+
+    /// ④↩。`undoDrawing` 在 `Sources/` 里的**唯一**调用点（守卫 U-G6）。
+    /// `defer` 里的选中态同步是 D77 表格四行的**全部**实现 ——
+    /// 判据「选中 id 不在 `visibleDrawings` 里就清空」已经把四行覆盖完，**不新写第二套**（D64）。
+    /// ⚠️ **不得**复用 `commitPendingAndSelect`、也不得建立任何选中：
+    ///    恢复回来的线**不自动选中**（与 D37 一致，自动选中 spec §10.1 第 2 条明令）。
+    @discardableResult
+    static func undo(engine: TrainingEngine) -> Bool {
+        defer { syncSelectionByState(engine: engine) }
+        return engine.undoDrawing()
+    }
+
+    /// ⑤↪。同上。
+    @discardableResult
+    static func redo(engine: TrainingEngine) -> Bool {
+        defer { syncSelectionByState(engine: engine) }
+        return engine.redoDrawing()
+    }
+
+    /// **UI 用**：④↩ 是否可用（D78）。
+    /// ⚠️ **刻意不含 `selectionGeometryVisible`、也不含任何选中分量** —— 这是本片唯一
+    ///    **不**共享几何判据的底栏键。撤销是**会话级**操作：不需要选中任何线，也不需要那条线
+    ///    此刻看得见。**后人不要"顺手统一"成和 🔒/🗑 一样的形状**（D78 逐字）。
+    static func undoButtonEnabled(engine: TrainingEngine) -> Bool { engine.canUndoDrawing }
+
+    /// **UI 用**：⑤↪ 是否可用（D78）。理由同上，刻意不对称。
+    static func redoButtonEnabled(engine: TrainingEngine) -> Bool { engine.canRedoDrawing }
 }

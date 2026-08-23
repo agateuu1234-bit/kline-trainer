@@ -356,4 +356,51 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
         XCTAssertFalse(onlyDrawBranch.contains(squeeze("engine: TrainingEngine) { engine.performDrawingAction {")),
                        "只包住 .draw 分支的样本必须不满足邻接条件")
     }
+
+    /// U-G6（D77，codex R5-F2）：`undoDrawing(` / `redoDrawing(` 在 `Sources/` 中的调用点
+    /// **各恰好 1 处**、都在 `DrawingEditRouter.swift`。
+    /// ⚠️ 底栏的 ↩ / ↪ 如果被**直接**接到 `engine.undoDrawing()` 上，引擎侧的往返测试照样全绿，
+    ///    可选中态永远不同步 —— 撤销掉的正好是选中那条线时，`selectedDrawingID` 变成一个指向
+    ///    已不存在的线的死值：高亮没了、🔒/🗑 灰着、要等用户再点一下别处才恢复。
+    func test_uG6_undoRedoHaveExactlyOneRouterCallSiteEach() throws {
+        // ⚠️ **不要过滤掉 `TrainingEngine.swift`**（与 codex plan-R4 报的是同一类盲区）：
+        //    `callSiteCount` 内部用的 `callCount` 已经把「定义」那一处自动扣掉了，引擎文件本来就
+        //    不会因为"声明在那儿"而出现在结果里；一旦过滤，引擎自己**真的调了** undo/redo
+        //    （绕过路由 ⇒ 选中态永远不同步）反而看不见。
+        for name in ["undoDrawing(", "redoDrawing("] {
+            let sites = try callSiteCount(name)
+            let total = sites.reduce(0) { $0 + $1.count }
+            XCTAssertEqual(total, 1, "\(name) 应恰好 1 个调用点，实测：\(sites)")
+            XCTAssertEqual(sites.first?.file.hasSuffix("/Drawing/DrawingEditRouter.swift"), true,
+                           "\(name) 的唯一调用点必须是路由（选中态同步只在那里）—— 落在引擎里就是绕过了路由")
+        }
+    }
+
+    /// U-G7（D77）：路由的 `undo` / `redo` 必须带 `defer { syncSelectionByState(engine: engine) }`，
+    /// 且**不得**出现 `commitPendingAndSelect`（交接 §10.1 第 2 条：恢复回来的线不自动选中）。
+    func test_uG7_routerUndoRedoSyncSelectionAndNeverAutoSelect() throws {
+        let router = try boundaryCodeOf(contractsDirForGuards
+            .appendingPathComponent("Sources/KlineTrainerContracts/Drawing/DrawingEditRouter.swift").path)
+        // ⚠️ `functionBody` 内部会自己拼上 `(`（needle = `func <name>(`），
+        //    所以这里**只能传裸函数名** —— 传 "undo(engine" 会拼成 `func undo(engine(`，
+        //    永远匹配不到 ⇒ 走 XCTFail 的锚点失效分支（幸好它会出声，不是静默恒绿）。
+        for fn in ["undo", "redo"] {
+            let body = functionBody(router, funcName: fn)
+            XCTAssertFalse(body.isEmpty, "锚点失效：找不到路由的 \(fn)(engine:)")
+            XCTAssertTrue(body.contains(squeeze("defer { syncSelectionByState(engine: engine) }")),
+                          "\(fn) 缺少选中态同步 —— D77 的四行全靠它")
+            XCTAssertFalse(body.contains(squeeze("commitPendingAndSelect(")),
+                           "\(fn) 不得复用 commitPendingAndSelect（交接 §10.1 明令）")
+            XCTAssertFalse(body.contains(squeeze("setCommittedSelection(")),
+                           "\(fn) 不得建立选中 —— 恢复回来的线不自动选中")
+        }
+    }
+
+    /// U-G6 / U-G7 的**双向自检**。
+    func test_uG6_uG7_scanners_are_not_vacuous() throws {
+        XCTAssertTrue(try callSiteCount("undoDrawingZZZ(").isEmpty)
+        let bad = squeezedText("static func undo(engine: TrainingEngine) -> Bool { engine.undoDrawing() }")
+        XCTAssertFalse(bad.contains(squeeze("defer { syncSelectionByState(engine: engine) }")),
+                       "缺 defer 的样本必须被判出来")
+    }
 }
