@@ -31,11 +31,34 @@
 ### D101　入栈条件 = 「`drawings` 内容真的变了」；本局默认单独变化**不入栈**
 
 - 一次动作里 `drawings` 内容真的变了 → 记一笔。若该动作**顺带**改了本局默认，把默认的 before / after **并进同一笔**。
-- 一次动作只改了本局默认、一条线都没碰 → **不记**，↩ 保持原状（既不亮、也不冲掉已有的栈顶）。
+- 一次动作只改了本局默认、一条线都没碰 → **不记**，↩ 保持原状（既不亮、也不冲掉已有的栈顶）；
+  **但必须把栈顶那条记录的「默认分量」丢掉**（见下面的不变量）。
+
+**不变量（codex plan-R3 high，已核实为真）：栈里那条记录的默认分量，两端必须仍与「当前默认值」对得上。**
+
+对不上会怎样：栈顶记录说「默认从 X 变成了 Y」，而用户之后**又单独**把默认改成了 Z（那次按上一条不入栈）。
+此后 ↩ 会把默认按 X 写回、↪ 会按 Y 写回 —— **两个方向都静默覆盖掉用户刚刚选的 Z**，
+还经 autosave 落盘。这不是「那次改动撤不回来」（那是已接受残留），而是**一次更早的操作反过来
+把更晚的操作抹掉了**，性质完全不同。
+
+**处置**：默认真的变了、却没有任何 `drawings` 改动 ⇒ 把栈顶的**默认分量丢掉**（置 `nil`），
+`drawings` 那一半**照常保留**（那条线根本没被碰过，它的 before/after 仍然有效）。
+
+⚠️ **本处方比 codex 的建议更宽，是有意的**：它建议「把 `isUndone == true` 的记录作废」，
+那只堵住了 ↪ 那一半 —— `isUndone == false` 时按 ↩ 同样会用旧的 `before` 覆盖掉新默认。
+丢掉默认分量把**两个方向一起**堵死，且**不牺牲**「那条线的编辑仍可撤销」这个功能。
+（若改成「整条作废」，则「选择态没选中任何线时改一下默认」这种最常见的操作
+会把 ↩ 直接变灰 —— 那是比缺陷本身更糟的功能回归。）
+
+**完整性论证（为什么只需管这一条路）**：`setDefaultStyle` 在 `Sources/` 里的调用点共 5 处（守卫 G1 钉死）——
+路由 2 处**都在**本作用域内、coordinator 2 处是**新引擎**的续训种子（栈按定义为空）、
+`applyUndoEntry` 1 处是撤销自己（它写的就是记录里的值，天然对得上）。故没有第二条会让默认分量过期的路。
 
 **为什么**：D80 已经把「`drawingsRevision` 递增 ⟺ `drawings` 内容真的变了」立成不变量，入栈条件**恰好等于**它 —— 两者同条件同位置，「入栈与 revision 不同步」这个坏状态不可表达。若改成「默认变了也入栈」，就要另立一套判据，且用户点 ↩ 之后屏幕上什么都不变（默认不可见），是"按了没反应"。
 
 > ⚠️ **已接受残留（必须写进 PR 描述）**：画线态下若那条线被拒（锁定 / 滑出屏 / 带未来数据 / 工具未实现四类门之一），结果是「只有默认变了」，这次改动**撤不回来**。用户 2026-08-21 明确接受。
+> 并且按上面那条不变量，它会把栈顶记录的**默认分量清掉** —— 那条线的编辑**仍然可撤销**，
+> 但撤销时不再连带回滚默认（因为默认已被一次**更晚的**用户操作改过，回滚它就是覆盖用户的新选择）。
 
 ### D102　「一次动作」作用域 —— 把画线态的两处写入合成一条撤销记录
 
@@ -1664,6 +1687,46 @@ struct DrawingUndoPairedRollbackTests {
                 "只改默认不入栈（D101）：栈顶不许多出一个 defaultDelta")
     }
 
+    // ── ⭐ D101 不变量：默认分量过期必须丢掉（codex plan-R3 high）──
+    //    两个方向各一条 —— codex 只报了 ↪ 那一半，↩ 同样会覆盖用户的新默认。
+
+    @Test("⭐R3-↪ 方向：旧记录已撤销 + 用户又单独改了默认 → ↪ 不得覆盖新默认")
+    func staleDefaultDeltaDoesNotClobberOnRedo() {
+        let e = Self.drawModeEngine()
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)   // 成对入栈
+        #expect(e.undoDrawing() == true)                                             // ↪ 可用
+        #expect(e.canRedoDrawing == true)
+        #expect(e.drawingSession.defaultStyle.thickness == 1)
+
+        // 让那条线不再够得着（几何判不了），**但不结束会话** → 栈按 N-Q3 原样保留
+        e.drawingSession.clearViewportMapper(panel: .upper)
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 5 }, engine: e)   // 只改默认
+        #expect(e.drawingSession.defaultStyle.thickness == 5, "前置：默认真的变成 5 了")
+        #expect(e.drawings[0].thickness == 1, "前置：那条线被几何门拒了，没被改")
+        #expect(e.drawingUndoEntryForTesting?.defaultDelta == nil,
+                "过期的默认分量必须被丢掉 —— 留着它 ↪ 就会拿旧值覆盖用户刚选的 5")
+
+        #expect(e.redoDrawing() == true)
+        #expect(e.drawings[0].thickness == 3, "线那一半仍然有效，↪ 照常把它重做回去")
+        #expect(e.drawingSession.defaultStyle.thickness == 5,
+                "⭐用户刚选的默认 5 必须原样保留 —— 被旧记录的 after 覆盖成 3 就是本条要防的缺陷")
+    }
+
+    @Test("⭐R3-↩ 方向（codex 未报，复核补出）：记录尚未撤销 + 用户又单独改了默认 → ↩ 不得覆盖新默认")
+    func staleDefaultDeltaDoesNotClobberOnUndo() {
+        let e = Self.drawModeEngine()
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)   // 成对入栈，未撤销
+        e.drawingSession.clearViewportMapper(panel: .upper)
+        DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 5 }, engine: e)   // 只改默认
+        #expect(e.drawingSession.defaultStyle.thickness == 5)
+        #expect(e.drawingUndoEntryForTesting?.defaultDelta == nil, "过期的默认分量必须被丢掉")
+
+        #expect(e.undoDrawing() == true)
+        #expect(e.drawings[0].thickness == 1, "线那一半仍然有效，↩ 照常把它退回去")
+        #expect(e.drawingSession.defaultStyle.thickness == 5,
+                "⭐用户刚选的默认 5 必须原样保留 —— 被旧记录的 before 覆盖成 1 就是本条要防的缺陷")
+    }
+
     @Test("D101：选择态改样式只写线、不写默认 → 栈记录里 defaultDelta 必须是 nil")
     func selectModeEditHasNoDefaultDelta() {
         let e = DrawingPanelStyleSemanticsTests.selectModeWithSelected(id: "A", colorToken: .orange)
@@ -1811,15 +1874,25 @@ struct DrawingDefaultStyleDelta: Equatable {
         drawingActionScope = nil
 
         guard let scope, !scope.aborted else { clearDrawingUndoStack(); return }
-        // D101：`drawings` 没变就不入栈 —— 只改了本局默认的动作**撤不回来**，这是已接受残留。
-        guard let delta = scope.delta else { return }
         let after = drawingSession.defaultStyle
+        let defaultChanged = (after != scope.defaultBefore)
+
+        // D101：`drawings` 没变就不入栈 —— 只改了本局默认的动作**撤不回来**，这是已接受残留。
+        guard let delta = scope.delta else {
+            // ⚠️ **但不能就这么放着**（codex plan-R3 high，已核实为真）：
+            //    栈顶那条记录的默认分量说「默认从 X 变成 Y」，而用户刚刚又把默认改成了 Z。
+            //    此后 ↩ 按 X 写回、↪ 按 Y 写回 —— **两个方向都会静默覆盖掉用户刚选的 Z**，
+            //    并经 autosave 落盘。不变量：**默认分量两端必须仍与当前默认值对得上**；
+            //    对不上就把这一半丢掉。`drawings` 那一半照常保留 —— 那条线根本没被碰过。
+            if defaultChanged { drawingUndoEntry?.defaultDelta = nil }
+            return
+        }
         // ⚠️ 实参顺序 = 声明顺序 `drawingsDelta` → `isUndone` → `defaultDelta`（codex plan-R1）。
         drawingUndoEntry = DrawingUndoEntry(
             drawingsDelta: delta,
             isUndone: false,
-            defaultDelta: after == scope.defaultBefore
-                ? nil : DrawingDefaultStyleDelta(before: scope.defaultBefore, after: after))
+            defaultDelta: defaultChanged
+                ? DrawingDefaultStyleDelta(before: scope.defaultBefore, after: after) : nil)
     }
 ```
 
@@ -1909,7 +1982,7 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t5.log | tail -2 || e
 grep -E "Test Case .*uG5.* passed" /tmp/undo-t5.log || exit 1
 git -C "$repo" status --short
 ```
-预期：swift-testing = **1939 + 6 = 1945**（G1 是既有测试，改名不改数量）；XCTest = 基线 + 9。
+预期：swift-testing = **1939 + 8 = 1947**（G1 是既有测试，改名不改数量）；XCTest = 基线 + 9。
 
 - [ ] **Step 5: 提交**
 
@@ -1927,7 +2000,9 @@ git commit -m "feat(drawing): D102 一次动作作用域 —— 画线态改样�
 | U-M26 | 把作用域从整个函数体缩到只包 `.draw` 分支 | 邻接条件 | `test_uG5_actionScopeWrapsWholePanelStyleMutation`（**成对回滚三条仍绿** —— 这正是「只数调用点不够」的证据，报告里点明） |
 | U-M27 | `recordDrawingUndoDelta` 在作用域内改成直接压栈（不合并） | 两处写入拆成两条 | `pairProducesExactlyOneEntry`（`undoDrawing()` 第二次会变成 `true`） |
 | U-M28 | `guard let delta = scope.delta else { return }` 改成「delta 为空也压一条」 | D101 | `lockedLineMeansDefaultOnlyChangeIsNotPushed` |
-| U-M29 | `after == scope.defaultBefore ? nil : ...` 的三元反过来 | 选择态误带默认分量 | `selectModeEditHasNoDefaultDelta` |
+| U-M29 | `defaultChanged ? ... : nil` 的三元反过来 | 选择态误带默认分量 | `selectModeEditHasNoDefaultDelta` |
+| U-M29b | `if defaultChanged { drawingUndoEntry?.defaultDelta = nil }` 整行删掉 | **过期默认分量覆盖用户新选择**（codex plan-R3） | `staleDefaultDeltaDoesNotClobberOnRedo` + `staleDefaultDeltaDoesNotClobberOnUndo` |
+| U-M29c | 把那行改成 codex 原处方（`if entry.isUndone { clearDrawingUndoStack() }`） | 只堵了 ↪ 那一半 | `staleDefaultDeltaDoesNotClobberOnUndo`（**↪ 那条会绿** —— 这正是"处方需要加强"的证据，报告里点明） |
 | U-M30 | `applyUndoEntry` 里把 `dd.before` / `dd.after` 对调 | 方向反了 | `undoRollsBackBothLineAndSessionDefault` + `redoRestoresBothLineAndSessionDefault` |
 
 ---
@@ -2142,7 +2217,7 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t6.log | tail -2 || e
 grep -E "Test Case .*(uG6|uG7).* passed" /tmp/undo-t6.log || exit 1
 git -C "$repo" status --short
 ```
-预期：swift-testing = **1945 + 5 = 1950**；XCTest = 基线 + 12。
+预期：swift-testing = **1947 + 5 = 1952**；XCTest = 基线 + 12。
 
 - [ ] **Step 5: 提交**
 
@@ -2332,7 +2407,7 @@ echo "Catalyst 编译门：三条全过"
    （scheme 找不到、destination 不可用），只靠 ①② 仍会把「什么都没编译」读成绿。
    用**产物存在**而不是 `BUILD SUCCEEDED` 字样，理由同 G-6「判绿读实物，不读字样」。
 
-预期：swift-testing = **1950 + 1 = 1951**（新增 `trainingViewWiresUndoRedoToRouter`；五键那条是替换不是新增）；Catalyst 三条门全过。
+预期：swift-testing = **1952 + 1 = 1953**（新增 `trainingViewWiresUndoRedoToRouter`；五键那条是替换不是新增）；Catalyst 三条门全过。
 
 - [ ] **Step 5: 提交**
 
@@ -2546,6 +2621,11 @@ PR 描述**必须**包含：
 | §3 契约零影响 | G-1 |
 
 **gap 1（已在计划里显式处置，不是遗漏）**：spec N-M 里「autosave 被触发 → **重新加载后结果正确**」这半条，本计划**不新写落盘往返测试**。理由：undo/redo 只改 `drawings` 与 `drawingSession.defaultStyle` 两个**已经**被 `DrawingAutosaveTriggersModifier` 盯住的量（`TrainingView.swift:49/52`），落盘路径与 1b-i / 持久化片逐字相同、本片零新增字段。本片补的证据是「`drawingsRevision` 严格 +1」（触发器的输入，Task 3）＋既有守卫 G6b（触发器真挂在 body 上）。**这是可执行化，不是打折** —— 但它是一条计划级裁决，**codex 评审必须正面审它**；若评审认为不足，正解是补一条走 `TrainingSessionCoordinator` 的往返测试，而不是删掉 N-M。
+
+**gap 2（R3 后新增，已处置）**：D101 原稿只说「默认单独变化不入栈」，没说**栈里那条旧记录的默认分量会因此过期**。
+codex plan-R3 从 ↪ 方向报了这个缺陷，复核发现 ↩ 方向同样成立（它未报）。已把「默认分量两端必须与当前默认对得上」
+写成显式不变量、给出完整性论证（`setDefaultStyle` 五个调用点逐一交代），并补两条方向对称的回归测试
+＋三条变异（含一条专门证明 codex 原处方不够）。
 
 **2. 占位符扫描**：全文无 TBD / TODO / "类似 Task N" / "写测试覆盖以上"。每个代码步都给了可直接粘贴的代码块；`<实测新值>` 只出现在 Task 8 的 Catalyst 基线（那是**必须实跑才能知道**的数，已配取数命令）。
 
