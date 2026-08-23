@@ -1484,6 +1484,77 @@ extension TrainingEngine {
         // D25：做了新动作 → ↪ 置灰。
         drawingUndoEntry = DrawingUndoEntry(drawingsDelta: delta, isUndone: false)
     }
+
+    /// ④↩：撤销一步。返回 `false` = 没做任何事（空栈 / 栈顶已撤销 / 复盘 / 陈旧栈项）。
+    /// **不接受任何外部参数** —— 这个签名本身就是信任边界（D76 / D79 第三条）。
+    @discardableResult
+    func undoDrawing() -> Bool {
+        guard flow.mode != .review else { return false }              // N-O：D34 纵深防御
+        guard var entry = drawingUndoEntry, !entry.isUndone else { return false }
+        guard applyUndoEntry(entry, direction: .undo) else { return false }   // 失败时它内部已作废栈
+        entry.isUndone = true
+        drawingUndoEntry = entry
+        return true
+    }
+
+    /// ⑤↪：前进一步。**恒用 `after` 快照，绝不从当前默认样式 / 当前选中态重算**（D25 / D76）。
+    @discardableResult
+    func redoDrawing() -> Bool {
+        guard flow.mode != .review else { return false }
+        guard var entry = drawingUndoEntry, entry.isUndone else { return false }
+        guard applyUndoEntry(entry, direction: .redo) else { return false }
+        entry.isUndone = false
+        drawingUndoEntry = entry
+        return true
+    }
+
+    /// undo / redo 的**唯一**执行单点（D79 第三条：它俩共用这一个私有函数）。
+    ///
+    /// **为什么不复用四个写入 API**（本片最容易做错的一处，D76 逐条）：
+    ///   · `insert(at:)` 根本不存在 —— `appendDrawing` 只能 append，用它撤销删除会把线放到数组末尾
+    ///     = **z-order 变了**，之后在同一位置单击选中的不再是原来那条（D25 / D33 / D40 点名的正是这个）；
+    ///   · `updateDrawingStyle` 会被 D60 的 locked 门与 D61 的 raw-aware 门挡住 →
+    ///     「撤销一条带未来数据线的锁定」直接走不通。
+    /// **那些门为什么可以不走**：它们防的是**外部传进来的坏数据**；而 before / after 是引擎自己刚才
+    /// 吐出来的、**已经过完整门列表**的快照。
+    ///
+    /// **D79 第二层：前置条件逐 case 写死，任一不成立 → 返 `false`、`drawings` 不动、
+    /// `drawingsRevision` 不递增、并把整个撤销栈作废**（fail-closed，不留半吊子状态）。
+    /// ⚠️ Swift 数组越界是 **trap（进程直接崩）**，`do/catch` 接不住；不越界但身份对不上时，则是
+    ///    **删掉 / 改写了另一条线**，然后 `drawingsRevision += 1` 让这个坏状态被 autosave 固化。
+    ///    所以校验必须在**任何一次突变之前**跑完。
+    ///
+    /// ⚠️ **本函数自身绝不入栈**（D79 第三条）：不调 `recordDrawingUndoDelta`，也不经过四个写入 API。
+    ///    否则「撤销一次锁定」会把这次撤销本身又推进栈里，第二次点 ↩ 的行为无法定义。
+    private func applyUndoEntry(_ entry: DrawingUndoEntry, direction: DrawingUndoDirection) -> Bool {
+        switch (entry.drawingsDelta, direction) {
+
+        // 目标操作：remove(at: index)
+        case (.inserted(let obj, let index), .undo), (.removed(let obj, let index), .redo):
+            guard drawings.indices.contains(index), drawings[index].id == obj.id else {
+                clearDrawingUndoStack(); return false
+            }
+            drawings.remove(at: index)
+
+        // 目标操作：insert(obj, at: index)
+        case (.inserted(let obj, let index), .redo), (.removed(let obj, let index), .undo):
+            guard (0...drawings.count).contains(index),
+                  !drawings.contains(where: { $0.id == obj.id })          // 防 D66 的重复 id
+            else { clearDrawingUndoStack(); return false }
+            drawings.insert(obj, at: index)
+
+        // 目标操作：drawings[index] = obj
+        case (.replaced(let before, let after, let index), _):
+            let target = (direction == .undo) ? before : after
+            guard drawings.indices.contains(index), drawings[index].id == target.id else {
+                clearDrawingUndoStack(); return false
+            }
+            drawings[index] = target
+        }
+
+        drawingsRevision += 1     // 照常触发 autosave（D56：与四个写入 API 同一个 dirty 信号）
+        return true
+    }
 }
 
 #if DEBUG

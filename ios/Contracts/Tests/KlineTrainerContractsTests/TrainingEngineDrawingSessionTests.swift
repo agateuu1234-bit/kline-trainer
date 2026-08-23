@@ -1011,17 +1011,22 @@ struct TrainingEngineDrawingSessionTests {
     /// ⚠️ 必须排除 `reviewDrawings`：它以**子串**形式包含 `drawings`，朴素计数会把复盘侧写入
     ///    算进来（假阳性）；而为了迁就它去放宽判据，又会让真正的新写入面溜过去。
     ///    故判据 = 「`drawings` 紧邻的前一个字符不是标识符字符」，与 `bareIdentifierReferences` 同款边界法。
-    @Test("L12b: TrainingEngine 里 drawings 的结构性写入点恰好 5 处（穷尽性，多一处即红）")
+    @Test("L12b: TrainingEngine 里 drawings 的结构性写入点恰好 8 处（穷尽性，多一处即红）")
     @MainActor func engineDrawingsWriteSurfaceIsExhaustive() throws {
         let code = try squeezedSource(trainingEnginePath)
         let n = engineDrawingsStructuralWrites(code)
-        // PR-1 后的构成（每一处都必须能对上号）：
+        // PR-2（1b-ii 撤销 Task 3，applyUndoEntry 落地）后的构成（每一处都必须能对上号）：
         //   drawings.remove(at:) ×2  → deleteDrawing(at:) / deleteDrawing(id:)
         //   drawings.append(     ×1  → appendDrawing
         //   drawings[x] =        ×2  → updateDrawingStyle / setDrawingLocked
-        //   drawings.insert(     ×0  → PR-2 才引入（届时期望值改为 6）
-        #expect(n == 5, """
-            drawings 结构性写入点应为 5，实际 \(n)。
+        //   drawings.remove(at:) ×1  → applyUndoEntry（undo 画线 / redo 删线共用这一行）
+        //   drawings.insert(     ×1  → applyUndoEntry（undo 删线 / redo 画线共用这一行）
+        //   drawings[x] =        ×1  → applyUndoEntry（undo/redo 改样式与锁定共用这一行）
+        // ⚠️ 原注释曾预告"届时改为 6"——那是只数了 `insert(` 那一处的低估；D76 明令 applyUndoEntry
+        //    不得复用四个写入 API，必然要**新增三处**自己的 remove/insert/subscript-assign，
+        //    而不是复用已有的 5 处。实测 n=8 与三处新增逐一对得上号，故改基线为 8（非判据放宽）。
+        #expect(n == 8, """
+            drawings 结构性写入点应为 8，实际 \(n)。
             多了 = 出现了未经分类的新写入面（可能绕过路由/几何/唯一性三道门）；
             少了 = 判据坏了或某个写入面被挪走。两种都必须查清再改期望值，不许直接改数字。
             """)

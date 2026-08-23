@@ -736,6 +736,13 @@ struct DrawingUndoSessionLifecycleTests {
                 "切周期后必须仍在画线模式（restoreDrawingSessionAfterPeriodChange 刻意保留会话）")
         #expect(e.canUndoDrawing == true, "同一个会话没结束 → 撤销记录必须留着")
         #expect(e.drawingUndoEntryForTesting?.isUndone == topBefore, "栈内容不得被动过")
+
+        // ③（控制者裁决补于 Task 3，spec §2.6 N-Q3 第 ③ 条，计划原稿只写了 ①②）：
+        //    切周期之后点 ↩ 必须能正确撤掉**切换之前**画的那条线 —— 这是 Task 3 才有 `undoDrawing()`
+        //    实现之后才补得上的断言，Task 2 落地时 undo/redo 尚不存在，只能先断言栈"没被清"。
+        #expect(e.drawings.map(\.id) == ["A"], "前置：那条线切周期之后还在（未被期间切换清掉）")
+        #expect(e.undoDrawing() == true)
+        #expect(e.drawings.map(\.id) == [], "↩ 必须撤掉切周期之前画的那条线 A")
     }
 
     // ── 两条**必须保留**（把「清栈写在函数入口」那种实现直接测红，D103） ──

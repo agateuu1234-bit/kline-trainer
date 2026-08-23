@@ -205,6 +205,11 @@ struct DrawingUndoSessionLifecycleTests {
                 "切周期后必须仍在画线模式（restoreDrawingSessionAfterPeriodChange 刻意保留会话）")
         #expect(e.canUndoDrawing == true, "同一个会话没结束 → 撤销记录必须留着")
         #expect(e.drawingUndoEntryForTesting?.isUndone == topBefore, "栈内容不得被动过")
+
+        // ③（控制者裁决补，spec §2.6 N-Q3）：切周期之后点 ↩ 必须能正确撤掉**切换之前**画的那条线。
+        #expect(e.drawings.map(\.id) == ["A"], "前置：那条线切周期之后还在（未被期间切换清掉）")
+        #expect(e.undoDrawing() == true)
+        #expect(e.drawings.map(\.id) == [], "↩ 必须撤掉切周期之前画的那条线 A")
     }
 
     // ── 两条**必须保留**（把「清栈写在函数入口」那种实现直接测红，D103） ──
@@ -227,5 +232,244 @@ struct DrawingUndoSessionLifecycleTests {
         #expect(e.drawingSession.drawingModeActive == true)
         #expect(e.canUndoDrawing == true,
                 "D103：activate 幂等、没有翻转 —— 清栈若写在函数入口/activate 旁边无条件执行，本条必红")
+    }
+}
+
+@Suite("1b-ii 撤销：四类动作往返 + 保序 + 深度 1（D76）")
+@MainActor
+struct DrawingUndoRoundTripTests {
+
+    /// 造一个已进画线模式的引擎（撤销栈只在画线会话内有意义）。
+    static func engine() -> TrainingEngine {
+        let e = TrainingEngine.preview()
+        e.toggleDrawingMode()
+        return e
+    }
+    static func line(_ id: String, _ e: TrainingEngine, price: Double = 50, candleIndex: Int = 0) -> DrawingObject {
+        makeStyledHLine(id: id, revealTick: 0, period: e.upperPanel.period,
+                        candleIndex: candleIndex, price: price)
+    }
+
+    // ── N-M：四类动作各一条「做 → ↩ 复原 → ↪ 重做」+ revision 严格 +1 ──
+
+    @Test("N-M 画线：做 → ↩ 线消失 → ↪ 线回来，revision 每步严格 +1")
+    func roundTripAppend() {
+        let e = Self.engine()
+        #expect(e.appendDrawing(Self.line("A", e)) == true)
+        let rev = e.drawingsRevision
+        #expect(e.undoDrawing() == true)
+        #expect(e.drawings.map(\.id) == [])
+        #expect(e.drawingsRevision == rev + 1, "undo 必须递增 revision（autosave 的输入）")
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == true)
+        #expect(e.redoDrawing() == true)
+        #expect(e.drawings.map(\.id) == ["A"])
+        #expect(e.drawingsRevision == rev + 2)
+        #expect(e.canUndoDrawing == true && e.canRedoDrawing == false)
+    }
+
+    @Test("N-M 删线：做 → ↩ 线回来 → ↪ 线又没了")
+    func roundTripDelete() {
+        let e = Self.engine()
+        #expect(e.appendDrawing(Self.line("A", e)) == true)
+        #expect(e.deleteDrawing(id: "A") == true)
+        let rev = e.drawingsRevision
+        #expect(e.undoDrawing() == true)
+        #expect(e.drawings.map(\.id) == ["A"])
+        #expect(e.drawingsRevision == rev + 1)
+        #expect(e.redoDrawing() == true)
+        #expect(e.drawings.map(\.id) == [])
+    }
+
+    @Test("N-M 改样式：做 → ↩ 回到旧样式 → ↪ 回到新样式")
+    func roundTripStyle() {
+        let e = Self.engine()
+        #expect(e.appendDrawing(Self.line("A", e)) == true)
+        var s = DrawingDefaultStyle(); s.thickness = 3
+        #expect(e.updateDrawingStyle(id: "A", style: s) == true)
+        #expect(e.undoDrawing() == true)
+        #expect(e.drawings[0].thickness == 1)
+        #expect(e.drawings[0].id == "A", "身份不能变（`DrawingObject.==` 排除 id，必须单独断言）")
+        #expect(e.redoDrawing() == true)
+        #expect(e.drawings[0].thickness == 3)
+    }
+
+    @Test("N-M 锁定：做 → ↩ 回到未锁 → ↪ 回到锁定")
+    func roundTripLock() {
+        let e = Self.engine()
+        #expect(e.appendDrawing(Self.line("A", e)) == true)
+        #expect(e.setDrawingLocked(id: "A", locked: true) == true)
+        #expect(e.undoDrawing() == true)
+        #expect(e.drawings[0].locked == false)
+        #expect(e.redoDrawing() == true)
+        #expect(e.drawings[0].locked == true)
+    }
+
+    // ── N-I 保序（D25 / codex R25-high 专项，不可省） ──
+
+    @Test("N-I 保序：删中间那条 → ↩ 必须回到**原下标**，且同价位单击选中的仍是最后画的 C")
+    func undoRestoresExactIndexAndZOrder() {
+        let e = Self.engine()
+        // 同一价位依次画三条**重合**的线 A→B→C（数组序 [A,B,C] = z-order）
+        for id in ["A", "B", "C"] {
+            #expect(e.appendDrawing(Self.line(id, e, price: 50)) == true)
+        }
+        #expect(e.deleteDrawing(id: "B") == true)
+        #expect(e.drawings.map(\.id) == ["A", "C"])
+        #expect(e.undoDrawing() == true)
+        // ① 数组**恰为** [A,B,C]：B 回到**下标 1**，不是末尾
+        #expect(e.drawings.map(\.id) == ["A", "B", "C"],
+                "只断言「B 回来了 / 条数是 3」的话，append 实现也能过 —— 必须断言精确序列")
+        // ② 在该价位单击，命中的仍是 C（数组序 = z-order 的用户可见后果）
+        let m = DrawingPanelStyleSemanticsTests.mapper()
+        let p = CGPoint(x: 50, y: m.priceToY(50))
+        let tools: [DrawingToolType: any DrawingTool] = [.horizontal: HorizontalLineTool()]
+        #expect(DrawingHitTester.firstHit(in: e.drawings, point: p, mapper: m, tools: tools)?.id == "C",
+                "撤销之后单击选中的必须仍是最后画的 C，不是刚撤回来的 B")
+        // ↪ 之后数组恰为 [A,C]
+        #expect(e.redoDrawing() == true)
+        #expect(e.drawings.map(\.id) == ["A", "C"])
+    }
+
+    // ── N-J redo 不漂移（codex R29-high 专项，改样式 + 锁定各一条） ──
+
+    @Test("N-J redo 不漂移（改样式）：↩ 后改动别处 → ↪ 必须回到 after 快照，不是当前默认")
+    func redoUsesAfterSnapshotNotCurrentDefault() {
+        let e = Self.engine()
+        #expect(e.appendDrawing(Self.line("A", e, price: 50)) == true)
+        #expect(e.appendDrawing(Self.line("Z", e, price: 80, candleIndex: 2)) == true)
+        var red = DrawingDefaultStyle(); red.colorToken = .red
+        #expect(e.updateDrawingStyle(id: "A", style: red) == true)     // A 改成红
+        #expect(e.undoDrawing() == true)
+        // 中途改动别处：把**本局默认**改成绿，并选中别的线
+        var green = DrawingDefaultStyle(); green.colorToken = .green
+        e.drawingSession.setDefaultStyle(green)
+        e.drawingSession.setMode(.select)
+        e.drawingSession.setSelection(id: "Z", panel: .upper)
+        #expect(e.redoDrawing() == true)
+        #expect(e.drawings.first { $0.id == "A" }?.colorToken == .red,
+                "redo 必须用 after 快照 —— 不是绿（当前默认）、也不是原色")
+    }
+
+    @Test("N-J redo 不漂移（锁定）：↩ 后改动别处 → ↪ 必须回到锁定态")
+    func redoLockUsesAfterSnapshot() {
+        let e = Self.engine()
+        #expect(e.appendDrawing(Self.line("A", e)) == true)
+        #expect(e.setDrawingLocked(id: "A", locked: true) == true)
+        #expect(e.undoDrawing() == true)
+        var green = DrawingDefaultStyle(); green.colorToken = .green
+        e.drawingSession.setDefaultStyle(green)
+        #expect(e.redoDrawing() == true)
+        #expect(e.drawings[0].locked == true)
+    }
+
+    // ── N-K 深度 1 / N-N 空栈 / N-N4 不入栈 ──
+
+    @Test("N-K 深度 1：连点两次 ↩ 只回退一步；连点两次 ↪ 只前进一步")
+    func depthOneBehaviour() {
+        let e = Self.engine()
+        #expect(e.appendDrawing(Self.line("A", e)) == true)
+        #expect(e.appendDrawing(Self.line("B", e, price: 60, candleIndex: 1)) == true)
+        #expect(e.undoDrawing() == true)
+        #expect(e.drawings.map(\.id) == ["A"])
+        let snapshot = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false, "深度 1：第二次 ↩ 无效果")
+        expectDrawingsUnchanged(e, snapshot, revisionBefore: rev)
+        #expect(e.redoDrawing() == true)
+        let after = e.drawings, rev2 = e.drawingsRevision
+        #expect(e.redoDrawing() == false, "第二次 ↪ 无效果")
+        expectDrawingsUnchanged(e, after, revisionBefore: rev2)
+    }
+
+    @Test("N-N 空栈：undo / redo 返回 false、drawings 与 revision 均不动")
+    func emptyStackIsNoop() {
+        let e = Self.engine()
+        #expect(e.appendDrawing(Self.line("A", e)) == true)
+        e.toggleDrawingMode(); e.toggleDrawingMode()          // 清栈（进出一趟）
+        let before = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false)
+        #expect(e.redoDrawing() == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+
+    @Test("N-N4：undo / redo **自身不入栈** —— 栈顶仍是那次锁定，不是「撤销锁定」")
+    func undoDoesNotPushItself() {
+        let e = Self.engine()
+        #expect(e.appendDrawing(Self.line("A", e)) == true)
+        #expect(e.setDrawingLocked(id: "A", locked: true) == true)
+        #expect(e.undoDrawing() == true)
+        guard case .replaced(let before, let after, _) = e.drawingUndoEntryForTesting!.drawingsDelta else {
+            Issue.record("栈顶不是 replaced —— 撤销把自己压进去了"); return
+        }
+        #expect(before.locked == false && after.locked == true,
+                "栈顶必须还是**那次锁定**（false→true）。若撤销自己入了栈，这里会变成 true→false")
+        #expect(e.drawingUndoEntryForTesting?.isUndone == true, "栈顶被标记为已撤销，而不是产生新栈项")
+    }
+
+    // ── N-O 复盘门 ──
+
+    @Test("N-O：复盘模式下 undo / redo 恒 false（D34 纵深防御）")
+    func reviewModeRejectsUndoRedo() {
+        let e = TrainingEngine.preview(mode: .review)
+        e.injectDrawingsForTesting([makeStyledHLine(id: "A")])
+        e.injectDrawingUndoEntryForTesting(
+            DrawingUndoEntry(drawingsDelta: .replaced(before: makeStyledHLine(id: "A"),
+                                                      after: makeStyledHLine(id: "A", thickness: 3), at: 0),
+                             isUndone: false))
+        let before = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false)
+        #expect(e.redoDrawing() == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+    }
+}
+
+@Suite("1b-ii 撤销：陈旧栈项 fail-closed（D79 第二层）")
+@MainActor
+struct DrawingUndoStaleEntryTests {
+
+    /// 造「引擎里有一条线 A，但栈里那条记录对不上号」。
+    static func engineWithStaleEntry(_ entry: DrawingUndoEntry) -> TrainingEngine {
+        let e = TrainingEngine.preview()
+        e.toggleDrawingMode()
+        #expect(e.appendDrawing(makeStyledHLine(id: "A", revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 0, price: 50)) == true)
+        e.injectDrawingUndoEntryForTesting(entry)      // 覆盖掉刚才那条真记录
+        return e
+    }
+
+    @Test("N-N2①：下标越界 → 返 false、**不崩**、数据与 revision 均不动、栈被作废")
+    func outOfBoundsIndexFailsClosed() {
+        // ⚠️ 这是**崩溃回归测试**：没有它，越界 trap 在测试里表现为整个 xctest 进程挂掉，
+        //    而不是一条红断言，容易被误读成环境问题。
+        let e = Self.engineWithStaleEntry(
+            .init(drawingsDelta: .inserted(after: makeStyledHLine(id: "A"), at: 99), isUndone: false))
+        let before = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false, "fail-closed：整个栈必须作废")
+    }
+
+    @Test("N-N2②：下标在界内但 id 对不上 → false、**那条无辜的线逐字段不变**、栈被作废")
+    func identityMismatchFailsClosed() {
+        let e = Self.engineWithStaleEntry(
+            .init(drawingsDelta: .replaced(before: makeStyledHLine(id: "GHOST"),
+                                           after: makeStyledHLine(id: "GHOST", thickness: 3), at: 0),
+                  isUndone: false))
+        let before = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false)
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+        #expect(e.drawings[0].id == "A", "下标 0 上那条无辜的 A 不许被改写")
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false)
+    }
+
+    @Test("N-N2③：insert 时 id 已存在（重复 id）→ false、条数不变、栈被作废")
+    func duplicateIdOnInsertFailsClosed() {
+        let e = Self.engineWithStaleEntry(
+            .init(drawingsDelta: .removed(before: makeStyledHLine(id: "A"), at: 0), isUndone: false))
+        let before = e.drawings, rev = e.drawingsRevision
+        #expect(e.undoDrawing() == false, "undo「删线」要 insert 一条 id=A 的线，但 A 已经在数组里（D66）")
+        expectDrawingsUnchanged(e, before, revisionBefore: rev)
+        #expect(e.drawings.count == 1)
+        #expect(e.canUndoDrawing == false && e.canRedoDrawing == false)
     }
 }

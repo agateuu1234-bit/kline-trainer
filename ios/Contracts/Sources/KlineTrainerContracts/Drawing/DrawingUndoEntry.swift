@@ -41,3 +41,6 @@ struct DrawingUndoEntry {
         self.isUndone = isUndone
     }
 }
+
+/// undo / redo 共用同一个执行单点，方向由本枚举表达 —— 两份镜像实现必然漂移（D76 的表格是对称的）。
+enum DrawingUndoDirection { case undo, redo }

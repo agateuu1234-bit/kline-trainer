@@ -7,6 +7,9 @@
 //
 // 纪律（G-5，缺一即失效）：结构计数不写黑名单；匹配前剥注释剥字面量；每条配双向自检。
 import XCTest
+import Testing          // U-G2/U-G3（Task 3）：`expectEngineInternalOnly`/`expectIdentifierNeverVended`
+                         // 的 `sourceLocation: SourceLocation = #_sourceLocation` 默认参数在**调用处**展开，
+                         // 调用处（本文件）不 import Testing 就解析不到 `#_sourceLocation` 宏（编译期实测）。
 @testable import KlineTrainerContracts
 
 // ⚠️ 下面三个助手必须在**文件作用域**（类外），不能写成 `XCTestCase` 的实例方法
@@ -129,5 +132,95 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
         // 锚点失效必须返回空数组（调用方据此 XCTFail），不得静默返回一个空函数体
         XCTAssertTrue(functionBodies(codeTextPreservingBoundaries("func g() {}"),
                                      funcName: "zzzNoSuchFunc").isEmpty)
+    }
+
+    /// U-G2（D79 第三条 + D76）：`undoDrawing` / `redoDrawing` **不接受任何外部参数**，
+    /// 且执行单点 `applyUndoEntry` **恰好被这两个函数各调 1 次**（共 2 次）。
+    /// ⚠️ 「不接受外部参数」不是风格 —— 那个签名**本身就是信任边界**（spec §2.3 逐字）：
+    ///    它保证恢复用的只能是引擎自己吐出的、已经过完整门列表的快照，所以才可以不走
+    ///    D60 / D61 那些防外部坏数据的门。一旦允许传参，「撤销」就变成了一个绕过全部门的写入面。
+    func test_uG2_undoRedoTakeNoExternalArgumentsAndShareOneApplySite() throws {
+        let code = try squeezedSource(trainingEnginePath)
+        XCTAssertTrue(code.contains(squeeze("func undoDrawing() -> Bool")), "undoDrawing 必须无参")
+        XCTAssertTrue(code.contains(squeeze("func redoDrawing() -> Bool")), "redoDrawing 必须无参")
+        // ⚠️ `callCount` = 总出现数 **减去** 定义处数（按 `"func"+pattern` 扣）⇒ 定义本身**不计**。
+        //    故期望值是 **2**（undo / redo 各 1 处调用），不是 3。写成 3 会让本守卫恒红。
+        XCTAssertEqual(callCount(inSqueezed: code, pattern: squeeze("applyUndoEntry(")), 2,
+                       "应为 undo / redo 各 1 处调用 = 2（定义已被 callCount 自动扣除）；多了说明出现了第二条执行路径")
+        // 两个入口都不得 public/package/open（信任边界的第二半）
+        try expectEngineInternalOnly("undoDrawing()")
+        try expectEngineInternalOnly("redoDrawing()")
+    }
+
+    /// U-G3：撤销栈的两个测试钩子**不得有任何生产使用**。
+    ///
+    /// ⚠️ **必须连 `TrainingEngine.swift` 一起扫**（codex plan-R4，**已核实为真**）：
+    ///    钩子的声明**和引擎侧全部撤销实现在同一个文件里**。把整个文件过滤掉 ⇒
+    ///    `undoDrawing` / `applyUndoEntry` 里真冒出一句 `injectDrawingUndoEntryForTesting(...)`
+    ///    会被整段丢掉、守卫照样全绿 —— 而那种调用绕过快照与全部前置校验，能种一条**任意的**
+    ///    陈旧栈项，随后删掉或改写**另一条**线（D79 要防的崩溃级 / 静默改写那一族）。
+    ///    **正确判据**：引擎之外零处；`TrainingEngine.swift` 里**恰好等于"声明本身"的处数**（各 1）。
+    ///    多出一处 = 引擎自己在用它。
+    func test_uG3_testOnlyHooksHaveNoProductionUse() throws {
+        // ── 引擎之外：两个钩子一处都不许出现 ──
+        for hook in ["injectDrawingUndoEntryForTesting", "drawingUndoEntryForTesting"] {
+            let outside = try filesMentioning(hook).filter { !$0.hasSuffix("/TrainingEngine.swift") }
+            XCTAssertTrue(outside.isEmpty, "\(hook) 被引擎之外的生产文件提到：\(outside)")
+        }
+        // ── 引擎之内（R4 补上的关键那一半）──
+        // 用**裸标识符**计数而不是子串计数：`injectDrawingUndoEntryForTesting` 里含的是
+        // `DrawingUndoEntryForTesting`（大写 D），与属性名 `drawingUndoEntryForTesting`（小写 d）
+        // 大小写不同、互不误计；属性体里的 `drawingUndoEntry` 也不会被算成它。
+        // ⚠️ **两个钩子要用两种不同的判据**（实施计划自查实测 `SourceGuardScanner.swift:171-186 / 252-278`）：
+        //    · `callCount` = **总出现数 − 定义处数**（定义按 `"func"+pattern` 扣）⇒ 只有声明时它是 **0**，
+        //      冒出一次真调用才变 1。所以带括号的注入钩子用它，期望 **0**；
+        //      **`callSiteCount` 对每个文件跑的就是它**，因此**根本不需要**把 `TrainingEngine.swift`
+        //      过滤掉 —— 当初那个过滤才是 codex plan-R4 报的盲区本身。
+        //    · `bareIdentifierReferences` 第 ③ 条明写「后面第一个非空格字符是 `(` 就不算」⇒ 它数的是
+        //      **vend**（把方法当值传出去），声明与调用都不计。无括号的那个计算属性只能用它。
+        //    两条判据搞反 = 守卫恒真、永远抓不到非法调用（本计划自查实测踩过一次）。
+        let injCalls = try callSiteCount("injectDrawingUndoEntryForTesting(")
+        XCTAssertTrue(injCalls.isEmpty,
+            "注入钩子被生产代码调用了：\(injCalls)。它绕过快照与全部前置校验，能种一条**任意**陈旧栈项去删改另一条线。")
+        // 第二层：vend 形式不出现调用 pattern，只数调用会放过它。
+        try expectIdentifierNeverVended("injectDrawingUndoEntryForTesting",
+                                        inFiles: try filesMentioning("injectDrawingUndoEntryForTesting"))
+        // 只读钩子（计算属性，无括号）：引擎之内恰好 1 处 = 那行声明；多出来就是引擎自己在读它。
+        XCTAssertEqual(bareIdentifierReferences(inCode: try boundaryCodeOf(trainingEnginePath),
+                                                identifier: "drawingUndoEntryForTesting"), 1,
+            "应恰好 1 处 = 那个只读计算属性的声明（它无括号，声明本身就算一次裸引用）。")
+    }
+
+    /// U-G3 的**反向自检**（codex plan-R4 点名要的）：合成一段「同文件里的生产调用」，
+    /// 判据必须数到 2（声明 + 那次非法调用）—— 这正是修正前那版守卫的盲区。
+    func test_uG3_scanner_catches_same_file_production_call() {
+        let illicit = squeezedText("""
+            func undoDrawing() -> Bool { injectDrawingUndoEntryForTesting(nil); return false }
+            func injectDrawingUndoEntryForTesting(_ e: DrawingUndoEntry?) { drawingUndoEntry = e }
+            """)
+        XCTAssertEqual(callCount(inSqueezed: illicit,
+                                 pattern: squeeze("injectDrawingUndoEntryForTesting(")), 1,
+            "callCount 会**自动扣掉声明**那一处 ⇒ 剩下的 1 就是那次非法调用。数成 0 = 判据坏了或又把整个文件过滤掉了。")
+        let clean = squeezedText("""
+            func injectDrawingUndoEntryForTesting(_ e: DrawingUndoEntry?) { drawingUndoEntry = e }
+            """)
+        XCTAssertEqual(callCount(inSqueezed: clean,
+                                 pattern: squeeze("injectDrawingUndoEntryForTesting(")), 0,
+            "只有声明的样本必须数成 0（声明被自动扣掉）—— 数成 1 说明扣除逻辑的理解又反了")
+        // 第二层各管一半：vend 形式不出现调用 pattern，只能靠裸引用判据抓
+        let vended = codeTextPreservingBoundaries("func f() { let g = injectDrawingUndoEntryForTesting }")
+        XCTAssertEqual(callCount(inSqueezed: squeeze(vended),
+                                 pattern: squeeze("injectDrawingUndoEntryForTesting(")), 0,
+            "vend 形式没有括号 → 调用计数抓不到它，这正是需要第二层的理由")
+        XCTAssertEqual(bareIdentifierReferences(inCode: vended,
+                                                identifier: "injectDrawingUndoEntryForTesting"), 1,
+            "裸引用判据必须抓到 vend")
+    }
+
+    /// U-G2 / U-G3 的**双向自检**。
+    func test_uG2_uG3_scanners_are_not_vacuous() throws {
+        XCTAssertEqual(callCount(inSqueezed: squeezedText("applyUndoEntry(x)"), pattern: squeeze("applyUndoEntry(")), 1)
+        XCTAssertEqual(callCount(inSqueezed: squeezedText("nothing here"), pattern: squeeze("applyUndoEntry(")), 0)
+        XCTAssertTrue(try callSiteCount("injectDrawingUndoEntryForTestingZZZ(").isEmpty)
     }
 }
