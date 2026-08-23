@@ -187,7 +187,11 @@ grep -E "Test Case .*<本 task 新增的 XCTest 名>.* passed" /tmp/undo-gate.lo
 3. `.github/scripts/catalyst-gate.test.sh` —— 「活基线覆盖」用例写死的旧数字（3 处）+ 追加维护记录条目
 4. `.github/scripts/fixtures/pass-main-current.log` —— 用**本轮真冷构建**日志逐行重裁
 
-⭐⭐ **喂闸门的日志必须冷构建**（先 `rm -rf` DerivedData），否则会假红报「scheme 用错了？」。
+⭐⭐ **喂闸门的日志必须冷构建**，否则会假红报「scheme 用错了？」。
+**「冷构建」一律用专属的 `-derivedDataPath`（`mktemp -d` 出来的新目录），用完只删自己那个目录**
+（codex plan-R8 medium，**已核实为真**）。⛔ **绝不** `rm -rf ~/Library/Developer/Xcode/DerivedData/KlineTrainerContracts-*`
+—— 那个通配**不限于本 checkout**，本仓当前有 **16 个 worktree**，删它会把其它分支的构建产物、索引、
+调试状态一并抹掉。全新目录天然就是冷的，效果一样而零外溢。
 ⭐⭐ Catalyst 双坑：必须 `-scheme KlineTrainerContracts-Package`（library scheme **不编译 testTarget**）+ `set -o pipefail`（tee 吞退出码）。**判绿读执行量，不读 `TEST SUCCEEDED` 字样**。
 ⭐ 取数用 CI 同款 `-only-testing:KlineTrainerContractsTests`。
 
@@ -2520,7 +2524,7 @@ grep -E "Executed [0-9]+ tests, with 0 failures" /tmp/undo-t7.log | tail -2 || e
 
 ```bash
 set -o pipefail                                   # ⚠️ 本块必须自己再设一次（上一个块的设置不跨块）
-rm -rf /tmp/undo-t7-dd                            # 冷构建：只清本次专用的 DerivedData，不动共享那份
+rm -rf /tmp/undo-t7-dd                            # 冷构建：只清本次专用的 DerivedData，**不动**全局那份
 xcodebuild build-for-testing -scheme KlineTrainerContracts-Package \
   -destination 'platform=macOS,variant=Mac Catalyst' \
   -derivedDataPath /tmp/undo-t7-dd 2>&1 | tee /tmp/undo-t7-cat.log | tail -5 || exit 1   # ① 退出码
@@ -2575,14 +2579,20 @@ git commit -m "feat(ui): 底栏补齐 ④↩ ⑤↪（5 键终局）+ 接路由 
 set -o pipefail
 repo="$(git rev-parse --show-toplevel)"
 echo "branch=$(git -C "$repo" branch --show-current) HEAD=$(git -C "$repo" rev-parse --short HEAD)"
-rm -rf ~/Library/Developer/Xcode/DerivedData/KlineTrainerContracts-*        # ⭐ 冷构建，否则 G6 假红
+# ⭐ 冷构建 = **用一个全新的专属 DerivedData 目录**，而不是去删全局那份
+#    （codex plan-R8 medium，**已核实为真**）：`~/Library/.../DerivedData/KlineTrainerContracts-*`
+#    这个通配**不限于本 checkout** —— 本仓当前有 16 个 worktree，删它等于把其它分支的构建产物、
+#    索引、调试状态一起抹掉。全新目录天然就是冷的，既达到目的又零外溢。Task 7 用的就是这个写法。
+DD="$(mktemp -d /tmp/undo-t8-dd.XXXXXX)"
 cd ios/Contracts
 xcodebuild test -scheme KlineTrainerContracts-Package \
   -destination 'platform=macOS,variant=Mac Catalyst' \
-  -only-testing:KlineTrainerContractsTests 2>&1 | tee /tmp/undo-catalyst.log | tail -5 || exit 1   # ① 退出码
+  -only-testing:KlineTrainerContractsTests \
+  -derivedDataPath "$DD" 2>&1 | tee /tmp/undo-catalyst.log | tail -5 || exit 1   # ① 退出码
 test "$(grep -c 'Executed [0-9]* tests' /tmp/undo-catalyst.log)" -ge 1 \
   || { echo "GATE FAIL: 日志里没有任何执行量行（很可能根本没跑起来）"; exit 1; }                      # ② 有执行量
 grep -E "Executed [0-9]+ tests" /tmp/undo-catalyst.log | tail -2                                    # ③ 人读取数
+rm -rf "$DD"        # 只删本次那个 mktemp 出来的目录，**绝不**碰全局 DerivedData
 ```
 ⚠️ **和 Task 7 同款的三条纪律**（codex plan-R2 在 Next steps 点名要审这一块，**已核实同样有问题**）：
 `xcodebuild` 那行必须自带 `|| exit 1`；「有没有执行量」要用 `test "$(grep -c …)" -ge 1` 断，
