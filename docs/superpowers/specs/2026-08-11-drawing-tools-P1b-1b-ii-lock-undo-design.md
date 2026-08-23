@@ -578,7 +578,10 @@ PR-1 的 N-A～N-H 与 1b-i / 1a-i 的既有测试在本 PR 仍全绿。
 
 1. **§2.3b 的写入点预估**：`TrainingEngine.swift` 里 `drawings` 的结构性写入点，锁定 PR 后预估为 **6 处**，
    实施后实测为 **8 处** —— 撤销执行单点 `applyUndoEntry` 因 D76（不得复用四个写入 API）自带 **3 处**
-   （`remove` / `insert` / 下标赋值），而不是预估里隐含的 1 处。守卫 L12b 与 U-G4 均按 **8** 钉死。
+   （`remove` / `insert` / 下标赋值），而不是预估里隐含的 1 处。后续「整支终审②/Important-4」订正：
+   判据原先漏计了**整体赋值** `drawings = <表达式>`（`init` 的 `self.drawings = seededLossy.drawings`
+   与 `injectDrawingsForTesting` 的 `drawings = ds` 各 1 处）——它是最彻底打乱下标的一种写法，漏掉它
+   等于在根因层留了口子，故补计 2 处。守卫 L12b 与 U-G4 现均按 **10** 钉死。
 2. **§2.1「落地形态」与自身 N-Q5 的冲突**：见上面 D103 —— 清栈判据从「调了 activate/deactivate」
    收紧为「`drawingModeActive` **真的翻转**」，按 N-Q5 收敛，不按 §2.1 原句字面实现。
 3. **§2.6 N-N2 的覆盖粒度**：原稿按 **case** 枚举了三条陈旧栈测试（`.removed` / `.inserted` / `.replaced`

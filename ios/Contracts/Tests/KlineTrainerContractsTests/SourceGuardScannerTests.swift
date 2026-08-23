@@ -262,7 +262,14 @@ struct SourceGuardScannerTests {
         #expect(n("self.drawings = seededLossy.drawings") == 1,
                 "带 `self.` 前缀的整体赋值也必须数到（`self`/`.` 都不是标识符字符，不挡前缀排除）")
         #expect(n("drawings == x") == 0, "`==` 是比较，不是赋值")
-        #expect(n("reviewDrawings = x") == 0, "reviewDrawings 是另一个属性，整体赋值判据不得跨对象误报")
+        // ⚠️ residual-fix C：`n("reviewDrawings = x") == 0` 曾经是恒真的——needle 是**全小写**的
+        //    `drawings`，`reviewDrawings` 里是**大写 D** 的 `Drawings`，两者字符级根本匹配不上，
+        //    删掉 `startsBare` 里的前缀排除（`i>0 && isIdentChar(chars[i-1])`）这条断言也纹丝不动。
+        //    真正能踩到「前缀是标识符字符」这条排除的，必须是**大小写与 needle 完全一致**（全小写
+        //    `drawings`）、且紧邻前一个字符是标识符字符的复合标识符——例如 `xdrawings`（`x` 是
+        //    标识符字符）。变异证据见 residual-fix-report.md：删掉前缀排除后这条断言真的从 0 翻到 1。
+        #expect(n("xdrawings = y") == 0,
+                "`xdrawings` 是一个更长的复合标识符（前一个字符 `x` 是标识符字符），前缀排除必须把它挡在外面，不得被当成对 `drawings` 的整体赋值")
         // `drawings[i] = x` 已在上面断言为 1（非 2）：证明整体赋值判据与下标赋值判据不重叠、不双计
         // ——下标写法紧邻 `drawings` 的下一个字符是 `[`，不是 `=`，两段判据各管各的字符位置。
     }

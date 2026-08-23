@@ -342,26 +342,43 @@ final class DrawingUndoSourceGuardTests: XCTestCase {
     }
 
     /// U-G4 的 `init` 分类双向自检（整支终审②/Important-4）：`init` 没有 `func` 关键字，
-    /// 锚点换成裸 `init(`；必须排除 `.init(` 调用与 `initialFoo` 这类更长标识符，否则会把
-    /// 一段完全不相干的"函数体"错当成 init 的写入面（详见 `functionBodies` 里的承重注释）。
+    /// 锚点换成裸 `init(`；必须排除 `.init(` 调用与 `initialFoo` 这类更长标识符、且必须先
+    /// **配对圆括号**跳过整段参数列表，否则会把一段完全不相干的"函数体"错当成 init 的写入面
+    /// （详见 `functionBodies` 里的承重注释）。
+    ///
+    /// ⚠️ **residual-fix B**：修正前那版的两个样本对头注点名要守的三件事**一件都测不出来**——
+    ///    参数列表里没有带花括号的闭包默认值 ⇒「圆括号跳过」删掉与否结果不变；`.init()` 后面
+    ///    没有紧跟 `{` ⇒「`.` 排除」删掉与否那次匹配自己就因为后面找不到 `{` 而断锚，跟排除
+    ///    逻辑本身无关；`initialPosition` 写在**会被真实 init 一次性跳过**的参数列表里 ⇒「更长
+    ///    标识符排除」的判据从未被扫描到。三条变异逐一跑过（见 residual-fix-report.md），
+    ///    删哪一条现有断言都不翻。下面重写为**真的会踩到**这三处坑的形态，逐条配变异证据。
     func test_uG4_initClassification_isNotVacuous() {
+        // 真实 init：参数列表里既有会踩「圆括号跳过」坑的闭包默认值（`= { trigger() }`——
+        // 默认值自己就带一对花括号，仿真实 TrainingEngine.swift 的 decelerationDriverFactory），
+        // 也有会踩「`.` 排除」坑的 `.init()` 调用、以及会踩「更长标识符」坑的 `initialPosition`
+        // 参数名——三者同场，真实写入必须仍被数到 1（证明三条判据分量都没把它顶掉）。
         let real = codeTextPreservingBoundaries("""
-            init(flow: X, initialPosition: PositionManager = .init()) {
+            init(flow: X, factory: (() -> Void) = { trigger() }, initialPosition: PositionManager = .init()) {
                 self.drawings = seededLossy.drawings
             }
             """)
         XCTAssertEqual(engineDrawingsWritesByFunction(real, functions: ["init"])["init"], 1,
-            "真实 init 的整体赋值必须被数到，`.init()` 默认值与 `initialPosition` 参数名不得干扰锚点")
+            "真实 init 的整体赋值必须被数到，闭包默认值里的花括号、`.init()` 默认值与 `initialPosition` 参数名都不得干扰锚点")
 
-        // 只有 `.init(` 调用、没有真实声明 → `init` 这个键必须锚点失效（缺席），不能凭空数出内容。
+        // 只有 `.init(` 调用、且后面紧跟着一个不相干的 `{`（`if` 块）——若「`.` 排除」被删掉，
+        // 扫描器会把这个 `{` 错当成 init 的函数体起点，切出一段完全不相干的内容
+        // （这里是 `drawings.append(p)`，会把一次假的结构性写入记到 init 头上）。
         let onlyCall = codeTextPreservingBoundaries("""
             func make() -> PositionManager {
                 let p: PositionManager = .init()
+                if p.isReady {
+                    drawings.append(p)
+                }
                 return p
             }
             """)
         XCTAssertNil(engineDrawingsWritesByFunction(onlyCall, functions: ["init"])["init"],
-            "`.init(` 是调用不是声明，不得被误判成 init 函数体（否则会把 `make()` 的内容错记到 init 头上）")
+            "`.init(` 是调用不是声明，不得被误判成 init 函数体（否则会把 `.init()` 后面那个不相干的 `{ … }` 错记到 init 头上）")
     }
 
     /// U-G5（D102）：`performDrawingAction` 在 `Sources/` 中的调用点**恰好 1 处**，且在
