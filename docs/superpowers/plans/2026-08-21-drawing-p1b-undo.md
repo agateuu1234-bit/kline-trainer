@@ -1883,18 +1883,32 @@ struct DrawingUndoPairedRollbackTests {
     @Test("D101：画线态那条线被锁 → 只有默认变了 → **不入栈**，栈顶保持原样（已接受残留）")
     func lockedLineMeansDefaultOnlyChangeIsNotPushed() {
         let e = Self.drawModeEngine(locked: true)
-        // 先造一条真记录（锁定动作本身可撤销）
         #expect(e.drawingSession.selectedDrawingID == "A")
-        let topBefore = e.drawingUndoEntryForTesting?.drawingsDelta
+
+        // 造一条**真**栈顶（修复轮 2，opus 评审 Important）：appendDrawing 一条新线 B。
+        // ⚠️ `drawModeWithSelected` 内部是 `appendDrawing(A)` → `toggleDrawingMode()`，而
+        //    `toggleDrawingMode` → `beginDrawingSession` 会清空撤销栈（U-G1 钉死）—— 所以进入
+        //    本测试体时栈其实**已经是空的**，旧版在这里断言「先造一条真记录」是句假话，
+        //    `topBefore == nil` 恒成立，后面的 `defaultDelta == nil` 因为 entry 本身是 nil 而
+        //    恒真，对「误给栈顶挂上默认分量」这类缺陷零判别力。这里补一条**真**记录堵住它。
+        //    `appendDrawing` 不改选中，选中仍是锁定的 A —— 后面「只改默认」的语义不变。
+        #expect(e.appendDrawing(makeStyledHLine(id: "B", revealTick: 0,
+                                                period: e.upperPanel.period,
+                                                candleIndex: 1, price: 60)) == true)
+        #expect(e.drawingSession.selectedDrawingID == "A", "appendDrawing 不改选中")
+        #expect(e.canUndoDrawing == true, "前置：栈顶必须是真记录")
+        #expect(DrawingUndoPushTests.topShape(e) == "inserted(B)@1", "前置：栈顶确实是 inserted(B)")
 
         DrawingEditRouter.applyPanelStyleMutation({ $0.thickness = 3 }, engine: e)
         #expect(e.drawingSession.defaultStyle.thickness == 3, "默认确实变了")
-        #expect(e.drawings[0].thickness == 1, "线锁着，applyStyle 被 D60 拒 —— 没被改")
+        #expect(e.drawings[0].thickness == 1, "线锁着，applyStyle 被 D60 拒 —— A 没被改")
 
-        let topAfter = e.drawingUndoEntryForTesting?.drawingsDelta
-        #expect((topBefore == nil) == (topAfter == nil), "栈顶存在性不得改变")
+        // 栈顶必须原样保留（不被这次「只改默认」的动作覆盖 / 误清）—— 这是本条的判别力核心。
+        #expect(DrawingUndoPushTests.topShape(e) == "inserted(B)@1",
+                "栈顶必须仍是 inserted(B)@1，不许被这次只改默认的动作顶替或清空")
         #expect(e.drawingUndoEntryForTesting?.defaultDelta == nil,
-                "只改默认不入栈（D101）：栈顶不许多出一个 defaultDelta")
+                "只改默认不入栈（D101）：inserted(B) 那条本来就没有默认分量，这次也不该被挂上")
+        #expect(e.canUndoDrawing == true)
     }
 
     // ── ⭐ 落盘往返：成对回滚必须**作为同一份状态**存下去、再一起读回来（codex plan-R9）──
@@ -2313,7 +2327,7 @@ git commit -m "feat(drawing): D102 一次动作作用域 —— 画线态改样�
 | U-M25 | `performDrawingAction` 里 `defaultDelta:` 恒传 `nil` | 默认分量根本没记 | `pairProducesExactlyOneEntry` + `undoRollsBackBothLineAndSessionDefault` |
 | U-M26 | 把作用域从整个函数体缩到只包 `.draw` 分支 | 邻接条件 | `test_uG5_actionScopeWrapsWholePanelStyleMutation`（**成对回滚三条仍绿** —— 这正是「只数调用点不够」的证据，报告里点明） |
 | U-M27 | `recordDrawingUndoDelta` 在作用域内改成直接压栈（不合并） | 两处写入拆成两条 | `pairProducesExactlyOneEntry`（`undoDrawing()` 第二次会变成 `true`） |
-| U-M28 | `guard let delta = scope.delta else { return }` 改成「delta 为空也压一条」 | D101 | `lockedLineMeansDefaultOnlyChangeIsNotPushed` |
+| U-M28 | `guard let delta = scope.delta else { return }` 改成「delta 为空也压一条」 | D101 | `lockedLineMeansDefaultOnlyChangeIsNotPushed`（**修复轮 2 后**用真栈顶验证：`DrawingUndoPushTests.topShape(e)` 从 `inserted(B)@1` 变成 `replaced(A->A)@0`，判别力确认；修复轮 2 之前该测试栈顶恒为 nil，`defaultDelta == nil` 恒真，对本变异**零判别力**——已堵住） |
 | U-M29 | `defaultChanged ? ... : nil` 的三元反过来 | 选择态误带默认分量 | `selectModeEditHasNoDefaultDelta` |
 | U-M29b | `if defaultChanged { drawingUndoEntry?.defaultDelta = nil }` 整行删掉 | **过期默认分量覆盖用户新选择**（codex plan-R3） | `staleDefaultDeltaDoesNotClobberOnRedo` + `staleDefaultDeltaDoesNotClobberOnUndo` |
 | U-M29c | 把那行改成 codex 原处方（`if entry.isUndone { clearDrawingUndoStack() }`） | 只堵了 ↪ 那一半 | `staleDefaultDeltaDoesNotClobberOnUndo`（**↪ 那条会绿** —— 这正是"处方需要加强"的证据，报告里点明） |
